@@ -1,0 +1,5496 @@
+{
+  "schema": "phase0-baseline/v1",
+  "harness": {
+    "version": "1",
+    "seed": 7,
+    "case_schema": "replay-case/v1"
+  },
+  "inputs": {
+    "scenarios": [
+      {
+        "file": "scenarios_v1.jsonl",
+        "sha256": "8cc64f74ad4a381c121fbb9d3b1685c3c1643214a342526be3fded3d73cbcb81"
+      }
+    ],
+    "n_cases": 149,
+    "n_skipped_bad": 0,
+    "raw_outputs": {
+      "file": "raw_outputs_v1.jsonl",
+      "sha256": "6fdb62ab05d689f75921faa08fba61b2a97aa262a588faaa60df23423b020a04",
+      "n_rows": 64
+    }
+  },
+  "assumptions": {
+    "router": "src.router.MessageRouter, production BotConfig defaults",
+    "proactive": "disabled for context/priming; enabled for the trigger with the probability roll forced open",
+    "sticky_ttl_sec": 60,
+    "followup_ttl_sec": 60,
+    "followup_max_chars": 30,
+    "image_followup_ttl_sec": 90,
+    "stale_at_max_age_sec": 300,
+    "trigger_keywords": [
+      "总结一下",
+      "之前发了什么",
+      "错过了什么",
+      "summarize",
+      "what did i miss",
+      "聊天总结",
+      "帮我总结",
+      "前面说了什么",
+      "说了啥",
+      "发生了什么"
+    ],
+    "stub_model_reply": "好",
+    "media_files": "available (tiny PNG)"
+  },
+  "routing": {
+    "summary": {
+      "n_cases": 149,
+      "outcomes": {
+        "engaged_chat": 49,
+        "engaged_vision": 5,
+        "engaged_proactive": 50,
+        "handled_locally": 11,
+        "none": 34,
+        "error": 0
+      },
+      "expect_counts": {
+        "speak_must": 43,
+        "speak_should": 30,
+        "silent_must": 23,
+        "silent_should": 39,
+        "either": 14,
+        "unlabeled": 0
+      },
+      "unlabeled": {
+        "n": 0,
+        "engaged_always_on": {
+          "k": 0,
+          "n": 0,
+          "rate": null
+        },
+        "engaged_incl_proactive": {
+          "k": 0,
+          "n": 0,
+          "rate": null
+        }
+      },
+      "addressing_recall": {
+        "speak_must": {
+          "k": 38,
+          "n": 43,
+          "rate": 0.8837
+        },
+        "speak_any": {
+          "k": 43,
+          "n": 73,
+          "rate": 0.589
+        }
+      },
+      "false_engagement": {
+        "silent_any": {
+          "deterministic": {
+            "k": 13,
+            "n": 62,
+            "rate": 0.2097
+          },
+          "incl_proactive": {
+            "k": 41,
+            "n": 62,
+            "rate": 0.6613
+          },
+          "proactive_open_only": 28
+        },
+        "silent_must": {
+          "deterministic": {
+            "k": 3,
+            "n": 23,
+            "rate": 0.1304
+          },
+          "incl_proactive": {
+            "k": 10,
+            "n": 23,
+            "rate": 0.4348
+          },
+          "proactive_open_only": 7
+        },
+        "either_engaged": {
+          "k": 11,
+          "n": 14,
+          "rate": 0.7857
+        }
+      },
+      "cannot_engage": {
+        "speak_must": {
+          "k": 4,
+          "n": 43,
+          "rate": 0.093
+        },
+        "speak_any": {
+          "k": 10,
+          "n": 73,
+          "rate": 0.137
+        },
+        "ids": [
+          "scn-0016",
+          "scn-0017",
+          "scn-0020",
+          "scn-0021",
+          "scn-0031",
+          "scn-0033",
+          "scn-0035",
+          "scn-0090",
+          "scn-0100",
+          "scn-0101"
+        ]
+      },
+      "chance_only": {
+        "speak_any": {
+          "k": 20,
+          "n": 73,
+          "rate": 0.274
+        },
+        "ids": [
+          "scn-0015",
+          "scn-0018",
+          "scn-0019",
+          "scn-0048",
+          "scn-0057",
+          "scn-0061",
+          "scn-0099",
+          "scn-0102",
+          "scn-0126",
+          "scn-0127",
+          "scn-0128",
+          "scn-0129",
+          "scn-0130",
+          "scn-0131",
+          "scn-0132",
+          "scn-0133",
+          "scn-0134",
+          "scn-0135",
+          "scn-0136",
+          "scn-0137"
+        ]
+      },
+      "unexpected_local": {
+        "n": 0,
+        "ids": []
+      },
+      "local_empty_reply": {
+        "n": 0,
+        "ids": []
+      },
+      "false_engagement_ids": [
+        "scn-0013",
+        "scn-0025",
+        "scn-0026",
+        "scn-0027",
+        "scn-0032",
+        "scn-0037",
+        "scn-0038",
+        "scn-0042",
+        "scn-0050",
+        "scn-0051",
+        "scn-0052",
+        "scn-0053",
+        "scn-0054",
+        "scn-0055",
+        "scn-0058",
+        "scn-0059",
+        "scn-0060",
+        "scn-0062",
+        "scn-0063",
+        "scn-0064",
+        "scn-0065",
+        "scn-0066",
+        "scn-0104",
+        "scn-0106",
+        "scn-0108",
+        "scn-0110",
+        "scn-0112",
+        "scn-0114",
+        "scn-0115",
+        "scn-0138",
+        "scn-0139",
+        "scn-0140",
+        "scn-0141",
+        "scn-0142",
+        "scn-0143",
+        "scn-0144",
+        "scn-0145",
+        "scn-0146",
+        "scn-0147",
+        "scn-0148",
+        "scn-0149"
+      ],
+      "missed_must_ids": [
+        "scn-0015",
+        "scn-0016",
+        "scn-0017",
+        "scn-0020",
+        "scn-0100"
+      ],
+      "expect_vs_outcome": {
+        "speak": {
+          "engaged_chat": 29,
+          "engaged_vision": 3,
+          "engaged_proactive": 20,
+          "handled_locally": 11,
+          "none": 10,
+          "error": 0
+        },
+        "silent": {
+          "engaged_chat": 13,
+          "engaged_vision": 0,
+          "engaged_proactive": 28,
+          "handled_locally": 0,
+          "none": 21,
+          "error": 0
+        },
+        "either": {
+          "engaged_chat": 7,
+          "engaged_vision": 2,
+          "engaged_proactive": 2,
+          "handled_locally": 0,
+          "none": 3,
+          "error": 0
+        }
+      },
+      "context": {
+        "latest_in_context": {
+          "k": 99,
+          "n": 99,
+          "rate": 1.0
+        },
+        "missing_ids": []
+      },
+      "by_route": {
+        "at_mention": {
+          "total": 17,
+          "wanted": 16,
+          "unwanted": 1,
+          "neutral": 0,
+          "unlabeled": 0
+        },
+        "followup": {
+          "total": 7,
+          "wanted": 1,
+          "unwanted": 3,
+          "neutral": 3,
+          "unlabeled": 0
+        },
+        "full_feed": {
+          "total": 2,
+          "wanted": 1,
+          "unwanted": 0,
+          "neutral": 1,
+          "unlabeled": 0
+        },
+        "image_followup": {
+          "total": 3,
+          "wanted": 1,
+          "unwanted": 0,
+          "neutral": 2,
+          "unlabeled": 0
+        },
+        "image_question": {
+          "total": 2,
+          "wanted": 2,
+          "unwanted": 0,
+          "neutral": 0,
+          "unlabeled": 0
+        },
+        "keyword": {
+          "total": 6,
+          "wanted": 3,
+          "unwanted": 3,
+          "neutral": 0,
+          "unlabeled": 0
+        },
+        "local:help": {
+          "total": 4,
+          "wanted": 4,
+          "unwanted": 0,
+          "neutral": 0,
+          "unlabeled": 0
+        },
+        "local:lots": {
+          "total": 2,
+          "wanted": 2,
+          "unwanted": 0,
+          "neutral": 0,
+          "unlabeled": 0
+        },
+        "local:tarot": {
+          "total": 2,
+          "wanted": 2,
+          "unwanted": 0,
+          "neutral": 0,
+          "unlabeled": 0
+        },
+        "local:todo": {
+          "total": 3,
+          "wanted": 3,
+          "unwanted": 0,
+          "neutral": 0,
+          "unlabeled": 0
+        },
+        "private": {
+          "total": 4,
+          "wanted": 3,
+          "unwanted": 0,
+          "neutral": 1,
+          "unlabeled": 0
+        },
+        "proactive": {
+          "total": 50,
+          "wanted": 20,
+          "unwanted": 28,
+          "neutral": 2,
+          "unlabeled": 0
+        },
+        "quote_bot": {
+          "total": 6,
+          "wanted": 3,
+          "unwanted": 1,
+          "neutral": 2,
+          "unlabeled": 0
+        },
+        "sticky": {
+          "total": 7,
+          "wanted": 2,
+          "unwanted": 5,
+          "neutral": 0,
+          "unlabeled": 0
+        }
+      },
+      "by_addressing": {
+        "explicit": {
+          "n": 38,
+          "speak_must": {
+            "k": 30,
+            "n": 30,
+            "rate": 1.0
+          },
+          "speak_any": {
+            "k": 31,
+            "n": 31,
+            "rate": 1.0
+          },
+          "silent_engaged_deterministic": {
+            "k": 2,
+            "n": 5,
+            "rate": 0.4
+          },
+          "silent_engaged_incl_proactive": {
+            "k": 2,
+            "n": 5,
+            "rate": 0.4
+          }
+        },
+        "implicit": {
+          "n": 103,
+          "speak_must": {
+            "k": 3,
+            "n": 8,
+            "rate": 0.375
+          },
+          "speak_any": {
+            "k": 7,
+            "n": 37,
+            "rate": 0.1892
+          },
+          "silent_engaged_deterministic": {
+            "k": 11,
+            "n": 57,
+            "rate": 0.193
+          },
+          "silent_engaged_incl_proactive": {
+            "k": 39,
+            "n": 57,
+            "rate": 0.6842
+          }
+        },
+        "private": {
+          "n": 8,
+          "speak_must": {
+            "k": 5,
+            "n": 5,
+            "rate": 1.0
+          },
+          "speak_any": {
+            "k": 5,
+            "n": 5,
+            "rate": 1.0
+          },
+          "silent_engaged_deterministic": {
+            "k": 0,
+            "n": 0,
+            "rate": null
+          },
+          "silent_engaged_incl_proactive": {
+            "k": 0,
+            "n": 0,
+            "rate": null
+          }
+        }
+      },
+      "by_category": {
+        "addressed_other_by_at": {
+          "n": 5,
+          "outcomes": {
+            "engaged_chat": 1,
+            "none": 4
+          },
+          "speak_must": {
+            "k": 0,
+            "n": 0,
+            "rate": null
+          },
+          "silent_engaged": {
+            "k": 1,
+            "n": 5,
+            "rate": 0.2
+          }
+        },
+        "ambient_closed_topic": {
+          "n": 6,
+          "outcomes": {
+            "engaged_proactive": 6
+          },
+          "speak_must": {
+            "k": 0,
+            "n": 0,
+            "rate": null
+          },
+          "silent_engaged": {
+            "k": 6,
+            "n": 6,
+            "rate": 1.0
+          }
+        },
+        "ambient_open": {
+          "n": 19,
+          "outcomes": {
+            "engaged_proactive": 19
+          },
+          "speak_must": {
+            "k": 0,
+            "n": 0,
+            "rate": null
+          },
+          "silent_engaged": {
+            "k": 4,
+            "n": 4,
+            "rate": 1.0
+          }
+        },
+        "between_others": {
+          "n": 11,
+          "outcomes": {
+            "engaged_chat": 2,
+            "engaged_proactive": 9
+          },
+          "speak_must": {
+            "k": 0,
+            "n": 0,
+            "rate": null
+          },
+          "silent_engaged": {
+            "k": 11,
+            "n": 11,
+            "rate": 1.0
+          }
+        },
+        "busy_group": {
+          "n": 4,
+          "outcomes": {
+            "engaged_chat": 4
+          },
+          "speak_must": {
+            "k": 4,
+            "n": 4,
+            "rate": 1.0
+          },
+          "silent_engaged": {
+            "k": 0,
+            "n": 0,
+            "rate": null
+          }
+        },
+        "direct_at": {
+          "n": 8,
+          "outcomes": {
+            "engaged_chat": 8
+          },
+          "speak_must": {
+            "k": 8,
+            "n": 8,
+            "rate": 1.0
+          },
+          "silent_engaged": {
+            "k": 0,
+            "n": 0,
+            "rate": null
+          }
+        },
+        "followup_to_bot": {
+          "n": 6,
+          "outcomes": {
+            "engaged_chat": 4,
+            "none": 2
+          },
+          "speak_must": {
+            "k": 1,
+            "n": 1,
+            "rate": 1.0
+          },
+          "silent_engaged": {
+            "k": 1,
+            "n": 1,
+            "rate": 1.0
+          }
+        },
+        "help_command": {
+          "n": 5,
+          "outcomes": {
+            "handled_locally": 4,
+            "none": 1
+          },
+          "speak_must": {
+            "k": 4,
+            "n": 4,
+            "rate": 1.0
+          },
+          "silent_engaged": {
+            "k": 0,
+            "n": 0,
+            "rate": null
+          }
+        },
+        "keyword": {
+          "n": 6,
+          "outcomes": {
+            "engaged_chat": 6
+          },
+          "speak_must": {
+            "k": 1,
+            "n": 1,
+            "rate": 1.0
+          },
+          "silent_engaged": {
+            "k": 3,
+            "n": 3,
+            "rate": 1.0
+          }
+        },
+        "lots_command": {
+          "n": 5,
+          "outcomes": {
+            "handled_locally": 4,
+            "none": 1
+          },
+          "speak_must": {
+            "k": 4,
+            "n": 4,
+            "rate": 1.0
+          },
+          "silent_engaged": {
+            "k": 0,
+            "n": 0,
+            "rate": null
+          }
+        },
+        "media_only": {
+          "n": 6,
+          "outcomes": {
+            "engaged_vision": 3,
+            "none": 3
+          },
+          "speak_must": {
+            "k": 2,
+            "n": 2,
+            "rate": 1.0
+          },
+          "silent_engaged": {
+            "k": 0,
+            "n": 3,
+            "rate": 0.0
+          }
+        },
+        "meta_about_bot": {
+          "n": 7,
+          "outcomes": {
+            "engaged_chat": 4,
+            "engaged_proactive": 2,
+            "none": 1
+          },
+          "speak_must": {
+            "k": 1,
+            "n": 1,
+            "rate": 1.0
+          },
+          "silent_engaged": {
+            "k": 4,
+            "n": 5,
+            "rate": 0.8
+          }
+        },
+        "name_call": {
+          "n": 7,
+          "outcomes": {
+            "engaged_proactive": 3,
+            "none": 4
+          },
+          "speak_must": {
+            "k": 0,
+            "n": 4,
+            "rate": 0.0
+          },
+          "silent_engaged": {
+            "k": 0,
+            "n": 0,
+            "rate": null
+          }
+        },
+        "private": {
+          "n": 6,
+          "outcomes": {
+            "engaged_chat": 4,
+            "engaged_vision": 1,
+            "none": 1
+          },
+          "speak_must": {
+            "k": 3,
+            "n": 3,
+            "rate": 1.0
+          },
+          "silent_engaged": {
+            "k": 0,
+            "n": 0,
+            "rate": null
+          }
+        },
+        "quote_bot": {
+          "n": 6,
+          "outcomes": {
+            "engaged_chat": 6
+          },
+          "speak_must": {
+            "k": 3,
+            "n": 3,
+            "rate": 1.0
+          },
+          "silent_engaged": {
+            "k": 1,
+            "n": 1,
+            "rate": 1.0
+          }
+        },
+        "quote_other_member": {
+          "n": 5,
+          "outcomes": {
+            "engaged_chat": 1,
+            "engaged_proactive": 1,
+            "none": 3
+          },
+          "speak_must": {
+            "k": 1,
+            "n": 1,
+            "rate": 1.0
+          },
+          "silent_engaged": {
+            "k": 0,
+            "n": 3,
+            "rate": 0.0
+          }
+        },
+        "short_reaction": {
+          "n": 10,
+          "outcomes": {
+            "engaged_chat": 3,
+            "engaged_proactive": 7
+          },
+          "speak_must": {
+            "k": 0,
+            "n": 0,
+            "rate": null
+          },
+          "silent_engaged": {
+            "k": 8,
+            "n": 8,
+            "rate": 1.0
+          }
+        },
+        "slang_alias": {
+          "n": 5,
+          "outcomes": {
+            "engaged_proactive": 2,
+            "none": 3
+          },
+          "speak_must": {
+            "k": 0,
+            "n": 1,
+            "rate": 0.0
+          },
+          "silent_engaged": {
+            "k": 0,
+            "n": 1,
+            "rate": 0.0
+          }
+        },
+        "stale_at": {
+          "n": 5,
+          "outcomes": {
+            "engaged_chat": 1,
+            "none": 4
+          },
+          "speak_must": {
+            "k": 1,
+            "n": 1,
+            "rate": 1.0
+          },
+          "silent_engaged": {
+            "k": 0,
+            "n": 4,
+            "rate": 0.0
+          }
+        },
+        "sticky_after_empty_at": {
+          "n": 6,
+          "outcomes": {
+            "engaged_chat": 3,
+            "engaged_vision": 1,
+            "none": 2
+          },
+          "speak_must": {
+            "k": 1,
+            "n": 1,
+            "rate": 1.0
+          },
+          "silent_engaged": {
+            "k": 2,
+            "n": 3,
+            "rate": 0.6667
+          }
+        },
+        "todo_command": {
+          "n": 5,
+          "outcomes": {
+            "engaged_proactive": 1,
+            "handled_locally": 3,
+            "none": 1
+          },
+          "speak_must": {
+            "k": 3,
+            "n": 3,
+            "rate": 1.0
+          },
+          "silent_engaged": {
+            "k": 0,
+            "n": 1,
+            "rate": 0.0
+          }
+        },
+        "yang_full_feed": {
+          "n": 6,
+          "outcomes": {
+            "engaged_chat": 2,
+            "none": 4
+          },
+          "speak_must": {
+            "k": 1,
+            "n": 1,
+            "rate": 1.0
+          },
+          "silent_engaged": {
+            "k": 0,
+            "n": 3,
+            "rate": 0.0
+          }
+        }
+      }
+    },
+    "cases": [
+      {
+        "id": "scn-0001",
+        "category": "direct_at",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 你帮我选一下 螺蛳粉还是黄焖鸡",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "at_mention",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0002",
+        "category": "direct_at",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 2358 除以 7 是多少",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "at_mention",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0003",
+        "category": "direct_at",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 周六天气怎么样 要不要带伞",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "at_mention",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0004",
+        "category": "direct_at",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "你们觉得这个方案能不能过 @小助手",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "at_mention",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0005",
+        "category": "direct_at",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 @大伟 帮忙看看这个报价单有没有问题",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "at_mention",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0006",
+        "category": "direct_at",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@Jarvis 明天北京会下雨吗",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "at_mention",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0007",
+        "category": "direct_at",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 取消订阅怎么弄 视频会员每个月都自动扣费",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "at_mention",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0008",
+        "category": "direct_at",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 帮我算算房租加水电一共多少钱",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "at_mention",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0009",
+        "category": "quote_bot",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "第二首吧",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "quote_bot",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0010",
+        "category": "quote_bot",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "周日我有事啊 你再想想",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "quote_bot",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0011",
+        "category": "quote_bot",
+        "addressing": "explicit",
+        "expect": {
+          "action": "either",
+          "strength": "free",
+          "addressee": "bot"
+        },
+        "text": "哈哈哈 这回答太官方了",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "quote_bot",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "neutral"
+      },
+      {
+        "id": "scn-0012",
+        "category": "quote_bot",
+        "addressing": "explicit",
+        "expect": {
+          "action": "either",
+          "strength": "free",
+          "addressee": "bot"
+        },
+        "text": "谢谢",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "quote_bot",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "neutral"
+      },
+      {
+        "id": "scn-0013",
+        "category": "quote_bot",
+        "addressing": "explicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "other_member"
+        },
+        "text": "@阿明 听到没 她说你去订位置",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "quote_bot",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "false_engagement"
+      },
+      {
+        "id": "scn-0014",
+        "category": "quote_bot",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "那明天呢",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "quote_bot",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0015",
+        "category": "name_call",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "小助手 你知道周杰伦哪年出道的吗",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0016",
+        "category": "name_call",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "小助手在吗",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "rate 1.0/min → SLEEP",
+        "local_empty": false,
+        "verdict": "miss"
+      },
+      {
+        "id": "scn-0017",
+        "category": "name_call",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "诶小助手，刚才那个再说一遍",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "rate 0.5/min → SLEEP",
+        "local_empty": false,
+        "verdict": "miss"
+      },
+      {
+        "id": "scn-0018",
+        "category": "name_call",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "bot"
+        },
+        "text": "你说呢小助手",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 2.0
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0019",
+        "category": "name_call",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "bot"
+        },
+        "text": "有请小助手来评评理",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 2.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0020",
+        "category": "name_call",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "小助手小助手 帮我把这段话润色一下：明天上午十点开会请大家准时参加",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "rate 1.0/min → SLEEP",
+        "local_empty": false,
+        "verdict": "miss"
+      },
+      {
+        "id": "scn-0021",
+        "category": "name_call",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "bot"
+        },
+        "text": "阿柔你今天怎么这么安静",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "rate 0.5/min → SLEEP",
+        "local_empty": false,
+        "verdict": "miss"
+      },
+      {
+        "id": "scn-0022",
+        "category": "keyword",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "刚才你们聊了啥 总结一下",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "keyword",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0023",
+        "category": "keyword",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "bot"
+        },
+        "text": "我刚进群 错过了什么",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "keyword",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0024",
+        "category": "keyword",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "bot"
+        },
+        "text": "pls summarize the thread above",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "keyword",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0025",
+        "category": "keyword",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "other_member"
+        },
+        "text": "你昨天跟她说了啥啊 她这么生气",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "keyword",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "false_engagement"
+      },
+      {
+        "id": "scn-0026",
+        "category": "keyword",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "昨天公司发生了什么你们绝对想不到",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "keyword",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "false_engagement"
+      },
+      {
+        "id": "scn-0027",
+        "category": "keyword",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "other_member"
+        },
+        "text": "老王你总结一下今天的会议吧",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "keyword",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "false_engagement"
+      },
+      {
+        "id": "scn-0028",
+        "category": "followup_to_bot",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "稻香",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "sticky",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0029",
+        "category": "followup_to_bot",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "bot"
+        },
+        "text": "要要要",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "followup",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0030",
+        "category": "followup_to_bot",
+        "addressing": "implicit",
+        "expect": {
+          "action": "either",
+          "strength": "free",
+          "addressee": "bot"
+        },
+        "text": "流浪地球2我看了 特效绝了",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "followup",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "neutral"
+      },
+      {
+        "id": "scn-0031",
+        "category": "followup_to_bot",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "bot"
+        },
+        "text": "那周日呢",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "rate 0.5/min → SLEEP",
+        "local_empty": false,
+        "verdict": "miss"
+      },
+      {
+        "id": "scn-0032",
+        "category": "followup_to_bot",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "nobody"
+        },
+        "text": "好的",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "sticky",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "false_engagement"
+      },
+      {
+        "id": "scn-0033",
+        "category": "followup_to_bot",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "bot"
+        },
+        "text": "稻香",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "rate 0.5/min → SLEEP",
+        "local_empty": false,
+        "verdict": "miss"
+      },
+      {
+        "id": "scn-0034",
+        "category": "sticky_after_empty_at",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "帮我想个周末活动",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "sticky",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0035",
+        "category": "sticky_after_empty_at",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "bot"
+        },
+        "text": "刚才那个事你怎么看",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "rate 0.5/min → SLEEP",
+        "local_empty": false,
+        "verdict": "miss"
+      },
+      {
+        "id": "scn-0036",
+        "category": "sticky_after_empty_at",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "哈哈 她又上线了",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "rate 0.5/min → SLEEP",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0037",
+        "category": "sticky_after_empty_at",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "other_member"
+        },
+        "text": "@大伟 你到哪了 我都到了",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "sticky",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "false_engagement"
+      },
+      {
+        "id": "scn-0038",
+        "category": "sticky_after_empty_at",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "nobody"
+        },
+        "text": "哎不好意思手滑了 点错了",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "sticky",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "false_engagement"
+      },
+      {
+        "id": "scn-0039",
+        "category": "sticky_after_empty_at",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "bot"
+        },
+        "text": "[图片]",
+        "context_has_trigger": null,
+        "outcome": "engaged_vision",
+        "route": "image_followup",
+        "model_calls": [
+          "describe_image"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0040",
+        "category": "addressed_other_by_at",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "other_member"
+        },
+        "text": "@大伟 你到哪了",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "rate 1.0/min → SLEEP",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0041",
+        "category": "addressed_other_by_at",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "other_member"
+        },
+        "text": "@小李 把昨天的文档发我一下",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "rate 1.0/min → SLEEP",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0042",
+        "category": "addressed_other_by_at",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "other_member"
+        },
+        "text": "@阿明 你吃饭了吗",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "followup",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "false_engagement"
+      },
+      {
+        "id": "scn-0043",
+        "category": "addressed_other_by_at",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "group"
+        },
+        "text": "@老王 @小红 明天下午三点会议室见",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "rate 1.0/min → SLEEP",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0044",
+        "category": "addressed_other_by_at",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "other_member"
+        },
+        "text": "@晓雯 周六你行不行",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "rate 0.5/min → SLEEP",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0045",
+        "category": "quote_other_member",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "other_member"
+        },
+        "text": "我也有空",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0046",
+        "category": "quote_other_member",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "other_member"
+        },
+        "text": "哈哈哈这个太像了",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0047",
+        "category": "quote_other_member",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "other_member"
+        },
+        "text": "你在哪买的",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0048",
+        "category": "quote_other_member",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "bot"
+        },
+        "text": "小助手你觉得他说得对吗",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0049",
+        "category": "quote_other_member",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 你来评评理",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "at_mention",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0050",
+        "category": "between_others",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "other_member"
+        },
+        "text": "可以啊 周六下午吧 你到时候别迟到",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 2.0
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0051",
+        "category": "between_others",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "other_member"
+        },
+        "text": "你吃了吗",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "followup",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "false_engagement"
+      },
+      {
+        "id": "scn-0052",
+        "category": "between_others",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "other_member"
+        },
+        "text": "对了你昨天说的那个店叫啥来着",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "sticky",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "false_engagement"
+      },
+      {
+        "id": "scn-0053",
+        "category": "between_others",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "other_member"
+        },
+        "text": "你别无理取闹行不行",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 3.0
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0054",
+        "category": "between_others",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "other_member"
+        },
+        "text": "谢谢你 还是你对我好",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 2.0
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0055",
+        "category": "between_others",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "哈哈哈哈哈哈 笑死我了",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "LIVELY",
+          "reply_probability": 0.5,
+          "rate_per_min": 6.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0056",
+        "category": "ambient_open",
+        "addressing": "implicit",
+        "expect": {
+          "action": "either",
+          "strength": "free",
+          "addressee": "group"
+        },
+        "text": "有人知道西湖边哪家餐厅不用排队吗",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 2.0
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "neutral"
+      },
+      {
+        "id": "scn-0057",
+        "category": "ambient_open",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "各位 Python 里怎么把列表去重又保持顺序啊",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0058",
+        "category": "ambient_open",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "有人一起拼车去机场吗 周日早上",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0059",
+        "category": "ambient_open",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "今天几号来着",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0060",
+        "category": "ambient_open",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "晚上有人打游戏吗",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0061",
+        "category": "ambient_open",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "有没有人懂 excel 怎么把两列合并成一列",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0062",
+        "category": "ambient_closed_topic",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "nobody"
+        },
+        "text": "好的 周六见",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 2.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0063",
+        "category": "ambient_closed_topic",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "nobody"
+        },
+        "text": "唉 心情很差",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 2.0
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0064",
+        "category": "ambient_closed_topic",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "nobody"
+        },
+        "text": "我先去睡了 晚安",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0065",
+        "category": "ambient_closed_topic",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "nobody"
+        },
+        "text": "行 随你吧",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 2.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0066",
+        "category": "ambient_closed_topic",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "nobody"
+        },
+        "text": "4.老王",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 2.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0067",
+        "category": "media_only",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "nobody"
+        },
+        "text": "[图片]",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0068",
+        "category": "media_only",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "nobody"
+        },
+        "text": "[表情]",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0069",
+        "category": "media_only",
+        "addressing": "implicit",
+        "expect": {
+          "action": "either",
+          "strength": "free",
+          "addressee": "bot"
+        },
+        "text": "[表情]",
+        "context_has_trigger": null,
+        "outcome": "engaged_vision",
+        "route": "image_followup",
+        "model_calls": [
+          "describe_image"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "neutral"
+      },
+      {
+        "id": "scn-0070",
+        "category": "media_only",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "nobody"
+        },
+        "text": "[语音]",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "rate 1.0/min → SLEEP",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0071",
+        "category": "media_only",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 这张图里写的什么",
+        "context_has_trigger": null,
+        "outcome": "engaged_vision",
+        "route": "image_question",
+        "model_calls": [
+          "describe_image"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0072",
+        "category": "media_only",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 看看这个表情包什么意思",
+        "context_has_trigger": null,
+        "outcome": "engaged_vision",
+        "route": "image_question",
+        "model_calls": [
+          "describe_image"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0073",
+        "category": "stale_at",
+        "addressing": "explicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 现在几点了",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0074",
+        "category": "stale_at",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 讲个笑话吧",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "at_mention",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0075",
+        "category": "stale_at",
+        "addressing": "explicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 讲个笑话吧",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0076",
+        "category": "stale_at",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "总结一下",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0077",
+        "category": "stale_at",
+        "addressing": "explicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "好听 再来一首",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0078",
+        "category": "private",
+        "addressing": "private",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "在吗",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "private",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0079",
+        "category": "private",
+        "addressing": "private",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "帮我想个生日礼物 送女朋友的 预算500",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "private",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0080",
+        "category": "private",
+        "addressing": "private",
+        "expect": {
+          "action": "either",
+          "strength": "free",
+          "addressee": "bot"
+        },
+        "text": "哈哈哈哈哈",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "private",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "neutral"
+      },
+      {
+        "id": "scn-0081",
+        "category": "private",
+        "addressing": "private",
+        "expect": {
+          "action": "either",
+          "strength": "free",
+          "addressee": "bot"
+        },
+        "text": "[表情]",
+        "context_has_trigger": null,
+        "outcome": "engaged_vision",
+        "route": "image_followup",
+        "model_calls": [
+          "describe_image"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "neutral"
+      },
+      {
+        "id": "scn-0082",
+        "category": "private",
+        "addressing": "private",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "感觉自己什么都做不好",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "private",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0083",
+        "category": "private",
+        "addressing": "private",
+        "expect": {
+          "action": "either",
+          "strength": "free",
+          "addressee": "bot"
+        },
+        "text": "[图片]",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "neutral"
+      },
+      {
+        "id": "scn-0084",
+        "category": "todo_command",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 记一下 周五下午三点评审会",
+        "context_has_trigger": null,
+        "outcome": "handled_locally",
+        "route": "local:todo",
+        "model_calls": [],
+        "reply_head": "当前群待办内容有： 1. 周五下午三点评审会 共",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0085",
+        "category": "todo_command",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 查看待办",
+        "context_has_trigger": null,
+        "outcome": "handled_locally",
+        "route": "local:todo",
+        "model_calls": [],
+        "reply_head": "当前没有待办事项。 @机器人说\"记一下 xxx\"",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0086",
+        "category": "todo_command",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 删掉 2",
+        "context_has_trigger": null,
+        "outcome": "handled_locally",
+        "route": "local:todo",
+        "model_calls": [],
+        "reply_head": "未找到匹配的待办：2",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0087",
+        "category": "todo_command",
+        "addressing": "implicit",
+        "expect": {
+          "action": "either",
+          "strength": "free",
+          "addressee": "group"
+        },
+        "text": "记一下 周五聚餐",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "neutral"
+      },
+      {
+        "id": "scn-0088",
+        "category": "todo_command",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "other_member"
+        },
+        "text": "@老王 记一下明天的会议纪要",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "rate 1.0/min → SLEEP",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0089",
+        "category": "lots_command",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 抽签",
+        "context_has_trigger": null,
+        "outcome": "handled_locally",
+        "route": "local:lots",
+        "model_calls": [],
+        "reply_head": "@小红 抽签结果：小吉 小吉小吉，主打一个没白抽",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0090",
+        "category": "lots_command",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "bot"
+        },
+        "text": "抽签",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "rate 1.0/min → SLEEP",
+        "local_empty": false,
+        "verdict": "miss"
+      },
+      {
+        "id": "scn-0091",
+        "category": "lots_command",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 塔罗",
+        "context_has_trigger": null,
+        "outcome": "handled_locally",
+        "route": "local:tarot",
+        "model_calls": [],
+        "reply_head": "@晓雯 塔罗三张： 先按你心里默念的问题看，只看",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0092",
+        "category": "lots_command",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 帮我测测今年的财运",
+        "context_has_trigger": null,
+        "outcome": "handled_locally",
+        "route": "local:tarot",
+        "model_calls": [],
+        "reply_head": "@阿明 塔罗三张： 先按你心里默念的问题看，只看",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0093",
+        "category": "lots_command",
+        "addressing": "private",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "抽签",
+        "context_has_trigger": null,
+        "outcome": "handled_locally",
+        "route": "local:lots",
+        "model_calls": [],
+        "reply_head": "@小明 抽签结果：中吉 好运轻敲，别急着把门关上",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0094",
+        "category": "help_command",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 帮助",
+        "context_has_trigger": null,
+        "outcome": "handled_locally",
+        "route": "local:help",
+        "model_calls": [],
+        "reply_head": "@小李 可用命令： ━━━━━━━━━━━━━━",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0095",
+        "category": "help_command",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 help",
+        "context_has_trigger": null,
+        "outcome": "handled_locally",
+        "route": "local:help",
+        "model_calls": [],
+        "reply_head": "@小李 可用命令： ━━━━━━━━━━━━━━",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0096",
+        "category": "help_command",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 命令",
+        "context_has_trigger": null,
+        "outcome": "handled_locally",
+        "route": "local:help",
+        "model_calls": [],
+        "reply_head": "@老王 可用命令： ━━━━━━━━━━━━━━",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0097",
+        "category": "help_command",
+        "addressing": "implicit",
+        "expect": {
+          "action": "either",
+          "strength": "free",
+          "addressee": "bot"
+        },
+        "text": "帮助",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "rate 1.0/min → SLEEP",
+        "local_empty": false,
+        "verdict": "neutral"
+      },
+      {
+        "id": "scn-0098",
+        "category": "help_command",
+        "addressing": "private",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "帮助",
+        "context_has_trigger": null,
+        "outcome": "handled_locally",
+        "route": "local:help",
+        "model_calls": [],
+        "reply_head": "@小明 可用命令： ━━━━━━━━━━━━━━",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0099",
+        "category": "slang_alias",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "bot"
+        },
+        "text": "助手 今天周几",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0100",
+        "category": "slang_alias",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@助手 帮我查一下明天天气",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "rate 1.0/min → SLEEP",
+        "local_empty": false,
+        "verdict": "miss"
+      },
+      {
+        "id": "scn-0101",
+        "category": "slang_alias",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "bot"
+        },
+        "text": "小助 在吗",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "rate 1.0/min → SLEEP",
+        "local_empty": false,
+        "verdict": "miss"
+      },
+      {
+        "id": "scn-0102",
+        "category": "slang_alias",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "bot"
+        },
+        "text": "机器人老师 你来说说",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0103",
+        "category": "slang_alias",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "other_member"
+        },
+        "text": "次元哥哥 你到哪了",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "rate 0.5/min → SLEEP",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0104",
+        "category": "meta_about_bot",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "must",
+          "addressee": "group"
+        },
+        "text": "这个AI今天怎么回事 老是答非所问",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0105",
+        "category": "meta_about_bot",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "other_member"
+        },
+        "text": "小助手是谁写的 好像挺智能的",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "rate 1.0/min → SLEEP",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0106",
+        "category": "meta_about_bot",
+        "addressing": "explicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "other_member"
+        },
+        "text": "@阿明 你别老@小助手 它回复很怪",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "at_mention",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "false_engagement"
+      },
+      {
+        "id": "scn-0107",
+        "category": "meta_about_bot",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "bot"
+        },
+        "text": "@小助手 你今天怎么回事 老答非所问",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "at_mention",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0108",
+        "category": "meta_about_bot",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "你们说它是不是接了什么大模型",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "followup",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "false_engagement"
+      },
+      {
+        "id": "scn-0109",
+        "category": "meta_about_bot",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 你到底是什么模型",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "at_mention",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0110",
+        "category": "short_reaction",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "哈哈哈哈",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 2.0
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0111",
+        "category": "short_reaction",
+        "addressing": "implicit",
+        "expect": {
+          "action": "either",
+          "strength": "free",
+          "addressee": "bot"
+        },
+        "text": "？",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "followup",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "neutral"
+      },
+      {
+        "id": "scn-0112",
+        "category": "short_reaction",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "笑死",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0113",
+        "category": "short_reaction",
+        "addressing": "implicit",
+        "expect": {
+          "action": "either",
+          "strength": "free",
+          "addressee": "bot"
+        },
+        "text": "6",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "followup",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "neutral"
+      },
+      {
+        "id": "scn-0114",
+        "category": "short_reaction",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "nobody"
+        },
+        "text": "嗯",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "sticky",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "false_engagement"
+      },
+      {
+        "id": "scn-0115",
+        "category": "short_reaction",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "nobody"
+        },
+        "text": "。。。",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0116",
+        "category": "yang_full_feed",
+        "addressing": "implicit",
+        "expect": {
+          "action": "either",
+          "strength": "free",
+          "addressee": "group"
+        },
+        "text": "鸣潮这版本的新角色你们抽了吗",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "full_feed",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "neutral"
+      },
+      {
+        "id": "scn-0117",
+        "category": "yang_full_feed",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "nobody"
+        },
+        "text": "哈哈",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0118",
+        "category": "yang_full_feed",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "这个ai是不是真人机",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0119",
+        "category": "yang_full_feed",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 你觉得这版本强度怎么样",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "full_feed",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0120",
+        "category": "yang_full_feed",
+        "addressing": "implicit",
+        "expect": {
+          "action": "either",
+          "strength": "free",
+          "addressee": "group"
+        },
+        "text": "经理还给打五折",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "neutral"
+      },
+      {
+        "id": "scn-0121",
+        "category": "yang_full_feed",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "other_member"
+        },
+        "text": "确实",
+        "context_has_trigger": null,
+        "outcome": "none",
+        "route": "none",
+        "model_calls": [],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0122",
+        "category": "busy_group",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 刚才大家聊到哪了 帮我总结一句",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "at_mention",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0123",
+        "category": "busy_group",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 你觉得今晚吃什么好",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "at_mention",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0124",
+        "category": "busy_group",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 周末的安排你帮我们定一下",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "at_mention",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0125",
+        "category": "busy_group",
+        "addressing": "explicit",
+        "expect": {
+          "action": "speak",
+          "strength": "must",
+          "addressee": "bot"
+        },
+        "text": "@小助手 在吗",
+        "context_has_trigger": true,
+        "outcome": "engaged_chat",
+        "route": "at_mention",
+        "model_calls": [
+          "chat"
+        ],
+        "reply_head": "",
+        "gate": null,
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "ok"
+      },
+      {
+        "id": "scn-0126",
+        "category": "ambient_open",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "有没有人知道 Windows 怎么把桌面图标放大一点",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0127",
+        "category": "ambient_open",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "谁懂这个报错 ModuleNotFoundError: No module named requ",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 2.0
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0128",
+        "category": "ambient_open",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "请问火车票退票的手续费是怎么算的",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0129",
+        "category": "ambient_open",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "各位推荐个适合新手的机械键盘吧",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 2.0
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0130",
+        "category": "ambient_open",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "有人知道苹果手机怎么看电池健康度吗",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0131",
+        "category": "ambient_open",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "excel 里 vlookup 和 xlookup 有什么区别",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0132",
+        "category": "ambient_open",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "有没有人会用 git 回滚到上一个提交啊",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0133",
+        "category": "ambient_open",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "AI 绘画现在哪个软件最好用",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 2.0
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0134",
+        "category": "ambient_open",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "周末想带爸妈去杭州玩两天 有什么推荐的路线吗",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 2.0
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0135",
+        "category": "ambient_open",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "谁知道微信聊天记录怎么迁移到新手机",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0136",
+        "category": "ambient_open",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "各位 怎么区分真假蜂蜜啊",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 2.0
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0137",
+        "category": "ambient_open",
+        "addressing": "implicit",
+        "expect": {
+          "action": "speak",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "大家觉得 Python 和 Go 哪个更适合写后端",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 2.0
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0138",
+        "category": "between_others",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "other_member"
+        },
+        "text": "我晚上七点到 你们先吃别等我",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 2.0
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0139",
+        "category": "short_reaction",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "nobody"
+        },
+        "text": "今天太累了不想动",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0140",
+        "category": "short_reaction",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "nobody"
+        },
+        "text": "哈哈哈哈这个视频太好笑了",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0141",
+        "category": "between_others",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "other_member"
+        },
+        "text": "你昨天说的那个电影叫啥来着",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0142",
+        "category": "between_others",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "明天谁去接小王",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 2.0
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0143",
+        "category": "ambient_open",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "有人一起去吃火锅吗",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0144",
+        "category": "short_reaction",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "other_member"
+        },
+        "text": "好的 收到",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0145",
+        "category": "short_reaction",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "nobody"
+        },
+        "text": "我也这么觉得",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 1.5
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0146",
+        "category": "ambient_closed_topic",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "other_member"
+        },
+        "text": "生日快乐！！！祝你天天开心",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 2.0
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0147",
+        "category": "meta_about_bot",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "other_member"
+        },
+        "text": "这个机器人回复好慢啊",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 2.0
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0148",
+        "category": "between_others",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "group"
+        },
+        "text": "你们在群里能不能小声点 我在开会",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 2.0
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      },
+      {
+        "id": "scn-0149",
+        "category": "between_others",
+        "addressing": "implicit",
+        "expect": {
+          "action": "silent",
+          "strength": "should",
+          "addressee": "other_member"
+        },
+        "text": "对不起我刚才没看手机",
+        "context_has_trigger": true,
+        "outcome": "engaged_proactive",
+        "route": "proactive",
+        "model_calls": [
+          "proactive_chat"
+        ],
+        "reply_head": "",
+        "gate": {
+          "mode": "QUIET",
+          "reply_probability": 0.1,
+          "rate_per_min": 2.0
+        },
+        "gate_reason": "",
+        "local_empty": false,
+        "verdict": "proactive_only"
+      }
+    ]
+  },
+  "not_measured_offline": [
+    "Whether the real LLM actually stays silent when it should (the stub model always answers; 'engaged' only means the router called the model).",
+    "Reply quality, persona fit, factual correctness, latency and cost.",
+    "The backend layer: WeChat dedup, message-burst coalescing, real is_at_mentioned / is_reply_to_bot detection (taken from the case as given).",
+    "Real group traffic: the proactive rate window only sees the messages in a case's context, and gate streams are synthetic Poisson arrivals.",
+    "Vision, web search and memory consolidation content (stubbed offline).",
+    "A live run needs an API key and a WeChat account; no live mode is implemented here by design."
+  ],
+  "cleaning": {
+    "summary": {
+      "n_rows": 64,
+      "n_should_be_blank": 19,
+      "n_legit": 45,
+      "leak_rate": {
+        "k": 7,
+        "n": 19,
+        "rate": 0.3684
+      },
+      "false_kill_rate": {
+        "k": 8,
+        "n": 45,
+        "rate": 0.1778
+      },
+      "mangled_rate": {
+        "k": 2,
+        "n": 45,
+        "rate": 0.0444
+      },
+      "exact_match_rate": {
+        "k": 47,
+        "n": 64,
+        "rate": 0.7344
+      },
+      "truncated_rows": 5,
+      "mid_sentence_truncations": 1,
+      "by_kind": {
+        "clean": {
+          "n": 12,
+          "ok": 12
+        },
+        "dangling_marker": {
+          "n": 2,
+          "ok": 2
+        },
+        "leak_meta": {
+          "n": 8,
+          "ok": 8
+        },
+        "leak_variant": {
+          "n": 7,
+          "leak": 7
+        },
+        "marker_false_kill": {
+          "n": 10,
+          "false_kill": 8,
+          "ok": 2
+        },
+        "paren_aside": {
+          "n": 4,
+          "ok": 4
+        },
+        "paren_legit": {
+          "n": 2,
+          "mangled": 2
+        },
+        "prefix": {
+          "n": 4,
+          "ok": 4
+        },
+        "prefix_false_strip": {
+          "n": 6,
+          "ok": 6
+        },
+        "punct_only": {
+          "n": 4,
+          "ok": 4
+        },
+        "too_long": {
+          "n": 5,
+          "ok": 5
+        }
+      },
+      "blank_without_silence_flag": {
+        "n": 4,
+        "ids": [
+          "raw-046",
+          "raw-047",
+          "raw-048",
+          "raw-049"
+        ]
+      },
+      "leak_ids": [
+        "raw-039",
+        "raw-040",
+        "raw-041",
+        "raw-042",
+        "raw-043",
+        "raw-044",
+        "raw-045"
+      ],
+      "false_kill_ids": [
+        "raw-055",
+        "raw-056",
+        "raw-057",
+        "raw-058",
+        "raw-060",
+        "raw-062",
+        "raw-063",
+        "raw-064"
+      ],
+      "mangled_ids": [
+        "raw-029",
+        "raw-030"
+      ]
+    },
+    "rows": [
+      {
+        "id": "raw-001",
+        "kind": "clean",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "嗯，在的",
+        "expect_text": "嗯，在的",
+        "out": "嗯，在的",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-002",
+        "kind": "clean",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "好呀，那就周六",
+        "expect_text": "好呀，那就周六",
+        "out": "好呀，那就周六",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-003",
+        "kind": "clean",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "哈哈哈哈笑死",
+        "expect_text": "哈哈哈哈笑死",
+        "out": "哈哈哈哈笑死",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-004",
+        "kind": "clean",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "我觉得可以",
+        "expect_text": "我觉得可以",
+        "out": "我觉得可以",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-005",
+        "kind": "clean",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "稻香吧，周杰伦的",
+        "expect_text": "稻香吧，周杰伦的",
+        "out": "稻香吧，周杰伦的",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-006",
+        "kind": "clean",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "不要啦",
+        "expect_text": "不要啦",
+        "out": "不要啦",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-007",
+        "kind": "clean",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "你是不是又熬夜了",
+        "expect_text": "你是不是又熬夜了",
+        "out": "你是不是又熬夜了",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-008",
+        "kind": "clean",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "啊？什么情况",
+        "expect_text": "啊？什么情况",
+        "out": "啊？什么情况",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-009",
+        "kind": "clean",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "ok 那就周六吧",
+        "expect_text": "ok 那就周六吧",
+        "out": "ok 那就周六吧",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-010",
+        "kind": "clean",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "我不傻的……其实我很聪明的",
+        "expect_text": "我不傻的……其实我很聪明的",
+        "out": "我不傻的……其实我很聪明的",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-011",
+        "kind": "clean",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "  收到  ",
+        "expect_text": "收到",
+        "out": "收到",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-012",
+        "kind": "clean",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "好的\n那就这样",
+        "expect_text": "好的 那就这样",
+        "out": "好的 那就这样",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-013",
+        "kind": "prefix",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "林小满：好呀",
+        "expect_text": "好呀",
+        "out": "好呀",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-014",
+        "kind": "prefix",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "小助手: 嗯嗯",
+        "expect_text": "嗯嗯",
+        "out": "嗯嗯",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-015",
+        "kind": "prefix",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "回复：好的",
+        "expect_text": "好的",
+        "out": "好的",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-016",
+        "kind": "prefix",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "杨宇靖：太极好啊",
+        "expect_text": "太极好啊",
+        "out": "太极好啊",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-017",
+        "kind": "prefix_false_strip",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "晚上7:30见",
+        "expect_text": "晚上7:30见",
+        "out": "晚上7:30见",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-018",
+        "kind": "prefix_false_strip",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "现在 3:2 了",
+        "expect_text": "现在 3:2 了",
+        "out": "现在 3:2 了",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-019",
+        "kind": "prefix_false_strip",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "地址：科技路88号",
+        "expect_text": "地址：科技路88号",
+        "out": "地址：科技路88号",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-020",
+        "kind": "prefix_false_strip",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "注意：明天下雨",
+        "expect_text": "注意：明天下雨",
+        "out": "注意：明天下雨",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-021",
+        "kind": "prefix_false_strip",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "https://example.com/a?b=1",
+        "expect_text": "https://example.com/a?b=1",
+        "out": "https://example.com/a?b=1",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-022",
+        "kind": "prefix_false_strip",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "比分 2:1 赢了",
+        "expect_text": "比分 2:1 赢了",
+        "out": "比分 2:1 赢了",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-023",
+        "kind": "dangling_marker",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "好的】【",
+        "expect_text": "好的",
+        "out": "好的",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-024",
+        "kind": "dangling_marker",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "嗯嗯，我知道了、】【",
+        "expect_text": "嗯嗯，我知道了",
+        "out": "嗯嗯，我知道了",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-025",
+        "kind": "paren_aside",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "嗯……我知道了（低下头）",
+        "expect_text": "嗯……我知道了",
+        "out": "嗯……我知道了",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-026",
+        "kind": "paren_aside",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "（笑）好呀",
+        "expect_text": "好呀",
+        "out": "好呀",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-027",
+        "kind": "paren_aside",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "（小声）那个...我不太确定",
+        "expect_text": "那个...我不太确定",
+        "out": "那个...我不太确定",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-028",
+        "kind": "paren_aside",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "好的(点头)",
+        "expect_text": "好的",
+        "out": "好的",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-029",
+        "kind": "paren_legit",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "我周五有空（下午三点后）",
+        "expect_text": "我周五有空（下午三点后）",
+        "out": "我周五有空",
+        "silence_flag": false,
+        "status": "mangled",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-030",
+        "kind": "paren_legit",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "这个是上周的版本（v2.3）",
+        "expect_text": "这个是上周的版本（v2.3）",
+        "out": "这个是上周的版本",
+        "silence_flag": false,
+        "status": "mangled",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-031",
+        "kind": "leak_meta",
+        "expect_silent": true,
+        "max_chars": 30,
+        "raw": "（沉默，不需要回复）",
+        "expect_text": null,
+        "out": "",
+        "silence_flag": true,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-032",
+        "kind": "leak_meta",
+        "expect_silent": true,
+        "max_chars": 30,
+        "raw": "空白",
+        "expect_text": null,
+        "out": "",
+        "silence_flag": true,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-033",
+        "kind": "leak_meta",
+        "expect_silent": true,
+        "max_chars": 30,
+        "raw": "沉默",
+        "expect_text": null,
+        "out": "",
+        "silence_flag": true,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-034",
+        "kind": "leak_meta",
+        "expect_silent": true,
+        "max_chars": 30,
+        "raw": "不需要回复",
+        "expect_text": null,
+        "out": "",
+        "silence_flag": true,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-035",
+        "kind": "leak_meta",
+        "expect_silent": true,
+        "max_chars": 30,
+        "raw": "（这条消息不是在对我说，保持沉默）",
+        "expect_text": null,
+        "out": "",
+        "silence_flag": true,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-036",
+        "kind": "leak_meta",
+        "expect_silent": true,
+        "max_chars": 30,
+        "raw": "回复空白",
+        "expect_text": null,
+        "out": "",
+        "silence_flag": true,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-037",
+        "kind": "leak_meta",
+        "expect_silent": true,
+        "max_chars": 30,
+        "raw": "(不回复)",
+        "expect_text": null,
+        "out": "",
+        "silence_flag": true,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-038",
+        "kind": "leak_meta",
+        "expect_silent": true,
+        "max_chars": 30,
+        "raw": "应该沉默",
+        "expect_text": null,
+        "out": "",
+        "silence_flag": true,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-039",
+        "kind": "leak_variant",
+        "expect_silent": true,
+        "max_chars": 30,
+        "raw": "沉默。",
+        "expect_text": null,
+        "out": "沉默。",
+        "silence_flag": false,
+        "status": "leak",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-040",
+        "kind": "leak_variant",
+        "expect_silent": true,
+        "max_chars": 30,
+        "raw": "这句话不是对我说的，所以我选择不说话。",
+        "expect_text": null,
+        "out": "这句话不是对我说的，所以我选择不说话。",
+        "silence_flag": false,
+        "status": "leak",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-041",
+        "kind": "leak_variant",
+        "expect_silent": true,
+        "max_chars": 30,
+        "raw": "NO_REPLY",
+        "expect_text": null,
+        "out": "NO_REPLY",
+        "silence_flag": false,
+        "status": "leak",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-042",
+        "kind": "leak_variant",
+        "expect_silent": true,
+        "max_chars": 30,
+        "raw": "无回复",
+        "expect_text": null,
+        "out": "无回复",
+        "silence_flag": false,
+        "status": "leak",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-043",
+        "kind": "leak_variant",
+        "expect_silent": true,
+        "max_chars": 30,
+        "raw": "[无回复]",
+        "expect_text": null,
+        "out": "[无回复]",
+        "silence_flag": false,
+        "status": "leak",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-044",
+        "kind": "leak_variant",
+        "expect_silent": true,
+        "max_chars": 30,
+        "raw": "看起来是他们在聊天，我就不打扰了",
+        "expect_text": null,
+        "out": "看起来是他们在聊天，我就不打扰了",
+        "silence_flag": false,
+        "status": "leak",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-045",
+        "kind": "leak_variant",
+        "expect_silent": true,
+        "max_chars": 30,
+        "raw": "保持安静就好",
+        "expect_text": null,
+        "out": "保持安静就好",
+        "silence_flag": false,
+        "status": "leak",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-046",
+        "kind": "punct_only",
+        "expect_silent": true,
+        "max_chars": 30,
+        "raw": "…",
+        "expect_text": null,
+        "out": "",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-047",
+        "kind": "punct_only",
+        "expect_silent": true,
+        "max_chars": 30,
+        "raw": "。。。",
+        "expect_text": null,
+        "out": "",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-048",
+        "kind": "punct_only",
+        "expect_silent": true,
+        "max_chars": 30,
+        "raw": "......",
+        "expect_text": null,
+        "out": "",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-049",
+        "kind": "punct_only",
+        "expect_silent": true,
+        "max_chars": 30,
+        "raw": "~",
+        "expect_text": null,
+        "out": "",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-050",
+        "kind": "too_long",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "我觉得周末去爬山挺好的，不过要看天气，如果下雨的话我们可以改成去看电影，反正都行，你们定",
+        "expect_text": "我觉得周末去爬山挺好的，不过要看天气",
+        "out": "我觉得周末去爬山挺好的，不过要看天气",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": true,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-051",
+        "kind": "too_long",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "其实我也不太确定这个方案到底能不能行，主要是预算和时间都有点紧张，要不我们先开个会讨论一下",
+        "expect_text": "其实我也不太确定这个方案到底能不能行",
+        "out": "其实我也不太确定这个方案到底能不能行",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": true,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-052",
+        "kind": "too_long",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "你说的那首歌我好像听过，是不是前几年很火的那个，叫什么来着，我想想……哦对，是《晴天》吧",
+        "expect_text": "你说的那首歌我好像听过，是不是前几年很火的那个，叫什么来着",
+        "out": "你说的那首歌我好像听过，是不是前几年很火的那个，叫什么来着",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": true,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-053",
+        "kind": "too_long",
+        "expect_silent": false,
+        "max_chars": 20,
+        "raw": "好的呀那我们就这么定了，周六下午三点在老地方见面，不见不散哦",
+        "expect_text": "好的呀那我们就这么定了",
+        "out": "好的呀那我们就这么定了",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": true,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-054",
+        "kind": "too_long",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈",
+        "expect_text": "哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈",
+        "out": "哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": true,
+        "mid_sentence_truncation": true
+      },
+      {
+        "id": "raw-055",
+        "kind": "marker_false_kill",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "不用回复我哈 你先忙",
+        "expect_text": "不用回复我哈 你先忙",
+        "out": "",
+        "silence_flag": true,
+        "status": "false_kill",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-056",
+        "kind": "marker_false_kill",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "他应该是沉默了吧",
+        "expect_text": "他应该是沉默了吧",
+        "out": "",
+        "silence_flag": true,
+        "status": "false_kill",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-057",
+        "kind": "marker_false_kill",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "这封邮件不需要回复",
+        "expect_text": "这封邮件不需要回复",
+        "out": "",
+        "silence_flag": true,
+        "status": "false_kill",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-058",
+        "kind": "marker_false_kill",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "你不要回复他 让他自己想想",
+        "expect_text": "你不要回复他 让他自己想想",
+        "out": "",
+        "silence_flag": true,
+        "status": "false_kill",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-059",
+        "kind": "marker_false_kill",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "他一直沉默 我感觉不太对劲",
+        "expect_text": "他一直沉默 我感觉不太对劲",
+        "out": "他一直沉默 我感觉不太对劲",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-060",
+        "kind": "marker_false_kill",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "我不确定他是不是在沉默抗议",
+        "expect_text": "我不确定他是不是在沉默抗议",
+        "out": "",
+        "silence_flag": true,
+        "status": "false_kill",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-061",
+        "kind": "marker_false_kill",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "这段空白期我们补一下",
+        "expect_text": "这段空白期我们补一下",
+        "out": "这段空白期我们补一下",
+        "silence_flag": false,
+        "status": "ok",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-062",
+        "kind": "marker_false_kill",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "无需回应 他只是随口说说",
+        "expect_text": "无需回应 他只是随口说说",
+        "out": "",
+        "silence_flag": true,
+        "status": "false_kill",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-063",
+        "kind": "marker_false_kill",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "他没有明确指向我的意思",
+        "expect_text": "他没有明确指向我的意思",
+        "out": "",
+        "silence_flag": true,
+        "status": "false_kill",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      },
+      {
+        "id": "raw-064",
+        "kind": "marker_false_kill",
+        "expect_silent": false,
+        "max_chars": 30,
+        "raw": "不是在对我说话也没关系 我回复你一下",
+        "expect_text": "不是在对我说话也没关系 我回复你一下",
+        "out": "",
+        "silence_flag": true,
+        "status": "false_kill",
+        "truncated": false,
+        "mid_sentence_truncation": false
+      }
+    ]
+  },
+  "gate": {
+    "config": {
+      "proactive_enabled": true,
+      "rate_window_sec": 120,
+      "thresholds_msgs_per_min": {
+        "QUIET": 1.5,
+        "CASUAL": 4.0,
+        "LIVELY": 6.5,
+        "BURST": 8.5
+      },
+      "simulated_minutes": 120,
+      "arrivals": "poisson, seeded"
+    },
+    "mode_order": [
+      "SLEEP",
+      "QUIET",
+      "CASUAL",
+      "LIVELY",
+      "BURST"
+    ],
+    "rates": [
+      {
+        "rate_per_min": 0.5,
+        "messages": 56,
+        "mode_share_of_messages": {
+          "SLEEP": 0.75,
+          "QUIET": 0.25,
+          "CASUAL": 0.0,
+          "LIVELY": 0.0,
+          "BURST": 0.0
+        },
+        "always_silent_model": {
+          "messages": 56,
+          "passes": 1,
+          "passes_per_hour": 0.5,
+          "calls_per_100_messages": 1.79,
+          "pass_mode_counts": {
+            "SLEEP": 0,
+            "QUIET": 1,
+            "CASUAL": 0,
+            "LIVELY": 0,
+            "BURST": 0
+          },
+          "wasted_model_calls": 1,
+          "wasted_calls_per_hour": 0.5
+        },
+        "always_speaking_model": {
+          "messages": 56,
+          "passes": 1,
+          "passes_per_hour": 0.5,
+          "calls_per_100_messages": 1.79,
+          "pass_mode_counts": {
+            "SLEEP": 0,
+            "QUIET": 1,
+            "CASUAL": 0,
+            "LIVELY": 0,
+            "BURST": 0
+          }
+        }
+      },
+      {
+        "rate_per_min": 1.0,
+        "messages": 115,
+        "mode_share_of_messages": {
+          "SLEEP": 0.4435,
+          "QUIET": 0.5565,
+          "CASUAL": 0.0,
+          "LIVELY": 0.0,
+          "BURST": 0.0
+        },
+        "always_silent_model": {
+          "messages": 115,
+          "passes": 1,
+          "passes_per_hour": 0.5,
+          "calls_per_100_messages": 0.87,
+          "pass_mode_counts": {
+            "SLEEP": 0,
+            "QUIET": 1,
+            "CASUAL": 0,
+            "LIVELY": 0,
+            "BURST": 0
+          },
+          "wasted_model_calls": 1,
+          "wasted_calls_per_hour": 0.5
+        },
+        "always_speaking_model": {
+          "messages": 115,
+          "passes": 2,
+          "passes_per_hour": 1.0,
+          "calls_per_100_messages": 1.74,
+          "pass_mode_counts": {
+            "SLEEP": 0,
+            "QUIET": 2,
+            "CASUAL": 0,
+            "LIVELY": 0,
+            "BURST": 0
+          }
+        }
+      },
+      {
+        "rate_per_min": 2.0,
+        "messages": 238,
+        "mode_share_of_messages": {
+          "SLEEP": 0.0966,
+          "QUIET": 0.7815,
+          "CASUAL": 0.1176,
+          "LIVELY": 0.0042,
+          "BURST": 0.0
+        },
+        "always_silent_model": {
+          "messages": 238,
+          "passes": 2,
+          "passes_per_hour": 1.0,
+          "calls_per_100_messages": 0.84,
+          "pass_mode_counts": {
+            "SLEEP": 0,
+            "QUIET": 0,
+            "CASUAL": 2,
+            "LIVELY": 0,
+            "BURST": 0
+          },
+          "wasted_model_calls": 2,
+          "wasted_calls_per_hour": 1.0
+        },
+        "always_speaking_model": {
+          "messages": 238,
+          "passes": 9,
+          "passes_per_hour": 4.5,
+          "calls_per_100_messages": 3.78,
+          "pass_mode_counts": {
+            "SLEEP": 0,
+            "QUIET": 6,
+            "CASUAL": 3,
+            "LIVELY": 0,
+            "BURST": 0
+          }
+        }
+      },
+      {
+        "rate_per_min": 4.0,
+        "messages": 486,
+        "mode_share_of_messages": {
+          "SLEEP": 0.0041,
+          "QUIET": 0.3354,
+          "CASUAL": 0.5535,
+          "LIVELY": 0.107,
+          "BURST": 0.0
+        },
+        "always_silent_model": {
+          "messages": 486,
+          "passes": 5,
+          "passes_per_hour": 2.5,
+          "calls_per_100_messages": 1.03,
+          "pass_mode_counts": {
+            "SLEEP": 0,
+            "QUIET": 0,
+            "CASUAL": 3,
+            "LIVELY": 2,
+            "BURST": 0
+          },
+          "wasted_model_calls": 5,
+          "wasted_calls_per_hour": 2.5
+        },
+        "always_speaking_model": {
+          "messages": 486,
+          "passes": 16,
+          "passes_per_hour": 8.0,
+          "calls_per_100_messages": 3.29,
+          "pass_mode_counts": {
+            "SLEEP": 0,
+            "QUIET": 0,
+            "CASUAL": 10,
+            "LIVELY": 6,
+            "BURST": 0
+          }
+        }
+      },
+      {
+        "rate_per_min": 6.0,
+        "messages": 737,
+        "mode_share_of_messages": {
+          "SLEEP": 0.0027,
+          "QUIET": 0.0366,
+          "CASUAL": 0.3853,
+          "LIVELY": 0.4125,
+          "BURST": 0.1628
+        },
+        "always_silent_model": {
+          "messages": 737,
+          "passes": 10,
+          "passes_per_hour": 5.0,
+          "calls_per_100_messages": 1.36,
+          "pass_mode_counts": {
+            "SLEEP": 0,
+            "QUIET": 1,
+            "CASUAL": 0,
+            "LIVELY": 2,
+            "BURST": 7
+          },
+          "wasted_model_calls": 10,
+          "wasted_calls_per_hour": 5.0
+        },
+        "always_speaking_model": {
+          "messages": 737,
+          "passes": 47,
+          "passes_per_hour": 23.5,
+          "calls_per_100_messages": 6.38,
+          "pass_mode_counts": {
+            "SLEEP": 0,
+            "QUIET": 1,
+            "CASUAL": 6,
+            "LIVELY": 22,
+            "BURST": 18
+          }
+        }
+      },
+      {
+        "rate_per_min": 8.0,
+        "messages": 944,
+        "mode_share_of_messages": {
+          "SLEEP": 0.0021,
+          "QUIET": 0.0064,
+          "CASUAL": 0.1557,
+          "LIVELY": 0.3528,
+          "BURST": 0.4831
+        },
+        "always_silent_model": {
+          "messages": 944,
+          "passes": 9,
+          "passes_per_hour": 4.5,
+          "calls_per_100_messages": 0.95,
+          "pass_mode_counts": {
+            "SLEEP": 0,
+            "QUIET": 0,
+            "CASUAL": 0,
+            "LIVELY": 0,
+            "BURST": 9
+          },
+          "wasted_model_calls": 9,
+          "wasted_calls_per_hour": 4.5
+        },
+        "always_speaking_model": {
+          "messages": 944,
+          "passes": 85,
+          "passes_per_hour": 42.5,
+          "calls_per_100_messages": 9.0,
+          "pass_mode_counts": {
+            "SLEEP": 0,
+            "QUIET": 0,
+            "CASUAL": 0,
+            "LIVELY": 27,
+            "BURST": 58
+          }
+        }
+      },
+      {
+        "rate_per_min": 10.0,
+        "messages": 1233,
+        "mode_share_of_messages": {
+          "SLEEP": 0.0016,
+          "QUIET": 0.0041,
+          "CASUAL": 0.0146,
+          "LIVELY": 0.1241,
+          "BURST": 0.8556
+        },
+        "always_silent_model": {
+          "messages": 1233,
+          "passes": 11,
+          "passes_per_hour": 5.5,
+          "calls_per_100_messages": 0.89,
+          "pass_mode_counts": {
+            "SLEEP": 0,
+            "QUIET": 0,
+            "CASUAL": 0,
+            "LIVELY": 0,
+            "BURST": 11
+          },
+          "wasted_model_calls": 11,
+          "wasted_calls_per_hour": 5.5
+        },
+        "always_speaking_model": {
+          "messages": 1233,
+          "passes": 129,
+          "passes_per_hour": 64.5,
+          "calls_per_100_messages": 10.46,
+          "pass_mode_counts": {
+            "SLEEP": 0,
+            "QUIET": 0,
+            "CASUAL": 0,
+            "LIVELY": 6,
+            "BURST": 123
+          }
+        }
+      },
+      {
+        "rate_per_min": 12.0,
+        "messages": 1519,
+        "mode_share_of_messages": {
+          "SLEEP": 0.0013,
+          "QUIET": 0.0033,
+          "CASUAL": 0.0033,
+          "LIVELY": 0.0237,
+          "BURST": 0.9684
+        },
+        "always_silent_model": {
+          "messages": 1519,
+          "passes": 15,
+          "passes_per_hour": 7.5,
+          "calls_per_100_messages": 0.99,
+          "pass_mode_counts": {
+            "SLEEP": 0,
+            "QUIET": 0,
+            "CASUAL": 0,
+            "LIVELY": 0,
+            "BURST": 15
+          },
+          "wasted_model_calls": 15,
+          "wasted_calls_per_hour": 7.5
+        },
+        "always_speaking_model": {
+          "messages": 1519,
+          "passes": 140,
+          "passes_per_hour": 70.0,
+          "calls_per_100_messages": 9.22,
+          "pass_mode_counts": {
+            "SLEEP": 0,
+            "QUIET": 0,
+            "CASUAL": 0,
+            "LIVELY": 1,
+            "BURST": 139
+          }
+        }
+      }
+    ]
+  },
+  "determinism": {
+    "runs": 2,
+    "identical": true,
+    "sha256": "fd041bae3eb735963fd31598ee8d2d1e74195c01113ee900e70d75a3dd90c5e2"
+  }
+}

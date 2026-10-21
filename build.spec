@@ -1,0 +1,124 @@
+# -*- mode: python ; coding: utf-8 -*-
+"""
+PyInstaller spec for webot Desktop.
+
+Build: pyinstaller build.spec
+Output: dist/webot.exe
+"""
+import sys
+import site
+from pathlib import Path
+
+PROJECT_ROOT = Path(SPECPATH)
+
+# ── Resolve webview runtime DLLs dynamically ───────────────────────────
+def _find_webview_runtime_dir():
+    """Find the webview package's runtime directory in site-packages."""
+    for sp in site.getsitepackages():
+        candidate = Path(sp) / "webview" / "lib"
+        if candidate.exists():
+            return candidate
+    # Fallback: try user site-packages
+    user_sp = site.getusersitepackages()
+    if user_sp:
+        candidate = Path(user_sp) / "webview" / "lib"
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        "webview package not found. Install with: pip install pywebview"
+    )
+
+_webview_dir = _find_webview_runtime_dir()
+_webview_runtime = _webview_dir / "runtimes" / "win-x64" / "native" / "WebView2Loader.dll"
+_webview_interop = _webview_dir / "WebBrowserInterop.x64.dll"
+
+if not _webview_runtime.exists():
+    raise FileNotFoundError(f"WebView2Loader.dll not found at {_webview_runtime}")
+if not _webview_interop.exists():
+    raise FileNotFoundError(f"WebBrowserInterop.x64.dll not found at {_webview_interop}")
+
+a = Analysis(
+    ['desktop.py'],
+    pathex=[str(PROJECT_ROOT)],
+    binaries=[
+        (str(_webview_runtime), './runtimes/win-x64/native'),
+        (str(_webview_interop), './lib'),
+        (str(PROJECT_ROOT / 'native' / 'windows' / 'wcdb_api.dll'), 'native/windows'),
+        (str(PROJECT_ROOT / 'native' / 'windows' / 'WCDB.dll'), 'native/windows'),
+        (str(PROJECT_ROOT / 'native' / 'windows' / 'MSVCP140.dll'), 'native/windows'),
+        (str(PROJECT_ROOT / 'native' / 'windows' / 'VCRUNTIME140.dll'), 'native/windows'),
+        (str(PROJECT_ROOT / 'native' / 'windows' / 'VCRUNTIME140_1.dll'), 'native/windows'),
+        (str(PROJECT_ROOT / 'native' / 'windows' / 'wx_key.dll'), 'native/windows'),
+    ],
+    datas=[
+        ('ui/dist', 'ui/dist'),
+        ('.env.example', '.'),
+        # persona and alias-rule data files (read next to src/persona.py)
+        ('src/personas', 'src/personas'),
+        # data/ is runtime-generated — do NOT bundle into read-only _MEIPASS
+    ],
+    hiddenimports=[
+        'src', 'src.bot', 'src.config', 'src.main',
+        'src.db', 'src.db.schema', 'src.db.store',
+        'src.trigger', 'src.trigger.detector',
+        'src.summarize', 'src.summarize.base', 'src.summarize.claude_backend',
+        'src.summarize.deepseek_backend', 'src.summarize.models', 'src.summarize.prompts',
+        'src.proactive', 'src.proactive.gate', 'src.proactive.modes',
+        'src.proactive.rate_tracker', 'src.proactive.sticky',
+        'src.memory', 'src.memory.consolidator',
+        'src.integrations', 'src.integrations.feishu',
+        'src.integrations.feishu.client', 'src.integrations.feishu.exporter',
+        'src.integrations.feishu.knowledge',
+        'src.wechat', 'src.wechat.base', 'src.wechat.wcdb_backend',
+        'src.wechat.wcdb_client', 'src.wechat.mac_hybrid_backend',
+        'src.wechat.mac_ui_backend', 'src.wechat.window_controller',
+        'src.wechat.keyboard', 'src.wechat.helpers', 'src.wechat.extract_key',
+        'src.wechat.native', 'src.wechat.native.injector',
+        'src.web', 'src.web.server',
+        'src.router', 'src.welcome',
+        'src.todo', 'src.todo.store', 'src.todo.handler',
+        'src.nickname', 'src.admin', 'src.fun',
+        'src.utils', 'src.utils.logging_config',
+        'dotenv', 'anthropic', 'openai', 'pydantic',
+        'uiautomation',
+        'webview', 'webview.platforms', 'webview.platforms.edgechromium',
+        'PIL', 'PIL.Image', 'PIL.ImageDraw',
+        'psutil', 'pyperclip',
+        'win32api', 'comtypes',
+    ],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=['tkinter', 'matplotlib', 'scipy', 'jedi', 'IPython',
+              'faster_whisper', 'ctranslate2', 'numpy', 'onnxruntime',
+              'pysilk', 'av', 'sounddevice', 'soundfile'],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=None,
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=None)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    [],
+    name='webot',
+    icon='image/logo_assets/logo.ico',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)

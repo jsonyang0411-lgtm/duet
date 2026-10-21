@@ -1,0 +1,32 @@
+{
+  "aliases": [
+    {
+      "stem": "次元",
+      "suffixes": [
+        "哥哥",
+        "大哥",
+        "哥"
+      ]
+    },
+    {
+      "stem": "牛牛哥哥",
+      "suffixes": []
+    }
+  ],
+  "bare_aliases": [
+    {
+      "stem": "次元",
+      "suffixes": [
+        "哥哥",
+        "哥",
+        "大哥"
+      ]
+    }
+  ],
+  "derived": [
+    {
+      "prefix": "次元",
+      "alias": "cy"
+    }
+  ]
+}

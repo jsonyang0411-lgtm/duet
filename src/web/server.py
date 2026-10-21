@@ -1,0 +1,2753 @@
+"""
+Zero-dependency web UI server for the bot dashboard.
+
+Uses only Python stdlib (http.server for HTTP).
+Serves the React UI from ui/dist/ and provides bot status via HTTP polling.
+
+Runs in a daemon thread — no impact on the main bot loop.
+"""
+import json
+import logging
+import os
+import re
+import threading
+import time
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+from pathlib import Path
+from urllib.parse import unquote, urlsplit
+
+# Re-exported from config.py for use in API handlers.
+# NOTE: _decode_wechat_groups is also imported inside _handle_request()
+# conditional blocks, but for Python's scoping those later imports still
+# make the name a local — so it must be imported at module level too,
+# otherwise the first branch that references it raises UnboundLocalError.
+from src.config import _decode_wechat_groups
+
+logger = logging.getLogger(__name__)
+
+import sys as _sys
+if getattr(_sys, "frozen", False):
+    UI_DIR = (Path(_sys._MEIPASS) / "ui" / "dist").resolve()
+else:
+    UI_DIR = (Path(__file__).resolve().parent.parent.parent / "ui" / "dist").resolve()
+def _messages_table_exists(conn) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages'"
+    ).fetchone()
+    return row is not None
+
+
+def _find_or_create_env() -> Path:
+    """Find .env file, using the canonical search order from config.py.
+
+    If .env is not found but .env.example is, copy it to create a new .env.
+    """
+    import sys
+
+    # 1. Use the canonical search from config.py (consistent across the app)
+    from src.config import find_env_file, _decode_wechat_groups
+    existing = find_env_file()
+    if existing:
+        return existing
+
+    # 2. Not found — try to create from .env.example
+    # .env.example is bundled into _MEIPASS in frozen mode.
+    if getattr(sys, "frozen", False):
+        env_example = Path(sys._MEIPASS) / ".env.example"
+    else:
+        env_example = Path(__file__).resolve().parent.parent.parent / ".env.example"
+
+    if env_example.exists():
+        # Create .env in app home (CWD already set to EXE dir / project root)
+        env_path = Path(".env")
+        env_path.write_text(env_example.read_text(encoding="utf-8"), encoding="utf-8")
+        logger.info("Created .env from .env.example at %s", env_path.resolve())
+        return env_path
+
+    # 3. Last resort: create minimal .env in app home
+    env_path = Path(".env")
+    env_path.write_text(
+        "AI_BACKEND=deepseek\n"
+        "DEEPSEEK_API_KEY=\n"
+        "OPENAI_API_KEY=\n"
+        "WECHAT_BACKEND=wcdb\n"
+        "BOT_DISPLAY_NAME=\n"
+        "WECHAT_GROUPS=\n"
+        "PRIVATE_CHAT_ENABLED=false\n"
+        "PRIVATE_CHATS=*\n"
+        "MESSAGE_BURST_ENABLED=true\n"
+        "MESSAGE_BURST_WINDOW_SEC=2.2\n"
+        "MESSAGE_BURST_MAX_MESSAGES=5\n"
+        "MESSAGE_BURST_MAX_CHARS=200\n"
+        "WEB_SEARCH_ENABLED=true\n"
+        "WEB_SEARCH_MAX_RESULTS=4\n"
+        "WEB_SEARCH_TIMEOUT_SEC=8.0\n"
+        "WEB_SEARCH_REGION=cn-zh\n"
+        "WEB_SEARCH_REPLY_MAX_CHARS=120\n",
+        encoding="utf-8",
+    )
+    logger.info("Created minimal .env at %s", env_path.resolve())
+    return env_path
+
+
+def _find_or_create_machine_env() -> Path:
+    """Find/create the per-machine env override used for local WeChat data."""
+    from src.config import find_local_env_file
+
+    existing = find_local_env_file()
+    if existing:
+        return existing
+
+    appdata = os.getenv("APPDATA", "").strip()
+    if appdata:
+        env_path = Path(appdata) / "webot" / ".env.local"
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        if not env_path.exists():
+            env_path.write_text("", encoding="utf-8")
+        return env_path
+
+    return _find_or_create_env()
+
+
+def _detect_default_data_dir() -> str:
+    """Auto-detect the default WeChat data directory (parent of wxid_*).
+
+    Returns the base directory path string, or empty string if not found.
+    Used by the UI to show what auto-detection would use.
+    """
+    import os as _os
+    candidates = [
+        Path(_os.environ.get("USERPROFILE", "")) / "Documents" / "xwechat_files",
+        Path(_os.environ.get("USERPROFILE", "")) / "Documents" / "WeChat Files",
+    ]
+    for base in candidates:
+        if not base.exists():
+            continue
+        try:
+            wxid_dirs = [d for d in base.iterdir() if d.is_dir() and d.name.startswith("wxid_")]
+            for wxid_dir in wxid_dirs:
+                session_db = wxid_dir / "db_storage" / "session" / "session.db"
+                if session_db.exists():
+                    return str(base)
+        except PermissionError:
+            continue
+    return ""
+
+
+_DEFAULT_FEISHU_TRIGGER_KEYWORDS = "同步到飞书,导出到飞书,写到飞书,沉淀到飞书"
+
+
+def _split_csv(raw: str) -> list[str]:
+    """Split a comma-separated env value into trimmed non-empty items."""
+    return [item.strip() for item in (raw or "").split(",") if item.strip()]
+
+
+def _bool_env(raw: str, default: bool = False) -> bool:
+    if raw == "":
+        return default
+    return raw.strip().lower() == "true"
+
+
+def _mask_key(value: str) -> str:
+    """Mask a sensitive key: show first 4 + last 4 chars, or '***' if too short."""
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "***"
+    return value[:4] + "***" + value[-4:]
+
+
+_SECRET_ENV_KEYS = {
+    "DEEPSEEK_API_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "VOICE_OPENAI_API_KEY",
+    "FEISHU_APP_SECRET",
+    "EMBEDDING_API_KEY",
+    "LOCAL_API_KEY",
+}
+
+
+def _is_masked_secret(value) -> bool:
+    """Return True when a UI/API value is a displayed mask, not a real secret."""
+    return isinstance(value, str) and "***" in value
+
+
+def _env_values_from_lines(lines: list[str]) -> dict[str, str]:
+    """Parse simple KEY=VALUE lines so masked secrets can preserve old values."""
+    values: dict[str, str] = {}
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def _read_env_values(env_path: Path | None) -> dict[str, str]:
+    if not env_path or not env_path.exists():
+        return {}
+    return _env_values_from_lines(env_path.read_text(encoding="utf-8").splitlines())
+
+
+def _read_effective_env_values() -> dict[str, str]:
+    """Read shared .env plus optional machine-local overrides."""
+    from src.config import find_local_env_file
+
+    raw = _read_env_values(_find_or_create_env())
+    for key, value in _read_env_values(find_local_env_file()).items():
+        if str(value or "").strip():
+            raw[key] = value
+    return raw
+
+
+def _preserve_masked_secret_updates(
+    updates: dict[str, str | None],
+    existing_values: dict[str, str],
+) -> None:
+    """Keep the existing secret when the UI posts back a masked placeholder."""
+    for key in _SECRET_ENV_KEYS:
+        if _is_masked_secret(updates.get(key)):
+            updates[key] = existing_values.get(key, "")
+
+
+def _int_env(raw: str, default: int) -> int:
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _encode_env_text(value: str | None) -> str:
+    text = str(value or "")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return text.strip().replace("\n", "\\n")
+
+
+def _persona_config_from_raw(raw: dict[str, str], include_preset: bool = False) -> dict:
+    """UI-facing persona settings.
+
+    ``chat_persona_*`` are always the custom persona's values from .env, also while the
+    Yang preset is selected: saving with the Yang profile leaves them alone
+    (``_persona_updates_from_config``), so switching back must show them, not
+    the preset. With ``include_preset`` the code-owned Yang preset comes back
+    separately, read-only, as ``yang_preset``.
+    """
+    from src.config import _decode_env_text
+    from src.persona import (
+        DEFAULT_CHAT_CONTEXT_COUNT,
+        DEFAULT_CHAT_CONTEXT_WINDOW_SEC,
+        DEFAULT_CHAT_MAX_CHARS,
+        DEFAULT_CHAT_PERSONA_NAME,
+        DEFAULT_CHAT_PERSONA_PROMPT,
+        DEFAULT_CHAT_REPLY_RULES,
+        DEFAULT_YANG_YUJING_ALWAYS_REPLY_GROUP_NAME,
+        DEFAULT_YANG_YUJING_GROUP_NAME,
+        PERSONA_PROFILE_YANG_YUJING,
+        normalize_persona_profile,
+        persona_defaults_for_profile,
+    )
+
+    profile = normalize_persona_profile(raw.get("CHAT_PERSONA_PROFILE"))
+    config = {
+        "chat_persona_profile": profile,
+        "chat_persona_name": raw.get("CHAT_PERSONA_NAME", DEFAULT_CHAT_PERSONA_NAME),
+        "chat_persona_prompt": _decode_env_text(
+            raw.get("CHAT_PERSONA_PROMPT"), DEFAULT_CHAT_PERSONA_PROMPT,
+        ),
+        "chat_reply_rules": _decode_env_text(
+            raw.get("CHAT_REPLY_RULES"), DEFAULT_CHAT_REPLY_RULES,
+        ),
+        "chat_max_chars": _int_env(raw.get("CHAT_MAX_CHARS", ""), DEFAULT_CHAT_MAX_CHARS),
+        "chat_context_window_sec": _int_env(
+            raw.get("CHAT_CONTEXT_WINDOW_SEC", ""),
+            DEFAULT_CHAT_CONTEXT_WINDOW_SEC,
+        ),
+        "chat_context_count": _int_env(
+            raw.get("CHAT_CONTEXT_COUNT", ""),
+            DEFAULT_CHAT_CONTEXT_COUNT,
+        ),
+        "yang_yujing_group_name": raw.get(
+            "YANG_YUJING_GROUP_NAME", DEFAULT_YANG_YUJING_GROUP_NAME,
+        ),
+        "yang_yujing_always_reply_group_name": raw.get(
+            "YANG_YUJING_ALWAYS_REPLY_GROUP_NAME",
+            DEFAULT_YANG_YUJING_ALWAYS_REPLY_GROUP_NAME,
+        ),
+    }
+    if include_preset:
+        defaults = persona_defaults_for_profile(PERSONA_PROFILE_YANG_YUJING)
+        assert defaults is not None
+        config["yang_preset"] = {
+            "name": defaults["name"],
+            "prompt": defaults["prompt"],
+            "reply_rules": defaults["reply_rules"],
+            "max_chars": defaults["max_chars"],
+            "context_window_sec": defaults["context_window_sec"],
+            "context_count": defaults["context_count"],
+        }
+    return config
+
+
+def _decode_name_list(raw: str | None) -> list[str]:
+    """Group / contact names from WECHAT_GROUPS or PRIVATE_CHATS as a list.
+
+    Each comma-separated chunk is decoded on its own, so a name stored as
+    ``%E6%B5%8B%E8%AF%95%2C%E7%BE%A4`` stays one name ("测试,群"); ``*`` and
+    an empty value give ``[]`` (= all).
+    """
+    text = str(raw or "").strip()
+    if not text or text == "*":
+        return []
+    names = []
+    for chunk in text.split(","):
+        chunk = chunk.strip()
+        if chunk:
+            try:
+                names.append(unquote(chunk))
+            except Exception:
+                names.append(chunk)
+    return names
+
+
+def _persona_updates_from_config(config: dict) -> dict[str, str]:
+    from src.persona import (
+        DEFAULT_CHAT_CONTEXT_COUNT,
+        DEFAULT_CHAT_CONTEXT_WINDOW_SEC,
+        DEFAULT_CHAT_MAX_CHARS,
+        DEFAULT_CHAT_PERSONA_NAME,
+        DEFAULT_CHAT_PERSONA_PROMPT,
+        DEFAULT_CHAT_REPLY_RULES,
+        DEFAULT_YANG_YUJING_ALWAYS_REPLY_GROUP_NAME,
+        DEFAULT_YANG_YUJING_GROUP_NAME,
+        PERSONA_PROFILE_YANG_YUJING,
+        normalize_persona_profile,
+    )
+
+    profile = normalize_persona_profile(config.get("chat_persona_profile"))
+    updates = {
+        "CHAT_PERSONA_PROFILE": profile,
+        "YANG_YUJING_GROUP_NAME": config.get(
+            "yang_yujing_group_name", DEFAULT_YANG_YUJING_GROUP_NAME,
+        ),
+        "YANG_YUJING_ALWAYS_REPLY_GROUP_NAME": config.get(
+            "yang_yujing_always_reply_group_name",
+            DEFAULT_YANG_YUJING_ALWAYS_REPLY_GROUP_NAME,
+        ),
+    }
+    if profile == PERSONA_PROFILE_YANG_YUJING:
+        # The Yang preset is code-owned. Leave the custom persona's prompt values
+        # in the .env file intact so switching back restores them exactly.
+        return updates
+
+    updates.update({
+        "CHAT_PERSONA_NAME": config.get("chat_persona_name", DEFAULT_CHAT_PERSONA_NAME),
+        "CHAT_PERSONA_PROMPT": _encode_env_text(
+            config.get("chat_persona_prompt", DEFAULT_CHAT_PERSONA_PROMPT),
+        ),
+        "CHAT_REPLY_RULES": _encode_env_text(
+            config.get("chat_reply_rules", DEFAULT_CHAT_REPLY_RULES),
+        ),
+        "CHAT_MAX_CHARS": str(config.get("chat_max_chars", DEFAULT_CHAT_MAX_CHARS)),
+        "CHAT_CONTEXT_WINDOW_SEC": str(
+            config.get("chat_context_window_sec", DEFAULT_CHAT_CONTEXT_WINDOW_SEC),
+        ),
+        "CHAT_CONTEXT_COUNT": str(config.get("chat_context_count", DEFAULT_CHAT_CONTEXT_COUNT)),
+    })
+    return updates
+
+
+def _feishu_config_from_raw(raw: dict[str, str]) -> dict:
+    """Return UI-facing Feishu export config from env key/value pairs."""
+    return {
+        "feishu_export_enabled": _bool_env(
+            raw.get("FEISHU_EXPORT_ENABLED", "false"),
+            False,
+        ),
+        "feishu_app_id": raw.get("FEISHU_APP_ID", ""),
+        "feishu_app_secret": _mask_key(raw.get("FEISHU_APP_SECRET", "")),
+        "feishu_export_mode": raw.get("FEISHU_EXPORT_MODE", "knowledge"),
+        "feishu_export_window_hours": _int_env(
+            raw.get("FEISHU_EXPORT_WINDOW_HOURS", "8"),
+            8,
+        ),
+        "feishu_auto_sync_enabled": _bool_env(
+            raw.get("FEISHU_AUTO_SYNC_ENABLED", "false"),
+            False,
+        ),
+        "feishu_auto_sync_min_messages": _int_env(
+            raw.get("FEISHU_AUTO_SYNC_MIN_MESSAGES", "20"),
+            20,
+        ),
+        "feishu_auto_sync_cooldown_sec": _int_env(
+            raw.get("FEISHU_AUTO_SYNC_COOLDOWN_SEC", "1800"),
+            1800,
+        ),
+        "feishu_knowledge_base_name": raw.get("FEISHU_KNOWLEDGE_BASE_NAME", "webot 群聊沉淀"),
+        "feishu_knowledge_folder_token": raw.get("FEISHU_KNOWLEDGE_FOLDER_TOKEN", ""),
+        "feishu_export_trigger_keywords": _split_csv(
+            raw.get("FEISHU_EXPORT_TRIGGER_KEYWORDS", _DEFAULT_FEISHU_TRIGGER_KEYWORDS)
+        ),
+        "feishu_spreadsheet_token": raw.get("FEISHU_SPREADSHEET_TOKEN", ""),
+        "feishu_spreadsheet_range": raw.get("FEISHU_SPREADSHEET_RANGE", "Sheet1!A:H"),
+        "feishu_bitable_app_token": raw.get("FEISHU_BITABLE_APP_TOKEN", ""),
+        "feishu_bitable_table_id": raw.get("FEISHU_BITABLE_TABLE_ID", ""),
+        "feishu_doc_folder_token": raw.get("FEISHU_DOC_FOLDER_TOKEN", ""),
+    }
+
+
+_DEFAULT_TODO_ADD_KEYWORDS = "记一下,添加待办,新建待办,帮我记,待办"
+_DEFAULT_TODO_COMPLETE_KEYWORDS = "搞定,做完了,完成,完成了,done"
+_DEFAULT_TODO_DELETE_KEYWORDS = "删掉,删除,取消,不要了"
+
+
+def _todo_config_from_raw(raw: dict[str, str]) -> dict:
+    """Return UI-facing todo config from env key/value pairs."""
+    return {
+        "todo_enabled": _bool_env(raw.get("TODO_ENABLED", "true"), True),
+        "todo_groups": _split_csv(raw.get("TODO_GROUPS", "*")),
+        "todo_max_per_group": _int_env(raw.get("TODO_MAX_PER_GROUP", "50"), 50),
+        "todo_completed_retention_days": _int_env(
+            raw.get("TODO_COMPLETED_RETENTION_DAYS", "30"), 30,
+        ),
+        "todo_deleted_retention_days": _int_env(
+            raw.get("TODO_DELETED_RETENTION_DAYS", "30"), 30,
+        ),
+        "todo_add_keywords": _split_csv(
+            raw.get("TODO_ADD_KEYWORDS", _DEFAULT_TODO_ADD_KEYWORDS),
+        ),
+        "todo_complete_keywords": _split_csv(
+            raw.get("TODO_COMPLETE_KEYWORDS", _DEFAULT_TODO_COMPLETE_KEYWORDS),
+        ),
+        "todo_delete_keywords": _split_csv(
+            raw.get("TODO_DELETE_KEYWORDS", _DEFAULT_TODO_DELETE_KEYWORDS),
+        ),
+    }
+
+
+def _todo_updates_from_config(config: dict) -> dict[str, str | None]:
+    """Convert todo config dict to .env lines."""
+    return {
+        "TODO_ENABLED": str(config.get("todo_enabled", True)).lower(),
+        "TODO_GROUPS": ",".join(config.get("todo_groups", ["*"])) if config.get("todo_groups") else "*",
+        "TODO_MAX_PER_GROUP": str(config.get("todo_max_per_group", 50)),
+        "TODO_COMPLETED_RETENTION_DAYS": str(config.get("todo_completed_retention_days", 30)),
+        "TODO_DELETED_RETENTION_DAYS": str(config.get("todo_deleted_retention_days", 30)),
+        "TODO_ADD_KEYWORDS": ",".join(config.get("todo_add_keywords", [])) if config.get("todo_add_keywords") else None,
+        "TODO_COMPLETE_KEYWORDS": ",".join(config.get("todo_complete_keywords", [])) if config.get("todo_complete_keywords") else None,
+        "TODO_DELETE_KEYWORDS": ",".join(config.get("todo_delete_keywords", [])) if config.get("todo_delete_keywords") else None,
+    }
+
+
+def _feishu_updates_from_config(config: dict) -> dict[str, str | None]:
+    """Return env updates for Feishu export settings from UI payload."""
+    keywords = config.get("feishu_export_trigger_keywords")
+    if isinstance(keywords, list):
+        keywords_value = ",".join(str(k).strip() for k in keywords if str(k).strip())
+    else:
+        keywords_value = str(keywords).strip() if keywords is not None else None
+
+    updates: dict[str, str | None] = {}
+    field_map = {
+        "feishu_export_enabled": "FEISHU_EXPORT_ENABLED",
+        "feishu_app_id": "FEISHU_APP_ID",
+        "feishu_app_secret": "FEISHU_APP_SECRET",
+        "feishu_export_mode": "FEISHU_EXPORT_MODE",
+        "feishu_export_window_hours": "FEISHU_EXPORT_WINDOW_HOURS",
+        "feishu_auto_sync_enabled": "FEISHU_AUTO_SYNC_ENABLED",
+        "feishu_auto_sync_min_messages": "FEISHU_AUTO_SYNC_MIN_MESSAGES",
+        "feishu_auto_sync_cooldown_sec": "FEISHU_AUTO_SYNC_COOLDOWN_SEC",
+        "feishu_knowledge_base_name": "FEISHU_KNOWLEDGE_BASE_NAME",
+        "feishu_knowledge_folder_token": "FEISHU_KNOWLEDGE_FOLDER_TOKEN",
+        "feishu_export_trigger_keywords": "FEISHU_EXPORT_TRIGGER_KEYWORDS",
+        "feishu_spreadsheet_token": "FEISHU_SPREADSHEET_TOKEN",
+        "feishu_spreadsheet_range": "FEISHU_SPREADSHEET_RANGE",
+        "feishu_bitable_app_token": "FEISHU_BITABLE_APP_TOKEN",
+        "feishu_bitable_table_id": "FEISHU_BITABLE_TABLE_ID",
+        "feishu_doc_folder_token": "FEISHU_DOC_FOLDER_TOKEN",
+    }
+    for field, env_key in field_map.items():
+        if field not in config:
+            continue
+        if field in ("feishu_export_enabled", "feishu_auto_sync_enabled"):
+            updates[env_key] = str(config.get(field, False)).lower()
+        elif field in (
+            "feishu_export_window_hours",
+            "feishu_auto_sync_min_messages",
+            "feishu_auto_sync_cooldown_sec",
+        ):
+            default = {
+                "feishu_export_window_hours": 8,
+                "feishu_auto_sync_min_messages": 20,
+                "feishu_auto_sync_cooldown_sec": 1800,
+            }[field]
+            updates[env_key] = str(config.get(field, default))
+        elif field == "feishu_export_trigger_keywords":
+            updates[env_key] = keywords_value
+        else:
+            updates[env_key] = config.get(field)
+    return updates
+
+
+def _detect_wxid_and_db_path():
+    """Auto-detect WeChat wxid and database path from common locations.
+
+    Respects WECHAT_DATA_DIR env var as a custom base dir (scanned first).
+    """
+    import os as _os
+
+    candidates: list[Path] = []
+
+    # 1. Custom path from env (highest priority)
+    custom_dir = _os.environ.get("WECHAT_DATA_DIR", "").strip()
+    if custom_dir:
+        custom = Path(custom_dir)
+        if custom.exists() and custom.is_dir():
+            candidates.append(custom)
+
+    # 2. Default locations
+    candidates += [
+        Path(_os.environ.get("USERPROFILE", "")) / "Documents" / "xwechat_files",
+        Path(_os.environ.get("USERPROFILE", "")) / "Documents" / "WeChat Files",
+    ]
+    for base in candidates:
+        if not base.exists():
+            continue
+        wxid_dirs = sorted(
+            [d for d in base.iterdir() if d.is_dir() and d.name.startswith("wxid_")],
+            key=lambda d: d.stat().st_mtime, reverse=True,
+        )
+        for wxid_dir in wxid_dirs:
+            session_db = wxid_dir / "db_storage" / "session" / "session.db"
+            if session_db.exists():
+                return wxid_dir.name, str(session_db)
+            # Older WeChat versions
+            msg_dir = wxid_dir / "Msg"
+            if msg_dir.exists():
+                db_files = sorted(msg_dir.glob("MSG*.db"), key=lambda f: f.stat().st_mtime, reverse=True)
+                if db_files:
+                    return wxid_dir.name, str(db_files[0])
+    return None, None
+
+
+def _set_env_key(env_path: Path, key: str, value: str) -> None:
+    """Set or update one key=value in a .env file atomically."""
+    if not env_path.exists():
+        env_path.write_text(f"{key}={value}\n", encoding="utf-8")
+        return
+    lines = env_path.read_text(encoding="utf-8").splitlines()
+    new_lines, found = [], False
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            k = stripped.split("=", 1)[0].strip()
+            if k == key:
+                new_lines.append(f"{key}={value}")
+                found = True
+                continue
+        new_lines.append(line)
+    if not found:
+        new_lines.append(f"{key}={value}")
+    tmp = env_path.with_suffix(".tmp")
+    tmp.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    os.replace(tmp, env_path)
+
+
+def _write_env_updates(env_path: Path, updates: dict[str, str]) -> None:
+    """Set several key=value pairs in a .env file in one atomic write.
+
+    Existing lines keep their place and every occurrence of a key is
+    replaced (dotenv reads the last one, and .env.example ships some keys
+    uncommented, so a hand-added duplicate must not win); new keys are
+    appended.
+    """
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    new_lines, seen = [], set()
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            k = stripped.split("=", 1)[0].strip()
+            if k in updates:
+                new_lines.append(f"{k}={updates[k]}")
+                seen.add(k)
+                continue
+        new_lines.append(line)
+    for k, v in updates.items():
+        if k not in seen:
+            new_lines.append(f"{k}={v}")
+    tmp = env_path.with_suffix(".tmp")
+    tmp.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    os.replace(tmp, env_path)
+
+
+_WCDB_KEY_RE = re.compile(r"[0-9a-fA-F]{64}")
+# Line breaks of any kind (str.splitlines() splits on all of them) or other
+# control characters would break a .env line.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f\x85  ]")
+
+
+def _write_onboarding_to_env(env_path):
+    """Write accumulated onboarding data to .env file atomically."""
+    env_map = {
+        "AI_BACKEND": _onboarding_data.get("ai_backend", "deepseek"),
+        "DEEPSEEK_API_KEY": _onboarding_data.get("deepseek_api_key", ""),
+        "DEEPSEEK_BASE_URL": _onboarding_data.get("deepseek_base_url", "https://api.deepseek.com"),
+        "DEEPSEEK_MODEL": _onboarding_data.get("deepseek_model", "deepseek-v4-flash"),
+        "OPENAI_API_KEY": _onboarding_data.get("openai_api_key", ""),
+        "OPENAI_BASE_URL": _onboarding_data.get("openai_base_url", ""),
+        "OPENAI_MODEL": _onboarding_data.get("openai_model", "gpt-5.6-terra"),
+        "ANTHROPIC_API_KEY": _onboarding_data.get("anthropic_api_key", ""),
+        "ANTHROPIC_BASE_URL": _onboarding_data.get("anthropic_base_url", "https://api.anthropic.com"),
+        "SUMMARIZE_MODEL": _onboarding_data.get("summarize_model", "claude-haiku-4-5-20251001"),
+        "WECHAT_BACKEND": _onboarding_data.get("wechat_backend", "wcdb"),
+        "WECHAT_GROUPS": _onboarding_data.get("wechat_groups", "*"),
+        "PRIVATE_CHAT_ENABLED": str(_onboarding_data.get("private_chat_enabled", False)).lower(),
+        "FUN_ENABLED": str(_onboarding_data.get("fun_enabled", True)).lower(),
+        "PRIVATE_CHATS": _onboarding_data.get("private_chats", "*"),
+        "BOT_DISPLAY_NAME": _onboarding_data.get("bot_display_name", "群聊小助手"),
+        "PROACTIVE_ENABLED": str(_onboarding_data.get("proactive_enabled", False)).lower(),
+        "STICKY_MENTION_ENABLED": str(_onboarding_data.get("sticky_mention_enabled", True)).lower(),
+        "FOLLOWUP_LISTEN_ENABLED": str(_onboarding_data.get("followup_listen_enabled", True)).lower(),
+        "FOLLOWUP_LISTEN_TTL_SEC": str(_onboarding_data.get("followup_listen_ttl_sec", 60)),
+        "FOLLOWUP_LISTEN_CONTEXT_COUNT": str(_onboarding_data.get("followup_listen_context_count", 6)),
+        "FOLLOWUP_LISTEN_MAX_MESSAGE_CHARS": str(_onboarding_data.get("followup_listen_max_message_chars", 30)),
+        "MESSAGE_BURST_ENABLED": str(_onboarding_data.get("message_burst_enabled", True)).lower(),
+        "MESSAGE_BURST_WINDOW_SEC": str(_onboarding_data.get("message_burst_window_sec", 2.2)),
+        "MESSAGE_BURST_MAX_MESSAGES": str(_onboarding_data.get("message_burst_max_messages", 5)),
+        "MESSAGE_BURST_MAX_CHARS": str(_onboarding_data.get("message_burst_max_chars", 200)),
+        "WEB_SEARCH_ENABLED": str(_onboarding_data.get("web_search_enabled", True)).lower(),
+        "WEB_SEARCH_MAX_RESULTS": str(_onboarding_data.get("web_search_max_results", 4)),
+        "WEB_SEARCH_TIMEOUT_SEC": str(_onboarding_data.get("web_search_timeout_sec", 8.0)),
+        "WEB_SEARCH_REGION": _onboarding_data.get("web_search_region", "cn-zh"),
+        "WEB_SEARCH_REPLY_MAX_CHARS": str(_onboarding_data.get("web_search_reply_max_chars", 120)),
+        "WCDB_KEY": _onboarding_data.get("key", ""),
+        "ONBOARDING_DONE": "true",
+    }
+    # Step 3 chose "everything on a local model": write the route and the
+    # local server; otherwise leave whatever MODEL_ROUTE / LOCAL_* say.
+    if _onboarding_data.get("model_route") == "local":
+        env_map.update({
+            "MODEL_ROUTE": "local",
+            "LOCAL_BASE_URL": _onboarding_data.get("local_base_url", "http://127.0.0.1:11434/v1"),
+            "LOCAL_MODEL": _onboarding_data.get("local_model", ""),
+            "LOCAL_API_KEY": _onboarding_data.get("local_api_key", ""),
+        })
+    machine_env_path = _find_or_create_machine_env()
+    try:
+        has_separate_machine_env = machine_env_path.resolve() != env_path.resolve()
+    except Exception:
+        has_separate_machine_env = str(machine_env_path).lower() != str(env_path).lower()
+    if has_separate_machine_env:
+        env_map["WCDB_KEY"] = None
+
+    # Preserve existing keys not managed by onboarding
+    if env_path.exists():
+        lines = []
+        seen = set()
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                key = stripped.split("=", 1)[0].strip()
+                if key in env_map and env_map[key] is not None:
+                    lines.append(f"{key}={env_map[key]}")
+                    seen.add(key)
+                    continue
+            lines.append(line)
+        for key, val in env_map.items():
+            if key not in seen and val is not None:
+                lines.append(f"{key}={val}")
+        content = "\n".join(lines) + "\n"
+    else:
+        content = "\n".join(f"{k}={v}" for k, v in env_map.items() if v is not None) + "\n"
+
+    tmp_path = env_path.with_suffix(".tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    os.replace(tmp_path, env_path)
+    logger.info("Onboarding complete — wrote .env")
+
+    if has_separate_machine_env:
+        wcdb_key = _onboarding_data.get("key", "")
+        if wcdb_key:
+            _set_env_key(machine_env_path, "WCDB_KEY", wcdb_key)
+        detected_data_dir = _detect_default_data_dir()
+        if detected_data_dir:
+            _set_env_key(machine_env_path, "WECHAT_DATA_DIR", detected_data_dir)
+        logger.info("Onboarding machine-local values written to %s", machine_env_path)
+
+
+def _run_step1_extraction():
+    """Background thread: wait for WeChat exit → restart → hook → capture.
+
+    Uses extract_wcdb_key's on_progress callback to push real-time phase
+    updates to the frontend so the user sees exactly what's happening.
+    """
+    # ── Ensure file logging is active during key extraction ──────────
+    # setup_logging() normally runs inside Bot.run(), but key extraction
+    # happens BEFORE the bot starts (during onboarding).  Without this,
+    # all log output from extract_key.py goes to stdout only, which is
+    # invisible in Windows GUI mode — making failures un-debuggable.
+    from src.utils.logging_config import setup_logging
+    from src.config import PROJECT_ROOT
+    setup_logging(level="INFO", log_file=str(PROJECT_ROOT / "data" / "bot.log"))
+
+    from src.wechat.extract_key import extract_wcdb_key
+
+    def _on_progress(phase, message):
+        """Push progress updates to the frontend via _step1_state."""
+        with _step1_lock:
+            _step1_state["phase"] = phase
+            _step1_state["message"] = message
+
+    try:
+        # extract_wcdb_key(require_restart=True) handles the full flow.
+        # on_progress pushes phase changes so the frontend can display
+        # real-time instructions (hooking → waiting_exit → waiting_login
+        # → hooking_restart).
+        key = extract_wcdb_key(require_restart=True,
+                               on_progress=_on_progress)
+
+        if key:
+            wxid, db_path = _detect_wxid_and_db_path()
+            with _onboarding_lock:
+                _onboarding_data["step1_done"] = True
+                _onboarding_data["key"] = key
+                _onboarding_data["wxid"] = wxid or ""
+                _onboarding_data["db_path"] = db_path or ""
+
+            # Persist the key to .env immediately so the bot can use it
+            # on restart without needing to complete the full onboarding flow.
+            machine_env_path = _find_or_create_machine_env()
+            _set_env_key(machine_env_path, "WCDB_KEY", key)
+            detected_data_dir = _detect_default_data_dir()
+            if detected_data_dir:
+                _set_env_key(machine_env_path, "WECHAT_DATA_DIR", detected_data_dir)
+            # Also set in the current process for load_dotenv in this session
+            import os as _os
+            _os.environ["WCDB_KEY"] = key
+            if detected_data_dir:
+                _os.environ["WECHAT_DATA_DIR"] = detected_data_dir
+            # Clear the KEY_MISSING error so it doesn't reappear on page refresh
+            update_status(error="")
+
+            with _step1_lock:
+                _step1_state["phase"] = "done"
+                _step1_state["message"] = "密钥获取成功"
+                _step1_state["result"] = {"key": key, "wxid": wxid or "", "db_path": db_path or ""}
+                _step1_state["running"] = False
+        else:
+            with _step1_lock:
+                _step1_state["phase"] = "timeout"
+                _step1_state["message"] = "密钥提取超时，请确保微信已登录并重试"
+                _step1_state["running"] = False
+
+    except Exception as e:
+        logger.exception("Step1 extraction failed")
+        with _step1_lock:
+            _step1_state["phase"] = "error"
+            _step1_state["message"] = str(e)
+            _step1_state["running"] = False
+
+
+def _list_dir_entries(target: Path) -> list[dict]:
+    """List directory entries for the filesystem browser API.
+
+    Returns only directories (the user is browsing for parent dir of wxid_*).
+    Sorted: directories first, then alphabetically.
+    """
+    entries = []
+    try:
+        for child in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+            if child.name.startswith(".") or child.name.startswith("$"):
+                continue  # skip hidden/system entries
+            entries.append({
+                "name": child.name,
+                "path": str(child),
+                "is_dir": child.is_dir(),
+            })
+    except PermissionError:
+        pass
+    return entries
+
+
+def _read_recent_logs():
+    """Read the last 500 lines from the bot log file. Returns JSON-serializable list.
+
+    Log format: ``YYYY-MM-DD HH:MM:SS [LEVEL] module: message``
+    (configured in src/utils/logging_config.py).
+    """
+    import re
+    # CWD is set to app home by desktop.py; relative path works for both
+    # frozen (EXE dir) and dev (project root) modes.
+    log_path = Path("data/bot.log")
+    if not log_path.exists():
+        return {"ok": True, "logs": [], "message": "日志文件尚未创建"}
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        # Return last 500 lines
+        recent = lines[-500:]
+        # Regex: timestamp [LEVEL] module: message
+        pattern = re.compile(
+            r'^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+'
+            r'\[(DEBUG|INFO|WARNING|ERROR)\]\s+'
+            r'([^:]+):\s+'
+            r'(.*)$'
+        )
+        entries = []
+        for line in recent:
+            entry = {"raw": line}
+            m = pattern.match(line.strip())
+            if m:
+                entry["ts"] = m.group(1)
+                entry["level"] = m.group(2)
+                entry["module"] = m.group(3)
+                entry["msg"] = m.group(4)
+            else:
+                # Fallback for lines that don't match (tracebacks, multi-line, etc.)
+                entry["ts"] = ""
+                entry["level"] = "INFO"
+                entry["module"] = ""
+                entry["msg"] = line
+            entries.append(entry)
+        return {"ok": True, "logs": entries}
+    except Exception as e:
+        return {"ok": False, "logs": [], "error": str(e)}
+
+
+def _can_import(module_name: str) -> bool:
+    try:
+        __import__(module_name)
+        return True
+    except ImportError:
+        return False
+
+
+def _platform_dependency_report(system_name=None, import_checker=None, command_checker=None):
+    """Return platform-aware dependency diagnostics for onboarding."""
+    import platform
+    import shutil
+
+    system = system_name or platform.system()
+    import_checker = import_checker or _can_import
+    command_checker = command_checker or shutil.which
+
+    req_mapping = {
+        "dotenv": "python-dotenv",
+        "anthropic": "anthropic",
+        "openai": "openai",
+        "pydantic": "pydantic",
+        "webview": "pywebview",
+        "PIL": "Pillow",
+        "psutil": "psutil",
+        "pyperclip": "pyperclip",
+    }
+    if system == "Windows":
+        req_mapping.update({
+            "uiautomation": "uiautomation",
+            "win32api": "pywin32",
+            "comtypes": "comtypes",
+        })
+
+    missing_reqs = []
+    for mod, pkg in req_mapping.items():
+        if not import_checker(mod):
+            missing_reqs.append(pkg)
+
+    if system == "Darwin":
+        # ddgs is a macOS-only dependency (DuckDuckGo integration)
+        ddgs_ok = import_checker("ddgs") or import_checker("duckduckgo_search")
+        if not ddgs_ok:
+            missing_reqs.append("ddgs")
+
+        for command in ("osascript", "pbcopy"):
+            if not command_checker(command):
+                missing_reqs.append(command)
+
+    ok = len(missing_reqs) == 0
+    value = "所有依赖已安装" if ok else f"缺少依赖: {', '.join(missing_reqs)}"
+    return {"ok": ok, "value": value, "missing": missing_reqs}
+
+
+def _platform_wechat_report(system_name=None):
+    """Return a platform-aware WeChat process status."""
+    import os as _os
+    import platform
+    import subprocess
+
+    system = system_name or platform.system()
+    if system == "Darwin":
+        app_name = _os.getenv("MAC_WECHAT_APP_NAME", "WeChat")
+        try:
+            result = subprocess.run(
+                ["pgrep", "-x", app_name],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                pid = result.stdout.strip().splitlines()[0]
+                return {"ok": True, "value": f"微信运行中 (PID {pid})", "error": None}
+            return {"ok": False, "value": "微信未运行", "error": "请启动 macOS 微信并授权辅助功能权限"}
+        except Exception as e:
+            return {"ok": False, "value": f"微信检测出错: {e}", "error": str(e)}
+
+    try:
+        from src.wechat.native.injector import _find_wechat_pid
+        wx_pid, wx_name = _find_wechat_pid()
+        wx_ok = wx_pid is not None
+        wx_val = f"微信运行中 (PID {wx_pid})" if wx_ok else "微信未运行"
+        return {"ok": wx_ok, "value": wx_val, "error": None if wx_ok else "请登录微信电脑端"}
+    except Exception as e:
+        return {"ok": False, "value": f"微信检测出错: {e}", "error": str(e)}
+
+
+def _macos_wechat_diagnostics(system_name=None, automation=None):
+    """Run macOS WeChat permission diagnostics from this process identity."""
+    import platform
+
+    system = system_name or platform.system()
+    if system != "Darwin":
+        return {
+            "ok": False,
+            "skipped": True,
+            "error": "macOS diagnostics are only available on Darwin",
+        }
+
+    try:
+        if automation is None:
+            from src.wechat.mac_ui_backend import MacUIAutomation
+
+            automation = MacUIAutomation()
+        return automation.diagnose_access()
+    except Exception as exc:
+        logger.exception("macOS WeChat diagnostics failed")
+        return {
+            "ok": False,
+            "skipped": False,
+            "error": str(exc),
+        }
+
+
+# ── Thread-safe server state classes ────────────────────────────────────
+
+
+class _ServerStatus:
+    """Thread-safe bot status snapshot served by ``/api/status``.
+
+    All writes are serialized through an internal lock so concurrent
+    update_status() calls from different threads never produce inconsistent
+    status snapshots.
+    """
+
+    _FIELDS = (
+        "running", "uptime_sec", "messages_processed",
+        "wechat_backend", "ai_backend", "db_ok",
+        "last_api_call_sec_ago", "last_api_call_time",
+        "timestamp", "error",
+    )
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.running = False
+        self.uptime_sec = 0
+        self.messages_processed = 0
+        self.wechat_backend = ""
+        self.ai_backend = ""
+        self.db_ok = False
+        self.last_api_call_sec_ago = -1
+        self.last_api_call_time = 0.0
+        self.timestamp = ""
+        self.error = ""
+    def update(self, **kwargs):
+        """Update status fields atomically."""
+        with self._lock:
+            for k, v in kwargs.items():
+                if hasattr(self, k):
+                    setattr(self, k, v)
+            self.timestamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+
+    def snapshot(self):
+        """Return a consistent dict snapshot (thread-safe)."""
+        with self._lock:
+            return self._snapshot_locked()
+
+    def _snapshot_locked(self):
+        """Build a dict from fields (caller must hold _lock)."""
+        return {k: getattr(self, k) for k in self._FIELDS}
+
+class _BotControl:
+    """Thread-safe bot lifecycle control.
+
+    Serializes start/stop transitions so concurrent API requests cannot
+    create duplicate bot instances or leave the state inconsistent.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.thread = None
+        self.backend = None
+        self.running = False
+
+    def register(self, thread=None, backend=None):
+        with self._lock:
+            if thread is not None:
+                self.thread = thread
+            if backend is not None:
+                self.backend = backend
+            self.running = True
+
+    def register_backend(self, backend):
+        """Called by Bot.run() during initialization."""
+        with self._lock:
+            self.backend = backend
+
+    def stop(self):
+        """Stop the bot backend and wait for the thread to exit."""
+        # Read refs under lock, then call stop + join outside the lock
+        # to avoid deadlock if stop() needs the lock.
+        with self._lock:
+            backend = self.backend
+            thread = self.thread
+
+        if backend is not None and hasattr(backend, "stop"):
+            backend.stop()
+
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=30)
+
+        with self._lock:
+            self.running = False
+            self.backend = None
+            self.thread = None
+        return backend is not None
+
+    def is_running(self):
+        with self._lock:
+            return self.running
+
+    def set_running(self):
+        with self._lock:
+            self.running = True
+
+    def mark_stopped(self):
+        """Reset running state when the bot thread exits on its own.
+
+        Does NOT stop the backend or join the thread — use stop() for
+        external shutdown requests.  This is called from within the bot
+        thread's ``finally`` block so the next /api/start can proceed.
+        """
+        with self._lock:
+            self.running = False
+            self.backend = None
+            self.thread = None
+
+    def set_thread(self, thread):
+        with self._lock:
+            self.thread = thread
+
+
+class _ServerStartGuard:
+    """Thread-safe idempotent server start guard."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._started = False
+
+    def try_start(self):
+        """Return True if server should start, False if already started."""
+        with self._lock:
+            if self._started:
+                return False
+            self._started = True
+            return True
+
+
+# ── Module-level instances ────────────────────────────────────────────
+
+_status = _ServerStatus()
+_bot_control = _BotControl()
+_server_guard = _ServerStartGuard()
+_shutdown_event = threading.Event()
+_voice_downloads: dict[str, dict] = {}  # model → {active, msg}
+
+
+def signal_shutdown():
+    """Signal all components to stop (called on app exit)."""
+    _shutdown_event.set()
+
+
+def is_shutting_down():
+    """Check if shutdown has been signaled."""
+    return _shutdown_event.is_set()
+
+# ── Onboarding state ──────────────────────────────────────────────────
+
+_onboarding_data = {
+    "step1_done": False, "step2_done": False, "step3_done": False, "step4_done": False,
+    "key": "", "wxid": "", "db_path": "",
+    "bot_display_name": "", "wechat_groups": "*", "wechat_backend": "wcdb",
+    "private_chat_enabled": False, "private_chats": "*",
+    "ai_backend": "deepseek", "deepseek_api_key": "", "deepseek_model": "deepseek-v4-flash",
+    "openai_api_key": "", "openai_model": "gpt-5.6-terra", "openai_base_url": "",
+    "anthropic_api_key": "", "summarize_model": "claude-haiku-4-5-20251001",
+    "proactive_enabled": False,
+    "sticky_mention_enabled": True,
+    "followup_listen_enabled": True,
+    "followup_listen_ttl_sec": 60,
+    "followup_listen_context_count": 6,
+    "followup_listen_max_message_chars": 30,
+    "message_burst_enabled": True,
+    "message_burst_window_sec": 2.2,
+    "message_burst_max_messages": 5,
+    "message_burst_max_chars": 200,
+    "web_search_enabled": True,
+    "web_search_max_results": 4,
+    "web_search_timeout_sec": 8.0,
+    "web_search_region": "cn-zh",
+    "web_search_reply_max_chars": 120,
+}
+_onboarding_lock = threading.Lock()
+
+# Async step1 state
+_step1_state = {
+    "running": False,
+    "phase": "idle",   # idle | waiting_exit | waiting_login | hooking | done | error
+    "message": "",
+    "result": None,    # {"key": ..., "wxid": ..., "db_path": ...}
+}
+_step1_thread = None
+_step1_lock = threading.Lock()
+
+
+# ── Public API wrappers (delegate to thread-safe classes) ─────────────
+
+
+def update_status(**kwargs):
+    """Update the status snapshot read by the HTTP status endpoint."""
+    _status.update(**kwargs)
+
+
+def register_bot(thread=None, backend=None):
+    """Register bot thread/backend so the web API can control it."""
+    _bot_control.register(thread=thread, backend=backend)
+    update_status(running=True)
+
+
+def _bot_exited():
+    """Notify that the bot thread has exited (any path — normal/error).
+
+    Resets the control lock so the next /api/start can proceed.
+    Called from desktop.py's start_bot() and _start_bot_in_thread().
+    """
+    _bot_control.mark_stopped()
+
+
+def _register_backend(backend):
+    """Register backend from Bot.run() — explicit API, no monkey-patching."""
+    _bot_control.register_backend(backend)
+
+
+def _stop_bot():
+    """Stop the running bot backend. Returns True if anything was stopped."""
+    stopped = _bot_control.stop()
+    update_status(running=False)
+    if stopped:
+        logger.info("Bot stopped via web API")
+    return stopped
+
+
+def _start_bot_in_thread():
+    """Start the bot in a new daemon thread. Call from API handler."""
+    if _bot_control.is_running():
+        return {"ok": False, "error": "Bot is already running"}
+
+    import sys
+    from src.config import PROJECT_ROOT
+
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+
+    def _run():
+        try:
+            import os as _os
+            _os.environ.setdefault("WECHAT_DATA_DIR", "E:\\xwechat_files")
+            from src.config import load_config
+            config = load_config()
+            update_status(
+                wechat_backend=config.wechat_backend,
+                ai_backend=config.ai_backend,
+                error="",
+            )
+            from src.bot import Bot
+            bot = Bot(config)
+            # Bot.run() calls _register_backend() during init — no patch needed
+            bot.run()
+        except SystemExit:
+            update_status(running=False)
+        except Exception as e:
+            update_status(running=False, error=str(e))
+            logger.exception("Bot crashed during startup")
+        finally:
+            # Always clear the running flag so the user can restart
+            # (bot.run() exits gracefully on errors like KEY_MISSING)
+            _bot_control.mark_stopped()
+            update_status(running=False)
+
+    thread = threading.Thread(target=_run, daemon=True, name="bot-main")
+    _bot_control.set_thread(thread)
+    _bot_control.set_running()
+    update_status(running=True)
+    thread.start()
+    return {"ok": True}
+
+
+# Hostnames that mean "this machine".  The console has no login, so when it
+# listens on loopback only requests that visibly come from this machine's own
+# pages may use it: a Host that is not loopback is a DNS-rebinding attempt and
+# an Origin that is not loopback is another website talking to the API.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+# Endpoints that change state (save the config, start/stop the bot, spend API
+# credit, ...).  The handler below mostly ignores the HTTP method, so without
+# this list a plain GET would run them -- and any web page can fire a GET at
+# 127.0.0.1 with an <img> tag, without an Origin header the check above could
+# look at.  The console itself only ever POSTs to these.
+_POST_ONLY_PATHS = frozenset({
+    "/api/config", "/api/config/import", "/api/start", "/api/stop",
+    "/api/onboarding/reset", "/api/onboarding/step1", "/api/onboarding/step2",
+    "/api/onboarding/step3", "/api/onboarding/step4",
+    "/api/sandbox/test", "/api/todos/action",
+    "/api/voice/download-model", "/api/wechat-data-dir/detect",
+})
+
+
+def _header_hostname(value: str) -> str | None:
+    """Hostname of a ``Host`` header value ("127.0.0.1:7327", "[::1]:7327")."""
+    try:
+        return urlsplit("//" + value.strip()).hostname
+    except ValueError:
+        return None
+
+
+def _origin_hostname(value: str) -> str | None:
+    """Hostname of an ``Origin`` header value (None for "null" or garbage)."""
+    try:
+        return urlsplit(value.strip()).hostname
+    except ValueError:
+        return None
+
+
+class _UIHandler(SimpleHTTPRequestHandler):
+    """HTTP handler for static files and the JSON API."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=str(UI_DIR), **kwargs)
+
+    # ── cross-origin protection ──────────────────────────────────────
+
+    def _bound_to_loopback(self) -> bool:
+        address = getattr(getattr(self, "server", None), "server_address", None)
+        host = address[0] if isinstance(address, tuple) and address else None
+        return not isinstance(host, str) or host in _LOOPBACK_HOSTS
+
+    def _request_origin_ok(self) -> bool:
+        """Reject DNS-rebinding and cross-site requests to a loopback console.
+
+        Requests without an Origin header (the page's own navigation, curl)
+        are fine; browsers always attach Origin to cross-site fetches/forms.
+        """
+        if not self._bound_to_loopback():
+            return True          # the user deliberately exposed the console
+        host = self.headers.get("Host")
+        if host and _header_hostname(host) not in _LOOPBACK_HOSTS:
+            return False
+        origin = self.headers.get("Origin")
+        if origin is not None and _origin_hostname(origin) not in _LOOPBACK_HOSTS:
+            return False
+        return True
+
+    def _forbid_cross_origin(self) -> None:
+        body = json.dumps(
+            {"ok": False, "error": "Forbidden: cross-origin request rejected"},
+        ).encode()
+        self.send_response(403)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _method_not_allowed(self) -> None:
+        self.send_response(405)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"ok": False, "error": "Method not allowed"}).encode())
+
+    def _send_cors_headers(self, preflight: bool = False) -> None:
+        """Echo an already-validated Origin; never answer with ``*``."""
+        origin = self.headers.get("Origin")
+        if not origin:
+            return
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Vary", "Origin")
+        if preflight:
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Max-Age", "86400")
+
+    def do_OPTIONS(self):
+        if not self._request_origin_ok():
+            self._forbid_cross_origin()
+            return
+        self.send_response(204)
+        self._send_cors_headers(preflight=True)
+        self.end_headers()
+
+    def do_POST(self):
+        if not self._request_origin_ok():
+            self._forbid_cross_origin()
+            return
+        # Only delegate specific API paths; return 405 for unknown POST paths
+        if self.path in ("/api/config", "/api/config/import", "/api/start", "/api/stop",
+                         "/api/nicknames",
+                         "/api/welcome/templates",
+                         "/api/onboarding/reset",
+                         "/api/onboarding/step1", "/api/onboarding/step2",
+                         "/api/onboarding/step3", "/api/onboarding/step4",
+                         "/api/sandbox/test",
+                         "/api/lots",
+                         "/api/advanced",
+                         "/api/todos/action",
+                         "/api/voice/download-model",
+                         "/api/wechat-data-dir/detect"):
+            self.do_GET()
+        else:
+            self._method_not_allowed()
+
+    def do_GET(self):
+        if not self._request_origin_ok():
+            self._forbid_cross_origin()
+            return
+        # do_POST delegates here, so ``command`` tells a real GET from a POST.
+        if self.command != "POST" and self.path.split("?", 1)[0] in _POST_ONLY_PATHS:
+            self._method_not_allowed()
+            return
+        self._handle_request()
+
+    def _handle_advanced(self):
+        """GET/POST /api/advanced: the allow-listed advanced switches.
+
+        GET returns every group of ``advanced_config.GROUPS`` with its current
+        value (secrets masked) and the keys a machine-local .env.local
+        overrides. POST takes ``{"values": {KEY: value}}``, checks each value
+        and then the merged result with _validate_config, and writes only the
+        posted keys to the shared .env and os.environ (like /api/config, so a
+        stop/start from the console picks them up). A masked secret keeps the
+        stored one. Unknown keys and invalid values are refused, nothing is
+        written then.
+        """
+        from src.config import find_local_env_file
+        from src.web import advanced_config as adv
+
+        if self.command != "POST":
+            local = _read_env_values(find_local_env_file())
+            self.send_json({
+                "ok": True,
+                "groups": adv.describe(_read_effective_env_values(), _mask_key),
+                "local_overrides": sorted(k for k in adv.FIELDS if str(local.get(k, "")).strip()),
+            })
+            return
+
+        content_len = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_len) if content_len else b"{}"
+        try:
+            data = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self.send_json({"ok": False, "error": "请求不是有效的 JSON"})
+            return
+        values = data.get("values") if isinstance(data, dict) else None
+        if not isinstance(values, dict) or not values:
+            self.send_json({"ok": False, "error": "没有要保存的设置"})
+            return
+        updates = {
+            k: v for k, v in values.items()
+            if not (k in adv.SECRET_KEYS and _is_masked_secret(v))
+        }
+        errors = adv.validate_updates(updates, _read_effective_env_values())
+        if errors:
+            self.send_json({"ok": False, "error": "有设置不合法，没有保存", "errors": errors})
+            return
+        written = {
+            k: str(v).strip() if k in adv.SECRET_KEYS else adv.normalize(k, v)
+            for k, v in updates.items()
+        }
+        try:
+            if written:
+                _write_env_updates(_find_or_create_env(), written)
+                for k, v in written.items():
+                    os.environ[k] = v
+        except Exception as e:
+            logger.exception("Failed to save advanced settings")
+            self.send_json({"ok": False, "error": str(e)})
+            return
+        self.send_json({"ok": True, "saved": sorted(written), "requires_restart": True})
+
+    def _send_decisions(self):
+        """GET /api/decisions?limit=50&outcome=silent&chat_id=...&message_id=...
+
+        The newest decisions of the decision trace, each translated into
+        plain words (src/decision_explain.py).  Read-only; a missing trace
+        file is an empty list.
+        """
+        from urllib.parse import parse_qs
+        from src import decision_explain
+
+        query = parse_qs(urlsplit(self.path).query)
+
+        def one(name: str, default: str = "") -> str:
+            return (query.get(name) or [default])[0]
+
+        try:
+            limit = int(one("limit", "50"))
+        except ValueError:
+            limit = 50
+        raw = _read_effective_env_values()
+        path = Path(raw.get("DECISION_TRACE_PATH") or "data/decision_trace.jsonl")
+        try:
+            items = decision_explain.recent(
+                path, limit=limit, outcome=one("outcome"), chat_id=one("chat_id"),
+                message_id=one("message_id"),
+            )
+        except Exception as exc:                      # a damaged trace must not drop the connection
+            logger.exception("Reading the decision trace failed")
+            self.send_json({"ok": False, "error": f"cannot read the decision trace: {type(exc).__name__}"})
+            return
+        self.send_json({"ok": True, "decisions": items})
+
+    def _handle_request(self):
+        # WebSocket support is intentionally disabled. Status is available
+        # through GET /api/status, which keeps the local server HTTP-only.
+        if self.path == "/ws":
+            self.send_response(404)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self._send_cors_headers()
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "ok": False,
+                "error": "WebSocket support is disabled; use /api/status",
+            }).encode())
+            return
+
+        # ── API: why did the bot (not) answer? (read-only) ─────────────
+        if self.path.split("?", 1)[0] == "/api/decisions":
+            self._send_decisions()
+            return
+
+        # ── API: Start bot ────────────────────────────────────────────
+        if self.path == "/api/start":
+            if _bot_control.is_running():
+                self.send_json({"ok": True, "already_running": True})
+            else:
+                result = _start_bot_in_thread()
+                self.send_json(result)
+            return
+
+        # ── API: Stop bot ─────────────────────────────────────────────
+        if self.path == "/api/stop":
+            _stop_bot()
+            self.send_json({"ok": True})
+            return
+
+        # ── API: Load config ───────────────────────────────────────────
+        if self.path == "/api/load-config":
+            from src.config import _decode_wechat_groups  # noqa: F811 - needed before use (scoping)
+            raw = _read_effective_env_values()
+            config_data = {
+                "ai_backend": raw.get("AI_BACKEND", "deepseek"),
+                "deepseek_api_key": _mask_key(raw.get("DEEPSEEK_API_KEY", "")),
+                "deepseek_base_url": raw.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+                "deepseek_model": raw.get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+                "openai_api_key": _mask_key(raw.get("OPENAI_API_KEY", "")),
+                "openai_base_url": raw.get("OPENAI_BASE_URL", ""),
+                "openai_model": raw.get("OPENAI_MODEL", "gpt-5.6-terra"),
+                "anthropic_api_key": _mask_key(raw.get("ANTHROPIC_API_KEY", "")),
+                "anthropic_base_url": raw.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+                "summarize_model": raw.get("SUMMARIZE_MODEL", "claude-haiku-4-5-20251001"),
+                "bot_display_name": raw.get("BOT_DISPLAY_NAME", ""),
+                "wechat_backend": raw.get("WECHAT_BACKEND", "wcdb"),
+                "wechat_groups": _decode_wechat_groups(raw.get("WECHAT_GROUPS", "*")),
+                # The same names as a list ([] = all); a name may contain a comma.
+                "wechat_groups_list": _decode_name_list(raw.get("WECHAT_GROUPS", "*")),
+                "private_chat_enabled": raw.get("PRIVATE_CHAT_ENABLED", "false").lower() == "true",
+                "private_chats": _decode_wechat_groups(raw.get("PRIVATE_CHATS", "*")),
+                "private_chats_list": _decode_name_list(raw.get("PRIVATE_CHATS", "*")),
+                "fun_enabled": raw.get("FUN_ENABLED", "true").lower() == "true",
+                "proactive_enabled": raw.get("PROACTIVE_ENABLED", "false").lower() == "true",
+                "proactive_rate_window_sec": int(raw.get("PROACTIVE_RATE_WINDOW_SEC", "120")),
+                "proactive_rate_quiet": float(raw.get("PROACTIVE_RATE_QUIET", "1.5")),
+                "proactive_rate_casual": float(raw.get("PROACTIVE_RATE_CASUAL", "4.0")),
+                "proactive_rate_lively": float(raw.get("PROACTIVE_RATE_LIVELY", "6.5")),
+                "proactive_rate_burst": float(raw.get("PROACTIVE_RATE_BURST", "8.5")),
+                "welcome_enabled": raw.get("WELCOME_ENABLED", "false").lower() == "true",
+                "sticky_mention_enabled": raw.get("STICKY_MENTION_ENABLED", "true").lower() == "true",
+                "sticky_mention_ttl_sec": int(raw.get("STICKY_MENTION_TTL_SEC", "60")),
+                "followup_listen_enabled": raw.get("FOLLOWUP_LISTEN_ENABLED", "true").lower() == "true",
+                "followup_listen_ttl_sec": int(raw.get("FOLLOWUP_LISTEN_TTL_SEC", "60")),
+                "followup_listen_context_count": int(raw.get("FOLLOWUP_LISTEN_CONTEXT_COUNT", "6")),
+                "followup_listen_max_message_chars": int(raw.get("FOLLOWUP_LISTEN_MAX_MESSAGE_CHARS", "30")),
+                "message_burst_enabled": raw.get("MESSAGE_BURST_ENABLED", "true").lower() == "true",
+                "message_burst_window_sec": float(raw.get("MESSAGE_BURST_WINDOW_SEC", "2.2")),
+                "message_burst_max_messages": int(raw.get("MESSAGE_BURST_MAX_MESSAGES", "5")),
+                "message_burst_max_chars": int(raw.get("MESSAGE_BURST_MAX_CHARS", "200")),
+                "web_search_enabled": raw.get("WEB_SEARCH_ENABLED", "true").lower() == "true",
+                "web_search_max_results": int(raw.get("WEB_SEARCH_MAX_RESULTS", "4")),
+                "web_search_timeout_sec": float(raw.get("WEB_SEARCH_TIMEOUT_SEC", "8.0")),
+                "web_search_region": raw.get("WEB_SEARCH_REGION", "cn-zh"),
+                "web_search_reply_max_chars": int(raw.get("WEB_SEARCH_REPLY_MAX_CHARS", "120")),
+                "summarize_enabled": raw.get("SUMMARIZE_ENABLED", "true").lower() == "true",
+                "fallback_window_hours": int(raw.get("FALLBACK_WINDOW_HOURS", "8")),
+                "trigger_keywords": [
+                    kw.strip() for kw in raw.get("TRIGGER_KEYWORDS", "").split(",")
+                    if kw.strip()
+                ],
+                "log_level": raw.get("LOG_LEVEL", "INFO"),
+                "wechat_data_dir": raw.get("WECHAT_DATA_DIR", ""),
+                "voice_asr_enabled": raw.get("VOICE_ASR_ENABLED", "false").lower() == "true",
+                "voice_asr_backend": raw.get("VOICE_ASR_BACKEND", "local_whisper"),
+                "voice_asr_language": raw.get("VOICE_ASR_LANGUAGE", "zh"),
+                "voice_openai_api_key": _mask_key(raw.get("VOICE_OPENAI_API_KEY", "")),
+                "voice_openai_base_url": raw.get("VOICE_OPENAI_BASE_URL", ""),
+                "voice_local_model": raw.get("VOICE_LOCAL_MODEL", "small"),
+            }
+            config_data.update(_persona_config_from_raw(raw, include_preset=True))
+            config_data.update(_feishu_config_from_raw(raw))
+            config_data.update(_todo_config_from_raw(raw))
+            self.send_json({
+                "ok": True,
+                "config": config_data,
+                "detected_data_dir": _detect_default_data_dir(),
+            })
+            return
+
+        # ── API: Export config ───────────────────────────────────────
+        if self.path == "/api/config/export":
+            from datetime import date as _dt_date
+            try:
+                env_path = _find_or_create_env()
+                raw = {}
+                if env_path.exists():
+                    for line in env_path.read_text(encoding="utf-8").splitlines():
+                        line = line.strip()
+                        if line and not line.startswith("#") and "=" in line:
+                            k, v = line.split("=", 1)
+                            raw[k.strip()] = v.strip()
+                export_data = {
+                    "ai_backend": raw.get("AI_BACKEND", "deepseek"),
+                    "deepseek_api_key": _mask_key(raw.get("DEEPSEEK_API_KEY", "")),
+                    "deepseek_base_url": raw.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+                    "deepseek_model": raw.get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+                    "openai_api_key": _mask_key(raw.get("OPENAI_API_KEY", "")),
+                    "openai_base_url": raw.get("OPENAI_BASE_URL", ""),
+                    "openai_model": raw.get("OPENAI_MODEL", "gpt-5.6-terra"),
+                    "anthropic_api_key": _mask_key(raw.get("ANTHROPIC_API_KEY", "")),
+                    "anthropic_base_url": raw.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+                    "summarize_model": raw.get("SUMMARIZE_MODEL", "claude-haiku-4-5-20251001"),
+                    "bot_display_name": raw.get("BOT_DISPLAY_NAME", ""),
+                    "wechat_backend": raw.get("WECHAT_BACKEND", "wcdb"),
+                    "wechat_groups": raw.get("WECHAT_GROUPS", "*"),
+                    "private_chat_enabled": raw.get("PRIVATE_CHAT_ENABLED", "false").lower() == "true",
+                    "private_chats": raw.get("PRIVATE_CHATS", "*"),
+                    "fun_enabled": raw.get("FUN_ENABLED", "true").lower() == "true",
+                    "proactive_enabled": raw.get("PROACTIVE_ENABLED", "false").lower() == "true",
+                    "proactive_rate_window_sec": int(raw.get("PROACTIVE_RATE_WINDOW_SEC", "120")),
+                    "proactive_rate_quiet": float(raw.get("PROACTIVE_RATE_QUIET", "1.5")),
+                    "proactive_rate_casual": float(raw.get("PROACTIVE_RATE_CASUAL", "4.0")),
+                    "proactive_rate_lively": float(raw.get("PROACTIVE_RATE_LIVELY", "6.5")),
+                    "proactive_rate_burst": float(raw.get("PROACTIVE_RATE_BURST", "8.5")),
+                    "welcome_enabled": raw.get("WELCOME_ENABLED", "false").lower() == "true",
+                    "sticky_mention_enabled": raw.get("STICKY_MENTION_ENABLED", "true").lower() == "true",
+                    "sticky_mention_ttl_sec": int(raw.get("STICKY_MENTION_TTL_SEC", "60")),
+                    "followup_listen_enabled": raw.get("FOLLOWUP_LISTEN_ENABLED", "true").lower() == "true",
+                    "followup_listen_ttl_sec": int(raw.get("FOLLOWUP_LISTEN_TTL_SEC", "60")),
+                    "followup_listen_context_count": int(raw.get("FOLLOWUP_LISTEN_CONTEXT_COUNT", "6")),
+                    "followup_listen_max_message_chars": int(raw.get("FOLLOWUP_LISTEN_MAX_MESSAGE_CHARS", "30")),
+                    "message_burst_enabled": raw.get("MESSAGE_BURST_ENABLED", "true").lower() == "true",
+                    "message_burst_window_sec": float(raw.get("MESSAGE_BURST_WINDOW_SEC", "2.2")),
+                    "message_burst_max_messages": int(raw.get("MESSAGE_BURST_MAX_MESSAGES", "5")),
+                    "message_burst_max_chars": int(raw.get("MESSAGE_BURST_MAX_CHARS", "200")),
+                    "web_search_enabled": raw.get("WEB_SEARCH_ENABLED", "true").lower() == "true",
+                    "web_search_max_results": int(raw.get("WEB_SEARCH_MAX_RESULTS", "4")),
+                    "web_search_timeout_sec": float(raw.get("WEB_SEARCH_TIMEOUT_SEC", "8.0")),
+                    "web_search_region": raw.get("WEB_SEARCH_REGION", "cn-zh"),
+                    "web_search_reply_max_chars": int(raw.get("WEB_SEARCH_REPLY_MAX_CHARS", "120")),
+                    "summarize_enabled": raw.get("SUMMARIZE_ENABLED", "true").lower() == "true",
+                    "fallback_window_hours": int(raw.get("FALLBACK_WINDOW_HOURS", "8")),
+                    "trigger_keywords": [
+                        kw.strip() for kw in raw.get("TRIGGER_KEYWORDS", "").split(",")
+                        if kw.strip()
+                    ],
+                    "log_level": raw.get("LOG_LEVEL", "INFO"),
+                    "wechat_data_dir": raw.get("WECHAT_DATA_DIR", ""),
+                }
+                export_data.update(_persona_config_from_raw(raw))
+                export_data.update(_feishu_config_from_raw(raw))
+                filename = f"webot-config-{_dt_date.today().isoformat()}.json"
+                body = json.dumps(export_data, ensure_ascii=False, indent=2).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                self.send_header("Content-Length", str(len(body)))
+                self._send_cors_headers()
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                logger.exception("Failed to export config")
+                self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # ── API: Save config ──────────────────────────────────────────
+        if self.path == "/api/config":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len else b"{}"
+            try:
+                config = json.loads(body)
+                env_path = _find_or_create_env()
+                if env_path.exists():
+                    lines = env_path.read_text(encoding="utf-8").splitlines()
+                else:
+                    lines = []
+                existing_values = _env_values_from_lines(lines)
+                new_lines = []
+                updates = {
+                    "DEEPSEEK_API_KEY": config.get("deepseek_api_key"),
+                    "DEEPSEEK_BASE_URL": config.get("deepseek_base_url"),
+                    "DEEPSEEK_MODEL": config.get("deepseek_model"),
+                    "OPENAI_API_KEY": config.get("openai_api_key"),
+                    "OPENAI_BASE_URL": config.get("openai_base_url", ""),
+                    "OPENAI_MODEL": config.get("openai_model", "gpt-5.6-terra"),
+                    "ANTHROPIC_API_KEY": config.get("anthropic_api_key"),
+                    "ANTHROPIC_BASE_URL": config.get("anthropic_base_url"),
+                    "SUMMARIZE_MODEL": config.get("summarize_model"),
+                    "AI_BACKEND": config.get("ai_backend"),
+                    "BOT_DISPLAY_NAME": config.get("bot_display_name"),
+                    "WECHAT_BACKEND": config.get("wechat_backend"),
+                    "WECHAT_GROUPS": config.get("wechat_groups") or "*",
+                    "PRIVATE_CHAT_ENABLED": str(config.get("private_chat_enabled", False)).lower(),
+                    "PRIVATE_CHATS": config.get("private_chats") or "*",
+                    "FUN_ENABLED": str(config.get("fun_enabled", True)).lower(),
+                    "PROACTIVE_ENABLED": str(config.get("proactive_enabled", False)).lower(),
+                    "PROACTIVE_RATE_WINDOW_SEC": str(config.get("proactive_rate_window_sec", 120)),
+                    "PROACTIVE_RATE_QUIET": str(config.get("proactive_rate_quiet", 1.5)),
+                    "PROACTIVE_RATE_CASUAL": str(config.get("proactive_rate_casual", 4.0)),
+                    "PROACTIVE_RATE_LIVELY": str(config.get("proactive_rate_lively", 6.5)),
+                    "PROACTIVE_RATE_BURST": str(config.get("proactive_rate_burst", 8.5)),
+                    "WELCOME_ENABLED": str(config.get("welcome_enabled", False)).lower(),
+                    "STICKY_MENTION_ENABLED": str(config.get("sticky_mention_enabled", True)).lower(),
+                    "STICKY_MENTION_TTL_SEC": str(config.get("sticky_mention_ttl_sec", 60)),
+                    "FOLLOWUP_LISTEN_ENABLED": str(config.get("followup_listen_enabled", True)).lower(),
+                    "FOLLOWUP_LISTEN_TTL_SEC": str(config.get("followup_listen_ttl_sec", 60)),
+                    "FOLLOWUP_LISTEN_CONTEXT_COUNT": str(config.get("followup_listen_context_count", 6)),
+                    "FOLLOWUP_LISTEN_MAX_MESSAGE_CHARS": str(config.get("followup_listen_max_message_chars", 30)),
+                    "MESSAGE_BURST_ENABLED": str(config.get("message_burst_enabled", True)).lower(),
+                    "MESSAGE_BURST_WINDOW_SEC": str(config.get("message_burst_window_sec", 2.2)),
+                    "MESSAGE_BURST_MAX_MESSAGES": str(config.get("message_burst_max_messages", 5)),
+                    "MESSAGE_BURST_MAX_CHARS": str(config.get("message_burst_max_chars", 200)),
+                    "WEB_SEARCH_ENABLED": str(config.get("web_search_enabled", True)).lower(),
+                    "WEB_SEARCH_MAX_RESULTS": str(config.get("web_search_max_results", 4)),
+                    "WEB_SEARCH_TIMEOUT_SEC": str(config.get("web_search_timeout_sec", 8.0)),
+                    "WEB_SEARCH_REGION": config.get("web_search_region", "cn-zh"),
+                    "WEB_SEARCH_REPLY_MAX_CHARS": str(config.get("web_search_reply_max_chars", 120)),
+                    "SUMMARIZE_ENABLED": str(config.get("summarize_enabled", True)).lower(),
+                    "FALLBACK_WINDOW_HOURS": str(config.get("fallback_window_hours", 8)),
+                    "TRIGGER_KEYWORDS": ",".join(config.get("trigger_keywords", [])) if config.get("trigger_keywords") else None,
+                    "LOG_LEVEL": config.get("log_level"),
+                    "WECHAT_DATA_DIR": config.get("wechat_data_dir"),
+                    "VOICE_ASR_ENABLED": str(config.get("voice_asr_enabled", False)).lower(),
+                    "VOICE_ASR_BACKEND": config.get("voice_asr_backend", "local_whisper"),
+                    "VOICE_ASR_LANGUAGE": config.get("voice_asr_language", "zh"),
+                    "VOICE_OPENAI_API_KEY": config.get("voice_openai_api_key", ""),
+                    "VOICE_OPENAI_BASE_URL": config.get("voice_openai_base_url", ""),
+                    "VOICE_LOCAL_MODEL": config.get("voice_local_model", "small"),
+                }
+                updates.update(_persona_updates_from_config(config))
+                updates.update(_feishu_updates_from_config(config))
+                updates.update(_todo_updates_from_config(config))
+                _preserve_masked_secret_updates(updates, existing_values)
+                seen = set()
+                for line in lines:
+                    stripped = line.strip()
+                    if stripped and not stripped.startswith("#") and "=" in stripped:
+                        key = stripped.split("=", 1)[0].strip()
+                        if key in updates and updates[key] is not None:
+                            new_lines.append(f"{key}={updates[key]}")
+                            seen.add(key)
+                            continue
+                    new_lines.append(line)
+                for key, val in updates.items():
+                    if key not in seen and val is not None:
+                        new_lines.append(f"{key}={val}")
+                # Atomic write: temp file then os.replace
+                tmp_path = env_path.with_suffix(".tmp")
+                tmp_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+                os.replace(tmp_path, env_path)
+                for key, val in updates.items():
+                    if val is not None:
+                        os.environ[key] = str(val)
+                self.send_json({
+                    "ok": True,
+                    "saved": list(seen),
+                    "requires_restart": True,
+                })
+            except Exception as e:
+                logger.exception("Failed to save config")
+                self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # ── API: Import config ─────────────────────────────────────────
+        if self.path == "/api/config/import":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len else b"{}"
+            try:
+                config = json.loads(body)
+                # Basic validation: must look like a webot config export
+                expected_keys = ['ai_backend', 'deepseek_model', 'wechat_backend']
+                has_keys = any(k in config for k in expected_keys)
+                if not has_keys:
+                    raise ValueError("无效的配置文件格式：缺少必需字段")
+                env_path = _find_or_create_env()
+                if env_path.exists():
+                    lines = env_path.read_text(encoding="utf-8").splitlines()
+                else:
+                    lines = []
+                existing_values = _env_values_from_lines(lines)
+                updates = {
+                    "DEEPSEEK_API_KEY": config.get("deepseek_api_key"),
+                    "DEEPSEEK_BASE_URL": config.get("deepseek_base_url"),
+                    "DEEPSEEK_MODEL": config.get("deepseek_model"),
+                    "OPENAI_API_KEY": config.get("openai_api_key"),
+                    "OPENAI_BASE_URL": config.get("openai_base_url", ""),
+                    "OPENAI_MODEL": config.get("openai_model", "gpt-5.6-terra"),
+                    "ANTHROPIC_API_KEY": config.get("anthropic_api_key"),
+                    "ANTHROPIC_BASE_URL": config.get("anthropic_base_url"),
+                    "SUMMARIZE_MODEL": config.get("summarize_model"),
+                    "AI_BACKEND": config.get("ai_backend"),
+                    "BOT_DISPLAY_NAME": config.get("bot_display_name"),
+                    "WECHAT_BACKEND": config.get("wechat_backend"),
+                    "WECHAT_GROUPS": config.get("wechat_groups") or "*",
+                    "PRIVATE_CHAT_ENABLED": str(config.get("private_chat_enabled", False)).lower(),
+                    "PRIVATE_CHATS": config.get("private_chats") or "*",
+                    "FUN_ENABLED": str(config.get("fun_enabled", True)).lower(),
+                    "PROACTIVE_ENABLED": str(config.get("proactive_enabled", False)).lower(),
+                    "PROACTIVE_RATE_WINDOW_SEC": str(config.get("proactive_rate_window_sec", 120)),
+                    "PROACTIVE_RATE_QUIET": str(config.get("proactive_rate_quiet", 1.5)),
+                    "PROACTIVE_RATE_CASUAL": str(config.get("proactive_rate_casual", 4.0)),
+                    "PROACTIVE_RATE_LIVELY": str(config.get("proactive_rate_lively", 6.5)),
+                    "PROACTIVE_RATE_BURST": str(config.get("proactive_rate_burst", 8.5)),
+                    "WELCOME_ENABLED": str(config.get("welcome_enabled", False)).lower(),
+                    "STICKY_MENTION_ENABLED": str(config.get("sticky_mention_enabled", True)).lower(),
+                    "STICKY_MENTION_TTL_SEC": str(config.get("sticky_mention_ttl_sec", 60)),
+                    "FOLLOWUP_LISTEN_ENABLED": str(config.get("followup_listen_enabled", True)).lower(),
+                    "FOLLOWUP_LISTEN_TTL_SEC": str(config.get("followup_listen_ttl_sec", 60)),
+                    "FOLLOWUP_LISTEN_CONTEXT_COUNT": str(config.get("followup_listen_context_count", 6)),
+                    "FOLLOWUP_LISTEN_MAX_MESSAGE_CHARS": str(config.get("followup_listen_max_message_chars", 30)),
+                    "MESSAGE_BURST_ENABLED": str(config.get("message_burst_enabled", True)).lower(),
+                    "MESSAGE_BURST_WINDOW_SEC": str(config.get("message_burst_window_sec", 2.2)),
+                    "MESSAGE_BURST_MAX_MESSAGES": str(config.get("message_burst_max_messages", 5)),
+                    "MESSAGE_BURST_MAX_CHARS": str(config.get("message_burst_max_chars", 200)),
+                    "WEB_SEARCH_ENABLED": str(config.get("web_search_enabled", True)).lower(),
+                    "WEB_SEARCH_MAX_RESULTS": str(config.get("web_search_max_results", 4)),
+                    "WEB_SEARCH_TIMEOUT_SEC": str(config.get("web_search_timeout_sec", 8.0)),
+                    "WEB_SEARCH_REGION": config.get("web_search_region", "cn-zh"),
+                    "WEB_SEARCH_REPLY_MAX_CHARS": str(config.get("web_search_reply_max_chars", 120)),
+                    "SUMMARIZE_ENABLED": str(config.get("summarize_enabled", True)).lower(),
+                    "FALLBACK_WINDOW_HOURS": str(config.get("fallback_window_hours", 8)),
+                    "TRIGGER_KEYWORDS": ",".join(config.get("trigger_keywords", [])) if config.get("trigger_keywords") else None,
+                    "LOG_LEVEL": config.get("log_level"),
+                    "WECHAT_DATA_DIR": config.get("wechat_data_dir"),
+                    "VOICE_ASR_ENABLED": str(config.get("voice_asr_enabled", False)).lower(),
+                    "VOICE_ASR_BACKEND": config.get("voice_asr_backend", "local_whisper"),
+                    "VOICE_ASR_LANGUAGE": config.get("voice_asr_language", "zh"),
+                    "VOICE_OPENAI_API_KEY": config.get("voice_openai_api_key", ""),
+                    "VOICE_OPENAI_BASE_URL": config.get("voice_openai_base_url", ""),
+                    "VOICE_LOCAL_MODEL": config.get("voice_local_model", "small"),
+                }
+                updates.update(_persona_updates_from_config(config))
+                updates.update(_feishu_updates_from_config(config))
+                _preserve_masked_secret_updates(updates, existing_values)
+                new_lines = []
+                seen = set()
+                for line in lines:
+                    stripped = line.strip()
+                    if stripped and not stripped.startswith("#") and "=" in stripped:
+                        key = stripped.split("=", 1)[0].strip()
+                        if key in updates and updates[key] is not None:
+                            new_lines.append(f"{key}={updates[key]}")
+                            seen.add(key)
+                            continue
+                    new_lines.append(line)
+                for key, val in updates.items():
+                    if key not in seen and val is not None:
+                        new_lines.append(f"{key}={val}")
+                # Atomic write
+                tmp_path = env_path.with_suffix(".tmp")
+                tmp_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+                os.replace(tmp_path, env_path)
+                # Update in-process environment
+                for key, val in updates.items():
+                    if val is not None:
+                        os.environ[key] = str(val)
+                self.send_json({
+                    "ok": True,
+                    "imported": list(seen),
+                    "requires_restart": True,
+                })
+            except ValueError as e:
+                self.send_json({"ok": False, "error": str(e)})
+            except Exception as e:
+                logger.exception("Failed to import config")
+                self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # ── API: Get nickname groups ─────────────────────────────────────
+        if self.path == "/api/nicknames/groups":
+            try:
+                from src.config import find_env_file, _decode_wechat_groups
+                env_path = find_env_file()
+                import sqlite3
+
+                # Resolve group names same way as wcdb_backend: read env, match sessions
+                groups_raw = "*"
+                if env_path and env_path.exists():
+                    for line in env_path.read_text(encoding="utf-8").splitlines():
+                        if line.strip().startswith("WECHAT_GROUPS="):
+                            groups_raw = line.strip().split("=", 1)[1].strip().strip('"').strip("'")
+                            break
+                groups_raw = _decode_wechat_groups(groups_raw)
+
+                db_path = "data/messages.db"
+                if env_path and env_path.exists():
+                    for line in env_path.read_text(encoding="utf-8").splitlines():
+                        if line.strip().startswith("DB_PATH="):
+                            db_path = line.strip().split("=", 1)[1].strip().strip('"').strip("'")
+                            break
+
+                conn = sqlite3.connect(db_path)
+                conn.row_factory = sqlite3.Row
+
+                # ── Load persisted chat_id -> group info ─────────────────
+                # Written by WcdbBackend._save_group_names() when the bot
+                # resolves group names from WeChat's session DB via WCDB DLL.
+                # New format: {chat_id: {name, member_count}}
+                # Old format: {chat_id: "name"} (backward compatible)
+                group_names_path = Path("data/group_names.json")
+                group_info: dict[str, dict] = {}
+                if group_names_path.exists():
+                    try:
+                        raw = json.loads(group_names_path.read_text(encoding="utf-8"))
+                        for chat_id, val in raw.items():
+                            if isinstance(val, dict):
+                                group_info[chat_id] = {
+                                    "name": val.get("name", chat_id),
+                                    "member_count": int(val.get("member_count", 0)),
+                                }
+                            else:
+                                # Old format: plain string → name only, no member count
+                                group_info[chat_id] = {
+                                    "name": str(val),
+                                    "member_count": 0,
+                                }
+                    except (json.JSONDecodeError, OSError):
+                        pass
+                # ──────────────────────────────────────────────────────────
+
+                groups = []
+
+                # Primary source: group_names.json (from WCDB session scan)
+                if group_info:
+                    for chat_id, info in group_info.items():
+                        mc = info["member_count"]
+                        if not mc:
+                            # Fall back to message-sender count if WCDB didn't provide one
+                            cnt_row = conn.execute(
+                                "SELECT COUNT(DISTINCT sender_id) FROM messages WHERE chat_id=?",
+                                (chat_id,),
+                            ).fetchone()
+                            mc = cnt_row[0] if cnt_row else 0
+                        groups.append({
+                            "chat_id": chat_id,
+                            "group_name": info["name"],
+                            "member_count": mc,
+                        })
+
+                # Secondary source: messages table (groups not yet in group_names.json)
+                if _messages_table_exists(conn):
+                    existing_ids = set(group_info.keys())
+                    rows = conn.execute(
+                        "SELECT DISTINCT chat_id FROM messages WHERE chat_id LIKE '%@chatroom%' ORDER BY chat_id"
+                    ).fetchall()
+                    for row in rows:
+                        chat_id = row["chat_id"]
+                        if chat_id in existing_ids:
+                            continue
+                        cnt_row = conn.execute(
+                            "SELECT COUNT(DISTINCT sender_id) FROM messages WHERE chat_id=?",
+                            (chat_id,),
+                        ).fetchone()
+                        groups.append({
+                            "chat_id": chat_id,
+                            "group_name": chat_id,
+                            "member_count": cnt_row[0] if cnt_row else 0,
+                        })
+
+                conn.close()
+                self.send_json({"ok": True, "groups": groups})
+            except Exception as e:
+                logger.exception("Failed to list nickname groups")
+                self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # ── API: Get nicknames for a group ────────────────────────────────
+        if self.path.startswith("/api/nicknames") and self.command == "GET":
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(self.path)
+            params = parse_qs(parsed.query)
+            if parsed.path != "/api/nicknames":
+                self.send_json({"ok": False, "error": "not found"})
+                return
+            try:
+                chat_id = params.get("chat_id", [""])[0]
+                if not chat_id:
+                    self.send_json({"ok": False, "error": "missing chat_id"})
+                    return
+
+                from src.nickname import NicknameService
+                nicks = NicknameService()
+                overrides = nicks.load()
+
+                # ── Collect all known wxids for this group ──
+                seen: set[str] = set()
+                member_map: dict[str, str] = {}  # wxid -> best display_name
+
+                # 1) From messages table (people who have sent messages)
+                import sqlite3
+                from src.config import load_config
+                config = load_config()
+                conn = sqlite3.connect(config.db_path)
+                conn.row_factory = sqlite3.Row
+                if _messages_table_exists(conn):
+                    rows = conn.execute(
+                        "SELECT DISTINCT sender_id, sender_name FROM messages WHERE chat_id=? ORDER BY sender_name",
+                        (chat_id,),
+                    ).fetchall()
+                    for row in rows:
+                        wxid = row["sender_id"]
+                        seen.add(wxid)
+                        if row["sender_name"]:
+                            member_map[wxid] = row["sender_name"]
+                conn.close()
+
+                # 2) From group_members.json (full member list from WCDB)
+                gm_path = Path("data/group_members.json")
+                if gm_path.exists():
+                    try:
+                        group_members = json.loads(gm_path.read_text(encoding="utf-8"))
+                        chat_members = group_members.get(chat_id, {})
+                        for wxid, display_name in chat_members.items():
+                            if wxid not in seen:
+                                seen.add(wxid)
+                                member_map[wxid] = display_name
+                    except (json.JSONDecodeError, OSError):
+                        pass
+
+                # 3) Build response
+                members = [
+                    {
+                        "wxid": wxid,
+                        "display_name": member_map.get(wxid, wxid),
+                        "nickname": overrides.get(wxid, ""),
+                    }
+                    for wxid in seen
+                ]
+
+                self.send_json({"ok": True, "members": members})
+            except Exception as e:
+                logger.exception("Failed to get nicknames")
+                self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # ── API: Save nickname ────────────────────────────────────────────
+        if self.path == "/api/nicknames" and self.command != "GET":
+            try:
+                content_len = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_len) if content_len else b"{}"
+                data = json.loads(body)
+                wxid = (data.get("wxid") or "").strip()
+                nickname = (data.get("nickname") or "").strip()
+
+                if not wxid:
+                    self.send_json({"ok": False, "error": "missing wxid"})
+                    return
+
+                from src.nickname import NicknameService
+                nicks = NicknameService()
+                if nickname:
+                    nicks.update(wxid, nickname)
+                else:
+                    nicks.remove(wxid)
+
+                self.send_json({"ok": True})
+            except Exception as e:
+                logger.exception("Failed to save nickname")
+                self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # ── API: Advanced switches (allow-list: src/web/advanced_config.py) ──
+        if self.path == "/api/advanced":
+            self._handle_advanced()
+            return
+
+        # ── API: Get / Save lots config ───────────────────────────────
+        if self.path == "/api/lots":
+            if self.command == "GET":
+                try:
+                    from src.fun import load_lots_config
+                    config = load_lots_config()
+                    self.send_json({"ok": True, "config": config})
+                except Exception as e:
+                    logger.exception("Failed to load lots config")
+                    self.send_json({"ok": False, "error": str(e)})
+            else:
+                # POST — save custom lots config
+                content_len = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_len) if content_len else b"{}"
+                try:
+                    data = json.loads(body)
+                    from src.fun import save_lots_config
+                    save_lots_config(data)
+                    self.send_json({"ok": True})
+                except ValueError as e:
+                    self.send_json({"ok": False, "error": str(e)})
+                except Exception as e:
+                    logger.exception("Failed to save lots config")
+                    self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # ── API: Todo management ───────────────────────────────────────
+        if self.path == "/api/todos" or self.path.startswith("/api/todos?"):
+            params = {}
+            if "?" in self.path:
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(self.path)
+                for k, v in parse_qs(parsed.query).items():
+                    params[k] = v[0] if v else ""
+            status = params.get("status", "active")
+            chat_id = params.get("chat_id", "")
+            search = params.get("search", "")
+            try:
+                from src.todo.store import TodoStore
+                from src.config import find_env_file
+                db_path = "data/messages.db"
+                env_path = find_env_file()
+                if env_path and env_path.exists():
+                    for line in env_path.read_text(encoding="utf-8").splitlines():
+                        if line.strip().startswith("DB_PATH="):
+                            db_path = line.strip().split("=", 1)[1].strip()
+                            break
+                store = TodoStore(db_path)
+                items = store.get_all(status=status, chat_id=chat_id, search=search)
+                groups = store.get_active_groups()
+                self.send_json({
+                    "ok": True,
+                    "items": [
+                        {
+                            "id": item.id,
+                            "chat_id": item.chat_id,
+                            "content": item.content,
+                            "display_order": item.display_order,
+                            "status": item.status,
+                            "creator_name": item.creator_name,
+                            "created_at": item.created_at,
+                            "completed_by_name": item.completed_by_name,
+                            "completed_at": item.completed_at,
+                            "deleted_by_name": item.deleted_by_name,
+                            "deleted_at": item.deleted_at,
+                        }
+                        for item in items
+                    ],
+                    "groups": groups,
+                })
+            except Exception as e:
+                logger.exception("Failed to load todos")
+                self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # ── API: Get todo counts per status ─────────────────────────────
+        if self.path.startswith("/api/todos/counts"):
+            chat_id = ""
+            if "?" in self.path:
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(self.path)
+                params = {k: v[0] if v else "" for k, v in parse_qs(parsed.query).items()}
+                chat_id = params.get("chat_id", "")
+            try:
+                from src.todo.store import TodoStore
+                from src.config import find_env_file
+                db_path = "data/messages.db"
+                env_path = find_env_file()
+                if env_path and env_path.exists():
+                    for line in env_path.read_text(encoding="utf-8").splitlines():
+                        if line.strip().startswith("DB_PATH="):
+                            db_path = line.strip().split("=", 1)[1].strip()
+                            break
+                store = TodoStore(db_path)
+                counts = store.get_counts(chat_id=chat_id)
+                self.send_json({"ok": True, "counts": counts})
+            except Exception as e:
+                logger.exception("Failed to load todo counts")
+                self.send_json({"ok": False, "error": str(e)})
+            return
+
+        if self.path == "/api/todos/action":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len else b"{}"
+            try:
+                data = json.loads(body)
+                action = data.get("action", "")
+                chat_id = data.get("chat_id", "")
+                target = data.get("target", "")
+                from src.todo.store import TodoStore
+                from src.config import find_env_file
+                db_path = "data/messages.db"
+                env_path = find_env_file()
+                if env_path and env_path.exists():
+                    for line in env_path.read_text(encoding="utf-8").splitlines():
+                        if line.strip().startswith("DB_PATH="):
+                            db_path = line.strip().split("=", 1)[1].strip()
+                            break
+                store = TodoStore(db_path)
+                if action == "complete":
+                    result = store.complete(chat_id, target)
+                elif action == "delete":
+                    result = store.delete(chat_id, target)
+                elif action == "restore":
+                    result = store.restore(chat_id, target)
+                elif action == "clear_completed":
+                    result = store.clear_completed(chat_id)
+                elif action == "clear_deleted":
+                    result = store.clear_deleted(chat_id)
+                else:
+                    self.send_json({"ok": False, "error": f"Unknown action: {action}"})
+                    return
+                self.send_json({"ok": result.ok, "reply": result.reply})
+                # 触发自动清理
+                store.cleanup(chat_id)
+            except Exception as e:
+                logger.exception("Todo action failed")
+                self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # ── API: Get / Save welcome templates ─────────────────────────
+        if self.path == "/api/welcome/templates":
+            if self.command == "GET":
+                try:
+                    from src.welcome import get_welcome_manager
+                    wm = get_welcome_manager()
+                    data = wm.load()
+                    self.send_json({"ok": True, "data": data})
+                except Exception as e:
+                    logger.exception("Failed to load welcome templates")
+                    self.send_json({"ok": False, "error": str(e)})
+            else:
+                # POST — save welcome templates + group mappings
+                content_len = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_len) if content_len else b"{}"
+                try:
+                    data = json.loads(body)
+                    from src.welcome import get_welcome_manager
+                    wm = get_welcome_manager()
+                    wm.save(data)
+                    self.send_json({"ok": True})
+                except Exception as e:
+                    logger.exception("Failed to save welcome templates")
+                    self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # ── API: Test AI prompt sandbox ──────────────────────────────
+        if self.path == "/api/sandbox/test":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len else b"{}"
+            try:
+                data = json.loads(body)
+                message = data.get("message", "").strip()
+                sender_name = data.get("sender_name", "张三").strip()
+                group_name = data.get("group_name", "技术交流群").strip()
+                group_memory = data.get("group_memory", "").strip()
+                context_messages = data.get("context_messages", [])
+
+                # Load config
+                from dotenv import load_dotenv
+                from src.config import find_env_file, load_config
+                from src.summarize import create_models
+
+                env_path = find_env_file()
+                if env_path:
+                    load_dotenv(env_path, override=True)
+                else:
+                    load_dotenv(override=True)
+
+                config = load_config()
+
+                # Allow overrides from frontend sandbox inputs (skip masked keys)
+                if data.get("ai_backend"):
+                    config.ai_backend = data["ai_backend"]
+                if data.get("deepseek_api_key") and not _is_masked_secret(data["deepseek_api_key"]):
+                    config.deepseek_api_key = data["deepseek_api_key"]
+                if data.get("deepseek_model"):
+                    config.deepseek_model = data["deepseek_model"]
+                if data.get("openai_api_key") and not _is_masked_secret(data["openai_api_key"]):
+                    config.openai_api_key = data["openai_api_key"]
+                if data.get("openai_base_url") is not None:
+                    config.openai_base_url = data["openai_base_url"]
+                if data.get("openai_model"):
+                    config.openai_model = data["openai_model"]
+                if data.get("anthropic_api_key") and not _is_masked_secret(data["anthropic_api_key"]):
+                    config.anthropic_api_key = data["anthropic_api_key"]
+                if data.get("summarize_model"):
+                    config.summarize_model = data["summarize_model"]
+                for key in (
+                    "chat_persona_name", "chat_persona_prompt", "chat_reply_rules",
+                    "chat_max_chars", "chat_context_window_sec", "chat_context_count",
+                ):
+                    if key in data and data[key] not in (None, ""):
+                        setattr(config, key, data[key])
+
+                # The model the bot would reply with: MODEL_ROUTE decides
+                # (local, or split with "chat" in LOCAL_TASKS, uses the local one).
+                summarizer = create_models(config).chat
+
+                # Call chat
+                reply = summarizer.chat(
+                    message=message,
+                    context_messages=context_messages,
+                    requester_name=sender_name,
+                    bot_name=config.bot_display_name or "群聊小助手",
+                    group_name=group_name,
+                    group_memory=group_memory,
+                )
+
+                self.send_json({
+                    "ok": True,
+                    "reply": reply,
+                })
+            except Exception as e:
+                logger.exception("Failed to run sandbox test")
+                self.send_json({
+                    "ok": False,
+                    "error": str(e),
+                })
+            return
+
+        # ── API: Get status ───────────────────────────────────────────
+        if self.path == "/api/status":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self._send_cors_headers()
+            self.end_headers()
+            self.wfile.write(json.dumps(_status.snapshot(), ensure_ascii=False).encode())
+            return
+
+        # ── API: Get logs ────────────────────────────────────────────
+        if self.path == "/api/logs":
+            self.send_json(_read_recent_logs())
+            return
+
+        # ── API: macOS WeChat automation diagnostics ─────────────────
+        if self.path == "/api/macos/diagnose":
+            self.send_json({
+                "ok": True,
+                "diagnostics": _macos_wechat_diagnostics(),
+            })
+            return
+
+        # ── API: Onboarding status ────────────────────────────────────
+        if self.path == "/api/onboarding/status":
+            from src.config import is_onboarding_done
+            done = is_onboarding_done()
+            with _onboarding_lock:
+                steps = {
+                    "step1": _onboarding_data["step1_done"],
+                    "step2": _onboarding_data["step2_done"],
+                    "step3": _onboarding_data["step3_done"],
+                    "step4": _onboarding_data["step4_done"],
+                }
+            self.send_json({"ok": True, "onboarding_done": done, "steps": steps})
+            return
+
+        # ── API: Onboarding diagnostics check ─────────────────────────
+        if self.path == "/api/onboarding/diagnose":
+            import sys
+
+            # 1. Python check
+            python_ok = sys.version_info >= (3, 10)
+            python_val = f"Python {sys.version.split()[0]}"
+
+            # 2. Requirements check
+            req_report = _platform_dependency_report()
+
+            # 3. WeChat PID check
+            wx_report = _platform_wechat_report()
+
+            # 4. .env check
+            # In frozen mode, __file__ is inside the read-only _MEIPASS
+            # extraction directory. Use PROJECT_ROOT from config.py which
+            # correctly resolves to the EXE directory when frozen.
+            from src.config import PROJECT_ROOT, find_env_file
+            project_root = PROJECT_ROOT
+            env_path = find_env_file() or (project_root / ".env")
+            env_ok = env_path.exists()
+            env_val = "配置文件已存在" if env_ok else "配置文件尚未创建"
+
+            # 5. DB permissions check
+            data_dir = project_root / "data"
+            db_perm_ok = True
+            db_perm_err = None
+            try:
+                data_dir.mkdir(parents=True, exist_ok=True)
+                test_file = data_dir / ".write_test"
+                test_file.write_text("test", encoding="utf-8")
+                test_file.unlink()
+            except Exception as e:
+                db_perm_ok = False
+                db_perm_err = str(e)
+
+            # Check read permission to WeChat db path if it's set/detected
+            db_path = None
+            with _onboarding_lock:
+                db_path = _onboarding_data.get("db_path")
+            if not db_path:
+                _, detected_db = _detect_wxid_and_db_path()
+                if detected_db:
+                    db_path = detected_db
+
+            if db_path:
+                db_path_obj = Path(db_path)
+                if db_path_obj.exists():
+                    try:
+                        with open(db_path_obj, "rb") as f:
+                            f.read(100)
+                    except Exception as e:
+                        db_perm_ok = False
+                        db_perm_err = f"微信数据库读取失败: {e}"
+
+            db_perm_val = "数据库读写权限正常" if db_perm_ok else f"数据库权限错误: {db_perm_err}"
+
+            self.send_json({
+                "ok": True,
+                "diagnostics": {
+                    "python": {"ok": python_ok, "value": python_val, "error": None},
+                    "requirements": req_report,
+                    "wechat": wx_report,
+                    "env": {"ok": env_ok, "value": env_val, "error": None},
+                    "db": {"ok": db_perm_ok, "value": db_perm_val, "error": db_perm_err}
+                }
+            })
+            return
+
+        # ── API: Onboarding step 1 - start extraction (async) ─────────
+        if self.path == "/api/onboarding/step1":
+            with _step1_lock:
+                if _step1_state["running"]:
+                    self.send_json({"ok": False, "phase": "busy", "message": "正在提取中..."})
+                    return
+                _step1_state["running"] = True
+                _step1_state["phase"] = "idle"
+                _step1_state["message"] = ""
+                _step1_state["result"] = None
+
+            # Start background thread
+            t = threading.Thread(target=_run_step1_extraction, daemon=True)
+            t.start()
+            with _step1_lock:
+                _step1_thread = t
+
+            self.send_json({"ok": True, "phase": "started", "message": "提取已启动"})
+            return
+
+        # ── API: Onboarding step 1 - poll status ──────────────────────
+        if self.path == "/api/onboarding/step1-status":
+            with _step1_lock:
+                s = dict(_step1_state)
+            self.send_json(s)
+            return
+
+        # ── API: Onboarding step 2 - WeChat identity ──────────────────
+        if self.path == "/api/onboarding/step2":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len else b"{}"
+            try:
+                data = json.loads(body)
+                # A key typed in by hand (when automatic extraction is not
+                # possible). Stored like an extracted one: in the machine
+                # .env right away, and in WCDB_KEY when step 4 writes .env.
+                manual_key = str(data.get("wcdb_key") or "").strip()
+                if manual_key and not _WCDB_KEY_RE.fullmatch(manual_key):
+                    self.send_json({"ok": False, "error": "微信密钥应为 64 位十六进制字符（0-9、a-f）"})
+                    return
+                if manual_key:
+                    _set_env_key(_find_or_create_machine_env(), "WCDB_KEY", manual_key)
+                    os.environ["WCDB_KEY"] = manual_key
+                with _onboarding_lock:
+                    _onboarding_data["step2_done"] = True
+                    if manual_key:
+                        _onboarding_data["step1_done"] = True
+                        _onboarding_data["key"] = manual_key
+                    from src.config import _sanitize_display_name
+                    _onboarding_data["bot_display_name"] = _sanitize_display_name(
+                        data.get("bot_display_name", "群聊小助手")
+                    )
+                    _onboarding_data["wechat_groups"] = data.get("wechat_groups", "*")
+                    _onboarding_data["wechat_backend"] = data.get("wechat_backend", "wcdb")
+                    if data.get("wxid"):
+                        _onboarding_data["wxid"] = data["wxid"]
+                    if data.get("db_path"):
+                        _onboarding_data["db_path"] = data["db_path"]
+                self.send_json({"ok": True})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # ── API: Onboarding step 3 - AI backend ───────────────────────
+        if self.path == "/api/onboarding/step3":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len else b"{}"
+            try:
+                data = json.loads(body)
+                ai = data.get("ai_backend", "deepseek")
+                # Everything on a model on this computer (MODEL_ROUTE=local):
+                # no cloud key needed. "split" is set later in the console.
+                route = str(data.get("model_route") or "cloud").strip().lower()
+                local_url = str(data.get("local_base_url") or "http://127.0.0.1:11434/v1").strip()
+                local_model = str(data.get("local_model") or "").strip()
+                local_key = str(data.get("local_api_key") or "").strip()
+                if route not in ("cloud", "local"):
+                    self.send_json({"ok": False, "error": "model_route 只能是 cloud 或 local"})
+                    return
+                if route == "local":
+                    if not local_url.startswith(("http://", "https://")):
+                        self.send_json({"ok": False, "error": "本地服务地址要以 http:// 或 https:// 开头"})
+                        return
+                    if not local_model:
+                        self.send_json({"ok": False, "error": "要填本地服务里的模型名"})
+                        return
+                    if any(_CONTROL_CHARS_RE.search(v) for v in (local_url, local_model, local_key)):
+                        self.send_json({"ok": False, "error": "不能包含换行或控制字符"})
+                        return
+                with _onboarding_lock:
+                    _onboarding_data["step3_done"] = True
+                    _onboarding_data["ai_backend"] = ai
+                    _onboarding_data["model_route"] = route
+                    _onboarding_data["local_base_url"] = local_url
+                    _onboarding_data["local_model"] = local_model
+                    _onboarding_data["local_api_key"] = local_key
+                    _onboarding_data["deepseek_api_key"] = data.get("deepseek_api_key", "")
+                    _onboarding_data["deepseek_base_url"] = data.get("deepseek_base_url", "https://api.deepseek.com")
+                    _onboarding_data["deepseek_model"] = data.get("deepseek_model", "deepseek-v4-flash")
+                    _onboarding_data["openai_api_key"] = data.get("openai_api_key", "")
+                    _onboarding_data["openai_base_url"] = data.get("openai_base_url", "")
+                    _onboarding_data["openai_model"] = data.get("openai_model", "gpt-5.6-terra")
+                    _onboarding_data["anthropic_api_key"] = data.get("anthropic_api_key", "")
+                    _onboarding_data["anthropic_base_url"] = data.get("anthropic_base_url", "https://api.anthropic.com")
+                    _onboarding_data["summarize_model"] = data.get("summarize_model", "claude-haiku-4-5-20251001")
+                self.send_json({"ok": True})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # ── API: Onboarding step 4 - features + write .env ────────────
+        if self.path == "/api/onboarding/step4":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len else b"{}"
+            try:
+                data = json.loads(body)
+                with _onboarding_lock:
+                    _onboarding_data["step4_done"] = True
+                    _onboarding_data["fun_enabled"] = data.get("fun_enabled", True)
+                    _onboarding_data["proactive_enabled"] = data.get("proactive_enabled", False)
+                    _onboarding_data["sticky_mention_enabled"] = data.get("sticky_mention_enabled", True)
+                    _onboarding_data["followup_listen_enabled"] = data.get("followup_listen_enabled", True)
+                    _onboarding_data["message_burst_enabled"] = data.get("message_burst_enabled", True)
+                    _onboarding_data["web_search_enabled"] = data.get("web_search_enabled", True)
+
+                # Write all accumulated data to .env
+                env_path = _find_or_create_env()
+                _write_onboarding_to_env(env_path)
+                self.send_json({"ok": True})
+            except Exception as e:
+                logger.exception("Onboarding step4 failed")
+                self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # ── API: Reset onboarding → allow re-extraction ─────────────
+        if self.path == "/api/onboarding/reset":
+            # 1. Reset file-based state
+            env_path = _find_or_create_env()
+            _set_env_key(env_path, "ONBOARDING_DONE", "false")
+            _set_env_key(_find_or_create_machine_env(), "WCDB_KEY", "")
+            # 2. Reset in-memory state so a fresh extraction can start
+            with _onboarding_lock:
+                for k in _onboarding_data:
+                    if isinstance(_onboarding_data[k], bool):
+                        _onboarding_data[k] = False
+                    elif isinstance(_onboarding_data[k], str):
+                        _onboarding_data[k] = ""
+            with _step1_lock:
+                _step1_state["running"] = False
+                _step1_state["phase"] = "idle"
+                _step1_state["message"] = ""
+                _step1_state["result"] = None
+            self.send_json({"ok": True, "message": "请退出微信，然后点击「重新获取密钥」"})
+            return
+
+        # ── API: Browse filesystem directories ──────────────────────
+        if self.path.startswith("/api/browse"):
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(self.path)
+            params = parse_qs(parsed.query)
+            dir_path = params.get("path", [""])[0].strip()
+            if not dir_path:
+                # No path given — list drives on Windows, home on others
+                import platform
+                if platform.system() == "Windows":
+                    import string
+                    drives = []
+                    for letter in string.ascii_uppercase:
+                        p = Path(f"{letter}:\\")
+                        if p.exists():
+                            drives.append({"name": f"{letter}:", "path": f"{letter}:\\", "is_dir": True})
+                    self.send_json({"ok": True, "entries": drives, "current_path": ""})
+                else:
+                    home = Path.home()
+                    entries = _list_dir_entries(home)
+                    self.send_json({"ok": True, "entries": entries, "current_path": str(home)})
+                return
+
+            target = Path(dir_path)
+            if not target.exists():
+                self.send_json({"ok": False, "error": f"路径不存在: {dir_path}"})
+                return
+            if not target.is_dir():
+                self.send_json({"ok": False, "error": "请选择一个目录"})
+                return
+
+            try:
+                entries = _list_dir_entries(target)
+                self.send_json({"ok": True, "entries": entries, "current_path": str(target)})
+            except PermissionError:
+                self.send_json({"ok": False, "error": "没有权限访问该目录"})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # ── API: Detect WeChat data in a custom directory ──────────
+        if self.path == "/api/wechat-data-dir/detect":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len else b"{}"
+            try:
+                data = json.loads(body)
+                dir_path = (data.get("path") or "").strip()
+                if not dir_path:
+                    self.send_json({"ok": False, "error": "请提供目录路径"})
+                    return
+                target = Path(dir_path)
+                if not target.exists() or not target.is_dir():
+                    self.send_json({"ok": False, "error": f"目录不存在: {dir_path}"})
+                    return
+
+                # Scan for wxid_* directories
+                wxid_dirs = sorted(
+                    [d for d in target.iterdir() if d.is_dir() and d.name.startswith("wxid_")],
+                    key=lambda d: d.stat().st_mtime, reverse=True,
+                )
+                accounts = []
+                for wxid_dir in wxid_dirs:
+                    session_db = wxid_dir / "db_storage" / "session" / "session.db"
+                    accounts.append({
+                        "wxid": wxid_dir.name,
+                        "has_session_db": session_db.exists(),
+                        "db_path": str(session_db) if session_db.exists() else "",
+                    })
+
+                if accounts:
+                    self.send_json({
+                        "ok": True,
+                        "found": True,
+                        "accounts": accounts,
+                        "message": f"找到 {len(accounts)} 个微信账号",
+                    })
+                else:
+                    self.send_json({
+                        "ok": True,
+                        "found": False,
+                        "accounts": [],
+                        "message": f"在 {dir_path} 中未找到 wxid_* 目录。请确认路径正确。",
+                    })
+            except Exception as e:
+                logger.exception("Failed to detect WeChat data dir")
+                self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # ── API: Voice model status ────────────────────────────────────
+        if self.path.startswith("/api/voice/model-status"):
+            try:
+                from urllib.parse import urlparse, parse_qs
+                qs = parse_qs(urlparse(self.path).query)
+                model = qs.get("model", ["small"])[0]
+
+                # Check HuggingFace cache
+                cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+                model_dir = cache_dir / f"models--Systran--faster-whisper-{model}"
+                downloaded = False
+                if model_dir.exists():
+                    snapshots = model_dir / "snapshots"
+                    if snapshots.exists() and any(snapshots.iterdir()):
+                        downloaded = True
+                    else:
+                        blobs = model_dir / "blobs"
+                        if blobs.exists() and any(blobs.iterdir()):
+                            downloaded = True
+
+                dl = _voice_downloads.get(model)
+                self.send_json({
+                    "ok": True,
+                    "downloaded": downloaded,
+                    "phase": dl.get("phase", "") if dl else "",  # "downloading" | "installing"
+                    "pct": dl.get("pct", 0) if dl else 0,
+                    "error": dl.get("error", "") if dl else "",
+                    "model": model,
+                })
+            except Exception as e:
+                logger.exception("Voice model-status failed")
+                self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # ── API: Trigger voice model download ──────────────────────────
+        if self.path == "/api/voice/download-model":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len else b"{}"
+            try:
+                data = json.loads(body)
+                model = data.get("model", "small")
+
+                _voice_downloads[model] = {"phase": "downloading", "pct": 0, "error": ""}
+
+                def _run():
+                    state = _voice_downloads.setdefault(model, {})
+                    try:
+                        # ── Phase 1: download via huggingface_hub ──
+                        state["phase"] = "downloading"
+                        state["pct"] = 0
+
+                        from huggingface_hub import snapshot_download
+                        cache = str(Path.home() / ".cache" / "huggingface")
+                        repo_id = f"Systran/faster-whisper-{model}"
+
+                        snapshot_download(
+                            repo_id=repo_id,
+                            cache_dir=cache,
+                        )
+                        state["pct"] = 90
+
+                        # ── Phase 2: load model into memory ──────
+                        state["phase"] = "installing"
+                        state["pct"] = 95
+                        from faster_whisper import WhisperModel
+                        WhisperModel(
+                            model, device="cpu", compute_type="int8",
+                            download_root=cache,
+                        )
+                        state["phase"] = "done"
+                        state["pct"] = 100
+                        state["error"] = ""
+                        logger.info("Voice model '%s' ready", model)
+                    except Exception as exc:
+                        state["phase"] = "error"
+                        state["error"] = str(exc).split("\n")[0][:300]
+                        logger.exception("Voice model download/install failed")
+
+                t = threading.Thread(target=_run, daemon=True)
+                t.start()
+                self.send_json({"ok": True, "model": model, "message": "下载已在后台启动"})
+            except Exception as e:
+                _voice_downloads.pop(model, None)
+                logger.exception("Voice download-model failed")
+                self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # ── SPA fallback: serve index.html for unknown paths ──────────
+        if self.command != "GET" and self.command != "HEAD":
+            self.send_response(405)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": False, "error": "Method not allowed"}).encode())
+            return
+
+        path = self.translate_path(self.path)
+        if not Path(path).exists():
+            self.path = "/index.html"
+
+        super().do_GET()
+
+    def log_message(self, format, *args):
+        """Log HTTP errors but suppress normal access logs."""
+        if args and any(
+            code in str(args).lower()
+            for code in ["error", "exception", "400", "401", "403", "404", "405", "500"]
+        ):
+            logger.warning("HTTP %s", format % args)
+
+    def send_json(self, data):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self._send_cors_headers()
+        self.end_headers()
+        self.wfile.write(json.dumps(data, ensure_ascii=False).encode())
+
+
+def _run_server(host, port):
+    """Run the HTTP server (blocking, called in daemon thread)."""
+    # Enable SO_REUSEADDR so a rapid restart doesn't fail with "address in use"
+    ThreadingHTTPServer.allow_reuse_address = True
+    try:
+        server = ThreadingHTTPServer((host, port), _UIHandler)
+    except OSError as e:
+        logger.error("Failed to bind web server on %s:%s: %s", host, port, e)
+        update_status(running=False, error=f"端口 {port} 被占用或无权绑定: {e}")
+        return
+    server.daemon_threads = True  # HTTP handlers won't block exit
+    logger.info("Web UI: http://%s:%s", host, port)
+    try:
+        server.serve_forever()
+    except Exception as e:
+        logger.error("Web server crashed: %s", e)
+
+
+def start_web_server(host="127.0.0.1", port=7327):
+    """Start the web UI in a daemon thread (idempotent)."""
+    if not _server_guard.try_start():
+        logger.debug("Web server already running, skipping duplicate start")
+        return None
+
+    if not UI_DIR.exists():
+        logger.warning("UI not built. Run: cd ui && npm run build")
+        return None
+
+    thread = threading.Thread(
+        target=_run_server, args=(host, port),
+        daemon=True, name="web-ui-server",
+    )
+    thread.start()
+    return thread

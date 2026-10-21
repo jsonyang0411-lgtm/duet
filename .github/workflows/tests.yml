@@ -1,0 +1,35 @@
+name: Tests
+
+# The bot runs on Windows; the development machine is a Mac, where the tests
+# that need real pywin32 are skipped. This runs tools/run_checks.py on Windows
+# with the same requirements as the packaged app: the whole suite, then the
+# offline replays and the memory evaluation against their baselines.
+# Manual only (Actions tab -> Tests -> Run workflow), so a push never spends
+# Actions minutes; on your own machine run: python tools/run_checks.py
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: checks on Windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Tests and baseline comparisons
+        run: python tools/run_checks.py

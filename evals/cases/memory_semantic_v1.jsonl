@@ -1,0 +1,22 @@
+{"schema": "memory-semantic/v1", "kind": "facts", "facts": [{"kind": "preference", "subject": "阿红", "predicate": "对", "object": "海鲜过敏"}, {"kind": "preference", "subject": "土豆", "predicate": "讨厌", "object": "香菜"}, {"kind": "plan", "subject": "阿强", "predicate": "约了", "object": "周六去爬山"}, {"kind": "event", "subject": "小明", "predicate": "去了", "object": "青岛出差"}, {"kind": "other", "subject": "老王", "predicate": "养了", "object": "一只橘猫"}, {"kind": "plan", "subject": "婷婷", "predicate": "在准备", "object": "考研"}, {"kind": "preference", "subject": "大伟", "predicate": "喜欢", "object": "打篮球"}, {"kind": "plan", "subject": "佳佳", "predicate": "下个月", "object": "要结婚"}, {"kind": "event", "subject": "老周", "predicate": "刚换了", "object": "新工作"}, {"kind": "preference", "subject": "小雨", "predicate": "是", "object": "素食主义者"}, {"kind": "preference", "subject": "阿杰", "predicate": "害怕", "object": "坐飞机"}, {"kind": "other", "subject": "浩子", "predicate": "在学", "object": "吉他"}, {"kind": "other", "subject": "小李", "predicate": "住在", "object": "杭州"}, {"kind": "other", "subject": "阿红", "predicate": "生日是", "object": "三月十二号"}, {"kind": "alias", "subject": "宇肆", "predicate": "称呼是", "object": "次元哥哥"}, {"kind": "jargon", "subject": "摸鱼", "predicate": "指", "object": "上班偷懒"}]}
+{"schema": "memory-semantic/v1", "kind": "question", "id": "s01", "text": "今晚去吃小龙虾吧", "people": ["小张"], "expect": [0], "note": "海鲜 ~ 小龙虾"}
+{"schema": "memory-semantic/v1", "kind": "question", "id": "s02", "text": "这道菜要不要多放点芫荽", "people": ["小张"], "expect": [1], "note": "芫荽 = 香菜"}
+{"schema": "memory-semantic/v1", "kind": "question", "id": "s03", "text": "这周末有人一起去户外吗", "people": ["小张"], "expect": [2], "note": "户外 ~ 爬山"}
+{"schema": "memory-semantic/v1", "kind": "question", "id": "s04", "text": "谁最近去过山东", "people": ["小张"], "expect": [3], "note": "青岛 is in 山东"}
+{"schema": "memory-semantic/v1", "kind": "question", "id": "s05", "text": "有人家里养宠物吗", "people": ["小张"], "expect": [4], "note": "宠物 ~ 橘猫"}
+{"schema": "memory-semantic/v1", "kind": "question", "id": "s06", "text": "最近谁在复习备考", "people": ["小张"], "expect": [5], "note": "备考 ~ 考研"}
+{"schema": "memory-semantic/v1", "kind": "question", "id": "s07", "text": "周末约个球局", "people": ["小张"], "expect": [6], "note": "球局 ~ 篮球"}
+{"schema": "memory-semantic/v1", "kind": "question", "id": "s08", "text": "听说有人要办喜事了", "people": ["小张"], "expect": [7], "note": "喜事 ~ 结婚"}
+{"schema": "memory-semantic/v1", "kind": "question", "id": "s09", "text": "谁最近跳槽了", "people": ["小张"], "expect": [8], "note": "跳槽 ~ 换工作"}
+{"schema": "memory-semantic/v1", "kind": "question", "id": "s10", "text": "聚餐的时候有人不吃肉吗", "people": ["小张"], "expect": [9], "note": "不吃肉 ~ 素食"}
+{"schema": "memory-semantic/v1", "kind": "question", "id": "s11", "text": "下次出远门大家打算怎么去", "people": ["小张"], "expect": [10], "note": "出远门 ~ 坐飞机"}
+{"schema": "memory-semantic/v1", "kind": "question", "id": "s12", "text": "群里有人会弹乐器吗", "people": ["小张"], "expect": [11], "note": "乐器 ~ 吉他"}
+{"schema": "memory-semantic/v1", "kind": "question", "id": "s13", "text": "有没有人在浙江", "people": ["小张"], "expect": [12], "note": "杭州 is in 浙江"}
+{"schema": "memory-semantic/v1", "kind": "question", "id": "s14", "text": "谁的生日快到了", "people": ["小张"], "expect": [13], "note": "word match (control)"}
+{"schema": "memory-semantic/v1", "kind": "question", "id": "s15", "text": "最近上班都在偷懒", "people": ["大伟"], "expect": [15, 6], "note": "word match on the jargon; 大伟 is present, so his fact counts"}
+{"schema": "memory-semantic/v1", "kind": "question", "id": "n01", "text": "今天天气真好", "people": ["路人甲"], "expect": [], "note": "nothing related"}
+{"schema": "memory-semantic/v1", "kind": "question", "id": "n02", "text": "笑死我了", "people": ["路人甲"], "expect": [], "note": "nothing related"}
+{"schema": "memory-semantic/v1", "kind": "question", "id": "n03", "text": "这个视频好好笑", "people": ["路人乙"], "expect": [], "note": "nothing related"}
+{"schema": "memory-semantic/v1", "kind": "question", "id": "n04", "text": "明天几点开会", "people": ["路人甲"], "expect": [], "note": "nothing related"}
+{"schema": "memory-semantic/v1", "kind": "question", "id": "n05", "text": "谁有充电宝借我用一下", "people": ["路人乙"], "expect": [], "note": "nothing related"}
+{"schema": "memory-semantic/v1", "kind": "question", "id": "n06", "text": "电影几点开场", "people": ["路人甲"], "expect": [], "note": "nothing related"}

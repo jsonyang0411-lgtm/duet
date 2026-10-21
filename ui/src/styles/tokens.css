@@ -1,0 +1,96 @@
+/* ==========================================================================
+   webot 控制台 · 明日方舟风（取自「口袋效果器-界面设计稿」DESIGN.md §2，2026-09-28 定稿）
+   暖灰纸面 + 炭黑深色块 + 天青。浅色是默认，html.dark 换成深色。
+   字体全部本地打包（assets/fonts，OFL），不从网络加载。
+   ========================================================================== */
+
+@font-face { font-family: "Noto Sans SC"; src: url(../assets/fonts/NotoSansSC/NotoSansSC-Regular.subset.woff2) format("woff2"); font-weight: 300 400; font-display: swap; }
+@font-face { font-family: "Noto Sans SC"; src: url(../assets/fonts/NotoSansSC/NotoSansSC-Medium.subset.woff2) format("woff2"); font-weight: 500 600; font-display: swap; }
+@font-face { font-family: "Noto Sans SC"; src: url(../assets/fonts/NotoSansSC/NotoSansSC-Bold.subset.woff2) format("woff2"); font-weight: 700 900; font-display: swap; }
+@font-face { font-family: "Barlow Condensed"; src: url(../assets/fonts/BarlowCondensed/BarlowCondensed-Light.woff2) format("woff2"); font-weight: 300; font-display: swap; }
+@font-face { font-family: "Barlow Condensed"; src: url(../assets/fonts/BarlowCondensed/BarlowCondensed-SemiBold.woff2) format("woff2"); font-weight: 600; font-display: swap; }
+@font-face { font-family: "Barlow Condensed"; src: url(../assets/fonts/BarlowCondensed/BarlowCondensed-Bold.woff2) format("woff2"); font-weight: 700; font-display: swap; }
+@font-face { font-family: "JetBrains Mono"; src: url(../assets/fonts/JetBrainsMono/JetBrainsMono-Regular.woff2) format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "JetBrains Mono"; src: url(../assets/fonts/JetBrainsMono/JetBrainsMono-SemiBold.woff2) format("woff2"); font-weight: 600; font-display: swap; }
+@font-face { font-family: "JetBrains Mono"; src: url(../assets/fonts/JetBrainsMono/JetBrainsMono-Bold.woff2) format("woff2"); font-weight: 700; font-display: swap; }
+
+/* 斜切组件的三个变量不继承：子元素不会误用父元素的切角和边色 */
+@property --ch-bg { syntax: "*"; inherits: false; }
+@property --ch-bd { syntax: "*"; inherits: false; }
+@property --ch-c  { syntax: "*"; inherits: false; }
+
+:root {
+  color-scheme: light;
+  /* 面：纸面三档 + 次级面 / 下沉区 / 输入框 */
+  --paper: #E4E4E1;  --panel: #EEEEEB;  --card: #F8F8F6;  --card-2: #F1F1EE;  --sunk: #E8E8E5;  --field: #FFFFFF;
+  /* 线：rule-2 细分隔 · rule 普通边 · rule-strong 卡片边 · line-input 输入框边（≥3:1） */
+  --rule-2: #D3D4D3;  --rule: #BDBEC0;  --rule-strong: #A9AAAD;  --line-input: #6B6E75;
+  /* 墨：ink-4 只做装饰 */
+  --ink: #17181B;  --ink-2: #3B3D42;  --ink-3: #5A5D64;  --ink-4: #9A9CA1;
+  /* 深色块（顶栏、选中行、台词框、保存条、日志终端）：一律不透明 */
+  --slab: #17181B;  --slab-2: #232428;  --slab-3: #2E3035;  --slab-line: #4A4C52;
+  --slab-ink: #F1F1EE;  --slab-ink-2: #B4B6BB;  --slab-ink-3: #8D9096;
+  /* 天青：cy 只做大面积填充和深色块上的字；cy-mid 浅底上有意义的非文字；cy-ink 浅底上的字、焦点、选中竖条 */
+  --cy: #1AA7E4;  --cy-mid: #1284BA;  --cy-ink: #08628E;  --cy-ink-2: #064B6D;  --cy-hi: #6FD0F7;
+  --cy-50: #E6F3F9;  --cy-soft: #D3ECF7;  --cy-soft-2: #B5DDF0;  --on-cy: #06212E;
+  --cy-hover: #3AB5EA;  --cy-press: #1596CE;
+  /* 红：只做点缀（机器人自己的色条、印章） */
+  --red: #D8323A;  --red-ink: #A8232C;  --red-hi: #FF7A7F;  --red-soft: #F6DCDD;
+  /* 语义：永远和图标、文字一起出现；-hi 是深色块上的写法 */
+  --ok-bg: #DCEDE3;   --ok-line: #9ECDB3;   --ok-ink: #1D6A4C;   --ok-hi: #8FD9B0;
+  --warn-bg: #F5E9D1; --warn-line: #DFBF7E; --warn-ink: #7A4D0A; --warn-hi: #F2C261;
+  --need-bg: #F5E0DC; --need-line: #E2AEA5; --need-ink: #A23528; --need-hi: #F29A8E;
+  --pend-bg: #E5E6F4; --pend-line: #BEC0E5; --pend-ink: #4546A0; --pend-hi: #C3C5F5;
+  --off-bg: #E7E7E4;  --off-line: #CFD0CD;  --off-ink: #5A5D64;
+  /* 焦点：直角 2px，外扩 2px；深色块里换亮天青 */
+  --focus: var(--cy-ink);  --focus-on-dark: #3DBBF0;
+  --sel-bg: var(--cy-50);  --sel-bar: var(--cy-ink);
+  /* 斜纹：只表示「关着 / 不是真的」 */
+  --hz-ink: repeating-linear-gradient(-45deg, var(--ink) 0 2px, transparent 2px 5px);
+  --hz-soft: repeating-linear-gradient(-45deg, #E1E1DE 0 5px, #EDEDEA 5px 10px);
+  /* 遮罩、阴影：平面；只有浮层（提示条、菜单）用一道硬阴影 */
+  --scrim: rgba(23, 24, 27, .32);
+  --sh-3: 6px 6px 0 rgba(23, 24, 27, .16);
+  /* 立绘占位的剪影 */
+  --figure: #D6D6D2;  --figure-line: #A9AAAD;
+  --deco-line: rgba(23, 24, 27, .22);
+  /* 字体 */
+  --f-ui: "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC", "Hiragino Sans GB", system-ui, sans-serif;
+  --f-latin: "Barlow Condensed", "Arial Narrow", var(--f-ui);
+  --f-mono: "JetBrains Mono", Consolas, "SF Mono", Menlo, var(--f-ui);
+  /* 字号只有 8 档；中文不小于 12px，11px 只给拉丁装饰 */
+  --fs-deco: 11px; --fs-xs: 12px; --fs-sm: 13px; --fs-md: 14px; --fs-lg: 16px; --fs-xl: 18px; --fs-h: 20px; --fs-poster: 32px;
+  /* 斜切只有四档 */
+  --cut-s: 8px;  --cut-m: 12px;  --cut-l: 16px;  --cut-xl: 18px;
+  /* 尺寸 */
+  --top-h: 56px;  --rail-w: 208px;  --aside-w: 340px;
+  --ease: cubic-bezier(.2, .7, .2, 1);  --t-fast: 140ms;  --t-mid: 220ms;
+}
+
+/* 深色：同一套结构，纸面变成深灰，深色块更深；天青不变；文字对比度都 ≥4.5:1 */
+html.dark {
+  color-scheme: dark;
+  --paper: #141519;  --panel: #191A1E;  --card: #202227;  --card-2: #25272C;  --sunk: #1B1C20;  --field: #101114;
+  --rule-2: #2B2D32;  --rule: #383B41;  --rule-strong: #4C4F57;  --line-input: #80848D;
+  --ink: #ECECE8;  --ink-2: #C4C6CB;  --ink-3: #9C9FA6;  --ink-4: #61646B;
+  --slab: #0A0B0D;  --slab-2: #1C1E22;  --slab-3: #282A2F;  --slab-line: #3C3F46;
+  --slab-ink: #F1F1EE;  --slab-ink-2: #B4B6BB;  --slab-ink-3: #8D9096;
+  --cy: #1AA7E4;  --cy-mid: #3FB3E8;  --cy-ink: #6FD0F7;  --cy-ink-2: #A8E3FA;  --cy-hi: #6FD0F7;
+  --cy-50: #102A37;  --cy-soft: #143648;  --cy-soft-2: #1C4A62;  --on-cy: #06212E;
+  --red: #E0464D;  --red-ink: #FF8A8F;  --red-hi: #FF8A8F;  --red-soft: #3A1B1E;
+  --ok-bg: #13291F;   --ok-line: #2D5B44;   --ok-ink: #79D4A3;   --ok-hi: #8FD9B0;
+  --warn-bg: #2D2413; --warn-line: #6B5A33; --warn-ink: #F2C261;
+  --need-bg: #331A1B; --need-line: #6E3B37; --need-ink: #F4A296;
+  --pend-bg: #1E1F35; --pend-line: #46487C; --pend-ink: #C3C5F5;
+  --off-bg: #1E2024;  --off-line: #383B41;  --off-ink: #9C9FA6;
+  --focus: #6FD0F7;  --focus-on-dark: #3DBBF0;
+  --hz-soft: repeating-linear-gradient(-45deg, #1D1F23 0 5px, #24262B 5px 10px);
+  --scrim: rgba(0, 0, 0, .55);
+  --sh-3: 6px 6px 0 rgba(0, 0, 0, .45);
+  --figure: #2A2C31;  --figure-line: #4C4F57;
+  --deco-line: rgba(236, 236, 232, .18);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --t-fast: 0ms; --t-mid: 0ms; }
+}

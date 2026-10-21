@@ -1,0 +1,19 @@
+python-dotenv>=1.0.0
+anthropic>=0.45.0
+openai>=1.0.0
+httpx>=0.27.0
+pydantic>=2.0.0
+uiautomation>=2.0
+pywin32>=300
+comtypes>=1.4
+pywebview>=5.0
+Pillow>=10.0
+psutil>=5.0
+pyperclip>=1.8
+zstandard>=0.23.0
+certifi>=2024.2.2
+
+# Voice recognition — SILK decode + local/cloud ASR
+silk-python>=0.2.8
+faster-whisper>=1.0
+opencc-python-reimplemented>=0.1.7
