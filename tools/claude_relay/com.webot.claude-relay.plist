@@ -4,7 +4,7 @@
   Keeps the Claude relay worker running on the Mac (see README.md).
   Replace /PATH/TO/webot-claude-relay, copy to ~/Library/LaunchAgents/ and run
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.webot.claude-relay.plist
-  caffeinate -i keeps the Mac from idle sleep while the worker runs.
+  caffeinate -s keeps the Mac awake while it is on power (on battery it sleeps as usual).
 -->
 <plist version="1.0">
 <dict>
@@ -13,7 +13,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/caffeinate</string>
-    <string>-i</string>
+    <string>-s</string>
     <string>/usr/bin/python3</string>
     <string>/PATH/TO/webot-claude-relay/tools/claude_relay/worker.py</string>
   </array>

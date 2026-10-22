@@ -210,3 +210,24 @@ def test_find_claude_prefers_the_newest_vscode_copy(worker, tmp_path, monkeypatc
     if any(Path(p).exists() for p in ("/opt/homebrew/bin/claude", "/usr/local/bin/claude")):
         pytest.skip("a system-wide claude is installed")
     assert "claude-code-2.1.300-" in worker.find_claude()
+
+
+def test_a_refused_token_is_read_again_from_the_config(worker, bot):
+    """Windows got a new token; config.json already has it; the running worker follows."""
+    client = worker.RelayClient(bot.url, "old" * 11, reload_token=lambda: TOKEN)
+    assert client.health() and client.token == TOKEN
+    stale = worker.RelayClient(bot.url, "old" * 11, reload_token=lambda: "old" * 11)
+    with pytest.raises(worker.urllib.error.HTTPError):
+        stale.health()
+    with pytest.raises(worker.urllib.error.HTTPError):
+        worker.RelayClient(bot.url, "old" * 11, reload_token=lambda: None).health()
+
+
+def test_read_token_follows_the_file(worker, tmp_path, monkeypatch):
+    monkeypatch.delenv("RELAY_TOKEN", raising=False)
+    monkeypatch.delenv("RELAY_URL", raising=False)
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"relay_url": "http://x", "token": "a" * 32}), encoding="utf-8")
+    assert worker.read_token(cfg) == "a" * 32
+    cfg.write_text("{broken", encoding="utf-8")
+    assert worker.read_token(cfg) is None

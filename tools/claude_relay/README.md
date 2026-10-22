@@ -72,7 +72,7 @@ Windows 上的机器人只负责收发微信消息。你私聊机器人发 `cc �
    python3 tools/claude_relay/worker.py --check
    ```
 4. 先手动跑一个任务试试：`python3 tools/claude_relay/worker.py --once`，然后在微信里发 `cc 只回复：收到`。
-5. 平时运行 `python3 tools/claude_relay/worker.py`，按 Ctrl+C 停止。也可以用 launchd 常驻：开机自启，崩溃自动重启，运行时阻止空闲睡眠。
+5. 平时运行 `python3 tools/claude_relay/worker.py`，按 Ctrl+C 停止。也可以用 launchd 常驻：开机自启，崩溃自动重启，插着电源时不睡眠（用电池时照常睡眠）。
    ```
    sed "s#/PATH/TO/webot-claude-relay#$(pwd)#" tools/claude_relay/com.webot.claude-relay.plist \
      > ~/Library/LaunchAgents/com.webot.claude-relay.plist
@@ -86,6 +86,7 @@ Windows 上的机器人只负责收发微信消息。你私聊机器人发 `cc �
 
 - **`--check` 显示 unreachable**：Mac 开着 Clash。worker 已经绕过系统代理，但如果开了 TUN 模式，要在 Clash 里把局域网网段设为直连，例如 `IP-CIDR,192.168.0.0/16,DIRECT`。再确认 Windows 防火墙规则和 IP 没变。
 - **HTTP 401**：两边的 token 不一致。
+- **换 token**：先把新 token 写进 Mac 的 `config.json`，正在运行的 worker 继续用旧的；等你把 Windows 的 `CLAUDE_RELAY_TOKEN` 换掉并重启机器人，worker 收到 401 后会自动重新读取 `config.json`，换成新的，不用重启 worker。
 - **回执里说「Mac 不在线」**：60 秒内 worker 没来取过任务。看 `worker.log`。
 - **#编号「失联」**：正在执行的任务超过 2 分钟没有心跳，通常是 Mac 睡眠或断网了。Mac 恢复后如果任务还在跑，结果会照常发回来；否则回复 `cc 重试 编号`。
 - **安全**：能连上这个端口、又知道 token 的人，就能让 Mac 执行命令。token 不要外传，端口只对局域网开放。worker 给 Claude 的说明里要求它不做推送代码、发消息这类对外或难以撤销的事，除非任务里写明。

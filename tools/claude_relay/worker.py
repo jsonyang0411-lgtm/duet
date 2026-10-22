@@ -84,6 +84,14 @@ def load_settings(path: Path) -> dict:
     return settings
 
 
+def read_token(path: Path) -> str | None:
+    """The token config.json (or RELAY_TOKEN) holds now; None if it cannot be read."""
+    try:
+        return load_settings(path)["token"]
+    except (SystemExit, Exception):
+        return None
+
+
 def find_claude(configured: str = "") -> str:
     """The claude executable, looked up for every job (VS Code updates move its copy)."""
     candidates = [configured] if configured else []
@@ -129,14 +137,33 @@ def project_dir(settings: dict, alias: str) -> tuple[Path | None, str]:
 # ── talking to the bot ───────────────────────────────────────────────────
 
 class RelayClient:
-    """HTTP to the bot.  Proxies are ignored: Clash on this Mac must not carry LAN traffic."""
+    """HTTP to the bot.  Proxies are ignored: Clash on this Mac must not carry LAN traffic.
 
-    def __init__(self, base_url: str, token: str):
+    ``reload_token`` (optional) reads the token again when the bot refuses the
+    current one: put the new token in config.json, change it on Windows when
+    convenient, and the running worker follows without a restart.
+    """
+
+    def __init__(self, base_url: str, token: str, reload_token=None):
         self.base_url = base_url
         self.token = token
+        self.reload_token = reload_token
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def _call(self, method: str, path: str, body: dict | None = None, timeout: float = 15):
+        try:
+            return self._send(method, path, body, timeout)
+        except urllib.error.HTTPError as e:
+            if e.code != 401 or self.reload_token is None:
+                raise
+            token = self.reload_token()
+            if not token or token == self.token:
+                raise
+            log.info("the bot refused the token; config.json has another one, using it")
+            self.token = token
+            return self._send(method, path, body, timeout)
+
+    def _send(self, method: str, path: str, body: dict | None, timeout: float):
         data = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(self.base_url + path, data=data, method=method)
         req.add_header("Authorization", f"Bearer {self.token}")
@@ -418,7 +445,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     setup_logging()
     settings = load_settings(Path(args.config))
-    client = RelayClient(settings["relay_url"], settings["token"])
+    client = RelayClient(settings["relay_url"], settings["token"],
+                         reload_token=lambda: read_token(Path(args.config)))
     if args.check:
         claude = find_claude(settings.get("claude_bin", ""))
         version = subprocess.run([claude, "--version"], capture_output=True, text=True).stdout.strip()
