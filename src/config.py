@@ -551,6 +551,20 @@ class BotConfig:
     memory_min_confidence: float = 0.6      # facts below this are never put in a prompt
     memory_prompt_facts: int = 12           # most facts injected into one prompt
 
+    # === Claude relay (src/relay) ===
+    # "on": private messages from claude_relay_wxids (empty = ADMIN_WXID) that
+    # start with claude_relay_prefix become jobs for Claude Code on a Mac
+    # (tools/claude_relay/worker.py asks for them on host:port with the token);
+    # the result comes back as a message.  Needs PRIVATE_CHAT_ENABLED=true.
+    claude_relay: str = "off"
+    claude_relay_token: str = ""
+    claude_relay_host: str = "0.0.0.0"
+    claude_relay_port: int = 8790
+    claude_relay_prefix: str = "cc"
+    claude_relay_wxids: list[str] = field(default_factory=list)
+    claude_relay_db: str = "data/claude_relay.db"
+    claude_relay_max_chars: int = 1500     # longer results are cut (the Mac keeps the full text)
+
 
 def _validate_config(kwargs: dict) -> None:
     """Validate numeric config values.  Prints clear errors and exits on bad values."""
@@ -912,6 +926,24 @@ def _validate_config(kwargs: dict) -> None:
             f"got {proactive_score_threshold}"
         )
 
+    claude_relay = kwargs.get("claude_relay", "off")
+    if claude_relay not in ("off", "on"):
+        errors.append(f"CLAUDE_RELAY must be off or on, got {claude_relay}")
+    elif claude_relay == "on":
+        # Anyone who can reach the port and knows the token can make the Mac run things.
+        if len(str(kwargs.get("claude_relay_token", ""))) < 16:
+            errors.append("CLAUDE_RELAY=on needs CLAUDE_RELAY_TOKEN (at least 16 characters, random)")
+        if not (kwargs.get("claude_relay_wxids") or kwargs.get("admin_wxid")):
+            errors.append("CLAUDE_RELAY=on needs CLAUDE_RELAY_WXIDS or ADMIN_WXID (who may use it)")
+        if not re.fullmatch(r"[^\s]{1,10}", str(kwargs.get("claude_relay_prefix", ""))):
+            errors.append("CLAUDE_RELAY_PREFIX must be 1-10 characters without spaces")
+        if not (1 <= int(kwargs.get("claude_relay_port", 8790)) <= 65535):
+            errors.append(f"CLAUDE_RELAY_PORT must be between 1 and 65535, got {kwargs.get('claude_relay_port')}")
+    if not (100 <= int(kwargs.get("claude_relay_max_chars", 1500)) <= 5000):
+        errors.append(
+            f"CLAUDE_RELAY_MAX_CHARS must be between 100 and 5000, got {kwargs.get('claude_relay_max_chars')}"
+        )
+
     if errors:
         msg = "配置值无效:\n" + "\n".join(f"  - {err}" for err in errors)
         raise RuntimeError(msg)
@@ -1191,6 +1223,14 @@ def load_config() -> BotConfig:
         "memory_idle_minutes": int(os.getenv("MEMORY_IDLE_MINUTES", "20")),
         "memory_min_confidence": float(os.getenv("MEMORY_MIN_CONFIDENCE", "0.6")),
         "memory_prompt_facts": int(os.getenv("MEMORY_PROMPT_FACTS", "12")),
+        "claude_relay": _parse_memory_mode(os.getenv("CLAUDE_RELAY", "off")),
+        "claude_relay_token": os.getenv("CLAUDE_RELAY_TOKEN", "").strip(),
+        "claude_relay_host": os.getenv("CLAUDE_RELAY_HOST", "0.0.0.0").strip() or "0.0.0.0",
+        "claude_relay_port": int(os.getenv("CLAUDE_RELAY_PORT", "8790")),
+        "claude_relay_prefix": os.getenv("CLAUDE_RELAY_PREFIX", "cc").strip(),
+        "claude_relay_wxids": _split_names(os.getenv("CLAUDE_RELAY_WXIDS", "")),
+        "claude_relay_db": os.getenv("CLAUDE_RELAY_DB", "data/claude_relay.db").strip() or "data/claude_relay.db",
+        "claude_relay_max_chars": int(os.getenv("CLAUDE_RELAY_MAX_CHARS", "1500")),
     }
 
     deepseek_model = os.getenv("DEEPSEEK_MODEL")

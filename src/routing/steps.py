@@ -92,6 +92,20 @@ def persist(ctx: RouteContext) -> Optional[Stop]:
     return None
 
 
+def claude_relay(ctx: RouteContext) -> Optional[Stop]:
+    """``cc ...`` in an allowed person's private chat is a job for Claude Code on
+    the Mac (CLAUDE_RELAY=on, src/relay): the reply is the receipt, the result
+    comes later.  Before the memory hooks: orders are not chat to remember."""
+    relay = getattr(ctx.router, "_claude_relay", None)
+    if relay is None:
+        return None
+    matched, reply = relay.handle(ctx.msg)
+    if not matched:
+        return None
+    ctx.trace.reason("claude_relay")
+    return Stop(reply)
+
+
 def memory_hooks(ctx: RouteContext) -> Optional[Stop]:
     """Hand the stored message to the memory machinery (never delays the reply)."""
     router, msg = ctx.router, ctx.msg
@@ -469,6 +483,7 @@ def finish(ctx: RouteContext) -> Optional[Stop]:
 ROUTE_STEPS: tuple[RouteStep, ...] = (
     RouteStep("self_message", self_message, "the bot's own lines are never handled"),
     RouteStep("persist", persist, "store the message; duplicates stop here"),
+    RouteStep("claude_relay", claude_relay, "cc ... from an allowed private chat goes to the Mac"),
     RouteStep("memory_hooks", memory_hooks, "memory job / diary trigger"),
     RouteStep("full_feed", full_feed, "a persona that reads every message of a group"),
     RouteStep("quoted_image", quoted_image, "a quoted picture the user asks about"),

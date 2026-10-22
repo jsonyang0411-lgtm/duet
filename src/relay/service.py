@@ -1,0 +1,330 @@
+"""Claude relay (``CLAUDE_RELAY=on``): WeChat takes the requests, Claude Code on a Mac does them.
+
+The allowed people's private messages that start with the prefix (``cc``) are
+queued (store.py).  The Mac worker (``tools/claude_relay/worker.py``) asks for
+jobs over HTTP (http.py), runs ``claude -p`` and posts the result back; a
+background thread sends it to the chat the request came from.  The bot never
+waits for the Mac: a request gets a receipt at once, the result comes later.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import threading
+import time
+from typing import Callable, Optional
+
+from .commands import RelayCommand, parse, prefix_pattern
+from .store import FINAL_STATES, RelayStore
+
+logger = logging.getLogger(__name__)
+
+LOST_AFTER_SEC = 120        # a running job without a heartbeat for this long is lost
+ONLINE_WINDOW_SEC = 60      # the Mac is online if it asked for work within this time
+MAX_AGE_SEC = 300           # older requests are history replayed at startup, not orders
+RETRY_SEND_SEC = 30         # wait before sending a result again after a failed send
+TICK_SEC = 5
+MAX_WAIT_SEC = 30           # longest a worker's request for a job is held open
+
+_QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
+
+STATUS_NAMES = {
+    "pending": "排队中", "running": "进行中", "done": "完成", "failed": "失败",
+    "cancelled": "已取消", "lost": "失联",
+}
+
+
+def format_duration(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    if seconds < 60:
+        return f"{seconds}秒"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}分{seconds}秒" if seconds else f"{minutes}分钟"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}小时{minutes}分"
+
+
+def _preview(text: str, limit: int = 20) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+class ClaudeRelay:
+    def __init__(self, config, *, store: Optional[RelayStore] = None,
+                 send: Optional[Callable[[str, str], bool]] = None,
+                 clock: Callable[[], float] = time.time):
+        self._config = config
+        self._store = store if store is not None else RelayStore(config.claude_relay_db)
+        self._send = send
+        self._clock = clock
+        self._prefix_word = config.claude_relay_prefix
+        self._prefix = prefix_pattern(config.claude_relay_prefix)
+        allowed = list(config.claude_relay_wxids) or [config.admin_wxid]
+        self._allowed = {str(w).strip() for w in allowed if str(w).strip()}
+        self._max_chars = int(config.claude_relay_max_chars)
+        self._jobs_ready = threading.Condition()
+        self._wake = threading.Event()
+        self._stopping = threading.Event()
+        self._last_seen = 0.0
+        self._send_failed_at: dict[tuple[int, str], float] = {}
+        self._thread: Optional[threading.Thread] = None
+        self._server = None
+
+    # ── lifecycle ─────────────────────────────────────────────────────────
+
+    def start(self) -> None:
+        """The delivery thread, then the HTTP server (an OSError there is the caller's to log)."""
+        self._thread = threading.Thread(target=self._loop, name="claude-relay", daemon=True)
+        self._thread.start()
+        from .http import serve
+        self._server = serve(
+            self, self._config.claude_relay_host, int(self._config.claude_relay_port),
+            self._config.claude_relay_token,
+        )
+        logger.info(
+            "CLAUDE_RELAY: waiting for the Mac worker on %s:%s (prefix %r, %d allowed sender(s))",
+            self._config.claude_relay_host, self._config.claude_relay_port,
+            self._prefix_word, len(self._allowed),
+        )
+
+    def stop(self) -> None:
+        self._stopping.set()
+        self._wake.set()
+        with self._jobs_ready:
+            self._jobs_ready.notify_all()
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
+
+    @property
+    def address(self) -> tuple[str, int] | None:
+        return self._server.server_address[:2] if self._server is not None else None
+
+    # ── from WeChat ───────────────────────────────────────────────────────
+
+    def handle(self, msg: dict) -> tuple[bool, Optional[str]]:
+        """``(matched, reply)``: matched = this message was a relay request (reply may be None)."""
+        if msg.get("is_group", True):
+            return False, None
+        content = _QUOTE_PREFIX.sub("", str(msg.get("content", "")))
+        m = self._prefix.match(content)
+        if not m:
+            return False, None
+        sender = str(msg.get("sender_id", ""))
+        if sender not in self._allowed:
+            logger.info("CLAUDE_RELAY: %s is not allowed to use the relay; handled as a normal message",
+                        sender)
+            return False, None
+        timestamp = float(msg.get("timestamp", 0) or 0)
+        if timestamp and self._clock() - timestamp > MAX_AGE_SEC:
+            logger.info("CLAUDE_RELAY: ignoring an old request (%.0f s): %s",
+                        self._clock() - timestamp, content[:60])
+            return True, None
+        try:
+            return True, self._run(parse(m.group(1)), msg["chat_id"], sender)
+        except Exception:
+            logger.exception("CLAUDE_RELAY: could not handle %r", content[:80])
+            return True, "转给 Mac 失败了，详情看 bot.log。"
+
+    def _run(self, cmd: RelayCommand, chat_id: str, sender: str) -> str:
+        if cmd.kind == "help":
+            return self.help_text()
+        if cmd.kind == "status":
+            return self.status_text(chat_id)
+        if cmd.kind == "reset":
+            self._store.reset_session(chat_id, self._clock())
+            return "好，下一个任务开一个新对话（不带之前的上下文）。"
+        if cmd.kind == "cancel":
+            return self._cancel(chat_id, cmd.job_id)
+        if cmd.kind == "retry":
+            return self._retry(chat_id, cmd.job_id)
+        return self._queue(chat_id, sender, cmd.text, cmd.project)
+
+    def _queue(self, chat_id: str, sender: str, text: str, project: str, note: str = "") -> str:
+        job_id = self._store.add(chat_id, sender, text, project, self._clock())
+        with self._jobs_ready:
+            self._jobs_ready.notify_all()
+        logger.info("CLAUDE_RELAY: queued #%d%s: %s", job_id,
+                    f" (@{project})" if project else "", text[:80])
+        lines = [f"收到，已交给 Mac（#{job_id}{note}）。"]
+        ahead = self._store.pending_before(job_id)
+        if ahead:
+            lines.append(f"前面还有 {ahead} 个任务。")
+        if not self.mac_online():
+            lines.append("Mac 现在不在线，任务先排队，Mac 上线后自动开始。")
+        return "\n".join(lines)
+
+    def _own_job(self, chat_id: str, job_id: int) -> Optional[dict]:
+        job = self._store.get(job_id)
+        return job if job is not None and job["chat_id"] == chat_id else None
+
+    def _cancel(self, chat_id: str, job_id: Optional[int]) -> str:
+        if job_id is None:
+            job = self._store.latest_open(chat_id)
+            if job is None:
+                return "现在没有排队或进行中的任务。"
+            job_id = job["id"]
+        elif self._own_job(chat_id, job_id) is None:
+            return f"没有找到 #{job_id}。"
+        outcome = self._store.cancel(job_id, self._clock())
+        if outcome == "cancelled":
+            return f"#{job_id} 还没开始，已取消。"
+        if outcome == "requested":
+            return f"#{job_id} 正在执行，已通知 Mac 停下来，停好后会告诉你。"
+        return f"#{job_id} 已经结束了（{STATUS_NAMES.get(outcome, outcome)}）。"
+
+    def _retry(self, chat_id: str, job_id: Optional[int]) -> str:
+        if job_id is None:
+            return f"重试要写编号，比如：{self._prefix_word} 重试 17"
+        job = self._own_job(chat_id, job_id)
+        if job is None:
+            return f"没有找到 #{job_id}。"
+        if job["status"] not in FINAL_STATES:
+            return f"#{job_id} 还在{STATUS_NAMES[job['status']]}，不用重试。"
+        return self._queue(chat_id, job["sender_id"], job["text"], job["project"],
+                           note=f"，重试 #{job_id}")
+
+    def help_text(self) -> str:
+        p = self._prefix_word
+        return (
+            "Claude 中转：让 Mac 上的 Claude Code 帮你干活，做完把结果发回来。\n"
+            f"{p} 任务内容 —— 交给 Mac 执行\n"
+            f"{p} @项目 任务 —— 在 Mac 上指定的项目目录里执行\n"
+            f"{p} 状态 —— 最近的任务、Mac 在不在线\n"
+            f"{p} 取消 [编号] —— 取消任务（不写编号就取消最近一个）\n"
+            f"{p} 重试 编号 —— 重新执行一个任务\n"
+            f"{p} 新对话 —— 下一个任务不带之前的上下文"
+        )
+
+    def status_text(self, chat_id: str) -> str:
+        now = self._clock()
+        if self.mac_online():
+            lines = ["Mac：在线"]
+        elif self._last_seen:
+            lines = [f"Mac：不在线（{format_duration(now - self._last_seen)}前联系过）"]
+        else:
+            lines = ["Mac：不在线（这次启动后还没连上过）"]
+        jobs = self._store.recent(chat_id, 5)
+        if not jobs:
+            lines.append("还没有任务。")
+        for job in jobs:
+            state = STATUS_NAMES.get(job["status"], job["status"])
+            if job["status"] == "running" and job["claimed_at"]:
+                state += f" {format_duration(now - job['claimed_at'])}"
+            lines.append(f"#{job['id']} {state} · {_preview(job['text'])}")
+        return "\n".join(lines)
+
+    # ── from the Mac worker (http.py) ─────────────────────────────────────
+
+    def mac_online(self) -> bool:
+        return bool(self._last_seen) and self._clock() - self._last_seen < ONLINE_WINDOW_SEC
+
+    def _seen(self) -> None:
+        self._last_seen = self._clock()
+
+    def next_job(self, wait: float) -> Optional[dict]:
+        """The oldest queued job, waiting up to ``wait`` seconds for one."""
+        self._seen()
+        deadline = time.monotonic() + max(0.0, min(float(wait), MAX_WAIT_SEC))
+        try:
+            while True:
+                job = self._store.claim_next(self._clock())
+                if job is not None:
+                    logger.info("CLAUDE_RELAY: #%d went to the Mac", job["id"])
+                    return {
+                        "id": job["id"], "text": job["text"], "project": job["project"],
+                        "session_id": job["session_id"], "created_at": job["created_at"],
+                    }
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or self._stopping.is_set():
+                    return None
+                with self._jobs_ready:
+                    # A job queued between the claim and this wait is found
+                    # within a second at most.
+                    self._jobs_ready.wait(min(remaining, 1.0))
+        finally:
+            self._seen()
+
+    def heartbeat(self, job_id: int) -> Optional[dict]:
+        self._seen()
+        return self._store.heartbeat(job_id, self._clock())
+
+    def finish(self, job_id: int, payload: dict) -> Optional[bool]:
+        self._seen()
+        text = str(payload.get("text", "") or "")
+        taken = self._store.finish(
+            job_id, ok=bool(payload.get("ok")), text=text,
+            session_id=str(payload.get("session_id", "") or ""),
+            payload={k: payload[k] for k in ("duration_s", "cost_usd", "log_path", "error")
+                     if k in payload},
+            now=self._clock(),
+        )
+        if taken:
+            logger.info("CLAUDE_RELAY: #%d finished (ok=%s, %d chars)", job_id, payload.get("ok"), len(text))
+            self._wake.set()
+        return taken
+
+    # ── back to WeChat ────────────────────────────────────────────────────
+
+    def _loop(self) -> None:
+        while not self._stopping.is_set():
+            try:
+                self.tick()
+            except Exception:
+                logger.exception("CLAUDE_RELAY: delivery round failed")
+            self._wake.wait(TICK_SEC)
+            self._wake.clear()
+
+    def tick(self) -> None:
+        """Mark silent jobs lost, then send every result WeChat has not had yet."""
+        now = self._clock()
+        for job_id in self._store.mark_lost(now - LOST_AFTER_SEC):
+            logger.warning("CLAUDE_RELAY: #%d lost (no heartbeat for %d s)", job_id, LOST_AFTER_SEC)
+        if self._send is None:
+            return
+        for job in self._store.undelivered():
+            key = (job["id"], job["status"])
+            failed_at = self._send_failed_at.get(key)
+            if failed_at is not None and now - failed_at < RETRY_SEND_SEC:
+                continue
+            try:
+                sent = bool(self._send(job["chat_id"], self.result_message(job)))
+            except Exception:
+                logger.exception("CLAUDE_RELAY: sending the result of #%d failed", job["id"])
+                sent = False
+            if sent:
+                self._store.mark_delivered(job["id"], job["status"])
+                self._send_failed_at.pop(key, None)
+            else:
+                self._send_failed_at[key] = now
+                logger.warning("CLAUDE_RELAY: result of #%d not sent; retry in %d s",
+                               job["id"], RETRY_SEND_SEC)
+
+    def result_message(self, job: dict) -> str:
+        job_id, status = job["id"], job["status"]
+        if status == "lost":
+            return (
+                f"#{job_id} 和 Mac 失去联系了（{LOST_AFTER_SEC // 60} 分钟没有心跳），可能只做了一半。"
+                f"Mac 恢复后如果还在做，结果会照常发回来；要重新执行就回复「{self._prefix_word} 重试 {job_id}」。"
+            )
+        try:
+            extra = json.loads(job.get("result_json") or "{}")
+        except ValueError:
+            extra = {}
+        head = {"done": "完成", "failed": "失败", "cancelled": "已取消"}.get(status, status)
+        duration = float(extra.get("duration_s") or 0)
+        head = f"#{job_id} {head}" + (f"（{format_duration(duration)}）" if duration >= 1 else "")
+        body = str(job.get("result_text") or "").strip()
+        if not body and status == "failed":
+            body = str(extra.get("error") or "没有返回内容")
+        if len(body) > self._max_chars:
+            where = f"，完整结果在 Mac：{extra['log_path']}" if extra.get("log_path") else ""
+            body = body[: self._max_chars].rstrip() + f"\n…（太长，已截断{where}）"
+        return f"{head}\n{body}" if body else head

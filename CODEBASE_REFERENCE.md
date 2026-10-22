@@ -79,6 +79,7 @@ grep "文件名" CODEBASE_REFERENCE.md
    - [功能O: 路由步骤、人设数据与决策解释](#功能o-路由步骤人设数据与决策解释)
    - [功能P: 回复发送（气泡与打字延迟）](#功能p-回复发送气泡与打字延迟)
    - [功能Q: 表情（微信小黄脸与表情包）](#功能q-表情微信小黄脸与表情包)
+   - [功能R: Claude 中转（CLAUDE_RELAY）](#功能r-claude-中转claude_relay)
 5. [配置文件和环境变量](#5-配置文件和环境变量)
 
 ---
@@ -204,6 +205,13 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `STICKER_PASTE` | `str` | `"file"` (`file`/`image`) | `src/config.py` | `WcdbBackend.__init__` → `WeChatWindowController(paste_files_as=…)`：`file` 粘贴文件（CF_HDROP，GIF 可以保持动图），`image` 粘贴静态图（CF_DIB，第一帧，透明处补白） |
 | `SEND_KEEP_CLIPBOARD` | `str` | `"on"` (`off`/`on`) | `src/config.py` | `WeChatWindowController._begin_quiet/_end_quiet`：开 `SEND_QUIET` 时，发送前存下剪贴板，微信确认处理完粘贴后放回（期间剪贴板被别人改过、或微信没回应就不放回） |
 | `FOLLOWUP_MODE` | `str` | `"heuristic"` (`heuristic`/`declared`) | `src/config.py` | `src/router.py:MessageRouter.__init__()` → `_declare_followups`；`declared` 时结构化管线让模型在回复里声明在等谁，监听器照此执行 |
+| `CLAUDE_RELAY` | `str` | `"off"` (`off`/`on`) | `src/config.py` | `src/bot.py:_start_claude_relay()` 建 `ClaudeRelay`（发送用 `backend.send_text`）并挂到 `router._claude_relay`；路由步骤 `claude_relay` 把允许的人私聊里 `cc` 开头的消息变成给 Mac 的任务。需要 `PRIVATE_CHAT_ENABLED=true` |
+| `CLAUDE_RELAY_TOKEN` | `str` | 空（开启时必填，至少 16 字符） | `src/config.py` | `src/relay/http.py`：每个请求的 `Authorization: Bearer`，`hmac.compare_digest` 比较；Mac 端 `RELAY_TOKEN` 要相同 |
+| `CLAUDE_RELAY_HOST` / `CLAUDE_RELAY_PORT` | `str` / `int` | `"0.0.0.0"` / `8790` | `src/config.py` | `src/relay/http.py:serve()`：中转自己的 HTTP 端口（不是控制台的端口） |
+| `CLAUDE_RELAY_PREFIX` | `str` | `"cc"`（1–10 个非空白字符） | `src/config.py` | `src/relay/commands.py:prefix_pattern()`：开头是它（可带 `/`、冒号、逗号），后面不能紧跟字母数字 |
+| `CLAUDE_RELAY_WXIDS` | `list[str]` | 空（=`ADMIN_WXID`） | `src/config.py`（逗号分隔） | `ClaudeRelay.__init__()`：只认这些 wxid 的私聊；开启时两者不能都空 |
+| `CLAUDE_RELAY_DB` | `str` | `"data/claude_relay.db"` | `src/config.py` | `RelayStore`：任务和每个私聊的 Claude 会话 |
+| `CLAUDE_RELAY_MAX_CHARS` | `int` | `1500` (100–5000) | `src/config.py` | `ClaudeRelay.result_message()`：结果超过就截断，并给出 Mac 上完整日志的路径 |
 
 ### 1.2 模块级常量
 
@@ -887,7 +895,7 @@ todo_delete_keywords: list[str] = [
 |---|---|---|
 | `context.Stop(value)` / `RouteContext` / `RouteStep(name, run, doc)` | 结束路由并给出返回值 / 步骤共享的上下文（路由器、消息、追踪、`raw`、`is_at`、`sticky_triggered`、`clean_content`、`reply`）/ 一个有名字的步骤 | — |
 | `context.AT_MENTION_MAX_AGE_SEC` 等三个年龄常量 | 300 秒：过旧的 @、欢迎、逐条监听消息当作启动时重放的历史（`src/router.py` 仍导出同名常量） | `int` |
-| `steps.ROUTE_STEPS` | 顺序：`self_message`（自己的消息）→ `persist`（入库，重复停止）→ `memory_hooks`（记忆任务/旧日记触发）→ `full_feed`（逐条监听的人设）→ `quoted_image` → `image_message` → `close_image_window` → `private_chat` → `quote_of_other_member` → `welcome` → `detect_trigger`（@/粘性/关键词/跟聊/点名，写 `route`）→ `mention_gate`（过旧的 @、去掉 @机器人、空 @ 变「在吗」）→ `feishu_export` → `help_command` → `fun_commands` → `admin_command` → `todo_command` → `chat_request` → `ambient`（主动发言，闸门关则沉默）→ `finish`（清洗并登记回复） | `tuple[RouteStep, ...]` |
+| `steps.ROUTE_STEPS` | 顺序：`self_message`（自己的消息）→ `persist`（入库，重复停止）→ `claude_relay`（`CLAUDE_RELAY=on` 时允许的人私聊里的 `cc …` 转给 Mac，回执结束路由）→ `memory_hooks`（记忆任务/旧日记触发）→ `full_feed`（逐条监听的人设）→ `quoted_image` → `image_message` → `close_image_window` → `private_chat` → `quote_of_other_member` → `welcome` → `detect_trigger`（@/粘性/关键词/跟聊/点名，写 `route`）→ `mention_gate`（过旧的 @、去掉 @机器人、空 @ 变「在吗」）→ `feishu_export` → `help_command` → `fun_commands` → `admin_command` → `todo_command` → `chat_request` → `ambient`（主动发言，闸门关则沉默）→ `finish`（清洗并登记回复） | `tuple[RouteStep, ...]` |
 | `steps.self_message(ctx)` | 跳过机器人自己的消息：后端已按 wxid 核实过的消息（`_not_self_by_id`）直接放行；否则按显示名（等于或包含 `BOT_DISPLAY_NAME`）判断 | `Stop \| None` |
 | `steps.run_route(router, msg, trace, steps=ROUTE_STEPS)` | 依次执行，第一个返回 `Stop` 的结束，并 `trace.note(ended_by=<步骤名>)` | `str \| None` |
 | `steps.run_fun_command(router, msg, clean_content, trace)` | 抽签/塔罗，群聊 @ 路径和私聊共用；命中会替换此前命令产生的回复 | `(matched, reply)` |
@@ -970,6 +978,26 @@ todo_delete_keywords: list[str] = [
 | `openai_backend.strip_reasoning(text)` | 去掉 `<think>…</think>`；只有 `</think>`（模板把开头放在提示词里）时去掉它之前的全部；只有 `<think>`（推理中被截断）时去掉它之后的全部 | `str` |
 | `OpenAISummarizer.extra_body / strip_reasoning / token_floor / timeout_floor` | 类默认值 `None / False / 0 / 0.0`，请求和以前逐字相同；本地实例设置后：额外字段并入请求（调用自己的参数优先）、回答内容去掉推理、`max_tokens` 和超时取较大值 | — |
 | `MessageRouter(..., proactive_summarizer=None, memory_summarizer=None)` | 主动发言（结构化与旧路径）用 `_proactive_summarizer`；`MemoryConsolidator`、`MemoryWorker` 用 `_memory_summarizer`；其余（被叫到的回复、看图）用 `summarizer`；决策追踪的调用记录器装到每个不同的模型上（记录里有 `backend` 和 `model`，能分清本地和云端） | — |
+
+### 2.47 `src/relay/`（Claude 中转，`CLAUDE_RELAY`）与 `tools/claude_relay/worker.py`
+
+| 名称 | 描述 | 返回值 |
+|---|---|---|
+| `commands.prefix_pattern(prefix)` / `commands.parse(body)` | 前缀正则；正文解析成 `RelayCommand(kind, text, project, job_id)`：`help`（空、帮助）、`status`（状态）、`reset`（新对话）、`cancel`（取消 [编号]）、`retry`（重试 编号）、`task`（其余；`@别名 任务` 带 `project`）。「取消一下那个提交」这类是任务 | `re.Pattern` / `RelayCommand` |
+| `store.RelayStore(path)` | SQLite（一个连接加锁）：`relay_jobs`（`pending → running → done/failed/cancelled`，没心跳的 `running` 变 `lost`）、`relay_sessions`（每个私聊当前的 Claude 会话） | — |
+| `RelayStore.add / get / recent / pending_before / latest_open / cancel / reset_session` | 微信这边：入队、查询、取消（排队中的直接 `cancelled`，进行中的设 `cancel_requested` 返回 `requested`）、清空会话 | `int` / `dict` / `list` / `str` |
+| `RelayStore.claim_next(now)` | 把最早的排队任务交给 worker；**领取时**才查会话，所以排在后面的追问能接上前一个任务刚留下的会话 | `dict \| None` |
+| `RelayStore.heartbeat(job_id, now)` / `finish(job_id, *, ok, text, session_id, payload, now)` | 心跳（`lost` 的任务恢复成 `running`）返回 `{"cancel": bool}`；结果只收一次（`True` 收下、`False` 已结束、`None` 没有这个任务），有 `session_id` 就更新会话，`delivered=0` 等待发送 | `dict \| None` / `bool \| None` |
+| `RelayStore.mark_lost(older_than) / undelivered() / mark_delivered(job_id, status)` | 心跳超时的标 `lost`；待发送列表；只在状态没变时标已发送（「失联」通知不会盖掉之后到的结果） | `list[int]` / `list[dict]` / — |
+| `service.ClaudeRelay(config, *, store=None, send=None, clock=time.time)` | 中转主体：`start()` 起发送线程和 HTTP 服务（端口打不开抛 `OSError`）、`stop()` | — |
+| `ClaudeRelay.handle(msg)` | 只看私聊、前缀、`CLAUDE_RELAY_WXIDS`/`ADMIN_WXID`；不允许的人返回 `(False, None)` 按普通消息处理；超过 `MAX_AGE_SEC`（300 秒）的旧消息 `(True, None)` 不执行；其余执行命令并返回回执（编号、前面几个任务、Mac 不在线时说明）；出错回「转给 Mac 失败了」 | `(matched, reply)` |
+| `ClaudeRelay.next_job(wait) / heartbeat(job_id) / finish(job_id, payload)` | HTTP 调用：长轮询最多 `MAX_WAIT_SEC`（30 秒）；三者都记录 Mac 最后出现时间，`mac_online()` = 60 秒内来过 | `dict \| None` / `dict \| None` / `bool \| None` |
+| `ClaudeRelay.tick()` | 发送线程每 5 秒（有结果时立即）：标记失联、把没发的结果用 `send(chat_id, text)` 发回原私聊，失败 30 秒后再试 | — |
+| `ClaudeRelay.result_message(job) / status_text(chat_id) / help_text()` | 「#17 完成（4分12秒）\n…」、失联提示（含 `cc 重试 17`）、超长截断；最近 5 个任务和 Mac 在线状态；命令说明 | `str` |
+| `http.serve(relay, host, port, token)` | `ThreadingHTTPServer` 守护线程：`GET /relay/health`、`GET /relay/next?wait=`（无任务 204）、`POST /relay/jobs/<id>/heartbeat`、`POST /relay/jobs/<id>/result`；无 token 401、坏 JSON 400、未知任务 404、请求体上限 1 MB | `ThreadingHTTPServer` |
+| `steps.claude_relay(ctx)` | 路由步骤（`persist` 之后、`memory_hooks` 之前）：`router._claude_relay` 为 `None` 时跳过；命中则 `trace.reason("claude_relay")` 并以回执结束路由 | `Stop \| None` |
+| `Bot._start_claude_relay(config, router, backend)` | `CLAUDE_RELAY=on` 时建中转并启动；端口打不开只记错误日志（任务照样排队，回执会说 Mac 不在线）；`run()` 结束时 `stop()` | `ClaudeRelay \| None` |
+| `tools/claude_relay/worker.py` | Mac 端，只用标准库（系统 Python 3.9 可用）：`load_settings`（`~/.claude-relay/config.json`，`RELAY_URL`/`RELAY_TOKEN` 覆盖）、`find_claude`（PATH、常见位置、最新的 VS Code 扩展内置版，每个任务重新找）、`project_dir`（只允许 `projects` 里的别名）、`RelayClient`（忽略系统代理）、`run_claude`（任务走 stdin；每 30 秒心跳，取消/超时/worker 停止时发 SIGINT，30 秒后强杀）、`summarize`（结果、会话、被拒绝的权限）、会话不存在时去掉 `--resume` 重跑一次、`deliver`/`flush_outbox`（结果先写 `~/.claude-relay/outbox/`，送达才删）、`--check`、`--once` | — |
 
 ---
 
@@ -2159,6 +2187,28 @@ WcdbBackend._handle_message
 看图提问的判断（`src/vision.py:is_image_question`）：只有在问一张已有的图时才走看图回复。“表情包”这个词本身不再算提问词；“发个害羞的表情包”“来张图”“给我发个表情包”这类请求（`_SEND_REQUEST_RE`：发/来/整/求/要… + 个/张… + 表情包/图，中间不跨过 这/那/看）一律不是看图提问，交给正常的聊天路径，开着 `SEND_STICKERS` 时模型可以选表情包。以前它们被当成看图提问，回“我没找到刚才那张图”（真机第 2 轮 BUG-02）。
 
 没验证的（要在 Windows 上看）：微信 4.x 把粘贴进来的 GIF 当动图还是当文件发（当文件就改 `STICKER_PASTE=image`，发出去是静态图）；内置的 30 个小黄脸代码在你的微信版本里是否都存在（`tools/sticker_check.py --emoji`）。发出去的是图片消息，不是微信收藏里的"表情"消息类型（那个只能靠注入或协议）。mac 后端不发图，只发文字。
+### 功能R: Claude 中转（CLAUDE_RELAY）
+
+目的：Windows 上的机器人只收发微信，任务由 Mac 上的 Claude Code 执行。默认关闭；关闭时 `router._claude_relay` 是 `None`，路由步骤直接跳过，行为逐字节不变。
+
+```
+私聊「cc 跑测试」
+  → steps.claude_relay → ClaudeRelay.handle → RelayStore.add → 回执「收到，已交给 Mac（#17）」
+Mac worker.py：GET /relay/next（长轮询）→ claim_next（带上这个私聊的会话）
+  → claude -p --output-format json --permission-mode auto --permission-prompts none [--resume 会话]
+  → 每 30 秒 POST heartbeat（返回 cancel）→ POST result
+ClaudeRelay.finish → RelayStore.finish（更新会话）→ 发送线程 tick → backend.send_text(私聊, 「#17 完成…」)
+```
+
+```sql
+CREATE TABLE relay_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, sender_id TEXT, text TEXT,
+  project TEXT, session_id TEXT, status TEXT, created_at REAL, claimed_at REAL, heartbeat_at REAL,
+  finished_at REAL, cancel_requested INTEGER, result_text TEXT, result_json TEXT, delivered INTEGER);
+CREATE TABLE relay_sessions (chat_id TEXT PRIMARY KEY, session_id TEXT, updated_at REAL);
+```
+
+安全：只认指定 wxid 的私聊；HTTP 要 token；端口只应对局域网开放（Windows 防火墙）；Mac 端用 `auto` 权限模式，无人值守时需要人工批准的操作直接拒绝，并在结果里列出。安装和使用见 `tools/claude_relay/README.md`。
+
 ---
 
 ## 5. 配置文件和环境变量
@@ -2301,6 +2351,15 @@ SEND_STICKERS=off                              # 允许偶尔配一张表情包�
 STICKER_DIR=data/stickers                      # 表情包文件夹（里面放 stickers.json 和图片）
 STICKER_MIN_INTERVAL_SEC=600                   # 同一个聊天两次表情包至少隔多少秒
 STICKER_PASTE=file                             # file=粘贴文件（GIF 可能保持动图）；image=粘贴静态图
+
+# === Claude 中转（Windows 收消息，Mac 上的 Claude Code 干活） ===
+CLAUDE_RELAY=off                               # on：允许的人私聊发「cc 任务」转给 Mac（需 PRIVATE_CHAT_ENABLED=true）
+CLAUDE_RELAY_TOKEN=                            # 随机串（至少 16 字符），Mac 端 RELAY_TOKEN 相同
+CLAUDE_RELAY_HOST=0.0.0.0                      # 中转端口监听地址（防火墙只放行局域网）
+CLAUDE_RELAY_PORT=8790
+CLAUDE_RELAY_PREFIX=cc                         # 指令前缀
+CLAUDE_RELAY_WXIDS=                            # 谁能用（逗号分隔 wxid）；空=ADMIN_WXID
+CLAUDE_RELAY_MAX_CHARS=1500                    # 结果超过就截断（完整结果在 Mac 日志）
 
 # === 引导流程 ===
 ONBOARDING_DONE=false

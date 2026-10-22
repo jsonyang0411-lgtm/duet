@@ -268,6 +268,8 @@ class MessageRouter:
             self._todo_handler = TodoHandler(
                 self._todo_store, config,
             )
+        # CLAUDE_RELAY=on: the bot sets a ClaudeRelay here once the backend can send.
+        self._claude_relay = None
         # Health monitoring: count unique messages processed (post-dedup)
         self.messages_processed: int = 0
 

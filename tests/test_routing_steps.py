@@ -40,7 +40,7 @@ class OrderTests(StepCase):
     def test_the_chain_has_the_documented_order_and_unique_names(self):
         names = [step.name for step in S.ROUTE_STEPS]
         assert names == [
-            "self_message", "persist", "memory_hooks", "full_feed", "quoted_image", "image_message",
+            "self_message", "persist", "claude_relay", "memory_hooks", "full_feed", "quoted_image", "image_message",
             "close_image_window", "private_chat", "quote_of_other_member", "welcome", "detect_trigger",
             "mention_gate", "feishu_export", "help_command", "fun_commands", "admin_command",
             "todo_command", "chat_request", "ambient", "finish",

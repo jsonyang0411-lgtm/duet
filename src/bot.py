@@ -269,6 +269,9 @@ class Bot:
         except Exception:
             pass
 
+        # CLAUDE_RELAY=on: "cc ..." in an allowed private chat goes to the Mac.
+        relay = self._start_claude_relay(config, router, backend)
+
         # ── 6. Health monitor ───────────────────────────────────
         self._health = HealthMonitor(
             summarizer=summarizer,
@@ -317,6 +320,8 @@ class Bot:
         finally:
             if self._health:
                 self._health.stop()
+            if relay is not None:
+                relay.stop()
             # Stop the memory thread before its database goes away.
             close_router = getattr(router, "close", None)
             if callable(close_router):
@@ -335,6 +340,27 @@ class Bot:
             logger.info("Bot shut down gracefully.")
 
     # ── Helpers ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _start_claude_relay(config, router, backend):
+        """The Claude relay (src/relay) with the backend as its sender, or None when off.
+
+        If its port cannot be opened the requests are still queued (the
+        receipt then says the Mac is offline) and the error is in the log.
+        """
+        if getattr(config, "claude_relay", "off") != "on":
+            return None
+        from .relay import ClaudeRelay
+        relay = ClaudeRelay(config, send=backend.send_text)
+        try:
+            relay.start()
+        except OSError:
+            logger.exception(
+                "CLAUDE_RELAY: cannot listen on %s:%s; the Mac cannot reach this bot",
+                config.claude_relay_host, config.claude_relay_port,
+            )
+        router._claude_relay = relay
+        return relay
 
     def _log_banner(self) -> None:
         """Log the startup banner with configuration details."""
