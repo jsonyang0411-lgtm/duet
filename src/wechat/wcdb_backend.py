@@ -1217,12 +1217,20 @@ class WcdbBackend(AbstractWeChatBackend):
             is_reply_to_bot = bool(quote_info and (quote_name_matches_bot or quote_id_matches_bot))
 
         # Detect @mention of bot
+        bot_names = {self._bot_name, "假企鹅", "qier"}
+        if hasattr(self, "_config") and self._config:
+            if getattr(self._config, "bot_display_name", None):
+                bot_names.add(self._config.bot_display_name)
+            if getattr(self._config, "chat_persona_name", None):
+                bot_names.add(self._config.chat_persona_name)
+        bot_names.discard("")
+
         is_at = bool(
             is_reply_to_bot
             or (
-                is_group and self._bot_name and (
-                    f"@{self._bot_name}" in resolved_content
-                    or f"@{self._bot_name}" in content
+                is_group and any(
+                    f"@{bn}" in resolved_content or f"@{bn}" in content
+                    for bn in bot_names
                 )
             )
         )

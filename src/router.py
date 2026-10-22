@@ -548,6 +548,8 @@ class MessageRouter:
             str(getattr(self._config, "bot_display_name", "") or "").strip(),
             str(getattr(self._config, "chat_persona_name", "") or "").strip(),
             persona.name if persona is not None else "",
+            "假企鹅",
+            "qier",
         }
         return any(name and f"@{name}" in content for name in names)
 

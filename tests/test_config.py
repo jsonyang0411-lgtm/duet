@@ -547,7 +547,7 @@ class LoadConfigTests(unittest.TestCase):
             self.assertEqual(config.wechat_backend, "wcdb")
             # the default persona is the 杨宇靖 preset, which answers to its own name
             self.assertEqual(config.chat_persona_profile, "yang_yujing")
-            self.assertEqual(config.bot_display_name, "杨宇靖")
+            self.assertEqual(config.bot_display_name, "假企鹅")
             self.assertEqual(config.yang_yujing_group_name, "群主应该是pyc")
 
     def test_load_config_parses_persona_settings(self):
@@ -586,13 +586,13 @@ class LoadConfigTests(unittest.TestCase):
         }, clear=True):
             config = load_config()
             self.assertEqual(config.chat_persona_profile, "yang_yujing")
-            self.assertEqual(config.chat_persona_name, "杨宇靖")
+            self.assertEqual(config.chat_persona_name, "假企鹅")
             self.assertIn("游戏", config.chat_persona_prompt)
             self.assertIn("2026", config.chat_persona_prompt)
             self.assertIn("2 到 8 个字", config.chat_persona_prompt)
             self.assertIn("次元和 cy 是同一个人", config.chat_persona_prompt)
             self.assertIn("cy 是南通人", config.chat_persona_prompt)
-            self.assertEqual(config.bot_display_name, "杨宇靖")
+            self.assertEqual(config.bot_display_name, "假企鹅")
             self.assertEqual(config.chat_max_chars, 30)
             self.assertEqual(config.chat_context_count, 14)
             self.assertEqual(config.yang_yujing_group_name, "群主应该是pyc")
