@@ -56,7 +56,11 @@ Windows 上的机器人只负责收发微信消息。你私聊机器人发 `cc �
 ## Mac 端（worker）
 
 1. worker 只用 Python 标准库，系统自带的 `/usr/bin/python3` 就够了。
-2. 写配置文件 `~/.claude-relay/config.json`，写完执行 `chmod 600`，因为里面有 token。字段如下（默认值见 `worker.py` 里的 `DEFAULTS`）：
+2. 写配置文件 `~/.claude-relay/config.json`，参照同目录的 `config.example.json`：
+   ```
+   mkdir -p ~/.claude-relay && cp tools/claude_relay/config.example.json ~/.claude-relay/config.json
+   chmod 600 ~/.claude-relay/config.json      # 里面有 token
+   ```
    - `relay_url`：`http://<Windows 的局域网 IP>:8790`
    - `projects`：`cc @别名` 能用的项目目录。只有这里列出的目录才能被指定。
    - `default_project`：不写 `@别名` 时用哪个，可以填别名或目录。
@@ -68,9 +72,15 @@ Windows 上的机器人只负责收发微信消息。你私聊机器人发 `cc �
    python3 tools/claude_relay/worker.py --check
    ```
 4. 先手动跑一个任务试试：`python3 tools/claude_relay/worker.py --once`，然后在微信里发 `cc 只回复：收到`。
-5. 平时运行 `python3 tools/claude_relay/worker.py`，按 Ctrl+C 停止。
+5. 平时运行 `python3 tools/claude_relay/worker.py`，按 Ctrl+C 停止。也可以用 launchd 常驻：开机自启，崩溃自动重启，运行时阻止空闲睡眠。
+   ```
+   sed "s#/PATH/TO/webot-claude-relay#$(pwd)#" tools/claude_relay/com.webot.claude-relay.plist \
+     > ~/Library/LaunchAgents/com.webot.claude-relay.plist
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.webot.claude-relay.plist
+   # 停止：launchctl bootout gui/$(id -u)/com.webot.claude-relay
+   ```
    - 日志在 `~/.claude-relay/worker.log`，每个任务的完整输出在 `~/.claude-relay/logs/`。
-   - Mac 睡眠期间任务会在 Windows 上排队等待。
+   - MacBook 合盖后仍会睡眠，除非接着电源和外接显示器。睡眠期间任务会在 Windows 上排队等待。
 
 ## 常见问题
 
