@@ -85,3 +85,11 @@ def test_a_missing_window_or_recognizer_fails_cleanly(tool, monkeypatch, capsys)
     monkeypatch.setattr(tool, "default_engine", no_engine)
     assert tool.main([]) == 1
     assert "no OCR engine" in capsys.readouterr().out
+
+
+def test_a_window_too_small_to_show_the_title_is_explained(tool, monkeypatch, capsys):
+    rows = [{"t": "字", "x0": 0.3, "x1": 0.4, "y0": 0.5, "y1": 0.52, "bg": [255, 255, 255]}]
+    use_engine(tool, monkeypatch, FakeEngine(rows))
+    assert tool.main(["--looks", "1"]) == 0
+    out = capsys.readouterr().out
+    assert "title=NO" in out and "make the window bigger" in out and "FRONT WeChat window" in out

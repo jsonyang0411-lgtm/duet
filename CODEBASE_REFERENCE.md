@@ -2244,7 +2244,7 @@ MacHybridBackend.poll_once
 
 Windows（`WcdbBackend`）：数据库启动时就打不开也不会退出（有 OCR 时）：`_poll_cycle` 每轮报「数据库没打开」→ 连续 N 次后打开 OCR → 每 5 次失败 `_reinitialize()` 试着重新打开数据库 → 打开成功后 `_resolve_groups` + `_prime_known_ids` 把积压标为已见 → 下一轮读通就关掉 OCR。
 
-限制：只读打开的那个会话、只读屏幕上显示的那一段；认不出群里是谁说的（所以只能按 @机器人/叫名字触发，管理员命令、cc 中转不可用）；图片、语音、表情读不出；微信不能最小化；macOS 要给运行机器人的程序「屏幕录制」权限、Windows 要装中文 OCR 语言包（Windows 部分只用假对象测过，真机用 `tools/ocr_check.py` 验证）；手动滚动机器人那台电脑上的微信窗口可能导致重复或漏读。控制台开关：`advanced_config.GROUPS` 里的 `ocr` 分组；`platform_label` / `platform_backends` 让标签显示「仅 macOS」，选了别的后端会变成警告色。
+限制：只读打开的那个会话、只读屏幕上显示的那一段；认不出群里是谁说的（所以只能按 @机器人/叫名字触发，管理员命令、cc 中转不可用）；图片、语音、表情读不出；微信不能最小化、读的是最前面的微信窗口（主窗口或独立聊天窗口），窗口要够大（约 600×500 以上，缩得太小时只认出几行、认不出标题）；macOS 要给运行机器人的程序「屏幕录制」权限、Windows 要装中文 OCR 语言包（Windows 部分只用假对象测过，真机用 `tools/ocr_check.py` 验证）；手动滚动机器人那台电脑上的微信窗口可能导致重复或漏读。控制台开关：`advanced_config.GROUPS` 里的 `ocr` 分组；`platform_label` / `platform_backends` 让标签显示「仅 macOS」，选了别的后端会变成警告色。
 
 ---
 

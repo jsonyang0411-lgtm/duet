@@ -21,6 +21,8 @@ What a failure means:
   Windows  no OCR language   Add-WindowsCapability -Online -Name Language.OCR~~~zh-CN~0.0.1.0
                              (PowerShell as administrator)
   both     window not found  WeChat is closed or minimized
+  both     rows but no title The window is too small (an independent chat window dragged small):
+                             the bot reads the FRONT WeChat window; make it about 600x500 or bigger
 """
 
 from __future__ import annotations
@@ -94,6 +96,10 @@ def main(argv=None) -> int:
             print(f"  NEW in {args.group}: {text}")
         if not last_rows:
             print("  no text on the screen at all: check the permission / that WeChat is not minimized")
+        elif not info["title"]:
+            print("  text was read but no chat title: open a chat, and make the window bigger "
+                  "(the bot reads the FRONT WeChat window, the main one or an independent chat window; "
+                  "about 600x500 or more)")
         if deadline is None and count >= args.looks:
             break
         if deadline is not None and time.monotonic() >= deadline:
