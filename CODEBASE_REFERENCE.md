@@ -1008,8 +1008,14 @@ todo_delete_keywords: list[str] = [
 | 名称 | 描述 | 返回值 |
 |---|---|---|
 | `reader.bubble_kind(bg)` / `resolve_chat_geometry(rows)` / `chat_title(rows)` / `other_messages(rows, want)` / `clean_group_name(name)` / `normalize_text(text)` / `MessageDeduplicator` | 来自 wechat-ocr-kit 的原样代码：按文字左侧底色分出「别人（白/深灰）」「自己（绿）」；动态推导聊天区边界（适配各种窗口大小、侧边抽屉、深浅色、输入框草稿）；取会话标题并去掉人数后缀；把同一气泡的相邻行合并成一条消息 | — |
-| `reader.read_rows(rows)` | 看一次窗口：`{"title", "title_clean", "other", "self"}`，消息按屏幕从上到下 | `dict` |
-| `reader.NewMessageTracker.feed(title, texts)` | 找出新消息：记住最近 100 条见过的消息，屏幕开头与记录末尾重叠的部分之后就是新的（模糊比较，容忍 OCR 把同一个气泡读得略有不同）；第一次看、换了聊天只记不报；不接续记录的屏幕（有人上滚、一次来了超过一屏）不报，同一屏停留 3 次后重新当起点；上滚再滚回来不会重复报 | `list[str]` |
+| `reader.read_rows(rows)` | 看一次窗口：`{"title", "title_clean", "other", "self", "sequence"}`，`other`/`self` 按屏幕从上到下，`sequence` 是 `messages_in_order` 的结果 | `dict` |
+| `reader.NewMessageTracker.feed(title, items)` | 找出对方的新消息。`items` 是 `messages_in_order` 的结果（纯字符串当作对方的消息）：记住最近 100 项（对方气泡、自己气泡、时间线），屏幕开头与记录末尾重叠的部分之后就是新的，只报告对方的；自己的气泡和时间线是参照，没有它们时一连串相同的消息在新来一条前后看起来一样（现场测试发现）。比较是模糊的；最上面一条可以是被窗口顶边截掉开头的那条（只剩结尾）；第一次看、换了聊天只记不报；不接续记录的屏幕不报，同一屏停留 3 次后重新当起点；上滚再滚回来不会重复报 | `list[str]` |
+| `reader.messages_in_order(rows)` | 聊天区里所有气泡和时间线按屏幕顺序：`[(kind, text)]`，kind 是 `other` / `self` / `time`；气泡合并规则同 `other_messages` | `list[tuple]` |
+| `reader.plain_backgrounds(rows)` / `bubble_kind(bg, plain=())` | 聊天自己的底色（标题本身和时间线下面的颜色，只取真正组成标题的文字块，标题栏下方被顶上去的气泡不算）；`bubble_kind` 遇到与底色相差不超过 `PLAIN_TOLERANCE`（4）的颜色返回 `none`。微信 4.x 浅色模式聊天底色是 251,251,251，工具包原来把接近白色的都当成气泡，时间、昵称、系统提示会被当成对方的消息。不传 `plain` 时与工具包原来一致 | `list` / `str` |
+| `reader.is_clock_text(text)` | 时间线（`13:01`、`昨天 12:30`、`10月21日 08:00`）或视频时长（`0:25`），容忍 OCR 加在末尾的点（`15:08.`）；永远不算消息 | `bool` |
+| `reader._is_search_box(text)` | 搜索框占位文字，包括放大镜图标被读成字母 Q 的情况（`Q 搜索`）；以前主窗口的标题会被认成搜索框 | `bool` |
+| `fallback.OcrFallback.chat_is_open(name)` | 立刻看一次（不受间隔限制）：主窗口里打开的是不是这个聊天（标题严格相等；聊天区左边界 < `MAIN_WINDOW_MIN_CHAT_X0` = 0.10 的独立聊天窗口不算，发送是往主窗口里打字） | `bool` |
+| `MacHybridBackend._chat_open_on_screen(target)` | OCR 开着时 `send_text` 先问它：群已经在主窗口打开就原地发送，不再走搜索（第一次真实测试里，搜索后标题核对失败、点进了别的联系人）；否则照旧搜索 | `bool` |
 | `mac_vision.MacVisionEngine(source, cache_dir, runner)` | macOS 识别引擎：`prepare()` 用 `swiftc -O` 把 `native/macos/wechat_ocr/ocr.swift` 编译到 `~/Library/Caches/webot/wechat_ocr/ocr-<源码哈希>`（改了源码会重编；没有 swiftc 只记日志不抛）；`capture()` 用 `ocr wid` 找微信主窗口、`screencapture -l` 截图、`ocr <图>` 识别成行，**截图读完立即删除**；找不到窗口抛 `RuntimeError` | `bool` / `list[dict]` |
 | `fallback.OcrFallback(engine, *, after=3, interval=4.0, clock)` | 开关逻辑：`note_db_failure()` 连续失败 `after` 次后打开（日志警告），`note_db_ok()` 数据库读通就关（返回 True 表示刚切回来）；`poll()` 只在打开时每 `interval` 秒看一次，返回 `OcrMessage(title, title_clean, text, is_group)`（标题带人数后缀 = 群聊）；连续 5 次读到 0 行文字时提示检查屏幕录制权限；`warm_up()` 后台编译识别程序 | `bool` / `bool` / `list[OcrMessage]` |
 | `MacHybridBackend(..., ocr=None)` | `poll_once`：WeFlow 读失败时调 `_poll_ocr()`；**第一次读通时**这次返回的是断线期间的积压，只记入 `_seen_ids` 不交给机器人（一部分已经靠屏幕回答过了）；`_dispatch(msg, callback)` 是原来的「去重 → 过滤自己 → 回调 → 发送」抽出来的共用步骤；`_message_from_ocr()` 组标准消息（`sender_id`/`sender_name` = `OCR群友`，`message_id` = `mac-ocr-<sha1>`，`is_at_mentioned` 判断同 WeFlow 路径）；`_chat_id_for_title()` 标题对应的 `@chatroom` 唯一时用它，否则 `ocr:<标题>`（发送靠标题，不靠 id）；`health_status()` 开着时返回 `ocr_fallback`（心跳日志里能看到） | — |
@@ -2244,7 +2250,7 @@ MacHybridBackend.poll_once
 
 Windows（`WcdbBackend`）：数据库启动时就打不开也不会退出（有 OCR 时）：`_poll_cycle` 每轮报「数据库没打开」→ 连续 N 次后打开 OCR → 每 5 次失败 `_reinitialize()` 试着重新打开数据库 → 打开成功后 `_resolve_groups` + `_prime_known_ids` 把积压标为已见 → 下一轮读通就关掉 OCR。
 
-限制：只读打开的那个会话、只读屏幕上显示的那一段；认不出群里是谁说的（所以只能按 @机器人/叫名字触发，管理员命令、cc 中转不可用）；图片、语音、表情读不出；微信不能最小化、读的是最前面的微信窗口（主窗口或独立聊天窗口），窗口要够大（约 600×500 以上，缩得太小时只认出几行、认不出标题）；macOS 要给运行机器人的程序「屏幕录制」权限、Windows 要装中文 OCR 语言包（Windows 部分只用假对象测过，真机用 `tools/ocr_check.py` 验证）；手动滚动机器人那台电脑上的微信窗口可能导致重复或漏读。控制台开关：`advanced_config.GROUPS` 里的 `ocr` 分组；`platform_label` / `platform_backends` 让标签显示「仅 macOS」，选了别的后端会变成警告色。
+限制：只读打开的那个会话、只读屏幕上显示的那一段（消息发在别的聊天里时看不到，切过去以后它已经在屏幕上，当作历史不回答）；屏幕上没有任何自己的消息或时间线作参照时，一连串完全相同的消息分不出新旧；认不出群里是谁说的（所以只能按 @机器人/叫名字触发，管理员命令、cc 中转不可用）；图片、语音、表情读不出；微信不能最小化、读的是最前面的微信窗口（主窗口或独立聊天窗口），窗口要够大（约 600×500 以上，缩得太小时只认出几行、认不出标题）；macOS 要给运行机器人的程序「屏幕录制」权限、Windows 要装中文 OCR 语言包（Windows 部分只用假对象测过，真机用 `tools/ocr_check.py` 验证）；手动滚动机器人那台电脑上的微信窗口可能导致重复或漏读。控制台开关：`advanced_config.GROUPS` 里的 `ocr` 分组；`platform_label` / `platform_backends` 让标签显示「仅 macOS」，选了别的后端会变成警告色。
 
 ---
 
