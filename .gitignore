@@ -118,3 +118,6 @@ image/*
 image/logo_assets/*
 !image/logo_assets/logo.ico
 data/models/
+*.patch
+*.bundle
+unsloth_compiled_cache/

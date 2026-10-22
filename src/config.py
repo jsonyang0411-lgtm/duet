@@ -577,6 +577,11 @@ class BotConfig:
     ocr_fallback_after: int = 3
     ocr_poll_sec: float = 4.0
 
+    # === Friend management ===
+    auto_accept_friends: str = "on"
+    auto_accept_interval_sec: int = 300
+    auto_accept_greeting: str = ""
+
 
 def _validate_config(kwargs: dict) -> None:
     """Validate numeric config values.  Prints clear errors and exits on bad values."""
@@ -967,6 +972,13 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(
             f"CLAUDE_RELAY_MAX_CHARS must be between 100 and 5000, got {kwargs.get('claude_relay_max_chars')}"
         )
+    auto_accept = kwargs.get("auto_accept_friends", "on")
+    if auto_accept not in ("off", "on"):
+        errors.append(f"AUTO_ACCEPT_FRIENDS must be off or on, got {auto_accept}")
+    if not (10 <= int(kwargs.get("auto_accept_interval_sec", 300)) <= 86400):
+        errors.append(
+            f"AUTO_ACCEPT_INTERVAL_SEC must be between 10 and 86400, got {kwargs.get('auto_accept_interval_sec')}"
+        )
 
     if errors:
         msg = "配置值无效:\n" + "\n".join(f"  - {err}" for err in errors)
@@ -1263,6 +1275,9 @@ def load_config() -> BotConfig:
         "ocr_fallback": _parse_memory_mode(os.getenv("OCR_FALLBACK", "off")),
         "ocr_fallback_after": int(os.getenv("OCR_FALLBACK_AFTER", "3")),
         "ocr_poll_sec": float(os.getenv("OCR_POLL_SEC", "4")),
+        "auto_accept_friends": _parse_memory_mode(os.getenv("AUTO_ACCEPT_FRIENDS", "on")),
+        "auto_accept_interval_sec": int(os.getenv("AUTO_ACCEPT_INTERVAL_SEC", "300")),
+        "auto_accept_greeting": os.getenv("AUTO_ACCEPT_GREETING", "").strip(),
     }
 
     deepseek_model = os.getenv("DEEPSEEK_MODEL")

@@ -190,6 +190,8 @@ class Bot:
         self._conn = None
         self._backend = None
         self._health: HealthMonitor | None = None
+        self._friend_mgr = None
+        self._auto_friend = None
 
     def run(self) -> None:
         """Initialize all components and start the bot. Blocks until stopped."""
@@ -272,6 +274,23 @@ class Bot:
         # CLAUDE_RELAY=on: "cc ..." in an allowed private chat goes to the Mac.
         relay = self._start_claude_relay(config, router, backend)
 
+        # Friend manager (PC auto-accept & add friend)
+        try:
+            window_ctrl = getattr(backend, "_window", None)
+            ocr_engine = getattr(backend, "_ocr", None)
+            from .wechat.friend_manager import FriendManager, AutoFriendService
+            self._friend_mgr = FriendManager(window_controller=window_ctrl, ocr_engine=ocr_engine, config=config)
+            self._auto_friend = AutoFriendService(
+                friend_manager=self._friend_mgr,
+                interval_sec=getattr(config, "auto_accept_interval_sec", 300),
+                enabled=(getattr(config, "auto_accept_friends", "on") == "on"),
+            )
+            admin_handler.set_friend_manager(self._friend_mgr, self._auto_friend)
+            if getattr(config, "auto_accept_friends", "on") == "on":
+                self._auto_friend.start()
+        except Exception as e:
+            logger.debug("FriendManager init: %s", e)
+
         # ── 6. Health monitor ───────────────────────────────────
         self._health = HealthMonitor(
             summarizer=summarizer,
@@ -286,6 +305,8 @@ class Bot:
         # ── 7. Signal handling ──────────────────────────────────
         def shutdown(signum, frame):
             logger.info("Received signal %d. Shutting down...", signum)
+            if self._auto_friend:
+                self._auto_friend.stop()
             backend.stop()
             if self._health:
                 self._health.stop()
@@ -318,6 +339,8 @@ class Bot:
         except KeyboardInterrupt:
             pass
         finally:
+            if self._auto_friend:
+                self._auto_friend.stop()
             if self._health:
                 self._health.stop()
             if relay is not None:
