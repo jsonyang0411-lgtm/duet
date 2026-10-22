@@ -1021,17 +1021,21 @@ def load_config() -> BotConfig:
     """
     ai_backend = os.getenv("AI_BACKEND", "claude").strip().lower()
     model_route = os.getenv("MODEL_ROUTE", "cloud").strip().lower() or "cloud"
+    relay_only = (_parse_memory_mode(os.getenv("CLAUDE_RELAY", "off")) == "on"
+                  and _parse_memory_mode(os.getenv("CLAUDE_RELAY_ONLY", "off")) == "on")
+    no_key_hint = "（只做中转的机器人不需要 AI 密钥：在控制台「中转代理」里打开中转和「只做中转」）"
 
     # Validate required API keys based on selected backend (not needed when
-    # every task runs on the local model: MODEL_ROUTE=local)
-    if model_route == "local":
+    # every task runs on the local model, MODEL_ROUTE=local, or when the bot
+    # only relays and uses no model at all, CLAUDE_RELAY_ONLY=on)
+    if model_route == "local" or relay_only:
         pass
     elif ai_backend == "deepseek":
         api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
         if not api_key or "***" in api_key:
             msg = (
                 "DEEPSEEK_API_KEY 未设置，或当前值是被打码后的占位；"
-                "请在 .env 文件中配置完整 API Key，或通过引导页重新填写"
+                "请在 .env 文件中配置完整 API Key，或通过引导页重新填写" + no_key_hint
             )
             raise RuntimeError(msg)
     elif ai_backend == "openai":
@@ -1039,7 +1043,7 @@ def load_config() -> BotConfig:
         if not api_key or "***" in api_key:
             msg = (
                 "OPENAI_API_KEY 未设置，或当前值是被打码后的占位；"
-                "请在 .env 文件中配置完整 API Key，或通过引导页重新填写"
+                "请在 .env 文件中配置完整 API Key，或通过引导页重新填写" + no_key_hint
             )
             raise RuntimeError(msg)
     elif ai_backend == "claude":
@@ -1047,7 +1051,7 @@ def load_config() -> BotConfig:
         if not api_key or "***" in api_key:
             msg = (
                 "ANTHROPIC_API_KEY 未设置，或当前值是被打码后的占位；"
-                "请在 .env 文件中配置完整 API Key，或通过引导页重新填写"
+                "请在 .env 文件中配置完整 API Key，或通过引导页重新填写" + no_key_hint
             )
             raise RuntimeError(msg)
     else:

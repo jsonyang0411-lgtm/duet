@@ -207,7 +207,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `SEND_KEEP_CLIPBOARD` | `str` | `"on"` (`off`/`on`) | `src/config.py` | `WeChatWindowController._begin_quiet/_end_quiet`：开 `SEND_QUIET` 时，发送前存下剪贴板，微信确认处理完粘贴后放回（期间剪贴板被别人改过、或微信没回应就不放回） |
 | `FOLLOWUP_MODE` | `str` | `"heuristic"` (`heuristic`/`declared`) | `src/config.py` | `src/router.py:MessageRouter.__init__()` → `_declare_followups`；`declared` 时结构化管线让模型在回复里声明在等谁，监听器照此执行 |
 | `CLAUDE_RELAY` | `str` | `"off"` (`off`/`on`) | `src/config.py` | `src/bot.py:_start_claude_relay()` 建 `ClaudeRelay`（发送用 `backend.send_text`）并挂到 `router._claude_relay`；路由步骤 `claude_relay` 把允许的人私聊里 `cc` 开头的消息变成给 Mac 的任务。需要 `PRIVATE_CHAT_ENABLED=true` |；控制台「中转代理」页可改（`advanced_config` 的 `relay` 分组：开关、`ADMIN_WXID`、`CLAUDE_RELAY_WXIDS`、token（可随机生成）、端口、监听地址、前缀、结果最长）。`CLAUDE_RELAY_PORT` 的范围不论开关都检查（与白名单一致）
-| `CLAUDE_RELAY_ONLY` | `str` | `"off"` (`off`/`on`；`on` 时必须 `CLAUDE_RELAY=on`) | `src/config.py` | `steps.relay_only`：不是中转请求的消息在 `claude_relay` 之后停下（不回复、不主动发言、不欢迎、不整理记忆、不调用模型，消息仍入库）；控制台「中转代理」页和首次设置第 3 步（默认打开）可改 |
+| `CLAUDE_RELAY_ONLY` | `str` | `"off"` (`off`/`on`；`on` 时必须 `CLAUDE_RELAY=on`) | `src/config.py` | `steps.relay_only`：不是中转请求的消息在 `claude_relay` 之后停下（不回复、不主动发言、不欢迎、不整理记忆、不调用模型，消息仍入库）；和 `CLAUDE_RELAY=on` 一起时 `load_config` 不检查 AI 密钥，`create_models` 返回 `summarize.no_model.NoModel`（一调用就抛错），`model_label` 为「不使用（只做中转）」，启动日志写 `AI: none`；控制台「中转代理」页和首次设置第 3 步（默认打开）可改 |
 | `CLAUDE_RELAY_TOKEN` | `str` | 空（开启时必填，至少 16 字符） | `src/config.py` | `src/relay/http.py`：每个请求的 `Authorization: Bearer`，`hmac.compare_digest` 比较；Mac 端 `RELAY_TOKEN` 要相同 |
 | `CLAUDE_RELAY_HOST` / `CLAUDE_RELAY_PORT` | `str` / `int` | `"0.0.0.0"` / `8790` | `src/config.py` | `src/relay/http.py:serve()`：中转自己的 HTTP 端口（不是控制台的端口） |
 | `CLAUDE_RELAY_PREFIX` | `str` | `"cc"`（1–10 个非空白字符） | `src/config.py` | `src/relay/commands.py:prefix_pattern()`：开头是它（可带 `/`、冒号、逗号），后面不能紧跟字母数字 |
@@ -978,7 +978,8 @@ todo_delete_keywords: list[str] = [
 
 | 名称 | 描述 | 返回值 |
 |---|---|---|
-| `summarize.create_models(config)` | `cloud`：一个 `create_summarizer` 实例给所有任务；`local`：一个 `create_local_summarizer` 实例给所有任务（不建云端，不需要云端 Key）；`split`：两个都建，`LOCAL_TASKS` 里的组（`LOCAL_TASK_GROUPS = chat, proactive, memory`）用本地，有 `decide`（`LOCAL_TASK_DECIDE`）时云端模型的 `decide_model` 设为本地模型；`CLOUD_FALLBACK=local` 时给云端模型装 `install_fallback`（`cloud` 路线也装）。启动日志写明每组用哪个 | `ModelSet(chat, proactive, memory)` |
+| `summarize.no_model.NoModel` / `relay_only(config)` | 只做中转的机器人的「模型」：所有调用都抛 `RuntimeError`（只做中转时路由根本不会调用它）；`relay_only` = `CLAUDE_RELAY=on` 且 `CLAUDE_RELAY_ONLY=on` | — / `bool` |
+| `summarize.create_models(config)` | 只做中转时三组任务都是一个 `NoModel`，不建任何云端或本地模型；`cloud`：一个 `create_summarizer` 实例给所有任务；`local`：一个 `create_local_summarizer` 实例给所有任务（不建云端，不需要云端 Key）；`split`：两个都建，`LOCAL_TASKS` 里的组（`LOCAL_TASK_GROUPS = chat, proactive, memory`）用本地，有 `decide`（`LOCAL_TASK_DECIDE`）时云端模型的 `decide_model` 设为本地模型；`CLOUD_FALLBACK=local` 时给云端模型装 `install_fallback`（`cloud` 路线也装）。启动日志写明每组用哪个 | `ModelSet(chat, proactive, memory)` |
 | `summarize.fallback.install_fallback(cloud, local, *, cooldown=FALLBACK_COOLDOWN_SEC, clock=time.monotonic)` | 给云端模型的两个聊天调用（`CHAT_CALLS`）包一层 `CloudFallback.wrap`：出错时由本地模型回答并记下 `skip_cloud_until`，冷却期内直接用本地，`fallbacks` 计数；在云端对象上留 `cloud_fallback` | `CloudFallback` |
 | `engine._decide_step(summarizer, request, settings, names, max_chars)` | 两步策略的判断步：有 `summarizer.decide_model`（`LOCAL_TASKS=decide`）时用它判断，它抛错就退回主模型；没有时与以前相同 | `Decision` |
 | `summarize.create_local_summarizer(config)` | `OpenAISummarizer`，URL/模型/Key 来自 `LOCAL_*`（Key 为空时用 `local`），设 `is_local=True`（看图时不读 `OPENAI_VISION_MODEL`、GIF 先转 PNG）、`extra_body=LOCAL_EXTRA_BODY`、`strip_reasoning=True`、`token_floor=LOCAL_MAX_TOKENS`、`timeout_floor=LOCAL_TIMEOUT_SEC`、`prompt_profile=LOCAL_PROMPT`，人设和管线开关与云端相同 | `OpenAISummarizer` |

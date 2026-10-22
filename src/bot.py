@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .config import BotConfig, PROJECT_ROOT
 from .db import initialize_db, MessageStore
-from .summarize import create_models
+from .summarize import create_models, relay_only
 from .trigger import TriggerDetector
 from .nickname import NicknameService
 from .admin import AdminCommandHandler
@@ -379,13 +379,15 @@ class Bot:
         logger.info("webot starting...")
         logger.info("WeChat backend: %s", config.wechat_backend)
         route = getattr(config, "model_route", "cloud")
-        if route != "local":
+        if relay_only(config):
+            logger.info("AI: none (CLAUDE_RELAY_ONLY: the bot only relays cc requests)")
+        elif route != "local":
             logger.info("AI backend: %s", config.ai_backend)
             if config.ai_backend == "deepseek":
                 logger.info("Model: %s", config.deepseek_model)
             else:
                 logger.info("Model: %s", config.summarize_model)
-        if route != "cloud":
+        if route != "cloud" and not relay_only(config):
             logger.info("Local model: %s at %s (MODEL_ROUTE=%s)",
                         config.local_model, config.local_base_url, route)
         logger.info("Bot name: %r", config.bot_display_name)

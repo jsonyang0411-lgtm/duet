@@ -62,3 +62,72 @@ def test_the_environment_is_read():
            "ADMIN_WXID": ME, "CLAUDE_RELAY_ONLY": "true"}
     with patch.dict(os.environ, env, clear=True):
         assert load_config().claude_relay_only == "on"
+
+
+class FakeBackend:
+    """Starts and returns at once; records what the router answers."""
+
+    def __init__(self, messages):
+        self.messages = messages
+        self.replies = []
+
+    def start(self, callback):
+        for msg in self.messages:
+            self.replies.append(callback(msg))
+
+    def stop(self):
+        pass
+
+    def send_text(self, chat_id, content):
+        return True
+
+
+def test_a_relay_only_bot_starts_and_runs_without_any_ai_key(tmp_path, monkeypatch):
+    """No DEEPSEEK/OPENAI/ANTHROPIC key, AI_BACKEND left at deepseek: the whole start-up and a few messages."""
+    import os
+    import time as _time
+    from src.bot import Bot
+    from src.config import load_config
+    from src.summarize.no_model import NoModel
+
+    import socket
+    monkeypatch.chdir(tmp_path)
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        free_port = s.getsockname()[1]
+    env = {"AI_BACKEND": "deepseek", "DEEPSEEK_API_KEY": "", "CLAUDE_RELAY": "on", "CLAUDE_RELAY_ONLY": "on",
+           "CLAUDE_RELAY_TOKEN": "t" * 32, "ADMIN_WXID": ME, "CLAUDE_RELAY_PORT": str(free_port),
+           "CLAUDE_RELAY_HOST": "127.0.0.1", "PRIVATE_CHAT_ENABLED": "true",
+           "DB_PATH": str(tmp_path / "messages.db"), "LOG_FILE": str(tmp_path / "bot.log"),
+           "CLAUDE_RELAY_DB": str(tmp_path / "relay.db"), "DECISION_TRACE_ENABLED": "false"}
+    with patch.dict(os.environ, env, clear=True):
+        config = load_config()
+    now = int(_time.time())
+    backend = FakeBackend([
+        {"message_id": "g1", "chat_id": "room@chatroom", "group_name": "群", "sender_id": "wxid_x",
+         "sender_name": "群友", "content": "@群聊小助手 你好", "msg_type": 1, "timestamp": now,
+         "is_at_mentioned": True, "is_group": True},
+        {"message_id": "p1", "chat_id": ME, "group_name": "我", "sender_id": ME, "sender_name": "我",
+         "content": "cc 只回复：收到", "msg_type": 1, "timestamp": now, "is_at_mentioned": False, "is_group": False},
+    ])
+    bot = Bot(config)
+    seen = {}
+
+    def fake_backend(store=None):
+        return backend
+
+    import src.bot as bot_module
+    real_create_models = bot_module.create_models
+
+    def spy_create_models(cfg):
+        models = real_create_models(cfg)
+        seen["chat"] = models.chat
+        return models
+
+    monkeypatch.setattr(bot, "_create_wechat_backend", fake_backend)
+    monkeypatch.setattr(bot_module, "create_models", spy_create_models)
+    monkeypatch.setattr(bot_module.signal, "signal", lambda *a: None)
+    bot.run()
+    assert isinstance(seen["chat"], NoModel)
+    assert backend.replies[0] is None                                    # the group mention: not answered
+    assert backend.replies[1] and "#1" in backend.replies[1]             # the relay request: a receipt
