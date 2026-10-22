@@ -23,8 +23,20 @@ from typing import NamedTuple
 
 # ---------------- bubbles, geometry, titles, messages (from the kit) ----------------
 
-def bubble_kind(bg: list[int]) -> str:
+PLAIN_TOLERANCE = 4      # colour distance up to which two backgrounds are "the same"
+
+
+def bubble_kind(bg: list[int], plain: tuple | list = ()) -> str:
+    """``self`` (green bubble), ``other`` (white / dark grey bubble) or ``none``.
+
+    ``plain`` are the colours of the chat's own background (see ``plain_backgrounds``): text drawn
+    directly on it (a time line, the name above a bubble, a system notice) is not a bubble.  The kit
+    called every near-white colour a bubble, which is wrong where the chat background itself is
+    near-white (WeChat 4.x light mode: 251,251,251).
+    """
     r, g, b = bg
+    if any(max(abs(r - p[0]), abs(g - p[1]), abs(b - p[2])) <= PLAIN_TOLERANCE for p in plain):
+        return "none"
     if g > 150 and g - r > 50:
         return "self"      # 绿色气泡：自己发的
     if 50 <= r <= 80 and abs(r - g) < 8 and abs(g - b) < 8:
@@ -124,9 +136,12 @@ def resolve_chat_geometry(rows: list[dict], img_size: tuple[int, int] | None = N
         r for r in rows
         if r["y0"] < 0.12 and r["x0"] < 0.40 and ("搜索" in r["t"] or "search" in r["t"].lower())
     ]
+    # Without the search box (an independent chat window) there is no session list: the title
+    # starts near the left edge, so the left limits below drop from 0.04 to 0.
+    left_limit = 0.04 if search_rows else 0.0
     title_cands = [
         r for r in rows
-        if r["y0"] < 0.08 and 0.04 < r["x0"] < chat_x1
+        if r["y0"] < 0.08 and (r["x0"] > 0.04 if search_rows else r["x0"] >= 0.0) and r["x0"] < chat_x1
         and r["t"] not in FUNC_BUTTONS
         and not any(r["t"].lower().startswith(b) for b in ("search", "搜索"))
         and not any(k in r["t"] for k in ("搜一搜", "小程序", "相关聊天记录"))
@@ -156,11 +171,11 @@ def resolve_chat_geometry(rows: list[dict], img_size: tuple[int, int] | None = N
         bubble_x0s = [r["x0"] for r in rows if bubble_kind(r["bg"]) in ("self", "other") and r["y0"] > 0.06]
         if title_cands and bubble_x0s:
             min_ref = min(min(r["x0"] for r in title_cands), min(bubble_x0s))
-            chat_x0 = max(0.04, min_ref - 0.015)
+            chat_x0 = max(left_limit, min_ref - 0.015)
         elif bubble_x0s:
-            chat_x0 = max(0.04, min(bubble_x0s) - 0.015)
+            chat_x0 = max(left_limit, min(bubble_x0s) - 0.015)
         elif title_cands:
-            chat_x0 = max(0.04, min(r["x0"] for r in title_cands) - 0.015)
+            chat_x0 = max(left_limit, min(r["x0"] for r in title_cands) - 0.015)
         else:
             chat_x0 = 0.08
 
@@ -219,11 +234,8 @@ def get_chat_bounds(rows: list[dict], img_size: tuple[int, int] | None = None) -
     return resolve_chat_geometry(rows, img_size=img_size)
 
 
-def chat_title(rows: list[dict], geometry: ChatGeometry | None = None) -> str:
-    """提取当前微信主聊天窗口的会话标题（群名或联系人名），自适应任意窗口宽度并支持群名称清洗与相邻切片合并。"""
-    if not rows:
-        return ""
-    geom = geometry or resolve_chat_geometry(rows)
+def _title_rows(rows: list[dict], geom: ChatGeometry) -> list[dict]:
+    """The text blocks of the title bar, left to right."""
     chat_x0, chat_x1 = geom.chat_x0, geom.chat_x1
     # 顶部右侧按钮右边界保护：群名绝不能跨越右侧功能按钮
     right_btns = [
@@ -242,6 +254,15 @@ def chat_title(rows: list[dict], geometry: ChatGeometry | None = None) -> str:
         and not any(k in r["t"] for k in ("搜一搜", "小程序", "相关聊天记录"))
     ]
     top.sort(key=lambda r: r["x0"])
+    return top
+
+
+def chat_title(rows: list[dict], geometry: ChatGeometry | None = None) -> str:
+    """提取当前微信主聊天窗口的会话标题（群名或联系人名），自适应任意窗口宽度并支持群名称清洗与相邻切片合并。"""
+    if not rows:
+        return ""
+    geom = geometry or resolve_chat_geometry(rows)
+    top = _title_rows(rows, geom)
     if not top:
         return CleanedTitle("")
     # 将同一行相邻的标题片段合并（处理群名包含空格、人数括号或被 OCR 切分为多个词块的情况）
@@ -256,18 +277,48 @@ def chat_title(rows: list[dict], geometry: ChatGeometry | None = None) -> str:
     return CleanedTitle(merged_title)
 
 
+_CLOCK = re.compile(
+    r"^(?:(?:昨天|今天|前天|星期[一二三四五六日天]|周[一二三四五六日天]|(?:\d{4}年)?\d{1,2}月\d{1,2}日)\s*)?"
+    r"\d{1,2}:\d{2}(?::\d{2})?$"
+)
+
+
+def is_clock_text(text: str) -> bool:
+    """A time line between messages ("13:01", "昨天 12:30", "10月21日 08:00") or a video's length ("0:25")."""
+    return bool(_CLOCK.match(text.strip()))
+
+
+def plain_backgrounds(rows: list[dict], geometry: ChatGeometry | None = None) -> list[list[int]]:
+    """The colours text is drawn on where it is not in a bubble: under the title and under the time lines."""
+    if not rows:
+        return []
+    geom = geometry or resolve_chat_geometry(rows)
+    chat_x0, chat_x1, chat_y0, chat_y1 = geom
+    colours = [r["bg"] for r in _title_rows(rows, geom)]
+    colours += [
+        r["bg"] for r in rows
+        if chat_x0 < r["x0"] < chat_x1 and chat_y0 < r["y0"] < chat_y1 and is_clock_text(r["t"])
+    ]
+    unique: list[list[int]] = []
+    for colour in colours:
+        if colour not in unique:
+            unique.append(list(colour))
+    return unique
+
+
 def other_messages(rows: list[dict], want: str = "other", geometry: ChatGeometry | None = None) -> list[str]:
     """把聊天区里某一方（other=别人，self=自己）发的行按气泡合并成消息（同一气泡的相邻行合并）。"""
     if not rows:
         return []
     geom = geometry or resolve_chat_geometry(rows)
     chat_x0, chat_x1, chat_y0, chat_y1 = geom
+    plain = plain_backgrounds(rows, geom)
 
     lines = [r for r in rows if chat_x0 < r["x0"] < chat_x1 and chat_y0 < r["y0"] < chat_y1]
     lines.sort(key=lambda r: r["y0"])
     msgs, cur, last = [], None, None
     for r in lines:
-        kind = bubble_kind(r["bg"])
+        kind = "none" if is_clock_text(r["t"]) else bubble_kind(r["bg"], plain)
         if kind != want:
             if cur:
                 msgs.append(cur)
@@ -350,14 +401,26 @@ def _same(a: str, b: str) -> bool:
     return SequenceMatcher(None, a, b).ratio() >= 0.85
 
 
+def _cut_off(a: str, b: str) -> bool:
+    """One text is the end of the other: the window's top edge cut the beginning off a message."""
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    return len(shorter) >= 3 and longer.endswith(shorter)
+
+
 def _overlap(prev: list[str], cur: list[str]) -> int:
     """The longest k such that the last k of ``prev`` are the first k of ``cur``.
 
     The screen is a window onto the chat: a new message pushes the old ones up, so
-    what was at the bottom last time is at the top now.
+    what was at the bottom last time is at the top now.  The topmost message may be
+    cut off by the window's edge (a file card scrolled up shows only its last line),
+    so it only has to be the end of the remembered one.
     """
     for k in range(min(len(prev), len(cur)), 0, -1):
-        if all(_same(p, c) for p, c in zip(prev[len(prev) - k:], cur[:k])):
+        tail = prev[len(prev) - k:]
+        head = cur[:k]
+        if not (_same(tail[0], head[0]) or _cut_off(tail[0], head[0])):
+            continue
+        if all(_same(p, c) for p, c in zip(tail[1:], head[1:])):
             return k
     return 0
 

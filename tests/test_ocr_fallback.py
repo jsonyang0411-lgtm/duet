@@ -117,6 +117,19 @@ class TestTracker:
         t.feed("群（3）", ["今天晚上一起去吃火锅吧", "好呀"])
         assert t.feed("群（3）", ["今天晚上一起去吃火锅吧。", "好 呀"]) == []
 
+    def test_a_message_cut_off_by_the_top_edge_still_continues_the_memory(self):
+        """Found live: a file card scrolled up and showed only its last line, which broke the match and hid the next message."""
+        t = NewMessageTracker()
+        t.feed("群（3）", ["wechat-ocr-kit.zip34.8K•微信电脑版"])
+        assert t.feed("群（3）", ["•微信电脑版", "自己测试1"]) == ["自己测试1"]
+        assert t.feed("群（3）", ["•微信电脑版", "自己测试1"]) == []
+        assert t.feed("群（3）", ["自己测试1", "第三句"]) == ["第三句"]
+
+    def test_a_short_unrelated_line_is_not_taken_for_a_cut_off_message(self):
+        t = NewMessageTracker()
+        t.feed("群（3）", ["今天晚上吃什么好呢"])
+        assert t.feed("群（3）", ["好呢", "另一句"]) == []          # 2 characters: too little to be the same message
+
     def test_punctuation_only_lines_are_ignored(self):
         t = NewMessageTracker()
         t.feed("群（3）", ["a"])
