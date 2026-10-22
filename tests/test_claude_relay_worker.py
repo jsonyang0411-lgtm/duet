@@ -231,3 +231,31 @@ def test_read_token_follows_the_file(worker, tmp_path, monkeypatch):
     assert worker.read_token(cfg) == "a" * 32
     cfg.write_text("{broken", encoding="utf-8")
     assert worker.read_token(cfg) is None
+
+
+def test_only_one_worker_runs_at_a_time(worker):
+    first = worker.single_instance()
+    assert first is not None
+    assert worker.single_instance() is None          # a second worker on this Mac exits
+    first.close()
+    again = worker.single_instance()
+    assert again is not None
+    again.close()
+
+
+def test_a_second_worker_exits_without_serving(worker, bot, fake_claude, tmp_path, monkeypatch):
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps(settings(bot, fake_claude, tmp_path)), encoding="utf-8")
+    monkeypatch.delenv("RELAY_URL", raising=False)
+    monkeypatch.delenv("RELAY_TOKEN", raising=False)
+    held = worker.single_instance()
+    monkeypatch.setattr(worker, "serve", lambda *a, **k: pytest.fail("a second worker must not serve"))
+    assert worker.main(["--config", str(cfg)]) == 0
+    held.close()
+
+
+def test_stay_awake_lasts_as_long_as_the_worker(worker, monkeypatch):
+    started = []
+    monkeypatch.setattr(worker.subprocess, "Popen", lambda cmd: started.append(cmd) or "proc")
+    assert worker.stay_awake() == "proc"
+    assert started == [["/usr/bin/caffeinate", "-s", "-w", str(worker.os.getpid())]]

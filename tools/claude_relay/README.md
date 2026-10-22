@@ -72,15 +72,20 @@ Windows 上的机器人只负责收发微信消息。你私聊机器人发 `cc �
    python3 tools/claude_relay/worker.py --check
    ```
 4. 先手动跑一个任务试试：`python3 tools/claude_relay/worker.py --once`，然后在微信里发 `cc 只回复：收到`。
-5. 平时运行 `python3 tools/claude_relay/worker.py`，按 Ctrl+C 停止。也可以用 launchd 常驻：开机自启，崩溃自动重启，插着电源时不睡眠（用电池时照常睡眠）。
-   ```
-   sed "s#/PATH/TO/webot-claude-relay#$(pwd)#" tools/claude_relay/com.webot.claude-relay.plist \
-     > ~/Library/LaunchAgents/com.webot.claude-relay.plist
-   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.webot.claude-relay.plist
-   # 停止：launchctl bootout gui/$(id -u)/com.webot.claude-relay
-   ```
+5. 长期运行（推荐）：双击 `tools/claude_relay/start-worker.command`，它会在一个终端窗口里运行 worker（可以最小化）。
+   - 第一次运行时，macOS 会问「终端」能不能访问这个文件夹，要点「允许」。
+   - 插着电源时不睡眠，用电池时照常睡眠。
+   - worker 崩溃后 30 秒自动重启；按 Ctrl+C 或关掉窗口就停止。
+   - 想开机自动运行，就把这个文件加进「系统设置 → 通用 → 登录项」。或者在仓库根目录运行：
+     ```
+     osascript -e "tell application \"System Events\" to make login item at end with properties {path:\"$(pwd)/tools/claude_relay/start-worker.command\", hidden:false}"
+     ```
+   - 同一时间只会运行一个 worker（锁文件 `~/.claude-relay/worker.lock`），多开的会自动退出。
    - 日志在 `~/.claude-relay/worker.log`，每个任务的完整输出在 `~/.claude-relay/logs/`。
    - MacBook 合盖后仍会睡眠，除非接着电源和外接显示器。睡眠期间任务会在 Windows 上排队等待。
+6. 为什么不用 launchd 后台服务：macOS 不允许后台服务读写「桌面」「文稿」「下载」这几个受保护的文件夹。worker 或项目放在这些文件夹里时，后台服务会报 `Operation not permitted`。
+   - 项目都不在这些文件夹里时，可以改用 `com.webot.claude-relay.plist`：把 `/PATH/TO/webot-claude-relay` 换成实际路径，复制到 `~/Library/LaunchAgents/`，再执行 `launchctl bootstrap gui/$(id -u) <plist>`。
+   - 也可以在「完全磁盘访问」里加入 python3 来解决，但这样所有用这个 Python 跑的脚本都能读写全部文件，权限太大，不推荐。
 
 ## 常见问题
 

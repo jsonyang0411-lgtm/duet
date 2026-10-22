@@ -18,11 +18,16 @@ RELAY_TOKEN in the environment override it.  Setup: README.md next to this file.
     python3 worker.py --check     reach the bot and find claude, then exit
     python3 worker.py --once      do one job, then exit
     python3 worker.py             run until stopped
+    --stay-awake                  keep the Mac awake while it is on power (caffeinate -s)
+
+Only one worker runs at a time (a lock in ~/.claude-relay): a second one exits.
+To keep it running, start-worker.command opens it in Terminal at login.
 """
 
 from __future__ import annotations
 
 import argparse
+import fcntl
 import glob
 import json
 import logging
@@ -427,6 +432,27 @@ def serve(settings: dict, client: RelayClient, stopper: Stopper, once: bool = Fa
             return
 
 
+def single_instance():
+    """The lock that keeps a second worker from starting (two would race for jobs and sessions)."""
+    HOME_DIR.mkdir(parents=True, exist_ok=True)
+    handle = open(HOME_DIR / "worker.lock", "w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
+def stay_awake() -> subprocess.Popen | None:
+    """caffeinate -s for as long as this process lives (awake on power, normal sleep on battery)."""
+    try:
+        return subprocess.Popen(["/usr/bin/caffeinate", "-s", "-w", str(os.getpid())])
+    except OSError as e:
+        log.warning("caffeinate not started: %s", e)
+        return None
+
+
 def setup_logging() -> None:
     HOME_DIR.mkdir(parents=True, exist_ok=True)
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
@@ -442,6 +468,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", default=str(HOME_DIR / "config.json"))
     parser.add_argument("--check", action="store_true", help="reach the bot and find claude, then exit")
     parser.add_argument("--once", action="store_true", help="do one job, then exit")
+    parser.add_argument("--stay-awake", action="store_true", help="keep the Mac awake while on power")
     args = parser.parse_args(argv)
     setup_logging()
     settings = load_settings(Path(args.config))
@@ -464,12 +491,19 @@ def main(argv: list[str] | None = None) -> int:
             print(f"bot {settings['relay_url']}: unreachable ({e})")
             return 1
         return 0
+    lock = single_instance()
+    if lock is None:
+        log.error("another worker is already running (%s); this one exits", HOME_DIR / "worker.lock")
+        return 0
+    if args.stay_awake:
+        stay_awake()
     stopper = Stopper()
     signal.signal(signal.SIGINT, stopper)
     signal.signal(signal.SIGTERM, stopper)
     log.info("worker started; bot %s", settings["relay_url"])
     serve(settings, client, stopper, once=args.once)
     log.info("worker stopped")
+    lock.close()
     return 0
 
 
