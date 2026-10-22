@@ -278,3 +278,20 @@ def test_the_token_can_live_in_its_own_file(worker, tmp_path, monkeypatch):
     assert worker.read_token(cfg) is None
     monkeypatch.setenv("RELAY_TOKEN", "d" * 32)
     assert worker.load_settings(cfg)["token"] == "d" * 32           # the environment wins
+
+
+def test_a_follow_up_without_project_stays_in_the_sessions_project(worker, bot, fake_claude, tmp_path):
+    other = tmp_path / "other"
+    other.mkdir()
+    s = settings(bot, fake_claude, tmp_path)
+    s["projects"]["other"] = str(other)
+    bot.ask("cc @other 统计行数")
+    run_one(worker, bot, s)
+    bot.ask("cc 最长的那个有几个类")                  # no @other: continues the session's project
+    run_one(worker, bot, s)
+    bot.ask("cc 新对话")
+    bot.ask("cc 现在在哪")                             # a new session: the default project again
+    run_one(worker, bot, s)
+    cwds = [c["cwd"] for c in fake_claude.calls()]
+    assert cwds == [str(other.resolve()), str(other.resolve()), str((tmp_path / "proj").resolve())]
+    assert worker.session_projects() == {"new-session": ""}

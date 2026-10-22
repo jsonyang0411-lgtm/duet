@@ -336,13 +336,35 @@ def summarize(run: dict, data: dict | None, settings: dict) -> dict:
     }
 
 
+def session_projects() -> dict:
+    """Which project each Claude session started in (``~/.claude-relay/sessions.json``)."""
+    try:
+        data = json.loads((HOME_DIR / "sessions.json").read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def remember_session_project(session_id: str, project: str) -> None:
+    if not session_id:
+        return
+    data = session_projects()
+    data[session_id] = project
+    if len(data) > 500:                                  # oldest first (insertion order)
+        data = dict(list(data.items())[-500:])
+    HOME_DIR.mkdir(parents=True, exist_ok=True)
+    (HOME_DIR / "sessions.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
 def do_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper) -> dict:
-    log.info("#%s start%s: %s", job["id"], f" @{job['project']}" if job.get("project") else "",
-             job["text"][:100])
-    cwd, problem = project_dir(settings, job.get("project") or "")
+    session_id = job.get("session_id") or None
+    # A follow-up without @project continues where its session started: "改一下那个文件"
+    # after "cc @relay ..." must not run in the default project.
+    project = job.get("project") or (session_projects().get(session_id, "") if session_id else "")
+    log.info("#%s start%s: %s", job["id"], f" @{project}" if project else "", job["text"][:100])
+    cwd, problem = project_dir(settings, project)
     if cwd is None:
         return {"ok": False, "text": problem, "duration_s": 0}
-    session_id = job.get("session_id") or None
     run = run_claude(settings, job, cwd, client, stopper, session_id)
     data = parse_output(run["stdout"])
     if data is None and session_id and "No conversation found" in run["stdout"] + run["stderr"]:
@@ -350,6 +372,7 @@ def do_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper) -> 
         run = run_claude(settings, job, cwd, client, stopper, None)
         data = parse_output(run["stdout"])
     result = summarize(run, data, settings)
+    remember_session_project(result.get("session_id", ""), project)
     result["log_path"] = str(save_log(job, run, result))
     log.info("#%s finished ok=%s in %ss", job["id"], result["ok"], result["duration_s"])
     return result
@@ -507,6 +530,7 @@ def main(argv: list[str] | None = None) -> int:
     stopper = Stopper()
     signal.signal(signal.SIGINT, stopper)
     signal.signal(signal.SIGTERM, stopper)
+    signal.signal(signal.SIGHUP, stopper)       # the Terminal window was closed: finish the job's bookkeeping
     log.info("worker started; bot %s", settings["relay_url"])
     serve(settings, client, stopper, once=args.once)
     log.info("worker stopped")
