@@ -138,7 +138,7 @@ class MacHybridBackend(AbstractWeChatBackend):
             return False
         is_group = self._chat_is_group.get(chat_id, str(chat_id).endswith("@chatroom"))
         prefer_group = self._should_prefer_group_result(chat_id, target)
-        if target and not self._automation.open_chat(
+        if target and not self._chat_open_on_screen(target) and not self._automation.open_chat(
             target,
             prefer_group=prefer_group,
             sidebar_index=None,
@@ -213,6 +213,21 @@ class MacHybridBackend(AbstractWeChatBackend):
             )
 
     # ── OCR fallback ──────────────────────────────────────────────────────
+
+    def _chat_open_on_screen(self, target: str) -> bool:
+        """While the OCR fallback is on: one fresh look says whether this chat is already open in the main
+        window.  Then the reply is typed in place; searching for the chat (and checking the result with the
+        slow title reader) went wrong in the first live test and is only needed when the chat is not open."""
+        if self._ocr is None or not self._ocr.active:
+            return False
+        try:
+            is_open = self._ocr.chat_is_open(target)
+        except Exception as exc:                          # noqa: BLE001 - fall back to the normal way
+            logger.debug("OCR check of the open chat failed: %s", exc)
+            return False
+        if is_open:
+            logger.info("Chat %r is already open (checked by OCR); sending in place", target)
+        return is_open
 
     def _poll_ocr(self, callback: MessageCallback) -> None:
         """A database read failed: after a few in a row, read the open chat from the screen."""

@@ -352,6 +352,12 @@ def backend(client, engine, *, groups=("摸鱼群",), after=3):
     ), automation, ocr
 
 
+def engine_says_main_window(engine):
+    """Whether OcrFallback.chat_is_open would call this engine's current screen a main window."""
+    from src.wechat.ocr.reader import resolve_chat_geometry
+    return resolve_chat_geometry(engine.screens[0]).chat_x0 >= 0.10
+
+
 def fail(be, callback, times):
     for _ in range(times):
         be.poll_once(callback)
@@ -384,7 +390,45 @@ class TestBackend:
         assert msg["is_group"] and msg["is_at_mentioned"] and msg["msg_type"] == 1
         assert msg["sender_id"] == msg["sender_name"] == OCR_SENDER
         assert msg["chat_id"] == "ocr:摸鱼群" and msg["message_id"].startswith("mac-ocr-")
-        assert automation.opened == ["摸鱼群"] and automation.sent == ["收到"]   # sending is the normal path
+        # the group is open in the main window (the screen says so): the reply is typed in place
+        assert automation.opened == [] and automation.sent == ["收到"]
+
+    def test_a_reply_goes_out_in_place_when_ocr_sees_the_chat_open_in_the_main_window(self):
+        engine = FakeEngine(screen("摸鱼群（5）", ["之前的话"]),
+                            screen("摸鱼群（5）", ["之前的话", "@群聊小助手 总结一下"]))
+        be, automation, _ = backend(DownClient(), engine)
+        fail(be, lambda msg: "收到", 6)
+        assert automation.sent == ["收到"] and automation.opened == []       # no search, no title reading
+
+    def test_another_open_chat_or_a_non_main_window_still_gets_searched_for(self):
+        engine = FakeEngine(screen("别的群（5）", ["a"]))
+        be, automation, ocr = backend(DownClient(), engine)
+        for _ in range(3):
+            ocr.note_db_failure()
+        assert be.send_text("ocr:摸鱼群", "你好") is True
+        assert automation.opened == ["摸鱼群"]                                # the normal way
+
+        standalone = generate_mock_wechat_ocr(title="摸鱼群（5）", messages=[("a", "other", 0.3)], session_list_w=0)
+        engine = FakeEngine(standalone)
+        be, automation, ocr = backend(DownClient(), engine)
+        for _ in range(3):
+            ocr.note_db_failure()
+        assert not engine_says_main_window(engine)
+        assert be.send_text("ocr:摸鱼群", "你好") is True and automation.opened == ["摸鱼群"]
+
+    def test_with_the_fallback_off_sending_is_unchanged(self):
+        engine = FakeEngine(screen("摸鱼群（5）", ["a"]))
+        be, automation, ocr = backend(DownClient(), engine)                  # the database never failed: OCR is off
+        assert be.send_text("ocr:摸鱼群", "你好") is True
+        assert automation.opened == ["摸鱼群"] and engine.looks == 0
+
+    def test_a_failing_check_falls_back_to_the_normal_way(self):
+        engine = FakeEngine(screen("摸鱼群（5）", ["a"]))
+        be, automation, ocr = backend(DownClient(), engine)
+        for _ in range(3):
+            ocr.note_db_failure()
+        engine.error = RuntimeError("no window")
+        assert be.send_text("ocr:摸鱼群", "你好") is True and automation.opened == ["摸鱼群"]
 
     def test_a_known_group_keeps_its_real_chat_id(self):
         engine = FakeEngine(screen("摸鱼群（5）", ["a"]), screen("摸鱼群（5）", ["a", "b"]))

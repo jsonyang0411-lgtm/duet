@@ -87,6 +87,14 @@ class CleanedTitle(str):
         return False
 
 
+def _is_search_box(text: str) -> bool:
+    """The search field's placeholder: "搜索" / "Search", also when the magnifier is read as a letter ("Q 搜索")."""
+    t = text.strip().lower()
+    if t.startswith(("search", "搜索")):
+        return True
+    return t.lstrip("q⌕🔍 ").strip() in ("搜索", "search")
+
+
 FUNC_BUTTONS = (
     "搜索", "Search", "search", "*", "•", "X", "x", "+", "十", "＋", "...", "…",
     "取消", "Cancel", "cancel"
@@ -143,7 +151,7 @@ def resolve_chat_geometry(rows: list[dict], img_size: tuple[int, int] | None = N
         r for r in rows
         if r["y0"] < 0.08 and (r["x0"] > 0.04 if search_rows else r["x0"] >= 0.0) and r["x0"] < chat_x1
         and r["t"] not in FUNC_BUTTONS
-        and not any(r["t"].lower().startswith(b) for b in ("search", "搜索"))
+        and not _is_search_box(r["t"])
         and not any(k in r["t"] for k in ("搜一搜", "小程序", "相关聊天记录"))
     ]
 
@@ -250,7 +258,7 @@ def _title_rows(rows: list[dict], geom: ChatGeometry) -> list[dict]:
         if chat_x0 <= r["x0"] < title_x1
         and r["y0"] < 0.08
         and r["t"] not in FUNC_BUTTONS
-        and not any(r["t"].lower().startswith(b) for b in ("search", "搜索"))
+        and not _is_search_box(r["t"])
         and not any(k in r["t"] for k in ("搜一搜", "小程序", "相关聊天记录"))
     ]
     top.sort(key=lambda r: r["x0"])

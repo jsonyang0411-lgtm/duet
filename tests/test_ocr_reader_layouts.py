@@ -75,3 +75,52 @@ def test_with_a_search_box_the_left_limit_stays_where_the_kit_had_it():
 ])
 def test_time_lines_are_recognized(text, is_clock):
     assert R.is_clock_text(text) is is_clock
+
+
+def main_window():
+    """The main window: session list on the left, a search box whose magnifier OCR reads as the letter Q."""
+    sidebar = [238, 238, 238]
+    return [
+        row("Q 搜索", 0.090, 0.030, [236, 236, 236], x1=0.130),
+        row("测试群（4）", 0.217, 0.025, BACKGROUND, x1=0.290),
+        # session list: names, previews and times, all on a near-white grey
+        row("小明", 0.109, 0.090, sidebar, x1=0.150),
+        row("14:47", 0.168, 0.090, sidebar),
+        row("[文件] training...", 0.109, 0.140, sidebar, x1=0.230),
+        row("测试群", 0.109, 0.210, sidebar, x1=0.150),
+        row("小明: @群聊...", 0.109, 0.250, sidebar, x1=0.230),
+        row("公众号", 0.109, 0.300, sidebar, x1=0.160),
+        # the chat
+        row("你邀请小明加入了群聊", 0.400, 0.150, BACKGROUND, x1=0.600),
+        row("小明", 0.320, 0.200, BACKGROUND),
+        row("你好", 0.330, 0.240, [241, 241, 243]),
+        row("14:56", 0.590, 0.440, BACKGROUND),
+        row("@群聊小助手 你好", 0.700, 0.490, [187, 240, 181], x1=0.900),
+        row("小明", 0.320, 0.600, BACKGROUND),
+        row("@群聊小助手 请介绍一下你自己", 0.330, 0.640, [241, 241, 243], x1=0.700),
+    ]
+
+
+@pytest.mark.parametrize("text,is_box", [
+    ("搜索", True), ("Q 搜索", True), ("q搜索", True), ("Search", True), ("Q Search", True), ("搜索框", True),
+    ("测试群", False), ("Quality 群", False), ("搜索技巧交流群", True),
+])
+def test_the_search_box_is_recognized_with_its_icon(text, is_box):
+    # "startswith 搜索" was the kit's rule, so a group named 搜索… at the title position is not told apart here;
+    # the check that matters is that the icon letter does not hide the box
+    assert R._is_search_box(text) is is_box
+
+
+def test_the_main_window_title_is_not_the_search_box():
+    rows = main_window()
+    assert str(R.chat_title(rows)) == "测试群（4）"
+    assert R.read_rows(rows)["title_clean"] == "测试群"
+
+
+def test_the_session_list_is_not_part_of_the_chat():
+    rows = main_window()
+    geom = R.resolve_chat_geometry(rows)
+    assert 0.15 <= geom.chat_x0 <= 0.22
+    info = R.read_rows(rows)
+    assert info["other"] == ["你好", "@群聊小助手 请介绍一下你自己"]     # not the names, previews or times on the left
+    assert info["self"] == ["@群聊小助手 你好"]

@@ -19,7 +19,9 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from .reader import NewMessageTracker, clean_group_name, read_rows
+from .reader import NewMessageTracker, clean_group_name, read_rows, resolve_chat_geometry
+
+MAIN_WINDOW_MIN_CHAT_X0 = 0.10       # the chat area starts right of the session list; an independent window has none
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +87,22 @@ class OcrFallback:
         self._tracker.reset()
         logger.info("The WeChat database can be read again: the OCR fallback is off.")
         return True
+
+    def chat_is_open(self, name: str) -> bool:
+        """One fresh look (not throttled): is the chat called ``name`` open in the MAIN window right now?
+
+        Used to send in place instead of searching for the chat.  An independent chat window does not
+        count (the sender types into the main window), and a title that does not match exactly does not either.
+        """
+        rows = self._engine.capture()
+        info = read_rows(rows)
+        if not info["title"] or resolve_chat_geometry(rows).chat_x0 < MAIN_WINDOW_MIN_CHAT_X0:
+            return False
+
+        def norm(value: str) -> str:
+            return "".join(str(value).split()).lower()
+
+        return norm(info["title_clean"]) == norm(name)
 
     # ── one look ──────────────────────────────────────────────────────────
 
