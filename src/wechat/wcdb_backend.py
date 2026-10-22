@@ -233,9 +233,10 @@ class WcdbBackend(AbstractWeChatBackend):
             "yang_yujing_group_name",
             "yang_yujing_always_reply_group_name",
         ):
-            group = str(getattr(config, attribute, "")).strip()
-            if group and group not in yang_target_groups:
-                yang_target_groups.append(group)
+            val = str(getattr(config, attribute, "")).strip()
+            for group in [g.strip() for g in val.split(",") if g.strip()]:
+                if group and group not in yang_target_groups:
+                    yang_target_groups.append(group)
         if (
             getattr(config, "chat_persona_profile", "")
             == PERSONA_PROFILE_YANG_YUJING
@@ -887,14 +888,15 @@ class WcdbBackend(AbstractWeChatBackend):
             != PERSONA_PROFILE_YANG_YUJING
         ):
             return False
-        target_groups = {
-            str(getattr(config, attribute, "")).strip()
-            for attribute in (
-                "yang_yujing_group_name",
-                "yang_yujing_always_reply_group_name",
-            )
-        }
-        target_groups.discard("")
+        target_groups = set()
+        for attribute in (
+            "yang_yujing_group_name",
+            "yang_yujing_always_reply_group_name",
+        ):
+            val = str(getattr(config, attribute, "")).strip()
+            for g in val.split(","):
+                if g.strip():
+                    target_groups.add(g.strip())
         if not target_groups:
             return False
         return bool(target_groups & {

@@ -1171,6 +1171,13 @@ def _start_bot_in_thread():
 
     def _run():
         try:
+            from dotenv import load_dotenv
+            from src.config import _env_path, _local_env_path, _load_non_empty_local_env
+            if _env_path and _env_path.exists():
+                load_dotenv(_env_path, override=True)
+            if _local_env_path and _local_env_path.exists():
+                _load_non_empty_local_env(_local_env_path)
+
             from src.config import load_config
             config = load_config()
             update_status(

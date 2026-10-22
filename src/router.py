@@ -452,9 +452,12 @@ class MessageRouter:
 
         group_name = str(msg.get("group_name", "")).strip()
         chat_id = str(msg.get("chat_id", "")).strip()
-        if always_reply_group and always_reply_group in (group_name, chat_id):
+        always_reply_groups = [g.strip() for g in always_reply_group.split(",") if g.strip()]
+        target_groups = [g.strip() for g in target_group.split(",") if g.strip()]
+
+        if any(g in (group_name, chat_id) for g in always_reply_groups):
             mode = "always_reply"
-        elif target_group and target_group in (group_name, chat_id):
+        elif any(g in (group_name, chat_id) for g in target_groups):
             mode = "ambient"
         else:
             return None
