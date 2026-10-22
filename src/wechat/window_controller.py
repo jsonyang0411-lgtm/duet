@@ -1184,6 +1184,7 @@ class WeChatWindowController:
     def _send_in_chat_window(self, hwnd: int, group_name: str, text: str,
                              file_path: str | None = None) -> bool:
         """Paste and send in a chat's own window: no tab switch, no search."""
+        _ensure_default_desktop()
         snapshot = self._capture_window_state(hwnd)
         try:
             if not self._bring_forward(hwnd):
@@ -1221,6 +1222,7 @@ class WeChatWindowController:
 
     def _bring_forward(self, hwnd: int) -> bool:
         """Bring a WeChat window to the front without the Alt tap; fall back to activate()."""
+        _ensure_default_desktop()
         if not self._validate_hwnd(hwnd):
             return False
         try:
