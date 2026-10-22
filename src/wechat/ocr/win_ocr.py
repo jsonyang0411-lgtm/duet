@@ -52,14 +52,17 @@ $null = [Windows.Media.Ocr.OcrResult, Windows.Foundation, ContentType = WindowsR
 $null = [Windows.Globalization.Language, Windows.Globalization, ContentType = WindowsRuntime]
 $null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
 $null = [Windows.Graphics.Imaging.SoftwareBitmap, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
+
 $asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
     $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and
     $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+
 function Await($operation, $type) {
     $task = $asTask.MakeGenericMethod($type).Invoke($null, @($operation))
     $task.Wait(-1) | Out-Null
     $task.Result
 }
+
 $engine = $null
 foreach ($tag in ($env:WEBOT_OCR_LANGS -split ',')) {
     if (-not $tag) { continue }
@@ -71,11 +74,13 @@ foreach ($tag in ($env:WEBOT_OCR_LANGS -split ',')) {
 }
 if (-not $engine) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages() }
 if (-not $engine) { [Console]::Error.WriteLine('NO_OCR_LANGUAGE'); exit 3 }
+
 $file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($env:WEBOT_OCR_IMAGE)) ([Windows.Storage.StorageFile])
 $stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
 $decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
 $bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
 $result = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
+
 foreach ($line in $result.Lines) {
     $x0 = [double]::MaxValue; $y0 = [double]::MaxValue; $x1 = 0.0; $y1 = 0.0
     foreach ($word in $line.Words) {
@@ -90,6 +95,7 @@ foreach ($line in $result.Lines) {
                        w = [math]::Round($x1 - $x0, 1); h = [math]::Round($y1 - $y0, 1) }
     ConvertTo-Json -InputObject $row -Compress
 }
+
 '''
 
 _CJK = "⺀-鿿＀-￯"
