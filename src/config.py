@@ -564,6 +564,10 @@ class BotConfig:
     claude_relay_wxids: list[str] = field(default_factory=list)
     claude_relay_db: str = "data/claude_relay.db"
     claude_relay_max_chars: int = 1500     # longer results are cut (the Mac keeps the full text)
+    # "on": the bot is a relay and nothing else: every message that is not a relay
+    # request ends the route silently (no reply, no proactive line, no welcome, no
+    # memory job, no model call).  Needs CLAUDE_RELAY=on.
+    claude_relay_only: str = "off"
 
     # === OCR fallback (src/wechat/ocr), macOS mac_hybrid backend only ===
     # "on": when the WeChat database cannot be read ocr_fallback_after times in a row, the
@@ -954,6 +958,11 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(f"OCR_FALLBACK_AFTER must be between 1 and 20, got {kwargs.get('ocr_fallback_after')}")
     if not (1 <= float(kwargs.get("ocr_poll_sec", 4.0)) <= 60):
         errors.append(f"OCR_POLL_SEC must be between 1 and 60, got {kwargs.get('ocr_poll_sec')}")
+    claude_relay_only = kwargs.get("claude_relay_only", "off")
+    if claude_relay_only not in ("off", "on"):
+        errors.append(f"CLAUDE_RELAY_ONLY must be off or on, got {claude_relay_only}")
+    elif claude_relay_only == "on" and kwargs.get("claude_relay", "off") != "on":
+        errors.append("CLAUDE_RELAY_ONLY=on needs CLAUDE_RELAY=on (otherwise the bot would do nothing at all)")
     if not (100 <= int(kwargs.get("claude_relay_max_chars", 1500)) <= 5000):
         errors.append(
             f"CLAUDE_RELAY_MAX_CHARS must be between 100 and 5000, got {kwargs.get('claude_relay_max_chars')}"
@@ -1246,6 +1255,7 @@ def load_config() -> BotConfig:
         "claude_relay_wxids": _split_names(os.getenv("CLAUDE_RELAY_WXIDS", "")),
         "claude_relay_db": os.getenv("CLAUDE_RELAY_DB", "data/claude_relay.db").strip() or "data/claude_relay.db",
         "claude_relay_max_chars": int(os.getenv("CLAUDE_RELAY_MAX_CHARS", "1500")),
+        "claude_relay_only": _parse_memory_mode(os.getenv("CLAUDE_RELAY_ONLY", "off")),
         "ocr_fallback": _parse_memory_mode(os.getenv("OCR_FALLBACK", "off")),
         "ocr_fallback_after": int(os.getenv("OCR_FALLBACK_AFTER", "3")),
         "ocr_poll_sec": float(os.getenv("OCR_POLL_SEC", "4")),

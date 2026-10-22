@@ -106,7 +106,7 @@ def test_the_relay_settings_are_in_the_allow_list():
     from src.web import advanced_config as adv
     group = next(g for g in adv.GROUPS if g["id"] == "relay")
     keys = [f["key"] for f in group["fields"]]
-    assert keys[:4] == ["CLAUDE_RELAY", "ADMIN_WXID", "CLAUDE_RELAY_WXIDS", "CLAUDE_RELAY_TOKEN"]
+    assert keys[:5] == ["CLAUDE_RELAY", "CLAUDE_RELAY_ONLY", "ADMIN_WXID", "CLAUDE_RELAY_WXIDS", "CLAUDE_RELAY_TOKEN"]
     assert adv.FIELDS["CLAUDE_RELAY_TOKEN"]["type"] == "secret" and adv.FIELDS["CLAUDE_RELAY_TOKEN"]["generate"]
     errors = adv.validate_updates({"CLAUDE_RELAY": "on"}, {})
     assert set(errors) == {"CLAUDE_RELAY_TOKEN", "CLAUDE_RELAY_WXIDS"}       # both reasons, each on its field

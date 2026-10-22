@@ -253,6 +253,7 @@ function StepRelay({ onBack, onDone }) {
   const [token, setToken] = useState(() => randomToken())
   const [port, setPort] = useState('8790')
   const [onlyMe, setOnlyMe] = useState(true)
+  const [relayOnly, setRelayOnly] = useState(true)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [written, setWritten] = useState(false)
@@ -278,7 +279,7 @@ function StepRelay({ onBack, onDone }) {
       if (relayOn) {
         const r = await api('/api/advanced', {
           method: 'POST',
-          body: { values: { CLAUDE_RELAY: 'on', ADMIN_WXID: id, CLAUDE_RELAY_TOKEN: token.trim(), CLAUDE_RELAY_PORT: port } },
+          body: { values: { CLAUDE_RELAY: 'on', CLAUDE_RELAY_ONLY: relayOnly ? 'on' : 'off', ADMIN_WXID: id, CLAUDE_RELAY_TOKEN: token.trim(), CLAUDE_RELAY_PORT: port } },
         })
         if (!r.ok) throw new Error([r.error, ...Object.values(r.errors || {})].filter(Boolean).join('；'))
       }
@@ -294,6 +295,10 @@ function StepRelay({ onBack, onDone }) {
         <Field label="你的 wxid" hint="发 cc 任务的人（你自己）的微信 wxid，形如 wxid_xxx，不是机器人账号的。只有这个人能用中转" error={id && !wxidOk ? '看起来不像 wxid' : ''}>
           <TextInput value={wxid} onChange={setWxid} mono placeholder="wxid_…" autoFocus />
         </Field>
+        <div className="toggle-row">
+          <div className="tr-text"><span className="tr-title">只做中转</span><div className="f-hint">只处理 cc 任务：群里被 @、别人的私聊一律不回，也不调用 AI（推荐）</div></div>
+          <Switch checked={relayOnly} onChange={setRelayOnly} label="只做中转" />
+        </div>
         <div className="toggle-row">
           <div className="tr-text"><span className="tr-title">只读你的私聊</span><div className="f-hint">其他人的私聊不会被读取（推荐）</div></div>
           <Switch checked={onlyMe} onChange={setOnlyMe} label="只读你的私聊" />

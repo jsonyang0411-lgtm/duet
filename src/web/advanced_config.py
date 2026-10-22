@@ -223,6 +223,10 @@ GROUPS: list[dict] = [
         "fields": [
             {"key": "CLAUDE_RELAY", "type": "onoff", "default": "off", "label": "打开中转",
              "help": "打开后机器人会开一个端口等 Mac 来取任务。必须同时填好下面的 token 和「谁能用」。"},
+            {"key": "CLAUDE_RELAY_ONLY", "type": "onoff", "default": "off", "label": "只做中转",
+             "help": "打开后机器人只处理 cc 任务：群里被 @、关键词、别人的私聊一律不回，不主动发言、不欢迎新人、不整理记忆，"
+                     "也不调用任何 AI 模型（不用填 AI 密钥）。",
+             "requires": [{"key": "CLAUDE_RELAY", "is": "on", "text": "中转打开时才能用"}]},
             {"key": "ADMIN_WXID", "type": "text", "default": "", "label": "管理员 wxid",
              "help": "你自己的微信 wxid（形如 wxid_xxx）。下面「谁能用」不填时，只有这个人能用中转。"},
             {"key": "CLAUDE_RELAY_WXIDS", "type": "names", "default": "", "label": "谁能用",

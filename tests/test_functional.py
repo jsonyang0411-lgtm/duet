@@ -359,7 +359,7 @@ class TestAgentConsolePages:
         page.goto(f"{BASE_URL}/#/relay", timeout=10000)
         page.wait_for_timeout(1500)
         text = page.inner_text("body")
-        for expected in ("Claude 中转", "打开中转", "CLAUDE_RELAY_TOKEN", "ADMIN_WXID", "CLAUDE_RELAY_PORT"):
+        for expected in ("Claude 中转", "打开中转", "只做中转", "CLAUDE_RELAY_ONLY", "CLAUDE_RELAY_TOKEN", "ADMIN_WXID", "CLAUDE_RELAY_PORT"):
             assert expected in text
         page.locator("button:has-text('随机生成')").click()
         page.wait_for_timeout(300)
@@ -433,4 +433,5 @@ class TestOnboardingForTheAgentConsole:
                                           "sticky_mention_enabled", "followup_listen_enabled"))
         values = posted["advanced"]["values"]
         assert values["CLAUDE_RELAY"] == "on" and values["ADMIN_WXID"] == "wxid_owner123"
+        assert values["CLAUDE_RELAY_ONLY"] == "on"                     # the default of the agent console
         assert len(values["CLAUDE_RELAY_TOKEN"]) >= 40 and values["CLAUDE_RELAY_PORT"] == "8790"

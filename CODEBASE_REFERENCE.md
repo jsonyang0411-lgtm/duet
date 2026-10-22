@@ -207,6 +207,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `SEND_KEEP_CLIPBOARD` | `str` | `"on"` (`off`/`on`) | `src/config.py` | `WeChatWindowController._begin_quiet/_end_quiet`：开 `SEND_QUIET` 时，发送前存下剪贴板，微信确认处理完粘贴后放回（期间剪贴板被别人改过、或微信没回应就不放回） |
 | `FOLLOWUP_MODE` | `str` | `"heuristic"` (`heuristic`/`declared`) | `src/config.py` | `src/router.py:MessageRouter.__init__()` → `_declare_followups`；`declared` 时结构化管线让模型在回复里声明在等谁，监听器照此执行 |
 | `CLAUDE_RELAY` | `str` | `"off"` (`off`/`on`) | `src/config.py` | `src/bot.py:_start_claude_relay()` 建 `ClaudeRelay`（发送用 `backend.send_text`）并挂到 `router._claude_relay`；路由步骤 `claude_relay` 把允许的人私聊里 `cc` 开头的消息变成给 Mac 的任务。需要 `PRIVATE_CHAT_ENABLED=true` |；控制台「中转代理」页可改（`advanced_config` 的 `relay` 分组：开关、`ADMIN_WXID`、`CLAUDE_RELAY_WXIDS`、token（可随机生成）、端口、监听地址、前缀、结果最长）。`CLAUDE_RELAY_PORT` 的范围不论开关都检查（与白名单一致）
+| `CLAUDE_RELAY_ONLY` | `str` | `"off"` (`off`/`on`；`on` 时必须 `CLAUDE_RELAY=on`) | `src/config.py` | `steps.relay_only`：不是中转请求的消息在 `claude_relay` 之后停下（不回复、不主动发言、不欢迎、不整理记忆、不调用模型，消息仍入库）；控制台「中转代理」页和首次设置第 3 步（默认打开）可改 |
 | `CLAUDE_RELAY_TOKEN` | `str` | 空（开启时必填，至少 16 字符） | `src/config.py` | `src/relay/http.py`：每个请求的 `Authorization: Bearer`，`hmac.compare_digest` 比较；Mac 端 `RELAY_TOKEN` 要相同 |
 | `CLAUDE_RELAY_HOST` / `CLAUDE_RELAY_PORT` | `str` / `int` | `"0.0.0.0"` / `8790` | `src/config.py` | `src/relay/http.py:serve()`：中转自己的 HTTP 端口（不是控制台的端口） |
 | `CLAUDE_RELAY_PREFIX` | `str` | `"cc"`（1–10 个非空白字符） | `src/config.py` | `src/relay/commands.py:prefix_pattern()`：开头是它（可带 `/`、冒号、逗号），后面不能紧跟字母数字 |
@@ -905,7 +906,7 @@ todo_delete_keywords: list[str] = [
 |---|---|---|
 | `context.Stop(value)` / `RouteContext` / `RouteStep(name, run, doc)` | 结束路由并给出返回值 / 步骤共享的上下文（路由器、消息、追踪、`raw`、`is_at`、`sticky_triggered`、`clean_content`、`reply`）/ 一个有名字的步骤 | — |
 | `context.AT_MENTION_MAX_AGE_SEC` 等三个年龄常量 | 300 秒：过旧的 @、欢迎、逐条监听消息当作启动时重放的历史（`src/router.py` 仍导出同名常量） | `int` |
-| `steps.ROUTE_STEPS` | 顺序：`self_message`（自己的消息）→ `persist`（入库，重复停止）→ `claude_relay`（`CLAUDE_RELAY=on` 时允许的人私聊里的 `cc …` 转给 Mac，回执结束路由）→ `memory_hooks`（记忆任务/旧日记触发）→ `full_feed`（逐条监听的人设）→ `quoted_image` → `image_message` → `close_image_window` → `private_chat` → `quote_of_other_member` → `welcome` → `detect_trigger`（@/粘性/关键词/跟聊/点名，写 `route`）→ `mention_gate`（过旧的 @、去掉 @机器人、空 @ 变「在吗」）→ `feishu_export` → `help_command` → `fun_commands` → `admin_command` → `todo_command` → `chat_request` → `ambient`（主动发言，闸门关则沉默）→ `finish`（清洗并登记回复） | `tuple[RouteStep, ...]` |
+| `steps.ROUTE_STEPS` | 顺序：`self_message`（自己的消息）→ `persist`（入库，重复停止）→ `claude_relay`（`CLAUDE_RELAY=on` 时允许的人私聊里的 `cc …` 转给 Mac，回执结束路由）→ `relay_only`（`CLAUDE_RELAY_ONLY=on` 时其余消息到此静默结束）→ `memory_hooks`（记忆任务/旧日记触发）→ `full_feed`（逐条监听的人设）→ `quoted_image` → `image_message` → `close_image_window` → `private_chat` → `quote_of_other_member` → `welcome` → `detect_trigger`（@/粘性/关键词/跟聊/点名，写 `route`）→ `mention_gate`（过旧的 @、去掉 @机器人、空 @ 变「在吗」）→ `feishu_export` → `help_command` → `fun_commands` → `admin_command` → `todo_command` → `chat_request` → `ambient`（主动发言，闸门关则沉默）→ `finish`（清洗并登记回复） | `tuple[RouteStep, ...]` |
 | `steps.self_message(ctx)` | 跳过机器人自己的消息：后端已按 wxid 核实过的消息（`_not_self_by_id`）直接放行；否则按显示名（等于或包含 `BOT_DISPLAY_NAME`）判断 | `Stop \| None` |
 | `steps.run_route(router, msg, trace, steps=ROUTE_STEPS)` | 依次执行，第一个返回 `Stop` 的结束，并 `trace.note(ended_by=<步骤名>)` | `str \| None` |
 | `steps.run_fun_command(router, msg, clean_content, trace)` | 抽签/塔罗，群聊 @ 路径和私聊共用；命中会替换此前命令产生的回复 | `(matched, reply)` |
@@ -2406,6 +2407,7 @@ STICKER_MIN_INTERVAL_SEC=600                   # 同一个聊天两次表情包�
 STICKER_PASTE=file                             # file=粘贴文件（GIF 可能保持动图）；image=粘贴静态图
 
 # === Claude 中转（Windows 收消息，Mac 上的 Claude Code 干活） ===
+CLAUDE_RELAY_ONLY=off                          # on：只做中转，其余消息一律不回、不调用模型
 CLAUDE_RELAY=off                               # on：允许的人私聊发「cc 任务」转给 Mac（需 PRIVATE_CHAT_ENABLED=true）
 CLAUDE_RELAY_TOKEN=                            # 随机串（至少 16 字符），Mac 端 RELAY_TOKEN 相同
 CLAUDE_RELAY_HOST=0.0.0.0                      # 中转端口监听地址（防火墙只放行局域网）

@@ -106,6 +106,16 @@ def claude_relay(ctx: RouteContext) -> Optional[Stop]:
     return Stop(reply)
 
 
+def relay_only(ctx: RouteContext) -> Optional[Stop]:
+    """CLAUDE_RELAY_ONLY=on: the bot only relays.  Whatever ``claude_relay`` did not
+    take ends here, silently: no reply, no proactive line, no welcome, no memory job,
+    no model call.  The message is stored (``persist`` ran) so the logs show it."""
+    if getattr(ctx.router._config, "claude_relay_only", "off") != "on":
+        return None
+    ctx.trace.ignore("relay_only")
+    return Stop(None)
+
+
 def memory_hooks(ctx: RouteContext) -> Optional[Stop]:
     """Hand the stored message to the memory machinery (never delays the reply)."""
     router, msg = ctx.router, ctx.msg
@@ -484,6 +494,7 @@ ROUTE_STEPS: tuple[RouteStep, ...] = (
     RouteStep("self_message", self_message, "the bot's own lines are never handled"),
     RouteStep("persist", persist, "store the message; duplicates stop here"),
     RouteStep("claude_relay", claude_relay, "cc ... from an allowed private chat goes to the Mac"),
+    RouteStep("relay_only", relay_only, "CLAUDE_RELAY_ONLY: nothing else is answered"),
     RouteStep("memory_hooks", memory_hooks, "memory job / diary trigger"),
     RouteStep("full_feed", full_feed, "a persona that reads every message of a group"),
     RouteStep("quoted_image", quoted_image, "a quoted picture the user asks about"),
