@@ -259,3 +259,22 @@ def test_stay_awake_lasts_as_long_as_the_worker(worker, monkeypatch):
     monkeypatch.setattr(worker.subprocess, "Popen", lambda cmd: started.append(cmd) or "proc")
     assert worker.stay_awake() == "proc"
     assert started == [["/usr/bin/caffeinate", "-s", "-w", str(worker.os.getpid())]]
+
+
+def test_the_token_can_live_in_its_own_file(worker, tmp_path, monkeypatch):
+    monkeypatch.delenv("RELAY_TOKEN", raising=False)
+    monkeypatch.delenv("RELAY_URL", raising=False)
+    token = tmp_path / "token"
+    token.write_text("b" * 32 + "\n", encoding="utf-8")
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"relay_url": "http://x", "token": "old", "token_file": str(token)}),
+                   encoding="utf-8")
+    assert worker.load_settings(cfg)["token"] == "b" * 32          # the file wins over "token"
+    token.write_text("c" * 32, encoding="utf-8")
+    assert worker.read_token(cfg) == "c" * 32                       # a running worker follows it
+    token.unlink()
+    with pytest.raises(SystemExit):
+        worker.load_settings(cfg)
+    assert worker.read_token(cfg) is None
+    monkeypatch.setenv("RELAY_TOKEN", "d" * 32)
+    assert worker.load_settings(cfg)["token"] == "d" * 32           # the environment wins

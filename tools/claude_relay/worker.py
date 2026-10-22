@@ -12,8 +12,8 @@ user cancelled), and posts the result back.  A result is written to the
 outbox first and sent until the bot has it, so a Windows restart loses nothing.
 
 Standard library only (macOS /usr/bin/python3 is enough).  Settings:
-~/.claude-relay/config.json (see config.example.json); RELAY_URL and
-RELAY_TOKEN in the environment override it.  Setup: README.md next to this file.
+~/.claude-relay/config.json (see config.example.json); the token can live in
+its own file (token_file); RELAY_URL and RELAY_TOKEN in the environment win.  Setup: README.md next to this file.
 
     python3 worker.py --check     reach the bot and find claude, then exit
     python3 worker.py --once      do one job, then exit
@@ -52,6 +52,7 @@ MAX_BACKOFF_SEC = 60
 DEFAULTS = {
     "relay_url": "",
     "token": "",
+    "token_file": "",          # a file holding only the token (kept out of config.json)
     "projects": {},            # alias -> folder, for "cc @alias ..."
     "default_project": "",     # alias or folder for tasks without @alias (empty = home)
     "claude_bin": "",          # empty = PATH, the usual install places, then VS Code's copy
@@ -80,6 +81,12 @@ def load_settings(path: Path) -> dict:
     settings = dict(DEFAULTS)
     if path.exists():
         settings.update(json.loads(path.read_text(encoding="utf-8")))
+    if settings.get("token_file") and not os.environ.get("RELAY_TOKEN"):
+        token_path = Path(os.path.expanduser(str(settings["token_file"])))
+        try:
+            settings["token"] = token_path.read_text(encoding="utf-8").strip()
+        except OSError as e:
+            raise SystemExit(f"cannot read token_file {token_path}: {e}")
     for env, key in (("RELAY_URL", "relay_url"), ("RELAY_TOKEN", "token")):
         if os.environ.get(env):
             settings[key] = os.environ[env]

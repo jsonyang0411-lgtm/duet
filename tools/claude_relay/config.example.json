@@ -1,6 +1,7 @@
 {
   "relay_url": "http://192.168.1.20:8790",
-  "token": "和 Windows 上 CLAUDE_RELAY_TOKEN 一样的随机串",
+  "token": "",
+  "token_file": "~/.claude-relay/token",
   "projects": {
     "webot": "~/Desktop/webot/webot-claude-relay",
     "douyin": "~/Desktop/douyin-engineering"
