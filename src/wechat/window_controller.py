@@ -38,6 +38,16 @@ from PIL import Image, ImageGrab, ImageStat
 
 logger = logging.getLogger(__name__)
 
+def _ensure_default_desktop() -> None:
+    """Ensure the calling thread is attached to the interactive 'Default' desktop."""
+    try:
+        user32 = ctypes.windll.user32
+        h_desk = user32.OpenDesktopW("Default", 0, False, 0x01FF)
+        if h_desk:
+            user32.SetThreadDesktop(h_desk)
+    except Exception:
+        pass
+
 # ── Constants ─────────────────────────────────────────────────────
 
 WECHAT_PROCESS_NAMES = {"wechat.exe", "weixin.exe"}
@@ -328,6 +338,8 @@ class WeChatWindowController:
         all_candidates: list[WindowCandidate] = []
         wechat_candidates: list[WindowCandidate] = []
 
+        _ensure_default_desktop()
+
         def _enum(hwnd, _ctx):
             c = _score_window(hwnd)
             if c.process_name in WECHAT_PROCESS_NAMES:
@@ -336,7 +348,12 @@ class WeChatWindowController:
                 all_candidates.append(c)
             return True
 
-        win32gui.EnumWindows(_enum, None)
+        ctypes.windll.kernel32.SetLastError(0)
+        ctypes.windll.kernel32.SetLastError(0)
+        try:
+            win32gui.EnumWindows(_enum, None)
+        except Exception as e:
+            logger.debug("EnumWindows status: %s", e)
 
         # Log candidates for diagnostics
         if wechat_candidates:
@@ -499,6 +516,7 @@ class WeChatWindowController:
     # ── Window activation ─────────────────────────────────────────
 
     def activate(self, hwnd: int) -> bool:
+        _ensure_default_desktop()
         """Activate the WeChat window: restore if iconic, bring to foreground.
 
         Windows foreground lock: SetForegroundWindow fails with
@@ -545,7 +563,11 @@ class WeChatWindowController:
             ctypes.windll.user32.AllowSetForegroundWindow(-1)
 
             # ── Layer 2: SetForegroundWindow ────────────────────────
-            foreground_set = win32gui.SetForegroundWindow(hwnd)
+            try:
+                foreground_set = win32gui.SetForegroundWindow(hwnd)
+            except Exception as e:
+                logger.debug("Layer 2 SetForegroundWindow failed: %s", e)
+                foreground_set = False
             time.sleep(0.3)
             if self._foreground_matches(hwnd):
                 logger.debug("Window activated: HWND=%s is foreground", hwnd)
@@ -674,13 +696,19 @@ class WeChatWindowController:
             # unless we also attached threads above)
             ctypes.windll.user32.AllowSetForegroundWindow(-1)
 
-            success = bool(win32gui.SetForegroundWindow(hwnd))
+            try:
+                success = bool(win32gui.SetForegroundWindow(hwnd))
+            except Exception:
+                success = False
 
             # If SetForegroundWindow failed but we got thread attachments,
             # try one more time after a brief sleep
             if not success and (attached_current or attached_foreground):
                 time.sleep(0.15)
-                success = bool(win32gui.SetForegroundWindow(hwnd))
+                try:
+                    success = bool(win32gui.SetForegroundWindow(hwnd))
+                except Exception:
+                    success = False
 
             return success
         except Exception as e:
@@ -1033,6 +1061,7 @@ class WeChatWindowController:
 
     def _send_to_chat(self, group_name: str, text: str, max_retries: int,
                       file_path: str | None = None) -> bool:
+        _ensure_default_desktop()
         state_to_restore: WindowSnapshot | None = None
         last_hwnd: int | None = None
 
@@ -1106,6 +1135,7 @@ class WeChatWindowController:
 
     def find_chat_window(self, group_name: str) -> Optional[int]:
         """A WeChat window of its own showing this chat (title = chat name), or None."""
+        _ensure_default_desktop()
         name = (group_name or "").strip()
         if not name or name in MAIN_WINDOW_TITLES:
             return None
