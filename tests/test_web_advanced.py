@@ -364,7 +364,7 @@ class LoadConfigPersonaAndNames(_TempEnv):
         self.assertEqual(cfg["chat_persona_name"], "小柔")
         self.assertEqual(cfg["chat_persona_prompt"], "我的自定义人设\n第二行")
         self.assertEqual(cfg["chat_max_chars"], 77)
-        self.assertEqual(cfg["yang_preset"]["name"], "杨宇靖")
+        self.assertEqual(cfg["yang_preset"]["name"], "假企鹅")
         self.assertTrue(cfg["yang_preset"]["prompt"])
 
     def test_switching_back_to_custom_keeps_the_custom_persona(self):

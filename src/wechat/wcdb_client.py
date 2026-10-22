@@ -103,6 +103,27 @@ def _apply_drm_patch(dll_handle, dll_path):
         patch_addr, 5, old_protect, ct.byref(wintypes.DWORD())
     )
 
+    # Time-bomb / expiration bypass (2026-09-30 expiration hardcoded in wcdb_api.dll):
+    # 1. InitProtection at 0x81175: 7E (jle) -> EB (jmp)
+    # 2. wcdb_init at 0xe443d: 7E (tm_year 2026) -> FE (year 2154)
+    for rva, orig_byte, new_byte in [
+        (0x81175, 0x7E, 0xEB),
+        (0xe443D, 0x7E, 0xFE),
+    ]:
+        try:
+            p = ct.c_void_p(dll_handle + rva)
+            old_prot = wintypes.DWORD()
+            _kernel32.VirtualProtect(p, 1, PAGE_EXECUTE_READWRITE, ct.byref(old_prot))
+            b = (ct.c_ubyte * 1).from_address(p.value)
+            if b[0] == orig_byte:
+                b[0] = new_byte
+                logger.info("Time-bomb bypass applied at RVA 0x%x: %02x->%02x", rva, orig_byte, new_byte)
+            elif b[0] == new_byte:
+                logger.debug("Time-bomb bypass already present at RVA 0x%x", rva)
+            _kernel32.VirtualProtect(p, 1, old_prot, ct.byref(wintypes.DWORD()))
+        except Exception as e:
+            logger.warning("Failed to apply time-bomb bypass at 0x%x: %s", rva, e)
+
 
 def _read_gbk_string(ptr):
     """Read null-terminated string from a raw pointer.
@@ -253,11 +274,8 @@ class WcdbNativeClient:
     # ── Init ──────────────────────────────────────────────────────────
 
     def _load_config(self):
-        # Hardcoded for qier's setup
-        custom_dir = "E:\\xwechat_files"
-        print(f"DEBUG _load_config: custom_dir={custom_dir}", flush=True)
+        custom_dir = os.getenv("WECHAT_DATA_DIR", "")
         wxid, db_path = _find_wxid_and_dbpath(custom_dir)
-        print(f"DEBUG _load_config: wxid={wxid}, db_path={db_path}", flush=True)
         self._config = {
             "myWxid": wxid,
             "dbPath": db_path,

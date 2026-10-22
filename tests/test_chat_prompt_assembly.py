@@ -365,7 +365,7 @@ def make_mode(**overrides) -> ProactiveMode:
 
 class TestPersonaModule:
     def test_default_numbers_and_names(self):
-        assert DEFAULT_CHAT_PERSONA_NAME == "杨宇靖"
+        assert DEFAULT_CHAT_PERSONA_NAME == "假企鹅"
         assert DEFAULT_CHAT_MAX_CHARS == 30
         assert DEFAULT_CHAT_CONTEXT_WINDOW_SEC == 900
         assert DEFAULT_CHAT_CONTEXT_COUNT == 14
@@ -400,7 +400,7 @@ class TestPersonaModule:
             "context_window_sec": DEFAULT_CHAT_CONTEXT_WINDOW_SEC,
             "context_count": 14,
         }
-        assert DEFAULT_YANG_YUJING_PERSONA_NAME == "杨宇靖"
+        assert DEFAULT_YANG_YUJING_PERSONA_NAME == "假企鹅"
 
     # PINNED (known issue, expected to change in Phase 3): one specific group's
     # name and one specific group's alias joke are baked into source/prompt text.
@@ -820,7 +820,7 @@ class TestSilenceFlag:
         # PINNED (known issue, expected to change in Phase 2): the flag is
         # computed on the RAW text, so silence that only becomes visible after
         # cleanup is reported as an unexplained empty reply.
-        pytest.param("杨宇靖：空白", "", False, id="pinned-name-prefix-plus-blank"),
+        pytest.param("假企鹅：空白", "", False, id="pinned-name-prefix-plus-blank"),
         pytest.param("输出：沉默", "", False, id="pinned-label-plus-silence"),
         pytest.param("不回复（沉默）", "", False, id="pinned-token-plus-aside"),
     ])

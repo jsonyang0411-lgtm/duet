@@ -185,6 +185,12 @@ class Win32Desktop:
         foreground lock for this call; no key press reaches the user's window.
         """
         user32, kernel32 = self._api()
+        try:
+            h_desk = user32.OpenDesktopW("Default", 0, False, 0x01FF)
+            if h_desk:
+                user32.SetThreadDesktop(h_desk)
+        except Exception:
+            pass
         foreground = user32.GetForegroundWindow()
         current = kernel32.GetCurrentThreadId()
         foreground_thread = user32.GetWindowThreadProcessId(foreground, None) if foreground else 0

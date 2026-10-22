@@ -48,8 +48,6 @@ def start_bot():
     web_thread = start_web_server()
 
     try:
-        import os as _os
-        _os.environ.setdefault("WECHAT_DATA_DIR", "E:\\xwechat_files")
         from src.config import load_config
         config = load_config()
         update_status(

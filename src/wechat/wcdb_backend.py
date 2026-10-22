@@ -233,9 +233,10 @@ class WcdbBackend(AbstractWeChatBackend):
             "yang_yujing_group_name",
             "yang_yujing_always_reply_group_name",
         ):
-            group = str(getattr(config, attribute, "")).strip()
-            if group and group not in yang_target_groups:
-                yang_target_groups.append(group)
+            val = str(getattr(config, attribute, "")).strip()
+            for group in [g.strip() for g in val.split(",") if g.strip()]:
+                if group and group not in yang_target_groups:
+                    yang_target_groups.append(group)
         if (
             getattr(config, "chat_persona_profile", "")
             == PERSONA_PROFILE_YANG_YUJING
@@ -887,14 +888,15 @@ class WcdbBackend(AbstractWeChatBackend):
             != PERSONA_PROFILE_YANG_YUJING
         ):
             return False
-        target_groups = {
-            str(getattr(config, attribute, "")).strip()
-            for attribute in (
-                "yang_yujing_group_name",
-                "yang_yujing_always_reply_group_name",
-            )
-        }
-        target_groups.discard("")
+        target_groups = set()
+        for attribute in (
+            "yang_yujing_group_name",
+            "yang_yujing_always_reply_group_name",
+        ):
+            val = str(getattr(config, attribute, "")).strip()
+            for g in val.split(","):
+                if g.strip():
+                    target_groups.add(g.strip())
         if not target_groups:
             return False
         return bool(target_groups & {
@@ -1217,12 +1219,20 @@ class WcdbBackend(AbstractWeChatBackend):
             is_reply_to_bot = bool(quote_info and (quote_name_matches_bot or quote_id_matches_bot))
 
         # Detect @mention of bot
+        bot_names = {self._bot_name, "假企鹅", "qier"}
+        if hasattr(self, "_config") and self._config:
+            if getattr(self._config, "bot_display_name", None):
+                bot_names.add(self._config.bot_display_name)
+            if getattr(self._config, "chat_persona_name", None):
+                bot_names.add(self._config.chat_persona_name)
+        bot_names.discard("")
+
         is_at = bool(
             is_reply_to_bot
             or (
-                is_group and self._bot_name and (
-                    f"@{self._bot_name}" in resolved_content
-                    or f"@{self._bot_name}" in content
+                is_group and any(
+                    f"@{bn}" in resolved_content or f"@{bn}" in content
+                    for bn in bot_names
                 )
             )
         )

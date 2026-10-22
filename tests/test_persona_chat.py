@@ -111,7 +111,7 @@ class PersonaChatTests(unittest.TestCase):
         self.assertEqual(summarizer.chat("测试", context_messages=[]), "hi，你在呀")
 
     def test_chat_reply_cleaner_strips_name_and_truncates(self):
-        summarizer = FakeSummarizer("杨宇靖：1234567890abcdef")
+        summarizer = FakeSummarizer("假企鹅：1234567890abcdef")
         summarizer.configure_chat_persona(max_chars=10)
         self.assertEqual(summarizer.chat("测试", context_messages=[]), "1234567890")
 

@@ -89,7 +89,7 @@ def test_the_registry_reads_builtin_and_user_personas_when_a_map_exists(tmp_path
     (tmp_path / "map.json").write_text(json.dumps({"groups": {"读书": "me", "游戏": "yang_yujing"}}), encoding="utf-8")
     reg = P.PersonaRegistry.from_files(user_dir=tmp_path / "personas", map_path=tmp_path / "map.json")
     assert reg.persona_for(group("读书群")).prompt == GOOD["prompt"]
-    assert reg.persona_for(group("游戏群")).name == "杨宇靖" and reg.unknown_ids() == []
+    assert reg.persona_for(group("游戏群")).name == "假企鹅" and reg.unknown_ids() == []
 
 
 # ── the summarizer prompts ───────────────────────────────────────────────────
