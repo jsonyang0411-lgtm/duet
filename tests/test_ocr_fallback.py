@@ -476,11 +476,11 @@ class TestSettings:
         group = next(g for g in adv.GROUPS if g["id"] == "ocr")
         fields = {f["key"]: f for f in group["fields"]}
         assert fields["OCR_FALLBACK"]["type"] == "onoff" and fields["OCR_FALLBACK"]["default"] == "off"
-        assert fields["OCR_FALLBACK"]["platform_backends"] == ["mac_hybrid"]
+        assert fields["OCR_FALLBACK"]["platform_backends"] == ["mac_hybrid", "wcdb"]
         assert fields["OCR_FALLBACK_AFTER"]["requires"][0]["key"] == "OCR_FALLBACK"
         assert adv.validate_updates({"OCR_FALLBACK": "on"}, {}) == {}
         assert "OCR_FALLBACK_AFTER" in adv.validate_updates({"OCR_FALLBACK_AFTER": "0"}, {})
         # what the console receives: the value as the bot reads it, and the platform tag's text
         sent = next(g for g in adv.describe({"OCR_FALLBACK": "true"}, lambda v: v) if g["id"] == "ocr")
         shown = {f["key"]: f for f in sent["fields"]}["OCR_FALLBACK"]
-        assert shown["value"] == "on" and shown["platform_label"] == "仅 macOS"
+        assert shown["value"] == "on" and shown["platform_label"] == "macOS / Windows"

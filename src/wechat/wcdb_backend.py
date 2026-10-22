@@ -5,6 +5,9 @@ Reads WeChat messages directly from the encrypted WCDB database via
 patched wcdb_api.dll (ctypes).  Uses WeChatWindowController for sending.
 
 WCDB native access — reads encrypted database in-process, no external dependencies.
+
+Fallback (``OCR_FALLBACK=on``): while the database cannot be opened or read, the open
+chat is read from a screenshot of the WeChat window (src/wechat/ocr); sending is unchanged.
 """
 import concurrent.futures
 import hashlib
@@ -35,6 +38,8 @@ DEFAULT_POLL_SEC = 1.0
 MAX_DEDUP_SIZE = 5000
 MAX_CONSECUTIVE_ERRORS = 5   # trigger reinit after this many consecutive failures
 SESSION_REFRESH_SEC = 60.0
+# OCR cannot see who wrote a line of a group chat.
+OCR_SENDER = "OCR群友"
 APPMSG_TYPE = 49
 QUOTE_APPMSG_SUBTYPE = 57
 _HEX_BLOB_RE = re.compile(r"^[0-9a-fA-F]{80,}$")
@@ -45,6 +50,24 @@ _SPECIAL_PRIVATE_TALKERS = {
     "newsapp", "feedsapp", "brandsessionholder", "notification_messages",
     "officialaccounts", "notifymessage", "mphelper",
 }
+
+
+def _backoff_sec(consecutive_errors: int) -> float:
+    """Seconds to wait after the n-th failed poll in a row: 2, 4, 8, 16, then 1 again after a reinit."""
+    return min(2 ** min(consecutive_errors % MAX_CONSECUTIVE_ERRORS, 5), 30)
+
+
+def _ocr_from_config(config, window):
+    """The OCR fallback the configuration asks for (``OCR_FALLBACK=on``), else None."""
+    if getattr(config, "ocr_fallback", "off") != "on":
+        return None
+    from .ocr import OcrFallback
+    from .ocr.win_ocr import WindowsOcrEngine
+    return OcrFallback(
+        WindowsOcrEngine(window=window),
+        after=getattr(config, "ocr_fallback_after", 3),
+        interval=getattr(config, "ocr_poll_sec", 4.0),
+    )
 
 
 def _looks_like_wechat_blob(content: str) -> bool:
@@ -226,7 +249,8 @@ class WcdbBackend(AbstractWeChatBackend):
                  groups: list[str] | None = None,
                  poll_sec: float = DEFAULT_POLL_SEC,
                  store=None,
-                 config=None):
+                 config=None,
+                 ocr=None):
         self._bot_name = bot_display_name
         yang_target_groups = []
         for attribute in (
@@ -257,6 +281,11 @@ class WcdbBackend(AbstractWeChatBackend):
         )
         # A quiet send that waits for the user gives up once the bot stops.
         self._window.alive = lambda: self._running
+        # OCR_FALLBACK=on: the open chat is read from the screen while the database cannot be read.
+        self._ocr = ocr if ocr is not None else _ocr_from_config(config, self._window)
+        # True for the first cycle after an OCR stretch: what the database returns then is the
+        # outage's backlog (part of it was answered from the screen), so it is marked seen only.
+        self._ocr_priming = False
         # SEND_QUEUE=on: one thread sends every reply, so typing pauses and the
         # wait for the user never hold a worker (src/send/queue.py).
         self._send_queue: SendQueue | None = (
@@ -313,13 +342,24 @@ class WcdbBackend(AbstractWeChatBackend):
             # Push error to Web UI so the user sees a recovery path
             try:
                 from src.web.server import update_status
-                update_status(running=False, error=str(e))
+                if self._ocr is None:
+                    update_status(running=False, error=str(e))
+                else:
+                    update_status(error=f"数据库打不开，已改用 OCR 读取屏幕：{e}")
             except Exception:
                 pass
-            return
+            if self._ocr is None:
+                return
+            # OCR_FALLBACK=on: go on without the database.  The poll loop below fails on every
+            # cycle, which turns the OCR fallback on and retries the database (_reinitialize).
+            logger.warning("OCR_FALLBACK is on: starting without the WCDB database")
+            self._client = None
 
         # Resolve group talker IDs
-        self._resolve_groups()
+        if self._client is not None:
+            self._resolve_groups()
+        else:
+            self._register_groups_without_database()
 
         if not self._talker_ids:
             logger.error("No groups resolved. Check WECHAT_GROUPS.")
@@ -335,7 +375,8 @@ class WcdbBackend(AbstractWeChatBackend):
             [name for name, talker in self._talker_ids.items() if self._chat_is_group.get(talker)]
         )
 
-        self._prime_known_ids()
+        if self._client is not None:
+            self._prime_known_ids()
         self._last_session_refresh = time.monotonic()
 
         self._start_workers()
@@ -347,13 +388,19 @@ class WcdbBackend(AbstractWeChatBackend):
 
         try:
             while self._running and not _is_shutting_down():
+                # The first cycle after an OCR stretch only marks the database's backlog as seen.
+                self._ocr_priming = self._ocr is not None and self._ocr.active
                 try:
                     self._poll_cycle(callback)
                     consecutive_errors = 0
+                    if self._ocr is not None:
+                        self._ocr.note_db_ok()
                 except KeyboardInterrupt:
                     break
                 except Exception as e:
                     consecutive_errors += 1
+                    if self._ocr is not None:
+                        self._ocr.note_db_failure()
 
                     # After MAX_CONSECUTIVE_ERRORS consecutive failures,
                     # attempt full reinitialization (WeChat may have restarted).
@@ -378,12 +425,14 @@ class WcdbBackend(AbstractWeChatBackend):
                             except Exception:
                                 pass
 
-                    wait = min(2 ** min(consecutive_errors % MAX_CONSECUTIVE_ERRORS, 5), 30)
+                    wait = _backoff_sec(consecutive_errors)
                     logger.warning(
                         "Poll error #%d (%s): %s. Retry in %ss...",
                         consecutive_errors, type(e).__name__, e, wait,
                     )
-                    time.sleep(wait)
+                    self._sleep_polling_ocr(wait, callback)
+                finally:
+                    self._ocr_priming = False
         finally:
             # Drain in-flight callbacks gracefully
             self._pool.shutdown(wait=True, cancel_futures=True)
@@ -704,9 +753,112 @@ class WcdbBackend(AbstractWeChatBackend):
                 return name
         return ""
 
+    # ── OCR fallback ─────────────────────────────────────────────────
+
+    def _register_groups_without_database(self) -> None:
+        """Group names to chat ids when there is no database to look them up in.
+
+        The id only has to lead back to the name: sending goes through the name.
+        ``*`` (all groups) cannot be listed without the database.
+        """
+        for name in self._groups:
+            if name and name != "*":
+                self._add_talker(name, f"ocr:{name}", is_group=True)
+
+    def _sleep_polling_ocr(self, seconds: float, callback: MessageCallback) -> None:
+        """``time.sleep`` that, while the OCR fallback is on, also reads the screen."""
+        if self._ocr is None or not self._ocr.active:
+            time.sleep(seconds)
+            return
+        end = time.monotonic() + seconds
+        while self._running and time.monotonic() < end:
+            self._poll_ocr(callback)
+            time.sleep(max(0.0, min(1.0, end - time.monotonic())))
+
+    def _poll_ocr(self, callback: MessageCallback) -> None:
+        for found in self._ocr.poll():
+            ready = self._message_from_ocr(found)
+            if ready is None:
+                continue
+            group_name, talker, standardized = ready
+            msg_id = standardized["message_id"]
+            if msg_id in self._known_ids:
+                continue
+            self._known_ids.add(msg_id)
+            # Not through the burst buffer: it holds a message until _poll_cycle flushes it (which
+            # does not run while the database is down) and would merge different people's lines,
+            # since every line has the same unknown speaker.  The looks are seconds apart anyway.
+            self._dispatch_message(standardized, callback)
+
+    def _group_for_title(self, title: str) -> str | None:
+        """The configured group that this window title is: the same name, or (for a long name that the
+        window shows cut off with an ellipsis) the only group that starts with what is shown."""
+        def norm(value: str) -> str:
+            return "".join(str(value).split()).lower()
+
+        wanted = norm(title)
+        for name in self._talker_ids:
+            if norm(name) == wanted:
+                return name
+        if wanted.endswith(("…", "...")):
+            head = wanted.rstrip("….")
+            if len(head) >= 3:
+                starts = [name for name in self._talker_ids if norm(name).startswith(head)]
+                if len(starts) == 1:
+                    return starts[0]
+        return None
+
+    def _message_from_ocr(self, found):
+        """``(group name, chat id, standard message)`` for a line read from the screen, or None.
+
+        Only the groups in ``WECHAT_GROUPS`` are answered; a title with no member count is a
+        private chat, which OCR does not serve.
+        """
+        text = str(found.text or "").strip()
+        title = str(found.title_clean or "").strip()
+        if not text or not title or not found.is_group:
+            return None
+        group_name = self._group_for_title(title)
+        if group_name is None:
+            return None
+        talker = self._talker_ids[group_name]
+        timestamp = int(time.time())
+        bot_names = {self._bot_name, "假企鹅", "qier"}
+        for attribute in ("bot_display_name", "chat_persona_name"):
+            bot_names.add(getattr(self._config, attribute, None) or "")
+        bot_names.discard("")
+        digest = hashlib.md5(f"ocr|{talker}|{text}|{timestamp}".encode("utf-8")).hexdigest()
+        return group_name, talker, {
+            "message_id": digest,
+            "chat_id": talker,
+            "group_name": group_name,
+            "chat_name": group_name,
+            "sender_id": OCR_SENDER,
+            "sender_name": OCR_SENDER,
+            "content": text,
+            "msg_type": 1,
+            "server_id": "",
+            "media_base_dir": "",
+            "media_hint": "",
+            "media_kind": "",
+            "media_path": "",
+            "timestamp": timestamp,
+            "is_at_mentioned": any(f"@{name}" in text for name in bot_names),
+            "is_group": True,
+            "is_system_join": False,
+            "new_member_id": "",
+            "is_reply_to_bot": False,
+            "quoted_sender_id": "",
+            "quoted_sender_name": "",
+            "quoted_content": "",
+            "quoted_server_id": "",
+        }
+
     # ── Message polling ──────────────────────────────────────────────
 
     def _poll_cycle(self, callback: MessageCallback) -> None:
+        if self._client is None:
+            raise RuntimeError("the WCDB database is not open")
         self._refresh_private_chats_if_due()
         for group_name in list(self._groups):
             if not self._running:
@@ -849,6 +1001,8 @@ class WcdbBackend(AbstractWeChatBackend):
             if msg_id in self._known_ids:
                 continue
             self._known_ids.add(msg_id)
+            if self._ocr_priming:
+                continue              # the backlog of an OCR stretch: seen, not answered
 
             # Skip own messages.  With the account's wxid known that is the
             # whole test: a member whose display name is the bot's (a persona

@@ -213,7 +213,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `CLAUDE_RELAY_WXIDS` | `list[str]` | 空（=`ADMIN_WXID`） | `src/config.py`（逗号分隔） | `ClaudeRelay.__init__()`：只认这些 wxid 的私聊；开启时两者不能都空 |
 | `CLAUDE_RELAY_DB` | `str` | `"data/claude_relay.db"` | `src/config.py` | `RelayStore`：任务和每个私聊的 Claude 会话 |
 | `CLAUDE_RELAY_MAX_CHARS` | `int` | `1500` (100–5000) | `src/config.py` | `ClaudeRelay.result_message()`：结果超过就截断，并给出 Mac 上完整日志的路径 |
-| `OCR_FALLBACK` | `str` | `"off"` (`off`/`on`) | `src/config.py` | `src/wechat/mac_hybrid_backend.py:_ocr_from_config()` 建 `OcrFallback(MacVisionEngine())`；数据库读不了时改读屏幕上打开的群聊。只对 macOS 的 `mac_hybrid` 后端有效；控制台「高级 → 读取备选（OCR）」有开关 |
+| `OCR_FALLBACK` | `str` | `"off"` (`off`/`on`) | `src/config.py` | `src/wechat/mac_hybrid_backend.py:_ocr_from_config()` 建 `OcrFallback(MacVisionEngine())`，`src/wechat/wcdb_backend.py:_ocr_from_config()` 建 `OcrFallback(WindowsOcrEngine(...))`；数据库读不了时改读屏幕上打开的群聊。对 macOS 的 `mac_hybrid` 和 Windows 的 `wcdb` 后端有效；控制台「高级 → 读取备选（OCR）」有开关 |
 | `OCR_FALLBACK_AFTER` | `int` | `3` (1–20) | `src/config.py` | `OcrFallback.note_db_failure()`：数据库每秒读一次，连续失败这么多次才切到 OCR |
 | `OCR_POLL_SEC` | `float` | `4.0` (1–60) | `src/config.py` | `OcrFallback.poll()`：两次看屏幕的最短间隔（一次约 0.8 秒） |
 
@@ -1013,6 +1013,11 @@ todo_delete_keywords: list[str] = [
 | `mac_vision.MacVisionEngine(source, cache_dir, runner)` | macOS 识别引擎：`prepare()` 用 `swiftc -O` 把 `native/macos/wechat_ocr/ocr.swift` 编译到 `~/Library/Caches/webot/wechat_ocr/ocr-<源码哈希>`（改了源码会重编；没有 swiftc 只记日志不抛）；`capture()` 用 `ocr wid` 找微信主窗口、`screencapture -l` 截图、`ocr <图>` 识别成行，**截图读完立即删除**；找不到窗口抛 `RuntimeError` | `bool` / `list[dict]` |
 | `fallback.OcrFallback(engine, *, after=3, interval=4.0, clock)` | 开关逻辑：`note_db_failure()` 连续失败 `after` 次后打开（日志警告），`note_db_ok()` 数据库读通就关（返回 True 表示刚切回来）；`poll()` 只在打开时每 `interval` 秒看一次，返回 `OcrMessage(title, title_clean, text, is_group)`（标题带人数后缀 = 群聊）；连续 5 次读到 0 行文字时提示检查屏幕录制权限；`warm_up()` 后台编译识别程序 | `bool` / `bool` / `list[OcrMessage]` |
 | `MacHybridBackend(..., ocr=None)` | `poll_once`：WeFlow 读失败时调 `_poll_ocr()`；**第一次读通时**这次返回的是断线期间的积压，只记入 `_seen_ids` 不交给机器人（一部分已经靠屏幕回答过了）；`_dispatch(msg, callback)` 是原来的「去重 → 过滤自己 → 回调 → 发送」抽出来的共用步骤；`_message_from_ocr()` 组标准消息（`sender_id`/`sender_name` = `OCR群友`，`message_id` = `mac-ocr-<sha1>`，`is_at_mentioned` 判断同 WeFlow 路径）；`_chat_id_for_title()` 标题对应的 `@chatroom` 唯一时用它，否则 `ocr:<标题>`（发送靠标题，不靠 id）；`health_status()` 开着时返回 `ocr_fallback`（心跳日志里能看到） | — |
+| `win_ocr.WindowsOcrEngine(window, runner, grabber, powershell)` | Windows 识别引擎：`capture()` 用 `WeChatWindowController.find_hwnd(wake=False)` 找微信主窗口（不唤醒托盘窗口）、`print_window()`（`PrintWindow` + `PW_RENDERFULLCONTENT`，被遮挡也能截，最小化不行；线程临时设为 per-monitor DPI 感知，按真实像素截；全黑当作失败）截图到私有临时文件，再把 `SCRIPT`（Windows.Media.Ocr 的 PowerShell 脚本）**经标准输入**交给 `powershell -NoProfile -Command -`（不落脚本文件，不改执行策略），脚本每行输出 `{"t","x","y","w","h"}`（像素），`rows_from_lines()` 转成 0..1 的行并取文字左侧 8 像素处的颜色；临时图读完即删。没装中文 OCR 语言包时脚本退出码 3，报错里给出 `Add-WindowsCapability -Online -Name Language.OCR~~~zh-CN~0.0.1.0` | `list[dict]` |
+| `win_ocr.fix_spacing(text)` | Windows OCR 会在汉字之间插空格（`你 好`），只去掉两边都是汉字/全角符号的空格 | `str` |
+| `engines.default_engine(window=None)` | 按平台选引擎：macOS `MacVisionEngine`，Windows `WindowsOcrEngine(window)`，其他抛 `RuntimeError` | 引擎 |
+| `WcdbBackend(..., ocr=None)` | `start()`：数据库打不开时（有 OCR 才）不再直接退出，`_client=None`、`_register_groups_without_database()` 用 `ocr:<群名>` 当 chat id（只认 `WECHAT_GROUPS` 里写明的群名，`*` 需要数据库），照常进读取循环；循环里每轮读失败 `note_db_failure()`、读通 `note_db_ok()`；`_poll_cycle` 在 `_client is None` 时抛错让循环计数并走 `_reinitialize()` 重试打开；失败后的等待换成 `_sleep_polling_ocr()`（等待期间每秒看一次屏幕，数据库的退避节奏不变）；OCR 刚结束的那一轮 `_ocr_priming=True`，`_poll_group` 只把积压记入已见、不回答；`_message_from_ocr()` 组完整的标准消息（键与 `_standardize` 相同，`sender` = `OCR群友`）；`_group_for_title()` 群名严格相等（忽略空格），窗口标题被截成「…」时只在唯一匹配时才认；OCR 消息**不走合并缓冲**（缓冲要靠 `_poll_cycle` 冲刷，且会把不同人的话合并）直接 `_dispatch_message` | — |
+| `tools/ocr_check.py` | 在真机上检查 OCR 能不能读：默认看 3 次、只打印数量（行数、标题、对方/自己的消息数、聊天区边界），不打印聊天内容；`--watch 秒数 --group 群名` 像机器人一样每 `--interval` 秒看一次，只打印这一个群的新消息；`--save-rows` 存原始行（含屏幕文字）。失败给出对应提示（屏幕录制权限、swiftc、OCR 语言包、窗口没找到） | 退出码 0/1 |
 
 ---
 
@@ -2226,7 +2231,7 @@ CREATE TABLE relay_sessions (chat_id TEXT PRIMARY KEY, session_id TEXT, updated_
 
 ### 功能S: OCR 备选读取（OCR_FALLBACK）
 
-目的：Mac 后端读不了微信数据库时（WeFlow 没启动、密钥失效、微信升级），改成截取微信窗口用 Apple Vision 读当前打开的聊天，数据库恢复后自动切回来。默认关闭；关闭时 `MacHybridBackend._ocr` 是 `None`，读取失败的行为和以前一样（只记日志）。只覆盖 macOS 的 `mac_hybrid`；Windows 的 WCDB 后端需要另一个识别引擎（`reader.py` 只吃「文字行」，引擎可替换），还没做。
+目的：读不了微信数据库时（macOS：WeFlow 没启动、密钥失效；Windows：DLL 加载失败、数据库打不开；微信升级），改成截取微信窗口用系统自带的文字识别（macOS Apple Vision，Windows `Windows.Media.Ocr`）读当前打开的聊天，数据库恢复后自动切回来。默认关闭；关闭时两个后端的 `_ocr` 是 `None`，读取失败的行为和以前一样。识别引擎可替换：`reader.py` 只吃「文字行」，引擎只要返回同样的行。
 
 ```
 MacHybridBackend.poll_once
@@ -2237,7 +2242,9 @@ MacHybridBackend.poll_once
         → _message_from_ocr → _should_monitor（只监听群）→ _dispatch → router → send_text（原来的发送路径）
 ```
 
-限制：只读打开的那个会话、只读屏幕上显示的那一段；认不出群里是谁说的（所以只能按 @机器人/叫名字触发，管理员命令、cc 中转不可用）；图片、语音、表情读不出；微信不能最小化；要给运行机器人的程序「屏幕录制」权限；手动滚动机器人那台电脑上的微信窗口可能导致重复或漏读。控制台开关：`advanced_config.GROUPS` 里的 `ocr` 分组；`platform_label` / `platform_backends` 让标签显示「仅 macOS」，选了别的后端会变成警告色。
+Windows（`WcdbBackend`）：数据库启动时就打不开也不会退出（有 OCR 时）：`_poll_cycle` 每轮报「数据库没打开」→ 连续 N 次后打开 OCR → 每 5 次失败 `_reinitialize()` 试着重新打开数据库 → 打开成功后 `_resolve_groups` + `_prime_known_ids` 把积压标为已见 → 下一轮读通就关掉 OCR。
+
+限制：只读打开的那个会话、只读屏幕上显示的那一段；认不出群里是谁说的（所以只能按 @机器人/叫名字触发，管理员命令、cc 中转不可用）；图片、语音、表情读不出；微信不能最小化；macOS 要给运行机器人的程序「屏幕录制」权限、Windows 要装中文 OCR 语言包（Windows 部分只用假对象测过，真机用 `tools/ocr_check.py` 验证）；手动滚动机器人那台电脑上的微信窗口可能导致重复或漏读。控制台开关：`advanced_config.GROUPS` 里的 `ocr` 分组；`platform_label` / `platform_backends` 让标签显示「仅 macOS」，选了别的后端会变成警告色。
 
 ---
 
@@ -2391,7 +2398,7 @@ CLAUDE_RELAY_PREFIX=cc                         # 指令前缀
 CLAUDE_RELAY_WXIDS=                            # 谁能用（逗号分隔 wxid）；空=ADMIN_WXID
 CLAUDE_RELAY_MAX_CHARS=1500                    # 结果超过就截断（完整结果在 Mac 日志）
 
-# === OCR 备选读取（仅 macOS mac_hybrid） ===
+# === OCR 备选读取（macOS mac_hybrid 和 Windows wcdb） ===
 OCR_FALLBACK=off                               # on：数据库读不了时，读屏幕上打开的群聊（Apple Vision）
 OCR_FALLBACK_AFTER=3                           # 连续读失败几次后切换
 OCR_POLL_SEC=4                                 # 多久看一次屏幕（秒）

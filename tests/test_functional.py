@@ -339,11 +339,11 @@ class TestRedesignedPages:
         for key in ("PIPELINE_V2", "MEMORY_V2", "SEND_QUIET", "SEND_STICKERS", "DECISION_TRACE_ENABLED"):
             assert key in text
 
-    def test_ocr_fallback_switch_is_on_the_advanced_page_and_marked_macos_only(self, page):
+    def test_ocr_fallback_switch_is_on_the_advanced_page_and_names_its_platforms(self, page):
         page.goto(f"{BASE_URL}/#/advanced", timeout=10000)
         page.wait_for_timeout(1500)
         text = page.inner_text("body")
-        for expected in ("OCR_FALLBACK", "数据库读不了时用 OCR", "读取备选（OCR）", "仅 macOS"):
+        for expected in ("OCR_FALLBACK", "数据库读不了时用 OCR", "读取备选（OCR）", "macOS / Windows"):
             assert expected in text
         # the Windows-only switches keep their own tag
         assert "仅 Windows" in text
