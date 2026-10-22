@@ -9,6 +9,7 @@ Runs in a daemon thread — no impact on the main bot loop.
 import json
 import logging
 import os
+_os = os
 import re
 import threading
 import time
@@ -115,7 +116,6 @@ def _detect_default_data_dir() -> str:
     Returns the base directory path string, or empty string if not found.
     Used by the UI to show what auto-detection would use.
     """
-    import os as _os
     candidates = [
         Path(_os.environ.get("USERPROFILE", "")) / "Documents" / "xwechat_files",
         Path(_os.environ.get("USERPROFILE", "")) / "Documents" / "WeChat Files",
@@ -499,7 +499,6 @@ def _detect_wxid_and_db_path():
 
     Respects WECHAT_DATA_DIR env var as a custom base dir (scanned first).
     """
-    import os as _os
 
     candidates: list[Path] = []
 
@@ -727,7 +726,6 @@ def _run_step1_extraction():
             if detected_data_dir:
                 _set_env_key(machine_env_path, "WECHAT_DATA_DIR", detected_data_dir)
             # Also set in the current process for load_dotenv in this session
-            import os as _os
             _os.environ["WCDB_KEY"] = key
             if detected_data_dir:
                 _os.environ["WECHAT_DATA_DIR"] = detected_data_dir
@@ -874,7 +872,6 @@ def _platform_dependency_report(system_name=None, import_checker=None, command_c
 
 def _platform_wechat_report(system_name=None):
     """Return a platform-aware WeChat process status."""
-    import os as _os
     import platform
     import subprocess
 
@@ -1174,8 +1171,6 @@ def _start_bot_in_thread():
 
     def _run():
         try:
-            import os as _os
-            _os.environ.setdefault("WECHAT_DATA_DIR", "E:\\xwechat_files")
             from src.config import load_config
             config = load_config()
             update_status(
