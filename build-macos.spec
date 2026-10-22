@@ -27,6 +27,8 @@ a = Analysis(
         (".env.example", "."),
         # persona and alias-rule data files (read next to src/persona.py)
         ("src/personas", "src/personas"),
+        # OCR fallback: the Swift source of the recognizer, compiled on first use (src/wechat/ocr)
+        ("native/macos/wechat_ocr", "native/macos/wechat_ocr"),
     ],
     hiddenimports=[
         "src",

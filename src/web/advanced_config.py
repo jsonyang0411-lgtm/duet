@@ -27,6 +27,7 @@ from src.config import (
 ONOFF = ("off", "on")
 V2_ON = {"key": "PIPELINE_V2", "not": "off", "text": "要先把 PIPELINE_V2 打开"}
 WCDB_ONLY = "只对 Windows（WCDB 直读）有效，macOS 后端会忽略"
+MAC_HYBRID_ONLY = "只对 macOS 的 mac_hybrid 后端有效，Windows（WCDB 直读）会忽略"
 
 # type: onoff | bool | enum | multi | int | float | text | json | names | path | secret
 # For "multi" and "json" an empty value is a real choice (no tasks / nothing
@@ -213,6 +214,24 @@ GROUPS: list[dict] = [
              "requires": [{"key": "IMAGE_FOLLOWUP_ENABLED", "is": "true", "text": "接话的图片也看打开时才用"}]},
             {"key": "IMAGE_SCREEN_FALLBACK_ENABLED", "type": "bool", "default": "true", "label": "读不到图时截屏",
              "help": "数据库里拿不到图片时，从微信窗口截图。"},
+        ],
+    },
+    {
+        "id": "ocr", "code": "OCR", "title": "读取备选（OCR）",
+        "desc": "数据库读不了的时候（WeFlow 没启动、密钥失效、微信升级后读不出来），改成截取微信窗口、用苹果的文字识别读当前打开的聊天。"
+                "数据库恢复后自动切回来。" + MAC_HYBRID_ONLY + "。",
+        "fields": [
+            {"key": "OCR_FALLBACK", "type": "onoff", "default": "off", "label": "数据库读不了时用 OCR",
+             "platform": MAC_HYBRID_ONLY, "platform_label": "仅 macOS", "platform_backends": ["mac_hybrid"],
+             "help": "只读当前打开的那个群聊，而且只读屏幕上显示的那一段；认不出是谁说的话，所以只能按 @机器人 或叫名字来触发；"
+                     "图片、语音、表情读不出来。微信窗口不能最小化，要给运行机器人的程序「屏幕录制」权限。"
+                     "第一次使用会用 swiftc 编译识别程序（需要 Xcode 命令行工具）。改完要重启机器人。"},
+            {"key": "OCR_FALLBACK_AFTER", "type": "int", "min": 1, "max": 20, "default": "3", "label": "连续读失败几次后切换", "unit": "次",
+             "help": "数据库每秒读一次，连续失败这么多次才改用 OCR，避免偶尔一次读失败就切换。",
+             "requires": [{"key": "OCR_FALLBACK", "is": "on", "text": "OCR 备选打开时才用"}]},
+            {"key": "OCR_POLL_SEC", "type": "float", "min": 1, "max": 60, "default": "4", "label": "多久看一次屏幕", "unit": "秒",
+             "help": "每次识别约 0.8 秒。间隔越短回得越快，也越占 CPU。",
+             "requires": [{"key": "OCR_FALLBACK", "is": "on", "text": "OCR 备选打开时才用"}]},
         ],
     },
     {

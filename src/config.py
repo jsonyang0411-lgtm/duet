@@ -565,6 +565,14 @@ class BotConfig:
     claude_relay_db: str = "data/claude_relay.db"
     claude_relay_max_chars: int = 1500     # longer results are cut (the Mac keeps the full text)
 
+    # === OCR fallback (src/wechat/ocr), macOS mac_hybrid backend only ===
+    # "on": when the WeChat database cannot be read ocr_fallback_after times in a row, the
+    # open chat is read from the screen (Apple Vision) every ocr_poll_sec seconds until the
+    # database works again.  Groups only; the speaker of a line is not known.
+    ocr_fallback: str = "off"
+    ocr_fallback_after: int = 3
+    ocr_poll_sec: float = 4.0
+
 
 def _validate_config(kwargs: dict) -> None:
     """Validate numeric config values.  Prints clear errors and exits on bad values."""
@@ -939,6 +947,13 @@ def _validate_config(kwargs: dict) -> None:
             errors.append("CLAUDE_RELAY_PREFIX must be 1-10 characters without spaces")
         if not (1 <= int(kwargs.get("claude_relay_port", 8790)) <= 65535):
             errors.append(f"CLAUDE_RELAY_PORT must be between 1 and 65535, got {kwargs.get('claude_relay_port')}")
+    ocr_fallback = kwargs.get("ocr_fallback", "off")
+    if ocr_fallback not in ("off", "on"):
+        errors.append(f"OCR_FALLBACK must be off or on, got {ocr_fallback}")
+    if not (1 <= int(kwargs.get("ocr_fallback_after", 3)) <= 20):
+        errors.append(f"OCR_FALLBACK_AFTER must be between 1 and 20, got {kwargs.get('ocr_fallback_after')}")
+    if not (1 <= float(kwargs.get("ocr_poll_sec", 4.0)) <= 60):
+        errors.append(f"OCR_POLL_SEC must be between 1 and 60, got {kwargs.get('ocr_poll_sec')}")
     if not (100 <= int(kwargs.get("claude_relay_max_chars", 1500)) <= 5000):
         errors.append(
             f"CLAUDE_RELAY_MAX_CHARS must be between 100 and 5000, got {kwargs.get('claude_relay_max_chars')}"
@@ -1231,6 +1246,9 @@ def load_config() -> BotConfig:
         "claude_relay_wxids": _split_names(os.getenv("CLAUDE_RELAY_WXIDS", "")),
         "claude_relay_db": os.getenv("CLAUDE_RELAY_DB", "data/claude_relay.db").strip() or "data/claude_relay.db",
         "claude_relay_max_chars": int(os.getenv("CLAUDE_RELAY_MAX_CHARS", "1500")),
+        "ocr_fallback": _parse_memory_mode(os.getenv("OCR_FALLBACK", "off")),
+        "ocr_fallback_after": int(os.getenv("OCR_FALLBACK_AFTER", "3")),
+        "ocr_poll_sec": float(os.getenv("OCR_POLL_SEC", "4")),
     }
 
     deepseek_model = os.getenv("DEEPSEEK_MODEL")

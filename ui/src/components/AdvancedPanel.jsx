@@ -132,7 +132,7 @@ export default function AdvancedPanel() {
                         <span className="f-key">{f.key}</span>
                         {changed && <span className="tag pend">已改</span>}
                         {data.local_overrides?.includes(f.key) && <span className="tag warn" title="这台电脑的 .env.local 里也写了这一项"><LockKey />被 .env.local 覆盖</span>}
-                        {f.platform && <span className={`tag ${wechatBackend && wechatBackend !== 'wcdb' ? 'warn' : ''}`} title={f.platform}><Desktop />仅 Windows</span>}
+                        {f.platform && <span className={`tag ${wechatBackend && !(f.platform_backends || ['wcdb']).includes(wechatBackend) ? 'warn' : ''}`} title={f.platform}><Desktop />{f.platform_label || '仅 Windows'}</span>}
                       </div>
                       {f.help && <div className="f-hint">{f.help}{rangeText(f) && ` ${rangeText(f)}。`}</div>}
                       {!f.help && rangeText(f) && <div className="f-hint">{rangeText(f)}。</div>}

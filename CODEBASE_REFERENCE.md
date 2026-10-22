@@ -80,6 +80,7 @@ grep "文件名" CODEBASE_REFERENCE.md
    - [功能P: 回复发送（气泡与打字延迟）](#功能p-回复发送气泡与打字延迟)
    - [功能Q: 表情（微信小黄脸与表情包）](#功能q-表情微信小黄脸与表情包)
    - [功能R: Claude 中转（CLAUDE_RELAY）](#功能r-claude-中转claude_relay)
+   - [功能S: OCR 备选读取（OCR_FALLBACK）](#功能s-ocr-备选读取ocr_fallback)
 5. [配置文件和环境变量](#5-配置文件和环境变量)
 
 ---
@@ -212,6 +213,9 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `CLAUDE_RELAY_WXIDS` | `list[str]` | 空（=`ADMIN_WXID`） | `src/config.py`（逗号分隔） | `ClaudeRelay.__init__()`：只认这些 wxid 的私聊；开启时两者不能都空 |
 | `CLAUDE_RELAY_DB` | `str` | `"data/claude_relay.db"` | `src/config.py` | `RelayStore`：任务和每个私聊的 Claude 会话 |
 | `CLAUDE_RELAY_MAX_CHARS` | `int` | `1500` (100–5000) | `src/config.py` | `ClaudeRelay.result_message()`：结果超过就截断，并给出 Mac 上完整日志的路径 |
+| `OCR_FALLBACK` | `str` | `"off"` (`off`/`on`) | `src/config.py` | `src/wechat/mac_hybrid_backend.py:_ocr_from_config()` 建 `OcrFallback(MacVisionEngine())`；数据库读不了时改读屏幕上打开的群聊。只对 macOS 的 `mac_hybrid` 后端有效；控制台「高级 → 读取备选（OCR）」有开关 |
+| `OCR_FALLBACK_AFTER` | `int` | `3` (1–20) | `src/config.py` | `OcrFallback.note_db_failure()`：数据库每秒读一次，连续失败这么多次才切到 OCR |
+| `OCR_POLL_SEC` | `float` | `4.0` (1–60) | `src/config.py` | `OcrFallback.poll()`：两次看屏幕的最短间隔（一次约 0.8 秒） |
 
 ### 1.2 模块级常量
 
@@ -998,6 +1002,17 @@ todo_delete_keywords: list[str] = [
 | `steps.claude_relay(ctx)` | 路由步骤（`persist` 之后、`memory_hooks` 之前）：`router._claude_relay` 为 `None` 时跳过；命中则 `trace.reason("claude_relay")` 并以回执结束路由 | `Stop \| None` |
 | `Bot._start_claude_relay(config, router, backend)` | `CLAUDE_RELAY=on` 时建中转并启动；端口打不开只记错误日志（任务照样排队，回执会说 Mac 不在线）；`run()` 结束时 `stop()` | `ClaudeRelay \| None` |
 | `tools/claude_relay/worker.py` | Mac 端，只用标准库（系统 Python 3.9 可用）：`load_settings`（`~/.claude-relay/config.json`，`RELAY_URL`/`RELAY_TOKEN` 覆盖）、`find_claude`（PATH、常见位置、最新的 VS Code 扩展内置版，每个任务重新找）、`project_dir`（只允许 `projects` 里的别名）、`RelayClient`（忽略系统代理）、`run_claude`（任务走 stdin；每 30 秒心跳，取消/超时/worker 停止时发 SIGINT，30 秒后强杀）、`summarize`（结果、会话、被拒绝的权限）、会话不存在时去掉 `--resume` 重跑一次、`deliver`/`flush_outbox`（结果先写 `~/.claude-relay/outbox/`，送达才删）、`--check`、`--once` | — |
+
+### 2.48 `src/wechat/ocr/`（OCR 备选读取，`OCR_FALLBACK`）
+
+| 名称 | 描述 | 返回值 |
+|---|---|---|
+| `reader.bubble_kind(bg)` / `resolve_chat_geometry(rows)` / `chat_title(rows)` / `other_messages(rows, want)` / `clean_group_name(name)` / `normalize_text(text)` / `MessageDeduplicator` | 来自 wechat-ocr-kit 的原样代码：按文字左侧底色分出「别人（白/深灰）」「自己（绿）」；动态推导聊天区边界（适配各种窗口大小、侧边抽屉、深浅色、输入框草稿）；取会话标题并去掉人数后缀；把同一气泡的相邻行合并成一条消息 | — |
+| `reader.read_rows(rows)` | 看一次窗口：`{"title", "title_clean", "other", "self"}`，消息按屏幕从上到下 | `dict` |
+| `reader.NewMessageTracker.feed(title, texts)` | 找出新消息：记住最近 100 条见过的消息，屏幕开头与记录末尾重叠的部分之后就是新的（模糊比较，容忍 OCR 把同一个气泡读得略有不同）；第一次看、换了聊天只记不报；不接续记录的屏幕（有人上滚、一次来了超过一屏）不报，同一屏停留 3 次后重新当起点；上滚再滚回来不会重复报 | `list[str]` |
+| `mac_vision.MacVisionEngine(source, cache_dir, runner)` | macOS 识别引擎：`prepare()` 用 `swiftc -O` 把 `native/macos/wechat_ocr/ocr.swift` 编译到 `~/Library/Caches/webot/wechat_ocr/ocr-<源码哈希>`（改了源码会重编；没有 swiftc 只记日志不抛）；`capture()` 用 `ocr wid` 找微信主窗口、`screencapture -l` 截图、`ocr <图>` 识别成行，**截图读完立即删除**；找不到窗口抛 `RuntimeError` | `bool` / `list[dict]` |
+| `fallback.OcrFallback(engine, *, after=3, interval=4.0, clock)` | 开关逻辑：`note_db_failure()` 连续失败 `after` 次后打开（日志警告），`note_db_ok()` 数据库读通就关（返回 True 表示刚切回来）；`poll()` 只在打开时每 `interval` 秒看一次，返回 `OcrMessage(title, title_clean, text, is_group)`（标题带人数后缀 = 群聊）；连续 5 次读到 0 行文字时提示检查屏幕录制权限；`warm_up()` 后台编译识别程序 | `bool` / `bool` / `list[OcrMessage]` |
+| `MacHybridBackend(..., ocr=None)` | `poll_once`：WeFlow 读失败时调 `_poll_ocr()`；**第一次读通时**这次返回的是断线期间的积压，只记入 `_seen_ids` 不交给机器人（一部分已经靠屏幕回答过了）；`_dispatch(msg, callback)` 是原来的「去重 → 过滤自己 → 回调 → 发送」抽出来的共用步骤；`_message_from_ocr()` 组标准消息（`sender_id`/`sender_name` = `OCR群友`，`message_id` = `mac-ocr-<sha1>`，`is_at_mentioned` 判断同 WeFlow 路径）；`_chat_id_for_title()` 标题对应的 `@chatroom` 唯一时用它，否则 `ocr:<标题>`（发送靠标题，不靠 id）；`health_status()` 开着时返回 `ocr_fallback`（心跳日志里能看到） | — |
 
 ---
 
@@ -2209,6 +2224,21 @@ CREATE TABLE relay_sessions (chat_id TEXT PRIMARY KEY, session_id TEXT, updated_
 
 安全：只认指定 wxid 的私聊；HTTP 要 token；端口只应对局域网开放（Windows 防火墙）；Mac 端用 `auto` 权限模式，无人值守时需要人工批准的操作直接拒绝，并在结果里列出。安装和使用见 `tools/claude_relay/README.md`。
 
+### 功能S: OCR 备选读取（OCR_FALLBACK）
+
+目的：Mac 后端读不了微信数据库时（WeFlow 没启动、密钥失效、微信升级），改成截取微信窗口用 Apple Vision 读当前打开的聊天，数据库恢复后自动切回来。默认关闭；关闭时 `MacHybridBackend._ocr` 是 `None`，读取失败的行为和以前一样（只记日志）。只覆盖 macOS 的 `mac_hybrid`；Windows 的 WCDB 后端需要另一个识别引擎（`reader.py` 只吃「文字行」，引擎可替换），还没做。
+
+```
+MacHybridBackend.poll_once
+  ├─ 数据库读成功 → OcrFallback.note_db_ok()（刚从 OCR 切回来：这次的积压只记已见，不回答）→ 原流程
+  └─ 数据库读失败 → _poll_ocr → note_db_failure()（连续 N 次才打开）
+        → OcrFallback.poll()（每 OCR_POLL_SEC 秒）→ MacVisionEngine.capture()（截图→识别→删截图）
+        → reader.read_rows → NewMessageTracker.feed → OcrMessage
+        → _message_from_ocr → _should_monitor（只监听群）→ _dispatch → router → send_text（原来的发送路径）
+```
+
+限制：只读打开的那个会话、只读屏幕上显示的那一段；认不出群里是谁说的（所以只能按 @机器人/叫名字触发，管理员命令、cc 中转不可用）；图片、语音、表情读不出；微信不能最小化；要给运行机器人的程序「屏幕录制」权限；手动滚动机器人那台电脑上的微信窗口可能导致重复或漏读。控制台开关：`advanced_config.GROUPS` 里的 `ocr` 分组；`platform_label` / `platform_backends` 让标签显示「仅 macOS」，选了别的后端会变成警告色。
+
 ---
 
 ## 5. 配置文件和环境变量
@@ -2360,6 +2390,11 @@ CLAUDE_RELAY_PORT=8790
 CLAUDE_RELAY_PREFIX=cc                         # 指令前缀
 CLAUDE_RELAY_WXIDS=                            # 谁能用（逗号分隔 wxid）；空=ADMIN_WXID
 CLAUDE_RELAY_MAX_CHARS=1500                    # 结果超过就截断（完整结果在 Mac 日志）
+
+# === OCR 备选读取（仅 macOS mac_hybrid） ===
+OCR_FALLBACK=off                               # on：数据库读不了时，读屏幕上打开的群聊（Apple Vision）
+OCR_FALLBACK_AFTER=3                           # 连续读失败几次后切换
+OCR_POLL_SEC=4                                 # 多久看一次屏幕（秒）
 
 # === 引导流程 ===
 ONBOARDING_DONE=false
