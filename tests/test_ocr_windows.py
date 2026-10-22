@@ -68,6 +68,34 @@ def test_the_script_is_ascii_and_uses_the_windows_ocr_api():
         assert needle in win_ocr.SCRIPT
 
 
+def test_the_script_has_the_empty_lines_that_made_it_run_on_a_real_windows_pc():
+    """Found on a real Windows 10/11 PC (PowerShell 5.1): ``powershell -Command -`` reads standard input like an
+    interactive session, and a block that is still unfinished at the end of the input is dropped: the script
+    printed nothing and exited with 0 (rows=0).  With an empty line after these six places it runs (0.5 s per
+    look, 34 rows).  Which of them is the one that matters is not known, so all six are kept."""
+    lines = win_ocr.SCRIPT.split("\n")
+
+    def blank_after(index):
+        return index + 1 < len(lines) and lines[index + 1].strip() == ""
+
+    def first(prefix):
+        return next(i for i, line in enumerate(lines) if line.startswith(prefix))
+
+    function_end = next(i for i in range(first("function Await"), len(lines)) if lines[i] == "}")
+    last_block_end = max(i for i, line in enumerate(lines) if line == "}")
+    anchors = {
+        "the type imports": first("$null = [Windows.Graphics.Imaging.SoftwareBitmap"),
+        "the AsTask lookup": next(i for i, line in enumerate(lines) if line.rstrip().endswith("})[0]")),
+        "function Await": function_end,
+        "the no-language exit": first("if (-not $engine) { [Console]"),
+        "the recognition": first("$result = Await"),
+        "the last block": last_block_end,
+    }
+    missing = [name for name, index in anchors.items() if not blank_after(index)]
+    assert missing == [], f"no empty line after: {missing}"
+    assert win_ocr.SCRIPT.endswith("}\n\n")
+
+
 # ── the engine ────────────────────────────────────────────────────────────
 
 class FakeWindow:

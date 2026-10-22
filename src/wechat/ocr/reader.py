@@ -265,24 +265,32 @@ def _title_rows(rows: list[dict], geom: ChatGeometry) -> list[dict]:
     return top
 
 
+def _title_parts(rows: list[dict], geom: ChatGeometry) -> list[dict]:
+    """The text blocks that make up the title: the leftmost block of the title bar and the neighbours on
+    the same line (处理群名包含空格、人数括号或被 OCR 切分为多个词块的情况).  A message scrolled up under the
+    title bar is in the band too, but it is not on the title's line."""
+    top = _title_rows(rows, geom)
+    if not top:
+        return []
+    parts = [top[0]]
+    for r in top[1:]:
+        last = parts[-1]
+        if r["x0"] - last["x1"] < 0.05 and abs(r["y0"] - last["y0"]) < 0.03:
+            parts.append(r)
+        else:
+            break
+    return parts
+
+
 def chat_title(rows: list[dict], geometry: ChatGeometry | None = None) -> str:
     """提取当前微信主聊天窗口的会话标题（群名或联系人名），自适应任意窗口宽度并支持群名称清洗与相邻切片合并。"""
     if not rows:
         return ""
     geom = geometry or resolve_chat_geometry(rows)
-    top = _title_rows(rows, geom)
-    if not top:
+    parts = _title_parts(rows, geom)
+    if not parts:
         return CleanedTitle("")
-    # 将同一行相邻的标题片段合并（处理群名包含空格、人数括号或被 OCR 切分为多个词块的情况）
-    merged_title = top[0]["t"]
-    last_r = top[0]
-    for r in top[1:]:
-        if r["x0"] - last_r["x1"] < 0.05 and abs(r["y0"] - last_r["y0"]) < 0.03:
-            merged_title += r["t"]
-            last_r = r
-        else:
-            break
-    return CleanedTitle(merged_title)
+    return CleanedTitle("".join(r["t"] for r in parts))
 
 
 _CLOCK = re.compile(
@@ -302,7 +310,7 @@ def plain_backgrounds(rows: list[dict], geometry: ChatGeometry | None = None) ->
         return []
     geom = geometry or resolve_chat_geometry(rows)
     chat_x0, chat_x1, chat_y0, chat_y1 = geom
-    colours = [r["bg"] for r in _title_rows(rows, geom)]
+    colours = [r["bg"] for r in _title_parts(rows, geom)]
     colours += [
         r["bg"] for r in rows
         if chat_x0 < r["x0"] < chat_x1 and chat_y0 < r["y0"] < chat_y1 and is_clock_text(r["t"])

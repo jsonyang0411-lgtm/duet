@@ -124,3 +124,14 @@ def test_the_session_list_is_not_part_of_the_chat():
     info = R.read_rows(rows)
     assert info["other"] == ["你好", "@群聊小助手 请介绍一下你自己"]     # not the names, previews or times on the left
     assert info["self"] == ["@群聊小助手 你好"]
+
+
+def test_a_message_scrolled_up_under_the_title_bar_is_still_a_bubble():
+    """Found live: a bubble at y0=0.075 is in the title band; its colour must not become the "background"."""
+    rows = main_window()
+    rows.append(row("被顶到标题栏下面的消息", 0.330, 0.075, [241, 241, 243], x1=0.700))
+    info = R.read_rows(rows)
+    assert "被顶到标题栏下面的消息" in info["other"]
+    assert "你好" in info["other"]                                       # the others are bubbles too
+    assert R.plain_backgrounds(rows) == [BACKGROUND]                    # only the title's own colour
+    assert str(R.chat_title(rows)) == "测试群（4）"
