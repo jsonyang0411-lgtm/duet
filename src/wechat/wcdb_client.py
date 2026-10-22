@@ -271,6 +271,10 @@ class WcdbNativeClient:
 
         self._load_config()
 
+    @property
+    def is_open(self) -> bool:
+        return bool(self._handle)
+
     # ── Init ──────────────────────────────────────────────────────────
 
     def _load_config(self):

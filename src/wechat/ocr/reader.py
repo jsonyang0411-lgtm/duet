@@ -92,12 +92,12 @@ def _is_search_box(text: str) -> bool:
     t = text.strip().lower()
     if t.startswith(("search", "搜索")):
         return True
-    return t.lstrip("q⌕🔍 ").strip() in ("搜索", "search")
+    return t.lstrip("0123456789q⌕🔍oO ").strip() in ("搜索", "search")
 
 
 FUNC_BUTTONS = (
     "搜索", "Search", "search", "*", "•", "X", "x", "+", "十", "＋", "...", "…",
-    "取消", "Cancel", "cancel"
+    "取消", "Cancel", "cancel", "O", "o", "0"
 )
 
 
@@ -144,19 +144,19 @@ def resolve_chat_geometry(rows: list[dict], img_size: tuple[int, int] | None = N
         r for r in rows
         if r["y0"] < 0.12 and r["x0"] < 0.40 and ("搜索" in r["t"] or "search" in r["t"].lower())
     ]
+    search_x1 = max((r["x1"] for r in search_rows), default=0.0)
     # Without the search box (an independent chat window) there is no session list: the title
     # starts near the left edge, so the left limits below drop from 0.04 to 0.
     left_limit = 0.04 if search_rows else 0.0
     title_cands = [
         r for r in rows
-        if r["y0"] < 0.08 and (r["x0"] > 0.04 if search_rows else r["x0"] >= 0.0) and r["x0"] < chat_x1
+        if r["y0"] < 0.08 and (r["x0"] > search_x1 if search_rows else r["x0"] >= 0.0) and r["x0"] < chat_x1
         and r["t"] not in FUNC_BUTTONS
         and not _is_search_box(r["t"])
         and not any(k in r["t"] for k in ("搜一搜", "小程序", "相关聊天记录"))
     ]
 
     if search_rows:
-        search_x1 = max(r["x1"] for r in search_rows)
         if title_cands:
             first_title_x0 = min(r["x0"] for r in title_cands)
             session_items = [
@@ -248,7 +248,7 @@ def _title_rows(rows: list[dict], geom: ChatGeometry) -> list[dict]:
     # 顶部右侧按钮右边界保护：群名绝不能跨越右侧功能按钮
     right_btns = [
         r["x0"] for r in rows
-        if r["y0"] < 0.08 and r["x0"] > chat_x0 and r["t"] in ("*", "•", "X", "x", "...", "…")
+        if r["y0"] < 0.08 and r["x0"] > chat_x0 and r["t"] in ("*", "•", "X", "x", "...", "…", "0", "O", "o")
     ]
     title_x1 = min(right_btns) if right_btns else chat_x1
 

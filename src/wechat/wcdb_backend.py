@@ -495,6 +495,7 @@ class WcdbBackend(AbstractWeChatBackend):
             self._client.open()
             logger.info("WCDB reinitialized successfully")
         except Exception as e:
+            self._client = None
             logger.error("WCDB reinitialization failed: %s", e)
             raise
         # Clear dedup set — WCDB may return messages with new IDs
@@ -857,7 +858,7 @@ class WcdbBackend(AbstractWeChatBackend):
     # ── Message polling ──────────────────────────────────────────────
 
     def _poll_cycle(self, callback: MessageCallback) -> None:
-        if self._client is None:
+        if self._client is None or not getattr(self._client, "is_open", False):
             raise RuntimeError("the WCDB database is not open")
         self._refresh_private_chats_if_due()
         for group_name in list(self._groups):
