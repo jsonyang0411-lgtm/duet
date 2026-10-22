@@ -138,4 +138,4 @@ class OcrFallback:
         clean = clean_group_name(title)
         is_group = clean != title.strip()
         return [OcrMessage(title=title, title_clean=clean, text=text, is_group=is_group)
-                for text in self._tracker.feed(title, info["other"])]
+                for text in self._tracker.feed(title, info["sequence"])]

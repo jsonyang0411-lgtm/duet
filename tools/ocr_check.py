@@ -50,7 +50,7 @@ def look(engine, tracker, show_for: str | None):
     took = time.monotonic() - started
     info = read_rows(rows)
     geom = resolve_chat_geometry(rows)
-    fresh = tracker.feed(info["title"], info["other"]) if info["title"] else []
+    fresh = tracker.feed(info["title"], info["sequence"]) if info["title"] else []
     shown = fresh if show_for and clean_group_name(info["title"]) == show_for else []
     summary = (
         f"{took:.2f}s rows={len(rows)} title={'yes' if info['title'] else 'NO'} "

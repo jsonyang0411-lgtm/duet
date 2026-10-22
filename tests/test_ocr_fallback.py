@@ -58,6 +58,7 @@ def test_read_rows_tells_the_two_sides_apart():
     info = read_rows(screen("测试群（3）", ["你好", "在吗"], mine=["在的"]))
     assert info["title"] == "测试群（3）" and info["title_clean"] == "测试群"
     assert info["other"] == ["你好", "在吗"] and info["self"] == ["在的"]
+    assert info["sequence"] == [("other", "你好"), ("other", "在吗"), ("self", "在的")]
 
 
 # ── which messages are new ────────────────────────────────────────────────
@@ -129,6 +130,28 @@ class TestTracker:
         t = NewMessageTracker()
         t.feed("群（3）", ["今天晚上吃什么好呢"])
         assert t.feed("群（3）", ["好呢", "另一句"]) == []          # 2 characters: too little to be the same message
+
+    def test_identical_messages_are_told_apart_by_own_bubbles_and_time_lines(self):
+        """Found live: five identical "@bot hi" lines look the same before and after a sixth arrives."""
+        ask = ("other", "@群聊小助手 你好")
+        t = NewMessageTracker()
+        t.feed("群（4）", [ask, ask, ask, ("time", "15:02"), ask, ask, ("self", "我的回复"), ask])
+        # one more arrives: the top one scrolls away, everything moves up one place
+        assert t.feed("群（4）", [ask, ask, ("time", "15:02"), ask, ask, ("self", "我的回复"), ask, ask]) == [
+            "@群聊小助手 你好"]
+        assert t.feed("群（4）", [ask, ask, ("time", "15:02"), ask, ask, ("self", "我的回复"), ask, ask]) == []
+
+    def test_own_bubbles_and_time_lines_are_never_reported(self):
+        t = NewMessageTracker()
+        t.feed("群（4）", [("other", "a")])
+        assert t.feed("群（4）", [("other", "a"), ("time", "15:10"), ("self", "我说的"), ("other", "b")]) == ["b"]
+
+    def test_without_any_landmark_identical_messages_stay_ambiguous(self):
+        """Documented limit: nothing on screen changes, so nothing can be reported."""
+        ask = ("other", "同一句话")
+        t = NewMessageTracker()
+        t.feed("群（4）", [ask, ask, ask])
+        assert t.feed("群（4）", [ask, ask, ask]) == []
 
     def test_punctuation_only_lines_are_ignored(self):
         t = NewMessageTracker()

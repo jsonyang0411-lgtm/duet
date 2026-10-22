@@ -70,7 +70,7 @@ def test_with_a_search_box_the_left_limit_stays_where_the_kit_had_it():
 @pytest.mark.parametrize("text,is_clock", [
     ("13:01", True), ("9:05", True), ("0:25", True), ("12:30:59", True),
     ("昨天 12:30", True), ("星期三 08:00", True), ("周五 21:15", True),
-    ("10月21日 08:00", True), ("2025年10月21日 08:00", True),
+    ("10月21日 08:00", True), ("2025年10月21日 08:00", True), ("15:08.", True), ("15:08。", True),
     ("下午3点", False), ("12:3", False), ("会议 13:00 开始", False), ("13:01 到", False), ("", False),
 ])
 def test_time_lines_are_recognized(text, is_clock):
@@ -135,3 +135,9 @@ def test_a_message_scrolled_up_under_the_title_bar_is_still_a_bubble():
     assert "你好" in info["other"]                                       # the others are bubbles too
     assert R.plain_backgrounds(rows) == [BACKGROUND]                    # only the title's own colour
     assert str(R.chat_title(rows)) == "测试群（4）"
+
+
+def test_the_sequence_keeps_both_sides_and_time_lines_in_screen_order():
+    seq = R.read_rows(independent_window())["sequence"]
+    assert seq == [("time", "13:01"), ("other", "对方的第一句话"), ("time", "0:25"), ("time", "14:41"),
+                   ("self", "我发的话"), ("other", "对方的第二句话")]

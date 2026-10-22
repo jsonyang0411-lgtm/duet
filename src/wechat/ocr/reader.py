@@ -301,7 +301,7 @@ _CLOCK = re.compile(
 
 def is_clock_text(text: str) -> bool:
     """A time line between messages ("13:01", "昨天 12:30", "10月21日 08:00") or a video's length ("0:25")."""
-    return bool(_CLOCK.match(text.strip()))
+    return bool(_CLOCK.match(text.strip().rstrip(".。·,，")))      # OCR adds a dot now and then: "15:08."
 
 
 def plain_backgrounds(rows: list[dict], geometry: ChatGeometry | None = None) -> list[list[int]]:
@@ -350,6 +350,38 @@ def other_messages(rows: list[dict], want: str = "other", geometry: ChatGeometry
     if cur:
         msgs.append(cur)
     return msgs
+
+
+def messages_in_order(rows: list[dict], geometry: ChatGeometry | None = None) -> list[tuple[str, str]]:
+    """Every bubble and time line of the chat area, top to bottom: ``[(kind, text)]`` with kind
+    ``other``, ``self`` or ``time``.  Bubbles are merged line by line the way ``other_messages`` does."""
+    if not rows:
+        return []
+    geom = geometry or resolve_chat_geometry(rows)
+    chat_x0, chat_x1, chat_y0, chat_y1 = geom
+    plain = plain_backgrounds(rows, geom)
+    lines = [r for r in rows if chat_x0 < r["x0"] < chat_x1 and chat_y0 < r["y0"] < chat_y1]
+    lines.sort(key=lambda r: r["y0"])
+    out: list[tuple[str, str]] = []
+    cur_kind, cur_text, last = None, "", None
+    for r in lines:
+        kind = "time" if is_clock_text(r["t"]) else bubble_kind(r["bg"], plain)
+        if kind == "none":
+            if cur_kind:
+                out.append((cur_kind, cur_text))
+            cur_kind, cur_text, last = None, "", None
+            continue
+        if (kind == cur_kind and kind != "time" and last is not None
+                and r["y0"] - last["y1"] < 0.035 and abs(r["x0"] - last["x0"]) < 0.05):
+            cur_text += r["t"]
+        else:
+            if cur_kind:
+                out.append((cur_kind, cur_text))
+            cur_kind, cur_text = kind, r["t"]
+        last = r
+    if cur_kind:
+        out.append((cur_kind, cur_text))
+    return out
 
 
 # ---------------- normalizing and de-duplicating (from the kit) ----------------
@@ -423,7 +455,15 @@ def _cut_off(a: str, b: str) -> bool:
     return len(shorter) >= 3 and longer.endswith(shorter)
 
 
-def _overlap(prev: list[str], cur: list[str]) -> int:
+def _same_item(a: tuple[str, str], b: tuple[str, str]) -> bool:
+    return a[0] == b[0] and _same(a[1], b[1])
+
+
+def _cut_off_item(a: tuple[str, str], b: tuple[str, str]) -> bool:
+    return a[0] == b[0] and _cut_off(a[1], b[1])
+
+
+def _overlap(prev: list, cur: list) -> int:
     """The longest k such that the last k of ``prev`` are the first k of ``cur``.
 
     The screen is a window onto the chat: a new message pushes the old ones up, so
@@ -434,9 +474,9 @@ def _overlap(prev: list[str], cur: list[str]) -> int:
     for k in range(min(len(prev), len(cur)), 0, -1):
         tail = prev[len(prev) - k:]
         head = cur[:k]
-        if not (_same(tail[0], head[0]) or _cut_off(tail[0], head[0])):
+        if not (_same_item(tail[0], head[0]) or _cut_off_item(tail[0], head[0])):
             continue
-        if all(_same(p, c) for p, c in zip(tail[1:], head[1:])):
+        if all(_same_item(p, c) for p, c in zip(tail[1:], head[1:])):
             return k
     return 0
 
@@ -444,8 +484,11 @@ def _overlap(prev: list[str], cur: list[str]) -> int:
 class NewMessageTracker:
     """Which of the other side's messages on screen are new.
 
-    It remembers the messages it has seen in the order they came (``HISTORY`` of
-    them).  The screen is a window onto the chat: a new message pushes the old ones
+    It remembers what it has seen in the order it came (``HISTORY`` items): the other
+    side's bubbles, the account's own bubbles and the time lines (``messages_in_order``).
+    Own bubbles and time lines are only landmarks, never reported, but without them a
+    run of identical messages ("@bot hi" five times) looks the same before and after a
+    new one arrives (found in a live test).  Plain strings count as the other side's.  The screen is a window onto the chat: a new message pushes the old ones
     up, so the end of the remembered messages is the start of the screen, and what
     follows that overlap is new.  Scrolling does not change what is remembered, so
     scrolling up to read and back down reports nothing twice.
@@ -470,10 +513,16 @@ class NewMessageTracker:
         self._lost = 0
         self._lost_screen: list[str] | None = None
 
-    def feed(self, title: str, texts: list[str]) -> list[str]:
+    def feed(self, title: str, items: list) -> list[str]:
+        """``items``: ``messages_in_order`` output, or plain strings (the other side's messages)."""
         key = clean_group_name(title)
-        pairs = [(t.strip(), normalize_text(t)) for t in texts if t and t.strip()]
-        pairs = [(t, n) for t, n in pairs if n]
+        pairs = []
+        for item in items:
+            kind, text = ("other", item) if isinstance(item, str) else item
+            text = str(text or "").strip()
+            norm = normalize_text(text)
+            if norm:
+                pairs.append((text, (kind, norm)))
         norm_cur = [n for _, n in pairs]
         if key != self._title or self._history is None:
             self._title, self._history, self._lost = key, norm_cur[-self.HISTORY:], 0
@@ -488,14 +537,15 @@ class NewMessageTracker:
         self._lost = 0
         fresh = pairs[k:]
         self._history = (self._history + [n for _, n in fresh])[-self.HISTORY:]
-        return [t for t, _ in fresh]
+        return [t for t, n in fresh if n[0] == "other"]
 
 
 def read_rows(rows: list[dict]) -> dict:
-    """What one look at the window shows: ``{"title", "title_clean", "other", "self"}``.
+    """What one look at the window shows: ``{"title", "title_clean", "other", "self", "sequence"}``.
 
     ``other`` and ``self`` are the messages of the other side and of the account itself,
-    each from top to bottom of the screen.
+    each from top to bottom of the screen; ``sequence`` is both sides and the time lines
+    in screen order (what ``NewMessageTracker`` needs).
     """
     geom = resolve_chat_geometry(rows)
     title = chat_title(rows, geometry=geom)
@@ -504,4 +554,5 @@ def read_rows(rows: list[dict]) -> dict:
         "title_clean": clean_group_name(title),
         "other": other_messages(rows, "other", geometry=geom),
         "self": other_messages(rows, "self", geometry=geom),
+        "sequence": messages_in_order(rows, geometry=geom),
     }
