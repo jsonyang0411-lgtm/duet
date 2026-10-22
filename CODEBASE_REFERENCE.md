@@ -206,7 +206,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `STICKER_PASTE` | `str` | `"file"` (`file`/`image`) | `src/config.py` | `WcdbBackend.__init__` → `WeChatWindowController(paste_files_as=…)`：`file` 粘贴文件（CF_HDROP，GIF 可以保持动图），`image` 粘贴静态图（CF_DIB，第一帧，透明处补白） |
 | `SEND_KEEP_CLIPBOARD` | `str` | `"on"` (`off`/`on`) | `src/config.py` | `WeChatWindowController._begin_quiet/_end_quiet`：开 `SEND_QUIET` 时，发送前存下剪贴板，微信确认处理完粘贴后放回（期间剪贴板被别人改过、或微信没回应就不放回） |
 | `FOLLOWUP_MODE` | `str` | `"heuristic"` (`heuristic`/`declared`) | `src/config.py` | `src/router.py:MessageRouter.__init__()` → `_declare_followups`；`declared` 时结构化管线让模型在回复里声明在等谁，监听器照此执行 |
-| `CLAUDE_RELAY` | `str` | `"off"` (`off`/`on`) | `src/config.py` | `src/bot.py:_start_claude_relay()` 建 `ClaudeRelay`（发送用 `backend.send_text`）并挂到 `router._claude_relay`；路由步骤 `claude_relay` 把允许的人私聊里 `cc` 开头的消息变成给 Mac 的任务。需要 `PRIVATE_CHAT_ENABLED=true` |
+| `CLAUDE_RELAY` | `str` | `"off"` (`off`/`on`) | `src/config.py` | `src/bot.py:_start_claude_relay()` 建 `ClaudeRelay`（发送用 `backend.send_text`）并挂到 `router._claude_relay`；路由步骤 `claude_relay` 把允许的人私聊里 `cc` 开头的消息变成给 Mac 的任务。需要 `PRIVATE_CHAT_ENABLED=true` |；控制台「中转代理」页可改（`advanced_config` 的 `relay` 分组：开关、`ADMIN_WXID`、`CLAUDE_RELAY_WXIDS`、token（可随机生成）、端口、监听地址、前缀、结果最长）。`CLAUDE_RELAY_PORT` 的范围不论开关都检查（与白名单一致）
 | `CLAUDE_RELAY_TOKEN` | `str` | 空（开启时必填，至少 16 字符） | `src/config.py` | `src/relay/http.py`：每个请求的 `Authorization: Bearer`，`hmac.compare_digest` 比较；Mac 端 `RELAY_TOKEN` 要相同 |
 | `CLAUDE_RELAY_HOST` / `CLAUDE_RELAY_PORT` | `str` / `int` | `"0.0.0.0"` / `8790` | `src/config.py` | `src/relay/http.py:serve()`：中转自己的 HTTP 端口（不是控制台的端口） |
 | `CLAUDE_RELAY_PREFIX` | `str` | `"cc"`（1–10 个非空白字符） | `src/config.py` | `src/relay/commands.py:prefix_pattern()`：开头是它（可带 `/`、冒号、逗号），后面不能紧跟字母数字 |
@@ -755,6 +755,7 @@ todo_delete_keywords: list[str] = [
 | `_UIHandler._request_origin_ok()` | 绑定本机时，`Host` 或 `Origin` 的主机名不是本机即拒绝（DNS 重绑定 / 其他网站调用）；没有 `Origin`（页面自身导航、curl）放行；用户把控制台绑到非本机地址时不检查 | 无 | `bool` |
 | `_UIHandler._method_not_allowed()` | 回 405 JSON `{"ok": false, "error": "Method not allowed"}`；`do_POST` 对未知路径、`do_GET` 对 `_POST_ONLY_PATHS` 的 GET 都用它 | 无 | `None` |
 | `_UIHandler._forbid_cross_origin()` | 回 403 JSON `{"ok": false, "error": "Forbidden: cross-origin request rejected"}` | 无 | `None` |
+| `register_relay(relay)` / `_relay_snapshot(limit=30)` / `_relay_job_for_console(job)` / `_lan_addresses()` | `Bot._start_claude_relay` 登记运行中的中转（停止时登记 `None`）；`GET /api/relay` 返回 `running`、`listening`、`address`、`mac_online`、`mac_last_seen_sec`、`counts`、`jobs`（每项：编号、状态、文字前 200 字、项目、时间、用时、结果前 400 字、错误，不含 wxid）、`lan_addresses`（本机局域网 IPv4，Mac 的 `relay_url` 用）；`POST /api/relay/cancel {id}` 取消（排队中的直接取消，进行中的让 Mac 下次心跳时停） | — | `dict` |
 | `_UIHandler._handle_advanced()` | `GET/POST /api/advanced`：GET 返回 `advanced_config.describe()` 的分组（密钥打码）和被 `.env.local` 覆盖的键；POST `{values:{KEY: 值}}` 先逐项 `check_value`、再合并后跑 `_validate_config`（`validate_updates`），全部合法才用 `_write_env_updates` 写共享 .env 并同步 `os.environ`；打码的密钥保留原值 | 无 | `None` |
 | `_UIHandler._send_cors_headers(preflight=False)` | 回显已通过校验的 `Origin`（带 `Vary: Origin`），预检时附 Methods/Headers/Max-Age；不再返回 `Access-Control-Allow-Origin: *` | `preflight: bool` | `None` |
 
@@ -773,6 +774,8 @@ todo_delete_keywords: list[str] = [
 
 ### 2.34 前端组件 (`ui/src/components/`)
 
+**公司版（中转代理控制台，`ocr-fallback` 分支）**：只保留让机器人当 Claude 中转代理的页面：运行状态、中转代理、微信连接、运行日志（`Shell.jsx` 的 `NAV`、`App.jsx` 的路由）。回复记录、AI 服务、人设、提示词沙箱、功能模块、高级开关、群友昵称、群聊待办这些页面在控制台里隐藏，组件文件和后端功能都保留（默认关闭），加回路由就能恢复；旧链接（`#/config/…` 等）落到运行状态页。
+
 2026-10 改版成明日方舟风：纯 CSS（`ui/src/styles/`：`tokens.css` 浅色 / `html.dark` 深色变量与本地字体，`components.css`，`layout.css`，`pages.css`），接口一律相对路径（`ui/src/api.js`），hash 路由（`ui/src/lib/router.js`）。
 
 | 文件 | 组件 | 描述 |
@@ -780,13 +783,16 @@ todo_delete_keywords: list[str] = [
 | `App.jsx` | `App`、`Console`、`Splash` | 问 `/api/onboarding/status` 决定进引导还是控制台；控制台 = 顶栏 + 左栏 + 页面 + 保存条 |
 | `Shell.jsx` | `TopBar`、`Rail`、`Dock`、`SaveBar`、`NAV` | 深色顶栏（运行状态胶囊带启动/停止、主题切换）；左栏导航 + 左下角助手小窗（立绘待定，剪影占位，台词来自运行状态）；配置有改动时的底部保存条（提交完整配置，可「保存并重启」） |
 | `ui.jsx` / `cfg.jsx` / `art.jsx` | 通用组件 / 绑定配置草稿的表单控件 / Logo 与剪影 | 斜切卡片、分段、开关、词条、密钥框（已设置时只显示尾号）、对话框、确认框 |
-| `Dashboard.jsx` | `Dashboard`、`KeyCard`、`ChecksCard`、`RecentDecisions` | 运行状态：票根式主卡、密钥缺失时重新获取、检查与环境诊断、最近的判断 |
+| `Dashboard.jsx` | `Dashboard`、`KeyCard`、`ChecksCard`、`RecentJobs` | 运行状态：票根式主卡（标签：微信后端、中转开关；数字：已处理消息、运行时长、Mac worker）、密钥缺失时重新获取、检查与环境诊断、最近的中转任务（`/api/relay`） |
+| `RelayPanel.jsx` | `RelayPanel`、`StateCard`、`MacCard`、`JobsCard` | 中转代理：机器人/中转端口/Mac worker/任务数；Mac 端怎么接（`relay_url` 用 `/api/relay` 的 `lan_addresses`）；任务表（每 5 秒刷新，展开看结果，排队中和进行中的可确认后取消，`POST /api/relay/cancel`）；中转设置 = `AdvancedFields only={['relay']}` |
+| `WechatPanel.jsx` | `WechatPanel`、`PrivateCard` | 微信连接：微信后端、私聊（开关 + 读哪些私聊，主配置的保存条）、监听的群（`ConfigPanel` 的 `GroupsCard`）、OCR 备选（`AdvancedFields only={['ocr']}`）、数据目录与日志（`DataSection`） |
+| `lib/relay.js` | `useRelay`、`JOB_STATES`、`fmtClock`、`fmtSeconds`、`macState` | 轮询 `GET /api/relay`；任务状态的中文和标签颜色；Mac 在线文字 |
 | `DecisionsPanel.jsx` | `DecisionsPanel` | 回复记录（`GET /api/decisions`）：筛选 + 右栏判断过程 |
 | `ConfigPanel.jsx` | `ConfigPanel` | 系统配置：AI 服务、身份与群聊（含唤醒词）、人设、数据与日志、提示词沙箱、配置备份 |
 | `ModulesPanel.jsx` | `ModulesPanel`、`LotsEditor`、`WelcomeEditor` | 功能模块 11 格 + 右栏详情；签文和欢迎模板各自保存 |
-| `AdvancedPanel.jsx` | `AdvancedPanel` | 高级开关（`GET/POST /api/advanced`），按服务器给的白名单渲染，自己的保存条 |
+| `AdvancedPanel.jsx` | `AdvancedPanel`、`AdvancedFields({only, onSaved, intro})`、`randomToken()` | 高级开关（`GET/POST /api/advanced`），按服务器给的白名单渲染，自己的保存条；`AdvancedFields` 只显示 `only` 里的分组，嵌进别的页面；字段带 `generate` 时密钥框旁有「随机生成」（32 字节 base64url），新生成的值保存前明文显示一次并可复制 |
 | `NicknameEditor.jsx` / `TodoManager.jsx` / `LogViewer.jsx` | 同名 | 群友昵称（离开输入框即保存）/ 群聊待办管理（批量清空按群、需确认）/ 运行日志（深色终端） |
-| `Onboarding.jsx` | `Onboarding` | 首次设置 4 步；可手动填写密钥（`step2` 的 `wcdb_key`） |
+| `Onboarding.jsx` | `Onboarding`、`StepRelay` | 首次设置 3 步：微信密钥 → 微信设置 → 中转设置。第 3 步填「你的 wxid」、token（预先随机生成，可复制）、端口；「完成」依次发 `step3`（AI 用默认、不填密钥）、`step4`（抽签/粘性提及/跟聊/联网搜索/主动发言都关，`private_chat_enabled` 开、`private_chats` = 你的 wxid）、`POST /api/advanced`（`CLAUDE_RELAY=on`、`ADMIN_WXID`、token、端口）；「以后再设置中转」只写前两步；可手动填写密钥（`step2` 的 `wcdb_key`） |
 | `store/config.jsx` / `store/status.jsx` / `store/toast.jsx` | Provider + hook | 全站唯一的配置草稿（改动、校验、保存）/ 每 2 秒轮询 `/api/status` / 提示条 |
 
 ### 2.35 `src/decision_trace.py` (决策追踪，只观测不改行为)
@@ -992,6 +998,8 @@ todo_delete_keywords: list[str] = [
 | `RelayStore.add / get / recent / pending_before / latest_open / cancel / reset_session` | 微信这边：入队、查询、取消（排队中的直接 `cancelled`，进行中的设 `cancel_requested` 返回 `requested`）、清空会话 | `int` / `dict` / `list` / `str` |
 | `RelayStore.claim_next(now)` | 把最早的排队任务交给 worker；**领取时**才查会话，所以排在后面的追问能接上前一个任务刚留下的会话 | `dict \| None` |
 | `RelayStore.heartbeat(job_id, now)` / `finish(job_id, *, ok, text, session_id, payload, now)` | 心跳（`lost` 的任务恢复成 `running`）返回 `{"cancel": bool}`；结果只收一次（`True` 收下、`False` 已结束、`None` 没有这个任务），有 `session_id` 就更新会话，`delivered=0` 等待发送 | `dict \| None` / `bool \| None` |
+| `RelayStore.list_jobs(limit=30) / counts()` | 控制台用：所有聊天的最新任务；各状态的数量 | `list[dict]` / `dict` |
+| `ClaudeRelay.snapshot() / cancel_from_console(job_id) / store` | 控制台用：监听地址、Mac 是否在线、上次联系距今秒数、前缀、各状态数量；取消任意任务（控制台就是主人） | `dict` / `str` |
 | `RelayStore.mark_lost(older_than) / undelivered() / mark_delivered(job_id, status)` | 心跳超时的标 `lost`；待发送列表；只在状态没变时标已发送（「失联」通知不会盖掉之后到的结果） | `list[int]` / `list[dict]` / — |
 | `service.ClaudeRelay(config, *, store=None, send=None, clock=time.time)` | 中转主体：`start()` 起发送线程和 HTTP 服务（端口打不开抛 `OSError`）、`stop()` | — |
 | `ClaudeRelay.handle(msg)` | 只看私聊、前缀、`CLAUDE_RELAY_WXIDS`/`ADMIN_WXID`；不允许的人返回 `(False, None)` 按普通消息处理；超过 `MAX_AGE_SEC`（300 秒）的旧消息 `(True, None)` 不执行；其余执行命令并返回回执（编号、前面几个任务、Mac 不在线时说明）；出错回「转给 Mac 失败了」 | `(matched, reply)` |
@@ -1125,6 +1133,8 @@ _API 请求 → _UIHandler._handle_request()
   ├── /api/voice/download-model → snapshot_download()
   ├── /api/lots           → load_lots_config() / save_lots_config()
   ├── /api/advanced       → advanced_config.describe() / validate_updates() → _write_env_updates()
+  ├── /api/relay          → _relay_snapshot()：运行中用 register_relay 登记的 ClaudeRelay（snapshot + store.list_jobs），停止时读 data/claude_relay.db（不存在不创建）
+  ├── /api/relay/cancel   → ClaudeRelay.cancel_from_console(id)（仅 POST，机器人运行时）
   ├── /api/onboarding/*   → 引导流程状态管理
   ├── /api/logs           → _read_recent_logs()
   ├── /api/status         → _status.snapshot()

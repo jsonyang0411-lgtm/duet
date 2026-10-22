@@ -223,6 +223,26 @@ class ClaudeRelay:
 
     # ── from the Mac worker (http.py) ─────────────────────────────────────
 
+    def snapshot(self) -> dict:
+        """What the console shows: the Mac worker, the address, the counts."""
+        now = self._clock()
+        return {
+            "listening": self._server is not None,
+            "address": list(self.address) if self.address else None,
+            "mac_online": self.mac_online(),
+            "mac_last_seen_sec": round(now - self._last_seen) if self._last_seen else None,
+            "prefix": self._prefix_word,
+            "counts": self._store.counts(),
+        }
+
+    def cancel_from_console(self, job_id: int) -> str:
+        """Cancel any job (the console is the owner's): see ``RelayStore.cancel`` for the result."""
+        return self._store.cancel(int(job_id), self._clock())
+
+    @property
+    def store(self) -> RelayStore:
+        return self._store
+
     def mac_online(self) -> bool:
         return bool(self._last_seen) and self._clock() - self._last_seen < ONLINE_WINDOW_SEC
 

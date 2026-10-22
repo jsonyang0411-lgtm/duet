@@ -90,6 +90,22 @@ class RelayStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_jobs(self, limit: int = 30) -> list[dict]:
+        """The newest jobs of every chat (the console's task list)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM relay_jobs ORDER BY id DESC LIMIT ?", (int(limit),)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def counts(self) -> dict:
+        """How many jobs are in each state."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT status, COUNT(*) AS n FROM relay_jobs GROUP BY status"
+            ).fetchall()
+        return {r["status"]: int(r["n"]) for r in rows}
+
     def pending_before(self, job_id: int) -> int:
         """Jobs that will run before this one (queued earlier or running now)."""
         with self._lock:

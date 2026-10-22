@@ -945,8 +945,8 @@ def _validate_config(kwargs: dict) -> None:
             errors.append("CLAUDE_RELAY=on needs CLAUDE_RELAY_WXIDS or ADMIN_WXID (who may use it)")
         if not re.fullmatch(r"[^\s]{1,10}", str(kwargs.get("claude_relay_prefix", ""))):
             errors.append("CLAUDE_RELAY_PREFIX must be 1-10 characters without spaces")
-        if not (1 <= int(kwargs.get("claude_relay_port", 8790)) <= 65535):
-            errors.append(f"CLAUDE_RELAY_PORT must be between 1 and 65535, got {kwargs.get('claude_relay_port')}")
+    if not (1 <= int(kwargs.get("claude_relay_port", 8790)) <= 65535):
+        errors.append(f"CLAUDE_RELAY_PORT must be between 1 and 65535, got {kwargs.get('claude_relay_port')}")
     ocr_fallback = kwargs.get("ocr_fallback", "off")
     if ocr_fallback not in ("off", "on"):
         errors.append(f"OCR_FALLBACK must be off or on, got {ocr_fallback}")

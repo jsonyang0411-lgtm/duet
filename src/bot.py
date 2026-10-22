@@ -322,6 +322,11 @@ class Bot:
                 self._health.stop()
             if relay is not None:
                 relay.stop()
+                try:
+                    from .web.server import register_relay
+                    register_relay(None)
+                except Exception:
+                    pass
             # Stop the memory thread before its database goes away.
             close_router = getattr(router, "close", None)
             if callable(close_router):
@@ -360,6 +365,11 @@ class Bot:
                 config.claude_relay_host, config.claude_relay_port,
             )
         router._claude_relay = relay
+        try:
+            from .web.server import register_relay
+            register_relay(relay)
+        except Exception:
+            pass
         return relay
 
     def _log_banner(self) -> None:

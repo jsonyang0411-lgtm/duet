@@ -7,12 +7,8 @@ import { ConfigProvider } from './store/config'
 import { TopBar, Rail, SaveBar } from './components/Shell'
 import { LogoGlyph } from './components/art'
 import Dashboard from './components/Dashboard'
-import DecisionsPanel from './components/DecisionsPanel'
-import ConfigPanel from './components/ConfigPanel'
-import ModulesPanel from './components/ModulesPanel'
-import AdvancedPanel from './components/AdvancedPanel'
-import NicknameEditor from './components/NicknameEditor'
-import TodoManager from './components/TodoManager'
+import RelayPanel from './components/RelayPanel'
+import WechatPanel from './components/WechatPanel'
 import LogViewer from './components/LogViewer'
 import Onboarding from './components/Onboarding'
 
@@ -50,13 +46,11 @@ export default function App() {
 function Console() {
   const route = useRoute()
   let page
+  // Agent console: four pages (components/Shell.jsx NAV). Old links (#/config/…,
+  // #/modules/…) land on the status page.
   switch (route.page) {
-    case 'trace': page = <DecisionsPanel route={route} />; break
-    case 'config': page = <ConfigPanel section={route.sub || 'ai'} />; break
-    case 'modules': page = <ModulesPanel selected={route.sub} />; break
-    case 'advanced': page = <AdvancedPanel />; break
-    case 'members': page = <NicknameEditor />; break
-    case 'todo': page = <TodoManager />; break
+    case 'relay': page = <RelayPanel />; break
+    case 'wechat': page = <WechatPanel />; break
     case 'logs': page = <LogViewer />; break
     default: page = <Dashboard />
   }

@@ -121,7 +121,7 @@ function AiSection() {
 /* ------------------------------------------------------------- 身份与群聊 */
 
 // The literal option values are checked by tests/test_macos_adaptation.py.
-const WECHAT_BACKENDS = [
+export const WECHAT_BACKENDS = [
   { value: 'wcdb', label: 'WCDB 直读（Windows）' },
   { value: 'mac_hybrid', label: 'macOS WeFlow' },
   { value: 'mac_ui', label: 'macOS 界面' },
@@ -152,7 +152,7 @@ function IdentitySection() {
   )
 }
 
-function GroupsCard() {
+export function GroupsCard() {
   const [value, setValue] = useField('wechat_groups')
   const names = Array.isArray(value) ? value : []
   const [wantSome, setWantSome] = useState(false)
@@ -256,7 +256,7 @@ function PersonaSection() {
 
 /* -------------------------------------------------------------- 数据与日志 */
 
-function DataSection() {
+export function DataSection() {
   const [dir, setDir] = useField('wechat_data_dir')
   const { detectedDataDir } = useConfig()
   const [browse, setBrowse] = useState(false)

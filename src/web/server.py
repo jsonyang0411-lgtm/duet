@@ -1149,6 +1149,79 @@ def _register_backend(backend):
     _bot_control.register_backend(backend)
 
 
+# The running ClaudeRelay (CLAUDE_RELAY=on), set by Bot.run(); None when the bot
+# is stopped or the relay is off.  /api/relay reads it.
+_relay = None
+
+
+def register_relay(relay):
+    """Register (or with None, forget) the running Claude relay for /api/relay."""
+    global _relay
+    _relay = relay
+
+
+def _lan_addresses() -> list[str]:
+    """This computer's LAN IPv4 addresses (what the Mac's relay_url should use)."""
+    import socket
+    found: list[str] = []
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("192.0.2.1", 9))          # no packet is sent: this only picks the outgoing interface
+            found.append(s.getsockname()[0])
+    except OSError:
+        pass
+    try:
+        for addr in socket.gethostbyname_ex(socket.gethostname())[2]:
+            if addr not in found:
+                found.append(addr)
+    except OSError:
+        pass
+    return [a for a in found if not a.startswith("127.")]
+
+
+def _relay_job_for_console(job: dict) -> dict:
+    """A job as the console shows it: no wxid, the text cut to 200 characters."""
+    try:
+        extra = json.loads(job.get("result_json") or "{}")
+    except ValueError:
+        extra = {}
+    text = str(job.get("text") or "")
+    return {
+        "id": job["id"],
+        "status": job["status"],
+        "text": text[:200],
+        "project": job.get("project") or "",
+        "created_at": job.get("created_at"),
+        "claimed_at": job.get("claimed_at"),
+        "finished_at": job.get("finished_at"),
+        "duration_s": extra.get("duration_s"),
+        "result": str(job.get("result_text") or "")[:400],
+        "error": str(extra.get("error") or "")[:300],
+        "cancel_requested": bool(job.get("cancel_requested")),
+    }
+
+
+def _relay_snapshot(limit: int = 30) -> dict:
+    """GET /api/relay: the relay's state and its newest jobs (also when the bot is stopped)."""
+    relay = _relay
+    if relay is not None:
+        jobs = relay.store.list_jobs(limit)
+        return {"ok": True, "running": True, **relay.snapshot(),
+                "jobs": [_relay_job_for_console(j) for j in jobs], "lan_addresses": _lan_addresses()}
+    out = {"ok": True, "running": False, "listening": False, "mac_online": False, "address": None,
+           "mac_last_seen_sec": None, "counts": {}, "jobs": [], "lan_addresses": _lan_addresses()}
+    db_path = Path(os.getenv("CLAUDE_RELAY_DB", "data/claude_relay.db").strip() or "data/claude_relay.db")
+    if db_path.exists():
+        from src.relay.store import RelayStore
+        store = RelayStore(db_path)
+        try:
+            out["jobs"] = [_relay_job_for_console(j) for j in store.list_jobs(limit)]
+            out["counts"] = store.counts()
+        finally:
+            store.close()
+    return out
+
+
 def _stop_bot():
     """Stop the running bot backend. Returns True if anything was stopped."""
     stopped = _bot_control.stop()
@@ -1225,6 +1298,7 @@ _POST_ONLY_PATHS = frozenset({
     "/api/onboarding/step3", "/api/onboarding/step4",
     "/api/sandbox/test", "/api/todos/action",
     "/api/voice/download-model", "/api/wechat-data-dir/detect",
+    "/api/relay/cancel",
 })
 
 
@@ -1325,7 +1399,8 @@ class _UIHandler(SimpleHTTPRequestHandler):
                          "/api/advanced",
                          "/api/todos/action",
                          "/api/voice/download-model",
-                         "/api/wechat-data-dir/detect"):
+                         "/api/wechat-data-dir/detect",
+                         "/api/relay/cancel"):
             self.do_GET()
         else:
             self._method_not_allowed()
@@ -1442,6 +1517,32 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 "ok": False,
                 "error": "WebSocket support is disabled; use /api/status",
             }).encode())
+            return
+
+        # ── API: Claude relay — state, jobs, cancel ────────────────────
+        if self.path.split("?", 1)[0] == "/api/relay":
+            try:
+                self.send_json(_relay_snapshot())
+            except Exception as e:
+                logger.exception("Reading the relay state failed")
+                self.send_json({"ok": False, "error": str(e)})
+            return
+        if self.path == "/api/relay/cancel":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len else b"{}"
+            try:
+                job_id = int(json.loads(body).get("id"))
+            except (ValueError, TypeError, AttributeError, json.JSONDecodeError):
+                self.send_json({"ok": False, "error": "要给出任务编号"})
+                return
+            if _relay is None:
+                self.send_json({"ok": False, "error": "机器人没有运行，中转没有开着"})
+                return
+            outcome = _relay.cancel_from_console(job_id)
+            if outcome == "missing":
+                self.send_json({"ok": False, "error": f"没有找到 #{job_id}"})
+            else:
+                self.send_json({"ok": True, "outcome": outcome})
             return
 
         # ── API: why did the bot (not) answer? (read-only) ─────────────
@@ -2483,6 +2584,10 @@ class _UIHandler(SimpleHTTPRequestHandler):
                     _onboarding_data["followup_listen_enabled"] = data.get("followup_listen_enabled", True)
                     _onboarding_data["message_burst_enabled"] = data.get("message_burst_enabled", True)
                     _onboarding_data["web_search_enabled"] = data.get("web_search_enabled", True)
+                    if "private_chat_enabled" in data:
+                        _onboarding_data["private_chat_enabled"] = bool(data["private_chat_enabled"])
+                    if data.get("private_chats"):
+                        _onboarding_data["private_chats"] = str(data["private_chats"])
 
                 # Write all accumulated data to .env
                 env_path = _find_or_create_env()

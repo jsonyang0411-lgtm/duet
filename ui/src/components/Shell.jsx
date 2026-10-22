@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import {
-  Pulse, ListMagnifyingGlass, GearSix, SquaresFour, SlidersHorizontal, UsersThree,
-  CheckSquare, TerminalWindow, Moon, Sun, Play, Stop, ArrowClockwise,
+  Pulse, ArrowsLeftRight, ChatCircleDots, TerminalWindow, Moon, Sun, Play, Stop, ArrowClockwise,
 } from '@phosphor-icons/react'
 import { useStatus, fmtDuration } from '../store/status'
 import { useConfig } from '../store/config'
@@ -11,23 +10,13 @@ import { useTheme } from '../lib/theme'
 import { navigate } from '../lib/router'
 import { LogoGlyph, FigurePlaceholder } from './art'
 
+// The company console: the bot as a relay to Claude Code on a Mac. The other
+// pages (reply records, AI and persona settings, modules, advanced switches,
+// nicknames, todos) are hidden here; their code and the bot's features stay.
 export const NAV = [
   { id: 'status', label: '运行状态', en: 'STATUS', icon: Pulse },
-  { id: 'trace', label: '回复记录', en: 'TRACE', icon: ListMagnifyingGlass },
-  {
-    id: 'config', label: '系统配置', en: 'CONFIG', icon: GearSix,
-    sub: [
-      { id: 'ai', label: 'AI 服务' },
-      { id: 'identity', label: '身份与群聊' },
-      { id: 'persona', label: '人设' },
-      { id: 'data', label: '数据与日志' },
-      { id: 'sandbox', label: '提示词沙箱' },
-    ],
-  },
-  { id: 'modules', label: '功能模块', en: 'MODULES', icon: SquaresFour },
-  { id: 'advanced', label: '高级开关', en: 'ADVANCED', icon: SlidersHorizontal },
-  { id: 'members', label: '群友昵称', en: 'MEMBERS', icon: UsersThree },
-  { id: 'todo', label: '群聊待办', en: 'TODO', icon: CheckSquare },
+  { id: 'relay', label: '中转代理', en: 'RELAY', icon: ArrowsLeftRight },
+  { id: 'wechat', label: '微信连接', en: 'WECHAT', icon: ChatCircleDots },
   { id: 'logs', label: '运行日志', en: 'LOGS', icon: TerminalWindow },
 ]
 
@@ -38,7 +27,7 @@ export function TopBar({ route }) {
     <header className="topbar">
       <a className="brand" href="#/status" aria-label="webot 控制台：回到运行状态">
         <span className="brand-mark"><LogoGlyph /></span>
-        <span className="brand-name"><b>WEBOT</b><small>微信机器人控制台</small></span>
+        <span className="brand-name"><b>WEBOT</b><small>微信中转代理</small></span>
       </a>
       {nav && (
         <div className="top-title" aria-hidden="true">
@@ -139,7 +128,7 @@ function Dock() {
   else if (data?.error && String(data.error).includes('KEY_MISSING')) line = <>读不到微信密钥，要重新获取。</>
   else if (!running && data?.error) line = <>上次启动出错了。</>
   else if (dirtyKeys.length) line = <>有 <em>{dirtyKeys.length}</em> 项设置还没保存。</>
-  else if (running) line = <>在岗中，已经处理 <em>{data?.messages_processed ?? 0}</em> 条消息。</>
+  else if (running) line = <>在岗中，私聊发「cc 任务」我就转给 Mac。</>
   else line = <>没在跑，点右上角「启动」。</>
   return (
     <div className="dock" aria-label="助手">

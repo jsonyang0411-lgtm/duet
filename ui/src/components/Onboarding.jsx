@@ -1,19 +1,21 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Key, ArrowLeft, CheckCircle, XCircle, Warning, ArrowClockwise, Sun, Moon, Check } from '@phosphor-icons/react'
+import { Key, ArrowLeft, CheckCircle, XCircle, Warning, ArrowClockwise, Sun, Moon, Check, Copy, Sparkle } from '@phosphor-icons/react'
 import { api } from '../api'
 import { useKeyExtraction, diagnose } from '../lib/keyExtraction'
 import { useTheme } from '../lib/theme'
 import { LogoGlyph, FigurePlaceholder } from './art'
-import { SecDeco, Field, TextInput, Seg, Switch, Note, ChipsInput, Select } from './ui'
+import { SecDeco, Field, TextInput, Seg, Switch, Note, ChipsInput } from './ui'
+import { randomToken } from './AdvancedPanel'
 
-// First run: get the WeChat key, name the bot, pick the AI service, choose a few
-// features. Step 4 writes .env (ONBOARDING_DONE=true) and opens the console.
+// First run of the agent console: get the WeChat key, set up WeChat, set up the
+// relay to Claude Code on the Mac. Step 3 sends the server's onboarding steps 3
+// and 4 with quiet defaults (no AI service, chat features off: this bot only
+// relays), which write .env (ONBOARDING_DONE=true), then saves the relay settings.
 
 const STEPS = [
-  { id: 1, en: 'KEY', title: '微信密钥', sub: '让机器人能读聊天记录' },
-  { id: 2, en: 'WECHAT', title: '微信设置', sub: '机器人叫什么、在哪些群' },
-  { id: 3, en: 'AI', title: 'AI 服务', sub: '用哪家的模型回复' },
-  { id: 4, en: 'FEATURES', title: '功能', sub: '先开哪些功能' },
+  { id: 1, en: 'KEY', title: '微信密钥', sub: '让机器人能读微信消息' },
+  { id: 2, en: 'WECHAT', title: '微信设置', sub: '机器人账号、在哪些群' },
+  { id: 3, en: 'RELAY', title: '中转设置', sub: '谁能发任务、Mac 怎么连' },
 ]
 
 const isMac = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform || navigator.userAgent)
@@ -26,10 +28,9 @@ export default function Onboarding({ onDone }) {
   const finish = (n, extra) => { setDone((d) => ({ ...d, [n]: true })); if (extra) setKeyInfo(extra); setStep(n + 1) }
 
   const LINES = {
-    1: '先拿到微信密钥，才看得到群聊。',
-    2: '我在微信里叫什么？去哪些群？',
-    3: '用哪里的模型？云端本机都行。',
-    4: '最后挑几个功能，以后还能改。',
+    1: '先拿到微信密钥，才收得到消息。',
+    2: '我在微信里叫什么？听哪些群？',
+    3: '最后：你私聊发的 cc 任务我转给 Mac。',
   }
 
   return (
@@ -77,12 +78,11 @@ export default function Onboarding({ onDone }) {
           <div className="page ob-page">
             <header className="page-head">
               <SecDeco no={`0${step + 1}`} en={STEPS[step - 1].en} />
-              <div className="ph-titles"><h1>{STEPS[step - 1].title}</h1><div className="ph-sub">第 {step} 步，共 4 步 · {STEPS[step - 1].sub}</div></div>
+              <div className="ph-titles"><h1>{STEPS[step - 1].title}</h1><div className="ph-sub">第 {step} 步，共 {STEPS.length} 步 · {STEPS[step - 1].sub}</div></div>
             </header>
             {step === 1 && <StepKey onNext={(info) => finish(1, info)} />}
             {step === 2 && <StepWechat keyInfo={keyInfo} onBack={() => setStep(1)} onNext={() => finish(2)} />}
-            {step === 3 && <StepAi onBack={() => setStep(2)} onNext={() => finish(3)} />}
-            {step === 4 && <StepFeatures onBack={() => setStep(3)} onDone={onDone} />}
+            {step === 3 && <StepRelay onBack={() => setStep(2)} onDone={onDone} />}
           </div>
         </div>
       </main>
@@ -243,115 +243,80 @@ function StepWechat({ keyInfo, onBack, onNext }) {
 
 /* ------------------------------------------------------------- 第 3 步 */
 
-const MODELS = {
-  deepseek: [{ value: 'deepseek-v4-flash', label: 'V4 Flash · 便宜（推荐）' }, { value: 'deepseek-v4-pro', label: 'V4 Pro · 更强' }],
-  openai: [{ value: 'gpt-5.6-terra', label: 'GPT-5.6 Terra · 平衡（推荐）' }, { value: 'gpt-5.6', label: 'GPT-5.6 · 更强' }, { value: 'gpt-5.6-luna', label: 'GPT-5.6 Luna · 更快' }],
-  claude: [{ value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5 · 快、便宜' }, { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6 · 质量高' }],
-}
-const BASE_URL = { deepseek: 'https://api.deepseek.com', openai: '', claude: 'https://api.anthropic.com', local: 'http://127.0.0.1:11434/v1' }
-
-function StepAi({ onBack, onNext }) {
-  const [ai, setAi] = useState('deepseek')
-  const [key, setKey] = useState('')
-  const [url, setUrl] = useState(BASE_URL.deepseek)
-  const [model, setModel] = useState(MODELS.deepseek[0].value)
-  const [busy, setBusy] = useState(false)
-  const [err, setErr] = useState('')
-  const local = ai === 'local'
-  const pick = (v) => { setAi(v); setUrl(BASE_URL[v]); setModel(v === 'local' ? '' : MODELS[v][0].value); setKey('') }
-  const valid = local ? model.trim() && /^https?:\/\//.test(url.trim()) : key.trim().length >= 10
-  const next = async () => {
-    setBusy(true); setErr('')
-    // Everything on a model on this computer: MODEL_ROUTE=local, no cloud key.
-    const body = local
-      ? { ai_backend: 'deepseek', model_route: 'local', local_base_url: url.trim(), local_model: model.trim(), local_api_key: key.trim() }
-      : { ai_backend: ai, model_route: 'cloud' }
-    if (ai === 'deepseek') Object.assign(body, { deepseek_api_key: key.trim(), deepseek_base_url: url.trim() || BASE_URL.deepseek, deepseek_model: model })
-    if (ai === 'openai') Object.assign(body, { openai_api_key: key.trim(), openai_base_url: url.trim(), openai_model: model })
-    if (ai === 'claude') Object.assign(body, { anthropic_api_key: key.trim(), anthropic_base_url: url.trim() || BASE_URL.claude, summarize_model: model })
-    try {
-      const d = await api('/api/onboarding/step3', { method: 'POST', body })
-      if (d.ok === false) throw new Error(d.error || '保存失败')
-      onNext()
-    } catch (e) { setErr(e.message) } finally { setBusy(false) }
-  }
-  return (
-    <section className="ch card">
-      <div className="stack" style={{ gap: 16 }}>
-        <Field label="用哪里的模型"><div><Seg value={ai} onChange={pick} options={[{ value: 'deepseek', label: 'DeepSeek（推荐）' }, { value: 'openai', label: 'OpenAI' }, { value: 'claude', label: 'Claude' }, { value: 'local', label: '本地模型' }]} /></div></Field>
-        {local ? (
-          <>
-            <div className="form-grid">
-              <Field label="本地服务地址" hint="Ollama 默认 http://127.0.0.1:11434/v1，LM Studio 是 http://127.0.0.1:1234/v1" error={url && !/^https?:\/\//.test(url.trim()) ? '要以 http:// 或 https:// 开头' : ''}>
-                <TextInput value={url} onChange={setUrl} mono />
-              </Field>
-              <Field label="模型名" hint="本地服务里的模型名，例如 qwen3.5:4b"><TextInput value={model} onChange={setModel} mono placeholder="必填" /></Field>
-            </div>
-            <Field label="本地服务密钥（可不填）" hint="大多数本地服务不检查"><TextInput value={key} onChange={setKey} mono type="password" autoComplete="off" /></Field>
-            <Note kind="cy">所有任务都交给这台电脑（或局域网里）的模型，不需要云端 API Key，也不产生费用。上线前先运行 python tools/model_check.py 检查一遍。以后可以在「高级开关 → 本地模型」里改成分工：只把一部分任务交给本地模型。</Note>
-          </>
-        ) : (
-          <>
-            <Field label="API Key" hint={ai === 'deepseek' ? '在 platform.deepseek.com 申请' : ai === 'openai' ? '在 platform.openai.com 申请' : '在 console.anthropic.com 申请'}>
-              <TextInput value={key} onChange={setKey} mono type="password" autoComplete="off" placeholder="粘贴 API Key" />
-            </Field>
-            <div className="form-grid">
-              <Field label="接口地址" hint="用代理或中转服务时才改"><TextInput value={url} onChange={setUrl} mono placeholder={ai === 'openai' ? '留空用官方地址' : ''} /></Field>
-              <Field label="模型"><Select value={model} onChange={setModel} options={MODELS[ai]} /></Field>
-            </div>
-            <Note>调用模型按用量计费，费用由你的账号承担。以后在「系统配置 → AI 服务」里可以换。</Note>
-          </>
-        )}
-        {err && <Note kind="need">{err}</Note>}
-      </div>
-      <div className="card-foot">
-        <button type="button" className="btn" onClick={onBack}><ArrowLeft />上一步</button>
-        <span className="spacer" />
-        <button type="button" className="btn primary" disabled={!valid || busy} onClick={next}>{busy ? '保存中…' : '下一步'}</button>
-      </div>
-    </section>
-  )
+async function onboardingStep(path, body) {
+  const d = await api(path, { method: 'POST', body })
+  if (d.ok === false) throw new Error(d.error || '保存失败')
 }
 
-/* ------------------------------------------------------------- 第 4 步 */
-
-const FEATURES = [
-  { k: 'fun_enabled', title: '趣味抽签', desc: '群友 @机器人说「抽签」时抽一支签', def: true },
-  { k: 'sticky_mention_enabled', title: '粘性提及', desc: '只发了「@机器人」时，把下一句当作是对它说的', def: true },
-  { k: 'followup_listen_enabled', title: '跟聊', desc: '刚回复完时，接着说的短句也会接', def: true },
-  { k: 'message_burst_enabled', title: '连发合并', desc: '同一个人连发几条时合成一句再处理', def: true },
-  { k: 'web_search_enabled', title: '联网搜索', desc: '有人说「搜一下」时先上网查', def: true },
-  { k: 'proactive_enabled', title: '主动发言', desc: '没人叫它时，偶尔自己插一句', def: false },
-]
-
-function StepFeatures({ onBack, onDone }) {
-  const [v, setV] = useState(Object.fromEntries(FEATURES.map((f) => [f.k, f.def])))
+function StepRelay({ onBack, onDone }) {
+  const [wxid, setWxid] = useState('')
+  const [token, setToken] = useState(() => randomToken())
+  const [port, setPort] = useState('8790')
+  const [onlyMe, setOnlyMe] = useState(true)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
-  const finish = async () => {
+  const [written, setWritten] = useState(false)
+  const id = wxid.trim()
+  const wxidOk = /^[A-Za-z][A-Za-z0-9_-]{4,}$/.test(id)
+  const portOk = /^\d+$/.test(port) && Number(port) >= 1 && Number(port) <= 65535
+  const tokenOk = token.trim().length >= 16
+
+  const write = async (relayOn) => {
     setBusy(true); setErr('')
     try {
-      const d = await api('/api/onboarding/step4', { method: 'POST', body: v })
-      if (d.ok === false) throw new Error(d.error || '写入配置失败')
+      if (!written) {
+        // This console only relays: no AI service, the chat features off.
+        await onboardingStep('/api/onboarding/step3', { ai_backend: 'deepseek', model_route: 'cloud' })
+        await onboardingStep('/api/onboarding/step4', {
+          fun_enabled: false, sticky_mention_enabled: false, followup_listen_enabled: false,
+          message_burst_enabled: true, web_search_enabled: false, proactive_enabled: false,
+          private_chat_enabled: relayOn,
+          private_chats: relayOn && onlyMe ? encodeURIComponent(id) : '*',
+        })
+        setWritten(true)
+      }
+      if (relayOn) {
+        const r = await api('/api/advanced', {
+          method: 'POST',
+          body: { values: { CLAUDE_RELAY: 'on', ADMIN_WXID: id, CLAUDE_RELAY_TOKEN: token.trim(), CLAUDE_RELAY_PORT: port } },
+        })
+        if (!r.ok) throw new Error([r.error, ...Object.values(r.errors || {})].filter(Boolean).join('；'))
+      }
       onDone()
     } catch (e) { setErr(e.message); setBusy(false) }
   }
+  const copy = async () => { try { await navigator.clipboard.writeText(token) } catch { /* select it by hand */ } }
+
   return (
     <section className="ch card">
-      {FEATURES.map((f) => (
-        <div key={f.k} className="toggle-row">
-          <div className="tr-text"><span className="tr-title">{f.title}</span><div className="f-hint">{f.desc}</div></div>
-          <Switch checked={v[f.k]} onChange={(on) => setV((x) => ({ ...x, [f.k]: on }))} label={f.title} />
+      <div className="stack" style={{ gap: 16 }}>
+        <Note kind="cy">你在微信里<b>私聊</b>机器人账号发「cc 任务」，机器人把任务交给 Mac 上的 Claude Code，做完把结果发回私聊。中转要在 Windows 机器人（WCDB 直读）上运行。</Note>
+        <Field label="你的 wxid" hint="发 cc 任务的人（你自己）的微信 wxid，形如 wxid_xxx，不是机器人账号的。只有这个人能用中转" error={id && !wxidOk ? '看起来不像 wxid' : ''}>
+          <TextInput value={wxid} onChange={setWxid} mono placeholder="wxid_…" autoFocus />
+        </Field>
+        <div className="toggle-row">
+          <div className="tr-text"><span className="tr-title">只读你的私聊</span><div className="f-hint">其他人的私聊不会被读取（推荐）</div></div>
+          <Switch checked={onlyMe} onChange={setOnlyMe} label="只读你的私聊" />
         </div>
-      ))}
-      <div style={{ marginTop: 12 }}><Note kind="cy">点「完成」会把这些设置写进配置文件，然后打开控制台。机器人不会自动启动，在控制台里点「启动」。</Note></div>
-      {err && <div style={{ marginTop: 12 }}><Note kind="need">{err}</Note></div>}
+        <Field label="token" hint="Mac 来取任务时带的密码。复制下来，写进 Mac 的 ~/.claude-relay/token（只放这一行），不要发到聊天里" error={!tokenOk ? '至少 16 个字符' : ''}>
+          <div className="input-wrap">
+            <TextInput value={token} onChange={setToken} mono />
+            <button type="button" className="btn" onClick={() => setToken(randomToken())}><Sparkle />重新生成</button>
+            <button type="button" className="btn" onClick={copy}><Copy />复制</button>
+          </div>
+        </Field>
+        <Field label="端口" hint="Mac 连这台电脑的这个端口；Windows 防火墙要放行它（只放行局域网）" error={!portOk ? '1 到 65535 之间的整数' : ''}>
+          <div style={{ width: 168 }}><TextInput value={port} onChange={setPort} mono /></div>
+        </Field>
+        {err && <Note kind="need">{err}{written && <> 其余设置已经写好，可以先进控制台，在「中转代理」页里再改。</>}</Note>}
+      </div>
       <div className="card-foot">
-        <button type="button" className="btn" onClick={onBack}><ArrowLeft />上一步</button>
+        <button type="button" className="btn" onClick={onBack} disabled={busy || written}><ArrowLeft />上一步</button>
         <span className="spacer" />
-        <button type="button" className="btn primary" disabled={busy} onClick={finish}>{busy ? '正在写入…' : '完成'}</button>
+        {written && <button type="button" className="btn" onClick={onDone}>先进控制台</button>}
+        <button type="button" className="btn ghost" onClick={() => write(false)} disabled={busy}>以后再设置中转</button>
+        <button type="button" className="btn primary" disabled={busy || !wxidOk || !portOk || !tokenOk} onClick={() => write(true)}>{busy ? '正在写入…' : '完成'}</button>
       </div>
     </section>
   )
 }
-

@@ -75,8 +75,9 @@ export function validateConfig(c) {
 
 // Where each key lives in the console; used by the save bar to say what changed.
 export const KEY_PAGE = [
+  [/^(wechat_groups|wechat_backend|private_|wechat_data_dir|log_level)/, '微信连接'],
   [/^(ai_backend|deepseek_|openai_|anthropic_|summarize_model)/, 'AI 服务'],
-  [/^(bot_display_name|wechat_groups|wechat_backend|trigger_keywords)/, '身份与群聊'],
+  [/^(bot_display_name|trigger_keywords)/, '身份与群聊'],
   [/^(chat_|yang_yujing_)/, '人设'],
   [/^(wechat_data_dir|log_level)/, '数据与日志'],
   [/^fun_/, '趣味抽签'],

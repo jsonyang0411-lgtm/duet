@@ -1,12 +1,11 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Play, Stop, Stethoscope, Key, ArrowRight, ArrowClockwise, CheckCircle, XCircle, MinusCircle } from '@phosphor-icons/react'
-import { get } from '../api'
-import { useStatus, fmtDuration, WECHAT_BACKEND_NAMES, AI_BACKEND_NAMES } from '../store/status'
+import { useStatus, fmtDuration, WECHAT_BACKEND_NAMES } from '../store/status'
 import { useConfig } from '../store/config'
 import { useKeyExtraction, diagnose } from '../lib/keyExtraction'
+import { useRelay, JOB_STATES, fmtClock, macState } from '../lib/relay'
 import { navigate } from '../lib/router'
 import { PageHead, Banner, Barcode, Empty, Note } from './ui'
-import { OutcomeTag, fmtTime } from './DecisionsPanel'
 
 // How each WeChat backend reads messages (shown under the title).
 const BACKEND_HOW = {
@@ -28,12 +27,14 @@ export default function Dashboard() {
   // The status only names the backends while the bot runs; otherwise show the saved settings.
   const { base } = useConfig()
   const wb = (running && data?.wechat_backend) || base?.wechat_backend
-  const ab = (running && data?.ai_backend) || base?.ai_backend
+  const relay = useRelay(5000)
+  const [mac] = macState(relay.data)
+  const relayText = !running ? '没运行' : relay.data?.listening ? '已打开' : '关着'
 
   return (
     <div className="main-scroll scroll">
       <div className="page">
-        <PageHead no="02" en="STATUS" title="运行状态" sub="机器人现在在做什么，以及最近每条消息是怎么处理的" />
+        <PageHead no="02" en="STATUS" title="运行状态" sub="机器人在不在线、Mac 在不在、最近的中转任务" />
 
         <section className="ch xl hero">
           <div className="hero-stub slab" aria-hidden="true">
@@ -46,18 +47,18 @@ export default function Dashboard() {
           <div className="hero-body">
             <div className="row wrap" style={{ gap: 6 }}>
               <span className="tag">微信 · {WECHAT_BACKEND_NAMES[wb] || wb || '未知'}</span>
-              <span className="tag">AI · {AI_BACKEND_NAMES[ab] || ab || '未知'}</span>
+              <span className="tag">中转 · {relayText}</span>
             </div>
             <h2 className="hero-title">{title}</h2>
             <p className="hero-desc">
               {conn === 'offline'
                 ? '控制台连不上 webot 的后台服务。webot 可能已经退出，重新打开 webot 即可。'
-                : BACKEND_HOW[wb] ? `${BACKEND_HOW[wb]}。` : '启动后开始读取微信消息并按设置回复。'}
+                : `${BACKEND_HOW[wb] ? `${BACKEND_HOW[wb]}；` : ''}私聊里的「cc 任务」交给 Mac 上的 Claude Code，结果发回微信。`}
             </p>
             <div className="hero-stats">
               <Stat k="MSG" label="已处理消息" value={data ? (data.messages_processed ?? 0) : '—'} />
               <Stat k="UPTIME" label="运行时长" value={running ? fmtDuration(data?.uptime_sec) : '—'} />
-              <Stat k="LAST CALL" label="最近一次模型调用" value={data?.last_api_call_time || '还没有'} />
+              <Stat k="MAC" label="Mac worker" value={mac} />
             </div>
             {conn === 'online' && (
               <div className="row" style={{ marginTop: 16 }}>
@@ -86,7 +87,7 @@ export default function Dashboard() {
 
         <div className="dash-grid">
           <ChecksCard />
-          <RecentDecisions />
+          <RecentJobs relay={relay} />
         </div>
       </div>
     </div>
@@ -195,47 +196,39 @@ function ChecksCard() {
   )
 }
 
-function RecentDecisions() {
-  const [items, setItems] = useState(null)
-  const [err, setErr] = useState('')
-  const load = useCallback(async () => {
-    try {
-      const d = await get('/api/decisions', { limit: 6 })
-      setItems(d.decisions || []); setErr('')
-    } catch (e) { setErr(e.message) }
-  }, [])
-  useEffect(() => {
-    load()
-    const t = setInterval(load, 10000)
-    return () => clearInterval(t)
-  }, [load])
+function RecentJobs({ relay }) {
+  const { data, err, reload } = relay
+  const items = data ? (data.jobs || []).slice(0, 6) : null
   return (
     <section className="ch card">
       <div className="card-head">
         <div className="stack" style={{ gap: 2 }}>
-          <span className="eyebrow" aria-hidden="true">TRACE</span>
-          <h2>最近的判断</h2>
+          <span className="eyebrow" aria-hidden="true">JOBS</span>
+          <h2>最近的中转任务</h2>
         </div>
-        <button type="button" className="icon-btn sm" style={{ marginLeft: 'auto' }} title="刷新" aria-label="刷新" onClick={load}><ArrowClockwise /></button>
+        <button type="button" className="icon-btn sm" style={{ marginLeft: 'auto' }} title="刷新" aria-label="刷新" onClick={reload}><ArrowClockwise /></button>
       </div>
       {err && <Note kind="need">{err}</Note>}
-      {items && !items.length && <Empty title="还没有记录">机器人运行后，每条消息回没回、为什么，都会记在这里。</Empty>}
+      {items && !items.length && <Empty title="还没有任务">在微信私聊里给机器人发「cc 只回复：收到」试试。</Empty>}
       {items && items.length > 0 && (
         <div className="mini-trace">
-          {items.map((d, i) => (
-            <button type="button" key={`${d.message_id}-${i}`} className="mt-row" onClick={() => navigate(`trace/${encodeURIComponent(d.message_id || '')}`)}>
-              <span className="mt-time num">{fmtTime(d.ts)}</span>
-              <span className="mt-main">
-                <span className="mt-who ellipsis">{d.chat || '—'} · {d.sender || '—'}</span>
-                <span className="mt-why ellipsis">{d.reason_text || d.reason}</span>
-              </span>
-              <OutcomeTag outcome={d.outcome} />
-            </button>
-          ))}
+          {items.map((j) => {
+            const [label, kind] = JOB_STATES[j.status] || [j.status, 'pend']
+            return (
+              <button type="button" key={j.id} className="mt-row" onClick={() => navigate('relay')}>
+                <span className="mt-time num">{fmtClock(j.created_at)}</span>
+                <span className="mt-main">
+                  <span className="mt-who ellipsis">#{j.id}{j.project ? ` · @${j.project}` : ''}</span>
+                  <span className="mt-why ellipsis">{j.text}</span>
+                </span>
+                <span className={`tag ${kind}`}>{label}</span>
+              </button>
+            )
+          })}
         </div>
       )}
       <div className="card-foot">
-        <button type="button" className="link" onClick={() => navigate('trace')}>全部回复记录<ArrowRight style={{ verticalAlign: -2, marginLeft: 4 }} /></button>
+        <button type="button" className="link" onClick={() => navigate('relay')}>全部任务<ArrowRight style={{ verticalAlign: -2, marginLeft: 4 }} /></button>
       </div>
     </section>
   )

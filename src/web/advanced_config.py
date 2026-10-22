@@ -217,6 +217,36 @@ GROUPS: list[dict] = [
         ],
     },
     {
+        "id": "relay", "code": "CC", "title": "Claude 中转",
+        "desc": "你在微信里私聊机器人发「cc 任务」，机器人把任务放进队列，Mac 上的 worker（tools/claude_relay/worker.py）"
+                "来取走、交给 Claude Code 执行，结果再由机器人发回私聊。需要在「微信连接」里打开私聊。",
+        "fields": [
+            {"key": "CLAUDE_RELAY", "type": "onoff", "default": "off", "label": "打开中转",
+             "help": "打开后机器人会开一个端口等 Mac 来取任务。必须同时填好下面的 token 和「谁能用」。"},
+            {"key": "ADMIN_WXID", "type": "text", "default": "", "label": "管理员 wxid",
+             "help": "你自己的微信 wxid（形如 wxid_xxx）。下面「谁能用」不填时，只有这个人能用中转。"},
+            {"key": "CLAUDE_RELAY_WXIDS", "type": "names", "default": "", "label": "谁能用",
+             "help": "能用 cc 指令的人的 wxid，逗号分隔；不填 = 只有管理员。只认这些人的私聊，群里的 cc 和别人发的都当普通消息。",
+             "requires": [{"key": "CLAUDE_RELAY", "is": "on", "text": "中转打开时才用"}]},
+            {"key": "CLAUDE_RELAY_TOKEN", "type": "secret", "default": "", "label": "token", "generate": True,
+             "help": "Mac 来取任务时要带的密码，至少 16 个字符。点「随机生成」后，把同一串填进 Mac 的 ~/.claude-relay/token。"
+                     "不要发到聊天里。",
+             "requires": [{"key": "CLAUDE_RELAY", "is": "on", "text": "中转打开时才用"}]},
+            {"key": "CLAUDE_RELAY_PORT", "type": "int", "min": 1, "max": 65535, "default": "8790", "label": "端口",
+             "help": "Mac 连这台电脑的这个端口。Windows 防火墙要放行它（只放行局域网）。",
+             "requires": [{"key": "CLAUDE_RELAY", "is": "on", "text": "中转打开时才用"}]},
+            {"key": "CLAUDE_RELAY_HOST", "type": "text", "default": "0.0.0.0", "label": "监听地址",
+             "help": "0.0.0.0 = 所有网卡；只想让局域网某一块网卡能连时填它的 IP。",
+             "requires": [{"key": "CLAUDE_RELAY", "is": "on", "text": "中转打开时才用"}]},
+            {"key": "CLAUDE_RELAY_PREFIX", "type": "text", "default": "cc", "label": "指令前缀",
+             "help": "私聊里以它开头的消息才算任务，例如「cc 跑一下测试」。",
+             "requires": [{"key": "CLAUDE_RELAY", "is": "on", "text": "中转打开时才用"}]},
+            {"key": "CLAUDE_RELAY_MAX_CHARS", "type": "int", "min": 100, "max": 5000, "default": "1500", "label": "结果最长", "unit": "字",
+             "help": "结果超过就截断，完整内容在 Mac 的 ~/.claude-relay/logs/ 里。",
+             "requires": [{"key": "CLAUDE_RELAY", "is": "on", "text": "中转打开时才用"}]},
+        ],
+    },
+    {
         "id": "ocr", "code": "OCR", "title": "读取备选（OCR）",
         "desc": "数据库读不了的时候（WeFlow 没启动、密钥失效、DLL 打不开、微信升级后读不出来），改成截取微信窗口、用系统自带的文字识别"
                 "（macOS 用苹果的，Windows 用系统自带的 Windows OCR）读当前打开的聊天。数据库恢复后自动切回来。" + OCR_BACKENDS + "。",
@@ -384,6 +414,9 @@ def validate_updates(updates: dict, current: dict[str, str]) -> dict[str, str]:
         lines = [ln.strip(" -") for ln in str(exc).splitlines()[1:] if ln.strip()]
         for line in lines:
             hit = next((k for k in FIELDS if line.startswith(k)), None)
+            if line.startswith("CLAUDE_RELAY=on needs "):
+                # two messages start alike: each belongs to the field it names
+                hit = "CLAUDE_RELAY_TOKEN" if "CLAUDE_RELAY_TOKEN" in line else "CLAUDE_RELAY_WXIDS"
             if hit is None and line.startswith("MEMORY_EMBEDDINGS=on"):
                 hit = "MEMORY_EMBEDDINGS"
             errors[hit or "_"] = line
