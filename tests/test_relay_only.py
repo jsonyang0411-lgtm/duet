@@ -44,6 +44,23 @@ class RelayOnlyRoutes(RouterTestCase):
         router = self.build()
         assert router.handle(self.group_msg("g1", f"@{BOT} 你好")) == "嗯，在。"
 
+    def test_admin_commands_in_private_chat_are_allowed_in_relay_only(self):
+        from unittest.mock import MagicMock
+        admin_mock = MagicMock()
+        admin_mock.handle.side_effect = lambda text, sender: "可用命令" if text == "帮助" else None
+        router = self.build(claude_relay="on", claude_relay_only="on", claude_relay_token="t" * 32, admin_wxid=ME,
+                            private_chat_enabled=True, admin=admin_mock)
+        # Help command from admin works
+        reply = router.handle(self.mine("m1", "帮助"))
+        assert reply is not None
+        assert "可用命令" in reply
+        # Non-admin trying help gets ignored
+        assert router.handle(self.private_msg("p1", "帮助")) is None
+        # Group @bot help gets ignored
+        assert router.handle(self.group_msg("g1", f"@{BOT} 帮助")) is None
+        # Normal chat from admin still ignored
+        assert router.handle(self.mine("m2", "你好呀")) is None
+
 
 def test_relay_only_needs_the_relay():
     from src.config import _validate_config

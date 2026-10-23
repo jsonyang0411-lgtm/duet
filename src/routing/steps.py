@@ -109,9 +109,25 @@ def claude_relay(ctx: RouteContext) -> Optional[Stop]:
 def relay_only(ctx: RouteContext) -> Optional[Stop]:
     """CLAUDE_RELAY_ONLY=on: the bot only relays.  Whatever ``claude_relay`` did not
     take ends here, silently: no reply, no proactive line, no welcome, no memory job,
-    no model call.  The message is stored (``persist`` ran) so the logs show it."""
+    no model call.  The message is stored (``persist`` ran) so the logs show it.
+
+    Exception: admin management commands in private chat (e.g. friend manager,
+    admin help) are answered so the admin can still control the host bot without
+    enabling conversational AI or group responses.
+    """
     if getattr(ctx.router._config, "claude_relay_only", "off") != "on":
         return None
+    router, msg = ctx.router, ctx.msg
+    if not msg.get("is_group", True) and (
+        router._config.admin_wxid and msg.get("sender_id") == router._config.admin_wxid
+    ):
+        raw_content = re.sub(r'^\s*wxid_[a-zA-Z0-9]+:\s*', '', msg.get("content", "")).strip()
+        if raw_content and hasattr(router, "_admin") and router._admin is not None:
+            admin_reply = router._admin.handle(raw_content, msg.get("sender_name", ""))
+            if admin_reply:
+                ctx.trace.reason("admin_command_relay_only")
+                return Stop(router._finish_visible_reply(msg, admin_reply))
+
     ctx.trace.ignore("relay_only")
     return Stop(None)
 
