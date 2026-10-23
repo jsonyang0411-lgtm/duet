@@ -1248,6 +1248,14 @@ class WcdbBackend(AbstractWeChatBackend):
         voice = self._get_voice()
         if not voice:  # False or None → disabled
             return None
+        msg_svr_id = (
+            msg.get("msg_svr_id") or msg.get("msgSvrId") or
+            msg.get("server_id") or msg.get("serverId") or 0
+        )
+        if msg_svr_id and hasattr(voice, "_cache"):
+            cached = voice._cache.get(str(msg_svr_id))
+            if cached is not None:
+                return cached
         voice_bytes = None
         if self._client and talker:
             try:
