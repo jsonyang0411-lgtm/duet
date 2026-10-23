@@ -74,11 +74,13 @@ class FakeOcr:
     def __init__(self, *screens, after_capture=None):
         self.screens = list(screens)
         self.captures = 0
+        self.hwnds = []              # the window each capture() was asked for (None = the main window)
         self._after = after_capture
 
-    def capture(self):
+    def capture(self, hwnd=None):
         screen = self.screens[min(self.captures, len(self.screens) - 1)]
         self.captures += 1
+        self.hwnds.append(hwnd)
         if self._after:
             self._after(self.captures)
         return screen
@@ -635,6 +637,53 @@ class WeChat4AddFriendTests(FriendTestCase):
             self.assertTrue(res["ok"])
             self.assertEqual(res["target"], "new_friend")
             self.assertIn("你好呀", res["message"])
+
+
+class CloseWindowTests(FriendTestCase):
+    """_close_window sends Alt+F4 only to a window that has the keyboard (Windows API faked)."""
+
+    def close(self, foreground, visible=True):
+        win32gui = MagicMock()
+        win32gui.IsWindow.return_value = True
+        win32gui.IsWindowVisible.return_value = visible
+        win32gui.GetForegroundWindow.return_value = foreground
+        win32con = SimpleNamespace(WM_CLOSE=0x10)
+        manager = self.manager(FakeWindow(), FakeOcr([]))
+        with patch.object(friend_manager, "sys", SimpleNamespace(platform="win32")), \
+             patch.dict("sys.modules", {"win32gui": win32gui, "win32con": win32con}), \
+             patch.object(manager, "_focus_window"):
+            manager._close_window(999)
+        return win32gui
+
+    def test_alt_f4_when_the_window_has_the_keyboard(self):
+        win32gui = self.close(foreground=999)
+        self.assertEqual(self.keys, [("combo", 0x12, 0x73)])
+        win32gui.PostMessage.assert_not_called()
+
+    def test_by_message_when_another_window_has_the_keyboard(self):
+        win32gui = self.close(foreground=555)
+        self.assertEqual(self.keys, [])                  # no Alt+F4 into the other window
+        win32gui.PostMessage.assert_called_once_with(999, 0x10, 0, 0)
+
+    def test_a_window_that_is_already_gone_is_left_alone(self):
+        win32gui = self.close(foreground=999, visible=False)
+        self.assertEqual(self.keys, [])
+        win32gui.PostMessage.assert_not_called()
+
+
+class CaptureTargetTests(FriendTestCase):
+    def test_a_dialog_is_captured_by_its_own_handle(self):
+        ocr = FakeOcr([row("x", 0, 0, 1, 1)])
+        manager = self.manager(FakeWindow(), ocr)
+        manager._capture_ocr()
+        manager._capture_ocr(777)
+        self.assertEqual(ocr.hwnds, [None, 777])
+
+    def test_an_error_inside_capture_is_not_retried_as_a_main_window_capture(self):
+        ocr = MagicMock()
+        ocr.capture.side_effect = TypeError("boom")
+        self.assertEqual(self.manager(FakeWindow(), ocr)._capture_ocr(777), [])
+        self.assertEqual(ocr.capture.call_count, 1)
 
 
 if __name__ == "__main__":

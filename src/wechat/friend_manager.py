@@ -241,12 +241,8 @@ class FriendManager:
     def _capture_ocr(self, hwnd: int | None = None) -> list[dict]:
         """The OCR rows of the WeChat window (empty if OCR fails)."""
         try:
-            if hwnd is not None:
-                try:
-                    return self._ocr.capture(hwnd=hwnd) or []
-                except TypeError:
-                    return self._ocr.capture() or []
-            return self._ocr.capture() or []
+            rows = self._ocr.capture(hwnd=hwnd) if hwnd is not None else self._ocr.capture()
+            return rows or []
         except Exception as e:
             logger.warning("Friend management: OCR capture failed: %s", e)
             return []
@@ -411,15 +407,27 @@ class FriendManager:
             self._sleep(0.2)
 
     def _close_window(self, hwnd: int) -> None:
-        if sys.platform == "win32":
-            try:
-                import win32gui
-                if win32gui.IsWindow(hwnd) and win32gui.IsWindowVisible(hwnd):
-                    self._focus_window(hwnd)
-                    send_combo(0x12, 0x73)  # Alt+F4
-                    self._sleep(0.3)
-            except Exception:
-                pass
+        """Close one of WeChat's dialog windows.
+
+        Alt+F4 goes to whatever window has the keyboard, so it is only sent once this very
+        window has it; otherwise the window is asked to close by message (it cannot hit
+        another window).
+        """
+        if sys.platform != "win32":
+            return
+        try:
+            import win32con
+            import win32gui
+            if not (win32gui.IsWindow(hwnd) and win32gui.IsWindowVisible(hwnd)):
+                return
+            self._focus_window(hwnd)
+            if win32gui.GetForegroundWindow() == hwnd:
+                send_combo(0x12, 0x73)  # Alt+F4
+            else:
+                win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+            self._sleep(0.3)
+        except Exception as e:
+            logger.warning("Friend management: closing window %s failed: %s", hwnd, e)
 
     def _is_window_visible(self, hwnd: int) -> bool:
         if sys.platform != "win32":
