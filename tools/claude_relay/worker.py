@@ -4,11 +4,12 @@
 The Windows bot (CLAUDE_RELAY=on) queues "cc ..." requests.  This worker asks
 for them over HTTP (long poll, so the Mac needs no open port), runs
 
-    claude -p --output-format json --permission-mode auto --permission-prompts none
-           [--resume <session>] --append-system-prompt <how to answer>
+    claude -p --output-format stream-json --verbose --permission-mode auto
+           --permission-prompts none [--resume <session>] --append-system-prompt <how to answer>
 
-in the project folder, sends a heartbeat every 30 s (the answer says when the
-user cancelled), and posts the result back.  A result is written to the
+in the project folder, sends a heartbeat every 30 s with what Claude is doing
+(read from the stream; the answer says when the user cancelled), and posts the
+result back.  A result is written to the
 outbox first and sent until the bot has it, so a Windows restart loses nothing.
 
 Standard library only (macOS /usr/bin/python3 is enough).  Settings:
@@ -230,9 +231,9 @@ class RelayClient:
         status, data = self._call("GET", f"/relay/next?wait={wait}", timeout=wait + 15, headers=headers)
         return data if status == 200 else None
 
-    def heartbeat(self, job_id: int) -> dict | None:
+    def heartbeat(self, job_id: int, progress: dict | None = None) -> dict | None:
         try:
-            _, data = self._call("POST", f"/relay/jobs/{job_id}/heartbeat", {})
+            _, data = self._call("POST", f"/relay/jobs/{job_id}/heartbeat", progress or {})
             return data
         except urllib.error.HTTPError as e:
             if e.code == 404:
@@ -267,7 +268,7 @@ class Stopper:
 
 def claude_command(settings: dict, session_id: str | None) -> list[str]:
     cmd = [
-        find_claude(settings.get("claude_bin", "")), "-p", "--output-format", "json",
+        find_claude(settings.get("claude_bin", "")), "-p", "--output-format", "stream-json", "--verbose",
         "--permission-mode", str(settings.get("permission_mode") or "auto"),
         "--permission-prompts", "none",
         "--append-system-prompt", SYSTEM_NOTE,
@@ -282,6 +283,76 @@ def claude_command(settings: dict, session_id: str | None) -> list[str]:
     return cmd
 
 
+def _short(value, limit: int = 40) -> str:
+    value = " ".join(str(value).split())
+    return value if len(value) <= limit else value[:limit] + "…"
+
+
+def describe_step(name: str, args: dict) -> str:
+    """One tool call in a few words, for the progress line ("改 service.py")."""
+    args = args if isinstance(args, dict) else {}
+    path = Path(str(args.get("file_path") or args.get("notebook_path") or "")).name
+    if name == "Bash":
+        return "运行 " + _short(args.get("command", ""))
+    if name in ("Edit", "MultiEdit", "NotebookEdit"):
+        return "改 " + path
+    if name == "Write":
+        return "写 " + path
+    if name == "Read":
+        return "看 " + path
+    if name in ("Grep", "Glob"):
+        return "搜索 " + _short(args.get("pattern", ""))
+    if name == "WebFetch":
+        return "打开网页 " + _short(args.get("url", ""))
+    if name == "WebSearch":
+        return "搜索网页 " + _short(args.get("query", ""))
+    if name in ("Task", "Agent"):
+        return "派子任务 " + _short(args.get("description", ""))
+    return name
+
+
+class Progress:
+    """What claude is doing, read from its stream-json events; sent with every heartbeat."""
+
+    def __init__(self):
+        self.steps = 0          # tool calls so far
+        self.doing = ""         # the latest one, or what Claude said it is doing
+        self.plan = ""          # "3/7": its todo list, done/total
+
+    def feed(self, line: str) -> None:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return
+        if not isinstance(event, dict) or event.get("type") != "assistant":
+            return
+        content = (event.get("message") or {}).get("content")
+        for item in content if isinstance(content, list) else []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "text" and str(item.get("text", "")).strip():
+                self.doing = _short(item["text"])
+            elif item.get("type") == "tool_use":
+                self.steps += 1
+                name, args = str(item.get("name", "")), item.get("input") or {}
+                if name == "TodoWrite":
+                    self._plan(args.get("todos") if isinstance(args, dict) else None)
+                else:
+                    self.doing = describe_step(name, args)
+
+    def _plan(self, todos) -> None:
+        todos = [t for t in todos or [] if isinstance(t, dict)]
+        if not todos:
+            return
+        self.plan = f"{sum(t.get('status') == 'completed' for t in todos)}/{len(todos)}"
+        current = next((t for t in todos if t.get("status") == "in_progress"), None)
+        if current:
+            self.doing = _short(current.get("activeForm") or current.get("content") or "")
+
+    def report(self) -> dict:
+        return {"steps": self.steps, "doing": self.doing, "plan": self.plan}
+
+
 def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stopper: Stopper,
                session_id: str | None) -> dict:
     """Run claude once; heartbeat meanwhile.  Returns stdout/stderr/returncode and why it stopped."""
@@ -291,13 +362,29 @@ def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stoppe
         cmd, cwd=str(cwd), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", errors="replace", start_new_session=True,
     )
-    out: dict = {}
+    progress = Progress()
+    lines: list[str] = []
+    errors: list[str] = []
 
-    def communicate():
-        out["stdout"], out["stderr"] = proc.communicate(job["text"])
+    def read_stdout():
+        for line in proc.stdout:
+            lines.append(line)
+            progress.feed(line)
 
-    reader = threading.Thread(target=communicate, daemon=True)
-    reader.start()
+    def read_stderr():
+        errors.append(proc.stderr.read())
+
+    def write_stdin():
+        try:
+            proc.stdin.write(job["text"])
+            proc.stdin.close()
+        except OSError:                                  # claude exited without reading it
+            pass
+
+    threads = [threading.Thread(target=f, daemon=True) for f in (read_stdout, read_stderr, write_stdin)]
+    for t in threads:
+        t.start()
+    reader = threads[0]
     started = time.monotonic()
     deadline = started + float(settings.get("timeout_min") or 60) * 60
     stopped_because, signalled_at = "", None
@@ -306,7 +393,7 @@ def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stoppe
         if not reader.is_alive():
             break
         try:
-            answer = client.heartbeat(job["id"])
+            answer = client.heartbeat(job["id"], progress.report())
         except Exception as e:                           # the bot may be restarting
             log.warning("#%s heartbeat failed: %s", job["id"], e)
             answer = None
@@ -324,26 +411,37 @@ def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stoppe
         elif signalled_at is not None and time.monotonic() - signalled_at > STOP_GRACE_SEC:
             log.warning("#%s claude did not stop; killing it", job["id"])
             os.killpg(proc.pid, signal.SIGKILL)
-    reader.join()
+    for t in threads:
+        t.join()
+    proc.wait()
     return {
-        "stdout": out.get("stdout", ""), "stderr": out.get("stderr", ""),
+        "stdout": "".join(lines), "stderr": "".join(errors),
         "returncode": proc.returncode, "stopped": stopped_because,
         "duration_s": round(time.monotonic() - started, 1),
     }
 
 
 def parse_output(stdout: str) -> dict | None:
-    """The final JSON object claude prints (None when it printed something else)."""
+    """The result claude printed: the last ``"type": "result"`` line of the stream, or the one
+    JSON object of ``--output-format json`` (None when it printed something else)."""
     text = stdout.strip()
     try:
         data = json.loads(text)
+        return data if isinstance(data, dict) and (data.get("type") == "result" or "result" in data) else None
     except ValueError:
-        start = text.rfind("\n{")
+        pass
+    last = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
         try:
-            data = json.loads(text[start + 1:]) if start >= 0 else None
+            event = json.loads(line)
         except ValueError:
-            data = None
-    return data if isinstance(data, dict) else None
+            continue
+        if isinstance(event, dict) and (event.get("type") == "result" or last is None and "result" in event):
+            last = event
+    return last
 
 
 def summarize(run: dict, data: dict | None, settings: dict) -> dict:

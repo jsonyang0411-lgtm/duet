@@ -248,6 +248,10 @@ GROUPS: list[dict] = [
             {"key": "CLAUDE_RELAY_MAX_CHARS", "type": "int", "min": 100, "max": 5000, "default": "1500", "label": "结果最长", "unit": "字",
              "help": "结果超过就截断，完整内容在 Mac 的 ~/.claude-relay/logs/ 里。",
              "requires": [{"key": "CLAUDE_RELAY", "is": "on", "text": "中转打开时才用"}]},
+            {"key": "CLAUDE_RELAY_PROGRESS_MIN", "type": "int", "min": 0, "max": 120, "default": "3",
+             "label": "进度提醒间隔", "unit": "分钟",
+             "help": "任务做得久时，每隔这么久发一条进度（做到第几步、正在改哪个文件）；排过队的任务开始时也说一声。填 0 = 只发回执和结果。",
+             "requires": [{"key": "CLAUDE_RELAY", "is": "on", "text": "中转打开时才用"}]},
         ],
     },
     {

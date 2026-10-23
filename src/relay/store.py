@@ -6,6 +6,8 @@ A job is one request from WeChat for Claude Code on the Mac.  Its life:
 stops sending heartbeats becomes ``lost``; a result that arrives later still
 finishes it.  ``delivered`` says whether WeChat has been told about the last
 state change, so a failed send is retried and a restart loses nothing.
+While a job runs, every heartbeat brings what Claude is doing (``progress``);
+``progress_sent_at`` / ``progress_sent`` say when WeChat last heard about it.
 
 The router thread adds jobs, the HTTP threads hand them out and take the
 results, the delivery thread marks them sent: one connection, one lock.
@@ -38,7 +40,10 @@ CREATE TABLE IF NOT EXISTS relay_jobs (
     cancel_requested INTEGER NOT NULL DEFAULT 0,
     result_text TEXT NOT NULL DEFAULT '',
     result_json TEXT NOT NULL DEFAULT '{}',
-    delivered INTEGER NOT NULL DEFAULT 1
+    delivered INTEGER NOT NULL DEFAULT 1,
+    progress TEXT NOT NULL DEFAULT '{}',
+    progress_sent_at REAL,
+    progress_sent TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS relay_jobs_status ON relay_jobs(status, id);
 CREATE TABLE IF NOT EXISTS relay_sessions (
@@ -50,6 +55,15 @@ CREATE TABLE IF NOT EXISTS relay_sessions (
 """
 
 
+# Columns added after the first release: (table, column, type).
+_ADDED_COLUMNS = (
+    ("relay_sessions", "project", "TEXT NOT NULL DEFAULT ''"),
+    ("relay_jobs", "progress", "TEXT NOT NULL DEFAULT '{}'"),
+    ("relay_jobs", "progress_sent_at", "REAL"),
+    ("relay_jobs", "progress_sent", "TEXT NOT NULL DEFAULT ''"),
+)
+
+
 class RelayStore:
     def __init__(self, path: str | Path = "data/claude_relay.db"):
         if str(path) != ":memory:":
@@ -59,9 +73,10 @@ class RelayStore:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(_SCHEMA)
-            columns = {r["name"] for r in self._conn.execute("PRAGMA table_info(relay_sessions)")}
-            if "project" not in columns:              # a database from before the current project
-                self._conn.execute("ALTER TABLE relay_sessions ADD COLUMN project TEXT NOT NULL DEFAULT ''")
+            for table, column, kind in _ADDED_COLUMNS:  # a database from before these columns
+                columns = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+                if column not in columns:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
             self._conn.commit()
 
     def close(self) -> None:
@@ -217,10 +232,12 @@ class RelayStore:
                 "SELECT 1 FROM relay_jobs WHERE status = 'pending' LIMIT 1"
             ).fetchone() is not None
 
-    def heartbeat(self, job_id: int, now: Optional[float] = None) -> Optional[dict]:
+    def heartbeat(self, job_id: int, now: Optional[float] = None,
+                  progress: Optional[dict] = None) -> Optional[dict]:
         """Note that the worker is alive; returns ``{"cancel": bool}``, or None for an unknown job.
 
         A job marked lost while the worker was unreachable is running again.
+        ``progress`` (``{"steps", "doing", "plan"}``) replaces the last one when given.
         """
         now = time.time() if now is None else now
         with self._lock:
@@ -234,6 +251,11 @@ class RelayStore:
                     "UPDATE relay_jobs SET status = 'running', heartbeat_at = ? WHERE id = ?",
                     (now, job_id),
                 )
+                if progress:
+                    self._conn.execute(
+                        "UPDATE relay_jobs SET progress = ? WHERE id = ?",
+                        (json.dumps(progress, ensure_ascii=False), job_id),
+                    )
                 self._conn.commit()
             return {"cancel": bool(row["cancel_requested"]) or row["status"] == "cancelled"}
 
@@ -288,6 +310,22 @@ class RelayStore:
                 )
                 self._conn.commit()
         return ids
+
+    def running(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM relay_jobs WHERE status = 'running' ORDER BY id"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def note_progress_sent(self, job_id: int, line: str, now: Optional[float] = None) -> None:
+        """WeChat was told that the job started (``line`` empty) or how far it is."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE relay_jobs SET progress_sent_at = ?, progress_sent = ? WHERE id = ?",
+                (time.time() if now is None else now, line, job_id),
+            )
+            self._conn.commit()
 
     def undelivered(self) -> list[dict]:
         with self._lock:

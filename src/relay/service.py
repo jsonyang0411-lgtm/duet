@@ -5,6 +5,8 @@ queued (store.py).  The Mac worker (``tools/claude_relay/worker.py``) asks for
 jobs over HTTP (http.py), runs ``claude -p`` and posts the result back; a
 background thread sends it to the chat the request came from.  The bot never
 waits for the Mac: a request gets a receipt at once, the result comes later.
+In between (CLAUDE_RELAY_PROGRESS_MIN): "started" when a job had to wait, and
+every few minutes how far a long one is (the worker's heartbeats carry it).
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ MAX_AGE_SEC = 300           # older requests are history replayed at startup, no
 RETRY_SEND_SEC = 30         # wait before sending a result again after a failed send
 TICK_SEC = 5
 MAX_WAIT_SEC = 30           # longest a worker's request for a job is held open
+START_NOTE_AFTER_SEC = 20   # a job that waited this long in the queue gets a "started" message
 
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
 
@@ -47,6 +50,35 @@ def format_duration(seconds: float) -> str:
     return f"{hours}小时{minutes}分"
 
 
+def progress_line(progress_json: str) -> str:
+    """"第 14 步 · 改 service.py · 计划 3/7" from a heartbeat's progress ("" when there is none)."""
+    try:
+        progress = json.loads(progress_json or "{}")
+    except ValueError:
+        return ""
+    if not isinstance(progress, dict):
+        return ""
+    steps = int(progress.get("steps") or 0)
+    parts = [f"第 {steps} 步"] if steps else []
+    if str(progress.get("doing") or "").strip():
+        parts.append(str(progress["doing"]).strip())
+    if progress.get("plan"):
+        parts.append(f"计划 {progress['plan']}")
+    return " · ".join(parts)
+
+
+def _clean_progress(progress) -> Optional[dict]:
+    """A heartbeat body as the store keeps it (None: the worker sent no progress)."""
+    if not isinstance(progress, dict) or not progress:
+        return None
+    try:
+        steps = max(0, int(progress.get("steps") or 0))
+    except (TypeError, ValueError):
+        steps = 0
+    return {"steps": steps, "doing": str(progress.get("doing") or "")[:80],
+            "plan": str(progress.get("plan") or "")[:10]}
+
+
 def _preview(text: str, limit: int = 20) -> str:
     text = " ".join(str(text).split())
     return text if len(text) <= limit else text[:limit] + "…"
@@ -65,6 +97,8 @@ class ClaudeRelay:
         allowed = list(config.claude_relay_wxids) or [config.admin_wxid]
         self._allowed = {str(w).strip() for w in allowed if str(w).strip()}
         self._max_chars = int(config.claude_relay_max_chars)
+        # "Started" and progress messages (0 = only the receipt and the result).
+        self._progress_sec = int(getattr(config, "claude_relay_progress_min", 3) or 0) * 60
         # CLAUDE_RELAY_ONLY: every private message of an allowed person is for the relay,
         # so "cc" can be left out.
         self._relay_only = getattr(config, "claude_relay_only", "off") == "on"
@@ -264,6 +298,8 @@ class ClaudeRelay:
             if job["status"] == "running" and job["claimed_at"]:
                 state += f" {format_duration(now - job['claimed_at'])}"
             lines.append(f"#{job['id']} {state} · {_preview(job['text'])}")
+            if job["status"] == "running" and progress_line(job.get("progress", "")):
+                lines.append(f"    {progress_line(job['progress'])}")
         return "\n".join(lines)
 
     # ── from the Mac worker (http.py) ─────────────────────────────────────
@@ -317,9 +353,9 @@ class ClaudeRelay:
         finally:
             self._seen()
 
-    def heartbeat(self, job_id: int) -> Optional[dict]:
+    def heartbeat(self, job_id: int, progress: Optional[dict] = None) -> Optional[dict]:
         self._seen()
-        return self._store.heartbeat(job_id, self._clock())
+        return self._store.heartbeat(job_id, self._clock(), _clean_progress(progress))
 
     def finish(self, job_id: int, payload: dict) -> Optional[bool]:
         self._seen()
@@ -354,6 +390,8 @@ class ClaudeRelay:
             logger.warning("CLAUDE_RELAY: #%d lost (no heartbeat for %d s)", job_id, LOST_AFTER_SEC)
         if self._send is None:
             return
+        if self._progress_sec > 0:
+            self._send_progress(now)
         for job in self._store.undelivered():
             key = (job["id"], job["status"])
             failed_at = self._send_failed_at.get(key)
@@ -371,6 +409,27 @@ class ClaudeRelay:
                 self._send_failed_at[key] = now
                 logger.warning("CLAUDE_RELAY: result of #%d not sent; retry in %d s",
                                job["id"], RETRY_SEND_SEC)
+
+    def _send_progress(self, now: float) -> None:
+        """"#3 开始了" for a job that waited; "#3 进行中（6分钟）：…" every few minutes after.
+
+        A failed send is not retried: the next progress message comes on time anyway.
+        """
+        for job in self._store.running():
+            claimed = float(job["claimed_at"] or now)
+            last = job["progress_sent_at"]
+            if last is None and claimed - float(job["created_at"]) >= START_NOTE_AFTER_SEC:
+                text, line = f"#{job['id']} 开始了（排队了 {format_duration(claimed - job['created_at'])}）。", ""
+            else:
+                line = progress_line(job["progress"])
+                if now - float(last or claimed) < self._progress_sec or not line or line == job["progress_sent"]:
+                    continue
+                text = f"#{job['id']} 进行中（{format_duration(now - claimed)}）：{line}"
+            try:
+                self._send(job["chat_id"], text)
+            except Exception:
+                logger.exception("CLAUDE_RELAY: progress message for #%d failed", job["id"])
+            self._store.note_progress_sent(job["id"], line, now)
 
     def result_message(self, job: dict) -> str:
         job_id, status = job["id"], job["status"]
