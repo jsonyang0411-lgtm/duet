@@ -23,7 +23,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import load_config
 from src.wechat.friend_manager import FriendManager
 from src.wechat.window_controller import WeChatWindowController
 
@@ -43,10 +42,9 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-    config = load_config()
     win_ctrl = WeChatWindowController()
     ocr_engine = WindowsOcrEngine(window=win_ctrl) if WindowsOcrEngine else None
-    mgr = FriendManager(window_controller=win_ctrl, ocr_engine=ocr_engine, config=config)
+    mgr = FriendManager(window_controller=win_ctrl, ocr_engine=ocr_engine)
 
     if args.status:
         hwnd = win_ctrl.find_hwnd()
@@ -55,12 +53,18 @@ def main() -> None:
             fg_info = win_ctrl.get_foreground_info()
             print(f"Foreground info: {fg_info}")
             if ocr_engine:
-                rows = ocr_engine.capture()
+                try:
+                    rows = ocr_engine.capture()
+                except Exception as e:
+                    print(f"OCR failed: {e}")
+                    sys.exit(1)
                 print(f"Captured {len(rows)} OCR text elements:")
                 for r in rows[:15]:
                     print(f"  [{r.get('x0'):.3f}, {r.get('y0'):.3f}] {r.get('t')}")
                 if len(rows) > 15:
                     print(f"  ... and {len(rows) - 15} more")
+            else:
+                print("No OCR engine: the Windows OCR is not available here")
         return
 
     if args.accept:
@@ -71,7 +75,7 @@ def main() -> None:
             for item in accepted:
                 print(f"  - Accepted at {item.get('timestamp')}")
         else:
-            print("No pending friend requests found.")
+            print("Nothing accepted (no pending requests, or the window / OCR failed: see the log above).")
         return
 
     if args.add:

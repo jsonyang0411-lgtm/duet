@@ -319,6 +319,16 @@ class WcdbBackend(AbstractWeChatBackend):
 
     # ── Public API ─────────────────────────────────────────────────
 
+    @property
+    def window_controller(self) -> WeChatWindowController:
+        """The controller of the WeChat window (friend management drives the same window)."""
+        return self._window
+
+    @property
+    def window_lock(self) -> threading.Lock:
+        """Held for every stretch of window automation; friend management takes it too."""
+        return self._window_lock
+
     def start(self, callback: MessageCallback) -> None:
         if not self._groups:
             logger.error("No groups configured. Set WECHAT_GROUPS in .env")

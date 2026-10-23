@@ -274,22 +274,7 @@ class Bot:
         # CLAUDE_RELAY=on: "cc ..." in an allowed private chat goes to the Mac.
         relay = self._start_claude_relay(config, router, backend)
 
-        # Friend manager (PC auto-accept & add friend)
-        try:
-            window_ctrl = getattr(backend, "_window", None)
-            ocr_engine = getattr(backend, "_ocr", None)
-            from .wechat.friend_manager import FriendManager, AutoFriendService
-            self._friend_mgr = FriendManager(window_controller=window_ctrl, ocr_engine=ocr_engine, config=config)
-            self._auto_friend = AutoFriendService(
-                friend_manager=self._friend_mgr,
-                interval_sec=getattr(config, "auto_accept_interval_sec", 300),
-                enabled=(getattr(config, "auto_accept_friends", "on") == "on"),
-            )
-            admin_handler.set_friend_manager(self._friend_mgr, self._auto_friend)
-            if getattr(config, "auto_accept_friends", "on") == "on":
-                self._auto_friend.start()
-        except Exception as e:
-            logger.debug("FriendManager init: %s", e)
+        self._start_friend_management(config, backend, admin_handler)
 
         # ── 6. Health monitor ───────────────────────────────────
         self._health = HealthMonitor(
@@ -368,6 +353,38 @@ class Bot:
             logger.info("Bot shut down gracefully.")
 
     # ── Helpers ──────────────────────────────────────────────────
+
+    def _start_friend_management(self, config, backend, admin_handler) -> None:
+        """The admin's friend commands and, with AUTO_ACCEPT_FRIENDS=on, the auto-accept worker.
+
+        Both drive the WeChat window, so only a backend that has one (Windows wcdb)
+        gets them; the manager shares that backend's window lock and reads the screen
+        with its own OCR engine (OCR_FALLBACK is a different engine and may be off).
+        """
+        window = getattr(backend, "window_controller", None)
+        if window is None:
+            logger.info("Friend management is off: this backend has no WeChat window to drive")
+            return
+        try:
+            from .wechat.friend_manager import AutoFriendService, FriendManager
+            from .wechat.ocr.win_ocr import WindowsOcrEngine
+            manager = FriendManager(
+                window_controller=window,
+                ocr_engine=WindowsOcrEngine(window=window),
+                ui_lock=getattr(backend, "window_lock", None),
+            )
+            auto = AutoFriendService(
+                manager,
+                interval_sec=config.auto_accept_interval_sec,
+                enabled=config.auto_accept_friends == "on",
+            )
+        except Exception:
+            logger.warning("Friend management could not start", exc_info=True)
+            return
+        self._friend_mgr, self._auto_friend = manager, auto
+        admin_handler.set_friend_manager(manager, auto)
+        if auto.enabled:
+            auto.start()
 
     @staticmethod
     def _start_claude_relay(config, router, backend):

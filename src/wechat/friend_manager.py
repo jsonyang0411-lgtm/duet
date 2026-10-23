@@ -1,11 +1,21 @@
-"""Friend manager: automated friend request acceptance and adding friends on WeChat PC.
+"""Friend manager: accepting friend requests and adding friends in the WeChat PC window.
+
+It drives the real window with keystrokes and mouse clicks and finds the buttons by
+OCR, so every step is guarded:
+
+- the window lock of the send path is shared, so a friend action never interleaves
+  with a reply being typed;
+- nothing is typed or clicked unless the WeChat window is in the foreground;
+- nothing is clicked blind: a button OCR cannot find ends the action with a reason;
+- an action is only reported as done when the screen shows it (the button is gone,
+  the dialog is closed).
 
 Features:
-- accept_friend_requests: Navigates to Contacts -> New Friends, detects and clicks "接受",
-  confirms popup verification dialogs, and records accepted friend requests.
-- add_friend: Focuses search box, pastes target phone/wxid, finds the network user profile,
-  clicks "添加到通讯录", fills greeting message, and sends friend application.
-- AutoFriendService: Periodic background worker for automatic silent acceptance.
+- accept_friend_requests: Contacts -> 新的朋友, accepts the pending requests (at most
+  MAX_ACCEPT_PER_RUN per call).
+- add_friend: searches the wxid / phone number, opens the card, "添加到通讯录", fills the
+  greeting and sends the application.
+- AutoFriendService: periodic background worker for accept_friend_requests.
 """
 
 from __future__ import annotations
@@ -14,50 +24,86 @@ import logging
 import sys
 import threading
 import time
-from typing import Any, Callable, Optional
+from contextlib import contextmanager
+from typing import Callable, Iterator
+
+from .keyboard import press_key, send_combo
 
 logger = logging.getLogger(__name__)
 
-try:
-    from .keyboard import press_key, send_combo
-except Exception:
-    def press_key(vk: int) -> None:
-        pass
-    def send_combo(mod_vk: int, key_vk: int) -> None:
-        pass
+VK_BACK = 0x08
+VK_ESCAPE = 0x1B
+VK_CONTROL = 0x11
+VK_A = 0x41
+VK_F = 0x46
+VK_V = 0x56
 
-# Default layout fallback coordinates on standard WeChat PC layout (relative 0.0 ~ 1.0)
-CONTACTS_TAB_COORD = (0.035, 0.175)       # Left navigation: Contacts tab icon
-NEW_FRIENDS_ITEM_COORD = (0.18, 0.14)     # Contacts list top: "新的朋友"
-SEARCH_BOX_COORD = (0.18, 0.085)          # Top search box
-FIRST_SEARCH_RESULT_COORD = (0.18, 0.16)   # Dropdown network search result
-ADD_CONTACT_BTN_COORD = (0.65, 0.76)      # Profile card: "添加到通讯录" button
-CONFIRM_BTN_COORD = (0.55, 0.65)          # Modal: "确定" / "完成" button
+MAX_ACCEPT_PER_RUN = 10      # a burst of requests is taken in a few runs, not all at once
+MAX_KEYWORD_CHARS = 64
+MIN_INTERVAL_SEC = 10        # same floor as AUTO_ACCEPT_INTERVAL_SEC in config validation
+SAME_SPOT = 0.02             # two OCR rows whose centres differ by less are "the same spot"
+
+NEW_FRIENDS_LABELS = ("新的朋友", "好友申请")
+ACCEPT_LABELS = ("接受", "通过")
+ACCEPT_MIN_X0 = 0.40         # the accept button sits on the right side of its row
+CONFIRM_LABELS = ("确定", "完成")
+SEARCH_ENTRY_LABELS = ("网络查找", "查找微信号", "查找手机号")
+NOT_FOUND_MARKERS = ("该用户不存在", "用户不存在", "查找失败")
+ALREADY_FRIEND_MARKERS = ("音视频通话", "语音聊天", "视频聊天")   # next to "发消息" on a friend's card
+ADD_BUTTON_LABELS = ("添加到通讯录", "加为朋友", "加为联系人")
+SEND_LABELS = ("发送", "确定", "完成")
 
 
-def _clean_text(text: str) -> str:
-    """Normalize text by stripping all whitespace and punctuation."""
+class _Abort(Exception):
+    """The window action cannot go on safely (WeChat lost the foreground, a click failed)."""
+
+
+def _clean_text(text) -> str:
+    """Strip all whitespace and lower-case, so OCR spacing never breaks a match."""
     return "".join(str(text or "").split()).lower()
 
 
-def set_clipboard(text: str) -> bool:
-    """Set text onto clipboard."""
-    if sys.platform != "win32":
-        return False
-    try:
-        import win32clipboard
-        win32clipboard.OpenClipboard()
-        win32clipboard.EmptyClipboard()
-        win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
-        win32clipboard.CloseClipboard()
-        return True
-    except Exception as e:
-        logger.debug("set_clipboard failed: %s", e)
-        return False
+def _centre(row: dict) -> tuple[float, float]:
+    return (row["x0"] + row["x1"]) / 2, (row["y0"] + row["y1"]) / 2
+
+
+def _find_row(rows: list[dict], *labels: str, exact: bool = False, min_x0: float = 0.0) -> dict | None:
+    """The topmost OCR row whose text is (exact) or contains one of ``labels``."""
+    found = []
+    for row in rows:
+        text = _clean_text(row.get("t", ""))
+        if row.get("x0", 0.0) < min_x0:
+            continue
+        if (text in labels) if exact else any(label in text for label in labels):
+            found.append(row)
+    return min(found, key=lambda r: r.get("y0", 0.0)) if found else None
+
+
+def _still_there(rows: list[dict], row: dict) -> bool:
+    """Is a row with the same text still at the spot of ``row``?"""
+    text = _clean_text(row.get("t", ""))
+    cx, cy = _centre(row)
+    for other in rows:
+        if _clean_text(other.get("t", "")) != text:
+            continue
+        ox, oy = _centre(other)
+        if abs(ox - cx) < SAME_SPOT and abs(oy - cy) < SAME_SPOT:
+            return True
+    return False
+
+
+def _failure(target: str, reason: str, message: str) -> dict:
+    return {"ok": False, "target": target, "reason": reason, "message": message}
+
+
+def window_rect(hwnd: int) -> tuple[int, int, int, int]:
+    """The window rectangle in screen pixels (Windows only)."""
+    import win32gui
+    return win32gui.GetWindowRect(hwnd)
 
 
 def click_screen(x: int, y: int) -> bool:
-    """Send left mouse click at absolute screen coordinates."""
+    """Send a left mouse click at absolute screen coordinates."""
     if sys.platform != "win32":
         return False
     try:
@@ -76,156 +122,160 @@ def click_screen(x: int, y: int) -> bool:
         return False
 
 
-def click_relative(hwnd: int, rx: float, ry: float, clicker: Callable[[int, int], bool] | None = None) -> bool:
-    """Click at normalized coordinates (0.0 to 1.0) relative to a window."""
-    _click = clicker or click_screen
-    if sys.platform != "win32":
-        return _click(int(rx * 1000), int(ry * 1000))
-    try:
-        import win32gui
-        rect = win32gui.GetWindowRect(hwnd)
-        left, top, right, bottom = rect
-        w = max(1, right - left)
-        h = max(1, bottom - top)
-        x = left + int(rx * w)
-        y = top + int(ry * h)
-        return _click(x, y)
-    except Exception as e:
-        logger.warning("click_relative failed: %s", e)
-        if clicker is not None:
-            return clicker(int(rx * 1000), int(ry * 1000))
-        return False
-
-
 class FriendManager:
-    """Automates accepting friend requests and sending new friend requests on WeChat PC."""
+    """Accepts friend requests and sends new ones in the WeChat PC window.
+
+    ``ui_lock`` is the lock the send path holds while it types (the backend's
+    window lock); without one the manager only excludes itself.  ``clicker``,
+    ``rect_of`` and ``sleeper`` are seams for tests.
+    """
 
     def __init__(
         self,
         window_controller=None,
         ocr_engine=None,
-        config=None,
+        ui_lock=None,
         clicker: Callable[[int, int], bool] | None = None,
+        rect_of: Callable[[int], tuple[int, int, int, int]] = window_rect,
         sleeper: Callable[[float], None] = time.sleep,
     ):
         self._window = window_controller
         self._ocr = ocr_engine
-        self._config = config
-        self._clicker = clicker
+        self._ui_lock = ui_lock if ui_lock is not None else threading.Lock()
+        self._clicker = clicker or click_screen
+        self._rect_of = rect_of
         self._sleep = sleeper
-        self._action_lock = threading.Lock()
-        self._accepted_history: set[str] = set()
 
-    def _ensure_window(self) -> int | None:
-        if self._window is None:
-            return None
-        hwnd = self._window.find_hwnd(force=True)
-        if hwnd:
-            self._window._activate_for_send(hwnd)
-        return hwnd
+    # ── Window session ──────────────────────────────────────────────────
+
+    @contextmanager
+    def _ui_session(self) -> Iterator[int | None]:
+        """The WeChat window in front, under the shared lock; ``None`` if it cannot be shown.
+
+        The window is put back the way it was found (minimized / hidden) afterwards.
+        """
+        with self._ui_lock:
+            window = self._window
+            hwnd = window.find_hwnd(force=True) if window is not None else None
+            if not hwnd:
+                logger.warning("Friend management: the WeChat window was not found")
+                yield None
+                return
+            snapshot = window._capture_window_state(hwnd)
+            try:
+                if window._activate_for_send(hwnd):
+                    yield hwnd
+                else:
+                    logger.warning("Friend management: WeChat could not be brought to the front")
+                    yield None
+            finally:
+                window._restore_window_state(snapshot, hwnd)
+
+    def _foreground(self, hwnd: int) -> None:
+        if not self._window._foreground_matches(hwnd):
+            raise _Abort("the WeChat window is not in the foreground")
+
+    # ── Guarded input ───────────────────────────────────────────────────
+
+    def _key(self, hwnd: int, vk: int) -> None:
+        self._foreground(hwnd)
+        press_key(vk)
+
+    def _combo(self, hwnd: int, mod_vk: int, key_vk: int) -> None:
+        self._foreground(hwnd)
+        send_combo(mod_vk, key_vk)
+
+    def _paste(self, hwnd: int, text: str) -> None:
+        self._window._clipboard_text(text, hwnd)
+        self._sleep(0.15)
+        self._combo(hwnd, VK_CONTROL, VK_V)
+
+    def _click_row(self, hwnd: int, row: dict) -> None:
+        self._foreground(hwnd)
+        rx, ry = _centre(row)
+        try:
+            left, top, right, bottom = self._rect_of(hwnd)
+        except Exception as e:
+            raise _Abort(f"the window position is unknown ({e})") from e
+        x = left + int(rx * max(1, right - left))
+        y = top + int(ry * max(1, bottom - top))
+        if not self._clicker(x, y):
+            raise _Abort("the click was not delivered")
+
+    def _dismiss(self, hwnd: int) -> None:
+        """Esc closes a leftover card / search; best effort, nothing to report."""
+        try:
+            self._key(hwnd, VK_ESCAPE)
+        except _Abort:
+            pass
 
     def _capture_ocr(self) -> list[dict]:
-        """Capture screen OCR rows if engine is available."""
-        if self._ocr is None:
-            return []
+        """The OCR rows of the WeChat window (empty if OCR fails)."""
         try:
             return self._ocr.capture() or []
         except Exception as e:
-            logger.debug("FriendManager OCR capture failed: %s", e)
+            logger.warning("Friend management: OCR capture failed: %s", e)
             return []
 
-    # ── Accept Friend Requests ──────────────────────────────────────────
+    # ── Accept friend requests ──────────────────────────────────────────
 
-    def accept_friend_requests(
-        self,
-        auto_reply: bool = False,
-        greeting: str = "",
-    ) -> list[dict]:
-        """Check the 'New Friends' list and accept any pending friend requests.
+    def accept_friend_requests(self) -> list[dict]:
+        """Open 'New Friends' and accept the pending requests, one by one.
+
+        The screen is read again after every click (the list moves), and a request
+        counts as accepted only when its button is gone afterwards.
 
         Returns:
-            A list of accepted request summaries:
-            [{"name": "...", "status": "accepted", "time": ...}]
+            One ``{"status": "accepted", "timestamp": ...}`` per accepted request.
         """
-        with self._action_lock:
-            hwnd = self._ensure_window()
-            if not hwnd:
-                logger.warning("accept_friend_requests: WeChat window not found")
-                return []
-
-            # 1. Switch to Contacts tab
+        if self._ocr is None:
+            logger.warning("accept_friend_requests: no OCR engine, so nothing can be clicked safely")
+            return []
+        accepted: list[dict] = []
+        with self._ui_session() as hwnd:
+            if hwnd is None:
+                return accepted
             try:
-                self._window._goto_contacts_tab(hwnd)
-            except Exception:
-                click_relative(hwnd, CONTACTS_TAB_COORD[0], CONTACTS_TAB_COORD[1], self._clicker)
-            self._sleep(0.4)
-
-            # 2. Check for "新的朋友" in the contacts list
-            rows = self._capture_ocr()
-            new_friend_row = None
-            for r in rows:
-                cleaned = _clean_text(r.get("t", ""))
-                if "新的朋友" in cleaned or "好友申请" in cleaned:
-                    new_friend_row = r
-                    break
-
-            if new_friend_row:
-                cx = (new_friend_row["x0"] + new_friend_row["x1"]) / 2
-                cy = (new_friend_row["y0"] + new_friend_row["y1"]) / 2
-                click_relative(hwnd, cx, cy, self._clicker)
-            else:
-                # Default position for "新的朋友" item
-                click_relative(hwnd, NEW_FRIENDS_ITEM_COORD[0], NEW_FRIENDS_ITEM_COORD[1], self._clicker)
-            self._sleep(0.6)
-
-            # 3. Read the requests panel
-            panel_rows = self._capture_ocr()
-            accept_buttons = []
-            for r in panel_rows:
-                cleaned = _clean_text(r.get("t", ""))
-                # "接受" or "通过" buttons usually sit on the right side of the item
-                if cleaned in ("接受", "通过") and r.get("x0", 0.0) > 0.40:
-                    accept_buttons.append(r)
-
-            if not accept_buttons:
-                logger.info("accept_friend_requests: no pending requests found")
-                return []
-
-            accepted: list[dict] = []
-            for btn in accept_buttons:
-                bx = (btn["x0"] + btn["x1"]) / 2
-                by = (btn["y0"] + btn["y1"]) / 2
-                click_relative(hwnd, bx, by, self._clicker)
-                self._sleep(0.5)
-
-                # Check if confirmation dialog ("通过朋友验证" / "确定" / "完成") appeared
-                dlg_rows = self._capture_ocr()
-                confirm_btn = None
-                for dr in dlg_rows:
-                    dt = _clean_text(dr.get("t", ""))
-                    if dt in ("确定", "完成", "添加") or "确定" in dt:
-                        confirm_btn = dr
+                self._open_new_friends(hwnd)
+                rows = self._capture_ocr()
+                for _ in range(MAX_ACCEPT_PER_RUN):
+                    button = _find_row(rows, *ACCEPT_LABELS, exact=True, min_x0=ACCEPT_MIN_X0)
+                    if button is None:
                         break
+                    self._click_row(hwnd, button)
+                    self._sleep(0.5)
+                    self._confirm_dialog(hwnd)
+                    rows = self._capture_ocr()
+                    if _still_there(rows, button):
+                        logger.warning("accept_friend_requests: a request is still pending after "
+                                       "the click; stopping")
+                        break
+                    accepted.append({"status": "accepted", "timestamp": time.time()})
+                    logger.info("Friend request accepted")
+            except _Abort as e:
+                logger.warning("accept_friend_requests stopped: %s", e)
+        if not accepted:
+            logger.info("accept_friend_requests: nothing accepted")
+        return accepted
 
-                if confirm_btn:
-                    dx = (confirm_btn["x0"] + confirm_btn["x1"]) / 2
-                    dy = (confirm_btn["y0"] + confirm_btn["y1"]) / 2
-                    click_relative(hwnd, dx, dy, self._clicker)
-                else:
-                    # Press Enter to confirm default dialog action
-                    press_key(0x0D)
+    def _open_new_friends(self, hwnd: int) -> None:
+        if not self._window._goto_contacts_tab(hwnd):
+            raise _Abort("the Contacts tab did not open")
+        self._sleep(0.4)
+        row = _find_row(self._capture_ocr(), *NEW_FRIENDS_LABELS)
+        if row is None:
+            raise _Abort("'新的朋友' is not on the screen")
+        self._click_row(hwnd, row)
+        self._sleep(0.6)
 
-                self._sleep(0.5)
-                record = {
-                    "status": "accepted",
-                    "timestamp": time.time(),
-                }
-                accepted.append(record)
-                logger.info("Friend request accepted successfully")
+    def _confirm_dialog(self, hwnd: int) -> None:
+        """Click the confirmation of the accept dialog, if one opened."""
+        row = _find_row(self._capture_ocr(), *CONFIRM_LABELS, exact=True)
+        if row is not None:
+            self._click_row(hwnd, row)
+            self._sleep(0.5)
 
-            return accepted
-
-    # ── Add Friend ──────────────────────────────────────────────────────
+    # ── Add friend ──────────────────────────────────────────────────────
 
     def add_friend(self, keyword: str, message: str = "") -> dict:
         """Search and add a new WeChat friend by phone number or WeChat ID.
@@ -235,125 +285,88 @@ class FriendManager:
             message: Greeting / verification message to send.
 
         Returns:
-            Result dict with keys: 'ok' (bool), 'target' (str), 'message' (str), 'reason' (str optional).
+            Result dict with keys: 'ok' (bool), 'target' (str), 'message' (str), 'reason' (str, on failure).
         """
-        keyword = str(keyword or "").strip()
+        keyword = " ".join(str(keyword or "").split())
+        message = " ".join(str(message or "").split())
         if not keyword:
-            return {"ok": False, "target": keyword, "message": "请输入有效的微信号或手机号"}
+            return _failure(keyword, "invalid", "请输入有效的微信号或手机号")
+        if len(keyword) > MAX_KEYWORD_CHARS:
+            return _failure(keyword[:MAX_KEYWORD_CHARS], "invalid", "微信号或手机号过长")
+        if self._ocr is None:
+            return _failure(keyword, "no_ocr", "好友管理需要屏幕识别（OCR），当前不可用")
 
-        with self._action_lock:
-            hwnd = self._ensure_window()
-            if not hwnd:
-                return {"ok": False, "target": keyword, "message": "未找到微信主窗口，请确保微信已启动"}
+        with self._ui_session() as hwnd:
+            if hwnd is None:
+                return _failure(keyword, "no_window", "未找到微信主窗口或无法切到前台，请确保微信已启动")
+            try:
+                return self._add_friend_in_window(hwnd, keyword, message)
+            except _Abort as e:
+                logger.warning("add_friend stopped: %s", e)
+                return _failure(keyword, "aborted", f"微信窗口状态异常，已中止：{e}")
 
-            # 1. Focus search box: Ctrl+F -> Ctrl+A -> Backspace
-            send_combo(0x11, 0x46)  # Ctrl+F
-            self._sleep(0.2)
-            send_combo(0x11, 0x41)  # Ctrl+A
+    def _add_friend_in_window(self, hwnd: int, keyword: str, message: str) -> dict:
+        # 1. Search box: Ctrl+F -> Ctrl+A -> Backspace -> paste the keyword
+        self._combo(hwnd, VK_CONTROL, VK_F)
+        self._sleep(0.2)
+        self._combo(hwnd, VK_CONTROL, VK_A)
+        self._sleep(0.05)
+        self._key(hwnd, VK_BACK)
+        self._sleep(0.05)
+        self._paste(hwnd, keyword)
+        self._sleep(0.8)
+
+        # 2. The network search entry of the dropdown
+        entry = _find_row(self._capture_ocr(), *SEARCH_ENTRY_LABELS)
+        if entry is None:
+            self._dismiss(hwnd)
+            return _failure(keyword, "no_search_entry", "搜索结果里没有「网络查找」入口，已中止（没有发出任何申请）")
+        self._click_row(hwnd, entry)
+        self._sleep(1.2)
+
+        # 3. The profile card
+        card = self._capture_ocr()
+        card_text = "".join(_clean_text(r.get("t", "")) for r in card)
+        if any(marker in card_text for marker in NOT_FOUND_MARKERS):
+            self._dismiss(hwnd)
+            return _failure(keyword, "not_found", f"未找到用户「{keyword}」，请核实微信号或手机号")
+        if "发消息" in card_text and any(marker in card_text for marker in ALREADY_FRIEND_MARKERS):
+            self._dismiss(hwnd)
+            return _failure(keyword, "already_friend", f"用户「{keyword}」已是您的微信好友，无需重复添加")
+        add_button = _find_row(card, *ADD_BUTTON_LABELS)
+        if add_button is None:
+            self._dismiss(hwnd)
+            return _failure(keyword, "no_add_button", f"没有找到「{keyword}」的「添加到通讯录」按钮，已中止")
+        self._click_row(hwnd, add_button)
+        self._sleep(0.8)
+
+        # 4. The application dialog: the greeting is pasted only once it is on the screen
+        send_button = _find_row(self._capture_ocr(), *SEND_LABELS, exact=True)
+        if send_button is None:
+            self._dismiss(hwnd)
+            return _failure(keyword, "no_dialog", "没有出现填写附言的申请窗口（对方可能无需验证，或界面不同），请在微信里确认是否已发出")
+        if message:
+            self._combo(hwnd, VK_CONTROL, VK_A)
             self._sleep(0.05)
-            press_key(0x08)         # Backspace
-            self._sleep(0.05)
+            self._paste(hwnd, message)
+            self._sleep(0.3)
+        self._click_row(hwnd, send_button)
+        self._sleep(0.8)
 
-            # 2. Paste target keyword
-            if hasattr(self._window, "_clipboard_text"):
-                self._window._clipboard_text(keyword, hwnd)
-            elif hasattr(self._window, "_set_clipboard"):
-                self._window._set_clipboard(keyword)
-            else:
-                set_clipboard(keyword)
-            send_combo(0x11, 0x56)  # Ctrl+V
-            self._sleep(0.8)
-
-            # 3. Check dropdown or press Down + Enter to trigger network search
-            search_rows = self._capture_ocr()
-            search_network_row = None
-            for r in search_rows:
-                t = _clean_text(r.get("t", ""))
-                if "网络查找" in t or "查找微信号" in t or "查找手机号" in t:
-                    search_network_row = r
-                    break
-
-            if search_network_row:
-                nx = (search_network_row["x0"] + search_network_row["x1"]) / 2
-                ny = (search_network_row["y0"] + search_network_row["y1"]) / 2
-                click_relative(hwnd, nx, ny, self._clicker)
-            else:
-                # Down arrow to select first network search option + Enter
-                press_key(0x28)     # Down Arrow
-                self._sleep(0.1)
-                press_key(0x0D)     # Enter
-
-            self._sleep(1.2)
-
-            # 4. Check profile card
-            card_rows = self._capture_ocr()
-            all_card_text = "".join(_clean_text(r.get("t", "")) for r in card_rows)
-
-            # Check if user not found
-            if "该用户不存在" in all_card_text or "用户不存在" in all_card_text or "查找失败" in all_card_text:
-                press_key(0x1B)  # Esc
-                return {"ok": False, "target": keyword, "reason": "not_found", "message": f"未找到用户「{keyword}」，请核实微信号或手机号"}
-
-            # Check if already a friend
-            if "发消息" in all_card_text and ("音视频通话" in all_card_text or "语音聊天" in all_card_text or "视频聊天" in all_card_text):
-                press_key(0x1B)  # Esc
-                return {"ok": False, "target": keyword, "reason": "already_friend", "message": f"用户「{keyword}」已是您的微信好友，无需重复添加"}
-
-            # Find "添加到通讯录" button
-            add_btn_row = None
-            for r in card_rows:
-                t = _clean_text(r.get("t", ""))
-                if "添加到通讯录" in t or "加为朋友" in t or "加为联系人" in t:
-                    add_btn_row = r
-                    break
-
-            if add_btn_row:
-                ax = (add_btn_row["x0"] + add_btn_row["x1"]) / 2
-                ay = (add_btn_row["y0"] + add_btn_row["y1"]) / 2
-                click_relative(hwnd, ax, ay, self._clicker)
-            else:
-                # Fallback click coordinate
-                click_relative(hwnd, ADD_CONTACT_BTN_COORD[0], ADD_CONTACT_BTN_COORD[1], self._clicker)
-
-            self._sleep(0.8)
-
-            # 5. Handle greeting/reason input if message dialog is open
-            if message:
-                send_combo(0x11, 0x41)  # Ctrl+A
-                self._sleep(0.05)
-                if hasattr(self._window, "_clipboard_text"):
-                    self._window._clipboard_text(message, hwnd)
-                elif hasattr(self._window, "_set_clipboard"):
-                    self._window._set_clipboard(message)
-                else:
-                    set_clipboard(message)
-                send_combo(0x11, 0x56)  # Ctrl+V
-                self._sleep(0.3)
-
-            # 6. Click "发送" or "确定"
-            dlg_rows = self._capture_ocr()
-            send_btn = None
-            for r in dlg_rows:
-                t = _clean_text(r.get("t", ""))
-                if t in ("发送", "确定", "完成"):
-                    send_btn = r
-                    break
-
-            if send_btn:
-                sx = (send_btn["x0"] + send_btn["x1"]) / 2
-                sy = (send_btn["y0"] + send_btn["y1"]) / 2
-                click_relative(hwnd, sx, sy, self._clicker)
-            else:
-                press_key(0x0D)  # Enter
-
-            self._sleep(0.5)
-            # Dismiss any leftover search focus
-            press_key(0x1B)
-            return {"ok": True, "target": keyword, "message": f"已成功向「{keyword}」发送好友申请" + (f"（附言：{message}）" if message else "")}
+        # 5. The dialog must be gone, or the application did not go out
+        if _still_there(self._capture_ocr(), send_button):
+            self._dismiss(hwnd)
+            return _failure(keyword, "not_sent", "申请窗口还在，申请可能没发出去，请在微信里确认")
+        self._dismiss(hwnd)
+        return {
+            "ok": True,
+            "target": keyword,
+            "message": f"已成功向「{keyword}」发送好友申请" + (f"（附言：{message}）" if message else ""),
+        }
 
 
 class AutoFriendService:
-    """Background polling service that periodically runs FriendManager.accept_friend_requests."""
+    """Background worker that runs FriendManager.accept_friend_requests every ``interval_sec``."""
 
     def __init__(
         self,
@@ -362,18 +375,20 @@ class AutoFriendService:
         enabled: bool = True,
     ):
         self._manager = friend_manager
-        self._interval = max(10, int(interval_sec))
+        self._interval = max(MIN_INTERVAL_SEC, int(interval_sec))
         self._enabled = enabled
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
-        self._last_accepted_count = 0
+        self._state_lock = threading.Lock()
 
     @property
     def enabled(self) -> bool:
         return self._enabled
 
     def enable(self) -> None:
+        """Switch on; also starts the worker if it was never started (the config had it off)."""
         self._enabled = True
+        self.start()
         logger.info("AutoFriendService enabled")
 
     def disable(self) -> None:
@@ -381,29 +396,37 @@ class AutoFriendService:
         logger.info("AutoFriendService disabled")
 
     def start(self) -> None:
-        """Start the background service thread."""
-        if self._thread and self._thread.is_alive():
-            return
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run, name="auto-friend-service", daemon=True)
-        self._thread.start()
-        logger.info("AutoFriendService background worker started (interval=%ds, enabled=%s)", self._interval, self._enabled)
+        """Start the background worker (no-op if it already runs)."""
+        with self._state_lock:
+            if self._thread and self._thread.is_alive():
+                return
+            self._stop_event.clear()
+            self._thread = threading.Thread(target=self._run, name="auto-friend-service", daemon=True)
+            self._thread.start()
+        logger.info("AutoFriendService worker started (interval=%ds, enabled=%s)", self._interval, self._enabled)
 
     def stop(self) -> None:
-        """Stop the background service thread."""
+        """Stop the background worker."""
         self._stop_event.set()
-        if self._thread:
-            self._thread.join(timeout=2.0)
-            self._thread = None
+        with self._state_lock:
+            thread, self._thread = self._thread, None
+        if thread:
+            thread.join(timeout=2.0)
+
+    def run_once(self) -> list[dict]:
+        """One check now (does nothing while disabled); never raises."""
+        if not self._enabled:
+            return []
+        try:
+            accepted = self._manager.accept_friend_requests()
+        except Exception:
+            logger.warning("AutoFriendService: the check failed", exc_info=True)
+            return []
+        if accepted:
+            logger.info("AutoFriendService: accepted %d friend request(s)", len(accepted))
+        return accepted
 
     def _run(self) -> None:
-        while not self._stop_event.is_set():
-            if self._enabled:
-                try:
-                    accepted = self._manager.accept_friend_requests()
-                    if accepted:
-                        self._last_accepted_count += len(accepted)
-                        logger.info("AutoFriendService: accepted %d friend requests", len(accepted))
-                except Exception as e:
-                    logger.debug("AutoFriendService tick exception: %s", e)
-            self._stop_event.wait(self._interval)
+        # The first check comes one interval after the start, not while the bot is still starting up.
+        while not self._stop_event.wait(self._interval):
+            self.run_once()

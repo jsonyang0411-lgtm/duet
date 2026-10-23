@@ -81,6 +81,7 @@ grep "文件名" CODEBASE_REFERENCE.md
    - [功能Q: 表情（微信小黄脸与表情包）](#功能q-表情微信小黄脸与表情包)
    - [功能R: Claude 中转（CLAUDE_RELAY）](#功能r-claude-中转claude_relay)
    - [功能S: OCR 备选读取（OCR_FALLBACK）](#功能s-ocr-备选读取ocr_fallback)
+   - [功能T: 好友管理（AUTO_ACCEPT_FRIENDS）](#功能t-好友管理auto_accept_friends)
 5. [配置文件和环境变量](#5-配置文件和环境变量)
 
 ---
@@ -217,6 +218,8 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `OCR_FALLBACK` | `str` | `"off"` (`off`/`on`) | `src/config.py` | `src/wechat/mac_hybrid_backend.py:_ocr_from_config()` 建 `OcrFallback(MacVisionEngine())`，`src/wechat/wcdb_backend.py:_ocr_from_config()` 建 `OcrFallback(WindowsOcrEngine(...))`；数据库读不了时改读屏幕上打开的群聊。对 macOS 的 `mac_hybrid` 和 Windows 的 `wcdb` 后端有效；控制台「高级 → 读取备选（OCR）」有开关 |
 | `OCR_FALLBACK_AFTER` | `int` | `3` (1–20) | `src/config.py` | `OcrFallback.note_db_failure()`：数据库每秒读一次，连续失败这么多次才切到 OCR |
 | `OCR_POLL_SEC` | `float` | `4.0` (1–60) | `src/config.py` | `OcrFallback.poll()`：两次看屏幕的最短间隔（一次约 0.8 秒） |
+| `AUTO_ACCEPT_FRIENDS` | `str` | `"off"` (`off`/`on`) | `src/config.py` | `src/bot.py:_start_friend_management()` → `AutoFriendService(enabled=…)`：`on` 时每 `AUTO_ACCEPT_INTERVAL_SEC` 秒打开「新的朋友」同意待处理的申请（会占用屏幕，所以默认关；只有 Windows `wcdb` 后端有微信窗口可操作）。管理员命令 `添加好友` / `同意好友` / `自动同意好友 开|关` 不受这个开关限制（`开` 会在线程没起时启动它） |
+| `AUTO_ACCEPT_INTERVAL_SEC` | `int` | `300` (10–86400) | `src/config.py` | `AutoFriendService(interval_sec=…)`：两次检查之间的秒数，第一次检查在启动一个间隔之后 |
 
 ### 1.2 模块级常量
 
@@ -257,6 +260,9 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `HEX_KEY_LEN` | `int` | `64` | `src/wechat/mac_weflow_client.py` | WCDB 密钥长度 |
 | `_CACHE_MAX_ENTRIES` | `int` | `10000` | `src/voice/pipeline.py` | 语音缓存最大条目 |
 | `_CACHE_TTL_SEC` | `int` | `604800` (7天) | `src/voice/pipeline.py` | 语音缓存过期时间 |
+| `MAX_ACCEPT_PER_RUN` / `MAX_KEYWORD_CHARS` / `MIN_INTERVAL_SEC` / `SAME_SPOT` | `int` / `int` / `int` / `float` | `10` / `64` / `10` / `0.02` | `src/wechat/friend_manager.py` | 一次同意的申请上限；添加好友关键词最长；自动同意间隔下限（与配置校验一致）；两个 OCR 行中心相差小于它算「同一个位置」 |
+| `NEW_FRIENDS_LABELS` / `ACCEPT_LABELS` / `CONFIRM_LABELS` / `SEARCH_ENTRY_LABELS` / `ADD_BUTTON_LABELS` / `SEND_LABELS` / `NOT_FOUND_MARKERS` / `ALREADY_FRIEND_MARKERS` | `tuple[str, ...]` | 微信界面上的文字（`新的朋友`、`接受`、`网络查找`、`添加到通讯录`、`发送` …） | `src/wechat/friend_manager.py` | OCR 靠这些文字找按钮；微信改版时改这里（`ACCEPT_MIN_X0` = 0.40：接受按钮在行的右半边） |
+| `NO_FRIEND_MANAGER` / `ACCEPT_FRIENDS_COMMANDS` / `AUTO_ACCEPT_COMMANDS` | `str` / `tuple` / `dict[str, bool]` | 「未启用好友管理组件…」/ 同意好友的几种说法 / 自动同意开关的几种说法 → 开(True)/关(False) | `src/admin.py` | 管理员好友命令的文字 |
 
 ### 1.3 触发关键词默认值
 
@@ -320,6 +326,7 @@ todo_delete_keywords: list[str] = [
 | `Bot._log_banner()` | ~260 | 打印启动横幅日志 | 无 | `None` |
 | `Bot._create_wechat_backend(store)` | ~275 | 根据配置创建微信后端实例 | `store: MessageStore` | `AbstractWeChatBackend` 子类实例 |
 | `Bot._configure_expressions(config)` | ~356 | 静态方法；`SEND_STICKERS=on` 时 `configure_stickers(StickerLibrary.load(STICKER_DIR))` 并记日志有几张能用（mac 后端时警告不会发表情包），否则配置空库；`WECHAT_EMOJI`/`SEND_STICKERS` 开着但 `PIPELINE_V2=off` 时警告它们不起作用 | `config` | `None` |
+| `Bot._start_friend_management(config, backend, admin_handler)` | 后端有 `window_controller`（Windows `wcdb`）时建 `FriendManager`（自己的 `WindowsOcrEngine`，共用 `backend.window_lock`）和 `AutoFriendService`，`admin_handler.set_friend_manager(...)`；`AUTO_ACCEPT_FRIENDS=on` 才启动线程。别的后端只记一条 info；建不起来记 warning，不影响机器人启动 | `config, backend, admin_handler` | `None` |
 
 ### 2.3 `src/router.py`
 
@@ -428,6 +435,8 @@ todo_delete_keywords: list[str] = [
 | `start(callback)` | 启动消息监听(阻塞) | `callback: MessageCallback` | `None` |
 | `send_text(chat_id, content)` | 发送文本消息（持 `_window_lock`） | `chat_id: str, content: str` | `bool` |
 | `stop()` | 停止监听 | 无 | `None` |
+| `window_controller`（属性） | 微信窗口控制器；好友管理操作同一个窗口 | — | `WeChatWindowController` |
+| `window_lock`（属性） | `_window_lock`：发送、截图、好友管理的每一段窗口操作都持有它 | — | `threading.Lock` |
 | `_reinitialize()` | 关闭并重开 WCDB(故障恢复) | 无 | `None` |
 | `_resolve_groups()` | 解析群组名称到 talker ID | 无 | `None` |
 | `_save_group_names(chatrooms)` | 持久化群名映射(静态) | `chatrooms: dict` | `None` |
@@ -647,10 +656,14 @@ todo_delete_keywords: list[str] = [
 
 | 函数 | 描述 | 参数 | 返回值 |
 |---|---|---|---|
-| `__init__(nickname_service)` | 初始化管理员命令处理器 | `nickname_service: NicknameService` | `None` |
+| `__init__(nickname_service, friend_manager=None, auto_friend_service=None)` | 初始化管理员命令处理器 | `nickname_service: NicknameService`, 可选 `FriendManager` / `AutoFriendService` | `None` |
+| `set_friend_manager(friend_manager, auto_friend_service=None)` | 后端建好后再接上好友管理（`Bot._start_friend_management` 调用） | 同上 | `None` |
 | `handle(content, requester_name)` | 解析并执行管理命令 | `content: str, requester_name: str` | `str \| None` |
 | `_cmd_rename(content, requester_name)` | 处理"改名"命令 | `content: str, requester_name: str` | `str \| None` |
 | `_cmd_delete_nickname(content, requester_name)` | 处理"删除昵称"命令 | `content: str, requester_name: str` | `str \| None` |
+| `_cmd_add_friend(content, requester_name)` | `添加好友 <号码> [附言]`（也认 `加好友`，不带号码时回复用法）→ `FriendManager.add_friend`；没有好友组件时回复 `NO_FRIEND_MANAGER` | `content: str, requester_name: str` | `str` |
+| `_cmd_accept_friends(requester_name)` | `同意好友` 等（`ACCEPT_FRIENDS_COMMANDS`）→ `FriendManager.accept_friend_requests`；一个也没同意时不断言「没有申请」（也可能是窗口/识别出了问题） | `requester_name: str` | `str` |
+| `_cmd_auto_accept(on, requester_name)` | `自动同意好友 开/关`（`AUTO_ACCEPT_COMMANDS`，空白归一后匹配）→ `AutoFriendService.enable()/disable()`；没有该服务时不回复「已开启」 | `on: bool, requester_name: str` | `str` |
 
 ### 2.25 `src/fun.py`
 
@@ -1035,6 +1048,22 @@ todo_delete_keywords: list[str] = [
 | `WcdbBackend(..., ocr=None)` | `start()`：数据库打不开时（有 OCR 才）不再直接退出，`_client=None`、`_register_groups_without_database()` 用 `ocr:<群名>` 当 chat id（只认 `WECHAT_GROUPS` 里写明的群名，`*` 需要数据库），照常进读取循环；循环里每轮读失败 `note_db_failure()`、读通 `note_db_ok()`；`_poll_cycle` 在 `_client is None` 时抛错让循环计数并走 `_reinitialize()` 重试打开；失败后的等待换成 `_sleep_polling_ocr()`（等待期间每秒看一次屏幕，数据库的退避节奏不变）；OCR 刚结束的那一轮 `_ocr_priming=True`，`_poll_group` 只把积压记入已见、不回答；`_message_from_ocr()` 组完整的标准消息（键与 `_standardize` 相同，`sender` = `OCR群友`）；`_group_for_title()` 群名严格相等（忽略空格），窗口标题被截成「…」时只在唯一匹配时才认；OCR 消息**不走合并缓冲**（缓冲要靠 `_poll_cycle` 冲刷，且会把不同人的话合并）直接 `_dispatch_message` | — |
 | `tools/ocr_check.py` | 在真机上检查 OCR 能不能读：默认看 3 次、只打印数量（行数、标题、对方/自己的消息数、聊天区边界），不打印聊天内容；`--watch 秒数 --group 群名` 像机器人一样每 `--interval` 秒看一次，只打印这一个群的新消息；`--save-rows` 存原始行（含屏幕文字）。失败给出对应提示（屏幕录制权限、swiftc、OCR 语言包、窗口没找到） | 退出码 0/1 |
 
+### 2.49 `src/wechat/friend_manager.py`（好友管理，`AUTO_ACCEPT_FRIENDS`）
+
+操作真实的微信窗口，按钮靠 OCR 找；每一步都有防护：共用后端的窗口锁、WeChat 不在前台就不输入不点击、OCR 找不到的按钮不盲点（直接带原因结束）、屏幕上看到结果（按钮消失、窗口关闭）才报告完成。
+
+| 名称 | 描述 | 返回值 |
+|---|---|---|
+| `FriendManager(window_controller, ocr_engine, ui_lock, clicker, rect_of, sleeper)` | `ui_lock` 是发送路径用的窗口锁（不给就只防自己重入）；`clicker`/`rect_of`/`sleeper` 是测试接缝（默认 `click_screen`、`window_rect`、`time.sleep`） | — |
+| `FriendManager._ui_session()` | 上下文：拿锁 → `find_hwnd(force=True)` → 记下窗口状态 → `_activate_for_send`（失败就给 `None`）→ 结束时 `_restore_window_state`（最小化/隐藏的窗口放回原样） | `int \| None` |
+| `FriendManager._key / _combo / _paste / _click_row` | 每次输入前核对 `_foreground_matches(hwnd)`，不在前台抛 `_Abort`；`_click_row` 把 OCR 行中心换算成屏幕坐标，点击没送出也抛 `_Abort` | `None` |
+| `FriendManager.accept_friend_requests()` | 通讯录 → 「新的朋友」（打不开/看不到就停）；每轮重新识别屏幕（列表会动），点最上面的「接受/通过」，出现「确定/完成」就点；之后按钮还在原处就不计数并停止；一次最多 `MAX_ACCEPT_PER_RUN`=10 个；没有 OCR 或窗口时返回空 | `list[{"status": "accepted", "timestamp": float}]` |
+| `FriendManager.add_friend(keyword, message="")` | Ctrl+F → 全选删除 → 粘贴关键词 → 点「网络查找」入口 → 资料卡：不存在 / 已是好友 / 找不到「添加到通讯录」都带原因返回 → 点它 → **申请窗口（发送/确定/完成）出现后才**粘贴附言 → 点发送 → 窗口还在就报 `not_sent`。关键词压成一行、最长 `MAX_KEYWORD_CHARS`=64 | `{"ok", "target", "message", "reason"（失败时）}`；`reason`：`invalid` / `no_ocr` / `no_window` / `aborted` / `no_search_entry` / `not_found` / `already_friend` / `no_add_button` / `no_dialog` / `not_sent` |
+| `AutoFriendService(friend_manager, interval_sec=300, enabled=True)` | 后台线程每隔 `interval_sec`（下限 10）调 `run_once()`；第一次在启动一个间隔之后 | — |
+| `AutoFriendService.enable() / disable() / start() / stop() / run_once()` | `enable()` 线程没起时会启动它；`run_once()` 关着时什么也不做，检查出错只记 warning、不抛 | `run_once` → `list[dict]` |
+| `friend_manager._find_row(rows, *labels, exact, min_x0)` / `_still_there(rows, row)` / `_clean_text(text)` | OCR 行里按文字找最上面的一行；同样文字的行还在原处（中心相差 < `SAME_SPOT`=0.02）吗；去掉所有空白并转小写 | `dict \| None` / `bool` / `str` |
+| `tools/friend_admin.py` | 手动工具（Windows）：`--status`（窗口句柄、前台信息、OCR 预览）、`--accept`、`--add 号码 [--message 附言]` | — |
+
 ---
 
 ## 3. 模块间关系图
@@ -1112,6 +1141,9 @@ Bot.run()
   │     ├── MemoryConsolidator()         [src/memory/consolidator.py]
   │     ├── TodoStore()                  [src/todo/store.py]
   │     └── TodoHandler()                [src/todo/handler.py]
+  ├── _start_friend_management()         [src/bot.py]（后端有 window_controller 才建）
+  │     ├── FriendManager()              [src/wechat/friend_manager.py]（WindowsOcrEngine、backend.window_lock）
+  │     └── AutoFriendService()          [src/wechat/friend_manager.py]
   ├── HealthMonitor()                    [src/bot.py]
   └── WcdbBackend / MacUIBackend / MacHybridBackend  [src/wechat/]
 ```
@@ -2263,6 +2295,33 @@ MacHybridBackend.poll_once
 Windows（`WcdbBackend`）：数据库启动时就打不开也不会退出（有 OCR 时）：`_poll_cycle` 每轮报「数据库没打开」→ 连续 N 次后打开 OCR → 每 5 次失败 `_reinitialize()` 试着重新打开数据库 → 打开成功后 `_resolve_groups` + `_prime_known_ids` 把积压标为已见 → 下一轮读通就关掉 OCR。
 
 限制：只读打开的那个会话、只读屏幕上显示的那一段（消息发在别的聊天里时看不到，切过去以后它已经在屏幕上，当作历史不回答）；屏幕上没有任何自己的消息或时间线作参照时，一连串完全相同的消息分不出新旧；认不出群里是谁说的（所以只能按 @机器人/叫名字触发，管理员命令、cc 中转不可用）；图片、语音、表情读不出；微信不能最小化、读的是最前面的微信窗口（主窗口或独立聊天窗口），窗口要够大（约 600×500 以上，缩得太小时只认出几行、认不出标题）；macOS 要给运行机器人的程序「屏幕录制」权限、Windows 要装中文 OCR 语言包（Windows 部分只用假对象测过，真机用 `tools/ocr_check.py` 验证）；手动滚动机器人那台电脑上的微信窗口可能导致重复或漏读。控制台开关：`advanced_config.GROUPS` 里的 `ocr` 分组；`platform_label` / `platform_backends` 让标签显示「仅 macOS」，选了别的后端会变成警告色。
+
+### 功能T: 好友管理（AUTO_ACCEPT_FRIENDS）
+
+目的：管理员在微信里说 `添加好友 <号码> [附言]` / `同意好友`，或者（`AUTO_ACCEPT_FRIENDS=on`）每隔一段时间自动同意「新的朋友」里的申请。只有 Windows `wcdb` 后端（有微信窗口可操作）支持；别的后端这些命令回复「未启用好友管理组件」。
+
+```
+Bot._start_friend_management → FriendManager(WeChatWindowController, WindowsOcrEngine, backend.window_lock)
+                             → AutoFriendService（AUTO_ACCEPT_FRIENDS=on 才起线程）→ admin_handler.set_friend_manager
+
+管理员「同意好友」→ router → AdminCommandHandler._cmd_accept_friends → accept_friend_requests()
+后台每 N 秒        → AutoFriendService.run_once() → accept_friend_requests()
+  _ui_session：窗口锁 → find_hwnd → 记状态 → 切到前台（失败就结束）
+    → 通讯录 → OCR 找「新的朋友」→ 点
+    → 循环（≤10）：OCR → 最上面的「接受」→ 点 → 有「确定」就点 → OCR 看按钮还在不在
+  → 放回窗口状态 → 放锁
+
+管理员「添加好友 号码 附言」→ AdminCommandHandler._cmd_add_friend → add_friend()
+  粘贴号码 → OCR 找「网络查找」→ 点 → OCR 看资料卡 → 点「添加到通讯录」
+  → OCR 看到申请窗口才粘贴附言 → 点发送 → OCR 确认窗口关了
+```
+
+关键点：
+- 与发送共用 `WcdbBackend._window_lock`，所以不会和正在输入的回复交错；管理员命令是在路由线程里同步执行的，要几秒。
+- 每次按键/点击前核对微信在前台；OCR 找不到的按钮一律不点（早先的版本会盲点固定坐标、盲按回车，附言可能被当成聊天消息发给别人）。
+- 结果以屏幕为准：按钮还在原处就不算同意，申请窗口没关就报 `not_sent`；失败原因见 `add_friend` 返回的 `reason`。
+- OCR 用自己的 `WindowsOcrEngine`，与 `OCR_FALLBACK`（读消息用）无关，后者关着也能用。
+- 真机上的界面文字（「新的朋友」「接受」「网络查找」「添加到通讯录」「发送」…）写在 `friend_manager.py` 顶部的 `*_LABELS` 常量里，微信改版时改这里。
 
 ---
 
