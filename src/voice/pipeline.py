@@ -187,11 +187,12 @@ class VoicePipeline:
 
     # -- Public ------------------------------------------------------------
 
-    def process(self, msg: dict) -> Optional[str]:
+    def process(self, msg: dict, voice_bytes: Optional[bytes] = None) -> Optional[str]:
         """Transcribe a voice message.
 
         Args:
             msg: WCDB raw message dict (must have localType=34).
+            voice_bytes: Optional raw audio bytes from WCDB media database.
 
         Returns:
             Recognised text, e.g. "今天晚上吃什么", or None on failure.
@@ -210,15 +211,17 @@ class VoicePipeline:
                 self._stats.cache_hit += 1
                 return cached
 
-        # ── Locate file ─────────────────────────────────────────────
-        audio_path = self._locator.find_voice_file(msg)
-        if not audio_path:
-            self._stats.file_not_found += 1
-            return None
-
         # ── Decode → WAV ────────────────────────────────────────────
+        wav_path = None
         try:
-            wav_path = self._decoder.decode(audio_path)
+            if voice_bytes:
+                wav_path = self._decoder.decode_bytes(voice_bytes)
+            else:
+                audio_path = self._locator.find_voice_file(msg)
+                if not audio_path:
+                    self._stats.file_not_found += 1
+                    return None
+                wav_path = self._decoder.decode(audio_path)
         except DecodeError:
             logger.exception("SILK decode failed for msg_svr_id=%s", msg_svr_id)
             self._stats.decode_failed += 1

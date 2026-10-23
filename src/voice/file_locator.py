@@ -82,10 +82,14 @@ class VoiceFileLocator:
     # ------------------------------------------------------------------
 
     def _find_wxid_dir(self) -> Optional[Path]:
-        """Find the wxid_* directory under the WeChat data directory."""
+        """Find the most recently active wxid_* directory under the WeChat data directory."""
         if not self._data_dir.exists():
             return None
-        for child in self._data_dir.iterdir():
-            if child.is_dir() and child.name.startswith("wxid_"):
-                return child
-        return None
+        dirs = [
+            child for child in self._data_dir.iterdir()
+            if child.is_dir() and child.name.startswith("wxid_")
+        ]
+        if not dirs:
+            return None
+        dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+        return dirs[0]

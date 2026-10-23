@@ -79,15 +79,14 @@ class SilkDecoder:
     # Internal
     # ------------------------------------------------------------------
 
-    def _decode_silk(self, silk_path: Path) -> Path:
-        """Decode .silk → .wav via pysilk."""
-        raw = silk_path.read_bytes()
+    def decode_bytes(self, raw: bytes) -> Path:
+        """Decode raw SILK bytes to a temporary WAV file."""
         if not raw:
-            raise DecodeError(f"Empty SILK file: {silk_path}")
+            raise DecodeError("Empty SILK bytes")
 
         silk_data = _strip_wechat_silk_header(raw)
         if not silk_data:
-            raise DecodeError(f"SILK payload empty after header strip: {silk_path}")
+            raise DecodeError("SILK payload empty after header strip")
 
         try:
             from pysilk import decode as silk_decode
@@ -96,7 +95,6 @@ class SilkDecoder:
                 "pysilk not installed. Run: pip install silk-python"
             )
 
-        # Decode SILK → PCM in memory
         inp = io.BytesIO(silk_data)
         out = io.BytesIO()
         try:
@@ -106,9 +104,16 @@ class SilkDecoder:
 
         pcm_data = out.getvalue()
         if not pcm_data:
-            raise DecodeError(f"pysilk produced empty PCM for: {silk_path}")
+            raise DecodeError("pysilk produced empty PCM")
 
         return self._pcm_to_wav(pcm_data, WECHAT_SILK_SAMPLE_RATE)
+
+    def _decode_silk(self, silk_path: Path) -> Path:
+        """Decode .silk → .wav via pysilk."""
+        raw = silk_path.read_bytes()
+        if not raw:
+            raise DecodeError(f"Empty SILK file: {silk_path}")
+        return self.decode_bytes(raw)
 
     def _decode_amr(self, amr_path: Path) -> Path:
         """Decode .amr → .wav via ffmpeg subprocess."""

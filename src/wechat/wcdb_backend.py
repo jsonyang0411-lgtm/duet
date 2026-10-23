@@ -1243,13 +1243,32 @@ class WcdbBackend(AbstractWeChatBackend):
             self._voice = False
         return self._voice
 
-    def _try_voice(self, msg: dict) -> Optional[str]:
+    def _try_voice(self, msg: dict, talker: str = "") -> Optional[str]:
         """Attempt voice recognition; return text or None on failure."""
         voice = self._get_voice()
         if not voice:  # False or None → disabled
             return None
+        voice_bytes = None
+        if self._client and talker:
+            try:
+                local_id = msg.get("local_id") or msg.get("localId") or 0
+                create_time = msg.get("create_time") or msg.get("createTime") or 0
+                msg_svr_id = (
+                    msg.get("msg_svr_id") or msg.get("msgSvrId") or
+                    msg.get("server_id") or msg.get("serverId") or 0
+                )
+                voice_bytes = self._client.get_voice_data(
+                    talker, local_id, create_time, msg_svr_id
+                )
+                if voice_bytes:
+                    logger.info(
+                        "Retrieved %d voice bytes from WCDB for %s (local_id=%s, svr_id=%s)",
+                        len(voice_bytes), talker, local_id, msg_svr_id
+                    )
+            except Exception:
+                logger.debug("Failed to retrieve voice bytes from WCDB client", exc_info=True)
         try:
-            return voice.process(msg)
+            return voice.process(msg, voice_bytes=voice_bytes)
         except Exception:
             logger.exception("VoicePipeline.process failed")
             return None
@@ -1288,7 +1307,7 @@ class WcdbBackend(AbstractWeChatBackend):
         if quote_info:
             content = quote_info["content"]
         elif local_type == 34 and resolve_voice:
-            voice_text = self._try_voice(msg)
+            voice_text = self._try_voice(msg, talker=talker)
             if voice_text:
                 content = f"[语音] {voice_text}"
             else:

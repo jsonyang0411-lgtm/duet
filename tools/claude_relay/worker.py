@@ -35,7 +35,10 @@ To keep it running, start-worker.command opens it in Terminal at login.
 from __future__ import annotations
 
 import argparse
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 import glob
 import json
 import logging
@@ -789,7 +792,8 @@ def single_instance():
     HOME_DIR.mkdir(parents=True, exist_ok=True)
     handle = open(HOME_DIR / "worker.lock", "w")
     try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if fcntl is not None:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         handle.close()
         return None
