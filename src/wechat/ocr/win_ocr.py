@@ -200,11 +200,11 @@ class WindowsOcrEngine:
             return False
         return True
 
-    def capture(self) -> list[dict]:
+    def capture(self, hwnd: int | None = None) -> list[dict]:
         if self._powershell is None and not self.prepare():
             raise RuntimeError("the OCR recognizer is not available")
-        hwnd = self._find_window()
-        image = self._grab(hwnd)
+        target_hwnd = hwnd if hwnd is not None else self._find_window()
+        image = self._grab(target_hwnd)
         return rows_from_lines(self._recognize(image), image)
 
     def _find_window(self) -> int:

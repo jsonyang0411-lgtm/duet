@@ -49,8 +49,8 @@ PENDING_REQUEST_LABELS = ("等待验证",)
 ACCEPT_MIN_X0 = 0.40         # the accept button sits on the right side of its row
 CONFIRM_LABELS = ("确定", "完成")
 SEARCH_ENTRY_LABELS = ("网络查找", "查找微信号", "查找手机号")
-NOT_FOUND_MARKERS = ("该用户不存在", "用户不存在", "查找失败")
-ALREADY_FRIEND_MARKERS = ("音视频通话", "语音聊天", "视频聊天")   # next to "发消息" on a friend's card
+NOT_FOUND_MARKERS = ("该用户不存在", "用户不存在", "查找失败", "无法找到该用户", "请检查你填写的账号是否正确")
+ALREADY_FRIEND_MARKERS = ("音视频通话", "语音聊天", "视频聊天", "朋友资料")   # next to "发消息" on a friend's card
 ADD_BUTTON_LABELS = ("添加到通讯录", "加为朋友", "加为联系人")
 SEND_LABELS = ("发送", "确定", "完成")
 
@@ -226,9 +226,14 @@ class FriendManager:
         except _Abort:
             pass
 
-    def _capture_ocr(self) -> list[dict]:
+    def _capture_ocr(self, hwnd: int | None = None) -> list[dict]:
         """The OCR rows of the WeChat window (empty if OCR fails)."""
         try:
+            if hwnd is not None:
+                try:
+                    return self._ocr.capture(hwnd=hwnd) or []
+                except TypeError:
+                    return self._ocr.capture() or []
             return self._ocr.capture() or []
         except Exception as e:
             logger.warning("Friend management: OCR capture failed: %s", e)
@@ -366,7 +371,187 @@ class FriendManager:
                 logger.warning("add_friend stopped: %s", e)
                 return _failure(keyword, "aborted", f"微信窗口状态异常，已中止：{e}")
 
+    def _is_wechat4(self, hwnd: int) -> bool:
+        if sys.platform != "win32":
+            return False
+        try:
+            import win32gui
+            if not win32gui.IsWindow(hwnd):
+                return False
+            cls = win32gui.GetClassName(hwnd)
+            return "Qt" in cls
+        except Exception:
+            return False
+
+    def _focus_window(self, hwnd: int) -> None:
+        if sys.platform == "win32":
+            import ctypes
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+            self._sleep(0.2)
+
+    def _close_window(self, hwnd: int) -> None:
+        if sys.platform == "win32":
+            try:
+                import win32gui
+                if win32gui.IsWindow(hwnd) and win32gui.IsWindowVisible(hwnd):
+                    self._focus_window(hwnd)
+                    send_combo(0x12, 0x73)  # Alt+F4
+                    self._sleep(0.3)
+            except Exception:
+                pass
+
+    def _open_add_friend_dialog_wechat4(self, main_hwnd: int) -> int | None:
+        if sys.platform != "win32":
+            return None
+        import win32gui, win32process
+        _, main_pid = win32process.GetWindowThreadProcessId(main_hwnd)
+
+        existing = []
+        def _enum_existing(h, _):
+            if h != main_hwnd and win32gui.IsWindow(h) and win32gui.IsWindowVisible(h):
+                _, pid = win32process.GetWindowThreadProcessId(h)
+                if pid == main_pid and win32gui.GetClassName(h) == "Qt51514QWindowIcon":
+                    r = win32gui.GetWindowRect(h)
+                    w, h_len = r[2] - r[0], r[3] - r[1]
+                    if 300 <= w <= 600 and 400 <= h_len <= 800:
+                        existing.append(h)
+        win32gui.EnumWindows(_enum_existing, None)
+        if existing:
+            return existing[0]
+
+        send_combo(VK_CONTROL, 0x31)
+        self._sleep(0.4)
+
+        rect = self._rect_of(main_hwnd)
+        plus_x = rect[0] + 285
+        plus_y = rect[1] + 60
+        if not self._clicker(plus_x, plus_y):
+            return None
+        self._sleep(0.4)
+
+        menu_hwnd = None
+        for _ in range(10):
+            def _enum_menu(h, _):
+                nonlocal menu_hwnd
+                if h != main_hwnd and win32gui.IsWindow(h) and win32gui.IsWindowVisible(h):
+                    _, pid = win32process.GetWindowThreadProcessId(h)
+                    if pid == main_pid and "Qt51514QWindowToolSaveBits" in win32gui.GetClassName(h):
+                        menu_hwnd = h
+            win32gui.EnumWindows(_enum_menu, None)
+            if menu_hwnd:
+                break
+            self._sleep(0.1)
+
+        if not menu_hwnd:
+            logger.warning("_open_add_friend_dialog_wechat4: popup menu not found after clicking (+)")
+            return None
+
+        m_rect = win32gui.GetWindowRect(menu_hwnd)
+        add_friend_x = m_rect[0] + int(0.5 * (m_rect[2] - m_rect[0]))
+        add_friend_y = m_rect[1] + int(0.454 * (m_rect[3] - m_rect[1]))
+        if not self._clicker(add_friend_x, add_friend_y):
+            return None
+        self._sleep(0.8)
+
+        dialog_hwnd = None
+        for _ in range(15):
+            existing.clear()
+            win32gui.EnumWindows(_enum_existing, None)
+            if existing:
+                dialog_hwnd = existing[0]
+                break
+            self._sleep(0.1)
+
+        return dialog_hwnd
+
+    def _add_friend_wechat4(self, hwnd: int, keyword: str, message: str) -> dict:
+        dialog_hwnd = self._open_add_friend_dialog_wechat4(hwnd)
+        if not dialog_hwnd:
+            return _failure(keyword, "no_window", "无法打开微信「添加朋友」窗口")
+
+        try:
+            self._focus_window(dialog_hwnd)
+            d_rect = self._rect_of(dialog_hwnd)
+            w = d_rect[2] - d_rect[0]
+            h = d_rect[3] - d_rect[1]
+
+            input_x = d_rect[0] + int(0.35 * w)
+            input_y = d_rect[1] + int(0.118 * h)
+            if not self._clicker(input_x, input_y):
+                raise _Abort("could not click search input box")
+            self._sleep(0.2)
+
+            self._combo(dialog_hwnd, VK_CONTROL, VK_A)
+            self._sleep(0.05)
+            self._key(dialog_hwnd, VK_BACK)
+            self._sleep(0.05)
+            self._paste(dialog_hwnd, keyword)
+            self._sleep(0.2)
+            self._key(dialog_hwnd, 0x0D)
+            self._sleep(1.5)
+
+            rows = self._capture_ocr(dialog_hwnd)
+            card_text = "".join(_clean_text(r.get("t", "")) for r in rows)
+
+            if any(marker in card_text for marker in NOT_FOUND_MARKERS):
+                self._close_window(dialog_hwnd)
+                return _failure(keyword, "not_found", f"未找到用户「{keyword}」，请核实微信号或手机号")
+
+            if any(marker in card_text for marker in ALREADY_FRIEND_MARKERS):
+                self._close_window(dialog_hwnd)
+                return _failure(keyword, "already_friend", f"用户「{keyword}」已是您的微信好友，无需重复添加")
+
+            add_button = _find_row(rows, *ADD_BUTTON_LABELS)
+            if add_button is None:
+                self._close_window(dialog_hwnd)
+                return _failure(keyword, "no_add_button", f"没有找到「{keyword}」的「添加到通讯录」按钮，已中止")
+
+            self._click_row(dialog_hwnd, add_button)
+            self._sleep(0.8)
+
+            popup_hwnd = self._find_popup_dialog(hwnd)
+            target_dialog = popup_hwnd if popup_hwnd else dialog_hwnd
+            self._focus_window(target_dialog)
+            app_rows = self._capture_ocr(target_dialog)
+
+            send_button = _find_row(app_rows, *SEND_LABELS, exact=True)
+            if send_button is None:
+                self._close_window(dialog_hwnd)
+                if popup_hwnd:
+                    self._close_window(popup_hwnd)
+                return _failure(keyword, "no_dialog", "没有出现填写附言的申请窗口（对方可能无需验证，或界面不同），请在微信里确认是否已发出")
+
+            if message:
+                self._combo(target_dialog, VK_CONTROL, VK_A)
+                self._sleep(0.05)
+                self._paste(target_dialog, message)
+                self._sleep(0.3)
+
+            self._click_row(target_dialog, send_button)
+            self._sleep(0.8)
+
+            check_rows = self._capture_ocr(target_dialog)
+            if _still_there(check_rows, send_button):
+                self._close_window(dialog_hwnd)
+                if popup_hwnd:
+                    self._close_window(popup_hwnd)
+                return _failure(keyword, "not_sent", "申请窗口还在，申请可能没发出去，请在微信里确认")
+
+            self._close_window(dialog_hwnd)
+            if popup_hwnd:
+                self._close_window(popup_hwnd)
+            return {
+                "ok": True,
+                "target": keyword,
+                "message": f"已成功向「{keyword}」发送好友申请" + (f"（附言：{message}）" if message else ""),
+            }
+        except _Abort as e:
+            self._close_window(dialog_hwnd)
+            raise
+
     def _add_friend_in_window(self, hwnd: int, keyword: str, message: str) -> dict:
+        if self._is_wechat4(hwnd):
+            return self._add_friend_wechat4(hwnd, keyword, message)
         # 1. Search box: Ctrl+F -> Ctrl+A -> Backspace -> paste the keyword
         self._combo(hwnd, VK_CONTROL, VK_F)
         self._sleep(0.2)
