@@ -9,7 +9,9 @@ state change, so a failed send is retried and a restart loses nothing.
 While a job runs, every heartbeat brings what Claude is doing (``progress``);
 ``progress_sent_at`` / ``progress_sent`` say when WeChat last heard about it.
 ``relay_files`` are the pictures and files sent with a job (copies the bot
-keeps; the worker downloads them).
+keeps; the worker downloads them).  ``relay_asks`` are Claude's requests for an
+approval: ``pending`` until the person answers in WeChat (``allow`` / ``deny``),
+the time runs out (``expired``) or the job ends (``cancelled``).
 
 The router thread adds jobs, the HTTP threads hand them out and take the
 results, the delivery thread marks them sent: one connection, one lock.
@@ -56,6 +58,20 @@ CREATE TABLE IF NOT EXISTS relay_files (
     size INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS relay_files_job ON relay_files(job_id, id);
+CREATE TABLE IF NOT EXISTS relay_asks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL,
+    chat_id TEXT NOT NULL,
+    tool TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    answered_at REAL,
+    sent INTEGER NOT NULL DEFAULT 0,
+    noted INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS relay_asks_chat ON relay_asks(chat_id, status, id);
 CREATE TABLE IF NOT EXISTS relay_sessions (
     chat_id TEXT PRIMARY KEY,
     session_id TEXT,
@@ -198,6 +214,93 @@ class RelayStore:
                 "SELECT * FROM relay_files WHERE job_id = ? AND id = ?", (job_id, file_id)
             ).fetchone()
         return dict(row) if row else None
+
+    # ── approvals ─────────────────────────────────────────────────────────
+
+    def add_ask(self, job_id: int, tool: str, detail: str, now: float, expires_at: float) -> Optional[int]:
+        """A request of a running job (None: no such job, or it is not running)."""
+        with self._lock:
+            row = self._conn.execute("SELECT chat_id, status FROM relay_jobs WHERE id = ?", (job_id,)).fetchone()
+            if row is None or row["status"] not in ("running", "lost"):
+                return None
+            cur = self._conn.execute(
+                "INSERT INTO relay_asks (job_id, chat_id, tool, detail, created_at, expires_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (job_id, row["chat_id"], tool, detail, now, expires_at),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def get_ask(self, ask_id: int) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM relay_asks WHERE id = ?", (ask_id,)).fetchone()
+        return dict(row) if row else None
+
+    def pending_ask(self, chat_id: str, job_id: Optional[int] = None) -> Optional[dict]:
+        """The newest request of this chat that waits for an answer (of job ``job_id`` when given)."""
+        sql = "SELECT * FROM relay_asks WHERE chat_id = ? AND status = 'pending'"
+        args: tuple = (chat_id,)
+        if job_id is not None:
+            sql += " AND job_id = ?"
+            args += (job_id,)
+        with self._lock:
+            row = self._conn.execute(sql + " ORDER BY id DESC LIMIT 1", args).fetchone()
+        return dict(row) if row else None
+
+    def settle_ask(self, ask_id: int, status: str, now: float) -> bool:
+        """Answer / expire / cancel a pending request; False when it was settled already."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE relay_asks SET status = ?, answered_at = ? WHERE id = ? AND status = 'pending'",
+                (status, now, ask_id),
+            )
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def unsent_asks(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM relay_asks WHERE status = 'pending' AND sent = 0 ORDER BY id"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_ask_sent(self, ask_id: int) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE relay_asks SET sent = 1 WHERE id = ?", (ask_id,))
+            self._conn.commit()
+
+    def expire_asks(self, now: float) -> int:
+        """Pending requests whose time is up become ``expired``; returns how many."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE relay_asks SET status = 'expired', answered_at = ? WHERE status = 'pending' AND expires_at < ?",
+                (now, now),
+            )
+            self._conn.commit()
+            return cur.rowcount
+
+    def expired_unnoted(self) -> list[dict]:
+        """Expired requests WeChat was asked about but not yet told that they ran out."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM relay_asks WHERE status = 'expired' AND sent = 1 AND noted = 0 ORDER BY id"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_ask_noted(self, ask_id: int) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE relay_asks SET noted = 1 WHERE id = ?", (ask_id,))
+            self._conn.commit()
+
+    def cancel_asks(self, job_id: int, now: float) -> int:
+        """The job ended or was cancelled: its open requests are ``cancelled``."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE relay_asks SET status = 'cancelled', answered_at = ? WHERE job_id = ? AND status = 'pending'",
+                (now, job_id),
+            )
+            self._conn.commit()
+            return cur.rowcount
 
     def current_project(self, chat_id: str) -> str:
         """The project later tasks of this chat run in ("" = the Mac's default)."""

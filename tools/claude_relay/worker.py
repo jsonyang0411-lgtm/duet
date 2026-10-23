@@ -10,7 +10,12 @@ for them over HTTP (long poll, so the Mac needs no open port), runs
 in the project folder, sends a heartbeat every 30 s with what Claude is doing
 (read from the stream; the answer says when the user cancelled), and posts the
 result back.  Pictures and files sent with a task are downloaded to
-~/.claude-relay/inbox/job-<id>/ first (claude gets --add-dir for it).  A result is written to the
+~/.claude-relay/inbox/job-<id>/ first (claude gets --add-dir for it).
+
+When claude needs an approval (wechat_approval, on by default), its
+PermissionRequest hook is this script again (--permission-hook): it sends the
+request to the bot, the bot asks in WeChat, and the answer allows or denies the
+step.  No answer within approval_timeout_min minutes is a denial.  A result is written to the
 outbox first and sent until the bot has it, so a Windows restart loses nothing.
 
 Standard library only (macOS /usr/bin/python3 is enough).  Settings:
@@ -18,6 +23,7 @@ Standard library only (macOS /usr/bin/python3 is enough).  Settings:
 its own file (token_file); RELAY_URL and RELAY_TOKEN in the environment win.  Setup: README.md next to this file.
 
     python3 worker.py --check     reach the bot and find claude, then exit
+    python3 worker.py --permission-hook   (claude runs this; not for people)
     python3 worker.py --once      do one job, then exit
     python3 worker.py             run until stopped
     --stay-awake                  keep the Mac awake while it is on power (caffeinate -s)
@@ -35,6 +41,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -64,6 +71,8 @@ DEFAULTS = {
     "timeout_min": 60,
     "model": "",
     "extra_args": [],
+    "wechat_approval": True,   # a step that needs approval is asked for in WeChat (else denied)
+    "approval_timeout_min": 10,
 }
 
 SYSTEM_NOTE = (
@@ -74,6 +83,26 @@ SYSTEM_NOTE = (
     "除非任务里明确要求。你最后的回复会原样发到微信：用中文，先一句话说结论，再列关键改动或发现"
     "（文件路径、命令结果），整体不超过 300 字，不要用 Markdown 表格和代码块。"
 )
+# With wechat_approval the sentence about approvals is this instead.
+APPROVAL_NOTE = (
+    "需要人工批准的操作会发到对方微信上请对方批准，对方可能过一会儿才看到，超过 {minutes} 分钟没回就算拒绝；"
+    "所以能不用这类操作就不用，确实需要时再用，被拒绝了就换个办法或在结果里说明。"
+)
+
+
+def system_note(settings: dict) -> str:
+    if not settings.get("wechat_approval", True):
+        return SYSTEM_NOTE
+    sentence = "没法回答你的问题，也没法批准权限；需要人工批准的操作会被直接拒绝，遇到时换一种不需要批准的办法，或者在结果里说清楚需要对方做什么。"
+    return SYSTEM_NOTE.replace(sentence, "没法回答你的问题。" + APPROVAL_NOTE.format(
+        minutes=_minutes(settings)))
+
+
+def _minutes(settings: dict) -> int:
+    try:
+        return max(1, int(float(settings.get("approval_timeout_min") or 10)))
+    except (TypeError, ValueError):
+        return 10
 
 log = logging.getLogger("claude_relay.worker")
 
@@ -82,6 +111,7 @@ log = logging.getLogger("claude_relay.worker")
 
 def load_settings(path: Path) -> dict:
     settings = dict(DEFAULTS)
+    settings["config_path"] = str(path)          # the permission hook reads the same file
     if path.exists():
         settings.update(json.loads(path.read_text(encoding="utf-8")))
     if settings.get("token_file") and not os.environ.get("RELAY_TOKEN"):
@@ -323,13 +353,23 @@ def fetch_files(client: RelayClient, job: dict) -> tuple[Path | None, str]:
     return (folder if got else None), note
 
 
+def hook_settings(settings: dict) -> str:
+    """``--settings`` JSON that makes this script claude's PermissionRequest hook."""
+    command = f"{shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__).resolve()))} --permission-hook"
+    return json.dumps({"hooks": {"PermissionRequest": [{"matcher": "*", "hooks": [
+        {"type": "command", "command": command, "timeout": _minutes(settings) * 60 + 120},
+    ]}]}})
+
+
 def claude_command(settings: dict, session_id: str | None, add_dirs: tuple = ()) -> list[str]:
     cmd = [
         find_claude(settings.get("claude_bin", "")), "-p", "--output-format", "stream-json", "--verbose",
         "--permission-mode", str(settings.get("permission_mode") or "auto"),
         "--permission-prompts", "none",
-        "--append-system-prompt", SYSTEM_NOTE,
+        "--append-system-prompt", system_note(settings),
     ]
+    if settings.get("wechat_approval", True):
+        cmd += ["--settings", hook_settings(settings)]
     if session_id:
         cmd += ["--resume", session_id]
     for folder in add_dirs:
@@ -417,9 +457,12 @@ def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stoppe
     """Run claude once; heartbeat meanwhile.  Returns stdout/stderr/returncode and why it stopped."""
     cmd = claude_command(settings, session_id, add_dirs)
     # The task goes in on stdin: a task starting with "-" must not be read as an option.
+    # The permission hook (a child of claude) needs to know the job and the settings file.
+    env = {**os.environ, "RELAY_JOB_ID": str(job["id"]),
+           "CLAUDE_RELAY_CONFIG": str(settings.get("config_path") or HOME_DIR / "config.json")}
     proc = subprocess.Popen(
         cmd, cwd=str(cwd), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, encoding="utf-8", errors="replace", start_new_session=True,
+        text=True, encoding="utf-8", errors="replace", start_new_session=True, env=env,
     )
     progress = Progress()
     lines: list[str] = []
@@ -588,6 +631,85 @@ def save_log(job: dict, run: dict, result: dict) -> Path:
     return path
 
 
+# ── approvals in WeChat (claude's PermissionRequest hook) ────────────────
+
+DENIED = {
+    "deny": "对方在微信里拒绝了这一步。换一种不需要这一步的办法，或者在结果里说明需要对方自己做什么。",
+    "expired": "对方没有及时在微信里回复（可能不在手机旁），按拒绝处理。换一种办法，或者在结果里说明需要批准什么。",
+    "cancelled": "这个任务已经被取消了，停下来。",
+}
+
+
+def describe_request(tool: str, args) -> str:
+    """What claude wants to do, for the person who approves it."""
+    args = args if isinstance(args, dict) else {}
+    if tool == "Bash":
+        return "运行命令 " + " ".join(str(args.get("command", "")).split())[:250]
+    path = str(args.get("file_path") or args.get("notebook_path") or "")
+    if tool in ("Edit", "MultiEdit", "NotebookEdit") and path:
+        return "修改文件 " + path
+    if tool == "Write" and path:
+        return "写文件 " + path
+    if tool == "WebFetch":
+        return "打开网页 " + str(args.get("url", ""))[:200]
+    if tool == "WebSearch":
+        return "搜索网页 " + str(args.get("query", ""))[:200]
+    detail = json.dumps(args, ensure_ascii=False)
+    return f"使用 {tool}（{detail[:200] + ('…' if len(detail) > 200 else '')}）"
+
+
+def permission_hook(request: dict, job_id: str, config_path: Path, poll_wait: int = POLL_WAIT_SEC) -> dict:
+    """The hook's answer for one permission request: allow, or deny with the reason for claude."""
+    def decide(behavior: str, message: str = "", interrupt: bool = False) -> dict:
+        decision = {"behavior": behavior}
+        if behavior == "deny":
+            decision.update(message=message, interrupt=interrupt)
+        return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}
+
+    try:
+        settings = load_settings(config_path)
+        client = RelayClient(settings["relay_url"], settings["token"])
+        timeout = _minutes(settings) * 60
+        tool = str(request.get("tool_name") or "?")
+        _, created = client._call("POST", f"/relay/jobs/{int(job_id)}/ask", {
+            "tool": tool, "detail": describe_request(tool, request.get("tool_input")), "timeout_s": timeout,
+        })
+        ask_id = int(created["ask_id"])
+    except Exception as e:
+        return decide("deny", f"没能把批准请求发到微信（{e}），按拒绝处理。")
+    deadline = time.monotonic() + timeout + 60
+    while time.monotonic() < deadline:
+        try:
+            _, answer = client._call("GET", f"/relay/asks/{ask_id}?wait={poll_wait}", timeout=poll_wait + 15)
+            status = (answer or {}).get("status")
+        except Exception as e:                           # the bot may be restarting
+            log.warning("#%s approval %s: cannot reach the bot (%s)", job_id, ask_id, e)
+            time.sleep(5)
+            continue
+        if status == "allow":
+            return decide("allow")
+        if status in DENIED:
+            return decide("deny", DENIED[status], interrupt=status == "cancelled")
+    return decide("deny", DENIED["expired"])
+
+
+def run_permission_hook() -> int:
+    """``--permission-hook``: read the request on stdin, print the decision (claude reads stdout)."""
+    try:
+        request = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        request = {}
+    job_id = os.environ.get("RELAY_JOB_ID", "")
+    config = Path(os.environ.get("CLAUDE_RELAY_CONFIG") or HOME_DIR / "config.json")
+    if not job_id.isdigit():
+        answer = {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {
+            "behavior": "deny", "message": "不是中转任务里的请求，按拒绝处理。"}}}
+    else:
+        answer = permission_hook(request if isinstance(request, dict) else {}, job_id, config)
+    print(json.dumps(answer, ensure_ascii=False))
+    return 0
+
+
 # ── delivery that survives restarts ──────────────────────────────────────
 
 def outbox_dir() -> Path:
@@ -699,8 +821,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true", help="reach the bot and find claude, then exit")
     parser.add_argument("--once", action="store_true", help="do one job, then exit")
     parser.add_argument("--stay-awake", action="store_true", help="keep the Mac awake while on power")
+    parser.add_argument("--permission-hook", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     setup_logging()
+    if args.permission_hook:
+        return run_permission_hook()
     settings = load_settings(Path(args.config))
     client = RelayClient(settings["relay_url"], settings["token"],
                          reload_token=lambda: read_token(Path(args.config)))

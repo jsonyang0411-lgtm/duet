@@ -12,5 +12,7 @@
   "max_budget_usd": 0,
   "timeout_min": 60,
   "model": "",
-  "extra_args": []
+  "extra_args": [],
+  "wechat_approval": true,
+  "approval_timeout_min": 10
 }

@@ -8,6 +8,9 @@ Every request carries ``Authorization: Bearer <CLAUDE_RELAY_TOKEN>``.
     GET  /relay/jobs/<id>/files/<n>    a picture or file sent with the job (bytes; 404: not one of its files)
     POST /relay/jobs/<id>/heartbeat    {"steps", "doing", "plan"} (what Claude is doing, optional)
                                        -> {"cancel": bool}    (404: unknown job)
+    POST /relay/jobs/<id>/ask          {"tool", "detail", "timeout_s"} -> {"ask_id"}  (an approval for
+                                       WeChat; 404: the job is not running)
+    GET  /relay/asks/<n>?wait=25       {"status": pending|allow|deny|expired|cancelled}
     POST /relay/jobs/<id>/result       {"ok", "text", "session_id", "duration_s", "cost_usd",
                                         "log_path", "error"} -> {"accepted": bool}
 
@@ -27,7 +30,8 @@ from urllib.parse import parse_qs, urlsplit
 logger = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 1_000_000
-_JOB_PATH = re.compile(r"^/relay/jobs/(\d+)/(heartbeat|result)$")
+_JOB_PATH = re.compile(r"^/relay/jobs/(\d+)/(heartbeat|result|ask)$")
+_ASK_PATH = re.compile(r"^/relay/asks/(\d+)$")
 _FILE_PATH = re.compile(r"^/relay/jobs/(\d+)/files/(\d+)$")
 
 
@@ -78,6 +82,16 @@ class _RelayHandler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         if url.path == "/relay/health":
             self._json(200, {"ok": True})
+        elif _ASK_PATH.match(url.path):
+            try:
+                wait = float(parse_qs(url.query).get("wait", ["25"])[0])
+            except ValueError:
+                wait = 25.0
+            answer = self.relay.ask_status(int(_ASK_PATH.match(url.path).group(1)), wait)
+            if answer is None:
+                self._json(404, {"error": "unknown request"})
+            else:
+                self._json(200, answer)
         elif _FILE_PATH.match(url.path):
             m = _FILE_PATH.match(url.path)
             path = self.relay.file_path(int(m.group(1)), int(m.group(2)))
@@ -127,6 +141,8 @@ class _RelayHandler(BaseHTTPRequestHandler):
             return
         if action == "heartbeat":
             answer = self.relay.heartbeat(job_id, body)
+        elif action == "ask":
+            answer = self.relay.ask(job_id, body)
         else:
             taken = self.relay.finish(job_id, body)
             answer = None if taken is None else {"accepted": taken}

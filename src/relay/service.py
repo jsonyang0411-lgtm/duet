@@ -11,6 +11,10 @@ A result too long for one message goes as a .txt file when the backend can
 send files (CLAUDE_RELAY_LONG_FILE), with a short message after it.
 Pictures and files the allowed person sends are held and go with the next task
 (attachments.py); the worker downloads them from GET /relay/jobs/<id>/files/<n>.
+When Claude needs an approval, the worker's PermissionRequest hook asks here
+(POST /relay/jobs/<id>/ask), the request goes to WeChat, and the hook waits for
+the answer (GET /relay/asks/<n>).  Only a WeChat message of the allowed person
+in that chat answers it ("同意" / "拒绝"); nothing over HTTP can.
 """
 
 from __future__ import annotations
@@ -27,7 +31,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .attachments import HOLD_SEC, KINDS, Held, attachment_kind, resolve
-from .commands import RelayCommand, parse, prefix_pattern
+from .commands import RelayCommand, parse, parse_answer, prefix_pattern
 from .store import FINAL_STATES, RelayStore
 
 logger = logging.getLogger(__name__)
@@ -41,6 +45,7 @@ MAX_WAIT_SEC = 30           # longest a worker's request for a job is held open
 START_NOTE_AFTER_SEC = 20   # a job that waited this long in the queue gets a "started" message
 SUMMARY_CHARS = 300         # the message after a result file starts with this much of it
 KEEP_FILES_DAYS = 30        # result files older than this are deleted when a new one is written
+ASK_TIMEOUT_SEC = (60, 3600)  # the range a worker may give an approval request to be answered
 
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
 # A voice message the backend turned into text (VOICE_ASR_ENABLED on Windows): "[语音] 跑一下测试。"
@@ -116,6 +121,7 @@ class ClaudeRelay:
         self._file_sent: set[int] = set()       # jobs whose result file is in the chat already
         self._held: dict[str, list[Held]] = {}  # pictures and files waiting for the next task
         self._held_lock = threading.Lock()
+        self._asks_changed = threading.Condition()
         self._clock = clock
         self._prefix_word = config.claude_relay_prefix
         self._prefix = prefix_pattern(config.claude_relay_prefix)
@@ -201,6 +207,10 @@ class ClaudeRelay:
                     return True, None if too_old else VOICE_NOT_HEARD
                 return False, None
             content = heard
+        if sender in self._allowed and not too_old:
+            answer = self._answer(str(msg["chat_id"]), content, timestamp, by_voice=bool(heard))
+            if answer is not None:
+                return answer
         m = self._prefix.match(content)
         if m:
             body = m.group(1)
@@ -351,6 +361,102 @@ class ClaudeRelay:
         job = self._store.get(job_id)
         return job if job is not None and job["chat_id"] == chat_id else None
 
+    # ── approvals ─────────────────────────────────────────────────────────
+
+    def _answer(self, chat_id: str, content: str, sent_at: float,
+                by_voice: bool = False) -> Optional[tuple[bool, Optional[str]]]:
+        """「同意」/「拒绝」 (with or without "cc") for Claude's request in this chat, else None.
+
+        Not by voice: a 「不同意」 heard as 「同意」 must never let a command run.
+        """
+        m = self._prefix.match(content)
+        answer = parse_answer(m.group(1) if m else content)
+        if answer is None:
+            return None
+        decision, job_id = answer
+        self._expire_asks()                              # a late "同意" must not count
+        ask = self._store.pending_ask(chat_id, job_id)
+        # An answer typed before the request arrived is not an answer to it.
+        if ask is None or (sent_at and sent_at < ask["created_at"] - 1):
+            if m or self._relay_only:
+                return True, "现在没有等你批准的操作。" if job_id is None else f"#{job_id} 现在没有等你批准的操作。"
+            return None                                  # plain "好" in a normal chat
+        if by_voice:
+            return True, "批准要打字回复「同意」或「拒绝」，语音不算（免得听错）。"
+        if not self._store.settle_ask(ask["id"], decision, self._clock()):
+            return True, f"#{ask['job_id']} 的请求已经结束了。"
+        with self._asks_changed:
+            self._asks_changed.notify_all()
+        logger.info("CLAUDE_RELAY: #%d request %d %s in WeChat", ask["job_id"], ask["id"], decision)
+        if decision == "allow":
+            return True, f"好，已批准 #{ask['job_id']}：{_preview(ask['detail'], 60)}"
+        return True, f"好，#{ask['job_id']} 不做这一步（Claude 会换个办法，或者在结果里说明）。"
+
+    def ask(self, job_id: int, body: dict) -> Optional[dict]:
+        """The worker's hook asks for an approval: ``{"ask_id"}``, or None for a job that is not running."""
+        self._seen()
+        try:
+            timeout = float(body.get("timeout_s") or 600)
+        except (TypeError, ValueError):
+            timeout = 600.0
+        timeout = min(max(timeout, ASK_TIMEOUT_SEC[0]), ASK_TIMEOUT_SEC[1])
+        now = self._clock()
+        tool = str(body.get("tool") or "?")[:60]
+        detail = " ".join(str(body.get("detail") or tool).split())[:300]
+        ask_id = self._store.add_ask(job_id, tool, detail, now, now + timeout)
+        if ask_id is None:
+            return None
+        logger.info("CLAUDE_RELAY: #%d asks for approval %d: %s", job_id, ask_id, detail[:80])
+        self._wake.set()
+        return {"ask_id": ask_id, "timeout_s": timeout}
+
+    def ask_status(self, ask_id: int, wait: float) -> Optional[dict]:
+        """``{"status"}`` of a request, waiting up to ``wait`` seconds while it is pending."""
+        self._seen()
+        deadline = time.monotonic() + max(0.0, min(float(wait), MAX_WAIT_SEC))
+        while True:
+            ask = self._store.get_ask(ask_id)
+            if ask is None:
+                return None
+            if ask["status"] == "pending" and self._clock() > ask["expires_at"]:
+                self._expire_asks()
+                continue
+            remaining = deadline - time.monotonic()
+            if ask["status"] != "pending" or remaining <= 0 or self._stopping.is_set():
+                return {"status": ask["status"]}
+            with self._asks_changed:
+                self._asks_changed.wait(min(remaining, 1.0))
+
+    def _expire_asks(self) -> None:
+        if self._store.expire_asks(self._clock()):
+            with self._asks_changed:
+                self._asks_changed.notify_all()
+
+    def _end_asks(self, job_id: int) -> None:
+        if self._store.cancel_asks(job_id, self._clock()):
+            with self._asks_changed:
+                self._asks_changed.notify_all()
+
+    def _send_asks(self) -> None:
+        """New requests to WeChat; a note when one ran out unanswered."""
+        for ask in self._store.unsent_asks():
+            text = (f"#{ask['job_id']} 要你批准：{ask['detail']}\n"
+                    f"回复「同意」或「拒绝」（{format_duration(ask['expires_at'] - ask['created_at'])}内不回就算拒绝）")
+            try:
+                sent = bool(self._send(ask["chat_id"], text))
+            except Exception:
+                logger.exception("CLAUDE_RELAY: approval request %d not sent", ask["id"])
+                sent = False
+            if sent:
+                self._store.mark_ask_sent(ask["id"])
+        self._expire_asks()
+        for ask in self._store.expired_unnoted():
+            try:
+                self._send(ask["chat_id"], f"#{ask['job_id']} 的请求没等到回复，已按拒绝处理。")
+            except Exception:
+                logger.exception("CLAUDE_RELAY: expiry note of request %d not sent", ask["id"])
+            self._store.mark_ask_noted(ask["id"])
+
     def _cancel(self, chat_id: str, job_id: Optional[int]) -> str:
         if job_id is None:
             job = self._store.latest_open(chat_id)
@@ -363,6 +469,7 @@ class ClaudeRelay:
         if outcome == "cancelled":
             return f"#{job_id} 还没开始，已取消。"
         if outcome == "requested":
+            self._end_asks(job_id)
             return f"#{job_id} 正在执行，已通知 Mac 停下来，停好后会告诉你。"
         return f"#{job_id} 已经结束了（{STATUS_NAMES.get(outcome, outcome)}）。"
 
@@ -414,6 +521,9 @@ class ClaudeRelay:
             lines.append(f"#{job['id']} {state} · {_preview(job['text'])}")
             if job["status"] == "running" and progress_line(job.get("progress", "")):
                 lines.append(f"    {progress_line(job['progress'])}")
+        ask = self._store.pending_ask(chat_id)
+        if ask is not None:
+            lines.append(f"#{ask['job_id']} 在等你批准：{ask['detail']}（回复「同意」或「拒绝」）")
         return "\n".join(lines)
 
     # ── from the Mac worker (http.py) ─────────────────────────────────────
@@ -432,7 +542,10 @@ class ClaudeRelay:
 
     def cancel_from_console(self, job_id: int) -> str:
         """Cancel any job (the console is the owner's): see ``RelayStore.cancel`` for the result."""
-        return self._store.cancel(int(job_id), self._clock())
+        outcome = self._store.cancel(int(job_id), self._clock())
+        if outcome == "requested":
+            self._end_asks(int(job_id))
+        return outcome
 
     @property
     def store(self) -> RelayStore:
@@ -485,6 +598,7 @@ class ClaudeRelay:
         )
         if taken:
             logger.info("CLAUDE_RELAY: #%d finished (ok=%s, %d chars)", job_id, payload.get("ok"), len(text))
+            self._end_asks(job_id)
             self._wake.set()
         return taken
 
@@ -505,7 +619,9 @@ class ClaudeRelay:
         for job_id in self._store.mark_lost(now - LOST_AFTER_SEC):
             logger.warning("CLAUDE_RELAY: #%d lost (no heartbeat for %d s)", job_id, LOST_AFTER_SEC)
         if self._send is None:
+            self._expire_asks()
             return
+        self._send_asks()
         if self._progress_sec > 0:
             self._send_progress(now)
         for job in self._store.undelivered():

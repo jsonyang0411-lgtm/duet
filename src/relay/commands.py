@@ -11,6 +11,9 @@
     cc / cc 帮助                    the help text
 
 With CLAUDE_RELAY_ONLY=on the "cc" can be left out (see ClaudeRelay.handle).
+
+While Claude waits for an approval (``parse_answer``): 同意 / 拒绝, optionally
+with the job number ("同意 17"); no "cc" is needed for these.
 """
 
 from __future__ import annotations
@@ -29,6 +32,10 @@ STATUS_WORDS = {"状态", "status", "列表", "list"}
 RESET_WORDS = {"新对话", "新会话", "重置", "reset", "new"}
 PROJECT_WORDS = {"项目", "项目列表", "当前项目", "projects", "project"}
 
+ALLOW_WORDS = {"同意", "批准", "允许", "可以", "好", "好的", "行", "ok", "okay", "yes", "y", "approve", "allow"}
+DENY_WORDS = {"拒绝", "不同意", "不批准", "不允许", "不行", "不可以", "不要", "no", "n", "deny"}
+_ANSWER = re.compile(r"^(\S+?)\s*[#＃]?(\d+)?\s*[。.!！]?$")
+
 
 @dataclass(frozen=True)
 class RelayCommand:
@@ -43,6 +50,21 @@ def prefix_pattern(prefix: str) -> re.Pattern:
     return re.compile(
         rf"^\s*/?{re.escape(prefix)}(?![A-Za-z0-9_])\s*[:：,，]?\s*(.*)$", re.S | re.I,
     )
+
+
+def parse_answer(body: str) -> tuple[str, int | None] | None:
+    """``("allow" | "deny", job number or None)`` for an answer to an approval request, else None."""
+    m = _ANSWER.match(body.strip())
+    if not m:
+        return None
+    word = m.group(1).lower()
+    if word in ALLOW_WORDS:
+        decision = "allow"
+    elif word in DENY_WORDS:
+        decision = "deny"
+    else:
+        return None
+    return decision, int(m.group(2)) if m.group(2) else None
 
 
 def parse(body: str) -> RelayCommand:

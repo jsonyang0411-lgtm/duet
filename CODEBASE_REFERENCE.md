@@ -1000,6 +1000,10 @@ todo_delete_keywords: list[str] = [
 | `commands.parse(body)` 新增 | `projects`（项目、当前项目）、`switch`（切到 / 切换到 / 进入 / cd / use + 别名） | `RelayCommand` |
 | `ClaudeRelay` 便利功能 | 只做中转时允许的人的私聊文字不用 `cc` 前缀（非文字、空白、别人、群里的不算）；`note_worker(projects, default)` 记下 worker 每次取任务时报的项目（请求头 `X-Relay-Projects` JSON 列表、`X-Relay-Default` JSON 字符串）；`projects_text` / `_switch`（知道列表时检查别名，切换会开新会话）；入队时没写 `@` 就用这个私聊的当前项目；状态里显示项目；帮助在只做中转时不写 `cc` | — |
 | `RelayStore.current_project(chat_id)` / `set_project(chat_id, project)` | `relay_sessions.project` 列（旧库启动时 `ALTER TABLE` 补上）；切换项目同时清空会话 | `str` / — |
+| `commands.parse_answer(body)` | 批准请求的回复：`ALLOW_WORDS`（同意、批准、允许、可以、好、行、ok…）/ `DENY_WORDS`（拒绝、不同意、不行、不要、no…），可带编号（「同意 17」「批准#3」）和句末标点；「同意一下这个提交」不算 | `("allow"\|"deny", int\|None) \| None` |
+| `ClaudeRelay.ask(job_id, body)` / `ask_status(ask_id, wait)` / `_answer(chat_id, content, sent_at, by_voice)` / `_send_asks()` / `_end_asks(job_id)` | 微信里批准：worker 的钩子 `POST /relay/jobs/<id>/ask {tool, detail, timeout_s}` 建请求（只给进行中的任务，期限夹在 60–3600 秒），发送线程发「#17 要你批准：…回复「同意」或「拒绝」（10分钟内不回就算拒绝）」；`GET /relay/asks/<n>?wait=` 长轮询状态；允许的人在**这个私聊**里打字回复才算（带不带 `cc` 都行；没有在等的请求时，带 `cc` 或只做中转回「现在没有等你批准的操作」，否则当普通消息）；请求之前打的、超过 5 分钟的旧消息、过了期限的都不算；语音回复只提示打字；任务取消/结束时请求变 `cancelled`；超时变 `expired` 并告诉微信一次（`noted`）。HTTP 上没有批准的入口 | `dict \| None` / `dict \| None` / `(bool, str) \| None` / — / — |
+| `RelayStore.add_ask / get_ask / pending_ask(chat_id, job_id=None) / settle_ask / unsent_asks / mark_ask_sent / expire_asks / expired_unnoted / mark_ask_noted / cancel_asks` | `relay_asks(id, job_id, chat_id, tool, detail, status pending→allow/deny/expired/cancelled, created_at, expires_at, answered_at, sent, noted)` | — |
+| worker `--permission-hook` / `permission_hook(request, job_id, config_path)` / `describe_request(tool, args)` / `hook_settings(settings)` / `system_note(settings)` | `wechat_approval`（默认开）时 claude 加 `--settings`，PermissionRequest 钩子就是 worker 自己（`--permission-hook`，超时 = `approval_timeout_min`×60+120 秒）；claude 的环境里有 `RELAY_JOB_ID`、`CLAUDE_RELAY_CONFIG`；钩子把「运行命令 …」「修改文件 …」「打开网页 …」发给机器人，等到 `allow` 就放行，`deny`/`expired` 拒绝并告诉 Claude 原因，`cancelled` 拒绝并 `interrupt`，连不上机器人也拒绝；系统提示里关于批准的那句换成「会发到对方微信上请对方批准…超过 N 分钟没回就算拒绝」 | `dict` / `str` / `str` / `str` |
 | `attachments.attachment_kind(msg)` / `resolve(config, held, number)` / `locate_received_file(data_dirs, name, size=0, timestamp=0)` / `Held(kind, msg, at)` | 新文件 `src/relay/attachments.py`。`msg_type=3` 是图片、`msg_type=49` 且有 `file_name` 是文件；图片用 `vision.find_recent_image_path`（上限放宽到 `MAX_FILE_BYTES` 50 MB，`.dat` 解码），找不到时用消息上的 `_capture_media_screenshot` 截聊天区域（「聊天截图-N.jpg」）；文件在每个账号目录（`media_base_dir`、`WECHAT_DATA_DIR`、`~/Documents/xwechat_files`、`~/Documents/WeChat Files` 及其子目录）的 `msg/file/<年-月>/`、`FileStorage/File/<年-月>/` 里找同名或 `名(1).扩展名`，知道大小时只认大小相同的（还在下载的不算），取最新的；名字带路径的不认 | `str` / `(path, name, problem)` / `Path \| None` |
 | `ClaudeRelay` 附件 `_hold` / `_take_held` / `_collect` / `file_path(job_id, file_id)` | 允许的人私聊发的图片和文件先放着（每个私聊一个列表，`HOLD_SEC` 600 秒内有效）：只做中转时回「收到图片，下一个任务会带上它（现在有 N 个附件…）」，否则不回（普通流程照常）；下一个任务入队时取走，复制到 `files_dir/attachments/<时间>-<随机>/`（同名文件加 `(2)`，30 天前的目录删掉），和任务**同一个事务**写进 `relay_files`（worker 不会拿到缺附件的任务）；回执写「带 N 个附件」和没找到的原因；重试沿用原任务的附件；`next_job` 的 JSON 带 `files: [{id, name, size}]` | — / `list[Held]` / `(files, problems)` / `str \| None` |
 | `RelayStore.add(..., files=())` / `files(job_id)` / `file(job_id, file_id)` | `relay_files(id, job_id, name, path, size)`；只认属于这个任务的文件 | `int` / `list[dict]` / `dict \| None` |
@@ -1025,7 +1029,7 @@ todo_delete_keywords: list[str] = [
 | `ClaudeRelay.next_job(wait) / heartbeat(job_id) / finish(job_id, payload)` | HTTP 调用：长轮询最多 `MAX_WAIT_SEC`（30 秒）；三者都记录 Mac 最后出现时间，`mac_online()` = 60 秒内来过 | `dict \| None` / `dict \| None` / `bool \| None` |
 | `ClaudeRelay.tick()` | 发送线程每 5 秒（有结果时立即）：标记失联、把没发的结果用 `send(chat_id, text)` 发回原私聊，失败 30 秒后再试 | — |
 | `ClaudeRelay.result_message(job) / status_text(chat_id) / help_text()` | 「#17 完成（4分12秒）\n…」、失联提示（含 `cc 重试 17`）、超长截断；最近 5 个任务和 Mac 在线状态；命令说明 | `str` |
-| `http.serve(relay, host, port, token)` | `ThreadingHTTPServer` 守护线程：`GET /relay/health`、`GET /relay/next?wait=`（无任务 204）、`GET /relay/jobs/<id>/files/<n>`（附件原样字节，不是这个任务的 404）、`POST /relay/jobs/<id>/heartbeat`、`POST /relay/jobs/<id>/result`；无 token 401、坏 JSON 400、未知任务 404、请求体上限 1 MB | `ThreadingHTTPServer` |
+| `http.serve(relay, host, port, token)` | `ThreadingHTTPServer` 守护线程：`GET /relay/health`、`GET /relay/next?wait=`（无任务 204）、`GET /relay/jobs/<id>/files/<n>`（附件原样字节，不是这个任务的 404）、`POST /relay/jobs/<id>/ask`、`GET /relay/asks/<n>?wait=`、`POST /relay/jobs/<id>/heartbeat`、`POST /relay/jobs/<id>/result`；无 token 401、坏 JSON 400、未知任务 404、请求体上限 1 MB | `ThreadingHTTPServer` |
 | `steps.claude_relay(ctx)` | 路由步骤（`persist` 之后、`memory_hooks` 之前）：`router._claude_relay` 为 `None` 时跳过；命中则 `trace.reason("claude_relay")` 并以回执结束路由 | `Stop \| None` |
 | `Bot._start_claude_relay(config, router, backend)` | `CLAUDE_RELAY=on` 时建中转并启动；端口打不开只记错误日志（任务照样排队，回执会说 Mac 不在线）；`run()` 结束时 `stop()` | `ClaudeRelay \| None` |
 | `tools/claude_relay/worker.py` | Mac 端，只用标准库（系统 Python 3.9 可用）：`load_settings`（`~/.claude-relay/config.json`，`RELAY_URL`/`RELAY_TOKEN` 覆盖）、`find_claude`（PATH、常见位置、最新的 VS Code 扩展内置版，每个任务重新找）、`project_dir`（只允许 `projects` 里的别名）、`RelayClient`（忽略系统代理）、`run_claude`（任务走 stdin；`--output-format stream-json --verbose`，边读边交给 `Progress`；每 30 秒心跳并带上进度，取消/超时/worker 停止时发 SIGINT，30 秒后强杀）、`parse_output`（流里最后一个 `"type": "result"` 行，也认旧的单个 JSON）、`summarize`（结果、会话、被拒绝的权限）、会话不存在时去掉 `--resume` 重跑一次、`deliver`/`flush_outbox`（结果先写 `~/.claude-relay/outbox/`，送达才删）、`--check`、`--once` | — |
@@ -2255,6 +2259,9 @@ Mac worker.py：GET /relay/next（长轮询）→ claim_next（带上这个私�
   → 有 files 时 fetch_files：GET /relay/jobs/<id>/files/<n> → ~/.claude-relay/inbox/job-<id>/ → claude --add-dir
   → claude -p --output-format stream-json --verbose --permission-mode auto --permission-prompts none [--resume 会话]
   → Progress.feed(每一行) → 每 30 秒 POST heartbeat {steps, doing, plan}（返回 cancel）→ POST result
+  → 要人工批准时 claude 调钩子 worker.py --permission-hook → POST /relay/jobs/<id>/ask
+      → 发送线程 _send_asks → 微信「#17 要你批准：…」→ 私聊回「同意」→ ClaudeRelay._answer → settle_ask
+      → 钩子 GET /relay/asks/<n> 拿到 allow / deny / expired / cancelled → 告诉 claude
 发送线程 tick → _send_progress：排过队的「#17 开始了」、每 CLAUDE_RELAY_PROGRESS_MIN 分钟「#17 进行中…」
 ClaudeRelay.finish → RelayStore.finish（更新会话）→ 发送线程 tick → _deliver
   → 结果太长且能发文件：backend.send_file(私聊, 中转结果-17.txt) → backend.send_text(私聊, 「#17 完成…」+ 开头 300 字)
@@ -2268,9 +2275,11 @@ CREATE TABLE relay_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, sen
   progress TEXT DEFAULT '{}', progress_sent_at REAL, progress_sent TEXT DEFAULT '');
 CREATE TABLE relay_sessions (chat_id TEXT PRIMARY KEY, session_id TEXT, updated_at REAL, project TEXT DEFAULT '');
 CREATE TABLE relay_files (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER, name TEXT, path TEXT, size INTEGER);
+CREATE TABLE relay_asks (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER, chat_id TEXT, tool TEXT, detail TEXT,
+  status TEXT DEFAULT 'pending', created_at REAL, expires_at REAL, answered_at REAL, sent INTEGER, noted INTEGER);
 ```
 
-安全：只认指定 wxid 的私聊；HTTP 要 token；端口只应对局域网开放（Windows 防火墙）；Mac 端用 `auto` 权限模式，无人值守时需要人工批准的操作直接拒绝，并在结果里列出。安装和使用见 `tools/claude_relay/README.md`。
+安全：只认指定 wxid 的私聊；HTTP 要 token；端口只应对局域网开放（Windows 防火墙）；Mac 端用 `auto` 权限模式，需要人工批准的操作发到微信请你批准（`wechat_approval`，默认开；关掉或超时就拒绝，并在结果里列出）。批准只能由允许的人在那个私聊里打字回复，HTTP 接口不能批准，语音不算。安装和使用见 `tools/claude_relay/README.md`。
 
 ### 功能S: OCR 备选读取（OCR_FALLBACK）
 
