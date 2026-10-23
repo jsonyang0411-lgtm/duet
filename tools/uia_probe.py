@@ -27,6 +27,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 MIN_SIZE = 40            # px; Qt keeps many tiny helper windows around
 NAME_CHARS = 60
+# What friend management would click or type into; windows and panes are only structure.
+USABLE_TYPES = frozenset({
+    "ButtonControl", "SplitButtonControl", "EditControl", "MenuItemControl", "ListItemControl",
+    "CheckBoxControl", "RadioButtonControl", "HyperlinkControl", "ComboBoxControl", "TabItemControl",
+})
 
 
 def describe(control, depth: int) -> str:
@@ -44,9 +49,9 @@ def describe(control, depth: int) -> str:
 
 
 def walk(root, max_depth: int, limit: int, walker) -> tuple[list[str], int, int]:
-    """(lines, controls seen, controls with a name) for the tree below ``root``."""
+    """(lines, controls seen, named buttons / inputs / menu items) for the tree below ``root``."""
     lines: list[str] = []
-    seen = named = 0
+    seen = usable = 0
     for control, depth in walker(root, includeTop=True, maxDepth=max_depth):
         if seen >= limit:
             lines.append(f"... stopped at {limit} controls (--limit)")
@@ -54,18 +59,19 @@ def walk(root, max_depth: int, limit: int, walker) -> tuple[list[str], int, int]
         lines.append(describe(control, depth))
         seen += 1
         try:
-            named += bool(str(control.Name).strip())
+            usable += control.ControlTypeName in USABLE_TYPES and bool(str(control.Name).strip())
         except Exception:
             pass
-    return lines, seen, named
+    return lines, seen, usable
 
 
-def verdict(total: int, named: int) -> str:
+def verdict(total: int, usable: int) -> str:
     if total <= 1:
         return "UI Automation shows nothing below the window itself: its controls cannot be found by name."
-    if named == 0:
-        return f"{total} controls are listed but none has a name: only their positions and classes could be used."
-    return f"{named} of {total} controls have a name: look for the ones friend management clicks."
+    if usable == 0:
+        return (f"{total} controls, but only windows and panes, no named button, input or menu item: "
+                "the window draws its own content and UI Automation cannot find anything to click by name.")
+    return f"{usable} named button / input / menu item controls of {total}: friend management could click these by name."
 
 
 # ── Windows only ────────────────────────────────────────────────────────
@@ -130,12 +136,12 @@ def main(argv=None) -> int:
         out.append("")
         out.append(f"--- HWND {w['hwnd']}  class={w['class']!r}  title={w['title']!r}  size={w['width']}x{w['height']}")
         try:
-            lines, total, named = walk(control_from_handle(w["hwnd"]), args.depth, args.limit, walker)
+            lines, total, usable = walk(control_from_handle(w["hwnd"]), args.depth, args.limit, walker)
         except Exception as e:
             out.append(f"    UI Automation could not read this window: {e}")
             continue
         out.extend(lines)
-        out.append(f"=> {verdict(total, named)}")
+        out.append(f"=> {verdict(total, usable)}")
 
     report = "\n".join(out)
     print(report)

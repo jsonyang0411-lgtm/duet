@@ -59,13 +59,18 @@ def test_long_names_are_cut(tool):
     assert len(tool.describe(control("TextControl", "字" * 500), 0)) < 200
 
 
-def test_walk_counts_named_controls_and_honours_the_limit(tool):
-    items = [(control("WindowControl", "添加朋友"), 0), (control("PaneControl"), 1),
+def test_walk_counts_named_buttons_and_inputs_and_honours_the_limit(tool):
+    items = [(control("WindowControl", "添加朋友"), 0), (control("PaneControl", "Weixin"), 1),
              (control("ButtonControl", "确定"), 2), (control("EditControl", "  "), 2)]
-    lines, total, named = tool.walk("root", 6, 3, tree(*items))
-    assert (total, named) == (3, 2)
+    lines, total, usable = tool.walk("root", 6, 3, tree(*items))
+    assert (total, usable) == (3, 1)                                 # windows and panes do not count
     assert lines[-1].startswith("... stopped at 3 controls")
     assert lines[1].startswith("  PaneControl")                      # indented by depth
+
+
+def test_a_blank_named_input_is_not_usable(tool):
+    _, total, usable = tool.walk("root", 6, 10, tree((control("EditControl", " "), 0), (control("ButtonControl"), 1)))
+    assert (total, usable) == (2, 0)
 
 
 def test_walk_asks_for_the_top_control_and_the_depth(tool):
@@ -74,13 +79,23 @@ def test_walk_asks_for_the_top_control_and_the_depth(tool):
     assert walker.calls == [{"includeTop": True, "maxDepth": 4}]
 
 
-@pytest.mark.parametrize("total, named, expect", [
+@pytest.mark.parametrize("total, usable, expect", [
     (1, 0, "nothing below the window"),
-    (30, 0, "none has a name"),
-    (30, 12, "12 of 30 controls have a name"),
+    (30, 0, "only windows and panes"),
+    (30, 12, "12 named button / input / menu item controls of 30"),
 ])
-def test_verdict(tool, total, named, expect):
-    assert expect in tool.verdict(total, named)
+def test_verdict(tool, total, usable, expect):
+    assert expect in tool.verdict(total, usable)
+
+
+def test_what_the_real_wechat_4_dialogs_showed_is_not_called_promising(tool):
+    """Round 2 on a real machine: the window, a 2 px pane and the render surface, all with names."""
+    real = tree((control("WindowControl", "添加朋友", cls="Qt51514QWindowIcon"), 0),
+                (control("PaneControl", "Weixin", cls="Qt51514QWindowIcon", rect=(2276, 1588, 2278, 1590)), 1),
+                (control("PaneControl", "MMUIRenderSubWindowHW", cls="MMUIRenderSubWindowHW"), 1))
+    lines, total, usable = tool.walk("root", 6, 400, real)
+    assert (total, usable) == (3, 0)
+    assert "only windows and panes" in tool.verdict(total, usable)
 
 
 def test_the_main_window_is_skipped_by_default(tool, monkeypatch, capsys):

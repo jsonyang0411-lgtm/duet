@@ -60,7 +60,8 @@ NOT_FOUND_MARKERS = ("该用户不存在", "用户不存在", "查找失败", "�
 ALREADY_FRIEND_MARKERS = ("音视频通话", "语音聊天", "视频聊天", "朋友资料")   # next to "发消息" on a friend's card
 ADD_BUTTON_LABELS = ("添加到通讯录", "加为朋友", "加为联系人")
 SEND_LABELS = ("发送", "确定", "完成")
-ADD_DIALOG_TITLES = ("添加朋友", "Add Friend")   # title of WeChat 4.0's add-friend window
+ADD_DIALOG_TITLES = ("添加朋友", "Add Friend")   # title of WeChat 4.0's add-friend window (read on a real machine);
+                                                # exact, because the application window is "申请添加朋友"
 
 
 class _Abort(Exception):
@@ -482,7 +483,7 @@ class FriendManager:
         # over from an earlier run); otherwise only a window that appears now counts.
         before = self._add_dialog_candidates(main_hwnd)
         for h in before:
-            if any(t in win32gui.GetWindowText(h) for t in ADD_DIALOG_TITLES):
+            if win32gui.GetWindowText(h) in ADD_DIALOG_TITLES:
                 return h
 
         self._combo(main_hwnd, VK_CONTROL, 0x31)    # Ctrl+1: the chat tab, where the (+) is
@@ -529,7 +530,12 @@ class FriendManager:
         return None
 
     def _add_dialog_candidates(self, main_hwnd: int) -> list[int]:
-        """Visible windows of WeChat's process, besides the main one, that are the add-friend window's class and size."""
+        """Visible windows of WeChat's process, besides the main one, that may be the add-friend window.
+
+        The title is the sure sign.  Without it the class and a size band decide, which only
+        holds in the logical pixels of a process that is not DPI aware (a real machine showed the
+        window at 746x1133 physical pixels, 373x566 logical) and also fits a chat of its own.
+        """
         import win32gui, win32process
         _, main_pid = win32process.GetWindowThreadProcessId(main_hwnd)
         found: list[int] = []
@@ -538,6 +544,9 @@ class FriendManager:
             if h != main_hwnd and win32gui.IsWindow(h) and win32gui.IsWindowVisible(h):
                 _, pid = win32process.GetWindowThreadProcessId(h)
                 if pid == main_pid and win32gui.GetClassName(h) == "Qt51514QWindowIcon":
+                    if win32gui.GetWindowText(h) in ADD_DIALOG_TITLES:
+                        found.append(h)
+                        return
                     r = win32gui.GetWindowRect(h)
                     if 300 <= r[2] - r[0] <= 600 and 400 <= r[3] - r[1] <= 800:
                         found.append(h)

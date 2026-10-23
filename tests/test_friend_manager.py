@@ -214,6 +214,18 @@ class AcceptFriendRequestsTests(FriendTestCase):
         self.assertEqual(len(result), 2)
         self.assertEqual(len(self.clicks), 3)
 
+    def test_a_slow_screen_gets_a_few_more_looks_before_the_request_counts_as_pending(self):
+        accept = row("接受", 0.70, 0.21, 0.76, 0.25)
+        ocr = FakeOcr([self.NEW_FRIENDS], [accept], [], [accept], [accept], [])      # gone on the second re-look
+        self.assertEqual(len(self.manager(FakeWindow(), ocr).accept_friend_requests()), 1)
+
+    def test_a_button_that_never_goes_away_is_looked_at_a_few_times_and_not_counted(self):
+        accept = row("接受", 0.70, 0.21, 0.76, 0.25)
+        ocr = FakeOcr([self.NEW_FRIENDS], [accept], [], [accept])                    # the last screen stays
+        self.assertEqual(self.manager(FakeWindow(), ocr).accept_friend_requests(), [])
+        self.assertEqual(ocr.captures, 2 + 1 + 1 + 3)                                # nav, panel, dialog, after click, 3 re-looks
+        self.assertEqual(len(self.clicks), 2)                                        # and never clicked again
+
     def test_a_click_that_is_not_delivered_ends_the_run(self):
         ocr = FakeOcr([self.NEW_FRIENDS], [row("接受", 0.70, 0.21, 0.76, 0.25)])
         self.assertEqual(self.manager(FakeWindow(), ocr, click_ok=False).accept_friend_requests(), [])
@@ -755,6 +767,27 @@ class OpenAddFriendDialogTests(FriendTestCase):
         desktop.add(self.CHAT, title="张三")
         desktop.on_click = [lambda: desktop.add(self.MENU, cls=FakeDesktop.MENU_CLASS, rect=(10, 60, 200, 300))]
         self.assertIsNone(self.open(desktop))
+
+    def test_the_dialog_is_found_by_its_title_whatever_size_the_process_sees(self):
+        """A real machine: 746x1133 physical pixels, which a DPI-aware process sees; the size band would miss it."""
+        desktop = FakeDesktop()
+        desktop.on_click = [lambda: desktop.add(self.MENU, cls=FakeDesktop.MENU_CLASS, rect=(10, 60, 200, 300)),
+                            lambda: desktop.add(self.DIALOG, title="添加朋友", rect=(1545, 470, 2291, 1603))]
+        self.assertEqual(self.open(desktop), self.DIALOG)
+
+    def test_without_the_title_a_window_of_the_wrong_size_is_not_the_dialog(self):
+        desktop = FakeDesktop()
+        desktop.on_click = [lambda: desktop.add(self.MENU, cls=FakeDesktop.MENU_CLASS, rect=(10, 60, 200, 300)),
+                            lambda: desktop.add(self.DIALOG, rect=(1545, 470, 2291, 1603))]
+        self.assertIsNone(self.open(desktop))
+
+    def test_the_application_window_is_not_a_leftover_add_dialog(self):
+        desktop = FakeDesktop()
+        application = 504
+        desktop.add(application, title="申请添加朋友", rect=(100, 100, 500, 800))      # a size that is a candidate
+        self.appears_after_clicks(desktop)
+        self.assertEqual(self.open(desktop), self.DIALOG)                # not the application window, which only
+        self.assertEqual(desktop.clicks, 2)                              # contains the words: the real one was opened
 
     def test_a_dialog_left_over_from_an_earlier_run_is_reused_by_its_title(self):
         desktop = FakeDesktop()
