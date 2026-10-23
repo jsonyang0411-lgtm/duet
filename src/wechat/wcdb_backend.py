@@ -1258,23 +1258,32 @@ class WcdbBackend(AbstractWeChatBackend):
                 return cached
         voice_bytes = None
         if self._client and talker:
-            try:
-                local_id = msg.get("local_id") or msg.get("localId") or 0
-                create_time = msg.get("create_time") or msg.get("createTime") or 0
-                msg_svr_id = (
-                    msg.get("msg_svr_id") or msg.get("msgSvrId") or
-                    msg.get("server_id") or msg.get("serverId") or 0
-                )
-                voice_bytes = self._client.get_voice_data(
-                    talker, local_id, create_time, msg_svr_id
-                )
-                if voice_bytes:
-                    logger.info(
-                        "Retrieved %d voice bytes from WCDB for %s (local_id=%s, svr_id=%s)",
-                        len(voice_bytes), talker, local_id, msg_svr_id
+            local_id = msg.get("local_id") or msg.get("localId") or 0
+            create_time = msg.get("create_time") or msg.get("createTime") or 0
+            msg_svr_id = (
+                msg.get("msg_svr_id") or msg.get("msgSvrId") or
+                msg.get("server_id") or msg.get("serverId") or 0
+            )
+            # WeChat 4.0 may write media_0.db asynchronously with a 0.5-2s lag for long audio.
+            # Retry a few times with short sleeps so long voice messages aren't prematurely dropped.
+            is_recent = abs(time.time() - float(create_time)) < 30 if create_time else True
+            max_attempts = 4 if is_recent else 1
+            for attempt in range(max_attempts):
+                try:
+                    voice_bytes = self._client.get_voice_data(
+                        talker, local_id, create_time, msg_svr_id
                     )
-            except Exception:
-                logger.debug("Failed to retrieve voice bytes from WCDB client", exc_info=True)
+                    if voice_bytes:
+                        logger.info(
+                            "Retrieved %d voice bytes from WCDB for %s (local_id=%s, svr_id=%s%s)",
+                            len(voice_bytes), talker, local_id, msg_svr_id,
+                            f", attempt {attempt + 1}" if attempt > 0 else ""
+                        )
+                        break
+                except Exception:
+                    logger.debug("Failed to retrieve voice bytes from WCDB client", exc_info=True)
+                if attempt + 1 < max_attempts:
+                    time.sleep(0.5)
         try:
             return voice.process(msg, voice_bytes=voice_bytes)
         except Exception:
