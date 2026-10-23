@@ -603,5 +603,39 @@ class WcdbBackendExposesItsWindowTests(unittest.TestCase):
         self.assertIs(backend.window_lock, backend._window_lock)
 
 
+class WeChat4AddFriendTests(FriendTestCase):
+    def test_wechat4_not_found(self):
+        manager = self.manager(FakeWindow(), FakeOcr([row("无法找到该用户，请检查你填写的账号是否正确", 0.1, 0.5, 0.8, 0.6)]))
+        with patch.object(manager, "_open_add_friend_dialog_wechat4", return_value=999), \
+             patch.object(manager, "_focus_window"), \
+             patch.object(manager, "_close_window"):
+            res = manager._add_friend_wechat4(HWND, "nonexistent", "")
+            self.assertFalse(res["ok"])
+            self.assertEqual(res["reason"], "not_found")
+
+    def test_wechat4_already_friend(self):
+        manager = self.manager(FakeWindow(), FakeOcr([row("朋友资料", 0.1, 0.4, 0.3, 0.45), row("语音聊天", 0.4, 0.8, 0.6, 0.9)]))
+        with patch.object(manager, "_open_add_friend_dialog_wechat4", return_value=999), \
+             patch.object(manager, "_focus_window"), \
+             patch.object(manager, "_close_window"):
+            res = manager._add_friend_wechat4(HWND, "friend_user", "")
+            self.assertFalse(res["ok"])
+            self.assertEqual(res["reason"], "already_friend")
+
+    def test_wechat4_send_success(self):
+        add_btn = row("添加到通讯录", 0.4, 0.8, 0.6, 0.9)
+        send_btn = row("发送", 0.4, 0.8, 0.6, 0.9)
+        ocr = FakeOcr([add_btn], [send_btn], [])
+        window = FakeWindow()
+        manager = self.manager(window, ocr)
+        with patch.object(manager, "_open_add_friend_dialog_wechat4", return_value=999), \
+             patch.object(manager, "_focus_window"), \
+             patch.object(manager, "_close_window"):
+            res = manager._add_friend_wechat4(HWND, "new_friend", "你好呀")
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["target"], "new_friend")
+            self.assertIn("你好呀", res["message"])
+
+
 if __name__ == "__main__":
     unittest.main()
