@@ -686,5 +686,97 @@ class CaptureTargetTests(FriendTestCase):
         self.assertEqual(ocr.capture.call_count, 1)
 
 
+class FakeDesktop:
+    """A few top-level windows with the win32gui / win32process calls the 4.0 dialog lookup makes."""
+
+    DIALOG_CLASS = "Qt51514QWindowIcon"
+    MENU_CLASS = "Qt51514QWindowToolSaveBits"
+    PID = 4242
+
+    def __init__(self):
+        self.windows = {HWND: {"cls": self.DIALOG_CLASS, "title": "微信", "rect": (0, 0, 1000, 800), "pid": self.PID}}
+        self.on_click = []                       # one callback per click: what appears on the screen
+        self.clicks = 0
+
+    def add(self, hwnd, cls=DIALOG_CLASS, title="", rect=(100, 100, 600, 700), pid=PID):
+        self.windows[hwnd] = {"cls": cls, "title": title, "rect": rect, "pid": pid}
+
+    def click(self, x, y):
+        if self.clicks < len(self.on_click):
+            self.on_click[self.clicks]()
+        self.clicks += 1
+        return True
+
+    def modules(self):
+        gui, process = MagicMock(), MagicMock()
+        gui.IsWindow.side_effect = lambda h: h in self.windows
+        gui.IsWindowVisible.return_value = True
+        gui.GetClassName.side_effect = lambda h: self.windows[h]["cls"]
+        gui.GetWindowText.side_effect = lambda h: self.windows[h]["title"]
+        gui.GetWindowRect.side_effect = lambda h: self.windows[h]["rect"]
+        gui.EnumWindows.side_effect = lambda cb, extra: [cb(h, extra) for h in list(self.windows)] and None
+        process.GetWindowThreadProcessId.side_effect = lambda h: (1, self.windows[h]["pid"])
+        return {"win32gui": gui, "win32process": process}
+
+
+class OpenAddFriendDialogTests(FriendTestCase):
+    """The WeChat 4.0 add-friend window is found among the windows of the process without taking a chat for it."""
+
+    CHAT, MENU, DIALOG = 501, 502, 503
+
+    def open(self, desktop, window=None):
+        manager = self.manager(window or FakeWindow(), FakeOcr([]))
+        manager._clicker = desktop.click
+        manager._rect_of = lambda h: (0, 0, 1000, 800)
+        with patch.object(friend_manager, "sys", SimpleNamespace(platform="win32")), \
+             patch.dict("sys.modules", desktop.modules()):
+            return manager._open_add_friend_dialog_wechat4(HWND)
+
+    def appears_after_clicks(self, desktop):
+        desktop.on_click = [lambda: desktop.add(self.MENU, cls=FakeDesktop.MENU_CLASS, rect=(10, 60, 200, 300)),
+                            lambda: desktop.add(self.DIALOG)]
+
+    def test_opens_the_dialog_through_the_plus_menu_and_returns_the_new_window(self):
+        desktop = FakeDesktop()
+        self.appears_after_clicks(desktop)
+        self.assertEqual(self.open(desktop), self.DIALOG)
+        self.assertEqual(self.keys, [("combo", CTRL, 0x31)])             # Ctrl+1, then the two clicks
+        self.assertEqual(desktop.clicks, 2)
+
+    def test_a_chat_in_a_window_of_its_own_is_not_taken_for_the_dialog(self):
+        desktop = FakeDesktop()
+        desktop.add(self.CHAT, title="张三")                              # same class, same size range
+        self.appears_after_clicks(desktop)
+        self.assertEqual(self.open(desktop), self.DIALOG)
+        self.assertEqual(desktop.clicks, 2)                              # it still opened the real dialog
+
+    def test_without_a_new_window_nothing_is_returned_even_if_a_chat_window_fits(self):
+        desktop = FakeDesktop()
+        desktop.add(self.CHAT, title="张三")
+        desktop.on_click = [lambda: desktop.add(self.MENU, cls=FakeDesktop.MENU_CLASS, rect=(10, 60, 200, 300))]
+        self.assertIsNone(self.open(desktop))
+
+    def test_a_dialog_left_over_from_an_earlier_run_is_reused_by_its_title(self):
+        desktop = FakeDesktop()
+        desktop.add(self.DIALOG, title="添加朋友")
+        self.assertEqual(self.open(desktop), self.DIALOG)
+        self.assertEqual(self.keys, [])
+        self.assertEqual(desktop.clicks, 0)
+
+    def test_nothing_is_typed_or_clicked_when_wechat_is_not_in_front(self):
+        desktop = FakeDesktop()
+        window = FakeWindow()
+        window.foreground = False
+        with self.assertRaises(friend_manager._Abort):
+            self.open(desktop, window)
+        self.assertEqual(self.keys, [])
+        self.assertEqual(desktop.clicks, 0)
+
+    def test_the_menu_is_not_clicked_when_it_never_appears(self):
+        desktop = FakeDesktop()
+        self.assertIsNone(self.open(desktop))
+        self.assertEqual(desktop.clicks, 1)                              # only the (+)
+
+
 if __name__ == "__main__":
     unittest.main()

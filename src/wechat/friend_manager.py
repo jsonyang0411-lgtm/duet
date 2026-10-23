@@ -60,6 +60,7 @@ NOT_FOUND_MARKERS = ("该用户不存在", "用户不存在", "查找失败", "�
 ALREADY_FRIEND_MARKERS = ("音视频通话", "语音聊天", "视频聊天", "朋友资料")   # next to "发消息" on a friend's card
 ADD_BUTTON_LABELS = ("添加到通讯录", "加为朋友", "加为联系人")
 SEND_LABELS = ("发送", "确定", "完成")
+ADD_DIALOG_TITLES = ("添加朋友", "Add Friend")   # title of WeChat 4.0's add-friend window
 
 
 class _Abort(Exception):
@@ -470,22 +471,18 @@ class FriendManager:
         import win32gui, win32process
         _, main_pid = win32process.GetWindowThreadProcessId(main_hwnd)
 
-        existing = []
-        def _enum_existing(h, _):
-            if h != main_hwnd and win32gui.IsWindow(h) and win32gui.IsWindowVisible(h):
-                _, pid = win32process.GetWindowThreadProcessId(h)
-                if pid == main_pid and win32gui.GetClassName(h) == "Qt51514QWindowIcon":
-                    r = win32gui.GetWindowRect(h)
-                    w, h_len = r[2] - r[0], r[3] - r[1]
-                    if 300 <= w <= 600 and 400 <= h_len <= 800:
-                        existing.append(h)
-        win32gui.EnumWindows(_enum_existing, None)
-        if existing:
-            return existing[0]
+        # Class and size also fit a chat opened in a window of its own, so a window that is
+        # already open is used only if its title says it is the add-friend window (one left
+        # over from an earlier run); otherwise only a window that appears now counts.
+        before = self._add_dialog_candidates(main_hwnd)
+        for h in before:
+            if any(t in win32gui.GetWindowText(h) for t in ADD_DIALOG_TITLES):
+                return h
 
-        send_combo(VK_CONTROL, 0x31)
+        self._combo(main_hwnd, VK_CONTROL, 0x31)    # Ctrl+1: the chat tab, where the (+) is
         self._sleep(0.4)
 
+        self._foreground(main_hwnd)
         rect = self._rect_of(main_hwnd)
         plus_x = rect[0] + 285
         plus_y = rect[1] + 60
@@ -510,6 +507,7 @@ class FriendManager:
             logger.warning("_open_add_friend_dialog_wechat4: popup menu not found after clicking (+)")
             return None
 
+        self._foreground(main_hwnd)
         m_rect = win32gui.GetWindowRect(menu_hwnd)
         add_friend_x = m_rect[0] + int(0.5 * (m_rect[2] - m_rect[0]))
         add_friend_y = m_rect[1] + int(0.454 * (m_rect[3] - m_rect[1]))
@@ -517,16 +515,28 @@ class FriendManager:
             return None
         self._sleep(0.8)
 
-        dialog_hwnd = None
         for _ in range(15):
-            existing.clear()
-            win32gui.EnumWindows(_enum_existing, None)
-            if existing:
-                dialog_hwnd = existing[0]
-                break
+            fresh = [h for h in self._add_dialog_candidates(main_hwnd) if h not in before]
+            if fresh:
+                return fresh[0]
             self._sleep(0.1)
+        return None
 
-        return dialog_hwnd
+    def _add_dialog_candidates(self, main_hwnd: int) -> list[int]:
+        """Visible windows of WeChat's process, besides the main one, that are the add-friend window's class and size."""
+        import win32gui, win32process
+        _, main_pid = win32process.GetWindowThreadProcessId(main_hwnd)
+        found: list[int] = []
+
+        def _enum(h, _):
+            if h != main_hwnd and win32gui.IsWindow(h) and win32gui.IsWindowVisible(h):
+                _, pid = win32process.GetWindowThreadProcessId(h)
+                if pid == main_pid and win32gui.GetClassName(h) == "Qt51514QWindowIcon":
+                    r = win32gui.GetWindowRect(h)
+                    if 300 <= r[2] - r[0] <= 600 and 400 <= r[3] - r[1] <= 800:
+                        found.append(h)
+        win32gui.EnumWindows(_enum, None)
+        return found
 
     def _add_friend_wechat4(self, hwnd: int, keyword: str, message: str) -> dict:
         dialog_hwnd = self._open_add_friend_dialog_wechat4(hwnd)
