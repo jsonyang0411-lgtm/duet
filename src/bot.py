@@ -368,6 +368,7 @@ class Bot:
         try:
             from .wechat.friend_manager import AutoFriendService, FriendManager
             from .wechat.ocr.win_ocr import WindowsOcrEngine
+            from .wechat.quiet_send import IdleGate, Win32Desktop
             manager = FriendManager(
                 window_controller=window,
                 ocr_engine=WindowsOcrEngine(window=window),
@@ -377,6 +378,10 @@ class Bot:
                 manager,
                 interval_sec=config.auto_accept_interval_sec,
                 enabled=config.auto_accept_friends == "on",
+                idle_gate=IdleGate(Win32Desktop(), config.auto_accept_idle_sec, 0),
+                idle_sec=config.auto_accept_idle_sec,
+                watch=config.auto_accept_watch == "on",
+                full_check_sec=config.auto_accept_full_check_sec,
             )
         except Exception:
             logger.warning("Friend management could not start", exc_info=True)

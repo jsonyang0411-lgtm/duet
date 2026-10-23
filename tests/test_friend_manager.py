@@ -44,14 +44,24 @@ class FakeWindow:
         self.foreground = True
         self.pasted = []
         self.restored = []
+        self.activations = 0
+        self.find_calls = []             # (force, wake) of every find_hwnd
+        self.previous = 777              # the window the user was in
+        self.focus_returned = []
+        self._desktop = SimpleNamespace(foreground_window=lambda: self.previous)
 
-    def find_hwnd(self, force=False):
+    def find_hwnd(self, force=False, wake=True):
+        self.find_calls.append((force, wake))
         return self.hwnd
+
+    def _return_focus(self, previous):
+        self.focus_returned.append(previous)
 
     def _capture_window_state(self, hwnd):
         return ("state", hwnd)
 
     def _activate_for_send(self, hwnd):
+        self.activations += 1
         return self.activates
 
     def _restore_window_state(self, snapshot, hwnd):
@@ -825,6 +835,296 @@ class OpenAddFriendDialogTests(FriendTestCase):
         desktop = FakeDesktop()
         self.assertIsNone(self.open(desktop))
         self.assertEqual(desktop.clicks, 1)                              # only the (+)
+
+
+def badge_picture(*positions):
+    """A window picture with red round badges in its left rail."""
+    from PIL import Image, ImageDraw
+    image = Image.new("RGB", (1000, 800), (240, 240, 240))
+    draw = ImageDraw.Draw(image)
+    for x, y in positions:
+        draw.ellipse((x, y, x + 16, y + 16), fill=(250, 81, 81))
+    return image
+
+
+class LookForNewsTests(FriendTestCase):
+    """The silent look: a picture of the window, nothing brought forward, clicked or typed."""
+
+    NEW_FRIENDS = row("新的朋友", 0.15, 0.12, 0.25, 0.16)
+
+    def manager_seeing(self, picture, window=None, ocr=None):
+        manager = self.manager(window or FakeWindow(), ocr)
+        manager._grab_window = lambda hwnd: picture
+        return manager
+
+    def test_without_a_window_it_cannot_tell(self):
+        self.assertEqual(self.manager(None, None).look_for_news(), "unknown")
+
+    def test_it_pictures_the_window_without_waking_or_activating_it(self):
+        window = FakeWindow()
+        manager = self.manager_seeing(badge_picture(), window)
+        manager.look_for_news()
+        self.assertEqual(window.find_calls, [(False, False)])              # not forced, not woken from the tray
+        self.assertEqual(window.activations, 0)
+        self.assertNothingHappened()
+
+    def test_it_takes_no_lock_so_it_never_waits_for_a_reply(self):
+        lock = threading.Lock()
+        manager = self.manager(FakeWindow(), None, lock)
+        manager._grab_window = lambda hwnd: badge_picture()
+        lock.acquire()
+        try:
+            self.assertEqual(manager.look_for_news(), "changed")
+        finally:
+            lock.release()
+
+    def test_a_window_that_cannot_be_pictured_is_unknown(self):
+        manager = self.manager(FakeWindow(), None)
+        manager._grab_window = lambda hwnd: (_ for _ in ()).throw(RuntimeError("WeChat is minimized"))
+        self.assertEqual(manager.look_for_news(), "unknown")
+
+    def test_no_window_found_is_unknown(self):
+        self.assertEqual(self.manager_seeing(badge_picture(), FakeWindow(hwnd=None)).look_for_news(), "unknown")
+
+    def test_a_clean_check_settles_the_rail(self):
+        manager = self.manager_seeing(badge_picture((40, 120)), ocr=FakeOcr([self.NEW_FRIENDS], []))
+        self.assertEqual(manager.look_for_news(), "changed")               # nothing to compare with yet
+        manager.accept_friend_requests()                                   # reads the list to its end: nothing there
+        self.assertEqual(manager.look_for_news(), "unchanged")
+
+    def test_a_check_that_did_not_finish_leaves_the_rail_unsettled(self):
+        manager = self.manager_seeing(badge_picture((40, 120)), FakeWindow(contacts_open=False), FakeOcr([]))
+        manager.accept_friend_requests()                                   # the Contacts tab did not open
+        self.assertEqual(manager.look_for_news(), "changed")
+
+    def test_a_stuck_request_leaves_the_rail_unsettled_so_the_next_look_asks_again(self):
+        accept = row("接受", 0.70, 0.21, 0.76, 0.25)
+        manager = self.manager_seeing(badge_picture((40, 120)), ocr=FakeOcr([self.NEW_FRIENDS], [accept], [], [accept]))
+        manager.accept_friend_requests()
+        self.assertEqual(manager.look_for_news(), "changed")
+
+    def test_a_new_badge_after_a_clean_check_is_news(self):
+        pictures = [badge_picture((40, 120))]
+        manager = self.manager(FakeWindow(), FakeOcr([self.NEW_FRIENDS], []))
+        manager._grab_window = lambda hwnd: pictures[-1]
+        manager.accept_friend_requests()
+        pictures.append(badge_picture((40, 120), (40, 190)))              # a request arrives
+        self.assertEqual(manager.look_for_news(), "changed")
+
+
+class FocusReturnTests(FriendTestCase):
+    NEW_FRIENDS = row("新的朋友", 0.15, 0.12, 0.25, 0.16)
+
+    def test_the_focus_goes_back_to_the_window_the_user_was_in(self):
+        window = FakeWindow()
+        self.manager(window, FakeOcr([self.NEW_FRIENDS], [])).accept_friend_requests()
+        self.assertEqual(window.focus_returned, [777])
+
+    def test_also_when_the_window_could_not_be_brought_forward(self):
+        window = FakeWindow(activates=False)
+        self.manager(window, FakeOcr([])).accept_friend_requests()
+        self.assertEqual(window.focus_returned, [777])
+
+    def test_also_after_an_add_friend(self):
+        window = FakeWindow()
+        ocr = FakeOcr([row("搜索", 0.06, 0.04, 0.14, 0.08)])
+        self.manager(window, ocr).add_friend("newbie")
+        self.assertEqual(window.focus_returned, [777])
+
+    def test_nothing_to_go_back_to(self):
+        window = FakeWindow()
+        window.previous = 0
+        self.manager(window, FakeOcr([self.NEW_FRIENDS], [])).accept_friend_requests()
+        self.assertEqual(window.focus_returned, [])
+
+    def test_a_focus_that_cannot_be_returned_does_not_fail_the_check(self):
+        window = FakeWindow()
+        window._return_focus = lambda previous: (_ for _ in ()).throw(OSError("gone"))
+        result = self.manager(window, FakeOcr([self.NEW_FRIENDS], [])).accept_friend_requests()
+        self.assertEqual(result, [])
+
+
+class FakeGate:
+    def __init__(self, idle=1000.0):
+        self.idle = idle
+        self.own_input_marked = 0
+        self.fail = False
+
+    def idle_seconds(self):
+        if self.fail:
+            raise OSError("no GetLastInputInfo")
+        return self.idle
+
+    def mark_own_input(self):
+        self.own_input_marked += 1
+
+
+class QuietServiceTests(unittest.TestCase):
+    """AutoFriendService: look silently, wait for the user to pause, force a check now and then."""
+
+    def setUp(self):
+        self.now = 0.0
+        self.manager = MagicMock()
+        self.manager.accept_friend_requests.return_value = []
+        self.manager.look_for_news.return_value = "changed"
+        self.gate = FakeGate()
+
+    def service(self, **kw):
+        kw.setdefault("idle_gate", self.gate)
+        kw.setdefault("idle_sec", 60)
+        kw.setdefault("full_check_sec", 900)
+        return AutoFriendService(self.manager, interval_sec=300, clock=lambda: self.now, **kw)
+
+    def test_when_nothing_changed_nothing_is_done_and_the_user_is_not_even_asked(self):
+        self.manager.look_for_news.return_value = "unchanged"
+        gate_calls = []
+        self.gate.idle_seconds = lambda: gate_calls.append(1) or 0.0           # busy, but it must not matter
+        self.assertEqual(self.service().run_once(), [])
+        self.manager.accept_friend_requests.assert_not_called()
+        self.assertEqual(gate_calls, [])
+
+    def test_news_and_an_idle_user_means_a_check(self):
+        self.manager.accept_friend_requests.return_value = [{"status": "accepted"}]
+        self.assertEqual(self.service().run_once(), [{"status": "accepted"}])
+
+    def test_news_while_the_user_is_busy_waits(self):
+        service = self.service()
+        self.gate.idle = 5.0
+        self.assertEqual(service.run_once(), [])
+        self.assertTrue(service.postponed)
+        self.manager.accept_friend_requests.assert_not_called()
+        self.gate.idle = 61.0                                                   # the user paused
+        service.run_once()
+        self.assertFalse(service.postponed)
+        self.manager.accept_friend_requests.assert_called_once()
+
+    def test_a_window_that_cannot_be_pictured_still_gets_a_check_when_the_user_is_idle(self):
+        self.manager.look_for_news.return_value = "unknown"
+        self.service().run_once()
+        self.manager.accept_friend_requests.assert_called_once()
+
+    def test_a_window_that_cannot_be_pictured_waits_for_an_idle_user_too(self):
+        self.manager.look_for_news.return_value = "unknown"
+        self.gate.idle = 3.0
+        service = self.service()
+        service.run_once()
+        self.assertTrue(service.postponed)
+        self.manager.accept_friend_requests.assert_not_called()
+
+    def test_with_the_watch_off_every_tick_is_a_check_but_still_waits_for_the_user(self):
+        service = self.service(watch=False)
+        self.gate.idle = 2.0
+        service.run_once()
+        self.manager.look_for_news.assert_not_called()
+        self.manager.accept_friend_requests.assert_not_called()
+        self.gate.idle = 100.0
+        service.run_once()
+        self.manager.accept_friend_requests.assert_called_once()
+
+    def test_a_check_is_forced_now_and_then_even_when_nothing_looks_new(self):
+        self.manager.look_for_news.return_value = "unchanged"
+        service = self.service()
+        self.now = 899.0
+        service.run_once()
+        self.manager.accept_friend_requests.assert_not_called()
+        self.now = 901.0                                                        # a badge that is not recognised must not hide a request for good
+        service.run_once()
+        self.manager.accept_friend_requests.assert_called_once()
+        self.now = 1000.0                                                       # and the clock starts again
+        service.run_once()
+        self.manager.accept_friend_requests.assert_called_once()
+
+    def test_the_forced_check_can_be_switched_off(self):
+        self.manager.look_for_news.return_value = "unchanged"
+        service = self.service(full_check_sec=0)
+        self.now = 10 ** 6
+        service.run_once()
+        self.manager.accept_friend_requests.assert_not_called()
+
+    def test_without_an_idle_time_there_is_no_waiting(self):
+        self.gate.idle = 0.0
+        self.service(idle_sec=0).run_once()
+        self.manager.accept_friend_requests.assert_called_once()
+        self.manager.accept_friend_requests.reset_mock()
+        self.service(idle_gate=None).run_once()
+        self.manager.accept_friend_requests.assert_called_once()
+
+    def test_idle_time_that_cannot_be_read_does_not_block_the_check(self):
+        self.gate.fail = True
+        self.service().run_once()
+        self.manager.accept_friend_requests.assert_called_once()
+
+    def test_the_checks_own_input_is_marked_so_it_does_not_look_like_the_user(self):
+        self.service().run_once()
+        self.assertEqual(self.gate.own_input_marked, 1)
+
+    def test_a_tick_that_did_nothing_marks_nothing(self):
+        self.manager.look_for_news.return_value = "unchanged"
+        self.service().run_once()
+        self.assertEqual(self.gate.own_input_marked, 0)
+
+    def test_a_failing_look_never_raises(self):
+        self.manager.look_for_news.side_effect = RuntimeError("boom")
+        self.assertEqual(self.service().run_once(), [])
+
+    def test_the_worker_asks_again_soon_while_the_user_is_busy_and_after_an_interval_otherwise(self):
+        waits = []
+
+        class Event:
+            def __init__(self, service):
+                self.service = service
+
+            def wait(self, seconds):
+                waits.append(seconds)
+                if len(waits) == 3:
+                    self.service.gate.idle = 100.0                                # the user pauses
+                return len(waits) > 4
+
+            def set(self):
+                pass
+
+        service = self.service()
+        service.gate = self.gate
+        self.gate.idle = 1.0
+        service._stop_event = Event(service)
+        service._run()
+        self.assertEqual(waits, [300, friend_manager.POSTPONE_RETRY_SEC, friend_manager.POSTPONE_RETRY_SEC, 300, 300])
+
+
+class QuietConfigTests(unittest.TestCase):
+    def test_defaults(self):
+        config = BotConfig()
+        self.assertEqual((config.auto_accept_idle_sec, config.auto_accept_watch, config.auto_accept_full_check_sec),
+                         (60, "on", 900))
+
+    def test_from_the_environment(self):
+        env = {"ANTHROPIC_API_KEY": "sk-ant-test-key", "AUTO_ACCEPT_IDLE_SEC": "30",
+               "AUTO_ACCEPT_WATCH": "no", "AUTO_ACCEPT_FULL_CHECK_SEC": "0"}
+        with patch.dict(os.environ, env, clear=True):
+            config = load_config()
+        self.assertEqual((config.auto_accept_idle_sec, config.auto_accept_watch, config.auto_accept_full_check_sec),
+                         (30, "off", 0))
+
+    def test_valid_values(self):
+        _validate_config({"auto_accept_idle_sec": 0, "auto_accept_watch": "off", "auto_accept_full_check_sec": 0})
+        _validate_config({"auto_accept_idle_sec": 3600, "auto_accept_full_check_sec": 60})
+
+    def test_invalid_values(self):
+        for bad in ({"auto_accept_idle_sec": -1}, {"auto_accept_idle_sec": 3601}, {"auto_accept_watch": "maybe"},
+                    {"auto_accept_full_check_sec": 30}, {"auto_accept_full_check_sec": 86401}):
+            with self.assertRaises(RuntimeError, msg=bad):
+                _validate_config(bad)
+
+    def test_the_bot_hands_them_to_the_service(self):
+        config = BotConfig(auto_accept_friends="off", auto_accept_idle_sec=45, auto_accept_watch="off",
+                           auto_accept_full_check_sec=120)
+        bot = Bot(config)
+        backend = SimpleNamespace(window_controller=FakeWindow(), window_lock=threading.Lock())
+        with patch("src.wechat.ocr.win_ocr.WindowsOcrEngine"):
+            bot._start_friend_management(config, backend, MagicMock())
+        service = bot._auto_friend
+        self.assertEqual((service._idle_sec, service._watch, service._full_check_sec), (45.0, False, 120.0))
+        self.assertTrue(hasattr(service._idle_gate, "idle_seconds"))
 
 
 if __name__ == "__main__":

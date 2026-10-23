@@ -221,7 +221,10 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `OCR_FALLBACK_AFTER` | `int` | `3` (1–20) | `src/config.py` | `OcrFallback.note_db_failure()`：数据库每秒读一次，连续失败这么多次才切到 OCR |
 | `OCR_POLL_SEC` | `float` | `4.0` (1–60) | `src/config.py` | `OcrFallback.poll()`：两次看屏幕的最短间隔（一次约 0.8 秒） |
 | `AUTO_ACCEPT_FRIENDS` | `str` | `"off"` (`off`/`on`) | `src/config.py` | `src/bot.py:_start_friend_management()` → `AutoFriendService(enabled=…)`：`on` 时每 `AUTO_ACCEPT_INTERVAL_SEC` 秒打开「新的朋友」同意待处理的申请（会占用屏幕，所以默认关；只有 Windows `wcdb` 后端有微信窗口可操作）。管理员命令 `添加好友` / `同意好友` / `自动同意好友 开|关` 不受这个开关限制（`开` 会在线程没起时启动它） |
-| `AUTO_ACCEPT_INTERVAL_SEC` | `int` | `300` (10–86400) | `src/config.py` | `AutoFriendService(interval_sec=…)`：两次检查之间的秒数，第一次检查在启动一个间隔之后 |
+| `AUTO_ACCEPT_INTERVAL_SEC` | `int` | `300` (10–86400) | `src/config.py` | `AutoFriendService(interval_sec=…)`：两次**看一眼**之间的秒数（`AUTO_ACCEPT_WATCH=on` 时看一眼不碰屏幕，30–60 也可以），第一次在启动一个间隔之后 |
+| `AUTO_ACCEPT_WATCH` | `str` | `"on"` (`off`/`on`) | `src/config.py` | `AutoFriendService(watch=…)`：`on` 时每个间隔先静默地看导航栏有没有**新**红点（`FriendManager.look_for_news`，PrintWindow 拍窗口，不动焦点），没有就什么也不做；`off` 时每个间隔都是一次完整检查（仍然等用户停下来） |
+| `AUTO_ACCEPT_IDLE_SEC` | `int` | `60` (0–3600) | `src/config.py` | `AutoFriendService(idle_sec=…)`：要碰屏幕的检查等键盘鼠标静止这么多秒才做（`quiet_send.IdleGate.idle_seconds()`），忙就 15 秒后再问；0 = 不等。检查结束后焦点还给用户原来的窗口 |
+| `AUTO_ACCEPT_FULL_CHECK_SEC` | `int` | `900` (0 或 60–86400) | `src/config.py` | `AutoFriendService(full_check_sec=…)`：即使红点没变化，每隔这么久也强制做一次完整检查，防止红点认不出来；0 = 不强制 |
 
 ### 1.2 模块级常量
 
@@ -264,6 +267,8 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `_CACHE_TTL_SEC` | `int` | `604800` (7天) | `src/voice/pipeline.py` | 语音缓存过期时间 |
 | `MAX_ACCEPT_PER_RUN` / `MAX_KEYWORD_CHARS` / `MIN_INTERVAL_SEC` / `SAME_SPOT` / `SEARCH_BOX_MAX_X0` / `SEARCH_BOX_MAX_Y0` | `int` / `int` / `int` / `float` / `float` / `float` | `10` / `64` / `10` / `0.02` / `0.40` / `0.12` | `src/wechat/friend_manager.py` | 一次同意的申请上限；添加好友关键词最长；自动同意间隔下限（与配置校验一致）；两个 OCR 行中心相差小于它算「同一个位置」；搜索框占位字所在的区域（与 OCR 读取器同一区域） |
 | `NEW_FRIENDS_LABELS` / `ACCEPT_LABELS` / `CONFIRM_LABELS` / `SEARCH_ENTRY_LABELS` / `ADD_BUTTON_LABELS` / `SEND_LABELS` / `NOT_FOUND_MARKERS` / `ALREADY_FRIEND_MARKERS` | `tuple[str, ...]` | 微信界面上的文字（`新的朋友`、`接受`、`网络查找`、`添加到通讯录`、`发送` …） | `src/wechat/friend_manager.py` | OCR 靠这些文字找按钮；微信改版时改这里（`ACCEPT_MIN_X0` = 0.40：接受按钮在行的右半边） |
+| `POSTPONE_RETRY_SEC` | `int` | `15` | `src/wechat/friend_manager.py` | 用户正忙时自动同意多久后再问一次 |
+| `RAIL_MAX_X` / `RAIL_MAX_Y` / `CELL` / `MIN_COVER` / `MIN_CELLS` / `SAME_BADGE_PX` / `RED_MIN` / `GREEN_MAX` / `BLUE_MAX` | `float` / `float` / `int` / `float` / `int` / `int` / `int` ×3 | `0.09` / `0.60` / `4` / `0.30` / `3` / `16` / `200` / `110` / `110` | `src/wechat/rail_watch.py` | 红点监视：导航栏的范围、看图的格子大小和判定、算同一个红点的最大位移、红色的阈值（真机上还没标定，见 `friend-management-test.md`） |
 | `ADD_DIALOG_TITLES` | `tuple[str, ...]` | `("添加朋友", "Add Friend")` | `src/wechat/friend_manager.py` | 4.0「添加朋友」窗口的标题；已经开着的窗口只在标题含它时才被当成这个窗口 |
 | `NO_FRIEND_MANAGER` / `ACCEPT_FRIENDS_COMMANDS` / `AUTO_ACCEPT_COMMANDS` | `str` / `tuple` / `dict[str, bool]` | 「未启用好友管理组件…」/ 同意好友的几种说法 / 自动同意开关的几种说法 → 开(True)/关(False) | `src/admin.py` | 管理员好友命令的文字 |
 
@@ -1082,11 +1087,15 @@ todo_delete_keywords: list[str] = [
 | `FriendManager(window_controller, ocr_engine, ui_lock, clicker, rect_of, sleeper)` | `ui_lock` 是发送路径用的窗口锁（不给就只防自己重入）；`clicker`/`rect_of`/`sleeper` 是测试接缝（默认 `click_screen`、`window_rect`、`time.sleep`） | — |
 | `FriendManager._add_friend_wechat4(hwnd, keyword, message)` 及 `_is_wechat4` / `_open_add_friend_dialog_wechat4` / `_find_apply_dialog` / `_focus_window` / `_close_window` | **微信 PC 4.0**（主窗口类名含 `Qt`；真机测试得出，geigp 提交 `e17f7de`/`00362a3`）：4.0 的 Ctrl+F 不支持网络查找，「添加朋友」是单独的窗口——Ctrl+1 回聊天页 → 点 (+) 按钮（固定偏移 `rect+(285,60)`，图标没有文字）→ 弹出菜单（类名含 `ToolSaveBits`）按比例点「添加朋友」→ 找到这个窗口（`_add_dialog_candidates`：同进程、类名 `Qt51514QWindowIcon`，标题恰好是「添加朋友」（真机上读到的；「申请添加朋友」不算）；标题不对时才退回「大小 300–600 × 400–800」，这个范围只在不声明 DPI 感知的进程的逻辑像素里成立（真机上物理像素是 746×1133），也符合单独打开的聊天窗口——所以只认点菜单之后**新出现**的窗口，已经开着的只在标题恰好是「添加朋友」时才复用；Ctrl+1、点 (+)、点菜单前都核对微信在前台），点搜索输入框（比例 0.35/0.118）、粘贴、回车 → OCR **这个窗口**（`capture(hwnd)`）判断不存在/已是好友/「添加到通讯录」→ 点后弹出「申请添加朋友」模态窗口（按类名+标题关键词找）→ 点附言框（比例 0.30/0.18）粘贴 → 点「确定」（OCR 找不到时点比例 0.337/0.933，并补一次回车）→ 等窗口消失。`_close_window`：Alt+F4 只在该窗口自己拿着键盘时发，否则 `PostMessage(WM_CLOSE)` 给它。**这条路径里有按比例/固定偏移的点击和回车，不是纯 OCR**（见 `friend-management-test.md` 的第一轮结果） | `dict` |
 | `FriendManager._find_search_box()` / `friend_manager._is_search_placeholder(text)` | 搜索框的占位字那一行（最上、最左的一个）；占位字必须恰好是「搜索」或「Search」（比 OCR 读取器的 `_is_search_box` 严，因为这里决定往哪里点：「搜索结果」不算） | `dict \| None` / `bool` |
-| `FriendManager._ui_session()` | 上下文：拿锁 → `find_hwnd(force=True)` → 记下窗口状态 → `_activate_for_send`（失败就给 `None`）→ 结束时 `_restore_window_state`（最小化/隐藏的窗口放回原样） | `int \| None` |
+| `FriendManager._ui_session()` | 上下文：拿锁 → `find_hwnd(force=True)` → 记下窗口状态和用户当时所在的前台窗口 → `_activate_for_send`（失败就给 `None`）→ 结束时 `_restore_window_state`（最小化/隐藏的窗口放回原样）并 `_return_focus(previous)`（焦点还给用户原来的窗口；用户中途去了别处就不动） | `int \| None` |
 | `FriendManager._key / _combo / _paste / _click_row` | 每次输入前核对 `_foreground_matches(hwnd)`，不在前台抛 `_Abort`；`_click_row` 把 OCR 行中心换算成屏幕坐标，点击没送出也抛 `_Abort` | `None` |
 | `FriendManager.accept_friend_requests()` | 通讯录 → 「新的朋友」（打不开/看不到就停）；每轮重新识别屏幕（列表会动），点最上面的「接受/通过」，出现「确定/完成」就点；之后按钮还在原处就再看 3 次（每次隔 0.4 秒，服务器慢时界面更新得晚），还在才不计数并停止；一次最多 `MAX_ACCEPT_PER_RUN`=10 个；没有 OCR 或窗口时返回空 | `list[{"status": "accepted", "timestamp": float}]` |
 | `FriendManager.add_friend(keyword, message="")` | 没有 OCR 不开始。**单窗口界面（旧版）只走 OCR**（不用快捷键、不切标签页、不盲点）；**4.0 走上一行的 `_add_friend_wechat4`**（`_is_wechat4` 判断）。旧版界面：OCR 找搜索框（左上区域 `y0<0.12, x0<0.40`、文字恰好是「搜索」/「Search」，放大镜被读成字母也认）→ 点它（认不出来就什么也不输入）→ 全选删除 → 粘贴关键词 → 点「网络查找」入口 → 资料卡：不存在 / 已是好友 / 找不到「添加到通讯录」都带原因返回 → 点它 → **申请窗口（发送/确定/完成）出现后才**粘贴附言 → 点发送 → 窗口还在就报 `not_sent`。关键词压成一行、最长 `MAX_KEYWORD_CHARS`=64 | `{"ok", "target", "message", "reason"（失败时）}`；`reason`：`invalid` / `no_ocr` / `no_window` / `aborted` / `no_search_box` / `no_search_entry` / `not_found` / `already_friend` / `no_add_button` / `no_dialog` / `not_sent` |
-| `AutoFriendService(friend_manager, interval_sec=300, enabled=True)` | 后台线程每隔 `interval_sec`（下限 10）调 `run_once()`；第一次在启动一个间隔之后 | — |
+| `AutoFriendService(friend_manager, interval_sec=300, enabled=True, idle_gate=None, idle_sec=0, watch=True, full_check_sec=900, clock)` | 后台线程每隔 `interval_sec`（下限 10）调 `run_once()`；第一次在启动一个间隔之后；用户忙时下一次只隔 `POSTPONE_RETRY_SEC`（15）秒，不是一个完整间隔。`idle_gate` 是 `quiet_send.IdleGate`（`Bot._start_friend_management` 用 `IdleGate(Win32Desktop(), AUTO_ACCEPT_IDLE_SEC, 0)`） | — |
+| `AutoFriendService.run_once()` 的顺序 | ① 关着：什么也不做；② `watch` 且没到强制检查时间：`manager.look_for_news()` 是 `unchanged` → 直接结束（**不碰屏幕、不看用户忙不忙**）；③ 用户没停够 `idle_sec` 秒（`idle_gate.idle_seconds()`，读不出来就当空闲）→ `postponed=True`，什么也不做；④ 否则 `accept_friend_requests()`，记下强制检查的时间，`idle_gate.mark_own_input()`（检查自己的点击按键不算用户） | `list[dict]` |
+| `FriendManager.look_for_news()` / `_grab_main_window()` | 静默地看：`find_hwnd(wake=False)`（不唤醒托盘窗口）→ `print_main_window(hwnd)`（`win_ocr.print_window`，PrintWindow，窗口被盖住也行，**不动焦点、不点不输**；最小化会抛错）→ `RailWatcher.look()`。不拿窗口锁。返回 `changed` / `unchanged` / `unknown`；`accept_friend_requests` 读完整个列表（没有「接受」按钮了）时 `RailWatcher.settle()`，中途失败/卡住的不 settle，下次还会问 | `str` |
+| `rail_watch.red_badges(image)` | 窗口图左侧导航栏（宽 `RAIL_MAX_X`=9%、上 `RAIL_MAX_Y`=60%）里红色圆点的中心：红色 R≥200、G≤110、B≤110，按 `CELL`=4px 看覆盖率 ≥30%，4 邻接连成块，小于 `MIN_CELLS`=3 个格子的当噪声。图像尺寸无关 | `list[(x, y)]` |
+| `rail_watch.RailWatcher(grab)` | `look()`：没有基线 → `changed`；有**新位置**的红点（离基线里每个点都超过 `SAME_BADGE_PX`=16px）→ `changed`；否则 `unchanged`；拍不到图 → `unknown`。`settle()`：**重新拍一张**当基线（不用上次 look 的图——刚同意的申请红点可能还在上一张里，进了基线下一条申请就会被当成老红点）；拍不到就清空基线。**不认哪个图标是通讯录**（没有真机标定）：新的未读消息红点也会触发一次多余的检查，红点认不出来最多让申请晚到 `full_check_sec` | — |
 | `AutoFriendService.enable() / disable() / start() / stop() / run_once()` | `enable()` 线程没起时会启动它；`run_once()` 关着时什么也不做，检查出错只记 warning、不抛 | `run_once` → `list[dict]` |
 | `friend_manager._find_row(rows, *labels, exact, min_x0)` / `_still_there(rows, row)` / `_clean_text(text)` | OCR 行里按文字找最上面的一行；同样文字的行还在原处（中心相差 < `SAME_SPOT`=0.02）吗；去掉所有空白并转小写 | `dict \| None` / `bool` / `str` |
 | `tools/uia_probe.py` | 只读：列出微信进程的窗口（默认不含主窗口，里面有联系人和聊天名；`--main` 才含）和每个窗口的 UI Automation 控件树（类型、名字、AutomationId、类名、矩形；`--depth` 默认 6、`--limit` 默认 400、`--out` 写文件），最后给一句结论：什么都没暴露 / 只有窗口和面板（没有有名字的按钮、输入框、菜单项）/ N 个有名字的按钮等。**第二轮真机结果：4.0 的「添加朋友」和「申请添加朋友」窗口都只有 3 个控件——窗口、2 像素的 `Weixin` 面板、渲染面板 `MMUIRenderSubWindowHW`，内容是微信自己画的，UIA 找不到任何按钮，按位置点是目前唯一办法**。用来判断 4.0 的 (+) 按钮、输入框、确定按钮能不能改成按名字找，不点击不输入 |
@@ -2346,7 +2355,10 @@ Bot._start_friend_management → FriendManager(WeChatWindowController, WindowsOc
                              → AutoFriendService（AUTO_ACCEPT_FRIENDS=on 才起线程）→ admin_handler.set_friend_manager
 
 管理员「同意好友」→ router → AdminCommandHandler._cmd_accept_friends → accept_friend_requests()
-后台每 N 秒        → AutoFriendService.run_once() → accept_friend_requests()
+后台每 N 秒        → AutoFriendService.run_once()
+                       → look_for_news()（静默：PrintWindow 拍窗口，看导航栏有没有新红点）
+                       → 没变化：结束，不碰前台    变了/不知道：等用户停够 AUTO_ACCEPT_IDLE_SEC 秒（忙就 15 秒后再问）
+                       → accept_friend_requests()；每 AUTO_ACCEPT_FULL_CHECK_SEC 秒不管红点也强制来一次
   _ui_session：窗口锁 → find_hwnd → 记状态 → 切到前台（失败就结束）
     → 通讯录 → OCR 找「新的朋友」→ 点
     → 循环（≤10）：OCR → 最上面的「接受」→ 点 → 有「确定」就点 → OCR 看按钮还在不在

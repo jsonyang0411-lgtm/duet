@@ -34,6 +34,7 @@ from contextlib import contextmanager
 from typing import Callable, Iterator
 
 from .keyboard import press_key, send_combo
+from .rail_watch import RailWatcher
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ VK_V = 0x56
 MAX_ACCEPT_PER_RUN = 10      # a burst of requests is taken in a few runs, not all at once
 MAX_KEYWORD_CHARS = 64
 MIN_INTERVAL_SEC = 10        # same floor as AUTO_ACCEPT_INTERVAL_SEC in config validation
+POSTPONE_RETRY_SEC = 15      # while the user is busy, look again this often (not once per interval)
 SAME_SPOT = 0.02             # two OCR rows whose centres differ by less are "the same spot"
 SEARCH_BOX_MAX_X0 = 0.40     # where the OCR reader looks for the search box's "搜索": top left
 SEARCH_BOX_MAX_Y0 = 0.12
@@ -115,6 +117,12 @@ def _failure(target: str, reason: str, message: str) -> dict:
     return {"ok": False, "target": target, "reason": reason, "message": message}
 
 
+def print_main_window(hwnd: int):
+    """A picture of the window taken without bringing it forward (Windows only)."""
+    from .ocr.win_ocr import print_window
+    return print_window(hwnd)
+
+
 def window_rect(hwnd: int) -> tuple[int, int, int, int]:
     """The window rectangle in screen pixels (Windows only)."""
     import win32gui
@@ -157,6 +165,7 @@ class FriendManager:
         clicker: Callable[[int, int], bool] | None = None,
         rect_of: Callable[[int], tuple[int, int, int, int]] = window_rect,
         sleeper: Callable[[float], None] = time.sleep,
+        grab_window: Callable[[int], object] = print_main_window,
     ):
         self._window = window_controller
         self._ocr = ocr_engine
@@ -164,6 +173,25 @@ class FriendManager:
         self._clicker = clicker or click_screen
         self._rect_of = rect_of
         self._sleep = sleeper
+        self._grab_window = grab_window
+        self._rail = RailWatcher(self._grab_main_window)
+
+    # ── Looking without touching the screen ─────────────────────────────
+
+    def look_for_news(self) -> str:
+        """Has a red badge appeared in WeChat's left rail since the last clean check?
+
+        ``"changed"`` / ``"unchanged"`` / ``"unknown"`` (the window cannot be pictured: minimized,
+        not found).  Only a picture of the window is taken: nothing is brought forward,
+        clicked or typed, so the user sees nothing.
+        """
+        return self._rail.look() if self._window is not None else RailWatcher.UNKNOWN
+
+    def _grab_main_window(self):
+        hwnd = self._window.find_hwnd(wake=False)
+        if not hwnd:
+            raise RuntimeError("the WeChat window was not found")
+        return self._grab_window(hwnd)
 
     # ── Window session ──────────────────────────────────────────────────
 
@@ -171,7 +199,8 @@ class FriendManager:
     def _ui_session(self) -> Iterator[int | None]:
         """The WeChat window in front, under the shared lock; ``None`` if it cannot be shown.
 
-        The window is put back the way it was found (minimized / hidden) afterwards.
+        The window is put back the way it was found (minimized / hidden) and the focus goes back
+        to the window the user was in.
         """
         with self._ui_lock:
             window = self._window
@@ -181,6 +210,7 @@ class FriendManager:
                 yield None
                 return
             snapshot = window._capture_window_state(hwnd)
+            previous = self._foreground_window()
             try:
                 if window._activate_for_send(hwnd):
                     yield hwnd
@@ -189,6 +219,22 @@ class FriendManager:
                     yield None
             finally:
                 window._restore_window_state(snapshot, hwnd)
+                self._return_focus(previous)
+
+    def _foreground_window(self) -> int:
+        try:
+            return int(self._window._desktop.foreground_window() or 0)
+        except Exception:
+            return 0
+
+    def _return_focus(self, previous: int) -> None:
+        """Back to the user's window (the controller leaves it alone if the user went elsewhere meanwhile)."""
+        if not previous:
+            return
+        try:
+            self._window._return_focus(previous)
+        except Exception as e:
+            logger.debug("Friend management: focus could not be returned to %s: %s", previous, e)
 
     def _foreground(self, hwnd: int) -> None:
         if not self._is_wechat_foreground(hwnd):
@@ -268,6 +314,7 @@ class FriendManager:
             logger.warning("accept_friend_requests: no OCR engine, so nothing can be clicked safely")
             return []
         accepted: list[dict] = []
+        clean = False                 # the list was read to its end: no accept button was left
         with self._ui_session() as hwnd:
             if hwnd is None:
                 return accepted
@@ -285,6 +332,7 @@ class FriendManager:
                 for _ in range(MAX_ACCEPT_PER_RUN):
                     button = _find_row(rows, *ACCEPT_LABELS, exact=True, min_x0=ACCEPT_MIN_X0)
                     if button is None:
+                        clean = True
                         break
                     self._click_row(hwnd, button)
                     self._sleep(0.5)
@@ -302,6 +350,9 @@ class FriendManager:
                         break
                     accepted.append({"status": "accepted", "timestamp": time.time()})
                     logger.info("Friend request accepted")
+                if clean:
+                    self._sleep(0.5)          # the badge goes when the list has been seen
+                    self._rail.settle()       # the badges on the screen now are "nothing to do"
             except _Abort as e:
                 logger.warning("accept_friend_requests stopped: %s", e)
         if not accepted:
@@ -763,17 +814,38 @@ class FriendManager:
 
 
 class AutoFriendService:
-    """Background worker that runs FriendManager.accept_friend_requests every ``interval_sec``."""
+    """Background worker that accepts friend requests without getting in the user's way.
+
+    Every ``interval_sec`` it first looks, silently, whether a red badge has appeared in
+    WeChat's rail (``watch``); if nothing changed it does nothing at all.  Only when something
+    may be waiting (or the window cannot be pictured) does it need the screen, and then only
+    once the user has not touched keyboard or mouse for ``idle_sec`` seconds (``idle_gate``);
+    until then it asks again every POSTPONE_RETRY_SEC.  ``full_check_sec`` forces a full check
+    even when nothing changed, so a badge that is not recognised delays a request that long at most.
+    """
 
     def __init__(
         self,
         friend_manager: FriendManager,
         interval_sec: int = 300,
         enabled: bool = True,
+        idle_gate=None,
+        idle_sec: float = 0,
+        watch: bool = True,
+        full_check_sec: float = 900,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self._manager = friend_manager
         self._interval = max(MIN_INTERVAL_SEC, int(interval_sec))
         self._enabled = enabled
+        self._idle_gate = idle_gate
+        self._idle_sec = max(0.0, float(idle_sec))
+        self._watch = watch
+        self._full_check_sec = max(0.0, float(full_check_sec))
+        self._clock = clock
+        self._last_full_check = clock()
+        self.postponed = False            # the last tick found the user busy and left it for later
+        self._postponed_since: float | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._state_lock = threading.Lock()
@@ -811,11 +883,33 @@ class AutoFriendService:
             thread.join(timeout=2.0)
 
     def run_once(self) -> list[dict]:
-        """One check now (does nothing while disabled); never raises."""
+        """One tick now (does nothing while disabled); never raises.
+
+        Looks silently first; only a screen-taking check waits for the user to be idle.
+        ``postponed`` says whether the tick left a check for later.
+        """
         if not self._enabled:
             return []
         try:
+            if self._watch and not self._full_check_due() and self._manager.look_for_news() == RailWatcher.UNCHANGED:
+                self._postponed_since = None
+                self.postponed = False
+                return []
+            if not self._user_is_idle():
+                if self._postponed_since is None:
+                    self._postponed_since = self._clock()
+                    logger.info("AutoFriendService: something may be waiting, but you are at the "
+                                "computer; the check waits until you pause for %.0fs", self._idle_sec)
+                self.postponed = True
+                return []
+            if self._postponed_since is not None:
+                logger.info("AutoFriendService: you paused after %.0fs; checking now",
+                            self._clock() - self._postponed_since)
+            self._postponed_since = None
+            self.postponed = False
             accepted = self._manager.accept_friend_requests()
+            self._last_full_check = self._clock()
+            self._mark_own_input()
         except Exception:
             logger.warning("AutoFriendService: the check failed", exc_info=True)
             return []
@@ -823,7 +917,29 @@ class AutoFriendService:
             logger.info("AutoFriendService: accepted %d friend request(s)", len(accepted))
         return accepted
 
+    def _full_check_due(self) -> bool:
+        return self._full_check_sec > 0 and self._clock() - self._last_full_check >= self._full_check_sec
+
+    def _user_is_idle(self) -> bool:
+        if self._idle_gate is None or self._idle_sec <= 0:
+            return True
+        try:
+            return self._idle_gate.idle_seconds() >= self._idle_sec
+        except Exception as e:
+            logger.warning("AutoFriendService: idle time unavailable (%s); not waiting for the user", e)
+            return True
+
+    def _mark_own_input(self) -> None:
+        """The check's own clicks and keys are not the user: they must not make the user look busy."""
+        try:
+            if self._idle_gate is not None:
+                self._idle_gate.mark_own_input()
+        except Exception:
+            pass
+
     def _run(self) -> None:
-        # The first check comes one interval after the start, not while the bot is still starting up.
-        while not self._stop_event.wait(self._interval):
+        # The first tick comes one interval after the start, not while the bot is still starting up.
+        wait = self._interval
+        while not self._stop_event.wait(wait):
             self.run_once()
+            wait = POSTPONE_RETRY_SEC if self.postponed else self._interval

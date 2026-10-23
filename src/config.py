@@ -589,6 +589,13 @@ class BotConfig:
     # the screen, so it is off unless asked for; the admin commands 添加好友 / 同意好友 work either way.
     auto_accept_friends: str = "off"
     auto_accept_interval_sec: int = 300
+    # It must not get in the way of the person at the computer: every interval it first looks, silently,
+    # for a new red badge in WeChat's rail (auto_accept_watch) and does nothing if there is none; a check that
+    # needs the screen waits until keyboard and mouse have been still for auto_accept_idle_sec (0 = do not wait);
+    # a check is forced every auto_accept_full_check_sec even without a new badge (0 = never).
+    auto_accept_idle_sec: int = 60
+    auto_accept_watch: str = "on"
+    auto_accept_full_check_sec: int = 900
 
 
 def _validate_config(kwargs: dict) -> None:
@@ -993,6 +1000,14 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(
             f"AUTO_ACCEPT_INTERVAL_SEC must be between 10 and 86400, got {kwargs.get('auto_accept_interval_sec')}"
         )
+    if not (0 <= int(kwargs.get("auto_accept_idle_sec", 60)) <= 3600):
+        errors.append(f"AUTO_ACCEPT_IDLE_SEC must be between 0 and 3600, got {kwargs.get('auto_accept_idle_sec')}")
+    auto_watch = kwargs.get("auto_accept_watch", "on")
+    if auto_watch not in ("off", "on"):
+        errors.append(f"AUTO_ACCEPT_WATCH must be off or on, got {auto_watch}")
+    full_check = int(kwargs.get("auto_accept_full_check_sec", 900))
+    if full_check != 0 and not (60 <= full_check <= 86400):
+        errors.append(f"AUTO_ACCEPT_FULL_CHECK_SEC must be 0 or between 60 and 86400, got {full_check}")
 
     if errors:
         msg = "配置值无效:\n" + "\n".join(f"  - {err}" for err in errors)
@@ -1293,6 +1308,9 @@ def load_config() -> BotConfig:
         "ocr_poll_sec": float(os.getenv("OCR_POLL_SEC", "4")),
         "auto_accept_friends": _parse_memory_mode(os.getenv("AUTO_ACCEPT_FRIENDS", "off")),
         "auto_accept_interval_sec": int(os.getenv("AUTO_ACCEPT_INTERVAL_SEC", "300")),
+        "auto_accept_idle_sec": int(os.getenv("AUTO_ACCEPT_IDLE_SEC", "60")),
+        "auto_accept_watch": _parse_memory_mode(os.getenv("AUTO_ACCEPT_WATCH", "on")),
+        "auto_accept_full_check_sec": int(os.getenv("AUTO_ACCEPT_FULL_CHECK_SEC", "900")),
     }
 
     deepseek_model = os.getenv("DEEPSEEK_MODEL")
