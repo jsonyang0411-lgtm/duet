@@ -260,7 +260,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `HEX_KEY_LEN` | `int` | `64` | `src/wechat/mac_weflow_client.py` | WCDB 密钥长度 |
 | `_CACHE_MAX_ENTRIES` | `int` | `10000` | `src/voice/pipeline.py` | 语音缓存最大条目 |
 | `_CACHE_TTL_SEC` | `int` | `604800` (7天) | `src/voice/pipeline.py` | 语音缓存过期时间 |
-| `MAX_ACCEPT_PER_RUN` / `MAX_KEYWORD_CHARS` / `MIN_INTERVAL_SEC` / `SAME_SPOT` | `int` / `int` / `int` / `float` | `10` / `64` / `10` / `0.02` | `src/wechat/friend_manager.py` | 一次同意的申请上限；添加好友关键词最长；自动同意间隔下限（与配置校验一致）；两个 OCR 行中心相差小于它算「同一个位置」 |
+| `MAX_ACCEPT_PER_RUN` / `MAX_KEYWORD_CHARS` / `MIN_INTERVAL_SEC` / `SAME_SPOT` / `SEARCH_BOX_MAX_X0` / `SEARCH_BOX_MAX_Y0` | `int` / `int` / `int` / `float` / `float` / `float` | `10` / `64` / `10` / `0.02` / `0.40` / `0.12` | `src/wechat/friend_manager.py` | 一次同意的申请上限；添加好友关键词最长；自动同意间隔下限（与配置校验一致）；两个 OCR 行中心相差小于它算「同一个位置」；搜索框占位字所在的区域（与 OCR 读取器同一区域） |
 | `NEW_FRIENDS_LABELS` / `ACCEPT_LABELS` / `CONFIRM_LABELS` / `SEARCH_ENTRY_LABELS` / `ADD_BUTTON_LABELS` / `SEND_LABELS` / `NOT_FOUND_MARKERS` / `ALREADY_FRIEND_MARKERS` | `tuple[str, ...]` | 微信界面上的文字（`新的朋友`、`接受`、`网络查找`、`添加到通讯录`、`发送` …） | `src/wechat/friend_manager.py` | OCR 靠这些文字找按钮；微信改版时改这里（`ACCEPT_MIN_X0` = 0.40：接受按钮在行的右半边） |
 | `NO_FRIEND_MANAGER` / `ACCEPT_FRIENDS_COMMANDS` / `AUTO_ACCEPT_COMMANDS` | `str` / `tuple` / `dict[str, bool]` | 「未启用好友管理组件…」/ 同意好友的几种说法 / 自动同意开关的几种说法 → 开(True)/关(False) | `src/admin.py` | 管理员好友命令的文字 |
 
@@ -1055,10 +1055,11 @@ todo_delete_keywords: list[str] = [
 | 名称 | 描述 | 返回值 |
 |---|---|---|
 | `FriendManager(window_controller, ocr_engine, ui_lock, clicker, rect_of, sleeper)` | `ui_lock` 是发送路径用的窗口锁（不给就只防自己重入）；`clicker`/`rect_of`/`sleeper` 是测试接缝（默认 `click_screen`、`window_rect`、`time.sleep`） | — |
+| `FriendManager._find_search_box()` / `friend_manager._is_search_placeholder(text)` | 搜索框的占位字那一行（最上、最左的一个）；占位字必须恰好是「搜索」或「Search」（比 OCR 读取器的 `_is_search_box` 严，因为这里决定往哪里点：「搜索结果」不算） | `dict \| None` / `bool` |
 | `FriendManager._ui_session()` | 上下文：拿锁 → `find_hwnd(force=True)` → 记下窗口状态 → `_activate_for_send`（失败就给 `None`）→ 结束时 `_restore_window_state`（最小化/隐藏的窗口放回原样） | `int \| None` |
 | `FriendManager._key / _combo / _paste / _click_row` | 每次输入前核对 `_foreground_matches(hwnd)`，不在前台抛 `_Abort`；`_click_row` 把 OCR 行中心换算成屏幕坐标，点击没送出也抛 `_Abort` | `None` |
 | `FriendManager.accept_friend_requests()` | 通讯录 → 「新的朋友」（打不开/看不到就停）；每轮重新识别屏幕（列表会动），点最上面的「接受/通过」，出现「确定/完成」就点；之后按钮还在原处就不计数并停止；一次最多 `MAX_ACCEPT_PER_RUN`=10 个；没有 OCR 或窗口时返回空 | `list[{"status": "accepted", "timestamp": float}]` |
-| `FriendManager.add_friend(keyword, message="")` | Ctrl+F → 全选删除 → 粘贴关键词 → 点「网络查找」入口 → 资料卡：不存在 / 已是好友 / 找不到「添加到通讯录」都带原因返回 → 点它 → **申请窗口（发送/确定/完成）出现后才**粘贴附言 → 点发送 → 窗口还在就报 `not_sent`。关键词压成一行、最长 `MAX_KEYWORD_CHARS`=64 | `{"ok", "target", "message", "reason"（失败时）}`；`reason`：`invalid` / `no_ocr` / `no_window` / `aborted` / `no_search_entry` / `not_found` / `already_friend` / `no_add_button` / `no_dialog` / `not_sent` |
+| `FriendManager.add_friend(keyword, message="")` | **只走 OCR 链路**（没有 OCR 不开始，不用快捷键、不切标签页、不盲点）：OCR 找搜索框（左上区域 `y0<0.12, x0<0.40`、文字恰好是「搜索」/「Search」，放大镜被读成字母也认）→ 点它（认不出来就什么也不输入）→ 全选删除 → 粘贴关键词 → 点「网络查找」入口 → 资料卡：不存在 / 已是好友 / 找不到「添加到通讯录」都带原因返回 → 点它 → **申请窗口（发送/确定/完成）出现后才**粘贴附言 → 点发送 → 窗口还在就报 `not_sent`。关键词压成一行、最长 `MAX_KEYWORD_CHARS`=64 | `{"ok", "target", "message", "reason"（失败时）}`；`reason`：`invalid` / `no_ocr` / `no_window` / `aborted` / `no_search_box` / `no_search_entry` / `not_found` / `already_friend` / `no_add_button` / `no_dialog` / `not_sent` |
 | `AutoFriendService(friend_manager, interval_sec=300, enabled=True)` | 后台线程每隔 `interval_sec`（下限 10）调 `run_once()`；第一次在启动一个间隔之后 | — |
 | `AutoFriendService.enable() / disable() / start() / stop() / run_once()` | `enable()` 线程没起时会启动它；`run_once()` 关着时什么也不做，检查出错只记 warning、不抛 | `run_once` → `list[dict]` |
 | `friend_manager._find_row(rows, *labels, exact, min_x0)` / `_still_there(rows, row)` / `_clean_text(text)` | OCR 行里按文字找最上面的一行；同样文字的行还在原处（中心相差 < `SAME_SPOT`=0.02）吗；去掉所有空白并转小写 | `dict \| None` / `bool` / `str` |
@@ -2312,13 +2313,13 @@ Bot._start_friend_management → FriendManager(WeChatWindowController, WindowsOc
   → 放回窗口状态 → 放锁
 
 管理员「添加好友 号码 附言」→ AdminCommandHandler._cmd_add_friend → add_friend()
-  粘贴号码 → OCR 找「网络查找」→ 点 → OCR 看资料卡 → 点「添加到通讯录」
+  OCR 找搜索框 → 点 → 粘贴号码 → OCR 找「网络查找」→ 点 → OCR 看资料卡 → 点「添加到通讯录」
   → OCR 看到申请窗口才粘贴附言 → 点发送 → OCR 确认窗口关了
 ```
 
 关键点：
 - 与发送共用 `WcdbBackend._window_lock`，所以不会和正在输入的回复交错；管理员命令是在路由线程里同步执行的，要几秒。
-- 每次按键/点击前核对微信在前台；OCR 找不到的按钮一律不点（早先的版本会盲点固定坐标、盲按回车，附言可能被当成聊天消息发给别人）。
+- 添加好友只走 OCR 链路：搜索框、每个按钮、每个窗口都是在屏幕上认出来的，不用 Ctrl+F，不切标签页，没有 OCR 就不开始；每次按键/点击前核对微信在前台；OCR 找不到的按钮一律不点（早先的版本会盲点固定坐标、盲按回车，附言可能被当成聊天消息发给别人）。
 - 结果以屏幕为准：按钮还在原处就不算同意，申请窗口没关就报 `not_sent`；失败原因见 `add_friend` 返回的 `reason`。
 - OCR 用自己的 `WindowsOcrEngine`，与 `OCR_FALLBACK`（读消息用）无关，后者关着也能用。
 - 真机测试清单（要试什么、期望什么、怎么汇报）：`friend-management-test.md`。

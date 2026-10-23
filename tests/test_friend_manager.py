@@ -37,6 +37,7 @@ class FakeWindow:
     """The window controller as FriendManager uses it."""
 
     def __init__(self, hwnd=HWND, activates=True, contacts_open=True):
+        self.contacts_calls = 0
         self.hwnd = hwnd
         self.activates = activates
         self.contacts_open = contacts_open
@@ -60,6 +61,7 @@ class FakeWindow:
         return self.foreground
 
     def _goto_contacts_tab(self, hwnd):
+        self.contacts_calls += 1
         return self.contacts_open
 
     def _clipboard_text(self, text, hwnd):
@@ -86,15 +88,21 @@ class FriendTestCase(unittest.TestCase):
     def setUp(self):
         self.clicks = []
         self.keys = []
-        for name, record in (("press_key", lambda vk: self.keys.append(("key", vk))),
-                             ("send_combo", lambda mod, key: self.keys.append(("combo", mod, key)))):
+        self.events = []             # clicks and keys in the order they happened
+        for name, record in (("press_key", lambda vk: self._key_event(("key", vk))),
+                             ("send_combo", lambda mod, key: self._key_event(("combo", mod, key)))):
             patcher = patch.object(friend_manager, name, side_effect=record)
             patcher.start()
             self.addCleanup(patcher.stop)
 
+    def _key_event(self, event):
+        self.keys.append(event)
+        self.events.append(event)
+
     def manager(self, window=None, ocr=None, lock=None, click_ok=True):
         def click(x, y):
             self.clicks.append((x, y))
+            self.events.append(("click", x, y))
             return click_ok
         return FriendManager(
             window_controller=window, ocr_engine=ocr, ui_lock=lock, clicker=click,
@@ -234,6 +242,7 @@ class AddFriendTests(FriendTestCase):
     ENTRY = row("网络查找微信号：newbie", 0.15, 0.15, 0.30, 0.20)
     ADD = row("添加到通讯录", 0.55, 0.70, 0.65, 0.75)
     SEND = row("发送", 0.50, 0.65, 0.58, 0.70)
+    SEARCH_BOX = row("搜索", 0.06, 0.04, 0.14, 0.08)
 
     def test_empty_keyword(self):
         res = self.manager(FakeWindow(), FakeOcr([])).add_friend("   ")
@@ -248,7 +257,7 @@ class AddFriendTests(FriendTestCase):
 
     def test_keyword_is_one_clean_line(self):
         window = FakeWindow()
-        self.manager(window, FakeOcr([])).add_friend(" 138\n0000 ")
+        self.manager(window, FakeOcr([self.SEARCH_BOX])).add_friend(" 138\n0000 ")
         self.assertEqual(window.pasted, ["138 0000"])
 
     def test_without_ocr_nothing_is_typed(self):
@@ -268,65 +277,96 @@ class AddFriendTests(FriendTestCase):
         self.assertNothingHappened()
         self.assertEqual(window.pasted, [])
 
-    def test_no_network_search_entry_stops_before_any_click(self):
+    def test_without_a_search_box_on_the_screen_nothing_is_typed_or_clicked(self):
         window = FakeWindow()
         res = self.manager(window, FakeOcr([row("张三", 0.1, 0.2, 0.2, 0.3)])).add_friend("newbie", "你好")
+        self.assertEqual(res["reason"], "no_search_box")
+        self.assertNothingHappened()
+        self.assertEqual(window.pasted, [])
+
+    def test_a_search_word_elsewhere_on_the_screen_is_not_the_search_box(self):
+        for other in (row("搜索", 0.60, 0.04, 0.70, 0.08),        # right half: not the search field
+                      row("搜索", 0.06, 0.40, 0.14, 0.44),        # a chat called 搜索 in the list
+                      row("搜索结果", 0.06, 0.04, 0.20, 0.08)):    # not the placeholder
+            self.clicks.clear()
+            res = self.manager(FakeWindow(), FakeOcr([other])).add_friend("newbie")
+            self.assertEqual(res["reason"], "no_search_box", other)
+            self.assertEqual(self.clicks, [])
+
+    def test_the_search_box_is_read_even_when_the_magnifier_comes_out_as_a_letter(self):
+        box = row("Q 搜索", 0.06, 0.04, 0.16, 0.08)
+        ocr = FakeOcr([box], [row("张三", 0.1, 0.2, 0.2, 0.3)])
+        res = self.manager(FakeWindow(), ocr).add_friend("newbie")
         self.assertEqual(res["reason"], "no_search_entry")
-        self.assertEqual(self.clicks, [])
+        self.assertEqual(self.clicks, [centre(box)])
+
+    def test_the_whole_chain_is_ocr_no_shortcut_no_tab_switch_before_the_first_click(self):
+        window = FakeWindow()
+        ocr = FakeOcr([self.SEARCH_BOX], [self.ENTRY], [self.ADD], [self.SEND], [])
+        self.assertTrue(self.manager(window, ocr).add_friend("newbie", "你好")["ok"])
+        self.assertEqual(self.events[0][0], "click")                       # the first thing done is a click on a seen box
+        self.assertNotIn(("combo", CTRL, KEY_F), self.keys)                # no Ctrl+F shortcut
+        self.assertEqual(window.contacts_calls, 0)                         # no tab navigation outside OCR
+        self.assertNotIn(("key", VK_RETURN), self.keys)                    # no blind Enter
+
+    def test_no_network_search_entry_stops_before_any_click(self):
+        window = FakeWindow()
+        res = self.manager(window, FakeOcr([self.SEARCH_BOX], [row("张三", 0.1, 0.2, 0.2, 0.3)])).add_friend("newbie", "你好")
+        self.assertEqual(res["reason"], "no_search_entry")
+        self.assertEqual(self.clicks, [centre(self.SEARCH_BOX)])
         self.assertEqual(window.pasted, ["newbie"])      # the greeting was never pasted
         self.assertIn(("key", VK_ESCAPE), self.keys)
         self.assertNotIn(("key", VK_RETURN), self.keys)
 
     def test_user_not_found(self):
-        ocr = FakeOcr([self.ENTRY], [row("该用户不存在", 0.45, 0.40, 0.55, 0.45)])
+        ocr = FakeOcr([self.SEARCH_BOX], [self.ENTRY], [row("该用户不存在", 0.45, 0.40, 0.55, 0.45)])
         res = self.manager(FakeWindow(), ocr).add_friend("newbie")
         self.assertEqual(res["reason"], "not_found")
-        self.assertEqual(self.clicks, [centre(self.ENTRY)])
+        self.assertEqual(self.clicks, [centre(self.SEARCH_BOX), centre(self.ENTRY)])
         self.assertIn(("key", VK_ESCAPE), self.keys)
 
     def test_already_a_friend(self):
-        ocr = FakeOcr([self.ENTRY], [row("发消息", 0.50, 0.60, 0.60, 0.65), row("音视频通话", 0.50, 0.70, 0.60, 0.75)])
+        ocr = FakeOcr([self.SEARCH_BOX], [self.ENTRY], [row("发消息", 0.50, 0.60, 0.60, 0.65), row("音视频通话", 0.50, 0.70, 0.60, 0.75)])
         res = self.manager(FakeWindow(), ocr).add_friend("newbie")
         self.assertEqual(res["reason"], "already_friend")
 
     def test_no_add_button_is_not_clicked_for_blind(self):
-        ocr = FakeOcr([self.ENTRY], [row("某个资料卡", 0.5, 0.5, 0.6, 0.6)])
+        ocr = FakeOcr([self.SEARCH_BOX], [self.ENTRY], [row("某个资料卡", 0.5, 0.5, 0.6, 0.6)])
         res = self.manager(FakeWindow(), ocr).add_friend("newbie")
         self.assertEqual(res["reason"], "no_add_button")
-        self.assertEqual(self.clicks, [centre(self.ENTRY)])
+        self.assertEqual(self.clicks, [centre(self.SEARCH_BOX), centre(self.ENTRY)])
 
     def test_the_greeting_is_never_pasted_when_no_application_dialog_opened(self):
         window = FakeWindow()
-        ocr = FakeOcr([self.ENTRY], [self.ADD], [row("已发送", 0.5, 0.5, 0.6, 0.6)])
+        ocr = FakeOcr([self.SEARCH_BOX], [self.ENTRY], [self.ADD], [row("已发送", 0.5, 0.5, 0.6, 0.6)])
         res = self.manager(window, ocr).add_friend("newbie", "你好")
         self.assertEqual(res["reason"], "no_dialog")
         self.assertEqual(window.pasted, ["newbie"])
         self.assertNotIn(("key", VK_RETURN), self.keys)
-        self.assertEqual(self.clicks, [centre(self.ENTRY), centre(self.ADD)])
+        self.assertEqual(self.clicks, [centre(self.SEARCH_BOX), centre(self.ENTRY), centre(self.ADD)])
 
     def test_sends_the_application_with_the_greeting(self):
         window = FakeWindow()
-        ocr = FakeOcr([self.ENTRY], [self.ADD], [self.SEND], [row("新朋友", 0.1, 0.1, 0.2, 0.2)])
+        ocr = FakeOcr([self.SEARCH_BOX], [self.ENTRY], [self.ADD], [self.SEND], [row("新朋友", 0.1, 0.1, 0.2, 0.2)])
         res = self.manager(window, ocr).add_friend("newbie", "Hello!")
         self.assertTrue(res["ok"])
         self.assertIn("已成功向「newbie」发送好友申请", res["message"])
         self.assertIn("Hello!", res["message"])
         self.assertEqual(window.pasted, ["newbie", "Hello!"])
-        self.assertEqual(self.clicks, [centre(self.ENTRY), centre(self.ADD), centre(self.SEND)])
-        self.assertEqual(self.keys[:4], [("combo", CTRL, KEY_F), ("combo", CTRL, KEY_A),
-                                         ("key", VK_BACK), ("combo", CTRL, KEY_V)])
+        self.assertEqual(self.clicks, [centre(self.SEARCH_BOX), centre(self.ENTRY), centre(self.ADD), centre(self.SEND)])
+        self.assertEqual(self.keys[:3], [("combo", CTRL, KEY_A), ("key", VK_BACK), ("combo", CTRL, KEY_V)])
         self.assertNotIn(("key", VK_RETURN), self.keys)
 
     def test_sends_without_a_greeting(self):
         window = FakeWindow()
-        ocr = FakeOcr([self.ENTRY], [self.ADD], [self.SEND], [])
+        ocr = FakeOcr([self.SEARCH_BOX], [self.ENTRY], [self.ADD], [self.SEND], [])
         res = self.manager(window, ocr).add_friend("newbie")
         self.assertTrue(res["ok"])
         self.assertEqual(window.pasted, ["newbie"])
         self.assertNotIn("附言", res["message"])
 
     def test_a_dialog_that_stays_open_is_not_reported_as_sent(self):
-        ocr = FakeOcr([self.ENTRY], [self.ADD], [self.SEND], [self.SEND])
+        ocr = FakeOcr([self.SEARCH_BOX], [self.ENTRY], [self.ADD], [self.SEND], [self.SEND])
         res = self.manager(FakeWindow(), ocr).add_friend("newbie")
         self.assertFalse(res["ok"])
         self.assertEqual(res["reason"], "not_sent")
@@ -337,16 +377,16 @@ class AddFriendTests(FriendTestCase):
         def lose_foreground(captures):
             window.foreground = False
 
-        ocr = FakeOcr([self.ENTRY], after_capture=lose_foreground)
+        ocr = FakeOcr([self.SEARCH_BOX], [self.ENTRY], after_capture=lose_foreground)
         res = self.manager(window, ocr).add_friend("newbie", "你好")
         self.assertEqual(res["reason"], "aborted")
         self.assertEqual(self.clicks, [])
-        self.assertEqual(window.pasted, ["newbie"])
+        self.assertEqual(window.pasted, [])
         self.assertEqual(window.restored, [("state", HWND)])
 
     def test_the_window_is_put_back_and_the_lock_released(self):
         window, lock = FakeWindow(), threading.Lock()
-        self.manager(window, FakeOcr([self.ENTRY], [row("该用户不存在", 0.4, 0.4, 0.5, 0.5)]), lock).add_friend("x")
+        self.manager(window, FakeOcr([self.SEARCH_BOX], [self.ENTRY], [row("该用户不存在", 0.4, 0.4, 0.5, 0.5)]), lock).add_friend("x")
         self.assertEqual(window.restored, [("state", HWND)])
         self.assertFalse(lock.locked())
 

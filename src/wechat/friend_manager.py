@@ -14,7 +14,9 @@ Features:
 - accept_friend_requests: Contacts -> 新的朋友, accepts the pending requests (at most
   MAX_ACCEPT_PER_RUN per call).
 - add_friend: searches the wxid / phone number, opens the card, "添加到通讯录", fills the
-  greeting and sends the application.
+  greeting and sends the application.  It runs on the OCR chain only: the search box,
+  every button and every dialog are found on the screen, never by a shortcut or a
+  guessed position, and without OCR it does not start.
 - AutoFriendService: periodic background worker for accept_friend_requests.
 """
 
@@ -35,13 +37,14 @@ VK_BACK = 0x08
 VK_ESCAPE = 0x1B
 VK_CONTROL = 0x11
 VK_A = 0x41
-VK_F = 0x46
 VK_V = 0x56
 
 MAX_ACCEPT_PER_RUN = 10      # a burst of requests is taken in a few runs, not all at once
 MAX_KEYWORD_CHARS = 64
 MIN_INTERVAL_SEC = 10        # same floor as AUTO_ACCEPT_INTERVAL_SEC in config validation
 SAME_SPOT = 0.02             # two OCR rows whose centres differ by less are "the same spot"
+SEARCH_BOX_MAX_X0 = 0.40     # where the OCR reader looks for the search box's "搜索": top left
+SEARCH_BOX_MAX_Y0 = 0.12
 
 NEW_FRIENDS_LABELS = ("新的朋友", "好友申请")
 ACCEPT_LABELS = ("接受", "通过")
@@ -61,6 +64,15 @@ class _Abort(Exception):
 def _clean_text(text) -> str:
     """Strip all whitespace and lower-case, so OCR spacing never breaks a match."""
     return "".join(str(text or "").split()).lower()
+
+
+def _is_search_placeholder(text) -> bool:
+    """Exactly the search field's placeholder ("搜索" / "Search"), also when the magnifier is read as a letter.
+
+    Stricter than the OCR reader's test on purpose: this one decides where to click.
+    """
+    t = _clean_text(text).lstrip("0123456789q⌕🔍o")
+    return t in ("搜索", "search")
 
 
 def _centre(row: dict) -> tuple[float, float]:
@@ -305,10 +317,22 @@ class FriendManager:
                 logger.warning("add_friend stopped: %s", e)
                 return _failure(keyword, "aborted", f"微信窗口状态异常，已中止：{e}")
 
+    def _find_search_box(self) -> dict | None:
+        """The search field's placeholder row in the top left of the window (topmost, then leftmost)."""
+        boxes = [
+            r for r in self._capture_ocr()
+            if r.get("y0", 1.0) < SEARCH_BOX_MAX_Y0 and r.get("x0", 1.0) < SEARCH_BOX_MAX_X0
+            and _is_search_placeholder(r.get("t", ""))
+        ]
+        return min(boxes, key=lambda r: (r["y0"], r["x0"])) if boxes else None
+
     def _add_friend_in_window(self, hwnd: int, keyword: str, message: str) -> dict:
-        # 1. Search box: Ctrl+F -> Ctrl+A -> Backspace -> paste the keyword
-        self._combo(hwnd, VK_CONTROL, VK_F)
-        self._sleep(0.2)
+        # 1. The search box is found on the screen and clicked; nothing is typed before it is seen
+        box = self._find_search_box()
+        if box is None:
+            return _failure(keyword, "no_search_box", "屏幕上没有认出搜索框（写着「搜索」的那一行），已中止，什么也没输入")
+        self._click_row(hwnd, box)
+        self._sleep(0.3)
         self._combo(hwnd, VK_CONTROL, VK_A)
         self._sleep(0.05)
         self._key(hwnd, VK_BACK)
