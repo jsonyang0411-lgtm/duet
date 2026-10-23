@@ -108,6 +108,8 @@ class ClaudeRelay:
                  send: Optional[Callable[[str, str], bool]] = None,
                  send_file: Optional[Callable[[str, str], bool]] = None,
                  files_dir: Optional[Path] = None,
+                 reserved: Optional[Callable[[str], bool]] = None,
+                 extra_help: str = "",
                  clock: Callable[[], float] = time.time):
         self._config = config
         self._store = store if store is not None else RelayStore(config.claude_relay_db)
@@ -134,6 +136,11 @@ class ClaudeRelay:
         # CLAUDE_RELAY_ONLY: every private message of an allowed person is for the relay,
         # so "cc" can be left out.
         self._relay_only = getattr(config, "claude_relay_only", "off") == "on"
+        # The admin's management commands (AdminCommandHandler.is_command): without "cc"
+        # they stay commands even when every other line is a task; their list goes in the help.
+        self._reserved = reserved
+        self._admin_wxid = str(getattr(config, "admin_wxid", "") or "").strip()
+        self._extra_help = extra_help
         # What the Mac worker said it offers (X-Relay-Projects on GET /relay/next).
         self._worker_projects: list[str] | None = None
         self._worker_default = ""
@@ -219,7 +226,8 @@ class ClaudeRelay:
                 logger.info("CLAUDE_RELAY: %s is not allowed to use the relay; handled as a normal message",
                             sender)
                 return False, None
-        elif self._relay_only and sender in self._allowed and msg_type in (1, 34) and content.strip():
+        elif self._relay_only and sender in self._allowed and msg_type in (1, 34) and content.strip() \
+                and not self._for_admin(sender, content):
             body = content                         # relay only: "cc" may be left out
         else:
             return False, None
@@ -236,6 +244,15 @@ class ClaudeRelay:
         except Exception:
             logger.exception("CLAUDE_RELAY: could not handle %r", content[:80])
             return True, "转给 Mac 失败了，详情看 bot.log。"
+
+    def _for_admin(self, sender: str, content: str) -> bool:
+        """A management command of the admin (the route's ``relay_only`` step answers it)."""
+        try:
+            return (self._reserved is not None and bool(self._admin_wxid) and sender == self._admin_wxid
+                    and bool(self._reserved(content.strip())))
+        except Exception:
+            logger.exception("CLAUDE_RELAY: could not check for an admin command")
+            return False
 
     def _run(self, cmd: RelayCommand, chat_id: str, sender: str) -> str:
         if cmd.kind == "help":
@@ -500,6 +517,7 @@ class ClaudeRelay:
             f"{p}重试 编号 —— 重新执行一个任务\n"
             f"{p}新对话 —— 下一个任务不带之前的上下文\n"
             f"发图片或文件 —— 下一个任务会带上它们（{HOLD_SEC // 60} 分钟内）"
+            + (f"\n\n{self._extra_help}" if self._relay_only and self._extra_help else "")
         )
 
     def status_text(self, chat_id: str) -> str:

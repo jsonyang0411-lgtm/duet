@@ -395,8 +395,13 @@ class Bot:
         """
         if getattr(config, "claude_relay", "off") != "on":
             return None
+        from .admin import RELAY_HELP
         from .relay import ClaudeRelay
-        relay = ClaudeRelay(config, send=backend.send_text, send_file=getattr(backend, "send_file", None))
+        # When the bot only relays, the admin's management commands still go to the
+        # admin handler (route step relay_only), not to the Mac.
+        is_command = getattr(getattr(router, "_admin", None), "is_command", None)
+        relay = ClaudeRelay(config, send=backend.send_text, send_file=getattr(backend, "send_file", None),
+                            reserved=is_command, extra_help=RELAY_HELP if is_command else "")
         try:
             relay.start()
         except OSError:

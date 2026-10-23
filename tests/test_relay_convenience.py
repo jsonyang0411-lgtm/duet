@@ -194,3 +194,37 @@ class TestVoice:
         r = relay(claude_relay_only="on")
         assert r.handle(self.voice("跑测试", sender="wxid_other")) == (False, None)
         assert r.handle(self.voice("跑测试", group=True)) == (False, None)
+
+
+# ── the admin's management commands are not tasks ─────────────────────────
+
+def test_only_the_admins_management_commands_are_left_alone():
+    reserved = lambda text: text.startswith("添加好友")                     # noqa: E731
+    r = ClaudeRelay(config(claude_relay_only="on", claude_relay_wxids=[ME, "wxid_two"]),
+                    store=RelayStore(":memory:"), reserved=reserved, extra_help="管理命令：添加好友")
+    assert r.handle(pm("添加好友 abc")) == (False, None)                    # the route's relay_only step answers it
+    assert r.handle(pm("添加好友 abc", sender="wxid_two"))[0] is True        # not the admin: a task
+    assert "管理命令：添加好友" in r.help_text()
+    assert "管理命令" not in ClaudeRelay(config(), store=RelayStore(":memory:"), reserved=reserved,
+                                        extra_help="管理命令：添加好友").help_text()   # not relay only
+
+
+def test_a_broken_check_does_not_stop_the_relay():
+    def broken(text):
+        raise RuntimeError("boom")
+    r = ClaudeRelay(config(claude_relay_only="on"), store=RelayStore(":memory:"), reserved=broken)
+    assert r.handle(pm("跑一下测试"))[0] is True
+
+
+def test_admin_commands_are_recognised_without_running_them():
+    from unittest.mock import MagicMock
+    from src.admin import AdminCommandHandler
+    nicks, friend = MagicMock(), MagicMock()
+    admin = AdminCommandHandler(nicks, friend_manager=friend)
+    for text in ("添加好友 abc 你好", "加好友 abc", "同意好友", "自动同意好友 开", "关闭自动同意",
+                 "改名 wxid_a = 张三", "删除昵称 wxid_a", "刷新昵称", "  同意好友  "):
+        assert admin.is_command(text), text
+    for text in ("帮助", "help", "跑一下测试", "添加好友的功能怎么用", "同意", ""):
+        assert not admin.is_command(text), text
+    assert nicks.mock_calls == [] and friend.mock_calls == []                # nothing ran
+

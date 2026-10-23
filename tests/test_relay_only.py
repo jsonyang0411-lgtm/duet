@@ -61,6 +61,31 @@ class RelayOnlyRoutes(RouterTestCase):
         # Normal chat from admin still ignored
         assert router.handle(self.mine("m2", "你好呀")) is None
 
+    def test_with_the_real_relay_only_relay_admin_commands_stay_commands(self):
+        """As bot.py wires it: the relay takes every line of the owner, except management commands."""
+        from unittest.mock import MagicMock
+        from src.admin import RELAY_HELP, AdminCommandHandler
+        admin = AdminCommandHandler(MagicMock())
+        router = self.build(claude_relay="on", claude_relay_only="on", claude_relay_token="t" * 32, admin_wxid=ME,
+                            private_chat_enabled=True, admin=admin)
+        relay_cfg = SimpleNamespace(
+            claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1", claude_relay_port=0,
+            claude_relay_prefix="cc", claude_relay_wxids=[], claude_relay_db=":memory:",
+            claude_relay_max_chars=1500, admin_wxid=ME, claude_relay_only="on",
+        )
+        relay = ClaudeRelay(relay_cfg, store=RelayStore(":memory:"), clock=lambda: self.now(),
+                            reserved=admin.is_command, extra_help=RELAY_HELP)
+        router._claude_relay = relay
+        assert "未启用好友管理组件" in router.handle(self.mine("m1", "添加好友 abc 你好"))
+        assert "未启用好友管理组件" in router.handle(self.mine("m2", "同意好友"))
+        assert "未启用好友管理组件" in router.handle(self.mine("m3", "自动同意好友 开"))
+        assert relay.store.get(1) is None                                       # nothing went to the Mac
+        help_text = router.handle(self.mine("m4", "帮助"))
+        assert "不用打 cc" in help_text and "添加好友 号码 [附言]" in help_text
+        assert "#1" in router.handle(self.mine("m5", "跑一下测试"))               # everything else is a task
+        assert "#2" in router.handle(self.mine("m6", "cc 添加好友 是什么功能"))    # with cc: a task too
+        assert relay.store.get(2)["text"] == "添加好友 是什么功能"
+
 
 def test_relay_only_needs_the_relay():
     from src.config import _validate_config

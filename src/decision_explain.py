@@ -25,6 +25,7 @@ REASONS = {
     "private_chat": "私聊，直接交给模型",
     "claude_relay": "cc 开头的私聊指令，转给 Mac 上的 Claude Code",
     "relay_only": "只做中转（CLAUDE_RELAY_ONLY）：不是中转指令，不处理",
+    "admin_command_relay_only": "只做中转时管理员私聊发的管理命令（加好友等），照常执行",
     "quote_of_other_member": "引用了别的群友的话，这条是说给他的，不是对机器人说的",
     "stale_mention_ignored": "@ 的消息太旧（可能是启动时重放的历史），忽略",
     "feishu_export": "同步到飞书的命令",

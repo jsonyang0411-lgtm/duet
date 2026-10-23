@@ -661,7 +661,9 @@ todo_delete_keywords: list[str] = [
 |---|---|---|---|
 | `__init__(nickname_service, friend_manager=None, auto_friend_service=None)` | 初始化管理员命令处理器 | `nickname_service: NicknameService`, 可选 `FriendManager` / `AutoFriendService` | `None` |
 | `set_friend_manager(friend_manager, auto_friend_service=None)` | 后端建好后再接上好友管理（`Bot._start_friend_management` 调用） | 同上 | `None` |
-| `handle(content, requester_name)` | 解析并执行管理命令 | `content: str, requester_name: str` | `str \| None` |
+| `handle(content, requester_name)` | 解析并执行管理命令（帮助在这里处理，其余交给 `_command`） | `content: str, requester_name: str` | `str \| None` |
+| `is_command(content)` / `_command(content)` | 认出管理命令但**不执行**（不含帮助）：改名、删除昵称、刷新昵称、添加好友/加好友 + 号码、`ACCEPT_FRIENDS_COMMANDS`、`AUTO_ACCEPT_COMMANDS`；`_command` 返回 `run(requester_name)`。`Bot._start_claude_relay` 把 `is_command` 交给中转，只做中转时管理员的这些命令不当任务；`RELAY_HELP`（三行命令列表）附在中转的帮助后面 | `content: str` | `bool` / `callable \| None` |
+| `_cmd_refresh_nicknames(requester_name)` | 处理"刷新昵称"命令 | `requester_name: str` | `str` |
 | `_cmd_rename(content, requester_name)` | 处理"改名"命令 | `content: str, requester_name: str` | `str \| None` |
 | `_cmd_delete_nickname(content, requester_name)` | 处理"删除昵称"命令 | `content: str, requester_name: str` | `str \| None` |
 | `_cmd_add_friend(content, requester_name)` | `添加好友 <号码> [附言]`（也认 `加好友`，不带号码时回复用法）→ `FriendManager.add_friend`；没有好友组件时回复 `NO_FRIEND_MANAGER` | `content: str, requester_name: str` | `str` |
@@ -1023,6 +1025,7 @@ todo_delete_keywords: list[str] = [
 | `RelayStore.add(..., files=())` / `files(job_id)` / `file(job_id, file_id)` | `relay_files(id, job_id, name, path, size)`；只认属于这个任务的文件 | `int` / `list[dict]` / `dict \| None` |
 | `WcdbBackend` 文件消息 | `_extract_file_appmsg(content)`：appmsg `type=6` 的 `title`、`appattach/totallen`（zstd 十六进制也能解）；`_standardize` 给每条消息加 `file_name`、`file_size`（不是文件时为空 / 0，`content` 仍是「[文件]」） | `dict \| None` |
 | worker `fetch_files(client, job)` / `RelayClient.download(job_id, file_id)` / `safe_name(name, fallback)` | 有附件时下载到 `~/.claude-relay/inbox/job-<编号>/`（7 天前的删掉），claude 加 `--add-dir` 这个目录，任务末尾写「（微信里和这条任务一起发来的附件，已存到 …：…。需要时用 Read 工具打开…）」，下载失败的也写上；文件名去掉路径和非法字符 | `(Path \| None, str)` / `bytes` / `str` |
+| `ClaudeRelay(..., reserved=None, extra_help="")` / `_for_admin(sender, content)` | 只做中转时，`ADMIN_WXID` 发的、`reserved(text)` 认出的文字（`AdminCommandHandler.is_command`）不当任务：返回 `(False, None)`，由路由步骤 `relay_only` 交给管理命令处理；别的允许的人发同样的话、或带 `cc` 时仍是任务；`reserved` 出错当作不是命令。`extra_help` 只在只做中转时附在帮助后面 | `bool` |
 | `ClaudeRelay.handle` 语音 | `msg_type=34` 且内容是「[语音] 文字」（Windows `VOICE_ASR_ENABLED=true` 时后端转好的）：去掉句末「。.！!，,、」后按文字处理（有前缀照常；只做中转时不用前缀），任务的回执末尾加「听到的是：…」；没转出文字的语音在只做中转时回 `VOICE_NOT_HEARD`（超过 5 分钟的旧消息不回），否则当普通消息 | `(matched, reply)` |
 | `ClaudeRelay(config, *, store, send, send_file=None, files_dir=None, clock)` / `_deliver(job)` / `result_message(job, file_name="")` | `send_file(chat_id, path)` 来自后端（`Bot._start_claude_relay` 用 `getattr(backend, "send_file", None)`）；`files_dir` 默认是数据库旁边的 `claude_relay_files/`（内存库用临时目录）；长结果先发文件、再发摘要消息（`_file_sent` 记住已发的文件，后面的消息重试时不重发文件）；`file_name` 给出时消息只带前 `SUMMARY_CHARS`（300）字 | — / `bool` / `str` |
 | `WcdbBackend.send_file(chat_id, path)` | 找到聊天名，在窗口锁里 `WeChatWindowController.send_file_to_chat`（粘贴文件再回车，和表情包一样）；`STICKER_PASTE=image` 只把图片转成静态图，其他文件（中转结果）始终按文件粘贴（`_PICTURE_SUFFIXES`） | `bool` |

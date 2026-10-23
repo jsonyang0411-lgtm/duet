@@ -18,6 +18,15 @@ AUTO_ACCEPT_COMMANDS = {                 # whitespace-normalised text -> switch 
 }
 
 
+# The management commands in one line each: the Claude relay's help lists them when the
+# bot only relays (CLAUDE_RELAY_ONLY=on), where this handler's own help does not fit.
+RELAY_HELP = (
+    "管理命令（只有管理员能用，不会交给 Mac）：\n"
+    "添加好友 号码 [附言] / 同意好友 / 自动同意好友 开|关\n"
+    "改名 wxid_xxx = 昵称 / 删除昵称 wxid_xxx / 刷新昵称"
+)
+
+
 class AdminCommandHandler:
     """Parse and execute admin commands from the bot's admin user.
 
@@ -87,34 +96,43 @@ class AdminCommandHandler:
                 "  对话：@bot + 你想说的话，直接聊天\n"
             )
 
-        # ── 改名 command ────────────────────────────────────────
+        command = self._command(content)
+        return command(requester_name) if command is not None else None
+
+    def is_command(self, content: str) -> bool:
+        """A management command (not the help), recognised without running it.
+
+        The Claude relay asks this when the bot only relays, so 「添加好友 …」 from the
+        admin stays a command instead of becoming a task for the Mac.
+        """
+        return self._command(content.strip()) is not None
+
+    def _command(self, content: str):
+        """The management command ``content`` is, as ``run(requester_name)``; else None."""
+        # ── 改名 / 删除昵称 / 刷新昵称 ──────────────────────────
         if content.startswith("改名 "):
-            return self._cmd_rename(content, requester_name)
-
-        # ── 删除昵称 command ────────────────────────────────────
+            return lambda name: self._cmd_rename(content, name)
         if content.startswith("删除昵称 "):
-            return self._cmd_delete_nickname(content, requester_name)
-
-        # ── 刷新昵称 command ────────────────────────────────────
+            return lambda name: self._cmd_delete_nickname(content, name)
         if content.strip() == "刷新昵称":
-            self._nicks.load(force=True)
-            count = len(self._nicks.load())
-            return f"@{requester_name} 昵称缓存已刷新，当前 {count} 条"
+            return self._cmd_refresh_nicknames
 
         # ── Friend commands (they drive the WeChat window and take seconds) ──
         if content.split(None, 1)[:1] in (["添加好友"], ["加好友"]):
-            return self._cmd_add_friend(content, requester_name)
-
+            return lambda name: self._cmd_add_friend(content, name)
         if content in ACCEPT_FRIENDS_COMMANDS:
-            return self._cmd_accept_friends(requester_name)
-
+            return self._cmd_accept_friends
         switch = AUTO_ACCEPT_COMMANDS.get(" ".join(content.split()))
         if switch is not None:
-            return self._cmd_auto_accept(switch, requester_name)
-
+            return lambda name: self._cmd_auto_accept(switch, name)
         return None
 
     # ── Command implementations ────────────────────────────────────
+
+    def _cmd_refresh_nicknames(self, requester_name: str) -> str:
+        self._nicks.load(force=True)
+        count = len(self._nicks.load())
+        return f"@{requester_name} 昵称缓存已刷新，当前 {count} 条"
 
     def _cmd_rename(self, content: str, requester_name: str) -> str | None:
         """Handle the '改名' command."""
