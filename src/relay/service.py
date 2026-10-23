@@ -119,7 +119,7 @@ class ClaudeRelay:
         db = str(getattr(config, "claude_relay_db", ":memory:"))
         self._files_dir = Path(files_dir) if files_dir is not None else (
             Path(tempfile.gettempdir()) / "webot-relay-files" if db == ":memory:"
-            else Path(db).parent / "claude_relay_files")
+            else (Path(db).parent / "claude_relay_files").resolve())
         self._file_sent: set[int] = set()       # jobs whose result file is in the chat already
         self._held: dict[str, list[Held]] = {}  # pictures and files waiting for the next task
         self._held_lock = threading.Lock()
@@ -700,7 +700,8 @@ class ClaudeRelay:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 self._prune_files()
                 path.write_text(self._file_text(job), encoding="utf-8-sig")
-                if self._send_file(job["chat_id"], str(path)):
+                if self._send_file(job["chat_id"], str(path.resolve())):
+                    time.sleep(1.0)
                     self._file_sent.add(job["id"])
                 else:
                     logger.warning("CLAUDE_RELAY: the result file of #%d was not sent; cutting it short",

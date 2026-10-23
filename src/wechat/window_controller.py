@@ -189,7 +189,8 @@ def _conversation_bbox(left: int, top: int, right: int, bottom: int,
 def _dropfiles_bytes(path: str) -> bytes:
     """CF_HDROP data for one file: a DROPFILES header and the path, UTF-16, double-NUL ended."""
     header = struct.pack("<IiiII", 20, 0, 0, 0, 1)        # pFiles, pt.x, pt.y, fNC, fWide
-    return header + (str(path) + "\0\0").encode("utf-16-le")
+    abs_path = str(Path(path).resolve())
+    return header + (abs_path + "\0\0").encode("utf-16-le")
 
 
 def _dib_bytes(path: str) -> bytes:
