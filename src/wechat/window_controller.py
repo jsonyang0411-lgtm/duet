@@ -241,7 +241,10 @@ def _score_window(hwnd: int) -> WindowCandidate:
     reasons.append("wechat_process")
 
     # Title
-    if "微信" in c.title:
+    if c.title in ("微信", "WeChat"):
+        c.score += 60
+        reasons.append("title_wechat_exact")
+    elif "微信" in c.title:
         c.score += 50
         reasons.append("title_wechat")
     elif "WeChat" in c.title:
