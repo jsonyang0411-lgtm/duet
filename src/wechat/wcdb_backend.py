@@ -467,6 +467,15 @@ class WcdbBackend(AbstractWeChatBackend):
         with self._window_lock:
             return self._send_and_confirm(chat_name, chat_id, content)
 
+    def send_file(self, chat_id: str, path: str) -> bool:
+        """Send a file into a chat (pasted, like a sticker): the Claude relay's long results."""
+        chat_name = self._talker_to_name(chat_id)
+        if not chat_name:
+            logger.error("Cannot resolve chat_id=%s to chat name", chat_id)
+            return False
+        with self._window_lock:
+            return self._window.send_file_to_chat(chat_name, path)
+
     def stop(self) -> None:
         self._running = False
         if self._pool:

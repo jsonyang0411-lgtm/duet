@@ -214,6 +214,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `CLAUDE_RELAY_WXIDS` | `list[str]` | 空（=`ADMIN_WXID`） | `src/config.py`（逗号分隔） | `ClaudeRelay.__init__()`：只认这些 wxid 的私聊；开启时两者不能都空 |
 | `CLAUDE_RELAY_DB` | `str` | `"data/claude_relay.db"` | `src/config.py` | `RelayStore`：任务和每个私聊的 Claude 会话 |
 | `CLAUDE_RELAY_MAX_CHARS` | `int` | `1500` (100–5000) | `src/config.py` | `ClaudeRelay.result_message()`：结果超过就截断，并给出 Mac 上完整日志的路径 |
+| `CLAUDE_RELAY_LONG_FILE` | `str` | `"on"` (`off`/`on`) | `src/config.py` | `ClaudeRelay.__init__`（`on` 时才用 `send_file`）→ `_deliver()`：结果超过 `CLAUDE_RELAY_MAX_CHARS` 时把完整结果写成 `data/claude_relay_files/中转结果-<编号>.txt`（UTF-8 带 BOM，30 天前的删掉），先用 `backend.send_file` 发文件，再发「#17 完成…」+ 前 300 字 + 「完整内容在上面的文件里」；后端不能发文件（没有 `send_file`，如 macOS）或发送失败就照旧截断；控制台「中转代理」页可改 |
 | `CLAUDE_RELAY_PROGRESS_MIN` | `int` | `3` (0–120；0 = 关) | `src/config.py` | `ClaudeRelay._send_progress()`（发送线程每轮）：排队超过 `START_NOTE_AFTER_SEC`（20 秒）的任务开始时发「#3 开始了（排队了…）」；进行中的任务每隔这么多分钟、进度有变化时发「#3 进行中（6分钟）：第 14 步 · 改 service.py · 计划 3/7」（进度来自 Mac 的心跳）；控制台「中转代理」页可改 |
 | `OCR_FALLBACK` | `str` | `"off"` (`off`/`on`) | `src/config.py` | `src/wechat/mac_hybrid_backend.py:_ocr_from_config()` 建 `OcrFallback(MacVisionEngine())`，`src/wechat/wcdb_backend.py:_ocr_from_config()` 建 `OcrFallback(WindowsOcrEngine(...))`；数据库读不了时改读屏幕上打开的群聊。对 macOS 的 `mac_hybrid` 和 Windows 的 `wcdb` 后端有效；控制台「高级 → 读取备选（OCR）」有开关 |
 | `OCR_FALLBACK_AFTER` | `int` | `3` (1–20) | `src/config.py` | `OcrFallback.note_db_failure()`：数据库每秒读一次，连续失败这么多次才切到 OCR |
@@ -999,6 +1000,8 @@ todo_delete_keywords: list[str] = [
 | `commands.parse(body)` 新增 | `projects`（项目、当前项目）、`switch`（切到 / 切换到 / 进入 / cd / use + 别名） | `RelayCommand` |
 | `ClaudeRelay` 便利功能 | 只做中转时允许的人的私聊文字不用 `cc` 前缀（非文字、空白、别人、群里的不算）；`note_worker(projects, default)` 记下 worker 每次取任务时报的项目（请求头 `X-Relay-Projects` JSON 列表、`X-Relay-Default` JSON 字符串）；`projects_text` / `_switch`（知道列表时检查别名，切换会开新会话）；入队时没写 `@` 就用这个私聊的当前项目；状态里显示项目；帮助在只做中转时不写 `cc` | — |
 | `RelayStore.current_project(chat_id)` / `set_project(chat_id, project)` | `relay_sessions.project` 列（旧库启动时 `ALTER TABLE` 补上）；切换项目同时清空会话 | `str` / — |
+| `ClaudeRelay(config, *, store, send, send_file=None, files_dir=None, clock)` / `_deliver(job)` / `result_message(job, file_name="")` | `send_file(chat_id, path)` 来自后端（`Bot._start_claude_relay` 用 `getattr(backend, "send_file", None)`）；`files_dir` 默认是数据库旁边的 `claude_relay_files/`（内存库用临时目录）；长结果先发文件、再发摘要消息（`_file_sent` 记住已发的文件，后面的消息重试时不重发文件）；`file_name` 给出时消息只带前 `SUMMARY_CHARS`（300）字 | — / `bool` / `str` |
+| `WcdbBackend.send_file(chat_id, path)` | 找到聊天名，在窗口锁里 `WeChatWindowController.send_file_to_chat`（粘贴文件再回车，和表情包一样）；`STICKER_PASTE=image` 只把图片转成静态图，其他文件（中转结果）始终按文件粘贴（`_PICTURE_SUFFIXES`） | `bool` |
 | `ClaudeRelay._send_progress(now)` / `service.progress_line(progress_json)` / `_clean_progress(body)` | 进度消息（见 `CLAUDE_RELAY_PROGRESS_MIN`；发送失败不重试，下一条照常）；把心跳里的 `{"steps", "doing", "plan"}` 拼成「第 14 步 · 改 service.py · 计划 3/7」（没有就是空串）；心跳体清洗（步数不是数字当 0，文字截断） | — / `str` / `dict \| None` |
 | `RelayStore.heartbeat(job_id, now, progress=None)` / `running()` / `note_progress_sent(job_id, line, now)` | 心跳带进度时存进 `relay_jobs.progress`（JSON）；进行中的任务；记下这次告诉微信的时间和内容（`progress_sent_at` / `progress_sent`，同样的进度不重复发）。新列由 `_ADDED_COLUMNS` 在旧库启动时 `ALTER TABLE` 补上 | `dict \| None` / `list[dict]` / — |
 | worker `Progress.feed(line)` / `report()` / `describe_step(name, args)` | 读 `stream-json` 的每一行：`assistant` 里的 `tool_use` 算一步，`doing` 是最近一步的简述（「运行 git status」「改 service.py」「看 store.py」「搜索 …」「打开网页 …」「派子任务 …」）或 Claude 刚说的话，`TodoWrite` 给出 `plan`（完成数/总数）和进行中那一项；`report()` 随每次心跳发出 | — / `dict` / `str` |
@@ -2244,7 +2247,9 @@ Mac worker.py：GET /relay/next（长轮询）→ claim_next（带上这个私�
   → claude -p --output-format stream-json --verbose --permission-mode auto --permission-prompts none [--resume 会话]
   → Progress.feed(每一行) → 每 30 秒 POST heartbeat {steps, doing, plan}（返回 cancel）→ POST result
 发送线程 tick → _send_progress：排过队的「#17 开始了」、每 CLAUDE_RELAY_PROGRESS_MIN 分钟「#17 进行中…」
-ClaudeRelay.finish → RelayStore.finish（更新会话）→ 发送线程 tick → backend.send_text(私聊, 「#17 完成…」)
+ClaudeRelay.finish → RelayStore.finish（更新会话）→ 发送线程 tick → _deliver
+  → 结果太长且能发文件：backend.send_file(私聊, 中转结果-17.txt) → backend.send_text(私聊, 「#17 完成…」+ 开头 300 字)
+  → 否则：backend.send_text(私聊, 「#17 完成…」，超长截断)
 ```
 
 ```sql
@@ -2427,6 +2432,7 @@ CLAUDE_RELAY_PREFIX=cc                         # 指令前缀
 CLAUDE_RELAY_WXIDS=                            # 谁能用（逗号分隔 wxid）；空=ADMIN_WXID
 CLAUDE_RELAY_MAX_CHARS=1500                    # 结果超过就截断（完整结果在 Mac 日志）
 CLAUDE_RELAY_PROGRESS_MIN=3                    # 长任务每隔几分钟发一次进度；排过队的开始时说一声；0=关
+CLAUDE_RELAY_LONG_FILE=on                      # 太长的结果发成 txt 文件（只有 Windows 能发文件，其他照旧截断）
 
 # === OCR 备选读取（macOS mac_hybrid 和 Windows wcdb） ===
 OCR_FALLBACK=off                               # on：数据库读不了时，读屏幕上打开的群聊（Apple Vision）

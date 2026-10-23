@@ -356,7 +356,7 @@ class Bot:
         if getattr(config, "claude_relay", "off") != "on":
             return None
         from .relay import ClaudeRelay
-        relay = ClaudeRelay(config, send=backend.send_text)
+        relay = ClaudeRelay(config, send=backend.send_text, send_file=getattr(backend, "send_file", None))
         try:
             relay.start()
         except OSError:

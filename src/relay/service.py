@@ -7,6 +7,8 @@ background thread sends it to the chat the request came from.  The bot never
 waits for the Mac: a request gets a receipt at once, the result comes later.
 In between (CLAUDE_RELAY_PROGRESS_MIN): "started" when a job had to wait, and
 every few minutes how far a long one is (the worker's heartbeats carry it).
+A result too long for one message goes as a .txt file when the backend can
+send files (CLAUDE_RELAY_LONG_FILE), with a short message after it.
 """
 
 from __future__ import annotations
@@ -14,8 +16,10 @@ from __future__ import annotations
 import json
 import logging
 import re
+import tempfile
 import threading
 import time
+from pathlib import Path
 from typing import Callable, Optional
 
 from .commands import RelayCommand, parse, prefix_pattern
@@ -30,6 +34,8 @@ RETRY_SEND_SEC = 30         # wait before sending a result again after a failed 
 TICK_SEC = 5
 MAX_WAIT_SEC = 30           # longest a worker's request for a job is held open
 START_NOTE_AFTER_SEC = 20   # a job that waited this long in the queue gets a "started" message
+SUMMARY_CHARS = 300         # the message after a result file starts with this much of it
+KEEP_FILES_DAYS = 30        # result files older than this are deleted when a new one is written
 
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
 
@@ -87,10 +93,19 @@ def _preview(text: str, limit: int = 20) -> str:
 class ClaudeRelay:
     def __init__(self, config, *, store: Optional[RelayStore] = None,
                  send: Optional[Callable[[str, str], bool]] = None,
+                 send_file: Optional[Callable[[str, str], bool]] = None,
+                 files_dir: Optional[Path] = None,
                  clock: Callable[[], float] = time.time):
         self._config = config
         self._store = store if store is not None else RelayStore(config.claude_relay_db)
         self._send = send
+        # Long results as a file: needs a backend that can send files (Windows).
+        self._send_file = send_file if getattr(config, "claude_relay_long_file", "on") == "on" else None
+        db = str(getattr(config, "claude_relay_db", ":memory:"))
+        self._files_dir = Path(files_dir) if files_dir is not None else (
+            Path(tempfile.gettempdir()) / "webot-relay-files" if db == ":memory:"
+            else Path(db).parent / "claude_relay_files")
+        self._file_sent: set[int] = set()       # jobs whose result file is in the chat already
         self._clock = clock
         self._prefix_word = config.claude_relay_prefix
         self._prefix = prefix_pattern(config.claude_relay_prefix)
@@ -398,7 +413,7 @@ class ClaudeRelay:
             if failed_at is not None and now - failed_at < RETRY_SEND_SEC:
                 continue
             try:
-                sent = bool(self._send(job["chat_id"], self.result_message(job)))
+                sent = self._deliver(job)
             except Exception:
                 logger.exception("CLAUDE_RELAY: sending the result of #%d failed", job["id"])
                 sent = False
@@ -431,7 +446,46 @@ class ClaudeRelay:
                 logger.exception("CLAUDE_RELAY: progress message for #%d failed", job["id"])
             self._store.note_progress_sent(job["id"], line, now)
 
-    def result_message(self, job: dict) -> str:
+    def _deliver(self, job: dict) -> bool:
+        """Send a result: a long one as a file first, when the backend can (else cut short)."""
+        body = str(job.get("result_text") or "").strip()
+        if self._send_file is None or len(body) <= self._max_chars or job["status"] not in ("done", "failed"):
+            return bool(self._send(job["chat_id"], self.result_message(job)))
+        path = self._result_file(job)
+        if job["id"] not in self._file_sent:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                self._prune_files()
+                path.write_text(self._file_text(job), encoding="utf-8-sig")
+                if self._send_file(job["chat_id"], str(path)):
+                    self._file_sent.add(job["id"])
+                else:
+                    logger.warning("CLAUDE_RELAY: the result file of #%d was not sent; cutting it short",
+                                   job["id"])
+            except Exception:
+                logger.exception("CLAUDE_RELAY: the result file of #%d failed; cutting it short", job["id"])
+        file_name = path.name if job["id"] in self._file_sent else ""
+        return bool(self._send(job["chat_id"], self.result_message(job, file_name=file_name)))
+
+    def _result_file(self, job: dict) -> Path:
+        return self._files_dir / f"中转结果-{job['id']}.txt"
+
+    def _file_text(self, job: dict) -> str:
+        head = self.result_message({**job, "result_text": ""})
+        return (f"{head}\n任务：{job['text']}\n项目：{job.get('project') or 'Mac 的默认项目'}\n"
+                f"{'─' * 20}\n\n{str(job.get('result_text') or '').strip()}\n")
+
+    def _prune_files(self) -> None:
+        cutoff = time.time() - KEEP_FILES_DAYS * 86400
+        for old in self._files_dir.glob("中转结果-*.txt"):
+            try:
+                if old.stat().st_mtime < cutoff:
+                    old.unlink()
+            except OSError:
+                pass
+
+    def result_message(self, job: dict, file_name: str = "") -> str:
+        """The result for WeChat; with ``file_name`` (the whole result went as that file) only its start."""
         job_id, status = job["id"], job["status"]
         if status == "lost":
             return (
@@ -448,7 +502,9 @@ class ClaudeRelay:
         body = str(job.get("result_text") or "").strip()
         if not body and status == "failed":
             body = str(extra.get("error") or "没有返回内容")
-        if len(body) > self._max_chars:
+        if file_name:
+            body = body[:SUMMARY_CHARS].rstrip() + f"…\n（结果太长，完整内容在上面的文件「{file_name}」里）"
+        elif len(body) > self._max_chars:
             where = f"，完整结果在 Mac：{extra['log_path']}" if extra.get("log_path") else ""
             body = body[: self._max_chars].rstrip() + f"\n…（太长，已截断{where}）"
         return f"{head}\n{body}" if body else head

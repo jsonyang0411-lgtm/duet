@@ -246,7 +246,11 @@ GROUPS: list[dict] = [
              "help": "私聊里以它开头的消息才算任务，例如「cc 跑一下测试」。",
              "requires": [{"key": "CLAUDE_RELAY", "is": "on", "text": "中转打开时才用"}]},
             {"key": "CLAUDE_RELAY_MAX_CHARS", "type": "int", "min": 100, "max": 5000, "default": "1500", "label": "结果最长", "unit": "字",
-             "help": "结果超过就截断，完整内容在 Mac 的 ~/.claude-relay/logs/ 里。",
+             "help": "结果超过就截断，完整内容在 Mac 的 ~/.claude-relay/logs/ 里（打开下面的「长结果发文件」时改成发文件）。",
+             "requires": [{"key": "CLAUDE_RELAY", "is": "on", "text": "中转打开时才用"}]},
+            {"key": "CLAUDE_RELAY_LONG_FILE", "type": "onoff", "default": "on", "label": "长结果发文件",
+             "help": "结果超过上面的字数时，把完整结果存成 txt 文件发到微信里，再发一条带开头摘要的消息。"
+                     "只有 Windows（数据库直读）能发文件，其他情况照样截断。",
              "requires": [{"key": "CLAUDE_RELAY", "is": "on", "text": "中转打开时才用"}]},
             {"key": "CLAUDE_RELAY_PROGRESS_MIN", "type": "int", "min": 0, "max": 120, "default": "3",
              "label": "进度提醒间隔", "unit": "分钟",
