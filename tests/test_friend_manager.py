@@ -515,6 +515,10 @@ class AdminFriendCommandTests(unittest.TestCase):
         self.auto.disable.assert_called_once()
         self.assertIn("已开启", handler.handle("自动同意好友  开", "Admin"))      # two spaces
         self.auto.enable.assert_called_once()
+        self.assertIn("已开启", handler.handle("自动同意好友开", "Admin"))         # no spaces
+        self.assertEqual(self.auto.enable.call_count, 2)
+        self.assertIn("已关闭", handler.handle("自动同意好友关", "Admin"))         # no spaces
+        self.assertEqual(self.auto.disable.call_count, 2)
 
     def test_without_the_components_no_command_claims_success(self):
         handler = self.handler(friend=False, auto=False)

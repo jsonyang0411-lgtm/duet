@@ -12,7 +12,9 @@ NO_FRIEND_MANAGER = "未启用好友管理组件（需要 Windows 版微信窗�
 ACCEPT_FRIENDS_COMMANDS = ("同意好友", "通过好友", "接受好友", "同意申请")
 AUTO_ACCEPT_COMMANDS = {                 # whitespace-normalised text -> switch on (True) / off (False)
     "自动同意好友 开": True, "自动同意好友 开启": True, "开启自动同意": True,
+    "自动同意好友开": True, "自动同意好友开启": True,
     "自动同意好友 关": False, "自动同意好友 关闭": False, "关闭自动同意": False,
+    "自动同意好友关": False, "自动同意好友关闭": False,
 }
 
 
