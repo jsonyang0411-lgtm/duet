@@ -290,6 +290,12 @@ class FriendManager:
                     self._confirm_dialog(hwnd)
                     rows = self._capture_ocr()
                     if _still_there(rows, button):
+                        for _ in range(3):
+                            self._sleep(0.4)
+                            rows = self._capture_ocr()
+                            if not _still_there(rows, button):
+                                break
+                    if _still_there(rows, button):
                         logger.warning("accept_friend_requests: a request is still pending after "
                                        "the click; stopping")
                         break

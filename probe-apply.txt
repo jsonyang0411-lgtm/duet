@@ -1,0 +1,13 @@
+WeChat main window: HWND 1115100 (pid 912)
+
+--- HWND 5048736  class='Qt51514QWindowIcon'  title='申请添加朋友'  size=746x1293
+WindowControl name='申请添加朋友' id='' class='Qt51514QWindowIcon' rect=1545,390,2291,1683
+  PaneControl name='Weixin' id='' class='Qt51514QWindowIcon' rect=2276,1668,2278,1670
+  PaneControl name='MMUIRenderSubWindowHW' id='' class='MMUIRenderSubWindowHW' rect=1558,390,2278,1670
+=> 3 of 3 controls have a name: look for the ones friend management clicks.
+
+--- HWND 24905158  class='Qt51514QWindowIcon'  title='添加朋友'  size=746x1133
+WindowControl name='添加朋友' id='' class='Qt51514QWindowIcon' rect=1545,470,2291,1603
+  PaneControl name='Weixin' id='' class='Qt51514QWindowIcon' rect=2276,1588,2278,1590
+  PaneControl name='MMUIRenderSubWindowHW' id='' class='MMUIRenderSubWindowHW' rect=1558,470,2278,1590
+=> 3 of 3 controls have a name: look for the ones friend management clicks.
