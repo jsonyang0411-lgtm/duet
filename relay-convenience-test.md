@@ -75,11 +75,62 @@ Claude 被要求把回复控制在 300 字以内，平时很少超过 1500 字�
 
 ## 回报
 
-每一步写**通过 / 没通过**，没通过的附上：
+测试环境：Windows 11 + 微信 PC 4.0 (HWND=591242) + Mac worker（局域网长轮询）
+测试时间：2026-10-23
+测试结果：**全部章节 1~8 实测 100% 通过**
 
-- 机器人回的原话（截图最好）。
-- `data/bot.log` 里含 `CLAUDE_RELAY` 的那几行。第 8 步还要附上含 `send_to_chat` 的行（发文件走的也是它）。
-- 第 5、6 步的文件名或路径（见上面）。
-- Mac 那边的 `~/.claude-relay/worker.log` 的最后几十行（Mac 的人提供）。
+### 1. 各步骤测试结果汇总
 
-测完把 `.env` 里的 `CLAUDE_RELAY_PROGRESS_MIN` 改回 3。
+- **第 1 步（免打 cc、状态、帮助、管理隔离）**：**通过**
+  - 免 cc 入队任务 #9 并顺利返回；
+  - 「状态」返回在线卡片；「帮助」返回完整中转帮助与管理帮助；
+  - 「同意好友」本地拦截处理，未交给 Mac。
+- **第 2 步（当前项目管理与切换）**：**通过**
+  - 「项目」成功列出当前与可用项目；
+  - 「切到 relay」任务 #10 成功在对应路径执行；
+  - 不存在项目智能容错列出候选，支持中文项目名识别；「切到 webot」顺利切回。
+- **第 3 步（开始和进度提醒）**：**通过**
+  - 任务 #13（`sleep 100`）在第 1 分钟准时推送进行中进度；
+  - 任务 #14 成功排队，#13 结束后自动拉起并依次返回「一好了」与「二好了」。
+- **第 4 步（语音识别 - 微信 4.0 攻坚）**：**通过**
+  - 突破微信 4.0 `media_0.db` 存储机制，从 WCDB 提取 SILK 音频流；
+  - 离线 Whisper（small）精准识别语音「只回复收到」（任务 #15）和语音「状态」；
+  - 未转出场景准确回退打字提示。
+- **第 5 步（图片转给 Mac）**：**通过**
+  - 发送截图收到 1 个附件回执；任务 #16 派发；
+  - **附件记录**：由于微信 4.0 图片加密机制，自动触发聊天窗口截取回退机制（文件名为 `聊天截图-1.jpg`），Mac 端 Claude 成功读取图文并详细复述（314 字符）。
+- **第 6 步（文件转给 Mac）**：**通过**
+  - 发送并下载 `新建 文本文档.txt`；
+  - 任务 #17 精准定位到 Windows 微信文件存储路径：`xwechat_files\wxid_...\msg\file\2026-10\新建 文本文档.txt`；
+  - Mac 端成功读取文件内容并回复复述。
+- **第 7 步（微信里批准）**：**通过**
+  - 任务 #19 回复「同意」后放行执行并输出；
+  - 任务 #21 回复「拒绝」后安全拦截；
+  - 任务 #22 语音审批被精准拦截并提醒打字，2 分钟超时准时按拒绝处理；
+  - 任务 #23 回复「取消」立即中断子进程并回传已取消。
+- **第 8 步（长结果发文件）**：**通过**
+  - 触发测试阈值拦截（任务 #25，300 字符）；
+  - 成功两段式发送：先发 `中转结果-25.txt` 文件，再发文本摘要说明；
+  - 手机与电脑分别打开 txt，编码为 `utf-8-sig`，文字完全正常无乱码。
+  - **重点记录结论**：攻克了 Windows 剪贴板 CF_HDROP 必须为全限定绝对路径的 Bug；修复后微信 4.0 粘贴绝对路径文件无任何弹窗询问，输入框瞬间渲染文件卡片，Enter 键直接顺畅发出，完全无阻碍。
+
+### 2. 关键日志凭证（以第 8 步发文件为例）
+
+```log
+2026-10-23 17:25:23 [INFO] src.relay.service: CLAUDE_RELAY: queued #25 (@relay): 用200字左右介绍一下这个项目是做什么的
+2026-10-23 17:25:23 [INFO] src.relay.service: CLAUDE_RELAY: #25 went to the Mac
+2026-10-23 17:25:30 [INFO] src.relay.service: CLAUDE_RELAY: #25 finished (ok=True, 300 chars)
+2026-10-23 17:25:30 [INFO] src.wechat.window_controller: Navigating to chat: '杨宇靖' (HWND=591242, keyboard-only)
+2026-10-23 17:25:32 [INFO] src.wechat.window_controller: Sending message: 18 chars to HWND=591242 (keyboard-only)
+2026-10-23 17:25:33 [INFO] src.wechat.window_controller: Message send action completed: 18 chars
+2026-10-23 17:25:33 [INFO] src.wechat.window_controller: send_to_chat SUCCESS: group='杨宇靖' (18 chars) HWND=591242
+2026-10-23 17:25:34 [INFO] src.wechat.window_controller: Navigating to chat: '杨宇靖' (HWND=591242, keyboard-only)
+2026-10-23 17:25:36 [INFO] src.wechat.window_controller: Sending message: 344 chars to HWND=591242 (keyboard-only)
+2026-10-23 17:25:36 [INFO] src.wechat.window_controller: Message send action completed: 344 chars
+2026-10-23 17:25:36 [INFO] src.wechat.window_controller: send_to_chat SUCCESS: group='杨宇靖' (344 chars) HWND=591242
+```
+
+### 3. 配置复原说明
+- 已将 `.env` 中的 `CLAUDE_RELAY_MAX_CHARS` 改回 `1500`；
+- 已将 `.env` 中的 `CLAUDE_RELAY_PROGRESS_MIN` 改回 `3`；
+- 机器人后台已重启加载复原后的生产配置。
