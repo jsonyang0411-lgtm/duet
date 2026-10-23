@@ -2321,6 +2321,7 @@ Bot._start_friend_management → FriendManager(WeChatWindowController, WindowsOc
 - 每次按键/点击前核对微信在前台；OCR 找不到的按钮一律不点（早先的版本会盲点固定坐标、盲按回车，附言可能被当成聊天消息发给别人）。
 - 结果以屏幕为准：按钮还在原处就不算同意，申请窗口没关就报 `not_sent`；失败原因见 `add_friend` 返回的 `reason`。
 - OCR 用自己的 `WindowsOcrEngine`，与 `OCR_FALLBACK`（读消息用）无关，后者关着也能用。
+- 真机测试清单（要试什么、期望什么、怎么汇报）：`friend-management-test.md`。
 - 真机上的界面文字（「新的朋友」「接受」「网络查找」「添加到通讯录」「发送」…）写在 `friend_manager.py` 顶部的 `*_LABELS` 常量里，微信改版时改这里。
 
 ---
