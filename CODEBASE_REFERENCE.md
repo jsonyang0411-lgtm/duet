@@ -1027,7 +1027,7 @@ todo_delete_keywords: list[str] = [
 | `service.ClaudeRelay(config, *, store=None, send=None, clock=time.time)` | 中转主体：`start()` 起发送线程和 HTTP 服务（端口打不开抛 `OSError`）、`stop()` | — |
 | `ClaudeRelay.handle(msg)` | 只看私聊、前缀、`CLAUDE_RELAY_WXIDS`/`ADMIN_WXID`；不允许的人返回 `(False, None)` 按普通消息处理；超过 `MAX_AGE_SEC`（300 秒）的旧消息 `(True, None)` 不执行；其余执行命令并返回回执（编号、前面几个任务、Mac 不在线时说明）；出错回「转给 Mac 失败了」 | `(matched, reply)` |
 | `ClaudeRelay.next_job(wait) / heartbeat(job_id) / finish(job_id, payload)` | HTTP 调用：长轮询最多 `MAX_WAIT_SEC`（30 秒）；三者都记录 Mac 最后出现时间，`mac_online()` = 60 秒内来过 | `dict \| None` / `dict \| None` / `bool \| None` |
-| `ClaudeRelay.tick()` | 发送线程每 5 秒（有结果时立即）：标记失联、把没发的结果用 `send(chat_id, text)` 发回原私聊，失败 30 秒后再试 | — |
+| `ClaudeRelay.tick()` | 发送线程每 5 秒（有结果时立即）：标记失联、把没发的结果用 `send(chat_id, text)` 发回原私聊，失败 30 秒后再试；`_tick_lock` 保证同一时间只有一轮（发送线程和别处同时调用时同一个结果不会发两次） | — |
 | `ClaudeRelay.result_message(job) / status_text(chat_id) / help_text()` | 「#17 完成（4分12秒）\n…」、失联提示（含 `cc 重试 17`）、超长截断；最近 5 个任务和 Mac 在线状态；命令说明 | `str` |
 | `http.serve(relay, host, port, token)` | `ThreadingHTTPServer` 守护线程：`GET /relay/health`、`GET /relay/next?wait=`（无任务 204）、`GET /relay/jobs/<id>/files/<n>`（附件原样字节，不是这个任务的 404）、`POST /relay/jobs/<id>/ask`、`GET /relay/asks/<n>?wait=`、`POST /relay/jobs/<id>/heartbeat`、`POST /relay/jobs/<id>/result`；无 token 401、坏 JSON 400、未知任务 404、请求体上限 1 MB | `ThreadingHTTPServer` |
 | `steps.claude_relay(ctx)` | 路由步骤（`persist` 之后、`memory_hooks` 之前）：`router._claude_relay` 为 `None` 时跳过；命中则 `trace.reason("claude_relay")` 并以回执结束路由 | `Stop \| None` |

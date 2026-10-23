@@ -122,6 +122,7 @@ class ClaudeRelay:
         self._held: dict[str, list[Held]] = {}  # pictures and files waiting for the next task
         self._held_lock = threading.Lock()
         self._asks_changed = threading.Condition()
+        self._tick_lock = threading.Lock()      # one delivery round at a time (no message sent twice)
         self._clock = clock
         self._prefix_word = config.claude_relay_prefix
         self._prefix = prefix_pattern(config.claude_relay_prefix)
@@ -614,7 +615,14 @@ class ClaudeRelay:
             self._wake.clear()
 
     def tick(self) -> None:
-        """Mark silent jobs lost, then send every result WeChat has not had yet."""
+        """Mark silent jobs lost, then send every result WeChat has not had yet.
+
+        Safe to call from any thread: two rounds at once would both send the same result.
+        """
+        with self._tick_lock:
+            self._tick()
+
+    def _tick(self) -> None:
         now = self._clock()
         for job_id in self._store.mark_lost(now - LOST_AFTER_SEC):
             logger.warning("CLAUDE_RELAY: #%d lost (no heartbeat for %d s)", job_id, LOST_AFTER_SEC)
