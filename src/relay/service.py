@@ -38,6 +38,9 @@ SUMMARY_CHARS = 300         # the message after a result file starts with this m
 KEEP_FILES_DAYS = 30        # result files older than this are deleted when a new one is written
 
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
+# A voice message the backend turned into text (VOICE_ASR_ENABLED on Windows): "[语音] 跑一下测试。"
+_VOICE = re.compile(r"^\[语音\]\s*(.*)$", re.S)
+VOICE_NOT_HEARD = "这条语音没转出文字。请打字发，或者在 Windows 上打开语音识别（VOICE_ASR_ENABLED=true）。"
 
 STATUS_NAMES = {
     "pending": "排队中", "running": "进行中", "done": "完成", "failed": "失败",
@@ -170,6 +173,18 @@ class ClaudeRelay:
             return False, None
         content = _QUOTE_PREFIX.sub("", str(msg.get("content", "")))
         sender = str(msg.get("sender_id", ""))
+        msg_type = int(msg.get("msg_type", 1) or 1)
+        timestamp = float(msg.get("timestamp", 0) or 0)
+        too_old = bool(timestamp) and self._clock() - timestamp > MAX_AGE_SEC
+        heard = ""
+        if msg_type == 34:                         # voice: its text, without the closing "。"
+            voice = _VOICE.match(content)
+            heard = voice.group(1).strip().rstrip("。.！!，,、 ") if voice else ""
+            if not heard:
+                if self._relay_only and sender in self._allowed:
+                    return True, None if too_old else VOICE_NOT_HEARD
+                return False, None
+            content = heard
         m = self._prefix.match(content)
         if m:
             body = m.group(1)
@@ -177,18 +192,20 @@ class ClaudeRelay:
                 logger.info("CLAUDE_RELAY: %s is not allowed to use the relay; handled as a normal message",
                             sender)
                 return False, None
-        elif self._relay_only and sender in self._allowed and int(msg.get("msg_type", 1) or 1) == 1 \
-                and content.strip():
+        elif self._relay_only and sender in self._allowed and msg_type in (1, 34) and content.strip():
             body = content                         # relay only: "cc" may be left out
         else:
             return False, None
-        timestamp = float(msg.get("timestamp", 0) or 0)
-        if timestamp and self._clock() - timestamp > MAX_AGE_SEC:
+        if too_old:
             logger.info("CLAUDE_RELAY: ignoring an old request (%.0f s): %s",
                         self._clock() - timestamp, content[:60])
             return True, None
         try:
-            return True, self._run(parse(body), msg["chat_id"], sender)
+            cmd = parse(body)
+            reply = self._run(cmd, msg["chat_id"], sender)
+            if heard and cmd.kind == "task":
+                reply += f"\n听到的是：{cmd.text}"
+            return True, reply
         except Exception:
             logger.exception("CLAUDE_RELAY: could not handle %r", content[:80])
             return True, "转给 Mac 失败了，详情看 bot.log。"

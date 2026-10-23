@@ -10,7 +10,7 @@ import pytest
 from test_claude_relay_worker import ROOT, TOKEN, bot, fake_claude, run_one, settings, worker  # noqa: F401  (fixtures)
 
 from src.relay import commands as C
-from src.relay.service import ClaudeRelay
+from src.relay.service import VOICE_NOT_HEARD, ClaudeRelay
 from src.relay.store import RelayStore
 
 ME = "wxid_me"
@@ -156,3 +156,40 @@ def test_config_json_is_read_again_when_it_changes(worker, tmp_path, monkeypatch
     path.write_text("{broken", encoding="utf-8")
     os.utime(path, ns=(time.time_ns(), time.time_ns() + 20_000_000))
     assert sorted(f.current()["projects"]) == ["a", "b"]                         # a broken file keeps the old one
+
+
+# ── voice messages (VOICE_ASR_ENABLED on Windows) ─────────────────────────
+
+class TestVoice:
+    def voice(self, text, **kw):
+        return pm(f"[语音] {text}" if text else "[语音]", msg_type=34, **kw)
+
+    def test_relay_only_takes_a_voice_task_and_says_what_it_heard(self):
+        r = relay(claude_relay_only="on")
+        matched, reply = r.handle(self.voice("帮我跑一下测试。"))
+        assert matched and "#1" in reply and reply.endswith("\n听到的是：帮我跑一下测试")
+        assert r.store.get(1)["text"] == "帮我跑一下测试"
+        assert r.handle(self.voice("状态。"))[1].startswith("Mac：")            # a control word by voice
+        assert "听到的是" not in r.handle(self.voice("状态"))[1]
+
+    def test_with_the_prefix_a_voice_needs_it_too(self):
+        r = relay()
+        assert r.handle(self.voice("跑一下测试")) == (False, None)
+        matched, reply = r.handle(self.voice("CC 跑一下测试。"))
+        assert matched and r.store.get(1)["text"] == "跑一下测试" and "听到的是：跑一下测试" in reply
+
+    def test_a_voice_without_text(self):
+        r = relay(claude_relay_only="on")
+        assert r.handle(self.voice("")) == (True, VOICE_NOT_HEARD)
+        assert r.handle(self.voice("  。")) == (True, VOICE_NOT_HEARD)
+        old = self.voice("")
+        old["timestamp"] = time.time() - 3600
+        assert r.handle(old) == (True, None)                                  # replayed history: quiet
+        assert r.handle(self.voice("", sender="wxid_other")) == (False, None)
+        assert relay().handle(self.voice("")) == (False, None)                 # not relay only: normal message
+        assert r.store.get(1) is None
+
+    def test_others_voices_and_groups_are_not_tasks(self):
+        r = relay(claude_relay_only="on")
+        assert r.handle(self.voice("跑测试", sender="wxid_other")) == (False, None)
+        assert r.handle(self.voice("跑测试", group=True)) == (False, None)
