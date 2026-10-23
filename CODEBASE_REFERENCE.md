@@ -1060,7 +1060,7 @@ todo_delete_keywords: list[str] = [
 | `FriendManager._ui_session()` | 上下文：拿锁 → `find_hwnd(force=True)` → 记下窗口状态 → `_activate_for_send`（失败就给 `None`）→ 结束时 `_restore_window_state`（最小化/隐藏的窗口放回原样） | `int \| None` |
 | `FriendManager._key / _combo / _paste / _click_row` | 每次输入前核对 `_foreground_matches(hwnd)`，不在前台抛 `_Abort`；`_click_row` 把 OCR 行中心换算成屏幕坐标，点击没送出也抛 `_Abort` | `None` |
 | `FriendManager.accept_friend_requests()` | 通讯录 → 「新的朋友」（打不开/看不到就停）；每轮重新识别屏幕（列表会动），点最上面的「接受/通过」，出现「确定/完成」就点；之后按钮还在原处就不计数并停止；一次最多 `MAX_ACCEPT_PER_RUN`=10 个；没有 OCR 或窗口时返回空 | `list[{"status": "accepted", "timestamp": float}]` |
-| `FriendManager.add_friend(keyword, message="")` | **只走 OCR 链路**（没有 OCR 不开始，不用快捷键、不切标签页、不盲点）：OCR 找搜索框（左上区域 `y0<0.12, x0<0.40`、文字恰好是「搜索」/「Search」，放大镜被读成字母也认）→ 点它（认不出来就什么也不输入）→ 全选删除 → 粘贴关键词 → 点「网络查找」入口 → 资料卡：不存在 / 已是好友 / 找不到「添加到通讯录」都带原因返回 → 点它 → **申请窗口（发送/确定/完成）出现后才**粘贴附言 → 点发送 → 窗口还在就报 `not_sent`。关键词压成一行、最长 `MAX_KEYWORD_CHARS`=64 | `{"ok", "target", "message", "reason"（失败时）}`；`reason`：`invalid` / `no_ocr` / `no_window` / `aborted` / `no_search_box` / `no_search_entry` / `not_found` / `already_friend` / `no_add_button` / `no_dialog` / `not_sent` |
+| `FriendManager.add_friend(keyword, message="")` | 没有 OCR 不开始。**单窗口界面（旧版）只走 OCR**（不用快捷键、不切标签页、不盲点）；**4.0 走上一行的 `_add_friend_wechat4`**（`_is_wechat4` 判断）。旧版界面：OCR 找搜索框（左上区域 `y0<0.12, x0<0.40`、文字恰好是「搜索」/「Search」，放大镜被读成字母也认）→ 点它（认不出来就什么也不输入）→ 全选删除 → 粘贴关键词 → 点「网络查找」入口 → 资料卡：不存在 / 已是好友 / 找不到「添加到通讯录」都带原因返回 → 点它 → **申请窗口（发送/确定/完成）出现后才**粘贴附言 → 点发送 → 窗口还在就报 `not_sent`。关键词压成一行、最长 `MAX_KEYWORD_CHARS`=64 | `{"ok", "target", "message", "reason"（失败时）}`；`reason`：`invalid` / `no_ocr` / `no_window` / `aborted` / `no_search_box` / `no_search_entry` / `not_found` / `already_friend` / `no_add_button` / `no_dialog` / `not_sent` |
 | `AutoFriendService(friend_manager, interval_sec=300, enabled=True)` | 后台线程每隔 `interval_sec`（下限 10）调 `run_once()`；第一次在启动一个间隔之后 | — |
 | `AutoFriendService.enable() / disable() / start() / stop() / run_once()` | `enable()` 线程没起时会启动它；`run_once()` 关着时什么也不做，检查出错只记 warning、不抛 | `run_once` → `list[dict]` |
 | `friend_manager._find_row(rows, *labels, exact, min_x0)` / `_still_there(rows, row)` / `_clean_text(text)` | OCR 行里按文字找最上面的一行；同样文字的行还在原处（中心相差 < `SAME_SPOT`=0.02）吗；去掉所有空白并转小写 | `dict \| None` / `bool` / `str` |
@@ -2320,7 +2320,7 @@ Bot._start_friend_management → FriendManager(WeChatWindowController, WindowsOc
 
 关键点：
 - 与发送共用 `WcdbBackend._window_lock`，所以不会和正在输入的回复交错；管理员命令是在路由线程里同步执行的，要几秒。
-- 添加好友只走 OCR 链路：搜索框、每个按钮、每个窗口都是在屏幕上认出来的，不用 Ctrl+F，不切标签页，没有 OCR 就不开始；每次按键/点击前核对微信在前台；OCR 找不到的按钮一律不点（早先的版本会盲点固定坐标、盲按回车，附言可能被当成聊天消息发给别人）。
+- 添加好友没有 OCR 就不开始。旧版单窗口界面只走 OCR（搜索框、每个按钮、每个窗口都是在屏幕上认出来的，不用 Ctrl+F，不切标签页）；微信 PC 4.0 的「添加朋友」「申请添加朋友」是独立窗口，按窗口类名/大小/标题找到后用 `capture(hwnd)` 识别，(+) 按钮和输入框按位置点，OCR 读不到「确定」时也按位置点（真机测出来的做法，不是纯 OCR；是否改成别的办法等下一轮真机结果）。每次按键/点击前核对微信在前台。
 - 结果以屏幕为准：按钮还在原处就不算同意，申请窗口没关就报 `not_sent`；失败原因见 `add_friend` 返回的 `reason`。
 - OCR 用自己的 `WindowsOcrEngine`，与 `OCR_FALLBACK`（读消息用）无关，后者关着也能用。
 - 真机测试清单（要试什么、期望什么、怎么汇报）：`friend-management-test.md`。

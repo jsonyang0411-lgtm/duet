@@ -6,7 +6,9 @@ OCR, so every step is guarded:
 - the window lock of the send path is shared, so a friend action never interleaves
   with a reply being typed;
 - nothing is typed or clicked unless the WeChat window is in the foreground;
-- nothing is clicked blind: a button OCR cannot find ends the action with a reason;
+- nothing is clicked blind: a button OCR cannot find ends the action with a reason (the
+  exceptions are the few WeChat PC 4.0 steps that have no text to read, see
+  _add_friend_wechat4);
 - an action is only reported as done when the screen shows it (the button is gone,
   the dialog is closed).
 
@@ -14,9 +16,11 @@ Features:
 - accept_friend_requests: Contacts -> 新的朋友, accepts the pending requests (at most
   MAX_ACCEPT_PER_RUN per call).
 - add_friend: searches the wxid / phone number, opens the card, "添加到通讯录", fills the
-  greeting and sends the application.  It runs on the OCR chain only: the search box,
-  every button and every dialog are found on the screen, never by a shortcut or a
-  guessed position, and without OCR it does not start.
+  greeting and sends the application.  Without OCR it does not start.  On the single-window
+  UI everything is found on the screen (the search box, every button, every dialog).  On
+  WeChat PC 4.0 the add dialog and the application dialog are windows of their own: they are
+  found by window class / size / title and read by handle, the (+) button and the input boxes
+  are clicked by position, and so is the confirm button when OCR does not read it.
 - AutoFriendService: periodic background worker for accept_friend_requests.
 """
 
