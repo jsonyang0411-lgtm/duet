@@ -400,6 +400,37 @@ class FriendManager:
             except Exception:
                 pass
 
+    def _is_window_visible(self, hwnd: int) -> bool:
+        if sys.platform != "win32":
+            return False
+        try:
+            import win32gui
+            return bool(win32gui.IsWindow(hwnd) and win32gui.IsWindowVisible(hwnd))
+        except Exception:
+            return False
+
+    def _find_apply_dialog(self, main_hwnd: int, dialog_hwnd: int) -> int | None:
+        if sys.platform != "win32":
+            return None
+        try:
+            import win32gui, win32process
+            if not win32gui.IsWindow(main_hwnd):
+                return None
+            _, main_pid = win32process.GetWindowThreadProcessId(main_hwnd)
+            modals = []
+            def _enum(h, _):
+                if h != main_hwnd and h != dialog_hwnd and win32gui.IsWindow(h) and win32gui.IsWindowVisible(h):
+                    _, pid = win32process.GetWindowThreadProcessId(h)
+                    if pid == main_pid:
+                        cls = win32gui.GetClassName(h)
+                        title = win32gui.GetWindowText(h)
+                        if cls == "Qt51514QWindowIcon" and any(kw in title for kw in ("申请", "验证", "朋友")):
+                            modals.append(h)
+            win32gui.EnumWindows(_enum, None)
+            return modals[0] if modals else None
+        except Exception:
+            return None
+
     def _open_add_friend_dialog_wechat4(self, main_hwnd: int) -> int | None:
         if sys.platform != "win32":
             return None
@@ -509,37 +540,74 @@ class FriendManager:
             self._click_row(dialog_hwnd, add_button)
             self._sleep(0.8)
 
-            popup_hwnd = self._find_popup_dialog(hwnd)
-            target_dialog = popup_hwnd if popup_hwnd else dialog_hwnd
+            # 3. Application modal dialog
+            apply_hwnd = None
+            for _ in range(10):
+                apply_hwnd = self._find_apply_dialog(hwnd, dialog_hwnd)
+                if apply_hwnd:
+                    break
+                self._sleep(0.1)
+
+            target_dialog = apply_hwnd if apply_hwnd else dialog_hwnd
             self._focus_window(target_dialog)
             app_rows = self._capture_ocr(target_dialog)
 
-            send_button = _find_row(app_rows, *SEND_LABELS, exact=True)
-            if send_button is None:
+            confirm_labels = ("确定", "发送", "完成")
+            send_button = _find_row(app_rows, *confirm_labels, exact=True)
+            if send_button is None and not apply_hwnd:
                 self._close_window(dialog_hwnd)
-                if popup_hwnd:
-                    self._close_window(popup_hwnd)
                 return _failure(keyword, "no_dialog", "没有出现填写附言的申请窗口（对方可能无需验证，或界面不同），请在微信里确认是否已发出")
 
-            if message:
-                self._combo(target_dialog, VK_CONTROL, VK_A)
-                self._sleep(0.05)
-                self._paste(target_dialog, message)
-                self._sleep(0.3)
+            if apply_hwnd:
+                a_rect = self._rect_of(apply_hwnd)
+                a_w = a_rect[2] - a_rect[0]
+                a_h = a_rect[3] - a_rect[1]
+                if message:
+                    # Focus the greeting input box near top (cx=0.30, cy=0.18)
+                    input_x = a_rect[0] + int(0.30 * a_w)
+                    input_y = a_rect[1] + int(0.18 * a_h)
+                    if self._clicker(input_x, input_y):
+                        self._sleep(0.1)
+                        self._combo(apply_hwnd, VK_CONTROL, VK_A)
+                        self._sleep(0.05)
+                        self._key(apply_hwnd, VK_BACK)
+                        self._sleep(0.05)
+                        self._paste(apply_hwnd, message)
+                        self._sleep(0.2)
 
-            self._click_row(target_dialog, send_button)
-            self._sleep(0.8)
+                if send_button:
+                    self._click_row(apply_hwnd, send_button)
+                else:
+                    # Default position for WeChat 4.0 green "确定" button (cx=0.337, cy=0.933)
+                    btn_x = a_rect[0] + int(0.337 * a_w)
+                    btn_y = a_rect[1] + int(0.933 * a_h)
+                    self._clicker(btn_x, btn_y)
+                self._sleep(0.2)
+                self._key(apply_hwnd, 0x0D)
+                self._sleep(1.0)
 
-            check_rows = self._capture_ocr(target_dialog)
-            if _still_there(check_rows, send_button):
-                self._close_window(dialog_hwnd)
-                if popup_hwnd:
-                    self._close_window(popup_hwnd)
-                return _failure(keyword, "not_sent", "申请窗口还在，申请可能没发出去，请在微信里确认")
+                for _ in range(15):
+                    if not self._is_window_visible(apply_hwnd):
+                        break
+                    self._sleep(0.1)
+
+                if self._is_window_visible(apply_hwnd):
+                    self._close_window(apply_hwnd)
+                    self._close_window(dialog_hwnd)
+                    return _failure(keyword, "not_sent", "申请窗口还在，申请可能没发出去，请在微信里确认")
+            else:
+                if message:
+                    self._combo(target_dialog, VK_CONTROL, VK_A)
+                    self._sleep(0.05)
+                    self._paste(target_dialog, message)
+                    self._sleep(0.3)
+                self._click_row(target_dialog, send_button)
+                self._sleep(0.8)
+                if _still_there(self._capture_ocr(target_dialog), send_button):
+                    self._close_window(dialog_hwnd)
+                    return _failure(keyword, "not_sent", "申请窗口还在，申请可能没发出去，请在微信里确认")
 
             self._close_window(dialog_hwnd)
-            if popup_hwnd:
-                self._close_window(popup_hwnd)
             return {
                 "ok": True,
                 "target": keyword,
