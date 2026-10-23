@@ -308,11 +308,33 @@ class FriendManager:
             logger.info("accept_friend_requests: nothing accepted")
         return accepted
 
+    def _scroll_contacts_top(self, hwnd: int) -> None:
+        """Scroll the contacts navigation list back to the top to reveal '新的朋友'."""
+        if sys.platform != "win32":
+            return
+        try:
+            left, top, right, bottom = self._rect_of(hwnd)
+            target_x = left + int(0.13 * max(1, right - left))
+            target_y = top + int(0.30 * max(1, bottom - top))
+            import ctypes
+            ctypes.windll.user32.SetCursorPos(target_x, target_y)
+            self._sleep(0.05)
+            # Send mouse wheel up events (0x0800 = MOUSEEVENTF_WHEEL, 120 = 1 notch up)
+            for _ in range(12):
+                ctypes.windll.user32.mouse_event(0x0800, 0, 0, 120, 0)
+                self._sleep(0.02)
+        except Exception as e:
+            logger.debug("Failed to scroll contacts list to top: %s", e)
+
     def _open_new_friends(self, hwnd: int) -> None:
         if not self._window._goto_contacts_tab(hwnd):
             raise _Abort("the Contacts tab did not open")
         self._sleep(0.4)
         row = _find_row(self._capture_ocr(), *NEW_FRIENDS_LABELS)
+        if row is None:
+            self._scroll_contacts_top(hwnd)
+            self._sleep(0.4)
+            row = _find_row(self._capture_ocr(), *NEW_FRIENDS_LABELS)
         if row is None:
             raise _Abort("'新的朋友' is not on the screen")
         self._click_row(hwnd, row)

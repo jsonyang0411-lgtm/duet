@@ -152,6 +152,18 @@ class AcceptFriendRequestsTests(FriendTestCase):
         self.assertEqual(self.manager(FakeWindow(), ocr).accept_friend_requests(), [])
         self.assertNothingHappened()
 
+    def test_missing_new_friends_entry_retries_after_scroll_to_top(self):
+        ocr = FakeOcr(
+            [row("联系人", 0.1, 0.1, 0.2, 0.2)],
+            [self.NEW_FRIENDS],
+            [row("没有新朋友", 0.5, 0.5, 0.6, 0.6)],
+        )
+        manager = self.manager(FakeWindow(), ocr)
+        manager._scroll_contacts_top = MagicMock()
+        self.assertEqual(manager.accept_friend_requests(), [])
+        manager._scroll_contacts_top.assert_called_once()
+        self.assertEqual(self.clicks, [centre(self.NEW_FRIENDS)])
+
     def test_no_click_while_wechat_is_not_in_front(self):
         window = FakeWindow()
         window.foreground = False
