@@ -27,25 +27,16 @@ class DecodeError(Exception):
 
 
 def _strip_wechat_silk_header(data: bytes) -> bytes:
-    """Strip WeChat's custom header from SILK data.
+    """Ensure SILK data has standard SILK v3 header.
 
-    WeChat prepends a variable-length header to standard SILK v3 data.
-    The actual SILK stream starts after the "#!SILK_V3" marker (9 bytes).
-
-    If the marker is not found, returns data as-is (may still be valid SILK).
+    WeChat prepends a 1-byte flag (0x02) before "#!SILK_V3", or in WCDB
+    stores frames without the magic header.  pysilk requires data to start
+    with "#!SILK_V3".
     """
     idx = data.find(_SILK_MAGIC)
-    if idx == -1:
-        logger.debug("SILK magic not found — treating as raw SILK")
-        return data
-    # Skip the magic bytes to get pure SILK data
-    start = idx + len(_SILK_MAGIC)
-    stripped = data[start:]
-    logger.debug(
-        "Stripped %d bytes WeChat header, %d bytes SILK payload",
-        start, len(stripped),
-    )
-    return stripped
+    if idx != -1:
+        return data[idx:]
+    return _SILK_MAGIC + data
 
 
 class SilkDecoder:
