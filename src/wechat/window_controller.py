@@ -71,6 +71,7 @@ WHITE_SCREEN_STDDEV_THRESHOLD = 3.5
 FAILURE_LOG = Path("data/send_failures.log")
 FAILURE_LOG.parent.mkdir(parents=True, exist_ok=True)
 VISION_SCREENSHOT_DIR = Path("data/vision_screenshots")
+_PICTURE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
 
 
 @dataclass
@@ -1054,7 +1055,7 @@ class WeChatWindowController:
         return self._run_send(group_name, text, max_retries)
 
     def send_file_to_chat(self, group_name: str, path: str, max_retries: int = 2) -> bool:
-        """Send a picture (a sticker) the same way: paste the file, then Enter."""
+        """Send a file the same way: paste it, then Enter (a sticker, a relay result)."""
         if not group_name or not path or not Path(path).is_file():
             logger.error("send_file_to_chat: no group name or no file at %r", path)
             return False
@@ -1505,8 +1506,10 @@ class WeChatWindowController:
         still on the clipboard.
         """
         session = self._session
-        ok = self._set_clipboard_file(path, as_image=self._paste_files_as == "image",
-                                      private=session is not None)
+        # STICKER_PASTE=image turns pictures into still images; any other file (a relay
+        # result) is always pasted as the file.
+        as_image = self._paste_files_as == "image" and Path(path).suffix.lower() in _PICTURE_SUFFIXES
+        ok = self._set_clipboard_file(path, as_image=as_image, private=session is not None)
         if session is not None:
             # Noted even after a failure: it may have emptied the clipboard, and
             # the saved one goes back afterwards (nothing was pasted).

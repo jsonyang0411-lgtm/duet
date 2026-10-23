@@ -4,11 +4,18 @@
 The Windows bot (CLAUDE_RELAY=on) queues "cc ..." requests.  This worker asks
 for them over HTTP (long poll, so the Mac needs no open port), runs
 
-    claude -p --output-format json --permission-mode auto --permission-prompts none
-           [--resume <session>] --append-system-prompt <how to answer>
+    claude -p --output-format stream-json --verbose --permission-mode auto
+           --permission-prompts none [--resume <session>] --append-system-prompt <how to answer>
 
-in the project folder, sends a heartbeat every 30 s (the answer says when the
-user cancelled), and posts the result back.  A result is written to the
+in the project folder, sends a heartbeat every 30 s with what Claude is doing
+(read from the stream; the answer says when the user cancelled), and posts the
+result back.  Pictures and files sent with a task are downloaded to
+~/.claude-relay/inbox/job-<id>/ first (claude gets --add-dir for it).
+
+When claude needs an approval (wechat_approval, on by default), its
+PermissionRequest hook is this script again (--permission-hook): it sends the
+request to the bot, the bot asks in WeChat, and the answer allows or denies the
+step.  No answer within approval_timeout_min minutes is a denial.  A result is written to the
 outbox first and sent until the bot has it, so a Windows restart loses nothing.
 
 Standard library only (macOS /usr/bin/python3 is enough).  Settings:
@@ -16,6 +23,7 @@ Standard library only (macOS /usr/bin/python3 is enough).  Settings:
 its own file (token_file); RELAY_URL and RELAY_TOKEN in the environment win.  Setup: README.md next to this file.
 
     python3 worker.py --check     reach the bot and find claude, then exit
+    python3 worker.py --permission-hook   (claude runs this; not for people)
     python3 worker.py --once      do one job, then exit
     python3 worker.py             run until stopped
     --stay-awake                  keep the Mac awake while it is on power (caffeinate -s)
@@ -33,6 +41,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -45,6 +54,7 @@ from pathlib import Path
 
 HOME_DIR = Path(os.environ.get("CLAUDE_RELAY_HOME", Path.home() / ".claude-relay"))
 POLL_WAIT_SEC = 25
+KEEP_INBOX_DAYS = 7          # downloaded attachments older than this are deleted
 HEARTBEAT_SEC = 30
 STOP_GRACE_SEC = 30          # after SIGINT, wait this long before killing claude
 MAX_BACKOFF_SEC = 60
@@ -61,6 +71,8 @@ DEFAULTS = {
     "timeout_min": 60,
     "model": "",
     "extra_args": [],
+    "wechat_approval": True,   # a step that needs approval is asked for in WeChat (else denied)
+    "approval_timeout_min": 10,
 }
 
 SYSTEM_NOTE = (
@@ -71,6 +83,26 @@ SYSTEM_NOTE = (
     "除非任务里明确要求。你最后的回复会原样发到微信：用中文，先一句话说结论，再列关键改动或发现"
     "（文件路径、命令结果），整体不超过 300 字，不要用 Markdown 表格和代码块。"
 )
+# With wechat_approval the sentence about approvals is this instead.
+APPROVAL_NOTE = (
+    "需要人工批准的操作会发到对方微信上请对方批准，对方可能过一会儿才看到，超过 {minutes} 分钟没回就算拒绝；"
+    "所以能不用这类操作就不用，确实需要时再用，被拒绝了就换个办法或在结果里说明。"
+)
+
+
+def system_note(settings: dict) -> str:
+    if not settings.get("wechat_approval", True):
+        return SYSTEM_NOTE
+    sentence = "没法回答你的问题，也没法批准权限；需要人工批准的操作会被直接拒绝，遇到时换一种不需要批准的办法，或者在结果里说清楚需要对方做什么。"
+    return SYSTEM_NOTE.replace(sentence, "没法回答你的问题。" + APPROVAL_NOTE.format(
+        minutes=_minutes(settings)))
+
+
+def _minutes(settings: dict) -> int:
+    try:
+        return max(1, int(float(settings.get("approval_timeout_min") or 10)))
+    except (TypeError, ValueError):
+        return 10
 
 log = logging.getLogger("claude_relay.worker")
 
@@ -79,6 +111,7 @@ log = logging.getLogger("claude_relay.worker")
 
 def load_settings(path: Path) -> dict:
     settings = dict(DEFAULTS)
+    settings["config_path"] = str(path)          # the permission hook reads the same file
     if path.exists():
         settings.update(json.loads(path.read_text(encoding="utf-8")))
     if settings.get("token_file") and not os.environ.get("RELAY_TOKEN"):
@@ -94,6 +127,33 @@ def load_settings(path: Path) -> dict:
     if not settings["relay_url"] or not settings["token"]:
         raise SystemExit(f"relay_url and token are needed (in {path} or RELAY_URL / RELAY_TOKEN)")
     return settings
+
+
+class SettingsFile:
+    """config.json, read again when it changes, so a new project needs no restart."""
+
+    def __init__(self, path: Path, settings: dict):
+        self.path = path
+        self.settings = settings
+        self._mtime = self._stamp()
+
+    def _stamp(self):
+        try:
+            return self.path.stat().st_mtime_ns
+        except OSError:
+            return None
+
+    def current(self) -> dict:
+        stamp = self._stamp()
+        if stamp is not None and stamp != self._mtime:
+            self._mtime = stamp
+            try:
+                self.settings = load_settings(self.path)
+                log.info("config.json changed; projects now: %s",
+                         ", ".join(sorted(self.settings.get("projects") or {})) or "(none)")
+            except (SystemExit, Exception) as e:            # keep the old settings
+                log.warning("config.json changed but cannot be used (%s); keeping the old settings", e)
+        return self.settings
 
 
 def read_token(path: Path) -> str | None:
@@ -162,9 +222,10 @@ class RelayClient:
         self.reload_token = reload_token
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-    def _call(self, method: str, path: str, body: dict | None = None, timeout: float = 15):
+    def _call(self, method: str, path: str, body: dict | None = None, timeout: float = 15,
+              headers: dict | None = None):
         try:
-            return self._send(method, path, body, timeout)
+            return self._send(method, path, body, timeout, headers)
         except urllib.error.HTTPError as e:
             if e.code != 401 or self.reload_token is None:
                 raise
@@ -173,12 +234,14 @@ class RelayClient:
                 raise
             log.info("the bot refused the token; config.json has another one, using it")
             self.token = token
-            return self._send(method, path, body, timeout)
+            return self._send(method, path, body, timeout, headers)
 
-    def _send(self, method: str, path: str, body: dict | None, timeout: float):
+    def _send(self, method: str, path: str, body: dict | None, timeout: float, headers: dict | None = None):
         data = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(self.base_url + path, data=data, method=method)
         req.add_header("Authorization", f"Bearer {self.token}")
+        for name, value in (headers or {}).items():
+            req.add_header(name, value)
         if data is not None:
             req.add_header("Content-Type", "application/json")
         with self.opener.open(req, timeout=timeout) as resp:
@@ -189,18 +252,41 @@ class RelayClient:
         status, data = self._call("GET", "/relay/health")
         return status == 200 and bool(data and data.get("ok"))
 
-    def next_job(self, wait: int = POLL_WAIT_SEC) -> dict | None:
-        status, data = self._call("GET", f"/relay/next?wait={wait}", timeout=wait + 15)
+    def next_job(self, wait: int = POLL_WAIT_SEC, settings: dict | None = None) -> dict | None:
+        """The next job; with ``settings`` the bot also learns which projects this Mac offers."""
+        headers = None
+        if settings is not None:
+            headers = {
+                "X-Relay-Projects": json.dumps(sorted(str(k) for k in (settings.get("projects") or {}))),
+                "X-Relay-Default": json.dumps(str(settings.get("default_project") or "")),   # ASCII-safe
+            }
+        status, data = self._call("GET", f"/relay/next?wait={wait}", timeout=wait + 15, headers=headers)
         return data if status == 200 else None
 
-    def heartbeat(self, job_id: int) -> dict | None:
+    def heartbeat(self, job_id: int, progress: dict | None = None) -> dict | None:
         try:
-            _, data = self._call("POST", f"/relay/jobs/{job_id}/heartbeat", {})
+            _, data = self._call("POST", f"/relay/jobs/{job_id}/heartbeat", progress or {})
             return data
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 return None
             raise
+
+    def download(self, job_id: int, file_id: int) -> bytes:
+        """A picture or file sent with the job."""
+        def get():
+            req = urllib.request.Request(f"{self.base_url}/relay/jobs/{job_id}/files/{file_id}")
+            req.add_header("Authorization", f"Bearer {self.token}")
+            with self.opener.open(req, timeout=120) as resp:
+                return resp.read()
+        try:
+            return get()
+        except urllib.error.HTTPError as e:
+            token = self.reload_token() if e.code == 401 and self.reload_token else None
+            if not token or token == self.token:
+                raise
+            self.token = token
+            return get()
 
     def send_result(self, job_id: int, result: dict) -> bool:
         """True when the bot has it (or does not know the job: then there is nobody to tell)."""
@@ -228,15 +314,66 @@ class Stopper:
         self.event.set()
 
 
-def claude_command(settings: dict, session_id: str | None) -> list[str]:
+def safe_name(name: str, fallback: str) -> str:
+    """A file name that stays inside its folder."""
+    name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", str(name)).strip(" .")
+    return name[:120] or fallback
+
+
+def fetch_files(client: RelayClient, job: dict) -> tuple[Path | None, str]:
+    """Download the job's attachments: ``(folder, note for the task)``; ``(None, "")`` without any."""
+    files = [f for f in job.get("files") or [] if isinstance(f, dict)]
+    if not files:
+        return None, ""
+    inbox = HOME_DIR / "inbox"
+    cutoff = time.time() - KEEP_INBOX_DAYS * 86400
+    for old in inbox.glob("job-*"):
+        try:
+            if old.is_dir() and old.stat().st_mtime < cutoff:
+                shutil.rmtree(old, ignore_errors=True)
+        except OSError:
+            pass
+    folder = inbox / f"job-{job['id']}"
+    folder.mkdir(parents=True, exist_ok=True)
+    got, failed = [], []
+    for f in files:
+        name = safe_name(f.get("name", ""), f"file-{f.get('id')}")
+        try:
+            (folder / name).write_bytes(client.download(job["id"], int(f["id"])))
+            got.append(name)
+        except Exception as e:
+            log.warning("#%s attachment %s not downloaded: %s", job["id"], name, e)
+            failed.append(name)
+    note = ""
+    if got:
+        note += (f"\n\n（微信里和这条任务一起发来的附件，已存到 {folder}：{'、'.join(got)}。"
+                 "需要时用 Read 工具打开，图片也能直接看。）")
+    if failed:
+        note += f"\n（还有附件没能从 Windows 取到：{'、'.join(failed)}。）"
+    return (folder if got else None), note
+
+
+def hook_settings(settings: dict) -> str:
+    """``--settings`` JSON that makes this script claude's PermissionRequest hook."""
+    command = f"{shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__).resolve()))} --permission-hook"
+    return json.dumps({"hooks": {"PermissionRequest": [{"matcher": "*", "hooks": [
+        {"type": "command", "command": command, "timeout": _minutes(settings) * 60 + 120},
+    ]}]}})
+
+
+def claude_command(settings: dict, session_id: str | None, add_dirs: tuple = ()) -> list[str]:
     cmd = [
-        find_claude(settings.get("claude_bin", "")), "-p", "--output-format", "json",
+        find_claude(settings.get("claude_bin", "")), "-p", "--output-format", "stream-json", "--verbose",
         "--permission-mode", str(settings.get("permission_mode") or "auto"),
         "--permission-prompts", "none",
-        "--append-system-prompt", SYSTEM_NOTE,
+        "--append-system-prompt", system_note(settings),
     ]
+    if settings.get("wechat_approval", True):
+        cmd += ["--settings", hook_settings(settings)]
     if session_id:
         cmd += ["--resume", session_id]
+    for folder in add_dirs:
+        cmd += ["--add-dir", str(folder)]
     if float(settings.get("max_budget_usd") or 0) > 0:
         cmd += ["--max-budget-usd", str(settings["max_budget_usd"])]
     if settings.get("model"):
@@ -245,22 +382,111 @@ def claude_command(settings: dict, session_id: str | None) -> list[str]:
     return cmd
 
 
+def _short(value, limit: int = 40) -> str:
+    value = " ".join(str(value).split())
+    return value if len(value) <= limit else value[:limit] + "…"
+
+
+def describe_step(name: str, args: dict) -> str:
+    """One tool call in a few words, for the progress line ("改 service.py")."""
+    args = args if isinstance(args, dict) else {}
+    path = Path(str(args.get("file_path") or args.get("notebook_path") or "")).name
+    if name == "Bash":
+        return "运行 " + _short(args.get("command", ""))
+    if name in ("Edit", "MultiEdit", "NotebookEdit"):
+        return "改 " + path
+    if name == "Write":
+        return "写 " + path
+    if name == "Read":
+        return "看 " + path
+    if name in ("Grep", "Glob"):
+        return "搜索 " + _short(args.get("pattern", ""))
+    if name == "WebFetch":
+        return "打开网页 " + _short(args.get("url", ""))
+    if name == "WebSearch":
+        return "搜索网页 " + _short(args.get("query", ""))
+    if name in ("Task", "Agent"):
+        return "派子任务 " + _short(args.get("description", ""))
+    return name
+
+
+class Progress:
+    """What claude is doing, read from its stream-json events; sent with every heartbeat."""
+
+    def __init__(self):
+        self.steps = 0          # tool calls so far
+        self.doing = ""         # the latest one, or what Claude said it is doing
+        self.plan = ""          # "3/7": its todo list, done/total
+
+    def feed(self, line: str) -> None:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return
+        if not isinstance(event, dict) or event.get("type") != "assistant":
+            return
+        content = (event.get("message") or {}).get("content")
+        for item in content if isinstance(content, list) else []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "text" and str(item.get("text", "")).strip():
+                self.doing = _short(item["text"])
+            elif item.get("type") == "tool_use":
+                self.steps += 1
+                name, args = str(item.get("name", "")), item.get("input") or {}
+                if name == "TodoWrite":
+                    self._plan(args.get("todos") if isinstance(args, dict) else None)
+                else:
+                    self.doing = describe_step(name, args)
+
+    def _plan(self, todos) -> None:
+        todos = [t for t in todos or [] if isinstance(t, dict)]
+        if not todos:
+            return
+        self.plan = f"{sum(t.get('status') == 'completed' for t in todos)}/{len(todos)}"
+        current = next((t for t in todos if t.get("status") == "in_progress"), None)
+        if current:
+            self.doing = _short(current.get("activeForm") or current.get("content") or "")
+
+    def report(self) -> dict:
+        return {"steps": self.steps, "doing": self.doing, "plan": self.plan}
+
+
 def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stopper: Stopper,
-               session_id: str | None) -> dict:
+               session_id: str | None, add_dirs: tuple = ()) -> dict:
     """Run claude once; heartbeat meanwhile.  Returns stdout/stderr/returncode and why it stopped."""
-    cmd = claude_command(settings, session_id)
+    cmd = claude_command(settings, session_id, add_dirs)
     # The task goes in on stdin: a task starting with "-" must not be read as an option.
+    # The permission hook (a child of claude) needs to know the job and the settings file.
+    env = {**os.environ, "RELAY_JOB_ID": str(job["id"]),
+           "CLAUDE_RELAY_CONFIG": str(settings.get("config_path") or HOME_DIR / "config.json")}
     proc = subprocess.Popen(
         cmd, cwd=str(cwd), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, encoding="utf-8", errors="replace", start_new_session=True,
+        text=True, encoding="utf-8", errors="replace", start_new_session=True, env=env,
     )
-    out: dict = {}
+    progress = Progress()
+    lines: list[str] = []
+    errors: list[str] = []
 
-    def communicate():
-        out["stdout"], out["stderr"] = proc.communicate(job["text"])
+    def read_stdout():
+        for line in proc.stdout:
+            lines.append(line)
+            progress.feed(line)
 
-    reader = threading.Thread(target=communicate, daemon=True)
-    reader.start()
+    def read_stderr():
+        errors.append(proc.stderr.read())
+
+    def write_stdin():
+        try:
+            proc.stdin.write(job["text"])
+            proc.stdin.close()
+        except OSError:                                  # claude exited without reading it
+            pass
+
+    threads = [threading.Thread(target=f, daemon=True) for f in (read_stdout, read_stderr, write_stdin)]
+    for t in threads:
+        t.start()
+    reader = threads[0]
     started = time.monotonic()
     deadline = started + float(settings.get("timeout_min") or 60) * 60
     stopped_because, signalled_at = "", None
@@ -269,7 +495,7 @@ def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stoppe
         if not reader.is_alive():
             break
         try:
-            answer = client.heartbeat(job["id"])
+            answer = client.heartbeat(job["id"], progress.report())
         except Exception as e:                           # the bot may be restarting
             log.warning("#%s heartbeat failed: %s", job["id"], e)
             answer = None
@@ -287,26 +513,37 @@ def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stoppe
         elif signalled_at is not None and time.monotonic() - signalled_at > STOP_GRACE_SEC:
             log.warning("#%s claude did not stop; killing it", job["id"])
             os.killpg(proc.pid, signal.SIGKILL)
-    reader.join()
+    for t in threads:
+        t.join()
+    proc.wait()
     return {
-        "stdout": out.get("stdout", ""), "stderr": out.get("stderr", ""),
+        "stdout": "".join(lines), "stderr": "".join(errors),
         "returncode": proc.returncode, "stopped": stopped_because,
         "duration_s": round(time.monotonic() - started, 1),
     }
 
 
 def parse_output(stdout: str) -> dict | None:
-    """The final JSON object claude prints (None when it printed something else)."""
+    """The result claude printed: the last ``"type": "result"`` line of the stream, or the one
+    JSON object of ``--output-format json`` (None when it printed something else)."""
     text = stdout.strip()
     try:
         data = json.loads(text)
+        return data if isinstance(data, dict) and (data.get("type") == "result" or "result" in data) else None
     except ValueError:
-        start = text.rfind("\n{")
+        pass
+    last = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
         try:
-            data = json.loads(text[start + 1:]) if start >= 0 else None
+            event = json.loads(line)
         except ValueError:
-            data = None
-    return data if isinstance(data, dict) else None
+            continue
+        if isinstance(event, dict) and (event.get("type") == "result" or last is None and "result" in event):
+            last = event
+    return last
 
 
 def summarize(run: dict, data: dict | None, settings: dict) -> dict:
@@ -365,11 +602,14 @@ def do_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper) -> 
     cwd, problem = project_dir(settings, project)
     if cwd is None:
         return {"ok": False, "text": problem, "duration_s": 0}
-    run = run_claude(settings, job, cwd, client, stopper, session_id)
+    inbox, note = fetch_files(client, job)
+    add_dirs = (inbox,) if inbox else ()
+    task = {**job, "text": job["text"] + note}
+    run = run_claude(settings, task, cwd, client, stopper, session_id, add_dirs)
     data = parse_output(run["stdout"])
     if data is None and session_id and "No conversation found" in run["stdout"] + run["stderr"]:
         log.info("#%s session %s is gone; starting a new one", job["id"], session_id)
-        run = run_claude(settings, job, cwd, client, stopper, None)
+        run = run_claude(settings, task, cwd, client, stopper, None, add_dirs)
         data = parse_output(run["stdout"])
     result = summarize(run, data, settings)
     remember_session_project(result.get("session_id", ""), project)
@@ -389,6 +629,85 @@ def save_log(job: dict, run: dict, result: dict) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+# ── approvals in WeChat (claude's PermissionRequest hook) ────────────────
+
+DENIED = {
+    "deny": "对方在微信里拒绝了这一步。换一种不需要这一步的办法，或者在结果里说明需要对方自己做什么。",
+    "expired": "对方没有及时在微信里回复（可能不在手机旁），按拒绝处理。换一种办法，或者在结果里说明需要批准什么。",
+    "cancelled": "这个任务已经被取消了，停下来。",
+}
+
+
+def describe_request(tool: str, args) -> str:
+    """What claude wants to do, for the person who approves it."""
+    args = args if isinstance(args, dict) else {}
+    if tool == "Bash":
+        return "运行命令 " + " ".join(str(args.get("command", "")).split())[:250]
+    path = str(args.get("file_path") or args.get("notebook_path") or "")
+    if tool in ("Edit", "MultiEdit", "NotebookEdit") and path:
+        return "修改文件 " + path
+    if tool == "Write" and path:
+        return "写文件 " + path
+    if tool == "WebFetch":
+        return "打开网页 " + str(args.get("url", ""))[:200]
+    if tool == "WebSearch":
+        return "搜索网页 " + str(args.get("query", ""))[:200]
+    detail = json.dumps(args, ensure_ascii=False)
+    return f"使用 {tool}（{detail[:200] + ('…' if len(detail) > 200 else '')}）"
+
+
+def permission_hook(request: dict, job_id: str, config_path: Path, poll_wait: int = POLL_WAIT_SEC) -> dict:
+    """The hook's answer for one permission request: allow, or deny with the reason for claude."""
+    def decide(behavior: str, message: str = "", interrupt: bool = False) -> dict:
+        decision = {"behavior": behavior}
+        if behavior == "deny":
+            decision.update(message=message, interrupt=interrupt)
+        return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}
+
+    try:
+        settings = load_settings(config_path)
+        client = RelayClient(settings["relay_url"], settings["token"])
+        timeout = _minutes(settings) * 60
+        tool = str(request.get("tool_name") or "?")
+        _, created = client._call("POST", f"/relay/jobs/{int(job_id)}/ask", {
+            "tool": tool, "detail": describe_request(tool, request.get("tool_input")), "timeout_s": timeout,
+        })
+        ask_id = int(created["ask_id"])
+    except Exception as e:
+        return decide("deny", f"没能把批准请求发到微信（{e}），按拒绝处理。")
+    deadline = time.monotonic() + timeout + 60
+    while time.monotonic() < deadline:
+        try:
+            _, answer = client._call("GET", f"/relay/asks/{ask_id}?wait={poll_wait}", timeout=poll_wait + 15)
+            status = (answer or {}).get("status")
+        except Exception as e:                           # the bot may be restarting
+            log.warning("#%s approval %s: cannot reach the bot (%s)", job_id, ask_id, e)
+            time.sleep(5)
+            continue
+        if status == "allow":
+            return decide("allow")
+        if status in DENIED:
+            return decide("deny", DENIED[status], interrupt=status == "cancelled")
+    return decide("deny", DENIED["expired"])
+
+
+def run_permission_hook() -> int:
+    """``--permission-hook``: read the request on stdin, print the decision (claude reads stdout)."""
+    try:
+        request = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        request = {}
+    job_id = os.environ.get("RELAY_JOB_ID", "")
+    config = Path(os.environ.get("CLAUDE_RELAY_CONFIG") or HOME_DIR / "config.json")
+    if not job_id.isdigit():
+        answer = {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {
+            "behavior": "deny", "message": "不是中转任务里的请求，按拒绝处理。"}}}
+    else:
+        answer = permission_hook(request if isinstance(request, dict) else {}, job_id, config)
+    print(json.dumps(answer, ensure_ascii=False))
+    return 0
 
 
 # ── delivery that survives restarts ──────────────────────────────────────
@@ -431,12 +750,15 @@ def flush_outbox(client: RelayClient, stopper: Stopper) -> None:
 
 # ── main loop ────────────────────────────────────────────────────────────
 
-def serve(settings: dict, client: RelayClient, stopper: Stopper, once: bool = False) -> None:
+def serve(settings: dict, client: RelayClient, stopper: Stopper, once: bool = False,
+          settings_file: SettingsFile | None = None) -> None:
     flush_outbox(client, stopper)
     backoff = 5
     while not stopper.event.is_set():
+        if settings_file is not None:
+            settings = settings_file.current()
         try:
-            job = client.next_job()
+            job = client.next_job(settings=settings)
             backoff = 5
         except urllib.error.HTTPError as e:
             if e.code == 401:
@@ -499,8 +821,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true", help="reach the bot and find claude, then exit")
     parser.add_argument("--once", action="store_true", help="do one job, then exit")
     parser.add_argument("--stay-awake", action="store_true", help="keep the Mac awake while on power")
+    parser.add_argument("--permission-hook", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     setup_logging()
+    if args.permission_hook:
+        return run_permission_hook()
     settings = load_settings(Path(args.config))
     client = RelayClient(settings["relay_url"], settings["token"],
                          reload_token=lambda: read_token(Path(args.config)))
@@ -532,7 +857,7 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, stopper)
     signal.signal(signal.SIGHUP, stopper)       # the Terminal window was closed: finish the job's bookkeeping
     log.info("worker started; bot %s", settings["relay_url"])
-    serve(settings, client, stopper, once=args.once)
+    serve(settings, client, stopper, once=args.once, settings_file=SettingsFile(Path(args.config), settings))
     log.info("worker stopped")
     lock.close()
     return 0

@@ -2,6 +2,8 @@
 
 import json
 import os
+import threading
+import time
 import urllib.error
 import urllib.request
 from types import SimpleNamespace
@@ -317,7 +319,7 @@ class TestHttp:
         relay.handle(pm("cc @webot 跑测试", clock=clock))
         status, job = self.call(url + "/relay/next?wait=0")
         assert status == 200 and job == {"id": 1, "text": "跑测试", "project": "webot",
-                                          "session_id": None, "created_at": clock.now}
+                                          "session_id": None, "created_at": clock.now, "files": []}
         assert self.call(url + "/relay/jobs/1/heartbeat", "POST", {}) == (200, {"cancel": False})
         result = {"ok": True, "text": "好了", "session_id": "s1", "duration_s": 3}
         assert self.call(url + "/relay/jobs/1/result", "POST", result) == (200, {"accepted": True})
@@ -381,3 +383,31 @@ class TestRouteStepAndConfig:
             cfg = load_config()
         assert cfg.claude_relay == "on" and cfg.claude_relay_wxids == ["wxid_a", "wxid_b"]
         assert cfg.claude_relay_port == 9000
+
+
+def test_two_delivery_rounds_at_once_send_a_result_once():
+    """The delivery thread and another caller (the tests, the console) may tick together."""
+    sent, entered = [], threading.Event()
+    release = threading.Event()
+
+    def slow_send(chat, text):
+        entered.set()
+        release.wait(5)                                   # the first round is still sending
+        sent.append(text)
+        return True
+
+    relay = ClaudeRelay(config(), store=RelayStore(":memory:"), send=slow_send)
+    relay.handle(pm("cc 任务"))
+    job = relay.next_job(0)
+    relay.finish(job["id"], {"ok": True, "text": "好了"})
+    first = threading.Thread(target=relay.tick)
+    first.start()
+    entered.wait(5)
+    second = threading.Thread(target=relay.tick)
+    second.start()
+    time.sleep(0.2)
+    release.set()
+    first.join(5)
+    second.join(5)
+    assert sent == ["#1 完成\n好了"]
+
