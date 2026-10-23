@@ -982,9 +982,9 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(
             f"CLAUDE_RELAY_PROGRESS_MIN must be between 0 and 120, got {kwargs.get('claude_relay_progress_min')}"
         )
-    if not (100 <= int(kwargs.get("claude_relay_max_chars", 1500)) <= 5000):
+    if not (20 <= int(kwargs.get("claude_relay_max_chars", 1500)) <= 5000):
         errors.append(
-            f"CLAUDE_RELAY_MAX_CHARS must be between 100 and 5000, got {kwargs.get('claude_relay_max_chars')}"
+            f"CLAUDE_RELAY_MAX_CHARS must be between 20 and 5000, got {kwargs.get('claude_relay_max_chars')}"
         )
     auto_accept = kwargs.get("auto_accept_friends", "off")
     if auto_accept not in ("off", "on"):
@@ -1284,7 +1284,7 @@ def load_config() -> BotConfig:
         "claude_relay_prefix": os.getenv("CLAUDE_RELAY_PREFIX", "cc").strip(),
         "claude_relay_wxids": _split_names(os.getenv("CLAUDE_RELAY_WXIDS", "")),
         "claude_relay_db": os.getenv("CLAUDE_RELAY_DB", "data/claude_relay.db").strip() or "data/claude_relay.db",
-        "claude_relay_max_chars": int(os.getenv("CLAUDE_RELAY_MAX_CHARS", "1500")),
+        "claude_relay_max_chars": int(os.getenv("CLAUDE_RELAY_MAX_CHARS", os.getenv("CLAUDE_RELAY_LONG_CHARS", "1500"))),
         "claude_relay_only": _parse_memory_mode(os.getenv("CLAUDE_RELAY_ONLY", "off")),
         "claude_relay_progress_min": int(os.getenv("CLAUDE_RELAY_PROGRESS_MIN", "3")),
         "claude_relay_long_file": _parse_memory_mode(os.getenv("CLAUDE_RELAY_LONG_FILE", "on")),
