@@ -65,6 +65,12 @@ class ClaudeRelay:
         allowed = list(config.claude_relay_wxids) or [config.admin_wxid]
         self._allowed = {str(w).strip() for w in allowed if str(w).strip()}
         self._max_chars = int(config.claude_relay_max_chars)
+        # CLAUDE_RELAY_ONLY: every private message of an allowed person is for the relay,
+        # so "cc" can be left out.
+        self._relay_only = getattr(config, "claude_relay_only", "off") == "on"
+        # What the Mac worker said it offers (X-Relay-Projects on GET /relay/next).
+        self._worker_projects: list[str] | None = None
+        self._worker_default = ""
         self._jobs_ready = threading.Condition()
         self._wake = threading.Event()
         self._stopping = threading.Event()
@@ -114,13 +120,18 @@ class ClaudeRelay:
         if msg.get("is_group", True):
             return False, None
         content = _QUOTE_PREFIX.sub("", str(msg.get("content", "")))
-        m = self._prefix.match(content)
-        if not m:
-            return False, None
         sender = str(msg.get("sender_id", ""))
-        if sender not in self._allowed:
-            logger.info("CLAUDE_RELAY: %s is not allowed to use the relay; handled as a normal message",
-                        sender)
+        m = self._prefix.match(content)
+        if m:
+            body = m.group(1)
+            if sender not in self._allowed:
+                logger.info("CLAUDE_RELAY: %s is not allowed to use the relay; handled as a normal message",
+                            sender)
+                return False, None
+        elif self._relay_only and sender in self._allowed and int(msg.get("msg_type", 1) or 1) == 1 \
+                and content.strip():
+            body = content                         # relay only: "cc" may be left out
+        else:
             return False, None
         timestamp = float(msg.get("timestamp", 0) or 0)
         if timestamp and self._clock() - timestamp > MAX_AGE_SEC:
@@ -128,7 +139,7 @@ class ClaudeRelay:
                         self._clock() - timestamp, content[:60])
             return True, None
         try:
-            return True, self._run(parse(m.group(1)), msg["chat_id"], sender)
+            return True, self._run(parse(body), msg["chat_id"], sender)
         except Exception:
             logger.exception("CLAUDE_RELAY: could not handle %r", content[:80])
             return True, "转给 Mac 失败了，详情看 bot.log。"
@@ -145,7 +156,35 @@ class ClaudeRelay:
             return self._cancel(chat_id, cmd.job_id)
         if cmd.kind == "retry":
             return self._retry(chat_id, cmd.job_id)
-        return self._queue(chat_id, sender, cmd.text, cmd.project)
+        if cmd.kind == "projects":
+            return self.projects_text(chat_id)
+        if cmd.kind == "switch":
+            return self._switch(chat_id, cmd.project)
+        return self._queue(chat_id, sender, cmd.text, cmd.project or self._store.current_project(chat_id))
+
+    # ── projects ──────────────────────────────────────────────────────────
+
+    def note_worker(self, projects: list[str] | None, default: str = "") -> None:
+        """What the Mac worker offers (sent with every request for a job)."""
+        if projects is not None:
+            self._worker_projects = [str(p) for p in projects if str(p).strip()]
+            self._worker_default = str(default or "")
+
+    def projects_text(self, chat_id: str) -> str:
+        current = self._store.current_project(chat_id)
+        now = current or (f"{self._worker_default}（Mac 的默认）" if self._worker_default else "Mac 的默认项目")
+        if self._worker_projects is None:
+            return f"现在的项目：{now}\nMac 还没连上过，不知道它有哪些项目。"
+        names = "、".join(self._worker_projects) or "（Mac 上没有登记项目）"
+        word = "" if self._relay_only else f"{self._prefix_word} "
+        return f"现在的项目：{now}\nMac 上能用的：{names}\n换项目：{word}切到 项目名"
+
+    def _switch(self, chat_id: str, project: str) -> str:
+        if self._worker_projects is not None and project not in self._worker_projects:
+            names = "、".join(self._worker_projects) or "（没有）"
+            return f"Mac 上没有叫 {project} 的项目。能用的有：{names}"
+        self._store.set_project(chat_id, project, self._clock())
+        return f"好，之后的任务都在 {project} 里做（开了一个新对话）。"
 
     def _queue(self, chat_id: str, sender: str, text: str, project: str, note: str = "") -> str:
         job_id = self._store.add(chat_id, sender, text, project, self._clock())
@@ -192,15 +231,19 @@ class ClaudeRelay:
                            note=f"，重试 #{job_id}")
 
     def help_text(self) -> str:
-        p = self._prefix_word
+        p = "" if self._relay_only else f"{self._prefix_word} "
+        first = ("直接说要做的事 —— 交给 Mac 执行（不用打 cc）\n" if self._relay_only
+                 else f"{p}任务内容 —— 交给 Mac 执行\n")
         return (
             "Claude 中转：让 Mac 上的 Claude Code 帮你干活，做完把结果发回来。\n"
-            f"{p} 任务内容 —— 交给 Mac 执行\n"
-            f"{p} @项目 任务 —— 在 Mac 上指定的项目目录里执行\n"
-            f"{p} 状态 —— 最近的任务、Mac 在不在线\n"
-            f"{p} 取消 [编号] —— 取消任务（不写编号就取消最近一个）\n"
-            f"{p} 重试 编号 —— 重新执行一个任务\n"
-            f"{p} 新对话 —— 下一个任务不带之前的上下文"
+            + first
+            + f"{p}@项目 任务 —— 这一个任务在别的项目里做\n"
+            f"{p}项目 —— 现在的项目和 Mac 上能用的项目\n"
+            f"{p}切到 项目名 —— 之后的任务都在这个项目里做\n"
+            f"{p}状态 —— 最近的任务、Mac 在不在线\n"
+            f"{p}取消 [编号] —— 取消任务（不写编号就取消最近一个）\n"
+            f"{p}重试 编号 —— 重新执行一个任务\n"
+            f"{p}新对话 —— 下一个任务不带之前的上下文"
         )
 
     def status_text(self, chat_id: str) -> str:
@@ -211,6 +254,8 @@ class ClaudeRelay:
             lines = [f"Mac：不在线（{format_duration(now - self._last_seen)}前联系过）"]
         else:
             lines = ["Mac：不在线（这次启动后还没连上过）"]
+        project = self._store.current_project(chat_id)
+        lines.append(f"项目：{project or (self._worker_default + '（默认）' if self._worker_default else 'Mac 的默认项目')}")
         jobs = self._store.recent(chat_id, 5)
         if not jobs:
             lines.append("还没有任务。")

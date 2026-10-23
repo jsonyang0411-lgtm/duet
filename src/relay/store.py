@@ -44,7 +44,8 @@ CREATE INDEX IF NOT EXISTS relay_jobs_status ON relay_jobs(status, id);
 CREATE TABLE IF NOT EXISTS relay_sessions (
     chat_id TEXT PRIMARY KEY,
     session_id TEXT,
-    updated_at REAL NOT NULL
+    updated_at REAL NOT NULL,
+    project TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -58,6 +59,9 @@ class RelayStore:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            columns = {r["name"] for r in self._conn.execute("PRAGMA table_info(relay_sessions)")}
+            if "project" not in columns:              # a database from before the current project
+                self._conn.execute("ALTER TABLE relay_sessions ADD COLUMN project TEXT NOT NULL DEFAULT ''")
             self._conn.commit()
 
     def close(self) -> None:
@@ -148,6 +152,25 @@ class RelayStore:
                 self._conn.commit()
                 return "requested"
             return status
+
+    def current_project(self, chat_id: str) -> str:
+        """The project later tasks of this chat run in ("" = the Mac's default)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT project FROM relay_sessions WHERE chat_id = ?", (chat_id,)
+            ).fetchone()
+        return str(row["project"]) if row else ""
+
+    def set_project(self, chat_id: str, project: str, now: Optional[float] = None) -> None:
+        """Switch the chat to ``project``; the next task starts a new Claude session there."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO relay_sessions (chat_id, session_id, updated_at, project) VALUES (?, NULL, ?, ?)"
+                " ON CONFLICT(chat_id) DO UPDATE SET session_id = NULL, updated_at = excluded.updated_at,"
+                " project = excluded.project",
+                (chat_id, time.time() if now is None else now, project),
+            )
+            self._conn.commit()
 
     def reset_session(self, chat_id: str, now: Optional[float] = None) -> None:
         with self._lock:

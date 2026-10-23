@@ -96,6 +96,33 @@ def load_settings(path: Path) -> dict:
     return settings
 
 
+class SettingsFile:
+    """config.json, read again when it changes, so a new project needs no restart."""
+
+    def __init__(self, path: Path, settings: dict):
+        self.path = path
+        self.settings = settings
+        self._mtime = self._stamp()
+
+    def _stamp(self):
+        try:
+            return self.path.stat().st_mtime_ns
+        except OSError:
+            return None
+
+    def current(self) -> dict:
+        stamp = self._stamp()
+        if stamp is not None and stamp != self._mtime:
+            self._mtime = stamp
+            try:
+                self.settings = load_settings(self.path)
+                log.info("config.json changed; projects now: %s",
+                         ", ".join(sorted(self.settings.get("projects") or {})) or "(none)")
+            except (SystemExit, Exception) as e:            # keep the old settings
+                log.warning("config.json changed but cannot be used (%s); keeping the old settings", e)
+        return self.settings
+
+
 def read_token(path: Path) -> str | None:
     """The token config.json (or RELAY_TOKEN) holds now; None if it cannot be read."""
     try:
@@ -162,9 +189,10 @@ class RelayClient:
         self.reload_token = reload_token
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-    def _call(self, method: str, path: str, body: dict | None = None, timeout: float = 15):
+    def _call(self, method: str, path: str, body: dict | None = None, timeout: float = 15,
+              headers: dict | None = None):
         try:
-            return self._send(method, path, body, timeout)
+            return self._send(method, path, body, timeout, headers)
         except urllib.error.HTTPError as e:
             if e.code != 401 or self.reload_token is None:
                 raise
@@ -173,12 +201,14 @@ class RelayClient:
                 raise
             log.info("the bot refused the token; config.json has another one, using it")
             self.token = token
-            return self._send(method, path, body, timeout)
+            return self._send(method, path, body, timeout, headers)
 
-    def _send(self, method: str, path: str, body: dict | None, timeout: float):
+    def _send(self, method: str, path: str, body: dict | None, timeout: float, headers: dict | None = None):
         data = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(self.base_url + path, data=data, method=method)
         req.add_header("Authorization", f"Bearer {self.token}")
+        for name, value in (headers or {}).items():
+            req.add_header(name, value)
         if data is not None:
             req.add_header("Content-Type", "application/json")
         with self.opener.open(req, timeout=timeout) as resp:
@@ -189,8 +219,15 @@ class RelayClient:
         status, data = self._call("GET", "/relay/health")
         return status == 200 and bool(data and data.get("ok"))
 
-    def next_job(self, wait: int = POLL_WAIT_SEC) -> dict | None:
-        status, data = self._call("GET", f"/relay/next?wait={wait}", timeout=wait + 15)
+    def next_job(self, wait: int = POLL_WAIT_SEC, settings: dict | None = None) -> dict | None:
+        """The next job; with ``settings`` the bot also learns which projects this Mac offers."""
+        headers = None
+        if settings is not None:
+            headers = {
+                "X-Relay-Projects": json.dumps(sorted(str(k) for k in (settings.get("projects") or {}))),
+                "X-Relay-Default": json.dumps(str(settings.get("default_project") or "")),   # ASCII-safe
+            }
+        status, data = self._call("GET", f"/relay/next?wait={wait}", timeout=wait + 15, headers=headers)
         return data if status == 200 else None
 
     def heartbeat(self, job_id: int) -> dict | None:
@@ -431,12 +468,15 @@ def flush_outbox(client: RelayClient, stopper: Stopper) -> None:
 
 # ── main loop ────────────────────────────────────────────────────────────
 
-def serve(settings: dict, client: RelayClient, stopper: Stopper, once: bool = False) -> None:
+def serve(settings: dict, client: RelayClient, stopper: Stopper, once: bool = False,
+          settings_file: SettingsFile | None = None) -> None:
     flush_outbox(client, stopper)
     backoff = 5
     while not stopper.event.is_set():
+        if settings_file is not None:
+            settings = settings_file.current()
         try:
-            job = client.next_job()
+            job = client.next_job(settings=settings)
             backoff = 5
         except urllib.error.HTTPError as e:
             if e.code == 401:
@@ -532,7 +572,7 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, stopper)
     signal.signal(signal.SIGHUP, stopper)       # the Terminal window was closed: finish the job's bookkeeping
     log.info("worker started; bot %s", settings["relay_url"])
-    serve(settings, client, stopper, once=args.once)
+    serve(settings, client, stopper, once=args.once, settings_file=SettingsFile(Path(args.config), settings))
     log.info("worker stopped")
     lock.close()
     return 0

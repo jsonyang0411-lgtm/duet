@@ -4,6 +4,7 @@ Every request carries ``Authorization: Bearer <CLAUDE_RELAY_TOKEN>``.
 
     GET  /relay/health                 {"ok": true}           (the worker's start-up check)
     GET  /relay/next?wait=25           a job, or 204 after ``wait`` seconds without one
+                                       (headers X-Relay-Projects: JSON list of aliases, X-Relay-Default)
     POST /relay/jobs/<id>/heartbeat    {"cancel": bool}       (404: unknown job)
     POST /relay/jobs/<id>/result       {"ok", "text", "session_id", "duration_s", "cost_usd",
                                         "log_path", "error"} -> {"accepted": bool}
@@ -79,6 +80,15 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 wait = float(parse_qs(url.query).get("wait", ["25"])[0])
             except ValueError:
                 wait = 25.0
+            projects = self.headers.get("X-Relay-Projects")
+            if projects is not None:
+                try:
+                    listed = json.loads(projects)
+                    default = json.loads(self.headers.get("X-Relay-Default") or '""')
+                    if isinstance(listed, list):
+                        self.relay.note_worker(listed, default if isinstance(default, str) else "")
+                except ValueError:
+                    pass
             job = self.relay.next_job(wait)
             if job is None:
                 self._json(204)

@@ -995,6 +995,10 @@ todo_delete_keywords: list[str] = [
 
 | 名称 | 描述 | 返回值 |
 |---|---|---|
+| `commands.parse(body)` 新增 | `projects`（项目、当前项目）、`switch`（切到 / 切换到 / 进入 / cd / use + 别名） | `RelayCommand` |
+| `ClaudeRelay` 便利功能 | 只做中转时允许的人的私聊文字不用 `cc` 前缀（非文字、空白、别人、群里的不算）；`note_worker(projects, default)` 记下 worker 每次取任务时报的项目（请求头 `X-Relay-Projects` JSON 列表、`X-Relay-Default` JSON 字符串）；`projects_text` / `_switch`（知道列表时检查别名，切换会开新会话）；入队时没写 `@` 就用这个私聊的当前项目；状态里显示项目；帮助在只做中转时不写 `cc` | — |
+| `RelayStore.current_project(chat_id)` / `set_project(chat_id, project)` | `relay_sessions.project` 列（旧库启动时 `ALTER TABLE` 补上）；切换项目同时清空会话 | `str` / — |
+| worker `SettingsFile(path, settings).current()` / `RelayClient.next_job(wait, settings)` | `config.json` 修改时间变了就重新读取（读坏了保留旧设置并记警告），加项目不用重启；取任务时带上项目列表和默认项目 | `dict` / `dict \| None` |
 | `commands.prefix_pattern(prefix)` / `commands.parse(body)` | 前缀正则；正文解析成 `RelayCommand(kind, text, project, job_id)`：`help`（空、帮助）、`status`（状态）、`reset`（新对话）、`cancel`（取消 [编号]）、`retry`（重试 编号）、`task`（其余；`@别名 任务` 带 `project`）。「取消一下那个提交」这类是任务 | `re.Pattern` / `RelayCommand` |
 | `store.RelayStore(path)` | SQLite（一个连接加锁）：`relay_jobs`（`pending → running → done/failed/cancelled`，没心跳的 `running` 变 `lost`）、`relay_sessions`（每个私聊当前的 Claude 会话） | — |
 | `RelayStore.add / get / recent / pending_before / latest_open / cancel / reset_session` | 微信这边：入队、查询、取消（排队中的直接 `cancelled`，进行中的设 `cancel_requested` 返回 `requested`）、清空会话 | `int` / `dict` / `list` / `str` |
