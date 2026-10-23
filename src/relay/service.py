@@ -9,6 +9,8 @@ In between (CLAUDE_RELAY_PROGRESS_MIN): "started" when a job had to wait, and
 every few minutes how far a long one is (the worker's heartbeats carry it).
 A result too long for one message goes as a .txt file when the backend can
 send files (CLAUDE_RELAY_LONG_FILE), with a short message after it.
+Pictures and files the allowed person sends are held and go with the next task
+(attachments.py); the worker downloads them from GET /relay/jobs/<id>/files/<n>.
 """
 
 from __future__ import annotations
@@ -16,12 +18,15 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
+from .attachments import HOLD_SEC, KINDS, Held, attachment_kind, resolve
 from .commands import RelayCommand, parse, prefix_pattern
 from .store import FINAL_STATES, RelayStore
 
@@ -109,6 +114,8 @@ class ClaudeRelay:
             Path(tempfile.gettempdir()) / "webot-relay-files" if db == ":memory:"
             else Path(db).parent / "claude_relay_files")
         self._file_sent: set[int] = set()       # jobs whose result file is in the chat already
+        self._held: dict[str, list[Held]] = {}  # pictures and files waiting for the next task
+        self._held_lock = threading.Lock()
         self._clock = clock
         self._prefix_word = config.claude_relay_prefix
         self._prefix = prefix_pattern(config.claude_relay_prefix)
@@ -177,6 +184,15 @@ class ClaudeRelay:
         timestamp = float(msg.get("timestamp", 0) or 0)
         too_old = bool(timestamp) and self._clock() - timestamp > MAX_AGE_SEC
         heard = ""
+        kind = attachment_kind(msg)
+        if kind and sender in self._allowed:       # a picture or file for the next task
+            if too_old:
+                return False, None
+            count = self._hold(str(msg["chat_id"]), Held(kind, msg, self._clock()))
+            if self._relay_only:
+                return True, (f"收到{KINDS[kind]}，下一个任务会带上它"
+                              f"（现在有 {count} 个附件，{HOLD_SEC // 60} 分钟内有效）。")
+            return False, None                     # the normal reply goes on; the next cc task takes it
         if msg_type == 34:                         # voice: its text, without the closing "。"
             voice = _VOICE.match(content)
             heard = voice.group(1).strip().rstrip("。.！!，,、 ") if voice else ""
@@ -252,13 +268,78 @@ class ClaudeRelay:
         self._store.set_project(chat_id, project, self._clock())
         return f"好，之后的任务都在 {project} 里做（开了一个新对话）。"
 
-    def _queue(self, chat_id: str, sender: str, text: str, project: str, note: str = "") -> str:
-        job_id = self._store.add(chat_id, sender, text, project, self._clock())
+    # ── pictures and files ────────────────────────────────────────────────
+
+    def _hold(self, chat_id: str, held: Held) -> int:
+        with self._held_lock:
+            items = [h for h in self._held.get(chat_id, []) if held.at - h.at < HOLD_SEC] + [held]
+            self._held[chat_id] = items
+            return len(items)
+
+    def _take_held(self, chat_id: str) -> list[Held]:
+        now = self._clock()
+        with self._held_lock:
+            return [h for h in self._held.pop(chat_id, []) if now - h.at < HOLD_SEC]
+
+    def _collect(self, held: list[Held]) -> tuple[list[tuple[str, str, int]], list[str]]:
+        """Copy the held pictures and files into the bot's own folder: ``(files, problems)``."""
+        files, problems, names = [], [], set()
+        folder = self._files_dir / "attachments" / f"{int(self._clock())}-{uuid.uuid4().hex[:8]}"
+        for number, item in enumerate(held, 1):
+            try:
+                path, name, problem = resolve(self._config, item, number)
+                if not path:
+                    problems.append(problem)
+                    continue
+                stem, suffix = Path(name).stem, Path(name).suffix
+                n = 2
+                while name in names:                   # two files of the same name
+                    name, n = f"{stem}({n}){suffix}", n + 1
+                names.add(name)
+                folder.mkdir(parents=True, exist_ok=True)
+                copy = folder / name
+                shutil.copyfile(path, copy)
+                files.append((name, str(copy), copy.stat().st_size))
+            except Exception:
+                logger.exception("CLAUDE_RELAY: attachment %d could not be prepared", number)
+                problems.append(f"第 {number} 个附件出错了，没带上")
+        if held:
+            self._prune_attachments()
+        return files, problems
+
+    def _prune_attachments(self) -> None:
+        cutoff = time.time() - KEEP_FILES_DAYS * 86400
+        for folder in (self._files_dir / "attachments").glob("*"):
+            try:
+                if folder.is_dir() and folder.stat().st_mtime < cutoff:
+                    shutil.rmtree(folder, ignore_errors=True)
+            except OSError:
+                pass
+
+    def file_path(self, job_id: int, file_id: int) -> Optional[str]:
+        """The copy the worker downloads (None: not a file of that job, or it is gone)."""
+        self._seen()
+        row = self._store.file(job_id, file_id)
+        return row["path"] if row and Path(row["path"]).is_file() else None
+
+    def _queue(self, chat_id: str, sender: str, text: str, project: str, note: str = "",
+               files_of: Optional[int] = None) -> str:
+        """Queue a task with the held pictures and files (a retry: with those of job ``files_of``)."""
+        if files_of is None:
+            files, problems = self._collect(self._take_held(chat_id))
+        else:
+            files = [(f["name"], f["path"], f["size"]) for f in self._store.files(files_of)]
+            problems = []
+        if files:
+            note += f"，带 {len(files)} 个附件"
+        job_id = self._store.add(chat_id, sender, text, project, self._clock(), files=files)
         with self._jobs_ready:
             self._jobs_ready.notify_all()
-        logger.info("CLAUDE_RELAY: queued #%d%s: %s", job_id,
-                    f" (@{project})" if project else "", text[:80])
+        logger.info("CLAUDE_RELAY: queued #%d%s%s: %s", job_id,
+                    f" (@{project})" if project else "", f" with {len(files)} file(s)" if files else "",
+                    text[:80])
         lines = [f"收到，已交给 Mac（#{job_id}{note}）。"]
+        lines += [f"{p}。" for p in problems]
         ahead = self._store.pending_before(job_id)
         if ahead:
             lines.append(f"前面还有 {ahead} 个任务。")
@@ -294,7 +375,7 @@ class ClaudeRelay:
         if job["status"] not in FINAL_STATES:
             return f"#{job_id} 还在{STATUS_NAMES[job['status']]}，不用重试。"
         return self._queue(chat_id, job["sender_id"], job["text"], job["project"],
-                           note=f"，重试 #{job_id}")
+                           note=f"，重试 #{job_id}", files_of=job_id)
 
     def help_text(self) -> str:
         p = "" if self._relay_only else f"{self._prefix_word} "
@@ -309,7 +390,8 @@ class ClaudeRelay:
             f"{p}状态 —— 最近的任务、Mac 在不在线\n"
             f"{p}取消 [编号] —— 取消任务（不写编号就取消最近一个）\n"
             f"{p}重试 编号 —— 重新执行一个任务\n"
-            f"{p}新对话 —— 下一个任务不带之前的上下文"
+            f"{p}新对话 —— 下一个任务不带之前的上下文\n"
+            f"发图片或文件 —— 下一个任务会带上它们（{HOLD_SEC // 60} 分钟内）"
         )
 
     def status_text(self, chat_id: str) -> str:
@@ -374,6 +456,8 @@ class ClaudeRelay:
                     return {
                         "id": job["id"], "text": job["text"], "project": job["project"],
                         "session_id": job["session_id"], "created_at": job["created_at"],
+                        "files": [{"id": f["id"], "name": f["name"], "size": f["size"]}
+                                  for f in self._store.files(job["id"])],
                     }
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or self._stopping.is_set():

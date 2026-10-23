@@ -9,7 +9,8 @@ for them over HTTP (long poll, so the Mac needs no open port), runs
 
 in the project folder, sends a heartbeat every 30 s with what Claude is doing
 (read from the stream; the answer says when the user cancelled), and posts the
-result back.  A result is written to the
+result back.  Pictures and files sent with a task are downloaded to
+~/.claude-relay/inbox/job-<id>/ first (claude gets --add-dir for it).  A result is written to the
 outbox first and sent until the bot has it, so a Windows restart loses nothing.
 
 Standard library only (macOS /usr/bin/python3 is enough).  Settings:
@@ -46,6 +47,7 @@ from pathlib import Path
 
 HOME_DIR = Path(os.environ.get("CLAUDE_RELAY_HOME", Path.home() / ".claude-relay"))
 POLL_WAIT_SEC = 25
+KEEP_INBOX_DAYS = 7          # downloaded attachments older than this are deleted
 HEARTBEAT_SEC = 30
 STOP_GRACE_SEC = 30          # after SIGINT, wait this long before killing claude
 MAX_BACKOFF_SEC = 60
@@ -240,6 +242,22 @@ class RelayClient:
                 return None
             raise
 
+    def download(self, job_id: int, file_id: int) -> bytes:
+        """A picture or file sent with the job."""
+        def get():
+            req = urllib.request.Request(f"{self.base_url}/relay/jobs/{job_id}/files/{file_id}")
+            req.add_header("Authorization", f"Bearer {self.token}")
+            with self.opener.open(req, timeout=120) as resp:
+                return resp.read()
+        try:
+            return get()
+        except urllib.error.HTTPError as e:
+            token = self.reload_token() if e.code == 401 and self.reload_token else None
+            if not token or token == self.token:
+                raise
+            self.token = token
+            return get()
+
     def send_result(self, job_id: int, result: dict) -> bool:
         """True when the bot has it (or does not know the job: then there is nobody to tell)."""
         try:
@@ -266,7 +284,46 @@ class Stopper:
         self.event.set()
 
 
-def claude_command(settings: dict, session_id: str | None) -> list[str]:
+def safe_name(name: str, fallback: str) -> str:
+    """A file name that stays inside its folder."""
+    name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", str(name)).strip(" .")
+    return name[:120] or fallback
+
+
+def fetch_files(client: RelayClient, job: dict) -> tuple[Path | None, str]:
+    """Download the job's attachments: ``(folder, note for the task)``; ``(None, "")`` without any."""
+    files = [f for f in job.get("files") or [] if isinstance(f, dict)]
+    if not files:
+        return None, ""
+    inbox = HOME_DIR / "inbox"
+    cutoff = time.time() - KEEP_INBOX_DAYS * 86400
+    for old in inbox.glob("job-*"):
+        try:
+            if old.is_dir() and old.stat().st_mtime < cutoff:
+                shutil.rmtree(old, ignore_errors=True)
+        except OSError:
+            pass
+    folder = inbox / f"job-{job['id']}"
+    folder.mkdir(parents=True, exist_ok=True)
+    got, failed = [], []
+    for f in files:
+        name = safe_name(f.get("name", ""), f"file-{f.get('id')}")
+        try:
+            (folder / name).write_bytes(client.download(job["id"], int(f["id"])))
+            got.append(name)
+        except Exception as e:
+            log.warning("#%s attachment %s not downloaded: %s", job["id"], name, e)
+            failed.append(name)
+    note = ""
+    if got:
+        note += (f"\n\n（微信里和这条任务一起发来的附件，已存到 {folder}：{'、'.join(got)}。"
+                 "需要时用 Read 工具打开，图片也能直接看。）")
+    if failed:
+        note += f"\n（还有附件没能从 Windows 取到：{'、'.join(failed)}。）"
+    return (folder if got else None), note
+
+
+def claude_command(settings: dict, session_id: str | None, add_dirs: tuple = ()) -> list[str]:
     cmd = [
         find_claude(settings.get("claude_bin", "")), "-p", "--output-format", "stream-json", "--verbose",
         "--permission-mode", str(settings.get("permission_mode") or "auto"),
@@ -275,6 +332,8 @@ def claude_command(settings: dict, session_id: str | None) -> list[str]:
     ]
     if session_id:
         cmd += ["--resume", session_id]
+    for folder in add_dirs:
+        cmd += ["--add-dir", str(folder)]
     if float(settings.get("max_budget_usd") or 0) > 0:
         cmd += ["--max-budget-usd", str(settings["max_budget_usd"])]
     if settings.get("model"):
@@ -354,9 +413,9 @@ class Progress:
 
 
 def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stopper: Stopper,
-               session_id: str | None) -> dict:
+               session_id: str | None, add_dirs: tuple = ()) -> dict:
     """Run claude once; heartbeat meanwhile.  Returns stdout/stderr/returncode and why it stopped."""
-    cmd = claude_command(settings, session_id)
+    cmd = claude_command(settings, session_id, add_dirs)
     # The task goes in on stdin: a task starting with "-" must not be read as an option.
     proc = subprocess.Popen(
         cmd, cwd=str(cwd), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -500,11 +559,14 @@ def do_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper) -> 
     cwd, problem = project_dir(settings, project)
     if cwd is None:
         return {"ok": False, "text": problem, "duration_s": 0}
-    run = run_claude(settings, job, cwd, client, stopper, session_id)
+    inbox, note = fetch_files(client, job)
+    add_dirs = (inbox,) if inbox else ()
+    task = {**job, "text": job["text"] + note}
+    run = run_claude(settings, task, cwd, client, stopper, session_id, add_dirs)
     data = parse_output(run["stdout"])
     if data is None and session_id and "No conversation found" in run["stdout"] + run["stderr"]:
         log.info("#%s session %s is gone; starting a new one", job["id"], session_id)
-        run = run_claude(settings, job, cwd, client, stopper, None)
+        run = run_claude(settings, task, cwd, client, stopper, None, add_dirs)
         data = parse_output(run["stdout"])
     result = summarize(run, data, settings)
     remember_session_project(result.get("session_id", ""), project)

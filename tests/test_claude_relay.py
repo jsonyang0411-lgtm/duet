@@ -317,7 +317,7 @@ class TestHttp:
         relay.handle(pm("cc @webot 跑测试", clock=clock))
         status, job = self.call(url + "/relay/next?wait=0")
         assert status == 200 and job == {"id": 1, "text": "跑测试", "project": "webot",
-                                          "session_id": None, "created_at": clock.now}
+                                          "session_id": None, "created_at": clock.now, "files": []}
         assert self.call(url + "/relay/jobs/1/heartbeat", "POST", {}) == (200, {"cancel": False})
         result = {"ok": True, "text": "好了", "session_id": "s1", "duration_s": 3}
         assert self.call(url + "/relay/jobs/1/result", "POST", result) == (200, {"accepted": True})

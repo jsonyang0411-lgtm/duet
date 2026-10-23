@@ -137,6 +137,29 @@ def _extract_xml_document(text: str) -> str:
     return text[start:].strip()
 
 
+def _extract_file_appmsg(content: str) -> dict | None:
+    """``{"name", "size"}`` of a file someone sent (an appmsg of type 6), else None."""
+    decoded = _decompress_zstd_hex(content) or content
+    xml_text = _extract_xml_document(decoded)
+    if not xml_text:
+        return None
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return None
+    appmsg = root if root.tag == "appmsg" else root.find("appmsg")
+    if appmsg is None or _text_at(appmsg, "type") != "6":
+        return None
+    name = _text_at(appmsg, "title")
+    if not name:
+        return None
+    try:
+        size = int(_text_at(appmsg, "appattach/totallen") or 0)
+    except ValueError:
+        size = 0
+    return {"name": name, "size": size}
+
+
 def _text_at(node: ET.Element | None, path: str) -> str:
     if node is None:
         return ""
@@ -852,6 +875,8 @@ class WcdbBackend(AbstractWeChatBackend):
             "media_hint": "",
             "media_kind": "",
             "media_path": "",
+            "file_name": "",
+            "file_size": 0,
             "timestamp": timestamp,
             "is_at_mentioned": any(f"@{name}" in text for name in bot_names),
             "is_group": True,
@@ -1243,6 +1268,9 @@ class WcdbBackend(AbstractWeChatBackend):
             if local_type == APPMSG_TYPE or msg_subtype == QUOTE_APPMSG_SUBTYPE
             else None
         )
+        # A file someone sent: its name and size (the Claude relay forwards it to the Mac).
+        file_info = (_extract_file_appmsg(content)
+                     if local_type == APPMSG_TYPE and not quote_info else None) or {}
 
         # ── Voice recognition ──────────────────────────────────────
         # Voice messages (localType=34) have empty message_content;
@@ -1437,6 +1465,8 @@ class WcdbBackend(AbstractWeChatBackend):
             ),
             "media_kind": media_kind,
             "media_path": media_path,
+            "file_name": file_info.get("name", ""),
+            "file_size": file_info.get("size", 0),
             "timestamp": ts,
             "is_at_mentioned": is_at,
             "is_group": bool(is_group),

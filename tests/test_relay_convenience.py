@@ -60,7 +60,8 @@ class TestNoPrefix:
         r = relay(claude_relay_only="on")
         assert r.handle(pm("跑一下测试", sender="wxid_other")) == (False, None)
         assert r.handle(pm("跑一下测试", group=True)) == (False, None)
-        assert r.handle(pm("[图片]", msg_type=3)) == (False, None)
+        assert r.handle(pm("[表情]", msg_type=47)) == (False, None)              # pictures: test_relay_attachments
+        assert r.handle(pm("[视频]", msg_type=43)) == (False, None)
         assert r.handle(pm("   ")) == (False, None)
 
     def test_without_relay_only_the_prefix_is_needed(self):

@@ -8,6 +8,8 @@ finishes it.  ``delivered`` says whether WeChat has been told about the last
 state change, so a failed send is retried and a restart loses nothing.
 While a job runs, every heartbeat brings what Claude is doing (``progress``);
 ``progress_sent_at`` / ``progress_sent`` say when WeChat last heard about it.
+``relay_files`` are the pictures and files sent with a job (copies the bot
+keeps; the worker downloads them).
 
 The router thread adds jobs, the HTTP threads hand them out and take the
 results, the delivery thread marks them sent: one connection, one lock.
@@ -46,6 +48,14 @@ CREATE TABLE IF NOT EXISTS relay_jobs (
     progress_sent TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS relay_jobs_status ON relay_jobs(status, id);
+CREATE TABLE IF NOT EXISTS relay_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    path TEXT NOT NULL,
+    size INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS relay_files_job ON relay_files(job_id, id);
 CREATE TABLE IF NOT EXISTS relay_sessions (
     chat_id TEXT PRIMARY KEY,
     session_id TEXT,
@@ -86,15 +96,22 @@ class RelayStore:
     # ── from WeChat ───────────────────────────────────────────────────────
 
     def add(self, chat_id: str, sender_id: str, text: str, project: str = "",
-            now: Optional[float] = None) -> int:
+            now: Optional[float] = None, files: tuple = ()) -> int:
+        """Queue a job; ``files`` (``(name, path, size)``) go with it in the same transaction,
+        so a worker never takes the job without them."""
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO relay_jobs (chat_id, sender_id, text, project, status, created_at)"
                 " VALUES (?, ?, ?, ?, 'pending', ?)",
                 (chat_id, sender_id, text, project, time.time() if now is None else now),
             )
+            job_id = int(cur.lastrowid)
+            self._conn.executemany(
+                "INSERT INTO relay_files (job_id, name, path, size) VALUES (?, ?, ?, ?)",
+                [(job_id, name, path, int(size)) for name, path, size in files],
+            )
             self._conn.commit()
-            return int(cur.lastrowid)
+            return job_id
 
     def get(self, job_id: int) -> Optional[dict]:
         with self._lock:
@@ -167,6 +184,20 @@ class RelayStore:
                 self._conn.commit()
                 return "requested"
             return status
+
+    def files(self, job_id: int) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM relay_files WHERE job_id = ? ORDER BY id", (job_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def file(self, job_id: int, file_id: int) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM relay_files WHERE job_id = ? AND id = ?", (job_id, file_id)
+            ).fetchone()
+        return dict(row) if row else None
 
     def current_project(self, chat_id: str) -> str:
         """The project later tasks of this chat run in ("" = the Mac's default)."""

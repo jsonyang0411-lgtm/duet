@@ -1000,6 +1000,11 @@ todo_delete_keywords: list[str] = [
 | `commands.parse(body)` 新增 | `projects`（项目、当前项目）、`switch`（切到 / 切换到 / 进入 / cd / use + 别名） | `RelayCommand` |
 | `ClaudeRelay` 便利功能 | 只做中转时允许的人的私聊文字不用 `cc` 前缀（非文字、空白、别人、群里的不算）；`note_worker(projects, default)` 记下 worker 每次取任务时报的项目（请求头 `X-Relay-Projects` JSON 列表、`X-Relay-Default` JSON 字符串）；`projects_text` / `_switch`（知道列表时检查别名，切换会开新会话）；入队时没写 `@` 就用这个私聊的当前项目；状态里显示项目；帮助在只做中转时不写 `cc` | — |
 | `RelayStore.current_project(chat_id)` / `set_project(chat_id, project)` | `relay_sessions.project` 列（旧库启动时 `ALTER TABLE` 补上）；切换项目同时清空会话 | `str` / — |
+| `attachments.attachment_kind(msg)` / `resolve(config, held, number)` / `locate_received_file(data_dirs, name, size=0, timestamp=0)` / `Held(kind, msg, at)` | 新文件 `src/relay/attachments.py`。`msg_type=3` 是图片、`msg_type=49` 且有 `file_name` 是文件；图片用 `vision.find_recent_image_path`（上限放宽到 `MAX_FILE_BYTES` 50 MB，`.dat` 解码），找不到时用消息上的 `_capture_media_screenshot` 截聊天区域（「聊天截图-N.jpg」）；文件在每个账号目录（`media_base_dir`、`WECHAT_DATA_DIR`、`~/Documents/xwechat_files`、`~/Documents/WeChat Files` 及其子目录）的 `msg/file/<年-月>/`、`FileStorage/File/<年-月>/` 里找同名或 `名(1).扩展名`，知道大小时只认大小相同的（还在下载的不算），取最新的；名字带路径的不认 | `str` / `(path, name, problem)` / `Path \| None` |
+| `ClaudeRelay` 附件 `_hold` / `_take_held` / `_collect` / `file_path(job_id, file_id)` | 允许的人私聊发的图片和文件先放着（每个私聊一个列表，`HOLD_SEC` 600 秒内有效）：只做中转时回「收到图片，下一个任务会带上它（现在有 N 个附件…）」，否则不回（普通流程照常）；下一个任务入队时取走，复制到 `files_dir/attachments/<时间>-<随机>/`（同名文件加 `(2)`，30 天前的目录删掉），和任务**同一个事务**写进 `relay_files`（worker 不会拿到缺附件的任务）；回执写「带 N 个附件」和没找到的原因；重试沿用原任务的附件；`next_job` 的 JSON 带 `files: [{id, name, size}]` | — / `list[Held]` / `(files, problems)` / `str \| None` |
+| `RelayStore.add(..., files=())` / `files(job_id)` / `file(job_id, file_id)` | `relay_files(id, job_id, name, path, size)`；只认属于这个任务的文件 | `int` / `list[dict]` / `dict \| None` |
+| `WcdbBackend` 文件消息 | `_extract_file_appmsg(content)`：appmsg `type=6` 的 `title`、`appattach/totallen`（zstd 十六进制也能解）；`_standardize` 给每条消息加 `file_name`、`file_size`（不是文件时为空 / 0，`content` 仍是「[文件]」） | `dict \| None` |
+| worker `fetch_files(client, job)` / `RelayClient.download(job_id, file_id)` / `safe_name(name, fallback)` | 有附件时下载到 `~/.claude-relay/inbox/job-<编号>/`（7 天前的删掉），claude 加 `--add-dir` 这个目录，任务末尾写「（微信里和这条任务一起发来的附件，已存到 …：…。需要时用 Read 工具打开…）」，下载失败的也写上；文件名去掉路径和非法字符 | `(Path \| None, str)` / `bytes` / `str` |
 | `ClaudeRelay.handle` 语音 | `msg_type=34` 且内容是「[语音] 文字」（Windows `VOICE_ASR_ENABLED=true` 时后端转好的）：去掉句末「。.！!，,、」后按文字处理（有前缀照常；只做中转时不用前缀），任务的回执末尾加「听到的是：…」；没转出文字的语音在只做中转时回 `VOICE_NOT_HEARD`（超过 5 分钟的旧消息不回），否则当普通消息 | `(matched, reply)` |
 | `ClaudeRelay(config, *, store, send, send_file=None, files_dir=None, clock)` / `_deliver(job)` / `result_message(job, file_name="")` | `send_file(chat_id, path)` 来自后端（`Bot._start_claude_relay` 用 `getattr(backend, "send_file", None)`）；`files_dir` 默认是数据库旁边的 `claude_relay_files/`（内存库用临时目录）；长结果先发文件、再发摘要消息（`_file_sent` 记住已发的文件，后面的消息重试时不重发文件）；`file_name` 给出时消息只带前 `SUMMARY_CHARS`（300）字 | — / `bool` / `str` |
 | `WcdbBackend.send_file(chat_id, path)` | 找到聊天名，在窗口锁里 `WeChatWindowController.send_file_to_chat`（粘贴文件再回车，和表情包一样）；`STICKER_PASTE=image` 只把图片转成静态图，其他文件（中转结果）始终按文件粘贴（`_PICTURE_SUFFIXES`） | `bool` |
@@ -1020,7 +1025,7 @@ todo_delete_keywords: list[str] = [
 | `ClaudeRelay.next_job(wait) / heartbeat(job_id) / finish(job_id, payload)` | HTTP 调用：长轮询最多 `MAX_WAIT_SEC`（30 秒）；三者都记录 Mac 最后出现时间，`mac_online()` = 60 秒内来过 | `dict \| None` / `dict \| None` / `bool \| None` |
 | `ClaudeRelay.tick()` | 发送线程每 5 秒（有结果时立即）：标记失联、把没发的结果用 `send(chat_id, text)` 发回原私聊，失败 30 秒后再试 | — |
 | `ClaudeRelay.result_message(job) / status_text(chat_id) / help_text()` | 「#17 完成（4分12秒）\n…」、失联提示（含 `cc 重试 17`）、超长截断；最近 5 个任务和 Mac 在线状态；命令说明 | `str` |
-| `http.serve(relay, host, port, token)` | `ThreadingHTTPServer` 守护线程：`GET /relay/health`、`GET /relay/next?wait=`（无任务 204）、`POST /relay/jobs/<id>/heartbeat`、`POST /relay/jobs/<id>/result`；无 token 401、坏 JSON 400、未知任务 404、请求体上限 1 MB | `ThreadingHTTPServer` |
+| `http.serve(relay, host, port, token)` | `ThreadingHTTPServer` 守护线程：`GET /relay/health`、`GET /relay/next?wait=`（无任务 204）、`GET /relay/jobs/<id>/files/<n>`（附件原样字节，不是这个任务的 404）、`POST /relay/jobs/<id>/heartbeat`、`POST /relay/jobs/<id>/result`；无 token 401、坏 JSON 400、未知任务 404、请求体上限 1 MB | `ThreadingHTTPServer` |
 | `steps.claude_relay(ctx)` | 路由步骤（`persist` 之后、`memory_hooks` 之前）：`router._claude_relay` 为 `None` 时跳过；命中则 `trace.reason("claude_relay")` 并以回执结束路由 | `Stop \| None` |
 | `Bot._start_claude_relay(config, router, backend)` | `CLAUDE_RELAY=on` 时建中转并启动；端口打不开只记错误日志（任务照样排队，回执会说 Mac 不在线）；`run()` 结束时 `stop()` | `ClaudeRelay \| None` |
 | `tools/claude_relay/worker.py` | Mac 端，只用标准库（系统 Python 3.9 可用）：`load_settings`（`~/.claude-relay/config.json`，`RELAY_URL`/`RELAY_TOKEN` 覆盖）、`find_claude`（PATH、常见位置、最新的 VS Code 扩展内置版，每个任务重新找）、`project_dir`（只允许 `projects` 里的别名）、`RelayClient`（忽略系统代理）、`run_claude`（任务走 stdin；`--output-format stream-json --verbose`，边读边交给 `Progress`；每 30 秒心跳并带上进度，取消/超时/worker 停止时发 SIGINT，30 秒后强杀）、`parse_output`（流里最后一个 `"type": "result"` 行，也认旧的单个 JSON）、`summarize`（结果、会话、被拒绝的权限）、会话不存在时去掉 `--resume` 重跑一次、`deliver`/`flush_outbox`（结果先写 `~/.claude-relay/outbox/`，送达才删）、`--check`、`--once` | — |
@@ -2244,7 +2249,10 @@ WcdbBackend._handle_message
 ```
 私聊「cc 跑测试」
   → steps.claude_relay → ClaudeRelay.handle → RelayStore.add → 回执「收到，已交给 Mac（#17）」
+私聊发图片/文件 → ClaudeRelay.handle → _hold（10 分钟内的下一个任务带上）
+  → 任务入队时 _collect → attachments.resolve（图片：vision 查找/解码/截图；文件：微信下载目录）→ 复制 → relay_files
 Mac worker.py：GET /relay/next（长轮询）→ claim_next（带上这个私聊的会话）
+  → 有 files 时 fetch_files：GET /relay/jobs/<id>/files/<n> → ~/.claude-relay/inbox/job-<id>/ → claude --add-dir
   → claude -p --output-format stream-json --verbose --permission-mode auto --permission-prompts none [--resume 会话]
   → Progress.feed(每一行) → 每 30 秒 POST heartbeat {steps, doing, plan}（返回 cancel）→ POST result
 发送线程 tick → _send_progress：排过队的「#17 开始了」、每 CLAUDE_RELAY_PROGRESS_MIN 分钟「#17 进行中…」
@@ -2259,6 +2267,7 @@ CREATE TABLE relay_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, sen
   finished_at REAL, cancel_requested INTEGER, result_text TEXT, result_json TEXT, delivered INTEGER,
   progress TEXT DEFAULT '{}', progress_sent_at REAL, progress_sent TEXT DEFAULT '');
 CREATE TABLE relay_sessions (chat_id TEXT PRIMARY KEY, session_id TEXT, updated_at REAL, project TEXT DEFAULT '');
+CREATE TABLE relay_files (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER, name TEXT, path TEXT, size INTEGER);
 ```
 
 安全：只认指定 wxid 的私聊；HTTP 要 token；端口只应对局域网开放（Windows 防火墙）；Mac 端用 `auto` 权限模式，无人值守时需要人工批准的操作直接拒绝，并在结果里列出。安装和使用见 `tools/claude_relay/README.md`。

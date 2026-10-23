@@ -5,6 +5,7 @@ Every request carries ``Authorization: Bearer <CLAUDE_RELAY_TOKEN>``.
     GET  /relay/health                 {"ok": true}           (the worker's start-up check)
     GET  /relay/next?wait=25           a job, or 204 after ``wait`` seconds without one
                                        (headers X-Relay-Projects: JSON list of aliases, X-Relay-Default)
+    GET  /relay/jobs/<id>/files/<n>    a picture or file sent with the job (bytes; 404: not one of its files)
     POST /relay/jobs/<id>/heartbeat    {"steps", "doing", "plan"} (what Claude is doing, optional)
                                        -> {"cancel": bool}    (404: unknown job)
     POST /relay/jobs/<id>/result       {"ok", "text", "session_id", "duration_s", "cost_usd",
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 1_000_000
 _JOB_PATH = re.compile(r"^/relay/jobs/(\d+)/(heartbeat|result)$")
+_FILE_PATH = re.compile(r"^/relay/jobs/(\d+)/files/(\d+)$")
 
 
 class _RelayHandler(BaseHTTPRequestHandler):
@@ -76,6 +78,19 @@ class _RelayHandler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         if url.path == "/relay/health":
             self._json(200, {"ok": True})
+        elif _FILE_PATH.match(url.path):
+            m = _FILE_PATH.match(url.path)
+            path = self.relay.file_path(int(m.group(1)), int(m.group(2)))
+            if path is None:
+                self._json(404, {"error": "unknown file"})
+                return
+            with open(path, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
         elif url.path == "/relay/next":
             try:
                 wait = float(parse_qs(url.query).get("wait", ["25"])[0])
