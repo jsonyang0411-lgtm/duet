@@ -44,7 +44,8 @@ MIN_INTERVAL_SEC = 10        # same floor as AUTO_ACCEPT_INTERVAL_SEC in config 
 SAME_SPOT = 0.02             # two OCR rows whose centres differ by less are "the same spot"
 
 NEW_FRIENDS_LABELS = ("新的朋友", "好友申请")
-ACCEPT_LABELS = ("接受", "通过")
+ACCEPT_LABELS = ("接受", "通过", "同意", "前往验证")
+PENDING_REQUEST_LABELS = ("等待验证",)
 ACCEPT_MIN_X0 = 0.40         # the accept button sits on the right side of its row
 CONFIRM_LABELS = ("确定", "完成")
 SEARCH_ENTRY_LABELS = ("网络查找", "查找微信号", "查找手机号")
@@ -172,8 +173,24 @@ class FriendManager:
                 window._restore_window_state(snapshot, hwnd)
 
     def _foreground(self, hwnd: int) -> None:
-        if not self._window._foreground_matches(hwnd):
+        if not self._is_wechat_foreground(hwnd):
             raise _Abort("the WeChat window is not in the foreground")
+
+    def _is_wechat_foreground(self, hwnd: int) -> bool:
+        if self._window._foreground_matches(hwnd):
+            return True
+        if sys.platform == "win32":
+            try:
+                import win32gui, win32process
+                fg = win32gui.GetForegroundWindow()
+                if fg and win32gui.IsWindow(fg):
+                    _, fg_pid = win32process.GetWindowThreadProcessId(fg)
+                    _, main_pid = win32process.GetWindowThreadProcessId(hwnd)
+                    if fg_pid == main_pid:
+                        return True
+            except Exception:
+                pass
+        return False
 
     # ── Guarded input ───────────────────────────────────────────────────
 
@@ -238,6 +255,14 @@ class FriendManager:
             try:
                 self._open_new_friends(hwnd)
                 rows = self._capture_ocr()
+                # In WeChat 4.0, if no accept button is visible, click pending item under "新的朋友"
+                if _find_row(rows, *ACCEPT_LABELS, exact=True, min_x0=ACCEPT_MIN_X0) is None:
+                    pending = _find_row(rows, *PENDING_REQUEST_LABELS)
+                    if pending is not None and pending.get("x0", 0.0) < ACCEPT_MIN_X0:
+                        self._click_row(hwnd, pending)
+                        self._sleep(0.6)
+                        rows = self._capture_ocr()
+
                 for _ in range(MAX_ACCEPT_PER_RUN):
                     button = _find_row(rows, *ACCEPT_LABELS, exact=True, min_x0=ACCEPT_MIN_X0)
                     if button is None:
@@ -274,6 +299,42 @@ class FriendManager:
         if row is not None:
             self._click_row(hwnd, row)
             self._sleep(0.5)
+            return
+        popup_hwnd = self._find_popup_dialog(hwnd)
+        if popup_hwnd:
+            self._confirm_popup_dialog(popup_hwnd)
+            self._sleep(0.5)
+
+    def _find_popup_dialog(self, hwnd: int) -> int | None:
+        if sys.platform != "win32":
+            return None
+        try:
+            import win32gui, win32process
+            _, main_pid = win32process.GetWindowThreadProcessId(hwnd)
+            modals = []
+            def _enum(h, _):
+                if h != hwnd and win32gui.IsWindow(h) and win32gui.IsWindowVisible(h):
+                    _, pid = win32process.GetWindowThreadProcessId(h)
+                    if pid == main_pid:
+                        title = win32gui.GetWindowText(h)
+                        if any(kw in title for kw in ("验证", "确定", "朋友")):
+                            modals.append(h)
+            win32gui.EnumWindows(_enum, None)
+            return modals[0] if modals else None
+        except Exception:
+            return None
+
+    def _confirm_popup_dialog(self, popup_hwnd: int) -> None:
+        if sys.platform == "win32":
+            import ctypes, win32gui
+            ctypes.windll.user32.SetForegroundWindow(popup_hwnd)
+            self._sleep(0.2)
+            rect = win32gui.GetWindowRect(popup_hwnd)
+            cx = rect[0] + int(0.318 * (rect[2] - rect[0]))
+            cy = rect[1] + int(0.930 * (rect[3] - rect[1]))
+            self._clicker(cx, cy)
+            self._sleep(0.2)
+            press_key(0x0D)
 
     # ── Add friend ──────────────────────────────────────────────────────
 
