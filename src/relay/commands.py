@@ -21,11 +21,15 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-_PROJECT = re.compile(r"^@([A-Za-z0-9_.-]+)\s+(.+)$", re.S)
+_PROJECT = re.compile(r"^@([^\s/\\:]+)\s+(.+)$", re.S)
 # "取消 17", "取消#17", "取消" -- but "取消一下那个提交" is a task.
 _CONTROL = re.compile(r"^(取消|停止|cancel|stop|重试|retry)\s*(?:#?(\d+))?$", re.I)
 _CANCEL = {"取消", "停止", "cancel", "stop"}
-_SWITCH = re.compile(r"^(?:切到|切换到|切换|进入|cd|use)\s*@?([A-Za-z0-9_.-]+)$", re.I)
+_SWITCH = re.compile(
+    r"^(?:切到|切换到|切回|切回到|进入|cd|use)\s*@?([A-Za-z0-9_.-]+|[\u4e00-\u9fa5]{1,20})$"
+    r"|^(?:切换)\s*@?([A-Za-z0-9_.-]+)$",
+    re.I,
+)
 
 HELP_WORDS = {"帮助", "help", "命令", "?", "？"}
 STATUS_WORDS = {"状态", "status", "列表", "list"}
@@ -81,7 +85,8 @@ def parse(body: str) -> RelayCommand:
         return RelayCommand("projects")
     m = _SWITCH.match(body)
     if m:
-        return RelayCommand("switch", project=m.group(1))
+        project = m.group(1) or m.group(2)
+        return RelayCommand("switch", project=project)
     m = _CONTROL.match(body)
     if m:
         kind = "cancel" if m.group(1).lower() in _CANCEL else "retry"
