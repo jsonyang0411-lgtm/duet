@@ -1,0 +1,319 @@
+"""达人商务模块的验收测试（handoff.md 第 4 节的 S1–S7 及补充用例）。
+
+第 1 阶段先写测试，再修代码。修复之前这些用例必然失败，所以标成
+xfail(strict=True)，并在 reason 里写明对应的问题编号。某个问题修好后，
+对应用例会变成"意外通过"，strict 模式会把它报成失败，提醒修复的人
+删掉这条用例上的 known_failure 标记。
+
+外部系统一律用替身：FakeERP 代替聚水潭，FakeXHS 代替小红书 CLI。
+它们只记录调用，不碰真实库存和佣金。
+"""
+
+import asyncio
+import time
+
+import pytest
+
+from src.influencer.handler import InfluencerBusinessHandler
+from src.influencer.jst_erp import JuShuiTanERPClient
+from src.influencer.types import GateStatus
+from src.influencer.xhs_cli import XiaohongshuCLIClient
+from test_router import make_private_msg, make_router
+
+INFLUENCER = "wxid_influencer_a"
+SAMPLE_REQUEST = "你好，想申请一下VC精华液的样品"
+FULL_ADDRESS = "张三 13812345678 上海市浦东新区世纪大道100号"
+
+# 审批通过之前，回复里不能出现的承诺性字眼（D1）
+COMMITMENT_WORDS = ("今天", "明天", "下午", "马上", "立刻", "顺丰", "已安排", "已经安排", "排单")
+
+
+def known_failure(issue):
+    return pytest.mark.xfail(strict=True, reason=f"{issue}：修复后删除此标记")
+
+
+class FakeERP:
+    """聚水潭替身：记录调用，可以模拟建单失败。"""
+
+    def __init__(self, *, order_ok=True):
+        self.order_ok = order_ok
+        self.inventory_calls = []
+        self.order_calls = []
+
+    async def check_inventory(self, product_name):
+        self.inventory_calls.append(product_name)
+        return {
+            "sku_id": f"SKU-{product_name}",
+            "product_name": product_name,
+            "in_stock": True,
+            "available_quantity": 100,
+            "cost_price": 18.5,
+        }
+
+    async def create_sample_order(self, **kwargs):
+        self.order_calls.append(kwargs)
+        if not self.order_ok:
+            return {"success": False, "error": "聚水潭返回错误"}
+        return {"success": True, "order_sn": f"JST-{len(self.order_calls)}", "tracking_number": "SF0001"}
+
+
+class FakeXHS:
+    """小红书 CLI 替身：记录查询和写操作。"""
+
+    def __init__(self, stats=None):
+        self.stats = {"follower_count": 35000, "recent_highest_likes": 3200} if stats is None else stats
+        self.stats_calls = []
+        self.commission_calls = []
+
+    async def get_creator_stats(self, xhs_uid):
+        self.stats_calls.append(xhs_uid)
+        return dict(self.stats)
+
+    async def set_exclusive_commission(self, **kwargs):
+        self.commission_calls.append(kwargs)
+        return {"success": True, "plan_id": f"PLAN-{len(self.commission_calls)}"}
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+def outcome(coro):
+    """执行协程；抛出的异常也算一种结果，因为"报错"是允许的处理方式。"""
+    try:
+        return run(coro)
+    except Exception as exc:
+        return exc
+
+
+# ---- 以下辅助函数集中了对处理器内部结构的依赖，第 2 阶段改结构时只改这里 ----
+
+def make_handler(erp=None, xhs=None, *, influencers=(INFLUENCER,)):
+    handler = InfluencerBusinessHandler(erp_client=erp or FakeERP(), xhs_client=xhs or FakeXHS())
+    # 白名单（D3）在第 2 阶段实现；实现之后去掉这个 hasattr 判断
+    if hasattr(handler, "mark_influencer"):
+        for chat_id in influencers:
+            handler.mark_influencer(chat_id)
+    return handler
+
+
+def pending_packets(handler):
+    return [p for p in handler.pending_approvals.values() if p.status == GateStatus.PENDING]
+
+
+def get_packet(handler, packet_id):
+    return handler.pending_approvals[packet_id]
+
+
+def set_commission(handler, packet_id, rate):
+    get_packet(handler, packet_id).proposed_commission_rate = rate
+
+
+def expire(handler, packet_id):
+    get_packet(handler, packet_id).expires_at = time.time() - 1
+
+
+# ---- 场景辅助 ----
+
+def submit_full_request(handler, chat_id=INFLUENCER):
+    """走完"索样 → 补地址"两步，返回生成的审批单号。"""
+    run(handler.process_incoming_message(chat_id, SAMPLE_REQUEST, nickname="小美"))
+    run(handler.process_incoming_message(chat_id, FULL_ADDRESS, nickname="小美"))
+    [packet] = pending_packets(handler)
+    return packet.packet_id
+
+
+def assert_no_commitment(reply):
+    found = [w for w in COMMITMENT_WORDS if w in reply]
+    assert not found, f"审批前的回复不能有承诺性字眼 {found}：{reply}"
+
+
+def private_msg(message_id, chat_id, nickname, content):
+    """模拟 Mac 后端（mac_hybrid）发来的私聊：sender_id 是昵称，chat_id 才是稳定的 ID。"""
+    msg = make_private_msg(message_id, content)
+    msg.update(chat_id=chat_id, sender_id=nickname, sender_name=nickname,
+               group_name=nickname, chat_name=nickname)
+    return msg
+
+
+def router_with(handler):
+    router, summarizer = make_router()
+    router._influencer_handler = handler
+    return router, summarizer
+
+
+# ---- S1–S7 ----
+
+@known_failure("B11/D3 白名单")
+def test_s1_non_influencer_private_chat_gets_the_normal_reply():
+    router, summarizer = router_with(make_handler())
+    reply = router.handle(private_msg("m1", "wxid_friend", "老同学", "上次合作的项目挺顺利，周末聚一下？"))
+    assert summarizer.chat_calls, "白名单以外的私聊应该走原有的聊天逻辑"
+    assert "收件" not in (reply or "")
+
+
+@known_failure("B1 审批前承诺")
+def test_s2_asking_for_the_address_makes_no_promise():
+    reply = run(make_handler().process_incoming_message(INFLUENCER, SAMPLE_REQUEST, nickname="小美"))
+    assert reply and ("收件" in reply or "地址" in reply)
+    assert_no_commitment(reply)
+
+
+@known_failure("B1 审批前承诺")
+def test_s3_full_address_is_submitted_for_review_without_promise():
+    handler = make_handler()
+    run(handler.process_incoming_message(INFLUENCER, SAMPLE_REQUEST, nickname="小美"))
+    reply = run(handler.process_incoming_message(INFLUENCER, FULL_ADDRESS, nickname="小美"))
+    assert "审核" in reply
+    assert_no_commitment(reply)
+
+
+@known_failure("B9 收件信息")
+def test_s3_packet_carries_the_recipient_from_the_message():
+    handler = make_handler()
+    packet = get_packet(handler, submit_full_request(handler))
+    assert packet.recipient_name == "张三"
+    assert packet.recipient_phone == "13812345678"
+    assert "上海市浦东新区世纪大道100号" in packet.shipping_address
+
+
+@known_failure("B2 重复执行")
+def test_s4_a_packet_is_executed_only_once():
+    erp, xhs = FakeERP(), FakeXHS()
+    handler = make_handler(erp, xhs)
+    packet_id = submit_full_request(handler)
+    first = run(handler.execute_operator_approval(packet_id, True))
+    second = run(handler.execute_operator_approval(packet_id, True))
+    assert first["success"] is True
+    assert second["success"] is False
+    assert len(erp.order_calls) == 1
+    assert len(xhs.commission_calls) == 1
+
+
+@known_failure("B2 驳回后执行")
+def test_s5_a_rejected_packet_cannot_be_approved_later():
+    erp, xhs = FakeERP(), FakeXHS()
+    handler = make_handler(erp, xhs)
+    packet_id = submit_full_request(handler)
+    run(handler.execute_operator_approval(packet_id, False))
+    result = run(handler.execute_operator_approval(packet_id, True))
+    assert result["success"] is False
+    assert erp.order_calls == [] and xhs.commission_calls == []
+
+
+@known_failure("B10 昵称当身份")
+def test_s6_two_people_with_the_same_nickname_stay_apart():
+    handler = make_handler(influencers=("wxid_a", "wxid_b"))
+    router, _ = router_with(handler)
+    router.handle(private_msg("m1", "wxid_a", "Lily", "想申请泥膜样品"))
+    router.handle(private_msg("m2", "wxid_b", "Lily", "王五 13700002222 北京市朝阳区建国路8号"))
+    assert pending_packets(handler) == [], "B 发来的地址被挂到了 A 的索样申请上"
+
+
+@known_failure("B12 商品占位")
+def test_s7_an_unnamed_product_is_asked_about_not_placeheld():
+    erp = FakeERP()
+    handler = make_handler(erp)
+    reply = run(handler.process_incoming_message(INFLUENCER, "老师您好，想跟您谈谈带货合作", nickname="阿杰"))
+    assert reply, "白名单里的达人应该得到回复"
+    assert "主推爆款商品" not in reply
+    assert erp.inventory_calls == []
+    run(handler.process_incoming_message(INFLUENCER, FULL_ADDRESS, nickname="阿杰"))
+    assert pending_packets(handler) == []
+
+
+# ---- 补充用例 ----
+
+@known_failure("B2 过期")
+def test_an_expired_packet_cannot_be_approved():
+    erp, xhs = FakeERP(), FakeXHS()
+    handler = make_handler(erp, xhs)
+    packet_id = submit_full_request(handler)
+    expire(handler, packet_id)
+    result = run(handler.execute_operator_approval(packet_id, True))
+    assert result["success"] is False
+    assert erp.order_calls == [] and xhs.commission_calls == []
+
+
+@known_failure("B3 失败后继续执行")
+def test_a_failed_erp_order_stops_before_the_commission():
+    erp, xhs = FakeERP(order_ok=False), FakeXHS()
+    handler = make_handler(erp, xhs)
+    packet_id = submit_full_request(handler)
+    result = run(handler.execute_operator_approval(packet_id, True))
+    assert result["success"] is False
+    assert xhs.commission_calls == []
+    assert get_packet(handler, packet_id).status == GateStatus.FAILED
+
+
+@known_failure("D5 佣金上限")
+def test_commission_above_the_25_percent_cap_is_refused():
+    erp, xhs = FakeERP(), FakeXHS()
+    handler = make_handler(erp, xhs)
+    packet_id = submit_full_request(handler)
+    set_commission(handler, packet_id, 0.30)
+    result = run(handler.execute_operator_approval(packet_id, True))
+    assert result["success"] is False
+    assert erp.order_calls == [] and xhs.commission_calls == []
+
+
+def test_default_commission_is_25_percent():
+    handler = make_handler()
+    packet = get_packet(handler, submit_full_request(handler))
+    assert packet.proposed_commission_rate == 0.25
+
+
+@known_failure("B8 缺数据默认达标")
+def test_missing_creator_stats_are_not_made_up():
+    handler = make_handler(xhs=FakeXHS(stats={}))
+    packet = get_packet(handler, submit_full_request(handler))
+    assert packet.follower_count is None, "拿不到粉丝数就是未知，不能编成 2 万"
+
+
+@known_failure("B10 微信身份当小红书账号")
+def test_the_wechat_identity_is_never_used_as_the_xhs_account():
+    xhs = FakeXHS()
+    handler = make_handler(xhs=xhs)
+    packet_id = submit_full_request(handler)
+    run(handler.execute_operator_approval(packet_id, True))
+    used = xhs.stats_calls + [c["xhs_uid"] for c in xhs.commission_calls]
+    assert INFLUENCER not in used and "小美" not in used
+
+
+@pytest.fixture
+def no_mock_env(monkeypatch):
+    for name in ("INFLUENCER_MOCK", "JST_APP_KEY", "JST_APP_SECRET", "JST_ACCESS_TOKEN", "XHS_CLI_PATH"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@known_failure("B6/D6 自动 mock")
+def test_erp_without_keys_or_mock_flag_returns_no_fake_stock(no_mock_env):
+    result = outcome(JuShuiTanERPClient().check_inventory("VC精华液"))
+    assert isinstance(result, Exception) or not result.get("in_stock")
+
+
+@known_failure("B6 真实模式假成功")
+def test_erp_real_mode_does_not_report_a_fake_order(no_mock_env):
+    # 第 5 阶段接入真实接口后，这条要改成拦截 HTTP 请求的写法
+    client = JuShuiTanERPClient(app_key="k", app_secret="s", access_token="t")
+    result = outcome(client.create_sample_order(
+        influencer_id=INFLUENCER, sku_id="SKU-1", recipient_name="张三",
+        recipient_phone="13812345678", shipping_address="上海市浦东新区世纪大道100号",
+    ))
+    assert isinstance(result, Exception) or not result.get("success")
+
+
+@known_failure("B7/D6 自动 mock")
+def test_xhs_without_cli_or_mock_flag_fakes_nothing(no_mock_env):
+    client = XiaohongshuCLIClient(cli_path="/nonexistent/xhs-cli")
+    stats = outcome(client.get_creator_stats("xhs_123"))
+    assert isinstance(stats, Exception) or not stats.get("follower_count")
+    result = outcome(client.set_exclusive_commission(xhs_uid="xhs_123", sku_id="SKU-1", rate=0.25))
+    assert isinstance(result, Exception) or not result.get("success")
+
+
+def test_explicit_mock_flag_keeps_working(no_mock_env, monkeypatch):
+    monkeypatch.setenv("INFLUENCER_MOCK", "1")
+    assert run(JuShuiTanERPClient().check_inventory("VC精华液"))["in_stock"]
+    client = XiaohongshuCLIClient(cli_path="/nonexistent/xhs-cli")
+    assert run(client.set_exclusive_commission(xhs_uid="xhs_123", sku_id="SKU-1", rate=0.25))["success"]
