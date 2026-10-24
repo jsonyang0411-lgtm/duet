@@ -316,21 +316,24 @@ class ClaudeRelay:
         self._kind_handlers[kind] = on_result
 
     def submit(self, chat_id: str, sender: str, text: str, *, kind: str, meta: dict,
-               files: tuple = (), settle_sec: float = 0.0) -> tuple[str, int]:
+               files: tuple = (), settle_sec: float = 0.0, fresh: bool = False,
+               input_closed: bool = False) -> tuple[str, int]:
         """Queue a silent job of ``kind``: ``(how, job_id)``, how = merged | followup | queued.
 
         A job of this chat that no worker has taken yet gets the text (and is held
         ``settle_sec`` longer, so a burst of messages is one job); one that is
         running gets it as a follow-up (only text: files need a job of their own);
-        else a new job.  Nothing is sent to WeChat.
+        else a new job.  ``fresh``: always a new job (its ``meta`` must reach the
+        worker).  ``input_closed``: and no later message joins it.  Nothing is sent
+        to WeChat.
         """
         if kind not in self._kind_handlers:
             raise ValueError(f"no handler for job kind {kind!r}")
         now = self._clock()
         ready_at = now + max(0.0, float(settle_sec))
-        job_id = self._store.append_pending(chat_id, kind, text, files, ready_at)
+        job_id = None if fresh else self._store.append_pending(chat_id, kind, text, files, ready_at)
         how = "merged"
-        if job_id is None and not files:
+        if job_id is None and not files and not fresh:
             added = self._store.add_followup(chat_id, text, now, kind=kind)
             if added is not None:
                 job_id, how = added[0], "followup"
@@ -338,7 +341,7 @@ class ClaudeRelay:
                     self._followups_ready.notify_all()
         if job_id is None:
             job_id = self._store.add(chat_id, sender, text, "", now, files=files,
-                                     kind=kind, meta=meta, ready_at=ready_at)
+                                     kind=kind, meta=meta, ready_at=ready_at, input_closed=input_closed)
             how = "queued"
         with self._jobs_ready:
             self._jobs_ready.notify_all()
@@ -791,8 +794,9 @@ class ClaudeRelay:
             return
         text = "\n".join(row["text"] for row in leftovers)
         kind = job.get("kind", ADMIN)
+        meta = {k: v for k, v in job_meta(job).items() if k != "history"}    # told once, with the job
         new_id = self._store.add(job["chat_id"], job["sender_id"], text, job["project"], self._clock(),
-                                 kind=kind, meta=job_meta(job))
+                                 kind=kind, meta=meta)
         self._store.add_result_note(job_id, followups_job=new_id)
         with self._jobs_ready:
             self._jobs_ready.notify_all()

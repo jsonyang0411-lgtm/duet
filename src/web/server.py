@@ -1270,25 +1270,81 @@ def _prm_state() -> dict:
     return state
 
 
+def _prm_int_env(key: str, default: int) -> int:
+    try:
+        return int(os.getenv(key, str(default)))
+    except ValueError:
+        return default
+
+
+def _prm_stopped_store():
+    """The PRM database for a stopped bot (gates seeded), or None when there is none yet."""
+    from src.prm.gates import DEFAULT_GATES
+    from src.prm.store import PrmStore
+
+    db = _prm_db_path()
+    if not db.exists():
+        return None
+    store = PrmStore(db)
+    store.seed_gates(DEFAULT_GATES)
+    return store
+
+
 def _prm_state_core() -> dict:
     from src.prm.service import snapshot as prm_snapshot
-    from src.prm.store import PrmStore
 
     settings = {"enabled": _prm_env_on("PRM_COPILOT"), "relay_on": _prm_env_on("CLAUDE_RELAY"),
                 "private_on": _prm_env_on("PRIVATE_CHAT_ENABLED")}
     if _prm is not None:
         return {**_prm.snapshot(), **settings, "enabled": True}
-    db = _prm_db_path()
-    if not db.exists():
+    stopped = {"mac_online": False, "worker_kinds": [], "can_send": False, "can_send_files": False,
+               "takeover_min": _prm_int_env("PRM_TAKEOVER_MIN", 120), "holding_min": _prm_int_env("PRM_HOLDING_MIN", 10),
+               "retention_days": _prm_int_env("PRM_RETENTION_DAYS", 30), **settings}
+    store = _prm_stopped_store()
+    if store is None:
         from src.prm.result import MESSAGE_KINDS
-        from src.prm.store import STAGES
-        return {"ok": True, "running": False, "parties": [], "pending": [], "recent": [], "counts": {},
-                "stages": STAGES, "kinds": MESSAGE_KINDS, "mac_online": False, "worker_kinds": [],
-                "can_send": False, "can_send_files": False, **settings}
-    store = PrmStore(db)
+        from src.prm.store import MODES, SHIPMENT_STATES, STAGES
+        return {"ok": True, "running": False, "parties": [], "pending": [], "recent": [], "counts": {}, "gates": [],
+                "stages": STAGES, "kinds": MESSAGE_KINDS, "modes": MODES, "shipment_states": SHIPMENT_STATES,
+                **stopped}
     try:
-        return prm_snapshot(store, running=False, extra={
-            "mac_online": False, "worker_kinds": [], "can_send": False, "can_send_files": False, **settings})
+        return prm_snapshot(store, running=False, retention_days=stopped["retention_days"], extra=stopped)
+    finally:
+        store.close()
+
+
+def _prm_deal(data: dict) -> dict:
+    """POST /api/prm/deals {action: stage | adopt | mode | shipment | shipment_status, deal_id, ...}."""
+    from src.prm.service import apply_deal_action
+
+    action = str(data.get("action") or "")
+    if _prm is not None:
+        return _prm.deal_action(action, data)
+    store = _prm_stopped_store()
+    if store is None:
+        return {"ok": False, "error": "还没有合作单"}
+    try:
+        return apply_deal_action(store, action, data, now=time.time(),
+                                 takeover_sec=_prm_int_env("PRM_TAKEOVER_MIN", 120) * 60)
+    finally:
+        store.close()
+
+
+def _prm_reveal(data: dict) -> dict:
+    """POST /api/prm/reveal {party_id}: the full numbers; every look is written down."""
+    from src.prm.service import reveal_numbers
+
+    try:
+        party_id = int(data.get("party_id"))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "要给出达人编号"}
+    if _prm is not None:
+        return _prm.reveal(party_id)
+    store = _prm_stopped_store()
+    if store is None:
+        return {"ok": False, "error": "没有找到这个达人"}
+    try:
+        return reveal_numbers(store, party_id, now=time.time())
     finally:
         store.close()
 
@@ -1334,7 +1390,7 @@ def _prm_parties(data: dict) -> dict:
 
 
 def _prm_packet(data: dict) -> dict:
-    """POST /api/prm/packets: {"id", "action": "send" | "edit" | "drop", "text"}."""
+    """POST /api/prm/packets: {"id", "action": "send" | "edit" | "drop" | "wrong", "text"}."""
     try:
         packet_id = int(data.get("id"))
     except (TypeError, ValueError):
@@ -1421,7 +1477,7 @@ _POST_ONLY_PATHS = frozenset({
     "/api/onboarding/step3", "/api/onboarding/step4",
     "/api/sandbox/test", "/api/todos/action",
     "/api/voice/download-model", "/api/wechat-data-dir/detect",
-    "/api/relay/cancel", "/api/prm/parties", "/api/prm/packets",
+    "/api/relay/cancel", "/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal",
 })
 
 
@@ -1524,7 +1580,7 @@ class _UIHandler(SimpleHTTPRequestHandler):
                          "/api/voice/download-model",
                          "/api/wechat-data-dir/detect",
                          "/api/relay/cancel",
-                         "/api/prm/parties", "/api/prm/packets"):
+                         "/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal"):
             self.do_GET()
         else:
             self._method_not_allowed()
@@ -1677,7 +1733,7 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 logger.exception("Reading the PRM state failed")
                 self.send_json({"ok": False, "error": str(e)})
             return
-        if self.path in ("/api/prm/parties", "/api/prm/packets"):
+        if self.path in ("/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal"):
             content_len = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len) if content_len else b"{}"
             try:
@@ -1688,8 +1744,10 @@ class _UIHandler(SimpleHTTPRequestHandler):
             if not isinstance(data, dict):
                 self.send_json({"ok": False, "error": "请求不是有效的 JSON"})
                 return
+            handler = {"/api/prm/parties": _prm_parties, "/api/prm/packets": _prm_packet,
+                       "/api/prm/deals": _prm_deal, "/api/prm/reveal": _prm_reveal}[self.path]
             try:
-                self.send_json(_prm_parties(data) if self.path == "/api/prm/parties" else _prm_packet(data))
+                self.send_json(handler(data))
             except Exception as e:
                 logger.exception("PRM console action failed")
                 self.send_json({"ok": False, "error": str(e)})

@@ -234,14 +234,23 @@ def test_read_token_follows_the_file(worker, tmp_path, monkeypatch):
     assert worker.read_token(cfg) is None
 
 
-def test_only_one_worker_runs_at_a_time(worker):
-    first = worker.single_instance()
+def release(handles):
+    for handle in handles:
+        handle.close()
+
+
+def test_only_one_worker_of_a_kind_runs_at_a_time(worker):
+    first = worker.single_instance()                 # admin,prm: both locks
     assert first is not None
     assert worker.single_instance() is None          # a second worker on this Mac exits
-    first.close()
-    again = worker.single_instance()
-    assert again is not None
-    again.close()
+    assert worker.single_instance(("admin",)) is None and worker.single_instance(("prm",)) is None
+    release(first)
+    admin, prm = worker.single_instance(("admin",)), worker.single_instance(("prm",))
+    assert admin is not None and prm is not None     # a cc worker and a draft worker side by side
+    assert worker.single_instance() is None
+    release(admin)
+    release(prm)
+    assert {p.name for p in worker.HOME_DIR.glob("*.lock")} == {"worker.lock", "worker-prm.lock"}
 
 
 def test_a_second_worker_exits_without_serving(worker, bot, fake_claude, tmp_path, monkeypatch):
@@ -252,7 +261,7 @@ def test_a_second_worker_exits_without_serving(worker, bot, fake_claude, tmp_pat
     held = worker.single_instance()
     monkeypatch.setattr(worker, "serve", lambda *a, **k: pytest.fail("a second worker must not serve"))
     assert worker.main(["--config", str(cfg)]) == 0
-    held.close()
+    release(held)
 
 
 def test_stay_awake_lasts_as_long_as_the_worker(worker, monkeypatch):

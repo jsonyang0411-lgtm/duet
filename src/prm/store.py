@@ -1,18 +1,28 @@
 """PRM copilot storage (``PRM_COPILOT=on``), one SQLite file (``PRM_DB``, data/prm.db).
 
 ``parties``         the creators the operators registered (their private chat is their wxid)
-``deals``           one collaboration per creator: stage, mode, the latest slot values,
-                    the stage the AI suggests, and why a person should look (``attention``)
+``deals``           one collaboration per creator: stage, mode (``copilot`` / ``human`` until
+                    ``mode_until`` / ``paused``), the latest slot values, the stage the AI
+                    suggests, why a person should look (``attention``), when it was
+                    delivered and when its personal data was cleared (8.2)
 ``action_packets``  every draft reply: what would be sent (text with placeholders,
                     attachments), why, and what became of it
 ``pii_tokens``      the phone and ID numbers behind the placeholders (〈手机1〉): the Mac
-                    and its model only ever see the placeholder
+                    and its model only ever see the placeholder; ``masked`` stays when the
+                    number itself is cleared
+``shipments``       the samples sent: carrier, waybill, logistics status
+``send_gates``      per message kind: does a draft wait for a person (``review``) or go out
+                    at once (``auto``), and from when its count starts (8.1)
+``deal_events``     what happened to a deal, in order: stage and mode changes, shipments,
+                    the operators' own WeChat replies, a creator's messages while a person
+                    has the chat, holding replies, numbers shown in full, clean-ups.  The
+                    audit trail, and the backlog the next draft job is told about.
 
 A packet's life: ``pending`` (waits in the console) -> ``approved`` (an operator said
-send) -> ``sending`` -> ``sent`` | ``failed``; or ``pending`` -> ``dropped`` (not sent) |
-``superseded`` (the creator wrote again, a newer draft follows).  ``no_reply`` is a
-draft that says nothing needs to be sent.  Moves are compare-and-set (``move``), so a
-double click or two threads never send one packet twice.
+send, or the kind's gate is ``auto``) -> ``sending`` -> ``sent`` | ``failed``; or
+``pending`` -> ``dropped`` (not sent) | ``superseded`` (the creator wrote again, a newer
+draft follows).  ``no_reply`` is a draft that says nothing needs to be sent.  Moves are
+compare-and-set (``move``), so a double click or two threads never send one packet twice.
 """
 
 from __future__ import annotations
@@ -22,7 +32,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 PENDING, APPROVED, SENDING, SENT, FAILED = "pending", "approved", "sending", "sent", "failed"
 DROPPED, SUPERSEDED, NO_REPLY = "dropped", "superseded", "no_reply"
@@ -35,7 +45,10 @@ STAGES = {
     "delivered": "已签收", "ship_error": "物流异常", "brief": "素材已发", "draft": "初稿已交",
     "revise": "修改中", "published": "已发布", "closed": "结案",
 }
-MODES = ("auto", "copilot", "human", "paused")
+COPILOT, HUMAN, PAUSED = "copilot", "human", "paused"
+MODES = {COPILOT: "副驾驶", HUMAN: "人工接管", PAUSED: "暂停"}
+# Logistics status of a shipment -> the stage it puts the deal in.
+SHIPMENT_STATES = {"shipped": "已寄出", "transit": "运输中", "delivered": "已签收", "ship_error": "物流异常"}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS parties (
@@ -96,7 +109,52 @@ CREATE TABLE IF NOT EXISTS pii_tokens (
     created_at REAL NOT NULL,
     PRIMARY KEY (party_id, token)
 );
+CREATE TABLE IF NOT EXISTS shipments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    deal_id INTEGER NOT NULL,
+    carrier TEXT NOT NULL,
+    waybill TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'shipped',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS shipments_deal ON shipments(deal_id, id);
+CREATE TABLE IF NOT EXISTS send_gates (
+    kind TEXT PRIMARY KEY,
+    route TEXT NOT NULL DEFAULT 'review',
+    window INTEGER NOT NULL,
+    min_unchanged INTEGER NOT NULL,
+    locked INTEGER NOT NULL DEFAULT 0,
+    reset_at REAL NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS deal_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    deal_id INTEGER NOT NULL,
+    party_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '{}',
+    actor TEXT NOT NULL DEFAULT '',
+    forwarded INTEGER NOT NULL DEFAULT 1,
+    at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS deal_events_deal ON deal_events(deal_id, id);
 """
+
+# Columns added after the first version: (table, column, type).
+_ADDED_COLUMNS = (
+    ("deals", "mode_until", "REAL"),
+    ("deals", "delivered_at", "REAL"),
+    ("deals", "purged_at", "REAL"),
+    ("deals", "holding_round", "REAL"),
+    ("action_packets", "meta", "TEXT NOT NULL DEFAULT '{}'"),
+    ("action_packets", "wrong", "INTEGER NOT NULL DEFAULT 0"),
+    ("pii_tokens", "masked", "TEXT NOT NULL DEFAULT ''"),
+    ("pii_tokens", "purged_at", "REAL"),
+)
+
+# What the creators wrote, or our side's own words, waiting for the next draft job.
+BACKLOG_KINDS = ("creator_message", "operator_message")
 
 
 class PartyError(ValueError):
@@ -116,14 +174,22 @@ def packet_view(row: dict) -> dict:
     out = dict(row)
     out["attachments"] = _loads(row.get("attachments"), [])
     out["slots"] = _loads(row.get("slots"), {})
+    out["meta"] = _loads(row.get("meta"), {})
     out["needs_attention"] = bool(row.get("needs_attention"))
     out["edited"] = bool(row.get("edited"))
+    out["wrong"] = bool(row.get("wrong"))
     return out
 
 
 def deal_view(row: dict) -> dict:
     out = dict(row)
     out["slots"] = _loads(row.get("slots"), {})
+    return out
+
+
+def event_view(row: dict) -> dict:
+    out = dict(row)
+    out["detail"] = _loads(row.get("detail"), {})
     return out
 
 
@@ -136,6 +202,20 @@ class PrmStore:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            for table, column, kind in _ADDED_COLUMNS:   # a database from before these columns
+                columns = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+                if column not in columns:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+            self._conn.commit()
+
+    def seed_gates(self, defaults: dict) -> None:
+        """``{kind: (window, min_unchanged, locked)}``: the gates a database does not have yet."""
+        with self._lock:
+            for kind, (window, minimum, locked) in defaults.items():
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO send_gates (kind, window, min_unchanged, locked) VALUES (?, ?, ?, ?)",
+                    (kind, int(window), int(minimum), int(bool(locked))),
+                )
             self._conn.commit()
 
     def close(self) -> None:
@@ -236,9 +316,10 @@ class PrmStore:
         return [deal_view(dict(r)) for r in rows]
 
     def update_deal(self, deal_id: int, now: Optional[float] = None, *, merge_slots: Optional[dict] = None,
-                    **fields) -> None:
-        """Set ``fields`` (stage, mode, stage_proposal, attention, last_message_at) and merge slot values."""
-        allowed = {"stage", "mode", "stage_proposal", "attention", "last_message_at"}
+                    replace_slots: Optional[dict] = None, **fields) -> None:
+        """Set ``fields`` and merge (or replace) the slot values."""
+        allowed = {"stage", "mode", "mode_until", "stage_proposal", "attention", "last_message_at",
+                   "delivered_at", "purged_at", "holding_round"}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"not a deal field: {sorted(unknown)}")
@@ -247,7 +328,9 @@ class PrmStore:
             row = self._conn.execute("SELECT slots FROM deals WHERE id = ?", (deal_id,)).fetchone()
             if row is None:
                 return
-            if merge_slots:
+            if replace_slots is not None:
+                fields["slots"] = json.dumps(replace_slots, ensure_ascii=False)
+            elif merge_slots:
                 slots = _loads(row["slots"], {})
                 slots.update(merge_slots)
                 fields["slots"] = json.dumps(slots, ensure_ascii=False)
@@ -259,21 +342,32 @@ class PrmStore:
             )
             self._conn.commit()
 
+    def deals_to_purge(self, delivered_before: float) -> list[dict]:
+        """Deals delivered before that time whose personal data is still there (8.2)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM deals WHERE delivered_at IS NOT NULL AND delivered_at <= ? AND purged_at IS NULL",
+                (delivered_before,),
+            ).fetchall()
+        return [deal_view(dict(r)) for r in rows]
+
     # ── drafts ────────────────────────────────────────────────────────────
 
     def add_packet(self, *, deal_id: int, party_id: int, job_id: Optional[int], chat_id: str, kind: str,
                    text: str, attachments: list, intent: str, slots: dict, stage_proposal: str,
                    needs_attention: bool, reason: str, status: str = PENDING, route: str = "review",
+                   meta: Optional[dict] = None, decided_at: Optional[float] = None,
                    now: Optional[float] = None) -> int:
         now = time.time() if now is None else now
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO action_packets (deal_id, party_id, job_id, chat_id, kind, route, text, attachments,"
-                " intent, slots, stage_proposal, needs_attention, reason, status, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " intent, slots, stage_proposal, needs_attention, reason, status, meta, decided_at, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (deal_id, party_id, job_id, chat_id, kind, route, text,
                  json.dumps(attachments, ensure_ascii=False), intent, json.dumps(slots, ensure_ascii=False),
-                 stage_proposal, int(bool(needs_attention)), reason, status, now),
+                 stage_proposal, int(bool(needs_attention)), reason, status,
+                 json.dumps(meta or {}, ensure_ascii=False), decided_at, now),
             )
             self._conn.commit()
             return int(cur.lastrowid)
@@ -300,6 +394,25 @@ class PrmStore:
             ).fetchone()
         return packet_view(dict(row)) if row else None
 
+    def sent_since(self, chat_id: str, since: float) -> list[dict]:
+        """Packets sent (or being sent) to this chat after ``since`` (the bot's own lines)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM action_packets WHERE chat_id = ? AND status IN (?, ?) AND sent_at >= ?"
+                " ORDER BY id DESC", (chat_id, SENT, SENDING, since),
+            ).fetchall()
+        return [packet_view(dict(r)) for r in rows]
+
+    def reviewed(self, kind: str, since: float, limit: int) -> list[dict]:
+        """The newest drafts of ``kind`` a person decided on after ``since`` (8.1's window)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM action_packets WHERE kind = ? AND route = 'review' AND status IN (?, ?, ?)"
+                " AND decided_at IS NOT NULL AND decided_at > ? ORDER BY decided_at DESC, id DESC LIMIT ?",
+                (kind, SENT, FAILED, DROPPED, since, int(limit)),
+            ).fetchall()
+        return [packet_view(dict(r)) for r in rows]
+
     def move(self, packet_id: int, from_states: tuple, to_state: str, **fields) -> bool:
         """Compare-and-set: the packet goes to ``to_state`` only if it is in one of ``from_states``."""
         allowed = {"final_text", "edited", "outcome", "error", "decided_at", "sent_at"}
@@ -316,13 +429,33 @@ class PrmStore:
             self._conn.commit()
             return cur.rowcount == 1
 
-    def supersede(self, deal_id: int, now: Optional[float] = None, keep: Optional[int] = None) -> int:
-        """Pending drafts of this deal (but ``keep``) are out of date: ``superseded``; returns how many."""
-        now = time.time() if now is None else now
+    def set_outcome(self, packet_id: int, outcome: str) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE action_packets SET outcome = ? WHERE id = ?", (outcome, packet_id))
+            self._conn.commit()
+
+    def mark_wrong(self, packet_id: int) -> bool:
+        """An operator says this sent packet should not have gone out (True: newly marked)."""
         with self._lock:
             cur = self._conn.execute(
-                "UPDATE action_packets SET status = ?, decided_at = ? WHERE deal_id = ? AND status = ?"
-                " AND id != ?", (SUPERSEDED, now, deal_id, PENDING, -1 if keep is None else keep),
+                "UPDATE action_packets SET wrong = 1 WHERE id = ? AND status = ? AND wrong = 0", (packet_id, SENT),
+            )
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def supersede(self, deal_id: int, now: Optional[float] = None, keep: Optional[int] = None,
+                  system_kind: Optional[str] = None) -> int:
+        """Pending drafts of this deal (but ``keep``) are out of date: ``superseded``; returns how many.
+        The Mac's drafts (they answer the creator), or with ``system_kind`` the system's own drafts of
+        that kind (a shipping notice is not out of date because the creator wrote)."""
+        now = time.time() if now is None else now
+        which = "job_id IS NOT NULL" if system_kind is None else "job_id IS NULL AND kind = ?"
+        with self._lock:
+            cur = self._conn.execute(
+                f"UPDATE action_packets SET status = ?, decided_at = ? WHERE deal_id = ? AND status = ?"
+                f" AND id != ? AND {which}",
+                (SUPERSEDED, now, deal_id, PENDING, -1 if keep is None else keep,
+                 *(() if system_kind is None else (system_kind,))),
             )
             self._conn.commit()
             return cur.rowcount
@@ -334,6 +467,26 @@ class PrmStore:
             ).fetchall()
         return {r["status"]: int(r["n"]) for r in rows}
 
+    def rewrite_packets(self, deal_id: int, rewrite: Callable[[str], str]) -> int:
+        """Rewrite the text of every packet of a deal (8.2 clean-up); returns how many changed."""
+        changed = 0
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, text, final_text, slots, intent, reason FROM action_packets WHERE deal_id = ?", (deal_id,)
+            ).fetchall()
+            for row in rows:
+                old = (row["text"] or "", row["final_text"], row["slots"] or "{}", row["intent"] or "",
+                       row["reason"] or "")
+                new = tuple(None if value is None else rewrite(value) for value in old)
+                if new != old:
+                    self._conn.execute(
+                        "UPDATE action_packets SET text = ?, final_text = ?, slots = ?, intent = ?, reason = ?"
+                        " WHERE id = ?", (*new, row["id"]),
+                    )
+                    changed += 1
+            self._conn.commit()
+        return changed
+
     # ── placeholders for phone and ID numbers ─────────────────────────────
 
     def token_for(self, party_id: int, kind: str, label: str, value: str, now: Optional[float] = None) -> str:
@@ -341,7 +494,7 @@ class PrmStore:
         now = time.time() if now is None else now
         with self._lock:
             row = self._conn.execute(
-                "SELECT token FROM pii_tokens WHERE party_id = ? AND kind = ? AND value = ?",
+                "SELECT token FROM pii_tokens WHERE party_id = ? AND kind = ? AND value = ? AND purged_at IS NULL",
                 (party_id, kind, value),
             ).fetchone()
             if row is not None:
@@ -358,9 +511,129 @@ class PrmStore:
             return token
 
     def tokens(self, party_id: int) -> dict[str, tuple[str, str]]:
-        """``{placeholder: (kind, value)}`` of this creator."""
+        """``{placeholder: (kind, value)}`` of this creator, the numbers that are still kept."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT token, kind, value FROM pii_tokens WHERE party_id = ?", (party_id,)
+                "SELECT token, kind, value FROM pii_tokens WHERE party_id = ? AND purged_at IS NULL", (party_id,)
             ).fetchall()
         return {r["token"]: (r["kind"], r["value"]) for r in rows}
+
+    def token_rows(self, party_id: int) -> list[dict]:
+        """Every placeholder of this creator, cleared ones too (``masked`` is what the console shows)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT token, kind, value, masked, purged_at FROM pii_tokens WHERE party_id = ? ORDER BY created_at",
+                (party_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def purge_tokens(self, party_id: int, masked: Callable[[str, str], str], now: Optional[float] = None) -> int:
+        """Clear the numbers of this creator, keep their masked form; returns how many."""
+        now = time.time() if now is None else now
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT token, kind, value FROM pii_tokens WHERE party_id = ? AND purged_at IS NULL", (party_id,)
+            ).fetchall()
+            for row in rows:
+                self._conn.execute(
+                    "UPDATE pii_tokens SET masked = ?, value = '', purged_at = ? WHERE party_id = ? AND token = ?",
+                    (masked(row["kind"], row["value"]), now, party_id, row["token"]),
+                )
+            self._conn.commit()
+        return len(rows)
+
+    # ── shipments ─────────────────────────────────────────────────────────
+
+    def add_shipment(self, deal_id: int, carrier: str, waybill: str, now: Optional[float] = None) -> dict:
+        now = time.time() if now is None else now
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO shipments (deal_id, carrier, waybill, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (deal_id, carrier, waybill, now, now),
+            )
+            self._conn.commit()
+            return dict(self._conn.execute("SELECT * FROM shipments WHERE id = ?", (cur.lastrowid,)).fetchone())
+
+    def latest_shipment(self, deal_id: int) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM shipments WHERE deal_id = ? ORDER BY id DESC LIMIT 1", (deal_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_shipment_status(self, shipment_id: int, status: str, now: Optional[float] = None) -> None:
+        now = time.time() if now is None else now
+        with self._lock:
+            self._conn.execute("UPDATE shipments SET status = ?, updated_at = ? WHERE id = ?",
+                               (status, now, shipment_id))
+            self._conn.commit()
+
+    # ── send gates (8.1) ──────────────────────────────────────────────────
+
+    def gates(self) -> dict[str, dict]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM send_gates ORDER BY kind").fetchall()
+        return {r["kind"]: dict(r) for r in rows}
+
+    def gate(self, kind: str) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM send_gates WHERE kind = ?", (kind,)).fetchone()
+        return dict(row) if row else None
+
+    def set_gate(self, kind: str, route: str, now: Optional[float] = None, reset: bool = False) -> None:
+        now = time.time() if now is None else now
+        with self._lock:
+            if reset:
+                self._conn.execute("UPDATE send_gates SET route = ?, reset_at = ?, updated_at = ? WHERE kind = ?",
+                                   (route, now, now, kind))
+            else:
+                self._conn.execute("UPDATE send_gates SET route = ?, updated_at = ? WHERE kind = ?", (route, now, kind))
+            self._conn.commit()
+
+    # ── events (the audit trail and the backlog for the next draft) ───────
+
+    def add_event(self, deal_id: int, party_id: int, kind: str, detail: Optional[dict] = None, *,
+                  actor: str = "", forwarded: bool = True, now: Optional[float] = None) -> int:
+        now = time.time() if now is None else now
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO deal_events (deal_id, party_id, kind, detail, actor, forwarded, at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (deal_id, party_id, kind, json.dumps(detail or {}, ensure_ascii=False), actor, int(bool(forwarded)), now),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def events(self, deal_id: Optional[int] = None, limit: int = 50) -> list[dict]:
+        sql, args = "SELECT * FROM deal_events", []
+        if deal_id is not None:
+            sql += " WHERE deal_id = ?"
+            args.append(deal_id)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY id DESC LIMIT ?", (*args, int(limit))).fetchall()
+        return [event_view(dict(r)) for r in rows]
+
+    def take_backlog(self, deal_id: int) -> list[dict]:
+        """The creator's and the operators' messages the next draft job has not heard of, oldest
+        first; they count as told."""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM deal_events WHERE deal_id = ? AND forwarded = 0 AND kind IN"
+                f" ({', '.join('?' * len(BACKLOG_KINDS))}) ORDER BY id", (deal_id, *BACKLOG_KINDS),
+            ).fetchall()
+            if rows:
+                self._conn.executemany("UPDATE deal_events SET forwarded = 1 WHERE id = ?", [(r["id"],) for r in rows])
+                self._conn.commit()
+        return [event_view(dict(r)) for r in rows]
+
+    def rewrite_events(self, deal_id: int, rewrite: Callable[[str], str]) -> int:
+        changed = 0
+        with self._lock:
+            rows = self._conn.execute("SELECT id, detail FROM deal_events WHERE deal_id = ?", (deal_id,)).fetchall()
+            for row in rows:
+                new = rewrite(row["detail"] or "{}")
+                if new != row["detail"]:
+                    self._conn.execute("UPDATE deal_events SET detail = ? WHERE id = ?", (new, row["id"]))
+                    changed += 1
+            self._conn.commit()
+        return changed

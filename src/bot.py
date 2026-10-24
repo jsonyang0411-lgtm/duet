@@ -445,14 +445,22 @@ class Bot:
             logger.warning("PRM_COPILOT is on but the Claude relay is not: creators' messages are not drafted")
             return None
         from .prm import PrmService
+        store = getattr(router, "_store", None)
         prm = PrmService(config, relay, send=backend.send_text, send_file=getattr(backend, "send_file", None),
-                         on_parties_changed=getattr(backend, "refresh_private_chats_soon", None))
+                         on_parties_changed=getattr(backend, "refresh_private_chats_soon", None),
+                         scrub_messages=getattr(store, "rewrite_chat", None))
         set_filter = getattr(backend, "set_private_filter", None)
         if callable(set_filter):
             set_filter(prm.is_party_chat)
         else:
             logger.warning("PRM_COPILOT: this WeChat backend cannot read extra private chats; "
                            "add the creators to PRIVATE_CHATS")
+        set_hook = getattr(backend, "set_own_message_hook", None)
+        if callable(set_hook):
+            set_hook(prm.on_own_message)           # an operator replying by hand takes the chat over
+        else:
+            logger.warning("PRM_COPILOT: this WeChat backend does not report this account's own lines; "
+                           "an operator's own replies will not take a chat over")
         prm.start()
         router._prm = prm
         try:

@@ -484,6 +484,71 @@ class TestPrmPages:
         page.wait_for_timeout(1500)
         assert not prm.service.is_party_chat("wxid_newcreator") and "已停用" in page.inner_text("body")
 
+    def test_deals_page_runs_a_deal_stage_mode_waybill_and_numbers(self, page, prm):
+        store = prm.service.store
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.wait_for_timeout(1500)
+        page.locator("button[aria-label='展开 小美']").click()
+        page.wait_for_timeout(300)
+        detail = page.locator(".prm-deal")
+        text = detail.inner_text()
+        for expected in ("谁来回复", "副驾驶：Mac 起草", "寄样", "还没有运单号", "号码", "显示完整号码"):
+            assert expected in text
+        assert "13812345678" not in page.inner_text("body")
+        # the AI's stage, then a person takes the chat and gives it back
+        detail.locator("button:has-text('采纳 AI 建议：收集收件信息')").click()
+        page.wait_for_timeout(1200)
+        assert store.deal(1)["stage"] == "address"
+        assert detail.locator("select[aria-label='小美 的阶段']").input_value() == "address"
+        detail.locator("[aria-label='小美 的模式'] button:has-text('人工接管')").click()
+        page.wait_for_timeout(1200)
+        assert store.deal(1)["mode"] == "human" and "人工接管中" in detail.inner_text()
+        detail.locator("button:has-text('恢复副驾驶')").click()
+        page.wait_for_timeout(1200)
+        assert store.deal(1)["mode"] == "copilot"
+        # a waybill: the shipping notice waits in 待审批; then the parcel moves
+        detail.locator("input[aria-label='小美 的快递公司']").fill("顺丰")
+        detail.locator("input[aria-label='小美 的运单号']").fill("SF1234567890123")
+        detail.locator("button:has-text('填运单号并起草发货通知')").click()
+        page.wait_for_timeout(1500)
+        assert store.latest_shipment(1)["waybill"] == "SF1234567890123" and store.deal(1)["stage"] == "shipped"
+        assert "SF1234567890123 · 已寄出" in detail.inner_text()
+        detail.locator("select[aria-label='小美 的物流状态']").select_option("delivered")
+        detail.locator("button:has-text('更新物流')").click()
+        page.wait_for_timeout(1500)
+        text = detail.inner_text()
+        assert store.deal(1)["delivered_at"] and "后自动清除收件信息" in text and "已签收" in text
+        assert "控制台 更新物流：SF1234567890123 已签收" in text
+        # the full number, written down; and hidden again
+        detail.locator("button:has-text('显示完整号码')").click()
+        page.wait_for_timeout(800)
+        assert "〈手机1〉 13812345678" in detail.inner_text()
+        assert [e["kind"] for e in store.events(1, limit=1)] == ["reveal"]
+        detail.locator("button:has-text('隐藏')").click()
+        assert "13812345678" not in page.inner_text("body")
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        notice = page.locator(".prm-draft", has_text="寄出、物流通知")
+        assert "系统里的运单号：SF1234567890123" in notice.inner_text() and "系统生成" in notice.inner_text()
+
+    def test_review_page_marks_a_sent_message_wrong_and_shows_the_gates(self, page, prm):
+        assert prm.service.decide(2, "send")["ok"]
+        prm.service.send_approved()
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        gates = page.locator(".prm-gates").inner_text()
+        for expected in ("自动发送门槛", "收件信息复述", "先审后发", "29/30", "一直先审"):
+            assert expected in gates
+        recent = page.locator(".prm-recent")
+        assert "已发出 · 未确认" in recent.inner_text()
+        recent.locator("button:has-text('标为发错了')").click()
+        page.wait_for_timeout(300)
+        page.locator("[role=dialog] button:has-text('标为发错了')").click()
+        page.wait_for_timeout(1500)
+        assert prm.service.store.packet(2)["wrong"] is True
+        assert "发错了" in recent.inner_text() and "标为发错了" not in recent.inner_text()
+        assert [e["kind"] for e in prm.service.store.events(1, limit=1)] == ["wrong"]
+
 
 class TestOnboardingForTheAgentConsole:
     def test_three_steps_end_with_the_relay_and_quiet_defaults(self, page):

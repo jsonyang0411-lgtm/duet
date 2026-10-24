@@ -583,6 +583,16 @@ class BotConfig:
     # PRIVATE_CHAT_ENABLED=true.
     prm_copilot: str = "off"
     prm_db: str = "data/prm.db"
+    # An operator's own WeChat reply in a creator's chat (or the console) gives the chat to
+    # a person for this long: the creator's messages are only recorded meanwhile.
+    prm_takeover_min: int = 120
+    # A draft waiting this long gets one holding reply per round of the creator's
+    # messages (8.1); 0 = never.
+    prm_holding_min: int = 10
+    prm_holding_text: str = "收到，我确认一下马上回你"
+    # A delivered deal's receiving details (address, phone and ID numbers) are cleared
+    # everywhere this many days after delivery (8.2).
+    prm_retention_days: int = 30
 
     # === OCR fallback (src/wechat/ocr), macOS mac_hybrid backend only ===
     # "on": when the WeChat database cannot be read ocr_fallback_after times in a row, the
@@ -1011,6 +1021,14 @@ def _validate_config(kwargs: dict) -> None:
         # Only when the caller knows it (the console's advanced page checks its own keys only).
         if "private_chat_enabled" in kwargs and not kwargs["private_chat_enabled"]:
             errors.append("PRM_COPILOT=on needs PRIVATE_CHAT_ENABLED=true (creators write in private chats)")
+    if not (5 <= int(kwargs.get("prm_takeover_min", 120)) <= 1440):
+        errors.append(f"PRM_TAKEOVER_MIN must be between 5 and 1440, got {kwargs.get('prm_takeover_min')}")
+    if not (0 <= int(kwargs.get("prm_holding_min", 10)) <= 120):
+        errors.append(f"PRM_HOLDING_MIN must be between 0 and 120, got {kwargs.get('prm_holding_min')}")
+    if not (1 <= len(str(kwargs.get("prm_holding_text", "收到，我确认一下马上回你")).strip()) <= 60):
+        errors.append("PRM_HOLDING_TEXT must be 1-60 characters")
+    if not (1 <= int(kwargs.get("prm_retention_days", 30)) <= 365):
+        errors.append(f"PRM_RETENTION_DAYS must be between 1 and 365, got {kwargs.get('prm_retention_days')}")
     auto_accept = kwargs.get("auto_accept_friends", "off")
     if auto_accept not in ("off", "on"):
         errors.append(f"AUTO_ACCEPT_FRIENDS must be off or on, got {auto_accept}")
@@ -1323,6 +1341,10 @@ def load_config() -> BotConfig:
         "claude_relay_long_file": _parse_memory_mode(os.getenv("CLAUDE_RELAY_LONG_FILE", "on")),
         "prm_copilot": _parse_memory_mode(os.getenv("PRM_COPILOT", "off")),
         "prm_db": os.getenv("PRM_DB", "data/prm.db").strip() or "data/prm.db",
+        "prm_takeover_min": int(os.getenv("PRM_TAKEOVER_MIN", "120")),
+        "prm_holding_min": int(os.getenv("PRM_HOLDING_MIN", "10")),
+        "prm_holding_text": os.getenv("PRM_HOLDING_TEXT", "收到，我确认一下马上回你").strip() or "收到，我确认一下马上回你",
+        "prm_retention_days": int(os.getenv("PRM_RETENTION_DAYS", "30")),
         "ocr_fallback": _parse_memory_mode(os.getenv("OCR_FALLBACK", "off")),
         "ocr_fallback_after": int(os.getenv("OCR_FALLBACK_AFTER", "3")),
         "ocr_poll_sec": float(os.getenv("OCR_POLL_SEC", "4")),

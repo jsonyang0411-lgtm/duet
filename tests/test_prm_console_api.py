@@ -1,4 +1,4 @@
-"""The console's PRM API: GET /api/prm, POST /api/prm/parties, POST /api/prm/packets."""
+"""The console's PRM API: GET /api/prm, POST /api/prm/parties, /api/prm/packets, /api/prm/deals, /api/prm/reveal."""
 
 import json
 import time
@@ -117,8 +117,74 @@ def test_send_edit_and_drop_from_the_console(running):
     assert running.prm.is_party_chat("wxid_new01")
 
 
+def test_deals_numbers_and_wrong_sends_from_the_running_console(running):
+    d = call("/api/prm")[1]
+    [party] = d["parties"]
+    deal = party["deal"]
+    assert party["has_numbers"] is True and deal["mode"] == "copilot" and deal["mode_label"] == "副驾驶"
+    assert deal["legend"] == [{"token": "〈手机1〉", "masked": "138****5678"}]
+    gates = {g["kind"]: g for g in d["gates"]}
+    assert gates["money"]["locked"] and gates["address_confirm"]["min_unchanged"] == 29 and d["takeover_min"] == 120
+    # the full number on request, and the look is written down (which placeholders, not the number)
+    answer = call("/api/prm/reveal", "POST", {"party_id": party["id"]})[1]
+    assert answer["numbers"] == [{"token": "〈手机1〉", "value": "13812345678", "cleared": False}]
+    d = call("/api/prm")[1]
+    [event] = [e for e in d["parties"][0]["deal"]["events"] if e["kind"] == "reveal"]
+    assert event["name"] == "查看完整号码" and event["detail"] == {"tokens": ["〈手机1〉"]}
+    assert "13812345678" not in json.dumps(d, ensure_ascii=False)
+    assert call("/api/prm/reveal", "POST", {"party_id": "x"})[1]["ok"] is False
+    # stage and mode
+    assert call("/api/prm/deals", "POST", {"action": "adopt", "deal_id": deal["id"]})[1] == {"ok": True}
+    assert call("/api/prm/deals", "POST", {"action": "mode", "deal_id": deal["id"], "mode": "human"})[1] == {"ok": True}
+    deal = call("/api/prm")[1]["parties"][0]["deal"]
+    assert deal["stage"] == "address" and deal["mode"] == "human" and deal["mode_until"]
+    assert call("/api/prm")[1]["pending"][0]["status"] == "pending"          # a console switch drops nothing
+    assert call("/api/prm/deals", "POST", {"action": "mode", "deal_id": deal["id"], "mode": "copilot"})[1] == {"ok": True}
+    assert call("/api/prm/deals", "POST", {"action": "fly", "deal_id": deal["id"]})[1]["ok"] is False
+    assert call("/api/prm/deals", "POST", {"action": "stage", "deal_id": deal["id"], "stage": "won"})[1]["ok"] is False
+    # a waybill: the notice waits for review with the system's number
+    answer = call("/api/prm/deals", "POST", {"action": "shipment", "deal_id": deal["id"], "carrier": "顺丰",
+                                             "waybill": "SF1234567890123"})[1]
+    d = call("/api/prm")[1]
+    [notice] = [p for p in d["pending"] if p["id"] == answer["packet"]]
+    assert notice["system"] is True and notice["waybill"] == "SF1234567890123" and notice["kind"] == "shipping_notice"
+    assert d["parties"][0]["deal"]["shipment"]["waybill"] == "SF1234567890123"
+    assert d["parties"][0]["deal"]["stage"] == "shipped"
+    assert call("/api/prm/deals", "POST", {"action": "shipment_status", "deal_id": deal["id"], "status": "transit"})[1] == {"ok": True}
+    assert call("/api/prm")[1]["parties"][0]["deal"]["shipment_status_label"] == "运输中"
+    edited = call("/api/prm/packets", "POST", {"id": notice["id"], "action": "edit", "text": "单号 SF0000000000"})[1]
+    assert edited["ok"] is False and "SF1234567890123" in edited["error"]
+    # sent, then marked wrong: shipping notices are reviewed again from zero
+    assert call("/api/prm/packets", "POST", {"id": notice["id"], "action": "send"})[1]["ok"]
+    running.prm.send_approved()
+    assert running.sent[-1] == (CREATOR, "小美你好～样品已经寄出啦：顺丰 SF1234567890123。签收之后跟我说一声哦～")
+    assert call("/api/prm/packets", "POST", {"id": notice["id"], "action": "wrong"})[1] == {"ok": True, "status": "wrong"}
+    d = call("/api/prm")[1]
+    assert [p["wrong"] for p in d["recent"] if p["id"] == notice["id"]] == [True]
+    assert {g["kind"]: g for g in d["gates"]}["shipping_notice"]["decided"] == 0
+    assert call("/api/prm/packets", "POST", {"id": notice["id"], "action": "wrong"})[1]["ok"] is False
+
+
+def test_deals_and_numbers_work_while_the_bot_is_stopped(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PRM_DB", raising=False)
+    assert call("/api/prm/deals", "POST", {"action": "stage", "deal_id": 1, "stage": "agreed"})[1]["ok"] is False
+    assert call("/api/prm/parties", "POST", {"action": "add", "wxid": CREATOR, "name": "小美"})[1]["ok"] is True
+    assert call("/api/prm/deals", "POST", {"action": "stage", "deal_id": 1, "stage": "agreed"})[1] == {"ok": True}
+    answer = call("/api/prm/deals", "POST", {"action": "shipment", "deal_id": 1, "carrier": "顺丰",
+                                             "waybill": "SF1234567890123"})[1]
+    assert answer["ok"] is True
+    d = call("/api/prm")[1]
+    assert d["running"] is False and [p["id"] for p in d["pending"]] == [answer["packet"]]
+    assert d["parties"][0]["deal"]["stage"] == "shipped" and d["gates"]
+    assert call("/api/prm/reveal", "POST", {"party_id": 1})[1] == {"ok": True, "numbers": []}
+    kinds = [e["kind"] for e in call("/api/prm")[1]["parties"][0]["deal"]["events"]]
+    assert kinds[0] == "reveal" and {"stage", "shipment"} <= set(kinds)
+    assert call("/api/prm/packets", "POST", {"id": answer["packet"], "action": "wrong"})[1]["ok"] is False
+
+
 def test_changes_need_a_post_and_a_body():
-    for path in ("/api/prm/parties", "/api/prm/packets"):
+    for path in ("/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal"):
         assert call(path)[0] == 405                                         # a GET must not change anything
     _, sock = _build_handler("/api/prm/parties", method="POST", body=b"not json",
                              headers={"Content-Type": "application/json"})

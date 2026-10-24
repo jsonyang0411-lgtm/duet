@@ -53,14 +53,32 @@ def masked_value(kind: str, value: str) -> str:
     return "*" * len(value)
 
 
-def legend(text: str, tokens: dict) -> list[dict]:
+def display(rows: list[dict]) -> dict[str, str]:
+    """``{placeholder: what the console shows}`` from ``PrmStore.token_rows``: the masked number,
+    or for a cleared one the masked form kept at clean-up time."""
+    out = {}
+    for row in rows:
+        if row.get("purged_at"):
+            out[row["token"]] = f"{row.get('masked') or '***'}（已清除）"
+        else:
+            out[row["token"]] = masked_value(row["kind"], row["value"])
+    return out
+
+
+def legend(text: str, shown: dict[str, str]) -> list[dict]:
     """``[{"token", "masked"}]`` for the placeholders in ``text``, in order of first use."""
     out, seen = [], set()
     for m in TOKEN.finditer(str(text)):
         token = m.group(0)
-        if token in seen or token not in tokens:
+        if token in seen or token not in shown:
             continue
         seen.add(token)
-        kind, value = tokens[token]
-        out.append({"token": token, "masked": masked_value(kind, value)})
+        out.append({"token": token, "masked": shown[token]})
     return out
+
+
+def mask_numbers(text: str) -> str:
+    """Every phone and ID number in ``text`` in its masked form (138****5678): for clean-ups of
+    text that never went through placeholders (the stored chat messages)."""
+    text = _ID_CARD.sub(lambda m: masked_value(ID_CARD, m.group(1).upper()), str(text))
+    return _PHONE.sub(lambda m: masked_value(PHONE, "".join(m.groups())), text)

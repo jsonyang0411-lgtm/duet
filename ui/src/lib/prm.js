@@ -31,6 +31,30 @@ export function usePrm(intervalMs = 5000) {
 
 export const decide = (id, action, text) => post('/api/prm/packets', text === undefined ? { id, action } : { id, action, text })
 export const partyAction = (body) => post('/api/prm/parties', body)
+export const dealAction = (body) => post('/api/prm/deals', body)
+/** The full numbers behind a creator's placeholders; every look is written down (8.2). */
+export const revealNumbers = (partyId) => post('/api/prm/reveal', { party_id: partyId })
+
+export const MODE_TAGS = { copilot: 'cy', human: 'warn', paused: 'off' }
+/** Who did it (deal_events.actor). */
+export const ACTORS = { console: '控制台', system: '系统', operator: '运营（微信里）', creator: '达人', mac: 'Mac' }
+
+/** One audit line: "改阶段 意向沟通 → 已寄出" etc. */
+export function eventText(ev, stages = {}, modes = {}, shipmentStates = {}) {
+  const d = ev.detail || {}
+  switch (ev.kind) {
+    case 'stage': return `${ev.name}：${stages[d.from] || d.from || '—'} → ${stages[d.to] || d.to}`
+    case 'mode': return `${ev.name}：${modes[d.from] || d.from || '—'} → ${modes[d.to] || d.to}`
+    case 'shipment': return `${ev.name}：${d.carrier} ${d.waybill}`
+    case 'shipment_status': return `${ev.name}：${d.waybill} ${shipmentStates[d.status] || d.status}`
+    case 'operator_message': case 'creator_message': case 'holding_reply': return `${ev.name}：${d.text || ''}`
+    case 'reveal': return `${ev.name}：${(d.tokens || []).join('、') || '没有号码'}`
+    case 'wrong': return `${ev.name}：#${d.packet}`
+    case 'purge': return `${ev.name}：${Object.entries(d).map(([k, v]) => `${k} ${v}`).join('，')}`
+    case 'purge_case': return `${ev.name}：${d.ok ? '完成' : '没成功'} ${d.result || ''}`
+    default: return ev.name
+  }
+}
 
 /** What is wrong with the setup, in the order a person has to fix it ([] = ready). */
 export function setupProblems(d) {

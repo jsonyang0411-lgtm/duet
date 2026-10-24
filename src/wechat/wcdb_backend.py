@@ -323,8 +323,10 @@ class WcdbBackend(AbstractWeChatBackend):
         self._talker_ids: dict[str, str] = {}
         self._chat_is_group: dict[str, bool] = {}
         self._last_session_refresh: float = 0.0
-        # PRM_COPILOT: private chats read whatever PRIVATE_CHATS says (the registered creators).
+        # PRM_COPILOT: private chats read whatever PRIVATE_CHATS says (the registered creators),
+        # and who hears this account's own lines there (an operator's hand-typed reply).
         self._private_filter = None
+        self._own_message_hook = None
         self._known_ids = DedupSet(max_size=MAX_DEDUP_SIZE)
         # Thread safety: WCDB DLL (ctypes) may not be thread-safe internally.
         # All _client calls are serialized through this lock.
@@ -958,6 +960,22 @@ class WcdbBackend(AbstractWeChatBackend):
         """The next poll looks for newly allowed private chats at once (a creator was registered)."""
         self._last_session_refresh = 0.0
 
+    def set_own_message_hook(self, hook) -> None:
+        """``hook(msg)`` hears this account's own lines in the private chats the filter wants
+        (PRM_COPILOT: a registered creator's chat, where an operator may reply by hand)."""
+        self._own_message_hook = hook
+
+    def _tell_own_message(self, standardized: dict) -> None:
+        hook = getattr(self, "_own_message_hook", None)
+        if hook is None or standardized.get("is_group", True):
+            return
+        if not self._wants_private(str(standardized.get("chat_id", ""))):
+            return
+        try:
+            hook(standardized)
+        except Exception:
+            logger.exception("The own-message hook failed; polling goes on")
+
     def _wants_private(self, username: str) -> bool:
         accept = self._private_filter
         if accept is None:
@@ -1112,6 +1130,7 @@ class WcdbBackend(AbstractWeChatBackend):
             my_wxid = self._client._config.get("myWxid", "")
             if my_wxid:
                 if sender_id == my_wxid or my_wxid.startswith(sender_id) or sender_id.startswith(my_wxid):
+                    self._tell_own_message(standardized)
                     continue
                 # Tells the router's self_message step not to judge by the name.
                 standardized["_not_self_by_id"] = True

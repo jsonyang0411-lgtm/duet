@@ -267,6 +267,19 @@ GROUPS: list[dict] = [
             # No "requires": CLAUDE_RELAY lives in another group; saving checks it (_validate_config).
             {"key": "PRM_COPILOT", "type": "onoff", "default": "off", "label": "打开达人副驾驶",
              "help": "打开后在上面登记达人的 wxid；没登记的人照旧。要先打开 Claude 中转，改完要重启机器人。"},
+            {"key": "PRM_TAKEOVER_MIN", "type": "int", "min": 5, "max": 1440, "default": "120",
+             "label": "人工接管多久", "unit": "分钟",
+             "help": "运营用这个微信号亲手回了达人（手机或电脑上），或在合作单里点「人工接管」，这段时间里达人的消息只记录、"
+                     "不起草；时间到了自动回到副驾驶，也可以随时点「恢复副驾驶」。"},
+            {"key": "PRM_HOLDING_MIN", "type": "int", "min": 0, "max": 120, "default": "10",
+             "label": "草稿等多久先回一句", "unit": "分钟",
+             "help": "草稿在「待审批」里放了这么久还没人处理，先自动回达人一句下面的话（达人每发一轮消息最多一次），草稿继续等。0 = 不回。"},
+            {"key": "PRM_HOLDING_TEXT", "type": "text", "default": "收到，我确认一下马上回你", "label": "先回的那句话",
+             "help": "1–60 个字。"},
+            {"key": "PRM_RETENTION_DAYS", "type": "int", "min": 1, "max": 365, "default": "30",
+             "label": "签收后多久清除收件信息", "unit": "天",
+             "help": "合作单进入「已签收」满这么多天后，地址只留省市、手机号和证件号只留打码的，聊天记录、草稿、中转记录、"
+                     "Mac 上的案卷都一起清。"},
         ],
     },
     {

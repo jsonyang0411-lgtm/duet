@@ -150,17 +150,19 @@ class RelayStore:
 
     def add(self, chat_id: str, sender_id: str, text: str, project: str = "",
             now: Optional[float] = None, files: tuple = (), *, kind: str = ADMIN,
-            meta: Optional[dict] = None, ready_at: Optional[float] = None) -> int:
+            meta: Optional[dict] = None, ready_at: Optional[float] = None,
+            input_closed: bool = False) -> int:
         """Queue a job; ``files`` (``(name, path, size)``) go with it in the same transaction,
-        so a worker never takes the job without them.  ``ready_at``: not handed out before."""
+        so a worker never takes the job without them.  ``ready_at``: not handed out before.
+        ``input_closed``: no later message joins it (a job the worker does without the model)."""
         if kind not in KINDS:
             raise ValueError(f"unknown job kind {kind!r}")
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO relay_jobs (chat_id, sender_id, text, project, status, created_at, kind, meta,"
-                " ready_at) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
+                " ready_at, input_closed) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
                 (chat_id, sender_id, text, project, time.time() if now is None else now, kind,
-                 json.dumps(meta or {}, ensure_ascii=False), ready_at),
+                 json.dumps(meta or {}, ensure_ascii=False), ready_at, int(bool(input_closed))),
             )
             job_id = int(cur.lastrowid)
             self._conn.executemany(
@@ -181,7 +183,7 @@ class RelayStore:
         with self._lock:
             row = self._conn.execute(
                 "SELECT id, text FROM relay_jobs WHERE chat_id = ? AND kind = ? AND status = 'pending'"
-                " ORDER BY id DESC LIMIT 1", (chat_id, kind),
+                " AND input_closed = 0 ORDER BY id DESC LIMIT 1", (chat_id, kind),
             ).fetchone()
             if row is None:
                 return None
@@ -308,6 +310,30 @@ class RelayStore:
                 "SELECT * FROM relay_outfiles WHERE job_id = ? ORDER BY id", (job_id,)
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def rewrite_chat(self, chat_id: str, kind: str, rewrite) -> int:
+        """Rewrite what the jobs of ``kind`` in this chat hold (their text, results, follow-ups):
+        the PRM clean-up of a creator's details (8.2).  Returns how many rows changed."""
+        changed = 0
+        with self._lock:
+            jobs = self._conn.execute(
+                "SELECT id, text, result_text, result_json FROM relay_jobs WHERE chat_id = ? AND kind = ?",
+                (chat_id, kind),
+            ).fetchall()
+            for job in jobs:
+                new = (rewrite(job["text"] or ""), rewrite(job["result_text"] or ""), rewrite(job["result_json"] or "{}"))
+                if new != (job["text"] or "", job["result_text"] or "", job["result_json"] or "{}"):
+                    self._conn.execute("UPDATE relay_jobs SET text = ?, result_text = ?, result_json = ? WHERE id = ?",
+                                       (*new, job["id"]))
+                    changed += 1
+                for row in self._conn.execute("SELECT id, text FROM relay_followups WHERE job_id = ?",
+                                              (job["id"],)).fetchall():
+                    text = rewrite(row["text"] or "")
+                    if text != row["text"]:
+                        self._conn.execute("UPDATE relay_followups SET text = ? WHERE id = ?", (text, row["id"]))
+                        changed += 1
+            self._conn.commit()
+        return changed
 
     # ── follow-ups: what the person sends while their job runs ─────────────
 

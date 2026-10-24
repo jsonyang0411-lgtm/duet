@@ -178,7 +178,8 @@ def test_unmask_legend_and_unknown_placeholders():
     text = mask("收件人小美 13812345678")
     tokens = store.tokens(party_id)
     assert pii.unmask(text, tokens) == "收件人小美 13812345678"
-    assert pii.legend(text + text, tokens) == [{"token": "〈手机1〉", "masked": "138****5678"}]
+    shown = pii.display(store.token_rows(party_id))
+    assert pii.legend(text + text, shown) == [{"token": "〈手机1〉", "masked": "138****5678"}]
     assert pii.unknown_tokens("打给〈手机1〉或〈手机2〉", tokens) == ["〈手机2〉"]
     assert pii.masked_value("id_card", "11010119900307123X") == "1101**********123X"
 
