@@ -27,6 +27,18 @@ class GateStatus(str, Enum):
     EXPIRED = "EXPIRED"
 
 
+# 审批单状态的中文叫法，用在给运营的提示里
+STATUS_LABELS = {
+    GateStatus.PENDING: "待审批",
+    GateStatus.APPROVED: "已批准",
+    GateStatus.REJECTED: "已驳回",
+    GateStatus.EXECUTING: "执行中",
+    GateStatus.FULFILLED: "已执行",
+    GateStatus.FAILED: "执行失败",
+    GateStatus.EXPIRED: "已过期",
+}
+
+
 @dataclass
 class InfluencerProfile:
     """达人统一上下文档案 (Layer 1: Context)"""

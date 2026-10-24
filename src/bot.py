@@ -230,6 +230,14 @@ class Bot:
             summarizer=summarizer,
         )
 
+        # 达人商务模块：名单、草稿和审批单存在同一个数据库里，控制台的"达人审批"页也读写这里
+        try:
+            from .influencer.handler import build_influencer_handler
+            influencer_handler = build_influencer_handler(config.db_path)
+        except Exception as e:
+            logger.warning("Failed to initialize InfluencerBusinessHandler: %s", e)
+            influencer_handler = None
+
         router = MessageRouter(
             store=store,
             detector=detector,
@@ -240,6 +248,7 @@ class Bot:
             feishu_export_service=feishu_export_service,
             proactive_summarizer=models.proactive,
             memory_summarizer=models.memory,
+            influencer_handler=influencer_handler,
         )
 
         # ── 4. Web UI status ────────────────────────────────────

@@ -16,6 +16,7 @@ import pytest
 
 from src.influencer.handler import InfluencerBusinessHandler
 from src.influencer.jst_erp import JuShuiTanERPClient
+from src.influencer.store import SOURCE_CONSOLE, InfluencerStore
 from src.influencer.types import GateStatus
 from src.influencer.xhs_cli import XiaohongshuCLIClient
 from test_router import make_private_msg, make_router
@@ -87,28 +88,35 @@ def outcome(coro):
         return exc
 
 
-# ---- 以下辅助函数集中了对处理器内部结构的依赖，第 2 阶段改结构时只改这里 ----
+# ---- 以下辅助函数集中了对处理器内部结构的依赖，改结构时只改这里 ----
+# 审批单和草稿存在数据库里（第 6 项）。取到的审批单是当时的快照，状态变了要重新取
 
 def make_handler(erp=None, xhs=None, *, influencers=(INFLUENCER,)):
-    return InfluencerBusinessHandler(
-        erp_client=erp or FakeERP(), xhs_client=xhs or FakeXHS(), influencer_ids=influencers,
-    )
+    store = InfluencerStore(":memory:")
+    store.add_contacts(influencers, source=SOURCE_CONSOLE)
+    return InfluencerBusinessHandler(store, erp_client=erp or FakeERP(), xhs_client=xhs or FakeXHS())
 
 
 def pending_packets(handler):
-    return [p for p in handler.pending_approvals.values() if p.status == GateStatus.PENDING]
+    return handler.store.list_approvals([GateStatus.PENDING])
 
 
 def get_packet(handler, packet_id):
-    return handler.pending_approvals[packet_id]
+    return handler.store.get_approval(packet_id)
 
 
 def set_commission(handler, packet_id, rate):
-    get_packet(handler, packet_id).proposed_commission_rate = rate
+    handler.store.update_pending(packet_id, proposed_commission_rate=rate)
 
 
 def expire(handler, packet_id):
-    get_packet(handler, packet_id).expires_at = time.time() - 1
+    handler.store.update_pending(packet_id, expires_at=time.time() - 1)
+
+
+def age_draft(handler, chat_id, seconds):
+    draft = handler.store.get_draft(chat_id)
+    draft.updated_at -= seconds
+    handler.store.save_draft(draft)
 
 
 # ---- 场景辅助 ----

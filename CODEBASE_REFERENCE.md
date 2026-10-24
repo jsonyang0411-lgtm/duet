@@ -312,7 +312,7 @@ todo_delete_keywords: list[str] = [
 
 | 函数 | 行号 | 描述 | 参数 | 返回值 |
 |---|---|---|---|---|
-| `MessageRouter.__init__()` | ~45 | 初始化消息路由器；创建/接收 `DecisionTracer`，并在其启用时给摘要器装上调用记录器 | `store, detector, summarizer, admin_handler, nickname_service, config, feishu_export_service=None, web_search_client=None, tracer=None` | `None` |
+| `MessageRouter.__init__()` | ~45 | 初始化消息路由器；创建/接收 `DecisionTracer`，并在其启用时给摘要器装上调用记录器；`influencer_handler` 原样保存为 `_influencer_handler`（达人商务模块由 `Bot.run` 构造后传入，没传就是 `None`，`private_chat` 步骤不交给达人模块；router 自己不再构造它，所以用默认配置的测试不会在 `data/messages.db` 里建表） | `store, detector, summarizer, admin_handler, nickname_service, config, feishu_export_service=None, web_search_client=None, tracer=None, proactive_summarizer=None, memory_summarizer=None, influencer_handler=None` | `None` |
 | `MessageRouter._strip_markdown(text)` | ~65 | 去除 Markdown 格式(静态方法) | `text: str` | `str` |
 | `MessageRouter.handle(msg)` | ~190 | 主入口；薄包装：开始/结束决策追踪，异常照常抛出；结果原样返回，只有一处例外：回复里含 `BUBBLE_SEP` 而 `msg["_bubbled"]` 没被置位（不是路由器自己拼的）时去掉分隔符（空了就当没有回复） | `msg: dict` | `str \| None` (回复文本) |
 | `MessageRouter._handle(msg)` | ~210 | 执行 `src/routing/steps.py:ROUTE_STEPS`（`run_route`）：按顺序跑各步骤，第一个返回 `Stop(value)` 的结束路由，其名字写进追踪 `extra.ended_by`；步骤列表可在实例上替换（`_route_steps`） | `msg: dict` | `str \| None` |
@@ -887,7 +887,7 @@ todo_delete_keywords: list[str] = [
 |---|---|---|
 | `context.Stop(value)` / `RouteContext` / `RouteStep(name, run, doc)` | 结束路由并给出返回值 / 步骤共享的上下文（路由器、消息、追踪、`raw`、`is_at`、`sticky_triggered`、`clean_content`、`reply`）/ 一个有名字的步骤 | — |
 | `context.AT_MENTION_MAX_AGE_SEC` 等三个年龄常量 | 300 秒：过旧的 @、欢迎、逐条监听消息当作启动时重放的历史（`src/router.py` 仍导出同名常量） | `int` |
-| `steps.ROUTE_STEPS` | 顺序：`self_message`（自己的消息）→ `persist`（入库，重复停止）→ `memory_hooks`（记忆任务/旧日记触发）→ `full_feed`（逐条监听的人设）→ `quoted_image` → `image_message` → `close_image_window` → `private_chat`（白名单内达人的私聊先交给 `InfluencerBusinessHandler.handle_private_message(chat_id, ...)`，有回复就结束，原因码 `influencer_business_intent`）→ `quote_of_other_member` → `welcome` → `detect_trigger`（@/粘性/关键词/跟聊/点名，写 `route`）→ `mention_gate`（过旧的 @、去掉 @机器人、空 @ 变「在吗」）→ `feishu_export` → `help_command` → `fun_commands` → `admin_command` → `todo_command` → `chat_request` → `ambient`（主动发言，闸门关则沉默）→ `finish`（清洗并登记回复） | `tuple[RouteStep, ...]` |
+| `steps.ROUTE_STEPS` | 顺序：`self_message`（自己的消息）→ `persist`（入库，重复停止）→ `memory_hooks`（记忆任务/旧日记触发）→ `full_feed`（逐条监听的人设）→ `quoted_image` → `image_message` → `close_image_window` → `private_chat`（有 `_influencer_handler` 时，名单内达人的私聊先交给 `InfluencerBusinessHandler.handle_private_message(chat_id, ...)`，有回复就结束，原因码 `influencer_business_intent`）→ `quote_of_other_member` → `welcome` → `detect_trigger`（@/粘性/关键词/跟聊/点名，写 `route`）→ `mention_gate`（过旧的 @、去掉 @机器人、空 @ 变「在吗」）→ `feishu_export` → `help_command` → `fun_commands` → `admin_command` → `todo_command` → `chat_request` → `ambient`（主动发言，闸门关则沉默）→ `finish`（清洗并登记回复） | `tuple[RouteStep, ...]` |
 | `steps.self_message(ctx)` | 跳过机器人自己的消息：后端已按 wxid 核实过的消息（`_not_self_by_id`）直接放行；否则按显示名（等于或包含 `BOT_DISPLAY_NAME`）判断 | `Stop \| None` |
 | `steps.run_route(router, msg, trace, steps=ROUTE_STEPS)` | 依次执行，第一个返回 `Stop` 的结束，并 `trace.note(ended_by=<步骤名>)` | `str \| None` |
 | `steps.run_fun_command(router, msg, clean_content, trace)` | 抽签/塔罗，群聊 @ 路径和私聊共用；命中会替换此前命令产生的回复 | `(matched, reply)` |
@@ -1042,7 +1042,8 @@ Bot.run()
   ├── NicknameService()                  [src/nickname.py]
   ├── AdminCommandHandler()              [src/admin.py]
   ├── FeishuExportService()              [src/integrations/feishu/exporter.py]
-  ├── MessageRouter()                    [src/router.py]
+  ├── build_influencer_handler(config.db_path)  [src/influencer/handler.py]（失败只警告，传 None；说明见 handoff.md）
+  ├── MessageRouter(..., influencer_handler=)  [src/router.py]
   │     ├── ProactiveGate()              [src/proactive/gate.py]
   │     ├── StickyMentionTracker()       [src/proactive/sticky.py]
   │     ├── MemoryConsolidator()         [src/memory/consolidator.py]

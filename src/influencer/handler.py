@@ -2,6 +2,9 @@
 
 Wires Intent Recognition, Multi-turn Context, Qualification Screening,
 JST ERP, XHS CLI, and Layer 6 Gate into a unified business pipeline.
+
+名单、没补齐的申请和审批单都存在数据库里（store.py）。机器人和控制台各自构造处理器，
+通过数据库共享数据，不共享内存对象（第 6 项，B5）。
 """
 
 from __future__ import annotations
@@ -11,7 +14,7 @@ import logging
 import threading
 import time
 import uuid
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Optional
 
 from .extract import extract_request_info
 from .jst_erp import JuShuiTanERPClient
@@ -23,8 +26,10 @@ from .settings import (
     MIN_RECENT_LIKES,
     influencer_chat_ids_from_env,
 )
+from .store import SOURCE_BOT, SOURCE_CONSOLE, SOURCE_ENV, InfluencerStore
 from .types import (
     RECIPIENT_FIELD_LABELS,
+    STATUS_LABELS,
     ApprovalActionPacket,
     GateStatus,
     InfluencerProfile,
@@ -45,41 +50,57 @@ def _mask_phone(phone: str) -> str:
     return f"{phone[:3]}****{phone[-4:]}" if len(phone) == 11 else phone
 
 
+def approval_notice(packet: ApprovalActionPacket) -> str:
+    """执行成功后发给达人的确认消息。现阶段显示在审批卡上，由运营复制后手动发送（Q2）。"""
+    tracking = (
+        f"快递单号：{packet.tracking_number}，" if packet.tracking_number
+        else "快递单号出来后我们再发给老师，"
+    )
+    return (
+        f"老师好~ 【{packet.requested_product}】的样品已经安排寄出啦 📦\n"
+        f"{tracking}请老师留意查收哦~ 收到后有任何问题随时找我们！"
+    )
+
+
+def rejection_notice(packet: ApprovalActionPacket) -> str:
+    """驳回后发给达人的婉拒话术，同样由运营复制后发送。驳回原因只留在操作记录里，不告诉达人。"""
+    return (
+        f"老师好~ 非常感谢老师对我们的关注！这次【{packet.requested_product}】的样品申请暂时没能通过审核，"
+        "非常抱歉~ 后续有合适的合作机会，我们会第一时间联系老师哦！"
+    )
+
+
+def build_influencer_handler(db_path: str) -> "InfluencerBusinessHandler":
+    """机器人启动时调用：打开数据库，把环境变量 INFLUENCER_CHAT_IDS 并进名单（只增不删，Q4），
+    再做一次维护（过期、清除到期的个人信息、删掉作废的草稿）。"""
+    store = InfluencerStore(db_path)
+    added = store.add_contacts(
+        sorted(influencer_chat_ids_from_env()), source=SOURCE_ENV, note="来自环境变量 INFLUENCER_CHAT_IDS",
+    )
+    if added:
+        logger.info(f"[达人模块] 从环境变量把 {len(added)} 位达人加进了名单")
+    store.run_maintenance()
+    return InfluencerBusinessHandler(store)
+
+
 class InfluencerBusinessHandler:
     def __init__(
         self,
+        store: InfluencerStore,
         erp_client: Optional[JuShuiTanERPClient] = None,
         xhs_client: Optional[XiaohongshuCLIClient] = None,
-        influencer_ids: Optional[Iterable[str]] = None,
     ):
+        self.store = store
         self.erp = erp_client or JuShuiTanERPClient()
         self.xhs = xhs_client or XiaohongshuCLIClient()
-        # 待审批动作队列 (Layer 6: Gate)
-        self.pending_approvals: Dict[str, ApprovalActionPacket] = {}
-        # 达人档案缓存 (Layer 1: Context)
-        self.profiles: Dict[str, InfluencerProfile] = {}
-        # 每位达人正在补齐的索样申请 {chat_id: draft}
-        self.drafts: Dict[str, SampleRequestDraft] = {}
-        # 白名单（D3）：只处理名单里的私聊 chat_id。没传就读环境变量 INFLUENCER_CHAT_IDS
-        self._influencers = (
-            set(influencer_ids) if influencer_ids is not None else influencer_chat_ids_from_env()
-        )
-        # router 在多个工作线程里调用本处理器，共享状态的检查和修改都在这把锁里完成
-        self._lock = threading.Lock()
-
-    # ---- 白名单 ----
+        # router 在多个工作线程里调用本处理器。同一位达人的消息一条一条处理：
+        # 草稿是"读出来、改、写回去"，两条消息同时处理会丢掉其中一条的信息
+        self._chat_locks: Dict[str, threading.Lock] = {}
+        self._chat_locks_guard = threading.Lock()
 
     def is_influencer(self, chat_id: str) -> bool:
-        with self._lock:
-            return chat_id in self._influencers
-
-    def mark_influencer(self, chat_id: str) -> None:
-        with self._lock:
-            self._influencers.add(chat_id)
-
-    def unmark_influencer(self, chat_id: str) -> None:
-        with self._lock:
-            self._influencers.discard(chat_id)
+        """只处理名单里、并且没有停用的私聊 chat_id（D3）。"""
+        return self.store.is_influencer(chat_id)
 
     # ---- 资质 ----
 
@@ -114,8 +135,10 @@ class InfluencerBusinessHandler:
             follower_count=stats.get("follower_count"),
             recent_like_count=stats.get("recent_highest_likes"),
         )
-        with self._lock:
-            self.profiles[chat_id] = profile
+        self.store.record_profile(
+            chat_id, nickname=nickname, xhs_account=xhs_account,
+            follower_count=profile.follower_count, recent_like_count=profile.recent_like_count,
+        )
         return profile
 
     # ---- 对话 ----
@@ -125,39 +148,51 @@ class InfluencerBusinessHandler:
 
         router 在工作线程里运行，线程里没有事件循环，所以直接用 asyncio.run（B19）。
         """
-        if not chat_id or not self.is_influencer(chat_id):
+        if not chat_id:
             return None
         try:
-            return asyncio.run(self.process_incoming_message(chat_id, content, nickname))
+            if not self.is_influencer(chat_id):
+                return None
+        except Exception:
+            logger.exception("[达人模块] 读不到达人名单，这条私聊按普通私聊处理")
+            return None
+        try:
+            with self._chat_lock(chat_id):
+                return asyncio.run(self.process_incoming_message(chat_id, content, nickname))
         except Exception:
             logger.exception("[达人模块] 处理私信出错，需要人工处理")
             return HOLDING_REPLY
 
+    def _chat_lock(self, chat_id: str) -> threading.Lock:
+        with self._chat_locks_guard:
+            return self._chat_locks.setdefault(chat_id, threading.Lock())
+
     def _active_draft(self, chat_id: str) -> Optional[SampleRequestDraft]:
         """取这位达人还没补齐的申请；超过 DRAFT_TTL_SECONDS 没有动静的作废。"""
-        with self._lock:
-            draft = self.drafts.get(chat_id)
-            if draft is not None and time.time() - draft.updated_at > DRAFT_TTL_SECONDS:
-                del self.drafts[chat_id]
-                return None
-            return draft
+        draft = self.store.get_draft(chat_id)
+        if draft is not None and time.time() - draft.updated_at > DRAFT_TTL_SECONDS:
+            self.store.delete_draft(chat_id)
+            return None
+        return draft
 
     async def _attach_xhs_account(self, chat_id: str, xhs_account: str) -> bool:
         """审批单提交后达人才发来小红书主页：补进这位达人最近一张还缺账号的待审批单。"""
-        with self._lock:
-            waiting = [
-                p for p in self.pending_approvals.values()
-                if p.influencer_id == chat_id and p.status == GateStatus.PENDING and not p.xhs_account
-            ]
-        if not waiting:
+        packet = self.store.latest_pending_without_xhs_account(chat_id)
+        if packet is None:
             return False
-        packet = max(waiting, key=lambda p: p.created_at)
         profile = await self._refresh_profile(chat_id, packet.influencer_name, xhs_account)
-        with self._lock:
-            packet.xhs_account = xhs_account
-            packet.follower_count = profile.follower_count
-            packet.qualification = self.assess_qualification(profile)
-        return True
+        attached = self.store.update_pending(
+            packet.packet_id,
+            xhs_account=xhs_account,
+            follower_count=profile.follower_count,
+            qualification=self.assess_qualification(profile),
+        )
+        if attached:
+            self.store.add_event(
+                "补充小红书账号", packet_id=packet.packet_id, chat_id=chat_id,
+                detail="达人发来了小红书主页", source=SOURCE_BOT,
+            )
+        return attached
 
     async def process_incoming_message(
         self, chat_id: str, content: str, nickname: str = ""
@@ -178,12 +213,17 @@ class InfluencerBusinessHandler:
             if not (info.is_sample_request or (info.recipient_phone and info.shipping_address)):
                 return None
             draft = SampleRequestDraft(chat_id=chat_id)
-            with self._lock:
-                self.drafts[chat_id] = draft
         draft.merge(info)
 
         # 资质只在审批单上标注，由运营决定，不自动拒绝（D4）
+        reply = await self._ask_for_what_is_missing(draft)
+        if reply is not None:
+            self.store.save_draft(draft)
+            return reply
+        return await self._submit_for_approval(chat_id, nickname, draft)
 
+    async def _ask_for_what_is_missing(self, draft: SampleRequestDraft) -> Optional[str]:
+        """申请还缺东西就返回要追问的话；都齐了返回 None。"""
         # 1. 不知道要哪款商品就先问，不拿占位名去查库存（B12）
         if not draft.product:
             draft.asked_for = ("product",)
@@ -205,7 +245,6 @@ class InfluencerBusinessHandler:
                     "老师也可以看看我们的其他产品哦！"
                 )
             draft.inventory = inventory
-        inventory = draft.inventory
 
         # 3. 收件信息没补齐：只追问缺的那几项
         missing = draft.missing_recipient_fields()
@@ -213,20 +252,20 @@ class InfluencerBusinessHandler:
             draft.asked_for = tuple(missing)
             if len(missing) == len(RECIPIENT_FIELD_LABELS):
                 return (
-                    f"收到老师的需求啦！【{inventory['product_name']}】目前有货，我们很期待和老师合作~ ✨\n"
+                    f"收到老师的需求啦！【{draft.inventory['product_name']}】目前有货，我们很期待和老师合作~ ✨\n"
                     "麻烦老师发一下【收件人姓名、联系电话、收货地址】，方便的话再附上小红书主页链接，"
                     "我们登记后会提交审核，审核结果第一时间告诉老师~"
                 )
             labels = "、".join(RECIPIENT_FIELD_LABELS[name] for name in missing)
             return f"收到~ 还差【{labels}】，麻烦老师补充一下哦~"
+        return None
 
-        # 4. 信息齐了：生成审批单，交给运营审批（R2）
-        with self._lock:
-            self.drafts.pop(chat_id, None)
+    async def _submit_for_approval(self, chat_id: str, nickname: str, draft: SampleRequestDraft) -> str:
+        """信息齐了：生成审批单，交给运营审批（R2）。"""
+        inventory = draft.inventory
         profile = await self._refresh_profile(chat_id, nickname, draft.xhs_account)
-        packet_id = f"GATE-{uuid.uuid4().hex[:8].upper()}"
-        action_packet = ApprovalActionPacket(
-            packet_id=packet_id,
+        packet = ApprovalActionPacket(
+            packet_id=f"GATE-{uuid.uuid4().hex[:8].upper()}",
             influencer_id=chat_id,
             influencer_name=nickname or chat_id,
             follower_count=profile.follower_count,
@@ -245,13 +284,13 @@ class InfluencerBusinessHandler:
             xhs_account=draft.xhs_account,
             evidence="\n".join(draft.evidence),
         )
-        with self._lock:
-            self.pending_approvals[packet_id] = action_packet
+        self.store.add_approval(packet, source=SOURCE_BOT)
+        self.store.delete_draft(chat_id)
 
         # 日志里不打印收件人信息
-        logger.info(f"🚨 [Gate拦截-待运营审批] 审批单 {packet_id}：{action_packet.requested_product}（达人 {chat_id}）")
+        logger.info(f"🚨 [Gate拦截-待运营审批] 审批单 {packet.packet_id}：{packet.requested_product}（达人 {chat_id}）")
         reply = (
-            f"收到老师的收件信息啦！【{inventory['product_name']}】的寄样申请已经提交审核~ 📝\n"
+            f"收到老师的收件信息啦！【{packet.requested_product}】的寄样申请已经提交审核~ 📝\n"
             f"收件人：{draft.recipient_name}（{_mask_phone(draft.recipient_phone)}）\n"
             f"收件地址：{draft.shipping_address}\n"
             "审核通过后我们会第一时间通知老师，请稍等哦~"
@@ -269,60 +308,79 @@ class InfluencerBusinessHandler:
         *,
         xhs_account: str = "",
         commission_rate: Optional[float] = None,
+        reason: str = "",
+        source: str = SOURCE_CONSOLE,
     ) -> Dict[str, Any]:
         """运营审批。每张审批单只能处理一次：驳回、过期、执行中或已执行的单都不能再执行。
 
         xhs_account / commission_rate 是运营在审批时填写的：补填或更正达人的小红书账号，
-        把佣金调低（不能超过上限）。
+        把佣金调低（不能超过上限）。reason 是驳回原因，记进操作记录，每周复盘用（R7）。
         """
-        with self._lock:
-            packet = self.pending_approvals.get(packet_id)
-            if packet is None:
-                return {"success": False, "error": "未找到对应的审批单号"}
-            if packet.status != GateStatus.PENDING:
+        packet = self.store.get_approval(packet_id)
+        if packet is None:
+            return {"success": False, "error": "未找到对应的审批单号"}
+        if packet.status != GateStatus.PENDING:
+            return self._not_pending(packet)
+
+        if not approved:
+            if not self.store.transition(packet_id, GateStatus.PENDING, GateStatus.REJECTED):
+                return self._not_pending(self.store.get_approval(packet_id))
+            self.store.add_event(
+                "驳回", packet_id=packet_id, chat_id=packet.influencer_id, detail=reason, source=source,
+            )
+            return {
+                "success": True,
+                "message": f"任务单 {packet_id} 已驳回",
+                "notice": rejection_notice(packet),
+            }
+
+        if time.time() > packet.expires_at:
+            if self.store.transition(
+                packet_id, GateStatus.PENDING, GateStatus.EXPIRED, handled_at=packet.expires_at,
+            ):
+                self.store.add_event(
+                    "过期", packet_id=packet_id, chat_id=packet.influencer_id,
+                    detail="批准时已经超过有效期", source=source,
+                )
+            return {"success": False, "error": f"审批单 {packet_id} 已过期，需要和达人重新确认"}
+
+        if xhs_account and xhs_account != packet.xhs_account:
+            # 运营填的账号马上存下：后面的检查没通过的话，下次批准不用再填一遍
+            if self.store.update_pending(packet_id, xhs_account=xhs_account):
+                self.store.add_event(
+                    "填写小红书账号", packet_id=packet_id, chat_id=packet.influencer_id, source=source,
+                )
+            packet.xhs_account = xhs_account
+        if commission_rate is not None:
+            if not 0 < commission_rate <= MAX_COMMISSION_RATE:
                 return {
                     "success": False,
-                    "error": f"审批单 {packet_id} 当前状态为 {packet.status.value}，不能再处理",
+                    "error": f"佣金 {commission_rate:.0%} 不在允许范围内（上限 {MAX_COMMISSION_RATE:.0%}）",
                 }
-            if not approved:
-                packet.status = GateStatus.REJECTED
-                return {"success": True, "message": f"任务单 {packet_id} 已驳回"}
-            if time.time() > packet.expires_at:
-                packet.status = GateStatus.EXPIRED
-                return {"success": False, "error": f"审批单 {packet_id} 已过期，需要和达人重新确认"}
-            if xhs_account:
-                packet.xhs_account = xhs_account
-            if commission_rate is not None:
-                if not 0 < commission_rate <= MAX_COMMISSION_RATE:
-                    return {
-                        "success": False,
-                        "error": f"佣金 {commission_rate:.0%} 不在允许范围内（上限 {MAX_COMMISSION_RATE:.0%}）",
-                    }
-                packet.proposed_commission_rate = commission_rate
-            # 以下检查不通过时都不改状态：运营补齐或改正后还能再批
-            if packet.proposed_commission_rate > MAX_COMMISSION_RATE:
-                return {
-                    "success": False,
-                    "error": (
-                        f"佣金 {packet.proposed_commission_rate:.0%} 超过上限 "
-                        f"{MAX_COMMISSION_RATE:.0%}，不能执行"
-                    ),
-                }
-            if packet.qualification.startswith(QUALIFICATION_FAILED):
-                # R3：数据明确不达标的达人不寄样，批准了也不执行
-                return {
-                    "success": False,
-                    "error": f"达人资质{packet.qualification}，按规则不能寄样，请驳回",
-                }
-            if not (packet.recipient_name and packet.recipient_phone and packet.shipping_address):
-                return {"success": False, "error": "收件人、电话或地址不全，不能建单"}
-            if not packet.xhs_account:
-                return {
-                    "success": False,
-                    "error": "缺少达人的小红书账号，不能绑定佣金；请让达人补发主页链接，或在审批时填写",
-                }
-            # 先占住这张单，调用外部系统期间，重复的"通过"会因为状态不是 PENDING 被挡下
-            packet.status = GateStatus.EXECUTING
+            packet.proposed_commission_rate = commission_rate
+        # 以下检查不通过时都不改状态：运营补齐或改正后还能再批
+        problem = self._why_not_executable(packet)
+        if problem:
+            return {"success": False, "error": problem}
+
+        # 审批单最长能等 72 小时，批准时重新查一次库存（Q1）
+        try:
+            inventory = await self.erp.check_inventory(packet.requested_product)
+        except Exception as exc:
+            return {"success": False, "error": f"批准前复查库存失败：{exc}"}
+        available = inventory.get("available_quantity", 0) if inventory.get("in_stock") else 0
+        if available <= 0:
+            return {
+                "success": False,
+                "error": f"【{packet.requested_product}】现在没有库存，不能建单；可以先驳回，或者等补货后再批",
+            }
+
+        # 先占住这张单：两个"通过"同时到达时，只有一个能把它从待审批改成执行中
+        if not self.store.transition(
+            packet_id, GateStatus.PENDING, GateStatus.EXECUTING,
+            proposed_commission_rate=packet.proposed_commission_rate, stock_available=available,
+        ):
+            return self._not_pending(self.store.get_approval(packet_id))
 
         try:
             order_res = await self.erp.create_sample_order(
@@ -334,9 +392,11 @@ class InfluencerBusinessHandler:
                 order_ref=packet.packet_id,
             )
         except Exception as exc:
-            return self._fail(packet, f"聚水潭建单出错：{exc}")
+            return self._fail(packet, f"聚水潭建单出错：{exc}", source)
         if not order_res.get("success"):
-            return self._fail(packet, f"聚水潭建单失败：{order_res.get('error') or '未知原因'}")
+            return self._fail(packet, f"聚水潭建单失败：{order_res.get('error') or '未知原因'}", source)
+        order_sn = str(order_res.get("order_sn") or "")
+        tracking_number = str(order_res.get("tracking_number") or "")
 
         try:
             comm_res = await self.xhs.set_exclusive_commission(
@@ -350,24 +410,71 @@ class InfluencerBusinessHandler:
         if not comm_res.get("success"):
             return self._fail(
                 packet,
-                f"出库单 {order_res.get('order_sn')} 已建，但小红书佣金绑定失败："
+                f"出库单 {order_sn} 已建，但小红书佣金绑定失败："
                 f"{comm_res.get('error') or '未知原因'}，需要人工处理",
-                order_sn=order_res.get("order_sn"),
+                source,
+                order_sn=order_sn,
+                tracking_number=tracking_number,
             )
 
-        packet.status = GateStatus.FULFILLED
+        commission_plan = str(comm_res.get("plan_id") or "")
+        self.store.transition(
+            packet_id, GateStatus.EXECUTING, GateStatus.FULFILLED,
+            order_sn=order_sn, tracking_number=tracking_number, commission_plan=commission_plan,
+        )
+        self.store.add_event(
+            "执行成功", packet_id=packet_id, chat_id=packet.influencer_id,
+            detail=f"出库单 {order_sn}，佣金 {packet.proposed_commission_rate:.0%}", source=source,
+        )
+        packet.tracking_number = tracking_number
         return {
             "success": True,
             "packet_id": packet_id,
-            "order_sn": order_res.get("order_sn"),
-            "tracking_number": order_res.get("tracking_number"),
-            "commission_plan": comm_res.get("plan_id"),
+            "order_sn": order_sn,
+            "tracking_number": tracking_number,
+            "commission_plan": commission_plan,
             "message": "已成功下发聚水潭打单，并设置小红书定向佣金！",
+            "notice": approval_notice(packet),
         }
 
-    def _fail(self, packet: ApprovalActionPacket, reason: str, **extra: Any) -> Dict[str, Any]:
+    @staticmethod
+    def _why_not_executable(packet: ApprovalActionPacket) -> str:
+        """执行前的检查。返回不能执行的原因；可以执行时返回空字符串。"""
+        if packet.proposed_commission_rate > MAX_COMMISSION_RATE:
+            return (
+                f"佣金 {packet.proposed_commission_rate:.0%} 超过上限 "
+                f"{MAX_COMMISSION_RATE:.0%}，不能执行"
+            )
+        if packet.qualification.startswith(QUALIFICATION_FAILED):
+            # R3：数据明确不达标的达人不寄样，批准了也不执行
+            return f"达人资质{packet.qualification}，按规则不能寄样，请驳回"
+        if not (packet.recipient_name and packet.recipient_phone and packet.shipping_address):
+            return "收件人、电话或地址不全，不能建单"
+        if not packet.xhs_account:
+            return "缺少达人的小红书账号，不能绑定佣金；请让达人补发主页链接，或在审批时填写"
+        return ""
+
+    @staticmethod
+    def _not_pending(packet: ApprovalActionPacket) -> Dict[str, Any]:
+        return {
+            "success": False,
+            "error": f"审批单 {packet.packet_id} {STATUS_LABELS[packet.status]}，不能再处理",
+        }
+
+    def _fail(
+        self, packet: ApprovalActionPacket, reason: str, source: str,
+        *, order_sn: str = "", tracking_number: str = "",
+    ) -> Dict[str, Any]:
         """把审批单标为失败并写明原因，后续步骤一律不再执行。"""
-        packet.status = GateStatus.FAILED
-        packet.failure_reason = reason
+        self.store.transition(
+            packet.packet_id, GateStatus.EXECUTING, GateStatus.FAILED,
+            failure_reason=reason, order_sn=order_sn, tracking_number=tracking_number,
+        )
+        self.store.add_event(
+            "执行失败", packet_id=packet.packet_id, chat_id=packet.influencer_id, detail=reason, source=source,
+        )
         logger.error(f"[审批执行失败] {packet.packet_id}: {reason}")
-        return {"success": False, "packet_id": packet.packet_id, "error": reason, **extra}
+        result: Dict[str, Any] = {"success": False, "packet_id": packet.packet_id, "error": reason}
+        if order_sn:
+            result["order_sn"] = order_sn
+        return result

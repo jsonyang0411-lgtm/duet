@@ -14,6 +14,8 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
+from .types import GateStatus
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,8 +68,9 @@ class ScheduledInfluencerAgent:
 
     def _generate_morning_brief(self) -> None:
         """Layer 4: Speak - 每日 150 字精炼晨报"""
-        pending_count = len(self.handler.pending_approvals)
-        total_profiles = len(self.handler.profiles)
+        # 晨报里写死的假数据留到第 4 阶段处理（B13），这里只是改为从数据库取数
+        pending_count = len(self.handler.store.list_approvals([GateStatus.PENDING]))
+        total_profiles = len(self.handler.store.list_contacts())
         brief = (
             f"☀️【达人商务智能体 · 每日晨报】\n"
             f"• 累计建联达人库：{total_profiles} 位\n"

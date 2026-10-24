@@ -1,19 +1,19 @@
 """达人索样的多轮对话：信息分几条消息发来，逐步补齐（src/influencer/handler.py）。"""
 
-import time
-
-from src.influencer.handler import HOLDING_REPLY, InfluencerBusinessHandler
+from src.influencer.handler import HOLDING_REPLY, build_influencer_handler
+from src.influencer.store import SOURCE_CONSOLE
 from test_influencer_acceptance import (
     INFLUENCER,
     SAMPLE_REQUEST,
     FakeERP,
-    FakeXHS,
+    age_draft,
     make_handler,
     pending_packets,
     private_msg,
     router_with,
     run,
 )
+from test_router import make_router
 
 
 def say(handler, text):
@@ -43,7 +43,7 @@ def test_the_reply_confirms_the_recipient_with_a_masked_phone():
 def test_an_abandoned_request_expires():
     handler = make_handler()
     say(handler, "想申请眼霜样品")
-    handler.drafts[INFLUENCER].updated_at = time.time() - 2 * 24 * 3600
+    age_draft(handler, INFLUENCER, 2 * 24 * 3600)
     assert say(handler, "好的") is None
 
 
@@ -66,13 +66,15 @@ def test_contacts_outside_the_whitelist_are_left_alone():
     assert run(handler.process_incoming_message("wxid_stranger", SAMPLE_REQUEST)) is None
 
 
-def test_the_whitelist_comes_from_the_environment_until_the_console_manages_it(monkeypatch):
+def test_the_environment_whitelist_is_merged_into_the_list_at_startup(monkeypatch, tmp_path):
     monkeypatch.setenv("INFLUENCER_CHAT_IDS", "wxid_a, wxid_b ,")
-    handler = InfluencerBusinessHandler(erp_client=FakeERP(), xhs_client=FakeXHS())
+    db_path = str(tmp_path / "messages.db")
+    handler = build_influencer_handler(db_path)
     assert handler.is_influencer("wxid_a") and handler.is_influencer("wxid_b")
     assert not handler.is_influencer("wxid_c")
-    handler.unmark_influencer("wxid_a")
+    handler.store.save_contact("wxid_a", enabled=False, source=SOURCE_CONSOLE)
     assert not handler.is_influencer("wxid_a")
+    assert not build_influencer_handler(db_path).is_influencer("wxid_a"), "重启后，停用的达人不能被环境变量加回来（Q4）"
 
 
 class BrokenERP(FakeERP):
@@ -85,3 +87,13 @@ def test_an_unexpected_error_gets_a_neutral_reply_instead_of_the_chat_model():
     reply = router.handle(private_msg("m1", INFLUENCER, "小美", "想申请眼霜样品"))
     assert reply == HOLDING_REPLY
     assert summarizer.chat_calls == []
+
+
+def test_a_router_built_without_the_handler_never_opens_the_database(tmp_path, monkeypatch):
+    # 达人处理器由 bot.py 构造后传给 router。router 自己不建，用默认配置的测试就不会
+    # 在 data/messages.db 里建表
+    monkeypatch.chdir(tmp_path)
+    router, summarizer = make_router()
+    router.handle(private_msg("m1", INFLUENCER, "小美", SAMPLE_REQUEST))
+    assert not (tmp_path / "data" / "messages.db").exists()
+    assert summarizer.chat_calls, "没挂达人模块时，私聊走原来的聊天逻辑"

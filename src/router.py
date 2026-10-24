@@ -132,7 +132,8 @@ class MessageRouter:
     def __init__(self, store, detector, summarizer, admin_handler,
                  nickname_service, config, feishu_export_service=None,
                  web_search_client=None, tracer=None,
-                 proactive_summarizer=None, memory_summarizer=None):
+                 proactive_summarizer=None, memory_summarizer=None,
+                 influencer_handler=None):
         """
         Args:
             store: MessageStore instance for persistence and queries.
@@ -146,6 +147,8 @@ class MessageRouter:
             proactive_summarizer / memory_summarizer: the models for proactive
                 turns and for memory work when MODEL_ROUTE splits the tasks
                 (``create_models``); both default to ``summarizer``.
+            influencer_handler: Optional InfluencerBusinessHandler（达人商务模块）。
+                bot.py 用 ``build_influencer_handler`` 构造后传入；没传就不处理达人私聊。
         """
         self._store = store
         self._detector = detector
@@ -184,13 +187,9 @@ class MessageRouter:
             ttl_sec=getattr(config, "image_followup_ttl_sec", 90),
         ) if getattr(config, "image_followup_enabled", True) else None
 
-        # 挂载达人商务智能体流水线 (意图识别 + 聚水潭ERP + 小红书CLI + Gate审批)
-        try:
-            from .influencer.handler import InfluencerBusinessHandler
-            self._influencer_handler = InfluencerBusinessHandler()
-        except Exception as e:
-            logger.warning(f"Failed to initialize InfluencerBusinessHandler: {e}")
-            self._influencer_handler = None
+        # 达人商务智能体流水线 (意图识别 + 聚水潭ERP + 小红书CLI + Gate审批)。
+        # 它要打开数据库，所以由 bot.py 构造后传入，测试里不传就不会碰数据库
+        self._influencer_handler = influencer_handler
         self._memory = MemoryConsolidator(store, self._memory_summarizer)
         # Structured pipeline (PIPELINE_V2).  "off" keeps the original path.
         strategy = getattr(config, "pipeline_v2", STRATEGY_OFF)
