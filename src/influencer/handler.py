@@ -272,7 +272,7 @@ class InfluencerBusinessHandler:
             requested_product=inventory["product_name"],
             sku_id=inventory["sku_id"],
             stock_available=inventory["available_quantity"],
-            sample_cost=inventory.get("cost_price", 18.5),
+            sample_cost=inventory.get("cost_price"),  # 聚水潭没给成本就是未知，不编一个数（同 B8）
             proposed_commission_rate=DEFAULT_COMMISSION_RATE,
             shipping_address=draft.shipping_address,
             what_cannot_be_undone=(

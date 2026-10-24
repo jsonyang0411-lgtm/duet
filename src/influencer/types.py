@@ -113,7 +113,7 @@ class ApprovalActionPacket:
     requested_product: str
     sku_id: str
     stock_available: int
-    sample_cost: float
+    sample_cost: Optional[float]  # None 表示聚水潭没给成本
     proposed_commission_rate: float
     shipping_address: str
     what_cannot_be_undone: str

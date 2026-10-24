@@ -194,7 +194,7 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
             : (p.xhs_account || <span className="dim">没有</span>)}
         </dd>
         <dt>申请</dt>
-        <dd>{p.requested_product} · SKU <span className="mono">{p.sku_id}</span> · 库存 {p.stock_available} · 样品成本 ¥{p.sample_cost}</dd>
+        <dd>{p.requested_product} · SKU <span className="mono">{p.sku_id}</span> · 库存 {p.stock_available} · 样品成本 {p.sample_cost != null ? `¥${p.sample_cost}` : <span className="dim">未知</span>}</dd>
         <dt>收件</dt>
         <dd>
           {cleared
@@ -349,7 +349,12 @@ function ContactsPage() {
     }
   }
   const add = async () => {
-    if (await save({ ...form, chat_id: form.chat_id.trim(), enabled: true }, '已加入名单')) setForm(EMPTY_FORM)
+    // 只提交填了的项：chat_id 已经在名单里时，留空的项不能把原来的值清掉
+    const body = { chat_id: form.chat_id.trim(), enabled: true }
+    for (const name of ['display_name', 'xhs_account', 'note']) {
+      if (form[name].trim()) body[name] = form[name].trim()
+    }
+    if (await save(body, '已加入名单')) setForm(EMPTY_FORM)
   }
   const field = (name) => ({ value: form[name], onChange: (v) => setForm((f) => ({ ...f, [name]: v })) })
 

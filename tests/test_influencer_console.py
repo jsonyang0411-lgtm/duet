@@ -31,6 +31,9 @@ def seed(db_path):
     conn.close()
     store = InfluencerStore(str(db_path))
     store.add_contacts(["wxid_mei"], source=SOURCE_CONSOLE)
+    store.save_contact(
+        "wxid_keep", display_name="老朋友", xhs_account="xhs_keep", enabled=False, source=SOURCE_CONSOLE,
+    )
     for packet_id, xhs_account in (("GATE-OK", "xhs_mei"), ("GATE-NO", "xhs_mei"), ("GATE-NOXHS", "")):
         store.add_approval(
             make_packet(packet_id, chat_id="wxid_mei", xhs_account=xhs_account,
@@ -144,3 +147,13 @@ def test_influencers_are_added_disabled_and_picked_from_recent_chats(console, pa
     recent.get_by_role("button", name="设为达人").click()
     recent.get_by_text("已在名单").wait_for()
     assert console.store.is_influencer("wxid_jie")
+
+
+def test_adding_someone_already_on_the_list_keeps_what_was_filled_in(console, page):
+    page.goto(f"{console.base}/#/influencer/contacts")
+    page.get_by_label("chat_id").fill("wxid_keep")
+    page.get_by_role("button", name="加入名单").click()
+    page.get_by_text("已加入名单").wait_for()
+    contact = console.store.get_contact("wxid_keep")
+    assert contact["enabled"] is True
+    assert (contact["display_name"], contact["xhs_account"]) == ("老朋友", "xhs_keep")

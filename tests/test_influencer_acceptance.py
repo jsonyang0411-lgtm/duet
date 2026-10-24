@@ -289,6 +289,19 @@ def test_missing_creator_stats_are_not_made_up():
     assert packet.follower_count is None, "拿不到粉丝数就是未知，不能编成 2 万"
 
 
+class NoCostERP(FakeERP):
+    async def check_inventory(self, product_name):
+        result = await super().check_inventory(product_name)
+        del result["cost_price"]
+        return result
+
+
+def test_a_missing_sample_cost_is_not_made_up():
+    handler = make_handler(NoCostERP())
+    packet = get_packet(handler, submit_full_request(handler))
+    assert packet.sample_cost is None, "聚水潭没给成本就是未知，不能编成 18.5"
+
+
 def test_unknown_stats_are_marked_for_review_and_can_still_be_approved():
     erp, xhs = FakeERP(), FakeXHS(stats={})
     handler = make_handler(erp, xhs)

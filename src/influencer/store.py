@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS influencer_approvals (
     requested_product        TEXT    NOT NULL,
     sku_id                   TEXT    NOT NULL,
     stock_available          INTEGER NOT NULL DEFAULT 0,
-    sample_cost              REAL    NOT NULL DEFAULT 0,
+    sample_cost              REAL,
     proposed_commission_rate REAL    NOT NULL,
     shipping_address         TEXT    NOT NULL DEFAULT '',
     what_cannot_be_undone    TEXT    NOT NULL DEFAULT '',
