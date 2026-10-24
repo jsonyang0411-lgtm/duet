@@ -66,6 +66,7 @@ POLL_WAIT_SEC = 25
 KEEP_INBOX_DAYS = 7          # downloaded attachments older than this are deleted
 HEARTBEAT_SEC = 30
 STOP_GRACE_SEC = 30          # after SIGINT, wait this long before killing claude
+BACKGROUND_GRACE_SEC = 20    # background commands done but no new turn after this long: wrap up
 MAX_BACKOFF_SEC = 60
 
 DEFAULTS = {
@@ -499,10 +500,14 @@ class Conversation:
 
     Follow-ups are handed on in order and only once (``upto`` = the last one written);
     the input closes when a turn ends and the bot has nothing more (``on_result``).
+    A turn that ends while commands Claude started in the background still run is
+    not the end: claude starts another turn when they finish (``see``).
     """
 
     def __init__(self, proc: subprocess.Popen, client: RelayClient, job_id: int):
         self.proc, self.client, self.job_id = proc, client, job_id
+        self.background = 0          # commands claude runs in the background right now
+        self.turn_ended = False
         self.lock = threading.Lock()
         self.closed = False
         self.upto = 0
@@ -540,6 +545,38 @@ class Conversation:
                     self.proc.stdin.close()
                 except OSError:
                     pass
+
+    def see(self, line: str) -> None:
+        """One line of claude's stream: follow turns and background commands."""
+        try:
+            event = json.loads(line) if line.lstrip().startswith("{") else None
+        except ValueError:
+            event = None
+        if not isinstance(event, dict):
+            return
+        kind = event.get("type")
+        if kind == "system" and event.get("subtype") == "background_tasks_changed":
+            tasks = event.get("tasks")
+            self.background = len(tasks) if isinstance(tasks, list) else 0
+            if not self.background and self.turn_ended:
+                # claude normally starts a turn to report them; if it does not, wrap up anyway.
+                timer = threading.Timer(BACKGROUND_GRACE_SEC, self._wrap_up_if_idle)
+                timer.daemon = True
+                timer.start()
+        elif kind == "result":
+            self.turn_ended = True
+            if self.background:
+                log.info("#%s turn ended with %d background command(s) running; input stays open",
+                         self.job_id, self.background)
+            else:
+                self.on_result()
+        elif kind in ("assistant", "user") or (kind == "system" and event.get("subtype") == "init"):
+            self.turn_ended = False
+
+    def _wrap_up_if_idle(self) -> None:
+        if self.turn_ended and not self.background and not self.closed:
+            log.info("#%s background commands done and no new turn; wrapping up", self.job_id)
+            self.on_result()
 
     def on_result(self) -> None:
         """A turn ended: hand on what came meanwhile, or end the input (claude then exits)."""
@@ -590,8 +627,7 @@ def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stoppe
         for line in proc.stdout:
             lines.append(line)
             progress.feed(line)
-            if _is_result(line):
-                conversation.on_result()
+            conversation.see(line)
         conversation.close()
 
     def read_stderr():

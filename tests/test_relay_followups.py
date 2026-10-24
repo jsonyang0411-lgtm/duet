@@ -284,3 +284,124 @@ def test_a_follow_up_reaches_the_running_claude(worker, bot, tmp_path):
     assert bot.sent == ["#1 完成\n大任务 | （微信里补充）顺便加上 X"]
     assert bot.relay.store.get(2) is None                                       # no new job
     assert bot.relay.store.get(1)["input_closed"] == 1
+
+
+# ── a turn that ends while background commands still run (job #27 on 2026-10-24) ──
+
+def bg(*task_ids):
+    return json.dumps({"type": "system", "subtype": "background_tasks_changed",
+                       "tasks": [{"task_id": t, "task_type": "local_bash"} for t in task_ids]})
+
+
+def result(text):
+    return json.dumps({"type": "result", "result": text, "session_id": "s"})
+
+
+class CountingClient:
+    def __init__(self, rows=()):
+        self.calls, self.rows = 0, list(rows)
+
+    def close_input(self, job_id, upto):
+        self.calls += 1
+        return [r for r in self.rows if r["id"] > upto]
+
+
+def test_input_stays_open_while_background_commands_run(worker, monkeypatch):
+    monkeypatch.setattr(worker, "BACKGROUND_GRACE_SEC", 0.05)
+    proc, client = FakeProc(), CountingClient()
+    c = worker.Conversation(proc, client, 27)
+    c.start("用 Bash 运行 sleep 60，然后只回复：A")
+    for line in (json.dumps({"type": "system", "subtype": "init"}),
+                 json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash",
+                             "input": {"command": "sleep 60", "run_in_background": True}}]}}),
+                 bg("bymg3d03p"), result("sleep 60 已在后台开始运行")):
+        c.see(line)
+    assert client.calls == 0 and not proc.stdin_closed                  # not the end yet
+    c.hand_on([{"id": 1, "text": "回复里在 A 后面加上 B"}])                # the follow-up gets in
+    assert proc.written()[-1] == "（微信里补充）回复里在 A 后面加上 B"
+    for line in (bg(), json.dumps({"type": "system", "subtype": "init"}),
+                 json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "AB"}]}}),
+                 result("AB")):
+        c.see(line)
+    assert client.calls == 1 and proc.stdin_closed
+    time.sleep(0.2)                                                       # the grace timer finds it done
+    assert client.calls == 1
+
+
+def test_background_done_but_no_new_turn_wraps_up(worker, monkeypatch):
+    monkeypatch.setattr(worker, "BACKGROUND_GRACE_SEC", 0.05)
+    proc, client = FakeProc(), CountingClient()
+    c = worker.Conversation(proc, client, 27)
+    c.start("任务")
+    for line in (bg("t1"), result("已在后台"), bg()):
+        c.see(line)
+    assert not proc.stdin_closed
+    time.sleep(0.3)
+    assert client.calls == 1 and proc.stdin_closed
+
+
+def test_odd_lines_are_ignored(worker):
+    proc, client = FakeProc(), CountingClient()
+    c = worker.Conversation(proc, client, 1)
+    for line in ("", "not json", "[1, 2]", json.dumps({"type": "system", "subtype": "background_tasks_changed"})):
+        c.see(line)
+    assert c.background == 0 and client.calls == 0
+
+
+BACKGROUND_CLAUDE = textwrap.dedent("""\
+    import json, sys, threading, time
+    first = json.loads(sys.stdin.readline())["message"]["content"]
+    got = []
+    reader = threading.Thread(target=lambda: [got.append(json.loads(l)["message"]["content"]) for l in sys.stdin],
+                              daemon=True)
+    reader.start()
+    def emit(event):
+        print(json.dumps(event), flush=True)
+    emit({"type": "system", "subtype": "background_tasks_changed", "tasks": [{"task_id": "t1"}]})
+    emit({"type": "result", "result": "已在后台开始运行", "session_id": "s1", "is_error": False})
+    time.sleep(2.0)                                       # the background command runs
+    emit({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
+    emit({"type": "system", "subtype": "init"})
+    emit({"type": "result", "result": "A " + "；".join(got), "session_id": "s1", "is_error": False})
+    reader.join(10)
+""")
+
+
+def test_a_follow_up_during_a_background_command_still_gets_in(worker, bot, tmp_path):
+    script = tmp_path / "background-claude"
+    script.write_text(f"#!{sys.executable}\n" + BACKGROUND_CLAUDE, encoding="utf-8")
+    script.chmod(0o755)
+    s = settings(bot, SimpleNamespace(path=str(script)), tmp_path)
+    bot.ask("cc 用 Bash 运行 sleep 60，然后只回复：A")
+    replies = []
+
+    def add_when_backgrounded():
+        for _ in range(100):
+            job = bot.relay.store.get(1)
+            if job and job["status"] == "running":
+                time.sleep(0.8)                            # after the first turn's result
+                replies.append(bot.ask("cc 回复里在 A 后面加上 B")[1])
+                return
+            time.sleep(0.05)
+
+    t = threading.Thread(target=add_when_backgrounded)
+    t.start()
+    run_one(worker, bot, s)
+    t.join()
+    assert replies and replies[0].startswith("收到，已转给正在做的 #1")
+    assert bot.sent == ["#1 完成\n已在后台开始运行\n\nA （微信里补充）回复里在 A 后面加上 B"]
+    assert bot.relay.store.get(2) is None
+
+
+def test_a_long_new_turn_is_not_cut_by_the_wrap_up(worker, monkeypatch):
+    monkeypatch.setattr(worker, "BACKGROUND_GRACE_SEC", 0.05)
+    proc, client = FakeProc(), CountingClient()
+    c = worker.Conversation(proc, client, 27)
+    c.start("任务")
+    for line in (bg("t1"), result("已在后台"), bg(), json.dumps({"type": "system", "subtype": "init"}),
+                 json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "还在写"}]}})):
+        c.see(line)
+    time.sleep(0.3)                                                       # longer than the grace
+    assert client.calls == 0 and not proc.stdin_closed                  # the turn is still going
+    c.see(result("写完了"))
+    assert client.calls == 1 and proc.stdin_closed
