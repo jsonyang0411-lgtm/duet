@@ -183,6 +183,14 @@ class MessageRouter:
         self._image_followup = ImageFollowupTracker(
             ttl_sec=getattr(config, "image_followup_ttl_sec", 90),
         ) if getattr(config, "image_followup_enabled", True) else None
+
+        # 挂载达人商务智能体流水线 (意图识别 + 聚水潭ERP + 小红书CLI + Gate审批)
+        try:
+            from .influencer.handler import InfluencerBusinessHandler
+            self._influencer_handler = InfluencerBusinessHandler()
+        except Exception as e:
+            logger.warning(f"Failed to initialize InfluencerBusinessHandler: {e}")
+            self._influencer_handler = None
         self._memory = MemoryConsolidator(store, self._memory_summarizer)
         # Structured pipeline (PIPELINE_V2).  "off" keeps the original path.
         strategy = getattr(config, "pipeline_v2", STRATEGY_OFF)
@@ -361,6 +369,30 @@ class MessageRouter:
         )
 
         reply: Optional[str] = None
+
+        # 优先拦截达人商务意图 (索样 / 合作 / 资质审查 / 聚水潭库存 / 审批闸门)
+        if hasattr(self, "_influencer_handler") and self._influencer_handler:
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                influencer_reply = loop.run_until_complete(
+                    self._influencer_handler.process_incoming_message(
+                        sender_id=msg.get("sender_id", ""),
+                        content=clean_content,
+                        nickname=msg.get("sender_name", ""),
+                    )
+                )
+            except RuntimeError:
+                influencer_reply = asyncio.run(
+                    self._influencer_handler.process_incoming_message(
+                        sender_id=msg.get("sender_id", ""),
+                        content=clean_content,
+                        nickname=msg.get("sender_name", ""),
+                    )
+                )
+            if influencer_reply:
+                self._tracer.current().reason("influencer_business_intent")
+                return influencer_reply
 
         if clean_content in ("帮助", "help", "命令"):
             self._tracer.current().reason("help_command")
