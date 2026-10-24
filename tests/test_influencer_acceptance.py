@@ -166,7 +166,6 @@ def test_s3_full_address_is_submitted_for_review_without_promise():
     assert_no_commitment(reply)
 
 
-@known_failure("B9 收件信息")
 def test_s3_packet_carries_the_recipient_from_the_message():
     handler = make_handler()
     packet = get_packet(handler, submit_full_request(handler))
@@ -206,7 +205,6 @@ def test_s6_two_people_with_the_same_nickname_stay_apart():
     assert pending_packets(handler) == [], "B 发来的地址被挂到了 A 的索样申请上"
 
 
-@known_failure("B12 商品占位")
 def test_s7_an_unnamed_product_is_asked_about_not_placeheld():
     erp = FakeERP()
     handler = make_handler(erp)

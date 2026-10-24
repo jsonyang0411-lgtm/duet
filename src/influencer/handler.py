@@ -7,15 +7,27 @@ JST ERP, XHS CLI, and Layer 6 Gate into a unified business pipeline.
 from __future__ import annotations
 
 import logging
-import re
 import threading
 import time
 import uuid
 from typing import Any, Dict, Optional
 
+from .extract import extract_request_info
 from .jst_erp import JuShuiTanERPClient
-from .settings import DEFAULT_COMMISSION_RATE, MAX_COMMISSION_RATE, MIN_FOLLOWERS, MIN_RECENT_LIKES
-from .types import ApprovalActionPacket, GateStatus, InfluencerProfile, SampleRequestIntent
+from .settings import (
+    DEFAULT_COMMISSION_RATE,
+    DRAFT_TTL_SECONDS,
+    MAX_COMMISSION_RATE,
+    MIN_FOLLOWERS,
+    MIN_RECENT_LIKES,
+)
+from .types import (
+    RECIPIENT_FIELD_LABELS,
+    ApprovalActionPacket,
+    GateStatus,
+    InfluencerProfile,
+    SampleRequestDraft,
+)
 from .xhs_cli import XiaohongshuCLIClient
 
 logger = logging.getLogger(__name__)
@@ -23,6 +35,10 @@ logger = logging.getLogger(__name__)
 QUALIFICATION_OK = "达标"
 QUALIFICATION_FAILED = "不达标"
 QUALIFICATION_UNKNOWN = "待核实：没有小红书数据，需要运营人工核实"
+
+
+def _mask_phone(phone: str) -> str:
+    return f"{phone[:3]}****{phone[-4:]}" if len(phone) == 11 else phone
 
 
 class InfluencerBusinessHandler:
@@ -37,55 +53,10 @@ class InfluencerBusinessHandler:
         self.pending_approvals: Dict[str, ApprovalActionPacket] = {}
         # 达人档案缓存 (Layer 1: Context)
         self.profiles: Dict[str, InfluencerProfile] = {}
-        # 达人会话上下文：等待补充地址中的达人 {sender_id: requested_product}
-        self.awaiting_address: Dict[str, str] = {}
-        # router 在多个工作线程里调用本处理器，审批状态的检查和修改都在这把锁里完成
+        # 每位达人正在补齐的索样申请 {sender_id: draft}
+        self.drafts: Dict[str, SampleRequestDraft] = {}
+        # router 在多个工作线程里调用本处理器，共享状态的检查和修改都在这把锁里完成
         self._lock = threading.Lock()
-
-    def extract_intent(self, text: str, sender_id: str = "") -> SampleRequestIntent:
-        """从微信消息中研判是否属于达人索样/合作意图 (Layer 3: Judge)"""
-        sample_keywords = ["样品", "样单", "寄样", "带货", "合作", "试用", "选品", "测品", "推品", "佣金"]
-        is_sample = any(kw in text for kw in sample_keywords)
-        is_in_address_turn = sender_id in self.awaiting_address
-
-        # 手机号提取
-        phone_match = re.search(r"1[3-9]\d{9}", text)
-        phone = phone_match.group(0) if phone_match else ""
-
-        # 地址提取
-        address = ""
-        address_match = re.search(
-            r"(?:收件地址|地址|寄到|寄送至)?[:：\s]*((?:[\u4e00-\u9fa5]{2,}(?:省|市|区|县|街道|路|镇|村))[^，。\n\r]+)",
-            text,
-        )
-        if address_match:
-            address = address_match.group(1).strip()
-        elif "市" in text or "区" in text or "路" in text:
-            # 宽容模式匹配地址
-            parts = re.split(r"[，,\s\n]+", text)
-            for part in parts:
-                if any(x in part for x in ["省", "市", "区", "县", "路", "街", "号"]):
-                    address = part.strip()
-                    break
-
-        # 如果既不是索样关键词，达人也不在等待收件信息状态，且没有收件手机地址特征，则判定为普通闲聊
-        if not is_sample and not is_in_address_turn and not (phone and address):
-            return SampleRequestIntent(is_sample_request=False)
-
-        # 商品抽取
-        product = self.awaiting_address.get(sender_id, "主推爆款商品")
-        for prod_candidate in ["VC精华液", "冻干粉", "泥膜", "眼霜", "洁面乳", "精华", "面膜"]:
-            if prod_candidate in text:
-                product = prod_candidate
-                break
-
-        return SampleRequestIntent(
-            is_sample_request=True,
-            requested_product=product,
-            recipient_phone=phone,
-            shipping_address=address,
-            raw_evidence=text,
-        )
 
     def assess_qualification(self, profile: InfluencerProfile) -> str:
         """给审批单标注资质（D4）：只标注、不自动拒绝；拿不到数据就是"待核实"。"""
@@ -108,13 +79,29 @@ class InfluencerBusinessHandler:
             logger.warning(f"[XHS] 查询达人数据失败，按待核实处理：{exc}")
             return {}
 
+    def _active_draft(self, sender_id: str) -> Optional[SampleRequestDraft]:
+        """取这位达人还没补齐的申请；超过 DRAFT_TTL_SECONDS 没有动静的作废。"""
+        with self._lock:
+            draft = self.drafts.get(sender_id)
+            if draft is not None and time.time() - draft.updated_at > DRAFT_TTL_SECONDS:
+                del self.drafts[sender_id]
+                return None
+            return draft
+
     async def process_incoming_message(
         self, sender_id: str, content: str, nickname: str = ""
     ) -> Optional[str]:
-        """处理进入的达人私信消息。"""
-        intent = self.extract_intent(content, sender_id=sender_id)
-        if not intent.is_sample_request:
-            return None
+        """处理达人的私信。返回要回复的话；返回 None 表示这条消息不归达人模块管。"""
+        draft = self._active_draft(sender_id)
+        expecting_name = draft is not None and draft.asked_for == ("recipient_name",)
+        info = extract_request_info(content, expecting_name=expecting_name)
+        if draft is None:
+            if not (info.is_sample_request or (info.recipient_phone and info.shipping_address)):
+                return None
+            draft = SampleRequestDraft(chat_id=sender_id)
+            with self._lock:
+                self.drafts[sender_id] = draft
+        draft.merge(info)
 
         # 1. 获取或创建达人档案
         if sender_id not in self.profiles:
@@ -129,29 +116,44 @@ class InfluencerBusinessHandler:
 
         # 2. 资质只在审批单上标注，由运营决定，不自动拒绝（D4）
 
-        # 3. 聚水潭 ERP 查库存
-        try:
-            inventory = await self.erp.check_inventory(intent.requested_product)
-        except Exception as exc:
-            logger.error(f"[ERP] 查询库存失败，需要人工处理：{exc}")
-            return "收到老师的需求啦~ 我们这边核对一下，再回复老师哦！"
-        if not inventory.get("in_stock") or inventory.get("available_quantity", 0) <= 0:
-            logger.warning(f"[ERP库存不足] {intent.requested_product}")
-            return (
-                f"亲亲，【{intent.requested_product}】的样品目前暂时没有库存，非常抱歉~ "
-                "老师也可以看看我们的其他产品哦！"
-            )
+        # 3. 不知道要哪款商品就先问，不拿占位名去查库存（B12）
+        if not draft.product:
+            draft.asked_for = ("product",)
+            return "收到老师的合作意向啦~ ✨ 请问老师想申请我们哪一款产品的样品呢？"
 
-        # 4. 地址信息不完整：引导达人补充地址并记录上下文状态
-        if not intent.shipping_address or not intent.recipient_phone:
-            self.awaiting_address[sender_id] = inventory["product_name"]
-            return (
-                f"收到老师的需求啦！【{inventory['product_name']}】目前有货，我们很期待和老师合作~ ✨\n"
-                "麻烦老师发一下【收件人姓名、联系电话、收货地址】，我们登记后会提交审核，审核结果第一时间告诉老师~"
-            )
+        # 4. 聚水潭 ERP 查库存（换了商品才重新查）
+        if draft.inventory is None:
+            try:
+                inventory = await self.erp.check_inventory(draft.product)
+            except Exception as exc:
+                logger.error(f"[ERP] 查询库存失败，需要人工处理：{exc}")
+                return "收到老师的需求啦~ 我们这边核对一下，再回复老师哦！"
+            if not inventory.get("in_stock") or inventory.get("available_quantity", 0) <= 0:
+                logger.warning(f"[ERP库存不足] {draft.product}")
+                product, draft.product = draft.product, ""  # 达人可以改选其他产品
+                draft.asked_for = ("product",)
+                return (
+                    f"亲亲，【{product}】的样品目前暂时没有库存，非常抱歉~ "
+                    "老师也可以看看我们的其他产品哦！"
+                )
+            draft.inventory = inventory
+        inventory = draft.inventory
 
-        # 5. 达人已提供完整收件地址，解除等待状态，生成 Layer 6 Gate 审批卡片
-        self.awaiting_address.pop(sender_id, None)
+        # 5. 收件信息没补齐：只追问缺的那几项
+        missing = draft.missing_recipient_fields()
+        if missing:
+            draft.asked_for = tuple(missing)
+            if len(missing) == len(RECIPIENT_FIELD_LABELS):
+                return (
+                    f"收到老师的需求啦！【{inventory['product_name']}】目前有货，我们很期待和老师合作~ ✨\n"
+                    "麻烦老师发一下【收件人姓名、联系电话、收货地址】，我们登记后会提交审核，审核结果第一时间告诉老师~"
+                )
+            labels = "、".join(RECIPIENT_FIELD_LABELS[name] for name in missing)
+            return f"收到~ 还差【{labels}】，麻烦老师补充一下哦~"
+
+        # 6. 信息齐了：生成审批单，交给运营审批（R2）
+        with self._lock:
+            self.drafts.pop(sender_id, None)
         packet_id = f"GATE-{uuid.uuid4().hex[:8].upper()}"
         action_packet = ApprovalActionPacket(
             packet_id=packet_id,
@@ -163,19 +165,24 @@ class InfluencerBusinessHandler:
             stock_available=inventory["available_quantity"],
             sample_cost=inventory.get("cost_price", 18.5),
             proposed_commission_rate=DEFAULT_COMMISSION_RATE,
-            shipping_address=f"{intent.shipping_address} (电话:{intent.recipient_phone})",
+            shipping_address=draft.shipping_address,
             what_cannot_be_undone=(
                 f"聚水潭ERP将自动扣减库存并出具打单运单，小红书将绑定 {DEFAULT_COMMISSION_RATE:.0%} 专属定向计划"
             ),
             qualification=self.assess_qualification(profile),
+            recipient_name=draft.recipient_name,
+            recipient_phone=draft.recipient_phone,
+            evidence="\n".join(draft.evidence),
         )
         with self._lock:
             self.pending_approvals[packet_id] = action_packet
 
-        logger.info(f"🚨 [Gate拦截-待运营审批] 任务单 {packet_id}: {action_packet}")
+        # 日志里不打印收件人信息
+        logger.info(f"🚨 [Gate拦截-待运营审批] 审批单 {packet_id}：{action_packet.requested_product}（达人 {sender_id}）")
         return (
             f"收到老师的收件信息啦！【{inventory['product_name']}】的寄样申请已经提交审核~ 📝\n"
-            f"收件地址：{intent.shipping_address}\n"
+            f"收件人：{draft.recipient_name}（{_mask_phone(draft.recipient_phone)}）\n"
+            f"收件地址：{draft.shipping_address}\n"
             "审核通过后我们会第一时间通知老师，请稍等哦~"
         )
 
@@ -211,6 +218,8 @@ class InfluencerBusinessHandler:
                     "success": False,
                     "error": f"达人资质{packet.qualification}，按规则不能寄样，请驳回",
                 }
+            if not (packet.recipient_name and packet.recipient_phone and packet.shipping_address):
+                return {"success": False, "error": "收件人、电话或地址不全，不能建单"}
             # 先占住这张单，调用外部系统期间，重复的"通过"会因为状态不是 PENDING 被挡下
             packet.status = GateStatus.EXECUTING
 
@@ -218,8 +227,8 @@ class InfluencerBusinessHandler:
             order_res = await self.erp.create_sample_order(
                 influencer_id=packet.influencer_id,
                 sku_id=packet.sku_id,
-                recipient_name=packet.influencer_name,
-                recipient_phone="13800000000",
+                recipient_name=packet.recipient_name,
+                recipient_phone=packet.recipient_phone,
                 shipping_address=packet.shipping_address,
                 order_ref=packet.packet_id,
             )

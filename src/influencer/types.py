@@ -5,9 +5,16 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .settings import APPROVAL_TTL_SECONDS
+
+# 收件信息的字段名和对达人说的叫法，顺序就是追问的顺序
+RECIPIENT_FIELD_LABELS = {
+    "recipient_name": "收件人姓名",
+    "recipient_phone": "联系电话",
+    "shipping_address": "收货地址",
+}
 
 
 class GateStatus(str, Enum):
@@ -51,6 +58,36 @@ class SampleRequestIntent:
 
 
 @dataclass
+class SampleRequestDraft:
+    """一位达人正在补齐的索样申请：多轮对话里逐条补充，信息齐了才生成审批单。"""
+    chat_id: str
+    product: str = ""
+    recipient_name: str = ""
+    recipient_phone: str = ""
+    shipping_address: str = ""
+    inventory: Optional[Dict[str, Any]] = None  # 当前商品的库存查询结果，换商品后清空
+    asked_for: Tuple[str, ...] = ()  # 上一轮追问了哪些字段
+    evidence: List[str] = field(default_factory=list)  # 达人的原话，供运营核对（R5）
+    updated_at: float = field(default_factory=time.time)
+
+    def merge(self, info: SampleRequestIntent) -> None:
+        """补进一条消息里提取到的字段。新的非空值覆盖旧值，因为达人可能会更正。"""
+        if info.requested_product and info.requested_product != self.product:
+            self.product = info.requested_product
+            self.inventory = None
+        for name in RECIPIENT_FIELD_LABELS:
+            value = getattr(info, name)
+            if value:
+                setattr(self, name, value)
+        if info.raw_evidence:
+            self.evidence = (self.evidence + [info.raw_evidence])[-10:]
+        self.updated_at = time.time()
+
+    def missing_recipient_fields(self) -> List[str]:
+        return [name for name in RECIPIENT_FIELD_LABELS if not getattr(self, name)]
+
+
+@dataclass
 class ApprovalActionPacket:
     """原子行动审批数据包 (Layer 6: Gate)"""
     packet_id: str
@@ -65,6 +102,9 @@ class ApprovalActionPacket:
     shipping_address: str
     what_cannot_be_undone: str
     qualification: str = ""  # 资质标注：达标 / 不达标：原因 / 待核实（D4，只标注不拒绝）
+    recipient_name: str = ""
+    recipient_phone: str = ""
+    evidence: str = ""  # 达人的原话，供运营核对（R5）
     status: GateStatus = GateStatus.PENDING
     created_at: float = field(default_factory=time.time)
     expires_at: float = field(default_factory=lambda: time.time() + APPROVAL_TTL_SECONDS)
