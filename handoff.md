@@ -1,6 +1,6 @@
 # 交接文档：达人商务智能体
 
-> 最后更新：2026-10-24（v6：第 2 阶段第 1–5 项已完成；第 6 项"审批入口和持久化"的设计等用户确认）
+> 最后更新：2026-10-24（v7：装好 Playwright，浏览器功能测试已纳入完整测试；第 6 项"审批入口和持久化"的设计仍等用户确认）
 > 读者：接手这个项目的 AI 窗口，以及参与开发的同事。
 > 规矩：新窗口开工前先读完本文件；收工前更新第 3 节（当前状态）、第 5 节（计划进度）和第 9 节（变更记录）。
 
@@ -88,7 +88,7 @@
 
 - `.venv`（Python 3.12.14）可用，`ui/dist` 已构建。控制台地址是 `http://127.0.0.1:7327`，只监听本机。
 - 打开模拟模式（`INFLUENCER_MOCK=1`）、把达人的 `chat_id` 加进 `INFLUENCER_CHAT_IDS` 之后，达人流程能从"索样"走到"生成审批单"。但审批还没有入口（B4），数据只在内存里（B5）。
-- 测试（2026-10-24，第 2 阶段第 5 项之后）：3365 个通过、1 个跳过，没有失败，也没有预期失败。前提是 `.venv` 里装了 `httpx[socks]`（见第 8 节）。
+- 测试（2026-10-24，装好 Playwright 之后）：3385 个通过、1 个跳过，没有失败，也没有预期失败。比之前多出的 20 个来自原项目的 `tests/test_functional.py`（其中 10 个用无头浏览器点页面）；没装 Playwright 时，`tests/conftest.py` 会跳过整个文件。前提是 `.venv` 里装了 `httpx[socks]` 和 Playwright（见第 8 节）。
 
 ### 3.2 问题清单
 
@@ -249,6 +249,7 @@ CLI 交付之前，我们按这份约定写一个桩程序，通过配置显式�
   - 同步同事的更新：`git fetch colleague && git merge colleague/main`
   - 本地 `main` 跟踪的是 `origin/main`。`colleague` 的推送地址已经禁用，防止误推到同事的仓库
 - `.venv` 是 uv 创建的，没有 pip。装包用 `uv pip install --python .venv/bin/python <包名>`。已额外装了 `pytest` 和 `httpx[socks]`：终端里设置了 `ALL_PROXY=socks5://...`，不装 `httpx[socks]` 的话，AI 后端会报 ImportError。`requirements-macos.txt` 里还没有 `httpx[socks]`，以后要补上
+- Playwright 1.64.1（2026-10-24 装的，已记入 `requirements-dev.txt`）。浏览器只装了无头版：`.venv/bin/python -m playwright install --only-shell chromium`，装在 `~/Library/Caches/ms-playwright`，约 200 MB。`tests/test_functional.py` 会启动真实的 Web 服务，并在项目根目录临时建一个 `.env`，测完就删；Mac 上的配置在 `.env.macos`，不受影响。走代理下载很慢，Python 包 41 MB 用了约 9 分钟
 - `CLAUDE.md` 已在 2026-10-24 调整过：Mac 上不打包 EXE；达人模块的说明不写入 `CODEBASE_REFERENCE.md`；每次改动仍然要 git commit（只提交到本地，推送必须经用户明确同意）
 
 ## 9. 变更记录
@@ -259,3 +260,4 @@ CLI 交付之前，我们按这份约定写一个桩程序，通过配置显式�
 - 2026-10-24 v4：改用 SSH 访问 GitHub；建好 git，并接上同事 main 的 `3f2036c`；把达人模块原样提交；调整了 CLAUDE.md；装上 pytest 和 httpx[socks]，测试基线为 3315 个通过、1 个失败（B18）。等用户确认后推送。业务代码仍未修改。
 - 2026-10-24 v5：用户确认后推送到 duet（`8448f36`）。第 1 阶段完成：新增 `tests/test_influencer_acceptance.py`，共 18 条（16 条预期失败、2 条通过）；去掉标记单独运行时，确认每条失败都落在预期的断言上。完整测试结果为 3317 个通过、16 个预期失败、1 个失败（B18）。业务代码仍未修改。
 - 2026-10-24 v6：第 2 阶段第 1–5 项完成，共 5 次提交（`e583a19`、`accc1fa`、`1d113f0`、`9f466c7`、`8d7bb5b`）。所有 `known_failure` 标记已删除；新增 4 个测试文件；完整测试 3365 个通过、1 个跳过，没有失败。新发现 B20–B22。第 6 项写了设计草案（`docs/influencer-approval-design.md`），等用户确认。
+- 2026-10-24 v7：用户同意装 Playwright。装了 Playwright 1.64.1 和无头版 Chromium，并记入 `requirements-dev.txt`。原项目的 `tests/test_functional.py`（20 个，其中 10 个是浏览器测试）不再被跳过，全部通过；完整测试 3385 个通过、1 个跳过。另外更正了设计文档里 B5 的说法：控制台和机器人其实在同一个进程里。第 6 项仍等用户确认 Q1–Q4；本地提交还没推送，推送要等用户明确同意。

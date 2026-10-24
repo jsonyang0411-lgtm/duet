@@ -79,5 +79,5 @@
 1. 写 `store.py`、建表、迁移。测试：重启后审批单还在；条件更新能保证只执行一次。
 2. 处理器改为读写 store。测试辅助函数相应调整，用例里的断言不变。
 3. 写接口和测试，沿用 `tests/test_web_api.py` 的写法。
-4. 做控制台页面，重新构建 `ui/dist`。页面的功能测试需要 Playwright，本机还没装：要么装上（浏览器内核大约一两百 MB），要么手动验证。
+4. 做控制台页面，重新构建 `ui/dist`。页面的功能测试用 Playwright（2026-10-24 已装好），沿用 `tests/test_functional.py` 的写法：启动真实的 Web 服务，用无头浏览器点页面。
 5. 同步 `CODEBASE_REFERENCE.md`，更新 `handoff.md`。
