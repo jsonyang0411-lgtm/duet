@@ -81,7 +81,7 @@ def test_claude_is_asked_for_a_stream(worker, tmp_path):
 
 STEPPING_CLAUDE = textwrap.dedent("""\
     import json, sys, time
-    prompt = sys.stdin.read()
+    prompt = json.loads(sys.stdin.readline())["message"]["content"]   # stream-json input
     for name, args in (("Read", {"file_path": "/p/a.py"}), ("Edit", {"file_path": "/p/service.py"})):
         print(json.dumps({"type": "assistant", "message": {"content": [
             {"type": "tool_use", "name": name, "input": args}]}}), flush=True)

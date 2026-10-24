@@ -15,6 +15,9 @@ When Claude needs an approval, the worker's PermissionRequest hook asks here
 (POST /relay/jobs/<id>/ask), the request goes to WeChat, and the hook waits for
 the answer (GET /relay/asks/<n>).  Only a WeChat message of the allowed person
 in that chat answers it ("同意" / "拒绝"); nothing over HTTP can.
+A task sent while the chat's job runs goes to that job (a follow-up): the worker
+reads it (GET /relay/jobs/<id>/messages) and hands it to the running Claude,
+which sees it at its next step; "新任务 …" queues a job of its own instead.
 """
 
 from __future__ import annotations
@@ -119,11 +122,12 @@ class ClaudeRelay:
         db = str(getattr(config, "claude_relay_db", ":memory:"))
         self._files_dir = Path(files_dir) if files_dir is not None else (
             Path(tempfile.gettempdir()) / "webot-relay-files" if db == ":memory:"
-            else Path(db).parent / "claude_relay_files")
+            else (Path(db).parent / "claude_relay_files").resolve())
         self._file_sent: set[int] = set()       # jobs whose result file is in the chat already
         self._held: dict[str, list[Held]] = {}  # pictures and files waiting for the next task
         self._held_lock = threading.Lock()
         self._asks_changed = threading.Condition()
+        self._followups_ready = threading.Condition()
         self._tick_lock = threading.Lock()      # one delivery round at a time (no message sent twice)
         self._clock = clock
         self._prefix_word = config.claude_relay_prefix
@@ -270,6 +274,14 @@ class ClaudeRelay:
             return self.projects_text(chat_id)
         if cmd.kind == "switch":
             return self._switch(chat_id, cmd.project)
+        if not cmd.queue and not cmd.project and not self._has_held(chat_id):
+            added = self._store.add_followup(chat_id, cmd.text, self._clock())
+            if added is not None:
+                with self._followups_ready:
+                    self._followups_ready.notify_all()
+                logger.info("CLAUDE_RELAY: follow-up for running #%d: %s", added[0], cmd.text[:80])
+                return (f"收到，已转给正在做的 #{added[0]}（Claude 下一步就能看到）。"
+                        f"要另起一个任务就发「{self._command_text('新任务 内容')}」。")
         return self._queue(chat_id, sender, cmd.text, cmd.project or self._store.current_project(chat_id))
 
     # ── projects ──────────────────────────────────────────────────────────
@@ -304,13 +316,23 @@ class ClaudeRelay:
             self._held[chat_id] = items
             return len(items)
 
+    def _has_held(self, chat_id: str) -> bool:
+        now = self._clock()
+        with self._held_lock:
+            return any(now - h.at < HOLD_SEC for h in self._held.get(chat_id, []))
+
     def _take_held(self, chat_id: str) -> list[Held]:
         now = self._clock()
         with self._held_lock:
             return [h for h in self._held.pop(chat_id, []) if now - h.at < HOLD_SEC]
 
     def _collect(self, held: list[Held]) -> tuple[list[tuple[str, str, int]], list[str]]:
-        """Copy the held pictures and files into the bot's own folder: ``(files, problems)``."""
+        """The held pictures and files for a job: ``(files, problems)``.
+
+        A picture is copied into the bot's own folder (WeChat's cache and the chat
+        screenshots come and go); a file stays where WeChat downloaded it (it can be
+        a gigabyte, and WeChat keeps it).
+        """
         files, problems, names = [], [], set()
         folder = self._files_dir / "attachments" / f"{int(self._clock())}-{uuid.uuid4().hex[:8]}"
         for number, item in enumerate(held, 1):
@@ -324,6 +346,9 @@ class ClaudeRelay:
                 while name in names:                   # two files of the same name
                     name, n = f"{stem}({n}){suffix}", n + 1
                 names.add(name)
+                if item.kind == "file":
+                    files.append((name, str(path), Path(path).stat().st_size))
+                    continue
                 folder.mkdir(parents=True, exist_ok=True)
                 copy = folder / name
                 shutil.copyfile(path, copy)
@@ -493,7 +518,7 @@ class ClaudeRelay:
 
     def _retry(self, chat_id: str, job_id: Optional[int]) -> str:
         if job_id is None:
-            return f"重试要写编号，比如：{self._prefix_word} 重试 17"
+            return f"重试要写编号，比如：{self._command_text('重试 17')}"
         job = self._own_job(chat_id, job_id)
         if job is None:
             return f"没有找到 #{job_id}。"
@@ -516,6 +541,7 @@ class ClaudeRelay:
             f"{p}取消 [编号] —— 取消任务（不写编号就取消最近一个）\n"
             f"{p}重试 编号 —— 重新执行一个任务\n"
             f"{p}新对话 —— 下一个任务不带之前的上下文\n"
+            f"任务进行中再发的话 —— 直接转给正在做的那个；要另起一个就发「{p}新任务 内容」\n"
             f"发图片或文件 —— 下一个任务会带上它们（{HOLD_SEC // 60} 分钟内）"
             + (f"\n\n{self._extra_help}" if self._relay_only and self._extra_help else "")
         )
@@ -611,15 +637,52 @@ class ClaudeRelay:
         taken = self._store.finish(
             job_id, ok=bool(payload.get("ok")), text=text,
             session_id=str(payload.get("session_id", "") or ""),
-            payload={k: payload[k] for k in ("duration_s", "cost_usd", "log_path", "error")
+            payload={k: payload[k] for k in ("duration_s", "cost_usd", "log_path", "error", "denied")
                      if k in payload},
             now=self._clock(),
         )
         if taken:
             logger.info("CLAUDE_RELAY: #%d finished (ok=%s, %d chars)", job_id, payload.get("ok"), len(text))
             self._end_asks(job_id)
+            self._requeue_leftovers(job_id)
             self._wake.set()
         return taken
+
+    # ── follow-ups (from the worker) ───────────────────────────────────────
+
+    def followups(self, job_id: int, after: int, wait: float) -> Optional[dict]:
+        """``{"messages": [{"id", "text"}]}`` past ``after``, waiting up to ``wait`` seconds for one."""
+        self._seen()
+        deadline = time.monotonic() + max(0.0, min(float(wait), MAX_WAIT_SEC))
+        while True:
+            rows = self._store.followups(job_id, int(after))
+            if rows is None:
+                return None
+            remaining = deadline - time.monotonic()
+            if rows or remaining <= 0 or self._stopping.is_set():
+                return {"messages": rows}
+            with self._followups_ready:
+                self._followups_ready.wait(min(remaining, 1.0))
+
+    def close_input(self, job_id: int, upto: int) -> Optional[dict]:
+        """A turn ended: what is still to hand on, or ``[]`` and the job takes no more."""
+        self._seen()
+        rows = self._store.close_input(job_id, int(upto))
+        return None if rows is None else {"messages": rows}
+
+    def _requeue_leftovers(self, job_id: int) -> None:
+        """Follow-ups the job ended before seeing become the next job (not after a cancel)."""
+        leftovers = self._store.take_leftovers(job_id)
+        job = self._store.get(job_id)
+        if not leftovers or job is None or job["status"] == "cancelled":
+            return
+        text = "\n".join(row["text"] for row in leftovers)
+        new_id = self._store.add(job["chat_id"], job["sender_id"], text, job["project"], self._clock())
+        self._store.add_result_note(job_id, followups_job=new_id)
+        with self._jobs_ready:
+            self._jobs_ready.notify_all()
+        logger.info("CLAUDE_RELAY: %d follow-up(s) of #%d came too late; queued as #%d",
+                    len(leftovers), job_id, new_id)
 
     # ── back to WeChat ────────────────────────────────────────────────────
 
@@ -700,7 +763,8 @@ class ClaudeRelay:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 self._prune_files()
                 path.write_text(self._file_text(job), encoding="utf-8-sig")
-                if self._send_file(job["chat_id"], str(path)):
+                if self._send_file(job["chat_id"], str(path.resolve())):
+                    time.sleep(1.0)
                     self._file_sent.add(job["id"])
                 else:
                     logger.warning("CLAUDE_RELAY: the result file of #%d was not sent; cutting it short",
@@ -733,7 +797,7 @@ class ClaudeRelay:
         if status == "lost":
             return (
                 f"#{job_id} 和 Mac 失去联系了（{LOST_AFTER_SEC // 60} 分钟没有心跳），可能只做了一半。"
-                f"Mac 恢复后如果还在做，结果会照常发回来；要重新执行就回复「{self._prefix_word} 重试 {job_id}」。"
+                f"Mac 恢复后如果还在做，结果会照常发回来；要重新执行就回复「{self._command_text(f'重试 {job_id}')}」。"
             )
         try:
             extra = json.loads(job.get("result_json") or "{}")
@@ -750,4 +814,14 @@ class ClaudeRelay:
         elif len(body) > self._max_chars:
             where = f"，完整结果在 Mac：{extra['log_path']}" if extra.get("log_path") else ""
             body = body[: self._max_chars].rstrip() + f"\n…（太长，已截断{where}）"
-        return f"{head}\n{body}" if body else head
+        if extra.get("followups_job"):
+            body += f"\n（你在中途发的消息没赶上，已作为 #{extra['followups_job']} 接着做）"
+        if extra.get("denied") and status in ("done", "failed"):
+            # The task is over: a 「同意」 now answers nothing, so say how to do it again.
+            body += (f"\n要重做就回复「{self._command_text(f'重试 {job_id}')}」，"
+                     "需要批准时再回「同意」。")
+        return f"{head}\n{body.strip()}" if body.strip() else head
+
+    def _command_text(self, words: str) -> str:
+        """A command as the person types it: 「重试 17」, or 「cc 重试 17」 when the prefix is needed."""
+        return words if self._relay_only else f"{self._prefix_word} {words}"

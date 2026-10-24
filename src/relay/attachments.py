@@ -18,7 +18,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 HOLD_SEC = 600                       # a held picture or file waits this long for a task
-MAX_FILE_BYTES = 50 * 1024 * 1024    # larger ones are not sent to the Mac
+MAX_FILE_BYTES = 2 * 1024 ** 3       # larger ones are not sent to the Mac (WeChat itself
+                                     # downloads files up to 1 GB without a click)
+MAX_PICTURE_BYTES = 50 * 1024 * 1024
 KINDS = {"image": "图片", "file": "文件"}
 
 
@@ -48,7 +50,7 @@ def resolve(config, held: Held, number: int) -> tuple[str, str, str]:
         from ..vision import find_recent_image_path
         vision = SimpleNamespace(
             wechat_data_dir=str(getattr(config, "wechat_data_dir", "") or ""),
-            image_vision_max_bytes=MAX_FILE_BYTES,
+            image_vision_max_bytes=MAX_PICTURE_BYTES,
             image_vision_lookback_sec=int(getattr(config, "image_vision_lookback_sec", 900) or 900),
         )
         path = find_recent_image_path(vision, [held.msg])
@@ -69,7 +71,7 @@ def resolve(config, held: Held, number: int) -> tuple[str, str, str]:
     except (TypeError, ValueError):
         size = 0
     if size > MAX_FILE_BYTES:
-        return "", "", f"文件「{name}」超过 {MAX_FILE_BYTES // 1024 // 1024} MB，没带上"
+        return "", "", f"文件「{name}」超过 {MAX_FILE_BYTES // 1024 ** 3} GB，没带上"
     found = locate_received_file(_data_dirs(config, held.msg), name, size,
                                  float(held.msg.get("timestamp", 0) or 0))
     if found is None:

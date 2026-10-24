@@ -104,8 +104,8 @@ def test_a_picture_is_found_or_photographed(tmp_path):
     assert path == str(shot) and name == "聊天截图-2.jpg"
     path, _, problem = resolve(config, Held("image", image_msg(), 0), 3)
     assert path == "" and "没找到" in problem
-    _, _, problem = resolve(config, Held("file", file_msg(size=60 * 1024 * 1024), 0), 4)
-    assert "超过 50 MB" in problem
+    _, _, problem = resolve(config, Held("file", file_msg(size=3 * 1024 ** 3), 0), 4)
+    assert "超过 2 GB" in problem
 
 
 # ── the bot holds them for the next task ──────────────────────────────────
@@ -147,7 +147,8 @@ def test_relay_only_holds_a_picture_and_the_next_task_takes_it(tmp_path):
     copy = relay.file_path(1, job["files"][0]["id"])
     assert Path(copy).read_bytes() == shot.read_bytes() and Path(copy).parent.parent == tmp_path / "files/attachments"
     assert relay.file_path(2, job["files"][0]["id"]) is None                       # not that job's file
-    relay.handle(text("下一个任务"))
+    assert relay.file_path(1, job["files"][1]["id"]) == str(folder / "报告.pdf")   # a file is not copied
+    relay.handle(text("新任务 下一个任务"))
     assert relay.next_job(0)["files"] == []                                         # taken once
 
 
@@ -255,3 +256,47 @@ def test_names_stay_inside_the_inbox(worker):
     assert worker.safe_name("../../etc/passwd", "f") == "_.._etc_passwd"
     assert worker.safe_name("a:b*c?.txt", "f") == "a_b_c_.txt"
     assert worker.safe_name("...", "file-1") == "file-1"
+
+
+# ── big files: no copy, streamed both ways ────────────────────────────────
+
+def test_a_big_file_goes_through_whole(worker, bot, fake_claude, tmp_path):
+    import os
+    month = time.strftime("%Y-%m")
+    folder = tmp_path / "wechat/wxid_me_1/msg/file" / month
+    folder.mkdir(parents=True)
+    big = folder / "数据.bin"
+    big.write_bytes(os.urandom(3 * 1024 * 1024 + 17))                 # more than one 1 MB chunk
+    bot.relay._config.wechat_data_dir = str(tmp_path / "wechat")
+    bot.relay._files_dir = tmp_path / "files"
+    bot.relay._hold(ME, Held("file", file_msg(name="数据.bin", size=big.stat().st_size), time.time()))
+    bot.ask("cc 看看这个数据")
+    run_one(worker, bot, settings(bot, fake_claude, tmp_path))
+    got = tmp_path / "home/inbox/job-1/数据.bin"
+    assert got.read_bytes() == big.read_bytes()
+    assert not list((tmp_path / "home/inbox/job-1").glob("*.part"))
+    assert not (tmp_path / "files/attachments").exists()                 # the file was not copied
+
+
+def test_a_download_that_breaks_off_leaves_nothing(worker, tmp_path):
+    import http.server
+    import threading as th
+
+    class Short(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "100")
+            self.end_headers()
+            self.wfile.write(b"x" * 40)                               # then the connection closes
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Short)
+    th.Thread(target=server.handle_request, daemon=True).start()
+    client = worker.RelayClient(f"http://127.0.0.1:{server.server_address[1]}", "t")
+    dest = tmp_path / "a.bin"
+    with pytest.raises(Exception):
+        client.download(1, 1, dest)
+    server.server_close()
+    assert not dest.exists() and not (tmp_path / "a.bin.part").exists()

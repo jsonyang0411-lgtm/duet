@@ -336,6 +336,22 @@ class WcdbNativeClient:
         except Exception:
             self._dll.wcdb_get_group_members = None
 
+        try:
+            fn = self._dll.wcdb_get_voice_data
+            fn.argtypes = [
+                ct.c_int64,
+                ct.c_char_p,
+                ct.c_int32,
+                ct.c_int32,
+                ct.c_int64,
+                ct.c_char_p,
+                ct.POINTER(ct.c_void_p),
+            ]
+            fn.restype = ct.c_int32
+            self._dll.wcdb_get_voice_data = fn
+        except Exception:
+            self._dll.wcdb_get_voice_data = None
+
         self._dll.wcdb_free_string.argtypes = [ct.c_void_p]
         self._dll.wcdb_free_string.restype = None
 
@@ -636,6 +652,43 @@ class WcdbNativeClient:
         if isinstance(result, dict):
             return result.get("members", result.get("data", []))
         return []
+
+    def get_voice_data(
+        self, talker: str, local_id: int, create_time: int, msg_svr_id: int | str
+    ):
+        """Fetch voice audio bytes from WCDB media database for a voice message (localType=34)."""
+        if not self._handle or not getattr(self._dll, "wcdb_get_voice_data", None):
+            return None
+        out = ct.c_void_p()
+        session_bytes = talker.encode("utf-8") if isinstance(talker, str) else talker
+        try:
+            svrid_val = int(msg_svr_id)
+        except (ValueError, TypeError):
+            svrid_val = 0
+        ret = self._dll.wcdb_get_voice_data(
+            self._handle,
+            session_bytes,
+            int(local_id or 0),
+            int(create_time or 0),
+            svrid_val,
+            b"[]",
+            ct.byref(out),
+        )
+        if ret != 0 or not out:
+            return None
+        try:
+            raw_s = ct.string_at(out)
+            if not raw_s:
+                return None
+            hex_str = raw_s.decode("utf-8", errors="replace").strip()
+            if not hex_str:
+                return None
+            return bytes.fromhex(hex_str)
+        except Exception as e:
+            logger.warning("Failed to decode voice hex data: %s", e)
+            return None
+        finally:
+            self._dll.wcdb_free_string(out)
 
     def resolve_nickname(self, wxid):
         """Get display name for a wxid from cache."""

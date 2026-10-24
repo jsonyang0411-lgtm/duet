@@ -12,6 +12,12 @@ in the project folder, sends a heartbeat every 30 s with what Claude is doing
 result back.  Pictures and files sent with a task are downloaded to
 ~/.claude-relay/inbox/job-<id>/ first (claude gets --add-dir for it).
 
+The task goes in as stream-json (--input-format stream-json), so what the person
+sends while it runs (GET /relay/jobs/<id>/messages) is handed to the running
+Claude, which reads it at its next step.  When a turn ends the worker asks the
+bot for anything still to hand on (POST /relay/jobs/<id>/close); nothing left
+closes claude's input and claude exits.
+
 When claude needs an approval (wechat_approval, on by default), its
 PermissionRequest hook is this script again (--permission-hook): it sends the
 request to the bot, the bot asks in WeChat, and the answer allows or denies the
@@ -35,7 +41,10 @@ To keep it running, start-worker.command opens it in Terminal at login.
 from __future__ import annotations
 
 import argparse
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 import glob
 import json
 import logging
@@ -87,6 +96,7 @@ SYSTEM_NOTE = (
 APPROVAL_NOTE = (
     "需要人工批准的操作会发到对方微信上请对方批准，对方可能过一会儿才看到，超过 {minutes} 分钟没回就算拒绝；"
     "所以能不用这类操作就不用，确实需要时再用，被拒绝了就换个办法或在结果里说明。"
+    "任务结束后对方再回「同意」不会生效（机器人会告诉对方怎么重做），所以不要在结果里让对方回复「同意」。"
 )
 
 
@@ -263,6 +273,28 @@ class RelayClient:
         status, data = self._call("GET", f"/relay/next?wait={wait}", timeout=wait + 15, headers=headers)
         return data if status == 200 else None
 
+    def followups(self, job_id: int, after: int, wait: int = POLL_WAIT_SEC) -> list | None:
+        """What the person sent while the job runs, past follow-up ``after`` (None: the bot has
+        no such endpoint or job)."""
+        try:
+            _, data = self._call("GET", f"/relay/jobs/{job_id}/messages?after={after}&wait={wait}",
+                                 timeout=wait + 15)
+            return list((data or {}).get("messages") or [])
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            raise
+
+    def close_input(self, job_id: int, upto: int) -> list:
+        """A turn ended: follow-ups still to hand on, or [] (the job takes no more input)."""
+        try:
+            _, data = self._call("POST", f"/relay/jobs/{job_id}/close", {"upto": upto})
+            return list((data or {}).get("messages") or [])
+        except urllib.error.HTTPError as e:
+            if e.code == 404:                            # an older bot: no follow-ups
+                return []
+            raise
+
     def heartbeat(self, job_id: int, progress: dict | None = None) -> dict | None:
         try:
             _, data = self._call("POST", f"/relay/jobs/{job_id}/heartbeat", progress or {})
@@ -272,13 +304,22 @@ class RelayClient:
                 return None
             raise
 
-    def download(self, job_id: int, file_id: int) -> bytes:
-        """A picture or file sent with the job."""
+    def download(self, job_id: int, file_id: int, dest: Path) -> None:
+        """A picture or file sent with the job, written to ``dest`` as it arrives."""
         def get():
             req = urllib.request.Request(f"{self.base_url}/relay/jobs/{job_id}/files/{file_id}")
             req.add_header("Authorization", f"Bearer {self.token}")
-            with self.opener.open(req, timeout=120) as resp:
-                return resp.read()
+            part = dest.with_name(dest.name + ".part")
+            try:
+                with self.opener.open(req, timeout=120) as resp, open(part, "wb") as out:
+                    shutil.copyfileobj(resp, out, 1024 * 1024)
+                    expected = resp.headers.get("Content-Length")
+                got = part.stat().st_size
+                if expected is not None and got != int(expected):
+                    raise OSError(f"incomplete download ({got}/{expected} bytes)")
+                part.replace(dest)
+            finally:
+                part.unlink(missing_ok=True)             # a broken download leaves nothing behind
         try:
             return get()
         except urllib.error.HTTPError as e:
@@ -339,7 +380,7 @@ def fetch_files(client: RelayClient, job: dict) -> tuple[Path | None, str]:
     for f in files:
         name = safe_name(f.get("name", ""), f"file-{f.get('id')}")
         try:
-            (folder / name).write_bytes(client.download(job["id"], int(f["id"])))
+            client.download(job["id"], int(f["id"]), folder / name)
             got.append(name)
         except Exception as e:
             log.warning("#%s attachment %s not downloaded: %s", job["id"], name, e)
@@ -364,6 +405,7 @@ def hook_settings(settings: dict) -> str:
 def claude_command(settings: dict, session_id: str | None, add_dirs: tuple = ()) -> list[str]:
     cmd = [
         find_claude(settings.get("claude_bin", "")), "-p", "--output-format", "stream-json", "--verbose",
+        "--input-format", "stream-json",
         "--permission-mode", str(settings.get("permission_mode") or "auto"),
         "--permission-prompts", "none",
         "--append-system-prompt", system_note(settings),
@@ -452,6 +494,81 @@ class Progress:
         return {"steps": self.steps, "doing": self.doing, "plan": self.plan}
 
 
+class Conversation:
+    """claude's stdin (stream-json): the task, then what the person sends while it runs.
+
+    Follow-ups are handed on in order and only once (``upto`` = the last one written);
+    the input closes when a turn ends and the bot has nothing more (``on_result``).
+    """
+
+    def __init__(self, proc: subprocess.Popen, client: RelayClient, job_id: int):
+        self.proc, self.client, self.job_id = proc, client, job_id
+        self.lock = threading.Lock()
+        self.closed = False
+        self.upto = 0
+
+    def _write(self, text: str) -> bool:
+        if self.closed:
+            return False
+        try:
+            self.proc.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": text}},
+                                             ensure_ascii=False) + "\n")
+            self.proc.stdin.flush()
+            return True
+        except (OSError, ValueError):                    # claude is gone
+            self.closed = True
+            return False
+
+    def start(self, text: str) -> None:
+        with self.lock:
+            self._write(text)
+
+    def hand_on(self, rows: list) -> None:
+        """Follow-ups from the bot, each written once."""
+        with self.lock:
+            for row in rows:
+                if int(row.get("id", 0)) <= self.upto or not self._write(f"（微信里补充）{row.get('text', '')}"):
+                    continue
+                self.upto = int(row["id"])
+                log.info("#%s follow-up %s handed to claude", self.job_id, row["id"])
+
+    def close(self) -> None:
+        with self.lock:
+            if not self.closed:
+                self.closed = True
+                try:
+                    self.proc.stdin.close()
+                except OSError:
+                    pass
+
+    def on_result(self) -> None:
+        """A turn ended: hand on what came meanwhile, or end the input (claude then exits)."""
+        try:
+            with self.lock:
+                upto = self.upto
+            rows = self.client.close_input(self.job_id, upto)
+        except Exception as e:
+            log.warning("#%s cannot ask the bot for follow-ups (%s); ending the input", self.job_id, e)
+            rows = []
+        if rows:
+            self.hand_on(rows)
+        else:
+            self.close()
+
+    def poll(self, stopper: Stopper) -> None:
+        """Fetch follow-ups while the input is open (a thread)."""
+        while not self.closed and self.proc.poll() is None and not stopper.event.is_set():
+            try:
+                rows = self.client.followups(self.job_id, self.upto, wait=POLL_WAIT_SEC)
+            except Exception as e:                       # the bot may be restarting
+                log.warning("#%s follow-ups: cannot reach the bot (%s)", self.job_id, e)
+                stopper.event.wait(5)
+                continue
+            if rows is None:                             # an older bot
+                return
+            self.hand_on(rows)
+
+
 def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stopper: Stopper,
                session_id: str | None, add_dirs: tuple = ()) -> dict:
     """Run claude once; heartbeat meanwhile.  Returns stdout/stderr/returncode and why it stopped."""
@@ -465,6 +582,7 @@ def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stoppe
         text=True, encoding="utf-8", errors="replace", start_new_session=True, env=env,
     )
     progress = Progress()
+    conversation = Conversation(proc, client, int(job["id"]))
     lines: list[str] = []
     errors: list[str] = []
 
@@ -472,20 +590,18 @@ def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stoppe
         for line in proc.stdout:
             lines.append(line)
             progress.feed(line)
+            if _is_result(line):
+                conversation.on_result()
+        conversation.close()
 
     def read_stderr():
         errors.append(proc.stderr.read())
 
-    def write_stdin():
-        try:
-            proc.stdin.write(job["text"])
-            proc.stdin.close()
-        except OSError:                                  # claude exited without reading it
-            pass
-
-    threads = [threading.Thread(target=f, daemon=True) for f in (read_stdout, read_stderr, write_stdin)]
+    conversation.start(job["text"])
+    threads = [threading.Thread(target=f, daemon=True) for f in (read_stdout, read_stderr)]
     for t in threads:
         t.start()
+    threading.Thread(target=conversation.poll, args=(stopper,), daemon=True).start()
     reader = threads[0]
     started = time.monotonic()
     deadline = started + float(settings.get("timeout_min") or 60) * 60
@@ -510,6 +626,7 @@ def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stoppe
             log.info("#%s stopping claude (%s)", job["id"], reason)
             stopped_because, signalled_at = reason, time.monotonic()
             proc.send_signal(signal.SIGINT)              # ends the turn cleanly
+            conversation.close()                         # and nothing more comes in
         elif signalled_at is not None and time.monotonic() - signalled_at > STOP_GRACE_SEC:
             log.warning("#%s claude did not stop; killing it", job["id"])
             os.killpg(proc.pid, signal.SIGKILL)
@@ -521,6 +638,28 @@ def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stoppe
         "returncode": proc.returncode, "stopped": stopped_because,
         "duration_s": round(time.monotonic() - started, 1),
     }
+
+
+def _is_result(line: str) -> bool:
+    """A ``"type": "result"`` line of the stream: a turn ended."""
+    if not line.lstrip().startswith("{"):
+        return False
+    try:
+        event = json.loads(line)
+    except ValueError:
+        return False
+    return isinstance(event, dict) and event.get("type") == "result"
+
+
+def result_texts(stdout: str) -> list[str]:
+    """The text of every turn's result (more than one when follow-ups came after a turn ended)."""
+    texts = []
+    for line in stdout.splitlines():
+        if _is_result(line):
+            text = str(json.loads(line).get("result") or "").strip()
+            if text:
+                texts.append(text)
+    return texts
 
 
 def parse_output(stdout: str) -> dict | None:
@@ -560,7 +699,9 @@ def summarize(run: dict, data: dict | None, settings: dict) -> dict:
     if data is None:
         tail = (run["stderr"] or run["stdout"]).strip()[-600:]
         return {**result, "ok": False, "text": "", "error": f"claude 没有正常输出（退出码 {run['returncode']}）：{tail}"}
-    text = str(data.get("result") or "").strip()
+    texts = result_texts(run["stdout"])
+    # Follow-ups that came after a turn ended made more turns: their answers go together.
+    text = "\n\n".join(texts) if len(texts) > 1 else str(data.get("result") or "").strip()
     denied = data.get("permission_denials") or []
     if denied:
         tools = sorted({str(d.get("tool_name", "?")) for d in denied if isinstance(d, dict)})
@@ -569,6 +710,7 @@ def summarize(run: dict, data: dict | None, settings: dict) -> dict:
     return {
         **result, "ok": ok, "text": text, "session_id": str(data.get("session_id") or ""),
         "cost_usd": data.get("total_cost_usd"),
+        **({"denied": len(denied)} if denied else {}),
         **({} if ok else {"error": str(data.get("subtype") or "error")}),
     }
 
@@ -789,7 +931,8 @@ def single_instance():
     HOME_DIR.mkdir(parents=True, exist_ok=True)
     handle = open(HOME_DIR / "worker.lock", "w")
     try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if fcntl is not None:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         handle.close()
         return None

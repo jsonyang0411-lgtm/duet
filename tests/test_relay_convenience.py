@@ -44,6 +44,8 @@ def test_project_words_and_switching():
     assert C.parse("切换到@relay") == C.RelayCommand("switch", project="relay")
     assert C.parse("cd webot") == C.RelayCommand("switch", project="webot")
     assert C.parse("切换一下思路，先看测试") == C.RelayCommand("task", text="切换一下思路，先看测试")
+    assert C.parse("切到 不存在的") == C.RelayCommand("switch", project="不存在的")
+    assert C.parse("切回 webot") == C.RelayCommand("switch", project="webot")
 
 
 # ── no "cc" when the bot only relays ──────────────────────────────────────

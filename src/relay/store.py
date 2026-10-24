@@ -12,6 +12,9 @@ While a job runs, every heartbeat brings what Claude is doing (``progress``);
 keeps; the worker downloads them).  ``relay_asks`` are Claude's requests for an
 approval: ``pending`` until the person answers in WeChat (``allow`` / ``deny``),
 the time runs out (``expired``) or the job ends (``cancelled``).
+``relay_followups`` are what the person sends while their job runs: the worker
+reads them past a cursor (``input_upto``) and hands them to the running Claude;
+``input_closed`` means the job takes no more (later messages are new jobs).
 
 The router thread adds jobs, the HTTP threads hand them out and take the
 results, the delivery thread marks them sent: one connection, one lock.
@@ -58,6 +61,13 @@ CREATE TABLE IF NOT EXISTS relay_files (
     size INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS relay_files_job ON relay_files(job_id, id);
+CREATE TABLE IF NOT EXISTS relay_followups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS relay_followups_job ON relay_followups(job_id, id);
 CREATE TABLE IF NOT EXISTS relay_asks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id INTEGER NOT NULL,
@@ -87,6 +97,8 @@ _ADDED_COLUMNS = (
     ("relay_jobs", "progress", "TEXT NOT NULL DEFAULT '{}'"),
     ("relay_jobs", "progress_sent_at", "REAL"),
     ("relay_jobs", "progress_sent", "TEXT NOT NULL DEFAULT ''"),
+    ("relay_jobs", "input_closed", "INTEGER NOT NULL DEFAULT 0"),
+    ("relay_jobs", "input_upto", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 
@@ -214,6 +226,87 @@ class RelayStore:
                 "SELECT * FROM relay_files WHERE job_id = ? AND id = ?", (job_id, file_id)
             ).fetchone()
         return dict(row) if row else None
+
+    # ── follow-ups: what the person sends while their job runs ─────────────
+
+    def add_followup(self, chat_id: str, text: str, now: float) -> Optional[tuple[int, int]]:
+        """``(job_id, followup_id)`` when this chat has a running job that still takes input."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id FROM relay_jobs WHERE chat_id = ? AND status = 'running' AND input_closed = 0"
+                " AND cancel_requested = 0 ORDER BY id DESC LIMIT 1", (chat_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            cur = self._conn.execute(
+                "INSERT INTO relay_followups (job_id, text, created_at) VALUES (?, ?, ?)",
+                (row["id"], text, now),
+            )
+            self._conn.commit()
+            return int(row["id"]), int(cur.lastrowid)
+
+    def followups(self, job_id: int, after: int) -> Optional[list[dict]]:
+        """Follow-ups past ``after`` (the worker has handed on everything up to it); None: no job."""
+        with self._lock:
+            if self._conn.execute("SELECT 1 FROM relay_jobs WHERE id = ?", (job_id,)).fetchone() is None:
+                return None
+            self._conn.execute("UPDATE relay_jobs SET input_upto = MAX(input_upto, ?) WHERE id = ?",
+                               (int(after), job_id))
+            rows = self._conn.execute(
+                "SELECT id, text FROM relay_followups WHERE job_id = ? AND id > ? ORDER BY id",
+                (job_id, int(after)),
+            ).fetchall()
+            self._conn.commit()
+        return [dict(r) for r in rows]
+
+    def close_input(self, job_id: int, upto: int) -> Optional[list[dict]]:
+        """A turn ended and the worker has handed on everything up to ``upto``: the follow-ups
+        past it, or (none left, or the job is being cancelled) ``[]`` and the job takes no
+        more.  One step under the lock, so a message is either returned here or a new job."""
+        with self._lock:
+            job = self._conn.execute("SELECT cancel_requested FROM relay_jobs WHERE id = ?", (job_id,)).fetchone()
+            if job is None:
+                return None
+            self._conn.execute("UPDATE relay_jobs SET input_upto = MAX(input_upto, ?) WHERE id = ?",
+                               (int(upto), job_id))
+            rows = [] if job["cancel_requested"] else self._conn.execute(
+                "SELECT id, text FROM relay_followups WHERE job_id = ? AND id > ? ORDER BY id",
+                (job_id, int(upto)),
+            ).fetchall()
+            if not rows:
+                self._conn.execute("UPDATE relay_jobs SET input_closed = 1 WHERE id = ?", (job_id,))
+            self._conn.commit()
+        return [dict(r) for r in rows]
+
+    def add_result_note(self, job_id: int, **fields) -> None:
+        """Merge ``fields`` into the job's ``result_json`` (what the result message mentions)."""
+        with self._lock:
+            row = self._conn.execute("SELECT result_json FROM relay_jobs WHERE id = ?", (job_id,)).fetchone()
+            if row is None:
+                return
+            try:
+                data = json.loads(row["result_json"] or "{}")
+            except ValueError:
+                data = {}
+            data.update(fields)
+            self._conn.execute("UPDATE relay_jobs SET result_json = ? WHERE id = ?",
+                               (json.dumps(data, ensure_ascii=False), job_id))
+            self._conn.commit()
+
+    def take_leftovers(self, job_id: int) -> list[dict]:
+        """Follow-ups the worker never handed on (the job ended first); they count as taken."""
+        with self._lock:
+            row = self._conn.execute("SELECT input_upto FROM relay_jobs WHERE id = ?", (job_id,)).fetchone()
+            if row is None:
+                return []
+            rows = self._conn.execute(
+                "SELECT id, text FROM relay_followups WHERE job_id = ? AND id > ? ORDER BY id",
+                (job_id, row["input_upto"]),
+            ).fetchall()
+            self._conn.execute("UPDATE relay_jobs SET input_closed = 1, input_upto = MAX(input_upto, ?)"
+                               " WHERE id = ?", (rows[-1]["id"] if rows else 0, job_id))
+            self._conn.commit()
+        return [dict(r) for r in rows]
 
     # ── approvals ─────────────────────────────────────────────────────────
 

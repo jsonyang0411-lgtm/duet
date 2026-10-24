@@ -8,6 +8,8 @@
     cc 新对话                       the next task starts a new Claude session
     cc 项目                         the projects the Mac offers, and the current one
     cc 切到 douyin                  later tasks run in "douyin" (a new session)
+    cc 新任务 …                     a task of its own even while another one runs
+                                    (otherwise a task sent meanwhile goes to the running one)
     cc / cc 帮助                    the help text
 
 With CLAUDE_RELAY_ONLY=on the "cc" can be left out (see ClaudeRelay.handle).
@@ -21,11 +23,17 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-_PROJECT = re.compile(r"^@([A-Za-z0-9_.-]+)\s+(.+)$", re.S)
+_PROJECT = re.compile(r"^@([^\s/\\:]+)\s+(.+)$", re.S)
 # "取消 17", "取消#17", "取消" -- but "取消一下那个提交" is a task.
 _CONTROL = re.compile(r"^(取消|停止|cancel|stop|重试|retry)\s*(?:#?(\d+))?$", re.I)
 _CANCEL = {"取消", "停止", "cancel", "stop"}
-_SWITCH = re.compile(r"^(?:切到|切换到|切换|进入|cd|use)\s*@?([A-Za-z0-9_.-]+)$", re.I)
+# "新任务 跑测试", "排队：跑测试" -- but "排队中时再发" is a task of its own words.
+_NEW_TASK = re.compile(r"^(?:新任务|排队)(?:\s*[:：]\s*|\s+)(.+)$", re.S)
+_SWITCH = re.compile(
+    r"^(?:切到|切换到|切回|切回到|进入|cd|use)\s*@?([A-Za-z0-9_.-]+|[\u4e00-\u9fa5]{1,20})$"
+    r"|^(?:切换)\s*@?([A-Za-z0-9_.-]+)$",
+    re.I,
+)
 
 HELP_WORDS = {"帮助", "help", "命令", "?", "？"}
 STATUS_WORDS = {"状态", "status", "列表", "list"}
@@ -43,6 +51,7 @@ class RelayCommand:
     text: str = ""          # the task for Claude
     project: str = ""       # a project alias the worker maps to a folder
     job_id: int | None = None
+    queue: bool = False     # "新任务 …": never a follow-up of the running task
 
 
 def prefix_pattern(prefix: str) -> re.Pattern:
@@ -81,11 +90,17 @@ def parse(body: str) -> RelayCommand:
         return RelayCommand("projects")
     m = _SWITCH.match(body)
     if m:
-        return RelayCommand("switch", project=m.group(1))
+        project = m.group(1) or m.group(2)
+        return RelayCommand("switch", project=project)
     m = _CONTROL.match(body)
     if m:
         kind = "cancel" if m.group(1).lower() in _CANCEL else "retry"
         return RelayCommand(kind, job_id=int(m.group(2)) if m.group(2) else None)
+    m = _NEW_TASK.match(body)
+    if m:
+        inner = parse(m.group(1))
+        if inner.kind == "task":
+            return RelayCommand("task", text=inner.text, project=inner.project, queue=True)
     m = _PROJECT.match(body)
     if m:
         return RelayCommand("task", text=m.group(2).strip(), project=m.group(1))
