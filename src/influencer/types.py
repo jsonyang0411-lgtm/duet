@@ -27,8 +27,9 @@ class InfluencerProfile:
     nickname: str = ""
     xhs_id: str = ""
     xhs_nickname: str = ""
-    follower_count: int = 0
-    recent_like_count: int = 0  # 近期爆款点赞数
+    # 拿不到小红书数据时为 None（未知），不编造（B8）
+    follower_count: Optional[int] = None
+    recent_like_count: Optional[int] = None  # 近期爆款点赞数
     category: str = "美妆个护"  # 带货类目
     status: str = "NEW"  # NEW, QUALIFIED, REJECTED, SAMPLE_SENT, COOPERATING
     cooperation_count: int = 0
@@ -55,7 +56,7 @@ class ApprovalActionPacket:
     packet_id: str
     influencer_id: str
     influencer_name: str
-    follower_count: int
+    follower_count: Optional[int]  # None 表示拿不到数据
     requested_product: str
     sku_id: str
     stock_available: int
@@ -63,6 +64,7 @@ class ApprovalActionPacket:
     proposed_commission_rate: float
     shipping_address: str
     what_cannot_be_undone: str
+    qualification: str = ""  # 资质标注：达标 / 不达标：原因 / 待核实（D4，只标注不拒绝）
     status: GateStatus = GateStatus.PENDING
     created_at: float = field(default_factory=time.time)
     expires_at: float = field(default_factory=lambda: time.time() + APPROVAL_TTL_SECONDS)

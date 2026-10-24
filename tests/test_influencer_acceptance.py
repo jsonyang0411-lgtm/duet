@@ -281,11 +281,31 @@ def test_default_commission_is_25_percent():
     assert packet.proposed_commission_rate == 0.25
 
 
-@known_failure("B8 缺数据默认达标")
 def test_missing_creator_stats_are_not_made_up():
     handler = make_handler(xhs=FakeXHS(stats={}))
     packet = get_packet(handler, submit_full_request(handler))
     assert packet.follower_count is None, "拿不到粉丝数就是未知，不能编成 2 万"
+
+
+def test_unknown_stats_are_marked_for_review_and_can_still_be_approved():
+    erp, xhs = FakeERP(), FakeXHS(stats={})
+    handler = make_handler(erp, xhs)
+    packet_id = submit_full_request(handler)
+    assert get_packet(handler, packet_id).qualification.startswith("待核实")
+    assert run(handler.execute_operator_approval(packet_id, True))["success"] is True
+
+
+def test_known_unqualified_creator_is_flagged_not_auto_rejected_and_cannot_be_shipped():
+    erp, xhs = FakeERP(), FakeXHS(stats={"follower_count": 500, "recent_highest_likes": 80})
+    handler = make_handler(erp, xhs)
+    run(handler.process_incoming_message(INFLUENCER, SAMPLE_REQUEST, nickname="小美"))
+    reply = run(handler.process_incoming_message(INFLUENCER, FULL_ADDRESS, nickname="小美"))
+    assert "名额" not in reply, "D4：不自动拒绝"
+    [packet] = pending_packets(handler)
+    assert packet.qualification.startswith("不达标")
+    result = run(handler.execute_operator_approval(packet.packet_id, True))
+    assert result["success"] is False, "R3：数据明确不达标的达人，批准了也不寄样"
+    assert erp.order_calls == [] and xhs.commission_calls == []
 
 
 @known_failure("B10 微信身份当小红书账号")
@@ -304,13 +324,11 @@ def no_mock_env(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
-@known_failure("B6/D6 自动 mock")
 def test_erp_without_keys_or_mock_flag_returns_no_fake_stock(no_mock_env):
     result = outcome(JuShuiTanERPClient().check_inventory("VC精华液"))
     assert isinstance(result, Exception) or not result.get("in_stock")
 
 
-@known_failure("B6 真实模式假成功")
 def test_erp_real_mode_does_not_report_a_fake_order(no_mock_env):
     # 第 5 阶段接入真实接口后，这条要改成拦截 HTTP 请求的写法
     client = JuShuiTanERPClient(app_key="k", app_secret="s", access_token="t")
@@ -321,7 +339,6 @@ def test_erp_real_mode_does_not_report_a_fake_order(no_mock_env):
     assert isinstance(result, Exception) or not result.get("success")
 
 
-@known_failure("B7/D6 自动 mock")
 def test_xhs_without_cli_or_mock_flag_fakes_nothing(no_mock_env):
     client = XiaohongshuCLIClient(cli_path="/nonexistent/xhs-cli")
     stats = outcome(client.get_creator_stats("xhs_123"))

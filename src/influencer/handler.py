@@ -11,14 +11,18 @@ import re
 import threading
 import time
 import uuid
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 from .jst_erp import JuShuiTanERPClient
-from .settings import DEFAULT_COMMISSION_RATE, MAX_COMMISSION_RATE
+from .settings import DEFAULT_COMMISSION_RATE, MAX_COMMISSION_RATE, MIN_FOLLOWERS, MIN_RECENT_LIKES
 from .types import ApprovalActionPacket, GateStatus, InfluencerProfile, SampleRequestIntent
 from .xhs_cli import XiaohongshuCLIClient
 
 logger = logging.getLogger(__name__)
+
+QUALIFICATION_OK = "达标"
+QUALIFICATION_FAILED = "不达标"
+QUALIFICATION_UNKNOWN = "待核实：没有小红书数据，需要运营人工核实"
 
 
 class InfluencerBusinessHandler:
@@ -83,13 +87,26 @@ class InfluencerBusinessHandler:
             raw_evidence=text,
         )
 
-    def check_qualification(self, profile: InfluencerProfile) -> Tuple[bool, str]:
-        """核查达人带货资质（小红书粉丝 >= 10000 且 爆款点赞 >= 1000）"""
-        if profile.follower_count < 10000:
-            return False, f"粉丝量（{profile.follower_count}）未达基础门槛（10,000）"
-        if profile.recent_like_count < 1000:
-            return False, f"近期点赞（{profile.recent_like_count}）未达爆款点赞门槛（1,000）"
-        return True, "资质合格"
+    def assess_qualification(self, profile: InfluencerProfile) -> str:
+        """给审批单标注资质（D4）：只标注、不自动拒绝；拿不到数据就是"待核实"。"""
+        if profile.follower_count is None or profile.recent_like_count is None:
+            return QUALIFICATION_UNKNOWN
+        problems = []
+        if profile.follower_count < MIN_FOLLOWERS:
+            problems.append(f"粉丝 {profile.follower_count} 低于 {MIN_FOLLOWERS}")
+        if profile.recent_like_count < MIN_RECENT_LIKES:
+            problems.append(f"近期最高点赞 {profile.recent_like_count} 低于 {MIN_RECENT_LIKES}")
+        if problems:
+            return f"{QUALIFICATION_FAILED}：{'；'.join(problems)}"
+        return QUALIFICATION_OK
+
+    async def _fetch_creator_stats(self, xhs_uid: str) -> Dict[str, Any]:
+        """查达人数据。拿不到就返回空字典，审批单会标成"待核实"，不编造数据（B8）。"""
+        try:
+            return await self.xhs.get_creator_stats(xhs_uid) or {}
+        except Exception as exc:
+            logger.warning(f"[XHS] 查询达人数据失败，按待核实处理：{exc}")
+            return {}
 
     async def process_incoming_message(
         self, sender_id: str, content: str, nickname: str = ""
@@ -101,27 +118,23 @@ class InfluencerBusinessHandler:
 
         # 1. 获取或创建达人档案
         if sender_id not in self.profiles:
-            stats = await self.xhs.get_creator_stats(sender_id)
+            stats = await self._fetch_creator_stats(sender_id)
             self.profiles[sender_id] = InfluencerProfile(
                 wechat_id=sender_id,
                 nickname=nickname,
-                follower_count=stats.get("follower_count", 20000),
-                recent_like_count=stats.get("recent_highest_likes", 1500),
+                follower_count=stats.get("follower_count"),
+                recent_like_count=stats.get("recent_highest_likes"),
             )
         profile = self.profiles[sender_id]
 
-        # 2. 资质初筛
-        qualified, reason = self.check_qualification(profile)
-        if not qualified:
-            logger.info(f"[达人初筛未过] {profile.nickname} ({sender_id}): {reason}")
-            return (
-                "亲亲，非常感谢您对我们品牌的认可与喜爱！💖\n"
-                "目前我们本期的免费寄样名额已经约满啦，您可以先关注我们小店的最新活动，"
-                "后续一旦开启新一轮体验官招募，我们第一时间私信您哦~"
-            )
+        # 2. 资质只在审批单上标注，由运营决定，不自动拒绝（D4）
 
         # 3. 聚水潭 ERP 查库存
-        inventory = await self.erp.check_inventory(intent.requested_product)
+        try:
+            inventory = await self.erp.check_inventory(intent.requested_product)
+        except Exception as exc:
+            logger.error(f"[ERP] 查询库存失败，需要人工处理：{exc}")
+            return "收到老师的需求啦~ 我们这边核对一下，再回复老师哦！"
         if not inventory.get("in_stock") or inventory.get("available_quantity", 0) <= 0:
             logger.warning(f"[ERP库存不足] {intent.requested_product}")
             return (
@@ -154,6 +167,7 @@ class InfluencerBusinessHandler:
             what_cannot_be_undone=(
                 f"聚水潭ERP将自动扣减库存并出具打单运单，小红书将绑定 {DEFAULT_COMMISSION_RATE:.0%} 专属定向计划"
             ),
+            qualification=self.assess_qualification(profile),
         )
         with self._lock:
             self.pending_approvals[packet_id] = action_packet
@@ -191,6 +205,12 @@ class InfluencerBusinessHandler:
                         f"{MAX_COMMISSION_RATE:.0%}，不能执行"
                     ),
                 }
+            if packet.qualification.startswith(QUALIFICATION_FAILED):
+                # R3：数据明确不达标的达人不寄样，批准了也不执行
+                return {
+                    "success": False,
+                    "error": f"达人资质{packet.qualification}，按规则不能寄样，请驳回",
+                }
             # 先占住这张单，调用外部系统期间，重复的"通过"会因为状态不是 PENDING 被挡下
             packet.status = GateStatus.EXECUTING
 
@@ -201,6 +221,7 @@ class InfluencerBusinessHandler:
                 recipient_name=packet.influencer_name,
                 recipient_phone="13800000000",
                 shipping_address=packet.shipping_address,
+                order_ref=packet.packet_id,
             )
         except Exception as exc:
             return self._fail(packet, f"聚水潭建单出错：{exc}")
@@ -212,6 +233,7 @@ class InfluencerBusinessHandler:
                 xhs_uid=packet.influencer_id,
                 sku_id=packet.sku_id,
                 rate=packet.proposed_commission_rate,
+                idempotency_key=packet.packet_id,
             )
         except Exception as exc:
             comm_res = {"success": False, "error": str(exc)}
