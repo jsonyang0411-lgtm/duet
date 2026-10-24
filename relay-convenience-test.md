@@ -4,6 +4,17 @@
 
 测试人：在跑机器人的 Windows 电脑上做，用**管理员号（`ADMIN_WXID`）和机器人的私聊**发消息。Mac 那边的步骤由 Mac 的人做（写了「Mac：」的那几行）。
 
+## 第三轮：微信 4 原图（从这里开始）
+
+第二轮已经全部通过。第三轮测的是：图片不再截聊天窗口，而是解开微信 4 加密的原图（`.dat`）。密钥要在微信的内存里找一次（只读），找到后存进 `data\wechat_image_keys.json`，以后不用再找。
+
+- [ ] **0. 准备**：`git pull`（分支 `ocr-fallback`），确认有 `tools/image_key_check.py`。先在电脑微信里随便点开 2–3 张图片（密钥在显示过图片之后才在内存里）。
+- [ ] **1. 检查工具**：机器人先停掉，在项目文件夹里运行 `python tools/image_key_check.py`。期望：列出账号目录，「V1 …, V2 …」，「XOR key: found」，V2 的话「AES key (V2): xxxx…（N s）」，最后「OK decoded the newest picture: data\vision_cache\image_key_check.jpg (… 宽x高)」。打开这张图，应该就是微信里最新那张图片，清晰。把整段输出发回来（里面只有数量和密钥前 4 个字符）。
+- [ ] **2. 中转发原图**：重启机器人。发一张有小字和人名的截图，再发 `这张图里写了什么，人名都列出来`。期望：回执「带 1 个附件」；**Mac：** `~/.claude-relay/inbox/job-N/` 里是 `图片-1.jpg`（不是 `聊天截图-1.jpg`）；结果里人名完整。
+- [ ] **3. 机器人自己找密钥**（可选）：删掉 `data\wechat_image_keys.json`，重启机器人，再做一次第 2 步。期望：第一张图的回执慢 10–60 秒（在找密钥），`data\bot.log` 里有 `Image key found`，之后的图片不再慢。
+
+**回报**：第 1 步的完整输出；第 2 步 Mac 那边的文件名（Mac 的人看）；没通过的附 `data\bot.log` 里含 `Image key` 和 `CLAUDE_RELAY` 的行。
+
 ## 第二轮：插话、大文件、重做提示（从这里开始）
 
 第一轮（下面第 0–8 节）已经全部通过。第二轮测的是之后加的三样东西：

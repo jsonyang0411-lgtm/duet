@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import mimetypes
 import os
 import re
@@ -256,7 +257,8 @@ def first_frame_png(data: bytes) -> bytes:
 
 
 def decode_wechat_dat_image(path: Path, cache_dir: Path) -> Path | None:
-    """Decode common XOR-obfuscated WeChat .dat image caches."""
+    """Decode WeChat .dat image caches: the XOR-obfuscated ones of WeChat 3, and WeChat 4's
+    AES + XOR ones (``src/wechat/image_key.py``; the first V2 picture may take a memory search)."""
     try:
         raw = path.read_bytes()
     except OSError:
@@ -264,8 +266,18 @@ def decode_wechat_dat_image(path: Path, cache_dir: Path) -> Path | None:
     if len(raw) < MIN_MEDIA_BYTES:
         return None
 
+    from .wechat.image_key import dat_version, decode_file
     direct_ext = _ext_from_magic(raw)
-    if direct_ext:
+    if dat_version(raw):
+        try:
+            decoded = decode_file(path, raw)
+        except Exception:
+            logging.getLogger(__name__).exception("Decoding the WeChat 4 picture %s failed", path)
+            decoded = None
+        ext = _ext_from_magic(decoded or b"")
+        if not ext:
+            return None
+    elif direct_ext:
         decoded = raw
         ext = direct_ext
     else:

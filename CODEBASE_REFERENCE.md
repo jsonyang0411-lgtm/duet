@@ -1105,6 +1105,21 @@ todo_delete_keywords: list[str] = [
 | `tools/uia_probe.py` | 只读：列出微信进程的窗口（默认不含主窗口，里面有联系人和聊天名；`--main` 才含）和每个窗口的 UI Automation 控件树（类型、名字、AutomationId、类名、矩形；`--depth` 默认 6、`--limit` 默认 400、`--out` 写文件），最后给一句结论：什么都没暴露 / 只有窗口和面板（没有有名字的按钮、输入框、菜单项）/ N 个有名字的按钮等。**第二轮真机结果：4.0 的「添加朋友」和「申请添加朋友」窗口都只有 3 个控件——窗口、2 像素的 `Weixin` 面板、渲染面板 `MMUIRenderSubWindowHW`，内容是微信自己画的，UIA 找不到任何按钮，按位置点是目前唯一办法**。用来判断 4.0 的 (+) 按钮、输入框、确定按钮能不能改成按名字找，不点击不输入 |
 | `tools/friend_admin.py` | 手动工具（Windows）：`--status`（窗口句柄、前台信息、OCR 预览）、`--accept`、`--add 号码 [--message 附言]` | — |
 
+
+### 2.50 `src/wechat/image_key.py`（微信 4 图片 `.dat` 的密钥和解码）
+
+微信 4 的图片在 `<账号>/msg/attach/…/Img/*.dat`：前 15 字节是签名（`07 08 56 32 08 07` = V2，`…31…` = V1）、AES 长度、XOR 长度和 1 个填充字节；接着是 AES-128-ECB（长度补到 16 的倍数，正好整除时多一块，PKCS7）、中间原文、XOR 尾巴。V1 用固定密钥 `cfcd208495d565ef`；V2 的密钥每个账号一个，只在运行中的微信内存里（一串 32 个小写字母/数字，取前 16 个）；XOR 密钥由缩略图（`*_t.dat`）最后两个字节算出（JPEG 以 FF D9 结尾）。只读微信的文件和内存。
+
+| 名称 | 描述 | 返回值 |
+|---|---|---|
+| `aes_ecb_decrypt(key, data)` / `aes_ecb_encrypt(key, data)` / `aes_decrypt_block(round_keys, block)` | 纯 Python 的 AES-128（不加依赖；对过 FIPS-197 的向量），一个候选密钥约 23 微秒 | `bytes` |
+| `dat_version(raw)` / `decode_v4(raw, aes_key, xor_key)` / `encode_v4(picture, aes_key, xor_key, version, aes_size, xor_size)` | 版本（1/2/0）；解出图片（缺密钥、截断返回 None）；反向编码（测试用） | `int` / `bytes \| None` / `bytes` |
+| `account_dir_of(path)` / `thumbnails(account, limit, look_at)` / `xor_key_from(files)` / `v2_block_from(files)` / `key_opens(key, block)` | `msg` 上一级是账号目录；最新的缩略图；按最后两个字节投票（`a^FF == b^D9` 才算）；V2 缩略图的第一个 AES 块；解出来以 FF D8 FF 开头才对 | — |
+| `find_aes_key(chunks, block, deadline)` / `wechat_memory(pid)` / `scan_wechat_for_key(block)` | 在内存块里找前后都不是小写字母数字的 32 字符串，取前 16 个试（每个只试一次，过了期限就停）；Windows 上用 `VirtualQueryEx`/`ReadProcessMemory` 读微信进程（只读，私有内存优先，跳过 100 MB 以上的区域，限时 `SCAN_TIME_LIMIT_SEC` 180 秒），进程号用 `extract_key._find_wechat_pid` | `bytes \| None` |
+| `ImageKeys(path, scan, clock).keys(account, need_aes, allow_scan)` / `decode_file(path, raw, keys)` | 每个账号目录的密钥缓存在 `data/wechat_image_keys.json`（`{"<账号目录名>": {"xor": n, "aes": "16 个字符"}}`）；没有就算 XOR、需要时搜内存，搜不到 `SCAN_RETRY_SEC`（600 秒）内不再搜；`decode_file` 给 `vision.decode_wechat_dat_image` 用 | `(bytes \| None, int \| None)` / `bytes \| None` |
+| `vision.decode_wechat_dat_image(path, cache_dir)` | 微信 4 的 V1/V2 走 `image_key.decode_file`（第一张 V2 图可能要搜一次内存），旧的 XOR 图照旧；中转的图片附件（`attachments.resolve`）和看图功能都因此拿到原图，找不到才截聊天窗口 | `Path \| None` |
+| `tools/image_key_check.py` | Windows 上运行（微信要开着）：找账号目录、数 V1/V2、算 XOR、搜 AES 密钥（存进缓存）、解出最新一张图到 `data/vision_cache/image_key_check.<扩展名>`；只打印数量、大小和密钥前 4 个字符；`--no-scan` 不搜内存 | 退出码 |
+
 ---
 
 ## 3. 模块间关系图
