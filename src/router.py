@@ -370,26 +370,14 @@ class MessageRouter:
 
         reply: Optional[str] = None
 
-        # 优先拦截达人商务意图 (索样 / 合作 / 资质审查 / 聚水潭库存 / 审批闸门)
-        if hasattr(self, "_influencer_handler") and self._influencer_handler:
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-                influencer_reply = loop.run_until_complete(
-                    self._influencer_handler.process_incoming_message(
-                        sender_id=msg.get("sender_id", ""),
-                        content=clean_content,
-                        nickname=msg.get("sender_name", ""),
-                    )
-                )
-            except RuntimeError:
-                influencer_reply = asyncio.run(
-                    self._influencer_handler.process_incoming_message(
-                        sender_id=msg.get("sender_id", ""),
-                        content=clean_content,
-                        nickname=msg.get("sender_name", ""),
-                    )
-                )
+        # 白名单内达人的私聊先交给达人商务模块（索样 / 收件信息 / 审批单）。
+        # 用 chat_id 识别达人：私聊的 chat_id 是对方的稳定 ID，sender_id 在 Mac 后端是昵称
+        if self._influencer_handler is not None:
+            influencer_reply = self._influencer_handler.handle_private_message(
+                chat_id=msg.get("chat_id", ""),
+                content=clean_content,
+                nickname=msg.get("sender_name", ""),
+            )
             if influencer_reply:
                 self._tracer.current().reason("influencer_business_intent")
                 return influencer_reply

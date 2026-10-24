@@ -53,6 +53,7 @@ class SampleRequestIntent:
     recipient_name: str = ""
     recipient_phone: str = ""
     shipping_address: str = ""
+    xhs_account: str = ""  # 小红书主页链接或小红书号
     proposed_commission_rate: Optional[float] = None
     raw_evidence: str = ""  # 事实溯源原话 (No memory without a source)
 
@@ -65,6 +66,7 @@ class SampleRequestDraft:
     recipient_name: str = ""
     recipient_phone: str = ""
     shipping_address: str = ""
+    xhs_account: str = ""
     inventory: Optional[Dict[str, Any]] = None  # 当前商品的库存查询结果，换商品后清空
     asked_for: Tuple[str, ...] = ()  # 上一轮追问了哪些字段
     evidence: List[str] = field(default_factory=list)  # 达人的原话，供运营核对（R5）
@@ -79,6 +81,8 @@ class SampleRequestDraft:
             value = getattr(info, name)
             if value:
                 setattr(self, name, value)
+        if info.xhs_account:
+            self.xhs_account = info.xhs_account
         if info.raw_evidence:
             self.evidence = (self.evidence + [info.raw_evidence])[-10:]
         self.updated_at = time.time()
@@ -104,6 +108,7 @@ class ApprovalActionPacket:
     qualification: str = ""  # 资质标注：达标 / 不达标：原因 / 待核实（D4，只标注不拒绝）
     recipient_name: str = ""
     recipient_phone: str = ""
+    xhs_account: str = ""  # 达人提供或运营填写；绑佣金必须有，不能用微信 ID 代替（B10）
     evidence: str = ""  # 达人的原话，供运营核对（R5）
     status: GateStatus = GateStatus.PENDING
     created_at: float = field(default_factory=time.time)

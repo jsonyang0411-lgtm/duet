@@ -23,6 +23,7 @@ REASONS = {
     "image_followup": "紧接着机器人回复后的图片/表情，按看图跟进回答",
     "image_message_no_followup": "收到图片/表情，但不是对机器人说的，没有回复",
     "private_chat": "私聊，直接交给模型",
+    "influencer_business_intent": "白名单内的达人在谈索样，交给达人商务模块处理，没有调用聊天模型",
     "quote_of_other_member": "引用了别的群友的话，这条是说给他的，不是对机器人说的",
     "stale_mention_ignored": "@ 的消息太旧（可能是启动时重放的历史），忽略",
     "feishu_export": "同步到飞书的命令",

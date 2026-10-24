@@ -26,3 +26,12 @@ MIN_RECENT_LIKES = 1000
 def mock_enabled() -> bool:
     """模拟模式只能手动打开（D6）：设置环境变量 INFLUENCER_MOCK=1。"""
     return os.getenv("INFLUENCER_MOCK", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def influencer_chat_ids_from_env() -> set:
+    """达人白名单的临时来源（D3）：环境变量 INFLUENCER_CHAT_IDS，逗号分隔的私聊 chat_id。
+
+    默认为空，也就是谁都不拦。第 6 项做好控制台的名单管理后，改为从数据库读取。
+    """
+    raw = os.getenv("INFLUENCER_CHAT_IDS", "")
+    return {part.strip() for part in raw.split(",") if part.strip()}

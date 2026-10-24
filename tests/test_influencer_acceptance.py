@@ -23,6 +23,7 @@ from test_router import make_private_msg, make_router
 INFLUENCER = "wxid_influencer_a"
 SAMPLE_REQUEST = "你好，想申请一下VC精华液的样品"
 FULL_ADDRESS = "张三 13812345678 上海市浦东新区世纪大道100号"
+XHS_PROFILE = "https://www.xiaohongshu.com/user/profile/5f0000000000000000000001"
 
 # 审批通过之前，回复里不能出现的承诺性字眼（D1）
 COMMITMENT_WORDS = ("今天", "明天", "下午", "马上", "立刻", "顺丰", "已安排", "已经安排", "排单")
@@ -89,12 +90,9 @@ def outcome(coro):
 # ---- 以下辅助函数集中了对处理器内部结构的依赖，第 2 阶段改结构时只改这里 ----
 
 def make_handler(erp=None, xhs=None, *, influencers=(INFLUENCER,)):
-    handler = InfluencerBusinessHandler(erp_client=erp or FakeERP(), xhs_client=xhs or FakeXHS())
-    # 白名单（D3）在第 2 阶段实现；实现之后去掉这个 hasattr 判断
-    if hasattr(handler, "mark_influencer"):
-        for chat_id in influencers:
-            handler.mark_influencer(chat_id)
-    return handler
+    return InfluencerBusinessHandler(
+        erp_client=erp or FakeERP(), xhs_client=xhs or FakeXHS(), influencer_ids=influencers,
+    )
 
 
 def pending_packets(handler):
@@ -116,9 +114,9 @@ def expire(handler, packet_id):
 # ---- 场景辅助 ----
 
 def submit_full_request(handler, chat_id=INFLUENCER):
-    """走完"索样 → 补地址"两步，返回生成的审批单号。"""
+    """走完"索样 → 补收件信息和小红书主页"两步，返回生成的审批单号。"""
     run(handler.process_incoming_message(chat_id, SAMPLE_REQUEST, nickname="小美"))
-    run(handler.process_incoming_message(chat_id, FULL_ADDRESS, nickname="小美"))
+    run(handler.process_incoming_message(chat_id, f"{FULL_ADDRESS} 小红书主页 {XHS_PROFILE}", nickname="小美"))
     [packet] = pending_packets(handler)
     return packet.packet_id
 
@@ -144,7 +142,6 @@ def router_with(handler):
 
 # ---- S1–S7 ----
 
-@known_failure("B11/D3 白名单")
 def test_s1_non_influencer_private_chat_gets_the_normal_reply():
     router, summarizer = router_with(make_handler())
     reply = router.handle(private_msg("m1", "wxid_friend", "老同学", "上次合作的项目挺顺利，周末聚一下？"))
@@ -196,7 +193,6 @@ def test_s5_a_rejected_packet_cannot_be_approved_later():
     assert erp.order_calls == [] and xhs.commission_calls == []
 
 
-@known_failure("B10 昵称当身份")
 def test_s6_two_people_with_the_same_nickname_stay_apart():
     handler = make_handler(influencers=("wxid_a", "wxid_b"))
     router, _ = router_with(handler)
@@ -297,7 +293,9 @@ def test_known_unqualified_creator_is_flagged_not_auto_rejected_and_cannot_be_sh
     erp, xhs = FakeERP(), FakeXHS(stats={"follower_count": 500, "recent_highest_likes": 80})
     handler = make_handler(erp, xhs)
     run(handler.process_incoming_message(INFLUENCER, SAMPLE_REQUEST, nickname="小美"))
-    reply = run(handler.process_incoming_message(INFLUENCER, FULL_ADDRESS, nickname="小美"))
+    reply = run(handler.process_incoming_message(
+        INFLUENCER, f"{FULL_ADDRESS} 小红书主页 {XHS_PROFILE}", nickname="小美",
+    ))
     assert "名额" not in reply, "D4：不自动拒绝"
     [packet] = pending_packets(handler)
     assert packet.qualification.startswith("不达标")
@@ -306,7 +304,6 @@ def test_known_unqualified_creator_is_flagged_not_auto_rejected_and_cannot_be_sh
     assert erp.order_calls == [] and xhs.commission_calls == []
 
 
-@known_failure("B10 微信身份当小红书账号")
 def test_the_wechat_identity_is_never_used_as_the_xhs_account():
     xhs = FakeXHS()
     handler = make_handler(xhs=xhs)

@@ -2,7 +2,18 @@
 
 import time
 
-from test_influencer_acceptance import INFLUENCER, FakeERP, make_handler, pending_packets, run
+from src.influencer.handler import HOLDING_REPLY, InfluencerBusinessHandler
+from test_influencer_acceptance import (
+    INFLUENCER,
+    SAMPLE_REQUEST,
+    FakeERP,
+    FakeXHS,
+    make_handler,
+    pending_packets,
+    private_msg,
+    router_with,
+    run,
+)
 
 
 def say(handler, text):
@@ -48,3 +59,29 @@ def test_an_out_of_stock_product_lets_the_influencer_pick_another():
     handler = make_handler(PartlyOutOfStockERP())
     assert "没有库存" in say(handler, "想申请眼霜样品")
     assert "【面膜】目前有货" in say(handler, "那换成面膜吧")
+
+
+def test_contacts_outside_the_whitelist_are_left_alone():
+    handler = make_handler(influencers=())
+    assert run(handler.process_incoming_message("wxid_stranger", SAMPLE_REQUEST)) is None
+
+
+def test_the_whitelist_comes_from_the_environment_until_the_console_manages_it(monkeypatch):
+    monkeypatch.setenv("INFLUENCER_CHAT_IDS", "wxid_a, wxid_b ,")
+    handler = InfluencerBusinessHandler(erp_client=FakeERP(), xhs_client=FakeXHS())
+    assert handler.is_influencer("wxid_a") and handler.is_influencer("wxid_b")
+    assert not handler.is_influencer("wxid_c")
+    handler.unmark_influencer("wxid_a")
+    assert not handler.is_influencer("wxid_a")
+
+
+class BrokenERP(FakeERP):
+    async def check_inventory(self, product_name):
+        return {"in_stock": True, "available_quantity": 1}  # 缺字段，后面会出错
+
+
+def test_an_unexpected_error_gets_a_neutral_reply_instead_of_the_chat_model():
+    router, summarizer = router_with(make_handler(BrokenERP()))
+    reply = router.handle(private_msg("m1", INFLUENCER, "小美", "想申请眼霜样品"))
+    assert reply == HOLDING_REPLY
+    assert summarizer.chat_calls == []

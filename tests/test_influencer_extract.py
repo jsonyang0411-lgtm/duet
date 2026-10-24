@@ -38,6 +38,18 @@ def test_digits_inside_a_longer_number_are_not_a_phone():
     assert extract_request_info("订单号 2023138123456789").recipient_phone == ""
 
 
+def test_a_profile_link_is_picked_up_and_kept_out_of_the_address():
+    link = "https://www.xiaohongshu.com/user/profile/5f0000000000000000000001"
+    info = extract_request_info(f"张三 13812345678 上海市浦东新区世纪大道100号 小红书主页 {link}")
+    assert info.xhs_account == link
+    assert info.shipping_address == "上海市浦东新区世纪大道100号"
+    assert info.recipient_name == "张三"
+
+
+def test_an_xhs_number_is_picked_up():
+    assert extract_request_info("小红书号：abc12345").xhs_account == "abc12345"
+
+
 def test_the_most_specific_product_wins():
     assert extract_request_info("想要VC精华液的样品").requested_product == "VC精华液"
     assert extract_request_info("想试试面膜").requested_product == "面膜"
