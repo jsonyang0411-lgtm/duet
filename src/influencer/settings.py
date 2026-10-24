@@ -6,8 +6,13 @@ import os
 DEFAULT_COMMISSION_RATE = 0.25
 MAX_COMMISSION_RATE = 0.25
 
-# 审批单有效期：过期后不能再执行
-APPROVAL_TTL_SECONDS = 4 * 3600
+# 审批单有效期：过期后不能再执行。运营每天 10:00、16:00 集中审批（R6），
+# 晚上来的申请要能等到第二天，所以给 72 小时；批准时会重新查一次库存（Q1）
+APPROVAL_TTL_SECONDS = 72 * 3600
+
+# 收件人的姓名、电话、地址和达人原话，在审批单处理完（驳回、执行完成、失败或过期）
+# 90 天后清除，只留统计信息（Q3）
+PERSONAL_INFO_RETENTION_SECONDS = 90 * 24 * 3600
 
 # 索样意图的关键词。商品清单先写死，接入聚水潭后改为从商品目录读取；
 # 长的放在前面，先匹配到更具体的商品（"VC精华液"先于"精华"）
@@ -29,9 +34,10 @@ def mock_enabled() -> bool:
 
 
 def influencer_chat_ids_from_env() -> set:
-    """达人白名单的临时来源（D3）：环境变量 INFLUENCER_CHAT_IDS，逗号分隔的私聊 chat_id。
+    """环境变量 INFLUENCER_CHAT_IDS 里的达人 chat_id（逗号分隔）。
 
-    默认为空，也就是谁都不拦。第 6 项做好控制台的名单管理后，改为从数据库读取。
+    名单以数据库为准，在控制台维护（D3）。这个变量只在机器人启动时并进名单一次：
+    只增不删，控制台里停用的达人不会因此恢复（Q4）。
     """
     raw = os.getenv("INFLUENCER_CHAT_IDS", "")
     return {part.strip() for part in raw.split(",") if part.strip()}

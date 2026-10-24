@@ -114,3 +114,9 @@ class ApprovalActionPacket:
     created_at: float = field(default_factory=time.time)
     expires_at: float = field(default_factory=lambda: time.time() + APPROVAL_TTL_SECONDS)
     failure_reason: str = ""  # 执行失败时写明原因，留给运营人工处理
+    # 执行结果
+    order_sn: str = ""
+    tracking_number: str = ""
+    commission_plan: str = ""
+    handled_at: Optional[float] = None  # 驳回、执行完成、失败或过期的时间
+    personal_info_cleared_at: Optional[float] = None  # 到期清除收件信息的时间（Q3）
