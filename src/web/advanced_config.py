@@ -259,6 +259,17 @@ GROUPS: list[dict] = [
         ],
     },
     {
+        "id": "prm", "code": "PRM", "title": "达人副驾驶",
+        "desc": "已登记达人的私聊消息不再当普通聊天：机器人不回任何话，把消息静默交给 Mac 上的 worker 起草回复"
+                "（只能读写 prm_workspace 里的知识库和案卷，不能运行命令），草稿进「待审批」，运营点「发送」才会发出去。"
+                "要同时打开 Claude 中转和「微信连接」里的私聊；Mac 的 config.json 要配好 prm_workspace。",
+        "fields": [
+            # No "requires": CLAUDE_RELAY lives in another group; saving checks it (_validate_config).
+            {"key": "PRM_COPILOT", "type": "onoff", "default": "off", "label": "打开达人副驾驶",
+             "help": "打开后在上面登记达人的 wxid；没登记的人照旧。要先打开 Claude 中转，改完要重启机器人。"},
+        ],
+    },
+    {
         "id": "ocr", "code": "OCR", "title": "读取备选（OCR）",
         "desc": "数据库读不了的时候（WeFlow 没启动、密钥失效、DLL 打不开、微信升级后读不出来），改成截取微信窗口、用系统自带的文字识别"
                 "（macOS 用苹果的，Windows 用系统自带的 Windows OCR）读当前打开的聊天。数据库恢复后自动切回来。" + OCR_BACKENDS + "。",

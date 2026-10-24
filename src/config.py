@@ -575,6 +575,15 @@ class BotConfig:
     # memory job, no model call).  Needs CLAUDE_RELAY=on.
     claude_relay_only: str = "off"
 
+    # === PRM copilot (src/prm) ===
+    # "on": private messages of the creators registered in the console become silent
+    # "prm" jobs of the relay; the Mac worker drafts a reply in its locked-down
+    # workspace and the draft waits in the console until an operator sends, edits
+    # or drops it.  The creator gets no receipt.  Needs CLAUDE_RELAY=on and
+    # PRIVATE_CHAT_ENABLED=true.
+    prm_copilot: str = "off"
+    prm_db: str = "data/prm.db"
+
     # === OCR fallback (src/wechat/ocr), macOS mac_hybrid backend only ===
     # "on": when the WeChat database cannot be read ocr_fallback_after times in a row, the
     # open chat is read from the screen (Apple Vision) every ocr_poll_sec seconds until the
@@ -993,6 +1002,15 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(
             f"CLAUDE_RELAY_MAX_CHARS must be between 20 and 5000, got {kwargs.get('claude_relay_max_chars')}"
         )
+    prm_copilot = kwargs.get("prm_copilot", "off")
+    if prm_copilot not in ("off", "on"):
+        errors.append(f"PRM_COPILOT must be off or on, got {prm_copilot}")
+    elif prm_copilot == "on":
+        if kwargs.get("claude_relay", "off") != "on":
+            errors.append("PRM_COPILOT=on needs CLAUDE_RELAY=on (the drafts are written on the Mac)")
+        # Only when the caller knows it (the console's advanced page checks its own keys only).
+        if "private_chat_enabled" in kwargs and not kwargs["private_chat_enabled"]:
+            errors.append("PRM_COPILOT=on needs PRIVATE_CHAT_ENABLED=true (creators write in private chats)")
     auto_accept = kwargs.get("auto_accept_friends", "off")
     if auto_accept not in ("off", "on"):
         errors.append(f"AUTO_ACCEPT_FRIENDS must be off or on, got {auto_accept}")
@@ -1303,6 +1321,8 @@ def load_config() -> BotConfig:
         "claude_relay_only": _parse_memory_mode(os.getenv("CLAUDE_RELAY_ONLY", "off")),
         "claude_relay_progress_min": int(os.getenv("CLAUDE_RELAY_PROGRESS_MIN", "3")),
         "claude_relay_long_file": _parse_memory_mode(os.getenv("CLAUDE_RELAY_LONG_FILE", "on")),
+        "prm_copilot": _parse_memory_mode(os.getenv("PRM_COPILOT", "off")),
+        "prm_db": os.getenv("PRM_DB", "data/prm.db").strip() or "data/prm.db",
         "ocr_fallback": _parse_memory_mode(os.getenv("OCR_FALLBACK", "off")),
         "ocr_fallback_after": int(os.getenv("OCR_FALLBACK_AFTER", "3")),
         "ocr_poll_sec": float(os.getenv("OCR_POLL_SEC", "4")),

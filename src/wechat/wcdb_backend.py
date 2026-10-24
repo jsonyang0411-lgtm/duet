@@ -323,6 +323,8 @@ class WcdbBackend(AbstractWeChatBackend):
         self._talker_ids: dict[str, str] = {}
         self._chat_is_group: dict[str, bool] = {}
         self._last_session_refresh: float = 0.0
+        # PRM_COPILOT: private chats read whatever PRIVATE_CHATS says (the registered creators).
+        self._private_filter = None
         self._known_ids = DedupSet(max_size=MAX_DEDUP_SIZE)
         # Thread safety: WCDB DLL (ctypes) may not be thread-safe internally.
         # All _client calls are serialized through this lock.
@@ -573,6 +575,7 @@ class WcdbBackend(AbstractWeChatBackend):
         # Build a map of all @chatroom entries: username -> {name, member_count}
         all_chatrooms: dict[str, dict] = {}
         all_private_chats: dict[str, dict] = {}
+        private_seen: dict[str, str] = {}   # every private chat with a name (the console's creator picker)
         private_enabled = bool(
             getattr(self._config, "private_chat_enabled", False)
         )
@@ -610,7 +613,8 @@ class WcdbBackend(AbstractWeChatBackend):
                 continue
 
             if private_enabled and _is_private_talker(username):
-                if auto_private_chats and not username.lower().startswith("wxid_"):
+                wanted = self._wants_private(username)        # a registered creator
+                if auto_private_chats and not wanted and not username.lower().startswith("wxid_"):
                     logger.debug(
                         "Skipping private chat %s: not an ordinary wxid contact",
                         username[:20],
@@ -622,12 +626,13 @@ class WcdbBackend(AbstractWeChatBackend):
                         username[:20],
                     )
                     continue
-                if self._bot_name and (
+                if not wanted and self._bot_name and (
                     display == self._bot_name
                     or self._bot_name in display
                 ):
                     continue
-                if not _matches_configured_chat(display, username, private_config):
+                private_seen[username] = display
+                if not wanted and not _matches_configured_chat(display, username, private_config):
                     continue
                 all_private_chats[username] = {
                     "name": display,
@@ -693,6 +698,8 @@ class WcdbBackend(AbstractWeChatBackend):
         # human-readable group names in the nickname dropdown.
         if all_chatrooms:
             self._save_group_names(all_chatrooms)
+        if private_seen and self._private_filter is not None:
+            self._save_private_names(private_seen)
 
         # ── Resolve and persist group members ──────────────────────────
         group_members: dict[str, dict[str, str]] = {}
@@ -794,6 +801,25 @@ class WcdbBackend(AbstractWeChatBackend):
             )
         except Exception as e:
             logger.warning("Failed to persist group_names.json: %s", e)
+
+    @staticmethod
+    def _save_private_names(chats: dict[str, str]) -> None:
+        """Persist the private chats WeChat lists (wxid -> name) to data/private_chat_names.json, so
+        the console can offer them when an operator registers a creator (PRM_COPILOT only)."""
+        import os as _os
+        path = Path("data/private_chat_names.json")
+        try:
+            known = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            known = known if isinstance(known, dict) else {}
+            if all(known.get(k) == v for k, v in chats.items()):
+                return
+            known.update(chats)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = path.with_suffix(".tmp")
+            tmp_path.write_text(json.dumps(known, ensure_ascii=False, indent=2), encoding="utf-8")
+            _os.replace(tmp_path, path)
+        except Exception as e:
+            logger.warning("Failed to persist private_chat_names.json: %s", e)
 
     def _talker_to_name(self, talker_id: str) -> str:
         for name, tid in self._talker_ids.items():
@@ -923,6 +949,25 @@ class WcdbBackend(AbstractWeChatBackend):
             return
         time.sleep(self._poll_sec)
 
+    def set_private_filter(self, accept) -> None:
+        """Also read the private chats ``accept(username)`` says yes to, whatever PRIVATE_CHATS
+        says (PRM_COPILOT: the registered creators).  Needs PRIVATE_CHAT_ENABLED=true."""
+        self._private_filter = accept
+
+    def refresh_private_chats_soon(self) -> None:
+        """The next poll looks for newly allowed private chats at once (a creator was registered)."""
+        self._last_session_refresh = 0.0
+
+    def _wants_private(self, username: str) -> bool:
+        accept = self._private_filter
+        if accept is None:
+            return False
+        try:
+            return bool(accept(username))
+        except Exception:
+            logger.exception("The private chat filter failed for %s", username[:20])
+            return False
+
     def _refresh_private_chats_if_due(self) -> None:
         """Discover private chats created after startup.
 
@@ -954,6 +999,7 @@ class WcdbBackend(AbstractWeChatBackend):
                     getattr(self._client, "_config", {}).get("myWxid", "") or ""
                 )
                 added = 0
+                seen: dict[str, str] = {}
                 for s in sessions:
                     username = _session_username(s)
                     if (
@@ -968,7 +1014,8 @@ class WcdbBackend(AbstractWeChatBackend):
                         or my_wxid.startswith(username)
                     ):
                         continue
-                    if auto_private_chats and not username.lower().startswith("wxid_"):
+                    wanted = self._wants_private(username)    # a registered creator
+                    if auto_private_chats and not wanted and not username.lower().startswith("wxid_"):
                         continue
 
                     display = self._resolve_session_display_name(s, username)
@@ -976,18 +1023,21 @@ class WcdbBackend(AbstractWeChatBackend):
                         display == username and username.startswith("wxid_")
                     ):
                         continue
-                    if self._bot_name and (
+                    if not wanted and self._bot_name and (
                         display == self._bot_name
                         or self._bot_name in display
                     ):
                         continue
-                    if not _matches_configured_chat(
+                    seen[username] = display
+                    if not wanted and not _matches_configured_chat(
                         display, username, private_config,
                     ):
                         continue
                     if self._add_talker(display, username, is_group=False):
                         added += 1
 
+                if seen and self._private_filter is not None:
+                    self._save_private_names(seen)
                 if added:
                     self._groups = list(self._talker_ids.keys())
                     logger.info(

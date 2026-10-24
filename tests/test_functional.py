@@ -292,13 +292,13 @@ class TestThemeToggle:
 
 
 class TestSidebarNavigation:
-    """The company console: the bot as a relay to Claude Code (four pages)."""
+    """The company console: the bot as a relay to Claude Code, plus the PRM copilot's two pages."""
 
     def test_sidebar_has_the_agent_pages_only(self, page):
         page.goto(BASE_URL, timeout=10000)
         page.wait_for_timeout(1000)
         nav = page.locator("nav.rail").inner_text()
-        for label in ("运行状态", "中转代理", "微信连接", "运行日志"):
+        for label in ("运行状态", "中转代理", "待审批", "合作单", "微信连接", "运行日志"):
             assert label in nav
         for gone in ("系统配置", "功能模块", "高级开关", "回复记录", "群友昵称", "群聊待办"):
             assert gone not in nav
@@ -389,6 +389,100 @@ class TestAgentConsolePages:
         page.locator("button:has-text('放弃修改')").first.click()
         page.wait_for_timeout(300)
         assert "项修改未保存" not in page.inner_text("body")
+
+
+class TestPrmPages:
+    """待审批 and 合作单 against a running PRM service (in memory: nothing is written to data/)."""
+
+    @pytest.fixture
+    def prm(self):
+        import json as _json
+        import time as _time
+        from types import SimpleNamespace
+        from src.prm.service import SETTLE_SEC, PrmService
+        from src.prm.store import PrmStore
+        from src.relay.service import ClaudeRelay
+        from src.relay.store import RelayStore
+        from src.web import server as web_server
+
+        class Clock:
+            now = _time.time()
+
+            def __call__(self):
+                return self.now
+
+        clock = Clock()
+        cfg = SimpleNamespace(
+            claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1", claude_relay_port=0,
+            claude_relay_prefix="cc", claude_relay_wxids=[], claude_relay_db=":memory:",
+            claude_relay_max_chars=1500, admin_wxid="wxid_admin", prm_copilot="on", prm_db=":memory:",
+        )
+        sent = []
+        relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=clock)
+        service = PrmService(cfg, relay, store=PrmStore(":memory:"), clock=clock,
+                             send=lambda c, t: sent.append((c, t)) or True, send_file=lambda c, p: True)
+        service.register("wxid_creator01", "小美", "618 防晒")
+        for text, reply in (("收件人小美 13812345678", "确认一下：小美，手机〈手机1〉"), ("在吗", "在的，有什么可以帮你？")):
+            service.handle({"chat_id": "wxid_creator01", "sender_id": "wxid_creator01", "content": text,
+                            "msg_type": 1, "is_group": False, "timestamp": clock.now})
+            clock.now += SETTLE_SEC + 1
+            job = relay.next_job(0, ("prm",))
+            draft = {"intent": "要样品", "slots": {"收件人": "小美"}, "stage_proposal": "address",
+                     "message_kind": "address_confirm", "reply_draft": reply, "attachments_to_send": [],
+                     "needs_attention": False, "reason": "收件信息齐了"}
+            relay.finish(job["id"], {"ok": True, "text": _json.dumps(draft, ensure_ascii=False)})
+            relay.tick()
+        web_server.register_prm(service)
+        yield SimpleNamespace(service=service, sent=sent)
+        web_server.register_prm(None)
+        relay.stop()
+
+    def test_review_page_shows_the_draft_and_sends_it(self, page, prm):
+        # the first draft was superseded by the second message; one waits
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        text = page.inner_text("body")
+        for expected in ("待审批", "小美 · 收件信息复述", "在的，有什么可以帮你？", "建议阶段：收集收件信息", "收件人：小美", "已过时"):
+            assert expected in text
+        assert "13812345678" not in text
+        page.locator(".prm-draft button:has-text('改了再发')").click()
+        page.locator("textarea[aria-label='修改要发的内容']").fill("在的，小美你好～")
+        page.locator(".prm-draft button:has-text('确认发送')").click()
+        page.wait_for_timeout(1500)
+        packet = prm.service.store.packet(2)
+        assert packet["status"] == "approved" and packet["final_text"] == "在的，小美你好～" and packet["edited"]
+        assert "发送中" in page.inner_text("body")
+
+    def test_review_page_drops_a_draft_after_asking(self, page, prm):
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        page.locator(".prm-draft button:has-text('不发')").click()
+        page.wait_for_timeout(300)
+        page.locator("[role=dialog] button:has-text('不发')").click()
+        page.wait_for_timeout(1500)
+        assert prm.service.store.packet(2)["status"] == "dropped"
+        assert "现在没有要审批的草稿" in page.inner_text("body") and prm.sent == []
+
+    def test_deals_page_registers_and_disables_a_creator(self, page, prm):
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.wait_for_timeout(1500)
+        text = page.inner_text("body")
+        for expected in ("合作单", "登记达人", "已登记的达人", "小美", "wxid_creator01", "意向沟通", "AI 建议：收集收件信息",
+                         "达人副驾驶", "PRM_COPILOT"):
+            assert expected in text
+        page.locator("input[aria-label='达人 wxid']").fill("wxid_admin")
+        page.locator("input[aria-label='称呼']").fill("管理员")
+        page.locator(".prm-register button:has-text('登记')").click()
+        page.wait_for_timeout(800)
+        assert "管理员或能用 cc 中转的人" in page.inner_text("body")
+        page.locator("input[aria-label='达人 wxid']").fill("wxid_newcreator")
+        page.locator("input[aria-label='称呼']").fill("阿花")
+        page.locator(".prm-register button:has-text('登记')").click()
+        page.wait_for_timeout(1500)
+        assert prm.service.is_party_chat("wxid_newcreator") and "阿花" in page.inner_text("body")
+        page.locator("tr", has_text="阿花").locator("button:has-text('停用')").click()
+        page.wait_for_timeout(1500)
+        assert not prm.service.is_party_chat("wxid_newcreator") and "已停用" in page.inner_text("body")
 
 
 class TestOnboardingForTheAgentConsole:

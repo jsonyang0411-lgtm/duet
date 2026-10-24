@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import {
   Pulse, ArrowsLeftRight, ChatCircleDots, TerminalWindow, Moon, Sun, Play, Stop, ArrowClockwise,
+  ChatTeardropText, Handshake,
 } from '@phosphor-icons/react'
 import { useStatus, fmtDuration } from '../store/status'
 import { useConfig } from '../store/config'
@@ -10,12 +11,15 @@ import { useTheme } from '../lib/theme'
 import { navigate } from '../lib/router'
 import { LogoGlyph, FigurePlaceholder } from './art'
 
-// The company console: the bot as a relay to Claude Code on a Mac. The other
+// The company console: the bot as a relay to Claude Code on a Mac, plus the
+// PRM copilot (drafts for registered creators: 待审批 / 合作单). The other
 // pages (reply records, AI and persona settings, modules, advanced switches,
 // nicknames, todos) are hidden here; their code and the bot's features stay.
 export const NAV = [
   { id: 'status', label: '运行状态', en: 'STATUS', icon: Pulse },
   { id: 'relay', label: '中转代理', en: 'RELAY', icon: ArrowsLeftRight },
+  { id: 'review', label: '待审批', en: 'REVIEW', icon: ChatTeardropText },
+  { id: 'deals', label: '合作单', en: 'CREATORS', icon: Handshake },
   { id: 'wechat', label: '微信连接', en: 'WECHAT', icon: ChatCircleDots },
   { id: 'logs', label: '运行日志', en: 'LOGS', icon: TerminalWindow },
 ]

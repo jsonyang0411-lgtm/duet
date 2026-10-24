@@ -106,6 +106,26 @@ def claude_relay(ctx: RouteContext) -> Optional[Stop]:
     return Stop(reply)
 
 
+def prm(ctx: RouteContext) -> Optional[Stop]:
+    """PRM_COPILOT=on: a registered creator's private message goes, silently, into a
+    draft job for the Mac (src/prm); the draft waits in the console.  Nothing is
+    ever said to the creator here, so the route ends without a reply.  After
+    ``claude_relay`` (an admin's cc stays the relay's), before ``relay_only``."""
+    service = getattr(ctx.router, "_prm", None)
+    if service is None:
+        return None
+    try:
+        handled = service.handle(ctx.msg)
+    except Exception:
+        logger.exception("PRM: could not take a creator's message; it is not answered")
+        handled = not ctx.msg.get("is_group", True) and service.is_party_chat(ctx.msg.get("chat_id", ""))
+    if not handled:
+        return None
+    ctx.trace.redact("[已登记达人的私聊，内容不记录]")      # phone numbers, addresses: not in the log
+    ctx.trace.reason("prm_copilot")
+    return Stop(None)
+
+
 def relay_only(ctx: RouteContext) -> Optional[Stop]:
     """CLAUDE_RELAY_ONLY=on: the bot only relays.  Whatever ``claude_relay`` did not
     take ends here, silently: no reply, no proactive line, no welcome, no memory job,
@@ -510,6 +530,7 @@ ROUTE_STEPS: tuple[RouteStep, ...] = (
     RouteStep("self_message", self_message, "the bot's own lines are never handled"),
     RouteStep("persist", persist, "store the message; duplicates stop here"),
     RouteStep("claude_relay", claude_relay, "cc ... from an allowed private chat goes to the Mac"),
+    RouteStep("prm", prm, "a registered creator's message: a silent draft job, the console decides"),
     RouteStep("relay_only", relay_only, "CLAUDE_RELAY_ONLY: nothing else is answered"),
     RouteStep("memory_hooks", memory_hooks, "memory job / diary trigger"),
     RouteStep("full_feed", full_feed, "a persona that reads every message of a group"),

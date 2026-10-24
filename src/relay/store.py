@@ -16,6 +16,16 @@ the time runs out (``expired``) or the job ends (``cancelled``).
 reads them past a cursor (``input_upto``) and hands them to the running Claude;
 ``input_closed`` means the job takes no more (later messages are new jobs).
 
+A job has a ``kind``: ``admin`` (the allowed people's ``cc`` tasks, the default)
+or ``prm`` (a registered creator's messages for a draft, src/prm; nothing goes
+back to WeChat on its own).  A worker only gets the kinds it says it can do
+(``claim_next``), so an older worker never runs a creator's text as a task.
+``meta`` is what the worker needs besides the text (JSON; for ``prm`` the
+creator's party id).  ``ready_at`` holds a job back a little: a creator's
+messages that come in quick succession are added to it (``append_pending``)
+instead of becoming jobs of their own.  ``relay_outfiles`` are the files a
+``prm`` job's worker sends back (pictures from the material folder).
+
 The router thread adds jobs, the HTTP threads hand them out and take the
 results, the delivery thread marks them sent: one connection, one lock.
 """
@@ -30,6 +40,9 @@ from pathlib import Path
 from typing import Optional
 
 FINAL_STATES = ("done", "failed", "cancelled", "lost")
+ADMIN = "admin"             # an allowed person's cc task
+PRM = "prm"                 # a registered creator's messages, for a draft (src/prm)
+KINDS = (ADMIN, PRM)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS relay_jobs (
@@ -88,6 +101,15 @@ CREATE TABLE IF NOT EXISTS relay_sessions (
     updated_at REAL NOT NULL,
     project TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS relay_outfiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    path TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    sha256 TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS relay_outfiles_job ON relay_outfiles(job_id, id);
 """
 
 
@@ -99,6 +121,9 @@ _ADDED_COLUMNS = (
     ("relay_jobs", "progress_sent", "TEXT NOT NULL DEFAULT ''"),
     ("relay_jobs", "input_closed", "INTEGER NOT NULL DEFAULT 0"),
     ("relay_jobs", "input_upto", "INTEGER NOT NULL DEFAULT 0"),
+    ("relay_jobs", "kind", "TEXT NOT NULL DEFAULT 'admin'"),
+    ("relay_jobs", "meta", "TEXT NOT NULL DEFAULT '{}'"),
+    ("relay_jobs", "ready_at", "REAL"),
 )
 
 
@@ -124,14 +149,18 @@ class RelayStore:
     # ── from WeChat ───────────────────────────────────────────────────────
 
     def add(self, chat_id: str, sender_id: str, text: str, project: str = "",
-            now: Optional[float] = None, files: tuple = ()) -> int:
+            now: Optional[float] = None, files: tuple = (), *, kind: str = ADMIN,
+            meta: Optional[dict] = None, ready_at: Optional[float] = None) -> int:
         """Queue a job; ``files`` (``(name, path, size)``) go with it in the same transaction,
-        so a worker never takes the job without them."""
+        so a worker never takes the job without them.  ``ready_at``: not handed out before."""
+        if kind not in KINDS:
+            raise ValueError(f"unknown job kind {kind!r}")
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO relay_jobs (chat_id, sender_id, text, project, status, created_at)"
-                " VALUES (?, ?, ?, ?, 'pending', ?)",
-                (chat_id, sender_id, text, project, time.time() if now is None else now),
+                "INSERT INTO relay_jobs (chat_id, sender_id, text, project, status, created_at, kind, meta,"
+                " ready_at) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
+                (chat_id, sender_id, text, project, time.time() if now is None else now, kind,
+                 json.dumps(meta or {}, ensure_ascii=False), ready_at),
             )
             job_id = int(cur.lastrowid)
             self._conn.executemany(
@@ -140,6 +169,31 @@ class RelayStore:
             )
             self._conn.commit()
             return job_id
+
+    def append_pending(self, chat_id: str, kind: str, text: str, files: tuple = (),
+                       ready_at: Optional[float] = None) -> Optional[int]:
+        """Add ``text`` (and ``files``) to this chat's newest job of ``kind`` that no worker
+        has taken yet, and hold it until ``ready_at``; None when there is no such job.
+
+        One step under the lock: the job is either still queued and gets the text, or a
+        worker took it first and the caller makes a follow-up or a new job instead.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, text FROM relay_jobs WHERE chat_id = ? AND kind = ? AND status = 'pending'"
+                " ORDER BY id DESC LIMIT 1", (chat_id, kind),
+            ).fetchone()
+            if row is None:
+                return None
+            joined = f"{row['text']}\n{text}" if row["text"] and text else (row["text"] or text)
+            self._conn.execute("UPDATE relay_jobs SET text = ?, ready_at = ? WHERE id = ?",
+                               (joined, ready_at, row["id"]))
+            self._conn.executemany(
+                "INSERT INTO relay_files (job_id, name, path, size) VALUES (?, ?, ?, ?)",
+                [(row["id"], name, path, int(size)) for name, path, size in files],
+            )
+            self._conn.commit()
+            return int(row["id"])
 
     def get(self, job_id: int) -> Optional[dict]:
         with self._lock:
@@ -227,14 +281,43 @@ class RelayStore:
             ).fetchone()
         return dict(row) if row else None
 
+    # ── files a prm job's worker sends back ───────────────────────────────
+
+    def add_outfile(self, job_id: int, name: str, path: str, size: int, sha256: str,
+                    limit: int) -> Optional[int]:
+        """Record a file the worker sent for a running ``prm`` job (None: not such a job,
+        or it has ``limit`` files already)."""
+        with self._lock:
+            row = self._conn.execute("SELECT kind, status FROM relay_jobs WHERE id = ?", (job_id,)).fetchone()
+            if row is None or row["kind"] != PRM or row["status"] not in ("running", "lost"):
+                return None
+            count = self._conn.execute("SELECT COUNT(*) FROM relay_outfiles WHERE job_id = ?",
+                                       (job_id,)).fetchone()[0]
+            if count >= limit:
+                return None
+            cur = self._conn.execute(
+                "INSERT INTO relay_outfiles (job_id, name, path, size, sha256) VALUES (?, ?, ?, ?, ?)",
+                (job_id, name, path, int(size), sha256),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def outfiles(self, job_id: int) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM relay_outfiles WHERE job_id = ? ORDER BY id", (job_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     # ── follow-ups: what the person sends while their job runs ─────────────
 
-    def add_followup(self, chat_id: str, text: str, now: float) -> Optional[tuple[int, int]]:
-        """``(job_id, followup_id)`` when this chat has a running job that still takes input."""
+    def add_followup(self, chat_id: str, text: str, now: float,
+                     kind: str = ADMIN) -> Optional[tuple[int, int]]:
+        """``(job_id, followup_id)`` when this chat has a running job of ``kind`` that still takes input."""
         with self._lock:
             row = self._conn.execute(
-                "SELECT id FROM relay_jobs WHERE chat_id = ? AND status = 'running' AND input_closed = 0"
-                " AND cancel_requested = 0 ORDER BY id DESC LIMIT 1", (chat_id,),
+                "SELECT id FROM relay_jobs WHERE chat_id = ? AND kind = ? AND status = 'running'"
+                " AND input_closed = 0 AND cancel_requested = 0 ORDER BY id DESC LIMIT 1", (chat_id, kind),
             ).fetchone()
             if row is None:
                 return None
@@ -425,23 +508,29 @@ class RelayStore:
 
     # ── from the worker ───────────────────────────────────────────────────
 
-    def claim_next(self, now: Optional[float] = None) -> Optional[dict]:
-        """Hand the oldest queued job to a worker.
+    def claim_next(self, now: Optional[float] = None, kinds: tuple = (ADMIN,)) -> Optional[dict]:
+        """Hand the oldest queued job of one of ``kinds`` that is ready to a worker.
 
         The Claude session is looked up now, not when the job was queued: the
         worker runs one job at a time, so a follow-up queued behind another job
-        of the same chat continues the session that job just left.
+        of the same chat continues the session that job just left.  Only ``admin``
+        jobs have sessions; a ``prm`` job always starts afresh.
         """
         now = time.time() if now is None else now
+        kinds = tuple(k for k in kinds if k in KINDS)
+        if not kinds:
+            return None
         with self._lock:
             row = self._conn.execute(
-                "SELECT * FROM relay_jobs WHERE status = 'pending' ORDER BY id LIMIT 1"
+                "SELECT * FROM relay_jobs WHERE status = 'pending' AND kind IN"
+                f" ({', '.join('?' * len(kinds))}) AND (ready_at IS NULL OR ready_at <= ?)"
+                " ORDER BY id LIMIT 1", (*kinds, now),
             ).fetchone()
             if row is None:
                 return None
             session = self._conn.execute(
                 "SELECT session_id FROM relay_sessions WHERE chat_id = ?", (row["chat_id"],)
-            ).fetchone()
+            ).fetchone() if row["kind"] == ADMIN else None
             session_id = session["session_id"] if session else None
             self._conn.execute(
                 "UPDATE relay_jobs SET status = 'running', claimed_at = ?, heartbeat_at = ?,"
@@ -495,7 +584,7 @@ class RelayStore:
         now = time.time() if now is None else now
         with self._lock:
             row = self._conn.execute(
-                "SELECT chat_id, status, cancel_requested FROM relay_jobs WHERE id = ?", (job_id,)
+                "SELECT chat_id, status, cancel_requested, kind FROM relay_jobs WHERE id = ?", (job_id,)
             ).fetchone()
             if row is None:
                 return None
@@ -510,7 +599,7 @@ class RelayStore:
                 " delivered = 0 WHERE id = ?",
                 (status, now, text, json.dumps(payload or {}, ensure_ascii=False), job_id),
             )
-            if session_id:
+            if session_id and row["kind"] == ADMIN:           # a prm job never carries on a session
                 self._conn.execute(
                     "INSERT INTO relay_sessions (chat_id, session_id, updated_at) VALUES (?, ?, ?)"
                     " ON CONFLICT(chat_id) DO UPDATE SET session_id = excluded.session_id,"

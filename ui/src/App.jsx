@@ -8,6 +8,8 @@ import { TopBar, Rail, SaveBar } from './components/Shell'
 import { LogoGlyph } from './components/art'
 import Dashboard from './components/Dashboard'
 import RelayPanel from './components/RelayPanel'
+import ReviewPanel from './components/ReviewPanel'
+import DealsPanel from './components/DealsPanel'
 import WechatPanel from './components/WechatPanel'
 import LogViewer from './components/LogViewer'
 import Onboarding from './components/Onboarding'
@@ -46,10 +48,13 @@ export default function App() {
 function Console() {
   const route = useRoute()
   let page
-  // Agent console: four pages (components/Shell.jsx NAV). Old links (#/config/…,
-  // #/modules/…) land on the status page.
+  // Agent console (components/Shell.jsx NAV): status, relay, the PRM copilot's
+  // review queue and creators, WeChat, logs. Old links (#/config/…, #/modules/…)
+  // land on the status page.
   switch (route.page) {
     case 'relay': page = <RelayPanel />; break
+    case 'review': page = <ReviewPanel />; break
+    case 'deals': page = <DealsPanel />; break
     case 'wechat': page = <WechatPanel />; break
     case 'logs': page = <LogViewer />; break
     default: page = <Dashboard />

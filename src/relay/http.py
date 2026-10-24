@@ -4,7 +4,12 @@ Every request carries ``Authorization: Bearer <CLAUDE_RELAY_TOKEN>``.
 
     GET  /relay/health                 {"ok": true}           (the worker's start-up check)
     GET  /relay/next?wait=25           a job, or 204 after ``wait`` seconds without one
-                                       (headers X-Relay-Projects: JSON list of aliases, X-Relay-Default)
+                                       (headers X-Relay-Projects: JSON list of aliases, X-Relay-Default;
+                                       X-Relay-Kinds: "admin,prm" = the job kinds this worker does,
+                                       without it only admin jobs; the job says its "kind" and "meta")
+    POST /relay/jobs/<id>/outfiles?name=<file name>   the bytes of a file a running prm job sends
+                                       back (Content-Length, at most 100 MB, 9 per job)
+                                       -> {"id", "size", "sha256"}  (404: not a running prm job)
     GET  /relay/jobs/<id>/files/<n>    a picture or file sent with the job (bytes; 404: not one of its files)
     POST /relay/jobs/<id>/heartbeat    {"steps", "doing", "plan"} (what Claude is doing, optional)
                                        -> {"cancel": bool}    (404: unknown job)
@@ -32,6 +37,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
+from .store import ADMIN, KINDS
+
 logger = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 1_000_000
@@ -39,6 +46,15 @@ _JOB_PATH = re.compile(r"^/relay/jobs/(\d+)/(heartbeat|result|ask|close)$")
 _MESSAGES_PATH = re.compile(r"^/relay/jobs/(\d+)/messages$")
 _ASK_PATH = re.compile(r"^/relay/asks/(\d+)$")
 _FILE_PATH = re.compile(r"^/relay/jobs/(\d+)/files/(\d+)$")
+_OUTFILE_PATH = re.compile(r"^/relay/jobs/(\d+)/outfiles$")
+
+
+def worker_kinds(header: str | None) -> tuple[str, ...]:
+    """The job kinds a worker asks for (X-Relay-Kinds); an older worker sends none: admin only."""
+    if not header:
+        return (ADMIN,)
+    kinds = tuple(dict.fromkeys(k.strip() for k in header.split(",") if k.strip() in KINDS))
+    return kinds or (ADMIN,)
 
 
 class _RelayHandler(BaseHTTPRequestHandler):
@@ -127,6 +143,8 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 wait = float(parse_qs(url.query).get("wait", ["25"])[0])
             except ValueError:
                 wait = 25.0
+            kinds = worker_kinds(self.headers.get("X-Relay-Kinds"))
+            self.relay.note_worker(None, kinds=kinds)
             projects = self.headers.get("X-Relay-Projects")
             if projects is not None:
                 try:
@@ -136,7 +154,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
                         self.relay.note_worker(listed, default if isinstance(default, str) else "")
                 except ValueError:
                     pass
-            job = self.relay.next_job(wait)
+            job = self.relay.next_job(wait, kinds)
             if job is None:
                 self._json(204)
             else:
@@ -144,10 +162,38 @@ class _RelayHandler(BaseHTTPRequestHandler):
         else:
             self._json(404, {"error": "not found"})
 
+    def _outfile(self, job_id: int, query: str) -> None:
+        """POST /relay/jobs/<id>/outfiles?name=…: the raw bytes of one file (not JSON)."""
+        name = parse_qs(query).get("name", [""])[0]
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if not name or length <= 0:
+            self._json(400, {"error": "name and Content-Length are needed"})
+            return
+        try:
+            answer = self.relay.outfile(job_id, name, self.rfile.read, length)
+        except OSError as e:
+            logger.warning("CLAUDE_RELAY: a file for #%d did not arrive whole: %s", job_id, e)
+            self.close_connection = True
+            self._json(400, {"error": "incomplete upload"})
+            return
+        if answer is None:
+            self.close_connection = True               # the body may not have been read
+            self._json(404, {"error": "not a running prm job, too big, or too many files"})
+        else:
+            self._json(200, answer)
+
     def do_POST(self):
         if not self._authorized():
             return
-        m = _JOB_PATH.match(urlsplit(self.path).path)
+        url = urlsplit(self.path)
+        m = _OUTFILE_PATH.match(url.path)
+        if m:
+            self._outfile(int(m.group(1)), url.query)
+            return
+        m = _JOB_PATH.match(url.path)
         if not m:
             self._json(404, {"error": "not found"})
             return

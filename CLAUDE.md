@@ -46,10 +46,11 @@ python -m pytest tests/ -v
 
 | 测试类别 | 覆盖功能 |
 |---------|---------|
-| API 端点 | Diagnose 返回结构、Sandbox 路由注册、POST allowlist、配置字段默认值、`/api/relay`（`tests/test_relay_console_api.py`） |
+| API 端点 | Diagnose 返回结构、Sandbox 路由注册、POST allowlist、配置字段默认值、`/api/relay`（`tests/test_relay_console_api.py`）、`/api/prm`（`tests/test_prm_console_api.py`） |
 | 页面加载 | 前端 SPA 正常渲染，不出现空白页或连接错误 |
 | 主题系统 | 浅色模式默认（明日方舟风，2026-10 改版）、Sun/Moon 按钮切换到深色、localStorage 持久化 |
-| 侧边栏导航 | 公司版（中转代理控制台）只有 运行状态/中转代理/微信连接/运行日志 四页；旧链接回到运行状态 |
+| 侧边栏导航 | 公司版（中转代理控制台）只有 运行状态/中转代理/待审批/合作单/微信连接/运行日志 六页；旧链接回到运行状态 |
+| 待审批 / 合作单页（达人副驾驶） | 草稿显示（号码只显示打码的）、改了再发、不发（确认框）；登记达人（管理员 wxid 被拒）、停用（`tests/test_functional.py::TestPrmPages`，PRM 服务在内存里，不写 data/） |
 | 中转代理页 | 任务列表（取消排队/进行中的任务）、Mac 状态、中转设置（随机生成 token 只显示一次、保存条） |
 | 微信连接页 | 私聊开关改动出现底部保存条、OCR 备选开关有自己的保存条，「放弃修改」能撤回 |
 | 首次设置 | 3 步（微信密钥 → 微信设置 → 中转设置），所有请求在测试里拦截，不写 .env |

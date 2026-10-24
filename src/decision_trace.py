@@ -124,6 +124,9 @@ class NullTrace:
     def ignore(self, code: str, **info: Any) -> None:
         return None
 
+    def redact(self, content: str) -> None:
+        return None
+
     def add_llm_call(self, call_id: str, latency_ms: float) -> None:
         return None
 
@@ -176,6 +179,11 @@ class DecisionTrace(NullTrace):
         """Final reason for a message dropped before any decision."""
         self._ignored = True
         self.reason(code, **info)
+
+    def redact(self, content: str) -> None:
+        """Keep ``content`` instead of the message's text (a creator's message: no numbers in logs)."""
+        if "content" in self._header:
+            self._header["content"] = str(content)
 
     def add_llm_call(self, call_id: str, latency_ms: float) -> None:
         self._llm_calls.append(call_id)

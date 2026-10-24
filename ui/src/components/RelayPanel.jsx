@@ -129,7 +129,9 @@ function JobsCard({ d, reload }) {
                     </td>
                     <td className="num">#{j.id}</td>
                     <td><span className={`tag ${kind}`}>{label}{j.cancel_requested && j.status === 'running' ? ' · 停止中' : ''}</span></td>
-                    <td className="ellipsis" style={{ maxWidth: 360 }} title={j.text}>{j.text}</td>
+                    <td className="ellipsis" style={{ maxWidth: 360 }} title={j.text}>
+                      {j.kind === 'prm' && <span className="tag cy" title="已登记达人的消息：草稿进「待审批」，不会自动回复">达人草稿</span>} {j.text}
+                    </td>
                     <td className="mono">{j.project || '—'}</td>
                     <td className="num">{fmtClock(j.created_at)}</td>
                     <td className="num">{fmtSeconds(j.duration_s) || (j.status === 'running' && j.claimed_at ? '…' : '')}</td>

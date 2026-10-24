@@ -14,5 +14,9 @@
   "model": "",
   "extra_args": [],
   "wechat_approval": true,
-  "approval_timeout_min": 10
+  "approval_timeout_min": 10,
+  "prm_workspace": "",
+  "prm_model": "",
+  "prm_timeout_min": 10,
+  "prm_max_budget_usd": 0
 }

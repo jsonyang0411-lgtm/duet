@@ -273,6 +273,8 @@ class Bot:
 
         # CLAUDE_RELAY=on: "cc ..." in an allowed private chat goes to the Mac.
         relay = self._start_claude_relay(config, router, backend)
+        # PRM_COPILOT=on: registered creators' messages become silent draft jobs.
+        prm = self._start_prm(config, router, backend, relay)
 
         self._start_friend_management(config, backend, admin_handler)
 
@@ -328,6 +330,13 @@ class Bot:
                 self._auto_friend.stop()
             if self._health:
                 self._health.stop()
+            if prm is not None:
+                prm.stop()
+                try:
+                    from .web.server import register_prm
+                    register_prm(None)
+                except Exception:
+                    pass
             if relay is not None:
                 relay.stop()
                 try:
@@ -421,6 +430,38 @@ class Bot:
         except Exception:
             pass
         return relay
+
+    @staticmethod
+    def _start_prm(config, router, backend, relay):
+        """The PRM copilot (src/prm) on top of the relay, or None when off.
+
+        The WeChat backend learns to read the registered creators' private chats
+        (set_private_filter, Windows only); the console finds the service through
+        register_prm.
+        """
+        if getattr(config, "prm_copilot", "off") != "on":
+            return None
+        if relay is None:
+            logger.warning("PRM_COPILOT is on but the Claude relay is not: creators' messages are not drafted")
+            return None
+        from .prm import PrmService
+        prm = PrmService(config, relay, send=backend.send_text, send_file=getattr(backend, "send_file", None),
+                         on_parties_changed=getattr(backend, "refresh_private_chats_soon", None))
+        set_filter = getattr(backend, "set_private_filter", None)
+        if callable(set_filter):
+            set_filter(prm.is_party_chat)
+        else:
+            logger.warning("PRM_COPILOT: this WeChat backend cannot read extra private chats; "
+                           "add the creators to PRIVATE_CHATS")
+        prm.start()
+        router._prm = prm
+        try:
+            from .web.server import register_prm
+            register_prm(prm)
+        except Exception:
+            pass
+        logger.info("PRM_COPILOT: %d registered creator(s)", len(prm.store.active_wxids()))
+        return prm
 
     def _log_banner(self) -> None:
         """Log the startup banner with configuration details."""

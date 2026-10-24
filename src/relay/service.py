@@ -18,10 +18,17 @@ in that chat answers it ("同意" / "拒绝"); nothing over HTTP can.
 A task sent while the chat's job runs goes to that job (a follow-up): the worker
 reads it (GET /relay/jobs/<id>/messages) and hands it to the running Claude,
 which sees it at its next step; "新任务 …" queues a job of its own instead.
+
+Jobs of another kind (``prm``: a registered creator's messages, src/prm) come in
+through ``submit`` and are silent: no receipt, no progress, no approval requests,
+and their results go to the handler registered for the kind (``register_kind``)
+instead of WeChat.  Only a worker that says it does that kind gets them
+(``X-Relay-Kinds``); a prm job's worker can send files back (``outfile``).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -35,7 +42,7 @@ from typing import Callable, Optional
 
 from .attachments import HOLD_SEC, KINDS, Held, attachment_kind, resolve
 from .commands import RelayCommand, parse, parse_answer, prefix_pattern
-from .store import FINAL_STATES, RelayStore
+from .store import ADMIN, FINAL_STATES, KINDS as JOB_KINDS, RelayStore
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +56,11 @@ START_NOTE_AFTER_SEC = 20   # a job that waited this long in the queue gets a "s
 SUMMARY_CHARS = 300         # the message after a result file starts with this much of it
 KEEP_FILES_DAYS = 30        # result files older than this are deleted when a new one is written
 ASK_TIMEOUT_SEC = (60, 3600)  # the range a worker may give an approval request to be answered
+MAX_OUTFILE_BYTES = 100 * 1024 * 1024   # one file a prm job's worker sends back
+MAX_OUTFILES = 9                        # files per prm job
 
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
+_UNSAFE_NAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 # A voice message the backend turned into text (VOICE_ASR_ENABLED on Windows): "[语音] 跑一下测试。"
 _VOICE = re.compile(r"^\[语音\]\s*(.*)$", re.S)
 VOICE_NOT_HEARD = "这条语音没转出文字。请打字发，或者在 Windows 上打开语音识别（VOICE_ASR_ENABLED=true）。"
@@ -106,6 +116,15 @@ def _preview(text: str, limit: int = 20) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+def job_meta(job: dict) -> dict:
+    """A job's ``meta`` as a dict ({} when it has none or it is not JSON)."""
+    try:
+        meta = json.loads(job.get("meta") or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
 class ClaudeRelay:
     def __init__(self, config, *, store: Optional[RelayStore] = None,
                  send: Optional[Callable[[str, str], bool]] = None,
@@ -148,6 +167,10 @@ class ClaudeRelay:
         # What the Mac worker said it offers (X-Relay-Projects on GET /relay/next).
         self._worker_projects: list[str] | None = None
         self._worker_default = ""
+        # The job kinds the last worker asked for (X-Relay-Kinds; an older worker: admin only).
+        self._worker_kinds: tuple[str, ...] = ()
+        # Results of the other kinds go here instead of WeChat (register_kind).
+        self._kind_handlers: dict[str, Callable[[dict], bool]] = {}
         self._jobs_ready = threading.Condition()
         self._wake = threading.Event()
         self._stopping = threading.Event()
@@ -284,13 +307,96 @@ class ClaudeRelay:
                         f"要另起一个任务就发「{self._command_text('新任务 内容')}」。")
         return self._queue(chat_id, sender, cmd.text, cmd.project or self._store.current_project(chat_id))
 
+    # ── jobs of other kinds (src/prm) ─────────────────────────────────────
+
+    def register_kind(self, kind: str, on_result: Callable[[dict], bool]) -> None:
+        """Send the finished jobs of ``kind`` to ``on_result`` (True: handled) instead of WeChat."""
+        if kind == ADMIN or kind not in JOB_KINDS:
+            raise ValueError(f"cannot register job kind {kind!r}")
+        self._kind_handlers[kind] = on_result
+
+    def submit(self, chat_id: str, sender: str, text: str, *, kind: str, meta: dict,
+               files: tuple = (), settle_sec: float = 0.0) -> tuple[str, int]:
+        """Queue a silent job of ``kind``: ``(how, job_id)``, how = merged | followup | queued.
+
+        A job of this chat that no worker has taken yet gets the text (and is held
+        ``settle_sec`` longer, so a burst of messages is one job); one that is
+        running gets it as a follow-up (only text: files need a job of their own);
+        else a new job.  Nothing is sent to WeChat.
+        """
+        if kind not in self._kind_handlers:
+            raise ValueError(f"no handler for job kind {kind!r}")
+        now = self._clock()
+        ready_at = now + max(0.0, float(settle_sec))
+        job_id = self._store.append_pending(chat_id, kind, text, files, ready_at)
+        how = "merged"
+        if job_id is None and not files:
+            added = self._store.add_followup(chat_id, text, now, kind=kind)
+            if added is not None:
+                job_id, how = added[0], "followup"
+                with self._followups_ready:
+                    self._followups_ready.notify_all()
+        if job_id is None:
+            job_id = self._store.add(chat_id, sender, text, "", now, files=files,
+                                     kind=kind, meta=meta, ready_at=ready_at)
+            how = "queued"
+        with self._jobs_ready:
+            self._jobs_ready.notify_all()
+        logger.info("CLAUDE_RELAY: %s job #%d %s (%d chars%s)", kind, job_id, how, len(text),
+                    f", {len(files)} file(s)" if files else "")
+        return how, job_id
+
+    def collect(self, held: list[Held]) -> tuple[list[tuple[str, str, int]], list[str]]:
+        """Pictures and files for a job of another kind (see ``_collect``)."""
+        return self._collect(held)
+
+    def outfile(self, job_id: int, name: str, read: Callable[[int], bytes], length: int) -> Optional[dict]:
+        """A file a ``prm`` job's worker sends back: ``{"id", "size", "sha256"}``, or None when
+        the job is not a running prm job, the file is too big, or the job has enough files."""
+        self._seen()
+        job = self._store.get(job_id)
+        if job is None or job.get("kind") == ADMIN or job["status"] not in ("running", "lost"):
+            return None
+        if not 0 < length <= MAX_OUTFILE_BYTES:
+            return None
+        name = _UNSAFE_NAME.sub("_", str(name)).strip(" .")[:120] or "file"
+        folder = self._files_dir / "outfiles" / f"job-{job_id}"
+        folder.mkdir(parents=True, exist_ok=True)
+        path, n = folder / name, 2
+        while path.exists():                          # two files of the same name
+            path, n = folder / f"{Path(name).stem}({n}){Path(name).suffix}", n + 1
+        digest, left = hashlib.sha256(), length
+        part = path.with_name(path.name + ".part")
+        try:
+            with open(part, "wb") as out:
+                while left > 0:
+                    chunk = read(min(left, 1024 * 1024))
+                    if not chunk:
+                        raise OSError(f"the upload ended early ({length - left}/{length} bytes)")
+                    digest.update(chunk)
+                    out.write(chunk)
+                    left -= len(chunk)
+            part.replace(path)
+        finally:
+            part.unlink(missing_ok=True)
+        file_id = self._store.add_outfile(job_id, path.name, str(path), length, digest.hexdigest(),
+                                          MAX_OUTFILES)
+        if file_id is None:
+            path.unlink(missing_ok=True)
+            return None
+        logger.info("CLAUDE_RELAY: #%d sent back a file (%d bytes)", job_id, length)
+        return {"id": file_id, "size": length, "sha256": digest.hexdigest()}
+
     # ── projects ──────────────────────────────────────────────────────────
 
-    def note_worker(self, projects: list[str] | None, default: str = "") -> None:
+    def note_worker(self, projects: list[str] | None, default: str = "",
+                    kinds: tuple[str, ...] | None = None) -> None:
         """What the Mac worker offers (sent with every request for a job)."""
         if projects is not None:
             self._worker_projects = [str(p) for p in projects if str(p).strip()]
             self._worker_default = str(default or "")
+        if kinds is not None:
+            self._worker_kinds = tuple(k for k in kinds if k in JOB_KINDS)
 
     def projects_text(self, chat_id: str) -> str:
         current = self._store.current_project(chat_id)
@@ -443,6 +549,11 @@ class ClaudeRelay:
         except (TypeError, ValueError):
             timeout = 600.0
         timeout = min(max(timeout, ASK_TIMEOUT_SEC[0]), ASK_TIMEOUT_SEC[1])
+        job = self._store.get(job_id)
+        if job is not None and job.get("kind", ADMIN) != ADMIN:
+            # A creator's chat must never get an approval request: refused, the hook denies.
+            logger.warning("CLAUDE_RELAY: #%d is a %s job; its approval request is refused", job_id, job["kind"])
+            return None
         now = self._clock()
         tool = str(body.get("tool") or "?")[:60]
         detail = " ".join(str(body.get("detail") or tool).split())[:300]
@@ -583,6 +694,7 @@ class ClaudeRelay:
             "mac_last_seen_sec": round(now - self._last_seen) if self._last_seen else None,
             "prefix": self._prefix_word,
             "counts": self._store.counts(),
+            "worker_kinds": list(self._worker_kinds),
         }
 
     def cancel_from_console(self, job_id: int) -> str:
@@ -602,17 +714,18 @@ class ClaudeRelay:
     def _seen(self) -> None:
         self._last_seen = self._clock()
 
-    def next_job(self, wait: float) -> Optional[dict]:
-        """The oldest queued job, waiting up to ``wait`` seconds for one."""
+    def next_job(self, wait: float, kinds: tuple[str, ...] = (ADMIN,)) -> Optional[dict]:
+        """The oldest queued job of ``kinds`` (what the worker does), waiting up to ``wait`` seconds."""
         self._seen()
         deadline = time.monotonic() + max(0.0, min(float(wait), MAX_WAIT_SEC))
         try:
             while True:
-                job = self._store.claim_next(self._clock())
+                job = self._store.claim_next(self._clock(), kinds)
                 if job is not None:
-                    logger.info("CLAUDE_RELAY: #%d went to the Mac", job["id"])
+                    logger.info("CLAUDE_RELAY: #%d (%s) went to the Mac", job["id"], job.get("kind", ADMIN))
                     return {
-                        "id": job["id"], "text": job["text"], "project": job["project"],
+                        "id": job["id"], "kind": job.get("kind", ADMIN), "meta": job_meta(job),
+                        "text": job["text"], "project": job["project"],
                         "session_id": job["session_id"], "created_at": job["created_at"],
                         "files": [{"id": f["id"], "name": f["name"], "size": f["size"]}
                                   for f in self._store.files(job["id"])],
@@ -677,7 +790,9 @@ class ClaudeRelay:
         if not leftovers or job is None or job["status"] == "cancelled":
             return
         text = "\n".join(row["text"] for row in leftovers)
-        new_id = self._store.add(job["chat_id"], job["sender_id"], text, job["project"], self._clock())
+        kind = job.get("kind", ADMIN)
+        new_id = self._store.add(job["chat_id"], job["sender_id"], text, job["project"], self._clock(),
+                                 kind=kind, meta=job_meta(job))
         self._store.add_result_note(job_id, followups_job=new_id)
         with self._jobs_ready:
             self._jobs_ready.notify_all()
@@ -707,6 +822,7 @@ class ClaudeRelay:
         now = self._clock()
         for job_id in self._store.mark_lost(now - LOST_AFTER_SEC):
             logger.warning("CLAUDE_RELAY: #%d lost (no heartbeat for %d s)", job_id, LOST_AFTER_SEC)
+        self._hand_over(now)
         if self._send is None:
             self._expire_asks()
             return
@@ -714,6 +830,8 @@ class ClaudeRelay:
         if self._progress_sec > 0:
             self._send_progress(now)
         for job in self._store.undelivered():
+            if job.get("kind", ADMIN) != ADMIN:
+                continue                               # _hand_over's (never WeChat)
             key = (job["id"], job["status"])
             failed_at = self._send_failed_at.get(key)
             if failed_at is not None and now - failed_at < RETRY_SEND_SEC:
@@ -731,12 +849,42 @@ class ClaudeRelay:
                 logger.warning("CLAUDE_RELAY: result of #%d not sent; retry in %d s",
                                job["id"], RETRY_SEND_SEC)
 
+    def _hand_over(self, now: float) -> None:
+        """Finished (or lost) jobs of the other kinds go to their handler, never to WeChat.
+
+        A handler that fails or says False gets the job again after RETRY_SEND_SEC.
+        """
+        for job in self._store.undelivered():
+            kind = job.get("kind", ADMIN)
+            if kind == ADMIN:
+                continue
+            handler = self._kind_handlers.get(kind)
+            if handler is None:
+                continue                               # nobody to give it to (yet): it waits
+            key = (job["id"], job["status"])
+            failed_at = self._send_failed_at.get(key)
+            if failed_at is not None and now - failed_at < RETRY_SEND_SEC:
+                continue
+            try:
+                handled = bool(handler(job))
+            except Exception:
+                logger.exception("CLAUDE_RELAY: the %s handler failed on #%d", kind, job["id"])
+                handled = False
+            if handled:
+                self._store.mark_delivered(job["id"], job["status"])
+                self._send_failed_at.pop(key, None)
+            else:
+                self._send_failed_at[key] = now
+
     def _send_progress(self, now: float) -> None:
         """"#3 开始了" for a job that waited; "#3 进行中（6分钟）：…" every few minutes after.
 
         A failed send is not retried: the next progress message comes on time anyway.
+        Only the cc tasks: a creator never hears about jobs.
         """
         for job in self._store.running():
+            if job.get("kind", ADMIN) != ADMIN:
+                continue
             claimed = float(job["claimed_at"] or now)
             last = job["progress_sent_at"]
             if last is None and claimed - float(job["created_at"]) >= START_NOTE_AFTER_SEC:

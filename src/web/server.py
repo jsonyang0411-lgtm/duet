@@ -1188,6 +1188,7 @@ def _relay_job_for_console(job: dict) -> dict:
     text = str(job.get("text") or "")
     return {
         "id": job["id"],
+        "kind": job.get("kind") or "admin",
         "status": job["status"],
         "text": text[:200],
         "project": job.get("project") or "",
@@ -1220,6 +1221,128 @@ def _relay_snapshot(limit: int = 30) -> dict:
         finally:
             store.close()
     return out
+
+
+# The running PrmService (PRM_COPILOT=on), set by Bot.run(); None when the bot is
+# stopped or the copilot is off.  /api/prm reads it.
+_prm = None
+
+
+def register_prm(service):
+    """Register (or with None, forget) the running PRM copilot for /api/prm."""
+    global _prm
+    _prm = service
+
+
+def _prm_db_path() -> Path:
+    return Path(os.getenv("PRM_DB", "data/prm.db").strip() or "data/prm.db")
+
+
+def _prm_env_on(key: str) -> bool:
+    return str(os.getenv(key, "")).strip().lower() in ("on", "true", "1", "yes", "y")
+
+
+def _prm_reserved() -> set[str]:
+    """The admin and the cc users: never creators."""
+    return {w.strip() for w in [os.getenv("ADMIN_WXID", ""), *os.getenv("CLAUDE_RELAY_WXIDS", "").split(",")]
+            if w.strip()}
+
+
+def _prm_candidates(state: dict) -> list[dict]:
+    """Private chats WeChat lists (data/private_chat_names.json, written by the Windows backend
+    while PRM_COPILOT is on) that are not creators yet: the register form offers them."""
+    path = Path("data/private_chat_names.json")
+    try:
+        names = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, ValueError):
+        names = {}
+    if not isinstance(names, dict):
+        return []
+    taken = {p["wxid"] for p in state.get("parties", []) if p.get("active")} | _prm_reserved()
+    out = [{"wxid": str(w), "name": str(n)} for w, n in names.items() if str(w) not in taken]
+    return sorted(out, key=lambda c: c["name"])[:300]
+
+
+def _prm_state() -> dict:
+    """GET /api/prm: creators, drafts waiting and recent ones (also when the bot is stopped)."""
+    state = _prm_state_core()
+    state["candidates"] = _prm_candidates(state)
+    return state
+
+
+def _prm_state_core() -> dict:
+    from src.prm.service import snapshot as prm_snapshot
+    from src.prm.store import PrmStore
+
+    settings = {"enabled": _prm_env_on("PRM_COPILOT"), "relay_on": _prm_env_on("CLAUDE_RELAY"),
+                "private_on": _prm_env_on("PRIVATE_CHAT_ENABLED")}
+    if _prm is not None:
+        return {**_prm.snapshot(), **settings, "enabled": True}
+    db = _prm_db_path()
+    if not db.exists():
+        from src.prm.result import MESSAGE_KINDS
+        from src.prm.store import STAGES
+        return {"ok": True, "running": False, "parties": [], "pending": [], "recent": [], "counts": {},
+                "stages": STAGES, "kinds": MESSAGE_KINDS, "mac_online": False, "worker_kinds": [],
+                "can_send": False, "can_send_files": False, **settings}
+    store = PrmStore(db)
+    try:
+        return prm_snapshot(store, running=False, extra={
+            "mac_online": False, "worker_kinds": [], "can_send": False, "can_send_files": False, **settings})
+    finally:
+        store.close()
+
+
+def _prm_parties(data: dict) -> dict:
+    """POST /api/prm/parties: {"action": "add", "wxid", "name", "note"} | {"action": "enable"|"disable", "id"}."""
+    from src.prm.service import check_wxid
+    from src.prm.store import PartyError, PrmStore
+
+    action = str(data.get("action") or "")
+    try:
+        if _prm is not None:
+            if action == "add":
+                party = _prm.register(data.get("wxid", ""), data.get("name", ""), data.get("note", ""))
+                return {"ok": True, "party": {"id": party["id"], "name": party["name"]}}
+            if action in ("enable", "disable"):
+                party = _prm.set_active(int(data.get("id")), action == "enable")
+                return {"ok": True} if party else {"ok": False, "error": "没有找到这个达人"}
+            return {"ok": False, "error": f"不认识的操作 {action}"}
+        # The bot is stopped: the same checks, straight into the database.
+        reserved = _prm_reserved()
+        store = PrmStore(_prm_db_path())
+        try:
+            if action == "add":
+                wxid = check_wxid(data.get("wxid", ""), reserved)
+                name, note = str(data.get("name") or "").strip(), str(data.get("note") or "").strip()
+                if not name or len(name) > 30:
+                    return {"ok": False, "error": "称呼要填，最多 30 个字"}
+                if len(note) > 200:
+                    return {"ok": False, "error": "备注最多 200 个字"}
+                party = store.add_party(wxid, name, note)
+                return {"ok": True, "party": {"id": party["id"], "name": party["name"]}}
+            if action in ("enable", "disable"):
+                party = store.update_party(int(data.get("id")), active=action == "enable")
+                return {"ok": True} if party else {"ok": False, "error": "没有找到这个达人"}
+            return {"ok": False, "error": f"不认识的操作 {action}"}
+        finally:
+            store.close()
+    except PartyError as e:
+        return {"ok": False, "error": str(e)}
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "要给出达人编号"}
+
+
+def _prm_packet(data: dict) -> dict:
+    """POST /api/prm/packets: {"id", "action": "send" | "edit" | "drop", "text"}."""
+    try:
+        packet_id = int(data.get("id"))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "要给出草稿编号"}
+    if _prm is None:
+        return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能处理草稿"}
+    text = data.get("text")
+    return _prm.decide(packet_id, str(data.get("action") or ""), None if text is None else str(text))
 
 
 def _stop_bot():
@@ -1298,7 +1421,7 @@ _POST_ONLY_PATHS = frozenset({
     "/api/onboarding/step3", "/api/onboarding/step4",
     "/api/sandbox/test", "/api/todos/action",
     "/api/voice/download-model", "/api/wechat-data-dir/detect",
-    "/api/relay/cancel",
+    "/api/relay/cancel", "/api/prm/parties", "/api/prm/packets",
 })
 
 
@@ -1400,7 +1523,8 @@ class _UIHandler(SimpleHTTPRequestHandler):
                          "/api/todos/action",
                          "/api/voice/download-model",
                          "/api/wechat-data-dir/detect",
-                         "/api/relay/cancel"):
+                         "/api/relay/cancel",
+                         "/api/prm/parties", "/api/prm/packets"):
             self.do_GET()
         else:
             self._method_not_allowed()
@@ -1543,6 +1667,32 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 self.send_json({"ok": False, "error": f"没有找到 #{job_id}"})
             else:
                 self.send_json({"ok": True, "outcome": outcome})
+            return
+
+        # ── API: PRM copilot — creators, drafts, decisions ─────────────
+        if self.path.split("?", 1)[0] == "/api/prm":
+            try:
+                self.send_json(_prm_state())
+            except Exception as e:
+                logger.exception("Reading the PRM state failed")
+                self.send_json({"ok": False, "error": str(e)})
+            return
+        if self.path in ("/api/prm/parties", "/api/prm/packets"):
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len else b"{}"
+            try:
+                data = json.loads(body)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self.send_json({"ok": False, "error": "请求不是有效的 JSON"})
+                return
+            if not isinstance(data, dict):
+                self.send_json({"ok": False, "error": "请求不是有效的 JSON"})
+                return
+            try:
+                self.send_json(_prm_parties(data) if self.path == "/api/prm/parties" else _prm_packet(data))
+            except Exception as e:
+                logger.exception("PRM console action failed")
+                self.send_json({"ok": False, "error": str(e)})
             return
 
         # ── API: why did the bot (not) answer? (read-only) ─────────────
