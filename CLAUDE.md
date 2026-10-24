@@ -1,5 +1,9 @@
 # CLAUDE.md
 
+## 开工前先读 handoff.md
+
+本仓库在 webot 的基础上开发"达人商务智能体"（`src/influencer/`）。开始任何工作前，先读根目录的 `handoff.md`，里面有当前状态、路线护栏、问题清单、计划和待确认事项；收工前按其中的规矩更新它。
+
 ## 每次修改必须提交 Git
 
 每次对代码的修改完成后，必须执行 `git add` 和 `git commit`，写清楚改动内容和原因。
@@ -11,9 +15,11 @@ git add -A
 git commit -m "<描述做了什么，为什么>"
 ```
 
-## 每次修改必须重新打包
+## 打包（仅在发布 Windows 版本时）
 
-前端代码或 Python 代码修改后，必须重新构建并打包 EXE，确保 `dist/webot.exe` 包含最新改动。
+在 Mac 上开发时不打包 EXE：PyInstaller 无法在 macOS 上生成 Windows 可执行文件。Mac 端直接从源码运行（`.venv/bin/python desktop_mac.py`）；前端有改动时，仍要执行 `cd ui && npm run build`。
+
+只有在 Windows 上发布新版本时，才按下面的步骤重新构建并打包 EXE，确保 `dist/webot.exe` 包含最新改动。
 
 ```bash
 # 1. 构建前端（如有前端改动）
@@ -34,7 +40,12 @@ cp ui/dist/webot.exe dist/webot.exe
 
 ```bash
 python -m pytest tests/ -v
+
+# Mac 开发环境
+.venv/bin/python -m pytest tests/ -v
 ```
+
+Mac 开发环境的 `.venv` 是用 uv 创建的，里面没有 pip，装依赖要用 `uv pip install --python .venv/bin/python <包名>`。如果终端设置了 SOCKS 代理（`ALL_PROXY=socks5://...`），必须安装 `httpx[socks]`，否则 AI 后端相关的测试和实际调用都会报 ImportError。
 
 测试分两层：
 - **单元测试** (`test_config.py`, `test_trigger.py`, `test_web_api.py`, `test_window_controller.py`) — 毫秒级，验证逻辑正确性
@@ -69,7 +80,7 @@ webot — 微信消息总结机器人，支持 WCDB 直读数据库、AI 自动�
 
 ## 技术栈
 
-- 后端：Python 3.13
+- 后端：Python 3.13（Mac 开发环境为 `.venv` 中的 Python 3.12）
 - 前端：React + Vite (ui/)
 - 桌面：PyWebView (WebView2)
 - 打包：PyInstaller (build.spec)
@@ -117,6 +128,8 @@ pyinstaller build.spec
 ## 代码参考手册同步更新
 
 项目根目录下有 `CODEBASE_REFERENCE.md`（代码参考手册），包含所有函数、参数、调用关系的完整文档。每次修改代码后，**必须同步更新该文档**，确保文档与代码保持一致。
+
+**例外**：达人商务模块（`src/influencer/`）的说明写在 `handoff.md` 里，不写入本手册。改动原项目的共享代码（例如 `src/router.py` 里的挂载点）时，仍要按本节要求同步。
 
 ### 何时需要更新
 
