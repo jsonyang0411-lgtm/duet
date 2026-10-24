@@ -260,7 +260,7 @@ def test_the_hook_says_no_when_the_bot_cannot_be_reached(worker, tmp_path, monke
 APPROVING_CLAUDE = textwrap.dedent("""\
     import json, os, subprocess, sys
     args = sys.argv[1:]
-    prompt = sys.stdin.read()
+    prompt = json.loads(sys.stdin.readline())["message"]["content"]   # stream-json input
     hook = json.loads(args[args.index("--settings") + 1])["hooks"]["PermissionRequest"][0]["hooks"][0]
     request = {"hook_event_name": "PermissionRequest", "tool_name": "Bash",
                "tool_input": {"command": "git push origin main", "description": "Push"}}
@@ -299,3 +299,22 @@ def test_a_whole_approval_through_the_hook(worker, bot, tmp_path, monkeypatch, a
     t.join()
     assert bot.sent[0] == "#1 要你批准：运行命令 git push origin main\n回复「同意」或「拒绝」（10分钟内不回就算拒绝）"
     assert bot.sent[-1].startswith("#1 完成\n" + expected)
+
+
+def test_after_a_denial_the_result_says_how_to_redo_it():
+    relay, clock, sent = make_relay(claude_relay_only="on")
+    job = running_job(relay, "推送一下")
+    relay.finish(job, {"ok": True, "text": "没推送：被拒绝了", "denied": 1})
+    relay.tick()
+    assert sent[-1].endswith("\n要重做就回复「重试 1」，需要批准时再回「同意」。")
+    prefixed, clock2, sent2 = make_relay()
+    job = running_job(prefixed)
+    prefixed.finish(job, {"ok": True, "text": "好了"})
+    prefixed.tick()
+    assert "重做" not in sent2[-1]                                         # nothing was denied
+    assert "「cc 重试 7」" in prefixed.result_message({"id": 7, "status": "lost"})
+
+
+def test_claude_is_told_not_to_ask_for_a_late_yes(worker):
+    note = worker.system_note({"wechat_approval": True})
+    assert "不要在结果里让对方回复「同意」" in note

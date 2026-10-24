@@ -192,10 +192,10 @@ class TestHandle:
         _, reply = relay.handle(pm("cc 一", clock=clock))
         assert reply.startswith("收到，已交给 Mac（#1）") and "不在线" in reply
         relay.next_job(0)                                 # the Mac asked: online, #1 running
-        _, reply = relay.handle(pm("cc 二", clock=clock))
+        _, reply = relay.handle(pm("cc 新任务 二", clock=clock))     # "二" alone would go to #1
         assert "#2" in reply and "前面还有 1 个任务" in reply and "不在线" not in reply
         clock.now += ONLINE_WINDOW_SEC + 1
-        assert "不在线" in relay.handle(pm("cc 三", clock=clock))[1]
+        assert "不在线" in relay.handle(pm("cc 新任务 三", clock=clock))[1]
 
     def test_status_cancel_retry_reset_help(self, relay, clock):
         relay.handle(pm("cc 第一个任务", clock=clock))

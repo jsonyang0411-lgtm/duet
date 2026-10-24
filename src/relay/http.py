@@ -11,6 +11,9 @@ Every request carries ``Authorization: Bearer <CLAUDE_RELAY_TOKEN>``.
     POST /relay/jobs/<id>/ask          {"tool", "detail", "timeout_s"} -> {"ask_id"}  (an approval for
                                        WeChat; 404: the job is not running)
     GET  /relay/asks/<n>?wait=25       {"status": pending|allow|deny|expired|cancelled}
+    GET  /relay/jobs/<id>/messages?after=<n>&wait=25   {"messages": [{"id", "text"}]}  (what the person
+                                       sent while the job runs, past follow-up <n>)
+    POST /relay/jobs/<id>/close        {"upto": n} -> {"messages": [...]}  ([] = the job takes no more)
     POST /relay/jobs/<id>/result       {"ok", "text", "session_id", "duration_s", "cost_usd",
                                         "log_path", "error"} -> {"accepted": bool}
 
@@ -22,7 +25,9 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import os
 import re
+import shutil
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
@@ -30,7 +35,8 @@ from urllib.parse import parse_qs, urlsplit
 logger = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 1_000_000
-_JOB_PATH = re.compile(r"^/relay/jobs/(\d+)/(heartbeat|result|ask)$")
+_JOB_PATH = re.compile(r"^/relay/jobs/(\d+)/(heartbeat|result|ask|close)$")
+_MESSAGES_PATH = re.compile(r"^/relay/jobs/(\d+)/messages$")
 _ASK_PATH = re.compile(r"^/relay/asks/(\d+)$")
 _FILE_PATH = re.compile(r"^/relay/jobs/(\d+)/files/(\d+)$")
 
@@ -82,6 +88,18 @@ class _RelayHandler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         if url.path == "/relay/health":
             self._json(200, {"ok": True})
+        elif _MESSAGES_PATH.match(url.path):
+            query = parse_qs(url.query)
+            try:
+                after = int(query.get("after", ["0"])[0])
+                wait = float(query.get("wait", ["25"])[0])
+            except ValueError:
+                after, wait = 0, 25.0
+            answer = self.relay.followups(int(_MESSAGES_PATH.match(url.path).group(1)), after, wait)
+            if answer is None:
+                self._json(404, {"error": "unknown job"})
+            else:
+                self._json(200, answer)
         elif _ASK_PATH.match(url.path):
             try:
                 wait = float(parse_qs(url.query).get("wait", ["25"])[0])
@@ -98,13 +116,12 @@ class _RelayHandler(BaseHTTPRequestHandler):
             if path is None:
                 self._json(404, {"error": "unknown file"})
                 return
-            with open(path, "rb") as f:
-                data = f.read()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            with open(path, "rb") as f:               # streamed: a file can be a gigabyte
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(os.fstat(f.fileno()).st_size))
+                self.end_headers()
+                shutil.copyfileobj(f, self.wfile, 1024 * 1024)
         elif url.path == "/relay/next":
             try:
                 wait = float(parse_qs(url.query).get("wait", ["25"])[0])
@@ -143,6 +160,12 @@ class _RelayHandler(BaseHTTPRequestHandler):
             answer = self.relay.heartbeat(job_id, body)
         elif action == "ask":
             answer = self.relay.ask(job_id, body)
+        elif action == "close":
+            try:
+                upto = int(body.get("upto") or 0)
+            except (TypeError, ValueError):
+                upto = 0
+            answer = self.relay.close_input(job_id, upto)
         else:
             taken = self.relay.finish(job_id, body)
             answer = None if taken is None else {"accepted": taken}

@@ -27,7 +27,7 @@ TOKEN = "k" * 32
 FAKE_CLAUDE = textwrap.dedent("""\
     import json, os, signal, sys, time
     args = sys.argv[1:]
-    prompt = sys.stdin.read()
+    prompt = json.loads(sys.stdin.readline())["message"]["content"]   # stream-json input
     with open(os.environ["FAKE_CLAUDE_LOG"], "a", encoding="utf-8") as f:
         f.write(json.dumps({"args": args, "cwd": os.getcwd(), "prompt": prompt}) + "\\n")
     session = args[args.index("--resume") + 1] if "--resume" in args else "new-session"
@@ -161,7 +161,8 @@ def test_a_vanished_session_starts_a_new_one(worker, bot, fake_claude, tmp_path)
 def test_permission_denials_are_named_in_the_result(worker, bot, fake_claude, tmp_path):
     bot.ask("cc deny 推送一下")
     run_one(worker, bot, settings(bot, fake_claude, tmp_path))
-    assert bot.sent == ["#1 完成\n部分完成\n（有 2 个操作需要人工批准，已被拒绝：Bash）"]
+    assert bot.sent == ["#1 完成\n部分完成\n（有 2 个操作需要人工批准，已被拒绝：Bash）\n"
+                        "要重做就回复「cc 重试 1」，需要批准时再回「同意」。"]
 
 
 def test_a_timeout_stops_claude(worker, bot, fake_claude, tmp_path):
