@@ -1,0 +1,49 @@
+WeChat main window: 1038x716 at (703,164)
+OCR rows in the window: 51
+Rows that show the file (lowest first): 1
+    '关于亻故好我校 2027 届毕业生'  x 0.373-0.539  y 0.605-0.624
+Rows around it (the bubble: size, status ...):
+    '[ 3 条 ] [ 每日游戏速递 ] 超好玩的 “ ．'  x 0.121-0.281  y 0.528-0.544
+    '1 6 ： 30'  x 0.629-0.657  y 0.537-0.550
+    '昨天 14 ： 23'  x 0.237-0.283  y 0.591-0.604
+    '关于亻故好我校 2027 届毕业生'  x 0.373-0.539  y 0.605-0.624
+    '一次性求职衤卜，，作的通知， ra r'  x 0.372-0.538  y 0.632-0.651
+    '10 ． 7M 未下载'  x 0.373-0.449  y 0.665-0.681
+    '昨天 10 ： 34'  x 0.237-0.284  y 0.682-0.695
+Picture of the bubble: probe-file-1.png
+Right-clicked at (1176,604). New WeChat windows: 1
+  window class='Qt51514QWindowToolSaveBits' title='Weixin' rect=(1152, 580, 1362, 923)
+  picture: probe-file-2.png
+Menu rows:
+    '囱下载'  x 0.145-0.383  y 0.118-0.163
+    '冷转发．，'  x 0.157-0.426  y 0.238-0.281
+    '收藏'  x 0.276-0.407  y 0.334-0.378
+    '多选'  x 0.286-0.419  y 0.426-0.471
+    '@ 引用'  x 0.195-0.436  y 0.614-0.659
+    '下载到 “'  x 0.319-0.550  y 0.730-0.778
+    '前删除'  x 0.229-0.467  y 0.854-0.899
+Save-as item: '下载到 “'
+Clicked '下载到 “'. New windows: 1
+  window class='#32770' title='另存为...' rect=(709, 164, 1669, 704)
+    WindowControl name='另存为...' id=''
+            ButtonControl name='帮助(&H)' id='HelpButton'
+              ButtonControl name='视图滑块' id='SplitMenuButton'
+            ButtonControl name='组织\u200b\u200b' id='{7DDC1264-7E4D-4F74-BBC0-D191987C8D0F}'
+            ButtonControl name='新建\u200b\u200b文件夹\u200b\u200b' id='{E44616AD-6DF1-4B94-85A4-E465AE8A19DB}'
+              ComboBoxControl name='文件名:' id='FileNameControlHost'
+                EditControl name='文件名:' id='1001'
+                ButtonControl name='打开' id='DropDown'
+              ComboBoxControl name='保存类型:' id='FileTypeControlHost'
+                ButtonControl name='打开' id='DropDown'
+        ButtonControl name='隐藏文件夹' id=''
+      ButtonControl name='保存(S)' id='1'
+      ButtonControl name='取消' id='2'
+              ButtonControl name='后退 (Alt + 向左键)' id=''
+              ButtonControl name='前进 (Alt + 向右键)' id=''
+              ButtonControl name='最近浏览的位置' id=''
+              ButtonControl name='上移到“桌面”(Alt + 向上键)' id=''
+                ButtonControl name='上一个位置' id=''
+                ButtonControl name='刷新“桌面”(F5)' id=''
+        ButtonControl name='关闭' id=''
+    picture: probe-file-3.png
+Cancelled the save window (Esc). Nothing was saved.
