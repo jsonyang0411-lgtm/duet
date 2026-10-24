@@ -768,7 +768,7 @@ todo_delete_keywords: list[str] = [
 | 文件 | 组件 | 描述 |
 |---|---|---|
 | `App.jsx` | `App`、`Console`、`Splash` | 问 `/api/onboarding/status` 决定进引导还是控制台；控制台 = 顶栏 + 左栏 + 页面 + 保存条 |
-| `Shell.jsx` | `TopBar`、`Rail`、`Dock`、`SaveBar`、`NAV` | 深色顶栏（运行状态胶囊带启动/停止、主题切换）；左栏导航 + 左下角助手小窗（立绘待定，剪影占位，台词来自运行状态）；配置有改动时的底部保存条（提交完整配置，可「保存并重启」） |
+| `Shell.jsx` | `TopBar`、`Rail`、`Dock`、`SaveBar`、`NAV` | 深色顶栏（运行状态胶囊带启动/停止、主题切换）；左栏导航（「系统配置」「达人审批」带子页）+ 左下角助手小窗（立绘待定，剪影占位，台词来自运行状态）；配置有改动时的底部保存条（提交完整配置，可「保存并重启」） |
 | `ui.jsx` / `cfg.jsx` / `art.jsx` | 通用组件 / 绑定配置草稿的表单控件 / Logo 与剪影 | 斜切卡片、分段、开关、词条、密钥框（已设置时只显示尾号）、对话框、确认框 |
 | `Dashboard.jsx` | `Dashboard`、`KeyCard`、`ChecksCard`、`RecentDecisions` | 运行状态：票根式主卡、密钥缺失时重新获取、检查与环境诊断、最近的判断 |
 | `DecisionsPanel.jsx` | `DecisionsPanel` | 回复记录（`GET /api/decisions`）：筛选 + 右栏判断过程 |
@@ -776,6 +776,7 @@ todo_delete_keywords: list[str] = [
 | `ModulesPanel.jsx` | `ModulesPanel`、`LotsEditor`、`WelcomeEditor` | 功能模块 11 格 + 右栏详情；签文和欢迎模板各自保存 |
 | `AdvancedPanel.jsx` | `AdvancedPanel` | 高级开关（`GET/POST /api/advanced`），按服务器给的白名单渲染，自己的保存条 |
 | `NicknameEditor.jsx` / `TodoManager.jsx` / `LogViewer.jsx` | 同名 | 群友昵称（离开输入框即保存）/ 群聊待办管理（批量清空按群、需确认）/ 运行日志（深色终端） |
+| `InfluencerPanel.jsx` | `InfluencerPanel`、`ApprovalsPage`、`ApprovalCard`、`NoticeBox`、`ContactsPage`、`EditContact` | 达人审批（`/api/influencer/*`，路由 `#/influencer/approvals`、`#/influencer/contacts`）：模拟模式横幅和聚水潭/小红书 CLI 状态；按状态筛选的审批卡（可填小红书账号、调低佣金，通过前再确认一次，驳回填原因，复制要发给达人的消息）；达人名单（添加、启用/停用、编辑，从最近私聊里挑选）。业务说明见 `handoff.md` |
 | `Onboarding.jsx` | `Onboarding` | 首次设置 4 步；可手动填写密钥（`step2` 的 `wcdb_key`） |
 | `store/config.jsx` / `store/status.jsx` / `store/toast.jsx` | Provider + hook | 全站唯一的配置草稿（改动、校验、保存）/ 每 2 秒轮询 `/api/status` / 提示条 |
 
@@ -1443,7 +1444,7 @@ MessageRouter.handle(msg) → [无 @mention]
 | `server.py` | `src/web/server.py` | HTTP + WebSocket 服务器 |
 | `desktop.py` | `desktop.py` | Windows 桌面入口 (WebView2) |
 | `desktop_mac.py` | `desktop_mac.py` | macOS 桌面入口 (WebView Cocoa) |
-| React 前端 | `ui/src/` | SPA 前端（首次设置 + 控制台 8 页，见 §2.34） |
+| React 前端 | `ui/src/` | SPA 前端（首次设置 + 控制台 9 页，见 §2.34） |
 
 #### API 端点清单
 

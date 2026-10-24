@@ -13,6 +13,7 @@ import ModulesPanel from './components/ModulesPanel'
 import AdvancedPanel from './components/AdvancedPanel'
 import NicknameEditor from './components/NicknameEditor'
 import TodoManager from './components/TodoManager'
+import InfluencerPanel from './components/InfluencerPanel'
 import LogViewer from './components/LogViewer'
 import Onboarding from './components/Onboarding'
 
@@ -57,6 +58,7 @@ function Console() {
     case 'advanced': page = <AdvancedPanel />; break
     case 'members': page = <NicknameEditor />; break
     case 'todo': page = <TodoManager />; break
+    case 'influencer': page = <InfluencerPanel sub={route.sub} />; break
     case 'logs': page = <LogViewer />; break
     default: page = <Dashboard />
   }

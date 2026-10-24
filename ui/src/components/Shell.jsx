@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import {
   Pulse, ListMagnifyingGlass, GearSix, SquaresFour, SlidersHorizontal, UsersThree,
-  CheckSquare, TerminalWindow, Moon, Sun, Play, Stop, ArrowClockwise,
+  CheckSquare, TerminalWindow, Moon, Sun, Play, Stop, ArrowClockwise, Handshake,
 } from '@phosphor-icons/react'
 import { useStatus, fmtDuration } from '../store/status'
 import { useConfig } from '../store/config'
@@ -28,6 +28,13 @@ export const NAV = [
   { id: 'advanced', label: '高级开关', en: 'ADVANCED', icon: SlidersHorizontal },
   { id: 'members', label: '群友昵称', en: 'MEMBERS', icon: UsersThree },
   { id: 'todo', label: '群聊待办', en: 'TODO', icon: CheckSquare },
+  {
+    id: 'influencer', label: '达人审批', en: 'CREATOR', icon: Handshake,
+    sub: [
+      { id: 'approvals', label: '审批单' },
+      { id: 'contacts', label: '达人名单' },
+    ],
+  },
   { id: 'logs', label: '运行日志', en: 'LOGS', icon: TerminalWindow },
 ]
 
