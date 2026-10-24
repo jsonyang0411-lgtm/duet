@@ -1120,6 +1120,18 @@ todo_delete_keywords: list[str] = [
 | `vision.decode_wechat_dat_image(path, cache_dir)` | 微信 4 的 V1/V2 走 `image_key.decode_file`（第一张 V2 图可能要搜一次内存），旧的 XOR 图照旧；中转的图片附件（`attachments.resolve`）和看图功能都因此拿到原图，找不到才截聊天窗口 | `Path \| None` |
 | `tools/image_key_check.py` | Windows 上运行（微信要开着）：找账号目录、数 V1/V2、算 XOR、搜 AES 密钥（存进缓存）、解出最新一张图到 `data/vision_cache/image_key_check.<扩展名>`；只打印数量、大小和密钥前 4 个字符；`--no-scan` 不搜内存 | 退出码 |
 
+
+### 2.51 `src/wechat/file_bubble.py`（在微信窗口里找到收到的文件，大文件下载的准备）
+
+微信只自动下载一定大小以内的文件（最多 1 GB）。机器人以后要替你下载更大的：**绝不左键点文件**（左键可能直接打开它，程序会被运行），而是右键文件 → 菜单里的「另存为」→ Windows 的保存窗口。现在只有找位置的函数和摸底工具，正式功能等真机摸底结果。
+
+| 名称 | 描述 | 返回值 |
+|---|---|---|
+| `name_matches(text, name)` | OCR 行是否显示这个文件名：完整（忽略空格）、中间被截成 `...`/`…`（前后两段都对得上，前段至少 2 个字）、或换行后的第一行（至少 6 个字的开头）；`name` 按 Windows 路径取文件名 | `bool` |
+| `file_rows(rows, name, min_x0=0.0)` / `rows_near(rows, row, span=0.08)` | 显示文件名的行，最下面（最新）的在前；`CONVERSATION_X0`（0.30）以左是会话列表；某一行上下附近的行（气泡里的大小、状态） | `list[dict]` |
+| `menu_item(rows, labels=SAVE_AS_LABELS)` / `centre(row)` | 菜单里第一个完全等于「另存为 / 另存 / 保存到电脑 / 保存」的行；行的中心（窗口的比例坐标） | `dict \| None` / `(x, y)` |
+| `tools/file_probe.py --file 名字 [--right-click] [--save-as]` | Windows 摸底工具：默认只看（显示文件名的行和附近几行、气泡附近的截图）；`--right-click` 右键文件、读出菜单（新的微信窗口用 `print_window` 截图再 OCR）、Esc 关掉；`--save-as` 再点「另存为」、用 UI Automation 读出保存窗口的输入框和按钮、Esc 取消（不保存）。写 `probe-file.txt`、`probe-file-1/2/3.png` | 退出码 |
+
 ---
 
 ## 3. 模块间关系图
