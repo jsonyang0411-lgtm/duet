@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 import uuid
 from typing import Any, Dict, Optional, Tuple
 
 from .jst_erp import JuShuiTanERPClient
+from .settings import DEFAULT_COMMISSION_RATE, MAX_COMMISSION_RATE
 from .types import ApprovalActionPacket, GateStatus, InfluencerProfile, SampleRequestIntent
 from .xhs_cli import XiaohongshuCLIClient
 
@@ -33,6 +35,8 @@ class InfluencerBusinessHandler:
         self.profiles: Dict[str, InfluencerProfile] = {}
         # 达人会话上下文：等待补充地址中的达人 {sender_id: requested_product}
         self.awaiting_address: Dict[str, str] = {}
+        # router 在多个工作线程里调用本处理器，审批状态的检查和修改都在这把锁里完成
+        self._lock = threading.Lock()
 
     def extract_intent(self, text: str, sender_id: str = "") -> SampleRequestIntent:
         """从微信消息中研判是否属于达人索样/合作意图 (Layer 3: Judge)"""
@@ -145,11 +149,14 @@ class InfluencerBusinessHandler:
             sku_id=inventory["sku_id"],
             stock_available=inventory["available_quantity"],
             sample_cost=inventory.get("cost_price", 18.5),
-            proposed_commission_rate=0.25,
+            proposed_commission_rate=DEFAULT_COMMISSION_RATE,
             shipping_address=f"{intent.shipping_address} (电话:{intent.recipient_phone})",
-            what_cannot_be_undone="聚水潭ERP将自动扣减库存并出具打单运单，小红书将绑定 25% 专属定向计划",
+            what_cannot_be_undone=(
+                f"聚水潭ERP将自动扣减库存并出具打单运单，小红书将绑定 {DEFAULT_COMMISSION_RATE:.0%} 专属定向计划"
+            ),
         )
-        self.pending_approvals[packet_id] = action_packet
+        with self._lock:
+            self.pending_approvals[packet_id] = action_packet
 
         logger.info(f"🚨 [Gate拦截-待运营审批] 任务单 {packet_id}: {action_packet}")
         return (
@@ -159,28 +166,62 @@ class InfluencerBusinessHandler:
         )
 
     async def execute_operator_approval(self, packet_id: str, approved: bool) -> Dict[str, Any]:
-        """运营审批放行"""
-        if packet_id not in self.pending_approvals:
-            return {"success": False, "error": "未找到对应的审批单号"}
+        """运营审批。每张审批单只能处理一次：驳回、过期、执行中或已执行的单都不能再执行。"""
+        with self._lock:
+            packet = self.pending_approvals.get(packet_id)
+            if packet is None:
+                return {"success": False, "error": "未找到对应的审批单号"}
+            if packet.status != GateStatus.PENDING:
+                return {
+                    "success": False,
+                    "error": f"审批单 {packet_id} 当前状态为 {packet.status.value}，不能再处理",
+                }
+            if not approved:
+                packet.status = GateStatus.REJECTED
+                return {"success": True, "message": f"任务单 {packet_id} 已驳回"}
+            if time.time() > packet.expires_at:
+                packet.status = GateStatus.EXPIRED
+                return {"success": False, "error": f"审批单 {packet_id} 已过期，需要和达人重新确认"}
+            if packet.proposed_commission_rate > MAX_COMMISSION_RATE:
+                # 不改状态：运营把佣金改到上限以内后还能再批
+                return {
+                    "success": False,
+                    "error": (
+                        f"佣金 {packet.proposed_commission_rate:.0%} 超过上限 "
+                        f"{MAX_COMMISSION_RATE:.0%}，不能执行"
+                    ),
+                }
+            # 先占住这张单，调用外部系统期间，重复的"通过"会因为状态不是 PENDING 被挡下
+            packet.status = GateStatus.EXECUTING
 
-        packet = self.pending_approvals[packet_id]
-        if not approved:
-            packet.status = GateStatus.REJECTED
-            return {"success": True, "message": f"任务单 {packet_id} 已驳回"}
+        try:
+            order_res = await self.erp.create_sample_order(
+                influencer_id=packet.influencer_id,
+                sku_id=packet.sku_id,
+                recipient_name=packet.influencer_name,
+                recipient_phone="13800000000",
+                shipping_address=packet.shipping_address,
+            )
+        except Exception as exc:
+            return self._fail(packet, f"聚水潭建单出错：{exc}")
+        if not order_res.get("success"):
+            return self._fail(packet, f"聚水潭建单失败：{order_res.get('error') or '未知原因'}")
 
-        order_res = await self.erp.create_sample_order(
-            influencer_id=packet.influencer_id,
-            sku_id=packet.sku_id,
-            recipient_name=packet.influencer_name,
-            recipient_phone="13800000000",
-            shipping_address=packet.shipping_address,
-        )
-
-        comm_res = await self.xhs.set_exclusive_commission(
-            xhs_uid=packet.influencer_id,
-            sku_id=packet.sku_id,
-            rate=packet.proposed_commission_rate,
-        )
+        try:
+            comm_res = await self.xhs.set_exclusive_commission(
+                xhs_uid=packet.influencer_id,
+                sku_id=packet.sku_id,
+                rate=packet.proposed_commission_rate,
+            )
+        except Exception as exc:
+            comm_res = {"success": False, "error": str(exc)}
+        if not comm_res.get("success"):
+            return self._fail(
+                packet,
+                f"出库单 {order_res.get('order_sn')} 已建，但小红书佣金绑定失败："
+                f"{comm_res.get('error') or '未知原因'}，需要人工处理",
+                order_sn=order_res.get("order_sn"),
+            )
 
         packet.status = GateStatus.FULFILLED
         return {
@@ -191,3 +232,10 @@ class InfluencerBusinessHandler:
             "commission_plan": comm_res.get("plan_id"),
             "message": "已成功下发聚水潭打单，并设置小红书定向佣金！",
         }
+
+    def _fail(self, packet: ApprovalActionPacket, reason: str, **extra: Any) -> Dict[str, Any]:
+        """把审批单标为失败并写明原因，后续步骤一律不再执行。"""
+        packet.status = GateStatus.FAILED
+        packet.failure_reason = reason
+        logger.error(f"[审批执行失败] {packet.packet_id}: {reason}")
+        return {"success": False, "packet_id": packet.packet_id, "error": reason, **extra}

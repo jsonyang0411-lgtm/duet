@@ -7,13 +7,17 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Optional
 
+from .settings import APPROVAL_TTL_SECONDS
+
 
 class GateStatus(str, Enum):
     PENDING = "PENDING_APPROVAL"
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
+    EXECUTING = "EXECUTING"  # 已批准，正在调用聚水潭和小红书
     FULFILLED = "FULFILLED"
     FAILED = "FAILED"
+    EXPIRED = "EXPIRED"
 
 
 @dataclass
@@ -61,4 +65,5 @@ class ApprovalActionPacket:
     what_cannot_be_undone: str
     status: GateStatus = GateStatus.PENDING
     created_at: float = field(default_factory=time.time)
-    expires_at: float = field(default_factory=lambda: time.time() + 14400)  # 4小时有效
+    expires_at: float = field(default_factory=lambda: time.time() + APPROVAL_TTL_SECONDS)
+    failure_reason: str = ""  # 执行失败时写明原因，留给运营人工处理

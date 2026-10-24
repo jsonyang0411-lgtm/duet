@@ -175,7 +175,6 @@ def test_s3_packet_carries_the_recipient_from_the_message():
     assert "上海市浦东新区世纪大道100号" in packet.shipping_address
 
 
-@known_failure("B2 重复执行")
 def test_s4_a_packet_is_executed_only_once():
     erp, xhs = FakeERP(), FakeXHS()
     handler = make_handler(erp, xhs)
@@ -188,7 +187,6 @@ def test_s4_a_packet_is_executed_only_once():
     assert len(xhs.commission_calls) == 1
 
 
-@known_failure("B2 驳回后执行")
 def test_s5_a_rejected_packet_cannot_be_approved_later():
     erp, xhs = FakeERP(), FakeXHS()
     handler = make_handler(erp, xhs)
@@ -222,7 +220,6 @@ def test_s7_an_unnamed_product_is_asked_about_not_placeheld():
 
 # ---- 补充用例 ----
 
-@known_failure("B2 过期")
 def test_an_expired_packet_cannot_be_approved():
     erp, xhs = FakeERP(), FakeXHS()
     handler = make_handler(erp, xhs)
@@ -233,7 +230,31 @@ def test_an_expired_packet_cannot_be_approved():
     assert erp.order_calls == [] and xhs.commission_calls == []
 
 
-@known_failure("B3 失败后继续执行")
+class SlowERP(FakeERP):
+    """建单时让出控制权，模拟网络等待，用来制造"两个请求同时在执行"的情况。"""
+
+    async def create_sample_order(self, **kwargs):
+        await asyncio.sleep(0.01)
+        return await super().create_sample_order(**kwargs)
+
+
+def test_two_simultaneous_approvals_execute_only_once():
+    erp, xhs = SlowERP(), FakeXHS()
+    handler = make_handler(erp, xhs)
+    packet_id = submit_full_request(handler)
+
+    async def double_click():
+        return await asyncio.gather(
+            handler.execute_operator_approval(packet_id, True),
+            handler.execute_operator_approval(packet_id, True),
+        )
+
+    results = run(double_click())
+    assert sorted(r["success"] for r in results) == [False, True]
+    assert len(erp.order_calls) == 1
+    assert len(xhs.commission_calls) == 1
+
+
 def test_a_failed_erp_order_stops_before_the_commission():
     erp, xhs = FakeERP(order_ok=False), FakeXHS()
     handler = make_handler(erp, xhs)
@@ -244,7 +265,6 @@ def test_a_failed_erp_order_stops_before_the_commission():
     assert get_packet(handler, packet_id).status == GateStatus.FAILED
 
 
-@known_failure("D5 佣金上限")
 def test_commission_above_the_25_percent_cap_is_refused():
     erp, xhs = FakeERP(), FakeXHS()
     handler = make_handler(erp, xhs)
