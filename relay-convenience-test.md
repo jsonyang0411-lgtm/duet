@@ -8,9 +8,9 @@
 
 第二轮已经全部通过。第三轮测的是：图片不再截聊天窗口，而是解开微信 4 加密的原图（`.dat`）。密钥要在微信的内存里找一次（只读），找到后存进 `data\wechat_image_keys.json`，以后不用再找。
 
-- [ ] **0. 准备**：`git pull`（分支 `ocr-fallback`），确认有 `tools/image_key_check.py`。先在电脑微信里随便点开 2–3 张图片（密钥在显示过图片之后才在内存里）。
-- [ ] **1. 检查工具**：机器人先停掉，在项目文件夹里运行 `python tools/image_key_check.py`。期望：列出账号目录，「V1 …, V2 …」，「XOR key: found」，V2 的话「AES key (V2): xxxx…（N s）」，最后「OK decoded the newest picture: data\vision_cache\image_key_check.jpg (… 宽x高)」。打开这张图，应该就是微信里最新那张图片，清晰。把整段输出发回来（里面只有数量和密钥前 4 个字符）。
-- [ ] **2. 中转发原图**：重启机器人。发一张有小字和人名的截图，再发 `这张图里写了什么，人名都列出来`。期望：回执「带 1 个附件」；**Mac：** `~/.claude-relay/inbox/job-N/` 里是 `图片-1.jpg`（不是 `聊天截图-1.jpg`）；结果里人名完整。
+- [x] **0. 准备**：`git pull`（分支 `ocr-fallback`），确认有 `tools/image_key_check.py`。先在电脑微信里随便点开 2–3 张图片（密钥在显示过图片之后才在内存里）。（✅ 已完成，同步至 23a704b，检查工具与依赖就绪）
+- [x] **1. 检查工具**：机器人先停掉，在项目文件夹里运行 `python tools/image_key_check.py`。期望：列出账号目录，「V1 …, V2 …」，「XOR key: found」，V2 的话「AES key (V2): xxxx…（N s）」，最后「OK decoded the newest picture: data\vision_cache\image_key_check.jpg (… 宽x高)」。打开这张图，应该就是微信里最新那张图片，清晰。把整段输出发回来（里面只有数量和密钥前 4 个字符）。（⚠️ 工具成功在 2.4s 内存扫描命中 AES Key `d4ea…` 与 XOR Key `139 (0x8b)` 并持久化至 json；因最新一条 dat 是群聊表情包 `wxgf` 格式导致 sample 报错 FAIL，验证真实图片 dat 成功解码出 1750x1020 高清 PNG 原图）
+- [x] **2. 中转发原图**：重启机器人。发一张有小字和人名的截图，再发 `这张图里写了什么，人名都列出来`。期望：回执「带 1 个附件」；**Mac：** `~/.claude-relay/inbox/job-N/` 里是 `图片-1.jpg`（不是 `聊天截图-1.jpg`）；结果里人名完整。（⚠️ 实测任务编号 #42，回执带 1 个附件。**Mac 实际收到的文件名是 `聊天截图-1.jpg`**（85,843 字节），未能解出原图 `图片-1.jpg`，走到了媒体截屏 fallback；Claude 成功识别图中小字人名，但提示为截图中截图）
 - [ ] **3. 机器人自己找密钥**（可选）：删掉 `data\wechat_image_keys.json`，重启机器人，再做一次第 2 步。期望：第一张图的回执慢 10–60 秒（在找密钥），`data\bot.log` 里有 `Image key found`，之后的图片不再慢。
 
 - [ ] **4. 大文件摸底（只看，不下载）**：超过 1 GB 的文件微信不会自己下载。机器人以后会在文件上**右键 →「另存为」**来下载（绝不左键点文件：左键可能直接打开它，程序会被运行）。这一步先看清楚微信 4 上这些东西长什么样。
