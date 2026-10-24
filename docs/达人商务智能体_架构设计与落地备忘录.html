@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>达人商务智能体备忘录</title>
+<style>
+:root {
+  --bg: #f6f5f1; --card: #ffffff; --fg: #1f2328; --muted: #5b616b; --line: #d9d7d0;
+  --head: #efede7; --accent: #0b6e99; --accent-bg: #e7f2f7;
+  --check-bg: #ecebe6; --check-fg: #4a4f57; --warn-bg: #fbecd2; --warn-fg: #8a5300;
+  --code-bg: #efede7;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #15171a; --card: #1c1f23; --fg: #e4e6e9; --muted: #9aa1ab; --line: #33373d;
+    --head: #23272c; --accent: #5bb8e3; --accent-bg: #16303c;
+    --check-bg: #2a2e34; --check-fg: #b8bec7; --warn-bg: #3a2c12; --warn-fg: #f0c06a;
+    --code-bg: #262a30;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #15171a; --card: #1c1f23; --fg: #e4e6e9; --muted: #9aa1ab; --line: #33373d;
+  --head: #23272c; --accent: #5bb8e3; --accent-bg: #16303c;
+  --check-bg: #2a2e34; --check-fg: #b8bec7; --warn-bg: #3a2c12; --warn-fg: #f0c06a;
+  --code-bg: #262a30;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.75 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Noto Sans SC", sans-serif;
+}
+.layout { display: grid; grid-template-columns: 240px minmax(0, 860px); gap: 40px; justify-content: center; padding: 40px 24px 80px; }
+nav.toc { position: sticky; top: 24px; align-self: start; font-size: 14px; }
+nav.toc .label { font-weight: 600; color: var(--muted); margin-bottom: 8px; }
+nav.toc ol { list-style: none; margin: 0; padding: 0; border-left: 2px solid var(--line); }
+nav.toc a { display: block; padding: 4px 0 4px 12px; color: var(--muted); text-decoration: none; line-height: 1.5; }
+nav.toc a:hover { color: var(--accent); }
+main { min-width: 0; }
+.title-row { display: flex; align-items: flex-start; gap: 16px; }
+h1 { flex: 1; font-size: 28px; line-height: 1.35; margin: 0 0 20px; }
+#theme { flex: none; margin-top: 4px; padding: 4px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--muted); font: inherit; font-size: 13px; cursor: pointer; }
+h2 { font-size: 22px; line-height: 1.4; margin: 44px 0 14px; padding-bottom: 8px; border-bottom: 1px solid var(--line); scroll-margin-top: 16px; }
+h3 { font-size: 18px; margin: 28px 0 10px; }
+p { margin: 10px 0; }
+a { color: var(--accent); word-break: break-all; }
+strong { font-weight: 650; }
+hr { display: none; }
+ul, ol { padding-left: 1.4em; margin: 10px 0; }
+li { margin: 6px 0; }
+blockquote { margin: 16px 0; padding: 10px 16px; background: var(--accent-bg); border-left: 4px solid var(--accent); border-radius: 0 6px 6px 0; }
+blockquote p { margin: 4px 0; }
+code { font: 0.88em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; word-break: break-all; }
+pre { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; overflow-x: auto; }
+pre code { background: none; padding: 0; font-size: 13px; line-height: 1.6; word-break: normal; white-space: pre; }
+.table-wrap { overflow-x: auto; margin: 14px 0; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+table { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.65; }
+th, td { text-align: left; vertical-align: top; padding: 9px 12px; border-bottom: 1px solid var(--line); }
+th { background: var(--head); font-weight: 600; white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+.check { display: inline-block; margin: 0 2px; padding: 0 7px; border-radius: 4px; background: var(--check-bg); color: var(--check-fg); font-size: 0.82em; line-height: 1.7; }
+.check.warn { background: var(--warn-bg); color: var(--warn-fg); }
+footer { margin-top: 56px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+@media (max-width: 1100px) {
+  .layout { grid-template-columns: minmax(0, 860px); gap: 0; padding: 24px 16px 60px; }
+  nav.toc { position: static; margin-bottom: 8px; padding: 12px 16px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
+  nav.toc ol { border-left: 0; columns: 2; column-gap: 24px; }
+  nav.toc a { padding: 3px 0; }
+}
+@media (max-width: 600px) {
+  h1 { font-size: 22px; }
+  nav.toc ol { columns: 1; }
+  table { min-width: 560px; }
+}
+@media print {
+  nav.toc, #theme { display: none; }
+  .layout { display: block; padding: 0; }
+  body { background: #fff; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+<nav class="toc" aria-label="目录"><div class="label">目录</div><ol><li><a href="#s1">一、一页看懂（2026-10-25）</a></li><li><a href="#s2">二、为什么不让 Claude Code 直接当服务器（原稿第一节）</a></li><li><a href="#s3">三、系统现在是怎么搭的（替换原稿第四节的代码蓝图）</a></li><li><a href="#s4">四、5 个核心维度：原稿的决议和现在的事实（原稿第二节）</a></li><li><a href="#s5">五、路线护栏：对照 Claude Duet（新增）</a></li><li><a href="#s6">六、个人微信防封规则：做了哪些（原稿第三节）</a></li><li><a href="#s7">七、原稿里需要更正的说法</a></li><li><a href="#s8">八、原稿第八节的 6 个"补层"文件怎么处理</a></li><li><a href="#s9">九、接下来</a></li><li><a href="#s10">十、时间线</a></li></ol></nav>
+<main>
+<div class="title-row"><h1>达人商务智能体（Proactive Agent）架构设计与落地备忘录</h1><button type="button" id="theme" title="切换浅色 / 深色">深浅色</button></div>
+<blockquote><p><strong>本版</strong>：2026-10-25 更新（第 3 阶段；同日补记了拍板结果）。原稿写于 2026-10-24 18:45–20:55，原文见 git 提交 <code>8ac1c6f</code>。</p><p><strong>本版的规矩</strong>：只写核实过的事实，每条都注明核实日期和方式；没法核实的写"未验证"。原稿里和事实不符的说法，集中列在第七节。</p><p><strong>读者</strong>：老板，以及参与开发的同事。开发细节（问题编号、决策编号、怎么跑测试）在仓库根目录的 <code>handoff.md</code>。</p></blockquote>
+<p>每条后面的<span class="check">日期 · 方式</span>说明它是怎么核实的：</p>
+<div class="table-wrap"><table><thead><tr><th>方式</th><th>含义</th></tr></thead><tbody><tr><td>测试</td><td>有自动化测试覆盖，每次改代码都会重新跑；后面写的是测试文件</td></tr><tr><td>代码</td><td>读过或搜索过代码</td></tr><tr><td>本机</td><td>在这台 Mac 上看过配置、文件或进程</td></tr><tr><td>检索</td><td>上网查过</td></tr><tr><td>拍板</td><td>你确认过的决定，编号见 <code>handoff.md</code> 第 6 节</td></tr><tr><td>告知</td><td>你或同事告诉我们的情况，没有另外核实</td></tr><tr><td>未验证</td><td>目前没法核实，多数要等真实微信、聚水潭或小红书 CLI</td></tr></tbody></table></div>
+<hr>
+<h2 id="s1">一、一页看懂（2026-10-25）</h2>
+<p><strong>已经能用（在模拟模式下）</strong></p>
+<ul><li>名单里的达人在私聊里要样品时，机器人会：没说要哪款就先问 → 查库存 → 逐项追问收件人、电话、地址，并请对方发小红书主页 → 信息齐了生成审批单。审批前的回复不承诺寄出时间和快递。<span class="check">10-25 · 测试 <code>tests/test_influencer_acceptance.py</code>、<code>test_influencer_dialogue.py</code></span></li><li>名单以外的私聊不受影响，照常由原来的聊天机器人回复。<span class="check">10-25 · 测试 <code>test_influencer_acceptance.py</code></span></li><li>运营在控制台的「达人审批」页核对后通过或驳回。通过后在聚水潭建出库单、在小红书绑定佣金；同一张单只能执行一次，重启以后也一样。<span class="check">10-25 · 测试 <code>test_influencer_approval.py</code>，浏览器测试 <code>test_influencer_console.py</code></span></li><li>审批单、达人名单、没补齐的申请都存在本机数据库里，重启不丢。<span class="check">10-25 · 测试 <code>test_influencer_store.py</code></span></li><li>全部自动化测试 3428 个通过、1 个跳过、0 个失败，其中达人模块 92 个。<span class="check">10-25 · 测试</span></li></ul>
+<p><strong>还不能用</strong></p>
+<ul><li>聚水潭：真实接口还没接，现在只能用模拟模式，库存和单号都是假的。<span class="check">10-25 · 代码</span></li><li>小红书 CLI：同事还在开发，还没交付。<span class="check">10-24 · 告知</span></li><li>真实微信：这台 Mac 上的机器人还没正式收过消息，数据库里还没有消息表。<span class="check">10-25 · 本机</span></li></ul>
+<p><strong>现在要注意的</strong></p>
+<ul><li>达人发的如果不是索样（比如闲聊），仍然由原来的聊天机器人回复，可能随口答应什么。第 4 阶段处理。<span class="check">10-24 · 代码</span></li><li>批准或驳回后，机器人不会自动通知达人，要运营把审批卡上的消息复制到微信里发。这是有意这样做的。<span class="check">10-24 · 拍板 D9</span></li><li>运营收不到主动提醒：达人申请时缺货，机器人只回复达人、记一条日志；执行失败会记在审批单上。两种情况都要运营自己去看。第 4 阶段处理。<span class="check">10-25 · 代码</span></li></ul>
+<p>想自己试一遍，步骤见 <code>handoff.md</code> 第 8 节"怎么用达人审批页"。</p>
+<hr>
+<h2 id="s2">二、为什么不让 Claude Code 直接当服务器（原稿第一节）</h2>
+<p><strong>结论不变，代码也是这么做的</strong>：Claude Code 用来写代码；跑业务的是一个常驻在 Mac 上的 Python 服务，基础是开源的微信机器人 webot，达人模块挂在它的私聊入口上。<span class="check">10-24 · 代码</span></p>
+<p>原稿的理由和技术细节，有两处要更正：</p>
+<ul><li>"Claude Code 调外部命令必须有人手动确认，非交互下直接报错"：这是同事实际碰到的情况，我们没有复现。<span class="check warn">告知，未验证</span>不过，不管能不能配成免确认，业务都应该放在专门的常驻服务里：要 7×24 运行，每一步都要能测试，出了错要能追查。</li><li>"常驻服务（如 fastapi + anthropic SDK）直接调用 Claude API"：实际用的是 webot 自带的服务，基于 Python 标准库的 HTTP 服务，不是 fastapi。全局配置的大模型是 DeepSeek（<code>AI_BACKEND=deepseek</code>），不是 Claude。达人模块本身不调用任何大模型，全靠规则识别。<span class="check">10-25 · 本机 <code>.env.macos</code>、代码</span></li></ul>
+<p><strong>向上汇报的话术（更正版）</strong></p>
+<p>原稿的话术里有三处和事实不符：</p>
+<div class="table-wrap"><table><thead><tr><th>原稿说法</th><th>事实</th><th>核实</th></tr></thead><tbody><tr><td>"使用的是 Claude 最顶尖的底层推理大脑"</td><td>全局用的是 DeepSeek；达人模块不调大模型</td><td>10-25 · 本机、代码</td></tr><tr><td>"根据生产级工程标准做了服务端容器化"</td><td>没有容器，直接在 Mac 上从源码运行；仓库里没有任何容器配置</td><td>10-25 · 代码</td></tr><tr><td>"确保了 7x24 小时无人值守的稳定性"</td><td>还没有长时间运行过</td><td>未验证</td></tr></tbody></table></div>
+<p>建议改成：</p>
+<blockquote><p>"跑在 Mac 上的是一个常驻的 Python 服务，基础是开源的微信机器人 webot，达人模块是我们在上面加的，代码由 Claude Code 协助编写和审查。建单、绑佣金这些花钱的动作，都要运营在控制台审批后才执行，每张审批单只能执行一次；达人模块的自动回复不做任何承诺。目前有 3428 个自动化测试，在模拟模式下全部通过；聚水潭、小红书 CLI 和真实微信还没有联调，达人闲聊交给通用聊天机器人的那部分也还要收紧。"</p></blockquote>
+<hr>
+<h2 id="s3">三、系统现在是怎么搭的（替换原稿第四节的代码蓝图）</h2>
+<p>原稿第四节的代码是设想中的骨架，和实际代码对不上：没有 Win 端网关，批准后也不会自动给达人发"样品已寄出"。实际流程如下。<span class="check">10-25 · 代码</span></p>
+<pre><code>微信（就在这台 Mac 上）
+  │  mac_hybrid 后端：从本机微信的数据库读消息，用系统的辅助功能操作微信发消息
+  ▼
+webot 的消息路由（src/router.py）
+  │  名单以外的私聊 → 原来的聊天流程
+  │  名单里的达人私聊 ↓
+  ▼
+达人模块（src/influencer/）
+  ├ 从消息里提取商品、收件人、电话、地址、小红书主页（规则，不用大模型）
+  ├ 查库存：聚水潭适配器（现在只有模拟模式）
+  ├ 查达人数据：小红书 CLI 适配器（CLI 还没交付）
+  └ 生成审批单，存进本机数据库
+        ▼
+控制台「达人审批」页（http://127.0.0.1:7327，默认只能在这台 Mac 上打开）
+  └ 运营点&quot;通过&quot; → 复查库存 → 聚水潭建出库单 → 小红书绑定佣金
+                → 运营把确认消息复制到微信，发给达人</code></pre>
+<div class="table-wrap"><table><thead><tr><th>部分</th><th>代码位置</th><th>现状</th><th>核实</th></tr></thead><tbody><tr><td>微信收发</td><td><code>src/wechat/mac_hybrid_backend.py</code>（原项目）</td><td>代码已有；这台 Mac 上还没正式收发过消息</td><td>10-25 · 代码、本机</td></tr><tr><td>达人对话和审批</td><td><code>src/influencer/handler.py</code>、<code>extract.py</code></td><td>可用</td><td>10-25 · 测试</td></tr><tr><td>数据库</td><td><code>src/influencer/store.py</code></td><td>可用，4 张表：名单、草稿、审批单、操作记录</td><td>10-25 · 测试</td></tr><tr><td>聚水潭</td><td><code>src/influencer/jst_erp.py</code></td><td>只有手动打开的模拟模式，真实接口未接</td><td>10-25 · 测试、代码</td></tr><tr><td>小红书 CLI</td><td><code>src/influencer/xhs_cli.py</code></td><td>按约定草案写好了调用方式，CLI 未交付</td><td>10-25 · 测试</td></tr><tr><td>控制台页面</td><td><code>ui/src/components/InfluencerPanel.jsx</code>、<code>src/influencer/console.py</code></td><td>可用</td><td>10-25 · 浏览器测试</td></tr><tr><td>晨报和物流跟进</td><td><code>src/influencer/scheduled_agent.py</code></td><td>从来没启动过，晨报里有写死的假数据</td><td>10-24 · 代码</td></tr></tbody></table></div>
+<hr>
+<h2 id="s4">四、5 个核心维度：原稿的决议和现在的事实（原稿第二节）</h2>
+<div class="table-wrap"><table><thead><tr><th>维度</th><th>原稿写的</th><th>现在的事实</th><th>核实</th></tr></thead><tbody><tr><td>1. 链路通信</td><td>双向通信已打通；Win 本地转文字</td><td><strong>没有 Win ↔ Mac 链路</strong>，收发都在这台 Mac 上完成（mac_hybrid）。原项目有本地语音转文字（Whisper），默认关闭，没在这台 Mac 上用过</td><td>10-25 · 代码、本机</td></tr><tr><td>2. 业务工具</td><td>小红书 CLI + 聚水潭 ERP</td><td>两个适配器都写好了。聚水潭真实接口没接（第 5 阶段），小红书 CLI 没交付。读操作可以自动调用；写操作（建单、绑佣金）只在审批通过后调用</td><td>10-25 · 测试、代码</td></tr><tr><td>3. 资质裁决</td><td>粉丝、点赞破千；不达标的自动回复"名额已满"</td><td><strong>改了</strong>：只在审批单上标"达标 / 不达标 / 待核实"，不自动拒绝；拿不到数据就标"待核实"，不编数字；数据明确不达标的，批准了也不寄样。门槛以代码为准：粉丝 ≥ 1 万且近期最高点赞 ≥ 1000（原稿写的是"破千"）</td><td>10-25 · 测试；门槛 10-25 · 拍板</td></tr><tr><td>4. 审批闸门</td><td>凡花钱必拦截；缺货、接口失败时自动通知运营</td><td><strong>拦截已实现</strong>：建单、绑佣金都要审批，达人模块的自动回复不做承诺。每张单只能执行一次，72 小时过期，批准时复查库存，佣金最高 25%。<strong>还不会主动通知运营</strong>：达人申请时缺货只回复达人、记日志；执行失败记在审批单上</td><td>10-25 · 测试、代码</td></tr><tr><td>5. 数据基座</td><td>SQLite + WAL；以后可一键迁移到云端 Postgres</td><td><strong>已实现</strong>：达人数据存进机器人本来在用的 SQLite 文件（<code>data/messages.db</code>），WAL 由原项目开启。"一键迁移 Postgres"没做，也没验证</td><td>10-25 · 测试、代码</td></tr></tbody></table></div>
+<hr>
+<h2 id="s5">五、路线护栏：对照 Claude Duet（新增）</h2>
+<p>原稿以《Build Your Own Duet: The 8-Layer Architecture…》为指导理论，但<strong>这篇文章查不到出处</strong>，不作为依据。<span class="check">10-24 · 检索</span>现在的参照是：</p>
+<ul><li>Anthropic 2026-10-21 发布的 Claude Duet 研究预览版，官方公告：<a href="https://claude.com/resources/articles/claude-duet">https://claude.com/resources/articles/claude-duet</a> <span class="check">10-24 · 检索</span></li><li>Shoopy 的使用教程：<a href="https://x.com/0xShoopy/status/2113262783605174729">https://x.com/0xShoopy/status/2113262783605174729</a> <span class="check">10-24 · 检索</span></li></ul>
+<p>从中提炼出 7 条规则，每次改代码都要对照：</p>
+<div class="table-wrap"><table><thead><tr><th>规则</th><th>在这个项目里的意思</th><th>现在做到了吗</th></tr></thead><tbody><tr><td>R1 读、起草、准备，自己做</td><td>识别索样、提取信息、查库存、生成审批单都自动做</td><td>做到了<span class="check">10-25 · 测试</span></td></tr><tr><td>R2 发消息、花钱，先问人</td><td>建单、绑佣金、对达人的承诺都要审批</td><td>部分做到：建单、绑佣金要审批，达人模块的回复不做承诺，批准后的确认消息由运营手动发；但达人闲聊仍交给通用聊天机器人，可能随口承诺（第 4 阶段处理）<span class="check">10-25 · 测试、代码</span></td></tr><tr><td>R3 有些事批准了也不做</td><td>写死的硬上限</td><td>佣金最高 25%、不达标不寄样已做到；每单件数、每日寄样总量的上限还没定<span class="check">10-25 · 测试</span></td></tr><tr><td>R4 读到的内容只当数据</td><td>达人消息不能变成系统指令</td><td>达人模块现在没用大模型，消息只被规则提取成字段；以后接大模型时要再落实<span class="check">10-25 · 代码</span></td></tr><tr><td>R5 每一行都要有来源</td><td>审批单、晨报里的信息都要能追溯</td><td>审批单附达人原话和操作记录；晨报还有假数据，没做到<span class="check">10-25 · 测试、代码</span></td></tr><tr><td>R6 一天汇报两次，只为急事打断</td><td>运营集中审批，急事才提醒</td><td>审批单有效期 72 小时，能等到集中审批；定时汇报和提醒还没做<span class="check">10-25 · 代码</span></td></tr><tr><td>R7 纠正要记住，人确认才生效</td><td>驳回原因每周复盘，系统不自己改规则</td><td>驳回原因已记录；每周复盘还没做<span class="check">10-25 · 测试</span></td></tr></tbody></table></div>
+<hr>
+<h2 id="s6">六、个人微信防封规则：做了哪些（原稿第三节）</h2>
+<div class="table-wrap"><table><thead><tr><th>原稿规则</th><th>现在的情况</th><th>核实</th></tr></thead><tbody><tr><td>加好友、打招呼的频率上限</td><td>系统不会自动加好友：代码里没有这个功能，路线护栏也禁止自动批量加好友</td><td>10-25 · 代码</td></tr><tr><td>拟人化打字延迟</td><td>原项目有打字延迟开关（<code>SEND_TYPING_DELAY</code>），默认关闭；打开后每条消息发送前按字数停 0.4–3.5 秒，和原稿的公式不同。在 Mac 后端上是否生效没有验证</td><td>10-25 · 代码；生效情况未验证</td></tr><tr><td>话术去重和改写</td><td><strong>没做</strong>。达人模块对所有达人用的是同一套固定话术，和这条规则冲突</td><td>10-25 · 代码</td></tr><tr><td>夜间 23:00–08:30 静默</td><td><strong>没做</strong></td><td>10-25 · 代码</td></tr></tbody></table></div>
+<p>这几条要不要做、参数定多少，还没定，10-26 再看（见第九节）。</p>
+<hr>
+<h2 id="s7">七、原稿里需要更正的说法</h2>
+<div class="table-wrap"><table><thead><tr><th>原稿位置</th><th>原稿说法</th><th>事实</th><th>核实</th></tr></thead><tbody><tr><td>抬头</td><td>指导理论是《Build Your Own Duet》</td><td>查不到出处，不作依据；文中的具体数字（轮数上限 10、驳回后门槛提高 15%、8 维研判、30 天回放）也都没有来源</td><td>10-24 · 检索</td></tr><tr><td>抬头、第二节、第五节</td><td>Win 端微信感知；"双向通信已打通"</td><td>代码里没有 Win ↔ Mac 链路</td><td>10-24 · 代码</td></tr><tr><td>第一节</td><td>汇报话术</td><td>见本文第二节</td><td>—</td></tr><tr><td>第六节</td><td>装了 38 个依赖库；<code>/api/status</code> 返回 200</td><td>依赖个数没有核对。控制台服务能启动，<code>/api/status</code> 返回正常</td><td>10-25 · 浏览器测试（会启动真实服务）</td></tr><tr><td>第七节</td><td>"完成端到端多轮真实逻辑模拟测试（……运营审批自动下发打单）"</td><td>当时没有任何达人模块的测试。10-24 晚的代码审查发现 11 个严重问题，包括：审批前就向达人承诺寄出、同一张单能执行两次、收件电话写死、审批根本没有入口。这些问题在 10-24 晚到 10-25 凌晨修完，现在由 92 个测试覆盖</td><td>10-24 · 代码；10-25 · 测试</td></tr><tr><td>第七、八节</td><td>聚水潭适配器"内置沙盒 Mock + 真实接口扩展"</td><td>初版没配密钥时会自动进入模拟模式，"真实模式"返回写死的成功。已修：模拟模式只能手动打开，真实接口没接时直接报错，不再假装成功</td><td>10-25 · 测试</td></tr><tr><td>第七、八节</td><td>定时 Agent：08:30 晨报、主动挖掘达人、物流跟进</td><td>从来没启动过；物流跟进是空函数；晨报里有写死的假数据（"样品充足""8 位中腰部达人"）</td><td>10-24 · 代码</td></tr><tr><td>第七、八节</td><td>资质初筛（不达标委婉拒绝）</td><td>已改为只标注，不自动拒绝</td><td>10-24 · 拍板 D4；10-25 · 测试</td></tr></tbody></table></div>
+<hr>
+<h2 id="s8">八、原稿第八节的 6 个"补层"文件怎么处理</h2>
+<p>2026-10-24 定的原则是"先修主流程，再加新功能"。<span class="check">10-24 · 拍板</span></p>
+<div class="table-wrap"><table><thead><tr><th>文件</th><th>处理</th></tr></thead><tbody><tr><td><code>credential_broker.py</code> 凭据隔离</td><td>不单独建模块。第 4 阶段落实"密钥放 Keychain，不进提示词、不进日志"</td></tr><tr><td><code>dedupe.py</code> 事件去重</td><td>不建。连发消息的合并原项目已有（<code>src/wechat/burst.py</code>）；审批单不会重复执行，已经做到</td></tr><tr><td><code>urgency_rubric.py</code> 8 维研判</td><td>只保留"没有证据就不升级"这一条，用几条规则代替 8 维评分</td></tr><tr><td><code>budget_runner.py</code> 轮数预算</td><td>暂缓。等出现让模型多步调用工具的环节，再加一个最大步数参数</td></tr><tr><td><code>feedback_learner.py</code> 驳回后自动调门槛</td><td>改成"记录驳回原因，每周提建议，人确认后才生效"。驳回原因已经在记录，每周的汇总还没做</td></tr><tr><td><code>tests/test_replay_30d.py</code> 30 天回放</td><td>保留，基于原项目已有的回放工具来做，排在第 4 阶段之后</td></tr></tbody></table></div>
+<hr>
+<h2 id="s9">九、接下来</h2>
+<div class="table-wrap"><table><thead><tr><th>阶段</th><th>内容</th></tr></thead><tbody><tr><td>4</td><td>意图识别改用大模型抽取，附原话证据，没把握就转人工；晨报只用真实数据，并在缺货、执行失败时通知运营；达人的闲聊不交给聊天机器人随口回答；批准后自动给达人发确认消息；日志打码再检查一遍；执行到一半中断的审批单给出处理入口</td></tr><tr><td>5</td><td>接入真实聚水潭（先用测试环境）；接入小红书 CLI（等同事交付），包括生成商品链接</td></tr><tr><td>6</td><td>真机验证：私聊的 ID 是不是对方的微信号；能不能拿到联系人备注</td></tr></tbody></table></div>
+<p><strong>拍板情况（2026-10-25）</strong></p>
+<ol><li>资质门槛：<strong>已定</strong>，以代码为准，粉丝 ≥ 1 万且近期最高点赞 ≥ 1000。<span class="check">10-25 · 拍板</span></li><li>寄样上限：佣金默认和最高都暂定 25%；每单几件、每天最多寄多少，<strong>还没定</strong>。</li><li>防封规则（第六节）要不要做、参数定多少：<strong>还没定</strong>，10-26 再看。尤其是达人模块现在对所有达人用同一套话术。</li></ol>
+<hr>
+<h2 id="s10">十、时间线</h2>
+<div class="table-wrap"><table><thead><tr><th>时间</th><th>事件</th><th>来源</th></tr></thead><tbody><tr><td>10-21</td><td>同事把开源的 webot 导入私有仓库（提交 <code>3f2036c</code>）</td><td>git 记录</td></tr><tr><td>10-24 17:41–18:40</td><td>需求梳理和技术决议（原稿第五节；其中"引入《Build Your Own Duet》""双向通信通畅"见第七节的更正）</td><td>原稿</td></tr><tr><td>10-24 18:57</td><td>Mac 环境跑通，控制台能打开（原稿第六节）</td><td>原稿</td></tr><tr><td>10-24 19:04</td><td>达人模块初版写入（原稿第七节）</td><td>原稿</td></tr><tr><td>10-24 20:55</td><td>原稿第八节：列出 6 个补层文件</td><td>原稿</td></tr><tr><td>10-24 晚</td><td>代码审查，发现 11 个严重问题；建立我方仓库 duet，接上同事仓库的历史</td><td><code>handoff.md</code></td></tr><tr><td>10-24 22:36–22:47</td><td>初版原样纳入版本管理；先写验收测试（修好之前都应该失败）</td><td>git 记录</td></tr><tr><td>10-24 22:58–23:15</td><td>修复严重问题：不承诺、只执行一次、不自动进入模拟模式、不编数据、用真实收件信息、按 ID 和名单识别达人</td><td>git 记录</td></tr><tr><td>10-24 23:40</td><td>装上浏览器自动化测试工具 Playwright</td><td>git 记录</td></tr><tr><td>10-24 23:53–10-25 00:18</td><td>审批入口和数据库：数据存进本机数据库，控制台新增「达人审批」页</td><td>git 记录</td></tr><tr><td>10-25</td><td>本备忘录更新，移进仓库 <code>docs/</code></td><td>git 记录</td></tr></tbody></table></div>
+<footer>这个网页由 <code>tools/memo_html.py</code> 从 <code>docs/达人商务智能体_架构设计与落地备忘录.md</code> 生成，内容以 Markdown 原文为准，不要直接修改网页。</footer>
+</main>
+</div>
+<script>
+(function () {
+  var root = document.documentElement, key = 'memo-theme', button = document.getElementById('theme');
+  try { var saved = localStorage.getItem(key); if (saved) root.setAttribute('data-theme', saved); } catch (e) {}
+  button.addEventListener('click', function () {
+    var current = root.getAttribute('data-theme');
+    var dark = current ? current === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+    root.setAttribute('data-theme', dark ? 'light' : 'dark');
+    try { localStorage.setItem(key, dark ? 'light' : 'dark'); } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>
