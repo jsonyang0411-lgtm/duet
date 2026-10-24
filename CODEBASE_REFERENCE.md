@@ -213,7 +213,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `UI_DIR` | `Path` | `ui/dist/` | `src/web/server.py` | 前端静态文件目录 |
 | `WEBSOCKET_GUID` | `bytes` | `b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"` | `src/web/server.py` | WebSocket 协议 GUID |
 | `_LOOPBACK_HOSTS` | `frozenset[str]` | `{"127.0.0.1", "localhost", "::1"}` | `src/web/server.py` | 控制台只接受 Host / Origin 为本机的请求（防 DNS 重绑定、跨站调用） |
-| `_POST_ONLY_PATHS` | `frozenset[str]` | `/api/config`、`/api/config/import`、`/api/start`、`/api/stop`、`/api/onboarding/reset`、`/api/onboarding/step1..4`、`/api/sandbox/test`、`/api/todos/action`、`/api/voice/download-model`、`/api/wechat-data-dir/detect` | `src/web/server.py` | 会改状态/花钱的端点只认 POST；GET 一律 405（网页可以用 `<img>` 悄悄发 GET，且不带 Origin） |
+| `_POST_ONLY_PATHS` | `frozenset[str]` | `/api/config`、`/api/config/import`、`/api/start`、`/api/stop`、`/api/onboarding/reset`、`/api/onboarding/step1..4`、`/api/sandbox/test`、`/api/todos/action`、`/api/voice/download-model`、`/api/wechat-data-dir/detect`、`/api/influencer/approvals/action`、`/api/influencer/contacts/action` | `src/web/server.py` | 会改状态/花钱的端点只认 POST；GET 一律 405（网页可以用 `<img>` 悄悄发 GET，且不带 Origin） |
 | `CONSOLIDATE_MSG_THRESHOLD` | `int` | `50` | `src/memory/consolidator.py` | 触发记忆合并的消息数阈值 |
 | `CONSOLIDATE_TIME_THRESHOLD_SEC` | `int` | `3600` (1小时) | `src/memory/consolidator.py` | 触发记忆合并的时间阈值 |
 | `MAX_NEW_MSGS_PER_CONSOLIDATION` | `int` | `400` | `src/memory/consolidator.py` | 每次合并最多处理的消息数 |
@@ -739,10 +739,12 @@ todo_delete_keywords: list[str] = [
 | `_decode_name_list(raw)` | `WECHAT_GROUPS` / `PRIVATE_CHATS` 逐段 URL 解码成列表（`*`、空 → `[]`），名字里的 `%2C` 不会被拆开 | `raw: str \| None` | `list[str]` |
 | `_header_hostname(value)` | 取 `Host` 头里的主机名（`127.0.0.1:7327`、`[::1]:7327`） | `value: str` | `str \| None` |
 | `_origin_hostname(value)` | 取 `Origin` 头里的主机名（`null`/乱码返回 None） | `value: str` | `str \| None` |
+| `_influencer_db_path()` | 达人模块用的数据库路径：和群聊待办接口一样从 `find_env_file()` 找到的 .env 里读 `DB_PATH`，默认 `data/messages.db` | 无 | `str` |
 | `_UIHandler._bound_to_loopback()` | 服务器是否只监听本机地址 | 无 | `bool` |
 | `_UIHandler._request_origin_ok()` | 绑定本机时，`Host` 或 `Origin` 的主机名不是本机即拒绝（DNS 重绑定 / 其他网站调用）；没有 `Origin`（页面自身导航、curl）放行；用户把控制台绑到非本机地址时不检查 | 无 | `bool` |
 | `_UIHandler._method_not_allowed()` | 回 405 JSON `{"ok": false, "error": "Method not allowed"}`；`do_POST` 对未知路径、`do_GET` 对 `_POST_ONLY_PATHS` 的 GET 都用它 | 无 | `None` |
 | `_UIHandler._forbid_cross_origin()` | 回 403 JSON `{"ok": false, "error": "Forbidden: cross-origin request rejected"}` | 无 | `None` |
+| `_UIHandler._handle_influencer()` | `/api/influencer/*`（控制台「达人审批」页）：POST 时读 JSON 请求体，连同路径、查询参数和 `InfluencerStore(_influencer_db_path())` 一起交给 `src/influencer/console.handle()`，结果用 `send_json` 返回；出错回 `{ok:false, error}`；路径不认识回 404 JSON。具体行为见 `handoff.md`（达人模块不写入本手册） | 无 | `None` |
 | `_UIHandler._handle_advanced()` | `GET/POST /api/advanced`：GET 返回 `advanced_config.describe()` 的分组（密钥打码）和被 `.env.local` 覆盖的键；POST `{values:{KEY: 值}}` 先逐项 `check_value`、再合并后跑 `_validate_config`（`validate_updates`），全部合法才用 `_write_env_updates` 写共享 .env 并同步 `os.environ`；打码的密钥保留原值 | 无 | `None` |
 | `_UIHandler._send_cors_headers(preflight=False)` | 回显已通过校验的 `Origin`（带 `Vary: Origin`），预检时附 Methods/Headers/Max-Age；不再返回 `Access-Control-Allow-Origin: *` | `preflight: bool` | `None` |
 
@@ -1068,6 +1070,7 @@ _API 请求 → _UIHandler._handle_request()
   ├── /api/todos          → TodoStore
   ├── /api/todos/action   → TodoStore
   ├── /api/todos/counts   → TodoStore
+  ├── /api/influencer/*   → _handle_influencer() → src/influencer/console.handle()（达人审批，说明见 handoff.md）
   ├── /api/voice/model-status → 检查 HuggingFace 缓存
   ├── /api/voice/download-model → snapshot_download()
   ├── /api/lots           → load_lots_config() / save_lots_config()
@@ -1463,6 +1466,12 @@ MessageRouter.handle(msg) → [无 @mention]
 | `GET` | `/api/todos?status=active&chat_id=xxx` | 获取待办列表 | 无 |
 | `GET` | `/api/todos/counts?chat_id=xxx` | 获取各状态待办计数 | 无 |
 | `POST` | `/api/todos/action` | 执行待办操作 (complete/delete/restore/clear) | 无 |
+| `GET` | `/api/influencer/status` | 达人审批页的状态：模拟模式、聚水潭和小红书 CLI 能否使用、待审批数量、佣金默认值和上限 | 无 |
+| `GET` | `/api/influencer/approvals?status=pending` | 审批单列表（pending/executing/fulfilled/rejected/failed/expired/all），带操作记录和要发给达人的消息 | 无 |
+| `POST` | `/api/influencer/approvals/action` | 通过或驳回审批单：`{packet_id, action: approve\|reject, xhs_account?, commission_rate?, reason?}`；通过时调用聚水潭和小红书 CLI | 无 |
+| `GET` | `/api/influencer/contacts` | 达人名单 | 无 |
+| `POST` | `/api/influencer/contacts/action` | 添加、修改、启用或停用达人：`{chat_id, display_name?, xhs_account?, note?, enabled?}` | 无 |
+| `GET` | `/api/influencer/recent-chats` | 最近私聊过的联系人（取自 messages 表，去掉群聊和系统会话），供挑选达人 | 无 |
 | `GET` | `/api/logs` | 获取最近 500 行日志 | 无 |
 | `POST` | `/api/sandbox/test` | AI 沙盒测试 (不发送)；用 `create_models(config).chat`，即按 `MODEL_ROUTE` 选机器人回复时用的模型 | 无 |
 | `GET` | `/api/advanced` | 高级开关白名单和当前值（密钥打码）、被 `.env.local` 覆盖的键 | 无 |

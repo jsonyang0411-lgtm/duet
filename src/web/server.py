@@ -1223,6 +1223,7 @@ _POST_ONLY_PATHS = frozenset({
     "/api/onboarding/step3", "/api/onboarding/step4",
     "/api/sandbox/test", "/api/todos/action",
     "/api/voice/download-model", "/api/wechat-data-dir/detect",
+    "/api/influencer/approvals/action", "/api/influencer/contacts/action",
 })
 
 
@@ -1240,6 +1241,19 @@ def _origin_hostname(value: str) -> str | None:
         return urlsplit(value.strip()).hostname
     except ValueError:
         return None
+
+
+def _influencer_db_path() -> str:
+    """达人模块的数据库：和群聊待办一样取 .env 里的 DB_PATH，默认 data/messages.db。"""
+    from src.config import find_env_file
+    db_path = "data/messages.db"
+    env_path = find_env_file()
+    if env_path and env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            if line.strip().startswith("DB_PATH="):
+                db_path = line.strip().split("=", 1)[1].strip()
+                break
+    return db_path
 
 
 class _UIHandler(SimpleHTTPRequestHandler):
@@ -1323,7 +1337,9 @@ class _UIHandler(SimpleHTTPRequestHandler):
                          "/api/advanced",
                          "/api/todos/action",
                          "/api/voice/download-model",
-                         "/api/wechat-data-dir/detect"):
+                         "/api/wechat-data-dir/detect",
+                         "/api/influencer/approvals/action",
+                         "/api/influencer/contacts/action"):
             self.do_GET()
         else:
             self._method_not_allowed()
@@ -1337,6 +1353,34 @@ class _UIHandler(SimpleHTTPRequestHandler):
             self._method_not_allowed()
             return
         self._handle_request()
+
+    def _handle_influencer(self):
+        """/api/influencer/*：控制台的「达人审批」页。具体处理在 src/influencer/console.py。"""
+        from urllib.parse import parse_qs
+        from src.influencer import console
+        from src.influencer.store import InfluencerStore
+
+        path, _, query = self.path.partition("?")
+        try:
+            body = {}
+            if self.command == "POST":
+                content_len = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(content_len) if content_len else b"{}")
+            params = {k: v[0] if v else "" for k, v in parse_qs(query).items()}
+            store = InfluencerStore(_influencer_db_path())
+            result = console.handle(path, self.command, params, body, store)
+        except Exception as e:
+            logger.exception("Influencer API failed: %s", path)
+            result = {"ok": False, "error": str(e)}
+        if result is None:
+            data = json.dumps({"ok": False, "error": "Not found"}).encode()
+            self.send_response(404)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        self.send_json(result)
 
     def _handle_advanced(self):
         """GET/POST /api/advanced: the allow-listed advanced switches.
@@ -2148,6 +2192,11 @@ class _UIHandler(SimpleHTTPRequestHandler):
             except Exception as e:
                 logger.exception("Todo action failed")
                 self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # ── API: 达人审批（src/influencer/，说明见 handoff.md） ──────────
+        if self.path.startswith("/api/influencer/"):
+            self._handle_influencer()
             return
 
         # ── API: Get / Save welcome templates ─────────────────────────

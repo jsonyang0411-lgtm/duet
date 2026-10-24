@@ -88,6 +88,12 @@ class JuShuiTanERPClient:
         # 真实环境调用聚水潭手工单/订单上传接口
         raise self._not_ready_error()
 
+    def readiness(self) -> Dict[str, Any]:
+        """给控制台看的状态：能不能用、是不是模拟模式、为什么不能用。"""
+        if self.mock_mode:
+            return {"ready": True, "mock": True, "detail": "模拟模式：库存和单号都是假的，不会真实建单"}
+        return {"ready": False, "mock": False, "detail": str(self._not_ready_error())}
+
     def _not_ready_error(self) -> ERPNotReadyError:
         if not self.app_key:
             return ERPNotReadyError(

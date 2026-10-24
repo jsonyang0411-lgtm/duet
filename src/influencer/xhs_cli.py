@@ -75,6 +75,17 @@ class XiaohongshuCLIClient:
             args += ["--idempotency-key", idempotency_key]
         return await self._run(*args, "--json")
 
+    def readiness(self) -> Dict[str, Any]:
+        """给控制台看的状态：能不能用、是不是模拟模式、为什么不能用。"""
+        if self.mock_mode:
+            return {"ready": True, "mock": True, "detail": "模拟模式：达人数据是假的，不会真实绑定佣金"}
+        if not self.is_available:
+            return {
+                "ready": False, "mock": False,
+                "detail": f"找不到小红书 CLI（{self.cli_path}），可以用环境变量 XHS_CLI_PATH 指定路径",
+            }
+        return {"ready": True, "mock": False, "detail": f"小红书 CLI：{self.cli_path}"}
+
     async def _run(self, *args: str) -> Dict[str, Any]:
         """执行一次 CLI，结果必须是 JSON。任何失败都抛出 XHSCLIError。"""
         if not self.is_available:
