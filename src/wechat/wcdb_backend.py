@@ -44,6 +44,7 @@ APPMSG_TYPE = 49
 QUOTE_APPMSG_SUBTYPE = 57
 _HEX_BLOB_RE = re.compile(r"^[0-9a-fA-F]{80,}$")
 _MEDIA_MD5_RE = re.compile(r"\bmd5=[\"']([0-9a-fA-F]{16,64})[\"']")
+_PICTURE_FIELD_LOGS = [0]       # how many picture messages have had their field names logged
 _SPECIAL_PRIVATE_TALKERS = {
     "filehelper", "fmessage", "medianote", "floatbottle", "qqmail",
     "tmessage", "qmessage", "qqsync", "weixin", "weixinreminder",
@@ -77,8 +78,12 @@ def _looks_like_wechat_blob(content: str) -> bool:
 
 
 def _extract_media_hint(content: str) -> str:
-    """Extract an emoji/image cache identifier from WeChat XML content."""
-    match = _MEDIA_MD5_RE.search(str(content or ""))
+    """Extract an emoji/image cache identifier (the md5 that names its files) from WeChat XML content.
+
+    WeChat 4 may hand the XML over zstd compressed and hex encoded; that is unpacked too.
+    """
+    text = str(content or "")
+    match = _MEDIA_MD5_RE.search(text) or _MEDIA_MD5_RE.search(_decompress_zstd_hex(text))
     return match.group(1).lower() if match else ""
 
 
@@ -1309,6 +1314,12 @@ class WcdbBackend(AbstractWeChatBackend):
         media_path = ""
         media_base_dir = ""
         media_hint = _extract_media_hint(content)
+        if (local_type == 3 or _looks_like_wechat_blob(content)) and _PICTURE_FIELD_LOGS[0] < 3:
+            # What WCDB gives for a picture decides how its file is found; names only, never content.
+            _PICTURE_FIELD_LOGS[0] += 1
+            logger.info("Picture message: fields %s; content is %s; md5 of the picture %s",
+                        sorted(msg), "a hex blob" if _looks_like_wechat_blob(content) else "text",
+                        "found" if media_hint else "NOT found (files are matched by time only)")
         quote_info = (
             _extract_quote_appmsg(content, msg_subtype)
             if local_type == APPMSG_TYPE or msg_subtype == QUOTE_APPMSG_SUBTYPE

@@ -335,6 +335,7 @@ class ImageKeys:
         self.clock = clock
         self.lock = threading.Lock()
         self.failed_at: dict[str, float] = {}
+        self._announced: set[str] = set()
 
     def _load(self) -> dict:
         try:
@@ -374,6 +375,12 @@ class ImageKeys:
             if changed:
                 data[account.name] = entry
                 self._save(data)
+            if account.name not in self._announced:
+                self._announced.add(account.name)
+                # data\ is relative to the working folder: a tool run from the project folder and a bot
+                # started from another one (the EXE's) do not share a key file; the path shows which.
+                logger.info("Image keys of %s (file %s): AES %s, XOR %s", account.name, self.path.resolve(),
+                            "known" if entry.get("aes") else "MISSING", "known" if entry.get("xor") is not None else "MISSING")
         aes = entry.get("aes")
         return (aes.encode("ascii") if aes else None), entry.get("xor")
 

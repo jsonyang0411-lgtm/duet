@@ -11,11 +11,14 @@ when it is small enough or someone opens it, so a file may not be there yet.
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+
+logger = logging.getLogger(__name__)
 
 HOLD_SEC = 600                       # a held picture or file waits this long for a task
 MAX_FILE_BYTES = 2 * 1024 ** 3       # larger ones are not sent to the Mac (WeChat itself
@@ -52,10 +55,15 @@ def resolve(config, held: Held, number: int) -> tuple[str, str, str]:
             wechat_data_dir=str(getattr(config, "wechat_data_dir", "") or ""),
             image_vision_max_bytes=MAX_PICTURE_BYTES,
             image_vision_lookback_sec=int(getattr(config, "image_vision_lookback_sec", 900) or 900),
+            image_allow_thumbnail=False,         # a thumbnail is worse than the chat window's own picture
         )
         path = find_recent_image_path(vision, [held.msg])
         if path:
+            logger.info("Relay picture %d: the picture file of the message (%s)", number, Path(path).name)
             return path, f"图片-{number}{Path(path).suffix.lower() or '.jpg'}", ""
+        logger.warning("Relay picture %d: no picture file found for the message (chat %s, base %s); "
+                       "see the 'Picture' lines above for why", number, held.msg.get("chat_id", "?"),
+                       held.msg.get("media_base_dir") or getattr(config, "wechat_data_dir", "") or "(none)")
         capture = held.msg.get("_capture_media_screenshot")
         if callable(capture):
             try:
@@ -63,6 +71,7 @@ def resolve(config, held: Held, number: int) -> tuple[str, str, str]:
             except Exception:
                 path = ""
             if path:
+                logger.warning("Relay picture %d: a screenshot of the chat window goes to the Mac instead", number)
                 return path, f"聊天截图-{number}.jpg", ""
         return "", "", "一张图片在电脑上没找到（可能还没下载完），没带上"
     name = str(held.msg.get("file_name") or "").strip()
