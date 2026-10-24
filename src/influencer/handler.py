@@ -121,16 +121,16 @@ class InfluencerBusinessHandler:
         if not inventory.get("in_stock") or inventory.get("available_quantity", 0) <= 0:
             logger.warning(f"[ERP库存不足] {intent.requested_product}")
             return (
-                f"亲亲，您看中的【{intent.requested_product}】太火爆啦，目前仓库的样品库存暂时告罄，"
-                "我们已经在紧急补货调拨中，到货后第一时间通知您寄送！"
+                f"亲亲，【{intent.requested_product}】的样品目前暂时没有库存，非常抱歉~ "
+                "老师也可以看看我们的其他产品哦！"
             )
 
         # 4. 地址信息不完整：引导达人补充地址并记录上下文状态
         if not intent.shipping_address or not intent.recipient_phone:
             self.awaiting_address[sender_id] = inventory["product_name"]
             return (
-                f"收到老师的需求啦！【{inventory['product_name']}】目前库存充足，我们非常期待与老师合作~ ✨\n"
-                "麻烦老师发一下您的【收件人姓名、联系电话、收货地址】，我们运营小姐姐马上为您安排寄出哦！"
+                f"收到老师的需求啦！【{inventory['product_name']}】目前有货，我们很期待和老师合作~ ✨\n"
+                "麻烦老师发一下【收件人姓名、联系电话、收货地址】，我们登记后会提交审核，审核结果第一时间告诉老师~"
             )
 
         # 5. 达人已提供完整收件地址，解除等待状态，生成 Layer 6 Gate 审批卡片
@@ -153,9 +153,9 @@ class InfluencerBusinessHandler:
 
         logger.info(f"🚨 [Gate拦截-待运营审批] 任务单 {packet_id}: {action_packet}")
         return (
-            f"收到老师的寄样收件信息！【{inventory['product_name']}】我们已经录入发货排单队列~ 📦\n"
+            f"收到老师的收件信息啦！【{inventory['product_name']}】的寄样申请已经提交审核~ 📝\n"
             f"收件地址：{intent.shipping_address}\n"
-            "仓库今天下午安排顺丰寄出，单号生成后第一时间发给老师，合作愉快！"
+            "审核通过后我们会第一时间通知老师，请稍等哦~"
         )
 
     async def execute_operator_approval(self, packet_id: str, approved: bool) -> Dict[str, Any]:

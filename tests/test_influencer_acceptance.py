@@ -152,14 +152,12 @@ def test_s1_non_influencer_private_chat_gets_the_normal_reply():
     assert "收件" not in (reply or "")
 
 
-@known_failure("B1 审批前承诺")
 def test_s2_asking_for_the_address_makes_no_promise():
     reply = run(make_handler().process_incoming_message(INFLUENCER, SAMPLE_REQUEST, nickname="小美"))
     assert reply and ("收件" in reply or "地址" in reply)
     assert_no_commitment(reply)
 
 
-@known_failure("B1 审批前承诺")
 def test_s3_full_address_is_submitted_for_review_without_promise():
     handler = make_handler()
     run(handler.process_incoming_message(INFLUENCER, SAMPLE_REQUEST, nickname="小美"))
