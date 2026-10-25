@@ -33,6 +33,7 @@ STATUS_FILTERS = {
 }
 
 TRACKING_PLACEHOLDER = "〔运单号〕"
+LINK_PLACEHOLDER = "〔推广链接〕"
 
 
 def handle(
@@ -129,7 +130,7 @@ def packet_json(packet: ApprovalActionPacket, events: List[Dict[str, Any]]) -> D
     data["status_label"] = STATUS_LABELS[packet.status]
     data["events"] = events
     if packet.status == GateStatus.PENDING:
-        data["notice"] = approval_notice(replace(packet, tracking_number=TRACKING_PLACEHOLDER))
+        data["notice"] = approval_notice(replace(packet, tracking_number=TRACKING_PLACEHOLDER, product_link=LINK_PLACEHOLDER))
     elif packet.status == GateStatus.FULFILLED:
         data["notice"] = approval_notice(packet)
     elif packet.status == GateStatus.REJECTED:
@@ -183,6 +184,7 @@ def resolve_interrupted(store: InfluencerStore, packet_id: str, body: Dict[str, 
         order_sn=str(body.get("order_sn") or ""),
         tracking_number=str(body.get("tracking_number") or ""),
         commission_plan=str(body.get("commission_plan") or ""),
+        product_link=str(body.get("product_link") or ""),
         note=str(body.get("note") or ""),
         source=SOURCE_CONSOLE,
     )

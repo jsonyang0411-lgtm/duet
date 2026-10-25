@@ -1,6 +1,6 @@
 """Xiaohongshu CLI (小红书命令行工具) Adapter.
 
-封装同事开发的小红书 CLI：查询达人数据（读），设置专属佣金（写）。
+封装同事开发的小红书 CLI：查询达人数据（读），设置专属佣金、生成商品推广链接（写）。
 命令格式按 handoff.md 第 7 节的接口约定草案，最终以同事交付的 CLI 为准。
 
 模拟模式只能手动打开（D6）：构造时传 mock_mode=True，或设置环境变量 INFLUENCER_MOCK=1。
@@ -71,6 +71,28 @@ class XiaohongshuCLIClient:
             }
 
         args = ["commission", "set", "--uid", xhs_uid, "--sku", sku_id, "--rate", str(rate)]
+        if idempotency_key:
+            args += ["--idempotency-key", idempotency_key]
+        return await self._run(*args, "--json")
+
+    async def create_product_link(
+        self, xhs_uid: str, sku_id: str, idempotency_key: str = ""
+    ) -> Dict[str, Any]:
+        """给达人生成这款商品的专属推广链接，成功时返回 {"success": True, "link": ...}。
+
+        链接由小红书平台生成，这里只是调用 CLI。命令和返回字段按 handoff.md 第 7 节的草案，
+        以同事交付的 CLI 为准。idempotency_key 传审批单号：重复调用只生成一次。
+        """
+        if self.mock_mode:
+            logger.info(f"[XHS Mock] 生成推广链接: 达人 {xhs_uid}，SKU {sku_id}")
+            return {
+                "success": True,
+                "link": f"https://xhslink.com/mock/{idempotency_key or sku_id}",
+                "message": "推广链接已生成（模拟）",
+                "mock": True,
+            }
+
+        args = ["product-link", "create", "--uid", xhs_uid, "--sku", sku_id]
         if idempotency_key:
             args += ["--idempotency-key", idempotency_key]
         return await self._run(*args, "--json")

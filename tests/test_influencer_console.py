@@ -113,7 +113,10 @@ def test_an_approval_runs_and_its_message_can_be_copied(console, page):
     done.get_by_role("button", name="复制").click()
     page.get_by_text("已复制").wait_for()
     tracking = console.store.get_approval("GATE-OK").tracking_number
-    assert tracking in page.evaluate("navigator.clipboard.readText()")
+    copied = page.evaluate("navigator.clipboard.readText()")
+    assert tracking in copied
+    assert "https://xhslink.com/mock/GATE-OK" in copied, "推广链接写进发给达人的消息"
+    done.get_by_role("link", name="https://xhslink.com/mock/GATE-OK").wait_for()
 
 
 def test_a_rejection_keeps_the_reason(console, page):

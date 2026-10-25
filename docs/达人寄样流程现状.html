@@ -93,7 +93,7 @@ footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
 <div class="summary">
   <div><b>能跑通的</b><p>在模拟模式下，从"达人说要样品"到"运营批准、生成运单号和要发给达人的消息"已经全程跑通。状态、审批记录都存进了数据库，每张单只会执行一次。</p></div>
   <div><b>卡在外部的</b><p>聚水潭的真实接口、小红书 CLI、Windows 真机验证。这几项不到位，就只能用假数据跑。</p></div>
-  <div><b>还没做的</b><p>Mac 端接收转发、把 <code>claude -p</code> 接进流程、推广链接、自动给达人发消息、查物流、发布跟进。</p></div>
+  <div><b>还没做的</b><p>Mac 端接收转发、把 <code>claude -p</code> 接进流程、自动给达人发消息、查物流、发布跟进。</p></div>
 </div>
 
 <div class="flow">
@@ -209,8 +209,8 @@ footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
       <p>执行顺序和失败处理都做好了，模拟模式会返回一个假的单号和运单号。<b>要核实：</b>真实的聚水潭建单时大概率还没有运单号，要等仓库打单后才有。</p></div>
     <div class="node part"><div class="t">小红书绑专属佣金<span class="chip part">只有模拟</span></div>
       <p>建单成功后才绑佣金（B3），审批单号作为防重复的标识传过去。等 CLI 交付。</p></div>
-    <div class="node todo"><div class="t">生成商品推广链接<span class="chip todo">未实现</span></div>
-      <p>链接由小红书平台生成，要通过小红书 CLI 调用。我们后台负责：调用 CLI、把链接存进审批单、在审批卡上显示、写进发给达人的消息。后台这部分可以先用模拟数据做。</p></div>
+    <div class="node part"><div class="t">生成商品推广链接<span class="chip part">后台已做，等 CLI</span></div>
+      <p>链接由小红书平台生成，通过小红书 CLI 调用。后台已经做好：绑佣金成功后调用 CLI、把链接存进审批单、在审批卡上显示、写进发给达人的消息。链接没生成不算执行失败，会提示运营手动生成。命令格式要和同事确认。</p></div>
     <div class="node done"><div class="t">执行失败 → 标记为失败<span class="chip done">已实现</span></div>
       <p>保留已经建好的单号，提示运营去人工核对。</p></div>
     <div class="node done"><div class="t">执行到一半中断<span class="chip done">已实现</span></div>
@@ -272,7 +272,7 @@ footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
 <tr><th>顺序</th><th>做什么</th><th>依赖</th></tr>
 <tr><td>1</td><td>B23：执行到一半中断的审批单，在控制台上给出"人工核对后标记"的入口</td><td>已完成</td></tr>
 <tr><td>2</td><td>谈佣金：识别到要求提佣金时，回复固定话术并记进「待处理」</td><td>已完成</td></tr>
-<tr><td>3</td><td>推广链接：后台调用、保存、显示、写进通知消息</td><td>先用模拟数据，命令格式要和同事确认</td></tr>
+<tr><td>3</td><td>推广链接：后台调用、保存、显示、写进通知消息</td><td>已完成，命令格式要和同事确认</td></tr>
 <tr><td>4</td><td>把查库存、提交审批单、查物流做成工具（MCP），供 Claude 调用</td><td>先用模拟数据</td></tr>
 <tr><td>5</td><td>Mac 端接收服务：收 Windows 转发的消息，交给达人模块和 <code>claude -p</code>，返回回复</td><td>同事的消息格式、业务资料</td></tr>
 <tr><td>6</td><td>自动给达人发确认消息（B15），经 Windows 发出</td><td>防封规则、第 5 项</td></tr>

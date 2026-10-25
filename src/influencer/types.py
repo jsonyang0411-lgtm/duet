@@ -130,5 +130,6 @@ class ApprovalActionPacket:
     order_sn: str = ""
     tracking_number: str = ""
     commission_plan: str = ""
+    product_link: str = ""  # 小红书 CLI 生成的商品推广链接，写进发给达人的确认消息
     handled_at: Optional[float] = None  # 驳回、执行完成、失败或过期的时间
     personal_info_cleared_at: Optional[float] = None  # 到期清除收件信息的时间（Q3）
