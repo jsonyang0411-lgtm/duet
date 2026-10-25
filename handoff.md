@@ -1,6 +1,6 @@
 # 交接文档：达人商务智能体
 
-> 最后更新：2026-10-25（v23：Claude 回复、寄样上限、发送限速、日志打码已做；第 5 项只差接收同事转发的那一层，要同事的消息格式；新发现 B27 待决定）
+> 最后更新：2026-10-25（v24："不等同事也能做"的 5 件事都做完了，备忘录已按新架构更新；第 5 项只差接收同事转发的那一层，要同事的消息格式；B27 待决定）
 > 读者：接手这个项目的 AI 窗口，以及参与开发的同事。
 > 规矩：新窗口开工前先读完本文件；收工前更新第 3 节（当前状态）、第 5 节（计划进度）和第 9 节（变更记录）。
 
@@ -314,3 +314,4 @@ CLI 交付之前，我们按这份约定写一个桩程序，通过配置显式�
 - 2026-10-25 v21：第 2 件寄样上限机制完成（D5 的数字没定，默认不限）。`handler.sample_limit_problem` 在批准时检查，超了不执行、单留在待审批；审批卡上标出原因，「通过」按钮不能点；审批页顶部显示当前上限。新增 `tests/test_influencer_sample_limits.py`。完整测试 3535 个通过、1 个跳过。
 - 2026-10-25 v22：第 3 件发送限速机制完成（防封参数没定，用保守默认值）：`src/influencer/send_policy.py`、`influencer_outbox` 表。回复延迟只在 `build_influencer_handler`（真实运行）里打开，测试里直接构造的处理器不等。新增 `tests/test_influencer_send_policy.py`。完整测试 3556 个通过、1 个跳过。
 - 2026-10-25 v23：第 4 件日志打码检查完成（B14 已修）：新增 `src/pii.py`，改了原项目共享代码的日志和追踪（router、routing/steps、decision_trace、wcdb_backend、voice/pipeline），CODEBASE_REFERENCE 新增 2.47 节。新发现 B27（messages 表永久存消息原文；extract_key 日志打印密钥前 16 位），等用户决定。新增 `tests/test_pii.py`。完整测试 3568 个通过、1 个跳过。
+- 2026-10-25 v24：给 `claude -p` 加了 `--max-turns 6`（`CLAUDE_MAX_TURNS`），用真实调用验证过到了上限返回 `error_max_turns`、处理器退回规则流程。第 5 件备忘录更新完成：按新架构（Windows 收发、Mac 处理、Claude 回复）重写第一、二、三节，其他各节同步，网页版重新生成。
