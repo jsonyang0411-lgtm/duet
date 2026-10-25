@@ -30,6 +30,7 @@ from .settings import (
     sample_limits,
     influencer_chat_ids_from_env,
 )
+from .send_policy import SendPolicy
 from .store import (
     EVENT_EXECUTION_STARTED,
     INBOX_COMMISSION,
@@ -111,7 +112,7 @@ def build_influencer_handler(db_path: str) -> "InfluencerBusinessHandler":
 
         brain = ClaudeBrain(store, db_path)
         logger.info("[达人模块] 达人的消息交给 Claude 回复（INFLUENCER_BRAIN=claude）")
-    return InfluencerBusinessHandler(store, brain=brain)
+    return InfluencerBusinessHandler(store, brain=brain, send_policy=SendPolicy.from_env())
 
 
 def sample_limit_problem(store: InfluencerStore, packet: ApprovalActionPacket, now: Optional[float] = None) -> str:
@@ -138,12 +139,15 @@ class InfluencerBusinessHandler:
         erp_client: Optional[JuShuiTanERPClient] = None,
         xhs_client: Optional[XiaohongshuCLIClient] = None,
         brain: Optional["ClaudeBrain"] = None,
+        send_policy: Optional[SendPolicy] = None,
     ):
         self.store = store
         self.erp = erp_client or JuShuiTanERPClient()
         self.xhs = xhs_client or XiaohongshuCLIClient()
         # 交给 Claude 回复（claude_brain.py）；None 表示只用规则流程
         self.brain = brain
+        # 防封：回复前像真人一样等一会儿（send_policy.py）；None 表示不等（测试里直接构造时）
+        self.send_policy = send_policy
         # router 在多个工作线程里调用本处理器。同一位达人的消息一条一条处理：
         # 草稿是"读出来、改、写回去"，两条消息同时处理会丢掉其中一条的信息
         self._chat_locks: Dict[str, threading.Lock] = {}
@@ -210,7 +214,11 @@ class InfluencerBusinessHandler:
             return None
         try:
             with self._chat_lock(chat_id):
-                return asyncio.run(self.process_incoming_message(chat_id, content, nickname))
+                started = time.time()
+                reply = asyncio.run(self.process_incoming_message(chat_id, content, nickname))
+                if reply and self.send_policy is not None:
+                    time.sleep(self.send_policy.reply_delay(reply, already_spent=time.time() - started))
+                return reply
         except Exception:
             logger.exception("[达人模块] 处理私信出错，需要人工处理")
             return HOLDING_REPLY

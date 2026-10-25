@@ -13,10 +13,13 @@ import time
 from contextlib import contextmanager
 from dataclasses import asdict, fields
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from .settings import DRAFT_TTL_SECONDS, PERSONAL_INFO_RETENTION_SECONDS
 from .types import ApprovalActionPacket, GateStatus, SampleRequestDraft
+
+if TYPE_CHECKING:
+    from .send_policy import SendPolicy
 
 # 操作记录里的"来源"
 SOURCE_BOT = "机器人"
@@ -130,6 +133,21 @@ CREATE TABLE IF NOT EXISTS influencer_dialog (
 
 CREATE INDEX IF NOT EXISTS idx_influencer_dialog_chat
     ON influencer_dialog(chat_id, created_at DESC);
+
+-- 主动发给达人的消息（批准后的确认消息等，B15）的发送队列。什么时候能发由 send_policy 决定
+-- （间隔、每小时上限、夜间不发）。发出后 90 天删除
+CREATE TABLE IF NOT EXISTS influencer_outbox (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id    TEXT    NOT NULL,
+    text       TEXT    NOT NULL,
+    kind       TEXT    NOT NULL DEFAULT '',
+    packet_id  TEXT    NOT NULL DEFAULT '',
+    created_at REAL    NOT NULL,
+    sent_at    REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_influencer_outbox_open
+    ON influencer_outbox(sent_at, created_at);
 """
 
 # 审批单从待审批改成执行中时记的一条操作记录，用来判断执行是不是被中断了（B23）
@@ -589,6 +607,45 @@ class InfluencerStore:
             ).fetchall()
         return [dict(row) for row in reversed(rows)]
 
+    # ---- 发送队列 ----
+
+    def enqueue_outgoing(self, chat_id: str, text: str, *, kind: str = "", packet_id: str = "") -> int:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO influencer_outbox (chat_id, text, kind, packet_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                (chat_id, text, kind, packet_id, time.time()),
+            )
+        return cur.lastrowid
+
+    def next_outgoing(self, policy: "SendPolicy", now: Optional[float] = None) -> Tuple[Optional[Dict[str, Any]], float, str]:
+        """队列里最早的一条，以及现在能不能发：(这一条, 还要等几秒, 原因)。队列空时第一项是 None。"""
+        now = time.time() if now is None else now
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM influencer_outbox WHERE sent_at IS NULL ORDER BY created_at, id LIMIT 1",
+            ).fetchone()
+            if row is None:
+                return None, 0.0, ""
+            last = conn.execute("SELECT MAX(sent_at) AS t FROM influencer_outbox").fetchone()["t"]
+            hour = conn.execute(
+                "SELECT COUNT(*) AS n, MIN(sent_at) AS oldest FROM influencer_outbox WHERE sent_at >= ?",
+                (now - 3600,),
+            ).fetchone()
+        wait, reason = policy.wait_before_next_send(now, last, hour["n"], hour["oldest"])
+        return dict(row), wait, reason
+
+    def mark_outgoing_sent(self, item_id: int, now: Optional[float] = None) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE influencer_outbox SET sent_at = ? WHERE id = ? AND sent_at IS NULL",
+                (time.time() if now is None else now, item_id),
+            )
+        return cur.rowcount == 1
+
+    def count_unsent(self) -> int:
+        with self._connect() as conn:
+            return conn.execute("SELECT COUNT(*) FROM influencer_outbox WHERE sent_at IS NULL").fetchone()[0]
+
     # ---- 概览 ----
 
     def overview(self, now: Optional[float] = None) -> Dict[str, int]:
@@ -632,7 +689,7 @@ class InfluencerStore:
 
     def run_maintenance(self, now: Optional[float] = None) -> None:
         """把超过有效期的待审批单标成过期；清除到期的个人信息（Q3）；删掉作废的草稿，
-        以及处理完 90 天的待处理事项、90 天前的对话记录。
+        以及处理完 90 天的待处理事项、90 天前的对话记录和发出 90 天的消息。
 
         机器人启动时、控制台每次列审批单时都会调用，所以不需要单独的定时任务。
         """
@@ -668,4 +725,8 @@ class InfluencerStore:
             )
             conn.execute(
                 "DELETE FROM influencer_dialog WHERE created_at < ?", (now - PERSONAL_INFO_RETENTION_SECONDS,),
+            )
+            conn.execute(
+                "DELETE FROM influencer_outbox WHERE sent_at IS NOT NULL AND sent_at < ?",
+                (now - PERSONAL_INFO_RETENTION_SECONDS,),
             )
