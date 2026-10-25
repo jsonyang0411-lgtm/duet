@@ -81,7 +81,7 @@ footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
 <body>
 <main>
 <h1>达人寄样流程现状</h1>
-<p class="sub">从达人发来消息到发货、跟进的每一步，以及每一步做到了什么程度。依据：仓库代码 <code>851e2fd</code>、handoff.md v15 和用户 10-25 的补充，2026-10-25。</p>
+<p class="sub">从达人发来消息到发货、跟进的每一步，以及每一步做到了什么程度。依据：仓库代码 <code>de04101</code>、handoff.md v24 和用户 10-25 的补充，2026-10-25。</p>
 
 <div class="legend">
   <span class="chip done">● 已实现（有测试）</span>
@@ -259,9 +259,9 @@ footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
 <tr><th>事项</th><th>状态</th><th>说明</th></tr>
 <tr><td>数据持久化</td><td><span class="chip done">已实现</span></td><td>名单、草稿、审批单、操作记录和待处理事项共 5 张表，和机器人共用 <code>data/messages.db</code>。</td></tr>
 <tr><td>个人信息到期清除</td><td><span class="chip done">已实现</span></td><td>D10：审批单处理完 90 天后，清除姓名、电话、地址和原话记录。</td></tr>
-<tr><td>日志打码</td><td><span class="chip part">部分</span></td><td>B14：达人模块已经不打印个人信息，全项目还没统一检查。</td></tr>
-<tr><td>寄样上限</td><td><span class="chip todo">待拍板</span></td><td>D5：每人、每天能寄多少还没定。</td></tr>
-<tr><td>防封规则</td><td><span class="chip todo">待拍板</span></td><td>发消息的频率和间隔还没定。自动发送和大模型回复上线前要先定下来。</td></tr>
+<tr><td>日志打码</td><td><span class="chip done">已实现</span></td><td>B14：全项目检查过，日志和追踪文件里的电话、地址、收件人姓名都先打码。原项目的消息表仍永久保存消息原文（B27，等你决定要不要按 90 天清除）。</td></tr>
+<tr><td>寄样上限</td><td><span class="chip part">机制已做，数字待定</span></td><td>D5：每位达人多少天内最多几单、每天一共最多几单。超过上限的单不能通过；数字没定，现在不限。</td></tr>
+<tr><td>防封规则</td><td><span class="chip part">机制已做，参数待定</span></td><td>回复前按字数等 2–6 秒左右；主动发的消息两条至少隔 30 秒、每小时最多 20 条、23 点到 8 点不发。都是先定的保守默认值。</td></tr>
 <tr><td>调用 Claude</td><td><span class="chip done">已跑通</span></td><td>10-25 本机调用 <code>claude -p</code> 已能回复消息。</td></tr>
 </table></div>
 </section>
