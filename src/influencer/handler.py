@@ -14,7 +14,7 @@ import logging
 import threading
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from .extract import asks_for_higher_commission, extract_request_info
 from .jst_erp import JuShuiTanERPClient
@@ -26,6 +26,7 @@ from .settings import (
     MIN_FOLLOWERS,
     MIN_RECENT_LIKES,
     STUCK_EXECUTION_SECONDS,
+    brain_enabled,
     influencer_chat_ids_from_env,
 )
 from .store import (
@@ -47,6 +48,9 @@ from .types import (
     SampleRequestDraft,
 )
 from .xhs_cli import XiaohongshuCLIClient
+
+if TYPE_CHECKING:
+    from .claude_brain import ClaudeBrain
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +104,13 @@ def build_influencer_handler(db_path: str) -> "InfluencerBusinessHandler":
     if added:
         logger.info(f"[达人模块] 从环境变量把 {len(added)} 位达人加进了名单")
     store.run_maintenance()
-    return InfluencerBusinessHandler(store)
+    brain = None
+    if brain_enabled():
+        from .claude_brain import ClaudeBrain
+
+        brain = ClaudeBrain(store, db_path)
+        logger.info("[达人模块] 达人的消息交给 Claude 回复（INFLUENCER_BRAIN=claude）")
+    return InfluencerBusinessHandler(store, brain=brain)
 
 
 class InfluencerBusinessHandler:
@@ -109,10 +119,13 @@ class InfluencerBusinessHandler:
         store: InfluencerStore,
         erp_client: Optional[JuShuiTanERPClient] = None,
         xhs_client: Optional[XiaohongshuCLIClient] = None,
+        brain: Optional["ClaudeBrain"] = None,
     ):
         self.store = store
         self.erp = erp_client or JuShuiTanERPClient()
         self.xhs = xhs_client or XiaohongshuCLIClient()
+        # 交给 Claude 回复（claude_brain.py）；None 表示只用规则流程
+        self.brain = brain
         # router 在多个工作线程里调用本处理器。同一位达人的消息一条一条处理：
         # 草稿是"读出来、改、写回去"，两条消息同时处理会丢掉其中一条的信息
         self._chat_locks: Dict[str, threading.Lock] = {}
@@ -225,8 +238,29 @@ class InfluencerBusinessHandler:
         """
         if not self.is_influencer(chat_id):
             return None
+        reply = await self._reply(chat_id, content, nickname)
+        if self.brain is not None and reply is not None:
+            # 记下这一轮，下次交给 Claude 时带上，它才记得前面聊过什么
+            self.store.add_dialog(chat_id, content, reply)
+        return reply
+
+    async def _reply(self, chat_id: str, content: str, nickname: str) -> Optional[str]:
         if asks_for_higher_commission(content):
             return self._answer_commission_request(chat_id, content)
+        if self.brain is not None:
+            answer = self.brain.reply(chat_id, content, nickname)
+            if answer is not None and not answer.blocked:
+                return answer.text
+            if answer is not None:
+                # 回复里有不该说的话：不发，交给运营；运营在「待处理」里能看到原本要发的话
+                return self._hand_over_to_operator(
+                    chat_id, f"{content}\n（Claude 的回复没发出：{answer.blocked}。原本要发：{answer.text}）",
+                )
+            # Claude 出错或超时：退回下面的规则流程
+        return await self._rule_reply(chat_id, content, nickname)
+
+    async def _rule_reply(self, chat_id: str, content: str, nickname: str) -> Optional[str]:
+        """规则流程：没打开 Claude，或者 Claude 这次没能回复时用。"""
         draft = self._active_draft(chat_id)
         expecting_name = draft is not None and draft.asked_for == ("recipient_name",)
         info = extract_request_info(content, expecting_name=expecting_name)

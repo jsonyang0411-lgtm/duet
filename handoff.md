@@ -1,6 +1,6 @@
 # 交接文档：达人商务智能体
 
-> 最后更新：2026-10-25（v19：B23、谈佣金、推广链接、MCP 工具已做；下一步 Mac 端接收服务，要同事的消息格式）
+> 最后更新：2026-10-25（v20：Claude 回复的封装已做；第 5 项只差接收同事转发的那一层，要同事的消息格式）
 > 读者：接手这个项目的 AI 窗口，以及参与开发的同事。
 > 规矩：新窗口开工前先读完本文件；收工前更新第 3 节（当前状态）、第 5 节（计划进度）和第 9 节（变更记录）。
 
@@ -36,6 +36,7 @@
 | `src/influencer/types.py` | 达人档案、申请草稿、审批单（ApprovalActionPacket）、审批状态 |
 | `src/influencer/jst_erp.py` | 聚水潭适配器：只有手动打开的模拟模式可用，真实接口还没接 |
 | `src/influencer/xhs_cli.py` | 小红书 CLI 适配器：按第 7 节草案调用，CLI 由同事开发，尚未交付 |
+| `src/influencer/claude_brain.py` | 把达人消息交给 `claude -p` 回复：回复规则（系统提示词）、业务资料、最近 20 轮对话（`influencer_dialog` 表，90 天删除）；回复发出前 `review_reply` 检查承诺发货时间、快递、审核结果、佣金数字、暴露 AI 身份和过长，拦下的转「待处理」；出错、超时退回规则流程。在系统临时目录里运行，读不到项目的 CLAUDE.md |
 | `src/influencer/mcp_server.py` | 给 `claude -p` 用的达人工具（MCP，stdio，只用标准库）：查库存、提交寄样申请、查申请和物流状态、转人工。一位达人一个进程，chat_id 由启动参数固定；没有建单、绑佣金、改佣金的工具。`mcp_config()` 生成 `--mcp-config`，`ALLOWED_TOOLS` 是 `--allowedTools` 的工具名 |
 | `src/influencer/scheduled_agent.py` | 晨报和物流跟进（从未被启动过，见 B13） |
 | `src/router.py` 的 `_handle_private_chat` | 把私聊的 `chat_id` 交给 `handle_private_message`，有回复就结束，原因码 `influencer_business_intent`。处理器由 `src/bot.py` 构造，通过 `MessageRouter(influencer_handler=)` 传入 |
@@ -257,6 +258,10 @@ CLI 交付之前，我们按这份约定写一个桩程序，通过配置显式�
 | `INFLUENCER_MOCK` | 设为 `1` 时打开模拟模式（D6）。不设的话，聚水潭和小红书 CLI 都走真实调用 |
 | `INFLUENCER_CHAT_IDS` | 逗号分隔的私聊 `chat_id`，机器人启动时并进名单（只增不删，D11）。名单以控制台为准，这个变量可以不设 |
 | `XHS_CLI_PATH` | 小红书 CLI 的路径，默认是 `xhs` |
+| `INFLUENCER_BRAIN` | 设为 `claude` 时，达人的消息交给 `claude -p` 回复（谈佣金仍由代码处理，出错退回规则流程）。不设就只用规则流程 |
+| `INFLUENCER_CLAUDE_MODEL` | 传给 `claude -p --model`，例如 `haiku`；不设用 claude 的默认模型 |
+| `CLAUDE_CLI_PATH` | `claude` 命令的路径，默认在 PATH 里找 |
+| `INFLUENCER_KNOWLEDGE_FILE` | 业务资料文件，默认是数据库同目录下的 `influencer_knowledge.md`；模板见 `docs/influencer_knowledge.example.md` |
 | `JST_APP_KEY`、`JST_APP_SECRET`、`JST_ACCESS_TOKEN` | 聚水潭密钥（真实接口在第 5 阶段接入） |
 
 - 达人模块的数据和机器人共用一个数据库：`DB_PATH`，默认 `data/messages.db`（相对于启动目录）。控制台接口也从 .env 里读 `DB_PATH`。
@@ -301,3 +306,4 @@ CLI 交付之前，我们按这份约定写一个桩程序，通过配置显式�
 - 2026-10-25 v17：第 2 项谈佣金完成：`extract.asks_for_higher_commission`（提到佣金且要求高一点，或开出超过 25% 的数；单独的"N点"要和佣金类的词一起出现才算，免得把时间当佣金），`handler.COMMISSION_REPLY` 是用户给的原文。识别到以后回固定话术，不改审批单上的佣金，记进「待处理」（新种类 `commission`）；同一位达人 6 小时内再提只记不回。没补齐的申请原样保留。新增 `tests/test_influencer_commission.py`。完整测试 3474 个通过、1 个跳过。
 - 2026-10-25 v18：第 3 项推广链接完成：`XiaohongshuCLIClient.create_product_link`（命令按第 7 节草案，审批单号作幂等键）；批准执行时在绑佣金成功后调用，链接存进审批单新列 `product_link`（老库启动时自动 `ALTER TABLE` 补列），写进确认消息，审批卡上显示。链接没生成不算执行失败：单照样算已执行，记一条「推广链接没有生成」，控制台提示运营手动生成；人工核对中断的单时也可以填链接。新增 `tests/test_influencer_product_link.py`。完整测试 3480 个通过、1 个跳过。
 - 2026-10-25 v19：第 4 项 MCP 工具完成：`src/influencer/mcp_server.py`。没有引入 `mcp` 包，按协议用标准库实现了 initialize、ping、tools/list、tools/call。提交申请复用处理器原来的补齐、查库存、缺货转人工和生成审批单的逻辑；同一款商品已有待审批的单时不重复提交；返回给模型的电话打码，不给成本价、收件地址和驳回原因。在本机用真实的 `claude -p`（haiku，模拟模式、临时数据库）验证过一次：能调用 check_inventory 并据此回复。调用方式：`claude -p --strict-mcp-config --mcp-config <mcp_config() 的 JSON> --tools "" --allowedTools <ALLOWED_TOOLS>`。物流轨迹还查不到，只返回运单号。新增 `tests/test_influencer_mcp.py`（16 条，含一条起真实子进程的）。完整测试 3496 个通过、1 个跳过。
+- 2026-10-25 v20：用户同意"不等同事也能做"的 5 件事按顺序做：Claude 回复封装 → 寄样上限机制 → 发送限速机制 → 日志打码检查 → 更新备忘录。第 1 件完成：`src/influencer/claude_brain.py`。处理器的顺序是：名单外不管 → 谈佣金代码回固定话术 → Claude 回复（过 `review_reply`）→ Claude 出错时走规则流程。新增 `influencer_dialog` 表和业务资料模板 `docs/influencer_knowledge.example.md`。用真实 `claude -p`（haiku、模拟模式、临时库）端到端跑了两条：问库存、给齐信息要样品，各 6–8 秒，第二条记得商品并通过工具生成了待审批单，没有承诺发货。新增 `tests/test_influencer_claude.py`（28 条）。完整测试 3524 个通过、1 个跳过。

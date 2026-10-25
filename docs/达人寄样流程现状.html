@@ -130,15 +130,15 @@ footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
   <div class="nodes">
     <div class="node done"><div class="t">规则识别<span class="chip done">已实现</span></div>
       <p><code>extract.py</code> 用关键词和正则识别要样品的意图，提取商品、姓名、电话、地址和小红书账号。</p></div>
-    <div class="node part"><div class="t">用 Claude 理解、回复消息<span class="chip part">工具已做，未接入</span></div>
-      <p>给 <code>claude -p</code> 用的工具已经做好（<code>mcp_server.py</code>）：查库存、提交寄样申请、查申请和物流状态、转人工。一位达人一个进程，模型换不了人，也没有建单、改佣金的工具；Claude Code 自带的工具全部关掉。10-25 已用真实的 <code>claude -p</code> 调通查库存。还差 Mac 端接收服务把它接进流程。</p></div>
+    <div class="node done"><div class="t">用 Claude 理解、回复消息<span class="chip done">已实现（开关打开时）</span></div>
+      <p>设置 <code>INFLUENCER_BRAIN=claude</code> 后，每条消息交给 <code>claude -p</code>：带上最近 20 轮对话和业务资料，只能用我们的 4 个工具（查库存、提交寄样申请、查状态、转人工），Claude Code 自带的工具全部关掉。回复发出前由代码检查，有承诺发货、快递、审核结果、佣金数字或暴露 AI 身份的拦下转人工；Claude 出错、超时时退回规则流程。10-25 已用真实 <code>claude -p</code> 端到端跑通，每条 6–8 秒。</p></div>
   </div>
   <p class="branch"><b>分支：不是要样品的消息</b>（闲聊、问发货、谈佣金）↓</p>
   <div class="nodes">
     <div class="node done"><div class="t">转人工 + 回一句中性的话<span class="chip done">已实现</span></div>
       <p>B20：消息记进控制台「待处理」，机器人回"我们核对一下再回复"，同一位达人 6 小时内最多回一次。</p></div>
-    <div class="node todo"><div class="t">闲聊由 Claude 回复<span class="chip todo">未实现</span></div>
-      <p>避免一直用固定话术，回复范围受知识库限制。业务资料（品牌、产品、寄样规则）还需要你提供。</p></div>
+    <div class="node part"><div class="t">闲聊由 Claude 回复<span class="chip part">等业务资料</span></div>
+      <p>已经做好，回复范围受业务资料限制。资料按 <code>docs/influencer_knowledge.example.md</code> 填好放到 <code>data/influencer_knowledge.md</code>；没填之前，产品细节、价格、活动一律转人工。</p></div>
     <div class="node done"><div class="t">谈佣金：代码固定回复<span class="chip done">已实现</span></div>
       <p>佣金上限 25%。达人提到佣金并要求高一点，或者开出超过 25% 的数时，由代码回复用户定的固定话术，不交给 Claude 判断，审批单上的佣金不变；同时记进「待处理」。同一位达人 6 小时内再提，不重复回同一段话，只记待处理。</p></div>
   </div>

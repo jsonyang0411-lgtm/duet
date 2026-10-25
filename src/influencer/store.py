@@ -117,6 +117,19 @@ CREATE TABLE IF NOT EXISTS influencer_inbox (
 
 CREATE INDEX IF NOT EXISTS idx_influencer_inbox_open
     ON influencer_inbox(handled_at, created_at DESC);
+
+-- 和达人的对话：交给 Claude 回复时带上最近几轮，它才记得前面聊过什么。
+-- 里面可能有收件信息，90 天后删除（D10）
+CREATE TABLE IF NOT EXISTS influencer_dialog (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id    TEXT    NOT NULL,
+    incoming   TEXT    NOT NULL,
+    reply      TEXT    NOT NULL DEFAULT '',
+    created_at REAL    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_influencer_dialog_chat
+    ON influencer_dialog(chat_id, created_at DESC);
 """
 
 # 审批单从待审批改成执行中时记的一条操作记录，用来判断执行是不是被中断了（B23）
@@ -544,6 +557,25 @@ class InfluencerStore:
                 self._log(conn, "已人工处理", chat_id=row["chat_id"], detail=f"待处理事项 #{item_id}", source=source)
         return cur.rowcount == 1
 
+    # ---- 对话 ----
+
+    def add_dialog(self, chat_id: str, incoming: str, reply: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO influencer_dialog (chat_id, incoming, reply, created_at) VALUES (?, ?, ?, ?)",
+                (chat_id, incoming, reply, time.time()),
+            )
+
+    def recent_dialog(self, chat_id: str, *, limit: int = 20, since: float = 0) -> List[Dict[str, Any]]:
+        """这位达人最近的几轮对话，从旧到新。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT incoming, reply, created_at FROM influencer_dialog"
+                " WHERE chat_id = ? AND created_at >= ? ORDER BY created_at DESC, id DESC LIMIT ?",
+                (chat_id, since, limit),
+            ).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
     # ---- 概览 ----
 
     def overview(self, now: Optional[float] = None) -> Dict[str, int]:
@@ -587,7 +619,7 @@ class InfluencerStore:
 
     def run_maintenance(self, now: Optional[float] = None) -> None:
         """把超过有效期的待审批单标成过期；清除到期的个人信息（Q3）；删掉作废的草稿，
-        以及处理完 90 天的待处理事项。
+        以及处理完 90 天的待处理事项、90 天前的对话记录。
 
         机器人启动时、控制台每次列审批单时都会调用，所以不需要单独的定时任务。
         """
@@ -620,4 +652,7 @@ class InfluencerStore:
             conn.execute(
                 "DELETE FROM influencer_inbox WHERE handled_at IS NOT NULL AND handled_at < ?",
                 (now - PERSONAL_INFO_RETENTION_SECONDS,),
+            )
+            conn.execute(
+                "DELETE FROM influencer_dialog WHERE created_at < ?", (now - PERSONAL_INFO_RETENTION_SECONDS,),
             )

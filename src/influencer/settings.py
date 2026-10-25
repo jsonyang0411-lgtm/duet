@@ -46,6 +46,20 @@ MIN_FOLLOWERS = 10000
 MIN_RECENT_LIKES = 1000
 
 
+# 交给 Claude（claude -p）回复：只能手动打开，设置环境变量 INFLUENCER_BRAIN=claude。
+# 没打开时照旧用规则流程。打开后谈佣金仍由代码回固定话术，Claude 出错或超时退回规则流程
+CLAUDE_TIMEOUT_SECONDS = 90
+# 带给 Claude 的对话：最近这么多轮、这么多天以内的
+CLAUDE_HISTORY_TURNS = 20
+CLAUDE_HISTORY_SECONDS = 7 * 24 * 3600
+# Claude 的回复超过这个长度就不发，转人工（微信里一大段话不像真人）
+CLAUDE_MAX_REPLY_CHARS = 400
+
+
+def brain_enabled() -> bool:
+    return os.getenv("INFLUENCER_BRAIN", "").strip().lower() == "claude"
+
+
 def mock_enabled() -> bool:
     """模拟模式只能手动打开（D6）：设置环境变量 INFLUENCER_MOCK=1。"""
     return os.getenv("INFLUENCER_MOCK", "").strip().lower() in ("1", "true", "yes", "on")
