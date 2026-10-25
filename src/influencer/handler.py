@@ -27,6 +27,7 @@ from .settings import (
     MIN_RECENT_LIKES,
     STUCK_EXECUTION_SECONDS,
     brain_enabled,
+    sample_limits,
     influencer_chat_ids_from_env,
 )
 from .store import (
@@ -111,6 +112,23 @@ def build_influencer_handler(db_path: str) -> "InfluencerBusinessHandler":
         brain = ClaudeBrain(store, db_path)
         logger.info("[达人模块] 达人的消息交给 Claude 回复（INFLUENCER_BRAIN=claude）")
     return InfluencerBusinessHandler(store, brain=brain)
+
+
+def sample_limit_problem(store: InfluencerStore, packet: ApprovalActionPacket, now: Optional[float] = None) -> str:
+    """寄样上限（D5）。超过上限返回原因；没超、或者没设上限，返回空字符串。"""
+    now = time.time() if now is None else now
+    limits = sample_limits()
+    if limits["per_person"]:
+        days = limits["window_days"]
+        sent = store.count_samples(since=now - days * 24 * 3600, chat_id=packet.influencer_id)
+        if sent >= limits["per_person"]:
+            return f"这位达人 {days} 天内已经寄了 {sent} 单，到了每人 {limits['per_person']} 单的上限"
+    if limits["per_day"]:
+        start_of_day = time.mktime(time.localtime(now)[:3] + (0, 0, 0, 0, 0, -1))
+        sent = store.count_samples(since=start_of_day)
+        if sent >= limits["per_day"]:
+            return f"今天已经寄了 {sent} 单，到了每天 {limits['per_day']} 单的上限"
+    return ""
 
 
 class InfluencerBusinessHandler:
@@ -439,7 +457,7 @@ class InfluencerBusinessHandler:
                 }
             packet.proposed_commission_rate = commission_rate
         # 以下检查不通过时都不改状态：运营补齐或改正后还能再批
-        problem = self._why_not_executable(packet)
+        problem = self._why_not_executable(packet) or sample_limit_problem(self.store, packet)
         if problem:
             return {"success": False, "error": problem}
 

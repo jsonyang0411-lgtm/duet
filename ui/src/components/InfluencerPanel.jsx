@@ -132,8 +132,20 @@ function StatusNotes({ status }) {
       )}
       {!status.erp.ready && <Note kind="warn">聚水潭现在用不了：{status.erp.detail}。批准会失败，审批单会留在待审批。</Note>}
       {!status.xhs.ready && <Note kind="warn">小红书 CLI 现在用不了：{status.xhs.detail}。查不到达人数据，也绑不了佣金。</Note>}
+      <SampleLimits limits={status.sample_limits} />
     </div>
   )
+}
+
+// 寄样上限（D5）：在 .env 里设 INFLUENCER_MAX_SAMPLES_PER_PERSON / INFLUENCER_MAX_SAMPLES_PER_DAY
+function SampleLimits({ limits }) {
+  if (!limits) return null
+  const parts = []
+  if (limits.per_person) parts.push(`每位达人 ${limits.window_days} 天内最多 ${limits.per_person} 单`)
+  if (limits.per_day) parts.push(`每天一共最多 ${limits.per_day} 单`)
+  return parts.length
+    ? <Note kind="cy">寄样上限：{parts.join('，')}。超过上限的单不能通过。</Note>
+    : <Note kind="cy">寄样上限还没设，现在不限单数。</Note>
 }
 
 // ── 审批单 ──────────────────────────────────────────────────────────
@@ -209,7 +221,8 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
   const rateOk = typeof rate === 'number' && rate > 0 && rate <= percent(maxRate)
   const cleared = !!p.personal_info_cleared_at
   let blocker = ''
-  if (unqualified) blocker = '资质不达标，按规则不能寄样，请驳回'
+  if (p.limit_problem) blocker = `${p.limit_problem}，不能通过`
+  else if (unqualified) blocker = '资质不达标，按规则不能寄样，请驳回'
   else if (!xhs.trim()) blocker = '缺小红书账号：请让达人补发主页链接，或者在上面填写'
   else if (!rateOk) blocker = `佣金要大于 0，不超过 ${percent(maxRate)}%`
 
@@ -280,6 +293,11 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
         </>
       )}
 
+      {pending && p.limit_problem && (
+        <div style={{ marginTop: 12 }}>
+          <Note kind="warn">寄样上限：{p.limit_problem}。可以驳回，或者等上限放开后再批。</Note>
+        </div>
+      )}
       {pending && (
         <div style={{ marginTop: 12 }}>
           <Note kind="cy">

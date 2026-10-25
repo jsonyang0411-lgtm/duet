@@ -453,6 +453,19 @@ class InfluencerStore:
             )
         return cur.rowcount == 1
 
+    def count_samples(self, *, since: float, chat_id: str = "") -> int:
+        """寄出去的样品单数（D5）：since 以后执行成功的，加上正在执行的。chat_id 为空时算所有达人。"""
+        sql = (
+            "SELECT COUNT(*) FROM influencer_approvals"
+            " WHERE ((status = ? AND handled_at >= ?) OR status = ?)"
+        )
+        params: List[Any] = [GateStatus.FULFILLED.value, since, GateStatus.EXECUTING.value]
+        if chat_id:
+            sql += " AND influencer_id = ?"
+            params.append(chat_id)
+        with self._connect() as conn:
+            return conn.execute(sql, params).fetchone()[0]
+
     def count_by_status(self) -> Dict[str, int]:
         with self._connect() as conn:
             rows = conn.execute(

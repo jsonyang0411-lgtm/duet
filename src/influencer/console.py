@@ -13,10 +13,16 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .handler import InfluencerBusinessHandler, approval_notice, rejection_notice
+from .handler import InfluencerBusinessHandler, approval_notice, rejection_notice, sample_limit_problem
 from .jst_erp import JuShuiTanERPClient
 from .scheduled_agent import morning_brief
-from .settings import DEFAULT_COMMISSION_RATE, MAX_COMMISSION_RATE, STUCK_EXECUTION_SECONDS, mock_enabled
+from .settings import (
+    DEFAULT_COMMISSION_RATE,
+    MAX_COMMISSION_RATE,
+    STUCK_EXECUTION_SECONDS,
+    mock_enabled,
+    sample_limits,
+)
 from .store import EVENT_EXECUTION_STARTED, SOURCE_CONSOLE, InfluencerStore
 from .types import STATUS_LABELS, ApprovalActionPacket, GateStatus
 from .xhs_cli import XiaohongshuCLIClient
@@ -101,6 +107,7 @@ def status(store: InfluencerStore) -> Dict[str, Any]:
         "contacts": sum(1 for contact in store.list_contacts() if contact["enabled"]),
         "default_commission_rate": DEFAULT_COMMISSION_RATE,
         "max_commission_rate": MAX_COMMISSION_RATE,
+        "sample_limits": sample_limits(),
     }
 
 
@@ -117,18 +124,23 @@ def list_approvals(store: InfluencerStore, status_filter: str) -> Dict[str, Any]
     }
     return {
         "ok": True,
-        "items": [packet_json(packet, events[packet.packet_id]) for packet in packets],
+        "items": [packet_json(packet, events[packet.packet_id], store) for packet in packets],
         "counts": counts,
     }
 
 
-def packet_json(packet: ApprovalActionPacket, events: List[Dict[str, Any]]) -> Dict[str, Any]:
+def packet_json(
+    packet: ApprovalActionPacket, events: List[Dict[str, Any]], store: Optional[InfluencerStore] = None,
+) -> Dict[str, Any]:
     """审批卡要显示的全部内容。notice 是要发给达人的消息：待审批时是批准后的预览，
     执行成功后是带运单号的确认消息，驳回后是婉拒话术（Q2，由运营复制后发送）。"""
     data = asdict(packet)
     data["status"] = packet.status.value
     data["status_label"] = STATUS_LABELS[packet.status]
     data["events"] = events
+    if packet.status == GateStatus.PENDING and store is not None:
+        # 寄样上限（D5）：超了就在审批卡上标出来，「通过」按钮不能点
+        data["limit_problem"] = sample_limit_problem(store, packet)
     if packet.status == GateStatus.PENDING:
         data["notice"] = approval_notice(replace(packet, tracking_number=TRACKING_PLACEHOLDER, product_link=LINK_PLACEHOLDER))
     elif packet.status == GateStatus.FULFILLED:
@@ -195,7 +207,7 @@ def _with_packet(store: InfluencerStore, packet_id: str, result: Dict[str, Any])
     response = {"ok": bool(result.get("success")), **result}
     packet = store.get_approval(packet_id)
     if packet is not None:
-        response["packet"] = packet_json(packet, store.events_for([packet_id])[packet_id])
+        response["packet"] = packet_json(packet, store.events_for([packet_id])[packet_id], store)
     return response
 
 

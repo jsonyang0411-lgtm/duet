@@ -1,6 +1,7 @@
 """达人商务模块的业务参数和开关。数值的来历见 handoff.md 第 6 节的决策表。"""
 
 import os
+from typing import Dict, Optional
 
 # 佣金（D5，2026-10-24 暂定）：审批单默认 25%；执行时超过上限一律拒绝
 DEFAULT_COMMISSION_RATE = 0.25
@@ -54,6 +55,30 @@ CLAUDE_HISTORY_TURNS = 20
 CLAUDE_HISTORY_SECONDS = 7 * 24 * 3600
 # Claude 的回复超过这个长度就不发，转人工（微信里一大段话不像真人）
 CLAUDE_MAX_REPLY_CHARS = 400
+
+
+# 寄样上限（D5，数字还没定）：环境变量不设就是不限。超过上限的审批单在控制台上标出来，不能批准
+#   INFLUENCER_MAX_SAMPLES_PER_PERSON：同一位达人在 INFLUENCER_SAMPLE_WINDOW_DAYS 天内最多寄几单
+#   INFLUENCER_MAX_SAMPLES_PER_DAY：所有达人每天一共最多寄几单
+# 算的是已执行和执行中的单
+DEFAULT_SAMPLE_WINDOW_DAYS = 30
+
+
+def _positive_int_env(name: str) -> Optional[int]:
+    raw = os.getenv(name, "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def sample_limits() -> Dict[str, Optional[int]]:
+    return {
+        "per_person": _positive_int_env("INFLUENCER_MAX_SAMPLES_PER_PERSON"),
+        "window_days": _positive_int_env("INFLUENCER_SAMPLE_WINDOW_DAYS") or DEFAULT_SAMPLE_WINDOW_DAYS,
+        "per_day": _positive_int_env("INFLUENCER_MAX_SAMPLES_PER_DAY"),
+    }
 
 
 def brain_enabled() -> bool:
