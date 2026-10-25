@@ -29,6 +29,7 @@ from .settings import (
     CLAUDE_HISTORY_SECONDS,
     CLAUDE_HISTORY_TURNS,
     CLAUDE_MAX_REPLY_CHARS,
+    CLAUDE_MAX_TURNS,
     CLAUDE_TIMEOUT_SECONDS,
 )
 from .store import InfluencerStore
@@ -177,6 +178,7 @@ class ClaudeBrain:
             self.claude_path, "-p",
             "--output-format", "json",
             "--no-session-persistence",
+            "--max-turns", str(CLAUDE_MAX_TURNS),
             "--strict-mcp-config",
             "--mcp-config", json.dumps(mcp_config(chat_id, self.db_path, nickname=nickname), ensure_ascii=False),
             "--system-prompt", SYSTEM_PROMPT.format(knowledge=self.knowledge()),

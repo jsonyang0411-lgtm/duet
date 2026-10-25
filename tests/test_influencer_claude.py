@@ -73,6 +73,7 @@ def test_claude_gets_only_our_tools_and_none_of_its_own(setup):
     assert args[:2] == ["claude", "-p"]
     assert args[args.index("--tools") + 1] == "", "Claude Code 自带的工具全部关掉"
     assert "--strict-mcp-config" in args
+    assert args[args.index("--max-turns") + 1] == "6", "工具调用的轮数有上限"
     assert args[args.index("--allowedTools") + 1:] == list(ALLOWED_TOOLS)
     config = json.loads(args[args.index("--mcp-config") + 1])
     assert INFLUENCER in config["mcpServers"]["influencer"]["args"], "工具绑定在这位达人身上"
