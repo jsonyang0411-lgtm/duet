@@ -93,7 +93,7 @@ footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
 <div class="summary">
   <div><b>能跑通的</b><p>在模拟模式下，从"达人说要样品"到"运营批准、生成运单号和要发给达人的消息"已经全程跑通。状态、审批记录都存进了数据库，每张单只会执行一次。</p></div>
   <div><b>卡在外部的</b><p>聚水潭的真实接口、小红书 CLI、Windows 真机验证。这几项不到位，就只能用假数据跑。</p></div>
-  <div><b>还没做的</b><p>Mac 端接收转发、把 <code>claude -p</code> 接进流程、谈佣金的固定回复、推广链接、自动给达人发消息、查物流、发布跟进。</p></div>
+  <div><b>还没做的</b><p>Mac 端接收转发、把 <code>claude -p</code> 接进流程、推广链接、自动给达人发消息、查物流、发布跟进。</p></div>
 </div>
 
 <div class="flow">
@@ -139,8 +139,8 @@ footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
       <p>B20：消息记进控制台「待处理」，机器人回"我们核对一下再回复"，同一位达人 6 小时内最多回一次。</p></div>
     <div class="node todo"><div class="t">闲聊由 Claude 回复<span class="chip todo">未实现</span></div>
       <p>避免一直用固定话术，回复范围受知识库限制。业务资料（品牌、产品、寄样规则）还需要你提供。</p></div>
-    <div class="node todo"><div class="t">谈佣金：代码固定回复<span class="chip todo">话术已定，待开发</span></div>
-      <p>佣金上限 25%。达人要求提高时由代码回复固定的话，不交给 Claude 判断，同时记进「待处理」。话术开头是"特别理解老师的想法！坦白讲我也特别希望能给老师申请更高点位……"，结尾建议先收样品再对排期。</p></div>
+    <div class="node done"><div class="t">谈佣金：代码固定回复<span class="chip done">已实现</span></div>
+      <p>佣金上限 25%。达人提到佣金并要求高一点，或者开出超过 25% 的数时，由代码回复用户定的固定话术，不交给 Claude 判断，审批单上的佣金不变；同时记进「待处理」。同一位达人 6 小时内再提，不重复回同一段话，只记待处理。</p></div>
   </div>
 </div></div>
 
@@ -271,7 +271,7 @@ footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
 <div class="tablewrap"><table>
 <tr><th>顺序</th><th>做什么</th><th>依赖</th></tr>
 <tr><td>1</td><td>B23：执行到一半中断的审批单，在控制台上给出"人工核对后标记"的入口</td><td>已完成</td></tr>
-<tr><td>2</td><td>谈佣金：识别到要求提佣金时，回复固定话术并记进「待处理」</td><td>话术已定</td></tr>
+<tr><td>2</td><td>谈佣金：识别到要求提佣金时，回复固定话术并记进「待处理」</td><td>已完成</td></tr>
 <tr><td>3</td><td>推广链接：后台调用、保存、显示、写进通知消息</td><td>先用模拟数据，命令格式要和同事确认</td></tr>
 <tr><td>4</td><td>把查库存、提交审批单、查物流做成工具（MCP），供 Claude 调用</td><td>先用模拟数据</td></tr>
 <tr><td>5</td><td>Mac 端接收服务：收 Windows 转发的消息，交给达人模块和 <code>claude -p</code>，返回回复</td><td>同事的消息格式、业务资料</td></tr>

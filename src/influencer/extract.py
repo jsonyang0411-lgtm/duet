@@ -8,7 +8,13 @@ from __future__ import annotations
 
 import re
 
-from .settings import PRODUCT_KEYWORDS, SAMPLE_KEYWORDS
+from .settings import (
+    COMMISSION_RAISE_WORDS,
+    COMMISSION_WORDS,
+    MAX_COMMISSION_RATE,
+    PRODUCT_KEYWORDS,
+    SAMPLE_KEYWORDS,
+)
 from .types import SampleRequestIntent
 
 _XHS_RE = re.compile(
@@ -34,6 +40,23 @@ _NOT_NAMES = (
     "收件", "收货", "姓名", "电话", "手机", "地址", "联系", "老师", "你好", "您好",
     "谢谢", "感谢", "好的", "收到", "麻烦", "辛苦", "可以", "稍等", "没问题",
 )
+
+
+# "30%""30个点"这种明确的数；单独的"30点"可能是时间，要和"佣金"之类的词一起出现才算
+_RATE_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*(%|％|个点|点)")
+
+
+def asks_for_higher_commission(text: str) -> bool:
+    """达人是不是在要求提高佣金：提到佣金并且说要高一点，或者开出了超过上限的数。"""
+    mentions_commission = any(word in text for word in COMMISSION_WORDS)
+    if mentions_commission and any(word in text for word in COMMISSION_RAISE_WORDS):
+        return True
+    for match in _RATE_RE.finditer(text):
+        if match.group(2) == "点" and not mentions_commission:
+            continue
+        if float(match.group(1)) > MAX_COMMISSION_RATE * 100:
+            return True
+    return False
 
 
 def mentions_sample(text: str) -> bool:

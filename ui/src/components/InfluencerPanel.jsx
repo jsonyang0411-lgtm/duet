@@ -466,7 +466,11 @@ function NoticeBox({ status, text }) {
 
 // ── 待处理 ──────────────────────────────────────────────────────────
 
-const INBOX_KIND = { message: ['达人消息', 'cy'], out_of_stock: ['缺货', 'warn'] }
+const INBOX_KIND = { message: ['达人消息', 'cy'], out_of_stock: ['缺货', 'warn'], commission: ['要求提佣金', 'warn'] }
+const AUTO_REPLY = {
+  message: '机器人已回复："收到老师的消息啦，我们核对一下再回复"',
+  commission: '机器人已回复佣金话术（佣金上限不变）',
+}
 
 function InboxPage() {
   const toast = useToast()
@@ -493,7 +497,7 @@ function InboxPage() {
       <div className="page">
         <PageHead
           no="02" en="CREATOR" title="待处理"
-          sub="名单里的达人发来的不是索样的消息（机器人不替你回答），以及达人申请时缺货。在微信里处理完，再点「已处理」"
+          sub="名单里的达人发来的不是索样的消息（机器人不替你回答）、要求提高佣金，以及达人申请时缺货。在微信里处理完，再点「已处理」"
           actions={<button type="button" className="btn sm" onClick={load}><ArrowClockwise />刷新</button>}
         />
         <div className="filters">
@@ -522,7 +526,7 @@ function InboxPage() {
                     <p className="td-text">{it.content}</p>
                     <div className="td-meta">
                       <span>{when(it.created_at)}</span>
-                      {it.auto_replied && <span>机器人已回复："收到老师的消息啦，我们核对一下再回复"</span>}
+                      {it.auto_replied && <span>{AUTO_REPLY[it.kind] || '机器人已自动回复'}</span>}
                       {it.handled_at && <span>处理于 {when(it.handled_at)}</span>}
                     </div>
                   </div>

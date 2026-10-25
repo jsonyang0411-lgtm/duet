@@ -16,7 +16,7 @@ import time
 import uuid
 from typing import Any, Dict, Optional
 
-from .extract import extract_request_info
+from .extract import asks_for_higher_commission, extract_request_info
 from .jst_erp import JuShuiTanERPClient
 from .settings import (
     DEFAULT_COMMISSION_RATE,
@@ -30,6 +30,7 @@ from .settings import (
 )
 from .store import (
     EVENT_EXECUTION_STARTED,
+    INBOX_COMMISSION,
     INBOX_MESSAGE,
     INBOX_OUT_OF_STOCK,
     SOURCE_BOT,
@@ -54,6 +55,14 @@ QUALIFICATION_FAILED = "不达标"
 QUALIFICATION_UNKNOWN = "待核实：没有小红书数据，需要运营人工核实"
 # 出了问题时的中性回复：不承诺任何事，也不让这条消息落到聊天模型那里随口作答
 HOLDING_REPLY = "收到老师的消息啦~ 我们这边核对一下，再回复老师哦！"
+# 达人要求提高佣金时的固定回复（2026-10-25 用户给的原文）。佣金不交给模型谈，上限见 MAX_COMMISSION_RATE
+COMMISSION_REPLY = (
+    "特别理解老师的想法！坦白讲我也特别希望能给老师申请更高点位，但咱们这款是全网破价的招牌款，"
+    "利润空间被供应链卡得特别紧，目前这个佣金已经是我们能争取到的最大诚意啦😭\n"
+    "不过老师放心，这款产品在小红书的自带转化率和复购率非常惊人！很多合作的老师虽然佣金点数适中，"
+    "但因为出单量极大，最终实际落袋的收益反而比那些高佣却带不动的品香很多！"
+    "建议老师可以先收样品感受下质感，合适咱们再对排期，您看好不好？"
+)
 
 
 def _mask_phone(phone: str) -> str:
@@ -215,6 +224,8 @@ class InfluencerBusinessHandler:
         """
         if not self.is_influencer(chat_id):
             return None
+        if asks_for_higher_commission(content):
+            return self._answer_commission_request(chat_id, content)
         draft = self._active_draft(chat_id)
         expecting_name = draft is not None and draft.asked_for == ("recipient_name",)
         info = extract_request_info(content, expecting_name=expecting_name)
@@ -241,6 +252,15 @@ class InfluencerBusinessHandler:
         reply_now = last is None or time.time() - last > HOLDING_REPLY_INTERVAL_SECONDS
         self.store.add_inbox_item(chat_id, INBOX_MESSAGE, content, auto_replied=reply_now)
         return HOLDING_REPLY if reply_now else ""
+
+    def _answer_commission_request(self, chat_id: str, content: str) -> str:
+        """达人要求提高佣金：回固定话术，不交给模型谈，也不改审批单上的佣金；记进「待处理」
+        让运营知道。同一位达人一段时间内再提，不重复回同一段话，只记待处理。
+        还没补齐的申请原样留着，达人接着发收件信息还能继续。"""
+        last = self.store.last_auto_reply_at(chat_id, INBOX_COMMISSION)
+        reply_now = last is None or time.time() - last > HOLDING_REPLY_INTERVAL_SECONDS
+        self.store.add_inbox_item(chat_id, INBOX_COMMISSION, content, auto_replied=reply_now)
+        return COMMISSION_REPLY if reply_now else ""
 
     async def _ask_for_what_is_missing(self, draft: SampleRequestDraft) -> Optional[str]:
         """申请还缺东西就返回要追问的话；都齐了返回 None。"""

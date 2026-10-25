@@ -124,6 +124,7 @@ EVENT_EXECUTION_STARTED = "开始执行"
 # 待处理事项的种类
 INBOX_MESSAGE = "message"
 INBOX_OUT_OF_STOCK = "out_of_stock"
+INBOX_COMMISSION = "commission"  # 达人要求提高佣金，机器人回了固定话术
 
 _PACKET_COLUMNS = tuple(f.name for f in fields(ApprovalActionPacket))
 _DRAFT_FIELDS = frozenset(f.name for f in fields(SampleRequestDraft))
@@ -492,12 +493,13 @@ class InfluencerStore:
             )
         return cur.lastrowid
 
-    def last_auto_reply_at(self, chat_id: str) -> Optional[float]:
-        """这位达人最近一次收到机器人中性回复的时间；没回过返回 None。"""
+    def last_auto_reply_at(self, chat_id: str, kind: str = INBOX_MESSAGE) -> Optional[float]:
+        """这位达人最近一次因为某类事项收到机器人自动回复的时间；没回过返回 None。"""
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT MAX(created_at) AS t FROM influencer_inbox WHERE chat_id = ? AND auto_replied = 1",
-                (chat_id,),
+                "SELECT MAX(created_at) AS t FROM influencer_inbox"
+                " WHERE chat_id = ? AND kind = ? AND auto_replied = 1",
+                (chat_id, kind),
             ).fetchone()
         return row["t"]
 
