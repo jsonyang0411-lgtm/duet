@@ -81,7 +81,7 @@ footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
 <body>
 <main>
 <h1>达人寄样流程现状</h1>
-<p class="sub">从达人发来消息到发货、跟进的每一步，以及每一步做到了什么程度。依据：仓库代码 <code>7f65470</code> 和 handoff.md v15，2026-10-25。</p>
+<p class="sub">从达人发来消息到发货、跟进的每一步，以及每一步做到了什么程度。依据：仓库代码 <code>851e2fd</code>、handoff.md v15 和用户 10-25 的补充，2026-10-25。</p>
 
 <div class="legend">
   <span class="chip done">● 已实现（有测试）</span>
@@ -93,21 +93,23 @@ footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
 <div class="summary">
   <div><b>能跑通的</b><p>在模拟模式下，从"达人说要样品"到"运营批准、生成运单号和要发给达人的消息"已经全程跑通。状态、审批记录都存进了数据库，每张单只会执行一次。</p></div>
   <div><b>卡在外部的</b><p>聚水潭的真实接口、小红书 CLI、Windows 真机验证。这几项不到位，就只能用假数据跑。</p></div>
-  <div><b>还没做的</b><p>Win → Mac 转发、Claude 理解消息和闲聊、佣金谈判、自动给达人发消息、查物流、发布跟进。</p></div>
+  <div><b>还没做的</b><p>Mac 端接收转发、把 <code>claude -p</code> 接进流程、谈佣金的固定回复、执行中断的处理（B23）、推广链接、自动给达人发消息、查物流、发布跟进。</p></div>
 </div>
 
 <div class="flow">
 
 <!-- 1 -->
 <div class="step"><div class="rail"><span class="num part">1</span></div><div class="body">
-  <h2>收到达人的微信私聊 <span class="where">Windows（同事的电脑）</span></h2>
+  <h2>收到达人的微信私聊 <span class="where">Windows 登录微信收发消息，Mac 负责处理</span></h2>
   <div class="nodes">
     <div class="node ext"><div class="t">Windows 后端读私聊<span class="chip ext">等真机</span></div>
       <p><code>wcdb_backend.py</code> 能读私聊，但要设 <code>PRIVATE_CHAT_ENABLED=true</code>。<code>PRIVATE_CHATS=*</code> 只读 wxid_ 开头的账号，老式微信号要单独列出来。达人流程还没在真机上跑过。</p></div>
-    <div class="node todo"><div class="t">Mac 后端读私聊<span class="chip todo">未实现</span></div>
-      <p>B25：Mac 后端只读群聊。B26：这台 Mac 没有数据库密钥。微信改在 Windows 上跑，所以暂时不修。</p></div>
-    <div class="node todo"><div class="t">Windows → Mac 转发<span class="chip todo">未实现</span></div>
-      <p>老板的方案是把消息交给 Mac 上的 Claude Code，需要在两台机器之间搭一条通道。另一种做法是在 Windows 上直接运行 <code>claude -p</code>，就不用搭。</p></div>
+    <div class="node done"><div class="t">Windows 端转发消息<span class="chip done">同事已完成</span></div>
+      <p>Windows 把收到的消息发给 Mac，再把 Mac 给出的回复发回微信。</p></div>
+    <div class="node todo"><div class="t">Mac 端接收转发<span class="chip todo">未实现</span></div>
+      <p>Mac 上要开一个服务，接收 Windows 发来的消息，交给达人模块和 Claude 处理后，把回复返回给 Windows。要先拿到同事那边的消息格式和鉴权方式。</p></div>
+    <div class="node ext"><div class="t">Mac 本机登录微信<span class="chip ext">不需要</span></div>
+      <p>链路打通后，Mac 只处理消息，不登录微信。B25（Mac 后端不读私聊）和 B26（没有数据库密钥）就不用修了。</p></div>
   </div>
 </div></div>
 
@@ -124,21 +126,21 @@ footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
 
 <!-- 3 -->
 <div class="step"><div class="rail"><span class="num part">3</span></div><div class="body">
-  <h2>理解达人想干什么 <span class="where">现在用规则，计划改用 Claude</span></h2>
+  <h2>理解达人想干什么 <span class="where">现在用规则，接下来改用 Claude</span></h2>
   <div class="nodes">
     <div class="node done"><div class="t">规则识别<span class="chip done">已实现</span></div>
       <p><code>extract.py</code> 用关键词和正则识别要样品的意图，提取商品、姓名、电话、地址和小红书账号。</p></div>
-    <div class="node todo"><div class="t">用 Claude 理解消息<span class="chip todo">未实现</span></div>
-      <p>计划用 <code>claude -p</code> 或 Agent SDK，配 API key。只开放我们自己做的工具，Claude Code 自带的工具全部关掉。</p></div>
+    <div class="node part"><div class="t">用 Claude 理解、回复消息<span class="chip part">已跑通，未接入</span></div>
+      <p>10-25 在本机调用 <code>claude -p</code> 已经能回复消息，还没接进流程。接入时只开放我们自己做的工具，Claude Code 自带的工具全部关掉。</p></div>
   </div>
   <p class="branch"><b>分支：不是要样品的消息</b>（闲聊、问发货、谈佣金）↓</p>
   <div class="nodes">
     <div class="node done"><div class="t">转人工 + 回一句中性的话<span class="chip done">已实现</span></div>
       <p>B20：消息记进控制台「待处理」，机器人回"我们核对一下再回复"，同一位达人 6 小时内最多回一次。</p></div>
-    <div class="node todo"><div class="t">闲聊由大模型回复<span class="chip todo">未实现</span></div>
+    <div class="node todo"><div class="t">闲聊由 Claude 回复<span class="chip todo">未实现</span></div>
       <p>避免一直用固定话术，回复范围受知识库限制。业务资料（品牌、产品、寄样规则）还需要你提供。</p></div>
-    <div class="node todo"><div class="t">谈佣金写死在代码里<span class="chip todo">未实现</span></div>
-      <p>达人要求提高佣金时由代码回复固定的话，不交给模型判断。话术还需要你定。</p></div>
+    <div class="node todo"><div class="t">谈佣金：代码固定回复<span class="chip todo">话术已定，待开发</span></div>
+      <p>佣金上限 25%。达人要求提高时由代码回复固定的话，不交给 Claude 判断，同时记进「待处理」。话术开头是"特别理解老师的想法！坦白讲我也特别希望能给老师申请更高点位……"，结尾建议先收样品再对排期。</p></div>
   </div>
 </div></div>
 
@@ -208,7 +210,7 @@ footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
     <div class="node part"><div class="t">小红书绑专属佣金<span class="chip part">只有模拟</span></div>
       <p>建单成功后才绑佣金（B3），审批单号作为防重复的标识传过去。等 CLI 交付。</p></div>
     <div class="node todo"><div class="t">生成商品推广链接<span class="chip todo">未实现</span></div>
-      <p>主流程里写了这一步，代码里还没有。</p></div>
+      <p>链接由小红书平台生成，要通过小红书 CLI 调用。我们后台负责：调用 CLI、把链接存进审批单、在审批卡上显示、写进发给达人的消息。后台这部分可以先用模拟数据做。</p></div>
     <div class="node done"><div class="t">执行失败 → 标记为失败<span class="chip done">已实现</span></div>
       <p>保留已经建好的单号，提示运营去人工核对。</p></div>
     <div class="node todo"><div class="t">执行到一半中断<span class="chip todo">未实现</span></div>
@@ -260,7 +262,7 @@ footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
 <tr><td>日志打码</td><td><span class="chip part">部分</span></td><td>B14：达人模块已经不打印个人信息，全项目还没统一检查。</td></tr>
 <tr><td>寄样上限</td><td><span class="chip todo">待拍板</span></td><td>D5：每人、每天能寄多少还没定。</td></tr>
 <tr><td>防封规则</td><td><span class="chip todo">待拍板</span></td><td>发消息的频率和间隔还没定。自动发送和大模型回复上线前要先定下来。</td></tr>
-<tr><td>Claude 的登录方式</td><td><span class="chip todo">待配置</span></td><td>要配 API key，不能用个人订阅。</td></tr>
+<tr><td>调用 Claude</td><td><span class="chip done">已跑通</span></td><td>10-25 本机调用 <code>claude -p</code> 已能回复消息。</td></tr>
 </table></div>
 </section>
 
@@ -268,11 +270,13 @@ footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
 <h2>建议的下一步</h2>
 <div class="tablewrap"><table>
 <tr><th>顺序</th><th>做什么</th><th>依赖</th></tr>
-<tr><td>1</td><td>把查库存、提交审批单、查物流做成工具（MCP），供 Claude 调用</td><td>不依赖外部，可以先用模拟模式</td></tr>
-<tr><td>2</td><td>谈佣金写死在代码里；加一道检查，拦住带承诺的回复</td><td>佣金话术需要你提供</td></tr>
-<tr><td>3</td><td>接入 <code>claude -p</code> 或 Agent SDK，闲聊和理解消息交给 Claude</td><td>API key、业务资料、确定跑在 Mac 还是 Windows 上</td></tr>
-<tr><td>4</td><td>自动给达人发确认消息（B15）</td><td>防封规则</td></tr>
-<tr><td>5</td><td>接聚水潭真实接口、小红书 CLI，在 Windows 真机上验证</td><td>账号、同事交付、同事的电脑</td></tr>
+<tr><td>1</td><td>B23：执行到一半中断的审批单，在控制台上给出"人工核对后标记"的入口</td><td>不依赖外部</td></tr>
+<tr><td>2</td><td>谈佣金：识别到要求提佣金时，回复固定话术并记进「待处理」</td><td>话术已定</td></tr>
+<tr><td>3</td><td>推广链接：后台调用、保存、显示、写进通知消息</td><td>先用模拟数据，命令格式要和同事确认</td></tr>
+<tr><td>4</td><td>把查库存、提交审批单、查物流做成工具（MCP），供 Claude 调用</td><td>先用模拟数据</td></tr>
+<tr><td>5</td><td>Mac 端接收服务：收 Windows 转发的消息，交给达人模块和 <code>claude -p</code>，返回回复</td><td>同事的消息格式、业务资料</td></tr>
+<tr><td>6</td><td>自动给达人发确认消息（B15），经 Windows 发出</td><td>防封规则、第 5 项</td></tr>
+<tr><td>7</td><td>接聚水潭真实接口、小红书 CLI，联调验证</td><td>账号、同事交付</td></tr>
 </table></div>
 </section>
 
