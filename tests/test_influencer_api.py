@@ -107,6 +107,34 @@ def test_an_unknown_filter_is_an_error(store):
     assert data["ok"] is False
 
 
+def test_an_interrupted_packet_is_flagged_and_can_be_resolved(store):
+    add_packet(store)
+    store.transition("GATE-1", GateStatus.PENDING, GateStatus.EXECUTING)
+    _, listed = call("/api/influencer/approvals?status=executing")
+    assert listed["items"][0]["interrupted"] is True
+    body = {"packet_id": "GATE-1", "action": "resolve", "outcome": "fulfilled", "order_sn": "JST-9"}
+    _, data = call("/api/influencer/approvals/action", body)
+    assert data["ok"] is True and data["packet"]["status"] == GateStatus.FULFILLED.value
+    assert "快递单号出来后" in data["notice"]
+
+
+def test_a_packet_that_just_started_is_not_flagged(store):
+    add_packet(store)
+    store.transition("GATE-1", GateStatus.PENDING, GateStatus.EXECUTING)
+    store.add_event("开始执行", packet_id="GATE-1", source=SOURCE_BOT)
+    _, listed = call("/api/influencer/approvals?status=executing")
+    assert listed["items"][0]["interrupted"] is False
+    _, data = call("/api/influencer/approvals/action",
+                   {"packet_id": "GATE-1", "action": "resolve", "outcome": "failed", "note": "没有单"})
+    assert data["ok"] is False and store.get_approval("GATE-1").status == GateStatus.EXECUTING
+
+
+def test_an_unknown_resolve_outcome_is_an_error(store):
+    add_packet(store)
+    _, data = call("/api/influencer/approvals/action", {"packet_id": "GATE-1", "action": "resolve", "outcome": "maybe"})
+    assert data["ok"] is False
+
+
 # ---- 名单 ----
 
 def test_contacts_can_be_added_disabled_and_listed(store):

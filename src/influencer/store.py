@@ -118,6 +118,9 @@ CREATE INDEX IF NOT EXISTS idx_influencer_inbox_open
     ON influencer_inbox(handled_at, created_at DESC);
 """
 
+# 审批单从待审批改成执行中时记的一条操作记录，用来判断执行是不是被中断了（B23）
+EVENT_EXECUTION_STARTED = "开始执行"
+
 # 待处理事项的种类
 INBOX_MESSAGE = "message"
 INBOX_OUT_OF_STOCK = "out_of_stock"
@@ -451,6 +454,15 @@ class InfluencerStore:
             " VALUES (?, ?, ?, ?, ?, ?)",
             (packet_id, chat_id, action, detail, source, time.time()),
         )
+
+    def execution_started_at(self, packet_id: str) -> Optional[float]:
+        """这张单最近一次"开始执行"的时间。老版本没记这条，查不到时返回 None。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT MAX(created_at) AS at FROM influencer_events WHERE packet_id = ? AND action = ?",
+                (packet_id, EVENT_EXECUTION_STARTED),
+            ).fetchone()
+        return row["at"]
 
     def events_for(self, packet_ids: Iterable[str]) -> Dict[str, List[Dict[str, Any]]]:
         """每张审批单的操作记录，按时间先后排列。"""

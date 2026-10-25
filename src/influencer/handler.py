@@ -25,9 +25,11 @@ from .settings import (
     MAX_COMMISSION_RATE,
     MIN_FOLLOWERS,
     MIN_RECENT_LIKES,
+    STUCK_EXECUTION_SECONDS,
     influencer_chat_ids_from_env,
 )
 from .store import (
+    EVENT_EXECUTION_STARTED,
     INBOX_MESSAGE,
     INBOX_OUT_OF_STOCK,
     SOURCE_BOT,
@@ -403,6 +405,9 @@ class InfluencerBusinessHandler:
             proposed_commission_rate=packet.proposed_commission_rate, stock_available=available,
         ):
             return self._not_pending(self.store.get_approval(packet_id))
+        self.store.add_event(
+            EVENT_EXECUTION_STARTED, packet_id=packet_id, chat_id=packet.influencer_id, source=source,
+        )
 
         try:
             order_res = await self.erp.create_sample_order(
@@ -458,6 +463,74 @@ class InfluencerBusinessHandler:
             "message": "已成功下发聚水潭打单，并设置小红书定向佣金！",
             "notice": approval_notice(packet),
         }
+
+    def resolve_interrupted_execution(
+        self,
+        packet_id: str,
+        fulfilled: bool,
+        *,
+        order_sn: str = "",
+        tracking_number: str = "",
+        commission_plan: str = "",
+        note: str = "",
+        source: str = SOURCE_CONSOLE,
+        now: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """执行被中断、一直停在"执行中"的单（B23）：运营到聚水潭和小红书核对后，在这里标成
+        已执行或失败。这里不调用聚水潭和小红书，只记下运营核对的结果。
+
+        标成已执行要填出库单号（核对过才知道）；标成失败要写原因。标完以后这张单算处理完，
+        收件信息照常在 90 天后清除。
+        """
+        now = time.time() if now is None else now
+        packet = self.store.get_approval(packet_id)
+        if packet is None:
+            return {"success": False, "error": "未找到对应的审批单号"}
+        if packet.status != GateStatus.EXECUTING:
+            return {
+                "success": False,
+                "error": f"审批单 {packet_id} {STATUS_LABELS[packet.status]}，只有停在执行中的单才需要人工核对",
+            }
+        started = self.store.execution_started_at(packet_id)
+        if started is not None and now - started < STUCK_EXECUTION_SECONDS:
+            return {
+                "success": False,
+                "error": (
+                    f"这张单 {int((now - started) // 60)} 分钟前才开始执行，可能还在跑；"
+                    f"开始执行 {STUCK_EXECUTION_SECONDS // 60} 分钟后还停在这里再核对"
+                ),
+            }
+        order_sn, tracking_number = order_sn.strip(), tracking_number.strip()
+        commission_plan, note = commission_plan.strip(), note.strip()
+
+        if fulfilled:
+            if not order_sn:
+                return {"success": False, "error": "标成已执行要填聚水潭的出库单号"}
+            if not self.store.transition(
+                packet_id, GateStatus.EXECUTING, GateStatus.FULFILLED,
+                order_sn=order_sn, tracking_number=tracking_number, commission_plan=commission_plan,
+                handled_at=now,
+            ):
+                return {"success": False, "error": f"审批单 {packet_id} 的状态刚刚变了，请刷新后再看"}
+            detail = f"出库单 {order_sn}" + (f"；{note}" if note else "")
+            self.store.add_event(
+                "人工核对：已执行", packet_id=packet_id, chat_id=packet.influencer_id, detail=detail, source=source,
+            )
+            packet.tracking_number = tracking_number
+            return {"success": True, "packet_id": packet_id, "order_sn": order_sn, "notice": approval_notice(packet)}
+
+        if not note:
+            return {"success": False, "error": "标成失败要写明核对的结果，例如「聚水潭里没有这张单」"}
+        if not self.store.transition(
+            packet_id, GateStatus.EXECUTING, GateStatus.FAILED,
+            failure_reason=f"执行中断，人工核对后标为失败：{note}",
+            order_sn=order_sn, tracking_number=tracking_number, handled_at=now,
+        ):
+            return {"success": False, "error": f"审批单 {packet_id} 的状态刚刚变了，请刷新后再看"}
+        self.store.add_event(
+            "人工核对：失败", packet_id=packet_id, chat_id=packet.influencer_id, detail=note, source=source,
+        )
+        return {"success": True, "packet_id": packet_id}
 
     @staticmethod
     def _why_not_executable(packet: ApprovalActionPacket) -> str:

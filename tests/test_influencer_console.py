@@ -40,6 +40,11 @@ def seed(db_path):
                         qualification="达标", expires_at=NEXT_YEAR),
             source=SOURCE_BOT,
         )
+    store.add_approval(
+        make_packet("GATE-STUCK", chat_id="wxid_mei", xhs_account="xhs_mei", expires_at=NEXT_YEAR),
+        source=SOURCE_BOT,
+    )
+    store.transition("GATE-STUCK", GateStatus.PENDING, GateStatus.EXECUTING)  # 执行中断，没记开始时间
     store.add_inbox_item("wxid_mei", "message", "这款什么时候上新呀", auto_replied=True)
     return store
 
@@ -130,6 +135,23 @@ def test_approval_waits_for_an_xhs_account(console, page):
     pending.get_by_label("小红书账号").fill("xhs_late")
     assert pending.get_by_role("button", name="通过").is_enabled()
     assert console.store.get_approval("GATE-NOXHS").status == GateStatus.PENDING
+
+
+def test_an_interrupted_execution_is_marked_done_after_checking(console, page):
+    page.goto(f"{console.base}/#/influencer/approvals")
+    page.get_by_role("group", name="状态").get_by_role("button", name="执行中").click()
+    stuck = card(page, "GATE-STUCK")
+    stuck.get_by_text("执行被中断了，需要人工核对").wait_for()
+    stuck.get_by_role("button", name="核对后标成已执行").click()
+    dialog = page.get_by_role("dialog")
+    confirm = dialog.get_by_role("button", name="确认")
+    assert confirm.is_disabled(), "没填出库单号不能确认"
+    dialog.get_by_label("出库单号").fill("JST-REAL-1")
+    dialog.get_by_label("运单号").fill("SF999")
+    confirm.click()
+    page.get_by_text("已标成已执行").wait_for()
+    packet = console.store.get_approval("GATE-STUCK")
+    assert (packet.status, packet.order_sn, packet.tracking_number) == (GateStatus.FULFILLED, "JST-REAL-1", "SF999")
 
 
 def test_influencers_are_added_disabled_and_picked_from_recent_chats(console, page):

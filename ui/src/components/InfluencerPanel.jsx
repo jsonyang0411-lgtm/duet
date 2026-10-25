@@ -287,11 +287,7 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
           </Note>
         </div>
       )}
-      {p.status === 'EXECUTING' && (
-        <div style={{ marginTop: 12 }}>
-          <Note kind="warn">正在执行。如果一直停在这里，说明执行被中断了，需要人工到聚水潭和小红书核对这张单。</Note>
-        </div>
-      )}
+      {p.status === 'EXECUTING' && <InterruptedExecution packet={p} onChanged={onChanged} />}
       {p.status === 'FULFILLED' && (
         <div style={{ marginTop: 12 }}>
           <Note kind="ok">
@@ -354,6 +350,96 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
         </Dialog>
       )}
     </section>
+  )
+}
+
+// 执行被中断（断电、强制退出）的单会一直停在执行中（B23）。运营到聚水潭和小红书核对后，
+// 在这里记下结果；这一步不调用聚水潭和小红书。开始执行 10 分钟内不让标，免得和还在跑的执行撞上
+function InterruptedExecution({ packet: p, onChanged }) {
+  const toast = useToast()
+  const [outcome, setOutcome] = useState(null)
+  const [orderSn, setOrderSn] = useState('')
+  const [tracking, setTracking] = useState('')
+  const [plan, setPlan] = useState('')
+  const [note, setNote] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  if (!p.interrupted) {
+    return (
+      <div style={{ marginTop: 12 }}>
+        <Note kind="cy">正在执行（{when(p.execution_started_at)} 开始）。如果 10 分钟后还停在这里，说明执行被中断了，到时可以在这里人工核对。</Note>
+      </div>
+    )
+  }
+  const fulfilled = outcome === 'fulfilled'
+  const missing = fulfilled ? (!orderSn.trim() && '要填出库单号') : (!note.trim() && '要写明核对的结果')
+  const submit = async () => {
+    setBusy(true)
+    try {
+      await post('/api/influencer/approvals/action', {
+        packet_id: p.packet_id, action: 'resolve', outcome,
+        order_sn: orderSn, tracking_number: tracking, commission_plan: plan, note,
+      })
+      toast.ok(fulfilled ? '已标成已执行。记得把确认消息复制给达人' : '已标成失败', { ms: 6000 })
+      setOutcome(null)
+    } catch (e) {
+      toast.err(e.message)
+    } finally {
+      setBusy(false)
+      onChanged()
+    }
+  }
+  return (
+    <div style={{ marginTop: 12 }}>
+      <Banner title="执行被中断了，需要人工核对">
+        这张单{p.execution_started_at ? `从 ${when(p.execution_started_at)} 开始执行，` : ''}一直没有执行完。
+        请到聚水潭看有没有这张单的出库单（外部单号是 <span className="mono">{p.packet_id}</span>），到小红书看佣金有没有绑上，再把结果记在这里。
+        佣金没绑上的，先去小红书补绑。
+      </Banner>
+      <div className="card-foot">
+        <span className="grow" />
+        <button type="button" className="btn" onClick={() => setOutcome('failed')}><XCircle />核对后标成失败</button>
+        <button type="button" className="btn primary chc" onClick={() => setOutcome('fulfilled')}><CheckCircle />核对后标成已执行</button>
+      </div>
+      {outcome && (
+        <Dialog
+          title={`${fulfilled ? '标成已执行' : '标成失败'}：${p.packet_id}`} eyebrow="CHECK" onClose={() => setOutcome(null)}
+          footer={<>
+            <span className="f-hint grow">{missing}</span>
+            <button type="button" className="btn" onClick={() => setOutcome(null)}>取消</button>
+            <button type="button" className={`btn ${fulfilled ? 'primary chc' : 'danger'}`} disabled={busy || !!missing} onClick={submit}>
+              {busy ? '处理中…' : '确认'}
+            </button>
+          </>}
+        >
+          {fulfilled ? (
+            <div className="stack" style={{ gap: 12 }}>
+              <Field label="出库单号" hint="聚水潭里这张单的单号">
+                <TextInput mono value={orderSn} onChange={setOrderSn} aria-label="出库单号" data-autofocus />
+              </Field>
+              <Field label="运单号" hint="还没有就先空着，确认消息里会写「快递单号出来后再发给老师」">
+                <TextInput mono value={tracking} onChange={setTracking} aria-label="运单号" />
+              </Field>
+              <Field label="佣金计划" hint="小红书里的计划编号，可以不填">
+                <TextInput mono value={plan} onChange={setPlan} aria-label="佣金计划" />
+              </Field>
+              <Field label="备注" hint="可以不填">
+                <TextArea value={note} onChange={setNote} rows={2} aria-label="备注" />
+              </Field>
+            </div>
+          ) : (
+            <div className="stack" style={{ gap: 12 }}>
+              <Field label="核对结果" hint="记在操作记录里，例如：聚水潭里没有这张单">
+                <TextArea value={note} onChange={setNote} rows={3} aria-label="核对结果" data-autofocus />
+              </Field>
+              <Field label="出库单号" hint="出库单已经建了、但后面没做完的，填上单号">
+                <TextInput mono value={orderSn} onChange={setOrderSn} aria-label="出库单号" />
+              </Field>
+            </div>
+          )}
+        </Dialog>
+      )}
+    </div>
   )
 }
 

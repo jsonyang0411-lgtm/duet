@@ -16,8 +16,8 @@ from typing import Any, Dict, List, Optional
 from .handler import InfluencerBusinessHandler, approval_notice, rejection_notice
 from .jst_erp import JuShuiTanERPClient
 from .scheduled_agent import morning_brief
-from .settings import DEFAULT_COMMISSION_RATE, MAX_COMMISSION_RATE, mock_enabled
-from .store import SOURCE_CONSOLE, InfluencerStore
+from .settings import DEFAULT_COMMISSION_RATE, MAX_COMMISSION_RATE, STUCK_EXECUTION_SECONDS, mock_enabled
+from .store import EVENT_EXECUTION_STARTED, SOURCE_CONSOLE, InfluencerStore
 from .types import STATUS_LABELS, ApprovalActionPacket, GateStatus
 from .xhs_cli import XiaohongshuCLIClient
 
@@ -136,15 +136,23 @@ def packet_json(packet: ApprovalActionPacket, events: List[Dict[str, Any]]) -> D
         data["notice"] = rejection_notice(packet)
     else:
         data["notice"] = ""
+    if packet.status == GateStatus.EXECUTING:
+        # 什么时候开始执行的、是不是已经可以人工核对了（B23）。老版本没记开始时间的单直接算中断
+        started = next((e["created_at"] for e in reversed(events) if e["action"] == EVENT_EXECUTION_STARTED), None)
+        data["execution_started_at"] = started
+        data["interrupted"] = started is None or time.time() - started >= STUCK_EXECUTION_SECONDS
     return data
 
 
 def act_on_approval(store: InfluencerStore, body: Dict[str, Any]) -> Dict[str, Any]:
-    """通过或驳回一张审批单。通过时会真的调用聚水潭和小红书 CLI（模拟模式下是假的）。"""
+    """通过或驳回一张审批单。通过时会真的调用聚水潭和小红书 CLI（模拟模式下是假的）。
+    action=resolve 是给执行被中断的单记下人工核对的结果（B23），不调用聚水潭和小红书。"""
     packet_id = str(body.get("packet_id") or "").strip()
     action = body.get("action")
+    if action == "resolve":
+        return resolve_interrupted(store, packet_id, body)
     if action not in ("approve", "reject"):
-        return {"ok": False, "error": "action 只能是 approve（通过）或 reject（驳回）"}
+        return {"ok": False, "error": "action 只能是 approve（通过）、reject（驳回）或 resolve（人工核对）"}
     commission_rate = body.get("commission_rate")
     if commission_rate in (None, ""):
         commission_rate = None
@@ -162,6 +170,26 @@ def act_on_approval(store: InfluencerStore, body: Dict[str, Any]) -> Dict[str, A
         reason=str(body.get("reason") or "").strip(),
         source=SOURCE_CONSOLE,
     ))
+    return _with_packet(store, packet_id, result)
+
+
+def resolve_interrupted(store: InfluencerStore, packet_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    outcome = body.get("outcome")
+    if outcome not in ("fulfilled", "failed"):
+        return {"ok": False, "error": "outcome 只能是 fulfilled（已执行）或 failed（失败）"}
+    result = InfluencerBusinessHandler(store).resolve_interrupted_execution(
+        packet_id,
+        outcome == "fulfilled",
+        order_sn=str(body.get("order_sn") or ""),
+        tracking_number=str(body.get("tracking_number") or ""),
+        commission_plan=str(body.get("commission_plan") or ""),
+        note=str(body.get("note") or ""),
+        source=SOURCE_CONSOLE,
+    )
+    return _with_packet(store, packet_id, result)
+
+
+def _with_packet(store: InfluencerStore, packet_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
     response = {"ok": bool(result.get("success")), **result}
     packet = store.get_approval(packet_id)
     if packet is not None:
