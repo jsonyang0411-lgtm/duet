@@ -1,6 +1,6 @@
 # 交接文档：达人商务智能体
 
-> 最后更新：2026-10-25（v22：Claude 回复的封装、寄样上限、发送限速机制已做；第 5 项只差接收同事转发的那一层，要同事的消息格式）
+> 最后更新：2026-10-25（v23：Claude 回复、寄样上限、发送限速、日志打码已做；第 5 项只差接收同事转发的那一层，要同事的消息格式；新发现 B27 待决定）
 > 读者：接手这个项目的 AI 窗口，以及参与开发的同事。
 > 规矩：新窗口开工前先读完本文件；收工前更新第 3 节（当前状态）、第 5 节（计划进度）和第 9 节（变更记录）。
 
@@ -115,7 +115,7 @@
 | B11 | 任何私聊里出现"合作"等词就进入索样流程 | `8d7bb5b` | P0 | 已修（白名单） |
 | B12 | 没提商品时用"主推爆款商品"占位 | `9f466c7` | P1 | 已修 |
 | B13 | 定时 agent 从未启动；物流跟进是空函数；晨报有写死的假数据 | `scheduled_agent.py` | P1 | 已修（2026-10-25）：假数据删掉，`morning_brief` 只用 `store.overview()` 的真实数字；控制台「审批单」页顶部新增「今日概览」，点数字进入对应列表、可复制概览。定时推送按 D14 不做，定时任务仍未启动；物流跟进要等第 5 阶段 |
-| B14 | 日志里有完整的姓名、电话、地址 | `1d113f0`、`9f466c7` | P1 | 达人模块已不再打印；第 4 阶段再统一检查一遍 |
+| B14 | 日志里有完整的姓名、电话、地址 | `1d113f0`、`9f466c7` | P1 | 已修（2026-10-25）：全项目检查了一遍。router 的私聊日志 "Private chat from" 和 "AI chat: asks" 会把达人消息的前 60–80 个字（含地址、电话）以 INFO 级别写进 bot.log，决策追踪 `decision_trace.jsonl` 每条消息存前 120 字、`llm_calls.jsonl` 存完整提示词，Windows 后端还有几处 debug 日志带消息原文。新增 `src/pii.py` 的 `mask_pii`，这些地方都先打码：手机号、身份证号、地址片段、带标签和紧挨手机号的姓名。新的问题记为 B27 |
 | B15 | 审批单里没有"将要发给达人的确切消息" | `2ba1849`、`22f2334` | P1 | 部分修复：审批卡上显示消息原文（批准前是预览，执行后带运单号；驳回给婉拒话术），由运营复制后手动发送（D9）；自动发送在第 4 阶段 |
 | B16 | 初筛不通过时自动回复"名额已满" | `1d113f0` | P1 | 已修（按 D4 不再自动拒绝） |
 | B17 | 准入门槛与备忘录不一致：代码是粉丝 ≥ 1 万且点赞 ≥ 1000，备忘录写的是"粉丝 + 点赞破千" | `settings.py` 的 `MIN_FOLLOWERS` | — | 已确认（2026-10-25）：以代码为准（D12） |
@@ -128,6 +128,7 @@
 | B24 | "最近私聊"按 `chat_id` 是否以 `@chatroom` 结尾来区分群聊；Mac 后端的 `chat_id` 是什么格式，要等 V1 验证 | `store.py` 的 `recent_private_chats` | P2 | 待 V1 验证 |
 | B25 | **Mac 后端根本不读私聊**：`MacWeFlowClient.get_new_messages` 只轮询 `@chatroom` 会话，`MacHybridBackend._should_monitor` 也把非群消息全部丢掉。所以在 Mac 上达人的私信到不了达人模块，"最近私聊"也永远是空的。修的时候只能放行名单里的达人，不能把所有私聊都放进来，否则原来的聊天机器人会回复你所有的私聊 | `src/wechat/mac_weflow_client.py`、`mac_hybrid_backend.py` | P0 | 2026-10-25 第 6 阶段读代码时发现，待用户确认修法 |
 | B26 | 这台 Mac 上 Mac 后端读不了微信数据库：① `native/macos/libWCDB.dylib` 带下载隔离标记被系统拒绝加载（10-25 经用户同意已去掉标记，现在能加载）；② 微信账号目录里没有数据库密钥 `all_keys.json`。提取密钥要用 sudo 读微信进程的内存（Go 扫描器，本机没装 Go；备用方案是 lldb 附加到微信），本机 SIP 是开着的，微信 4.1 有加固，大概率附加不上。另外 `tools/macos/weflow_setup.py` 找的是 `macos_chatlog_setup.py`，实际文件名是 `chatlog_setup.py`，这个入口直接会报错 | `native/macos/`、`tools/macos/` | P0 | 待用户决定怎么拿密钥（问同事在他的 Mac 上怎么弄的） |
+| B27 | 原项目的 `messages` 表（`data/messages.db`）存了所有消息的原文，达人发来的收件信息也在里面，而且永久保留，不受 D10 的 90 天清除约束；记忆、日记等功能也会读这张表。另外 `extract_key.py` 在日志里打印微信数据库密钥的前 16 位 | `src/db/store.py`、`src/wechat/extract_key.py` | P2 | 2026-10-25 做 B14 时发现，要用户决定：达人私聊的消息原文要不要也按 90 天清除 |
 
 ### 3.3 备忘录与代码不符的地方
 
@@ -312,3 +313,4 @@ CLI 交付之前，我们按这份约定写一个桩程序，通过配置显式�
 - 2026-10-25 v20：用户同意"不等同事也能做"的 5 件事按顺序做：Claude 回复封装 → 寄样上限机制 → 发送限速机制 → 日志打码检查 → 更新备忘录。第 1 件完成：`src/influencer/claude_brain.py`。处理器的顺序是：名单外不管 → 谈佣金代码回固定话术 → Claude 回复（过 `review_reply`）→ Claude 出错时走规则流程。新增 `influencer_dialog` 表和业务资料模板 `docs/influencer_knowledge.example.md`。用真实 `claude -p`（haiku、模拟模式、临时库）端到端跑了两条：问库存、给齐信息要样品，各 6–8 秒，第二条记得商品并通过工具生成了待审批单，没有承诺发货。新增 `tests/test_influencer_claude.py`（28 条）。完整测试 3524 个通过、1 个跳过。
 - 2026-10-25 v21：第 2 件寄样上限机制完成（D5 的数字没定，默认不限）。`handler.sample_limit_problem` 在批准时检查，超了不执行、单留在待审批；审批卡上标出原因，「通过」按钮不能点；审批页顶部显示当前上限。新增 `tests/test_influencer_sample_limits.py`。完整测试 3535 个通过、1 个跳过。
 - 2026-10-25 v22：第 3 件发送限速机制完成（防封参数没定，用保守默认值）：`src/influencer/send_policy.py`、`influencer_outbox` 表。回复延迟只在 `build_influencer_handler`（真实运行）里打开，测试里直接构造的处理器不等。新增 `tests/test_influencer_send_policy.py`。完整测试 3556 个通过、1 个跳过。
+- 2026-10-25 v23：第 4 件日志打码检查完成（B14 已修）：新增 `src/pii.py`，改了原项目共享代码的日志和追踪（router、routing/steps、decision_trace、wcdb_backend、voice/pipeline），CODEBASE_REFERENCE 新增 2.47 节。新发现 B27（messages 表永久存消息原文；extract_key 日志打印密钥前 16 位），等用户决定。新增 `tests/test_pii.py`。完整测试 3568 个通过、1 个跳过。

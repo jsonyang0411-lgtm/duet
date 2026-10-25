@@ -786,9 +786,9 @@ todo_delete_keywords: list[str] = [
 |---|---|---|---|
 | `JsonlSink(path, max_bytes, backups)` | 追加写 JSON Lines，按大小旋转，线程安全，写失败只记 debug | `path, max_bytes=20MB, backups=3` | — |
 | `DecisionTracer.from_config(config)` | 由 BotConfig 构建；只有字面量 `True` 才开启，Mock/空配置得到 `NullTracer` | `config` | `DecisionTracer \| NullTracer` |
-| `DecisionTracer.begin(msg)` | 开始一条消息的追踪，并设为当前线程的 current | `msg: dict` | `DecisionTrace` |
+| `DecisionTracer.begin(msg)` | 开始一条消息的追踪，并设为当前线程的 current；记录里的 `content` 先经 `mask_pii` 打码再截断 | `msg: dict` | `DecisionTrace` |
 | `DecisionTracer.current()` | 当前线程正在进行的追踪（没有则为空对象） | 无 | `DecisionTrace \| NullTrace` |
-| `DecisionTracer.record_llm_call(**fields)` | 写一条 `llm_call` 记录并关联当前消息 | `call, system_prompt, user_prompt, raw_reply, cleaned_reply, ...` | `None` |
+| `DecisionTracer.record_llm_call(**fields)` | 写一条 `llm_call` 记录并关联当前消息；保存的 `system_prompt`、`user_prompt` 经 `mask_pii` 打码（指纹和长度按原文算） | `call, system_prompt, user_prompt, raw_reply, cleaned_reply, ...` | `None` |
 | `DecisionTrace.step(code, **info)` / `note(**info)` | 追加一个步骤 / 补充附加信息 | — | `None` |
 | `DecisionTrace.reason(code, **info)` | 设置最终原因（后者覆盖前者）并记为步骤 | — | `None` |
 | `DecisionTrace.ignore(code, **info)` | 同 `reason`，且结果标为 `ignored`（决策前被过滤） | — | `None` |
@@ -973,6 +973,14 @@ todo_delete_keywords: list[str] = [
 | `openai_backend.strip_reasoning(text)` | 去掉 `<think>…</think>`；只有 `</think>`（模板把开头放在提示词里）时去掉它之前的全部；只有 `<think>`（推理中被截断）时去掉它之后的全部 | `str` |
 | `OpenAISummarizer.extra_body / strip_reasoning / token_floor / timeout_floor` | 类默认值 `None / False / 0 / 0.0`，请求和以前逐字相同；本地实例设置后：额外字段并入请求（调用自己的参数优先）、回答内容去掉推理、`max_tokens` 和超时取较大值 | — |
 | `MessageRouter(..., proactive_summarizer=None, memory_summarizer=None)` | 主动发言（结构化与旧路径）用 `_proactive_summarizer`；`MemoryConsolidator`、`MemoryWorker` 用 `_memory_summarizer`；其余（被叫到的回复、看图）用 `summarizer`；决策追踪的调用记录器装到每个不同的模型上（记录里有 `backend` 和 `model`，能分清本地和云端） | — |
+
+### 2.47 `src/pii.py`（日志里的个人信息打码）
+
+| 名称 | 描述 | 参数 | 返回值 |
+|---|---|---|---|
+| `mask_pii(text)` | 只用于写日志和追踪文件，不改消息本身。手机号留前 3 后 4 位；18 位身份证号留前 3 后 2 位；"xx省/市/区/县"开头的片段换成〔地址〕；"收件人/收货人/联系人/姓名"后面和紧挨手机号的 2–4 个汉字换成〔姓名〕（"电话""手机号"等标签词不算）。`None` 返回空字符串 | `text: object` | `str` |
+
+调用位置：`src/router.py`（私聊日志 "Private chat from"、"AI chat: asks"、主动发言回复日志、联网搜索日志和追踪步骤）、`src/routing/steps.py`（引用他人、路由 debug、@ 触发、关键词路由的日志）、`src/decision_trace.py`（见 2.35）、`src/wechat/wcdb_backend.py`（"Handling message"、回调返回值、"Standardized message" 的 debug 日志）、`src/voice/pipeline.py`（低置信度识别结果日志）。
 
 ---
 

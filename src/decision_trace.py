@@ -33,6 +33,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .pii import mask_pii
+
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
@@ -333,7 +335,8 @@ class DecisionTracer(NullTracer):
             "flags": flags,
         }
         if self._content_chars:
-            header["content"] = _truncate(msg.get("content", ""), self._content_chars)
+            # 追踪文件会一直留着，手机号、地址这类个人信息先打码（B14）
+            header["content"] = _truncate(mask_pii(msg.get("content", "")), self._content_chars)
         return header
 
     def _write_decision(self, record: dict) -> None:
@@ -361,8 +364,8 @@ class DecisionTracer(NullTracer):
             }
             record.update(fields)
             if self._include_prompts:
-                record["system_prompt"] = system_prompt
-                record["user_prompt"] = user_prompt
+                record["system_prompt"] = mask_pii(system_prompt)
+                record["user_prompt"] = mask_pii(user_prompt)
             trace.add_llm_call(call_id, fields.get("latency_ms", 0.0))
             if self._llm_sink is not None:
                 self._llm_sink.write(record)

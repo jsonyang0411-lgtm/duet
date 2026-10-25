@@ -32,6 +32,7 @@ from .persona import (
     PERSONA_PROFILE_YANG_YUJING, FullFeed, Persona, PersonaRegistry, builtin_personas,
 )
 from .decision_trace import DecisionTracer
+from .pii import mask_pii
 from .pipeline.addressing import (
     LEVEL_STRONG,
     LEVEL_WEAK,
@@ -364,7 +365,7 @@ class MessageRouter:
         self._tracer.current().reason("private_chat")
         logger.info(
             "Private chat from '%s': %s",
-            msg["sender_name"], clean_content[:80],
+            msg["sender_name"], mask_pii(clean_content)[:80],
         )
 
         reply: Optional[str] = None
@@ -867,7 +868,7 @@ class MessageRouter:
 
         logger.info(
             "AI chat: '%s' asks '%s'",
-            display_name, clean_content[:60],
+            display_name, mask_pii(clean_content)[:60],
         )
 
         if not ambient:
@@ -935,8 +936,8 @@ class MessageRouter:
                 bot_name=self._config.bot_display_name,
             )
             if search_query:
-                logger.info("Web search requested by '%s': %s", display_name, search_query)
-                trace.step("web_search", query=search_query[:80])
+                logger.info("Web search requested by '%s': %s", display_name, mask_pii(search_query))
+                trace.step("web_search", query=mask_pii(search_query)[:80])
                 try:
                     search_results = self._web_search.search(search_query)
                     search_context = self._web_search.format_for_prompt(
@@ -1729,7 +1730,7 @@ class MessageRouter:
         self._proactive.record_speech(chat_id)
         trace.reason("proactive_reply", mode=mode.name)
         logger.info(
-            "Proactive reply: mode=%s len=%d → '%s'", mode.name, len(reply), reply[:40],
+            "Proactive reply: mode=%s len=%d → '%s'", mode.name, len(reply), mask_pii(reply)[:40],
         )
         return reply
 
@@ -1843,7 +1844,7 @@ class MessageRouter:
         ai_reply = self._nicks.resolve_wxids(ai_reply)
         logger.info(
             "Proactive reply: mode=%s len=%d → '%s'",
-            mode.name, len(ai_reply), ai_reply[:40],
+            mode.name, len(ai_reply), mask_pii(ai_reply)[:40],
         )
         # No @prefix — bot speaks as a natural group member
         return ai_reply

@@ -16,6 +16,7 @@ import logging
 import re
 from typing import Optional
 
+from ..pii import mask_pii
 from ..pipeline.addressing import calls_by_name
 from ..todo.handler import format_todo_reply
 from .context import (
@@ -184,7 +185,7 @@ def quote_of_other_member(ctx: RouteContext) -> Optional[Stop]:
     ):
         logger.info(
             "Ignoring reply to another member: quoted_sender=%r content=%r",
-            msg.get("quoted_sender_name", ""), str(msg.get("content", ""))[:60],
+            msg.get("quoted_sender_name", ""), mask_pii(msg.get("content", ""))[:60],
         )
         ctx.trace.reason("quote_of_other_member")
         return Stop(None)
@@ -223,7 +224,7 @@ def detect_trigger(ctx: RouteContext) -> Optional[Stop]:
     kw_match = router._detector.is_trigger(
         content=raw, is_at_mentioned=False, sender_name=msg["sender_name"],
     )
-    logger.debug("Keyword route: raw=%r is_at=%s kw_match=%s", raw[:30], is_at, kw_match)
+    logger.debug("Keyword route: raw=%r is_at=%s kw_match=%s", mask_pii(raw)[:30], is_at, kw_match)
     if not is_at and kw_match:
         is_at = True
         msg["_kw_triggered"] = True  # the keyword counts as an @
@@ -263,7 +264,7 @@ def detect_trigger(ctx: RouteContext) -> Optional[Stop]:
     ))
     logger.debug(
         "Router route: is_at=%s age=%ds content=%.50s",
-        is_at, router._now() - msg.get("timestamp", 0), msg.get("content", "")[:50],
+        is_at, router._now() - msg.get("timestamp", 0), mask_pii(msg.get("content", ""))[:50],
     )
     ctx.raw, ctx.is_at, ctx.sticky_triggered = raw, is_at, sticky_triggered
     return None
@@ -290,7 +291,7 @@ def mention_gate(ctx: RouteContext) -> Optional[Stop]:
 
     logger.info(
         "Trigger in %s by '%s': %s",
-        msg["chat_id"], msg["sender_name"], msg["content"][:80],
+        msg["chat_id"], msg["sender_name"], mask_pii(msg["content"])[:80],
     )
 
     clean_content = msg["content"]
