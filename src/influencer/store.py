@@ -646,6 +646,65 @@ class InfluencerStore:
         with self._connect() as conn:
             return conn.execute("SELECT COUNT(*) FROM influencer_outbox WHERE sent_at IS NULL").fetchone()[0]
 
+    # ---- 原项目表里的达人私聊（B27） ----
+
+    @staticmethod
+    def _purge_influencer_chats(conn: sqlite3.Connection, cutoff: float) -> None:
+        """名单里的达人（包括停用的）的私聊，在原项目各表里 cutoff 以前的内容都删掉：
+        消息原文、图片语音索引、导入的聊天记录、机器人发出的话，以及由这些消息整理出的记忆。
+
+        这些表是原项目建的，达人模块单独用一个库（测试）时可能不存在，不存在就跳过。
+        消息表上的全文索引（fts_messages、fts_history）是外部内容索引，要先用 'delete'
+        命令把已经编进索引的行去掉，否则索引里会留下残影。
+        """
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        chats = "SELECT chat_id FROM influencer_contacts"
+
+        def state(key: str) -> int:
+            if "memory_state" not in tables:
+                return 0
+            row = conn.execute("SELECT value FROM memory_state WHERE key = ?", (key,)).fetchone()
+            return int(row[0]) if row and str(row[0]).isdigit() else 0
+
+        for table, index in (("messages", "fts_messages"), ("history_messages", "fts_history")):
+            if table not in tables:
+                continue
+            where = f"chat_id IN ({chats}) AND timestamp < ?"
+            if index in tables:
+                conn.execute(
+                    f"INSERT INTO {index}({index}, rowid, content)"
+                    f" SELECT 'delete', id, content FROM {table} WHERE {where} AND id <= ?",
+                    (cutoff, state(f"{index}.cursor")),
+                )
+            conn.execute(f"DELETE FROM {table} WHERE {where}", (cutoff,))
+        for table, column in (("message_media", "timestamp"), ("bot_replies", "timestamp"),
+                              ("group_facts", "updated_at"), ("group_memory", "updated_at")):
+            if table in tables:
+                conn.execute(f"DELETE FROM {table} WHERE chat_id IN ({chats}) AND {column} < ?", (cutoff,))
+
+        # 记忆 v2：片段按结束时间、事实按最后一次出现的时间；连同引用的原话和向量一起删
+        owners = []
+        if "memory_episodes" in tables:
+            owners.append(("episode", "memory_episodes", "end_ts"))
+        if "memory_facts" in tables:
+            owners.append(("fact", "memory_facts", "last_seen_at"))
+        for kind, table, column in owners:
+            old = f"SELECT id FROM {table} WHERE chat_id IN ({chats}) AND {column} < ?"
+            for extra in ("memory_evidence", "memory_vectors"):
+                if extra in tables:
+                    conn.execute(
+                        f"DELETE FROM {extra} WHERE owner_kind = ? AND owner_id IN ({old})", (kind, cutoff),
+                    )
+            conn.execute(f"DELETE FROM {table} WHERE chat_id IN ({chats}) AND {column} < ?", (cutoff,))
+        if "memory_evidence" in tables:
+            # 还在用的记忆里，引用的旧原话也删掉
+            for kind, table, _ in owners:
+                conn.execute(
+                    f"DELETE FROM memory_evidence WHERE owner_kind = ? AND ts < ?"
+                    f" AND owner_id IN (SELECT id FROM {table} WHERE chat_id IN ({chats}))",
+                    (kind, cutoff),
+                )
+
     # ---- 概览 ----
 
     def overview(self, now: Optional[float] = None) -> Dict[str, int]:
@@ -689,7 +748,8 @@ class InfluencerStore:
 
     def run_maintenance(self, now: Optional[float] = None) -> None:
         """把超过有效期的待审批单标成过期；清除到期的个人信息（Q3）；删掉作废的草稿，
-        以及处理完 90 天的待处理事项、90 天前的对话记录和发出 90 天的消息。
+        以及处理完 90 天的待处理事项、90 天前的对话记录和发出 90 天的消息；
+        原项目的表里达人私聊的消息和由它们整理出来的记忆，也按 90 天清除（B27）。
 
         机器人启动时、控制台每次列审批单时都会调用，所以不需要单独的定时任务。
         """
@@ -730,3 +790,4 @@ class InfluencerStore:
                 "DELETE FROM influencer_outbox WHERE sent_at IS NOT NULL AND sent_at < ?",
                 (now - PERSONAL_INFO_RETENTION_SECONDS,),
             )
+            self._purge_influencer_chats(conn, now - PERSONAL_INFO_RETENTION_SECONDS)

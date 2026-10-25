@@ -1,6 +1,6 @@
 # 交接文档：达人商务智能体
 
-> 最后更新：2026-10-25（v24："不等同事也能做"的 5 件事都做完了，备忘录已按新架构更新；第 5 项只差接收同事转发的那一层，要同事的消息格式；B27 待决定）
+> 最后更新：2026-10-25（v25：达人消息按 90 天清除已做（D15）；v24："不等同事也能做"的 5 件事都做完了，备忘录已按新架构更新；第 5 项只差接收同事转发的那一层，要同事的消息格式；B27 待决定）
 > 读者：接手这个项目的 AI 窗口，以及参与开发的同事。
 > 规矩：新窗口开工前先读完本文件；收工前更新第 3 节（当前状态）、第 5 节（计划进度）和第 9 节（变更记录）。
 
@@ -128,7 +128,7 @@
 | B24 | "最近私聊"按 `chat_id` 是否以 `@chatroom` 结尾来区分群聊；Mac 后端的 `chat_id` 是什么格式，要等 V1 验证 | `store.py` 的 `recent_private_chats` | P2 | 待 V1 验证 |
 | B25 | **Mac 后端根本不读私聊**：`MacWeFlowClient.get_new_messages` 只轮询 `@chatroom` 会话，`MacHybridBackend._should_monitor` 也把非群消息全部丢掉。所以在 Mac 上达人的私信到不了达人模块，"最近私聊"也永远是空的。修的时候只能放行名单里的达人，不能把所有私聊都放进来，否则原来的聊天机器人会回复你所有的私聊 | `src/wechat/mac_weflow_client.py`、`mac_hybrid_backend.py` | P0 | 2026-10-25 第 6 阶段读代码时发现，待用户确认修法 |
 | B26 | 这台 Mac 上 Mac 后端读不了微信数据库：① `native/macos/libWCDB.dylib` 带下载隔离标记被系统拒绝加载（10-25 经用户同意已去掉标记，现在能加载）；② 微信账号目录里没有数据库密钥 `all_keys.json`。提取密钥要用 sudo 读微信进程的内存（Go 扫描器，本机没装 Go；备用方案是 lldb 附加到微信），本机 SIP 是开着的，微信 4.1 有加固，大概率附加不上。另外 `tools/macos/weflow_setup.py` 找的是 `macos_chatlog_setup.py`，实际文件名是 `chatlog_setup.py`，这个入口直接会报错 | `native/macos/`、`tools/macos/` | P0 | 待用户决定怎么拿密钥（问同事在他的 Mac 上怎么弄的） |
-| B27 | 原项目的 `messages` 表（`data/messages.db`）存了所有消息的原文，达人发来的收件信息也在里面，而且永久保留，不受 D10 的 90 天清除约束；记忆、日记等功能也会读这张表。另外 `extract_key.py` 在日志里打印微信数据库密钥的前 16 位 | `src/db/store.py`、`src/wechat/extract_key.py` | P2 | 2026-10-25 做 B14 时发现，要用户决定：达人私聊的消息原文要不要也按 90 天清除 |
+| B27 | 原项目的 `messages` 表（`data/messages.db`）存了所有消息的原文，达人发来的收件信息也在里面，而且永久保留，不受 D10 的 90 天清除约束；记忆、日记等功能也会读这张表。另外 `extract_key.py` 在日志里打印微信数据库密钥的前 16 位 | `src/db/store.py`、`src/wechat/extract_key.py` | P2 | 第一件已修（2026-10-25，用户定"达人消息都按 90 天清除"，记为 D15）：`store.run_maintenance` 里新增 `_purge_influencer_chats`，名单里的达人（包括停用的）的私聊，在原项目的 messages、history_messages、message_media、bot_replies、group_facts、group_memory 里 90 天以前的都删掉，记忆 v2 的旧片段、旧事实连同引用原话和向量一起删；全文索引先用 'delete' 命令去掉。group_memory 是整段日记，只能在 90 天没更新时整条删。第二件（密钥前 16 位）还没改 |
 
 ### 3.3 备忘录与代码不符的地方
 
@@ -208,6 +208,7 @@
 | D11 | 环境变量白名单怎么过渡 | 机器人启动时并入名单，只增不删，之后以控制台为准；控制台里停用的达人不会被加回来（Q4） | 已确认，已实现 |
 | D13 | 非达人的私聊怎么处理 | 照常由聊天机器人回复（这是公司号）。部署时 Windows 上要设 `PRIVATE_CHAT_ENABLED=true`；`PRIVATE_CHATS=*` 只读 `wxid_` 开头的账号，老式自定义微信号的达人要单独写进 `PRIVATE_CHATS` | 已确认（2026-10-25） |
 | D14 | 提醒发到哪里 | 先只做在控制台里：左栏「达人审批」显示待审批 + 待处理的数量，「待处理」子页列出要人工回复的消息和缺货。不推送到微信或飞书 | 已确认（2026-10-25），已实现 |
+| D15 | 达人私聊的消息原文保留多久 | 原项目各表里的达人消息、由它们整理的记忆，都按 90 天清除（B27） | 已确认（2026-10-25），已实现 |
 | D12 | 资质门槛 | 以代码为准：粉丝 ≥ 1 万且近期最高点赞 ≥ 1000。只用来在审批单上标注，不自动拒绝（D4） | 已确认（2026-10-25），已实现 |
 
 D8–D11 是第 6 项设计里的 4 个问题，2026-10-24 用户回复"默认"，即按建议做。
@@ -315,3 +316,4 @@ CLI 交付之前，我们按这份约定写一个桩程序，通过配置显式�
 - 2026-10-25 v22：第 3 件发送限速机制完成（防封参数没定，用保守默认值）：`src/influencer/send_policy.py`、`influencer_outbox` 表。回复延迟只在 `build_influencer_handler`（真实运行）里打开，测试里直接构造的处理器不等。新增 `tests/test_influencer_send_policy.py`。完整测试 3556 个通过、1 个跳过。
 - 2026-10-25 v23：第 4 件日志打码检查完成（B14 已修）：新增 `src/pii.py`，改了原项目共享代码的日志和追踪（router、routing/steps、decision_trace、wcdb_backend、voice/pipeline），CODEBASE_REFERENCE 新增 2.47 节。新发现 B27（messages 表永久存消息原文；extract_key 日志打印密钥前 16 位），等用户决定。新增 `tests/test_pii.py`。完整测试 3568 个通过、1 个跳过。
 - 2026-10-25 v24：给 `claude -p` 加了 `--max-turns 6`（`CLAUDE_MAX_TURNS`），用真实调用验证过到了上限返回 `error_max_turns`、处理器退回规则流程。第 5 件备忘录更新完成：按新架构（Windows 收发、Mac 处理、Claude 回复）重写第一、二、三节，其他各节同步，网页版重新生成。
+- 2026-10-25 v25：用户定 D15：达人消息都按 90 天清除。B27 第一件已修（见问题表），新增 `tests/test_influencer_chat_retention.py`，用原项目真实建表语句和真实全文索引验证，并确认去掉索引清理后测试会失败。完整测试 3573 个通过、1 个跳过。

@@ -259,7 +259,7 @@ footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
 <tr><th>事项</th><th>状态</th><th>说明</th></tr>
 <tr><td>数据持久化</td><td><span class="chip done">已实现</span></td><td>名单、草稿、审批单、操作记录和待处理事项共 5 张表，和机器人共用 <code>data/messages.db</code>。</td></tr>
 <tr><td>个人信息到期清除</td><td><span class="chip done">已实现</span></td><td>D10：审批单处理完 90 天后，清除姓名、电话、地址和原话记录。</td></tr>
-<tr><td>日志打码</td><td><span class="chip done">已实现</span></td><td>B14：全项目检查过，日志和追踪文件里的电话、地址、收件人姓名都先打码。原项目的消息表仍永久保存消息原文（B27，等你决定要不要按 90 天清除）。</td></tr>
+<tr><td>日志打码</td><td><span class="chip done">已实现</span></td><td>B14：全项目检查过，日志和追踪文件里的电话、地址、收件人姓名都先打码。原项目消息表里的达人消息原文和由它们整理出的记忆，也按 90 天清除（D15）。</td></tr>
 <tr><td>寄样上限</td><td><span class="chip part">机制已做，数字待定</span></td><td>D5：每位达人多少天内最多几单、每天一共最多几单。超过上限的单不能通过；数字没定，现在不限。</td></tr>
 <tr><td>防封规则</td><td><span class="chip part">机制已做，参数待定</span></td><td>回复前按字数等 2–6 秒左右；主动发的消息两条至少隔 30 秒、每小时最多 20 条、23 点到 8 点不发。都是先定的保守默认值。</td></tr>
 <tr><td>调用 Claude</td><td><span class="chip done">已跑通</span></td><td>10-25 本机调用 <code>claude -p</code> 已能回复消息。</td></tr>
