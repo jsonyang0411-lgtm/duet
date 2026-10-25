@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>达人寄样流程现状</title>
+<style>
+:root {
+  --bg: #f6f5f1; --card: #ffffff; --ink: #1d1d1b; --muted: #6b6a64; --line: #d9d6cc;
+  --done: #1f7a4d; --done-bg: #e3f3ea;
+  --part: #9a6200; --part-bg: #fbf0d9;
+  --todo: #b3261e; --todo-bg: #fbe5e3;
+  --ext: #2457a6; --ext-bg: #e3ecf9;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161614; --card: #22221f; --ink: #ecebe6; --muted: #a09e95; --line: #3a3934;
+    --done: #6fd39f; --done-bg: #1c3528; --part: #f0c36a; --part-bg: #3a2f17;
+    --todo: #f29b93; --todo-bg: #3d1f1c; --ext: #8db4f2; --ext-bg: #1c2a40;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #161614; --card: #22221f; --ink: #ecebe6; --muted: #a09e95; --line: #3a3934;
+  --done: #6fd39f; --done-bg: #1c3528; --part: #f0c36a; --part-bg: #3a2f17;
+  --todo: #f29b93; --todo-bg: #3d1f1c; --ext: #8db4f2; --ext-bg: #1c2a40;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+main { max-width: 1080px; margin: 0 auto; padding: 32px 16px 64px; }
+h1 { font-size: 26px; margin: 0 0 4px; }
+.sub { color: var(--muted); margin: 0 0 20px; }
+.legend { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px;
+  font-size: 13px; font-weight: 600; white-space: nowrap; }
+.done { color: var(--done); background: var(--done-bg); }
+.part { color: var(--part); background: var(--part-bg); }
+.todo { color: var(--todo); background: var(--todo-bg); }
+.ext  { color: var(--ext);  background: var(--ext-bg); }
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 28px; }
+.summary div { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.summary b { display: block; font-size: 14px; margin-bottom: 4px; }
+.summary p { margin: 0; color: var(--muted); font-size: 13px; }
+
+.flow { position: relative; }
+.step { display: grid; grid-template-columns: 56px 1fr; gap: 14px; }
+.rail { display: flex; flex-direction: column; align-items: center; }
+.num { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center;
+  font-weight: 700; border: 2px solid var(--line); background: var(--card); flex: none; }
+.num.done { border-color: var(--done); } .num.part { border-color: var(--part); }
+.num.todo { border-color: var(--todo); border-style: dashed; }
+.rail::after { content: ""; flex: 1; width: 2px; background: var(--line); margin: 4px 0; min-height: 18px; }
+.step:last-child .rail::after { display: none; }
+.body { padding-bottom: 22px; min-width: 0; }
+.body h2 { font-size: 17px; margin: 7px 0 2px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.where { font-size: 12px; color: var(--muted); font-weight: 400; }
+.nodes { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-top: 10px; }
+.node { background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--line);
+  border-radius: 8px; padding: 10px 12px; }
+.node.done { border-left-color: var(--done); background: var(--card); }
+.node.part { border-left-color: var(--part); background: var(--card); }
+.node.todo { border-left-color: var(--todo); border-style: dashed; border-left-style: solid; background: var(--card); }
+.node.ext  { border-left-color: var(--ext); background: var(--card); }
+.node .t { font-weight: 600; display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
+.node .t .chip { font-size: 11px; padding: 0 8px; }
+.node p { margin: 4px 0 0; font-size: 13px; color: var(--muted); }
+.node code { font-size: 12px; background: var(--bg); padding: 0 4px; border-radius: 4px; word-break: break-all; }
+.branch { font-size: 12px; color: var(--muted); margin: 10px 0 0; }
+.branch b { color: var(--ink); }
+
+section.side { margin-top: 30px; }
+section.side h2 { font-size: 18px; }
+table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; font-size: 14px; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 13px; color: var(--muted); font-weight: 600; }
+tr:last-child td { border-bottom: none; }
+.tablewrap { overflow-x: auto; }
+footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+<h1>达人寄样流程现状</h1>
+<p class="sub">从达人发来消息到发货、跟进的每一步，以及每一步做到了什么程度。依据：仓库代码 <code>7f65470</code> 和 handoff.md v15，2026-10-25。</p>
+
+<div class="legend">
+  <span class="chip done">● 已实现（有测试）</span>
+  <span class="chip part">● 部分实现 / 只有模拟</span>
+  <span class="chip todo">● 未实现</span>
+  <span class="chip ext">● 等外部（账号、同事、真机）</span>
+</div>
+
+<div class="summary">
+  <div><b>能跑通的</b><p>在模拟模式下，从"达人说要样品"到"运营批准、生成运单号和要发给达人的消息"已经全程跑通。状态、审批记录都存进了数据库，每张单只会执行一次。</p></div>
+  <div><b>卡在外部的</b><p>聚水潭的真实接口、小红书 CLI、Windows 真机验证。这几项不到位，就只能用假数据跑。</p></div>
+  <div><b>还没做的</b><p>Win → Mac 转发、Claude 理解消息和闲聊、佣金谈判、自动给达人发消息、查物流、发布跟进。</p></div>
+</div>
+
+<div class="flow">
+
+<!-- 1 -->
+<div class="step"><div class="rail"><span class="num part">1</span></div><div class="body">
+  <h2>收到达人的微信私聊 <span class="where">Windows（同事的电脑）</span></h2>
+  <div class="nodes">
+    <div class="node ext"><div class="t">Windows 后端读私聊<span class="chip ext">等真机</span></div>
+      <p><code>wcdb_backend.py</code> 能读私聊，但要设 <code>PRIVATE_CHAT_ENABLED=true</code>。<code>PRIVATE_CHATS=*</code> 只读 wxid_ 开头的账号，老式微信号要单独列出来。达人流程还没在真机上跑过。</p></div>
+    <div class="node todo"><div class="t">Mac 后端读私聊<span class="chip todo">未实现</span></div>
+      <p>B25：Mac 后端只读群聊。B26：这台 Mac 没有数据库密钥。微信改在 Windows 上跑，所以暂时不修。</p></div>
+    <div class="node todo"><div class="t">Windows → Mac 转发<span class="chip todo">未实现</span></div>
+      <p>老板的方案是把消息交给 Mac 上的 Claude Code，需要在两台机器之间搭一条通道。另一种做法是在 Windows 上直接运行 <code>claude -p</code>，就不用搭。</p></div>
+  </div>
+</div></div>
+
+<!-- 2 -->
+<div class="step"><div class="rail"><span class="num done">2</span></div><div class="body">
+  <h2>判断是不是达人</h2>
+  <div class="nodes">
+    <div class="node done"><div class="t">达人名单（白名单）<span class="chip done">已实现</span></div>
+      <p>名单存在数据库里，在控制台「达人名单」页添加或停用。按 chat_id 判断，不看昵称（B10、B11）。</p></div>
+    <div class="node done"><div class="t">不是达人 → 普通聊天<span class="chip done">已实现</span></div>
+      <p>D13：名单以外的私聊照常交给原来的聊天模型回复（这是公司号）。</p></div>
+  </div>
+</div></div>
+
+<!-- 3 -->
+<div class="step"><div class="rail"><span class="num part">3</span></div><div class="body">
+  <h2>理解达人想干什么 <span class="where">现在用规则，计划改用 Claude</span></h2>
+  <div class="nodes">
+    <div class="node done"><div class="t">规则识别<span class="chip done">已实现</span></div>
+      <p><code>extract.py</code> 用关键词和正则识别要样品的意图，提取商品、姓名、电话、地址和小红书账号。</p></div>
+    <div class="node todo"><div class="t">用 Claude 理解消息<span class="chip todo">未实现</span></div>
+      <p>计划用 <code>claude -p</code> 或 Agent SDK，配 API key。只开放我们自己做的工具，Claude Code 自带的工具全部关掉。</p></div>
+  </div>
+  <p class="branch"><b>分支：不是要样品的消息</b>（闲聊、问发货、谈佣金）↓</p>
+  <div class="nodes">
+    <div class="node done"><div class="t">转人工 + 回一句中性的话<span class="chip done">已实现</span></div>
+      <p>B20：消息记进控制台「待处理」，机器人回"我们核对一下再回复"，同一位达人 6 小时内最多回一次。</p></div>
+    <div class="node todo"><div class="t">闲聊由大模型回复<span class="chip todo">未实现</span></div>
+      <p>避免一直用固定话术，回复范围受知识库限制。业务资料（品牌、产品、寄样规则）还需要你提供。</p></div>
+    <div class="node todo"><div class="t">谈佣金写死在代码里<span class="chip todo">未实现</span></div>
+      <p>达人要求提高佣金时由代码回复固定的话，不交给模型判断。话术还需要你定。</p></div>
+  </div>
+</div></div>
+
+<!-- 4 -->
+<div class="step"><div class="rail"><span class="num done">4</span></div><div class="body">
+  <h2>补齐申请信息（多轮对话）</h2>
+  <div class="nodes">
+    <div class="node done"><div class="t">申请草稿<span class="chip done">已实现</span></div>
+      <p>缺什么就问什么：先问要哪款商品，再问收件人、电话、地址，最后问小红书主页。草稿存在数据库里，重启不会丢；放太久没动静的会作废。</p></div>
+    <div class="node done"><div class="t">后补小红书账号<span class="chip done">已实现</span></div>
+      <p>审批单已经提交后达人才发来主页的，会自动补到那张待审批单上。</p></div>
+  </div>
+</div></div>
+
+<!-- 5 -->
+<div class="step"><div class="rail"><span class="num part">5</span></div><div class="body">
+  <h2>查库存 <span class="where">聚水潭</span></h2>
+  <div class="nodes">
+    <div class="node done"><div class="t">查库存的流程<span class="chip done">已实现</span></div>
+      <p>换了商品就重新查；查询出错时转人工，不会乱回复。</p></div>
+    <div class="node ext"><div class="t">聚水潭真实接口<span class="chip ext">等账号</span></div>
+      <p><code>jst_erp.py</code> 目前只能在模拟模式下用；不开模拟时直接报错，不会假装成功（B6）。第 5 阶段要拿到真实账号再接。</p></div>
+    <div class="node done"><div class="t">缺货 → 告诉达人 + 通知运营<span class="chip done">已实现</span></div>
+      <p>B21：告诉达人暂时没货、可以换别的产品，同时在控制台「待处理」里提醒运营。</p></div>
+  </div>
+</div></div>
+
+<!-- 6 -->
+<div class="step"><div class="rail"><span class="num part">6</span></div><div class="body">
+  <h2>查达人资质 <span class="where">小红书 CLI</span></h2>
+  <div class="nodes">
+    <div class="node done"><div class="t">资质只标注、不自动拒绝<span class="chip done">已实现</span></div>
+      <p>D4、D12：门槛是粉丝 ≥ 1 万且最近点赞 ≥ 1000，只在审批单上标出来，由运营决定。拿不到数据就写"未知"，不编数字（B8）。</p></div>
+    <div class="node ext"><div class="t">小红书 CLI<span class="chip ext">等同事</span></div>
+      <p>适配器按约定的命令格式写好了，CLI 本身由同事开发、还没交付。</p></div>
+  </div>
+</div></div>
+
+<!-- 7 -->
+<div class="step"><div class="rail"><span class="num done">7</span></div><div class="body">
+  <h2>生成审批单</h2>
+  <div class="nodes">
+    <div class="node done"><div class="t">审批单入库<span class="chip done">已实现</span></div>
+      <p>写明商品、库存、成本、佣金、收件信息、资质和不可撤销的后果。72 小时有效（D8）。回复达人"已提交审核"，不承诺发货时间（B1）。</p></div>
+  </div>
+</div></div>
+
+<!-- 8 -->
+<div class="step"><div class="rail"><span class="num done">8</span></div><div class="body">
+  <h2>运营审批 <span class="where">控制台「达人审批」页</span></h2>
+  <div class="nodes">
+    <div class="node done"><div class="t">审批页<span class="chip done">已实现</span></div>
+      <p>可以通过或驳回，可以补填、更正小红书账号和佣金（上限 25%，写死在代码里）。左栏角标显示有几件事等着处理，还有「今日概览」。</p></div>
+    <div class="node done"><div class="t">保证只执行一次<span class="chip done">已实现</span></div>
+      <p>用条件更新防止重复执行；批准时重新查一次库存；驳回或过期的单不能再执行（B2、B22）。</p></div>
+    <div class="node done"><div class="t">驳回 → 婉拒话术<span class="chip done">已实现</span></div>
+      <p>生成礼貌的婉拒消息，由运营复制后手动发送（按方案，驳回一直走手动）。</p></div>
+  </div>
+</div></div>
+
+<!-- 9 -->
+<div class="step"><div class="rail"><span class="num part">9</span></div><div class="body">
+  <h2>执行：建单 → 绑佣金 <span class="where">批准后由代码执行，不交给 Claude</span></h2>
+  <div class="nodes">
+    <div class="node part"><div class="t">聚水潭建出库单<span class="chip part">只有模拟</span></div>
+      <p>执行顺序和失败处理都做好了，模拟模式会返回一个假的单号和运单号。<b>要核实：</b>真实的聚水潭建单时大概率还没有运单号，要等仓库打单后才有。</p></div>
+    <div class="node part"><div class="t">小红书绑专属佣金<span class="chip part">只有模拟</span></div>
+      <p>建单成功后才绑佣金（B3），审批单号作为防重复的标识传过去。等 CLI 交付。</p></div>
+    <div class="node todo"><div class="t">生成商品推广链接<span class="chip todo">未实现</span></div>
+      <p>主流程里写了这一步，代码里还没有。</p></div>
+    <div class="node done"><div class="t">执行失败 → 标记为失败<span class="chip done">已实现</span></div>
+      <p>保留已经建好的单号，提示运营去人工核对。</p></div>
+    <div class="node todo"><div class="t">执行到一半中断<span class="chip todo">未实现</span></div>
+      <p>B23：断电或强制退出时，审批单会一直停在"执行中"，控制台没有处理的入口。</p></div>
+  </div>
+</div></div>
+
+<!-- 10 -->
+<div class="step"><div class="rail"><span class="num part">10</span></div><div class="body">
+  <h2>通知达人"已安排发货"</h2>
+  <div class="nodes">
+    <div class="node done"><div class="t">生成要发的消息<span class="chip done">已实现</span></div>
+      <p>审批卡上显示消息原文：批准前是预览，执行后带上运单号。目前由运营复制后手动发送（D9）。</p></div>
+    <div class="node todo"><div class="t">自动发送<span class="chip todo">未实现</span></div>
+      <p>B15，方案已经定了：机器人在运行就自动发，没在运行就退回手动复制。</p></div>
+  </div>
+</div></div>
+
+<!-- 11 -->
+<div class="step"><div class="rail"><span class="num todo">11</span></div><div class="body">
+  <h2>仓库打包发货 → 达人问物流</h2>
+  <div class="nodes">
+    <div class="node ext"><div class="t">打包、发货<span class="chip ext">仓库 / 聚水潭</span></div>
+      <p>不归我们的代码管，由仓库在聚水潭里完成。</p></div>
+    <div class="node todo"><div class="t">查物流工具<span class="chip todo">未实现</span></div>
+      <p>达人问"到哪了"时由 Claude 调用这个工具来回答。要先确认聚水潭能不能返回物流轨迹，不能的话就接快递100之类的服务。</p></div>
+    <div class="node todo"><div class="t">主动跟进物流<span class="chip todo">未实现</span></div>
+      <p>B13 的物流跟进部分：定时任务从来没启动过，等聚水潭接入后再做。</p></div>
+  </div>
+</div></div>
+
+<!-- 12 -->
+<div class="step"><div class="rail"><span class="num todo">12</span></div><div class="body">
+  <h2>签收后跟进发布</h2>
+  <div class="nodes">
+    <div class="node todo"><div class="t">提醒达人发笔记、记录发布情况<span class="chip todo">未实现</span></div>
+      <p>主流程第 7 步的一部分，还没设计。</p></div>
+  </div>
+</div></div>
+
+</div>
+
+<section class="side">
+<h2>贯穿全流程的保障</h2>
+<div class="tablewrap"><table>
+<tr><th>事项</th><th>状态</th><th>说明</th></tr>
+<tr><td>数据持久化</td><td><span class="chip done">已实现</span></td><td>名单、草稿、审批单、操作记录和待处理事项共 5 张表，和机器人共用 <code>data/messages.db</code>。</td></tr>
+<tr><td>个人信息到期清除</td><td><span class="chip done">已实现</span></td><td>D10：审批单处理完 90 天后，清除姓名、电话、地址和原话记录。</td></tr>
+<tr><td>日志打码</td><td><span class="chip part">部分</span></td><td>B14：达人模块已经不打印个人信息，全项目还没统一检查。</td></tr>
+<tr><td>寄样上限</td><td><span class="chip todo">待拍板</span></td><td>D5：每人、每天能寄多少还没定。</td></tr>
+<tr><td>防封规则</td><td><span class="chip todo">待拍板</span></td><td>发消息的频率和间隔还没定。自动发送和大模型回复上线前要先定下来。</td></tr>
+<tr><td>Claude 的登录方式</td><td><span class="chip todo">待配置</span></td><td>要配 API key，不能用个人订阅。</td></tr>
+</table></div>
+</section>
+
+<section class="side">
+<h2>建议的下一步</h2>
+<div class="tablewrap"><table>
+<tr><th>顺序</th><th>做什么</th><th>依赖</th></tr>
+<tr><td>1</td><td>把查库存、提交审批单、查物流做成工具（MCP），供 Claude 调用</td><td>不依赖外部，可以先用模拟模式</td></tr>
+<tr><td>2</td><td>谈佣金写死在代码里；加一道检查，拦住带承诺的回复</td><td>佣金话术需要你提供</td></tr>
+<tr><td>3</td><td>接入 <code>claude -p</code> 或 Agent SDK，闲聊和理解消息交给 Claude</td><td>API key、业务资料、确定跑在 Mac 还是 Windows 上</td></tr>
+<tr><td>4</td><td>自动给达人发确认消息（B15）</td><td>防封规则</td></tr>
+<tr><td>5</td><td>接聚水潭真实接口、小红书 CLI，在 Windows 真机上验证</td><td>账号、同事交付、同事的电脑</td></tr>
+</table></div>
+</section>
+
+<footer>本地文件，不上传。要更新时，对照 handoff.md 第 3、5 节改这一页。</footer>
+</main>
+</body>
+</html>
