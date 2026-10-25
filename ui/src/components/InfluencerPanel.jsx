@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Handshake, Copy, ArrowClockwise, CheckCircle, XCircle, UserPlus, PencilSimple } from '@phosphor-icons/react'
+import { Handshake, Copy, ArrowClockwise, CheckCircle, XCircle, UserPlus, PencilSimple, ChatCircleDots } from '@phosphor-icons/react'
 import { get, post } from '../api'
 import { useToast } from '../store/toast'
 import { PageHead, Card, Field, TextInput, TextArea, NumberInput, Switch, Seg, Empty, Note, Banner, Dialog, Confirm } from './ui'
 
 // 达人审批（src/influencer/，说明见 handoff.md）：审批单、达人名单两个子页。
 // 「通过」会真的在聚水潭建出库单、在小红书绑佣金，撤不回，所以执行前要再确认一次。
-// 发给达人的消息先由运营复制后在微信里手动发送（Q2）。
+// 发给达人的消息先由运营复制后在微信里手动发送（Q2）。提醒只做在控制台里（D14）：
+// 左栏「达人审批」上的数字 = 待审批 + 待处理，「待处理」子页列出要人工回复的达人消息和缺货。
 
 const FILTERS = [
   { value: 'pending', label: '待审批' },
@@ -50,7 +51,27 @@ async function copyText(text) {
 }
 
 export default function InfluencerPanel({ sub }) {
-  return sub === 'contacts' ? <ContactsPage /> : <ApprovalsPage />
+  if (sub === 'contacts') return <ContactsPage />
+  if (sub === 'inbox') return <InboxPage />
+  return <ApprovalsPage />
+}
+
+/** 左栏角标用：待审批 + 待处理的数量，每 30 秒问一次。 */
+export function useInfluencerAttention() {
+  const [count, setCount] = useState(0)
+  useEffect(() => {
+    let alive = true
+    const ask = async () => {
+      try {
+        const d = await get('/api/influencer/counts')
+        if (alive) setCount((d.pending || 0) + (d.inbox || 0))
+      } catch { /* 控制台离线时不显示 */ }
+    }
+    ask()
+    const timer = setInterval(ask, 30000)
+    return () => { alive = false; clearInterval(timer) }
+  }, [])
+  return count
 }
 
 function useInfluencerStatus() {
@@ -107,6 +128,9 @@ function ApprovalsPage() {
           actions={<button type="button" className="btn sm" onClick={refresh}><ArrowClockwise />刷新</button>}
         />
         <StatusNotes status={status} />
+        {status?.inbox > 0 && (
+          <Note kind="warn">有 {status.inbox} 条待处理事项（达人发来的消息、缺货），<a className="link" href="#/influencer/inbox">去看看</a>。</Note>
+        )}
         <div className="filters">
           <Seg small label="状态" value={filter} onChange={setFilter} options={tabs} />
         </div>
@@ -311,6 +335,81 @@ function NoticeBox({ status, text }) {
         {!preview && <button type="button" className="btn sm" onClick={copy}><Copy />复制</button>}
       </div>
       <p className="notice-text">{text}</p>
+    </div>
+  )
+}
+
+// ── 待处理 ──────────────────────────────────────────────────────────
+
+const INBOX_KIND = { message: ['达人消息', 'cy'], out_of_stock: ['缺货', 'warn'] }
+
+function InboxPage() {
+  const toast = useToast()
+  const [handled, setHandled] = useState(false)
+  const [items, setItems] = useState(null)
+  const [err, setErr] = useState('')
+  const load = useCallback(async () => {
+    try {
+      const d = await get('/api/influencer/inbox', { handled: handled ? 1 : 0 })
+      setItems(d.items || [])
+      setErr('')
+    } catch (e) { setErr(e.message) }
+  }, [handled])
+  useEffect(() => { load() }, [load])
+  const done = async (id) => {
+    try {
+      await post('/api/influencer/inbox/action', { id })
+      toast.ok('已标为处理完')
+    } catch (e) { toast.err(e.message) }
+    load()
+  }
+  return (
+    <div className="main-scroll scroll">
+      <div className="page">
+        <PageHead
+          no="02" en="CREATOR" title="待处理"
+          sub="名单里的达人发来的不是索样的消息（机器人不替你回答），以及达人申请时缺货。在微信里处理完，再点「已处理」"
+          actions={<button type="button" className="btn sm" onClick={load}><ArrowClockwise />刷新</button>}
+        />
+        <div className="filters">
+          <Seg small label="状态" value={handled ? 'done' : 'open'} onChange={(v) => setHandled(v === 'done')}
+            options={[{ value: 'open', label: '待处理' }, { value: 'done', label: '已处理' }]} />
+        </div>
+        {err && <Note kind="need">读取失败：{err}</Note>}
+        {items && !items.length && !err && (
+          <Empty icon={ChatCircleDots} title={handled ? '还没有处理过的事项' : '没有待处理的事项'}>
+            {handled ? '' : '达人发来不是索样的消息、或者申请时缺货，会出现在这里。'}
+          </Empty>
+        )}
+        {items && items.length > 0 && (
+          <div className="todo-list" style={{ marginTop: 12 }}>
+            {items.map((it) => {
+              const [label, kind] = INBOX_KIND[it.kind] || [it.kind, '']
+              return (
+                <div key={it.id} className={`todo-row${handled ? ' s-completed' : ''}`} aria-label={`待处理事项 ${it.id}`}>
+                  <span className="td-no num">#{it.id}</span>
+                  <div className="td-main">
+                    <div className="row wrap" style={{ gap: 6 }}>
+                      <span className={`tag ${kind}`}>{label}</span>
+                      <b>{it.display_name || it.chat_id}</b>
+                      {it.display_name && <span className="mono dim" style={{ fontSize: 'var(--fs-xs)' }}>{it.chat_id}</span>}
+                    </div>
+                    <p className="td-text">{it.content}</p>
+                    <div className="td-meta">
+                      <span>{when(it.created_at)}</span>
+                      {it.auto_replied && <span>机器人已回复："收到老师的消息啦，我们核对一下再回复"</span>}
+                      {it.handled_at && <span>处理于 {when(it.handled_at)}</span>}
+                    </div>
+                  </div>
+                  <div className="td-act">
+                    {!handled && <button type="button" className="btn sm" onClick={() => done(it.id)}><CheckCircle />已处理</button>}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
     </div>
   )
 }

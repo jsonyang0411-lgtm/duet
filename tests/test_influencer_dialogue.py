@@ -44,7 +44,9 @@ def test_an_abandoned_request_expires():
     handler = make_handler()
     say(handler, "想申请眼霜样品")
     age_draft(handler, INFLUENCER, 2 * 24 * 3600)
-    assert say(handler, "好的") is None
+    # 草稿作废后，"好的"不再接着追问收件信息，而是当成普通消息转给运营（B20）
+    assert say(handler, "好的") == HOLDING_REPLY
+    assert handler.store.get_draft(INFLUENCER) is None
 
 
 class PartlyOutOfStockERP(FakeERP):
@@ -97,3 +99,21 @@ def test_a_router_built_without_the_handler_never_opens_the_database(tmp_path, m
     router.handle(private_msg("m1", INFLUENCER, "小美", SAMPLE_REQUEST))
     assert not (tmp_path / "data" / "messages.db").exists()
     assert summarizer.chat_calls, "没挂达人模块时，私聊走原来的聊天逻辑"
+
+
+def test_small_talk_from_an_influencer_goes_to_the_operator_not_the_chat_model():
+    handler = make_handler()
+    router, summarizer = router_with(handler)
+    first = router.handle(private_msg("m1", INFLUENCER, "小美", "这款什么时候上新呀"))
+    second = router.handle(private_msg("m2", INFLUENCER, "小美", "还有别的颜色吗"))
+    assert first == HOLDING_REPLY
+    assert second is None, "同一位达人 6 小时内只回一次中性回复"
+    assert summarizer.chat_calls == [], "达人的消息不能交给聊天模型随口作答（B20）"
+    assert [i["content"] for i in handler.store.list_inbox()] == ["还有别的颜色吗", "这款什么时候上新呀"]
+
+
+def test_running_out_of_stock_is_put_in_front_of_the_operator():
+    handler = make_handler(PartlyOutOfStockERP())
+    say(handler, "想申请眼霜样品")
+    [item] = handler.store.list_inbox()
+    assert item["kind"] == "out_of_stock" and "眼霜" in item["content"]

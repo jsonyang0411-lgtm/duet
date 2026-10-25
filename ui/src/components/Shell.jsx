@@ -10,6 +10,7 @@ import { pageOfKey } from '../lib/schema'
 import { useTheme } from '../lib/theme'
 import { navigate } from '../lib/router'
 import { LogoGlyph, FigurePlaceholder } from './art'
+import { useInfluencerAttention } from './InfluencerPanel'
 
 export const NAV = [
   { id: 'status', label: '运行状态', en: 'STATUS', icon: Pulse },
@@ -32,6 +33,7 @@ export const NAV = [
     id: 'influencer', label: '达人审批', en: 'CREATOR', icon: Handshake,
     sub: [
       { id: 'approvals', label: '审批单' },
+      { id: 'inbox', label: '待处理' },
       { id: 'contacts', label: '达人名单' },
     ],
   },
@@ -92,6 +94,7 @@ function RunPill() {
 }
 
 export function Rail({ route }) {
+  const influencerCount = useInfluencerAttention()
   return (
     <nav className="rail" aria-label="控制台导航">
       <div className="rail-head">
@@ -113,6 +116,9 @@ export function Rail({ route }) {
               >
                 <Ico weight={active ? 'bold' : 'regular'} />
                 <span className="ni-label">{n.label}</span>
+                {n.id === 'influencer' && influencerCount > 0 && (
+                  <span className="ni-badge num" aria-label={`${influencerCount} 项等你处理`}>{influencerCount}</span>
+                )}
                 <span className="ni-en" aria-hidden="true">{n.en}</span>
               </button>
               {active && n.sub && (

@@ -377,9 +377,10 @@ class MessageRouter:
                 content=clean_content,
                 nickname=msg.get("sender_name", ""),
             )
-            if influencer_reply:
+            # None 表示不是达人；空字符串表示是达人、这次不回复，也不能再交给聊天模型（B20）
+            if influencer_reply is not None:
                 self._tracer.current().reason("influencer_business_intent")
-                return influencer_reply
+                return influencer_reply or None
 
         if clean_content in ("帮助", "help", "命令"):
             self._tracer.current().reason("help_command")

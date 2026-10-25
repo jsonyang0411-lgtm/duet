@@ -186,3 +186,17 @@ def test_abandoned_drafts_are_deleted():
     store.run_maintenance()
     assert store.get_draft("wxid_a") is None
     assert store.get_draft("wxid_b") is not None
+
+
+def test_inbox_items_are_handled_once_and_deleted_90_days_later():
+    store = InfluencerStore(":memory:")
+    store.save_contact("wxid_a", display_name="小美", source=SOURCE_CONSOLE)
+    item_id = store.add_inbox_item("wxid_a", "message", "什么时候发货", auto_replied=True)
+    [item] = store.list_inbox()
+    assert (item["display_name"], item["auto_replied"]) == ("小美", True)
+    assert store.count_open_inbox() == 1
+    assert store.mark_inbox_handled(item_id, source=SOURCE_CONSOLE) is True
+    assert store.mark_inbox_handled(item_id, source=SOURCE_CONSOLE) is False
+    assert store.count_open_inbox() == 0
+    store.run_maintenance(time.time() + PERSONAL_INFO_RETENTION_SECONDS + 60)
+    assert store.list_inbox(handled=True) == []

@@ -40,6 +40,7 @@ def seed(db_path):
                         qualification="达标", expires_at=NEXT_YEAR),
             source=SOURCE_BOT,
         )
+    store.add_inbox_item("wxid_mei", "message", "这款什么时候上新呀", auto_replied=True)
     return store
 
 
@@ -157,3 +158,14 @@ def test_adding_someone_already_on_the_list_keeps_what_was_filled_in(console, pa
     contact = console.store.get_contact("wxid_keep")
     assert contact["enabled"] is True
     assert (contact["display_name"], contact["xhs_account"]) == ("老朋友", "xhs_keep")
+
+
+def test_the_sidebar_shows_what_needs_attention_and_the_inbox_can_be_cleared(console, page):
+    page.goto(f"{console.base}/#/influencer/inbox")
+    page.locator(".ni-badge").wait_for()
+    [item] = console.store.list_inbox()
+    row = page.get_by_label(f"待处理事项 {item['id']}")
+    row.get_by_text("这款什么时候上新呀").wait_for()
+    row.get_by_role("button", name="已处理").click()
+    page.get_by_text("已标为处理完").wait_for()
+    assert console.store.list_inbox() == []

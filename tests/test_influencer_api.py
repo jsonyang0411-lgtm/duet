@@ -150,3 +150,30 @@ def test_another_website_cannot_approve(store, mock_mode):
 def test_an_unknown_influencer_path_is_not_found(store):
     status, data = call("/api/influencer/nope")
     assert status == 404 and data["ok"] is False
+
+
+def test_inbox_items_are_listed_counted_and_marked_handled(store):
+    item_id = store.add_inbox_item("wxid_a", "message", "什么时候发货")
+    _, status = call("/api/influencer/status")
+    assert status["inbox"] == 1
+    _, listed = call("/api/influencer/inbox")
+    assert [i["content"] for i in listed["items"]] == ["什么时候发货"]
+    _, done = call("/api/influencer/inbox/action", {"id": item_id})
+    assert done["ok"] is True
+    _, again = call("/api/influencer/inbox/action", {"id": item_id})
+    assert again["ok"] is False
+    assert call("/api/influencer/inbox")[1]["items"] == []
+    assert call("/api/influencer/inbox/action", method="GET")[0] == 405
+
+
+def test_the_sidebar_count_never_creates_the_database(tmp_path, monkeypatch):
+    db_path = tmp_path / "messages.db"
+    monkeypatch.setattr("src.web.server._influencer_db_path", lambda: str(db_path))
+    assert call("/api/influencer/counts")[1] == {"ok": True, "pending": 0, "inbox": 0}
+    assert not db_path.exists(), "角标每 30 秒问一次，不能顺手建库建表"
+
+
+def test_the_sidebar_count_adds_pending_approvals_and_inbox_items(store):
+    add_packet(store)
+    store.add_inbox_item("wxid_a", "message", "什么时候发货")
+    assert call("/api/influencer/counts")[1] == {"ok": True, "pending": 1, "inbox": 1}

@@ -213,7 +213,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `UI_DIR` | `Path` | `ui/dist/` | `src/web/server.py` | 前端静态文件目录 |
 | `WEBSOCKET_GUID` | `bytes` | `b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"` | `src/web/server.py` | WebSocket 协议 GUID |
 | `_LOOPBACK_HOSTS` | `frozenset[str]` | `{"127.0.0.1", "localhost", "::1"}` | `src/web/server.py` | 控制台只接受 Host / Origin 为本机的请求（防 DNS 重绑定、跨站调用） |
-| `_POST_ONLY_PATHS` | `frozenset[str]` | `/api/config`、`/api/config/import`、`/api/start`、`/api/stop`、`/api/onboarding/reset`、`/api/onboarding/step1..4`、`/api/sandbox/test`、`/api/todos/action`、`/api/voice/download-model`、`/api/wechat-data-dir/detect`、`/api/influencer/approvals/action`、`/api/influencer/contacts/action` | `src/web/server.py` | 会改状态/花钱的端点只认 POST；GET 一律 405（网页可以用 `<img>` 悄悄发 GET，且不带 Origin） |
+| `_POST_ONLY_PATHS` | `frozenset[str]` | `/api/config`、`/api/config/import`、`/api/start`、`/api/stop`、`/api/onboarding/reset`、`/api/onboarding/step1..4`、`/api/sandbox/test`、`/api/todos/action`、`/api/voice/download-model`、`/api/wechat-data-dir/detect`、`/api/influencer/approvals/action`、`/api/influencer/contacts/action`、`/api/influencer/inbox/action` | `src/web/server.py` | 会改状态/花钱的端点只认 POST；GET 一律 405（网页可以用 `<img>` 悄悄发 GET，且不带 Origin） |
 | `CONSOLIDATE_MSG_THRESHOLD` | `int` | `50` | `src/memory/consolidator.py` | 触发记忆合并的消息数阈值 |
 | `CONSOLIDATE_TIME_THRESHOLD_SEC` | `int` | `3600` (1小时) | `src/memory/consolidator.py` | 触发记忆合并的时间阈值 |
 | `MAX_NEW_MSGS_PER_CONSOLIDATION` | `int` | `400` | `src/memory/consolidator.py` | 每次合并最多处理的消息数 |
@@ -744,7 +744,7 @@ todo_delete_keywords: list[str] = [
 | `_UIHandler._request_origin_ok()` | 绑定本机时，`Host` 或 `Origin` 的主机名不是本机即拒绝（DNS 重绑定 / 其他网站调用）；没有 `Origin`（页面自身导航、curl）放行；用户把控制台绑到非本机地址时不检查 | 无 | `bool` |
 | `_UIHandler._method_not_allowed()` | 回 405 JSON `{"ok": false, "error": "Method not allowed"}`；`do_POST` 对未知路径、`do_GET` 对 `_POST_ONLY_PATHS` 的 GET 都用它 | 无 | `None` |
 | `_UIHandler._forbid_cross_origin()` | 回 403 JSON `{"ok": false, "error": "Forbidden: cross-origin request rejected"}` | 无 | `None` |
-| `_UIHandler._handle_influencer()` | `/api/influencer/*`（控制台「达人审批」页）：POST 时读 JSON 请求体，连同路径、查询参数和 `InfluencerStore(_influencer_db_path())` 一起交给 `src/influencer/console.handle()`，结果用 `send_json` 返回；出错回 `{ok:false, error}`；路径不认识回 404 JSON。具体行为见 `handoff.md`（达人模块不写入本手册） | 无 | `None` |
+| `_UIHandler._handle_influencer()` | `/api/influencer/*`（控制台「达人审批」页）：POST 时读 JSON 请求体，连同路径、查询参数和 `InfluencerStore(_influencer_db_path())` 一起交给 `src/influencer/console.handle()`，结果用 `send_json` 返回；出错回 `{ok:false, error}`；路径不认识回 404 JSON；`/api/influencer/counts` 不构造 store，直接调 `console.attention_counts()` 只读计数。具体行为见 `handoff.md`（达人模块不写入本手册） | 无 | `None` |
 | `_UIHandler._handle_advanced()` | `GET/POST /api/advanced`：GET 返回 `advanced_config.describe()` 的分组（密钥打码）和被 `.env.local` 覆盖的键；POST `{values:{KEY: 值}}` 先逐项 `check_value`、再合并后跑 `_validate_config`（`validate_updates`），全部合法才用 `_write_env_updates` 写共享 .env 并同步 `os.environ`；打码的密钥保留原值 | 无 | `None` |
 | `_UIHandler._send_cors_headers(preflight=False)` | 回显已通过校验的 `Origin`（带 `Vary: Origin`），预检时附 Methods/Headers/Max-Age；不再返回 `Access-Control-Allow-Origin: *` | `preflight: bool` | `None` |
 
@@ -768,7 +768,7 @@ todo_delete_keywords: list[str] = [
 | 文件 | 组件 | 描述 |
 |---|---|---|
 | `App.jsx` | `App`、`Console`、`Splash` | 问 `/api/onboarding/status` 决定进引导还是控制台；控制台 = 顶栏 + 左栏 + 页面 + 保存条 |
-| `Shell.jsx` | `TopBar`、`Rail`、`Dock`、`SaveBar`、`NAV` | 深色顶栏（运行状态胶囊带启动/停止、主题切换）；左栏导航（「系统配置」「达人审批」带子页）+ 左下角助手小窗（立绘待定，剪影占位，台词来自运行状态）；配置有改动时的底部保存条（提交完整配置，可「保存并重启」） |
+| `Shell.jsx` | `TopBar`、`Rail`、`Dock`、`SaveBar`、`NAV` | 深色顶栏（运行状态胶囊带启动/停止、主题切换）；左栏导航（「系统配置」「达人审批」带子页；「达人审批」上的角标每 30 秒问一次 `/api/influencer/counts`）+ 左下角助手小窗（立绘待定，剪影占位，台词来自运行状态）；配置有改动时的底部保存条（提交完整配置，可「保存并重启」） |
 | `ui.jsx` / `cfg.jsx` / `art.jsx` | 通用组件 / 绑定配置草稿的表单控件 / Logo 与剪影 | 斜切卡片、分段、开关、词条、密钥框（已设置时只显示尾号）、对话框、确认框 |
 | `Dashboard.jsx` | `Dashboard`、`KeyCard`、`ChecksCard`、`RecentDecisions` | 运行状态：票根式主卡、密钥缺失时重新获取、检查与环境诊断、最近的判断 |
 | `DecisionsPanel.jsx` | `DecisionsPanel` | 回复记录（`GET /api/decisions`）：筛选 + 右栏判断过程 |
@@ -776,7 +776,7 @@ todo_delete_keywords: list[str] = [
 | `ModulesPanel.jsx` | `ModulesPanel`、`LotsEditor`、`WelcomeEditor` | 功能模块 11 格 + 右栏详情；签文和欢迎模板各自保存 |
 | `AdvancedPanel.jsx` | `AdvancedPanel` | 高级开关（`GET/POST /api/advanced`），按服务器给的白名单渲染，自己的保存条 |
 | `NicknameEditor.jsx` / `TodoManager.jsx` / `LogViewer.jsx` | 同名 | 群友昵称（离开输入框即保存）/ 群聊待办管理（批量清空按群、需确认）/ 运行日志（深色终端） |
-| `InfluencerPanel.jsx` | `InfluencerPanel`、`ApprovalsPage`、`ApprovalCard`、`NoticeBox`、`ContactsPage`、`EditContact` | 达人审批（`/api/influencer/*`，路由 `#/influencer/approvals`、`#/influencer/contacts`）：模拟模式横幅和聚水潭/小红书 CLI 状态；按状态筛选的审批卡（可填小红书账号、调低佣金，通过前再确认一次，驳回填原因，复制要发给达人的消息）；达人名单（添加、启用/停用、编辑，从最近私聊里挑选）。业务说明见 `handoff.md` |
+| `InfluencerPanel.jsx` | `InfluencerPanel`、`useInfluencerAttention`、`ApprovalsPage`、`ApprovalCard`、`NoticeBox`、`InboxPage`、`ContactsPage`、`EditContact` | 达人审批（`/api/influencer/*`，路由 `#/influencer/approvals`、`#/influencer/inbox`、`#/influencer/contacts`；「待处理」列出要人工回复的达人消息和缺货）：模拟模式横幅和聚水潭/小红书 CLI 状态；按状态筛选的审批卡（可填小红书账号、调低佣金，通过前再确认一次，驳回填原因，复制要发给达人的消息）；达人名单（添加、启用/停用、编辑，从最近私聊里挑选）。业务说明见 `handoff.md` |
 | `Onboarding.jsx` | `Onboarding` | 首次设置 4 步；可手动填写密钥（`step2` 的 `wcdb_key`） |
 | `store/config.jsx` / `store/status.jsx` / `store/toast.jsx` | Provider + hook | 全站唯一的配置草稿（改动、校验、保存）/ 每 2 秒轮询 `/api/status` / 提示条 |
 
@@ -890,7 +890,7 @@ todo_delete_keywords: list[str] = [
 |---|---|---|
 | `context.Stop(value)` / `RouteContext` / `RouteStep(name, run, doc)` | 结束路由并给出返回值 / 步骤共享的上下文（路由器、消息、追踪、`raw`、`is_at`、`sticky_triggered`、`clean_content`、`reply`）/ 一个有名字的步骤 | — |
 | `context.AT_MENTION_MAX_AGE_SEC` 等三个年龄常量 | 300 秒：过旧的 @、欢迎、逐条监听消息当作启动时重放的历史（`src/router.py` 仍导出同名常量） | `int` |
-| `steps.ROUTE_STEPS` | 顺序：`self_message`（自己的消息）→ `persist`（入库，重复停止）→ `memory_hooks`（记忆任务/旧日记触发）→ `full_feed`（逐条监听的人设）→ `quoted_image` → `image_message` → `close_image_window` → `private_chat`（有 `_influencer_handler` 时，名单内达人的私聊先交给 `InfluencerBusinessHandler.handle_private_message(chat_id, ...)`，有回复就结束，原因码 `influencer_business_intent`）→ `quote_of_other_member` → `welcome` → `detect_trigger`（@/粘性/关键词/跟聊/点名，写 `route`）→ `mention_gate`（过旧的 @、去掉 @机器人、空 @ 变「在吗」）→ `feishu_export` → `help_command` → `fun_commands` → `admin_command` → `todo_command` → `chat_request` → `ambient`（主动发言，闸门关则沉默）→ `finish`（清洗并登记回复） | `tuple[RouteStep, ...]` |
+| `steps.ROUTE_STEPS` | 顺序：`self_message`（自己的消息）→ `persist`（入库，重复停止）→ `memory_hooks`（记忆任务/旧日记触发）→ `full_feed`（逐条监听的人设）→ `quoted_image` → `image_message` → `close_image_window` → `private_chat`（有 `_influencer_handler` 时，名单内达人的私聊先交给 `InfluencerBusinessHandler.handle_private_message(chat_id, ...)`；返回值不是 `None` 就结束（空字符串表示达人模块接手但不回复，不再交给聊天模型），原因码 `influencer_business_intent`）→ `quote_of_other_member` → `welcome` → `detect_trigger`（@/粘性/关键词/跟聊/点名，写 `route`）→ `mention_gate`（过旧的 @、去掉 @机器人、空 @ 变「在吗」）→ `feishu_export` → `help_command` → `fun_commands` → `admin_command` → `todo_command` → `chat_request` → `ambient`（主动发言，闸门关则沉默）→ `finish`（清洗并登记回复） | `tuple[RouteStep, ...]` |
 | `steps.self_message(ctx)` | 跳过机器人自己的消息：后端已按 wxid 核实过的消息（`_not_self_by_id`）直接放行；否则按显示名（等于或包含 `BOT_DISPLAY_NAME`）判断 | `Stop \| None` |
 | `steps.run_route(router, msg, trace, steps=ROUTE_STEPS)` | 依次执行，第一个返回 `Stop` 的结束，并 `trace.note(ended_by=<步骤名>)` | `str \| None` |
 | `steps.run_fun_command(router, msg, clean_content, trace)` | 抽签/塔罗，群聊 @ 路径和私聊共用；命中会替换此前命令产生的回复 | `(matched, reply)` |
@@ -1467,12 +1467,15 @@ MessageRouter.handle(msg) → [无 @mention]
 | `GET` | `/api/todos?status=active&chat_id=xxx` | 获取待办列表 | 无 |
 | `GET` | `/api/todos/counts?chat_id=xxx` | 获取各状态待办计数 | 无 |
 | `POST` | `/api/todos/action` | 执行待办操作 (complete/delete/restore/clear) | 无 |
-| `GET` | `/api/influencer/status` | 达人审批页的状态：模拟模式、聚水潭和小红书 CLI 能否使用、待审批数量、佣金默认值和上限 | 无 |
+| `GET` | `/api/influencer/status` | 达人审批页的状态：模拟模式、聚水潭和小红书 CLI 能否使用、待审批数量、待处理事项数量、佣金默认值和上限 | 无 |
 | `GET` | `/api/influencer/approvals?status=pending` | 审批单列表（pending/executing/fulfilled/rejected/failed/expired/all），带操作记录和要发给达人的消息 | 无 |
 | `POST` | `/api/influencer/approvals/action` | 通过或驳回审批单：`{packet_id, action: approve\|reject, xhs_account?, commission_rate?, reason?}`；通过时调用聚水潭和小红书 CLI | 无 |
 | `GET` | `/api/influencer/contacts` | 达人名单 | 无 |
 | `POST` | `/api/influencer/contacts/action` | 添加、修改、启用或停用达人：`{chat_id, display_name?, xhs_account?, note?, enabled?}` | 无 |
 | `GET` | `/api/influencer/recent-chats` | 最近私聊过的联系人（取自 messages 表，去掉群聊和系统会话），供挑选达人 | 无 |
+| `GET` | `/api/influencer/counts` | 左栏「达人审批」角标的数量（待审批 + 待处理）；只读打开数据库，不建表，表不存在时返回 0 | 无 |
+| `GET` | `/api/influencer/inbox?handled=0` | 待运营处理的事项：达人发来的非索样消息、达人申请时缺货；`handled=1` 看已处理的 | 无 |
+| `POST` | `/api/influencer/inbox/action` | 把一条待处理事项标为已处理：`{id}` | 无 |
 | `GET` | `/api/logs` | 获取最近 500 行日志 | 无 |
 | `POST` | `/api/sandbox/test` | AI 沙盒测试 (不发送)；用 `create_models(config).chat`，即按 `MODEL_ROUTE` 选机器人回复时用的模型 | 无 |
 | `GET` | `/api/advanced` | 高级开关白名单和当前值（密钥打码）、被 `.env.local` 覆盖的键 | 无 |
@@ -1955,7 +1958,7 @@ router.handle(msg)
 
 `decision_trace.jsonl` 每行字段：`ts, chat_id, group, message_id, sender_id, sender_name, is_group, msg_type, msg_ts, age_sec, flags{at,reply_to_bot,quoted,join}, content(截断), steps[{code,...}], outcome, reason, reply_chars, elapsed_ms, llm_calls[], llm_ms, extra{route,...}`。
 
-主要原因码：`self_message`、`duplicate_or_store_error`、`stale_mention_ignored`、`quote_of_other_member`、`welcome`、`full_feed_chat`、`full_feed_local_skip`、`quoted_image_question`、`image_followup`、`image_message_no_followup`、`private_chat`、`influencer_business_intent`（白名单内达人的索样私聊，由 `src/influencer/` 处理，说明见 `handoff.md`）、`feishu_export`、`help_command`、`lots_command`、`tarot_command`、`admin_command`、`todo_command`、`chat_request`、`ai_reply`、`ai_intentional_silence`、`ai_blank_*`、`ai_error`、`proactive_gate_closed`、`proactive_reply`、`proactive_model_silence`、`proactive_no_context`、`proactive_api_error`。`extra.route` ∈ at / sticky / keyword / followup / name_call / ambient。
+主要原因码：`self_message`、`duplicate_or_store_error`、`stale_mention_ignored`、`quote_of_other_member`、`welcome`、`full_feed_chat`、`full_feed_local_skip`、`quoted_image_question`、`image_followup`、`image_message_no_followup`、`private_chat`、`influencer_business_intent`（名单内达人的私聊，由 `src/influencer/` 处理：索样流程，或转运营人工回复；说明见 `handoff.md`）、`feishu_export`、`help_command`、`lots_command`、`tarot_command`、`admin_command`、`todo_command`、`chat_request`、`ai_reply`、`ai_intentional_silence`、`ai_blank_*`、`ai_error`、`proactive_gate_closed`、`proactive_reply`、`proactive_model_silence`、`proactive_no_context`、`proactive_api_error`。`extra.route` ∈ at / sticky / keyword / followup / name_call / ambient。
 
 `llm_calls.jsonl` 每行字段：`call_id, message_id, call(chat|proactive_chat), backend, model, system_prompt_sha, system_prompt, user_prompt, raw_reply, cleaned_reply, intentional_silence, error, latency_ms, max_chars, ambient, force_reply, mode`。
 

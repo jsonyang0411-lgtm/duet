@@ -101,7 +101,26 @@ CREATE TABLE IF NOT EXISTS influencer_events (
 
 CREATE INDEX IF NOT EXISTS idx_influencer_events_packet
     ON influencer_events(packet_id, created_at);
+
+-- 待运营处理的事项：达人发来的非索样消息（B20）、达人申请时缺货（B21）。
+-- 提醒只做在控制台里（D14）。处理完 90 天后删除，和收件信息的保留期一样（D10）
+CREATE TABLE IF NOT EXISTS influencer_inbox (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id      TEXT    NOT NULL,
+    kind         TEXT    NOT NULL,
+    content      TEXT    NOT NULL DEFAULT '',
+    auto_replied INTEGER NOT NULL DEFAULT 0,
+    created_at   REAL    NOT NULL,
+    handled_at   REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_influencer_inbox_open
+    ON influencer_inbox(handled_at, created_at DESC);
 """
+
+# 待处理事项的种类
+INBOX_MESSAGE = "message"
+INBOX_OUT_OF_STOCK = "out_of_stock"
 
 _PACKET_COLUMNS = tuple(f.name for f in fields(ApprovalActionPacket))
 _DRAFT_FIELDS = frozenset(f.name for f in fields(SampleRequestDraft))
@@ -450,10 +469,62 @@ class InfluencerStore:
             events[event.pop("packet_id")].append(event)
         return events
 
+    # ---- 待运营处理的事项 ----
+
+    def add_inbox_item(self, chat_id: str, kind: str, content: str, *, auto_replied: bool = False) -> int:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO influencer_inbox (chat_id, kind, content, auto_replied, created_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (chat_id, kind, content, int(auto_replied), time.time()),
+            )
+        return cur.lastrowid
+
+    def last_auto_reply_at(self, chat_id: str) -> Optional[float]:
+        """这位达人最近一次收到机器人中性回复的时间；没回过返回 None。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT MAX(created_at) AS t FROM influencer_inbox WHERE chat_id = ? AND auto_replied = 1",
+                (chat_id,),
+            ).fetchone()
+        return row["t"]
+
+    def list_inbox(self, *, handled: bool = False, limit: int = 200) -> List[Dict[str, Any]]:
+        """待处理（或已处理）的事项，从新到旧，带上名单里的显示名。"""
+        condition = "i.handled_at IS NOT NULL" if handled else "i.handled_at IS NULL"
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT i.*, COALESCE(c.display_name, '') AS display_name FROM influencer_inbox AS i"
+                " LEFT JOIN influencer_contacts AS c ON c.chat_id = i.chat_id"
+                f" WHERE {condition} ORDER BY i.created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        items = [dict(row) for row in rows]
+        for item in items:
+            item["auto_replied"] = bool(item["auto_replied"])
+        return items
+
+    def count_open_inbox(self) -> int:
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS n FROM influencer_inbox WHERE handled_at IS NULL").fetchone()
+        return row["n"]
+
+    def mark_inbox_handled(self, item_id: int, *, source: str) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE influencer_inbox SET handled_at = ? WHERE id = ? AND handled_at IS NULL",
+                (time.time(), item_id),
+            )
+            if cur.rowcount:
+                row = conn.execute("SELECT chat_id FROM influencer_inbox WHERE id = ?", (item_id,)).fetchone()
+                self._log(conn, "已人工处理", chat_id=row["chat_id"], detail=f"待处理事项 #{item_id}", source=source)
+        return cur.rowcount == 1
+
     # ---- 维护 ----
 
     def run_maintenance(self, now: Optional[float] = None) -> None:
-        """把超过有效期的待审批单标成过期；清除到期的个人信息（Q3）；删掉作废的草稿。
+        """把超过有效期的待审批单标成过期；清除到期的个人信息（Q3）；删掉作废的草稿，
+        以及处理完 90 天的待处理事项。
 
         机器人启动时、控制台每次列审批单时都会调用，所以不需要单独的定时任务。
         """
@@ -483,3 +554,7 @@ class InfluencerStore:
                 (now, *finished, now - PERSONAL_INFO_RETENTION_SECONDS),
             )
             conn.execute("DELETE FROM influencer_drafts WHERE updated_at < ?", (now - DRAFT_TTL_SECONDS,))
+            conn.execute(
+                "DELETE FROM influencer_inbox WHERE handled_at IS NOT NULL AND handled_at < ?",
+                (now - PERSONAL_INFO_RETENTION_SECONDS,),
+            )

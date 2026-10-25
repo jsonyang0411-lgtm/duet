@@ -21,12 +21,20 @@ from .jst_erp import JuShuiTanERPClient
 from .settings import (
     DEFAULT_COMMISSION_RATE,
     DRAFT_TTL_SECONDS,
+    HOLDING_REPLY_INTERVAL_SECONDS,
     MAX_COMMISSION_RATE,
     MIN_FOLLOWERS,
     MIN_RECENT_LIKES,
     influencer_chat_ids_from_env,
 )
-from .store import SOURCE_BOT, SOURCE_CONSOLE, SOURCE_ENV, InfluencerStore
+from .store import (
+    INBOX_MESSAGE,
+    INBOX_OUT_OF_STOCK,
+    SOURCE_BOT,
+    SOURCE_CONSOLE,
+    SOURCE_ENV,
+    InfluencerStore,
+)
 from .types import (
     RECIPIENT_FIELD_LABELS,
     STATUS_LABELS,
@@ -144,7 +152,8 @@ class InfluencerBusinessHandler:
     # ---- 对话 ----
 
     def handle_private_message(self, chat_id: str, content: str, nickname: str = "") -> Optional[str]:
-        """供同步的 router 调用。返回 None 表示这条私聊不归达人模块管。
+        """供同步的 router 调用。返回 None 表示这条私聊不归达人模块管；
+        返回空字符串表示归达人模块管、但这次不回复（router 不能再交给聊天模型）。
 
         router 在工作线程里运行，线程里没有事件循环，所以直接用 asyncio.run（B19）。
         """
@@ -199,7 +208,8 @@ class InfluencerBusinessHandler:
     ) -> Optional[str]:
         """处理达人的私信。chat_id 是私聊的稳定 ID，不能用昵称（B10）。
 
-        返回要回复的话；返回 None 表示这条消息不归达人模块管。
+        返回要回复的话；返回空字符串表示不回复；返回 None 表示这条消息不归达人模块管
+        （只有名单以外的人才会这样）。
         """
         if not self.is_influencer(chat_id):
             return None
@@ -211,7 +221,7 @@ class InfluencerBusinessHandler:
                 if await self._attach_xhs_account(chat_id, info.xhs_account):
                     return "收到老师的小红书主页啦，已经补充到申请里了~"
             if not (info.is_sample_request or (info.recipient_phone and info.shipping_address)):
-                return None
+                return self._hand_over_to_operator(chat_id, content)
             draft = SampleRequestDraft(chat_id=chat_id)
         draft.merge(info)
 
@@ -221,6 +231,14 @@ class InfluencerBusinessHandler:
             self.store.save_draft(draft)
             return reply
         return await self._submit_for_approval(chat_id, nickname, draft)
+
+    def _hand_over_to_operator(self, chat_id: str, content: str) -> str:
+        """达人发的不是索样（闲聊、问发货等）：不交给聊天模型随口作答（B20），记进控制台的
+        待处理事项，由运营人工回复。机器人先回一句不做任何承诺的话，一段时间内只回一次。"""
+        last = self.store.last_auto_reply_at(chat_id)
+        reply_now = last is None or time.time() - last > HOLDING_REPLY_INTERVAL_SECONDS
+        self.store.add_inbox_item(chat_id, INBOX_MESSAGE, content, auto_replied=reply_now)
+        return HOLDING_REPLY if reply_now else ""
 
     async def _ask_for_what_is_missing(self, draft: SampleRequestDraft) -> Optional[str]:
         """申请还缺东西就返回要追问的话；都齐了返回 None。"""
@@ -238,6 +256,10 @@ class InfluencerBusinessHandler:
                 return HOLDING_REPLY
             if not inventory.get("in_stock") or inventory.get("available_quantity", 0) <= 0:
                 logger.warning(f"[ERP库存不足] {draft.product}")
+                # 缺货要让运营知道（B21），提醒只做在控制台里（D14）
+                self.store.add_inbox_item(
+                    draft.chat_id, INBOX_OUT_OF_STOCK, f"想要【{draft.product}】的样品，但聚水潭显示没有库存",
+                )
                 product, draft.product = draft.product, ""  # 达人可以改选其他产品
                 draft.asked_for = ("product",)
                 return (

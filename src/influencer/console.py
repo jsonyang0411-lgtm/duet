@@ -1,4 +1,4 @@
-"""控制台「达人审批」页的接口（/api/influencer/*，第 6 项，B4）。
+"""控制台「达人审批」页的接口（/api/influencer/*，第 6 项 B4；待处理事项 B20、B21）。
 
 src/web/server.py 只负责把请求转到 handle()，这里读写数据库、执行审批，返回 JSON。
 控制台只监听本机，沿用 server.py 的 Origin 校验和"只收 POST"的路径白名单（D2）。
@@ -7,7 +7,10 @@ src/web/server.py 只负责把请求转到 handle()，这里读写数据库、�
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+import time
 from dataclasses import asdict, replace
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .handler import InfluencerBusinessHandler, approval_notice, rejection_notice
@@ -47,7 +50,35 @@ def handle(
         return save_contact(store, body)
     if path == "/api/influencer/recent-chats":
         return {"ok": True, "items": store.recent_private_chats()}
+    if path == "/api/influencer/inbox":
+        handled = query.get("handled", "") in ("1", "true")
+        return {"ok": True, "items": store.list_inbox(handled=handled)}
+    if path == "/api/influencer/inbox/action" and method == "POST":
+        return mark_inbox_handled(store, body)
     return None
+
+
+def attention_counts(db_path: str) -> Dict[str, Any]:
+    """左栏角标用的数量：待审批 + 待处理。每 30 秒问一次，所以只读打开数据库：
+    不建表、不碰聚水潭和小红书的适配器（模拟模式下它们每次构造都会写一条警告）。
+    数据库或表还不存在时（机器人没跑过）都算 0。"""
+    zeros = {"ok": True, "pending": 0, "inbox": 0}
+    path = Path(db_path)
+    if db_path == ":memory:" or not path.exists():
+        return zeros
+    try:
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+        try:
+            pending = conn.execute(
+                "SELECT COUNT(*) FROM influencer_approvals WHERE status = ? AND expires_at >= ?",
+                (GateStatus.PENDING.value, time.time()),
+            ).fetchone()[0]
+            inbox = conn.execute("SELECT COUNT(*) FROM influencer_inbox WHERE handled_at IS NULL").fetchone()[0]
+        finally:
+            conn.close()
+    except sqlite3.OperationalError:
+        return zeros
+    return {"ok": True, "pending": pending, "inbox": inbox}
 
 
 def status(store: InfluencerStore) -> Dict[str, Any]:
@@ -60,6 +91,7 @@ def status(store: InfluencerStore) -> Dict[str, Any]:
         "erp": JuShuiTanERPClient().readiness(),
         "xhs": XiaohongshuCLIClient().readiness(),
         "pending": counts.get(GateStatus.PENDING.value, 0),
+        "inbox": store.count_open_inbox(),
         "contacts": sum(1 for contact in store.list_contacts() if contact["enabled"]),
         "default_commission_rate": DEFAULT_COMMISSION_RATE,
         "max_commission_rate": MAX_COMMISSION_RATE,
@@ -130,6 +162,17 @@ def act_on_approval(store: InfluencerStore, body: Dict[str, Any]) -> Dict[str, A
     if packet is not None:
         response["packet"] = packet_json(packet, store.events_for([packet_id])[packet_id])
     return response
+
+
+def mark_inbox_handled(store: InfluencerStore, body: Dict[str, Any]) -> Dict[str, Any]:
+    """运营回复过达人、或者处理完缺货以后，把这条待处理事项标为已处理。"""
+    try:
+        item_id = int(body.get("id"))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "id 要是数字"}
+    if not store.mark_inbox_handled(item_id, source=SOURCE_CONSOLE):
+        return {"ok": False, "error": "这条事项不存在，或者已经处理过了"}
+    return {"ok": True}
 
 
 def save_contact(store: InfluencerStore, body: Dict[str, Any]) -> Dict[str, Any]:

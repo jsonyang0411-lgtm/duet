@@ -1224,6 +1224,7 @@ _POST_ONLY_PATHS = frozenset({
     "/api/sandbox/test", "/api/todos/action",
     "/api/voice/download-model", "/api/wechat-data-dir/detect",
     "/api/influencer/approvals/action", "/api/influencer/contacts/action",
+    "/api/influencer/inbox/action",
 })
 
 
@@ -1339,7 +1340,8 @@ class _UIHandler(SimpleHTTPRequestHandler):
                          "/api/voice/download-model",
                          "/api/wechat-data-dir/detect",
                          "/api/influencer/approvals/action",
-                         "/api/influencer/contacts/action"):
+                         "/api/influencer/contacts/action",
+                         "/api/influencer/inbox/action"):
             self.do_GET()
         else:
             self._method_not_allowed()
@@ -1361,6 +1363,10 @@ class _UIHandler(SimpleHTTPRequestHandler):
         from src.influencer.store import InfluencerStore
 
         path, _, query = self.path.partition("?")
+        if path == "/api/influencer/counts":
+            # 左栏每 30 秒问一次：只读，不建表（不然原项目的浏览器测试会在真实数据库里建表）
+            self.send_json(console.attention_counts(_influencer_db_path()))
+            return
         try:
             body = {}
             if self.command == "POST":
