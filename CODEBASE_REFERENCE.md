@@ -776,7 +776,7 @@ todo_delete_keywords: list[str] = [
 | `ModulesPanel.jsx` | `ModulesPanel`、`LotsEditor`、`WelcomeEditor` | 功能模块 11 格 + 右栏详情；签文和欢迎模板各自保存 |
 | `AdvancedPanel.jsx` | `AdvancedPanel` | 高级开关（`GET/POST /api/advanced`），按服务器给的白名单渲染，自己的保存条 |
 | `NicknameEditor.jsx` / `TodoManager.jsx` / `LogViewer.jsx` | 同名 | 群友昵称（离开输入框即保存）/ 群聊待办管理（批量清空按群、需确认）/ 运行日志（深色终端） |
-| `InfluencerPanel.jsx` | `InfluencerPanel`、`useInfluencerAttention`、`ApprovalsPage`、`ApprovalCard`、`NoticeBox`、`InboxPage`、`ContactsPage`、`EditContact` | 达人审批（`/api/influencer/*`，路由 `#/influencer/approvals`、`#/influencer/inbox`、`#/influencer/contacts`；「待处理」列出要人工回复的达人消息和缺货）：模拟模式横幅和聚水潭/小红书 CLI 状态；按状态筛选的审批卡（可填小红书账号、调低佣金，通过前再确认一次，驳回填原因，复制要发给达人的消息）；达人名单（添加、启用/停用、编辑，从最近私聊里挑选）。业务说明见 `handoff.md` |
+| `InfluencerPanel.jsx` | `InfluencerPanel`、`useInfluencerAttention`、`ApprovalsPage`、`ApprovalCard`、`NoticeBox`、`InboxPage`、`Overview`、`ContactsPage`、`EditContact` | 达人审批（`/api/influencer/*`，路由 `#/influencer/approvals`、`#/influencer/inbox`、`#/influencer/contacts`；「待处理」列出要人工回复的达人消息和缺货）：模拟模式横幅和聚水潭/小红书 CLI 状态；按状态筛选的审批卡（可填小红书账号、调低佣金，通过前再确认一次，驳回填原因，复制要发给达人的消息）；达人名单（添加、启用/停用、编辑，从最近私聊里挑选）。业务说明见 `handoff.md` |
 | `Onboarding.jsx` | `Onboarding` | 首次设置 4 步；可手动填写密钥（`step2` 的 `wcdb_key`） |
 | `store/config.jsx` / `store/status.jsx` / `store/toast.jsx` | Provider + hook | 全站唯一的配置草稿（改动、校验、保存）/ 每 2 秒轮询 `/api/status` / 提示条 |
 
@@ -1473,6 +1473,7 @@ MessageRouter.handle(msg) → [无 @mention]
 | `GET` | `/api/influencer/contacts` | 达人名单 | 无 |
 | `POST` | `/api/influencer/contacts/action` | 添加、修改、启用或停用达人：`{chat_id, display_name?, xhs_account?, note?, enabled?}` | 无 |
 | `GET` | `/api/influencer/recent-chats` | 最近私聊过的联系人（取自 messages 表，去掉群聊和系统会话），供挑选达人 | 无 |
+| `GET` | `/api/influencer/overview` | 「今日概览」：待审批（含 12 小时内过期的）、待处理、近 24 小时的新申请 / 已执行 / 驳回 / 失败 / 缺货、停在执行中的单、启用的达人数，以及可复制的概览文字 | 无 |
 | `GET` | `/api/influencer/counts` | 左栏「达人审批」角标的数量（待审批 + 待处理）；只读打开数据库，不建表，表不存在时返回 0 | 无 |
 | `GET` | `/api/influencer/inbox?handled=0` | 待运营处理的事项：达人发来的非索样消息、达人申请时缺货；`handled=1` 看已处理的 | 无 |
 | `POST` | `/api/influencer/inbox/action` | 把一条待处理事项标为已处理：`{id}` | 无 |

@@ -200,3 +200,24 @@ def test_inbox_items_are_handled_once_and_deleted_90_days_later():
     assert store.count_open_inbox() == 0
     store.run_maintenance(time.time() + PERSONAL_INFO_RETENTION_SECONDS + 60)
     assert store.list_inbox(handled=True) == []
+
+
+def test_the_overview_counts_only_what_is_in_the_database():
+    from src.influencer.scheduled_agent import morning_brief
+
+    store = InfluencerStore(":memory:")
+    now = time.time()
+    store.add_contacts(["wxid_a"], source=SOURCE_CONSOLE)
+    store.add_approval(make_packet("GATE-SOON", expires_at=now + 3600), source=SOURCE_BOT)
+    store.add_approval(make_packet("GATE-DONE", expires_at=NEXT_YEAR), source=SOURCE_BOT)
+    store.transition("GATE-DONE", GateStatus.PENDING, GateStatus.FULFILLED)
+    store.add_inbox_item("wxid_a", "out_of_stock", "想要【眼霜】的样品，但聚水潭显示没有库存")
+    overview = store.overview(now)
+    assert overview == {
+        "pending": 1, "expiring_soon": 1, "executing": 0, "inbox": 1, "submitted_24h": 2,
+        "fulfilled_24h": 1, "rejected_24h": 0, "failed_24h": 0, "out_of_stock_24h": 1, "contacts": 1,
+    }
+    brief = morning_brief(overview, date="2026-10-26")
+    assert "待审批：1 单（其中 1 单 12 小时内过期）" in brief
+    for made_up in ("样品充足", "中腰部达人"):
+        assert made_up not in brief, "晨报里不能再有写死的假数据（B13）"

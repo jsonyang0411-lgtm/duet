@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from .handler import InfluencerBusinessHandler, approval_notice, rejection_notice
 from .jst_erp import JuShuiTanERPClient
+from .scheduled_agent import morning_brief
 from .settings import DEFAULT_COMMISSION_RATE, MAX_COMMISSION_RATE, mock_enabled
 from .store import SOURCE_CONSOLE, InfluencerStore
 from .types import STATUS_LABELS, ApprovalActionPacket, GateStatus
@@ -50,6 +51,10 @@ def handle(
         return save_contact(store, body)
     if path == "/api/influencer/recent-chats":
         return {"ok": True, "items": store.recent_private_chats()}
+    if path == "/api/influencer/overview":
+        store.run_maintenance()
+        numbers = store.overview()
+        return {"ok": True, **numbers, "brief": morning_brief(numbers)}
     if path == "/api/influencer/inbox":
         handled = query.get("handled", "") in ("1", "true")
         return {"ok": True, "items": store.list_inbox(handled=handled)}

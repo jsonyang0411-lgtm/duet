@@ -520,6 +520,45 @@ class InfluencerStore:
                 self._log(conn, "已人工处理", chat_id=row["chat_id"], detail=f"待处理事项 #{item_id}", source=source)
         return cur.rowcount == 1
 
+    # ---- 概览 ----
+
+    def overview(self, now: Optional[float] = None) -> Dict[str, int]:
+        """控制台「今日概览」和晨报用的数字，全部来自数据库（B13：不再写死假数据）。
+        "近 24 小时"按提交、处理的时间算。"""
+        now = time.time() if now is None else now
+        day_ago = now - 24 * 3600
+        pending = GateStatus.PENDING.value
+        with self._connect() as conn:
+            def count(sql: str, *params: Any) -> int:
+                return conn.execute(sql, params).fetchone()[0]
+
+            def handled_since(status: GateStatus) -> int:
+                return count(
+                    "SELECT COUNT(*) FROM influencer_approvals WHERE status = ? AND handled_at >= ?",
+                    status.value, day_ago,
+                )
+
+            return {
+                "pending": count("SELECT COUNT(*) FROM influencer_approvals WHERE status = ?", pending),
+                "expiring_soon": count(
+                    "SELECT COUNT(*) FROM influencer_approvals WHERE status = ? AND expires_at < ?",
+                    pending, now + 12 * 3600,
+                ),
+                "executing": count(
+                    "SELECT COUNT(*) FROM influencer_approvals WHERE status = ?", GateStatus.EXECUTING.value,
+                ),
+                "inbox": count("SELECT COUNT(*) FROM influencer_inbox WHERE handled_at IS NULL"),
+                "submitted_24h": count("SELECT COUNT(*) FROM influencer_approvals WHERE created_at >= ?", day_ago),
+                "fulfilled_24h": handled_since(GateStatus.FULFILLED),
+                "rejected_24h": handled_since(GateStatus.REJECTED),
+                "failed_24h": handled_since(GateStatus.FAILED),
+                "out_of_stock_24h": count(
+                    "SELECT COUNT(*) FROM influencer_inbox WHERE kind = ? AND created_at >= ?",
+                    INBOX_OUT_OF_STOCK, day_ago,
+                ),
+                "contacts": count("SELECT COUNT(*) FROM influencer_contacts WHERE enabled = 1"),
+            }
+
     # ---- 维护 ----
 
     def run_maintenance(self, now: Optional[float] = None) -> None:

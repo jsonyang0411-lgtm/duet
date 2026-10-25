@@ -14,9 +14,25 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from .types import GateStatus
-
 logger = logging.getLogger(__name__)
+
+
+def morning_brief(overview: Dict[str, int], date: str = "") -> str:
+    """晨报 / 今日概览的文字。只用 InfluencerStore.overview() 的真实数字，不写任何推测（B13、R5）。"""
+    lines = [
+        f"【达人商务 · 今日概览】{date or time.strftime('%Y-%m-%d')}",
+        f"• 待审批：{overview['pending']} 单（其中 {overview['expiring_soon']} 单 12 小时内过期）",
+        f"• 待处理：{overview['inbox']} 条（达人发来的消息、缺货）",
+        (
+            f"• 近 24 小时：新申请 {overview['submitted_24h']} 单，已执行 {overview['fulfilled_24h']} 单，"
+            f"驳回 {overview['rejected_24h']} 单，失败 {overview['failed_24h']} 单，缺货 {overview['out_of_stock_24h']} 次"
+        ),
+        f"• 名单里启用的达人：{overview['contacts']} 位",
+    ]
+    if overview["executing"]:
+        lines.append(f"• 注意：有 {overview['executing']} 单停在\"执行中\"，需要人工到聚水潭和小红书核对")
+    lines.append("数据来源：控制台「达人审批」，每个数字都能在对应的列表里查到")
+    return "\n".join(lines)
 
 
 class ScheduledInfluencerAgent:
@@ -67,20 +83,11 @@ class ScheduledInfluencerAgent:
             time.sleep(self.interval)
 
     def _generate_morning_brief(self) -> None:
-        """Layer 4: Speak - 每日 150 字精炼晨报"""
-        # 晨报里写死的假数据留到第 4 阶段处理（B13），这里只是改为从数据库取数
-        pending_count = len(self.handler.store.list_approvals([GateStatus.PENDING]))
-        total_profiles = len(self.handler.store.list_contacts())
-        brief = (
-            f"☀️【达人商务智能体 · 每日晨报】\n"
-            f"• 累计建联达人库：{total_profiles} 位\n"
-            f"• 🚨 待运营审批索样：{pending_count} 单 (请在控制台及时处理)\n"
-            f"• 聚水潭库存状态：全部主推品样品充足\n"
-            f"• 建议今日重点：跟进上周已寄出的 8 位中腰部达人拍摄排期！"
-        )
-        self.notify(brief)
+        """Layer 4: Speak - 每日晨报。按 D14 提醒只做在控制台里，这个定时任务目前没有启动；
+        控制台的「今日概览」用的是同一段文字。"""
+        self.handler.store.run_maintenance()
+        self.notify(morning_brief(self.handler.store.overview()))
 
     def _check_shipped_samples_followup(self) -> None:
-        """定时检查已寄样品的物流，自动草拟关怀话术"""
-        # 后台静默准备，不直接打扰用户，放入待办
-        pass
+        """定时检查已寄样品的物流，自动草拟关怀话术。
+        还没有实现：要等聚水潭真实接口（第 5 阶段）才能查物流。"""

@@ -177,3 +177,10 @@ def test_the_sidebar_count_adds_pending_approvals_and_inbox_items(store):
     add_packet(store)
     store.add_inbox_item("wxid_a", "message", "什么时候发货")
     assert call("/api/influencer/counts")[1] == {"ok": True, "pending": 1, "inbox": 1}
+
+
+def test_the_overview_comes_with_a_brief_to_copy(store):
+    add_packet(store)
+    _, data = call("/api/influencer/overview")
+    assert data["ok"] is True and data["pending"] == 1
+    assert "待审批：1 单" in data["brief"]

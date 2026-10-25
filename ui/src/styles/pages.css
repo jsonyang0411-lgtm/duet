@@ -258,3 +258,13 @@ details.more > summary { cursor: pointer; font-size: var(--fs-sm); font-weight: 
 .gate-events li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .gate-steps { margin: 8px 0 0; padding-left: 18px; font-size: var(--fs-sm); line-height: 1.7; }
 .gate-card .kv .tag { height: auto; min-height: 20px; padding: 3px 6px; white-space: normal; line-height: 1.4; }
+
+/* 达人审批：今日概览 */
+.overview { margin-bottom: 14px; }
+.ov-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+.ov-tile { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 10px 12px; border: 1px solid var(--rule); background: var(--card); color: var(--ink); text-align: left; cursor: pointer; }
+.ov-tile:hover { border-color: var(--ink); }
+.ov-tile.warn { border-color: var(--warn-line); background: var(--warn-bg); }
+.ov-v { font-size: var(--fs-xl); font-weight: 700; line-height: 1.2; }
+.ov-l { font-size: var(--fs-xs); color: var(--ink-2); }
+.ov-h { font-size: var(--fs-xs); color: var(--warn-ink); }

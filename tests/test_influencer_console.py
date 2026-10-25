@@ -102,7 +102,7 @@ def test_an_approval_runs_and_its_message_can_be_copied(console, page):
     page.get_by_text("已执行：出库单").wait_for()
     assert console.store.get_approval("GATE-OK").status == GateStatus.FULFILLED
 
-    page.get_by_role("button", name="已执行").click()
+    page.get_by_role("group", name="状态").get_by_role("button", name="已执行").click()
     done = card(page, "GATE-OK")
     done.get_by_text("发给达人的确认消息").wait_for()
     done.get_by_role("button", name="复制").click()
@@ -169,3 +169,11 @@ def test_the_sidebar_shows_what_needs_attention_and_the_inbox_can_be_cleared(con
     row.get_by_role("button", name="已处理").click()
     page.get_by_text("已标为处理完").wait_for()
     assert console.store.list_inbox() == []
+
+
+def test_the_overview_numbers_lead_to_their_lists(console, page):
+    page.goto(f"{console.base}/#/influencer/approvals")
+    overview = page.get_by_role("region", name="今日概览")
+    overview.get_by_role("button", name="近 24 小时新申请").wait_for()
+    overview.get_by_role("button", name="待处理").click()
+    page.get_by_role("heading", name="待处理").wait_for()

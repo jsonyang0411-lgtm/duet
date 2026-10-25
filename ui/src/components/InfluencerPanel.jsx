@@ -50,6 +50,44 @@ async function copyText(text) {
   return ok
 }
 
+// 「今日概览」：数字都来自数据库（B13），点一下进入对应的列表（R5）
+function Overview({ onFilter }) {
+  const toast = useToast()
+  const [o, setO] = useState(null)
+  useEffect(() => { get('/api/influencer/overview').then(setO, () => setO(null)) }, [])
+  if (!o) return null
+  const tiles = [
+    { label: '待审批', value: o.pending, hint: o.expiring_soon ? `${o.expiring_soon} 单 12 小时内过期` : '', go: () => onFilter('pending'), warn: o.expiring_soon > 0 },
+    { label: '待处理', value: o.inbox, hint: '达人消息、缺货', go: () => { window.location.hash = '#/influencer/inbox' }, warn: o.inbox > 0 },
+    { label: '近 24 小时新申请', value: o.submitted_24h, go: () => onFilter('all') },
+    { label: '近 24 小时已执行', value: o.fulfilled_24h, go: () => onFilter('fulfilled') },
+    { label: '近 24 小时失败', value: o.failed_24h, go: () => onFilter('failed'), warn: o.failed_24h > 0 },
+    { label: '近 24 小时驳回', value: o.rejected_24h, go: () => onFilter('rejected') },
+  ]
+  if (o.executing) tiles.push({ label: '停在执行中', value: o.executing, hint: '要人工核对', go: () => onFilter('executing'), warn: true })
+  const copy = async () => {
+    if (await copyText(o.brief)) toast.ok('已复制今日概览')
+    else toast.err('复制没有成功，请手动选中文字复制')
+  }
+  return (
+    <section className="overview" aria-label="今日概览">
+      <div className="row" style={{ marginBottom: 8 }}>
+        <span className="label grow">今日概览</span>
+        <button type="button" className="btn sm ghost" onClick={copy}><Copy />复制概览</button>
+      </div>
+      <div className="ov-tiles">
+        {tiles.map((t) => (
+          <button key={t.label} type="button" className={`ov-tile${t.warn ? ' warn' : ''}`} onClick={t.go}>
+            <span className="ov-v num">{t.value}</span>
+            <span className="ov-l">{t.label}</span>
+            {t.hint && <span className="ov-h">{t.hint}</span>}
+          </button>
+        ))}
+      </div>
+    </section>
+  )
+}
+
 export default function InfluencerPanel({ sub }) {
   if (sub === 'contacts') return <ContactsPage />
   if (sub === 'inbox') return <InboxPage />
@@ -128,6 +166,7 @@ function ApprovalsPage() {
           actions={<button type="button" className="btn sm" onClick={refresh}><ArrowClockwise />刷新</button>}
         />
         <StatusNotes status={status} />
+        <Overview key={data ? JSON.stringify(data.counts) : 'loading'} onFilter={setFilter} />
         {status?.inbox > 0 && (
           <Note kind="warn">有 {status.inbox} 条待处理事项（达人发来的消息、缺货），<a className="link" href="#/influencer/inbox">去看看</a>。</Note>
         )}
