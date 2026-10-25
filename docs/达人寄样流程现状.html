@@ -130,8 +130,8 @@ footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
   <div class="nodes">
     <div class="node done"><div class="t">规则识别<span class="chip done">已实现</span></div>
       <p><code>extract.py</code> 用关键词和正则识别要样品的意图，提取商品、姓名、电话、地址和小红书账号。</p></div>
-    <div class="node part"><div class="t">用 Claude 理解、回复消息<span class="chip part">已跑通，未接入</span></div>
-      <p>10-25 在本机调用 <code>claude -p</code> 已经能回复消息，还没接进流程。接入时只开放我们自己做的工具，Claude Code 自带的工具全部关掉。</p></div>
+    <div class="node part"><div class="t">用 Claude 理解、回复消息<span class="chip part">工具已做，未接入</span></div>
+      <p>给 <code>claude -p</code> 用的工具已经做好（<code>mcp_server.py</code>）：查库存、提交寄样申请、查申请和物流状态、转人工。一位达人一个进程，模型换不了人，也没有建单、改佣金的工具；Claude Code 自带的工具全部关掉。10-25 已用真实的 <code>claude -p</code> 调通查库存。还差 Mac 端接收服务把它接进流程。</p></div>
   </div>
   <p class="branch"><b>分支：不是要样品的消息</b>（闲聊、问发货、谈佣金）↓</p>
   <div class="nodes">
@@ -235,8 +235,8 @@ footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
   <div class="nodes">
     <div class="node ext"><div class="t">打包、发货<span class="chip ext">仓库 / 聚水潭</span></div>
       <p>不归我们的代码管，由仓库在聚水潭里完成。</p></div>
-    <div class="node todo"><div class="t">查物流工具<span class="chip todo">未实现</span></div>
-      <p>达人问"到哪了"时由 Claude 调用这个工具来回答。要先确认聚水潭能不能返回物流轨迹，不能的话就接快递100之类的服务。</p></div>
+    <div class="node part"><div class="t">查物流工具<span class="chip part">只有运单号</span></div>
+      <p>达人问"到哪了"时，Claude 调用 get_request_status，能拿到申请状态、运单号和推广链接。物流轨迹还查不到：要先确认聚水潭能不能返回，不能的话就接快递100之类的服务。</p></div>
     <div class="node todo"><div class="t">主动跟进物流<span class="chip todo">未实现</span></div>
       <p>B13 的物流跟进部分：定时任务从来没启动过，等聚水潭接入后再做。</p></div>
   </div>
@@ -273,7 +273,7 @@ footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
 <tr><td>1</td><td>B23：执行到一半中断的审批单，在控制台上给出"人工核对后标记"的入口</td><td>已完成</td></tr>
 <tr><td>2</td><td>谈佣金：识别到要求提佣金时，回复固定话术并记进「待处理」</td><td>已完成</td></tr>
 <tr><td>3</td><td>推广链接：后台调用、保存、显示、写进通知消息</td><td>已完成，命令格式要和同事确认</td></tr>
-<tr><td>4</td><td>把查库存、提交审批单、查物流做成工具（MCP），供 Claude 调用</td><td>先用模拟数据</td></tr>
+<tr><td>4</td><td>把查库存、提交审批单、查物流做成工具（MCP），供 Claude 调用</td><td>已完成（物流轨迹待接）</td></tr>
 <tr><td>5</td><td>Mac 端接收服务：收 Windows 转发的消息，交给达人模块和 <code>claude -p</code>，返回回复</td><td>同事的消息格式、业务资料</td></tr>
 <tr><td>6</td><td>自动给达人发确认消息（B15），经 Windows 发出</td><td>防封规则、第 5 项</td></tr>
 <tr><td>7</td><td>接聚水潭真实接口、小红书 CLI，联调验证</td><td>账号、同事交付</td></tr>
