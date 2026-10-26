@@ -199,13 +199,20 @@ class FakeEdge:
         if status == P.SENT:
             record["sent_at"] = round(self._clock(), 3)
         self._event(P.SEND_RESULT, send_id=record["send_id"], status=status, error=error)
-        if status == P.SENT and self.auto_send and self.auto_seen:
+        if status == P.SENT and record["seen_at"]:          # read back while it was going out
+            self._event(P.SEND_SEEN, send_id=record["send_id"], delay_s=0)
+        elif status == P.SENT and self.auto_send and self.auto_seen:
             self._seen(record, 1)
         return self._public(record)
 
     def _seen(self, record: dict, delay_s: float) -> None:
+        """As on Windows: once per send; while it is still going out, ``send_seen`` waits for
+        its ``send_result``; a send that did not go out is never seen."""
+        if record["seen_at"] or record["status"] not in (P.QUEUED, P.SENDING, P.SENT):
+            return
         record["seen_at"] = round(self._clock(), 3)
-        self._event(P.SEND_SEEN, send_id=record["send_id"], delay_s=delay_s)
+        if record["status"] == P.SENT:
+            self._event(P.SEND_SEEN, send_id=record["send_id"], delay_s=delay_s)
 
     def seen(self, send_id: str, delay_s: float = 1) -> dict:
         """The sent message was read back from WeChat."""

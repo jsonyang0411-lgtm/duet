@@ -844,9 +844,21 @@ class WcdbBackend(AbstractWeChatBackend):
             logger.warning("Failed to persist private_chat_names.json: %s", e)
 
     def _talker_to_name(self, talker_id: str) -> str:
-        for name, tid in self._talker_ids.items():
+        for name, tid in list(self._talker_ids.items()):     # the poll thread may add chats meanwhile
             if tid == talker_id:
                 return name
+        if not talker_id.endswith("@chatroom"):
+            # A private chat not read yet (a creator just put on the list): the name WeChat lists
+            # it under, unless another chat has that name (a send finds the chat by its name).
+            names_file = Path("data/private_chat_names.json")
+            if names_file.is_file():
+                try:
+                    data = json.loads(names_file.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    data = {}
+                display = str(data.get(talker_id) or "").strip() if isinstance(data, dict) else ""
+                if display and self._add_talker(display, talker_id, is_group=False):
+                    return display
         return ""
 
     # ── OCR fallback ─────────────────────────────────────────────────

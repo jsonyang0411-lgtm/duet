@@ -65,6 +65,7 @@ with FakeEdge(auto_send=False) as fake:   # 在 127.0.0.1 上找一个空端口�
 
 - `fake.complete(send_id, "failed", "找不到聊天窗口")`：发送失败；
 - `fake.unseen(send_id)`：读回时限过了还没对上；
+- 在 `fake.complete` 之前调 `fake.seen(send_id)`：读回比发送动作返回还早（Windows 真机上常见）。和 Windows 一样，先记下，`complete` 报完 `send_result` 紧接着报 `send_seen`（`delay_s` 为 0）；同一条只报一次，没发出去的（`failed` 等）不报；
 - `fake.start_sending(send_id)` 再 `fake.restart()`：发送进行中时 Windows 重启了，结果是 `indeterminate`；
 - `fake.expire_due()`：发送请求过了 `ttl_sec`；
 - `fake.fail_next(n, 原因)`：接下来 n 条发送失败。

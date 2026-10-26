@@ -92,8 +92,9 @@ class EdgeService:
         self._cond = threading.Condition()       # notified when an event is stored
         self._send_lock = threading.Lock()       # send requests and the list change one at a time
         self._seen_lock = threading.Lock()
-        self._lines: dict[str, deque] = {}       # chat -> (text, sent at, send_id): this run's sends
-        self._files: dict[str, deque] = {}       # chat -> (sent at, send_id of a files-only send or None)
+        self._report_lock = threading.Lock()     # a send's result and its read-back are told in that order
+        self._lines: dict[str, deque] = {}       # chat -> (text, noted at, send_id): this run's sends
+        self._files: dict[str, deque] = {}       # chat -> (noted at, send_id of a files-only send or None)
         self._started = clock()
         self._status = {"wechat": P.ONLINE, "db": P.OK, "send": P.OK, "detail": ""}
         self._failures = 0
@@ -247,24 +248,48 @@ class EdgeService:
             return
         matched, send_id = self._match_own(chat_id, msg, now)
         if matched:
-            if send_id and self._store.mark_seen(send_id, now):
-                record = self._store.send(send_id) or {}
-                delay = round(max(0.0, now - float(record.get("sent_at") or now)), 1)
-                self._emit(P.SEND_SEEN, send_id=send_id, delay_s=delay)
-                logger.info("EDGE: send %s seen in WeChat %.0f s after sending", send_id, delay)
+            if send_id:
+                self._seen(send_id, now)
             return
         event = self._emit(P.OPERATOR_MESSAGE, chat_id, message_id, msg_type=T.msg_type_of(msg),
                            text=T.message_text(msg))
         if event is not None:
             logger.info("EDGE: an operator wrote in a listed chat by hand -> event #%d", event["id"])
 
-    def _note_line(self, chat_id: str, text: str, send_id: str, at: float) -> None:
-        with self._seen_lock:
-            self._lines.setdefault(chat_id, deque(maxlen=200)).append((T.normalized(text), at, send_id))
+    def _seen(self, send_id: str, now: float) -> None:
+        """One of our sends read back: ``send_seen`` now, or right after its ``send_result``
+        while it is still going out (WeChat shows a line before the send returns)."""
+        with self._report_lock:
+            if not self._store.mark_seen(send_id, now):
+                return
+            record = self._store.send(send_id) or {}
+            if record.get("status") == P.SENT:
+                self._emit_seen(record)
 
-    def _note_file(self, chat_id: str, send_id: Optional[str], at: float) -> None:
+    def _emit_seen(self, record: dict) -> None:
+        seen_at = float(record["seen_at"])
+        delay = round(max(0.0, seen_at - float(record.get("sent_at") or seen_at)), 1)
+        self._emit(P.SEND_SEEN, send_id=record["send_id"], delay_s=delay)
+        logger.info("EDGE: send %s seen in WeChat %.0f s after sending", record["send_id"], delay)
+
+    def _note_line(self, chat_id: str, text: str, send_id: str, at: float) -> tuple:
+        item = (T.normalized(text), at, send_id)
         with self._seen_lock:
-            self._files.setdefault(chat_id, deque(maxlen=200)).append((at, send_id))
+            self._lines.setdefault(chat_id, deque(maxlen=200)).append(item)
+        return item
+
+    def _note_file(self, chat_id: str, send_id: Optional[str], at: float) -> tuple:
+        item = (at, send_id)
+        with self._seen_lock:
+            self._files.setdefault(chat_id, deque(maxlen=200)).append(item)
+        return item
+
+    def _unnote(self, noted: dict, chat_id: str, item: tuple) -> None:
+        """A part that did not go out is not ours (unless it was read back already)."""
+        with self._seen_lock:
+            items = noted.get(chat_id)
+            if items is not None and item in items:
+                items.remove(item)
 
     def _match_own(self, chat_id: str, msg: dict, now: float) -> tuple[bool, Optional[str]]:
         """Is this own line one of our sends? ``(True, send_id or None)``."""
@@ -356,8 +381,11 @@ class EdgeService:
         if chat_id not in self._parties:
             self._finish(send_id, P.FAILED, "不在名单里")
             return
+        # Each part is noted before it goes: WeChat writes a sent line at once, and the backend
+        # can read it back before the send returns (the same second on the Windows test PC).
         problem, text_sent = "", False
         if text.strip():
+            noted = self._note_line(chat_id, text, send_id, self._clock())
             try:
                 ok = self._send_text is not None and bool(self._send_text(chat_id, text))
             except Exception:
@@ -365,8 +393,8 @@ class EdgeService:
                 ok = False
             if ok:
                 text_sent = True
-                self._note_line(chat_id, text, send_id, self._clock())
             else:
+                self._unnote(self._lines, chat_id, noted)
                 problem = "文字没发出去"
         for upload_id in [] if problem else record["uploads"]:
             upload = self._store.upload(upload_id)
@@ -377,15 +405,16 @@ class EdgeService:
             if upload is None or not os.path.isfile(upload["path"]):
                 problem = f"文件「{name}」在 Windows 上找不到了"
                 break
+            noted = self._note_file(chat_id, None if text.strip() else send_id, self._clock())
             try:
                 ok = bool(self._send_file(chat_id, upload["path"]))
             except Exception:
                 logger.exception("EDGE: send %s: a file failed", send_id)
                 ok = False
             if not ok:
+                self._unnote(self._files, chat_id, noted)
                 problem = f"文件「{name}」没发出去"
                 break
-            self._note_file(chat_id, None if text.strip() else send_id, self._clock())
         if problem:
             self._finish(send_id, P.FAILED, f"文字已发出；{problem}" if text_sent else problem)
         else:
@@ -396,10 +425,14 @@ class EdgeService:
         fields = {"error": error, "finished_at": now}
         if status == P.SENT:
             fields["sent_at"] = now
-        if not self._store.move_send(send_id, (P.QUEUED, P.SENDING), status, **fields):
-            return
-        self._emit(P.SEND_RESULT, send_id=send_id, status=status, error=error)
-        logger.info("EDGE: send %s %s%s", send_id, status, f" ({error})" if error else "")
+        with self._report_lock:
+            if not self._store.move_send(send_id, (P.QUEUED, P.SENDING), status, **fields):
+                return
+            self._emit(P.SEND_RESULT, send_id=send_id, status=status, error=error)
+            logger.info("EDGE: send %s %s%s", send_id, status, f" ({error})" if error else "")
+            record = self._store.send(send_id) if status == P.SENT else None
+            if record and record.get("seen_at"):          # read back while it was going out
+                self._emit_seen(record)
         if status == P.SENT:
             self._failures = 0
             self._set_status("发送恢复正常", send=P.OK)

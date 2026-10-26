@@ -477,6 +477,30 @@ class PrmStore:
             self._conn.execute("UPDATE action_packets SET outcome = ? WHERE id = ?", (outcome, packet_id))
             self._conn.commit()
 
+    def confirm_sent(self, packet_id: int) -> bool:
+        """Its line was read back from WeChat: ``sent_confirmed`` while it is going out or sent
+        unconfirmed, never over a failure (True: newly confirmed)."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE action_packets SET outcome = 'sent_confirmed' WHERE id = ?"
+                " AND COALESCE(outcome, '') != 'sent_confirmed'"
+                " AND (status = ? OR (status = ? AND COALESCE(outcome, 'sent_unconfirmed') = 'sent_unconfirmed'))",
+                (packet_id, SENDING, SENT),
+            )
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def mark_sent(self, packet_id: int, now: float) -> bool:
+        """Sending → sent: ``sent_unconfirmed``, unless its line was read back already."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE action_packets SET status = ?, sent_at = ?, outcome = CASE WHEN outcome = 'sent_confirmed'"
+                " THEN outcome ELSE 'sent_unconfirmed' END WHERE id = ? AND status = ?",
+                (SENT, now, packet_id, SENDING),
+            )
+            self._conn.commit()
+            return cur.rowcount == 1
+
     def mark_wrong(self, packet_id: int) -> bool:
         """An operator says this sent packet should not have gone out (True: newly marked)."""
         with self._lock:

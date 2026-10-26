@@ -297,6 +297,70 @@ def test_a_line_read_back_late_is_still_ours(edge, clock):
     assert len(events(edge, P.SEND_UNSEEN)) == 1                                      # said once
 
 
+def test_a_line_read_back_before_its_send_returns_is_ours(edge, clock, wechat, tmp_path):
+    """WeChat writes a sent line at once and the backend can read it back before the send
+    returns (Windows test, 2026-10-26): each part is noted before it goes, and send_seen
+    follows the send_result."""
+    def text_seen_at_once(chat, text):
+        wechat.texts.append((chat, text))
+        edge.on_own_message(msg(clock, text, own=True))
+        return True
+
+    def file_seen_at_once(chat, path):
+        wechat.files.append((chat, Path(path).name))
+        edge.on_own_message(msg(clock, "[文件]", 49, own=True))
+        return True
+
+    edge._send_text, edge._send_file = text_seen_at_once, file_seen_at_once
+    ups = []
+    for name in ("brief.pdf", "sizes.pdf"):
+        (tmp_path / name).write_bytes(b"x")
+        ups.append(edge.upload(name, (tmp_path / name).open("rb").read, 1)["upload_id"])
+    sent(edge, "text-and-file", "brief 在下面～", uploads=[ups[0]])
+    sent(edge, "file-only", uploads=[ups[1]])
+    edge.tick()
+    edge.tick()
+    assert len(wechat.texts) == 1 and len(wechat.files) == 2 and not events(edge, P.OPERATOR_MESSAGE)
+    told = [(e["type"], e["send_id"]) for e in events(edge, P.SEND_RESULT, P.SEND_SEEN)]
+    assert told == [(P.SEND_RESULT, "text-and-file"), (P.SEND_SEEN, "text-and-file"),
+                    (P.SEND_RESULT, "file-only"), (P.SEND_SEEN, "file-only")]
+    assert [e["delay_s"] for e in events(edge, P.SEND_SEEN)] == [0, 0]
+    clock.now += 1801
+    edge.tick()
+    assert not events(edge, P.SEND_UNSEEN)
+
+
+def test_a_part_that_did_not_go_out_is_not_ours(edge, clock, wechat, tmp_path):
+    """Noted before it goes, taken back when it fails: the same words, or a file, showing up
+    later were put there by a person; a failed send is never reported seen."""
+    wechat.text_ok = False
+    sent(edge, "refused", "这句没发出去")
+    edge.tick()
+
+    def broken(chat, text):
+        raise RuntimeError("the window went away")
+
+    edge._send_text = broken
+    sent(edge, "broken", "这句出错了")
+    edge.tick()
+    for name in ("a.pdf", "b.pdf"):
+        (tmp_path / name).write_bytes(b"x")
+    ups = [edge.upload(n, (tmp_path / n).open("rb").read, 1)["upload_id"] for n in ("a.pdf", "b.pdf")]
+    goes = iter([True, False])
+    edge._send_file = lambda chat, path: next(goes)                                  # a.pdf goes, b.pdf not
+    sent(edge, "half", uploads=ups)
+    edge.tick()
+    assert [e["status"] for e in events(edge, P.SEND_RESULT)] == [P.FAILED] * 3
+    clock.now += 2
+    for line in ("这句没发出去", "这句出错了"):
+        edge.on_own_message(msg(clock, line, own=True))
+    edge.on_own_message(msg(clock, "[文件]", 49, own=True))                          # a.pdf: ours
+    edge.on_own_message(msg(clock, "[文件]", 49, own=True))                          # one more: a person's
+    operators = events(edge, P.OPERATOR_MESSAGE)
+    assert [e["text"] for e in operators[:2]] == ["这句没发出去", "这句出错了"] and len(operators) == 3
+    assert not events(edge, P.SEND_SEEN)
+
+
 def test_after_a_restart_only_the_earlier_runs_unseen_sends_count(tmp_path, clock, wechat):
     store = EdgeStore(":memory:")
     first = make_edge(tmp_path, clock, wechat, store=store)

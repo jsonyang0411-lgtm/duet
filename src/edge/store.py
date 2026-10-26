@@ -235,10 +235,11 @@ class EdgeStore:
                                           (since,)).fetchone()[0])
 
     def mark_seen(self, send_id: str, now: float) -> bool:
+        """Read back from WeChat: sent, or still going out (a line shows up before its send returns)."""
         with self._lock:
             cur = self._conn.execute(
-                "UPDATE edge_sends SET seen_at = ? WHERE send_id = ? AND status = ? AND seen_at IS NULL",
-                (now, send_id, P.SENT))
+                "UPDATE edge_sends SET seen_at = ? WHERE send_id = ? AND status IN (?, ?) AND seen_at IS NULL",
+                (now, send_id, P.SENDING, P.SENT))
             self._conn.commit()
             return cur.rowcount == 1
 

@@ -1,5 +1,7 @@
 """Tests for WCDB message standardization."""
 
+import json
+import os
 from pathlib import Path
 import tempfile
 import time
@@ -355,6 +357,33 @@ class WcdbBackendStandardizeTests(unittest.TestCase):
 
         self.assertEqual(backend._talker_ids["私聊好友"], "wxid_friend")
         self.assertFalse(backend._chat_is_group["wxid_friend"])
+
+
+class PrivateChatNameFallbackTests(unittest.TestCase):
+    """A creator's private chat not read yet gets the name WeChat lists it under
+    (data/private_chat_names.json), never a name another chat has: a send finds the chat
+    by its name."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(tmp.name)
+        Path("data").mkdir()
+        Path("data/private_chat_names.json").write_text(
+            json.dumps({"wxid_new": "小丽", "wxid_twin": "测试群"}, ensure_ascii=False), encoding="utf-8")
+        self.backend = WcdbBackend(bot_display_name="商务助手", groups=["测试群"])
+        self.backend._client = FakeClient()
+        self.backend._add_talker("测试群", "room1@chatroom", is_group=True)
+
+    def test_a_listed_private_chat_gets_its_name(self):
+        self.assertEqual(self.backend._talker_to_name("wxid_new"), "小丽")
+        self.assertEqual(self.backend._talker_ids["小丽"], "wxid_new")
+
+    def test_a_name_another_chat_has_is_not_used(self):
+        self.assertEqual(self.backend._talker_to_name("wxid_twin"), "")
+        self.assertEqual(self.backend._talker_ids["测试群"], "room1@chatroom")
+        self.assertEqual(self.backend._talker_to_name("wxid_unknown"), "")
 
 
 if __name__ == "__main__":
