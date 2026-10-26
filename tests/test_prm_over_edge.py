@@ -180,3 +180,31 @@ def test_the_mac_relay_only_listens_on_this_mac():
     with pytest.raises(RuntimeError, match="CLAUDE_RELAY_HOST=127.0.0.1"):
         _validate_config({**base, "claude_relay_host": "0.0.0.0"})
     _validate_config({**base, "claude_relay_host": "127.0.0.1"})   # Mac 端不用登记 cc 用户
+
+
+def test_a_failed_send_takes_back_the_newest_of_two_same_lines(tmp_path):
+    """同一句话发了两次：第二次没发出去，第一次的读回还要对到第一条草稿上（不能把它的登记删掉）。"""
+    from test_prm import Bot as PrmBot
+
+    side = PrmBot(Clock(), tmp_path)
+    try:
+        side.prm.register(CREATOR, "小美")
+        packets = []
+        for _ in range(2):
+            side.prm.handle(side.msg("在吗"))
+            job = side.worker_takes()
+            side.finish(job["id"], draft(slots={}, reply_draft="好的，收到～", message_kind="greeting"))
+            packet = side.prm.store.packet_for_job(job["id"])
+            side.prm.decide(packet["id"], "send")
+            side.prm.send_approved()
+            packets.append(packet["id"])
+        side.prm.on_send_failed(CREATOR, "好的，收到～", "Windows 没发出去")
+        first, second = (side.prm.store.packet(i) for i in packets)
+        assert (first["status"], second["status"]) == ("sent", "failed")
+        side.prm.on_own_message({"chat_id": CREATOR, "content": "好的，收到～", "msg_type": 1, "is_group": False,
+                                 "timestamp": side.clock.now, "edge_seen": True})
+        assert side.prm.store.packet(packets[0])["outcome"] == "sent_confirmed"
+        assert side.prm.store.deal(1)["mode"] == "copilot"
+    finally:
+        side.prm.stop()
+        side.relay.stop()

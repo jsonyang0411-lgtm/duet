@@ -70,6 +70,13 @@ class FakeSide(Side):
     def read_back(self, send_id):
         self.edge.seen(send_id, delay_s=2)
 
+    def deliver_read_back_at_once(self):
+        for s in self.edge.sends:
+            if s["status"] == P.QUEUED:
+                self.edge.start_sending(s["send_id"])
+                self.edge.seen(s["send_id"])
+                self.edge.complete(s["send_id"])
+
     def pass_read_back_window(self, send_id):
         self.edge.unseen(send_id)
 
@@ -99,6 +106,7 @@ class RealSide(Side):
         self.clock = Clock()
         self.texts, self.files = [], []
         self.online = True
+        self.echo = False                        # True: WeChat shows a sent line before the send returns
         self.collected = {}                      # message id -> (path, name, problem)
         self.seq = 0
         self.config = SimpleNamespace(
@@ -119,7 +127,7 @@ class RealSide(Side):
 
     def _service(self):
         edge = EdgeService(self.config, store=self.store, clock=self.clock, files_dir=self.tmp / "edge",
-                           send_text=lambda chat, text: self.texts.append((chat, text)) or True,
+                           send_text=self._send_text,
                            send_file=lambda chat, path: self.files.append((chat, os.path.basename(path))) or True,
                            collect=lambda msg, kind, n: self.collected[msg["message_id"]],
                            own_wxid=lambda: "wxid_bot", wechat_online=lambda: self.online,
@@ -127,6 +135,12 @@ class RealSide(Side):
         self.relay.attach_edge(edge, EDGE_TOKEN)
         edge.start(run_thread=False)                                     # the test drives tick()
         return edge
+
+    def _send_text(self, chat, text):
+        self.texts.append((chat, text))
+        if self.echo:
+            self.edge.on_own_message(self._msg(chat, text, 1, own=True))
+        return True
 
     def _msg(self, chat, content, msg_type, own=False, **extra):
         self.seq += 1
@@ -179,6 +193,13 @@ class RealSide(Side):
         record = self.store.send(send_id)
         self.clock.now += 2
         self.edge.on_own_message(self._msg(record["chat_id"], record["text"], 1, own=True))
+
+    def deliver_read_back_at_once(self):
+        self.echo = True
+        try:
+            self.deliver()
+        finally:
+            self.echo = False
 
     def pass_read_back_window(self, send_id):
         self.clock.now += 1801
@@ -400,6 +421,19 @@ def test_uploads_need_a_length_and_stay_under_the_limit(side):
         assert response.status == status
         assert json.loads(response.read())["error"] in ("too_large", "bad_request")
         conn.close()
+
+
+def test_a_send_read_back_before_it_returns_is_seen_right_after_its_result(side):
+    """WeChat shows a sent line at once and Windows can read it back before the send returns
+    (Windows test, 2026-10-26): send_result first, then send_seen with delay_s 0."""
+    c = side.client
+    c.put_parties(1, [CREATOR])
+    c.send("pk-5", CREATOR, "brief 在下面～")
+    side.deliver_read_back_at_once()
+    events = drain(side)
+    assert types(events) == [P.SEND_RESULT, P.SEND_SEEN]
+    assert events[0]["status"] == P.SENT and events[1]["send_id"] == "pk-5" and events[1]["delay_s"] == 0
+    assert c.send_status("pk-5")["seen_at"]
 
 
 def test_a_failed_and_an_unseen_send_are_events(side):
