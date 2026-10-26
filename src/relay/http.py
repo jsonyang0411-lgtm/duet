@@ -25,6 +25,8 @@ Every request carries ``Authorization: Bearer <CLAUDE_RELAY_TOKEN>``.
                                         "log_path", "error"} -> {"accepted": bool}
 
 A separate server on its own port (not the console's), standard library only.
+``/edge/*`` (the WeChat edge for the Mac business service, PRM_EDGE) is answered by
+src/edge/http.py with its own token, never with this one.
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
+from ..edge import http as edge_http
 from .store import ADMIN, KINDS
 
 logger = logging.getLogger(__name__)
@@ -100,7 +103,22 @@ class _RelayHandler(BaseHTTPRequestHandler):
             return None
         return data if isinstance(data, dict) else None
 
+    def _edge(self, method: str) -> bool:
+        """``/edge/*`` (PRM_EDGE, src/edge): answered there, with its own token; True when it was one."""
+        if not urlsplit(self.path).path.startswith("/edge/"):
+            return False
+        edge_http.handle(self, method, getattr(self.relay, "edge", None), getattr(self.relay, "edge_token", b""))
+        return True
+
+    def do_PUT(self):
+        if self._edge("PUT"):
+            return
+        if self._authorized():
+            self._json(404, {"error": "not found"})
+
     def do_GET(self):
+        if self._edge("GET"):
+            return
         if not self._authorized():
             return
         url = urlsplit(self.path)
@@ -188,6 +206,8 @@ class _RelayHandler(BaseHTTPRequestHandler):
             self._json(200, answer)
 
     def do_POST(self):
+        if self._edge("POST"):
+            return
         if not self._authorized():
             return
         url = urlsplit(self.path)

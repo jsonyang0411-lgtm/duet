@@ -593,6 +593,17 @@ class BotConfig:
     # A delivered deal's receiving details (address, phone and ID numbers) are cleared
     # everywhere this many days after delivery (8.2).
     prm_retention_days: int = 30
+    # === WeChat edge (src/edge, edge-protocol.md) for the Mac business service ===
+    # "on": Windows only receives and sends WeChat messages for the creators the Mac lists;
+    # the Mac pulls /edge/* on the relay's port with PRM_EDGE_TOKEN.  Not with PRM_COPILOT.
+    prm_edge: str = "off"
+    prm_edge_token: str = ""
+    edge_db: str = "data/edge.db"
+    edge_send_min_gap_sec: int = 3
+    edge_send_per_hour: int = 60
+    edge_seen_text_sec: int = 1800
+    edge_seen_file_sec: int = 600
+    edge_keep_days: int = 7
 
     # === OCR fallback (src/wechat/ocr), macOS mac_hybrid backend only ===
     # "on": when the WeChat database cannot be read ocr_fallback_after times in a row, the
@@ -1029,6 +1040,26 @@ def _validate_config(kwargs: dict) -> None:
         errors.append("PRM_HOLDING_TEXT must be 1-60 characters")
     if not (1 <= int(kwargs.get("prm_retention_days", 30)) <= 365):
         errors.append(f"PRM_RETENTION_DAYS must be between 1 and 365, got {kwargs.get('prm_retention_days')}")
+    prm_edge = kwargs.get("prm_edge", "off")
+    if prm_edge not in ("off", "on"):
+        errors.append(f"PRM_EDGE must be off or on, got {prm_edge}")
+    elif prm_edge == "on":
+        if kwargs.get("claude_relay", "off") != "on":
+            errors.append("PRM_EDGE=on needs CLAUDE_RELAY=on (/edge/* is served on the relay's port)")
+        if "private_chat_enabled" in kwargs and not kwargs["private_chat_enabled"]:
+            errors.append("PRM_EDGE=on needs PRIVATE_CHAT_ENABLED=true (creators write in private chats)")
+        if prm_copilot == "on":
+            errors.append("PRM_EDGE and PRM_COPILOT cannot both be on (the edge hands everything to the Mac)")
+        edge_token = str(kwargs.get("prm_edge_token", "") or "")
+        if len(edge_token) < 32:
+            errors.append("PRM_EDGE=on needs PRM_EDGE_TOKEN of at least 32 characters")
+        elif edge_token == str(kwargs.get("claude_relay_token", "") or ""):
+            errors.append("PRM_EDGE_TOKEN must differ from CLAUDE_RELAY_TOKEN")
+    for key, low, high, default in (("edge_send_min_gap_sec", 0, 60, 3), ("edge_send_per_hour", 1, 1000, 60),
+                                    ("edge_seen_text_sec", 60, 86400, 1800), ("edge_seen_file_sec", 60, 86400, 600),
+                                    ("edge_keep_days", 1, 30, 7)):
+        if not (low <= int(kwargs.get(key, default)) <= high):
+            errors.append(f"{key.upper()} must be between {low} and {high}, got {kwargs.get(key)}")
     auto_accept = kwargs.get("auto_accept_friends", "off")
     if auto_accept not in ("off", "on"):
         errors.append(f"AUTO_ACCEPT_FRIENDS must be off or on, got {auto_accept}")
@@ -1345,6 +1376,14 @@ def load_config() -> BotConfig:
         "prm_holding_min": int(os.getenv("PRM_HOLDING_MIN", "10")),
         "prm_holding_text": os.getenv("PRM_HOLDING_TEXT", "收到，我确认一下马上回你").strip() or "收到，我确认一下马上回你",
         "prm_retention_days": int(os.getenv("PRM_RETENTION_DAYS", "30")),
+        "prm_edge": _parse_memory_mode(os.getenv("PRM_EDGE", "off")),
+        "prm_edge_token": os.getenv("PRM_EDGE_TOKEN", "").strip(),
+        "edge_db": os.getenv("EDGE_DB", "data/edge.db").strip() or "data/edge.db",
+        "edge_send_min_gap_sec": int(os.getenv("EDGE_SEND_MIN_GAP_SEC", "3")),
+        "edge_send_per_hour": int(os.getenv("EDGE_SEND_PER_HOUR", "60")),
+        "edge_seen_text_sec": int(os.getenv("EDGE_SEEN_TEXT_SEC", "1800")),
+        "edge_seen_file_sec": int(os.getenv("EDGE_SEEN_FILE_SEC", "600")),
+        "edge_keep_days": int(os.getenv("EDGE_KEEP_DAYS", "7")),
         "ocr_fallback": _parse_memory_mode(os.getenv("OCR_FALLBACK", "off")),
         "ocr_fallback_after": int(os.getenv("OCR_FALLBACK_AFTER", "3")),
         "ocr_poll_sec": float(os.getenv("OCR_POLL_SEC", "4")),

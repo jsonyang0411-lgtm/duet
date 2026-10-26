@@ -205,6 +205,42 @@ def _extract_quote_appmsg(content: str,
     }
 
 
+def _special_info(content: str, local_type: int) -> dict:
+    """What a link, mini program, card, location or system line is, for the WeChat edge
+    (src/edge/text.py writes "[链接] 标题"); {} for anything else."""
+    decoded = _decompress_zstd_hex(content) or str(content or "")
+    if local_type == 10000:                      # a system line: plain text, or XML (a recall)
+        text = decoded
+        start = decoded.find("<")
+        if start >= 0 and decoded[start:].lstrip().startswith("<"):
+            try:
+                root = ET.fromstring(decoded[start:].strip())
+                text = _text_at(root, ".//replacemsg") or " ".join(t.strip() for t in root.itertext() if t.strip())
+            except ET.ParseError:
+                text = re.sub(r"<[^>]+>", " ", decoded)
+        return {"kind": "system", "title": " ".join(str(text).split())[:200]}
+    xml_text = _extract_xml_document(decoded)
+    if not xml_text:
+        return {}
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return {}
+    if local_type == 42:                         # a contact card
+        return {"kind": "card", "title": str(root.get("nickname") or "").strip()}
+    if local_type == 48:                         # a location
+        place = root if root.tag == "location" else root.find("location")
+        if place is None:
+            return {}
+        return {"kind": "location", "title": str(place.get("poiname") or place.get("label") or "").strip()}
+    if local_type == APPMSG_TYPE:
+        appmsg = root if root.tag == "appmsg" else root.find("appmsg")
+        if appmsg is None:
+            return {}
+        return {"kind": "appmsg", "type": _text_at(appmsg, "type"), "title": _text_at(appmsg, "title")}
+    return {}
+
+
 def _strip_wechat_group_sender_prefix(content: str) -> str:
     """Remove WCDB's leading ``wxid_xxx:\n`` prefix from group messages."""
     return re.sub(
@@ -327,6 +363,7 @@ class WcdbBackend(AbstractWeChatBackend):
         # and who hears this account's own lines there (an operator's hand-typed reply).
         self._private_filter = None
         self._own_message_hook = None
+        self._db_failures = 0          # database reads failed in a row (the WeChat edge's state)
         self._known_ids = DedupSet(max_size=MAX_DEDUP_SIZE)
         # Thread safety: WCDB DLL (ctypes) may not be thread-safe internally.
         # All _client calls are serialized through this lock.
@@ -435,12 +472,14 @@ class WcdbBackend(AbstractWeChatBackend):
                 try:
                     self._poll_cycle(callback)
                     consecutive_errors = 0
+                    self._db_failures = 0
                     if self._ocr is not None:
                         self._ocr.note_db_ok()
                 except KeyboardInterrupt:
                     break
                 except Exception as e:
                     consecutive_errors += 1
+                    self._db_failures += 1
                     if self._ocr is not None:
                         self._ocr.note_db_failure()
 
@@ -930,6 +969,7 @@ class WcdbBackend(AbstractWeChatBackend):
             "quoted_sender_name": "",
             "quoted_content": "",
             "quoted_server_id": "",
+            "special": {},
         }
 
     # ── Message polling ──────────────────────────────────────────────
@@ -964,6 +1004,25 @@ class WcdbBackend(AbstractWeChatBackend):
         """``hook(msg)`` hears this account's own lines in the private chats the filter wants
         (PRM_COPILOT: a registered creator's chat, where an operator may reply by hand)."""
         self._own_message_hook = hook
+
+    def own_wxid(self) -> str:
+        """This WeChat account's wxid ("" when not known yet)."""
+        return str(getattr(self._client, "_config", {}).get("myWxid", "") or "") if self._client else ""
+
+    def db_readable(self) -> bool:
+        """Can the WeChat database be read (fewer than 3 failed reads in a row)?"""
+        return self._db_failures < 3
+
+    def wechat_window_found(self) -> Optional[bool]:
+        """Is WeChat's main window there?  None while a send holds the window (asked again later)."""
+        if not self._window_lock.acquire(blocking=False):
+            return None
+        try:
+            return self._window.find_hwnd(wake=False) is not None
+        except Exception:
+            return False
+        finally:
+            self._window_lock.release()
 
     def _tell_own_message(self, standardized: dict) -> None:
         hook = getattr(self, "_own_message_hook", None)
@@ -1397,6 +1456,10 @@ class WcdbBackend(AbstractWeChatBackend):
         # A file someone sent: its name and size (the Claude relay forwards it to the Mac).
         file_info = (_extract_file_appmsg(content)
                      if local_type == APPMSG_TYPE and not quote_info else None) or {}
+        # A link / mini program / card / location / system line: its title (the WeChat edge).
+        special_info = (_special_info(content, local_type)
+                        if local_type in (42, 48, 10000) or (local_type == APPMSG_TYPE and not quote_info
+                                                            and not file_info) else {})
 
         # ── Voice recognition ──────────────────────────────────────
         # Voice messages (localType=34) have empty message_content;
@@ -1603,6 +1666,7 @@ class WcdbBackend(AbstractWeChatBackend):
             "quoted_sender_name": quoted_sender_name,
             "quoted_content": quote_info.get("quoted_content", "") if quote_info else "",
             "quoted_server_id": quote_info.get("quoted_server_id", "") if quote_info else "",
+            "special": special_info,
         }
 
     def _trim_dedup(self) -> None:

@@ -106,6 +106,25 @@ def claude_relay(ctx: RouteContext) -> Optional[Stop]:
     return Stop(reply)
 
 
+def edge(ctx: RouteContext) -> Optional[Stop]:
+    """PRM_EDGE=on: a listed creator's private message goes to the Mac business service
+    (src/edge: an event the Mac pulls) and is never answered here.  Before ``persist``:
+    the creator's words are not kept in this PC's chat archive."""
+    service = getattr(ctx.router, "_edge", None)
+    if service is None:
+        return None
+    try:
+        handled = service.handle(ctx.msg)
+    except Exception:
+        logger.exception("EDGE: could not take a creator's message; it is not answered")
+        handled = not ctx.msg.get("is_group", True) and service.is_party_chat(ctx.msg.get("chat_id", ""))
+    if not handled:
+        return None
+    ctx.trace.redact("[已登记达人的私聊，内容不记录]")
+    ctx.trace.reason("prm_edge")
+    return Stop(None)
+
+
 def prm(ctx: RouteContext) -> Optional[Stop]:
     """PRM_COPILOT=on: a registered creator's private message goes, silently, into a
     draft job for the Mac (src/prm); the draft waits in the console.  Nothing is
@@ -528,6 +547,7 @@ def finish(ctx: RouteContext) -> Optional[Stop]:
 
 ROUTE_STEPS: tuple[RouteStep, ...] = (
     RouteStep("self_message", self_message, "the bot's own lines are never handled"),
+    RouteStep("edge", edge, "a listed creator's message goes to the Mac (PRM_EDGE), not stored, not answered"),
     RouteStep("persist", persist, "store the message; duplicates stop here"),
     RouteStep("claude_relay", claude_relay, "cc ... from an allowed private chat goes to the Mac"),
     RouteStep("prm", prm, "a registered creator's message: a silent draft job, the console decides"),

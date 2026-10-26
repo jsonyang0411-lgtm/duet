@@ -71,6 +71,9 @@ class FakeEdge:
     # ── lifecycle ─────────────────────────────────────────────────────────
 
     def start(self) -> "FakeEdge":
+        """Serve on 127.0.0.1 (a free port) and, like Windows, say the state once."""
+        with self._cond:
+            self._event(P.EDGE_STATUS, **{**self._status, "detail": "Windows 边缘启动了"})
         self._server = serve(self, self.token)
         return self
 
@@ -291,7 +294,7 @@ class FakeEdge:
         with self._cond:
             self._acked = max(self._acked, min(int(upto), len(self._events)))
             pending = sum(1 for e in self._events if e["id"] > self._acked)
-            return {"ok": True, "acked": self._acked, "pending": pending}
+            return {"ok": True, "pending": pending}
 
     def event_file(self, event_id: int, n: int) -> Optional[str]:
         return self._files.get((int(event_id), int(n)))
@@ -348,6 +351,11 @@ class FakeEdge:
             for upload_id in request["uploads"]:
                 if upload_id not in self._uploads:
                     raise P.bad_request(f"没有这个上传：{upload_id}")
+                used_by = self._uploads[upload_id].get("send_id")
+                if used_by and used_by != request["send_id"]:
+                    raise P.bad_request(f"这个上传已经用在别的发送里了：{upload_id}")
+            for upload_id in request["uploads"]:
+                self._uploads[upload_id]["send_id"] = request["send_id"]
             now = self._clock()
             record = {**request, "digest": digest, "status": P.QUEUED, "error": "", "sent_at": None,
                       "seen_at": None, "created_at": now, "deadline": now + request["ttl_sec"]}

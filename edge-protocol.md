@@ -85,6 +85,7 @@ GET  /edge/sends/<send_id>
 ### 3.3 `POST /edge/events/ack`
 
 - 请求体：`{"upto": <id>}`，表示编号小于等于 `upto` 的事件，Mac 都已经存好了。
+- 回答：`{"ok": true, "pending": <还没确认的事件数>}`。
 - 确认是累积的。Mac 要先把事件（**连同附件**）存好，再确认。
 - 确认以后，事件和附件在 Windows 上再留 7 天就删。7 天内还能再取，用来补救。
 
@@ -115,6 +116,7 @@ GET  /edge/sends/<send_id>
 
 - 请求体是文件的原始字节，要带 `Content-Length`，最大 100 MB。
 - 返回：`{"upload_id", "size", "sha256"}`。
+- 一个 `upload_id` 只能用在一条发送里（同一条发送重试不算）；要发给几个人，就传几次。
 - 24 小时内没被任何发送请求用到，就删掉。用过的，在那条发送结束 7 天后删掉。
 
 ### 3.8 `POST /edge/sends`
@@ -130,7 +132,7 @@ GET  /edge/sends/<send_id>
   - 同一个 `send_id` 只发一次：重复提交、内容相同，返回现在的状态；内容不同，返回 409。
 - **`chat_id`**：必须在名单里，否则返回 403。
 - **`text`**：最长 1500 字，是要发出去的成品文字（号码已经换回真实的）。只发附件时可以为空。
-- **`uploads`**：最多 9 个，只能是 `/edge/uploads` 返回的编号。
+- **`uploads`**：最多 9 个，只能是 `/edge/uploads` 返回的、还没用在别的发送里的编号。
 - **`ttl_sec`**：60 到 86400，默认 1800。这么久还没发出去，就不发了（`expired`）。
 
 返回：`{"send_id", "status": "queued"}`。
@@ -142,6 +144,8 @@ GET  /edge/sends/<send_id>
 
 ### 3.10 错误码
 
+出错时回答的格式是 `{"error": "<代码>", "detail": "<中文说明>"}`，409 冲突时还带 `current_version`。
+
 | 码 | 什么时候 |
 |---|---|
 | 400 | 请求格式不对：缺字段、太长、不认识的 `upload_id` |
@@ -150,6 +154,7 @@ GET  /edge/sends/<send_id>
 | 404 | 没有这个事件、附件或发送请求 |
 | 409 | `send_id` 已经有了但内容不同；名单版本冲突 |
 | 413 | 文件超过 100 MB |
+| 500 | Windows 这边出错了（`detail` 里有错误类型），稍后再试 |
 | 503 | Windows 正在停机，稍后再试 |
 
 ## 4. 事件
@@ -236,6 +241,8 @@ GET  /edge/sends/<send_id>
   - **文字**：去掉多余空白以后完全一样，而且在 `EDGE_SEEN_TEXT_SEC`（默认 1800）秒内；
   - **只有附件的发送**：`EDGE_SEEN_FILE_SEC`（默认 600）秒内读回了这个号发的文件或图片。
 - 对上了，发 `send_seen`；时限过了还没对上，发 `send_unseen`。
+- 报过 `send_unseen` 以后，24 小时内又读回来了，照样发 `send_seen`，不会当成运营亲手回复。
+- 读回比对只认还没对上的发送：已经对上过的话，运营再打一遍，就是运营亲手回复。
 - **这两个默认值是暂定的**。Windows 真机测完（`prm-copilot-test.md` 第 2、4、5 步）后，按实际的读回延迟和「读回文字是否一字不差」更新本节。
 
 ### 运营亲手回复
@@ -280,6 +287,7 @@ GET  /edge/sends/<send_id>
 ```
 PRM_EDGE=on                    # 打开边缘（要 CLAUDE_RELAY=on、PRIVATE_CHAT_ENABLED=true；不能和 PRM_COPILOT 同时开）
 PRM_EDGE_TOKEN=…               # 至少 32 个字符，和 CLAUDE_RELAY_TOKEN 不同
+EDGE_DB=data/edge.db           # 事件、发送、上传、名单
 EDGE_SEND_MIN_GAP_SEC=3
 EDGE_SEND_PER_HOUR=60
 EDGE_SEEN_TEXT_SEC=1800
@@ -297,6 +305,7 @@ EDGE_KEEP_DAYS=7
 
 ## 11. 以后再做
 
+- **Windows 停机期间达人发的消息**：v1 里，Windows 重启时把微信里已有的消息当历史，不补转给 Mac（运营在微信里能看到）。以后做「重启后补转最近几小时、Mac 还没收到的消息」，要先在真机上确认重启后能读到哪些消息。
 - `creator_message_recalled`：要先在 Windows 真机上摸清撤回在数据库里的样子。
 - 识别风控验证窗口（`wechat: verify`）。
 - TLS。

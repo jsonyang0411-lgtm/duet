@@ -83,6 +83,7 @@ grep "文件名" CODEBASE_REFERENCE.md
    - [功能S: OCR 备选读取（OCR_FALLBACK）](#功能s-ocr-备选读取ocr_fallback)
    - [功能T: 好友管理（AUTO_ACCEPT_FRIENDS）](#功能t-好友管理auto_accept_friends)
    - [功能U: 达人副驾驶（PRM_COPILOT）](#功能u-达人副驾驶prm_copilot)
+   - [功能V: 微信边缘（PRM_EDGE）](#功能v-微信边缘prm_edge)
 5. [配置文件和环境变量](#5-配置文件和环境变量)
 
 ---
@@ -224,6 +225,12 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `PRM_HOLDING_MIN` | `int` | `10` (0–120；0 = 不发) | `src/config.py` | `PrmService.send_holding_replies()`：Mac 写的草稿等了这么多分钟还没人处理，先回达人一句 `PRM_HOLDING_TEXT`，每轮消息最多一次 |
 | `PRM_HOLDING_TEXT` | `str` | `"收到，我确认一下马上回你"` (1–60 字) | `src/config.py` | 同上，回的那句话 |
 | `PRM_RETENTION_DAYS` | `int` | `30` (1–365) | `src/config.py` | `PrmService.purge_due()`（发送线程每小时）：合作单进入「已签收」满这么多天，清除收件信息（8.2）；`snapshot` 的 `purge_due_at` |
+| `PRM_EDGE` | `str` | `"off"` (`off`/`on`；`on` 时必须 `CLAUDE_RELAY=on`、`PRIVATE_CHAT_ENABLED=true`，不能和 `PRM_COPILOT` 同时开) | `src/config.py` | `src/bot.py:_start_edge()` 建 `EdgeService`（发送用 `backend.send_text` / `send_file`），`set_private_filter(edge.is_party_chat)`、`set_own_message_hook(edge.on_own_message)`、`relay.attach_edge`（`/edge/*` 在中转的端口上）、`router._edge`；路由步骤 `edge`（`self_message` 之后、`persist` 之前） |
+| `PRM_EDGE_TOKEN` | `str` | 空（开 `PRM_EDGE` 时至少 32 个字符，不能等于 `CLAUDE_RELAY_TOKEN`） | `src/config.py` | `src/edge/http.py:handle()`：`/edge/*` 只认它（`/relay/*` 只认 cc 的口令） |
+| `EDGE_DB` | `str` | `"data/edge.db"` | `src/config.py` | `EdgeStore`：`edge_events`、`edge_files`、`edge_sends`、`edge_uploads`、`edge_parties`、`edge_meta` |
+| `EDGE_SEND_MIN_GAP_SEC` / `EDGE_SEND_PER_HOUR` | `int` | `3` (0–60) / `60` (1–1000) | `src/config.py` | `EdgeService._send_due()`：两条发送之间至少隔几秒、每小时最多几条（只算 `/edge` 的发送）；被挡住的留在 `queued` 直到 `ttl_sec` |
+| `EDGE_SEEN_TEXT_SEC` / `EDGE_SEEN_FILE_SEC` | `int` | `1800` / `600` (60–86400) | `src/config.py` | `EdgeService._check_unseen()`：发出去的文字（只有附件的发送）这么久没从微信读回来，报 `send_unseen`；`_match_own` 文件按 `EDGE_SEEN_FILE_SEC` 认 |
+| `EDGE_KEEP_DAYS` | `int` | `7` (1–30) | `src/config.py` | `EdgeService.cleanup()`（每小时）：确认过的事件和附件、用过的上传、发送的正文，这么多天以后删掉（发送记录本身留 30 天，`send_id` 重试照样认得） |
 | `OCR_FALLBACK` | `str` | `"off"` (`off`/`on`) | `src/config.py` | `src/wechat/mac_hybrid_backend.py:_ocr_from_config()` 建 `OcrFallback(MacVisionEngine())`，`src/wechat/wcdb_backend.py:_ocr_from_config()` 建 `OcrFallback(WindowsOcrEngine(...))`；数据库读不了时改读屏幕上打开的群聊。对 macOS 的 `mac_hybrid` 和 Windows 的 `wcdb` 后端有效；控制台「高级 → 读取备选（OCR）」有开关 |
 | `OCR_FALLBACK_AFTER` | `int` | `3` (1–20) | `src/config.py` | `OcrFallback.note_db_failure()`：数据库每秒读一次，连续失败这么多次才切到 OCR |
 | `OCR_POLL_SEC` | `float` | `4.0` (1–60) | `src/config.py` | `OcrFallback.poll()`：两次看屏幕的最短间隔（一次约 0.8 秒） |
@@ -457,6 +464,7 @@ todo_delete_keywords: list[str] = [
 | `_save_group_names(chatrooms)` | 持久化群名映射(静态) | `chatrooms: dict` | `None` |
 | `_save_group_members(chat_members)` | 持久化群成员列表(静态) | `chat_members: dict` | `None` |
 | `set_private_filter(accept)` / `refresh_private_chats_soon()` / `_wants_private(username)` | PRM：`accept(username)` 为真的私聊（登记的达人）不管 `PRIVATE_CHATS` 都读（自定义号也认，跳过「和机器人同名」的检查；仍要 `PRIVATE_CHAT_ENABLED=true`，也仍要能解析出显示名，发送靠它找窗口）；`_resolve_groups` 和 `_refresh_private_chats_if_due` 都问它，出错当作不读；登记以后 `refresh_private_chats_soon` 把 `_last_session_refresh` 清零，下一轮轮询就刷新会话 | `accept: Callable[[str], bool] \| None` / — / `username: str` | `None` / `None` / `bool` |
+| `own_wxid()` / `db_readable()` / `wechat_window_found()` / `_special_info(content, local_type)` | 给微信边缘（PRM_EDGE）用：账号自己的 wxid；数据库连续读失败少于 3 次（`_db_failures`，轮询循环里记）；微信主窗口在不在（`find_hwnd(wake=False)`，发送占着窗口时不问、返回 None）；标准化消息多一个 `special`：链接、小程序、聊天记录、转账、红包（appmsg 的 `type`、`title`）、名片（`nickname`）、位置（`poiname` / `label`）、系统消息（文字，撤回时取 `replacemsg`），其他是 `{}` | — / — / — / `content: str, local_type: int` | `str` / `bool` / `bool \| None` / `dict` |
 | `set_own_message_hook(hook)` / `_tell_own_message(standardized)` | PRM：`_poll_group` 遇到自己（`myWxid`）发的消息，跳过之前先交给 `hook`，只限过滤器要的私聊（登记的达人；群聊和别的私聊不给）；`hook` 出错只记日志，轮询照常；这些消息照旧不进路由 | `hook: Callable[[dict], None] \| None` / `standardized: dict` | `None` |
 | `_save_private_names(chats)` | 静态方法：有过滤器（PRM 打开）时，把会话列表里所有有名字的私聊（wxid → 名字）合并写进 `data/private_chat_names.json`（原子替换，没变化不写）；控制台「合作单」页的「从最近的私聊里选」读它 | `chats: dict[str, str]` | `None` |
 | `_poll_cycle(callback)` | 单次轮询周期 | `callback: MessageCallback` | `None` |
@@ -946,7 +954,7 @@ todo_delete_keywords: list[str] = [
 |---|---|---|
 | `context.Stop(value)` / `RouteContext` / `RouteStep(name, run, doc)` | 结束路由并给出返回值 / 步骤共享的上下文（路由器、消息、追踪、`raw`、`is_at`、`sticky_triggered`、`clean_content`、`reply`）/ 一个有名字的步骤 | — |
 | `context.AT_MENTION_MAX_AGE_SEC` 等三个年龄常量 | 300 秒：过旧的 @、欢迎、逐条监听消息当作启动时重放的历史（`src/router.py` 仍导出同名常量） | `int` |
-| `steps.ROUTE_STEPS` | 顺序：`self_message`（自己的消息）→ `persist`（入库，重复停止）→ `claude_relay`（`CLAUDE_RELAY=on` 时允许的人私聊里的 `cc …` 转给 Mac，回执结束路由）→ `prm`（`PRM_COPILOT=on` 时登记达人的私聊静默变成 `prm` 任务，不回复、结束路由；出错也不交给后面的步骤）→ `relay_only`（`CLAUDE_RELAY_ONLY=on` 时其余消息到此静默结束）→ `memory_hooks`（记忆任务/旧日记触发）→ `full_feed`（逐条监听的人设）→ `quoted_image` → `image_message` → `close_image_window` → `private_chat` → `quote_of_other_member` → `welcome` → `detect_trigger`（@/粘性/关键词/跟聊/点名，写 `route`）→ `mention_gate`（过旧的 @、去掉 @机器人、空 @ 变「在吗」）→ `feishu_export` → `help_command` → `fun_commands` → `admin_command` → `todo_command` → `chat_request` → `ambient`（主动发言，闸门关则沉默）→ `finish`（清洗并登记回复） | `tuple[RouteStep, ...]` |
+| `steps.ROUTE_STEPS` | 顺序：`self_message`（自己的消息）→ `edge`（`PRM_EDGE=on` 时名单里达人的私聊交给 `EdgeService.handle`：变成事件给 Mac，不入库、不回复、结束路由；出错也不交给后面的步骤）→ `persist`（入库，重复停止）→ `claude_relay`（`CLAUDE_RELAY=on` 时允许的人私聊里的 `cc …` 转给 Mac，回执结束路由）→ `prm`（`PRM_COPILOT=on` 时登记达人的私聊静默变成 `prm` 任务，不回复、结束路由；出错也不交给后面的步骤）→ `relay_only`（`CLAUDE_RELAY_ONLY=on` 时其余消息到此静默结束）→ `memory_hooks`（记忆任务/旧日记触发）→ `full_feed`（逐条监听的人设）→ `quoted_image` → `image_message` → `close_image_window` → `private_chat` → `quote_of_other_member` → `welcome` → `detect_trigger`（@/粘性/关键词/跟聊/点名，写 `route`）→ `mention_gate`（过旧的 @、去掉 @机器人、空 @ 变「在吗」）→ `feishu_export` → `help_command` → `fun_commands` → `admin_command` → `todo_command` → `chat_request` → `ambient`（主动发言，闸门关则沉默）→ `finish`（清洗并登记回复） | `tuple[RouteStep, ...]` |
 | `steps.self_message(ctx)` | 跳过机器人自己的消息：后端已按 wxid 核实过的消息（`_not_self_by_id`）直接放行；否则按显示名（等于或包含 `BOT_DISPLAY_NAME`）判断 | `Stop \| None` |
 | `steps.run_route(router, msg, trace, steps=ROUTE_STEPS)` | 依次执行，第一个返回 `Stop` 的结束，并 `trace.note(ended_by=<步骤名>)` | `str \| None` |
 | `steps.run_fun_command(router, msg, clean_content, trace)` | 抽签/塔罗，群聊 @ 路径和私聊共用；命中会替换此前命令产生的回复 | `(matched, reply)` |
@@ -1078,6 +1086,7 @@ todo_delete_keywords: list[str] = [
 | `tools/claude_relay/worker.py` | Mac 端，只用标准库（系统 Python 3.9 可用）：`load_settings`（`~/.claude-relay/config.json`，`RELAY_URL`/`RELAY_TOKEN` 覆盖）、`find_claude`（PATH、常见位置、最新的 VS Code 扩展内置版，每个任务重新找）、`project_dir`（只允许 `projects` 里的别名）、`RelayClient`（忽略系统代理）、`run_claude`（任务走 stdin；`--output-format stream-json --verbose`，边读边交给 `Progress`；每 30 秒心跳并带上进度，取消/超时/worker 停止时发 SIGINT，30 秒后强杀）、`parse_output`（流里最后一个 `"type": "result"` 行，也认旧的单个 JSON）、`summarize`（结果、会话、被拒绝的权限）、会话不存在时去掉 `--resume` 重跑一次、`deliver`/`flush_outbox`（结果先写 `~/.claude-relay/outbox/`，送达才删）、`--check`、`--once` | — |
 | 任务类型：`relay_jobs.kind`（`admin` 默认 / `prm`）、`meta`（JSON）、`ready_at`（旧库启动时补列）；`store.ADMIN` / `PRM` / `KINDS` | `RelayStore.add(..., kind="admin", meta=None, ready_at=None, input_closed=False)`（未知类型抛 `ValueError`；`input_closed`：以后的消息不并进来，例如 PRM 的清理任务）；`append_pending(chat_id, kind, text, files=(), ready_at)`：这个私聊这种类型还没被领走、还收消息的最新任务追加文字和文件、推迟 `ready_at`（同一把锁里，要么并进去，要么调用方另做）；`rewrite_chat(chat_id, kind, rewrite)`：PRM 8.2 清理，这个私聊这种类型的任务的 `text`、`result_text`、`result_json` 和跟进消息都用 `rewrite` 改写，返回改了几处；`claim_next(now, kinds=("admin",))` 只交出 `kinds` 里、`ready_at` 已到的任务，只有 `admin` 查会话；`add_followup(..., kind="admin")` 只并进同类型的进行中任务；`finish` 只给 `admin` 任务记会话 | `int` / `int \| None` / `dict \| None` / … |
 | `RelayStore.add_outfile(job_id, name, path, size, sha256, limit)` / `outfiles(job_id)` | `relay_outfiles(id, job_id, name, path, size, sha256)`：只收进行中（或失联）的 `prm` 任务的，每个任务最多 `limit` 个 | `int \| None` / `list[dict]` |
+| `ClaudeRelay.attach_edge(edge, token)` / `edge` / `edge_token` / `http._RelayHandler._edge(method)` / `do_PUT` | 微信边缘（PRM_EDGE）挂在中转的 HTTP 服务上：`/edge/*` 先于中转口令检查，交给 `src/edge/http.handle`（自己的口令 `PRM_EDGE_TOKEN`）；没挂时 `/edge/*` 回 404；`PUT` 只有 `/edge/parties` 用 | — | — |
 | `ClaudeRelay.register_kind(kind, on_result)` / `submit(chat_id, sender, text, *, kind, meta, files=(), settle_sec=0, fresh=False, input_closed=False)` / `collect(held)` / `_hand_over(now)` | 别的类型（`prm`）的任务：`submit` 不发任何回执，依次试「并进还没被领走的同类任务（推迟 `settle_sec`）」「只有文字时并进进行中的同类任务」「新任务」，返回 `(merged\|followup\|queued, 编号)`；`fresh=True` 一定开新任务（`meta` 要送到 worker：接管结束后的 `history`、清理任务），`input_closed=True` 再让以后的消息都不并进来；`collect` 就是 `_collect`（图片复制、文件原地）；发送线程每轮先 `_hand_over`：结束（或失联）的这类任务交给 `on_result`，返回 True 才算送达，出错或 False 隔 `RETRY_SEND_SEC` 再给；它们永远不发微信，`_send_progress` 只管 `admin`，`ask()` 对非 `admin` 任务返回 None（钩子按拒绝处理，达人的私聊收不到批准请求），`_requeue_leftovers` 保留类型和 `meta`（`history` 除外：只跟原任务说一次） | — / `(str, int)` / `(files, problems)` / — |
 | `ClaudeRelay.next_job(wait, kinds=("admin",))` / `note_worker(projects, default="", kinds=None)` / `outfile(job_id, name, read, length)` / `service.job_meta(job)` | 任务 JSON 多了 `kind` 和 `meta`；记下 worker 说它能做的类型（`snapshot()["worker_kinds"]`）；`prm` 任务的 worker 传回文件：只收进行中的 prm 任务、1 字节到 `MAX_OUTFILE_BYTES`（100 MB）、每个任务 `MAX_OUTFILES`（9）个，名字去掉路径和非法字符，写到 `files_dir/outfiles/job-<编号>/`（同名加 `(2)`，先写 `.part`，边收边算 sha256，收不全抛 `OSError`）；`meta` 读成 dict | `dict \| None` / — / `dict \| None` / `dict` |
 | `http.worker_kinds(header)` / `POST /relay/jobs/<id>/outfiles?name=` / `GET /relay/health` | `/relay/health` 回 `{"ok": true, "kinds": ["admin", "prm"]}`（只做草稿的 worker 靠 `kinds` 认出新版机器人）；`GET /relay/next` 读 `X-Relay-Kinds`（逗号分隔，只认 `admin` / `prm`；没有这个头的旧 worker 只拿 `admin`，达人的话永远不会被当成 cc 任务执行）；传回文件：原始字节（不是 JSON），`Content-Length` 必须给，没有 name 或长度 400，不是进行中的 prm 任务 / 太大 / 太多 404（关连接），收不全 400 | `tuple[str, ...]` / — |
@@ -1199,6 +1208,27 @@ todo_delete_keywords: list[str] = [
 | `PrmService.snapshot()` / `service.snapshot(store, *, running, extra=None, limit=40, retention_days=30, now=None)` / `gates_out(store)` / `event_out(ev)` | 控制台的数据（见 `_prm_state`、`_prm_deal`）；停止时也能从数据库直接拼 | `dict` |
 | `steps.prm(ctx)` / `Bot._start_prm(config, router, backend, relay)` | 路由步骤：`router._prm` 为 `None` 时跳过；接了就 `trace.redact(...)`（决策记录不留达人原文）、`trace.reason("prm_copilot")`，以 `Stop(None)` 结束（不回复）；`handle` 出错时，只要是登记达人的私聊也照样结束（不会落到后面的普通聊天）；`_start_prm`：`PRM_COPILOT=on` 且中转在运行时建服务、给后端装过滤器、`start()`、挂到 `router._prm`、`register_prm`，`run()` 结束时 `stop()` | `Stop \| None` / `PrmService \| None` |
 
+### 2.53 `src/edge/`（微信边缘，`PRM_EDGE`；协议见根目录 `edge-protocol.md`）
+
+Windows 只替 Mac 的业务服务收发微信（见功能 V）。`protocol.py`、`http.py`、`client.py`、`fake.py` 只用标准库、Python 3.9 能跑，Mac 端直接用；`store.py`、`text.py`、`service.py` 是 Windows 这一侧。
+
+| 名称 | 描述 | 返回值 |
+|---|---|---|
+| `protocol.PROTOCOL` / 事件类型 `CREATOR_MESSAGE`、`OPERATOR_MESSAGE`、`CHAT_NOTICE`、`CREATOR_MESSAGE_RECALLED`（预留）、`SEND_RESULT`、`SEND_SEEN`、`SEND_UNSEEN`、`EDGE_STATUS` / 发送状态 `QUEUED`、`SENDING`、`SENT`、`FAILED`、`EXPIRED`、`INDETERMINATE` / 上限和默认值 | 两边共用的名字：文字 1500 字、一条最多 9 个附件、上传 100 MB、`ttl_sec` 60–86400（默认 1800）、长轮询最多 30 秒、名单 5000 人、`LATE_SEEN_SEC`（86400）、`HISTORY_SEC`（300）、`FAILING_AFTER`（3） | — |
+| `protocol.EdgeError(status, code, detail, close=False, **extra)` / `check_send(body)` / `send_digest(send)` / `check_parties(body)` / `parties_digest(wxids)` / `decide_parties(current_version, current_digest, version, wxids)` / `party_rejection(wxid, reserved)` / `clamp(value, low, high, default)` | 拒绝一个请求（`{"error", "detail", ...}`，`close` 时连接不复用）；发送请求的检查和规范化；同一个 `send_id` 算不算同一条（`chat_id` + 文字 + 附件）；名单的检查（版本从 1 开始、去重）；名单版本规则：更大 → `apply`，相等且同一份 → `same`，否则 `conflict`；不收的 wxid（群聊、格式不对、管理员和 cc 用户） | — / `dict` / `str` / `(int, list)` / `str` / `str` / `str` / `float` |
+| `http.handle(handler, method, service, token)` / `http.serve(service, token, host="127.0.0.1", port=0)` | `/edge/*` 的 HTTP，一份代码：中转的服务器（`_RelayHandler._edge`）和假服务端（`serve`）都走它。口令不对 401（关连接）、路径不对 404、方法不对 405；`EdgeError` 变成对应的状态码和 JSON，别的异常 500（不带堆栈）；附件按流读写 | — / `ThreadingHTTPServer` |
+| `client.EdgeClient(base_url, token, timeout=15)` / `health()` / `events(after, wait, limit)` / `ack(upto)` / `download(event_id, n, dest)` / `put_parties(version, wxids)` / `private_chats()` / `upload(path, name=None)` / `upload_bytes(data, name)` / `send(send_id, chat_id, text, uploads, ttl_sec)` / `send_status(send_id)` / `client.EdgeError` | Mac 端的客户端：每个接口一个方法；不走系统代理；拒绝时抛 `EdgeError`（`status`、`code`、`detail`、`body`），网络错误留给调用方；下载先写 `.part` 再改名；`send_status` 没有时返回 None | `dict` / `list` / … |
+| `fake.FakeEdge(token=None, *, reserved, auto_send=True, auto_seen=True, private_chats, clock)` | 假的 Windows 边缘：整个协议在内存里，检查和真的一样；`start()` 时也报一次状态；剧本：`creator_says`、`operator_says`、`notice`、`set_status`、`complete`、`start_sending`、`seen`、`unseen`、`restart`、`expire_due`、`fail_next`；查看：`sends`、`sent()`、`events_list`、`acked_upto`、`parties`、`parties_version` | — |
+| `store.EdgeStore(path)` | SQLite（一个连接加锁）：事件（同一个私聊的同一条微信消息只存一次）和附件（`owned`：边缘自己复制的才删）；发送（`send_id` 主键，比较后再改状态 `move_send`）、`waiting_read_back`、`unconfirmed`、`sent_since`、`mark_seen` / `mark_unseen`、`clear_sends`（到期清空正文、再过 30 天删行）；上传（一个上传只给一条发送）；名单和版本（`edge_meta`） | — |
+| `text.message_text(msg)` / `notice_text(msg)` / `quote_of(msg, own_wxid, chat_id)` / `is_reply(msg)` / `is_notice(msg)` / `normalized(text)` / `APPMSG_LABELS` | 一条微信消息在事件里的文字（协议 4.2 的表：图片、语音转写、视频、表情、名片、位置、链接、小程序、聊天记录、转账、红包、文件、引用、系统消息，不认识的也有一行）；引用的那句和它是谁说的（`us` / `creator` / `other`）；读回比对时空白算一个空格 | `str` / `str` / `dict \| None` / `bool` / `bool` / `str` |
+| `service.EdgeService(config, *, store, send_text, send_file, clock, files_dir, collect, own_wxid, wechat_online, db_readable, private_names, on_parties_changed)` / `start(run_thread=True)` / `stop()` / `tick()` | Windows 这一侧：`start` 先把上次停机时还在 `sending` 的发送报成 `indeterminate`（不重发），再报一次状态，起发送线程（每秒一轮 `tick`：每 30 秒查状态、过期、发一条、读回超时、每小时清理） | — |
+| `EdgeService.handle(msg)` / `is_party_chat(chat_id)` / `_collect_files(msg)` | 路由步骤 `edge` 用：名单里的私聊返回 True（之后不回复）；超过 5 分钟的旧消息不转；系统消息报 `chat_notice`；别的报 `creator_message`（文字、引用、附件：图片解开后复制到 `data/edge_files/in/`，文件留在微信放的地方；取不到的写 `missing` 原因）；同一条只报一次 | `bool` |
+| `EdgeService.on_own_message(msg)` / `_match_own(chat_id, msg, now)` / `_note_line` / `_note_file` | 后端交来的、这个号在名单私聊里发的消息：超过 5 分钟的不管；系统消息报 `chat_notice`；和这次运行发过、还没对上的文字一样（24 小时内），或 `EDGE_SEEN_FILE_SEC` 内发过文件，就是我们发的（`send_seen`，带延迟秒数；文字加附件的发送，附件不再报）；重启前发的只认还没对上的；都对不上报 `operator_message` | — |
+| `EdgeService._send_due(now)` / `_deliver(record)` / `_finish(send_id, status, error)` / `_expire(now)` / `_check_unseen(now)` | 发送：微信离线时不发（排着，直到 `ttl_sec`）；最小间隔、每小时上限；`queued → sending` 抢到的才发，先文字后附件，第一个失败就停（文字已发出时错误里写明）；结果报 `send_result`；连续 3 条失败报 `edge_status send=failing`，发成功回到 `ok`；过期报 `expired`；读回超时报 `send_unseen`（只报一次，之后读回来照样 `send_seen`） | `int` / — / — / — / — |
+| `EdgeService._probe_status()` / `_check_status()` / `_set_status(detail, **changes)` | `wechat`（主窗口在不在；`None` = 正在发送，下次再问）、`db`（数据库能不能读）、`send`；三项有变化才报 `edge_status` | — |
+| `EdgeService.health()` / `events(after, wait, limit)` / `ack(upto)` / `event_file(event_id, n)` / `put_parties(version, wxids)` / `private_chats()` / `upload(name, read, length)` / `send(request)` / `send_status(send_id)` / `cleanup(now=None)` | `http.py` 调的协议实现：长轮询等新事件（最多 30 秒，每秒醒一次）；名单生效时去掉的人还在排队的发送报 `failed`（「不在名单里」）并通知后端刷新私聊；`private_chats` 来自 `data/private_chat_names.json`，去掉名单里的、管理员、cc 用户和群；上传写到 `data/edge_files/uploads/<编号>/`，边收边算 sha256，收不全删掉；发送：同一 `send_id` 内容相同回原状态、不同 409，不在名单 403，上传不存在或已被别的发送用了 400；清理按 `EDGE_KEEP_DAYS`、未确认事件 30 天、没用的上传 24 小时 | … |
+| `steps.edge(ctx)` / `Bot._start_edge(config, router, backend, relay)` | 路由步骤：`router._edge` 为 `None` 时跳过；接了就 `trace.redact(...)`、`trace.reason("prm_edge")`、`Stop(None)`；`handle` 出错时名单里的私聊也照样结束；`_start_edge`：`PRM_EDGE=on` 且中转在运行时建服务、装过滤器和自己消息的钩子、`relay.attach_edge`、`start()`、`router._edge`，`run()` 结束时 `stop()` 并摘掉 | `Stop \| None` / `EdgeService \| None` |
+
 ---
 
 ## 3. 模块间关系图
@@ -1309,6 +1339,7 @@ _API 请求 → _UIHandler._handle_request()
   ├── /api/prm/packets    → PrmService.decide（send / edit / drop / wrong）（仅 POST，机器人运行时）
   ├── /api/prm/deals      → PrmService.deal_action / apply_deal_action（停止时直接写 data/prm.db）（仅 POST）
   ├── /api/prm/reveal     → PrmService.reveal / reveal_numbers（写操作记录）（仅 POST）
+  （中转的端口 8790 上另有 /edge/*：微信边缘，见功能 V；口令 PRM_EDGE_TOKEN）
   ├── /api/onboarding/*   → 引导流程状态管理
   ├── /api/logs           → _read_recent_logs()
   ├── /api/status         → _status.snapshot()
@@ -2555,6 +2586,47 @@ CREATE TABLE relay_outfiles (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGE
 
 还没做的：真机（Windows 微信 + Mac 的 worker）还没测，尤其是自己发的消息能否从数据库回读、回读延迟和 `OWN_MATCH_SEC`；签收以外的结束（例如没寄就结案）不会触发 8.2 清理。
 
+---
+
+### 功能V: 微信边缘（PRM_EDGE）
+
+目的：和同事团队合并以后的分工。Windows 只替 Mac 的业务服务收发微信，起草、审核、自动放行、接管、审批单、聚水潭、小红书、清理都在 Mac。协议见根目录 `edge-protocol.md`；第二轮的意见和回答见 `prm-merge-reply-2.md`。默认关闭；关闭时 `router._edge` 是 `None`、中转上没有 `/edge/*`，行为不变。
+
+```
+名单里的达人发私聊 → WcdbBackend（set_private_filter = edge.is_party_chat）→ steps.self_message → steps.edge
+  → EdgeService.handle：text.message_text / quote_of、_collect_files（relay.attachments.resolve）
+  → EdgeStore.add_event(creator_message)（不进 messages.db，决策记录不留内容）
+Mac：GET /edge/events?after=&wait=25 → 存好事件和附件（GET /edge/events/<id>/files/<n>）→ POST /edge/events/ack
+Mac：PUT /edge/parties {version, wxids}（名单有变化、或 /edge/health 的 parties_version 对不上时）
+Mac：POST /edge/uploads?name= → POST /edge/sends {send_id, chat_id, text, uploads, ttl_sec}
+  → edge-sender 线程 tick → _send_due（离线不发、间隔、每小时上限）→ _deliver → backend.send_text / send_file
+  → send_result（sent / failed / expired / indeterminate）
+这个号在名单私聊里发的消息 → _tell_own_message → EdgeService.on_own_message → _match_own
+  → 对上 → send_seen；对不上 → operator_message；时限过了 → send_unseen
+状态：每 30 秒 _check_status（wechat_window_found / db_readable）+ 连续发送失败 → edge_status
+清理：每小时 cleanup（确认后 EDGE_KEEP_DAYS 删事件和自己复制的附件；未确认 30 天；没用的上传 24 小时；发送正文到期清空）
+```
+
+```sql
+-- data/edge.db
+CREATE TABLE edge_events (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, at REAL, chat_id TEXT DEFAULT '',
+  message_id TEXT, body TEXT DEFAULT '{}', acked_at REAL);
+CREATE UNIQUE INDEX edge_events_message ON edge_events(chat_id, message_id) WHERE message_id IS NOT NULL;
+CREATE TABLE edge_files (event_id INTEGER, n INTEGER, name TEXT, path TEXT, size INTEGER, kind TEXT,
+  owned INTEGER DEFAULT 1, PRIMARY KEY (event_id, n));
+CREATE TABLE edge_sends (send_id TEXT PRIMARY KEY, chat_id TEXT, text TEXT DEFAULT '', uploads TEXT DEFAULT '[]',
+  ttl_sec INTEGER, digest TEXT, status TEXT, error TEXT DEFAULT '', created_at REAL, deadline REAL, sent_at REAL,
+  seen_at REAL, unseen_at REAL, finished_at REAL, cleared INTEGER DEFAULT 0);
+CREATE TABLE edge_uploads (upload_id TEXT PRIMARY KEY, name TEXT, path TEXT, size INTEGER, sha256 TEXT,
+  created_at REAL, send_id TEXT);
+CREATE TABLE edge_parties (wxid TEXT PRIMARY KEY);
+CREATE TABLE edge_meta (key TEXT PRIMARY KEY, value TEXT);   -- parties_version, parties_digest
+```
+
+测试：`tests/test_edge_protocol.py` 一套用例通过客户端同时跑假服务端和真的 Windows 边缘（挂在中转的 HTTP 服务上，微信换成记录器），另外用 Mac 自带的 Python 3.9 跑一遍假服务端和客户端；`tests/test_edge_service.py` 是 Windows 这一侧：消息文字、`special` 的解析、读回和运营亲手回复、重启后的读回、节奏和过期、失败和状态、清理、路由步骤（不入库）、设置检查、`_start_edge`。
+
+还没做的：Windows 真机（边缘版清单）；Windows 停机期间达人发的消息重启后不补转（当历史）；撤回关联到原消息（`creator_message_recalled`）；识别风控验证窗口；TLS。
+
 ## 5. 配置文件和环境变量
 
 ### 5.1 `.env` 文件完整配置项
@@ -2712,6 +2784,14 @@ PRM_TAKEOVER_MIN=120                           # 运营亲手回了达人，人�
 PRM_HOLDING_MIN=10                             # 草稿等多久先回达人一句（0=不回，最多 120）
 PRM_HOLDING_TEXT=收到，我确认一下马上回你        # 那一句
 PRM_RETENTION_DAYS=30                          # 签收后多少天清除收件信息（1–365）
+PRM_EDGE=off                                   # on：Windows 只替 Mac 收发微信（/edge/*，见 edge-protocol.md）
+PRM_EDGE_TOKEN=                                # /edge/* 的口令（至少 32 个字符，和 CLAUDE_RELAY_TOKEN 不同）
+EDGE_DB=data/edge.db                           # 事件、发送、上传、名单
+EDGE_SEND_MIN_GAP_SEC=3                        # 两条发送之间至少几秒（0–60）
+EDGE_SEND_PER_HOUR=60                          # 每小时最多几条（1–1000）
+EDGE_SEEN_TEXT_SEC=1800                        # 文字多久没读回就报 send_unseen
+EDGE_SEEN_FILE_SEC=600                         # 只有附件的发送多久没读回就报
+EDGE_KEEP_DAYS=7                               # 事件和附件确认后留几天（1–30）
 CLAUDE_RELAY_LONG_FILE=on                      # 太长的结果发成 txt 文件（只有 Windows 能发文件，其他照旧截断）
 
 # === OCR 备选读取（macOS mac_hybrid 和 Windows wcdb） ===
@@ -2789,6 +2869,8 @@ WCDB_KEY=
 | `data/private_chat_names.json` | `src/wechat/wcdb_backend.py`（`PRM_COPILOT=on` 时） | 微信会话列表里的私聊 wxid → 名字（控制台「合作单」页从里面选人登记） |
 | `data/prm.db` | `src/prm/store.py` | 达人副驾驶：达人、合作单、草稿、号码占位符、运单、自动发送门槛、操作记录 |
 | `data/claude_relay_files/outfiles/job-<编号>/` | `src/relay/service.py:ClaudeRelay.outfile` | prm 任务从 Mac 传回的素材文件（草稿发送时用） |
+| `data/edge.db` | `src/edge/store.py` | 微信边缘：给 Mac 的事件、Mac 的发送请求、上传、名单 |
+| `data/edge_files/in/`、`data/edge_files/uploads/` | `src/edge/service.py` | 达人发来的图片（解开后的副本，确认后 7 天删）、Mac 上传要发的文件（24 小时没用或发送结束 7 天后删） |
 | `data/welcome_templates.json` | `src/welcome.py` | 欢迎模板 + 群映射 |
 | `data/lots.json` | `src/fun.py` | 自定义抽签配置 |
 | `data/feishu_resources.json` | `src/integrations/feishu/knowledge.py` | 飞书知识库资源 ID |

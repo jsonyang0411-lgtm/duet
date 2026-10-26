@@ -178,8 +178,16 @@ class ClaudeRelay:
         self._send_failed_at: dict[tuple[int, str], float] = {}
         self._thread: Optional[threading.Thread] = None
         self._server = None
+        # PRM_EDGE: the WeChat edge answers /edge/* on this server (attach_edge).
+        self.edge = None
+        self.edge_token = b""
 
     # ── lifecycle ─────────────────────────────────────────────────────────
+
+    def attach_edge(self, edge, token: str) -> None:
+        """Let ``edge`` (src/edge EdgeService) answer /edge/* here with ``token``; None detaches."""
+        self.edge = edge
+        self.edge_token = str(token or "").encode() if edge is not None else b""
 
     def start(self) -> None:
         """The delivery thread, then the HTTP server (an OSError there is the caller's to log)."""

@@ -275,6 +275,8 @@ class Bot:
         relay = self._start_claude_relay(config, router, backend)
         # PRM_COPILOT=on: registered creators' messages become silent draft jobs.
         prm = self._start_prm(config, router, backend, relay)
+        # PRM_EDGE=on: Windows only receives and sends WeChat for the Mac business service.
+        edge = self._start_edge(config, router, backend, relay)
 
         self._start_friend_management(config, backend, admin_handler)
 
@@ -330,6 +332,9 @@ class Bot:
                 self._auto_friend.stop()
             if self._health:
                 self._health.stop()
+            if edge is not None:
+                edge.stop()
+                relay.attach_edge(None, "")
             if prm is not None:
                 prm.stop()
                 try:
@@ -470,6 +475,41 @@ class Bot:
             pass
         logger.info("PRM_COPILOT: %d registered creator(s)", len(prm.store.active_wxids()))
         return prm
+
+    @staticmethod
+    def _start_edge(config, router, backend, relay):
+        """The WeChat edge (src/edge) on the relay's port, or None when off.
+
+        Listed creators' private chats are read (set_private_filter) and forwarded as events
+        the Mac pulls; this account's own lines there are read back or reported as an
+        operator's (set_own_message_hook); the Mac's send requests go out through the backend.
+        """
+        if getattr(config, "prm_edge", "off") != "on":
+            return None
+        if relay is None:
+            logger.warning("PRM_EDGE is on but the Claude relay is not: /edge/* has no server")
+            return None
+        from .edge.service import EdgeService
+        edge = EdgeService(
+            config, send_text=backend.send_text, send_file=getattr(backend, "send_file", None),
+            own_wxid=getattr(backend, "own_wxid", None), wechat_online=getattr(backend, "wechat_window_found", None),
+            db_readable=getattr(backend, "db_readable", None),
+            on_parties_changed=getattr(backend, "refresh_private_chats_soon", None))
+        set_filter = getattr(backend, "set_private_filter", None)
+        set_hook = getattr(backend, "set_own_message_hook", None)
+        if callable(set_filter):
+            set_filter(edge.is_party_chat)
+        else:
+            logger.warning("PRM_EDGE: this WeChat backend cannot read extra private chats")
+        if callable(set_hook):
+            set_hook(edge.on_own_message)
+        else:
+            logger.warning("PRM_EDGE: this WeChat backend does not report this account's own lines; "
+                           "sends are not read back and operators' own replies are not reported")
+        relay.attach_edge(edge, config.prm_edge_token)
+        edge.start()
+        router._edge = edge
+        return edge
 
     def _log_banner(self) -> None:
         """Log the startup banner with configuration details."""

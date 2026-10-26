@@ -25,6 +25,7 @@ REASONS = {
     "private_chat": "私聊，直接交给模型",
     "claude_relay": "cc 开头的私聊指令，转给 Mac 上的 Claude Code",
     "prm_copilot": "已登记达人的私聊：不回复，静默交给 Mac 起草，草稿在控制台等运营审批",
+    "prm_edge": "名单里达人的私聊：不回复、不存进聊天记录，转给 Mac 的业务服务处理",
     "relay_only": "只做中转（CLAUDE_RELAY_ONLY）：不是中转指令，不处理",
     "admin_command_relay_only": "只做中转时管理员私聊发的管理命令（加好友等），照常执行",
     "quote_of_other_member": "引用了别的群友的话，这条是说给他的，不是对机器人说的",
@@ -57,6 +58,7 @@ REASONS = {
 # the routing step that ended the route (src/routing/steps.py)
 STEPS = {
     "self_message": "自己的消息",
+    "edge": "转给 Mac 业务服务",
     "persist": "入库",
     "claude_relay": "转给 Mac",
     "prm": "达人副驾驶",
