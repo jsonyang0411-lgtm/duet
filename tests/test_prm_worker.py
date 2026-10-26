@@ -34,7 +34,9 @@ FAKE_CLAUDE = textwrap.dedent("""\
     prompt = json.loads(sys.stdin.readline())["message"]["content"]   # stream-json input
     with open(os.environ["FAKE_CLAUDE_LOG"], "a", encoding="utf-8") as f:
         f.write(json.dumps({"args": args, "cwd": os.getcwd(), "prompt": prompt,
-                            "workspace": os.environ.get("PRM_WORKSPACE")}) + "\\n")
+                            "workspace": os.environ.get("PRM_WORKSPACE"),
+                            "proxy": {k: os.environ[k] for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                                                                 "NO_PROXY", "https_proxy") if k in os.environ}}) + "\\n")
     if "坏答案" in prompt:
         print(json.dumps({"type": "result", "result": "好的，我来回复", "is_error": False}))
         sys.exit(0)
@@ -387,7 +389,8 @@ def test_a_prm_only_worker_waits_for_a_bot_that_hands_out_jobs_by_kind(worker, b
     assert len(asked) == 1
 
 
-def test_a_prm_only_worker_has_its_own_lock_log_and_outbox(worker, tmp_path, workspace):
+def test_a_prm_only_worker_has_its_own_lock_log_and_outbox(worker, tmp_path, workspace, monkeypatch):
+    monkeypatch.setattr(worker, "LOCK_WAIT_SEC", 0.3)
     config = tmp_path / "config.json"
     config.write_text(json.dumps({"relay_url": "http://127.0.0.1:9", "token": TOKEN}), encoding="utf-8")
     added = []
@@ -493,3 +496,51 @@ def test_the_purge_job_cuts_the_case_file_down_without_claude(worker, bot, fake_
 def test_the_mac_and_the_bot_clean_up_the_same_way(worker, text):
     from src.prm import retention
     assert worker.scrub_case(text) == retention.scrub(text, [])
+
+
+# ── the proxy of Claude Code's settings (--restricted does not read them) ──
+
+PROXIES = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy",
+           "no_proxy")
+
+
+def without_proxy(monkeypatch):
+    for key in PROXIES:
+        monkeypatch.delenv(key, raising=False)
+
+
+def claude_settings(tmp_path, monkeypatch, env):
+    folder = tmp_path / "claude-config"
+    folder.mkdir(exist_ok=True)
+    (folder / "settings.json").write_text(json.dumps({"env": env, "model": "opus"}), encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(folder))
+    return folder / "settings.json"
+
+
+def test_the_proxy_comes_from_claudes_settings_only_when_the_worker_has_none(worker, tmp_path, monkeypatch):
+    without_proxy(monkeypatch)
+    path = claude_settings(tmp_path, monkeypatch, {"HTTP_PROXY": "http://127.0.0.1:7897",
+                                                    "https_proxy": "http://127.0.0.1:7897", "NO_PROXY": "localhost",
+                                                    "ANTHROPIC_MODEL": "x", "ALL_PROXY": ""})
+    assert worker.claude_settings_path() == path
+    assert worker.proxy_env() == {"HTTP_PROXY": "http://127.0.0.1:7897", "https_proxy": "http://127.0.0.1:7897",
+                                  "NO_PROXY": "localhost"}
+    assert worker.proxy_env({"NO_PROXY": "10.0.0.0/8"}, path)["HTTP_PROXY"] == "http://127.0.0.1:7897"
+    for has_one in ({"HTTPS_PROXY": "http://other:1"}, {"all_proxy": "socks5://127.0.0.1:1080"}):
+        assert worker.proxy_env(has_one, path) == {}                 # the worker's own proxy wins
+    path.write_text("{not json", encoding="utf-8")
+    assert worker.proxy_env({}, path) == {}
+    assert worker.proxy_env({}, tmp_path / "missing.json") == {}
+    assert worker._without_password("http://user:secret@proxy:8080") == "http://***@proxy:8080"
+
+
+def test_a_prm_job_hands_the_proxy_to_claude_and_not_to_the_relay_client(worker, bot, fake_claude, tmp_path,
+                                                                          workspace, monkeypatch):
+    without_proxy(monkeypatch)
+    claude_settings(tmp_path, monkeypatch, {"HTTPS_PROXY": "http://127.0.0.1:9", "NO_PROXY": "localhost"})
+    creator_says(bot, "你好")
+    run_one(worker, bot, settings(bot, fake_claude, tmp_path, prm_workspace=str(workspace)))
+    [call] = fake_claude.calls()
+    assert call["proxy"] == {"HTTPS_PROXY": "http://127.0.0.1:9", "NO_PROXY": "localhost"}
+    assert "HTTPS_PROXY" not in os.environ                         # the worker itself is untouched
+    assert bot.prm.store.packets()[0]["status"] == "pending"       # and reached the bot directly

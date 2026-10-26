@@ -87,6 +87,11 @@ MAX_BACKOFF_SEC = 60
 ALL_KINDS = ("admin", "prm")
 # One lock per kind of job (admin keeps the old name: an older worker blocks a new admin one).
 LOCK_FILES = {"admin": "worker.lock", "prm": "worker-prm.lock"}
+LOCK_WAIT_SEC = 60           # a restart: the old worker ends its long poll, then lets go of the lock
+# --restricted keeps a prm job's claude from reading ~/.claude/settings.json; a proxy that only
+# lives in that file's "env" is handed to claude here (proxy_env).
+PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
+PROXY_PASSED = PROXY_KEYS + ("NO_PROXY",)
 OUTBOX_NAME = "outbox"       # "outbox-prm" for a prm-only worker (main sets it)
 
 DEFAULTS = {
@@ -994,6 +999,36 @@ def worker_kinds(settings: dict, allowed: tuple = ALL_KINDS) -> list[str]:
     return kinds
 
 
+def claude_settings_path() -> Path:
+    """Claude Code's user settings (``$CLAUDE_CONFIG_DIR/settings.json`` when that is set)."""
+    base = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    return (Path(os.path.expanduser(base)) if base else Path.home() / ".claude") / "settings.json"
+
+
+def proxy_env(environ=None, settings_path: Path | None = None) -> dict:
+    """The proxy for a prm job's claude when this worker has none: ``HTTP_PROXY``,
+    ``HTTPS_PROXY``, ``ALL_PROXY`` and ``NO_PROXY`` (either case) from the ``env`` of Claude
+    Code's settings file, which ``--restricted`` makes claude ignore.  Only for the claude
+    child process; the relay client never uses a proxy (the Windows bot is on the LAN)."""
+    environ = os.environ if environ is None else environ
+    if any(str(environ.get(k) or environ.get(k.lower()) or "").strip() for k in PROXY_KEYS):
+        return {}
+    try:
+        data = json.loads(Path(settings_path or claude_settings_path()).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    env = data.get("env") if isinstance(data, dict) else None
+    if not isinstance(env, dict):
+        return {}
+    wanted = {k.lower() for k in PROXY_PASSED}
+    return {str(k): str(v).strip() for k, v in env.items()
+            if str(k).lower() in wanted and isinstance(v, (str, int)) and str(v).strip()}
+
+
+def _without_password(url: str) -> str:
+    return re.sub(r"//[^/@\s]+@", "//***@", url)
+
+
 def prm_hook_settings() -> str:
     """``--settings`` JSON: this script guards every tool call and denies every permission request."""
     command = f"{shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__).resolve()))} --prm-hook"
@@ -1257,9 +1292,12 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
     got, failed = fetch_prm_files(client, job, workspace)
     task = {**job, "text": prm_prompt(job, party_id, str(meta.get("name") or ""), case_rel, got, failed)}
     timeout = float(settings.get("prm_timeout_min") or 10)
+    proxy = proxy_env()
+    if proxy:
+        log.info("#%s prm: the proxy of %s goes to claude (%s)", job["id"], claude_settings_path(), ", ".join(proxy))
     run = run_claude({**settings, "timeout_min": timeout}, task, workspace, client, stopper, None,
                      cmd=prm_claude_command(settings), wrap=prm_followup,
-                     env_extra={"PRM_WORKSPACE": str(workspace)})
+                     env_extra={"PRM_WORKSPACE": str(workspace), **proxy})
     result = summarize_prm(run, parse_output(run["stdout"]), {**settings, "prm_timeout_min": timeout})
     if result["ok"]:
         draft = json.loads(result["text"])
@@ -1572,6 +1610,24 @@ def single_instance(kinds: tuple = ALL_KINDS):
     return handles
 
 
+def wait_for_locks(kinds: tuple = ALL_KINDS, wait: float | None = None, poll: float = 1.0):
+    """``single_instance``, waiting up to ``wait`` seconds (``LOCK_WAIT_SEC``) for a worker of
+    the same kinds that is stopping: a restart starts the new one before the old one has let go.
+    None when the lock stays taken (another worker really runs)."""
+    wait = LOCK_WAIT_SEC if wait is None else wait
+    deadline = time.monotonic() + wait
+    told = False
+    while True:
+        handles = single_instance(kinds)
+        if handles is not None or time.monotonic() >= deadline:
+            return handles
+        if not told:
+            log.info("another worker doing %s still holds its lock; waiting up to %.0f s for it to stop",
+                     ",".join(kinds), wait)
+            told = True
+        time.sleep(poll)
+
+
 def stay_awake() -> subprocess.Popen | None:
     """caffeinate -s for as long as this process lives (awake on power, normal sleep on battery)."""
     try:
@@ -1628,6 +1684,13 @@ def main(argv: list[str] | None = None) -> int:
               + (" (达人草稿：会向机器人要 prm 任务)" if workspace else " (不接达人草稿)"))
         print(f"kinds: {','.join(worker_kinds(settings, kinds)) or '(nothing: prm_workspace is needed)'}"
               f"; locks: {', '.join(LOCK_FILES[k] for k in kinds)}")
+        proxy = proxy_env()
+        if proxy:
+            print(f"prm jobs' proxy (from {claude_settings_path()}): "
+                  + ", ".join(f"{k}={_without_password(v)}" for k, v in proxy.items()))
+        else:
+            mine = [k for k in PROXY_KEYS if os.environ.get(k) or os.environ.get(k.lower())]
+            print("prm jobs' proxy: " + (f"this shell's ({', '.join(mine)})" if mine else "none"))
         try:
             healthy = client.health()
             offered = client.bot_kinds()
@@ -1644,7 +1707,11 @@ def main(argv: list[str] | None = None) -> int:
     if prm_only and prm_workspace_dir(settings)[0] is None:
         log.error("--kinds prm needs a usable prm_workspace: %s", prm_workspace_dir(settings)[1])
         return 1
-    locks = single_instance(kinds)
+    try:
+        locks = wait_for_locks(kinds)
+    except KeyboardInterrupt:
+        log.info("stopped while waiting for the other worker")
+        return 130
     if locks is None:
         log.error("another worker doing %s is already running (%s); this one exits", ",".join(kinds),
                   ", ".join(str(HOME_DIR / LOCK_FILES[k]) for k in kinds))
