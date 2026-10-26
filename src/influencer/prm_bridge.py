@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from src.pii import mask_pii
+from src.prm.platforms import load_catalog
 from src.prm.store import PartyError
 
 from .extract import asks_for_higher_commission, extract_xhs_account
@@ -229,6 +230,45 @@ def split_items(text: str) -> List[dict]:
     return [{"name": p, "qty": 1} for p in parts]
 
 
+CATALOG_PLATFORMS = {"DY": "dy", "XHS": "xhs"}
+
+
+def _code_tokens(text: str) -> List[str]:
+    """文字里像编号的词：平台商品 ID、聚水潭商品编码（带尺码后缀的也算）。至少 8 位、带数字。"""
+    import re
+
+    return [t for t in re.findall(r"[0-9A-Za-z]+(?:-[0-9A-Za-z]+)*", text or "")
+            if len(t.split("-")[0]) >= 8 and any(c.isdigit() for c in t)]
+
+
+def match_listings(items: List[dict], platform: str, catalog: Optional[dict]) -> bool:
+    """给每款商品对上这个平台的商品（开专属佣金按平台商品设）：文字里有平台商品 ID，或者有聚水潭商品编码
+    （SKU 的，或者去掉尺码后缀的款），就到商品目录（worker --sync-products 写的 kb/products.json）里找。
+    对上的加 listing {id, title}；写了编号却对不上的标 unlisted（这个平台可能没上架，运营决定换款还是不设
+    专属佣金）；没写编号的不动，由运营自己对。返回有没有标上东西。"""
+    part = ((catalog or {}).get("platforms") or {}).get(CATALOG_PLATFORMS.get(platform, ""))
+    if not isinstance(part, dict) or not part.get("items"):
+        return False
+    keys = {}
+    for entry in part["items"]:
+        listing = {"id": str(entry.get("id") or ""), "title": str(entry.get("title") or "")}
+        keys[listing["id"]] = listing
+        for sku in entry.get("skus") or []:
+            code = str(sku.get("code") or "")
+            if code:
+                keys[code] = keys[code.rsplit("-", 1)[0]] = listing
+    marked = False
+    for item in items:
+        tokens = _code_tokens(item.get("name", ""))
+        found = next((keys[t] for t in tokens if t in keys), None)
+        if found:
+            item["listing"] = found
+        elif tokens:
+            item["unlisted"] = True
+        marked = marked or bool(tokens)
+    return marked
+
+
 def _first(slots: dict, keys: tuple) -> str:
     for key in keys:
         value = str(slots.get(key) or "").strip()
@@ -246,9 +286,10 @@ class SampleBridge:
     缺东西、ERP 里查不到这个商品时不生成，在合作单上写明原因（attention），由运营看着办。
     没有现货不拦（D35：ERP 里有就能寄）。"""
 
-    def __init__(self, handler, prm) -> None:
+    def __init__(self, handler, prm, *, workspace=None) -> None:
         self._handler = handler
         self._prm = prm
+        self._workspace = workspace     # 业务资料目录（读商品目录）；None 就按 prm_workspace_dir() 找
         self._lock = threading.Lock()
 
     def attach(self) -> None:
@@ -315,19 +356,14 @@ class SampleBridge:
             if missing:
                 self._attention(deal, f"要生成寄样审批单，合作单上还缺：{'、'.join(missing)}", now)
                 return None
-            follow_up = asyncio.run(self._handler._ask_for_what_is_missing(draft))
-            if follow_up is not None:
-                from .handler import HOLDING_REPLY
-                why = ("聚水潭查不了商品（连不上或者还没接入），请人工处理" if follow_up == HOLDING_REPLY
-                       else f"【{draft.product or _first(slots, PRODUCT_KEYS)}】在聚水潭 ERP 里查不到（已记进「待处理」）")
-                self._attention(deal, f"寄样审批单没有生成：{why}", now)
+            problem = asyncio.run(self._handler.check_product(draft))
+            if problem:
+                self._attention(deal, f"寄样审批单没有生成：{problem}", now)
                 return None
             name = str(contact.get("display_name") or party["name"] or "")
-            asyncio.run(self._handler._submit_for_approval(chat_id, name, draft, self._packet_extra(chat_id, slots, now)))
-            packet = next((p for p in self._handler.store.list_approvals([GateStatus.PENDING])
-                           if p.influencer_id == chat_id), None)
-        if packet is None:
-            return None
+            packet_id = asyncio.run(self._handler.submit_for_approval(
+                chat_id, name, draft, self._packet_extra(chat_id, slots, now)))
+            packet = self._handler.store.get_approval(packet_id)
         self._prm.store.add_event(deal["id"], party["id"], "sample_request",
                                   {"approval": packet.packet_id, "product": packet.requested_product},
                                   actor="system", now=now)
@@ -348,13 +384,16 @@ class SampleBridge:
                 logger.exception("寄样：重查达人资料出错，审批单上用名单里原来的")
             contact = store.get_contact(chat_id) or {}
         items = split_items(_first(slots, PRODUCT_KEYS))
+        platform = str(contact.get("platform") or "")
+        workspace = self._workspace or prm_workspace_dir()
+        listed = bool(workspace) and match_listings(items, platform, load_catalog(workspace))
         return {
-            "platform": str(contact.get("platform") or ""),
+            "platform": platform,
             "platform_no": str(contact.get("platform_no") or ""),
             "tier": str(contact.get("tier") or ""),
             "channel": str(contact.get("channel") or ""),
             "sales_label": str(contact.get("sales_label") or contact.get("profile_note") or ""),
-            "items_json": json.dumps(items, ensure_ascii=False) if len(items) > 1 else "",
+            "items_json": json.dumps(items, ensure_ascii=False) if len(items) > 1 or listed else "",
             "live_session": _first(slots, LIVE_KEYS),
         }
 

@@ -22,19 +22,15 @@ PERSONAL_INFO_RETENTION_SECONDS = 90 * 24 * 3600
 
 # 索样意图的关键词。商品清单先写死，接入聚水潭后改为从商品目录读取；
 # 长的放在前面，先匹配到更具体的商品（"VC精华液"先于"精华"）
-SAMPLE_KEYWORDS = ("样品", "样单", "寄样", "带货", "合作", "试用", "选品", "测品", "推品", "佣金")
-PRODUCT_KEYWORDS = ("VC精华液", "冻干粉", "泥膜", "眼霜", "洁面乳", "精华", "面膜")
-
-# 没补齐的索样申请，超过这个时间没有动静就作废，之后的消息按新对话处理
+# 以前规则对话里没补齐的索样申请（老库里的），超过这个时间删掉
 DRAFT_TTL_SECONDS = 24 * 3600
 
-# 名单里的达人发的不是索样（闲聊、问发货等），不交给聊天模型，转运营人工回复（B20）。
-# 机器人先回一句中性的话，同一位达人在这段时间内最多回一次，免得刷屏
+# 谈佣金的固定话术，同一位达人在这段时间内最多放进待审批一次，免得刷屏
 HOLDING_REPLY_INTERVAL_SECONDS = 6 * 3600
 
 # 达人要求提高佣金：上限写死在 MAX_COMMISSION_RATE，不交给模型谈（2026-10-25 用户定）。
-# 识别到以后回复固定话术（handler.COMMISSION_REPLY），并记进控制台「待处理」。
-# 同一位达人在 HOLDING_REPLY_INTERVAL_SECONDS 内再提，就不再重复回同一段话，只记待处理
+# 识别到以后，固定话术（handler.COMMISSION_REPLY）作为系统消息放进待审批（prm_bridge），并记进「待处理」。
+# 同一位达人在 HOLDING_REPLY_INTERVAL_SECONDS 内再提，就不再重复放，只记待处理
 COMMISSION_WORDS = ("佣金", "点位", "返点", "提成", "分成", "点数", "佣")
 COMMISSION_RAISE_WORDS = (
     "提高", "提一", "提点", "调高", "上调", "加点", "加一", "加个", "涨", "高点", "高一", "高些",
@@ -42,19 +38,6 @@ COMMISSION_RAISE_WORDS = (
 )
 
 # 资质：D30（2026-10-26）起不看粉丝数，寄几款按聚水潭的销售额分档；审批单上的粉丝数只作参考，不拦单
-
-
-# 交给 Claude（claude -p）回复：只能手动打开，设置环境变量 INFLUENCER_BRAIN=claude。
-# 没打开时照旧用规则流程。打开后谈佣金仍由代码回固定话术，Claude 出错或超时退回规则流程
-CLAUDE_TIMEOUT_SECONDS = 90
-# 一条消息里 Claude 最多来回几轮（每调一次工具算一轮）。正常是查库存、提交申请两三轮；
-# 到了上限 claude -p 会报错，处理器退回规则流程
-CLAUDE_MAX_TURNS = 6
-# 带给 Claude 的对话：最近这么多轮、这么多天以内的
-CLAUDE_HISTORY_TURNS = 20
-CLAUDE_HISTORY_SECONDS = 7 * 24 * 3600
-# Claude 的回复超过这个长度就不发，转人工（微信里一大段话不像真人）
-CLAUDE_MAX_REPLY_CHARS = 400
 
 
 # 寄样上限（D5，数字还没定）：环境变量不设就是不限。超过上限的审批单在控制台上标出来，不能批准
@@ -79,10 +62,6 @@ def sample_limits() -> Dict[str, Optional[int]]:
         "window_days": _positive_int_env("INFLUENCER_SAMPLE_WINDOW_DAYS") or DEFAULT_SAMPLE_WINDOW_DAYS,
         "per_day": _positive_int_env("INFLUENCER_MAX_SAMPLES_PER_DAY"),
     }
-
-
-def brain_enabled() -> bool:
-    return os.getenv("INFLUENCER_BRAIN", "").strip().lower() == "claude"
 
 
 def mock_enabled() -> bool:

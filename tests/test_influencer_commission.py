@@ -1,21 +1,11 @@
-"""达人要求提高佣金（2026-10-25 用户定）：代码识别后回固定话术，不交给模型谈，
-佣金上限不变，并记进控制台「待处理」。"""
+"""达人要求提高佣金（2026-10-25 用户定，D37 改起步 20%）：代码识别后用固定话术，不交给模型谈，
+佣金上限不变。话术放进待审批、记进「待处理」的部分在 tests/test_influencer_sample_bridge.py。"""
 
 import pytest
 
 from src.influencer.extract import asks_for_higher_commission
 from src.influencer.handler import COMMISSION_REPLY, FORBIDDEN_WORDS
 from src.influencer.settings import DEFAULT_COMMISSION_RATE, MAX_COMMISSION_RATE
-from src.influencer.store import INBOX_COMMISSION
-from test_influencer_acceptance import (
-    FULL_ADDRESS,
-    INFLUENCER,
-    SAMPLE_REQUEST,
-    XHS_PROFILE,
-    make_handler,
-    pending_packets,
-    run,
-)
 
 
 @pytest.mark.parametrize("text", [
@@ -51,40 +41,8 @@ def test_start_at_20_percent_and_the_cap_is_still_25_percent():
     assert asks_for_higher_commission("26%可以吗")
 
 
-def test_the_fixed_reply_is_sent_and_the_operator_is_told():
-    handler = make_handler()
-    reply = run(handler.process_incoming_message(INFLUENCER, "佣金能不能高点呀", nickname="小美"))
-    assert reply == COMMISSION_REPLY
-    # D37：只说帮老师申请，不替运营拒绝，也不承诺能涨
-    assert "申请" in reply and "先收样品" in reply and "已经是" not in reply
-    assert not [w for w in FORBIDDEN_WORDS if w in reply], "固定话术里不能有违规词"
-    [item] = handler.store.list_inbox()
-    assert (item["kind"], item["content"], item["auto_replied"]) == (INBOX_COMMISSION, "佣金能不能高点呀", True)
-
-
-def test_asking_again_soon_does_not_repeat_the_same_reply():
-    handler = make_handler()
-    run(handler.process_incoming_message(INFLUENCER, "佣金能不能高点呀"))
-    again = run(handler.process_incoming_message(INFLUENCER, "真的不能再高一点吗，30%吧"))
-    assert again == ""
-    assert [i["auto_replied"] for i in handler.store.list_inbox()] == [False, True]
-
-
-def test_the_commission_reply_does_not_stop_the_neutral_reply_to_other_messages():
-    handler = make_handler()
-    run(handler.process_incoming_message(INFLUENCER, "佣金能不能高点呀"))
-    assert run(handler.process_incoming_message(INFLUENCER, "你们是哪个品牌呀")) != ""
-
-
-def test_a_request_in_progress_carries_on_and_the_commission_is_unchanged():
-    handler = make_handler()
-    run(handler.process_incoming_message(INFLUENCER, SAMPLE_REQUEST, nickname="小美"))
-    run(handler.process_incoming_message(INFLUENCER, "佣金能给30%吗", nickname="小美"))
-    run(handler.process_incoming_message(INFLUENCER, f"{FULL_ADDRESS} 小红书主页 {XHS_PROFILE}", nickname="小美"))
-    [packet] = pending_packets(handler)
-    assert packet.proposed_commission_rate == DEFAULT_COMMISSION_RATE
-
-
-def test_someone_not_on_the_list_is_not_answered():
-    handler = make_handler()
-    assert run(handler.process_incoming_message("wxid_stranger", "佣金能不能高点呀")) is None
+def test_the_fixed_reply_only_says_we_will_ask():
+    # D37：只说帮老师申请，不替运营拒绝，也不承诺能涨。什么时候放进待审批、一段时间内只放一次，
+    # 见 tests/test_influencer_sample_bridge.py
+    assert "申请" in COMMISSION_REPLY and "先收样品" in COMMISSION_REPLY and "已经是" not in COMMISSION_REPLY
+    assert not [w for w in FORBIDDEN_WORDS if w in COMMISSION_REPLY], "固定话术里不能有违规词"

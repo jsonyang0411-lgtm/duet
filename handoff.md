@@ -1,13 +1,13 @@
 # 交接文档：达人商务智能体
 
-> 最后更新：2026-10-26（v59）。开发在 `merge-platforms` 分支上，还没合回 `main`（`main` 停在 `b448beb`）。每次改了什么看第 9 节。
+> 最后更新：2026-10-26（v60）。开发在 `merge-platforms` 分支上，还没合回 `main`（`main` 停在 `b448beb`）。每次改了什么看第 9 节。
 > 读者：接手这个项目的 AI 窗口，以及参与开发的同事。
 > 规矩：新窗口开工前先读完本文件；收工前更新第 3 节（当前状态）、第 5 节（计划进度）和第 9 节（变更记录）。
 
 ## 0. 先看这几条
 
 1. **现状（2026-10-26）**：达人的私聊走同事 PRM 的"Claude 起草 → 运营在「待审批」审 → 经 Windows 发出"；合作单进「待寄出」时生成我们的审批单，运营在「达人审批」页批准后在聚水潭建寄样单。查库存、建寄样单还是模拟模式（`INFLUENCER_MOCK=1`），和 Windows 的真机联调还没做。
-2. **下一步看第 5 节**：抓一次真实建寄样单的请求（`saveV3`），接上真实聚水潭；多款商品逐款到聚水潭查；同事 `src/prm/platforms.py` 的佣金上限改成 25%。
+2. **下一步看第 5 节**：抓一次真实建寄样单的请求（`saveV3`），接上真实聚水潭；多款商品逐款到聚水潭查；配好平台 CLI、同步商品目录。
 3. **规则尽量写在约束文档里，不写死在代码里**（用户 10-26："不要定太多规则"）。代码只守三道关：佣金 ≤ 25%、一张单只执行一次、建单 / 开佣金 / 发消息必须过审批。对达人的口径在 `~/Documents/prm_workspace/kb/`，找达人的标准在 `~/daren-scout/CLAUDE.md`。
 4. **所有改动都要对照第 2 节的路线护栏。** 和护栏冲突时，先停下来问人，不要自行取舍。
 
@@ -28,19 +28,18 @@
 
 | 路径 | 作用 |
 |---|---|
-| `src/influencer/handler.py` | 生成审批单；执行审批（ERP 里查不到商品才拦，没现货不拦；用条件更新保证只执行一次）；给达人的通知和婉拒话术；谈佣金的固定话术（`COMMISSION_REPLY`、`FORBIDDEN_WORDS`）。`build_influencer_handler` 在 `src/bot.py` 启动时调用，**不挂在路由上**。旧的规则对话流程（`handle_private_message`、多轮补齐）已经没有入口，测试还在用，第 8 步删 |
-| `src/influencer/prm_bridge.py` | 和同事 PRM 接起来：`PartyListSync` 名单合一、按号码查档位、写达人资料文件 `deals/<编号>-达人资料.md`；`SampleBridge` 合作单进「待寄出」生成审批单，批准 / 驳回的通知和谈佣金话术作为系统消息进「待审批」 |
+| `src/influencer/handler.py` | 生成审批单；执行审批（ERP 里查不到商品才拦，没现货不拦；用条件更新保证只执行一次）；给达人的通知和婉拒话术；谈佣金的固定话术（`COMMISSION_REPLY`、`FORBIDDEN_WORDS`）。`check_product`（到聚水潭查商品）、`submit_for_approval`（生成审批单）由 prm_bridge 调用。`build_influencer_handler` 在 `src/bot.py` 启动时调用，**不挂在路由上**。旧的规则对话流程 v60 已删 |
+| `src/influencer/prm_bridge.py` | 和同事 PRM 接起来：`PartyListSync` 名单合一、按号码查档位、写达人资料文件 `deals/<编号>-达人资料.md`；`SampleBridge` 合作单进「待寄出」生成审批单（`match_listings` 按商品编码或平台商品 ID 把每一款对到商品目录里的平台商品），批准 / 驳回的通知和谈佣金话术作为系统消息进「待审批」 |
 | `src/influencer/tiers.py` | 档位（3 款 / 问专场 / 不限 / 无销售数据，D30）和主播类型（D36），调聚水潭 CLI 的 `lookup` |
 | `src/influencer/jst_erp.py` | 聚水潭适配器：`run_jst_cli` 调 `~/jushuitan-engineering`；`coop_summary` 查近 30 天合作数据（涨佣参考）。查库存、建寄样单的真实调用还没接，只有手动打开的模拟模式 |
 | `src/influencer/store.py` | 数据库：名单（含平台、号码、档位、主播类型）、草稿、审批单、操作记录、待处理等，和机器人共用 `DB_PATH`（默认 `data/messages.db`）；启动时给老库补新列（`_ADDED_COLUMNS`）；维护（过期、90 天清除个人信息） |
 | `src/influencer/console.py` | 控制台接口 `/api/influencer/*` 的处理；`src/web/server.py` 只负责转发 |
 | `ui/src/components/InfluencerPanel.jsx` | 控制台「达人审批」页：审批单、待处理、名单三个子页 |
-| `src/influencer/extract.py` | 从消息里提取商品、收件人、电话、地址、小红书账号；判断是不是要涨佣（超过 20%） |
+| `src/influencer/extract.py` | 认合作单上的小红书账号；判断是不是要涨佣（超过 20%） |
 | `src/influencer/settings.py` | 佣金（默认 20%、上限 25%）、有效期、模拟模式、白名单环境变量 |
 | `src/influencer/types.py` | 达人档案、申请草稿、审批单（`ApprovalActionPacket`，含平台、档位、商品清单、专场）、审批状态 |
 | `src/influencer/xhs_cli.py` | 小红书 CLI 适配器。D34 以后审批不再开定向计划，只在生成审批单时查一下小红书粉丝数作参考 |
 | `src/influencer/scheduled_agent.py` | 只剩 `morning_brief` 给控制台「今日概览」用 |
-| `src/influencer/claude_brain.py`、`mcp_server.py`、`send_policy.py` | 旧的"达人模块直接回复"用的（`claude -p` + 4 个工具 + 防封节奏）。合并 prm-platforms 后没有入口了，第 8 步删 |
 | `docs/influencer-approval-design.md` | 第 6 项的设计（已确认、已实施；第 8 节是落实时的调整） |
 
 **外部依赖现状**
@@ -51,7 +50,7 @@
 | 起草 | 同事的 PRM（`PRM_COPILOT=on`）+ worker 沙箱（`tools/claude_relay/worker.py --kinds prm`），只读 `~/Documents/prm_workspace`（kb/、案卷）。没有聊天模型，不需要 AI 密钥 |
 | 聚水潭 | CLI `~/jushuitan-engineering`（直接发 HTTP，令牌从调试版 Chrome 取，D32）。找达人、查达人、加达人、查商品和库存、查合作数据都真跑过；建寄样单没做（等抓 `saveV3`）。webot 里查档位、合作数据走真实 CLI，查库存、建寄样单还是模拟 |
 | 小红书 CLI | `~/xiaohongshu-engineering`，在这台 Mac 上真机接通过（只读，v37）。开定向计划改由 PRM 平台动作调用（D34），还没真跑过 |
-| 抖音 CLI | `~/Douyin-engineering`，PRM 平台动作 `dy.designated_commission` 用它。本机是 10-20 的快照，没有 `buyin promotion-strategy-create-designated`，要拉新 |
+| 抖音 CLI | `~/Douyin-engineering`，PRM 平台动作 `dy.designated_commission` 用它。v60 拉到公司仓库最新的 10-21 快照（`c494254`），有 `buyin promotion-strategy-create-designated` 了；这台 Mac 没登录抖店 / 百应，还没真跑过 |
 
 **相关文档**
 - 设计备忘录：`docs/达人商务智能体_架构设计与落地备忘录.md`，写给老板和同事看，每条都标了核实日期和方式。2026-10-25 第 3 阶段从桌面移进仓库，10-26 晚按现在的架构重写（v59）；原稿原文在提交 `8ac1c6f`。以后改代码、改决定时，也要同步更新备忘录里对应的事实。备忘录有一个本地网页版 `docs/达人商务智能体_架构设计与落地备忘录.html`，由 `python3 tools/memo_html.py` 从 Markdown 生成，不上传到任何网站；改了备忘录要重新生成，否则 `tests/test_memo_html.py` 会失败。
@@ -144,9 +143,8 @@
 验收场景在 `tests/test_influencer_acceptance.py`（第 1 阶段写好，第 2 阶段逐项修通）。
 
 - 每条用例都按"修好之后应有的表现"来写。修复前用 `known_failure`（也就是 `xfail(strict=True)`）标记；修好后对应用例会"意外通过"，strict 模式会报失败，提醒删掉标记。目前所有标记都已删除。`known_failure` 这个辅助函数保留着，以后再有先写测试、后修代码的情况还能用。
-- 用例对处理器内部结构的依赖，集中在 `make_handler`、`pending_packets`、`get_packet`、`set_commission`、`expire`、`age_draft` 这几个辅助函数里。第 6 项改成数据库存储时只改了它们，用例里的断言没动。注意：取到的审批单是当时的快照，状态变了要重新取。
-- 这些用例直接调达人模块的旧对话流程（已经没有入口），留着是因为"不承诺、只执行一次"这些保证还靠它们；第 8 步删旧代码时要把保证挪到 PRM 那条路上再删。
-- `submit_full_request` 发收件信息时会带上小红书主页链接（当初绑佣金必须有小红书账号；D34 以后不需要了，用例没改）。
+- 用例对处理器内部结构的依赖，集中在 `make_handler`、`pending_packets`、`get_packet`、`set_commission`、`expire`、`submit_full_request` 这几个辅助函数里。第 6 项改成数据库存储时只改了它们，用例里的断言没动。注意：取到的审批单是当时的快照，状态变了要重新取。
+- v60 删旧对话时，`submit_full_request` 改成按现在的路径生成审批单（`check_product` → `submit_for_approval`，prm_bridge 做的就是这两步）；只测对话回复的 S2、S3 的回复、S6、S7 删了（回复现在由 PRM 起草、运营审核）。
 - 外部系统用替身（`FakeERP`、`FakeXHS`）代替，不碰真实库存和佣金。
 
 | 场景 | 输入 | 修复前的表现 | 应有的表现（现在已经做到） |
@@ -164,7 +162,7 @@
 | 文件 | 覆盖内容 |
 |---|---|
 | `tests/test_influencer_acceptance.py` | 除了 S1–S7，还有：过期、建单失败即停、同时两次批准、佣金上限、资质标注和 R3、没打开 mock 时不返回假数据、微信身份不当小红书账号 |
-| `tests/test_influencer_dialogue.py` | 多轮补齐、电话打码、草稿过期、缺货改选、环境变量白名单只增不删、出错时回中性话术、router 不传处理器时不碰数据库 |
+| `tests/test_influencer_handler.py` | 环境变量名单启动时并入（只增不删）、ERP 查不到的商品不生成并进「待处理」、没现货照常、聚水潭连不上照实说（v60 由 `test_influencer_dialogue.py` 改名精简） |
 | `tests/test_influencer_approval.py` | 没有小红书账号也能批、事后补发链接、运营调低佣金；重启后控制台能批机器人提交的单、没现货不拦、ERP 里查不到才拦、批准只建单不碰佣金、给达人的消息、操作记录里没有收件信息、粉丝数只作参考 |
 | `tests/test_influencer_store.py` | 数据库：重启后数据还在、两个实例同时占单只有一个成功、草稿存取、名单只增不删、过期、90 天清除个人信息、删掉作废草稿、最近私聊 |
 | `tests/test_influencer_api.py` | 控制台接口：状态、列表、通过只执行一次、驳回原因、名单、写接口不收 GET、别的网站发来的请求回 403 |
@@ -174,8 +172,7 @@
 | `tests/test_influencer_tiers.py` | 档位按区间下限、小红书看直播场均、无销售数据单列、查不到说原因、名单同步每轮只查一位、改号码重查、达人资料文件不含个人信息 |
 | `tests/test_influencer_coop.py` | 涨佣参考：满 40 单或退款前满 1 万、CLI 没装照实说 |
 | `tests/test_influencer_commission.py`、`test_influencer_interrupted.py`、`test_influencer_sample_limits.py`、`test_influencer_chat_retention.py` | 谈佣金固定话术（起步 20%、上限 25%）；执行中断的人工核对；寄样上限；原项目表里的达人消息 90 天清除 |
-| `tests/test_influencer_claude.py`、`test_influencer_mcp.py`、`test_influencer_send_policy.py` | 旧的直接回复（`claude_brain`、MCP 工具、防封节奏），没有入口了，第 8 步和代码一起删 |
-| `tests/test_influencer_extract.py` | 收件信息的各种写法、姓名误判、电话边界、小红书链接、商品匹配 |
+| `tests/test_influencer_extract.py` | 小红书主页链接、小红书号 |
 | `tests/test_influencer_clients.py` | 小红书 CLI 的真实调用路径：幂等键参数、退出码非 0、输出不是 JSON（用临时 shell 脚本冒充 CLI，Windows 上跳过） |
 
 ## 5. 计划
@@ -187,14 +184,13 @@
 | 1 | 按审查结果改线上审批路径：抖音达人也能批、不按粉丝拦、ERP 里有商品就能寄、寄样单代替出库单、涨佣附合作数据 | 已完成（`bdd3dd6`，v57） |
 | 2 | 数据模型：名单记平台和号码，查档位、主播类型写成达人资料；审批单带平台、档位、多款商品、专场 | 已完成（`2584e93`、`cd55e27`，v58） |
 | 3 | 清理文档：handoff 前半部分、备忘录、记忆文件（审查报告 19 处） | 已完成（v59） |
+| 3b | 用户 10-26 让做的 4 件：佣金上限 25%、款号对平台商品、抖音 CLI 拉新、删旧代码 | 已完成（v60） |
 | 4 | 接真实聚水潭：抓 `saveV3` 后 `create_sample_order` 收商品清单、真实建寄样单；`check_inventory` 逐款调 `jst goods` 查（现在拿整段商品文字查） | 等运营第一次真寄样时抓请求（运营在调试版 Chrome 点保存前叫我们） |
 
 其余待办：
-- 同事 `src/prm/platforms.py` 的佣金上限默认 50%（表单 80%），改成 25%
-- 聚水潭款号 → 抖音 / 小红书商品 ID 自动对照：开专属佣金按商品设，要把达人挑的每一款对到平台商品 ID。现在 `data/xhs_items.json` 只有一款贝雷帽，ERP 有 4166 款；千帆商品规格上有 ERP 编码，聚水潭有店铺商品和 ERP 商品的对应。某款没在该平台上架时在审批单上标出来，由运营决定
+- 让商品目录在这台 Mac 上真的有数据：`~/.claude-relay/config.json` 的 `platforms` 现在是空的，要填小红书、抖音 CLI 的目录（抖音还要 `dy_expect_shop_id`，要用户给），然后 `worker.py --sync-products` 生成 `kb/products.md`。没有目录时审批卡上不标平台商品，不影响审批
+- 抖音商品的聚水潭编码：抖店 `fxg sku-prices` 默认输出没有商家编码，`--raw` 里可能有；要等调试版 Chrome 登录抖店后看一次真实输出，再让目录同步存下来（小红书的 `erpCode` 已经存了）
 - 运单号回填：寄样管理发货后，运单号在哪个字段 / 接口（现在列表接口的 `erpOrderVoList` 是空的）
-- 本机 `~/Douyin-engineering` 拉新
-- 第 8 步删旧代码：`claude_brain.py`、`mcp_server.py`、`send_policy.py`、handler 里的规则对话流程（先把测试保证挪到 PRM 那条路上）
 - 和 Windows 真机联调（等同事给 `PRM_EDGE_TOKEN`）
 
 等真实场景：运营第一次联系那 8 位抖音达人，加上微信后在名单页填抖音号；第一次真实开专属佣金，要用户确认后执行。
@@ -253,7 +249,7 @@
 | D25 | Mac 上起草的沙箱怎么来 | 直接用同事的 `tools/claude_relay/worker.py --kinds prm`，一行不复制：Mac 的业务服务开中转（只监听 127.0.0.1），PRM 把起草任务放进去，本机 worker 领任务、在沙箱里跑 claude、交回草稿。沙箱条件全是同事的（`--restricted`、只有读写文件的工具、`prm_guard` 只让读 `prm_workspace`、只让写 `deals/*.md`、无 MCP、不存会话、固定 JSON 格式）。同事建议过「不用经过中转排队、直接调用」；先走本机中转，因为合并连发、追加消息、取消、超时、附件这些中转已经做好了，以后同事修 worker 我们拉一下就有。代理：`--restricted` 不读 `~/.claude/settings.json`，worker 会把那里的代理转给 claude；这台 Mac 的代理原来只在 `~/.zshrc`；用户选了把代理也写进 settings.json 的 `env`（10-26 已写，去掉终端代理后真跑起草成功），以后 Clash 换端口两处都要改 | 已实现（2026-10-26），本机真跑过两次 |
 | D26 | PRM 的合作单怎么接到我们的审批单 | 合作单进「待寄出」时（Claude 建议的，或者运营在合作单页改的），用合作单上确认过的信息（商品、收件人、手机、地址，号码换回真的）生成审批单，小红书账号先看合作单再看名单；缺项、没库存、聚水潭连不上就在合作单上提示，不生成；一位达人同时只有一张在等的单。批准 / 驳回以后给达人的通知、达人要佣金时的固定话术，都作为**系统消息**进 PRM 的待审批，一定人审（批准通知提到佣金，算 money 类；D22）；批准时聚水潭给了运单号就直接记进合作单、阶段改成已寄出，批准通知里已带单号，不再另发发货通知。业务资料（kb/）先用模板，用户还没有规则（10-26） | 已实现（2026-10-26）。**后来改了**：通知改成 other 类（D34）；"没库存不生成"改成 ERP 里查不到才不生成（D35）；kb 已按 D36 重写；小红书账号不再必需，审批单带平台、档位、多款商品（v58） |
 | D27 | 个人信息清理用几条规则 | 一条，按同事提的（D20）：90 天，从处理完起算。PRM 合作单签收满 90 天，或者 90 天没有任何动静（没有消息、没有改动：结案、审批没通过、达人不回了都算），就清除收件信息；清理以后达人又来，从新的消息重新算。我们达人模块本来就是处理完 90 天（审批单、待处理、对话、发送记录、原项目表里的达人消息），不用改。同事代码原来是签收后 30 天、没签收的不清 | 已实现（2026-10-26） |
-| D28 | Mac 这边的防封节奏要不要接到「审核后经 Windows 发出」的路径上 | 不做。每条回复都要经 Claude 起草、运营审核，本来就慢，不像机器刷屏；只靠 Windows 那层的账号节奏（两条至少隔 3 秒、每小时最多 60 条）。`send_policy.py` 只留在旧的直接回复路径上，第 8 步删旧代码时一起处理 | 已确认（2026-10-26） |
+| D28 | Mac 这边的防封节奏要不要接到「审核后经 Windows 发出」的路径上 | 不做。每条回复都要经 Claude 起草、运营审核，本来就慢，不像机器刷屏；只靠 Windows 那层的账号节奏（两条至少隔 3 秒、每小时最多 60 条）。`send_policy.py` 只留在旧的直接回复路径上，第 8 步删旧代码时一起处理 | 已确认（2026-10-26）；`send_policy.py` 已随旧代码删除（v60） |
 | D29 | ERP 接哪家 | **聚水潭**（企业版，用户 10-26 截图确认；此前一度说还没定，所以真实接口一直没做）。现在的 `jst_erp.py` 只有模拟；定了以后按那家的接口写，对外仍是查库存、建寄样单、查运单号三件事（`check_inventory` / `create_sample_order` / 待加的查运单），审批和寄样流程不用改。千帆商品规格上有 ERP 编码（如 `A7261010037A-M`），对应商品时可用 | 已确认（2026-10-26），开始接真实接口；怎么接见 D32（寄样改走分销版「寄样管理」，不走 ERP 出库单） |
 | D30 | 寄几样（抖音、小红书一样） | 只看聚水潭分销版「达人管理」里**平台数据的近 30 日销售总额**（直播加视频，不是「合作数据」里在我们店的带货），不看粉丝（取代 D12、D16）。**没有销售额的不寄**（防刷粉白嫖），不生成审批单，也不另记名单。25 万以下寄 3 款；25 万–100 万：达人要超过 3 款时才问能不能开直播专场（Claude 自己措辞，经人审），答应的在审批单上标「答应专场」并记日期、寄几款由运营定、到期提醒运营跟进，不答应的寄 3 款；100 万以上（含"1000万+"这种区间）要几款寄几款。边界：25 万算中档，100 万算高档。每款 1 件，颜色、尺码达人挑；从聚水潭全部在售商品里挑。**小红书另算**（10-26 侦察发现聚水潭里小红书达人没有销售数据）：看**聚水潭找达人里的「直播场均销售额」**（`gmvLiveAvgMin`~`Max`，10-26 晚些时候发现聚水潭有这项，就不用千帆的 `avg_agmv_90d` 了，两个平台一个数据源），50 万以下 3 款，50–100 万问专场（同上），100 万以上要几款寄几款。抖音的销售额是区间（如 50–100 万），区间跨过 25 万这条线的按低档（3 款）算，审批单上标出区间，运营可手动多给。不设件数上限（取代 D5 的"每单 1 件"；R3 的"单次寄样件数上限"去掉） | 已确认（2026-10-26），已实现：名单上填号码后自动查档位、主播类型，写进达人资料和审批卡（v58）；R3 的件数上限已去掉 |
 | D31 | 主动找达人 | 新角色「找达人的 Claude」：单独的工作目录 + CLAUDE.md，规则尽量写在约束文档里，不写死在代码里；代码只保留已有的三道关（佣金 ≤ 25%、一张单只执行一次、建单 / 绑佣金 / 发消息必须过审批）。它能做：在聚水潭搜达人、读近 30 日销售额、把达人加进聚水潭达人管理（自动，不审批）、提交审批单；不给发消息、建出库单、绑佣金。搜到合格的列成候选名单，**第一次联系由运营确认**（加微信或聚水潭"一键邀约"）；之后的聊天走现有起草 + 人审（D19）；聊完生成审批单，运营批准后建出库单、绑佣金。还没定：抖音的 25% 专属佣金怎么绑——同事的 `~/Douyin-engineering` 百应部分有达人库、改定向计划佣金、建专属计划，但没有"把某个达人加进定向计划"，百应写命令也都没在真实平台跑过 | 已确认（2026-10-26），已实现：`~/daren-scout`，第一轮加了 8 位抖音达人（v45）。找人门槛（用户 10-26 定，写在 `~/daren-scout/CLAUDE.md`）：抖音近 30 日销售额下限 ≥ 5 万、小红书直播场均 1–50 万（暂定）、等级 LV2–LV5（老板要求）、3 款档最多占名单三成。这是"找谁"的标准，和 D30"寄几款"是两回事，不冲突。**后来改了**："建出库单"改成建寄样单（D32），"绑佣金"和"抖音专属佣金怎么绑"由 D34 回答（PRM 平台动作，抖音是 `dy.designated_commission`） |
@@ -294,7 +290,7 @@ CLI 是同事的千帆商家后台命令行工具：私有仓库 `doupi-org/xiao
 
 还要知道的：
 
-- 千帆商品 ID 和聚水潭 SKU 不是一回事，靠对照表 `data/xhs_items.json`（模板 `docs/xhs_items.example.json`）。D34 以后我们的审批单只建寄样单，不再查对照表、不开定向计划；对照表以后要改成自动对（第 5 节）。
+- 千帆商品 ID 和聚水潭 SKU 不是一回事。千帆 SKU 上的 `erpCode`（如 `A7261010037A-M`）就是聚水潭 SKU 的商品编码（`goods-detail` 的 `itemCode`；款号是 `ACE7CN2026…` 那种，不一样），10-26 用那款贝雷帽对过。v60 起商品目录同步存下这个编码，审批单按它把每一款对到千帆商品（`prm_bridge.match_listings`）。手写的对照表 `data/xhs_items.json` 只剩旧适配器在用。
 - 定向计划的有效期按页面默认的"长期有效"；以后要按天数过期，改 `xhs_cli.set_exclusive_commission` 的 `--long-term` 为 `--start/--end`。
 - 定向计划对达人有约束力，佣金由我们出；"终止"不可撤销。它的 7 个写操作 10-20 在真实账号上各验证过一次（它仓库的 docs/VALIDATION.md F68、F69），但都是在有 Chrome 的情况下，"只用会话文件、不开 Chrome"的写没验证过。
 - 这台 Mac 上真机接通过（v37，只读：`doctor`、`account`、查达人、读商品）；调试版 Chrome 开在 9333。开定向计划（写）还没真跑过。
@@ -317,7 +313,7 @@ CLI 是同事的千帆商家后台命令行工具：私有仓库 `doupi-org/xiao
 | `INFLUENCER_MAX_SAMPLES_PER_PERSON`、`INFLUENCER_SAMPLE_WINDOW_DAYS`、`INFLUENCER_MAX_SAMPLES_PER_DAY` | 寄样上限（D5）：每位达人在多少天内（默认 30）最多几单、所有达人每天一共最多几单。不设就不限（现在不设）。超过上限的单在审批卡上标出来，不能通过 |
 | `WECHAT_BACKEND=edge`、`EDGE_URL`、`PRM_EDGE_TOKEN` | Mac 经 Windows 收发微信（v31、v41）。口令由 Windows 生成后私下发，不进仓库 |
 | `PRM_COPILOT`、`CLAUDE_RELAY`、`CLAUDE_RELAY_ONLY`、`PRM_TAKEOVER_MIN`、`PRM_HOLDING_MIN`、`PRM_RETENTION_DAYS` | 同事的 PRM 和中转的开关，含义见 `CLAUDE.md` 和同事的说明。联调时 `PRM_TAKEOVER_MIN=5`、`PRM_HOLDING_MIN=2`，测完改回 120 / 10 |
-| 旧代码用的：`INFLUENCER_BRAIN`、`INFLUENCER_CLAUDE_MODEL`、`INFLUENCER_KNOWLEDGE_FILE`、`INFLUENCER_REPLY_DELAY`、`INFLUENCER_SEND_MIN_INTERVAL`、`INFLUENCER_SEND_MAX_PER_HOUR`、`INFLUENCER_QUIET_HOURS` | 旧的直接回复和防封节奏用的，没有入口了，设了也不起作用；第 8 步一起删。聚水潭的 `JST_APP_KEY` 等已经删了（D32） |
+| 已删的：`INFLUENCER_BRAIN`、`INFLUENCER_CLAUDE_MODEL`、`INFLUENCER_KNOWLEDGE_FILE`、`INFLUENCER_REPLY_DELAY`、`INFLUENCER_SEND_MIN_INTERVAL`、`INFLUENCER_SEND_MAX_PER_HOUR`、`INFLUENCER_QUIET_HOURS`（v60 随旧代码删除）、`JST_APP_KEY` 等（D32） | 设了也不起作用 |
 
 - 达人模块的数据和机器人共用一个数据库：`DB_PATH`，默认 `data/messages.db`（相对于启动目录）。控制台接口也从 .env 里读 `DB_PATH`。
 - 测试：`.venv/bin/python -m pytest tests/ -v`
@@ -405,3 +401,4 @@ CLI 是同事的千帆商家后台命令行工具：私有仓库 `doupi-org/xiao
 - 2026-10-26 v57：用户要求审查过时逻辑，派 3 个 Agent 审代码、文档、仓库外三处。按审查结果改了线上的审批路径（`bdd3dd6`）：批准不再要小红书账号、资质不按粉丝拦（去掉 `MIN_FOLLOWERS`）、ERP 里有商品就能寄（`check_inventory` 加 `found`，只在查不到时拦）、文案改成寄样单 / 不再说绑佣金 / 审核通过后 3 天内寄出、涨佣话术改成中性的「帮老师申请」并附近 30 天合作数据（`jst_erp.coop_summary`）、测试默认不碰真实聚水潭命令行。老的规则回复流程（router 已不挂达人模块）没动。聚水潭 CLI 修了 3 个 bug（`9ba47e3`）、加 `--level-min/--level-max`（`8004707`）；`~/daren-scout` 加老板要的 LV2–LV5（`2cbe227`）；kb 话术去掉没依据的说法、第一时间改尽快。全量测试 1717 个通过、2 个跳过。**下一步**：审批单改成"平台 + 档位 + 多款商品"、名单记抖音号 / 小红书号；然后集中清理 handoff 前半部分和备忘录（审查报告列了 19 处）。
 - 2026-10-26 v58：第 2 步数据模型（`2584e93`、`cd55e27`）。名单加平台（DY / XHS）和抖音号 / 小红书号，控制台名单页可填；`tiers.py` 按号码调聚水潭命令行 `jst lookup` 算档位（D30：抖音近 30 日销售总额 25 万 / 100 万，小红书直播场均 50 万 / 100 万，按区间下限；没数据单列"无销售数据"）和主播类型（`channelBySales`）；名单同步每轮最多重查一位到期的达人（24 小时一次，失败 1 小时后再试，改号码马上重查），并把"达人资料"写到业务资料目录 `deals/<编号>-达人资料.md`（只有平台、号码、档位、主播类型、销售额、等级），kb 合作政策已写明去这里看。审批单加 platform、platform_no、tier、channel、sales_label、items_json（合作单上的商品按顿号逗号分号拆成多款）、live_session；审批卡都显示。store 启动时自动补列（`_ADDED_COLUMNS`）。测试默认把 `JST_CLI_PATH`、`PRM_WORKSPACE` 指到不存在的目录。全量测试 1741 个通过、2 个跳过。**还没做**：多款商品逐款到聚水潭查（现在 `check_inventory` 拿的是整段商品文字，模拟模式下总能查到）；`create_sample_order` 收商品清单、真实建寄样单（等抓 `saveV3`）。**用法**：那 8 位达人加了微信、进了名单以后，在名单页给他们填上抖音号。
 - 2026-10-26 v59：第 3 步清理文档（审查报告 19 处）。handoff：抬头只留最新版本；第 0、1 节按现在的架构重写（PRM 起草、edge、聚水潭 CLI、寄样单、平台动作开佣金），代码位置标出没有入口的旧代码；第 2 节 R2、R3 标出取消的项；第 3 节换成 10-26 的状态；第 4 节补新测试文件；第 5 节换成 4 步计划和待办；第 6 节补齐被取代 / 已实现的状态（D5、D8、D16、D18、D19、D22、D26、D29、D30、D31、D32、D35、D36、D37），表按编号排序，注明提交说明里撞号的两处；"10-27 统一询问""等用户拍板"已答完，删掉；V1、V2、B24–B26 标成不用做；第 7、8 节去掉旧流程和 `JST_APP_KEY`，补 edge、PRM、聚水潭 CLI 的变量；后一个 v42 改成 v47b。备忘录重写成 10-26 版并重新生成网页；`CLAUDE.md` 的挂载点说明改成 `src/bot.py`，项目结构补 `src/influencer/`；记忆文件去掉过时的事实。没改代码。
+- 2026-10-26 v60：做第 5 节"其余待办"里的 4 件（用户说"把 5 到 8 条更新"）。① 佣金上限：同事 `src/prm/platforms.py` 加 `COMMISSION_CAP = 25`，Mac 的 config.json 只能往低调、写更大的也按 25 算，机器人端检查（`FORM_LIMITS`）也按 25；改了同事的 4 条测试和 worker README、联调清单、参考手册。② 款号对平台商品：发现千帆 SKU 的 `erpCode` 就是聚水潭 SKU 的商品编码（只读查了一次千帆商品详情和聚水潭 `goods-detail`）；目录同步存下 `code`、`products.md` 里显示"编码 …"；`prm_bridge.match_listings` 生成审批单时按编码或平台商品 ID 对，审批卡上逐款显示平台商品 ID，写了编号却对不上的标"商品目录里没有"；kb `商品.md` 加了合作单商品的写法（每款跟编号）。顺手修了聚水潭 CLI `goods --style-code` 不起作用（接口不认，返回全部款，`a428bcb` 去掉，按款号查用 `goods-detail`）。③ `~/Douyin-engineering` 快进到公司仓库最新的 `c494254`（10-21），有指定达人佣金命令了；百应相关离线测试 1333 个全过（全套有 1 个失败、91 个被连带取消，都在录制 / 变异测试工具里，和开佣金无关，没管）。④ 删旧代码：`claude_brain.py`、`mcp_server.py`、`send_policy.py`、`docs/influencer_knowledge.example.md`，handler 的规则对话（改成 `check_product` / `submit_for_approval` 两个公开方法），extract 的收件信息提取，store 的对话 / 发送队列 / 草稿读写（表和到期清理留着，老库照样清），settings 的 Claude 常数；测试相应改写（见第 4 节）。**还要用户做**：给抖店店铺 ID、登录抖店后才能让抖音目录带编码；配好 `platforms` 后跑一次 `--sync-products`。

@@ -23,11 +23,11 @@
     "dy": "~/Desktop/douyin-engineering",
     "tb": "~/Desktop/campaign-engineering",
     "dy_expect_shop_id": "<抖店店铺 ID>",
-    "max_commission_rate": 30,
+    "max_commission_rate": 20,
     "max_day_budget": 50
   }
   ```
-  测试时上限压低一点（佣金 30%、预算 50 元），测完再按业务改。
+  测试时上限压低一点（佣金 20%、预算 50 元），测完再按业务改；佣金最高 25%，写更大的也按 25% 算。
 - [ ] Mac：`python3 tools/claude_relay/worker.py --check --kinds prm`。期望多两行：`platform actions: xhs=…, dy=…, tb=…; node …`（没有 `missing`），`product catalogue: none yet …`。
 - [ ] Windows：换到这个分支、`npm run build`、`pyinstaller build.spec`、重启机器人（`.env` 不用改；`PRM_COPILOT=on` 照旧）。
 

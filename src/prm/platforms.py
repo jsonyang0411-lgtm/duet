@@ -189,18 +189,22 @@ ACTION_SCHEMA = {
     "additionalProperties": False,
 }
 
+# 公司定的专属佣金上限（handoff D5、D37：抖音、小红书都是 25%）。Mac 的 config.json 只能往低调，
+# 调不高；机器人这一侧也按它查。
+COMMISSION_CAP = 25
+
 # The limits an action is held to besides the platform's own (the Mac's config.json
-# "platforms" may lower or raise them).
+# "platforms" may lower or raise them; the commission rate only lower, see COMMISSION_CAP).
 DEFAULT_LIMITS = {
-    "max_commission_rate": 50,      # percent
+    "max_commission_rate": COMMISSION_CAP,      # percent
     "max_day_budget": 300,          # yuan a day
     "min_price_ratio": 0.5,         # an exclusive price at least this share of the catalogue price
     "max_sku_prices": 20,
     "max_crowds": 10,
 }
-# What the bot holds a Mac's action to: the form and the platforms' own ranges only (the
-# Mac's limits are the Mac's: it may have raised them).
-FORM_LIMITS = {**DEFAULT_LIMITS, "max_commission_rate": 80, "max_day_budget": 100_000_000}
+# What the bot holds a Mac's action to: the form, the platforms' own ranges and the
+# commission cap (the Mac's other limits are the Mac's: it may have raised them).
+FORM_LIMITS = {**DEFAULT_LIMITS, "max_day_budget": 100_000_000}
 
 _DIGITS = re.compile(r"^[1-9]\d{3,31}$")              # dy / tb ids (no leading zero)
 _HEX24 = re.compile(r"^[0-9A-Za-z]{24}$")              # a 千帆 user id
@@ -246,7 +250,7 @@ def _limits(limits: Optional[dict]) -> dict:
     out = dict(DEFAULT_LIMITS)
     for key, value in (limits or {}).items():
         if key in out and isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
-            out[key] = value
+            out[key] = min(value, COMMISSION_CAP) if key == "max_commission_rate" else value
     return out
 
 
@@ -389,7 +393,8 @@ def check_action(raw, *, catalog: Optional[dict] = None, limits: Optional[dict] 
 
 def _cap_rate(rate: Decimal, lim: dict) -> None:
     if rate > Decimal(str(lim["max_commission_rate"])):
-        raise _err("over_limit", f"佣金率 {_plain(rate)}% 超过这台 Mac 设的上限 {lim['max_commission_rate']}%")
+        raise _err("over_limit", f"佣金率 {_plain(rate)}% 超过上限 {lim['max_commission_rate']}%"
+                                 f"（公司定的最高 {COMMISSION_CAP}%，这台 Mac 只能往低调）")
 
 
 def _price(value, what: str) -> Decimal:
@@ -1416,6 +1421,7 @@ def check_record(value) -> dict:
 
 CATALOG_TIMEOUT_SEC = 600
 MAX_CATALOG_ITEMS = 2000
+_ERP_CODE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z_-]{2,63}$")    # 聚水潭商品编码
 
 
 def _yuan(value, fen: bool) -> str:
@@ -1506,7 +1512,7 @@ def catalog_markdown(catalog: dict) -> str:
     lines = ["# 在售商品目录（自动生成，不要手改）", "",
              f"同步时间：{when}（Mac 上运行 `python3 tools/claude_relay/worker.py --sync-products` 生成）。",
              "起草平台动作（platform_action）时，商品 ID 和 SKU ID 只能从这张表里取；价格是目录里的售价（元），"
-             "专属价、佣金按 kb/ 里的合作规则定。", ""]
+             "专属价、佣金按 kb/ 里的合作规则定。SKU 后面的「编码」是聚水潭的商品编码（有的平台才有）。", ""]
     for platform, name in PLATFORMS.items():
         part = (catalog.get("platforms") or {}).get(platform)
         if not isinstance(part, dict):
@@ -1522,7 +1528,8 @@ def catalog_markdown(catalog: dict) -> str:
         if items:
             lines += ["| 商品 ID | 标题 | 售价（元） | SKU（ID：规格 售价） |", "|---|---|---|---|"]
             for item in items:
-                skus = "；".join(f"{s.get('id')}：{_cell(s.get('name') or '')} {s.get('price') or ''}".strip()
+                skus = "；".join((f"{s.get('id')}：{_cell(s.get('name') or '')} {s.get('price') or ''}".strip()
+                                 + (f" 编码 {s['code']}" if s.get("code") else ""))
                                 for s in item.get("skus") or [])
                 lines.append(f"| {item.get('id')} | {_cell(item.get('title') or '')} | {item.get('price') or ''} | {skus} |")
             lines.append("")
@@ -1899,8 +1906,13 @@ def _sync_xhs(cfg: dict, progress) -> dict:
             for sku in entry.get("skus") or []:
                 if isinstance(sku, dict) and _XHS_ID.match(str(sku.get("skuId") or "")):
                     price = (sku.get("price") or {}).get("price") if isinstance(sku.get("price"), dict) else None
-                    item["skus"].append({"id": str(sku["skuId"]), "name": _clip(sku.get("skuName") or sku.get("variantName") or "", 60),
-                                         "price": _yuan(price, fen=True), "on_sale": bool(sku.get("available", True))})
+                    entry_sku = {"id": str(sku["skuId"]), "name": _clip(sku.get("skuName") or sku.get("variantName") or "", 60),
+                                 "price": _yuan(price, fen=True), "on_sale": bool(sku.get("available", True))}
+                    # 千帆 SKU 上的 ERP 编码就是聚水潭 SKU 的商品编码（如 A7261010037A-M，10-26 对过），
+                    # 审批单靠它把聚水潭的款对到平台商品
+                    if _ERP_CODE.match(str(sku.get("erpCode") or "")):
+                        entry_sku["code"] = str(sku["erpCode"])
+                    item["skus"].append(entry_sku)
     return {"items": items, "notes": notes, "complete": not (isinstance(data, dict) and data.get("complete") is False)}
 
 

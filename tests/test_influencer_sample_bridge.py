@@ -14,7 +14,7 @@ from test_prm import Bot as PrmBot, CREATOR, Clock, draft
 
 from src.influencer import console
 from src.influencer.handler import COMMISSION_REPLY, InfluencerBusinessHandler
-from src.influencer.prm_bridge import SampleBridge
+from src.influencer.prm_bridge import SampleBridge, match_listings
 from src.influencer.store import INBOX_COMMISSION, INBOX_OUT_OF_STOCK, SOURCE_CONSOLE, InfluencerStore
 from src.influencer.types import GateStatus
 
@@ -43,11 +43,11 @@ def side(tmp_path):
     b.relay.stop()
 
 
-def make_bridge(side, tmp_path, erp=None):
+def make_bridge(side, tmp_path, erp=None, workspace=None):
     store = InfluencerStore(str(tmp_path / "messages.db"))
     store.save_contact(CREATOR, source=SOURCE_CONSOLE, display_name="小美", xhs_account="https://www.xiaohongshu.com/user/profile/5f1e2d3c4b5a697887766554")
     handler = InfluencerBusinessHandler(store, erp_client=erp or FakeERP(), xhs_client=FakeXHS())
-    bridge = SampleBridge(handler, side.prm)
+    bridge = SampleBridge(handler, side.prm, workspace=workspace)
     bridge.attach()
     return handler, bridge
 
@@ -220,6 +220,54 @@ def test_the_approval_carries_platform_tier_items_and_live_session(side, bridged
     assert "25万~50万" in packet.sales_label
     assert [i["name"] for i in json.loads(packet.items_json)] == ["法式复古贝雷帽 深棕色", "丹麦小众贝雷帽 黑色", "北欧套头帽"]
     assert packet.live_session == "11 月 3 日"
+
+
+XHS_BERET = "6ad705003ae8b10015cc5be7"
+CATALOG = {"version": 1, "platforms": {
+    "xhs": {"ok": True, "items": [{"id": XHS_BERET, "title": "ACE7CN 英伦复古经典手缝线贝雷帽", "price": "220.00", "skus": [
+        {"id": "6ad705003ae8b10015cc5be8", "name": "黑色 M", "price": "220.00", "code": "A7261010037A-M"},
+        {"id": "6ad705003ae8b10015cc5be9", "name": "黑色 L", "price": "220.00", "code": "A7261010037A-L"}]}]},
+    "dy": {"ok": True, "items": [{"id": "3712345678901234567", "title": "法式贝雷帽", "price": "199.00", "skus": []}]},
+}}
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("手缝线贝雷帽 黑色 M（A7261010037A-M）", XHS_BERET),           # SKU 的商品编码
+    ("手缝线贝雷帽 A7261010037A 黑色", XHS_BERET),                  # 去掉尺码后缀的款
+    (f"千帆商品 {XHS_BERET}", XHS_BERET),                            # 平台商品 ID
+])
+def test_an_item_is_matched_to_the_platforms_listing_by_code_or_id(name, expected):
+    items = [{"name": name, "qty": 1}]
+    assert match_listings(items, "XHS", CATALOG) is True
+    assert items[0]["listing"]["id"] == expected and "贝雷帽" in items[0]["listing"]["title"]
+
+
+def test_a_code_not_in_this_platforms_catalogue_is_marked_and_no_code_is_left_alone():
+    items = [{"name": "丹麦贝雷帽 A7260610003B-F", "qty": 1}, {"name": "北欧套头帽 黑色", "qty": 1}]
+    assert match_listings(items, "XHS", CATALOG) is True
+    assert items[0].get("unlisted") is True and "listing" not in items[0]
+    assert items[1] == {"name": "北欧套头帽 黑色", "qty": 1}
+    # 小红书的编码在抖音的目录里找不到；没有目录、平台不认识都不标
+    dy = [{"name": "A7261010037A-M", "qty": 1}]
+    assert match_listings(dy, "DY", CATALOG) is True and dy[0].get("unlisted") is True
+    for catalog, platform in ((None, "XHS"), ({"platforms": {}}, "XHS"), (CATALOG, "")):
+        untouched = [{"name": "A7261010037A-M", "qty": 1}]
+        assert match_listings(untouched, platform, catalog) is False and untouched == [{"name": "A7261010037A-M", "qty": 1}]
+
+
+def test_the_approval_shows_the_platform_listing_of_each_item(side, tmp_path):
+    workspace = tmp_path / "ws"
+    (workspace / "kb").mkdir(parents=True)
+    (workspace / "kb" / "products.json").write_text(json.dumps(CATALOG, ensure_ascii=False), encoding="utf-8")
+    handler, bridge = make_bridge(side, tmp_path, workspace=workspace)
+    try:
+        handler.store.save_contact(CREATOR, source=SOURCE_CONSOLE, platform="XHS", platform_no="mei")
+        drafts(side, slots={**READY, "商品": "手缝线贝雷帽 黑色 M（A7261010037A-M）"}, stage_proposal="to_ship")
+        [packet] = approvals(handler)
+        [item] = json.loads(packet.items_json)          # 只有一款，对上了也列出来
+        assert item["listing"]["id"] == XHS_BERET
+    finally:
+        bridge.detach()
 
 
 def test_detach_unhooks_everything(side, tmp_path):

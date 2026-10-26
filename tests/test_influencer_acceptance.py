@@ -7,6 +7,10 @@ xfail(strict=True)，并在 reason 里写明对应的问题编号。某个问题
 
 外部系统一律用替身：FakeERP 代替聚水潭，FakeXHS 代替小红书 CLI。
 它们只记录调用，不碰真实库存和佣金。
+
+2026-10-26 第 8 步删了旧的规则对话（达人的私聊改由 PRM 起草、运营审核），只测对话回复的
+S2、S3 的回复、S6、S7 一起删了；审批单改成按现在的路径生成（check_product → submit_for_approval，
+prm_bridge 做的就是这两步），只执行一次、过期、上限这些保证照旧在这里测。
 """
 
 import asyncio
@@ -17,16 +21,12 @@ import pytest
 from src.influencer.handler import InfluencerBusinessHandler
 from src.influencer.jst_erp import JuShuiTanERPClient
 from src.influencer.store import SOURCE_CONSOLE, InfluencerStore
-from src.influencer.types import GateStatus
+from src.influencer.types import GateStatus, SampleRequestDraft
 from src.influencer.xhs_cli import XiaohongshuCLIClient
 
 INFLUENCER = "wxid_influencer_a"
-SAMPLE_REQUEST = "你好，想申请一下VC精华液的样品"
-FULL_ADDRESS = "张三 13812345678 上海市浦东新区世纪大道100号"
+PRODUCT = "英伦复古贝雷帽 黑色 M"
 XHS_PROFILE = "https://www.xiaohongshu.com/user/profile/5f0000000000000000000001"
-
-# 审批通过之前，回复里不能出现的承诺性字眼（D1）
-COMMITMENT_WORDS = ("今天", "明天", "下午", "马上", "立刻", "顺丰", "已安排", "已经安排", "排单")
 
 
 def known_failure(issue):
@@ -115,25 +115,16 @@ def expire(handler, packet_id):
     handler.store.update_pending(packet_id, expires_at=time.time() - 1)
 
 
-def age_draft(handler, chat_id, seconds):
-    draft = handler.store.get_draft(chat_id)
-    draft.updated_at -= seconds
-    handler.store.save_draft(draft)
-
-
 # ---- 场景辅助 ----
 
-def submit_full_request(handler, chat_id=INFLUENCER):
-    """走完"索样 → 补收件信息和小红书主页"两步，返回生成的审批单号。"""
-    run(handler.process_incoming_message(chat_id, SAMPLE_REQUEST, nickname="小美"))
-    run(handler.process_incoming_message(chat_id, f"{FULL_ADDRESS} 小红书主页 {XHS_PROFILE}", nickname="小美"))
-    [packet] = pending_packets(handler)
-    return packet.packet_id
-
-
-def assert_no_commitment(reply):
-    found = [w for w in COMMITMENT_WORDS if w in reply]
-    assert not found, f"审批前的回复不能有承诺性字眼 {found}：{reply}"
+def submit_full_request(handler, chat_id=INFLUENCER, *, xhs_account=XHS_PROFILE):
+    """合作单上的信息齐了以后生成审批单（prm_bridge 做的两步：先到聚水潭查商品，再提交），返回审批单号。"""
+    draft = SampleRequestDraft(
+        chat_id=chat_id, product=PRODUCT, recipient_name="张三", recipient_phone="13812345678",
+        shipping_address="上海市浦东新区世纪大道100号", xhs_account=xhs_account,
+    )
+    assert run(handler.check_product(draft)) == ""
+    return run(handler.submit_for_approval(chat_id, "小美", draft))
 
 
 # ---- S1–S7 ----
@@ -142,21 +133,7 @@ def assert_no_commitment(reply):
 # 由同事的 tests/test_router_business.py 守着。
 
 
-def test_s2_asking_for_the_address_makes_no_promise():
-    reply = run(make_handler().process_incoming_message(INFLUENCER, SAMPLE_REQUEST, nickname="小美"))
-    assert reply and ("收件" in reply or "地址" in reply)
-    assert_no_commitment(reply)
-
-
-def test_s3_full_address_is_submitted_for_review_without_promise():
-    handler = make_handler()
-    run(handler.process_incoming_message(INFLUENCER, SAMPLE_REQUEST, nickname="小美"))
-    reply = run(handler.process_incoming_message(INFLUENCER, FULL_ADDRESS, nickname="小美"))
-    assert "审核" in reply
-    assert_no_commitment(reply)
-
-
-def test_s3_packet_carries_the_recipient_from_the_message():
+def test_s3_packet_carries_the_recipient_as_confirmed():
     handler = make_handler()
     packet = get_packet(handler, submit_full_request(handler))
     assert packet.recipient_name == "张三"
@@ -184,24 +161,6 @@ def test_s5_a_rejected_packet_cannot_be_approved_later():
     result = run(handler.execute_operator_approval(packet_id, True))
     assert result["success"] is False
     assert erp.order_calls == [] and xhs.commission_calls == []
-
-
-def test_s6_two_people_with_the_same_nickname_stay_apart():
-    handler = make_handler(influencers=("wxid_a", "wxid_b"))
-    run(handler.process_incoming_message("wxid_a", "想申请泥膜样品", nickname="Lily"))
-    run(handler.process_incoming_message("wxid_b", "王五 13700002222 北京市朝阳区建国路8号", nickname="Lily"))
-    assert pending_packets(handler) == [], "B 发来的地址被挂到了 A 的索样申请上"
-
-
-def test_s7_an_unnamed_product_is_asked_about_not_placeheld():
-    erp = FakeERP()
-    handler = make_handler(erp)
-    reply = run(handler.process_incoming_message(INFLUENCER, "老师您好，想跟您谈谈带货合作", nickname="阿杰"))
-    assert reply, "白名单里的达人应该得到回复"
-    assert "主推爆款商品" not in reply
-    assert erp.inventory_calls == []
-    run(handler.process_incoming_message(INFLUENCER, FULL_ADDRESS, nickname="阿杰"))
-    assert pending_packets(handler) == []
 
 
 # ---- 补充用例 ----
@@ -299,12 +258,7 @@ def test_a_low_follower_count_is_only_a_reference_and_does_not_block():
     # D30（2026-10-26）：寄几款按销售额分档，不看粉丝数；粉丝数只写在单上给运营参考
     erp, xhs = FakeERP(), FakeXHS(stats={"follower_count": 500, "recent_highest_likes": 80})
     handler = make_handler(erp, xhs)
-    run(handler.process_incoming_message(INFLUENCER, SAMPLE_REQUEST, nickname="小美"))
-    reply = run(handler.process_incoming_message(
-        INFLUENCER, f"{FULL_ADDRESS} 小红书主页 {XHS_PROFILE}", nickname="小美",
-    ))
-    assert "名额" not in reply, "D4：不自动拒绝"
-    [packet] = pending_packets(handler)
+    packet = get_packet(handler, submit_full_request(handler))
     assert "粉丝 500" in packet.qualification and "参考" in packet.qualification
     result = run(handler.execute_operator_approval(packet.packet_id, True))
     assert result["success"] is True
@@ -327,7 +281,7 @@ def no_mock_env(monkeypatch):
 
 
 def test_erp_without_keys_or_mock_flag_returns_no_fake_stock(no_mock_env):
-    result = outcome(JuShuiTanERPClient().check_inventory("VC精华液"))
+    result = outcome(JuShuiTanERPClient().check_inventory(PRODUCT))
     assert isinstance(result, Exception) or not result.get("in_stock")
 
 
@@ -351,6 +305,6 @@ def test_xhs_without_cli_or_mock_flag_fakes_nothing(no_mock_env):
 
 def test_explicit_mock_flag_keeps_working(no_mock_env, monkeypatch):
     monkeypatch.setenv("INFLUENCER_MOCK", "1")
-    assert run(JuShuiTanERPClient().check_inventory("VC精华液"))["in_stock"]
+    assert run(JuShuiTanERPClient().check_inventory(PRODUCT))["in_stock"]
     client = XiaohongshuCLIClient(cli_path="/nonexistent/xhs-cli")
     assert run(client.set_exclusive_commission(xhs_uid="xhs_123", sku_id="SKU-1", rate=0.25))["success"]

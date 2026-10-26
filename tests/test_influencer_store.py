@@ -7,7 +7,7 @@ import pytest
 from src.db.schema import initialize_db
 from src.influencer.settings import DRAFT_TTL_SECONDS, PERSONAL_INFO_RETENTION_SECONDS
 from src.influencer.store import SOURCE_BOT, SOURCE_CONSOLE, SOURCE_ENV, InfluencerStore
-from src.influencer.types import ApprovalActionPacket, GateStatus, SampleRequestDraft
+from src.influencer.types import ApprovalActionPacket, GateStatus
 
 NEXT_YEAR = time.time() + 365 * 24 * 3600
 
@@ -90,18 +90,6 @@ def test_every_step_of_a_packet_is_on_record():
 
 # ---- 草稿 ----
 
-def test_a_draft_survives_a_restart(db_path):
-    draft = SampleRequestDraft(
-        chat_id="wxid_a", product="眼霜", recipient_phone="13812345678",
-        inventory={"sku_id": "SKU-眼霜", "available_quantity": 3},
-        asked_for=("recipient_name",), evidence=["想申请眼霜样品"],
-    )
-    InfluencerStore(db_path).save_draft(draft)
-    assert InfluencerStore(db_path).get_draft("wxid_a") == draft
-
-
-# ---- 达人名单 ----
-
 def test_the_environment_whitelist_only_ever_adds(db_path):
     store = InfluencerStore(db_path)
     assert store.add_contacts(["wxid_a"], source=SOURCE_ENV) == ["wxid_a"]
@@ -179,13 +167,22 @@ def test_personal_info_is_cleared_90_days_after_a_packet_is_handled():
     assert store.get_approval("GATE-WAITING").recipient_phone == "13812345678", "没处理完的单不清"
 
 
-def test_abandoned_drafts_are_deleted():
+def test_leftovers_of_the_old_dialogue_in_an_old_database_are_deleted_in_time():
+    # 旧的规则对话、直接回复、发送队列都删了（第 8 步），不再写这三张表；老库里留下的照样到期删
     store = InfluencerStore(":memory:")
-    store.save_draft(SampleRequestDraft(chat_id="wxid_a", updated_at=time.time() - DRAFT_TTL_SECONDS - 60))
-    store.save_draft(SampleRequestDraft(chat_id="wxid_b"))
+    now = time.time()
+    with store._connect() as conn:
+        conn.executemany("INSERT INTO influencer_drafts (chat_id, draft_json, updated_at) VALUES (?, '{}', ?)",
+                         [("wxid_old", now - DRAFT_TTL_SECONDS - 60), ("wxid_new", now)])
+        conn.executemany("INSERT INTO influencer_dialog (chat_id, incoming, created_at) VALUES (?, '地址……', ?)",
+                         [("wxid_old", now - PERSONAL_INFO_RETENTION_SECONDS - 60), ("wxid_new", now)])
+        conn.executemany("INSERT INTO influencer_outbox (chat_id, text, created_at) VALUES (?, '……', ?)",
+                         [("wxid_old", now - PERSONAL_INFO_RETENTION_SECONDS - 60), ("wxid_new", now)])
     store.run_maintenance()
-    assert store.get_draft("wxid_a") is None
-    assert store.get_draft("wxid_b") is not None
+    with store._connect() as conn:
+        for table in ("influencer_drafts", "influencer_dialog", "influencer_outbox"):
+            left = [r[0] for r in conn.execute(f"SELECT chat_id FROM {table}")]
+            assert left == ["wxid_new"], table
 
 
 def test_inbox_items_are_handled_once_and_deleted_90_days_later():

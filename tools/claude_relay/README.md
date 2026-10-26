@@ -208,7 +208,7 @@ Mac：同一个 CLI 带 --execute，只发一次（执行台账：同一个批�
      "node_bin": "",
      "dy_expect_shop_id": "",
      "tb_shop": "",
-     "max_commission_rate": 50,
+     "max_commission_rate": 25,
      "max_day_budget": 300,
      "min_price_ratio": 0.5,
      "env": {}
@@ -216,7 +216,7 @@ Mac：同一个 CLI 带 --execute，只发一次（执行台账：同一个批�
    ```
    - `node_bin` 留空就在 PATH、`~/.local/bin`、`/opt/homebrew/bin`、`/usr/local/bin` 里找（要 Node 22 以上）。
    - `dy_expect_shop_id`：抖音每条命令都加 `--expect-shop-id`，登录的不是这家店就退出码 79，什么都不发。`tb_shop`：淘宝用 `--shop <名字>` 选店铺（`node bin/shop.mjs` 登记过的）。`env`：额外交给命令行的环境变量，例如 `{"CAMPAIGN_EXPECT_UNB": "…", "XHS_CDP_ENDPOINT": "http://127.0.0.1:9222"}`。
-   - 上限（这台 Mac 自己的保险，平台自己的规则另算）：佣金率最多 `max_commission_rate`%，淘宝日预算最多 `max_day_budget` 元，专属价不能低于商品目录价的 `min_price_ratio`（防止小数点点错）。超了的动作不预览、不能执行。
+   - 上限（这台 Mac 自己的保险，平台自己的规则另算）：佣金率最多 `max_commission_rate`%（公司定的最高 25%，这里只能往低调，写更大的也按 25% 算），淘宝日预算最多 `max_day_budget` 元，专属价不能低于商品目录价的 `min_price_ratio`（防止小数点点错）。超了的动作不预览、不能执行。
    - `preview_timeout_sec`（默认 300）/ `execute_timeout_sec`（默认 900）：单条命令的时限。执行超时只能停下命令、结果算「不知道」，所以给得宽。
 3. 同步商品目录（只读命令）：
    ```

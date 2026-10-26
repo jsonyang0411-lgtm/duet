@@ -6,20 +6,16 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import threading
 import time
 from contextlib import contextmanager
 from dataclasses import asdict, fields
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 from .settings import DRAFT_TTL_SECONDS, PERSONAL_INFO_RETENTION_SECONDS
-from .types import ApprovalActionPacket, GateStatus, SampleRequestDraft
-
-if TYPE_CHECKING:
-    from .send_policy import SendPolicy
+from .types import ApprovalActionPacket, GateStatus
 
 # 操作记录里的"来源"
 SOURCE_BOT = "机器人"
@@ -48,7 +44,7 @@ CREATE TABLE IF NOT EXISTS influencer_contacts (
     updated_at        REAL    NOT NULL
 );
 
--- 还没补齐的索样申请，一位达人一份（SampleRequestDraft 的 JSON）
+-- 以前规则对话里还没补齐的索样申请，现在不再写入（寄样信息在 PRM 合作单上）。老库里的到期删除
 CREATE TABLE IF NOT EXISTS influencer_drafts (
     chat_id    TEXT PRIMARY KEY,
     draft_json TEXT NOT NULL,
@@ -120,8 +116,8 @@ CREATE TABLE IF NOT EXISTS influencer_inbox (
 CREATE INDEX IF NOT EXISTS idx_influencer_inbox_open
     ON influencer_inbox(handled_at, created_at DESC);
 
--- 和达人的对话：交给 Claude 回复时带上最近几轮，它才记得前面聊过什么。
--- 里面可能有收件信息，90 天后删除（D10）
+-- 和达人的对话：以前交给 Claude 直接回复时用，现在不再写入（达人的私聊走 PRM）。
+-- 老库里的可能有收件信息，照样 90 天后删除（D10）
 CREATE TABLE IF NOT EXISTS influencer_dialog (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id    TEXT    NOT NULL,
@@ -133,8 +129,7 @@ CREATE TABLE IF NOT EXISTS influencer_dialog (
 CREATE INDEX IF NOT EXISTS idx_influencer_dialog_chat
     ON influencer_dialog(chat_id, created_at DESC);
 
--- 主动发给达人的消息（批准后的确认消息等，B15）的发送队列。什么时候能发由 send_policy 决定
--- （间隔、每小时上限、夜间不发）。发出后 90 天删除
+-- 以前主动发给达人的消息的发送队列，现在不再写入（通知走 PRM 待审批）。老库里的 90 天后删除
 CREATE TABLE IF NOT EXISTS influencer_outbox (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id    TEXT    NOT NULL,
@@ -159,7 +154,6 @@ INBOX_COMMISSION = "commission"  # 达人要求提高佣金，机器人回了固
 INBOX_DRAFT = "draft"  # Mac 端（WECHAT_BACKEND=edge）：机器人想回的话，没发出，等运营审核（D19）
 
 _PACKET_COLUMNS = tuple(f.name for f in fields(ApprovalActionPacket))
-_DRAFT_FIELDS = frozenset(f.name for f in fields(SampleRequestDraft))
 
 
 # 建表以后加的列：老库启动时补上（ALTER TABLE ... ADD COLUMN），新库也靠这里加，SCHEMA_SQL 不再改
@@ -416,31 +410,6 @@ class InfluencerStore:
             for row in rows
         ]
 
-    # ---- 没补齐的申请 ----
-
-    def get_draft(self, chat_id: str) -> Optional[SampleRequestDraft]:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT draft_json FROM influencer_drafts WHERE chat_id = ?", (chat_id,),
-            ).fetchone()
-        if row is None:
-            return None
-        data = json.loads(row["draft_json"])
-        draft = SampleRequestDraft(**{name: value for name, value in data.items() if name in _DRAFT_FIELDS})
-        draft.asked_for = tuple(draft.asked_for)
-        return draft
-
-    def save_draft(self, draft: SampleRequestDraft) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO influencer_drafts (chat_id, draft_json, updated_at) VALUES (?, ?, ?)",
-                (draft.chat_id, json.dumps(asdict(draft), ensure_ascii=False), draft.updated_at),
-            )
-
-    def delete_draft(self, chat_id: str) -> None:
-        with self._connect() as conn:
-            conn.execute("DELETE FROM influencer_drafts WHERE chat_id = ?", (chat_id,))
-
     # ---- 审批单 ----
 
     def add_approval(self, packet: ApprovalActionPacket, *, source: str) -> None:
@@ -477,15 +446,6 @@ class InfluencerStore:
         with self._connect() as conn:
             rows = conn.execute(sql + " ORDER BY created_at DESC LIMIT ?", (*params, limit)).fetchall()
         return [_packet_from_row(row) for row in rows]
-
-    def latest_pending_without_xhs_account(self, chat_id: str) -> Optional[ApprovalActionPacket]:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM influencer_approvals WHERE influencer_id = ? AND status = ?"
-                " AND xhs_account = '' ORDER BY created_at DESC LIMIT 1",
-                (chat_id, GateStatus.PENDING.value),
-            ).fetchone()
-        return None if row is None else _packet_from_row(row)
 
     def update_pending(self, packet_id: str, **values: Any) -> bool:
         """改一张还在待审批的单。单已经不是待审批了就什么都不改，返回 False。"""
@@ -635,64 +595,6 @@ class InfluencerStore:
                 self._log(conn, "已人工处理", chat_id=row["chat_id"], detail=f"待处理事项 #{item_id}", source=source)
         return cur.rowcount == 1
 
-    # ---- 对话 ----
-
-    def add_dialog(self, chat_id: str, incoming: str, reply: str) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT INTO influencer_dialog (chat_id, incoming, reply, created_at) VALUES (?, ?, ?, ?)",
-                (chat_id, incoming, reply, time.time()),
-            )
-
-    def recent_dialog(self, chat_id: str, *, limit: int = 20, since: float = 0) -> List[Dict[str, Any]]:
-        """这位达人最近的几轮对话，从旧到新。"""
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT incoming, reply, created_at FROM influencer_dialog"
-                " WHERE chat_id = ? AND created_at >= ? ORDER BY created_at DESC, id DESC LIMIT ?",
-                (chat_id, since, limit),
-            ).fetchall()
-        return [dict(row) for row in reversed(rows)]
-
-    # ---- 发送队列 ----
-
-    def enqueue_outgoing(self, chat_id: str, text: str, *, kind: str = "", packet_id: str = "") -> int:
-        with self._connect() as conn:
-            cur = conn.execute(
-                "INSERT INTO influencer_outbox (chat_id, text, kind, packet_id, created_at) VALUES (?, ?, ?, ?, ?)",
-                (chat_id, text, kind, packet_id, time.time()),
-            )
-        return cur.lastrowid
-
-    def next_outgoing(self, policy: "SendPolicy", now: Optional[float] = None) -> Tuple[Optional[Dict[str, Any]], float, str]:
-        """队列里最早的一条，以及现在能不能发：(这一条, 还要等几秒, 原因)。队列空时第一项是 None。"""
-        now = time.time() if now is None else now
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM influencer_outbox WHERE sent_at IS NULL ORDER BY created_at, id LIMIT 1",
-            ).fetchone()
-            if row is None:
-                return None, 0.0, ""
-            last = conn.execute("SELECT MAX(sent_at) AS t FROM influencer_outbox").fetchone()["t"]
-            hour = conn.execute(
-                "SELECT COUNT(*) AS n, MIN(sent_at) AS oldest FROM influencer_outbox WHERE sent_at >= ?",
-                (now - 3600,),
-            ).fetchone()
-        wait, reason = policy.wait_before_next_send(now, last, hour["n"], hour["oldest"])
-        return dict(row), wait, reason
-
-    def mark_outgoing_sent(self, item_id: int, now: Optional[float] = None) -> bool:
-        with self._connect() as conn:
-            cur = conn.execute(
-                "UPDATE influencer_outbox SET sent_at = ? WHERE id = ? AND sent_at IS NULL",
-                (time.time() if now is None else now, item_id),
-            )
-        return cur.rowcount == 1
-
-    def count_unsent(self) -> int:
-        with self._connect() as conn:
-            return conn.execute("SELECT COUNT(*) FROM influencer_outbox WHERE sent_at IS NULL").fetchone()[0]
-
     # ---- 原项目表里的达人私聊（B27） ----
 
     @staticmethod
@@ -834,7 +736,6 @@ class InfluencerStore:
                 "DELETE FROM influencer_dialog WHERE created_at < ?", (now - PERSONAL_INFO_RETENTION_SECONDS,),
             )
             conn.execute(
-                "DELETE FROM influencer_outbox WHERE sent_at IS NOT NULL AND sent_at < ?",
-                (now - PERSONAL_INFO_RETENTION_SECONDS,),
+                "DELETE FROM influencer_outbox WHERE created_at < ?", (now - PERSONAL_INFO_RETENTION_SECONDS,),
             )
             self._purge_influencer_chats(conn, now - PERSONAL_INFO_RETENTION_SECONDS)

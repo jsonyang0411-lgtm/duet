@@ -5,61 +5,39 @@ from src.influencer.handler import InfluencerBusinessHandler
 from src.influencer.store import SOURCE_CONSOLE, InfluencerStore
 from src.influencer.types import GateStatus
 from test_influencer_acceptance import (
-    FULL_ADDRESS,
     INFLUENCER,
-    SAMPLE_REQUEST,
+    PRODUCT,
     FakeERP,
     FakeXHS,
     get_packet,
     make_handler,
-    pending_packets,
     run,
     submit_full_request,
 )
 
-LATE_PROFILE = "https://www.xiaohongshu.com/user/profile/5f00000000000000000000aa"
-
 
 def submit_without_xhs_account(handler):
-    run(handler.process_incoming_message(INFLUENCER, SAMPLE_REQUEST, nickname="小美"))
-    reply = run(handler.process_incoming_message(INFLUENCER, FULL_ADDRESS, nickname="小美"))
-    [packet] = pending_packets(handler)
-    return packet, reply
-
-
-def test_without_an_xhs_account_the_reply_asks_for_the_profile_link():
-    _, reply = submit_without_xhs_account(make_handler())
-    assert "小红书主页链接" in reply
+    return get_packet(handler, submit_full_request(handler, xhs_account=""))
 
 
 def test_approval_does_not_need_an_xhs_account_but_one_can_be_filled_in():
     # D31：抖音达人也要寄样；D34：批准后不在这里开佣金，所以不再要求小红书账号
     erp, xhs = FakeERP(), FakeXHS()
     handler = make_handler(erp, xhs)
-    without, _ = submit_without_xhs_account(handler)
+    without = submit_without_xhs_account(handler)
     assert run(handler.execute_operator_approval(without.packet_id, True))["success"] is True
     handler = make_handler(erp, xhs)
-    packet, _ = submit_without_xhs_account(handler)
+    packet = submit_without_xhs_account(handler)
     approved = run(handler.execute_operator_approval(packet.packet_id, True, xhs_account="xhs_creator_001"))
     assert approved["success"] is True
     assert get_packet(handler, packet.packet_id).xhs_account == "xhs_creator_001", "运营填的账号记在单上，开佣金时用"
     assert xhs.commission_calls == []
 
 
-def test_a_profile_link_sent_after_submission_is_attached_to_the_request():
-    handler = make_handler()
-    packet, _ = submit_without_xhs_account(handler)
-    reply = run(handler.process_incoming_message(INFLUENCER, f"我的小红书主页 {LATE_PROFILE}", nickname="小美"))
-    assert "补充到申请" in reply
-    packet = get_packet(handler, packet.packet_id)
-    assert packet.xhs_account == LATE_PROFILE
-    assert packet.qualification.startswith("粉丝 35000")  # FakeXHS 默认返回 3.5 万粉，只作参考
-
-
 def test_the_operator_can_lower_the_commission_but_not_raise_it():
     erp, xhs = FakeERP(), FakeXHS()
     handler = make_handler(erp, xhs)
-    packet, _ = submit_without_xhs_account(handler)
+    packet = submit_without_xhs_account(handler)
     too_high = run(handler.execute_operator_approval(
         packet.packet_id, True, xhs_account="xhs_creator_001", commission_rate=0.30,
     ))
@@ -155,7 +133,7 @@ def test_an_approval_only_makes_the_order_and_never_touches_the_commission():
 def test_after_approval_the_operator_gets_the_message_for_the_influencer():
     handler = make_handler()
     result = run(handler.execute_operator_approval(submit_full_request(handler), True))
-    assert "VC精华液" in result["notice"] and "SF0001" in result["notice"]
+    assert PRODUCT in result["notice"] and "SF0001" in result["notice"]
 
 
 def test_a_rejection_gives_a_polite_message_and_keeps_the_reason_on_record():

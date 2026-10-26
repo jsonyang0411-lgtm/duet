@@ -75,7 +75,7 @@ def test_each_action_is_normalised_and_typed():
     ({**DESIGNATED, "commission_rate": 20.5}, "bad_rate"),               # whole percents only on 百应
     ({**DESIGNATED, "commission_rate": 0}, "bad_rate"),
     ({**DESIGNATED, "commission_rate": True}, "bad_rate"),
-    ({**DESIGNATED, "commission_rate": 60}, "over_limit"),               # the Mac's own cap (50%)
+    ({**DESIGNATED, "commission_rate": 26}, "over_limit"),               # 公司定的上限 25%
     ({**PLAN, "commission_rate": 12.55}, "bad_rate"),
     ({**PLAN, "commission_rate": 81}, "bad_rate"),
     ({**PLAN, "creator_platform_id": "--execute"}, "bad_creator"),
@@ -101,8 +101,11 @@ def test_what_does_not_fit_is_refused(raw, code):
     assert e.value.code == code
 
 
-def test_the_mac_can_raise_or_lower_its_limits():
-    assert platforms.check_action({**DESIGNATED, "commission_rate": 60}, limits={"max_commission_rate": 70})
+def test_the_mac_can_lower_the_commission_cap_but_not_raise_it():
+    assert platforms.check_action({**DESIGNATED, "commission_rate": 25}, limits={"max_commission_rate": 70})
+    with pytest.raises(ActionError) as e:
+        platforms.check_action({**DESIGNATED, "commission_rate": 26}, limits={"max_commission_rate": 70})
+    assert e.value.code == "over_limit"
     with pytest.raises(ActionError):
         platforms.check_action(DESIGNATED, limits={"max_commission_rate": 10})
 
@@ -169,9 +172,10 @@ def test_a_link_must_be_the_platforms_own():
 # ── settings ──────────────────────────────────────────────────────────────
 
 def test_a_platform_is_usable_only_with_its_cli_and_node(node, tmp_path):
-    cfg = platforms.config(node.settings(tb=str(tmp_path / "nowhere"), max_commission_rate=30))
+    cfg = platforms.config(node.settings(tb=str(tmp_path / "nowhere"), max_commission_rate=15))
     assert set(cfg["dirs"]) == {"xhs", "dy"} and "tb" in cfg["missing"] and cfg["enabled"]
-    assert cfg["limits"]["max_commission_rate"] == 30
+    assert cfg["limits"]["max_commission_rate"] == 15
+    assert platforms.config(node.settings(max_commission_rate=30))["limits"]["max_commission_rate"] == 25
     assert platforms.config({})["enabled"] is False
     assert platforms.find_node(str(node.path)) == str(node.path)
 
@@ -530,12 +534,13 @@ def test_the_bot_checks_what_comes_back(node, cfg):
     assert len(huge["steps"][0]["raw"]) <= platforms.MAX_RAW_CHARS + 40
 
 
-def test_the_bot_holds_a_macs_action_to_the_form_not_to_the_macs_own_limits(node):
+def test_the_bot_holds_a_macs_action_to_the_form_and_the_commission_cap(node):
     cfg = platforms.config(node.settings(max_commission_rate=70, max_day_budget=2000))
-    raised = {**DESIGNATED, "commission_rate": 60}
-    action = platforms.check_action(raised, limits=cfg["limits"])
+    action = platforms.check_action({**DESIGNATED, "commission_rate": 25}, limits=cfg["limits"])
     block = {"version": 1, "action": action, "verdict": "ready", "run": {"steps": ["designated"]}}
-    assert platforms.check_block(block)["action"]["commission_rate"] == "60"
+    assert platforms.check_block(block)["action"]["commission_rate"] == "25"
+    with pytest.raises(ActionError):                    # Mac 改过的 worker 交回 26% 也不收
+        platforms.check_block({**block, "action": {**action, "commission_rate": "26"}})
     assert platforms.check_block({**block, "action": platforms.check_action({**CAMPAIGN, "day_budget": 2000},
                                                                          limits=cfg["limits"]),
                                   "run": {"steps": ["create"], "name": "x_1"}})["verdict"] == "ready"
@@ -570,7 +575,8 @@ def test_the_catalogue_is_read_from_the_three_platforms(node, cfg, tmp_path):
         rule(["items", "--tab=shelf"], {"site": "ark", "complete": True, "items": [
             {"item_id": XHS_ITEM, "item_name": "防晒霜", "min_price": 9900}, {"item_id": other, "item_name": "面膜 | 补水", "min_price": 5900}]}),
         rule(["item", f"--item-id={XHS_ITEM},{other}"], {"site": "ark", "notFound": [], "items": [
-            {"item": {"item_id": XHS_ITEM}, "skus": [{"skuId": XHS_SKU, "skuName": "50ml", "price": {"price": 9900}, "available": True}]}]}),
+            {"item": {"item_id": XHS_ITEM}, "skus": [{"skuId": XHS_SKU, "skuName": "50ml", "price": {"price": 9900}, "available": True,
+                                                  "erpCode": "A7261010037A-M"}]}]}),
         rule(["fxg", "products"], {"site": "fxg", "command": "products", "complete": True, "rows": [
             {"productId": DY_ITEM, "name": "测试主品", "status": 0, "checkStatus": 3, "priceLower": 1999, "discountPrice": 0}]}),
         rule(["fxg", "sku-prices"], {"site": "fxg", "command": "sku-prices", "rows": [
@@ -580,7 +586,8 @@ def test_the_catalogue_is_read_from_the_three_platforms(node, cfg, tmp_path):
     cat = platforms.sync_catalog(cfg, ["xhs", "dy", "tb"])
     xhs, dy, tb = (cat["platforms"][p] for p in ("xhs", "dy", "tb"))
     assert xhs["ok"] and [i["id"] for i in xhs["items"]] == [XHS_ITEM, other]
-    assert xhs["items"][0]["skus"] == [{"id": XHS_SKU, "name": "50ml", "price": "99.00", "on_sale": True}]
+    assert xhs["items"][0]["skus"] == [{"id": XHS_SKU, "name": "50ml", "price": "99.00", "on_sale": True,
+                                        "code": "A7261010037A-M"}]
     assert xhs["items"][0]["price"] == "99.00"
     assert dy["items"] == [{"id": DY_ITEM, "title": "测试主品", "price": "19.99",
                             "skus": [{"id": DY_SKU, "name": "红色/M", "price": "19.99"}]}]
@@ -589,7 +596,7 @@ def test_the_catalogue_is_read_from_the_three_platforms(node, cfg, tmp_path):
     (ws / "kb").mkdir(parents=True)
     paths = platforms.write_catalog(ws, cat)
     md = (ws / "kb/products.md").read_text(encoding="utf-8")
-    assert f"| {XHS_ITEM} | 防晒霜 | 99.00 | {XHS_SKU}：50ml 99.00 |" in md
+    assert f"| {XHS_ITEM} | 防晒霜 | 99.00 | {XHS_SKU}：50ml 99.00 编码 A7261010037A-M |" in md
     assert "面膜 ｜ 补水" in md and f"| {DY_ITEM} | 测试主品 |" in md and "## 淘宝（tb）— 1 个商品" in md
     assert platforms.load_catalog(ws)["platforms"]["dy"]["items"][0]["id"] == DY_ITEM and len(paths) == 2
     for argv in (c["argv"] for c in node.calls()):

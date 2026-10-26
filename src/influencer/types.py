@@ -5,17 +5,9 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from .settings import APPROVAL_TTL_SECONDS
-
-# 收件信息的字段名和对达人说的叫法，顺序就是追问的顺序
-RECIPIENT_FIELD_LABELS = {
-    "recipient_name": "收件人姓名",
-    "recipient_phone": "联系电话",
-    "shipping_address": "收货地址",
-}
-
 
 class GateStatus(str, Enum):
     PENDING = "PENDING_APPROVAL"
@@ -57,50 +49,16 @@ class InfluencerProfile:
 
 
 @dataclass
-class SampleRequestIntent:
-    """达人索样/合作意图 (Layer 3: Judge)"""
-    is_sample_request: bool = False
-    requested_product: str = ""
-    target_sku: str = ""
-    recipient_name: str = ""
-    recipient_phone: str = ""
-    shipping_address: str = ""
-    xhs_account: str = ""  # 小红书主页链接或小红书号
-    proposed_commission_rate: Optional[float] = None
-    raw_evidence: str = ""  # 事实溯源原话 (No memory without a source)
-
-
-@dataclass
 class SampleRequestDraft:
-    """一位达人正在补齐的索样申请：多轮对话里逐条补充，信息齐了才生成审批单。"""
+    """要生成审批单的寄样信息（prm_bridge 从合作单上取），先查商品再提交审批。"""
     chat_id: str
     product: str = ""
     recipient_name: str = ""
     recipient_phone: str = ""
     shipping_address: str = ""
     xhs_account: str = ""
-    inventory: Optional[Dict[str, Any]] = None  # 当前商品的库存查询结果，换商品后清空
-    asked_for: Tuple[str, ...] = ()  # 上一轮追问了哪些字段
-    evidence: List[str] = field(default_factory=list)  # 达人的原话，供运营核对（R5）
-    updated_at: float = field(default_factory=time.time)
-
-    def merge(self, info: SampleRequestIntent) -> None:
-        """补进一条消息里提取到的字段。新的非空值覆盖旧值，因为达人可能会更正。"""
-        if info.requested_product and info.requested_product != self.product:
-            self.product = info.requested_product
-            self.inventory = None
-        for name in RECIPIENT_FIELD_LABELS:
-            value = getattr(info, name)
-            if value:
-                setattr(self, name, value)
-        if info.xhs_account:
-            self.xhs_account = info.xhs_account
-        if info.raw_evidence:
-            self.evidence = (self.evidence + [info.raw_evidence])[-10:]
-        self.updated_at = time.time()
-
-    def missing_recipient_fields(self) -> List[str]:
-        return [name for name in RECIPIENT_FIELD_LABELS if not getattr(self, name)]
+    inventory: Optional[Dict[str, Any]] = None  # check_product 查到的商品
+    evidence: List[str] = field(default_factory=list)  # 信息从哪来，供运营核对（R5）
 
 
 @dataclass

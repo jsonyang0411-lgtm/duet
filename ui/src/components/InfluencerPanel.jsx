@@ -289,8 +289,15 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
         {p.live_session && (<><dt>直播专场</dt><dd>{p.live_session}</dd></>)}
         <dt>申请</dt>
         <dd>
-          {items.length > 1
-            ? <ol className="gate-items">{items.map((it, i) => <li key={i}>{it.name}{it.qty > 1 ? ` × ${it.qty}` : ''}</li>)}</ol>
+          {items.length > 0
+            ? <ol className="gate-items">{items.map((it, i) => (
+                <li key={i}>
+                  {it.name}{it.qty > 1 ? ` × ${it.qty}` : ''}
+                  {/* 开专属佣金按平台商品设：对上了显示平台商品 ID，写了编号却对不上的标出来 */}
+                  {it.listing && <div className="f-hint">{PLATFORM_LABEL[p.platform] || p.platform}商品 <span className="mono">{it.listing.id}</span> {it.listing.title}</div>}
+                  {it.unlisted && <div className="f-hint"><span className="tag warn">{PLATFORM_LABEL[p.platform] || p.platform}商品目录里没有</span> 可能没上架：换款，或者照寄、不设专属佣金</div>}
+                </li>
+              ))}</ol>
             : p.requested_product}
           <div className="f-hint">共 {Math.max(items.length, 1)} 款，每款 1 件 · 现货 {p.stock_available}（没现货也能寄，D35）</div>
         </dd>

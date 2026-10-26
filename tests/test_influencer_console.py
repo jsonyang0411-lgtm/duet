@@ -48,7 +48,9 @@ def seed(db_path):
     store.add_approval(
         make_packet("GATE-DY", chat_id="wxid_mei", expires_at=NEXT_YEAR, platform="DY", platform_no="jiawen3339",
                     tier="不限", channel="视频", sales_label="近 30 日销售总额 250万~500万（聚水潭，10-26 查）",
-                    items_json='[{"name": "法式复古贝雷帽 深棕色", "qty": 1}, {"name": "丹麦小众贝雷帽 黑色", "qty": 1},'
+                    items_json='[{"name": "法式复古贝雷帽 深棕色", "qty": 1,'
+                               ' "listing": {"id": "3712345678901234567", "title": "法式贝雷帽 抖音款"}},'
+                               ' {"name": "丹麦小众贝雷帽 A7260610003B", "qty": 1, "unlisted": true},'
                                ' {"name": "北欧套头帽", "qty": 1}]',
                     live_session="11 月 3 日晚上开专场"),
         source=SOURCE_BOT,
@@ -215,7 +217,8 @@ def test_a_douyin_request_shows_tier_channel_and_every_item(console, page):
     page.goto(f"{console.base}/#/influencer/approvals")
     dy = card(page, "GATE-DY")
     dy.get_by_text("jiawen3339").wait_for()
-    for text in ("不限", "视频为主", "250万~500万", "法式复古贝雷帽 深棕色", "北欧套头帽", "共 3 款", "11 月 3 日晚上开专场"):
+    for text in ("不限", "视频为主", "250万~500万", "法式复古贝雷帽 深棕色", "北欧套头帽", "共 3 款", "11 月 3 日晚上开专场",
+                 "3712345678901234567", "抖音商品目录里没有"):
         assert dy.get_by_text(text).count() >= 1, text
     assert dy.get_by_role("button", name="通过").is_enabled()
 

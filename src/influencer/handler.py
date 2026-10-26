@@ -1,38 +1,28 @@
-"""Influencer Business Handler.
+"""达人寄样审批：生成审批单、运营批准后在聚水潭建寄样单。
 
-Wires Intent Recognition, Multi-turn Context, Qualification Screening,
-JST ERP, XHS CLI, and Layer 6 Gate into a unified business pipeline.
-
-名单、没补齐的申请和审批单都存在数据库里（store.py）。机器人和控制台各自构造处理器，
-通过数据库共享数据，不共享内存对象（第 6 项，B5）。
+达人的私聊由 PRM 起草、运营审核（D19、D25）；合作单进「待寄出」时，prm_bridge.SampleBridge 先用
+check_product 到聚水潭查商品，再用 submit_for_approval 生成审批单。运营在控制台「达人审批」页批准，
+execute_operator_approval 建寄样单（每张单只执行一次）。名单、审批单都存在数据库里（store.py），
+机器人和控制台各自构造处理器，通过数据库共享数据（B5）。
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import threading
 import time
 import uuid
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import Any, Dict, Optional
 
-from .extract import asks_for_higher_commission, extract_request_info
 from .jst_erp import JuShuiTanERPClient
 from .settings import (
     DEFAULT_COMMISSION_RATE,
-    DRAFT_TTL_SECONDS,
-    HOLDING_REPLY_INTERVAL_SECONDS,
     MAX_COMMISSION_RATE,
     STUCK_EXECUTION_SECONDS,
-    brain_enabled,
     sample_limits,
     influencer_chat_ids_from_env,
 )
-from .send_policy import SendPolicy
 from .store import (
     EVENT_EXECUTION_STARTED,
-    INBOX_COMMISSION,
-    INBOX_MESSAGE,
     INBOX_OUT_OF_STOCK,
     SOURCE_BOT,
     SOURCE_CONSOLE,
@@ -40,7 +30,6 @@ from .store import (
     InfluencerStore,
 )
 from .types import (
-    RECIPIENT_FIELD_LABELS,
     STATUS_LABELS,
     ApprovalActionPacket,
     GateStatus,
@@ -49,15 +38,12 @@ from .types import (
 )
 from .xhs_cli import XiaohongshuCLIClient
 
-if TYPE_CHECKING:
-    from .claude_brain import ClaudeBrain
-
 logger = logging.getLogger(__name__)
 
 QUALIFICATION_UNKNOWN = "待核实：没有达人数据，需要运营人工核实"
-# 出了问题时的中性回复：不承诺任何事，也不让这条消息落到聊天模型那里随口作答
-HOLDING_REPLY = "收到老师的消息啦~ 我们这边核对一下，再回复老师哦！"
-# 达人要求提高佣金时的固定回复。佣金不交给模型谈，上限见 MAX_COMMISSION_RATE。
+# 查商品时聚水潭连不上（check_product 的结果）
+ERP_UNREACHABLE = "聚水潭查不了商品（连不上或者还没接入），请人工处理"
+# 达人要求提高佣金时的固定回复（prm_bridge 作为系统消息放进待审批，D22）。佣金不交给模型谈，上限见 MAX_COMMISSION_RATE。
 # D37（2026-10-26）：起步 20%，涨不涨由运营看这位达人近 30 天在我们店的单量和成交额再定，
 # 所以这里只说"帮老师申请"，不替运营拒绝，也不承诺能涨。不能有违规词（FORBIDDEN_WORDS）
 COMMISSION_REPLY = (
@@ -74,10 +60,6 @@ def product_in_erp(inventory: Dict[str, Any]) -> bool:
     if "found" in inventory:
         return bool(inventory["found"])
     return bool(inventory.get("sku_id"))
-
-
-def _mask_phone(phone: str) -> str:
-    return f"{phone[:3]}****{phone[-4:]}" if len(phone) == 11 else phone
 
 
 def approval_notice(packet: ApprovalActionPacket) -> str:
@@ -105,7 +87,7 @@ def rejection_notice(packet: ApprovalActionPacket) -> str:
 
 def build_influencer_handler(db_path: str) -> "InfluencerBusinessHandler":
     """机器人启动时调用：打开数据库，把环境变量 INFLUENCER_CHAT_IDS 并进名单（只增不删，Q4），
-    再做一次维护（过期、清除到期的个人信息、删掉作废的草稿）。"""
+    再做一次维护（过期、清除到期的个人信息）。"""
     store = InfluencerStore(db_path)
     added = store.add_contacts(
         sorted(influencer_chat_ids_from_env()), source=SOURCE_ENV, note="来自环境变量 INFLUENCER_CHAT_IDS",
@@ -113,13 +95,7 @@ def build_influencer_handler(db_path: str) -> "InfluencerBusinessHandler":
     if added:
         logger.info(f"[达人模块] 从环境变量把 {len(added)} 位达人加进了名单")
     store.run_maintenance()
-    brain = None
-    if brain_enabled():
-        from .claude_brain import ClaudeBrain
-
-        brain = ClaudeBrain(store, db_path)
-        logger.info("[达人模块] 达人的消息交给 Claude 回复（INFLUENCER_BRAIN=claude）")
-    return InfluencerBusinessHandler(store, brain=brain, send_policy=SendPolicy.from_env())
+    return InfluencerBusinessHandler(store)
 
 
 def sample_limit_problem(store: InfluencerStore, packet: ApprovalActionPacket, now: Optional[float] = None) -> str:
@@ -139,26 +115,17 @@ def sample_limit_problem(store: InfluencerStore, packet: ApprovalActionPacket, n
     return ""
 
 
+
 class InfluencerBusinessHandler:
     def __init__(
         self,
         store: InfluencerStore,
         erp_client: Optional[JuShuiTanERPClient] = None,
         xhs_client: Optional[XiaohongshuCLIClient] = None,
-        brain: Optional["ClaudeBrain"] = None,
-        send_policy: Optional[SendPolicy] = None,
     ):
         self.store = store
         self.erp = erp_client or JuShuiTanERPClient()
         self.xhs = xhs_client or XiaohongshuCLIClient()
-        # 交给 Claude 回复（claude_brain.py）；None 表示只用规则流程
-        self.brain = brain
-        # 防封：回复前像真人一样等一会儿（send_policy.py）；None 表示不等（测试里直接构造时）
-        self.send_policy = send_policy
-        # router 在多个工作线程里调用本处理器。同一位达人的消息一条一条处理：
-        # 草稿是"读出来、改、写回去"，两条消息同时处理会丢掉其中一条的信息
-        self._chat_locks: Dict[str, threading.Lock] = {}
-        self._chat_locks_guard = threading.Lock()
 
     def is_influencer(self, chat_id: str) -> bool:
         """只处理名单里、并且没有停用的私聊 chat_id（D3）。"""
@@ -197,181 +164,31 @@ class InfluencerBusinessHandler:
         )
         return profile
 
-    # ---- 对话 ----
+    # ---- 生成审批单 ----
 
-    def handle_private_message(self, chat_id: str, content: str, nickname: str = "") -> Optional[str]:
-        """供同步的 router 调用。返回 None 表示这条私聊不归达人模块管；
-        返回空字符串表示归达人模块管、但这次不回复（router 不能再交给聊天模型）。
-
-        router 在工作线程里运行，线程里没有事件循环，所以直接用 asyncio.run（B19）。
-        """
-        if not chat_id:
-            return None
+    async def check_product(self, draft: SampleRequestDraft) -> str:
+        """到聚水潭 ERP 查这款商品，查到的结果记进 draft.inventory。能寄返回空字符串，不能寄返回原因。
+        D35：ERP 里有这个商品就能寄，不看现货（每个 SKU 挂着虚拟库存，现货多半是 0）；
+        只有 ERP 里查不到、或者已停用才不能寄，并记进控制台「待处理」让运营知道（B21、D14）。"""
         try:
-            if not self.is_influencer(chat_id):
-                return None
-        except Exception:
-            logger.exception("[达人模块] 读不到达人名单，这条私聊按普通私聊处理")
-            return None
-        try:
-            with self._chat_lock(chat_id):
-                started = time.time()
-                reply = asyncio.run(self.process_incoming_message(chat_id, content, nickname))
-                if reply and self.send_policy is not None:
-                    time.sleep(self.send_policy.reply_delay(reply, already_spent=time.time() - started))
-                return reply
-        except Exception:
-            logger.exception("[达人模块] 处理私信出错，需要人工处理")
-            return HOLDING_REPLY
-
-    def _chat_lock(self, chat_id: str) -> threading.Lock:
-        with self._chat_locks_guard:
-            return self._chat_locks.setdefault(chat_id, threading.Lock())
-
-    def _active_draft(self, chat_id: str) -> Optional[SampleRequestDraft]:
-        """取这位达人还没补齐的申请；超过 DRAFT_TTL_SECONDS 没有动静的作废。"""
-        draft = self.store.get_draft(chat_id)
-        if draft is not None and time.time() - draft.updated_at > DRAFT_TTL_SECONDS:
-            self.store.delete_draft(chat_id)
-            return None
-        return draft
-
-    async def _attach_xhs_account(self, chat_id: str, xhs_account: str) -> bool:
-        """审批单提交后达人才发来小红书主页：补进这位达人最近一张还缺账号的待审批单。"""
-        packet = self.store.latest_pending_without_xhs_account(chat_id)
-        if packet is None:
-            return False
-        profile = await self._refresh_profile(chat_id, packet.influencer_name, xhs_account)
-        attached = self.store.update_pending(
-            packet.packet_id,
-            xhs_account=xhs_account,
-            follower_count=profile.follower_count,
-            qualification=self.assess_qualification(profile),
-        )
-        if attached:
-            self.store.add_event(
-                "补充小红书账号", packet_id=packet.packet_id, chat_id=chat_id,
-                detail="达人发来了小红书主页", source=SOURCE_BOT,
+            inventory = await self.erp.check_inventory(draft.product)
+        except Exception as exc:
+            logger.error(f"[ERP] 查询商品失败，需要人工处理：{exc}")
+            return ERP_UNREACHABLE
+        if not product_in_erp(inventory):
+            logger.warning(f"[ERP查不到商品] {draft.product}")
+            self.store.add_inbox_item(
+                draft.chat_id, INBOX_OUT_OF_STOCK, f"想要【{draft.product}】的样品，但聚水潭 ERP 里查不到这个商品（或已停用）",
             )
-        return attached
+            return f"【{draft.product}】在聚水潭 ERP 里查不到（已记进「待处理」）"
+        draft.inventory = inventory
+        return ""
 
-    async def process_incoming_message(
-        self, chat_id: str, content: str, nickname: str = ""
-    ) -> Optional[str]:
-        """处理达人的私信。chat_id 是私聊的稳定 ID，不能用昵称（B10）。
-
-        返回要回复的话；返回空字符串表示不回复；返回 None 表示这条消息不归达人模块管
-        （只有名单以外的人才会这样）。
-        """
-        if not self.is_influencer(chat_id):
-            return None
-        reply = await self._reply(chat_id, content, nickname)
-        if self.brain is not None and reply is not None:
-            # 记下这一轮，下次交给 Claude 时带上，它才记得前面聊过什么
-            self.store.add_dialog(chat_id, content, reply)
-        return reply
-
-    async def _reply(self, chat_id: str, content: str, nickname: str) -> Optional[str]:
-        if asks_for_higher_commission(content):
-            return self._answer_commission_request(chat_id, content)
-        if self.brain is not None:
-            answer = self.brain.reply(chat_id, content, nickname)
-            if answer is not None and not answer.blocked:
-                return answer.text
-            if answer is not None:
-                # 回复里有不该说的话：不发，交给运营；运营在「待处理」里能看到原本要发的话
-                return self._hand_over_to_operator(
-                    chat_id, f"{content}\n（Claude 的回复没发出：{answer.blocked}。原本要发：{answer.text}）",
-                )
-            # Claude 出错或超时：退回下面的规则流程
-        return await self._rule_reply(chat_id, content, nickname)
-
-    async def _rule_reply(self, chat_id: str, content: str, nickname: str) -> Optional[str]:
-        """规则流程：没打开 Claude，或者 Claude 这次没能回复时用。"""
-        draft = self._active_draft(chat_id)
-        expecting_name = draft is not None and draft.asked_for == ("recipient_name",)
-        info = extract_request_info(content, expecting_name=expecting_name)
-        if draft is None:
-            if info.xhs_account and not info.is_sample_request:
-                if await self._attach_xhs_account(chat_id, info.xhs_account):
-                    return "收到老师的小红书主页啦，已经补充到申请里了~"
-            if not (info.is_sample_request or (info.recipient_phone and info.shipping_address)):
-                return self._hand_over_to_operator(chat_id, content)
-            draft = SampleRequestDraft(chat_id=chat_id)
-        draft.merge(info)
-
-        # 资质只在审批单上标注，由运营决定，不自动拒绝（D4）
-        reply = await self._ask_for_what_is_missing(draft)
-        if reply is not None:
-            self.store.save_draft(draft)
-            return reply
-        return await self._submit_for_approval(chat_id, nickname, draft)
-
-    def _hand_over_to_operator(self, chat_id: str, content: str) -> str:
-        """达人发的不是索样（闲聊、问发货等）：不交给聊天模型随口作答（B20），记进控制台的
-        待处理事项，由运营人工回复。机器人先回一句不做任何承诺的话，一段时间内只回一次。"""
-        last = self.store.last_auto_reply_at(chat_id)
-        reply_now = last is None or time.time() - last > HOLDING_REPLY_INTERVAL_SECONDS
-        self.store.add_inbox_item(chat_id, INBOX_MESSAGE, content, auto_replied=reply_now)
-        return HOLDING_REPLY if reply_now else ""
-
-    def _answer_commission_request(self, chat_id: str, content: str) -> str:
-        """达人要求提高佣金：回固定话术，不交给模型谈，也不改审批单上的佣金；记进「待处理」
-        让运营知道。同一位达人一段时间内再提，不重复回同一段话，只记待处理。
-        还没补齐的申请原样留着，达人接着发收件信息还能继续。"""
-        last = self.store.last_auto_reply_at(chat_id, INBOX_COMMISSION)
-        reply_now = last is None or time.time() - last > HOLDING_REPLY_INTERVAL_SECONDS
-        self.store.add_inbox_item(chat_id, INBOX_COMMISSION, content, auto_replied=reply_now)
-        return COMMISSION_REPLY if reply_now else ""
-
-    async def _ask_for_what_is_missing(self, draft: SampleRequestDraft) -> Optional[str]:
-        """申请还缺东西就返回要追问的话；都齐了返回 None。"""
-        # 1. 不知道要哪款商品就先问，不拿占位名去查库存（B12）
-        if not draft.product:
-            draft.asked_for = ("product",)
-            return "收到老师的合作意向啦~ ✨ 请问老师想申请我们哪一款产品的样品呢？"
-
-        # 2. 聚水潭 ERP 查商品（换了商品才重新查）。D35：ERP 里有这个商品就能寄，不看现货
-        #    （每个 SKU 挂着虚拟库存，现货多半是 0）；只有 ERP 里查不到、或者已停用才不能寄
-        if draft.inventory is None:
-            try:
-                inventory = await self.erp.check_inventory(draft.product)
-            except Exception as exc:
-                logger.error(f"[ERP] 查询商品失败，需要人工处理：{exc}")
-                return HOLDING_REPLY
-            if not product_in_erp(inventory):
-                logger.warning(f"[ERP查不到商品] {draft.product}")
-                # 要让运营知道（B21），提醒只做在控制台里（D14）
-                self.store.add_inbox_item(
-                    draft.chat_id, INBOX_OUT_OF_STOCK, f"想要【{draft.product}】的样品，但聚水潭 ERP 里查不到这个商品（或已停用）",
-                )
-                product, draft.product = draft.product, ""  # 达人可以改选其他产品
-                draft.asked_for = ("product",)
-                return (
-                    f"老师，【{product}】我这边暂时没查到，我确认一下再回复老师哈~ "
-                    "老师也可以看看我们的其他款式哦！"
-                )
-            draft.inventory = inventory
-
-        # 3. 收件信息没补齐：只追问缺的那几项
-        missing = draft.missing_recipient_fields()
-        if missing:
-            draft.asked_for = tuple(missing)
-            if len(missing) == len(RECIPIENT_FIELD_LABELS):
-                return (
-                    f"收到老师的需求啦！【{draft.inventory['product_name']}】我们很期待和老师合作~ ✨\n"
-                    "麻烦老师发一下【收件人姓名、联系电话、收货地址】，方便的话再附上小红书主页链接，"
-                    "我们登记后会提交审核，审核结果尽快告诉老师~"
-                )
-            labels = "、".join(RECIPIENT_FIELD_LABELS[name] for name in missing)
-            return f"收到~ 还差【{labels}】，麻烦老师补充一下哦~"
-        return None
-
-    async def _submit_for_approval(
+    async def submit_for_approval(
         self, chat_id: str, nickname: str, draft: SampleRequestDraft, extra: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """信息齐了：生成审批单，交给运营审批（R2）。extra 是审批单上的其他字段
-        （平台、档位、主播类型、多款商品、专场，prm_bridge 从名单和合作单上取）。"""
+        """信息齐了（先过 check_product）：生成审批单，交给运营审批（R2），返回审批单号。extra 是审批单上的
+        其他字段（平台、档位、主播类型、多款商品、专场，prm_bridge 从名单和合作单上取）。"""
         inventory = draft.inventory
         profile = await self._refresh_profile(chat_id, nickname, draft.xhs_account)
         packet = ApprovalActionPacket(
@@ -394,19 +211,9 @@ class InfluencerBusinessHandler:
             **(extra or {}),
         )
         self.store.add_approval(packet, source=SOURCE_BOT)
-        self.store.delete_draft(chat_id)
-
         # 日志里不打印收件人信息
         logger.info(f"🚨 [Gate拦截-待运营审批] 审批单 {packet.packet_id}：{packet.requested_product}（达人 {chat_id}）")
-        reply = (
-            f"收到老师的收件信息啦！【{packet.requested_product}】的寄样申请已经提交审核~ 📝\n"
-            f"收件人：{draft.recipient_name}（{_mask_phone(draft.recipient_phone)}）\n"
-            f"收件地址：{draft.shipping_address}\n"
-            "审核通过后我们会尽快通知老师，请稍等哦~"
-        )
-        if not draft.xhs_account:
-            reply += "\n另外麻烦老师发一下小红书主页链接，方便我们核对哦~"
-        return reply
+        return packet.packet_id
 
     # ---- 审批 ----
 
