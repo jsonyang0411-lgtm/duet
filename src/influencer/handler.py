@@ -24,7 +24,6 @@ from .settings import (
     HOLDING_REPLY_INTERVAL_SECONDS,
     MAX_COMMISSION_RATE,
     MIN_FOLLOWERS,
-    MIN_RECENT_LIKES,
     STUCK_EXECUTION_SECONDS,
     brain_enabled,
     sample_limits,
@@ -161,15 +160,11 @@ class InfluencerBusinessHandler:
 
     def assess_qualification(self, profile: InfluencerProfile) -> str:
         """给审批单标注资质（D4）：只标注、不自动拒绝；拿不到数据就是"待核实"。"""
-        if profile.follower_count is None or profile.recent_like_count is None:
+        if profile.follower_count is None:
             return QUALIFICATION_UNKNOWN
-        problems = []
+        # 只看粉丝数（D16）：小红书 CLI 查不到点赞，点赞由运营审批时自己看
         if profile.follower_count < MIN_FOLLOWERS:
-            problems.append(f"粉丝 {profile.follower_count} 低于 {MIN_FOLLOWERS}")
-        if profile.recent_like_count < MIN_RECENT_LIKES:
-            problems.append(f"近期最高点赞 {profile.recent_like_count} 低于 {MIN_RECENT_LIKES}")
-        if problems:
-            return f"{QUALIFICATION_FAILED}：{'；'.join(problems)}"
+            return f"{QUALIFICATION_FAILED}：粉丝 {profile.follower_count} 低于 {MIN_FOLLOWERS}"
         return QUALIFICATION_OK
 
     async def _fetch_creator_stats(self, xhs_account: str) -> Dict[str, Any]:

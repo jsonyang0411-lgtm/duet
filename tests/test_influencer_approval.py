@@ -147,3 +147,15 @@ def test_the_records_hold_no_recipient_details():
     assert "执行失败" in [e["action"] for e in handler.store.events_for([packet_id])[packet_id]]
     for secret in ("张三", "13812345678", "世纪大道"):
         assert secret not in details
+
+
+# ---- 资质只看粉丝（D16） ----
+
+def test_qualification_looks_at_followers_only():
+    from src.influencer.types import InfluencerProfile
+
+    handler = make_handler()
+    assert handler.assess_qualification(InfluencerProfile(wechat_id="w", follower_count=20000)) == "达标", \
+        "点赞查不到不影响，运营审批时复查"
+    assert handler.assess_qualification(InfluencerProfile(wechat_id="w", follower_count=500)).startswith("不达标：粉丝 500")
+    assert handler.assess_qualification(InfluencerProfile(wechat_id="w")).startswith("待核实")
