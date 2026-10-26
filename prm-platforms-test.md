@@ -29,7 +29,8 @@
   ```
   测试时上限压低一点（佣金 30%、预算 50 元），测完再按业务改。
 - [ ] Mac：`python3 tools/claude_relay/worker.py --check --kinds prm`。期望多两行：`platform actions: xhs=…, dy=…, tb=…; node …`（没有 `missing`），`product catalogue: none yet …`。
-- [ ] Windows：换到这个分支、`npm run build`、`pyinstaller build.spec`、重启机器人（`.env` 不用改；`PRM_COPILOT=on` 照旧）。
+- [x] Windows：换到这个分支、`npm run build`、`pyinstaller build.spec`、重启机器人（`.env` 不用改；`PRM_COPILOT=on` 照旧）。
+  - **实测结果**：✅ 已切换至 `prm-platforms` 分支，前端构建完成（`ui/dist`），`pyinstaller build.spec` 打包成功，新版 `dist\webot.exe` 已启动运行且 `/api/status` 与 `/api/prm` 显示就绪（`running: True`, `wechat_backend: wcdb`）。
 
 ## 1. 商品目录
 
