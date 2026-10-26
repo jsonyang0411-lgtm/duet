@@ -1,6 +1,6 @@
 # 交接文档：达人商务智能体
 
-> 最后更新：2026-10-26（v31：Mac 端 edge 后端骨架（计划第 2 步）；v30：在 `merge-edge` 分支合并了同事的 `wechat-edge`（`ef1e0d9`），全量测试 4305 个通过；v29：同事交付 `wechat-edge`（Mac 客户端、假 Windows、Windows 端），D24；开始在 `merge-edge` 分支合并；v28：同事回复同意方向并分了工（D20–D23），协议意见 `docs/edge-protocol-review.md`；v27：D18、D19，Windows 收发 + Mac 处理的设计草案 `docs/win-mac-design.md`，等同事确认；v26：小红书 CLI 已接上（第 7 节），D16、D17；v25：达人消息按 90 天清除已做（D15）；v24："不等同事也能做"的 5 件事都做完了，备忘录已按新架构更新；第 5 项只差接收同事转发的那一层，要同事的消息格式；B27 待决定）
+> 最后更新：2026-10-26（v32：计划第 3 步第一部分：同事的 PRM 挂在 Mac 的 edge 后端上，起草用同事 worker 的沙箱，D25；v31：Mac 端 edge 后端骨架（计划第 2 步）；v30：在 `merge-edge` 分支合并了同事的 `wechat-edge`（`ef1e0d9`），全量测试 4305 个通过；v29：同事交付 `wechat-edge`（Mac 客户端、假 Windows、Windows 端），D24；开始在 `merge-edge` 分支合并；v28：同事回复同意方向并分了工（D20–D23），协议意见 `docs/edge-protocol-review.md`；v27：D18、D19，Windows 收发 + Mac 处理的设计草案 `docs/win-mac-design.md`，等同事确认；v26：小红书 CLI 已接上（第 7 节），D16、D17；v25：达人消息按 90 天清除已做（D15）；v24："不等同事也能做"的 5 件事都做完了，备忘录已按新架构更新；第 5 项只差接收同事转发的那一层，要同事的消息格式；B27 待决定）
 > 读者：接手这个项目的 AI 窗口，以及参与开发的同事。
 > 规矩：新窗口开工前先读完本文件；收工前更新第 3 节（当前状态）、第 5 节（计划进度）和第 9 节（变更记录）。
 
@@ -218,6 +218,7 @@
 | D22 | 谈佣金的固定话术自动发还是人审 | 人审：当成"系统生成"的一类，和钱相关，不进自动放行（之前是代码直接回复，搬到 Mac 业务服务时改） | 已确认（2026-10-26），未实现 |
 | D23 | 要不要先在 Windows 上测 prm-copilot | 同意：同事用 prm-copilot 的 EXE 先测他清单第 0、1、2、4、5 步，拿到读回延迟等真实数据 | 已确认（2026-10-26），同事那边做 |
 | D24 | 名单以外的私聊怎么处理 | 不回（取代 D13）。Windows 用公司版默认的只做中转（`CLAUDE_RELAY_ONLY=on`），名单以外的私聊不自动聊天，由人工处理 | 已确认（2026-10-26） |
+| D25 | Mac 上起草的沙箱怎么来 | 直接用同事的 `tools/claude_relay/worker.py --kinds prm`，一行不复制：Mac 的业务服务开中转（只监听 127.0.0.1），PRM 把起草任务放进去，本机 worker 领任务、在沙箱里跑 claude、交回草稿。沙箱条件全是同事的（`--restricted`、只有读写文件的工具、`prm_guard` 只让读 `prm_workspace`、只让写 `deals/*.md`、无 MCP、不存会话、固定 JSON 格式）。同事建议过「不用经过中转排队、直接调用」；先走本机中转，因为合并连发、追加消息、取消、超时、附件这些中转已经做好了，以后同事修 worker 我们拉一下就有。代理：`--restricted` 不读 `~/.claude/settings.json`，worker 会把那里的代理转给 claude；这台 Mac 的代理在 `~/.zshrc`，所以要从终端启动 worker，或者把代理写进 settings.json | 已实现（2026-10-26），本机真跑过一次 |
 | D12 | 资质门槛 | 以代码为准：粉丝 ≥ 1 万且近期最高点赞 ≥ 1000。只用来在审批单上标注，不自动拒绝（D4） | 已确认（2026-10-25），已实现 |
 
 D8–D11 是第 6 项设计里的 4 个问题，2026-10-24 用户回复"默认"，即按建议做。
@@ -334,3 +335,4 @@ CLI 是同事的千帆商家后台命令行工具：私有仓库 `doupi-org/xiao
 - 2026-10-26 v29：同事在 `wechat-edge` 分支交付了 Mac 端客户端库 `src/edge/client.py`、假 Windows 边缘 `src/edge/fake.py`、Windows 端本身（`PRM_EDGE`），协议定稿 `edge-protocol.md`（补了几处向下兼容的地方；v1 限制：Windows 停机期间达人发的消息重启后不补转）。计划改为合并 `wechat-edge`（已包含 prm-copilot），用假 Windows 直接开发 Mac 端。用户定 D24：名单以外的私聊不回。
 - 2026-10-26 v30：计划第 1 步完成：新开分支 `merge-edge`，合并同事 `wechat-edge`（`89808d0`，已含 prm-copilot），6 处冲突两边都保留；控制台菜单以同事的公司版为准（运行状态 / 中转代理 / 待审批 / 合作单 / 微信连接 / 运行日志），加上我们的「达人审批」。`PRM_COPILOT`、`PRM_EDGE` 默认关，行为不变。全量测试 4305 个通过、2 个跳过（含两边的浏览器测试）。还没合回 main。
 - 2026-10-26 v31：计划第 2 步完成（`merge-edge` 分支）：新增 Mac 端微信后端 `src/wechat/edge_backend.py`（`WECHAT_BACKEND=edge`，`EDGE_URL` + `PRM_EDGE_TOKEN`），用同事的 `EdgeClient` 拉事件、推名单、发消息；达人消息照常进路由和达人模块，**路由给的回复不直接发**，存进「待处理」（新种类 `draft`）等审核（D19），审核和真正发出在第 3 步接。名单 = 达人模块里启用的达人。`tests/test_edge_backend.py` 用同事的假 Windows 跑真实 HTTP。全量 4318 个通过、2 个跳过。
+- 2026-10-26 v32：计划第 3 步第一部分（`merge-edge` 分支）：同事的 PRM（`PRM_COPILOT=on`）原样挂在 Mac 的 edge 后端上。edge 后端补了：几个名单来源合并推送（达人模块 + PRM 登记的）、发文件、运营亲手回复和读回确认交给 PRM（带 `edge_operator` / `edge_seen`，Windows 已经比过，PRM 不再比）、Windows 没发出去时 PRM 把草稿改成没发出去（新 `PrmService.on_send_failed`）。中转取附件时直接用 Windows 下载好的文件。配置：`WECHAT_BACKEND=edge` 时中转必须只监听 127.0.0.1，不要求登记 cc 用户。起草的沙箱用同事 worker（D25），在本机临时目录真跑了一次：haiku 15 秒起草出一条待审核草稿，案卷里没有真实号码。新增 `tests/test_prm_over_edge.py`（8 条）。还没做：草稿替代 `claude_brain` 直接回复、和达人模块的名单合一、寄样信息进审批单（第 4 步）。

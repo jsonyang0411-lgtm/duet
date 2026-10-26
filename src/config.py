@@ -998,7 +998,8 @@ def _validate_config(kwargs: dict) -> None:
         # Anyone who can reach the port and knows the token can make the Mac run things.
         if len(str(kwargs.get("claude_relay_token", ""))) < 16:
             errors.append("CLAUDE_RELAY=on needs CLAUDE_RELAY_TOKEN (at least 16 characters, random)")
-        if not (kwargs.get("claude_relay_wxids") or kwargs.get("admin_wxid")):
+        # Mac 端（WECHAT_BACKEND=edge）的中转只给本机起草 worker 用，微信里没人能发 cc
+        if not (kwargs.get("claude_relay_wxids") or kwargs.get("admin_wxid")) and kwargs.get("wechat_backend") != "edge":
             errors.append("CLAUDE_RELAY=on needs CLAUDE_RELAY_WXIDS or ADMIN_WXID (who may use it)")
         if not re.fullmatch(r"[^\s]{1,10}", str(kwargs.get("claude_relay_prefix", ""))):
             errors.append("CLAUDE_RELAY_PREFIX must be 1-10 characters without spaces")
@@ -1067,6 +1068,11 @@ def _validate_config(kwargs: dict) -> None:
             errors.append("WECHAT_BACKEND=edge needs PRM_EDGE_TOKEN (the same token as on Windows, 32+ characters)")
         if prm_edge == "on":
             errors.append("WECHAT_BACKEND=edge is the Mac side; PRM_EDGE=on is the Windows side - not both")
+        if claude_relay == "on" and str(kwargs.get("claude_relay_host", "0.0.0.0")).strip() not in (
+                "127.0.0.1", "localhost", "::1"):
+            # 起草 worker 在本机，中转不给局域网：别人连上来就能让这台 Mac 跑 Claude
+            errors.append("WECHAT_BACKEND=edge with CLAUDE_RELAY=on needs CLAUDE_RELAY_HOST=127.0.0.1 "
+                          "(the drafting worker runs on this Mac)")
     for key, low, high, default in (("edge_send_min_gap_sec", 0, 60, 3), ("edge_send_per_hour", 1, 1000, 60),
                                     ("edge_seen_text_sec", 60, 86400, 1800), ("edge_seen_file_sec", 60, 86400, 600),
                                     ("edge_keep_days", 1, 30, 7)):

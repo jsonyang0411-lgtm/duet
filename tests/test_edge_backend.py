@@ -42,7 +42,7 @@ class Running:
             client=EdgeClient(fake.url, fake.token), state_path=str(tmp_path / name),
             files_dir=str(tmp_path / "files"), events_wait=0.5,
         )
-        self.backend.set_parties_source(lambda: self.parties)
+        self.backend.add_parties_source(lambda: self.parties)
         self.backend.set_reply_sink(lambda chat_id, text, msg: self.drafts.append((chat_id, text)))
         self.backend.add_event_hook(self.events.append)
         self.reply = reply
@@ -187,7 +187,7 @@ def test_the_bot_wires_the_list_and_drafts_to_the_influencer_module(tmp_path, fa
     store.save_contact("wxid_off", enabled=False, source=SOURCE_CONSOLE)
     backend = EdgeBackend(client=EdgeClient(fake.url, fake.token), state_path=str(tmp_path / "s.json"))
     Bot._wire_edge_backend(backend, SimpleNamespace(store=store))
-    assert backend._parties_source() == [CREATOR], "停用的达人不推"
+    assert backend.parties() == [CREATOR], "停用的达人不推"
     backend._reply_sink(CREATOR, "好的老师", {})
     [item] = store.list_inbox()
     assert (item["kind"], item["content"]) == (INBOX_DRAFT, "好的老师")

@@ -49,6 +49,17 @@ def attachment_kind(msg: dict) -> str:
 
 def resolve(config, held: Held, number: int) -> tuple[str, str, str]:
     """``(path, name, problem)``: the file on this PC and the name the Mac gets, or why not."""
+    if "edge_files" in held.msg:
+        # Mac 端（WECHAT_BACKEND=edge）：Windows 已经取好、下载到这台 Mac 上了，不在本机找
+        edge_files = [str(f) for f in held.msg.get("edge_files") or [] if str(f)]
+        if not edge_files:
+            return "", "", f"{KINDS[held.kind]}Windows 没取到，没带上"
+        path = Path(edge_files[0])
+        if not path.is_file():
+            return "", "", f"{KINDS[held.kind]}从 Windows 下载后找不到了，没带上"
+        name = (f"图片-{number}{path.suffix.lower() or '.jpg'}" if held.kind == "image"
+                else str(held.msg.get("file_name") or path.name))
+        return str(path), name, ""
     if held.kind == "image":
         from ..vision import find_recent_image_path
         vision = SimpleNamespace(

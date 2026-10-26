@@ -351,7 +351,13 @@ class PrmService:
         sent_at = float(msg.get("timestamp", 0) or 0)
         if sent_at and now - sent_at > MAX_AGE_SEC:
             return                                         # history (a chat read for the first time)
-        matched, packet_id = self._match_own(chat_id, msg, now)
+        if msg.get("edge_operator"):
+            # Mac 端：Windows 已经用发送记录比过了，对不上才报 operator_message，不再比一次
+            matched, packet_id = False, None
+        else:
+            matched, packet_id = self._match_own(chat_id, msg, now)
+        if msg.get("edge_seen") and not matched:
+            return                                         # 我们发的读回来了，只是这次运行没记着它
         if matched:
             if packet_id is not None:
                 packet = self._store.packet(packet_id)
@@ -420,6 +426,29 @@ class PrmService:
                     and _norm(ev["detail"].get("text")) == text):
                 return True, None
         return False, None
+
+    def on_send_failed(self, chat_id: str, text: str, why: str) -> None:
+        """Mac 端：Windows 报这条没发出去（失败、过期、不确定）。对应的草稿从「已发出」改成「没发出去」，
+        运营在待审批页能看到原因；「稍等」这类不是草稿的，只记日志。"""
+        now = self._clock()
+        wanted = _norm(text)
+        with self._sent_lock:
+            lines = self._sent_lines.get(chat_id) or deque()
+            for item in list(lines):
+                if item[0] == wanted:
+                    lines.remove(item)                     # 没发出去，读回时不能再算我们的
+                    break
+        party = self._store.party_by_wxid(chat_id)
+        if party is None:
+            return
+        tokens = self._store.tokens(party["id"])
+        for packet in self._store.sent_since(chat_id, now - OWN_MATCH_SEC):
+            final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
+            if packet["outcome"] == "sent_unconfirmed" and _norm(pii.unmask(final, tokens)) == wanted:
+                if self._store.move(packet["id"], (SENT,), FAILED, outcome="failed", error=why[:200]):
+                    logger.warning("PRM: packet %d was not sent by Windows: %s", packet["id"], why)
+                return
+        logger.warning("PRM: a send to party %d failed (%s); no waiting draft matches it", party["id"], why)
 
     # ── from the Mac (the relay's delivery thread) ────────────────────────
 
