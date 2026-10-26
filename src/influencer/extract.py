@@ -11,7 +11,7 @@ import re
 from .settings import (
     COMMISSION_RAISE_WORDS,
     COMMISSION_WORDS,
-    MAX_COMMISSION_RATE,
+    DEFAULT_COMMISSION_RATE,
     PRODUCT_KEYWORDS,
     SAMPLE_KEYWORDS,
 )
@@ -47,14 +47,15 @@ _RATE_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*(%|％|个点|点)")
 
 
 def asks_for_higher_commission(text: str) -> bool:
-    """达人是不是在要求提高佣金：提到佣金并且说要高一点，或者开出了超过上限的数。"""
+    """达人是不是在要求提高佣金：提到佣金并且说要高一点，或者开出了超过起步佣金的数。
+    起步是 20%（D37），所以达人要 25% 也算要求加佣金，转运营，不由模型答应。"""
     mentions_commission = any(word in text for word in COMMISSION_WORDS)
     if mentions_commission and any(word in text for word in COMMISSION_RAISE_WORDS):
         return True
     for match in _RATE_RE.finditer(text):
         if match.group(2) == "点" and not mentions_commission:
             continue
-        if float(match.group(1)) > MAX_COMMISSION_RATE * 100:
+        if float(match.group(1)) > DEFAULT_COMMISSION_RATE * 100:
             return True
     return False
 

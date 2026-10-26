@@ -3,8 +3,8 @@
 import os
 from typing import Dict, Optional
 
-# 佣金（D5，2026-10-24 暂定）：审批单默认 25%；执行时超过上限一律拒绝
-DEFAULT_COMMISSION_RATE = 0.25
+# 佣金（D5、D37）：2026-10-26 用户定起步 20%，带货表现好再涨，最高 25%；执行时超过上限一律拒绝
+DEFAULT_COMMISSION_RATE = 0.20
 MAX_COMMISSION_RATE = 0.25
 
 # 审批单有效期：过期后不能再执行。运营每天 10:00、16:00 集中审批（R6），

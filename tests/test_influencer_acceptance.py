@@ -261,10 +261,11 @@ def test_commission_above_the_25_percent_cap_is_refused():
     assert erp.order_calls == [] and xhs.commission_calls == []
 
 
-def test_default_commission_is_25_percent():
+def test_default_commission_starts_at_20_percent():
+    # D37（2026-10-26）：起步 20%，带货表现好再涨，最高 25%
     handler = make_handler()
     packet = get_packet(handler, submit_full_request(handler))
-    assert packet.proposed_commission_rate == 0.25
+    assert packet.proposed_commission_rate == 0.20
 
 
 def test_missing_creator_stats_are_not_made_up():

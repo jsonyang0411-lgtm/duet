@@ -5,7 +5,7 @@ import pytest
 
 from src.influencer.extract import asks_for_higher_commission
 from src.influencer.handler import COMMISSION_REPLY, FORBIDDEN_WORDS
-from src.influencer.settings import MAX_COMMISSION_RATE
+from src.influencer.settings import DEFAULT_COMMISSION_RATE, MAX_COMMISSION_RATE
 from src.influencer.store import INBOX_COMMISSION
 from test_influencer_acceptance import (
     FULL_ADDRESS,
@@ -43,9 +43,11 @@ def test_other_messages_are_not_taken_as_a_commission_request(text):
     assert not asks_for_higher_commission(text)
 
 
-def test_the_cap_is_still_25_percent():
-    assert MAX_COMMISSION_RATE == 0.25
-    assert not asks_for_higher_commission("25%可以吗")
+def test_start_at_20_percent_and_the_cap_is_still_25_percent():
+    # D37：起步 20%，表现好再涨，最高 25%。达人要 25% 也是要求加佣金，转运营
+    assert (DEFAULT_COMMISSION_RATE, MAX_COMMISSION_RATE) == (0.20, 0.25)
+    assert not asks_for_higher_commission("20%可以吗")
+    assert asks_for_higher_commission("25%可以吗")
     assert asks_for_higher_commission("26%可以吗")
 
 
@@ -79,7 +81,7 @@ def test_a_request_in_progress_carries_on_and_the_commission_is_unchanged():
     run(handler.process_incoming_message(INFLUENCER, "佣金能给30%吗", nickname="小美"))
     run(handler.process_incoming_message(INFLUENCER, f"{FULL_ADDRESS} 小红书主页 {XHS_PROFILE}", nickname="小美"))
     [packet] = pending_packets(handler)
-    assert packet.proposed_commission_rate == MAX_COMMISSION_RATE
+    assert packet.proposed_commission_rate == DEFAULT_COMMISSION_RATE
 
 
 def test_someone_not_on_the_list_is_not_answered():
