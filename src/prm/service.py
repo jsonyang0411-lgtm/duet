@@ -278,6 +278,8 @@ class PrmService:
 
     def is_party_chat(self, chat_id: str) -> bool:
         """Is this private chat a registered creator's? (the WeChat backend reads such chats)"""
+        if str(chat_id) not in self._wxids:
+            self._wxids = self._store.active_wxids()
         return str(chat_id) in self._wxids
 
     def _mask(self, party_id: int, text: str, now: float) -> str:
