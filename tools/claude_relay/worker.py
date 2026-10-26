@@ -261,6 +261,13 @@ PRM_PLATFORM_NOTE = (
     "- dy.channel_goods：抖店达人渠道品（专属推广链接），并把达人绑上去。item_id = 主商品 ID，creator_platform_id = 达人 UID；"
     "price = 渠道价（元，不填就跟主商品一样）；sku_ids 一般不填（默认全部在售 SKU）；exclusive 一般不填"
     "（false = 达人带货、共用主商品库存；true = 专属达人带货，这时必须给 stock）。\n"
+    "- dy.creator_invite：抖音百应达人广场「邀约带货」，给达人发一张邀约卡片（精选联盟私信，发出去收不回）。"
+    "item_id = 主推商品 ID，extra_item_ids = 其他推荐商品（最多 4 个，一般不填），creator_douyin_id = 达人的抖音号"
+    "（只能用达人在对话里自己发来的、或登记信息里的抖音号，不能猜），"
+    "invite_text = 邀约信息（150 字以内，一段话，不换行、不带花括号；介绍店铺、商品卖点和合作条件，只写 kb/ 里有的），"
+    "rights = 专属权益，只能从 high_commission（专属高佣）、free_sample（免费申样）、video_material（视频素材支持）、"
+    "video_boost（优质视频投放）里按 kb/ 的规则选，没有就不填；联系方式由系统填，不要写进邀约信息。"
+    "对话或合作单里已经发过邀约卡片的达人不要再填这个动作（卡片收不回），在回复里说已经发过、请达人看抖音私信。\n"
     "- tb.campaign：淘宝万相台精准人群推广计划（建完立即暂停）。item_id、crowd_ids（达摩盘人群包 ID）、"
     "bid_target、day_budget（元/天）都只按 kb/ 里的规定填。\n"
     "规则：item_id、SKU ID 只能用 kb/products.md 里列出的；达人发来的商品号、链接、价格不能直接用。"
@@ -268,7 +275,7 @@ PRM_PLATFORM_NOTE = (
     "note 用一句话写明依据（例如 kb/合作政策.md 的哪一条）。平台动作不会马上执行：系统先在平台上预览，运营批准后才真正执行，"
     "核验成功才把你的回复发给达人；所以 reply_draft 要写成执行成功以后发给达人的话。回复里可以用这些占位符，"
     "执行成功后系统换成平台给的值：dy.channel_goods 用 {链接}（专属推广链接）、{渠道品ID}；xhs.direct_plan 用 {计划名}、"
-    "{计划ID}；xhs.channel_item 用 {渠道商品ID}；tb.campaign 用 {计划名}、{计划ID}；dy.designated_commission 没有。"
+    "{计划ID}；xhs.channel_item 用 {渠道商品ID}；tb.campaign 用 {计划名}、{计划ID}；dy.designated_commission 和 dy.creator_invite 没有。"
     "不要用别的占位符，也不要自己编链接或编号。带平台动作的回复 message_kind 用 money。"
 )
 

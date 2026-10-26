@@ -207,6 +207,8 @@ Mac：同一个 CLI 带 --execute，只发一次（执行台账：同一个批�
      "tb": "~/Desktop/campaign-engineering",
      "node_bin": "",
      "dy_expect_shop_id": "",
+     "dy_invite_phone": "",
+     "dy_invite_wechat": "",
      "tb_shop": "",
      "max_commission_rate": 50,
      "max_day_budget": 300,
@@ -215,7 +217,7 @@ Mac：同一个 CLI 带 --execute，只发一次（执行台账：同一个批�
    }
    ```
    - `node_bin` 留空就在 PATH、`~/.local/bin`、`/opt/homebrew/bin`、`/usr/local/bin` 里找（要 Node 22 以上）。
-   - `dy_expect_shop_id`：抖音每条命令都加 `--expect-shop-id`，登录的不是这家店就退出码 79，什么都不发。`tb_shop`：淘宝用 `--shop <名字>` 选店铺（`node bin/shop.mjs` 登记过的）。`env`：额外交给命令行的环境变量，例如 `{"CAMPAIGN_EXPECT_UNB": "…", "XHS_CDP_ENDPOINT": "http://127.0.0.1:9222"}`。
+   - `dy_expect_shop_id`：抖音每条命令都加 `--expect-shop-id`，登录的不是这家店就退出码 79，什么都不发。`dy_invite_phone` / `dy_invite_wechat`：「邀约带货」卡片上给达人看的店铺联系方式（11 位手机号 / 微信号，按百应抽屉的格式；至少配一个，两个都没有时 `dy.creator_invite` 不预览、不执行）。联系方式只从这里来，草稿里写不进去。`tb_shop`：淘宝用 `--shop <名字>` 选店铺（`node bin/shop.mjs` 登记过的）。`env`：额外交给命令行的环境变量，例如 `{"CAMPAIGN_EXPECT_UNB": "…", "XHS_CDP_ENDPOINT": "http://127.0.0.1:9222"}`。
    - 上限（这台 Mac 自己的保险，平台自己的规则另算）：佣金率最多 `max_commission_rate`%，淘宝日预算最多 `max_day_budget` 元，专属价不能低于商品目录价的 `min_price_ratio`（防止小数点点错）。超了的动作不预览、不能执行。
    - `preview_timeout_sec`（默认 300）/ `execute_timeout_sec`（默认 900）：单条命令的时限。执行超时只能停下命令、结果算「不知道」，所以给得宽。
 3. 同步商品目录（只读命令）：
@@ -226,7 +228,7 @@ Mac：同一个 CLI 带 --execute，只发一次（执行台账：同一个批�
    写出 `prm_workspace/kb/products.md`（给 Claude 看：商品 ID、标题、SKU、价格）和 `kb/products.json`（给代码核对）。**平台动作的商品必须在目录里**，SKU 和专属价也按目录核对；没有目录就不预览。小红书读 `items --tab shelf --all` + `item`，抖音读 `fxg products` + `fxg sku-prices`，淘宝读万相台选品列表 `alimama items`（没有 SKU）。某个平台这次没读成，保留上一次的列表并在 md 里注明。商品有变化就再跑一次（可以放进每天的定时任务）。
 4. `python3 tools/claude_relay/worker.py --check` 多两行：`platform actions: dy=…; node …` 和商品目录的同步时间。
 
-#### 五种动作
+#### 六种动作
 
 | 动作 | 预览（不写） | 批准后执行 | 发给达人 |
 |---|---|---|---|
@@ -234,6 +236,7 @@ Mac：同一个 CLI 带 --execute，只发一次（执行台账：同一个批�
 | `xhs.channel_item` 小红书渠道商品（专属价） | `channel-item --action create … --shelf on --read-current`（读当前表单和页面的拦截） | 同一条带 `--execute` | 回复原文。注意：小红书工具对这条创建永远只给 ACCEPTED_UNVERIFIED（两项核验不了），所以**按规则不会自动发**，执行后在千帆核对再自己回 |
 | `dy.designated_commission` 百应指定达人专属佣金 | `buyin promotion-strategy-create-designated --id … --uid … --to … --end long`；商品还没推广（预览说 create its promotion first）时再预览 `buyin promotion-create` | 需要时先 `promotion-create --execute`（核验通过才继续），再重新预览，再 `promotion-strategy-create-designated --execute` | 回复原文 |
 | `dy.channel_goods` 抖店达人渠道品 + 绑定达人 | `fxg channel-goods-create --product-id … --sale-channel kol [--price][--sku-id][--stock]`（价格检查 warn / block 都算拦下） | `channel-goods-create --execute` → 核验通过且拿到渠道 ID 和链接 → 预览 `channel-goods-bind --uid …` → 没被拦下才 `channel-goods-bind --execute`（已经绑过算成功） | `{链接}` 换成 `channelGoods.links.channelLink`（只认 jinritemai.com / douyin.com 的链接） |
+| `dy.creator_invite` 百应达人广场「邀约带货」 | `buyin author-invite --aweme-id … --product <item_id>[,<extra_item_ids>] --content … [--rights …] [--phone …] [--wechat …] --names`（按抖音号搜达人、读门槛、默认值、添加商品、达人现在的按钮；页面会拦下的这里也拦下；控制台显示达人昵称请核对；达人现在不是「邀约带货」——已经邀约过或在沟通——也拦下，免得重复发收不回的卡片） | 同一条带 `--execute` 和预览时的 `--expect-status` / `--expect-popwindow`：达人状态或门槛跟预览时不一样（例如门槛变成要确认「本周还剩 N 次」）就 STATE_CONFLICT、什么都不发；否则发一张邀约卡片（精选联盟私信，发出去收不回，占每周邀约次数）；读回是达人的按钮从「邀约带货」变成「继续沟通」 | 回复原文 |
 | `tb.campaign` 万相台精准人群推广计划 | `alimama create-display-custom-campaign --item-id … --item-title <目录里的标题> --crowd … --bid-target … --day-budget … --campaign-name … --transport http --format json --pause-after-create=true`（会读平台：准入、全站互斥…） | 同一条加 `--execute=true`：建成即投放，命令确认新计划后马上暂停 | 回复原文。到目前为止这条命令的真实读回都是 ACCEPTED_UNVERIFIED，所以一般不会自动发 |
 
 回复里能用的占位符（执行成功后换成平台给的值；别的花括号写法一律不让批准）：
@@ -245,6 +248,7 @@ Mac：同一个 CLI 带 --execute，只发一次（执行台账：同一个批�
 | `xhs.channel_item` | `{渠道商品ID}` |
 | `tb.campaign` | `{计划名}`、`{计划ID}` |
 | `dy.designated_commission` | 没有 |
+| `dy.creator_invite` | 没有 |
 
 平台核验成功了、但回复里某个占位符平台没给出值时，回复也不发（标红），免得把 `{计划ID}` 原样发给达人。
 
@@ -252,7 +256,7 @@ Mac：同一个 CLI 带 --execute，只发一次（执行台账：同一个批�
 
 #### 守住的东西
 
-- 参数白名单：动作只能是这五种，参数只能是该动作的那几个；ID 按各平台的格式核对（数字 / 24 位字母数字），文字参数不能有换行、控制字符、花括号，不能以 `-` 开头；命令行是参数列表（不经过 shell），每个值都写成 `--名字=值`，模型或达人写的东西变不成选项。
+- 参数白名单：动作只能是这六种，参数只能是该动作的那几个；ID 按各平台的格式核对（数字 / 24 位字母数字），文字参数不能有换行、控制字符、花括号，不能以 `-` 开头；命令行是参数列表（不经过 shell），每个值都写成 `--名字=值`，模型或达人写的东西变不成选项。
 - 预览从不带 `--execute`。执行前 Mac 再按商品目录和上限核对一遍动作和批准的步骤。
 - 执行台账 `~/.claude-relay/platform/ledger/<批准编号>.json`：开始执行前先独占地写下这个编号（0600）。同一个编号再来（任务重复、worker 重启后重收），一律「这次批准已经执行过」，不再执行；执行到一半 worker 挂了的也一样，结果以平台后台为准。
 - 一次只跑一个平台命令（`~/.claude-relay/platform/cli.lock`，同步目录和草稿共用）。等锁、跑命令时照常发心跳，任务不会被当成失联。
