@@ -166,10 +166,10 @@ ACTIONS = {
     },
     "jst.sample_order": {
         "platform": "jst", "label": "聚水潭 · 达人寄样单",
-        "required": ("item_id", "shop", "skus", "creator_platform"),
-        "optional": ("creator_uid", "creator_account", "receiver", "logistics"),
+        "required": ("shop", "creator_platform"),
+        "optional": ("items", "item_id", "skus", "creator_uid", "creator_account", "receiver", "logistics"),
         "link": False,
-        "effect": "在聚水潭建一张寄样单：这位达人、收货地址、快递、这个商品的 SKU 和数量（这台 Mac 配的店铺）；"
+        "effect": "在聚水潭建一张寄样单：这位达人、收货地址、快递、同一家店的一个或几个商品和各自的 SKU、数量（这台 Mac 配的店铺）；"
                   "达人不在达人库先加入并认领到这台 Mac 登录的子账号，新地址存到达人名下。建好后在聚水潭寄样管理审核，仓库发货",
         "caveat": "建寄样单这条写命令还没在真实账号上提交过：第一次执行后请到聚水潭寄样管理核对；"
                   "已经归别的账号跟进、或者寄过这个商品的达人，命令会拦下不建",
@@ -182,7 +182,8 @@ PARAM_LABELS = {
     "sku_ids": "SKU", "stock": "渠道库存", "exclusive": "专属达人带货", "crowd_ids": "达摩盘人群包",
     "creator_douyin_id": "达人抖音号", "invite_text": "邀约信息", "extra_item_ids": "其他推荐商品", "rights": "专属权益",
     "bid_target": "出价目标", "day_budget": "日预算（元）", "note": "说明",
-    "shop": "发货店铺", "skus": "寄样 SKU × 数量", "creator_platform": "达人平台", "creator_uid": "达人 UID",
+    "shop": "发货店铺", "items": "寄样商品：SKU × 数量", "skus": "寄样 SKU × 数量", "creator_platform": "达人平台",
+    "creator_uid": "达人 UID",
     "creator_account": "达人号码（抖音号 / 小红书号）", "receiver": "收货信息", "logistics": "快递",
 }
 SHOPS = ("dy", "xhs")                                   # a sample order sends one of this Mac's two shops' products
@@ -193,6 +194,12 @@ INVITE_RIGHTS = {"high_commission": ("high-commission", "专属高佣"), "free_s
                  "video_material": ("video-material", "视频素材支持"), "video_boost": ("video-boost", "优质视频投放")}
 INVITE_TEXT_MAX = 150                                 # the 邀约信息 field's own limit
 INVITE_MAX_ITEMS = 5                                  # the drawer's 专属推荐商品: item_id and up to 4 more
+
+_SKUS_SCHEMA = {"type": "array", "items": {
+    "type": "object",
+    "properties": {"sku_id": {"type": "string"}, "qty": {"type": "integer"}},
+    "required": ["sku_id", "qty"], "additionalProperties": False}}
+MAX_ORDER_SKUS = 50                     # 聚水潭: SKUs in one sample order (the CLI refuses more)
 
 # The JSON schema of ``platform_action`` (the draft's optional field; result.SCHEMA and the
 # worker's PRM_SCHEMA carry it).  Which parameters an action takes is checked in
@@ -222,10 +229,11 @@ ACTION_SCHEMA = {
         "bid_target": {"type": "string", "enum": list(BID_TARGETS)},
         "day_budget": {"type": "integer"},
         "shop": {"type": "string", "enum": list(SHOPS)},
-        "skus": {"type": "array", "items": {
+        "items": {"type": "array", "items": {
             "type": "object",
-            "properties": {"sku_id": {"type": "string"}, "qty": {"type": "integer"}},
-            "required": ["sku_id", "qty"], "additionalProperties": False}},
+            "properties": {"item_id": {"type": "string"}, "skus": _SKUS_SCHEMA},
+            "required": ["item_id", "skus"], "additionalProperties": False}},
+        "skus": _SKUS_SCHEMA,
         "creator_platform": {"type": "string", "enum": list(SHOPS)},
         "creator_uid": {"type": "string"},
         "creator_account": {"type": "string"},
@@ -235,7 +243,7 @@ ACTION_SCHEMA = {
         "logistics": {"type": "string"},
         "note": {"type": "string"},
     },
-    "required": ["action", "item_id"],
+    "required": ["action"],              # the item: each action's own (a sample order may name several)
     "additionalProperties": False,
 }
 
@@ -352,7 +360,8 @@ def check_action(raw, *, catalog: Optional[dict] = None, limits: Optional[dict] 
         if raw.get("shop") not in SHOPS:
             raise _err("bad_shop", "发货店铺（shop）只能是 dy（抖店）或 xhs（小红书店）")
         out["shop"] = raw["shop"]
-        platform = raw["shop"]                  # the product is that shop's (its catalogue, its id format)
+        platform = raw["shop"]                  # the products are that shop's (its catalogue, its id format)
+        raw = {**raw, "item_id": _first_item(raw)}     # the first product stands for the order (title, catalogue)
     if platform == "xhs":
         out["item_id"] = _text_id(raw["item_id"], _XHS_ID, "bad_item", "商品 ID")
     else:
@@ -471,7 +480,7 @@ def check_action(raw, *, catalog: Optional[dict] = None, limits: Optional[dict] 
             raise _err("over_limit", f"日预算 {budget} 元超过这台 Mac 设的上限 {lim['max_day_budget']} 元")
         out["day_budget"] = budget
     elif name == "jst.sample_order":
-        out.update(_sample_order(raw, item, platform, out["item_id"], lim))
+        out.update(_sample_order(raw, platform, lim, catalog))
     if raw.get("note") not in (None, ""):
         if not isinstance(raw["note"], str):
             raise _err("bad_note", "说明要是文字")
@@ -479,29 +488,69 @@ def check_action(raw, *, catalog: Optional[dict] = None, limits: Optional[dict] 
     return out
 
 
-def _sample_order(raw: dict, item: Optional[dict], shop: str, item_id: str, lim: dict) -> dict:
-    """The parameters of jst.sample_order besides the item and the shop, checked."""
+def _first_item(raw: dict):
+    """A sample order's first product: of ``items``, or the old single ``item_id``."""
+    items = raw.get("items")
+    if items not in (None, []):
+        first = items[0].get("item_id") if isinstance(items, list) and isinstance(items[0], dict) else None
+        if raw.get("item_id") not in (None, "") and str(raw["item_id"]).strip() != str(first).strip():
+            raise _err("bad_items", "写了 items 就不要另写 item_id（写了就要和第一个商品一样）")
+        return first
+    if raw.get("item_id") in (None, ""):
+        raise _err("missing_param", "jst.sample_order 缺少商品：写 items（每项 {item_id, skus}），或者 item_id + skus")
+    return raw["item_id"]
+
+
+def _sample_order(raw: dict, shop: str, lim: dict, catalog: Optional[dict]) -> dict:
+    """The parameters of jst.sample_order besides the shop, checked: its products (``items``, or the
+    old single ``item_id`` + ``skus``), each in this shop's catalogue with SKUs of its own, at
+    most ``max_sample_skus`` SKUs in all (and 聚水潭's 50); the creator, the receiver, the courier."""
     out: dict = {}
-    skus = raw.get("skus")
-    if not isinstance(skus, list) or not skus or len(skus) > lim["max_sample_skus"]:
-        raise _err("bad_sku", f"寄样的 SKU 要是 1–{lim['max_sample_skus']} 项的列表（这台 Mac 的上限）")
-    listed = {s.get("id") for s in (item or {}).get("skus") or []}
-    clean = []
-    for entry in skus:
-        if not isinstance(entry, dict) or set(entry) - {"sku_id", "qty"}:
-            raise _err("bad_sku", "每个寄样 SKU 写成 {sku_id, qty}")
-        sku = _text_id(entry.get("sku_id"), _XHS_ID if shop == "xhs" else _DIGITS, "bad_sku", "SKU ID")
-        if any(c["sku_id"] == sku for c in clean):
-            raise _err("bad_sku", f"SKU {sku} 写了两次：数量写在一处")
-        if listed and sku not in listed:
-            raise _err("bad_sku", f"SKU {sku} 不是商品 {item_id} 的（商品目录里没有）")
-        qty = entry.get("qty", 1)
-        if isinstance(qty, bool) or not isinstance(qty, int) or not (1 <= qty <= 99):
-            raise _err("bad_qty", "每个 SKU 的数量要是 1–99 的整数")
-        if qty > lim["max_sample_qty"]:
-            raise _err("over_limit", f"SKU {sku} 寄 {qty} 件，超过这台 Mac 设的上限 {lim['max_sample_qty']} 件")
-        clean.append({"sku_id": sku, "qty": qty})
-    out["skus"] = clean
+    if raw.get("items") not in (None, []):
+        if raw.get("skus") not in (None, []):
+            raise _err("bad_items", "items 和 skus 只写一种：几个商品写 items（每项 {item_id, skus}）")
+        entries = raw["items"]
+        if not isinstance(entries, list):
+            raise _err("bad_items", "items 要是列表，每项 {item_id, skus}")
+    else:
+        entries = [{"item_id": raw.get("item_id"), "skus": raw.get("skus")}]
+    cap = min(lim["max_sample_skus"], MAX_ORDER_SKUS)
+    items, count = [], 0
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) - {"item_id", "skus"}:
+            raise _err("bad_items", "items 的每项写成 {item_id, skus}")
+        item_id = _text_id(entry.get("item_id"), _XHS_ID if shop == "xhs" else _DIGITS, "bad_item", "商品 ID")
+        if any(i["item_id"] == item_id for i in items):
+            raise _err("bad_items", f"商品 {item_id} 写了两次：它的 SKU 写在一项里")
+        listed_item = catalog_item(catalog, shop, item_id) if catalog is not None else None
+        if catalog is not None and listed_item is None:
+            raise _err("not_in_catalog", f"商品 {item_id} 不在{PLATFORMS[shop]}的商品目录里（kb/products.md），"
+                                         "先在 Mac 上同步商品目录，或者换目录里的商品")
+        skus = entry.get("skus")
+        if not isinstance(skus, list) or not skus:
+            raise _err("bad_sku", f"商品 {item_id} 要写寄哪些 SKU：[{{sku_id, qty}}]")
+        listed = {s.get("id") for s in (listed_item or {}).get("skus") or []}
+        clean = []
+        for sku_entry in skus:
+            if not isinstance(sku_entry, dict) or set(sku_entry) - {"sku_id", "qty"}:
+                raise _err("bad_sku", "每个寄样 SKU 写成 {sku_id, qty}")
+            sku = _text_id(sku_entry.get("sku_id"), _XHS_ID if shop == "xhs" else _DIGITS, "bad_sku", "SKU ID")
+            if any(c["sku_id"] == sku for c in clean):
+                raise _err("bad_sku", f"SKU {sku} 写了两次：数量写在一处")
+            if listed and sku not in listed:
+                raise _err("bad_sku", f"SKU {sku} 不是商品 {item_id} 的（商品目录里没有）")
+            qty = sku_entry.get("qty", 1)
+            if isinstance(qty, bool) or not isinstance(qty, int) or not (1 <= qty <= 99):
+                raise _err("bad_qty", "每个 SKU 的数量要是 1–99 的整数")
+            if qty > lim["max_sample_qty"]:
+                raise _err("over_limit", f"SKU {sku} 寄 {qty} 件，超过这台 Mac 设的上限 {lim['max_sample_qty']} 件")
+            clean.append({"sku_id": sku, "qty": qty})
+        count += len(clean)
+        items.append({"item_id": item_id, "skus": clean})
+    if count > cap:
+        raise _err("over_limit", f"这张寄样单有 {count} 个 SKU，超过上限 {cap} 个（这台 Mac 的 max_sample_skus，"
+                                 f"聚水潭一张单最多 {MAX_ORDER_SKUS} 个）：分成几张单")
+    out["items"] = items
     if raw.get("creator_platform") not in SHOPS:
         raise _err("bad_creator", "达人平台（creator_platform）只能是 dy（抖音）或 xhs（小红书）")
     out["creator_platform"] = raw["creator_platform"]
@@ -663,7 +712,7 @@ def describe(action: Optional[dict], catalog_entry: Optional[dict] = None) -> li
         return []
     out = []
     for key, value in action.items():
-        if key == "action":
+        if key == "action" or (key == "item_id" and "items" in action):    # a sample order lists its products
             continue
         if key == "sku_prices":
             value = "；".join(f"{p['sku_id']}：{p['price']} 元" for p in value)
@@ -679,6 +728,9 @@ def describe(action: Optional[dict], catalog_entry: Optional[dict] = None) -> li
             value = f"{value}%"
         elif key == "skus":
             value = "；".join(f"{s['sku_id']} × {s['qty']}" for s in value)
+        elif key == "items":
+            value = "；".join(f"{i['item_id']}：" + "、".join(f"{s['sku_id']} × {s['qty']}" for s in i["skus"])
+                             for i in value)
         elif key == "receiver":
             value = (f"{value.get('name')} {value.get('phone')} "
                      f"{value.get('province')}{value.get('city')}{value.get('district') or ''} {value.get('address')}")
@@ -686,7 +738,10 @@ def describe(action: Optional[dict], catalog_entry: Optional[dict] = None) -> li
             value = f"{PLATFORMS.get(value, value)}（{value}）"
         out.append({"label": PARAM_LABELS.get(key, key), "value": str(value)})
     if catalog_entry and catalog_entry.get("title"):
-        out.insert(0, {"label": "商品", "value": str(catalog_entry["title"])[:80]})
+        title = str(catalog_entry["title"])[:80]
+        if len(action.get("items") or []) > 1:
+            title += f"（等 {len(action['items'])} 款）"
+        out.insert(0, {"label": "商品", "value": title})
     return out
 
 
@@ -1500,7 +1555,8 @@ def preview(raw, cfg: dict, *, catalog: Optional[dict], heartbeat=None, context:
         block["problems"].append(cfg.get("missing", {}).get(platform)
                                  or f"这台 Mac 的 config.json 里没有配置{PLATFORMS[platform]}的命令行项目（platforms.{platform}）")
         return block
-    _PREVIEWS[name](action, cfg, _runner(cfg, heartbeat), block, {**(context or {}), "catalog_entry": entry or None})
+    _PREVIEWS[name](action, cfg, _runner(cfg, heartbeat), block,
+                    {**(context or {}), "catalog_entry": entry or None, "catalog": catalog})
     verdict = "ready"
     for step in block["steps"]:
         verdict = _worse_verdict(verdict, step.get("verdict") or "error")
@@ -1597,7 +1653,8 @@ def execute(raw, cfg: dict, *, plan, key: str, ledger, catalog: Optional[dict], 
         return out
     try:
         _EXECUTES[platform](action, cfg, approved, _runner(cfg, heartbeat), out,
-                            {"catalog_entry": catalog_item(catalog, catalog_platform(action), action["item_id"])})
+                            {"catalog_entry": catalog_item(catalog, catalog_platform(action), action["item_id"]),
+                             "catalog": catalog})
         writes = [step for step in out["steps"] if step.get("execute")]
         outcome = worst(step.get("outcome") for step in writes) if writes else "NOT_RUN"
         done = {step["name"] for step in out["steps"] if step.get("outcome") in _DONE}
@@ -2265,8 +2322,9 @@ def _jst_title(entry: Optional[dict]) -> str:
     return "" if _CONTROL.search(title) else title[:30]
 
 
-def _jst_spec(action: dict, cfg: dict, catalog_entry: Optional[dict], *, execute: bool) -> dict:
-    """The order file of ``jst sample-create``."""
+def _jst_spec(action: dict, cfg: dict, catalog: Optional[dict], *, execute: bool) -> dict:
+    """The order file of ``jst sample-create``: one goods line per SKU, each product searched by its
+    own catalogue title."""
     shop = (cfg.get("jst_shops") or {}).get(action["shop"])
     if not shop:
         raise _err("no_shop", f"这台 Mac 没有配聚水潭里{PLATFORMS[action['shop']]}店铺的 ID"
@@ -2278,14 +2336,18 @@ def _jst_spec(action: dict, cfg: dict, catalog_entry: Optional[dict], *, execute
     code = action.get("logistics") or allowed[0]
     if code not in allowed:
         raise _err("bad_logistics", f"快递 {code} 不在这台 Mac 允许的里面（{'、'.join(allowed)}）")
-    title = _jst_title(catalog_entry)
-    if not title:
-        raise _err("no_title", "商品目录里没有这个商品的标题（聚水潭的店铺商品只能按标题搜）：先同步商品目录")
+    items = action.get("items") or [{"item_id": action["item_id"], "skus": action.get("skus") or []}]
+    goods = []
+    for item in items:
+        title = _jst_title(catalog_item(catalog, action["shop"], item["item_id"]))
+        if not title:
+            raise _err("no_title", f"商品目录里没有商品 {item['item_id']} 的标题（聚水潭的店铺商品只能按标题搜）："
+                                   "先同步商品目录")
+        goods += [{"platform": action["shop"].upper(), "shop": shop, "product": item["item_id"],
+                   "title": title, "sku": s["sku_id"], "qty": s["qty"]} for s in item["skus"]]
     by = "uid" if action.get("creator_uid") else "account"
     spec = {"daren": {"platform": action["creator_platform"].upper(), by: action[f"creator_{by}"]},
-            "logistics": code,
-            "goods": [{"platform": action["shop"].upper(), "shop": shop, "product": action["item_id"],
-                       "title": title, "sku": s["sku_id"], "qty": s["qty"]} for s in action["skus"]]}
+            "logistics": code, "goods": goods}
     receiver = action.get("receiver")
     if receiver:
         phone = receiver["phone"]
@@ -2359,7 +2421,7 @@ def _jst_facts(data: dict, rec: dict) -> None:
 def _preview_jst(action: dict, cfg: dict, run_one, block: dict, context: dict) -> None:
     block["run"] = {"steps": ["create"]}
     try:
-        spec = _jst_spec(action, cfg, context.get("catalog_entry"), execute=False)
+        spec = _jst_spec(action, cfg, context.get("catalog"), execute=False)
     except ActionError as e:
         block["steps"].append({"name": "preview", "label": JST_STEPS["preview"], "execute": False, "command": "",
                                "exit_code": None, "seconds": 0, "verdict": "invalid", "outcome": "",
@@ -2416,9 +2478,9 @@ def _jst_outcome(run: CliRun, data, rec: dict) -> str:
     return outcome
 
 
-def _execute_jst(action: dict, cfg: dict, plan: dict, run_one, record: dict, catalog_entry: Optional[dict] = None) -> None:
+def _execute_jst(action: dict, cfg: dict, plan: dict, run_one, record: dict, catalog: Optional[dict] = None) -> None:
     try:
-        spec = _jst_spec(action, cfg, catalog_entry, execute=True)
+        spec = _jst_spec(action, cfg, catalog, execute=True)
     except ActionError as e:
         record["problems"].append(f"没有执行：{e}")
         return
@@ -2455,6 +2517,6 @@ _EXECUTES = {
     "xhs": lambda a, c, p, r, rec, ctx: _execute_xhs(a, c, p, r, rec),
     "dy": lambda a, c, p, r, rec, ctx: _execute_dy(a, c, p, r, rec),
     "tb": lambda a, c, p, r, rec, ctx: _execute_tb(a, c, p, r, rec, ctx.get("catalog_entry")),
-    "jst": lambda a, c, p, r, rec, ctx: _execute_jst(a, c, p, r, rec, ctx.get("catalog_entry")),
+    "jst": lambda a, c, p, r, rec, ctx: _execute_jst(a, c, p, r, rec, ctx.get("catalog")),
 }
 _SYNCS = {"xhs": _sync_xhs, "dy": _sync_dy, "tb": _sync_tb}

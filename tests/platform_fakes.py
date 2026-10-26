@@ -18,6 +18,8 @@ XHS_SKU = "64f1a2b3c4d5e6f7a8b9c0d2"
 XHS_BUYER = "5e9a8b7c6d5e4f3a2b1c0d9e"
 DY_ITEM = "3000000000000000101"
 DY_SKU = "3100000000000000201"
+DY_ITEM2, DY_SKU2, DY_SKU2B = "3000000000000000102", "3100000000000000202", "3100000000000000203"
+DY_ITEM3, DY_SKU3 = "3000000000000000103", "3100000000000000204"
 DY_UID = "5100000000000002"
 DY_CHANNEL = "7200000000000001"
 DY_LINK = (f"https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id={DY_ITEM}"
@@ -101,12 +103,17 @@ def rule(match, stdout=None, *, execute=None, stderr="", exit=0, sleep=0) -> dic
 
 
 def catalog() -> dict:
-    """A catalogue (kb/products.json) with one product of each platform."""
+    """A catalogue (kb/products.json): products of each platform (three of the 抖店's, for sample orders)."""
     return {"version": 1, "synced_at": 1761400000.0, "platforms": {
         "xhs": {"ok": True, "items": [{"id": XHS_ITEM, "title": "防晒霜", "price": "99.00",
                                        "skus": [{"id": XHS_SKU, "name": "50ml", "price": "99.00"}]}]},
         "dy": {"ok": True, "items": [{"id": DY_ITEM, "title": "测试主品", "price": "19.99",
-                                      "skus": [{"id": DY_SKU, "name": "红色/M", "price": "19.99"}]}]},
+                                      "skus": [{"id": DY_SKU, "name": "红色/M", "price": "19.99"}]},
+                                     {"id": DY_ITEM2, "title": "测试贝雷帽 秋冬羊毛款", "price": "220.00",
+                                      "skus": [{"id": DY_SKU2, "name": "均码黑色", "price": "220.00"},
+                                               {"id": DY_SKU2B, "name": "均码咖啡", "price": "220.00"}]},
+                                     {"id": DY_ITEM3, "title": "测试药盒帽", "price": "300.00",
+                                      "skus": [{"id": DY_SKU3, "name": "均码粉色", "price": "300.00"}]}]},
         "tb": {"ok": True, "items": [{"id": TB_ITEM, "title": "连衣裙 夏季", "price": "199.00", "skus": []}]},
     }}
 

@@ -15,7 +15,7 @@ from src.prm import platforms
 from src.prm.platforms import ActionError
 
 from platform_fakes import (
-    DRY_STDERR, DY_CHANNEL, DY_ITEM, DY_LINK, DY_SKU, DY_UID, JST_ORDER, JST_SHOP_DY, JST_SHOP_XHS, JST_UID,
+    DRY_STDERR, DY_CHANNEL, DY_ITEM, DY_ITEM2, DY_ITEM3, DY_LINK, DY_SKU, DY_SKU2, DY_SKU2B, DY_SKU3, DY_UID, JST_ORDER, JST_SHOP_DY, JST_SHOP_XHS, JST_UID,
     TB_CAMPAIGN, TB_CROWD, TB_ITEM, TB_PRECHECK, XHS_BUYER, XHS_ITEM, XHS_SKU, FakeNode, catalog, dy_bind_done,
     dy_bind_preview, dy_create_done, dy_create_preview, dy_designated_done, dy_designated_preview, dy_promotion,
     jst_blocked, jst_done, jst_preview, rule, tb_done, tb_row, xhs_buyers, xhs_channel_done, xhs_channel_preview,
@@ -641,14 +641,15 @@ def jcfg(node):
 def test_a_sample_order_is_normalised_and_held_to_the_catalogue():
     assert platforms.check_action({**SAMPLE, "receiver": {**RECEIVER, "phone": "+86 139-0000-1111"}},
                                   catalog=catalog()) == {
-        "action": "jst.sample_order", "shop": "dy", "item_id": DY_ITEM, "skus": [{"sku_id": DY_SKU, "qty": 1}],
+        "action": "jst.sample_order", "shop": "dy", "item_id": DY_ITEM,
+        "items": [{"item_id": DY_ITEM, "skus": [{"sku_id": DY_SKU, "qty": 1}]}],
         "creator_platform": "dy", "creator_uid": DY_UID,
         "receiver": {**RECEIVER, "phone": "13900001111"}}
     assert platforms.check_action(SAMPLE)["receiver"]["phone"] == "〈手机1〉"          # the draft's placeholder
     xhs = {**SAMPLE, "shop": "xhs", "item_id": XHS_ITEM, "skus": [{"sku_id": XHS_SKU, "qty": 2}],
            "creator_platform": "xhs", "creator_uid": None, "creator_account": "xhs_123", "logistics": "ZTO"}
     out = platforms.check_action({k: v for k, v in xhs.items() if v is not None}, catalog=catalog())
-    assert out["creator_account"] == "xhs_123" and out["logistics"] == "ZTO" and out["skus"][0]["qty"] == 2
+    assert out["creator_account"] == "xhs_123" and out["logistics"] == "ZTO" and out["items"][0]["skus"][0]["qty"] == 2
     without = {k: v for k, v in SAMPLE.items() if k != "receiver"}
     assert "receiver" not in platforms.check_action(without)
     with pytest.raises(ActionError) as e:
@@ -668,7 +669,16 @@ def test_a_sample_order_is_normalised_and_held_to_the_catalogue():
     ({"skus": [{"sku_id": DY_SKU, "qty": True}]}, "bad_qty"),
     ({"skus": [{"sku_id": DY_SKU, "qty": 1}, {"sku_id": DY_SKU, "qty": 1}]}, "bad_sku"),
     ({"skus": [{"sku_id": DY_SKU, "qty": 1, "price": "1"}]}, "bad_sku"),
-    ({"skus": [{"sku_id": f"31000000000000002{i:02d}", "qty": 1} for i in range(11)]}, "bad_sku"),
+    ({"skus": [{"sku_id": f"31000000000000002{i:02d}", "qty": 1} for i in range(11)]}, "over_limit"),  # 10 SKUs a order
+    ({"skus": []}, "bad_sku"),
+    ({"item_id": None, "skus": None}, "missing_param"),
+    ({"items": [{"item_id": DY_ITEM, "skus": [{"sku_id": DY_SKU, "qty": 1}]}]}, "bad_items"),     # items and skus
+    ({"skus": None, "items": "x"}, "bad_items"),
+    ({"skus": None, "items": [{"item_id": DY_ITEM, "skus": [{"sku_id": DY_SKU, "qty": 1}], "price": 1}]}, "bad_items"),
+    ({"skus": None, "items": [{"item_id": DY_ITEM2, "skus": [{"sku_id": DY_SKU2, "qty": 1}]}]}, "bad_items"),  # item_id
+    ({"item_id": None, "skus": None, "items": [{"item_id": DY_ITEM, "skus": [{"sku_id": DY_SKU, "qty": 1}]},
+                                               {"item_id": DY_ITEM, "skus": [{"sku_id": DY_SKU, "qty": 1}]}]}, "bad_items"),
+    ({"item_id": None, "skus": None, "items": [{"item_id": DY_ITEM, "skus": []}]}, "bad_sku"),
     ({"creator_platform": "ks"}, "bad_creator"),
     ({"creator_account": "dy_abc"}, "bad_creator"),                              # both the UID and the number
     ({"creator_uid": "--execute"}, "bad_creator"),
@@ -689,7 +699,7 @@ def test_what_does_not_fit_a_sample_order_is_refused(change, code):
 
 def test_a_sample_orders_limits_are_the_macs_and_the_form_is_wider():
     three = {**SAMPLE, "skus": [{"sku_id": DY_SKU, "qty": 3}]}
-    assert platforms.check_action(three, limits={"max_sample_qty": 5})["skus"][0]["qty"] == 3
+    assert platforms.check_action(three, limits={"max_sample_qty": 5})["items"][0]["skus"][0]["qty"] == 3
     assert platforms.check_action(three, limits=platforms.FORM_LIMITS)
     with pytest.raises(ActionError):
         platforms.check_action(three)
@@ -706,7 +716,8 @@ def test_the_jst_settings_are_read(node):
 
 def test_the_console_shows_a_sample_orders_parameters():
     shown = {p["label"]: p["value"] for p in platforms.describe(platforms.check_action(SAMPLE))}
-    assert shown["发货店铺"] == "抖音（dy）" and shown["寄样 SKU × 数量"] == f"{DY_SKU} × 1"
+    assert shown["发货店铺"] == "抖音（dy）" and shown["寄样商品：SKU × 数量"] == f"{DY_ITEM}：{DY_SKU} × 1"
+    assert "商品 ID" not in shown                                               # the order lists its products
     assert shown["收货信息"] == "张三 〈手机1〉 广东省佛山市南海区 某某路 100 号 1 栋 101"
     assert platforms.reply_problems("寄样单建好啦：{寄样单号}", platforms.check_action(SAMPLE)) == []
     assert platforms.fill_reply("单号 {寄样单号}", platforms.check_action(SAMPLE), {"sample_order_no": JST_ORDER}) == (
@@ -823,3 +834,72 @@ def test_jushuitan_is_no_catalogue_platform(node, jcfg):
     cat = platforms.sync_catalog(jcfg, ["jst"], previous=catalog())
     assert "jst" not in cat["platforms"] and node.calls() == []
     assert "聚水潭" not in platforms.catalog_markdown(cat)
+
+
+THREE = {"action": "jst.sample_order", "shop": "dy", "creator_platform": "dy", "creator_account": "test_daren_01",
+         "receiver": RECEIVER, "items": [
+             {"item_id": DY_ITEM, "skus": [{"sku_id": DY_SKU, "qty": 1}]},
+             {"item_id": DY_ITEM2, "skus": [{"sku_id": DY_SKU2, "qty": 1}, {"sku_id": DY_SKU2B, "qty": 1}]},
+             {"item_id": DY_ITEM3, "skus": [{"sku_id": DY_SKU3, "qty": 1}]}]}
+
+
+def test_one_sample_order_takes_several_products_of_one_shop():
+    out = platforms.check_action(THREE, catalog=catalog())
+    assert out["item_id"] == DY_ITEM and [i["item_id"] for i in out["items"]] == [DY_ITEM, DY_ITEM2, DY_ITEM3]
+    assert platforms.check_action(out, catalog=catalog()) == out                  # what the bot stores runs again
+    assert platforms.check_action({**THREE, "item_id": DY_ITEM}, catalog=catalog()) == out
+    shown = {p["label"]: p["value"] for p in platforms.describe(out, {"title": "测试主品"})}
+    assert shown["商品"] == "测试主品（等 3 款）"
+    assert shown["寄样商品：SKU × 数量"] == (f"{DY_ITEM}：{DY_SKU} × 1；{DY_ITEM2}：{DY_SKU2} × 1、{DY_SKU2B} × 1；"
+                                            f"{DY_ITEM3}：{DY_SKU3} × 1")
+    with pytest.raises(ActionError) as e:                                        # every product in the catalogue
+        platforms.check_action({**THREE, "items": [*THREE["items"], {"item_id": "3000000000000000999",
+                                                                   "skus": [{"sku_id": DY_SKU, "qty": 1}]}]},
+                               catalog=catalog())
+    assert e.value.code == "not_in_catalog"
+    with pytest.raises(ActionError) as e:                                        # and its SKUs its own
+        platforms.check_action({**THREE, "items": [{"item_id": DY_ITEM2, "skus": [{"sku_id": DY_SKU, "qty": 1}]}]},
+                               catalog=catalog())
+    assert e.value.code == "bad_sku"
+
+
+def test_a_sample_orders_skus_are_counted_over_its_products():
+    many = {**THREE, "items": [{"item_id": f"30000000000001{i:05d}", "skus": [{"sku_id": f"31000000000001{i:05d}",
+                                                                               "qty": 1}]} for i in range(12)]}
+    with pytest.raises(ActionError) as e:
+        platforms.check_action(many)                                             # the default: 10 SKUs a order
+    assert e.value.code == "over_limit" and "12 个 SKU" in str(e.value)
+    assert len(platforms.check_action(many, limits={"max_sample_skus": 50})["items"]) == 12
+    fifty_one = {**THREE, "items": [{"item_id": f"30000000000001{i:05d}",
+                                     "skus": [{"sku_id": f"31000000000001{i:05d}", "qty": 1}]} for i in range(51)]}
+    for lim in ({"max_sample_skus": 80}, platforms.FORM_LIMITS):                # 聚水潭's 50 holds whatever the Mac says
+        with pytest.raises(ActionError) as e:
+            platforms.check_action(fifty_one, limits=lim)
+        assert e.value.code == "over_limit" and "最多 50 个" in str(e.value)
+
+
+def test_a_preview_of_several_products_searches_each_by_its_own_title(node, jcfg):
+    node.rules([rule(["sample-create"], jst_preview(), execute=False)])
+    block = platforms.preview(THREE, jcfg, catalog=catalog())
+    assert block["verdict"] == "ready", block
+    assert block["catalog"]["title"] == "测试主品"
+    [call] = node.calls()
+    assert [(g["product"], g["title"], g["sku"], g["qty"]) for g in call["spec"]["goods"]] == [
+        (DY_ITEM, "测试主品", DY_SKU, 1), (DY_ITEM2, "测试贝雷帽 秋冬羊毛款", DY_SKU2, 1),
+        (DY_ITEM2, "测试贝雷帽 秋冬羊毛款", DY_SKU2B, 1), (DY_ITEM3, "测试药盒帽", DY_SKU3, 1)]
+    assert {g["shop"] for g in call["spec"]["goods"]} == {JST_SHOP_DY}
+    assert call["spec"]["daren"] == {"platform": "DY", "account": "test_daren_01"}
+    untitled = catalog()
+    untitled["platforms"]["dy"]["items"][2]["title"] = ""
+    block = platforms.preview(THREE, jcfg, catalog=untitled)
+    assert block["verdict"] == "invalid" and DY_ITEM3 in block["problems"][0]
+
+
+def test_several_products_run_in_one_order(node, jcfg, tmp_path):
+    node.rules([rule(["sample-create"], jst_done(), execute=True)])
+    approved = {**THREE, "receiver": {**RECEIVER, "phone": "13900001111"}}
+    out = execute(jcfg, approved, {"steps": ["create"]}, tmp_path)
+    assert out["outcome"] == "VERIFIED_SUCCESS" and out["created"] == {"sample_order_no": JST_ORDER}
+    [call] = node.calls()
+    assert "--execute" in call["argv"] and len(call["spec"]["goods"]) == 4
+    assert {g["title"] for g in call["spec"]["goods"]} == {"测试主品", "测试贝雷帽 秋冬羊毛款", "测试药盒帽"}
