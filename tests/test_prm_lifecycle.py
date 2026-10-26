@@ -1,5 +1,5 @@
 """PRM copilot, the second part: takeovers, send gates (8.1), holding replies, shipments,
-numbers shown in full and the 30-day clean-up (8.2), and what the backend tells about own lines."""
+numbers shown in full and the 90-day clean-up (8.2), and what the backend tells about own lines."""
 
 import json
 import sqlite3
@@ -349,7 +349,7 @@ def test_stage_adopt_mode_and_logistics(bot, clock):
     assert all(e["actor"] == "console" for e in bot.prm.store.events(1) if e["kind"] in ("stage", "mode"))
 
 
-# ── 8.2: numbers in full, and the clean-up 30 days after delivery ─────────
+# ── 8.2: numbers in full, and the clean-up 90 days after the deal is done ─
 
 def test_the_full_numbers_are_shown_on_request_and_every_look_is_written_down(bot, clock):
     drafted(bot, text="收件人小美 13812345678")
@@ -374,11 +374,11 @@ def delivered_deal(bot, clock, address="上海市浦东新区张江路100号3栋
     return store, packet
 
 
-def test_thirty_days_after_delivery_every_copy_is_cut_down(bot, clock):
+def test_ninety_days_after_delivery_every_copy_is_cut_down(bot, clock):
     messages, packet = delivered_deal(bot, clock)
     # a later draft quotes the address without its beginning (seen with the real model)
     drafted(bot, draft(slots={}, reply_draft="再确认一下：张江路100号3栋1201，收件人小美"), text="好的")
-    clock.now += 29 * DAY
+    clock.now += 89 * DAY
     assert bot.prm.purge_due() == 0
     clock.now += 2 * DAY
     assert bot.prm.purge_due() == 1 and bot.prm.purge_due() == 0              # once
@@ -409,9 +409,37 @@ def test_thirty_days_after_delivery_every_copy_is_cut_down(bot, clock):
     assert bot.prm.store.events(1, limit=1)[0]["kind"] == "purge_case"
 
 
+def test_a_deal_quiet_for_ninety_days_is_cleared_too(bot, clock):
+    """没寄出就结束的（结案、审批没通过、达人不回了）：90 天没有任何动静也清（D27）。"""
+    drafted(bot, text="收件人小美 13812345678，地址上海市浦东新区张江路100号3栋1201")
+    assert bot.prm.store.deal(1)["delivered_at"] is None
+    clock.now += 60 * DAY
+    bot.prm.handle(bot.msg("我再想想"))                                       # a sign of life: the count starts again
+    clock.now += 89 * DAY
+    assert bot.prm.purge_due() == 0
+    clock.now += 2 * DAY
+    assert bot.prm.purge_due() == 1 and bot.prm.purge_due() == 0
+    assert bot.prm.store.tokens(1) == {}
+
+
+def test_a_creator_back_after_the_clean_up_starts_a_new_count(bot, clock):
+    delivered_deal(bot, clock)
+    clock.now += 91 * DAY
+    assert bot.prm.purge_due() == 1
+    assert bot.prm.snapshot()["parties"][0]["deal"]["purge_due_at"] is None, "清过以后没有新东西"
+    clock.now += 60
+    bot.prm.handle(bot.msg("又想要一份，手机 13900001111"))
+    due = bot.prm.snapshot()["parties"][0]["deal"]["purge_due_at"]
+    assert due == clock.now + 90 * DAY, "签收是清理前的事，不再算；从这条消息起算"
+    clock.now += 30 * DAY
+    assert bot.prm.purge_due() == 0
+    clock.now += 61 * DAY
+    assert bot.prm.purge_due() == 1
+
+
 def test_the_creator_writing_around_the_purge_job_still_gets_a_draft(bot, clock):
     delivered_deal(bot, clock)
-    clock.now += 31 * DAY
+    clock.now += 91 * DAY
     bot.prm.purge_due()
     purge = bot.relay.store.list_jobs(1)[0]
     bot.prm.handle(bot.msg("样品很好用！"))                                  # the purge job is still queued
@@ -427,7 +455,7 @@ def test_the_creator_writing_around_the_purge_job_still_gets_a_draft(bot, clock)
 def test_a_cleared_number_is_never_sent_as_a_placeholder(bot, clock):
     delivered_deal(bot, clock)
     late = drafted(bot, draft(reply_draft="再确认下 〈手机1〉", slots={}), text="还有事")
-    clock.now += 31 * DAY
+    clock.now += 91 * DAY
     bot.prm.purge_due()
     assert bot.prm.decide(late["id"], "send")["ok"] is False
 
@@ -475,7 +503,7 @@ def test_the_new_settings_have_ranges():
     for key in ("PRM_TAKEOVER_MIN", "PRM_HOLDING_MIN", "PRM_HOLDING_TEXT", "PRM_RETENTION_DAYS"):
         assert key in message
     config = BotConfig()
-    assert (config.prm_takeover_min, config.prm_holding_min, config.prm_retention_days) == (120, 10, 30)
+    assert (config.prm_takeover_min, config.prm_holding_min, config.prm_retention_days) == (120, 10, 90)
 
 
 # ── the backend tells PRM about this account's own lines ──────────────────

@@ -1317,7 +1317,7 @@ def _prm_state_core() -> dict:
         return {**_prm.snapshot(), **settings, "enabled": True}
     stopped = {"mac_online": False, "worker_kinds": [], "can_send": False, "can_send_files": False,
                "takeover_min": _prm_int_env("PRM_TAKEOVER_MIN", 120), "holding_min": _prm_int_env("PRM_HOLDING_MIN", 10),
-               "retention_days": _prm_int_env("PRM_RETENTION_DAYS", 30), **settings}
+               "retention_days": _prm_int_env("PRM_RETENTION_DAYS", 90), **settings}
     store = _prm_stopped_store()
     if store is None:
         from src.prm.result import MESSAGE_KINDS

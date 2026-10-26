@@ -18,7 +18,7 @@ instead), or from the console; paused needs the console to end it.  Meanwhile th
 creator's messages are only recorded; the next draft job is told what both sides
 said (``history``).  A draft left waiting ``PRM_HOLDING_MIN`` minutes gets one
 holding reply per round of the creator's messages.  ``PRM_RETENTION_DAYS`` after a
-deal is delivered its receiving details are cleared everywhere (8.2, retention.py),
+deal is done (delivered, or quiet that long) its receiving details are cleared everywhere (8.2, retention.py),
 the Mac's case file through a ``purge`` job.  The deal actions (stage, mode,
 shipment) are in deals.py.
 """
@@ -186,8 +186,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
                 "stage_proposal_label": STAGES.get(deal["stage_proposal"], ""),
                 "attention": deal.get("attention", ""), "last_message_at": deal.get("last_message_at"),
                 "delivered_at": deal.get("delivered_at"), "purged_at": deal.get("purged_at"),
-                "purge_due_at": (float(deal["delivered_at"]) + retention_days * 86400
-                                 if deal.get("delivered_at") and not deal.get("purged_at") else None),
+                "purge_due_at": retention.purge_due_at(deal, retention_days),
                 "shipment": {k: shipment[k] for k in ("carrier", "waybill", "status", "updated_at")}
                 if shipment else None,
                 "shipment_status_label": SHIPMENT_STATES.get((shipment or {}).get("status", ""), ""),
@@ -226,7 +225,8 @@ class PrmService:
         self._takeover_sec = int(getattr(config, "prm_takeover_min", 120) or 120) * 60
         self._holding_sec = int(getattr(config, "prm_holding_min", 10) or 0) * 60
         self._holding_text = str(getattr(config, "prm_holding_text", "") or HOLDING_TEXT).strip() or HOLDING_TEXT
-        self._retention_days = int(getattr(config, "prm_retention_days", retention.RETENTION_DAYS) or 30)
+        self._retention_days = int(getattr(config, "prm_retention_days", retention.RETENTION_DAYS)
+                                   or retention.RETENTION_DAYS)
         # The admin and the cc users are never creators: their messages stay the relay's.
         self._reserved = {str(w).strip() for w in [getattr(config, "admin_wxid", ""),
                                                     *(getattr(config, "claude_relay_wxids", None) or [])]
@@ -771,10 +771,10 @@ class PrmService:
         return sent
 
     def purge_due(self) -> int:
-        """Clear the details of every deal delivered ``PRM_RETENTION_DAYS`` ago (8.2)."""
+        """Clear the details of every deal done ``PRM_RETENTION_DAYS`` ago (8.2, ``retention.purge_due_at``)."""
         now = self._clock()
         done = 0
-        for deal in self._store.deals_to_purge(now - self._retention_days * 86400):
+        for deal in self._store.deals_to_purge(now, self._retention_days):
             try:
                 self.purge(deal, now)
                 done += 1
@@ -804,7 +804,7 @@ class PrmService:
             self._relay.submit(chat_id, chat_id, "", kind=PRM, fresh=True, input_closed=True,
                                meta={"op": "purge", "party_id": deal["party_id"], "deal_id": deal["id"]})
         self._store.add_event(deal["id"], deal["party_id"], "purge", counts, actor="system", now=now)
-        logger.info("PRM: deal %d delivered %d days ago; receiving details cleared (%s)", deal["id"],
+        logger.info("PRM: deal %d done %d days ago (delivered or quiet); receiving details cleared (%s)", deal["id"],
                     self._retention_days, ", ".join(f"{k} {v}" for k, v in counts.items()))
         return counts
 

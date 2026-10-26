@@ -243,11 +243,11 @@ function DealDetail({ p, d, onDone }) {
             <button type="button" className="btn" disabled={busy} onClick={() => run({ action: 'shipment_status', status }, `物流已更新：${shipmentStates[status]}`)}>更新物流</button>
           </div>
         )}
-        {deal.delivered_at && (
+        {(deal.purged_at || deal.purge_due_at) && (
           <div className="f-hint">
-            {deal.purged_at
-              ? `收件信息已在 ${fmtClock(deal.purged_at)} 按规定清除（地址只留省市，号码只留打码的）。`
-              : `${fmtClock(deal.delivered_at)} 签收；${fmtClock(deal.purge_due_at)} 后自动清除收件信息（地址、手机号、证件号）。`}
+            {deal.purged_at && `收件信息已在 ${fmtClock(deal.purged_at)} 按规定清除（地址只留省市，号码只留打码的）。`}
+            {deal.purge_due_at && `${deal.delivered_at && !deal.purged_at ? `${fmtClock(deal.delivered_at)} 签收；` : ''}`
+              + `${fmtClock(deal.purge_due_at)} 后自动清除收件信息（地址、手机号、证件号）；签收满 90 天或 90 天没有动静就清。`}
           </div>
         )}
       </div>

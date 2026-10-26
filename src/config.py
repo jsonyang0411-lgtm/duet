@@ -592,7 +592,7 @@ class BotConfig:
     prm_holding_text: str = "收到，我确认一下马上回你"
     # A delivered deal's receiving details (address, phone and ID numbers) are cleared
     # everywhere this many days after delivery (8.2).
-    prm_retention_days: int = 30
+    prm_retention_days: int = 90
     # === WeChat edge (src/edge, edge-protocol.md) for the Mac business service ===
     # "on": Windows only receives and sends WeChat messages for the creators the Mac lists;
     # the Mac pulls /edge/* on the relay's port with PRM_EDGE_TOKEN.  Not with PRM_COPILOT.
@@ -1042,7 +1042,7 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(f"PRM_HOLDING_MIN must be between 0 and 120, got {kwargs.get('prm_holding_min')}")
     if not (1 <= len(str(kwargs.get("prm_holding_text", "收到，我确认一下马上回你")).strip()) <= 60):
         errors.append("PRM_HOLDING_TEXT must be 1-60 characters")
-    if not (1 <= int(kwargs.get("prm_retention_days", 30)) <= 365):
+    if not (1 <= int(kwargs.get("prm_retention_days", 90)) <= 365):
         errors.append(f"PRM_RETENTION_DAYS must be between 1 and 365, got {kwargs.get('prm_retention_days')}")
     prm_edge = kwargs.get("prm_edge", "off")
     if prm_edge not in ("off", "on"):
@@ -1393,7 +1393,7 @@ def load_config() -> BotConfig:
         "prm_takeover_min": int(os.getenv("PRM_TAKEOVER_MIN", "120")),
         "prm_holding_min": int(os.getenv("PRM_HOLDING_MIN", "10")),
         "prm_holding_text": os.getenv("PRM_HOLDING_TEXT", "收到，我确认一下马上回你").strip() or "收到，我确认一下马上回你",
-        "prm_retention_days": int(os.getenv("PRM_RETENTION_DAYS", "30")),
+        "prm_retention_days": int(os.getenv("PRM_RETENTION_DAYS", "90")),
         "prm_edge": _parse_memory_mode(os.getenv("PRM_EDGE", "off")),
         "prm_edge_token": os.getenv("PRM_EDGE_TOKEN", "").strip(),
         "edge_url": os.getenv("EDGE_URL", "").strip(),
