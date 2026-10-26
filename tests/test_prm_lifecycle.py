@@ -9,7 +9,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from test_prm import ADMIN, CREATOR, Bot, Clock, draft
+from test_prm import ADMIN, CREATOR, Bot, Clock, draft, pending_packet
 
 from src.config import BotConfig, _validate_config
 from src.db.schema import initialize_db
@@ -561,3 +561,55 @@ def test_send_race_condition_notes_sent_before_wechat_reads_back(bot, clock):
     assert bot.prm.store.packet(packet["id"])["outcome"] == "sent_confirmed"
     assert bot.prm.store.deal(1)["mode"] == "copilot"
     assert not [e for e in bot.prm.store.events(1) if e["kind"] in ("takeover", "operator_message")]
+
+
+def test_a_failed_packet_stays_failed_when_its_text_is_read_back_late(clock, tmp_path):
+    b = Bot(clock, tmp_path, files_ok=False)
+    b.prm.register(CREATOR, "小美")
+    p = pending_packet(b, draft(attachments_to_send=["assets/a.txt"]), files=[("a.txt", b"a")])
+    b.prm.decide(p["id"], "send")
+    b.prm.send_approved()                                                     # the text went, the file not
+    clock.now += 2
+    b.prm.on_own_message(own(b, "确认一下：小美，手机13812345678。"))          # the text shows up after that
+    packet = b.prm.store.packet(p["id"])
+    assert packet["status"] == "failed" and packet["outcome"] == "failed"
+    assert b.prm.store.deal(1)["mode"] == "copilot"
+    b.relay.stop()
+
+
+def test_a_later_file_failing_keeps_the_earlier_file_the_bots(clock, tmp_path):
+    b = Bot(clock, tmp_path)
+    b.prm.register(CREATOR, "小美")
+    p = pending_packet(b, draft(attachments_to_send=["assets/a.txt", "assets/b.txt"]),
+                       files=[("a.txt", b"a"), ("b.txt", b"b")])
+    goes = iter([True, False])
+    b.prm._send_file = lambda chat, path: next(goes)                          # a.txt goes, b.txt does not
+    b.prm.decide(p["id"], "send")
+    b.prm.send_approved()
+    assert b.prm.store.packet(p["id"])["error"] == "文件「b.txt」没发出去"
+    clock.now += 2
+    b.prm.on_own_message(own(b, "[文件]", msg_type=49))                       # a.txt shows up in WeChat
+    assert b.prm.store.deal(1)["mode"] == "copilot"
+    assert not [e for e in b.prm.store.events(1) if e["kind"] in ("takeover", "operator_message")]
+    b.relay.stop()
+
+
+def test_a_failed_send_takes_back_only_its_own_line(bot, clock):
+    first = drafted(bot, draft(reply_draft="好的，收到～"))
+    bot.prm.decide(first["id"], "send")
+    bot.prm.send_approved()                                                   # WeChat has not shown it yet
+    second = drafted(bot, draft(reply_draft="好的，收到～"))
+    bot.prm.decide(second["id"], "send")
+    bot.send_ok = False
+    bot.prm.send_approved()                                                   # the same words, not sent
+    bot.prm.on_own_message(own(bot, "好的，收到～"))                          # the first one shows up
+    assert bot.prm.store.packet(first["id"])["outcome"] == "sent_confirmed"
+    assert bot.prm.store.packet(second["id"])["outcome"] == "failed"
+
+
+def test_a_creator_written_straight_into_the_database_is_read_at_once(bot):
+    """The console writes to the database itself when it has no handle on the running
+    service: the chat filter looks there before it says no."""
+    assert not bot.prm.is_party_chat("wxid_creator02")
+    bot.prm.store.add_party("wxid_creator02", "小丽", "", bot.clock.now)
+    assert bot.prm.is_party_chat("wxid_creator02")
