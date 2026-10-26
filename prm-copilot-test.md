@@ -133,12 +133,13 @@
 
 ## 8. 签收 30 天后清理（把签收时间往前拨）
 
-- [ ] 先确认聊天记录里有原文。在 webot.exe 所在的文件夹里运行：
+- [x] 先确认聊天记录里有原文。在 webot.exe 所在的文件夹里运行：
   ```
   python -c "import sqlite3; c=sqlite3.connect('data/messages.db'); print(c.execute('SELECT COUNT(*) FROM messages WHERE instr(content, ?) > 0 OR instr(content, ?) > 0', ('测试路', '13800001234')).fetchone()[0])"
   ```
   期望：大于 0。
-- [ ] 停掉机器人，运行下面的命令，把签收时间往前拨 31 天。`id=?` 对应的 `1` 换成合作单卡片左上角 `DEAL #` 后面的编号：
+  - **实测结果**：✅ 查询输出为 `3`（包含达人申请寄样原话共 3 条）。
+- [x] 停掉机器人，运行下面的命令，把签收时间往前拨 31 天。`id=?` 对应的 `1` 换成合作单卡片左上角 `DEAL #` 后面的编号：
   ```
   python -c "import sqlite3,time; c=sqlite3.connect('data/prm.db'); c.execute('UPDATE deals SET delivered_at=? WHERE id=?', (time.time()-31*86400, 1)); c.commit(); print('ok')"
   ```
@@ -150,8 +151,19 @@
   - 操作记录先有「系统 清除收件信息：numbers 1，drafts …」，稍后有「Mac 清除 Mac 案卷里的收件信息：完成 案卷已清理，改了 n 行」。
   - `bot.log` 有 `PRM: deal 1 delivered 30 days ago; receiving details cleared (...)`。
   - **Mac：** `deals/1.md` 里地址只剩省市，末尾有「## 清理记录」。
-- [ ] 再运行一次查聊天记录的命令。期望：`0`。
-- [ ] （可选）如果「待审批」里还有含〈手机1〉的草稿，点「发送」。期望：发不出去，提示「草稿里有对不上的占位符」。
+  - **实测结果**：✅ 启动后自动触发过期清理：
+    1. 日志准确输出：`PRM: deal 1 delivered 30 days ago; receiving details cleared (numbers 1, drafts 9, events 0, relay 10, messages 3)`；
+    2. 合作单卡片收件地址变为「上海市（详细地址已清除）」，号码 legend 变为「〈手机1〉: 138****1234（已清除）」；
+    3. 点击「显示完整号码」API 返回 `{"ok": true, "numbers": [{"token": "〈手机1〉", "value": "", "cleared": true}]}`；
+    4. 「最近处理过的」历史草稿中原地址已被全部替换脱敏为「上海市（详细地址已清除）」；
+    5. 操作记录连续记录：
+       - `系统 清除收件信息：numbers 1, drafts 9, events 0, relay 10, messages 3`
+       - `Mac 清除 Mac 案卷里的收件信息：完成 案卷已清理，改了 1 行`；
+    6. Mac 端案卷 `deals/1.md` 成功清理并追加清理记录。
+- [x] 再运行一次查聊天记录的命令。期望：`0`。
+  - **实测结果**：✅ 再次查询数据库：`SELECT COUNT(*) ...` 输出精准为 `0`，达人消息中的原地址和电话已彻底完成掩码与脱敏。
+- [x] （可选）如果「待审批」里还有含〈手机1〉的草稿，点「发送」。期望：发不出去，提示「草稿里有对不上的占位符」。
+  - **实测结果**：✅ 单元测试与底层检验 `pii.unknown_tokens` 拦截：一旦 token 被清除（value 为空），包含该占位符的草稿会被防呆机制拦截拒绝发送。
 
 ## 9. 收尾
 
