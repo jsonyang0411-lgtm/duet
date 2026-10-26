@@ -1465,7 +1465,10 @@ def _sync_dy(cfg: dict, progress) -> dict:
     for start in range(0, len(ids), 20):
         batch = ids[start:start + 20]
         try:
-            _, prices = _catalog_run(cfg, "dy", ["fxg", "sku-prices", "--product-id=" + ",".join(batch), *shop], progress)
+            # --raw：精简输出里没有 SKU 的商家编码（spec_prices[].code，就是聚水潭的商品编码，10-26 对过），
+            # 所以读原始数据自己取 id、规格名（sell_properties 的 value_name 用 / 连起来，同精简输出）、价格（分）
+            _, prices = _catalog_run(cfg, "dy", ["fxg", "sku-prices", "--raw", "--product-id=" + ",".join(batch), *shop],
+                                     progress)
         except RuntimeError as e:
             notes.append(f"SKU 价格没读到（{_clip(e, 120)}）：这些商品在目录里没有 SKU")
             break
@@ -1473,10 +1476,16 @@ def _sync_dy(cfg: dict, progress) -> dict:
             item = by_id.get(str(row.get("productId") or ""))
             if item is None:
                 continue
-            for sku in row.get("skus") or []:
-                if isinstance(sku, dict) and _DIGITS.match(str(sku.get("skuId") or "")):
-                    item["skus"].append({"id": str(sku["skuId"]), "name": _clip(sku.get("name") or "", 60),
-                                         "price": _yuan(sku.get("priceYuan"), fen=False) or _yuan(sku.get("price"), fen=True)})
+            data = row.get("data") if isinstance(row.get("data"), dict) else {}
+            for sku in data.get("spec_prices") or []:
+                if not (isinstance(sku, dict) and _DIGITS.match(str(sku.get("id") or ""))):
+                    continue
+                props = sku.get("sell_properties") if isinstance(sku.get("sell_properties"), list) else []
+                name = "/".join(str(p.get("value_name") or "") for p in props if isinstance(p, dict))
+                entry_sku = {"id": str(sku["id"]), "name": _clip(name, 60), "price": _yuan(sku.get("price"), fen=True)}
+                if _ERP_CODE.match(str(sku.get("code") or "")):
+                    entry_sku["code"] = str(sku["code"])
+                item["skus"].append(entry_sku)
     return {"items": items, "notes": notes, "complete": bool(data.get("complete", True))}
 
 

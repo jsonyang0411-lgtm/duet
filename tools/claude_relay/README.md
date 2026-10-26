@@ -223,7 +223,7 @@ Mac：同一个 CLI 带 --execute，只发一次（执行台账：同一个批�
    python3 tools/claude_relay/worker.py --sync-products          # 全部配置了的平台
    python3 tools/claude_relay/worker.py --sync-products --platforms dy
    ```
-   写出 `prm_workspace/kb/products.md`（给 Claude 看：商品 ID、标题、SKU、价格）和 `kb/products.json`（给代码核对）。**平台动作的商品必须在目录里**，SKU 和专属价也按目录核对；没有目录就不预览。小红书读 `items --tab shelf --all` + `item`，抖音读 `fxg products` + `fxg sku-prices`，淘宝读万相台选品列表 `alimama items`（没有 SKU）。某个平台这次没读成，保留上一次的列表并在 md 里注明。商品有变化就再跑一次（可以放进每天的定时任务）。
+   写出 `prm_workspace/kb/products.md`（给 Claude 看：商品 ID、标题、SKU、价格）和 `kb/products.json`（给代码核对）。**平台动作的商品必须在目录里**，SKU 和专属价也按目录核对；没有目录就不预览。小红书读 `items --tab shelf --all` + `item`，抖音读 `fxg products` + `fxg sku-prices --raw`（要原始数据里 SKU 的商家编码），淘宝读万相台选品列表 `alimama items`（没有 SKU）。某个平台这次没读成，保留上一次的列表并在 md 里注明。商品有变化就再跑一次（可以放进每天的定时任务）。
 4. `python3 tools/claude_relay/worker.py --check` 多两行：`platform actions: dy=…; node …` 和商品目录的同步时间。
 
 #### 五种动作

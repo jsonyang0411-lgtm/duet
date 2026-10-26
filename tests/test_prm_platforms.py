@@ -579,8 +579,11 @@ def test_the_catalogue_is_read_from_the_three_platforms(node, cfg, tmp_path):
                                                   "erpCode": "A7261010037A-M"}]}]}),
         rule(["fxg", "products"], {"site": "fxg", "command": "products", "complete": True, "rows": [
             {"productId": DY_ITEM, "name": "测试主品", "status": 0, "checkStatus": 3, "priceLower": 1999, "discountPrice": 0}]}),
-        rule(["fxg", "sku-prices"], {"site": "fxg", "command": "sku-prices", "rows": [
-            {"productId": DY_ITEM, "skus": [{"skuId": DY_SKU, "name": "红色/M", "price": 1999, "priceYuan": "19.99"}]}]}),
+        rule(["fxg", "sku-prices", "--raw"], {"site": "fxg", "command": "sku-prices", "rows": [
+            {"productId": DY_ITEM, "data": {"spec_prices": [
+                {"id": DY_SKU, "price": 1999, "stock_num": 100, "code": "A7260810095A-M",
+                 "sell_properties": [{"value_name": "红色"}, {"value_name": "M"}]},
+                {"id": "not-a-sku", "price": 1}]}}]}),
         rule(["alimama", "items", "--page=1"], [{"itemId": TB_ITEM, "itemTitle": "连衣裙 夏季", "price": 199.0}]),
     ])
     cat = platforms.sync_catalog(cfg, ["xhs", "dy", "tb"])
@@ -590,7 +593,7 @@ def test_the_catalogue_is_read_from_the_three_platforms(node, cfg, tmp_path):
                                         "code": "A7261010037A-M"}]
     assert xhs["items"][0]["price"] == "99.00"
     assert dy["items"] == [{"id": DY_ITEM, "title": "测试主品", "price": "19.99",
-                            "skus": [{"id": DY_SKU, "name": "红色/M", "price": "19.99"}]}]
+                            "skus": [{"id": DY_SKU, "name": "红色/M", "price": "19.99", "code": "A7260810095A-M"}]}]
     assert tb["items"][0] == {"id": TB_ITEM, "title": "连衣裙 夏季", "price": "199.00", "skus": []}
     ws = tmp_path / "ws"
     (ws / "kb").mkdir(parents=True)
