@@ -42,6 +42,14 @@ h1 { font-size: 26px; margin: 0 0 4px; }
 .summary b { display: block; font-size: 14px; margin-bottom: 4px; }
 .summary p { margin: 0; color: var(--muted); font-size: 13px; }
 
+.arch { display: grid; grid-template-columns: 1fr auto 1fr; gap: 12px; align-items: stretch; margin-bottom: 28px; }
+.arch .box { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.arch .box b { display: block; margin-bottom: 4px; }
+.arch .box ul { margin: 0; padding-left: 18px; font-size: 13px; color: var(--muted); }
+.arch .wire { display: flex; flex-direction: column; justify-content: center; gap: 6px; font-size: 12px; color: var(--muted); text-align: center; }
+.arch .wire span { background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; white-space: nowrap; }
+@media (max-width: 720px) { .arch { grid-template-columns: 1fr; } .arch .wire { flex-direction: row; flex-wrap: wrap; justify-content: center; } }
+
 .flow { position: relative; }
 .step { display: grid; grid-template-columns: 56px 1fr; gap: 14px; }
 .rail { display: flex; flex-direction: column; align-items: center; }
@@ -57,14 +65,14 @@ h1 { font-size: 26px; margin: 0 0 4px; }
 .nodes { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-top: 10px; }
 .node { background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--line);
   border-radius: 8px; padding: 10px 12px; }
-.node.done { border-left-color: var(--done); background: var(--card); }
-.node.part { border-left-color: var(--part); background: var(--card); }
-.node.todo { border-left-color: var(--todo); border-style: dashed; border-left-style: solid; background: var(--card); }
-.node.ext  { border-left-color: var(--ext); background: var(--card); }
+.node.done { border-left-color: var(--done); }
+.node.part { border-left-color: var(--part); }
+.node.todo { border-left-color: var(--todo); border-style: dashed; border-left-style: solid; }
+.node.ext  { border-left-color: var(--ext); }
 .node .t { font-weight: 600; display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
 .node .t .chip { font-size: 11px; padding: 0 8px; }
 .node p { margin: 4px 0 0; font-size: 13px; color: var(--muted); }
-.node code { font-size: 12px; background: var(--bg); padding: 0 4px; border-radius: 4px; word-break: break-all; }
+code { font-size: 12px; background: var(--bg); padding: 0 4px; border-radius: 4px; word-break: break-all; }
 .branch { font-size: 12px; color: var(--muted); margin: 10px 0 0; }
 .branch b { color: var(--ink); }
 
@@ -81,173 +89,177 @@ footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
 <body>
 <main>
 <h1>达人寄样流程现状</h1>
-<p class="sub">从达人发来消息到发货、跟进的每一步，以及每一步做到了什么程度。依据：仓库代码、handoff.md v26 和用户 10-25、10-26 的补充，2026-10-26。</p>
+<p class="sub">从达人发来消息到发货、跟进的每一步，以及每一步做到了什么程度。依据：<code>merge-edge</code> 分支的代码（已推到 duet）、handoff.md v36，2026-10-26。</p>
 
 <div class="legend">
   <span class="chip done">● 已实现（有测试）</span>
   <span class="chip part">● 部分实现 / 只有模拟</span>
   <span class="chip todo">● 未实现</span>
-  <span class="chip ext">● 等外部（账号、同事、真机）</span>
+  <span class="chip ext">● 等外部（同事、账号、真机）</span>
 </div>
 
 <div class="summary">
-  <div><b>能跑通的</b><p>在模拟模式下，从"达人说要样品"到"运营批准、生成运单号和要发给达人的消息"已经全程跑通。状态、审批记录都存进了数据库，每张单只会执行一次。</p></div>
-  <div><b>卡在外部的</b><p>聚水潭的真实接口、Mac 端接收 Windows 转发的消息、在真机上登录千帆联调小红书 CLI。这几项不到位，就只能用假数据跑。</p></div>
-  <div><b>还没做的</b><p>Mac 端接收转发、把 <code>claude -p</code> 接进流程、自动给达人发消息、查物流、发布跟进。</p></div>
+  <div><b>能跑通的</b><p>用同事的"假 Windows"测试：达人发消息 → Claude 起草 → 运营审核 → 经 Windows 发出、读回确认；收件信息齐了 → 审批单 → 批准 → 建单、绑佣金（模拟）→ 通知进待审批。起草的沙箱在这台 Mac 上用真实 Claude 跑过两次。</p></div>
+  <div><b>等外部的</b><p>和同事的 Windows 真机联调（第 7 步）；聚水潭真实接口（要账号）；小红书 CLI 在真实千帆上跑（要登录）；业务资料（寄样规则、商品、话术，还没定）。</p></div>
+  <div><b>还没做的</b><p>自动查物流、签收后跟进发布；Mac 这边的"夜里不主动发"等防封节奏还没接到新发送路径上；真实聚水潭的运单号回填；联调通过后删旧代码（第 8 步）。</p></div>
+</div>
+
+<div class="arch" aria-label="两台电脑怎么分工">
+  <div class="box"><b>Windows（同事的 webot，只收发）</b>
+    <ul>
+      <li>登录微信，只读名单里达人的私聊</li>
+      <li>解图片、语音转文字、取文件</li>
+      <li>按 Mac 的指令发消息，同一条只发一次</li>
+      <li>读回确认；认出运营亲手回复</li>
+      <li>名单以外的私聊不回（D24）</li>
+    </ul>
+  </div>
+  <div class="wire">
+    <span>达人消息 →</span>
+    <span>← 名单</span>
+    <span>← 请发这句</span>
+    <span>发出 / 读回 →</span>
+    <span>局域网 + 口令</span>
+  </div>
+  <div class="box"><b>Mac（我们，处理一切）</b>
+    <ul>
+      <li>不登录微信</li>
+      <li>Claude 在沙箱里起草，运营在控制台审核</li>
+      <li>审批单、聚水潭建单、小红书开佣金</li>
+      <li>名单、合作单、个人信息 90 天清理</li>
+      <li>Windows 出问题时控制台顶上提醒</li>
+    </ul>
+  </div>
 </div>
 
 <div class="flow">
 
 <!-- 1 -->
 <div class="step"><div class="rail"><span class="num part">1</span></div><div class="body">
-  <h2>收到达人的微信私聊 <span class="where">Windows 登录微信收发消息，Mac 负责处理</span></h2>
+  <h2>达人发微信，Windows 转给 Mac <span class="where">同事的 Windows 边缘 + 我们的 edge 后端</span></h2>
   <div class="nodes">
-    <div class="node ext"><div class="t">Windows 后端读私聊<span class="chip ext">等真机</span></div>
-      <p><code>wcdb_backend.py</code> 能读私聊，但要设 <code>PRIVATE_CHAT_ENABLED=true</code>。<code>PRIVATE_CHATS=*</code> 只读 wxid_ 开头的账号，老式微信号要单独列出来。达人流程还没在真机上跑过。</p></div>
-    <div class="node done"><div class="t">Windows 端转发消息<span class="chip done">同事已完成</span></div>
-      <p>Windows 把收到的消息发给 Mac，再把 Mac 给出的回复发回微信。</p></div>
-    <div class="node todo"><div class="t">Mac 端接收转发<span class="chip todo">未实现</span></div>
-      <p>Mac 上要开一个服务，接收 Windows 发来的消息，交给达人模块和 Claude 处理后，把回复返回给 Windows。要先拿到同事那边的消息格式和鉴权方式。</p></div>
-    <div class="node ext"><div class="t">Mac 本机登录微信<span class="chip ext">不需要</span></div>
-      <p>链路打通后，Mac 只处理消息，不登录微信。B25（Mac 后端不读私聊）和 B26（没有数据库密钥）就不用修了。</p></div>
+    <div class="node done"><div class="t">Windows 读名单里的私聊、转成事件<span class="chip done">同事已完成</span></div>
+      <p>同事 <code>wechat-edge</code> 分支（<code>PRM_EDGE=on</code>）。图片、文件在 Windows 取好，Mac 下载后再交给 Claude。</p></div>
+    <div class="node done"><div class="t">Mac 拉事件、推名单<span class="chip done">已实现</span></div>
+      <p><code>WECHAT_BACKEND=edge</code>：Mac 不登录微信，去 Windows 拉消息；连不上就退避重试；重启后从上次读到的地方接着读，不重复处理。</p></div>
+    <div class="node ext"><div class="t">Windows 真机<span class="chip ext">等联调</span></div>
+      <p>同事 10-26 用旧版 EXE 在真机上测过收消息、起草、发出：读回不到 1 秒；测出"长文字被当成图片、误判运营接管"的问题，已修好并合进来。新的只收发模式还没在真机上跑过。</p></div>
   </div>
 </div></div>
 
 <!-- 2 -->
 <div class="step"><div class="rail"><span class="num done">2</span></div><div class="body">
-  <h2>判断是不是达人</h2>
+  <h2>是不是名单里的达人</h2>
   <div class="nodes">
-    <div class="node done"><div class="t">达人名单（白名单）<span class="chip done">已实现</span></div>
-      <p>名单存在数据库里，在控制台「达人名单」页添加或停用。按 chat_id 判断，不看昵称（B10、B11）。</p></div>
-    <div class="node done"><div class="t">不是达人 → 普通聊天<span class="chip done">已实现</span></div>
-      <p>D13：名单以外的私聊照常交给原来的聊天模型回复（这是公司号）。</p></div>
+    <div class="node done"><div class="t">一份名单<span class="chip done">已实现</span></div>
+      <p>以「达人审批 → 达人名单」为准，合作单页登记或停用的也同步回来。名单变了 Mac 就推给 Windows，Windows 只转名单里的人。</p></div>
+    <div class="node done"><div class="t">名单以外的私聊<span class="chip done">不回</span></div>
+      <p>D24：Windows 不转、不自动回复，由人工处理。</p></div>
   </div>
 </div></div>
 
 <!-- 3 -->
 <div class="step"><div class="rail"><span class="num part">3</span></div><div class="body">
-  <h2>理解达人想干什么 <span class="where">现在用规则，接下来改用 Claude</span></h2>
+  <h2>Claude 起草回复 <span class="where">同事的起草沙箱，在这台 Mac 上</span></h2>
   <div class="nodes">
-    <div class="node done"><div class="t">规则识别<span class="chip done">已实现</span></div>
-      <p><code>extract.py</code> 用关键词和正则识别要样品的意图，提取商品、姓名、电话、地址和小红书账号。</p></div>
-    <div class="node done"><div class="t">用 Claude 理解、回复消息<span class="chip done">已实现（开关打开时）</span></div>
-      <p>设置 <code>INFLUENCER_BRAIN=claude</code> 后，每条消息交给 <code>claude -p</code>：带上最近 20 轮对话和业务资料，只能用我们的 4 个工具（查库存、提交寄样申请、查状态、转人工），Claude Code 自带的工具全部关掉。回复发出前由代码检查，有承诺发货、快递、审核结果、佣金数字或暴露 AI 身份的拦下转人工；Claude 出错、超时时退回规则流程。10-25 已用真实 <code>claude -p</code> 端到端跑通，每条 6–8 秒。</p></div>
+    <div class="node done"><div class="t">号码先换成占位符<span class="chip done">已实现</span></div>
+      <p>手机号、证件号变成〈手机1〉这种占位符才交给 Claude，发出前再换回来。</p></div>
+    <div class="node done"><div class="t">沙箱起草<span class="chip done">本机跑过</span></div>
+      <p>同事的 worker（<code>--kinds prm</code>）：只能读业务资料、只能改这位达人的案卷，不能运行命令、不能上网；结果按固定格式交回（回复、类型、已确认信息、建议阶段）。代理已写进 <code>~/.claude/settings.json</code>，双击启动也能用。</p></div>
+    <div class="node part"><div class="t">业务资料（kb/）<span class="chip part">等规则</span></div>
+      <p>寄样规则、可寄的商品、常见问答还没定，现在用的是同事的样例。资料里没有的，Claude 会写"我确认一下再回复"并提醒运营。</p></div>
   </div>
-  <p class="branch"><b>分支：不是要样品的消息</b>（闲聊、问发货、谈佣金）↓</p>
+  <p class="branch"><b>分支：达人要求提高佣金</b> ↓</p>
   <div class="nodes">
-    <div class="node done"><div class="t">转人工 + 回一句中性的话<span class="chip done">已实现</span></div>
-      <p>B20：消息记进控制台「待处理」，机器人回"我们核对一下再回复"，同一位达人 6 小时内最多回一次。</p></div>
-    <div class="node part"><div class="t">闲聊由 Claude 回复<span class="chip part">等业务资料</span></div>
-      <p>已经做好，回复范围受业务资料限制。资料按 <code>docs/influencer_knowledge.example.md</code> 填好放到 <code>data/influencer_knowledge.md</code>；没填之前，产品细节、价格、活动一律转人工。</p></div>
-    <div class="node done"><div class="t">谈佣金：代码固定回复<span class="chip done">已实现</span></div>
-      <p>佣金上限 25%。达人提到佣金并要求高一点，或者开出超过 25% 的数时，由代码回复用户定的固定话术，不交给 Claude 判断，审批单上的佣金不变；同时记进「待处理」。同一位达人 6 小时内再提，不重复回同一段话，只记待处理。</p></div>
+    <div class="node done"><div class="t">固定话术，等人审<span class="chip done">已实现</span></div>
+      <p>D22：佣金上限 25%。用户给的固定话术作为"系统消息"放进待审批，一定人审；同一位达人 6 小时内只放一条，同时记进「待处理」。</p></div>
   </div>
 </div></div>
 
 <!-- 4 -->
 <div class="step"><div class="rail"><span class="num done">4</span></div><div class="body">
-  <h2>补齐申请信息（多轮对话）</h2>
+  <h2>运营审核 <span class="where">控制台「待审批」页</span></h2>
   <div class="nodes">
-    <div class="node done"><div class="t">申请草稿<span class="chip done">已实现</span></div>
-      <p>缺什么就问什么：先问要哪款商品，再问收件人、电话、地址，最后问小红书主页。草稿存在数据库里，重启不会丢；放太久没动静的会作废。</p></div>
-    <div class="node done"><div class="t">后补小红书账号<span class="chip done">已实现</span></div>
-      <p>审批单已经提交后达人才发来主页的，会自动补到那张待审批单上。</p></div>
+    <div class="node done"><div class="t">发送 / 改了再发 / 不发<span class="chip done">已实现</span></div>
+      <p>D19：先人审。号码默认打码显示，看完整号码要点一下并留记录。</p></div>
+    <div class="node done"><div class="t">逐步自动<span class="chip done">已实现</span></div>
+      <p>某一类回复最近 20 条有 18 条原样发出、关键信息没改过，这一类以后自动发；钱和投诉永远人审；标"发错了"立刻退回人审。</p></div>
+    <div class="node done"><div class="t">没人处理先回"稍等"<span class="chip done">已实现</span></div>
+      <p>草稿放了 10 分钟没人处理，先回达人一句"收到，我确认一下马上回你"，每轮消息最多一次。</p></div>
+    <div class="node done"><div class="t">运营亲手回复 → 人工接管<span class="chip done">已实现</span></div>
+      <p>运营在微信里自己回了，Windows 认出来告诉 Mac：这位达人转人工 2 小时，等着的草稿作废；结束后下一份草稿会带上双方说过的话。</p></div>
   </div>
 </div></div>
 
 <!-- 5 -->
 <div class="step"><div class="rail"><span class="num part">5</span></div><div class="body">
-  <h2>查库存 <span class="where">聚水潭</span></h2>
+  <h2>经 Windows 发出 <span class="where">Mac 下指令，Windows 发</span></h2>
   <div class="nodes">
-    <div class="node done"><div class="t">查库存的流程<span class="chip done">已实现</span></div>
-      <p>换了商品就重新查；查询出错时转人工，不会乱回复。</p></div>
-    <div class="node ext"><div class="t">聚水潭真实接口<span class="chip ext">等账号</span></div>
-      <p><code>jst_erp.py</code> 目前只能在模拟模式下用；不开模拟时直接报错，不会假装成功（B6）。第 5 阶段要拿到真实账号再接。</p></div>
-    <div class="node done"><div class="t">缺货 → 告诉达人 + 通知运营<span class="chip done">已实现</span></div>
-      <p>B21：告诉达人暂时没货、可以换别的产品，同时在控制台「待处理」里提醒运营。</p></div>
+    <div class="node done"><div class="t">只发一次、读回确认<span class="chip done">已实现</span></div>
+      <p>每条有编号，重复提交也只发一次。Windows 读回后草稿标"已确认"；没发出去（失败、过期、不确定）的草稿改成"没发出去"并写原因。</p></div>
+    <div class="node part"><div class="t">防封节奏<span class="chip part">只有 Windows 那层</span></div>
+      <p>Windows 管账号级节奏（两条至少隔 3 秒、每小时最多 60 条）。Mac 这边原来的"像真人打字的等待、夜里不主动发"（<code>send_policy.py</code>）还没接到新的发送路径上；参数也还没定。</p></div>
   </div>
 </div></div>
 
 <!-- 6 -->
 <div class="step"><div class="rail"><span class="num part">6</span></div><div class="body">
-  <h2>查达人资质 <span class="where">小红书 CLI</span></h2>
+  <h2>收件信息齐了 → 生成审批单 <span class="where">合作单进「待寄出」时</span></h2>
   <div class="nodes">
-    <div class="node done"><div class="t">资质只标注、不自动拒绝<span class="chip done">已实现</span></div>
-      <p>D4、D16：门槛只看粉丝 ≥ 1 万（点赞查不到，由运营审批时复查），只在审批单上标出来，由运营决定。拿不到数据就写"待核实"，不编数字（B8）。</p></div>
-    <div class="node part"><div class="t">小红书 CLI<span class="chip part">已接上，待真机</span></div>
-      <p>同事 10-26 交付（千帆商家后台命令行工具）。查达人走买手搜索，能拿到粉丝数，查不到点赞，所以资质只看粉丝（D16）。还没对真实千帆跑过，要在运行 webot 的电脑上开调试 Chrome 并登录千帆。</p></div>
+    <div class="node done"><div class="t">从合作单生成审批单<span class="chip done">已实现</span></div>
+      <p>D26：Claude 建议进「待寄出」，或运营在合作单页改成「待寄出」时，用合作单上确认过的商品、收件人、手机、地址生成审批单。缺哪项就在合作单上提示；每位达人同时只有一张在等的单。</p></div>
+    <div class="node part"><div class="t">查库存（聚水潭）<span class="chip part">只有模拟</span></div>
+      <p>没库存就不生成，在合作单上提示，并记进「待处理」。真实接口要聚水潭账号。</p></div>
+    <div class="node part"><div class="t">查资质（小红书 CLI）<span class="chip part">待真机</span></div>
+      <p>D16：只看粉丝 ≥ 1 万，只标注不自动拒绝；点赞由运营审批时复查。要在真机上开调试 Chrome 登录千帆。</p></div>
   </div>
 </div></div>
 
 <!-- 7 -->
-<div class="step"><div class="rail"><span class="num done">7</span></div><div class="body">
-  <h2>生成审批单</h2>
+<div class="step"><div class="rail"><span class="num part">7</span></div><div class="body">
+  <h2>运营审批 → 建单、绑佣金 <span class="where">控制台「达人审批」页，批准后由代码执行</span></h2>
   <div class="nodes">
-    <div class="node done"><div class="t">审批单入库<span class="chip done">已实现</span></div>
-      <p>写明商品、库存、成本、佣金、收件信息、资质和不可撤销的后果。72 小时有效（D8）。回复达人"已提交审核"，不承诺发货时间（B1）。</p></div>
+    <div class="node done"><div class="t">审批页<span class="chip done">已实现</span></div>
+      <p>通过或驳回；可以补填小红书账号、把佣金调低（上限 25%）；每张单只执行一次，批准时重新查库存；执行到一半中断的可以人工核对后标记（B23）。</p></div>
+    <div class="node part"><div class="t">聚水潭建出库单<span class="chip part">只有模拟</span></div>
+      <p>真实聚水潭建单时大概率还没有运单号，要仓库打单后才有，到时要回填。</p></div>
+    <div class="node part"><div class="t">小红书开专属佣金（定向计划）<span class="chip part">待真机</span></div>
+      <p>指定这位达人、这款商品、这个佣金；计划名用审批单号，不会开两次。不发推广链接，达人在选品里自己能看到（D17）。</p></div>
   </div>
 </div></div>
 
 <!-- 8 -->
 <div class="step"><div class="rail"><span class="num done">8</span></div><div class="body">
-  <h2>运营审批 <span class="where">控制台「达人审批」页</span></h2>
+  <h2>通知达人 <span class="where">系统消息，进「待审批」</span></h2>
   <div class="nodes">
-    <div class="node done"><div class="t">审批页<span class="chip done">已实现</span></div>
-      <p>可以通过或驳回，可以补填、更正小红书账号和佣金（上限 25%，写死在代码里）。左栏角标显示有几件事等着处理，还有「今日概览」。</p></div>
-    <div class="node done"><div class="t">保证只执行一次<span class="chip done">已实现</span></div>
-      <p>用条件更新防止重复执行；批准时重新查一次库存；驳回或过期的单不能再执行（B2、B22）。</p></div>
-    <div class="node done"><div class="t">驳回 → 婉拒话术<span class="chip done">已实现</span></div>
-      <p>生成礼貌的婉拒消息，由运营复制后手动发送（按方案，驳回一直走手动）。</p></div>
+    <div class="node done"><div class="t">批准 / 驳回的通知等人审<span class="chip done">已实现</span></div>
+      <p>批准通知（带运单号、说明已开专属佣金）和驳回的婉拒话术，都作为系统消息放进待审批，审核后经 Windows 发出。审批卡上不再显示"复制"，免得发两遍。</p></div>
+    <div class="node done"><div class="t">运单号进合作单<span class="chip done">已实现</span></div>
+      <p>聚水潭给了运单号就直接记进合作单，阶段改成"已寄出"，不用运营再填。</p></div>
   </div>
 </div></div>
 
 <!-- 9 -->
 <div class="step"><div class="rail"><span class="num part">9</span></div><div class="body">
-  <h2>执行：建单 → 绑佣金 <span class="where">批准后由代码执行，不交给 Claude</span></h2>
+  <h2>发货、物流、签收 <span class="where">「合作单」页</span></h2>
   <div class="nodes">
-    <div class="node part"><div class="t">聚水潭建出库单<span class="chip part">只有模拟</span></div>
-      <p>执行顺序和失败处理都做好了，模拟模式会返回一个假的单号和运单号。<b>要核实：</b>真实的聚水潭建单时大概率还没有运单号，要等仓库打单后才有。</p></div>
-    <div class="node part"><div class="t">小红书绑专属佣金<span class="chip part">已接上，待真机</span></div>
-      <p>用千帆的"定向计划"：指定这位达人、这款商品、这个佣金，长期有效。计划名用审批单号，同一张单不会绑两次。千帆商品 ID 靠对照表 <code>data/xhs_items.json</code>；对照表里没有或达人账号是短链时，批准前就拦下，不建出库单。</p></div>
-    <div class="node done"><div class="t">推广链接<span class="chip done">不需要</span></div>
-      <p>D17：小红书 CLI 没有生成链接的命令。定向计划开好后，达人在小红书选品里自己就能看到这款商品和专属佣金，确认消息里告诉达人去选品里找。</p></div>
-    <div class="node done"><div class="t">执行失败 → 标记为失败<span class="chip done">已实现</span></div>
-      <p>保留已经建好的单号，提示运营去人工核对。</p></div>
-    <div class="node done"><div class="t">执行到一半中断<span class="chip done">已实现</span></div>
-      <p>B23：开始执行 10 分钟后还停在"执行中"的单，运营到聚水潭和小红书核对后，在审批卡上标成已执行（填出库单号）或失败（写核对结果）。</p></div>
+    <div class="node ext"><div class="t">打包、发货<span class="chip ext">仓库 / 聚水潭</span></div>
+      <p>不归我们的代码管。</p></div>
+    <div class="node done"><div class="t">手动填运单、更新物流<span class="chip done">已实现</span></div>
+      <p>运营在合作单页填运单号会生成发货通知草稿（单号由系统填，不让模型写）；可以改成运输中、已签收、物流异常。</p></div>
+    <div class="node todo"><div class="t">自动查物流<span class="chip todo">未实现</span></div>
+      <p>要先确认聚水潭能不能返回物流轨迹，不能的话接快递100之类的服务。</p></div>
   </div>
 </div></div>
 
 <!-- 10 -->
-<div class="step"><div class="rail"><span class="num part">10</span></div><div class="body">
-  <h2>通知达人"已安排发货"</h2>
-  <div class="nodes">
-    <div class="node done"><div class="t">生成要发的消息<span class="chip done">已实现</span></div>
-      <p>审批卡上显示消息原文：批准前是预览，执行后带上运单号。目前由运营复制后手动发送（D9）。</p></div>
-    <div class="node todo"><div class="t">自动发送<span class="chip todo">未实现</span></div>
-      <p>B15，方案已经定了：机器人在运行就自动发，没在运行就退回手动复制。</p></div>
-  </div>
-</div></div>
-
-<!-- 11 -->
-<div class="step"><div class="rail"><span class="num todo">11</span></div><div class="body">
-  <h2>仓库打包发货 → 达人问物流</h2>
-  <div class="nodes">
-    <div class="node ext"><div class="t">打包、发货<span class="chip ext">仓库 / 聚水潭</span></div>
-      <p>不归我们的代码管，由仓库在聚水潭里完成。</p></div>
-    <div class="node part"><div class="t">查物流工具<span class="chip part">只有运单号</span></div>
-      <p>达人问"到哪了"时，Claude 调用 get_request_status，能拿到申请状态、运单号和推广链接。物流轨迹还查不到：要先确认聚水潭能不能返回，不能的话就接快递100之类的服务。</p></div>
-    <div class="node todo"><div class="t">主动跟进物流<span class="chip todo">未实现</span></div>
-      <p>B13 的物流跟进部分：定时任务从来没启动过，等聚水潭接入后再做。</p></div>
-  </div>
-</div></div>
-
-<!-- 12 -->
-<div class="step"><div class="rail"><span class="num todo">12</span></div><div class="body">
+<div class="step"><div class="rail"><span class="num todo">10</span></div><div class="body">
   <h2>签收后跟进发布</h2>
   <div class="nodes">
-    <div class="node todo"><div class="t">提醒达人发笔记、记录发布情况<span class="chip todo">未实现</span></div>
-      <p>主流程第 7 步的一部分，还没设计。</p></div>
+    <div class="node part"><div class="t">合作单阶段<span class="chip part">只能手动</span></div>
+      <p>合作单有"素材已发、初稿已交、修改中、已发布、结案"这些阶段，运营手动改；Claude 也会建议阶段。</p></div>
+    <div class="node todo"><div class="t">主动提醒发笔记<span class="chip todo">未实现</span></div>
+      <p>还没设计。</p></div>
   </div>
 </div></div>
 
@@ -257,30 +269,29 @@ footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
 <h2>贯穿全流程的保障</h2>
 <div class="tablewrap"><table>
 <tr><th>事项</th><th>状态</th><th>说明</th></tr>
-<tr><td>数据持久化</td><td><span class="chip done">已实现</span></td><td>名单、草稿、审批单、操作记录和待处理事项共 5 张表，和机器人共用 <code>data/messages.db</code>。</td></tr>
-<tr><td>个人信息到期清除</td><td><span class="chip done">已实现</span></td><td>D10：审批单处理完 90 天后，清除姓名、电话、地址和原话记录。</td></tr>
-<tr><td>日志打码</td><td><span class="chip done">已实现</span></td><td>B14：全项目检查过，日志和追踪文件里的电话、地址、收件人姓名都先打码。原项目消息表里的达人消息原文和由它们整理出的记忆，也按 90 天清除（D15）。</td></tr>
+<tr><td>个人信息清理</td><td><span class="chip done">已实现</span></td><td>D27：一条规则，签收满 90 天或 90 天没有任何动静就清（地址只留省市、号码只留打码的），聊天记录、草稿、案卷、审批单一起清；清理后达人又来，重新计时。</td></tr>
+<tr><td>日志打码</td><td><span class="chip done">已实现</span></td><td>B14：日志和追踪文件里的电话、地址、收件人姓名都先打码。</td></tr>
+<tr><td>起草沙箱</td><td><span class="chip done">已实现</span></td><td>D25：用同事的 worker，一行不复制；Mac 上的中转只给本机用（配置检查拦着不让开到局域网）。</td></tr>
+<tr><td>Windows 出问题提醒</td><td><span class="chip done">已实现</span></td><td>连不上 Windows、微信掉线、读不了数据库、连续发不出去时，控制台每页顶上提醒；Mac 端不显示用不上的「微信连接」页。</td></tr>
 <tr><td>寄样上限</td><td><span class="chip part">机制已做，数字待定</span></td><td>D5：每位达人多少天内最多几单、每天一共最多几单。超过上限的单不能通过；数字没定，现在不限。</td></tr>
-<tr><td>防封规则</td><td><span class="chip part">机制已做，参数待定</span></td><td>回复前按字数等 2–6 秒左右；主动发的消息两条至少隔 30 秒、每小时最多 20 条、23 点到 8 点不发。都是先定的保守默认值。</td></tr>
-<tr><td>调用 Claude</td><td><span class="chip done">已跑通</span></td><td>10-25 本机调用 <code>claude -p</code> 已能回复消息。</td></tr>
+<tr><td>防封规则</td><td><span class="chip part">只有 Windows 那层</span></td><td>见第 5 步。</td></tr>
 </table></div>
 </section>
 
 <section class="side">
-<h2>建议的下一步</h2>
+<h2>接下来</h2>
 <div class="tablewrap"><table>
 <tr><th>顺序</th><th>做什么</th><th>依赖</th></tr>
-<tr><td>1</td><td>B23：执行到一半中断的审批单，在控制台上给出"人工核对后标记"的入口</td><td>已完成</td></tr>
-<tr><td>2</td><td>谈佣金：识别到要求提佣金时，回复固定话术并记进「待处理」</td><td>已完成</td></tr>
-<tr><td>3</td><td>推广链接：后台调用、保存、显示、写进通知消息</td><td>已完成，命令格式要和同事确认</td></tr>
-<tr><td>4</td><td>把查库存、提交审批单、查物流做成工具（MCP），供 Claude 调用</td><td>已完成（物流轨迹待接）</td></tr>
-<tr><td>5</td><td>Mac 端接收服务：收 Windows 转发的消息，交给达人模块和 <code>claude -p</code>，返回回复</td><td>同事的消息格式、业务资料</td></tr>
-<tr><td>6</td><td>自动给达人发确认消息（B15），经 Windows 发出</td><td>防封规则、第 5 项</td></tr>
-<tr><td>7</td><td>接聚水潭真实接口、小红书 CLI，联调验证</td><td>聚水潭账号；小红书 CLI 已交付，要在真机上登录千帆联调</td></tr>
+<tr><td>1</td><td>和同事真机联调（计划第 7 步）：Windows 打包只收发版，Mac 配 <code>EDGE_URL</code> 和口令，按顺序测收消息、起草、审核发出、读回、接管、寄样审批</td><td>同事</td></tr>
+<tr><td>2</td><td>业务资料：寄样规则、可寄商品、常见问答、话术</td><td>用户定规则</td></tr>
+<tr><td>3</td><td>把 Mac 这边的防封节奏接到新的发送路径上</td><td>防封参数</td></tr>
+<tr><td>4</td><td>聚水潭真实接口、运单号回填；小红书 CLI 在真实千帆上跑</td><td>聚水潭账号；千帆登录</td></tr>
+<tr><td>5</td><td>联调通过后删掉不再用的旧代码（计划第 8 步）：名单里的达人已不走旧的规则流程和 <code>claude_brain</code> 直接回复</td><td>第 1 项</td></tr>
+<tr><td>6</td><td>自动查物流、签收后跟进发布</td><td>聚水潭</td></tr>
 </table></div>
 </section>
 
-<footer>本地文件，不上传。要更新时，对照 handoff.md 第 3、5 节改这一页。</footer>
+<footer>本地文件，不上传。要更新时，对照 handoff.md 第 3、5、6、9 节改这一页。</footer>
 </main>
 </body>
 </html>
