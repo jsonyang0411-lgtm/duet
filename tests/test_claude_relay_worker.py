@@ -260,8 +260,23 @@ def test_a_second_worker_exits_without_serving(worker, bot, fake_claude, tmp_pat
     monkeypatch.delenv("RELAY_TOKEN", raising=False)
     held = worker.single_instance()
     monkeypatch.setattr(worker, "serve", lambda *a, **k: pytest.fail("a second worker must not serve"))
+    monkeypatch.setattr(worker, "LOCK_WAIT_SEC", 0.3)               # it waited for the lock, in vain
     assert worker.main(["--config", str(cfg)]) == 0
     release(held)
+
+
+def test_a_restarted_worker_waits_for_the_old_one_to_let_go(worker):
+    import threading
+    import time
+    held = worker.single_instance(("prm",))
+    threading.Timer(0.4, lambda: release(held)).start()            # the old worker ends its long poll
+    started = time.monotonic()
+    handles = worker.wait_for_locks(("prm",), wait=10, poll=0.05)
+    assert handles is not None and 0.3 < time.monotonic() - started < 5
+    release(handles)
+    still = worker.single_instance(("prm",))
+    assert worker.wait_for_locks(("prm",), wait=0.3, poll=0.05) is None   # really another worker
+    release(still)
 
 
 def test_stay_awake_lasts_as_long_as_the_worker(worker, monkeypatch):

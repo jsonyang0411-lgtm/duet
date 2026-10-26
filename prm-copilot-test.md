@@ -56,6 +56,7 @@
   期望：
   - 有一行 `bot http://192.168.9.155:8790: ok (job kinds: admin,prm)`。如果写的是 `older than job kinds`，说明 Windows 还没换成新版。
   - 有一行 `kinds: prm; locks: worker-prm.lock`。
+  - 有一行 `prm jobs' proxy: …`。这台 Mac 靠代理连 Claude，所以应该显示 `~/.claude/settings.json` 里的代理（比如 `HTTP_PROXY=http://127.0.0.1:7897`）。写的是 `none` 的话，草稿任务会报 `403 Request not allowed`。
 - [ ] **Windows**：「待审批」页上方**没有**黄色提示「Mac 还没表示能写草稿」。
 - [ ] **cc 照常**：管理员号给机器人发 `只回复：收到`。期望：和以前一样收到回执和「#N 完成 … 收到」。草稿 worker 不会抢 cc 任务。
 
