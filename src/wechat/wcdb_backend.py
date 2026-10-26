@@ -119,7 +119,7 @@ def _decompress_zstd_hex(text: str) -> str:
         import zstandard as zstd
     except Exception:
         logger.warning(
-            "zstandard is not installed; cannot decode WeChat quote message"
+            "zstandard is not installed; cannot decode a compressed WeChat message"
         )
         return ""
     try:
@@ -1438,6 +1438,12 @@ class WcdbBackend(AbstractWeChatBackend):
         content = str(msg.get("message_content", msg.get("content", ""))).strip()
         local_type = _message_local_type(msg)
         msg_subtype = _message_subtype(msg)
+        if local_type == 1:
+            # WeChat 4 keeps a longer text zstd compressed and hex encoded (28b52ffd…): it is the
+            # text, not a picture blob (a sent line read back must match itself, a long task too).
+            unpacked = _decompress_zstd_hex(content)
+            if unpacked:
+                content = unpacked
         media_kind = ""
         media_path = ""
         media_base_dir = ""

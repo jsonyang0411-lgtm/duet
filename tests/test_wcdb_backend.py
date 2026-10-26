@@ -60,6 +60,27 @@ class WcdbBackendStandardizeTests(unittest.TestCase):
         self.assertEqual(standardized["msg_type"], 3)
         self.assertEqual(standardized["server_id"], "")
 
+    def test_a_long_text_wechat_keeps_compressed_is_text_not_a_picture(self):
+        # WeChat 4 stores a longer text zstd compressed and hex encoded (seen on Windows,
+        # 2026-10-26: a 124-character line read back as "[图片]").
+        text = "好的～帮你核对一下收件信息：收件人测试，电话 13800001234，地址上海市浦东新区测试路1号2栋301。没问题回我一下哦～" * 2
+        backend = self.make_backend()
+        for talker, raw in (("wxid_friend", text), ("room1@chatroom", "wxid_user:\n" + text)):
+            packed = zstd.ZstdCompressor().compress(raw.encode("utf-8")).hex()
+            self.assertTrue(packed.startswith("28b52ffd"))
+            standardized = backend._standardize(
+                {"sender_username": "wxid_user", "message_content": packed, "local_type": 1,
+                 "create_time": int(time.time()), "local_id": f"z-{talker}"},
+                "测试群", talker, is_group=talker.endswith("@chatroom"))
+            self.assertEqual(standardized["content"], text)
+            self.assertEqual(standardized["msg_type"], 1)
+            self.assertEqual(standardized["media_kind"], "")
+        blob = "0a1b" * 30                                     # a raw media payload is still a picture
+        standardized = backend._standardize(
+            {"sender_username": "wxid_user", "message_content": blob, "local_type": 1,
+             "create_time": int(time.time()), "local_id": "b1"}, "测试群", "wxid_friend", is_group=False)
+        self.assertEqual((standardized["content"], standardized["msg_type"]), ("[图片]", 3))
+
     def test_yang_yujing_target_group_uses_full_feed_burst_rules(self):
         backend = WcdbBackend(
             bot_display_name="林小满",
