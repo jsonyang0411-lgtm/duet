@@ -39,7 +39,6 @@ STATUS_FILTERS = {
 }
 
 TRACKING_PLACEHOLDER = "〔运单号〕"
-LINK_PLACEHOLDER = "〔推广链接〕"
 
 
 def handle(
@@ -142,7 +141,7 @@ def packet_json(
         # 寄样上限（D5）：超了就在审批卡上标出来，「通过」按钮不能点
         data["limit_problem"] = sample_limit_problem(store, packet)
     if packet.status == GateStatus.PENDING:
-        data["notice"] = approval_notice(replace(packet, tracking_number=TRACKING_PLACEHOLDER, product_link=LINK_PLACEHOLDER))
+        data["notice"] = approval_notice(replace(packet, tracking_number=TRACKING_PLACEHOLDER))
     elif packet.status == GateStatus.FULFILLED:
         data["notice"] = approval_notice(packet)
     elif packet.status == GateStatus.REJECTED:
@@ -196,7 +195,6 @@ def resolve_interrupted(store: InfluencerStore, packet_id: str, body: Dict[str, 
         order_sn=str(body.get("order_sn") or ""),
         tracking_number=str(body.get("tracking_number") or ""),
         commission_plan=str(body.get("commission_plan") or ""),
-        product_link=str(body.get("product_link") or ""),
         note=str(body.get("note") or ""),
         source=SOURCE_CONSOLE,
     )

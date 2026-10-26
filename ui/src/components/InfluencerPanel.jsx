@@ -234,7 +234,6 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
         : { packet_id: p.packet_id, action, reason: reason.trim() }
       const d = await post('/api/influencer/approvals/action', body)
       toast.ok(action === 'approve' ? `已执行：出库单 ${d.order_sn}。记得把消息复制给达人` : '已驳回。记得把婉拒话术复制给达人', { ms: 6000 })
-      if (d.warning) toast.err(d.warning, { ms: 10000 })
     } catch (e) {
       toast.err(e.message)
     } finally {
@@ -302,7 +301,7 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
         <div style={{ marginTop: 12 }}>
           <Note kind="cy">
             批准后：在聚水潭建出库单（扣库存、出运单），在小红书给 <b>{xhs.trim() || '（先填小红书账号）'}</b> 绑定
-            <b> {rateOk ? `${rate}%` : '—'} </b>的专属佣金，并生成商品推广链接。出库单建了就撤不回。
+            <b> {rateOk ? `${rate}%` : '—'} </b>的专属佣金（达人在小红书选品里自己就能看到）。出库单建了就撤不回。
           </Note>
         </div>
       )}
@@ -311,9 +310,6 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
         <div style={{ marginTop: 12 }}>
           <Note kind="ok">
             出库单 <b className="mono">{p.order_sn}</b> · 运单 <b className="mono">{p.tracking_number || '—'}</b> · 佣金计划 <span className="mono">{p.commission_plan || '—'}</span>
-            <br />推广链接 {p.product_link
-              ? <a className="link mono" href={p.product_link} target="_blank" rel="noreferrer">{p.product_link}</a>
-              : <span>没有生成，需要到小红书手动生成后发给达人</span>}
           </Note>
         </div>
       )}
@@ -354,7 +350,7 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
           <p>马上执行以下操作，出库单建了就撤不回：</p>
           <ul className="gate-steps">
             <li>聚水潭：给 {p.recipient_name}（{p.recipient_phone}）建【{p.requested_product}】样品出库单</li>
-            <li>小红书：给 <span className="mono">{xhs.trim()}</span> 绑定 {rate}% 专属佣金，生成商品推广链接</li>
+            <li>小红书：给 <span className="mono">{xhs.trim()}</span> 绑定 {rate}% 专属佣金</li>
           </ul>
         </Confirm>
       )}
@@ -383,7 +379,6 @@ function InterruptedExecution({ packet: p, onChanged }) {
   const [orderSn, setOrderSn] = useState('')
   const [tracking, setTracking] = useState('')
   const [plan, setPlan] = useState('')
-  const [link, setLink] = useState('')
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -401,7 +396,7 @@ function InterruptedExecution({ packet: p, onChanged }) {
     try {
       await post('/api/influencer/approvals/action', {
         packet_id: p.packet_id, action: 'resolve', outcome,
-        order_sn: orderSn, tracking_number: tracking, commission_plan: plan, product_link: link, note,
+        order_sn: orderSn, tracking_number: tracking, commission_plan: plan, note,
       })
       toast.ok(fulfilled ? '已标成已执行。记得把确认消息复制给达人' : '已标成失败', { ms: 6000 })
       setOutcome(null)
@@ -445,9 +440,6 @@ function InterruptedExecution({ packet: p, onChanged }) {
               </Field>
               <Field label="佣金计划" hint="小红书里的计划编号，可以不填">
                 <TextInput mono value={plan} onChange={setPlan} aria-label="佣金计划" />
-              </Field>
-              <Field label="推广链接" hint="小红书里给这位达人生成的链接，没有就先空着">
-                <TextInput mono value={link} onChange={setLink} aria-label="推广链接" />
               </Field>
               <Field label="备注" hint="可以不填">
                 <TextArea value={note} onChange={setNote} rows={2} aria-label="备注" />

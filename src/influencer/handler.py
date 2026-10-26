@@ -80,10 +80,12 @@ def approval_notice(packet: ApprovalActionPacket) -> str:
         f"快递单号：{packet.tracking_number}，" if packet.tracking_number
         else "快递单号出来后我们再发给老师，"
     )
-    link = f"\n老师的专属推广链接：{packet.product_link}" if packet.product_link else ""
+    # 不发推广链接：定向计划开好以后，达人在小红书的选品里自己就能看到这款商品和专属佣金（D17）
     return (
         f"老师好~ 【{packet.requested_product}】的样品已经安排寄出啦 📦\n"
-        f"{tracking}请老师留意查收哦~ 收到后有任何问题随时找我们！{link}"
+        f"{tracking}请老师留意查收哦~\n"
+        f"另外已经为老师开通了【{packet.requested_product}】的专属佣金，老师在小红书的选品里就能找到这款商品~ "
+        "收到后有任何问题随时找我们！"
     )
 
 
@@ -377,7 +379,6 @@ class InfluencerBusinessHandler:
             shipping_address=draft.shipping_address,
             what_cannot_be_undone=(
                 f"聚水潭ERP将自动扣减库存并出具打单运单，小红书将绑定 {DEFAULT_COMMISSION_RATE:.0%} 专属定向计划"
-                "并生成商品推广链接"
             ),
             qualification=self.assess_qualification(profile),
             recipient_name=draft.recipient_name,
@@ -522,53 +523,24 @@ class InfluencerBusinessHandler:
             )
 
         commission_plan = str(comm_res.get("plan_id") or "")
-
-        # 推广链接最后生成。出库单和佣金都已经成了，链接没生成不算执行失败：
-        # 审批单照样算已执行，确认消息里不带链接，记一条操作记录让运营到小红书手动生成
-        product_link, link_problem = await self._create_product_link(packet)
-
         self.store.transition(
             packet_id, GateStatus.EXECUTING, GateStatus.FULFILLED,
             order_sn=order_sn, tracking_number=tracking_number, commission_plan=commission_plan,
-            product_link=product_link,
         )
         self.store.add_event(
             "执行成功", packet_id=packet_id, chat_id=packet.influencer_id,
             detail=f"出库单 {order_sn}，佣金 {packet.proposed_commission_rate:.0%}", source=source,
         )
-        if link_problem:
-            self.store.add_event(
-                "推广链接没有生成", packet_id=packet_id, chat_id=packet.influencer_id,
-                detail=f"{link_problem}，需要到小红书手动生成后发给达人", source=source,
-            )
         packet.tracking_number = tracking_number
-        packet.product_link = product_link
-        result = {
+        return {
             "success": True,
             "packet_id": packet_id,
             "order_sn": order_sn,
             "tracking_number": tracking_number,
             "commission_plan": commission_plan,
-            "product_link": product_link,
             "message": "已成功下发聚水潭打单，并设置小红书定向佣金！",
             "notice": approval_notice(packet),
         }
-        if link_problem:
-            result["warning"] = f"推广链接没有生成：{link_problem}。确认消息里没带链接，需要到小红书手动生成"
-        return result
-
-    async def _create_product_link(self, packet: ApprovalActionPacket) -> tuple:
-        """返回 (链接, 没生成的原因)。成功时原因是空字符串。"""
-        try:
-            res = await self.xhs.create_product_link(
-                xhs_uid=packet.xhs_account, sku_id=packet.sku_id, idempotency_key=packet.packet_id,
-            )
-        except Exception as exc:
-            return "", str(exc)
-        link = str(res.get("link") or "").strip()
-        if not res.get("success") or not link:
-            return "", str(res.get("error") or "小红书 CLI 没有返回链接")
-        return link, ""
 
     def resolve_interrupted_execution(
         self,
@@ -578,7 +550,6 @@ class InfluencerBusinessHandler:
         order_sn: str = "",
         tracking_number: str = "",
         commission_plan: str = "",
-        product_link: str = "",
         note: str = "",
         source: str = SOURCE_CONSOLE,
         now: Optional[float] = None,
@@ -608,7 +579,7 @@ class InfluencerBusinessHandler:
                 ),
             }
         order_sn, tracking_number = order_sn.strip(), tracking_number.strip()
-        commission_plan, product_link, note = commission_plan.strip(), product_link.strip(), note.strip()
+        commission_plan, note = commission_plan.strip(), note.strip()
 
         if fulfilled:
             if not order_sn:
@@ -616,14 +587,14 @@ class InfluencerBusinessHandler:
             if not self.store.transition(
                 packet_id, GateStatus.EXECUTING, GateStatus.FULFILLED,
                 order_sn=order_sn, tracking_number=tracking_number, commission_plan=commission_plan,
-                product_link=product_link, handled_at=now,
+                handled_at=now,
             ):
                 return {"success": False, "error": f"审批单 {packet_id} 的状态刚刚变了，请刷新后再看"}
             detail = f"出库单 {order_sn}" + (f"；{note}" if note else "")
             self.store.add_event(
                 "人工核对：已执行", packet_id=packet_id, chat_id=packet.influencer_id, detail=detail, source=source,
             )
-            packet.tracking_number, packet.product_link = tracking_number, product_link
+            packet.tracking_number = tracking_number
             return {"success": True, "packet_id": packet_id, "order_sn": order_sn, "notice": approval_notice(packet)}
 
         if not note:

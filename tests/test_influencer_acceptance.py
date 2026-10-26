@@ -66,7 +66,6 @@ class FakeXHS:
         self.stats = {"follower_count": 35000, "recent_highest_likes": 3200} if stats is None else stats
         self.stats_calls = []
         self.commission_calls = []
-        self.link_calls = []
 
     async def get_creator_stats(self, xhs_uid):
         self.stats_calls.append(xhs_uid)
@@ -75,10 +74,6 @@ class FakeXHS:
     async def set_exclusive_commission(self, **kwargs):
         self.commission_calls.append(kwargs)
         return {"success": True, "plan_id": f"PLAN-{len(self.commission_calls)}"}
-
-    async def create_product_link(self, **kwargs):
-        self.link_calls.append(kwargs)
-        return {"success": True, "link": f"https://xhslink.com/test/{kwargs['idempotency_key']}"}
 
 
 def run(coro):

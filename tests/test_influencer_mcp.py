@@ -107,14 +107,13 @@ def test_status_shows_only_this_influencers_requests_and_no_recipient_details():
     tools = make_tools()
     tools.store.add_approval(
         make_packet("GATE-MINE", chat_id=INFLUENCER, expires_at=NEXT_YEAR,
-                    status=GateStatus.FULFILLED, tracking_number="SF777", product_link="https://xhslink.com/x"),
+                    status=GateStatus.FULFILLED, tracking_number="SF777"),
         source=SOURCE_BOT,
     )
     tools.store.add_approval(make_packet("GATE-OTHER", chat_id="wxid_other", expires_at=NEXT_YEAR), source=SOURCE_BOT)
     data, _ = call(tools, "get_request_status")
     assert [r["packet_id"] for r in data["requests"]] == ["GATE-MINE"]
     assert data["requests"][0]["tracking_number"] == "SF777"
-    assert data["requests"][0]["product_link"] == "https://xhslink.com/x"
     text = json.dumps(data, ensure_ascii=False)
     assert PHONE not in text and "世纪大道" not in text
 

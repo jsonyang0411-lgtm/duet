@@ -80,7 +80,6 @@ CREATE TABLE IF NOT EXISTS influencer_approvals (
     order_sn                 TEXT    NOT NULL DEFAULT '',
     tracking_number          TEXT    NOT NULL DEFAULT '',
     commission_plan          TEXT    NOT NULL DEFAULT '',
-    product_link             TEXT    NOT NULL DEFAULT '',
     handled_at               REAL,
     personal_info_cleared_at REAL
 );
@@ -158,11 +157,6 @@ INBOX_MESSAGE = "message"
 INBOX_OUT_OF_STOCK = "out_of_stock"
 INBOX_COMMISSION = "commission"  # 达人要求提高佣金，机器人回了固定话术
 
-# 表建好以后才加的列。CREATE TABLE IF NOT EXISTS 不会给已有的表加列，所以启动时补上
-_ADDED_COLUMNS = (
-    ("influencer_approvals", "product_link", "TEXT NOT NULL DEFAULT ''"),
-)
-
 _PACKET_COLUMNS = tuple(f.name for f in fields(ApprovalActionPacket))
 _DRAFT_FIELDS = frozenset(f.name for f in fields(SampleRequestDraft))
 
@@ -196,10 +190,6 @@ class InfluencerStore:
         self._shared_lock = threading.RLock()
         with self._connect() as conn:
             conn.executescript(SCHEMA_SQL)
-            for table, column, definition in _ADDED_COLUMNS:
-                existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-                if column not in existing:
-                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:

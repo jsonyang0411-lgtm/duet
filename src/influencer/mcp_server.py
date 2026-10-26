@@ -6,7 +6,7 @@
 - submit_sample_request：信息齐了提交寄样申请，生成审批单，等运营在控制台批准（R2）
 - get_request_status：这位达人的申请和物流状态（运单号）
 - hand_over_to_operator：拿不准的事交给运营
-建单、绑佣金、生成推广链接只在运营批准后由代码执行；佣金上限写死在代码里，也没有改佣金的工具。
+建单、绑佣金只在运营批准后由代码执行；佣金上限写死在代码里，也没有改佣金的工具。
 
 启动：python -m src.influencer.mcp_server --chat-id <达人 chat_id> --db <数据库路径> [--nickname <昵称>]
 给 claude -p 用的配置见 mcp_config()；允许的工具名见 ALLOWED_TOOLS。
@@ -121,7 +121,7 @@ class InfluencerTools:
         }
 
     def get_request_status(self) -> Dict[str, Any]:
-        """这位达人最近的申请：状态、运单号、推广链接。不给收件信息和驳回原因。"""
+        """这位达人最近的申请：状态、运单号。不给收件信息和驳回原因。"""
         packets = [p for p in self.store.list_approvals(None) if p.influencer_id == self.chat_id][:5]
         items = []
         for p in packets:
@@ -132,8 +132,6 @@ class InfluencerTools:
             }
             if p.status == GateStatus.FULFILLED:
                 item["tracking_number"] = p.tracking_number or "运单号还没出来"
-                if p.product_link:
-                    item["product_link"] = p.product_link
             items.append(item)
         return {
             "requests": items,
