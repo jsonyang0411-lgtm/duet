@@ -41,20 +41,21 @@ def invite_result(outcome="PREVIEW", *, status=1, blocked="", unlocated=False, e
                    "the creator receives it at once and it cannot be taken back")
     else:
         detail = "the platform acknowledged this target with no reported error, and a re-read shows the requested value"
-    button = {1: "邀约带货", 2: "继续沟通", 3: "继续沟通", 99: "邀约带货 (disabled)"}[status]
+    button = {1: "邀约带货", 2: "继续沟通 · 待回复", 3: "继续沟通 · 达人已拒绝", 99: "邀约带货 (disabled)"}[status]
+    gate_type = 4 if remaining is not None else -1
     row = {"targetKind": "aweme_id", "targetId": DOUYIN, "outcome": outcome, "detail": detail,
-           "currentValue": f"{button} (status {status})", "desiredValue": "invited", "unlocated": unlocated,
+           "currentValue": f"{button} (status {status}); gate {gate_type}", "desiredValue": "invited", "unlocated": unlocated,
            "blocked": bool(blocked)}
     if outcome == "VERIFIED_SUCCESS":
-        row["observedValue"] = "invited (继续沟通 (status 2))"
+        row["observedValue"] = "invited (继续沟通 · 待回复 (status 2))"
     elif executed:
-        row["observedValue"] = "not shown as invited: 继续沟通 (status 2)"
+        row["observedValue"] = "not shown as invited: 继续沟通 · 待回复 (status 2)"
     out = {"site": "buyin", "command": "author-invite", "executed": executed,
            "overall": "VERIFIED" if outcome == "VERIFIED_SUCCESS" else "UNCERTAIN" if executed else "PREVIEW_ONLY",
            "platformWrites": int(executed), "items": [row], "restore": [], "creator": {"awemeId": DOUYIN, "nickname": "测试达人昵称"},
            "transport": {"kind": "page", "pageSignature": True, "platformRequests": 7}}
     if not unlocated:
-        out["gate"] = {"popwindowType": 4 if remaining is not None else -1,
+        out["gate"] = {"popwindowType": gate_type,
                        "popwindow": "PopRemainTimes" if remaining is not None else "NoPopWindow",
                        "connectionType": 1, "isPassed": True, "needStrongTemplate": False, "remaining": remaining}
         out["statusBefore"] = {"status": status, "button": f"{button} (status {status})"}
@@ -281,6 +282,13 @@ def test_a_contact_in_the_wrong_format_is_said_not_silently_dropped(node):
     assert cfg["dy_invite_invalid"] == ["dy_invite_phone", "dy_invite_wechat"]
     block = platforms.preview(INVITE, cfg, catalog=catalog())
     assert block["verdict"] == "unavailable" and "填了但格式不对：dy_invite_phone、dy_invite_wechat" in " ".join(block["problems"])
+    # one of the two in the wrong format is not dropped silently: the preview and the execution stop until it is fixed
+    half = platforms.config(node.settings(dy_invite_phone="1234", dy_invite_wechat=WECHAT))
+    assert half["dy_invite_wechat"] == WECHAT and half["dy_invite_invalid"] == ["dy_invite_phone"]
+    stopped = platforms.preview(INVITE, half, catalog=catalog())
+    assert stopped["verdict"] == "unavailable" and "dy_invite_phone 填了但格式不对" in " ".join(stopped["problems"])
+    out = platforms.execute(INVITE, half, plan=PLAN, key="9" * 32, ledger=node.root / "ledger", catalog=catalog())
+    assert out["outcome"] == "NOT_RUN" and node.calls() == []
 
 
 def test_the_text_is_counted_as_the_page_counts_it():

@@ -970,6 +970,17 @@ NO_INVITE_CONTACT = ("这台 Mac 没配邀约卡片上给达人看的联系方�
 def _no_contact(cfg: dict) -> str:
     bad = cfg.get("dy_invite_invalid") or []
     return NO_INVITE_CONTACT + (f"（填了但格式不对：{'、'.join(bad)}）" if bad else "")
+
+
+def _contact_problem(cfg: dict) -> str:
+    """Why the card's contact cannot go as configured ("" = it can): none set, or one set in the wrong format (it would be dropped)."""
+    if not (cfg.get("dy_invite_phone") or cfg.get("dy_invite_wechat")):
+        return _no_contact(cfg)
+    bad = cfg.get("dy_invite_invalid") or []
+    if bad:
+        return (f"config.json 的 platforms 里 {'、'.join(bad)} 填了但格式不对（手机号 11 位、第二位 2–9；微信号 6–20 位字母数字 _ -，不以数字开头），"
+                "照现在的配置它会被丢掉、卡片上缺这一项：改好再预览")
+    return ""
 _LINK_HOSTS = {"dy": (".jinritemai.com", ".douyin.com", ".snssdk.com"),
                "xhs": (".xiaohongshu.com", ".xhslink.com")}
 
@@ -1178,10 +1189,11 @@ def _preview_dy_channel_goods(action: dict, cfg: dict, run_one, block: dict) -> 
 
 
 def _preview_dy_invite(action: dict, cfg: dict, run_one, block: dict) -> None:
-    if not (cfg.get("dy_invite_phone") or cfg.get("dy_invite_wechat")):
+    contact = _contact_problem(cfg)
+    if contact:
         block["steps"].append({"name": "invite", "label": DY_STEPS["invite"][0], "execute": False, "command": "",
                                "exit_code": None, "seconds": 0, "verdict": "unavailable", "outcome": "",
-                               "problems": [_no_contact(cfg)], "facts": [], "raw": ""})
+                               "problems": [contact], "facts": [], "raw": ""})
         return
     rec, data = _dy_preview(cfg, "invite", action, run_one)
     block["steps"].append(rec)
@@ -1214,8 +1226,9 @@ def _execute_dy(action: dict, cfg: dict, plan: dict, run_one, record: dict) -> N
 
     name = action["action"]
     if name == "dy.creator_invite":
-        if not (cfg.get("dy_invite_phone") or cfg.get("dy_invite_wechat")):
-            record["problems"].append("没有执行：" + _no_contact(cfg))
+        contact = _contact_problem(cfg)
+        if contact:
+            record["problems"].append("没有执行：" + contact)
             return
         write("invite", expect=plan)
         return
