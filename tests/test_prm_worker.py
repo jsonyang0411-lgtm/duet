@@ -365,6 +365,28 @@ def test_a_prm_only_worker_with_no_workspace_never_asks(worker, bot, fake_claude
     assert bot.relay.store.list_jobs(1)[0]["status"] == "pending"
 
 
+def test_a_prm_only_worker_waits_for_a_bot_that_hands_out_jobs_by_kind(worker, bot, fake_claude, tmp_path,
+                                                                        workspace, monkeypatch):
+    client = worker.RelayClient(bot.url, TOKEN)
+    assert client.bot_kinds() == ["admin", "prm"]
+    # A bot older than job kinds answers health without them and would hand over a cc task.
+    admin_job = bot.relay.store.add("wxid_admin", "wxid_admin", "看看日志", "", time.time())
+    monkeypatch.setattr(client, "bot_kinds", lambda: None)
+    asked, waits = [], []
+    stopper = worker.Stopper()
+    monkeypatch.setattr(client, "next_job", lambda **kw: asked.append(kw) or stopper.event.set())
+    monkeypatch.setattr(stopper.event, "wait", lambda t: waits.append(t) or stopper.event.set())
+    s = settings(bot, fake_claude, tmp_path, prm_workspace=str(workspace))
+    worker.serve(s, client, stopper, kinds=("prm",))
+    assert asked == [] and waits == [worker.MAX_BACKOFF_SEC]
+    assert bot.relay.store.get(admin_job)["status"] == "pending"
+    # a worker that does cc tasks too asks such a bot as before (its jobs are cc tasks)
+    stopper = worker.Stopper()
+    monkeypatch.setattr(client, "next_job", lambda **kw: asked.append(kw) or stopper.event.set())
+    worker.serve(s, client, stopper, kinds=worker.ALL_KINDS)
+    assert len(asked) == 1
+
+
 def test_a_prm_only_worker_has_its_own_lock_log_and_outbox(worker, tmp_path, workspace):
     config = tmp_path / "config.json"
     config.write_text(json.dumps({"relay_url": "http://127.0.0.1:9", "token": TOKEN}), encoding="utf-8")

@@ -358,6 +358,13 @@ class RelayClient:
         status, data = self._call("GET", "/relay/health")
         return status == 200 and bool(data and data.get("ok"))
 
+    def bot_kinds(self) -> list[str] | None:
+        """The job kinds the bot hands out by kind; None from a bot older than job kinds (it ignores
+        X-Relay-Kinds and hands any job, a cc task too, to whoever asks)."""
+        status, data = self._call("GET", "/relay/health")
+        kinds = data.get("kinds") if status == 200 and isinstance(data, dict) else None
+        return [str(k) for k in kinds] if isinstance(kinds, list) else None
+
     def next_job(self, wait: int = POLL_WAIT_SEC, settings: dict | None = None,
                  kinds: tuple = ALL_KINDS) -> dict | None:
         """The next job; with ``settings`` the bot also learns which projects this Mac offers
@@ -1489,6 +1496,7 @@ def serve(settings: dict, client: RelayClient, stopper: Stopper, once: bool = Fa
           settings_file: SettingsFile | None = None, kinds: tuple = ALL_KINDS) -> None:
     flush_outbox(client, stopper)
     backoff = 5
+    old_bot = False
     while not stopper.event.is_set():
         if settings_file is not None:
             settings = settings_file.current()
@@ -1498,6 +1506,17 @@ def serve(settings: dict, client: RelayClient, stopper: Stopper, once: bool = Fa
             stopper.event.wait(MAX_BACKOFF_SEC)
             continue
         try:
+            if "admin" not in kinds and "prm" not in (client.bot_kinds() or ()):
+                # Only drafts, and the bot is older than job kinds: it would hand over a cc task.
+                if not old_bot:
+                    log.warning("the bot does not hand out jobs by kind (it is older than the PRM copilot); "
+                                "a prm-only worker would get cc tasks: waiting until the bot is updated")
+                    old_bot = True
+                stopper.event.wait(MAX_BACKOFF_SEC)
+                continue
+            if old_bot:
+                log.info("the bot hands out jobs by kind now; asking for drafts")
+                old_bot = False
             job = client.next_job(settings=settings, kinds=kinds)
             backoff = 5
         except urllib.error.HTTPError as e:
@@ -1610,7 +1629,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"kinds: {','.join(worker_kinds(settings, kinds)) or '(nothing: prm_workspace is needed)'}"
               f"; locks: {', '.join(LOCK_FILES[k] for k in kinds)}")
         try:
-            print(f"bot {settings['relay_url']}: {'ok' if client.health() else 'unexpected answer'}")
+            healthy = client.health()
+            offered = client.bot_kinds()
+            print(f"bot {settings['relay_url']}: {'ok' if healthy else 'unexpected answer'}"
+                  + (f" (job kinds: {','.join(offered)})" if offered is not None else
+                     " (older than job kinds: it hands any job to any worker; a prm-only worker waits)"))
         except urllib.error.HTTPError as e:
             print(f"bot {settings['relay_url']}: HTTP {e.code}" + (" (token wrong)" if e.code == 401 else ""))
             return 1

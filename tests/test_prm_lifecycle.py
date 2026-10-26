@@ -400,6 +400,8 @@ def test_thirty_days_after_delivery_every_copy_is_cut_down(bot, clock):
     assert reveal_numbers(bot.prm.store, 1, now=clock.now)["numbers"][0]["cleared"] is True
     shown = pii.display(bot.prm.store.token_rows(1))
     assert shown["〈手机1〉"] == "138****5678（已清除）"
+    [party] = bot.prm.snapshot()["parties"]
+    assert party["has_numbers"] is True and party["deal"]["purged_at"] == clock.now   # the console still lists them
     # the Mac's answer to the purge job is recorded
     job = bot.relay.next_job(0, ("prm",))
     bot.relay.finish(job["id"], {"ok": True, "text": "案卷已清理，改了 2 行"})

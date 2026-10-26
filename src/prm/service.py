@@ -175,7 +175,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
         return {
             "id": p["id"], "wxid": p["wxid"], "name": p["name"], "note": p["note"],
             "active": bool(p["active"]), "authorized_at": p["authorized_at"],
-            "has_numbers": bool(store.tokens(p["id"])),
+            "has_numbers": bool(store.token_rows(p["id"])),       # cleared ones too: shown as （已清除）
             "deal": {
                 "id": deal["id"], "stage": deal["stage"], "stage_label": STAGES.get(deal["stage"], ""),
                 "mode": mode, "mode_label": MODES.get(mode, mode),
@@ -357,6 +357,8 @@ class PrmService:
                 packet = self._store.packet(packet_id)
                 if packet is not None and packet["outcome"] == "sent_unconfirmed":
                     self._store.set_outcome(packet_id, "sent_confirmed")
+                    logger.info("PRM: packet %d seen in WeChat %.0f s after sending (sent_confirmed)", packet_id,
+                                now - float(packet["sent_at"] or now))
             return
         deal = self._store.deal_of(party["id"], now)
         text = self._mask(party["id"], f"[{_clock_text(sent_at or now)}] {message_text(msg)}", now)

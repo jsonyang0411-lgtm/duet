@@ -311,7 +311,7 @@ class TestHttp:
         assert self.call(url + "/relay/health", token=None)[0] == 401
         assert self.call(url + "/relay/health", token="wrong")[0] == 401
         assert self.call(url + "/relay/jobs/1/result", "POST", {}, token="x" * 32)[0] == 401
-        assert self.call(url + "/relay/health") == (200, {"ok": True})
+        assert self.call(url + "/relay/health") == (200, {"ok": True, "kinds": ["admin", "prm"]})
 
     def test_a_job_round_trip(self, server, clock, sent):
         relay, url = server
