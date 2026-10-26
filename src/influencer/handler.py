@@ -507,6 +507,7 @@ class InfluencerBusinessHandler:
             return self._fail(packet, f"聚水潭建单失败：{order_res.get('error') or '未知原因'}", source)
         order_sn = str(order_res.get("order_sn") or "")
         tracking_number = str(order_res.get("tracking_number") or "")
+        carrier = str(order_res.get("carrier") or "")
 
         try:
             comm_res = await self.xhs.set_exclusive_commission(
@@ -543,6 +544,7 @@ class InfluencerBusinessHandler:
             "packet_id": packet_id,
             "order_sn": order_sn,
             "tracking_number": tracking_number,
+            "carrier": carrier,
             "commission_plan": commission_plan,
             "message": "已成功下发聚水潭打单，并设置小红书定向佣金！",
             "notice": approval_notice(packet),

@@ -30,8 +30,9 @@ def wired(tmp_path):
     backend = EdgeBackend(client=EdgeClient("http://127.0.0.1:9", "x" * 32), state_path=str(tmp_path / "s.json"))
     side.prm.on_parties_changed = backend.refresh_private_chats_soon      # 和 _start_prm 一样
     contacts.save_contact(A, source=SOURCE_CONSOLE, display_name="小美", note="家居博主")
-    Bot._wire_edge_prm(backend, side.prm, SimpleNamespace(store=contacts))
+    bridge = Bot._wire_edge_prm(backend, side.prm, SimpleNamespace(store=contacts))
     yield contacts, side.prm, backend
+    bridge.detach()
     side.prm.stop()
     side.relay.stop()
 
@@ -74,8 +75,9 @@ def test_on_start_the_list_wins_a_disagreement(tmp_path):
     side.prm.register(A, "小美")                                    # PRM 里登记着
     contacts.save_contact(A, source=SOURCE_CONSOLE, enabled=False)   # 名单里停用了（比如 Bot 停着时改的）
     backend = EdgeBackend(client=EdgeClient("http://127.0.0.1:9", "x" * 32), state_path=str(tmp_path / "s.json"))
-    Bot._wire_edge_prm(backend, side.prm, SimpleNamespace(store=contacts))
+    bridge = Bot._wire_edge_prm(backend, side.prm, SimpleNamespace(store=contacts))
     assert side.prm.store.party_by_wxid(A) is None and contacts.get_contact(A)["enabled"] is False
+    bridge.detach()
     side.prm.stop()
     side.relay.stop()
 
@@ -107,7 +109,7 @@ def test_a_creator_added_on_the_list_page_is_drafted_by_prm(tmp_path):
     contacts = InfluencerStore(str(tmp_path / "messages.db"))
     with FakeEdge(auto_send=False) as fake:
         mac = Mac(fake, tmp_path)
-        Bot._wire_edge_prm(mac.backend, mac.prm, SimpleNamespace(store=contacts))
+        bridge = Bot._wire_edge_prm(mac.backend, mac.prm, SimpleNamespace(store=contacts))
         with mac:
             contacts.save_contact(A, source=SOURCE_CONSOLE, display_name="小美")
             assert wait_for(lambda: A in fake._parties), "名单页加的达人推给了 Windows"
@@ -115,4 +117,5 @@ def test_a_creator_added_on_the_list_page_is_drafted_by_prm(tmp_path):
             assert wait_for(lambda: mac.relay.store.list_jobs())
             [job] = mac.relay.store.list_jobs()
             assert job["chat_id"] == A and job["kind"] == "prm"
+        bridge.detach()
         assert contacts.list_inbox() == [], "不再走达人模块的直接回复"

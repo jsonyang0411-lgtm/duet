@@ -7,11 +7,12 @@ src/web/server.py 只负责把请求转到 handle()，这里读写数据库、�
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 import time
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .handler import InfluencerBusinessHandler, approval_notice, rejection_notice, sample_limit_problem
 from .jst_erp import JuShuiTanERPClient
@@ -26,6 +27,8 @@ from .settings import (
 from .store import EVENT_EXECUTION_STARTED, SOURCE_CONSOLE, InfluencerStore
 from .types import STATUS_LABELS, ApprovalActionPacket, GateStatus
 from .xhs_cli import XiaohongshuCLIClient
+
+logger = logging.getLogger(__name__)
 
 # 审批单列表的筛选项 → 状态；None 表示全部
 STATUS_FILTERS = {
@@ -156,6 +159,34 @@ def packet_json(
     return data
 
 
+# 审批有了结果以后交给谁：Mac 端开着 PRM 时由 bot 注册（src/influencer/prm_bridge.py），
+# 给达人的通知进 PRM 的待审批、运单号进合作单。没注册（PRM 没开、机器人没运行）时照旧由运营复制通知
+_decision_hooks: List[Callable[[ApprovalActionPacket, bool, Dict[str, Any]], None]] = []
+
+
+def register_decision_hook(hook) -> None:
+    _decision_hooks.append(hook)
+
+
+def unregister_decision_hook(hook) -> None:
+    if hook in _decision_hooks:
+        _decision_hooks.remove(hook)
+
+
+def _after_decision(store: InfluencerStore, packet_id: str, approved: bool, result: Dict[str, Any]) -> None:
+    if not result.get("success") or not _decision_hooks:
+        return
+    packet = store.get_approval(packet_id)
+    if packet is None:
+        return
+    for hook in list(_decision_hooks):
+        try:
+            hook(packet, approved, result)
+            result["notice_queued"] = True
+        except Exception:
+            logger.exception("审批结果交给 PRM 时出错（%s）", packet_id)
+
+
 def act_on_approval(store: InfluencerStore, body: Dict[str, Any]) -> Dict[str, Any]:
     """通过或驳回一张审批单。通过时会真的调用聚水潭和小红书 CLI（模拟模式下是假的）。
     action=resolve 是给执行被中断的单记下人工核对的结果（B23），不调用聚水潭和小红书。"""
@@ -182,6 +213,7 @@ def act_on_approval(store: InfluencerStore, body: Dict[str, Any]) -> Dict[str, A
         reason=str(body.get("reason") or "").strip(),
         source=SOURCE_CONSOLE,
     ))
+    _after_decision(store, packet_id, action == "approve", result)
     return _with_packet(store, packet_id, result)
 
 
