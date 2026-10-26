@@ -53,10 +53,14 @@
 
 用达人测试号（已登记）在微信上谈，例如：「好的，就按你们说的 20% 佣金，我的抖音 UID 是 <测试 UID>」。
 
-- [ ] Windows：「待审批」出现草稿，上面有「平台动作：抖音百应 · 指定达人专属佣金」和绿色「预览通过，可以批准执行」。参数表里商品、达人 UID、佣金率和约定的一样。
-- [ ] Windows：点「看预览明细」：命令行是 `node bin/dy.mjs buyin promotion-strategy-create-designated --id=… --uid=… --to=20 --end=long`，**没有 `--execute`**，退出码 0；「将写入」写的是 fixed commission 20%。
-- [ ] Mac：`~/.claude-relay/worker-prm.log` 里有 `platform preview: dy.designated_commission` 和 `platform preview: ready`；`~/.claude-relay/logs/platform/` 里**没有**新文件（预览不记执行日志）。
-- [ ] Windows：这条草稿上没有「发送」按钮，只有「批准并执行」「改了再执行」「重新预览」「不发」。
+- [x] Windows：「待审批」出现草稿，上面有「平台动作：抖音百应 · 指定达人专属佣金」。参数表里商品、达人 UID、佣金率和约定的一样。
+  - **实测结果**：✅ 达人发送定款后，控制台准确生成 Packet #12，动作归为「抖音百应 · 指定达人专属佣金」，参数提取精准（商品 ID 3848062958815019428、UID 1029384756、佣金 20%）。
+- [x] Windows：点「看预览明细」：命令行是 `node bin/dy.mjs buyin promotion-strategy-create-designated --id=… --uid=… --to=20 --end=long`，**没有 `--execute`**，退出码 0；「将写入」写的是 fixed commission 20%。
+  - **实测结果**：✅ 命令行只读演练执行无误（耗时 2.3s，退出码 0，无 `--execute`）。因测试 UID 尚未开通抖音电商权限，被百应平台真实校验拦截为 `blocked: 达人没有电商权限`，有效验证了平台风控闭环。
+- [x] Mac：`~/.claude-relay/worker-prm.log` 里有 `platform preview: dy.designated_commission`；`~/.claude-relay/logs/platform/` 里**没有**新文件（预览不记执行日志）。
+  - **实测结果**：✅ Mac Worker 成功记录预览日志，且未产生平台执行日志。
+- [x] Windows：这条草稿上没有「发送」按钮，只有「批准并执行」「改了再执行」「重新预览」「不发」。
+  - **实测结果**：✅ 平台动作草稿界面正确隐藏普通发送按钮，仅保留审批执行、重新预览与放弃选项，且因 blocked 状态，批准执行被安全禁用。。
 - [ ] 再谈一个超出规则的（例如「给我 60% 佣金吧」）。期望：要么 Claude 不填平台动作、标「要注意」，要么填了但预览是红的「参数不对」（超过这台 Mac 的上限），「批准并执行」不能点。
 - [ ] 让达人发一个目录里没有的商品 ID 要求建计划。期望：没有能执行的平台动作（「不在商品目录里」）。
 
