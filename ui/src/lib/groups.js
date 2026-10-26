@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { get } from '../api'
 
-// Group list from the message database (/api/nicknames/groups), shared by the
-// pages that need a group picker. Cached for a minute.
+// Group list from the message database (/api/groups) for the group picker of
+// 微信连接. Cached for a minute.
 let cache = null
 let cacheAt = 0
 let inflight = null
@@ -10,7 +10,7 @@ let inflight = null
 export async function loadGroups(force = false) {
   if (!force && cache && Date.now() - cacheAt < 60000) return cache
   if (!inflight) {
-    inflight = get('/api/nicknames/groups')
+    inflight = get('/api/groups')
       .then((d) => { cache = d.groups || []; cacheAt = Date.now(); return cache })
       .finally(() => { inflight = null })
   }

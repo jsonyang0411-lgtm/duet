@@ -111,4 +111,3 @@ export const WECHAT_BACKEND_NAMES = {
   mac_hybrid: 'macOS WeFlow',
   mac_ui: 'macOS 界面',
 }
-export const AI_BACKEND_NAMES = { deepseek: 'DeepSeek', openai: 'OpenAI', claude: 'Claude' }

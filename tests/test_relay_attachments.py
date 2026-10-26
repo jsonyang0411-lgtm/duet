@@ -64,7 +64,7 @@ def test_a_file_message_gives_its_name_and_size():
 
 def test_the_wcdb_backend_puts_the_file_on_the_message():
     from test_wcdb_backend import FakeClient
-    backend = WcdbBackend(bot_display_name="林小满", groups=["测试群"])
+    backend = WcdbBackend(bot_display_name="商务助手", groups=["测试群"])
     backend._client = FakeClient()
     msg = backend._standardize({"sender_username": "wxid_friend", "message_content": FILE_XML.format(size=9),
                                 "local_type": 49, "create_time": int(time.time()), "local_id": "f1"},

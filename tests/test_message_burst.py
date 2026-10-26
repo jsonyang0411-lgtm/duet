@@ -72,14 +72,14 @@ class MessageBurstBufferTests(unittest.TestCase):
     def test_at_mention_flag_is_preserved_across_burst(self):
         buffer = MessageBurstBuffer(window_sec=1.0)
 
-        buffer.push(_msg("@林小满", message_id="m1", is_at=True), now=0.0)
+        buffer.push(_msg("@商务助手", message_id="m1", is_at=True), now=0.0)
         buffer.push(_msg("推荐几首英文歌", message_id="m2"), now=0.2)
 
         ready = buffer.flush_due(now=1.3)
 
         self.assertEqual(len(ready), 1)
         self.assertTrue(ready[0]["is_at_mentioned"])
-        self.assertEqual(ready[0]["content"], "@林小满\n推荐几首英文歌")
+        self.assertEqual(ready[0]["content"], "@商务助手\n推荐几首英文歌")
 
     def test_disabled_buffer_returns_immediately(self):
         buffer = MessageBurstBuffer(enabled=False)
@@ -87,32 +87,7 @@ class MessageBurstBufferTests(unittest.TestCase):
 
         self.assertEqual(buffer.push(message, now=0.0), [message])
 
-    def test_full_feed_can_merge_text_with_image_and_sticker(self):
-        buffer = MessageBurstBuffer(window_sec=2.0, max_messages=5)
-
-        self.assertEqual(
-            buffer.push(
-                _msg("[图片]", message_id="m1", msg_type=3),
-                allow_nontext=True,
-                now=0.0,
-            ),
-            [],
-        )
-        buffer.push(_msg("还是普通出的", message_id="m2"), allow_nontext=True, now=0.5)
-        buffer.push(
-            _msg("[表情]", message_id="m3", msg_type=47),
-            allow_nontext=True,
-            now=1.0,
-        )
-
-        ready = buffer.flush_due(now=3.1)
-
-        self.assertEqual(len(ready), 1)
-        self.assertEqual(ready[0]["content"], "[图片]\n还是普通出的\n[表情]")
-        self.assertEqual(ready[0]["msg_type"], 1)
-        self.assertTrue(ready[0]["_burst_contains_media"])
-
-    def test_media_stays_immediate_without_full_feed_opt_in(self):
+    def test_media_is_never_held(self):
         buffer = MessageBurstBuffer(window_sec=2.0)
         image = _msg("[图片]", message_id="m1", msg_type=3)
 

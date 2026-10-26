@@ -103,9 +103,6 @@ def server():
     env_existed = env_path.exists()
     if not env_existed:
         env_path.write_text(
-            "AI_BACKEND=deepseek\n"
-            "DEEPSEEK_API_KEY=\n"  # empty → sandbox returns error immediately without retrying real API
-            "DEEPSEEK_MODEL=deepseek-v4-flash\n"
             "WECHAT_GROUPS=*\n"
             "ONBOARDING_DONE=true\n"  # skip onboarding → dashboard loads directly
         )
@@ -137,95 +134,15 @@ class TestDiagnoseApi:
         assert "Python 3" in data["diagnostics"]["python"]["value"]
 
 
-class TestSandboxApi:
-    """Verify /api/sandbox/test endpoint is routed correctly.
-
-    Note: sending a real message triggers an AI API call which may take 10–30s.
-    These tests only verify the endpoint accepts POST requests and returns JSON.
-    """
-
-    def test_sandbox_invalid_json_returns_error(self, server):
-        status, data = _api_post("/api/sandbox/test", raw_body=b"not json")
-        assert status == 200
-        assert "ok" in data
-
-
-class TestConfigDeepseekBaseUrl:
-    """Verify deepseek_base_url is loaded and has a default."""
-
-    def test_default_value(self):
-        from src.config import BotConfig
-        assert BotConfig.deepseek_base_url == "https://api.deepseek.com"
-
-    def test_from_env(self, monkeypatch):
-        monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://custom-proxy.example.com")
-        monkeypatch.setenv("AI_BACKEND", "deepseek")
-        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
-        from src.config import load_config
-        config = load_config()
-        assert config.deepseek_base_url == "https://custom-proxy.example.com"
-
-
-class TestConfigAnthropicBaseUrl:
-    """Verify anthropic_base_url is loaded and has a default."""
-
-    def test_default_value(self):
-        from src.config import BotConfig
-        assert BotConfig.anthropic_base_url == "https://api.anthropic.com"
-
-    def test_from_env(self, monkeypatch):
-        monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://claude-proxy.example.com")
-        monkeypatch.setenv("AI_BACKEND", "claude")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-        from src.config import load_config
-        config = load_config()
-        assert config.anthropic_base_url == "https://claude-proxy.example.com"
-
-
-class TestSummarizerBaseUrl:
-    """Verify AI factory forwards provider-specific Base URLs."""
-
-    def test_claude_factory_passes_anthropic_base_url(self, monkeypatch):
-        from src.config import BotConfig
-        import src.summarize as summarize
-
-        captured = {}
-
-        class FakeClaudeSummarizer:
-            def __init__(self, api_key, model, base_url, chunk_size, chat_model=None):
-                captured.update({
-                    "api_key": api_key,
-                    "model": model,
-                    "base_url": base_url,
-                    "chunk_size": chunk_size,
-                    "chat_model": chat_model,
-                })
-
-        monkeypatch.setattr(summarize, "ClaudeSummarizer", FakeClaudeSummarizer)
-
-        config = BotConfig(
-            ai_backend="claude",
-            anthropic_api_key="sk-ant-test",
-            anthropic_base_url="https://claude-proxy.example.com",
-            summarize_model="claude-test",
-            chunk_size=123,
-        )
-
-        summarize.create_summarizer(config)
-
-        assert captured["api_key"] == "sk-ant-test"
-        assert captured["model"] == "claude-test"
-        assert captured["base_url"] == "https://claude-proxy.example.com"
-        assert captured["chunk_size"] == 123
-
-
 class TestPostAllowlist:
-    """Verify /api/sandbox/test is in POST allowlist (doesn't return 405)."""
+    """Only the gateway's endpoints take a POST: the chat bot's AI sandbox is gone."""
 
-    def test_sandbox_post_not_405(self, server):
-        """Invalid JSON still returns 200 (not 405), proving the route is registered."""
-        status, _ = _api_post("/api/sandbox/test", raw_body=b"not json")
-        assert status == 200
+    def test_the_sandbox_is_gone(self, server):
+        conn = http.client.HTTPConnection(SERVER_HOST, SERVER_PORT, timeout=5)
+        conn.request("POST", "/api/sandbox/test", body=b"{}", headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        conn.close()
+        assert resp.status == 405
 
     def test_unknown_post_path_returns_405(self, server):
         conn = http.client.HTTPConnection(SERVER_HOST, SERVER_PORT, timeout=5)
@@ -373,7 +290,8 @@ class TestAgentConsolePages:
         page.goto(f"{BASE_URL}/#/wechat", timeout=10000)
         page.wait_for_timeout(1500)
         text = page.inner_text("body")
-        for expected in ("微信连接", "微信后端", "读取私聊", "监听哪些群", "OCR_FALLBACK", "数据库读不了时用 OCR", "macOS / Windows"):
+        for expected in ("微信连接", "微信后端", "读取私聊", "读取哪些群", "从不在群里说话", "OCR_FALLBACK",
+                         "数据库读不了时用 OCR", "macOS / Windows"):
             assert expected in text
         # a main setting: the bottom save bar
         page.locator(".toggle-row", has_text="读取私聊").locator('button[role="switch"]').click()
@@ -609,7 +527,7 @@ class TestPrmPages:
 
 
 class TestOnboardingForTheAgentConsole:
-    def test_three_steps_end_with_the_relay_and_quiet_defaults(self, page):
+    def test_three_steps_end_with_the_relay(self, page):
         """Every request of the wizard is answered here: nothing is written to .env."""
         import json as _json
         posted = {}
@@ -634,7 +552,7 @@ class TestOnboardingForTheAgentConsole:
         page.locator("input[type=password]").fill("a" * 64)
         page.locator("button:has-text('下一步')").click()
         page.wait_for_timeout(300)
-        page.locator("input[placeholder='例如 小助手']").fill("机器人账号")
+        page.locator("input[placeholder='例如 商务号']").fill("机器人账号")
         page.locator("button:has-text('下一步')").click()
         page.wait_for_timeout(500)
         text = page.inner_text("body")
@@ -643,11 +561,10 @@ class TestOnboardingForTheAgentConsole:
         page.locator("button:has-text('完成')").click()
         page.wait_for_timeout(1500)
 
-        assert posted["onboarding/step3"]["ai_backend"] == "deepseek"
-        step4 = posted["onboarding/step4"]
-        assert step4["private_chat_enabled"] is True and step4["private_chats"] == "wxid_owner123"
-        assert not any(step4[k] for k in ("fun_enabled", "proactive_enabled", "web_search_enabled",
-                                          "sticky_mention_enabled", "followup_listen_enabled"))
+        step3 = posted["onboarding/step3"]
+        assert step3["private_chat_enabled"] is True and step3["private_chats"] == "wxid_owner123"
+        assert set(step3) == {"message_burst_enabled", "private_chat_enabled", "private_chats"}   # no chat switch
+        assert "onboarding/step4" not in posted
         values = posted["advanced"]["values"]
         assert values["CLAUDE_RELAY"] == "on" and values["ADMIN_WXID"] == "wxid_owner123"
         assert values["CLAUDE_RELAY_ONLY"] == "on"                     # the default of the agent console

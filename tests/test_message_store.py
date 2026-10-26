@@ -12,13 +12,10 @@ Behaviour that is deliberately NOT endorsed is marked::
 
 When such behaviour is fixed, edit the expectation in the same change.
 
-tests/test_history_store.py already covers the archive-import / live+archive
-search happy path; this file adds the remaining branches.
-
 Determinism: the ``time`` reference inside src/db/store.py is replaced by a
-fake clock.  ``messages.created_at`` and ``trigger_log.processed_at`` come from
-SQLite's own clock (a column DEFAULT), so tests that depend on them insert rows
-with explicit values or only check plausibility.  Nothing sleeps, no threads
+fake clock.  ``messages.created_at`` comes from SQLite's own clock (a column
+DEFAULT), so tests that depend on it insert rows with explicit values or only
+check plausibility.  Nothing sleeps, no threads
 are started and file databases live in a temporary directory.
 """
 
@@ -113,21 +110,11 @@ class InitializeDbTests(unittest.TestCase):
             )
         }
 
-        self.assertEqual(tables, {
-            "messages", "history_messages", "message_media",
-            "user_last_message", "trigger_log", "group_memory", "group_facts",
-            # Phase 3 (memory v2); always created, empty while MEMORY_V2 is off.
-            "memory_facts", "memory_episodes", "memory_evidence",
-            "memory_progress", "memory_state", "bot_replies",
-        })
+        # No chat archive, group memory or reply log: the business gateway keeps none.
+        self.assertEqual(tables, {"messages", "message_media", "user_last_message"})
         self.assertEqual(indexes, {
             "idx_msg_chat_time", "idx_msg_chat_sender_time",
-            "idx_history_msg_chat_time", "idx_media_chat_time",
-            "idx_media_chat_server", "idx_trigger_chat_time",
-            "idx_group_facts_chat_time",
-            "idx_memory_facts_chat_status", "idx_memory_episodes_chat_time",
-            "idx_memory_evidence_owner", "idx_memory_evidence_sender",
-            "idx_bot_replies_chat_time",
+            "idx_media_chat_time", "idx_media_chat_server",
         })
 
     def test_connection_returns_sqlite_row_objects(self):
@@ -144,7 +131,7 @@ class InitializeDbTests(unittest.TestCase):
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' "
             "AND name NOT LIKE 'sqlite_%'"
         ).fetchone()[0]
-        self.assertEqual(count, 13)
+        self.assertEqual(count, 3)
 
     def test_file_database_creates_parent_dirs_and_enables_wal(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -263,10 +250,6 @@ class InitializeDbTests(unittest.TestCase):
                 "INSERT INTO messages (message_id, chat_id, sender_id, "
                 "sender_name, timestamp) VALUES ('m', 'c', 's', 'n', 1)"
             ),
-            "history_messages.message_id": (
-                "INSERT INTO history_messages (message_id, chat_id, sender_id, "
-                "sender_name, timestamp) VALUES ('m', 'c', 's', 'n', 1)"
-            ),
             "message_media.message_id": (
                 "INSERT INTO message_media (message_id, chat_id, sender_id, "
                 "sender_name, msg_type, timestamp) VALUES ('m', 'c', 's', 'n', 3, 1)"
@@ -275,35 +258,12 @@ class InitializeDbTests(unittest.TestCase):
                 "INSERT INTO user_last_message (chat_id, sender_id, "
                 "sender_name, last_timestamp) VALUES ('c', 's', 'n', 1)"
             ),
-            "group_facts.(chat_id, subject, predicate, object)": (
-                "INSERT INTO group_facts (chat_id, subject, predicate, object) "
-                "VALUES ('c', 's', 'p', 'o')"
-            ),
         }
         for name, statement in statements.items():
             with self.subTest(constraint=name):
                 conn.execute(statement)
                 with self.assertRaises(sqlite3.IntegrityError):
                     conn.execute(statement)
-
-    def test_column_defaults_for_facts_and_memory(self):
-        conn = self._memory_db()
-        conn.execute(
-            "INSERT INTO group_facts (chat_id, subject, predicate, object) "
-            "VALUES ('c', 's', 'p', 'o')"
-        )
-        conn.execute("INSERT INTO group_memory (chat_id) VALUES ('c')")
-
-        fact = dict(conn.execute("SELECT * FROM group_facts").fetchone())
-        memory = dict(conn.execute("SELECT * FROM group_memory").fetchone())
-
-        self.assertEqual((fact["source"], fact["confidence"]), ("heuristic", 0.8))
-        self.assertEqual(
-            (memory["memory_text"], memory["message_count"],
-             memory["last_message_id"], memory["last_consolidated"]),
-            ("", 0, None, None),
-        )
-
 
 # ── insert_message ─────────────────────────────────────────────────────
 
@@ -716,370 +676,6 @@ class SenderDisplayNameTests(StoreTestCase):
         self.insert("m1", 100, chat_id=OTHER_CHAT, sender_name="Alice")
 
         self.assertEqual(self.store.get_sender_display_name("wxid_a"), "Alice")
-
-
-# ── upsert_history_messages ────────────────────────────────────────────
-
-class HistoryImportTests(StoreTestCase):
-    def test_empty_input_imports_nothing(self):
-        self.assertEqual(self.store.upsert_history_messages([]), 0)
-
-    def test_records_without_id_chat_or_text_are_skipped(self):
-        imported = self.store.upsert_history_messages([
-            {"message_id": "", "chat_id": CHAT, "content": "x"},
-            {"message_id": "   ", "chat_id": CHAT, "content": "x"},
-            {"message_id": "h1", "chat_id": "", "content": "x"},
-            {"message_id": "h2", "chat_id": CHAT, "content": "   "},
-            {"message_id": "h3", "chat_id": CHAT},
-        ])
-
-        self.assertEqual(imported, 0)
-        self.assertEqual(self.rows("SELECT * FROM history_messages"), [])
-
-    def test_defaults_and_stripping(self):
-        imported = self.store.upsert_history_messages([
-            {"message_id": " h1 ", "chat_id": f" {CHAT} ", "content": "  hi  "},
-            {"message_id": "h2", "chat_id": CHAT, "content": "x",
-             "msg_type": 0, "timestamp": None, "source": ""},
-        ])
-
-        rows = self.rows(
-            "SELECT message_id, chat_id, sender_id, sender_name, content, "
-            "msg_type, source, timestamp FROM history_messages ORDER BY id"
-        )
-        self.assertEqual(imported, 2)
-        self.assertEqual(rows[0], {
-            "message_id": "h1", "chat_id": CHAT, "sender_id": "archive-unknown",
-            "sender_name": "群友", "content": "hi", "msg_type": 1,
-            "source": "archive", "timestamp": 0,
-        })
-        self.assertEqual(
-            (rows[1]["msg_type"], rows[1]["timestamp"], rows[1]["source"]),
-            (1, 0, "archive"),
-        )
-
-    def test_reimport_keeps_the_first_copy_and_counts_only_new_rows(self):
-        first = {"message_id": "h1", "chat_id": CHAT, "content": "original"}
-        again = {"message_id": "h1", "chat_id": CHAT, "content": "edited"}
-        new = {"message_id": "h2", "chat_id": CHAT, "content": "fresh"}
-
-        self.assertEqual(self.store.upsert_history_messages([first]), 1)
-        self.assertEqual(self.store.upsert_history_messages([again]), 0)
-        self.assertEqual(self.store.upsert_history_messages([again, new]), 1)
-
-        self.assertEqual(
-            self.rows("SELECT message_id, content FROM history_messages "
-                      "ORDER BY id"),
-            [{"message_id": "h1", "content": "original"},
-             {"message_id": "h2", "content": "fresh"}],
-        )
-
-    def test_import_does_not_touch_live_tables(self):
-        self.store.upsert_history_messages([
-            {"message_id": "h1", "chat_id": CHAT, "content": "x",
-             "sender_id": "wxid_a"},
-        ])
-
-        for table in ("messages", "user_last_message", "message_media",
-                      "trigger_log", "group_memory", "group_facts"):
-            with self.subTest(table=table):
-                self.assertEqual(
-                    self.conn.execute(
-                        f"SELECT COUNT(*) FROM {table}"
-                    ).fetchone()[0],
-                    0,
-                )
-
-    def test_non_numeric_timestamp_aborts_the_whole_batch(self):
-        good = {"message_id": "h1", "chat_id": CHAT, "content": "ok"}
-        bad = {"message_id": "h2", "chat_id": CHAT, "content": "x",
-               "timestamp": "abc"}
-
-        # PINNED (known issue, expected to change in Phase N): there is no
-        # per-record error handling; one bad timestamp raises ValueError and
-        # none of the batch is imported.
-        with self.assertRaises(ValueError):
-            self.store.upsert_history_messages([good, bad])
-
-        self.assertEqual(self.rows("SELECT * FROM history_messages"), [])
-
-
-# ── search_chat_history ────────────────────────────────────────────────
-
-class SearchChatHistoryTests(StoreTestCase):
-    def history(self, message_id, timestamp, content, *, chat_id=CHAT,
-                source="wechat_backup", sender_id="archive-user"):
-        self.store.upsert_history_messages([{
-            "message_id": message_id, "chat_id": chat_id,
-            "sender_id": sender_id, "sender_name": "群友",
-            "content": content, "timestamp": timestamp, "source": source,
-        }])
-
-    def search(self, terms, **kwargs):
-        return self.store.search_chat_history(CHAT, terms, **kwargs)
-
-    def test_no_usable_terms_or_chat_returns_nothing(self):
-        self.insert("m1", 100, content="火锅真好吃")
-
-        self.assertEqual(self.search([]), [])
-        self.assertEqual(self.search(["火", "", None, "   "]), [])
-        self.assertEqual(
-            self.store.search_chat_history("", ["火锅"]), [],
-        )
-
-    def test_matches_live_and_archive_text_in_the_same_chat_only(self):
-        self.insert("live-1", 100, content="今天吃火锅")
-        self.insert("live-img", 400, content="[图片] 火锅", msg_type=3)
-        self.insert("live-other", 300, content="别的群火锅", chat_id=OTHER_CHAT)
-        self.history("arch-1", 150, "火锅真好吃", source="wechat_backup")
-        self.history("arch-other", 160, "别的群火锅", chat_id=OTHER_CHAT)
-        self.history("arch-default", 170, "又是火锅", source="")
-
-        results = self.search(["火锅"])
-
-        self.assertEqual(
-            [(r["message_id"], r["source"]) for r in results],
-            [("arch-default", "archive"), ("arch-1", "wechat_backup"),
-             ("live-1", "live")],
-        )
-        self.assertEqual(
-            sorted(results[0]),
-            ["content", "message_id", "msg_type", "sender_id",
-             "sender_name", "source", "timestamp"],
-        )
-
-    def test_results_rank_by_matched_terms_then_recency(self):
-        self.insert("both-old", 100, content="alpha beta")
-        self.insert("alpha-new", 200, content="alpha only")
-        self.insert("beta-newest", 300, content="beta only")
-        self.insert("all-oldest", 50, content="alpha beta gamma")
-
-        two_terms = self.search(["alpha", "beta"])
-        three_terms = self.search(["alpha", "beta", "gamma"])
-
-        self.assertEqual(
-            self.ids(two_terms),
-            ["both-old", "all-oldest", "alpha-new", "beta-newest"],
-        )
-        self.assertEqual(
-            self.ids(three_terms),
-            ["all-oldest", "both-old", "alpha-new", "beta-newest"],
-        )
-
-    def test_longer_matched_terms_score_higher_than_recency(self):
-        self.insert("short-new", 300, content="has xy in it")
-        self.insert("long-old", 100, content="has longterm1 in it")
-
-        results = self.search(["xy", "longterm1"])
-
-        # score = sum(10 + len(term)): 12 for "xy", 19 for "longterm1".
-        self.assertEqual(self.ids(results), ["long-old", "short-new"])
-
-    def test_term_cleaning_strips_dedupes_truncates_and_caps_at_six(self):
-        self.insert("long", 100, content="火锅" * 20)
-        self.insert("padded", 110, content="padded-term here")
-        self.insert("sixth", 120, content="ff6")
-        self.insert("seventh", 130, content="seventh")
-
-        # strip, then truncate to 40 characters: 60 chars becomes "火锅"*20.
-        self.assertEqual(self.ids(self.search(["火锅" * 30])), ["long"])
-        self.assertEqual(self.ids(self.search(["  padded-term  "])), ["padded"])
-        # Case-insensitive duplicates do not use up the six slots ...
-        six = ["aa1", "AA1", "bb2", "cc3", "dd4", "ee5", "ff6"]
-        self.assertEqual(self.ids(self.search(six)), ["sixth"])
-        # ... but a genuine seventh term is silently ignored.
-        seven = ["aa1", "bb2", "cc3", "dd4", "ee5", "ff6", "seventh"]
-        self.assertEqual(self.ids(self.search(seven)), ["sixth"])
-        self.assertEqual(
-            self.ids(self.search(["seventh", "aa1", "bb2", "cc3", "dd4", "ee5"])),
-            ["seventh"],
-        )
-
-    def test_ascii_matching_is_case_insensitive(self):
-        self.insert("m1", 100, content="Hello World")
-
-        self.assertEqual(self.ids(self.search(["HELLO"])), ["m1"])
-        self.assertEqual(self.ids(self.search(["world"])), ["m1"])
-
-    def test_like_wildcards_in_terms_are_not_escaped(self):
-        self.insert("m1", 100, content="完全无关")
-        self.insert("m2", 200, content="abc")
-
-        # PINNED (known issue, expected to change in Phase N): the terms are
-        # bound as parameters (no SQL injection) but %/_ stay LIKE wildcards,
-        # so "%%" or "__" match every text message in the chat.
-        self.assertEqual(self.ids(self.search(["%%"])), ["m2", "m1"])
-        self.assertEqual(self.ids(self.search(["__"])), ["m2", "m1"])
-        self.assertEqual(self.ids(self.search(["a_c"])), ["m2"])
-
-    def test_live_and_archive_copies_of_one_message_are_collapsed(self):
-        self.insert("live", 100, sender_id="wxid_a", content="重复内容")
-        self.history(
-            "arch", 100, "重复内容", sender_id="wxid_a", source="wechat_backup",
-        )
-
-        results = self.search(["重复"])
-
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["content"], "重复内容")
-
-    def test_same_text_from_different_senders_is_kept(self):
-        self.insert("a", 100, sender_id="wxid_a", content="重复内容")
-        self.insert("b", 100, sender_id="wxid_b", content="重复内容")
-
-        self.assertEqual(len(self.search(["重复"])), 2)
-
-    def test_limit_is_at_least_one(self):
-        for index in range(3):
-            self.insert(f"m{index}", 100 + index, content="火锅")
-
-        self.assertEqual(len(self.search(["火锅"], limit=0)), 1)
-        self.assertEqual(len(self.search(["火锅"], limit=-5)), 1)
-        self.assertEqual(len(self.search(["火锅"], limit=2)), 2)
-
-    def test_candidate_pool_is_the_120_newest_matches(self):
-        for index in range(130):
-            self.insert(f"m{index}", 1000 + index, content=f"match {index}")
-
-        results = self.search(["match"], limit=500)
-
-        # PINNED (known issue, expected to change in Phase N): a hard 120-row
-        # candidate cap applies before scoring, so ``limit`` cannot exceed it
-        # and a better-scoring but older match is never considered.
-        self.assertEqual(len(results), 120)
-        self.assertEqual(
-            (min(r["timestamp"] for r in results),
-             max(r["timestamp"] for r in results)),
-            (1010, 1129),
-        )
-
-
-# ── group memory ───────────────────────────────────────────────────────
-
-class GroupMemoryTests(StoreTestCase):
-    def test_unknown_chat_has_no_memory(self):
-        self.assertIsNone(self.store.get_group_memory(CHAT))
-
-    def test_upsert_creates_then_updates_keeping_created_at(self):
-        self.clock.now = 1_700_000_000.5
-        self.store.upsert_group_memory(CHAT, "diary 1", 10, "m10")
-
-        self.assertEqual(self.store.get_group_memory(CHAT), {
-            "chat_id": CHAT, "memory_text": "diary 1", "message_count": 10,
-            "last_message_id": "m10", "last_consolidated": 1_700_000_000.5,
-            "created_at": 1_700_000_000.5, "updated_at": 1_700_000_000.5,
-        })
-
-        self.clock.now = 1_700_000_100.25
-        self.store.upsert_group_memory(CHAT, "diary 2", 25, "m25")
-
-        self.assertEqual(self.store.get_group_memory(CHAT), {
-            "chat_id": CHAT, "memory_text": "diary 2", "message_count": 25,
-            "last_message_id": "m25", "last_consolidated": 1_700_000_100.25,
-            "created_at": 1_700_000_000.5, "updated_at": 1_700_000_100.25,
-        })
-
-    def test_memory_is_per_chat(self):
-        self.store.upsert_group_memory(CHAT, "mine", 1, "m1")
-
-        self.assertIsNone(self.store.get_group_memory(OTHER_CHAT))
-        self.assertEqual(
-            self.store.get_group_memory(CHAT)["memory_text"], "mine",
-        )
-
-
-# ── group facts ────────────────────────────────────────────────────────
-
-class GroupFactTests(StoreTestCase):
-    def upsert(self, subject, predicate, obj, **kwargs):
-        self.store.upsert_group_fact(CHAT, subject, predicate, obj, **kwargs)
-
-    def test_defaults_are_heuristic_source_and_point_eight_confidence(self):
-        self.clock.now = 1000.0
-        self.upsert("宇肆", "alias", "次元哥哥")
-
-        self.assertEqual(self.store.get_group_facts(CHAT), [{
-            "chat_id": CHAT, "subject": "宇肆", "predicate": "alias",
-            "object": "次元哥哥", "source": "heuristic",
-            "source_message_id": "", "confidence": 0.8,
-            "created_at": 1000.0, "updated_at": 1000.0,
-        }])
-
-    def test_blank_parts_are_ignored_and_values_are_stripped(self):
-        self.upsert("", "alias", "x")
-        self.upsert("s", "  ", "x")
-        self.upsert("s", "p", None)
-        self.store.upsert_group_fact("", "s", "p", "o")
-        self.upsert("  s  ", " p ", " o ")
-
-        facts = self.store.get_group_facts(CHAT)
-
-        self.assertEqual(
-            [(f["subject"], f["predicate"], f["object"]) for f in facts],
-            [("s", "p", "o")],
-        )
-        self.assertEqual(self.store.get_group_facts(""), [])
-
-    def test_refresh_keeps_max_confidence_and_updates_message_and_time(self):
-        self.clock.now = 1000.0
-        self.upsert("宇肆", "alias", "次元哥哥", source_message_id="m1",
-                    confidence=0.86)
-        self.clock.now = 1002.0
-        self.upsert("宇肆", "alias", "次元哥哥", source_message_id="m2",
-                    confidence=0.5, source="llm")
-
-        fact = self.store.get_group_facts(CHAT)[0]
-
-        self.assertEqual(fact["confidence"], 0.86)       # max(), not last
-        self.assertEqual(fact["source_message_id"], "m2")
-        self.assertEqual((fact["created_at"], fact["updated_at"]), (1000.0, 1002.0))
-        # PINNED (known issue, expected to change in Phase N): ON CONFLICT does
-        # not update `source`, so the first writer's label sticks forever.
-        self.assertEqual(fact["source"], "heuristic")
-
-    def test_higher_confidence_replaces_the_stored_one(self):
-        self.upsert("宇肆", "alias", "cy", confidence=0.78)
-        self.upsert("宇肆", "alias", "cy", confidence=0.99)
-
-        self.assertEqual(self.store.get_group_facts(CHAT)[0]["confidence"], 0.99)
-
-    def test_facts_are_ordered_by_recency_with_a_limit(self):
-        self.clock.now = 1000.0
-        self.upsert("a", "alias", "1")
-        self.clock.now = 1001.0
-        self.upsert("b", "alias", "2")
-        self.clock.now = 1002.0
-        self.upsert("c", "alias", "3")
-        self.clock.now = 1003.0
-        self.upsert("a", "alias", "1")  # refresh moves it to the front
-
-        objects = [f["object"] for f in self.store.get_group_facts(CHAT)]
-
-        self.assertEqual(objects, ["1", "3", "2"])
-        self.assertEqual(
-            [f["object"] for f in self.store.get_group_facts(CHAT, limit=2)],
-            ["1", "3"],
-        )
-        self.assertEqual(self.store.get_group_facts(CHAT, limit=0), [])
-
-    def test_facts_with_equal_timestamps_come_back_oldest_inserted_first(self):
-        self.clock.now = 5.0
-        self.upsert("a", "alias", "1")
-        self.upsert("b", "alias", "2")
-        self.upsert("c", "alias", "3")
-
-        # PINNED (known issue, expected to change in Phase N): no tie-breaker
-        # on ``updated_at DESC``; today ties follow the index's rowid order.
-        self.assertEqual(
-            [f["object"] for f in self.store.get_group_facts(CHAT)],
-            ["1", "2", "3"],
-        )
-
-    def test_facts_are_per_chat(self):
-        self.store.upsert_group_fact(OTHER_CHAT, "a", "alias", "1")
-
-        self.assertEqual(self.store.get_group_facts(CHAT), [])
-        self.assertEqual(len(self.store.get_group_facts(OTHER_CHAT)), 1)
 
 
 # ── media lookups ──────────────────────────────────────────────────────

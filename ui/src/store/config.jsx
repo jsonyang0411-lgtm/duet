@@ -6,8 +6,8 @@ import { validateConfig } from '../lib/schema'
 //
 // The old console had three pages that each POSTed only their own part of the
 // settings to /api/config; the server fills every missing key with its default,
-// so saving one page silently reset the others (target groups, persona, voice
-// key…). Here every save posts the complete draft, so nothing is reset.
+// so saving one page silently reset the others (target groups, voice key…).
+// Here every save posts the complete draft, so nothing is reset.
 
 const ConfigContext = createContext(null)
 
@@ -36,15 +36,9 @@ function fromServer(cfg) {
 
 // Keys that POST /api/config leaves alone when they are missing from the
 // payload (it reads them with a plain config.get()). Sending them only when
-// they changed keeps values that live in the machine-local .env.local (data
-// dir, API keys) out of the shared .env, and a masked key from .env.local is
-// not blanked in the running process.
-const OMIT_IF_UNCHANGED = [
-  'ai_backend', 'deepseek_api_key', 'deepseek_base_url', 'deepseek_model',
-  'openai_api_key', 'anthropic_api_key', 'anthropic_base_url', 'summarize_model',
-  'bot_display_name', 'wechat_backend', 'log_level', 'wechat_data_dir', 'trigger_keywords',
-]
-const OMIT_PREFIX_IF_UNCHANGED = /^feishu_/
+// they changed keeps values that live in the machine-local .env.local (the
+// data dir) out of the shared .env.
+const OMIT_IF_UNCHANGED = ['bot_display_name', 'wechat_backend', 'log_level', 'wechat_data_dir']
 
 export function toPayload(draft, base = null) {
   const out = {
@@ -52,10 +46,9 @@ export function toPayload(draft, base = null) {
     wechat_groups: encodeNames(draft.wechat_groups),
     private_chats: encodeNames(draft.private_chats),
   }
-  delete out.yang_preset
   if (base) {
     for (const k of Object.keys(out)) {
-      if ((OMIT_IF_UNCHANGED.includes(k) || OMIT_PREFIX_IF_UNCHANGED.test(k)) && same(draft[k], base[k])) delete out[k]
+      if (OMIT_IF_UNCHANGED.includes(k) && same(draft[k], base[k])) delete out[k]
     }
   }
   return out

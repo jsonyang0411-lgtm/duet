@@ -21,18 +21,23 @@ class MessageStore:
     # ── Write operations ──────────────────────────────────────────
 
     def rewrite_chat(self, chat_id: str, rewrite) -> int:
-        """Rewrite the stored text of one chat (live and imported messages) with ``rewrite``:
-        the PRM clean-up of a creator's address and numbers (8.2).  Full-text index rows
-        (memory v2) are swapped too, so no old words stay searchable.  Returns how many
-        messages changed."""
+        """Rewrite the stored text of one chat with ``rewrite``: the PRM clean-up of a
+        creator's address and numbers (8.2).  A database from an older version can still
+        have imported messages (``history_messages``) and full-text indexes of them
+        (``fts_*`` with a cursor in ``memory_state``): those are rewritten and swapped too,
+        so no old words stay searchable.  Returns how many messages changed."""
         changed = 0
         with self._lock:
             with self.conn:
-                indexes = {r[0] for r in self.conn.execute(
-                    "SELECT name FROM sqlite_master WHERE name IN ('fts_messages', 'fts_history')")}
+                present = {r[0] for r in self.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE name IN "
+                    "('history_messages', 'fts_messages', 'fts_history', 'memory_state')")}
+                indexes = present & {"fts_messages", "fts_history"} if "memory_state" in present else set()
                 for table, index in (("messages", "fts_messages"), ("history_messages", "fts_history")):
-                    # Only rows the index has seen (memory v2 indexes in id order up to a cursor)
-                    # have entries to swap; later ones are indexed with the new text anyway.
+                    if table != "messages" and table not in present:
+                        continue
+                    # Only rows the index has seen (it was filled in id order up to a cursor)
+                    # have entries to swap; later ones were never indexed.
                     upto = 0
                     if index in indexes:
                         row = self.conn.execute("SELECT value FROM memory_state WHERE key = ?",
@@ -204,208 +209,6 @@ class MessageStore:
                    )
                    ORDER BY timestamp ASC, id ASC""",
                 (chat_id, since_ts, until_ts, limit),
-            ).fetchall()
-        return [dict(row) for row in rows]
-
-    # ── Historical chat archive operations ────────────────────────
-
-    def upsert_history_messages(self, messages: list[dict]) -> int:
-        """Import archive messages without letting them enter the live queue.
-
-        ``history_messages`` deliberately has no side effects on
-        ``user_last_message``, trigger logs, or group-memory consolidation.
-        Re-running an import is safe because archive message IDs are unique.
-        """
-        rows = []
-        for msg in messages:
-            message_id = str(msg.get("message_id", "")).strip()
-            chat_id = str(msg.get("chat_id", "")).strip()
-            content = str(msg.get("content", "")).strip()
-            if not message_id or not chat_id or not content:
-                continue
-            rows.append((
-                message_id,
-                chat_id,
-                str(msg.get("sender_id", "") or "archive-unknown"),
-                str(msg.get("sender_name", "") or "群友"),
-                content,
-                int(msg.get("msg_type", 1) or 1),
-                str(msg.get("source", "") or "archive"),
-                int(msg.get("timestamp", 0) or 0),
-            ))
-        if not rows:
-            return 0
-
-        with self._lock:
-            before = self.conn.total_changes
-            with self.conn:
-                self.conn.executemany(
-                    """INSERT INTO history_messages
-                       (message_id, chat_id, sender_id, sender_name, content,
-                        msg_type, source, timestamp)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(message_id) DO NOTHING""",
-                    rows,
-                )
-            return self.conn.total_changes - before
-
-    def search_chat_history(self, chat_id: str, query_terms: list[str],
-                            limit: int = 8) -> list[dict]:
-        """Return relevant text messages from live and imported group history.
-
-        The caller supplies a small set of content terms only after detecting
-        an explicit history-recall question.  Searching is bounded and uses
-        parameterized LIKE expressions so archive contents are never treated
-        as SQL.
-        """
-        terms = []
-        seen = set()
-        for value in query_terms:
-            term = str(value or "").strip()[:40]
-            key = term.casefold()
-            if len(term) < 2 or key in seen:
-                continue
-            seen.add(key)
-            terms.append(term)
-            if len(terms) >= 6:
-                break
-        if not chat_id or not terms:
-            return []
-
-        clauses = " OR ".join("content LIKE ?" for _ in terms)
-        like_params = [f"%{term}%" for term in terms]
-        with self._lock:
-            rows = self.conn.execute(
-                f"""WITH candidates AS (
-                        SELECT message_id, sender_id, sender_name, content,
-                               msg_type, timestamp, 'live' AS source
-                        FROM messages
-                        WHERE chat_id = ? AND msg_type = 1 AND ({clauses})
-                        UNION ALL
-                        SELECT message_id, sender_id, sender_name, content,
-                               msg_type, timestamp, source
-                        FROM history_messages
-                        WHERE chat_id = ? AND msg_type = 1 AND ({clauses})
-                    )
-                    SELECT message_id, sender_id, sender_name, content,
-                           msg_type, timestamp, source
-                    FROM candidates
-                    ORDER BY timestamp DESC
-                    LIMIT 120""",
-                [chat_id, *like_params, chat_id, *like_params],
-            ).fetchall()
-
-        # Prefer records matching more of the question, then newer records.
-        # A duplicate can exist if an archive overlaps with live collection.
-        ranked = []
-        seen_records = set()
-        for row in rows:
-            record = dict(row)
-            dedup_key = (
-                record["sender_id"], record["content"], record["timestamp"],
-            )
-            if dedup_key in seen_records:
-                continue
-            seen_records.add(dedup_key)
-            haystack = record["content"].casefold()
-            score = sum(
-                10 + len(term) for term in terms if term.casefold() in haystack
-            )
-            ranked.append((score, int(record["timestamp"]), record))
-        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        return [record for _, _, record in ranked[:max(1, int(limit))]]
-
-    # ── Group memory operations ────────────────────────────────────
-
-    def get_group_memory(self, chat_id: str) -> dict | None:
-        """Retrieve the memory record for a group.
-
-        Returns:
-            Dict with keys: chat_id, memory_text, message_count,
-            last_message_id, last_consolidated, created_at, updated_at.
-            None if no memory exists yet for this group.
-        """
-        with self._lock:
-            row = self.conn.execute(
-                """SELECT chat_id, memory_text, message_count,
-                          last_message_id, last_consolidated,
-                          created_at, updated_at
-                   FROM group_memory
-                   WHERE chat_id = ?""",
-                (chat_id,),
-            ).fetchone()
-        return dict(row) if row else None
-
-    def upsert_group_memory(self, chat_id: str, memory_text: str,
-                            message_count: int, last_message_id: str) -> None:
-        """Insert or update a group's memory record.
-
-        Args:
-            chat_id: Group chat ID.
-            memory_text: The consolidated first-person memory text.
-            message_count: Total messages incorporated into this memory.
-            last_message_id: The last message ID that was incorporated.
-        """
-        now = time.time()
-        with self._lock:
-            with self.conn:
-                self.conn.execute(
-                    """INSERT INTO group_memory
-                       (chat_id, memory_text, message_count, last_message_id,
-                        last_consolidated, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(chat_id) DO UPDATE SET
-                       memory_text = excluded.memory_text,
-                       message_count = excluded.message_count,
-                       last_message_id = excluded.last_message_id,
-                       last_consolidated = excluded.last_consolidated,
-                       updated_at = excluded.updated_at""",
-                    (chat_id, memory_text, message_count, last_message_id,
-                     now, now, now),
-                )
-
-    # ── Group fact operations ─────────────────────────────────────
-
-    def upsert_group_fact(self, chat_id: str, subject: str, predicate: str,
-                          object_value: str, source_message_id: str = "",
-                          confidence: float = 0.8,
-                          source: str = "heuristic") -> None:
-        """Insert or refresh a durable structured group fact."""
-        now = time.time()
-        subject = str(subject or "").strip()
-        predicate = str(predicate or "").strip()
-        object_value = str(object_value or "").strip()
-        if not chat_id or not subject or not predicate or not object_value:
-            return
-        with self._lock:
-            with self.conn:
-                self.conn.execute(
-                    """INSERT INTO group_facts
-                       (chat_id, subject, predicate, object, source,
-                        source_message_id, confidence, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(chat_id, subject, predicate, object)
-                       DO UPDATE SET
-                         source_message_id = excluded.source_message_id,
-                         confidence = max(group_facts.confidence, excluded.confidence),
-                         updated_at = excluded.updated_at""",
-                    (
-                        chat_id, subject, predicate, object_value, source,
-                        source_message_id, float(confidence), now, now,
-                    ),
-                )
-
-    def get_group_facts(self, chat_id: str, limit: int = 30) -> list[dict]:
-        """Return recent structured facts for a group."""
-        with self._lock:
-            rows = self.conn.execute(
-                """SELECT chat_id, subject, predicate, object, source,
-                          source_message_id, confidence, created_at, updated_at
-                   FROM group_facts
-                   WHERE chat_id = ?
-                   ORDER BY updated_at DESC
-                   LIMIT ?""",
-                (chat_id, int(limit)),
             ).fetchall()
         return [dict(row) for row in rows]
 

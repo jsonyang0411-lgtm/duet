@@ -1331,10 +1331,11 @@ class WeChatWindowController:
             logger.debug("Clipboard could not be restored: %s", e)
 
     def capture_chat_media(self, group_name: str) -> str:
-        """Capture only the visible conversation pane for vision fallback.
+        """Capture only the visible conversation pane (the relay's fallback for a
+        picture it cannot find on disk).
 
         The caller is responsible for deleting the returned temporary file
-        after the vision request finishes.
+        once it has been passed on.
         """
         if not group_name:
             return ""

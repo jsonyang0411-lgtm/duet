@@ -187,14 +187,14 @@ Claude 被要求把回复控制在 300 字以内，平时很少超过 1500 字�
 2026-10-23 17:25:23 [INFO] src.relay.service: CLAUDE_RELAY: queued #25 (@relay): 用200字左右介绍一下这个项目是做什么的
 2026-10-23 17:25:23 [INFO] src.relay.service: CLAUDE_RELAY: #25 went to the Mac
 2026-10-23 17:25:30 [INFO] src.relay.service: CLAUDE_RELAY: #25 finished (ok=True, 300 chars)
-2026-10-23 17:25:30 [INFO] src.wechat.window_controller: Navigating to chat: '杨宇靖' (HWND=591242, keyboard-only)
+2026-10-23 17:25:30 [INFO] src.wechat.window_controller: Navigating to chat: '管理员' (HWND=591242, keyboard-only)
 2026-10-23 17:25:32 [INFO] src.wechat.window_controller: Sending message: 18 chars to HWND=591242 (keyboard-only)
 2026-10-23 17:25:33 [INFO] src.wechat.window_controller: Message send action completed: 18 chars
-2026-10-23 17:25:33 [INFO] src.wechat.window_controller: send_to_chat SUCCESS: group='杨宇靖' (18 chars) HWND=591242
-2026-10-23 17:25:34 [INFO] src.wechat.window_controller: Navigating to chat: '杨宇靖' (HWND=591242, keyboard-only)
+2026-10-23 17:25:33 [INFO] src.wechat.window_controller: send_to_chat SUCCESS: group='管理员' (18 chars) HWND=591242
+2026-10-23 17:25:34 [INFO] src.wechat.window_controller: Navigating to chat: '管理员' (HWND=591242, keyboard-only)
 2026-10-23 17:25:36 [INFO] src.wechat.window_controller: Sending message: 344 chars to HWND=591242 (keyboard-only)
 2026-10-23 17:25:36 [INFO] src.wechat.window_controller: Message send action completed: 344 chars
-2026-10-23 17:25:36 [INFO] src.wechat.window_controller: send_to_chat SUCCESS: group='杨宇靖' (344 chars) HWND=591242
+2026-10-23 17:25:36 [INFO] src.wechat.window_controller: send_to_chat SUCCESS: group='管理员' (344 chars) HWND=591242
 ```
 
 ### 3. 配置复原说明

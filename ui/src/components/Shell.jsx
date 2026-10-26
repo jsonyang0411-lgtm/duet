@@ -12,9 +12,8 @@ import { navigate } from '../lib/router'
 import { LogoGlyph, FigurePlaceholder } from './art'
 
 // The company console: the bot as a relay to Claude Code on a Mac, plus the
-// PRM copilot (drafts for registered creators: 待审批 / 合作单). The other
-// pages (reply records, AI and persona settings, modules, advanced switches,
-// nicknames, todos) are hidden here; their code and the bot's features stay.
+// PRM copilot (drafts for registered creators: 待审批 / 合作单). The bot has
+// no chat features: groups and other private chats are never answered.
 export const NAV = [
   { id: 'status', label: '运行状态', en: 'STATUS', icon: Pulse },
   { id: 'relay', label: '中转代理', en: 'RELAY', icon: ArrowsLeftRight },

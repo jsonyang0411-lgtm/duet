@@ -281,7 +281,7 @@ class ClaudeRelay:
             return True, "转给 Mac 失败了，详情看 bot.log。"
 
     def _for_admin(self, sender: str, content: str) -> bool:
-        """A management command of the admin (the route's ``relay_only`` step answers it)."""
+        """A management command of the admin (the route's ``admin_command`` step answers it)."""
         try:
             return (self._reserved is not None and bool(self._admin_wxid) and sender == self._admin_wxid
                     and bool(self._reserved(content.strip())))

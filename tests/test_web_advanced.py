@@ -1,11 +1,9 @@
-"""Backend changes that came with the console redesign:
+"""The console's settings endpoints:
 
-- GET/POST /api/advanced (src/web/advanced_config.py);
-- onboarding: a hand-typed WeChat key in step 2, FUN_ENABLED in step 4,
-  "everything on a local model" in step 3;
-- /api/load-config: the custom persona's values while Yang is selected (the
-  preset comes separately), group/contact names as lists;
-- the sandbox replies with the model MODEL_ROUTE picks for chat.
+- GET/POST /api/advanced (src/web/advanced_config.py): sending, relay, PRM, OCR, trace;
+- onboarding: a hand-typed WeChat key in step 2, the private chats in step 3 (the last);
+- /api/load-config: group/contact names as lists, no chat-bot keys;
+- the chat-bot endpoints (sandbox, nicknames, todos, lots, welcome) are gone.
 
 Every test works on temporary .env files; nothing touches the project's .env.
 """
@@ -85,8 +83,8 @@ class _TempEnv(unittest.TestCase):
 
 
 class AdvancedGetTests(_TempEnv):
-    shared_text = "# comment\nPIPELINE_V2=true\nSEND_QUIET=yes\nEMBEDDING_API_KEY=sk-abcdefghijkl1234\n"
-    local_text = "SEND_QUIET=on\nMEMORY_V2=\n"
+    shared_text = "# comment\nSEND_QUEUE=true\nSEND_QUIET=yes\nCLAUDE_RELAY_TOKEN=abcdefghijkl1234abcd\n"
+    local_text = "SEND_QUIET=on\nCLAUDE_RELAY_PROGRESS_MIN=\n"
 
     def test_returns_every_allow_listed_field_with_normalized_values(self):
         from src.web import advanced_config as adv
@@ -96,52 +94,60 @@ class AdvancedGetTests(_TempEnv):
         self.assertTrue(body["ok"])
         fields = {f["key"]: f for g in body["groups"] for f in g["fields"]}
         self.assertEqual(set(fields), set(adv.FIELDS))
-        self.assertEqual(fields["PIPELINE_V2"]["value"], "single")   # alias "true"
+        self.assertEqual(fields["SEND_QUEUE"]["value"], "on")              # alias "true"
         self.assertEqual(fields["SEND_QUIET"]["value"], "on")
-        self.assertEqual(fields["MEMORY_V2"]["value"], "off")         # default
-        self.assertEqual(fields["PERSONA_EXAMPLES"]["value"], "4")
+        self.assertEqual(fields["CLAUDE_RELAY_PROGRESS_MIN"]["value"], "3")  # default
+        self.assertEqual(fields["STICKER_PASTE"]["value"], "file")
+
+    def test_only_the_gateways_switches_are_offered(self):
+        from src.web import advanced_config as adv
+
+        self.assertEqual([g["id"] for g in adv.GROUPS], ["send", "relay", "prm", "ocr", "trace"])
+        for gone in ("PIPELINE_V2", "MEMORY_V2", "MODEL_ROUTE", "PERSONA_EXAMPLES", "WECHAT_EMOJI", "SEND_STICKERS",
+                     "SEND_BUBBLES", "PROACTIVE_GATE_MODE", "IMAGE_VISION_ENABLED", "CLAUDE_CHAT_MODEL", "BOT_ALIASES"):
+            self.assertNotIn(gone, adv.FIELDS)
 
     def test_secret_is_masked(self):
         _, body = _request("/api/advanced")
         fields = {f["key"]: f for g in body["groups"] for f in g["fields"]}
-        self.assertIn("***", fields["EMBEDDING_API_KEY"]["value"])
+        self.assertIn("***", fields["CLAUDE_RELAY_TOKEN"]["value"])
         self.assertNotIn("abcdefghijkl", json.dumps(body))
 
     def test_reports_keys_overridden_by_env_local(self):
         _, body = _request("/api/advanced")
-        self.assertEqual(body["local_overrides"], ["SEND_QUIET"])   # empty MEMORY_V2= is not an override
+        self.assertEqual(body["local_overrides"], ["SEND_QUIET"])   # an empty value is not an override
 
 
 class AdvancedPostTests(_TempEnv):
-    shared_text = "AI_BACKEND=deepseek\n# keep me\nPIPELINE_V2=off\nEMBEDDING_API_KEY=sk-stored-secret-0000\n"
+    shared_text = "AI_BACKEND=deepseek\n# keep me\nSEND_QUEUE=off\nCLAUDE_RELAY_TOKEN=stored-secret-token-0000\n"
 
     def test_writes_only_posted_keys_and_updates_environment(self):
         before = self.env.read_text(encoding="utf-8")
-        status, body = _request("/api/advanced", "POST", {"values": {"PIPELINE_V2": "two-step", "PERSONA_EXAMPLES": "6"}})
+        status, body = _request("/api/advanced", "POST", {"values": {"SEND_QUEUE": "yes", "CLAUDE_RELAY_PROGRESS_MIN": "6"}})
         self.assertEqual(status, 200)
         self.assertTrue(body["ok"], body)
-        self.assertEqual(body["saved"], ["PERSONA_EXAMPLES", "PIPELINE_V2"])
+        self.assertEqual(body["saved"], ["CLAUDE_RELAY_PROGRESS_MIN", "SEND_QUEUE"])
         values = self.env_values()
-        self.assertEqual(values["PIPELINE_V2"], "two_step")            # written the canonical way
-        self.assertEqual(values["PERSONA_EXAMPLES"], "6")
-        self.assertEqual(values["AI_BACKEND"], "deepseek")
+        self.assertEqual(values["SEND_QUEUE"], "on")                     # written the canonical way
+        self.assertEqual(values["CLAUDE_RELAY_PROGRESS_MIN"], "6")
+        self.assertEqual(values["AI_BACKEND"], "deepseek")               # an old line stays as it was
         self.assertIn("# keep me", self.env.read_text(encoding="utf-8"))
         self.assertEqual(len(self.env.read_text(encoding="utf-8").splitlines()), len(before.splitlines()) + 1)
-        self.assertEqual(os.environ["PIPELINE_V2"], "two_step")
+        self.assertEqual(os.environ["SEND_QUEUE"], "on")
 
     def test_rejects_invalid_values_and_writes_nothing(self):
         before = self.env.read_text(encoding="utf-8")
         cases = [
-            {"PERSONA_EXAMPLES": "9"},
-            {"PERSONA_EXAMPLES": "2.5"},
-            {"MEMORY_EMBEDDING_MIN_SIM": "1"},
+            {"CLAUDE_RELAY_PROGRESS_MIN": "121"},
+            {"CLAUDE_RELAY_PROGRESS_MIN": "2.5"},
+            {"OCR_POLL_SEC": "0.5"},
             {"SEND_QUIET": "maybe"},
-            {"STICKER_DIR": "data/stickers\nPIPELINE_V2=single"},
-            {"BOT_ALIASES": "a\u2028DEEPSEEK_API_KEY=attacker"},       # str.splitlines() splits here
-            {"EMBEDDING_BASE_URL": "http://x #frag"},                 # dotenv would cut at " #"
-            {"STICKER_DIR": "   "},
-            {"WCDB_KEY": "0" * 64},                                  # not allow-listed
-            {"WECHAT_EMOJI_CODES": "[]"},
+            {"PRM_HOLDING_TEXT": "好\nSEND_QUIET=on"},
+            {"CLAUDE_RELAY_WXIDS": "a\u2028CLAUDE_RELAY_TOKEN=attacker"},   # str.splitlines() splits here
+            {"CLAUDE_RELAY_HOST": "0.0.0.0 #frag"},                         # dotenv would cut at " #"
+            {"STICKER_PASTE": "gif"},
+            {"WCDB_KEY": "0" * 64},                                         # not allow-listed
+            {"PIPELINE_V2": "single"},                                      # the chat bot's: not any more
         ]
         for values in cases:
             with self.subTest(values=values):
@@ -152,19 +158,20 @@ class AdvancedPostTests(_TempEnv):
         self.assertEqual(self.env.read_text(encoding="utf-8"), before)
 
     def test_cross_field_check_runs_validate_config(self):
-        status, body = _request("/api/advanced", "POST", {"values": {"MEMORY_EMBEDDINGS": "on", "EMBEDDING_API_KEY": ""}})
+        status, body = _request("/api/advanced", "POST", {"values": {"PRM_COPILOT": "on"}})
         self.assertFalse(body["ok"])
-        self.assertIn("MEMORY_EMBEDDINGS", body["errors"])
+        self.assertIn("PRM_COPILOT", body["errors"])
         status, body = _request("/api/advanced", "POST", {"values": {
-            "MEMORY_EMBEDDINGS": "on", "EMBEDDING_MODEL": "BAAI/bge-m3", "EMBEDDING_BASE_URL": "http://127.0.0.1:8000/v1",
+            "PRM_COPILOT": "on", "CLAUDE_RELAY": "on", "ADMIN_WXID": "wxid_admin",
         }})
         self.assertTrue(body["ok"], body)
 
     def test_masked_secret_keeps_the_stored_one(self):
-        status, body = _request("/api/advanced", "POST", {"values": {"EMBEDDING_API_KEY": "sk-s***0000", "SEND_BUBBLES": "on"}})
+        status, body = _request("/api/advanced", "POST", {"values": {"CLAUDE_RELAY_TOKEN": "stor***0000",
+                                                                     "SEND_TYPING_DELAY": "on"}})
         self.assertTrue(body["ok"], body)
-        self.assertEqual(body["saved"], ["SEND_BUBBLES"])
-        self.assertEqual(self.env_values()["EMBEDDING_API_KEY"], "sk-stored-secret-0000")
+        self.assertEqual(body["saved"], ["SEND_TYPING_DELAY"])
+        self.assertEqual(self.env_values()["CLAUDE_RELAY_TOKEN"], "stored-secret-token-0000")
 
     def test_every_duplicate_of_a_key_is_replaced(self):
         self.env.write_text("SEND_QUIET=off\nAI_BACKEND=deepseek\nSEND_QUIET=on\n", encoding="utf-8")
@@ -174,14 +181,14 @@ class AdvancedPostTests(_TempEnv):
 
     def test_cross_origin_post_is_refused(self):
         before = self.env.read_text(encoding="utf-8")
-        status, body = _request("/api/advanced", "POST", {"values": {"SEND_BUBBLES": "on"}},
+        status, body = _request("/api/advanced", "POST", {"values": {"SEND_TYPING_DELAY": "on"}},
                                 headers={"Origin": "http://evil.example"})
         self.assertEqual(status, 403)
         self.assertEqual(self.env.read_text(encoding="utf-8"), before)
 
     def test_a_get_with_a_body_does_not_write(self):
         before = self.env.read_text(encoding="utf-8")
-        status, body = _request("/api/advanced", "GET", {"values": {"SEND_BUBBLES": "on"}})
+        status, body = _request("/api/advanced", "GET", {"values": {"SEND_TYPING_DELAY": "on"}})
         self.assertEqual(status, 200)
         self.assertIn("groups", body)
         self.assertEqual(self.env.read_text(encoding="utf-8"), before)
@@ -243,47 +250,11 @@ class AllowListMatchesValidateConfig(unittest.TestCase):
                 self.assertEqual(adv.check_value(key, field["default"]), "")
                 for option in field.get("options", []):
                     self.assertEqual(adv.check_value(key, option), "")
-                    # a local route and the local fallback need the model name (cross-field)
-                    extra = {"LOCAL_MODEL": "qwen3.5:4b"} if key in ("MODEL_ROUTE", "CLOUD_FALLBACK") else {}
-                    self.assertEqual(self._validate_only(key, option, **extra), "")
-
-
-class LocalModelSettings(_TempEnv):
-    """MODEL_ROUTE / LOCAL_* from main 25f3494."""
-    shared_text = "LOCAL_EXTRA_BODY=\n"
-
-    def test_empty_extra_body_stays_empty(self):
-        from src.web import advanced_config as adv
-
-        self.assertEqual(adv.normalize("LOCAL_EXTRA_BODY", ""), "")           # "" = send nothing extra
-        self.assertIn("enable_thinking", adv.normalize("LOCAL_EXTRA_BODY", None))
-        self.assertIn("reasoning_effort", adv.normalize("LOCAL_EXTRA_BODY", None))
-        _, body = _request("/api/advanced")
-        fields = {f["key"]: f for g in body["groups"] for f in g["fields"]}
-        self.assertEqual(fields["LOCAL_EXTRA_BODY"]["value"], "")
-
-    def test_json_and_task_checks(self):
-        from src.web import advanced_config as adv
-
-        self.assertEqual(adv.check_value("LOCAL_EXTRA_BODY", '{"reasoning_effort": "none"}'), "")
-        self.assertNotEqual(adv.check_value("LOCAL_EXTRA_BODY", "[1, 2]"), "")
-        self.assertNotEqual(adv.check_value("LOCAL_EXTRA_BODY", "{broken"), "")
-        self.assertEqual(adv.check_value("LOCAL_TASKS", "chat, Memory"), "")
-        self.assertEqual(adv.normalize("LOCAL_TASKS", "chat, Memory"), "chat,memory")
-        self.assertNotEqual(adv.check_value("LOCAL_TASKS", "chat,vision"), "")
-        self.assertNotEqual(adv.check_value("LOCAL_BASE_URL", "127.0.0.1:11434"), "")
-
-    def test_local_route_needs_a_model_name(self):
-        status, body = _request("/api/advanced", "POST", {"values": {"MODEL_ROUTE": "local"}})
-        self.assertFalse(body["ok"])
-        self.assertIn("MODEL_ROUTE", body["errors"])
-        status, body = _request("/api/advanced", "POST", {"values": {"MODEL_ROUTE": "split", "LOCAL_MODEL": "qwen3.5:4b", "LOCAL_TASKS": "memory,proactive"}})
-        self.assertTrue(body["ok"], body)
-        self.assertEqual(self.env_values()["LOCAL_TASKS"], "memory,proactive")
+                    self.assertEqual(self._validate_only(key, option), "")
 
 
 class OnboardingManualKeyTests(_TempEnv):
-    shared_text = "AI_BACKEND=deepseek\n"
+    shared_text = ""
     local_text = ""
 
     def setUp(self):
@@ -314,7 +285,7 @@ class OnboardingManualKeyTests(_TempEnv):
         self.assertEqual(self.local.read_text(encoding="utf-8"), "")
 
 
-class OnboardingStep4WithMachineEnv(_TempEnv):
+class OnboardingStep3WithMachineEnv(_TempEnv):
     """With a separate machine .env.local the key stays out of the shared .env."""
     shared_text = ""
     local_text = ""
@@ -326,130 +297,72 @@ class OnboardingStep4WithMachineEnv(_TempEnv):
         self.addCleanup(lambda: (server._onboarding_data.clear(), server._onboarding_data.update(saved)))
         key = "cd" * 32
         _request("/api/onboarding/step2", "POST", {"bot_display_name": "bot", "wcdb_key": key})
-        status, body = _request("/api/onboarding/step4", "POST", {"fun_enabled": True})
+        status, body = _request("/api/onboarding/step3", "POST", {"private_chat_enabled": True})
         self.assertTrue(body["ok"], body)
         self.assertNotIn("WCDB_KEY", self.env_values())
         self.assertEqual(self.env_values()["ONBOARDING_DONE"], "true")
         self.assertEqual(self.env_values(self.local)["WCDB_KEY"], key)
 
 
-class OnboardingWritesFunEnabled(_TempEnv):
+class OnboardingWritesOnlyTheGatewaysKeys(_TempEnv):
     shared_text = ""
     local_text = ""
 
-    def test_step4_writes_fun_enabled(self):
+    def test_step3_writes_the_private_chats_and_no_chat_switch(self):
         from src.web import server
 
         saved = dict(server._onboarding_data)
         self.addCleanup(lambda: (server._onboarding_data.clear(), server._onboarding_data.update(saved)))
-        status, body = _request("/api/onboarding/step4", "POST", {"fun_enabled": False})
+        _request("/api/onboarding/step2", "POST", {"bot_display_name": "商务号", "wechat_groups": "*"})
+        status, body = _request("/api/onboarding/step3", "POST", {"private_chat_enabled": True,
+                                                                   "private_chats": "wxid_me"})
         self.assertTrue(body["ok"], body)
-        self.assertEqual(self.env_values()["FUN_ENABLED"], "false")
+        values = self.env_values()
+        self.assertEqual((values["PRIVATE_CHAT_ENABLED"], values["PRIVATE_CHATS"]), ("true", "wxid_me"))
+        self.assertEqual(values["BOT_DISPLAY_NAME"], "商务号")
+        for gone in ("AI_BACKEND", "DEEPSEEK_API_KEY", "FUN_ENABLED", "PROACTIVE_ENABLED", "STICKY_MENTION_ENABLED",
+                     "FOLLOWUP_LISTEN_ENABLED", "WEB_SEARCH_ENABLED", "MODEL_ROUTE"):
+            self.assertNotIn(gone, values)
+
+    def test_there_is_no_fourth_step(self):
+        status, body = _request("/api/onboarding/step4", "POST", {"fun_enabled": True})
+        self.assertEqual(status, 405)
 
 
-class LoadConfigPersonaAndNames(_TempEnv):
+class LoadConfigNames(_TempEnv):
     shared_text = (
-        "CHAT_PERSONA_PROFILE=yang_yujing\n"
-        "CHAT_PERSONA_NAME=小柔\n"
-        "CHAT_PERSONA_PROMPT=我的自定义人设\\n第二行\n"
-        "CHAT_MAX_CHARS=77\n"
+        "CHAT_PERSONA_PROFILE=custom\n"                 # an old chat-bot line: never read, never shown
         "WECHAT_GROUPS=%E6%B5%8B%E8%AF%95%2C%E7%BE%A4,%E8%AF%BB%E4%B9%A6%E7%BE%A4\n"
         "PRIVATE_CHATS=*\n"
     )
-
-    def test_custom_values_stay_while_yang_is_selected(self):
-        _, body = _request("/api/load-config")
-        cfg = body["config"]
-        self.assertEqual(cfg["chat_persona_profile"], "yang_yujing")
-        self.assertEqual(cfg["chat_persona_name"], "小柔")
-        self.assertEqual(cfg["chat_persona_prompt"], "我的自定义人设\n第二行")
-        self.assertEqual(cfg["chat_max_chars"], 77)
-        self.assertEqual(cfg["yang_preset"]["name"], "假企鹅")
-        self.assertTrue(cfg["yang_preset"]["prompt"])
-
-    def test_switching_back_to_custom_keeps_the_custom_persona(self):
-        _, body = _request("/api/load-config")
-        cfg = dict(body["config"])
-        cfg["chat_persona_profile"] = "custom"
-        cfg.pop("yang_preset")
-        status, res = _request("/api/config", "POST", cfg)
-        self.assertTrue(res["ok"], res)
-        values = self.env_values()
-        self.assertEqual(values["CHAT_PERSONA_PROFILE"], "custom")
-        self.assertEqual(values["CHAT_PERSONA_NAME"], "小柔")
-        self.assertEqual(values["CHAT_PERSONA_PROMPT"], "我的自定义人设\\n第二行")
-        self.assertEqual(values["CHAT_MAX_CHARS"], "77")
 
     def test_names_come_back_as_lists(self):
         _, body = _request("/api/load-config")
         cfg = body["config"]
         self.assertEqual(cfg["wechat_groups_list"], ["测试,群", "读书群"])
         self.assertEqual(cfg["private_chats_list"], [])
+        self.assertFalse([k for k in cfg if k.startswith(("chat_", "yang_", "feishu_", "todo_"))])
 
-    def test_export_has_no_preset(self):
-        from src.web.server import _persona_config_from_raw
-
-        self.assertNotIn("yang_preset", _persona_config_from_raw({"CHAT_PERSONA_PROFILE": "yang_yujing"}))
-
-
-class OnboardingLocalModel(_TempEnv):
-    shared_text = ""
-    local_text = ""
-
-    def setUp(self):
-        super().setUp()
-        from src.web import server
-
-        saved = dict(server._onboarding_data)
-        self.addCleanup(lambda: (server._onboarding_data.clear(), server._onboarding_data.update(saved)))
-
-    def test_rejects_a_local_route_without_model_or_with_a_bad_url(self):
-        for payload in (
-            {"model_route": "local", "local_base_url": "http://127.0.0.1:11434/v1", "local_model": ""},
-            {"model_route": "local", "local_base_url": "127.0.0.1:11434", "local_model": "qwen"},
-            {"model_route": "local", "local_base_url": "http://x", "local_model": "a\u2028b"},
-            {"model_route": "split"},
-        ):
-            with self.subTest(payload=payload):
-                _, body = _request("/api/onboarding/step3", "POST", payload)
-                self.assertFalse(body["ok"])
-
-    def test_local_route_is_written_by_step4(self):
-        _request("/api/onboarding/step3", "POST", {
-            "model_route": "local", "local_base_url": "http://192.168.1.5:1234/v1", "local_model": "qwen3.5:4b",
-        })
-        status, body = _request("/api/onboarding/step4", "POST", {})
-        self.assertTrue(body["ok"], body)
-        values = self.env_values()
-        self.assertEqual(values["MODEL_ROUTE"], "local")
-        self.assertEqual(values["LOCAL_BASE_URL"], "http://192.168.1.5:1234/v1")
-        self.assertEqual(values["LOCAL_MODEL"], "qwen3.5:4b")
-        self.assertEqual(values["LOCAL_API_KEY"], "")
-
-    def test_cloud_route_leaves_local_settings_alone(self):
-        self.env.write_text("MODEL_ROUTE=split\nLOCAL_MODEL=keep\n", encoding="utf-8")
-        _request("/api/onboarding/step3", "POST", {"ai_backend": "deepseek", "deepseek_api_key": "sk-0123456789"})
-        _request("/api/onboarding/step4", "POST", {})
-        values = self.env_values()
-        self.assertEqual(values["MODEL_ROUTE"], "split")
-        self.assertEqual(values["LOCAL_MODEL"], "keep")
+    def test_saving_leaves_the_old_lines_alone(self):
+        _, body = _request("/api/load-config")
+        status, res = _request("/api/config", "POST", dict(body["config"]))
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(self.env_values()["CHAT_PERSONA_PROFILE"], "custom")
 
 
-class SandboxUsesTheChatModel(unittest.TestCase):
-    def test_reply_comes_from_create_models_chat(self):
-        from src.config import BotConfig
-
-        chat_model = MagicMock()
-        chat_model.chat.return_value = "本地回复"
-        models = MagicMock(chat=chat_model)
-        with patch("dotenv.load_dotenv"), \
-                patch("src.config.find_env_file", return_value=None), \
-                patch("src.config.load_config", return_value=BotConfig(model_route="local", local_model="qwen")), \
-                patch("src.summarize.create_models", return_value=models) as create:
-            status, body = _request("/api/sandbox/test", "POST", {"message": "你好"})
-        self.assertTrue(body["ok"], body)
-        self.assertEqual(body["reply"], "本地回复")
-        create.assert_called_once()
+class TheChatEndpointsAreGone(_TempEnv):
+    def test_they_answer_nothing(self):
+        for path in ("/api/sandbox/test", "/api/nicknames", "/api/todos/action", "/api/lots", "/api/welcome/templates"):
+            with self.subTest(path=path):
+                status, body = _request(path, "POST", {"message": "你好"})
+                self.assertEqual(status, 405)
+        for path in ("/api/nicknames/groups", "/api/todos", "/api/lots", "/api/welcome/templates"):
+            with self.subTest(path=path):
+                try:
+                    status, body = _request(path)
+                except ValueError:              # not JSON: the console page, no API behind the path
+                    continue
+                self.assertNotEqual((status, (body or {}).get("ok")), (200, True))
 
 
 if __name__ == "__main__":

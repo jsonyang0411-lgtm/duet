@@ -8,13 +8,13 @@ import { SecDeco, Field, TextInput, Seg, Switch, Note, ChipsInput } from './ui'
 import { randomToken } from './AdvancedPanel'
 
 // First run of the agent console: get the WeChat key, set up WeChat, set up the
-// relay to Claude Code on the Mac. Step 3 sends the server's onboarding steps 3
-// and 4 with quiet defaults (no AI service, chat features off: this bot only
-// relays), which write .env (ONBOARDING_DONE=true), then saves the relay settings.
+// relay to Claude Code on the Mac. Step 3 sends the server's onboarding step 3
+// (which private chats to read), which writes .env (ONBOARDING_DONE=true), then
+// saves the relay settings. The bot has no chat features to switch on or off.
 
 const STEPS = [
   { id: 1, en: 'KEY', title: '微信密钥', sub: '让机器人能读微信消息' },
-  { id: 2, en: 'WECHAT', title: '微信设置', sub: '机器人账号、在哪些群' },
+  { id: 2, en: 'WECHAT', title: '微信设置', sub: '机器人账号、读哪些群' },
   { id: 3, en: 'RELAY', title: '中转设置', sub: '谁能发任务、Mac 怎么连' },
 ]
 
@@ -29,7 +29,7 @@ export default function Onboarding({ onDone }) {
 
   const LINES = {
     1: '先拿到微信密钥，才收得到消息。',
-    2: '我在微信里叫什么？听哪些群？',
+    2: '我在微信里叫什么？读哪些群？',
     3: '最后：你私聊发的 cc 任务我转给 Mac。',
   }
 
@@ -220,11 +220,11 @@ function StepWechat({ keyInfo, onBack, onNext }) {
     <section className="ch card">
       <div className="stack" style={{ gap: 16 }}>
         {keyInfo?.wxid && <Note kind="ok">微信账号 <span className="mono">{keyInfo.wxid}</span>{keyInfo.manualKey ? '（手动填写的密钥）' : ''}</Note>}
-        <Field label="机器人的微信昵称" hint="和机器人账号在群里显示的名字一致，群友 @ 这个名字它才知道是在叫它">
-          <TextInput value={name} onChange={setName} placeholder="例如 小助手" autoFocus />
+        <Field label="机器人的微信昵称" hint="机器人账号在微信里显示的名字，用来认出它自己发的消息">
+          <TextInput value={name} onChange={setName} placeholder="例如 商务号" autoFocus />
         </Field>
-        <Field label="在哪些群工作">
-          <div><Seg value={mode} onChange={setMode} options={[{ value: 'all', label: '所有群' }, { value: 'some', label: '只在这些群' }]} /></div>
+        <Field label="读取哪些群" hint="群消息只记录，机器人从不在群里说话（@ 它也不回）">
+          <div><Seg value={mode} onChange={setMode} options={[{ value: 'all', label: '所有群' }, { value: 'some', label: '只读这些群' }]} /></div>
         </Field>
         {mode === 'some' && <ChipsInput split={false} value={groups} onChange={setGroups} placeholder="输入群名（和微信里完全一致）后按回车，一次一个" />}
         <Field label="微信后端" hint={isMac ? '这台是 Mac：用 WeFlow 或界面操作' : 'Windows 用 WCDB 直读'}>
@@ -266,11 +266,8 @@ function StepRelay({ onBack, onDone }) {
     setBusy(true); setErr('')
     try {
       if (!written) {
-        // This console only relays: no AI service, the chat features off.
-        await onboardingStep('/api/onboarding/step3', { ai_backend: 'deepseek', model_route: 'cloud' })
-        await onboardingStep('/api/onboarding/step4', {
-          fun_enabled: false, sticky_mention_enabled: false, followup_listen_enabled: false,
-          message_burst_enabled: true, web_search_enabled: false, proactive_enabled: false,
+        await onboardingStep('/api/onboarding/step3', {
+          message_burst_enabled: true,
           private_chat_enabled: relayOn,
           private_chats: relayOn && onlyMe ? encodeURIComponent(id) : '*',
         })
@@ -296,8 +293,8 @@ function StepRelay({ onBack, onDone }) {
           <TextInput value={wxid} onChange={setWxid} mono placeholder="wxid_…" autoFocus />
         </Field>
         <div className="toggle-row">
-          <div className="tr-text"><span className="tr-title">只做中转</span><div className="f-hint">只处理 cc 任务：群里被 @、别人的私聊一律不回，也不调用 AI（推荐）</div></div>
-          <Switch checked={relayOnly} onChange={setRelayOnly} label="只做中转" />
+          <div className="tr-text"><span className="tr-title">私聊不用打 cc</span><div className="f-hint">你私聊发的每句话都当任务（「添加好友」「查状态」这类管理员命令除外）；关掉时只有 cc 开头的才是任务。群聊和别人的私聊机器人都不回</div></div>
+          <Switch checked={relayOnly} onChange={setRelayOnly} label="私聊不用打 cc" />
         </div>
         <div className="toggle-row">
           <div className="tr-text"><span className="tr-title">只读你的私聊</span><div className="f-hint">其他人的私聊不会被读取（推荐）</div></div>

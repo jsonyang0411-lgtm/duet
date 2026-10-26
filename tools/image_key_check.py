@@ -12,7 +12,7 @@ What it does, step by step (it only READS WeChat's files and memory, never chang
   3. works out the XOR key from the thumbnails (*_t.dat)
   4. for V2: searches WeChat's memory for the AES key (10-60 s; saved in data\\wechat_image_keys.json,
      so the bot never needs to search again)
-  5. decodes the newest picture to data\\vision_cache\\image_key_check.<ext> so you can open it
+  5. decodes the newest picture to data\\media_cache\\image_key_check.<ext> so you can open it
 
 It prints counts and sizes only, and the first 4 characters of a key, never a whole key.
 
@@ -108,7 +108,7 @@ def main(argv=None, root: Path = ROOT) -> int:
             ok = False
             print(f"  FAIL the newest picture ({sample.stat().st_size} bytes) could not be decoded")
             continue
-        out = Path("data") / "vision_cache" / f"image_key_check.{ext}"
+        out = Path("data") / "media_cache" / f"image_key_check.{ext}"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(picture)
         size = ""

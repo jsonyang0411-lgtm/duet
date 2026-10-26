@@ -1,4 +1,4 @@
-"""Tests for the observe-only decision trace / model-call log (src/decision_trace.py)."""
+"""Tests for the observe-only decision trace (src/decision_trace.py)."""
 
 import json
 import threading
@@ -18,7 +18,6 @@ from src.decision_trace import (
     OUTCOME_IGNORED,
     OUTCOME_REPLY,
     OUTCOME_SILENT,
-    sha1_short,
 )
 
 
@@ -39,7 +38,7 @@ def _msg(**overrides) -> dict:
         "group_name": "测试群",
         "sender_id": "wxid_a",
         "sender_name": "阿明",
-        "content": "@小助手 今天吃什么",
+        "content": "cc 看一下今天的发货",
         "msg_type": 1,
         "timestamp": 1_760_000_000,
         "is_at_mentioned": True,
@@ -82,39 +81,38 @@ class JsonlSinkTests(unittest.TestCase):
 class DecisionTracerTests(unittest.TestCase):
     def make(self, tmp, **kwargs):
         decision = JsonlSink(Path(tmp) / "decision.jsonl")
-        llm = JsonlSink(Path(tmp) / "llm.jsonl")
-        tracer = DecisionTracer(decision, llm, clock=lambda: 1_760_000_005.0, **kwargs)
-        return tracer, Path(tmp) / "decision.jsonl", Path(tmp) / "llm.jsonl"
+        tracer = DecisionTracer(decision, clock=lambda: 1_760_000_005.0, **kwargs)
+        return tracer, Path(tmp) / "decision.jsonl", None
 
     def test_reply_record_has_header_steps_and_outcome(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             tracer, decision_path, _ = self.make(tmp)
             trace = tracer.begin(_msg())
             trace.step("stored")
-            trace.reason("at_mention")
-            trace.reason("chat_reply", handler="chat")
-            trace.finish_reply("今天吃火锅吧")
+            trace.reason("prm_copilot")
+            trace.reason("claude_relay", job="j1")
+            trace.finish_reply("收到，已转给 Mac")
 
             (rec,) = _read(decision_path)
             self.assertEqual(rec["kind"], "decision")
             self.assertEqual(rec["outcome"], OUTCOME_REPLY)
-            self.assertEqual(rec["reason"], "chat_reply")        # last reason wins
-            self.assertEqual(rec["reply_chars"], 6)
+            self.assertEqual(rec["reason"], "claude_relay")      # last reason wins
+            self.assertEqual(rec["reply_chars"], 10)
             self.assertEqual(rec["chat_id"], "g1@chatroom")
             self.assertEqual(rec["message_id"], "m1")
             self.assertEqual(rec["age_sec"], 5)
             self.assertTrue(rec["flags"]["at"])
             self.assertEqual(
                 [s["code"] for s in rec["steps"]],
-                ["stored", "at_mention", "chat_reply"],
+                ["stored", "prm_copilot", "claude_relay"],
             )
-            self.assertEqual(rec["steps"][2]["handler"], "chat")
+            self.assertEqual(rec["steps"][2]["job"], "j1")
 
     def test_silent_vs_ignored_outcome(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             tracer, decision_path, _ = self.make(tmp)
             t = tracer.begin(_msg(message_id="m2"))
-            t.reason("proactive_gate_blocked", gate="rate")
+            t.reason("prm_copilot")
             t.finish_reply(None)
             t = tracer.begin(_msg(message_id="m3"))
             t.ignore("self_message")
@@ -156,36 +154,15 @@ class DecisionTracerTests(unittest.TestCase):
             (rec,) = _read(decision_path)
             self.assertNotIn("content", rec)
 
-    def test_llm_call_is_linked_to_current_message(self):
+    def test_a_creator_message_is_redacted(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
-            tracer, decision_path, llm_path = self.make(tmp)
-            trace = tracer.begin(_msg())
-            tracer.record_llm_call(
-                call="chat", model="m", latency_ms=12.5,
-                system_prompt="SYS", user_prompt="USER",
-                raw_reply="raw", cleaned_reply="clean",
-            )
-            trace.finish_reply("clean")
-
-            (call,) = _read(llm_path)
+            tracer, decision_path, _ = self.make(tmp)
+            trace = tracer.begin(_msg(content="我的电话 13800000000"))
+            trace.redact("[已登记达人的私聊，内容不记录]")
+            trace.finish_reply(None)
             (rec,) = _read(decision_path)
-            self.assertEqual(call["message_id"], "m1")
-            self.assertEqual(call["system_prompt"], "SYS")
-            self.assertEqual(call["system_prompt_sha"], sha1_short("SYS"))
-            self.assertEqual(rec["llm_calls"], [call["call_id"]])
-            self.assertEqual(rec["llm_ms"], 12.5)
-
-    def test_prompts_can_be_withheld(self):
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
-            tracer, _, llm_path = self.make(tmp, include_prompts=False)
-            tracer.record_llm_call(
-                call="chat", system_prompt="SECRET PERSONA", user_prompt="u",
-                raw_reply="r", cleaned_reply="c",
-            )
-            (call,) = _read(llm_path)
-            self.assertNotIn("system_prompt", call)
-            self.assertNotIn("user_prompt", call)
-            self.assertEqual(call["system_prompt_chars"], len("SECRET PERSONA"))
+            self.assertEqual(rec["content"], "[已登记达人的私聊，内容不记录]")
+            self.assertNotIn("13800000000", decision_path.read_text(encoding="utf-8"))
 
     def test_current_trace_is_per_thread(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -210,19 +187,18 @@ class DecisionTracerTests(unittest.TestCase):
 
 
 class FromConfigTests(unittest.TestCase):
-    def test_default_botconfig_enables_both_sinks(self):
+    def test_default_botconfig_enables_the_trace(self):
         tracer = DecisionTracer.from_config(BotConfig())
         self.assertIsInstance(tracer, DecisionTracer)
         self.assertTrue(tracer.enabled)
 
     def test_disabled_config_gives_noop_tracer(self):
-        cfg = BotConfig(decision_trace_enabled=False, llm_call_log_enabled=False)
+        cfg = BotConfig(decision_trace_enabled=False)
         tracer = DecisionTracer.from_config(cfg)
         self.assertIsInstance(tracer, NullTracer)
         trace = tracer.begin(_msg())
         self.assertIsInstance(trace, NullTrace)
         trace.finish_reply("x")            # no-ops must not raise
-        tracer.record_llm_call(call="chat")
 
     def test_mock_or_bare_configs_never_enable_tracing(self):
         # Tests build routers with MagicMock / SimpleNamespace configs; their
@@ -236,17 +212,12 @@ class FromConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             cfg = BotConfig(
                 decision_trace_path=str(Path(tmp) / "d.jsonl"),
-                llm_call_log_path=str(Path(tmp) / "l.jsonl"),
-                llm_call_log_prompts=False,
                 decision_trace_content_chars=3,
             )
             tracer = DecisionTracer.from_config(cfg)
             tracer.begin(_msg(content="abcdef")).finish_reply(None)
-            tracer.record_llm_call(call="chat", system_prompt="S", user_prompt="U")
             (rec,) = _read(Path(tmp) / "d.jsonl")
-            (call,) = _read(Path(tmp) / "l.jsonl")
             self.assertEqual(rec["content"], "abc…")
-            self.assertNotIn("system_prompt", call)
 
 
 if __name__ == "__main__":

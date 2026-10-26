@@ -35,7 +35,7 @@ collect_ignore = []
 if importlib.util.find_spec("playwright") is None:
     collect_ignore.append("test_functional.py")
 
-_ISOLATE_CWD = {"test_feishu_export.py", "test_wcdb_backend.py"}
+_ISOLATE_CWD = {"test_wcdb_backend.py"}
 
 
 @pytest.fixture(autouse=True)
@@ -47,10 +47,10 @@ def _isolate_runtime_files(request, tmp_path, monkeypatch):
     yield
 
 
-# BotConfig enables the decision trace / model-call log by default, which would
-# make every router built with a stock config write data/*.jsonl into the
-# working directory.  Only the tests that exercise tracing opt back in.
-_TRACE_ENABLED_TESTS = {"test_decision_trace.py", "test_router_trace_hooks.py"}
+# BotConfig enables the decision trace by default, which would make every router
+# built with a stock config write data/*.jsonl into the working directory.  Only
+# the tests that exercise tracing opt back in.
+_TRACE_ENABLED_TESTS = {"test_decision_trace.py"}
 
 
 @pytest.fixture(autouse=True)

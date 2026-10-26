@@ -38,7 +38,7 @@ Windows 上的机器人只负责收发微信消息。你私聊机器人发 `cc �
 - Mac 上改了 `config.json`（比如加项目），worker 会自动重新读取，不用重启。
 - 结果太长（超过 `CLAUDE_RELAY_MAX_CHARS`，默认 1500 字）时，Windows 机器人会把完整结果存成 `中转结果-17.txt` 发给你，再发一条带开头的消息。用 `CLAUDE_RELAY_LONG_FILE=off` 关掉，或者机器人不能发文件（macOS 后端）时，照旧截断。
 - 任务排过队（前面有任务、或者 Mac 当时不在线）的话，开始时会说「#17 开始了」。做得久的任务每 3 分钟发一次进度，比如「#17 进行中（6分钟）：第 14 步 · 改 service.py · 计划 3/7」，进度没变就不发。间隔用 Windows 上的 `CLAUDE_RELAY_PROGRESS_MIN` 改，0 表示不发。`cc 状态` 里也能看到正在做的那一步。
-- 只认 `CLAUDE_RELAY_WXIDS`（不填就是 `ADMIN_WXID`）发来的**私聊**。群里的消息、别人发的 `cc` 都当普通消息处理。
+- 只认 `CLAUDE_RELAY_WXIDS`（不填就是 `ADMIN_WXID`）发来的**私聊**。群里的消息、别人发的 `cc` 机器人只记录、不回复（它没有聊天功能）。
 - 超过 5 分钟的旧消息不会执行，防止机器人重启时把历史消息当成新任务。
 
 ## Windows 端（机器人）

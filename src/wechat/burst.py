@@ -1,7 +1,7 @@
 """Small burst coalescing for WeChat message bubbles.
 
 WeChat users often split one thought across several short bubbles.  The bot
-should answer the thought, not each bubble.
+handles the thought (one relay task, one creator turn), not each bubble.
 """
 
 from __future__ import annotations
@@ -9,9 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import time
-
-
-_BURST_MEDIA_TYPES = {3, 47}
 
 
 @dataclass
@@ -37,21 +34,16 @@ class MessageBurstBuffer:
         self.max_chars = max(1, int(max_chars))
         self._pending: dict[tuple[str, str, bool], _PendingBurst] = {}
 
-    def push(self, message: dict, *, allow_nontext: bool = False,
-             now: float | None = None) -> list[dict]:
+    def push(self, message: dict, *, now: float | None = None) -> list[dict]:
         """Add one standardized message and return messages ready to handle.
 
-        Media stays immediate by default so regular mention/image behavior is
-        unchanged.  A full-feed persona can opt in to combining image/sticker
-        placeholders with the surrounding short text from the same sender.
+        Only text is held; a picture, file or voice message is handed on at once.
         """
         if now is None:
             now = time.monotonic()
         ready = self.flush_due(now=now)
 
-        if not self.enabled or not self._can_buffer(
-            message, allow_nontext=allow_nontext,
-        ):
+        if not self.enabled or not self._can_buffer(message):
             ready.append(message)
             return ready
 
@@ -110,14 +102,11 @@ class MessageBurstBuffer:
             bool(message.get("is_group", True)),
         )
 
-    def _can_buffer(self, message: dict, *, allow_nontext: bool) -> bool:
+    def _can_buffer(self, message: dict) -> bool:
         if message.get("is_system_join"):
             return False
         try:
-            msg_type = int(message.get("msg_type", 1) or 1)
-            if msg_type != 1 and not (
-                allow_nontext and msg_type in _BURST_MEDIA_TYPES
-            ):
+            if int(message.get("msg_type", 1) or 1) != 1:
                 return False
         except (TypeError, ValueError):
             return False
@@ -159,16 +148,6 @@ class MessageBurstBuffer:
         merged["is_reply_to_bot"] = any(bool(message.get("is_reply_to_bot")) for message in messages)
         merged["_burst_count"] = len(messages)
         merged["_burst_message_ids"] = ids
-        contains_media = any(
-            self._message_type(message) in _BURST_MEDIA_TYPES
-            for message in messages
-        )
-        if contains_media:
-            # A mixed turn contains already-normalized [图片]/[表情] text.
-            # Mark it as text so the router receives the complete segment
-            # instead of dropping its text because the last bubble was media.
-            merged["msg_type"] = 1
-            merged["_burst_contains_media"] = True
 
         quote_source = next(
             (

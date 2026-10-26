@@ -1,6 +1,6 @@
 """Reading small JSON data files that a person edits by hand.
 
-Personas, the persona map and the nickname rules are such files.  People save
+The sticker list (``data/stickers/stickers.json``) is such a file.  People save
 them with Notepad (a BOM, or the system code page instead of UTF-8) and make
 typos, so reading them has to fail in one predictable way: ``DataFileError``,
 which callers log and skip.  A file is never allowed to stop the bot from

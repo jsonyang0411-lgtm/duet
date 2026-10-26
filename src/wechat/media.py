@@ -1,11 +1,17 @@
-"""On-demand image/sticker understanding helpers."""
+"""Pictures WeChat keeps on disk: find the one a message refers to, and make it readable.
+
+The relay and the PRM copilot forward a picture a person sent (src/relay/attachments.py):
+``find_recent_image_path`` looks for the message's picture file (WeChat 4 keeps a chat's
+pictures in ``msg/attach/<md5 of the chat id>/<YYYY-MM>/Img``) and ``readable_image``
+turns WeChat's ``.dat`` caches into an ordinary picture (``decode_wechat_dat_image``:
+WeChat 3's XOR, WeChat 4's AES + XOR through ``src/wechat/image_key.py``).  Decoded
+pictures go to ``data/media_cache``.
+"""
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import logging
-import mimetypes
 import os
 import re
 import time
@@ -23,45 +29,8 @@ MIN_MEDIA_BYTES = 128
 DEFAULT_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_SCANNED_FILES = 30000          # per search root
 MAX_PICTURES_TRIED = 6             # candidate pictures (not files) tried before giving up
+CACHE_DIR = Path("data") / "media_cache"
 _MONTH_DIR = re.compile(r"^(\d{4})-(\d{2})$")
-
-_IMAGE_WORDS = (
-    "图", "图片", "照片", "相片", "表情", "表情包", "截图",
-)
-_QUESTION_WORDS = (
-    "什么", "啥", "看", "识别", "内容", "意思", "什么意思",
-    "写了", "写的", "是谁", "在哪", "哪里", "这张", "这个",
-    "里面", "里边", "图里", "图上", "解读",
-)
-_DIRECT_QUESTION_RE = re.compile(
-    r"(这|那|刚才|上面|前面)?(张|个)?(图|图片|照片|表情包|表情)"
-)
-# "发个害羞的表情包" / "来张图" asks the bot to SEND one (a sticker, SEND_STICKERS),
-# not to look at one.  The words in between may not cross a 这/那/看, so
-# "你发的这张图是什么" and "来看看这张图" stay image questions.
-_SEND_REQUEST_RE = re.compile(
-    r"(?:给我发|给我来|给我整|再发|再来|发|来|整|求|要|丢|甩|扔)"
-    r"(?:一)?(?:个|张|波|些|点)[^看这那]{0,8}?(?:表情包|表情|图片|照片|图)"
-)
-
-
-def is_image_question(text: str, bot_name: str = "") -> bool:
-    """Return True when a message explicitly asks about a recent image."""
-    raw = str(text or "").strip()
-    if not raw:
-        return False
-    if bot_name:
-        raw = raw.replace(f"@{bot_name}", "").replace(bot_name, "")
-    compact = re.sub(r"\s+", "", raw)
-    if not any(word in compact for word in _IMAGE_WORDS):
-        return False
-    if _SEND_REQUEST_RE.search(compact):
-        return False
-    if _DIRECT_QUESTION_RE.search(compact) and any(
-        word in compact for word in _QUESTION_WORDS
-    ):
-        return True
-    return False
 
 
 def find_existing_media_path_from_message(
@@ -86,14 +55,14 @@ def find_recent_image_path(config: Any, media_records: list[dict]) -> str:
         getattr(config, "image_vision_max_bytes", DEFAULT_MAX_IMAGE_BYTES)
         or DEFAULT_MAX_IMAGE_BYTES
     )
-    cache_dir = Path("data") / "vision_cache"
+    cache_dir = CACHE_DIR
     wechat_data_dir = str(getattr(config, "wechat_data_dir", "") or "")
     lookback_sec = int(getattr(config, "image_vision_lookback_sec", 900) or 900)
     allow_thumbnail = bool(getattr(config, "image_allow_thumbnail", True))
 
     for record in media_records:
         media_path = str(record.get("media_path", "") or "").strip()
-        prepared = prepare_image_for_model(
+        prepared = readable_image(
             media_path, cache_dir=cache_dir, max_bytes=max_bytes,
         )
         if prepared:
@@ -221,7 +190,7 @@ def locate_recent_image_file(
         return ""
 
     hint = re.sub(r"[^0-9a-zA-Z]", "", media_hint).lower()
-    cache = cache_dir or Path("data") / "vision_cache"
+    cache = cache_dir or CACHE_DIR
     base = Path(wechat_data_dir)
     budget = [MAX_SCANNED_FILES]
     pictures: list[_Picture] = []
@@ -258,7 +227,7 @@ def locate_recent_image_file(
             if picture.rank == 2 and not allow_thumbnail:
                 problems.append(f"{picture.path.name}: only a thumbnail, not wanted")
                 continue
-            prepared = prepare_image_for_model(str(picture.path), cache_dir=cache, max_bytes=max_bytes)
+            prepared = readable_image(str(picture.path), cache_dir=cache, max_bytes=max_bytes)
             if prepared:
                 logger.info("Picture found in %s: %s (%s, %.0f s from the message)", where, picture.path.name,
                             ("HD", "plain", "thumbnail")[picture.rank], picture.diff)
@@ -270,13 +239,13 @@ def locate_recent_image_file(
     return ""
 
 
-def prepare_image_for_model(
+def readable_image(
     path: str,
     *,
     cache_dir: Path,
     max_bytes: int = DEFAULT_MAX_IMAGE_BYTES,
 ) -> str:
-    """Return a model-readable image path, decoding WeChat .dat if needed."""
+    """An ordinary picture file for ``path`` (a WeChat .dat decoded into ``cache_dir``), or ""."""
     if not path:
         return ""
     p = Path(path)
@@ -302,44 +271,6 @@ def prepare_image_for_model(
     return ""
 
 
-def image_to_data_url(path: str, max_bytes: int = DEFAULT_MAX_IMAGE_BYTES, *, still: bool = False) -> str:
-    """Read an image file and return a data URL for vision chat completions.
-
-    ``still=True`` (the local model) sends anything but PNG and JPEG as a PNG
-    of its first frame: Ollama refuses a GIF ("invalid image input"), and
-    WeChat stickers are often GIFs.
-    """
-    p = Path(path)
-    data = p.read_bytes()
-    if len(data) > max_bytes:
-        raise ValueError(f"Image too large for vision request: {len(data)} bytes")
-    mime = mimetypes.guess_type(str(p))[0] or _mime_from_magic(data)
-    if not mime or not mime.startswith("image/"):
-        raise ValueError(f"Unsupported image type: {p}")
-    if still and mime not in ("image/png", "image/jpeg"):
-        data, mime = first_frame_png(data), "image/png"
-    encoded = base64.b64encode(data).decode("ascii")
-    return f"data:{mime};base64,{encoded}"
-
-
-def first_frame_png(data: bytes) -> bytes:
-    """The first frame of an image (a GIF, a WebP ...) as PNG bytes."""
-    import io
-
-    from PIL import Image
-
-    try:
-        with Image.open(io.BytesIO(data)) as image:
-            image.seek(0)
-            frame = image.convert("RGBA" if "transparency" in image.info or image.mode in ("RGBA", "LA", "P")
-                                  else "RGB")
-            out = io.BytesIO()
-            frame.save(out, format="PNG")
-            return out.getvalue()
-    except Exception as exc:                              # noqa: BLE001 - a clear error for the caller
-        raise ValueError(f"Cannot convert the image to PNG: {exc}") from exc
-
-
 def decode_wechat_dat_image(path: Path, cache_dir: Path) -> Path | None:
     """Decode WeChat .dat image caches: the XOR-obfuscated ones of WeChat 3, and WeChat 4's
     AES + XOR ones (``src/wechat/image_key.py``; the first V2 picture may take a memory search)."""
@@ -350,7 +281,7 @@ def decode_wechat_dat_image(path: Path, cache_dir: Path) -> Path | None:
     if len(raw) < MIN_MEDIA_BYTES:
         return None
 
-    from .wechat.image_key import dat_version, decode_file
+    from .image_key import dat_version, decode_file
     direct_ext = _ext_from_magic(raw)
     if dat_version(raw):
         try:
@@ -422,8 +353,7 @@ def _candidate_media_roots(base: Path) -> list[Path]:
             account,
         ])
     # Some Windows WeChat builds keep downloaded custom emojis outside the
-    # account DB directory. These roots are only searched for a qualified
-    # image request/follow-up, never for ordinary messages.
+    # account DB directory.
     home = Path.home()
     roots.extend([
         home / "Documents" / "WeChat Files",
@@ -506,14 +436,3 @@ def _ext_from_magic(data: bytes) -> str:
     if data.startswith(b"BM"):
         return "bmp"
     return ""
-
-
-def _mime_from_magic(data: bytes) -> str:
-    ext = _ext_from_magic(data)
-    return {
-        "jpg": "image/jpeg",
-        "png": "image/png",
-        "gif": "image/gif",
-        "webp": "image/webp",
-        "bmp": "image/bmp",
-    }.get(ext, "application/octet-stream")

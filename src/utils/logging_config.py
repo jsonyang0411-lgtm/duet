@@ -35,5 +35,5 @@ def setup_logging(level: str = "INFO", log_file: str | None = None) -> None:
         root_logger.addHandler(file_handler)
 
     # Silence noisy third-party loggers
-    for noisy in ("httpx", "httpcore", "urllib3", "anthropic._base_client"):
+    for noisy in ("httpx", "httpcore", "urllib3"):
         logging.getLogger(noisy).setLevel(logging.WARNING)

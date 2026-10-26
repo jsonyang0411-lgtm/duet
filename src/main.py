@@ -1,4 +1,4 @@
-"""WeChat Group Chat Summarizer Bot — Entry Point.
+"""Business WeChat gateway (Claude relay, PRM copilot, WeChat edge) — Entry Point.
 
 Usage:
     python -m src.main
@@ -24,33 +24,16 @@ def _print_config_summary(config: BotConfig) -> None:
     print()
     print("Configuration Summary")
     print("─" * 50)
-    print(f"  Model Route:             {config.model_route}")
-    if config.model_route != "cloud":
-        print(f"  Local Model:             {config.local_model} ({config.local_base_url})")
-    print(f"  AI Backend:              {config.ai_backend}{' (not used)' if config.model_route == 'local' else ''}")
-    print(f"  Summarize Model:         {config.summarize_model}")
-    print(f"  Anthropic API Key:       {_mask(config.anthropic_api_key)}")
-    if config.ai_backend == "deepseek":
-        print(f"  DeepSeek API Key:        {_mask(config.deepseek_api_key)}")
-        print(f"  DeepSeek Model:          {config.deepseek_model}")
     print(f"  WeChat Backend:          {config.wechat_backend}")
     print(f"  WeChat Groups:           {config.wechat_groups or '(all)'}")
     print(f"  Bot Display Name:        {config.bot_display_name}")
     print(f"  Admin wxid:              {config.admin_wxid or '(not set)'}")
-    print(f"  Trigger Keywords:        {config.trigger_keywords}")
+    print(f"  Private Chats:           {'enabled' if config.private_chat_enabled else 'disabled'}")
+    print(f"  Claude Relay:            {config.claude_relay} (token {_mask(config.claude_relay_token)})")
+    print(f"  PRM Copilot / Edge:      {config.prm_copilot} / {config.prm_edge}")
     print(f"  DB Path:                 {config.db_path}")
     print(f"  Poll Interval (sec):     {config.poll_interval_sec}")
     print(f"  Dedup Window (sec):      {config.dedup_window_sec}")
-    print(f"  Max Msgs per Summary:    {config.max_messages_for_summary}")
-    print(f"  Chunk Size:              {config.chunk_size}")
-    print(f"  Fallback Window (hrs):   {config.fallback_window_hours}")
-    print(f"  Proactive Enabled:       {config.proactive_enabled}")
-    if config.proactive_enabled:
-        print(f"    Rate Window (sec):     {config.proactive_rate_window_sec}")
-        print(f"    Rate Quiet:            {config.proactive_rate_quiet}")
-        print(f"    Rate Casual:           {config.proactive_rate_casual}")
-        print(f"    Rate Lively:           {config.proactive_rate_lively}")
-        print(f"    Rate Burst:            {config.proactive_rate_burst}")
     print(f"  Log Level:               {config.log_level}")
     print(f"  Log File:                {config.log_file}")
     print("─" * 50)

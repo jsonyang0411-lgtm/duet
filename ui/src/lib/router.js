@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 
-// Hash routes: #/status, #/config/ai, #/modules/fun … so a reload stays put.
+// Hash routes: #/status, #/relay, #/wechat … so a reload stays put.
 export function parseHash(hash = window.location.hash) {
   const parts = hash.replace(/^#\/?/, '').split('/').filter(Boolean)
   return { page: parts[0] || 'status', sub: parts[1] || '', rest: parts.slice(2) }

@@ -91,12 +91,12 @@ def test_cancel_needs_the_running_relay_and_a_post():
     assert status == 405
 
 
-def test_onboarding_step4_takes_the_private_chats_for_the_relay():
+def test_onboarding_step3_takes_the_private_chats_for_the_relay():
     with patch("src.web.server._find_or_create_env", return_value=MagicMock()), \
             patch("src.web.server._write_onboarding_to_env"), \
             patch.dict(server._onboarding_data):                        # restored afterwards
-        status, d = call("/api/onboarding/step4", "POST", {
-            "fun_enabled": False, "private_chat_enabled": True, "private_chats": "wxid_me"})
+        status, d = call("/api/onboarding/step3", "POST", {
+            "private_chat_enabled": True, "private_chats": "wxid_me"})
         assert d["ok"] is True
         assert server._onboarding_data["private_chat_enabled"] is True
         assert server._onboarding_data["private_chats"] == "wxid_me"

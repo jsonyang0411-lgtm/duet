@@ -177,7 +177,7 @@ def test_the_backend_hands_the_title_on_with_the_message():
     raw = [{"sender_username": CREATOR, "local_type": 49, "create_time": now, "local_id": "a1",
             "message_content": "<msg><appmsg><title>新品测评</title><type>5</type></appmsg></msg>"}]
     backend = WcdbBackend(bot_display_name="机器人", groups=["*"],
-                          config=BotConfig(private_chat_enabled=True, chat_persona_profile="custom"))
+                          config=BotConfig(private_chat_enabled=True))
     backend._client = FakeClient(raw)
     backend._chat_is_group[CREATOR] = False
     backend._running = True

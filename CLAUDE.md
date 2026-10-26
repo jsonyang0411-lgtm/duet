@@ -37,7 +37,7 @@ python -m pytest tests/ -v
 ```
 
 测试分两层：
-- **单元测试** (`test_config.py`, `test_trigger.py`, `test_web_api.py`, `test_window_controller.py`) — 毫秒级，验证逻辑正确性
+- **单元测试** (`test_config.py`, `test_routing_steps.py`, `test_router_business.py`, `test_web_api.py`, `test_window_controller.py` 等) — 毫秒级，验证逻辑正确性
 - **功能测试** (`test_functional.py`) — 启动真实 HTTP 服务器 + Playwright 无头浏览器，模拟用户点击操作
 
 ### 功能测试覆盖要求
@@ -46,7 +46,8 @@ python -m pytest tests/ -v
 
 | 测试类别 | 覆盖功能 |
 |---------|---------|
-| API 端点 | Diagnose 返回结构、Sandbox 路由注册、POST allowlist、配置字段默认值、`/api/relay`（`tests/test_relay_console_api.py`）、`/api/prm` 和 `/api/prm/parties`、`/packets`、`/deals`、`/reveal`（`tests/test_prm_console_api.py`） |
+| 路由红线 | 7 个路由步骤的顺序和每一步（`tests/test_routing_steps.py`）；任何群消息（@ 机器人、cc、管理员命令、进群）、陌生私聊、旧 .env 里的聊天开关都得不到回复，被删的聊天模块不能再被导入（`tests/test_router_business.py`） |
+| API 端点 | Diagnose 返回结构、POST allowlist（聊天机器人的接口已删除）、配置字段默认值、`/api/relay`（`tests/test_relay_console_api.py`）、`/api/prm` 和 `/api/prm/parties`、`/packets`、`/deals`、`/reveal`（`tests/test_prm_console_api.py`） |
 | 页面加载 | 前端 SPA 正常渲染，不出现空白页或连接错误 |
 | 主题系统 | 浅色模式默认（明日方舟风，2026-10 改版）、Sun/Moon 按钮切换到深色、localStorage 持久化 |
 | 侧边栏导航 | 公司版（中转代理控制台）只有 运行状态/中转代理/待审批/合作单/微信连接/运行日志 六页；旧链接回到运行状态 |
@@ -59,17 +60,17 @@ python -m pytest tests/ -v
 
 ### 手动验证清单
 
-部分功能无法自动化测试（需要微信客户端或真实 API Key），修改这些模块后需手动验证：
+部分功能无法自动化测试（需要微信客户端或 Mac 上的 worker），修改这些模块后需手动验证：
 
-1. **AI 聊天/总结** — 需要真实 API Key + 微信运行
+1. **Claude 中转** — 需要微信运行 + Mac worker（`tools/claude_relay/README.md`）
 2. **密钥提取** — 需要微信客户端运行
-3. **主动发言** — 需要微信客户端 + 真实群聊
-4. **昵称管理** — 需要 data/messages.db 有数据
+3. **达人副驾驶 / 微信边缘** — 需要微信 + Mac（`prm-copilot-test.md`、`edge-protocol.md`）
+4. **好友管理** — 需要 Windows 版微信窗口（`friend-management-test.md`）
 5. **消息发送** — 需要微信窗口可见
 
 ## 项目概述
 
-webot — 微信消息总结机器人，支持 WCDB 直读数据库、AI 自动总结/聊天/主动发言。
+webot — 商务微信号的网关：Claude 中转（cc 任务交给 Mac 上的 Claude Code）、达人副驾驶 / 微信边缘、管理员的账号命令。没有聊天模型、不需要 AI 密钥；群消息和陌生人的私聊一律不回（`src/routing/steps.py`）。
 
 ## 技术栈
 
@@ -84,8 +85,12 @@ webot — 微信消息总结机器人，支持 WCDB 直读数据库、AI 自动�
 ```
 src/bot.py              - Bot 主控
 src/config.py           - 配置加载 (.env)
-src/router.py           - 消息路由
-src/summarize/          - AI 后端 (DeepSeek/Claude)
+src/router.py           - 消息路由（跑 src/routing/steps.py 的 7 个步骤）
+src/routing/            - 路由步骤：自己的消息 → 微信边缘 → 入库 → 中转 → 达人副驾驶 → 管理员命令 → 静默
+src/admin.py            - 管理员私聊命令（查状态、添加好友、同意好友、自动同意好友）
+src/relay/              - Claude 中转（Mac worker 来取任务）
+src/prm/                - 达人副驾驶（草稿、合作单、门槛、清理、平台联动）
+src/edge/               - 微信边缘（给 Mac 业务服务收发微信）
 src/wechat/             - 微信后端
   wcdb_backend.py       - WCDB 直读后端
   wcdb_client.py        - WCDB DLL 封装 (wcdb_api.dll)
@@ -93,8 +98,8 @@ src/wechat/             - 微信后端
   window_controller.py  - 微信窗口操控 (键盘导航 + 消息发送)
   helpers.py            - 去重等工具
 src/web/server.py       - Web UI 服务器 + HTTP API
-src/memory/             - 聊天记忆
-src/proactive/          - 主动发言
+src/send/、src/voice/   - 发送（打字停顿、排队、安静发送）、语音转文字
+tools/claude_relay/     - Mac 上的 worker
 desktop.py              - 桌面入口 (PyWebView)
 ui/                     - React 前端
 native/                 - 平台原生库 (windows/, macos/)

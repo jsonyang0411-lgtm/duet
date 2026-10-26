@@ -221,12 +221,13 @@ def test_a_broken_check_does_not_stop_the_relay():
 def test_admin_commands_are_recognised_without_running_them():
     from unittest.mock import MagicMock
     from src.admin import AdminCommandHandler
-    nicks, friend = MagicMock(), MagicMock()
-    admin = AdminCommandHandler(nicks, friend_manager=friend)
+    friend, status = MagicMock(), MagicMock(return_value=[])
+    admin = AdminCommandHandler(friend_manager=friend, status=status)
     for text in ("添加好友 abc 你好", "加好友 abc", "同意好友", "自动同意好友 开", "关闭自动同意",
-                 "改名 wxid_a = 张三", "删除昵称 wxid_a", "刷新昵称", "  同意好友  "):
+                 "查状态", "账号状态", "  同意好友  "):
         assert admin.is_command(text), text
-    for text in ("帮助", "help", "跑一下测试", "添加好友的功能怎么用", "同意", ""):
+    for text in ("帮助", "help", "跑一下测试", "添加好友的功能怎么用", "同意", "",
+                 "改名 wxid_a = 张三", "删除昵称 wxid_a", "刷新昵称", "状态"):
         assert not admin.is_command(text), text
-    assert nicks.mock_calls == [] and friend.mock_calls == []                # nothing ran
+    assert friend.mock_calls == [] and status.mock_calls == []                # nothing ran
 
