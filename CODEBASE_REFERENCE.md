@@ -1255,13 +1255,13 @@ Windows 只替 Mac 的业务服务收发微信（见功能 V）。`protocol.py`�
 | `set_own_message_hook(fn)` | 给 PRM 的 `on_own_message`：`operator_message` 转成标准消息、带 `edge_operator=True`；`send_seen` 按这次运行的发送记录拼成「自己发的」消息、带 `edge_seen=True`（发送记录只在内存，有原文不写盘） | `None` |
 | `set_send_failure_hook(fn)` | `send_result` 是 `failed`/`expired`/`indeterminate` 的文字发送：`fn(chat_id, 文字, 原因)`（给 PRM 的 `on_send_failed`） | `None` |
 | `set_private_filter(fn)` / `refresh_private_chats_soon()` | PRM 接线用：前者不用筛（Windows 只转名单里的）；后者清掉名单摘要，下一轮重推 | `None` |
-| `start(callback)` | 一直拉事件直到 `stop()`：每 60 秒问一次 `health`（名单版本对不上就重推）；名单摘要变了就 `PUT /edge/parties`（409 时从 Windows 的版本往后接）；`creator_message` 先下载附件，再 `event_to_message` 交给 `callback`（路由），回复交给 `reply_sink`；其他事件交给钩子，`edge_status` 记进 `edge_status`；处理完、存好游标再 `ack`；`EdgeError`、`OSError` 按 2/4/8/15/30/60 秒退避重试 | `None` |
+| `start(callback)` | 一直拉事件直到 `stop()`：每 60 秒问一次 `health`（名单版本对不上就重推）；名单摘要变了就 `PUT /edge/parties`（409 时从 Windows 的版本往后接；名单来源出错时这一轮不推，免得推一份缺人的名单）；`creator_message` 先下载附件，再 `event_to_message` 交给 `callback`（路由），回复交给 `reply_sink`；其他事件交给钩子，`edge_status` 记进 `edge_status`；处理完、存好游标再 `ack`；`EdgeError`、`OSError` 按 2/4/8/15/30/60 秒退避重试 | `None` |
 | `send_text(chat_id, content, send_id=None)` | `POST /edge/sends`；`True` 只表示 Windows 收下了请求，结果看 `send_result` / `send_seen` 事件；同一个 `send_id` 重复提交是安全的 | `bool` |
 | `send_file(chat_id, path, send_id=None)` | 先 `POST /edge/uploads`，再带 `uploads` 发 | `bool` |
 | `EdgeState(path)` / `save()` | `cursor`（处理到的事件编号）、`parties_version`、`parties_digest`；先写临时文件再替换 | — |
 | `event_to_message(event, files)` | 事件 → 路由的标准消息：`sender_id`/`sender_name` 用 `chat_id`（事件里没有昵称），`is_group=False`；有 `quote` 时带 `quoted_content`、`is_reply_to_bot`（引用的是我们的话）；另带 `edge_event_id`、`edge_files`（已下载到 Mac 的附件，`relay/attachments.resolve` 直接用，不在本机微信目录里找）；文件消息带 `file_name`、`file_size` | `dict` |
 | `Bot._wire_edge_backend(backend, influencer_handler)` | 只对 `EdgeBackend`：名单 = 达人模块里启用的达人；回复存进达人模块「待处理」（种类 `draft`，`INBOX_DRAFT`）。没有达人模块时名单为空 | `None` |
-| `Bot._wire_edge_prm(backend, prm)` | 只对 `EdgeBackend` 且 `PRM_COPILOT=on`：PRM 登记的达人也进名单；发送失败交给 `PrmService.on_send_failed`（找到对应的「已发出、未确认」草稿，改成 `failed`、写上原因）。发送、`set_own_message_hook` 在 `_start_prm` 里已按普通后端接好 | `None` |
+| `Bot._wire_edge_prm(backend, prm, influencer_handler=None)` | 只对 `EdgeBackend` 且 `PRM_COPILOT=on`：有达人模块时名单合一（`src/influencer/prm_bridge.PartyListSync`，说明在 handoff.md）：`sync` 当名单来源（每轮同步，返回 PRM 登记着的达人），`prm.on_parties_changed` 先 `prm_changed` 再 `refresh_private_chats_soon`，接线时先同步一次；没有达人模块时名单 = PRM 登记的达人；发送失败交给 `PrmService.on_send_failed`（找到对应的「已发出、未确认」草稿，改成 `failed`、写上原因）。发送、`set_own_message_hook` 在 `_start_prm` 里已按普通后端接好 | `None` |
 
 **Mac 端起草（计划第 3 步）**：`WECHAT_BACKEND=edge` + `CLAUDE_RELAY=on`（`CLAUDE_RELAY_HOST` 必须是 127.0.0.1，配置检查会拦；这时不要求 `CLAUDE_RELAY_WXIDS`/`ADMIN_WXID`）+ `PRM_COPILOT=on`。中转只给本机的 `tools/claude_relay/worker.py --kinds prm` 用，起草在同事 worker 的沙箱里（`--restricted`、只有读写文件的工具、`prm_guard` 钩子把读限制在 `prm_workspace`、写限制在 `deals/*.md`、无 MCP、无会话保存、`--json-schema`）。`PrmService.on_own_message` 见到 `edge_operator` 时不再自己比对（Windows 比过了），见到 `edge_seen` 而对不上时不算接管。
 

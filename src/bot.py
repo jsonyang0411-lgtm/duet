@@ -288,7 +288,7 @@ class Bot:
         # PRM_COPILOT=on: registered creators' messages become silent draft jobs.
         prm = self._start_prm(config, router, backend, relay)
         # WECHAT_BACKEND=edge 加 PRM_COPILOT=on：PRM 登记的达人也推给 Windows，发送失败告诉 PRM
-        self._wire_edge_prm(backend, prm)
+        self._wire_edge_prm(backend, prm, influencer_handler)
         # PRM_EDGE=on: Windows only receives and sends WeChat for the Mac business service.
         edge = self._start_edge(config, router, backend, relay)
 
@@ -506,14 +506,34 @@ class Bot:
         backend.set_reply_sink(lambda chat_id, reply, msg: store.add_inbox_item(chat_id, INBOX_DRAFT, reply))
 
     @staticmethod
-    def _wire_edge_prm(backend, prm) -> None:
+    def _wire_edge_prm(backend, prm, influencer_handler=None) -> None:
         """Mac 端的 PRM（同事的副驾驶，见 src/prm/service.py）：起草在本机的 worker 沙箱里，发送、读回、
-        运营亲手回复都经过 Windows。发送、钩子在 _start_prm 里已经按普通后端接好，这里补名单和发送失败。"""
+        运营亲手回复都经过 Windows。发送、钩子在 _start_prm 里已经按普通后端接好，这里补名单和发送失败。
+
+        名单合一（src/influencer/prm_bridge.py）：达人模块的名单为准，PRM 的登记跟着它；合作单页上的改动
+        也写回名单。edge 后端每拉一轮事件同步一次，同步完的 PRM 名单就是推给 Windows 的名单。"""
         from .wechat.edge_backend import EdgeBackend
         if prm is None or not isinstance(backend, EdgeBackend):
             return
-        backend.add_parties_source(prm.store.active_wxids)
         backend.set_send_failure_hook(prm.on_send_failed)
+        if influencer_handler is None:
+            backend.add_parties_source(prm.store.active_wxids)
+            return
+        from .influencer.prm_bridge import PartyListSync
+        sync = PartyListSync(influencer_handler.store, prm)
+        refresh = prm.on_parties_changed
+
+        def parties_changed() -> None:
+            sync.prm_changed()
+            if refresh is not None:
+                refresh()
+
+        prm.on_parties_changed = parties_changed
+        backend.add_parties_source(sync.sync)
+        try:
+            sync.sync()
+        except Exception:
+            logger.exception("名单合一：启动时同步失败，edge 后端拉事件时会再试")
 
     @staticmethod
     def _start_edge(config, router, backend, relay):

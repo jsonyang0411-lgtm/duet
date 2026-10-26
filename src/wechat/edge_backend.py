@@ -343,7 +343,12 @@ class EdgeBackend(AbstractWeChatBackend):
             self.state.parties_digest = ""
 
     def _sync_parties(self) -> None:
-        wxids = self.parties()
+        try:
+            wxids = self.parties()
+        except Exception:
+            # 名单没拿全就不推（推一份缺人的名单，Windows 就不转那几位的消息了），下一轮再试
+            logger.exception("[edge] 名单来源出错，这一轮不推名单")
+            return
         digest = P.parties_digest(wxids)
         if digest == self.state.parties_digest:
             return
