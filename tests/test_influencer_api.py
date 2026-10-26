@@ -213,3 +213,13 @@ def test_the_overview_comes_with_a_brief_to_copy(store):
     _, data = call("/api/influencer/overview")
     assert data["ok"] is True and data["pending"] == 1
     assert "待审批：1 单" in data["brief"]
+
+
+def test_contacts_keep_a_platform_and_number(store):
+    status, data = call("/api/influencer/contacts/action", {"chat_id": "wxid_p", "platform": "dy", "platform_no": " jiawen3339 "})
+    assert status == 200 and data["ok"] is True
+    assert (data["contact"]["platform"], data["contact"]["platform_no"]) == ("DY", "jiawen3339")
+    _, bad = call("/api/influencer/contacts/action", {"chat_id": "wxid_p", "platform": "TB"})
+    assert bad["ok"] is False and "平台" in bad["error"]
+    _, missing = call("/api/influencer/contacts/action", {"chat_id": "wxid_q", "platform_no": "x"})
+    assert missing["ok"] is False and "选平台" in missing["error"]

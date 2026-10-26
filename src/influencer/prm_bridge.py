@@ -201,6 +201,7 @@ PHONE_KEYS = ("手机", "电话", "手机号", "联系电话")
 ADDRESS_KEYS = ("地址", "收件地址", "收货地址", "详细地址")
 REGION_KEYS = ("省市区", "所在地区")
 XHS_KEYS = ("小红书", "小红书主页", "小红书账号", "小红书号")
+LIVE_KEYS = ("直播专场", "专场", "专场日期", "专场时间")
 FIELD_LABELS = {"product": "商品", "recipient_name": "收件人", "recipient_phone": "手机", "shipping_address": "地址"}
 READY_STAGE = "to_ship"          # 合作单到了「待寄出」：收件信息达人确认过了，可以生成审批单
 SYSTEM = "system"
@@ -217,6 +218,15 @@ def _platform_account(contact: dict) -> tuple:
     if xhs:
         return "XHS", xhs
     return "DY", ""
+
+
+def split_items(text: str) -> List[dict]:
+    """合作单上的商品（一段话，可能是好几款）拆成审批单的商品清单：按顿号、逗号、分号、换行分开，
+    每款 1 件（D30）。颜色尺码就写在每一款的文字里，运营批准时核对；拆不开的就是一款。"""
+    import re
+
+    parts = [p.strip() for p in re.split(r"[、,，;；\n]+", text or "") if p.strip()]
+    return [{"name": p, "qty": 1} for p in parts]
 
 
 def _first(slots: dict, keys: tuple) -> str:
@@ -313,7 +323,7 @@ class SampleBridge:
                 self._attention(deal, f"寄样审批单没有生成：{why}", now)
                 return None
             name = str(contact.get("display_name") or party["name"] or "")
-            asyncio.run(self._handler._submit_for_approval(chat_id, name, draft))
+            asyncio.run(self._handler._submit_for_approval(chat_id, name, draft, self._packet_extra(chat_id, slots, now)))
             packet = next((p for p in self._handler.store.list_approvals([GateStatus.PENDING])
                            if p.influencer_id == chat_id), None)
         if packet is None:
@@ -323,6 +333,30 @@ class SampleBridge:
                                   actor="system", now=now)
         logger.info("寄样：合作单 %d 生成了审批单 %s（%s）", deal["id"], packet.packet_id, packet.requested_product)
         return packet.packet_id
+
+    def _packet_extra(self, chat_id: str, slots: dict, now: float) -> dict:
+        """审批单上的平台、档位、主播类型（名单上的，超过一天没查就先重查一次）、商品清单、专场。"""
+        from .tiers import refresh_contact
+
+        store = self._handler.store
+        contact = store.get_contact(chat_id) or {}
+        checked = contact.get("profile_checked_at")
+        if contact.get("platform_no") and (checked is None or now - checked > PROFILE_REFRESH_SECONDS):
+            try:
+                refresh_contact(store, chat_id, now=now)
+            except Exception:
+                logger.exception("寄样：重查达人资料出错，审批单上用名单里原来的")
+            contact = store.get_contact(chat_id) or {}
+        items = split_items(_first(slots, PRODUCT_KEYS))
+        return {
+            "platform": str(contact.get("platform") or ""),
+            "platform_no": str(contact.get("platform_no") or ""),
+            "tier": str(contact.get("tier") or ""),
+            "channel": str(contact.get("channel") or ""),
+            "sales_label": str(contact.get("sales_label") or contact.get("profile_note") or ""),
+            "items_json": json.dumps(items, ensure_ascii=False) if len(items) > 1 else "",
+            "live_session": _first(slots, LIVE_KEYS),
+        }
 
     def _commission_template(self, job: dict, deal: dict) -> None:
         """达人要求提高佣金：我们的固定话术作为系统消息等审核（D22），一段时间内只放一次。

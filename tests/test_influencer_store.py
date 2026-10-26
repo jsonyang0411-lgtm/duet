@@ -221,3 +221,24 @@ def test_the_overview_counts_only_what_is_in_the_database():
     assert "待审批：1 单（其中 1 单 12 小时内过期）" in brief
     for made_up in ("样品充足", "中腰部达人"):
         assert made_up not in brief, "晨报里不能再有写死的假数据（B13）"
+
+
+def test_an_old_database_gets_the_new_columns_without_losing_rows(tmp_path):
+    # 第 2 步（2026-10-26）加了平台、号码、档位等列：老库启动时补上，原来的数据不动
+    import sqlite3
+
+    from src.influencer.store import _ADDED_COLUMNS
+
+    db = tmp_path / "old.db"
+    InfluencerStore(str(db)).save_contact("wxid_old", display_name="老达人", source="test")
+    conn = sqlite3.connect(db)
+    for table, columns in _ADDED_COLUMNS.items():
+        for name, _ in columns:
+            conn.execute(f"ALTER TABLE {table} DROP COLUMN {name}")
+    conn.commit()
+    conn.close()
+    store = InfluencerStore(str(db))
+    contact = store.get_contact("wxid_old")
+    assert contact["display_name"] == "老达人" and contact["platform"] == "" and contact["tier"] == ""
+    store.save_contact("wxid_old", source="test", platform="DY", platform_no="dy1")
+    assert store.get_contact("wxid_old")["platform_no"] == "dy1"

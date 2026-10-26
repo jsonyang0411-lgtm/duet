@@ -217,6 +217,8 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
   useEffect(() => { setXhs(p.xhs_account || '') }, [p.xhs_account])
   useEffect(() => { setRate(percent(p.proposed_commission_rate)) }, [p.proposed_commission_rate])
 
+  let items = []
+  try { items = p.items_json ? JSON.parse(p.items_json) : [] } catch { items = [] }
   // 资质只作参考、不拦单（D30：寄几款按销售额分档，不看粉丝数）
   const qualKind = p.qualification.startsWith('待核实') || !p.qualification ? 'warn' : 'ok'
   const rateOk = typeof rate === 'number' && rate > 0 && rate <= percent(maxRate)
@@ -259,7 +261,7 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
       <dl className="kv">
         <dt>达人</dt>
         <dd>{p.influencer_name} <span className="mono dim">{p.influencer_id}</span></dd>
-        <dt>资质</dt>
+        <dt>粉丝</dt>
         <dd>
           <span className={`tag ${qualKind}`}>{p.qualification || '待核实'}</span>
           {p.follower_count != null && <span className="dim"> 粉丝 {p.follower_count}</span>}
@@ -270,8 +272,28 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
             ? <TextInput mono value={xhs} onChange={setXhs} placeholder="主页链接或小红书号" aria-label="小红书账号" />
             : (p.xhs_account || <span className="dim">没有</span>)}
         </dd>
+        <dt>平台</dt>
+        <dd>
+          {p.platform_no
+            ? <>{PLATFORM_LABEL[p.platform] || p.platform} <span className="mono">{p.platform_no}</span></>
+            : <span className="dim">名单上没填抖音号 / 小红书号</span>}
+        </dd>
+        <dt>档位</dt>
+        <dd>
+          {p.tier
+            ? <><span className={`tag ${p.tier === '无销售数据' ? 'need' : 'ok'}`}>{p.tier}</span>{p.channel && <span className="dim"> · {p.channel}为主</span>}</>
+            : <span className="tag warn">不知道</span>}
+          {p.sales_label && <div className="f-hint">{p.sales_label}</div>}
+          {p.tier === '无销售数据' && <div className="f-hint">按规则没有销售数据的不寄样（D30），要寄请写明原因</div>}
+        </dd>
+        {p.live_session && (<><dt>直播专场</dt><dd>{p.live_session}</dd></>)}
         <dt>申请</dt>
-        <dd>{p.requested_product} · SKU <span className="mono">{p.sku_id}</span> · 库存 {p.stock_available} · 样品成本 {p.sample_cost != null ? `¥${p.sample_cost}` : <span className="dim">未知</span>}</dd>
+        <dd>
+          {items.length > 1
+            ? <ol className="gate-items">{items.map((it, i) => <li key={i}>{it.name}{it.qty > 1 ? ` × ${it.qty}` : ''}</li>)}</ol>
+            : p.requested_product}
+          <div className="f-hint">共 {Math.max(items.length, 1)} 款，每款 1 件 · 现货 {p.stock_available}（没现货也能寄，D35）</div>
+        </dd>
         <dt>收件</dt>
         <dd>
           {cleared
@@ -571,7 +593,23 @@ function InboxPage() {
 
 // ── 达人名单 ────────────────────────────────────────────────────────
 
-const EMPTY_FORM = { chat_id: '', display_name: '', xhs_account: '', note: '' }
+const EMPTY_FORM = { chat_id: '', display_name: '', platform: 'DY', platform_no: '', note: '' }
+const PLATFORM_OPTIONS = [{ value: 'DY', label: '抖音' }, { value: 'XHS', label: '小红书' }]
+const PLATFORM_LABEL = { DY: '抖音', XHS: '小红书' }
+
+// 达人资料（tiers.py）：按名单上的号码从聚水潭查的档位、主播类型、销售额；名单同步时在后台更新
+function DarenProfile({ c }) {
+  if (!c.platform_no) return <span className="dim">没填号码</span>
+  if (!c.tier) return <span className="dim">{c.profile_note || '等后台查'}</span>
+  return (
+    <span>
+      <span className={`tag ${c.tier === '无销售数据' ? 'need' : 'ok'}`}>{c.tier}</span>
+      {c.channel && <span className="dim"> · {c.channel}</span>}
+      {c.level != null && <span className="dim"> · LV{c.level}</span>}
+      <div className="f-hint">{c.sales_label}</div>
+    </span>
+  )
+}
 
 function ContactsPage() {
   const toast = useToast()
@@ -605,9 +643,10 @@ function ContactsPage() {
   const add = async () => {
     // 只提交填了的项：chat_id 已经在名单里时，留空的项不能把原来的值清掉
     const body = { chat_id: form.chat_id.trim(), enabled: true }
-    for (const name of ['display_name', 'xhs_account', 'note']) {
+    for (const name of ['display_name', 'platform_no', 'note']) {
       if (form[name].trim()) body[name] = form[name].trim()
     }
+    if (body.platform_no) body.platform = form.platform
     if (await save(body, '已加入名单')) setForm(EMPTY_FORM)
   }
   const field = (name) => ({ value: form[name], onChange: (v) => setForm((f) => ({ ...f, [name]: v })) })
@@ -617,7 +656,7 @@ function ContactsPage() {
       <div className="page">
         <PageHead
           no="02" en="CREATOR" title="达人名单"
-          sub="只有名单里、并且启用的私聊才会进入索样流程；其他私聊照常由机器人聊天回复"
+          sub="名单里、并且启用的达人，私聊由 Claude 起草、你审核后发出；名单以外的私聊不回。填上抖音号 / 小红书号，系统会从聚水潭查档位和主播类型"
           actions={<button type="button" className="btn sm" onClick={load}><ArrowClockwise />刷新</button>}
         />
         {err && <Note kind="need">读取失败：{err}</Note>}
@@ -626,7 +665,8 @@ function ContactsPage() {
           <div className="form-grid">
             <Field label="chat_id"><TextInput mono placeholder="例如 wxid_xxx" aria-label="chat_id" {...field('chat_id')} /></Field>
             <Field label="显示名"><TextInput placeholder="可不填，机器人会用微信昵称" aria-label="显示名" {...field('display_name')} /></Field>
-            <Field label="小红书账号"><TextInput mono placeholder="主页链接或小红书号（可不填）" aria-label="小红书账号" {...field('xhs_account')} /></Field>
+            <Field label="平台"><Seg small label="平台" value={form.platform} onChange={(v) => setForm((f) => ({ ...f, platform: v }))} options={PLATFORM_OPTIONS} /></Field>
+            <Field label="抖音号 / 小红书号" hint="填了以后自动从聚水潭查档位、主播类型（可以先不填）"><TextInput mono placeholder="例如 jiawen3339" aria-label="抖音号或小红书号" {...field('platform_no')} /></Field>
             <Field label="备注"><TextInput placeholder="可不填" aria-label="备注" {...field('note')} /></Field>
           </div>
           <div className="card-foot">
@@ -639,18 +679,20 @@ function ContactsPage() {
           {contacts && !contacts.length && <Empty icon={Handshake} title="名单还是空的">机器人现在不拦任何私聊。</Empty>}
           {contacts && contacts.length > 0 && (
             <table className="table">
-              <thead><tr><th>显示名</th><th>chat_id</th><th>小红书账号</th><th>粉丝 / 点赞</th><th>启用</th><th /></tr></thead>
+              <thead><tr><th>显示名</th><th>chat_id</th><th>平台号码</th><th>档位 / 主播类型</th><th>启用</th><th /></tr></thead>
               <tbody>
                 {contacts.map((c) => (
                   <tr key={c.chat_id}>
                     <td>{c.display_name || <span className="dim">（没有）</span>}{c.note && <div className="f-hint">{c.note}</div>}</td>
                     <td className="mono dim" style={{ fontSize: 'var(--fs-xs)' }}>{c.chat_id}</td>
-                    <td className="mono" style={{ fontSize: 'var(--fs-xs)', wordBreak: 'break-all' }}>{c.xhs_account || <span className="dim">—</span>}</td>
-                    <td className="num">{c.follower_count != null ? `${c.follower_count} / ${c.recent_like_count ?? '—'}` : <span className="dim">—</span>}</td>
+                    <td className="mono" style={{ fontSize: 'var(--fs-xs)', wordBreak: 'break-all' }}>
+                      {c.platform_no ? `${PLATFORM_LABEL[c.platform] || c.platform} ${c.platform_no}` : (c.xhs_account ? `小红书 ${c.xhs_account}` : <span className="dim">—</span>)}
+                    </td>
+                    <td><DarenProfile c={c} /></td>
                     <td>
                       <Switch
                         checked={c.enabled} label={`${c.enabled ? '停用' : '启用'} ${c.display_name || c.chat_id}`}
-                        onChange={(on) => save({ chat_id: c.chat_id, enabled: on }, on ? '已启用' : '已停用：这位达人的私聊交回给机器人聊天')}
+                        onChange={(on) => save({ chat_id: c.chat_id, enabled: on }, on ? '已启用' : '已停用：这位达人的私聊不再起草回复')}
                       />
                     </td>
                     <td><button type="button" className="btn sm ghost" onClick={() => setEditing(c)}><PencilSimple />编辑</button></td>
@@ -694,7 +736,8 @@ function ContactsPage() {
 
 function EditContact({ contact, onClose, onSave }) {
   const [values, setValues] = useState({
-    display_name: contact.display_name || '', xhs_account: contact.xhs_account || '', note: contact.note || '',
+    display_name: contact.display_name || '', platform: contact.platform || 'DY', platform_no: contact.platform_no || '',
+    xhs_account: contact.xhs_account || '', note: contact.note || '',
   })
   const field = (name) => ({ value: values[name], onChange: (v) => setValues((s) => ({ ...s, [name]: v })) })
   return (
@@ -707,7 +750,9 @@ function EditContact({ contact, onClose, onSave }) {
     >
       <div className="stack">
         <Field label="显示名"><TextInput aria-label="显示名" {...field('display_name')} /></Field>
-        <Field label="小红书账号"><TextInput mono aria-label="小红书账号" {...field('xhs_account')} /></Field>
+        <Field label="平台"><Seg small label="平台" value={values.platform} onChange={(v) => setValues((s) => ({ ...s, platform: v }))} options={PLATFORM_OPTIONS} /></Field>
+        <Field label="抖音号 / 小红书号" hint="改了号码会马上重查档位"><TextInput mono aria-label="抖音号或小红书号" {...field('platform_no')} /></Field>
+        <Field label="小红书主页（旧字段，选填）"><TextInput mono aria-label="小红书账号" {...field('xhs_account')} /></Field>
         <Field label="备注"><TextInput aria-label="备注" {...field('note')} /></Field>
       </div>
     </Dialog>

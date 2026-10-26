@@ -5,6 +5,8 @@
 一定要人审（D22），运单号从聚水潭出库单记进合作单；达人要求提高佣金 → 我们的固定话术作为系统消息等审核。
 """
 
+import json
+
 import pytest
 
 from test_influencer_acceptance import FakeERP, FakeXHS
@@ -200,6 +202,24 @@ def test_without_a_platform_number_the_operator_is_told_to_look_it_up(side, brid
     drafts(side, "佣金能不能再高一点", message_kind="money", needs_attention=True)
     [script] = [p for p in side.prm.store.packets(("pending",)) if p["job_id"] is None]
     assert "查不了合作数据" in script["reason"]
+
+
+def test_the_approval_carries_platform_tier_items_and_live_session(side, bridged, monkeypatch):
+    # 第 2 步：审批单上的平台、档位、主播类型来自名单（没查过就先查聚水潭），商品拆成清单，专场照写
+    from src.influencer import tiers
+
+    monkeypatch.setattr(tiers, "run_jst_cli", lambda *args: {"found": True, "daren": {
+        "sales30d": {"available": True, "min": 250000, "max": 500000, "label": "25万~50万"},
+        "channelBySales": "直播", "level": 3,
+    }})
+    bridged.store.save_contact(CREATOR, source=SOURCE_CONSOLE, platform="DY", platform_no="dy_mei")
+    slots = {**READY, "商品": "法式复古贝雷帽 深棕色、丹麦小众贝雷帽 黑色、北欧套头帽", "直播专场": "11 月 3 日"}
+    drafts(side, slots=slots, stage_proposal="to_ship")
+    [packet] = approvals(bridged)
+    assert (packet.platform, packet.platform_no, packet.tier, packet.channel) == ("DY", "dy_mei", "问专场", "直播")
+    assert "25万~50万" in packet.sales_label
+    assert [i["name"] for i in json.loads(packet.items_json)] == ["法式复古贝雷帽 深棕色", "丹麦小众贝雷帽 黑色", "北欧套头帽"]
+    assert packet.live_session == "11 月 3 日"
 
 
 def test_detach_unhooks_everything(side, tmp_path):

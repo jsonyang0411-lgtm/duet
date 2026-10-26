@@ -272,6 +272,14 @@ def save_contact(store: InfluencerStore, body: Dict[str, Any]) -> Dict[str, Any]
         return None if value is None else str(value).strip()
 
     enabled = body.get("enabled")
+    platform = text("platform")
+    if platform is not None:
+        platform = platform.upper()
+        if platform not in ("", "DY", "XHS"):
+            return {"ok": False, "error": "平台只能是 DY（抖音）或 XHS（小红书）"}
+    platform_no = text("platform_no")
+    if platform_no and platform is None and not (store.get_contact(chat_id) or {}).get("platform"):
+        return {"ok": False, "error": "填了号码要同时选平台（抖音或小红书）"}
     contact = store.save_contact(
         chat_id,
         source=SOURCE_CONSOLE,
@@ -279,5 +287,7 @@ def save_contact(store: InfluencerStore, body: Dict[str, Any]) -> Dict[str, Any]
         xhs_account=text("xhs_account"),
         note=text("note"),
         enabled=None if enabled is None else bool(enabled),
+        platform=platform,
+        platform_no=platform_no,
     )
     return {"ok": True, "contact": contact}

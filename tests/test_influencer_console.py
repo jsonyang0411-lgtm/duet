@@ -44,6 +44,15 @@ def seed(db_path):
         make_packet("GATE-STUCK", chat_id="wxid_mei", xhs_account="xhs_mei", expires_at=NEXT_YEAR),
         source=SOURCE_BOT,
     )
+    # 抖音达人，没有小红书账号；档位、主播类型从聚水潭来，三款商品（第 2 步）
+    store.add_approval(
+        make_packet("GATE-DY", chat_id="wxid_mei", expires_at=NEXT_YEAR, platform="DY", platform_no="jiawen3339",
+                    tier="不限", channel="视频", sales_label="近 30 日销售总额 250万~500万（聚水潭，10-26 查）",
+                    items_json='[{"name": "法式复古贝雷帽 深棕色", "qty": 1}, {"name": "丹麦小众贝雷帽 黑色", "qty": 1},'
+                               ' {"name": "北欧套头帽", "qty": 1}]',
+                    live_session="11 月 3 日晚上开专场"),
+        source=SOURCE_BOT,
+    )
     store.transition("GATE-STUCK", GateStatus.PENDING, GateStatus.EXECUTING)  # 执行中断，没记开始时间
     store.add_inbox_item("wxid_mei", "message", "这款什么时候上新呀", auto_replied=True)
     return store
@@ -200,3 +209,24 @@ def test_the_overview_numbers_lead_to_their_lists(console, page):
     overview.get_by_role("button", name="近 24 小时新申请").wait_for()
     overview.get_by_role("button", name="待处理").click()
     page.get_by_role("heading", name="待处理").wait_for()
+
+
+def test_a_douyin_request_shows_tier_channel_and_every_item(console, page):
+    page.goto(f"{console.base}/#/influencer/approvals")
+    dy = card(page, "GATE-DY")
+    dy.get_by_text("jiawen3339").wait_for()
+    for text in ("不限", "视频为主", "250万~500万", "法式复古贝雷帽 深棕色", "北欧套头帽", "共 3 款", "11 月 3 日晚上开专场"):
+        assert dy.get_by_text(text).count() >= 1, text
+    assert dy.get_by_role("button", name="通过").is_enabled()
+
+
+def test_a_creator_is_added_with_a_platform_number(console, page):
+    page.goto(f"{console.base}/#/influencer/contacts")
+    page.get_by_label("chat_id").fill("wxid_dy")
+    page.get_by_role("group", name="平台").get_by_role("button", name="小红书").click()
+    page.get_by_label("抖音号或小红书号").fill("xhs_no_1")
+    page.get_by_role("button", name="加入名单").click()
+    page.get_by_role("cell", name="wxid_dy", exact=True).wait_for()
+    contact = console.store.get_contact("wxid_dy")
+    assert (contact["platform"], contact["platform_no"]) == ("XHS", "xhs_no_1")
+    page.get_by_text("小红书 xhs_no_1").wait_for()

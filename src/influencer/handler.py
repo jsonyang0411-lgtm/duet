@@ -367,8 +367,11 @@ class InfluencerBusinessHandler:
             return f"收到~ 还差【{labels}】，麻烦老师补充一下哦~"
         return None
 
-    async def _submit_for_approval(self, chat_id: str, nickname: str, draft: SampleRequestDraft) -> str:
-        """信息齐了：生成审批单，交给运营审批（R2）。"""
+    async def _submit_for_approval(
+        self, chat_id: str, nickname: str, draft: SampleRequestDraft, extra: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """信息齐了：生成审批单，交给运营审批（R2）。extra 是审批单上的其他字段
+        （平台、档位、主播类型、多款商品、专场，prm_bridge 从名单和合作单上取）。"""
         inventory = draft.inventory
         profile = await self._refresh_profile(chat_id, nickname, draft.xhs_account)
         packet = ApprovalActionPacket(
@@ -388,6 +391,7 @@ class InfluencerBusinessHandler:
             recipient_phone=draft.recipient_phone,
             xhs_account=draft.xhs_account,
             evidence="\n".join(draft.evidence),
+            **(extra or {}),
         )
         self.store.add_approval(packet, source=SOURCE_BOT)
         self.store.delete_draft(chat_id)
