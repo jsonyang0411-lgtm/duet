@@ -604,6 +604,9 @@ class BotConfig:
     edge_seen_text_sec: int = 1800
     edge_seen_file_sec: int = 600
     edge_keep_days: int = 7
+    # Mac 端（WECHAT_BACKEND=edge）：不连本机微信，通过 Windows 的微信边缘收发（D18）。
+    # EDGE_URL 是 Windows 边缘的地址，如 http://192.168.1.20:8790；口令同样用 PRM_EDGE_TOKEN
+    edge_url: str = ""
 
     # === OCR fallback (src/wechat/ocr), macOS mac_hybrid backend only ===
     # "on": when the WeChat database cannot be read ocr_fallback_after times in a row, the
@@ -1055,6 +1058,15 @@ def _validate_config(kwargs: dict) -> None:
             errors.append("PRM_EDGE=on needs PRM_EDGE_TOKEN of at least 32 characters")
         elif edge_token == str(kwargs.get("claude_relay_token", "") or ""):
             errors.append("PRM_EDGE_TOKEN must differ from CLAUDE_RELAY_TOKEN")
+    if kwargs.get("wechat_backend") == "edge":
+        # Mac 端：去连 Windows 的边缘，自己不是边缘
+        edge_url = str(kwargs.get("edge_url", "") or "")
+        if not edge_url.startswith(("http://", "https://")):
+            errors.append("WECHAT_BACKEND=edge needs EDGE_URL, e.g. http://<Windows 的局域网 IP>:8790")
+        if len(str(kwargs.get("prm_edge_token", "") or "")) < 32:
+            errors.append("WECHAT_BACKEND=edge needs PRM_EDGE_TOKEN (the same token as on Windows, 32+ characters)")
+        if prm_edge == "on":
+            errors.append("WECHAT_BACKEND=edge is the Mac side; PRM_EDGE=on is the Windows side - not both")
     for key, low, high, default in (("edge_send_min_gap_sec", 0, 60, 3), ("edge_send_per_hour", 1, 1000, 60),
                                     ("edge_seen_text_sec", 60, 86400, 1800), ("edge_seen_file_sec", 60, 86400, 600),
                                     ("edge_keep_days", 1, 30, 7)):
@@ -1378,6 +1390,7 @@ def load_config() -> BotConfig:
         "prm_retention_days": int(os.getenv("PRM_RETENTION_DAYS", "30")),
         "prm_edge": _parse_memory_mode(os.getenv("PRM_EDGE", "off")),
         "prm_edge_token": os.getenv("PRM_EDGE_TOKEN", "").strip(),
+        "edge_url": os.getenv("EDGE_URL", "").strip(),
         "edge_db": os.getenv("EDGE_DB", "data/edge.db").strip() or "data/edge.db",
         "edge_send_min_gap_sec": int(os.getenv("EDGE_SEND_MIN_GAP_SEC", "3")),
         "edge_send_per_hour": int(os.getenv("EDGE_SEND_PER_HOUR", "60")),

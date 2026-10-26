@@ -156,6 +156,7 @@ EVENT_EXECUTION_STARTED = "开始执行"
 INBOX_MESSAGE = "message"
 INBOX_OUT_OF_STOCK = "out_of_stock"
 INBOX_COMMISSION = "commission"  # 达人要求提高佣金，机器人回了固定话术
+INBOX_DRAFT = "draft"  # Mac 端（WECHAT_BACKEND=edge）：机器人想回的话，没发出，等运营审核（D19）
 
 _PACKET_COLUMNS = tuple(f.name for f in fields(ApprovalActionPacket))
 _DRAFT_FIELDS = frozenset(f.name for f in fields(SampleRequestDraft))

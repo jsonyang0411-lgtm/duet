@@ -280,6 +280,9 @@ class Bot:
         except Exception:
             pass
 
+        # WECHAT_BACKEND=edge（Mac 端）：名单从达人模块来，回复存成待审核的草稿、不直接发（D19）
+        self._wire_edge_backend(backend, influencer_handler)
+
         # CLAUDE_RELAY=on: "cc ..." in an allowed private chat goes to the Mac.
         relay = self._start_claude_relay(config, router, backend)
         # PRM_COPILOT=on: registered creators' messages become silent draft jobs.
@@ -486,6 +489,21 @@ class Bot:
         return prm
 
     @staticmethod
+    def _wire_edge_backend(backend, influencer_handler) -> None:
+        """Mac 端的 edge 后端：达人名单从达人模块来；路由给的回复存进「待处理」当草稿，不直接发给达人（D19）。
+        没有达人模块时名单为空，Windows 什么都不转。"""
+        from .wechat.edge_backend import EdgeBackend
+        if not isinstance(backend, EdgeBackend):
+            return
+        if influencer_handler is None:
+            logger.warning("WECHAT_BACKEND=edge 但达人模块没有启动：名单为空，Windows 不会转任何消息")
+            return
+        from .influencer.store import INBOX_DRAFT
+        store = influencer_handler.store
+        backend.set_parties_source(lambda: [c["chat_id"] for c in store.list_contacts() if c["enabled"]])
+        backend.set_reply_sink(lambda chat_id, reply, msg: store.add_inbox_item(chat_id, INBOX_DRAFT, reply))
+
+    @staticmethod
     def _start_edge(config, router, backend, relay):
         """The WeChat edge (src/edge) on the relay's port, or None when off.
 
@@ -594,6 +612,11 @@ class Bot:
                 store=store,
             )
 
+        if config.wechat_backend == "edge":
+            # Mac 端：通过 Windows 的微信边缘收发（D18），这台 Mac 不登录微信
+            from .wechat.edge_backend import EdgeBackend
+            return EdgeBackend(config=config)
+
         if config.wechat_backend == "mac_hybrid":
             from .wechat.mac_hybrid_backend import MacHybridBackend
             return MacHybridBackend(
@@ -607,5 +630,5 @@ class Bot:
         else:
             raise ValueError(
                 f"Unknown WECHAT_BACKEND: '{config.wechat_backend}'. "
-                f"Supported: wcdb, mac_ui, mac_hybrid."
+                f"Supported: wcdb, mac_ui, mac_hybrid, edge."
             )

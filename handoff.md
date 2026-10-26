@@ -1,6 +1,6 @@
 # 交接文档：达人商务智能体
 
-> 最后更新：2026-10-26（v30：在 `merge-edge` 分支合并了同事的 `wechat-edge`（`ef1e0d9`），全量测试 4305 个通过；v29：同事交付 `wechat-edge`（Mac 客户端、假 Windows、Windows 端），D24；开始在 `merge-edge` 分支合并；v28：同事回复同意方向并分了工（D20–D23），协议意见 `docs/edge-protocol-review.md`；v27：D18、D19，Windows 收发 + Mac 处理的设计草案 `docs/win-mac-design.md`，等同事确认；v26：小红书 CLI 已接上（第 7 节），D16、D17；v25：达人消息按 90 天清除已做（D15）；v24："不等同事也能做"的 5 件事都做完了，备忘录已按新架构更新；第 5 项只差接收同事转发的那一层，要同事的消息格式；B27 待决定）
+> 最后更新：2026-10-26（v31：Mac 端 edge 后端骨架（计划第 2 步）；v30：在 `merge-edge` 分支合并了同事的 `wechat-edge`（`ef1e0d9`），全量测试 4305 个通过；v29：同事交付 `wechat-edge`（Mac 客户端、假 Windows、Windows 端），D24；开始在 `merge-edge` 分支合并；v28：同事回复同意方向并分了工（D20–D23），协议意见 `docs/edge-protocol-review.md`；v27：D18、D19，Windows 收发 + Mac 处理的设计草案 `docs/win-mac-design.md`，等同事确认；v26：小红书 CLI 已接上（第 7 节），D16、D17；v25：达人消息按 90 天清除已做（D15）；v24："不等同事也能做"的 5 件事都做完了，备忘录已按新架构更新；第 5 项只差接收同事转发的那一层，要同事的消息格式；B27 待决定）
 > 读者：接手这个项目的 AI 窗口，以及参与开发的同事。
 > 规矩：新窗口开工前先读完本文件；收工前更新第 3 节（当前状态）、第 5 节（计划进度）和第 9 节（变更记录）。
 
@@ -333,3 +333,4 @@ CLI 是同事的千帆商家后台命令行工具：私有仓库 `doupi-org/xiao
 - 2026-10-26 v28：同事在他仓库 `prm-copilot` 分支写了回复 `prm-merge-reply.md`（`0e344f5`）：同意 Windows 只管微信、Mac 做全部业务；他做 Windows 一侧并给我们 Mac 客户端库和假服务端；`prm-copilot` 冻结，整块搬到 Mac；保留期统一 90 天；附了 `/edge/*` 协议 v1 草案。用户定 D20–D23。写了对协议的意见 `docs/edge-protocol-review.md`（补 send_unseen、edge_status、名单版本、撤回、引用、其他消息类型；问附件确认顺序、手机端回复、名单外私聊怎么处理等），由用户转给同事。
 - 2026-10-26 v29：同事在 `wechat-edge` 分支交付了 Mac 端客户端库 `src/edge/client.py`、假 Windows 边缘 `src/edge/fake.py`、Windows 端本身（`PRM_EDGE`），协议定稿 `edge-protocol.md`（补了几处向下兼容的地方；v1 限制：Windows 停机期间达人发的消息重启后不补转）。计划改为合并 `wechat-edge`（已包含 prm-copilot），用假 Windows 直接开发 Mac 端。用户定 D24：名单以外的私聊不回。
 - 2026-10-26 v30：计划第 1 步完成：新开分支 `merge-edge`，合并同事 `wechat-edge`（`89808d0`，已含 prm-copilot），6 处冲突两边都保留；控制台菜单以同事的公司版为准（运行状态 / 中转代理 / 待审批 / 合作单 / 微信连接 / 运行日志），加上我们的「达人审批」。`PRM_COPILOT`、`PRM_EDGE` 默认关，行为不变。全量测试 4305 个通过、2 个跳过（含两边的浏览器测试）。还没合回 main。
+- 2026-10-26 v31：计划第 2 步完成（`merge-edge` 分支）：新增 Mac 端微信后端 `src/wechat/edge_backend.py`（`WECHAT_BACKEND=edge`，`EDGE_URL` + `PRM_EDGE_TOKEN`），用同事的 `EdgeClient` 拉事件、推名单、发消息；达人消息照常进路由和达人模块，**路由给的回复不直接发**，存进「待处理」（新种类 `draft`）等审核（D19），审核和真正发出在第 3 步接。名单 = 达人模块里启用的达人。`tests/test_edge_backend.py` 用同事的假 Windows 跑真实 HTTP。全量 4318 个通过、2 个跳过。

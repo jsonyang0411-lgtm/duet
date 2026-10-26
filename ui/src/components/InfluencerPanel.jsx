@@ -484,7 +484,10 @@ function NoticeBox({ status, text }) {
 
 // ── 待处理 ──────────────────────────────────────────────────────────
 
-const INBOX_KIND = { message: ['达人消息', 'cy'], out_of_stock: ['缺货', 'warn'], commission: ['要求提佣金', 'warn'] }
+const INBOX_KIND = {
+  message: ['达人消息', 'cy'], out_of_stock: ['缺货', 'warn'], commission: ['要求提佣金', 'warn'],
+  draft: ['回复草稿（没发出，等审核）', 'pend'],
+}
 const AUTO_REPLY = {
   message: '机器人已回复："收到老师的消息啦，我们核对一下再回复"',
   commission: '机器人已回复佣金话术（佣金上限不变）',

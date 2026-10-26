@@ -104,7 +104,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `DEEPSEEK_API_KEY` | `str` | `""` | `src/config.py` | `src/summarize/deepseek_backend.py:DeepSeekSummarizer.__init__()` |
 | `DEEPSEEK_MODEL` | `str` | `"deepseek-v4-flash"` | `src/config.py` | `src/summarize/deepseek_backend.py`, `src/bot.py:_log_banner()` |
 | `DEEPSEEK_BASE_URL` | `str` | `"https://api.deepseek.com"` | `src/config.py` | `src/summarize/deepseek_backend.py` |
-| `WECHAT_BACKEND` | `str` | `"wcdb"` | `src/config.py` | `src/bot.py:_create_wechat_backend()` |
+| `WECHAT_BACKEND` | `str` | `"wcdb"`（另有 `mac_ui`、`mac_hybrid`、`edge`：Mac 端通过 Windows 的微信边缘收发） | `src/config.py` | `src/bot.py:_create_wechat_backend()` |
 | `WECHAT_GROUPS` | `str` | `"*"` | `src/config.py` (经 `_decode_wechat_groups` URL解码) | `src/bot.py:_create_wechat_backend()`, `src/wechat/wcdb_backend.py:_resolve_groups()` |
 | `WECHAT_DATA_DIR` | `str` | `""` | `src/config.py` | `src/wechat/wcdb_client.py`, `src/voice/file_locator.py`, `src/web/server.py` |
 | `BOT_DISPLAY_NAME` | `str` | `"群聊小助手"` | `src/config.py` (经 `_sanitize_display_name` 清洗) | `src/router.py:handle()` (多处), `src/bot.py:_log_banner()` |
@@ -227,6 +227,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `PRM_RETENTION_DAYS` | `int` | `30` (1–365) | `src/config.py` | `PrmService.purge_due()`（发送线程每小时）：合作单进入「已签收」满这么多天，清除收件信息（8.2）；`snapshot` 的 `purge_due_at` |
 | `PRM_EDGE` | `str` | `"off"` (`off`/`on`；`on` 时必须 `CLAUDE_RELAY=on`、`PRIVATE_CHAT_ENABLED=true`，不能和 `PRM_COPILOT` 同时开) | `src/config.py` | `src/bot.py:_start_edge()` 建 `EdgeService`（发送用 `backend.send_text` / `send_file`），`set_private_filter(edge.is_party_chat)`、`set_own_message_hook(edge.on_own_message)`、`relay.attach_edge`（`/edge/*` 在中转的端口上）、`router._edge`；路由步骤 `edge`（`self_message` 之后、`persist` 之前） |
 | `PRM_EDGE_TOKEN` | `str` | 空（开 `PRM_EDGE` 时至少 32 个字符，不能等于 `CLAUDE_RELAY_TOKEN`） | `src/config.py` | `src/edge/http.py:handle()`：`/edge/*` 只认它（`/relay/*` 只认 cc 的口令） |
+| `EDGE_URL` | `str` | 空（`WECHAT_BACKEND=edge` 时必填，`http://<Windows IP>:8790`；同时要 `PRM_EDGE_TOKEN` 和 Windows 上一样、`PRM_EDGE` 不能开） | `src/config.py` | `src/wechat/edge_backend.py:EdgeBackend` |
 | `EDGE_DB` | `str` | `"data/edge.db"` | `src/config.py` | `EdgeStore`：`edge_events`、`edge_files`、`edge_sends`、`edge_uploads`、`edge_parties`、`edge_meta` |
 | `EDGE_SEND_MIN_GAP_SEC` / `EDGE_SEND_PER_HOUR` | `int` | `3` (0–60) / `60` (1–1000) | `src/config.py` | `EdgeService._send_due()`：两条发送之间至少隔几秒、每小时最多几条（只算 `/edge` 的发送）；被挡住的留在 `queued` 直到 `ttl_sec` |
 | `EDGE_SEEN_TEXT_SEC` / `EDGE_SEEN_FILE_SEC` | `int` | `1800` / `600` (60–86400) | `src/config.py` | `EdgeService._check_unseen()`：发出去的文字（只有附件的发送）这么久没从微信读回来，报 `send_unseen`；`_match_own` 文件按 `EDGE_SEEN_FILE_SEC` 认 |
@@ -1239,6 +1240,20 @@ Windows 只替 Mac 的业务服务收发微信（见功能 V）。`protocol.py`�
 | `mask_pii(text)` | 只用于写日志和追踪文件，不改消息本身。手机号留前 3 后 4 位；18 位身份证号留前 3 后 2 位；"xx省/市/区/县"开头的片段换成〔地址〕；"收件人/收货人/联系人/姓名"后面和紧挨手机号的 2–4 个汉字换成〔姓名〕（"电话""手机号"等标签词不算）。`None` 返回空字符串 | `text: object` | `str` |
 
 调用位置：`src/router.py`（私聊日志 "Private chat from"、"AI chat: asks"、主动发言回复日志、联网搜索日志和追踪步骤）、`src/routing/steps.py`（引用他人、路由 debug、@ 触发、关键词路由的日志）、`src/decision_trace.py`（见 2.35）、`src/wechat/wcdb_backend.py`（"Handling message"、回调返回值、"Standardized message" 的 debug 日志）、`src/voice/pipeline.py`（低置信度识别结果日志）。
+
+### 2.55 `src/wechat/edge_backend.py`（Mac 端的微信后端，`WECHAT_BACKEND=edge`）
+
+这台 Mac 不登录微信，通过 Windows 的微信边缘（`/edge/*`，见 2.53 和 `edge-protocol.md`）收发（handoff.md D18）。连接用 `src/edge/client.EdgeClient`。
+
+| 名称 | 描述 | 返回值 |
+|---|---|---|
+| `EdgeBackend(config=None, *, client=None, state_path=None, files_dir=None, sleep, clock, events_wait=25)` | `client` 不给就按 `EDGE_URL`、`PRM_EDGE_TOKEN` 建；状态文件默认在数据库同目录的 `edge_client.json`，附件存 `edge_files/<事件编号>/` | — |
+| `set_parties_source(fn)` / `set_reply_sink(fn)` / `add_event_hook(fn)` | 名单从哪来；路由给的回复交给谁（**不直接发**，D19）；除达人消息以外的事件（运营亲手回复、撤回提示、发送结果、读回、Windows 状态）交给谁 | `None` |
+| `start(callback)` | 一直拉事件直到 `stop()`：每 60 秒问一次 `health`（名单版本对不上就重推）；名单摘要变了就 `PUT /edge/parties`（409 时从 Windows 的版本往后接）；`creator_message` 先下载附件，再 `event_to_message` 交给 `callback`（路由），回复交给 `reply_sink`；其他事件交给钩子，`edge_status` 记进 `edge_status`；处理完、存好游标再 `ack`；`EdgeError`、`OSError` 按 2/4/8/15/30/60 秒退避重试 | `None` |
+| `send_text(chat_id, content, send_id=None)` | `POST /edge/sends`；`True` 只表示 Windows 收下了请求，结果看 `send_result` / `send_seen` 事件；同一个 `send_id` 重复提交是安全的 | `bool` |
+| `EdgeState(path)` / `save()` | `cursor`（处理到的事件编号）、`parties_version`、`parties_digest`；先写临时文件再替换 | — |
+| `event_to_message(event, files)` | 事件 → 路由的标准消息：`sender_id`/`sender_name` 用 `chat_id`（事件里没有昵称），`is_group=False`；有 `quote` 时带 `quoted_content`、`is_reply_to_bot`（引用的是我们的话）；另带 `edge_event_id`、`edge_files` | `dict` |
+| `Bot._wire_edge_backend(backend, influencer_handler)` | 只对 `EdgeBackend`：名单 = 达人模块里启用的达人；回复存进达人模块「待处理」（种类 `draft`，`INBOX_DRAFT`）。没有达人模块时名单为空 | `None` |
 
 ---
 
