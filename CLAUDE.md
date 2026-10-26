@@ -103,6 +103,7 @@ src/routing/            - 路由步骤：自己的消息 → 微信边缘 → �
 src/admin.py            - 管理员私聊命令（查状态、添加好友、同意好友、自动同意好友）
 src/relay/              - Claude 中转（Mac worker 来取任务）
 src/prm/                - 达人副驾驶（草稿、合作单、门槛、清理、平台联动）
+src/influencer/         - 达人寄样审批（名单、档位、审批单、聚水潭），说明在 handoff.md
 src/edge/               - 微信边缘（给 Mac 业务服务收发微信）
 src/wechat/             - 微信后端
   wcdb_backend.py       - WCDB 直读后端
@@ -140,7 +141,7 @@ pyinstaller build.spec
 
 项目根目录下有 `CODEBASE_REFERENCE.md`（代码参考手册），包含所有函数、参数、调用关系的完整文档。每次修改代码后，**必须同步更新该文档**，确保文档与代码保持一致。
 
-**例外**：达人商务模块（`src/influencer/`）的说明写在 `handoff.md` 里，不写入本手册。改动原项目的共享代码（例如 `src/router.py` 里的挂载点）时，仍要按本节要求同步。
+**例外**：达人商务模块（`src/influencer/`）的说明写在 `handoff.md` 里，不写入本手册。改动原项目的共享代码（例如 `src/bot.py` 里建达人模块、接名单合一和寄样审批的地方，`src/web/server.py` 的转发）时，仍要按本节要求同步。
 
 ### 何时需要更新
 
