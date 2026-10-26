@@ -176,18 +176,16 @@ def test_readiness_says_what_is_missing(tmp_path, monkeypatch):
     assert "产品对照表" in client.readiness()["detail"]
 
 
-# ---- 审批时：佣金绑不上就不建单 ----
+# ---- 审批时：不再管小红书对照表（佣金由 PRM 的平台动作开，D30） ----
 
 class NoMappingXHS(FakeXHS):
     def commission_problem(self, product_name, sku_id, xhs_account):
         return "对照表里没有【VC精华液】"
 
 
-def test_an_approval_stops_before_the_order_when_the_commission_cannot_be_set():
+def test_an_approval_does_not_wait_for_the_xhs_item_table():
     erp = FakeERP()
     handler = make_handler(erp, NoMappingXHS())
     packet_id = submit_full_request(handler)
     result = run(handler.execute_operator_approval(packet_id, True))
-    assert result["success"] is False and "对照表" in result["error"]
-    assert erp.order_calls == [], "出库单不建"
-    assert get_packet(handler, packet_id).status == GateStatus.PENDING, "补好对照表后还能再批"
+    assert result["success"] is True and len(erp.order_calls) == 1

@@ -80,12 +80,10 @@ def approval_notice(packet: ApprovalActionPacket) -> str:
         f"快递单号：{packet.tracking_number}，" if packet.tracking_number
         else "快递单号出来后我们再发给老师，"
     )
-    # 不发推广链接：定向计划开好以后，达人在小红书的选品里自己就能看到这款商品和专属佣金（D17）
+    # 专属佣金由 PRM 的平台动作单独开、单独审核（D30），这里不提，免得佣金还没开就先说开了
     return (
         f"老师好~ 【{packet.requested_product}】的样品已经安排寄出啦 📦\n"
-        f"{tracking}请老师留意查收哦~\n"
-        f"另外已经为老师开通了【{packet.requested_product}】的专属佣金，老师在小红书的选品里就能找到这款商品~ "
-        "收到后有任何问题随时找我们！"
+        f"{tracking}请老师留意查收哦~ 收到后有任何问题随时找我们！"
     )
 
 
@@ -377,9 +375,7 @@ class InfluencerBusinessHandler:
             sample_cost=inventory.get("cost_price"),  # 聚水潭没给成本就是未知，不编一个数（同 B8）
             proposed_commission_rate=DEFAULT_COMMISSION_RATE,
             shipping_address=draft.shipping_address,
-            what_cannot_be_undone=(
-                f"聚水潭ERP将自动扣减库存并出具打单运单，小红书将绑定 {DEFAULT_COMMISSION_RATE:.0%} 专属定向计划"
-            ),
+            what_cannot_be_undone="聚水潭ERP将自动扣减库存并出具打单运单（专属佣金另在「待审批」的平台动作里开）",
             qualification=self.assess_qualification(profile),
             recipient_name=draft.recipient_name,
             recipient_phone=draft.recipient_phone,
@@ -416,7 +412,10 @@ class InfluencerBusinessHandler:
         """运营审批。每张审批单只能处理一次：驳回、过期、执行中或已执行的单都不能再执行。
 
         xhs_account / commission_rate 是运营在审批时填写的：补填或更正达人的小红书账号，
-        把佣金调低（不能超过上限）。reason 是驳回原因，记进操作记录，每周复盘用（R7）。
+        把建议佣金调低（不能超过上限）。reason 是驳回原因，记进操作记录，每周复盘用（R7）。
+
+        批准后只在聚水潭建出库单。专属佣金不在这里开：用 PRM 的平台动作（src/prm/platforms.py，
+        小红书定向计划等），在「待审批」里单独预览、审核、执行（D30）。commission_rate 只是记在单上的建议值。
         """
         packet = self.store.get_approval(packet_id)
         if packet is None:
@@ -477,11 +476,6 @@ class InfluencerBusinessHandler:
                 "error": f"【{packet.requested_product}】现在没有库存，不能建单；可以先驳回，或者等补货后再批",
             }
 
-        # 佣金绑不上的问题（千帆商品对照表里没有、达人账号是短链等）在建单之前发现，免得出库单建了才失败
-        problem = self.xhs.commission_problem(packet.requested_product, packet.sku_id, packet.xhs_account)
-        if problem:
-            return {"success": False, "error": f"小红书佣金现在绑不上：{problem}"}
-
         # 先占住这张单：两个"通过"同时到达时，只有一个能把它从待审批改成执行中
         if not self.store.transition(
             packet_id, GateStatus.PENDING, GateStatus.EXECUTING,
@@ -509,34 +503,13 @@ class InfluencerBusinessHandler:
         tracking_number = str(order_res.get("tracking_number") or "")
         carrier = str(order_res.get("carrier") or "")
 
-        try:
-            comm_res = await self.xhs.set_exclusive_commission(
-                xhs_uid=packet.xhs_account,
-                sku_id=packet.sku_id,
-                rate=packet.proposed_commission_rate,
-                idempotency_key=packet.packet_id,
-                product_name=packet.requested_product,
-            )
-        except Exception as exc:
-            comm_res = {"success": False, "error": str(exc)}
-        if not comm_res.get("success"):
-            return self._fail(
-                packet,
-                f"出库单 {order_sn} 已建，但小红书佣金绑定失败："
-                f"{comm_res.get('error') or '未知原因'}，需要人工处理",
-                source,
-                order_sn=order_sn,
-                tracking_number=tracking_number,
-            )
-
-        commission_plan = str(comm_res.get("plan_id") or "")
         self.store.transition(
             packet_id, GateStatus.EXECUTING, GateStatus.FULFILLED,
-            order_sn=order_sn, tracking_number=tracking_number, commission_plan=commission_plan,
+            order_sn=order_sn, tracking_number=tracking_number,
         )
         self.store.add_event(
             "执行成功", packet_id=packet_id, chat_id=packet.influencer_id,
-            detail=f"出库单 {order_sn}，佣金 {packet.proposed_commission_rate:.0%}", source=source,
+            detail=f"出库单 {order_sn}", source=source,
         )
         packet.tracking_number = tracking_number
         return {
@@ -545,8 +518,7 @@ class InfluencerBusinessHandler:
             "order_sn": order_sn,
             "tracking_number": tracking_number,
             "carrier": carrier,
-            "commission_plan": commission_plan,
-            "message": "已成功下发聚水潭打单，并设置小红书定向佣金！",
+            "message": "已下发聚水潭打单。专属佣金请在「待审批」里用平台动作开",
             "notice": approval_notice(packet),
         }
 

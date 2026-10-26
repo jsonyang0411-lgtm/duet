@@ -277,10 +277,10 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
             ? <span className="dim">已按规定清除（处理完 90 天后）</span>
             : <>{p.recipient_name} · <span className="mono">{p.recipient_phone}</span><br />{p.shipping_address}</>}
         </dd>
-        <dt>佣金</dt>
+        <dt>建议佣金</dt>
         <dd>
           {pending
-            ? <div style={{ maxWidth: 160 }}><NumberInput value={rate} onChange={setRate} invalid={!rateOk} suffix="%" aria-label="佣金" /></div>
+            ? <div style={{ maxWidth: 160 }}><NumberInput value={rate} onChange={setRate} invalid={!rateOk} suffix="%" aria-label="建议佣金" /></div>
             : `${percent(p.proposed_commission_rate)}%`}
         </dd>
       </dl>
@@ -300,8 +300,8 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
       {pending && (
         <div style={{ marginTop: 12 }}>
           <Note kind="cy">
-            批准后：在聚水潭建出库单（扣库存、出运单），在小红书给 <b>{xhs.trim() || '（先填小红书账号）'}</b> 绑定
-            <b> {rateOk ? `${rate}%` : '—'} </b>的专属佣金（达人在小红书选品里自己就能看到）。出库单建了就撤不回。
+            批准后：在聚水潭建出库单（扣库存、出运单），建了就撤不回。专属佣金不在这里开：
+            在「待审批」里用平台动作给 <b>{xhs.trim() || '（先填小红书账号）'}</b> 开，建议 <b>{rateOk ? `${rate}%` : '—'}</b>。
           </Note>
         </div>
       )}
@@ -309,7 +309,8 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
       {p.status === 'FULFILLED' && (
         <div style={{ marginTop: 12 }}>
           <Note kind="ok">
-            出库单 <b className="mono">{p.order_sn}</b> · 运单 <b className="mono">{p.tracking_number || '—'}</b> · 佣金计划 <span className="mono">{p.commission_plan || '—'}</span>
+            出库单 <b className="mono">{p.order_sn}</b> · 运单 <b className="mono">{p.tracking_number || '—'}</b>
+            {p.commission_plan && <> · 佣金计划 <span className="mono">{p.commission_plan}</span>（以前批准时开的）</>}
           </Note>
         </div>
       )}

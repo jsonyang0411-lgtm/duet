@@ -69,7 +69,7 @@ def test_pending_approvals_come_with_the_message_preview_and_history(store):
     _, data = call("/api/influencer/approvals?status=pending")
     [item] = data["items"]
     assert (item["packet_id"], item["status_label"]) == ("GATE-1", "待审批")
-    assert "〔运单号〕" in item["notice"] and "专属佣金" in item["notice"]
+    assert "〔运单号〕" in item["notice"] and "专属佣金" not in item["notice"], "佣金另由平台动作开，通知里不提（D30）"
     assert [e["action"] for e in item["events"]] == ["提交审批"]
     assert data["counts"]["pending"] == 1
 

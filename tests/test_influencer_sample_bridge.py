@@ -126,8 +126,8 @@ def test_an_approval_puts_the_notice_up_for_review_and_the_waybill_on_the_deal(s
     deal = side.prm.store.deal(1)
     assert deal["stage"] == "shipped" and side.prm.store.latest_shipment(1)["waybill"] == "SF0001"
     [notice] = [p for p in side.prm.store.packets(("pending",)) if p["job_id"] is None]
-    assert notice["kind"] == "money" and notice["route"] == "review", "提到佣金，永远人审"
-    assert "SF0001" in notice["text"] and "专属佣金" in notice["text"]
+    assert notice["kind"] == "other" and notice["route"] == "review", "系统消息一定人审"
+    assert "SF0001" in notice["text"] and "专属佣金" not in notice["text"], "佣金另由平台动作开（D30）"
     # 审核通过才发
     assert side.texts == []
     assert side.prm.decide(notice["id"], "send")["ok"]
@@ -149,7 +149,7 @@ def test_system_notices_are_not_dropped_when_the_creator_writes_again(side, brid
     [packet] = approvals(bridged, GateStatus.PENDING)
     console.act_on_approval(bridged.store, {"packet_id": packet.packet_id, "action": "approve"})
     drafts(side, "请问什么时候发货呀")
-    assert [p["kind"] for p in side.prm.store.packets(("pending",)) if p["job_id"] is None] == ["money"]
+    assert [p["kind"] for p in side.prm.store.packets(("pending",)) if p["job_id"] is None] == ["other"]
 
 
 # ---- 谈佣金的固定话术 ----

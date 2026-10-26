@@ -173,7 +173,7 @@ def test_s4_a_packet_is_executed_only_once():
     assert first["success"] is True
     assert second["success"] is False
     assert len(erp.order_calls) == 1
-    assert len(xhs.commission_calls) == 1
+    assert xhs.commission_calls == [], "佣金由 PRM 的平台动作开（D30），审批单不开"
 
 
 def test_s5_a_rejected_packet_cannot_be_approved_later():
@@ -238,7 +238,7 @@ def test_two_simultaneous_approvals_execute_only_once():
     results = run(double_click())
     assert sorted(r["success"] for r in results) == [False, True]
     assert len(erp.order_calls) == 1
-    assert len(xhs.commission_calls) == 1
+    assert xhs.commission_calls == []
 
 
 def test_a_failed_erp_order_stops_before_the_commission():

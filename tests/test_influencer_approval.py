@@ -40,7 +40,8 @@ def test_approval_needs_an_xhs_account_which_the_operator_can_fill_in():
     assert refused["success"] is False and erp.order_calls == []
     approved = run(handler.execute_operator_approval(packet.packet_id, True, xhs_account="xhs_creator_001"))
     assert approved["success"] is True
-    assert xhs.commission_calls[0]["xhs_uid"] == "xhs_creator_001"
+    assert get_packet(handler, packet.packet_id).xhs_account == "xhs_creator_001", "运营填的账号记在单上，开佣金时用"
+    assert xhs.commission_calls == []
 
 
 def test_a_profile_link_sent_after_submission_is_attached_to_the_request():
@@ -63,7 +64,8 @@ def test_the_operator_can_lower_the_commission_but_not_raise_it():
     assert too_high["success"] is False and erp.order_calls == []
     lowered = run(handler.execute_operator_approval(packet.packet_id, True, commission_rate=0.20))
     assert lowered["success"] is True
-    assert xhs.commission_calls[0]["rate"] == 0.20
+    assert get_packet(handler, packet.packet_id).proposed_commission_rate == 0.20, "记成建议佣金"
+    assert xhs.commission_calls == [], "审批单不开佣金（D30）"
 
 
 # ---- 审批单存在数据库里 ----
@@ -111,13 +113,16 @@ class FailingCommissionXHS(FakeXHS):
         return {"success": False, "error": "CLI 超时"}
 
 
-def test_an_order_made_before_a_failed_commission_is_kept_for_manual_follow_up():
-    handler = make_handler(xhs=FailingCommissionXHS())
+def test_an_approval_only_makes_the_order_and_never_touches_the_commission():
+    """D30：专属佣金由 PRM 的平台动作开。小红书 CLI 坏了也不影响建出库单，审批单从不调它。"""
+    xhs = FailingCommissionXHS()
+    handler = make_handler(xhs=xhs)
     packet_id = submit_full_request(handler)
     result = run(handler.execute_operator_approval(packet_id, True))
-    assert result["success"] is False and "需要人工处理" in result["error"]
+    assert result["success"] is True and "commission_plan" not in result
     packet = get_packet(handler, packet_id)
-    assert (packet.status, packet.order_sn) == (GateStatus.FAILED, "JST-1")
+    assert (packet.status, packet.order_sn, packet.commission_plan) == (GateStatus.FULFILLED, "JST-1", "")
+    assert xhs.commission_calls == []
 
 
 # ---- 给达人的消息（Q2：由运营复制后发送）和操作记录 ----

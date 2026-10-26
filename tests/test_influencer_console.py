@@ -115,7 +115,7 @@ def test_an_approval_runs_and_its_message_can_be_copied(console, page):
     tracking = console.store.get_approval("GATE-OK").tracking_number
     copied = page.evaluate("navigator.clipboard.readText()")
     assert tracking in copied
-    assert "选品里就能找到" in copied, "不发链接，告诉达人去选品里找（D17）"
+    assert "专属佣金" not in copied, "佣金另由平台动作开，确认消息里不提（D30）"
 
 
 def test_a_rejection_keeps_the_reason(console, page):
