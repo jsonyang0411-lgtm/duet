@@ -4,7 +4,7 @@
 import pytest
 
 from src.influencer.extract import asks_for_higher_commission
-from src.influencer.handler import COMMISSION_REPLY
+from src.influencer.handler import COMMISSION_REPLY, FORBIDDEN_WORDS
 from src.influencer.settings import MAX_COMMISSION_RATE
 from src.influencer.store import INBOX_COMMISSION
 from test_influencer_acceptance import (
@@ -53,7 +53,8 @@ def test_the_fixed_reply_is_sent_and_the_operator_is_told():
     handler = make_handler()
     reply = run(handler.process_incoming_message(INFLUENCER, "佣金能不能高点呀", nickname="小美"))
     assert reply == COMMISSION_REPLY
-    assert "最大诚意" in reply and "先收样品" in reply
+    assert "诚意" in reply and "先收样品" in reply
+    assert not [w for w in FORBIDDEN_WORDS if w in reply], "固定话术里不能有违规词"
     [item] = handler.store.list_inbox()
     assert (item["kind"], item["content"], item["auto_replied"]) == (INBOX_COMMISSION, "佣金能不能高点呀", True)
 
