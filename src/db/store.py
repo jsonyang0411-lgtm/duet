@@ -20,6 +20,41 @@ class MessageStore:
 
     # ── Write operations ──────────────────────────────────────────
 
+    def rewrite_chat(self, chat_id: str, rewrite) -> int:
+        """Rewrite the stored text of one chat (live and imported messages) with ``rewrite``:
+        the PRM clean-up of a creator's address and numbers (8.2).  Full-text index rows
+        (memory v2) are swapped too, so no old words stay searchable.  Returns how many
+        messages changed."""
+        changed = 0
+        with self._lock:
+            with self.conn:
+                indexes = {r[0] for r in self.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE name IN ('fts_messages', 'fts_history')")}
+                for table, index in (("messages", "fts_messages"), ("history_messages", "fts_history")):
+                    # Only rows the index has seen (memory v2 indexes in id order up to a cursor)
+                    # have entries to swap; later ones are indexed with the new text anyway.
+                    upto = 0
+                    if index in indexes:
+                        row = self.conn.execute("SELECT value FROM memory_state WHERE key = ?",
+                                                (f"{index}.cursor",)).fetchone()
+                        upto = int(row[0] or 0) if row else 0
+                    rows = self.conn.execute(
+                        f"SELECT id, content FROM {table} WHERE chat_id = ?", (chat_id,)).fetchall()
+                    for row_id, content in rows:
+                        new = rewrite(content or "")
+                        if new == (content or ""):
+                            continue
+                        indexed = index in indexes and row_id <= upto
+                        if indexed:
+                            self.conn.execute(
+                                f"INSERT INTO {index}({index}, rowid, content) VALUES('delete', ?, ?)",
+                                (row_id, content or ""))
+                        self.conn.execute(f"UPDATE {table} SET content = ? WHERE id = ?", (new, row_id))
+                        if indexed:
+                            self.conn.execute(f"INSERT INTO {index}(rowid, content) VALUES(?, ?)", (row_id, new))
+                        changed += 1
+        return changed
+
     def insert_message(self, msg: dict) -> bool:
         """Insert a message and update the user's last-message cursor.
 

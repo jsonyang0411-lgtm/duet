@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import struct
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -405,6 +406,8 @@ def test_the_file_list_has_the_shape_windows_expects():
     data = wc._dropfiles_bytes(r"C:\s\shy.gif")
     assert struct.unpack("<IiiII", data[:20]) == (20, 0, 0, 0, 1)
     assert data[20:].decode("utf-16-le") == "C:\\s\\shy.gif\0\0"
+    relative = wc._dropfiles_bytes("data/x.txt")[20:].decode("utf-16-le").rstrip("\0")
+    assert relative == str((Path.cwd() / "data/x.txt").resolve())             # WeChat needs the full path
 
 
 def test_a_still_picture_is_the_first_frame_on_white(tmp_path):

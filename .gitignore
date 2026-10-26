@@ -118,3 +118,10 @@ image/*
 image/logo_assets/*
 !image/logo_assets/logo.ico
 data/models/
+*.patch
+*.bundle
+unsloth_compiled_cache/
+
+# tools/file_probe.py output (screen contents)
+probe-file.txt
+probe-file-*.png

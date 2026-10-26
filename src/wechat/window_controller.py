@@ -11,6 +11,7 @@ Design principles:
 import ctypes
 import io
 import logging
+import ntpath
 import struct
 import subprocess
 import time
@@ -38,6 +39,27 @@ from PIL import Image, ImageGrab, ImageStat
 
 logger = logging.getLogger(__name__)
 
+def _ensure_default_desktop() -> None:
+    """Ensure the calling thread is attached to the interactive 'Default' desktop."""
+    try:
+        user32 = ctypes.windll.user32
+        h_desk = user32.OpenDesktopW("Default", 0, False, 0x01FF)
+        if h_desk:
+            user32.SetThreadDesktop(h_desk)
+    except Exception:
+        pass
+
+
+def _reset_last_error() -> None:
+    """Clear the Win32 last-error code before a call whose failure is read back.
+
+    ``ctypes.windll`` exists only on Windows; elsewhere (the unit tests on a Mac) this does nothing.
+    """
+    windll = getattr(ctypes, "windll", None)
+    if windll is not None:
+        windll.kernel32.SetLastError(0)
+
+
 # ── Constants ─────────────────────────────────────────────────────
 
 WECHAT_PROCESS_NAMES = {"wechat.exe", "weixin.exe"}
@@ -50,6 +72,7 @@ WHITE_SCREEN_STDDEV_THRESHOLD = 3.5
 FAILURE_LOG = Path("data/send_failures.log")
 FAILURE_LOG.parent.mkdir(parents=True, exist_ok=True)
 VISION_SCREENSHOT_DIR = Path("data/vision_screenshots")
+_PICTURE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
 
 
 @dataclass
@@ -167,7 +190,10 @@ def _conversation_bbox(left: int, top: int, right: int, bottom: int,
 def _dropfiles_bytes(path: str) -> bytes:
     """CF_HDROP data for one file: a DROPFILES header and the path, UTF-16, double-NUL ended."""
     header = struct.pack("<IiiII", 20, 0, 0, 0, 1)        # pFiles, pt.x, pt.y, fNC, fWide
-    return header + (str(path) + "\0\0").encode("utf-16-le")
+    # WeChat takes only a full path (a relay result is "data\\claude_relay_files\\…"); one that
+    # is already absolute on Windows stays exactly as given.
+    abs_path = path if ntpath.isabs(path) else str(Path(path).resolve())
+    return header + (abs_path + "\0\0").encode("utf-16-le")
 
 
 def _dib_bytes(path: str) -> bytes:
@@ -220,7 +246,10 @@ def _score_window(hwnd: int) -> WindowCandidate:
     reasons.append("wechat_process")
 
     # Title
-    if "微信" in c.title:
+    if c.title in ("微信", "WeChat"):
+        c.score += 60
+        reasons.append("title_wechat_exact")
+    elif "微信" in c.title:
         c.score += 50
         reasons.append("title_wechat")
     elif "WeChat" in c.title:
@@ -328,6 +357,8 @@ class WeChatWindowController:
         all_candidates: list[WindowCandidate] = []
         wechat_candidates: list[WindowCandidate] = []
 
+        _ensure_default_desktop()
+
         def _enum(hwnd, _ctx):
             c = _score_window(hwnd)
             if c.process_name in WECHAT_PROCESS_NAMES:
@@ -336,7 +367,11 @@ class WeChatWindowController:
                 all_candidates.append(c)
             return True
 
-        win32gui.EnumWindows(_enum, None)
+        _reset_last_error()
+        try:
+            win32gui.EnumWindows(_enum, None)
+        except Exception as e:
+            logger.debug("EnumWindows status: %s", e)
 
         # Log candidates for diagnostics
         if wechat_candidates:
@@ -499,6 +534,7 @@ class WeChatWindowController:
     # ── Window activation ─────────────────────────────────────────
 
     def activate(self, hwnd: int) -> bool:
+        _ensure_default_desktop()
         """Activate the WeChat window: restore if iconic, bring to foreground.
 
         Windows foreground lock: SetForegroundWindow fails with
@@ -545,7 +581,11 @@ class WeChatWindowController:
             ctypes.windll.user32.AllowSetForegroundWindow(-1)
 
             # ── Layer 2: SetForegroundWindow ────────────────────────
-            foreground_set = win32gui.SetForegroundWindow(hwnd)
+            try:
+                foreground_set = win32gui.SetForegroundWindow(hwnd)
+            except Exception as e:
+                logger.debug("Layer 2 SetForegroundWindow failed: %s", e)
+                foreground_set = False
             time.sleep(0.3)
             if self._foreground_matches(hwnd):
                 logger.debug("Window activated: HWND=%s is foreground", hwnd)
@@ -674,13 +714,19 @@ class WeChatWindowController:
             # unless we also attached threads above)
             ctypes.windll.user32.AllowSetForegroundWindow(-1)
 
-            success = bool(win32gui.SetForegroundWindow(hwnd))
+            try:
+                success = bool(win32gui.SetForegroundWindow(hwnd))
+            except Exception:
+                success = False
 
             # If SetForegroundWindow failed but we got thread attachments,
             # try one more time after a brief sleep
             if not success and (attached_current or attached_foreground):
                 time.sleep(0.15)
-                success = bool(win32gui.SetForegroundWindow(hwnd))
+                try:
+                    success = bool(win32gui.SetForegroundWindow(hwnd))
+                except Exception:
+                    success = False
 
             return success
         except Exception as e:
@@ -1013,7 +1059,7 @@ class WeChatWindowController:
         return self._run_send(group_name, text, max_retries)
 
     def send_file_to_chat(self, group_name: str, path: str, max_retries: int = 2) -> bool:
-        """Send a picture (a sticker) the same way: paste the file, then Enter."""
+        """Send a file the same way: paste it, then Enter (a sticker, a relay result)."""
         if not group_name or not path or not Path(path).is_file():
             logger.error("send_file_to_chat: no group name or no file at %r", path)
             return False
@@ -1033,6 +1079,7 @@ class WeChatWindowController:
 
     def _send_to_chat(self, group_name: str, text: str, max_retries: int,
                       file_path: str | None = None) -> bool:
+        _ensure_default_desktop()
         state_to_restore: WindowSnapshot | None = None
         last_hwnd: int | None = None
 
@@ -1106,6 +1153,7 @@ class WeChatWindowController:
 
     def find_chat_window(self, group_name: str) -> Optional[int]:
         """A WeChat window of its own showing this chat (title = chat name), or None."""
+        _ensure_default_desktop()
         name = (group_name or "").strip()
         if not name or name in MAIN_WINDOW_TITLES:
             return None
@@ -1154,6 +1202,7 @@ class WeChatWindowController:
     def _send_in_chat_window(self, hwnd: int, group_name: str, text: str,
                              file_path: str | None = None) -> bool:
         """Paste and send in a chat's own window: no tab switch, no search."""
+        _ensure_default_desktop()
         snapshot = self._capture_window_state(hwnd)
         try:
             if not self._bring_forward(hwnd):
@@ -1191,6 +1240,7 @@ class WeChatWindowController:
 
     def _bring_forward(self, hwnd: int) -> bool:
         """Bring a WeChat window to the front without the Alt tap; fall back to activate()."""
+        _ensure_default_desktop()
         if not self._validate_hwnd(hwnd):
             return False
         try:
@@ -1460,8 +1510,10 @@ class WeChatWindowController:
         still on the clipboard.
         """
         session = self._session
-        ok = self._set_clipboard_file(path, as_image=self._paste_files_as == "image",
-                                      private=session is not None)
+        # STICKER_PASTE=image turns pictures into still images; any other file (a relay
+        # result) is always pasted as the file.
+        as_image = self._paste_files_as == "image" and Path(path).suffix.lower() in _PICTURE_SUFFIXES
+        ok = self._set_clipboard_file(path, as_image=as_image, private=session is not None)
         if session is not None:
             # Noted even after a failure: it may have emptied the clipboard, and
             # the saved one goes back afterwards (nothing was pasted).

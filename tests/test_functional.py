@@ -292,64 +292,305 @@ class TestThemeToggle:
 
 
 class TestSidebarNavigation:
-    def test_sidebar_has_tabs(self, page):
+    """The company console: the bot as a relay to Claude Code, plus the PRM copilot's two pages."""
+
+    def test_sidebar_has_the_agent_pages_only(self, page):
         page.goto(BASE_URL, timeout=10000)
         page.wait_for_timeout(1000)
-        page_text = page.inner_text("body")
-        assert "运行状态" in page_text
-        assert "系统配置" in page_text
-        assert "运行日志" in page_text
+        nav = page.locator("nav.rail").inner_text()
+        for label in ("运行状态", "中转代理", "待审批", "合作单", "微信连接", "运行日志"):
+            assert label in nav
+        for gone in ("系统配置", "功能模块", "高级开关", "回复记录", "群友昵称", "群聊待办"):
+            assert gone not in nav
 
-    def test_sandbox_subtab_visible(self, page):
-        page.goto(BASE_URL, timeout=10000)
-        page.wait_for_timeout(1000)
-        config_btn = page.locator("button:has-text('系统配置')")
-        if config_btn.count() > 0:
-            config_btn.first.click()
-            page.wait_for_timeout(500)
-            page_text = page.inner_text("body")
-            assert "提示词沙箱" in page_text
-
-
-class TestConfigExportImport:
-    def test_backup_ui_visible(self, page):
-        page.goto(BASE_URL, timeout=10000)
-        page.wait_for_timeout(1000)
-        config_btn = page.locator("button:has-text('系统配置')")
-        if config_btn.count() > 0:
-            config_btn.first.click()
-            page.wait_for_timeout(500)
-            page_text = page.inner_text("body")
-            assert "导出备份" in page_text or "配置备份" in page_text
-
-
-class TestRedesignedPages:
-    def test_modules_grid_and_detail(self, page):
+    def test_old_links_land_on_the_status_page(self, page):
         page.goto(f"{BASE_URL}/#/modules/sticky", timeout=10000)
+        page.wait_for_timeout(1000)
+        text = page.inner_text("body")
+        assert "最近的中转任务" in text and "STICKY_MENTION_TTL_SEC" not in text
+
+
+class TestAgentConsolePages:
+    @pytest.fixture
+    def relay_with_jobs(self):
+        """A running relay (not listening) with one finished and one queued job."""
+        import time
+        from types import SimpleNamespace
+        from src.relay.service import ClaudeRelay
+        from src.relay.store import RelayStore
+        from src.web import server as web_server
+
+        cfg = SimpleNamespace(
+            claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1", claude_relay_port=0,
+            claude_relay_prefix="cc", claude_relay_wxids=[], claude_relay_db=":memory:",
+            claude_relay_max_chars=1500, admin_wxid="wxid_me",
+        )
+        relay = ClaudeRelay(cfg, store=RelayStore(":memory:"))
+        for text in ("cc 只回复：收到", "cc @webot 跑一下测试"):
+            relay.handle({"chat_id": "wxid_me", "sender_id": "wxid_me", "content": text,
+                          "is_group": False, "timestamp": time.time()})
+        first = relay.next_job(0)
+        relay.finish(first["id"], {"ok": True, "text": "收到", "duration_s": 9.5})
+        web_server.register_relay(relay)
+        yield relay
+        web_server.register_relay(None)
+
+    def test_status_page_shows_the_relay(self, page):
+        page.goto(BASE_URL, timeout=10000)
         page.wait_for_timeout(1500)
         text = page.inner_text("body")
-        for code in ("FUN", "PRO", "STK", "TODO", "ADV"):
-            assert code in text
-        assert "STICKY_MENTION_TTL_SEC" in text
+        for expected in ("运行状态", "中转 ·", "Mac worker", "最近的中转任务"):
+            assert expected in text
 
-    def test_advanced_page_lists_allow_listed_switches(self, page):
-        page.goto(f"{BASE_URL}/#/advanced", timeout=10000)
+    def test_relay_page_lists_jobs_and_cancels_a_queued_one(self, page, relay_with_jobs):
+        page.goto(f"{BASE_URL}/#/relay", timeout=10000)
         page.wait_for_timeout(1500)
         text = page.inner_text("body")
-        for key in ("PIPELINE_V2", "MEMORY_V2", "SEND_QUIET", "SEND_STICKERS", "DECISION_TRACE_ENABLED"):
-            assert key in text
-
-    def test_trace_page_renders(self, page):
-        page.goto(f"{BASE_URL}/#/trace", timeout=10000)
-        page.wait_for_timeout(1500)
-        assert "回复记录" in page.inner_text("body")
-
-    def test_editing_a_setting_shows_the_save_bar(self, page):
-        page.goto(f"{BASE_URL}/#/modules/sticky", timeout=10000)
-        page.wait_for_timeout(1500)
-        page.locator('button[role="switch"]').first.click()
+        for expected in ("中转代理", "现在的状态", "Mac 端怎么接", "relay_url", "#1", "#2", "跑一下测试", "完成", "排队中"):
+            assert expected in text
+        page.locator("tr", has_text="跑一下测试").locator("button:has-text('取消')").click()
         page.wait_for_timeout(300)
-        assert "项修改未保存" in page.inner_text("body")
+        page.locator("[role=dialog] button:has-text('取消任务')").click()
+        page.wait_for_timeout(1500)
+        assert relay_with_jobs.store.get(2)["status"] == "cancelled"
+        assert "已取消" in page.inner_text("body")
+
+    def test_relay_settings_generate_a_token_and_show_it_once(self, page):
+        page.goto(f"{BASE_URL}/#/relay", timeout=10000)
+        page.wait_for_timeout(1500)
+        text = page.inner_text("body")
+        for expected in ("Claude 中转", "打开中转", "只做中转", "CLAUDE_RELAY_ONLY", "CLAUDE_RELAY_TOKEN", "ADMIN_WXID", "CLAUDE_RELAY_PORT"):
+            assert expected in text
+        page.locator("button:has-text('随机生成')").click()
+        page.wait_for_timeout(300)
+        text = page.inner_text("body")
+        assert "新 token" in text and "项修改未保存" in text
         page.locator("button:has-text('放弃修改')").click()
         page.wait_for_timeout(300)
+        assert "新 token" not in page.inner_text("body")
+
+    def test_wechat_page_has_private_chats_and_the_ocr_switch(self, page):
+        page.goto(f"{BASE_URL}/#/wechat", timeout=10000)
+        page.wait_for_timeout(1500)
+        text = page.inner_text("body")
+        for expected in ("微信连接", "微信后端", "读取私聊", "监听哪些群", "OCR_FALLBACK", "数据库读不了时用 OCR", "macOS / Windows"):
+            assert expected in text
+        # a main setting: the bottom save bar
+        page.locator(".toggle-row", has_text="读取私聊").locator('button[role="switch"]').click()
+        page.wait_for_timeout(300)
+        assert "项修改未保存" in page.inner_text("body")
+        page.locator("button:has-text('放弃修改')").first.click()
+        page.wait_for_timeout(300)
         assert "项修改未保存" not in page.inner_text("body")
+        # an advanced switch: its own save bar
+        page.locator(".adv-field", has_text="数据库读不了时用 OCR").locator('button[role="switch"]').click()
+        page.wait_for_timeout(300)
+        assert "项修改未保存" in page.inner_text("body")
+        page.locator("button:has-text('放弃修改')").first.click()
+        page.wait_for_timeout(300)
+        assert "项修改未保存" not in page.inner_text("body")
+
+
+class TestPrmPages:
+    """待审批 and 合作单 against a running PRM service (in memory: nothing is written to data/)."""
+
+    @pytest.fixture
+    def prm(self):
+        import json as _json
+        import time as _time
+        from types import SimpleNamespace
+        from src.prm.service import SETTLE_SEC, PrmService
+        from src.prm.store import PrmStore
+        from src.relay.service import ClaudeRelay
+        from src.relay.store import RelayStore
+        from src.web import server as web_server
+
+        class Clock:
+            now = _time.time()
+
+            def __call__(self):
+                return self.now
+
+        clock = Clock()
+        cfg = SimpleNamespace(
+            claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1", claude_relay_port=0,
+            claude_relay_prefix="cc", claude_relay_wxids=[], claude_relay_db=":memory:",
+            claude_relay_max_chars=1500, admin_wxid="wxid_admin", prm_copilot="on", prm_db=":memory:",
+        )
+        sent = []
+        relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=clock)
+        service = PrmService(cfg, relay, store=PrmStore(":memory:"), clock=clock,
+                             send=lambda c, t: sent.append((c, t)) or True, send_file=lambda c, p: True)
+        service.register("wxid_creator01", "小美", "618 防晒")
+        for text, reply in (("收件人小美 13812345678", "确认一下：小美，手机〈手机1〉"), ("在吗", "在的，有什么可以帮你？")):
+            service.handle({"chat_id": "wxid_creator01", "sender_id": "wxid_creator01", "content": text,
+                            "msg_type": 1, "is_group": False, "timestamp": clock.now})
+            clock.now += SETTLE_SEC + 1
+            job = relay.next_job(0, ("prm",))
+            draft = {"intent": "要样品", "slots": {"收件人": "小美"}, "stage_proposal": "address",
+                     "message_kind": "address_confirm", "reply_draft": reply, "attachments_to_send": [],
+                     "needs_attention": False, "reason": "收件信息齐了"}
+            relay.finish(job["id"], {"ok": True, "text": _json.dumps(draft, ensure_ascii=False)})
+            relay.tick()
+        web_server.register_prm(service)
+        yield SimpleNamespace(service=service, sent=sent)
+        web_server.register_prm(None)
+        relay.stop()
+
+    def test_review_page_shows_the_draft_and_sends_it(self, page, prm):
+        # the first draft was superseded by the second message; one waits
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        text = page.inner_text("body")
+        for expected in ("待审批", "小美 · 收件信息复述", "在的，有什么可以帮你？", "建议阶段：收集收件信息", "收件人：小美", "已过时"):
+            assert expected in text
+        assert "13812345678" not in text
+        page.locator(".prm-draft button:has-text('改了再发')").click()
+        page.locator("textarea[aria-label='修改要发的内容']").fill("在的，小美你好～")
+        page.locator(".prm-draft button:has-text('确认发送')").click()
+        page.wait_for_timeout(1500)
+        packet = prm.service.store.packet(2)
+        assert packet["status"] == "approved" and packet["final_text"] == "在的，小美你好～" and packet["edited"]
+        assert "发送中" in page.inner_text("body")
+
+    def test_review_page_drops_a_draft_after_asking(self, page, prm):
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        page.locator(".prm-draft button:has-text('不发')").click()
+        page.wait_for_timeout(300)
+        page.locator("[role=dialog] button:has-text('不发')").click()
+        page.wait_for_timeout(1500)
+        assert prm.service.store.packet(2)["status"] == "dropped"
+        assert "现在没有要审批的草稿" in page.inner_text("body") and prm.sent == []
+
+    def test_deals_page_registers_and_disables_a_creator(self, page, prm):
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.wait_for_timeout(1500)
+        text = page.inner_text("body")
+        for expected in ("合作单", "登记达人", "已登记的达人", "小美", "wxid_creator01", "意向沟通", "AI 建议：收集收件信息",
+                         "达人副驾驶", "PRM_COPILOT"):
+            assert expected in text
+        page.locator("input[aria-label='达人 wxid']").fill("wxid_admin")
+        page.locator("input[aria-label='称呼']").fill("管理员")
+        page.locator(".prm-register button:has-text('登记')").click()
+        page.wait_for_timeout(800)
+        assert "管理员或能用 cc 中转的人" in page.inner_text("body")
+        page.locator("input[aria-label='达人 wxid']").fill("wxid_newcreator")
+        page.locator("input[aria-label='称呼']").fill("阿花")
+        page.locator(".prm-register button:has-text('登记')").click()
+        page.wait_for_timeout(1500)
+        assert prm.service.is_party_chat("wxid_newcreator") and "阿花" in page.inner_text("body")
+        page.locator("tr", has_text="阿花").locator("button:has-text('停用')").click()
+        page.wait_for_timeout(1500)
+        assert not prm.service.is_party_chat("wxid_newcreator") and "已停用" in page.inner_text("body")
+
+    def test_deals_page_runs_a_deal_stage_mode_waybill_and_numbers(self, page, prm):
+        store = prm.service.store
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.wait_for_timeout(1500)
+        page.locator("button[aria-label='展开 小美']").click()
+        page.wait_for_timeout(300)
+        detail = page.locator(".prm-deal")
+        text = detail.inner_text()
+        for expected in ("谁来回复", "副驾驶：Mac 起草", "寄样", "还没有运单号", "号码", "显示完整号码"):
+            assert expected in text
+        assert "13812345678" not in page.inner_text("body")
+        # the AI's stage, then a person takes the chat and gives it back
+        detail.locator("button:has-text('采纳 AI 建议：收集收件信息')").click()
+        page.wait_for_timeout(1200)
+        assert store.deal(1)["stage"] == "address"
+        assert detail.locator("select[aria-label='小美 的阶段']").input_value() == "address"
+        detail.locator("[aria-label='小美 的模式'] button:has-text('人工接管')").click()
+        page.wait_for_timeout(1200)
+        assert store.deal(1)["mode"] == "human" and "人工接管中" in detail.inner_text()
+        detail.locator("button:has-text('恢复副驾驶')").click()
+        page.wait_for_timeout(1200)
+        assert store.deal(1)["mode"] == "copilot"
+        # a waybill: the shipping notice waits in 待审批; then the parcel moves
+        detail.locator("input[aria-label='小美 的快递公司']").fill("顺丰")
+        detail.locator("input[aria-label='小美 的运单号']").fill("SF1234567890123")
+        detail.locator("button:has-text('填运单号并起草发货通知')").click()
+        page.wait_for_timeout(1500)
+        assert store.latest_shipment(1)["waybill"] == "SF1234567890123" and store.deal(1)["stage"] == "shipped"
+        assert "SF1234567890123 · 已寄出" in detail.inner_text()
+        detail.locator("select[aria-label='小美 的物流状态']").select_option("delivered")
+        detail.locator("button:has-text('更新物流')").click()
+        page.wait_for_timeout(1500)
+        text = detail.inner_text()
+        assert store.deal(1)["delivered_at"] and "后自动清除收件信息" in text and "已签收" in text
+        assert "控制台 更新物流：SF1234567890123 已签收" in text
+        # the full number, written down; and hidden again
+        detail.locator("button:has-text('显示完整号码')").click()
+        page.wait_for_timeout(800)
+        assert "〈手机1〉 13812345678" in detail.inner_text()
+        assert [e["kind"] for e in store.events(1, limit=1)] == ["reveal"]
+        detail.locator("button:has-text('隐藏')").click()
+        assert "13812345678" not in page.inner_text("body")
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        notice = page.locator(".prm-draft", has_text="寄出、物流通知")
+        assert "系统里的运单号：SF1234567890123" in notice.inner_text() and "系统生成" in notice.inner_text()
+
+    def test_review_page_marks_a_sent_message_wrong_and_shows_the_gates(self, page, prm):
+        assert prm.service.decide(2, "send")["ok"]
+        prm.service.send_approved()
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        gates = page.locator(".prm-gates").inner_text()
+        for expected in ("自动发送门槛", "收件信息复述", "先审后发", "29/30", "一直先审"):
+            assert expected in gates
+        recent = page.locator(".prm-recent")
+        assert "已发出 · 未确认" in recent.inner_text()
+        recent.locator("button:has-text('标为发错了')").click()
+        page.wait_for_timeout(300)
+        page.locator("[role=dialog] button:has-text('标为发错了')").click()
+        page.wait_for_timeout(1500)
+        assert prm.service.store.packet(2)["wrong"] is True
+        assert "发错了" in recent.inner_text() and "标为发错了" not in recent.inner_text()
+        assert [e["kind"] for e in prm.service.store.events(1, limit=1)] == ["wrong"]
+
+
+class TestOnboardingForTheAgentConsole:
+    def test_three_steps_end_with_the_relay_and_quiet_defaults(self, page):
+        """Every request of the wizard is answered here: nothing is written to .env."""
+        import json as _json
+        posted = {}
+
+        def ok(route, body=None):
+            req = route.request
+            if req.method == "POST":
+                posted[req.url.split("/api/", 1)[1]] = req.post_data_json if req.post_data else None
+            route.fulfill(status=200, content_type="application/json", body=_json.dumps(body or {"ok": True}))
+
+        diag = {k: {"ok": True, "value": "ok"} for k in ("python", "requirements", "wechat", "env", "db")}
+        page.route("**/api/onboarding/status", lambda r: ok(r, {"ok": True, "onboarding_done": False, "steps": {}}))
+        page.route("**/api/onboarding/diagnose", lambda r: ok(r, {"ok": True, **diag}))
+        page.route("**/api/onboarding/step*", lambda r: ok(r))
+        page.route("**/api/advanced", lambda r: ok(r))
+        page.goto(BASE_URL, timeout=10000)
+        page.wait_for_timeout(1000)
+        nav = page.locator("nav.rail").inner_text()
+        assert "中转设置" in nav and "AI 服务" not in nav and "功能" not in nav
+
+        page.locator("button:has-text('我已经有密钥，手动填写')").click()
+        page.locator("input[type=password]").fill("a" * 64)
+        page.locator("button:has-text('下一步')").click()
+        page.wait_for_timeout(300)
+        page.locator("input[placeholder='例如 小助手']").fill("机器人账号")
+        page.locator("button:has-text('下一步')").click()
+        page.wait_for_timeout(500)
+        text = page.inner_text("body")
+        assert "第 3 步，共 3 步" in text and "你的 wxid" in text
+        page.locator("input[placeholder='wxid_…']").fill("wxid_owner123")
+        page.locator("button:has-text('完成')").click()
+        page.wait_for_timeout(1500)
+
+        assert posted["onboarding/step3"]["ai_backend"] == "deepseek"
+        step4 = posted["onboarding/step4"]
+        assert step4["private_chat_enabled"] is True and step4["private_chats"] == "wxid_owner123"
+        assert not any(step4[k] for k in ("fun_enabled", "proactive_enabled", "web_search_enabled",
+                                          "sticky_mention_enabled", "followup_listen_enabled"))
+        values = posted["advanced"]["values"]
+        assert values["CLAUDE_RELAY"] == "on" and values["ADMIN_WXID"] == "wxid_owner123"
+        assert values["CLAUDE_RELAY_ONLY"] == "on"                     # the default of the agent console
+        assert len(values["CLAUDE_RELAY_TOKEN"]) >= 40 and values["CLAUDE_RELAY_PORT"] == "8790"

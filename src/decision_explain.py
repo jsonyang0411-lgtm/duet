@@ -24,6 +24,11 @@ REASONS = {
     "image_message_no_followup": "收到图片/表情，但不是对机器人说的，没有回复",
     "private_chat": "私聊，直接交给模型",
     "influencer_business_intent": "名单里的达人发来私聊，交给达人商务模块处理（索样流程，或转运营人工回复），没有调用聊天模型",
+    "claude_relay": "cc 开头的私聊指令，转给 Mac 上的 Claude Code",
+    "prm_copilot": "已登记达人的私聊：不回复，静默交给 Mac 起草，草稿在控制台等运营审批",
+    "prm_edge": "名单里达人的私聊：不回复、不存进聊天记录，转给 Mac 的业务服务处理",
+    "relay_only": "只做中转（CLAUDE_RELAY_ONLY）：不是中转指令，不处理",
+    "admin_command_relay_only": "只做中转时管理员私聊发的管理命令（加好友等），照常执行",
     "quote_of_other_member": "引用了别的群友的话，这条是说给他的，不是对机器人说的",
     "stale_mention_ignored": "@ 的消息太旧（可能是启动时重放的历史），忽略",
     "feishu_export": "同步到飞书的命令",
@@ -54,7 +59,11 @@ REASONS = {
 # the routing step that ended the route (src/routing/steps.py)
 STEPS = {
     "self_message": "自己的消息",
+    "edge": "转给 Mac 业务服务",
     "persist": "入库",
+    "claude_relay": "转给 Mac",
+    "prm": "达人副驾驶",
+    "relay_only": "只做中转",
     "memory_hooks": "记忆",
     "full_feed": "逐条监听",
     "quoted_image": "引用图片",

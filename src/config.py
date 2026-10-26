@@ -551,6 +551,82 @@ class BotConfig:
     memory_min_confidence: float = 0.6      # facts below this are never put in a prompt
     memory_prompt_facts: int = 12           # most facts injected into one prompt
 
+    # === Claude relay (src/relay) ===
+    # "on": private messages from claude_relay_wxids (empty = ADMIN_WXID) that
+    # start with claude_relay_prefix become jobs for Claude Code on a Mac
+    # (tools/claude_relay/worker.py asks for them on host:port with the token);
+    # the result comes back as a message.  Needs PRIVATE_CHAT_ENABLED=true.
+    claude_relay: str = "off"
+    claude_relay_token: str = ""
+    claude_relay_host: str = "0.0.0.0"
+    claude_relay_port: int = 8790
+    claude_relay_prefix: str = "cc"
+    claude_relay_wxids: list[str] = field(default_factory=list)
+    claude_relay_db: str = "data/claude_relay.db"
+    claude_relay_max_chars: int = 1500     # longer results are cut (the Mac keeps the full text)
+    # Minutes between progress messages for a running job; a job that waited in the
+    # queue also gets "started".  0 = only the receipt and the result.
+    claude_relay_progress_min: int = 3
+    # "on": a result longer than claude_relay_max_chars goes as a .txt file (backends
+    # that can send files: Windows wcdb), with its start in a message; else it is cut.
+    claude_relay_long_file: str = "on"
+    # "on": the bot is a relay and nothing else: every message that is not a relay
+    # request ends the route silently (no reply, no proactive line, no welcome, no
+    # memory job, no model call).  Needs CLAUDE_RELAY=on.
+    claude_relay_only: str = "off"
+
+    # === PRM copilot (src/prm) ===
+    # "on": private messages of the creators registered in the console become silent
+    # "prm" jobs of the relay; the Mac worker drafts a reply in its locked-down
+    # workspace and the draft waits in the console until an operator sends, edits
+    # or drops it.  The creator gets no receipt.  Needs CLAUDE_RELAY=on and
+    # PRIVATE_CHAT_ENABLED=true.
+    prm_copilot: str = "off"
+    prm_db: str = "data/prm.db"
+    # An operator's own WeChat reply in a creator's chat (or the console) gives the chat to
+    # a person for this long: the creator's messages are only recorded meanwhile.
+    prm_takeover_min: int = 120
+    # A draft waiting this long gets one holding reply per round of the creator's
+    # messages (8.1); 0 = never.
+    prm_holding_min: int = 10
+    prm_holding_text: str = "收到，我确认一下马上回你"
+    # A delivered deal's receiving details (address, phone and ID numbers) are cleared
+    # everywhere this many days after delivery (8.2).
+    prm_retention_days: int = 30
+    # === WeChat edge (src/edge, edge-protocol.md) for the Mac business service ===
+    # "on": Windows only receives and sends WeChat messages for the creators the Mac lists;
+    # the Mac pulls /edge/* on the relay's port with PRM_EDGE_TOKEN.  Not with PRM_COPILOT.
+    prm_edge: str = "off"
+    prm_edge_token: str = ""
+    edge_db: str = "data/edge.db"
+    edge_send_min_gap_sec: int = 3
+    edge_send_per_hour: int = 60
+    edge_seen_text_sec: int = 1800
+    edge_seen_file_sec: int = 600
+    edge_keep_days: int = 7
+
+    # === OCR fallback (src/wechat/ocr), macOS mac_hybrid backend only ===
+    # "on": when the WeChat database cannot be read ocr_fallback_after times in a row, the
+    # open chat is read from the screen (Apple Vision) every ocr_poll_sec seconds until the
+    # database works again.  Groups only; the speaker of a line is not known.
+    ocr_fallback: str = "off"
+    ocr_fallback_after: int = 3
+    ocr_poll_sec: float = 4.0
+
+    # === Friend management ===
+    # AUTO_ACCEPT_FRIENDS=on: every auto_accept_interval_sec seconds the bot opens "新的朋友" in
+    # the WeChat window and accepts the pending requests (Windows wcdb backend only).  It takes
+    # the screen, so it is off unless asked for; the admin commands 添加好友 / 同意好友 work either way.
+    auto_accept_friends: str = "off"
+    auto_accept_interval_sec: int = 300
+    # It must not get in the way of the person at the computer: every interval it first looks, silently,
+    # for a new red badge in WeChat's rail (auto_accept_watch) and does nothing if there is none; a check that
+    # needs the screen waits until keyboard and mouse have been still for auto_accept_idle_sec (0 = do not wait);
+    # a check is forced every auto_accept_full_check_sec even without a new badge (0 = never).
+    auto_accept_idle_sec: int = 60
+    auto_accept_watch: str = "on"
+    auto_accept_full_check_sec: int = 900
+
 
 def _validate_config(kwargs: dict) -> None:
     """Validate numeric config values.  Prints clear errors and exits on bad values."""
@@ -912,6 +988,94 @@ def _validate_config(kwargs: dict) -> None:
             f"got {proactive_score_threshold}"
         )
 
+    claude_relay = kwargs.get("claude_relay", "off")
+    if claude_relay not in ("off", "on"):
+        errors.append(f"CLAUDE_RELAY must be off or on, got {claude_relay}")
+    elif claude_relay == "on":
+        # Anyone who can reach the port and knows the token can make the Mac run things.
+        if len(str(kwargs.get("claude_relay_token", ""))) < 16:
+            errors.append("CLAUDE_RELAY=on needs CLAUDE_RELAY_TOKEN (at least 16 characters, random)")
+        if not (kwargs.get("claude_relay_wxids") or kwargs.get("admin_wxid")):
+            errors.append("CLAUDE_RELAY=on needs CLAUDE_RELAY_WXIDS or ADMIN_WXID (who may use it)")
+        if not re.fullmatch(r"[^\s]{1,10}", str(kwargs.get("claude_relay_prefix", ""))):
+            errors.append("CLAUDE_RELAY_PREFIX must be 1-10 characters without spaces")
+    if not (1 <= int(kwargs.get("claude_relay_port", 8790)) <= 65535):
+        errors.append(f"CLAUDE_RELAY_PORT must be between 1 and 65535, got {kwargs.get('claude_relay_port')}")
+    ocr_fallback = kwargs.get("ocr_fallback", "off")
+    if ocr_fallback not in ("off", "on"):
+        errors.append(f"OCR_FALLBACK must be off or on, got {ocr_fallback}")
+    if not (1 <= int(kwargs.get("ocr_fallback_after", 3)) <= 20):
+        errors.append(f"OCR_FALLBACK_AFTER must be between 1 and 20, got {kwargs.get('ocr_fallback_after')}")
+    if not (1 <= float(kwargs.get("ocr_poll_sec", 4.0)) <= 60):
+        errors.append(f"OCR_POLL_SEC must be between 1 and 60, got {kwargs.get('ocr_poll_sec')}")
+    claude_relay_only = kwargs.get("claude_relay_only", "off")
+    if claude_relay_only not in ("off", "on"):
+        errors.append(f"CLAUDE_RELAY_ONLY must be off or on, got {claude_relay_only}")
+    elif claude_relay_only == "on" and kwargs.get("claude_relay", "off") != "on":
+        errors.append("CLAUDE_RELAY_ONLY=on needs CLAUDE_RELAY=on (otherwise the bot would do nothing at all)")
+    if kwargs.get("claude_relay_long_file", "on") not in ("off", "on"):
+        errors.append(f"CLAUDE_RELAY_LONG_FILE must be off or on, got {kwargs.get('claude_relay_long_file')}")
+    if not (0 <= int(kwargs.get("claude_relay_progress_min", 3)) <= 120):
+        errors.append(
+            f"CLAUDE_RELAY_PROGRESS_MIN must be between 0 and 120, got {kwargs.get('claude_relay_progress_min')}"
+        )
+    if not (20 <= int(kwargs.get("claude_relay_max_chars", 1500)) <= 5000):
+        errors.append(
+            f"CLAUDE_RELAY_MAX_CHARS must be between 20 and 5000, got {kwargs.get('claude_relay_max_chars')}"
+        )
+    prm_copilot = kwargs.get("prm_copilot", "off")
+    if prm_copilot not in ("off", "on"):
+        errors.append(f"PRM_COPILOT must be off or on, got {prm_copilot}")
+    elif prm_copilot == "on":
+        if kwargs.get("claude_relay", "off") != "on":
+            errors.append("PRM_COPILOT=on needs CLAUDE_RELAY=on (the drafts are written on the Mac)")
+        # Only when the caller knows it (the console's advanced page checks its own keys only).
+        if "private_chat_enabled" in kwargs and not kwargs["private_chat_enabled"]:
+            errors.append("PRM_COPILOT=on needs PRIVATE_CHAT_ENABLED=true (creators write in private chats)")
+    if not (5 <= int(kwargs.get("prm_takeover_min", 120)) <= 1440):
+        errors.append(f"PRM_TAKEOVER_MIN must be between 5 and 1440, got {kwargs.get('prm_takeover_min')}")
+    if not (0 <= int(kwargs.get("prm_holding_min", 10)) <= 120):
+        errors.append(f"PRM_HOLDING_MIN must be between 0 and 120, got {kwargs.get('prm_holding_min')}")
+    if not (1 <= len(str(kwargs.get("prm_holding_text", "收到，我确认一下马上回你")).strip()) <= 60):
+        errors.append("PRM_HOLDING_TEXT must be 1-60 characters")
+    if not (1 <= int(kwargs.get("prm_retention_days", 30)) <= 365):
+        errors.append(f"PRM_RETENTION_DAYS must be between 1 and 365, got {kwargs.get('prm_retention_days')}")
+    prm_edge = kwargs.get("prm_edge", "off")
+    if prm_edge not in ("off", "on"):
+        errors.append(f"PRM_EDGE must be off or on, got {prm_edge}")
+    elif prm_edge == "on":
+        if kwargs.get("claude_relay", "off") != "on":
+            errors.append("PRM_EDGE=on needs CLAUDE_RELAY=on (/edge/* is served on the relay's port)")
+        if "private_chat_enabled" in kwargs and not kwargs["private_chat_enabled"]:
+            errors.append("PRM_EDGE=on needs PRIVATE_CHAT_ENABLED=true (creators write in private chats)")
+        if prm_copilot == "on":
+            errors.append("PRM_EDGE and PRM_COPILOT cannot both be on (the edge hands everything to the Mac)")
+        edge_token = str(kwargs.get("prm_edge_token", "") or "")
+        if len(edge_token) < 32:
+            errors.append("PRM_EDGE=on needs PRM_EDGE_TOKEN of at least 32 characters")
+        elif edge_token == str(kwargs.get("claude_relay_token", "") or ""):
+            errors.append("PRM_EDGE_TOKEN must differ from CLAUDE_RELAY_TOKEN")
+    for key, low, high, default in (("edge_send_min_gap_sec", 0, 60, 3), ("edge_send_per_hour", 1, 1000, 60),
+                                    ("edge_seen_text_sec", 60, 86400, 1800), ("edge_seen_file_sec", 60, 86400, 600),
+                                    ("edge_keep_days", 1, 30, 7)):
+        if not (low <= int(kwargs.get(key, default)) <= high):
+            errors.append(f"{key.upper()} must be between {low} and {high}, got {kwargs.get(key)}")
+    auto_accept = kwargs.get("auto_accept_friends", "off")
+    if auto_accept not in ("off", "on"):
+        errors.append(f"AUTO_ACCEPT_FRIENDS must be off or on, got {auto_accept}")
+    if not (10 <= int(kwargs.get("auto_accept_interval_sec", 300)) <= 86400):
+        errors.append(
+            f"AUTO_ACCEPT_INTERVAL_SEC must be between 10 and 86400, got {kwargs.get('auto_accept_interval_sec')}"
+        )
+    if not (0 <= int(kwargs.get("auto_accept_idle_sec", 60)) <= 3600):
+        errors.append(f"AUTO_ACCEPT_IDLE_SEC must be between 0 and 3600, got {kwargs.get('auto_accept_idle_sec')}")
+    auto_watch = kwargs.get("auto_accept_watch", "on")
+    if auto_watch not in ("off", "on"):
+        errors.append(f"AUTO_ACCEPT_WATCH must be off or on, got {auto_watch}")
+    full_check = int(kwargs.get("auto_accept_full_check_sec", 900))
+    if full_check != 0 and not (60 <= full_check <= 86400):
+        errors.append(f"AUTO_ACCEPT_FULL_CHECK_SEC must be 0 or between 60 and 86400, got {full_check}")
+
     if errors:
         msg = "配置值无效:\n" + "\n".join(f"  - {err}" for err in errors)
         raise RuntimeError(msg)
@@ -965,17 +1129,21 @@ def load_config() -> BotConfig:
     """
     ai_backend = os.getenv("AI_BACKEND", "claude").strip().lower()
     model_route = os.getenv("MODEL_ROUTE", "cloud").strip().lower() or "cloud"
+    relay_only = (_parse_memory_mode(os.getenv("CLAUDE_RELAY", "off")) == "on"
+                  and _parse_memory_mode(os.getenv("CLAUDE_RELAY_ONLY", "off")) == "on")
+    no_key_hint = "（只做中转的机器人不需要 AI 密钥：在控制台「中转代理」里打开中转和「只做中转」）"
 
     # Validate required API keys based on selected backend (not needed when
-    # every task runs on the local model: MODEL_ROUTE=local)
-    if model_route == "local":
+    # every task runs on the local model, MODEL_ROUTE=local, or when the bot
+    # only relays and uses no model at all, CLAUDE_RELAY_ONLY=on)
+    if model_route == "local" or relay_only:
         pass
     elif ai_backend == "deepseek":
         api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
         if not api_key or "***" in api_key:
             msg = (
                 "DEEPSEEK_API_KEY 未设置，或当前值是被打码后的占位；"
-                "请在 .env 文件中配置完整 API Key，或通过引导页重新填写"
+                "请在 .env 文件中配置完整 API Key，或通过引导页重新填写" + no_key_hint
             )
             raise RuntimeError(msg)
     elif ai_backend == "openai":
@@ -983,7 +1151,7 @@ def load_config() -> BotConfig:
         if not api_key or "***" in api_key:
             msg = (
                 "OPENAI_API_KEY 未设置，或当前值是被打码后的占位；"
-                "请在 .env 文件中配置完整 API Key，或通过引导页重新填写"
+                "请在 .env 文件中配置完整 API Key，或通过引导页重新填写" + no_key_hint
             )
             raise RuntimeError(msg)
     elif ai_backend == "claude":
@@ -991,7 +1159,7 @@ def load_config() -> BotConfig:
         if not api_key or "***" in api_key:
             msg = (
                 "ANTHROPIC_API_KEY 未设置，或当前值是被打码后的占位；"
-                "请在 .env 文件中配置完整 API Key，或通过引导页重新填写"
+                "请在 .env 文件中配置完整 API Key，或通过引导页重新填写" + no_key_hint
             )
             raise RuntimeError(msg)
     else:
@@ -1191,6 +1359,39 @@ def load_config() -> BotConfig:
         "memory_idle_minutes": int(os.getenv("MEMORY_IDLE_MINUTES", "20")),
         "memory_min_confidence": float(os.getenv("MEMORY_MIN_CONFIDENCE", "0.6")),
         "memory_prompt_facts": int(os.getenv("MEMORY_PROMPT_FACTS", "12")),
+        "claude_relay": _parse_memory_mode(os.getenv("CLAUDE_RELAY", "off")),
+        "claude_relay_token": os.getenv("CLAUDE_RELAY_TOKEN", "").strip(),
+        "claude_relay_host": os.getenv("CLAUDE_RELAY_HOST", "0.0.0.0").strip() or "0.0.0.0",
+        "claude_relay_port": int(os.getenv("CLAUDE_RELAY_PORT", "8790")),
+        "claude_relay_prefix": os.getenv("CLAUDE_RELAY_PREFIX", "cc").strip(),
+        "claude_relay_wxids": _split_names(os.getenv("CLAUDE_RELAY_WXIDS", "")),
+        "claude_relay_db": os.getenv("CLAUDE_RELAY_DB", "data/claude_relay.db").strip() or "data/claude_relay.db",
+        "claude_relay_max_chars": int(os.getenv("CLAUDE_RELAY_MAX_CHARS", os.getenv("CLAUDE_RELAY_LONG_CHARS", "1500"))),
+        "claude_relay_only": _parse_memory_mode(os.getenv("CLAUDE_RELAY_ONLY", "off")),
+        "claude_relay_progress_min": int(os.getenv("CLAUDE_RELAY_PROGRESS_MIN", "3")),
+        "claude_relay_long_file": _parse_memory_mode(os.getenv("CLAUDE_RELAY_LONG_FILE", "on")),
+        "prm_copilot": _parse_memory_mode(os.getenv("PRM_COPILOT", "off")),
+        "prm_db": os.getenv("PRM_DB", "data/prm.db").strip() or "data/prm.db",
+        "prm_takeover_min": int(os.getenv("PRM_TAKEOVER_MIN", "120")),
+        "prm_holding_min": int(os.getenv("PRM_HOLDING_MIN", "10")),
+        "prm_holding_text": os.getenv("PRM_HOLDING_TEXT", "收到，我确认一下马上回你").strip() or "收到，我确认一下马上回你",
+        "prm_retention_days": int(os.getenv("PRM_RETENTION_DAYS", "30")),
+        "prm_edge": _parse_memory_mode(os.getenv("PRM_EDGE", "off")),
+        "prm_edge_token": os.getenv("PRM_EDGE_TOKEN", "").strip(),
+        "edge_db": os.getenv("EDGE_DB", "data/edge.db").strip() or "data/edge.db",
+        "edge_send_min_gap_sec": int(os.getenv("EDGE_SEND_MIN_GAP_SEC", "3")),
+        "edge_send_per_hour": int(os.getenv("EDGE_SEND_PER_HOUR", "60")),
+        "edge_seen_text_sec": int(os.getenv("EDGE_SEEN_TEXT_SEC", "1800")),
+        "edge_seen_file_sec": int(os.getenv("EDGE_SEEN_FILE_SEC", "600")),
+        "edge_keep_days": int(os.getenv("EDGE_KEEP_DAYS", "7")),
+        "ocr_fallback": _parse_memory_mode(os.getenv("OCR_FALLBACK", "off")),
+        "ocr_fallback_after": int(os.getenv("OCR_FALLBACK_AFTER", "3")),
+        "ocr_poll_sec": float(os.getenv("OCR_POLL_SEC", "4")),
+        "auto_accept_friends": _parse_memory_mode(os.getenv("AUTO_ACCEPT_FRIENDS", "off")),
+        "auto_accept_interval_sec": int(os.getenv("AUTO_ACCEPT_INTERVAL_SEC", "300")),
+        "auto_accept_idle_sec": int(os.getenv("AUTO_ACCEPT_IDLE_SEC", "60")),
+        "auto_accept_watch": _parse_memory_mode(os.getenv("AUTO_ACCEPT_WATCH", "on")),
+        "auto_accept_full_check_sec": int(os.getenv("AUTO_ACCEPT_FULL_CHECK_SEC", "900")),
     }
 
     deepseek_model = os.getenv("DEEPSEEK_MODEL")

@@ -93,6 +93,85 @@ def persist(ctx: RouteContext) -> Optional[Stop]:
     return None
 
 
+def claude_relay(ctx: RouteContext) -> Optional[Stop]:
+    """``cc ...`` in an allowed person's private chat is a job for Claude Code on
+    the Mac (CLAUDE_RELAY=on, src/relay): the reply is the receipt, the result
+    comes later.  Before the memory hooks: orders are not chat to remember."""
+    relay = getattr(ctx.router, "_claude_relay", None)
+    if relay is None:
+        return None
+    matched, reply = relay.handle(ctx.msg)
+    if not matched:
+        return None
+    ctx.trace.reason("claude_relay")
+    return Stop(reply)
+
+
+def edge(ctx: RouteContext) -> Optional[Stop]:
+    """PRM_EDGE=on: a listed creator's private message goes to the Mac business service
+    (src/edge: an event the Mac pulls) and is never answered here.  Before ``persist``:
+    the creator's words are not kept in this PC's chat archive."""
+    service = getattr(ctx.router, "_edge", None)
+    if service is None:
+        return None
+    try:
+        handled = service.handle(ctx.msg)
+    except Exception:
+        logger.exception("EDGE: could not take a creator's message; it is not answered")
+        handled = not ctx.msg.get("is_group", True) and service.is_party_chat(ctx.msg.get("chat_id", ""))
+    if not handled:
+        return None
+    ctx.trace.redact("[已登记达人的私聊，内容不记录]")
+    ctx.trace.reason("prm_edge")
+    return Stop(None)
+
+
+def prm(ctx: RouteContext) -> Optional[Stop]:
+    """PRM_COPILOT=on: a registered creator's private message goes, silently, into a
+    draft job for the Mac (src/prm); the draft waits in the console.  Nothing is
+    ever said to the creator here, so the route ends without a reply.  After
+    ``claude_relay`` (an admin's cc stays the relay's), before ``relay_only``."""
+    service = getattr(ctx.router, "_prm", None)
+    if service is None:
+        return None
+    try:
+        handled = service.handle(ctx.msg)
+    except Exception:
+        logger.exception("PRM: could not take a creator's message; it is not answered")
+        handled = not ctx.msg.get("is_group", True) and service.is_party_chat(ctx.msg.get("chat_id", ""))
+    if not handled:
+        return None
+    ctx.trace.redact("[已登记达人的私聊，内容不记录]")      # phone numbers, addresses: not in the log
+    ctx.trace.reason("prm_copilot")
+    return Stop(None)
+
+
+def relay_only(ctx: RouteContext) -> Optional[Stop]:
+    """CLAUDE_RELAY_ONLY=on: the bot only relays.  Whatever ``claude_relay`` did not
+    take ends here, silently: no reply, no proactive line, no welcome, no memory job,
+    no model call.  The message is stored (``persist`` ran) so the logs show it.
+
+    Exception: admin management commands in private chat (e.g. friend manager,
+    admin help) are answered so the admin can still control the host bot without
+    enabling conversational AI or group responses.
+    """
+    if getattr(ctx.router._config, "claude_relay_only", "off") != "on":
+        return None
+    router, msg = ctx.router, ctx.msg
+    if not msg.get("is_group", True) and (
+        router._config.admin_wxid and msg.get("sender_id") == router._config.admin_wxid
+    ):
+        raw_content = re.sub(r'^\s*wxid_[a-zA-Z0-9]+:\s*', '', msg.get("content", "")).strip()
+        if raw_content and hasattr(router, "_admin") and router._admin is not None:
+            admin_reply = router._admin.handle(raw_content, msg.get("sender_name", ""))
+            if admin_reply:
+                ctx.trace.reason("admin_command_relay_only")
+                return Stop(router._finish_visible_reply(msg, admin_reply))
+
+    ctx.trace.ignore("relay_only")
+    return Stop(None)
+
+
 def memory_hooks(ctx: RouteContext) -> Optional[Stop]:
     """Hand the stored message to the memory machinery (never delays the reply)."""
     router, msg = ctx.router, ctx.msg
@@ -469,7 +548,11 @@ def finish(ctx: RouteContext) -> Optional[Stop]:
 
 ROUTE_STEPS: tuple[RouteStep, ...] = (
     RouteStep("self_message", self_message, "the bot's own lines are never handled"),
+    RouteStep("edge", edge, "a listed creator's message goes to the Mac (PRM_EDGE), not stored, not answered"),
     RouteStep("persist", persist, "store the message; duplicates stop here"),
+    RouteStep("claude_relay", claude_relay, "cc ... from an allowed private chat goes to the Mac"),
+    RouteStep("prm", prm, "a registered creator's message: a silent draft job, the console decides"),
+    RouteStep("relay_only", relay_only, "CLAUDE_RELAY_ONLY: nothing else is answered"),
     RouteStep("memory_hooks", memory_hooks, "memory job / diary trigger"),
     RouteStep("full_feed", full_feed, "a persona that reads every message of a group"),
     RouteStep("quoted_image", quoted_image, "a quoted picture the user asks about"),

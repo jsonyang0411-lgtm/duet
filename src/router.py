@@ -276,6 +276,8 @@ class MessageRouter:
             self._todo_handler = TodoHandler(
                 self._todo_store, config,
             )
+        # CLAUDE_RELAY=on: the bot sets a ClaudeRelay here once the backend can send.
+        self._claude_relay = None
         # Health monitoring: count unique messages processed (post-dedup)
         self.messages_processed: int = 0
 
@@ -473,9 +475,12 @@ class MessageRouter:
 
         group_name = str(msg.get("group_name", "")).strip()
         chat_id = str(msg.get("chat_id", "")).strip()
-        if always_reply_group and always_reply_group in (group_name, chat_id):
+        always_reply_groups = [g.strip() for g in always_reply_group.split(",") if g.strip()]
+        target_groups = [g.strip() for g in target_group.split(",") if g.strip()]
+
+        if any(g in (group_name, chat_id) for g in always_reply_groups):
             mode = "always_reply"
-        elif target_group and target_group in (group_name, chat_id):
+        elif any(g in (group_name, chat_id) for g in target_groups):
             mode = "ambient"
         else:
             return None
@@ -569,6 +574,8 @@ class MessageRouter:
             str(getattr(self._config, "bot_display_name", "") or "").strip(),
             str(getattr(self._config, "chat_persona_name", "") or "").strip(),
             persona.name if persona is not None else "",
+            "假企鹅",
+            "qier",
         }
         return any(name and f"@{name}" in content for name in names)
 

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .config import BotConfig, PROJECT_ROOT
 from .db import initialize_db, MessageStore
-from .summarize import create_models
+from .summarize import create_models, relay_only
 from .trigger import TriggerDetector
 from .nickname import NicknameService
 from .admin import AdminCommandHandler
@@ -190,6 +190,8 @@ class Bot:
         self._conn = None
         self._backend = None
         self._health: HealthMonitor | None = None
+        self._friend_mgr = None
+        self._auto_friend = None
 
     def run(self) -> None:
         """Initialize all components and start the bot. Blocks until stopped."""
@@ -278,6 +280,15 @@ class Bot:
         except Exception:
             pass
 
+        # CLAUDE_RELAY=on: "cc ..." in an allowed private chat goes to the Mac.
+        relay = self._start_claude_relay(config, router, backend)
+        # PRM_COPILOT=on: registered creators' messages become silent draft jobs.
+        prm = self._start_prm(config, router, backend, relay)
+        # PRM_EDGE=on: Windows only receives and sends WeChat for the Mac business service.
+        edge = self._start_edge(config, router, backend, relay)
+
+        self._start_friend_management(config, backend, admin_handler)
+
         # ── 6. Health monitor ───────────────────────────────────
         self._health = HealthMonitor(
             summarizer=summarizer,
@@ -292,6 +303,8 @@ class Bot:
         # ── 7. Signal handling ──────────────────────────────────
         def shutdown(signum, frame):
             logger.info("Received signal %d. Shutting down...", signum)
+            if self._auto_friend:
+                self._auto_friend.stop()
             backend.stop()
             if self._health:
                 self._health.stop()
@@ -324,8 +337,27 @@ class Bot:
         except KeyboardInterrupt:
             pass
         finally:
+            if self._auto_friend:
+                self._auto_friend.stop()
             if self._health:
                 self._health.stop()
+            if edge is not None:
+                edge.stop()
+                relay.attach_edge(None, "")
+            if prm is not None:
+                prm.stop()
+                try:
+                    from .web.server import register_prm
+                    register_prm(None)
+                except Exception:
+                    pass
+            if relay is not None:
+                relay.stop()
+                try:
+                    from .web.server import register_relay
+                    register_relay(None)
+                except Exception:
+                    pass
             # Stop the memory thread before its database goes away.
             close_router = getattr(router, "close", None)
             if callable(close_router):
@@ -345,6 +377,149 @@ class Bot:
 
     # ── Helpers ──────────────────────────────────────────────────
 
+    def _start_friend_management(self, config, backend, admin_handler) -> None:
+        """The admin's friend commands and, with AUTO_ACCEPT_FRIENDS=on, the auto-accept worker.
+
+        Both drive the WeChat window, so only a backend that has one (Windows wcdb)
+        gets them; the manager shares that backend's window lock and reads the screen
+        with its own OCR engine (OCR_FALLBACK is a different engine and may be off).
+        """
+        window = getattr(backend, "window_controller", None)
+        if window is None:
+            logger.info("Friend management is off: this backend has no WeChat window to drive")
+            return
+        try:
+            from .wechat.friend_manager import AutoFriendService, FriendManager
+            from .wechat.ocr.win_ocr import WindowsOcrEngine
+            from .wechat.quiet_send import IdleGate, Win32Desktop
+            manager = FriendManager(
+                window_controller=window,
+                ocr_engine=WindowsOcrEngine(window=window),
+                ui_lock=getattr(backend, "window_lock", None),
+            )
+            auto = AutoFriendService(
+                manager,
+                interval_sec=config.auto_accept_interval_sec,
+                enabled=config.auto_accept_friends == "on",
+                idle_gate=IdleGate(Win32Desktop(), config.auto_accept_idle_sec, 0),
+                idle_sec=config.auto_accept_idle_sec,
+                watch=config.auto_accept_watch == "on",
+                full_check_sec=config.auto_accept_full_check_sec,
+            )
+        except Exception:
+            logger.warning("Friend management could not start", exc_info=True)
+            return
+        self._friend_mgr, self._auto_friend = manager, auto
+        admin_handler.set_friend_manager(manager, auto)
+        if auto.enabled:
+            auto.start()
+
+    @staticmethod
+    def _start_claude_relay(config, router, backend):
+        """The Claude relay (src/relay) with the backend as its sender, or None when off.
+
+        If its port cannot be opened the requests are still queued (the
+        receipt then says the Mac is offline) and the error is in the log.
+        """
+        if getattr(config, "claude_relay", "off") != "on":
+            return None
+        from .admin import RELAY_HELP
+        from .relay import ClaudeRelay
+        # When the bot only relays, the admin's management commands still go to the
+        # admin handler (route step relay_only), not to the Mac.
+        is_command = getattr(getattr(router, "_admin", None), "is_command", None)
+        relay = ClaudeRelay(config, send=backend.send_text, send_file=getattr(backend, "send_file", None),
+                            reserved=is_command, extra_help=RELAY_HELP if is_command else "")
+        try:
+            relay.start()
+        except OSError:
+            logger.exception(
+                "CLAUDE_RELAY: cannot listen on %s:%s; the Mac cannot reach this bot",
+                config.claude_relay_host, config.claude_relay_port,
+            )
+        router._claude_relay = relay
+        try:
+            from .web.server import register_relay
+            register_relay(relay)
+        except Exception:
+            pass
+        return relay
+
+    @staticmethod
+    def _start_prm(config, router, backend, relay):
+        """The PRM copilot (src/prm) on top of the relay, or None when off.
+
+        The WeChat backend learns to read the registered creators' private chats
+        (set_private_filter, Windows only); the console finds the service through
+        register_prm.
+        """
+        if getattr(config, "prm_copilot", "off") != "on":
+            return None
+        if relay is None:
+            logger.warning("PRM_COPILOT is on but the Claude relay is not: creators' messages are not drafted")
+            return None
+        from .prm import PrmService
+        store = getattr(router, "_store", None)
+        prm = PrmService(config, relay, send=backend.send_text, send_file=getattr(backend, "send_file", None),
+                         on_parties_changed=getattr(backend, "refresh_private_chats_soon", None),
+                         scrub_messages=getattr(store, "rewrite_chat", None))
+        set_filter = getattr(backend, "set_private_filter", None)
+        if callable(set_filter):
+            set_filter(prm.is_party_chat)
+        else:
+            logger.warning("PRM_COPILOT: this WeChat backend cannot read extra private chats; "
+                           "add the creators to PRIVATE_CHATS")
+        set_hook = getattr(backend, "set_own_message_hook", None)
+        if callable(set_hook):
+            set_hook(prm.on_own_message)           # an operator replying by hand takes the chat over
+        else:
+            logger.warning("PRM_COPILOT: this WeChat backend does not report this account's own lines; "
+                           "an operator's own replies will not take a chat over")
+        prm.start()
+        router._prm = prm
+        try:
+            from .web.server import register_prm
+            register_prm(prm)
+        except Exception:
+            pass
+        logger.info("PRM_COPILOT: %d registered creator(s)", len(prm.store.active_wxids()))
+        return prm
+
+    @staticmethod
+    def _start_edge(config, router, backend, relay):
+        """The WeChat edge (src/edge) on the relay's port, or None when off.
+
+        Listed creators' private chats are read (set_private_filter) and forwarded as events
+        the Mac pulls; this account's own lines there are read back or reported as an
+        operator's (set_own_message_hook); the Mac's send requests go out through the backend.
+        """
+        if getattr(config, "prm_edge", "off") != "on":
+            return None
+        if relay is None:
+            logger.warning("PRM_EDGE is on but the Claude relay is not: /edge/* has no server")
+            return None
+        from .edge.service import EdgeService
+        edge = EdgeService(
+            config, send_text=backend.send_text, send_file=getattr(backend, "send_file", None),
+            own_wxid=getattr(backend, "own_wxid", None), wechat_online=getattr(backend, "wechat_window_found", None),
+            db_readable=getattr(backend, "db_readable", None),
+            on_parties_changed=getattr(backend, "refresh_private_chats_soon", None))
+        set_filter = getattr(backend, "set_private_filter", None)
+        set_hook = getattr(backend, "set_own_message_hook", None)
+        if callable(set_filter):
+            set_filter(edge.is_party_chat)
+        else:
+            logger.warning("PRM_EDGE: this WeChat backend cannot read extra private chats")
+        if callable(set_hook):
+            set_hook(edge.on_own_message)
+        else:
+            logger.warning("PRM_EDGE: this WeChat backend does not report this account's own lines; "
+                           "sends are not read back and operators' own replies are not reported")
+        relay.attach_edge(edge, config.prm_edge_token)
+        edge.start()
+        router._edge = edge
+        return edge
+
     def _log_banner(self) -> None:
         """Log the startup banner with configuration details."""
         config = self._config
@@ -352,13 +527,15 @@ class Bot:
         logger.info("webot starting...")
         logger.info("WeChat backend: %s", config.wechat_backend)
         route = getattr(config, "model_route", "cloud")
-        if route != "local":
+        if relay_only(config):
+            logger.info("AI: none (CLAUDE_RELAY_ONLY: the bot only relays cc requests)")
+        elif route != "local":
             logger.info("AI backend: %s", config.ai_backend)
             if config.ai_backend == "deepseek":
                 logger.info("Model: %s", config.deepseek_model)
             else:
                 logger.info("Model: %s", config.summarize_model)
-        if route != "cloud":
+        if route != "cloud" and not relay_only(config):
             logger.info("Local model: %s at %s (MODEL_ROUTE=%s)",
                         config.local_model, config.local_base_url, route)
         logger.info("Bot name: %r", config.bot_display_name)

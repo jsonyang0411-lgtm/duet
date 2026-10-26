@@ -2,6 +2,8 @@
 
 Read path: WeFlow-style local WCDB access keyed by stable ``@chatroom`` ids.
 Write path: existing macOS Accessibility automation from ``mac_ui_backend``.
+Fallback read path (``OCR_FALLBACK=on``): while the database cannot be read, the open
+chat is read from the screen (``src/wechat/ocr``); sending is unchanged.
 """
 
 from __future__ import annotations
@@ -25,6 +27,21 @@ logger = logging.getLogger(__name__)
 DEFAULT_POLL_SEC = 1.0
 DEFAULT_LIMIT = 200
 SENT_TITLE_RE = re.compile(r"Sent macOS WeChat reply to (?P<username>\S+) via '(?P<title>[^']+)'")
+# OCR cannot see who wrote a line of a group chat.
+OCR_SENDER = "OCR群友"
+
+
+def _ocr_from_config(config):
+    """The OCR fallback the configuration asks for (``OCR_FALLBACK=on``), else None."""
+    if getattr(config, "ocr_fallback", "off") != "on":
+        return None
+    from .ocr import OcrFallback
+    from .ocr.mac_vision import MacVisionEngine
+    return OcrFallback(
+        MacVisionEngine(),
+        after=getattr(config, "ocr_fallback_after", 3),
+        interval=getattr(config, "ocr_poll_sec", 4.0),
+    )
 
 
 class MacHybridBackend(AbstractWeChatBackend):
@@ -40,8 +57,10 @@ class MacHybridBackend(AbstractWeChatBackend):
         automation: MacUIAutomation | None = None,
         limit: int = DEFAULT_LIMIT,
         config=None,
+        ocr: Any = None,
     ):
         self._bot_name = bot_display_name
+        self._ocr = ocr if ocr is not None else _ocr_from_config(config)
         self._groups = groups or []
         self._poll_sec = poll_sec
         self._store = store
@@ -74,6 +93,8 @@ class MacHybridBackend(AbstractWeChatBackend):
             self._groups, self._poll_sec, self._bot_name,
         )
         self._automation.activate_wechat()
+        if self._ocr is not None:
+            self._ocr.warm_up()
         self._prime_message_state()
         while self._running:
             self.poll_once(callback)
@@ -117,7 +138,7 @@ class MacHybridBackend(AbstractWeChatBackend):
             return False
         is_group = self._chat_is_group.get(chat_id, str(chat_id).endswith("@chatroom"))
         prefer_group = self._should_prefer_group_result(chat_id, target)
-        if target and not self._automation.open_chat(
+        if target and not self._chat_open_on_screen(target) and not self._automation.open_chat(
             target,
             prefer_group=prefer_group,
             sidebar_index=None,
@@ -139,6 +160,8 @@ class MacHybridBackend(AbstractWeChatBackend):
         self._running = False
 
     def health_status(self) -> str:
+        if self._ocr is not None and self._ocr.active:
+            return "ocr_fallback"
         if self._service_error:
             return "weflow_down"
         return "weflow_ok" if self._client.health() else "weflow_down"
@@ -148,7 +171,12 @@ class MacHybridBackend(AbstractWeChatBackend):
             payload = self._client.get_new_messages(self._state, limit=self._limit)
         except Exception as exc:
             logger.warning("Failed to poll macOS WeFlow messages: %s", exc)
+            self._poll_ocr(callback)
             return
+
+        # The first good read after an OCR stretch: what it returns is the outage's
+        # history, and part of it was already answered from the screen.
+        recovered = self._ocr is not None and self._ocr.note_db_ok()
 
         self._apply_new_state(payload.get("new_state"))
 
@@ -160,22 +188,93 @@ class MacHybridBackend(AbstractWeChatBackend):
             if not isinstance(raw, dict):
                 continue
             msg = self._message_from_source(raw)
+            if recovered and msg:
+                self._seen_ids.add(msg["message_id"])
+                continue
             if not msg or not self._should_monitor(msg):
                 continue
-            msg_id = msg["message_id"]
-            if msg_id in self._seen_ids:
-                continue
-            self._seen_ids.add(msg_id)
+            self._dispatch(msg, callback)
 
-            if self._bot_name and self._bot_name in msg["sender_name"]:
-                continue
+    def _dispatch(self, msg: dict, callback: MessageCallback) -> None:
+        """Hand one new message to the bot and send what it answers."""
+        msg_id = msg["message_id"]
+        if msg_id in self._seen_ids:
+            return
+        self._seen_ids.add(msg_id)
 
-            self._last_messages[msg["chat_id"]] = msg
-            reply = callback(msg)
-            if reply:
-                get_sender().deliver(
-                    msg["chat_id"], reply, lambda part: self.send_text(msg["chat_id"], part),
-                )
+        if self._bot_name and self._bot_name in msg["sender_name"]:
+            return
+
+        self._last_messages[msg["chat_id"]] = msg
+        reply = callback(msg)
+        if reply:
+            get_sender().deliver(
+                msg["chat_id"], reply, lambda part: self.send_text(msg["chat_id"], part),
+            )
+
+    # ── OCR fallback ──────────────────────────────────────────────────────
+
+    def _chat_open_on_screen(self, target: str) -> bool:
+        """While the OCR fallback is on: one fresh look says whether this chat is already open in the main
+        window.  Then the reply is typed in place; searching for the chat (and checking the result with the
+        slow title reader) went wrong in the first live test and is only needed when the chat is not open."""
+        if self._ocr is None or not self._ocr.active:
+            return False
+        try:
+            is_open = self._ocr.chat_is_open(target)
+        except Exception as exc:                          # noqa: BLE001 - fall back to the normal way
+            logger.debug("OCR check of the open chat failed: %s", exc)
+            return False
+        if is_open:
+            logger.info("Chat %r is already open (checked by OCR); sending in place", target)
+        return is_open
+
+    def _poll_ocr(self, callback: MessageCallback) -> None:
+        """A database read failed: after a few in a row, read the open chat from the screen."""
+        if self._ocr is None or not self._ocr.note_db_failure():
+            return
+        for found in self._ocr.poll():
+            msg = self._message_from_ocr(found)
+            if msg and self._should_monitor(msg):
+                self._dispatch(msg, callback)
+
+    def _message_from_ocr(self, found) -> dict | None:
+        text = str(found.text or "").strip()
+        if not text:
+            return None
+        chat_id = self._chat_id_for_title(found.title_clean)
+        is_group = bool(found.is_group or str(chat_id).endswith("@chatroom"))
+        self._remember_chat_session(chat_id, found.title_clean, is_group)
+        timestamp = int(time.time())
+        digest = hashlib.sha1(f"{chat_id}\0{text}\0{timestamp}".encode("utf-8")).hexdigest()
+        return {
+            "message_id": f"mac-ocr-{digest}",
+            "chat_id": chat_id,
+            "group_name": found.title_clean,
+            "sender_id": OCR_SENDER,
+            "sender_name": OCR_SENDER,
+            "content": text,
+            "msg_type": 1,
+            "timestamp": timestamp,
+            "is_at_mentioned": bool(
+                self._bot_name and (f"@{self._bot_name}" in text or self._bot_name in text)
+            ),
+            "is_group": is_group,
+            "is_system_join": False,
+            "new_member_id": "",
+        }
+
+    def _chat_id_for_title(self, title: str) -> str:
+        """The ``@chatroom`` id of the group with this title when it is known and unique, else ``ocr:<title>``.
+
+        The id only has to lead back to the title: sending goes through the title.
+        """
+        wanted = _normalize_chat_title(title)
+        known = [
+            chat_id for chat_id, name in self._chat_titles.items()
+            if str(chat_id).endswith("@chatroom") and _normalize_chat_title(name) == wanted
+        ]
+        return known[0] if len(known) == 1 else f"ocr:{title}"
 
     def _prime_message_state(self) -> None:
         try:

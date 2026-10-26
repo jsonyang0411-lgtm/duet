@@ -9,6 +9,7 @@ Runs in a daemon thread — no impact on the main bot loop.
 import json
 import logging
 import os
+_os = os
 import re
 import threading
 import time
@@ -115,7 +116,6 @@ def _detect_default_data_dir() -> str:
     Returns the base directory path string, or empty string if not found.
     Used by the UI to show what auto-detection would use.
     """
-    import os as _os
     candidates = [
         Path(_os.environ.get("USERPROFILE", "")) / "Documents" / "xwechat_files",
         Path(_os.environ.get("USERPROFILE", "")) / "Documents" / "WeChat Files",
@@ -499,7 +499,6 @@ def _detect_wxid_and_db_path():
 
     Respects WECHAT_DATA_DIR env var as a custom base dir (scanned first).
     """
-    import os as _os
 
     candidates: list[Path] = []
 
@@ -727,7 +726,6 @@ def _run_step1_extraction():
             if detected_data_dir:
                 _set_env_key(machine_env_path, "WECHAT_DATA_DIR", detected_data_dir)
             # Also set in the current process for load_dotenv in this session
-            import os as _os
             _os.environ["WCDB_KEY"] = key
             if detected_data_dir:
                 _os.environ["WECHAT_DATA_DIR"] = detected_data_dir
@@ -874,7 +872,6 @@ def _platform_dependency_report(system_name=None, import_checker=None, command_c
 
 def _platform_wechat_report(system_name=None):
     """Return a platform-aware WeChat process status."""
-    import os as _os
     import platform
     import subprocess
 
@@ -1152,6 +1149,258 @@ def _register_backend(backend):
     _bot_control.register_backend(backend)
 
 
+# The running ClaudeRelay (CLAUDE_RELAY=on), set by Bot.run(); None when the bot
+# is stopped or the relay is off.  /api/relay reads it.
+_relay = None
+
+
+def register_relay(relay):
+    """Register (or with None, forget) the running Claude relay for /api/relay."""
+    global _relay
+    _relay = relay
+
+
+def _lan_addresses() -> list[str]:
+    """This computer's LAN IPv4 addresses (what the Mac's relay_url should use)."""
+    import socket
+    found: list[str] = []
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("192.0.2.1", 9))          # no packet is sent: this only picks the outgoing interface
+            found.append(s.getsockname()[0])
+    except OSError:
+        pass
+    try:
+        for addr in socket.gethostbyname_ex(socket.gethostname())[2]:
+            if addr not in found:
+                found.append(addr)
+    except OSError:
+        pass
+    return [a for a in found if not a.startswith("127.")]
+
+
+def _relay_job_for_console(job: dict) -> dict:
+    """A job as the console shows it: no wxid, the text cut to 200 characters."""
+    try:
+        extra = json.loads(job.get("result_json") or "{}")
+    except ValueError:
+        extra = {}
+    text = str(job.get("text") or "")
+    return {
+        "id": job["id"],
+        "kind": job.get("kind") or "admin",
+        "status": job["status"],
+        "text": text[:200],
+        "project": job.get("project") or "",
+        "created_at": job.get("created_at"),
+        "claimed_at": job.get("claimed_at"),
+        "finished_at": job.get("finished_at"),
+        "duration_s": extra.get("duration_s"),
+        "result": str(job.get("result_text") or "")[:400],
+        "error": str(extra.get("error") or "")[:300],
+        "cancel_requested": bool(job.get("cancel_requested")),
+    }
+
+
+def _relay_snapshot(limit: int = 30) -> dict:
+    """GET /api/relay: the relay's state and its newest jobs (also when the bot is stopped)."""
+    relay = _relay
+    if relay is not None:
+        jobs = relay.store.list_jobs(limit)
+        return {"ok": True, "running": True, **relay.snapshot(),
+                "jobs": [_relay_job_for_console(j) for j in jobs], "lan_addresses": _lan_addresses()}
+    out = {"ok": True, "running": False, "listening": False, "mac_online": False, "address": None,
+           "mac_last_seen_sec": None, "counts": {}, "jobs": [], "lan_addresses": _lan_addresses()}
+    db_path = Path(os.getenv("CLAUDE_RELAY_DB", "data/claude_relay.db").strip() or "data/claude_relay.db")
+    if db_path.exists():
+        from src.relay.store import RelayStore
+        store = RelayStore(db_path)
+        try:
+            out["jobs"] = [_relay_job_for_console(j) for j in store.list_jobs(limit)]
+            out["counts"] = store.counts()
+        finally:
+            store.close()
+    return out
+
+
+# The running PrmService (PRM_COPILOT=on), set by Bot.run(); None when the bot is
+# stopped or the copilot is off.  /api/prm reads it.
+_prm = None
+
+
+def register_prm(service):
+    """Register (or with None, forget) the running PRM copilot for /api/prm."""
+    global _prm
+    _prm = service
+
+
+def _prm_db_path() -> Path:
+    return Path(os.getenv("PRM_DB", "data/prm.db").strip() or "data/prm.db")
+
+
+def _prm_env_on(key: str) -> bool:
+    return str(os.getenv(key, "")).strip().lower() in ("on", "true", "1", "yes", "y")
+
+
+def _prm_reserved() -> set[str]:
+    """The admin and the cc users: never creators."""
+    return {w.strip() for w in [os.getenv("ADMIN_WXID", ""), *os.getenv("CLAUDE_RELAY_WXIDS", "").split(",")]
+            if w.strip()}
+
+
+def _prm_candidates(state: dict) -> list[dict]:
+    """Private chats WeChat lists (data/private_chat_names.json, written by the Windows backend
+    while PRM_COPILOT is on) that are not creators yet: the register form offers them."""
+    path = Path("data/private_chat_names.json")
+    try:
+        names = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, ValueError):
+        names = {}
+    if not isinstance(names, dict):
+        return []
+    taken = {p["wxid"] for p in state.get("parties", []) if p.get("active")} | _prm_reserved()
+    out = [{"wxid": str(w), "name": str(n)} for w, n in names.items() if str(w) not in taken]
+    return sorted(out, key=lambda c: c["name"])[:300]
+
+
+def _prm_state() -> dict:
+    """GET /api/prm: creators, drafts waiting and recent ones (also when the bot is stopped)."""
+    state = _prm_state_core()
+    state["candidates"] = _prm_candidates(state)
+    return state
+
+
+def _prm_int_env(key: str, default: int) -> int:
+    try:
+        return int(os.getenv(key, str(default)))
+    except ValueError:
+        return default
+
+
+def _prm_stopped_store():
+    """The PRM database for a stopped bot (gates seeded), or None when there is none yet."""
+    from src.prm.gates import DEFAULT_GATES
+    from src.prm.store import PrmStore
+
+    db = _prm_db_path()
+    if not db.exists():
+        return None
+    store = PrmStore(db)
+    store.seed_gates(DEFAULT_GATES)
+    return store
+
+
+def _prm_state_core() -> dict:
+    from src.prm.service import snapshot as prm_snapshot
+
+    settings = {"enabled": _prm_env_on("PRM_COPILOT"), "relay_on": _prm_env_on("CLAUDE_RELAY"),
+                "private_on": _prm_env_on("PRIVATE_CHAT_ENABLED")}
+    if _prm is not None:
+        return {**_prm.snapshot(), **settings, "enabled": True}
+    stopped = {"mac_online": False, "worker_kinds": [], "can_send": False, "can_send_files": False,
+               "takeover_min": _prm_int_env("PRM_TAKEOVER_MIN", 120), "holding_min": _prm_int_env("PRM_HOLDING_MIN", 10),
+               "retention_days": _prm_int_env("PRM_RETENTION_DAYS", 30), **settings}
+    store = _prm_stopped_store()
+    if store is None:
+        from src.prm.result import MESSAGE_KINDS
+        from src.prm.store import MODES, SHIPMENT_STATES, STAGES
+        return {"ok": True, "running": False, "parties": [], "pending": [], "recent": [], "counts": {}, "gates": [],
+                "stages": STAGES, "kinds": MESSAGE_KINDS, "modes": MODES, "shipment_states": SHIPMENT_STATES,
+                **stopped}
+    try:
+        return prm_snapshot(store, running=False, retention_days=stopped["retention_days"], extra=stopped)
+    finally:
+        store.close()
+
+
+def _prm_deal(data: dict) -> dict:
+    """POST /api/prm/deals {action: stage | adopt | mode | shipment | shipment_status, deal_id, ...}."""
+    from src.prm.service import apply_deal_action
+
+    action = str(data.get("action") or "")
+    if _prm is not None:
+        return _prm.deal_action(action, data)
+    store = _prm_stopped_store()
+    if store is None:
+        return {"ok": False, "error": "还没有合作单"}
+    try:
+        return apply_deal_action(store, action, data, now=time.time(),
+                                 takeover_sec=_prm_int_env("PRM_TAKEOVER_MIN", 120) * 60)
+    finally:
+        store.close()
+
+
+def _prm_reveal(data: dict) -> dict:
+    """POST /api/prm/reveal {party_id}: the full numbers; every look is written down."""
+    from src.prm.service import reveal_numbers
+
+    try:
+        party_id = int(data.get("party_id"))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "要给出达人编号"}
+    if _prm is not None:
+        return _prm.reveal(party_id)
+    store = _prm_stopped_store()
+    if store is None:
+        return {"ok": False, "error": "没有找到这个达人"}
+    try:
+        return reveal_numbers(store, party_id, now=time.time())
+    finally:
+        store.close()
+
+
+def _prm_parties(data: dict) -> dict:
+    """POST /api/prm/parties: {"action": "add", "wxid", "name", "note"} | {"action": "enable"|"disable", "id"}."""
+    from src.prm.service import check_wxid
+    from src.prm.store import PartyError, PrmStore
+
+    action = str(data.get("action") or "")
+    try:
+        if _prm is not None:
+            if action == "add":
+                party = _prm.register(data.get("wxid", ""), data.get("name", ""), data.get("note", ""))
+                return {"ok": True, "party": {"id": party["id"], "name": party["name"]}}
+            if action in ("enable", "disable"):
+                party = _prm.set_active(int(data.get("id")), action == "enable")
+                return {"ok": True} if party else {"ok": False, "error": "没有找到这个达人"}
+            return {"ok": False, "error": f"不认识的操作 {action}"}
+        # The bot is stopped: the same checks, straight into the database.
+        reserved = _prm_reserved()
+        store = PrmStore(_prm_db_path())
+        try:
+            if action == "add":
+                wxid = check_wxid(data.get("wxid", ""), reserved)
+                name, note = str(data.get("name") or "").strip(), str(data.get("note") or "").strip()
+                if not name or len(name) > 30:
+                    return {"ok": False, "error": "称呼要填，最多 30 个字"}
+                if len(note) > 200:
+                    return {"ok": False, "error": "备注最多 200 个字"}
+                party = store.add_party(wxid, name, note)
+                return {"ok": True, "party": {"id": party["id"], "name": party["name"]}}
+            if action in ("enable", "disable"):
+                party = store.update_party(int(data.get("id")), active=action == "enable")
+                return {"ok": True} if party else {"ok": False, "error": "没有找到这个达人"}
+            return {"ok": False, "error": f"不认识的操作 {action}"}
+        finally:
+            store.close()
+    except PartyError as e:
+        return {"ok": False, "error": str(e)}
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "要给出达人编号"}
+
+
+def _prm_packet(data: dict) -> dict:
+    """POST /api/prm/packets: {"id", "action": "send" | "edit" | "drop" | "wrong", "text"}."""
+    try:
+        packet_id = int(data.get("id"))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "要给出草稿编号"}
+    if _prm is None:
+        return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能处理草稿"}
+    text = data.get("text")
+    return _prm.decide(packet_id, str(data.get("action") or ""), None if text is None else str(text))
+
+
 def _stop_bot():
     """Stop the running bot backend. Returns True if anything was stopped."""
     stopped = _bot_control.stop()
@@ -1174,8 +1423,13 @@ def _start_bot_in_thread():
 
     def _run():
         try:
-            import os as _os
-            _os.environ.setdefault("WECHAT_DATA_DIR", "E:\\xwechat_files")
+            from dotenv import load_dotenv
+            from src.config import _env_path, _local_env_path, _load_non_empty_local_env
+            if _env_path and _env_path.exists():
+                load_dotenv(_env_path, override=True)
+            if _local_env_path and _local_env_path.exists():
+                _load_non_empty_local_env(_local_env_path)
+
             from src.config import load_config
             config = load_config()
             update_status(
@@ -1225,6 +1479,7 @@ _POST_ONLY_PATHS = frozenset({
     "/api/voice/download-model", "/api/wechat-data-dir/detect",
     "/api/influencer/approvals/action", "/api/influencer/contacts/action",
     "/api/influencer/inbox/action",
+    "/api/relay/cancel", "/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal",
 })
 
 
@@ -1341,7 +1596,9 @@ class _UIHandler(SimpleHTTPRequestHandler):
                          "/api/wechat-data-dir/detect",
                          "/api/influencer/approvals/action",
                          "/api/influencer/contacts/action",
-                         "/api/influencer/inbox/action"):
+                         "/api/influencer/inbox/action",
+                         "/api/relay/cancel",
+                         "/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal"):
             self.do_GET()
         else:
             self._method_not_allowed()
@@ -1490,6 +1747,60 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 "ok": False,
                 "error": "WebSocket support is disabled; use /api/status",
             }).encode())
+            return
+
+        # ── API: Claude relay — state, jobs, cancel ────────────────────
+        if self.path.split("?", 1)[0] == "/api/relay":
+            try:
+                self.send_json(_relay_snapshot())
+            except Exception as e:
+                logger.exception("Reading the relay state failed")
+                self.send_json({"ok": False, "error": str(e)})
+            return
+        if self.path == "/api/relay/cancel":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len else b"{}"
+            try:
+                job_id = int(json.loads(body).get("id"))
+            except (ValueError, TypeError, AttributeError, json.JSONDecodeError):
+                self.send_json({"ok": False, "error": "要给出任务编号"})
+                return
+            if _relay is None:
+                self.send_json({"ok": False, "error": "机器人没有运行，中转没有开着"})
+                return
+            outcome = _relay.cancel_from_console(job_id)
+            if outcome == "missing":
+                self.send_json({"ok": False, "error": f"没有找到 #{job_id}"})
+            else:
+                self.send_json({"ok": True, "outcome": outcome})
+            return
+
+        # ── API: PRM copilot — creators, drafts, decisions ─────────────
+        if self.path.split("?", 1)[0] == "/api/prm":
+            try:
+                self.send_json(_prm_state())
+            except Exception as e:
+                logger.exception("Reading the PRM state failed")
+                self.send_json({"ok": False, "error": str(e)})
+            return
+        if self.path in ("/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal"):
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len else b"{}"
+            try:
+                data = json.loads(body)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self.send_json({"ok": False, "error": "请求不是有效的 JSON"})
+                return
+            if not isinstance(data, dict):
+                self.send_json({"ok": False, "error": "请求不是有效的 JSON"})
+                return
+            handler = {"/api/prm/parties": _prm_parties, "/api/prm/packets": _prm_packet,
+                       "/api/prm/deals": _prm_deal, "/api/prm/reveal": _prm_reveal}[self.path]
+            try:
+                self.send_json(handler(data))
+            except Exception as e:
+                logger.exception("PRM console action failed")
+                self.send_json({"ok": False, "error": str(e)})
             return
 
         # ── API: why did the bot (not) answer? (read-only) ─────────────
@@ -2536,6 +2847,10 @@ class _UIHandler(SimpleHTTPRequestHandler):
                     _onboarding_data["followup_listen_enabled"] = data.get("followup_listen_enabled", True)
                     _onboarding_data["message_burst_enabled"] = data.get("message_burst_enabled", True)
                     _onboarding_data["web_search_enabled"] = data.get("web_search_enabled", True)
+                    if "private_chat_enabled" in data:
+                        _onboarding_data["private_chat_enabled"] = bool(data["private_chat_enabled"])
+                    if data.get("private_chats"):
+                        _onboarding_data["private_chats"] = str(data["private_chats"])
 
                 # Write all accumulated data to .env
                 env_path = _find_or_create_env()

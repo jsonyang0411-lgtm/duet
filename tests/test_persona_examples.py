@@ -142,7 +142,8 @@ class RouterExamples(RouterTestCase):
         (folder / name).write_text(text, encoding="utf-8")
 
     def test_the_closest_examples_reach_the_model(self):
-        self.write("yang_yujing.txt", SAMPLE)
+        # the speaker label in an example file is the persona's own name (the built-in one is 假企鹅)
+        self.write("yang_yujing.txt", SAMPLE.replace("杨宇靖", "假企鹅"))
         router, model = self.build()
         router.handle(self.group_msg("m1", f"@{BOT} 晚饭吃啥"))
         examples = model.decide_requests[0].examples

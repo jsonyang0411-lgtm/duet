@@ -14,6 +14,7 @@ from .base import AbstractSummarizer
 from .claude_backend import ClaudeSummarizer
 from .deepseek_backend import DeepSeekSummarizer
 from .fallback import install_fallback
+from .no_model import NoModel, relay_only
 from .openai_backend import OpenAISummarizer
 from .models import ParticipantContribution, SummaryResult
 
@@ -91,6 +92,8 @@ def model_label(config) -> str:
     """What answers, for the log and the console: the cloud backend, the local
     model, or both (MODEL_ROUTE).  AI_BACKEND alone would name a cloud service
     that a local setup never calls."""
+    if relay_only(config):
+        return "不使用（只做中转）"
     route = getattr(config, "model_route", "cloud")
     local = getattr(config, "local_model", "") or "?"
     if route == "local":
@@ -107,6 +110,10 @@ def create_models(config) -> ModelSet:
     cloud models to the local model.  CLOUD_FALLBACK=local makes the cloud
     model's chat calls fall back to the local model when they fail.
     """
+    if relay_only(config):
+        none = NoModel()
+        logger.info("Model route: none (CLAUDE_RELAY_ONLY: the bot only relays, no AI model)")
+        return ModelSet(none, none, none)
     route = getattr(config, "model_route", "cloud")
     if route == "local":
         local = create_local_summarizer(config)

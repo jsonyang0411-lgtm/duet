@@ -5,6 +5,9 @@ Reads WeChat messages directly from the encrypted WCDB database via
 patched wcdb_api.dll (ctypes).  Uses WeChatWindowController for sending.
 
 WCDB native access — reads encrypted database in-process, no external dependencies.
+
+Fallback (``OCR_FALLBACK=on``): while the database cannot be opened or read, the open
+chat is read from a screenshot of the WeChat window (src/wechat/ocr); sending is unchanged.
 """
 import concurrent.futures
 import hashlib
@@ -36,16 +39,37 @@ DEFAULT_POLL_SEC = 1.0
 MAX_DEDUP_SIZE = 5000
 MAX_CONSECUTIVE_ERRORS = 5   # trigger reinit after this many consecutive failures
 SESSION_REFRESH_SEC = 60.0
+# OCR cannot see who wrote a line of a group chat.
+OCR_SENDER = "OCR群友"
 APPMSG_TYPE = 49
 QUOTE_APPMSG_SUBTYPE = 57
 _HEX_BLOB_RE = re.compile(r"^[0-9a-fA-F]{80,}$")
 _MEDIA_MD5_RE = re.compile(r"\bmd5=[\"']([0-9a-fA-F]{16,64})[\"']")
+_PICTURE_FIELD_LOGS = [0]       # how many picture messages have had their field names logged
 _SPECIAL_PRIVATE_TALKERS = {
     "filehelper", "fmessage", "medianote", "floatbottle", "qqmail",
     "tmessage", "qmessage", "qqsync", "weixin", "weixinreminder",
     "newsapp", "feedsapp", "brandsessionholder", "notification_messages",
     "officialaccounts", "notifymessage", "mphelper",
 }
+
+
+def _backoff_sec(consecutive_errors: int) -> float:
+    """Seconds to wait after the n-th failed poll in a row: 2, 4, 8, 16, then 1 again after a reinit."""
+    return min(2 ** min(consecutive_errors % MAX_CONSECUTIVE_ERRORS, 5), 30)
+
+
+def _ocr_from_config(config, window):
+    """The OCR fallback the configuration asks for (``OCR_FALLBACK=on``), else None."""
+    if getattr(config, "ocr_fallback", "off") != "on":
+        return None
+    from .ocr import OcrFallback
+    from .ocr.win_ocr import WindowsOcrEngine
+    return OcrFallback(
+        WindowsOcrEngine(window=window),
+        after=getattr(config, "ocr_fallback_after", 3),
+        interval=getattr(config, "ocr_poll_sec", 4.0),
+    )
 
 
 def _looks_like_wechat_blob(content: str) -> bool:
@@ -55,8 +79,12 @@ def _looks_like_wechat_blob(content: str) -> bool:
 
 
 def _extract_media_hint(content: str) -> str:
-    """Extract an emoji/image cache identifier from WeChat XML content."""
-    match = _MEDIA_MD5_RE.search(str(content or ""))
+    """Extract an emoji/image cache identifier (the md5 that names its files) from WeChat XML content.
+
+    WeChat 4 may hand the XML over zstd compressed and hex encoded; that is unpacked too.
+    """
+    text = str(content or "")
+    match = _MEDIA_MD5_RE.search(text) or _MEDIA_MD5_RE.search(_decompress_zstd_hex(text))
     return match.group(1).lower() if match else ""
 
 
@@ -115,6 +143,29 @@ def _extract_xml_document(text: str) -> str:
     return text[start:].strip()
 
 
+def _extract_file_appmsg(content: str) -> dict | None:
+    """``{"name", "size"}`` of a file someone sent (an appmsg of type 6), else None."""
+    decoded = _decompress_zstd_hex(content) or content
+    xml_text = _extract_xml_document(decoded)
+    if not xml_text:
+        return None
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return None
+    appmsg = root if root.tag == "appmsg" else root.find("appmsg")
+    if appmsg is None or _text_at(appmsg, "type") != "6":
+        return None
+    name = _text_at(appmsg, "title")
+    if not name:
+        return None
+    try:
+        size = int(_text_at(appmsg, "appattach/totallen") or 0)
+    except ValueError:
+        size = 0
+    return {"name": name, "size": size}
+
+
 def _text_at(node: ET.Element | None, path: str) -> str:
     if node is None:
         return ""
@@ -153,6 +204,42 @@ def _extract_quote_appmsg(content: str,
         "quoted_content": quoted_content,
         "quoted_server_id": _text_at(refer, "svrid"),
     }
+
+
+def _special_info(content: str, local_type: int) -> dict:
+    """What a link, mini program, card, location or system line is, for the WeChat edge
+    (src/edge/text.py writes "[链接] 标题"); {} for anything else."""
+    decoded = _decompress_zstd_hex(content) or str(content or "")
+    if local_type == 10000:                      # a system line: plain text, or XML (a recall)
+        text = decoded
+        start = decoded.find("<")
+        if start >= 0 and decoded[start:].lstrip().startswith("<"):
+            try:
+                root = ET.fromstring(decoded[start:].strip())
+                text = _text_at(root, ".//replacemsg") or " ".join(t.strip() for t in root.itertext() if t.strip())
+            except ET.ParseError:
+                text = re.sub(r"<[^>]+>", " ", decoded)
+        return {"kind": "system", "title": " ".join(str(text).split())[:200]}
+    xml_text = _extract_xml_document(decoded)
+    if not xml_text:
+        return {}
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return {}
+    if local_type == 42:                         # a contact card
+        return {"kind": "card", "title": str(root.get("nickname") or "").strip()}
+    if local_type == 48:                         # a location
+        place = root if root.tag == "location" else root.find("location")
+        if place is None:
+            return {}
+        return {"kind": "location", "title": str(place.get("poiname") or place.get("label") or "").strip()}
+    if local_type == APPMSG_TYPE:
+        appmsg = root if root.tag == "appmsg" else root.find("appmsg")
+        if appmsg is None:
+            return {}
+        return {"kind": "appmsg", "type": _text_at(appmsg, "type"), "title": _text_at(appmsg, "title")}
+    return {}
 
 
 def _strip_wechat_group_sender_prefix(content: str) -> str:
@@ -227,16 +314,18 @@ class WcdbBackend(AbstractWeChatBackend):
                  groups: list[str] | None = None,
                  poll_sec: float = DEFAULT_POLL_SEC,
                  store=None,
-                 config=None):
+                 config=None,
+                 ocr=None):
         self._bot_name = bot_display_name
         yang_target_groups = []
         for attribute in (
             "yang_yujing_group_name",
             "yang_yujing_always_reply_group_name",
         ):
-            group = str(getattr(config, attribute, "")).strip()
-            if group and group not in yang_target_groups:
-                yang_target_groups.append(group)
+            val = str(getattr(config, attribute, "")).strip()
+            for group in [g.strip() for g in val.split(",") if g.strip()]:
+                if group and group not in yang_target_groups:
+                    yang_target_groups.append(group)
         if (
             getattr(config, "chat_persona_profile", "")
             == PERSONA_PROFILE_YANG_YUJING
@@ -257,6 +346,11 @@ class WcdbBackend(AbstractWeChatBackend):
         )
         # A quiet send that waits for the user gives up once the bot stops.
         self._window.alive = lambda: self._running
+        # OCR_FALLBACK=on: the open chat is read from the screen while the database cannot be read.
+        self._ocr = ocr if ocr is not None else _ocr_from_config(config, self._window)
+        # True for the first cycle after an OCR stretch: what the database returns then is the
+        # outage's backlog (part of it was answered from the screen), so it is marked seen only.
+        self._ocr_priming = False
         # SEND_QUEUE=on: one thread sends every reply, so typing pauses and the
         # wait for the user never hold a worker (src/send/queue.py).
         self._send_queue: SendQueue | None = (
@@ -266,6 +360,11 @@ class WcdbBackend(AbstractWeChatBackend):
         self._talker_ids: dict[str, str] = {}
         self._chat_is_group: dict[str, bool] = {}
         self._last_session_refresh: float = 0.0
+        # PRM_COPILOT: private chats read whatever PRIVATE_CHATS says (the registered creators),
+        # and who hears this account's own lines there (an operator's hand-typed reply).
+        self._private_filter = None
+        self._own_message_hook = None
+        self._db_failures = 0          # database reads failed in a row (the WeChat edge's state)
         self._known_ids = DedupSet(max_size=MAX_DEDUP_SIZE)
         # Thread safety: WCDB DLL (ctypes) may not be thread-safe internally.
         # All _client calls are serialized through this lock.
@@ -290,6 +389,16 @@ class WcdbBackend(AbstractWeChatBackend):
 
     # ── Public API ─────────────────────────────────────────────────
 
+    @property
+    def window_controller(self) -> WeChatWindowController:
+        """The controller of the WeChat window (friend management drives the same window)."""
+        return self._window
+
+    @property
+    def window_lock(self) -> threading.Lock:
+        """Held for every stretch of window automation; friend management takes it too."""
+        return self._window_lock
+
     def start(self, callback: MessageCallback) -> None:
         if not self._groups:
             logger.error("No groups configured. Set WECHAT_GROUPS in .env")
@@ -313,13 +422,24 @@ class WcdbBackend(AbstractWeChatBackend):
             # Push error to Web UI so the user sees a recovery path
             try:
                 from src.web.server import update_status
-                update_status(running=False, error=str(e))
+                if self._ocr is None:
+                    update_status(running=False, error=str(e))
+                else:
+                    update_status(error=f"数据库打不开，已改用 OCR 读取屏幕：{e}")
             except Exception:
                 pass
-            return
+            if self._ocr is None:
+                return
+            # OCR_FALLBACK=on: go on without the database.  The poll loop below fails on every
+            # cycle, which turns the OCR fallback on and retries the database (_reinitialize).
+            logger.warning("OCR_FALLBACK is on: starting without the WCDB database")
+            self._client = None
 
         # Resolve group talker IDs
-        self._resolve_groups()
+        if self._client is not None:
+            self._resolve_groups()
+        else:
+            self._register_groups_without_database()
 
         if not self._talker_ids:
             logger.error("No groups resolved. Check WECHAT_GROUPS.")
@@ -335,7 +455,8 @@ class WcdbBackend(AbstractWeChatBackend):
             [name for name, talker in self._talker_ids.items() if self._chat_is_group.get(talker)]
         )
 
-        self._prime_known_ids()
+        if self._client is not None:
+            self._prime_known_ids()
         self._last_session_refresh = time.monotonic()
 
         self._start_workers()
@@ -347,13 +468,21 @@ class WcdbBackend(AbstractWeChatBackend):
 
         try:
             while self._running and not _is_shutting_down():
+                # The first cycle after an OCR stretch only marks the database's backlog as seen.
+                self._ocr_priming = self._ocr is not None and self._ocr.active
                 try:
                     self._poll_cycle(callback)
                     consecutive_errors = 0
+                    self._db_failures = 0
+                    if self._ocr is not None:
+                        self._ocr.note_db_ok()
                 except KeyboardInterrupt:
                     break
                 except Exception as e:
                     consecutive_errors += 1
+                    self._db_failures += 1
+                    if self._ocr is not None:
+                        self._ocr.note_db_failure()
 
                     # After MAX_CONSECUTIVE_ERRORS consecutive failures,
                     # attempt full reinitialization (WeChat may have restarted).
@@ -378,12 +507,14 @@ class WcdbBackend(AbstractWeChatBackend):
                             except Exception:
                                 pass
 
-                    wait = min(2 ** min(consecutive_errors % MAX_CONSECUTIVE_ERRORS, 5), 30)
+                    wait = _backoff_sec(consecutive_errors)
                     logger.warning(
                         "Poll error #%d (%s): %s. Retry in %ss...",
                         consecutive_errors, type(e).__name__, e, wait,
                     )
-                    time.sleep(wait)
+                    self._sleep_polling_ocr(wait, callback)
+                finally:
+                    self._ocr_priming = False
         finally:
             # Drain in-flight callbacks gracefully
             self._pool.shutdown(wait=True, cancel_futures=True)
@@ -418,6 +549,15 @@ class WcdbBackend(AbstractWeChatBackend):
         with self._window_lock:
             return self._send_and_confirm(chat_name, chat_id, content)
 
+    def send_file(self, chat_id: str, path: str) -> bool:
+        """Send a file into a chat (pasted, like a sticker): the Claude relay's long results."""
+        chat_name = self._talker_to_name(chat_id)
+        if not chat_name:
+            logger.error("Cannot resolve chat_id=%s to chat name", chat_id)
+            return False
+        with self._window_lock:
+            return self._window.send_file_to_chat(chat_name, path)
+
     def stop(self) -> None:
         self._running = False
         if self._pool:
@@ -446,6 +586,7 @@ class WcdbBackend(AbstractWeChatBackend):
             self._client.open()
             logger.info("WCDB reinitialized successfully")
         except Exception as e:
+            self._client = None
             logger.error("WCDB reinitialization failed: %s", e)
             raise
         # Clear dedup set — WCDB may return messages with new IDs
@@ -476,6 +617,7 @@ class WcdbBackend(AbstractWeChatBackend):
         # Build a map of all @chatroom entries: username -> {name, member_count}
         all_chatrooms: dict[str, dict] = {}
         all_private_chats: dict[str, dict] = {}
+        private_seen: dict[str, str] = {}   # every private chat with a name (the console's creator picker)
         private_enabled = bool(
             getattr(self._config, "private_chat_enabled", False)
         )
@@ -513,7 +655,8 @@ class WcdbBackend(AbstractWeChatBackend):
                 continue
 
             if private_enabled and _is_private_talker(username):
-                if auto_private_chats and not username.lower().startswith("wxid_"):
+                wanted = self._wants_private(username)        # a registered creator
+                if auto_private_chats and not wanted and not username.lower().startswith("wxid_"):
                     logger.debug(
                         "Skipping private chat %s: not an ordinary wxid contact",
                         username[:20],
@@ -525,12 +668,13 @@ class WcdbBackend(AbstractWeChatBackend):
                         username[:20],
                     )
                     continue
-                if self._bot_name and (
+                if not wanted and self._bot_name and (
                     display == self._bot_name
                     or self._bot_name in display
                 ):
                     continue
-                if not _matches_configured_chat(display, username, private_config):
+                private_seen[username] = display
+                if not wanted and not _matches_configured_chat(display, username, private_config):
                     continue
                 all_private_chats[username] = {
                     "name": display,
@@ -596,6 +740,8 @@ class WcdbBackend(AbstractWeChatBackend):
         # human-readable group names in the nickname dropdown.
         if all_chatrooms:
             self._save_group_names(all_chatrooms)
+        if private_seen and self._private_filter is not None:
+            self._save_private_names(private_seen)
 
         # ── Resolve and persist group members ──────────────────────────
         group_members: dict[str, dict[str, str]] = {}
@@ -698,15 +844,140 @@ class WcdbBackend(AbstractWeChatBackend):
         except Exception as e:
             logger.warning("Failed to persist group_names.json: %s", e)
 
+    @staticmethod
+    def _save_private_names(chats: dict[str, str]) -> None:
+        """Persist the private chats WeChat lists (wxid -> name) to data/private_chat_names.json, so
+        the console can offer them when an operator registers a creator (PRM_COPILOT only)."""
+        import os as _os
+        path = Path("data/private_chat_names.json")
+        try:
+            known = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            known = known if isinstance(known, dict) else {}
+            if all(known.get(k) == v for k, v in chats.items()):
+                return
+            known.update(chats)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = path.with_suffix(".tmp")
+            tmp_path.write_text(json.dumps(known, ensure_ascii=False, indent=2), encoding="utf-8")
+            _os.replace(tmp_path, path)
+        except Exception as e:
+            logger.warning("Failed to persist private_chat_names.json: %s", e)
+
     def _talker_to_name(self, talker_id: str) -> str:
         for name, tid in self._talker_ids.items():
             if tid == talker_id:
                 return name
         return ""
 
+    # ── OCR fallback ─────────────────────────────────────────────────
+
+    def _register_groups_without_database(self) -> None:
+        """Group names to chat ids when there is no database to look them up in.
+
+        The id only has to lead back to the name: sending goes through the name.
+        ``*`` (all groups) cannot be listed without the database.
+        """
+        for name in self._groups:
+            if name and name != "*":
+                self._add_talker(name, f"ocr:{name}", is_group=True)
+
+    def _sleep_polling_ocr(self, seconds: float, callback: MessageCallback) -> None:
+        """``time.sleep`` that, while the OCR fallback is on, also reads the screen."""
+        if self._ocr is None or not self._ocr.active:
+            time.sleep(seconds)
+            return
+        end = time.monotonic() + seconds
+        while self._running and time.monotonic() < end:
+            self._poll_ocr(callback)
+            time.sleep(max(0.0, min(1.0, end - time.monotonic())))
+
+    def _poll_ocr(self, callback: MessageCallback) -> None:
+        for found in self._ocr.poll():
+            ready = self._message_from_ocr(found)
+            if ready is None:
+                continue
+            group_name, talker, standardized = ready
+            msg_id = standardized["message_id"]
+            if msg_id in self._known_ids:
+                continue
+            self._known_ids.add(msg_id)
+            # Not through the burst buffer: it holds a message until _poll_cycle flushes it (which
+            # does not run while the database is down) and would merge different people's lines,
+            # since every line has the same unknown speaker.  The looks are seconds apart anyway.
+            self._dispatch_message(standardized, callback)
+
+    def _group_for_title(self, title: str) -> str | None:
+        """The configured group that this window title is: the same name, or (for a long name that the
+        window shows cut off with an ellipsis) the only group that starts with what is shown."""
+        def norm(value: str) -> str:
+            return "".join(str(value).split()).lower()
+
+        wanted = norm(title)
+        for name in self._talker_ids:
+            if norm(name) == wanted:
+                return name
+        if wanted.endswith(("…", "...")):
+            head = wanted.rstrip("….")
+            if len(head) >= 3:
+                starts = [name for name in self._talker_ids if norm(name).startswith(head)]
+                if len(starts) == 1:
+                    return starts[0]
+        return None
+
+    def _message_from_ocr(self, found):
+        """``(group name, chat id, standard message)`` for a line read from the screen, or None.
+
+        Only the groups in ``WECHAT_GROUPS`` are answered; a title with no member count is a
+        private chat, which OCR does not serve.
+        """
+        text = str(found.text or "").strip()
+        title = str(found.title_clean or "").strip()
+        if not text or not title or not found.is_group:
+            return None
+        group_name = self._group_for_title(title)
+        if group_name is None:
+            return None
+        talker = self._talker_ids[group_name]
+        timestamp = int(time.time())
+        bot_names = {self._bot_name, "假企鹅", "qier"}
+        for attribute in ("bot_display_name", "chat_persona_name"):
+            bot_names.add(getattr(self._config, attribute, None) or "")
+        bot_names.discard("")
+        digest = hashlib.md5(f"ocr|{talker}|{text}|{timestamp}".encode("utf-8")).hexdigest()
+        return group_name, talker, {
+            "message_id": digest,
+            "chat_id": talker,
+            "group_name": group_name,
+            "chat_name": group_name,
+            "sender_id": OCR_SENDER,
+            "sender_name": OCR_SENDER,
+            "content": text,
+            "msg_type": 1,
+            "server_id": "",
+            "media_base_dir": "",
+            "media_hint": "",
+            "media_kind": "",
+            "media_path": "",
+            "file_name": "",
+            "file_size": 0,
+            "timestamp": timestamp,
+            "is_at_mentioned": any(f"@{name}" in text for name in bot_names),
+            "is_group": True,
+            "is_system_join": False,
+            "new_member_id": "",
+            "is_reply_to_bot": False,
+            "quoted_sender_id": "",
+            "quoted_sender_name": "",
+            "quoted_content": "",
+            "quoted_server_id": "",
+            "special": {},
+        }
+
     # ── Message polling ──────────────────────────────────────────────
 
     def _poll_cycle(self, callback: MessageCallback) -> None:
+        if self._client is None or not getattr(self._client, "is_open", False):
+            raise RuntimeError("the WCDB database is not open")
         self._refresh_private_chats_if_due()
         for group_name in list(self._groups):
             if not self._running:
@@ -720,6 +991,60 @@ class WcdbBackend(AbstractWeChatBackend):
         if not self._running:
             return
         time.sleep(self._poll_sec)
+
+    def set_private_filter(self, accept) -> None:
+        """Also read the private chats ``accept(username)`` says yes to, whatever PRIVATE_CHATS
+        says (PRM_COPILOT: the registered creators).  Needs PRIVATE_CHAT_ENABLED=true."""
+        self._private_filter = accept
+
+    def refresh_private_chats_soon(self) -> None:
+        """The next poll looks for newly allowed private chats at once (a creator was registered)."""
+        self._last_session_refresh = 0.0
+
+    def set_own_message_hook(self, hook) -> None:
+        """``hook(msg)`` hears this account's own lines in the private chats the filter wants
+        (PRM_COPILOT: a registered creator's chat, where an operator may reply by hand)."""
+        self._own_message_hook = hook
+
+    def own_wxid(self) -> str:
+        """This WeChat account's wxid ("" when not known yet)."""
+        return str(getattr(self._client, "_config", {}).get("myWxid", "") or "") if self._client else ""
+
+    def db_readable(self) -> bool:
+        """Can the WeChat database be read (fewer than 3 failed reads in a row)?"""
+        return self._db_failures < 3
+
+    def wechat_window_found(self) -> Optional[bool]:
+        """Is WeChat's main window there?  None while a send holds the window (asked again later)."""
+        if not self._window_lock.acquire(blocking=False):
+            return None
+        try:
+            return self._window.find_hwnd(wake=False) is not None
+        except Exception:
+            return False
+        finally:
+            self._window_lock.release()
+
+    def _tell_own_message(self, standardized: dict) -> None:
+        hook = getattr(self, "_own_message_hook", None)
+        if hook is None or standardized.get("is_group", True):
+            return
+        if not self._wants_private(str(standardized.get("chat_id", ""))):
+            return
+        try:
+            hook(standardized)
+        except Exception:
+            logger.exception("The own-message hook failed; polling goes on")
+
+    def _wants_private(self, username: str) -> bool:
+        accept = self._private_filter
+        if accept is None:
+            return False
+        try:
+            return bool(accept(username))
+        except Exception:
+            logger.exception("The private chat filter failed for %s", username[:20])
+            return False
 
     def _refresh_private_chats_if_due(self) -> None:
         """Discover private chats created after startup.
@@ -752,6 +1077,7 @@ class WcdbBackend(AbstractWeChatBackend):
                     getattr(self._client, "_config", {}).get("myWxid", "") or ""
                 )
                 added = 0
+                seen: dict[str, str] = {}
                 for s in sessions:
                     username = _session_username(s)
                     if (
@@ -766,7 +1092,8 @@ class WcdbBackend(AbstractWeChatBackend):
                         or my_wxid.startswith(username)
                     ):
                         continue
-                    if auto_private_chats and not username.lower().startswith("wxid_"):
+                    wanted = self._wants_private(username)    # a registered creator
+                    if auto_private_chats and not wanted and not username.lower().startswith("wxid_"):
                         continue
 
                     display = self._resolve_session_display_name(s, username)
@@ -774,18 +1101,21 @@ class WcdbBackend(AbstractWeChatBackend):
                         display == username and username.startswith("wxid_")
                     ):
                         continue
-                    if self._bot_name and (
+                    if not wanted and self._bot_name and (
                         display == self._bot_name
                         or self._bot_name in display
                     ):
                         continue
-                    if not _matches_configured_chat(
+                    seen[username] = display
+                    if not wanted and not _matches_configured_chat(
                         display, username, private_config,
                     ):
                         continue
                     if self._add_talker(display, username, is_group=False):
                         added += 1
 
+                if seen and self._private_filter is not None:
+                    self._save_private_names(seen)
                 if added:
                     self._groups = list(self._talker_ids.keys())
                     logger.info(
@@ -849,6 +1179,8 @@ class WcdbBackend(AbstractWeChatBackend):
             if msg_id in self._known_ids:
                 continue
             self._known_ids.add(msg_id)
+            if self._ocr_priming:
+                continue              # the backlog of an OCR stretch: seen, not answered
 
             # Skip own messages.  With the account's wxid known that is the
             # whole test: a member whose display name is the bot's (a persona
@@ -858,6 +1190,7 @@ class WcdbBackend(AbstractWeChatBackend):
             my_wxid = self._client._config.get("myWxid", "")
             if my_wxid:
                 if sender_id == my_wxid or my_wxid.startswith(sender_id) or sender_id.startswith(my_wxid):
+                    self._tell_own_message(standardized)
                     continue
                 # Tells the router's self_message step not to judge by the name.
                 standardized["_not_self_by_id"] = True
@@ -888,14 +1221,15 @@ class WcdbBackend(AbstractWeChatBackend):
             != PERSONA_PROFILE_YANG_YUJING
         ):
             return False
-        target_groups = {
-            str(getattr(config, attribute, "")).strip()
-            for attribute in (
-                "yang_yujing_group_name",
-                "yang_yujing_always_reply_group_name",
-            )
-        }
-        target_groups.discard("")
+        target_groups = set()
+        for attribute in (
+            "yang_yujing_group_name",
+            "yang_yujing_always_reply_group_name",
+        ):
+            val = str(getattr(config, attribute, "")).strip()
+            for g in val.split(","):
+                if g.strip():
+                    target_groups.add(g.strip())
         if not target_groups:
             return False
         return bool(target_groups & {
@@ -1043,13 +1377,49 @@ class WcdbBackend(AbstractWeChatBackend):
             self._voice = False
         return self._voice
 
-    def _try_voice(self, msg: dict) -> Optional[str]:
+    def _try_voice(self, msg: dict, talker: str = "") -> Optional[str]:
         """Attempt voice recognition; return text or None on failure."""
         voice = self._get_voice()
         if not voice:  # False or None → disabled
             return None
+        msg_svr_id = (
+            msg.get("msg_svr_id") or msg.get("msgSvrId") or
+            msg.get("server_id") or msg.get("serverId") or 0
+        )
+        if msg_svr_id and hasattr(voice, "_cache"):
+            cached = voice._cache.get(str(msg_svr_id))
+            if cached is not None:
+                return cached
+        voice_bytes = None
+        if self._client and talker:
+            local_id = msg.get("local_id") or msg.get("localId") or 0
+            create_time = msg.get("create_time") or msg.get("createTime") or 0
+            msg_svr_id = (
+                msg.get("msg_svr_id") or msg.get("msgSvrId") or
+                msg.get("server_id") or msg.get("serverId") or 0
+            )
+            # WeChat 4.0 may write media_0.db asynchronously with a 0.5-2s lag for long audio.
+            # Retry a few times with short sleeps so long voice messages aren't prematurely dropped.
+            is_recent = abs(time.time() - float(create_time)) < 30 if create_time else True
+            max_attempts = 4 if is_recent else 1
+            for attempt in range(max_attempts):
+                try:
+                    voice_bytes = self._client.get_voice_data(
+                        talker, local_id, create_time, msg_svr_id
+                    )
+                    if voice_bytes:
+                        logger.info(
+                            "Retrieved %d voice bytes from WCDB for %s (local_id=%s, svr_id=%s%s)",
+                            len(voice_bytes), talker, local_id, msg_svr_id,
+                            f", attempt {attempt + 1}" if attempt > 0 else ""
+                        )
+                        break
+                except Exception:
+                    logger.debug("Failed to retrieve voice bytes from WCDB client", exc_info=True)
+                if attempt + 1 < max_attempts:
+                    time.sleep(0.5)
         try:
-            return voice.process(msg)
+            return voice.process(msg, voice_bytes=voice_bytes)
         except Exception:
             logger.exception("VoicePipeline.process failed")
             return None
@@ -1073,11 +1443,24 @@ class WcdbBackend(AbstractWeChatBackend):
         media_path = ""
         media_base_dir = ""
         media_hint = _extract_media_hint(content)
+        if (local_type == 3 or _looks_like_wechat_blob(content)) and _PICTURE_FIELD_LOGS[0] < 3:
+            # What WCDB gives for a picture decides how its file is found; names only, never content.
+            _PICTURE_FIELD_LOGS[0] += 1
+            logger.info("Picture message: fields %s; content is %s; md5 of the picture %s",
+                        sorted(msg), "a hex blob" if _looks_like_wechat_blob(content) else "text",
+                        "found" if media_hint else "NOT found (files are matched by time only)")
         quote_info = (
             _extract_quote_appmsg(content, msg_subtype)
             if local_type == APPMSG_TYPE or msg_subtype == QUOTE_APPMSG_SUBTYPE
             else None
         )
+        # A file someone sent: its name and size (the Claude relay forwards it to the Mac).
+        file_info = (_extract_file_appmsg(content)
+                     if local_type == APPMSG_TYPE and not quote_info else None) or {}
+        # A link / mini program / card / location / system line: its title (the WeChat edge).
+        special_info = (_special_info(content, local_type)
+                        if local_type in (42, 48, 10000) or (local_type == APPMSG_TYPE and not quote_info
+                                                            and not file_info) else {})
 
         # ── Voice recognition ──────────────────────────────────────
         # Voice messages (localType=34) have empty message_content;
@@ -1085,7 +1468,7 @@ class WcdbBackend(AbstractWeChatBackend):
         if quote_info:
             content = quote_info["content"]
         elif local_type == 34 and resolve_voice:
-            voice_text = self._try_voice(msg)
+            voice_text = self._try_voice(msg, talker=talker)
             if voice_text:
                 content = f"[语音] {voice_text}"
             else:
@@ -1218,12 +1601,20 @@ class WcdbBackend(AbstractWeChatBackend):
             is_reply_to_bot = bool(quote_info and (quote_name_matches_bot or quote_id_matches_bot))
 
         # Detect @mention of bot
+        bot_names = {self._bot_name, "假企鹅", "qier"}
+        if hasattr(self, "_config") and self._config:
+            if getattr(self._config, "bot_display_name", None):
+                bot_names.add(self._config.bot_display_name)
+            if getattr(self._config, "chat_persona_name", None):
+                bot_names.add(self._config.chat_persona_name)
+        bot_names.discard("")
+
         is_at = bool(
             is_reply_to_bot
             or (
-                is_group and self._bot_name and (
-                    f"@{self._bot_name}" in resolved_content
-                    or f"@{self._bot_name}" in content
+                is_group and any(
+                    f"@{bn}" in resolved_content or f"@{bn}" in content
+                    for bn in bot_names
                 )
             )
         )
@@ -1264,6 +1655,8 @@ class WcdbBackend(AbstractWeChatBackend):
             ),
             "media_kind": media_kind,
             "media_path": media_path,
+            "file_name": file_info.get("name", ""),
+            "file_size": file_info.get("size", 0),
             "timestamp": ts,
             "is_at_mentioned": is_at,
             "is_group": bool(is_group),
@@ -1274,6 +1667,7 @@ class WcdbBackend(AbstractWeChatBackend):
             "quoted_sender_name": quoted_sender_name,
             "quoted_content": quote_info.get("quoted_content", "") if quote_info else "",
             "quoted_server_id": quote_info.get("quoted_server_id", "") if quote_info else "",
+            "special": special_info,
         }
 
     def _trim_dedup(self) -> None:

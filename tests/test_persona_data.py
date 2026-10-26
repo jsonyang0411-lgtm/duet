@@ -26,14 +26,14 @@ def test_the_shipped_persona_reads_exactly_as_the_old_constants_did():
     assert list(P.builtin_personas()) == ["yang_yujing"]
     yang = P.builtin_personas()["yang_yujing"]
     assert (digest(yang.name), digest(yang.prompt), digest(yang.reply_rules)) == (
-        "c45bef0d7a3ff8f4", "b0bfd44e87d7b402", "b6110f1fadf37d7f")
+        "696bed0ccf2b37e2", "a0db90ee39b231c3", "b6110f1fadf37d7f")
     assert (yang.max_chars, yang.context_window_sec, yang.context_count) == (30, 900, 14)
     assert sorted(p.name for p in (ROOT / "src" / "personas").glob("*.json")) == [
         "alias_rules.json", "yang_yujing.json"]
 
 
 def test_the_old_module_level_names_still_exist_with_the_same_values():
-    assert P.DEFAULT_CHAT_PERSONA_NAME == "杨宇靖" and P.DEFAULT_YANG_YUJING_PERSONA_NAME == "杨宇靖"
+    assert P.DEFAULT_CHAT_PERSONA_NAME == "假企鹅" and P.DEFAULT_YANG_YUJING_PERSONA_NAME == "假企鹅"
     assert P.DEFAULT_CHAT_PERSONA_PROMPT == P.DEFAULT_YANG_YUJING_PERSONA_PROMPT
     assert P.DEFAULT_CHAT_REPLY_RULES == P.DEFAULT_YANG_YUJING_REPLY_RULES
     assert P.DEFAULT_CHAT_MAX_CHARS == 30 and P.DEFAULT_CHAT_CONTEXT_COUNT == 14
@@ -45,7 +45,7 @@ def test_the_old_module_level_names_still_exist_with_the_same_values():
     assert P.normalize_persona_profile(" YANG_YUJING ") == "yang_yujing"
     assert P.normalize_persona_profile("other") == "yang_yujing"
     assert P.persona_defaults_for_profile("yang_yujing") == {
-        "name": "杨宇靖", "prompt": P.DEFAULT_YANG_YUJING_PERSONA_PROMPT,
+        "name": "假企鹅", "prompt": P.DEFAULT_YANG_YUJING_PERSONA_PROMPT,
         "reply_rules": P.DEFAULT_YANG_YUJING_REPLY_RULES, "max_chars": 30,
         "context_window_sec": 900, "context_count": 14,
     }
@@ -69,7 +69,7 @@ def test_the_full_feed_block_reproduces_the_pacing_the_router_used_to_hard_code(
 
 def test_a_persona_hands_the_prompt_builders_their_settings_dict():
     settings = P.builtin_personas()["yang_yujing"].settings()
-    assert settings == {"persona_name": "杨宇靖", "persona_prompt": P.DEFAULT_YANG_YUJING_PERSONA_PROMPT,
+    assert settings == {"persona_name": "假企鹅", "persona_prompt": P.DEFAULT_YANG_YUJING_PERSONA_PROMPT,
                         "reply_rules": P.DEFAULT_YANG_YUJING_REPLY_RULES, "max_chars": 30, "context_count": 14}
 
 

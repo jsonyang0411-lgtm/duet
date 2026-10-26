@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Keeps the Claude relay worker running on the Mac (see README.md).
+  Replace /PATH/TO/webot-claude-relay, copy to ~/Library/LaunchAgents/ and run
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.webot.claude-relay.plist
+  caffeinate -s keeps the Mac awake while it is on power (on battery it sleeps as usual).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.webot.claude-relay</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/caffeinate</string>
+    <string>-s</string>
+    <string>/usr/bin/python3</string>
+    <string>/PATH/TO/webot-claude-relay/tools/claude_relay/worker.py</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardErrorPath</key>
+  <string>/tmp/claude-relay-worker.err</string>
+</dict>
+</plist>

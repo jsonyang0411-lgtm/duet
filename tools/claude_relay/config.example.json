@@ -1,0 +1,22 @@
+{
+  "relay_url": "http://192.168.1.20:8790",
+  "token": "",
+  "token_file": "~/.claude-relay/token",
+  "projects": {
+    "webot": "~/Desktop/webot/webot-claude-relay",
+    "douyin": "~/Desktop/douyin-engineering"
+  },
+  "default_project": "webot",
+  "claude_bin": "",
+  "permission_mode": "auto",
+  "max_budget_usd": 0,
+  "timeout_min": 60,
+  "model": "",
+  "extra_args": [],
+  "wechat_approval": true,
+  "approval_timeout_min": 10,
+  "prm_workspace": "",
+  "prm_model": "",
+  "prm_timeout_min": 10,
+  "prm_max_budget_usd": 0
+}
