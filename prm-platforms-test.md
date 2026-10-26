@@ -25,6 +25,8 @@
     "dy": "~/Desktop/douyin-engineering",
     "tb": "~/Desktop/campaign-engineering",
     "dy_expect_shop_id": "<抖店店铺 ID>",
+    "dy_invite_phone": "<邀约卡片上的店铺手机号，可留空>",
+    "dy_invite_wechat": "<邀约卡片上的店铺微信号，可留空>",
     "max_commission_rate": 30,
     "max_day_budget": 50
   }
@@ -92,6 +94,7 @@
 - [ ] 小红书定向计划（`xhs.direct_plan`）。
 - [ ] 小红书渠道商品（`xhs.channel_item`）。
 - [ ] 淘宝推广计划（`tb.campaign`）。
+- [ ] 百应达人广场邀约带货（`dy.creator_invite`）：见第 9 节。
 - **实测结果**：⚠️ **按书面决定不做真实写入，保持平台零写入（测试止于只读预览阶段）**。
 
 ## 6. 复原（测完把平台改回去）
@@ -141,3 +144,16 @@
 2. **线上安全机制**：
    - 全程测试严格保持**平台零写入**；
    - Mac 端平台动作目前处于待命开启状态。只有当达人谈妥且运营亲手在控制台点击「批准并执行」并二次确认后，才会真实向平台写入。目前登记到达人仅为测试达人，安全可控。
+
+---
+
+## 9. 抖音达人广场「邀约带货」（`dy.creator_invite`，2026-10-26 新加）
+
+这是对外动作：达人马上在抖音（精选联盟私信）收到卡片，**发出去收不回**，还占店铺每周的邀约次数。命令是 douyin-engineering 的 `buyin author-invite`（只有离线验证，整条流程没抓过包）。
+
+- [ ] Mac：douyin-engineering 的 main 里有 `buyin author-invite`（`node bin/dy.mjs buyin author-invite --help` 能出帮助）。
+- [ ] Mac：`~/.claude-relay/config.json` 的 `platforms` 里填 `dy_invite_phone` 或 `dy_invite_wechat`（卡片上给达人看的店铺联系方式，至少一个）。两个都空时这个动作的预览是「这台 Mac 不能做这个动作」。
+- [ ] Mac：先直接只读预览一次（不带 `--execute`，不发任何东西）：`node bin/dy.mjs buyin author-invite --aweme-id <测试达人抖音号> --product <目录里的商品 ID> --content <一句测试文案> --wechat <店铺微信号> --expect-shop-id <店铺 ID>`。期望：退出码 0，`items[0].outcome` 是 `PREVIEW`；看 `gate`（门槛）、`statusBefore`（达人现在的按钮，1 = 邀约带货）、`products`（每个商品免费申样 / 买样）。门槛、状态、商品读不出（`SCHEMA_MISMATCH`）就停下，把输出发回来改读法。
+- [ ] Windows：测试达人在微信里谈妥，草稿带 `dy.creator_invite`。期望：控制台「待审批」显示预览结论、达人昵称（核对是不是聊天里这位）、达人现在的按钮、邀约门槛、商品；按钮不是「邀约带货」（已经邀约过或在沟通）时结论是「拦下了」。
+- [ ] 真实发送：**先书面约定**发给哪个抖音号、哪个商品、什么文案和权益；再点「批准并执行」。期望：结果 `VERIFIED_SUCCESS`（达人的按钮从「邀约带货」变成「继续沟通」），微信回复自动发出；百应 › 消息里能看到这条邀约卡片。预览到批准之间达人状态或门槛变了（例如要确认「本周还剩 N 次」），结果是「发送前复核发现情况变了，没有发」，重新预览再批。
+- 复原：没有。卡片收不回，只能在百应 › 消息里和达人说明。
