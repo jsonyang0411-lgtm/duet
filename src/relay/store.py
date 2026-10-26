@@ -235,11 +235,13 @@ class RelayStore:
             ).fetchone()
         return int(row[0])
 
-    def latest_open(self, chat_id: str) -> Optional[dict]:
+    def latest_open(self, chat_id: str, drafts_only: bool = False) -> Optional[dict]:
+        """The chat's newest queued or running job; ``drafts_only``: not one the worker does
+        without the model (a ``meta.op`` job: a clean-up, a platform preview or execution)."""
         with self._lock:
             row = self._conn.execute(
                 "SELECT * FROM relay_jobs WHERE chat_id = ? AND status IN ('pending', 'running')"
-                " ORDER BY id DESC LIMIT 1",
+                + (" AND meta NOT LIKE '%\"op\":%'" if drafts_only else "") + " ORDER BY id DESC LIMIT 1",
                 (chat_id,),
             ).fetchone()
         return dict(row) if row else None
@@ -268,6 +270,18 @@ class RelayStore:
                 self._conn.commit()
                 return "requested"
             return status
+
+    def cancel_if_pending(self, job_id: int, now: Optional[float] = None) -> bool:
+        """Cancel a job only while no worker has taken it (True: cancelled).  A running job is
+        left alone, without a cancel request: a platform write on the Mac is never interrupted."""
+        now = time.time() if now is None else now
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE relay_jobs SET status = 'cancelled', finished_at = ?, delivered = 1"
+                " WHERE id = ? AND status = 'pending'", (now, job_id),
+            )
+            self._conn.commit()
+            return cur.rowcount == 1
 
     def files(self, job_id: int) -> list[dict]:
         with self._lock:

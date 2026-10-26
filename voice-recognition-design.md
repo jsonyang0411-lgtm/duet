@@ -5,7 +5,7 @@
 当前系统对消息的处理链路：
 
 ```
-WCDB 数据库 → wcdb_api.dll (ctypes) → _standardize() → router → AI 总结
+WCDB 数据库 → wcdb_api.dll (ctypes) → _standardize() → router → AI 总结（当时的设计；公司版已没有 AI 总结和聊天，语音转成的文字现在交给中转 / 达人副驾驶）
 ```
 
 ### 消息类型码 (localType)

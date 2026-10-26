@@ -460,21 +460,49 @@ def test_a_cleared_number_is_never_sent_as_a_placeholder(bot, clock):
     assert bot.prm.decide(late["id"], "send")["ok"] is False
 
 
-def test_the_full_text_index_forgets_the_old_words():
+def test_an_older_databases_full_text_index_forgets_the_old_words():
+    """A messages.db of the chat bot can still hold imported history and its full-text index
+    (FTS5, external content, filled up to a cursor in memory_state): both are cleaned too."""
+    import sqlite3
     conn = initialize_db(":memory:")
-    from src.memory.store import MemoryStore
     store = MessageStore(conn)
-    memory = MemoryStore(store)
-    if not memory.enable_search_index():
+    try:
+        for index, table in (("fts_messages", "messages"), ("fts_history", "history_messages")):
+            if table == "history_messages":
+                conn.execute("CREATE TABLE history_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, message_id TEXT "
+                             "UNIQUE NOT NULL, chat_id TEXT NOT NULL, sender_id TEXT NOT NULL, sender_name TEXT NOT "
+                             "NULL, content TEXT NOT NULL DEFAULT '', msg_type INTEGER NOT NULL DEFAULT 1, source "
+                             "TEXT NOT NULL DEFAULT '', timestamp INTEGER NOT NULL, imported_at INTEGER NOT NULL "
+                             "DEFAULT 0)")
+            conn.execute(f"CREATE VIRTUAL TABLE {index} USING fts5(content, content='{table}', "
+                         "content_rowid='id', tokenize='trigram')")
+    except sqlite3.OperationalError:
         pytest.skip("this sqlite has no fts5 trigram")
+    conn.execute("CREATE TABLE memory_state (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '')")
     store.insert_message({"message_id": "m1", "chat_id": CREATOR, "sender_id": CREATOR, "sender_name": "小美",
                           "content": "地址：上海市浦东新区张江路100号", "msg_type": 1, "timestamp": 1})
-    while not memory.sync_index():
-        pass
+    conn.execute("INSERT INTO history_messages (message_id, chat_id, sender_id, sender_name, content, timestamp) "
+                 "VALUES ('h1', ?, ?, '小美', '旧地址：上海市浦东新区张江路100号', 1)", (CREATOR, CREATOR))
+    for index, table in (("fts_messages", "messages"), ("fts_history", "history_messages")):
+        conn.execute(f"INSERT INTO {index}(rowid, content) SELECT id, content FROM {table}")
+        conn.execute("INSERT INTO memory_state(key, value) VALUES (?, '1')", (f"{index}.cursor",))
+    conn.commit()
+    assert store.rewrite_chat(CREATOR, lambda t: retention.scrub(t, [])) == 2
+    for index, table in (("fts_messages", "messages"), ("fts_history", "history_messages")):
+        assert conn.execute(f"SELECT rowid FROM {index} WHERE {index} MATCH '\"张江路\"'").fetchall() == []
+        assert conn.execute(f"SELECT rowid FROM {index} WHERE {index} MATCH '\"上海市\"'").fetchall()
+        assert "张江路" not in conn.execute(f"SELECT content FROM {table}").fetchone()[0]
+    assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+def test_a_new_database_has_only_the_live_messages_to_clean():
+    conn = initialize_db(":memory:")
+    store = MessageStore(conn)
+    store.insert_message({"message_id": "m1", "chat_id": CREATOR, "sender_id": CREATOR, "sender_name": "小美",
+                          "content": "电话 13812345678", "msg_type": 1, "timestamp": 1})
     assert store.rewrite_chat(CREATOR, lambda t: retention.scrub(t, [])) == 1
-    hits = conn.execute("SELECT rowid FROM fts_messages WHERE fts_messages MATCH '\"张江路\"'").fetchall()
-    assert hits == [] and conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-    assert conn.execute("SELECT rowid FROM fts_messages WHERE fts_messages MATCH '\"上海市\"'").fetchall()
+    assert conn.execute("SELECT content FROM messages").fetchone()[0] == "电话 138****5678"
+    assert store.rewrite_chat("wxid_nobody", lambda t: "x") == 0
 
 
 def test_scrub_cuts_addresses_and_masks_numbers():
@@ -537,7 +565,7 @@ def test_a_long_reply_read_back_compressed_confirms_it_and_takes_nothing_over(bo
     raw = [{"sender_username": "wxid_bot", "local_type": 1, "create_time": int(clock.now), "local_id": "z1",
             "message_content": zstandard.ZstdCompressor().compress(sent_text.encode("utf-8")).hex()}]
     backend = WcdbBackend(bot_display_name="机器人", groups=["*"],
-                          config=BotConfig(private_chat_enabled=True, chat_persona_profile="custom"))
+                          config=BotConfig(private_chat_enabled=True))
     backend._client = FakeClient(raw)
     backend._chat_is_group[CREATOR] = False
     backend._running = True
@@ -556,7 +584,7 @@ def test_own_lines_in_a_creators_chat_reach_the_hook_and_nowhere_else():
             "local_id": f"m{i}"} for i, (who, text) in enumerate([(CREATOR, "你好"), ("wxid_bot", "我亲手回的")])]
     for chat, registered, expect in ((CREATOR, True, ["我亲手回的"]), ("wxid_friend", False, [])):
         backend = WcdbBackend(bot_display_name="机器人", groups=["*"],
-                              config=BotConfig(private_chat_enabled=True, chat_persona_profile="custom"))
+                              config=BotConfig(private_chat_enabled=True))
         backend._client = FakeClient(raw)
         backend._chat_is_group[chat] = False
         backend._running = True

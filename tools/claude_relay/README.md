@@ -38,7 +38,7 @@ Windows 上的机器人只负责收发微信消息。你私聊机器人发 `cc �
 - Mac 上改了 `config.json`（比如加项目），worker 会自动重新读取，不用重启。
 - 结果太长（超过 `CLAUDE_RELAY_MAX_CHARS`，默认 1500 字）时，Windows 机器人会把完整结果存成 `中转结果-17.txt` 发给你，再发一条带开头的消息。用 `CLAUDE_RELAY_LONG_FILE=off` 关掉，或者机器人不能发文件（macOS 后端）时，照旧截断。
 - 任务排过队（前面有任务、或者 Mac 当时不在线）的话，开始时会说「#17 开始了」。做得久的任务每 3 分钟发一次进度，比如「#17 进行中（6分钟）：第 14 步 · 改 service.py · 计划 3/7」，进度没变就不发。间隔用 Windows 上的 `CLAUDE_RELAY_PROGRESS_MIN` 改，0 表示不发。`cc 状态` 里也能看到正在做的那一步。
-- 只认 `CLAUDE_RELAY_WXIDS`（不填就是 `ADMIN_WXID`）发来的**私聊**。群里的消息、别人发的 `cc` 都当普通消息处理。
+- 只认 `CLAUDE_RELAY_WXIDS`（不填就是 `ADMIN_WXID`）发来的**私聊**。群里的消息、别人发的 `cc` 机器人只记录、不回复（它没有聊天功能）。
 - 超过 5 分钟的旧消息不会执行，防止机器人重启时把历史消息当成新任务。
 
 ## Windows 端（机器人）
@@ -180,6 +180,91 @@ Windows 上的机器人只负责收发微信消息。你私聊机器人发 `cc �
   - 合作单里的详细地址只留省市。
   - 草稿、操作记录、中转任务、聊天记录（`messages.db`，连同全文索引）里的地址和号码同样处理，模型复述时省掉省市的半截地址（例如「张江路100号3栋1201」）也会清掉。
   - 再给 Mac 发一个清理任务：worker 不用 Claude，自己按同样的规则改 `deals/<编号>.md`，并在末尾记一笔「清理记录」。号码清掉之后，含这个占位符的草稿不能再发。
+
+### 平台联动（小红书 / 抖音 / 淘宝）
+
+和达人在微信上谈妥（平台、商品、佣金率或专属价、达人的平台账号都确认了）以后，草稿可以带一个「平台动作」`platform_action`：五种动作之一，只有类型固定的参数（商品 ID、达人账号、佣金率、专属价……），**不是命令**。起草的 Claude 照旧 `--restricted`、没有 Bash。真正调平台命令行的是 worker 自己的 Python 代码（`src/prm/platforms.py`，worker 按路径加载），分两段：
+
+```
+草稿带 platform_action ─► Mac：严格校验（白名单、类型、范围、上限、商品目录）
+                          └► 平台 CLI 不带 --execute 预览（读平台，不写）─► 预览结果随草稿回 Windows
+控制台「待审批」：平台动作、参数、预览（准入检查、将写入的佣金/价格、拦下的原因、退出码）
+     │ 运营点「批准并执行」（确认框）
+     ▼
+Mac：同一个 CLI 带 --execute，只发一次（执行台账：同一个批准编号只执行一次，绝不自动重试）
+     ├► 读回 VERIFIED_SUCCESS：回复里的占位符（{链接}、{计划名}…）换成平台给的值，发给达人
+     └► 其余结果：不发微信，「待审批」页顶部标红，等运营处理
+```
+
+#### Mac 端要做的
+
+1. 三个命令行项目先按各自的 README 在这台 Mac 上跑通（调试 Chrome 里登录千帆 / 抖店 / 百应；淘宝的登录和 uv）。worker 不替它们登录，也不改它们的文件。
+2. 在 `~/.claude-relay/config.json` 里加（只配要用的平台；不配 `platforms` 就没有平台动作，草稿的系统提示里也不提）：
+   ```
+   "platforms": {
+     "xhs": "~/Desktop/xiaohongshu-engineering",
+     "dy": "~/Desktop/douyin-engineering",
+     "tb": "~/Desktop/campaign-engineering",
+     "node_bin": "",
+     "dy_expect_shop_id": "",
+     "tb_shop": "",
+     "max_commission_rate": 50,
+     "max_day_budget": 300,
+     "min_price_ratio": 0.5,
+     "env": {}
+   }
+   ```
+   - `node_bin` 留空就在 PATH、`~/.local/bin`、`/opt/homebrew/bin`、`/usr/local/bin` 里找（要 Node 22 以上）。
+   - `dy_expect_shop_id`：抖音每条命令都加 `--expect-shop-id`，登录的不是这家店就退出码 79，什么都不发。`tb_shop`：淘宝用 `--shop <名字>` 选店铺（`node bin/shop.mjs` 登记过的）。`env`：额外交给命令行的环境变量，例如 `{"CAMPAIGN_EXPECT_UNB": "…", "XHS_CDP_ENDPOINT": "http://127.0.0.1:9222"}`。
+   - 上限（这台 Mac 自己的保险，平台自己的规则另算）：佣金率最多 `max_commission_rate`%，淘宝日预算最多 `max_day_budget` 元，专属价不能低于商品目录价的 `min_price_ratio`（防止小数点点错）。超了的动作不预览、不能执行。
+   - `preview_timeout_sec`（默认 300）/ `execute_timeout_sec`（默认 900）：单条命令的时限。执行超时只能停下命令、结果算「不知道」，所以给得宽。
+3. 同步商品目录（只读命令）：
+   ```
+   python3 tools/claude_relay/worker.py --sync-products          # 全部配置了的平台
+   python3 tools/claude_relay/worker.py --sync-products --platforms dy
+   ```
+   写出 `prm_workspace/kb/products.md`（给 Claude 看：商品 ID、标题、SKU、价格）和 `kb/products.json`（给代码核对）。**平台动作的商品必须在目录里**，SKU 和专属价也按目录核对；没有目录就不预览。小红书读 `items --tab shelf --all` + `item`，抖音读 `fxg products` + `fxg sku-prices`，淘宝读万相台选品列表 `alimama items`（没有 SKU）。某个平台这次没读成，保留上一次的列表并在 md 里注明。商品有变化就再跑一次（可以放进每天的定时任务）。
+4. `python3 tools/claude_relay/worker.py --check` 多两行：`platform actions: dy=…; node …` 和商品目录的同步时间。
+
+#### 五种动作
+
+| 动作 | 预览（不写） | 批准后执行 | 发给达人 |
+|---|---|---|---|
+| `xhs.direct_plan` 小红书定向计划（专属佣金） | 达人给的是小红书号或昵称时先 `direct-plans --find-buyer … --raw` 找买手（正好一个才继续，控制台显示昵称和粉丝数请运营核对）；再用小红书仓库自带的只读整条演练 `tools/dry-execute.mjs direct-plan --action create …`（命令本身的预览不读平台；演练会读平台、做页面的检查：计划名、买手、最低佣金、选品，只拦下写请求） | `direct-plan --action create --name <预览时定的计划名> --buyer-id <预览时找到的 userId> --item <商品>:<佣金> --long-term --execute` | 回复原文 |
+| `xhs.channel_item` 小红书渠道商品（专属价） | `channel-item --action create … --shelf on --read-current`（读当前表单和页面的拦截） | 同一条带 `--execute` | 回复原文。注意：小红书工具对这条创建永远只给 ACCEPTED_UNVERIFIED（两项核验不了），所以**按规则不会自动发**，执行后在千帆核对再自己回 |
+| `dy.designated_commission` 百应指定达人专属佣金 | `buyin promotion-strategy-create-designated --id … --uid … --to … --end long`；商品还没推广（预览说 create its promotion first）时再预览 `buyin promotion-create` | 需要时先 `promotion-create --execute`（核验通过才继续），再重新预览，再 `promotion-strategy-create-designated --execute` | 回复原文 |
+| `dy.channel_goods` 抖店达人渠道品 + 绑定达人 | `fxg channel-goods-create --product-id … --sale-channel kol [--price][--sku-id][--stock]`（价格检查 warn / block 都算拦下） | `channel-goods-create --execute` → 核验通过且拿到渠道 ID 和链接 → 预览 `channel-goods-bind --uid …` → 没被拦下才 `channel-goods-bind --execute`（已经绑过算成功） | `{链接}` 换成 `channelGoods.links.channelLink`（只认 jinritemai.com / douyin.com 的链接） |
+| `tb.campaign` 万相台精准人群推广计划 | `alimama create-display-custom-campaign --item-id … --item-title <目录里的标题> --crowd … --bid-target … --day-budget … --campaign-name … --transport http --format json --pause-after-create=true`（会读平台：准入、全站互斥…） | 同一条加 `--execute=true`：建成即投放，命令确认新计划后马上暂停 | 回复原文。到目前为止这条命令的真实读回都是 ACCEPTED_UNVERIFIED，所以一般不会自动发 |
+
+回复里能用的占位符（执行成功后换成平台给的值；别的花括号写法一律不让批准）：
+
+| 动作 | 占位符 |
+|---|---|
+| `dy.channel_goods` | `{链接}`（渠道品的专属推广链接；回复里没写时接在末尾）、`{渠道品ID}` |
+| `xhs.direct_plan` | `{计划名}`、`{计划ID}` |
+| `xhs.channel_item` | `{渠道商品ID}` |
+| `tb.campaign` | `{计划名}`、`{计划ID}` |
+| `dy.designated_commission` | 没有 |
+
+平台核验成功了、但回复里某个占位符平台没给出值时，回复也不发（标红），免得把 `{计划ID}` 原样发给达人。
+
+`alimama create-campaign`（货品全站推广）没有接：它建成就投放、没有建后暂停，预览也不读平台。
+
+#### 守住的东西
+
+- 参数白名单：动作只能是这五种，参数只能是该动作的那几个；ID 按各平台的格式核对（数字 / 24 位字母数字），文字参数不能有换行、控制字符、花括号，不能以 `-` 开头；命令行是参数列表（不经过 shell），每个值都写成 `--名字=值`，模型或达人写的东西变不成选项。
+- 预览从不带 `--execute`。执行前 Mac 再按商品目录和上限核对一遍动作和批准的步骤。
+- 执行台账 `~/.claude-relay/platform/ledger/<批准编号>.json`：开始执行前先独占地写下这个编号（0600）。同一个编号再来（任务重复、worker 重启后重收），一律「这次批准已经执行过」，不再执行；执行到一半 worker 挂了的也一样，结果以平台后台为准。
+- 一次只跑一个平台命令（`~/.claude-relay/platform/cli.lock`，同步目录和草稿共用）。等锁、跑命令时照常发心跳，任务不会被当成失联。
+- 执行中不响应取消（写到一半停下比写完更糟）：控制台取消了也会跑完，只是回复不再自动发。
+- 每次执行的完整记录在 `~/.claude-relay/logs/platform/`（不自动删除：这是平台写操作的记录）。
+
+#### 结果怎么处理（Windows 机器人这边）
+
+- 带平台动作的草稿一律先审（门槛不管用），也不计入自动发送的门槛统计。「发送」「改了再发」对它不可用，只有「批准并执行」「改了再执行」「重新预览」「不发」。
+- 预览没通过（被拦下、没登录、验证码、账号不对、参数不对）不能批准；在 Mac 上处理好（比如重新登录）以后点「重新预览」。
+- 批准以后草稿是「平台执行中」。Mac 30 分钟没接手就取消这个任务（平台没有动）；执行中 Mac 失联，等它 30 分钟，回来了照常处理，没回来就标红「不知道执行了没有」，之后才到的结果只记下来、不自动发。
+- 只有 `VERIFIED_SUCCESS` 才发回复；其余一律不发，在「待审批」页顶部标红，并写进合作单的「要注意」。运营到平台后台核对、自己处理完，点「我已处理」。系统不会重试。
 
 ### 两端的版本
 

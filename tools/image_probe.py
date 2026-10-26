@@ -35,7 +35,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from src import vision  # noqa: E402
+from src.wechat import media  # noqa: E402
 from src.wechat import image_key as K  # noqa: E402
 
 KINDS = ("HD (_h)", "plain", "thumbnail (_t)")
@@ -103,7 +103,7 @@ def newest_files(folders: list[Path], seconds: float, limit: int) -> list[tuple[
                     age = now - path.stat().st_mtime
                 except OSError:
                     continue
-                if age <= seconds and path.suffix.lower() in vision.MEDIA_EXTS:
+                if age <= seconds and path.suffix.lower() in media.MEDIA_EXTS:
                     found.append((age, path))
     return sorted(found, key=lambda item: item[0])[:limit]
 
@@ -158,7 +158,7 @@ def main(argv=None, root: Path = ROOT) -> int:
         print(f"\n  the bot's lookup for a message sent when the newest file was written "
               f"(chat {chat_id or 'unknown: searching everything'}):")
         with tempfile.TemporaryDirectory() as cache:
-            got = vision.locate_recent_image_file(
+            got = media.locate_recent_image_file(
                 wechat_data_dir=str(account.parent), timestamp=int(time.time() - newest_age),
                 cache_dir=Path(cache), chat_id=chat_id, allow_thumbnail=False)
             if got:

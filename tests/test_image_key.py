@@ -1,4 +1,4 @@
-"""WeChat 4 picture files: AES-128, the .dat layout, finding the keys, and decoding through vision."""
+"""WeChat 4 picture files: AES-128, the .dat layout, finding the keys, and decoding (src/wechat/media.py)."""
 
 import io
 import json
@@ -143,7 +143,7 @@ def test_the_account_folder_of_a_picture(tmp_path):
     assert K.account_dir_of(tmp_path / "loose.dat") is None
 
 
-# ── through vision and the relay ──────────────────────────────────────────
+# ── through media.py and the relay ──────────────────────────────────────────
 
 @pytest.fixture
 def known_keys(tmp_path, monkeypatch):
@@ -152,21 +152,21 @@ def known_keys(tmp_path, monkeypatch):
     return keys
 
 
-def test_vision_decodes_a_wechat_4_picture(tmp_path, known_keys):
-    from src.vision import decode_wechat_dat_image, prepare_image_for_model
+def test_media_decodes_a_wechat_4_picture(tmp_path, known_keys):
+    from src.wechat.media import decode_wechat_dat_image, readable_image
     acc = account(tmp_path)
     write_dat(acc, "x_t.dat", jpeg((10, 10, 10)))
     picture = jpeg((0, 200, 0))
     path = write_dat(acc, "big.dat", picture)
     out = decode_wechat_dat_image(path, tmp_path / "cache")
     assert out is not None and out.suffix == ".jpg" and out.read_bytes() == picture
-    assert prepare_image_for_model(str(path), cache_dir=tmp_path / "cache") == str(out)
+    assert readable_image(str(path), cache_dir=tmp_path / "cache") == str(out)
     v1 = write_dat(acc, "old.dat", picture, version=1)
     assert decode_wechat_dat_image(v1, tmp_path / "cache").read_bytes() == picture
 
 
 def test_a_picture_whose_key_cannot_be_found(tmp_path, monkeypatch):
-    from src.vision import decode_wechat_dat_image
+    from src.wechat.media import decode_wechat_dat_image
     monkeypatch.setattr(K, "_keys", K.ImageKeys(tmp_path / "keys.json", scan=lambda block: None))
     acc = account(tmp_path)
     path = write_dat(acc, "big.dat", jpeg())
@@ -208,7 +208,7 @@ def test_the_check_tool_decodes_a_picture(tmp_path, monkeypatch, capsys):
     assert tool.main([], root=tmp_path) == 0
     out = capsys.readouterr().out
     assert "V1 2, V2 0" in out and "XOR key: found" in out and "200x100" in out
-    assert (tmp_path / "data/vision_cache/image_key_check.jpg").read_bytes() == picture
+    assert (tmp_path / "data/media_cache/image_key_check.jpg").read_bytes() == picture
     assert AES_KEY.decode() not in out
 
 

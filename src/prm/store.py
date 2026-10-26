@@ -23,6 +23,12 @@ send, or the kind's gate is ``auto``) -> ``sending`` -> ``sent`` | ``failed``; o
 ``pending`` -> ``dropped`` (not sent) | ``superseded`` (the creator wrote again, a newer
 draft follows).  ``no_reply`` is a draft that says nothing needs to be sent.  Moves are
 compare-and-set (``move``), so a double click or two threads never send one packet twice.
+
+A packet with a platform action (``tool`` is the action's name, ``platform`` the JSON:
+the action, the Mac's preview, the execution; src/prm/platforms.py) is always reviewed:
+``pending`` -> ``executing`` (an operator said 批准并执行; the Mac runs the platform CLI
+with --execute, once) -> ``approved`` (read back VERIFIED_SUCCESS: the reply, with the
+link filled in, goes out) | ``failed`` (anything less: nothing is sent to the creator).
 """
 
 from __future__ import annotations
@@ -36,7 +42,9 @@ from typing import Callable, Optional
 
 PENDING, APPROVED, SENDING, SENT, FAILED = "pending", "approved", "sending", "sent", "failed"
 DROPPED, SUPERSEDED, NO_REPLY = "dropped", "superseded", "no_reply"
-PACKET_STATES = (PENDING, APPROVED, SENDING, SENT, FAILED, DROPPED, SUPERSEDED, NO_REPLY)
+EXECUTING = "executing"      # a platform action an operator approved, running on the Mac
+PACKET_STATES = (PENDING, APPROVED, SENDING, SENT, FAILED, DROPPED, SUPERSEDED, NO_REPLY, EXECUTING)
+MESSAGE_TOOL = "message.send"   # ``tool`` of a plain reply (a platform action's name otherwise)
 
 # The stages of a collaboration (docs: 合作单状态机); the AI may only suggest these.
 STAGES = {
@@ -151,6 +159,7 @@ _ADDED_COLUMNS = (
     ("action_packets", "wrong", "INTEGER NOT NULL DEFAULT 0"),
     ("pii_tokens", "masked", "TEXT NOT NULL DEFAULT ''"),
     ("pii_tokens", "purged_at", "REAL"),
+    ("action_packets", "platform", "TEXT NOT NULL DEFAULT '{}'"),
 )
 
 # What the creators wrote, or our side's own words, waiting for the next draft job.
@@ -175,6 +184,7 @@ def packet_view(row: dict) -> dict:
     out["attachments"] = _loads(row.get("attachments"), [])
     out["slots"] = _loads(row.get("slots"), {})
     out["meta"] = _loads(row.get("meta"), {})
+    out["platform"] = _loads(row.get("platform"), {})
     out["needs_attention"] = bool(row.get("needs_attention"))
     out["edited"] = bool(row.get("edited"))
     out["wrong"] = bool(row.get("wrong"))
@@ -357,17 +367,19 @@ class PrmStore:
                    text: str, attachments: list, intent: str, slots: dict, stage_proposal: str,
                    needs_attention: bool, reason: str, status: str = PENDING, route: str = "review",
                    meta: Optional[dict] = None, decided_at: Optional[float] = None,
+                   tool: str = MESSAGE_TOOL, platform: Optional[dict] = None,
                    now: Optional[float] = None) -> int:
         now = time.time() if now is None else now
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO action_packets (deal_id, party_id, job_id, chat_id, kind, route, text, attachments,"
-                " intent, slots, stage_proposal, needs_attention, reason, status, meta, decided_at, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (deal_id, party_id, job_id, chat_id, kind, route, text,
+                "INSERT INTO action_packets (deal_id, party_id, job_id, chat_id, tool, kind, route, text, attachments,"
+                " intent, slots, stage_proposal, needs_attention, reason, status, meta, platform, decided_at,"
+                " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (deal_id, party_id, job_id, chat_id, tool, kind, route, text,
                  json.dumps(attachments, ensure_ascii=False), intent, json.dumps(slots, ensure_ascii=False),
                  stage_proposal, int(bool(needs_attention)), reason, status,
-                 json.dumps(meta or {}, ensure_ascii=False), decided_at, now),
+                 json.dumps(meta or {}, ensure_ascii=False), json.dumps(platform or {}, ensure_ascii=False),
+                 decided_at, now),
             )
             self._conn.commit()
             return int(cur.lastrowid)
@@ -387,6 +399,17 @@ class PrmStore:
             rows = self._conn.execute(sql, (*args, int(limit))).fetchall()
         return [packet_view(dict(r)) for r in rows]
 
+    def platform_failures(self, limit: int = 50) -> list[dict]:
+        """Packets with a platform action that ended ``failed`` (the platform write was not
+        verified, or the reply did not go out), newest first: the console marks them red
+        until an operator says they are dealt with (``platform.acked_at``)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM action_packets WHERE tool != ? AND status = ? ORDER BY id DESC LIMIT ?",
+                (MESSAGE_TOOL, FAILED, int(limit)),
+            ).fetchall()
+        return [p for p in (packet_view(dict(r)) for r in rows) if not p["platform"].get("acked_at")]
+
     def packet_for_job(self, job_id: int) -> Optional[dict]:
         with self._lock:
             row = self._conn.execute(
@@ -404,21 +427,25 @@ class PrmStore:
         return [packet_view(dict(r)) for r in rows]
 
     def reviewed(self, kind: str, since: float, limit: int) -> list[dict]:
-        """The newest drafts of ``kind`` a person decided on after ``since`` (8.1's window)."""
+        """The newest drafts of ``kind`` a person decided on after ``since`` (8.1's window).
+        Plain replies only: a platform action is always reviewed and earns no kind ``auto``."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM action_packets WHERE kind = ? AND route = 'review' AND status IN (?, ?, ?)"
+                "SELECT * FROM action_packets WHERE kind = ? AND route = 'review' AND tool = ? AND status IN (?, ?, ?)"
                 " AND decided_at IS NOT NULL AND decided_at > ? ORDER BY decided_at DESC, id DESC LIMIT ?",
-                (kind, SENT, FAILED, DROPPED, since, int(limit)),
+                (kind, MESSAGE_TOOL, SENT, FAILED, DROPPED, since, int(limit)),
             ).fetchall()
         return [packet_view(dict(r)) for r in rows]
 
     def move(self, packet_id: int, from_states: tuple, to_state: str, **fields) -> bool:
-        """Compare-and-set: the packet goes to ``to_state`` only if it is in one of ``from_states``."""
-        allowed = {"final_text", "edited", "outcome", "error", "decided_at", "sent_at"}
+        """Compare-and-set: the packet goes to ``to_state`` only if it is in one of ``from_states``.
+        ``platform`` (a dict) replaces the packet's platform JSON in the same step."""
+        allowed = {"final_text", "edited", "outcome", "error", "decided_at", "sent_at", "platform"}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"not a packet field: {sorted(unknown)}")
+        if "platform" in fields:
+            fields["platform"] = json.dumps(fields["platform"] or {}, ensure_ascii=False)
         names = sorted(fields)
         with self._lock:
             cur = self._conn.execute(
@@ -428,6 +455,22 @@ class PrmStore:
             )
             self._conn.commit()
             return cur.rowcount == 1
+
+    def set_platform(self, packet_id: int, platform: dict, statuses: tuple, *,
+                     expect: Optional[Callable[[dict], bool]] = None) -> bool:
+        """Replace the platform JSON of a packet that is in one of ``statuses`` (and, with
+        ``expect``, whose platform JSON now passes it): one step under the lock."""
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT platform FROM action_packets WHERE id = ? AND status IN ({', '.join('?' * len(statuses))})",
+                (packet_id, *statuses),
+            ).fetchone()
+            if row is None or (expect is not None and not expect(_loads(row["platform"], {}))):
+                return False
+            self._conn.execute("UPDATE action_packets SET platform = ? WHERE id = ?",
+                               (json.dumps(platform or {}, ensure_ascii=False), packet_id))
+            self._conn.commit()
+            return True
 
     def set_outcome(self, packet_id: int, outcome: str) -> None:
         with self._lock:

@@ -19,7 +19,6 @@ from src.influencer.jst_erp import JuShuiTanERPClient
 from src.influencer.store import SOURCE_CONSOLE, InfluencerStore
 from src.influencer.types import GateStatus
 from src.influencer.xhs_cli import XiaohongshuCLIClient
-from test_router import make_private_msg, make_router
 
 INFLUENCER = "wxid_influencer_a"
 SAMPLE_REQUEST = "你好，想申请一下VC精华液的样品"
@@ -137,27 +136,10 @@ def assert_no_commitment(reply):
     assert not found, f"审批前的回复不能有承诺性字眼 {found}：{reply}"
 
 
-def private_msg(message_id, chat_id, nickname, content):
-    """模拟 Mac 后端（mac_hybrid）发来的私聊：sender_id 是昵称，chat_id 才是稳定的 ID。"""
-    msg = make_private_msg(message_id, content)
-    msg.update(chat_id=chat_id, sender_id=nickname, sender_name=nickname,
-               group_name=nickname, chat_name=nickname)
-    return msg
-
-
-def router_with(handler):
-    router, summarizer = make_router()
-    router._influencer_handler = handler
-    return router, summarizer
-
-
 # ---- S1–S7 ----
 
-def test_s1_non_influencer_private_chat_gets_the_normal_reply():
-    router, summarizer = router_with(make_handler())
-    reply = router.handle(private_msg("m1", "wxid_friend", "老同学", "上次合作的项目挺顺利，周末聚一下？"))
-    assert summarizer.chat_calls, "白名单以外的私聊应该走原有的聊天逻辑"
-    assert "收件" not in (reply or "")
+# S1（名单以外的私聊走原来的聊天）不再适用：公司仓库改成业务网关后，名单以外的私聊一概不回，
+# 由同事的 tests/test_router_business.py 守着。
 
 
 def test_s2_asking_for_the_address_makes_no_promise():
@@ -206,9 +188,8 @@ def test_s5_a_rejected_packet_cannot_be_approved_later():
 
 def test_s6_two_people_with_the_same_nickname_stay_apart():
     handler = make_handler(influencers=("wxid_a", "wxid_b"))
-    router, _ = router_with(handler)
-    router.handle(private_msg("m1", "wxid_a", "Lily", "想申请泥膜样品"))
-    router.handle(private_msg("m2", "wxid_b", "Lily", "王五 13700002222 北京市朝阳区建国路8号"))
+    run(handler.process_incoming_message("wxid_a", "想申请泥膜样品", nickname="Lily"))
+    run(handler.process_incoming_message("wxid_b", "王五 13700002222 北京市朝阳区建国路8号", nickname="Lily"))
     assert pending_packets(handler) == [], "B 发来的地址被挂到了 A 的索样申请上"
 
 

@@ -1,7 +1,9 @@
 """Bot orchestrator — wires all components and manages the bot lifecycle.
 
 This is the central class that initializes, starts, and gracefully shuts down
-the WeChat summarizer bot. It replaces the inline wiring previously in main.py.
+the business WeChat gateway: the Claude relay, the PRM copilot or the WeChat edge,
+the admin's account commands.  There is no chat model: groups and unknown private
+chats are never answered (src/routing/steps.py).
 """
 
 import json
@@ -14,15 +16,10 @@ from pathlib import Path
 
 from .config import BotConfig, PROJECT_ROOT
 from .db import initialize_db, MessageStore
-from .summarize import create_models, relay_only
-from .trigger import TriggerDetector
-from .nickname import NicknameService
 from .admin import AdminCommandHandler
 from .router import MessageRouter
-from .integrations.feishu import FeishuExportService
 from .utils.logging_config import setup_logging
 from .send.bubbles import configure_sender
-from .send.stickers import StickerLibrary, configure_stickers
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +30,8 @@ class HealthMonitor:
     Runs in a daemon thread so it never blocks shutdown.
     """
 
-    def __init__(self, summarizer, router, conn, backend, config: BotConfig,
+    def __init__(self, router, conn, backend, config: BotConfig,
                  on_tick=None):
-        self._summarizer = summarizer
         self._router = router
         self._conn = conn
         self._backend = backend
@@ -56,6 +52,9 @@ class HealthMonitor:
     def stop(self) -> None:
         self._running = False
 
+    def uptime_sec(self) -> int:
+        return int(time.time() - self._start_time)
+
     # ── Internals ───────────────────────────────────────────────────
 
     _FAST_TICK_SEC = 30    # push message count to dashboard every 30s
@@ -70,14 +69,7 @@ class HealthMonitor:
             cycle += 1
             try:
                 # Fast tick (every 30s): push live stats to dashboard
-                self._on_tick(
-                    messages_processed=self._router.messages_processed,
-                    last_api_call_time=self._summarizer.last_api_call_time,
-                    last_api_call_sec_ago=(
-                        int(time.time() - self._summarizer.last_api_call_time)
-                        if self._summarizer.last_api_call_time > 0 else -1
-                    ),
-                )
+                self._on_tick(messages_processed=self._router.messages_processed)
                 # Full tick (every 300s): logging + JSON + health checks
                 if cycle % self._FULL_TICK_CYCLES == 0:
                     self._tick()
@@ -85,27 +77,22 @@ class HealthMonitor:
                 logger.exception("Health monitor tick failed")
 
     def _tick(self) -> None:
-        uptime_sec = int(time.time() - self._start_time)
-        uptime_min = uptime_sec // 60
+        uptime_sec = self.uptime_sec()
         msgs = self._router.messages_processed
 
         db_status = self._check_db()
-        wechat_status = self._check_wechat_hwnd()
-        last_api_str = self._last_api_ago()
+        wechat_status = self.wechat_status()
 
         # Push to Web UI
         self._on_tick(
             uptime_sec=uptime_sec,
             messages_processed=msgs,
             db_ok=db_status == "OK",
-            last_api_call_time=self._summarizer.last_api_call_time,
-            last_api_call_sec_ago=int(time.time() - self._summarizer.last_api_call_time)
-                if self._summarizer.last_api_call_time > 0 else -1,
         )
 
         logger.info(
-            "HEARTBEAT: uptime=%dm, msgs=%d, db=%s, wechat=%s, last_api=%s",
-            uptime_min, msgs, db_status, wechat_status, last_api_str,
+            "HEARTBEAT: uptime=%dm, msgs=%d, db=%s, wechat=%s",
+            uptime_sec // 60, msgs, db_status, wechat_status,
         )
 
         self._write_status_json()
@@ -118,8 +105,8 @@ class HealthMonitor:
         except Exception as e:
             return f"ERR:{e}"
 
-    def _check_wechat_hwnd(self) -> str:
-        """Check WeChat window HWND."""
+    def wechat_status(self) -> str:
+        """The backend's own health word, or the WeChat window's HWND."""
         try:
             health_status = getattr(self._backend, "health_status", None)
             if callable(health_status):
@@ -136,19 +123,6 @@ class HealthMonitor:
         except Exception as e:
             return f"ERR:{e}"
 
-    def _last_api_ago(self) -> str:
-        """Human-readable 'time since last successful API call'."""
-        last = self._summarizer.last_api_call_time
-        if last <= 0:
-            return "never"
-        ago = int(time.time() - last)
-        if ago < 60:
-            return f"{ago}s_ago"
-        elif ago < 3600:
-            return f"{ago // 60}m_ago"
-        else:
-            return f"{ago // 3600}h_ago"
-
     def _write_status_json(self) -> None:
         """Write a lightweight status file for external watchdogs."""
         status = {
@@ -156,11 +130,6 @@ class HealthMonitor:
             "messages_processed": self._router.messages_processed,
             "db_ok": self._check_db() == "OK",
             "wechat_backend": self._config.wechat_backend,
-            "last_api_call_sec_ago": (
-                int(time.time() - self._summarizer.last_api_call_time)
-                if self._summarizer.last_api_call_time > 0
-                else -1
-            ),
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }
 
@@ -177,7 +146,7 @@ class HealthMonitor:
 
 
 class Bot:
-    """Orchestrates the WeChat summarizer bot.
+    """Orchestrates the business WeChat gateway.
 
     Usage:
         config = load_config()
@@ -201,9 +170,8 @@ class Bot:
         setup_logging(level=config.log_level, log_file=config.log_file)
         self._log_banner()
 
-        # How replies are delivered (bubbles, typing pauses); see src/send/bubbles.py.
+        # How replies are delivered (typing pauses); see src/send/bubbles.py.
         configure_sender(typing=getattr(config, "send_typing_delay", "off") == "on")
-        self._configure_expressions(config)
 
         # ── 2. Database ─────────────────────────────────────────
         self._conn = initialize_db(config.db_path)
@@ -217,22 +185,11 @@ class Bot:
             pass
 
         # ── 3. Components ───────────────────────────────────────
-        detector = TriggerDetector(
-            keywords=config.trigger_keywords,
-            bot_display_name=config.bot_display_name,
-        )
-        # MODEL_ROUTE: one cloud model (as before), the local one, or split by task.
-        models = create_models(config)
-        summarizer = models.chat
-        nickname_service = NicknameService()
-        admin_handler = AdminCommandHandler(nickname_service)
-        feishu_export_service = FeishuExportService(
-            config=config,
-            store=store,
-            summarizer=summarizer,
-        )
+        admin_handler = AdminCommandHandler()
+        router = MessageRouter(store=store, admin_handler=admin_handler, config=config)
 
-        # 达人商务模块：名单、草稿和审批单存在同一个数据库里，控制台的"达人审批"页也读写这里
+        # 达人商务模块：名单、审批单存在同一个数据库里，控制台的「达人审批」页也读写这里。
+        # 不再挂在路由上（达人的私聊走 PRM 起草）；Mac 端用它做名单合一和寄样审批（src/influencer/prm_bridge.py）
         try:
             from .influencer.handler import build_influencer_handler
             influencer_handler = build_influencer_handler(config.db_path)
@@ -240,28 +197,11 @@ class Bot:
             logger.warning("Failed to initialize InfluencerBusinessHandler: %s", e)
             influencer_handler = None
 
-        router = MessageRouter(
-            store=store,
-            detector=detector,
-            summarizer=summarizer,
-            admin_handler=admin_handler,
-            nickname_service=nickname_service,
-            config=config,
-            feishu_export_service=feishu_export_service,
-            proactive_summarizer=models.proactive,
-            memory_summarizer=models.memory,
-            influencer_handler=influencer_handler,
-        )
-
         # ── 4. Web UI status ────────────────────────────────────
         # (web server already started by desktop.py)
         try:
             from .web.server import update_status
-            from .summarize import model_label
-            update_status(
-                wechat_backend=config.wechat_backend,
-                ai_backend=model_label(config),
-            )
+            update_status(wechat_backend=config.wechat_backend)
             self._update_status = update_status
         except Exception as e:
             logger.debug("Web UI status: %s", e)
@@ -294,10 +234,10 @@ class Bot:
         edge = self._start_edge(config, router, backend, relay)
 
         self._start_friend_management(config, backend, admin_handler)
+        admin_handler.set_status(lambda: self._status_lines(router, relay, prm, edge))
 
         # ── 6. Health monitor ───────────────────────────────────
         self._health = HealthMonitor(
-            summarizer=summarizer,
             router=router,
             conn=self._conn,
             backend=backend,
@@ -326,17 +266,12 @@ class Bot:
         #
         # DESIGN NOTE — fire-and-forget callback execution:
         #   WcdbBackend uses a ThreadPoolExecutor (max_workers=4) to
-        #   offload AI-triggering callbacks from the poll loop.  The poll
+        #   offload the route callbacks from the poll loop.  The poll
         #   thread submits each message to the pool and returns immediately,
-        #   so a slow summarization in one group never blocks polling of
-        #   other groups.  Reply sending + WCDB confirmation happen inside
+        #   so a slow send in one chat never blocks polling of the other
+        #   chats.  Reply sending + WCDB confirmation happen inside
         #   the worker, serialized through a client_lock to keep ctypes
         #   safe.  On shutdown the pool drains with a 30 s timeout.
-        #
-        # Legacy design (pre-2026-06):
-        #   The old single-threaded loop caused head-of-line blocking:
-        #   one slow AI call delayed ALL groups' message polling.
-        #   The old comment is archived in AUDIT.md §C1.
         try:
             logger.info("Bot is running. Press Ctrl+C to stop.")
             backend.start(router.handle)
@@ -367,17 +302,8 @@ class Bot:
                     register_relay(None)
                 except Exception:
                     pass
-            # Stop the memory thread before its database goes away.
-            close_router = getattr(router, "close", None)
-            if callable(close_router):
-                try:
-                    close_router()
-                except Exception:
-                    logger.exception("Router shutdown failed")
             if self._conn is not None:
                 self._conn.close()
-            if hasattr(self, 'backend') and hasattr(self.backend, 'router'):
-                pass  # router cleanup handled by backend shutdown
             try:
                 self._update_status(running=False)
             except Exception:
@@ -385,6 +311,26 @@ class Bot:
             logger.info("Bot shut down gracefully.")
 
     # ── Helpers ──────────────────────────────────────────────────
+
+    def _status_lines(self, router, relay, prm, edge) -> list[str]:
+        """The lines of the admin's 查状态 (the friend switches are the handler's own)."""
+        config = self._config
+        health = self._health
+        lines = []
+        if health is not None:
+            lines.append(f"运行：{health.uptime_sec() // 60} 分钟")
+            lines.append(f"微信后端：{config.wechat_backend}（{health.wechat_status()}）")
+        else:
+            lines.append(f"微信后端：{config.wechat_backend}")
+        lines.append(f"已处理消息：{router.messages_processed} 条")
+        if relay is None:
+            lines.append("中转（cc → Mac）：关")
+        else:
+            lines.append("中转（cc → Mac）：开，" + ("Mac 在线" if relay.mac_online() else "Mac 未连接"))
+        lines.append("达人副驾驶（PRM_COPILOT）：" + ("开" if prm is not None else "关"))
+        lines.append("微信边缘（PRM_EDGE）：" + ("开" if edge is not None else "关"))
+        lines.append("群聊：一律不回复")
+        return lines
 
     def _start_friend_management(self, config, backend, admin_handler) -> None:
         """The admin's friend commands and, with AUTO_ACCEPT_FRIENDS=on, the auto-accept worker.
@@ -435,7 +381,7 @@ class Bot:
         from .admin import RELAY_HELP
         from .relay import ClaudeRelay
         # When the bot only relays, the admin's management commands still go to the
-        # admin handler (route step relay_only), not to the Mac.
+        # admin handler (route step admin_command), not to the Mac.
         is_command = getattr(getattr(router, "_admin", None), "is_command", None)
         relay = ClaudeRelay(config, send=backend.send_text, send_file=getattr(backend, "send_file", None),
                             reserved=is_command, extra_help=RELAY_HELP if is_command else "")
@@ -597,18 +543,11 @@ class Bot:
         logger.info("=" * 50)
         logger.info("webot starting...")
         logger.info("WeChat backend: %s", config.wechat_backend)
-        route = getattr(config, "model_route", "cloud")
-        if relay_only(config):
-            logger.info("AI: none (CLAUDE_RELAY_ONLY: the bot only relays cc requests)")
-        elif route != "local":
-            logger.info("AI backend: %s", config.ai_backend)
-            if config.ai_backend == "deepseek":
-                logger.info("Model: %s", config.deepseek_model)
-            else:
-                logger.info("Model: %s", config.summarize_model)
-        if route != "cloud" and not relay_only(config):
-            logger.info("Local model: %s at %s (MODEL_ROUTE=%s)",
-                        config.local_model, config.local_base_url, route)
+        logger.info(
+            "Business gateway: relay=%s, prm_copilot=%s, prm_edge=%s; no chat model, groups are never answered",
+            getattr(config, "claude_relay", "off"), getattr(config, "prm_copilot", "off"),
+            getattr(config, "prm_edge", "off"),
+        )
         logger.info("Bot name: %r", config.bot_display_name)
         if config.wechat_groups:
             logger.info("Groups: %s", config.wechat_groups)
@@ -618,23 +557,6 @@ class Bot:
         )
         logger.info("DB path: %s", config.db_path)
         logger.info("=" * 50)
-
-    @staticmethod
-    def _configure_expressions(config) -> None:
-        """Load the sticker library (SEND_STICKERS) and say when a switch cannot work."""
-        stickers_on = getattr(config, "send_stickers", "off") == "on"
-        library = StickerLibrary.load(getattr(config, "sticker_dir", "data/stickers")) if stickers_on else StickerLibrary()
-        configure_stickers(library)
-        if stickers_on:
-            logger.info("Stickers: %d usable in %s", len(library), getattr(config, "sticker_dir", ""))
-            if getattr(config, "wechat_backend", "wcdb") != "wcdb":
-                logger.warning("SEND_STICKERS: the %s backend cannot send pictures; no sticker is offered",
-                               getattr(config, "wechat_backend", ""))
-        wanted = [name for name, on in (("WECHAT_EMOJI", getattr(config, "wechat_emoji", "off") == "on"),
-                                        ("SEND_STICKERS", stickers_on)) if on]
-        if wanted and getattr(config, "pipeline_v2", "off") == "off":
-            logger.warning("%s only work with PIPELINE_V2=single or two_step; with PIPELINE_V2=off they do nothing",
-                           " and ".join(wanted))
 
     def _create_wechat_backend(self, store=None):
         """Create the appropriate WeChat backend based on config.

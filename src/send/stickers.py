@@ -1,19 +1,17 @@
-"""Sticker pictures the bot may send now and then (``SEND_STICKERS=on``).
+"""Sticker pictures a reply part may be (the sending side).
 
 The library is a folder, ``data/stickers/`` by default, with the pictures and a
 ``stickers.json`` that names them and says when each fits::
 
     {"stickers": [
         {"name": "害羞捂脸", "file": "shy.gif", "when": "被夸或被调侃的时候"},
-        {"name": "问号", "file": "what.png", "when": "没听懂", "personas": ["杨宇靖"]}
+        {"name": "问号", "file": "what.png", "when": "没听懂", "personas": ["客服"]}
     ]}
 
-``personas`` (optional) limits a sticker to those persona names or ids.  The
-structured pipeline lists the stickers in its prompt and the model may name one
-in the optional ``sticker`` field.  The router then appends a sticker bubble:
-``STICKER_MARK`` followed by the name.  Like the bubble separator, only the
-router may put that mark in a reply; :class:`src.send.bubbles.BubbleSender`
-looks the name up here and hands the file to the backend.
+``personas`` (optional) limits a sticker to those names or ids.  A sticker
+part is ``STICKER_MARK`` followed by the name; :class:`src.send.bubbles.BubbleSender`
+looks the name up here and hands the file to the backend.  No route of the
+business gateway adds one: the router removes the mark from every reply.
 """
 
 from __future__ import annotations

@@ -9,11 +9,8 @@ from test_influencer_acceptance import (
     age_draft,
     make_handler,
     pending_packets,
-    private_msg,
-    router_with,
     run,
 )
-from test_router import make_router
 
 
 def say(handler, text):
@@ -84,32 +81,10 @@ class BrokenERP(FakeERP):
         return {"in_stock": True, "available_quantity": 1}  # 缺字段，后面会出错
 
 
-def test_an_unexpected_error_gets_a_neutral_reply_instead_of_the_chat_model():
-    router, summarizer = router_with(make_handler(BrokenERP()))
-    reply = router.handle(private_msg("m1", INFLUENCER, "小美", "想申请眼霜样品"))
-    assert reply == HOLDING_REPLY
-    assert summarizer.chat_calls == []
 
 
-def test_a_router_built_without_the_handler_never_opens_the_database(tmp_path, monkeypatch):
-    # 达人处理器由 bot.py 构造后传给 router。router 自己不建，用默认配置的测试就不会
-    # 在 data/messages.db 里建表
-    monkeypatch.chdir(tmp_path)
-    router, summarizer = make_router()
-    router.handle(private_msg("m1", INFLUENCER, "小美", SAMPLE_REQUEST))
-    assert not (tmp_path / "data" / "messages.db").exists()
-    assert summarizer.chat_calls, "没挂达人模块时，私聊走原来的聊天逻辑"
 
 
-def test_small_talk_from_an_influencer_goes_to_the_operator_not_the_chat_model():
-    handler = make_handler()
-    router, summarizer = router_with(handler)
-    first = router.handle(private_msg("m1", INFLUENCER, "小美", "这款什么时候上新呀"))
-    second = router.handle(private_msg("m2", INFLUENCER, "小美", "还有别的颜色吗"))
-    assert first == HOLDING_REPLY
-    assert second is None, "同一位达人 6 小时内只回一次中性回复"
-    assert summarizer.chat_calls == [], "达人的消息不能交给聊天模型随口作答（B20）"
-    assert [i["content"] for i in handler.store.list_inbox()] == ["还有别的颜色吗", "这款什么时候上新呀"]
 
 
 def test_running_out_of_stock_is_put_in_front_of_the_operator():
@@ -117,3 +92,7 @@ def test_running_out_of_stock_is_put_in_front_of_the_operator():
     say(handler, "想申请眼霜样品")
     [item] = handler.store.list_inbox()
     assert item["kind"] == "out_of_stock" and "眼霜" in item["content"]
+
+
+# 原来这里还有三条经过路由的测试（出错时回中性的话、路由不自己建处理器、闲聊转运营不交给聊天模型）。
+# 公司仓库改成业务网关后，路由不再把私聊交给达人模块（达人走 PRM 起草），这三条不再适用。

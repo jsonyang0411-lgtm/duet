@@ -195,8 +195,8 @@ class TestEngine:
 
 def backend(groups=("测试群",), engine=None, **config):
     ocr = OcrFallback(engine or FakeEngine(screen("测试群（5）", ["之前的话"])), after=3, interval=0)
-    be = WcdbBackend(bot_display_name="假企鹅", groups=list(groups),
-                     config=BotConfig(chat_persona_profile="custom", message_burst_enabled=False, **config), ocr=ocr)
+    be = WcdbBackend(bot_display_name="商务助手", groups=list(groups),
+                     config=BotConfig(message_burst_enabled=False, **config), ocr=ocr)
     be._running = True
     return be, ocr
 
@@ -242,7 +242,7 @@ class TestBackendGlue:
         real = be._standardize({"sender_username": "wxid_u", "message_content": "你好", "local_type": 1,
                                 "create_time": int(time.time()), "local_id": "m1"},
                                "测试群", "ocr:测试群", is_group=True)
-        name, talker, ocr_msg = be._message_from_ocr(OcrMessage_for("测试群（5）", "@假企鹅 你好"))
+        name, talker, ocr_msg = be._message_from_ocr(OcrMessage_for("测试群（5）", "@商务助手 你好"))
         assert (name, talker) == ("测试群", "ocr:测试群")
         assert set(ocr_msg) == set(real)
         assert ocr_msg["sender_id"] == ocr_msg["sender_name"] == OCR_SENDER
@@ -331,7 +331,7 @@ def test_start_without_a_database_answers_from_the_screen(monkeypatch):
     monkeypatch.setattr(wcdb_backend, "WcdbNativeClient", BrokenClient)
     monkeypatch.setattr(wcdb_backend, "_backoff_sec", lambda n: 0.05)
     engine = FakeEngine(screen("测试群（5）", ["之前的话"]),
-                        screen("测试群（5）", ["之前的话", "@假企鹅 总结一下"]))
+                        screen("测试群（5）", ["之前的话", "@商务助手 总结一下"]))
     be, ocr = backend(engine=engine)
     be._window.find_hwnd = lambda *a, **k: None
     be._window.describe_chat_windows = lambda *a, **k: None
@@ -349,7 +349,7 @@ def test_start_without_a_database_answers_from_the_screen(monkeypatch):
     be.stop()
     thread.join(10)
     assert not thread.is_alive()
-    assert got[0]["content"] == "@假企鹅 总结一下" and got[0]["group_name"] == "测试群"
+    assert got[0]["content"] == "@商务助手 总结一下" and got[0]["group_name"] == "测试群"
     assert got[0]["chat_id"] == "ocr:测试群" and got[0]["sender_id"] == OCR_SENDER
 
 
@@ -359,7 +359,7 @@ def test_start_without_a_database_and_without_ocr_still_stops_as_before(monkeypa
             raise RuntimeError("wcdb_api.dll cannot be loaded")
 
     monkeypatch.setattr(wcdb_backend, "WcdbNativeClient", BrokenClient)
-    be = WcdbBackend(bot_display_name="假企鹅", groups=["测试群"], config=BotConfig(chat_persona_profile="custom"))
+    be = WcdbBackend(bot_display_name="商务助手", groups=["测试群"], config=BotConfig())
     assert be._ocr is None
     be.start(lambda msg: None)                       # returns at once, nothing was started
     assert be._pool is None and not be._running

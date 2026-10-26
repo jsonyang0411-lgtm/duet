@@ -499,68 +499,92 @@ class AdminFriendCommandTests(unittest.TestCase):
         self.friend.accept_friend_requests.return_value = [{"status": "accepted"}]
         self.auto = MagicMock()
         return AdminCommandHandler(
-            nickname_service=MagicMock(),
             friend_manager=self.friend if friend else None,
             auto_friend_service=self.auto if auto else None,
         )
 
     def test_add_friend(self):
         handler = self.handler()
-        self.assertIn("已成功向「13800000000」发送好友申请", handler.handle("添加好友 13800000000 请通过", "Admin"))
+        self.assertIn("已成功向「13800000000」发送好友申请", handler.handle("添加好友 13800000000 请通过"))
         self.friend.add_friend.assert_called_once_with("13800000000", "请通过")
 
     def test_add_friend_short_form_and_extra_spaces(self):
         handler = self.handler()
-        handler.handle("加好友   13800000000", "Admin")
+        handler.handle("加好友   13800000000")
         self.friend.add_friend.assert_called_once_with("13800000000", "")
 
     def test_add_friend_without_a_target_explains_the_usage(self):
         handler = self.handler()
-        reply = handler.handle("添加好友", "Admin")
+        reply = handler.handle("添加好友")
         self.assertIn("请指定", reply)
         self.friend.add_friend.assert_not_called()
 
     def test_accept_friends(self):
         handler = self.handler()
-        self.assertIn("已成功同意 1 位", handler.handle("同意好友", "Admin"))
+        self.assertIn("已成功同意 1 位", handler.handle("同意好友"))
 
     def test_accepting_nothing_does_not_claim_there_were_no_requests(self):
         handler = self.handler()
         self.friend.accept_friend_requests.return_value = []
-        reply = handler.handle("同意好友", "Admin")
+        reply = handler.handle("同意好友")
         self.assertIn("没有同意任何申请", reply)
         self.assertIn("日志", reply)
 
     def test_auto_accept_switch(self):
         handler = self.handler()
-        self.assertIn("已关闭", handler.handle("自动同意好友 关", "Admin"))
+        self.assertIn("已关闭", handler.handle("自动同意好友 关"))
         self.auto.disable.assert_called_once()
-        self.assertIn("已开启", handler.handle("自动同意好友  开", "Admin"))      # two spaces
+        self.assertIn("已开启", handler.handle("自动同意好友  开"))      # two spaces
         self.auto.enable.assert_called_once()
-        self.assertIn("已开启", handler.handle("自动同意好友开", "Admin"))         # no spaces
+        self.assertIn("已开启", handler.handle("自动同意好友开"))         # no spaces
         self.assertEqual(self.auto.enable.call_count, 2)
-        self.assertIn("已关闭", handler.handle("自动同意好友关", "Admin"))         # no spaces
+        self.assertIn("已关闭", handler.handle("自动同意好友关"))         # no spaces
         self.assertEqual(self.auto.disable.call_count, 2)
 
     def test_without_the_components_no_command_claims_success(self):
         handler = self.handler(friend=False, auto=False)
         for command in ("添加好友 13800000000", "同意好友", "自动同意好友 开", "关闭自动同意"):
-            reply = handler.handle(command, "Admin")
+            reply = handler.handle(command)
             self.assertIn("未启用好友管理组件", reply, command)
             self.assertNotIn("已开启", reply)
             self.assertNotIn("已关闭", reply)
 
     def test_other_commands_are_not_taken(self):
-        self.assertIsNone(self.handler().handle("添加好友们的名字", "Admin"))
+        self.assertIsNone(self.handler().handle("添加好友们的名字"))
         self.friend.add_friend.assert_not_called()
 
+    def test_status_lists_the_bot_lines_and_the_friend_switches(self):
+        handler = self.handler()
+        self.auto.enabled = True
+        handler.set_status(lambda: ["微信：已连接", "已处理消息：12 条"])
+        reply = handler.handle("查状态")
+        self.assertEqual(reply.splitlines(), ["账号状态：", "微信：已连接", "已处理消息：12 条",
+                                              "好友管理：可用", "自动同意好友：开"])
+        self.assertTrue(handler.is_command("账号状态"))
+
+    def test_status_without_components_or_with_a_broken_source_still_answers(self):
+        handler = self.handler(friend=False, auto=False)
+        handler.set_status(lambda: 1 / 0)
+        reply = handler.handle("查状态")
+        self.assertIn("运行状态读取失败", reply)
+        self.assertIn("好友管理：未启用", reply)
+        self.assertNotIn("自动同意好友：", reply)
+
+    def test_help_lists_only_account_commands(self):
+        reply = self.handler().handle("帮助")
+        for word in ("查状态", "添加好友", "同意好友", "自动同意好友"):
+            self.assertIn(word, reply)
+        for word in ("改名", "昵称", "抽签", "塔罗", "总结", "@bot"):
+            self.assertNotIn(word, reply)
+        self.assertFalse(self.handler().is_command("帮助"))      # the relay keeps its own help
+
     def test_set_friend_manager_attaches_both(self):
-        handler = AdminCommandHandler(nickname_service=MagicMock())
+        handler = AdminCommandHandler()
         friend, auto = MagicMock(), MagicMock()
         friend.accept_friend_requests.return_value = []
         handler.set_friend_manager(friend, auto)
-        handler.handle("同意好友", "Admin")
-        handler.handle("开启自动同意", "Admin")
+        handler.handle("同意好友")
+        handler.handle("开启自动同意")
         friend.accept_friend_requests.assert_called_once()
         auto.enable.assert_called_once()
 

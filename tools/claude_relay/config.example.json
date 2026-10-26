@@ -18,5 +18,6 @@
   "prm_workspace": "",
   "prm_model": "",
   "prm_timeout_min": 10,
-  "prm_max_budget_usd": 0
+  "prm_max_budget_usd": 0,
+  "platforms": {}
 }

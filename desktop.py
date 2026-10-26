@@ -50,10 +50,7 @@ def start_bot():
     try:
         from src.config import load_config
         config = load_config()
-        update_status(
-            wechat_backend=config.wechat_backend,
-            ai_backend=config.ai_backend,
-        )
+        update_status(wechat_backend=config.wechat_backend)
         from src.bot import Bot
         bot = Bot(config)
         # Bot.run() calls _register_backend() during init — no patch needed

@@ -141,8 +141,8 @@ if (-not (Test-Path $localEnvFile)) {
 # WECHAT_DATA_DIR=C:\Users\<vm-user>\Documents\WeChat Files
 # WCDB_KEY=...
 #
-# Shared settings such as AI_BACKEND, DEEPSEEK_API_KEY, persona, and trigger
-# words can stay in the shared project .env.
+# Shared settings such as CLAUDE_RELAY, PRIVATE_CHATS and the relay token can
+# stay in the shared project .env.
 "@ | Set-Content -Encoding UTF8 $localEnvFile
     Write-Warning "Created local env file: $localEnvFile"
     Write-Warning "Fill WECHAT_DATA_DIR and WCDB_KEY in that file before first run."

@@ -12,11 +12,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-# Messages older than this are history replayed at startup, not conversation.
-AT_MENTION_MAX_AGE_SEC = 300        # ignore @mentions older than 5 minutes
-ALL_MESSAGES_MAX_AGE_SEC = 300      # full-feed persona must not replay history
-WELCOME_MAX_AGE_SEC = 300           # ignore join events older than 5 minutes
-
 
 @dataclass(frozen=True)
 class Stop:
@@ -27,14 +22,9 @@ class Stop:
 
 @dataclass
 class RouteContext:
-    router: Any                       # the MessageRouter (its handlers are the steps' tools)
+    router: Any                       # the MessageRouter (its parts are the steps' tools)
     msg: dict
     trace: Any
-    raw: str = ""                     # content without a leading ``wxid_xxx:`` quote prefix
-    is_at: bool = False               # @, sticky, keyword, follow-up or name call
-    sticky_triggered: bool = False
-    clean_content: str = ""           # the request text once the @bot is cut out
-    reply: Optional[str] = None       # produced by a command or by the chat model
 
 
 RouteFn = Callable[[RouteContext], Optional[Stop]]

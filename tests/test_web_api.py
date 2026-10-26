@@ -1,5 +1,5 @@
 """
-Tests for webot: config loading, trigger detection, and web API endpoints.
+Tests for webot: config loading and web API endpoints.
 
 Uses Python's built-in unittest framework with unittest.mock for mocking.
 No real DB or network -- all tests are fast and deterministic.
@@ -41,118 +41,21 @@ class TestConfig(unittest.TestCase):
 
     # -- load_config ---------------------------------------------------
 
-    def test_load_config_deepseek_backend(self):
-        """load_config should build BotConfig from DeepSeek environment variables."""
-        from src.config import load_config, BotConfig
-        env = {
-            "AI_BACKEND": "deepseek",
-            "DEEPSEEK_API_KEY": "sk-test-deepseek-key",
-            "DEEPSEEK_MODEL": "deepseek-v4-flash",
-            "WECHAT_BACKEND": "wcdb",
-            "WECHAT_GROUPS": "*",
-            "BOT_DISPLAY_NAME": "test-bot",
-            "CHAT_PERSONA_PROFILE": "custom",          # the 杨宇靖 preset uses its own name
-            "TRIGGER_KEYWORDS": "summary,help,info",
-        }
-        with patch.dict(os.environ, env, clear=True):
-            cfg = load_config()
-            self.assertIsInstance(cfg, BotConfig)
-            self.assertEqual(cfg.ai_backend, "deepseek")
-            self.assertEqual(cfg.deepseek_api_key, "sk-test-deepseek-key")
-            self.assertEqual(cfg.deepseek_model, "deepseek-v4-flash")
-            self.assertEqual(cfg.bot_display_name, "test-bot")
-            self.assertEqual(cfg.trigger_keywords, ["summary", "help", "info"])
-            self.assertEqual(cfg.wechat_groups, "*")
-
-    def test_load_config_claude_backend(self):
-        """load_config should build BotConfig from Claude env vars."""
-        from src.config import load_config, BotConfig
-        env = {
-            "AI_BACKEND": "claude",
-            "ANTHROPIC_API_KEY": "sk-ant-test-key",
-            "SUMMARIZE_MODEL": "claude-sonnet-4-5-20250901",
-            "WECHAT_BACKEND": "wcdb",
-            "BOT_DISPLAY_NAME": "claude-bot",
-            "CHAT_PERSONA_PROFILE": "custom",
-        }
-        with patch.dict(os.environ, env, clear=True):
-            cfg = load_config()
-            self.assertEqual(cfg.ai_backend, "claude")
-            self.assertEqual(cfg.anthropic_api_key, "sk-ant-test-key")
-            self.assertEqual(cfg.summarize_model, "claude-sonnet-4-5-20250901")
-            self.assertEqual(cfg.bot_display_name, "claude-bot")
-
-    def test_load_config_openai_backend(self):
-        """load_config should build BotConfig from OpenAI environment variables."""
-        from src.config import load_config
-
-        env = {
-            "AI_BACKEND": "openai",
-            "OPENAI_API_KEY": "sk-openai-test-key",
-            "OPENAI_MODEL": "gpt-test",
-            "OPENAI_BASE_URL": "https://proxy.example.com/v1",
-        }
-        with patch.dict(os.environ, env, clear=True):
-            cfg = load_config()
-            self.assertEqual(cfg.ai_backend, "openai")
-            self.assertEqual(cfg.openai_api_key, "sk-openai-test-key")
-            self.assertEqual(cfg.openai_model, "gpt-test")
-            self.assertEqual(cfg.openai_base_url, "https://proxy.example.com/v1")
-
-    def test_load_config_missing_deepseek_api_key_raises(self):
-        """load_config with deepseek backend but empty key should raise RuntimeError."""
-        from src.config import load_config
-        env = {"AI_BACKEND": "deepseek", "DEEPSEEK_API_KEY": ""}
-        with patch.dict(os.environ, env, clear=True):
-            with self.assertRaises(RuntimeError) as ctx:
-                load_config()
-            self.assertIn("DEEPSEEK_API_KEY", str(ctx.exception))
-
-    def test_load_config_missing_anthropic_api_key_raises(self):
-        """load_config with claude backend but empty key should raise RuntimeError."""
-        from src.config import load_config
-        env = {"AI_BACKEND": "claude", "ANTHROPIC_API_KEY": ""}
-        with patch.dict(os.environ, env, clear=True):
-            with self.assertRaises(RuntimeError) as ctx:
-                load_config()
-            self.assertIn("ANTHROPIC_API_KEY", str(ctx.exception))
-
     def test_load_config_defaults_when_vars_missing(self):
-        """load_config should apply dataclass defaults for optional env vars."""
+        """load_config should apply dataclass defaults for optional env vars (no key is needed)."""
         from src.config import load_config
-        env = {"AI_BACKEND": "deepseek", "DEEPSEEK_API_KEY": "sk-test-key"}
-        with patch.dict(os.environ, env, clear=True):
+        with patch.dict(os.environ, {}, clear=True):
             cfg = load_config()
             self.assertEqual(cfg.poll_interval_sec, 1.0)
-            self.assertEqual(cfg.chunk_size, 400)
-            self.assertEqual(cfg.max_messages_for_summary, 5000)
-            self.assertEqual(cfg.fallback_window_hours, 8)
             self.assertEqual(cfg.dedup_window_sec, 60)
-            self.assertTrue(cfg.fun_enabled)
-            self.assertFalse(cfg.proactive_enabled)
             self.assertEqual(cfg.log_level, "INFO")
-
-    def test_load_config_empty_trigger_keywords_uses_default(self):
-        """When TRIGGER_KEYWORDS is unset, the dataclass defaults apply."""
-        from src.config import load_config
-        env = {"AI_BACKEND": "deepseek", "DEEPSEEK_API_KEY": "sk-test-key",
-               "TRIGGER_KEYWORDS": ""}
-        with patch.dict(os.environ, env, clear=True):
-            cfg = load_config()
-            self.assertIn("summarize", cfg.trigger_keywords)
-            self.assertIn("总结一下", cfg.trigger_keywords)
+            self.assertEqual(cfg.wechat_backend, "wcdb")
 
     # -- _validate_config ----------------------------------------------
 
     def _call_validate(self, **overrides):
         from src.config import _validate_config
-        defaults = {
-            "ai_backend": "deepseek",
-            "anthropic_api_key": "k",
-            "deepseek_api_key": "k",
-        }
-        defaults.update(overrides)
-        _validate_config(defaults)
+        _validate_config(dict(overrides))
 
     def test_validate_config_poll_interval_too_low(self):
         """POLL_INTERVAL_SEC < 0.1 must raise RuntimeError."""
@@ -160,93 +63,18 @@ class TestConfig(unittest.TestCase):
             self._call_validate(poll_interval_sec=0.05)
         self.assertIn("POLL_INTERVAL_SEC", str(ctx.exception))
 
-    def test_validate_config_chunk_size_below_range(self):
-        """CHUNK_SIZE < 10 must raise RuntimeError."""
-        with self.assertRaises(RuntimeError) as ctx:
-            self._call_validate(chunk_size=5)
-        self.assertIn("CHUNK_SIZE", str(ctx.exception))
-
-    def test_validate_config_chunk_size_above_range(self):
-        """CHUNK_SIZE > 1000 must raise RuntimeError."""
-        with self.assertRaises(RuntimeError) as ctx:
-            self._call_validate(chunk_size=9999)
-        self.assertIn("CHUNK_SIZE", str(ctx.exception))
-
-    def test_validate_config_chunk_size_at_boundaries_passes(self):
-        """CHUNK_SIZE at 10 and 1000 should pass."""
-        self._call_validate(chunk_size=10)
-        self._call_validate(chunk_size=1000)
-
-    def test_validate_config_max_messages_too_low(self):
-        """MAX_MESSAGES_FOR_SUMMARY < 10 must raise RuntimeError."""
-        with self.assertRaises(RuntimeError) as ctx:
-            self._call_validate(max_messages_for_summary=1)
-        self.assertIn("MAX_MESSAGES_FOR_SUMMARY", str(ctx.exception))
-
-    def test_validate_config_fallback_window_hours_too_low(self):
-        """FALLBACK_WINDOW_HOURS < 1 must raise RuntimeError."""
-        with self.assertRaises(RuntimeError) as ctx:
-            self._call_validate(fallback_window_hours=0)
-        self.assertIn("FALLBACK_WINDOW_HOURS", str(ctx.exception))
-
     def test_validate_config_dedup_window_too_low(self):
         """DEDUP_WINDOW_SEC < 10 must raise RuntimeError."""
         with self.assertRaises(RuntimeError) as ctx:
             self._call_validate(dedup_window_sec=5)
         self.assertIn("DEDUP_WINDOW_SEC", str(ctx.exception))
 
-    def test_validate_config_proactive_rates_not_ascending(self):
-        """PROACTIVE_RATE_* values must be strictly ascending."""
-        with self.assertRaises(RuntimeError) as ctx:
-            self._call_validate(
-                proactive_rate_quiet=5.0,
-                proactive_rate_casual=3.0,   # smaller than quiet
-                proactive_rate_lively=6.5,
-                proactive_rate_burst=8.5,
-            )
-        self.assertIn("ascending", str(ctx.exception))
-
-    def test_validate_config_proactive_rates_negative(self):
-        """All PROACTIVE_RATE_* values must be > 0."""
-        with self.assertRaises(RuntimeError) as ctx:
-            self._call_validate(
-                proactive_rate_quiet=-1.0,
-                proactive_rate_casual=4.0,
-                proactive_rate_lively=6.5,
-                proactive_rate_burst=8.5,
-            )
-        self.assertIn("PROACTIVE_RATE", str(ctx.exception))
-
-    def test_validate_config_sticky_mention_ttl_out_of_range(self):
-        """STICKY_MENTION_TTL_SEC must be between 10 and 300."""
-        with self.assertRaises(RuntimeError):
-            self._call_validate(sticky_mention_ttl_sec=500)
-        with self.assertRaises(RuntimeError):
-            self._call_validate(sticky_mention_ttl_sec=5)
-
-    def test_validate_config_proactive_rate_window_too_low(self):
-        """PROACTIVE_RATE_WINDOW_SEC must be >= 30."""
-        with self.assertRaises(RuntimeError) as ctx:
-            self._call_validate(proactive_rate_window_sec=10)
-        self.assertIn("PROACTIVE_RATE_WINDOW_SEC", str(ctx.exception))
-
-    def test_validate_config_max_retries_out_of_range(self):
-        """MAX_RETRIES must be between 1 and 10 if provided."""
-        with self.assertRaises(RuntimeError):
-            self._call_validate(max_retries=0)
-        with self.assertRaises(RuntimeError):
-            self._call_validate(max_retries=99)
-
-    def test_validate_config_max_retries_not_set_passes(self):
-        """max_retries=None (not in config) should pass validation."""
-        self._call_validate()  # no max_retries key at all
-
     def test_validate_config_multiple_errors_reported(self):
         """Multiple invalid values should all appear in the error message."""
         with self.assertRaises(RuntimeError) as ctx:
-            self._call_validate(chunk_size=0, poll_interval_sec=0)
+            self._call_validate(dedup_window_sec=0, poll_interval_sec=0)
         msg = str(ctx.exception)
-        self.assertIn("CHUNK_SIZE", msg)
+        self.assertIn("DEDUP_WINDOW_SEC", msg)
         self.assertIn("POLL_INTERVAL_SEC", msg)
 
     # -- find_env_file ------------------------------------------------
@@ -475,175 +303,6 @@ class TestConfig(unittest.TestCase):
 # ======================================================================
 
 
-class TestTriggerDetector(unittest.TestCase):
-    """Tests for TriggerDetector: keyword matching, @mention detection,
-    empty content, edge cases."""
-
-    def setUp(self):
-        from src.trigger.detector import TriggerDetector
-        self.TriggerDetector = TriggerDetector
-
-    def test_exact_keyword_match(self):
-        """An exact match on a keyword triggers."""
-        detector = self.TriggerDetector(
-            keywords=["总结一下", "summarize"],
-            bot_display_name="小助手",
-        )
-        self.assertTrue(
-            detector.is_trigger("总结一下", is_at_mentioned=False,
-                               sender_name="user")
-        )
-
-    def test_substring_keyword_match(self):
-        """Keyword found as substring triggers (uses 'in' check)."""
-        detector = self.TriggerDetector(
-            keywords=["总结"],
-            bot_display_name="小助手",
-        )
-        self.assertTrue(
-            detector.is_trigger("请帮我总结一下今天的内容",
-                               is_at_mentioned=False, sender_name="user")
-        )
-
-    def test_case_insensitive_match(self):
-        """Keyword matching is case-insensitive."""
-        detector = self.TriggerDetector(
-            keywords=["Summarize", "What Did I Miss"],
-            bot_display_name="小助手",
-        )
-        self.assertTrue(
-            detector.is_trigger("summarize this for me",
-                               is_at_mentioned=False, sender_name="user")
-        )
-        self.assertTrue(
-            detector.is_trigger("WHAT DID I MISS?",
-                               is_at_mentioned=False, sender_name="user")
-        )
-
-    def test_at_mention_always_triggers(self):
-        """is_at_mentioned=True always triggers regardless of content."""
-        detector = self.TriggerDetector(
-            keywords=["总结"],
-            bot_display_name="小助手",
-        )
-        self.assertTrue(
-            detector.is_trigger("random chat message",
-                               is_at_mentioned=True, sender_name="user")
-        )
-
-    def test_at_mention_even_with_empty_content(self):
-        """is_at_mentioned=True with empty content still triggers."""
-        detector = self.TriggerDetector(
-            keywords=["总结"],
-            bot_display_name="小助手",
-        )
-        self.assertTrue(
-            detector.is_trigger("", is_at_mentioned=True, sender_name="user")
-        )
-
-    def test_no_match_when_no_keyword_and_no_mention(self):
-        """A message without keyword or @mention does not trigger."""
-        detector = self.TriggerDetector(
-            keywords=["总结", "summarize"],
-            bot_display_name="小助手",
-        )
-        self.assertFalse(
-            detector.is_trigger("今天天气不错",
-                               is_at_mentioned=False, sender_name="user")
-        )
-
-    def test_empty_content_no_mention_does_not_trigger(self):
-        """Empty content without @mention does not trigger."""
-        detector = self.TriggerDetector(
-            keywords=["总结"],
-            bot_display_name="小助手",
-        )
-        self.assertFalse(
-            detector.is_trigger("", is_at_mentioned=False, sender_name="user")
-        )
-
-    def test_empty_keyword_list_no_false_positive(self):
-        """An empty keyword list never causes a false trigger."""
-        detector = self.TriggerDetector(
-            keywords=[],
-            bot_display_name="小助手",
-        )
-        self.assertFalse(
-            detector.is_trigger("总结一下",
-                               is_at_mentioned=False, sender_name="user")
-        )
-
-    def test_whitespace_only_keyword_not_added(self):
-        """Keywords that are whitespace-only after stripping are excluded."""
-        detector = self.TriggerDetector(
-            keywords=["总结", "   ", "\t"],
-            bot_display_name="小助手",
-        )
-        self.assertEqual(len(detector.keywords), 1)
-        self.assertIn("总结", detector.keywords)
-
-    def test_keyword_with_leading_trailing_spaces_trimmed(self):
-        """Keywords with surrounding whitespace are trimmed."""
-        detector = self.TriggerDetector(
-            keywords=["  总结  "],
-            bot_display_name="小助手",
-        )
-        self.assertIn("总结", detector.keywords)
-        self.assertTrue(
-            detector.is_trigger("总结", is_at_mentioned=False,
-                               sender_name="user")
-        )
-
-    def test_chinese_keyword_match(self):
-        """Chinese keywords match correctly."""
-        detector = self.TriggerDetector(
-            keywords=["说了啥", "发生了什么", "聊天总结"],
-            bot_display_name="小助手",
-        )
-        self.assertTrue(
-            detector.is_trigger("前面说了啥",
-                               is_at_mentioned=False, sender_name="user")
-        )
-        self.assertTrue(
-            detector.is_trigger("发生了什么我不知道的事",
-                               is_at_mentioned=False, sender_name="user")
-        )
-
-    def test_partial_word_boundary_match(self):
-        """Keyword matches inside a longer word (substring match)."""
-        detector = self.TriggerDetector(
-            keywords=["help"],
-            bot_display_name="小助手",
-        )
-        self.assertTrue(
-            detector.is_trigger("helpless situation",
-                               is_at_mentioned=False, sender_name="user")
-        )
-
-    def test_special_characters_in_keyword(self):
-        """Keywords with special characters still match."""
-        detector = self.TriggerDetector(
-            keywords=["@bot", "what's up"],
-            bot_display_name="小助手",
-        )
-        self.assertTrue(
-            detector.is_trigger("hey @bot come here",
-                               is_at_mentioned=False, sender_name="user")
-        )
-
-    def test_bot_name_as_keyword_is_just_string_match(self):
-        """Having the bot name as a keyword is just a string match,
-        not @-semantics."""
-        detector = self.TriggerDetector(
-            keywords=["小助手"],
-            bot_display_name="小助手",
-        )
-        self.assertTrue(
-            detector.is_trigger("小助手在不",
-                               is_at_mentioned=False, sender_name="user")
-        )
-
-
 # ======================================================================
 #  Web API endpoint handler tests
 # ======================================================================
@@ -734,9 +393,7 @@ class ServerStatusTests(unittest.TestCase):
         snap = self.status.snapshot()
         expected_fields = {
             "running", "uptime_sec", "messages_processed",
-            "wechat_backend", "ai_backend", "db_ok",
-            "last_api_call_sec_ago", "last_api_call_time",
-            "timestamp", "error",
+            "wechat_backend", "db_ok", "timestamp", "error",
         }
         self.assertEqual(set(snap.keys()), expected_fields)
 
@@ -747,9 +404,8 @@ class ServerStatusTests(unittest.TestCase):
         self.assertEqual(snap["uptime_sec"], 0)
         self.assertEqual(snap["messages_processed"], 0)
         self.assertEqual(snap["wechat_backend"], "")
-        self.assertEqual(snap["ai_backend"], "")
         self.assertFalse(snap["db_ok"])
-        self.assertEqual(snap["last_api_call_sec_ago"], -1)
+        self.assertEqual(snap["error"], "")
 
     def test_update_changes_fields(self):
         """update() sets fields and updates timestamp."""
@@ -783,7 +439,7 @@ class ServerStatusTests(unittest.TestCase):
         self.status.update(running=True)
         snap = self.status.snapshot()
         self.assertTrue(snap["running"])
-        self.assertEqual(snap["ai_backend"], "")
+        self.assertEqual(snap["wechat_backend"], "")
 
 
 # ---------------------------------------------------------------------------
@@ -936,7 +592,7 @@ class ApiStatusEndpointTests(unittest.TestCase):
     def test_status_returns_json_with_expected_fields(self):
         """GET /api/status returns 200 with JSON containing key fields."""
         from src.web.server import _status
-        _status.update(running=False, ai_backend="claude")
+        _status.update(running=False, wechat_backend="wcdb")
         handler, sock = _build_handler("/api/status")
         response = sock.get_response_text()
         self.assertIn("200", response.splitlines()[0])
@@ -946,7 +602,8 @@ class ApiStatusEndpointTests(unittest.TestCase):
         body = json.loads(parts[1])
         self.assertIn("running", body)
         self.assertIn("messages_processed", body)
-        self.assertIn("ai_backend", body)
+        self.assertIn("wechat_backend", body)
+        self.assertNotIn("ai_backend", body)
         self.assertIn("error", body)
 
     def test_status_when_bot_stopped(self):
@@ -1043,8 +700,12 @@ class ApiConfigEndpointTests(unittest.TestCase):
             body = json.loads(parts[1])
             self.assertTrue(body["ok"])
             config = body["config"]
-            self.assertEqual(config["ai_backend"], "deepseek")
             self.assertEqual(config["wechat_backend"], "wcdb")
+            self.assertEqual(config["wechat_groups_list"], [])
+            self.assertFalse(config["private_chat_enabled"])
+            for gone in ("ai_backend", "deepseek_api_key", "chat_persona_profile", "fun_enabled",
+                         "proactive_enabled", "trigger_keywords", "feishu_export_enabled", "todo_enabled"):
+                self.assertNotIn(gone, config)
 
     def test_load_config_reads_env_values(self):
         """GET /api/load-config reads values from .env file."""
@@ -1053,72 +714,23 @@ class ApiConfigEndpointTests(unittest.TestCase):
             fake_env.exists.return_value = True
             fake_env.read_text.return_value = (
                 "AI_BACKEND=claude\n"
-                "DEEPSEEK_BASE_URL=https://proxy.example.com/v1\n"
-                "OPENAI_MODEL=gpt-test\n"
-                "OPENAI_BASE_URL=https://openai-proxy.example.com/v1\n"
-                "ANTHROPIC_BASE_URL=https://claude-proxy.example.com\n"
                 "BOT_DISPLAY_NAME=MyBot\n"
-                "FUN_ENABLED=false\n"
+                "WECHAT_GROUPS=%E6%B5%8B%E8%AF%95%2C%E7%BE%A4,dev\n"
+                "PRIVATE_CHAT_ENABLED=true\n"
+                "MESSAGE_BURST_MAX_CHARS=120\n"
+                "VOICE_OPENAI_API_KEY=sk-voice-secret-1234\n"
             )
             mock_find.return_value = fake_env
             handler, sock = _build_handler("/api/load-config")
             parts = sock.get_response_text().split("\r\n\r\n", 1)
             body = json.loads(parts[1])
             config = body["config"]
-            self.assertEqual(config["ai_backend"], "claude")
-            self.assertEqual(config["deepseek_base_url"], "https://proxy.example.com/v1")
-            self.assertEqual(config["openai_model"], "gpt-test")
-            self.assertEqual(config["openai_base_url"], "https://openai-proxy.example.com/v1")
-            self.assertEqual(config["anthropic_base_url"], "https://claude-proxy.example.com")
             self.assertEqual(config["bot_display_name"], "MyBot")
-            self.assertFalse(config["fun_enabled"])
-
-    def test_load_config_reads_feishu_export_values(self):
-        """GET /api/load-config reads Feishu export settings from .env."""
-        with patch("src.web.server._find_or_create_env") as mock_find:
-            fake_env = MagicMock()
-            fake_env.exists.return_value = True
-            fake_env.read_text.return_value = (
-                "FEISHU_EXPORT_ENABLED=true\n"
-                "FEISHU_APP_ID=cli_test\n"
-                "FEISHU_APP_SECRET=secret_test\n"
-                "FEISHU_EXPORT_MODE=knowledge\n"
-                "FEISHU_EXPORT_WINDOW_HOURS=6\n"
-                "FEISHU_AUTO_SYNC_ENABLED=true\n"
-                "FEISHU_AUTO_SYNC_MIN_MESSAGES=7\n"
-                "FEISHU_AUTO_SYNC_COOLDOWN_SEC=900\n"
-                "FEISHU_KNOWLEDGE_BASE_NAME=webot 自动知识库\n"
-                "FEISHU_KNOWLEDGE_FOLDER_TOKEN=fld_knowledge\n"
-                "FEISHU_EXPORT_TRIGGER_KEYWORDS=同步到飞书,导出到飞书\n"
-                "FEISHU_SPREADSHEET_TOKEN=sht_test\n"
-                "FEISHU_SPREADSHEET_RANGE=Sheet1!A:H\n"
-                "FEISHU_BITABLE_APP_TOKEN=base_test\n"
-                "FEISHU_BITABLE_TABLE_ID=tbl_test\n"
-                "FEISHU_DOC_FOLDER_TOKEN=fld_test\n"
-            )
-            mock_find.return_value = fake_env
-
-            handler, sock = _build_handler("/api/load-config")
-            parts = sock.get_response_text().split("\r\n\r\n", 1)
-            body = json.loads(parts[1])
-
-        config = body["config"]
-        self.assertTrue(config["feishu_export_enabled"])
-        self.assertEqual(config["feishu_app_id"], "cli_test")
-        self.assertEqual(config["feishu_app_secret"], "secr***test")
-        self.assertEqual(config["feishu_export_mode"], "knowledge")
-        self.assertEqual(config["feishu_export_window_hours"], 6)
-        self.assertTrue(config["feishu_auto_sync_enabled"])
-        self.assertEqual(config["feishu_auto_sync_min_messages"], 7)
-        self.assertEqual(config["feishu_auto_sync_cooldown_sec"], 900)
-        self.assertEqual(config["feishu_knowledge_base_name"], "webot 自动知识库")
-        self.assertEqual(config["feishu_knowledge_folder_token"], "fld_knowledge")
-        self.assertEqual(config["feishu_export_trigger_keywords"], ["同步到飞书", "导出到飞书"])
-        self.assertEqual(config["feishu_spreadsheet_token"], "sht_test")
-        self.assertEqual(config["feishu_spreadsheet_range"], "Sheet1!A:H")
-        self.assertEqual(config["feishu_bitable_app_token"], "base_test")
-        self.assertEqual(config["feishu_bitable_table_id"], "tbl_test")
-        self.assertEqual(config["feishu_doc_folder_token"], "fld_test")
+            self.assertEqual(config["wechat_groups_list"], ["测试,群", "dev"])
+            self.assertTrue(config["private_chat_enabled"])
+            self.assertEqual(config["message_burst_max_chars"], 120)
+            self.assertEqual(config["voice_openai_api_key"], "sk-v***1234")
+            self.assertNotIn("ai_backend", config)
 
     def test_load_config_empty_env_returns_defaults(self):
         """GET /api/load-config with empty env returns defaults."""
@@ -1139,7 +751,7 @@ class ApiConfigEndpointTests(unittest.TestCase):
             fake_env = MagicMock()
             fake_env.exists.return_value = True
             fake_env.read_text.return_value = (
-                "AI_BACKEND=deepseek\n"
+                "WECHAT_BACKEND=wcdb\n"
                 "BOT_DISPLAY_NAME=oldname\n"
             )
             fake_env.with_suffix.return_value = fake_env
@@ -1147,7 +759,7 @@ class ApiConfigEndpointTests(unittest.TestCase):
             with patch("os.replace") as mock_replace:
                 body = json.dumps({
                     "bot_display_name": "newname",
-                    "ai_backend": "claude",
+                    "wechat_backend": "mac_hybrid",
                 })
                 handler, sock = _build_handler(
                     "/api/config", method="POST",
@@ -1158,7 +770,7 @@ class ApiConfigEndpointTests(unittest.TestCase):
                 result = json.loads(parts[1])
                 self.assertTrue(result["ok"])
                 self.assertIn("BOT_DISPLAY_NAME", result["saved"])
-                self.assertIn("AI_BACKEND", result["saved"])
+                self.assertIn("WECHAT_BACKEND", result["saved"])
                 self.assertTrue(result["requires_restart"])
 
     def test_save_config_adds_new_keys(self):
@@ -1193,10 +805,11 @@ class ApiConfigEndpointTests(unittest.TestCase):
             # -- Save --
             save_body = json.dumps({
                 "deepseek_api_key": "new-key",
-                "deepseek_base_url": "https://proxy.example.com/v1",
-                "anthropic_base_url": "https://claude-proxy.example.com",
+                "fun_enabled": True,
                 "bot_display_name": "new-name",
-                "fun_enabled": False,
+                "private_chat_enabled": True,
+                "private_chats": "wxid_a",
+                "message_burst_window_sec": 3.5,
             }).encode()
             with patch("src.web.server._find_or_create_env",
                        return_value=tmp_env):
@@ -1212,12 +825,13 @@ class ApiConfigEndpointTests(unittest.TestCase):
 
             # -- Read back --
             saved_content = tmp_env.read_text(encoding="utf-8")
-            self.assertIn("DEEPSEEK_API_KEY=new-key", saved_content)
-            self.assertIn("DEEPSEEK_BASE_URL=https://proxy.example.com/v1", saved_content)
-            self.assertIn("ANTHROPIC_BASE_URL=https://claude-proxy.example.com", saved_content)
             self.assertIn("BOT_DISPLAY_NAME=new-name", saved_content)
-            self.assertIn("FUN_ENABLED=false", saved_content)
-            self.assertIn("AI_BACKEND=deepseek", saved_content)
+            self.assertIn("PRIVATE_CHAT_ENABLED=true", saved_content)
+            self.assertIn("PRIVATE_CHATS=wxid_a", saved_content)
+            self.assertIn("MESSAGE_BURST_WINDOW_SEC=3.5", saved_content)
+            # chat-bot keys are neither written nor changed: an old line stays as it was
+            self.assertIn("DEEPSEEK_API_KEY=old-key", saved_content)
+            self.assertNotIn("FUN_ENABLED", saved_content)
         finally:
             tmp_env.unlink(missing_ok=True)
             for f in tmp_dir.glob("*"):
@@ -1229,19 +843,11 @@ class ApiConfigEndpointTests(unittest.TestCase):
         tmp_dir = Path(tempfile.mkdtemp())
         tmp_env = tmp_dir / ".env"
         tmp_env.write_text(
-            "DEEPSEEK_API_KEY=sk-real-deepseek-secret\n"
-            "OPENAI_API_KEY=sk-real-openai-secret\n"
-            "ANTHROPIC_API_KEY=sk-ant-real-secret\n"
-            "VOICE_OPENAI_API_KEY=sk-voice-real-secret\n"
-            "FEISHU_APP_SECRET=feishu-real-secret\n",
+            "VOICE_OPENAI_API_KEY=sk-voice-real-secret\n",
             encoding="utf-8",
         )
         save_body = json.dumps({
-            "deepseek_api_key": "sk-r***cret",
-            "openai_api_key": "sk-o***cret",
-            "anthropic_api_key": "sk-a***cret",
             "voice_openai_api_key": "sk-v***cret",
-            "feishu_app_secret": "feis***cret",
             "bot_display_name": "new-name",
         }).encode()
         try:
@@ -1258,23 +864,11 @@ class ApiConfigEndpointTests(unittest.TestCase):
                 parts = sock.get_response_text().split("\r\n\r\n", 1)
                 result = json.loads(parts[1])
                 self.assertTrue(result["ok"])
-                self.assertEqual(os.environ["DEEPSEEK_API_KEY"], "sk-real-deepseek-secret")
-                self.assertEqual(os.environ["OPENAI_API_KEY"], "sk-real-openai-secret")
-                self.assertEqual(os.environ["ANTHROPIC_API_KEY"], "sk-ant-real-secret")
                 self.assertEqual(os.environ["VOICE_OPENAI_API_KEY"], "sk-voice-real-secret")
-                self.assertEqual(os.environ["FEISHU_APP_SECRET"], "feishu-real-secret")
 
             saved_content = tmp_env.read_text(encoding="utf-8")
-            self.assertIn("DEEPSEEK_API_KEY=sk-real-deepseek-secret", saved_content)
-            self.assertIn("OPENAI_API_KEY=sk-real-openai-secret", saved_content)
-            self.assertIn("ANTHROPIC_API_KEY=sk-ant-real-secret", saved_content)
             self.assertIn("VOICE_OPENAI_API_KEY=sk-voice-real-secret", saved_content)
-            self.assertIn("FEISHU_APP_SECRET=feishu-real-secret", saved_content)
-            self.assertNotIn("sk-r***cret", saved_content)
-            self.assertNotIn("sk-o***cret", saved_content)
-            self.assertNotIn("sk-a***cret", saved_content)
             self.assertNotIn("sk-v***cret", saved_content)
-            self.assertNotIn("feis***cret", saved_content)
         finally:
             tmp_env.unlink(missing_ok=True)
             for f in tmp_dir.glob("*"):
@@ -1285,12 +879,11 @@ class ApiConfigEndpointTests(unittest.TestCase):
         """POST /api/config/import keeps existing secrets when import has masks."""
         tmp_dir = Path(tempfile.mkdtemp())
         tmp_env = tmp_dir / ".env"
-        tmp_env.write_text("DEEPSEEK_API_KEY=sk-real-deepseek-secret\n", encoding="utf-8")
+        tmp_env.write_text("VOICE_OPENAI_API_KEY=sk-voice-real-secret\n", encoding="utf-8")
         import_body = json.dumps({
-            "ai_backend": "deepseek",
-            "deepseek_model": "deepseek-v4-flash",
+            "ai_backend": "deepseek",                 # an old export: its chat keys are ignored
             "wechat_backend": "wcdb",
-            "deepseek_api_key": "sk-r***cret",
+            "voice_openai_api_key": "sk-v***cret",
         }).encode()
         try:
             with (
@@ -1306,84 +899,12 @@ class ApiConfigEndpointTests(unittest.TestCase):
                 parts = sock.get_response_text().split("\r\n\r\n", 1)
                 result = json.loads(parts[1])
                 self.assertTrue(result["ok"])
-                self.assertEqual(os.environ["DEEPSEEK_API_KEY"], "sk-real-deepseek-secret")
+                self.assertEqual(os.environ["VOICE_OPENAI_API_KEY"], "sk-voice-real-secret")
 
             saved_content = tmp_env.read_text(encoding="utf-8")
-            self.assertIn("DEEPSEEK_API_KEY=sk-real-deepseek-secret", saved_content)
-            self.assertNotIn("sk-r***cret", saved_content)
-        finally:
-            tmp_env.unlink(missing_ok=True)
-            for f in tmp_dir.glob("*"):
-                f.unlink(missing_ok=True)
-            tmp_dir.rmdir()
-
-    def test_save_config_roundtrip_feishu_export_values(self):
-        """POST /api/config persists Feishu settings and load-config reads them."""
-        tmp_dir = Path(tempfile.mkdtemp())
-        tmp_env = tmp_dir / ".env"
-        tmp_env.write_text("AI_BACKEND=deepseek\n", encoding="utf-8")
-        try:
-            save_body = json.dumps({
-                "feishu_export_enabled": True,
-                "feishu_app_id": "cli_test",
-                "feishu_app_secret": "secret_test",
-                "feishu_export_mode": "knowledge",
-                "feishu_export_window_hours": 12,
-                "feishu_auto_sync_enabled": True,
-                "feishu_auto_sync_min_messages": 9,
-                "feishu_auto_sync_cooldown_sec": 1200,
-                "feishu_knowledge_base_name": "webot 群聊沉淀",
-                "feishu_knowledge_folder_token": "fld_knowledge",
-                "feishu_export_trigger_keywords": ["同步到飞书", "飞书沉淀"],
-                "feishu_spreadsheet_token": "sht_test",
-                "feishu_spreadsheet_range": "Sheet1!A:H",
-                "feishu_bitable_app_token": "base_test",
-                "feishu_bitable_table_id": "tbl_test",
-                "feishu_doc_folder_token": "fld_test",
-            }).encode()
-            with patch("src.web.server._find_or_create_env", return_value=tmp_env):
-                handler, sock = _build_handler(
-                    "/api/config", method="POST",
-                    body=save_body,
-                    headers={"Content-Type": "application/json",
-                             "Content-Length": str(len(save_body))},
-                )
-                parts = sock.get_response_text().split("\r\n\r\n", 1)
-                result = json.loads(parts[1])
-                self.assertTrue(result["ok"])
-
-            saved = tmp_env.read_text(encoding="utf-8")
-            self.assertIn("FEISHU_EXPORT_ENABLED=true", saved)
-            self.assertIn("FEISHU_APP_ID=cli_test", saved)
-            self.assertIn("FEISHU_APP_SECRET=secret_test", saved)
-            self.assertIn("FEISHU_EXPORT_MODE=knowledge", saved)
-            self.assertIn("FEISHU_EXPORT_WINDOW_HOURS=12", saved)
-            self.assertIn("FEISHU_AUTO_SYNC_ENABLED=true", saved)
-            self.assertIn("FEISHU_AUTO_SYNC_MIN_MESSAGES=9", saved)
-            self.assertIn("FEISHU_AUTO_SYNC_COOLDOWN_SEC=1200", saved)
-            self.assertIn("FEISHU_KNOWLEDGE_BASE_NAME=webot 群聊沉淀", saved)
-            self.assertIn("FEISHU_KNOWLEDGE_FOLDER_TOKEN=fld_knowledge", saved)
-            self.assertIn("FEISHU_EXPORT_TRIGGER_KEYWORDS=同步到飞书,飞书沉淀", saved)
-            self.assertIn("FEISHU_SPREADSHEET_TOKEN=sht_test", saved)
-            self.assertIn("FEISHU_SPREADSHEET_RANGE=Sheet1!A:H", saved)
-            self.assertIn("FEISHU_BITABLE_APP_TOKEN=base_test", saved)
-            self.assertIn("FEISHU_BITABLE_TABLE_ID=tbl_test", saved)
-            self.assertIn("FEISHU_DOC_FOLDER_TOKEN=fld_test", saved)
-
-            with patch("src.web.server._find_or_create_env", return_value=tmp_env):
-                handler, sock = _build_handler("/api/load-config")
-                parts = sock.get_response_text().split("\r\n\r\n", 1)
-                body = json.loads(parts[1])
-
-            config = body["config"]
-            self.assertTrue(config["feishu_export_enabled"])
-            self.assertEqual(config["feishu_export_mode"], "knowledge")
-            self.assertTrue(config["feishu_auto_sync_enabled"])
-            self.assertEqual(config["feishu_auto_sync_min_messages"], 9)
-            self.assertEqual(config["feishu_auto_sync_cooldown_sec"], 1200)
-            self.assertEqual(config["feishu_knowledge_base_name"], "webot 群聊沉淀")
-            self.assertEqual(config["feishu_knowledge_folder_token"], "fld_knowledge")
-            self.assertEqual(config["feishu_export_trigger_keywords"], ["同步到飞书", "飞书沉淀"])
+            self.assertIn("VOICE_OPENAI_API_KEY=sk-voice-real-secret", saved_content)
+            self.assertNotIn("sk-v***cret", saved_content)
+            self.assertNotIn("AI_BACKEND", saved_content)
         finally:
             tmp_env.unlink(missing_ok=True)
             for f in tmp_dir.glob("*"):
@@ -1395,17 +916,14 @@ class ApiConfigEndpointTests(unittest.TestCase):
         tmp_dir = Path(tempfile.mkdtemp())
         tmp_env = tmp_dir / ".env"
         tmp_env.write_text(
-            "AI_BACKEND=deepseek\n"
-            "DEEPSEEK_API_KEY=old-key\n"
-            "DEEPSEEK_BASE_URL=https://api.deepseek.com\n"
-            "DEEPSEEK_MODEL=old-model\n",
+            "BOT_DISPLAY_NAME=old\n"
+            "PRIVATE_CHAT_ENABLED=false\n",
             encoding="utf-8",
         )
         save_body = json.dumps({
-            "ai_backend": "deepseek",
-            "deepseek_api_key": "new-key",
-            "deepseek_base_url": "https://proxy.example.com/v1",
-            "deepseek_model": "new-model",
+            "bot_display_name": "商务号",
+            "private_chat_enabled": True,
+            "wechat_groups": "dev",
         }).encode()
         try:
             with (
@@ -1422,12 +940,9 @@ class ApiConfigEndpointTests(unittest.TestCase):
                 parts = sock.get_response_text().split("\r\n\r\n", 1)
                 result = json.loads(parts[1])
                 self.assertTrue(result["ok"])
-                self.assertEqual(os.environ["DEEPSEEK_API_KEY"], "new-key")
-                self.assertEqual(
-                    os.environ["DEEPSEEK_BASE_URL"],
-                    "https://proxy.example.com/v1",
-                )
-                self.assertEqual(os.environ["DEEPSEEK_MODEL"], "new-model")
+                self.assertEqual(os.environ["BOT_DISPLAY_NAME"], "商务号")
+                self.assertEqual(os.environ["PRIVATE_CHAT_ENABLED"], "true")
+                self.assertEqual(os.environ["WECHAT_GROUPS"], "dev")
         finally:
             tmp_env.unlink(missing_ok=True)
             for f in tmp_dir.glob("*"):
@@ -1468,8 +983,8 @@ class ApiConfigEndpointTests(unittest.TestCase):
         tmp_dir = Path(tempfile.mkdtemp())
         tmp_env = tmp_dir / ".env"
         save_body = json.dumps({
-            "ai_backend": "claude",
-            "anthropic_api_key": "sk-ant-key",
+            "wechat_backend": "wcdb",
+            "bot_display_name": "商务号",
         }).encode()
         try:
             tmp_env.write_text("", encoding="utf-8")
@@ -1485,8 +1000,8 @@ class ApiConfigEndpointTests(unittest.TestCase):
                 result = json.loads(parts[1])
                 self.assertTrue(result["ok"])
             saved = tmp_env.read_text(encoding="utf-8")
-            self.assertIn("AI_BACKEND=claude", saved)
-            self.assertIn("ANTHROPIC_API_KEY=sk-ant-key", saved)
+            self.assertIn("WECHAT_BACKEND=wcdb", saved)
+            self.assertIn("BOT_DISPLAY_NAME=商务号", saved)
         finally:
             tmp_env.unlink(missing_ok=True)
             for f in tmp_dir.glob("*"):
@@ -1751,47 +1266,27 @@ class OnboardingApiTests(unittest.TestCase):
         result = json.loads(parts[1])
         self.assertTrue(result["ok"])
 
-    def test_onboarding_step3_posts_data(self):
-        """POST /api/onboarding/step3 accepts AI backend config."""
-        post_body = json.dumps({
-            "ai_backend": "deepseek",
-            "deepseek_api_key": "sk-test",
-            "deepseek_model": "deepseek-v4-flash",
-        })
-        handler, sock = _build_handler(
-            "/api/onboarding/step3", method="POST",
-            body=post_body.encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        parts = sock.get_response_text().split("\r\n\r\n", 1)
-        result = json.loads(parts[1])
-        self.assertTrue(result["ok"])
+    def test_onboarding_step3_writes_the_env_and_returns_ok(self):
+        """POST /api/onboarding/step3 (the last step) takes the private chats and writes .env."""
+        with (
+            patch("src.web.server._find_or_create_env") as mock_find,
+            patch("src.web.server._write_onboarding_to_env") as write,
+        ):
+            mock_find.return_value = MagicMock()
+            post_body = json.dumps({"private_chat_enabled": True, "private_chats": "wxid_me"})
+            handler, sock = _build_handler(
+                "/api/onboarding/step3", method="POST",
+                body=post_body.encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            parts = sock.get_response_text().split("\r\n\r\n", 1)
+            result = json.loads(parts[1])
+            self.assertTrue(result["ok"])
+            write.assert_called_once()
 
-    def test_onboarding_step4_posts_data(self):
-        """POST /api/onboarding/step4 writes to .env and returns ok."""
-        with patch("src.web.server._find_or_create_env") as mock_find:
-            fake_env = MagicMock()
-            fake_env.exists.return_value = True
-            fake_env.with_suffix.return_value = fake_env
-            mock_find.return_value = fake_env
-            with (
-                patch("os.replace") as mock_replace,
-                patch("src.web.server._write_onboarding_to_env"),
-            ):
-                post_body = json.dumps({
-                    "fun_enabled": True,
-                    "proactive_enabled": False,
-                    "sticky_mention_enabled": True,
-                })
-                handler, sock = _build_handler(
-                    "/api/onboarding/step4", method="POST",
-                    body=post_body.encode(),
-                    headers={"Content-Type": "application/json"},
-                )
-                parts = sock.get_response_text().split("\r\n\r\n", 1)
-                result = json.loads(parts[1])
-                self.assertTrue(result["ok"])
-
+    def test_there_is_no_fourth_onboarding_step(self):
+        handler, sock = _build_handler("/api/onboarding/step4", method="POST", body=b"{}")
+        self.assertIn("405", sock.get_response_text().splitlines()[0])
 
 # ---------------------------------------------------------------------------
 # Cross-site and DNS-rebinding protection (the console has no login)

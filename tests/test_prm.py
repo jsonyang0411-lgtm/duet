@@ -529,9 +529,9 @@ def test_message_text_names_pictures_files_voice_and_stickers():
 
 # ── the route ─────────────────────────────────────────────────────────────
 
-def test_the_prm_step_sits_between_the_relay_and_relay_only():
+def test_the_prm_step_sits_between_the_relay_and_the_admin_commands():
     names = [step.name for step in S.ROUTE_STEPS]
-    assert names.index("claude_relay") < names.index("prm") < names.index("relay_only")
+    assert names.index("claude_relay") < names.index("prm") < names.index("admin_command")
 
 
 class Trace:
@@ -620,8 +620,7 @@ def test_the_backend_reads_a_registered_creator_outside_private_chats(monkeypatc
                 {"username": "wxid_creator01", "displayName": "小美"},
                 {"username": "wxid_friend", "displayName": "朋友"}]
     backend = WcdbBackend(bot_display_name="机器人", groups=["*"],
-                          config=BotConfig(private_chat_enabled=True, private_chats="wxid_admin",
-                                           chat_persona_profile="custom"))
+                          config=BotConfig(private_chat_enabled=True, private_chats="wxid_admin"))
     backend._client = FakeClient(sessions)
     backend.set_private_filter(lambda username: username in {"wxid_creator01", "mei_custom"})
     backend._resolve_groups()
@@ -642,7 +641,7 @@ def test_without_prm_the_backend_writes_no_private_names(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(WcdbBackend, "_save_group_names", staticmethod(lambda chatrooms: None))
     backend = WcdbBackend(bot_display_name="机器人", groups=["*"],
-                          config=BotConfig(private_chat_enabled=True, chat_persona_profile="custom"))
+                          config=BotConfig(private_chat_enabled=True))
     backend._client = FakeClient([{"username": "wxid_friend", "displayName": "朋友"}])
     backend._resolve_groups()
     assert backend._talker_ids.get("朋友") == "wxid_friend"                # PRIVATE_CHATS="*" as before
@@ -651,6 +650,6 @@ def test_without_prm_the_backend_writes_no_private_names(monkeypatch, tmp_path):
 
 def test_a_broken_filter_reads_nothing_extra():
     backend = WcdbBackend(bot_display_name="机器人", groups=["*"],
-                          config=BotConfig(private_chat_enabled=True, chat_persona_profile="custom"))
+                          config=BotConfig(private_chat_enabled=True))
     backend.set_private_filter(lambda username: 1 / 0)
     assert backend._wants_private("wxid_creator01") is False

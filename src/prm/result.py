@@ -4,7 +4,12 @@ The worker asks Claude for one JSON object (``--json-schema``)::
 
     {"intent": "…", "slots": {"收件人": "…"}, "stage_proposal": "address",
      "message_kind": "address_confirm", "reply_draft": "…", "attachments_to_send": ["assets/…"],
-     "needs_attention": false, "reason": "…"}
+     "needs_attention": false, "reason": "…",
+     "platform_action": {"action": "dy.designated_commission", "item_id": "…", …}}
+
+``platform_action`` is optional (platforms.py): the Mac checks it and previews it, and
+hands back ``platform``, its verdict, in its place; a draft that names an action the Mac
+did not preview carries the verdict ``unavailable`` and cannot be executed.
 
 This side is where it is trusted or not: ``parse_draft`` validates instead of
 repairing; anything it cannot use raises ``DraftError`` and nothing is drafted.
@@ -15,7 +20,9 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from typing import Optional
 
+from . import platforms
 from .store import STAGES
 
 # The kinds of message (8.1 of the assessment): they decide later what may go out unreviewed.
@@ -41,6 +48,7 @@ SCHEMA = {
         "attachments_to_send": {"type": "array", "items": {"type": "string"}},
         "needs_attention": {"type": "boolean"},
         "reason": {"type": "string"},
+        "platform_action": platforms.ACTION_SCHEMA,
     },
     "required": ["intent", "slots", "stage_proposal", "message_kind", "reply_draft",
                  "attachments_to_send", "needs_attention", "reason"],
@@ -66,6 +74,8 @@ class Draft:
     attachments_to_send: list = field(default_factory=list)
     needs_attention: bool = False
     reason: str = ""
+    # The Mac's preview of the draft's platform action (platforms.check_block), or None.
+    platform: Optional[dict] = None
 
 
 def _text(value, limit: int) -> str:
@@ -108,6 +118,15 @@ def parse_draft(raw: str) -> Draft:
     draft = _text(data.get("reply_draft"), MAX_DRAFT_CHARS + 1)
     if len(draft) > MAX_DRAFT_CHARS:
         raise DraftError("draft_too_long")
+    platform = None
+    if data.get("platform") is not None:
+        try:
+            platform = platforms.check_block(data["platform"])
+        except platforms.ActionError as e:
+            raise DraftError("bad_platform", e.code) from None
+    elif data.get("platform_action") is not None:
+        # An action the Mac did not preview (an older worker, or one without platforms).
+        platform = platforms.unpreviewed_block(data["platform_action"])
     return Draft(
         intent=_text(data.get("intent"), 200),
         slots=clean_slots,
@@ -117,4 +136,5 @@ def parse_draft(raw: str) -> Draft:
         attachments_to_send=[str(f).strip()[:200] for f in files if str(f).strip()],
         needs_attention=needs,
         reason=_text(data.get("reason"), 300),
+        platform=platform,
     )

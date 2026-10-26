@@ -27,9 +27,8 @@ from .wcdb_client import WcdbNativeClient
 from .quiet_send import QuietSendSettings
 from .window_controller import WeChatWindowController
 from .helpers import DedupSet, format_nontext_content, normalize_msg_type
-from src.persona import PERSONA_PROFILE_YANG_YUJING
 from src.pii import mask_pii
-from src.vision import IMAGE_MSG_TYPES, find_existing_media_path_from_message
+from src.wechat.media import IMAGE_MSG_TYPES, find_existing_media_path_from_message
 from ..send.bubbles import get_sender
 from ..send.queue import SendQueue
 
@@ -317,25 +316,7 @@ class WcdbBackend(AbstractWeChatBackend):
                  config=None,
                  ocr=None):
         self._bot_name = bot_display_name
-        yang_target_groups = []
-        for attribute in (
-            "yang_yujing_group_name",
-            "yang_yujing_always_reply_group_name",
-        ):
-            val = str(getattr(config, attribute, "")).strip()
-            for group in [g.strip() for g in val.split(",") if g.strip()]:
-                if group and group not in yang_target_groups:
-                    yang_target_groups.append(group)
-        if (
-            getattr(config, "chat_persona_profile", "")
-            == PERSONA_PROFILE_YANG_YUJING
-            and yang_target_groups
-        ):
-            # Yang Yujing only reads its configured full-feed groups. This
-            # also avoids eagerly querying member metadata for unrelated groups.
-            self._groups = yang_target_groups
-        else:
-            self._groups = groups or []
+        self._groups = groups or []
         self._poll_sec = poll_sec
         self._store = store  # MessageStore fallback for name resolution
         self._running = False
@@ -373,8 +354,8 @@ class WcdbBackend(AbstractWeChatBackend):
         # must not interleave, but it never touches the DLL: it has its own
         # lock so a reply being typed no longer stalls message polling.
         self._window_lock = threading.Lock()
-        # Callback thread pool — fire-and-forget AI calls so the poll loop
-        # never blocks on a slow summarization.
+        # Callback thread pool — fire-and-forget route callbacks so the poll
+        # loop never blocks on a slow send.
         self._pool: concurrent.futures.ThreadPoolExecutor | None = None
         # Voice recognition pipeline (lazy-init when voice_asr_enabled)
         self._voice: Optional[object] = None
@@ -737,7 +718,7 @@ class WcdbBackend(AbstractWeChatBackend):
         self._groups = list(self._talker_ids.keys())
 
         # Persist chat_id -> display_name so the web UI can show
-        # human-readable group names in the nickname dropdown.
+        # human-readable group names in the console's group picker.
         if all_chatrooms:
             self._save_group_names(all_chatrooms)
         if private_seen and self._private_filter is not None:
@@ -951,9 +932,7 @@ class WcdbBackend(AbstractWeChatBackend):
             return None
         talker = self._talker_ids[group_name]
         timestamp = int(time.time())
-        bot_names = {self._bot_name, "假企鹅", "qier"}
-        for attribute in ("bot_display_name", "chat_persona_name"):
-            bot_names.add(getattr(self._config, attribute, None) or "")
+        bot_names = {self._bot_name, getattr(self._config, "bot_display_name", None) or ""}
         bot_names.discard("")
         digest = hashlib.md5(f"ocr|{talker}|{text}|{timestamp}".encode("utf-8")).hexdigest()
         return group_name, talker, {
@@ -1164,8 +1143,8 @@ class WcdbBackend(AbstractWeChatBackend):
                     callback: MessageCallback) -> None:
         """Fetch messages for one group and dispatch new ones.
 
-        AI-triggering callbacks are submitted to the thread pool so slow
-        summarization in one group never blocks polling of other groups.
+        Route callbacks are submitted to the thread pool so a slow send in
+        one chat never blocks polling of the other chats.
         """
         with self._client_lock:
             messages = self._client.get_messages(talker=talker, limit=50)
@@ -1195,8 +1174,7 @@ class WcdbBackend(AbstractWeChatBackend):
                 continue              # the backlog of an OCR stretch: seen, not answered
 
             # Skip own messages.  With the account's wxid known that is the
-            # whole test: a member whose display name is the bot's (a persona
-            # named after a real member, round 4b: the member himself) must
+            # whole test: a member whose display name is the account's must
             # still be heard.  The name is only a fallback without the wxid.
             sender_id = standardized.get("sender_id", "")
             my_wxid = self._client._config.get("myWxid", "")
@@ -1213,41 +1191,9 @@ class WcdbBackend(AbstractWeChatBackend):
 
             self._trim_dedup()
 
-            is_yang_full_feed = self._uses_yang_yujing_full_feed(standardized)
-            # Yang Yujing's full-feed groups still receive every conversational
-            # turn, but a rapid same-sender run is one turn rather than one AI
-            # call per WeChat bubble.  Only this mode also coalesces the image
-            # and sticker placeholders around that text.
-            ready_messages = self._burst.push(
-                standardized,
-                allow_nontext=is_yang_full_feed,
-            )
-            for ready in ready_messages:
+            # A rapid same-sender run of text bubbles is one turn.
+            for ready in self._burst.push(standardized):
                 self._dispatch_message(ready, callback)
-
-    def _uses_yang_yujing_full_feed(self, standardized: dict) -> bool:
-        """Whether a message uses Yang Yujing full-feed burst behavior."""
-        config = self._config
-        if (
-            getattr(config, "chat_persona_profile", "")
-            != PERSONA_PROFILE_YANG_YUJING
-        ):
-            return False
-        target_groups = set()
-        for attribute in (
-            "yang_yujing_group_name",
-            "yang_yujing_always_reply_group_name",
-        ):
-            val = str(getattr(config, attribute, "")).strip()
-            for g in val.split(","):
-                if g.strip():
-                    target_groups.add(g.strip())
-        if not target_groups:
-            return False
-        return bool(target_groups & {
-            str(standardized.get("group_name", "")).strip(),
-            str(standardized.get("chat_id", "")).strip(),
-        })
 
     def _flush_due_bursts(self, callback: MessageCallback) -> None:
         """Dispatch message bursts that have gone quiet long enough."""
@@ -1273,7 +1219,7 @@ class WcdbBackend(AbstractWeChatBackend):
                 standardized.get("_burst_count"),
             )
 
-        # Fire-and-forget: callback (potentially AI call) + send run in
+        # Fire-and-forget: callback (the route) + send run in
         # a thread pool worker so the poll loop continues immediately.
         if self._pool:
             self._pool.submit(
@@ -1368,7 +1314,8 @@ class WcdbBackend(AbstractWeChatBackend):
             return self._window.send_file_to_chat(group_name, path)
 
     def _capture_media_screenshot(self, group_name: str) -> str:
-        """Serialize vision capture with normal WeChat navigation/sending."""
+        """The relay's screenshot of a picture it cannot find on disk, serialized with
+        normal WeChat navigation/sending."""
         with self._window_lock:
             return self._window.capture_chat_media(group_name)
 
@@ -1537,7 +1484,7 @@ class WcdbBackend(AbstractWeChatBackend):
                 return None
 
         # ── System message handling ───────────────────────────────
-        # Extract "xxx joined the group" events → welcome feature.
+        # Extract "xxx joined the group" events (recorded; groups are never answered).
         # Pattern matches:
         #   "张三"加入了群聊                    → 张三
         #   "张三"通过扫描二维码加入了群聊      → 张三
@@ -1619,12 +1566,9 @@ class WcdbBackend(AbstractWeChatBackend):
             is_reply_to_bot = bool(quote_info and (quote_name_matches_bot or quote_id_matches_bot))
 
         # Detect @mention of bot
-        bot_names = {self._bot_name, "假企鹅", "qier"}
-        if hasattr(self, "_config") and self._config:
-            if getattr(self._config, "bot_display_name", None):
-                bot_names.add(self._config.bot_display_name)
-            if getattr(self._config, "chat_persona_name", None):
-                bot_names.add(self._config.chat_persona_name)
+        bot_names = {self._bot_name}
+        if getattr(self, "_config", None) is not None and getattr(self._config, "bot_display_name", None):
+            bot_names.add(self._config.bot_display_name)
         bot_names.discard("")
 
         is_at = bool(

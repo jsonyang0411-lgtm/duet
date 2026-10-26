@@ -39,7 +39,7 @@ class ConfigModuleImportTests(unittest.TestCase):
 
         self.assertIsInstance(PROJECT_ROOT, Path)
         self.assertTrue(PROJECT_ROOT.exists())
-        self.assertTrue(hasattr(BotConfig, "ai_backend"))
+        self.assertTrue(hasattr(BotConfig, "wechat_backend"))
 
 
 # ---------------------------------------------------------------------------
@@ -421,249 +421,68 @@ class IsOnboardingDoneTests(unittest.TestCase):
 class LoadConfigTests(unittest.TestCase):
     """Tests for load_config() with mocked environment variables."""
 
-    def test_load_config_with_minimal_valid_env(self):
-        """load_config() should succeed with the minimum required env vars."""
+    def test_load_config_needs_no_setting_at_all(self):
+        """There is no model: an empty environment is a valid configuration."""
         from src.config import load_config, BotConfig
 
-        with patch.dict(os.environ, {
-            "ANTHROPIC_API_KEY": "sk-ant-test-key",
-        }, clear=True):
-            config = load_config()
-            self.assertIsInstance(config, BotConfig)
-            self.assertEqual(config.ai_backend, "claude")
-            self.assertEqual(config.anthropic_api_key, "sk-ant-test-key")
-
-    def test_load_config_with_deepseek_backend(self):
-        """When AI_BACKEND=deepseek, DEEPSEEK_API_KEY is required."""
-        from src.config import load_config
-
-        with patch.dict(os.environ, {
-            "AI_BACKEND": "deepseek",
-            "DEEPSEEK_API_KEY": "sk-ds-test-key",
-        }, clear=True):
-            config = load_config()
-            self.assertEqual(config.ai_backend, "deepseek")
-            self.assertEqual(config.deepseek_api_key, "sk-ds-test-key")
-
-    def test_load_config_with_openai_backend(self):
-        """When AI_BACKEND=openai, OPENAI_API_KEY is required."""
-        from src.config import load_config
-
-        with patch.dict(os.environ, {
-            "AI_BACKEND": "openai",
-            "OPENAI_API_KEY": "sk-openai-test-key",
-            "OPENAI_MODEL": "gpt-test",
-            "OPENAI_BASE_URL": "https://proxy.example.com/v1",
-        }, clear=True):
-            config = load_config()
-            self.assertEqual(config.ai_backend, "openai")
-            self.assertEqual(config.openai_api_key, "sk-openai-test-key")
-            self.assertEqual(config.openai_model, "gpt-test")
-            self.assertEqual(config.openai_base_url, "https://proxy.example.com/v1")
-
-    def test_load_config_raises_when_api_key_missing_claude(self):
-        """load_config() with default (claude) backend and no API key → RuntimeError."""
-        from src.config import load_config
-
         with patch.dict(os.environ, {}, clear=True):
-            with self.assertRaises(RuntimeError) as ctx:
-                load_config()
-            self.assertIn("ANTHROPIC_API_KEY", str(ctx.exception))
+            config = load_config()
+        self.assertIsInstance(config, BotConfig)
+        self.assertEqual(config.wechat_backend, "wcdb")
+        self.assertEqual(config.wechat_groups, "*")
+        self.assertFalse(config.private_chat_enabled)
+        self.assertEqual(config.bot_display_name, "群聊小助手")
+        self.assertEqual(config.poll_interval_sec, 1.0)
+        self.assertEqual(config.dedup_window_sec, 60)
+        self.assertEqual((config.claude_relay, config.prm_copilot, config.prm_edge), ("off", "off", "off"))
 
-    def test_load_config_raises_when_api_key_missing_deepseek(self):
-        """load_config() with deepseek backend and no API key → RuntimeError."""
+    def test_old_chat_settings_are_ignored(self):
+        """An .env of the chat bot (AI keys, persona, proactive, ...) still loads; nothing of it is read."""
+        from src.config import load_config
+
+        env = {"AI_BACKEND": "nonsense", "CHAT_PERSONA_PROFILE": "nonsense", "CHUNK_SIZE": "5",
+               "STICKY_MENTION_TTL_SEC": "999", "PIPELINE_V2": "maybe", "MODEL_ROUTE": "x"}
+        with patch.dict(os.environ, env, clear=True):
+            config = load_config()
+        for name in ("ai_backend", "chat_persona_profile", "chunk_size", "sticky_mention_ttl_sec",
+                     "pipeline_v2", "model_route", "anthropic_api_key", "deepseek_api_key"):
+            self.assertFalse(hasattr(config, name), name)
+
+    def test_load_config_reads_the_chats(self):
+        """Groups and private chats are URL-encoded names; private chats are off unless asked for."""
         from src.config import load_config
 
         with patch.dict(os.environ, {
-            "AI_BACKEND": "deepseek",
-        }, clear=True):
-            with self.assertRaises(RuntimeError) as ctx:
-                load_config()
-            self.assertIn("DEEPSEEK_API_KEY", str(ctx.exception))
-
-    def test_load_config_rejects_masked_deepseek_api_key(self):
-        """Masked UI placeholders are not usable DeepSeek API keys."""
-        from src.config import load_config
-
-        with patch.dict(os.environ, {
-            "AI_BACKEND": "deepseek",
-            "DEEPSEEK_API_KEY": "sk-t***test",
-        }, clear=True):
-            with self.assertRaises(RuntimeError) as ctx:
-                load_config()
-            self.assertIn("打码", str(ctx.exception))
-
-    def test_load_config_rejects_masked_anthropic_api_key(self):
-        """Masked UI placeholders are not usable Anthropic API keys."""
-        from src.config import load_config
-
-        with patch.dict(os.environ, {
-            "AI_BACKEND": "claude",
-            "ANTHROPIC_API_KEY": "sk-a***test",
-        }, clear=True):
-            with self.assertRaises(RuntimeError) as ctx:
-                load_config()
-            self.assertIn("打码", str(ctx.exception))
-
-    def test_load_config_rejects_masked_openai_api_key(self):
-        """Masked UI placeholders are not usable OpenAI API keys."""
-        from src.config import load_config
-
-        with patch.dict(os.environ, {
-            "AI_BACKEND": "openai",
-            "OPENAI_API_KEY": "sk-o***test",
-        }, clear=True):
-            with self.assertRaises(RuntimeError) as ctx:
-                load_config()
-            self.assertIn("打码", str(ctx.exception))
-
-    def test_load_config_parses_trigger_keywords(self):
-        """Custom TRIGGER_KEYWORDS should be parsed from comma-separated string."""
-        from src.config import load_config
-
-        with patch.dict(os.environ, {
-            "ANTHROPIC_API_KEY": "sk-ant-test",
-            "TRIGGER_KEYWORDS": "总结,回顾,summarize",
+            "WECHAT_GROUPS": "%E6%B5%8B%E8%AF%95%2C%E7%BE%A4,dev",
+            "PRIVATE_CHAT_ENABLED": "true",
+            "PRIVATE_CHATS": "wxid_a",
+            "BOT_DISPLAY_NAME": "  商务\n号  ",
+            "ADMIN_WXID": " wxid_admin ",
         }, clear=True):
             config = load_config()
-            self.assertEqual(
-                config.trigger_keywords,
-                ["总结", "回顾", "summarize"],
-            )
-
-    def test_load_config_uses_defaults_for_unset_vars(self):
-        """Unset environment variables should fall back to BotConfig defaults."""
-        from src.config import load_config
-
-        with patch.dict(os.environ, {
-            "ANTHROPIC_API_KEY": "sk-ant-test",
-        }, clear=True):
-            config = load_config()
-            self.assertEqual(config.poll_interval_sec, 1.0)
-            self.assertEqual(config.chunk_size, 400)
-            self.assertEqual(config.max_messages_for_summary, 5000)
-            self.assertEqual(config.fallback_window_hours, 8)
-            self.assertEqual(config.dedup_window_sec, 60)
-            self.assertEqual(config.wechat_backend, "wcdb")
-            # the default persona is the 杨宇靖 preset, which answers to its own name
-            self.assertEqual(config.chat_persona_profile, "yang_yujing")
-            self.assertEqual(config.bot_display_name, "假企鹅")
-            self.assertEqual(config.yang_yujing_group_name, "群主应该是pyc")
-
-    def test_load_config_parses_persona_settings(self):
-        """Persona env vars should be decoded and validated."""
-        from src.config import load_config
-
-        with patch.dict(os.environ, {
-            "ANTHROPIC_API_KEY": "sk-ant-test",
-            "CHAT_PERSONA_PROFILE": "custom",
-            "CHAT_PERSONA_NAME": "小柔",
-            "CHAT_PERSONA_PROMPT": "第一行\n第二行",
-            "CHAT_REPLY_RULES": "短句\n不乱认人",
-            "CHAT_MAX_CHARS": "48",
-            "CHAT_CONTEXT_WINDOW_SEC": "1200",
-            "CHAT_CONTEXT_COUNT": "55",
-        }, clear=True):
-            config = load_config()
-            self.assertEqual(config.chat_persona_name, "小柔")
-            self.assertEqual(config.chat_persona_prompt, "第一行\n第二行")
-            self.assertEqual(config.chat_reply_rules, "短句\n不乱认人")
-            self.assertEqual(config.chat_max_chars, 48)
-            self.assertEqual(config.chat_context_window_sec, 1200)
-            self.assertEqual(config.chat_context_count, 55)
-
-    def test_load_config_uses_yang_yujing_preset_and_target_group(self):
-        """Yang's fixed preset overrides the custom persona's editable prompt fields."""
-        from src.config import load_config
-
-        with patch.dict(os.environ, {
-            "ANTHROPIC_API_KEY": "sk-ant-test",
-            "CHAT_PERSONA_PROFILE": "yang_yujing",
-            "YANG_YUJING_GROUP_NAME": "群主应该是pyc",
-            "YANG_YUJING_ALWAYS_REPLY_GROUP_NAME": "shit bro 和emperor 还有maybe哥",
-            "CHAT_PERSONA_NAME": "林小满",
-            "CHAT_PERSONA_PROMPT": "旧人设",
-        }, clear=True):
-            config = load_config()
-            self.assertEqual(config.chat_persona_profile, "yang_yujing")
-            self.assertEqual(config.chat_persona_name, "假企鹅")
-            self.assertIn("游戏", config.chat_persona_prompt)
-            self.assertIn("2026", config.chat_persona_prompt)
-            self.assertIn("2 到 8 个字", config.chat_persona_prompt)
-            self.assertIn("次元和 cy 是同一个人", config.chat_persona_prompt)
-            self.assertIn("cy 是南通人", config.chat_persona_prompt)
-            self.assertEqual(config.bot_display_name, "假企鹅")
-            self.assertEqual(config.chat_max_chars, 30)
-            self.assertEqual(config.chat_context_count, 14)
-            self.assertEqual(config.yang_yujing_group_name, "群主应该是pyc")
-            self.assertEqual(
-                config.yang_yujing_always_reply_group_name,
-                "shit bro 和emperor 还有maybe哥",
-            )
-
-    def test_load_config_rejects_unknown_persona_profile(self):
-        from src.config import load_config
-
-        with patch.dict(os.environ, {
-            "ANTHROPIC_API_KEY": "sk-ant-test",
-            "CHAT_PERSONA_PROFILE": "unknown_persona",
-        }, clear=True):
-            with self.assertRaises(RuntimeError) as ctx:
-                load_config()
-            self.assertIn("CHAT_PERSONA_PROFILE", str(ctx.exception))
+        self.assertEqual(config.wechat_groups, "测试,群,dev")
+        self.assertTrue(config.private_chat_enabled)
+        self.assertEqual(config.private_chats, "wxid_a")
+        self.assertEqual(config.bot_display_name, "商务 号")
+        self.assertEqual(config.admin_wxid, "wxid_admin")
 
     def test_load_config_with_custom_numeric_values(self):
         """Custom numeric env vars should be parsed correctly."""
         from src.config import load_config
 
         with patch.dict(os.environ, {
-            "ANTHROPIC_API_KEY": "sk-ant-test",
             "POLL_INTERVAL_SEC": "2.5",
-            "CHUNK_SIZE": "500",
-            "MAX_MESSAGES_FOR_SUMMARY": "2000",
-            "FALLBACK_WINDOW_HOURS": "12",
             "DEDUP_WINDOW_SEC": "120",
         }, clear=True):
             config = load_config()
             self.assertEqual(config.poll_interval_sec, 2.5)
-            self.assertEqual(config.chunk_size, 500)
-            self.assertEqual(config.max_messages_for_summary, 2000)
-            self.assertEqual(config.fallback_window_hours, 12)
             self.assertEqual(config.dedup_window_sec, 120)
-
-    def test_load_config_boolean_parsing(self):
-        """Boolean env vars (FUN_ENABLED, PROACTIVE_ENABLED) parse correctly."""
-        from src.config import load_config
-
-        with patch.dict(os.environ, {
-            "ANTHROPIC_API_KEY": "sk-ant-test",
-            "FUN_ENABLED": "false",
-            "PROACTIVE_ENABLED": "true",
-            "STICKY_MENTION_ENABLED": "false",
-        }, clear=True):
-            config = load_config()
-            self.assertFalse(config.fun_enabled)
-            self.assertTrue(config.proactive_enabled)
-            self.assertFalse(config.sticky_mention_enabled)
-
-    def test_load_config_sticky_mention_defaults(self):
-        """Sticky mention settings have correct defaults."""
-        from src.config import load_config
-
-        with patch.dict(os.environ, {
-            "ANTHROPIC_API_KEY": "sk-ant-test",
-        }, clear=True):
-            config = load_config()
-            self.assertTrue(config.sticky_mention_enabled)
-            self.assertEqual(config.sticky_mention_ttl_sec, 60)
 
     def test_load_config_message_burst_defaults(self):
         """Message burst coalescing has conversation-friendly defaults."""
         from src.config import load_config
 
-        with patch.dict(os.environ, {
-            "ANTHROPIC_API_KEY": "sk-ant-test",
-        }, clear=True):
+        with patch.dict(os.environ, {}, clear=True):
             config = load_config()
             self.assertTrue(config.message_burst_enabled)
             self.assertEqual(config.message_burst_window_sec, 2.2)
@@ -675,7 +494,6 @@ class LoadConfigTests(unittest.TestCase):
         from src.config import load_config
 
         with patch.dict(os.environ, {
-            "ANTHROPIC_API_KEY": "sk-ant-test",
             "MESSAGE_BURST_ENABLED": "false",
             "MESSAGE_BURST_WINDOW_SEC": "3.5",
             "MESSAGE_BURST_MAX_MESSAGES": "4",
@@ -687,50 +505,17 @@ class LoadConfigTests(unittest.TestCase):
             self.assertEqual(config.message_burst_max_messages, 4)
             self.assertEqual(config.message_burst_max_chars, 120)
 
-    def test_load_config_web_search_defaults(self):
-        """Web search has safe defaults for triggered current-info requests."""
+    def test_load_config_sending_switches(self):
+        """The send switches accept the usual on/off spellings."""
         from src.config import load_config
 
         with patch.dict(os.environ, {
-            "ANTHROPIC_API_KEY": "sk-ant-test",
+            "SEND_TYPING_DELAY": "true", "SEND_QUIET": "yes", "SEND_QUEUE": "1", "SEND_KEEP_CLIPBOARD": "off",
+            "STICKER_PASTE": "IMAGE",
         }, clear=True):
             config = load_config()
-            self.assertTrue(config.web_search_enabled)
-            self.assertEqual(config.web_search_max_results, 4)
-            self.assertEqual(config.web_search_timeout_sec, 8.0)
-            self.assertEqual(config.web_search_region, "cn-zh")
-            self.assertEqual(config.web_search_reply_max_chars, 120)
-
-    def test_load_config_web_search_env_override(self):
-        """Web search settings can be tuned from env."""
-        from src.config import load_config
-
-        with patch.dict(os.environ, {
-            "ANTHROPIC_API_KEY": "sk-ant-test",
-            "WEB_SEARCH_ENABLED": "false",
-            "WEB_SEARCH_MAX_RESULTS": "2",
-            "WEB_SEARCH_TIMEOUT_SEC": "5.5",
-            "WEB_SEARCH_REGION": "us-en",
-            "WEB_SEARCH_REPLY_MAX_CHARS": "180",
-        }, clear=True):
-            config = load_config()
-            self.assertFalse(config.web_search_enabled)
-            self.assertEqual(config.web_search_max_results, 2)
-            self.assertEqual(config.web_search_timeout_sec, 5.5)
-            self.assertEqual(config.web_search_region, "us-en")
-            self.assertEqual(config.web_search_reply_max_chars, 180)
-
-    def test_load_config_deepseek_model_override(self):
-        """DEEPSEEK_MODEL can override the default model."""
-        from src.config import load_config
-
-        with patch.dict(os.environ, {
-            "AI_BACKEND": "deepseek",
-            "DEEPSEEK_API_KEY": "sk-ds-test",
-            "DEEPSEEK_MODEL": "deepseek-v4-ultra",
-        }, clear=True):
-            config = load_config()
-            self.assertEqual(config.deepseek_model, "deepseek-v4-ultra")
+        self.assertEqual((config.send_typing_delay, config.send_quiet, config.send_queue), ("on", "on", "on"))
+        self.assertEqual((config.send_keep_clipboard, config.sticker_paste), ("off", "image"))
 
 
 class ValidateConfigTests(unittest.TestCase):
@@ -751,65 +536,12 @@ class ValidateConfigTests(unittest.TestCase):
         # Should not raise
         _validate_config({"poll_interval_sec": 0.1})
 
-    def test_chunk_size_below_minimum_raises(self):
-        """chunk_size < 10 → RuntimeError."""
-        from src.config import _validate_config
-
-        with self.assertRaises(RuntimeError) as ctx:
-            _validate_config({"chunk_size": 5})
-        self.assertIn("CHUNK_SIZE", str(ctx.exception))
-
-    def test_chunk_size_above_maximum_raises(self):
-        """chunk_size > 1000 → RuntimeError."""
-        from src.config import _validate_config
-
-        with self.assertRaises(RuntimeError) as ctx:
-            _validate_config({"chunk_size": 2000})
-        self.assertIn("CHUNK_SIZE", str(ctx.exception))
-
-    def test_chunk_size_at_boundaries_passes(self):
-        """chunk_size at 10 or 1000 should pass."""
-        from src.config import _validate_config
-
-        _validate_config({"chunk_size": 10})
-        _validate_config({"chunk_size": 1000})
-
-    def test_max_messages_for_summary_below_minimum_raises(self):
-        """max_messages_for_summary < 10 → RuntimeError."""
-        from src.config import _validate_config
-
-        with self.assertRaises(RuntimeError):
-            _validate_config({"max_messages_for_summary": 5})
-
-    def test_fallback_window_hours_below_one_raises(self):
-        """fallback_window_hours < 1 → RuntimeError."""
-        from src.config import _validate_config
-
-        with self.assertRaises(RuntimeError):
-            _validate_config({"fallback_window_hours": 0})
-
     def test_dedup_window_sec_below_minimum_raises(self):
         """dedup_window_sec < 10 → RuntimeError."""
         from src.config import _validate_config
 
         with self.assertRaises(RuntimeError):
             _validate_config({"dedup_window_sec": 5})
-
-    def test_sticky_mention_ttl_sec_below_minimum_raises(self):
-        """sticky_mention_ttl_sec < 10 → RuntimeError."""
-        from src.config import _validate_config
-
-        with self.assertRaises(RuntimeError) as ctx:
-            _validate_config({"sticky_mention_ttl_sec": 5})
-        self.assertIn("STICKY_MENTION_TTL_SEC", str(ctx.exception))
-
-    def test_sticky_mention_ttl_sec_above_maximum_raises(self):
-        """sticky_mention_ttl_sec > 300 → RuntimeError."""
-        from src.config import _validate_config
-
-        with self.assertRaises(RuntimeError) as ctx:
-            _validate_config({"sticky_mention_ttl_sec": 500})
-        self.assertIn("STICKY_MENTION_TTL_SEC", str(ctx.exception))
 
     def test_message_burst_window_sec_out_of_range_raises(self):
         """message_burst_window_sec should stay within usable latency."""
@@ -835,85 +567,15 @@ class ValidateConfigTests(unittest.TestCase):
             _validate_config({"message_burst_max_chars": 10})
         self.assertIn("MESSAGE_BURST_MAX_CHARS", str(ctx.exception))
 
-    def test_web_search_limits_out_of_range_raise(self):
-        """web_search limits should avoid slow or oversized searches."""
+    def test_picture_lookup_limits(self):
+        """The relay's picture lookup: how far back, how large."""
         from src.config import _validate_config
 
-        with self.assertRaises(RuntimeError) as ctx:
-            _validate_config({"web_search_max_results": 99})
-        self.assertIn("WEB_SEARCH_MAX_RESULTS", str(ctx.exception))
-
-        with self.assertRaises(RuntimeError) as ctx:
-            _validate_config({"web_search_timeout_sec": 0.5})
-        self.assertIn("WEB_SEARCH_TIMEOUT_SEC", str(ctx.exception))
-
-        with self.assertRaises(RuntimeError) as ctx:
-            _validate_config({"web_search_reply_max_chars": 10})
-        self.assertIn("WEB_SEARCH_REPLY_MAX_CHARS", str(ctx.exception))
-
-    def test_proactive_rate_window_sec_below_minimum_raises(self):
-        """proactive_rate_window_sec < 30 → RuntimeError."""
-        from src.config import _validate_config
-
-        with self.assertRaises(RuntimeError):
-            _validate_config({"proactive_rate_window_sec": 10})
-
-    def test_proactive_rates_not_strictly_ascending_raises(self):
-        """Proactive rates must be quiet < casual < lively < burst."""
-        from src.config import _validate_config
-
-        with self.assertRaises(RuntimeError) as ctx:
-            _validate_config({
-                "proactive_rate_quiet": 5.0,
-                "proactive_rate_casual": 4.0,
-                "proactive_rate_lively": 6.5,
-                "proactive_rate_burst": 8.5,
-            })
-        self.assertIn("strict ascending", str(ctx.exception))
-
-    def test_proactive_rates_with_zero_or_negative_raises(self):
-        """Proactive rates must all be > 0."""
-        from src.config import _validate_config
-
-        with self.assertRaises(RuntimeError) as ctx:
-            _validate_config({
-                "proactive_rate_quiet": 0,
-                "proactive_rate_casual": 4.0,
-                "proactive_rate_lively": 6.5,
-                "proactive_rate_burst": 8.5,
-            })
-        self.assertIn("must be > 0", str(ctx.exception))
-
-    def test_proactive_rates_valid_order_passes(self):
-        """Valid ascending proactive rates should pass."""
-        from src.config import _validate_config
-
-        _validate_config({
-            "proactive_rate_quiet": 1.5,
-            "proactive_rate_casual": 4.0,
-            "proactive_rate_lively": 6.5,
-            "proactive_rate_burst": 8.5,
-        })
-
-    def test_max_retries_below_minimum_raises(self):
-        """max_retries < 1 → RuntimeError."""
-        from src.config import _validate_config
-
-        with self.assertRaises(RuntimeError):
-            _validate_config({"max_retries": 0})
-
-    def test_max_retries_above_maximum_raises(self):
-        """max_retries > 10 → RuntimeError."""
-        from src.config import _validate_config
-
-        with self.assertRaises(RuntimeError):
-            _validate_config({"max_retries": 11})
-
-    def test_max_retries_valid_passes(self):
-        """max_retries between 1-10 should pass."""
-        from src.config import _validate_config
-
-        _validate_config({"max_retries": 5})
+        for bad, key in (({"image_vision_lookback_sec": 10}, "IMAGE_VISION_LOOKBACK_SEC"),
+                         ({"image_vision_max_bytes": 100}, "IMAGE_VISION_MAX_BYTES")):
+            with self.assertRaises(RuntimeError) as ctx:
+                _validate_config(bad)
+            self.assertIn(key, str(ctx.exception))
 
     def test_multiple_errors_reported_together(self):
         """Multiple invalid values should all appear in error message."""
@@ -922,12 +584,12 @@ class ValidateConfigTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             _validate_config({
                 "poll_interval_sec": 0.01,
-                "chunk_size": 5,
+                "message_burst_max_chars": 5,
                 "dedup_window_sec": 3,
             })
         msg = str(ctx.exception)
         self.assertIn("POLL_INTERVAL_SEC", msg)
-        self.assertIn("CHUNK_SIZE", msg)
+        self.assertIn("MESSAGE_BURST_MAX_CHARS", msg)
         self.assertIn("DEDUP_WINDOW_SEC", msg)
 
     def test_empty_kwargs_passes_all_defaults(self):
@@ -945,29 +607,23 @@ class ValidateConfigTests(unittest.TestCase):
 class LoadConfigValidationIntegrationTests(unittest.TestCase):
     """load_config() → _validate_config() integration."""
 
-    def test_invalid_chunk_size_in_env_raises(self):
-        """Setting CHUNK_SIZE=5 via env should trigger validation error."""
+    def test_invalid_poll_interval_in_env_raises(self):
+        """Setting POLL_INTERVAL_SEC=0.01 via env should trigger validation error."""
         from src.config import load_config
 
-        with patch.dict(os.environ, {
-            "ANTHROPIC_API_KEY": "sk-ant-test",
-            "CHUNK_SIZE": "5",
-        }, clear=True):
+        with patch.dict(os.environ, {"POLL_INTERVAL_SEC": "0.01"}, clear=True):
             with self.assertRaises(RuntimeError) as ctx:
                 load_config()
-            self.assertIn("CHUNK_SIZE", str(ctx.exception))
+            self.assertIn("POLL_INTERVAL_SEC", str(ctx.exception))
 
-    def test_invalid_sticky_mention_ttl_in_env_raises(self):
-        """Setting STICKY_MENTION_TTL_SEC=999 via env should fail."""
+    def test_invalid_message_burst_window_in_env_raises(self):
+        """Setting MESSAGE_BURST_WINDOW_SEC=99 via env should fail."""
         from src.config import load_config
 
-        with patch.dict(os.environ, {
-            "ANTHROPIC_API_KEY": "sk-ant-test",
-            "STICKY_MENTION_TTL_SEC": "999",
-        }, clear=True):
+        with patch.dict(os.environ, {"MESSAGE_BURST_WINDOW_SEC": "99"}, clear=True):
             with self.assertRaises(RuntimeError) as ctx:
                 load_config()
-            self.assertIn("STICKY_MENTION_TTL_SEC", str(ctx.exception))
+            self.assertIn("MESSAGE_BURST_WINDOW_SEC", str(ctx.exception))
 
 
 if __name__ == "__main__":

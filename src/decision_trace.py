@@ -1,35 +1,29 @@
-"""Decision trace and LLM-call snapshots (observe only).
+"""Decision trace (observe only).
 
-Phase 0 of the refactor: record WHY the bot answered or stayed silent for each
-message, and exactly what was sent to / received from the model, without
-changing any behaviour.  The records are what the offline replay harness and
-the later phases are calibrated on.
+Record WHY the bot answered or stayed silent for each message (which route step
+ended it, with which reason code), without changing any behaviour.
 
 Design rules
 ------------
 * Best effort: a failure to write a trace must never affect message handling.
   Every public method swallows its own exceptions.
 * Thread safe: the router runs in a worker pool; the "current" trace is kept
-  per thread, so helper methods deep in the call stack (and the summarizer)
-  can attach events without extra parameters.
+  per thread, so helpers deeper in the call stack can attach events without
+  extra parameters.
 * Local files only (JSON Lines, size-rotated).  Content is optional and
-  truncated; prompts can be switched off.
+  truncated; a registered creator's message is never kept (``redact``).
 
-Files
------
+File
+----
 ``decision_trace.jsonl``  one record per handled message (kind="decision")
-``llm_calls.jsonl``       one record per chat/proactive model call
-                          (kind="llm_call"), linked by ``message_id``.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import threading
 import time
-import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -40,7 +34,6 @@ logger = logging.getLogger(__name__)
 SCHEMA_VERSION = 1
 
 DEFAULT_DECISION_PATH = "data/decision_trace.jsonl"
-DEFAULT_LLM_PATH = "data/llm_calls.jsonl"
 DEFAULT_MAX_BYTES = 20 * 1024 * 1024
 DEFAULT_BACKUPS = 3
 
@@ -55,11 +48,6 @@ def _truncate(value: Any, limit: int) -> str:
     if limit <= 0:
         return ""
     return text if len(text) <= limit else text[:limit] + "…"
-
-
-def sha1_short(text: str) -> str:
-    """Stable 12-hex fingerprint used to group identical prompts."""
-    return hashlib.sha1(str(text or "").encode("utf-8", "replace")).hexdigest()[:12]
 
 
 class JsonlSink:
@@ -129,9 +117,6 @@ class NullTrace:
     def redact(self, content: str) -> None:
         return None
 
-    def add_llm_call(self, call_id: str, latency_ms: float) -> None:
-        return None
-
     def finish_reply(self, reply: Optional[str]) -> None:
         return None
 
@@ -154,8 +139,6 @@ class DecisionTrace(NullTrace):
         self._extra: dict = {}
         self._reason = ""
         self._ignored = False
-        self._llm_calls: list[str] = []
-        self._llm_ms = 0.0
         self._finished = False
         self.message_id = str(msg.get("message_id", "") or "")
         self._header = tracer._header(msg)
@@ -187,10 +170,6 @@ class DecisionTrace(NullTrace):
         if "content" in self._header:
             self._header["content"] = str(content)
 
-    def add_llm_call(self, call_id: str, latency_ms: float) -> None:
-        self._llm_calls.append(call_id)
-        self._llm_ms += float(latency_ms or 0.0)
-
     def finish_reply(self, reply: Optional[str]) -> None:
         if reply:
             outcome = OUTCOME_REPLY
@@ -221,9 +200,6 @@ class DecisionTrace(NullTrace):
                 "elapsed_ms": round((time.monotonic() - self._t0) * 1000, 1),
                 "steps": self._steps,
             })
-            if self._llm_calls:
-                record["llm_calls"] = self._llm_calls
-                record["llm_ms"] = round(self._llm_ms, 1)
             if self._extra:
                 record["extra"] = self._extra
             self._tracer._write_decision(record)
@@ -242,24 +218,17 @@ class NullTracer:
     def current(self) -> NullTrace:
         return _NULL_TRACE
 
-    def record_llm_call(self, **fields: Any) -> None:
-        return None
-
 
 class DecisionTracer(NullTracer):
-    """Creates per-message traces and writes decision / LLM-call records."""
+    """Creates per-message traces and writes the decision records."""
 
     enabled = True
 
-    def __init__(self, decision_sink: Optional[JsonlSink] = None,
-                 llm_sink: Optional[JsonlSink] = None, *,
+    def __init__(self, decision_sink: Optional[JsonlSink] = None, *,
                  content_chars: int = 120,
-                 include_prompts: bool = True,
                  clock: Callable[[], float] = time.time):
         self._decision_sink = decision_sink
-        self._llm_sink = llm_sink
         self._content_chars = max(0, int(content_chars))
-        self._include_prompts = bool(include_prompts)
         self._clock = clock
         self._local = threading.local()
 
@@ -270,12 +239,10 @@ class DecisionTracer(NullTracer):
                     clock: Callable[[], float] = time.time) -> NullTracer:
         """Build a tracer from a BotConfig-like object.
 
-        Only a literal ``True`` enables a sink, so Mock/namespace configs used
+        Only a literal ``True`` enables the sink, so Mock/namespace configs used
         in tests silently get a no-op tracer.
         """
-        decision_on = getattr(config, "decision_trace_enabled", False) is True
-        llm_on = getattr(config, "llm_call_log_enabled", False) is True
-        if not (decision_on or llm_on):
+        if getattr(config, "decision_trace_enabled", False) is not True:
             return NullTracer()
 
         def _text(name: str, default: str) -> str:
@@ -286,18 +253,9 @@ class DecisionTracer(NullTracer):
             value = getattr(config, name, default)
             return value if isinstance(value, int) and not isinstance(value, bool) else default
 
-        decision_sink = (
-            JsonlSink(_text("decision_trace_path", DEFAULT_DECISION_PATH))
-            if decision_on else None
-        )
-        llm_sink = (
-            JsonlSink(_text("llm_call_log_path", DEFAULT_LLM_PATH))
-            if llm_on else None
-        )
         return cls(
-            decision_sink, llm_sink,
+            JsonlSink(_text("decision_trace_path", DEFAULT_DECISION_PATH)),
             content_chars=_int("decision_trace_content_chars", 120),
-            include_prompts=getattr(config, "llm_call_log_prompts", True) is not False,
             clock=clock,
         )
 
@@ -350,32 +308,3 @@ class DecisionTracer(NullTracer):
     def _write_decision(self, record: dict) -> None:
         if self._decision_sink is not None:
             self._decision_sink.write(record)
-
-    # ── model calls ─────────────────────────────────────────────────
-
-    def record_llm_call(self, **fields: Any) -> None:
-        """Write one model-call record and link it to the current message."""
-        try:
-            call_id = uuid.uuid4().hex[:12]
-            trace = self.current()
-            system_prompt = str(fields.pop("system_prompt", "") or "")
-            user_prompt = str(fields.pop("user_prompt", "") or "")
-            record = {
-                "v": SCHEMA_VERSION,
-                "kind": "llm_call",
-                "ts": round(self._clock(), 3),
-                "call_id": call_id,
-                "message_id": trace.message_id,
-                "system_prompt_sha": sha1_short(system_prompt),
-                "system_prompt_chars": len(system_prompt),
-                "user_prompt_chars": len(user_prompt),
-            }
-            record.update(fields)
-            if self._include_prompts:
-                record["system_prompt"] = mask_pii(system_prompt)
-                record["user_prompt"] = mask_pii(user_prompt)
-            trace.add_llm_call(call_id, fields.get("latency_ms", 0.0))
-            if self._llm_sink is not None:
-                self._llm_sink.write(record)
-        except Exception:  # pragma: no cover - defensive
-            logger.debug("llm call record failed", exc_info=True)

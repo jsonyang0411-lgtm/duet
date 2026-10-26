@@ -1,10 +1,8 @@
 """WeChat's built-in emoji ("小黄脸"): text codes such as ``[捂脸]``.
 
 WeChat draws a known code as a picture; an unknown one (``[开心]``) stays plain
-text and gives the bot away.  With ``WECHAT_EMOJI=on`` the structured pipeline
-offers the model a short list of codes, and :func:`keep_known` removes every
-other bracket code from its reply.  The list differs between WeChat versions:
-check it once with ``python tools/sticker_check.py --emoji``.
+text.  :func:`keep_known` removes every bracket code that is not in a list; the
+list differs between WeChat versions.  The business route does not use it.
 """
 
 from __future__ import annotations
@@ -74,10 +72,3 @@ def keep_known(text: str, allowed, *, limit: int = MAX_PER_MESSAGE) -> str:
     text = _DANGLING_RE.sub(lambda m: "" if not m.group(1) or _CJK_RE.search(m.group(1)) else m.group(0), text)
     return re.sub(r"\s{2,}", " ", text).strip()
 
-
-def prompt_line(codes) -> str:
-    return (
-        "- 微信自带表情（可选）：可以偶尔在句子里放一个，写成方括号代码，只能从这些里选："
-        + "".join(codes)
-        + "。它们不算颜文字或 emoji，人设里“不用表情”的要求不包括它们；大多数句子不需要，一句最多一个。"
-    )

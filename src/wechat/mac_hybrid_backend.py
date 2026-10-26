@@ -314,7 +314,7 @@ class MacHybridBackend(AbstractWeChatBackend):
             return None
 
         # ── System message handling ───────────────────────────────
-        # Detect "xxx joined the group" events for welcome feature.
+        # Detect "xxx joined the group" events (recorded; groups are never answered).
         # Pattern matches:
         #   "张三"加入了群聊                    → 张三
         #   "张三"通过扫描二维码加入了群聊      → 张三

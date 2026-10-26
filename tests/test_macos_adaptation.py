@@ -286,8 +286,6 @@ class MacOSAdaptationTests(unittest.TestCase):
 
     def test_bot_selects_mac_ui_backend_without_importing_wcdb(self):
         cfg = BotConfig(
-            ai_backend="deepseek",
-            deepseek_api_key="sk-test",
             wechat_backend="mac_ui",
             wechat_groups="*",
             bot_display_name="群聊小助手",
@@ -299,8 +297,6 @@ class MacOSAdaptationTests(unittest.TestCase):
 
     def test_bot_selects_mac_hybrid_backend_without_importing_wcdb(self):
         cfg = BotConfig(
-            ai_backend="deepseek",
-            deepseek_api_key="sk-test",
             wechat_backend="mac_hybrid",
             wechat_groups="*",
             bot_display_name="群聊小助手",
@@ -327,14 +323,14 @@ class MacOSAdaptationTests(unittest.TestCase):
         self.assertTrue(entitlements["com.apple.security.cs.disable-library-validation"])
 
     def test_frontend_exposes_mac_ui_backend_label(self):
-        config_panel = Path("ui/src/components/ConfigPanel.jsx").read_text(encoding="utf-8")
+        wechat_panel = Path("ui/src/components/WechatPanel.jsx").read_text(encoding="utf-8")
         dashboard = Path("ui/src/components/Dashboard.jsx").read_text(encoding="utf-8")
 
-        self.assertIn("value: 'mac_ui'", config_panel)
-        self.assertIn("value: 'mac_hybrid'", config_panel)
+        self.assertIn("value: 'mac_ui'", wechat_panel)
+        self.assertIn("value: 'mac_hybrid'", wechat_panel)
         self.assertIn("mac_ui", dashboard)
         self.assertIn("mac_hybrid", dashboard)
-        self.assertIn("macOS", config_panel)
+        self.assertIn("macOS", wechat_panel)
 
     def test_readme_documents_macos_experimental_start(self):
         text = Path("README.md").read_text(encoding="utf-8")
@@ -1899,21 +1895,16 @@ class MacOSAdaptationTests(unittest.TestCase):
         from src.bot import HealthMonitor
         from src.wechat.mac_hybrid_backend import MacHybridBackend
 
-        cfg = BotConfig(
-            ai_backend="deepseek",
-            deepseek_api_key="sk-test",
-            wechat_backend="mac_hybrid",
-        )
+        cfg = BotConfig(wechat_backend="mac_hybrid")
         backend = MacHybridBackend(client=FakeChatlogClient(), automation=FakeMacAutomation())
         monitor = HealthMonitor(
-            summarizer=type("S", (), {"last_api_call_time": 0})(),
             router=type("R", (), {"messages_processed": 0})(),
             conn=type("C", (), {"execute": lambda self, sql: None})(),
             backend=backend,
             config=cfg,
         )
 
-        self.assertEqual(monitor._check_wechat_hwnd(), "weflow_ok")
+        self.assertEqual(monitor.wechat_status(), "weflow_ok")
 
 
 if __name__ == "__main__":

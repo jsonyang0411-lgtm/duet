@@ -41,7 +41,7 @@ class FakeClient:
 
 class WcdbBackendStandardizeTests(unittest.TestCase):
     def make_backend(self):
-        backend = WcdbBackend(bot_display_name="林小满", groups=["测试群"])
+        backend = WcdbBackend(bot_display_name="商务助手", groups=["测试群"])
         backend._client = FakeClient()
         return backend
 
@@ -83,34 +83,8 @@ class WcdbBackendStandardizeTests(unittest.TestCase):
              "create_time": int(time.time()), "local_id": "b1"}, "测试群", "wxid_friend", is_group=False)
         self.assertEqual((standardized["content"], standardized["msg_type"]), ("[图片]", 3))
 
-    def test_yang_yujing_target_group_uses_full_feed_burst_rules(self):
-        backend = WcdbBackend(
-            bot_display_name="林小满",
-            groups=["群主应该是pyc"],
-            config=BotConfig(
-                chat_persona_profile="yang_yujing",
-                yang_yujing_group_name="群主应该是pyc",
-            ),
-        )
-
-        self.assertTrue(backend._uses_yang_yujing_full_feed({
-            "group_name": "群主应该是pyc",
-            "chat_id": "chat1@chatroom",
-        }))
-        self.assertFalse(backend._uses_yang_yujing_full_feed({
-            "group_name": "测试群",
-            "chat_id": "chat2@chatroom",
-        }))
-
-    def test_yang_yujing_poll_merges_rapid_same_sender_messages(self):
-        backend = WcdbBackend(
-            bot_display_name="林小满",
-            groups=["群主应该是pyc"],
-            config=BotConfig(
-                chat_persona_profile="yang_yujing",
-                yang_yujing_group_name="群主应该是pyc",
-            ),
-        )
+    def test_a_poll_merges_rapid_same_sender_messages(self):
+        backend = WcdbBackend(bot_display_name="商务助手", groups=["测试群"], config=BotConfig())
         backend._client = FakeClient()
         backend._client.get_messages = Mock(return_value=[
             {
@@ -132,7 +106,7 @@ class WcdbBackendStandardizeTests(unittest.TestCase):
         backend._running = True
         callback = Mock()
 
-        backend._poll_group("群主应该是pyc", "chat1@chatroom", callback)
+        backend._poll_group("测试群", "chat1@chatroom", callback)
         ready = backend._burst.flush_all()
 
         callback.assert_not_called()
@@ -141,17 +115,17 @@ class WcdbBackendStandardizeTests(unittest.TestCase):
         self.assertEqual(ready[0]["_burst_count"], 2)
 
     def _poll_senders(self, my_wxid):
-        backend = WcdbBackend(bot_display_name="杨宇靖", groups=["测试群"])
+        backend = WcdbBackend(bot_display_name="商务助手", groups=["测试群"])
         backend._client = FakeClient()
         backend._client._config = {"myWxid": my_wxid} if my_wxid else {}
-        names = {"wxid_me": "杨宇靖", "wxid_yang": "杨宇靖", "wxid_user": "测试用户"}
+        names = {"wxid_me": "商务助手", "wxid_namesake": "商务助手", "wxid_user": "测试用户"}
         backend._client.resolve_nickname = lambda wxid: names.get(wxid, wxid)
         backend._client.get_display_names = lambda usernames: {u: names.get(u, u) for u in usernames}
         now = int(time.time())
         backend._client.get_messages = Mock(return_value=[
             {"sender_username": who, "message_content": f"{who} 说的话", "local_type": 1,
              "create_time": now, "local_id": f"m-{who}"}
-            for who in ("wxid_user", "wxid_yang", "wxid_me")
+            for who in ("wxid_user", "wxid_namesake", "wxid_me")
         ])
         backend._chat_is_group["room1@chatroom"] = True
         backend._running = True
@@ -163,14 +137,14 @@ class WcdbBackendStandardizeTests(unittest.TestCase):
         return sorted(seen)
 
     def test_a_member_named_like_the_bot_is_still_heard(self):
-        self.assertEqual(self._poll_senders("wxid_me"), ["wxid_user", "wxid_yang"])
+        self.assertEqual(self._poll_senders("wxid_me"), ["wxid_namesake", "wxid_user"])
 
     def test_quoting_a_member_named_like_the_bot_is_not_a_reply_to_it(self):
         xml = """wxid_user:
 <?xml version="1.0"?>
 <msg><appmsg><title>哈哈</title><type>57</type>
 <refermsg><type>1</type><svrid>124</svrid><fromusr>chat1@chatroom</fromusr>
-<chatusr>wxid_yang</chatusr><displayname>林小满</displayname><content>我说的</content></refermsg>
+<chatusr>wxid_namesake</chatusr><displayname>商务助手</displayname><content>我说的</content></refermsg>
 </appmsg></msg>"""
         msg = {"sender_username": "wxid_user", "message_content": self._zstd_hex(xml),
                "local_type": str((57 << 32) | 49), "create_time": int(time.time()), "local_id": "m_quote2"}
@@ -180,43 +154,11 @@ class WcdbBackendStandardizeTests(unittest.TestCase):
     def test_without_the_accounts_wxid_the_name_still_marks_own_messages(self):
         self.assertEqual(self._poll_senders(""), ["wxid_user"])
 
-    def test_yang_yujing_monitors_only_its_target_group(self):
+    def test_the_configured_groups_are_kept(self):
         backend = WcdbBackend(
-            bot_display_name="林小满",
+            bot_display_name="商务助手",
             groups=["*"],
-            config=BotConfig(
-                chat_persona_profile="yang_yujing",
-                yang_yujing_group_name="群主应该是pyc",
-            ),
-        )
-
-        self.assertEqual(backend._groups, ["群主应该是pyc"])
-
-    def test_yang_yujing_also_monitors_its_forced_reply_group(self):
-        backend = WcdbBackend(
-            bot_display_name="林小满",
-            groups=["*"],
-            config=BotConfig(
-                chat_persona_profile="yang_yujing",
-                yang_yujing_group_name="群主应该是pyc",
-                yang_yujing_always_reply_group_name="shit bro 和emperor 还有maybe哥",
-            ),
-        )
-
-        self.assertEqual(
-            backend._groups,
-            ["群主应该是pyc", "shit bro 和emperor 还有maybe哥"],
-        )
-        self.assertTrue(backend._uses_yang_yujing_full_feed({
-            "group_name": "shit bro 和emperor 还有maybe哥",
-            "chat_id": "chat2@chatroom",
-        }))
-
-    def test_custom_profile_keeps_configured_groups(self):
-        backend = WcdbBackend(
-            bot_display_name="林小满",
-            groups=["*"],
-            config=BotConfig(chat_persona_profile="custom"),
+            config=BotConfig(),
         )
 
         self.assertEqual(backend._groups, ["*"])
@@ -293,7 +235,7 @@ class WcdbBackendStandardizeTests(unittest.TestCase):
     def test_standardize_strips_group_sender_prefix_from_text(self):
         msg = {
             "sender_username": "wxid_user",
-            "message_content": "wxid_user:\n@林小满 推荐几首英文歌",
+            "message_content": "wxid_user:\n@商务助手 推荐几首英文歌",
             "local_type": 1,
             "create_time": int(time.time()),
             "local_id": "m_prefix",
@@ -303,7 +245,7 @@ class WcdbBackendStandardizeTests(unittest.TestCase):
             msg, "测试群", "chat1@chatroom",
         )
 
-        self.assertEqual(standardized["content"], "@林小满 推荐几首英文歌")
+        self.assertEqual(standardized["content"], "@商务助手 推荐几首英文歌")
         self.assertTrue(standardized["is_at_mentioned"])
 
     @staticmethod
@@ -324,7 +266,7 @@ class WcdbBackendStandardizeTests(unittest.TestCase):
       <svrid>123</svrid>
       <fromusr>chat1@chatroom</fromusr>
       <chatusr>wxid_me</chatusr>
-      <displayname>林小满</displayname>
+      <displayname>商务助手</displayname>
       <content>啊？你喜欢哪种风格的呀</content>
     </refermsg>
   </appmsg>
@@ -349,7 +291,7 @@ class WcdbBackendStandardizeTests(unittest.TestCase):
             standardized["quoted_content"],
             "啊？你喜欢哪种风格的呀",
         )
-        self.assertEqual(standardized["quoted_sender_name"], "林小满")
+        self.assertEqual(standardized["quoted_sender_name"], "商务助手")
 
     def test_standardize_private_chat_uses_talker_as_sender_fallback(self):
         msg = {
@@ -379,9 +321,9 @@ class WcdbBackendStandardizeTests(unittest.TestCase):
             {"username": "mcdonalds888", "displayName": "麦当劳"},
         ]
         backend = WcdbBackend(
-            bot_display_name="林小满",
+            bot_display_name="商务助手",
             groups=["*"],
-            config=BotConfig(private_chat_enabled=True, chat_persona_profile="custom"),
+            config=BotConfig(private_chat_enabled=True),
         )
         backend._client = FakeClient(sessions=sessions)
 
@@ -400,9 +342,9 @@ class WcdbBackendStandardizeTests(unittest.TestCase):
             sessions=[{"username": "room1@chatroom", "displayName": "测试群"}]
         )
         backend = WcdbBackend(
-            bot_display_name="林小满",
+            bot_display_name="商务助手",
             groups=["*"],
-            config=BotConfig(private_chat_enabled=True, chat_persona_profile="custom"),
+            config=BotConfig(private_chat_enabled=True),
         )
         backend._client = client
         backend._resolve_groups()

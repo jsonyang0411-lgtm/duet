@@ -2,7 +2,7 @@
 
 An allowed person's private picture or file is held for ``HOLD_SEC``; the next
 task takes everything held (``ClaudeRelay._queue``).  ``resolve`` finds it on
-disk: a picture through the image-vision helpers (WeChat's ``.dat`` decoded; a
+disk: a picture through src/wechat/media.py (WeChat's ``.dat`` decoded; a
 screenshot of the chat when it cannot be found), a file in WeChat's download
 folder (``msg/file/<YYYY-MM>/`` in WeChat 4, ``FileStorage/File/<YYYY-MM>/`` in 3;
 a second file of the same name is ``name(1).ext``).  WeChat downloads a file only
@@ -61,14 +61,14 @@ def resolve(config, held: Held, number: int) -> tuple[str, str, str]:
                 else str(held.msg.get("file_name") or path.name))
         return str(path), name, ""
     if held.kind == "image":
-        from ..vision import find_recent_image_path
-        vision = SimpleNamespace(
+        from ..wechat.media import find_recent_image_path
+        lookup = SimpleNamespace(
             wechat_data_dir=str(getattr(config, "wechat_data_dir", "") or ""),
             image_vision_max_bytes=MAX_PICTURE_BYTES,
             image_vision_lookback_sec=int(getattr(config, "image_vision_lookback_sec", 900) or 900),
             image_allow_thumbnail=False,         # a thumbnail is worse than the chat window's own picture
         )
-        path = find_recent_image_path(vision, [held.msg])
+        path = find_recent_image_path(lookup, [held.msg])
         if path:
             logger.info("Relay picture %d: the picture file of the message (%s)", number, Path(path).name)
             return path, f"图片-{number}{Path(path).suffix.lower() or '.jpg'}", ""

@@ -18,11 +18,72 @@ OLD = int(NOW - PERSONAL_INFO_RETENTION_SECONDS - 3600)
 NEW = int(NOW - 3600)
 ADDRESS = "张三 13812345678 上海市浦东新区世纪大道100号"
 
+# 旧版本的库里还有这几张表（机器人发出的话、记忆）。公司仓库改成业务网关后新库不再建它们，
+# 但已经在用的库里还在，清理照样要清，所以测试里按旧的表结构建出来。
+OLD_TABLES = """
+CREATE TABLE IF NOT EXISTS bot_replies (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id            TEXT    NOT NULL,
+    text               TEXT    NOT NULL,
+    timestamp          INTEGER NOT NULL,
+    trigger_message_id TEXT    NOT NULL DEFAULT '',
+    mode               TEXT    NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS memory_state (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS memory_episodes (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id       TEXT    NOT NULL,
+    summary       TEXT    NOT NULL,
+    topics        TEXT    NOT NULL DEFAULT '',
+    start_ts      INTEGER NOT NULL DEFAULT 0,
+    end_ts        INTEGER NOT NULL DEFAULT 0,
+    message_count INTEGER NOT NULL DEFAULT 0,
+    created_at    REAL    NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE TABLE IF NOT EXISTS memory_facts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id       TEXT    NOT NULL,
+    kind          TEXT    NOT NULL,
+    subject       TEXT    NOT NULL,
+    predicate     TEXT    NOT NULL,
+    object        TEXT    NOT NULL,
+    norm_key      TEXT    NOT NULL,
+    status        TEXT    NOT NULL DEFAULT 'active',
+    confidence    REAL    NOT NULL DEFAULT 0.7,
+    support_count INTEGER NOT NULL DEFAULT 1,
+    source        TEXT    NOT NULL DEFAULT 'llm',
+    created_at    REAL    NOT NULL DEFAULT (unixepoch()),
+    updated_at    REAL    NOT NULL DEFAULT (unixepoch()),
+    last_seen_at  REAL    NOT NULL DEFAULT (unixepoch()),
+    expires_at    REAL,
+    UNIQUE(chat_id, norm_key)
+);
+
+CREATE TABLE IF NOT EXISTS memory_evidence (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_kind TEXT    NOT NULL,
+    owner_id   INTEGER NOT NULL,
+    message_id TEXT    NOT NULL,
+    quote      TEXT    NOT NULL DEFAULT '',
+    sender_id  TEXT    NOT NULL DEFAULT '',
+    sender_name TEXT   NOT NULL DEFAULT '',
+    ts         INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(owner_kind, owner_id, message_id)
+);
+"""
+
 
 @pytest.fixture
 def db(tmp_path):
     path = str(tmp_path / "messages.db")
     conn = initialize_db(path)
+    conn.executescript(OLD_TABLES)
     conn.execute(
         "CREATE VIRTUAL TABLE fts_messages USING fts5("
         "content, content='messages', content_rowid='id', tokenize='trigram')"

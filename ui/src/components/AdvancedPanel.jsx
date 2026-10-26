@@ -5,13 +5,13 @@ import { useConfig } from '../store/config'
 import { useStatus } from '../store/status'
 import { useToast } from '../store/toast'
 import { isMasked } from '../lib/schema'
-import { PageHead, Note, Empty, Switch, Seg, NumberInput, TextInput, SecretInput } from './ui'
+import { Note, Empty, Switch, Seg, NumberInput, TextInput, SecretInput } from './ui'
 
 // The allow-listed advanced switches (GET/POST /api/advanced). The server owns
 // the list: type, range, default, label, help, dependencies
 // (src/web/advanced_config.py), so this code only renders what it gets.
-// AdvancedFields shows some of the groups inside another page (the relay and
-// WeChat pages of the agent console); AdvancedPanel shows all of them.
+// AdvancedFields shows some of the groups inside another page (the relay,
+// creators and WeChat pages of the console).
 
 function checkLocal(field, value) {
   const v = String(value ?? '').trim()
@@ -23,14 +23,6 @@ function checkLocal(field, value) {
     if (field.min !== undefined && n < field.min) return `不能小于 ${field.min}`
     if (field.max !== undefined && (field.max_exclusive ? n >= field.max : n > field.max)) return field.max_exclusive ? `要小于 ${field.max}` : `不能大于 ${field.max}`
   }
-  if (field.type === 'path' && !v) return '不能为空'
-  if (field.type === 'json' && v) {
-    try {
-      const o = JSON.parse(v)
-      if (!o || typeof o !== 'object' || Array.isArray(o)) return '要是一个 JSON 对象（用 { } 包起来）'
-    } catch (e) { return `不是有效的 JSON：${e.message}` }
-  }
-  if (field.key === 'LOCAL_BASE_URL' && v && !/^https?:\/\//.test(v)) return '要以 http:// 或 https:// 开头'
   if (/(^|\s)#/.test(v)) return '不能包含「 #」（.env 会把后面当成注释）'
   return ''
 }
@@ -46,17 +38,6 @@ export function randomToken() {
   const bytes = new Uint8Array(32)
   crypto.getRandomValues(bytes)
   return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-}
-
-export default function AdvancedPanel() {
-  return (
-    <div className="main-scroll scroll">
-      <div className="page">
-        <PageHead no="02" en="ADVANCED" title="高级开关" sub="新功能和排错用的开关。不清楚的项保持默认就好" />
-        <AdvancedFields />
-      </div>
-    </div>
-  )
 }
 
 /**
@@ -95,7 +76,7 @@ export function AdvancedFields({ only, onSaved, intro = true }) {
     return out
   }, [dirty, draft, fields])
 
-  // Dependencies may point at the main settings (AI_BACKEND, PROACTIVE_ENABLED).
+  // A dependency may also point at a main setting (store/config.jsx).
   const valueOf = (key) => {
     if (key in draft) return String(draft[key])
     const main = mainDraft || base
@@ -174,7 +155,6 @@ export function AdvancedFields({ only, onSaved, intro = true }) {
                     {f.help && <div className="f-hint">{f.help}{rangeText(f) && ` ${rangeText(f)}。`}</div>}
                     {!f.help && rangeText(f) && <div className="f-hint">{rangeText(f)}。</div>}
                     {missing.map((r) => <div key={r.key} className="af-req"><Warning />{r.text}</div>)}
-                    {f.privacy && <div className="af-privacy"><Note kind="warn">{f.privacy}</Note></div>}
                     {error && <div className="f-err" role="alert">{error}</div>}
                     {f.generate && changed && draft[f.key] && !isMasked(draft[f.key]) && <NewSecret value={draft[f.key]} />}
                   </div>
@@ -223,22 +203,6 @@ function Control({ f, value, onChange, invalid }) {
   // f.value is what the server has; SecretInput uses it to leave edit mode after a save.
   if (f.type === 'onoff') return <Switch checked={value === 'on'} onChange={(on) => onChange(on ? 'on' : 'off')} label={f.label} />
   if (f.type === 'bool') return <Switch checked={value === 'true'} onChange={(on) => onChange(on ? 'true' : 'false')} label={f.label} />
-  if (f.type === 'multi') {
-    const set = String(value || '').split(/[,，]/).map((x) => x.trim()).filter(Boolean)
-    const toggle = (o) => onChange(f.options.filter((x) => (x === o ? !set.includes(o) : set.includes(x))).join(','))
-    return (
-      <div className="seg sm" role="group" aria-label={f.label}>
-        {f.options.map((o) => (
-          <button key={o} type="button" aria-pressed={set.includes(o) ? 'true' : 'false'} onClick={() => toggle(o)}>
-            {set.includes(o) ? '✓ ' : ''}{f.labels?.[o] || o}
-          </button>
-        ))}
-      </div>
-    )
-  }
-  if (f.type === 'json') {
-    return <div style={{ width: 360 }}><TextInput value={value} onChange={onChange} mono placeholder="（空 = 不附带）" aria-invalid={invalid ? 'true' : undefined} /></div>
-  }
   if (f.type === 'enum') return <Seg small value={value} onChange={onChange} label={f.label} options={f.options.map((o) => ({ value: o, label: f.labels?.[o] || o }))} />
   if (f.type === 'int' || f.type === 'float') {
     return <div style={{ width: 168 }}><NumberInput value={value} onChange={(v) => onChange(String(v))} invalid={invalid} suffix={f.unit} /></div>

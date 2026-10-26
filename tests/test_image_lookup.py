@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
-from src import vision
+from src.wechat import media
 from src.wechat import image_key as K
 
 AES = b"0123456789abcdef"
@@ -62,7 +62,7 @@ class Tree:
 
     def locate(self, chat=ADMIN, **kw):
         kw.setdefault("timestamp", self.now)
-        return vision.locate_recent_image_file(wechat_data_dir=str(self.root), lookback_sec=900,
+        return media.locate_recent_image_file(wechat_data_dir=str(self.root), lookback_sec=900,
                                                cache_dir=self.cache, chat_id=chat, **kw)
 
 
@@ -137,7 +137,7 @@ def test_the_md5_of_the_message_picks_its_file_even_when_a_newer_one_exists(tree
 
 
 def test_months_far_from_the_message_are_not_entered_so_old_pictures_cannot_use_up_the_budget(tree, monkeypatch):
-    monkeypatch.setattr(vision, "MAX_SCANNED_FILES", 40)
+    monkeypatch.setattr(media, "MAX_SCANNED_FILES", 40)
     old = tree.account / "msg" / "attach" / ("0" * 32) / "2024-01" / "Img"          # sorts before everything
     old.mkdir(parents=True)
     for i in range(200):
@@ -173,11 +173,11 @@ def test_the_picture_of_a_message_goes_through_find_recent_image_path(tree):
     config = SimpleNamespace(wechat_data_dir=str(tree.root), image_vision_max_bytes=50 * 1024 * 1024,
                              image_vision_lookback_sec=900)
     msg = {"timestamp": tree.now, "media_base_dir": str(tree.root), "chat_id": ADMIN, "media_hint": ""}
-    assert size(vision.find_recent_image_path(config, [msg])) == (1750, 1020)
+    assert size(media.find_recent_image_path(config, [msg])) == (1750, 1020)
     tree.account.joinpath("msg", "attach", md5(ADMIN), time.strftime("%Y-%m"), "Img", "pppp_h.dat").unlink()
-    assert size(vision.find_recent_image_path(config, [msg])) == (160, 100)         # the thumbnail is all there is
+    assert size(media.find_recent_image_path(config, [msg])) == (160, 100)         # the thumbnail is all there is
     config.image_allow_thumbnail = False
-    assert vision.find_recent_image_path(config, [msg]) == ""
+    assert media.find_recent_image_path(config, [msg]) == ""
 
 
 # ── the relay ────────────────────────────────────────────────────────────

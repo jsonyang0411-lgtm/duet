@@ -1,14 +1,14 @@
-"""Several chat bubbles from one reply, and the pause between them.
+"""Sending a reply, the typing pause, and the parts of a reply with separators.
 
-The router turns the model's messages into one string; with ``SEND_BUBBLES=on``
-it puts ``BUBBLE_SEP`` between them.  Every WeChat backend hands that string to
-:class:`BubbleSender`, which sends the parts one after another.  A reply without
-the separator is sent exactly as before, in one call and without any pause
-(unless ``SEND_TYPING_DELAY=on``).
+Every WeChat backend hands a reply to :class:`BubbleSender`.  A reply without
+``BUBBLE_SEP`` is sent in one call, without any pause unless
+``SEND_TYPING_DELAY=on``.  Parts between separators would be sent one after
+another; no route of the business gateway writes the separator (the router
+removes it from every reply).
 
 Why a separate class: the backends share the one WeChat window, so the window
 lock must be held per bubble, not while waiting between them, or every other
-group would stall behind a slow typist.  A per-chat lock keeps the bubbles of
+chat would stall behind a slow typist.  A per-chat lock keeps the bubbles of
 one reply together instead.
 """
 
@@ -24,9 +24,8 @@ from .stickers import STICKER_MARK, describe, get_stickers, sticker_in
 
 logger = logging.getLogger(__name__)
 
-# An invisible separator (U+2063) that a model has no reason to write.  Only
-# the router puts it in a reply (it removes it from every other reply), so a
-# nickname or a quoted message cannot split one.
+# An invisible separator (U+2063) nobody types.  The router removes it from
+# every reply, so a nickname or a quoted message cannot split one.
 BUBBLE_SEP = "\u2063"
 MAX_BUBBLES = 3
 MAX_CHAT_LOCKS = 500

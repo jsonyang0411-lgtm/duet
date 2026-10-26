@@ -3,9 +3,9 @@
 Without the queue a reply is sent from the worker thread that wrote it.  Typing
 pauses (``SEND_TYPING_DELAY``) and the wait for the user to pause before a send
 (``SEND_QUIET``, up to ``SEND_IDLE_MAX_WAIT_SEC``) then keep that worker busy,
-and with every worker busy no message of any group gets answered.  With the
-queue the worker hands the reply over and is free at once.  (A screenshot for
-the vision fallback still runs on a worker and can still wait for the user.)
+and with every worker busy no other message gets handled.  With the queue the
+worker hands the reply over and is free at once.  (A screenshot of a picture
+for the relay still runs on a worker and can still wait for the user.)
 
 The queue sends bubble by bubble: within a chat strictly in order (a reply
 starts after the chat's previous reply is done), across chats whichever bubble

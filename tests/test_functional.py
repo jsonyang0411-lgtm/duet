@@ -103,9 +103,6 @@ def server():
     env_existed = env_path.exists()
     if not env_existed:
         env_path.write_text(
-            "AI_BACKEND=deepseek\n"
-            "DEEPSEEK_API_KEY=\n"  # empty → sandbox returns error immediately without retrying real API
-            "DEEPSEEK_MODEL=deepseek-v4-flash\n"
             "WECHAT_GROUPS=*\n"
             "ONBOARDING_DONE=true\n"  # skip onboarding → dashboard loads directly
         )
@@ -137,95 +134,15 @@ class TestDiagnoseApi:
         assert "Python 3" in data["diagnostics"]["python"]["value"]
 
 
-class TestSandboxApi:
-    """Verify /api/sandbox/test endpoint is routed correctly.
-
-    Note: sending a real message triggers an AI API call which may take 10–30s.
-    These tests only verify the endpoint accepts POST requests and returns JSON.
-    """
-
-    def test_sandbox_invalid_json_returns_error(self, server):
-        status, data = _api_post("/api/sandbox/test", raw_body=b"not json")
-        assert status == 200
-        assert "ok" in data
-
-
-class TestConfigDeepseekBaseUrl:
-    """Verify deepseek_base_url is loaded and has a default."""
-
-    def test_default_value(self):
-        from src.config import BotConfig
-        assert BotConfig.deepseek_base_url == "https://api.deepseek.com"
-
-    def test_from_env(self, monkeypatch):
-        monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://custom-proxy.example.com")
-        monkeypatch.setenv("AI_BACKEND", "deepseek")
-        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
-        from src.config import load_config
-        config = load_config()
-        assert config.deepseek_base_url == "https://custom-proxy.example.com"
-
-
-class TestConfigAnthropicBaseUrl:
-    """Verify anthropic_base_url is loaded and has a default."""
-
-    def test_default_value(self):
-        from src.config import BotConfig
-        assert BotConfig.anthropic_base_url == "https://api.anthropic.com"
-
-    def test_from_env(self, monkeypatch):
-        monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://claude-proxy.example.com")
-        monkeypatch.setenv("AI_BACKEND", "claude")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-        from src.config import load_config
-        config = load_config()
-        assert config.anthropic_base_url == "https://claude-proxy.example.com"
-
-
-class TestSummarizerBaseUrl:
-    """Verify AI factory forwards provider-specific Base URLs."""
-
-    def test_claude_factory_passes_anthropic_base_url(self, monkeypatch):
-        from src.config import BotConfig
-        import src.summarize as summarize
-
-        captured = {}
-
-        class FakeClaudeSummarizer:
-            def __init__(self, api_key, model, base_url, chunk_size, chat_model=None):
-                captured.update({
-                    "api_key": api_key,
-                    "model": model,
-                    "base_url": base_url,
-                    "chunk_size": chunk_size,
-                    "chat_model": chat_model,
-                })
-
-        monkeypatch.setattr(summarize, "ClaudeSummarizer", FakeClaudeSummarizer)
-
-        config = BotConfig(
-            ai_backend="claude",
-            anthropic_api_key="sk-ant-test",
-            anthropic_base_url="https://claude-proxy.example.com",
-            summarize_model="claude-test",
-            chunk_size=123,
-        )
-
-        summarize.create_summarizer(config)
-
-        assert captured["api_key"] == "sk-ant-test"
-        assert captured["model"] == "claude-test"
-        assert captured["base_url"] == "https://claude-proxy.example.com"
-        assert captured["chunk_size"] == 123
-
-
 class TestPostAllowlist:
-    """Verify /api/sandbox/test is in POST allowlist (doesn't return 405)."""
+    """Only the gateway's endpoints take a POST: the chat bot's AI sandbox is gone."""
 
-    def test_sandbox_post_not_405(self, server):
-        """Invalid JSON still returns 200 (not 405), proving the route is registered."""
-        status, _ = _api_post("/api/sandbox/test", raw_body=b"not json")
-        assert status == 200
+    def test_the_sandbox_is_gone(self, server):
+        conn = http.client.HTTPConnection(SERVER_HOST, SERVER_PORT, timeout=5)
+        conn.request("POST", "/api/sandbox/test", body=b"{}", headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        conn.close()
+        assert resp.status == 405
 
     def test_unknown_post_path_returns_405(self, server):
         conn = http.client.HTTPConnection(SERVER_HOST, SERVER_PORT, timeout=5)
@@ -373,7 +290,8 @@ class TestAgentConsolePages:
         page.goto(f"{BASE_URL}/#/wechat", timeout=10000)
         page.wait_for_timeout(1500)
         text = page.inner_text("body")
-        for expected in ("微信连接", "微信后端", "读取私聊", "监听哪些群", "OCR_FALLBACK", "数据库读不了时用 OCR", "macOS / Windows"):
+        for expected in ("微信连接", "微信后端", "读取私聊", "读取哪些群", "从不在群里说话", "OCR_FALLBACK",
+                         "数据库读不了时用 OCR", "macOS / Windows"):
             assert expected in text
         # a main setting: the bottom save bar
         page.locator(".toggle-row", has_text="读取私聊").locator('button[role="switch"]').click()
@@ -433,7 +351,7 @@ class TestPrmPages:
             relay.finish(job["id"], {"ok": True, "text": _json.dumps(draft, ensure_ascii=False)})
             relay.tick()
         web_server.register_prm(service)
-        yield SimpleNamespace(service=service, sent=sent)
+        yield SimpleNamespace(service=service, sent=sent, relay=relay, clock=clock)
         web_server.register_prm(None)
         relay.stop()
 
@@ -452,6 +370,64 @@ class TestPrmPages:
         packet = prm.service.store.packet(2)
         assert packet["status"] == "approved" and packet["final_text"] == "在的，小美你好～" and packet["edited"]
         assert "发送中" in page.inner_text("body")
+
+    def test_review_page_runs_a_platform_action_once_and_shows_it_red_when_unverified(self, page, prm):
+        import json as _json
+        from src.prm import platforms
+        from src.prm.service import SETTLE_SEC
+
+        action = platforms.check_action({"action": "dy.designated_commission", "item_id": "3000000000000000101",
+                                         "creator_platform_id": "5100000000000002", "commission_rate": 20})
+        preview = {"version": 1, "action": action, "verdict": "ready", "problems": [],
+                   "facts": [{"label": "将写入", "value": "fixed commission 20%; ends never"}],
+                   "steps": [{"name": "designated", "label": "百应 · 建指定达人佣金策略", "execute": False,
+                              "command": "node bin/dy.mjs buyin promotion-strategy-create-designated --to=20",
+                              "exit_code": 0, "seconds": 2.1, "verdict": "ready", "outcome": "", "problems": [],
+                              "facts": [], "raw": '{"overall": "PREVIEW_ONLY"}'}],
+                   "run": {"steps": ["designated"]}, "catalog": {"synced_at": 1.0, "title": "测试主品"},
+                   "previewed_at": prm.clock.now}
+        prm.service.handle({"chat_id": "wxid_creator01", "sender_id": "wxid_creator01", "content": "好的就按 20%",
+                            "msg_type": 1, "is_group": False, "timestamp": prm.clock.now})
+        prm.clock.now += SETTLE_SEC + 1
+        job = prm.relay.next_job(0, ("prm",))
+        d = {"intent": "谈妥专属佣金", "slots": {"佣金": "20%"}, "stage_proposal": "agreed", "message_kind": "money",
+             "reply_draft": "专属佣金 20% 设好啦～", "attachments_to_send": [], "needs_attention": False,
+             "reason": "kb/合作政策.md", "platform": preview}
+        prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(d, ensure_ascii=False)})
+        prm.relay.tick()
+        packet = prm.service.store.packet_for_job(job["id"])
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="平台动作")
+        text = card.inner_text()
+        for expected in ("平台动作：抖音百应 · 指定达人专属佣金", "预览通过，可以批准执行", "佣金率（%）", "20%", "测试主品",
+                         "fixed commission 20%", "平台上核验成功以后才发给达人"):
+            assert expected in text
+        assert card.locator("button:has-text('发送')").count() == 0
+        card.locator("button:has-text('看预览明细')").click()
+        assert "promotion-strategy-create-designated" in card.inner_text()
+        card.locator("button:has-text('批准并执行')").click()
+        page.wait_for_timeout(300)
+        dialog = page.locator("[role=dialog]")
+        assert "只执行一次，不会自动重试" in dialog.inner_text()
+        dialog.locator("button:has-text('执行')").click()
+        page.wait_for_timeout(1500)
+        assert prm.service.store.packet(packet["id"])["status"] == "executing"
+        assert "平台执行中" in page.inner_text("body")
+        # the Mac: the write went out, the read-back did not prove it -> red, nothing sent
+        mac_job = prm.relay.next_job(0, ("prm",))
+        assert mac_job["meta"]["op"] == "platform_execute"
+        rec = {"version": 1, "op": "platform_execute", "outcome": "ACCEPTED_UNVERIFIED", "key": mac_job["meta"]["key"],
+               "problems": ["读回没证实"], "facts": [], "steps": [], "created": {}, "finished_at": prm.clock.now}
+        prm.relay.finish(mac_job["id"], {"ok": True, "text": _json.dumps(rec, ensure_ascii=False)})
+        prm.relay.tick()
+        page.wait_for_timeout(5000)                               # the page polls every 4 s
+        alerts = page.locator(".prm-alerts").inner_text()
+        assert "要人工处理" in alerts and "ACCEPTED_UNVERIFIED" in alerts and "没有发微信" in alerts
+        page.locator(".prm-alerts button:has-text('我已处理')").click()
+        page.wait_for_timeout(1500)
+        assert page.locator(".prm-alerts").count() == 0
+        assert prm.sent == []
 
     def test_review_page_drops_a_draft_after_asking(self, page, prm):
         page.goto(f"{BASE_URL}/#/review", timeout=10000)
@@ -551,7 +527,7 @@ class TestPrmPages:
 
 
 class TestOnboardingForTheAgentConsole:
-    def test_three_steps_end_with_the_relay_and_quiet_defaults(self, page):
+    def test_three_steps_end_with_the_relay(self, page):
         """Every request of the wizard is answered here: nothing is written to .env."""
         import json as _json
         posted = {}
@@ -576,7 +552,7 @@ class TestOnboardingForTheAgentConsole:
         page.locator("input[type=password]").fill("a" * 64)
         page.locator("button:has-text('下一步')").click()
         page.wait_for_timeout(300)
-        page.locator("input[placeholder='例如 小助手']").fill("机器人账号")
+        page.locator("input[placeholder='例如 商务号']").fill("机器人账号")
         page.locator("button:has-text('下一步')").click()
         page.wait_for_timeout(500)
         text = page.inner_text("body")
@@ -585,11 +561,10 @@ class TestOnboardingForTheAgentConsole:
         page.locator("button:has-text('完成')").click()
         page.wait_for_timeout(1500)
 
-        assert posted["onboarding/step3"]["ai_backend"] == "deepseek"
-        step4 = posted["onboarding/step4"]
-        assert step4["private_chat_enabled"] is True and step4["private_chats"] == "wxid_owner123"
-        assert not any(step4[k] for k in ("fun_enabled", "proactive_enabled", "web_search_enabled",
-                                          "sticky_mention_enabled", "followup_listen_enabled"))
+        step3 = posted["onboarding/step3"]
+        assert step3["private_chat_enabled"] is True and step3["private_chats"] == "wxid_owner123"
+        assert set(step3) == {"message_burst_enabled", "private_chat_enabled", "private_chats"}   # no chat switch
+        assert "onboarding/step4" not in posted
         values = posted["advanced"]["values"]
         assert values["CLAUDE_RELAY"] == "on" and values["ADMIN_WXID"] == "wxid_owner123"
         assert values["CLAUDE_RELAY_ONLY"] == "on"                     # the default of the agent console

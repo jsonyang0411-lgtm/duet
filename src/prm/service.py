@@ -21,6 +21,15 @@ holding reply per round of the creator's messages.  ``PRM_RETENTION_DAYS`` after
 deal is done (delivered, or quiet that long) its receiving details are cleared everywhere (8.2, retention.py),
 the Mac's case file through a ``purge`` job.  The deal actions (stage, mode,
 shipment) are in deals.py.
+
+A draft with a platform action (platforms.py: 小红书 / 抖音 / 淘宝 CLIs on the Mac) comes
+with the Mac's preview of it and always waits for a person, whatever its kind's gate.
+批准并执行 moves it to ``executing`` and queues a ``platform_execute`` job (one approval
+key; the Mac runs the CLI with --execute once and never again for that key); only a
+read-back ``VERIFIED_SUCCESS`` turns it into an approved reply (the link filled in) for
+the sender thread.  Anything else, a job the Mac never took within APPROVED_EXPIRE_SEC,
+or one lost for PLATFORM_LOST_GRACE_SEC, ends ``failed``: nothing goes to the creator
+and the console shows it red until an operator marks it dealt with.
 """
 
 from __future__ import annotations
@@ -30,6 +39,7 @@ import logging
 import re
 import threading
 import time
+import uuid
 from collections import deque
 from pathlib import Path
 from typing import Callable, Optional
@@ -37,11 +47,11 @@ from typing import Callable, Optional
 from ..relay.attachments import KINDS as ATTACHMENT_KINDS, Held, attachment_kind
 from ..relay.service import MAX_AGE_SEC, job_meta
 from ..relay.store import PRM
-from . import deals, gates, pii, retention
+from . import deals, gates, pii, platforms, retention
 from .result import MAX_DRAFT_CHARS, MESSAGE_KINDS, DraftError, parse_draft
 from .store import (
-    APPROVED, COPILOT, DROPPED, FAILED, HUMAN, MODES, NO_REPLY, PAUSED, PENDING, SENDING, SENT,
-    SHIPMENT_STATES, STAGES, SUPERSEDED, PartyError, PrmStore,
+    APPROVED, COPILOT, DROPPED, EXECUTING, FAILED, HUMAN, MESSAGE_TOOL, MODES, NO_REPLY, PAUSED, PENDING,
+    SENDING, SENT, SHIPMENT_STATES, STAGES, SUPERSEDED, PartyError, PrmStore,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +62,8 @@ SEND_TICK_SEC = 5
 OWN_MATCH_SEC = 1800         # our own line seen in WeChat within this long after sending is the bot's
 OWN_FILE_SEC = 600           # an own picture/file this soon after the bot sent one is the bot's
 RETENTION_CHECK_SEC = 3600
+PLATFORM_LOST_GRACE_SEC = 1800   # an execution whose Mac went silent this long is given up on (red)
+PLATFORM_OPS = ("platform_execute", "platform_preview")
 HOLDING_TEXT = "收到，我确认一下马上回你"
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
 _WXID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{3,63}$")
@@ -109,6 +121,8 @@ EVENT_NAMES = {
     "shipment_status": "更新物流", "holding_reply": "自动回复「稍等」", "reveal": "查看完整号码",
     "wrong": "标为发错了", "purge": "清除收件信息", "purge_case": "清除 Mac 案卷里的收件信息",
     "sample_request": "生成寄样审批单", "sample_decision": "寄样审批结果",
+    "platform_execute": "批准执行平台动作", "platform_result": "平台动作结果",
+    "platform_preview": "重新预览平台动作", "platform_ack": "平台动作已处理",
 }
 
 
@@ -117,6 +131,43 @@ def event_out(ev: dict) -> dict:
     detail = dict(ev.get("detail") or {})
     return {"id": ev["id"], "kind": ev["kind"], "name": EVENT_NAMES.get(ev["kind"], ev["kind"]),
             "actor": ev.get("actor", ""), "at": ev["at"], "detail": detail}
+
+
+def platform_out(p: dict) -> Optional[dict]:
+    """A packet's platform action for the console (None for a plain reply): what it will do,
+    the Mac's preview, the execution and whether it can be approved now."""
+    if p.get("tool", MESSAGE_TOOL) == MESSAGE_TOOL:
+        return None
+    data = p.get("platform") or {}
+    action = data.get("action")
+    preview = data.get("preview") or {}
+    execution = data.get("execution") or None
+    verdict = preview.get("verdict") or "unavailable"
+    name = (action or {}).get("action") or p.get("tool")
+    return {
+        "name": name, "label": platforms.label(name), "platform": (platforms.ACTIONS.get(name) or {}).get("platform"),
+        "effect": (platforms.ACTIONS.get(name) or {}).get("effect", ""),
+        "caveat": (platforms.ACTIONS.get(name) or {}).get("caveat", ""),
+        "makes_link": bool((platforms.ACTIONS.get(name) or {}).get("link")),
+        "placeholders": [{"name": k, "label": platforms.PLACEHOLDER_LABELS.get(k, k)}
+                         for k in platforms.REPLY_FIELDS.get(name, {})],
+        "params": platforms.describe(action, preview.get("catalog")),
+        "requested": preview.get("requested"),
+        "verdict": verdict, "verdict_label": platforms.VERDICTS.get(verdict, verdict),
+        "problems": preview.get("problems") or [], "facts": preview.get("facts") or [],
+        "steps": preview.get("steps") or [], "previewed_at": preview.get("previewed_at"),
+        "previewing": bool(data.get("previewing")),
+        "can_execute": p["status"] == PENDING and verdict == "ready" and bool(action) and not data.get("previewing"),
+        "approved_at": data.get("approved_at"), "job_id": data.get("job_id"), "lost_at": data.get("lost_at"),
+        "execution": None if execution is None else {
+            "outcome": execution.get("outcome"),
+            "outcome_label": platforms.outcome_text(execution.get("outcome") or "UNKNOWN"),
+            "problems": execution.get("problems") or [], "facts": execution.get("facts") or [],
+            "created": execution.get("created") or {}, "steps": execution.get("steps") or [],
+            "late": bool(execution.get("late")), "finished_at": execution.get("finished_at"),
+        },
+        "acked_at": data.get("acked_at"),
+    }
 
 
 def gates_out(store: PrmStore) -> list[dict]:
@@ -138,7 +189,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
     newest = {}
     for deal in store.deals():
         newest[deal["party_id"]] = deal                # the newest deal of each creator
-    pending = list(reversed(store.packets((PENDING, APPROVED, SENDING), limit=200)))
+    pending = list(reversed(store.packets((PENDING, EXECUTING, APPROVED, SENDING), limit=200)))
     recent = store.packets((SENT, FAILED, DROPPED, SUPERSEDED, NO_REPLY), limit=limit)
     shown_cache: dict[int, dict] = {}
 
@@ -163,6 +214,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
             "waybill": p["meta"].get("waybill", ""), "system": p["meta"].get("source") == "system",
             "outcome": p["outcome"], "error": p["error"],
             "created_at": p["created_at"], "decided_at": p["decided_at"], "sent_at": p["sent_at"],
+            "tool": p.get("tool", MESSAGE_TOOL), "platform": platform_out(p),
         }
 
     def party_out(p: dict) -> dict:
@@ -199,6 +251,8 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
         "parties": [party_out(p) for p in parties.values()],
         "pending": [packet_out(p) for p in pending],
         "recent": [packet_out(p) for p in recent],
+        "platform_alerts": [packet_out(p) for p in store.platform_failures()],
+        "platform_actions": {name: spec["label"] for name, spec in platforms.ACTIONS.items()},
         "counts": store.counts(),
         "gates": gates_out(store),
         "stages": STAGES, "kinds": MESSAGE_KINDS, "modes": MODES, "shipment_states": SHIPMENT_STATES,
@@ -493,6 +547,8 @@ class PrmService:
             return True
         now = self._clock()
         status = job["status"]
+        if meta.get("op") in PLATFORM_OPS:
+            return self._on_platform_job(job, meta, now)
         if meta.get("op") == "purge":                       # the Mac's case file was cleaned (or not)
             if status in ("done", "failed", "lost"):
                 self._store.add_event(deal_id, party_id, "purge_case",
@@ -525,9 +581,12 @@ class PrmService:
         shipment = self._store.latest_shipment(deal_id)
         waybill = shipment["waybill"] if shipment else ""
         unknown = pii.unknown_tokens(draft.reply_draft, self._store.tokens(party_id))
-        newer = self._relay.store.latest_open(job["chat_id"])
+        newer = self._relay.store.latest_open(job["chat_id"], drafts_only=True)
         route, decided_at = gates.REVIEW, None
-        if not draft.reply_draft and not attachments:
+        if draft.platform is not None:
+            # A platform write: always a person's decision (8.1's gates do not apply).
+            state = SUPERSEDED if mode != COPILOT or (newer is not None and newer["id"] > job["id"]) else PENDING
+        elif not draft.reply_draft and not attachments:
             state = NO_REPLY
         elif mode != COPILOT:
             state = SUPERSEDED                         # a person has the chat
@@ -539,11 +598,17 @@ class PrmService:
                 needs_attention=draft.needs_attention, unknown_tokens=unknown, reason=draft.reason,
                 waybill=waybill, attachments=attachments)
         packet_meta = {"waybill": waybill} if draft.message_kind == "shipping_notice" and waybill else {}
+        tool, platform = MESSAGE_TOOL, None
+        if draft.platform is not None:
+            action = draft.platform.get("action")
+            tool = (action or {}).get("action") or "platform.unchecked"
+            platform = {"action": action, "preview": draft.platform}
         packet_id = self._store.add_packet(
             deal_id=deal_id, party_id=party_id, job_id=job["id"], chat_id=job["chat_id"],
             kind=draft.message_kind, text=draft.reply_draft, attachments=attachments, intent=draft.intent,
             slots=draft.slots, stage_proposal=draft.stage_proposal, needs_attention=draft.needs_attention,
-            reason=draft.reason, status=state, route=route, decided_at=decided_at, meta=packet_meta, now=now,
+            reason=draft.reason, status=state, route=route, decided_at=decided_at, meta=packet_meta,
+            tool=tool, platform=platform, now=now,
         )
         if state in (PENDING, APPROVED):
             self._store.supersede(deal_id, now, keep=packet_id)
@@ -553,6 +618,9 @@ class PrmService:
             attention.append(f"草稿要附 {len(draft.attachments_to_send)} 个文件，只收到 {len(attachments)} 个")
         if draft.message_kind == "shipping_notice" and draft.reply_draft and not gates.waybill_ok(draft.reply_draft, waybill):
             attention.append("发货通知里的单号和系统记录对不上" if waybill else "还没有运单号，发货通知不能发")
+        if draft.platform is not None and draft.platform.get("verdict") != "ready":
+            why = "；".join(draft.platform.get("problems") or []) or platforms.VERDICTS.get(draft.platform.get("verdict"), "")
+            attention.append(f"平台动作预览没通过：{why}"[:200])
         self._store.update_deal(deal_id, now, merge_slots=draft.slots,
                                 stage_proposal=draft.stage_proposal, attention="；".join(attention)[:300])
         if state == APPROVED:
@@ -629,8 +697,16 @@ class PrmService:
             if not self._store.move(packet["id"], (PENDING,), DROPPED, decided_at=now):
                 return {"ok": False, "error": "这条草稿已经处理过了"}
             return {"ok": True, "status": DROPPED}
+        if action == "execute":
+            return self._approve_execute(packet, text, now)
+        if action == "repreview":
+            return self._repreview(packet, now)
+        if action == "ack":
+            return self._ack(packet, now)
         if action not in ("send", "edit"):
             return {"ok": False, "error": f"不认识的操作 {action}"}
+        if packet.get("tool", MESSAGE_TOOL) != MESSAGE_TOOL:
+            return {"ok": False, "error": "这条草稿带平台动作：要点「批准并执行」，平台上核验成功后才会发给达人"}
         final = packet["text"] if action == "send" else str(text if text is not None else "").strip()
         if len(final) > MAX_DRAFT_CHARS:
             return {"ok": False, "error": f"最多 {MAX_DRAFT_CHARS} 个字"}
@@ -652,6 +728,221 @@ class PrmService:
             return {"ok": False, "error": "这条草稿已经处理过了（或者达人又发了新消息，草稿已过时）"}
         self._wake.set()
         return {"ok": True, "status": APPROVED}
+
+    # ── platform actions (platforms.py; the CLIs run on the Mac) ───────────
+
+    def _approve_execute(self, packet: dict, text: Optional[str], now: float) -> dict:
+        """批准并执行: the action goes to the Mac once (an approval key), the reply waits for
+        its read-back.  The checks of a reply (length, placeholders, can it be sent) come
+        first: a platform write whose reply could not go out is not started."""
+        if packet.get("tool", MESSAGE_TOOL) == MESSAGE_TOOL:
+            return {"ok": False, "error": "这条草稿没有平台动作"}
+        data = packet["platform"]
+        action, preview = data.get("action"), data.get("preview") or {}
+        if not action or preview.get("verdict") != "ready":
+            why = "；".join(preview.get("problems") or []) or platforms.VERDICTS.get(preview.get("verdict"), "")
+            return {"ok": False, "error": f"预览没通过，不能执行：{why}"}
+        if data.get("previewing"):
+            return {"ok": False, "error": "正在重新预览，等结果出来再批准"}
+        final = packet["text"] if text is None else str(text).strip()
+        if len(final) > MAX_DRAFT_CHARS:
+            return {"ok": False, "error": f"最多 {MAX_DRAFT_CHARS} 个字"}
+        problems = platforms.reply_problems(final, action)
+        if problems:
+            return {"ok": False, "error": "；".join(problems)}
+        unknown = pii.unknown_tokens(final, self._store.tokens(packet["party_id"]))
+        if unknown:
+            return {"ok": False, "error": f"草稿里有对不上的占位符：{'、'.join(unknown)}"}
+        if self._send is None:
+            return {"ok": False, "error": "机器人没有连着微信：执行成功后回复发不出去，现在不执行"}
+        if packet["attachments"] and self._send_file is None:
+            return {"ok": False, "error": "这个微信后端不能发文件（只有 Windows 数据库直读能发）"}
+        approved = {**data, "key": uuid.uuid4().hex, "approved_at": now}
+        if not self._store.move(packet["id"], (PENDING,), EXECUTING, decided_at=now, final_text=final,
+                                edited=int(final != packet["text"]), platform=approved):
+            return {"ok": False, "error": "这条草稿已经处理过了（或者达人又发了新消息，草稿已过时）"}
+        meta = {"op": "platform_execute", "party_id": packet["party_id"], "deal_id": packet["deal_id"],
+                "packet_id": packet["id"], "key": approved["key"], "action": action, "run": preview.get("run") or {}}
+        try:
+            _, job_id = self._relay.submit(packet["chat_id"], packet["chat_id"], "", kind=PRM, meta=meta,
+                                           fresh=True, input_closed=True)
+        except Exception as e:
+            logger.exception("PRM: packet %d could not be queued for the Mac", packet["id"])
+            self._store.move(packet["id"], (EXECUTING,), FAILED, outcome="platform_not_run", sent_at=now,
+                             error=f"没能排进 Mac 的任务队列，平台没有动：{e}"[:300])
+            return {"ok": False, "error": "没能排进 Mac 的任务队列，平台没有动"}
+        self._store.set_platform(packet["id"], {**approved, "job_id": job_id}, (EXECUTING,))
+        self._store.add_event(packet["deal_id"], packet["party_id"], "platform_execute",
+                              {"packet": packet["id"], "action": action["action"], "job": job_id},
+                              actor="console", now=now)
+        logger.info("PRM: packet %d approved; %s goes to the Mac as job #%d", packet["id"], action["action"], job_id)
+        return {"ok": True, "status": EXECUTING, "job": job_id}
+
+    def _repreview(self, packet: dict, now: float) -> dict:
+        """Ask the Mac for a new preview of a waiting draft's action (after a login, say)."""
+        if packet.get("tool", MESSAGE_TOOL) == MESSAGE_TOOL:
+            return {"ok": False, "error": "这条草稿没有平台动作"}
+        data = packet["platform"]
+        action = data.get("action")
+        if not action:
+            return {"ok": False, "error": "这个平台动作的参数不对，预览不了；等达人再发消息时的新草稿"}
+        if not self._store.set_platform(packet["id"], {**data, "previewing": now}, (PENDING,),
+                                        expect=lambda current: not current.get("previewing")):
+            return {"ok": False, "error": "这条草稿已经处理过了，或者已经在重新预览"}
+        meta = {"op": "platform_preview", "party_id": packet["party_id"], "deal_id": packet["deal_id"],
+                "packet_id": packet["id"], "action": action}
+        try:
+            _, job_id = self._relay.submit(packet["chat_id"], packet["chat_id"], "", kind=PRM, meta=meta,
+                                           fresh=True, input_closed=True)
+        except Exception:
+            logger.exception("PRM: a new preview of packet %d could not be queued", packet["id"])
+            self._store.set_platform(packet["id"], {**data, "previewing": None}, (PENDING,))
+            return {"ok": False, "error": "没能排进 Mac 的任务队列"}
+        self._store.add_event(packet["deal_id"], packet["party_id"], "platform_preview",
+                              {"packet": packet["id"], "job": job_id}, actor="console", now=now)
+        return {"ok": True, "status": PENDING, "job": job_id}
+
+    def _ack(self, packet: dict, now: float) -> dict:
+        """An operator has dealt with a platform action that ended red."""
+        if packet.get("tool", MESSAGE_TOOL) == MESSAGE_TOOL or packet["status"] != FAILED:
+            return {"ok": False, "error": "只有没完成的平台动作能标为已处理"}
+        data = packet["platform"]
+        if data.get("acked_at") or not self._store.set_platform(packet["id"], {**data, "acked_at": now}, (FAILED,)):
+            return {"ok": False, "error": "已经标过了"}
+        self._store.add_event(packet["deal_id"], packet["party_id"], "platform_ack", {"packet": packet["id"]},
+                              actor="console", now=now)
+        return {"ok": True}
+
+    def _on_platform_job(self, job: dict, meta: dict, now: float) -> bool:
+        """The Mac's answer to a platform job: a new preview, or the execution's outcome."""
+        try:
+            packet = self._store.packet(int(meta.get("packet_id")))
+        except (TypeError, ValueError):
+            packet = None
+        if packet is None or packet.get("tool", MESSAGE_TOOL) == MESSAGE_TOOL:
+            return True
+        status = job["status"]
+        if meta.get("op") == "platform_preview":
+            if status in ("pending", "running"):
+                return True
+            data = packet["platform"]
+            block = None
+            if status == "done":
+                try:
+                    block = platforms.check_block(json.loads(job.get("result_text") or ""))
+                except (ValueError, platforms.ActionError):
+                    block = None
+            if block is None:
+                why = {"lost": "Mac 失联了", "cancelled": "任务被取消了"}.get(status) or _job_error(job)
+                preview = {**(data.get("preview") or {}), "problems": [f"重新预览没做成：{why}"[:200]]}
+                try:
+                    block = platforms.check_block(preview)
+                except platforms.ActionError:
+                    block = None
+            new = {**data, "previewing": None, **({"preview": block} if block else {})}
+            self._store.set_platform(packet["id"], new, (PENDING,))
+            return True
+        # platform_execute
+        data = packet["platform"]
+        if str(meta.get("key") or "") != str(data.get("key") or ""):
+            logger.warning("PRM: job #%d answers another approval of packet %d; ignored", job["id"], packet["id"])
+            return True
+        if status == "lost":
+            if packet["status"] == EXECUTING:
+                self._store.set_platform(packet["id"], {**data, "lost_at": now}, (EXECUTING,))
+                logger.warning("PRM: the Mac went silent while executing packet %d; waiting for it", packet["id"])
+            return True
+        if status in ("pending", "running"):
+            return True
+        record = None
+        try:
+            record = platforms.check_record(json.loads(job.get("result_text") or ""))
+        except (ValueError, platforms.ActionError):
+            record = None
+        if record is None:
+            if status == "cancelled":
+                record = platforms.record("UNKNOWN", ["执行任务被取消了；如果 Mac 已经开始执行，请到平台后台核对"])
+            elif status == "failed":
+                record = platforms.record("NOT_RUN", [f"Mac 没有执行：{_job_error(job)}"[:300]])
+            else:
+                record = platforms.record("UNKNOWN", ["Mac 的执行结果读不出来；请到平台后台核对"])
+        self._platform_finished(packet, record, now, cancelled=status == "cancelled")
+        return True
+
+    def _platform_finished(self, packet: dict, record: dict, now: float, cancelled: bool = False) -> None:
+        """VERIFIED_SUCCESS: the reply, link filled in, is approved for the sender; else red."""
+        data = packet["platform"]
+        action = data.get("action") or {}
+        outcome = record["outcome"]
+        executed = {**data, "execution": record, "lost_at": data.get("lost_at")}
+        if packet["status"] != EXECUTING:
+            # A late answer (the packet was given up on): kept for the operators, nothing sent.
+            if packet["status"] == FAILED:
+                record["late"] = True
+                self._store.set_platform(packet["id"], {**executed, "acked_at": None}, (FAILED,))
+                self._store.update_deal(packet["deal_id"], now, attention=(
+                    f"#{packet['id']} 平台动作的结果晚到了：{platforms.outcome_text(outcome)}；回复没有自动发，请运营处理")[:300])
+            return
+        event = {"packet": packet["id"], "action": action.get("action"), "outcome": outcome,
+                 "link": (record.get("created") or {}).get("link", "")}
+        missing = []
+        if outcome == platforms.VERIFIED and not cancelled:
+            final, missing = platforms.fill_reply(
+                packet["final_text"] if packet["final_text"] is not None else packet["text"], action,
+                record.get("created"))
+            if not missing:
+                if self._store.move(packet["id"], (EXECUTING,), APPROVED, final_text=final, decided_at=now,
+                                    platform=executed):
+                    self._store.add_event(packet["deal_id"], packet["party_id"], "platform_result", event,
+                                          actor="mac", now=now)
+                    logger.info("PRM: packet %d %s verified on the platform; the reply goes out", packet["id"],
+                                action.get("action"))
+                    self._wake.set()
+                return
+        why = "；".join(record.get("problems") or [])
+        if outcome == platforms.VERIFIED and missing:
+            error = (f"平台上已经核验成功，但回复里的 {'、'.join(missing)} 平台没有给出，回复没有自动发出；"
+                     "请核对后自己回达人")
+        elif outcome == platforms.VERIFIED:        # verified, but the job was cancelled on the way
+            error = "平台上已经核验成功，但执行任务中途被取消了，回复没有自动发出；请核对后自己回达人"
+        else:
+            error = (f"平台动作没有核验成功（{outcome}：{platforms.outcome_text(outcome)}），没有发微信"
+                     + (f"：{why}" if why else "") + "。请到平台后台核对后自己处理，系统不会重试")[:500]
+        if self._store.move(packet["id"], (EXECUTING,), FAILED, outcome=f"platform_{outcome.lower()}", sent_at=now,
+                            error=error, platform=executed):
+            self._store.add_event(packet["deal_id"], packet["party_id"], "platform_result", event, actor="mac", now=now)
+            self._store.update_deal(packet["deal_id"], now, attention=f"#{packet['id']} {error}"[:300])
+            logger.warning("PRM: packet %d %s ended %s; nothing sent", packet["id"], action.get("action"), outcome)
+
+    def sweep_executing(self) -> int:
+        """Executions that cannot finish any more: a job the Mac has not taken within
+        APPROVED_EXPIRE_SEC is cancelled (nothing was run); one whose Mac went silent for
+        PLATFORM_LOST_GRACE_SEC, or whose job is gone, is given up on.  Returns how many."""
+        done = 0
+        now = self._clock()
+        for packet in self._store.packets((EXECUTING,), limit=100):
+            data = packet["platform"]
+            job = self._relay.store.get(int(data.get("job_id") or 0)) if data.get("job_id") else None
+            approved = float(data.get("approved_at") or packet["decided_at"] or now)
+            record = None
+            if job is None:
+                if now - approved > 60:
+                    record = platforms.record("UNKNOWN", ["找不到执行任务了；请到平台后台核对"])
+            elif job["status"] == "pending" and now - approved > APPROVED_EXPIRE_SEC:
+                if self._relay.store.cancel_if_pending(job["id"], now):
+                    record = platforms.record("NOT_RUN", [f"Mac {APPROVED_EXPIRE_SEC // 60} 分钟没有接手，平台没有动"])
+            elif job["status"] == "cancelled" and not job.get("result_text"):
+                record = platforms.record("NOT_RUN", ["执行任务在 Mac 接手前被取消了，平台没有动"])
+            elif data.get("lost_at") and job["status"] in ("lost", "running"):
+                if job["status"] == "running" and float(job.get("heartbeat_at") or 0) > float(data["lost_at"]):
+                    self._store.set_platform(packet["id"], {**data, "lost_at": None}, (EXECUTING,))   # it is back
+                elif now - float(data["lost_at"]) > PLATFORM_LOST_GRACE_SEC:
+                    record = platforms.record("UNKNOWN", [
+                        f"Mac 失联超过 {PLATFORM_LOST_GRACE_SEC // 60} 分钟，不知道平台上执行了没有；请到平台后台核对"])
+            if record is not None:
+                self._platform_finished(self._store.packet(packet["id"]), record, now)
+                done += 1
+        return done
 
     def _waybill(self, packet: dict) -> str:
         """The system's record: the deal's latest waybill (a notice of an earlier one is refused)."""
@@ -680,6 +971,7 @@ class PrmService:
             self._wake.clear()
 
     def tick(self) -> None:
+        self.sweep_executing()
         self.send_approved()
         self.send_holding_replies()
         now = self._clock()
@@ -739,20 +1031,24 @@ class PrmService:
                 break
         now = self._clock()
         if problem:
+            if packet.get("tool", MESSAGE_TOOL) != MESSAGE_TOOL:
+                problem = f"平台动作已经核验成功，但回复没发出去：{problem}；请在微信里手动发给达人"
             self._store.move(packet["id"], (SENDING,), FAILED, outcome="failed", sent_at=now, error=problem)
             logger.warning("PRM: packet %d failed: %s", packet["id"], problem)
-            self._update_gate(packet["kind"], packet["route"], now)
+            self._update_gate(packet, now)
             return 0
         # The backend says the keystrokes went through; seeing the line in WeChat confirms it
         # (often already, before the send returned).
         self._store.mark_sent(packet["id"], now)
         logger.info("PRM: packet %d sent (%d chars, %d file(s))", packet["id"], len(text), len(packet["attachments"]))
-        self._update_gate(packet["kind"], packet["route"], now)
+        self._update_gate(packet, now)
         return 1
 
-    def _update_gate(self, kind: str, route: str, now: float) -> None:
-        """After a person's decision went out: has the kind earned ``auto`` (8.1)?"""
-        if route != gates.REVIEW:
+    def _update_gate(self, packet: dict, now: float) -> None:
+        """After a person's decision went out: has the kind earned ``auto`` (8.1)?  A platform
+        action's reply never counts (it is always reviewed)."""
+        kind, route = packet["kind"], packet["route"]
+        if route != gates.REVIEW or packet.get("tool", MESSAGE_TOOL) != MESSAGE_TOOL:
             return
         gate = self._store.gate(kind)
         if gate is None or gate["locked"] or gate["route"] == gates.AUTO:
@@ -835,6 +1131,16 @@ class PrmService:
         logger.info("PRM: deal %d done %d days ago (delivered or quiet); receiving details cleared (%s)", deal["id"],
                     self._retention_days, ", ".join(f"{k} {v}" for k, v in counts.items()))
         return counts
+
+
+def _job_error(job: dict) -> str:
+    """Why a relay job failed, from its result (the worker's ``error``)."""
+    try:
+        extra = json.loads(job.get("result_json") or "{}")
+    except ValueError:
+        extra = {}
+    extra = extra if isinstance(extra, dict) else {}
+    return str(extra.get("error") or job.get("result_text") or "没有返回内容")[:200]
 
 
 def apply_deal_action(store: PrmStore, action: str, data: dict, *, now: float, takeover_sec: float) -> dict:
