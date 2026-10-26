@@ -465,7 +465,7 @@ todo_delete_keywords: list[str] = [
 | `_capture_media_screenshot(group_name)` | 视觉问答用的聊天窗口截图（持 `_window_lock`，与发送互斥） | `group_name: str` | `str` |
 | `_log_delivery(group_name, reply, success)` | 静态方法："Reply sent" / "Reply FAILED" 日志（直接发送和发送队列共用，文字和以前相同） | — | `None` |
 | `_send_file_part(group_name, path)` | 一张表情包：和文字气泡一样持 `_window_lock`，调 `send_file_to_chat`；`_handle_message` 把它作为 `send_file` 交给 `BubbleSender.deliver` | `group_name: str, path: str` | `bool` |
-| `_standardize(msg, group_name, talker)` | 标准化WCDB原始消息 | `msg: dict, group_name: str, talker: str` | `dict \| None` |
+| `_standardize(msg, group_name, talker)` | 标准化WCDB原始消息；文字消息（`local_type=1`）先试 zstd 解压：微信 4 把较长的文字压缩成十六进制存（`28b52ffd…`），不解压会被当成图片（读回比对对不上、长任务丢字），解不开的长十六进制才按图片处理 | `msg: dict, group_name: str, talker: str` | `dict \| None` |
 | `_send_and_confirm(group_name, talker, content)` | 通过键盘发送并确认 | `group_name, talker, content` | `bool` |
 | `_get_voice()` | 懒初始化语音识别管道 | 无 | `VoicePipeline \| None \| False` |
 | `_try_voice(msg)` | 尝试语音识别 | `msg: dict` | `str \| None` |

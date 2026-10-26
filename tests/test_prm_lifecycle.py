@@ -496,6 +496,32 @@ class FakeClient:
         return {u: self.resolve_nickname(u) for u in usernames}
 
 
+def test_a_long_reply_read_back_compressed_confirms_it_and_takes_nothing_over(bot, clock):
+    """Windows, 2026-10-26: WeChat stored the 124-character draft zstd compressed; it was read
+    back as a picture and the chat was taken over.  Read back through the backend now."""
+    import zstandard
+    long_reply = "好的～帮你核对一下收件信息：收件人测试，电话〈手机1〉，地址上海市浦东新区测试路1号2栋301。没问题回我一下哦～" * 2
+    packet = drafted(bot, draft(reply_draft=long_reply))
+    bot.prm.decide(packet["id"], "send")
+    bot.prm.send_approved()
+    sent_text = bot.texts[-1][1]
+    assert "13812345678" in sent_text
+    raw = [{"sender_username": "wxid_bot", "local_type": 1, "create_time": int(clock.now), "local_id": "z1",
+            "message_content": zstandard.ZstdCompressor().compress(sent_text.encode("utf-8")).hex()}]
+    backend = WcdbBackend(bot_display_name="机器人", groups=["*"],
+                          config=BotConfig(private_chat_enabled=True, chat_persona_profile="custom"))
+    backend._client = FakeClient(raw)
+    backend._chat_is_group[CREATOR] = False
+    backend._running = True
+    backend.set_private_filter(bot.prm.is_party_chat)
+    backend.set_own_message_hook(bot.prm.on_own_message)
+    backend._dispatch_message = lambda msg, callback: None
+    backend._poll_group("小美", CREATOR, Mock())
+    assert bot.prm.store.packet(packet["id"])["outcome"] == "sent_confirmed"
+    assert bot.prm.store.deal(1)["mode"] == "copilot"
+    assert not [e for e in bot.prm.store.events(1) if e["kind"] in ("takeover", "operator_message")]
+
+
 def test_own_lines_in_a_creators_chat_reach_the_hook_and_nowhere_else():
     now = int(time.time())
     raw = [{"sender_username": who, "message_content": text, "local_type": 1, "create_time": now,
