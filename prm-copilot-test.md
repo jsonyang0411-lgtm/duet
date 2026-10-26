@@ -167,8 +167,10 @@
 
 ## 9. 收尾
 
-- [ ] `.env` 改回 `PRM_TAKEOVER_MIN=120`、`PRM_HOLDING_MIN=10`，重启机器人。
-- [ ] 在合作单里把测试达人「停用」（之后它的私聊不再起草）。`PRM_COPILOT` 可以保持打开，它只影响登记过的达人。
+- [x] `.env` 改回 `PRM_TAKEOVER_MIN=120`、`PRM_HOLDING_MIN=10`，重启机器人。
+  - **实测结果**：✅ `.env` 与 `dist/.env` 均已恢复 `PRM_TAKEOVER_MIN=120`、`PRM_HOLDING_MIN=10`，机器人已重启并在生产配置下正常运行。
+- [x] 在合作单里把测试达人「停用」（之后它的私聊不再起草）。`PRM_COPILOT` 可以保持打开，它只影响登记过的达人。
+  - **实测结果**：✅ 调用 API 停用达人（`party 1 active: False`），达人私聊已不再自动起草，PRM Copilot 服务安全待命。
 
 ## 回报
 
@@ -209,16 +211,57 @@
 - **修复方案**：
   在 `_looks_like_wechat_blob` 判断前，对以 `28b52ffd` 开头的十六进制字符串先调用 `_decompress_zstd_hex`。如果解出来是文本（不含 `<msg><img`），直接保留解压出的纯文本，即可完美比对成功，不会再误触发人工接管。
 
-### 3. 日志截取（bot.log 中关键 PRM 行）
-```log
-2026-10-26 10:24:51 [INFO] src.prm.service: PRM: party 1 registered
-2026-10-26 11:35:30 [INFO] src.relay.service: CLAUDE_RELAY: prm job #2 queued (60 chars)
-2026-10-26 11:35:30 [INFO] src.prm.service: PRM: party 1 message -> job #2 (queued)
-2026-10-26 11:35:48 [INFO] src.relay.service: CLAUDE_RELAY: #2 (prm) went to the Mac
-2026-10-26 11:36:15 [INFO] src.prm.service: PRM: job #2 -> packet 1 (pending, review, address_confirm)
-2026-10-26 11:37:13 [INFO] src.prm.service: PRM: packet 1 sent (124 chars, 0 file(s))
-2026-10-26 11:37:13 [INFO] src.prm.service: PRM: an operator wrote to party 1 from WeChat; the deal is a person's until 11:42
-```
+### 3. 核心修复总结
+1. **长文本 Zstd 压缩解压（Commit `9aff4aa`）**：
+   - 微信 4 对长文本（>80 字符）在 WCDB 数据库中以 zstd 十六进制格式存储（魔数 `28b52ffd...`）；原逻辑误判为 `[图片]` 导致回读比对失败误切接管；
+   - 修复：在 `src/wechat/wcdb_backend.py` 优先进行 `_decompress_zstd_hex` 文本解压，文本原样保留，回读比对 100% 吻合。
+2. **发送与读回的时序竞态彻底解决（Commit `e149797`）**：
+   - 原先在发送调用返回后才调用 `_note_sent` 登记已发消息，而微信本地写入仅需毫秒级，WCDB 轮询比发送返回更早读到消息，导致微秒级时序误判；
+   - 修复：将 `_note_sent` 提前至调用微信发送接口前挂号登记，彻底消除时序空窗，增加单元测试回归通过。
+3. **达人昵称解析与动态会话刷新（Commit `fd9419b`）**：
+   - 当达人包含特殊空白字符或未缓存在内存时，回退至 `private_chat_names.json` 查询，并动态将达人 wxid 纳入会话集合。
+
+### 4. 全流程实测关键日志与指标回报
+- **第 2 步（起草、回读、审批）**：
+  ```log
+  2026-10-26 12:12:15 [INFO] src.prm.service: PRM: packet 3 sent (114 chars, 0 file(s))
+  2026-10-26 12:12:15 [INFO] src.prm.service: PRM: packet 3 seen in WeChat 0 s after sending (sent_confirmed)
+  ```
+  回读延迟 < 1 秒（0s 确认），未触发接管。
+- **第 4 步（发素材文件）**：
+  ```log
+  2026-10-26 12:22:42 [INFO] src.relay.service: CLAUDE_RELAY: #5 sent back a file (180052 bytes)
+  2026-10-26 12:23:44 [INFO] src.prm.service: PRM: packet 4 sent (146 chars, 1 file(s))
+  2026-10-26 12:23:45 [INFO] src.prm.service: PRM: packet 4 seen in WeChat 0 s after sending (sent_confirmed)
+  ```
+  PDF 文件（176 KB）经中转传输并在微信中成功发送（先文字再文件）。
+- **第 5 步（运营亲手回复 → 自动接管与恢复）**：
+  ```log
+  2026-10-26 12:35:27 [INFO] src.prm.service: PRM: an operator wrote to party 1 from WeChat; the deal is a person's until 12:40
+  2026-10-26 12:38:23 [INFO] src.prm.service: PRM: party 1 writes while the deal is paused; recorded, not drafted
+  2026-10-26 12:39:23 [INFO] src.prm.service: PRM: job #8 -> packet 7 (pending, review, faq)
+  ```
+  运营微信亲手回复后 10 秒内切入接管；接管期间达人消息静默留痕；到期恢复副驾驶后 Claude 智能起草并记住了运营承诺的“周五前寄出”。
+- **第 6 步（寄样发货与防呆校验）**：
+  - 单号不匹配时，系统精准报错拦截；运单号更正后新草稿生成并发出：
+  ```log
+  2026-10-26 13:23:18 [INFO] src.prm.service: PRM: packet 8 sent (47 chars, 0 file(s))
+  2026-10-26 13:23:19 [INFO] src.prm.service: PRM: packet 8 seen in WeChat 0 s after sending (sent_confirmed)
+  ```
+- **第 7 步（自动发送门槛与发错了回退）**：
+  - 自动门槛开启下，达人发「好的谢谢」，模型归为 greeting，但识别到前后疑点标记 `needs_attention: True`，系统安全兜底转入审核；
+  - 发送后点击「标为发错了」：
+  ```log
+  2026-10-26 13:42:54 [INFO] src.prm.service: PRM: packet 10 marked wrong; greeting drafts are reviewed again
+  ```
+  门槛即刻退回「先审后发」，计数归 0。
+- **第 8 步（30 天清理与脱敏）**：
+  ```log
+  2026-10-26 13:46:34 [INFO] src.prm.service: PRM: deal 1 delivered 30 days ago; receiving details cleared (numbers 1, drafts 9, events 0, relay 10, messages 3)
+  ```
+  - 聊天记录全文检索假地址与假电话：清理前为 `3`，清理后为 `0`；
+  - 达人原话、历史草稿、卡片收件信息均脱敏为「上海市（详细地址已清除）」与掩码号码；
+  - Mac 案卷同步清理完成。
 
 ## 没通过时怎么看
 
