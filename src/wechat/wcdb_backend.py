@@ -866,6 +866,17 @@ class WcdbBackend(AbstractWeChatBackend):
         for name, tid in self._talker_ids.items():
             if tid == talker_id:
                 return name
+        if not talker_id.endswith("@chatroom"):
+            names_file = Path("data/private_chat_names.json")
+            if names_file.is_file():
+                try:
+                    data = json.loads(names_file.read_text(encoding="utf-8"))
+                    if talker_id in data:
+                        display = data[talker_id]
+                        self._add_talker(display, talker_id, is_group=False)
+                        return display
+                except Exception:
+                    pass
         return ""
 
     # ── OCR fallback ─────────────────────────────────────────────────
