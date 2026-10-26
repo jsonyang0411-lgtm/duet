@@ -477,6 +477,11 @@ class InfluencerBusinessHandler:
                 "error": f"【{packet.requested_product}】现在没有库存，不能建单；可以先驳回，或者等补货后再批",
             }
 
+        # 佣金绑不上的问题（千帆商品对照表里没有、达人账号是短链等）在建单之前发现，免得出库单建了才失败
+        problem = self.xhs.commission_problem(packet.requested_product, packet.sku_id, packet.xhs_account)
+        if problem:
+            return {"success": False, "error": f"小红书佣金现在绑不上：{problem}"}
+
         # 先占住这张单：两个"通过"同时到达时，只有一个能把它从待审批改成执行中
         if not self.store.transition(
             packet_id, GateStatus.PENDING, GateStatus.EXECUTING,
@@ -509,6 +514,7 @@ class InfluencerBusinessHandler:
                 sku_id=packet.sku_id,
                 rate=packet.proposed_commission_rate,
                 idempotency_key=packet.packet_id,
+                product_name=packet.requested_product,
             )
         except Exception as exc:
             comm_res = {"success": False, "error": str(exc)}

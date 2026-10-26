@@ -1,6 +1,6 @@
 # 交接文档：达人商务智能体
 
-> 最后更新：2026-10-25（v25：达人消息按 90 天清除已做（D15）；v24："不等同事也能做"的 5 件事都做完了，备忘录已按新架构更新；第 5 项只差接收同事转发的那一层，要同事的消息格式；B27 待决定）
+> 最后更新：2026-10-26（v26：小红书 CLI 已接上（第 7 节），D16、D17；v25：达人消息按 90 天清除已做（D15）；v24："不等同事也能做"的 5 件事都做完了，备忘录已按新架构更新；第 5 项只差接收同事转发的那一层，要同事的消息格式；B27 待决定）
 > 读者：接手这个项目的 AI 窗口，以及参与开发的同事。
 > 规矩：新窗口开工前先读完本文件；收工前更新第 3 节（当前状态）、第 5 节（计划进度）和第 9 节（变更记录）。
 
@@ -232,25 +232,24 @@ D8–D11 是第 6 项设计里的 4 个问题，2026-10-24 用户回复"默认"�
 - `.gitignore` 已经排除了 `.env.macos`、`data/messages.db` 和日志文件。
 - 控制台"保存配置"时用 `_write_env_updates` 写 `.env.macos`，会保留文件里原有的其他行，所以手动加的 `INFLUENCER_*` 变量不会被冲掉。
 
-## 7. 小红书 CLI 接口约定（草案，命令名和字段需同事确认）
+## 7. 小红书 CLI（已交付，2026-10-26）
 
-原则：**读操作可以自动调用；写操作只能在审批通过后调用。**
+CLI 是同事的千帆商家后台命令行工具：私有仓库 `doupi-org/xiaohongshu-engineering`（`git clone git@github.com:doupi-org/xiaohongshu-engineering.git`），用 `node bin/xhs.mjs <命令>` 运行，要 Node ≥ 22，零依赖。它通过一个带调试端口的 Chrome（单独的用户目录）发请求，那个 Chrome 里要登录千帆；登录过期退出码 77，平台风控会停下、不重试。启动 Chrome 和登录的步骤见它的 README 第 2–4 步。
 
-| 用途 | 命令（示意） | 类型 | 适配器 |
+原则不变：**读操作可以自动调用；写操作只能在审批通过后调用。** 老板的要求（10-26）是"我们自己做自己的"：运营在我们控制台批准一张单，就当作这一单的授权，不走它仓库里给开发测试用的书面约定流程。
+
+| 用途 | 实际命令 | 类型 | 适配器 |
 |---|---|---|---|
-| 查达人数据 | `xhs creator info --uid <小红书号> --json` | 读 | 已实现 |
-| 设置专属佣金 | `xhs commission set --uid <小红书号> --sku <SKU> --rate <比例> --idempotency-key <审批单号> --json` | 写 | 已实现 |
-| 生成商品链接 | `xhs product-link create --uid <小红书号> --sku <SKU> --idempotency-key <审批单号> --json` | 写 | 不做（D17）：CLI 没有这个命令，达人在选品里自己选 |
+| 查达人（粉丝数、买手 user_id） | `direct-plans --find-buyer <小红书号或昵称> --raw`：返回 `buyers[]`，字段 `user_id`、`nick_name`、`fan_cnt`、`note_cnt`、`avatar`；查不到点赞（D16） | 读 | 已实现。主页链接里的 24 位 ID 就是 user_id；按它搜索时只认 user_id 相同的那一行；找不到或找到多位都算"待核实" |
+| 绑专属佣金（定向计划） | `direct-plan --action create --name 寄样-<审批单号> --buyer-id <user_id> --item <千帆商品ID>:<佣金%> --long-term --execute`：先读状态、只发一次、读回；`summary.overall` 是 `VERIFIED` 且退出码 0 才算成功，计划组 ID 在 `items[0].targetId` | 写 | 已实现。同名计划 CLI 拒绝再建（`STATE_CONFLICT`），所以同一张审批单不会绑两次；`INDETERMINATE` 等不确定的结果提示先到千帆核对、不要重试 |
+| 生成商品链接 | 没有这个命令 | — | 不做（D17）：达人在小红书选品里自己选 |
 
-通用约定：
+还要知道的：
 
-- 成功时退出码为 0，失败时为非 0。stdout 只输出 JSON，日志写到 stderr。
-- 写操作必须支持幂等键：同一个审批单号重复调用，只生效一次。
-- 支持 `--dry-run`：只校验、不执行，方便联调。
-- 单次调用不超过 30 秒。
-- 小红书账号由达人提供，或由运营绑定，不能用微信 ID 或昵称代替。
-
-CLI 交付之前，我们按这份约定写一个桩程序，通过配置显式指向它，不走自动 mock。
+- 千帆商品 ID 和聚水潭 SKU 不是一回事，靠对照表 `data/xhs_items.json`（模板 `docs/xhs_items.example.json`）。批准时先检查对照表和达人账号，佣金绑不上就不建出库单。
+- 定向计划的有效期按页面默认的"长期有效"；以后要按天数过期，改 `xhs_cli.set_exclusive_commission` 的 `--long-term` 为 `--start/--end`。
+- 定向计划对达人有约束力，佣金由我们出；"终止"不可撤销。它的 7 个写操作 10-20 在真实账号上各验证过一次（它仓库的 docs/VALIDATION.md F68、F69），但都是在有 Chrome 的情况下，"只用会话文件、不开 Chrome"的写没验证过。
+- 还没在我们这边对真实千帆跑过：要在运行 webot 的电脑上开调试 Chrome 并登录千帆，由用户操作。
 
 ## 8. 环境与命令
 
@@ -262,7 +261,10 @@ CLI 交付之前，我们按这份约定写一个桩程序，通过配置显式�
 |---|---|
 | `INFLUENCER_MOCK` | 设为 `1` 时打开模拟模式（D6）。不设的话，聚水潭和小红书 CLI 都走真实调用 |
 | `INFLUENCER_CHAT_IDS` | 逗号分隔的私聊 `chat_id`，机器人启动时并进名单（只增不删，D11）。名单以控制台为准，这个变量可以不设 |
-| `XHS_CLI_PATH` | 小红书 CLI 的路径，默认是 `xhs` |
+| `XHS_CLI_PATH` | 小红书 CLI 仓库的目录（或其中的 `bin/xhs.mjs`），不设就用不了 |
+| `XHS_NODE_PATH` | node 的路径（要 22 以上），默认在 PATH 里找 |
+| `INFLUENCER_XHS_ITEMS_FILE` | 产品 → 千帆商品 ID 的对照表，默认 `data/xhs_items.json`；模板 `docs/xhs_items.example.json` |
+| `XHS_CDP_ENDPOINT` | CLI 自己读的：调试 Chrome 的地址，默认 `http://127.0.0.1:9222` |
 | `INFLUENCER_MAX_SAMPLES_PER_PERSON`、`INFLUENCER_SAMPLE_WINDOW_DAYS`、`INFLUENCER_MAX_SAMPLES_PER_DAY` | 寄样上限（D5）：每位达人在多少天内（默认 30）最多几单、所有达人每天一共最多几单。不设就不限。算的是已执行和执行中的单；超过上限的单在审批卡上标出来，不能通过 |
 | `INFLUENCER_REPLY_DELAY`、`INFLUENCER_SEND_MIN_INTERVAL`、`INFLUENCER_SEND_MAX_PER_HOUR`、`INFLUENCER_QUIET_HOURS` | 防封（`send_policy.py`）：回复前等待的秒数范围（默认 `2-6`，`0` 不等）；主动发送两条之间至少隔几秒（默认 30）、每小时最多几条（默认 20）、夜间不发的时段（默认 `23-8`，`0` 不设） |
 | `INFLUENCER_BRAIN` | 设为 `claude` 时，达人的消息交给 `claude -p` 回复（谈佣金仍由代码处理，出错退回规则流程）。不设就只用规则流程 |
@@ -319,3 +321,4 @@ CLI 交付之前，我们按这份约定写一个桩程序，通过配置显式�
 - 2026-10-25 v23：第 4 件日志打码检查完成（B14 已修）：新增 `src/pii.py`，改了原项目共享代码的日志和追踪（router、routing/steps、decision_trace、wcdb_backend、voice/pipeline），CODEBASE_REFERENCE 新增 2.47 节。新发现 B27（messages 表永久存消息原文；extract_key 日志打印密钥前 16 位），等用户决定。新增 `tests/test_pii.py`。完整测试 3568 个通过、1 个跳过。
 - 2026-10-25 v24：给 `claude -p` 加了 `--max-turns 6`（`CLAUDE_MAX_TURNS`），用真实调用验证过到了上限返回 `error_max_turns`、处理器退回规则流程。第 5 件备忘录更新完成：按新架构（Windows 收发、Mac 处理、Claude 回复）重写第一、二、三节，其他各节同步，网页版重新生成。
 - 2026-10-25 v25：用户定 D15：达人消息都按 90 天清除。B27 第一件已修（见问题表），新增 `tests/test_influencer_chat_retention.py`，用原项目真实建表语句和真实全文索引验证，并确认去掉索引清理后测试会失败。完整测试 3573 个通过、1 个跳过。
+- 2026-10-26 v26：同事交付小红书 CLI。读了它的 README、COMMANDS 和 direct-plan / direct-plans 的代码，第 7 节按实际命令重写。用户定 D16（资质只看粉丝）、D17（不发推广链接）、对照表用配置文件、有效期按长期；老板的要求是"我们自己做自己的"，控制台批准就是授权。`xhs_cli.py` 重写：查达人走 `--find-buyer`，绑佣金走定向计划，批准时先查对照表和账号，佣金绑不上就不建出库单。新增 `docs/xhs_items.example.json`，`tests/test_influencer_clients.py` 重写（用 /bin/sh 冒充 node）。还没对真实千帆跑过。老板另提了"先人工批准、让 AI 学、一段时间后 AI 接手审批"，设计待确认。

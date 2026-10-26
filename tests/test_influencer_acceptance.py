@@ -71,6 +71,9 @@ class FakeXHS:
         self.stats_calls.append(xhs_uid)
         return dict(self.stats)
 
+    def commission_problem(self, product_name, sku_id, xhs_account):
+        return ""
+
     async def set_exclusive_commission(self, **kwargs):
         self.commission_calls.append(kwargs)
         return {"success": True, "plan_id": f"PLAN-{len(self.commission_calls)}"}

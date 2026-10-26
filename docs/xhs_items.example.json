@@ -1,0 +1,4 @@
+{
+  "_说明": "复制到 data/xhs_items.json（或用环境变量 INFLUENCER_XHS_ITEMS_FILE 指定位置）。左边是审批单上的商品名（聚水潭返回的商品名）或聚水潭 SKU，右边是千帆后台里这款商品的商品 ID（可以用 xhs items --keyword <商品名> 查）。以 _ 开头的键会被忽略。",
+  "VC精华液": "在这里填千帆商品 ID"
+}
