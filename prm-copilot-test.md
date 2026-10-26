@@ -77,10 +77,10 @@
     - `运营（微信里） 运营亲手回复：[10-26 12:26] 我是运营，样品着周五前寄出`
     - `系统 运营亲手回复，自动接管：{'until': 1792989083.9022396}`
   - `bot.log` 完整记录：`PRM: an operator wrote to party 1 from WeChat; the deal is a person's until 12:31`。
-- [ ] 接管期间，达人测试号发 `好的，那我等单号`。期望：
-  - 没有新草稿，也不会收到「稍等」。
-  - 操作记录多一条「达人 接管期间达人的消息：…」。
-  - `bot.log` 有 `PRM: party 1 writes while the deal is human; recorded, not drafted`。
+- [x] 接管期间，达人测试号发 `好的，那我等单号`：
+  - 待审批页面无新草稿，达人端未收到任何打扰回复或「稍等」消息。
+  - 操作记录顺利增加：`达人 接管期间达人的消息：[10-26 12:29] 好的，那我等单号`。
+  - `bot.log` 完整记录：`PRM: party 1 writes while the deal is human; recorded, not drafted`。
 - [ ] 等过了「到 …」那个时间，达人测试号发 `对了，素材什么时候发？`。期望：
   - 出现新草稿，操作记录有「系统 人工接管到期」。
   - **Mac：** `deals/1.md` 的「承诺过的事」里记下了运营说的「这周五前寄出」。
