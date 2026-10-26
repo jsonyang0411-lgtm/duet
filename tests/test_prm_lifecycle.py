@@ -543,3 +543,21 @@ def test_own_lines_in_a_creators_chat_reach_the_hook_and_nowhere_else():
         assert heard == expect and dispatched == [CREATOR]                    # never to the router
     backend.set_own_message_hook(lambda msg: 1 / 0)                           # a broken hook: polling goes on
     backend._tell_own_message({"chat_id": "wxid_friend", "is_group": False})
+
+def test_send_race_condition_notes_sent_before_wechat_reads_back(bot, clock):
+    """If WeChat's WCDB polling detects the sent message or attachment during sending
+    (before the send action returns), it must be recognised as the bot's own send,
+    confirm the packet, and NOT trigger manual takeover."""
+    packet = drafted(bot, draft(reply_draft="这是预先登记的回复"))
+    bot.prm.decide(packet["id"], "send")
+
+    orig_send = bot._send
+    def simulated_send(chat_id, text):
+        bot.prm.on_own_message({"chat_id": chat_id, "content": text, "msg_type": 1, "timestamp": clock.now})
+        return orig_send(chat_id, text)
+
+    bot.prm._send = simulated_send
+    bot.prm.send_approved()
+    assert bot.prm.store.packet(packet["id"])["outcome"] == "sent_confirmed"
+    assert bot.prm.store.deal(1)["mode"] == "copilot"
+    assert not [e for e in bot.prm.store.events(1) if e["kind"] in ("takeover", "operator_message")]

@@ -355,10 +355,11 @@ class PrmService:
         if matched:
             if packet_id is not None:
                 packet = self._store.packet(packet_id)
-                if packet is not None and packet["outcome"] == "sent_unconfirmed":
+                if packet is not None:
                     self._store.set_outcome(packet_id, "sent_confirmed")
+                    sent_at = float(packet.get("sent_at") or now)
                     logger.info("PRM: packet %d seen in WeChat %.0f s after sending (sent_confirmed)", packet_id,
-                                now - float(packet["sent_at"] or now))
+                                now - sent_at)
             return
         deal = self._store.deal_of(party["id"], now)
         text = self._mask(party["id"], f"[{_clock_text(sent_at or now)}] {message_text(msg)}", now)
@@ -378,10 +379,23 @@ class PrmService:
         now = self._clock()
         with self._sent_lock:
             if file:
-                self._sent_files[chat_id] = now
+                self._sent_files[chat_id] = (now, packet_id)
                 return
             lines = self._sent_lines.setdefault(chat_id, deque(maxlen=50))
             lines.append((_norm(text), now, packet_id))
+
+    def _unnote_sent(self, chat_id: str, text: str = "", file: bool = False) -> None:
+        with self._sent_lock:
+            if file:
+                self._sent_files.pop(chat_id, None)
+                return
+            lines = self._sent_lines.get(chat_id)
+            if lines:
+                target = _norm(text)
+                for item in list(lines):
+                    if item[0] == target:
+                        lines.remove(item)
+                        break
 
     def _match_own(self, chat_id: str, msg: dict, now: float) -> tuple[bool, Optional[int]]:
         """Was this own line sent by the bot? ``(True, packet id or None)``."""
@@ -391,8 +405,12 @@ class PrmService:
             msg_type = 1
         with self._sent_lock:
             if msg_type != 1:
-                at = self._sent_files.get(chat_id)
-                return (at is not None and now - at <= OWN_FILE_SEC), None
+                rec = self._sent_files.get(chat_id)
+                if rec is not None:
+                    at, pid = rec if isinstance(rec, tuple) else (rec, None)
+                    if now - at <= OWN_FILE_SEC:
+                        return True, pid
+                return False, None
             text = _norm(_QUOTE_PREFIX.sub("", str(msg.get("content", "") or "")))
             lines = self._sent_lines.get(chat_id) or deque()
             for item in list(lines):
@@ -642,12 +660,13 @@ class PrmService:
         elif packet["kind"] == "shipping_notice" and not gates.waybill_ok(final, self._waybill(packet)):
             problem = "发货通知里的单号和系统记录对不上"
         if not problem and text.strip():
+            self._note_sent(packet["chat_id"], text, packet["id"])
             try:
-                if self._send(packet["chat_id"], text):
-                    self._note_sent(packet["chat_id"], text, packet["id"])
-                else:
+                if not self._send(packet["chat_id"], text):
+                    self._unnote_sent(packet["chat_id"], text)
                     problem = "文字没发出去"
             except Exception:
+                self._unnote_sent(packet["chat_id"], text)
                 logger.exception("PRM: packet %d text not sent", packet["id"])
                 problem = "文字发送出错"
         for item in packet["attachments"] if not problem else ():
@@ -655,12 +674,14 @@ class PrmService:
             if not Path(path).is_file():
                 problem = f"文件「{item.get('name')}」在电脑上找不到了"
                 break
+            self._note_sent(packet["chat_id"], file=True, packet_id=packet["id"])
             try:
                 if not self._send_file(packet["chat_id"], path):
+                    self._unnote_sent(packet["chat_id"], file=True)
                     problem = f"文件「{item.get('name')}」没发出去"
                     break
-                self._note_sent(packet["chat_id"], file=True)
             except Exception:
+                self._unnote_sent(packet["chat_id"], file=True)
                 logger.exception("PRM: packet %d file not sent", packet["id"])
                 problem = f"文件「{item.get('name')}」发送出错"
                 break
@@ -671,7 +692,9 @@ class PrmService:
             self._update_gate(packet["kind"], packet["route"], now)
             return 0
         # The backend says the keystrokes went through; seeing the line in WeChat confirms it.
-        self._store.move(packet["id"], (SENDING,), SENT, outcome="sent_unconfirmed", sent_at=now)
+        latest = self._store.packet(packet["id"])
+        outcome = "sent_confirmed" if latest and latest.get("outcome") == "sent_confirmed" else "sent_unconfirmed"
+        self._store.move(packet["id"], (SENDING,), SENT, outcome=outcome, sent_at=now)
         logger.info("PRM: packet %d sent (%d chars, %d file(s))", packet["id"], len(text), len(packet["attachments"]))
         self._update_gate(packet["kind"], packet["route"], now)
         return 1
@@ -708,14 +731,15 @@ class PrmService:
             if deal.get("holding_round") is not None and float(deal["holding_round"]) >= round_at:
                 continue                                   # already told in this round
             done.add(packet["deal_id"])
+            self._note_sent(packet["chat_id"], self._holding_text)
             try:
                 ok = bool(self._send(packet["chat_id"], self._holding_text))
             except Exception:
                 logger.exception("PRM: holding reply for deal %d failed", deal["id"])
                 ok = False
             if not ok:
+                self._unnote_sent(packet["chat_id"], self._holding_text)
                 continue                                   # tried again next round of the thread
-            self._note_sent(packet["chat_id"], self._holding_text)
             self._store.update_deal(deal["id"], now, holding_round=round_at)
             self._store.add_event(deal["id"], deal["party_id"], "holding_reply",
                                   {"text": self._holding_text, "packet": packet["id"]}, actor="system", now=now)
