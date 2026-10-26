@@ -173,7 +173,7 @@ def test_s4_a_packet_is_executed_only_once():
     assert first["success"] is True
     assert second["success"] is False
     assert len(erp.order_calls) == 1
-    assert xhs.commission_calls == [], "佣金由 PRM 的平台动作开（D30），审批单不开"
+    assert xhs.commission_calls == [], "佣金由 PRM 的平台动作开（D34），审批单不开"
 
 
 def test_s5_a_rejected_packet_cannot_be_approved_later():

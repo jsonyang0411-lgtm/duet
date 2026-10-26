@@ -259,7 +259,7 @@ class SampleBridge:
             deals.set_stage(self._prm.store, deal["id"], "shipped", now=now, actor="system")
         notice = str(result.get("notice") or "")
         if notice:
-            # 系统消息一定人审（_system_packet 不看自动放行）；批准通知不再提佣金（D30），和驳回一样算 other
+            # 系统消息一定人审（_system_packet 不看自动放行）；批准通知不再提佣金（D34），和驳回一样算 other
             self._system_packet(self._prm.store.deal(deal["id"]), "other", notice,
                                 intent="寄样审批通过，通知达人" if approved else "寄样审批没通过，婉拒达人",
                                 reason=f"审批单 {packet.packet_id} {'已批准执行' if approved else '已驳回'}，系统按模板生成",

@@ -176,7 +176,7 @@ def test_readiness_says_what_is_missing(tmp_path, monkeypatch):
     assert "产品对照表" in client.readiness()["detail"]
 
 
-# ---- 审批时：不再管小红书对照表（佣金由 PRM 的平台动作开，D30） ----
+# ---- 审批时：不再管小红书对照表（佣金由 PRM 的平台动作开，D34） ----
 
 class NoMappingXHS(FakeXHS):
     def commission_problem(self, product_name, sku_id, xhs_account):

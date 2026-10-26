@@ -80,7 +80,7 @@ def approval_notice(packet: ApprovalActionPacket) -> str:
         f"快递单号：{packet.tracking_number}，" if packet.tracking_number
         else "快递单号出来后我们再发给老师，"
     )
-    # 专属佣金由 PRM 的平台动作单独开、单独审核（D30），这里不提，免得佣金还没开就先说开了
+    # 专属佣金由 PRM 的平台动作单独开、单独审核（D34），这里不提，免得佣金还没开就先说开了
     return (
         f"老师好~ 【{packet.requested_product}】的样品已经安排寄出啦 📦\n"
         f"{tracking}请老师留意查收哦~ 收到后有任何问题随时找我们！"
@@ -415,7 +415,7 @@ class InfluencerBusinessHandler:
         把建议佣金调低（不能超过上限）。reason 是驳回原因，记进操作记录，每周复盘用（R7）。
 
         批准后只在聚水潭建出库单。专属佣金不在这里开：用 PRM 的平台动作（src/prm/platforms.py，
-        小红书定向计划等），在「待审批」里单独预览、审核、执行（D30）。commission_rate 只是记在单上的建议值。
+        小红书定向计划等），在「待审批」里单独预览、审核、执行（D34）。commission_rate 只是记在单上的建议值。
         """
         packet = self.store.get_approval(packet_id)
         if packet is None:

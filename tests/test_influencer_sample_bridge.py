@@ -127,7 +127,7 @@ def test_an_approval_puts_the_notice_up_for_review_and_the_waybill_on_the_deal(s
     assert deal["stage"] == "shipped" and side.prm.store.latest_shipment(1)["waybill"] == "SF0001"
     [notice] = [p for p in side.prm.store.packets(("pending",)) if p["job_id"] is None]
     assert notice["kind"] == "other" and notice["route"] == "review", "系统消息一定人审"
-    assert "SF0001" in notice["text"] and "专属佣金" not in notice["text"], "佣金另由平台动作开（D30）"
+    assert "SF0001" in notice["text"] and "专属佣金" not in notice["text"], "佣金另由平台动作开（D34）"
     # 审核通过才发
     assert side.texts == []
     assert side.prm.decide(notice["id"], "send")["ok"]

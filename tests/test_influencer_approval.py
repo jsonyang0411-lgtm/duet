@@ -65,7 +65,7 @@ def test_the_operator_can_lower_the_commission_but_not_raise_it():
     lowered = run(handler.execute_operator_approval(packet.packet_id, True, commission_rate=0.20))
     assert lowered["success"] is True
     assert get_packet(handler, packet.packet_id).proposed_commission_rate == 0.20, "记成建议佣金"
-    assert xhs.commission_calls == [], "审批单不开佣金（D30）"
+    assert xhs.commission_calls == [], "审批单不开佣金（D34）"
 
 
 # ---- 审批单存在数据库里 ----
@@ -114,7 +114,7 @@ class FailingCommissionXHS(FakeXHS):
 
 
 def test_an_approval_only_makes_the_order_and_never_touches_the_commission():
-    """D30：专属佣金由 PRM 的平台动作开。小红书 CLI 坏了也不影响建出库单，审批单从不调它。"""
+    """D34：专属佣金由 PRM 的平台动作开。小红书 CLI 坏了也不影响建出库单，审批单从不调它。"""
     xhs = FailingCommissionXHS()
     handler = make_handler(xhs=xhs)
     packet_id = submit_full_request(handler)
