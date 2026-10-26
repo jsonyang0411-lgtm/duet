@@ -15,10 +15,11 @@ from src.prm import platforms
 from src.prm.platforms import ActionError
 
 from platform_fakes import (
-    DRY_STDERR, DY_CHANNEL, DY_ITEM, DY_LINK, DY_SKU, DY_UID, TB_CAMPAIGN, TB_CROWD, TB_ITEM, TB_PRECHECK,
-    XHS_BUYER, XHS_ITEM, XHS_SKU, FakeNode, catalog, dy_bind_done, dy_bind_preview, dy_create_done,
-    dy_create_preview, dy_designated_done, dy_designated_preview, dy_promotion, rule, tb_done, tb_row,
-    xhs_buyers, xhs_channel_done, xhs_channel_preview, xhs_plan,
+    DRY_STDERR, DY_CHANNEL, DY_ITEM, DY_LINK, DY_SKU, DY_UID, JST_ORDER, JST_SHOP_DY, JST_SHOP_XHS, JST_UID,
+    TB_CAMPAIGN, TB_CROWD, TB_ITEM, TB_PRECHECK, XHS_BUYER, XHS_ITEM, XHS_SKU, FakeNode, catalog, dy_bind_done,
+    dy_bind_preview, dy_create_done, dy_create_preview, dy_designated_done, dy_designated_preview, dy_promotion,
+    jst_blocked, jst_done, jst_preview, rule, tb_done, tb_row, xhs_buyers, xhs_channel_done, xhs_channel_preview,
+    xhs_plan,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +32,10 @@ PLAN = {"action": "xhs.direct_plan", "item_id": XHS_ITEM, "creator_platform_id":
 XCHANNEL = {"action": "xhs.channel_item", "item_id": XHS_ITEM, "sku_prices": [{"sku_id": XHS_SKU, "price": "79"}]}
 CAMPAIGN = {"action": "tb.campaign", "item_id": TB_ITEM, "crowd_ids": [TB_CROWD], "bid_target": "display_pay",
             "day_budget": 50}
+RECEIVER = {"name": "张三", "phone": "〈手机1〉", "province": "广东省", "city": "佛山市", "district": "南海区",
+            "address": "某某路 100 号 1 栋 101"}
+SAMPLE = {"action": "jst.sample_order", "shop": "dy", "item_id": DY_ITEM, "skus": [{"sku_id": DY_SKU, "qty": 1}],
+          "creator_platform": "dy", "creator_uid": DY_UID, "receiver": RECEIVER}
 
 
 @pytest.fixture
@@ -170,7 +175,7 @@ def test_a_link_must_be_the_platforms_own():
 
 def test_a_platform_is_usable_only_with_its_cli_and_node(node, tmp_path):
     cfg = platforms.config(node.settings(tb=str(tmp_path / "nowhere"), max_commission_rate=30))
-    assert set(cfg["dirs"]) == {"xhs", "dy"} and "tb" in cfg["missing"] and cfg["enabled"]
+    assert set(cfg["dirs"]) == {"xhs", "dy", "jst"} and "tb" in cfg["missing"] and cfg["enabled"]
     assert cfg["limits"]["max_commission_rate"] == 30
     assert platforms.config({})["enabled"] is False
     assert platforms.find_node(str(node.path)) == str(node.path)
@@ -615,9 +620,206 @@ def test_the_module_runs_on_the_macs_system_python(tmp_path):
         f"spec = importlib.util.spec_from_file_location('p', {str(ROOT / 'src/prm/platforms.py')!r})\n"
         "p = importlib.util.module_from_spec(spec); spec.loader.exec_module(p)\n"
         f"a = p.check_action(json.loads({json.dumps(DESIGNATED, ensure_ascii=False)!r}))\n"
+        f"s = p.check_action(json.loads({json.dumps(SAMPLE, ensure_ascii=False)!r}))\n"
         "r = p.run_cli([sys.executable, '-c', 'print(1)'], '.', timeout=10)\n"
+        "assert p.ledger_action({**s, 'receiver': {**s['receiver'], 'phone': '13900001111'}})['receiver']['phone'] == '139****1111'\n"
         "print(a['commission_rate'], r.exit_code, r.stdout.strip(), sys.version_info[:2])\n",
         encoding="utf-8")
     run = subprocess.run([python, "-I", str(script)], capture_output=True, text=True, timeout=60, cwd=tmp_path)
     assert run.returncode == 0, run.stderr
     assert run.stdout.startswith("20 0 1")
+
+
+# ── 聚水潭: sample orders ─────────────────────────────────────────────────
+
+@pytest.fixture
+def jcfg(node):
+    return platforms.config(node.settings(jst_shops={"dy": JST_SHOP_DY, "xhs": JST_SHOP_XHS}, jst_expect_uid=JST_UID,
+                                          jst_logistics=["SF", "ZTO"]))
+
+
+def test_a_sample_order_is_normalised_and_held_to_the_catalogue():
+    assert platforms.check_action({**SAMPLE, "receiver": {**RECEIVER, "phone": "+86 139-0000-1111"}},
+                                  catalog=catalog()) == {
+        "action": "jst.sample_order", "shop": "dy", "item_id": DY_ITEM, "skus": [{"sku_id": DY_SKU, "qty": 1}],
+        "creator_platform": "dy", "creator_uid": DY_UID,
+        "receiver": {**RECEIVER, "phone": "13900001111"}}
+    assert platforms.check_action(SAMPLE)["receiver"]["phone"] == "〈手机1〉"          # the draft's placeholder
+    xhs = {**SAMPLE, "shop": "xhs", "item_id": XHS_ITEM, "skus": [{"sku_id": XHS_SKU, "qty": 2}],
+           "creator_platform": "xhs", "creator_uid": None, "creator_account": "xhs_123", "logistics": "ZTO"}
+    out = platforms.check_action({k: v for k, v in xhs.items() if v is not None}, catalog=catalog())
+    assert out["creator_account"] == "xhs_123" and out["logistics"] == "ZTO" and out["skus"][0]["qty"] == 2
+    without = {k: v for k, v in SAMPLE.items() if k != "receiver"}
+    assert "receiver" not in platforms.check_action(without)
+    with pytest.raises(ActionError) as e:
+        platforms.check_action({**SAMPLE, "skus": [{"sku_id": "3100000000000000999", "qty": 1}]}, catalog=catalog())
+    assert e.value.code == "bad_sku"
+    with pytest.raises(ActionError) as e:
+        platforms.check_action({**SAMPLE, "item_id": "3000000000000000999"}, catalog=catalog())
+    assert e.value.code == "not_in_catalog"
+
+
+@pytest.mark.parametrize("change, code", [
+    ({"shop": "tb"}, "bad_shop"),
+    ({"shop": None}, "missing_param"),
+    ({"item_id": XHS_ITEM}, "bad_item"),                                        # a 小红书 id for the 抖店
+    ({"skus": [{"sku_id": DY_SKU, "qty": 3}]}, "over_limit"),                   # the Mac's own cap (2)
+    ({"skus": [{"sku_id": DY_SKU, "qty": 0}]}, "bad_qty"),
+    ({"skus": [{"sku_id": DY_SKU, "qty": True}]}, "bad_qty"),
+    ({"skus": [{"sku_id": DY_SKU, "qty": 1}, {"sku_id": DY_SKU, "qty": 1}]}, "bad_sku"),
+    ({"skus": [{"sku_id": DY_SKU, "qty": 1, "price": "1"}]}, "bad_sku"),
+    ({"skus": [{"sku_id": f"31000000000000002{i:02d}", "qty": 1} for i in range(11)]}, "bad_sku"),
+    ({"creator_platform": "ks"}, "bad_creator"),
+    ({"creator_account": "dy_abc"}, "bad_creator"),                              # both the UID and the number
+    ({"creator_uid": "--execute"}, "bad_creator"),
+    ({"creator_uid": "小美"}, "bad_creator"),                                    # nicknames are fuzzy: not taken
+    ({"receiver": {**RECEIVER, "phone": "12345"}}, "bad_receiver"),
+    ({"receiver": {**RECEIVER, "address": ""}}, "bad_receiver"),
+    ({"receiver": {**RECEIVER, "remark": "x"}}, "bad_receiver"),
+    ({"receiver": {**RECEIVER, "name": "张三\n--execute"}}, "bad_receiver"),
+    ({"logistics": "顺丰"}, "bad_logistics"),
+    ({"commission_rate": 20}, "extra_param"),
+])
+def test_what_does_not_fit_a_sample_order_is_refused(change, code):
+    raw = {**SAMPLE, **change}
+    with pytest.raises(ActionError) as e:
+        platforms.check_action({k: v for k, v in raw.items() if v is not None}, limits=platforms.DEFAULT_LIMITS)
+    assert e.value.code == code
+
+
+def test_a_sample_orders_limits_are_the_macs_and_the_form_is_wider():
+    three = {**SAMPLE, "skus": [{"sku_id": DY_SKU, "qty": 3}]}
+    assert platforms.check_action(three, limits={"max_sample_qty": 5})["skus"][0]["qty"] == 3
+    assert platforms.check_action(three, limits=platforms.FORM_LIMITS)
+    with pytest.raises(ActionError):
+        platforms.check_action(three)
+
+
+def test_the_jst_settings_are_read(node):
+    cfg = platforms.config(node.settings(jst_shops={"dy": 30000001, "xhs": "x1", "tb": "1"}, jst_expect_uid="9 0",
+                                         jst_logistics="SF"))
+    assert cfg["jst_shops"] == {"dy": "30000001"} and cfg["jst_expect_uid"] == "" and cfg["jst_logistics"] == ["SF"]
+    assert "jst" in cfg["dirs"]
+    cfg = platforms.config(node.settings(jst_logistics=["SF.COLLECT", "顺丰", 3]))
+    assert cfg["jst_logistics"] == ["SF.COLLECT"]
+
+
+def test_the_console_shows_a_sample_orders_parameters():
+    shown = {p["label"]: p["value"] for p in platforms.describe(platforms.check_action(SAMPLE))}
+    assert shown["发货店铺"] == "抖音（dy）" and shown["寄样 SKU × 数量"] == f"{DY_SKU} × 1"
+    assert shown["收货信息"] == "张三 〈手机1〉 广东省佛山市南海区 某某路 100 号 1 栋 101"
+    assert platforms.reply_problems("寄样单建好啦：{寄样单号}", platforms.check_action(SAMPLE)) == []
+    assert platforms.fill_reply("单号 {寄样单号}", platforms.check_action(SAMPLE), {"sample_order_no": JST_ORDER}) == (
+        f"单号 {JST_ORDER}", [])
+
+
+def test_sample_order_preview_reads_with_a_private_order_file(node, jcfg):
+    node.rules([rule(["sample-create"], jst_preview(), execute=False)])
+    block = platforms.preview(SAMPLE, jcfg, catalog=catalog(), context={"party_id": 7})
+    assert block["verdict"] == "ready", block
+    assert block["run"] == {"steps": ["create"]} and block["catalog"]["title"] == "测试主品"
+    [call] = node.calls()
+    spec_arg = [a for a in call["argv"] if a.startswith("--spec=")][0]
+    assert call["argv"] == ["bin/jst.mjs", "sample-create", spec_arg, f"--expect-uid={JST_UID}"]
+    assert call["cwd"].endswith("jst-engineering") and call["spec_mode"] == "0o600"
+    assert not os.path.exists(spec_arg[len("--spec="):])                       # removed after the run
+    assert call["spec"] == {
+        "daren": {"platform": "DY", "uid": DY_UID}, "logistics": "SF",
+        "goods": [{"platform": "DY", "shop": JST_SHOP_DY, "product": DY_ITEM, "title": "测试主品", "sku": DY_SKU, "qty": 1}],
+        "receiver": {"name": "张三", "phone": None, "state": "广东省", "city": "佛山市", "district": "南海区",
+                     "address": "某某路 100 号 1 栋 101"}}                       # the placeholder stays here
+    facts = {f["label"]: f["value"] for f in block["steps"][0]["facts"]}
+    assert facts["快递"] == "菜鸟顺丰-优惠陆运（SF）" and "T100-RED-M 红色/M × 1" in facts["商品"]
+    assert "归这个子账号跟进" in facts["达人"] and facts["查重"] == "这位达人没寄过这个商品"
+    assert facts["执行时会做"] == "新增收货地址、提交寄样单" and "张*" in facts["收货"]
+
+
+@pytest.mark.parametrize("answer, verdict", [
+    (dict(stdout=jst_blocked("这位达人现在归 同事 跟进，不是当前登录的账号"), exit=1), "blocked"),
+    (dict(stderr="[WRONG_ACCOUNT] 登录的是账号 900002，不是指定的 900001\n", exit=79), "wrong_account"),
+    (dict(stderr="[NOT_LOGGED_IN] 聚水潭登录失效\n", exit=77), "login"),
+    (dict(stderr="[RISK] 被限流（操作过于频繁）\n", exit=76), "wall"),
+    (dict(stderr="[USAGE] goods[0].title 太长\n", exit=2), "invalid"),
+    (dict(stderr="[FAILED] TypeError\n", exit=1), "error"),
+])
+def test_what_stops_a_sample_order_preview(node, jcfg, answer, verdict):
+    node.rules([rule(["sample-create"], execute=False, **answer)])
+    block = platforms.preview(SAMPLE, jcfg, catalog=catalog())
+    assert block["verdict"] == verdict, block
+    if verdict == "blocked":
+        assert "归 同事 跟进" in block["problems"][0]
+
+
+def test_a_sample_order_needs_this_macs_shop_and_courier(node, jcfg):
+    for cfg, raw, why in ((platforms.config(node.settings()), SAMPLE, "jst_shops.dy"),
+                          (jcfg, {**SAMPLE, "logistics": "YTO"}, "不在这台 Mac 允许的里面"),
+                          ({**jcfg, "jst_logistics": []}, SAMPLE, "jst_logistics"),
+                          ({**jcfg, "jst_logistics": []}, {**SAMPLE, "logistics": "SF.COLLECT"}, "jst_logistics")):
+        block = platforms.preview(raw, cfg, catalog=catalog())
+        assert block["verdict"] == "invalid" and why in block["problems"][0], block
+    untitled = catalog()
+    untitled["platforms"]["dy"]["items"][0]["title"] = ""
+    assert platforms.preview(SAMPLE, jcfg, catalog=untitled)["verdict"] == "invalid"
+    assert node.calls() == []
+    unset = platforms.config(node.settings(jst_shops={"dy": JST_SHOP_DY}, jst_logistics=["SF"]))
+    node.rules([rule(["sample-create"], jst_preview(), execute=False)])
+    block = platforms.preview(SAMPLE, unset, catalog=catalog())
+    assert block["verdict"] == "ready" and not any("--expect-uid" in a for a in node.calls()[0]["argv"])
+    assert any("jst_expect_uid" in f["value"] for f in block["steps"][0]["facts"])
+
+
+def test_a_sample_order_runs_once_with_the_number_and_the_ledger_keeps_it_masked(node, jcfg, tmp_path):
+    node.rules([rule(["sample-create"], jst_done(), execute=True)])
+    approved = {**SAMPLE, "receiver": {**RECEIVER, "phone": "13900001111"}}      # as the bot sends it
+    out = execute(jcfg, approved, {"steps": ["create"]}, tmp_path)
+    assert out["outcome"] == "VERIFIED_SUCCESS", out
+    assert out["created"] == {"sample_order_no": JST_ORDER}
+    [call] = node.calls()
+    assert "--execute" in call["argv"] and call["spec"]["receiver"]["phone"] == "13900001111"
+    facts = {f["label"]: f["value"] for f in out["steps"][0]["facts"]}
+    assert facts["寄样单号"] == f"{JST_ORDER}（INIT）" and facts["已经做了"] == "新增收货地址、提交寄样单"
+    ledger = (tmp_path / "ledger" / f"{KEY}.json").read_text(encoding="utf-8")
+    assert "13900001111" not in ledger and "某某路" not in ledger and "南海区" not in ledger and "139****1111" in ledger
+    assert json.loads(ledger)["action"]["receiver"] == {"name": "张*", "phone": "139****1111", "province": "广东省",
+                                                        "city": "佛山市", "district": "", "address": "（详细地址已清除）"}
+    again = execute(jcfg, approved, {"steps": ["create"]}, tmp_path)
+    assert again["outcome"] == "ALREADY_RUN" and len(node.calls()) == 1
+    assert platforms.check_record(json.loads(json.dumps(out)))["created"] == {"sample_order_no": JST_ORDER}
+
+
+def test_a_sample_order_with_the_placeholder_still_in_it_is_not_run(node, jcfg, tmp_path):
+    out = execute(jcfg, SAMPLE, {"steps": ["create"]}, tmp_path)
+    assert out["outcome"] == "NOT_RUN" and "占位符" in out["problems"][0] and node.calls() == []
+
+
+@pytest.mark.parametrize("answer, outcome", [
+    (dict(stdout=jst_done("ACCEPTED_UNVERIFIED", note="建了，但读回核对对不上：快递读回是 顺丰陆运到付"), exit=1),
+     "ACCEPTED_UNVERIFIED"),
+    (dict(stdout=jst_done("INDETERMINATE", order=None, note="提交没拿到应答：不要重发"), exit=1), "INDETERMINATE"),
+    (dict(stdout=jst_blocked("这位达人寄过这些商品了（YP111）"), exit=1), "FAILED"),
+    (dict(stdout=jst_done(order=None), exit=0), "ACCEPTED_UNVERIFIED"),          # "verified" without its number
+    (dict(stderr="[RISK] 被限流（已经做了：加入达人库），单子没有建\n", exit=76), "FAILED"),
+    (dict(stderr="[WRONG_ACCOUNT] 登录的不是 900001\n", exit=79), "FAILED"),
+    (dict(stderr="[FAILED] TypeError at submit\n", exit=1), "INDETERMINATE"),
+    (dict(stderr="[INTERRUPTED] 被打断：写命令可能已经发出\n", exit=130), "INDETERMINATE"),
+])
+def test_a_sample_order_that_is_not_verified_says_so(node, jcfg, tmp_path, answer, outcome):
+    node.rules([rule(["sample-create"], execute=True, **answer)])
+    out = execute(jcfg, {**SAMPLE, "receiver": {**RECEIVER, "phone": "13900001111"}}, {"steps": ["create"]}, tmp_path)
+    assert out["outcome"] == outcome, out
+    assert out["problems"] or out["steps"][0]["problems"]
+    if out.get("created", {}).get("sample_order_no"):
+        assert JST_ORDER in out["problems"][0]                              # the red mark names the order
+
+
+def test_the_bot_keeps_only_a_sample_order_number():
+    rec = {**platforms.record("VERIFIED_SUCCESS"), "created": {"sample_order_no": JST_ORDER}}
+    assert platforms.check_record(rec)["created"] == {"sample_order_no": JST_ORDER}
+    rec["created"]["sample_order_no"] = "YP1; rm"
+    assert platforms.check_record(rec)["created"] == {}
+
+
+def test_jushuitan_is_no_catalogue_platform(node, jcfg):
+    cat = platforms.sync_catalog(jcfg, ["jst"], previous=catalog())
+    assert "jst" not in cat["platforms"] and node.calls() == []
+    assert "聚水潭" not in platforms.catalog_markdown(cat)

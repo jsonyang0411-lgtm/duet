@@ -9,7 +9,7 @@ import pytest
 
 from test_prm import CREATOR, Bot, Clock, draft
 
-from platform_fakes import DY_ITEM, DY_LINK, DY_UID, XHS_BUYER, XHS_ITEM
+from platform_fakes import DY_ITEM, DY_LINK, DY_SKU, DY_UID, JST_ORDER, XHS_BUYER, XHS_ITEM
 from src.prm import platforms
 from src.prm.result import DraftError, parse_draft
 from src.prm.service import APPROVED_EXPIRE_SEC, PLATFORM_LOST_GRACE_SEC, SETTLE_SEC
@@ -18,6 +18,10 @@ from src.relay.service import LOST_AFTER_SEC
 DESIGNATED = {"action": "dy.designated_commission", "item_id": DY_ITEM, "creator_platform_id": DY_UID,
               "commission_rate": 20}
 CHANNEL = {"action": "dy.channel_goods", "item_id": DY_ITEM, "creator_platform_id": DY_UID, "price": "15"}
+SAMPLE = {"action": "jst.sample_order", "shop": "dy", "item_id": DY_ITEM, "skus": [{"sku_id": DY_SKU, "qty": 1}],
+          "creator_platform": "dy", "creator_uid": DY_UID,
+          "receiver": {"name": "小美", "phone": "〈手机1〉", "province": "上海市", "city": "上海市", "district": "浦东新区",
+                       "address": "张江路100号3栋1201"}}
 
 
 def block(raw=DESIGNATED, verdict="ready", run=None, **extra):
@@ -434,3 +438,43 @@ def test_parse_draft_reads_the_platform_block():
     assert parse_draft(json.dumps(draft())).platform is None
     unpreviewed = parse_draft(json.dumps({**draft(), "platform_action": DESIGNATED}))
     assert unpreviewed.platform["verdict"] == "unavailable"
+
+
+# ── 聚水潭 sample orders: the number goes to the Mac only ──────────────────
+
+def test_a_sample_order_goes_to_the_mac_with_the_number_and_stays_masked_here(bot, clock):
+    packet = drafted(bot, preview=block(SAMPLE, run={"steps": ["create"]}), reply="寄样单建好啦，单号 {寄样单号}～")
+    assert bot.prm.store.token_for(packet["party_id"], "phone", "手机", "13900001111", clock.now) == "〈手机1〉"
+    [shown] = snap(bot)["pending"]
+    assert {"label": "收货信息", "value": "小美 〈手机1〉 上海市上海市浦东新区 张江路100号3栋1201"} in shown["platform"]["params"]
+    job = approve(bot, packet)
+    meta = json.loads(job["meta"])
+    assert meta["action"]["receiver"]["phone"] == "13900001111"             # for the Mac that sends the order
+    stored = bot.prm.store.packet(packet["id"])["platform"]
+    assert stored["action"]["receiver"]["phone"] == "〈手机1〉"              # the packet keeps the placeholder
+    assert "13900001111" not in json.dumps(snap(bot), ensure_ascii=False)
+    mac_runs(bot, job, record(sample_order_no=JST_ORDER))
+    bot.prm.send_approved()
+    assert bot.texts == [(packet["chat_id"], f"寄样单建好啦，单号 {JST_ORDER}～")]
+    assert any(e["kind"] == "platform_result" and e["detail"]["sample_order_no"] == JST_ORDER
+               for e in bot.prm.store.events(packet["deal_id"]))
+
+
+def test_an_unverified_sample_order_names_its_number_in_the_red_mark(bot):
+    packet = drafted(bot, preview=block({k: v for k, v in SAMPLE.items() if k != "receiver"}, run={"steps": ["create"]}),
+                     reply="寄样单建好啦")
+    job = approve(bot, packet)
+    rec = record("ACCEPTED_UNVERIFIED", sample_order_no=JST_ORDER)
+    rec["problems"] = [f"聚水潭寄样单 {JST_ORDER}；建了 {JST_ORDER}，但读回核对对不上：快递读回是 顺丰陆运到付"]
+    mac_runs(bot, job, rec)
+    failed = bot.prm.store.packet(packet["id"])
+    assert failed["status"] == "failed" and JST_ORDER in failed["error"] and bot.texts == []
+
+
+def test_a_sample_order_whose_placeholder_has_no_number_is_not_approved(bot):
+    packet = drafted(bot, preview=block({**SAMPLE, "receiver": {**SAMPLE["receiver"], "phone": "〈手机9〉"}},
+                                        run={"steps": ["create"]}), reply="寄样单建好啦")
+    out = bot.prm.decide(packet["id"], "execute", None)
+    assert not out["ok"] and "〈手机9〉" in out["error"]
+    assert bot.prm.store.packet(packet["id"])["status"] == "pending"
+    assert [j for j in bot.relay.store.list_jobs(10) if '"platform_execute"' in j["meta"]] == []

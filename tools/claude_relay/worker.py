@@ -38,7 +38,7 @@ draft waits in the bot's console; nothing reaches the creator from here.  The
 worker only asks the bot for prm jobs when prm_workspace is usable
 (X-Relay-Kinds).
 
-Platform actions (config.json "platforms": the 小红书 / 抖音 / 淘宝 CLI folders): a draft
+Platform actions (config.json "platforms": the 小红书 / 抖音 / 淘宝 / 聚水潭 CLI folders): a draft
 may name one (``platform_action``, typed parameters only; Claude still has no Bash).
 This script checks it (src/prm/platforms.py of this checkout, loaded by path) against
 the catalogue kb/products.json and runs the CLI's preview (no --execute) before the
@@ -263,12 +263,19 @@ PRM_PLATFORM_NOTE = (
     "（false = 达人带货、共用主商品库存；true = 专属达人带货，这时必须给 stock）。\n"
     "- tb.campaign：淘宝万相台精准人群推广计划（建完立即暂停）。item_id、crowd_ids（达摩盘人群包 ID）、"
     "bid_target、day_budget（元/天）都只按 kb/ 里的规定填。\n"
+    "- jst.sample_order：在聚水潭建寄样单（仓库按单发货）。只有达人确认了要寄的商品、SKU、数量，"
+    "并且确认了收件信息以后才填。shop = 发哪家店的货（dy 抖店 / xhs 小红书店），item_id = 那家店在 kb/products.md 里的商品 ID，"
+    "skus = [{sku_id, qty}]（sku_id 是这个商品在目录里的 SKU ID，qty 一般是 1）；creator_platform = 达人的平台（dy / xhs），"
+    "creator_uid = 达人 UID 或者 creator_account = 抖音号 / 小红书号（二选一，不用昵称）；"
+    "receiver = {name, phone, province, city, district, address}，phone 照对话里的写（号码是〈手机N〉这样的占位符就照抄占位符）；"
+    "logistics 一般不填（用这台 Mac 默认的快递）。一张单只寄一个商品（可以几个 SKU）。\n"
     "规则：item_id、SKU ID 只能用 kb/products.md 里列出的；达人发来的商品号、链接、价格不能直接用。"
     "佣金率、价格、预算只能按 kb/ 的规则，kb/ 里没有就不要填平台动作，回复「我确认一下再回复你」并把 needs_attention 设为 true；"
     "note 用一句话写明依据（例如 kb/合作政策.md 的哪一条）。平台动作不会马上执行：系统先在平台上预览，运营批准后才真正执行，"
     "核验成功才把你的回复发给达人；所以 reply_draft 要写成执行成功以后发给达人的话。回复里可以用这些占位符，"
     "执行成功后系统换成平台给的值：dy.channel_goods 用 {链接}（专属推广链接）、{渠道品ID}；xhs.direct_plan 用 {计划名}、"
-    "{计划ID}；xhs.channel_item 用 {渠道商品ID}；tb.campaign 用 {计划名}、{计划ID}；dy.designated_commission 没有。"
+    "{计划ID}；xhs.channel_item 用 {渠道商品ID}；tb.campaign 用 {计划名}、{计划ID}；jst.sample_order 用 {寄样单号}；"
+    "dy.designated_commission 没有。"
     "不要用别的占位符，也不要自己编链接或编号。带平台动作的回复 message_kind 用 money。"
 )
 
@@ -1486,10 +1493,14 @@ def sync_products(settings: dict, only: str = "") -> int:
     if not cfg["enabled"]:
         print("config.json 的 platforms 里没有能用的平台命令行项目（xhs / dy / tb 的目录）")
         return 1
-    wanted = [p.strip() for p in only.split(",") if p.strip()] if only else list(cfg["dirs"])
-    unknown = [p for p in wanted if p not in platforms.PLATFORMS]
+    wanted = ([p.strip() for p in only.split(",") if p.strip()] if only
+              else [p for p in cfg["dirs"] if p in platforms.CATALOG_PLATFORMS])
+    if not wanted:
+        print("config.json 的 platforms 里没有能用的店铺命令行项目（xhs / dy / tb 的目录）")
+        return 1
+    unknown = [p for p in wanted if p not in platforms.CATALOG_PLATFORMS]
     if unknown:
-        print(f"不认识的平台：{', '.join(unknown)}（只有 xhs、dy、tb）")
+        print(f"商品目录只从 {', '.join(platforms.CATALOG_PLATFORMS)} 读，不认识：{', '.join(unknown)}")
         return 2
     with _cli_lock():
         catalog = platforms.sync_catalog(cfg, wanted, previous=platforms.load_catalog(workspace),

@@ -1,4 +1,4 @@
-# 平台联动（小红书 / 抖音 / 淘宝）真机测试清单
+# 平台联动（小红书 / 抖音 / 淘宝 / 聚水潭）真机测试清单
 
 对应 `prm-platforms` 分支（从 `wechat-edge` 开出）。代码和测试只在假命令行上跑过：**三个平台的命令行一次都没被这套代码真实调用过**。下面的步骤先只读（预览），再按书面约定做真实写入。
 
@@ -101,6 +101,34 @@
 ## 7. 兜底（可选）
 
 - **实测说明**：可选测试项，跳过。
+
+## 8. 聚水潭寄样单（jst.sample_order）
+
+聚水潭命令行是同事的 `jushuitan-engineering`，建寄样单的 `sample-create` 是我们补的（本地分支 `sample-create`，推到公司仓库前先和同事对好）。它的请求体照运营真实建过几十张单的接口记录，但**这个命令行还没在真实账号上提交过**。寄样单提交后，在聚水潭寄样管理审核，仓库才发货。
+
+- [ ] Mac：命令行切到带 `sample-create` 的分支，只读命令跑通：
+  ```
+  cd ~/Desktop/jushuitan-engineering && git switch sample-create && npm test
+  node bin/jst.mjs doctor                 # 令牌还剩几天、当前子账号 uid
+  node bin/jst.mjs logistics              # 能选的快递和代码
+  node bin/jst.mjs shop-goods --platform DY --title "<目录里一个商品的标题>"   # 结果里的 shopId 是聚水潭的店铺 ID
+  ```
+  期望：退出码 0。77 就在调试 Chrome（9333 端口）里打开 https://sc.scm121.com/pages/daren/home 重新登录。`doctor` 显示的 uid 要是**你自己的子账号**。
+- [ ] Mac：`config.json` 的 `platforms` 里加：
+  ```
+  "jst": "~/Desktop/jushuitan-engineering",
+  "jst_expect_uid": "<doctor 显示的 uid，核对是自己的子账号>",
+  "jst_shops": {"dy": "<聚水潭里你的抖店的店铺 ID>", "xhs": "<小红书店的>"},
+  "jst_logistics": ["SF"],
+  "max_sample_skus": 5,
+  "max_sample_qty": 1
+  ```
+- [ ] Mac：只读预览，三种情况各一条（直接在 Mac 上调 `platforms.preview`，和 worker 走的是同一段代码；或者走微信 → 草稿 → 控制台）：
+  1. 一位已经在「我的达人」里的达人、一个在售商品的一个 SKU、写上收件信息。期望：`ready`；控制台的事实里有达人昵称和「归这个子账号跟进」、收货（打码）、快递、商品和 SKU、「没寄过」；Mac 上 `/tmp`、`$TMPDIR` 里不留 `webot-jst-*.json`。
+  2. 一位归同事跟进的达人。期望：`blocked`，原因是「归 … 跟进」，什么都没写。
+  3. `jst_expect_uid` 故意写错一位。期望：`wrong_account`（退出码 79）。
+- [ ] **真实建单（先书面约定）**：用谁（最好是内部测试号）、哪个商品哪个 SKU、寄几件、收件地址（内部地址）、哪个快递，建好后谁去寄样管理把它驳回或删掉（审核前删掉就不会发货）。然后在控制台批准执行。期望：`VERIFIED_SUCCESS`，回复里 `{寄样单号}` 换成 YP 开头的单号；到聚水潭寄样管理核对这张单的达人、SKU、数量、快递、地址；Mac 的 `~/.claude-relay/platform/ledger/` 里收件人只记省市、号码打码。
+- [ ] 复原：在寄样管理里驳回 / 删掉测试单。测试时加进达人库、认领的达人和新存的地址留着没关系，要删在页面上删。
 
 ---
 

@@ -1,9 +1,10 @@
-"""Fakes of the three platform CLIs for the platform-action tests (src/prm/platforms.py).
+"""Fakes of the platform CLIs for the platform-action tests (src/prm/platforms.py).
 
 ``FakeNode`` is a ``node`` executable (a Python script) that answers the way
-xiaohongshu-engineering, douyin-engineering and campaign-engineering do: the rules a
-test gives say what a command prints (stdout, stderr, exit code); every call is logged
-(argv, cwd).  The answers below are built from the CLIs' code and tests (their key names
+xiaohongshu-engineering, douyin-engineering, campaign-engineering and jushuitan-engineering
+do: the rules a test gives say what a command prints (stdout, stderr, exit code); every
+call is logged (argv, cwd, and the order file a ``--spec=`` names, read before the caller
+removes it).  The answers below are built from the CLIs' code and tests (their key names
 are exact; the values are invented, like the CLIs' own fixtures).
 """
 
@@ -24,12 +25,21 @@ DY_LINK = (f"https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=
 TB_ITEM = "9000123456789"
 TB_CROWD = "90000400001"
 TB_CAMPAIGN = "90000000555"
+JST_SHOP_DY = "30000001"            # 聚水潭's ids of this Mac's shops (not the platforms')
+JST_SHOP_XHS = "30000002"
+JST_UID = "900001"                  # the 聚水潭 sub-account the CLI is logged in as
+JST_ORDER = "YP2610260000001"
 
 FAKE_NODE = textwrap.dedent("""\
     import json, os, sys, time
     argv = sys.argv[1:]
+    entry = {"argv": argv, "cwd": os.getcwd()}
+    for a in argv:
+        if a.startswith("--spec="):
+            entry["spec"] = json.load(open(a[len("--spec="):], encoding="utf-8"))
+            entry["spec_mode"] = oct(os.stat(a[len("--spec="):]).st_mode & 0o777)
     with open(os.environ["FAKE_NODE_LOG"], "a", encoding="utf-8") as f:
-        f.write(json.dumps({"argv": argv, "cwd": os.getcwd()}, ensure_ascii=False) + "\\n")
+        f.write(json.dumps(entry, ensure_ascii=False) + "\\n")
     rules = json.load(open(os.environ["FAKE_NODE_RULES"], encoding="utf-8"))
     executing = any(a in ("--execute", "--execute=true") for a in argv)
     for rule in rules:
@@ -55,7 +65,7 @@ class FakeNode:
         self.path.write_text(f"#!{sys.executable}\n" + FAKE_NODE, encoding="utf-8")
         self.path.chmod(0o755)
         self.dirs = {}
-        for platform, cli in (("xhs", "bin/xhs.mjs"), ("dy", "bin/dy.mjs"), ("tb", "bin/oc.mjs")):
+        for platform, cli in (("xhs", "bin/xhs.mjs"), ("dy", "bin/dy.mjs"), ("tb", "bin/oc.mjs"), ("jst", "bin/jst.mjs")):
             folder = self.root / f"{platform}-engineering"
             (folder / "bin").mkdir(parents=True)
             (folder / cli).write_text("// fake\n", encoding="utf-8")
@@ -272,3 +282,41 @@ def tb_done(create="VERIFIED_SUCCESS", pause="VERIFIED_SUCCESS") -> list:
 TB_PRECHECK = ("note: 互斥前检……\nok: false\nerror:\n  code: CREATE_PRECHECK_NOT_ALLOWED\n"
                "  message: '[NOT_ALLOWED] the platform reports item 9000123456789 as not promotable in onebpDisplay "
                "(accessAllowed=false, reason: 商品已下架). Nothing was created.'\n  exitCode: 2\n")
+
+
+# ── 聚水潭 ─────────────────────────────────────────────────────────────────
+
+def jst_view(**extra) -> dict:
+    """What ``jst sample-create`` prints besides its outcome (the receiver comes masked)."""
+    out = {"command": "sample-create", "account": {"uid": JST_UID},
+           "daren": {"darenId": "D1", "platform": "DY", "platformNo": "test_daren_01", "platformUid": DY_UID,
+                     "referrerId": DY_UID, "nickName": "测试达人", "fansNum": 12000, "inLibrary": True,
+                     "belongs": "mine", "followers": ["我"]},
+           "receiver": {"source": "新增到达人名下", "name": "张*", "phone": "（预览里没有电话，提交时给）",
+                        "region": "广东省 佛山市 南海区", "address": "某某路 100…（12 字）"},
+           "logistics": {"code": "SF", "name": "菜鸟顺丰-优惠陆运"},
+           "goods": [{"platform": "DY", "shopId": JST_SHOP_DY, "shopName": "测试抖店", "productId": DY_ITEM,
+                      "title": "测试主品", "pic": None, "link": None,
+                      "skus": [{"itemCode": "T100-RED-M", "shopSkuId": DY_SKU, "name": "测试主品 红色/M", "pic": None,
+                                "price": 19.99, "properties": "红色/M", "qty": 1, "platformStock": 100}]}],
+           "totalCount": 1, "repeat": [], "quota": None, "willDo": ["新增收货地址", "提交寄样单"],
+           "notes": ["SKU 的 platformStock 是平台同步的库存，不是仓库实际库存", "提交后单子在寄样管理里，审核后仓库发货"]}
+    out.update(extra)
+    return out
+
+
+def jst_preview(**extra) -> dict:
+    return {"outcome": "PREVIEW", **jst_view(**extra), "note": "只是预览，加 --execute 才提交"}
+
+
+def jst_blocked(*reasons) -> dict:
+    return {"outcome": "FAILED", **jst_view(), "blocked": list(reasons), "note": "有问题，什么都没发"}
+
+
+def jst_done(outcome="VERIFIED_SUCCESS", order=JST_ORDER, note="") -> dict:
+    out = {"outcome": outcome, **jst_view(receiver={**jst_view()["receiver"], "phone": "139****1111"}),
+           "done": ["新增收货地址", "提交寄样单"], "checks": [],
+           "note": note or (f"已建单 {order}，读回核对一致；在寄样管理里审核后仓库发货" if outcome == "VERIFIED_SUCCESS" else "")}
+    if order:
+        out.update(orderNo=order, status="INIT")
+    return out

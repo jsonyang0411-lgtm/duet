@@ -1,4 +1,4 @@
-"""Platform actions of a creator deal: the three platform CLIs on the Mac (小红书, 抖音, 淘宝).
+"""Platform actions of a creator deal: the platform CLIs on the Mac (小红书, 抖音, 淘宝, 聚水潭).
 
 When Claude and a creator have agreed in WeChat (the platform, the product, the
 commission or the exclusive price, the creator's platform account), the draft may
@@ -18,7 +18,8 @@ the Mac (tools/claude_relay/worker.py), in two phases:
    STATE_CONFLICT, exit 76 / 77 / 79 …) stops it and the console marks it red.
 
 The CLIs (xiaohongshu-engineering ``node bin/xhs.mjs``, douyin-engineering ``node
-bin/dy.mjs``, campaign-engineering ``node bin/oc.mjs``) share one discipline: a write
+bin/dy.mjs``, campaign-engineering ``node bin/oc.mjs``, jushuitan-engineering ``node
+bin/jst.mjs``: 聚水潭's sample orders) share one discipline: a write
 is a preview unless ``--execute``; it is sent once, read back, and every target gets
 an ``outcome``; the result is JSON on stdout.  They run here with an argv list (no
 shell), every value as ``--name=value`` and checked first, so nothing the model or a
@@ -52,12 +53,15 @@ REPLY_FIELDS = {
     "dy.designated_commission": {},
     "dy.channel_goods": {LINK: "link", "{渠道品ID}": "channel_id"},
     "tb.campaign": {"{计划名}": "plan_name", "{计划ID}": "campaign_id"},
+    "jst.sample_order": {"{寄样单号}": "sample_order_no"},
 }
 PLACEHOLDER_LABELS = {LINK: "专属推广链接", "{渠道品ID}": "抖店渠道品 ID", "{渠道商品ID}": "小红书渠道商品 ID",
-                      "{计划名}": "计划名", "{计划ID}": "计划 ID"}
+                      "{计划名}": "计划名", "{计划ID}": "计划 ID", "{寄样单号}": "聚水潭寄样单号"}
 
-PLATFORMS = {"xhs": "小红书", "dy": "抖音", "tb": "淘宝"}
-CLI_FILES = {"xhs": "bin/xhs.mjs", "dy": "bin/dy.mjs", "tb": "bin/oc.mjs"}
+PLATFORMS = {"xhs": "小红书", "dy": "抖音", "tb": "淘宝", "jst": "聚水潭"}
+CLI_FILES = {"xhs": "bin/xhs.mjs", "dy": "bin/dy.mjs", "tb": "bin/oc.mjs", "jst": "bin/jst.mjs"}
+# The platforms whose products make the catalogue (聚水潭 sends the 抖店 / 小红书 shops' products).
+CATALOG_PLATFORMS = ("xhs", "dy", "tb")
 
 # Outcomes of a write, as the CLIs say them (one per target), and what this module adds.
 VERIFIED = "VERIFIED_SUCCESS"
@@ -96,7 +100,7 @@ VERDICTS = {
 EXIT_CODES = {
     0: "完成", 1: "失败或结果未知", 2: "参数错误或发送前被拒绝（什么都没发）",
     76: "验证码或限流：立刻停下，到浏览器里处理", 77: "登录失效：回调试 Chrome 重新登录",
-    79: "登录的不是指定的账号", 130: "被打断：写命令可能已经发出，先读回再说",
+    79: "登录的不是指定的账号（子账号）", 130: "被打断：写命令可能已经发出，先读回再说",
     # campaign-engineering (OpenCLI): a command that did not start
     69: "uv 没能启动", 75: "整条命令超时", 78: "不在完整的仓库检出里运行",
 }
@@ -150,6 +154,16 @@ ACTIONS = {
         "effect": "在万相台从零新建一个精准人群推广（自定义）计划：建成即投放，命令确认新计划后马上暂停（中间有几秒在投放、可能产生消耗）",
         "caveat": "到目前为止这条命令的真实运行读回都是 ACCEPTED_UNVERIFIED（父资源位读回暂停且锁定等），按规则回复不会自动发出：执行后请在万相台核对",
     },
+    "jst.sample_order": {
+        "platform": "jst", "label": "聚水潭 · 达人寄样单",
+        "required": ("item_id", "shop", "skus", "creator_platform"),
+        "optional": ("creator_uid", "creator_account", "receiver", "logistics"),
+        "link": False,
+        "effect": "在聚水潭建一张寄样单：这位达人、收货地址、快递、这个商品的 SKU 和数量（这台 Mac 配的店铺）；"
+                  "达人不在达人库先加入并认领到这台 Mac 登录的子账号，新地址存到达人名下。建好后在聚水潭寄样管理审核，仓库发货",
+        "caveat": "建寄样单这条写命令还没在真实账号上提交过：第一次执行后请到聚水潭寄样管理核对；"
+                  "已经归别的账号跟进、或者寄过这个商品的达人，命令会拦下不建",
+    },
 }
 ACTION_NAMES = tuple(ACTIONS)
 PARAM_LABELS = {
@@ -157,7 +171,11 @@ PARAM_LABELS = {
     "sku_prices": "SKU 专属价（元）", "title": "商品标题", "short_title": "导购短标题", "price": "渠道价（元）",
     "sku_ids": "SKU", "stock": "渠道库存", "exclusive": "专属达人带货", "crowd_ids": "达摩盘人群包",
     "bid_target": "出价目标", "day_budget": "日预算（元）", "note": "说明",
+    "shop": "发货店铺", "skus": "寄样 SKU × 数量", "creator_platform": "达人平台", "creator_uid": "达人 UID",
+    "creator_account": "达人号码（抖音号 / 小红书号）", "receiver": "收货信息", "logistics": "快递",
 }
+SHOPS = ("dy", "xhs")                                   # a sample order sends one of this Mac's two shops' products
+RECEIVER_KEYS = ("name", "phone", "province", "city", "district", "address")
 BID_TARGETS = {"display_pay": "成交", "display_cart": "加购", "display_click": "点击"}
 
 # The JSON schema of ``platform_action`` (the draft's optional field; result.SCHEMA and the
@@ -183,6 +201,18 @@ ACTION_SCHEMA = {
         "crowd_ids": {"type": "array", "items": {"type": "string"}},
         "bid_target": {"type": "string", "enum": list(BID_TARGETS)},
         "day_budget": {"type": "integer"},
+        "shop": {"type": "string", "enum": list(SHOPS)},
+        "skus": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"sku_id": {"type": "string"}, "qty": {"type": "integer"}},
+            "required": ["sku_id", "qty"], "additionalProperties": False}},
+        "creator_platform": {"type": "string", "enum": list(SHOPS)},
+        "creator_uid": {"type": "string"},
+        "creator_account": {"type": "string"},
+        "receiver": {"type": "object",
+                     "properties": {k: {"type": "string"} for k in RECEIVER_KEYS},
+                     "required": ["name", "phone", "province", "city", "address"], "additionalProperties": False},
+        "logistics": {"type": "string"},
         "note": {"type": "string"},
     },
     "required": ["action", "item_id"],
@@ -197,16 +227,25 @@ DEFAULT_LIMITS = {
     "min_price_ratio": 0.5,         # an exclusive price at least this share of the catalogue price
     "max_sku_prices": 20,
     "max_crowds": 10,
+    "max_sample_skus": 10,          # SKUs in one sample order
+    "max_sample_qty": 2,            # pieces of one SKU in it
 }
 # What the bot holds a Mac's action to: the form and the platforms' own ranges only (the
 # Mac's limits are the Mac's: it may have raised them).
-FORM_LIMITS = {**DEFAULT_LIMITS, "max_commission_rate": 80, "max_day_budget": 100_000_000}
+FORM_LIMITS = {**DEFAULT_LIMITS, "max_commission_rate": 80, "max_day_budget": 100_000_000,
+               "max_sample_skus": 50, "max_sample_qty": 99}
 
 _DIGITS = re.compile(r"^[1-9]\d{3,31}$")              # dy / tb ids (no leading zero)
 _HEX24 = re.compile(r"^[0-9A-Za-z]{24}$")              # a 千帆 user id
 _XHS_ID = re.compile(r"^[0-9A-Za-z]{24}$")             # an item / SKU id of 千帆
 _KEY = re.compile(r"^[0-9a-f]{32}$")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_CREATOR_NO = re.compile(r"^[0-9A-Za-z_.][0-9A-Za-z_.-]{0,39}$")   # an 抖音号 / 小红书号 / UID (聚水潭 looks it up)
+_LOGISTICS = re.compile(r"^[A-Za-z0-9_.-]{1,30}$")     # a courier code of 聚水潭 (SF, SF.COLLECT, ZTO …)
+_JST_SHOP = re.compile(r"^\d{1,20}$")                  # a shop id / account id of 聚水潭
+PHONE_TOKEN = re.compile(r"^〈手机\d+〉$")               # the draft's stand-in for a creator's number (pii.py)
+_MOBILE = re.compile(r"^1[3-9]\d{9}$")
+_ORDER_NO = re.compile(r"^YP[0-9A-Za-z]{6,30}$")
 
 
 def _err(code: str, message: str) -> ActionError:
@@ -286,6 +325,11 @@ def check_action(raw, *, catalog: Optional[dict] = None, limits: Optional[dict] 
     lim = _limits(limits)
     platform = spec["platform"]
     out: dict = {"action": name}
+    if platform == "jst":
+        if raw.get("shop") not in SHOPS:
+            raise _err("bad_shop", "发货店铺（shop）只能是 dy（抖店）或 xhs（小红书店）")
+        out["shop"] = raw["shop"]
+        platform = raw["shop"]                  # the product is that shop's (its catalogue, its id format)
     if platform == "xhs":
         out["item_id"] = _text_id(raw["item_id"], _XHS_ID, "bad_item", "商品 ID")
     else:
@@ -380,11 +424,89 @@ def check_action(raw, *, catalog: Optional[dict] = None, limits: Optional[dict] 
         if budget > lim["max_day_budget"]:
             raise _err("over_limit", f"日预算 {budget} 元超过这台 Mac 设的上限 {lim['max_day_budget']} 元")
         out["day_budget"] = budget
+    elif name == "jst.sample_order":
+        out.update(_sample_order(raw, item, platform, out["item_id"], lim))
     if raw.get("note") not in (None, ""):
         if not isinstance(raw["note"], str):
             raise _err("bad_note", "说明要是文字")
         out["note"] = " ".join(raw["note"].split())[:200]
     return out
+
+
+def _sample_order(raw: dict, item: Optional[dict], shop: str, item_id: str, lim: dict) -> dict:
+    """The parameters of jst.sample_order besides the item and the shop, checked."""
+    out: dict = {}
+    skus = raw.get("skus")
+    if not isinstance(skus, list) or not skus or len(skus) > lim["max_sample_skus"]:
+        raise _err("bad_sku", f"寄样的 SKU 要是 1–{lim['max_sample_skus']} 项的列表（这台 Mac 的上限）")
+    listed = {s.get("id") for s in (item or {}).get("skus") or []}
+    clean = []
+    for entry in skus:
+        if not isinstance(entry, dict) or set(entry) - {"sku_id", "qty"}:
+            raise _err("bad_sku", "每个寄样 SKU 写成 {sku_id, qty}")
+        sku = _text_id(entry.get("sku_id"), _XHS_ID if shop == "xhs" else _DIGITS, "bad_sku", "SKU ID")
+        if any(c["sku_id"] == sku for c in clean):
+            raise _err("bad_sku", f"SKU {sku} 写了两次：数量写在一处")
+        if listed and sku not in listed:
+            raise _err("bad_sku", f"SKU {sku} 不是商品 {item_id} 的（商品目录里没有）")
+        qty = entry.get("qty", 1)
+        if isinstance(qty, bool) or not isinstance(qty, int) or not (1 <= qty <= 99):
+            raise _err("bad_qty", "每个 SKU 的数量要是 1–99 的整数")
+        if qty > lim["max_sample_qty"]:
+            raise _err("over_limit", f"SKU {sku} 寄 {qty} 件，超过这台 Mac 设的上限 {lim['max_sample_qty']} 件")
+        clean.append({"sku_id": sku, "qty": qty})
+    out["skus"] = clean
+    if raw.get("creator_platform") not in SHOPS:
+        raise _err("bad_creator", "达人平台（creator_platform）只能是 dy（抖音）或 xhs（小红书）")
+    out["creator_platform"] = raw["creator_platform"]
+    given = [k for k in ("creator_uid", "creator_account") if raw.get(k) not in (None, "")]
+    if len(given) != 1:
+        raise _err("bad_creator", "达人的 UID（creator_uid）和号码（creator_account，抖音号 / 小红书号）给一个")
+    out[given[0]] = _text_id(raw[given[0]], _CREATOR_NO, "bad_creator", PARAM_LABELS[given[0]])
+    if raw.get("receiver") not in (None, {}):
+        out["receiver"] = _receiver(raw["receiver"])
+    if raw.get("logistics") not in (None, ""):
+        out["logistics"] = _text_id(raw["logistics"], _LOGISTICS, "bad_logistics", "快递代码（如 SF）")
+    return out
+
+
+def _receiver(raw) -> dict:
+    """A sample order's address.  The phone is a number or the draft's 〈手机N〉 (the bot puts the
+    number in only when the action goes to the Mac to be executed)."""
+    if not isinstance(raw, dict) or set(raw) - set(RECEIVER_KEYS):
+        raise _err("bad_receiver", "收货信息写成 {name, phone, province, city, district, address}")
+    out = {}
+    for key, what, limit, required in (("name", "收货人", 30, True), ("phone", "", 0, True),
+                                       ("province", "省", 20, True), ("city", "市", 20, True),
+                                       ("district", "区县", 20, False), ("address", "详细地址", 120, True)):
+        if key == "phone":
+            out["phone"] = phone_of(raw.get("phone"))
+            continue
+        value = raw.get(key)
+        if value in (None, ""):
+            if required:
+                raise _err("bad_receiver", f"收货信息缺{what}")
+            out[key] = ""
+            continue
+        out[key] = _free_text(value, "bad_receiver", what, limit)
+    return out
+
+
+def phone_of(value) -> str:
+    """A receiver's phone as an action carries it: 11 digits, or a 〈手机N〉 placeholder."""
+    text = str(value if isinstance(value, (str, int)) and not isinstance(value, bool) else "").strip()
+    if PHONE_TOKEN.match(text):
+        return text
+    digits = re.sub(r"^\+?86(?=1\d{10}$)", "", re.sub(r"[\s-]", "", text))
+    if not _MOBILE.match(digits):
+        raise _err("bad_receiver", "收件电话要是 11 位手机号（或草稿里的〈手机N〉占位符）")
+    return digits
+
+
+def catalog_platform(action: dict) -> str:
+    """Whose catalogue an action's item is in: its platform's; a sample order's, its shop's."""
+    platform = ACTIONS[action["action"]]["platform"]
+    return action.get("shop", "") if platform == "jst" else platform
 
 
 def _cap_rate(rate: Decimal, lim: dict) -> None:
@@ -507,6 +629,13 @@ def describe(action: Optional[dict], catalog_entry: Optional[dict] = None) -> li
             value = f"{BID_TARGETS.get(value, value)}（{value}）"
         elif key == "commission_rate":
             value = f"{value}%"
+        elif key == "skus":
+            value = "；".join(f"{s['sku_id']} × {s['qty']}" for s in value)
+        elif key == "receiver":
+            value = (f"{value.get('name')} {value.get('phone')} "
+                     f"{value.get('province')}{value.get('city')}{value.get('district') or ''} {value.get('address')}")
+        elif key in ("shop", "creator_platform"):
+            value = f"{PLATFORMS.get(value, value)}（{value}）"
         out.append({"label": PARAM_LABELS.get(key, key), "value": str(value)})
     if catalog_entry and catalog_entry.get("title"):
         out.insert(0, {"label": "商品", "value": str(catalog_entry["title"])[:80]})
@@ -561,14 +690,20 @@ def config(settings: dict) -> dict:
 
         {"node": "/…/node" | None, "dirs": {"xhs": Path, …}, "missing": {"dy": "why"},
          "limits": {…}, "env": {…}, "dy_expect_shop_id": "…", "tb_shop": "…",
+         "jst_expect_uid": "…", "jst_shops": {"dy": "…", "xhs": "…"}, "jst_logistics": ["SF", …],
          "preview_timeout_sec": 300, "execute_timeout_sec": 900}
+
+    聚水潭 (jst): several people send samples from one company account, each with a sub-account
+    of their own and their own shops; ``jst_shops`` are this Mac's (聚水潭's shop ids, not the
+    platforms'), ``jst_expect_uid`` the sub-account the CLI must be logged in as (else exit 79),
+    ``jst_logistics`` the couriers a sample order may use (the first one when the draft names none).
 
     A platform is usable when its folder holds its CLI (``bin/xhs.mjs`` …) and node is
     found; ``enabled`` says whether any is.
     """
     raw = settings.get("platforms") if isinstance(settings.get("platforms"), dict) else {}
     out = {"node": None, "dirs": {}, "missing": {}, "limits": _limits(raw), "env": {},
-           "dy_expect_shop_id": "", "tb_shop": "",
+           "dy_expect_shop_id": "", "tb_shop": "", "jst_expect_uid": "", "jst_shops": {}, "jst_logistics": [],
            "preview_timeout_sec": PREVIEW_TIMEOUT_SEC, "execute_timeout_sec": EXECUTE_TIMEOUT_SEC}
     for key in ("preview_timeout_sec", "execute_timeout_sec"):
         value = raw.get(key)
@@ -583,6 +718,15 @@ def config(settings: dict) -> dict:
     tb_shop = str(raw.get("tb_shop") or "").strip()
     if tb_shop and not tb_shop.startswith("-") and not _CONTROL.search(tb_shop) and len(tb_shop) <= 40:
         out["tb_shop"] = tb_shop
+    uid = str(raw.get("jst_expect_uid") or "").strip()
+    if _JST_SHOP.match(uid):
+        out["jst_expect_uid"] = uid
+    shops = raw.get("jst_shops") if isinstance(raw.get("jst_shops"), dict) else {}
+    out["jst_shops"] = {k: str(v).strip() for k, v in shops.items()
+                        if k in SHOPS and isinstance(v, (str, int)) and _JST_SHOP.match(str(v).strip())}
+    couriers = raw.get("jst_logistics")
+    couriers = [couriers] if isinstance(couriers, str) else couriers if isinstance(couriers, list) else []
+    out["jst_logistics"] = [c for c in couriers if isinstance(c, str) and _LOGISTICS.match(c)][:10]
     out["node"] = find_node(str(raw.get("node_bin") or ""))
     for platform, cli in CLI_FILES.items():
         folder = str(raw.get(platform) or "").strip()
@@ -1137,6 +1281,7 @@ PLANS = {
     "dy.designated_commission": (("designated",), ("promotion", "designated")),
     "dy.channel_goods": (("create", "bind"),),
     "tb.campaign": (("create",),),
+    "jst.sample_order": (("create",),),
 }
 _VERDICT_RANK = ("error", "wrong_account", "wall", "login", "unavailable", "invalid", "blocked", "ready")
 
@@ -1198,7 +1343,7 @@ def preview(raw, cfg: dict, *, catalog: Optional[dict], heartbeat=None, context:
     block = _new_block(raw, action)
     name = action["action"]
     platform = ACTIONS[name]["platform"]
-    entry = catalog_item(catalog, platform, action["item_id"]) or {}
+    entry = catalog_item(catalog, catalog_platform(action), action["item_id"]) or {}
     block["catalog"] = {"synced_at": (catalog or {}).get("synced_at"), "title": _clip(entry.get("title", ""), 120)}
     if catalog is None:
         block["verdict"] = "invalid"
@@ -1238,6 +1383,22 @@ def check_plan(action: dict, plan) -> dict:
     return out
 
 
+RECEIVER_CLEARED = "（详细地址已清除）"         # as retention.CLEARED: only the province and the city stay
+
+
+def ledger_action(action: dict) -> dict:
+    """The action as the ledger keeps it (for good): a sample order's receiver cut down the way the
+    bot's clean-up cuts it after delivery (retention.py), province and city only."""
+    receiver = action.get("receiver")
+    if not isinstance(receiver, dict):
+        return action
+    name, phone = str(receiver.get("name") or ""), str(receiver.get("phone") or "")
+    return {**action, "receiver": {
+        "name": name[:1] + "*" if name else "", "phone": phone[:3] + "****" + phone[-4:] if _MOBILE.match(phone) else phone,
+        "province": receiver.get("province"), "city": receiver.get("city"), "district": "",
+        "address": RECEIVER_CLEARED}}
+
+
 def record(outcome: str, problems: Optional[list] = None) -> dict:
     """An execution's record (what the worker hands back)."""
     return {"version": 1, "op": "platform_execute", "outcome": outcome, "problems": list(problems or []),
@@ -1268,7 +1429,7 @@ def execute(raw, cfg: dict, *, plan, key: str, ledger, catalog: Optional[dict], 
         return out
     try:
         earlier = claim(ledger, key, {"key": key, "status": "started", "started_at": time.time(),
-                                      "action": action, "run": approved, **(context or {})})
+                                      "action": ledger_action(action), "run": approved, **(context or {})})
     except (ActionError, OSError) as e:
         out["problems"].append(f"没有执行：执行台账写不了（{e}）")
         return out
@@ -1280,7 +1441,7 @@ def execute(raw, cfg: dict, *, plan, key: str, ledger, catalog: Optional[dict], 
         return out
     try:
         _EXECUTES[platform](action, cfg, approved, _runner(cfg, heartbeat), out,
-                            {"catalog_entry": catalog_item(catalog, platform, action["item_id"])})
+                            {"catalog_entry": catalog_item(catalog, catalog_platform(action), action["item_id"])})
         writes = [step for step in out["steps"] if step.get("execute")]
         outcome = worst(step.get("outcome") for step in writes) if writes else "NOT_RUN"
         done = {step["name"] for step in out["steps"] if step.get("outcome") in _DONE}
@@ -1301,7 +1462,7 @@ def execute(raw, cfg: dict, *, plan, key: str, ledger, catalog: Optional[dict], 
     finally:
         out["finished_at"] = time.time()
         try:
-            settle(ledger, key, {"key": key, "status": "done", "action": action, "run": approved,
+            settle(ledger, key, {"key": key, "status": "done", "action": ledger_action(action), "run": approved,
                                  "finished_at": out["finished_at"], "record": {k: v for k, v in out.items() if k != "steps"},
                                  **(context or {})})
         except OSError:
@@ -1398,6 +1559,8 @@ def check_record(value) -> dict:
     for key in ("channel_id", "group_id", "task_id", "item_id", "campaign_id", "plan_name", "review"):
         if created_in.get(key) not in (None, ""):
             created[key] = _clip(created_in[key], 200)
+    if _ORDER_NO.match(str(created_in.get("sample_order_no") or "")):
+        created["sample_order_no"] = str(created_in["sample_order_no"])
     if isinstance(created_in.get("strategy_ids"), list):
         created["strategy_ids"] = [_clip(s, 40) for s in created_in["strategy_ids"][:10]]
     link = str(created_in.get("link") or "")
@@ -1479,7 +1642,7 @@ def sync_catalog(cfg: dict, wanted: list, *, previous: Optional[dict] = None, pr
     commands.  A platform that fails keeps its previous list, marked ``stale``."""
     old = ((previous or {}).get("platforms") or {}) if isinstance(previous, dict) else {}
     out = {"version": 1, "synced_at": time.time(), "platforms": {}}
-    for platform in PLATFORMS:
+    for platform in CATALOG_PLATFORMS:
         if platform not in wanted or platform not in cfg.get("dirs", {}):
             if isinstance(old.get(platform), dict):
                 out["platforms"][platform] = old[platform]
@@ -1507,7 +1670,8 @@ def catalog_markdown(catalog: dict) -> str:
              f"同步时间：{when}（Mac 上运行 `python3 tools/claude_relay/worker.py --sync-products` 生成）。",
              "起草平台动作（platform_action）时，商品 ID 和 SKU ID 只能从这张表里取；价格是目录里的售价（元），"
              "专属价、佣金按 kb/ 里的合作规则定。", ""]
-    for platform, name in PLATFORMS.items():
+    for platform in CATALOG_PLATFORMS:
+        name = PLATFORMS[platform]
         part = (catalog.get("platforms") or {}).get(platform)
         if not isinstance(part, dict):
             continue
@@ -1925,6 +2089,201 @@ def _sync_tb(cfg: dict, progress) -> dict:
     return {"items": items, "notes": notes, "complete": True}
 
 
+# ── 聚水潭 (jushuitan-engineering, node bin/jst.mjs) ─────────────────────
+# sample-create takes its order as a JSON file (a receiver's phone must not be on a command
+# line): written 0600 to a temp file for the one run, removed right after.  Its preview (no
+# --execute) only reads: the shop's on-sale product found by title (聚水潭 cannot search shop
+# products by id; the title comes from the catalogue), its SKUs (matched by the platform's SKU
+# id), the creator (UID or 抖音号 / 小红书号, exact), saved addresses, couriers, earlier samples.
+# A draft's phone is 〈手机N〉: the preview goes without it; the bot puts the number in when the
+# approved action comes back to be executed.
+
+JST_STEPS = {"preview": "聚水潭 · 寄样单预览（只读：商品、达人、地址、快递、查重）", "create": "聚水潭 · 建寄样单"}
+# The CLI's [TAG]s of a run that ended before its order could be sent.
+_JST_TAGS = ("USAGE", "REFUSED", "NOT_LOGGED_IN", "RISK", "WRONG_ACCOUNT", "NO_BROWSER", "AMBIGUOUS")
+
+
+def _jst_title(entry: Optional[dict]) -> str:
+    """What the shop's products are searched by: the catalogue title's first 30 characters."""
+    title = str((entry or {}).get("title") or "").strip().rstrip("…").strip()
+    return "" if _CONTROL.search(title) else title[:30]
+
+
+def _jst_spec(action: dict, cfg: dict, catalog_entry: Optional[dict], *, execute: bool) -> dict:
+    """The order file of ``jst sample-create``."""
+    shop = (cfg.get("jst_shops") or {}).get(action["shop"])
+    if not shop:
+        raise _err("no_shop", f"这台 Mac 没有配聚水潭里{PLATFORMS[action['shop']]}店铺的 ID"
+                              f"（config.json 的 platforms.jst_shops.{action['shop']}）")
+    allowed = cfg.get("jst_logistics") or []
+    if not allowed:                     # the draft never picks a courier on its own (到付 costs the creator)
+        raise _err("no_logistics", "这台 Mac 没有配寄样能用的快递：在 config.json 的 platforms.jst_logistics 里"
+                                   "写上快递代码（第一个是默认）")
+    code = action.get("logistics") or allowed[0]
+    if code not in allowed:
+        raise _err("bad_logistics", f"快递 {code} 不在这台 Mac 允许的里面（{'、'.join(allowed)}）")
+    title = _jst_title(catalog_entry)
+    if not title:
+        raise _err("no_title", "商品目录里没有这个商品的标题（聚水潭的店铺商品只能按标题搜）：先同步商品目录")
+    by = "uid" if action.get("creator_uid") else "account"
+    spec = {"daren": {"platform": action["creator_platform"].upper(), by: action[f"creator_{by}"]},
+            "logistics": code,
+            "goods": [{"platform": action["shop"].upper(), "shop": shop, "product": action["item_id"],
+                       "title": title, "sku": s["sku_id"], "qty": s["qty"]} for s in action["skus"]]}
+    receiver = action.get("receiver")
+    if receiver:
+        phone = receiver["phone"]
+        if PHONE_TOKEN.match(phone):
+            if execute:
+                raise _err("phone_token", "收件电话还是占位符：执行时机器人要换成号码，这次没换，不执行")
+            phone = None
+        spec["receiver"] = {"name": receiver["name"], "phone": phone, "state": receiver["province"],
+                            "city": receiver["city"], "district": receiver.get("district") or "",
+                            "address": receiver["address"]}
+    return spec
+
+
+def _jst_argv(cfg: dict, spec_file: str, *, execute: bool) -> list:
+    who = [f"--expect-uid={cfg['jst_expect_uid']}"] if cfg.get("jst_expect_uid") else []
+    return [cfg["node"], CLI_FILES["jst"], "sample-create", f"--spec={spec_file}", *who,
+            *(["--execute"] if execute else [])]
+
+
+def _jst_run(cfg: dict, spec: dict, run_one, *, execute: bool) -> CliRun:
+    """One sample-create run, its order in a private temp file (removed afterwards)."""
+    import tempfile
+
+    fd, path = tempfile.mkstemp(prefix="webot-jst-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(spec, f, ensure_ascii=False)
+        return run_one(_jst_argv(cfg, path, execute=execute), "jst", execute)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def _jst_facts(data: dict, rec: dict) -> None:
+    """What the operator should see of a sample-create answer (its receiver comes masked)."""
+    d = data.get("daren") if isinstance(data.get("daren"), dict) else None
+    if d:
+        belongs = {"mine": "归这个子账号跟进", "none": "没人跟进：执行时认领到这个子账号",
+                   "others": f"归 {'、'.join(map(str, d.get('followers') or []))} 跟进"}.get(d.get("belongs"), "")
+        rec["facts"].append(_fact("达人", f"{d.get('nickName')}（{d.get('platform')} {d.get('platformNo') or ''}，"
+                                          f"粉丝 {d.get('fansNum')}）；{belongs}"
+                                          + ("" if d.get("inLibrary") else "；不在达人库：执行时先加入")))
+    r = data.get("receiver") if isinstance(data.get("receiver"), dict) else None
+    if r:
+        rec["facts"].append(_fact("收货", f"{r.get('name')} {r.get('phone')} {r.get('region')} {r.get('address')}"
+                                          f"（{r.get('source')}）"))
+    lg = data.get("logistics") if isinstance(data.get("logistics"), dict) else None
+    if lg:
+        rec["facts"].append(_fact("快递", f"{lg.get('name')}（{lg.get('code')}）"))
+    for g in data.get("goods") or []:
+        if not isinstance(g, dict):
+            continue
+        skus = "；".join(f"{k.get('itemCode')} {k.get('properties') or ''} × {k.get('qty')}"
+                        f"（售价 {k.get('price')}，平台库存 {k.get('platformStock')}）"
+                        for k in g.get("skus") or [] if isinstance(k, dict))
+        rec["facts"].append(_fact("商品", f"{g.get('title')}（{g.get('shopName') or g.get('shopId')}）：{skus}"))
+    if isinstance(data.get("repeat"), list):
+        hits = [str(h.get("orderNo") or h.get("productId")) for h in data["repeat"] if isinstance(h, dict)]
+        rec["facts"].append(_fact("查重", "寄过：" + "、".join(hits) if hits else "这位达人没寄过这个商品"))
+    for key, label_ in (("willDo", "执行时会做"), ("done", "已经做了")):
+        if data.get(key):
+            rec["facts"].append(_fact(label_, "、".join(map(str, data[key]))))
+    if data.get("orderNo"):
+        rec["facts"].append(_fact("寄样单号", f"{data['orderNo']}（{data.get('status') or ''}）"))
+    if data.get("note"):
+        rec["facts"].append(_fact("说明", data["note"]))
+
+
+def _preview_jst(action: dict, cfg: dict, run_one, block: dict, context: dict) -> None:
+    block["run"] = {"steps": ["create"]}
+    try:
+        spec = _jst_spec(action, cfg, context.get("catalog_entry"), execute=False)
+    except ActionError as e:
+        block["steps"].append({"name": "preview", "label": JST_STEPS["preview"], "execute": False, "command": "",
+                               "exit_code": None, "seconds": 0, "verdict": "invalid", "outcome": "",
+                               "problems": [str(e)], "facts": [], "raw": ""})
+        return
+    run = _jst_run(cfg, spec, run_one, execute=False)
+    data = parse_json(run.stdout)
+    rec = _step("preview", JST_STEPS["preview"], run, False)
+    block["steps"].append(rec)
+    if not cfg.get("jst_expect_uid"):
+        rec["facts"].append(_fact("子账号", "这台 Mac 没设 jst_expect_uid：不核对调试 Chrome 里登录的是哪个子账号"))
+    if isinstance(data, dict):
+        _jst_facts(data, rec)
+    if run.error or run.stopped:
+        rec["problems"].append(_exit_problem(run))
+        rec["verdict"] = "error"
+    elif run.exit_code in _EXIT_VERDICT:
+        rec["problems"].append(_exit_problem(run))
+        rec["verdict"] = _EXIT_VERDICT[run.exit_code]
+    elif run.exit_code == 2:
+        rec["problems"].append(_exit_problem(run))
+        rec["verdict"] = "invalid"
+    elif isinstance(data, dict) and data.get("outcome") == "PREVIEW" and run.exit_code == 0:
+        rec["verdict"] = "ready"
+    elif isinstance(data, dict) and data.get("outcome") == "FAILED":
+        rec["problems"].extend(_clip(t, 500) for t in (data.get("blocked") or [data.get("note") or "命令说不能建"]))
+        rec["verdict"] = "blocked"
+    else:
+        rec["problems"].append(_exit_problem(run) if run.exit_code else "预览没有给出结果")
+        rec["verdict"] = "error"
+
+
+def _jst_outcome(run: CliRun, data, rec: dict) -> str:
+    """The outcome of an executed sample-create: its JSON's; without one, FAILED when the CLI
+    stopped before the order could go out (its [TAG] says why), else INDETERMINATE."""
+    if not isinstance(data, dict):
+        rec["problems"].append(_exit_problem(run))
+        if run.error:
+            return "FAILED"
+        tag = re.match(r"^\[([A-Z_]+)\]", _stderr_line(run.stderr))
+        if not run.stopped and run.exit_code not in (None, 130) and tag and tag.group(1) in _JST_TAGS:
+            return "FAILED"
+        return "INDETERMINATE"
+    outcome = data.get("outcome")
+    rec["problems"].extend(_clip(t, 500) for t in data.get("blocked") or [])
+    if outcome not in OUTCOMES:
+        rec["problems"].append(f"命令给的结果是 {outcome}（执行时不该是这个）")
+        return "FAILED" if outcome == "PREVIEW" else "INDETERMINATE"
+    if outcome != VERIFIED and data.get("note"):
+        rec["problems"].append(_clip(data["note"], 500))
+    if outcome == VERIFIED and not _ORDER_NO.match(str(data.get("orderNo") or "")):
+        rec["problems"].append("说建好了，可结果里没有寄样单号")
+        return "ACCEPTED_UNVERIFIED"
+    return outcome
+
+
+def _execute_jst(action: dict, cfg: dict, plan: dict, run_one, record: dict, catalog_entry: Optional[dict] = None) -> None:
+    try:
+        spec = _jst_spec(action, cfg, catalog_entry, execute=True)
+    except ActionError as e:
+        record["problems"].append(f"没有执行：{e}")
+        return
+    run = _jst_run(cfg, spec, run_one, execute=True)
+    data = parse_json(run.stdout)
+    rec = _step("create", JST_STEPS["create"], run, True)
+    record["steps"].append(rec)
+    rec["outcome"] = _jst_outcome(run, data, rec)
+    if isinstance(data, dict):
+        _jst_facts(data, rec)
+        if _ORDER_NO.match(str(data.get("orderNo") or "")):
+            record["created"]["sample_order_no"] = str(data["orderNo"])
+    if rec["outcome"] != VERIFIED:
+        # what the operator must check in 聚水潭 goes with the red mark (the order may exist)
+        number = record["created"].get("sample_order_no")
+        note = data.get("note") if isinstance(data, dict) else ""
+        line = "；".join(t for t in (f"聚水潭寄样单 {number}" if number else "", _clip(note or "", 300)) if t)
+        if line:
+            record["problems"].append(line)
+
+
 # ── the registries ────────────────────────────────────────────────────────
 
 _PREVIEWS = {
@@ -1933,10 +2292,12 @@ _PREVIEWS = {
     "dy.designated_commission": lambda a, c, r, b, ctx: _preview_dy_designated(a, c, r, b),
     "dy.channel_goods": lambda a, c, r, b, ctx: _preview_dy_channel_goods(a, c, r, b),
     "tb.campaign": _preview_tb,
+    "jst.sample_order": _preview_jst,
 }
 _EXECUTES = {
     "xhs": lambda a, c, p, r, rec, ctx: _execute_xhs(a, c, p, r, rec),
     "dy": lambda a, c, p, r, rec, ctx: _execute_dy(a, c, p, r, rec),
     "tb": lambda a, c, p, r, rec, ctx: _execute_tb(a, c, p, r, rec, ctx.get("catalog_entry")),
+    "jst": lambda a, c, p, r, rec, ctx: _execute_jst(a, c, p, r, rec, ctx.get("catalog_entry")),
 }
 _SYNCS = {"xhs": _sync_xhs, "dy": _sync_dy, "tb": _sync_tb}

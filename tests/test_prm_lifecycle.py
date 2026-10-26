@@ -409,6 +409,47 @@ def test_thirty_days_after_delivery_every_copy_is_cut_down(bot, clock):
     assert bot.prm.store.events(1, limit=1)[0]["kind"] == "purge_case"
 
 
+def test_a_sample_orders_receiver_is_cut_down_with_the_rest(bot, clock):
+    from platform_fakes import DY_ITEM, DY_SKU, DY_UID
+    from src.prm import platforms
+
+    messages, _ = delivered_deal(bot, clock)
+    action = platforms.check_action({
+        "action": "jst.sample_order", "shop": "dy", "item_id": DY_ITEM, "skus": [{"sku_id": DY_SKU, "qty": 1}],
+        "creator_platform": "dy", "creator_uid": DY_UID,
+        "receiver": {"name": "小美", "phone": "〈手机1〉", "province": "上海市", "city": "上海市", "district": "浦东新区",
+                     "address": "张江路100号3栋1201"}})
+    preview = {"version": 1, "action": action, "verdict": "ready", "problems": [], "facts": [], "steps": [],
+               "run": {"steps": ["create"]}, "catalog": None, "previewed_at": 1.0}
+    packet = drafted(bot, {**draft(message_kind="money", reply_draft="寄样单建好啦：{寄样单号}", slots={}),
+                           "platform": preview}, text="再寄一个颜色")
+    assert bot.prm.decide(packet["id"], "execute", None)["ok"]
+    before = json.dumps(bot.relay.store.list_jobs(100), ensure_ascii=False)
+    assert "13812345678" in before and "张江路" in before                     # the execution job carries them
+    clock.now += 31 * DAY
+    assert bot.prm.purge_due() == 1
+    everything = json.dumps([bot.prm.store.packets(limit=100), bot.relay.store.list_jobs(100)], ensure_ascii=False)
+    assert "张江路" not in everything and "13812345678" not in everything
+    cut = bot.prm.store.packet(packet["id"])["platform"]["action"]["receiver"]
+    assert cut == {"name": "小*", "phone": "〈手机1〉", "province": "上海市", "city": "上海市", "district": "",
+                   "address": retention.CLEARED}
+    jobs = [json.loads(j["meta"]) for j in bot.relay.store.list_jobs(100)]
+    [sent] = [m for m in jobs if m.get("op") == "platform_execute"]
+    assert sent["action"]["receiver"]["phone"] == "138****5678"
+
+
+def test_clear_receivers_leaves_other_text_alone():
+    assert retention.clear_receivers("收件人小美") == "收件人小美"
+    assert retention.clear_receivers('{"receiver": "x"}') == '{"receiver": "x"}'
+    once = retention.clear_receivers(json.dumps({"a": [{"receiver": {"name": "张三", "phone": "13900001111",
+                                                                   "address": "某路1号"}}]}, ensure_ascii=False))
+    assert json.loads(once)["a"][0]["receiver"] == {"name": "张*", "phone": "139****1111", "district": "",
+                                                    "address": retention.CLEARED}
+    from src.prm import platforms
+    assert platforms.RECEIVER_CLEARED == retention.CLEARED                  # the Mac's ledger cuts the same way
+    assert retention.clear_receivers(once) == once
+
+
 def test_the_creator_writing_around_the_purge_job_still_gets_a_draft(bot, clock):
     delivered_deal(bot, clock)
     clock.now += 31 * DAY

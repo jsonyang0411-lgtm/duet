@@ -703,9 +703,13 @@ class PrmService:
         problems = platforms.reply_problems(final, action)
         if problems:
             return {"ok": False, "error": "；".join(problems)}
-        unknown = pii.unknown_tokens(final, self._store.tokens(packet["party_id"]))
+        tokens = self._store.tokens(packet["party_id"])
+        unknown = pii.unknown_tokens(final, tokens)
         if unknown:
             return {"ok": False, "error": f"草稿里有对不上的占位符：{'、'.join(unknown)}"}
+        mac_action, problem = action_for_mac(action, tokens)
+        if problem:
+            return {"ok": False, "error": problem}
         if self._send is None:
             return {"ok": False, "error": "机器人没有连着微信：执行成功后回复发不出去，现在不执行"}
         if packet["attachments"] and self._send_file is None:
@@ -715,7 +719,7 @@ class PrmService:
                                 edited=int(final != packet["text"]), platform=approved):
             return {"ok": False, "error": "这条草稿已经处理过了（或者达人又发了新消息，草稿已过时）"}
         meta = {"op": "platform_execute", "party_id": packet["party_id"], "deal_id": packet["deal_id"],
-                "packet_id": packet["id"], "key": approved["key"], "action": action, "run": preview.get("run") or {}}
+                "packet_id": packet["id"], "key": approved["key"], "action": mac_action, "run": preview.get("run") or {}}
         try:
             _, job_id = self._relay.submit(packet["chat_id"], packet["chat_id"], "", kind=PRM, meta=meta,
                                            fresh=True, input_closed=True)
@@ -838,6 +842,8 @@ class PrmService:
             return
         event = {"packet": packet["id"], "action": action.get("action"), "outcome": outcome,
                  "link": (record.get("created") or {}).get("link", "")}
+        if (record.get("created") or {}).get("sample_order_no"):
+            event["sample_order_no"] = record["created"]["sample_order_no"]
         missing = []
         if outcome == platforms.VERIFIED and not cancelled:
             final, missing = platforms.fill_reply(
@@ -1065,7 +1071,7 @@ class PrmService:
         addresses = retention.address_values(deal.get("slots") or {})
 
         def rewrite(text: str) -> str:
-            return retention.scrub(text, addresses)
+            return retention.scrub(retention.clear_receivers(text), addresses)
 
         counts = {"numbers": self._store.purge_tokens(deal["party_id"], pii.masked_value, now)}
         self._store.update_deal(deal["id"], now, replace_slots=retention.cleared_slots(deal.get("slots") or {}),
@@ -1084,6 +1090,26 @@ class PrmService:
         logger.info("PRM: deal %d delivered %d days ago; receiving details cleared (%s)", deal["id"],
                     self._retention_days, ", ".join(f"{k} {v}" for k, v in counts.items()))
         return counts
+
+
+def action_for_mac(action: dict, tokens: dict) -> tuple:
+    """``(action, problem)``: the approved action as the Mac executes it.  A sample order's
+    receiver phone is the draft's 〈手机N〉 (the model never sees numbers); the number goes in
+    here, for the Mac that sends the order and nowhere else (the packet keeps the placeholder)."""
+    receiver = action.get("receiver") if isinstance(action.get("receiver"), dict) else None
+    if not receiver:
+        return action, ""
+    phone = str(receiver.get("phone") or "")
+    unknown = pii.unknown_tokens(phone, tokens)
+    if unknown:
+        return action, f"收件电话的占位符对不上：{'、'.join(unknown)}（这位达人没有这个号码）"
+    try:
+        number = platforms.phone_of(pii.unmask(phone, tokens))
+    except platforms.ActionError:
+        return action, "收件电话换回号码以后不是手机号，不执行"
+    if platforms.PHONE_TOKEN.match(number):
+        return action, "收件电话还是占位符，不执行"
+    return {**action, "receiver": {**receiver, "phone": number}}, ""
 
 
 def _job_error(job: dict) -> str:
