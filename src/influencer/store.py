@@ -162,6 +162,38 @@ _PACKET_COLUMNS = tuple(f.name for f in fields(ApprovalActionPacket))
 _DRAFT_FIELDS = frozenset(f.name for f in fields(SampleRequestDraft))
 
 
+# 建表以后加的列：老库启动时补上（ALTER TABLE ... ADD COLUMN），新库也靠这里加，SCHEMA_SQL 不再改
+_ADDED_COLUMNS = {
+    "influencer_contacts": (
+        ("platform", "TEXT NOT NULL DEFAULT ''"),        # DY / XHS
+        ("platform_no", "TEXT NOT NULL DEFAULT ''"),     # 抖音号 / 小红书号（运营在名单里填）
+        ("tier", "TEXT NOT NULL DEFAULT ''"),            # 下面几项是按号码从聚水潭查来的（tiers.py）
+        ("channel", "TEXT NOT NULL DEFAULT ''"),
+        ("sales_label", "TEXT NOT NULL DEFAULT ''"),
+        ("level", "INTEGER"),
+        ("profile_note", "TEXT NOT NULL DEFAULT ''"),    # 查不到时的原因
+        ("profile_checked_at", "REAL"),
+    ),
+    "influencer_approvals": (
+        ("platform", "TEXT NOT NULL DEFAULT ''"),
+        ("platform_no", "TEXT NOT NULL DEFAULT ''"),
+        ("tier", "TEXT NOT NULL DEFAULT ''"),
+        ("channel", "TEXT NOT NULL DEFAULT ''"),
+        ("sales_label", "TEXT NOT NULL DEFAULT ''"),
+        ("items_json", "TEXT NOT NULL DEFAULT ''"),
+        ("live_session", "TEXT NOT NULL DEFAULT ''"),
+    ),
+}
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    for table, columns in _ADDED_COLUMNS.items():
+        have = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name, ddl in columns:
+            if name not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+
 def _placeholders(count: int) -> str:
     return ", ".join("?" * count)
 
@@ -191,6 +223,7 @@ class InfluencerStore:
         self._shared_lock = threading.RLock()
         with self._connect() as conn:
             conn.executescript(SCHEMA_SQL)
+            _add_missing_columns(conn)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -241,6 +274,8 @@ class InfluencerStore:
         xhs_account: Optional[str] = None,
         note: Optional[str] = None,
         enabled: Optional[bool] = None,
+        platform: Optional[str] = None,
+        platform_no: Optional[str] = None,
     ) -> Dict[str, Any]:
         """新增或修改一位达人；传 None 的字段保持原样。返回改完后的记录。"""
         now = time.time()
@@ -248,6 +283,8 @@ class InfluencerStore:
             name: value for name, value in (
                 ("display_name", display_name),
                 ("xhs_account", xhs_account),
+                ("platform", platform),
+                ("platform_no", platform_no),
                 ("note", note),
                 ("enabled", None if enabled is None else int(enabled)),
             ) if value is not None
@@ -267,6 +304,12 @@ class InfluencerStore:
                     f"UPDATE influencer_contacts SET {assignments}, updated_at = ? WHERE chat_id = ?",
                     (*changes.values(), now, chat_id),
                 )
+            if "platform" in changes or "platform_no" in changes:
+                # 号码变了，原来查到的档位、主播类型作废，下一轮同步马上按新号码重查（prm_bridge）
+                conn.execute(
+                    "UPDATE influencer_contacts SET tier = '', channel = '', sales_label = '', level = NULL,"
+                    " profile_note = '', profile_checked_at = NULL WHERE chat_id = ?", (chat_id,),
+                )
             if before is None:
                 action = "加入名单"
             elif enabled is not None and bool(before["enabled"]) != enabled:
@@ -276,6 +319,19 @@ class InfluencerStore:
             self._log(conn, action, chat_id=chat_id, source=source)
             row = conn.execute("SELECT * FROM influencer_contacts WHERE chat_id = ?", (chat_id,)).fetchone()
         return _contact_from_row(row)
+
+    def record_daren_profile(
+        self, chat_id: str, *, tier: str, channel: str, sales_label: str, level: Optional[int], note: str,
+        now: Optional[float] = None,
+    ) -> None:
+        """记下按号码从聚水潭查来的档位、主播类型、销售额（tiers.py）。查不到时 tier 为空，note 写原因。"""
+        now = time.time() if now is None else now
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE influencer_contacts SET tier = ?, channel = ?, sales_label = ?, level = ?,"
+                " profile_note = ?, profile_checked_at = ? WHERE chat_id = ?",
+                (tier, channel, sales_label, level, note, now, chat_id),
+            )
 
     def get_contact(self, chat_id: str) -> Optional[Dict[str, Any]]:
         with self._connect() as conn:

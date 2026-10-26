@@ -52,6 +52,8 @@ def _no_real_jushuitan_cli(monkeypatch, tmp_path):
     """达人模块会调聚水潭命令行（~/jushuitan-engineering，真实账号、真实请求）。测试一律指到一个
     不存在的目录：没替身的调用只会得到"找不到命令行"，不会碰真实的聚水潭。"""
     monkeypatch.setenv("JST_CLI_PATH", str(tmp_path / "no-jushuitan-cli"))
+    # 名单同步会往起草用的业务资料目录写达人资料：测试一律指到不存在的目录，不碰真实的 ~/Documents/prm_workspace
+    monkeypatch.setenv("PRM_WORKSPACE", str(tmp_path / "no-prm-workspace"))
     yield
 
 

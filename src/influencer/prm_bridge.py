@@ -14,10 +14,13 @@ PRM 的达人（起草、审核、接管都走 PRM），停用的取消登记。
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import threading
 import time
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Callable, Dict, List, Optional
 
 from src.pii import mask_pii
 from src.prm.store import PartyError
@@ -31,12 +34,59 @@ SOURCE_PRM = "合作单页"
 MAX_NAME = 30      # PRM 的称呼最多 30 个字
 MAX_NOTE = 200
 
+# 达人资料（档位、主播类型）多久按号码重查一次聚水潭；查失败的一小时后再试。每轮同步最多查一位，免得被限流
+PROFILE_REFRESH_SECONDS = 24 * 3600
+PROFILE_RETRY_SECONDS = 3600
+PROFILE_FILE = "deals/{party_id}-达人资料.md"
+
+
+def prm_workspace_dir() -> Optional[Path]:
+    """起草用的业务资料目录（起草的 Claude 在这里读 kb/ 和 deals/ 案卷）：环境变量 PRM_WORKSPACE，
+    或者这台 Mac 上 worker 的配置 ~/.claude-relay/config.json 的 prm_workspace。找不到返回 None。"""
+    raw = os.getenv("PRM_WORKSPACE", "")
+    if not raw:
+        try:
+            raw = json.loads(Path("~/.claude-relay/config.json").expanduser().read_text(encoding="utf-8")).get("prm_workspace", "")
+        except (OSError, ValueError, AttributeError):
+            raw = ""
+    path = Path(raw).expanduser() if raw else None
+    return path if path and path.is_dir() else None
+
+
+def profile_text(contact: dict, now: float) -> str:
+    """给起草的 Claude 看的达人资料：平台、号码、档位、主播类型。没有收件信息，只读。"""
+    from .tiers import PLATFORM_LABELS
+
+    platform = PLATFORM_LABELS.get(str(contact.get("platform") or ""), "")
+    lines = ["# 达人资料（系统写的，只读：不要改这个文件）", ""]
+    if not (platform and contact.get("platform_no")):
+        lines.append("- 名单上还没有这位达人的平台和抖音号 / 小红书号：档位、主播类型都不知道，按 kb/合作政策.md 里\"案卷没写\"处理")
+    else:
+        lines.append(f"- 平台：{platform}；{platform}号：{contact['platform_no']}")
+        if contact.get("tier"):
+            lines.append(f"- 档位：{contact['tier']}（{contact.get('sales_label') or ''}）")
+            lines.append(f"- 主播类型：{contact.get('channel') or '不知道'}")
+            if contact.get("level") is not None:
+                lines.append(f"- 带货等级：LV{contact['level']}")
+        else:
+            lines.append(f"- 档位、主播类型：还没查到（{contact.get('profile_note') or '还没查'}），按\"案卷没写\"处理")
+    lines += ["", f"更新时间：{time.strftime('%Y-%m-%d %H:%M', time.localtime(now))}", ""]
+    return "\n".join(lines)
+
 
 class PartyListSync:
-    def __init__(self, store: InfluencerStore, prm) -> None:
+    def __init__(
+        self, store: InfluencerStore, prm, *,
+        workspace: Optional[Path] = None, refresh: Optional[Callable] = None,
+    ) -> None:
+        from .tiers import refresh_contact
+
         self._store = store
         self._prm = prm
         self._lock = threading.RLock()
+        # 写达人资料的业务资料目录；None 表示到用的时候再找（prm_workspace_dir），找不到就不写
+        self._workspace = workspace
+        self._refresh = refresh or refresh_contact
         # 上次同步后 PRM 每位达人的状态：wxid → 是否登记着。用来认出合作单页上的改动
         self._seen: Dict[str, bool] = {}
         self._refused: Dict[str, str] = {}
@@ -56,7 +106,49 @@ class PartyListSync:
                     self._prm.set_active(party["id"], False)
                     logger.info("名单合一：%s 在名单里停用了，PRM 取消登记", chat_id[:20])
             self._snapshot()
+            self._refresh_profiles()
             return sorted(self._prm.store.active_wxids())
+
+    def _refresh_profiles(self, now: Optional[float] = None) -> None:
+        """达人资料：最多重查一位到期的达人（聚水潭会限流），再把资料文件写进业务资料目录。
+        出错只记日志，不影响名单同步。"""
+        now = time.time() if now is None else now
+        try:
+            due = [c for c in self._store.list_contacts() if c["enabled"] and c.get("platform_no") and self._due(c, now)]
+            if due:
+                self._refresh(self._store, due[0]["chat_id"], now=now)
+            self._write_profiles(now)
+        except Exception:
+            logger.exception("达人资料：重查或写文件出错（不影响名单同步）")
+
+    @staticmethod
+    def _due(contact: dict, now: float) -> bool:
+        checked = contact.get("profile_checked_at")
+        if checked is None:
+            return True
+        wait = PROFILE_REFRESH_SECONDS if contact.get("tier") else PROFILE_RETRY_SECONDS
+        return now - checked > wait
+
+    def _write_profiles(self, now: float) -> None:
+        workspace = self._workspace or prm_workspace_dir()
+        if workspace is None:
+            return
+        parties = {p["wxid"]: p for p in self._prm.store.parties(include_inactive=False)}
+        for contact in self._store.list_contacts():
+            party = parties.get(contact["chat_id"])
+            if party is None or not contact["enabled"]:
+                continue
+            path = workspace / PROFILE_FILE.format(party_id=int(party["id"]))
+            text = profile_text(contact, now)
+            try:
+                old = path.read_text(encoding="utf-8")
+            except OSError:
+                old = ""
+            # 只有内容变了才重写（更新时间那一行不算）
+            if old.split("\n更新时间")[0] == text.split("\n更新时间")[0]:
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
 
     def prm_changed(self) -> None:
         """合作单页登记或停用了达人（PrmService.on_parties_changed）。"""

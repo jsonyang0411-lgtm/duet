@@ -120,7 +120,7 @@ class ApprovalActionPacket:
     qualification: str = ""  # 资质标注：粉丝数（只作参考）/ 待核实（D4、D30，只标注不拦单）
     recipient_name: str = ""
     recipient_phone: str = ""
-    xhs_account: str = ""  # 达人提供或运营填写；绑佣金必须有，不能用微信 ID 代替（B10）
+    xhs_account: str = ""  # 小红书账号，选填（抖音达人没有）；不能用微信 ID 代替（B10）
     evidence: str = ""  # 达人的原话，供运营核对（R5）
     status: GateStatus = GateStatus.PENDING
     created_at: float = field(default_factory=time.time)
@@ -132,3 +132,11 @@ class ApprovalActionPacket:
     commission_plan: str = ""
     handled_at: Optional[float] = None  # 驳回、执行完成、失败或过期的时间
     personal_info_cleared_at: Optional[float] = None  # 到期清除收件信息的时间（Q3）
+    # 2026-10-26 第 2 步：抖音、小红书都做（D31），寄几款按销售额分档（D30），合作形式看主播类型（D36）
+    platform: str = ""  # DY / XHS（聚水潭的平台代码）
+    platform_no: str = ""  # 抖音号 / 小红书号
+    tier: str = ""  # 档位：3 款 / 问专场 / 不限 / 无销售数据（tiers.py）
+    channel: str = ""  # 主播类型：直播 / 视频（近 30 日哪边卖得多）
+    sales_label: str = ""  # 分档用的销售额和来源，如"近 30 日销售总额 250万~500万（聚水潭，10-26 查）"
+    items_json: str = ""  # 多款商品：[{"name", "colour", "spec", "qty"}] 的 JSON；空表示只有 requested_product 一款
+    live_session: str = ""  # 答应开直播专场的说明（日期等）；没答应为空
