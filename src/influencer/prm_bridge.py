@@ -114,6 +114,19 @@ READY_STAGE = "to_ship"          # 合作单到了「待寄出」：收件信息
 SYSTEM = "system"
 
 
+def _platform_account(contact: dict) -> tuple:
+    """名单上这位达人的平台和号码，查聚水潭合作数据用。名单以后会记抖音号（platform / platform_no）；
+    现在只有小红书账号时按小红书查；都没有就返回空号码，由 coop_summary 说明查不了。"""
+    platform = str(contact.get("platform") or "").strip().upper()
+    number = str(contact.get("platform_no") or "").strip()
+    if platform and number:
+        return platform, number
+    xhs = str(contact.get("xhs_account") or "").strip()
+    if xhs:
+        return "XHS", xhs
+    return "DY", ""
+
+
 def _first(slots: dict, keys: tuple) -> str:
     for key in keys:
         value = str(slots.get(key) or "").strip()
@@ -128,7 +141,8 @@ class SampleBridge:
     达人要求提高佣金时，我们的固定话术也作为系统消息放进待审批（D22）。
 
     什么时候生成审批单：Claude 的草稿建议合作单进「待寄出」，或者运营在合作单页把阶段改成「待寄出」。
-    缺东西、没库存时不生成，在合作单上写明原因（attention），由运营看着办。"""
+    缺东西、ERP 里查不到这个商品时不生成，在合作单上写明原因（attention），由运营看着办。
+    没有现货不拦（D35：ERP 里有就能寄）。"""
 
     def __init__(self, handler, prm) -> None:
         self._handler = handler
@@ -162,7 +176,7 @@ class SampleBridge:
             self.request_sample(deal)
 
     def request_sample(self, deal: dict) -> Optional[str]:
-        """合作单上的信息齐了就生成审批单，返回审批单号；不齐、没货、已经有在等的单就返回 None。"""
+        """合作单上的信息齐了就生成审批单，返回审批单号；不齐、ERP 里查不到商品、已经有在等的单就返回 None。"""
         from src.prm import pii
 
         from .types import GateStatus, SampleRequestDraft
@@ -202,8 +216,8 @@ class SampleBridge:
             follow_up = asyncio.run(self._handler._ask_for_what_is_missing(draft))
             if follow_up is not None:
                 from .handler import HOLDING_REPLY
-                why = ("聚水潭查不了库存（连不上或者还没接入），请人工处理" if follow_up == HOLDING_REPLY
-                       else f"【{draft.product or _first(slots, PRODUCT_KEYS)}】聚水潭显示没有库存（已记进「待处理」）")
+                why = ("聚水潭查不了商品（连不上或者还没接入），请人工处理" if follow_up == HOLDING_REPLY
+                       else f"【{draft.product or _first(slots, PRODUCT_KEYS)}】在聚水潭 ERP 里查不到（已记进「待处理」）")
                 self._attention(deal, f"寄样审批单没有生成：{why}", now)
                 return None
             name = str(contact.get("display_name") or party["name"] or "")
@@ -219,8 +233,10 @@ class SampleBridge:
         return packet.packet_id
 
     def _commission_template(self, job: dict, deal: dict) -> None:
-        """达人要求提高佣金：我们的固定话术作为系统消息等审核（D22），一段时间内只放一次。"""
+        """达人要求提高佣金：我们的固定话术作为系统消息等审核（D22），一段时间内只放一次。
+        D37：系统不改佣金，只查他近 30 天在我们店的单量和成交额，写在审核理由里给运营看，由运营决定。"""
         from .handler import COMMISSION_REPLY
+        from .jst_erp import coop_summary
         from .settings import HOLDING_REPLY_INTERVAL_SECONDS
         from .store import INBOX_COMMISSION
 
@@ -231,10 +247,17 @@ class SampleBridge:
         chat_id = party.get("wxid", "")
         last = self._handler.store.last_auto_reply_at(chat_id, INBOX_COMMISSION)
         fresh = last is None or time.time() - last > HOLDING_REPLY_INTERVAL_SECONDS
-        self._handler.store.add_inbox_item(chat_id, INBOX_COMMISSION, mask_pii(text)[:300], auto_replied=fresh)
-        if fresh:
-            self._system_packet(deal, "money", COMMISSION_REPLY, intent="达人要求提高佣金",
-                                reason="达人要求提高佣金，按固定话术回复（D22，要人审）", meta={"template": "commission"})
+        if not fresh:
+            self._handler.store.add_inbox_item(chat_id, INBOX_COMMISSION, mask_pii(text)[:300], auto_replied=False)
+            return
+        platform, platform_no = _platform_account(self._handler.store.get_contact(chat_id) or {})
+        coop = coop_summary(platform, platform_no)
+        self._handler.store.add_inbox_item(
+            chat_id, INBOX_COMMISSION, f"{mask_pii(text)[:300]}\n{coop['text']}", auto_replied=True,
+        )
+        self._system_packet(deal, "money", COMMISSION_REPLY, intent="达人要求提高佣金",
+                            reason=f"达人要求提高佣金，按固定话术回复（D22，要人审）。{coop['text']}",
+                            meta={"template": "commission", "coop": {k: coop[k] for k in coop if k != "text"}})
 
     # ---- 达人审批页来的（console.register_decision_hook） ----
 
@@ -251,7 +274,7 @@ class SampleBridge:
                                    "order_sn": str(result.get("order_sn") or "")}, actor="console", now=now)
         waybill = str(result.get("tracking_number") or "")
         if approved and waybill:
-            # 运单号从聚水潭出库单来，不用运营再填；批准通知里已经带了单号，就不再另生成发货通知
+            # 运单号从聚水潭寄样单来（真实的要等发货后才有），不用运营再填；批准通知里已经带了单号，就不再另生成发货通知
             carrier = str(result.get("carrier") or "") or "快递"
             self._prm.store.add_shipment(deal["id"], carrier, waybill, now)
             self._prm.store.add_event(deal["id"], party["id"], "shipment", {"carrier": carrier, "waybill": waybill},

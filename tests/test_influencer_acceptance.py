@@ -295,7 +295,8 @@ def test_unknown_stats_are_marked_for_review_and_can_still_be_approved():
     assert run(handler.execute_operator_approval(packet_id, True))["success"] is True
 
 
-def test_known_unqualified_creator_is_flagged_not_auto_rejected_and_cannot_be_shipped():
+def test_a_low_follower_count_is_only_a_reference_and_does_not_block():
+    # D30（2026-10-26）：寄几款按销售额分档，不看粉丝数；粉丝数只写在单上给运营参考
     erp, xhs = FakeERP(), FakeXHS(stats={"follower_count": 500, "recent_highest_likes": 80})
     handler = make_handler(erp, xhs)
     run(handler.process_incoming_message(INFLUENCER, SAMPLE_REQUEST, nickname="小美"))
@@ -304,10 +305,10 @@ def test_known_unqualified_creator_is_flagged_not_auto_rejected_and_cannot_be_sh
     ))
     assert "名额" not in reply, "D4：不自动拒绝"
     [packet] = pending_packets(handler)
-    assert packet.qualification.startswith("不达标")
+    assert "粉丝 500" in packet.qualification and "参考" in packet.qualification
     result = run(handler.execute_operator_approval(packet.packet_id, True))
-    assert result["success"] is False, "R3：数据明确不达标的达人，批准了也不寄样"
-    assert erp.order_calls == [] and xhs.commission_calls == []
+    assert result["success"] is True
+    assert len(erp.order_calls) == 1 and xhs.commission_calls == []
 
 
 def test_the_wechat_identity_is_never_used_as_the_xhs_account():
@@ -331,8 +332,8 @@ def test_erp_without_keys_or_mock_flag_returns_no_fake_stock(no_mock_env):
 
 
 def test_erp_real_mode_does_not_report_a_fake_order(no_mock_env):
-    # 第 5 阶段接入真实接口后，这条要改成拦截 HTTP 请求的写法
-    client = JuShuiTanERPClient(app_key="k", app_secret="s", access_token="t")
+    # 建寄样单接上聚水潭命令行后，这条要改成用假命令行的写法
+    client = JuShuiTanERPClient()
     result = outcome(client.create_sample_order(
         influencer_id=INFLUENCER, sku_id="SKU-1", recipient_name="张三",
         recipient_phone="13812345678", shipping_address="上海市浦东新区世纪大道100号",

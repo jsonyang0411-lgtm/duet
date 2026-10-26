@@ -32,12 +32,14 @@ def test_without_an_xhs_account_the_reply_asks_for_the_profile_link():
     assert "小红书主页链接" in reply
 
 
-def test_approval_needs_an_xhs_account_which_the_operator_can_fill_in():
+def test_approval_does_not_need_an_xhs_account_but_one_can_be_filled_in():
+    # D31：抖音达人也要寄样；D34：批准后不在这里开佣金，所以不再要求小红书账号
     erp, xhs = FakeERP(), FakeXHS()
     handler = make_handler(erp, xhs)
+    without, _ = submit_without_xhs_account(handler)
+    assert run(handler.execute_operator_approval(without.packet_id, True))["success"] is True
+    handler = make_handler(erp, xhs)
     packet, _ = submit_without_xhs_account(handler)
-    refused = run(handler.execute_operator_approval(packet.packet_id, True))
-    assert refused["success"] is False and erp.order_calls == []
     approved = run(handler.execute_operator_approval(packet.packet_id, True, xhs_account="xhs_creator_001"))
     assert approved["success"] is True
     assert get_packet(handler, packet.packet_id).xhs_account == "xhs_creator_001", "运营填的账号记在单上，开佣金时用"
@@ -51,7 +53,7 @@ def test_a_profile_link_sent_after_submission_is_attached_to_the_request():
     assert "补充到申请" in reply
     packet = get_packet(handler, packet.packet_id)
     assert packet.xhs_account == LATE_PROFILE
-    assert packet.qualification == "达标"  # FakeXHS 默认返回 3.5 万粉
+    assert packet.qualification.startswith("粉丝 35000")  # FakeXHS 默认返回 3.5 万粉，只作参考
 
 
 def test_the_operator_can_lower_the_commission_but_not_raise_it():
@@ -96,15 +98,38 @@ class SoldOutLaterERP(FakeERP):
         return result
 
 
-def test_stock_is_checked_again_at_approval():
+def test_no_stock_on_hand_at_approval_does_not_block():
+    # D35：ERP 里有就能寄，现货只记在单上
     erp = SoldOutLaterERP()
     handler = make_handler(erp)
     packet_id = submit_full_request(handler)
     erp.sold_out = True
     result = run(handler.execute_operator_approval(packet_id, True))
-    assert result["success"] is False and "没有库存" in result["error"]
+    assert result["success"] is True and len(erp.order_calls) == 1
+    assert get_packet(handler, packet_id).stock_available == 0
+
+
+class GoneLaterERP(FakeERP):
+    """提交审批时 ERP 里有，批准前这个商品被删了或停用了。"""
+
+    gone = False
+
+    async def check_inventory(self, product_name):
+        result = await super().check_inventory(product_name)
+        if self.gone:
+            result.update(found=False)
+        return result
+
+
+def test_the_product_is_checked_again_at_approval_and_a_missing_one_blocks():
+    erp = GoneLaterERP()
+    handler = make_handler(erp)
+    packet_id = submit_full_request(handler)
+    erp.gone = True
+    result = run(handler.execute_operator_approval(packet_id, True))
+    assert result["success"] is False and "查不到" in result["error"]
     assert erp.order_calls == []
-    assert get_packet(handler, packet_id).status == GateStatus.PENDING, "补货后还能再批"
+    assert get_packet(handler, packet_id).status == GateStatus.PENDING, "运营可以先驳回"
 
 
 class FailingCommissionXHS(FakeXHS):
@@ -156,11 +181,10 @@ def test_the_records_hold_no_recipient_details():
 
 # ---- 资质只看粉丝（D16） ----
 
-def test_qualification_looks_at_followers_only():
+def test_the_follower_count_is_only_a_reference():
+    # D30：不看粉丝数，不判达标 / 不达标
     from src.influencer.types import InfluencerProfile
 
     handler = make_handler()
-    assert handler.assess_qualification(InfluencerProfile(wechat_id="w", follower_count=20000)) == "达标", \
-        "点赞查不到不影响，运营审批时复查"
-    assert handler.assess_qualification(InfluencerProfile(wechat_id="w", follower_count=500)).startswith("不达标：粉丝 500")
+    assert handler.assess_qualification(InfluencerProfile(wechat_id="w", follower_count=500)).startswith("粉丝 500（只作参考")
     assert handler.assess_qualification(InfluencerProfile(wechat_id="w")).startswith("待核实")

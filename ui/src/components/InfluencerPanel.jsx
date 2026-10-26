@@ -5,7 +5,8 @@ import { useToast } from '../store/toast'
 import { PageHead, Card, Field, TextInput, TextArea, NumberInput, Switch, Seg, Empty, Note, Banner, Dialog, Confirm } from './ui'
 
 // 达人审批（src/influencer/，说明见 handoff.md）：审批单、达人名单两个子页。
-// 「通过」会真的在聚水潭建出库单、在小红书绑佣金，撤不回，所以执行前要再确认一次。
+// 「通过」会真的在聚水潭「寄样管理」建寄样单（会发货），撤不回，所以执行前要再确认一次。
+// 专属佣金不在这里开：在「待审批」里用平台动作开（D34）。
 // 发给达人的消息先由运营复制后在微信里手动发送（Q2）。提醒只做在控制台里（D14）：
 // 左栏「达人审批」上的数字 = 待审批 + 待处理，「待处理」子页列出要人工回复的达人消息和缺货。
 
@@ -127,11 +128,11 @@ function StatusNotes({ status }) {
     <div className="stack" style={{ gap: 8, marginBottom: 14 }}>
       {status.mock && (
         <Banner title="模拟模式已打开（INFLUENCER_MOCK=1）">
-          库存、出库单号、运单号和佣金都是假的：批准不会真的建单，也不会真的绑定佣金。
+          商品、寄样单号都是假的：批准不会真的建单。
         </Banner>
       )}
       {!status.erp.ready && <Note kind="warn">聚水潭现在用不了：{status.erp.detail}。批准会失败，审批单会留在待审批。</Note>}
-      {!status.xhs.ready && <Note kind="warn">小红书 CLI 现在用不了：{status.xhs.detail}。查不到达人数据，也绑不了佣金。</Note>}
+      {!status.xhs.ready && <Note kind="warn">小红书 CLI 现在用不了：{status.xhs.detail}。小红书达人的粉丝数查不到（只作参考，不影响审批）。</Note>}
       <SampleLimits limits={status.sample_limits} />
     </div>
   )
@@ -174,7 +175,7 @@ function ApprovalsPage() {
       <div className="page">
         <PageHead
           no="02" en="CREATOR" title="达人审批"
-          sub="达人申请样品的审批单。通过后会在聚水潭建出库单、在小红书绑定佣金，批准前请核对收件信息和达人原话"
+          sub="达人申请样品的审批单。通过后会在聚水潭建寄样单（会发货），批准前请核对收件信息和达人原话。专属佣金在「待审批」里用平台动作开"
           actions={<button type="button" className="btn sm" onClick={refresh}><ArrowClockwise />刷新</button>}
         />
         <StatusNotes status={status} />
@@ -216,14 +217,12 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
   useEffect(() => { setXhs(p.xhs_account || '') }, [p.xhs_account])
   useEffect(() => { setRate(percent(p.proposed_commission_rate)) }, [p.proposed_commission_rate])
 
-  const unqualified = p.qualification.startsWith('不达标')
-  const qualKind = p.qualification.startsWith('达标') ? 'ok' : unqualified ? 'need' : 'warn'
+  // 资质只作参考、不拦单（D30：寄几款按销售额分档，不看粉丝数）
+  const qualKind = p.qualification.startsWith('待核实') || !p.qualification ? 'warn' : 'ok'
   const rateOk = typeof rate === 'number' && rate > 0 && rate <= percent(maxRate)
   const cleared = !!p.personal_info_cleared_at
   let blocker = ''
   if (p.limit_problem) blocker = `${p.limit_problem}，不能通过`
-  else if (unqualified) blocker = '资质不达标，按规则不能寄样，请驳回'
-  else if (!xhs.trim()) blocker = '缺小红书账号：请让达人补发主页链接，或者在上面填写'
   else if (!rateOk) blocker = `佣金要大于 0，不超过 ${percent(maxRate)}%`
 
   const act = async (action) => {
@@ -233,7 +232,9 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
         ? { packet_id: p.packet_id, action, xhs_account: xhs.trim(), commission_rate: rate / 100 }
         : { packet_id: p.packet_id, action, reason: reason.trim() }
       const d = await post('/api/influencer/approvals/action', body)
-      toast.ok(action === 'approve' ? `已执行：出库单 ${d.order_sn}。记得把消息复制给达人` : '已驳回。记得把婉拒话术复制给达人', { ms: 6000 })
+      toast.ok(action === 'approve'
+        ? `已执行：寄样单 ${d.order_sn}。记得把消息复制给达人；专属佣金到「待审批」用平台动作开`
+        : '已驳回。记得把婉拒话术复制给达人', { ms: 6000 })
     } catch (e) {
       toast.err(e.message)
     } finally {
@@ -263,7 +264,7 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
           <span className={`tag ${qualKind}`}>{p.qualification || '待核实'}</span>
           {p.follower_count != null && <span className="dim"> 粉丝 {p.follower_count}</span>}
         </dd>
-        <dt>小红书账号</dt>
+        <dt>小红书账号<span className="dim">（选填）</span></dt>
         <dd>
           {pending
             ? <TextInput mono value={xhs} onChange={setXhs} placeholder="主页链接或小红书号" aria-label="小红书账号" />
@@ -300,8 +301,8 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
       {pending && (
         <div style={{ marginTop: 12 }}>
           <Note kind="cy">
-            批准后：在聚水潭建出库单（扣库存、出运单），建了就撤不回。专属佣金不在这里开：
-            在「待审批」里用平台动作给 <b>{xhs.trim() || '（先填小红书账号）'}</b> 开，建议 <b>{rateOk ? `${rate}%` : '—'}</b>。
+            批准后：在聚水潭「寄样管理」建寄样单（会真的发货，运单号要等发货后才有），建了就撤不回。专属佣金不在这里开：
+            在「待审批」里用平台动作开，建议 <b>{rateOk ? `${rate}%` : '—'}</b>。
           </Note>
         </div>
       )}
@@ -309,14 +310,14 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
       {p.status === 'FULFILLED' && (
         <div style={{ marginTop: 12 }}>
           <Note kind="ok">
-            出库单 <b className="mono">{p.order_sn}</b> · 运单 <b className="mono">{p.tracking_number || '—'}</b>
+            寄样单 <b className="mono">{p.order_sn}</b> · 运单 <b className="mono">{p.tracking_number || '发货后才有'}</b>
             {p.commission_plan && <> · 佣金计划 <span className="mono">{p.commission_plan}</span>（以前批准时开的）</>}
           </Note>
         </div>
       )}
       {p.status === 'FAILED' && (
         <div style={{ marginTop: 12 }}>
-          <Banner title={p.order_sn ? '出库单已建，但佣金没绑上：需要人工补绑' : '执行失败'}>{p.failure_reason}</Banner>
+          <Banner title="执行失败">{p.failure_reason}</Banner>
         </div>
       )}
 
@@ -348,11 +349,11 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
           title={`通过 ${p.packet_id}？`} confirmLabel="确认通过并执行" busy={busy}
           onCancel={() => setConfirming(false)} onConfirm={() => act('approve')}
         >
-          <p>马上执行以下操作，出库单建了就撤不回：</p>
+          <p>马上执行以下操作，寄样单建了就撤不回（会真的发货）：</p>
           <ul className="gate-steps">
-            <li>聚水潭：给 {p.recipient_name}（{p.recipient_phone}）建【{p.requested_product}】样品出库单</li>
-            <li>小红书：给 <span className="mono">{xhs.trim()}</span> 绑定 {rate}% 专属佣金</li>
+            <li>聚水潭寄样管理：给 {p.recipient_name}（{p.recipient_phone}）建【{p.requested_product}】寄样单</li>
           </ul>
+          <p className="dim">专属佣金不在这里开：建议 {rate}%，到「待审批」里用平台动作开。</p>
         </Confirm>
       )}
       {rejecting && (
@@ -391,7 +392,7 @@ function InterruptedExecution({ packet: p, onChanged }) {
     )
   }
   const fulfilled = outcome === 'fulfilled'
-  const missing = fulfilled ? (!orderSn.trim() && '要填出库单号') : (!note.trim() && '要写明核对的结果')
+  const missing = fulfilled ? (!orderSn.trim() && '要填寄样单号') : (!note.trim() && '要写明核对的结果')
   const submit = async () => {
     setBusy(true)
     try {
@@ -412,8 +413,7 @@ function InterruptedExecution({ packet: p, onChanged }) {
     <div style={{ marginTop: 12 }}>
       <Banner title="执行被中断了，需要人工核对">
         这张单{p.execution_started_at ? `从 ${when(p.execution_started_at)} 开始执行，` : ''}一直没有执行完。
-        请到聚水潭看有没有这张单的出库单（外部单号是 <span className="mono">{p.packet_id}</span>），到小红书看佣金有没有绑上，再把结果记在这里。
-        佣金没绑上的，先去小红书补绑。
+        请到聚水潭「寄样管理」看有没有这张单的寄样单（备注里有 <span className="mono">{p.packet_id}</span>），再把结果记在这里。
       </Banner>
       <div className="card-foot">
         <span className="grow" />
@@ -433,8 +433,8 @@ function InterruptedExecution({ packet: p, onChanged }) {
         >
           {fulfilled ? (
             <div className="stack" style={{ gap: 12 }}>
-              <Field label="出库单号" hint="聚水潭里这张单的单号">
-                <TextInput mono value={orderSn} onChange={setOrderSn} aria-label="出库单号" data-autofocus />
+              <Field label="寄样单号" hint="聚水潭寄样管理里这张单的单号（YP 开头）">
+                <TextInput mono value={orderSn} onChange={setOrderSn} aria-label="寄样单号" data-autofocus />
               </Field>
               <Field label="运单号" hint="还没有就先空着，确认消息里会写「快递单号出来后再发给老师」">
                 <TextInput mono value={tracking} onChange={setTracking} aria-label="运单号" />
@@ -451,8 +451,8 @@ function InterruptedExecution({ packet: p, onChanged }) {
               <Field label="核对结果" hint="记在操作记录里，例如：聚水潭里没有这张单">
                 <TextArea value={note} onChange={setNote} rows={3} aria-label="核对结果" data-autofocus />
               </Field>
-              <Field label="出库单号" hint="出库单已经建了、但后面没做完的，填上单号">
-                <TextInput mono value={orderSn} onChange={setOrderSn} aria-label="出库单号" />
+              <Field label="寄样单号" hint="寄样单已经建了、但后面没做完的，填上单号">
+                <TextInput mono value={orderSn} onChange={setOrderSn} aria-label="寄样单号" />
               </Field>
             </div>
           )}

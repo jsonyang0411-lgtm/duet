@@ -36,8 +36,17 @@ FULL = dict(
 
 
 class SoldOutERP(FakeERP):
+    """ERP 里有，但没有现货（D35：照样能寄）。"""
+
     async def check_inventory(self, product_name):
-        return {**await super().check_inventory(product_name), "in_stock": False, "available_quantity": 0}
+        return {**await super().check_inventory(product_name), "found": True, "in_stock": False, "available_quantity": 0}
+
+
+class MissingERP(FakeERP):
+    """ERP 里查不到这个商品。"""
+
+    async def check_inventory(self, product_name):
+        return {**await super().check_inventory(product_name), "found": False, "in_stock": False, "available_quantity": 0}
 
 
 def make_tools(erp=None, chat_id=INFLUENCER):
@@ -83,10 +92,16 @@ def test_a_request_missing_the_address_is_not_submitted():
     assert tools.store.list_approvals([GateStatus.PENDING]) == []
 
 
-def test_an_out_of_stock_request_is_not_submitted_and_the_operator_is_told():
-    tools = make_tools(SoldOutERP())
+def test_no_stock_on_hand_still_submits(  # D35
+):
+    data, _ = call(make_tools(SoldOutERP()), "submit_sample_request", **FULL)
+    assert data["submitted"] is True
+
+
+def test_a_product_missing_from_the_erp_is_not_submitted_and_the_operator_is_told():
+    tools = make_tools(MissingERP())
     data, _ = call(tools, "submit_sample_request", **FULL)
-    assert data["submitted"] is False and "没有库存" in data["suggested_reply"]
+    assert data["submitted"] is False and "没查到" in data["suggested_reply"]
     assert [i["kind"] for i in tools.store.list_inbox()] == [INBOX_OUT_OF_STOCK]
 
 

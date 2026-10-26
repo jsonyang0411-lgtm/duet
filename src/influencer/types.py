@@ -117,7 +117,7 @@ class ApprovalActionPacket:
     proposed_commission_rate: float
     shipping_address: str
     what_cannot_be_undone: str
-    qualification: str = ""  # 资质标注：达标 / 不达标：原因 / 待核实（D4，只标注不拒绝）
+    qualification: str = ""  # 资质标注：粉丝数（只作参考）/ 待核实（D4、D30，只标注不拦单）
     recipient_name: str = ""
     recipient_phone: str = ""
     xhs_account: str = ""  # 达人提供或运营填写；绑佣金必须有，不能用微信 ID 代替（B10）

@@ -21,8 +21,15 @@ SAYS = "我是小美，手机 13812345678，地址上海市浦东新区测试路
 
 
 class OutOfStock(FakeERP):
+    """ERP 里有，但没有现货（D35：照样生成审批单）。"""
+
     async def check_inventory(self, product_name):
-        return {**await super().check_inventory(product_name), "in_stock": False, "available_quantity": 0}
+        return {**await super().check_inventory(product_name), "found": True, "in_stock": False, "available_quantity": 0}
+
+
+class NotInERP(FakeERP):
+    async def check_inventory(self, product_name):
+        return {**await super().check_inventory(product_name), "found": False, "in_stock": False, "available_quantity": 0}
 
 
 @pytest.fixture
@@ -97,14 +104,23 @@ def test_the_operator_moving_the_deal_to_ready_makes_the_approval(side, bridged)
     assert len(approvals(bridged, GateStatus.PENDING)) == 1
 
 
-def test_out_of_stock_is_told_on_the_deal_and_in_the_inbox(side, tmp_path):
+def test_no_stock_on_hand_still_makes_an_approval(side, tmp_path):
     handler, bridge = make_bridge(side, tmp_path, erp=OutOfStock())
     try:
         drafts(side, slots=READY, stage_proposal="to_ship")
     finally:
         bridge.detach()
+    assert len(approvals(handler)) == 1, "D35：ERP 里有就能寄，不看现货"
+
+
+def test_a_product_missing_from_the_erp_is_told_on_the_deal_and_in_the_inbox(side, tmp_path):
+    handler, bridge = make_bridge(side, tmp_path, erp=NotInERP())
+    try:
+        drafts(side, slots=READY, stage_proposal="to_ship")
+    finally:
+        bridge.detach()
     assert approvals(handler) == []
-    assert "没有库存" in side.prm.store.deal(1)["attention"]
+    assert "查不到" in side.prm.store.deal(1)["attention"]
     assert [i["kind"] for i in handler.store.list_inbox()] == [INBOX_OUT_OF_STOCK]
 
 
@@ -161,6 +177,29 @@ def test_asking_for_more_commission_puts_our_script_up_for_review_once(side, bri
     assert [p["text"] for p in scripts] == [COMMISSION_REPLY], "一段时间内只放一次"
     assert scripts[0]["kind"] == "money" and scripts[0]["route"] == "review"
     assert [i["kind"] for i in bridged.store.list_inbox()] == [INBOX_COMMISSION, INBOX_COMMISSION]
+
+
+def test_asking_for_more_commission_tells_the_operator_the_last_30_days(side, bridged, monkeypatch):
+    # D37：系统不改佣金，只把近 30 天在我们店的单量和成交额写给运营看，由运营决定
+    from src.influencer import jst_erp
+
+    monkeypatch.setattr(jst_erp, "run_jst_cli", lambda *args: {"rows": [
+        {"platformNo": "xhs_1", "coop30d": {"orders": 46, "amount": 7728.0, "netAmount": 0.0, "commission": 0}},
+    ]})
+    bridged.store.save_contact(CREATOR, source=SOURCE_CONSOLE, xhs_account="xhs_1")
+    drafts(side, "佣金能不能再高一点", message_kind="money", needs_attention=True)
+    [script] = [p for p in side.prm.store.packets(("pending",)) if p["job_id"] is None]
+    assert "46 单" in script["reason"] and "满足涨佣条件" in script["reason"]
+    [item] = bridged.store.list_inbox()
+    assert "46 单" in item["content"]
+
+
+def test_without_a_platform_number_the_operator_is_told_to_look_it_up(side, bridged):
+    bridged.store.save_contact(CREATOR, source=SOURCE_CONSOLE, xhs_account="")
+    assert not (bridged.store.get_contact(CREATOR) or {}).get("xhs_account")
+    drafts(side, "佣金能不能再高一点", message_kind="money", needs_attention=True)
+    [script] = [p for p in side.prm.store.packets(("pending",)) if p["job_id"] is None]
+    assert "查不了合作数据" in script["reason"]
 
 
 def test_detach_unhooks_everything(side, tmp_path):

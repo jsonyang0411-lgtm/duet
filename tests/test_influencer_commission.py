@@ -55,7 +55,8 @@ def test_the_fixed_reply_is_sent_and_the_operator_is_told():
     handler = make_handler()
     reply = run(handler.process_incoming_message(INFLUENCER, "佣金能不能高点呀", nickname="小美"))
     assert reply == COMMISSION_REPLY
-    assert "诚意" in reply and "先收样品" in reply
+    # D37：只说帮老师申请，不替运营拒绝，也不承诺能涨
+    assert "申请" in reply and "先收样品" in reply and "已经是" not in reply
     assert not [w for w in FORBIDDEN_WORDS if w in reply], "固定话术里不能有违规词"
     [item] = handler.store.list_inbox()
     assert (item["kind"], item["content"], item["auto_replied"]) == (INBOX_COMMISSION, "佣金能不能高点呀", True)

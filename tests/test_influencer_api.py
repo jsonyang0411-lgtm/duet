@@ -50,8 +50,9 @@ def test_status_says_why_the_erp_cannot_be_used(store):
     status, data = call("/api/influencer/status")
     assert status == 200 and data["ok"] is True
     assert data["mock"] is False
-    assert data["erp"]["ready"] is False and "JST_APP_KEY" in data["erp"]["detail"]
+    assert data["erp"]["ready"] is False and "寄样单" in data["erp"]["detail"]
     assert data["max_commission_rate"] == 0.25
+    assert data["default_commission_rate"] == 0.20
 
 
 def test_status_flags_mock_mode(store, mock_mode):

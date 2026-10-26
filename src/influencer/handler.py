@@ -23,7 +23,6 @@ from .settings import (
     DRAFT_TTL_SECONDS,
     HOLDING_REPLY_INTERVAL_SECONDS,
     MAX_COMMISSION_RATE,
-    MIN_FOLLOWERS,
     STUCK_EXECUTION_SECONDS,
     brain_enabled,
     sample_limits,
@@ -55,23 +54,26 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-QUALIFICATION_OK = "达标"
-QUALIFICATION_FAILED = "不达标"
-QUALIFICATION_UNKNOWN = "待核实：没有小红书数据，需要运营人工核实"
+QUALIFICATION_UNKNOWN = "待核实：没有达人数据，需要运营人工核实"
 # 出了问题时的中性回复：不承诺任何事，也不让这条消息落到聊天模型那里随口作答
 HOLDING_REPLY = "收到老师的消息啦~ 我们这边核对一下，再回复老师哦！"
 # 达人要求提高佣金时的固定回复。佣金不交给模型谈，上限见 MAX_COMMISSION_RATE。
-# 2026-10-25 用户给的原文里有"全网破价""最大诚意""非常惊人"等广告法里的绝对化、夸大用语，
-# 平台会判违规；10-26 用户要求改掉，意思不变
+# D37（2026-10-26）：起步 20%，涨不涨由运营看这位达人近 30 天在我们店的单量和成交额再定，
+# 所以这里只说"帮老师申请"，不替运营拒绝，也不承诺能涨。不能有违规词（FORBIDDEN_WORDS）
 COMMISSION_REPLY = (
-    "特别理解老师的想法！坦白讲我也很想帮老师申请更高的点位，但咱们这款定价本身就很实在，"
-    "利润空间确实比较紧，目前这个佣金已经是我们能给到的诚意啦😭\n"
-    "不过老师放心，这款在平台上的转化和复购表现都很不错，很多合作的老师虽然佣金点数适中，"
-    "但出单量起来以后，实际到手的收益并不低。"
-    "建议老师可以先收样品感受下质感，合适咱们再对排期，您看好不好？"
+    "特别理解老师的想法！我这边先帮老师跟负责人申请一下，有结果马上回复老师哈~\n"
+    "也建议老师先收样品感受下质感，咱们边合作边看数据，您看好不好？"
 )
 # 广告法和平台常见的违规词：固定话术里不能出现（测试里检查）
 FORBIDDEN_WORDS = ("全网", "破价", "最低", "最大", "最好", "第一", "极致", "绝对", "惊人", "顶级", "100%")
+
+
+def product_in_erp(inventory: Dict[str, Any]) -> bool:
+    """聚水潭 ERP 里有没有这个商品（D35：有就能寄，不看现货）。查询结果明确说了 found 就以它为准；
+    老的结果没有 found 字段时，有 SKU 就算有。"""
+    if "found" in inventory:
+        return bool(inventory["found"])
+    return bool(inventory.get("sku_id"))
 
 
 def _mask_phone(phone: str) -> str:
@@ -80,14 +82,16 @@ def _mask_phone(phone: str) -> str:
 
 def approval_notice(packet: ApprovalActionPacket) -> str:
     """执行成功后发给达人的确认消息。现阶段显示在审批卡上，由运营复制后手动发送（Q2）。"""
-    tracking = (
-        f"快递单号：{packet.tracking_number}，" if packet.tracking_number
-        else "快递单号出来后我们再发给老师，"
-    )
     # 专属佣金由 PRM 的平台动作单独开、单独审核（D34），这里不提，免得佣金还没开就先说开了
+    if packet.tracking_number:
+        return (
+            f"老师好~ 【{packet.requested_product}】的样品已经寄出啦 📦\n"
+            f"快递单号：{packet.tracking_number}，请老师留意查收哦~ 收到后有任何问题随时找我们！"
+        )
+    # 对外口径（D36）：包邮，审核通过后 3 天内寄出
     return (
-        f"老师好~ 【{packet.requested_product}】的样品已经安排寄出啦 📦\n"
-        f"{tracking}请老师留意查收哦~ 收到后有任何问题随时找我们！"
+        f"老师好~ 【{packet.requested_product}】的样品已经通过审核啦 🎉\n"
+        "我们 3 天内寄出（包邮），快递单号出来后发给老师~ 收到后有任何问题随时找我们！"
     )
 
 
@@ -95,7 +99,7 @@ def rejection_notice(packet: ApprovalActionPacket) -> str:
     """驳回后发给达人的婉拒话术，同样由运营复制后发送。驳回原因只留在操作记录里，不告诉达人。"""
     return (
         f"老师好~ 非常感谢老师对我们的关注！这次【{packet.requested_product}】的样品申请暂时没能通过审核，"
-        "非常抱歉~ 后续有合适的合作机会，我们会第一时间联系老师哦！"
+        "非常抱歉~ 后续有合适的合作机会，我们会尽快联系老师哦！"
     )
 
 
@@ -163,13 +167,11 @@ class InfluencerBusinessHandler:
     # ---- 资质 ----
 
     def assess_qualification(self, profile: InfluencerProfile) -> str:
-        """给审批单标注资质（D4）：只标注、不自动拒绝；拿不到数据就是"待核实"。"""
+        """给审批单标注资质（D4）：只标注、不拦单。D30 起寄几款按聚水潭的销售额分档，不看粉丝数
+        （找达人时已经按销售额、等级等筛过），这里的粉丝数只给运营参考。"""
         if profile.follower_count is None:
             return QUALIFICATION_UNKNOWN
-        # 只看粉丝数（D16）：小红书 CLI 查不到点赞，点赞由运营审批时自己看
-        if profile.follower_count < MIN_FOLLOWERS:
-            return f"{QUALIFICATION_FAILED}：粉丝 {profile.follower_count} 低于 {MIN_FOLLOWERS}"
-        return QUALIFICATION_OK
+        return f"粉丝 {profile.follower_count}（只作参考，寄几款看销售额分档）"
 
     async def _fetch_creator_stats(self, xhs_account: str) -> Dict[str, Any]:
         """查达人数据。拿不到就返回空字典，审批单会标成"待核实"，不编造数据（B8）。"""
@@ -329,24 +331,25 @@ class InfluencerBusinessHandler:
             draft.asked_for = ("product",)
             return "收到老师的合作意向啦~ ✨ 请问老师想申请我们哪一款产品的样品呢？"
 
-        # 2. 聚水潭 ERP 查库存（换了商品才重新查）
+        # 2. 聚水潭 ERP 查商品（换了商品才重新查）。D35：ERP 里有这个商品就能寄，不看现货
+        #    （每个 SKU 挂着虚拟库存，现货多半是 0）；只有 ERP 里查不到、或者已停用才不能寄
         if draft.inventory is None:
             try:
                 inventory = await self.erp.check_inventory(draft.product)
             except Exception as exc:
-                logger.error(f"[ERP] 查询库存失败，需要人工处理：{exc}")
+                logger.error(f"[ERP] 查询商品失败，需要人工处理：{exc}")
                 return HOLDING_REPLY
-            if not inventory.get("in_stock") or inventory.get("available_quantity", 0) <= 0:
-                logger.warning(f"[ERP库存不足] {draft.product}")
-                # 缺货要让运营知道（B21），提醒只做在控制台里（D14）
+            if not product_in_erp(inventory):
+                logger.warning(f"[ERP查不到商品] {draft.product}")
+                # 要让运营知道（B21），提醒只做在控制台里（D14）
                 self.store.add_inbox_item(
-                    draft.chat_id, INBOX_OUT_OF_STOCK, f"想要【{draft.product}】的样品，但聚水潭显示没有库存",
+                    draft.chat_id, INBOX_OUT_OF_STOCK, f"想要【{draft.product}】的样品，但聚水潭 ERP 里查不到这个商品（或已停用）",
                 )
                 product, draft.product = draft.product, ""  # 达人可以改选其他产品
                 draft.asked_for = ("product",)
                 return (
-                    f"亲亲，【{product}】的样品目前暂时没有库存，非常抱歉~ "
-                    "老师也可以看看我们的其他产品哦！"
+                    f"老师，【{product}】我这边暂时没查到，我确认一下再回复老师哈~ "
+                    "老师也可以看看我们的其他款式哦！"
                 )
             draft.inventory = inventory
 
@@ -356,9 +359,9 @@ class InfluencerBusinessHandler:
             draft.asked_for = tuple(missing)
             if len(missing) == len(RECIPIENT_FIELD_LABELS):
                 return (
-                    f"收到老师的需求啦！【{draft.inventory['product_name']}】目前有货，我们很期待和老师合作~ ✨\n"
+                    f"收到老师的需求啦！【{draft.inventory['product_name']}】我们很期待和老师合作~ ✨\n"
                     "麻烦老师发一下【收件人姓名、联系电话、收货地址】，方便的话再附上小红书主页链接，"
-                    "我们登记后会提交审核，审核结果第一时间告诉老师~"
+                    "我们登记后会提交审核，审核结果尽快告诉老师~"
                 )
             labels = "、".join(RECIPIENT_FIELD_LABELS[name] for name in missing)
             return f"收到~ 还差【{labels}】，麻烦老师补充一下哦~"
@@ -379,7 +382,7 @@ class InfluencerBusinessHandler:
             sample_cost=inventory.get("cost_price"),  # 聚水潭没给成本就是未知，不编一个数（同 B8）
             proposed_commission_rate=DEFAULT_COMMISSION_RATE,
             shipping_address=draft.shipping_address,
-            what_cannot_be_undone="聚水潭ERP将自动扣减库存并出具打单运单（专属佣金另在「待审批」的平台动作里开）",
+            what_cannot_be_undone="在聚水潭「寄样管理」建寄样单，会真的发货（专属佣金另在「待审批」的平台动作里开）",
             qualification=self.assess_qualification(profile),
             recipient_name=draft.recipient_name,
             recipient_phone=draft.recipient_phone,
@@ -395,7 +398,7 @@ class InfluencerBusinessHandler:
             f"收到老师的收件信息啦！【{packet.requested_product}】的寄样申请已经提交审核~ 📝\n"
             f"收件人：{draft.recipient_name}（{_mask_phone(draft.recipient_phone)}）\n"
             f"收件地址：{draft.shipping_address}\n"
-            "审核通过后我们会第一时间通知老师，请稍等哦~"
+            "审核通过后我们会尽快通知老师，请稍等哦~"
         )
         if not draft.xhs_account:
             reply += "\n另外麻烦老师发一下小红书主页链接，方便我们核对哦~"
@@ -418,7 +421,7 @@ class InfluencerBusinessHandler:
         xhs_account / commission_rate 是运营在审批时填写的：补填或更正达人的小红书账号，
         把建议佣金调低（不能超过上限）。reason 是驳回原因，记进操作记录，每周复盘用（R7）。
 
-        批准后只在聚水潭建出库单。专属佣金不在这里开：用 PRM 的平台动作（src/prm/platforms.py，
+        批准后只在聚水潭「寄样管理」建寄样单。专属佣金不在这里开：用 PRM 的平台动作（src/prm/platforms.py，
         小红书定向计划等），在「待审批」里单独预览、审核、执行（D34）。commission_rate 只是记在单上的建议值。
         """
         packet = self.store.get_approval(packet_id)
@@ -468,17 +471,18 @@ class InfluencerBusinessHandler:
         if problem:
             return {"success": False, "error": problem}
 
-        # 审批单最长能等 72 小时，批准时重新查一次库存（Q1）
+        # 审批单最长能等 72 小时，批准时重新查一次商品（Q1）。D35：商品还在 ERP 里就能寄，
+        # 现货多少只记在单上给运营参考，不拦单
         try:
             inventory = await self.erp.check_inventory(packet.requested_product)
         except Exception as exc:
-            return {"success": False, "error": f"批准前复查库存失败：{exc}"}
-        available = inventory.get("available_quantity", 0) if inventory.get("in_stock") else 0
-        if available <= 0:
+            return {"success": False, "error": f"批准前复查商品失败：{exc}"}
+        if not product_in_erp(inventory):
             return {
                 "success": False,
-                "error": f"【{packet.requested_product}】现在没有库存，不能建单；可以先驳回，或者等补货后再批",
+                "error": f"【{packet.requested_product}】在聚水潭 ERP 里查不到了（或已停用），不能建单；可以先驳回",
             }
+        available = int(inventory.get("available_quantity") or 0)
 
         # 先占住这张单：两个"通过"同时到达时，只有一个能把它从待审批改成执行中
         if not self.store.transition(
@@ -513,7 +517,7 @@ class InfluencerBusinessHandler:
         )
         self.store.add_event(
             "执行成功", packet_id=packet_id, chat_id=packet.influencer_id,
-            detail=f"出库单 {order_sn}", source=source,
+            detail=f"寄样单 {order_sn}", source=source,
         )
         packet.tracking_number = tracking_number
         return {
@@ -522,7 +526,7 @@ class InfluencerBusinessHandler:
             "order_sn": order_sn,
             "tracking_number": tracking_number,
             "carrier": carrier,
-            "message": "已下发聚水潭打单。专属佣金请在「待审批」里用平台动作开",
+            "message": "已在聚水潭建寄样单。专属佣金请在「待审批」里用平台动作开",
             "notice": approval_notice(packet),
         }
 
@@ -541,7 +545,7 @@ class InfluencerBusinessHandler:
         """执行被中断、一直停在"执行中"的单（B23）：运营到聚水潭和小红书核对后，在这里标成
         已执行或失败。这里不调用聚水潭和小红书，只记下运营核对的结果。
 
-        标成已执行要填出库单号（核对过才知道）；标成失败要写原因。标完以后这张单算处理完，
+        标成已执行要填寄样单号（核对过才知道）；标成失败要写原因。标完以后这张单算处理完，
         收件信息照常在 90 天后清除。
         """
         now = time.time() if now is None else now
@@ -567,14 +571,14 @@ class InfluencerBusinessHandler:
 
         if fulfilled:
             if not order_sn:
-                return {"success": False, "error": "标成已执行要填聚水潭的出库单号"}
+                return {"success": False, "error": "标成已执行要填聚水潭的寄样单号"}
             if not self.store.transition(
                 packet_id, GateStatus.EXECUTING, GateStatus.FULFILLED,
                 order_sn=order_sn, tracking_number=tracking_number, commission_plan=commission_plan,
                 handled_at=now,
             ):
                 return {"success": False, "error": f"审批单 {packet_id} 的状态刚刚变了，请刷新后再看"}
-            detail = f"出库单 {order_sn}" + (f"；{note}" if note else "")
+            detail = f"寄样单 {order_sn}" + (f"；{note}" if note else "")
             self.store.add_event(
                 "人工核对：已执行", packet_id=packet_id, chat_id=packet.influencer_id, detail=detail, source=source,
             )
@@ -602,13 +606,9 @@ class InfluencerBusinessHandler:
                 f"佣金 {packet.proposed_commission_rate:.0%} 超过上限 "
                 f"{MAX_COMMISSION_RATE:.0%}，不能执行"
             )
-        if packet.qualification.startswith(QUALIFICATION_FAILED):
-            # R3：数据明确不达标的达人不寄样，批准了也不执行
-            return f"达人资质{packet.qualification}，按规则不能寄样，请驳回"
         if not (packet.recipient_name and packet.recipient_phone and packet.shipping_address):
             return "收件人、电话或地址不全，不能建单"
-        if not packet.xhs_account:
-            return "缺少达人的小红书账号，不能绑定佣金；请让达人补发主页链接，或在审批时填写"
+        # 不再要求小红书账号：抖音达人也要寄样（D31），批准后也不在这里开佣金（D34）
         return ""
 
     @staticmethod

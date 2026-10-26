@@ -46,18 +46,23 @@ def test_an_abandoned_request_expires():
     assert handler.store.get_draft(INFLUENCER) is None
 
 
-class PartlyOutOfStockERP(FakeERP):
+class PartlyMissingERP(FakeERP):
+    """眼霜在 ERP 里查不到；面膜在 ERP 里有，但没有现货。"""
+
     async def check_inventory(self, product_name):
         result = await super().check_inventory(product_name)
         if product_name == "眼霜":
-            result.update(in_stock=False, available_quantity=0)
+            result.update(found=False, in_stock=False, available_quantity=0)
+        if product_name == "面膜":
+            result.update(found=True, in_stock=False, available_quantity=0)
         return result
 
 
-def test_an_out_of_stock_product_lets_the_influencer_pick_another():
-    handler = make_handler(PartlyOutOfStockERP())
-    assert "没有库存" in say(handler, "想申请眼霜样品")
-    assert "【面膜】目前有货" in say(handler, "那换成面膜吧")
+def test_a_product_missing_from_the_erp_lets_the_influencer_pick_another():
+    handler = make_handler(PartlyMissingERP())
+    assert "没查到" in say(handler, "想申请眼霜样品")
+    # D35：ERP 里有就能寄，没有现货也照常往下走
+    assert "【面膜】我们很期待" in say(handler, "那换成面膜吧")
 
 
 def test_contacts_outside_the_whitelist_are_left_alone():
@@ -87,8 +92,8 @@ class BrokenERP(FakeERP):
 
 
 
-def test_running_out_of_stock_is_put_in_front_of_the_operator():
-    handler = make_handler(PartlyOutOfStockERP())
+def test_a_product_missing_from_the_erp_is_put_in_front_of_the_operator():
+    handler = make_handler(PartlyMissingERP())
     say(handler, "想申请眼霜样品")
     [item] = handler.store.list_inbox()
     assert item["kind"] == "out_of_stock" and "眼霜" in item["content"]

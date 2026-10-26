@@ -61,13 +61,13 @@ def test_after_checking_the_operator_marks_it_done_and_gets_the_message():
     )
     assert packet.handled_at == now
     events = handler.store.events_for([packet_id])[packet_id]
-    assert (events[-1]["action"], events[-1]["detail"]) == ("人工核对：已执行", "出库单 JST-9")
+    assert (events[-1]["action"], events[-1]["detail"]) == ("人工核对：已执行", "寄样单 JST-9")
 
 
 def test_marking_it_done_needs_the_order_number():
     handler, packet_id, started = interrupted_packet()
     result = handler.resolve_interrupted_execution(packet_id, True, now=started + STUCK_EXECUTION_SECONDS)
-    assert result["success"] is False and "出库单号" in result["error"]
+    assert result["success"] is False and "寄样单号" in result["error"]
     assert get_packet(handler, packet_id).status == GateStatus.EXECUTING
 
 

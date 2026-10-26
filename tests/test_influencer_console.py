@@ -104,7 +104,7 @@ def test_an_approval_runs_and_its_message_can_be_copied(console, page):
 
     card(page, "GATE-OK").get_by_role("button", name="通过").click()
     page.get_by_role("button", name="确认通过并执行").click()
-    page.get_by_text("已执行：出库单").wait_for()
+    page.get_by_text("已执行：寄样单").wait_for()
     assert console.store.get_approval("GATE-OK").status == GateStatus.FULFILLED
 
     page.get_by_role("group", name="状态").get_by_role("button", name="已执行").click()
@@ -129,12 +129,11 @@ def test_a_rejection_keeps_the_reason(console, page):
     assert console.store.events_for(["GATE-NO"])["GATE-NO"][-1]["detail"] == "粉丝画像不匹配"
 
 
-def test_approval_waits_for_an_xhs_account(console, page):
+def test_approval_does_not_wait_for_an_xhs_account(console, page):
+    # D31：抖音达人也要寄样，小红书账号选填，不挡「通过」
     page.goto(f"{console.base}/#/influencer/approvals")
     pending = card(page, "GATE-NOXHS")
-    pending.get_by_text("缺小红书账号").wait_for()
-    assert pending.get_by_role("button", name="通过").is_disabled()
-    pending.get_by_label("小红书账号").fill("xhs_late")
+    pending.get_by_label("小红书账号").wait_for()
     assert pending.get_by_role("button", name="通过").is_enabled()
     assert console.store.get_approval("GATE-NOXHS").status == GateStatus.PENDING
 
@@ -147,8 +146,8 @@ def test_an_interrupted_execution_is_marked_done_after_checking(console, page):
     stuck.get_by_role("button", name="核对后标成已执行").click()
     dialog = page.get_by_role("dialog")
     confirm = dialog.get_by_role("button", name="确认")
-    assert confirm.is_disabled(), "没填出库单号不能确认"
-    dialog.get_by_label("出库单号").fill("JST-REAL-1")
+    assert confirm.is_disabled(), "没填寄样单号不能确认"
+    dialog.get_by_label("寄样单号").fill("JST-REAL-1")
     dialog.get_by_label("运单号").fill("SF999")
     confirm.click()
     page.get_by_text("已标成已执行").wait_for()

@@ -47,6 +47,14 @@ def _isolate_runtime_files(request, tmp_path, monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _no_real_jushuitan_cli(monkeypatch, tmp_path):
+    """达人模块会调聚水潭命令行（~/jushuitan-engineering，真实账号、真实请求）。测试一律指到一个
+    不存在的目录：没替身的调用只会得到"找不到命令行"，不会碰真实的聚水潭。"""
+    monkeypatch.setenv("JST_CLI_PATH", str(tmp_path / "no-jushuitan-cli"))
+    yield
+
+
 # BotConfig enables the decision trace by default, which would make every router
 # built with a stock config write data/*.jsonl into the working directory.  Only
 # the tests that exercise tracing opt back in.
