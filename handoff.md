@@ -1,13 +1,13 @@
 # 交接文档：达人商务智能体
 
-> 最后更新：2026-10-26（v60）。开发在 `merge-platforms` 分支上，还没合回 `main`（`main` 停在 `b448beb`）。每次改了什么看第 9 节。
+> 最后更新：2026-10-26（v61）。开发在 `merge-platforms` 分支上，还没合回 `main`（`main` 停在 `b448beb`）。每次改了什么看第 9 节。
 > 读者：接手这个项目的 AI 窗口，以及参与开发的同事。
 > 规矩：新窗口开工前先读完本文件；收工前更新第 3 节（当前状态）、第 5 节（计划进度）和第 9 节（变更记录）。
 
 ## 0. 先看这几条
 
 1. **现状（2026-10-26）**：达人的私聊走同事 PRM 的"Claude 起草 → 运营在「待审批」审 → 经 Windows 发出"；合作单进「待寄出」时生成我们的审批单，运营在「达人审批」页批准后在聚水潭建寄样单。查库存、建寄样单还是模拟模式（`INFLUENCER_MOCK=1`），和 Windows 的真机联调还没做。
-2. **下一步看第 5 节**：抓一次真实建寄样单的请求（`saveV3`），接上真实聚水潭；多款商品逐款到聚水潭查；配好平台 CLI、同步商品目录。
+2. **下一步看第 5 节**：抓一次真实建寄样单的请求（`saveV3`），接上真实聚水潭；多款商品逐款到聚水潭查。
 3. **规则尽量写在约束文档里，不写死在代码里**（用户 10-26："不要定太多规则"）。代码只守三道关：佣金 ≤ 25%、一张单只执行一次、建单 / 开佣金 / 发消息必须过审批。对达人的口径在 `~/Documents/prm_workspace/kb/`，找达人的标准在 `~/daren-scout/CLAUDE.md`。
 4. **所有改动都要对照第 2 节的路线护栏。** 和护栏冲突时，先停下来问人，不要自行取舍。
 
@@ -50,7 +50,7 @@
 | 起草 | 同事的 PRM（`PRM_COPILOT=on`）+ worker 沙箱（`tools/claude_relay/worker.py --kinds prm`），只读 `~/Documents/prm_workspace`（kb/、案卷）。没有聊天模型，不需要 AI 密钥 |
 | 聚水潭 | CLI `~/jushuitan-engineering`（直接发 HTTP，令牌从调试版 Chrome 取，D32）。找达人、查达人、加达人、查商品和库存、查合作数据都真跑过；建寄样单没做（等抓 `saveV3`）。webot 里查档位、合作数据走真实 CLI，查库存、建寄样单还是模拟 |
 | 小红书 CLI | `~/xiaohongshu-engineering`，在这台 Mac 上真机接通过（只读，v37）。开定向计划改由 PRM 平台动作调用（D34），还没真跑过 |
-| 抖音 CLI | `~/Douyin-engineering`，PRM 平台动作 `dy.designated_commission` 用它。v60 拉到公司仓库最新的 10-21 快照（`c494254`），有 `buyin promotion-strategy-create-designated` 了；这台 Mac 没登录抖店 / 百应，还没真跑过 |
+| 抖音 CLI | `~/Douyin-engineering`，PRM 平台动作 `dy.designated_commission` 用它。v60 拉到公司仓库最新的 10-21 快照（`c494254`），有 `buyin promotion-strategy-create-designated` 了。抖店 10-26 在调试版 Chrome（9333）登录了（店铺 ID 288806756），只读跑过商品列表和 SKU；百应没登录，开佣金还没真跑过 |
 
 **相关文档**
 - 设计备忘录：`docs/达人商务智能体_架构设计与落地备忘录.md`，写给老板和同事看，每条都标了核实日期和方式。2026-10-25 第 3 阶段从桌面移进仓库，10-26 晚按现在的架构重写（v59）；原稿原文在提交 `8ac1c6f`。以后改代码、改决定时，也要同步更新备忘录里对应的事实。备忘录有一个本地网页版 `docs/达人商务智能体_架构设计与落地备忘录.html`，由 `python3 tools/memo_html.py` 从 Markdown 生成，不上传到任何网站；改了备忘录要重新生成，否则 `tests/test_memo_html.py` 会失败。
@@ -188,8 +188,7 @@
 | 4 | 接真实聚水潭：抓 `saveV3` 后 `create_sample_order` 收商品清单、真实建寄样单；`check_inventory` 逐款调 `jst goods` 查（现在拿整段商品文字查） | 等运营第一次真寄样时抓请求（运营在调试版 Chrome 点保存前叫我们） |
 
 其余待办：
-- 让商品目录在这台 Mac 上真的有数据：`~/.claude-relay/config.json` 的 `platforms` 现在是空的，要填小红书、抖音 CLI 的目录（抖音还要 `dy_expect_shop_id`，要用户给），然后 `worker.py --sync-products` 生成 `kb/products.md`。没有目录时审批卡上不标平台商品，不影响审批
-- 抖音商品的聚水潭编码：抖店 `fxg sku-prices` 默认输出没有商家编码，`--raw` 里可能有；要等调试版 Chrome 登录抖店后看一次真实输出，再让目录同步存下来（小红书的 `erpCode` 已经存了）
+- 商品目录要定期重跑（`python3 tools/claude_relay/worker.py --sync-products`，上新、下架后）；还没放进定时任务。`kb/products.md` 有 800 KB，起草的 Claude 要按编号搜着看，别整个读
 - 运单号回填：寄样管理发货后，运单号在哪个字段 / 接口（现在列表接口的 `erpOrderVoList` 是空的）
 - 和 Windows 真机联调（等同事给 `PRM_EDGE_TOKEN`）
 
@@ -317,6 +316,7 @@ CLI 是同事的千帆商家后台命令行工具：私有仓库 `doupi-org/xiao
 
 - 达人模块的数据和机器人共用一个数据库：`DB_PATH`，默认 `data/messages.db`（相对于启动目录）。控制台接口也从 .env 里读 `DB_PATH`。
 - 测试：`.venv/bin/python -m pytest tests/ -v`
+- worker 的平台 CLI（v61 配的）：`~/.claude-relay/config.json` 的 `platforms`：小红书 `~/xiaohongshu-engineering`、抖音 `~/Douyin-engineering`、`dy_expect_shop_id` 288806756、`max_commission_rate` 25、`env` 里 `XHS_CDP_ENDPOINT` / `DY_CDP_ENDPOINT` 都指 9333。改之前的备份在会话 scratchpad
 - 调试版 Chrome（聚水潭、小红书 CLI 共用）：`--remote-debugging-port=9333`，用户目录 `~/Library/Application Support/Google/Chrome-Debug`。聚水潭令牌现在这个 2026-10-27 14:22 过期（v43 记的"11-05"是之前那个令牌），过期后在调试版 Chrome 里重新登录分销版
 - 本机 git 身份已设置为 `jsonyang0411-lgtm` / `jsonyang0411@gmail.com`（2026-10-24；用户输入时带了中文弯引号，已修正）
 - 用 SSH 访问 GitHub，不需要登录 gh：`~/.ssh/config` 里 github.com 走本地 socks5 代理 `127.0.0.1:7897`（Clash 要开着），密钥对应的账号是 `jsonyang0411-lgtm`
@@ -402,3 +402,4 @@ CLI 是同事的千帆商家后台命令行工具：私有仓库 `doupi-org/xiao
 - 2026-10-26 v58：第 2 步数据模型（`2584e93`、`cd55e27`）。名单加平台（DY / XHS）和抖音号 / 小红书号，控制台名单页可填；`tiers.py` 按号码调聚水潭命令行 `jst lookup` 算档位（D30：抖音近 30 日销售总额 25 万 / 100 万，小红书直播场均 50 万 / 100 万，按区间下限；没数据单列"无销售数据"）和主播类型（`channelBySales`）；名单同步每轮最多重查一位到期的达人（24 小时一次，失败 1 小时后再试，改号码马上重查），并把"达人资料"写到业务资料目录 `deals/<编号>-达人资料.md`（只有平台、号码、档位、主播类型、销售额、等级），kb 合作政策已写明去这里看。审批单加 platform、platform_no、tier、channel、sales_label、items_json（合作单上的商品按顿号逗号分号拆成多款）、live_session；审批卡都显示。store 启动时自动补列（`_ADDED_COLUMNS`）。测试默认把 `JST_CLI_PATH`、`PRM_WORKSPACE` 指到不存在的目录。全量测试 1741 个通过、2 个跳过。**还没做**：多款商品逐款到聚水潭查（现在 `check_inventory` 拿的是整段商品文字，模拟模式下总能查到）；`create_sample_order` 收商品清单、真实建寄样单（等抓 `saveV3`）。**用法**：那 8 位达人加了微信、进了名单以后，在名单页给他们填上抖音号。
 - 2026-10-26 v59：第 3 步清理文档（审查报告 19 处）。handoff：抬头只留最新版本；第 0、1 节按现在的架构重写（PRM 起草、edge、聚水潭 CLI、寄样单、平台动作开佣金），代码位置标出没有入口的旧代码；第 2 节 R2、R3 标出取消的项；第 3 节换成 10-26 的状态；第 4 节补新测试文件；第 5 节换成 4 步计划和待办；第 6 节补齐被取代 / 已实现的状态（D5、D8、D16、D18、D19、D22、D26、D29、D30、D31、D32、D35、D36、D37），表按编号排序，注明提交说明里撞号的两处；"10-27 统一询问""等用户拍板"已答完，删掉；V1、V2、B24–B26 标成不用做；第 7、8 节去掉旧流程和 `JST_APP_KEY`，补 edge、PRM、聚水潭 CLI 的变量；后一个 v42 改成 v47b。备忘录重写成 10-26 版并重新生成网页；`CLAUDE.md` 的挂载点说明改成 `src/bot.py`，项目结构补 `src/influencer/`；记忆文件去掉过时的事实。没改代码。
 - 2026-10-26 v60：做第 5 节"其余待办"里的 4 件（用户说"把 5 到 8 条更新"）。① 佣金上限：同事 `src/prm/platforms.py` 加 `COMMISSION_CAP = 25`，Mac 的 config.json 只能往低调、写更大的也按 25 算，机器人端检查（`FORM_LIMITS`）也按 25；改了同事的 4 条测试和 worker README、联调清单、参考手册。② 款号对平台商品：发现千帆 SKU 的 `erpCode` 就是聚水潭 SKU 的商品编码（只读查了一次千帆商品详情和聚水潭 `goods-detail`）；目录同步存下 `code`、`products.md` 里显示"编码 …"；`prm_bridge.match_listings` 生成审批单时按编码或平台商品 ID 对，审批卡上逐款显示平台商品 ID，写了编号却对不上的标"商品目录里没有"；kb `商品.md` 加了合作单商品的写法（每款跟编号）。顺手修了聚水潭 CLI `goods --style-code` 不起作用（接口不认，返回全部款，`a428bcb` 去掉，按款号查用 `goods-detail`）。③ `~/Douyin-engineering` 快进到公司仓库最新的 `c494254`（10-21），有指定达人佣金命令了；百应相关离线测试 1333 个全过（全套有 1 个失败、91 个被连带取消，都在录制 / 变异测试工具里，和开佣金无关，没管）。④ 删旧代码：`claude_brain.py`、`mcp_server.py`、`send_policy.py`、`docs/influencer_knowledge.example.md`，handler 的规则对话（改成 `check_product` / `submit_for_approval` 两个公开方法），extract 的收件信息提取，store 的对话 / 发送队列 / 草稿读写（表和到期清理留着，老库照样清），settings 的 Claude 常数；测试相应改写（见第 4 节）。**还要用户做**：给抖店店铺 ID、登录抖店后才能让抖音目录带编码；配好 `platforms` 后跑一次 `--sync-products`。
+- 2026-10-26 v61：用户在调试版 Chrome 登录了抖店（店铺 ID 288806756）。只读核对：抖店 SKU 原始数据的 `spec_prices[].code`（如 `A7260810095A-M`）也是聚水潭商品编码（聚水潭 `queryErpItemStockInfo` 按编码查得到，编的编码全是 0），精简输出里没有，所以抖音目录同步改用 `sku-prices --raw` 自己取 id、规格名、价格、编码（`ed66677`）。配好 worker 的 `platforms`（见第 8 节），只读同步了商品目录：抖音 900 个商品、2567 个 SKU，小红书 939 个商品、2671 个 SKU，全部带编码；用真实目录试对照，`A7261010037A-M`、`A7260810095A` 两个平台都对上了。百应没登录，开佣金没碰。
