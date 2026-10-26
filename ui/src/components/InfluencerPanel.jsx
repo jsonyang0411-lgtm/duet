@@ -319,7 +319,7 @@ function ApprovalCard({ packet: p, maxRate, onChanged }) {
         </div>
       )}
 
-      {p.notice && <NoticeBox status={p.status} text={p.notice} />}
+      {p.notice && <NoticeBox status={p.status} text={p.notice} queued={p.notice_queued} />}
 
       {p.events?.length > 0 && (
         <ol className="gate-events" aria-label="操作记录">
@@ -461,7 +461,9 @@ function InterruptedExecution({ packet: p, onChanged }) {
   )
 }
 
-function NoticeBox({ status, text }) {
+// queued：这条通知已经放进「待审批」（Mac 端经 Windows 发，src/influencer/prm_bridge.py），
+// 不再让运营复制，免得发两遍
+function NoticeBox({ status, text, queued }) {
   const toast = useToast()
   const preview = status === PENDING
   const label = preview
@@ -475,8 +477,10 @@ function NoticeBox({ status, text }) {
     <div className="notice-box">
       <div className="row">
         <span className="label grow">{label}</span>
-        {!preview && <button type="button" className="btn sm" onClick={copy}><Copy />复制</button>}
+        {!preview && !queued && <button type="button" className="btn sm" onClick={copy}><Copy />复制</button>}
+        {queued && <a className="btn sm" href="#/review">去「待审批」</a>}
       </div>
+      {queued && <p className="sub">已放进「待审批」，在那里审核后由 Windows 发给达人，不用再复制。</p>}
       <p className="notice-text">{text}</p>
     </div>
   )
@@ -490,7 +494,7 @@ const INBOX_KIND = {
 }
 const AUTO_REPLY = {
   message: '机器人已回复："收到老师的消息啦，我们核对一下再回复"',
-  commission: '机器人已回复佣金话术（佣金上限不变）',
+  commission: '佣金话术已回复，或已放进「待审批」等审核（佣金上限不变）',
 }
 
 function InboxPage() {

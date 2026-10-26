@@ -282,6 +282,7 @@ class Bot:
 
         # WECHAT_BACKEND=edge（Mac 端）：名单从达人模块来，回复存成待审核的草稿、不直接发（D19）
         self._wire_edge_backend(backend, influencer_handler)
+        self._register_edge_client(backend)
 
         # CLAUDE_RELAY=on: "cc ..." in an allowed private chat goes to the Mac.
         relay = self._start_claude_relay(config, router, backend)
@@ -351,6 +352,7 @@ class Bot:
                 relay.attach_edge(None, "")
             if bridge is not None:
                 bridge.detach()
+            self._register_edge_client(None)
             if prm is not None:
                 prm.stop()
                 try:
@@ -506,6 +508,18 @@ class Bot:
         store = influencer_handler.store
         backend.add_parties_source(lambda: [c["chat_id"] for c in store.list_contacts() if c["enabled"]])
         backend.set_reply_sink(lambda chat_id, reply, msg: store.add_inbox_item(chat_id, INBOX_DRAFT, reply))
+
+    @staticmethod
+    def _register_edge_client(backend) -> None:
+        """控制台的 /api/edge 读 edge 后端的状态（Windows 连没连上）；不是 edge 后端就不登记。"""
+        from .wechat.edge_backend import EdgeBackend
+        if backend is not None and not isinstance(backend, EdgeBackend):
+            return
+        try:
+            from .web.server import register_edge_client
+            register_edge_client(backend)
+        except Exception:
+            pass
 
     @staticmethod
     def _wire_edge_prm(backend, prm, influencer_handler=None):

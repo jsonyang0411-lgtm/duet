@@ -4,7 +4,7 @@ import { useRoute } from './lib/router'
 import { ToastProvider } from './store/toast'
 import { StatusProvider } from './store/status'
 import { ConfigProvider } from './store/config'
-import { TopBar, Rail, SaveBar } from './components/Shell'
+import { TopBar, Rail, SaveBar, EdgeAlert } from './components/Shell'
 import { LogoGlyph } from './components/art'
 import Dashboard from './components/Dashboard'
 import RelayPanel from './components/RelayPanel'
@@ -66,6 +66,7 @@ function Console() {
       <TopBar route={route} />
       <Rail route={route} />
       <main className="main" id="main">
+        <EdgeAlert />
         {page}
         <SaveBar />
       </main>

@@ -24,7 +24,7 @@ from .settings import (
     mock_enabled,
     sample_limits,
 )
-from .store import EVENT_EXECUTION_STARTED, SOURCE_CONSOLE, InfluencerStore
+from .store import EVENT_EXECUTION_STARTED, SOURCE_AUTO, SOURCE_CONSOLE, InfluencerStore
 from .types import STATUS_LABELS, ApprovalActionPacket, GateStatus
 from .xhs_cli import XiaohongshuCLIClient
 
@@ -140,6 +140,7 @@ def packet_json(
     data["status"] = packet.status.value
     data["status_label"] = STATUS_LABELS[packet.status]
     data["events"] = events
+    data["notice_queued"] = any(e["action"] == EVENT_NOTICE_QUEUED for e in events)
     if packet.status == GateStatus.PENDING and store is not None:
         # 寄样上限（D5）：超了就在审批卡上标出来，「通过」按钮不能点
         data["limit_problem"] = sample_limit_problem(store, packet)
@@ -162,6 +163,8 @@ def packet_json(
 # 审批有了结果以后交给谁：Mac 端开着 PRM 时由 bot 注册（src/influencer/prm_bridge.py），
 # 给达人的通知进 PRM 的待审批、运单号进合作单。没注册（PRM 没开、机器人没运行）时照旧由运营复制通知
 _decision_hooks: List[Callable[[ApprovalActionPacket, bool, Dict[str, Any]], None]] = []
+# 通知进了 PRM 的待审批：记一笔，审批卡据此不再让运营复制通知（免得发两遍）
+EVENT_NOTICE_QUEUED = "通知已进待审批"
 
 
 def register_decision_hook(hook) -> None:
@@ -182,9 +185,13 @@ def _after_decision(store: InfluencerStore, packet_id: str, approved: bool, resu
     for hook in list(_decision_hooks):
         try:
             hook(packet, approved, result)
-            result["notice_queued"] = True
         except Exception:
             logger.exception("审批结果交给 PRM 时出错（%s）", packet_id)
+            continue
+        if result.get("notice") and not result.get("notice_queued"):
+            result["notice_queued"] = True
+            store.add_event(EVENT_NOTICE_QUEUED, packet_id=packet_id, chat_id=packet.influencer_id,
+                            detail="在「待审批」页审核后由 Windows 发给达人", source=SOURCE_AUTO)
 
 
 def act_on_approval(store: InfluencerStore, body: Dict[str, Any]) -> Dict[str, Any]:

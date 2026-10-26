@@ -1223,6 +1223,24 @@ def _relay_snapshot(limit: int = 30) -> dict:
     return out
 
 
+# Mac 端（WECHAT_BACKEND=edge）运行中的 edge 后端，由 Bot.run() 注册；/api/edge 读它的状态
+_edge_client = None
+
+
+def register_edge_client(backend):
+    """登记（传 None 就是忘掉）运行中的 edge 后端，给 /api/edge 用。"""
+    global _edge_client
+    _edge_client = backend
+
+
+def _edge_state() -> dict:
+    """GET /api/edge：Windows 微信边缘的状态和要提醒运营的事。不是 Mac 端（edge）时 mode 为空。"""
+    mode = "edge" if os.getenv("WECHAT_BACKEND", "").strip() == "edge" else ""
+    if _edge_client is None:
+        return {"mode": mode, "running": False, "problems": []}
+    return {"mode": "edge", **_edge_client.status()}
+
+
 # The running PrmService (PRM_COPILOT=on), set by Bot.run(); None when the bot is
 # stopped or the copilot is off.  /api/prm reads it.
 _prm = None
@@ -1773,6 +1791,14 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 self.send_json({"ok": False, "error": f"没有找到 #{job_id}"})
             else:
                 self.send_json({"ok": True, "outcome": outcome})
+            return
+
+        if self.path.split("?", 1)[0] == "/api/edge":
+            try:
+                self.send_json(_edge_state())
+            except Exception as e:
+                logger.exception("Reading the edge state failed")
+                self.send_json({"ok": False, "error": str(e)})
             return
 
         # ── API: PRM copilot — creators, drafts, decisions ─────────────

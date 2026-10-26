@@ -99,6 +99,23 @@ def event_to_message(event: Dict[str, Any], files: List[str]) -> Dict[str, Any]:
     return msg
 
 
+def edge_problems(info: Dict[str, Any]) -> List[str]:
+    """要提醒运营的事（控制台顶上的横条），按要先处理的顺序。"""
+    out = []
+    if not info.get("online"):
+        ago = info.get("last_contact_sec_ago")
+        out.append("连不上 Windows：达人的消息收不到，审核过的回复也发不出去。看看 Windows 那台电脑和 webot 开着没有、"
+                   "EDGE_URL 和 PRM_EDGE_TOKEN 对不对" + (f"（上次联系上是 {ago // 60} 分钟前）" if ago and ago >= 60 else ""))
+        return out
+    if info.get("wechat") == P.OFFLINE:
+        out.append("Windows 上的微信掉线了：达人的消息收不到，回复也发不出去。请到 Windows 上重新登录微信")
+    if info.get("db") == P.UNREADABLE:
+        out.append("Windows 读不了微信的数据库：达人的消息收不到。请在 Windows 的「微信连接」页看看")
+    if info.get("send") == P.FAILING:
+        out.append("Windows 连续几条没发出去" + (f"：{info['detail']}" if info.get("detail") else ""))
+    return out
+
+
 class EdgeBackend(AbstractWeChatBackend):
     def __init__(
         self,
@@ -134,6 +151,7 @@ class EdgeBackend(AbstractWeChatBackend):
         self.edge_status: Dict[str, Any] = {}
         self.last_contact: Optional[float] = None
         self.online = False
+        self.parties_count = 0   # 最近一次名单里有几位
 
     # ---- 接线 ----
 
@@ -349,6 +367,7 @@ class EdgeBackend(AbstractWeChatBackend):
             # 名单没拿全就不推（推一份缺人的名单，Windows 就不转那几位的消息了），下一轮再试
             logger.exception("[edge] 名单来源出错，这一轮不推名单")
             return
+        self.parties_count = len(wxids)
         digest = P.parties_digest(wxids)
         if digest == self.state.parties_digest:
             return
@@ -367,6 +386,22 @@ class EdgeBackend(AbstractWeChatBackend):
         self.state.parties_digest = digest
         self.state.save()
         logger.info("[edge] 达人名单已推给 Windows：版本 %d，%d 位", version, len(wxids))
+
+    def status(self) -> Dict[str, Any]:
+        """给控制台看的（GET /api/edge）：连没连上 Windows、最后一次联系上是多久以前、Windows 报的状态、要提醒运营的事。"""
+        now = self._clock()
+        info = {
+            "running": not self._stop.is_set(),
+            "online": self.online,
+            "last_contact_sec_ago": None if self.last_contact is None else round(now - self.last_contact),
+            "wechat": self.edge_status.get("wechat", ""),
+            "db": self.edge_status.get("db", ""),
+            "send": self.edge_status.get("send", ""),
+            "detail": str(self.edge_status.get("detail") or ""),
+            "parties": self.parties_count,
+        }
+        info["problems"] = edge_problems(info)
+        return info
 
     def _mark_online(self, online: bool) -> None:
         if online:
