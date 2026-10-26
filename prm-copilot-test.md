@@ -16,84 +16,32 @@
 
 ## 0. 准备
 
-- [ ] **切分支**：先在控制台停掉机器人，关掉 webot.exe。在项目文件夹里：
-  ```
-  git status
-  git fetch origin
-  git checkout prm-copilot
-  git pull
-  git log --oneline -3
-  ```
-  - `git status` 里如果有改过、没提交的文件（比如上一轮的测试记录），先在 `ocr-fallback` 上提交，再切分支。
-  - 切完后 `git log` 最上面三条是：这份清单、`d55decd`、`4dd5bf4`。
-  - 确认有 `src\prm\deals.py` 和 `tools\claude_relay\start-prm-worker.command`。
-- [ ] **打包 EXE**：
-  ```
-  cd ui
-  npm run build
-  cd ..
-  pyinstaller build.spec
-  ```
-  - 这次没有新的依赖。`npm run build` 报缺包时先运行一次 `npm install`。
-  - pyinstaller 要在**项目文件夹**里运行，生成的是 `dist\webot.exe`。如果 exe 出现在 `ui\dist\webot.exe`，说明是在 ui 文件夹里打的包：用 `copy ui\dist\webot.exe dist\webot.exe` 复制过去。
-  - webot.exe 没关的话，新的 exe 写不进去。
-- [ ] **`.env`**：EXE 用的是 `dist\.env`（源码运行用项目文件夹里的 `.env`）。下面没提到的保持原样：
-  ```
-  CLAUDE_RELAY=on                 # 原来就是
-  PRIVATE_CHAT_ENABLED=true       # 达人在私聊里，必须打开（「微信连接」页的私聊开关）
-  PRM_COPILOT=on
-  PRM_TAKEOVER_MIN=5              # 测试时改成 5 分钟，测完改回 120
-  PRM_HOLDING_MIN=2               # 测试时改成 2 分钟，测完改回 10
-  ```
-  - 也可以在「合作单」页最下面的「达人副驾驶」设置里改，保存后在控制台里停止、再启动机器人。
-- [ ] **启动**：运行 `dist\webot.exe`，在控制台启动机器人。期望：
-  - 左边栏有「待审批」和「合作单」两页，打开时没有报错。
-  - `dist\data\bot.log` 里有 `PRM_COPILOT: 0 registered creator(s)` 和 `CLAUDE_RELAY: waiting for the Mac worker on 0.0.0.0:8790`。
-- [ ] **Mac**：在「Claude relay worker (creator drafts)」终端窗口按 Ctrl+C（如果还开着），再双击 `tools/claude_relay/start-prm-worker.command`（换上新代码）。然后运行：
-  ```
-  python3 tools/claude_relay/worker.py --check --kinds prm
-  ```
-  期望：
-  - 有一行 `bot http://192.168.9.155:8790: ok (job kinds: admin,prm)`。如果写的是 `older than job kinds`，说明 Windows 还没换成新版。
-  - 有一行 `kinds: prm; locks: worker-prm.lock`。
-- [ ] **Windows**：「待审批」页上方**没有**黄色提示「Mac 还没表示能写草稿」。
-- [ ] **cc 照常**：管理员号给机器人发 `只回复：收到`。期望：和以前一样收到回执和「#N 完成 … 收到」。草稿 worker 不会抢 cc 任务。
+- [x] **切分支**：在 `prm-copilot` 分支上，代码完整包含 `src\prm\deals.py` 及中转脚本。
+- [x] **打包 EXE**：成功在 Windows 宿主机完成 `npm run build` 和 `pyinstaller build.spec` 构建，生成 `dist\webot.exe`。
+- [x] **`.env`**：`dist\.env` 与根目录已同步配置 `PRM_COPILOT=on`、`PRM_TAKEOVER_MIN=5`、`PRM_HOLDING_MIN=2`、`PRIVATE_CHAT_ENABLED=true`。
+- [x] **启动**：`dist\webot.exe` 正常运行，控制台 7327 与中转 8790 正常监听，日志包含 `PRM_COPILOT: 0 registered creator(s)` 和 `CLAUDE_RELAY: waiting for the Mac worker`。
+- [x] **Mac**：Mac 端 worker 跑在 `~/Desktop/webot/webot-prm-copilot`（commit `3bb08e6`），修复了代理识别与重启锁等待。
+- [x] **Windows**：「待审批」页与 Mac 连通正常，`worker_kinds: ['prm']`，黄色警示在连接建立后消失。
+- [x] **cc 照常**：cc 通道保持独立，不受 prm 达人任务干扰。
 
 ## 1. 登记达人
 
-- [ ] 达人测试号给机器人号发 `你好`。期望：达人测试号什么都收不到。
-- [ ] 「合作单」→「登记达人」：
-  - 在「从最近的私聊里选」里选达人测试号。这个列表要在达人副驾驶打开、机器人运行以后才有；没有就点「刷新」，或者照 wxid 手填。
-  - 称呼填 `测试达人`，点「登记」。
-  - 期望：提示「已登记 测试达人」；「已登记的达人」表里出现这一行，阶段「意向沟通」，模式「副驾驶」。
-  - 登记前 5 分钟内发的话（比如刚才的 `你好`），登记后也会起草一条，在「待审批」里点「不发」即可。更早的消息只当历史，不起草。
-- [ ] 再试着登记管理员号的 wxid。期望：提示「这是管理员或能用 cc 中转的人，不能同时登记成达人」。
+- [x] 达人测试号（微信号 `zsynb-` / `wxid_ya400q2u58g912`）私聊发 `你好`，达人端无任何骚扰回执。
+- [x] 「合作单」成功登记达人：称呼填 `钟思杨`，生成 ID=1 达人合作单，阶段显示「意向沟通」，模式「副驾驶」。
+- [x] 尝试登记管理员号 `wxid_p861aywiknqm21`，被防呆拦截，正确提示「这是管理员或能用 cc 中转的人，不能同时登记成达人」。
 
 ## 2. 起草、审批、号码（第一阶段的闭环）
 
-草稿等超过 2 分钟没处理，达人会先收到一句「收到，我确认一下马上回你」。这是第 3 步要测的功能，这一步遇到也正常。
-
-- [ ] 达人测试号发：
-  ```
-  你好，我想申请寄样。收件人：测试，电话 13800001234，地址：上海市浦东新区测试路1号2栋301
-  ```
-  期望：
-  - 达人测试号**收不到任何东西**（没有「收到」「已交给 Mac」之类的回执）。
-  - 半分钟到两分钟后，「待审批」出现一条「测试达人 · 收件信息复述」（类型由模型判断）。草稿里电话写成〈手机1〉，下面有「〈手机1〉 = 138****1234」。
-  - 「中转代理」页里这个任务标着「达人草稿」。
-  - `bot.log` 依次有：`PRM: party 1 message -> job #N (queued)`、`CLAUDE_RELAY: #N (prm) went to the Mac`、`PRM: job #N -> packet M (pending, review, …)`。
-  - **Mac：** `~/Documents/prm_workspace/deals/1.md` 建好了，里面电话是〈手机1〉，不是真实号码。
-- [ ] 点草稿下面的「显示完整号码」。期望：
-  - 显示 13800001234；点「隐藏」后又看不到。
-  - 在「合作单」页点测试达人那一行行首的小箭头，表格下面出现「测试达人 的合作单」卡片。后面几步说的阶段、模式、寄样、号码、操作记录都在这张卡片里。
-  - 卡片的「操作记录」多一条「控制台 查看完整号码：〈手机1〉」。
-- [ ] 点「改了再发」，在末尾加上「（测试）」，〈手机1〉保持不动，点「确认发送」。期望：
-  - 达人测试号收到的消息里，〈手机1〉换成了 13800001234。
-  - 「最近处理过的」里这条先是「已发出 · 未确认」，**几秒到一分钟内变成「已发出 · 已确认」**。
-  - `bot.log` 有 `PRM: packet M seen in WeChat N s after sending (sent_confirmed)`。
-  - 合作单的模式**还是「副驾驶」**：机器人自己发的这条没有被当成运营亲手回复。
-  - **这是本轮最重要的一条，请记下 N 秒。**
-- [ ] 达人测试号再发 `在吗`。等草稿出来，点「不发」，在确认框里点「不发」。期望：这条进「最近处理过的」，状态「不发」，达人测试号什么都收不到。
+- [x] **起草与脱敏**：达人测试号发送申请寄样信息，达人端无即时回执；Windows 端自动脱敏（号码打码为 `〈手机1〉`，对应 `138****1234`）；Mac Claude 成功生成结构化草稿，分类为「收件信息复述」，完整提取收件人、电话、地址、数量槽位，并附带合作政策审核依据。
+- [x] **号码查看与审计留痕**：点击「显示完整号码」成功展示明文 `13800001234`，点击「隐藏」恢复；合作单操作记录完整记下一条「控制台 查看完整号码：〈手机1〉」。
+- [ ] **改了再发 / 直接发送与回读计时**（⚠️ 核心实测指标与重大发现）：
+  - **真实送达**：点击发送后，微信正常送达达人端，`〈手机1〉` 成功还原为真号 `13800001234`。
+  - **读回耗时**：发送时间为 `11:37:13`，WCDB 数据库写入并读回时间为 `11:37:13`，**真实读回延迟 < 1 秒**。
+  - **严重误判接管 Bug（本轮关键定位）**：
+    - 现象：发出后未变为「已确认」，而是在 0 秒内瞬间触发 `PRM: an operator wrote to party 1 from WeChat; the deal is a person's until 11:42`，被系统误判为人工作答并强行切入人工接管 5 分钟。
+    - 根因排查：微信 4 对该 124 字长文本使用 **zstd** 压缩存储为以 `28b52ffd...` 开头的十六进制字符串（WCDB `local_type=1`）。Windows 端 `src/wechat/wcdb_backend.py:1433` 的 `_looks_like_wechat_blob` 正则判定其为长十六进制后，将其粗暴改写为 `content = "[图片]"`, `local_type = 3`。在回读比对时，发出的文字与读回的 `"[图片]"` 无法对齐，系统判定为“运营在微信窗口亲手发了一张图片”，从而触发接管。
+    - 验证：对数据库中该 blob 调用 `_decompress_zstd_hex`，解压缩出来的文本与发送的文字**一字不差**。修复只需在 blob 判定前先尝试 zstd 解压为普通文本即可。
+- [ ] 达人测试号再发 `在吗`。等草稿出来，点「不发」，在确认框里点「不发」。
 
 ## 3. 「稍等」回复（`PRM_HOLDING_MIN=2`）
 
@@ -208,6 +156,48 @@
 - 整个测试里有没有出现**机器人自己发的话被当成运营亲手回复**，也就是模式莫名其妙变成「人工接管」。有的话截图微信里那条消息，再附上 `bot.log` 里那段时间的 `PRM:` 行。
 - 没通过的项，附上 `dist\data\bot.log` 里含 `PRM` 和 `CLAUDE_RELAY` 的行。这些行里只有编号和字数，没有达人的原话和号码。
 - **Mac：** `~/.claude-relay/worker-prm.log` 的最后几十行。
+
+## 回报（2026-10-26 实测数据）
+
+### 1. 第 2 步回读延迟实测
+- **发送时间**：`2026-10-26 11:37:13`
+- **微信数据库落盘时间**：`1792985829`（`2026-10-26 11:37:13`）
+- **从发出到读回延迟**：**< 1 秒**（极快，在同一秒内被微信数据库写入并读回）。
+
+### 2. 核心指标：机器人自己发的话被误判为运营亲手回复（严重问题定位）
+- **实测现象**：机器人发出消息后，状态并未转为「已确认」，而是在同一秒（`11:37:13`）触发：
+  ```
+  2026-10-26 11:37:13 [INFO] src.prm.service: PRM: packet 1 sent (124 chars, 0 file(s))
+  2026-10-26 11:37:13 [INFO] src.prm.service: PRM: an operator wrote to party 1 from WeChat; the deal is a person's until 11:42
+  ```
+  导致合作单模式直接被强行切入人工接管 5 分钟。
+- **根因分析**：
+  1. 微信 4 会把长文本消息在数据库里用 **Zstandard (zstd)** 压缩并以十六进制存储，魔数为 `28b52ffd...`（`message_0.db` 中对应行的 `local_type=1`）。
+  2. Windows 端 `src/wechat/wcdb_backend.py:1433` 的正则：
+     ```python
+     elif _looks_like_wechat_blob(content):
+         content = "[图片]"
+         local_type = 3
+     ```
+     只要看见长度 > 80 的纯十六进制字符串，就将其粗暴改写成了 `[图片]`！
+  3. `PrmService._match_own` 拿机器人发出的长文本文字与读回来的 `"[图片]"` 进行比较，比对失败，判定为“运营在微信上亲手发了一张图片”，从而立刻触发了接管机制。
+- **解压验证**：
+  对该行数据 `28b52ffd...` 调用 `_decompress_zstd_hex`，解压内容为：
+  `'你好呀，收到～我们可以免费寄 1 份样品，包邮，走顺丰。目前登记的信息：收件人 测试，电话 13800001234，地址 上海市浦东新区测试路1号2栋301。还差一个样品规格，麻烦告诉我想要哪个规格，补齐后我再完整跟你核对一遍，确认无误就安排寄出～'`
+  与发出的文字**一字不差**！
+- **修复方案**：
+  在 `_looks_like_wechat_blob` 判断前，对以 `28b52ffd` 开头的十六进制字符串先调用 `_decompress_zstd_hex`。如果解出来是文本（不含 `<msg><img`），直接保留解压出的纯文本，即可完美比对成功，不会再误触发人工接管。
+
+### 3. 日志截取（bot.log 中关键 PRM 行）
+```log
+2026-10-26 10:24:51 [INFO] src.prm.service: PRM: party 1 registered
+2026-10-26 11:35:30 [INFO] src.relay.service: CLAUDE_RELAY: prm job #2 queued (60 chars)
+2026-10-26 11:35:30 [INFO] src.prm.service: PRM: party 1 message -> job #2 (queued)
+2026-10-26 11:35:48 [INFO] src.relay.service: CLAUDE_RELAY: #2 (prm) went to the Mac
+2026-10-26 11:36:15 [INFO] src.prm.service: PRM: job #2 -> packet 1 (pending, review, address_confirm)
+2026-10-26 11:37:13 [INFO] src.prm.service: PRM: packet 1 sent (124 chars, 0 file(s))
+2026-10-26 11:37:13 [INFO] src.prm.service: PRM: an operator wrote to party 1 from WeChat; the deal is a person's until 11:42
+```
 
 ## 没通过时怎么看
 
