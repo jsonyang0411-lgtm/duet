@@ -197,3 +197,69 @@ def test_the_prm_switch_is_in_the_allow_list_and_needs_the_relay():
     assert set(adv.validate_updates({"PRM_COPILOT": "on"}, {})) == {"PRM_COPILOT"}
     assert adv.validate_updates({"PRM_COPILOT": "on", "CLAUDE_RELAY": "on", "CLAUDE_RELAY_TOKEN": "x" * 20,
                                  "ADMIN_WXID": "wxid_admin"}, {}) == {}
+
+
+# ── platform actions (src/prm/platforms.py) ───────────────────────────────
+
+def _platform_draft(running):
+    """A second draft that carries a previewed platform action (what the Mac hands back)."""
+    from src.prm import platforms
+
+    action = platforms.check_action({"action": "dy.channel_goods", "item_id": "3000000000000000101",
+                                     "creator_platform_id": "5100000000000002", "price": "15"})
+    preview = {"version": 1, "action": action, "verdict": "ready", "problems": [], "steps": [],
+               "facts": [{"label": "将写入", "value": "create a 达人带货 channel product"}],
+               "run": {"steps": ["create", "bind"]}, "catalog": {"synced_at": 1.0, "title": "测试主品"},
+               "previewed_at": 2.0}
+    running.prm.handle({"chat_id": CREATOR, "sender_id": CREATOR, "content": "好的，就要专属链接", "msg_type": 1,
+                        "is_group": False, "timestamp": running.relay._clock()})
+    running.relay._clock.now += SETTLE_SEC + 1
+    job = running.relay.next_job(0, ("prm",))
+    d = {"intent": "要专属链接", "slots": {}, "stage_proposal": "agreed", "message_kind": "money",
+         "reply_draft": "链接给你啦：{链接}", "attachments_to_send": [], "needs_attention": False,
+         "reason": "kb/合作政策.md", "platform": preview}
+    running.relay.finish(job["id"], {"ok": True, "text": json.dumps(d, ensure_ascii=False)})
+    running.relay.tick()
+    return running.prm.store.packet_for_job(job["id"])
+
+
+def test_a_platform_draft_is_approved_with_execute_and_shown_red_when_it_fails(running):
+    packet = _platform_draft(running)
+    d = call("/api/prm")[1]
+    [shown] = [p for p in d["pending"] if p["id"] == packet["id"]]
+    pf = shown["platform"]
+    assert pf["label"].startswith("抖店") and pf["verdict"] == "ready" and pf["can_execute"] and pf["makes_link"]
+    assert d["platform_alerts"] == [] and d["platform_actions"]["tb.campaign"].startswith("淘宝")
+    assert call("/api/prm/packets", "POST", {"id": packet["id"], "action": "send"})[1]["ok"] is False
+    answer = call("/api/prm/packets", "POST", {"id": packet["id"], "action": "execute",
+                                               "text": "宝子，专属链接：{链接}"})[1]
+    assert answer["ok"] is True and answer["status"] == "executing"
+    assert call("/api/prm/packets", "POST", {"id": packet["id"], "action": "execute"})[1]["ok"] is False
+    job = running.relay.next_job(0, ("prm",))
+    assert job["meta"]["op"] == "platform_execute"
+    rec = {"version": 1, "op": "platform_execute", "outcome": "INDETERMINATE", "key": job["meta"]["key"],
+           "problems": ["发出了，结果未知"], "facts": [], "steps": [], "created": {}, "finished_at": 3.0}
+    running.relay.finish(job["id"], {"ok": True, "text": json.dumps(rec, ensure_ascii=False)})
+    running.relay.tick()
+    d = call("/api/prm")[1]
+    [alert] = d["platform_alerts"]
+    assert alert["id"] == packet["id"] and "INDETERMINATE" in alert["error"]
+    assert alert["platform"]["execution"]["outcome"] == "INDETERMINATE"
+    assert call("/api/prm/packets", "POST", {"id": packet["id"], "action": "ack"})[1] == {"ok": True}
+    assert call("/api/prm")[1]["platform_alerts"] == []
+    running.prm.tick()
+    assert running.sent == []
+
+
+def test_a_platform_draft_can_be_previewed_again_from_the_console(running):
+    packet = _platform_draft(running)
+    answer = call("/api/prm/packets", "POST", {"id": packet["id"], "action": "repreview"})[1]
+    assert answer["ok"] is True and answer["job"]
+    assert call("/api/prm")[1]["pending"][-1]["platform"]["previewing"] is True
+
+
+def test_a_stopped_bot_lists_no_platform_alerts(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PRM_DB", raising=False)
+    d = call("/api/prm")[1]
+    assert d["platform_alerts"] == [] and "dy.channel_goods" in d["platform_actions"]

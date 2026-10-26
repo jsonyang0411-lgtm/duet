@@ -38,6 +38,16 @@ draft waits in the bot's console; nothing reaches the creator from here.  The
 worker only asks the bot for prm jobs when prm_workspace is usable
 (X-Relay-Kinds).
 
+Platform actions (config.json "platforms": the 小红书 / 抖音 / 淘宝 CLI folders): a draft
+may name one (``platform_action``, typed parameters only; Claude still has no Bash).
+This script checks it (src/prm/platforms.py of this checkout, loaded by path) against
+the catalogue kb/products.json and runs the CLI's preview (no --execute) before the
+draft goes back; the verdict goes with it.  After an operator's 批准并执行 the bot
+queues a ``platform_execute`` job: the same CLI with --execute, once per approval key
+(a ledger in ~/.claude-relay/platform/ledger; a key seen before is never run again),
+and the outcome goes back.  ``--sync-products`` writes the catalogue (read-only CLI
+commands) to prm_workspace/kb/products.md and products.json.
+
 Standard library only (macOS /usr/bin/python3 is enough).  Settings:
 ~/.claude-relay/config.json (see config.example.json); the token can live in
 its own file (token_file); RELAY_URL and RELAY_TOKEN in the environment win.  Setup: README.md next to this file.
@@ -46,6 +56,7 @@ its own file (token_file); RELAY_URL and RELAY_TOKEN in the environment win.  Se
     python3 worker.py --permission-hook   (claude runs this; not for people)
     python3 worker.py --prm-hook  (claude runs this for prm jobs; not for people)
     python3 worker.py --once      do one job, then exit
+    python3 worker.py --sync-products [--platforms xhs,dy,tb]   write the product catalogue, then exit
     python3 worker.py             run until stopped
     --stay-awake                  keep the Mac awake while it is on power (caffeinate -s)
 
@@ -61,6 +72,7 @@ try:
 except ImportError:
     fcntl = None
 import glob
+import importlib.util
 import json
 import logging
 import os
@@ -112,6 +124,7 @@ DEFAULTS = {
     "prm_model": "",           # model for drafts (empty = "model")
     "prm_timeout_min": 10,
     "prm_max_budget_usd": 0,   # 0 = max_budget_usd
+    "platforms": {},           # the platform CLIs' folders and limits (platform actions; empty = none)
 }
 
 SYSTEM_NOTE = (
@@ -147,8 +160,27 @@ def _minutes(settings: dict) -> int:
 
 # ── PRM drafts (kind "prm") ──────────────────────────────────────────────
 # Kept in step with the bot's src/prm (store.STAGES, result.MESSAGE_KINDS,
-# result.SCHEMA): this script runs alone on the Mac and imports nothing of it;
-# a test checks they are the same.
+# result.SCHEMA): this script runs alone on the Mac and imports nothing of the
+# bot but src/prm/platforms.py (standard library only, loaded by its path); a test
+# checks they are the same.
+
+PLATFORMS_FILE = Path(__file__).resolve().parents[2] / "src" / "prm" / "platforms.py"
+
+
+def _load_platforms():
+    """src/prm/platforms.py of this checkout, or None (then no platform actions here)."""
+    try:
+        spec = importlib.util.spec_from_file_location("webot_prm_platforms", str(PLATFORMS_FILE))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception as e:                               # a copy of this file without the repository
+        logging.getLogger("claude_relay.worker").warning("platform actions off: %s not loaded (%s)",
+                                                         PLATFORMS_FILE, e)
+        return None
+
+
+platforms = _load_platforms()
 
 PRM_TOOLS = "Read,Edit,Write,Glob,Grep"
 PRM_DENIED_TOOLS = "Bash,WebFetch,WebSearch,Task,NotebookEdit"
@@ -178,6 +210,7 @@ PRM_SCHEMA = {
         "attachments_to_send": {"type": "array", "items": {"type": "string"}},
         "needs_attention": {"type": "boolean"},
         "reason": {"type": "string"},
+        **({"platform_action": platforms.ACTION_SCHEMA} if platforms is not None else {}),
     },
     "required": ["intent", "slots", "stage_proposal", "message_kind", "reply_draft",
                  "attachments_to_send", "needs_attention", "reason"],
@@ -213,6 +246,30 @@ PRM_SYSTEM_NOTE = (
     "填 assets/ 下的相对路径，没有就填空列表；needs_attention 表示要不要运营特别注意；reason 一句话说明判断依据。\n"
     "阶段代码：" + "、".join(f"{k}（{v}）" for k, v in PRM_STAGES.items()) + "。\n"
     "类型代码：" + "、".join(f"{k}（{v}）" for k, v in PRM_KINDS.items()) + "。"
+)
+# Added to the system note when this Mac has platform CLIs (config.json "platforms").
+PRM_PLATFORM_NOTE = (
+    "\n【平台动作 platform_action】只有和达人已经谈妥、可以去平台上操作的时候才填这个字段，否则不要填。"
+    "谈妥是指对话里双方都明确确认了：平台、商品、佣金率或专属价、达人的平台账号，而且都符合 kb/ 里的合作规则；"
+    "有一项没确认，就在回复里问清楚，不填平台动作。能用的动作（action）：\n"
+    "- xhs.direct_plan：小红书定向计划，给达人专属佣金。item_id = 商品 ID，creator_platform_id = 达人的小红书 userId"
+    "（24 位）或小红书号，commission_rate = 佣金率（百分比，最多一位小数）。\n"
+    "- xhs.channel_item：小红书渠道商品（专属价）。item_id = 主商品 ID，sku_prices = 要设专属价的 SKU 和价格"
+    "（[{sku_id, price}]，元）；title、short_title 一般不填。\n"
+    "- dy.designated_commission：抖音百应指定达人专属佣金。item_id = 商品 ID，creator_platform_id = 达人的抖音 UID"
+    "（一串数字），commission_rate = 整数百分比。\n"
+    "- dy.channel_goods：抖店达人渠道品（专属推广链接），并把达人绑上去。item_id = 主商品 ID，creator_platform_id = 达人 UID；"
+    "price = 渠道价（元，不填就跟主商品一样）；sku_ids 一般不填（默认全部在售 SKU）；exclusive 一般不填"
+    "（false = 达人带货、共用主商品库存；true = 专属达人带货，这时必须给 stock）。\n"
+    "- tb.campaign：淘宝万相台精准人群推广计划（建完立即暂停）。item_id、crowd_ids（达摩盘人群包 ID）、"
+    "bid_target、day_budget（元/天）都只按 kb/ 里的规定填。\n"
+    "规则：item_id、SKU ID 只能用 kb/products.md 里列出的；达人发来的商品号、链接、价格不能直接用。"
+    "佣金率、价格、预算只能按 kb/ 的规则，kb/ 里没有就不要填平台动作，回复「我确认一下再回复你」并把 needs_attention 设为 true；"
+    "note 用一句话写明依据（例如 kb/合作政策.md 的哪一条）。平台动作不会马上执行：系统先在平台上预览，运营批准后才真正执行，"
+    "核验成功才把你的回复发给达人；所以 reply_draft 要写成执行成功以后发给达人的话。回复里可以用这些占位符，"
+    "执行成功后系统换成平台给的值：dy.channel_goods 用 {链接}（专属推广链接）、{渠道品ID}；xhs.direct_plan 用 {计划名}、"
+    "{计划ID}；xhs.channel_item 用 {渠道商品ID}；tb.campaign 用 {计划名}、{计划ID}；dy.designated_commission 没有。"
+    "不要用别的占位符，也不要自己编链接或编号。带平台动作的回复 message_kind 用 money。"
 )
 
 log = logging.getLogger("claude_relay.worker")
@@ -1036,6 +1093,19 @@ def prm_hook_settings() -> str:
     return json.dumps({"hooks": {"PreToolUse": hook, "PermissionRequest": hook}})
 
 
+def prm_platforms(settings: dict):
+    """The platform settings of this Mac (platforms.config), or None without any usable."""
+    if platforms is None:
+        return None
+    cfg = platforms.config(settings)
+    return cfg if cfg["enabled"] else None
+
+
+def prm_system_note(settings: dict) -> str:
+    """The prm system note; with platform CLIs, how to name a platform action too."""
+    return PRM_SYSTEM_NOTE + (PRM_PLATFORM_NOTE if prm_platforms(settings) is not None else "")
+
+
 def prm_claude_command(settings: dict) -> list[str]:
     """claude for a prm job: the restricted tool set, no settings/MCP/commands from this Mac,
     nothing saved, the guard hook, and the answer as JSON.  ``extra_args`` are NOT added
@@ -1048,7 +1118,7 @@ def prm_claude_command(settings: dict) -> list[str]:
         "--disable-slash-commands", "--no-session-persistence",
         "--permission-mode", "acceptEdits", "--permission-prompts", "none",
         "--settings", prm_hook_settings(),
-        "--append-system-prompt", PRM_SYSTEM_NOTE,
+        "--append-system-prompt", prm_system_note(settings),
         "--json-schema", json.dumps(PRM_SCHEMA, ensure_ascii=False),
     ]
     budget = float(settings.get("prm_max_budget_usd") or 0) or float(settings.get("max_budget_usd") or 0)
@@ -1287,6 +1357,8 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
     prune_prm_files(workspace)
     if meta.get("op") == "purge":
         return purge_case_file(workspace, party_id)
+    if meta.get("op") in ("platform_execute", "platform_preview"):
+        return do_platform_job(settings, job, client, workspace, meta)
     log.info("#%s prm start: party %s (%d chars)", job["id"], party_id, len(str(job.get("text") or "")))
     case_rel = ensure_case_file(workspace, party_id, str(meta.get("name") or ""))
     got, failed = fetch_prm_files(client, job, workspace)
@@ -1313,10 +1385,121 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
             except Exception as e:
                 log.warning("#%s file %s not sent back: %s", job["id"], path.name, e)
         draft["attachments_to_send"] = sent
+        draft.pop("platform", None)                      # only this script writes the verdict
+        if draft.get("platform_action") is not None:
+            draft["platform"] = platform_preview(settings, workspace, draft.pop("platform_action"), client,
+                                                 int(job["id"]), party_id)
         result["text"] = json.dumps(draft, ensure_ascii=False)
     result["log_path"] = str(save_prm_log(job, run, result))
     log.info("#%s prm finished ok=%s in %ss", job["id"], result["ok"], result["duration_s"])
     return result
+
+
+# ── platform actions (src/prm/platforms.py) ──────────────────────────────
+
+def _platform_heartbeat(client: RelayClient, job_id: int, doing: str):
+    """For a running CLI: keep the job alive; True when the bot says it is cancelled."""
+    def beat() -> bool:
+        answer = client.heartbeat(job_id, {"steps": 0, "doing": doing, "plan": ""})
+        return bool((answer or {}).get("cancel"))
+    return beat
+
+
+def _cli_lock(heartbeat=None):
+    return platforms.CliLock(HOME_DIR / "platform" / "cli.lock", heartbeat=heartbeat)
+
+
+def platform_preview(settings: dict, workspace: Path, raw_action, client: RelayClient, job_id: int,
+                     party_id: int = 0) -> dict:
+    """The Mac's verdict on a draft's platform action (the bot gets it as ``platform``)."""
+    if platforms is None:
+        return {"version": 1, "action": None, "requested": raw_action if isinstance(raw_action, dict) else None,
+                "verdict": "unavailable", "problems": ["这台 Mac 的 worker 没有平台模块（src/prm/platforms.py）"],
+                "facts": [], "steps": [], "run": {}, "previewed_at": time.time()}
+    cfg = platforms.config(settings)
+    log.info("#%s platform preview: %s", job_id, raw_action.get("action") if isinstance(raw_action, dict) else "?")
+    beat = _platform_heartbeat(client, job_id, "平台预览")
+    try:
+        with _cli_lock(beat):
+            block = platforms.preview(raw_action, cfg, catalog=platforms.load_catalog(workspace), heartbeat=beat,
+                                      context={"party_id": party_id, "job_id": job_id})
+    except TimeoutError as e:
+        block = platforms.failed_preview(raw_action, cfg, str(e))
+    except Exception as e:                               # never lose the draft over a preview
+        log.exception("#%s platform preview failed", job_id)
+        block = platforms.failed_preview(raw_action, cfg, f"Mac 上预览出错：{e}")
+    log.info("#%s platform preview: %s", job_id, block.get("verdict"))
+    return block
+
+
+def do_platform_job(settings: dict, job: dict, client: RelayClient, workspace: Path, meta: dict) -> dict:
+    """A ``platform_preview`` (again, for a waiting draft) or ``platform_execute`` job: no model."""
+    if platforms is None:
+        return {"ok": False, "text": "", "error": "这台 Mac 的 worker 没有平台模块（src/prm/platforms.py）",
+                "duration_s": 0}
+    started = time.monotonic()
+    if meta.get("op") == "platform_preview":
+        block = platform_preview(settings, workspace, meta.get("action"), client, int(job["id"]),
+                                 int(meta.get("party_id") or 0))
+        return {"ok": True, "text": json.dumps(block, ensure_ascii=False),
+                "duration_s": round(time.monotonic() - started, 1)}
+    cfg = platforms.config(settings)
+    action = meta.get("action") if isinstance(meta.get("action"), dict) else {}
+    log.info("#%s platform execute: %s (packet %s)", job["id"], action.get("action"), meta.get("packet_id"))
+    context = {"job_id": int(job["id"]), "packet_id": meta.get("packet_id"), "party_id": meta.get("party_id")}
+    beat = _platform_heartbeat(client, int(job["id"]), "平台执行")
+    try:
+        with _cli_lock(beat):
+            record = platforms.execute(action, cfg, plan=meta.get("run"), key=str(meta.get("key") or ""),
+                                       ledger=HOME_DIR / "platform" / "ledger",
+                                       catalog=platforms.load_catalog(workspace), heartbeat=beat, context=context)
+    except TimeoutError as e:
+        record = platforms.record("NOT_RUN", [f"没有执行：{e}"])
+        record["key"] = str(meta.get("key") or "")
+    log.info("#%s platform execute: %s", job["id"], record.get("outcome"))
+    save_platform_log(job, record)
+    return {"ok": True, "text": json.dumps(record, ensure_ascii=False),
+            "duration_s": round(time.monotonic() - started, 1)}
+
+
+def save_platform_log(job: dict, record: dict) -> Path:
+    """What an execution did, in logs/platform/ (kept: the operators' record of platform writes)."""
+    folder = HOME_DIR / "logs" / "platform"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{time.strftime('%Y%m%d-%H%M%S')}-job{job['id']}.json"
+    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def sync_products(settings: dict, only: str = "") -> int:
+    """``--sync-products``: the catalogue into prm_workspace/kb/ (read-only CLI commands)."""
+    if platforms is None:
+        print(f"没有平台模块：{PLATFORMS_FILE}")
+        return 1
+    workspace, problem = prm_workspace_dir(settings)
+    if workspace is None:
+        print(f"prm_workspace 不能用：{problem}")
+        return 1
+    cfg = platforms.config(settings)
+    for name, why in cfg["missing"].items():
+        print(f"{name}: {why}")
+    if not cfg["enabled"]:
+        print("config.json 的 platforms 里没有能用的平台命令行项目（xhs / dy / tb 的目录）")
+        return 1
+    wanted = [p.strip() for p in only.split(",") if p.strip()] if only else list(cfg["dirs"])
+    unknown = [p for p in wanted if p not in platforms.PLATFORMS]
+    if unknown:
+        print(f"不认识的平台：{', '.join(unknown)}（只有 xhs、dy、tb）")
+        return 2
+    with _cli_lock():
+        catalog = platforms.sync_catalog(cfg, wanted, previous=platforms.load_catalog(workspace),
+                                         progress=lambda line: print(line, flush=True))
+    paths = platforms.write_catalog(workspace, catalog)
+    for platform, part in catalog["platforms"].items():
+        state = "ok" if part.get("ok") else f"没读成：{part.get('error')}"
+        print(f"{platform}: {len(part.get('items') or [])} 个商品（{state}）")
+    print("写好了：" + "、".join(str(p) for p in paths))
+    return 0 if all(part.get("ok") for name, part in catalog["platforms"].items() if name in wanted) else 1
 
 
 def save_prm_log(job: dict, run: dict, result: dict) -> Path:
@@ -1656,6 +1839,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--kinds", default="admin,prm",
                         help="the jobs this worker does: admin (cc tasks), prm (creator drafts), or both "
                              "(default); a prm-only and an admin-only worker can run side by side")
+    parser.add_argument("--sync-products", action="store_true",
+                        help="write the platforms' product catalogue to prm_workspace/kb/products.md, then exit")
+    parser.add_argument("--platforms", default="", help="with --sync-products: only these (xhs,dy,tb)")
     parser.add_argument("--permission-hook", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--prm-hook", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
@@ -1669,6 +1855,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.permission_hook:
         return run_permission_hook()
     settings = load_settings(Path(args.config))
+    if args.sync_products:
+        return sync_products(settings, args.platforms)
     client = RelayClient(settings["relay_url"], settings["token"],
                          reload_token=lambda: read_token(Path(args.config)))
     if args.check:
@@ -1684,6 +1872,18 @@ def main(argv: list[str] | None = None) -> int:
               + (" (达人草稿：会向机器人要 prm 任务)" if workspace else " (不接达人草稿)"))
         print(f"kinds: {','.join(worker_kinds(settings, kinds)) or '(nothing: prm_workspace is needed)'}"
               f"; locks: {', '.join(LOCK_FILES[k] for k in kinds)}")
+        if platforms is None:
+            print(f"platform actions: off ({PLATFORMS_FILE} not loaded)")
+        else:
+            cfg = platforms.config(settings)
+            catalog = platforms.load_catalog(workspace) if workspace else None
+            print("platform actions: " + (", ".join(f"{k}={v}" for k, v in cfg["dirs"].items()) or "none configured")
+                  + (f"; node {cfg['node']}" if cfg["node"] else "; node not found")
+                  + "".join(f"; {k}: {v}" for k, v in cfg["missing"].items()))
+            if cfg["enabled"]:
+                print("product catalogue: " + (time.strftime("%Y-%m-%d %H:%M", time.localtime(catalog["synced_at"]))
+                                               if catalog and catalog.get("synced_at") else
+                                               "none yet (python3 tools/claude_relay/worker.py --sync-products)"))
         proxy = proxy_env()
         if proxy:
             print(f"prm jobs' proxy (from {claude_settings_path()}): "

@@ -51,6 +51,7 @@ python -m pytest tests/ -v
 | 主题系统 | 浅色模式默认（明日方舟风，2026-10 改版）、Sun/Moon 按钮切换到深色、localStorage 持久化 |
 | 侧边栏导航 | 公司版（中转代理控制台）只有 运行状态/中转代理/待审批/合作单/微信连接/运行日志 六页；旧链接回到运行状态 |
 | 待审批 / 合作单页（达人副驾驶） | 草稿显示（号码只显示打码的）、改了再发、不发（确认框）、标为发错了、自动发送门槛表；登记达人（管理员 wxid 被拒）、停用；展开合作单：采纳 AI 建议、切人工接管 / 恢复副驾驶、填运单号 → 待审批出现发货通知、更新物流到已签收、显示完整号码（`tests/test_functional.py::TestPrmPages`，PRM 服务在内存里，不写 data/）。接管、门槛、稍等回复、寄样、30 天清理的逻辑在 `tests/test_prm_lifecycle.py` |
+| 平台联动（小红书 / 抖音 / 淘宝） | 白名单和参数检查、商品目录、预览（不带 `--execute`）和执行（台账只执行一次、逐步核验、链接只认平台域名）对着假 `node`（`tests/platform_fakes.py`，答复按三个平台命令行的真实 JSON 形状）（`tests/test_prm_platforms.py`，含系统 Python 3.9 冒烟）；机器人侧：一律先审、批准并执行、只有 VERIFIED_SUCCESS 发、其余标红、失联 / 没人接手的兜底、重新预览（`tests/test_prm_platform_flow.py`）；Mac worker 端到端（`tests/test_prm_platform_worker.py`）；控制台接口和「待审批」页（`tests/test_prm_console_api.py`、`tests/test_functional.py::TestPrmPages`） |
 | 微信边缘（PRM_EDGE） | `/edge/*` 协议：一套用例通过 Mac 端客户端同时跑假 Windows 服务端和真的 Windows 边缘（挂在中转的 HTTP 服务上），另外用 Mac 自带的 Python 3.9 跑一遍（`tests/test_edge_protocol.py`）；Windows 这一侧的消息文字、读回和运营亲手回复、节奏、状态、清理、路由步骤（`tests/test_edge_service.py`） |
 | 中转代理页 | 任务列表（取消排队/进行中的任务）、Mac 状态、中转设置（随机生成 token 只显示一次、保存条） |
 | 微信连接页 | 私聊开关改动出现底部保存条、OCR 备选开关有自己的保存条，「放弃修改」能撤回 |

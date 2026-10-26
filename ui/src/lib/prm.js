@@ -6,6 +6,7 @@ import { get, post } from '../api'
 
 export const PACKET_STATES = {
   pending: ['待审批', 'cy'],
+  executing: ['平台执行中', 'pend'],
   approved: ['发送中', 'pend'],
   sending: ['发送中', 'pend'],
   sent: ['已发出', 'ok'],
@@ -30,6 +31,17 @@ export function usePrm(intervalMs = 5000) {
 }
 
 export const decide = (id, action, text) => post('/api/prm/packets', text === undefined ? { id, action } : { id, action, text })
+
+// Platform actions (src/prm/platforms.py): the Mac's preview verdict and an execution's outcome.
+export const VERDICT_TAGS = {
+  ready: 'ok', blocked: 'need', invalid: 'need', unavailable: 'off', login: 'need', wall: 'need',
+  wrong_account: 'need', error: 'need',
+}
+export const outcomeTag = (outcome) => (outcome === 'VERIFIED_SUCCESS' ? 'ok' : 'need')
+/** 批准并执行 (text: the reply as edited; undefined = as drafted). */
+export const executePlatform = (id, text) => decide(id, 'execute', text)
+export const repreview = (id) => decide(id, 'repreview')
+export const ackPlatform = (id) => decide(id, 'ack')
 export const partyAction = (body) => post('/api/prm/parties', body)
 export const dealAction = (body) => post('/api/prm/deals', body)
 /** The full numbers behind a creator's placeholders; every look is written down (8.2). */
@@ -52,6 +64,10 @@ export function eventText(ev, stages = {}, modes = {}, shipmentStates = {}) {
     case 'wrong': return `${ev.name}：#${d.packet}`
     case 'purge': return `${ev.name}：${Object.entries(d).map(([k, v]) => `${k} ${v}`).join('，')}`
     case 'purge_case': return `${ev.name}：${d.ok ? '完成' : '没成功'} ${d.result || ''}`
+    case 'platform_execute': return `${ev.name}：#${d.packet} ${d.action || ''}（Mac 任务 #${d.job}）`
+    case 'platform_result': return `${ev.name}：#${d.packet} ${d.outcome || ''}${d.link ? ` ${d.link}` : ''}`
+    case 'platform_preview': return `${ev.name}：#${d.packet}`
+    case 'platform_ack': return `${ev.name}：#${d.packet}`
     default: return ev.name
   }
 }

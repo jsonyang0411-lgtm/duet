@@ -1,13 +1,16 @@
-import { useState } from 'react'
-import { ArrowClockwise, PaperPlaneRight, PencilSimple, X, Paperclip, WarningCircle, Eye, EyeSlash, Flag } from '@phosphor-icons/react'
+import { Fragment, useState } from 'react'
+import { ArrowClockwise, PaperPlaneRight, PencilSimple, X, Paperclip, WarningCircle, Eye, EyeSlash, Flag, Lightning, CheckCircle } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
-import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, fmtSize } from '../lib/prm'
-import { PageHead, Card, Note, Empty, Confirm, TextArea } from './ui'
+import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform } from '../lib/prm'
+import { PageHead, Card, Note, Banner, Empty, Confirm, TextArea } from './ui'
 
 // 待审批: what the Mac drafted for the registered creators. Nothing reaches a
 // creator until somebody here clicks 发送 (or edits and sends). A new message
 // from the creator makes the waiting draft out of date; a newer one follows.
+// A draft with a platform action (小红书 / 抖音 / 淘宝) shows the Mac's preview of it;
+// 批准并执行 runs it on the platform once, and only a verified write lets the
+// reply go out. Anything less is listed red at the top until marked dealt with.
 
 export default function ReviewPanel() {
   const { data, err, reload } = usePrm(4000)
@@ -23,6 +26,7 @@ export default function ReviewPanel() {
         {err && <Note kind="need">{err}</Note>}
         {setupProblems(data).map(([kind, text]) => <Note key={text} kind={kind}>{text}</Note>)}
         {!data && <Empty title="正在读取…" />}
+        <PlatformAlerts alerts={data?.platform_alerts || []} onDone={reload} />
         {data && !pending.length && (
           <Empty title="现在没有要审批的草稿">已登记的达人发来消息后，Mac 写好的回复会出现在这里。</Empty>
         )}
@@ -54,20 +58,104 @@ function Numbers({ partyId, legend }) {
   )
 }
 
+/** Platform actions that ended without a verified write (or whose reply did not go out). */
+function PlatformAlerts({ alerts, onDone }) {
+  const toast = useToast()
+  const [busy, setBusy] = useState(0)
+  if (!alerts.length) return null
+  const ack = async (id) => {
+    setBusy(id)
+    try { await ackPlatform(id); toast.ok('已标为处理过了'); onDone() } catch (e) { toast.err(e.message) } finally { setBusy(0) }
+  }
+  return (
+    <div className="stack prm-alerts" style={{ gap: 8 }}>
+      {alerts.map((p) => {
+        const ex = p.platform?.execution
+        return (
+          <Banner key={p.id} kind="" title={`#${p.id} ${p.party_name} · ${p.platform?.label || '平台动作'}：要人工处理`}
+            actions={<button type="button" className="btn sm" disabled={busy === p.id} onClick={() => ack(p.id)}><CheckCircle />我已处理</button>}>
+            <div>{p.error || '平台动作没有核验成功，回复没有发给达人'}</div>
+            {ex && <div className="f-hint">结果：{ex.outcome}（{ex.outcome_label}）{ex.late ? ' · 结果晚到' : ''}</div>}
+            {ex?.created?.link && <div className="f-hint">平台给的链接：<span className="mono">{ex.created.link}</span></div>}
+            {ex?.created?.channel_id && <div className="f-hint">渠道品 ID：<span className="mono">{ex.created.channel_id}</span></div>}
+            {(ex?.problems || []).map((t) => <div key={t} className="f-err">{t}</div>)}
+          </Banner>
+        )
+      })}
+    </div>
+  )
+}
+
+/** One CLI command of a preview or an execution: its line, exit code, what it said. */
+function StepView({ st }) {
+  const tag = st.outcome ? outcomeTag(st.outcome) : (VERDICT_TAGS[st.verdict] || 'pend')
+  return (
+    <div className="prm-step">
+      <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+        <b>{st.label}</b>
+        <span className={`tag ${tag}`}>{st.outcome || st.verdict || '—'}</span>
+        <span className="dim mono">退出码 {st.exit_code ?? '—'}{st.seconds != null ? ` · ${st.seconds}s` : ''}{st.execute ? ' · --execute' : ' · 预览'}</span>
+      </div>
+      <div className="mono prm-cmd">{st.command}</div>
+      {(st.facts || []).map((f, i) => <div key={i} className="f-hint"><b>{f.label}：</b>{f.value}</div>)}
+      {(st.problems || []).map((t) => <div key={t} className="f-err">{t}</div>)}
+      {st.raw && <details><summary className="f-hint">命令输出</summary><pre className="prm-raw">{st.raw}</pre></details>}
+    </div>
+  )
+}
+
+/** A draft's platform action: what it will do, the Mac's verdict, and the detail behind it. */
+function PlatformBox({ pf }) {
+  const [open, setOpen] = useState(false)
+  const ex = pf.execution
+  return (
+    <div className="prm-platform">
+      <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+        <Lightning weight="bold" />
+        <b>平台动作：{pf.label}</b>
+        <span className={`tag ${VERDICT_TAGS[pf.verdict] || 'need'}`}>{pf.verdict_label}</span>
+        {pf.previewing && <span className="tag pend">正在重新预览…</span>}
+      </div>
+      {pf.effect && <div className="f-hint">{pf.effect}</div>}
+      {pf.caveat && <Note kind="warn">{pf.caveat}</Note>}
+      {pf.params.length > 0 && (
+        <dl className="kv">{pf.params.map((x) => <Fragment key={x.label}><dt>{x.label}</dt><dd className="mono">{x.value}</dd></Fragment>)}</dl>
+      )}
+      {pf.requested && <div className="f-hint">草稿里写的：<span className="mono">{JSON.stringify(pf.requested)}</span></div>}
+      {pf.problems.map((t) => <Note key={t} kind="need">{t}</Note>)}
+      {pf.facts.map((f, i) => <div key={i} className="f-hint"><b>{f.label}：</b>{f.value}</div>)}
+      {ex && <div className="f-hint">执行结果：<span className={`tag ${outcomeTag(ex.outcome)}`}>{ex.outcome}</span> {ex.outcome_label}</div>}
+      {pf.steps.length > 0 && (
+        <button type="button" className="link" onClick={() => setOpen(!open)}>{open ? '收起预览明细' : `看预览明细（${pf.steps.length} 条命令）`}</button>
+      )}
+      {open && pf.steps.map((st, i) => <StepView key={i} st={st} />)}
+      {pf.previewed_at && <div className="f-hint">预览于 {fmtClock(pf.previewed_at)}（Mac 上的时间）</div>}
+      <div className="f-hint">{pf.placeholders?.length
+        ? `回复里可以用：${pf.placeholders.map((x) => `${x.name}（${x.label}）`).join('、')}，执行成功后换成平台给的值${pf.makes_link ? '；没写 {链接} 时链接接在回复末尾' : ''}`
+        : '这个动作没有可用的占位符：回复原样发出'}</div>
+    </div>
+  )
+}
+
 function DraftCard({ p, canSend, onDone }) {
   const toast = useToast()
   const [editing, setEditing] = useState(false)
   const [text, setText] = useState(p.text)
   const [busy, setBusy] = useState(false)
   const [dropping, setDropping] = useState(false)
+  const [executing, setExecuting] = useState(null)   // the text to execute with (null = no dialog)
+  const pf = p.platform
   const waiting = p.status !== 'pending'
   const act = async (action, body) => {
     setBusy(true)
     try {
-      await decide(p.id, action, body)
-      toast.ok(action === 'drop' ? '这条不发了' : '已确认，正在发送')
+      if (action === 'execute') await executePlatform(p.id, body)
+      else if (action === 'repreview') await repreview(p.id)
+      else await decide(p.id, action, body)
+      toast.ok({ drop: '这条不发了', execute: '已批准，Mac 正在平台上执行', repreview: '已请 Mac 重新预览' }[action] || '已确认，正在发送')
       setEditing(false)
       setDropping(false)
+      setExecuting(null)
       onDone()
     } catch (e) { toast.err(e.message) } finally { setBusy(false) }
   }
@@ -92,6 +180,8 @@ function DraftCard({ p, canSend, onDone }) {
             {slots.map(([k, v]) => <span key={k} className="tag">{k}：{v}</span>)}
           </div>
         )}
+        {pf && <PlatformBox pf={pf} />}
+        {pf && <div className="f-hint">下面是平台上核验成功以后才发给达人的回复：</div>}
         {editing
           ? <TextArea value={text} onChange={setText} rows={5} aria-label="修改要发的内容" />
           : <div className="prm-text" style={{ whiteSpace: 'pre-wrap' }}>{p.text || <span className="dim">（只发附件，没有文字）</span>}</div>}
@@ -102,7 +192,30 @@ function DraftCard({ p, canSend, onDone }) {
             {p.attachments.map((a) => <span key={a.name} className="tag"><Paperclip />{a.name} {fmtSize(a.size)}</span>)}
           </div>
         )}
-        {!waiting && (
+        {p.status === 'executing' && (
+          <Note kind="warn">平台执行中（Mac 任务 #{pf?.job_id ?? '—'}）：核验成功后自动把回复发给达人；没核验成功就不发，在页面上方标红。
+            {pf?.lost_at ? ` Mac 从 ${fmtClock(pf.lost_at)} 起失联，等它回来；30 分钟还没回来就算结果未知。` : ''}</Note>
+        )}
+        {!waiting && pf && (
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+            {editing ? (
+              <>
+                <button type="button" className="btn primary" disabled={busy || !canSend || !pf.can_execute} onClick={() => setExecuting(text)}><Lightning />确认并执行</button>
+                <button type="button" className="btn" disabled={busy} onClick={() => { setEditing(false); setText(p.text) }}>取消修改</button>
+              </>
+            ) : (
+              <>
+                <button type="button" className="btn primary" disabled={busy || !canSend || !pf.can_execute} onClick={() => setExecuting(undefined)}><Lightning />批准并执行</button>
+                <button type="button" className="btn" disabled={busy || !pf.can_execute} onClick={() => setEditing(true)}><PencilSimple />改了再执行</button>
+                <button type="button" className="btn" disabled={busy || pf.previewing || !pf.params.length} onClick={() => act('repreview')}><ArrowClockwise />重新预览</button>
+                <button type="button" className="btn ghost" disabled={busy} onClick={() => setDropping(true)}><X />不发</button>
+              </>
+            )}
+            {!canSend && <span className="dim">机器人没连着微信，现在不能批准执行</span>}
+            {canSend && !pf.can_execute && !pf.previewing && <span className="dim">预览没通过，不能执行；处理好以后点「重新预览」</span>}
+          </div>
+        )}
+        {!waiting && !pf && (
           <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
             {editing ? (
               <>
@@ -123,7 +236,18 @@ function DraftCard({ p, canSend, onDone }) {
       {dropping && (
         <Confirm title={`不发 #${p.id}？`} confirmLabel="不发" cancelLabel="再想想" danger busy={busy}
           onConfirm={() => act('drop')} onCancel={() => setDropping(false)}>
-          这条草稿不会发给达人。达人再发消息时，会有新的草稿。
+          这条草稿不会发给达人{pf ? '，平台上也不会执行' : ''}。达人再发消息时，会有新的草稿。
+        </Confirm>
+      )}
+      {executing !== null && pf && (
+        <Confirm title={`批准并执行 #${p.id}？`} confirmLabel="执行" cancelLabel="再想想" busy={busy}
+          onConfirm={() => act('execute', executing)} onCancel={() => setExecuting(null)}>
+          <div className="stack" style={{ gap: 6 }}>
+            <div>这会在平台上真实写入：<b>{pf.label}</b>。{pf.effect}</div>
+            {pf.caveat && <div className="f-err">{pf.caveat}</div>}
+            {pf.params.map((x) => <div key={x.label} className="f-hint">{x.label}：<span className="mono">{x.value}</span></div>)}
+            <div>只执行一次，不会自动重试；平台读回核验成功（VERIFIED_SUCCESS）才把回复发给达人，否则不发，并在这一页上方标红。</div>
+          </div>
         </Confirm>
       )}
     </Card>
@@ -166,6 +290,9 @@ function RecentCard({ d, onDone }) {
                     </span>
                     {p.route === 'auto' && <span className="tag ok">自动</span>}
                     {p.wrong && <span className="tag need">发错了</span>}
+                    {p.platform && <span className={`tag ${p.platform.execution ? outcomeTag(p.platform.execution.outcome) : 'off'}`} title={p.platform.label}>
+                      平台 · {p.platform.execution ? p.platform.execution.outcome : '没执行'}</span>}
+                    {p.platform?.execution?.created?.link && <div className="f-hint mono">{p.platform.execution.created.link}</div>}
                     {p.error && <div className="f-err">{p.error}</div>}
                   </td>
                   <td className="ellipsis" style={{ maxWidth: 360 }} title={shown}>{shown || '—'}</td>

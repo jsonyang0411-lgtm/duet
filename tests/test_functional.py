@@ -433,7 +433,7 @@ class TestPrmPages:
             relay.finish(job["id"], {"ok": True, "text": _json.dumps(draft, ensure_ascii=False)})
             relay.tick()
         web_server.register_prm(service)
-        yield SimpleNamespace(service=service, sent=sent)
+        yield SimpleNamespace(service=service, sent=sent, relay=relay, clock=clock)
         web_server.register_prm(None)
         relay.stop()
 
@@ -452,6 +452,64 @@ class TestPrmPages:
         packet = prm.service.store.packet(2)
         assert packet["status"] == "approved" and packet["final_text"] == "在的，小美你好～" and packet["edited"]
         assert "发送中" in page.inner_text("body")
+
+    def test_review_page_runs_a_platform_action_once_and_shows_it_red_when_unverified(self, page, prm):
+        import json as _json
+        from src.prm import platforms
+        from src.prm.service import SETTLE_SEC
+
+        action = platforms.check_action({"action": "dy.designated_commission", "item_id": "3000000000000000101",
+                                         "creator_platform_id": "5100000000000002", "commission_rate": 20})
+        preview = {"version": 1, "action": action, "verdict": "ready", "problems": [],
+                   "facts": [{"label": "将写入", "value": "fixed commission 20%; ends never"}],
+                   "steps": [{"name": "designated", "label": "百应 · 建指定达人佣金策略", "execute": False,
+                              "command": "node bin/dy.mjs buyin promotion-strategy-create-designated --to=20",
+                              "exit_code": 0, "seconds": 2.1, "verdict": "ready", "outcome": "", "problems": [],
+                              "facts": [], "raw": '{"overall": "PREVIEW_ONLY"}'}],
+                   "run": {"steps": ["designated"]}, "catalog": {"synced_at": 1.0, "title": "测试主品"},
+                   "previewed_at": prm.clock.now}
+        prm.service.handle({"chat_id": "wxid_creator01", "sender_id": "wxid_creator01", "content": "好的就按 20%",
+                            "msg_type": 1, "is_group": False, "timestamp": prm.clock.now})
+        prm.clock.now += SETTLE_SEC + 1
+        job = prm.relay.next_job(0, ("prm",))
+        d = {"intent": "谈妥专属佣金", "slots": {"佣金": "20%"}, "stage_proposal": "agreed", "message_kind": "money",
+             "reply_draft": "专属佣金 20% 设好啦～", "attachments_to_send": [], "needs_attention": False,
+             "reason": "kb/合作政策.md", "platform": preview}
+        prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(d, ensure_ascii=False)})
+        prm.relay.tick()
+        packet = prm.service.store.packet_for_job(job["id"])
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="平台动作")
+        text = card.inner_text()
+        for expected in ("平台动作：抖音百应 · 指定达人专属佣金", "预览通过，可以批准执行", "佣金率（%）", "20%", "测试主品",
+                         "fixed commission 20%", "平台上核验成功以后才发给达人"):
+            assert expected in text
+        assert card.locator("button:has-text('发送')").count() == 0
+        card.locator("button:has-text('看预览明细')").click()
+        assert "promotion-strategy-create-designated" in card.inner_text()
+        card.locator("button:has-text('批准并执行')").click()
+        page.wait_for_timeout(300)
+        dialog = page.locator("[role=dialog]")
+        assert "只执行一次，不会自动重试" in dialog.inner_text()
+        dialog.locator("button:has-text('执行')").click()
+        page.wait_for_timeout(1500)
+        assert prm.service.store.packet(packet["id"])["status"] == "executing"
+        assert "平台执行中" in page.inner_text("body")
+        # the Mac: the write went out, the read-back did not prove it -> red, nothing sent
+        mac_job = prm.relay.next_job(0, ("prm",))
+        assert mac_job["meta"]["op"] == "platform_execute"
+        rec = {"version": 1, "op": "platform_execute", "outcome": "ACCEPTED_UNVERIFIED", "key": mac_job["meta"]["key"],
+               "problems": ["读回没证实"], "facts": [], "steps": [], "created": {}, "finished_at": prm.clock.now}
+        prm.relay.finish(mac_job["id"], {"ok": True, "text": _json.dumps(rec, ensure_ascii=False)})
+        prm.relay.tick()
+        page.wait_for_timeout(5000)                               # the page polls every 4 s
+        alerts = page.locator(".prm-alerts").inner_text()
+        assert "要人工处理" in alerts and "ACCEPTED_UNVERIFIED" in alerts and "没有发微信" in alerts
+        page.locator(".prm-alerts button:has-text('我已处理')").click()
+        page.wait_for_timeout(1500)
+        assert page.locator(".prm-alerts").count() == 0
+        assert prm.sent == []
 
     def test_review_page_drops_a_draft_after_asking(self, page, prm):
         page.goto(f"{BASE_URL}/#/review", timeout=10000)

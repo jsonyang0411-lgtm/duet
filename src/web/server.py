@@ -1302,9 +1302,11 @@ def _prm_state_core() -> dict:
                "retention_days": _prm_int_env("PRM_RETENTION_DAYS", 30), **settings}
     store = _prm_stopped_store()
     if store is None:
+        from src.prm.platforms import ACTIONS
         from src.prm.result import MESSAGE_KINDS
         from src.prm.store import MODES, SHIPMENT_STATES, STAGES
         return {"ok": True, "running": False, "parties": [], "pending": [], "recent": [], "counts": {}, "gates": [],
+                "platform_alerts": [], "platform_actions": {k: v["label"] for k, v in ACTIONS.items()},
                 "stages": STAGES, "kinds": MESSAGE_KINDS, "modes": MODES, "shipment_states": SHIPMENT_STATES,
                 **stopped}
     try:
@@ -1390,7 +1392,9 @@ def _prm_parties(data: dict) -> dict:
 
 
 def _prm_packet(data: dict) -> dict:
-    """POST /api/prm/packets: {"id", "action": "send" | "edit" | "drop" | "wrong", "text"}."""
+    """POST /api/prm/packets: {"id", "action": "send" | "edit" | "drop" | "wrong" | "execute" | "repreview"
+    | "ack", "text"}; a draft with a platform action is approved with "execute" (text: the reply as
+    edited), see PrmService.decide."""
     try:
         packet_id = int(data.get("id"))
     except (TypeError, ValueError):
