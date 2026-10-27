@@ -815,6 +815,10 @@ class PrmService:
         # Every file the draft named (an older worker reports only the ones it sent back): fewer came,
         # the draft waits for a person whatever its kind's gate, and the deal and the draft say which.
         named = draft.attachments_named if draft.attachments_named is not None else draft.attachments_to_send
+        # The Mac's action did not pass the bot's own check (a Mac with wider limits, say): the reply stays
+        # a draft, without it, for a person (it was written as if the action had run).
+        refused = (f"平台动作没过机器人这边的检查（{draft.platform_refused}），草稿里去掉了它，平台上什么都不会做；"
+                   "回复是按执行成功写的，发之前请核对") if draft.platform_refused else ""
         short = ""
         if len(named) > len(attachments):
             lost = missing_files(named, [a["name"] for a in attachments], draft.attachments_missing)
@@ -842,7 +846,7 @@ class PrmService:
         else:
             route, state, decided_at = deals.route_for(
                 self._store, draft.message_kind, deal=deal, now=now, text=draft.reply_draft,
-                needs_attention=draft.needs_attention, unknown_tokens=unknown, reason=draft.reason,
+                needs_attention=draft.needs_attention or bool(refused), unknown_tokens=unknown, reason=draft.reason,
                 waybill=waybill, attachments=attachments, files_named=len(named))
         packet_meta = {"waybill": waybill} if draft.message_kind == "shipping_notice" and waybill else {}
         if lane == LANE_SYSTEM:
@@ -855,8 +859,9 @@ class PrmService:
         packet_id = self._store.add_packet(
             deal_id=deal_id, party_id=party_id, job_id=job["id"], chat_id=job["chat_id"],
             kind=draft.message_kind, text=draft.reply_draft, attachments=attachments, intent=draft.intent,
-            slots=draft.slots, stage_proposal=draft.stage_proposal, needs_attention=draft.needs_attention or bool(short),
-            reason="；".join(r for r in (short, draft.reason) if r)[:500], status=state, route=route,
+            slots=draft.slots, stage_proposal=draft.stage_proposal,
+            needs_attention=draft.needs_attention or bool(short) or bool(refused),
+            reason="；".join(r for r in (refused, short, draft.reason) if r)[:500], status=state, route=route,
             decided_at=decided_at, meta=packet_meta,
             tool=tool, platform=platform, now=now,
         )
@@ -867,6 +872,8 @@ class PrmService:
             attention.append(f"#{job['id']} 开专属佣金这一步的草稿没进待审批（人工接管中，或者又有了新的一步），请运营核对")
         if short:
             attention.append(short)
+        if refused:
+            attention.append(f"#{job['id']} {refused}")
         if draft.message_kind == "shipping_notice" and draft.reply_draft and not gates.waybill_ok(draft.reply_draft, waybill):
             attention.append("发货通知里的单号和系统记录对不上" if waybill else "还没有运单号，发货通知不能发")
         if draft.platform is not None and draft.platform.get("verdict") != "ready":
@@ -1130,14 +1137,16 @@ class PrmService:
             if status in ("pending", "running"):
                 return True
             data = packet["platform"]
-            block = None
+            block, refused = None, ""
             if status == "done":
                 try:
                     block = platforms.check_block(json.loads(job.get("result_text") or ""))
+                except platforms.ActionRefused as e:
+                    refused = f"新预览的动作没过机器人这边的检查（{e}）"
                 except (ValueError, platforms.ActionError):
                     block = None
             if block is None:
-                why = {"lost": "Mac 失联了", "cancelled": "任务被取消了"}.get(status) or _job_error(job)
+                why = refused or {"lost": "Mac 失联了", "cancelled": "任务被取消了"}.get(status) or _job_error(job)
                 preview = {**(data.get("preview") or {}), "problems": [f"重新预览没做成：{why}"[:200]]}
                 try:
                     block = platforms.check_block(preview)
@@ -1228,12 +1237,19 @@ class PrmService:
     def _ask_next_step(self, packet: dict, note: str, now: float) -> None:
         """A platform write that leads to the next one (a sample order → its 专属佣金): a draft
         job of its own, told what happened in ``meta.system_note``.  What it drafts is a platform
-        action like any other: previewed on the Mac, approved by a person."""
+        action like any other: previewed on the Mac, approved by a person.  Not for a creator the
+        operators took off the list (inactive) or a deal a person has: the deal says so instead."""
         if not note:
             return
         deal = self._store.deal(packet["deal_id"])
         party = self._store.party(packet["party_id"])
         if deal is None or party is None:
+            return
+        if not party.get("active"):
+            self._store.update_deal(deal["id"], now, attention=(
+                f"#{packet['id']} 之后该开专属佣金了：这位达人已经停用（不在达人名单里），系统没有起草，请运营处理")[:300])
+            logger.info("PRM: party %d is inactive; the next step after packet %d is left to a person",
+                        party["id"], packet["id"])
             return
         if self._mode(deal, now) != COPILOT:
             self._store.update_deal(deal["id"], now, attention=(
@@ -1541,22 +1557,28 @@ def next_step_note(action: dict, record: dict, *, delivered: bool = False) -> st
     per draft, so one product each time; the case file says which are done).  Told again (the
     deal set back before 已签收 and signed for again, e.g. after the chain was cut off), the draft
     starts at the first product not done yet, so no 专属佣金 is opened twice.  A 抖店 order names
-    the 抖音 UID 聚水潭 found (``creator_uid``): the draft may only know the creator's 抖音号."""
+    the 抖音 UID 聚水潭 found (``creator_uid``): the draft may only know the creator's 抖音号.
+    What to do comes first and the list of products last: a 专场 order's long list (up to
+    ``platforms.MAX_ORDER_SKUS`` products) never pushes the instruction out of the note."""
     name = action.get("action")
     if name == "jst.sample_order":
         shop = str(action.get("shop") or "")
         if shop not in COMMISSION_ACTIONS:
             return ""
         created = record.get("created") or {}
-        items = "、".join(str(i.get("item_id")) for i in action.get("items") or [] if isinstance(i, dict))
+        ids = [str(i.get("item_id")) for i in action.get("items") or [] if isinstance(i, dict)]
+        if not ids and action.get("item_id"):
+            ids = [str(action["item_id"])]
         number = str(created.get("sample_order_no") or "")
-        done = (f"达人已经签收了寄样单 {number}（{platforms.PLATFORMS[shop]}的商品 {items}）。" if delivered else
-                f"寄样单 {number} 已经在聚水潭建好，寄的是{platforms.PLATFORMS[shop]}的商品 {items}。")
+        what = f"{platforms.PLATFORMS[shop]}的商品，共 {len(ids)} 个，清单在最后"
+        done = (f"达人已经签收了寄样单 {number}（{what}）。" if delivered else
+                f"寄样单 {number} 已经在聚水潭建好，寄的是{what}。")
         uid = str(created.get("creator_uid") or "") if shop == "dy" else ""
         who = f"聚水潭建单时查到达人的抖音 UID 是 {uid}，creator_platform_id 就填它。" if uid else ""
         return (done + who +
                 f"按 kb/合作政策.md 的「开专属佣金」给这些商品开专属佣金：这一份草稿填第一个还没开的商品的 {COMMISSION_ACTIONS[shop]}"
-                "（看案卷，开过的不要再开），把哪些商品还没开记进案卷。")
+                "（看案卷，开过的不要再开），把哪些商品还没开记进案卷。"
+                f"寄样单上的商品（按顺序）：{'、'.join(ids)}。")
     if name in COMMISSION_ACTIONS.values():
         return (f"商品 {action.get('item_id')} 的专属佣金（{action.get('commission_rate')}%）已经在平台上开好了"
                 f"（达人 {action.get('creator_platform_id')}）。"
