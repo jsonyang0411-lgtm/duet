@@ -1,1 +1,3 @@
 pytest>=8.0
+# 浏览器功能测试（tests/test_functional.py）。装完还要下载浏览器：python -m playwright install --only-shell chromium
+playwright>=1.49

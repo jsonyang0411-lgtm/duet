@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from src.config import PROJECT_ROOT
+from src.pii import mask_pii
 from .file_locator import VoiceFileLocator, _extract_msg_svr_id
 from .decoder import SilkDecoder, DecodeError
 from .asr import AbstractASR, ASRError, create_asr
@@ -253,7 +254,7 @@ class VoicePipeline:
         if result.confidence < _LOW_CONFIDENCE_THRESHOLD:
             logger.info(
                 "Low-confidence result (%.2f): '%s'...",
-                result.confidence, text[:40],
+                result.confidence, mask_pii(text)[:40],
             )
             return f"[可能不准确] {text}"
 

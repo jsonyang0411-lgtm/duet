@@ -1,0 +1,235 @@
+"""控制台「达人审批」页的浏览器测试：启动真实的 Web 服务，用无头浏览器点页面。
+
+和 tests/test_functional.py 一样需要 Playwright（没装就跳过）和构建好的 ui/dist。
+配置文件和数据库都是临时的：WEBOT_ENV_FILE 指向临时 .env，里面的 DB_PATH 指向临时库；
+并且打开模拟模式，不碰真实的配置、数据库、聚水潭和小红书。
+"""
+
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from src.db.schema import initialize_db
+from src.influencer.store import SOURCE_BOT, SOURCE_CONSOLE, InfluencerStore
+from src.influencer.types import GateStatus
+from test_functional import _find_free_port, _start_server
+from test_influencer_store import NEXT_YEAR, make_packet
+
+UI_INDEX = Path(__file__).resolve().parent.parent / "ui" / "dist" / "index.html"
+
+
+def seed(db_path):
+    conn = initialize_db(str(db_path))
+    conn.execute(
+        "INSERT INTO messages (message_id, chat_id, sender_id, sender_name, content, timestamp)"
+        " VALUES ('m1', 'wxid_jie', 'wxid_jie', '阿杰', '在吗', ?)",
+        (int(time.time()),),
+    )
+    conn.commit()
+    conn.close()
+    store = InfluencerStore(str(db_path))
+    store.add_contacts(["wxid_mei"], source=SOURCE_CONSOLE)
+    store.save_contact(
+        "wxid_keep", display_name="老朋友", xhs_account="xhs_keep", enabled=False, source=SOURCE_CONSOLE,
+    )
+    for packet_id, xhs_account in (("GATE-OK", "xhs_mei"), ("GATE-NO", "xhs_mei"), ("GATE-NOXHS", "")):
+        store.add_approval(
+            make_packet(packet_id, chat_id="wxid_mei", xhs_account=xhs_account,
+                        qualification="达标", expires_at=NEXT_YEAR),
+            source=SOURCE_BOT,
+        )
+    store.add_approval(
+        make_packet("GATE-STUCK", chat_id="wxid_mei", xhs_account="xhs_mei", expires_at=NEXT_YEAR),
+        source=SOURCE_BOT,
+    )
+    # 抖音达人，没有小红书账号；档位、主播类型从聚水潭来，三款商品（第 2 步）
+    store.add_approval(
+        make_packet("GATE-DY", chat_id="wxid_mei", expires_at=NEXT_YEAR, platform="DY", platform_no="test_daren01",
+                    tier="不限", channel="视频", sales_label="近 30 日销售总额 250万~500万（聚水潭，10-26 查）",
+                    items_json='[{"name": "法式复古贝雷帽 深棕色", "qty": 1,'
+                               ' "listing": {"id": "3712345678901234567", "title": "法式贝雷帽 抖音款"}},'
+                               ' {"name": "丹麦小众贝雷帽 A7260610003B", "qty": 1, "unlisted": true},'
+                               ' {"name": "北欧套头帽", "qty": 1}]',
+                    live_session="11 月 3 日晚上开专场"),
+        source=SOURCE_BOT,
+    )
+    store.transition("GATE-STUCK", GateStatus.PENDING, GateStatus.EXECUTING)  # 执行中断，没记开始时间
+    store.add_inbox_item("wxid_mei", "message", "这款什么时候上新呀", auto_replied=True)
+    return store
+
+
+@pytest.fixture(scope="module")
+def console(tmp_path_factory):
+    if not UI_INDEX.exists():
+        pytest.skip("UI not built. Run: cd ui && npm run build")
+    sync_api = pytest.importorskip("playwright.sync_api")
+    tmp = tmp_path_factory.mktemp("influencer_console")
+    env_file = tmp / ".env"
+    env_file.write_text(
+        "AI_BACKEND=deepseek\nDEEPSEEK_API_KEY=\nWECHAT_GROUPS=*\nONBOARDING_DONE=true\n"
+        f"DB_PATH={tmp / 'messages.db'}\n",
+        encoding="utf-8",
+    )
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("WEBOT_ENV_FILE", str(env_file))
+        mp.setenv("INFLUENCER_MOCK", "1")
+        store = seed(tmp / "messages.db")
+        port = _find_free_port()
+        _start_server(port)
+        with sync_api.sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            yield SimpleNamespace(base=f"http://127.0.0.1:{port}", browser=browser, store=store)
+            browser.close()
+
+
+@pytest.fixture
+def page(console):
+    context = console.browser.new_context(
+        viewport={"width": 1440, "height": 900}, permissions=["clipboard-read", "clipboard-write"],
+    )
+    page = context.new_page()
+    yield page
+    context.close()
+
+
+def card(page, packet_id):
+    return page.get_by_role("region", name=f"审批单 {packet_id}", exact=True)
+
+
+def test_the_sidebar_leads_to_both_sub_pages(console, page):
+    page.goto(console.base)
+    page.get_by_role("button", name="达人审批").click()
+    page.get_by_role("heading", name="达人审批").wait_for()
+    assert page.url.endswith("#/influencer/approvals")
+    page.get_by_role("button", name="达人名单").click()
+    page.get_by_role("heading", name="达人名单").wait_for()
+
+
+def test_an_approval_runs_and_its_message_can_be_copied(console, page):
+    page.goto(f"{console.base}/#/influencer/approvals")
+    card(page, "GATE-OK").wait_for()
+    assert "模拟模式已打开" in page.inner_text("body")
+    assert "想申请眼霜样品" in card(page, "GATE-OK").inner_text(), "达人原话要显示出来（R5）"
+
+    card(page, "GATE-OK").get_by_role("button", name="通过").click()
+    page.get_by_role("button", name="确认通过并执行").click()
+    page.get_by_text("已执行：寄样单").wait_for()
+    assert console.store.get_approval("GATE-OK").status == GateStatus.FULFILLED
+
+    page.get_by_role("group", name="状态").get_by_role("button", name="已执行").click()
+    done = card(page, "GATE-OK")
+    done.get_by_text("发给达人的确认消息").wait_for()
+    done.get_by_role("button", name="复制").click()
+    page.get_by_text("已复制").wait_for()
+    tracking = console.store.get_approval("GATE-OK").tracking_number
+    copied = page.evaluate("navigator.clipboard.readText()")
+    assert tracking in copied
+    assert "专属佣金" not in copied, "佣金另由平台动作开，确认消息里不提（D34）"
+
+
+def test_a_rejection_keeps_the_reason(console, page):
+    page.goto(f"{console.base}/#/influencer/approvals")
+    card(page, "GATE-NO").get_by_role("button", name="驳回").click()
+    dialog = page.get_by_role("dialog")
+    dialog.locator("textarea").fill("粉丝画像不匹配")
+    dialog.get_by_role("button", name="驳回").click()
+    page.get_by_text("已驳回。记得").wait_for()
+    assert console.store.get_approval("GATE-NO").status == GateStatus.REJECTED
+    assert console.store.events_for(["GATE-NO"])["GATE-NO"][-1]["detail"] == "粉丝画像不匹配"
+
+
+def test_approval_does_not_wait_for_an_xhs_account(console, page):
+    # D31：抖音达人也要寄样，小红书账号选填，不挡「通过」
+    page.goto(f"{console.base}/#/influencer/approvals")
+    pending = card(page, "GATE-NOXHS")
+    pending.get_by_label("小红书账号").wait_for()
+    assert pending.get_by_role("button", name="通过").is_enabled()
+    assert console.store.get_approval("GATE-NOXHS").status == GateStatus.PENDING
+
+
+def test_an_interrupted_execution_is_marked_done_after_checking(console, page):
+    page.goto(f"{console.base}/#/influencer/approvals")
+    page.get_by_role("group", name="状态").get_by_role("button", name="执行中").click()
+    stuck = card(page, "GATE-STUCK")
+    stuck.get_by_text("执行被中断了，需要人工核对").wait_for()
+    stuck.get_by_role("button", name="核对后标成已执行").click()
+    dialog = page.get_by_role("dialog")
+    confirm = dialog.get_by_role("button", name="确认")
+    assert confirm.is_disabled(), "没填寄样单号不能确认"
+    dialog.get_by_label("寄样单号").fill("JST-REAL-1")
+    dialog.get_by_label("运单号").fill("SF999")
+    confirm.click()
+    page.get_by_text("已标成已执行").wait_for()
+    packet = console.store.get_approval("GATE-STUCK")
+    assert (packet.status, packet.order_sn, packet.tracking_number) == (GateStatus.FULFILLED, "JST-REAL-1", "SF999")
+
+
+def test_influencers_are_added_disabled_and_picked_from_recent_chats(console, page):
+    page.goto(f"{console.base}/#/influencer/contacts")
+    page.get_by_label("chat_id").fill("wxid_new")
+    page.get_by_label("显示名").fill("新达人")
+    page.get_by_role("button", name="加入名单").click()
+    page.get_by_role("cell", name="wxid_new").wait_for()
+    assert console.store.is_influencer("wxid_new")
+
+    page.get_by_role("switch", name="停用 新达人").click()
+    page.get_by_text("已停用").wait_for()
+    assert not console.store.is_influencer("wxid_new")
+
+    recent = page.locator(".list-row", has_text="wxid_jie")
+    recent.get_by_role("button", name="设为达人").click()
+    recent.get_by_text("已在名单").wait_for()
+    assert console.store.is_influencer("wxid_jie")
+
+
+def test_adding_someone_already_on_the_list_keeps_what_was_filled_in(console, page):
+    page.goto(f"{console.base}/#/influencer/contacts")
+    page.get_by_label("chat_id").fill("wxid_keep")
+    page.get_by_role("button", name="加入名单").click()
+    page.get_by_text("已加入名单").wait_for()
+    contact = console.store.get_contact("wxid_keep")
+    assert contact["enabled"] is True
+    assert (contact["display_name"], contact["xhs_account"]) == ("老朋友", "xhs_keep")
+
+
+def test_the_sidebar_shows_what_needs_attention_and_the_inbox_can_be_cleared(console, page):
+    page.goto(f"{console.base}/#/influencer/inbox")
+    page.locator(".ni-badge").wait_for()
+    [item] = console.store.list_inbox()
+    row = page.get_by_label(f"待处理事项 {item['id']}")
+    row.get_by_text("这款什么时候上新呀").wait_for()
+    row.get_by_role("button", name="已处理").click()
+    page.get_by_text("已标为处理完").wait_for()
+    assert console.store.list_inbox() == []
+
+
+def test_the_overview_numbers_lead_to_their_lists(console, page):
+    page.goto(f"{console.base}/#/influencer/approvals")
+    overview = page.get_by_role("region", name="今日概览")
+    overview.get_by_role("button", name="近 24 小时新申请").wait_for()
+    overview.get_by_role("button", name="待处理").click()
+    page.get_by_role("heading", name="待处理").wait_for()
+
+
+def test_a_douyin_request_shows_tier_channel_and_every_item(console, page):
+    page.goto(f"{console.base}/#/influencer/approvals")
+    dy = card(page, "GATE-DY")
+    dy.get_by_text("test_daren01").wait_for()
+    for text in ("不限", "视频为主", "250万~500万", "法式复古贝雷帽 深棕色", "北欧套头帽", "共 3 款", "11 月 3 日晚上开专场",
+                 "3712345678901234567", "抖音商品目录里没有"):
+        assert dy.get_by_text(text).count() >= 1, text
+    assert dy.get_by_role("button", name="通过").is_enabled()
+
+
+def test_a_creator_is_added_with_a_platform_number(console, page):
+    page.goto(f"{console.base}/#/influencer/contacts")
+    page.get_by_label("chat_id").fill("wxid_dy")
+    page.get_by_role("group", name="平台").get_by_role("button", name="小红书").click()
+    page.get_by_label("抖音号或小红书号").fill("xhs_no_1")
+    page.get_by_role("button", name="加入名单").click()
+    page.get_by_role("cell", name="wxid_dy", exact=True).wait_for()
+    contact = console.store.get_contact("wxid_dy")
+    assert (contact["platform"], contact["platform_no"]) == ("XHS", "xhs_no_1")
+    page.get_by_text("小红书 xhs_no_1").wait_for()

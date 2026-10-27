@@ -27,11 +27,11 @@
     "dy_expect_shop_id": "<抖店店铺 ID>",
     "dy_invite_phone": "<邀约卡片上的店铺手机号，可留空>",
     "dy_invite_wechat": "<邀约卡片上的店铺微信号，可留空>",
-    "max_commission_rate": 30,
+    "max_commission_rate": 20,
     "max_day_budget": 50
   }
   ```
-  测试时上限压低一点（佣金 30%、预算 50 元），测完再按业务改。
+  测试时上限压低一点（佣金 20%、预算 50 元），测完再按业务改；佣金最高 25%，写更大的也按 25% 算。
   - **实测结果**：✅ 抖店店铺身份已锁定为指定店铺 ID，佣金与预算上限均已按测试安全配置设定。
 - [x] Mac：`python3 tools/claude_relay/worker.py --check --kinds prm`。期望多两行：`platform actions: xhs=…, dy=…, tb=…; node …`（没有 `missing`），`product catalogue: none yet …`。
   - **实测结果**：✅ 健康检查全部通过，输出 `platform actions` 就绪且无 missing。

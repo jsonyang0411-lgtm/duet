@@ -27,6 +27,7 @@ from .wcdb_client import WcdbNativeClient
 from .quiet_send import QuietSendSettings
 from .window_controller import WeChatWindowController
 from .helpers import DedupSet, format_nontext_content, normalize_msg_type
+from src.pii import mask_pii
 from src.wechat.media import IMAGE_MSG_TYPES, find_existing_media_path_from_message
 from ..send.bubbles import get_sender
 from ..send.queue import SendQueue
@@ -1246,13 +1247,13 @@ class WcdbBackend(AbstractWeChatBackend):
                 "Handling message: msg_id=%s is_at=%s content=%.60s",
                 standardized.get("message_id", "?"),
                 standardized.get("is_at_mentioned"),
-                standardized.get("content", ""),
+                mask_pii(standardized.get("content", "")),
             )
             cb_start = time.monotonic()
             reply = callback(standardized)
             logger.debug(
                 "Message callback returned: reply=%s",
-                repr(reply)[:100] if reply else "None",
+                repr(mask_pii(reply))[:100] if reply else "None",
             )
             cb_elapsed = time.monotonic() - cb_start
             if cb_elapsed > 0.5:
@@ -1581,7 +1582,7 @@ class WcdbBackend(AbstractWeChatBackend):
         )
         logger.debug(
             "Standardized message: content=%r resolved=%r bot=%r is_at=%s quote_bot=%s",
-            content[:100], resolved_content[:100], self._bot_name, is_at,
+            mask_pii(content)[:100], mask_pii(resolved_content)[:100], self._bot_name, is_at,
             is_reply_to_bot,
         )
 

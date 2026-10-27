@@ -352,14 +352,14 @@ class PrmStore:
             )
             self._conn.commit()
 
-    def deals_to_purge(self, delivered_before: float) -> list[dict]:
-        """Deals delivered before that time whose personal data is still there (8.2)."""
+    def deals_to_purge(self, now: float, days: int) -> list[dict]:
+        """Deals whose details are due to be cleared (8.2, ``retention.purge_due_at``)."""
+        from .retention import purge_due_at
+
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM deals WHERE delivered_at IS NOT NULL AND delivered_at <= ? AND purged_at IS NULL",
-                (delivered_before,),
-            ).fetchall()
-        return [deal_view(dict(r)) for r in rows]
+            rows = self._conn.execute("SELECT * FROM deals ORDER BY id").fetchall()
+        deals = [deal_view(dict(r)) for r in rows]
+        return [d for d in deals if (purge_due_at(d, days) or now + 1) <= now]
 
     # ── drafts ────────────────────────────────────────────────────────────
 

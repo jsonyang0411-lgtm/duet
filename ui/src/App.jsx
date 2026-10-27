@@ -4,13 +4,14 @@ import { useRoute } from './lib/router'
 import { ToastProvider } from './store/toast'
 import { StatusProvider } from './store/status'
 import { ConfigProvider } from './store/config'
-import { TopBar, Rail, SaveBar } from './components/Shell'
+import { TopBar, Rail, SaveBar, EdgeAlert } from './components/Shell'
 import { LogoGlyph } from './components/art'
 import Dashboard from './components/Dashboard'
 import RelayPanel from './components/RelayPanel'
 import ReviewPanel from './components/ReviewPanel'
 import DealsPanel from './components/DealsPanel'
 import WechatPanel from './components/WechatPanel'
+import InfluencerPanel from './components/InfluencerPanel'
 import LogViewer from './components/LogViewer'
 import Onboarding from './components/Onboarding'
 
@@ -56,6 +57,7 @@ function Console() {
     case 'review': page = <ReviewPanel />; break
     case 'deals': page = <DealsPanel />; break
     case 'wechat': page = <WechatPanel />; break
+    case 'influencer': page = <InfluencerPanel sub={route.sub} />; break
     case 'logs': page = <LogViewer />; break
     default: page = <Dashboard />
   }
@@ -64,6 +66,7 @@ function Console() {
       <TopBar route={route} />
       <Rail route={route} />
       <main className="main" id="main">
+        <EdgeAlert />
         {page}
         <SaveBar />
       </main>

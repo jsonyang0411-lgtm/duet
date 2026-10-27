@@ -18,7 +18,7 @@ instead), or from the console; paused needs the console to end it.  Meanwhile th
 creator's messages are only recorded; the next draft job is told what both sides
 said (``history``).  A draft left waiting ``PRM_HOLDING_MIN`` minutes gets one
 holding reply per round of the creator's messages.  ``PRM_RETENTION_DAYS`` after a
-deal is delivered its receiving details are cleared everywhere (8.2, retention.py),
+deal is done (delivered, or quiet that long) its receiving details are cleared everywhere (8.2, retention.py),
 the Mac's case file through a ``purge`` job.  The deal actions (stage, mode,
 shipment) are in deals.py.
 
@@ -122,6 +122,7 @@ EVENT_NAMES = {
     "operator_message": "运营亲手回复", "creator_message": "接管期间达人的消息", "shipment": "填运单号",
     "shipment_status": "更新物流", "holding_reply": "自动回复「稍等」", "reveal": "查看完整号码",
     "wrong": "标为发错了", "purge": "清除收件信息", "purge_case": "清除 Mac 案卷里的收件信息",
+    "sample_request": "生成寄样审批单", "sample_decision": "寄样审批结果",
     "platform_execute": "批准执行平台动作", "platform_result": "平台动作结果",
     "platform_preview": "重新预览平台动作", "platform_ack": "平台动作已处理",
 }
@@ -239,8 +240,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
                 "stage_proposal_label": STAGES.get(deal["stage_proposal"], ""),
                 "attention": deal.get("attention", ""), "last_message_at": deal.get("last_message_at"),
                 "delivered_at": deal.get("delivered_at"), "purged_at": deal.get("purged_at"),
-                "purge_due_at": (float(deal["delivered_at"]) + retention_days * 86400
-                                 if deal.get("delivered_at") and not deal.get("purged_at") else None),
+                "purge_due_at": retention.purge_due_at(deal, retention_days),
                 "shipment": {k: shipment[k] for k in ("carrier", "waybill", "status", "updated_at")}
                 if shipment else None,
                 "shipment_status_label": SHIPMENT_STATES.get((shipment or {}).get("status", ""), ""),
@@ -281,7 +281,8 @@ class PrmService:
         self._takeover_sec = int(getattr(config, "prm_takeover_min", 120) or 120) * 60
         self._holding_sec = int(getattr(config, "prm_holding_min", 10) or 0) * 60
         self._holding_text = str(getattr(config, "prm_holding_text", "") or HOLDING_TEXT).strip() or HOLDING_TEXT
-        self._retention_days = int(getattr(config, "prm_retention_days", retention.RETENTION_DAYS) or 30)
+        self._retention_days = int(getattr(config, "prm_retention_days", retention.RETENTION_DAYS)
+                                   or retention.RETENTION_DAYS)
         # The admin and the cc users are never creators: their messages stay the relay's.
         self._reserved = {str(w).strip() for w in [getattr(config, "admin_wxid", ""),
                                                     *(getattr(config, "claude_relay_wxids", None) or [])]
@@ -297,6 +298,10 @@ class PrmService:
         self._wake = threading.Event()
         self._stopping = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Mac 端达人模块的挂钩（src/influencer/prm_bridge.py）：draft_hooks(job, draft, deal) 在 Mac 的草稿
+        # 进库以后调；stage_hooks(deal) 在控制台改了阶段以后调。钩子出错只记日志，不影响草稿
+        self.draft_hooks: list = []
+        self.stage_hooks: list = []
         relay.register_kind(PRM, self.on_result)
 
     @property
@@ -449,7 +454,13 @@ class PrmService:
         sent_at = float(msg.get("timestamp", 0) or 0)
         if sent_at and now - sent_at > MAX_AGE_SEC:
             return                                         # history (a chat read for the first time)
-        matched, packet_id = self._match_own(chat_id, msg, now)
+        if msg.get("edge_operator"):
+            # Mac 端：Windows 已经用发送记录比过了，对不上才报 operator_message，不再比一次
+            matched, packet_id = False, None
+        else:
+            matched, packet_id = self._match_own(chat_id, msg, now)
+        if msg.get("edge_seen") and not matched:
+            return                                         # 我们发的读回来了，只是这次运行没记着它
         if matched:
             # Often before its send returned (WeChat shows a line at once); a failure stays one.
             if packet_id is not None and self._store.confirm_sent(packet_id):
@@ -538,6 +549,29 @@ class PrmService:
                     and _norm(ev["detail"].get("text")) == text):
                 return True, None
         return False, None
+
+    def on_send_failed(self, chat_id: str, text: str, why: str) -> None:
+        """Mac 端：Windows 报这条没发出去（失败、过期、不确定）。对应的草稿从「已发出」改成「没发出去」，
+        运营在待审批页能看到原因；「稍等」这类不是草稿的，只记日志。"""
+        now = self._clock()
+        wanted = _norm(text)
+        with self._sent_lock:
+            lines = self._sent_lines.get(chat_id) or deque()
+            for item in reversed(list(lines)):             # 最新的那条：更早发出的同一句话可能还在等读回
+                if item[0] == wanted:
+                    lines.remove(item)                     # 没发出去，读回时不能再算我们的
+                    break
+        party = self._store.party_by_wxid(chat_id)
+        if party is None:
+            return
+        tokens = self._store.tokens(party["id"])
+        for packet in self._store.sent_since(chat_id, now - OWN_MATCH_SEC):
+            final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
+            if packet["outcome"] == "sent_unconfirmed" and _norm(pii.unmask(final, tokens)) == wanted:
+                if self._store.move(packet["id"], (SENT,), FAILED, outcome="failed", error=why[:200]):
+                    logger.warning("PRM: packet %d was not sent by Windows: %s", packet["id"], why)
+                return
+        logger.warning("PRM: a send to party %d failed (%s); no waiting draft matches it", party["id"], why)
 
     # ── from the Mac (the relay's delivery thread) ────────────────────────
 
@@ -633,7 +667,16 @@ class PrmService:
         if state == APPROVED:
             self._wake.set()
         logger.info("PRM: job #%d -> packet %d (%s, %s, %s)", job["id"], packet_id, state, route, draft.message_kind)
+        self._run_hooks(self.draft_hooks, job, draft, self._store.deal(deal_id))
         return True
+
+    @staticmethod
+    def _run_hooks(hooks: list, *args) -> None:
+        for hook in hooks:
+            try:
+                hook(*args)
+            except Exception:
+                logger.exception("PRM: a hook failed")
 
     # ── from the console ──────────────────────────────────────────────────
 
@@ -667,6 +710,10 @@ class PrmService:
         result = apply_deal_action(self._store, action, data, now=self._clock(), takeover_sec=self._takeover_sec)
         if result.get("ok"):
             self._wake.set()
+            if action in ("stage", "adopt"):
+                deal = self._store.deal(int(data.get("deal_id")))
+                if deal is not None:
+                    self._run_hooks(self.stage_hooks, deal)
         return result
 
     def reveal(self, party_id: int, actor: str = "console") -> dict:
@@ -1095,10 +1142,10 @@ class PrmService:
         return sent
 
     def purge_due(self) -> int:
-        """Clear the details of every deal delivered ``PRM_RETENTION_DAYS`` ago (8.2)."""
+        """Clear the details of every deal done ``PRM_RETENTION_DAYS`` ago (8.2, ``retention.purge_due_at``)."""
         now = self._clock()
         done = 0
-        for deal in self._store.deals_to_purge(now - self._retention_days * 86400):
+        for deal in self._store.deals_to_purge(now, self._retention_days):
             try:
                 self.purge(deal, now)
                 done += 1
@@ -1128,7 +1175,7 @@ class PrmService:
             self._relay.submit(chat_id, chat_id, "", kind=PRM, fresh=True, input_closed=True,
                                meta={"op": "purge", "party_id": deal["party_id"], "deal_id": deal["id"]})
         self._store.add_event(deal["id"], deal["party_id"], "purge", counts, actor="system", now=now)
-        logger.info("PRM: deal %d delivered %d days ago; receiving details cleared (%s)", deal["id"],
+        logger.info("PRM: deal %d done %d days ago (delivered or quiet); receiving details cleared (%s)", deal["id"],
                     self._retention_days, ", ".join(f"{k} {v}" for k, v in counts.items()))
         return counts
 

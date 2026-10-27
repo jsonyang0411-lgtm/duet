@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Pulse, ArrowsLeftRight, ChatCircleDots, TerminalWindow, Moon, Sun, Play, Stop, ArrowClockwise,
-  ChatTeardropText, Handshake,
+  ChatTeardropText, Handshake, Package,
 } from '@phosphor-icons/react'
 import { useStatus, fmtDuration } from '../store/status'
 import { useConfig } from '../store/config'
@@ -10,6 +10,9 @@ import { pageOfKey } from '../lib/schema'
 import { useTheme } from '../lib/theme'
 import { navigate } from '../lib/router'
 import { LogoGlyph, FigurePlaceholder } from './art'
+import { useInfluencerAttention } from './InfluencerPanel'
+import { Banner } from './ui'
+import { get } from '../api'
 
 // The company console: the bot as a relay to Claude Code on a Mac, plus the
 // PRM copilot (drafts for registered creators: 待审批 / 合作单). The bot has
@@ -20,8 +23,42 @@ export const NAV = [
   { id: 'review', label: '待审批', en: 'REVIEW', icon: ChatTeardropText },
   { id: 'deals', label: '合作单', en: 'CREATORS', icon: Handshake },
   { id: 'wechat', label: '微信连接', en: 'WECHAT', icon: ChatCircleDots },
+  {
+    id: 'influencer', label: '达人审批', en: 'SAMPLES', icon: Package,
+    sub: [
+      { id: 'approvals', label: '审批单' },
+      { id: 'inbox', label: '待处理' },
+      { id: 'contacts', label: '达人名单' },
+    ],
+  },
   { id: 'logs', label: '运行日志', en: 'LOGS', icon: TerminalWindow },
 ]
+
+/** GET /api/edge：Mac 端（WECHAT_BACKEND=edge）时 Windows 微信边缘的状态，每 10 秒问一次。 */
+export function useEdge(intervalMs = 10000) {
+  const [data, setData] = useState(null)
+  useEffect(() => {
+    let alive = true
+    const load = async () => {
+      try { const d = await get('/api/edge'); if (alive) setData(d) } catch { /* 控制台离线另有提示 */ }
+    }
+    load()
+    const t = setInterval(load, intervalMs)
+    return () => { alive = false; clearInterval(t) }
+  }, [intervalMs])
+  return data
+}
+
+/** 每页顶上：Windows 连不上、微信掉线、读不了数据库、连续发不出去时提醒运营。 */
+export function EdgeAlert() {
+  const edge = useEdge()
+  if (!edge || edge.mode !== 'edge' || !edge.running || !(edge.problems || []).length) return null
+  return (
+    <Banner title="Windows 那边有问题，达人的消息可能收不到、发不出">
+      {edge.problems.map((p) => <div key={p}>{p}</div>)}
+    </Banner>
+  )
+}
 
 export function TopBar({ route }) {
   const { theme, toggle } = useTheme()
@@ -77,6 +114,10 @@ function RunPill() {
 }
 
 export function Rail({ route }) {
+  const influencerCount = useInfluencerAttention()
+  const edge = useEdge(30000)
+  // Mac 端不连本机微信（Windows 替它收发），「微信连接」页用不上
+  const nav = edge?.mode === 'edge' ? NAV.filter((n) => n.id !== 'wechat') : NAV
   return (
     <nav className="rail" aria-label="控制台导航">
       <div className="rail-head">
@@ -85,7 +126,7 @@ export function Rail({ route }) {
         <span className="sec-rule" aria-hidden="true" />
       </div>
       <div className="nav">
-        {NAV.map((n) => {
+        {nav.map((n) => {
           const active = route.page === n.id
           const Ico = n.icon
           return (
@@ -98,6 +139,9 @@ export function Rail({ route }) {
               >
                 <Ico weight={active ? 'bold' : 'regular'} />
                 <span className="ni-label">{n.label}</span>
+                {n.id === 'influencer' && influencerCount > 0 && (
+                  <span className="ni-badge num" aria-label={`${influencerCount} 项等你处理`}>{influencerCount}</span>
+                )}
                 <span className="ni-en" aria-hidden="true">{n.en}</span>
               </button>
               {active && n.sub && (
@@ -125,12 +169,18 @@ function Dock() {
   const { conn, data, running } = useStatus()
   const { draft, dirtyKeys } = useConfig()
   const name = (draft?.bot_display_name || '').trim() || 'webot'
+  const edge = useEdge(30000)
   let line
   if (conn === 'connecting') line = <>正在连接控制台服务…</>
   else if (conn === 'offline') line = <>连不上控制台服务。</>
   else if (data?.error && String(data.error).includes('KEY_MISSING')) line = <>读不到微信密钥，要重新获取。</>
   else if (!running && data?.error) line = <>上次启动出错了。</>
   else if (dirtyKeys.length) line = <>有 <em>{dirtyKeys.length}</em> 项设置还没保存。</>
+  else if (running && edge?.mode === 'edge') {
+    line = edge.online
+      ? <>在岗中，Windows 已连上，替 <em>{edge.parties ?? 0}</em> 位达人收发。</>
+      : <>在岗中，但<em>连不上 Windows</em>。</>
+  }
   else if (running) line = <>在岗中，私聊发「cc 任务」我就转给 Mac。</>
   else line = <>没在跑，点右上角「启动」。</>
   return (

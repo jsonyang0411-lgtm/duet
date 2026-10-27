@@ -313,7 +313,7 @@ class BotConfig:
     prm_holding_text: str = "收到，我确认一下马上回你"
     # A delivered deal's receiving details (address, phone and ID numbers) are cleared
     # everywhere this many days after delivery (8.2).
-    prm_retention_days: int = 30
+    prm_retention_days: int = 90
     # === WeChat edge (src/edge, edge-protocol.md) for the Mac business service ===
     # "on": Windows only receives and sends WeChat messages for the creators the Mac lists;
     # the Mac pulls /edge/* on the relay's port with PRM_EDGE_TOKEN.  Not with PRM_COPILOT.
@@ -325,6 +325,9 @@ class BotConfig:
     edge_seen_text_sec: int = 1800
     edge_seen_file_sec: int = 600
     edge_keep_days: int = 7
+    # Mac 端（WECHAT_BACKEND=edge）：不连本机微信，通过 Windows 的微信边缘收发（D18）。
+    # EDGE_URL 是 Windows 边缘的地址，如 http://192.168.1.20:8790；口令同样用 PRM_EDGE_TOKEN
+    edge_url: str = ""
 
     # === OCR fallback (src/wechat/ocr), macOS mac_hybrid backend only ===
     # "on": when the WeChat database cannot be read ocr_fallback_after times in a row, the
@@ -430,7 +433,8 @@ def _validate_config(kwargs: dict) -> None:
         # Anyone who can reach the port and knows the token can make the Mac run things.
         if len(str(kwargs.get("claude_relay_token", ""))) < 16:
             errors.append("CLAUDE_RELAY=on needs CLAUDE_RELAY_TOKEN (at least 16 characters, random)")
-        if not (kwargs.get("claude_relay_wxids") or kwargs.get("admin_wxid")):
+        # Mac 端（WECHAT_BACKEND=edge）的中转只给本机起草 worker 用，微信里没人能发 cc
+        if not (kwargs.get("claude_relay_wxids") or kwargs.get("admin_wxid")) and kwargs.get("wechat_backend") != "edge":
             errors.append("CLAUDE_RELAY=on needs CLAUDE_RELAY_WXIDS or ADMIN_WXID (who may use it)")
         if not re.fullmatch(r"[^\s]{1,10}", str(kwargs.get("claude_relay_prefix", ""))):
             errors.append("CLAUDE_RELAY_PREFIX must be 1-10 characters without spaces")
@@ -473,7 +477,7 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(f"PRM_HOLDING_MIN must be between 0 and 120, got {kwargs.get('prm_holding_min')}")
     if not (1 <= len(str(kwargs.get("prm_holding_text", "收到，我确认一下马上回你")).strip()) <= 60):
         errors.append("PRM_HOLDING_TEXT must be 1-60 characters")
-    if not (1 <= int(kwargs.get("prm_retention_days", 30)) <= 365):
+    if not (1 <= int(kwargs.get("prm_retention_days", 90)) <= 365):
         errors.append(f"PRM_RETENTION_DAYS must be between 1 and 365, got {kwargs.get('prm_retention_days')}")
     prm_edge = kwargs.get("prm_edge", "off")
     if prm_edge not in ("off", "on"):
@@ -490,6 +494,20 @@ def _validate_config(kwargs: dict) -> None:
             errors.append("PRM_EDGE=on needs PRM_EDGE_TOKEN of at least 32 characters")
         elif edge_token == str(kwargs.get("claude_relay_token", "") or ""):
             errors.append("PRM_EDGE_TOKEN must differ from CLAUDE_RELAY_TOKEN")
+    if kwargs.get("wechat_backend") == "edge":
+        # Mac 端：去连 Windows 的边缘，自己不是边缘
+        edge_url = str(kwargs.get("edge_url", "") or "")
+        if not edge_url.startswith(("http://", "https://")):
+            errors.append("WECHAT_BACKEND=edge needs EDGE_URL, e.g. http://<Windows 的局域网 IP>:8790")
+        if len(str(kwargs.get("prm_edge_token", "") or "")) < 32:
+            errors.append("WECHAT_BACKEND=edge needs PRM_EDGE_TOKEN (the same token as on Windows, 32+ characters)")
+        if prm_edge == "on":
+            errors.append("WECHAT_BACKEND=edge is the Mac side; PRM_EDGE=on is the Windows side - not both")
+        if claude_relay == "on" and str(kwargs.get("claude_relay_host", "0.0.0.0")).strip() not in (
+                "127.0.0.1", "localhost", "::1"):
+            # 起草 worker 在本机，中转不给局域网：别人连上来就能让这台 Mac 跑 Claude
+            errors.append("WECHAT_BACKEND=edge with CLAUDE_RELAY=on needs CLAUDE_RELAY_HOST=127.0.0.1 "
+                          "(the drafting worker runs on this Mac)")
     for key, low, high, default in (("edge_send_min_gap_sec", 0, 60, 3), ("edge_send_per_hour", 1, 1000, 60),
                                     ("edge_seen_text_sec", 60, 86400, 1800), ("edge_seen_file_sec", 60, 86400, 600),
                                     ("edge_keep_days", 1, 30, 7)):
@@ -592,9 +610,10 @@ def load_config() -> BotConfig:
         "prm_takeover_min": int(os.getenv("PRM_TAKEOVER_MIN", "120")),
         "prm_holding_min": int(os.getenv("PRM_HOLDING_MIN", "10")),
         "prm_holding_text": os.getenv("PRM_HOLDING_TEXT", "收到，我确认一下马上回你").strip() or "收到，我确认一下马上回你",
-        "prm_retention_days": int(os.getenv("PRM_RETENTION_DAYS", "30")),
+        "prm_retention_days": int(os.getenv("PRM_RETENTION_DAYS", "90")),
         "prm_edge": _parse_switch(os.getenv("PRM_EDGE", "off")),
         "prm_edge_token": os.getenv("PRM_EDGE_TOKEN", "").strip(),
+        "edge_url": os.getenv("EDGE_URL", "").strip(),
         "edge_db": os.getenv("EDGE_DB", "data/edge.db").strip() or "data/edge.db",
         "edge_send_min_gap_sec": int(os.getenv("EDGE_SEND_MIN_GAP_SEC", "3")),
         "edge_send_per_hour": int(os.getenv("EDGE_SEND_PER_HOUR", "60")),

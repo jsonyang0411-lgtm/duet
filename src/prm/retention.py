@@ -1,9 +1,15 @@
-"""8.2: a delivered deal's receiving details are cleared 30 days after delivery.
+"""8.2: a deal's receiving details are cleared 90 days after it is done.
 
 Addresses go to the model in plain text (the user's decision: it has to judge whether
 an address is complete); phone and ID numbers never leave this PC except as
-placeholders.  Both follow the same life: ``RETENTION_DAYS`` after the deal is
-delivered, every copy is cut down to province and city / the masked number.
+placeholders.  Both follow the same life: ``RETENTION_DAYS`` after the deal is done,
+every copy is cut down to province and city / the masked number.
+
+When a deal is done (``purge_due_at``; the rule both sides agreed, handoff.md D20 / D27):
+``RETENTION_DAYS`` after it was delivered, or after its last sign of life (a message,
+any change of the deal) - whichever comes first.  A deal closed, or whose sample request
+was turned down or ran out, goes quiet: the second clause clears it.  A creator who
+writes again after a clean-up starts a new count from that message.
 
 ``scrub`` is the one rule for every copy: the addresses known (the deal's slots, and
 any written out in the text itself after a label or from the province / city on), then
@@ -20,7 +26,27 @@ import re
 
 from . import pii
 
-RETENTION_DAYS = 30
+RETENTION_DAYS = 90
+DAY = 86400
+
+
+def last_activity(deal: dict) -> float:
+    """The deal's last sign of life: a message from the creator or any change of the deal."""
+    return max(float(deal.get("updated_at") or 0), float(deal.get("last_message_at") or 0))
+
+
+def purge_due_at(deal: dict, days: int = RETENTION_DAYS):
+    """When this deal's details are to be cleared (None: nothing new since the last clean-up).
+    Delivered ``days`` ago, or quiet for ``days``; what came before a clean-up does not count again."""
+    purged = float(deal.get("purged_at") or 0)
+    due = []
+    delivered = float(deal.get("delivered_at") or 0)
+    if delivered and delivered > purged:
+        due.append(delivered + days * DAY)
+    active = last_activity(deal)
+    if active > purged:
+        due.append(active + days * DAY)
+    return min(due) if due else None
 CLEARED = "（详细地址已清除）"
 ADDRESS_KEY = re.compile(r"地址|住址")
 _REGION = re.compile(r"^\s*((?:[一-龥]{2,7}?(?:省|自治区|特别行政区))?(?:[一-龥]{2,7}?(?:市|自治州|地区|盟))?)")

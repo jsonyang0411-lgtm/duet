@@ -217,7 +217,7 @@ Mac：同一个 CLI 带 --execute，只发一次（执行台账：同一个批�
      "jst_expect_uid": "",
      "jst_shops": {"dy": "", "xhs": ""},
      "jst_logistics": ["SF"],
-     "max_commission_rate": 50,
+     "max_commission_rate": 25,
      "max_day_budget": 300,
      "min_price_ratio": 0.5,
      "max_sample_skus": 10,
@@ -228,14 +228,14 @@ Mac：同一个 CLI 带 --execute，只发一次（执行台账：同一个批�
    - `node_bin` 留空就在 PATH、`~/.local/bin`、`/opt/homebrew/bin`、`/usr/local/bin` 里找（要 Node 22 以上）。
    - `dy_expect_shop_id`：抖音每条命令都加 `--expect-shop-id`，登录的不是这家店就退出码 79，什么都不发。`dy_invite_phone` / `dy_invite_wechat`：「邀约带货」卡片上给达人看的店铺联系方式（11 位手机号 / 微信号，按百应抽屉的格式；至少配一个，两个都没有时 `dy.creator_invite` 不预览、不执行）。联系方式只从这里来，草稿里写不进去。`tb_shop`：淘宝用 `--shop <名字>` 选店铺（`node bin/shop.mjs` 登记过的）。`env`：额外交给命令行的环境变量，例如 `{"CAMPAIGN_EXPECT_UNB": "…", "XHS_CDP_ENDPOINT": "http://127.0.0.1:9222"}`。
    - 聚水潭：几个人共用一个公司账号，各用自己的子账号、发自己的店铺。`jst_shops` 是**这台 Mac 的子账号**在聚水潭里的店铺 ID（聚水潭自己的编号，不是抖店 / 小红书的店铺号；`node bin/jst.mjs shop-goods --platform DY --title <商品标题>` 的结果里有）；`jst_expect_uid` 是这个子账号的 uid（`node bin/jst.mjs doctor` 显示），设了以后调试 Chrome 里登录的不是它就退出码 79，什么都不发；`jst_logistics` 是寄样能用的快递代码（`node bin/jst.mjs logistics` 列出全部；第一个是默认，草稿没写快递就用它，草稿写的快递也只能是这里列的；不配就建不了寄样单；顺丰有优惠陆运 `SF`、到付 `SF.COLLECT`、特快 `Temu_01` 几种，写代码别写名字）。
-   - 上限（这台 Mac 自己的保险，平台自己的规则另算）：佣金率最多 `max_commission_rate`%，淘宝日预算最多 `max_day_budget` 元，专属价不能低于商品目录价的 `min_price_ratio`（防止小数点点错），一张寄样单所有商品加起来最多 `max_sample_skus` 个 SKU（默认 10；专场要寄几十款就设成 50，聚水潭一张单最多 50 个）、每个 SKU 最多 `max_sample_qty` 件。超了的动作不预览、不能执行。
+   - 上限（这台 Mac 自己的保险，平台自己的规则另算）：佣金率最多 `max_commission_rate`%（公司定的最高 25%，这里只能往低调，写更大的也按 25% 算），淘宝日预算最多 `max_day_budget` 元，专属价不能低于商品目录价的 `min_price_ratio`（防止小数点点错），一张寄样单所有商品加起来最多 `max_sample_skus` 个 SKU（默认 10；专场要寄几十款就设成 50，聚水潭一张单最多 50 个）、每个 SKU 最多 `max_sample_qty` 件。超了的动作不预览、不能执行。
    - `preview_timeout_sec`（默认 300）/ `execute_timeout_sec`（默认 900）：单条命令的时限。执行超时只能停下命令、结果算「不知道」，所以给得宽。
 3. 同步商品目录（只读命令）：
    ```
    python3 tools/claude_relay/worker.py --sync-products          # 全部配置了的平台
    python3 tools/claude_relay/worker.py --sync-products --platforms dy
    ```
-   写出 `prm_workspace/kb/products.md`（给 Claude 看：商品 ID、标题、SKU、价格）和 `kb/products.json`（给代码核对）。**平台动作的商品必须在目录里**，SKU 和专属价也按目录核对；没有目录就不预览。聚水潭不单独出目录：寄样单寄的是抖店 / 小红书店的商品，用这两家的目录（聚水潭只能按标题搜店铺商品，标题也取自目录）。小红书读 `items --tab shelf --all` + `item`，抖音读 `fxg products` + `fxg sku-prices`，淘宝读万相台选品列表 `alimama items`（没有 SKU）。某个平台这次没读成，保留上一次的列表并在 md 里注明。商品有变化就再跑一次（可以放进每天的定时任务）。
+   写出 `prm_workspace/kb/products.md`（给 Claude 看：商品 ID、标题、SKU、价格）和 `kb/products.json`（给代码核对）。**平台动作的商品必须在目录里**，SKU 和专属价也按目录核对；没有目录就不预览。聚水潭不单独出目录：寄样单寄的是抖店 / 小红书店的商品，用这两家的目录（聚水潭只能按标题搜店铺商品，标题也取自目录）。小红书读 `items --tab shelf --all` + `item`，抖音读 `fxg products` + `fxg sku-prices --raw`（要原始数据里 SKU 的商家编码），淘宝读万相台选品列表 `alimama items`（没有 SKU）。某个平台这次没读成，保留上一次的列表并在 md 里注明。商品有变化就再跑一次（可以放进每天的定时任务）。
 4. `python3 tools/claude_relay/worker.py --check` 多两行：`platform actions: dy=…; node …` 和商品目录的同步时间。
 
 #### 六种动作
