@@ -11,7 +11,7 @@ import pytest
 from test_prm import CREATOR, Bot, Clock, draft
 
 from platform_fakes import (
-    DY_ITEM, DY_ITEM2, DY_ITEM3, DY_LINK, DY_SKU, DY_UID, JST_ORDER, TB_ITEM, XHS_BUYER, XHS_ITEM,
+    DY_ITEM, DY_ITEM2, DY_ITEM3, DY_LINK, DY_SKU, DY_SKU2, DY_UID, JST_ORDER, TB_ITEM, XHS_BUYER, XHS_ITEM,
 )
 from src.prm import platforms
 from src.prm.result import DraftError, parse_draft
@@ -704,6 +704,79 @@ def test_only_a_douyin_order_names_the_uid_and_a_commission_names_its_creator():
     commission = platforms.check_action({"action": "dy.designated_commission", "item_id": DY_ITEM,
                                          "creator_platform_id": DY_UID, "commission_rate": 20})
     assert f"开好了（达人 {DY_UID}）" in next_step_note(commission, record())
+
+
+TWO = {"action": "jst.sample_order", "shop": "dy", "creator_platform": "dy", "creator_uid": DY_UID,
+       "receiver": SAMPLE["receiver"], "items": [{"item_id": DY_ITEM, "skus": [{"sku_id": DY_SKU, "qty": 1}]},
+                                                 {"item_id": DY_ITEM2, "skus": [{"sku_id": DY_SKU2, "qty": 1}]}]}
+
+
+def test_a_two_product_order_opens_each_commission_in_turn_and_only_the_last_one_speaks(bot, clock):
+    """The whole chain (kb/合作政策.md 2.1): signed for → 专属佣金 of the first product (an empty reply:
+    nothing goes out) → of the second (the reply that says both are done) → nothing left: no action,
+    no reply, and no further step."""
+    order = drafted(bot, preview=block(TWO, run={"steps": ["create"]}), reply="寄样单建好啦，单号 {寄样单号}～")
+    bot.prm.store.token_for(order["party_id"], "phone", "手机", "13900001111", clock.now)
+    mac_runs(bot, approve(bot, order), record(sample_order_no=JST_ORDER, creator_uid=DY_UID))
+    bot.prm.send_approved()
+    told = [(order["chat_id"], f"寄样单建好啦，单号 {JST_ORDER}～")]
+    assert bot.texts == told and bot.worker_takes() is None                # PRM_COMMISSION_AFTER=delivered
+    assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": "delivered"})["ok"]
+    first = bot.worker_takes()
+    note = first["meta"]["system_note"]
+    assert DY_ITEM in note and DY_ITEM2 in note and "共 2 个" in note and first["text"] == ""
+    bot.finish(first["id"], {**draft(message_kind="money", reply_draft="", slots={}), "platform": block()})
+    step1 = bot.prm.store.packet_for_job(first["id"])
+    assert step1["status"] == "pending" and step1["meta"]["lane"] == "system" and step1["text"] == ""
+    mac_runs(bot, approve(bot, step1), record())
+    bot.prm.send_approved()
+    assert bot.prm.store.packet(step1["id"])["status"] == "sent" and bot.texts == told   # nothing went out
+    second = bot.worker_takes()
+    assert f"商品 {DY_ITEM} 的专属佣金（20%）已经在平台上开好了" in second["meta"]["system_note"]
+    last = "两款的专属佣金都开好啦，明天 0 点生效～"
+    bot.finish(second["id"], {**draft(message_kind="money", reply_draft=last, slots={}),
+                              "platform": block({**DESIGNATED, "item_id": DY_ITEM2})})
+    step2 = bot.prm.store.packet_for_job(second["id"])
+    assert step2["status"] == "pending" and step2["platform"]["action"]["item_id"] == DY_ITEM2
+    mac_runs(bot, approve(bot, step2), record())
+    bot.prm.send_approved()
+    assert bot.texts == told + [(order["chat_id"], last)]                  # the last one carries the reply
+    third = bot.worker_takes()
+    assert f"商品 {DY_ITEM2} 的专属佣金" in third["meta"]["system_note"]
+    bot.finish(third["id"], draft(message_kind="other", reply_draft="", slots={}))   # all done: no action
+    assert bot.prm.store.packet_for_job(third["id"])["status"] == "no_reply"
+    assert bot.worker_takes() is None and bot.texts == told + [(order["chat_id"], last)]
+    assert sorted(p["platform"]["action"]["item_id"] for p in bot.prm.store.deal_packets(
+        order["deal_id"], tools=("dy.designated_commission",), statuses=("sent",))) == [DY_ITEM, DY_ITEM2]
+
+
+def test_a_commission_step_drafted_while_a_person_took_over_is_left_to_them(bot, clock):
+    order = ordered(bot, clock)
+    mac_runs(bot, approve(bot, order), record(sample_order_no=JST_ORDER))
+    bot.prm.send_approved()
+    assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": "delivered"})["ok"]
+    step = bot.worker_takes()                                               # the Mac drafts the 专属佣金 …
+    assert bot.prm.deal_action("mode", {"deal_id": order["deal_id"], "mode": "human"})["ok"]   # … a person takes over
+    bot.finish(step["id"], {**draft(message_kind="money", reply_draft="", slots={}), "platform": block()})
+    packet = bot.prm.store.packet_for_job(step["id"])
+    assert packet["status"] == "superseded" and packet["meta"]["lane"] == "system"
+    assert f"#{step['id']} 开专属佣金这一步的草稿没进待审批" in bot.prm.store.deal(order["deal_id"])["attention"]
+    assert snap(bot)["pending"] == [] and not bot.prm.decide(packet["id"], "execute")["ok"]
+
+
+def test_set_to_created_signing_for_the_sample_later_asks_nothing_more(bot, clock):
+    """PRM_COMMISSION_AFTER=created: the 专属佣金 is asked for when the order is made, so marking the
+    deal 已签收 later does not ask again."""
+    bot.prm._commission_after = "created"
+    order = ordered(bot, clock)
+    mac_runs(bot, approve(bot, order), record(sample_order_no=JST_ORDER))
+    bot.prm.send_approved()
+    step = bot.worker_takes()
+    assert "已经在聚水潭建好" in step["meta"]["system_note"]
+    bot.finish(step["id"], draft(message_kind="other", reply_draft="", slots={}))
+    assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": "delivered"})["ok"]
+    assert bot.worker_takes() is None
+    assert len([j for j in bot.relay.store.list_jobs(20) if "system_note" in j["meta"]]) == 1
 
 
 def test_a_commission_step_waiting_in_review_sends_the_creator_no_holding_reply(bot, clock):

@@ -1864,7 +1864,7 @@ Windows _on_platform_job → _platform_finished
 
 还没做的：没有对真实平台跑过（只有假命令行的测试）；小红书渠道商品和淘宝建计划按各自工具的规则总是 ACCEPTED_UNVERIFIED，所以不会自动发回复；抖音 `promotion-create` 没在真实平台上跑过；淘宝 `alimama create-campaign`（全站推广，建成即投放、不能建后暂停）没有接；聚水潭 `sample-create --execute` 还没在真实账号上提交过（`caveat`：第一次执行后到聚水潭寄样管理核对）。
 
-测试：`tests/test_prm_platforms.py`（对着假 `node`：`tests/platform_fakes.py` 按四个命令行的 JSON 形状答复，记下 argv、cwd 和 `--spec=` 单子的内容与权限；含系统 Python 3.9 冒烟；末尾是寄样单：规范化和目录、拒收的参数、Mac 的上限和更宽的 `FORM_LIMITS`、`jst_*` 设置、控制台参数和 `{寄样单号}`、0600 临时单子和 `--expect-uid`、预览被拦的几种、缺店铺 / 快递 / 标题、只执行一次且台账打码、占位符没换回不执行、没核验成功的几种、`check_record` 只留合格单号、聚水潭不是目录平台）；`tests/test_prm_platform_flow.py`（机器人侧；寄样单的号码只在交给 Mac 的任务里、没核验成功的标红写明单号、占位符对不上不批准）；`tests/test_prm_lifecycle.py`（8.2 清理也剪短寄样单的收货信息，`clear_receivers` 不动别的文字、再跑不变）；`tests/test_prm_platform_worker.py`（Mac worker 端到端）。
+测试：`tests/test_prm_platforms.py`（对着假 `node`：`tests/platform_fakes.py` 按四个命令行的 JSON 形状答复，记下 argv、cwd 和 `--spec=` 单子的内容与权限；含系统 Python 3.9 冒烟；末尾是寄样单：规范化和目录、拒收的参数、Mac 的上限和更宽的 `FORM_LIMITS`、`jst_*` 设置、控制台参数和 `{寄样单号}`、0600 临时单子和 `--expect-uid`、预览被拦的几种、缺店铺 / 快递 / 标题、只执行一次且台账打码、占位符没换回不执行、没核验成功的几种、`check_record` 只留合格单号、聚水潭不是目录平台）；`tests/test_prm_platform_flow.py`（机器人侧；寄样单的号码只在交给 Mac 的任务里、没核验成功的标红写明单号、占位符对不上不批准；两个商品的寄样单整条链：签收 → 第一个商品的专属佣金（空回复，什么都不发）→ 第二个（带回复）→ 没有下一个了（不填动作，`no_reply`，不再派任务）；人工接管时出来的专属佣金草稿标过时并写 attention；`PRM_COMMISSION_AFTER=created` 时后来标已签收不再问；停用的达人不派下一步；Mac 上限比机器人宽的动作去掉、回复留成草稿）；`tests/test_prm_lifecycle.py`（8.2 清理也剪短寄样单的收货信息，`clear_receivers` 不动别的文字、再跑不变）；`tests/test_prm_platform_worker.py`（Mac worker 端到端）。
 
 ---
 
