@@ -14,7 +14,7 @@ import pytest
 from src.config import BotConfig, _validate_config
 from src.prm import pii
 from src.prm.result import MAX_DRAFT_CHARS, DraftError, parse_draft
-from src.prm.service import SETTLE_SEC, PrmService, check_wxid, message_text
+from src.prm.service import HOLDING_TEXT, SETTLE_SEC, PrmService, check_wxid, message_text
 from src.prm.store import PartyError, PrmStore
 from src.relay.service import MAX_AGE_SEC, MAX_OUTFILES, ClaudeRelay
 from src.relay.store import RelayStore
@@ -653,3 +653,58 @@ def test_a_broken_filter_reads_nothing_extra():
                           config=BotConfig(private_chat_enabled=True))
     backend.set_private_filter(lambda username: 1 / 0)
     assert backend._wants_private("wxid_creator01") is False
+
+
+# ── what the next draft is told about our own replies ─────────────────────
+
+def _drafted(b, reply, text="好的"):
+    b.prm.handle(b.msg(text))
+    job = b.worker_takes()
+    b.finish(job["id"], draft(message_kind="faq", reply_draft=reply, reason="kb/合作政策.md"))
+    return b.prm.store.packet_for_job(job["id"])
+
+
+def test_the_next_draft_is_told_what_really_went_out(bot, clock):
+    first = _drafted(bot, "佣金 20% 哦")
+    assert bot.prm.decide(first["id"], "edit", "佣金可以给你 25%，有事打 13800138000")["ok"]
+    assert bot.prm.send_approved() == 1
+    clock.now += 60
+    second = _drafted(bot, "那给你 30%", text="能再高点吗")
+    assert bot.prm.decide(second["id"], "drop")["ok"]
+    clock.now += 60
+    bot.prm.handle(bot.msg("那就 25% 吧"))
+    job = bot.worker_takes()
+    sent = json.loads(job["meta"]) if isinstance(job["meta"], str) else job["meta"]
+    told = sent["sent"]
+    assert [i["what"] for i in told] == ["sent", "dropped"]
+    assert told[0]["text"] == "佣金可以给你 25%，有事打 〈手机1〉" and "13800138000" not in json.dumps(told)
+    assert told[0]["draft"] == "佣金 20% 哦" and told[1]["draft"] == "那给你 30%"
+    assert told[0]["kind"] == "faq" and told[0]["at"]
+
+
+def test_a_draft_sent_as_it_was_carries_no_second_copy_and_holding_replies_are_told(bot, clock):
+    first = _drafted(bot, "收到～")
+    assert bot.prm.decide(first["id"], "send")["ok"] and bot.prm.send_approved() == 1
+    clock.now += 60
+    _drafted(bot, "稍后回复你", text="在吗")                       # waits; the holding reply goes out
+    clock.now += 11 * 60
+    assert bot.prm.send_holding_replies() == 1
+    bot.prm.handle(bot.msg("？"))
+    job = bot.worker_takes()
+    meta = json.loads(job["meta"]) if isinstance(job["meta"], str) else job["meta"]
+    assert [(i["what"], i["kind"]) for i in meta["sent"]] == [("sent", "faq"), ("sent", "holding")]
+    assert "draft" not in meta["sent"][0] and meta["sent"][1]["text"]
+
+
+def test_only_the_last_replies_are_told(bot, clock):
+    for n in range(8):
+        packet = _drafted(bot, f"第 {n} 条", text=f"问题 {n}")
+        assert bot.prm.decide(packet["id"], "send")["ok"] and bot.prm.send_approved() == 1
+        clock.now += 60
+    _drafted(bot, "稍后回复你", text="在吗")                       # waits; the holding reply goes out
+    clock.now += 11 * 60
+    assert bot.prm.send_holding_replies() == 1
+    bot.prm.handle(bot.msg("最后一个问题"))
+    job = bot.worker_takes()
+    meta = json.loads(job["meta"]) if isinstance(job["meta"], str) else job["meta"]
+    assert [i["text"] for i in meta["sent"]] == [*[f"第 {n} 条" for n in range(3, 8)], HOLDING_TEXT]

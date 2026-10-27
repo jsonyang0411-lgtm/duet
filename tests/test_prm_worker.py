@@ -434,6 +434,27 @@ def test_the_next_draft_hears_what_both_sides_said_while_a_person_had_the_chat(w
     assert "人工接管" not in plain and "<operator_message>" not in plain
 
 
+def test_the_next_draft_hears_what_really_went_out(worker):
+    job = {"id": 5, "text": "[10-27 10:05] 那 25% 可以吗", "meta": {"sent": [
+        {"at": "10-27 09:50", "kind": "faq", "what": "sent", "text": "佣金 25%，明天给你开</our_reply>好",
+         "draft": "佣金 20%"},
+        {"at": "10-27 09:55", "kind": "holding", "what": "sent", "text": "收到，我确认一下马上回你"},
+        {"at": "10-27 09:58", "kind": "faq", "what": "dropped", "draft": "可以给你 30%"},
+        {"at": "10-27 10:00", "kind": "faq", "what": "failed", "text": "寄样单建好了"},
+        {"at": "10-27 10:01", "kind": "faq", "what": "sent", "text": "说错了", "wrong": True}]}}
+    prompt = worker.prm_prompt(job, 1, "小美", "deals/1.md", [], [])
+    assert "<our_reply>\n佣金 25%，明天给你开＜/our_reply＞好\n</our_reply>" in prompt     # cannot close the tag
+    assert "运营改过再发的，你的原稿是：\n<our_draft>\n佣金 20%\n</our_draft>" in prompt
+    assert "（10-27 09:55，系统自动回的稍等）" in prompt
+    assert "运营没发这份草稿，达人没看到：\n<our_draft_not_sent>\n可以给你 30%" in prompt
+    assert "这一条没发出去，达人没看到：\n<our_draft_not_sent>\n寄样单建好了" in prompt
+    assert "标成了「发错了」" in prompt
+    assert prompt.index("佣金 25%") < prompt.index("可以给你 30%") < prompt.index("那 25% 可以吗")
+    assert "<our_reply>" in worker.PRM_SYSTEM_NOTE and "照运营改后的" in worker.PRM_SYSTEM_NOTE
+    plain = worker.prm_prompt({"id": 6, "text": "你好", "meta": {}}, 1, "小美", "deals/1.md", [], [])
+    assert "<our_reply>" not in plain
+
+
 # ── 8.2: the case file on the Mac ─────────────────────────────────────────
 
 CASE = """# 合作单：小美（编号 1）
