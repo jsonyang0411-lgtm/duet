@@ -2253,11 +2253,15 @@ def _execute_tb(action: dict, cfg: dict, plan: dict, run_one, record: dict, cata
     rec = _step("create", TB_STEP, run, True)
     record["steps"].append(rec)
     if not rows:
+        # campaign-engineering's recovery contract: only a CREATE_PRECHECK_* envelope says the create
+        # request was not sent.  An exit code (1 after a read-back error, 2, 77, 75 …) or another code
+        # proves nothing: the plan may exist, the operator checks 万相台.
         envelope = yaml_error(run.stderr) or {}
         code = str(envelope.get("code") or "")
         rec["problems"].append(_clip(f"{code}：{envelope.get('message') or ''}" if envelope else _exit_problem(run), 500))
-        sent = _may_have_sent(run) or run.exit_code == 75
-        rec["outcome"] = "INDETERMINATE" if sent else "FAILED"
+        rec["outcome"] = "FAILED" if code.startswith("CREATE_PRECHECK") else "INDETERMINATE"
+        if rec["outcome"] == "INDETERMINATE":
+            record["problems"].append("淘宝命令没给出结果行，万相台上的计划可能已经建了：请到万相台核对，不要再建一次")
         return
     rec["outcome"] = _execute_outcome(run, {"items": rows}, rows, rec)
     for row in rows:

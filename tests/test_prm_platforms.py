@@ -449,6 +449,29 @@ def test_campaign_needs_the_create_and_the_pause_verified(node, cfg, tmp_path):
     assert execute(cfg, CAMPAIGN, {"steps": ["create"], "name": "x_2"}, tmp_path, key="d" * 32)["outcome"] == "FAILED"
 
 
+TB_READBACK = ("ok: false\nerror:\n  code: COMMAND_EXEC\n  message: 'campaign 90000000555 was created; reading it back "
+               "failed: socket hang up'\n  exitCode: 1\n")
+
+
+@pytest.mark.parametrize("answer, outcome", [
+    (dict(stderr=TB_PRECHECK, exit=2), "FAILED"),                                   # CREATE_PRECHECK_*: not sent
+    (dict(stderr=TB_READBACK, exit=1), "INDETERMINATE"),                            # created, the read-back failed
+    (dict(stderr="ok: false\nerror:\n  code: ARGUMENT\n  message: 'bad --crowd'\n  exitCode: 2\n", exit=2),
+     "INDETERMINATE"),
+    (dict(stderr="ok: false\nerror:\n  code: AUTH_REQUIRED\n  message: '[NOT_LOGGED_IN] …'\n  exitCode: 77\n", exit=77),
+     "INDETERMINATE"),
+    (dict(stderr="TypeError: cannot read properties of undefined\n", exit=1), "INDETERMINATE"),
+], ids=["precheck", "readback-error", "argument", "login", "no-envelope"])
+def test_a_campaign_without_result_rows_is_failed_only_on_a_precheck(node, cfg, tmp_path, answer, outcome):
+    """oc.mjs can exit 1 after it created the plan (a read-back error); its contract: only an envelope whose
+    code is CREATE_PRECHECK_* says the create request was not sent, an exit code proves nothing."""
+    node.rules([rule(["create-display-custom-campaign"], execute=True, **answer)])
+    out = execute(cfg, CAMPAIGN, {"steps": ["create"], "name": "达人合作7_10261015"}, tmp_path)
+    assert out["outcome"] == outcome, out
+    assert ("请到万相台核对" in " ".join(out["problems"])) == (outcome == "INDETERMINATE")
+    assert out["steps"][0]["problems"] and len(argvs(node, "--execute=true")) == 1
+
+
 @pytest.mark.parametrize("answer, outcome", [
     (dict(stderr="[NOT_LOGGED_IN] the 百应 tab is on a login page; nothing was requested\n", exit=77), "FAILED"),
     (dict(stderr="[USAGE] --to must be a whole number\n", exit=2), "FAILED"),
