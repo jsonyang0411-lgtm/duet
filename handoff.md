@@ -1,6 +1,6 @@
 # 交接文档：达人商务智能体
 
-> 最后更新：2026-10-27（v66）。开发在 `merge-platforms` 分支上，还没合回 `main`（`main` 停在 `b448beb`）。每次改了什么看第 9 节。
+> 最后更新：2026-10-27（v67）。开发在 `merge-platforms` 分支上，还没合回 `main`（`main` 停在 `b448beb`）。每次改了什么看第 9 节。
 > 读者：接手这个项目的 AI 窗口，以及参与开发的同事。
 > 规矩：新窗口开工前先读完本文件；收工前更新第 3 节（当前状态）、第 5 节（计划进度）和第 9 节（变更记录）。
 
@@ -190,7 +190,7 @@
 其余待办：
 - 商品目录要定期重跑（`python3 tools/claude_relay/worker.py --sync-products`，上新、下架后）；还没放进定时任务
 - 一键邀约：预览版命令已做（`jst invite`，v66）。还差：第一次真邀约时运营在页面上点、我们录一次请求，和预览拼的逐项核对（尤其网址上的 `ewid`、`seraph_did`），核对后放开 `--execute`；卡片上填哪个微信、勾哪些优势等用户定；之后接进控制台（运营逐个确认再发）
-- 达人加我们微信后自动进名单：需求已写给同事（`edge-friends-request.md`，方案 A：Windows 自动通过、报 `friend_added`），等他回复
+- 达人加我们微信后自动进名单：同事回复（他仓库 `edge-friends-reply.md`，`f3bddf1`，见 v67）同意方案 A，先在 Windows 跑只读探针；探针结果出来后约一天做完，排在现有协议联调之后。Mac 这边收 `friend_added`、控制台确认进名单要我们做（等他的字段定下来）
 - 运单号回填：寄样管理发货后，运单号在哪个字段 / 接口（现在列表接口的 `erpOrderVoList` 是空的）
 - 和 Windows 真机联调（等同事给 `PRM_EDGE_TOKEN`）
 
@@ -410,3 +410,5 @@ CLI 是同事的千帆商家后台命令行工具：私有仓库 `doupi-org/xiao
 - 2026-10-27 v64：用户说百应只用来邀约和开佣金，别的达人在百应发来的消息不管（不接进系统）。试了起草的 Claude 用商品目录：kb `商品.md` 改成指向 `kb/products.md`（Grep 搜、不整个读；问颜色尺码售价照目录答；推荐只从目录挑、needs_attention；材质头围现货发货转运营），备份在会话 scratchpad。离线测试：复制业务资料目录，用 worker 的原始命令和提示词（`prm_claude_command`、`prm_prompt`）跑 4 个场景（脚本在会话 scratchpad `prm_catalog_eval.py`）：找款（灯芯绒有哪些颜色）、定款（两款写编码 + 推荐第三款）、细节（材质头围）、小红书达人问某款摩卡色。4 个都答对：列的款和颜色、推荐的三款、写的编码（A7261010037A-M、A7260810095B-M、A7261010048C-M）都和目录一致，问材质头围的转运营，推荐的设了 needs_attention。每次先试着 Read 整个目录，超过 256 KB 被拒后自己改用 Grep，不影响结果。定款时商品写在 slots 的「SKU」里，prm_bridge 的 `PRODUCT_KEYS` 认这一栏。
 - 2026-10-27 v65：用户定起草就用 Opus（不换便宜模型，`prm_model` 不设即默认），成本见 v64。
 - 2026-10-27 v66：给同事写了需求 `edge-friends-request.md`（`1735c39`）：达人看了邀约卡片来加我们，Windows 报新事件 `friend_added`（wxid、昵称、验证消息、怎么通过的），Mac 让运营确认后进名单；倾向方案 A（Windows 自动通过），B（逐个确认再通过）作备选；Mac 收到不认识的事件照样 ack，加事件不升协议版本。聚水潭 CLI 新增 `invite`（`7d00ec7`，`src/buyin.mjs` + `src/commands/invite.mjs`，测试 29 个）：在调试版 Chrome 开着的百应页面里用页面自己的 fetch 发请求（带页面登录和签名），只读做：按抖音号在达人广场 `search_feed_author` 精确找人、`account_check`、`shop_contact_rights_info` 算本周各等级剩余额度、`struct_template` 列卡片可勾的优势，拼出 `shangda/msgs/send` 的请求体（普通卡片 card_version 0：正文、我们的微信 / 手机、优势 key；不带商品和佣金）；`--execute` 锁住。不取聚水潭令牌（入口加了 `needsSession: false`）。真跑预览（嘉嘉嘉雯 LV3、刘熊熊 LV5 都可邀约，额度是**每周**的）。发现百应的达人 uid 每次搜索都不一样（临时加密），真发要现搜现用。
+- 2026-10-27 v67：**同事回复加好友需求**（用户转述；文件在他仓库 `edge-friends-reply.md`，本地 `prm-platforms` 分支 `f3bddf1`，没推）：方案 A 可行，就做 A。新好友是谁**不读通讯录表**（读联系人表的数据库接口在新版微信上可能让程序崩溃，代码特意没用），改看私聊里的系统提示（如「你已添加了 XX，现在可以开始聊天了」），私聊编号就是 wxid，所以 wxid 一定有。动手前先在 Windows 跑只读探针，确认：电脑通过、手机通过、对方通过我们申请时提示各是什么原文；验证消息会不会进数据库；新好友编号是不是 `wxid_` 开头。另外建议：`how` 加一个值 `requested`（对方通过了我们发的申请）；自动通过加每天上限（先 50），屏幕出现「操作频繁」「安全验证」当天停手。现有节奏：默认 5 分钟看一次红点、等用户停手 60 秒、每次最多 10 个；手机上手动通过的能认出来。他看不到我们仓库，「Mac 收到不认识的事件照样 ack」以我们代码为准（`edge_backend._handle_events` 确实如此）。
+- 2026-10-27 v67（续）：修**起草记忆的漏洞**：下一个草稿只读案卷，案卷里是它起草时的设想；运营改过再发、点了不发、发送失败、草稿因为达人又来消息作废，以及我们的系统消息（审批通知、发货通知、谈佣金话术）发给了达人，它都不知道。改：PRM 新事件 `our_reply`（`forwarded=False`，进 `BACKLOG_KINDS`）：`decide drop`（Mac 草稿）记 dropped；`_deliver` 发出时改过的草稿或系统消息记 sent、失败记 failed；批准后过期记 failed；`handle` 在 `supersede` 前给每条待审草稿记 superseded（`PrmStore.pending_drafts`）。原样发出的不记。下一次起草时和接管期间的话一起进 `meta.history`（`service.history_item`，`who: ours`），worker 的 `history_block` 放进 `<our_reply>`（带中文说明，文字关不掉标签），`PRM_SYSTEM_NOTE` 加 5b：以 `<our_reply>` 为准先更正案卷，没发出去的当达人没看到。同时加**案卷长度规则**：进展记录超过 30 条就把早的合并成几行概括、只留最近 10 条，已确认信息 / 承诺过的事 / 待确认不删。测试发现同事代码原有的漏洞：90 天清理不改写中转任务的 `meta`（接管历史里的达人原话也在 meta 里），`RelayStore.rewrite_chat` 补上 `meta`。新增测试 7 条（`test_prm_lifecycle.py` 5 条、`test_prm_worker.py` 2 条）。

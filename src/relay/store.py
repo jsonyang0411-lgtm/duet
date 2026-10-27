@@ -326,19 +326,22 @@ class RelayStore:
         return [dict(r) for r in rows]
 
     def rewrite_chat(self, chat_id: str, kind: str, rewrite) -> int:
-        """Rewrite what the jobs of ``kind`` in this chat hold (their text, results, follow-ups):
-        the PRM clean-up of a creator's details (8.2).  Returns how many rows changed."""
+        """Rewrite what the jobs of ``kind`` in this chat hold (their text, results, ``meta`` — the
+        history a draft job was told carries the creator's words too — and follow-ups): the PRM
+        clean-up of a creator's details (8.2).  Returns how many rows changed."""
         changed = 0
         with self._lock:
             jobs = self._conn.execute(
-                "SELECT id, text, result_text, result_json FROM relay_jobs WHERE chat_id = ? AND kind = ?",
+                "SELECT id, text, result_text, result_json, meta FROM relay_jobs WHERE chat_id = ? AND kind = ?",
                 (chat_id, kind),
             ).fetchall()
             for job in jobs:
-                new = (rewrite(job["text"] or ""), rewrite(job["result_text"] or ""), rewrite(job["result_json"] or "{}"))
-                if new != (job["text"] or "", job["result_text"] or "", job["result_json"] or "{}"):
-                    self._conn.execute("UPDATE relay_jobs SET text = ?, result_text = ?, result_json = ? WHERE id = ?",
-                                       (*new, job["id"]))
+                old = (job["text"] or "", job["result_text"] or "", job["result_json"] or "{}", job["meta"] or "{}")
+                new = tuple(rewrite(part) for part in old)
+                if new != old:
+                    self._conn.execute(
+                        "UPDATE relay_jobs SET text = ?, result_text = ?, result_json = ?, meta = ? WHERE id = ?",
+                        (*new, job["id"]))
                     changed += 1
                 for row in self._conn.execute("SELECT id, text FROM relay_followups WHERE job_id = ?",
                                               (job["id"],)).fetchall():

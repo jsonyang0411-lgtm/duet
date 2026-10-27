@@ -163,7 +163,8 @@ _ADDED_COLUMNS = (
 )
 
 # What the creators wrote, or our side's own words, waiting for the next draft job.
-BACKLOG_KINDS = ("creator_message", "operator_message")
+# our_reply：我方回复的实际结果（改过再发、系统消息发出、不发、发送失败、草稿作废），下一个草稿要知道
+BACKLOG_KINDS = ("creator_message", "operator_message", "our_reply")
 
 
 class PartyError(ValueError):
@@ -679,6 +680,15 @@ class PrmStore:
         with self._lock:
             rows = self._conn.execute(sql + " ORDER BY id DESC LIMIT ?", (*args, int(limit))).fetchall()
         return [event_view(dict(r)) for r in rows]
+
+    def pending_drafts(self, deal_id: int) -> list[dict]:
+        """The Mac's drafts of this deal still waiting for an operator (what ``supersede`` would end)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, text FROM action_packets WHERE deal_id = ? AND status = ? AND job_id IS NOT NULL ORDER BY id",
+                (deal_id, PENDING),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def take_backlog(self, deal_id: int) -> list[dict]:
         """The creator's and the operators' messages the next draft job has not heard of, oldest

@@ -122,8 +122,18 @@ EVENT_NAMES = {
     "wrong": "标为发错了", "purge": "清除收件信息", "purge_case": "清除 Mac 案卷里的收件信息",
     "sample_request": "生成寄样审批单", "sample_decision": "寄样审批结果",
     "platform_execute": "批准执行平台动作", "platform_result": "平台动作结果",
-    "platform_preview": "重新预览平台动作", "platform_ack": "平台动作已处理",
+    "platform_preview": "重新预览平台动作", "platform_ack": "平台动作已处理", "our_reply": "我方回复的实际结果",
 }
+
+
+def history_item(ev: dict) -> dict:
+    """A backlog event as the next draft job hears it (``meta["history"]``, the worker's ``history_block``):
+    what the creator and our operators said, and what really became of our replies."""
+    detail = ev.get("detail") or {}
+    if ev["kind"] == "our_reply":
+        return {"who": "ours", "status": str(detail.get("status", "")), "edited": bool(detail.get("edited")),
+                "system": bool(detail.get("system")), "text": str(detail.get("text", ""))}
+    return {"who": "operator" if ev["kind"] == "operator_message" else "creator", "text": str(detail.get("text", ""))}
 
 
 def event_out(ev: dict) -> dict:
@@ -382,19 +392,35 @@ class PrmService:
             elif not files:
                 line += f"（{ATTACHMENT_KINDS[kind]}没取到）"
         text = self._mask(party["id"], f"[{_clock_text(sent_at or now)}] {line}", now)
+        for old in self._store.pending_drafts(deal["id"]):
+            # 草稿还没审就作废了：案卷里写着"已起草"，下一个草稿要知道它没发出去
+            self._tell_next_draft(deal["id"], party["id"], "superseded", old["text"], now)
         stale = self._store.supersede(deal["id"], now)
         self._store.update_deal(deal["id"], now, last_message_at=sent_at or now)
         meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"]}
         backlog = self._store.take_backlog(deal["id"])
         if backlog:
-            meta["history"] = [{"who": "operator" if ev["kind"] == "operator_message" else "creator",
-                                "text": str(ev["detail"].get("text", ""))} for ev in backlog]
+            meta["history"] = [history_item(ev) for ev in backlog]
         how, job_id = self._relay.submit(chat_id, chat_id, text, kind=PRM, files=files, settle_sec=SETTLE_SEC,
                                          meta=meta, fresh=bool(backlog))
         logger.info("PRM: party %d message -> job #%d (%s)%s%s", party["id"], job_id, how,
                     f"; {stale} waiting draft(s) out of date" if stale else "",
                     f"; {len(backlog)} line(s) from the takeover told" if backlog else "")
         return True
+
+    def _tell_next_draft(self, deal_id: int, party_id: int, status: str, text: str, now: float, *,
+                         edited: bool = False, system: bool = False) -> None:
+        """我方一条回复的实际结果，记给下一个草稿（``our_reply``）：它只读案卷，案卷里是它起草时的设想。"""
+        self._store.add_event(deal_id, party_id, "our_reply",
+                              {"status": status, "text": str(text or "")[:MAX_DRAFT_CHARS], "edited": edited, "system": system},
+                              actor="system", forwarded=False, now=now)
+
+    def _told_result(self, packet: dict, status: str, final: str, now: float) -> None:
+        """发出或没发出的这条，下一个草稿不知道的才记：改过的草稿、系统消息（草稿的 Claude 没写过它）。"""
+        system = packet.get("job_id") is None
+        edited = bool(packet.get("edited"))
+        if system or edited or status != "sent":
+            self._tell_next_draft(packet["deal_id"], packet["party_id"], status, final, now, edited=edited, system=system)
 
     def on_own_message(self, msg: dict) -> None:
         """A line this WeChat account sent in a creator's chat (the backend's hook).
@@ -696,6 +722,8 @@ class PrmService:
         if action == "drop":
             if not self._store.move(packet["id"], (PENDING,), DROPPED, decided_at=now):
                 return {"ok": False, "error": "这条草稿已经处理过了"}
+            if packet.get("job_id") is not None:                     # 系统消息没发，草稿的 Claude 本来就不知道它
+                self._tell_next_draft(packet["deal_id"], packet["party_id"], "dropped", packet["text"], now)
             return {"ok": True, "status": DROPPED}
         if action == "execute":
             return self._approve_execute(packet, text, now)
@@ -985,8 +1013,10 @@ class PrmService:
         for packet in reversed(self._store.packets((APPROVED,), limit=50)):
             now = self._clock()
             if now - float(packet["decided_at"] or now) > APPROVED_EXPIRE_SEC:
-                self._store.move(packet["id"], (APPROVED,), FAILED, outcome="expired", sent_at=now,
-                                 error="批准后太久没发出去（机器人停过），没有发送；需要的话重新写一条")
+                if self._store.move(packet["id"], (APPROVED,), FAILED, outcome="expired", sent_at=now,
+                                    error="批准后太久没发出去（机器人停过），没有发送；需要的话重新写一条"):
+                    self._told_result(packet, "failed", packet["final_text"] if packet["final_text"] is not None
+                                      else packet["text"], now)
                 continue
             if not self._store.move(packet["id"], (APPROVED,), SENDING):
                 continue                               # another round took it
@@ -1034,12 +1064,14 @@ class PrmService:
             if packet.get("tool", MESSAGE_TOOL) != MESSAGE_TOOL:
                 problem = f"平台动作已经核验成功，但回复没发出去：{problem}；请在微信里手动发给达人"
             self._store.move(packet["id"], (SENDING,), FAILED, outcome="failed", sent_at=now, error=problem)
+            self._told_result(packet, "failed", final, now)
             logger.warning("PRM: packet %d failed: %s", packet["id"], problem)
             self._update_gate(packet, now)
             return 0
         # The backend says the keystrokes went through; seeing the line in WeChat confirms it
         # (often already, before the send returned).
         self._store.mark_sent(packet["id"], now)
+        self._told_result(packet, "sent", final, now)
         logger.info("PRM: packet %d sent (%d chars, %d file(s))", packet["id"], len(text), len(packet["attachments"]))
         self._update_gate(packet, now)
         return 1
