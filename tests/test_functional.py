@@ -272,6 +272,25 @@ class TestAgentConsolePages:
         assert relay_with_jobs.store.get(2)["status"] == "cancelled"
         assert "已取消" in page.inner_text("body")
 
+    def test_relay_page_says_how_the_mac_is_reached(self, page, relay_with_jobs, monkeypatch):
+        """cross-network.md: the Mac's network on the state card, and what each address is for."""
+        from src.relay import link
+
+        monkeypatch.setattr(link, "this_pc_addresses", lambda: [{"ip": "192.168.1.20", "kind": "lan"},
+                                                                {"ip": "100.101.102.103", "kind": "tailscale"}])
+        relay_with_jobs.note_worker(None, address="100.70.1.2")
+        page.goto(f"{BASE_URL}/#/relay", timeout=10000)
+        page.wait_for_timeout(1500)
+        text = page.inner_text("body")
+        for expected in ("在线 · 经 Tailscale\n100.70.1.2", "http://192.168.1.20:8790", "同一个局域网时用",
+                         "http://100.101.102.103:8790", "Tailscale，在不在同一个网络都能用，推荐", "100.64.0.0/10"):
+            assert expected in text
+        assert "两台都装 Tailscale" not in text                              # there is a Tailscale address
+        monkeypatch.setattr(link, "this_pc_addresses", lambda: [{"ip": "192.168.1.20", "kind": "lan"}])
+        page.locator("button:has-text('刷新')").first.click()
+        page.wait_for_timeout(1000)
+        assert "两台都装 Tailscale" in page.inner_text("body")
+
     def test_relay_settings_generate_a_token_and_show_it_once(self, page):
         page.goto(f"{BASE_URL}/#/relay", timeout=10000)
         page.wait_for_timeout(1500)

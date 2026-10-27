@@ -65,6 +65,13 @@ def first(d: dict, *keys, default=None):
     return default
 
 
+def is_me(sender: str, me: str) -> bool:
+    """Is this message the account's own?  ``myWxid`` comes from WeChat 4's data folder, which
+    carries a suffix (wxid_abc_b6ce) the messages' sender does not (wxid_abc): the bot's backend
+    matches the same way."""
+    return bool(sender and me) and (sender == me or me.startswith(sender + "_") or sender.startswith(me + "_"))
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--chats", type=int, default=8, help="how many of the newest private chats (default 8)")
@@ -135,12 +142,16 @@ def main(argv=None) -> int:
             sender = str(first(m, "sender_username", "senderUsername", "sender", default="") or "")
             content = str(first(m, "message_content", "content", default="") or "")
             decoded = _decompress_zstd_hex(content) or content
+            mine = "我" if is_me(sender, me) else "对方"
             if local_type == 10000:
                 who, text = "系统", _special_info(content, local_type).get("title", "")
             elif local_type == 1:
-                who, text = ("我" if me and sender == me else "对方"), decoded
+                who, text = mine, decoded
             else:
-                who, text = ("我" if me and sender == me else "对方"), f"（类型 {local_type}，不看内容）"
+                who, text = mine, f"（类型 {local_type}，不看内容）"
+            real = first(m, "real_sender_id", "realSenderId")
+            if real is not None:
+                who += f"（real_sender_id {real}）"
             line = masked_text(text, name)
             mark = ">>>" if any(k in str(text) for k in FRIEND_MARKERS) else "   "
             stamp = time.strftime("%m-%d %H:%M:%S", time.localtime(ts(m))) if ts(m) else "--"

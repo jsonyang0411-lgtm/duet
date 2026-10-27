@@ -128,15 +128,16 @@ def set_shipment_status(store: PrmStore, deal_id, status: str, *, now: float, ac
 
 def route_for(store: PrmStore, kind: str, *, deal: dict, now: float, text: str, needs_attention: bool = False,
               unknown_tokens: Optional[list] = None, reason: str = "", waybill: str = "",
-              attachments: Optional[list] = None) -> tuple[str, str, Optional[float]]:
+              attachments: Optional[list] = None, files_named: int = 0) -> tuple[str, str, Optional[float]]:
     """``(route, status, decided_at)`` of a new draft: ``auto`` / approved now when its kind has
-    earned it and nothing about this draft needs a person; else ``review`` / pending."""
+    earned it and nothing about this draft needs a person (``files_named``: how many files it
+    named; fewer came: a person); else ``review`` / pending."""
     gate = store.gate(kind)
     if gate is None or gate["locked"] or gate["route"] != gates.AUTO:
         return gates.REVIEW, PENDING, None
     why = gates.plain_reason(kind, needs_attention=needs_attention, mode=effective_mode(deal, now),
                              unknown_tokens=unknown_tokens or [], reason=reason, text=text, waybill=waybill,
-                             attachments=attachments or [])
+                             attachments=attachments or [], files_named=files_named)
     if why:
         return gates.REVIEW, PENDING, None
     return gates.AUTO, APPROVED, now

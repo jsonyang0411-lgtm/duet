@@ -18,7 +18,7 @@ SESSIONS = [
 MESSAGES = {
     "wxid_newfriend12345": [
         {"local_type": 1, "sender_username": "wxid_newfriend12345", "message_content": "我是张小美，电话 13800138000",
-         "create_time": 1761529990},
+         "create_time": 1761529990, "real_sender_id": 5},
         {"local_type": 10000, "sender_username": "", "message_content": "你已添加了张小美，现在可以开始聊天了。",
          "create_time": 1761530000},
         {"local_type": 3, "sender_username": "wxid_newfriend12345", "message_content": "<img/>", "create_time": 1761530005},
@@ -26,14 +26,15 @@ MESSAGES = {
     "meimei_88": [
         {"local_type": 10000, "sender_username": "", "message_content": "小美美通过了你的朋友验证请求，现在可以开始聊天了",
          "create_time": 1761520000},
-        {"local_type": 1, "sender_username": "wxid_me", "message_content": "你好呀", "create_time": 1761520010},
+        {"local_type": 1, "sender_username": "wxid_me", "message_content": "你好呀", "create_time": 1761520010,
+         "real_sender_id": 2},
     ],
 }
 
 
 class FakeClient:
     def __init__(self):
-        self._config = {"myWxid": "wxid_me"}
+        self._config = {"myWxid": "wxid_me_b6ce"}          # WeChat 4's data folder: the wxid plus a suffix
         self.asked = []
 
     def init(self):
@@ -69,8 +70,15 @@ def test_the_probe_shows_the_system_lines_and_hides_ids_names_and_numbers(tool, 
     assert "wxid_…（19 位）" in text and "自定义微信号（首字符 字母，9 位）" in text
     assert ">>>" in text and "你已添加了〈名字〉，现在可以开始聊天了。" in text
     assert "〈名字〉通过了你的朋友验证请求" in text
-    assert "138****8000" in text and "（类型 3，不看内容）" in text and "我：你好呀" in text
+    assert "138****8000" in text and "（类型 3，不看内容）" in text
+    assert "我（real_sender_id 2）：你好呀" in text and "对方（real_sender_id 5）：我是〈名字〉" in text   # own line by the suffixed wxid
     for secret in ("wxid_newfriend12345", "meimei_88", "13800138000", "张小美", "小美美"):
         assert secret not in text
     assert text.index("我是〈名字〉") < text.index("你已添加了")       # oldest first
     assert "会话带的字段：" in text and "消息带的字段：" in text
+
+
+def test_own_lines_are_told_apart_by_the_wxid_without_the_folder_suffix(tool):
+    assert tool.is_me("wxid_me", "wxid_me_b6ce") and tool.is_me("wxid_me", "wxid_me")
+    assert not tool.is_me("wxid_newfriend12345", "wxid_me_b6ce") and not tool.is_me("", "wxid_me_b6ce")
+    assert not tool.is_me("wxid_m", "wxid_me_b6ce")                # a shorter id is not a prefix match

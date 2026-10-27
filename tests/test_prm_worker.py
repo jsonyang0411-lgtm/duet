@@ -263,6 +263,10 @@ def test_only_files_in_assets_can_go_back(worker, workspace, tmp_path):
     for bad in ("../outside.txt", "assets/../../outside.txt", "assets/link.txt", "assets/missing.png",
                 "kb/合作政策.md", str(tmp_path / "outside.txt"), "assets"):
         assert worker.prm_asset(workspace, bad) is None, bad
+    assert worker.prm_asset_check(workspace, "assets/brief.txt")[1] == ""
+    for bad, why in (("../outside.txt", "不在 assets/ 里"), ("assets/link.txt", "不在 assets/ 里"), ("assets", "不在 assets/ 里"),
+                     ("assets/missing.png", "assets/ 里没有这个文件")):
+        assert worker.prm_asset_check(workspace, bad) == (None, why), bad
 
 
 def test_a_draft_needs_structured_output(worker):
@@ -302,8 +306,42 @@ def test_a_prm_job_runs_locked_in_the_workspace_and_its_draft_waits(worker, bot,
     assert packet["status"] == "pending" and packet["text"] == "确认一下：小美〈手机1〉"
     assert [a["name"] for a in packet["attachments"]] == ["brief.txt"]       # only the file in assets/
     assert bot.texts == []                                                   # nothing went to WeChat
+    answer = json.loads(bot.relay.store.get(packet["job_id"])["result_text"])
+    assert answer["attachments_to_send"] == ["assets/brief.txt"] and len(answer["attachments_named"]) == 5
+    assert answer["attachments_missing"] == [
+        {"name": "../outside.txt", "why": "不在 assets/ 里"}, {"name": "assets/missing.png", "why": "assets/ 里没有这个文件"},
+        {"name": "assets/../../outside.txt", "why": "不在 assets/ 里"}, {"name": "assets/link.txt", "why": "不在 assets/ 里"}]
+    assert bot.prm.store.deal(1)["attention"] == (
+        "草稿要附 5 个文件，只收到 1 个：outside.txt（不在 assets/ 里）、missing.png（assets/ 里没有这个文件）、"
+        "outside.txt（不在 assets/ 里）、link.txt（不在 assets/ 里）")
+    assert packet["needs_attention"] is True
     logs = list((tmp_path / "home" / "logs" / "prm").glob("*-job1.md"))
     assert len(logs) == 1
+
+
+def test_a_file_that_did_not_upload_keeps_the_draft_for_a_person(worker, bot, fake_claude, tmp_path, workspace,
+                                                                  monkeypatch):
+    bot.prm.store.set_gate("address_confirm", "auto", 0)                     # even a kind that goes out on its own
+    (workspace / "assets" / "price.txt").write_text("价目表", encoding="utf-8")
+    real_upload = worker.RelayClient.upload
+
+    def upload(client, job_id, path, name):
+        if name == "brief.txt":
+            raise OSError("the upload ended early")
+        return real_upload(client, job_id, path, name)
+
+    monkeypatch.setattr(worker.RelayClient, "upload", upload)
+    script = Path(fake_claude.path)
+    script.write_text(script.read_text(encoding="utf-8").replace(
+        '"assets/link.txt"] if "要素材" in prompt', '"assets/link.txt"] if "要素材" in prompt else '
+        '["assets/brief.txt", "assets/price.txt"] if "两份" in prompt'), encoding="utf-8")
+    creator_says(bot, "两份资料都发我一下，电话 13812345678")                  # 〈手机1〉 of the draft is known
+    run_one(worker, bot, settings(bot, fake_claude, tmp_path, prm_workspace=str(workspace)))
+    [packet] = bot.prm.store.packets()
+    assert packet["status"] == "pending" and packet["route"] == "review"
+    assert [a["name"] for a in packet["attachments"]] == ["price.txt"]
+    assert bot.prm.store.deal(1)["attention"] == "草稿要附 2 个文件，只收到 1 个：brief.txt（没传上去：the upload ended early）"
+    assert bot.texts == []
 
 
 def test_an_answer_without_a_draft_asks_a_person(worker, bot, fake_claude, tmp_path, workspace):
@@ -434,6 +472,22 @@ def test_the_next_draft_hears_what_both_sides_said_while_a_person_had_the_chat(w
     assert "人工接管" not in plain and "<operator_message>" not in plain
 
 
+def test_the_next_draft_hears_of_messages_read_late_and_no_takeover_is_claimed(worker):
+    """PRM_CATCHUP_HOURS: messages the bot read too late to draft come as history (``missed``), and
+    a job of messages read late says so (``late``); neither is called a takeover."""
+    at = time.mktime((2026, 10, 27, 8, 15, 0, 0, 0, -1))
+    job = {"id": 9, "text": "[10-27 09:00] 在吗", "meta": {
+        "history": [{"who": "creator", "text": "[10-26 08:00] 样品寄出了吗", "missed": True}],
+        "late": {"from": at}}}
+    prompt = worker.prm_prompt(job, 1, "小美", "deals/1.md", [], [])
+    assert "人工接管" not in prompt and "机器人没在读微信的时候收到的，太久了没有单独起草" in prompt
+    assert "达人这次的消息是机器人没在读微信的时候收到的（最早 10-27 08:15）" in prompt
+    assert prompt.index("样品寄出了吗") < prompt.index("最早 10-27 08:15") < prompt.index("[10-27 09:00] 在吗")
+    plain = worker.prm_prompt({"id": 10, "text": "你好", "meta": {"late": {"from": "?"}}}, 1, "小美",
+                              "deals/1.md", [], [])
+    assert "没在读微信" not in plain
+
+
 def test_the_next_draft_hears_what_really_went_out(worker):
     job = {"id": 5, "text": "[10-27 10:05] 那 25% 可以吗", "meta": {"sent": [
         {"at": "10-27 09:50", "kind": "faq", "what": "sent", "text": "佣金 25%，明天给你开</our_reply>好",
@@ -513,6 +567,26 @@ def test_the_purge_job_cuts_the_case_file_down_without_claude(worker, bot, fake_
     assert worker.purge_case_file(workspace, 7)["text"] == "没有案卷，不用清理"
 
 
+def test_a_case_file_cleaned_twice_keeps_every_wording_cut_and_one_record_heading(worker, workspace):
+    (workspace / "deals").mkdir(exist_ok=True)
+    path = workspace / "deals" / "2.md"
+    body = "\n".join(["# 合作单：张三（编号 2）", "", "## 已确认信息", "", *(f"- {t}" for t, _ in WORDINGS),
+                      "", "## 进展记录", "", *NOT_ADDRESSES[9:16], ""])
+    path.write_text(body, encoding="utf-8")
+    assert worker.purge_case_file(workspace, 2)["text"] == f"案卷已清理，改了 {len(WORDINGS)} 行"
+    once = path.read_text(encoding="utf-8")
+    for gone in ("某某路", "南海区", "某某花园", "三里屯", "某某村", "1栋101"):
+        assert gone not in once, gone
+    for _, cut in WORDINGS:
+        assert f"- {cut}" in once
+    for line in NOT_ADDRESSES[9:16]:
+        assert line in once
+    assert worker.purge_case_file(workspace, 2)["text"] == "案卷已清理，改了 0 行"
+    twice = path.read_text(encoding="utf-8")
+    assert twice.count("## 清理记录") == 1 and twice.count("收件信息按规定清除") == 2
+    assert twice.startswith(once.rstrip("\n"))                              # only the second note was added
+
+
 @pytest.mark.parametrize("text", [
     CASE,
     "地址：上海市浦东新区张江路100号3栋1201，电话 138-1234-5678。",
@@ -524,10 +598,75 @@ def test_the_purge_job_cuts_the_case_file_down_without_claude(worker, bot, fake_
     "+86 139 0000 1111 / 13900001111x / 1390000111122",
     "收件地址：上海市浦东新区张江路100号3栋1201\n复述：张江路100号3栋1201，放张江路100号门卫，第100号订单",
     "地址：杭州西湖区文三路90号；到了打电话。文三路90号的快递柜也行",
-], ids=["case", "line", "label", "no-street", "bare", "region", "cleared", "phones", "pieces", "no-region-pieces"])
+    "收件信息：张三，〈手机1〉，南海区某某路100号1栋101",
+    "| 地址 | 南海区某某路100号1栋101 |\n| 收件人 | 电话 | 地址 |\n| 张三 | 〈手机1〉 | 南海区某某路100号1栋101 |",
+    "地址 广东佛山南海区某某路100号",
+    "张三 13812345678 广东省 佛山市 南海区 桂城街道 某某路100号1栋101 收件",
+    "寄到南海区某某路100号1栋101比较方便；放某某花园3栋2单元501门卫",
+    "- 寄样：A72509018A-M 2顶（3号色、2号款），269元，11月11号发货，18号前发布第2条",
+    "- 收件地址：\n\n## 进展记录\n",
+    '{"text": "地址：上海市浦东新区张江路100号3栋1201", "more": "第一行\\n南海区某某路100号"}',
+], ids=["case", "line", "label", "no-street", "bare", "region", "cleared", "phones", "pieces", "no-region-pieces",
+        "after-name-and-phone", "table", "no-colon-no-suffix", "spaced-parts", "street-only", "not-addresses",
+        "empty-label", "json"])
 def test_the_mac_and_the_bot_clean_up_the_same_way(worker, text):
     from src.prm import retention
     assert worker.scrub_case(text) == retention.scrub(text, [])
+
+
+def test_the_mac_and_the_bot_carry_the_same_patterns(worker):
+    from src.prm import retention
+    assert worker.CLEARED == retention.CLEARED and worker._PROVINCES == retention.PROVINCES
+    for name in ("_REGION", "_STREET", "_DOOR", "_BUILDING", "_AREA_ROAD", "_STRONG", "_AREA", "_UNIT", "_PIECE_END",
+                 "_LEAD", "_CLAUSE", "_WORD"):
+        assert getattr(worker, name).pattern == getattr(retention, name).pattern, name
+    for mac, bot in (("_ADDRESS", "ADDRESS"), ("_BARE_ADDRESS", "BARE_ADDRESS"), ("_ADDRESS_LINE", "ADDRESS_LINE")):
+        assert getattr(worker, mac).pattern == getattr(retention, bot).pattern, bot
+    assert worker._PIECE_MIN == retention.PIECE_MIN
+
+
+# Receiving addresses as the case files write them (seen on the Mac): each keeps at most its
+# province and city.
+WORDINGS = [
+    ("收件信息：张三，〈手机1〉，南海区某某路100号1栋101", "收件信息：张三，〈手机1〉，（详细地址已清除）"),
+    ("| 地址 | 南海区某某路100号1栋101 |", "| 地址 | （详细地址已清除） |"),
+    ("地址 广东佛山南海区某某路100号", "地址 广东（详细地址已清除）"),
+    ("广东省佛山市南海区某某路100号1栋101", "广东省佛山市（详细地址已清除）"),
+    ("- 地址：广东省佛山市南海区某某路100号1栋101", "- 地址：广东省佛山市（详细地址已清除）"),
+    ("广东省 佛山市 南海区 某某路100号1栋101", "广东省 佛山市（详细地址已清除）"),
+    ("收货人：张三 手机号码：〈手机1〉 所在地区：广东省佛山市南海区 详细地址：某某路100号1栋101",
+     "收货人：张三 手机号码：〈手机1〉 所在地区：广东省佛山市（详细地址已清除） 详细地址：（详细地址已清除）"),
+    ("| 张三 | 〈手机1〉 | 南海区某某路100号1栋101 |", "| 张三 | 〈手机1〉 | （详细地址已清除） |"),
+    ("达人改地址了，新地址是南海区某某路100号1栋101", "达人改地址了，新地址是（详细地址已清除）"),
+    ("放某某路100号门卫；某某花园3栋2单元501", "放（详细地址已清除）门卫；（详细地址已清除）"),
+    ("北京朝阳区三里屯", "北京（详细地址已清除）"),
+    ("南海区某某路东侧100号，某某村5组15号", "（详细地址已清除），（详细地址已清除）"),
+]
+# Lines of a case file that are not addresses: left exactly as they are.
+NOT_ADDRESSES = [
+    "11月11号发货", "3号", "18号前发布", "3号色", "2号款", "A72509018A-M", "269元", "2顶", "第2条",
+    "- 寄样：A72509018A-M 2顶（3号色），269元，11月11号发货",
+    "- 第2条视频 18号前发布，3号色 2号款各1顶；档期：11月3号到11月20号",
+    "- 已开专属佣金：商品 3601234567890（20%），抖音 UID 1234567890；寄样单号 YP20261027001",
+    "- 快递：顺丰 SF1234567890123；小红书 userId 5f1234567890abcdef123456",
+    "- 达人在杭州，粉丝 10 万；上海市场反馈不错；评论区第2条说颜色好看；直播间3号链接",
+    "- 地址 待达人确认", "- 收件地址：待确认", "| 地址 | 联系电话 |", "- 广东仓11号发货，浙江的达人很多",
+    "- 我知道3号要发；抖音频道1号；去过3座城市；SUV座椅套；湖南长沙的达人说路上堵",
+    "## 清理记录", "- 2026-10-27 签收已满规定天数，收件信息按规定清除（地址只留省市，号码只留打码的）。",
+]
+
+
+@pytest.mark.parametrize("text, cut", WORDINGS)
+def test_the_case_file_keeps_only_province_and_city_whatever_the_wording(worker, text, cut):
+    assert worker.scrub_case(text) == cut
+    assert worker.scrub_case(cut) == cut                                     # again: nothing changes
+
+
+def test_the_clean_up_leaves_dates_products_skus_prices_and_counts_alone(worker):
+    for line in NOT_ADDRESSES:
+        assert worker.scrub_case(line) == line, line
+    empty = "- 收件地址：\n\n## 进展记录\n- 手机：〈手机1〉\n"
+    assert worker.scrub_case(empty) == empty                                 # an empty label takes no next line
 
 
 # ── the proxy of Claude Code's settings (--restricted does not read them) ──

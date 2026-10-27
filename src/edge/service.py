@@ -31,6 +31,7 @@ from collections import deque
 from pathlib import Path
 from typing import Callable, Optional
 
+from ..relay.link import PeerLog
 from . import protocol as P
 from . import text as T
 from .store import EdgeStore
@@ -104,6 +105,7 @@ class EdgeService:
         self._wake = threading.Event()
         self._stopping = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._peer = PeerLog("EDGE: the Mac")    # where it connects from: the LAN, Tailscale, ...
 
     @property
     def store(self) -> EdgeStore:
@@ -469,6 +471,10 @@ class EdgeService:
         self._store.clear_sends(now - self._keep_sec, now - P.UNACKED_KEEP_DAYS * 86400)
 
     # ── the protocol (http.py calls these) ────────────────────────────────
+
+    def note_client(self, address: str) -> None:
+        """An authorized request came from ``address`` (logged when the Mac moves)."""
+        self._peer.note(address)
 
     def health(self) -> dict:
         return {"ok": True, "protocol": P.PROTOCOL, "parties_version": self._store.parties_version(),

@@ -64,6 +64,16 @@ CREATE TABLE IF NOT EXISTS user_last_message (
     last_timestamp INTEGER NOT NULL,
     PRIMARY KEY (chat_id, sender_id)
 );
+
+-- How far the WCDB backend has read each registered creator's private chat: the newest
+-- message time it saw there (no text).  After a restart the account's own lines newer
+-- than this (an operator typing on the phone while the bot was not reading) are handed
+-- on; older ones were handed on already (PRM_CATCHUP_HOURS, src/wechat/wcdb_backend.py).
+CREATE TABLE IF NOT EXISTS chat_read_marks (
+    chat_id    TEXT    PRIMARY KEY,
+    read_ts    INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
 """
 
 

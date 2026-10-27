@@ -422,6 +422,20 @@ class PrmStore:
             ).fetchall()
         return [p for p in (packet_view(dict(r)) for r in rows) if not p["platform"].get("acked_at")]
 
+    def deal_packets(self, deal_id: int, tools: tuple = (), statuses: tuple = ()) -> list[dict]:
+        """A deal's packets, newest first: of these ``tools`` (platform action names) and in these
+        ``statuses`` (all when empty).  Every one of them, however old (a 专属佣金 opened months ago)."""
+        sql, args = "SELECT * FROM action_packets WHERE deal_id = ?", [deal_id]
+        if tools:
+            sql += f" AND tool IN ({', '.join('?' * len(tools))})"
+            args += list(tools)
+        if statuses:
+            sql += f" AND status IN ({', '.join('?' * len(statuses))})"
+            args += list(statuses)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY id DESC", args).fetchall()
+        return [packet_view(dict(r)) for r in rows]
+
     def packet_for_job(self, job_id: int) -> Optional[dict]:
         with self._lock:
             row = self._conn.execute(
@@ -697,6 +711,15 @@ class PrmStore:
             args.append(deal_id)
         with self._lock:
             rows = self._conn.execute(sql + " ORDER BY id DESC LIMIT ?", (*args, int(limit))).fetchall()
+        return [event_view(dict(r)) for r in rows]
+
+    def backlog(self, deal_id: int) -> list[dict]:
+        """What ``take_backlog`` would hand the next draft job now, oldest first, without taking it."""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM deal_events WHERE deal_id = ? AND forwarded = 0 AND kind IN"
+                f" ({', '.join('?' * len(BACKLOG_KINDS))}) ORDER BY id", (deal_id, *BACKLOG_KINDS),
+            ).fetchall()
         return [event_view(dict(r)) for r in rows]
 
     def take_backlog(self, deal_id: int) -> list[dict]:

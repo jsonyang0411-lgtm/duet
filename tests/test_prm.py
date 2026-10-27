@@ -190,6 +190,16 @@ def test_a_valid_draft_is_read_and_cleaned():
     d = parse_draft("```json\n" + json.dumps(draft(slots={"收件人": " 小美 ", "数量": 1, "bad": {"x": 1}})) + "\n```")
     assert d.message_kind == "address_confirm" and d.stage_proposal == "address"
     assert d.slots == {"收件人": "小美", "数量": "1"}                       # nested values dropped, text kept
+    assert d.attachments_named is None and d.attachments_missing == []         # an older worker says nothing
+
+
+def test_the_macs_report_on_the_files_is_read():
+    d = parse_draft(json.dumps(draft(attachments_to_send=["assets/a.txt"],
+                                     attachments_named=["assets/a.txt", " assets/b.pdf ", ""],
+                                     attachments_missing=[{"name": "assets/b.pdf", "why": "超过 100 MB"}, "assets/c.png",
+                                                          {"why": "no name"}, 7])))
+    assert d.attachments_to_send == ["assets/a.txt"] and d.attachments_named == ["assets/a.txt", "assets/b.pdf"]
+    assert d.attachments_missing == [{"name": "assets/b.pdf", "why": "超过 100 MB"}, {"name": "assets/c.png", "why": ""}]
 
 
 BAD_DRAFTS = [
@@ -197,13 +207,15 @@ BAD_DRAFTS = [
     (json.dumps(draft(stage_proposal="won")), "bad_stage"),
     (json.dumps(draft(message_kind="spam")), "bad_kind"),
     (json.dumps(draft(attachments_to_send="assets/a.png")), "bad_attachments"),
+    (json.dumps(draft(attachments_named="assets/a.png")), "bad_attachments"),
+    (json.dumps(draft(attachments_missing={"name": "assets/a.png"})), "bad_attachments"),
     (json.dumps(draft(needs_attention="yes")), "bad_needs_attention"),
     (json.dumps(draft(slots=["收件人"])), "bad_slots"),
     (json.dumps(draft(reply_draft="字" * (MAX_DRAFT_CHARS + 1))), "draft_too_long"),
 ]
 
 
-@pytest.mark.parametrize("bad, code", BAD_DRAFTS, ids=[code for _, code in BAD_DRAFTS])
+@pytest.mark.parametrize("bad, code", BAD_DRAFTS, ids=[f"{code}-{n}" for n, (_, code) in enumerate(BAD_DRAFTS)])
 def test_an_unusable_draft_is_refused_not_repaired(bad, code):
     with pytest.raises(DraftError) as e:
         parse_draft(bad)
@@ -225,7 +237,8 @@ def test_a_creators_message_becomes_a_silent_prm_job_with_numbers_masked(bot, cl
 def test_strangers_groups_and_history_are_not_drafted(bot, clock):
     assert bot.prm.handle(bot.msg("你好", chat="wxid_stranger")) is False
     assert bot.prm.handle(bot.msg("你好", group=True)) is False
-    assert bot.prm.handle(bot.msg("昨天的话", ts=clock.now - MAX_AGE_SEC - 5)) is True   # taken, but history
+    # older than PRM_CATCHUP_HOURS (12 by default) when read: taken and recorded, not drafted
+    assert bot.prm.handle(bot.msg("前天的话", ts=clock.now - 13 * 3600)) is True
     assert bot.relay.store.list_jobs() == []
 
 

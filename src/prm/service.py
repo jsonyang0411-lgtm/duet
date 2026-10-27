@@ -72,6 +72,8 @@ PLATFORM_OPS = ("platform_execute", "platform_preview")
 HOLDING_TEXT = "收到，我确认一下马上回你"
 # Mac 重启以前发的、后来 Windows 才报失败的：没有发送时间时往回找这么久（edge 后端的发送记录留一天）
 RESTART_FAIL_SEC = 86400
+CATCHUP_HOURS = 12           # PRM_CATCHUP_HOURS: a message read late is drafted up to this old (0-72)
+OWN_FILE_EARLY_SEC = 60      # a file the bot sent shows in WeChat up to this long before its send returns
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
 _WXID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{3,63}$")
 _VOICE = re.compile(r"^\[语音\]\s*(.*)$", re.S)
@@ -79,7 +81,9 @@ _VOICE = re.compile(r"^\[语音\]\s*(.*)$", re.S)
 
 def _queued(msg: dict) -> bool:
     """Windows 的微信边缘排队转来的（Mac 端 edge 后端，带 edge_event_id）：Windows 只转它运行以后收到的、
-    Mac 没确认的事件（按编号续读，不会重放历史），所以 Mac 离线多久再取都不是历史，不按 MAX_AGE_SEC 丢。"""
+    Mac 没确认的事件（按编号续读，不会重放历史），所以 Mac 离线多久再取都不是历史，不按 MAX_AGE_SEC 丢。
+    PRM_CATCHUP_HOURS 大于 0 时它和本机读到的消息一样按补读的规矩走（晚到的起草但一律先审，太旧的只记下），
+    等于 0 时照旧不看年龄。"""
     return msg.get("edge_event_id") not in (None, "")
 
 
@@ -128,6 +132,41 @@ def _clock_text(at: float) -> str:
     return time.strftime("%m-%d %H:%M", time.localtime(at))
 
 
+def late_note(earliest: float) -> str:
+    """The deal's attention for a draft of messages read late (PRM_CATCHUP_HOURS)."""
+    return f"这次的消息是机器人没在读微信时收到的（最早 {_clock_text(earliest)}），草稿要人看过再发"
+
+
+def missed_note(count: int, earliest: float) -> str:
+    """The deal's attention for messages too old to draft (older than PRM_CATCHUP_HOURS when read)."""
+    return f"{count} 条消息在机器人没在读微信时收到（最早 {_clock_text(earliest)}），没有起草，请看一下"
+
+
+def gap_notes(meta: dict) -> list[str]:
+    """What a draft job's ``meta`` says about messages read late (``late``) or recorded without a
+    draft (``missed``), as attention lines."""
+    notes = []
+    late, missed = meta.get("late"), meta.get("missed")
+    if isinstance(late, dict) and late.get("from"):
+        notes.append(late_note(float(late["from"])))
+    if isinstance(missed, dict) and missed.get("from"):
+        notes.append(missed_note(int(missed.get("count") or 1), float(missed["from"])))
+    return notes
+
+
+def _event_time(ev: dict) -> float:
+    """When a recorded message was written (its own time when kept, else when it was recorded)."""
+    try:
+        return float((ev.get("detail") or {}).get("at") or ev["at"])
+    except (TypeError, ValueError):
+        return float(ev["at"])
+
+
+def _later(deal: dict, at: float) -> float:
+    """The deal's ``last_message_at`` after a message written at ``at`` (it never goes back)."""
+    return max(float(deal.get("last_message_at") or 0), at)
+
+
 EVENT_NAMES = {
     "stage": "改阶段", "mode": "改模式", "mode_expired": "人工接管到期", "takeover": "运营亲手回复，自动接管",
     "operator_message": "运营亲手回复", "creator_message": "接管期间达人的消息", "shipment": "填运单号",
@@ -136,12 +175,16 @@ EVENT_NAMES = {
     "platform_execute": "批准执行平台动作", "platform_result": "平台动作结果",
     "platform_preview": "重新预览平台动作", "platform_ack": "平台动作已处理",
 }
+# A creator's message recorded without a draft because it was read too late (PRM_CATCHUP_HOURS).
+MISSED_EVENT_NAME = "机器人没在读时达人的消息（没有起草）"
 
 
 def event_out(ev: dict) -> dict:
     """An event for the console: what happened, by whom, when (texts kept as stored: masked)."""
     detail = dict(ev.get("detail") or {})
-    return {"id": ev["id"], "kind": ev["kind"], "name": EVENT_NAMES.get(ev["kind"], ev["kind"]),
+    name = (MISSED_EVENT_NAME if ev["kind"] == "creator_message" and detail.get("missed")
+            else EVENT_NAMES.get(ev["kind"], ev["kind"]))
+    return {"id": ev["id"], "kind": ev["kind"], "name": name,
             "actor": ev.get("actor", ""), "at": ev["at"], "detail": detail}
 
 
@@ -289,12 +332,24 @@ class PrmService:
         self.on_parties_changed = on_parties_changed
         self._scrub_messages = scrub_messages
         self._takeover_sec = int(getattr(config, "prm_takeover_min", 120) or 120) * 60
+        # PRM_CATCHUP_HOURS: a message read more than MAX_AGE_SEC late is drafted (always reviewed)
+        # up to this old, only recorded beyond it; 0 = older than MAX_AGE_SEC is history.
+        try:
+            catchup_hours = int(getattr(config, "prm_catchup_hours", CATCHUP_HOURS))
+        except (TypeError, ValueError):
+            catchup_hours = CATCHUP_HOURS
+        self._catchup_sec = min(max(catchup_hours, 0), 72) * 3600
+        # One creator's message at a time: messages read at once (a catch-up after a restart,
+        # a burst) find the job the one before made, so they are one job.
+        self._handle_lock = threading.Lock()
         self._holding_sec = int(getattr(config, "prm_holding_min", 10) or 0) * 60
         self._holding_text = str(getattr(config, "prm_holding_text", "") or HOLDING_TEXT).strip() or HOLDING_TEXT
         self._retention_days = int(getattr(config, "prm_retention_days", retention.RETENTION_DAYS)
                                    or retention.RETENTION_DAYS)
         # created | delivered: when a sample order's 专属佣金 is drafted (next_step_note)
         self._commission_after = str(getattr(config, "prm_commission_after", "delivered") or "delivered")
+        # 批准并执行: checking that a 专属 action is not open already and starting it is one step
+        self._approve_lock = threading.Lock()
         # The admin and the cc users are never creators: their messages stay the relay's.
         self._reserved = {str(w).strip() for w in [getattr(config, "admin_wxid", ""),
                                                     *(getattr(config, "claude_relay_wxids", None) or [])]
@@ -357,7 +412,14 @@ class PrmService:
         return pii.mask(text, lambda k, label, value: self._store.token_for(party_id, k, label, value, now))
 
     def handle(self, msg: dict) -> bool:
-        """True when this is a registered creator's private message (it is then dealt with, silently)."""
+        """True when this is a registered creator's private message (it is then dealt with, silently).
+
+        A message read more than MAX_AGE_SEC after it was written came in while the bot was not
+        reading WeChat (stopped, updated, the database re-opened; or this PC's clock is off): up
+        to PRM_CATCHUP_HOURS old it is drafted as usual but the draft always waits for a person
+        (``meta.late``); older, it is only recorded and the deal asks a person to look
+        (``_missed``).  PRM_CATCHUP_HOURS=0: older than MAX_AGE_SEC is history, as before (a
+        message Windows' edge queued, ``_queued``, never is: drafted as it always was)."""
         if msg.get("is_group", True):
             return False
         chat_id = str(msg.get("chat_id", ""))
@@ -366,23 +428,31 @@ class PrmService:
         party = self._store.party_by_wxid(chat_id)
         if party is None:
             return False
+        self._take(msg, party, chat_id)
+        return True
+
+    def _take(self, msg: dict, party: dict, chat_id: str) -> None:
+        """``handle`` for a registered creator's message.  What is recorded and the job it joins
+        are decided under ``_handle_lock``; a picture or file is fetched outside it (that may wait
+        for the WeChat window, and the backend's own lines wait for the lock)."""
         now = self._clock()
         sent_at = float(msg.get("timestamp", 0) or 0)
-        if sent_at and now - sent_at > MAX_AGE_SEC and not _queued(msg):
-            logger.info("PRM: an old message of party %d (%.0f s) is history, not drafted", party["id"], now - sent_at)
-            return True
-        deal = self._store.deal_of(party["id"], now)
-        mode = self._mode(deal, now)
+        age = now - sent_at if sent_at else 0.0
+        late = age > MAX_AGE_SEC
+        if late and not self._catchup_sec:
+            if not _queued(msg):
+                logger.info("PRM: an old message of party %d (%.0f s) is history, not drafted", party["id"], age)
+                return
+            late = False                   # Windows' queue never replays history: drafted as it always was
+        at = sent_at or now
         line = message_text(msg)
-        if mode != COPILOT:
-            # A person has the chat: recorded for the next draft, nothing queued.
-            text = self._mask(party["id"], f"[{_clock_text(sent_at or now)}] {line}", now)
-            self._store.add_event(deal["id"], party["id"], "creator_message", {"text": text},
-                                  actor="creator", forwarded=False, now=now)
-            self._store.update_deal(deal["id"], now, last_message_at=sent_at or now)
-            self._store.supersede(deal["id"], now, lane=LANE_REPLY)
-            logger.info("PRM: party %d writes while the deal is %s; recorded, not drafted", party["id"], mode)
-            return True
+        if late and age > self._catchup_sec:
+            with self._handle_lock:
+                self._missed(party, self._store.deal_of(party["id"], now), line, at, now)
+            return
+        with self._handle_lock:
+            if self._recorded_for_a_person(party, line, at, now):
+                return
         files: tuple = ()
         kind = attachment_kind(msg)
         if kind:
@@ -392,23 +462,79 @@ class PrmService:
                 line += "（" + "；".join(problems) + "）"
             elif not files:
                 line += f"（{ATTACHMENT_KINDS[kind]}没取到）"
-        text = self._mask(party["id"], f"[{_clock_text(sent_at or now)}] {line}", now)
+        with self._handle_lock:
+            if not self._recorded_for_a_person(party, line, at, now):    # (a person may have taken it meanwhile)
+                self._submit(party, chat_id, line, files, at, age, late, now)
+
+    def _recorded_for_a_person(self, party: dict, line: str, at: float, now: float) -> bool:
+        """A person has the chat (taken over, paused): the message is recorded for the next draft,
+        nothing queued; True then (under ``_handle_lock``)."""
+        deal = self._store.deal_of(party["id"], now)
+        mode = self._mode(deal, now)
+        if mode == COPILOT:
+            return False
+        text = self._mask(party["id"], f"[{_clock_text(at)}] {line}", now)
+        self._store.add_event(deal["id"], party["id"], "creator_message", {"text": text},
+                              actor="creator", forwarded=False, now=now)
+        self._store.update_deal(deal["id"], now, last_message_at=_later(deal, at))
+        self._store.supersede(deal["id"], now, lane=LANE_REPLY)
+        logger.info("PRM: party %d writes while the deal is %s; recorded, not drafted", party["id"], mode)
+        return True
+
+    def _submit(self, party: dict, chat_id: str, line: str, files: tuple, at: float, age: float,
+                late: bool, now: float) -> None:
+        """The draft job of a creator's message (under ``_handle_lock``): the waiting drafts are
+        out of date, the deal hears of the message, the job is made or joined."""
+        deal = self._store.deal_of(party["id"], now)
+        text = self._mask(party["id"], f"[{_clock_text(at)}] {line}", now)
         stale = self._store.supersede(deal["id"], now, lane=LANE_REPLY)   # a 专属佣金 step stays
-        self._store.update_deal(deal["id"], now, last_message_at=sent_at or now)
+        self._store.update_deal(deal["id"], now, last_message_at=_later(deal, at))
         meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"]}
         outbound = self._outbound(deal["id"], party["id"], now)
         if outbound:
             meta["sent"] = outbound
         backlog = self._store.take_backlog(deal["id"])
+        fresh = bool(backlog)
         if backlog:
             meta["history"] = [{"who": "operator" if ev["kind"] == "operator_message" else "creator",
-                                "text": str(ev["detail"].get("text", ""))} for ev in backlog]
+                                "text": str(ev["detail"].get("text", "")),
+                                **({"missed": True} if ev["detail"].get("missed") else {})} for ev in backlog]
+            missed = [ev for ev in backlog if ev["kind"] == "creator_message" and ev["detail"].get("missed")]
+            if missed:
+                meta["missed"] = {"count": len(missed), "from": min(_event_time(ev) for ev in missed)}
+        if late:
+            # Read late: the draft always waits for a person (on_result).  A job of messages read
+            # on time does not take it in; the next messages read late join this one.
+            meta["late"] = {"from": at}
+            if not fresh:
+                open_job = self._relay.store.latest_open(chat_id, drafts_only=True, system=False)
+                fresh = open_job is None or not job_meta(open_job).get("late")
+            logger.warning("PRM: party %d's message was read %.0f min after it was written (the bot was not "
+                           "reading WeChat, or this PC's clock is off); its draft waits for a person",
+                           party["id"], age / 60)
         how, job_id = self._relay.submit(chat_id, chat_id, text, kind=PRM, files=files, settle_sec=SETTLE_SEC,
-                                         meta=meta, fresh=bool(backlog))
+                                         meta=meta, fresh=fresh)
         logger.info("PRM: party %d message -> job #%d (%s)%s%s", party["id"], job_id, how,
                     f"; {stale} waiting draft(s) out of date" if stale else "",
-                    f"; {len(backlog)} line(s) from the takeover told" if backlog else "")
-        return True
+                    f"; {len(backlog)} recorded line(s) told (a takeover, or read too late)" if backlog else "")
+
+    def _missed(self, party: dict, deal: dict, line: str, at: float, now: float) -> None:
+        """A creator's message older than PRM_CATCHUP_HOURS when it was read: too old to draft.
+        It is recorded (the deal's history; the next draft job hears of it, ``take_backlog``),
+        waiting drafts are out of date, and the deal asks a person to look (how many such
+        messages wait, the earliest one's time)."""
+        text = self._mask(party["id"], f"[{_clock_text(at)}] {line}", now)
+        self._store.add_event(deal["id"], party["id"], "creator_message", {"text": text, "missed": True, "at": at},
+                              actor="creator", forwarded=False, now=now)
+        self._store.supersede(deal["id"], now, lane=LANE_REPLY)
+        waiting = [ev for ev in self._store.backlog(deal["id"])
+                   if ev["kind"] == "creator_message" and ev["detail"].get("missed")]
+        earliest = min([_event_time(ev) for ev in waiting] or [at])
+        self._store.update_deal(deal["id"], now, last_message_at=_later(deal, at),
+                                attention=missed_note(len(waiting) or 1, earliest))
+        logger.warning("PRM: party %d's message was read %.1f h after it was written (more than "
+                       "PRM_CATCHUP_HOURS); recorded, not drafted, the deal asks a person to look",
+                       party["id"], (now - at) / 3600)
 
     def _outbound(self, deal_id: int, party_id: int, now: float) -> list[dict]:
         """What the creator really got from us lately, oldest first, for the next draft: the Mac's
@@ -451,7 +577,11 @@ class PrmService:
 
         The bot's own line confirms its packet (``sent_confirmed``); anything else was typed
         by an operator on the phone or the PC: it is recorded for the next draft, and the
-        deal goes to ``human`` for ``PRM_TAKEOVER_MIN`` (a new one extends it).
+        deal goes to ``human`` for ``PRM_TAKEOVER_MIN`` (a new one extends it).  A line read
+        more than MAX_AGE_SEC late (typed while the bot was not reading WeChat) is recorded
+        the same way, but takes the chat over only until ``PRM_TAKEOVER_MIN`` after it was
+        written, so not at all once that has passed.  PRM_CATCHUP_HOURS=0: such a line is
+        history, as before (one Windows' edge queued, ``_queued``, counts as just written).
         """
         chat_id = str(msg.get("chat_id", ""))
         if chat_id not in self._wxids:
@@ -461,8 +591,16 @@ class PrmService:
             return
         now = self._clock()
         sent_at = float(msg.get("timestamp", 0) or 0)
-        if sent_at and now - sent_at > MAX_AGE_SEC and not _queued(msg):
-            return                                         # history (a chat read for the first time)
+        late = bool(sent_at) and now - sent_at > MAX_AGE_SEC
+        if late and not self._catchup_sec:
+            if not _queued(msg):
+                return                                     # history (a chat read for the first time)
+            late = False                                   # Windows' queue never replays history
+        with self._handle_lock:
+            self._own_line(msg, party, chat_id, now, sent_at, late)
+
+    def _own_line(self, msg: dict, party: dict, chat_id: str, now: float, sent_at: float, late: bool) -> None:
+        """``on_own_message`` for a creator's chat (under ``_handle_lock``)."""
         if msg.get("edge_operator"):
             # Mac 端：Windows 已经用发送记录比过了，对不上才报 operator_message，不再比一次
             matched, packet_id = False, None
@@ -489,10 +627,21 @@ class PrmService:
         self._store.add_event(deal["id"], party["id"], "operator_message", {"text": text},
                               actor="operator", forwarded=False, now=now)
         self._store.supersede(deal["id"], now, lane=LANE_REPLY)
-        if deals.effective_mode(deal, now) == PAUSED:
+        mode = deals.effective_mode(deal, now)
+        if mode == PAUSED:
             logger.info("PRM: an operator wrote to party %d from WeChat; the deal stays paused", party["id"])
             return                                         # paused stays paused (the line is recorded)
-        until = now + self._takeover_sec
+        # Typed while the bot was not reading: the chat is a person's as long as it would have
+        # been, counted from when the line was written (a later takeover is not cut short).
+        until = (sent_at if late else now) + self._takeover_sec
+        if until <= now:
+            logger.info("PRM: an operator wrote to party %d from WeChat while the bot was not reading, %.0f min "
+                        "ago; recorded, too long ago to take the chat over", party["id"], (now - sent_at) / 60)
+            return
+        if mode == HUMAN and until <= float(deal.get("mode_until") or 0):
+            logger.info("PRM: an operator's earlier line in party %d's chat recorded; the takeover goes on",
+                        party["id"])
+            return
         self._store.update_deal(deal["id"], now, mode=HUMAN, mode_until=until)
         self._store.add_event(deal["id"], party["id"], "takeover", {"until": until}, actor="system", now=now)
         logger.info("PRM: an operator wrote to party %d from WeChat; the deal is a person's until %s",
@@ -551,33 +700,44 @@ class PrmService:
             return any(seen == text and now - at <= OWN_ECHO_SEC for seen, at in self._seen_lines.get(chat_id) or ())
 
     def _match_own(self, chat_id: str, msg: dict, now: float) -> tuple[bool, Optional[int]]:
-        """Was this own line sent by the bot? ``(True, packet id or None)``."""
+        """Was this own line sent by the bot? ``(True, packet id or None)``.  What was sent before
+        this run is looked for around the time the line was written (read late after a restart:
+        the bot sent it just before it stopped)."""
         try:
             msg_type = int(msg.get("msg_type", 1) or 1)
         except (TypeError, ValueError):
             msg_type = 1
+        written = min(now, float(msg.get("timestamp", 0) or 0) or now)
         with self._sent_lock:
             if msg_type != 1:
                 at, pid = self._sent_files.get(chat_id) or (None, None)
                 if at is not None and now - at <= OWN_FILE_SEC:
                     return True, pid
-                return False, None
-            text = _norm(_QUOTE_PREFIX.sub("", str(msg.get("content", "") or "")))
-            lines = self._sent_lines.get(chat_id) or deque()
-            for item in list(lines):
-                if now - item[1] > OWN_MATCH_SEC:
-                    lines.remove(item)
-                elif item[0] == text:
-                    lines.remove(item)
-                    return True, item[2]
+            else:
+                text = _norm(_QUOTE_PREFIX.sub("", str(msg.get("content", "") or "")))
+                lines = self._sent_lines.get(chat_id) or deque()
+                for item in list(lines):
+                    if now - item[1] > OWN_MATCH_SEC:
+                        lines.remove(item)
+                    elif item[0] == text:
+                        lines.remove(item)
+                        return True, item[2]
         # Sent before this run (the bot restarted in between): the database, but only what
         # WeChat has not shown yet; this run's sends are all in memory, so an operator typing
         # the same words later is still seen as a person.
         party = self._store.party_by_wxid(chat_id)
         if party is None:
             return False, None
+        if msg_type != 1:
+            # A file of a draft sent just before a restart: WeChat shows it while the draft's
+            # files are going out, before its send returns (``sent_at``).
+            for packet in self._store.sent_since(chat_id, written - OWN_FILE_EARLY_SEC):
+                if (packet["attachments"] and float(packet["sent_at"]) < self._started
+                        and float(packet["sent_at"]) <= written + OWN_FILE_SEC):
+                    return True, packet["id"]
+            return False, None
         tokens = self._store.tokens(party["id"])
-        for packet in self._store.sent_since(chat_id, now - OWN_MATCH_SEC):
+        for packet in self._store.sent_since(chat_id, written - OWN_MATCH_SEC):
             if packet["outcome"] != "sent_unconfirmed" or float(packet["sent_at"]) >= self._started:
                 continue
             final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
@@ -585,7 +745,7 @@ class PrmService:
                 return True, packet["id"]
         deal = self._store.deal_of(party["id"], now)
         for ev in self._store.events(deal["id"], limit=20):
-            if (ev["kind"] == "holding_reply" and now - OWN_MATCH_SEC <= ev["at"] < self._started
+            if (ev["kind"] == "holding_reply" and written - OWN_MATCH_SEC <= ev["at"] < self._started
                     and _norm(ev["detail"].get("text")) == text):
                 return True, None
         return False, None
@@ -662,6 +822,8 @@ class PrmService:
             return True
         if status == "cancelled":
             return True
+        # Messages read late (PRM_CATCHUP_HOURS): said in the deal's attention, the draft is reviewed.
+        notes = gap_notes(meta)
         if status in ("failed", "lost"):
             try:
                 extra = json.loads(job.get("result_json") or "{}")
@@ -669,7 +831,7 @@ class PrmService:
                 extra = {}
             extra = extra if isinstance(extra, dict) else {}
             why = "Mac 失联了" if status == "lost" else str(extra.get("error") or job.get("result_text") or "没有返回内容")
-            self._store.update_deal(deal_id, now, attention=f"#{job['id']} 草稿没写成：{why[:120]}")
+            self._store.update_deal(deal_id, now, attention="；".join([f"#{job['id']} 草稿没写成：{why[:120]}", *notes])[:300])
             logger.warning("PRM: job #%d %s; the deal needs a person", job["id"], status)
             return True
         if self._store.packet_for_job(job["id"]) is not None:
@@ -677,11 +839,19 @@ class PrmService:
         try:
             draft = parse_draft(job.get("result_text") or "")
         except DraftError as e:
-            self._store.update_deal(deal_id, now, attention=f"#{job['id']} 的草稿格式不对（{e.code}），没有生成待审批")
+            self._store.update_deal(deal_id, now, attention="；".join(
+                [f"#{job['id']} 的草稿格式不对（{e.code}），没有生成待审批", *notes])[:300])
             logger.warning("PRM: job #%d answer unusable: %s", job["id"], e)
             return True
         files = self._relay.store.outfiles(job["id"])
         attachments = [{"name": f["name"], "path": f["path"], "size": f["size"], "sha256": f["sha256"]} for f in files]
+        # Every file the draft named (an older worker reports only the ones it sent back): fewer came,
+        # the draft waits for a person whatever its kind's gate, and the deal and the draft say which.
+        named = draft.attachments_named if draft.attachments_named is not None else draft.attachments_to_send
+        short = ""
+        if len(named) > len(attachments):
+            lost = missing_files(named, [a["name"] for a in attachments], draft.attachments_missing)
+            short = f"草稿要附 {len(named)} 个文件，只收到 {len(attachments)} 个" + (f"：{'、'.join(lost)}" if lost else "")
         mode = self._mode(deal, now)
         shipment = self._store.latest_shipment(deal_id)
         waybill = shipment["waybill"] if shipment else ""
@@ -700,11 +870,13 @@ class PrmService:
             state = SUPERSEDED                         # a person has the chat
         elif newer is not None and newer["id"] > job["id"]:
             state = SUPERSEDED                         # the creator wrote again: a newer draft is coming
+        elif notes:
+            state = PENDING                            # read late: a person decides, whatever the gate
         else:
             route, state, decided_at = deals.route_for(
                 self._store, draft.message_kind, deal=deal, now=now, text=draft.reply_draft,
                 needs_attention=draft.needs_attention, unknown_tokens=unknown, reason=draft.reason,
-                waybill=waybill, attachments=attachments)
+                waybill=waybill, attachments=attachments, files_named=len(named))
         packet_meta = {"waybill": waybill} if draft.message_kind == "shipping_notice" and waybill else {}
         if lane == LANE_SYSTEM:
             packet_meta["lane"] = LANE_SYSTEM
@@ -716,18 +888,18 @@ class PrmService:
         packet_id = self._store.add_packet(
             deal_id=deal_id, party_id=party_id, job_id=job["id"], chat_id=job["chat_id"],
             kind=draft.message_kind, text=draft.reply_draft, attachments=attachments, intent=draft.intent,
-            slots=draft.slots, stage_proposal=draft.stage_proposal, needs_attention=draft.needs_attention,
-            reason=draft.reason, status=state, route=route, decided_at=decided_at, meta=packet_meta,
+            slots=draft.slots, stage_proposal=draft.stage_proposal, needs_attention=draft.needs_attention or bool(short),
+            reason="；".join(r for r in (short, draft.reason) if r)[:500], status=state, route=route,
+            decided_at=decided_at, meta=packet_meta,
             tool=tool, platform=platform, now=now,
         )
         if state in (PENDING, APPROVED):
             self._store.supersede(deal_id, now, keep=packet_id, lane=lane)
-        attention = [draft.reason] if draft.needs_attention and draft.reason else []
+        attention = [*notes, *([draft.reason] if draft.needs_attention and draft.reason else [])]
         if lane == LANE_SYSTEM and state == SUPERSEDED:
             attention.append(f"#{job['id']} 开专属佣金这一步的草稿没进待审批（人工接管中，或者又有了新的一步），请运营核对")
-        missing = len(draft.attachments_to_send) - len(attachments)
-        if missing > 0:
-            attention.append(f"草稿要附 {len(draft.attachments_to_send)} 个文件，只收到 {len(attachments)} 个")
+        if short:
+            attention.append(short)
         if draft.message_kind == "shipping_notice" and draft.reply_draft and not gates.waybill_ok(draft.reply_draft, waybill):
             attention.append("发货通知里的单号和系统记录对不上" if waybill else "还没有运单号，发货通知不能发")
         if draft.platform is not None and draft.platform.get("verdict") != "ready":
@@ -867,6 +1039,11 @@ class PrmService:
             return {"ok": False, "error": f"预览没通过，不能执行：{why}"}
         if data.get("previewing"):
             return {"ok": False, "error": "正在重新预览，等结果出来再批准"}
+        opened = self._opened_before(packet)
+        if opened:
+            logger.warning("PRM: packet %d not approved: its %s ran before for this product and creator",
+                           packet["id"], action.get("action"))
+            return {"ok": False, "error": opened}
         final = packet["text"] if text is None else str(text).strip()
         if len(final) > MAX_DRAFT_CHARS:
             return {"ok": False, "error": f"最多 {MAX_DRAFT_CHARS} 个字"}
@@ -885,8 +1062,14 @@ class PrmService:
         if packet["attachments"] and self._send_file is None:
             return {"ok": False, "error": "这个微信后端不能发文件（只有 Windows 数据库直读能发）"}
         approved = {**data, "key": uuid.uuid4().hex, "approved_at": now}
-        if not self._store.move(packet["id"], (PENDING,), EXECUTING, decided_at=now, final_text=final,
-                                edited=int(final != packet["text"]), platform=approved):
+        with self._approve_lock:              # two drafts of one product approved at the same moment: one runs
+            opened = self._opened_before(packet)
+            moved = not opened and self._store.move(
+                packet["id"], (PENDING,), EXECUTING, decided_at=now, final_text=final,
+                edited=int(final != packet["text"]), platform=approved)
+        if opened:
+            return {"ok": False, "error": opened}
+        if not moved:
             return {"ok": False, "error": "这条草稿已经处理过了（或者达人又发了新消息，草稿已过时）"}
         meta = {"op": "platform_execute", "party_id": packet["party_id"], "deal_id": packet["deal_id"],
                 "packet_id": packet["id"], "key": approved["key"], "action": mac_action, "run": preview.get("run") or {}}
@@ -904,6 +1087,33 @@ class PrmService:
                               actor="console", now=now)
         logger.info("PRM: packet %d approved; %s goes to the Mac as job #%d", packet["id"], action["action"], job_id)
         return {"ok": True, "status": EXECUTING, "job": job_id}
+
+    def _opened_before(self, packet: dict) -> str:
+        """Why this draft's 专属 action (``ONCE_ACTIONS``) must not run: another draft of the deal has
+        the same action for the same product and creator, verified on the platform (its reply sent,
+        about to go, or held back) or running on the Mac now.  The ledger on the Mac only stops one
+        approval from running twice; this stops a second draft (a chain picked up again while a step
+        runs, a reply that carries a commission against kb/).  "" = it may run."""
+        data = packet["platform"]
+        action = data.get("action") or {}
+        name = action.get("action")
+        if name not in ONCE_ACTIONS:
+            return ""
+        item, creators = action_target(action, data)
+        for other in self._store.deal_packets(packet["deal_id"], tools=(name,),
+                                              statuses=(EXECUTING, APPROVED, SENDING, SENT, FAILED)):
+            theirs = other["platform"] or {}
+            their_item, their_creators = action_target(theirs.get("action") or {}, theirs)
+            if other["id"] == packet["id"] or their_item != item or not (creators & their_creators):
+                continue
+            what = f"商品 {item} 给达人 {action.get('creator_platform_id')} 的「{platforms.label(name)}」"
+            if other["status"] == EXECUTING:
+                at = float(theirs.get("approved_at") or other.get("decided_at") or other["created_at"])
+                return f"{what}正在执行（#{other['id']}，{_date_text(at)} 批准），不能再开一次。{REOPEN_HINT}"
+            if other["status"] != FAILED or (theirs.get("execution") or {}).get("outcome") == platforms.VERIFIED:
+                at = float(other.get("sent_at") or other.get("decided_at") or other["created_at"])
+                return f"{what}已经在 #{other['id']}（{_date_text(at)}）开过了，平台上核验成功，不能再开一次。{REOPEN_HINT}"
+        return ""
 
     def _repreview(self, packet: dict, now: float) -> dict:
         """Ask the Mac for a new preview of a waiting draft's action (after a login, say)."""
@@ -1012,6 +1222,9 @@ class PrmService:
             return
         event = {"packet": packet["id"], "action": action.get("action"), "outcome": outcome,
                  "link": (record.get("created") or {}).get("link", "")}
+        for key in ("item_id", "creator_platform_id"):      # which product, which creator (an older event has neither)
+            if action.get(key):
+                event[key] = str(action[key])
         if (record.get("created") or {}).get("sample_order_no"):
             event["sample_order_no"] = record["created"]["sample_order_no"]
         missing = []
@@ -1312,6 +1525,46 @@ def action_for_mac(action: dict, tokens: dict) -> tuple:
 
 # The 专属佣金 action of each shop: a sample order's products get theirs once it is created.
 COMMISSION_ACTIONS = {"dy": "dy.designated_commission", "xhs": "xhs.direct_plan"}
+# A creator's 专属 actions: one per product and creator (a second would open a second 百应 strategy,
+# 千帆 plan or channel product); ``PrmService._opened_before`` refuses another approval.
+ONCE_ACTIONS = ("dy.designated_commission", "xhs.direct_plan", "dy.channel_goods")
+REOPEN_HINT = "点「不发」；要接着开下一个商品，把物流改回「运输中」再标「已签收」"
+
+
+def action_target(action: dict, data: Optional[dict] = None) -> tuple:
+    """``(item, creators)`` of a 专属 action: the product, and the creator as the draft named them
+    plus, for a 千帆 plan, the buyer id the Mac's preview found (``data``: the packet's ``platform``),
+    so a 小红书号 and the userId of one buyer are the same creator."""
+    item = str(action.get("item_id") or "").strip()
+    creators = {str(action.get("creator_platform_id") or "").strip().lower()}
+    buyer = (((data or {}).get("preview") or {}).get("run") or {}).get("buyer_id")
+    if buyer:
+        creators.add(str(buyer).strip().lower())
+    return item, creators - {""}
+
+
+def _date_text(at: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(at))
+
+
+def missing_files(named: list, arrived: list, reported: list) -> list:
+    """The files a draft named that did not come, for the note on the deal and the draft: what the
+    Mac said it could not send back, with why (``reported``: ``[{"name", "why"}]``), else (an older
+    worker says nothing) each named one whose file name is not among the ``arrived`` names."""
+    if reported:
+        return [f"{_file_name(r['name'])}（{r['why']}）" if r.get("why") else _file_name(r["name"]) for r in reported]
+    left, out = [str(a) for a in arrived], []
+    for name in named:
+        base = _file_name(name)
+        if base in left:
+            left.remove(base)
+        else:
+            out.append(base)
+    return out
+
+
+def _file_name(path: str) -> str:
+    return str(path).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or str(path)
 
 
 def next_step_note(action: dict, record: dict, *, delivered: bool = False) -> str:

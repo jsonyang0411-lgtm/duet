@@ -175,6 +175,52 @@ class MessageStore:
             ).fetchone()
         return row["sender_name"] if row else None
 
+    # ── Catch-up after a restart (PRM_CATCHUP_HOURS, src/wechat/wcdb_backend.py) ──
+
+    def last_stored_at(self, chat_id: str) -> Optional[int]:
+        """The newest ``timestamp`` stored for this chat (None: nothing stored).  The route
+        stores every message it handles first (step ``persist``), so a message of the chat
+        that is newer and not stored was never handled."""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT MAX(timestamp) FROM messages WHERE chat_id = ?", (str(chat_id),),
+            ).fetchone()
+        return None if row is None or row[0] is None else int(row[0])
+
+    def stored_ids(self, message_ids) -> set[str]:
+        """Which of these message ids are stored already."""
+        ids = [str(i) for i in message_ids if i]
+        found: set[str] = set()
+        with self._lock:
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                rows = self.conn.execute(
+                    f"SELECT message_id FROM messages WHERE message_id IN ({', '.join('?' * len(chunk))})",
+                    chunk,
+                ).fetchall()
+                found.update(str(r[0]) for r in rows)
+        return found
+
+    def read_mark(self, chat_id: str) -> Optional[int]:
+        """How far the backend has read this chat as a registered creator's (``chat_read_marks``:
+        the newest message time it saw there); None when it never has."""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT read_ts FROM chat_read_marks WHERE chat_id = ?", (str(chat_id),),
+            ).fetchone()
+        return None if row is None else int(row[0])
+
+    def set_read_mark(self, chat_id: str, read_ts: int) -> None:
+        """Move the chat's read mark forward to ``read_ts`` (never back)."""
+        with self._lock:
+            with self.conn:
+                self.conn.execute(
+                    "INSERT INTO chat_read_marks (chat_id, read_ts, updated_at) VALUES (?, ?, ?)"
+                    " ON CONFLICT(chat_id) DO UPDATE SET read_ts = MAX(read_ts, excluded.read_ts),"
+                    " updated_at = excluded.updated_at",
+                    (str(chat_id), int(read_ts), int(time.time())),
+                )
+
     def get_messages_since(self, chat_id: str, since_ts: int,
                            until_ts: Optional[int] = None,
                            limit: int = 500) -> list[dict]:

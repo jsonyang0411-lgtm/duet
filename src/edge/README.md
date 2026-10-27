@@ -19,7 +19,7 @@
 ```python
 from src.edge.client import EdgeClient, EdgeError
 
-edge = EdgeClient("http://<Windows 的局域网 IP>:8790", token)    # PRM_EDGE_TOKEN
+edge = EdgeClient("http://<Windows 的局域网 IP>:8790", token)    # PRM_EDGE_TOKEN；不在同一个网络时用 Windows 的 Tailscale 地址（cross-network.md）
 edge.put_parties(version, wxids)          # 名单有变化时推；另外 edge.health()["parties_version"] 和自己的对不上时也推
 
 cursor = load_cursor()                    # Mac 已经存好的最后一个事件编号

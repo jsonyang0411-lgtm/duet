@@ -317,6 +317,12 @@ class BotConfig:
     # When a sample order's products get their 专属佣金 drafted: "delivered" (the creator signed
     # for the sample: the deal is marked delivered) or "created" (as soon as the order is made).
     prm_commission_after: str = "delivered"
+    # A creator's message read more than 5 minutes late (it came in while the bot was not
+    # reading WeChat: stopped, updated, the database re-opened) is still drafted up to this many
+    # hours old, its draft always reviewed; an older one is only recorded and the deal asks a
+    # person to look.  After a restart the Windows backend hands such messages on
+    # (wcdb_backend._catchup_plan).  0 = the old rule: older than 5 minutes is history.
+    prm_catchup_hours: int = 12
     # === WeChat edge (src/edge, edge-protocol.md) for the Mac business service ===
     # "on": Windows only receives and sends WeChat messages for the creators the Mac lists;
     # the Mac pulls /edge/* on the relay's port with PRM_EDGE_TOKEN.  Not with PRM_COPILOT.
@@ -484,6 +490,8 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(f"PRM_RETENTION_DAYS must be between 1 and 365, got {kwargs.get('prm_retention_days')}")
     if kwargs.get("prm_commission_after", "delivered") not in ("delivered", "created"):
         errors.append(f"PRM_COMMISSION_AFTER must be delivered or created, got {kwargs.get('prm_commission_after')}")
+    if not (0 <= int(kwargs.get("prm_catchup_hours", 12)) <= 72):
+        errors.append(f"PRM_CATCHUP_HOURS must be between 0 and 72, got {kwargs.get('prm_catchup_hours')}")
     prm_edge = kwargs.get("prm_edge", "off")
     if prm_edge not in ("off", "on"):
         errors.append(f"PRM_EDGE must be off or on, got {prm_edge}")
@@ -617,6 +625,7 @@ def load_config() -> BotConfig:
         "prm_holding_text": os.getenv("PRM_HOLDING_TEXT", "收到，我确认一下马上回你").strip() or "收到，我确认一下马上回你",
         "prm_retention_days": int(os.getenv("PRM_RETENTION_DAYS", "90")),
         "prm_commission_after": os.getenv("PRM_COMMISSION_AFTER", "delivered").strip().lower() or "delivered",
+        "prm_catchup_hours": int(os.getenv("PRM_CATCHUP_HOURS", "12")),
         "prm_edge": _parse_switch(os.getenv("PRM_EDGE", "off")),
         "prm_edge_token": os.getenv("PRM_EDGE_TOKEN", "").strip(),
         "edge_url": os.getenv("EDGE_URL", "").strip(),
