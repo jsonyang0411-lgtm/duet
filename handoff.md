@@ -1,6 +1,6 @@
 # 交接文档：达人商务智能体
 
-> 最后更新：2026-10-27（v64）。开发在 `merge-platforms` 分支上，还没合回 `main`（`main` 停在 `b448beb`）。每次改了什么看第 9 节。
+> 最后更新：2026-10-27（v66）。开发在 `merge-platforms` 分支上，还没合回 `main`（`main` 停在 `b448beb`）。每次改了什么看第 9 节。
 > 读者：接手这个项目的 AI 窗口，以及参与开发的同事。
 > 规矩：新窗口开工前先读完本文件；收工前更新第 3 节（当前状态）、第 5 节（计划进度）和第 9 节（变更记录）。
 
@@ -189,7 +189,8 @@
 
 其余待办：
 - 商品目录要定期重跑（`python3 tools/claude_relay/worker.py --sync-products`，上新、下架后）；还没放进定时任务
-- 一键邀约接进系统（v62 读了代码，见变更记录）：要先在调试版 Chrome 登录巨量百应，再只读核对邀约额度、模板，然后做"预览"版命令；第一次真邀约时运营操作、我们录一次核对
+- 一键邀约：预览版命令已做（`jst invite`，v66）。还差：第一次真邀约时运营在页面上点、我们录一次请求，和预览拼的逐项核对（尤其网址上的 `ewid`、`seraph_did`），核对后放开 `--execute`；卡片上填哪个微信、勾哪些优势等用户定；之后接进控制台（运营逐个确认再发）
+- 达人加我们微信后自动进名单：需求已写给同事（`edge-friends-request.md`，方案 A：Windows 自动通过、报 `friend_added`），等他回复
 - 运单号回填：寄样管理发货后，运单号在哪个字段 / 接口（现在列表接口的 `erpOrderVoList` 是空的）
 - 和 Windows 真机联调（等同事给 `PRM_EDGE_TOKEN`）
 
@@ -408,3 +409,4 @@ CLI 是同事的千帆商家后台命令行工具：私有仓库 `doupi-org/xiao
 - 2026-10-27 v63：用户登录了百应（调试版 Chrome 借抖店登录直接进，doctor 显示 buyin on-site；百应标签页 buyin.jinritemai.com/dashboard 留着，邀约要在它里面发）。只读查了 3 个接口：`shop_contact_rights_info`：我们店 `shop_gmv_type` 7（1 万 ≤ 上周结算 < 10 万），在线邀约额度 LV0-1 2500、LV2-3 2500、LV4-5 1000、LV6-7 200，都没用过；回复率 ≥ 80% 再加 550 / 550 / 500。另有 `offline_rights`（同档 800 / 800 / 800 / 200），像是查看联系方式的额度，没确认；刷新周期接口没写。**近 7 日会话回复率 0%（3 条达人会话都没回）**，已提醒运营去飞鸽回。`card/sender/msg`：默认卡片开着附带商品、没填联系方式。`struct_template`：卡片可勾的"核心优势"（行业知名度、源头工厂、品类丰富、48h 发货、七天无理由等），勾哪些等用户定。
 - 2026-10-27 v64：用户说百应只用来邀约和开佣金，别的达人在百应发来的消息不管（不接进系统）。试了起草的 Claude 用商品目录：kb `商品.md` 改成指向 `kb/products.md`（Grep 搜、不整个读；问颜色尺码售价照目录答；推荐只从目录挑、needs_attention；材质头围现货发货转运营），备份在会话 scratchpad。离线测试：复制业务资料目录，用 worker 的原始命令和提示词（`prm_claude_command`、`prm_prompt`）跑 4 个场景（脚本在会话 scratchpad `prm_catalog_eval.py`）：找款（灯芯绒有哪些颜色）、定款（两款写编码 + 推荐第三款）、细节（材质头围）、小红书达人问某款摩卡色。4 个都答对：列的款和颜色、推荐的三款、写的编码（A7261010037A-M、A7260810095B-M、A7261010048C-M）都和目录一致，问材质头围的转运营，推荐的设了 needs_attention。每次先试着 Read 整个目录，超过 256 KB 被拒后自己改用 Grep，不影响结果。定款时商品写在 slots 的「SKU」里，prm_bridge 的 `PRODUCT_KEYS` 认这一栏。
 - 2026-10-27 v65：用户定起草就用 Opus（不换便宜模型，`prm_model` 不设即默认），成本见 v64。
+- 2026-10-27 v66：给同事写了需求 `edge-friends-request.md`（`1735c39`）：达人看了邀约卡片来加我们，Windows 报新事件 `friend_added`（wxid、昵称、验证消息、怎么通过的），Mac 让运营确认后进名单；倾向方案 A（Windows 自动通过），B（逐个确认再通过）作备选；Mac 收到不认识的事件照样 ack，加事件不升协议版本。聚水潭 CLI 新增 `invite`（`7d00ec7`，`src/buyin.mjs` + `src/commands/invite.mjs`，测试 29 个）：在调试版 Chrome 开着的百应页面里用页面自己的 fetch 发请求（带页面登录和签名），只读做：按抖音号在达人广场 `search_feed_author` 精确找人、`account_check`、`shop_contact_rights_info` 算本周各等级剩余额度、`struct_template` 列卡片可勾的优势，拼出 `shangda/msgs/send` 的请求体（普通卡片 card_version 0：正文、我们的微信 / 手机、优势 key；不带商品和佣金）；`--execute` 锁住。不取聚水潭令牌（入口加了 `needsSession: false`）。真跑预览（嘉嘉嘉雯 LV3、刘熊熊 LV5 都可邀约，额度是**每周**的）。发现百应的达人 uid 每次搜索都不一样（临时加密），真发要现搜现用。
