@@ -713,6 +713,15 @@ class PrmStore:
             rows = self._conn.execute(sql + " ORDER BY id DESC LIMIT ?", (*args, int(limit))).fetchall()
         return [event_view(dict(r)) for r in rows]
 
+    def backlog(self, deal_id: int) -> list[dict]:
+        """What ``take_backlog`` would hand the next draft job now, oldest first, without taking it."""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM deal_events WHERE deal_id = ? AND forwarded = 0 AND kind IN"
+                f" ({', '.join('?' * len(BACKLOG_KINDS))}) ORDER BY id", (deal_id, *BACKLOG_KINDS),
+            ).fetchall()
+        return [event_view(dict(r)) for r in rows]
+
     def take_backlog(self, deal_id: int) -> list[dict]:
         """The creator's and the operators' messages the next draft job has not heard of, oldest
         first; they count as told."""

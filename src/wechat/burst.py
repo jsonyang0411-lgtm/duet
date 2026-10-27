@@ -95,6 +95,15 @@ class MessageBurstBuffer:
         self._pending.clear()
         return ready
 
+    def held_ids(self) -> set[str]:
+        """The ids of the messages held here, not handed on yet (the catch-up after a
+        re-initialisation leaves them to the buffer)."""
+        return {
+            str(message.get("message_id", ""))
+            for pending in self._pending.values()
+            for message in pending.messages
+        }
+
     def _key(self, message: dict) -> tuple[str, str, bool]:
         return (
             str(message.get("chat_id", "")),

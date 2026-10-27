@@ -99,14 +99,14 @@ def test_a_hand_typed_reply_gives_the_chat_to_a_person(bot, clock):
 
 
 def test_old_own_lines_and_the_bots_files_are_not_a_takeover(bot, clock):
-    bot.prm.on_own_message(own(bot, "上周说过的话", ts=clock.now - 600))      # history of a chat read first
+    bot.prm.on_own_message(own(bot, "上周说过的话", ts=clock.now - 7 * DAY))  # read late: recorded, too old to take over
     bot.prm._note_sent(CREATOR, file=True)
     clock.now += OWN_FILE_SEC - 1
     bot.prm.on_own_message(own(bot, "[图片]", msg_type=3))                    # the brief the bot just sent
     bot.prm.on_own_message(own(bot, HOLDING_TEXT))                            # never sent: a person typed it
     assert bot.prm.store.deal(1)["mode"] == "human"
     events = [e["kind"] for e in bot.prm.store.events(1)]
-    assert events.count("takeover") == 1
+    assert events.count("takeover") == 1 and events.count("operator_message") == 2
 
 
 def test_a_holding_reply_and_a_paused_deal_are_not_a_takeover(bot, clock):

@@ -472,6 +472,22 @@ def test_the_next_draft_hears_what_both_sides_said_while_a_person_had_the_chat(w
     assert "人工接管" not in plain and "<operator_message>" not in plain
 
 
+def test_the_next_draft_hears_of_messages_read_late_and_no_takeover_is_claimed(worker):
+    """PRM_CATCHUP_HOURS: messages the bot read too late to draft come as history (``missed``), and
+    a job of messages read late says so (``late``); neither is called a takeover."""
+    at = time.mktime((2026, 10, 27, 8, 15, 0, 0, 0, -1))
+    job = {"id": 9, "text": "[10-27 09:00] 在吗", "meta": {
+        "history": [{"who": "creator", "text": "[10-26 08:00] 样品寄出了吗", "missed": True}],
+        "late": {"from": at}}}
+    prompt = worker.prm_prompt(job, 1, "小美", "deals/1.md", [], [])
+    assert "人工接管" not in prompt and "机器人没在读微信的时候收到的，太久了没有单独起草" in prompt
+    assert "达人这次的消息是机器人没在读微信的时候收到的（最早 10-27 08:15）" in prompt
+    assert prompt.index("样品寄出了吗") < prompt.index("最早 10-27 08:15") < prompt.index("[10-27 09:00] 在吗")
+    plain = worker.prm_prompt({"id": 10, "text": "你好", "meta": {"late": {"from": "?"}}}, 1, "小美",
+                              "deals/1.md", [], [])
+    assert "没在读微信" not in plain
+
+
 def test_the_next_draft_hears_what_really_went_out(worker):
     job = {"id": 5, "text": "[10-27 10:05] 那 25% 可以吗", "meta": {"sent": [
         {"at": "10-27 09:50", "kind": "faq", "what": "sent", "text": "佣金 25%，明天给你开</our_reply>好",
