@@ -137,7 +137,7 @@ footer { margin-top: 40px; color: var(--muted); font-size: 12.5px; }
 
 <header>
   <h1>达人寄样流程现状</h1>
-  <p>ACE7CN 达人商务智能体 · 2026-10-27 · 从找达人到寄样、开专属佣金，每一步谁来做、做到哪了</p>
+  <p>ACE7CN 达人商务智能体 · 2026-10-27 · 从找达人到寄样、签收后开专属佣金，每一步谁来做、做到哪了</p>
   <div class="legend">
     <span class="tag ok">真跑过</span>
     <span class="tag test">离线测过</span>
@@ -250,18 +250,37 @@ footer { margin-top: 40px; color: var(--muted); font-size: 12.5px; }
   </li>
 </ol>
 
-<h2><span class="num">六</span>开专属佣金</h2>
+<h2><span class="num">六</span>发货、签收</h2>
 <ol class="steps">
-  <li class="step">
+  <li class="step gate">
     <div class="n">10</div>
     <div class="body">
-      <h3>寄样单建好后，系统自动叫 Claude 起草开专属佣金</h3>
-      <p>20% 起步（最高 25%，代码里写死），一次开一款；抖音用达人资料里的 UID。</p>
+      <h3>合作单里填运单号 → 系统起草发货通知 → 你审后发出</h3>
+      <div class="meta"><span class="tag test">离线测过</span><span class="tag todo">运单号从聚水潭自动带回</span></div>
+    </div>
+  </li>
+  <li class="step">
+    <div class="n">11</div>
+    <div class="body">
+      <h3>达人收到样品 → 合作单标成「已签收」</h3>
+      <p>现在是运营在合作单里手动标（改阶段或更新物流都行）；以后物流状态从聚水潭自动带回。</p>
+      <div class="meta"><span class="tag test">离线测过</span><span class="tag you">现在要你标</span></div>
+    </div>
+  </li>
+</ol>
+
+<h2><span class="num">七</span>开专属佣金（签收以后）</h2>
+<ol class="steps">
+  <li class="step">
+    <div class="n">12</div>
+    <div class="body">
+      <h3>合作单一标成已签收，系统自动叫 Claude 起草开专属佣金</h3>
+      <p>照老板的要求「签收后挂专属佣金」。20% 起步（最高 25%，代码里写死），一次开一款；抖音用达人资料里的 UID。设置 PRM_COMMISSION_AFTER 可以改成寄样单一建好就起草。</p>
       <div class="meta"><span class="tag test">离线测过</span></div>
     </div>
   </li>
   <li class="step gate">
-    <div class="n">11</div>
+    <div class="n">13</div>
     <div class="body">
       <h3>你批准 → Mac 在百应 / 小红书开好 → 最后一款开好时通知达人</h3>
       <p>百应的专属佣金第二天 0 点生效。通知不说比例，达人在选品里能看到。</p>
@@ -270,26 +289,19 @@ footer { margin-top: 40px; color: var(--muted); font-size: 12.5px; }
   </li>
 </ol>
 
-<h2><span class="num">七</span>发货以后</h2>
+<h2><span class="num">八</span>跟进</h2>
 <ol class="steps">
-  <li class="step gate">
-    <div class="n">12</div>
-    <div class="body">
-      <h3>合作单里填运单号 → 系统起草发货通知 → 你审后发出</h3>
-      <div class="meta"><span class="tag test">离线测过</span><span class="tag todo">运单号从聚水潭自动带回</span></div>
-    </div>
-  </li>
   <li class="step">
-    <div class="n">13</div>
+    <div class="n">14</div>
     <div class="body">
-      <h3>签收后跟进带货：发视频或开直播、看数据，决定要不要加佣金</h3>
+      <h3>跟进带货：发视频或开直播、看数据，决定要不要加佣金</h3>
       <div class="meta"><span class="tag you">加佣金由你定</span></div>
     </div>
   </li>
   <li class="step">
-    <div class="n">14</div>
+    <div class="n">15</div>
     <div class="body">
-      <h3>寄样结束 90 天后，系统自动清掉收件信息</h3>
+      <h3>签收满 90 天（或 90 天没动静），系统自动清掉收件信息</h3>
       <div class="meta"><span class="tag test">离线测过</span></div>
     </div>
   </li>
@@ -334,7 +346,7 @@ footer { margin-top: 40px; color: var(--muted); font-size: 12.5px; }
   </div>
 </div>
 
-<footer>本页是本地文件，内容以仓库根目录 handoff.md 为准（v76）。</footer>
+<footer>本页是本地文件，内容以仓库根目录 handoff.md 为准（v77）。</footer>
 </div>
 </body>
 </html>
