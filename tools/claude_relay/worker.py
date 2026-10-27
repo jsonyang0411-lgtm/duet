@@ -200,6 +200,9 @@ PRM_READ_TOOLS = ("Read", "Glob", "Grep")
 PRM_WRITE_TOOLS = ("Edit", "Write")
 PRM_ALWAYS_ALLOWED = ("StructuredOutput",)     # how --json-schema hands in the answer
 PRM_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+# What a draft is told of the bot's <system_note>: a sample order of 50 products (聚水潭's most, ids
+# up to 32 digits) makes about 2000 characters, its instruction first (service.next_step_note).
+SYSTEM_NOTE_CHARS = 4000
 PRM_STAGES = {
     "new": "待建联", "talk": "意向沟通", "agreed": "意向确认", "hold": "搁置",
     "address": "收集收件信息", "to_ship": "待寄出", "shipped": "已寄出", "transit": "运输中",
@@ -1374,7 +1377,7 @@ def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, fa
         lines.append(history_block(history))
         lines.append("人工接管结束了，下面是达人最新发来的消息。")
     if meta.get("system_note"):
-        lines.append(f"<system_note>\n{_untagged(str(meta['system_note']))[:1000]}\n</system_note>")
+        lines.append(f"<system_note>\n{_untagged(str(meta['system_note']))[:SYSTEM_NOTE_CHARS]}\n</system_note>")
     if got:
         lines.append("达人这次还发来了附件（用 Read 打开，图片可以直接看）：" + "、".join(got))
     if failed:

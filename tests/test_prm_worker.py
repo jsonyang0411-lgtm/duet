@@ -504,6 +504,26 @@ def test_a_system_note_is_its_own_block_and_no_creator_message_is_made_up(worker
     assert "<system_note>" in worker.PRM_SYSTEM_NOTE and "不是达人说的话" in worker.PRM_SYSTEM_NOTE
 
 
+def test_a_big_orders_note_keeps_every_product_and_the_instruction(worker):
+    """A 专场 order of 50 products (聚水潭's most, the longest ids): the 专属佣金 draft is told what to
+    do and every product (the note used to put the instruction after the list and lose it at 1000)."""
+    from src.prm import platforms
+    from src.prm.service import next_step_note
+    ids = [f"3{i:031d}" for i in range(1, platforms.MAX_ORDER_SKUS + 1)]          # 32 digits: the longest dy id
+    order = platforms.check_action({
+        "action": "jst.sample_order", "shop": "dy", "creator_platform": "dy", "creator_account": "test_daren_01",
+        "items": [{"item_id": item, "skus": [{"sku_id": f"4{i:031d}", "qty": 1}]} for i, item in enumerate(ids)]},
+        limits=platforms.FORM_LIMITS)
+    note = next_step_note(order, {"created": {"sample_order_no": "YP2610270000001", "creator_uid": "5100000000000002"}},
+                          delivered=True)
+    prompt = worker.prm_prompt({"id": 9, "text": "", "meta": {"system_note": note}}, 1, "小美", "deals/1.md", [], [])
+    told = prompt[prompt.index("<system_note>"):prompt.index("</system_note>")]
+    assert all(item in told for item in ids)
+    assert "这一份草稿填第一个还没开的商品的 dy.designated_commission" in told and "开过的不要再开" in told
+    assert "抖音 UID 是 5100000000000002" in told and "共 50 个" in told
+    assert told.index("第一个还没开的商品") < told.index(ids[0])                  # what to do, then the list
+
+
 # ── 8.2: the case file on the Mac ─────────────────────────────────────────
 
 CASE = """# 合作单：小美（编号 1）

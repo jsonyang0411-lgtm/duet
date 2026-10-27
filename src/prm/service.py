@@ -1345,22 +1345,28 @@ def next_step_note(action: dict, record: dict, *, delivered: bool = False) -> st
     per draft, so one product each time; the case file says which are done).  Told again (the
     deal set back before 已签收 and signed for again, e.g. after the chain was cut off), the draft
     starts at the first product not done yet, so no 专属佣金 is opened twice.  A 抖店 order names
-    the 抖音 UID 聚水潭 found (``creator_uid``): the draft may only know the creator's 抖音号."""
+    the 抖音 UID 聚水潭 found (``creator_uid``): the draft may only know the creator's 抖音号.
+    What to do comes first and the list of products last: a 专场 order's long list (up to
+    ``platforms.MAX_ORDER_SKUS`` products) never pushes the instruction out of the note."""
     name = action.get("action")
     if name == "jst.sample_order":
         shop = str(action.get("shop") or "")
         if shop not in COMMISSION_ACTIONS:
             return ""
         created = record.get("created") or {}
-        items = "、".join(str(i.get("item_id")) for i in action.get("items") or [] if isinstance(i, dict))
+        ids = [str(i.get("item_id")) for i in action.get("items") or [] if isinstance(i, dict)]
+        if not ids and action.get("item_id"):
+            ids = [str(action["item_id"])]
         number = str(created.get("sample_order_no") or "")
-        done = (f"达人已经签收了寄样单 {number}（{platforms.PLATFORMS[shop]}的商品 {items}）。" if delivered else
-                f"寄样单 {number} 已经在聚水潭建好，寄的是{platforms.PLATFORMS[shop]}的商品 {items}。")
+        what = f"{platforms.PLATFORMS[shop]}的商品，共 {len(ids)} 个，清单在最后"
+        done = (f"达人已经签收了寄样单 {number}（{what}）。" if delivered else
+                f"寄样单 {number} 已经在聚水潭建好，寄的是{what}。")
         uid = str(created.get("creator_uid") or "") if shop == "dy" else ""
         who = f"聚水潭建单时查到达人的抖音 UID 是 {uid}，creator_platform_id 就填它。" if uid else ""
         return (done + who +
                 f"按 kb/合作政策.md 的「开专属佣金」给这些商品开专属佣金：这一份草稿填第一个还没开的商品的 {COMMISSION_ACTIONS[shop]}"
-                "（看案卷，开过的不要再开），把哪些商品还没开记进案卷。")
+                "（看案卷，开过的不要再开），把哪些商品还没开记进案卷。"
+                f"寄样单上的商品（按顺序）：{'、'.join(ids)}。")
     if name in COMMISSION_ACTIONS.values():
         return (f"商品 {action.get('item_id')} 的专属佣金（{action.get('commission_rate')}%）已经在平台上开好了"
                 f"（达人 {action.get('creator_platform_id')}）。"
