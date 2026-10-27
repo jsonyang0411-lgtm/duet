@@ -72,6 +72,7 @@ APPROVED_EXPIRE_SEC = 1800   # an approved draft not sent by then (the bot was s
 SEND_TICK_SEC = 5
 OWN_MATCH_SEC = 1800         # our own line seen in WeChat within this long after sending is the bot's
 OWN_FILE_SEC = 600           # an own picture/file this soon after the bot sent one is the bot's
+READ_BACK_SEC = 120          # our line matched in WeChat and read again this soon after: the same send
 RETENTION_CHECK_SEC = 3600
 PLATFORM_LOST_GRACE_SEC = 1800   # an execution whose Mac went silent this long is given up on (red)
 PLATFORM_OPS = ("platform_execute", "platform_preview")
@@ -377,6 +378,9 @@ class PrmService:
         # file send (when, packet id).
         self._sent_lines: dict[str, deque] = {}
         self._sent_files: dict[str, tuple] = {}
+        # Per chat, our own lines matched lately (normalized text -> when): read again within
+        # READ_BACK_SEC they are the same send read back a second time (_match_own).
+        self._read_back: dict[str, dict[str, float]] = {}
         self._sent_lock = threading.Lock()
         self._started = clock()               # what this run sent is in _sent_lines / _sent_files
         self._last_retention = 0.0
@@ -698,9 +702,41 @@ class PrmService:
                 lines.remove(item)
 
     def _match_own(self, chat_id: str, msg: dict, now: float) -> tuple[bool, Optional[int]]:
-        """Was this own line sent by the bot? ``(True, packet id or None)``.  What was sent before
-        this run is looked for around the time the line was written (read late after a restart:
-        the bot sent it just before it stopped)."""
+        """Was this own line sent by the bot? ``(True, packet id or None)`` (``_match_sent``).
+
+        A text line of ours that was matched in this chat, read again within READ_BACK_SEC,
+        is the same send read back a second time, not an operator typing: WeChat 4.1
+        writes a line it sends with no server id and fills one in a second later, and a backend
+        that took that for a new message handed the row on twice (the WCDB backend's ids no
+        longer change, src/wechat/wcdb_backend.py; this is the safety net).  The same words
+        after that are a person's again."""
+        matched, packet_id = self._match_sent(chat_id, msg, now)
+        try:
+            msg_type = int(msg.get("msg_type", 1) or 1)
+        except (TypeError, ValueError):
+            msg_type = 1
+        if msg_type != 1:
+            return matched, packet_id
+        text = _norm(_QUOTE_PREFIX.sub("", str(msg.get("content", "") or "")))
+        with self._sent_lock:
+            seen = self._read_back.setdefault(chat_id, {})
+            for line, at in list(seen.items()):
+                if now - at > READ_BACK_SEC:
+                    del seen[line]
+            if matched:
+                seen[text] = now
+            elif text in seen:
+                logger.info("PRM: our line in %s…'s chat read again %.0f s after it was matched (the same send, "
+                            "a second id); not an operator's", chat_id[:8], now - seen[text])
+                return True, None
+            if not seen:
+                del self._read_back[chat_id]
+        return matched, packet_id
+
+    def _match_sent(self, chat_id: str, msg: dict, now: float) -> tuple[bool, Optional[int]]:
+        """Was this own line sent by the bot (``_match_own``)?  What was sent before this run is
+        looked for around the time the line was written (read late after a restart: the bot
+        sent it just before it stopped)."""
         try:
             msg_type = int(msg.get("msg_type", 1) or 1)
         except (TypeError, ValueError):
