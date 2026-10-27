@@ -1784,6 +1784,8 @@ def check_record(value) -> dict:
             created[key] = _clip(created_in[key], 200)
     if _ORDER_NO.match(str(created_in.get("sample_order_no") or "")):
         created["sample_order_no"] = str(created_in["sample_order_no"])
+    if _DIGITS.match(str(created_in.get("creator_uid") or "")):
+        created["creator_uid"] = str(created_in["creator_uid"])
     if isinstance(created_in.get("strategy_ids"), list):
         created["strategy_ids"] = [_clip(s, 40) for s in created_in["strategy_ids"][:10]]
     link = str(created_in.get("link") or "")
@@ -2519,6 +2521,12 @@ def _execute_jst(action: dict, cfg: dict, plan: dict, run_one, record: dict, cat
         _jst_facts(data, rec)
         if _ORDER_NO.match(str(data.get("orderNo") or "")):
             record["created"]["sample_order_no"] = str(data["orderNo"])
+        # the creator's 抖音 UID as 聚水潭 found them (platformUid = its referrerId): their 专属佣金
+        # (dy.designated_commission) is set by it, and the draft may only know the 抖音号
+        daren = data.get("daren") if isinstance(data.get("daren"), dict) else {}
+        uid = str(daren.get("platformUid") or daren.get("referrerId") or "")
+        if _DIGITS.match(uid):
+            record["created"]["creator_uid"] = uid
     if rec["outcome"] != VERIFIED:
         # what the operator must check in 聚水潭 goes with the red mark (the order may exist)
         number = record["created"].get("sample_order_no")

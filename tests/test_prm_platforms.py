@@ -794,7 +794,7 @@ def test_a_sample_order_runs_once_with_the_number_and_the_ledger_keeps_it_masked
     approved = {**SAMPLE, "receiver": {**RECEIVER, "phone": "13900001111"}}      # as the bot sends it
     out = execute(jcfg, approved, {"steps": ["create"]}, tmp_path)
     assert out["outcome"] == "VERIFIED_SUCCESS", out
-    assert out["created"] == {"sample_order_no": JST_ORDER}
+    assert out["created"] == {"sample_order_no": JST_ORDER, "creator_uid": DY_UID}     # the 抖音 UID 聚水潭 found
     [call] = node.calls()
     assert "--execute" in call["argv"] and call["spec"]["receiver"]["phone"] == "13900001111"
     facts = {f["label"]: f["value"] for f in out["steps"][0]["facts"]}
@@ -805,7 +805,8 @@ def test_a_sample_order_runs_once_with_the_number_and_the_ledger_keeps_it_masked
                                                         "city": "佛山市", "district": "", "address": "（详细地址已清除）"}
     again = execute(jcfg, approved, {"steps": ["create"]}, tmp_path)
     assert again["outcome"] == "ALREADY_RUN" and len(node.calls()) == 1
-    assert platforms.check_record(json.loads(json.dumps(out)))["created"] == {"sample_order_no": JST_ORDER}
+    assert platforms.check_record(json.loads(json.dumps(out)))["created"] == {"sample_order_no": JST_ORDER,
+                                                                              "creator_uid": DY_UID}
 
 
 def test_a_sample_order_with_the_placeholder_still_in_it_is_not_run(node, jcfg, tmp_path):
@@ -838,7 +839,20 @@ def test_the_bot_keeps_only_a_sample_order_number():
     assert platforms.check_record(rec)["created"] == {"sample_order_no": JST_ORDER}
     rec["created"]["sample_order_no"] = "YP1; rm"
     assert platforms.check_record(rec)["created"] == {}
+    rec["created"] = {"sample_order_no": JST_ORDER, "creator_uid": DY_UID}
+    assert platforms.check_record(rec)["created"] == {"sample_order_no": JST_ORDER, "creator_uid": DY_UID}
+    for odd in ("6aaa5100a553c3001554dc79", "0123456789", "12; rm", ""):
+        rec["created"]["creator_uid"] = odd                                 # only a 抖音 UID: digits
+        assert platforms.check_record(rec)["created"] == {"sample_order_no": JST_ORDER}
 
+
+
+def test_a_sample_order_keeps_the_creator_uid_only_when_it_is_a_douyin_one(node, jcfg, tmp_path):
+    answer = jst_done()
+    answer["daren"] = {**answer["daren"], "platformUid": None, "referrerId": "6aaa5100a553c3001554dc79"}
+    node.rules([rule(["sample-create"], answer, execute=True)])
+    out = execute(jcfg, {**SAMPLE, "receiver": {**RECEIVER, "phone": "13900001111"}}, {"steps": ["create"]}, tmp_path)
+    assert out["outcome"] == "VERIFIED_SUCCESS" and out["created"] == {"sample_order_no": JST_ORDER}
 
 def test_jushuitan_is_no_catalogue_platform(node, jcfg):
     cat = platforms.sync_catalog(jcfg, ["jst"], previous=catalog())
@@ -909,7 +923,7 @@ def test_several_products_run_in_one_order(node, jcfg, tmp_path):
     node.rules([rule(["sample-create"], jst_done(), execute=True)])
     approved = {**THREE, "receiver": {**RECEIVER, "phone": "13900001111"}}
     out = execute(jcfg, approved, {"steps": ["create"]}, tmp_path)
-    assert out["outcome"] == "VERIFIED_SUCCESS" and out["created"] == {"sample_order_no": JST_ORDER}
+    assert out["outcome"] == "VERIFIED_SUCCESS" and out["created"] == {"sample_order_no": JST_ORDER, "creator_uid": DY_UID}
     [call] = node.calls()
     assert "--execute" in call["argv"] and len(call["spec"]["goods"]) == 4
     assert {g["title"] for g in call["spec"]["goods"]} == {"测试主品", "测试贝雷帽 秋冬羊毛款", "测试药盒帽"}

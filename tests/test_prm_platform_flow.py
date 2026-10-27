@@ -601,3 +601,41 @@ def test_a_commission_step_and_a_reply_do_not_put_each_other_out_of_date(bot, cl
     bot.prm.handle(bot.msg("对了，能寄黑色吗"))                              # the creator writes again
     assert bot.prm.store.packet(reply["id"])["status"] == "superseded"      # her reply is redrafted
     assert bot.prm.store.packet(step["id"])["status"] == "pending"          # the 专属佣金 step stays
+
+
+def test_a_douyin_order_tells_the_commission_draft_the_uid_it_found(bot, clock):
+    packet = ordered(bot, clock)
+    mac_runs(bot, approve(bot, packet), record(sample_order_no=JST_ORDER, creator_uid="5100000000000099"))
+    bot.prm.send_approved()
+    assert bot.prm.deal_action("stage", {"deal_id": packet["deal_id"], "stage": "delivered"})["ok"]
+    note = bot.worker_takes()["meta"]["system_note"]
+    assert "抖音 UID 是 5100000000000099" in note and "第一个还没开的商品" in note   # the draft may know only the 抖音号
+
+
+def test_signed_for_again_after_a_step_back_picks_up_what_is_left(bot, clock):
+    """The chain cut off (say a newer draft took a step's place): 运输中, then 已签收 again, asks
+    again, and the draft starts at the first product not done yet (kb/合作政策.md 2.1)."""
+    packet = ordered(bot, clock)
+    mac_runs(bot, approve(bot, packet), record(sample_order_no=JST_ORDER))
+    bot.prm.send_approved()
+    assert bot.prm.deal_action("stage", {"deal_id": packet["deal_id"], "stage": "delivered"})["ok"]
+    first = bot.worker_takes()
+    bot.finish(first["id"], draft(message_kind="other", reply_draft="", slots={}))
+    for stage in ("transit", "delivered"):
+        assert bot.prm.deal_action("stage", {"deal_id": packet["deal_id"], "stage": stage})["ok"]
+    again = bot.worker_takes()
+    assert again is not None and again["id"] != first["id"]
+    assert "达人已经签收了寄样单" in again["meta"]["system_note"] and "开过的不要再开" in again["meta"]["system_note"]
+
+
+def test_only_a_douyin_order_names_the_uid_and_a_commission_names_its_creator():
+    from src.prm.service import next_step_note
+    dy = platforms.check_action(SAMPLE)
+    assert f"抖音 UID 是 {DY_UID}" in next_step_note(dy, record(sample_order_no=JST_ORDER, creator_uid=DY_UID))
+    assert "UID" not in next_step_note(dy, record(sample_order_no=JST_ORDER))
+    xhs = platforms.check_action({**SAMPLE, "shop": "xhs", "item_id": XHS_ITEM, "skus": [{"sku_id": "a" * 24, "qty": 1}],
+                                  "creator_platform": "xhs"})
+    assert "UID" not in next_step_note(xhs, record(sample_order_no=JST_ORDER, creator_uid=DY_UID))
+    commission = platforms.check_action({"action": "dy.designated_commission", "item_id": DY_ITEM,
+                                         "creator_platform_id": DY_UID, "commission_rate": 20})
+    assert f"开好了（达人 {DY_UID}）" in next_step_note(commission, record())
