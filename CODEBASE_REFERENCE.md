@@ -598,6 +598,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `tools/ocr_check.py` | 真机上检查 OCR，见 §2.27 |
 | `tools/uia_probe.py` / `tools/friend_admin.py` | 好友管理的摸底和手动工具，见 §2.28 |
 | `tools/image_probe.py` / `tools/image_key_check.py` | 图片查找和 `.dat` 密钥的检查，见 §2.30 |
+| `tools/friend_probe.py` | Windows 上运行（只读：只用 `WcdbNativeClient` 的 `get_sessions` / `get_messages`，不点、不写微信）：为 `friend_added`（`edge-friends-reply.md`）看新好友在微信 4 数据库里的样子；`--chats`（默认 8）个最新的个人私聊（`_is_private_talker`，去掉自己和 `@openim`），每个前 `--messages`（默认 12）条按时间排：类型、我 / 对方 / 系统、文字（号码打成 3+4、「你已添加了」后面的名字和会话名换成〈名字〉、非文字类型只写类型号，每条最多 120 字）；带好友提示的行标 `>>>`；私聊编号只写形状（`wxid_` 还是自定义、几位）；另把会话和消息的字段名列出来；同样的内容写进 `--out`（默认项目目录的 `probe-friends.txt`，不进仓库） |
 | `tools/file_probe.py` | 收到的文件在微信窗口里的位置，见 §2.31 |
 | `tools/setup_wizard.py` | 命令行版的第一次设置：自动找 `dbPath`（`Documents/xwechat_files`）和 `myWxid`，用 wx_key.dll Hook 取密钥，写进 .env |
 | `tools/wechat_memory_scan.py` | 在微信进程（WeChatWin.dll）的内存里找 64 位十六进制的数据库密钥（排错用） |
