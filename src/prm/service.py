@@ -285,6 +285,8 @@ class PrmService:
                                    or retention.RETENTION_DAYS)
         # created | delivered: when a sample order's 专属佣金 is drafted (next_step_note)
         self._commission_after = str(getattr(config, "prm_commission_after", "delivered") or "delivered")
+        # 批准并执行: checking that a 专属 action is not open already and starting it is one step
+        self._approve_lock = threading.Lock()
         # The admin and the cc users are never creators: their messages stay the relay's.
         self._reserved = {str(w).strip() for w in [getattr(config, "admin_wxid", ""),
                                                     *(getattr(config, "claude_relay_wxids", None) or [])]
@@ -801,6 +803,11 @@ class PrmService:
             return {"ok": False, "error": f"预览没通过，不能执行：{why}"}
         if data.get("previewing"):
             return {"ok": False, "error": "正在重新预览，等结果出来再批准"}
+        opened = self._opened_before(packet)
+        if opened:
+            logger.warning("PRM: packet %d not approved: its %s ran before for this product and creator",
+                           packet["id"], action.get("action"))
+            return {"ok": False, "error": opened}
         final = packet["text"] if text is None else str(text).strip()
         if len(final) > MAX_DRAFT_CHARS:
             return {"ok": False, "error": f"最多 {MAX_DRAFT_CHARS} 个字"}
@@ -819,8 +826,14 @@ class PrmService:
         if packet["attachments"] and self._send_file is None:
             return {"ok": False, "error": "这个微信后端不能发文件（只有 Windows 数据库直读能发）"}
         approved = {**data, "key": uuid.uuid4().hex, "approved_at": now}
-        if not self._store.move(packet["id"], (PENDING,), EXECUTING, decided_at=now, final_text=final,
-                                edited=int(final != packet["text"]), platform=approved):
+        with self._approve_lock:              # two drafts of one product approved at the same moment: one runs
+            opened = self._opened_before(packet)
+            moved = not opened and self._store.move(
+                packet["id"], (PENDING,), EXECUTING, decided_at=now, final_text=final,
+                edited=int(final != packet["text"]), platform=approved)
+        if opened:
+            return {"ok": False, "error": opened}
+        if not moved:
             return {"ok": False, "error": "这条草稿已经处理过了（或者达人又发了新消息，草稿已过时）"}
         meta = {"op": "platform_execute", "party_id": packet["party_id"], "deal_id": packet["deal_id"],
                 "packet_id": packet["id"], "key": approved["key"], "action": mac_action, "run": preview.get("run") or {}}
@@ -838,6 +851,33 @@ class PrmService:
                               actor="console", now=now)
         logger.info("PRM: packet %d approved; %s goes to the Mac as job #%d", packet["id"], action["action"], job_id)
         return {"ok": True, "status": EXECUTING, "job": job_id}
+
+    def _opened_before(self, packet: dict) -> str:
+        """Why this draft's 专属 action (``ONCE_ACTIONS``) must not run: another draft of the deal has
+        the same action for the same product and creator, verified on the platform (its reply sent,
+        about to go, or held back) or running on the Mac now.  The ledger on the Mac only stops one
+        approval from running twice; this stops a second draft (a chain picked up again while a step
+        runs, a reply that carries a commission against kb/).  "" = it may run."""
+        data = packet["platform"]
+        action = data.get("action") or {}
+        name = action.get("action")
+        if name not in ONCE_ACTIONS:
+            return ""
+        item, creators = action_target(action, data)
+        for other in self._store.deal_packets(packet["deal_id"], tools=(name,),
+                                              statuses=(EXECUTING, APPROVED, SENDING, SENT, FAILED)):
+            theirs = other["platform"] or {}
+            their_item, their_creators = action_target(theirs.get("action") or {}, theirs)
+            if other["id"] == packet["id"] or their_item != item or not (creators & their_creators):
+                continue
+            what = f"商品 {item} 给达人 {action.get('creator_platform_id')} 的「{platforms.label(name)}」"
+            if other["status"] == EXECUTING:
+                at = float(theirs.get("approved_at") or other.get("decided_at") or other["created_at"])
+                return f"{what}正在执行（#{other['id']}，{_date_text(at)} 批准），不能再开一次。{REOPEN_HINT}"
+            if other["status"] != FAILED or (theirs.get("execution") or {}).get("outcome") == platforms.VERIFIED:
+                at = float(other.get("sent_at") or other.get("decided_at") or other["created_at"])
+                return f"{what}已经在 #{other['id']}（{_date_text(at)}）开过了，平台上核验成功，不能再开一次。{REOPEN_HINT}"
+        return ""
 
     def _repreview(self, packet: dict, now: float) -> dict:
         """Ask the Mac for a new preview of a waiting draft's action (after a login, say)."""
@@ -946,6 +986,9 @@ class PrmService:
             return
         event = {"packet": packet["id"], "action": action.get("action"), "outcome": outcome,
                  "link": (record.get("created") or {}).get("link", "")}
+        for key in ("item_id", "creator_platform_id"):      # which product, which creator (an older event has neither)
+            if action.get(key):
+                event[key] = str(action[key])
         if (record.get("created") or {}).get("sample_order_no"):
             event["sample_order_no"] = record["created"]["sample_order_no"]
         missing = []
@@ -1246,6 +1289,26 @@ def action_for_mac(action: dict, tokens: dict) -> tuple:
 
 # The 专属佣金 action of each shop: a sample order's products get theirs once it is created.
 COMMISSION_ACTIONS = {"dy": "dy.designated_commission", "xhs": "xhs.direct_plan"}
+# A creator's 专属 actions: one per product and creator (a second would open a second 百应 strategy,
+# 千帆 plan or channel product); ``PrmService._opened_before`` refuses another approval.
+ONCE_ACTIONS = ("dy.designated_commission", "xhs.direct_plan", "dy.channel_goods")
+REOPEN_HINT = "点「不发」；要接着开下一个商品，把物流改回「运输中」再标「已签收」"
+
+
+def action_target(action: dict, data: Optional[dict] = None) -> tuple:
+    """``(item, creators)`` of a 专属 action: the product, and the creator as the draft named them
+    plus, for a 千帆 plan, the buyer id the Mac's preview found (``data``: the packet's ``platform``),
+    so a 小红书号 and the userId of one buyer are the same creator."""
+    item = str(action.get("item_id") or "").strip()
+    creators = {str(action.get("creator_platform_id") or "").strip().lower()}
+    buyer = (((data or {}).get("preview") or {}).get("run") or {}).get("buyer_id")
+    if buyer:
+        creators.add(str(buyer).strip().lower())
+    return item, creators - {""}
+
+
+def _date_text(at: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(at))
 
 
 def next_step_note(action: dict, record: dict, *, delivered: bool = False) -> str:
