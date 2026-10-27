@@ -1149,13 +1149,16 @@ class PrmService:
 
     def send_holding_replies(self) -> int:
         """One holding reply per round of the creator's messages whose draft waits too long
-        (the Mac's drafts only: a system notice answers nothing the creator asked)."""
+        (the Mac's replies only: a system notice, or a next step the bot asked for (the system
+        lane: a 专属佣金 waiting for a person), answers nothing the creator asked)."""
         if self._send is None or self._holding_sec <= 0:
             return 0
         now = self._clock()
         sent, done = 0, set()
         for packet in reversed(self._store.packets((PENDING,), limit=200)):
             if packet["job_id"] is None or packet["deal_id"] in done:
+                continue
+            if (packet.get("meta") or {}).get("lane") == LANE_SYSTEM:
                 continue
             if now - float(packet["created_at"]) < self._holding_sec:
                 continue
