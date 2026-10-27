@@ -6,7 +6,6 @@
 
 import threading
 import time
-from types import SimpleNamespace
 
 import pytest
 
@@ -186,7 +185,7 @@ def test_the_bot_wires_the_list_and_drafts_to_the_influencer_module(tmp_path, fa
     store.add_contacts([CREATOR, "wxid_off"], source=SOURCE_CONSOLE)
     store.save_contact("wxid_off", enabled=False, source=SOURCE_CONSOLE)
     backend = EdgeBackend(client=EdgeClient(fake.url, fake.token), state_path=str(tmp_path / "s.json"))
-    Bot._wire_edge_backend(backend, SimpleNamespace(store=store))
+    Bot._wire_edge_backend(backend, store)
     assert backend.parties() == [CREATOR], "停用的达人不推"
     backend._reply_sink(CREATOR, "好的老师", {})
     [item] = store.list_inbox()

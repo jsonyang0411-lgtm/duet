@@ -1,101 +1,22 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Handshake, Copy, ArrowClockwise, CheckCircle, XCircle, UserPlus, PencilSimple, ChatCircleDots } from '@phosphor-icons/react'
+import { Handshake, ArrowClockwise, CheckCircle, UserPlus, PencilSimple, ChatCircleDots } from '@phosphor-icons/react'
 import { get, post } from '../api'
 import { useToast } from '../store/toast'
-import { PageHead, Card, Field, TextInput, TextArea, NumberInput, Switch, Seg, Empty, Note, Banner, Dialog, Confirm } from './ui'
+import { PageHead, Card, Field, TextInput, Switch, Seg, Empty, Note, Dialog } from './ui'
 
-// 达人审批（src/influencer/，说明见 handoff.md）：审批单、达人名单两个子页。
-// 「通过」会真的在聚水潭「寄样管理」建寄样单（会发货），撤不回，所以执行前要再确认一次。
-// 专属佣金不在这里开：在「待审批」里用平台动作开（D34）。
-// 发给达人的消息先由运营复制后在微信里手动发送（Q2）。提醒只做在控制台里（D14）：
-// 左栏「达人审批」上的数字 = 待审批 + 待处理，「待处理」子页列出要人工回复的达人消息和缺货。
-
-const FILTERS = [
-  { value: 'pending', label: '待审批' },
-  { value: 'executing', label: '执行中' },
-  { value: 'fulfilled', label: '已执行' },
-  { value: 'rejected', label: '已驳回' },
-  { value: 'failed', label: '执行失败' },
-  { value: 'expired', label: '已过期' },
-  { value: 'all', label: '全部' },
-]
-const PENDING = 'PENDING_APPROVAL'
-const STATUS_TAG = { PENDING_APPROVAL: 'cy', EXECUTING: 'pend', FULFILLED: 'ok', REJECTED: 'off', FAILED: 'need', EXPIRED: 'off' }
+// 达人名单（src/influencer/，说明见 handoff.md）：名单、待处理两个子页。
+// 名单里启用的达人，私聊由 PRM 起草、在「待审批」审核；寄样单、专属佣金也在「待审批」里用平台动作办
+// （jst.sample_order、dy.designated_commission，2026-10-27 起）。提醒只做在控制台里（D14）：
+// 左栏「达人名单」上的数字 = 待处理的数量。
 
 const when = (ts) => (ts ? new Date(ts * 1000).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '')
-const percent = (rate) => Math.round(rate * 1000) / 10
-
-function timeLeft(expiresAt) {
-  const hours = (expiresAt - Date.now() / 1000) / 3600
-  if (hours <= 0) return '已超过有效期'
-  return hours < 1 ? '不到 1 小时后过期' : `${Math.floor(hours)} 小时后过期`
-}
-
-async function copyText(text) {
-  try {
-    await navigator.clipboard.writeText(text)
-    return true
-  } catch {
-    // 桌面窗口里可能没有剪贴板接口，退回到选中文本再复制
-  }
-  const area = document.createElement('textarea')
-  area.value = text
-  area.setAttribute('readonly', '')
-  area.style.position = 'fixed'
-  area.style.opacity = '0'
-  document.body.appendChild(area)
-  area.select()
-  let ok = false
-  try { ok = document.execCommand('copy') } catch { ok = false }
-  area.remove()
-  return ok
-}
-
-// 「今日概览」：数字都来自数据库（B13），点一下进入对应的列表（R5）
-function Overview({ onFilter }) {
-  const toast = useToast()
-  const [o, setO] = useState(null)
-  useEffect(() => { get('/api/influencer/overview').then(setO, () => setO(null)) }, [])
-  if (!o) return null
-  const tiles = [
-    { label: '待审批', value: o.pending, hint: o.expiring_soon ? `${o.expiring_soon} 单 12 小时内过期` : '', go: () => onFilter('pending'), warn: o.expiring_soon > 0 },
-    { label: '待处理', value: o.inbox, hint: '达人消息、缺货', go: () => { window.location.hash = '#/influencer/inbox' }, warn: o.inbox > 0 },
-    { label: '近 24 小时新申请', value: o.submitted_24h, go: () => onFilter('all') },
-    { label: '近 24 小时已执行', value: o.fulfilled_24h, go: () => onFilter('fulfilled') },
-    { label: '近 24 小时失败', value: o.failed_24h, go: () => onFilter('failed'), warn: o.failed_24h > 0 },
-    { label: '近 24 小时驳回', value: o.rejected_24h, go: () => onFilter('rejected') },
-  ]
-  if (o.executing) tiles.push({ label: '停在执行中', value: o.executing, hint: '要人工核对', go: () => onFilter('executing'), warn: true })
-  const copy = async () => {
-    if (await copyText(o.brief)) toast.ok('已复制今日概览')
-    else toast.err('复制没有成功，请手动选中文字复制')
-  }
-  return (
-    <section className="overview" aria-label="今日概览">
-      <div className="row" style={{ marginBottom: 8 }}>
-        <span className="label grow">今日概览</span>
-        <button type="button" className="btn sm ghost" onClick={copy}><Copy />复制概览</button>
-      </div>
-      <div className="ov-tiles">
-        {tiles.map((t) => (
-          <button key={t.label} type="button" className={`ov-tile${t.warn ? ' warn' : ''}`} onClick={t.go}>
-            <span className="ov-v num">{t.value}</span>
-            <span className="ov-l">{t.label}</span>
-            {t.hint && <span className="ov-h">{t.hint}</span>}
-          </button>
-        ))}
-      </div>
-    </section>
-  )
-}
 
 export default function InfluencerPanel({ sub }) {
-  if (sub === 'contacts') return <ContactsPage />
   if (sub === 'inbox') return <InboxPage />
-  return <ApprovalsPage />
+  return <ContactsPage />
 }
 
-/** 左栏角标用：待审批 + 待处理的数量，每 30 秒问一次。 */
+/** 左栏角标用：待处理的数量，每 30 秒问一次。 */
 export function useInfluencerAttention() {
   const [count, setCount] = useState(0)
   useEffect(() => {
@@ -103,7 +24,7 @@ export function useInfluencerAttention() {
     const ask = async () => {
       try {
         const d = await get('/api/influencer/counts')
-        if (alive) setCount((d.pending || 0) + (d.inbox || 0))
+        if (alive) setCount(d.inbox || 0)
       } catch { /* 控制台离线时不显示 */ }
     }
     ask()
@@ -111,409 +32,6 @@ export function useInfluencerAttention() {
     return () => { alive = false; clearInterval(timer) }
   }, [])
   return count
-}
-
-function useInfluencerStatus() {
-  const [status, setStatus] = useState(null)
-  const reload = useCallback(async () => {
-    try { setStatus(await get('/api/influencer/status')) } catch { /* 页面本身会显示读取失败 */ }
-  }, [])
-  useEffect(() => { reload() }, [reload])
-  return { status, reload }
-}
-
-function StatusNotes({ status }) {
-  if (!status) return null
-  return (
-    <div className="stack" style={{ gap: 8, marginBottom: 14 }}>
-      {status.mock && (
-        <Banner title="模拟模式已打开（INFLUENCER_MOCK=1）">
-          商品、寄样单号都是假的：批准不会真的建单。
-        </Banner>
-      )}
-      {!status.erp.ready && <Note kind="warn">聚水潭现在用不了：{status.erp.detail}。批准会失败，审批单会留在待审批。</Note>}
-      {!status.xhs.ready && <Note kind="warn">小红书 CLI 现在用不了：{status.xhs.detail}。小红书达人的粉丝数查不到（只作参考，不影响审批）。</Note>}
-      <SampleLimits limits={status.sample_limits} />
-    </div>
-  )
-}
-
-// 寄样上限（D5）：在 .env 里设 INFLUENCER_MAX_SAMPLES_PER_PERSON / INFLUENCER_MAX_SAMPLES_PER_DAY
-function SampleLimits({ limits }) {
-  if (!limits) return null
-  const parts = []
-  if (limits.per_person) parts.push(`每位达人 ${limits.window_days} 天内最多 ${limits.per_person} 单`)
-  if (limits.per_day) parts.push(`每天一共最多 ${limits.per_day} 单`)
-  return parts.length
-    ? <Note kind="cy">寄样上限：{parts.join('，')}。超过上限的单不能通过。</Note>
-    : <Note kind="cy">寄样上限还没设，现在不限单数。</Note>
-}
-
-// ── 审批单 ──────────────────────────────────────────────────────────
-
-function ApprovalsPage() {
-  const { status, reload: reloadStatus } = useInfluencerStatus()
-  const [filter, setFilter] = useState('pending')
-  const [data, setData] = useState(null)
-  const [err, setErr] = useState('')
-
-  const load = useCallback(async () => {
-    try {
-      setData(await get('/api/influencer/approvals', { status: filter }))
-      setErr('')
-    } catch (e) { setErr(e.message) }
-  }, [filter])
-  useEffect(() => { load() }, [load])
-
-  const refresh = () => { load(); reloadStatus() }
-  const items = data?.items || []
-  const counts = data?.counts || {}
-  const tabs = FILTERS.map((f) => ({ ...f, count: f.value === 'all' ? undefined : counts[f.value] ?? 0 }))
-
-  return (
-    <div className="main-scroll scroll">
-      <div className="page">
-        <PageHead
-          no="02" en="CREATOR" title="达人审批"
-          sub="达人申请样品的审批单。通过后会在聚水潭建寄样单（会发货），批准前请核对收件信息和达人原话。专属佣金在「待审批」里用平台动作开"
-          actions={<button type="button" className="btn sm" onClick={refresh}><ArrowClockwise />刷新</button>}
-        />
-        <StatusNotes status={status} />
-        <Overview key={data ? JSON.stringify(data.counts) : 'loading'} onFilter={setFilter} />
-        {status?.inbox > 0 && (
-          <Note kind="warn">有 {status.inbox} 条待处理事项（达人发来的消息、缺货），<a className="link" href="#/influencer/inbox">去看看</a>。</Note>
-        )}
-        <div className="filters">
-          <Seg small label="状态" value={filter} onChange={setFilter} options={tabs} />
-        </div>
-        {err && <Note kind="need">读取失败：{err}</Note>}
-        {data && !items.length && !err && (
-          <Empty icon={Handshake} title={filter === 'pending' ? '没有待审批的申请' : '这里还没有审批单'}>
-            {filter === 'pending'
-              ? '名单里的达人在私聊里申请样品、收件信息补齐以后，审批单会出现在这里。'
-              : '换个状态看看。'}
-          </Empty>
-        )}
-        <div className="stack" style={{ gap: 14, marginTop: 12 }}>
-          {items.map((p) => (
-            <ApprovalCard key={p.packet_id} packet={p} maxRate={status?.max_commission_rate ?? 0.25} onChanged={refresh} />
-          ))}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function ApprovalCard({ packet: p, maxRate, onChanged }) {
-  const toast = useToast()
-  const pending = p.status === PENDING
-  const [xhs, setXhs] = useState(p.xhs_account || '')
-  const [rate, setRate] = useState(percent(p.proposed_commission_rate))
-  const [confirming, setConfirming] = useState(false)
-  const [rejecting, setRejecting] = useState(false)
-  const [reason, setReason] = useState('')
-  const [busy, setBusy] = useState(false)
-  // 刷新后以服务器上的为准：达人可能在这期间补发了主页链接
-  useEffect(() => { setXhs(p.xhs_account || '') }, [p.xhs_account])
-  useEffect(() => { setRate(percent(p.proposed_commission_rate)) }, [p.proposed_commission_rate])
-
-  let items = []
-  try { items = p.items_json ? JSON.parse(p.items_json) : [] } catch { items = [] }
-  // 资质只作参考、不拦单（D30：寄几款按销售额分档，不看粉丝数）
-  const qualKind = p.qualification.startsWith('待核实') || !p.qualification ? 'warn' : 'ok'
-  const rateOk = typeof rate === 'number' && rate > 0 && rate <= percent(maxRate)
-  const cleared = !!p.personal_info_cleared_at
-  let blocker = ''
-  if (p.limit_problem) blocker = `${p.limit_problem}，不能通过`
-  else if (!rateOk) blocker = `佣金要大于 0，不超过 ${percent(maxRate)}%`
-
-  const act = async (action) => {
-    setBusy(true)
-    try {
-      const body = action === 'approve'
-        ? { packet_id: p.packet_id, action, xhs_account: xhs.trim(), commission_rate: rate / 100 }
-        : { packet_id: p.packet_id, action, reason: reason.trim() }
-      const d = await post('/api/influencer/approvals/action', body)
-      toast.ok(action === 'approve'
-        ? `已执行：寄样单 ${d.order_sn}。记得把消息复制给达人；专属佣金到「待审批」用平台动作开`
-        : '已驳回。记得把婉拒话术复制给达人', { ms: 6000 })
-    } catch (e) {
-      toast.err(e.message)
-    } finally {
-      setBusy(false)
-      setConfirming(false)
-      setRejecting(false)
-      onChanged()
-    }
-  }
-
-  return (
-    <section className="ch card gate-card" aria-label={`审批单 ${p.packet_id}`}>
-      <div className="card-head">
-        <div className="stack" style={{ gap: 2 }}>
-          <span className="eyebrow" aria-hidden="true">{p.packet_id}</span>
-          <h2>{p.requested_product}<span className="dim"> · {p.influencer_name}</span></h2>
-          <div className="sub">提交于 {when(p.created_at)}{pending && ` · ${timeLeft(p.expires_at)}`}</div>
-        </div>
-        <span className={`tag ${STATUS_TAG[p.status] || ''}`} style={{ marginLeft: 'auto' }}>{p.status_label}</span>
-      </div>
-
-      <dl className="kv">
-        <dt>达人</dt>
-        <dd>{p.influencer_name} <span className="mono dim">{p.influencer_id}</span></dd>
-        <dt>粉丝</dt>
-        <dd>
-          <span className={`tag ${qualKind}`}>{p.qualification || '待核实'}</span>
-          {p.follower_count != null && <span className="dim"> 粉丝 {p.follower_count}</span>}
-        </dd>
-        <dt>小红书账号<span className="dim">（选填）</span></dt>
-        <dd>
-          {pending
-            ? <TextInput mono value={xhs} onChange={setXhs} placeholder="主页链接或小红书号" aria-label="小红书账号" />
-            : (p.xhs_account || <span className="dim">没有</span>)}
-        </dd>
-        <dt>平台</dt>
-        <dd>
-          {p.platform_no
-            ? <>{PLATFORM_LABEL[p.platform] || p.platform} <span className="mono">{p.platform_no}</span></>
-            : <span className="dim">名单上没填抖音号 / 小红书号</span>}
-        </dd>
-        <dt>档位</dt>
-        <dd>
-          {p.tier
-            ? <><span className={`tag ${p.tier === '无销售数据' ? 'need' : 'ok'}`}>{p.tier}</span>{p.channel && <span className="dim"> · {p.channel}为主</span>}</>
-            : <span className="tag warn">不知道</span>}
-          {p.sales_label && <div className="f-hint">{p.sales_label}</div>}
-          {p.tier === '无销售数据' && <div className="f-hint">按规则没有销售数据的不寄样（D30），要寄请写明原因</div>}
-        </dd>
-        {p.live_session && (<><dt>直播专场</dt><dd>{p.live_session}</dd></>)}
-        <dt>申请</dt>
-        <dd>
-          {items.length > 0
-            ? <ol className="gate-items">{items.map((it, i) => (
-                <li key={i}>
-                  {it.name}{it.qty > 1 ? ` × ${it.qty}` : ''}
-                  {/* 开专属佣金按平台商品设：对上了显示平台商品 ID，写了编号却对不上的标出来 */}
-                  {it.listing && <div className="f-hint">{PLATFORM_LABEL[p.platform] || p.platform}商品 <span className="mono">{it.listing.id}</span> {it.listing.title}</div>}
-                  {it.unlisted && <div className="f-hint"><span className="tag warn">{PLATFORM_LABEL[p.platform] || p.platform}商品目录里没有</span> 可能没上架：换款，或者照寄、不设专属佣金</div>}
-                </li>
-              ))}</ol>
-            : p.requested_product}
-          <div className="f-hint">共 {Math.max(items.length, 1)} 款，每款 1 件 · 现货 {p.stock_available}（没现货也能寄，D35）</div>
-        </dd>
-        <dt>收件</dt>
-        <dd>
-          {cleared
-            ? <span className="dim">已按规定清除（处理完 90 天后）</span>
-            : <>{p.recipient_name} · <span className="mono">{p.recipient_phone}</span><br />{p.shipping_address}</>}
-        </dd>
-        <dt>建议佣金</dt>
-        <dd>
-          {pending
-            ? <div style={{ maxWidth: 160 }}><NumberInput value={rate} onChange={setRate} invalid={!rateOk} suffix="%" aria-label="建议佣金" /></div>
-            : `${percent(p.proposed_commission_rate)}%`}
-        </dd>
-      </dl>
-
-      {!cleared && p.evidence && (
-        <>
-          <div className="label" style={{ marginTop: 12 }}>达人原话</div>
-          <div className="quote">{p.evidence}</div>
-        </>
-      )}
-
-      {pending && p.limit_problem && (
-        <div style={{ marginTop: 12 }}>
-          <Note kind="warn">寄样上限：{p.limit_problem}。可以驳回，或者等上限放开后再批。</Note>
-        </div>
-      )}
-      {pending && (
-        <div style={{ marginTop: 12 }}>
-          <Note kind="cy">
-            批准后：在聚水潭「寄样管理」建寄样单（会真的发货，运单号要等发货后才有），建了就撤不回。专属佣金不在这里开：
-            在「待审批」里用平台动作开，建议 <b>{rateOk ? `${rate}%` : '—'}</b>。
-          </Note>
-        </div>
-      )}
-      {p.status === 'EXECUTING' && <InterruptedExecution packet={p} onChanged={onChanged} />}
-      {p.status === 'FULFILLED' && (
-        <div style={{ marginTop: 12 }}>
-          <Note kind="ok">
-            寄样单 <b className="mono">{p.order_sn}</b> · 运单 <b className="mono">{p.tracking_number || '发货后才有'}</b>
-            {p.commission_plan && <> · 佣金计划 <span className="mono">{p.commission_plan}</span>（以前批准时开的）</>}
-          </Note>
-        </div>
-      )}
-      {p.status === 'FAILED' && (
-        <div style={{ marginTop: 12 }}>
-          <Banner title="执行失败">{p.failure_reason}</Banner>
-        </div>
-      )}
-
-      {p.notice && <NoticeBox status={p.status} text={p.notice} queued={p.notice_queued} />}
-
-      {p.events?.length > 0 && (
-        <ol className="gate-events" aria-label="操作记录">
-          {p.events.map((e, i) => (
-            <li key={i}>
-              <span className="num dim">{when(e.created_at)}</span>
-              <span className="tag">{e.source}</span>
-              <b>{e.action}</b>
-              {e.detail && <span className="muted">{e.detail}</span>}
-            </li>
-          ))}
-        </ol>
-      )}
-
-      {pending && (
-        <div className="card-foot">
-          <span className="f-hint grow">{blocker}</span>
-          <button type="button" className="btn" disabled={busy} onClick={() => setRejecting(true)}><XCircle />驳回</button>
-          <button type="button" className="btn primary chc" disabled={busy || !!blocker} onClick={() => setConfirming(true)}><CheckCircle />通过</button>
-        </div>
-      )}
-
-      {confirming && (
-        <Confirm
-          title={`通过 ${p.packet_id}？`} confirmLabel="确认通过并执行" busy={busy}
-          onCancel={() => setConfirming(false)} onConfirm={() => act('approve')}
-        >
-          <p>马上执行以下操作，寄样单建了就撤不回（会真的发货）：</p>
-          <ul className="gate-steps">
-            <li>聚水潭寄样管理：给 {p.recipient_name}（{p.recipient_phone}）建【{p.requested_product}】寄样单</li>
-          </ul>
-          <p className="dim">专属佣金不在这里开：建议 {rate}%，到「待审批」里用平台动作开。</p>
-        </Confirm>
-      )}
-      {rejecting && (
-        <Dialog
-          title={`驳回 ${p.packet_id}`} eyebrow="REJECT" onClose={() => setRejecting(false)}
-          footer={<>
-            <button type="button" className="btn" onClick={() => setRejecting(false)}>取消</button>
-            <button type="button" className="btn danger" disabled={busy} onClick={() => act('reject')}>{busy ? '处理中…' : '驳回'}</button>
-          </>}
-        >
-          <Field label="驳回原因" hint="只记在操作记录里，每周复盘用，不会告诉达人">
-            <TextArea value={reason} onChange={setReason} rows={3} placeholder="例如：粉丝画像和产品不匹配" data-autofocus />
-          </Field>
-        </Dialog>
-      )}
-    </section>
-  )
-}
-
-// 执行被中断（断电、强制退出）的单会一直停在执行中（B23）。运营到聚水潭和小红书核对后，
-// 在这里记下结果；这一步不调用聚水潭和小红书。开始执行 10 分钟内不让标，免得和还在跑的执行撞上
-function InterruptedExecution({ packet: p, onChanged }) {
-  const toast = useToast()
-  const [outcome, setOutcome] = useState(null)
-  const [orderSn, setOrderSn] = useState('')
-  const [tracking, setTracking] = useState('')
-  const [plan, setPlan] = useState('')
-  const [note, setNote] = useState('')
-  const [busy, setBusy] = useState(false)
-
-  if (!p.interrupted) {
-    return (
-      <div style={{ marginTop: 12 }}>
-        <Note kind="cy">正在执行（{when(p.execution_started_at)} 开始）。如果 10 分钟后还停在这里，说明执行被中断了，到时可以在这里人工核对。</Note>
-      </div>
-    )
-  }
-  const fulfilled = outcome === 'fulfilled'
-  const missing = fulfilled ? (!orderSn.trim() && '要填寄样单号') : (!note.trim() && '要写明核对的结果')
-  const submit = async () => {
-    setBusy(true)
-    try {
-      await post('/api/influencer/approvals/action', {
-        packet_id: p.packet_id, action: 'resolve', outcome,
-        order_sn: orderSn, tracking_number: tracking, commission_plan: plan, note,
-      })
-      toast.ok(fulfilled ? '已标成已执行。记得把确认消息复制给达人' : '已标成失败', { ms: 6000 })
-      setOutcome(null)
-    } catch (e) {
-      toast.err(e.message)
-    } finally {
-      setBusy(false)
-      onChanged()
-    }
-  }
-  return (
-    <div style={{ marginTop: 12 }}>
-      <Banner title="执行被中断了，需要人工核对">
-        这张单{p.execution_started_at ? `从 ${when(p.execution_started_at)} 开始执行，` : ''}一直没有执行完。
-        请到聚水潭「寄样管理」看有没有这张单的寄样单（备注里有 <span className="mono">{p.packet_id}</span>），再把结果记在这里。
-      </Banner>
-      <div className="card-foot">
-        <span className="grow" />
-        <button type="button" className="btn" onClick={() => setOutcome('failed')}><XCircle />核对后标成失败</button>
-        <button type="button" className="btn primary chc" onClick={() => setOutcome('fulfilled')}><CheckCircle />核对后标成已执行</button>
-      </div>
-      {outcome && (
-        <Dialog
-          title={`${fulfilled ? '标成已执行' : '标成失败'}：${p.packet_id}`} eyebrow="CHECK" onClose={() => setOutcome(null)}
-          footer={<>
-            <span className="f-hint grow">{missing}</span>
-            <button type="button" className="btn" onClick={() => setOutcome(null)}>取消</button>
-            <button type="button" className={`btn ${fulfilled ? 'primary chc' : 'danger'}`} disabled={busy || !!missing} onClick={submit}>
-              {busy ? '处理中…' : '确认'}
-            </button>
-          </>}
-        >
-          {fulfilled ? (
-            <div className="stack" style={{ gap: 12 }}>
-              <Field label="寄样单号" hint="聚水潭寄样管理里这张单的单号（YP 开头）">
-                <TextInput mono value={orderSn} onChange={setOrderSn} aria-label="寄样单号" data-autofocus />
-              </Field>
-              <Field label="运单号" hint="还没有就先空着，确认消息里会写「快递单号出来后再发给老师」">
-                <TextInput mono value={tracking} onChange={setTracking} aria-label="运单号" />
-              </Field>
-              <Field label="佣金计划" hint="小红书里的计划编号，可以不填">
-                <TextInput mono value={plan} onChange={setPlan} aria-label="佣金计划" />
-              </Field>
-              <Field label="备注" hint="可以不填">
-                <TextArea value={note} onChange={setNote} rows={2} aria-label="备注" />
-              </Field>
-            </div>
-          ) : (
-            <div className="stack" style={{ gap: 12 }}>
-              <Field label="核对结果" hint="记在操作记录里，例如：聚水潭里没有这张单">
-                <TextArea value={note} onChange={setNote} rows={3} aria-label="核对结果" data-autofocus />
-              </Field>
-              <Field label="寄样单号" hint="寄样单已经建了、但后面没做完的，填上单号">
-                <TextInput mono value={orderSn} onChange={setOrderSn} aria-label="寄样单号" />
-              </Field>
-            </div>
-          )}
-        </Dialog>
-      )}
-    </div>
-  )
-}
-
-// queued：这条通知已经放进「待审批」（Mac 端经 Windows 发，src/influencer/prm_bridge.py），
-// 不再让运营复制，免得发两遍
-function NoticeBox({ status, text, queued }) {
-  const toast = useToast()
-  const preview = status === PENDING
-  const label = preview
-    ? '批准后要发给达人的消息（运单号执行后填入）'
-    : status === 'FULFILLED' ? '发给达人的确认消息' : '发给达人的婉拒话术'
-  const copy = async () => {
-    if (await copyText(text)) toast.ok('已复制，去微信里发给达人')
-    else toast.err('复制没有成功，请手动选中文字复制')
-  }
-  return (
-    <div className="notice-box">
-      <div className="row">
-        <span className="label grow">{label}</span>
-        {!preview && !queued && <button type="button" className="btn sm" onClick={copy}><Copy />复制</button>}
-        {queued && <a className="btn sm" href="#/review">去「待审批」</a>}
-      </div>
-      {queued && <p className="sub">已放进「待审批」，在那里审核后由 Windows 发给达人，不用再复制。</p>}
-      <p className="notice-text">{text}</p>
-    </div>
-  )
 }
 
 // ── 待处理 ──────────────────────────────────────────────────────────
@@ -552,7 +70,7 @@ function InboxPage() {
       <div className="page">
         <PageHead
           no="02" en="CREATOR" title="待处理"
-          sub="名单里的达人发来的不是索样的消息（机器人不替你回答）、要求提高佣金，以及达人申请时缺货。在微信里处理完，再点「已处理」"
+          sub="Mac 端机器人想回却没发出的话（等你审核后自己在微信里处理），以及以前留下的事项。处理完再点「已处理」"
           actions={<button type="button" className="btn sm" onClick={load}><ArrowClockwise />刷新</button>}
         />
         <div className="filters">
@@ -562,7 +80,7 @@ function InboxPage() {
         {err && <Note kind="need">读取失败：{err}</Note>}
         {items && !items.length && !err && (
           <Empty icon={ChatCircleDots} title={handled ? '还没有处理过的事项' : '没有待处理的事项'}>
-            {handled ? '' : '达人发来不是索样的消息、或者申请时缺货，会出现在这里。'}
+            {handled ? '' : '机器人想回却没发出的话会出现在这里。'}
           </Empty>
         )}
         {items && items.length > 0 && (
@@ -581,7 +99,7 @@ function InboxPage() {
                     <p className="td-text">{it.content}</p>
                     <div className="td-meta">
                       <span>{when(it.created_at)}</span>
-                      {it.auto_replied && <span>{AUTO_REPLY[it.kind] || '机器人已自动回复'}</span>}
+                      {it.auto_replied && <span>机器人已自动回复</span>}
                       {it.handled_at && <span>处理于 {when(it.handled_at)}</span>}
                     </div>
                   </div>

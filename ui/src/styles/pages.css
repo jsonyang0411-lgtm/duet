@@ -137,26 +137,6 @@
 
 .f-key { overflow-wrap: anywhere; }
 
-/* 达人审批（InfluencerPanel） */
-.gate-card .kv > dd .input { height: 30px; font-size: var(--fs-sm); }
-.gate-card .quote { margin-top: 4px; }
-.notice-box { margin-top: 12px; padding: 10px 12px; border: 1px dashed var(--cy-mid); background: var(--cy-50); }
-.notice-text { margin-top: 6px; font-size: var(--fs-sm); white-space: pre-wrap; word-break: break-word; }
-.gate-events { list-style: none; margin: 12px 0 0; padding: 10px 0 0; border-top: 1px dashed var(--rule); display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-xs); }
-.gate-events li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.gate-steps { margin: 8px 0 0; padding-left: 18px; font-size: var(--fs-sm); line-height: 1.7; }
-.gate-card .kv .tag { height: auto; min-height: 20px; padding: 3px 6px; white-space: normal; line-height: 1.4; }
-
-/* 达人审批：今日概览 */
-.overview { margin-bottom: 14px; }
-.ov-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
-.ov-tile { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 10px 12px; border: 1px solid var(--rule); background: var(--card); color: var(--ink); text-align: left; cursor: pointer; }
-.ov-tile:hover { border-color: var(--ink); }
-.ov-tile.warn { border-color: var(--warn-line); background: var(--warn-bg); }
-.ov-v { font-size: var(--fs-xl); font-weight: 700; line-height: 1.2; }
-.ov-l { font-size: var(--fs-xs); color: var(--ink-2); }
-.ov-h { font-size: var(--fs-xs); color: var(--warn-ink); }
-
 /* ---------- 待审批 · 平台动作 ---------- */
 .prm-platform { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--cy-soft-2); background: var(--cy-50); }
 .prm-platform > .row svg { width: 14px; height: 14px; color: var(--cy-ink); }

@@ -51,12 +51,18 @@ def fake_cli(monkeypatch, answer=None, error=None):
 def test_look_up_gives_tier_channel_and_where_the_numbers_came_from(monkeypatch):
     calls = fake_cli(monkeypatch, {"found": True, "daren": {
         "sales30d": {"available": True, "min": 2_500_000, "max": 5_000_000, "label": "250万~500万"},
-        "channelBySales": "视频", "level": 3,
+        "channelBySales": "视频", "level": 3, "uid": "10000000001",
     }})
     result = look_up("dy", " test_daren01 ")
     assert calls == [("lookup", "--platform", "DY", "--no", "test_daren01")]
     assert (result["ok"], result["tier"], result["channel"], result["level"]) == (True, TIER_ANY, "视频", 3)
     assert "近 30 日销售总额 250万~500万" in result["sales_label"] and "聚水潭" in result["sales_label"]
+    assert result["uid"] == "10000000001"                                  # 开抖音专属佣金要用
+
+
+def test_a_uid_that_is_not_digits_is_dropped(monkeypatch):
+    fake_cli(monkeypatch, {"found": True, "daren": {"sales30d": None, "uid": "v2_abc"}})
+    assert look_up("dy", "x")["uid"] == ""
 
 
 @pytest.mark.parametrize("platform,number,answer,error,expected", [
@@ -107,7 +113,8 @@ def setup(tmp_path):
     def refresh(store_, chat_id, now=None):
         refreshed.append(chat_id)
         store_.record_daren_profile(chat_id, tier=TIER_ANY, channel="视频",
-                                    sales_label="近 30 日销售总额 250万~500万（聚水潭，10-26 查）", level=3, note="", now=now)
+                                    sales_label="近 30 日销售总额 250万~500万（聚水潭，10-26 查）", level=3, note="",
+                                    uid="10000000001", now=now)
 
     sync = PartyListSync(store, prm, workspace=workspace, refresh=refresh)
     return store, sync, workspace, refreshed
@@ -119,6 +126,7 @@ def test_sync_refreshes_one_due_creator_and_writes_the_profile_files(setup):
     assert refreshed == ["wxid_a"], "只有填了号码的才查；一轮最多查一位"
     a = (workspace / PROFILE_FILE.format(party_id=7)).read_text(encoding="utf-8")
     assert "test_daren01" in a and "档位：不限" in a and "主播类型：视频" in a and "LV3" in a
+    assert "抖音 UID：10000000001" in a
     b = (workspace / PROFILE_FILE.format(party_id=8)).read_text(encoding="utf-8")
     assert "还没有这位达人的平台" in b
     sync.sync()
@@ -130,6 +138,7 @@ def test_changing_the_number_makes_it_due_again(setup):
     sync.sync()
     store.save_contact("wxid_a", source="t", platform_no="new_no")
     assert store.get_contact("wxid_a")["tier"] == "" and store.get_contact("wxid_a")["profile_checked_at"] is None
+    assert store.get_contact("wxid_a")["platform_uid"] == "", "换了号码，原来的 UID 也作废"
     sync.sync()
     assert refreshed == ["wxid_a", "wxid_a"]
 

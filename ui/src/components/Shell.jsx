@@ -24,11 +24,10 @@ export const NAV = [
   { id: 'deals', label: '合作单', en: 'CREATORS', icon: Handshake },
   { id: 'wechat', label: '微信连接', en: 'WECHAT', icon: ChatCircleDots },
   {
-    id: 'influencer', label: '达人审批', en: 'SAMPLES', icon: Package,
+    id: 'influencer', label: '达人名单', en: 'LIST', icon: Package,
     sub: [
-      { id: 'approvals', label: '审批单' },
-      { id: 'inbox', label: '待处理' },
       { id: 'contacts', label: '达人名单' },
+      { id: 'inbox', label: '待处理' },
     ],
   },
   { id: 'logs', label: '运行日志', en: 'LOGS', icon: TerminalWindow },

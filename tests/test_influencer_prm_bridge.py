@@ -5,7 +5,6 @@
 """
 
 import logging
-from types import SimpleNamespace
 
 import pytest
 
@@ -15,7 +14,7 @@ from test_prm_over_edge import Mac, wait_for
 from src.bot import Bot
 from src.edge.client import EdgeClient
 from src.edge.fake import FakeEdge
-from src.influencer.prm_bridge import SOURCE_PRM
+from src.influencer.prm_bridge import SOURCE_PRM, PartyListSync
 from src.influencer.store import SOURCE_CONSOLE, InfluencerStore
 from src.wechat.edge_backend import EdgeBackend
 
@@ -30,9 +29,8 @@ def wired(tmp_path):
     backend = EdgeBackend(client=EdgeClient("http://127.0.0.1:9", "x" * 32), state_path=str(tmp_path / "s.json"))
     side.prm.on_parties_changed = backend.refresh_private_chats_soon      # 和 _start_prm 一样
     contacts.save_contact(A, source=SOURCE_CONSOLE, display_name="小美", note="家居博主")
-    bridge = Bot._wire_edge_prm(backend, side.prm, SimpleNamespace(store=contacts))
+    Bot._wire_edge_prm(backend, side.prm, contacts)
     yield contacts, side.prm, backend
-    bridge.detach()
     side.prm.stop()
     side.relay.stop()
 
@@ -75,9 +73,24 @@ def test_on_start_the_list_wins_a_disagreement(tmp_path):
     side.prm.register(A, "小美")                                    # PRM 里登记着
     contacts.save_contact(A, source=SOURCE_CONSOLE, enabled=False)   # 名单里停用了（比如 Bot 停着时改的）
     backend = EdgeBackend(client=EdgeClient("http://127.0.0.1:9", "x" * 32), state_path=str(tmp_path / "s.json"))
-    bridge = Bot._wire_edge_prm(backend, side.prm, SimpleNamespace(store=contacts))
+    Bot._wire_edge_prm(backend, side.prm, contacts)
     assert side.prm.store.party_by_wxid(A) is None and contacts.get_contact(A)["enabled"] is False
-    bridge.detach()
+    side.prm.stop()
+    side.relay.stop()
+
+
+def test_only_the_list_is_wired_and_a_deal_ready_to_ship_makes_no_approval(tmp_path):
+    # 寄样单 2026-10-27 起走 PRM 的平台动作 jst.sample_order：达人模块不再挂钩子、不再生成审批单
+    contacts = InfluencerStore(str(tmp_path / "messages.db"))
+    contacts.save_contact(A, source=SOURCE_CONSOLE, display_name="小美")
+    side = PrmBot(Clock(), tmp_path)
+    backend = EdgeBackend(client=EdgeClient("http://127.0.0.1:9", "x" * 32), state_path=str(tmp_path / "s.json"))
+    sync = Bot._wire_edge_prm(backend, side.prm, contacts)
+    assert isinstance(sync, PartyListSync) and not hasattr(side.prm, "draft_hooks")
+    deal = side.prm.store.deal_of(side.prm.store.party_by_wxid(A)["id"], side.clock.now)
+    assert side.prm.deal_action("stage", {"deal_id": deal["id"], "stage": "to_ship"})["ok"]
+    with contacts._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM influencer_approvals").fetchone()[0] == 0
     side.prm.stop()
     side.relay.stop()
 
@@ -109,7 +122,7 @@ def test_a_creator_added_on_the_list_page_is_drafted_by_prm(tmp_path):
     contacts = InfluencerStore(str(tmp_path / "messages.db"))
     with FakeEdge(auto_send=False) as fake:
         mac = Mac(fake, tmp_path)
-        bridge = Bot._wire_edge_prm(mac.backend, mac.prm, SimpleNamespace(store=contacts))
+        Bot._wire_edge_prm(mac.backend, mac.prm, contacts)
         with mac:
             contacts.save_contact(A, source=SOURCE_CONSOLE, display_name="小美")
             assert wait_for(lambda: A in fake._parties), "名单页加的达人推给了 Windows"
@@ -117,5 +130,4 @@ def test_a_creator_added_on_the_list_page_is_drafted_by_prm(tmp_path):
             assert wait_for(lambda: mac.relay.store.list_jobs())
             [job] = mac.relay.store.list_jobs()
             assert job["chat_id"] == A and job["kind"] == "prm"
-        bridge.detach()
         assert contacts.list_inbox() == [], "不再走达人模块的直接回复"

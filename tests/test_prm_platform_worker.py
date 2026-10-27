@@ -6,6 +6,7 @@ VERIFIED_SUCCESS.  A fake ``claude`` drafts; a fake ``node`` answers like the pl
 import json
 import sys
 import textwrap
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -119,6 +120,9 @@ def test_approval_runs_the_cli_once_and_only_a_verified_write_lets_the_reply_out
     entry = json.loads((mac.home / "platform" / "ledger" / f"{key}.json").read_text(encoding="utf-8"))
     assert entry["status"] == "done" and entry["packet_id"] == packet["id"] and entry["record"]["outcome"] == "VERIFIED_SUCCESS"
     assert list((mac.home / "logs" / "platform").glob(f"*-job{out['job']}.json"))
+    # a verified 专属佣金 asks for the next step (the next product, if any): a draft job of its own
+    [nxt] = [j for j in bot.relay.store.list_jobs(10) if "system_note" in j["meta"]]
+    assert nxt["status"] == "pending" and bot.relay.store.cancel_if_pending(nxt["id"], time.time())
     # the same approval once more (a duplicated job): the Mac does not run it again
     bot.relay.submit(CREATOR, CREATOR, "", kind="prm", fresh=True, input_closed=True,
                      meta=json.loads(bot.relay.store.get(out["job"])["meta"]))

@@ -57,7 +57,7 @@ Mac 开发环境的 `.venv` 是用 uv 创建的，里面没有 pip，装依赖�
 | API 端点 | Diagnose 返回结构、POST allowlist（聊天机器人的接口已删除）、配置字段默认值、`/api/relay`（`tests/test_relay_console_api.py`）、`/api/prm` 和 `/api/prm/parties`、`/packets`、`/deals`、`/reveal`（`tests/test_prm_console_api.py`） |
 | 页面加载 | 前端 SPA 正常渲染，不出现空白页或连接错误 |
 | 主题系统 | 浅色模式默认（明日方舟风，2026-10 改版）、Sun/Moon 按钮切换到深色、localStorage 持久化 |
-| 侧边栏导航 | 公司版（中转代理控制台）只有 运行状态/中转代理/待审批/合作单/微信连接/达人审批/运行日志 七页（Mac 端 `WECHAT_BACKEND=edge` 时没有「微信连接」）；旧链接回到运行状态 |
+| 侧边栏导航 | 公司版（中转代理控制台）只有 运行状态/中转代理/待审批/合作单/微信连接/达人名单/运行日志 七页（Mac 端 `WECHAT_BACKEND=edge` 时没有「微信连接」）；旧链接回到运行状态 |
 | 待审批 / 合作单页（达人副驾驶） | 草稿显示（号码只显示打码的）、改了再发、不发（确认框）、标为发错了、自动发送门槛表；登记达人（管理员 wxid 被拒）、停用；展开合作单：采纳 AI 建议、切人工接管 / 恢复副驾驶、填运单号 → 待审批出现发货通知、更新物流到已签收、显示完整号码（`tests/test_functional.py::TestPrmPages`，PRM 服务在内存里，不写 data/）。接管、门槛、稍等回复、寄样、30 天清理的逻辑在 `tests/test_prm_lifecycle.py`；每份草稿带上我方实际发出的回复（改过的、没发的）在 `tests/test_prm.py`、`tests/test_prm_worker.py` |
 | 平台联动（小红书 / 抖音 / 淘宝 / 聚水潭） | 白名单和参数检查（佣金最高 25%，Mac 的配置只能往低调）、商品目录、预览（不带 `--execute`）和执行（台账只执行一次、逐步核验、链接只认平台域名）对着假 `node`（`tests/platform_fakes.py`，答复按四个平台命令行的真实 JSON 形状），聚水潭寄样单的单子走 0600 临时文件、预览不带电话、台账和输出打码、子账号核对（`tests/test_prm_platforms.py`，含系统 Python 3.9 冒烟）；机器人侧：一律先审、批准并执行、只有 VERIFIED_SUCCESS 发、其余标红、失联 / 没人接手的兜底、重新预览、寄样单的〈手机N〉只在交给 Mac 的任务里换成号码（`tests/test_prm_platform_flow.py`）；交付后的清理也清寄样单的收货信息（`tests/test_prm_lifecycle.py`）；Mac worker 端到端（`tests/test_prm_platform_worker.py`）；控制台接口和「待审批」页（`tests/test_prm_console_api.py`、`tests/test_functional.py::TestPrmPages`） |
 | 微信边缘（PRM_EDGE） | `/edge/*` 协议：一套用例通过 Mac 端客户端同时跑假 Windows 服务端和真的 Windows 边缘（挂在中转的 HTTP 服务上），另外用 Mac 自带的 Python 3.9 跑一遍（`tests/test_edge_protocol.py`）；Windows 这一侧的消息文字、读回和运营亲手回复、节奏、状态、清理、路由步骤（`tests/test_edge_service.py`） |
@@ -65,7 +65,7 @@ Mac 开发环境的 `.venv` 是用 uv 创建的，里面没有 pip，装依赖�
 | 微信连接页 | 私聊开关改动出现底部保存条、OCR 备选开关有自己的保存条，「放弃修改」能撤回 |
 | 首次设置 | 3 步（微信密钥 → 微信设置 → 中转设置），所有请求在测试里拦截，不写 .env |
 | Mac 端控制台（WECHAT_BACKEND=edge） | `/api/edge`、Windows 出问题时每页顶上的提醒条、Mac 端左栏不显示「微信连接」、审批卡上通知已进「待审批」时不显示复制按钮（`tests/test_edge_console.py`，`/api/edge` 用 Playwright 拦截） |
-| 达人审批页 | 审批卡通过 / 驳回、没有小红书账号也能通过（抖音达人，D31）、审批卡显示平台 / 档位 / 主播类型 / 多款商品（逐款的平台商品 ID、目录里没有的标出来）/ 专场、复制发给达人的消息、名单的添加（带平台和抖音号 / 小红书号）/ 停用 / 从最近私聊挑选（`tests/test_influencer_console.py`，用临时配置和数据库，打开模拟模式） |
+| 达人名单页 | 左栏「达人名单」只有达人名单、待处理两个子页（老的审批单链接落到名单）；名单的添加（带平台和抖音号 / 小红书号）/ 停用 / 从最近私聊挑选、已在名单的再加入不清掉原来填的、待处理的回复草稿标为已处理（`tests/test_influencer_console.py`，用临时配置和数据库） |
 
 ### 手动验证清单
 
@@ -99,7 +99,7 @@ src/routing/            - 路由步骤：自己的消息 → 微信边缘 → �
 src/admin.py            - 管理员私聊命令（查状态、添加好友、同意好友、自动同意好友）
 src/relay/              - Claude 中转（Mac worker 来取任务）
 src/prm/                - 达人副驾驶（草稿、合作单、门槛、清理、平台联动）
-src/influencer/         - 达人寄样审批（名单、档位、审批单、聚水潭）
+src/influencer/         - 达人名单（档位、主播类型、平台 UID，从聚水潭查；名单合一进 PRM）
 src/edge/               - 微信边缘（给 Mac 业务服务收发微信）
 src/wechat/             - 微信后端
   wcdb_backend.py       - WCDB 直读后端
@@ -137,7 +137,7 @@ pyinstaller build.spec
 
 项目根目录下有 `CODEBASE_REFERENCE.md`（代码参考手册），包含所有函数、参数、调用关系的完整文档。每次修改代码后，**必须同步更新该文档**，确保文档与代码保持一致。
 
-**例外**：达人商务模块（`src/influencer/`）的说明不写入本手册。改动原项目的共享代码（例如 `src/bot.py` 里建达人模块、接名单合一和寄样审批的地方，`src/web/server.py` 的转发）时，仍要按本节要求同步。
+**例外**：达人商务模块（`src/influencer/`）的说明不写入本手册。改动原项目的共享代码（例如 `src/bot.py` 里建达人模块、接名单合一的地方，`src/web/server.py` 的转发）时，仍要按本节要求同步。
 
 ### 何时需要更新
 

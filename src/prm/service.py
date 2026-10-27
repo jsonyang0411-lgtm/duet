@@ -122,7 +122,6 @@ EVENT_NAMES = {
     "operator_message": "运营亲手回复", "creator_message": "接管期间达人的消息", "shipment": "填运单号",
     "shipment_status": "更新物流", "holding_reply": "自动回复「稍等」", "reveal": "查看完整号码",
     "wrong": "标为发错了", "purge": "清除收件信息", "purge_case": "清除 Mac 案卷里的收件信息",
-    "sample_request": "生成寄样审批单", "sample_decision": "寄样审批结果",
     "platform_execute": "批准执行平台动作", "platform_result": "平台动作结果",
     "platform_preview": "重新预览平台动作", "platform_ack": "平台动作已处理",
 }
@@ -283,6 +282,8 @@ class PrmService:
         self._holding_text = str(getattr(config, "prm_holding_text", "") or HOLDING_TEXT).strip() or HOLDING_TEXT
         self._retention_days = int(getattr(config, "prm_retention_days", retention.RETENTION_DAYS)
                                    or retention.RETENTION_DAYS)
+        # created | delivered: when a sample order's 专属佣金 is drafted (next_step_note)
+        self._commission_after = str(getattr(config, "prm_commission_after", "delivered") or "delivered")
         # The admin and the cc users are never creators: their messages stay the relay's.
         self._reserved = {str(w).strip() for w in [getattr(config, "admin_wxid", ""),
                                                     *(getattr(config, "claude_relay_wxids", None) or [])]
@@ -298,10 +299,6 @@ class PrmService:
         self._wake = threading.Event()
         self._stopping = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        # Mac 端达人模块的挂钩（src/influencer/prm_bridge.py）：draft_hooks(job, draft, deal) 在 Mac 的草稿
-        # 进库以后调；stage_hooks(deal) 在控制台改了阶段以后调。钩子出错只记日志，不影响草稿
-        self.draft_hooks: list = []
-        self.stage_hooks: list = []
         relay.register_kind(PRM, self.on_result)
 
     @property
@@ -667,16 +664,7 @@ class PrmService:
         if state == APPROVED:
             self._wake.set()
         logger.info("PRM: job #%d -> packet %d (%s, %s, %s)", job["id"], packet_id, state, route, draft.message_kind)
-        self._run_hooks(self.draft_hooks, job, draft, self._store.deal(deal_id))
         return True
-
-    @staticmethod
-    def _run_hooks(hooks: list, *args) -> None:
-        for hook in hooks:
-            try:
-                hook(*args)
-            except Exception:
-                logger.exception("PRM: a hook failed")
 
     # ── from the console ──────────────────────────────────────────────────
 
@@ -707,14 +695,34 @@ class PrmService:
 
     def deal_action(self, action: str, data: dict) -> dict:
         """Stage / adopt / mode / shipment / shipment_status from the console (deals.py)."""
-        result = apply_deal_action(self._store, action, data, now=self._clock(), takeover_sec=self._takeover_sec)
+        now = self._clock()
+        try:
+            before = self._store.deal(int(data.get("deal_id")))
+        except (TypeError, ValueError):
+            before = None
+        result = apply_deal_action(self._store, action, data, now=now, takeover_sec=self._takeover_sec)
         if result.get("ok"):
             self._wake.set()
-            if action in ("stage", "adopt"):
-                deal = self._store.deal(int(data.get("deal_id")))
-                if deal is not None:
-                    self._run_hooks(self.stage_hooks, deal)
+            after = self._store.deal(before["id"]) if before else None
+            if after and after.get("delivered_at") and not before.get("delivered_at"):
+                self._on_delivered(after, now)
         return result
+
+    def _on_delivered(self, deal: dict, now: float) -> None:
+        """The creator signed for the sample: with PRM_COMMISSION_AFTER=delivered the 专属佣金 of
+        the deal's last created sample order is drafted now (``_ask_next_step``)."""
+        if self._commission_after != "delivered":
+            return
+        for ev in self._store.events(deal["id"], limit=200):        # newest first
+            detail = ev["detail"]
+            if (ev["kind"] == "platform_result" and detail.get("action") == "jst.sample_order"
+                    and detail.get("outcome") == platforms.VERIFIED):
+                packet = self._store.packet(int(detail.get("packet") or 0))
+                if packet is not None:
+                    data = packet["platform"] or {}
+                    self._ask_next_step(packet, next_step_note(data.get("action") or {}, data.get("execution") or {},
+                                                               delivered=True), now)
+                return
 
     def reveal(self, party_id: int, actor: str = "console") -> dict:
         return reveal_numbers(self._store, int(party_id), now=self._clock(), actor=actor)
@@ -945,6 +953,8 @@ class PrmService:
                     logger.info("PRM: packet %d %s verified on the platform; the reply goes out", packet["id"],
                                 action.get("action"))
                     self._wake.set()
+                    if action.get("action") != "jst.sample_order" or self._commission_after == "created":
+                        self._ask_next_step(packet, next_step_note(action, record), now)
                 return
         why = "；".join(record.get("problems") or [])
         if outcome == platforms.VERIFIED and missing:
@@ -960,6 +970,27 @@ class PrmService:
             self._store.add_event(packet["deal_id"], packet["party_id"], "platform_result", event, actor="mac", now=now)
             self._store.update_deal(packet["deal_id"], now, attention=f"#{packet['id']} {error}"[:300])
             logger.warning("PRM: packet %d %s ended %s; nothing sent", packet["id"], action.get("action"), outcome)
+
+    def _ask_next_step(self, packet: dict, note: str, now: float) -> None:
+        """A platform write that leads to the next one (a sample order → its 专属佣金): a draft
+        job of its own, told what happened in ``meta.system_note``.  What it drafts is a platform
+        action like any other: previewed on the Mac, approved by a person."""
+        if not note:
+            return
+        deal = self._store.deal(packet["deal_id"])
+        party = self._store.party(packet["party_id"])
+        if deal is None or party is None:
+            return
+        if self._mode(deal, now) != COPILOT:
+            self._store.update_deal(deal["id"], now, attention=(
+                f"#{packet['id']} 之后该开专属佣金了：现在不在副驾驶模式，系统没有起草，请运营处理")[:300])
+            return
+        meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"], "system_note": note}
+        outbound = self._outbound(deal["id"], party["id"], now)
+        if outbound:
+            meta["sent"] = outbound
+        _, job_id = self._relay.submit(packet["chat_id"], packet["chat_id"], "", kind=PRM, meta=meta, fresh=True)
+        logger.info("PRM: packet %d done; job #%d drafts the next step", packet["id"], job_id)
 
     def sweep_executing(self) -> int:
         """Executions that cannot finish any more: a job the Mac has not taken within
@@ -1198,6 +1229,34 @@ def action_for_mac(action: dict, tokens: dict) -> tuple:
     if platforms.PHONE_TOKEN.match(number):
         return action, "收件电话还是占位符，不执行"
     return {**action, "receiver": {**receiver, "phone": number}}, ""
+
+
+# The 专属佣金 action of each shop: a sample order's products get theirs once it is created.
+COMMISSION_ACTIONS = {"dy": "dy.designated_commission", "xhs": "xhs.direct_plan"}
+
+
+def next_step_note(action: dict, record: dict, *, delivered: bool = False) -> str:
+    """What the next draft is told after a verified platform write, or "" when nothing follows:
+    a sample order → open the 专属佣金 of its products (``delivered``: told when the creator
+    signed for it, PRM_COMMISSION_AFTER); a 专属佣金 → the next product, if any (one action
+    per draft, so one product each time; the case file says which are done)."""
+    name = action.get("action")
+    if name == "jst.sample_order":
+        shop = str(action.get("shop") or "")
+        if shop not in COMMISSION_ACTIONS:
+            return ""
+        items = "、".join(str(i.get("item_id")) for i in action.get("items") or [] if isinstance(i, dict))
+        number = str((record.get("created") or {}).get("sample_order_no") or "")
+        done = (f"达人已经签收了寄样单 {number}（{platforms.PLATFORMS[shop]}的商品 {items}）。" if delivered else
+                f"寄样单 {number} 已经在聚水潭建好，寄的是{platforms.PLATFORMS[shop]}的商品 {items}。")
+        return (done +
+                f"按 kb/合作政策.md 的「开专属佣金」给这些商品开专属佣金：这一份草稿填第一个商品的 {COMMISSION_ACTIONS[shop]}，"
+                "把哪些商品还没开记进案卷。")
+    if name in COMMISSION_ACTIONS.values():
+        return (f"商品 {action.get('item_id')} 的专属佣金（{action.get('commission_rate')}%）已经在平台上开好了。"
+                "这位达人寄样的商品里还有没开专属佣金的，就填下一个；都开完了就不要填平台动作。"
+                "按 kb/合作政策.md 的「开专属佣金」更新案卷。")
+    return ""
 
 
 def _job_error(job: dict) -> str:

@@ -567,12 +567,14 @@ def test_scrub_cuts_addresses_and_masks_numbers():
 
 def test_the_new_settings_have_ranges():
     with pytest.raises(RuntimeError) as e:
-        _validate_config({"prm_takeover_min": 1, "prm_holding_min": 500, "prm_holding_text": "", "prm_retention_days": 0})
+        _validate_config({"prm_takeover_min": 1, "prm_holding_min": 500, "prm_holding_text": "", "prm_retention_days": 0,
+                          "prm_commission_after": "shipped"})
     message = str(e.value)
-    for key in ("PRM_TAKEOVER_MIN", "PRM_HOLDING_MIN", "PRM_HOLDING_TEXT", "PRM_RETENTION_DAYS"):
+    for key in ("PRM_TAKEOVER_MIN", "PRM_HOLDING_MIN", "PRM_HOLDING_TEXT", "PRM_RETENTION_DAYS", "PRM_COMMISSION_AFTER"):
         assert key in message
     config = BotConfig()
     assert (config.prm_takeover_min, config.prm_holding_min, config.prm_retention_days) == (120, 10, 90)
+    assert config.prm_commission_after == "delivered"                       # 专属佣金等达人签收以后
 
 
 # ── the backend tells PRM about this account's own lines ──────────────────
