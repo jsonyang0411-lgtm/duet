@@ -1153,8 +1153,7 @@ _POST_ONLY_PATHS = frozenset({
     "/api/onboarding/reset", "/api/onboarding/step1", "/api/onboarding/step2",
     "/api/onboarding/step3",
     "/api/voice/download-model", "/api/wechat-data-dir/detect",
-    "/api/influencer/approvals/action", "/api/influencer/contacts/action",
-    "/api/influencer/inbox/action",
+    "/api/influencer/contacts/action", "/api/influencer/inbox/action",
     "/api/relay/cancel", "/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal",
 })
 
@@ -1265,7 +1264,6 @@ class _UIHandler(SimpleHTTPRequestHandler):
                          "/api/advanced",
                          "/api/voice/download-model",
                          "/api/wechat-data-dir/detect",
-                         "/api/influencer/approvals/action",
                          "/api/influencer/contacts/action",
                          "/api/influencer/inbox/action",
                          "/api/relay/cancel",
@@ -1285,7 +1283,7 @@ class _UIHandler(SimpleHTTPRequestHandler):
         self._handle_request()
 
     def _handle_influencer(self):
-        """/api/influencer/*：控制台的「达人审批」页。具体处理在 src/influencer/console.py。"""
+        """/api/influencer/*：控制台的「达人名单」页。具体处理在 src/influencer/console.py。"""
         from urllib.parse import parse_qs
         from src.influencer import console
         from src.influencer.store import InfluencerStore
@@ -1811,7 +1809,7 @@ class _UIHandler(SimpleHTTPRequestHandler):
             self._handle_advanced()
             return
 
-        # ── API: 达人审批（src/influencer/，说明见 handoff.md） ──────────
+        # ── API: 达人名单（src/influencer/，说明见 handoff.md） ──────────
         if self.path.startswith("/api/influencer/"):
             self._handle_influencer()
             return

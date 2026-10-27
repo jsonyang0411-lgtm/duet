@@ -188,14 +188,15 @@ class Bot:
         admin_handler = AdminCommandHandler()
         router = MessageRouter(store=store, admin_handler=admin_handler, config=config)
 
-        # 达人商务模块：名单、审批单存在同一个数据库里，控制台的「达人审批」页也读写这里。
-        # 不再挂在路由上（达人的私聊走 PRM 起草）；Mac 端用它做名单合一和寄样审批（src/influencer/prm_bridge.py）
+        # 达人商务模块：名单存在同一个数据库里，控制台的「达人名单」页也读写这里。
+        # 不挂在路由上（达人的私聊走 PRM 起草）；Mac 端用它做名单合一（src/influencer/prm_bridge.py）。
+        # 寄样单、专属佣金走 PRM 的平台动作（jst.sample_order 等），不经过达人模块
         try:
-            from .influencer.handler import build_influencer_handler
-            influencer_handler = build_influencer_handler(config.db_path)
+            from .influencer.store import open_store
+            influencer_store = open_store(config.db_path)
         except Exception as e:
-            logger.warning("Failed to initialize InfluencerBusinessHandler: %s", e)
-            influencer_handler = None
+            logger.warning("Failed to open the influencer list: %s", e)
+            influencer_store = None
 
         # ── 4. Web UI status ────────────────────────────────────
         # (web server already started by desktop.py)
@@ -221,15 +222,15 @@ class Bot:
             pass
 
         # WECHAT_BACKEND=edge（Mac 端）：名单从达人模块来，回复存成待审核的草稿、不直接发（D19）
-        self._wire_edge_backend(backend, influencer_handler)
+        self._wire_edge_backend(backend, influencer_store)
         self._register_edge_client(backend)
 
         # CLAUDE_RELAY=on: "cc ..." in an allowed private chat goes to the Mac.
         relay = self._start_claude_relay(config, router, backend)
         # PRM_COPILOT=on: registered creators' messages become silent draft jobs.
         prm = self._start_prm(config, router, backend, relay)
-        # WECHAT_BACKEND=edge 加 PRM_COPILOT=on：名单合一、发送失败告诉 PRM、寄样接上审批单
-        bridge = self._wire_edge_prm(backend, prm, influencer_handler)
+        # WECHAT_BACKEND=edge 加 PRM_COPILOT=on：名单合一、发送失败告诉 PRM
+        self._wire_edge_prm(backend, prm, influencer_store)
         # PRM_EDGE=on: Windows only receives and sends WeChat for the Mac business service.
         edge = self._start_edge(config, router, backend, relay)
 
@@ -285,8 +286,6 @@ class Bot:
             if edge is not None:
                 edge.stop()
                 relay.attach_edge(None, "")
-            if bridge is not None:
-                bridge.detach()
             self._register_edge_client(None)
             if prm is not None:
                 prm.stop()
@@ -441,17 +440,17 @@ class Bot:
         return prm
 
     @staticmethod
-    def _wire_edge_backend(backend, influencer_handler) -> None:
+    def _wire_edge_backend(backend, influencer_store) -> None:
         """Mac 端的 edge 后端：达人名单从达人模块来；路由给的回复存进「待处理」当草稿，不直接发给达人（D19）。
         没有达人模块时名单为空，Windows 什么都不转。"""
         from .wechat.edge_backend import EdgeBackend
         if not isinstance(backend, EdgeBackend):
             return
-        if influencer_handler is None:
+        if influencer_store is None:
             logger.warning("WECHAT_BACKEND=edge 但达人模块没有启动：名单为空，Windows 不会转任何消息")
             return
         from .influencer.store import INBOX_DRAFT
-        store = influencer_handler.store
+        store = influencer_store
         backend.add_parties_source(lambda: [c["chat_id"] for c in store.list_contacts() if c["enabled"]])
         backend.set_reply_sink(lambda chat_id, reply, msg: store.add_inbox_item(chat_id, INBOX_DRAFT, reply))
 
@@ -468,23 +467,22 @@ class Bot:
             pass
 
     @staticmethod
-    def _wire_edge_prm(backend, prm, influencer_handler=None):
+    def _wire_edge_prm(backend, prm, influencer_store=None):
         """Mac 端的 PRM（同事的副驾驶，见 src/prm/service.py）：起草在本机的 worker 沙箱里，发送、读回、
         运营亲手回复都经过 Windows。发送、钩子在 _start_prm 里已经按普通后端接好，这里补名单和发送失败。
 
         名单合一（src/influencer/prm_bridge.py）：达人模块的名单为准，PRM 的登记跟着它；合作单页上的改动
         也写回名单。edge 后端每拉一轮事件同步一次，同步完的 PRM 名单就是推给 Windows 的名单。
-        寄样（SampleBridge）：合作单到了「待寄出」生成审批单，审批结果的通知进 PRM 的待审批。
-        返回 SampleBridge（停止时 detach），没接上时返回 None。"""
+        返回 PartyListSync，没接上时返回 None。"""
         from .wechat.edge_backend import EdgeBackend
         if prm is None or not isinstance(backend, EdgeBackend):
             return None
         backend.set_send_failure_hook(prm.on_send_failed)
-        if influencer_handler is None:
+        if influencer_store is None:
             backend.add_parties_source(prm.store.active_wxids)
             return None
-        from .influencer.prm_bridge import PartyListSync, SampleBridge
-        sync = PartyListSync(influencer_handler.store, prm)
+        from .influencer.prm_bridge import PartyListSync
+        sync = PartyListSync(influencer_store, prm)
         refresh = prm.on_parties_changed
 
         def parties_changed() -> None:
@@ -498,9 +496,7 @@ class Bot:
             sync.sync()
         except Exception:
             logger.exception("名单合一：启动时同步失败，edge 后端拉事件时会再试")
-        bridge = SampleBridge(influencer_handler, prm)
-        bridge.attach()
-        return bridge
+        return sync
 
     @staticmethod
     def _start_edge(config, router, backend, relay):

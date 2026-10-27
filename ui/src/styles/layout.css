@@ -128,5 +128,5 @@ html.dark .topbar { box-shadow: inset 0 -1px 0 var(--slab-line); }
 .savebar .btn.primary { margin-left: auto; }
 .savebar.err { box-shadow: inset 0 3px 0 var(--need-hi); }
 
-/* 左栏「达人审批」上的待办数量 */
+/* 左栏「达人名单」上的待办数量 */
 .nav-item .ni-badge { min-width: 18px; height: 18px; padding: 0 5px; background: var(--need-ink); color: #fff; font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; }

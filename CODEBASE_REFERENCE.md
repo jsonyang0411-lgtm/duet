@@ -514,7 +514,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `_UIHandler._request_origin_ok()` | 绑定本机时，`Host` 或 `Origin` 的主机名不是本机即拒绝（DNS 重绑定 / 其他网站调用）；没有 `Origin`（页面自身导航、curl）放行；用户把控制台绑到非本机地址时不检查 | 无 | `bool` |
 | `_UIHandler._method_not_allowed()` | 回 405 JSON `{"ok": false, "error": "Method not allowed"}`；`do_POST` 对未知路径、`do_GET` 对 `_POST_ONLY_PATHS` 的 GET 都用它 | 无 | `None` |
 | `_UIHandler._forbid_cross_origin()` | 回 403 JSON `{"ok": false, "error": "Forbidden: cross-origin request rejected"}` | 无 | `None` |
-| `_UIHandler._handle_influencer()` | `/api/influencer/*`（控制台「达人审批」页）：POST 时读 JSON 请求体，连同路径、查询参数和 `InfluencerStore(_influencer_db_path())` 一起交给 `src/influencer/console.handle()`，结果用 `send_json` 返回；出错回 `{ok:false, error}`；路径不认识回 404 JSON；`/api/influencer/counts` 不构造 store，直接调 `console.attention_counts()` 只读计数。具体行为见 `handoff.md`（达人模块不写入本手册） | 无 | `None` |
+| `_UIHandler._handle_influencer()` | `/api/influencer/*`（控制台「达人名单」页）：POST 时读 JSON 请求体，连同路径、查询参数和 `InfluencerStore(_influencer_db_path())` 一起交给 `src/influencer/console.handle()`，结果用 `send_json` 返回；出错回 `{ok:false, error}`；路径不认识回 404 JSON；`/api/influencer/counts` 不构造 store，直接调 `console.attention_counts()` 只读计数。具体行为见 `handoff.md`（达人模块不写入本手册） | 无 | `None` |
 | `register_relay(relay)` / `_relay_snapshot(limit=30)` / `_relay_job_for_console(job)` / `_lan_addresses()` | `Bot._start_claude_relay` 登记运行中的中转（停止时登记 `None`）；`GET /api/relay` 返回 `running`、`listening`、`address`、`mac_online`、`mac_last_seen_sec`、`counts`、`jobs`（每项：编号、状态、文字前 200 字、项目、时间、用时、结果前 400 字、错误，不含 wxid）、`lan_addresses`（本机局域网 IPv4，Mac 的 `relay_url` 用）；`POST /api/relay/cancel {id}` 取消（排队中的直接取消，进行中的让 Mac 下次心跳时停） | — | `dict` |
 | `register_prm(service)` / `_prm_state()` / `_prm_state_core()` / `_prm_candidates(state)` / `_prm_reserved()` / `_prm_parties(data)` / `_prm_packet(data)` / `_prm_db_path()` / `_prm_env_on(key)` | `Bot._start_prm` 登记运行中的 `PrmService`（停止时 `None`）。`GET /api/prm`：`prm.service.snapshot()`——`parties`（每位达人和最新的合作单：阶段、模式、槽位、AI 建议阶段、`attention`、最近消息时间）、`pending`（待审批/发送中的草稿，旧的在前）、`recent`（最近处理过的）、`counts`、`stages`/`kinds` 的中文名；每条草稿的 `legend` 只给打码号码（138****5678），号码本身不出现；再加 `enabled`/`relay_on`/`private_on`（读环境变量）、`mac_online`、`worker_kinds`、`can_send`/`can_send_files` 和 `candidates`（`data/private_chat_names.json` 里还没登记、不是 `ADMIN_WXID`/`CLAUDE_RELAY_WXIDS` 的私聊，最多 300 个）；机器人停止时读 `PRM_DB`（不存在不创建）。`POST /api/prm/parties`：`{action: "add", wxid, name, note}` / `{action: "enable"\|"disable", id}`，运行中交给 `PrmService.register / set_active`，停止时做同样的检查后直接写库；`POST /api/prm/packets {id, action: "send"\|"edit"\|"drop"\|"wrong"\|"execute"\|"repreview"\|"ack", text}` 只在运行中（`PrmService.decide`；带平台动作的草稿用 `execute`，`text` 是改过的回复）；`GET /api/prm` 另有 `platform_alerts`（没核验成功、还没标「我已处理」的平台动作）和 `platform_actions`（动作名 → 中文名；机器人停止时也有，`platform_alerts` 为空）。两个 POST 都在 `_POST_ONLY_PATHS` 里。`_relay_job_for_console` 多给 `kind`（`admin` / `prm`） | — | `dict` |
 | `_prm_deal(data)` / `_prm_reveal(data)` / `_prm_stopped_store()` / `_prm_int_env(key, default)` | `POST /api/prm/deals {action: "stage"\|"adopt"\|"mode"\|"shipment"\|"shipment_status", deal_id, stage / mode / carrier, waybill / status}`：运行中交给 `PrmService.deal_action`（成功后叫醒发送线程），停止时 `service.apply_deal_action` 直接写 `PRM_DB`（没有库就「还没有合作单」；`PRM_TAKEOVER_MIN` 读环境变量）；`shipment` 返回 `{ok, packet}`（发货通知草稿编号）。`POST /api/prm/reveal {party_id}`：完整号码 `{ok, numbers: [{token, value, cleared}]}`，运行中 / 停止时都写一条 `reveal` 操作记录（只记占位符）。`_prm_stopped_store` 打开已有的库并补齐 `send_gates` 默认值。`GET /api/prm` 另有 `gates`（每类消息的门槛和进度）、`modes`、`shipment_states`、`takeover_min`、`holding_min`、`retention_days`；每位达人多给 `has_numbers` 和合作单的 `mode`（过期的接管算副驾驶）/`mode_label`/`mode_until`、`legend`（槽位里的占位符，打码）、`shipment`、`shipment_status_label`、`delivered_at`、`purged_at`、`purge_due_at`、`events`（最近 12 条操作记录）；草稿多给 `route`、`wrong`、`waybill`、`system`（系统按模板生成）。两个新路径都在 `_POST_ONLY_PATHS` 里 | `dict` | `dict` |
@@ -549,7 +549,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | 文件 | 组件 | 描述 |
 |---|---|---|
 | `App.jsx` | `App`、`Console`、`Splash` | 问 `/api/onboarding/status` 决定进引导还是控制台；控制台 = 顶栏 + 左栏 + 页面 + 保存条 |
-| `Shell.jsx` | `NAV`、`TopBar`、`RunPill`、`Rail`、`Dock`、`SaveBar` | 深色顶栏（运行状态胶囊带启动/停止、主题切换）；左栏导航 + 左下角助手小窗（立绘待定，剪影占位，台词来自运行状态）；配置有改动时的底部保存条（提交完整配置，可「保存并重启」）；「达人审批」带子页，角标每 30 秒问一次 `/api/influencer/counts`；`useEdge` / `EdgeAlert`：Mac 端（`WECHAT_BACKEND=edge`）每页顶上的 Windows 提醒条，左栏不显示「微信连接」，左下角说 Windows 连没连上 |
+| `Shell.jsx` | `NAV`、`TopBar`、`RunPill`、`Rail`、`Dock`、`SaveBar` | 深色顶栏（运行状态胶囊带启动/停止、主题切换）；左栏导航 + 左下角助手小窗（立绘待定，剪影占位，台词来自运行状态）；配置有改动时的底部保存条（提交完整配置，可「保存并重启」）；「达人名单」带子页（达人名单、待处理），角标（待处理数）每 30 秒问一次 `/api/influencer/counts`；`useEdge` / `EdgeAlert`：Mac 端（`WECHAT_BACKEND=edge`）每页顶上的 Windows 提醒条，左栏不显示「微信连接」，左下角说 Windows 连没连上 |
 | `ui.jsx` / `cfg.jsx` / `art.jsx` | 通用组件 / 绑定配置草稿的表单控件 / Logo 与剪影 | 斜切卡片、分段、开关、词条、密钥框（已设置时只显示尾号）、对话框、确认框 |
 | `Dashboard.jsx` | `Dashboard`、`KeyCard`、`ChecksCard`、`RecentJobs` | 运行状态：票根式主卡（标签：微信后端、中转开关；数字：已处理消息、运行时长、Mac worker）、密钥缺失时重新获取、检查与环境诊断、最近的中转任务（`/api/relay`） |
 | `RelayPanel.jsx` | `RelayPanel`、`StateCard`、`MacCard`、`JobsCard` | 中转代理：机器人/中转端口/Mac worker/任务数；Mac 端怎么接（`relay_url` 用 `/api/relay` 的 `lan_addresses`）；任务表（每 5 秒刷新，展开看结果，排队中和进行中的可确认后取消，`POST /api/relay/cancel`）；中转设置 = `AdvancedFields only={['relay']}` |
@@ -566,7 +566,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `LogViewer.jsx` | `LogViewer` | 运行日志（深色终端）：`/api/logs` 最近 500 行，每 2 秒刷新，按级别筛选、搜索、暂停、跟随、清屏 |
 | `Onboarding.jsx` | `Onboarding`、`StepKey`、`ManualKey`、`StepWechat`、`StepRelay` | 首次设置 3 步：微信密钥（`useKeyExtraction`；也可 `ManualKey` 手动填 64 位密钥，交给 `step2` 的 `wcdb_key`）→ 微信设置（`StepWechat`：机器人的微信昵称、读取哪些群、微信后端 → `POST /api/onboarding/step2`）→ 中转设置（`StepRelay`：「你的 wxid」、「私聊不用打 cc」（默认开）、「只读你的私聊」（默认开）、token（预先随机生成，可重新生成、复制）、端口）。「完成」依次发 `step3`（`message_burst_enabled: true`、`private_chat_enabled: true`、`private_chats` = 你的 wxid（URL 编码；不只读你的就是 `*`），服务器写 .env、`ONBOARDING_DONE=true`）和 `POST /api/advanced`（`CLAUDE_RELAY=on`、`CLAUDE_RELAY_ONLY`、`ADMIN_WXID`、token、端口）；「以后再设置中转」只发 `step3`（私聊关、`private_chats: *`） |
 | `store/config.jsx` / `store/status.jsx` / `store/toast.jsx` | Provider + hook | 全站唯一的配置草稿（`/api/load-config` → 改动 → `validateConfig` 校验 → 每次保存都把完整草稿 POST 到 `/api/config`；`bot_display_name`、`wechat_backend`、`log_level`、`wechat_data_dir` 没改就不发，免得把本机覆盖文件里的值写进共享 .env）/ 每 2 秒轮询 `/api/status`，启动 / 停止（`fmtDuration`、`WECHAT_BACKEND_NAMES`）/ 提示条 |
-| `InfluencerPanel.jsx` | `InfluencerPanel`、`useInfluencerAttention`、`ApprovalsPage`、`ApprovalCard`、`NoticeBox`、`InboxPage`、`Overview`、`ContactsPage`、`EditContact` | 达人审批（`/api/influencer/*`，路由 `#/influencer/approvals`、`#/influencer/inbox`、`#/influencer/contacts`；「待处理」列出要人工回复的达人消息和缺货）：模拟模式横幅和聚水潭/小红书 CLI 状态；按状态筛选的审批卡（可填小红书账号、调低佣金，通过前再确认一次，驳回填原因，复制要发给达人的消息）；达人名单（添加、启用/停用、编辑，从最近私聊里挑选）。业务说明见 `handoff.md` |
+| `InfluencerPanel.jsx` | `InfluencerPanel`、`useInfluencerAttention`、`InboxPage`、`ContactsPage`、`DarenProfile`、`EditContact` | 达人名单（`/api/influencer/*`，路由 `#/influencer/contacts`（默认，老的 `#/influencer/approvals` 也落到这里）、`#/influencer/inbox`）：达人名单（添加、启用/停用、编辑，带平台和抖音号 / 小红书号，显示从聚水潭查的档位 / 主播类型，从最近私聊里挑选）；「待处理」列出 Mac 端机器人想回却没发出的话（`draft`）和以前留下的老事项。寄样审批单 2026-10-27 起撤掉了（寄样单、专属佣金在「待审批」里用平台动作办）。业务说明见 `handoff.md` |
 
 ### 2.20 `src/decision_trace.py` (决策追踪，只观测不改行为)
 
@@ -825,7 +825,6 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `PrmService._ask_next_step(packet, note, now)` / `service.next_step_note(action, record)` / `service.COMMISSION_ACTIONS` | 平台动作做成以后的下一步（寄样单 → 专属佣金，2026-10-27）：`next_step_note`：`jst.sample_order` 说寄样单号、店铺（`platforms.PLATFORMS`）和商品，叫这一份草稿填第一个商品的 `COMMISSION_ACTIONS[shop]`（`dy` → `dy.designated_commission`，`xhs` → `xhs.direct_plan`），把没开的记进案卷；`COMMISSION_ACTIONS` 里的动作说这个商品、佣金率开好了，还有没开的就填下一个、都开完了不填；别的动作返回 ""。`_ask_next_step`：没有说明就不做；合作单不在副驾驶模式时只写 `attention`（「之后该开专属佣金了：…请运营处理」）；否则 `relay.submit(chat, chat, "", kind="prm", fresh=True, meta={party_id, deal_id, name, system_note[, sent]})`。草稿出来的平台动作照常预览、等人批准 | — / `str` / — |
 | `PrmService._outbound(deal_id, party_id, now)` / `OUTBOUND_TOLD` / `OUTBOUND_CHARS` | 下一份草稿的「我方实际发了什么」：`outcomes` 的最近 `OUTBOUND_TOLD`（6）份（sent：发出去的文字，改过的另带原稿 `draft`，标了发错的带 `wrong`；dropped：不发的原稿；failed：没发出去的文字）加上 `holding_reply` 事件（`kind: holding`），按时间排、取最后 6 条，文字照达人的话一样打码（`_mask`），每条最多 `OUTBOUND_CHARS`（500）字，`at` 写成「月-日 时:分」；`handle` 每建一个草稿任务都放进 `meta.sent`（不是一次性的：草稿作废、任务被取消也不会丢） | `list[dict]` |
 | `PrmService.on_own_message(msg)` / `_note_sent(chat_id, text="", packet_id=None, file=False)` / `_unnote_sent(noted)` / `_match_own(chat_id, msg, now)` | 后端交来的、这个微信号自己在登记达人私聊里发的消息（`set_own_message_hook`）：超过 `MAX_AGE_SEC` 的不管；是机器人发的（这次运行发过的文字 30 分钟内对得上、文件 10 分钟内；重启前发的只认还没确认过的草稿和「稍等」回复）→ `confirm_sent`（发送中也认，失败的不改）；`_note_sent` 在发送**之前**登记（微信几毫秒就写进库，读回常常比发送函数返回还早），返回登记凭据，没发出去或出错时 `_unnote_sent` 撤销：文字只删这一条，文件把记录恢复成登记前的（前面发出的文件仍算机器人的）；否则是运营亲手回的：记 `operator_message`（打码），Mac 草稿作废，合作单 `human` 到 `now + PRM_TAKEOVER_MIN`、记 `takeover`（暂停的保持暂停）。Mac 端：带 `edge_operator` 的不比对、直接算运营；带 `edge_seen` 的对不上也不算接管 | — / — / `(bool, int \| None)` |
-| `PrmService.draft_hooks` / `stage_hooks` / `_run_hooks(hooks, *args)` | Mac 端达人模块的挂钩（`src/influencer/prm_bridge.SampleBridge`）：`on_result` 存好草稿、更新合作单后调 `draft_hooks(job, draft, deal)`；`deal_action` 的 `stage`/`adopt` 成功后调 `stage_hooks(deal)`；钩子出错只记日志。`EVENT_NAMES` 加了 `sample_request`（生成寄样审批单）、`sample_decision`（寄样审批结果） | — |
 | `PrmService.on_send_failed(chat_id, text, why)` | Mac 端（`set_send_failure_hook`）：Windows 没发出去。从 `_sent_lines` 去掉这句；`OWN_MATCH_SEC` 内发到这个聊天、`sent_unconfirmed`、换回号码后一字不差的草稿 `sent → failed`，`error` 写原因；对不上的（「稍等」）只记日志 | — |
 | `PrmService.on_result(job)` | 中转发送线程交来的结束任务：取消的忽略；清理任务（`meta.op="purge"`）记 `purge_case`；失败 / 失联的在合作单上写 `attention`（「#17 草稿没写成：…」）；同一个任务只起一次草稿；`parse_draft` 不过就写「草稿格式不对（not_json）」不起草稿；附件 = 这个任务传回的文件（`relay_outfiles`）；没有正文也没有附件 → `no_reply`；合作单不在副驾驶模式或这个私聊已有更新的任务 → `superseded`；否则 `deals.route_for`：门槛达标 → `approved`（`route=auto`，叫醒发送线程），不然 `pending`（并把更早还在等的 Mac 草稿改成已过时）；合并槽位、记下建议阶段（只是建议，不改阶段）和 `attention`（模型说要注意时是理由；要的附件没收齐、发货通知单号对不上也写上） | `bool` |
 | `PrmService.register(wxid, name, note)` / `set_active(party_id, active)` / `service.check_wxid(wxid, reserved)` | 控制台用：wxid 要是字母开头的字母数字下划线短横线（4–64），不能是群 id，不能是 `ADMIN_WXID` 或 `CLAUDE_RELAY_WXIDS`；称呼 1–30 字，备注 200 字以内；改完通知后端（`on_parties_changed` = `refresh_private_chats_soon`） | `dict` / `dict \| None` / `str` |
@@ -910,8 +909,8 @@ Windows 只替 Mac 的业务服务收发微信（见功能 M）。`protocol.py`�
 | `server.register_edge_client(backend)` / `_edge_state()` / `Bot._register_edge_client(backend)` | Bot.run 登记运行中的 edge 后端（停止时传 None）；`GET /api/edge` 返回 `{mode: "edge"/"", running, …status()}`，`mode` 看环境变量 `WECHAT_BACKEND`。前端 `Shell.jsx` 的 `useEdge` / `EdgeAlert`：每页顶上的提醒条，Mac 端左栏不显示「微信连接」，左下角说 Windows 连没连上 | `None` / `dict` |
 | `EdgeState(path)` / `save()` | `cursor`（处理到的事件编号）、`parties_version`、`parties_digest`；先写临时文件再替换 | — |
 | `event_to_message(event, files)` | 事件 → 路由的标准消息：`sender_id`/`sender_name` 用 `chat_id`（事件里没有昵称），`is_group=False`；有 `quote` 时带 `quoted_content`、`is_reply_to_bot`（引用的是我们的话）；另带 `edge_event_id`、`edge_files`（已下载到 Mac 的附件，`relay/attachments.resolve` 直接用，不在本机微信目录里找）；文件消息带 `file_name`、`file_size` | `dict` |
-| `Bot._wire_edge_backend(backend, influencer_handler)` | 只对 `EdgeBackend`：名单 = 达人模块里启用的达人；回复存进达人模块「待处理」（种类 `draft`，`INBOX_DRAFT`）。没有达人模块时名单为空 | `None` |
-| `Bot._wire_edge_prm(backend, prm, influencer_handler=None)` | 返回 `SampleBridge`（寄样接上审批单，停止时 `detach`）或 `None`。只对 `EdgeBackend` 且 `PRM_COPILOT=on`：有达人模块时名单合一（`src/influencer/prm_bridge.PartyListSync`，说明在 handoff.md）：`sync` 当名单来源（每轮同步，返回 PRM 登记着的达人），`prm.on_parties_changed` 先 `prm_changed` 再 `refresh_private_chats_soon`，接线时先同步一次；没有达人模块时名单 = PRM 登记的达人；发送失败交给 `PrmService.on_send_failed`（找到对应的「已发出、未确认」草稿，改成 `failed`、写上原因）。发送、`set_own_message_hook` 在 `_start_prm` 里已按普通后端接好 | `None` |
+| `Bot._wire_edge_backend(backend, influencer_store)` | 只对 `EdgeBackend`：名单 = 达人模块里启用的达人；回复存进达人模块「待处理」（种类 `draft`，`INBOX_DRAFT`）。没有达人模块时名单为空 | `None` |
+| `Bot._wire_edge_prm(backend, prm, influencer_store=None)` | 返回 `PartyListSync` 或 `None`。只对 `EdgeBackend` 且 `PRM_COPILOT=on`：有达人模块时名单合一（`src/influencer/prm_bridge.PartyListSync`，说明在 handoff.md）：`sync` 当名单来源（每轮同步，返回 PRM 登记着的达人），`prm.on_parties_changed` 先 `prm_changed` 再 `refresh_private_chats_soon`，接线时先同步一次；没有达人模块时名单 = PRM 登记的达人；发送失败交给 `PrmService.on_send_failed`（找到对应的「已发出、未确认」草稿，改成 `failed`、写上原因）。发送、`set_own_message_hook` 在 `_start_prm` 里已按普通后端接好。寄样单不经过达人模块（2026-10-27 起走 PRM 的 `jst.sample_order`） | `PartyListSync \| None` |
 
 **Mac 端起草（计划第 3 步）**：`WECHAT_BACKEND=edge` + `CLAUDE_RELAY=on`（`CLAUDE_RELAY_HOST` 必须是 127.0.0.1，配置检查会拦；这时不要求 `CLAUDE_RELAY_WXIDS`/`ADMIN_WXID`）+ `PRM_COPILOT=on`。中转只给本机的 `tools/claude_relay/worker.py --kinds prm` 用，起草在同事 worker 的沙箱里（`--restricted`、只有读写文件的工具、`prm_guard` 钩子把读限制在 `prm_workspace`、写限制在 `deals/*.md`、无 MCP、无会话保存、`--json-schema`）。`PrmService.on_own_message` 见到 `edge_operator` 时不再自己比对（Windows 比过了），见到 `edge_seen` 而对不上时不算接管。
 
@@ -973,7 +972,7 @@ Bot.run()
   ├── initialize_db() → MessageStore()   [src/db/]
   ├── AdminCommandHandler()              [src/admin.py]
   ├── MessageRouter(store, admin_handler, config)   [src/router.py]（DecisionTracer.from_config）
-  ├── build_influencer_handler(config.db_path)  [src/influencer/handler.py]（失败只警告，传 None；说明见 handoff.md）
+  ├── open_store(config.db_path)          [src/influencer/store.py]（INFLUENCER_CHAT_IDS 并进名单、清理到期个人信息；失败只警告，传 None；说明见 handoff.md）
   ├── _create_wechat_backend(store)      → WcdbBackend / MacUIBackend / MacHybridBackend  [src/wechat/]
   ├── _register_backend(backend)         [src/web/server.py]
   ├── _start_claude_relay(config, router, backend)   → ClaudeRelay（CLAUDE_RELAY=on）→ router._claude_relay、register_relay
@@ -1017,7 +1016,7 @@ _UIHandler.do_GET / do_POST（先 _request_origin_ok；_POST_ONLY_PATHS 的 GET 
   ├── /api/voice/model-status / download-model → HuggingFace 缓存 / 后台下载
   └── 其他路径             → ui/dist 静态文件（找不到回 index.html）
   （中转的端口 8790 上另有 /relay/*（Mac worker）和 /edge/*（微信边缘，见功能 M）；口令 CLAUDE_RELAY_TOKEN / PRM_EDGE_TOKEN）
-  ├── /api/influencer/*   → _handle_influencer() → src/influencer/console.handle()（达人审批，说明见 handoff.md）
+  ├── /api/influencer/*   → _handle_influencer() → src/influencer/console.handle()（达人名单，说明见 handoff.md）
   （中转的端口 8790 上另有 /edge/*：微信边缘，见功能 V；口令 PRM_EDGE_TOKEN）
 ```
 
@@ -1286,7 +1285,7 @@ WcdbBackend._handle_message(...)（线程池）/ Mac 后端 poll_once
 | `advanced_config.py` | `src/web/advanced_config.py` | 高级开关白名单（`/api/advanced`） |
 | `desktop.py` | `desktop.py` | Windows 桌面入口 (WebView2) |
 | `desktop_mac.py` | `desktop_mac.py` | macOS 桌面入口 (WebView Cocoa) |
-| React 前端 | `ui/src/` | SPA（首次设置 3 步 + 控制台 7 页（含达人审批），见 §2.19） |
+| React 前端 | `ui/src/` | SPA（首次设置 3 步 + 控制台 7 页（含达人名单），见 §2.19） |
 
 #### API 端点清单
 
@@ -1302,15 +1301,11 @@ WcdbBackend._handle_message(...)（线程池）/ Mac 后端 poll_once
 | `GET` | `/api/config/export` | 导出主配置为 JSON 文件（不含语音设置和密钥） | 无 |
 | `POST` | `/api/config/import` | 导入 JSON 配置（至少要有 `wechat_backend` / `bot_display_name` / `wechat_groups` 之一；写的键同 `/api/config`） | 无 |
 | `GET` | `/api/groups` | 已知的群：`data/group_names.json`（群名、人数；没有人数时数 `messages` 里的发言人）+ `messages` 表里还没进名单的 `@chatroom`；微信连接页的群选择器用 | 无 |
-| `GET` | `/api/influencer/status` | 达人审批页的状态：模拟模式、聚水潭和小红书 CLI 能否使用、待审批数量、待处理事项数量、佣金默认值和上限 | 无 |
-| `GET` | `/api/influencer/approvals?status=pending` | 审批单列表（pending/executing/fulfilled/rejected/failed/expired/all），带操作记录和要发给达人的消息 | 无 |
-| `POST` | `/api/influencer/approvals/action` | 通过或驳回审批单：`{packet_id, action: approve\|reject, xhs_account?, commission_rate?, reason?}`；通过时调用聚水潭和小红书 CLI | 无 |
-| `GET` | `/api/influencer/contacts` | 达人名单 | 无 |
-| `POST` | `/api/influencer/contacts/action` | 添加、修改、启用或停用达人：`{chat_id, display_name?, xhs_account?, note?, enabled?}` | 无 |
+| `GET` | `/api/influencer/contacts` | 达人名单（先 `run_maintenance`：清到期的个人信息，含老的寄样审批单） | 无 |
+| `POST` | `/api/influencer/contacts/action` | 添加、修改、启用或停用达人：`{chat_id, display_name?, xhs_account?, note?, enabled?, platform?, platform_no?}` | 无 |
 | `GET` | `/api/influencer/recent-chats` | 最近私聊过的联系人（取自 messages 表，去掉群聊和系统会话），供挑选达人 | 无 |
-| `GET` | `/api/influencer/overview` | 「今日概览」：待审批（含 12 小时内过期的）、待处理、近 24 小时的新申请 / 已执行 / 驳回 / 失败 / 缺货、停在执行中的单、启用的达人数，以及可复制的概览文字 | 无 |
-| `GET` | `/api/influencer/counts` | 左栏「达人审批」角标的数量（待审批 + 待处理）；只读打开数据库，不建表，表不存在时返回 0 | 无 |
-| `GET` | `/api/influencer/inbox?handled=0` | 待运营处理的事项：达人发来的非索样消息、达人申请时缺货；`handled=1` 看已处理的 | 无 |
+| `GET` | `/api/influencer/counts` | 左栏「达人名单」角标的数量 `{ok, inbox}`（待处理）；只读打开数据库，不建表，表不存在时返回 0 | 无 |
+| `GET` | `/api/influencer/inbox?handled=0` | 待运营处理的事项：Mac 端机器人想回却没发出的话（`draft`），以及老库里以前的事项；`handled=1` 看已处理的 | 无 |
 | `POST` | `/api/influencer/inbox/action` | 把一条待处理事项标为已处理：`{id}` | 无 |
 | `GET` | `/api/advanced` | 高级开关白名单和当前值（密钥打码）、被 `.env.local` 覆盖的键 | 无 |
 | `POST` | `/api/advanced` | 保存高级开关：只写提交的键，先校验（不合法返回 `{ok:false, errors:{键: 原因}}`，什么都不写） | 无 |

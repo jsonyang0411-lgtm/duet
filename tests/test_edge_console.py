@@ -1,7 +1,6 @@
-"""Mac 端控制台和 Windows 状态（计划第 5 步）：/api/edge、每页顶上的提醒条、Mac 端隐藏「微信连接」页、
-审批卡上通知已进「待审批」时不再让运营复制。
+"""Mac 端控制台和 Windows 状态（计划第 5 步）：/api/edge、每页顶上的提醒条、Mac 端隐藏「微信连接」页。
 
-浏览器部分沿用达人审批页的测试服务（临时配置和数据库），/api/edge 用 Playwright 拦截，模拟 Windows 的各种状态。
+浏览器部分沿用达人名单页的测试服务（临时配置和数据库），/api/edge 用 Playwright 拦截，模拟 Windows 的各种状态。
 """
 
 import json
@@ -61,31 +60,6 @@ def test_the_console_api_reads_the_running_backend(tmp_path, monkeypatch):
     assert server._edge_state()["mode"] == ""
 
 
-def test_an_approval_card_knows_its_notice_went_to_review(tmp_path, monkeypatch):
-    from test_influencer_acceptance import FakeERP, FakeXHS
-    from test_influencer_store import NEXT_YEAR, make_packet
-
-    from src.influencer import console as influencer_console
-    from src.influencer.handler import InfluencerBusinessHandler
-    from src.influencer.store import SOURCE_BOT, InfluencerStore
-
-    store = InfluencerStore(str(tmp_path / "messages.db"))
-    for packet_id in ("GATE-A", "GATE-B"):
-        store.add_approval(make_packet(packet_id, chat_id="wxid_mei", xhs_account="xhs_mei", expires_at=NEXT_YEAR),
-                           source=SOURCE_BOT)
-    monkeypatch.setattr(influencer_console, "InfluencerBusinessHandler",
-                        lambda s: InfluencerBusinessHandler(s, erp_client=FakeERP(), xhs_client=FakeXHS()))
-    plain = influencer_console.act_on_approval(store, {"packet_id": "GATE-A", "action": "reject"})
-    assert plain["packet"]["notice"] and plain["packet"]["notice_queued"] is False, "没开 PRM：照旧复制"
-    queued = []
-    influencer_console.register_decision_hook(lambda packet, approved, result: queued.append(packet.packet_id))
-    try:
-        result = influencer_console.act_on_approval(store, {"packet_id": "GATE-B", "action": "reject"})
-    finally:
-        influencer_console._decision_hooks.clear()
-    assert queued == ["GATE-B"] and result["notice_queued"] and result["packet"]["notice_queued"] is True
-
-
 # ---- 浏览器 ----
 
 def fake_edge_api(page, **state):
@@ -104,7 +78,7 @@ def test_windows_trouble_shows_on_every_page(page, console):  # noqa: F811
 def test_the_mac_side_has_no_wechat_page_and_no_alert_when_all_is_well(page, console):  # noqa: F811
     fake_edge_api(page, mode="edge", running=True, online=True, parties=3, problems=[])
     page.goto(f"{console.base}/#/status")
-    page.get_by_role("button", name="达人审批").wait_for()
+    page.locator(".nav-item", has_text="达人名单").wait_for()
     page.wait_for_timeout(500)
     assert page.get_by_role("button", name="微信连接").count() == 0
     assert page.get_by_text("Windows 那边有问题").count() == 0

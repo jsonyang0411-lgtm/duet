@@ -122,7 +122,6 @@ EVENT_NAMES = {
     "operator_message": "运营亲手回复", "creator_message": "接管期间达人的消息", "shipment": "填运单号",
     "shipment_status": "更新物流", "holding_reply": "自动回复「稍等」", "reveal": "查看完整号码",
     "wrong": "标为发错了", "purge": "清除收件信息", "purge_case": "清除 Mac 案卷里的收件信息",
-    "sample_request": "生成寄样审批单", "sample_decision": "寄样审批结果",
     "platform_execute": "批准执行平台动作", "platform_result": "平台动作结果",
     "platform_preview": "重新预览平台动作", "platform_ack": "平台动作已处理",
 }
@@ -298,10 +297,6 @@ class PrmService:
         self._wake = threading.Event()
         self._stopping = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        # Mac 端达人模块的挂钩（src/influencer/prm_bridge.py）：draft_hooks(job, draft, deal) 在 Mac 的草稿
-        # 进库以后调；stage_hooks(deal) 在控制台改了阶段以后调。钩子出错只记日志，不影响草稿
-        self.draft_hooks: list = []
-        self.stage_hooks: list = []
         relay.register_kind(PRM, self.on_result)
 
     @property
@@ -667,16 +662,7 @@ class PrmService:
         if state == APPROVED:
             self._wake.set()
         logger.info("PRM: job #%d -> packet %d (%s, %s, %s)", job["id"], packet_id, state, route, draft.message_kind)
-        self._run_hooks(self.draft_hooks, job, draft, self._store.deal(deal_id))
         return True
-
-    @staticmethod
-    def _run_hooks(hooks: list, *args) -> None:
-        for hook in hooks:
-            try:
-                hook(*args)
-            except Exception:
-                logger.exception("PRM: a hook failed")
 
     # ── from the console ──────────────────────────────────────────────────
 
@@ -710,10 +696,6 @@ class PrmService:
         result = apply_deal_action(self._store, action, data, now=self._clock(), takeover_sec=self._takeover_sec)
         if result.get("ok"):
             self._wake.set()
-            if action in ("stage", "adopt"):
-                deal = self._store.deal(int(data.get("deal_id")))
-                if deal is not None:
-                    self._run_hooks(self.stage_hooks, deal)
         return result
 
     def reveal(self, party_id: int, actor: str = "console") -> dict:

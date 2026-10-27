@@ -1,4 +1,7 @@
-"""达人模块的数据存储（第 6 项，B5）：达人名单、没补齐的申请、审批单、操作记录。
+"""达人模块的数据存储（第 6 项，B5）：达人名单（档位、主播类型、平台 UID）、待处理事项、操作记录。
+
+寄样审批单（influencer_approvals）2026-10-27 起不再写入：寄样单改走 PRM 的平台动作 jst.sample_order。
+老库里的审批单和它的操作记录按 90 天删掉（run_maintenance），里面的收件信息跟着删。
 
 和机器人共用一个 SQLite 文件（默认 data/messages.db）。机器人和控制台都只通过这里
 读写，不共享内存对象。表名都以 influencer_ 开头，建表不经过原项目的 src/db/schema.py。
@@ -6,25 +9,21 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
-from .settings import DRAFT_TTL_SECONDS, PERSONAL_INFO_RETENTION_SECONDS
-from .types import ApprovalActionPacket, GateStatus
+from .settings import DRAFT_TTL_SECONDS, PERSONAL_INFO_RETENTION_SECONDS, influencer_chat_ids_from_env
+
+logger = logging.getLogger(__name__)
 
 # 操作记录里的"来源"
-SOURCE_BOT = "机器人"
 SOURCE_CONSOLE = "控制台"
 SOURCE_ENV = "环境变量"
-SOURCE_AUTO = "自动"
-
-# 处理完的状态：从这一刻起开始算个人信息的保留期（Q3）
-FINISHED_STATUSES = (GateStatus.REJECTED, GateStatus.FULFILLED, GateStatus.FAILED, GateStatus.EXPIRED)
 
 # 不是联系人的系统会话，不出现在"最近私聊"里
 _SYSTEM_CHATS = ("filehelper", "weixin", "newsapp", "fmessage", "medianote", "floatbottle")
@@ -51,7 +50,7 @@ CREATE TABLE IF NOT EXISTS influencer_drafts (
     updated_at REAL NOT NULL
 );
 
--- 审批单：列名和 ApprovalActionPacket 的字段名一一对应
+-- 寄样审批单：2026-10-27 起不再写入（寄样单走 PRM 的 jst.sample_order）。老库里的 90 天后删除
 CREATE TABLE IF NOT EXISTS influencer_approvals (
     packet_id                TEXT    PRIMARY KEY,
     influencer_id            TEXT    NOT NULL,
@@ -144,16 +143,8 @@ CREATE INDEX IF NOT EXISTS idx_influencer_outbox_open
     ON influencer_outbox(sent_at, created_at);
 """
 
-# 审批单从待审批改成执行中时记的一条操作记录，用来判断执行是不是被中断了（B23）
-EVENT_EXECUTION_STARTED = "开始执行"
-
-# 待处理事项的种类
-INBOX_MESSAGE = "message"
-INBOX_OUT_OF_STOCK = "out_of_stock"
-INBOX_COMMISSION = "commission"  # 达人要求提高佣金，机器人回了固定话术
+# 待处理事项的种类。老库里还有 message / out_of_stock / commission（以前的审批那条路写的）
 INBOX_DRAFT = "draft"  # Mac 端（WECHAT_BACKEND=edge）：机器人想回的话，没发出，等运营审核（D19）
-
-_PACKET_COLUMNS = tuple(f.name for f in fields(ApprovalActionPacket))
 
 
 # 建表以后加的列：老库启动时补上（ALTER TABLE ... ADD COLUMN），新库也靠这里加，SCHEMA_SQL 不再改
@@ -193,12 +184,6 @@ def _placeholders(count: int) -> str:
     return ", ".join("?" * count)
 
 
-def _packet_from_row(row: sqlite3.Row) -> ApprovalActionPacket:
-    values = {name: row[name] for name in _PACKET_COLUMNS}
-    values["status"] = GateStatus(values["status"])
-    return ApprovalActionPacket(**values)
-
-
 def _contact_from_row(row: sqlite3.Row) -> Dict[str, Any]:
     contact = dict(row)
     contact["enabled"] = bool(contact["enabled"])
@@ -236,13 +221,6 @@ class InfluencerStore:
             conn.close()
 
     # ---- 达人名单（D3） ----
-
-    def is_influencer(self, chat_id: str) -> bool:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM influencer_contacts WHERE chat_id = ? AND enabled = 1", (chat_id,),
-            ).fetchone()
-        return row is not None
 
     def add_contacts(self, chat_ids: Iterable[str], *, source: str, note: str = "") -> List[str]:
         """把名单里还没有的 chat_id 加进来；已有的（包括停用的）一概不动（Q4）。返回新加的。"""
@@ -340,42 +318,6 @@ class InfluencerStore:
             ).fetchall()
         return [_contact_from_row(row) for row in rows]
 
-    def record_profile(
-        self,
-        chat_id: str,
-        *,
-        nickname: str,
-        xhs_account: str,
-        follower_count: Optional[int],
-        recent_like_count: Optional[int],
-    ) -> None:
-        """记下机器人看到的达人资料。显示名和小红书账号只在名单里还空着时才填，运营填的优先；
-        粉丝和点赞只记在名单上那个小红书账号名下，拿不到数据时保留上次的。"""
-        now = time.time()
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT display_name, xhs_account FROM influencer_contacts WHERE chat_id = ?", (chat_id,),
-            ).fetchone()
-            if row is None:
-                return
-            values: Dict[str, Any] = {}
-            if nickname and not row["display_name"]:
-                values["display_name"] = nickname
-            if xhs_account and not row["xhs_account"]:
-                values["xhs_account"] = xhs_account
-            account = row["xhs_account"] or xhs_account
-            if xhs_account and xhs_account == account and follower_count is not None:
-                values.update(
-                    follower_count=follower_count, recent_like_count=recent_like_count, stats_updated_at=now,
-                )
-            if not values:
-                return
-            assignments = ", ".join(f"{name} = ?" for name in values)
-            conn.execute(
-                f"UPDATE influencer_contacts SET {assignments}, updated_at = ? WHERE chat_id = ?",
-                (*values.values(), now, chat_id),
-            )
-
     def recent_private_chats(self, *, limit: int = 30) -> List[Dict[str, Any]]:
         """最近私聊过的联系人，取自原项目的 messages 表，供在控制台里挑选达人。
 
@@ -411,138 +353,14 @@ class InfluencerStore:
             for row in rows
         ]
 
-    # ---- 审批单 ----
-
-    def add_approval(self, packet: ApprovalActionPacket, *, source: str) -> None:
-        values = asdict(packet)
-        values["status"] = packet.status.value
-        with self._connect() as conn:
-            conn.execute(
-                f"INSERT INTO influencer_approvals ({', '.join(_PACKET_COLUMNS)})"
-                f" VALUES ({_placeholders(len(_PACKET_COLUMNS))})",
-                [values[name] for name in _PACKET_COLUMNS],
-            )
-            self._log(
-                conn, "提交审批", packet_id=packet.packet_id, chat_id=packet.influencer_id,
-                detail=packet.requested_product, source=source,
-            )
-
-    def get_approval(self, packet_id: str) -> Optional[ApprovalActionPacket]:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM influencer_approvals WHERE packet_id = ?", (packet_id,),
-            ).fetchone()
-        return None if row is None else _packet_from_row(row)
-
-    def list_approvals(
-        self, statuses: Optional[Iterable[GateStatus]] = None, *, limit: int = 200,
-    ) -> List[ApprovalActionPacket]:
-        """按创建时间从新到旧列出审批单；statuses 为 None 时列出全部。"""
-        sql, params = "SELECT * FROM influencer_approvals", []
-        if statuses is not None:
-            params = [status.value for status in statuses]
-            if not params:
-                return []
-            sql += f" WHERE status IN ({_placeholders(len(params))})"
-        with self._connect() as conn:
-            rows = conn.execute(sql + " ORDER BY created_at DESC LIMIT ?", (*params, limit)).fetchall()
-        return [_packet_from_row(row) for row in rows]
-
-    def update_pending(self, packet_id: str, **values: Any) -> bool:
-        """改一张还在待审批的单。单已经不是待审批了就什么都不改，返回 False。"""
-        return self._update(packet_id, GateStatus.PENDING, values)
-
-    def transition(
-        self, packet_id: str, from_status: GateStatus, to_status: GateStatus, **values: Any,
-    ) -> bool:
-        """当前状态是 from_status 时才改成 to_status，否则什么都不改，返回 False。
-
-        "每张审批单只能执行一次"靠的就是这个条件更新：两个请求同时想把同一张单从
-        待审批改成执行中，只有一个能改到。跨线程、跨进程、重启之后都成立。
-        """
-        values["status"] = to_status.value
-        if to_status in FINISHED_STATUSES:
-            values.setdefault("handled_at", time.time())
-        return self._update(packet_id, from_status, values)
-
-    def _update(self, packet_id: str, expected: GateStatus, values: Dict[str, Any]) -> bool:
-        unknown = set(values) - set(_PACKET_COLUMNS)
-        if unknown:
-            raise ValueError(f"审批单没有这些字段：{sorted(unknown)}")
-        if not values:
-            return False
-        assignments = ", ".join(f"{name} = ?" for name in values)
-        with self._connect() as conn:
-            cur = conn.execute(
-                f"UPDATE influencer_approvals SET {assignments} WHERE packet_id = ? AND status = ?",
-                (*values.values(), packet_id, expected.value),
-            )
-        return cur.rowcount == 1
-
-    def count_samples(self, *, since: float, chat_id: str = "") -> int:
-        """寄出去的样品单数（D5）：since 以后执行成功的，加上正在执行的。chat_id 为空时算所有达人。"""
-        sql = (
-            "SELECT COUNT(*) FROM influencer_approvals"
-            " WHERE ((status = ? AND handled_at >= ?) OR status = ?)"
-        )
-        params: List[Any] = [GateStatus.FULFILLED.value, since, GateStatus.EXECUTING.value]
-        if chat_id:
-            sql += " AND influencer_id = ?"
-            params.append(chat_id)
-        with self._connect() as conn:
-            return conn.execute(sql, params).fetchone()[0]
-
-    def count_by_status(self) -> Dict[str, int]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT status, COUNT(*) AS n FROM influencer_approvals GROUP BY status",
-            ).fetchall()
-        return {row["status"]: row["n"] for row in rows}
-
     # ---- 操作记录 ----
 
-    def add_event(
-        self, action: str, *, source: str, packet_id: str = "", chat_id: str = "", detail: str = "",
-    ) -> None:
-        with self._connect() as conn:
-            self._log(conn, action, packet_id=packet_id, chat_id=chat_id, detail=detail, source=source)
-
     @staticmethod
-    def _log(
-        conn: sqlite3.Connection, action: str, *, source: str,
-        packet_id: str = "", chat_id: str = "", detail: str = "",
-    ) -> None:
+    def _log(conn: sqlite3.Connection, action: str, *, source: str, chat_id: str = "", detail: str = "") -> None:
         conn.execute(
-            "INSERT INTO influencer_events (packet_id, chat_id, action, detail, source, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (packet_id, chat_id, action, detail, source, time.time()),
+            "INSERT INTO influencer_events (chat_id, action, detail, source, created_at) VALUES (?, ?, ?, ?, ?)",
+            (chat_id, action, detail, source, time.time()),
         )
-
-    def execution_started_at(self, packet_id: str) -> Optional[float]:
-        """这张单最近一次"开始执行"的时间。老版本没记这条，查不到时返回 None。"""
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT MAX(created_at) AS at FROM influencer_events WHERE packet_id = ? AND action = ?",
-                (packet_id, EVENT_EXECUTION_STARTED),
-            ).fetchone()
-        return row["at"]
-
-    def events_for(self, packet_ids: Iterable[str]) -> Dict[str, List[Dict[str, Any]]]:
-        """每张审批单的操作记录，按时间先后排列。"""
-        ids = list(packet_ids)
-        if not ids:
-            return {}
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT packet_id, action, detail, source, created_at FROM influencer_events"
-                f" WHERE packet_id IN ({_placeholders(len(ids))}) ORDER BY created_at, id",
-                ids,
-            ).fetchall()
-        events: Dict[str, List[Dict[str, Any]]] = {packet_id: [] for packet_id in ids}
-        for row in rows:
-            event = dict(row)
-            events[event.pop("packet_id")].append(event)
-        return events
 
     # ---- 待运营处理的事项 ----
 
@@ -554,16 +372,6 @@ class InfluencerStore:
                 (chat_id, kind, content, int(auto_replied), time.time()),
             )
         return cur.lastrowid
-
-    def last_auto_reply_at(self, chat_id: str, kind: str = INBOX_MESSAGE) -> Optional[float]:
-        """这位达人最近一次因为某类事项收到机器人自动回复的时间；没回过返回 None。"""
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT MAX(created_at) AS t FROM influencer_inbox"
-                " WHERE chat_id = ? AND kind = ? AND auto_replied = 1",
-                (chat_id, kind),
-            ).fetchone()
-        return row["t"]
 
     def list_inbox(self, *, handled: bool = False, limit: int = 200) -> List[Dict[str, Any]]:
         """待处理（或已处理）的事项，从新到旧，带上名单里的显示名。"""
@@ -655,88 +463,38 @@ class InfluencerStore:
                     (kind, cutoff),
                 )
 
-    # ---- 概览 ----
-
-    def overview(self, now: Optional[float] = None) -> Dict[str, int]:
-        """控制台「今日概览」和晨报用的数字，全部来自数据库（B13：不再写死假数据）。
-        "近 24 小时"按提交、处理的时间算。"""
-        now = time.time() if now is None else now
-        day_ago = now - 24 * 3600
-        pending = GateStatus.PENDING.value
-        with self._connect() as conn:
-            def count(sql: str, *params: Any) -> int:
-                return conn.execute(sql, params).fetchone()[0]
-
-            def handled_since(status: GateStatus) -> int:
-                return count(
-                    "SELECT COUNT(*) FROM influencer_approvals WHERE status = ? AND handled_at >= ?",
-                    status.value, day_ago,
-                )
-
-            return {
-                "pending": count("SELECT COUNT(*) FROM influencer_approvals WHERE status = ?", pending),
-                "expiring_soon": count(
-                    "SELECT COUNT(*) FROM influencer_approvals WHERE status = ? AND expires_at < ?",
-                    pending, now + 12 * 3600,
-                ),
-                "executing": count(
-                    "SELECT COUNT(*) FROM influencer_approvals WHERE status = ?", GateStatus.EXECUTING.value,
-                ),
-                "inbox": count("SELECT COUNT(*) FROM influencer_inbox WHERE handled_at IS NULL"),
-                "submitted_24h": count("SELECT COUNT(*) FROM influencer_approvals WHERE created_at >= ?", day_ago),
-                "fulfilled_24h": handled_since(GateStatus.FULFILLED),
-                "rejected_24h": handled_since(GateStatus.REJECTED),
-                "failed_24h": handled_since(GateStatus.FAILED),
-                "out_of_stock_24h": count(
-                    "SELECT COUNT(*) FROM influencer_inbox WHERE kind = ? AND created_at >= ?",
-                    INBOX_OUT_OF_STOCK, day_ago,
-                ),
-                "contacts": count("SELECT COUNT(*) FROM influencer_contacts WHERE enabled = 1"),
-            }
-
     # ---- 维护 ----
 
     def run_maintenance(self, now: Optional[float] = None) -> None:
-        """把超过有效期的待审批单标成过期；清除到期的个人信息（Q3）；删掉作废的草稿，
-        以及处理完 90 天的待处理事项、90 天前的对话记录和发出 90 天的消息；
+        """清除到期的个人信息（Q3、D10）：老的寄样审批单（含收件人、电话、地址）和它们的操作记录、
+        作废的草稿、处理完 90 天的待处理事项、90 天前的对话记录和发出 90 天的消息；
         原项目的表里达人私聊的消息和由它们整理出来的记忆，也按 90 天清除（B27）。
 
-        机器人启动时、控制台每次列审批单时都会调用，所以不需要单独的定时任务。
+        机器人启动时、控制台每次读名单状态时都会调用，所以不需要单独的定时任务。
         """
         now = time.time() if now is None else now
-        finished = [status.value for status in FINISHED_STATUSES]
+        cutoff = now - PERSONAL_INFO_RETENTION_SECONDS
         with self._connect() as conn:
-            overdue = conn.execute(
-                "SELECT packet_id, influencer_id FROM influencer_approvals WHERE status = ? AND expires_at < ?",
-                (GateStatus.PENDING.value, now),
-            ).fetchall()
-            for row in overdue:
-                cur = conn.execute(
-                    "UPDATE influencer_approvals SET status = ?, handled_at = expires_at"
-                    " WHERE packet_id = ? AND status = ?",
-                    (GateStatus.EXPIRED.value, row["packet_id"], GateStatus.PENDING.value),
-                )
-                if cur.rowcount:
-                    self._log(
-                        conn, "过期", packet_id=row["packet_id"], chat_id=row["influencer_id"],
-                        detail="超过有效期没有审批", source=SOURCE_AUTO,
-                    )
             conn.execute(
-                "UPDATE influencer_approvals SET recipient_name = '', recipient_phone = '',"
-                " shipping_address = '', evidence = '', personal_info_cleared_at = ?"
-                f" WHERE personal_info_cleared_at IS NULL AND status IN ({_placeholders(len(finished))})"
-                " AND handled_at < ?",
-                (now, *finished, now - PERSONAL_INFO_RETENTION_SECONDS),
+                "DELETE FROM influencer_events WHERE packet_id IN"
+                " (SELECT packet_id FROM influencer_approvals WHERE created_at < ?)", (cutoff,),
             )
+            conn.execute("DELETE FROM influencer_approvals WHERE created_at < ?", (cutoff,))
             conn.execute("DELETE FROM influencer_drafts WHERE updated_at < ?", (now - DRAFT_TTL_SECONDS,))
-            conn.execute(
-                "DELETE FROM influencer_inbox WHERE handled_at IS NOT NULL AND handled_at < ?",
-                (now - PERSONAL_INFO_RETENTION_SECONDS,),
-            )
-            conn.execute(
-                "DELETE FROM influencer_dialog WHERE created_at < ?", (now - PERSONAL_INFO_RETENTION_SECONDS,),
-            )
-            conn.execute(
-                "DELETE FROM influencer_outbox WHERE created_at < ?", (now - PERSONAL_INFO_RETENTION_SECONDS,),
-            )
-            self._purge_influencer_chats(conn, now - PERSONAL_INFO_RETENTION_SECONDS)
+            conn.execute("DELETE FROM influencer_inbox WHERE handled_at IS NOT NULL AND handled_at < ?", (cutoff,))
+            conn.execute("DELETE FROM influencer_dialog WHERE created_at < ?", (cutoff,))
+            conn.execute("DELETE FROM influencer_outbox WHERE created_at < ?", (cutoff,))
+            self._purge_influencer_chats(conn, cutoff)
+
+
+def open_store(db_path: str) -> InfluencerStore:
+    """机器人启动时调用：打开数据库，把环境变量 INFLUENCER_CHAT_IDS 并进名单（只增不删，Q4），
+    再做一次维护（清除到期的个人信息）。"""
+    store = InfluencerStore(db_path)
+    added = store.add_contacts(
+        sorted(influencer_chat_ids_from_env()), source=SOURCE_ENV, note="来自环境变量 INFLUENCER_CHAT_IDS",
+    )
+    if added:
+        logger.info("[达人模块] 从环境变量把 %d 位达人加进了名单", len(added))
+    store.run_maintenance()
+    return store
