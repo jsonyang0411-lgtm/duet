@@ -8,6 +8,7 @@ the real one does.
 import importlib.util
 import json
 import re
+import signal
 import sys
 import textwrap
 import threading
@@ -320,3 +321,49 @@ def test_a_follow_up_without_project_stays_in_the_sessions_project(worker, bot, 
     cwds = [c["cwd"] for c in fake_claude.calls()]
     assert cwds == [str(other.resolve()), str(other.resolve()), str((tmp_path / "proj").resolve())]
     assert worker.session_projects() == {"new-session": ""}
+
+
+# ── restart in place (kill -USR1): no Terminal window left at 「进程已完成」 ──────────
+
+def test_a_restart_lets_the_job_in_hand_finish_and_asks_for_no_new_one(worker, bot, fake_claude, tmp_path,
+                                                                         monkeypatch):
+    s = settings(bot, fake_claude, tmp_path)
+    bot.ask("cc 第一件")
+    stopper = worker.Stopper()
+    do_job = worker.do_job
+
+    def restart_midway(*args, **kwargs):
+        stopper.request_restart(signal.SIGUSR1, None)           # kill -USR1 while the job runs
+        return do_job(*args, **kwargs)
+
+    monkeypatch.setattr(worker, "do_job", restart_midway)
+    client = worker.RelayClient(s["relay_url"], s["token"])
+    serving = threading.Thread(target=worker.serve, args=(s, client, stopper), daemon=True)
+    serving.start()
+    serving.join(30)
+    assert not serving.is_alive(), "a restart request ends the loop once the job in hand is done"
+    bot.relay.tick()
+    assert bot.sent == ["#1 完成\n完成：第一件"] and len(fake_claude.calls()) == 1   # not cut short
+    assert stopper.exit_code() == worker.RESTART_EXIT
+    stopper(signal.SIGTERM, None)                                  # a stop on top of it: a plain stop
+    assert stopper.exit_code() == 0
+
+
+def test_a_restart_asked_while_idle_takes_no_job(worker, bot, fake_claude, tmp_path):
+    s = settings(bot, fake_claude, tmp_path)
+    bot.ask("cc 重启以后再做")
+    stopper = worker.Stopper()
+    stopper.request_restart()
+    serving = threading.Thread(target=worker.serve, args=(s, worker.RelayClient(s["relay_url"], s["token"]), stopper),
+                               daemon=True)
+    serving.start()
+    serving.join(30)
+    assert not serving.is_alive() and fake_claude.calls() == [] and bot.sent == []
+    assert stopper.exit_code() == worker.RESTART_EXIT
+
+
+@pytest.mark.parametrize("name", ["start-worker.command", "start-admin-worker.command", "start-prm-worker.command"])
+def test_the_start_scripts_run_a_restarted_worker_again_at_once(worker, name):
+    script = (ROOT / "tools/claude_relay" / name).read_text(encoding="utf-8")
+    restart, stop = script.index(f"$code -eq {worker.RESTART_EXIT} ]]"), script.index("$code -eq 0 ||")
+    assert restart < stop and "continue" in script[restart:stop] and "sleep" not in script[restart:stop]

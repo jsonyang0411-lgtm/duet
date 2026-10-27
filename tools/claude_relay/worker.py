@@ -94,6 +94,7 @@ POLL_WAIT_SEC = 25
 KEEP_INBOX_DAYS = 7          # downloaded attachments older than this are deleted
 HEARTBEAT_SEC = 30
 STOP_GRACE_SEC = 30          # after SIGINT, wait this long before killing claude
+RESTART_EXIT = 75            # main() after SIGUSR1: the start-*.command loop runs the worker again at once
 BACKGROUND_GRACE_SEC = 20    # background commands done but no new turn after this long: wrap up
 MAX_BACKOFF_SEC = 60
 ALL_KINDS = ("admin", "prm")
@@ -555,14 +556,28 @@ class RelayClient:
 # ── running one job ──────────────────────────────────────────────────────
 
 class Stopper:
-    """Ctrl+C / launchd stop: finish the current job's bookkeeping, take no new one."""
+    """Ctrl+C / launchd stop: finish the current job's bookkeeping, take no new one.
+
+    SIGUSR1 is a restart (after new code): the job in hand runs to its end, no new one is
+    taken, and ``exit_code`` is ``RESTART_EXIT``, which the start-*.command loop runs again at
+    once in the same Terminal window (stopping and double-clicking the script again left a
+    window per restart at 「进程已完成」)."""
 
     def __init__(self):
         self.event = threading.Event()
+        self.restart = threading.Event()
 
     def __call__(self, signum, frame):
         log.info("stop requested (signal %s)", signum)
         self.event.set()
+
+    def request_restart(self, signum=None, frame=None):
+        log.info("restart requested (signal %s): after the job in hand, if any", signum)
+        self.restart.set()
+
+    def exit_code(self) -> int:
+        """``RESTART_EXIT`` after a restart request alone; 0 after a stop (a stop wins)."""
+        return RESTART_EXIT if self.restart.is_set() and not self.event.is_set() else 0
 
 
 def safe_name(name: str, fallback: str) -> str:
@@ -1782,7 +1797,7 @@ def serve(settings: dict, client: RelayClient, stopper: Stopper, once: bool = Fa
     flush_outbox(client, stopper)
     backoff = 5
     old_bot = False
-    while not stopper.event.is_set():
+    while not stopper.event.is_set() and not stopper.restart.is_set():
         if settings_file is not None:
             settings = settings_file.current()
         if not worker_kinds(settings, kinds):
@@ -1986,13 +2001,16 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, stopper)
     signal.signal(signal.SIGTERM, stopper)
     signal.signal(signal.SIGHUP, stopper)       # the Terminal window was closed: finish the job's bookkeeping
+    signal.signal(signal.SIGUSR1, stopper.request_restart)   # kill -USR1 <pid>: restart in the same window
     log.info("worker started (%s); bot %s", ",".join(kinds), settings["relay_url"])
     serve(settings, client, stopper, once=args.once, settings_file=SettingsFile(Path(args.config), settings),
           kinds=kinds)
     log.info("worker stopped")
     for lock in locks:
         lock.close()
-    return 0
+    if stopper.exit_code() == RESTART_EXIT:
+        log.info("restarting: the start script runs the worker again (exit %d)", RESTART_EXIT)
+    return stopper.exit_code()
 
 
 if __name__ == "__main__":

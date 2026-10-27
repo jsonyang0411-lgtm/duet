@@ -89,6 +89,7 @@ Windows 上的机器人只负责收发微信消息。你私聊机器人发 `cc �
    - 第一次运行时，macOS 会问「终端」能不能访问这个文件夹，要点「允许」。
    - 插着电源时不睡眠，用电池时照常睡眠。
    - worker 崩溃后 30 秒自动重启；按 Ctrl+C 或关掉窗口就停止。
+   - 换了代码要重启：`kill -USR1 <worker 的 pid>`（pid 用 `pgrep -fl claude_relay/worker.py` 看）。worker 把手上的任务做完、不再接新的，然后在同一个窗口里用新代码重新起来（退出码 75，启动脚本见到就马上再跑）。不要按 Ctrl+C 停掉再双击启动脚本，那样每重启一次就多一个停在「进程已完成」的窗口。
    - 想开机自动运行，就把这个文件加进「系统设置 → 通用 → 登录项」。或者在仓库根目录运行：
      ```
      osascript -e "tell application \"System Events\" to make login item at end with properties {path:\"$(pwd)/tools/claude_relay/start-worker.command\", hidden:false}"
@@ -131,7 +132,7 @@ Windows 上的机器人只负责收发微信消息。你私聊机器人发 `cc �
 4. 推荐跑两个 worker：一个只做 cc 任务，一个只做达人草稿。这样一个跑半小时的 cc 任务不会让达人的草稿一直排队：
    - 把 `start-admin-worker.command`（`--kinds admin`）和 `start-prm-worker.command`（`--kinds prm`）都加进登录项，代替原来的 `start-worker.command`。
    - 每种任务各有一把锁：`worker.lock`（cc）、`worker-prm.lock`（草稿）。所以这两个 worker 能同时运行，同一种再开一个会自动退出。不带 `--kinds` 的 worker 两种都做，两把锁都要拿。
-   - 重启（Ctrl+C 再双击启动脚本）时，旧的 worker 要等手上那次长轮询结束才放开锁。新的会先等它最多 60 秒（`LOCK_WAIT_SEC`），日志里写一行「still holds its lock; waiting」，不会马上退出。
+   - 用 Ctrl+C 停掉再双击启动脚本来重启时（推荐用上面的 `kill -USR1`），旧的 worker 要等手上那次长轮询结束才放开锁。新的会先等它最多 60 秒（`LOCK_WAIT_SEC`），日志里写一行「still holds its lock; waiting」，不会马上退出。
    - 只做草稿的 worker：日志写在 `~/.claude-relay/worker-prm.log`，没发出去的结果放在 `~/.claude-relay/outbox-prm/`。没配好 `prm_workspace` 时直接退出（启动脚本 30 秒后重试）。它绝不会在不带任务类型的情况下去要任务，否则机器人会把它当成旧版 worker，交给它 cc 任务。
    - 机器人还是旧版（没有达人副驾驶，`/relay/health` 里没有 `kinds`）时，旧版机器人不分任务类型，谁来要就把 cc 任务给谁。所以只做草稿的 worker 这时不去要任务，日志里写一次「the bot does not hand out jobs by kind」，然后每分钟看一次；Windows 换成新版以后自动开始。`--check` 的 `bot …` 那一行会写 `job kinds: admin,prm`（新版）或 `older than job kinds`（旧版）。
    - `--check --kinds prm` 会显示这个 worker 会要哪几种任务、用哪把锁。
