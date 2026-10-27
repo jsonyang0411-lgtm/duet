@@ -229,8 +229,10 @@ class Bot:
         relay = self._start_claude_relay(config, router, backend)
         # PRM_COPILOT=on: registered creators' messages become silent draft jobs.
         prm = self._start_prm(config, router, backend, relay)
-        # WECHAT_BACKEND=edge 加 PRM_COPILOT=on：名单合一、发送失败告诉 PRM
-        self._wire_edge_prm(backend, prm, influencer_store)
+        # WECHAT_BACKEND=edge 加 PRM_COPILOT=on：名单合一、发送失败告诉 PRM；达人资料在后台线程里查
+        party_sync = self._wire_edge_prm(backend, prm, influencer_store)
+        if party_sync is not None:
+            party_sync.start()
         # PRM_EDGE=on: Windows only receives and sends WeChat for the Mac business service.
         edge = self._start_edge(config, router, backend, relay)
 
@@ -279,6 +281,8 @@ class Bot:
         except KeyboardInterrupt:
             pass
         finally:
+            if party_sync is not None:
+                party_sync.stop()
             if self._auto_friend:
                 self._auto_friend.stop()
             if self._health:
@@ -473,7 +477,7 @@ class Bot:
 
         名单合一（src/influencer/prm_bridge.py）：达人模块的名单为准，PRM 的登记跟着它；合作单页上的改动
         也写回名单。edge 后端每拉一轮事件同步一次，同步完的 PRM 名单就是推给 Windows 的名单。
-        返回 PartyListSync，没接上时返回 None。"""
+        返回 PartyListSync（调用方 start() 它的达人资料后台线程、关机时 stop()），没接上时返回 None。"""
         from .wechat.edge_backend import EdgeBackend
         if prm is None or not isinstance(backend, EdgeBackend):
             return None

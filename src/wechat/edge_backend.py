@@ -18,6 +18,7 @@ Windows 只收发微信（D18）；这台 Mac 跑业务：路由、达人模块�
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import threading
@@ -40,9 +41,22 @@ HEALTH_EVERY_SEC = 60
 # 一次最多拉多少事件、最多等多少秒
 EVENTS_LIMIT = 50
 EVENTS_WAIT_SEC = 25
-# 发出去的请求在内存里记多久（等发送结果和读回用）。只放内存：里面有没打码的原文，不写盘
+# 发出去的请求在内存里记多久（等发送结果和读回用）。原文只放内存；写盘的只有摘要（EdgeSends）
 SENT_KEEP_SEC = P.LATE_SEEN_SEC
 FAILED_RESULTS = (P.FAILED, P.EXPIRED, P.INDETERMINATE)
+# 同一条事件的附件因为网络断了连续下载失败这么多次，就不要这个附件了，消息照常往下走（别永远卡在这一条）
+DOWNLOAD_TRIES = 3
+# Windows 的事件库重建过（编号从 1 重新开始）以后，控制台提醒多久
+EVENTS_RESET_NOTICE_SEC = 3600
+
+
+class AttachmentNotYet(Exception):
+    """附件这次没下载成（网络断了）：这一轮先不处理这条事件，等一会儿再试；不算连不上 Windows。"""
+
+
+def text_digest(text: str) -> str:
+    """发出去的原文的摘要（sha256）：写盘只写它，重启后用来和草稿对（PrmService.on_send_failed）。"""
+    return hashlib.sha256(str(text).encode("utf-8")).hexdigest()
 
 
 class EdgeState:
@@ -68,6 +82,31 @@ class EdgeState:
             "cursor": self.cursor, "parties_version": self.parties_version, "parties_digest": self.parties_digest,
         }), encoding="utf-8")
         tmp.replace(self.path)
+
+
+class EdgeSends:
+    """发出去的请求，重启以后还要认得的那部分：send_id → {chat_id, sha256, is_file, at}。不写原文
+    （原文里有换回来的号码）；超过 SENT_KEEP_SEC 的丢掉。写的时候先写临时文件再换。"""
+
+    def __init__(self, path: Path):
+        self.path = path
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        self.items: Dict[str, Dict[str, Any]] = {str(k): v for k, v in data.items() if isinstance(v, dict)} \
+            if isinstance(data, dict) else {}
+
+    def add(self, send_id: str, chat_id: str, text: str, is_file: bool, now: float) -> None:
+        self.items = {k: v for k, v in self.items.items() if now - float(v.get("at") or 0) <= SENT_KEEP_SEC}
+        self.items[send_id] = {"chat_id": chat_id, "sha256": text_digest(text), "is_file": bool(is_file), "at": now}
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.items), encoding="utf-8")
+        tmp.replace(self.path)
+
+    def get(self, send_id: str) -> Optional[Dict[str, Any]]:
+        return self.items.get(send_id)
 
 
 def event_to_message(event: Dict[str, Any], files: List[str]) -> Dict[str, Any]:
@@ -102,6 +141,9 @@ def event_to_message(event: Dict[str, Any], files: List[str]) -> Dict[str, Any]:
 def edge_problems(info: Dict[str, Any]) -> List[str]:
     """要提醒运营的事（控制台顶上的横条），按要先处理的顺序。"""
     out = []
+    if info.get("events_reset"):
+        out.append("Windows 的事件库重建过（编号从头开始了），Mac 已经从头接着读。重建之前没取走的达人消息可能丢了，"
+                   "请到 Windows 的微信里看看最近有没有没回的达人")
     if not info.get("online"):
         ago = info.get("last_contact_sec_ago")
         out.append("连不上 Windows：达人的消息收不到，审核过的回复也发不出去。看看 Windows 那台电脑和 webot 开着没有、"
@@ -133,6 +175,7 @@ class EdgeBackend(AbstractWeChatBackend):
         self.client = client or EdgeClient(url, token)
         data_dir = Path(getattr(config, "db_path", "data/messages.db")).resolve().parent
         self.state = EdgeState(Path(state_path) if state_path else data_dir / "edge_client.json")
+        self.sends_record = EdgeSends(self.state.path.with_name("edge_sends.json"))
         self.files_dir = Path(files_dir) if files_dir else data_dir / "edge_files"
         self._sleep = sleep
         self._clock = clock
@@ -147,6 +190,10 @@ class EdgeBackend(AbstractWeChatBackend):
         self._sends: Dict[str, tuple] = {}
         self._sends_lock = threading.Lock()
         self._last_health = 0.0
+        # 附件因为网络断了下载失败：事件编号 → 连续失败几次（DOWNLOAD_TRIES 次以后不要那个附件）
+        self._download_failures: Dict[int, int] = {}
+        # Windows 的事件库重建过、Mac 从头读的时间（控制台提醒用）
+        self.events_reset_at: Optional[float] = None
         # 给控制台和日志看的：Windows 最近一次的状态，最后一次联系上的时间
         self.edge_status: Dict[str, Any] = {}
         self.last_contact: Optional[float] = None
@@ -209,6 +256,10 @@ class EdgeBackend(AbstractWeChatBackend):
                 failures = 0
                 if events:
                     self._handle_events(events, callback)
+            except AttachmentNotYet as exc:
+                # 附件这次没下载成：前面处理完的事件已经确认了，这一条下一轮再试（不算连不上 Windows）
+                logger.warning("[edge] %s，稍后再试", exc)
+                self._sleep(BACKOFF_SEC[0])
             except EdgeError as exc:
                 failures += 1
                 self._mark_online(False)
@@ -250,6 +301,11 @@ class EdgeBackend(AbstractWeChatBackend):
         with self._sends_lock:
             self._sends = {k: v for k, v in self._sends.items() if now - v[3] <= SENT_KEEP_SEC}
             self._sends[send_id] = (chat_id, text, is_file, now)
+            try:
+                self.sends_record.add(send_id, chat_id, text, is_file, now)
+            except OSError:
+                logger.exception("[edge] 发送记录 %s 没写进 %s（重启以后认不出它的发送结果）", send_id,
+                                 self.sends_record.path.name)
         logger.info("[edge] 发送请求 %s 已交给 Windows（%s），%s", send_id, answer.get("status"),
                     "1 个文件" if is_file else f"{len(text)} 字")
         return True
@@ -257,27 +313,34 @@ class EdgeBackend(AbstractWeChatBackend):
     # ---- 内部 ----
 
     def _handle_events(self, events: List[Dict[str, Any]], callback: MessageCallback) -> None:
-        for event in events:
-            event_id = int(event.get("id") or 0)
-            if event_id <= self.state.cursor:
-                continue  # 至少送达一次：已经处理过的不再处理
-            kind = event.get("type")
-            if kind == P.CREATOR_MESSAGE:
-                self._handle_creator_message(event, callback)
-            else:
-                if kind == P.OPERATOR_MESSAGE:
-                    self._own_line(dict(event_to_message(event, []), edge_operator=True))
-                elif kind == P.SEND_SEEN:
-                    self._send_seen(event)
-                elif kind == P.SEND_RESULT and event.get("status") in FAILED_RESULTS:
-                    self._send_failed(event)
-                self._run_hooks(event)
-            if event.get("type") == P.EDGE_STATUS:
-                self.edge_status = {k: event.get(k) for k in ("wechat", "db", "send", "detail", "at")}
-            self.state.cursor = event_id
-            self.state.save()
-        # 都处理、存好以后才确认（附件已经下载完了）
-        self.client.ack(self.state.cursor)
+        handled = self.state.cursor
+        try:
+            for event in events:
+                self._handle_event(event, callback)
+        finally:
+            # 都处理、存好以后才确认（附件已经下载完了）；附件没下载成的那条和它后面的下一轮再来
+            if self.state.cursor > handled:
+                self.client.ack(self.state.cursor)
+
+    def _handle_event(self, event: Dict[str, Any], callback: MessageCallback) -> None:
+        event_id = int(event.get("id") or 0)
+        if event_id <= self.state.cursor:
+            return  # 至少送达一次：已经处理过的不再处理
+        kind = event.get("type")
+        if kind == P.CREATOR_MESSAGE:
+            self._handle_creator_message(event, callback)
+        else:
+            if kind == P.OPERATOR_MESSAGE:
+                self._own_line(dict(event_to_message(event, []), edge_operator=True))
+            elif kind == P.SEND_SEEN:
+                self._send_seen(event)
+            elif kind == P.SEND_RESULT and event.get("status") in FAILED_RESULTS:
+                self._send_failed(event)
+            self._run_hooks(event)
+        if event.get("type") == P.EDGE_STATUS:
+            self.edge_status = {k: event.get(k) for k in ("wechat", "db", "send", "detail", "at")}
+        self.state.cursor = event_id
+        self.state.save()
 
     def _handle_creator_message(self, event: Dict[str, Any], callback: MessageCallback) -> None:
         files = self._download_files(event)
@@ -317,27 +380,52 @@ class EdgeBackend(AbstractWeChatBackend):
         send_id = str(event.get("send_id") or "")
         with self._sends_lock:
             sent = self._sends.get(send_id)
+            record = self.sends_record.get(send_id)
         why = {P.FAILED: "Windows 没发出去", P.EXPIRED: "在 Windows 上排队太久，过期没发",
                P.INDETERMINATE: "Windows 发送时停了，不确定发出去没有"}[event["status"]]
         detail = str(event.get("error") or "").strip()
         logger.warning("[edge] 发送 %s：%s%s", send_id, why, f"（{detail}）" if detail else "")
-        if sent is None or sent[2] or self._send_failure_hook is None:
+        if self._send_failure_hook is None:
             return
+        reason = why + (f"：{detail}" if detail else "")
         try:
-            self._send_failure_hook(sent[0], sent[1], why + (f"：{detail}" if detail else ""))
+            if sent is not None:
+                if not sent[2]:
+                    self._send_failure_hook(sent[0], sent[1], reason)
+            elif record is not None and not record.get("is_file"):
+                # 重启以前发的：内存里没有原文了，用写盘的摘要去对草稿
+                self._send_failure_hook(str(record["chat_id"]), "", reason, digest=str(record["sha256"]),
+                                        sent_at=float(record.get("at") or 0) or None)
         except Exception:
             logger.exception("[edge] 处理发送失败出错（%s）", send_id)
 
     def _download_files(self, event: Dict[str, Any]) -> List[str]:
+        """下载这条事件的附件。Windows 明确回了错误（文件没了等）的那个附件不要了，消息照常往下走；
+        网络断了就抛 AttachmentNotYet（这一条下一轮再试），同一条连续 DOWNLOAD_TRIES 次都不成也不要了。"""
         saved = []
+        event_id = int(event["id"])
         for f in event.get("files") or []:
             if f.get("missing"):
                 continue
             name = Path(str(f.get("name") or f"file-{f.get('n')}")).name  # 只要文件名，不让它带路径
-            dest = self.files_dir / str(event["id"]) / name
+            dest = self.files_dir / str(event_id) / name
             dest.parent.mkdir(parents=True, exist_ok=True)
-            self.client.download(int(event["id"]), int(f["n"]), dest)
+            try:
+                self.client.download(event_id, int(f["n"]), dest)
+            except EdgeError as exc:
+                logger.warning("[edge] 事件 %d 的附件 %s 取不到（%s %s），这条消息不带它往下走",
+                               event_id, f.get("n"), exc.status, exc.code)
+                continue
+            except OSError as exc:
+                tries = self._download_failures.get(event_id, 0) + 1
+                if tries < DOWNLOAD_TRIES:
+                    self._download_failures[event_id] = tries
+                    raise AttachmentNotYet(f"事件 {event_id} 的附件 {f.get('n')} 没下载成（第 {tries} 次：{exc}）")
+                logger.warning("[edge] 事件 %d 的附件 %s 连续 %d 次没下载成，这条消息不带它往下走",
+                               event_id, f.get("n"), tries)
+                continue
             saved.append(str(dest))
+        self._download_failures.pop(event_id, None)
         return saved
 
     def _run_hooks(self, event: Dict[str, Any]) -> None:
@@ -359,6 +447,24 @@ class EdgeBackend(AbstractWeChatBackend):
         if int(health.get("parties_version") or 0) != self.state.parties_version:
             # Windows 重装过、库丢了：下面 _sync_parties 会重新推一次
             self.state.parties_digest = ""
+        if int(health.get("events_pending") or 0) > 0 and self.state.cursor > 0:
+            self._check_events_reset()
+
+    def _check_events_reset(self) -> None:
+        """Windows 说还有没确认的事件，可是我们读到的位置后面一条都没有：要么是读完了还没来得及确认
+        （读到的那一条 Windows 还有），要么是 Windows 的事件库重建了、编号从 1 重新开始（那一条 Windows 没有）。
+        前一种补一个确认；后一种从头读，不然会一直静默跳过所有新事件。"""
+        cursor = self.state.cursor
+        if self.client.events(after=cursor, wait=0, limit=1):
+            return
+        last = self.client.events(after=cursor - 1, wait=0, limit=1)
+        if last and int(last[0].get("id") or 0) == cursor:
+            self.client.ack(cursor)
+            return
+        logger.warning("[edge] Windows 的事件库重建过（我们读到 %d，它那里没有这一条，后面也没有），从头接着读", cursor)
+        self.state.cursor = 0
+        self.state.save()
+        self.events_reset_at = self._clock()
 
     def _sync_parties(self) -> None:
         try:
@@ -399,6 +505,7 @@ class EdgeBackend(AbstractWeChatBackend):
             "send": self.edge_status.get("send", ""),
             "detail": str(self.edge_status.get("detail") or ""),
             "parties": self.parties_count,
+            "events_reset": bool(self.events_reset_at and now - self.events_reset_at < EVENTS_RESET_NOTICE_SEC),
         }
         info["problems"] = edge_problems(info)
         return info

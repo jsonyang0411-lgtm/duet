@@ -208,3 +208,58 @@ def test_a_failed_send_takes_back_the_newest_of_two_same_lines(tmp_path):
     finally:
         side.prm.stop()
         side.relay.stop()
+
+
+def test_messages_windows_kept_while_the_mac_was_away_are_not_history(tmp_path):
+    """Mac 离线超过 5 分钟：Windows 排队的达人消息、运营亲手回复照常处理（edge 事件不按年龄当历史丢掉）。
+    本机微信后端的旧消息（没有 edge_event_id）照旧当历史。"""
+    from test_prm import Bot as PrmBot
+
+    side = PrmBot(Clock(), tmp_path)
+    try:
+        side.prm.register(CREATOR, "小美")
+        an_hour_ago = side.clock.now - 3600
+        assert side.prm.handle(side.msg("一小时前发的", ts=an_hour_ago)) is True
+        assert side.relay.store.list_jobs() == []                          # 不是 edge 来的：历史
+        assert side.prm.handle(side.msg("我到家啦", ts=an_hour_ago, edge_event_id=7)) is True
+        job = side.worker_takes()
+        assert job is not None and "我到家啦" in job["text"]
+        side.prm.on_own_message({"chat_id": CREATOR, "content": "我来回", "msg_type": 1, "is_group": False,
+                                 "timestamp": an_hour_ago, "edge_operator": True, "edge_event_id": 8})
+        assert side.prm.store.deal(1)["mode"] == "human"                    # 运营亲手回复：接管
+        assert side.prm.handle(side.msg("那什么时候寄", ts=an_hour_ago, edge_event_id=9)) is True
+        kinds = [e["kind"] for e in side.prm.store.events(1, limit=20)]
+        assert "operator_message" in kinds and "creator_message" in kinds   # 接管期间的也记下了
+    finally:
+        side.prm.stop()
+        side.relay.stop()
+
+
+def test_a_send_that_failed_after_a_restart_is_matched_by_its_digest(tmp_path):
+    """重启以前发的回复，过了很久 Windows 才报失败：内存里的原文和登记都没了，按摘要对上草稿。"""
+    import hashlib
+
+    from test_prm import Bot as PrmBot
+
+    side = PrmBot(Clock(), tmp_path)
+    try:
+        side.prm.register(CREATOR, "小美")
+        side.prm.handle(side.msg("在吗"))
+        job = side.worker_takes()
+        side.finish(job["id"], draft(slots={}, reply_draft="好的，收到～", message_kind="greeting"))
+        packet = side.prm.store.packet_for_job(job["id"])
+        side.prm.decide(packet["id"], "send")
+        side.prm.send_approved()
+        sent_at = side.clock.now
+        side.prm._sent_lines.clear()                                        # 重启：内存里的发送登记没了
+        side.clock.now += 3 * 3600                                          # 过了 OWN_MATCH_SEC 很久
+        digest = hashlib.sha256("好的，收到～".encode("utf-8")).hexdigest()
+        side.prm.on_send_failed(CREATOR, "", "Windows 没发出去", digest=hashlib.sha256(b"x").hexdigest(),
+                                sent_at=sent_at)
+        assert side.prm.store.packet(packet["id"])["status"] == "sent"      # 摘要对不上的不动
+        side.prm.on_send_failed(CREATOR, "", "在 Windows 上排队太久，过期没发", digest=digest, sent_at=sent_at)
+        failed = side.prm.store.packet(packet["id"])
+        assert failed["status"] == "failed" and "过期" in failed["error"]
+    finally:
+        side.prm.stop()
+        side.relay.stop()
