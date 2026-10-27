@@ -34,6 +34,7 @@ and the console shows it red until an operator marks it dealt with.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -68,9 +69,17 @@ RETENTION_CHECK_SEC = 3600
 PLATFORM_LOST_GRACE_SEC = 1800   # an execution whose Mac went silent this long is given up on (red)
 PLATFORM_OPS = ("platform_execute", "platform_preview")
 HOLDING_TEXT = "收到，我确认一下马上回你"
+# Mac 重启以前发的、后来 Windows 才报失败的：没有发送时间时往回找这么久（edge 后端的发送记录留一天）
+RESTART_FAIL_SEC = 86400
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
 _WXID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{3,63}$")
 _VOICE = re.compile(r"^\[语音\]\s*(.*)$", re.S)
+
+
+def _queued(msg: dict) -> bool:
+    """Windows 的微信边缘排队转来的（Mac 端 edge 后端，带 edge_event_id）：Windows 只转它运行以后收到的、
+    Mac 没确认的事件（按编号续读，不会重放历史），所以 Mac 离线多久再取都不是历史，不按 MAX_AGE_SEC 丢。"""
+    return msg.get("edge_event_id") not in (None, "")
 
 
 def check_wxid(wxid: str, reserved: set) -> str:
@@ -357,7 +366,7 @@ class PrmService:
             return False
         now = self._clock()
         sent_at = float(msg.get("timestamp", 0) or 0)
-        if sent_at and now - sent_at > MAX_AGE_SEC:
+        if sent_at and now - sent_at > MAX_AGE_SEC and not _queued(msg):
             logger.info("PRM: an old message of party %d (%.0f s) is history, not drafted", party["id"], now - sent_at)
             return True
         deal = self._store.deal_of(party["id"], now)
@@ -450,7 +459,7 @@ class PrmService:
             return
         now = self._clock()
         sent_at = float(msg.get("timestamp", 0) or 0)
-        if sent_at and now - sent_at > MAX_AGE_SEC:
+        if sent_at and now - sent_at > MAX_AGE_SEC and not _queued(msg):
             return                                         # history (a chat read for the first time)
         if msg.get("edge_operator"):
             # Mac 端：Windows 已经用发送记录比过了，对不上才报 operator_message，不再比一次
@@ -548,10 +557,17 @@ class PrmService:
                 return True, None
         return False, None
 
-    def on_send_failed(self, chat_id: str, text: str, why: str) -> None:
+    def on_send_failed(self, chat_id: str, text: str, why: str, *, digest: str = "",
+                       sent_at: Optional[float] = None) -> None:
         """Mac 端：Windows 报这条没发出去（失败、过期、不确定）。对应的草稿从「已发出」改成「没发出去」，
-        运营在待审批页能看到原因；「稍等」这类不是草稿的，只记日志。"""
+        运营在待审批页能看到原因；「稍等」这类不是草稿的，只记日志。
+
+        ``digest``：Mac 重启以前发的，edge 后端只留着发出去的原文的 sha256（原文不写盘），``text`` 是空的：
+        按摘要对草稿（换回号码以后的全文），从 ``sent_at`` 前后找起，不受 OWN_MATCH_SEC 限制。"""
         now = self._clock()
+        if digest:
+            self._send_failed_by_digest(chat_id, digest, why, sent_at, now)
+            return
         wanted = _norm(text)
         with self._sent_lock:
             lines = self._sent_lines.get(chat_id) or deque()
@@ -570,6 +586,23 @@ class PrmService:
                     logger.warning("PRM: packet %d was not sent by Windows: %s", packet["id"], why)
                 return
         logger.warning("PRM: a send to party %d failed (%s); no waiting draft matches it", party["id"], why)
+
+    def _send_failed_by_digest(self, chat_id: str, digest: str, why: str, sent_at: Optional[float],
+                               now: float) -> None:
+        party = self._store.party_by_wxid(chat_id)
+        if party is None:
+            return
+        tokens = self._store.tokens(party["id"])
+        since = (sent_at - OWN_MATCH_SEC) if sent_at else now - RESTART_FAIL_SEC
+        for packet in self._store.sent_since(chat_id, since):
+            final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
+            sent = pii.unmask(final, tokens)
+            if packet["outcome"] == "sent_unconfirmed" and hashlib.sha256(sent.encode("utf-8")).hexdigest() == digest:
+                if self._store.move(packet["id"], (SENT,), FAILED, outcome="failed", error=why[:200]):
+                    logger.warning("PRM: packet %d was not sent by Windows (told after a restart): %s", packet["id"], why)
+                return
+        logger.warning("PRM: a send to party %d failed (%s, after a restart); no waiting draft matches it",
+                       party["id"], why)
 
     # ── from the Mac (the relay's delivery thread) ────────────────────────
 
