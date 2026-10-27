@@ -77,6 +77,38 @@ def _ocr_from_config(config, window):
     )
 
 
+def _md5(text: str) -> str:
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+def _message_ids(msg: dict, talker: str, sender: str, content: str, ts: int) -> tuple[str, list[str]]:
+    """``(message id, older ids)`` of a WCDB row (not a group's join line: that has its own).
+
+    The id never changes for a row: md5 of the chat, its ``local_id`` and its time.  WeChat
+    (4.1.15) writes a line this account sends with no server id and fills one in about a
+    second later; the id that used the server id changed then, and the same row was handed
+    on twice (PRM took the bot's own reply read back for an operator's and took the chat
+    over; the WeChat edge reported ``send_seen`` and then ``operator_message`` for it).  A
+    row without a ``local_id``: sender, text and time, as before, never the server id.
+
+    The older ids are what versions up to 2026-10-27 made of the row: from its server id, or
+    from its local id while the server id was still empty.  The message store still holds
+    those, so a message handled before the update counts as stored (``_catchup_plan``,
+    ``MessageStore.insert_message``) and is not handed on a second time."""
+    local_id = msg.get("local_id", msg.get("localId"))
+    local_id = "" if local_id is None else str(local_id).strip()
+    if local_id in ("", "0"):
+        msg_id = _md5(f"{sender}|{content}|{ts}|{ts}")
+    else:
+        msg_id = _md5(f"{talker}|{local_id}|{ts}")
+    old_local = str(msg.get("local_id", ""))           # exactly as those versions read the fields
+    old_key = str(msg.get("server_id", "")) or old_local or f"{sender}|{content}|{ts}"
+    older = [_md5(f"{old_key}|{ts}")]
+    if old_local:
+        older.append(_md5(f"{old_local}|{ts}"))
+    return msg_id, [i for i in dict.fromkeys(older) if i != msg_id]
+
+
 def _looks_like_wechat_blob(content: str) -> bool:
     """Detect raw WCDB media payloads that were misreported as text."""
     compact = re.sub(r"\s+", "", content or "")
@@ -583,7 +615,8 @@ class WcdbBackend(AbstractWeChatBackend):
             self._client = None
             logger.error("WCDB reinitialization failed: %s", e)
             raise
-        # Clear dedup set — WCDB may return messages with new IDs
+        # Forget what was seen: priming below marks what WCDB shows now (a row keeps its id,
+        # _message_ids), and the catch-up finds a creator's messages from the gap.
         self._known = {}
         self._tracked = {}
         # Re-resolve groups (talker IDs may have changed)
@@ -979,6 +1012,7 @@ class WcdbBackend(AbstractWeChatBackend):
             "quoted_content": "",
             "quoted_server_id": "",
             "special": {},
+            "_legacy_ids": [],                  # an OCR line's id was always made this way
         }
 
     # ── Message polling ──────────────────────────────────────────────
@@ -1233,7 +1267,8 @@ class WcdbBackend(AbstractWeChatBackend):
         now) that the bot never handled: they are handed on, the rest is history.
 
         The creator's lines: newer than the newest message stored for the chat (the route
-        stores every message it handles first, step ``persist``) and not stored themselves.
+        stores every message it handles first, step ``persist``) and not stored themselves
+        (under their id, or one an older version made of the row: ``_stored_of``).
         This account's own lines (an operator typing on the phone; they are never stored):
         newer than that and than the chat's read mark (``chat_read_marks``: how far the bot
         has read the chat as a creator's).  Without a stored message the read mark is the
@@ -1247,7 +1282,7 @@ class WcdbBackend(AbstractWeChatBackend):
         try:
             stored_at = self._store.last_stored_at(talker)
             mark = self._store.read_mark(talker)
-            stored = self._store.stored_ids([s["message_id"] for s in items])
+            stored = self._stored_of(talker, items)
         except Exception:
             logger.exception("Catch-up: the message store could not be read for %s…; its messages are history",
                              talker[:8])
@@ -1272,6 +1307,16 @@ class WcdbBackend(AbstractWeChatBackend):
             elif floor is None and first_read and ts >= recent:
                 picked.add(msg_id)
         return picked
+
+    def _stored_of(self, talker: str, items: list[dict]) -> set[str]:
+        """The ids of these messages (standardized) that the message store holds for the chat:
+        under their id, or under an id a version up to 2026-10-27 made of the row
+        (``_legacy_ids``; the first start after the update still finds what it handled)."""
+        wanted: dict[str, str] = {}
+        for standardized in items:
+            for key in (standardized["message_id"], *(standardized.get("_legacy_ids") or ())):
+                wanted.setdefault(key, standardized["message_id"])
+        return {wanted[key] for key in self._store.stored_ids(list(wanted), chat_id=talker)}
 
     def _hand_on_missed(self, group_name: str, talker: str, messages: list[dict],
                         callback: MessageCallback) -> None:
@@ -1774,20 +1819,15 @@ class WcdbBackend(AbstractWeChatBackend):
             is_reply_to_bot,
         )
 
-        # Generate stable message ID.
-        # For system join messages, use a content-based ID to avoid
-        # volatile WCDB server_id/local_id causing dedup misses.
+        # The message id stays the same for the row whatever WeChat fills in later
+        # (_message_ids).  A join line keeps its content-based id.  Not the recognised words of
+        # a voice message: priming reads it without recognising it, and must get the same id.
         if is_system_join:
-            raw_id = f"join|{talker}|{new_member_id}|{content}|{ts}"
+            msg_id = _md5(f"join|{talker}|{new_member_id}|{content}|{ts}")
+            older_ids: list[str] = []
         else:
-            raw_id = (
-                str(msg.get("server_id", ""))
-                or str(msg.get("local_id", ""))
-                or f"{sender}|{content}|{ts}"
-            )
-            # Always append timestamp to avoid dedup collisions for repeated text
-            raw_id = f"{raw_id}|{ts}"
-        msg_id = hashlib.md5(str(raw_id).encode()).hexdigest()
+            msg_id, older_ids = _message_ids(
+                msg, talker, sender, "[语音]" if local_type == 34 and not quote_info else content, ts)
 
         return {
             "message_id": msg_id,
@@ -1818,6 +1858,8 @@ class WcdbBackend(AbstractWeChatBackend):
             "quoted_content": quote_info.get("quoted_content", "") if quote_info else "",
             "quoted_server_id": quote_info.get("quoted_server_id", "") if quote_info else "",
             "special": special_info,
+            # The ids versions up to 2026-10-27 made of this row (the message store may hold them).
+            "_legacy_ids": older_ids,
         }
 
     def _trim_dedup(self) -> None:

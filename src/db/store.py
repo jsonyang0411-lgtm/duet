@@ -66,10 +66,13 @@ class MessageStore:
         Args:
             msg: Standardized message dict with keys:
                 message_id, chat_id, sender_id, sender_name,
-                content, msg_type, timestamp
+                content, msg_type, timestamp; optionally ``_legacy_ids``:
+                ids an older version may have stored the same message
+                under (``WcdbBackend`` up to 2026-10-27).
 
         Returns:
-            True if inserted, False if duplicate (silently skipped).
+            True if inserted, False if duplicate (silently skipped): stored
+            under its id, or in this chat under one of its ``_legacy_ids``.
         """
         try:
             # Coerce all fields to SQLite-safe types (defensive).
@@ -82,8 +85,13 @@ class MessageStore:
             content = str(msg.get("content", ""))
             msg_type = int(msg.get("msg_type", 1))
             timestamp = int(msg.get("timestamp", 0))
+            older = [str(i) for i in (msg.get("_legacy_ids") or ()) if i]
 
             with self._lock:
+                if older and self.stored_ids(older, chat_id=chat_id):
+                    # Handled before an update that changed how ids are made: the same message.
+                    logger.info("msg_id=%s was stored under its older id; a duplicate", message_id[:20])
+                    return False
                 with self.conn:
                     self.conn.execute(
                         """INSERT INTO messages
@@ -187,16 +195,18 @@ class MessageStore:
             ).fetchone()
         return None if row is None or row[0] is None else int(row[0])
 
-    def stored_ids(self, message_ids) -> set[str]:
-        """Which of these message ids are stored already."""
+    def stored_ids(self, message_ids, chat_id: Optional[str] = None) -> set[str]:
+        """Which of these message ids are stored already (with ``chat_id``: for that chat)."""
         ids = [str(i) for i in message_ids if i]
         found: set[str] = set()
+        chat_clause = "" if chat_id is None else " AND chat_id = ?"
         with self._lock:
             for start in range(0, len(ids), 500):
                 chunk = ids[start:start + 500]
                 rows = self.conn.execute(
-                    f"SELECT message_id FROM messages WHERE message_id IN ({', '.join('?' * len(chunk))})",
-                    chunk,
+                    f"SELECT message_id FROM messages WHERE message_id IN ({', '.join('?' * len(chunk))})"
+                    + chat_clause,
+                    chunk + ([] if chat_id is None else [str(chat_id)]),
                 ).fetchall()
                 found.update(str(r[0]) for r in rows)
         return found

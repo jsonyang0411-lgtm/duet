@@ -188,7 +188,8 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `_ServerStatus._FIELDS` | `tuple[str, ...]` | `running`、`uptime_sec`、`messages_processed`、`wechat_backend`、`db_ok`、`timestamp`、`error` | `src/web/server.py` | `GET /api/status` 返回的字段（`update_status` 只收这些） |
 | `DEFAULT_POLL_SEC` | `float` | `1.0` | `src/wechat/wcdb_backend.py` | 默认轮询间隔 |
 | `CHAT_KNOWN_SIZE` / `CATCHUP_READ` | `int` | `500` / `200` | `src/wechat/wcdb_backend.py` | 每个聊天记住多少条见过的消息 id（`_known_set`：每个聊天一套，忙的群挤不掉安静聊天的历史；以前所有聊天共用 5000 条，挤掉的历史会被当成新消息再交出去）/ `PRM_CATCHUP_HOURS`：启动和重新打开数据库时每个登记达人的私聊往回读多少条，从里面找机器人没处理过的 |
-| `CATCHUP_HOURS` / `OWN_FILE_EARLY_SEC` / `MISSED_EVENT_NAME` | `int` / `int` / `str` | `12` / `60` / `"机器人没在读时达人的消息（没有起草）"` | `src/prm/service.py` | `PRM_CATCHUP_HOURS` 没配时的默认值 / 重启前发出、重启后才读回的文件：微信里的时间最多比草稿的 `sent_at` 早这么多秒（`_match_own`）/ 控制台里 `missed` 的 `creator_message` 的名字（`event_out`） |
+| `CATCHUP_HOURS` / `OWN_FILE_EARLY_SEC` / `MISSED_EVENT_NAME` | `int` / `int` / `str` | `12` / `60` / `"机器人没在读时达人的消息（没有起草）"` | `src/prm/service.py` | `PRM_CATCHUP_HOURS` 没配时的默认值 / 重启前发出、重启后才读回的文件：微信里的时间最多比草稿的 `sent_at` 早这么多秒（`_match_sent`）/ 控制台里 `missed` 的 `creator_message` 的名字（`event_out`） |
+| `READ_BACK_SEC` | `int` | `120` | `src/prm/service.py` | `_match_own` 的保险：机器人自己的一句话在这个聊天里对上以后这么多秒内又读到同样的字（同一行换了编号又交来一次），算同一次发送的读回，不算运营亲手打的；过了这个时间同样的字照旧算人 |
 | `MAX_CONSECUTIVE_ERRORS` | `int` | `5` | `src/wechat/wcdb_backend.py` | 连续错误触发重初始化阈值 |
 | `SESSION_REFRESH_SEC` / `OCR_SENDER` | `float` / `str` | `60.0` / `"OCR群友"` | `src/wechat/wcdb_backend.py` | 新私聊会话多久查一次（`_refresh_private_chats_if_due`）/ OCR 读到的消息的发言人（认不出是谁） |
 | `WECHAT_PROCESS_NAMES` | `set` | `{"wechat.exe", "weixin.exe"}` | `src/wechat/window_controller.py` | 微信进程名集合 |
@@ -287,7 +288,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `steps.ROUTE_STEPS` | `self_message` → `edge` → `persist` → `claude_relay` → `prm` → `admin_command` → `silence` | `tuple[RouteStep, ...]` |
 | `steps.self_message(ctx)` | 跳过这个号自己的消息：后端按 wxid 核实过的（`_not_self_by_id`）直接放行；否则发言人名等于或包含 `BOT_DISPLAY_NAME` → `ignore("self_message")`、`Stop(None)` | `Stop \| None` |
 | `steps.edge(ctx)` | `router._edge` 为 `None` 时跳过；`EdgeService.handle(msg)` 接了（名单里达人的私聊）→ `redact("[已登记达人的私聊，内容不记录]")`、`reason("prm_edge")`、`Stop(None)`；出错时只要是名单里的私聊（`is_party_chat`）也照样结束。在 `persist` 之前：达人的话不进 `messages.db` | `Stop \| None` |
-| `steps.persist(ctx)` | `store.insert_message(msg)`；重复或出错 → `ignore("duplicate_or_store_error")`、`Stop(None)`；入库了记 `step("stored")`、`messages_processed += 1` | `Stop \| None` |
+| `steps.persist(ctx)` | `store.insert_message(msg)`；重复（含这个聊天里用 `_legacy_ids` 旧编号存过的）或出错 → `ignore("duplicate_or_store_error")`、`Stop(None)`；入库了记 `step("stored")`、`messages_processed += 1` | `Stop \| None` |
 | `steps.claude_relay(ctx)` | `router._claude_relay` 为 `None` 时跳过；`relay.handle(msg)` 返回 `(True, 回执)` → `reason("claude_relay")`、`Stop(回执)`（回执可以是 `None`，例如过旧的请求） | `Stop \| None` |
 | `steps.prm(ctx)` | `router._prm` 为 `None` 时跳过；`PrmService.handle(msg)` 接了（登记达人的私聊）→ `redact(...)`、`reason("prm_copilot")`、`Stop(None)`；出错时登记达人的私聊照样结束。在 `claude_relay` 之后：管理员的 cc 仍归中转 | `Stop \| None` |
 | `steps.admin_command(ctx)` | 只认私聊、`sender_id == ADMIN_WXID`、`router._admin` 存在；文字去掉引用前缀 `wxid_…:`（`_QUOTE_PREFIX`）后交给 `AdminCommandHandler.handle(content)`：是命令 → `reason("admin_command")`、`Stop(回复)`；不是命令交给下一步 | `Stop \| None` |
@@ -322,12 +323,12 @@ grep "文件名" CODEBASE_REFERENCE.md
 | 函数 | 描述 | 参数 | 返回值 |
 |---|---|---|---|
 | `__init__(conn)` | 共用一个连接，一把可重入锁 | `conn: sqlite3.Connection` | `None` |
-| `insert_message(msg)` | 插入消息、更新 `user_last_message`；图片 / 表情（`MEDIA_MSG_TYPES` = 3、47）同时写 `message_media`（已有的行只补非空字段）；重复的 `message_id` 记警告、返回 `False` | `msg: dict` | `bool` |
+| `insert_message(msg)` | 插入消息、更新 `user_last_message`；图片 / 表情（`MEDIA_MSG_TYPES` = 3、47）同时写 `message_media`（已有的行只补非空字段）；重复的 `message_id` 记警告、返回 `False`；消息带 `_legacy_ids`（`WcdbBackend` 算的、2026-10-27 以前的版本给同一行的编号）时，这个聊天里已经用其中一个存过的也算重复（记一行 info、返回 `False`）：更新后第一次启动重读到的旧消息不再交给中转 / PRM | `msg: dict` | `bool` |
 | `get_sender_display_name(sender_id)` | 以前解析成功过的显示名（`WcdbBackend` 解析不出名字时的后备） | `sender_id: str` | `str \| None` |
 | `get_messages_since(chat_id, since_ts, until_ts=None, limit=500)` | 时间窗口内的消息：超过 `limit` 条时返回**最新**的 `limit` 条，结果按时间升序（同一秒内保持插入顺序） | 见左 | `list[dict]` |
 | `get_media_by_server_id(chat_id, server_id)` / `get_recent_media(chat_id, before_ts=None, lookback_sec=900, msg_types=(3, 47), limit=10)` | 引用指向的那条图片消息 / 最近的图片和表情消息（新的在前） | 见左 | `dict \| None` / `list[dict]` |
 | `get_new_message_count(chat_id, since_message_id)` / `get_messages_since_id(chat_id, since_message_id, limit=200)` | 某条之后的新消息数（`None` = 全部）/ 某条之后的消息（时间升序） | 见左 | `int` / `list[dict]` |
-| `last_stored_at(chat_id)` / `stored_ids(message_ids)` | `PRM_CATCHUP_HOURS`（`WcdbBackend._catchup_plan`）：这个聊天存过的最新一条的 `timestamp`（没存过是 `None`；路由的 `persist` 先存再交给后面的步骤，更新而且没存的就是没处理过的）/ 这些 `message_id` 里已经存了的（每 500 个查一次） | `chat_id: str` / `message_ids: Iterable[str]` | `int \| None` / `set[str]` |
+| `last_stored_at(chat_id)` / `stored_ids(message_ids, chat_id=None)` | `PRM_CATCHUP_HOURS`（`WcdbBackend._catchup_plan`）：这个聊天存过的最新一条的 `timestamp`（没存过是 `None`；路由的 `persist` 先存再交给后面的步骤，更新而且没存的就是没处理过的）/ 这些 `message_id` 里已经存了的（每 500 个查一次；给了 `chat_id` 只算这个聊天的：`_catchup_plan` 经 `_stored_of`、`insert_message` 查旧编号都这样用，旧编号里的 `local_id` 是每个聊天各自数的） | `chat_id: str` / `message_ids: Iterable[str], chat_id: str \| None` | `int \| None` / `set[str]` |
 | `read_mark(chat_id)` / `set_read_mark(chat_id, read_ts)` | `chat_read_marks`：后端把这个聊天当登记达人的私聊读到了哪儿（看到的最新一条消息的时间；从没读过是 `None`）/ 往前挪到 `read_ts`（只进不退：`MAX(read_ts, excluded.read_ts)`） | `chat_id: str` / `chat_id: str, read_ts: int` | `int \| None` / `None` |
 | `rewrite_chat(chat_id, rewrite)` | PRM 8.2 清理：这个私聊在 `messages` 里的每条内容用 `rewrite` 改写（一个事务）；旧版本的库里还有导入的消息（`history_messages`）和全文索引（`fts_messages` / `fts_history`，游标在 `memory_state` 的 `<索引>.cursor`）时，那些也一起改，索引收录过的行先按旧内容 `'delete'`、再按新内容插入，旧词搜不到；返回改了几条 | `chat_id: str, rewrite: Callable[[str], str]` | `int` |
 
@@ -343,7 +344,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `stop()` | 停止监听 | 无 | `None` |
 | `window_controller`（属性） | 微信窗口控制器；好友管理操作同一个窗口 | — | `WeChatWindowController` |
 | `window_lock`（属性） | `_window_lock`：发送、截图、好友管理的每一段窗口操作都持有它 | — | `threading.Lock` |
-| `_reinitialize()` | 关闭并重开 WCDB(故障恢复)：清空每个聊天的已见集合（`_known`）和 `_tracked`，`_resolve_groups` 之后 `_prime_known_ids`（`PRM_CATCHUP_HOURS`：登记达人私聊里数据库读不了那段时间没处理过的消息留给下一轮交出去） | 无 | `None` |
+| `_reinitialize()` | 关闭并重开 WCDB(故障恢复)：清空每个聊天的已见集合（`_known`）和 `_tracked`，`_resolve_groups` 之后 `_prime_known_ids`（同一行重开以后编号不变，`_message_ids`；`PRM_CATCHUP_HOURS`：登记达人私聊里数据库读不了那段时间没处理过的消息留给下一轮交出去） | 无 | `None` |
 | `_resolve_groups()` | 解析群组名称到 talker ID | 无 | `None` |
 | `_save_group_names(chatrooms)` | 持久化群名映射(静态) | `chatrooms: dict` | `None` |
 | `_save_group_members(chat_members)` | 持久化群成员列表(静态) | `chat_members: dict` | `None` |
@@ -357,7 +358,8 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `_known_set(talker)` | 这个聊天见过的消息 id（`DedupSet(CHAT_KNOWN_SIZE)`，第一次读时新建）：每个聊天一套，忙的群挤不掉安静聊天的历史 | `talker: str` | `DedupSet` |
 | `_catchup_hours()` / `_tracked_chat(talker)` / `_is_own_line(standardized, my_wxid)` | `PRM_CATCHUP_HOURS`（没配或不是数字算 0）/ 是不是要记读到哪儿的登记达人私聊：有消息库、没开 `PRM_EDGE`（边缘的事件另有规矩，同事负责）、不是群、过滤器要它；结果记在 `_tracked`，会话刷新时清空重问 / 是不是这个号自己发的（同 `_poll_group` 的判断） | — / `talker: str` / `standardized: dict, my_wxid: str` | `int` / `bool` / `bool` |
 | `_prime_known_ids()` / `_prime_chat(group_name, talker, messages, *, catch_up, first_read=False)` | 启动和 `_reinitialize` 时把每个聊天现在看得到的消息记成已见（历史）；`PRM_CATCHUP_HOURS` 大于 0 时登记达人的私聊往回读 `CATCHUP_READ` 条，`_catchup_plan` 挑出来的不记已见，按时间顺序留在 `_catchup[talker]` 给这个聊天的下一轮；日志写一共交出几条、最早的时间；`_prime_chat` 返回 `(记成已见的, 留下的)` | — / `group_name, talker, messages: list, catch_up: bool, first_read: bool` | `None` / `(int, int)` |
-| `_catchup_plan(talker, items, *, first_read=False)` | 登记达人私聊里机器人没处理过的消息 id：达人的话——比这个聊天存过的最新一条（`MessageStore.last_stored_at`）新、自己也没存过（`stored_ids`）；这个号自己的话（运营在手机上回的，从来不存）——比那条和读到的位置（`read_mark`）都新。没存过的时候读到的位置就是达人那边的线；没有读到的位置，自己的话都算历史（从没把它当达人私聊读过，或是上一个版本）；都没有就全是历史（和以前一样）。启动以后才找到、从没当达人私聊读过的聊天（刚登记），不管很久以前存过什么，只有最近 `MAX_AGE_SEC` 秒的交出去（老规矩）；合并缓冲里还压着的（重新打开数据库时）留给缓冲；读消息库出错就全当历史 | `talker: str, items: list[dict], first_read: bool` | `set[str]` |
+| `_stored_of(talker, items)` | 这些标准化消息里消息库已经存了的（只看这个聊天）：用现在的编号存的，或用 `_legacy_ids` 里旧版本给同一行的编号存的（更新后第一次启动也认得出旧版本处理过的）；返回现在的编号 | `talker: str, items: list[dict]` | `set[str]` |
+| `_catchup_plan(talker, items, *, first_read=False)` | 登记达人私聊里机器人没处理过的消息 id：达人的话——比这个聊天存过的最新一条（`MessageStore.last_stored_at`）新、自己也没存过（`_stored_of`：现在的编号或旧版本的编号）；这个号自己的话（运营在手机上回的，从来不存）——比那条和读到的位置（`read_mark`）都新。没存过的时候读到的位置就是达人那边的线；没有读到的位置，自己的话都算历史（从没把它当达人私聊读过，或是上一个版本）；都没有就全是历史（和以前一样）。启动以后才找到、从没当达人私聊读过的聊天（刚登记），不管很久以前存过什么，只有最近 `MAX_AGE_SEC` 秒的交出去（老规矩）；合并缓冲里还压着的（重新打开数据库时）留给缓冲；读消息库出错就全当历史 | `talker: str, items: list[dict], first_read: bool` | `set[str]` |
 | `_hand_on_missed(group_name, talker, messages, callback)` | 把 `_prime_chat` 留下的按时间顺序、在轮询线程里一条一条交出去：达人的话直接 `_handle_message(..., screenshot=False)`（不进合并缓冲、不进线程池：PRM 按顺序收到，8 秒的合并让它们成为一个任务，每条用自己的 id 入库），自己的话交给 `_tell_own_message`；机器人停了就停（没交的下次启动还在） | `group_name, talker, messages: list[dict], callback` | `None` |
 | `_note_read(talker, newest)` | 读到的位置往前挪（`MessageStore.set_read_mark`，只在变大时写，记在 `_read_marks`）；出错只记日志 | `talker: str, newest: int` | `None` |
 | `_handle_message(group_name, talker, standardized, callback, *, screenshot=True)` | 处理单条消息(线程池)；回复发送时持 `_window_lock`，不占 DLL 读锁；`screenshot=False`（补交的晚到消息）时图片不挂截图函数：窗口里是现在的聊天，不是那张图 | `group_name, talker, standardized, callback, screenshot: bool` | `None` |
@@ -365,7 +367,9 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `_log_delivery(group_name, reply, success)` | 静态方法："Reply sent" / "Reply FAILED" 日志（直接发送和发送队列共用，文字和以前相同） | — | `None` |
 | `_send_part(group_name, talker, text)` | 一个气泡：持 `_window_lock` 调 `_send_and_confirm`（锁按气泡拿，气泡之间的停顿不占锁）；`_handle_message` 把它交给 `BubbleSender.deliver` / `SendQueue.submit` | `group_name, talker, text: str` | `bool` |
 | `_send_file_part(group_name, path)` | 一张表情包：和文字气泡一样持 `_window_lock`，调 `send_file_to_chat`；`_handle_message` 把它作为 `send_file` 交给 `BubbleSender.deliver` | `group_name: str, path: str` | `bool` |
-| `_standardize(msg, group_name, talker)` | 标准化WCDB原始消息；文字消息（`local_type=1`）先试 zstd 解压：微信 4 把较长的文字压缩成十六进制存（`28b52ffd…`），不解压会被当成图片（读回比对对不上、长任务丢字），解不开的长十六进制才按图片处理 | `msg: dict, group_name: str, talker: str` | `dict \| None` |
+| `_standardize(msg, group_name, talker, resolve_voice=True, is_group=None)` | 标准化WCDB原始消息；文字消息（`local_type=1`）先试 zstd 解压：微信 4 把较长的文字压缩成十六进制存（`28b52ffd…`），不解压会被当成图片（读回比对对不上、长任务丢字），解不开的长十六进制才按图片处理。`message_id` 由 `_message_ids` 算（同一行一直是同一个；语音不管识没识别都按「[语音]」算，启动时不识别的读法和轮询的读法编号一样），进群的系统消息照旧 `md5("join|聊天|新成员|内容|时间")`；多一个内部字段 `_legacy_ids`（旧版本给这一行的编号，进群消息是空的） | `msg: dict, group_name: str, talker: str, resolve_voice: bool, is_group: bool \| None` | `dict \| None` |
+| `wcdb_backend._message_ids(msg, talker, sender, content, ts)` | 一行消息的 `(编号, 旧编号)`：编号 `md5(f"{talker}|{local_id}|{ts}")`（`local_id` / `localId`，空、`0` 算没有），微信先写进库、约一秒后才填 `server_id`，编号不跟着变（以前用 `server_id` 算，同一行先后两个编号、交出去两次：副驾驶把机器人自己的话第二次读到当成运营亲手回、接管；边缘先报 `send_seen` 又报 `operator_message`）；没有 `local_id` 时 `md5(f"{sender}|{content}|{ts}|{ts}")`（和以前一样，但从不用 `server_id`）。旧编号：2026-10-27 以前的算法（`server_id` 有就用它，否则 `local_id`，再否则发送人+内容+时间，后面加 `|时间`）按这一行现在的样子算一个，再加上 `server_id` 还空着时会算出的 `md5(f"{local_id}|{ts}")`，去重、去掉和新编号相同的 | 见左 | `tuple[str, list[str]]` |
+| `wcdb_backend._md5(text)` | `hashlib.md5(text.encode("utf-8")).hexdigest()` | `text: str` | `str` |
 | `_send_and_confirm(group_name, talker, content)` | 通过键盘发送并确认 | `group_name, talker, content` | `bool` |
 | `_get_voice()` | 懒初始化语音识别管道 | 无 | `VoicePipeline \| None \| False` |
 | `_try_voice(msg)` | 尝试语音识别 | `msg: dict` | `str \| None` |
@@ -448,7 +452,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `MessageBurstBuffer.push(message, *, now=None)` | 先交出已经到时间的，再收这一条：只收文字（`msg_type=1`、有内容、不是进群通知），单条超过 `max_chars` 直接交出；凑够 `max_messages` 条或 `max_chars` 字就立刻交出 | `message: dict` | `list[dict]`（可以处理的消息） |
 | `MessageBurstBuffer.flush_due(*, now=None)` / `flush_all()` | 安静了 `window_sec` 秒的 / 全部 | — | `list[dict]` |
 | `MessageBurstBuffer.held_ids()` | 还压在缓冲里、没交出去的消息 id（`WcdbBackend._catchup_plan`：重新打开数据库时这些留给缓冲，不再补交一遍） | — | `set[str]` |
-| `MessageBurstBuffer._merge(messages)` | 合成一条：以最后一条为底，文字用换行连起来，`timestamp` 取最大，`is_at_mentioned` / `is_reply_to_bot` 任一为真即真，引用取最后一条带引用的，记 `_burst_count`、`_burst_message_ids`，`message_id` 由各条的 id 算出（`_burst_id`） | `messages: list[dict]` | `dict` |
+| `MessageBurstBuffer._merge(messages)` | 合成一条：以最后一条为底，文字用换行连起来，`timestamp` 取最大，`is_at_mentioned` / `is_reply_to_bot` 任一为真即真，引用取最后一条带引用的，记 `_burst_count`、`_burst_message_ids`，`message_id` 由各条的 id 算出（`_burst_id`）；`_legacy_ids` 由各条的第一个旧编号用同样的算法算出（旧版本存这一轮用的就是它，`MessageStore.insert_message` 认得出是重复的），有一条没有旧编号就是空的 | `messages: list[dict]` | `dict` |
 
 ### 2.12 `src/wechat/keyboard.py`
 
@@ -749,7 +753,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `win_ocr.WindowsOcrEngine(window, runner, grabber, powershell)` | Windows 识别引擎：`capture(hwnd=None)`（给 `hwnd` 就截那个窗口，好友管理识别 4.0 的独立弹窗用；不给就是下面说的主窗口） 用 `WeChatWindowController.find_hwnd(wake=False)` 找微信主窗口（不唤醒托盘窗口）、`print_window()`（`PrintWindow` + `PW_RENDERFULLCONTENT`，被遮挡也能截，最小化不行；线程临时设为 per-monitor DPI 感知，按真实像素截；全黑当作失败）截图到私有临时文件，再把 `SCRIPT`（Windows.Media.Ocr 的 PowerShell 脚本）**经标准输入**交给 `powershell -NoProfile -Command -`（不落脚本文件，不改执行策略），脚本每行输出 `{"t","x","y","w","h"}`（像素），`rows_from_lines()` 转成 0..1 的行并取文字左侧 8 像素处的颜色；临时图读完即删。没装中文 OCR 语言包时脚本退出码 3，报错里给出 `Add-WindowsCapability -Online -Name Language.OCR~~~zh-CN~0.0.1.0` | `list[dict]` |
 | `win_ocr.fix_spacing(text)` | Windows OCR 会在汉字之间插空格（`你 好`），只去掉两边都是汉字/全角符号的空格 | `str` |
 | `engines.default_engine(window=None)` | 按平台选引擎：macOS `MacVisionEngine`，Windows `WindowsOcrEngine(window)`，其他抛 `RuntimeError` | 引擎 |
-| `WcdbBackend(..., ocr=None)` | `start()`：数据库打不开时（有 OCR 才）不再直接退出，`_client=None`、`_register_groups_without_database()` 用 `ocr:<群名>` 当 chat id（只认 `WECHAT_GROUPS` 里写明的群名，`*` 需要数据库），照常进读取循环；循环里每轮读失败 `note_db_failure()`、读通 `note_db_ok()`；`_poll_cycle` 在 `_client is None` 时抛错让循环计数并走 `_reinitialize()` 重试打开；失败后的等待换成 `_sleep_polling_ocr()`（等待期间每秒看一次屏幕，数据库的退避节奏不变）；OCR 刚结束的那一轮 `_ocr_priming=True`，`_poll_group` 只把积压记入已见、不交给路由；`_message_from_ocr()` 组完整的标准消息（键与 `_standardize` 相同，`sender` = `OCR群友`）；`_group_for_title()` 群名严格相等（忽略空格），窗口标题被截成「…」时只在唯一匹配时才认；OCR 消息**不走合并缓冲**（缓冲要靠 `_poll_cycle` 冲刷，且会把不同人的话合并）直接 `_dispatch_message` | — |
+| `WcdbBackend(..., ocr=None)` | `start()`：数据库打不开时（有 OCR 才）不再直接退出，`_client=None`、`_register_groups_without_database()` 用 `ocr:<群名>` 当 chat id（只认 `WECHAT_GROUPS` 里写明的群名，`*` 需要数据库），照常进读取循环；循环里每轮读失败 `note_db_failure()`、读通 `note_db_ok()`；`_poll_cycle` 在 `_client is None` 时抛错让循环计数并走 `_reinitialize()` 重试打开；失败后的等待换成 `_sleep_polling_ocr()`（等待期间每秒看一次屏幕，数据库的退避节奏不变）；OCR 刚结束的那一轮 `_ocr_priming=True`，`_poll_group` 只把积压记入已见、不交给路由；`_message_from_ocr()` 组完整的标准消息（键与 `_standardize` 相同，`sender` = `OCR群友`，`message_id` = `md5("ocr|聊天|文字|时间")`，`_legacy_ids` 为空：这个编号一直这样算）；`_group_for_title()` 群名严格相等（忽略空格），窗口标题被截成「…」时只在唯一匹配时才认；OCR 消息**不走合并缓冲**（缓冲要靠 `_poll_cycle` 冲刷，且会把不同人的话合并）直接 `_dispatch_message` | — |
 | `tools/ocr_check.py` | 在真机上检查 OCR 能不能读：默认看 3 次、只打印数量（行数、标题、对方/自己的消息数、聊天区边界），不打印聊天内容；`--watch 秒数 --group 群名` 像机器人一样每 `--interval` 秒看一次，只打印这一个群的新消息；`--save-rows` 存原始行（含屏幕文字）。失败给出对应提示（屏幕录制权限、swiftc、OCR 语言包、窗口没找到） | 退出码 0/1 |
 
 ### 2.28 `src/wechat/friend_manager.py`（好友管理，`AUTO_ACCEPT_FRIENDS`）
@@ -842,7 +846,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `PrmService._missed(party, deal, line, at, now)` / `service.late_note(earliest)` / `missed_note(count, earliest)` / `gap_notes(meta)` / `_event_time(ev)` / `_later(deal, at)` | 比 `PRM_CATCHUP_HOURS` 还早的达人消息：记 `creator_message`（`missed: true`、`at`，`forwarded=False`：合作单的记录里有，下一份草稿的 `history` 也有）、等着的回复草稿作废，合作单 `attention` = `missed_note(还没告诉 Mac 的这类消息条数, 其中最早的时间)`：「N 条消息在机器人没在读微信时收到（最早 月-日 时:分），没有起草，请看一下」；`late_note`：「这次的消息是机器人没在读微信时收到的（最早 …），草稿要人看过再发」；`gap_notes(meta)`：任务的 `meta.late` / `meta.missed` 换成这两句；`_event_time`：记录里达人写的时间（没有就用记录时间）；`_later`：`max(last_message_at, at)` | — / `str` / `str` / `list[str]` / `float` / `float` |
 | `PrmService._ask_next_step(packet, note, now)` / `_on_delivered(deal, now)` / `service.next_step_note(action, record, *, delivered=False)` / `service.COMMISSION_ACTIONS` | 平台动作做成以后的下一步（寄样单 → 专属佣金，2026-10-27）：寄样单的专属佣金看 `PRM_COMMISSION_AFTER`——`created` 时 `_platform_finished` 核验成功就问，`delivered`（默认）时等 `deal_action` 把合作单第一次标成已签收（`delivered_at` 从空变成有），`_on_delivered` 找这张合作单最近一条核验成功的 `jst.sample_order`（`platform_result` 事件 → 草稿的 `platform.action` / `execution`），用 `delivered=True` 的说明（「达人已经签收了寄样单 …」）问；专属佣金之后的下一个商品不管这个开关都马上问。`next_step_note`：`jst.sample_order` 先说寄样单号、店铺（`platforms.PLATFORMS`）和商品个数（「共 N 个，清单在最后」），抖店的单子执行记录 `created` 里有 `creator_uid` 时加一句「聚水潭建单时查到达人的抖音 UID 是 …，creator_platform_id 就填它」（草稿可能只知道抖音号），叫这一份草稿填第一个还没开的商品的 `COMMISSION_ACTIONS[shop]`（`dy` → `dy.designated_commission`，`xhs` → `xhs.direct_plan`；看案卷，开过的不要再开），把没开的记进案卷，最后才是「寄样单上的商品（按顺序）：…」（要做什么在前、清单在后：清单再长也挤不掉指令；`items` 为空的老动作用 `item_id`）；`COMMISSION_ACTIONS` 里的动作说这个商品、佣金率开好了（带上达人 `creator_platform_id`），还有没开的就给这位达人填下一个、都开完了不填；别的动作返回 ""。合作单从已签收改回签收前的阶段（`delivered_at` 清空）再标已签收会再问一次：开佣金被打断时这样接上，草稿从还没开的商品开始（`kb/合作政策.md` 2.1）。`_ask_next_step`：没有说明就不做；达人已经停用（`party.active` 为假：运营把他从达人名单里拿掉了）时只写 `attention`（「#编号 之后该开专属佣金了：这位达人已经停用（不在达人名单里），系统没有起草，请运营处理」，2026-10-27）；合作单不在副驾驶模式时只写 `attention`（「之后该开专属佣金了：…请运营处理」）；否则 `relay.submit(chat, chat, "", kind="prm", fresh=True, input_closed=True, meta={party_id, deal_id, name, system_note[, sent]})`（`input_closed`：达人这时发来的话另起一个回复任务，不并进这一步）。这一步是单独一路（2026-10-27 同事指出两路会互相顶掉）：`on_result` 按任务有没有 `system_note` 定 `lane`，「更新的草稿任务」只在同一路里找（`latest_open(..., system=…)`），进待审批时只顶替同一路的（`supersede(keep, lane)`），这一路的草稿 `meta.lane="system"`、被标过时会写 attention；达人来消息（`handle`、接管期间）和运营亲手回复只顶替回复那一路（`LANE_REPLY`），开专属佣金的草稿留着。草稿出来的平台动作照常预览、等人批准 | — / `str` / — |
 | `PrmService._outbound(deal_id, party_id, now)` / `OUTBOUND_TOLD` / `OUTBOUND_CHARS` | 下一份草稿的「我方实际发了什么」：`outcomes` 的最近 `OUTBOUND_TOLD`（6）份（sent：发出去的文字，改过的另带原稿 `draft`，标了发错的带 `wrong`；dropped：不发的原稿；failed：没发出去的文字）加上 `holding_reply` 事件（`kind: holding`），按时间排、取最后 6 条，文字照达人的话一样打码（`_mask`），每条最多 `OUTBOUND_CHARS`（500）字，`at` 写成「月-日 时:分」；`handle` 每建一个草稿任务都放进 `meta.sent`（不是一次性的：草稿作废、任务被取消也不会丢） | `list[dict]` |
-| `PrmService.on_own_message(msg)` / `_own_line(msg, party, chat_id, now, sent_at, late)` / `_note_sent(chat_id, text="", packet_id=None, file=False)` / `_unnote_sent(noted)` / `_match_own(chat_id, msg, now)` | 后端交来的、这个微信号自己在登记达人私聊里发的消息（`set_own_message_hook`），在 `_handle_lock` 里交给 `_own_line`：读到时晚了 `MAX_AGE_SEC` 以上的（机器人没在读时打的）照样处理，`PRM_CATCHUP_HOURS=0` 时才不管（带 `edge_event_id` 的除外，算刚写的，同 `handle`）；是机器人发的（这次运行发过的文字 30 分钟内对得上、文件 10 分钟内；重启前发的只认还没确认过的草稿和「稍等」回复，在这句话写的时间前后找：文字往前 `OWN_MATCH_SEC`，文件看 `sent_at` 落在写的时间前 `OWN_FILE_EARLY_SEC` 到后 `OWN_FILE_SEC` 之间、带附件的草稿，确认过的也算）→ `confirm_sent`（发送中也认，失败的不改）；`_note_sent` 在发送**之前**登记（微信几毫秒就写进库，读回常常比发送函数返回还早），返回登记凭据，没发出去或出错时 `_unnote_sent` 撤销：文字只删这一条，文件把记录恢复成登记前的（前面发出的文件仍算机器人的）；否则是运营亲手回的：记 `operator_message`（打码，时间是写的时间），Mac 草稿作废，合作单 `human` 到 `now + PRM_TAKEOVER_MIN`、记 `takeover`（暂停的保持暂停）；晚到的从写的时候算（`sent_at + PRM_TAKEOVER_MIN`），已经过了就只记下、不接管，比正在进行的接管早结束的也不缩短它。Mac 端：带 `edge_operator` 的不比对、直接算运营；带 `edge_seen` 的对不上也不算接管 | — / — / — / — / `(bool, int \| None)` |
+| `PrmService.on_own_message(msg)` / `_own_line(msg, party, chat_id, now, sent_at, late)` / `_note_sent(chat_id, text="", packet_id=None, file=False)` / `_unnote_sent(noted)` / `_match_own(chat_id, msg, now)` / `_match_sent(chat_id, msg, now)` | 后端交来的、这个微信号自己在登记达人私聊里发的消息（`set_own_message_hook`），在 `_handle_lock` 里交给 `_own_line`：读到时晚了 `MAX_AGE_SEC` 以上的（机器人没在读时打的）照样处理，`PRM_CATCHUP_HOURS=0` 时才不管（带 `edge_event_id` 的除外，算刚写的，同 `handle`）；是机器人发的（`_match_sent`：这次运行发过的文字 30 分钟内对得上、文件 10 分钟内；重启前发的只认还没确认过的草稿和「稍等」回复，在这句话写的时间前后找：文字往前 `OWN_MATCH_SEC`，文件看 `sent_at` 落在写的时间前 `OWN_FILE_EARLY_SEC` 到后 `OWN_FILE_SEC` 之间、带附件的草稿，确认过的也算）→ `confirm_sent`（发送中也认，失败的不改）；`_match_own` 在 `_match_sent` 外面加一层保险：文字对上了就按聊天记下（`_read_back`：规整后的文字 → 对上的时间），`READ_BACK_SEC`（120 秒）内同一个聊天又来一样的字、`_match_sent` 对不上，算同一次发送又读到一次（微信先写进库、一秒后才填 `server_id`，以前的后端把同一行当成两条交来），返回 `(True, None)`：不记 `operator_message`、不接管；过了 120 秒同样的字照旧算运营；还没读回的同样的字（又发了一次）先由 `_match_sent` 对上、确认那一份；`_note_sent` 在发送**之前**登记（微信几毫秒就写进库，读回常常比发送函数返回还早），返回登记凭据，没发出去或出错时 `_unnote_sent` 撤销：文字只删这一条，文件把记录恢复成登记前的（前面发出的文件仍算机器人的）；否则是运营亲手回的：记 `operator_message`（打码，时间是写的时间），Mac 草稿作废，合作单 `human` 到 `now + PRM_TAKEOVER_MIN`、记 `takeover`（暂停的保持暂停）；晚到的从写的时候算（`sent_at + PRM_TAKEOVER_MIN`），已经过了就只记下、不接管，比正在进行的接管早结束的也不缩短它。Mac 端：带 `edge_operator` 的不比对、直接算运营；带 `edge_seen` 的对不上也不算接管 | — / — / — / — / `(bool, int \| None)` |
 | `PrmService.on_send_failed(chat_id, text, why, *, digest="", sent_at=None)` / `_send_failed_by_digest(...)` / `RESTART_FAIL_SEC` | Mac 端（`set_send_failure_hook`）：Windows 没发出去。从 `_sent_lines` 去掉这句；`OWN_MATCH_SEC` 内发到这个聊天、`sent_unconfirmed`、换回号码后一字不差的草稿 `sent → failed`，`error` 写原因；对不上的（「稍等」）只记日志。`digest`：Mac 重启以前发的（edge 后端只存了原文的 sha256，`text` 为空），从 `sent_at - OWN_MATCH_SEC`（没有 `sent_at` 时往回 `RESTART_FAIL_SEC` 一天）起找 `sent_unconfirmed`、换回号码后的全文摘要相同的草稿改 `failed` | — |
 | `PrmService.on_result(job)` / `service.missing_files(named, arrived, reported)` / `_file_name(path)` | 中转发送线程交来的结束任务：取消的忽略；清理任务（`meta.op="purge"`）记 `purge_case`；失败 / 失联的在合作单上写 `attention`（「#17 草稿没写成：…」）；同一个任务只起一次草稿；`parse_draft` 不过就写「草稿格式不对（not_json）」不起草稿；任务的 `meta.late` / `meta.missed`（`gap_notes`）：草稿不走门槛，一律 `pending`、`route=review`，这两句写在 `attention` 最前面（没写成、格式不对时也接在后面）；附件 = 这个任务传回的文件（`relay_outfiles`）；没有正文也没有附件 → `no_reply`；合作单不在副驾驶模式或这个私聊已有更新的任务 → `superseded`；否则 `deals.route_for`：门槛达标 → `approved`（`route=auto`，叫醒发送线程），不然 `pending`（并把更早还在等的 Mac 草稿改成已过时）；合并槽位、记下建议阶段（只是建议，不改阶段）和 `attention`（模型说要注意时是理由；要的附件没收齐、发货通知单号对不上也写上）。附件对数：草稿点名的文件 = `Draft.attachments_named`（旧 worker 没有时用 `attachments_to_send`，只是它传回去了的），比收到的（`relay_outfiles`）多时：`route_for(..., files_named=点名的个数)` 一律先审（门槛 `auto` 也不自动发），合作单 `attention` 和这份草稿都写「草稿要附 N 个文件，只收到 M 个：b.pdf（超过 100 MB）、c.png（assets/ 里没有这个文件）」（`missing_files`：有 worker 报的 `attachments_missing` 就用它、带原因，没有就拿点名的文件名和收到的文件名对；`_file_name` 去掉目录），草稿的 `needs_attention` 设成真、`reason` 前面加上这句（待审批卡片上就能看到「要特别注意：…」）。`Draft.platform_refused`（Mac 的平台动作过不了机器人自己的检查，见 `result.parse_draft`）：这份草稿是普通消息（`tool=message.send`，不能「批准并执行」），`route_for(needs_attention=True)` 一律先审（门槛 `auto` 也不自动发），草稿 `needs_attention` 为真、`reason` 和合作单 `attention` 都写「平台动作没过机器人这边的检查（…），草稿里去掉了它，平台上什么都不会做；回复是按执行成功写的，发之前请核对」（`attention` 前面带任务编号）；回复是空的照常 `no_reply`，原因仍写进 `attention` | `bool` / `list[str]` / `str` |
 | `PrmService.register(wxid, name, note)` / `set_active(party_id, active)` / `service.check_wxid(wxid, reserved)` | 控制台用：wxid 要是字母开头的字母数字下划线短横线（4–64），不能是群 id，不能是 `ADMIN_WXID` 或 `CLAUDE_RELAY_WXIDS`；称呼 1–30 字，备注 200 字以内；改完通知后端（`on_parties_changed` = `refresh_private_chats_soon`） | `dict` / `dict \| None` / `str` |
@@ -1052,7 +1056,7 @@ AbstractWeChatBackend (base.py)
     │     │     └── quiet_send.py — SEND_QUIET：IdleGate / Win32Desktop（焦点、剪贴板）
     │     ├── burst.py — MessageBurstBuffer（连发合并）
     │     ├── media.py / image_key.py — 图片文件的查找与 .dat 解码
-    │     ├── MessageStore (src/db/store.py) — 补读（PRM_CATCHUP_HOURS）：last_stored_at / stored_ids / read_mark / set_read_mark
+    │     ├── MessageStore (src/db/store.py) — 补读（PRM_CATCHUP_HOURS）：last_stored_at / stored_ids(chat_id=…，_stored_of 新旧编号都查) / read_mark / set_read_mark
     │     └── helpers.py — DedupSet（每个聊天一套已见 id）/ 消息类型映射
     │
     ├── MacUIBackend (mac_ui_backend.py) — macOS 界面自动化
@@ -1125,7 +1129,7 @@ Windows PrmService
 6. MessageRouter.handle(msg) → run_route(ROUTE_STEPS)
          ├─ self_message   自己的消息 → None
          ├─ edge           名单里达人的私聊 → EdgeService.handle（事件给 Mac）→ None
-         ├─ persist        MessageStore.insert_message()（重复 → None）
+         ├─ persist        MessageStore.insert_message()（重复 → None；旧版本用 _legacy_ids 存过的也算重复）
          ├─ claude_relay   允许的人私聊的 cc → ClaudeRelay.handle → 回执
          ├─ prm            登记达人的私聊 → PrmService.handle（草稿任务）→ None
          ├─ admin_command  管理员私聊的账号命令 → AdminCommandHandler.handle → 回复
@@ -1179,7 +1183,7 @@ WcdbBackend.start(callback)
   │
   ├── _prime_known_ids() → 每个聊天 _prime_chat()：现在看得到的记成已见（历史）
   │     └── PRM_CATCHUP_HOURS > 0、登记达人的私聊（_tracked_chat）：往回读 CATCHUP_READ 条
-  │           → _catchup_plan()：比存过的最新一条新、没存过的达人消息，比读到的位置新的这个号自己的话
+  │           → _catchup_plan()：比存过的最新一条新、没存过（_stored_of：新旧编号都查）的达人消息，比读到的位置新的这个号自己的话
   │           → 留在 _catchup[talker]，不记已见
   │
   ├── _start_workers() → 线程池（4 个；开打字停顿且没开发送队列时 8 个）+ SendQueue.start()
@@ -1216,7 +1220,7 @@ WcdbBackend.start(callback)
 
 ```python
 {
-    "message_id": str,          # MD5 哈希的稳定 ID
+    "message_id": str,          # md5(聊天|local_id|时间)：同一行一直是同一个（_message_ids；以前用 server_id，先空后填会变）
     "chat_id": str,             # talker：@chatroom 或私聊对方的 wxid
     "group_name": str,          # 聊天的显示名（群名或私聊对方的名字）
     "chat_name": str,           # 同 group_name
@@ -1245,7 +1249,9 @@ WcdbBackend.start(callback)
 }
 ```
 
-后端另加的内部键：`_not_self_by_id`（按 wxid 核实过不是自己）、`_capture_media_screenshot`（图片消息，截聊天区的函数）、`_burst_count` / `_burst_message_ids`（合并过的连发）。
+后端另加的内部键：`_not_self_by_id`（按 wxid 核实过不是自己）、`_capture_media_screenshot`（图片消息，截聊天区的函数）、`_burst_count` / `_burst_message_ids`（合并过的连发）、`_legacy_ids`（2026-10-27 以前的版本给同一行的编号：消息库里可能还是用它存的，`MessageStore.insert_message` 和 `_catchup_plan` 拿它认出更新前处理过的消息；合并的连发由 `_merge` 算）。
+
+**编号为什么不能用 `server_id`**（2026-10-27，Windows 微信 4.1.15 实测）：这个号发的话微信先写进库、`server_id` 是空的，约一秒后才填上。机器人自己发的话不到一秒就读回来，用 `server_id` 算的编号在两次读之间变了，同一行交出去两次：副驾驶第一次对上了机器人的话，第二次对不上，当成运营亲手回、接管（`PRM_TAKEOVER_MIN` 内不起草）；边缘先报 `send_seen` 又报 `operator_message`，Mac 接管。现在用聊天、`local_id`、时间算；`PrmService._match_own` 另有 120 秒的保险（`READ_BACK_SEC`）。**更新后第一次启动**：启动时看得到的消息照旧全部记成已见（新编号），不会重放；会去问消息库的两处——补读的 `_catchup_plan`（`_stored_of`）和路由的 `persist`（`insert_message`）——也认旧编号（只在同一个聊天里认），所以启动时没读到、后来第一次读的聊天，旧版本处理过的消息不会再交给中转 / PRM（连发按同样的分组合并时也认得出；分组不一样的连发和补读交出来的单条连发片段本来就认不出，和更新前一样）。测试：`tests/test_stable_message_ids.py`（`server_id` 先空后填同一个编号、只交一次，启动和轮询编号一样（语音也是），副驾驶端到端不接管；消息库里是旧编号时第一次启动什么都不重放、启动时没读到的聊天不再跑旧的 cc（单条和连发）、刚登记的达人不再起草旧消息；`_match_own` 的 120 秒保险和过了 120 秒照旧接管）。
 
 ---
 
@@ -1276,7 +1282,7 @@ WcdbBackend._handle_message(...)（线程池）/ Mac 后端 poll_once
         │     │                    → ignore("self_message") → Stop(None)
         │     ├── 2 edge           PRM_EDGE=on：名单里达人的私聊 → EdgeService.handle（事件给 Mac，不入库）
         │     │                    → redact + reason("prm_edge") → Stop(None)
-        │     ├── 3 persist        MessageStore.insert_message()：重复/出错 → ignore("duplicate_or_store_error") → Stop(None)
+        │     ├── 3 persist        MessageStore.insert_message()：重复（含旧编号 _legacy_ids）/出错 → ignore("duplicate_or_store_error") → Stop(None)
         │     │                    入库 → step("stored")，messages_processed += 1（群消息也入库）
         │     ├── 4 claude_relay   CLAUDE_RELAY=on：允许的人私聊里的 cc（只做中转时不用 cc）→ ClaudeRelay.handle
         │     │                    → reason("claude_relay") → Stop(回执)
@@ -1752,7 +1758,8 @@ Mac worker.py：GET /relay/next（X-Relay-Kinds: admin,prm，prm_workspace 可�
 
 运营亲手回复（M6 + H2）：
 WcdbBackend._poll_group（myWxid 发的、登记达人的私聊）→ _tell_own_message → PrmService.on_own_message
-  → _match_own：机器人刚发的 → confirm_sent（发送中也认，失败的不改）；对不上 → operator_message（打码）+ mode=human 到 now+PRM_TAKEOVER_MIN
+  → _match_own：机器人刚发的（_match_sent）→ confirm_sent（发送中也认，失败的不改）；对不上 → operator_message（打码）+ mode=human 到 now+PRM_TAKEOVER_MIN
+     保险：对上过的那句话 READ_BACK_SEC（120 秒）内在同一个聊天又读到 → 同一次发送的读回，不算运营（后端的编号以前会变，见功能A「编号为什么不能用 server_id」）
 接管期间：handle → creator_message（只记录）；到期（或控制台「恢复副驾驶」）后下一条：
   → take_backlog → meta.history → submit(fresh=True) → worker history_block（<operator_message> / <creator_message>）
 我方实际发出的回复（每份草稿都带，不是一次性）：handle → _outbound(deal_id, party_id, now) → outcomes（最近 OUTBOUND_TOLD=6 条
@@ -1761,7 +1768,7 @@ WcdbBackend._poll_group（myWxid 发的、登记达人的私聊）→ _tell_own_
 
 机器人没在读微信时收到的（PRM_CATCHUP_HOURS，默认 12；停着、更新 EXE、读失败后重新打开数据库）：
 WcdbBackend._prime_known_ids → _prime_chat → _catchup_plan（登记达人的私聊；往回读 CATCHUP_READ 条）
-  达人的话：比 messages 里这个聊天最新一条新、自己没存过（persist 先存再交给 prm：没存 = 没处理过）
+  达人的话：比 messages 里这个聊天最新一条新、自己没存过（persist 先存再交给 prm：没存 = 没处理过；新编号和旧版本的编号都查，_stored_of）
   这个号自己的话：还要比 chat_read_marks 里读到的位置新（没有位置：历史）
   → 下一轮 _hand_on_missed：按时间顺序直接 _handle_message(screenshot=False) / _tell_own_message
   → 路由照常：persist（每条用自己的 id 入库：再启动一次不会再交）→ prm → PrmService.handle（_handle_lock）
@@ -1816,7 +1823,7 @@ CREATE TABLE IF NOT EXISTS chat_read_marks (chat_id TEXT PRIMARY KEY, read_ts IN
 
 安全（防止达人消息里夹带的指令起作用）：旧版 worker 不带 `X-Relay-Kinds`，拿不到 prm 任务；prm 任务锁在 `prm_workspace`（不在代码仓库里），只有 5 个文件工具，`--restricted` 不读这台 Mac 的设置、不加载 MCP 和斜杠命令，worker 的 PreToolUse 钩子再按真实路径挡住工作目录外面的读写（软链接也算外面），任何批准请求都拒绝、也不会发到达人的私聊；达人的话包在 `<creator_message>` 里并注明只是数据；答案必须符合 JSON 结构，Windows 再校验一遍；每条要发的话都要运营在控制台点过，只有门槛达标的那一类、而且草稿本身没问题时才自动发（钱和投诉永远先审，「标为发错了」立刻退回）。号码在离开 Windows 之前换成占位符，控制台默认只显示打码号码，看完整号码要点一下并留记录；地址照原文给 Mac（模型要判断完整不完整），签收满 `PRM_RETENTION_DAYS` 天（默认 90）或这么多天没有动静后各处只留省市。接管期间运营的话放在 `<operator_message>` 里，同样注明只是记录。发货通知的运单号由系统填，发出去的必须是最新运单号。Mac 上可以跑两个 worker（`--kinds admin` / `--kinds prm`，各自一把锁），只做草稿的 worker 不会拿 cc 任务。
 
-还没做的：真机（Windows 微信 + Mac 的 worker）还没测，尤其是自己发的消息能否从数据库回读、回读延迟和 `OWN_MATCH_SEC`；签收以外的结束（例如没寄就结案）不会触发 8.2 清理。补读（`PRM_CATCHUP_HOURS`）只用假的 WCDB 测过：真机上要看停机期间的消息、手机上回的话是不是都在 `get_messages` 的结果里、时间对不对；升级到这个版本后的第一次启动没有读到的位置，那次停机期间这个号自己的话不补；这台电脑的钟快了 5 分钟以上时，每条达人消息都会被当成晚到的（照样起草，但一律先审、合作单上有提示），要把钟对准。
+还没做的：真机（Windows 微信 + Mac 的 worker）还没测，尤其是自己发的消息能否从数据库回读、回读延迟和 `OWN_MATCH_SEC`；稳定编号（`_message_ids`，2026-10-27）要在 Windows 上确认：机器人发一句、一秒内读回、`server_id` 填上以后，日志里这句只读回一次、合作单不接管；`create_time` 在填 `server_id` 时不变（编号里有它）；签收以外的结束（例如没寄就结案）不会触发 8.2 清理。补读（`PRM_CATCHUP_HOURS`）只用假的 WCDB 测过：真机上要看停机期间的消息、手机上回的话是不是都在 `get_messages` 的结果里、时间对不对；升级到这个版本后的第一次启动没有读到的位置，那次停机期间这个号自己的话不补；这台电脑的钟快了 5 分钟以上时，每条达人消息都会被当成晚到的（照样起草，但一律先审、合作单上有提示），要把钟对准。
 
 ---
 
