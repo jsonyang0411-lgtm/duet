@@ -487,7 +487,8 @@ def test_a_sample_order_whose_placeholder_has_no_number_is_not_approved(bot):
     assert [j for j in bot.relay.store.list_jobs(10) if '"platform_execute"' in j["meta"]] == []
 
 
-# ── a created sample order → its 专属佣金 (drafted, then approved like any platform write) ──
+# ── a sample order → its 专属佣金 (drafted, then approved like any platform write) ──
+# PRM_COMMISSION_AFTER: delivered (the default: when the creator signed for it) or created.
 
 def ordered(b, clock, reply="寄样单建好啦"):
     """A sample order drafted, its receiver's phone known (〈手机1〉)."""
@@ -496,7 +497,8 @@ def ordered(b, clock, reply="寄样单建好啦"):
     return packet
 
 
-def test_a_created_sample_order_asks_for_a_draft_of_its_commission(bot, clock):
+def test_set_to_created_a_sample_order_asks_for_a_draft_of_its_commission_at_once(bot, clock):
+    bot.prm._commission_after = "created"
     packet = ordered(bot, clock, reply="寄样单建好啦，单号 {寄样单号}～")
     mac_runs(bot, approve(bot, packet), record(sample_order_no=JST_ORDER))
     bot.prm.send_approved()
@@ -519,18 +521,50 @@ def test_a_created_sample_order_asks_for_a_draft_of_its_commission(bot, clock):
 
 
 def test_a_sample_order_not_verified_asks_for_nothing_more(bot, clock):
+    bot.prm._commission_after = "created"
     packet = ordered(bot, clock)
     mac_runs(bot, approve(bot, packet), record("ACCEPTED_UNVERIFIED", sample_order_no=JST_ORDER))
     assert bot.worker_takes() is None
 
 
 def test_a_sample_order_done_during_a_takeover_leaves_the_commission_to_a_person(bot, clock):
+    bot.prm._commission_after = "created"
     packet = ordered(bot, clock)
     job = approve(bot, packet)
     bot.prm.deal_action("mode", {"deal_id": packet["deal_id"], "mode": "human"})
     mac_runs(bot, job, record(sample_order_no=JST_ORDER))
     assert bot.worker_takes() is None
     assert "该开专属佣金了" in bot.prm.store.deal(packet["deal_id"])["attention"]
+
+
+@pytest.mark.parametrize("how", [
+    {"action": "stage", "stage": "delivered"},
+    {"action": "shipment_status", "status": "delivered"},
+])
+def test_by_default_the_commission_waits_until_the_creator_signed_for_the_sample(bot, clock, how):
+    packet = ordered(bot, clock)
+    mac_runs(bot, approve(bot, packet), record(sample_order_no=JST_ORDER))
+    bot.prm.send_approved()
+    assert bot.worker_takes() is None                                       # not when the order is made
+    if how["action"] == "shipment_status":
+        assert bot.prm.deal_action("shipment", {"deal_id": packet["deal_id"], "carrier": "中通",
+                                                "waybill": "ZT1234567890"})["ok"]
+        for pending in bot.prm.store.packets(("pending",)):
+            bot.prm.decide(pending["id"], "drop")                           # the shipping notice: not this test
+    action = {k: v for k, v in how.items() if k != "action"}
+    assert bot.prm.deal_action(how["action"], {"deal_id": packet["deal_id"], **action})["ok"]
+    job = bot.worker_takes()
+    note = job["meta"]["system_note"]
+    assert "达人已经签收了寄样单" in note and JST_ORDER in note and DY_ITEM in note and "dy.designated_commission" in note
+    bot.relay.store.cancel_if_pending(job["id"], clock.now)
+    assert bot.prm.deal_action("stage", {"deal_id": packet["deal_id"], "stage": "delivered"})["ok"]
+    assert bot.worker_takes() is None                                       # signed for once: asked once
+
+
+def test_a_delivered_deal_without_a_sample_order_asks_for_nothing(bot, clock):
+    packet = drafted(bot, preview=False, reply="好的")
+    assert bot.prm.deal_action("stage", {"deal_id": packet["deal_id"], "stage": "delivered"})["ok"]
+    assert all("system_note" not in j["meta"] for j in bot.relay.store.list_jobs(10))
 
 
 def test_only_a_sample_order_and_a_commission_have_a_next_step():
