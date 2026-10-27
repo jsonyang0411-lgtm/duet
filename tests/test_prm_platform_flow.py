@@ -545,6 +545,23 @@ def test_a_sample_order_done_during_a_takeover_leaves_the_commission_to_a_person
     assert "该开专属佣金了" in bot.prm.store.deal(packet["deal_id"])["attention"]
 
 
+@pytest.mark.parametrize("after", ["created", "delivered"])
+def test_no_commission_step_is_drafted_for_a_creator_the_operators_disabled(bot, clock, after):
+    """停用: the creator is off the list; the order made (or signed for) does not start the 专属佣金
+    drafts behind the operators' back: the deal says it is theirs to decide."""
+    bot.prm._commission_after = after
+    order = ordered(bot, clock)
+    execution = approve(bot, order)
+    bot.prm.set_active(order["party_id"], False)                             # taken off the list meanwhile
+    mac_runs(bot, execution, record(sample_order_no=JST_ORDER))
+    if after == "delivered":
+        assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": "delivered"})["ok"]
+    assert bot.worker_takes() is None
+    assert all("system_note" not in j["meta"] for j in bot.relay.store.list_jobs(20))
+    attention = bot.prm.store.deal(order["deal_id"])["attention"]
+    assert f"#{order['id']} 之后该开专属佣金了" in attention and "停用" in attention
+
+
 @pytest.mark.parametrize("how", [
     {"action": "stage", "stage": "delivered"},
     {"action": "shipment_status", "status": "delivered"},

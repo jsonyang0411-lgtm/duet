@@ -1032,12 +1032,19 @@ class PrmService:
     def _ask_next_step(self, packet: dict, note: str, now: float) -> None:
         """A platform write that leads to the next one (a sample order → its 专属佣金): a draft
         job of its own, told what happened in ``meta.system_note``.  What it drafts is a platform
-        action like any other: previewed on the Mac, approved by a person."""
+        action like any other: previewed on the Mac, approved by a person.  Not for a creator the
+        operators took off the list (inactive) or a deal a person has: the deal says so instead."""
         if not note:
             return
         deal = self._store.deal(packet["deal_id"])
         party = self._store.party(packet["party_id"])
         if deal is None or party is None:
+            return
+        if not party.get("active"):
+            self._store.update_deal(deal["id"], now, attention=(
+                f"#{packet['id']} 之后该开专属佣金了：这位达人已经停用（不在达人名单里），系统没有起草，请运营处理")[:300])
+            logger.info("PRM: party %d is inactive; the next step after packet %d is left to a person",
+                        party["id"], packet["id"])
             return
         if self._mode(deal, now) != COPILOT:
             self._store.update_deal(deal["id"], now, attention=(
