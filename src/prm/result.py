@@ -14,7 +14,9 @@ failed); an older worker sends neither.
 
 ``platform_action`` is optional (platforms.py): the Mac checks it and previews it, and
 hands back ``platform``, its verdict, in its place; a draft that names an action the Mac
-did not preview carries the verdict ``unavailable`` and cannot be executed.
+did not preview carries the verdict ``unavailable`` and cannot be executed.  A preview whose
+action the bot's own check refuses (``platforms.ActionRefused``: a Mac whose limits are wider
+than ``FORM_LIMITS``, say) loses the action, not the draft: ``platform_refused`` says why.
 
 This side is where it is trusted or not: ``parse_draft`` validates instead of
 repairing; anything it cannot use raises ``DraftError`` and nothing is drafted.
@@ -85,6 +87,9 @@ class Draft:
     # and why some of them did not come (``[{"name", "why"}]``).
     attachments_named: Optional[list] = None
     attachments_missing: list = field(default_factory=list)
+    # Why the Mac's platform action was left out ("" = it was not): the bot's own check refused it
+    # (platforms.ActionRefused); the reply stays, as a plain draft for a person.
+    platform_refused: str = ""
 
 
 def _text(value, limit: int) -> str:
@@ -141,10 +146,12 @@ def parse_draft(raw: str) -> Draft:
     draft = _text(data.get("reply_draft"), MAX_DRAFT_CHARS + 1)
     if len(draft) > MAX_DRAFT_CHARS:
         raise DraftError("draft_too_long")
-    platform = None
+    platform, refused = None, ""
     if data.get("platform") is not None:
         try:
             platform = platforms.check_block(data["platform"])
+        except platforms.ActionRefused as e:
+            refused = str(e)[:200]                       # the reply is still a draft; the action goes
         except platforms.ActionError as e:
             raise DraftError("bad_platform", e.code) from None
     elif data.get("platform_action") is not None:
@@ -162,4 +169,5 @@ def parse_draft(raw: str) -> Draft:
         platform=platform,
         attachments_named=None if named is None else [str(f).strip()[:200] for f in named if str(f).strip()],
         attachments_missing=_missing_files(missing),
+        platform_refused=refused,
     )

@@ -116,6 +116,12 @@ class ActionError(ValueError):
         self.code = code
 
 
+class ActionRefused(ActionError):
+    """``check_block``: the Mac's preview is well formed, but its action does not pass the bot's own
+    check (``FORM_LIMITS``: say a Mac whose config.json raised max_crowds or max_sku_prices past
+    them).  The draft's reply is kept, without the action (``result.parse_draft``)."""
+
+
 # ── the actions ───────────────────────────────────────────────────────────
 
 ACTIONS = {
@@ -1733,13 +1739,16 @@ def _steps(value) -> list:
 
 def check_block(block) -> dict:
     """The Mac's preview of an action (a draft's ``platform``), checked and cut to size.
-    ``ActionError`` when it is not one; an action that does not pass ``check_action`` (the
-    form) cannot be ``ready``."""
+    ``ActionError`` when it is not one; ``ActionRefused`` (its ``code`` the check's) when its
+    action does not pass ``check_action`` (the form, ``FORM_LIMITS``)."""
     if not isinstance(block, dict) or block.get("verdict") not in VERDICTS:
         raise _err("bad_block", "平台预览的格式不对")
     action = None
     if block.get("action") is not None:
-        action = check_action(block["action"], limits=FORM_LIMITS)
+        try:
+            action = check_action(block["action"], limits=FORM_LIMITS)
+        except ActionError as e:
+            raise ActionRefused(e.code, str(e)) from None
     verdict = block["verdict"]
     if action is None and verdict == "ready":
         raise _err("bad_block", "预览说可以执行，却没有动作")

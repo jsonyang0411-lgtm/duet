@@ -10,7 +10,9 @@ import pytest
 
 from test_prm import CREATOR, Bot, Clock, draft
 
-from platform_fakes import DY_ITEM, DY_ITEM2, DY_ITEM3, DY_LINK, DY_SKU, DY_UID, JST_ORDER, XHS_BUYER, XHS_ITEM
+from platform_fakes import (
+    DY_ITEM, DY_ITEM2, DY_ITEM3, DY_LINK, DY_SKU, DY_UID, JST_ORDER, TB_ITEM, XHS_BUYER, XHS_ITEM,
+)
 from src.prm import platforms
 from src.prm.result import DraftError, parse_draft
 from src.prm.service import APPROVED_EXPIRE_SEC, PLATFORM_LOST_GRACE_SEC, SETTLE_SEC
@@ -343,6 +345,43 @@ def test_an_action_the_mac_did_not_preview_cannot_run(bot):
     assert not bot.prm.decide(packet["id"], "execute")["ok"]
 
 
+TWELVE_CROWDS = {"action": "tb.campaign", "item_id": TB_ITEM, "bid_target": "display_pay", "day_budget": 50,
+                 "crowd_ids": [str(90000400001 + i) for i in range(12)]}
+TWENTY_FIVE_PRICES = {"action": "xhs.channel_item", "item_id": XHS_ITEM,
+                      "sku_prices": [{"sku_id": f"{i:024d}", "price": "79"} for i in range(1, 26)]}
+
+
+@pytest.mark.parametrize("raw, mac_limits, run, word", [
+    (TWELVE_CROWDS, {"max_crowds": 20}, {"steps": ["create"], "name": "达人合作1_10271000"}, "人群包"),
+    (TWENTY_FIVE_PRICES, {"max_sku_prices": 30}, {"steps": ["create"]}, "SKU 专属价"),
+], ids=["12-crowds", "25-sku-prices"])
+def test_a_preview_past_the_bots_limits_keeps_the_reply_without_the_action(bot, clock, raw, mac_limits, run, word):
+    """A Mac whose config.json raised max_crowds / max_sku_prices past FORM_LIMITS: the bot does not take
+    its action, but the reply is no longer lost with it (「草稿格式不对」): a plain draft for a person."""
+    bot.prm.store.set_gate("other", "auto", clock.now)                      # even a kind that goes out on its own
+    action = platforms.check_action(raw, limits=mac_limits)                 # what that Mac previewed, ready
+    packet = drafted(bot, {**block(), "action": action, "run": run}, reply="计划建好啦～", kind="other")
+    assert packet is not None and packet["status"] == "pending" and packet["route"] == "review"
+    assert packet["tool"] == "message.send" and packet["needs_attention"] and word in packet["reason"]
+    attention = bot.prm.store.deal(packet["deal_id"])["attention"]
+    assert "没过机器人这边的检查" in attention and word in attention and "格式不对" not in attention
+    assert not bot.prm.decide(packet["id"], "execute")["ok"]                  # nothing can run
+    assert [j for j in bot.relay.store.list_jobs(10) if '"platform_execute"' in j["meta"]] == []
+    assert bot.texts == [] and bot.prm.decide(packet["id"], "edit", "好的，我确认一下再回你～")["ok"]
+
+
+def test_a_new_preview_the_bot_does_not_take_keeps_the_old_one_and_says_why(bot):
+    packet = drafted(bot, block(verdict="login"))
+    assert bot.prm.decide(packet["id"], "repreview")["ok"]
+    job = bot.relay.next_job(0, ("prm",))
+    over = {**block(), "action": {**platforms.check_action(DESIGNATED), "commission_rate": "26"}}
+    bot.relay.finish(job["id"], {"ok": True, "text": json.dumps(over, ensure_ascii=False)})
+    bot.relay.tick()
+    pf = snap(bot)["pending"][0]["platform"]
+    assert pf["verdict"] == "login" and not pf["previewing"] and not pf["can_execute"]
+    assert "没过机器人这边的检查" in pf["problems"][0] and "上限 25%" in pf["problems"][0]
+
+
 def test_a_preview_block_that_is_not_one_is_no_draft(bot):
     packet = drafted(bot, {"verdict": "great"})
     assert packet is None
@@ -453,6 +492,10 @@ def test_parse_draft_reads_the_platform_block():
     assert parse_draft(json.dumps(draft())).platform is None
     unpreviewed = parse_draft(json.dumps({**draft(), "platform_action": DESIGNATED}))
     assert unpreviewed.platform["verdict"] == "unavailable"
+    over = {**block(), "action": {**platforms.check_action(DESIGNATED), "commission_rate": "26"}}
+    refused = parse_draft(json.dumps({**draft(), "platform": over}, ensure_ascii=False))
+    assert refused.platform is None and "上限 25%" in refused.platform_refused and refused.reply_draft
+    assert parse_draft(json.dumps(draft())).platform_refused == ""
 
 
 # ── 聚水潭 sample orders: the number goes to the Mac only ──────────────────

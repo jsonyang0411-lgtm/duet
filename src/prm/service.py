@@ -621,6 +621,10 @@ class PrmService:
         # Every file the draft named (an older worker reports only the ones it sent back): fewer came,
         # the draft waits for a person whatever its kind's gate, and the deal and the draft say which.
         named = draft.attachments_named if draft.attachments_named is not None else draft.attachments_to_send
+        # The Mac's action did not pass the bot's own check (a Mac with wider limits, say): the reply stays
+        # a draft, without it, for a person (it was written as if the action had run).
+        refused = (f"平台动作没过机器人这边的检查（{draft.platform_refused}），草稿里去掉了它，平台上什么都不会做；"
+                   "回复是按执行成功写的，发之前请核对") if draft.platform_refused else ""
         short = ""
         if len(named) > len(attachments):
             lost = missing_files(named, [a["name"] for a in attachments], draft.attachments_missing)
@@ -646,7 +650,7 @@ class PrmService:
         else:
             route, state, decided_at = deals.route_for(
                 self._store, draft.message_kind, deal=deal, now=now, text=draft.reply_draft,
-                needs_attention=draft.needs_attention, unknown_tokens=unknown, reason=draft.reason,
+                needs_attention=draft.needs_attention or bool(refused), unknown_tokens=unknown, reason=draft.reason,
                 waybill=waybill, attachments=attachments, files_named=len(named))
         packet_meta = {"waybill": waybill} if draft.message_kind == "shipping_notice" and waybill else {}
         if lane == LANE_SYSTEM:
@@ -659,8 +663,9 @@ class PrmService:
         packet_id = self._store.add_packet(
             deal_id=deal_id, party_id=party_id, job_id=job["id"], chat_id=job["chat_id"],
             kind=draft.message_kind, text=draft.reply_draft, attachments=attachments, intent=draft.intent,
-            slots=draft.slots, stage_proposal=draft.stage_proposal, needs_attention=draft.needs_attention or bool(short),
-            reason="；".join(r for r in (short, draft.reason) if r)[:500], status=state, route=route,
+            slots=draft.slots, stage_proposal=draft.stage_proposal,
+            needs_attention=draft.needs_attention or bool(short) or bool(refused),
+            reason="；".join(r for r in (refused, short, draft.reason) if r)[:500], status=state, route=route,
             decided_at=decided_at, meta=packet_meta,
             tool=tool, platform=platform, now=now,
         )
@@ -671,6 +676,8 @@ class PrmService:
             attention.append(f"#{job['id']} 开专属佣金这一步的草稿没进待审批（人工接管中，或者又有了新的一步），请运营核对")
         if short:
             attention.append(short)
+        if refused:
+            attention.append(f"#{job['id']} {refused}")
         if draft.message_kind == "shipping_notice" and draft.reply_draft and not gates.waybill_ok(draft.reply_draft, waybill):
             attention.append("发货通知里的单号和系统记录对不上" if waybill else "还没有运单号，发货通知不能发")
         if draft.platform is not None and draft.platform.get("verdict") != "ready":
@@ -934,14 +941,16 @@ class PrmService:
             if status in ("pending", "running"):
                 return True
             data = packet["platform"]
-            block = None
+            block, refused = None, ""
             if status == "done":
                 try:
                     block = platforms.check_block(json.loads(job.get("result_text") or ""))
+                except platforms.ActionRefused as e:
+                    refused = f"新预览的动作没过机器人这边的检查（{e}）"
                 except (ValueError, platforms.ActionError):
                     block = None
             if block is None:
-                why = {"lost": "Mac 失联了", "cancelled": "任务被取消了"}.get(status) or _job_error(job)
+                why = refused or {"lost": "Mac 失联了", "cancelled": "任务被取消了"}.get(status) or _job_error(job)
                 preview = {**(data.get("preview") or {}), "problems": [f"重新预览没做成：{why}"[:200]]}
                 try:
                     block = platforms.check_block(preview)
