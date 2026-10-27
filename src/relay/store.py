@@ -235,13 +235,16 @@ class RelayStore:
             ).fetchone()
         return int(row[0])
 
-    def latest_open(self, chat_id: str, drafts_only: bool = False) -> Optional[dict]:
+    def latest_open(self, chat_id: str, drafts_only: bool = False, system: Optional[bool] = None) -> Optional[dict]:
         """The chat's newest queued or running job; ``drafts_only``: not one the worker does
-        without the model (a ``meta.op`` job: a clean-up, a platform preview or execution)."""
+        without the model (a ``meta.op`` job: a clean-up, a platform preview or execution);
+        ``system``: True only the PRM's own next steps (``meta.system_note``), False none of them."""
+        lane = "" if system is None else (" AND meta LIKE '%\"system_note\":%'" if system
+                                          else " AND meta NOT LIKE '%\"system_note\":%'")
         with self._lock:
             row = self._conn.execute(
                 "SELECT * FROM relay_jobs WHERE chat_id = ? AND status IN ('pending', 'running')"
-                + (" AND meta NOT LIKE '%\"op\":%'" if drafts_only else "") + " ORDER BY id DESC LIMIT 1",
+                + (" AND meta NOT LIKE '%\"op\":%'" if drafts_only else "") + lane + " ORDER BY id DESC LIMIT 1",
                 (chat_id,),
             ).fetchone()
         return dict(row) if row else None

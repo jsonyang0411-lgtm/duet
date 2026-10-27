@@ -399,6 +399,9 @@ def test_platform_replies_never_earn_their_kind_the_auto_gate(bot, clock):
         packet = drafted(bot, kind="other")
         mac_runs(bot, approve(bot, packet), record())
         bot.prm.send_approved()
+        for job in bot.relay.store.list_jobs(20):                  # the next 专属佣金 step: not this test
+            if "system_note" in job["meta"]:
+                bot.relay.store.cancel_if_pending(job["id"], clock.now)
         clock.now += 60
     assert bot.prm.store.reviewed("other", 0, 20) == []
     assert bot.prm.store.gate("other")["route"] == "review"
@@ -573,3 +576,28 @@ def test_only_a_sample_order_and_a_commission_have_a_next_step():
                                     "creator_platform": "xhs"})
     assert "xhs.direct_plan" in next_step_note(order, record(sample_order_no=JST_ORDER))
     assert next_step_note(platforms.check_action(CHANNEL), record(link=DY_LINK)) == ""
+
+
+def test_a_commission_step_and_a_reply_do_not_put_each_other_out_of_date(bot, clock):
+    """The bot's next step (meta.system_note) is a lane of its own: the creator's message is not
+    merged into it, and neither draft supersedes the other (only one of its own lane)."""
+    bot.prm._commission_after = "created"
+    packet = ordered(bot, clock)
+    execution = approve(bot, packet)
+    bot.prm.handle(bot.msg("好的，等你们寄"))                               # a reply job, queued first
+    mac_runs(bot, execution, record(sample_order_no=JST_ORDER))            # → the 专属佣金 step is asked for
+    jobs = {("system_note" in j["meta"]): j for j in bot.relay.store.list_jobs(10) if j["status"] == "pending"}
+    assert jobs[True]["text"] == "" and "好的，等你们寄" in jobs[False]["text"]   # not merged into the step
+    reply_job = bot.worker_takes()
+    assert reply_job["id"] == jobs[False]["id"]
+    step_job = bot.relay.next_job(0, ("prm",))                              # both run at once
+    bot.finish(reply_job["id"], draft(message_kind="other", reply_draft="好的老师，寄出后发单号给您", slots={}))
+    reply = bot.prm.store.packet_for_job(reply_job["id"])
+    assert reply["status"] == "pending"                                     # the newer step job does not outdate it
+    bot.finish(step_job["id"], {**draft(message_kind="money", reply_draft="", slots={}), "platform": block()})
+    step = bot.prm.store.packet_for_job(step_job["id"])
+    assert step["status"] == "pending" and step["meta"]["lane"] == "system"
+    assert bot.prm.store.packet(reply["id"])["status"] == "pending"         # nor does the step's draft
+    bot.prm.handle(bot.msg("对了，能寄黑色吗"))                              # the creator writes again
+    assert bot.prm.store.packet(reply["id"])["status"] == "superseded"      # her reply is redrafted
+    assert bot.prm.store.packet(step["id"])["status"] == "pending"          # the 专属佣金 step stays
