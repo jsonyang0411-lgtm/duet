@@ -243,7 +243,7 @@ def test_check_and_a_wrong_token(worker, bot, fake_claude, tmp_path, capsys, mon
     assert "token wrong" in capsys.readouterr().out
 
 
-PONG_DIRECT = "pong from win-pc (100.101.102.103) via 192.168.9.155:41641 in 2ms\n"
+PONG_DIRECT = "pong from win-pc (100.101.102.103) via 192.168.1.20:41641 in 2ms\n"
 PONG_DERP = "pong from win-pc (100.101.102.103) via DERP(hkg) in 118ms\n"
 
 
@@ -254,22 +254,22 @@ def test_check_tells_the_network_and_tailscales_way(worker, monkeypatch):
         raise worker.socket.gaierror("no such name")
 
     monkeypatch.setattr(worker.socket, "gethostbyname", resolve)
-    assert [worker.address_kind(h) for h in ("192.168.9.155", "100.101.102.103", "win-pc", "8.8.8.8", "nowhere")] == [
+    assert [worker.address_kind(h) for h in ("192.168.1.20", "100.101.102.103", "win-pc", "8.8.8.8", "nowhere")] == [
         "lan", "tailscale", "tailscale", "public", "unknown"]
     calls = []
-    lan = worker.link_report("http://192.168.9.155:8790", lambda: calls.append(1))
-    assert lan == [lan[0]] and lan[0].startswith("network: 192.168.9.155 是局域网地址，往返 ") and len(calls) == 3
-    assert "这个地址连不上" in worker.link_report("http://192.168.9.155:8790")[1]   # the bot did not answer
+    lan = worker.link_report("http://192.168.1.20:8790", lambda: calls.append(1))
+    assert lan == [lan[0]] and lan[0].startswith("network: 192.168.1.20 是局域网地址，往返 ") and len(calls) == 3
+    assert "这个地址连不上" in worker.link_report("http://192.168.1.20:8790")[1]   # the bot did not answer
     assert "明文 http 经过公网" in worker.link_report("http://8.8.8.8:8790", lambda: None)[1]
     assert worker.link_report("https://8.8.8.8", lambda: None)[1:] == []           # https: no warning
 
     def down():
         raise OSError("refused")
 
-    assert "往返" not in worker.link_report("http://192.168.9.155:8790", down)[0]
+    assert "往返" not in worker.link_report("http://192.168.1.20:8790", down)[0]
     ts = worker.link_report("http://win-pc:8790", lambda: None, ping=lambda host: PONG_DERP + PONG_DIRECT)
     assert ts[0].startswith("network: win-pc 是 Tailscale 地址，往返 ")
-    assert ts[1] == "  Tailscale：直连（经 192.168.9.155:41641，2 ms）"
+    assert ts[1] == "  Tailscale：直连（经 192.168.1.20:41641，2 ms）"
     relayed = worker.tailscale_path("win-pc", lambda host: PONG_DERP * 5 + "direct connection not established\n")
     assert relayed.startswith("走中转 DERP(hkg)（118 ms）")
     assert "没有回音" in worker.tailscale_path("win-pc", lambda host: "")
