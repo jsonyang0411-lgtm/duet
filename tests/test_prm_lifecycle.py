@@ -209,6 +209,55 @@ def test_a_locked_kind_never_goes_auto(bot, clock):
     assert packet["route"] == "review" and packet["status"] == "pending"
 
 
+# Files the draft named that did not all come: the Mac says which and why; the draft waits for a
+# person whatever its kind's gate ("两份资料发你啦" must not go out with one).
+SHORT = draft(message_kind="material", reply_draft="三份资料发你啦～", slots={}, reason="kb/素材规范.md",
+              attachments_to_send=["assets/a.txt"], attachments_named=["assets/a.txt", "assets/b.pdf", "assets/c.png"],
+              attachments_missing=[{"name": "assets/b.pdf", "why": "超过 100 MB"},
+                                   {"name": "assets/c.png", "why": "assets/ 里没有这个文件"}])
+
+
+def test_a_draft_short_of_its_files_waits_for_a_person_even_when_its_kind_is_auto(bot, clock):
+    bot.prm.store.set_gate("material", "auto", clock.now)
+    packet = pending_packet(bot, SHORT, files=[("a.txt", b"a")])
+    assert packet["status"] == "pending" and packet["route"] == "review"
+    assert [a["name"] for a in packet["attachments"]] == ["a.txt"]
+    note = "草稿要附 3 个文件，只收到 1 个：b.pdf（超过 100 MB）、c.png（assets/ 里没有这个文件）"
+    assert bot.prm.store.deal(1)["attention"] == note
+    assert packet["needs_attention"] and packet["reason"] == f"{note}；kb/素材规范.md"   # the 待审批 card says it too
+    bot.prm.tick()
+    assert bot.texts == [] and bot.files == []
+
+
+def test_a_draft_with_all_its_files_goes_as_before(bot, clock):
+    bot.prm.store.set_gate("material", "auto", clock.now)
+    whole = {**SHORT, "reply_draft": "两份资料发你啦～", "attachments_to_send": ["assets/a.txt", "assets/b.txt"],
+             "attachments_named": ["assets/a.txt", "assets/b.txt"], "attachments_missing": []}
+    packet = pending_packet(bot, whole, files=[("a.txt", b"a"), ("b.txt", b"b")])
+    assert packet["status"] == "approved" and packet["route"] == "auto"
+    assert bot.prm.store.deal(1)["attention"] == "" and not packet["needs_attention"]
+    bot.prm.send_approved()
+    assert bot.texts == [(CREATOR, "两份资料发你啦～")] and len(bot.files) == 2
+
+
+def test_an_older_worker_that_reports_only_what_it_sent(bot, clock):
+    """It sends only the list of what it uploaded: as before, plus a file the bot did not get."""
+    bot.prm.store.set_gate("material", "auto", clock.now)
+    old = {k: v for k, v in SHORT.items() if k not in ("attachments_named", "attachments_missing")}
+    assert pending_packet(bot, old, files=[("a.txt", b"a")])["status"] == "approved"   # it named one, one came
+    lost = pending_packet(bot, {**old, "attachments_to_send": ["assets/a.txt", "assets/b.txt"]}, files=[("a.txt", b"a")])
+    assert lost["status"] == "pending" and lost["route"] == "review"
+    assert bot.prm.store.deal(1)["attention"] == "草稿要附 2 个文件，只收到 1 个：b.txt"
+
+
+def test_plain_reason_counts_the_files_the_draft_named():
+    base = dict(needs_attention=False, mode="copilot", unknown_tokens=[], reason="kb/素材规范.md", text="x", waybill="",
+                attachments=[{"name": "a.txt"}])
+    assert gates.plain_reason("material", **base, files_named=3) == "草稿要附 3 个文件，只收到 1 个"
+    assert gates.plain_reason("material", **base, files_named=1) == ""
+    assert gates.plain_reason("greeting", **base) == ""                       # nothing said: as before
+
+
 def test_plain_reason_rules():
     base = dict(needs_attention=False, mode="copilot", unknown_tokens=[], reason="kb/合作政策.md", text="x",
                 waybill="", attachments=[])
@@ -561,6 +610,47 @@ def test_scrub_cuts_addresses_and_masks_numbers():
                                     "收件信息": "小美 广东省深圳市南山区科苑路15号 13812345678"}) == {
         "收件地址": "广东省深圳市（详细地址已清除）", "收件人": "小美", "件数": 2,
         "收件信息": "小美 广东省深圳市（详细地址已清除） 138****5678"}
+
+
+def test_province_and_city_are_kept_only_when_they_are_ones():
+    assert retention.coarse_address("广东佛山市南海区某某路100号") == "广东佛山市"
+    assert retention.coarse_address("广东佛山南海区某某路100号") == "广东"            # a province without 省
+    assert retention.coarse_address("广东省南海区某某市场路100号") == "广东省"        # 南海区某某市 is no city
+    assert retention.coarse_address("上海市浦东新区张江路100号") == "上海市"
+    assert retention.coarse_address("广东省 佛山市 南海区") == "广东省 佛山市"
+    assert retention.coarse_address("南海区某某路100号") == ""
+    assert retention.cleared_slots({"收件地址": "广东佛山南海区某某路100号"}) == {"收件地址": "广东（详细地址已清除）"}
+
+
+def test_every_copy_is_cut_whatever_the_wording_and_stays_readable(bot, clock):
+    """8.2 on this PC with the wordings the case files showed (no province in front, a label
+    without a colon, a table cell, after a name and a phone); the JSON copies (events, a job's
+    meta) stay JSON: a label's value never runs past the end of its string."""
+    messages = MessageStore(initialize_db(":memory:"))
+    bot.prm._scrub_messages = messages.rewrite_chat
+    text = "收件信息：张三，13812345678，南海区某某路100号1栋101"
+    messages.insert_message({"message_id": "m1", "chat_id": CREATOR, "sender_id": CREATOR, "sender_name": "张三",
+                             "content": text, "msg_type": 1, "timestamp": int(clock.now)})
+    packet = drafted(bot, draft(slots={"收件人": "张三"}, reply_draft="确认：张三 〈手机1〉 南海区某某路100号1栋101",
+                                reason="| 地址 | 南海区某某路100号1栋101 |"), text=text)
+    for kind, line in (("operator_message", "[10:00] 地址 广东佛山南海区某某路100号"),
+                       ("creator_message", "[10:01] 地址：南海区某某路100号1栋101")):
+        bot.prm.store.add_event(1, 1, kind, {"text": line}, actor="operator", now=clock.now)
+    clock.now += 91 * DAY
+    assert bot.prm.purge_due() == 1
+    everything = json.dumps([bot.prm.store.packets(limit=100), bot.prm.store.events(1, limit=100),
+                             bot.relay.store.list_jobs(100)], ensure_ascii=False)
+    assert "某某路" not in everything and "南海区" not in everything and "13812345678" not in everything
+    stored = messages.conn.execute("SELECT content FROM messages WHERE chat_id = ?", (CREATOR,)).fetchone()[0]
+    assert stored == "收件信息：张三，138****5678，（详细地址已清除）"
+    lines = [e["detail"]["text"] for e in bot.prm.store.events(1, limit=100)
+             if e["kind"] in ("operator_message", "creator_message")]
+    assert lines == ["[10:01] 地址：（详细地址已清除）", "[10:00] 地址 广东（详细地址已清除）"]
+    cut = bot.prm.store.packet(packet["id"])
+    assert cut["text"] == "确认：张三 〈手机1〉 （详细地址已清除）" and cut["reason"] == "| 地址 | （详细地址已清除） |"
+    [job] = [j for j in bot.relay.store.list_jobs(100) if j["id"] == packet["job_id"]]
+    assert job["text"].endswith("收件信息：张三，〈手机1〉，（详细地址已清除）")
+    assert all(isinstance(json.loads(j["meta"]), dict) for j in bot.relay.store.list_jobs(100))
 
 
 # ── settings ──────────────────────────────────────────────────────────────

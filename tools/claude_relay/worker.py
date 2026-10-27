@@ -33,7 +33,9 @@ and this script as a PreToolUse hook (--prm-hook) that refuses any path outside
 the workspace and any write outside deals/*.md (and denies every permission
 request).  The creator's words go in between <creator_message> tags as data.
 Claude answers with a JSON object (--json-schema): a draft and slot updates;
-files it names from assets/ are sent back to the bot (POST .../outfiles).  The
+files it names from assets/ are sent back to the bot (POST .../outfiles), and the bot
+is told every file the draft named and why one did not go (attachments_named /
+attachments_missing): a draft short of its files waits for a person.  The
 draft waits in the bot's console; nothing reaches the creator from here.  The
 worker only asks the bot for prm jobs when prm_workspace is usable
 (X-Relay-Kinds).
@@ -1385,15 +1387,42 @@ def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, fa
 
 
 # The same clean-up rule as the bot's src/prm/retention.py (a test keeps them in step):
-# addresses cut to province and city, phone and ID numbers masked.
-_REGION = re.compile(r"^\s*((?:[一-龥]{2,7}?(?:省|自治区|特别行政区))?(?:[一-龥]{2,7}?(?:市|自治州|地区|盟))?)")
+# addresses cut to province and city, whatever the wording (after a label, from the province or
+# city on, or a street address found by its door number / building / district), phone and ID
+# numbers masked; dates, colours, SKUs, prices and counts left alone.
+CLEARED = "（详细地址已清除）"
+_PROVINCES = ("北京", "天津", "上海", "重庆", "河北", "山西", "辽宁", "吉林", "黑龙江", "江苏", "浙江", "安徽", "福建",
+              "江西", "山东", "河南", "湖北", "湖南", "广东", "海南", "四川", "贵州", "云南", "陕西", "甘肃", "青海",
+              "台湾", "内蒙古", "广西", "西藏", "宁夏", "新疆", "香港", "澳门")
+_BARE = "(?:" + "|".join(_PROVINCES) + ")(?![省市])"
+_PROVINCE = rf"(?:[一-龥]{{2,7}}?(?:省|自治区|特别行政区)|{_BARE})"
+_CITY = r"(?:(?![区县旗路街巷号])[一-龥]){2,7}?(?:市|自治州|地区|盟)"
+_REGION = re.compile(rf"^\s*((?:{_PROVINCE}(?:\s*{_CITY})?|{_CITY})?)")
 _ADDRESS = re.compile(r"(?:[一-龥]{2,7}?(?:省|自治区|特别行政区|市))[一-龥A-Za-z0-9#\-－（）()]{3,60}")
-_ADDRESS_LINE = re.compile(r"((?:收件|详细|收货)?(?:地址|住址)\s*[:：]\s*)([^\n，,。；;]{4,80})")
+_BARE_ADDRESS = re.compile(rf"{_BARE}[一-龥A-Za-z0-9#\-－]{{2,60}}")
+_ADDRESS_LINE = re.compile(r"((?:收件|详细|收货)?(?:地址|住址)(?:[ \t　]*[:：|][ \t　]*|[ \t　]+))"
+                           r"([^\n\r，,。；;\"\\|]{4,80})")
 _STREET = re.compile(r"\d|[路街道号栋幢室弄巷村镇区县单元楼层]")
+_ROAD = r"(?:路|街|大道|巷|胡同|村|(?<![知频渠味报难通管轨跑赛隧弯车航])道)"
+_DOOR = re.compile(rf"{_ROAD}\s*\d+(?:[-－]\d+)*\s*(?:号|弄|组|巷|栋|幢)")
+_BUILDING = re.compile(r"\d+\s*(?:栋|幢|号楼)\s*\d+|(?<![A-Za-z])[A-Za-z]\s*(?:座|栋|幢)(?![椅位谈垫])"
+                       r"|\d+\s*单元\s*\d+|\d{3,4}\s*室")
+_AREA_ROAD = re.compile(rf"(?:区|县|旗|镇|乡)[一-龥]{{1,8}}?{_ROAD}[一-龥]{{0,4}}\d+\s*号")
+_STRONG = re.compile(r"[区县旗镇乡路街巷弄村栋幢室]|大道|单元|号楼|小区|大厦|花园|公寓|广场|"
+                     r"(?<![知频渠味报难通管轨跑赛隧弯车航])道")
+_AREA = re.compile(r"[一-龥]{1,8}?(?:区|县|旗|镇|乡|街道)$")
+_UNIT = re.compile(r"(?=\S)(?:\d{1,5}(?:[-－]\d{1,5})*(?:号楼|号|室|楼|层|弄|栋|幢|单元|座|户)|[A-Za-z](?:座|栋|幢))*"
+                   r"(?:\d{1,5}(?:[-－]\d{1,5})*)?$")
+_PIECE_END = re.compile(r"\d+(?:[-－]\d+)*(?:号楼|号|室|楼|层|弄|栋|幢|单元|座|户)?|[A-Za-z](?:座|栋|幢)|"
+                        r"路|街|大道|巷|胡同|村|小区|花园|公寓|大厦|广场|苑")
+_LEAD = re.compile(r"(?:[一-龥]{0,3}?(?:地址|住址)(?:是|为|在)?|寄到|寄往|寄去|发到|送到|住在|放在|放到|改成|改为|"
+                   r"改到|换成|换到|搬到|是|在|到|放|送|寄)")
+_CLAUSE = re.compile(r"(?<!\\)[^\n\r，,。；;：:、|/\\\"'“”‘’（）()\[\]{}<>《》〈〉【】!！?？…]+")
+_WORD = re.compile(r"[^ \t　]+")
 _PIECE_MIN = 5
 _PHONE = re.compile(r"(?<![\dA-Za-z])(?:\+?86[-\s]?)?(1[3-9]\d)[-\s]?(\d{4})[-\s]?(\d{4})(?![\dA-Za-z])")
 _ID_CARD = re.compile(r"(?<![\dA-Za-z])(\d{6}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx])(?![\dA-Za-z])")
-CLEARED = "（详细地址已清除）"
+CASE_PURGE_HEAD = "## 清理记录"
 
 
 def _coarse(address: str) -> str:
@@ -1405,6 +1434,62 @@ def _cleared(address: str) -> str:
     return f"{_coarse(address)}{CLEARED}"
 
 
+def _strong(text: str) -> bool:
+    return bool(_STRONG.search(text) or _DOOR.search(text) or _BUILDING.search(text))
+
+
+def _belongs_before(word: str) -> bool:
+    return _coarse(word) == word or bool(_AREA.match(word)) or _strong(word)
+
+
+def _belongs_after(word: str) -> bool:
+    return _strong(word) or bool(_UNIT.match(word))
+
+
+def _street_spans(text: str) -> list:
+    """(start, end) of every street address found by its door number, building or district,
+    with the words of its clause that belong to it (retention._street_spans)."""
+    spans = []
+    for clause in _CLAUSE.finditer(str(text)):
+        body = clause.group(0)
+        found = sorted(m.span() for rx in (_DOOR, _BUILDING, _AREA_ROAD) for m in rx.finditer(body))
+        if not found:
+            continue
+        first_at, last_at = found[0][0], max(e for _, e in found)
+        words = [m.span() for m in _WORD.finditer(body)]
+        first = next(i for i, (_, e) in enumerate(words) if e > first_at)
+        last = max(i for i, (s, _) in enumerate(words) if s < last_at)
+        while first > 0 and _belongs_before(body[words[first - 1][0]:words[first - 1][1]]):
+            first -= 1
+        while last + 1 < len(words) and _belongs_after(body[words[last + 1][0]:words[last + 1][1]]):
+            last += 1
+        start = words[first][0]
+        lead = _LEAD.match(body, start, words[first][1])
+        if lead and start < lead.end() <= min(first_at, words[first][1] - 1):
+            start = lead.end()
+        ends = [m.end() for m in _PIECE_END.finditer(body, words[last][0], words[last][1])]
+        end = max(ends + [min(last_at, words[last][1])]) if ends else words[last][1]
+        if CLEARED not in body[start:end]:
+            spans.append((clause.start() + start, clause.start() + end))
+    return spans
+
+
+def _label_value(m) -> str:
+    value = m.group(2).strip()
+    if not value or CLEARED in value:
+        return ""
+    if "|" in m.group(1):
+        return value if _STREET.search(value[len(_coarse(value)):]) else ""
+    if not re.search(r"[:：]", m.group(1)) and not _strong(value):
+        return ""
+    return value
+
+
+def _labelled(m) -> str:
+    value = _label_value(m)
+    return m.group(1) + m.group(2).replace(value, _cleared(value), 1) if value else m.group(0)
+
+
 def _street(m) -> str:
     text = m.group(0)
     if CLEARED in text or not _STREET.search(text[len(_coarse(text)):]):
@@ -1412,9 +1497,27 @@ def _street(m) -> str:
     return _cleared(text)
 
 
-def _written_out(text: str) -> list[str]:
-    found = [m.group(2).strip() for m in _ADDRESS_LINE.finditer(text)] + [m.group(0) for m in _ADDRESS.finditer(text)]
+def _bare(m) -> str:
+    text = m.group(0)
+    rest = text[len(_coarse(text)):]
+    if CLEARED in text or not (re.match(r"[一-龥]{1,7}?(?:区|县|旗|镇|乡)", rest) or _DOOR.search(rest)
+                               or _BUILDING.search(rest)):
+        return text
+    return _cleared(text)
+
+
+def _written_out(text: str) -> list:
+    found = [v for v in (_label_value(m) for m in _ADDRESS_LINE.finditer(text)) if v]
+    found += [m.group(0) for m in _ADDRESS.finditer(text)]
+    found += [m.group(0) for m in _BARE_ADDRESS.finditer(text) if _bare(m) != m.group(0)]
+    found += [text[s:e] for s, e in _street_spans(text)]
     return [a for a in found if CLEARED not in a and _STREET.search(a[len(_coarse(a)):])]
+
+
+def _cut_streets(text: str) -> str:
+    for start, end in reversed(_street_spans(text)):
+        text = text[:start] + _cleared(text[start:end]) + text[end:]
+    return text
 
 
 def _cut_pieces(text: str, detail: str) -> str:
@@ -1433,15 +1536,17 @@ def _cut_pieces(text: str, detail: str) -> str:
 
 
 def scrub_case(text: str) -> str:
-    """A case file with its receiving details cleared (8.2): the addresses it writes out, and
-    pieces of them quoted elsewhere in it, cut to province and city; numbers masked."""
+    """A case file with its receiving details cleared (8.2): the addresses it writes out, in any
+    wording, and pieces of them quoted elsewhere in it, cut to province and city; numbers masked.
+    Running it again changes nothing."""
     text = str(text)
     known = sorted({a.strip() for a in _written_out(text) if a.strip()}, key=len, reverse=True)
     for address in known:
         text = text.replace(address, _cleared(address))
-    text = _ADDRESS_LINE.sub(lambda m: m.group(0) if CLEARED in m.group(2) else m.group(1) + _cleared(m.group(2)),
-                             text)
+    text = _ADDRESS_LINE.sub(_labelled, text)
     text = _ADDRESS.sub(_street, text)
+    text = _BARE_ADDRESS.sub(_bare, text)
+    text = _cut_streets(text)
     for address in known:
         detail = address[len(_coarse(address)):]
         if len(detail) >= _PIECE_MIN:
@@ -1451,32 +1556,52 @@ def scrub_case(text: str) -> str:
 
 
 def purge_case_file(workspace: Path, party_id: int) -> dict:
-    """The bot's 8.2 clean-up of one case file: done here, without the model."""
+    """The bot's 8.2 clean-up of one case file: done here, without the model.  The note goes
+    under the file's「## 清理记录」(made the first time)."""
     path = workspace / "deals" / f"{int(party_id)}.md"
     if not path.is_file():
         return {"ok": True, "text": "没有案卷，不用清理", "duration_s": 0}
     old = path.read_text(encoding="utf-8")
     new = scrub_case(old)
     changed = sum(1 for a, b in zip(old.splitlines(), new.splitlines()) if a != b)
-    new = new.rstrip("\n") + (f"\n\n## 清理记录\n\n- {time.strftime('%Y-%m-%d')} 签收已满规定天数，"
-                              "收件信息按规定清除（地址只留省市，号码只留打码的）。\n")
+    note = (f"- {time.strftime('%Y-%m-%d')} 签收已满规定天数，"
+            "收件信息按规定清除（地址只留省市，号码只留打码的）。")
+    lines = new.rstrip("\n").split("\n")
+    if CASE_PURGE_HEAD in lines:
+        at = lines.index(CASE_PURGE_HEAD) + 1
+        while at < len(lines) and not lines[at].startswith("## "):
+            at += 1
+        while lines[at - 1].strip() == "":
+            at -= 1
+        lines.insert(at, note)
+        new = "\n".join(lines) + "\n"
+    else:
+        new = new.rstrip("\n") + f"\n\n{CASE_PURGE_HEAD}\n\n{note}\n"
     path.write_text(new, encoding="utf-8")
     log.info("case file of party %s cleaned (%d line(s) changed)", party_id, changed)
     return {"ok": True, "text": f"案卷已清理，改了 {changed} 行", "duration_s": 0}
 
 
-def prm_asset(workspace: Path, rel: str) -> Path | None:
-    """A file the draft wants to send, only from assets/ (no way out through .. or links)."""
+def prm_asset_check(workspace: Path, rel: str) -> tuple[Path | None, str]:
+    """``(file, "")`` for a file the draft wants to send, only from assets/ (no way out through ..
+    or links), else ``(None, why not)``: the bot tells the operators which file did not come."""
     candidate = Path(os.path.expanduser(str(rel)))
     if not candidate.is_absolute():
         candidate = workspace / candidate
     real = os.path.realpath(candidate)
     assets = os.path.realpath(workspace / "assets")
-    if not _inside(real, assets) or real == assets or not os.path.isfile(real):
-        return None
+    if not _inside(real, assets) or real == assets:
+        return None, "不在 assets/ 里"
+    if not os.path.isfile(real):
+        return None, "assets/ 里没有这个文件"
     if os.path.getsize(real) > PRM_MAX_UPLOAD_BYTES:
-        return None
-    return Path(real)
+        return None, f"超过 {PRM_MAX_UPLOAD_BYTES // (1024 * 1024)} MB"
+    return Path(real), ""
+
+
+def prm_asset(workspace: Path, rel: str) -> Path | None:
+    """A file the draft wants to send, only from assets/ (no way out through .. or links)."""
+    return prm_asset_check(workspace, rel)[0]
 
 
 def summarize_prm(run: dict, data: dict | None, settings: dict) -> dict:
@@ -1535,18 +1660,27 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
     result = summarize_prm(run, parse_output(run["stdout"]), {**settings, "prm_timeout_min": timeout})
     if result["ok"]:
         draft = json.loads(result["text"])
-        sent = []
-        for rel in draft.get("attachments_to_send") or []:
-            path = prm_asset(workspace, str(rel))
+        named = [str(rel).strip() for rel in draft.get("attachments_to_send") or [] if str(rel).strip()]
+        sent, missing = [], []
+        for rel in named:
+            path, why = prm_asset_check(workspace, rel)
             if path is None:
-                log.warning("#%s draft names a file outside assets/ (or missing / too big); not sent back", job["id"])
+                log.warning("#%s draft names a file it cannot send back (%s)", job["id"], why)
+                missing.append({"name": rel, "why": why})
                 continue
             try:
                 client.upload(int(job["id"]), path, path.name)
-                sent.append(str(rel))
+                sent.append(rel)
             except Exception as e:
                 log.warning("#%s file %s not sent back: %s", job["id"], path.name, e)
+                missing.append({"name": rel, "why": f"没传上去：{e}"[:120]})
+        # What came back (all an older bot counts), every file the draft named and why some did
+        # not come: the bot keeps a draft short of files for a person and says which.
         draft["attachments_to_send"] = sent
+        draft["attachments_named"] = named
+        draft.pop("attachments_missing", None)
+        if missing:
+            draft["attachments_missing"] = missing
         draft.pop("platform", None)                      # only this script writes the verdict
         if draft.get("platform_action") is not None:
             draft["platform"] = platform_preview(settings, workspace, draft.pop("platform_action"), client,

@@ -10,7 +10,8 @@ always reviewed.  An operator marking a sent message "发错了" puts the kind b
 Even an ``auto`` kind waits for a person when the draft itself is not plain: the
 model asked for attention, the deal is not in copilot mode, a placeholder is
 unknown, an FAQ answer does not name its kb/ source, a shipping notice does not
-carry the system's waybill, or material comes without its files.
+carry the system's waybill, fewer files came than the draft named, or material comes
+without its files.
 """
 
 from __future__ import annotations
@@ -69,8 +70,9 @@ def waybill_ok(text: str, waybill: str) -> bool:
 
 
 def plain_reason(kind: str, *, needs_attention: bool, mode: str, unknown_tokens: list, reason: str,
-                 text: str, waybill: str, attachments: list) -> str:
-    """Why this draft must wait for a person even when its kind is ``auto`` ("" = it need not)."""
+                 text: str, waybill: str, attachments: list, files_named: int = 0) -> str:
+    """Why this draft must wait for a person even when its kind is ``auto`` ("" = it need not).
+    ``files_named``: how many files the draft named (more than came: "两份资料发你啦" with one)."""
     if needs_attention:
         return "模型要求运营注意"
     if mode != "copilot":
@@ -81,6 +83,8 @@ def plain_reason(kind: str, *, needs_attention: bool, mode: str, unknown_tokens:
         return "回答没有注明 kb/ 出处"
     if kind == "shipping_notice" and not waybill_ok(text, waybill):
         return "单号和系统记录对不上"
+    if files_named > len(attachments or []):
+        return f"草稿要附 {files_named} 个文件，只收到 {len(attachments or [])} 个"
     if kind == "material" and not attachments:
         return "素材文件没有收到"
     return ""

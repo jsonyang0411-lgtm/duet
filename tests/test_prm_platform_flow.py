@@ -4,12 +4,13 @@ VERIFIED_SUCCESS sends the reply (the link filled in); everything else, a Mac th
 the job or goes silent, ends red without a word to the creator."""
 
 import json
+import time
 
 import pytest
 
 from test_prm import CREATOR, Bot, Clock, draft
 
-from platform_fakes import DY_ITEM, DY_LINK, DY_SKU, DY_UID, JST_ORDER, XHS_BUYER, XHS_ITEM
+from platform_fakes import DY_ITEM, DY_ITEM2, DY_ITEM3, DY_LINK, DY_SKU, DY_UID, JST_ORDER, XHS_BUYER, XHS_ITEM
 from src.prm import platforms
 from src.prm.result import DraftError, parse_draft
 from src.prm.service import APPROVED_EXPIRE_SEC, PLATFORM_LOST_GRACE_SEC, SETTLE_SEC
@@ -395,8 +396,8 @@ def test_an_edited_reply_is_what_goes_out(bot):
 # ── the gates and the audit trail ─────────────────────────────────────────
 
 def test_platform_replies_never_earn_their_kind_the_auto_gate(bot, clock):
-    for _ in range(3):
-        packet = drafted(bot, kind="other")
+    for item in (DY_ITEM, DY_ITEM2, DY_ITEM3):                  # one product each (never the same one twice)
+        packet = drafted(bot, block({**DESIGNATED, "item_id": item}), kind="other")
         mac_runs(bot, approve(bot, packet), record())
         bot.prm.send_approved()
         for job in bot.relay.store.list_jobs(20):                  # the next 专属佣金 step: not this test
@@ -429,7 +430,11 @@ def test_a_placeholder_the_platform_gave_no_value_for_keeps_the_reply_back(bot):
     assert failed["status"] == "failed" and "{计划ID}" in failed["error"] and "已经核验成功" in failed["error"]
     bot.prm.tick()
     assert bot.texts == []
-    other = drafted(bot, block(raw, run=plan), reply="定向计划「{计划名}」开好啦，编号 {计划ID}")
+    same = drafted(bot, block(raw, run=plan), reply="定向计划「{计划名}」开好啦，编号 {计划ID}")
+    out = bot.prm.decide(same["id"], "execute")                 # it is open on the platform: not a second plan
+    assert not out["ok"] and f"#{failed['id']}" in out["error"] and "开过了" in out["error"]
+    other_item = {**raw, "item_id": "64f1a2b3c4d5e6f7a8b9c0d3"}
+    other = drafted(bot, block(other_item, run=plan), reply="定向计划「{计划名}」开好啦，编号 {计划ID}")
     mac_runs(bot, approve(bot, other), record(plan_name="达人合作1-1026101500", group_id="6a0000000000000000000a01"))
     bot.prm.send_approved()
     assert bot.texts == [(CREATOR, "定向计划「达人合作1-1026101500」开好啦，编号 6a0000000000000000000a01")]
@@ -660,3 +665,121 @@ def test_a_commission_step_waiting_in_review_sends_the_creator_no_holding_reply(
     bot.finish(reply_job["id"], draft(message_kind="other", reply_draft="戴上效果怎么样～", slots={}))
     clock.now += 3600
     assert bot.prm.send_holding_replies() == 1 and bot.texts[-1] == (packet["chat_id"], bot.prm._holding_text)
+
+
+# ── a 专属 action runs once per product and creator ───────────────────────
+# The Mac's ledger only stops one approval from running twice; a second draft of the same
+# 专属佣金 / 定向计划 / 渠道品 (a chain picked up again while a step runs, a reply that carries
+# one) must not open a second one on the platform.
+
+def no_next_step(b, clock):
+    """Cancel the next-step draft job a verified 专属佣金 asks for (not what these tests are about)."""
+    for job in b.relay.store.list_jobs(20):
+        if "system_note" in job["meta"]:
+            b.relay.store.cancel_if_pending(job["id"], clock.now)
+
+
+def opened(b, clock, raw=DESIGNATED, run=None, rec=None, reply="专属佣金 20% 设好啦，明天 0 点生效～"):
+    """A draft of this action approved, verified on the platform and its reply sent."""
+    packet = drafted(b, block(raw, run=run), reply=reply)
+    mac_runs(b, approve(b, packet), rec or record())
+    b.prm.send_approved()
+    no_next_step(b, clock)
+    return b.prm.store.packet(packet["id"])
+
+
+def date_of(at):
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(at))
+
+
+def test_a_commission_opened_once_is_not_opened_again(bot, clock):
+    first = opened(bot, clock)
+    [event] = [e for e in bot.prm.store.events(first["deal_id"]) if e["kind"] == "platform_result"]
+    assert event["detail"]["item_id"] == DY_ITEM and event["detail"]["creator_platform_id"] == DY_UID
+    clock.now += 3 * 86400
+    again = drafted(bot, reply="")                             # the same product for the same creator
+    jobs = len(bot.relay.store.list_jobs(100))
+    out = bot.prm.decide(again["id"], "execute")
+    assert not out["ok"]
+    assert f"#{first['id']}（{date_of(first['sent_at'])}）" in out["error"] and DY_ITEM in out["error"]
+    assert "开过了" in out["error"]
+    assert out["error"].endswith("点「不发」；要接着开下一个商品，把物流改回「运输中」再标「已签收」")
+    assert bot.prm.store.packet(again["id"])["status"] == "pending"
+    assert len(bot.relay.store.list_jobs(100)) == jobs                      # nothing goes to the Mac
+    assert bot.prm.decide(again["id"], "drop")["ok"]
+
+
+def test_picking_the_chain_up_again_while_a_step_runs_does_not_open_it_twice(bot, clock):
+    """The operator sets the deal back to 运输中 and 已签收 while the 专属佣金 step is still running on
+    the Mac: the step is asked for again, and the Mac drafts the same product (its case file does
+    not know yet)."""
+    order = ordered(bot, clock)
+    mac_runs(bot, approve(bot, order), record(sample_order_no=JST_ORDER))
+    bot.prm.send_approved()
+    assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": "delivered"})["ok"]
+    step = bot.worker_takes()
+    bot.finish(step["id"], {**draft(message_kind="money", reply_draft="", slots={}), "platform": block()})
+    first = bot.prm.store.packet_for_job(step["id"])
+    running = approve(bot, first)
+    bot.relay.next_job(0, ("prm",))                                         # the Mac is on it
+    for stage in ("transit", "delivered"):
+        assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": stage})["ok"]
+    again = bot.worker_takes()
+    bot.finish(again["id"], {**draft(message_kind="money", reply_draft="", slots={}), "platform": block()})
+    second = bot.prm.store.packet_for_job(again["id"])
+    assert second["status"] == "pending" and bot.prm.store.packet(first["id"])["status"] == "executing"
+    out = bot.prm.decide(second["id"], "execute")
+    approved_at = bot.prm.store.packet(first["id"])["platform"]["approved_at"]
+    assert not out["ok"] and "正在执行" in out["error"] and f"#{first['id']}" in out["error"]
+    assert date_of(approved_at) in out["error"] and "点「不发」" in out["error"]
+    assert bot.relay.finish(running["id"], {"ok": True, "text": json.dumps(record(key=json.loads(running["meta"])["key"]))})
+    bot.relay.tick()
+    assert bot.prm.store.packet(first["id"])["status"] == "approved"
+    out = bot.prm.decide(second["id"], "execute")                          # done now: still not twice
+    assert not out["ok"] and "开过了" in out["error"] and f"#{first['id']}" in out["error"]
+    assert len([j for j in bot.relay.store.list_jobs(100) if '"platform_execute"' in j["meta"]]) == 2   # order + step
+
+
+def test_another_product_or_another_creator_is_still_allowed(bot, clock):
+    first = opened(bot, clock)
+    other_item = opened(bot, clock, {**DESIGNATED, "item_id": DY_ITEM2})
+    other_creator = opened(bot, clock, {**DESIGNATED, "creator_platform_id": "5100000000000003"})
+    assert [p["status"] for p in (first, other_item, other_creator)] == ["sent", "sent", "sent"]
+    running = drafted(bot, block({**DESIGNATED, "item_id": DY_ITEM3}))
+    approve(bot, running)
+    bot.relay.next_job(0, ("prm",))                                         # on the Mac now
+    channel = drafted(bot, block(CHANNEL), reply="链接：{链接}")              # a channel product is not a commission
+    assert approve(bot, channel)
+
+
+def test_only_a_verified_or_running_one_counts(bot, clock):
+    tried = drafted(bot)
+    mac_runs(bot, approve(bot, tried), record("FAILED"))                     # the platform refused it: try again
+    retry = drafted(bot)
+    mac_runs(bot, approve(bot, retry), record())
+    no_next_step(bot, clock)
+    assert bot.prm.store.packet(retry["id"])["status"] == "approved"
+    out = bot.prm.decide(drafted(bot)["id"], "execute")
+    assert not out["ok"] and f"#{retry['id']}" in out["error"]
+    bot.prm._send = lambda chat, text: False                                 # verified, but the reply failed
+    bot.prm.send_approved()
+    assert bot.prm.store.packet(retry["id"])["status"] == "failed"
+    out = bot.prm.decide(drafted(bot)["id"], "execute")
+    assert not out["ok"] and f"#{retry['id']}" in out["error"]
+
+
+@pytest.mark.parametrize("raw, again", [
+    ({"action": "dy.channel_goods", "item_id": DY_ITEM, "creator_platform_id": DY_UID, "price": "15"},
+     {"action": "dy.channel_goods", "item_id": DY_ITEM, "creator_platform_id": DY_UID, "price": "14"}),
+    ({"action": "xhs.direct_plan", "item_id": XHS_ITEM, "creator_platform_id": "小美的号", "commission_rate": 15},
+     {"action": "xhs.direct_plan", "item_id": XHS_ITEM, "creator_platform_id": XHS_BUYER, "commission_rate": 12}),
+], ids=["channel-goods", "xhs-plan-by-name-then-by-id"])
+def test_a_channel_product_or_a_plan_is_not_made_twice_either(bot, clock, raw, again):
+    run = {"steps": ["create"], "buyer_id": XHS_BUYER, "name": "达人合作1-1027100000"} if raw["action"] == "xhs.direct_plan" \
+        else None
+    first = opened(bot, clock, raw, run=run, rec=record(link=DY_LINK, plan_name="达人合作1-1027100000",
+                                                        group_id="6a0000000000000000000a01"), reply="好啦")
+    assert first["status"] == "sent"
+    second = drafted(bot, block(again, run=run and {**run, "name": "达人合作1-1027100500"}), reply="好啦")
+    out = bot.prm.decide(second["id"], "execute")
+    assert not out["ok"] and f"#{first['id']}" in out["error"]

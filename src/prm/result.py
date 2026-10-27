@@ -7,6 +7,11 @@ The worker asks Claude for one JSON object (``--json-schema``)::
      "needs_attention": false, "reason": "…",
      "platform_action": {"action": "dy.designated_commission", "item_id": "…", …}}
 
+The worker keeps in ``attachments_to_send`` only the files it sent back (what an older bot
+counts) and adds ``attachments_named`` (every file the draft named) and
+``attachments_missing`` (``[{"name", "why"}]``: outside assets/, missing, too big, the upload
+failed); an older worker sends neither.
+
 ``platform_action`` is optional (platforms.py): the Mac checks it and previews it, and
 hands back ``platform``, its verdict, in its place; a draft that names an action the Mac
 did not preview carries the verdict ``unavailable`` and cannot be executed.
@@ -76,6 +81,10 @@ class Draft:
     reason: str = ""
     # The Mac's preview of the draft's platform action (platforms.check_block), or None.
     platform: Optional[dict] = None
+    # Every file the draft named (None: an older worker, which reports only the ones it sent back)
+    # and why some of them did not come (``[{"name", "why"}]``).
+    attachments_named: Optional[list] = None
+    attachments_missing: list = field(default_factory=list)
 
 
 def _text(value, limit: int) -> str:
@@ -84,6 +93,17 @@ def _text(value, limit: int) -> str:
     if not isinstance(value, str):
         raise DraftError("bad_type", f"expected text, got {type(value).__name__}")
     return value.strip()[:limit]
+
+
+def _missing_files(entries: list) -> list:
+    """``[{"name", "why"}]`` of the files the Mac could not send back (anything else is left out)."""
+    out = []
+    for entry in entries:
+        if isinstance(entry, dict) and str(entry.get("name") or "").strip():
+            out.append({"name": str(entry["name"]).strip()[:200], "why": str(entry.get("why") or "").strip()[:120]})
+        elif isinstance(entry, str) and entry.strip():
+            out.append({"name": entry.strip()[:200], "why": ""})
+    return out
 
 
 def parse_draft(raw: str) -> Draft:
@@ -112,6 +132,9 @@ def parse_draft(raw: str) -> Draft:
     files = data.get("attachments_to_send") or []
     if not isinstance(files, list) or len(files) > MAX_ATTACHMENTS:
         raise DraftError("bad_attachments")
+    named, missing = data.get("attachments_named"), data.get("attachments_missing") or []
+    if (named is not None and not isinstance(named, list)) or not isinstance(missing, list):
+        raise DraftError("bad_attachments")
     needs = data.get("needs_attention", False)
     if not isinstance(needs, bool):
         raise DraftError("bad_needs_attention")
@@ -137,4 +160,6 @@ def parse_draft(raw: str) -> Draft:
         needs_attention=needs,
         reason=_text(data.get("reason"), 300),
         platform=platform,
+        attachments_named=None if named is None else [str(f).strip()[:200] for f in named if str(f).strip()],
+        attachments_missing=_missing_files(missing),
     )
