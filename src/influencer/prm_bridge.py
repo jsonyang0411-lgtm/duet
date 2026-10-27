@@ -10,6 +10,9 @@ PRM 的达人（起草、审核、接管都走 PRM），停用的取消登记。
 哪边改了怎么知道：PRM 那边每次登记、停用都会调 ``prm_changed``（接在 PrmService.on_parties_changed 上），
 只把和上次看到的不一样的那几位写回名单；名单这边没有通知，``sync`` 每次都整份比一遍（edge 后端每拉
 一轮事件就调一次，见 bot._wire_edge_prm）。
+
+达人资料（聚水潭查档位、主播类型、UID，最长一分钟）不在 ``sync`` 里查：``sync`` 跑在 edge 后端收消息的
+循环里，聚水潭慢的时候会把整个循环卡住。由 ``start`` 开的后台线程每 PROFILE_LOOP_SEC 秒查一位、写资料文件。
 """
 
 from __future__ import annotations
@@ -35,6 +38,8 @@ MAX_NOTE = 200
 # 达人资料（档位、主播类型）多久按号码重查一次聚水潭；查失败的一小时后再试。每轮同步最多查一位，免得被限流
 PROFILE_REFRESH_SECONDS = 24 * 3600
 PROFILE_RETRY_SECONDS = 3600
+# 后台线程隔多久看一轮要不要重查达人资料、写资料文件
+PROFILE_LOOP_SEC = 60
 PROFILE_FILE = "deals/{party_id}-达人资料.md"
 
 
@@ -90,6 +95,31 @@ class PartyListSync:
         # 上次同步后 PRM 每位达人的状态：wxid → 是否登记着。用来认出合作单页上的改动
         self._seen: Dict[str, bool] = {}
         self._refused: Dict[str, str] = {}
+        # 达人资料的后台线程（start / stop）
+        self._stopping = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self) -> None:
+        """开后台线程：每 PROFILE_LOOP_SEC 秒重查一位到期的达人资料、写资料文件（refresh_profiles）。"""
+        if self.running:
+            return
+        self._stopping.clear()
+        self._thread = threading.Thread(target=self._profile_loop, name="daren-profiles", daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout: float = 5.0) -> None:
+        self._stopping.set()
+        if self._thread is not None:
+            self._thread.join(timeout)
+
+    def _profile_loop(self) -> None:
+        while not self._stopping.is_set():
+            self.refresh_profiles()
+            self._stopping.wait(PROFILE_LOOP_SEC)
 
     def sync(self) -> List[str]:
         """先把合作单页上的改动写回名单，再让 PRM 跟上名单。返回 PRM 登记着的达人（推给 Windows 的名单）。"""
@@ -106,12 +136,11 @@ class PartyListSync:
                     self._prm.set_active(party["id"], False)
                     logger.info("名单合一：%s 在名单里停用了，PRM 取消登记", chat_id[:20])
             self._snapshot()
-            self._refresh_profiles()
             return sorted(self._prm.store.active_wxids())
 
-    def _refresh_profiles(self, now: Optional[float] = None) -> None:
+    def refresh_profiles(self, now: Optional[float] = None) -> None:
         """达人资料：最多重查一位到期的达人（聚水潭会限流），再把资料文件写进业务资料目录。
-        出错只记日志，不影响名单同步。"""
+        后台线程调（不拿名单合一的锁）；出错只记日志，不影响名单同步。"""
         now = time.time() if now is None else now
         try:
             due = [c for c in self._store.list_contacts() if c["enabled"] and c.get("platform_no") and self._due(c, now)]
