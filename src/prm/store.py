@@ -44,6 +44,7 @@ PENDING, APPROVED, SENDING, SENT, FAILED = "pending", "approved", "sending", "se
 DROPPED, SUPERSEDED, NO_REPLY = "dropped", "superseded", "no_reply"
 EXECUTING = "executing"      # a platform action an operator approved, running on the Mac
 PACKET_STATES = (PENDING, APPROVED, SENDING, SENT, FAILED, DROPPED, SUPERSEDED, NO_REPLY, EXECUTING)
+LANE_SYSTEM, LANE_REPLY = "system", "reply"   # supersede(lane=): the bot's next steps, the replies
 MESSAGE_TOOL = "message.send"   # ``tool`` of a plain reply (a platform action's name otherwise)
 
 # The stages of a collaboration (docs: 合作单状态机); the AI may only suggest these.
@@ -522,12 +523,17 @@ class PrmStore:
             return cur.rowcount == 1
 
     def supersede(self, deal_id: int, now: Optional[float] = None, keep: Optional[int] = None,
-                  system_kind: Optional[str] = None) -> int:
+                  system_kind: Optional[str] = None, lane: Optional[str] = None) -> int:
         """Pending drafts of this deal (but ``keep``) are out of date: ``superseded``; returns how many.
         The Mac's drafts (they answer the creator), or with ``system_kind`` the system's own drafts of
-        that kind (a shipping notice is not out of date because the creator wrote)."""
+        that kind (a shipping notice is not out of date because the creator wrote).  ``lane``: only the
+        Mac's drafts of that lane — ``LANE_SYSTEM`` (a next step the bot asked for, ``meta.lane``) or
+        ``LANE_REPLY`` (the others): a reply and a 专属佣金 step do not put each other out of date."""
         now = time.time() if now is None else now
         which = "job_id IS NOT NULL" if system_kind is None else "job_id IS NULL AND kind = ?"
+        if system_kind is None and lane is not None:
+            which += (" AND meta LIKE '%\"lane\": \"system\"%'" if lane == LANE_SYSTEM
+                      else " AND meta NOT LIKE '%\"lane\": \"system\"%'")
         with self._lock:
             cur = self._conn.execute(
                 f"UPDATE action_packets SET status = ?, decided_at = ? WHERE deal_id = ? AND status = ?"

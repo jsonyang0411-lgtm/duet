@@ -50,7 +50,8 @@ from ..relay.store import PRM
 from . import deals, gates, pii, platforms, retention
 from .result import MAX_DRAFT_CHARS, MESSAGE_KINDS, DraftError, parse_draft
 from .store import (
-    APPROVED, COPILOT, DROPPED, EXECUTING, FAILED, HUMAN, MESSAGE_TOOL, MODES, NO_REPLY, PAUSED, PENDING,
+    APPROVED, COPILOT, DROPPED, EXECUTING, FAILED, HUMAN, LANE_REPLY, LANE_SYSTEM, MESSAGE_TOOL, MODES, NO_REPLY,
+    PAUSED, PENDING,
     SENDING, SENT, SHIPMENT_STATES, STAGES, SUPERSEDED, PartyError, PrmStore,
 )
 
@@ -368,7 +369,7 @@ class PrmService:
             self._store.add_event(deal["id"], party["id"], "creator_message", {"text": text},
                                   actor="creator", forwarded=False, now=now)
             self._store.update_deal(deal["id"], now, last_message_at=sent_at or now)
-            self._store.supersede(deal["id"], now)
+            self._store.supersede(deal["id"], now, lane=LANE_REPLY)
             logger.info("PRM: party %d writes while the deal is %s; recorded, not drafted", party["id"], mode)
             return True
         files: tuple = ()
@@ -381,7 +382,7 @@ class PrmService:
             elif not files:
                 line += f"（{ATTACHMENT_KINDS[kind]}没取到）"
         text = self._mask(party["id"], f"[{_clock_text(sent_at or now)}] {line}", now)
-        stale = self._store.supersede(deal["id"], now)
+        stale = self._store.supersede(deal["id"], now, lane=LANE_REPLY)   # a 专属佣金 step stays
         self._store.update_deal(deal["id"], now, last_message_at=sent_at or now)
         meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"]}
         outbound = self._outbound(deal["id"], party["id"], now)
@@ -469,7 +470,7 @@ class PrmService:
         text = self._mask(party["id"], f"[{_clock_text(sent_at or now)}] {message_text(msg)}", now)
         self._store.add_event(deal["id"], party["id"], "operator_message", {"text": text},
                               actor="operator", forwarded=False, now=now)
-        self._store.supersede(deal["id"], now)
+        self._store.supersede(deal["id"], now, lane=LANE_REPLY)
         if deals.effective_mode(deal, now) == PAUSED:
             logger.info("PRM: an operator wrote to party %d from WeChat; the deal stays paused", party["id"])
             return                                         # paused stays paused (the line is recorded)
@@ -619,7 +620,10 @@ class PrmService:
         shipment = self._store.latest_shipment(deal_id)
         waybill = shipment["waybill"] if shipment else ""
         unknown = pii.unknown_tokens(draft.reply_draft, self._store.tokens(party_id))
-        newer = self._relay.store.latest_open(job["chat_id"], drafts_only=True)
+        # Two lanes: the creator's replies and the bot's own next steps (meta.system_note); a newer
+        # job of the other lane does not make a draft out of date, nor does a draft supersede the other's.
+        lane = LANE_SYSTEM if meta.get("system_note") else LANE_REPLY
+        newer = self._relay.store.latest_open(job["chat_id"], drafts_only=True, system=lane == LANE_SYSTEM)
         route, decided_at = gates.REVIEW, None
         if draft.platform is not None:
             # A platform write: always a person's decision (8.1's gates do not apply).
@@ -636,6 +640,8 @@ class PrmService:
                 needs_attention=draft.needs_attention, unknown_tokens=unknown, reason=draft.reason,
                 waybill=waybill, attachments=attachments)
         packet_meta = {"waybill": waybill} if draft.message_kind == "shipping_notice" and waybill else {}
+        if lane == LANE_SYSTEM:
+            packet_meta["lane"] = LANE_SYSTEM
         tool, platform = MESSAGE_TOOL, None
         if draft.platform is not None:
             action = draft.platform.get("action")
@@ -649,8 +655,10 @@ class PrmService:
             tool=tool, platform=platform, now=now,
         )
         if state in (PENDING, APPROVED):
-            self._store.supersede(deal_id, now, keep=packet_id)
+            self._store.supersede(deal_id, now, keep=packet_id, lane=lane)
         attention = [draft.reason] if draft.needs_attention and draft.reason else []
+        if lane == LANE_SYSTEM and state == SUPERSEDED:
+            attention.append(f"#{job['id']} 开专属佣金这一步的草稿没进待审批（人工接管中，或者又有了新的一步），请运营核对")
         missing = len(draft.attachments_to_send) - len(attachments)
         if missing > 0:
             attention.append(f"草稿要附 {len(draft.attachments_to_send)} 个文件，只收到 {len(attachments)} 个")
@@ -989,7 +997,9 @@ class PrmService:
         outbound = self._outbound(deal["id"], party["id"], now)
         if outbound:
             meta["sent"] = outbound
-        _, job_id = self._relay.submit(packet["chat_id"], packet["chat_id"], "", kind=PRM, meta=meta, fresh=True)
+        # input_closed: the creator's next message is a reply job of its own, not part of this step
+        _, job_id = self._relay.submit(packet["chat_id"], packet["chat_id"], "", kind=PRM, meta=meta, fresh=True,
+                                       input_closed=True)
         logger.info("PRM: packet %d done; job #%d drafts the next step", packet["id"], job_id)
 
     def sweep_executing(self) -> int:
