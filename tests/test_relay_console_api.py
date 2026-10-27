@@ -71,6 +71,12 @@ def test_the_running_relay_shows_jobs_newest_first_without_wxids(relay):
     assert d["jobs"][1]["result"] == "做完了" and d["jobs"][1]["duration_s"] == 12.5
     assert ME not in json.dumps(d)                                           # no chat id / sender
     assert isinstance(d["lan_addresses"], list)
+    assert d["lan_addresses"] == [a["ip"] for a in d["addresses"]]           # each with its network
+    assert all(a["kind"] in ("lan", "tailscale", "public") for a in d["addresses"])
+    assert d["mac_address"] is None and d["mac_link"] is None                # asked here, not over HTTP
+    relay.note_worker(None, address="100.101.102.103")
+    d = call("/api/relay")[1]
+    assert d["mac_address"] == "100.101.102.103" and d["mac_link"] == "tailscale"
 
 
 def test_cancel_from_the_console(relay):

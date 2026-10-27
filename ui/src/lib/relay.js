@@ -43,10 +43,14 @@ export function fmtSeconds(s) {
   return `${Math.floor(n / 3600)} 小时 ${Math.floor((n % 3600) / 60)} 分`
 }
 
-/** "在线" / "不在线（3 分前联系过）" / "还没连上过" */
+// The network the Mac connects from (src/relay/link.py): the same LAN, or Tailscale when the
+// two are not on one network (cross-network.md).
+const VIA = { lan: '经局域网', tailscale: '经 Tailscale', public: '经公网' }
+
+/** "在线 · 经局域网" / "在线 · 经 Tailscale" / "不在线（3 分前联系过）" / "还没连上过" */
 export function macState(d) {
   if (!d) return ['—', undefined]
-  if (d.mac_online) return ['在线', true]
+  if (d.mac_online) return [VIA[d.mac_link] ? `在线 · ${VIA[d.mac_link]}` : '在线', true]
   if (d.mac_last_seen_sec !== null && d.mac_last_seen_sec !== undefined) return [`不在线（${fmtSeconds(d.mac_last_seen_sec)}前联系过）`, false]
   return [d.running && d.listening ? '还没连上过' : '—', d.running && d.listening ? false : undefined]
 }

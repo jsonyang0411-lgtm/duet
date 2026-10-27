@@ -59,7 +59,17 @@ function StateCard({ d }) {
         ok={d?.listening ? true : running ? false : undefined}
         value={d?.listening ? `已打开 ${d.address[0]}:${port}` : running ? '没打开：中转关着，或端口被占用（看运行日志）' : '机器人启动后打开'}
       />
-      <Row label="Mac worker" ok={macOk} value={mac} />
+      <Row
+        label="Mac worker"
+        ok={macOk}
+        value={d?.mac_online && d?.mac_address ? (
+          <>
+            <span style={{ wordBreak: 'keep-all' }}>{mac}</span>
+            <div className="mono dim">{d.mac_address}</div>
+            {d.mac_link === 'public' && <div className="dim">明文经过公网，口令和消息内容都能被看到；请改用 Tailscale（见 cross-network.md）</div>}
+          </>
+        ) : mac}
+      />
       <Row
         label="任务"
         value={['pending', 'running', 'done', 'failed', 'lost', 'cancelled']
@@ -69,22 +79,37 @@ function StateCard({ d }) {
   )
 }
 
+// What each of this PC's addresses is for (src/relay/link.py kinds).
+const ADDRESS_USE = {
+  lan: '同一个局域网时用',
+  tailscale: 'Tailscale，在不在同一个网络都能用，推荐',
+  public: '公网地址：不要直接用，明文会经过公网',
+}
+
 function MacCard({ d }) {
   const port = d?.address?.[1] || 8790
-  const ips = d?.lan_addresses?.length ? d.lan_addresses : ['<这台电脑的局域网 IP>']
+  const addresses = d?.addresses?.length ? d.addresses
+    : [{ ip: '<这台电脑的局域网 IP>', kind: '' }]
+  const tailscale = addresses.some((a) => a.kind === 'tailscale')
   return (
     <Card title="Mac 端怎么接" eyebrow="MAC">
       <ol className="mac-steps" style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8 }}>
         <li>
           在 Mac 的 <span className="mono">~/.claude-relay/config.json</span> 里，<span className="mono">relay_url</span> 填
-          {ips.map((ip) => <div key={ip}><span className="mono" style={{ userSelect: 'all' }}>http://{ip}:{port}</span></div>)}
+          {addresses.map((a) => (
+            <div key={a.ip}>
+              <span className="mono" style={{ userSelect: 'all' }}>http://{a.ip}:{port}</span>
+              {ADDRESS_USE[a.kind] && <span className="dim">（{ADDRESS_USE[a.kind]}）</span>}
+            </div>
+          ))}
+          {!tailscale && <div className="dim">Mac 不在同一个网络时：两台都装 Tailscale，这里会多出一个 100 开头的地址（见 cross-network.md）。</div>}
         </li>
         <li>把下面设置里的 token 写进 Mac 的 <span className="mono">~/.claude-relay/token</span>（只放这一行）。</li>
         <li>运行 <span className="mono">python3 tools/claude_relay/worker.py --check</span>，能连上、能找到 claude 再继续。</li>
         <li>常驻：双击 <span className="mono">tools/claude_relay/start-worker.command</span>（可加进登录项）。</li>
       </ol>
       <div style={{ marginTop: 12 }}>
-        <Note>Windows 防火墙要放行这个端口（只放行局域网）。微信里发 <span className="mono">cc 帮助</span> 看全部指令。</Note>
+        <Note>Windows 防火墙要放行这个端口：只放行局域网，用 Tailscale 时再放行 <span className="mono">100.64.0.0/10</span>，不要开到公网。微信里发 <span className="mono">cc 帮助</span> 看全部指令。</Note>
       </div>
     </Card>
   )

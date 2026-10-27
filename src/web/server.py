@@ -819,23 +819,11 @@ def register_relay(relay):
     _relay = relay
 
 
-def _lan_addresses() -> list[str]:
-    """This computer's LAN IPv4 addresses (what the Mac's relay_url should use)."""
-    import socket
-    found: list[str] = []
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("192.0.2.1", 9))          # no packet is sent: this only picks the outgoing interface
-            found.append(s.getsockname()[0])
-    except OSError:
-        pass
-    try:
-        for addr in socket.gethostbyname_ex(socket.gethostname())[2]:
-            if addr not in found:
-                found.append(addr)
-    except OSError:
-        pass
-    return [a for a in found if not a.startswith("127.")]
+def _lan_addresses() -> list[dict]:
+    """This computer's IPv4 addresses for the Mac's relay_url, ``[{"ip", "kind"}]``: the LAN
+    ones first, then Tailscale's (when the Mac is on another network, cross-network.md)."""
+    from src.relay.link import this_pc_addresses
+    return this_pc_addresses()
 
 
 def _relay_job_for_console(job: dict) -> dict:
@@ -864,12 +852,14 @@ def _relay_job_for_console(job: dict) -> dict:
 def _relay_snapshot(limit: int = 30) -> dict:
     """GET /api/relay: the relay's state and its newest jobs (also when the bot is stopped)."""
     relay = _relay
+    addresses = _lan_addresses()
+    here = {"lan_addresses": [a["ip"] for a in addresses], "addresses": addresses}
     if relay is not None:
         jobs = relay.store.list_jobs(limit)
         return {"ok": True, "running": True, **relay.snapshot(),
-                "jobs": [_relay_job_for_console(j) for j in jobs], "lan_addresses": _lan_addresses()}
+                "jobs": [_relay_job_for_console(j) for j in jobs], **here}
     out = {"ok": True, "running": False, "listening": False, "mac_online": False, "address": None,
-           "mac_last_seen_sec": None, "counts": {}, "jobs": [], "lan_addresses": _lan_addresses()}
+           "mac_last_seen_sec": None, "mac_address": None, "mac_link": None, "counts": {}, "jobs": [], **here}
     db_path = Path(os.getenv("CLAUDE_RELAY_DB", "data/claude_relay.db").strip() or "data/claude_relay.db")
     if db_path.exists():
         from src.relay.store import RelayStore

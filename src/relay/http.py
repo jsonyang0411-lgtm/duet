@@ -164,7 +164,7 @@ class _RelayHandler(BaseHTTPRequestHandler):
             except ValueError:
                 wait = 25.0
             kinds = worker_kinds(self.headers.get("X-Relay-Kinds"))
-            self.relay.note_worker(None, kinds=kinds)
+            self.relay.note_worker(None, kinds=kinds, address=self.client_address[0])
             projects = self.headers.get("X-Relay-Projects")
             if projects is not None:
                 try:

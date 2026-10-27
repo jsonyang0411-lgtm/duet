@@ -42,6 +42,7 @@ from typing import Callable, Optional
 
 from .attachments import HOLD_SEC, KINDS, Held, attachment_kind, resolve
 from .commands import RelayCommand, parse, parse_answer, prefix_pattern
+from .link import VIA as LINK_VIA, PeerLog
 from .store import ADMIN, FINAL_STATES, KINDS as JOB_KINDS, RelayStore
 
 logger = logging.getLogger(__name__)
@@ -169,6 +170,8 @@ class ClaudeRelay:
         self._worker_default = ""
         # The job kinds the last worker asked for (X-Relay-Kinds; an older worker: admin only).
         self._worker_kinds: tuple[str, ...] = ()
+        # Where the worker connects from: the LAN, Tailscale (cross-network.md), ...
+        self._worker_link = PeerLog("CLAUDE_RELAY: the Mac worker")
         # Results of the other kinds go here instead of WeChat (register_kind).
         self._kind_handlers: dict[str, Callable[[dict], bool]] = {}
         self._jobs_ready = threading.Condition()
@@ -401,13 +404,15 @@ class ClaudeRelay:
     # ── projects ──────────────────────────────────────────────────────────
 
     def note_worker(self, projects: list[str] | None, default: str = "",
-                    kinds: tuple[str, ...] | None = None) -> None:
-        """What the Mac worker offers (sent with every request for a job)."""
+                    kinds: tuple[str, ...] | None = None, address: str | None = None) -> None:
+        """What the Mac worker offers (sent with every request for a job), and where from."""
         if projects is not None:
             self._worker_projects = [str(p) for p in projects if str(p).strip()]
             self._worker_default = str(default or "")
         if kinds is not None:
             self._worker_kinds = tuple(k for k in kinds if k in JOB_KINDS)
+        if address:
+            self._worker_link.note(address)
 
     def projects_text(self, chat_id: str) -> str:
         current = self._store.current_project(chat_id)
@@ -671,7 +676,8 @@ class ClaudeRelay:
     def status_text(self, chat_id: str) -> str:
         now = self._clock()
         if self.mac_online():
-            lines = ["Mac：在线"]
+            via = LINK_VIA.get(self._worker_link.kind or "")
+            lines = ["Mac：在线" + (f"（{via}）" if via else "")]
         elif self._last_seen:
             lines = [f"Mac：不在线（{format_duration(now - self._last_seen)}前联系过）"]
         else:
@@ -703,6 +709,8 @@ class ClaudeRelay:
             "address": list(self.address) if self.address else None,
             "mac_online": self.mac_online(),
             "mac_last_seen_sec": round(now - self._last_seen) if self._last_seen else None,
+            "mac_address": self._worker_link.address,
+            "mac_link": self._worker_link.kind,
             "prefix": self._prefix_word,
             "counts": self._store.counts(),
             "worker_kinds": list(self._worker_kinds),
