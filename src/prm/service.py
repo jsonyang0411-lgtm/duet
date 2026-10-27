@@ -73,7 +73,6 @@ SEND_TICK_SEC = 5
 OWN_MATCH_SEC = 1800         # our own line seen in WeChat within this long after sending is the bot's
 OWN_FILE_SEC = 600           # an own picture/file this soon after the bot sent one is the bot's
 READ_BACK_SEC = 120          # our line matched in WeChat and read again this soon after: the same send
-OWN_ECHO_SEC = 120           # 同一句我们的话读回后这么快又来一次：微信补上 server_id 换了消息编号，不是有人亲手打的
 RETENTION_CHECK_SEC = 3600
 PLATFORM_LOST_GRACE_SEC = 1800   # an execution whose Mac went silent this long is given up on (red)
 PLATFORM_OPS = ("platform_execute", "platform_preview")
@@ -382,7 +381,6 @@ class PrmService:
         # Per chat, our own lines matched lately (normalized text -> when): read again within
         # READ_BACK_SEC they are the same send read back a second time (_match_own).
         self._read_back: dict[str, dict[str, float]] = {}
-        self._seen_lines: dict[str, deque] = {}   # 读回来对上了的我们的话：(normalized text, when)
         self._sent_lock = threading.Lock()
         self._started = clock()               # what this run sent is in _sent_lines / _sent_files
         self._last_retention = 0.0
@@ -644,7 +642,6 @@ class PrmService:
         if msg.get("edge_seen") and not matched:
             return                                         # 我们发的读回来了，只是这次运行没记着它
         if matched:
-            self._note_seen(chat_id, msg, now)
             # Often before its send returned (WeChat shows a line at once); a failure stays one.
             if packet_id is not None and self._store.confirm_sent(packet_id):
                 packet = self._store.packet(packet_id) or {}
@@ -720,19 +717,17 @@ class PrmService:
             pass
         return _norm(_QUOTE_PREFIX.sub("", str(msg.get("content", "") or "")))
 
-    def _note_seen(self, chat_id: str, msg: dict, now: float) -> None:
-        text = self._own_text(msg)
-        if text:
-            with self._sent_lock:
-                self._seen_lines.setdefault(chat_id, deque(maxlen=20)).append((text, now))
-
     def _read_again(self, chat_id: str, msg: dict, now: float) -> bool:
-        """The same words as a line of ours read back within ``OWN_ECHO_SEC``: that line again."""
+        """The same words as a line of ours matched in this chat within ``READ_BACK_SEC``: that
+        line read again.  The times are ``_read_back``'s, set by ``_match_own`` on a real match only
+        (a read-back read again does not move them, so the window is counted from the send's own
+        read-back); this covers the Mac's ``edge_operator`` lines, which skip ``_match_own``."""
         text = self._own_text(msg)
         if not text:
             return False
         with self._sent_lock:
-            return any(seen == text and now - at <= OWN_ECHO_SEC for seen, at in self._seen_lines.get(chat_id) or ())
+            at = (self._read_back.get(chat_id) or {}).get(text)
+        return at is not None and now - at <= READ_BACK_SEC
 
     def _match_own(self, chat_id: str, msg: dict, now: float) -> tuple[bool, Optional[int]]:
         """Was this own line sent by the bot? ``(True, packet id or None)`` (``_match_sent``).
