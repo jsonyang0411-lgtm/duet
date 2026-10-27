@@ -292,7 +292,7 @@ Mac：同一个 CLI 带 --execute，只发一次（执行台账：同一个批�
 
 ## 常见问题
 
-- **`--check` 显示 unreachable**：Mac 开着 Clash。worker 已经绕过系统代理，但如果开了 TUN 模式，要在 Clash 里把局域网网段设为直连，例如 `IP-CIDR,192.168.0.0/16,DIRECT`；用 Tailscale 时再加 `IP-CIDR,100.64.0.0/10,DIRECT`。再确认 Windows 防火墙规则和 IP 没变。`--check` 的最后几行会说明 Windows 在哪种网络上，不在同一个局域网时会提示改用 Tailscale 地址。
+- **`--check` 显示 unreachable**：Mac 开着 Clash。worker 已经绕过系统代理，但如果开了 TUN 模式，要在 Clash 里把局域网网段设为直连，例如 `IP-CIDR,192.168.0.0/16,DIRECT`。用 Tailscale 时，最简单是两台都关掉 TUN、只用系统代理；要开 TUN，就在 TUN 的排除路由里加上 `192.168.0.0/16` 和 `100.64.0.0/10`，只加直连规则不够，Tailscale 会打不通直连、绕境外中转（见 `cross-network.md`）。再确认 Windows 防火墙规则和 IP 没变。`--check` 的最后几行会说明 Windows 在哪种网络上，不在同一个局域网时会提示改用 Tailscale 地址。
 - **HTTP 401**：两边的 token 不一致。
 - **换 token**：先把新 token 写进 Mac 的 `~/.claude-relay/token`（或 `config.json` 的 `token`），正在运行的 worker 继续用旧的；等你把 Windows 的 `CLAUDE_RELAY_TOKEN` 换掉并重启机器人，worker 收到 401 后会自动重新读取 `config.json`，换成新的，不用重启 worker。
 - **回执里说「Mac 不在线」**：60 秒内 worker 没来取过任务。看 `worker.log`。
