@@ -123,3 +123,4 @@ probe-file.txt
 probe-file-*.png
 # tools/friend_probe.py output (masked, but still the bot's chats)
 probe-friends.txt
+docs/汇报素材/

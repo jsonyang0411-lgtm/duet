@@ -124,10 +124,35 @@ h2 .num {
 .card ul { margin: 0; padding-left: 18px; font-size: 14px; }
 footer { margin-top: 40px; color: var(--muted); font-size: 12.5px; }
 
+/* 联调结果 */
+.result {
+  margin-top: 28px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+  padding: 18px 20px; box-shadow: var(--shadow);
+}
+.result h2 { margin: 0 0 4px; }
+.result > p { margin: 0; color: var(--muted); font-size: 14px; }
+.stats { display: grid; gap: 10px; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 14px 0; }
+.stat { background: var(--ok-soft); border-radius: 10px; padding: 10px 12px; }
+.stat b { display: block; font-size: 20px; color: var(--ok); line-height: 1.3; }
+.stat span { font-size: 12.5px; color: var(--muted); }
+.timeline { list-style: none; margin: 10px 0 0; padding: 0; font-size: 14px; }
+.timeline li { display: grid; grid-template-columns: 64px 1fr; gap: 10px; padding: 5px 0; border-top: 1px dashed var(--line); }
+.timeline li:first-child { border-top: 0; }
+.timeline time { color: var(--muted); font-variant-numeric: tabular-nums; }
+figure { margin: 16px 0 0; }
+figure .shot { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+figure img { display: block; width: 100%; min-width: 760px; height: auto; }
+figcaption { margin-top: 6px; color: var(--muted); font-size: 13px; }
+.fixes { margin: 8px 0 0; padding-left: 20px; font-size: 14px; }
+.fixes li { margin: 4px 0; }
+.fixes .tag { margin-left: 6px; vertical-align: 1px; }
+.result h3 { margin: 18px 0 0; font-size: 15px; }
+
 @media (max-width: 720px) {
   .lane { grid-template-columns: 1fr; }
   .node:not(:last-child)::after { content: "↓"; right: 50%; top: auto; bottom: -10px; transform: translate(50%, 50%); }
   .next { grid-template-columns: 1fr; }
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   header h1 { font-size: 23px; }
 }
 </style>
@@ -149,11 +174,41 @@ footer { margin-top: 40px; color: var(--muted); font-size: 12.5px; }
 
 <div class="lane" aria-label="消息和动作怎么走">
   <div class="node"><b>达人</b><span>在微信里发消息</span></div>
-  <div class="node"><b>Windows</b><span>收发微信（同事那边的微信边缘）</span></div>
+  <div class="node"><b>Windows</b><span>机器人微信号收发消息（同事写的微信边缘，经 Tailscale 和 Mac 相连）</span></div>
   <div class="node"><b>Mac · Claude</b><span>读知识库、商品目录、案卷，起草回复或平台动作</span></div>
   <div class="node you"><b>你 · 控制台</b><span>「待审批」里发 / 改了再发 / 不发 / 批准</span></div>
   <div class="node"><b>平台</b><span>聚水潭建寄样单，百应 / 小红书开专属佣金</span></div>
 </div>
+
+<section class="result">
+  <h2><span class="num">10-27</span>第一次真机联调：从打招呼到真实建单，跑通</h2>
+  <p>Windows 主机上的机器人微信号 + Mac 上的起草和审批，用一个微信号扮演达人，走完第 5–8 步。寄样单是真实建的，建完马上在聚水潭取消。</p>
+  <div class="stats">
+    <div class="stat"><b>30–40 秒</b><span>达人发消息到草稿进「待审批」</span></div>
+    <div class="stat"><b>5–11 秒</b><span>批准后发出、从微信读回确认</span></div>
+    <div class="stat"><b>约 5 秒</b><span>批准寄样单到聚水潭建好、达人收到回复</span></div>
+    <div class="stat"><b>0 次</b><span>没经批准就发出去的消息</span></div>
+  </div>
+  <ol class="timeline">
+    <li><time>16:52</time><span>达人：「想合作，可以寄样吗？」→ Claude 介绍免费寄样，请他发抖音号 → 运营批准发出</span></li>
+    <li><time>17:11</time><span>达人报抖音号、说直播为主 → Claude 介绍合作方式（档位查不到，标了提醒）</span></li>
+    <li><time>17:15</time><span>达人要黑色贝雷帽 M 码 → Claude 只从抖店在售目录里挑了 3 款，头围合不合适说「帮老师查一下」</span></li>
+    <li><time>17:16</time><span>达人定款、给收件信息 → Claude 完整复述请他确认，电话全程打码</span></li>
+    <li><time>17:29</time><span>第一次建单失败：东莞地址没有区县，聚水潭拒收 → 当场修好</span></li>
+    <li><time>17:40</time><span>运营批准 → 聚水潭建单 YP2610272386641 并读回核对 → 回复自动发给达人 → 随后在寄样管理取消</span></li>
+  </ol>
+  <figure>
+    <div class="shot"><img src="汇报素材/2026-10-27_聚水潭寄样管理_联调单已取消.png" alt="聚水潭寄样管理：YP2610272386641，ACE7CN-dy，英伦复古经典手缝线贝雷帽 M 黑色 ×1，抖音号 23626173510，状态已取消，创建人和跟进人钟思杨"></div>
+    <figcaption>聚水潭「寄样管理」：机器人建的测试单 YP2610272386641（ACE7CN-dy · 手缝线贝雷帽 黑色 M × 1），达人认领到子账号钟思杨，已取消。达人号是我们自己的测试抖音号。</figcaption>
+  </figure>
+  <h3>联调发现、已经改好的</h3>
+  <ol class="fixes">
+    <li>机器人自己发的回复被当成「运营亲手回复」，每发一条就转人工 5 分钟<span class="tag ok">Mac 已挡住</span><span class="tag todo">根子请同事在 Windows 修</span></li>
+    <li>东莞、中山这类没有区县的地址，聚水潭建不了单<span class="tag ok">已改：区县必填，填镇 / 街道 / 新区，预览就拦</span></li>
+    <li>话术写死「3 天内寄出」<span class="tag ok">已改：只说审核后尽快安排，寄出后发物流单号</span></li>
+    <li>建单后那句「寄样单建好啦🎉 单号…」像我们占了便宜<span class="tag ok">已改：先谢谢老师、说给老师安排上了，不发内部单号</span></li>
+  </ol>
+</section>
 
 <h2><span class="num">一</span>找达人</h2>
 <ol class="steps">
@@ -162,7 +217,7 @@ footer { margin-top: 40px; color: var(--muted); font-size: 12.5px; }
     <div class="body">
       <h3>在聚水潭按条件找达人，加进「我的达人」</h3>
       <p>按销售额、粉丝数、带货等级筛；抖音、小红书都能找（小红书看直播场均）。你定条件，我用命令行查，加进达人库要你同意。</p>
-      <div class="meta"><span class="tag ok">真跑过 · 已加 8 位</span><span class="tag you">加入要你同意</span></div>
+      <div class="meta"><span class="tag ok">真跑过 · 已加 9 位（含 1 个测试号）</span><span class="tag you">加入要你同意</span></div>
     </div>
   </li>
 </ol>
@@ -194,7 +249,7 @@ footer { margin-top: 40px; color: var(--muted); font-size: 12.5px; }
     <div class="body">
       <h3>控制台「达人名单」里加上他，填抖音号 / 小红书号</h3>
       <p>系统自动去聚水潭查档位、主播类型、平台 UID，写成「达人资料」给 Claude 看（每天重查一次）。</p>
-      <div class="meta"><span class="tag test">离线测过</span><span class="tag todo">达人加微信后自动进名单：等同事的探针</span></div>
+      <div class="meta"><span class="tag ok">登记真跑过</span><span class="tag todo">加微信后自动进名单：探针已跑完，等同事做 Windows 那半</span></div>
     </div>
   </li>
 </ol>
@@ -206,7 +261,7 @@ footer { margin-top: 40px; color: var(--muted); font-size: 12.5px; }
     <div class="body">
       <h3>达人发消息 → Windows 收到 → Mac 上的 Claude 起草回复</h3>
       <p>起草时读：知识库（合作政策、话术、商品）、商品目录（抖店 900 款、小红书 939 款）、这位达人的案卷和达人资料。</p>
-      <div class="meta"><span class="tag test">离线测过</span><span class="tag ok">起草质量：4 个场景离线试过都对</span></div>
+      <div class="meta"><span class="tag ok">真跑过 · 30–40 秒出草稿</span><span class="tag ok">只按目录报款，不编</span></div>
     </div>
   </li>
   <li class="step gate">
@@ -218,7 +273,7 @@ footer { margin-top: 40px; color: var(--muted); font-size: 12.5px; }
         <li>你直接在微信里回达人，系统自动转人工接管，这段时间不起草。</li>
         <li>寄几款看档位，佣金比例不说，钱的事转你。</li>
       </ul>
-      <div class="meta"><span class="tag test">离线测过</span><span class="tag todo">等 Windows 接上联调</span><span class="tag you">每条都要你审</span></div>
+      <div class="meta"><span class="tag ok">真跑过</span><span class="tag you">每条都要你审</span></div>
     </div>
   </li>
 </ol>
@@ -230,15 +285,15 @@ footer { margin-top: 40px; color: var(--muted); font-size: 12.5px; }
     <div class="body">
       <h3>达人挑好款和颜色尺码、确认收件信息 → Claude 起草寄样单</h3>
       <p>控制台显示预览：达人、商品和规格、快递（中通）、地址（手机号只显示〈手机1〉这样的占位）。预览只读聚水潭，不建单。</p>
-      <div class="meta"><span class="tag test">离线测过</span><span class="tag ok">聚水潭预览真跑过</span></div>
+      <div class="meta"><span class="tag ok">真跑过</span><span class="tag ok">地址缺区县、达人不在聚水潭：预览就拦</span></div>
     </div>
   </li>
   <li class="step gate">
     <div class="n">8</div>
     <div class="body">
-      <h3>你批准 → Mac 在聚水潭建寄样单 → 把「寄样单建好啦，单号 YP…」发给达人</h3>
-      <p>建单时把达人认领到你的子账号、地址存到他名下；建完按单号读回核对。每张单只执行一次。</p>
-      <div class="meta"><span class="tag ok">建单真跑过 · YP2610272378025（测试，已拒绝）</span><span class="tag you">要你批准</span></div>
+      <h3>你批准 → Mac 在聚水潭建寄样单 → 核对成功才给达人发「谢谢老师，已经给老师安排上啦」</h3>
+      <p>建单时把达人认领到你的子账号（钟思杨）、地址存到他名下；建完按单号读回核对。每张单只执行一次。不给达人发聚水潭内部单号，也不承诺几天寄出。</p>
+      <div class="meta"><span class="tag ok">机器人建单真跑过 · YP2610272386641（测试，已取消）</span><span class="tag you">要你批准</span></div>
     </div>
   </li>
   <li class="step">
@@ -323,30 +378,29 @@ footer { margin-top: 40px; color: var(--muted); font-size: 12.5px; }
   <div class="card">
     <h3>你</h3>
     <ul>
-      <li>聚水潭今天 14:22 前重新登录</li>
       <li>定邀约卡片上的微信号 / 手机号</li>
-      <li>定一个当「达人」的测试微信号</li>
-    </ul>
-  </div>
-  <div class="card">
-    <h3>Windows 到了以后</h3>
-    <ul>
-      <li>接上同事的微信边缘</li>
-      <li>用测试号走第 5–8 步：打招呼、挑款、给地址、起草寄样单</li>
-      <li>第 8 步看完预览点「不发」，不批准</li>
-    </ul>
-  </div>
-  <div class="card">
-    <h3>之后</h3>
-    <ul>
       <li>找一位真实达人从头到尾走一遍</li>
-      <li>同事探针出来后做「加微信自动进名单」</li>
-      <li>运单号自动带回、商品目录每天同步</li>
+      <li>聚水潭登录 11-06 到期前重新登录</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>同事</h3>
+    <ul>
+      <li>Windows 修消息编号（自己的回复被读两次）</li>
+      <li>加微信自动进名单的 Windows 那半</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>还没真跑过</h3>
+    <ul>
+      <li>签收后自动开专属佣金（要一张真签收的单）</li>
+      <li>运单号、签收从聚水潭自动带回</li>
+      <li>商品目录每天自动同步</li>
     </ul>
   </div>
 </div>
 
-<footer>本页是本地文件，内容以仓库根目录 handoff.md 为准（v77）。</footer>
+<footer>本页是本地文件，内容以仓库根目录 handoff.md 为准（v82）。截图在 docs/汇报素材/（含原图，不进 git）。</footer>
 </div>
 </body>
 </html>
