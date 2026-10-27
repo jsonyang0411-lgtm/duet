@@ -798,6 +798,7 @@ def test_a_sample_order_is_normalised_and_held_to_the_catalogue():
     ({"creator_uid": "小美"}, "bad_creator"),                                    # nicknames are fuzzy: not taken
     ({"receiver": {**RECEIVER, "phone": "12345"}}, "bad_receiver"),
     ({"receiver": {**RECEIVER, "address": ""}}, "bad_receiver"),
+    ({"receiver": {**RECEIVER, "district": ""}}, "bad_receiver"),          # 聚水潭省市区都要有（东莞空着被拒）
     ({"receiver": {**RECEIVER, "remark": "x"}}, "bad_receiver"),
     ({"receiver": {**RECEIVER, "name": "张三\n--execute"}}, "bad_receiver"),
     ({"logistics": "顺丰"}, "bad_logistics"),

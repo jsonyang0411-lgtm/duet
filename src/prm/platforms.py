@@ -577,20 +577,24 @@ def _sample_order(raw: dict, shop: str, lim: dict, catalog: Optional[dict]) -> d
 
 def _receiver(raw) -> dict:
     """A sample order's address.  The phone is a number or the draft's 〈手机N〉 (the bot puts the
-    number in only when the action goes to the Mac to be executed)."""
+    number in only when the action goes to the Mac to be executed).  聚水潭新增地址时省市区都要有
+    （2026-10-27 联调：区县空着被拒「省市区不能为空」，而这时已经认领了达人）；东莞、中山这类不设区县的市
+    填镇、街道或新区（如「滨海湾新区」，聚水潭收）。"""
     if not isinstance(raw, dict) or set(raw) - set(RECEIVER_KEYS):
         raise _err("bad_receiver", "收货信息写成 {name, phone, province, city, district, address}")
     out = {}
     for key, what, limit, required in (("name", "收货人", 30, True), ("phone", "", 0, True),
                                        ("province", "省", 20, True), ("city", "市", 20, True),
-                                       ("district", "区县", 20, False), ("address", "详细地址", 120, True)):
+                                       ("district", "区县", 20, True), ("address", "详细地址", 120, True)):
         if key == "phone":
             out["phone"] = phone_of(raw.get("phone"))
             continue
         value = raw.get(key)
         if value in (None, ""):
             if required:
-                raise _err("bad_receiver", f"收货信息缺{what}")
+                raise _err("bad_receiver", f"收货信息缺{what}" + (
+                    "（聚水潭省市区都要填；东莞、中山这类不设区县的市填镇、街道或新区，如「滨海湾新区」）"
+                    if key == "district" else ""))
             out[key] = ""
             continue
         out[key] = _free_text(value, "bad_receiver", what, limit)
