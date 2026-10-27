@@ -2,6 +2,8 @@
 
 - **用途**：Windows（微信这一侧，下面叫「边缘」）和 Mac（业务服务）之间的接口。Windows 开服务，Mac 来拉。
 - **版本**：`protocol: 1`。2026-10-26 定稿，已经并入同事团队第二轮的 14 条意见（见 `prm-merge-reply-2.md`）。
+  2026-10-27 在 v1 里加了两样，都是只增不改，版本号不变：事件 `friend_added`（第 4.1 节）和 `/edge/health` 的 `db_id`（第 3.1 节）。
+  Mac 端遇到不认识的事件类型照样往下传、照样确认，不认识的字段不用管。
 - **实现**：
   - Windows 端由我们做，在公司仓库的 `wechat-edge` 分支（从 `prm-copilot` 开出来）。
   - 同时提供给 Mac 用的客户端库和假 Windows 服务端，只用 Python 标准库。
@@ -69,10 +71,14 @@ GET  /edge/sends/<send_id>
 ```json
 {"ok": true, "protocol": 1, "parties_version": 3,
  "wechat": "online", "db": "ok", "send": "ok", "detail": "",
- "can_send_files": true, "events_pending": 12}
+ "can_send_files": true, "events_pending": 12, "db_id": "9f1c2e7a4b6d48e0a3c5b7d9e1f20314"}
 ```
 
 - `parties_version`：Windows 现在用的名单版本，0 表示没有名单。和 Mac 自己的版本对不上（比如 Windows 重装过、库丢了），Mac 就重新推一次名单。
+- `db_id`：Windows 这份 `edge.db` 的编号。建库时随机生成（32 个十六进制字符），库在它就不变，Windows 重启也不变。
+  - 和 Mac 上次记下的不一样，说明 Windows 的库是新建的（重装、删了库）：事件编号从 1 重新开始，名单版本回到 0。
+  - Mac 这时要从 `after=0` 重新拉事件、重新推一次名单，不要用旧的 `after` 跳过新库的事件。
+  - 2026-10-27 起才有这个字段；更早的 Windows 不带它（升级后第一次启动时给老库补一个）。
 - `wechat`、`db`、`send`：含义见第 8 节。
 - `events_pending`：还没确认的事件有几个。
 
@@ -174,9 +180,42 @@ GET  /edge/sends/<send_id>
 | `send_seen` | `send_id`、`delay_s` | 发出去的这条在微信里读回来了 |
 | `send_unseen` | `send_id`、`window_s` | 读回时限过了还没对上（第 5 节） |
 | `edge_status` | `wechat`、`db`、`send`、`detail` | Windows 状态有变化时报；Windows 启动时也报一次 |
+| `friend_added` | `wxid`、`name`、`remark`、`verify_text`、`how` | 这个微信号多了一个个人好友（不管在不在名单里）。同一个 wxid 只报一次 |
 
 - `message_id` 是微信消息的编号，Windows 已经按它去过重。
 - 同一个私聊的事件按时间顺序给。
+- **对方通过我们的好友申请时**，微信会以对方的名义在私聊里写一句「我通过了你的朋友验证请求，现在我们可以开始聊天了」。这是微信的提示，不是达人说的话：在名单里的私聊按 `chat_notice` 报，不报 `creator_message`。
+
+### 4.1.1 `friend_added`
+
+Windows 每分钟看一次会话列表，读有变化的私聊最新的几十条，认出微信写的这几种提示（2026-10-27 在 Windows 真机、微信 4.1.15.36 上用 `tools/friend_probe.py` 看到的原文）：
+
+| 怎么加的 | 私聊里的样子 |
+|---|---|
+| 对方加我们，在电脑上通过 | 对方的验证消息（对方的文字消息），几秒后系统提示「你已添加了X，现在可以开始聊天了。」 |
+| 对方加我们，在手机上通过 | 同上，系统提示是「你已添加了X，以上是打招呼的消息。」 |
+| 我们加对方，对方通过 | 我们的打招呼（我们的消息），对方名义的「我通过了你的朋友验证请求，现在我们可以开始聊天了」，再一条系统提示「以上是打招呼的消息」 |
+
+字段：
+
+- `wxid`：私聊的编号，就是对方的 wxid。老账号可能是自定义的微信号，不一定 `wxid_` 开头。
+- `name`：「你已添加了X」里的 X；没有这句（我们加的对方）时是微信里显示的名字。
+- `remark`：会话里有备注才给，没有就空。
+- `verify_text`：提示前面对方发来的文字（加好友时的验证消息，几条的话用换行连起来，最多 500 字）。只有对方加我们的两种情况有，其余是空。可能带手机号，原样给 Mac，和 `creator_message` 一样由 Mac 自己打码。认新好友这一步只把它放在这个事件里（Mac 确认后 `EDGE_KEEP_DAYS` 天删），不另存进 Windows 的聊天记录库，也不写日志。注意：机器人要是本来就在读这个私聊（`PRIVATE_CHATS=*` 时读所有 `wxid_` 开头的私聊），那条验证消息本身会像别的陌生人私聊一样被记进聊天记录库，这是原来就有的；不想要就把 `PRIVATE_CHATS` 设成具体的人。
+- `how`：
+  - `auto_accept`：提示出现前几分钟内，Windows 自己点过「通过」（`自动同意好友 开`，或管理员的 `同意好友` 命令）；
+  - `manual`：「你已添加了」，但不是 Windows 点的（手机上，或有人在电脑上点的）；
+  - `requested`：对方通过了我们发的申请（管理员的 `添加好友`，或手机上加的）；
+  - `unknown`：分不清，比如只有一句「以上是打招呼的消息」，或者那几分钟里 Windows 通过的那一个已经算给了别人。
+
+不报的：群、公众号和服务号（`gh_`）、企业微信（`@openim`）、文件传输助手这类微信自己的会话、这个号自己；只有一串空白字符「ㅤ」（U+3164，别人测试是不是被删了）的私聊。
+功能第一次打开时记一个起点，起点以前加的好友不报，老好友不会被当成新好友。报过的记在 Windows 机器人的数据库里（`DB_PATH`），重启不重报。
+延迟：通过以后一般 1–2 分钟内报出。
+
+```json
+{"id": 1301, "type": "friend_added", "at": 1761530060, "wxid": "wxid_newfriend12345", "name": "阿花",
+ "remark": "", "verify_text": "我是阿花，做美妆的，想合作", "how": "auto_accept"}
+```
 
 ### 4.2 `text` 的写法
 
@@ -267,6 +306,7 @@ GET  /edge/sends/<send_id>
 
 - **Windows 不长期保存达人的内容**：
   - 达人的消息不写进 Windows 的聊天记录库（转发步骤在 `persist` 之前，靠事件按 `message_id` 去重）。
+  - 新好友的验证消息（`friend_added` 的 `verify_text`）认新好友时只放在事件里，随事件删（`PRIVATE_CHATS=*` 时那条消息本身照原来的规矩被记录，见第 4.1.1 节）。
   - 决策记录不写内容。
   - 日志只写编号和字数。
   - 同事团队 10-25 在 router、wcdb_backend、decision_trace 上做的日志打码，合并时保留。
@@ -306,7 +346,7 @@ EDGE_KEEP_DAYS=7
 - **协议测试，两边跑同一套用例**：
   - Windows 这边：用真的边缘服务跑客户端库；
   - Mac 那边：用客户端库跑假服务端。
-- **假 Windows 服务端**：在内存里跑，可以写剧本：塞入达人消息、运营亲手回复、撤回提示、状态变化；记下 Mac 发出的请求；模拟发送失败、`indeterminate`、`send_unseen`、重启。
+- **假 Windows 服务端**：在内存里跑，可以写剧本：塞入达人消息、运营亲手回复、撤回提示、状态变化、新好友（`friend_added(wxid, name, verify_text=…, how=…)`，同一个 wxid 只报一次）；记下 Mac 发出的请求；模拟发送失败、`indeterminate`、`send_unseen`、重启、库重建（`rebuild_db()`：换一个 `db_id`，事件从 1 重新编号）。
 - **真机**：边缘版的 Windows 清单，在 `prm-copilot-test.md` 基础上改。
 
 ## 11. 以后再做

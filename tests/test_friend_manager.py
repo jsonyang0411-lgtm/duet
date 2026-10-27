@@ -199,6 +199,36 @@ class AcceptFriendRequestsTests(FriendTestCase):
         self.assertEqual(self.clicks, [centre(self.NEW_FRIENDS), centre(accept), centre(confirm)])
         self.assertEqual(self.keys, [])          # no blind Enter
 
+    def test_each_accept_is_told_with_when_and_the_text_beside_its_button(self):
+        """AUTO_ACCEPT_FRIENDS and 同意好友 both come here: the new-friend scan hears what the bot let in."""
+        first = row("接受", 0.70, 0.21, 0.76, 0.25)
+        second = row("接受", 0.70, 0.31, 0.76, 0.35)
+        ocr = FakeOcr(
+            [self.NEW_FRIENDS],
+            [row("张三", 0.35, 0.20, 0.45, 0.22), row("我是张三 13800138000", 0.35, 0.225, 0.60, 0.25), first,
+             row("李四", 0.35, 0.30, 0.45, 0.32), second],
+            [],                                          # no dialog
+            [row("李四", 0.35, 0.26, 0.45, 0.28), row("接受", 0.70, 0.27, 0.76, 0.31)],   # the list moved up
+            [],
+            [],
+        )
+        told = []
+        manager = self.manager(FakeWindow(), ocr)
+        manager._on_accepted = lambda at, label: told.append((at, label))
+        before = time.time()
+        result = manager.accept_friend_requests()
+        self.assertEqual(len(result), 2)
+        self.assertEqual([label for _, label in told], ["张三 我是张三 13800138000", "李四"])
+        self.assertTrue(all(before <= at <= time.time() for at, _ in told))
+        self.assertEqual([at for at, _ in told], [r["timestamp"] for r in result])
+        self.assertNotIn("label", result[0])            # the greeting is not handed to whoever logs the result
+
+    def test_a_failing_listener_does_not_stop_the_accepts(self):
+        accept = row("接受", 0.70, 0.21, 0.76, 0.25)
+        manager = self.manager(FakeWindow(), FakeOcr([self.NEW_FRIENDS], [accept], [], []))
+        manager._on_accepted = MagicMock(side_effect=RuntimeError("database locked"))
+        self.assertEqual(len(manager.accept_friend_requests()), 1)
+
     def test_without_a_dialog_the_gone_button_is_enough(self):
         accept = row("接受", 0.70, 0.21, 0.76, 0.25)
         ocr = FakeOcr([self.NEW_FRIENDS], [accept], [], [])
@@ -643,6 +673,15 @@ class BotFriendWiringTests(unittest.TestCase):
         self.assertIs(bot._friend_mgr._ocr, engine_class.return_value)
         self.assertIs(bot._friend_mgr._ui_lock, lock)
         admin.set_friend_manager.assert_called_once_with(bot._friend_mgr, bot._auto_friend)
+
+    def test_the_manager_tells_its_accepts_to_the_new_friend_scan(self):
+        backend = SimpleNamespace(window_controller=FakeWindow(), window_lock=threading.Lock())
+        heard = MagicMock()
+        config = BotConfig(auto_accept_friends="off", auto_accept_interval_sec=300)
+        bot = Bot(config)
+        with patch("src.wechat.ocr.win_ocr.WindowsOcrEngine"):
+            bot._start_friend_management(config, backend, MagicMock(), on_accepted=heard)
+        self.assertIs(bot._friend_mgr._on_accepted, heard)
 
     def test_the_worker_runs_only_when_switched_on(self):
         backend = SimpleNamespace(window_controller=FakeWindow(), window_lock=threading.Lock())

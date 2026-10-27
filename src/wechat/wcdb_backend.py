@@ -44,6 +44,10 @@ CHAT_KNOWN_SIZE = 500
 CATCHUP_READ = 200
 MAX_CONSECUTIVE_ERRORS = 5   # trigger reinit after this many consecutive failures
 SESSION_REFRESH_SEC = 60.0
+# catch_up_chat: a chat asked for that is not read within this long is given up on (logged).
+CATCH_UP_WAIT_SEC = 600.0
+# data/private_chat_names.json is written by the poll loop and the new-friend scan.
+_PRIVATE_NAMES_LOCK = threading.Lock()
 # OCR cannot see who wrote a line of a group chat.
 OCR_SENDER = "OCR群友"
 APPMSG_TYPE = 49
@@ -360,6 +364,12 @@ class WcdbBackend(AbstractWeChatBackend):
         self._catchup: dict[str, list[dict]] = {}
         self._tracked: dict[str, bool] = {}
         self._read_marks: dict[str, int] = {}
+        # catch_up_chat (a new friend registered as a creator, src/wechat/new_friends.py): per chat
+        # (name, since, sink, asked at), taken by the chat's next poll; and the session list the
+        # poll loop read last (monotonic time, list) for the new-friend scan (recent_sessions).
+        self._catch_up_requests: dict[str, tuple] = {}
+        self._catch_up_lock = threading.Lock()
+        self._sessions_read: Optional[tuple] = None
         # Thread safety: WCDB DLL (ctypes) may not be thread-safe internally.
         # All _client calls are serialized through this lock.
         self._client_lock = threading.Lock()
@@ -608,6 +618,7 @@ class WcdbBackend(AbstractWeChatBackend):
         the local nickname cache (WeChat contacts / manual overrides).
         """
         sessions = self._client.get_sessions()
+        self._sessions_read = (time.monotonic(), sessions)
         self._talker_ids = {}
         self._chat_is_group = {}
 
@@ -848,15 +859,16 @@ class WcdbBackend(AbstractWeChatBackend):
         import os as _os
         path = Path("data/private_chat_names.json")
         try:
-            known = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-            known = known if isinstance(known, dict) else {}
-            if all(known.get(k) == v for k, v in chats.items()):
-                return
-            known.update(chats)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = path.with_suffix(".tmp")
-            tmp_path.write_text(json.dumps(known, ensure_ascii=False, indent=2), encoding="utf-8")
-            _os.replace(tmp_path, path)
+            with _PRIVATE_NAMES_LOCK:          # the new-friend scan writes here too (note_private_name)
+                known = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+                known = known if isinstance(known, dict) else {}
+                if all(known.get(k) == v for k, v in chats.items()):
+                    return
+                known.update(chats)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_path = path.with_suffix(".tmp")
+                tmp_path.write_text(json.dumps(known, ensure_ascii=False, indent=2), encoding="utf-8")
+                _os.replace(tmp_path, path)
         except Exception as e:
             logger.warning("Failed to persist private_chat_names.json: %s", e)
 
@@ -987,6 +999,7 @@ class WcdbBackend(AbstractWeChatBackend):
         if self._client is None or not getattr(self._client, "is_open", False):
             raise RuntimeError("the WCDB database is not open")
         self._refresh_private_chats_if_due()
+        self._admit_catch_up_chats()
         for group_name in list(self._groups):
             if not self._running:
                 break
@@ -1018,6 +1031,117 @@ class WcdbBackend(AbstractWeChatBackend):
     def own_wxid(self) -> str:
         """This WeChat account's wxid ("" when not known yet)."""
         return str(getattr(self._client, "_config", {}).get("myWxid", "") or "") if self._client else ""
+
+    # ── Readers beside the poll loop (src/wechat/new_friends.py) ─────
+
+    def with_client(self, fn):
+        """``fn(client)`` under the client lock: another reader of the WeChat database beside the
+        poll loop (the new-friend scan), one call at a time so polling waits for one call at most.
+        None while the database is not open."""
+        with self._client_lock:
+            client = self._client
+            if client is None or not getattr(client, "is_open", False):
+                return None
+            return fn(client)
+
+    def recent_sessions(self, max_age: float):
+        """The session list the poll loop read last (``_refresh_private_chats_if_due``,
+        ``_resolve_groups``) when it is at most ``max_age`` seconds old, else None."""
+        seen = self._sessions_read
+        if seen is None or time.monotonic() - seen[0] > max_age:
+            return None
+        return seen[1]
+
+    def note_private_name(self, wxid: str, name: str) -> None:
+        """A new friend's name (src/wechat/new_friends.py): a name lookup that missed before she was
+        a contact is replaced (the poll loop then finds her chat), and with a private filter
+        (PRM_COPILOT / PRM_EDGE) the console's and the Mac's lists of private chats offer her."""
+        wxid, name = str(wxid or "").strip(), str(name or "").strip()
+        if not wxid or not name or name == wxid:
+            return
+        remember = getattr(self._client, "remember_nickname", None)
+        if callable(remember):
+            remember(wxid, name)
+        if self._private_filter is not None:
+            self._save_private_names({wxid: name})
+
+    def catch_up_chat(self, talker: str, name: str, since: float, sink) -> None:
+        """Hand a private chat's messages written since ``since`` to ``sink(messages)`` on the chat's
+        next poll, past the route (they may be stored already): a new friend just registered as a
+        creator (PRM_COPILOT; ``sink`` is PrmService.take_new_friend through the new-friend service).
+        Only the other party's words go (oldest first, standardized; not this account's lines,
+        WeChat's system lines or friend notices); everything the chat shows then is marked seen, so
+        nothing of it is handed on again.  A chat not read yet is read from the next poll on under
+        ``name``."""
+        with self._catch_up_lock:
+            self._catch_up_requests[str(talker)] = (str(name or "").strip(), float(since), sink, time.monotonic())
+        self._last_session_refresh = 0.0
+
+    def _admit_catch_up_chats(self) -> None:
+        """The chats of catch_up_chat requests that are not read yet are read from this cycle on."""
+        if not self._catch_up_requests:
+            return
+        with self._catch_up_lock:
+            pending = list(self._catch_up_requests.items())
+        added = False
+        for talker, (name, _since, _sink, asked_at) in pending:
+            if talker in self._chat_is_group:
+                continue                                  # read already: its poll takes the request
+            if time.monotonic() - asked_at > CATCH_UP_WAIT_SEC:
+                with self._catch_up_lock:
+                    self._catch_up_requests.pop(talker, None)
+                logger.warning("Catch-up of a new friend's chat (%s…) given up: the chat could not be read",
+                               talker[:8])
+                continue
+            if name and self._add_talker(name, talker, is_group=False):
+                added = True
+        if added:
+            self._groups = list(self._talker_ids.keys())
+
+    def _catch_up_new_friend(self, group_name: str, talker: str, request: tuple) -> None:
+        """A catch_up_chat request, in the poll thread before the chat's own poll: read the chat back
+        (CATCHUP_READ messages), mark all of it seen, and hand the other party's messages since the
+        request's time to its sink (stored first, so the restart catch-up counts them as handled)."""
+        from .new_friends import is_friend_notice
+
+        _name, since, sink, _asked = request
+        try:
+            with self._client_lock:
+                messages = self._client.get_messages(talker=talker, limit=CATCHUP_READ)
+        except Exception:
+            with self._catch_up_lock:
+                self._catch_up_requests.setdefault(talker, request)      # asked again at the next poll
+            raise
+        known = self._known_set(talker)
+        my_wxid = self.own_wxid()
+        picked, newest = [], None
+        for msg in reversed(messages or []):
+            standardized = self._standardize(msg, group_name, talker, is_group=False)
+            if standardized is None:
+                continue
+            ts = int(standardized.get("timestamp") or 0)
+            newest = ts if newest is None else max(newest, ts)
+            known.add(standardized["message_id"])
+            if (ts < since or self._is_own_line(standardized, my_wxid) or is_friend_notice(standardized)
+                    or int(standardized.get("msg_type") or 1) == 10000):
+                continue
+            if my_wxid:
+                standardized["_not_self_by_id"] = True
+            picked.append(standardized)
+        if self._store is not None:
+            for standardized in picked:
+                try:
+                    self._store.insert_message(standardized)
+                except Exception:
+                    logger.exception("Catch-up of a new friend: a message could not be stored")
+        if newest is not None and self._tracked_chat(talker):
+            self._note_read(talker, newest)
+        logger.info("Catch-up of a new friend (%s…): %d message(s) since she was added handed on", talker[:8],
+                    len(picked))
+        try:
+            sink(picked)
+        except Exception:
+            logger.exception("Catch-up of a new friend (%s…): the messages could not be handed on", talker[:8])
 
     def db_readable(self) -> bool:
         """Can the WeChat database be read (fewer than 3 failed reads in a row)?"""
@@ -1083,6 +1207,7 @@ class WcdbBackend(AbstractWeChatBackend):
         try:
             with self._client_lock:
                 sessions = self._client.get_sessions()
+                self._sessions_read = (time.monotonic(), sessions)
                 my_wxid = str(
                     getattr(self._client, "_config", {}).get("myWxid", "") or ""
                 )
@@ -1320,6 +1445,11 @@ class WcdbBackend(AbstractWeChatBackend):
         later, it is picked now), then the new messages; the newest message time seen goes
         to its read mark.
         """
+        if self._catch_up_requests:
+            with self._catch_up_lock:
+                request = self._catch_up_requests.pop(talker, None)
+            if request is not None:
+                self._catch_up_new_friend(group_name, talker, request)
         with self._client_lock:
             messages = self._client.get_messages(talker=talker, limit=50)
         first_read = talker not in self._known

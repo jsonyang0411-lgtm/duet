@@ -14,7 +14,8 @@ OCR, so every step is guarded:
 
 Features:
 - accept_friend_requests: Contacts -> 新的朋友, accepts the pending requests (at most
-  MAX_ACCEPT_PER_RUN per call).
+  MAX_ACCEPT_PER_RUN per call); each accept is told to ``on_accepted`` (when, and the text
+  beside its button) so the new-friend scan can say which friends the bot let in.
 - add_friend: searches the wxid / phone number, opens the card, "添加到通讯录", fills the
   greeting and sends the application.  Without OCR it does not start.  On the single-window
   UI everything is found on the screen (the search box, every button, every dialog).  On
@@ -113,6 +114,20 @@ def _still_there(rows: list[dict], row: dict) -> bool:
     return False
 
 
+def _row_label(rows: list[dict], button: dict) -> str:
+    """The text left of an accept button on its row of 新的朋友 (the requester's name and greeting as
+    OCR read them).  Only to tell which new friend the bot let in (src/wechat/new_friends.py); it may
+    hold a phone number, so it is never logged."""
+    top, bottom = float(button.get("y0", 0.0)), float(button.get("y1", 0.0))
+    reach = max(0.0, bottom - top)
+    parts = [r for r in rows if r is not button
+             and float(r.get("x1", 1.0)) <= float(button.get("x0", 0.0)) + SAME_SPOT
+             and float(r.get("y1", 0.0)) >= top - reach and float(r.get("y0", 1.0)) <= bottom + reach
+             and _clean_text(r.get("t", "")) not in ACCEPT_LABELS]
+    parts.sort(key=lambda r: (r.get("y0", 0.0), r.get("x0", 0.0)))
+    return " ".join(str(r.get("t", "")).strip() for r in parts)[:200]
+
+
 def _failure(target: str, reason: str, message: str) -> dict:
     return {"ok": False, "target": target, "reason": reason, "message": message}
 
@@ -154,7 +169,9 @@ class FriendManager:
 
     ``ui_lock`` is the lock the send path holds while it types (the backend's
     window lock); without one the manager only excludes itself.  ``clicker``,
-    ``rect_of`` and ``sleeper`` are seams for tests.
+    ``rect_of`` and ``sleeper`` are seams for tests.  ``on_accepted(at, label)`` hears every
+    request it accepted (AUTO_ACCEPT_FRIENDS and the admin's 同意好友 both come here): when, and
+    what OCR read beside its button (the new-friend scan tells the bot's accepts from a person's).
     """
 
     def __init__(
@@ -166,6 +183,7 @@ class FriendManager:
         rect_of: Callable[[int], tuple[int, int, int, int]] = window_rect,
         sleeper: Callable[[float], None] = time.sleep,
         grab_window: Callable[[int], object] = print_main_window,
+        on_accepted: Callable[[float, str], None] | None = None,
     ):
         self._window = window_controller
         self._ocr = ocr_engine
@@ -175,6 +193,15 @@ class FriendManager:
         self._sleep = sleeper
         self._grab_window = grab_window
         self._rail = RailWatcher(self._grab_main_window)
+        self._on_accepted = on_accepted
+
+    def _tell_accepted(self, at: float, label: str) -> None:
+        if self._on_accepted is None:
+            return
+        try:
+            self._on_accepted(at, label)
+        except Exception:
+            logger.warning("Friend management: an accept could not be written down", exc_info=True)
 
     # ── Looking without touching the screen ─────────────────────────────
 
@@ -334,6 +361,7 @@ class FriendManager:
                     if button is None:
                         clean = True
                         break
+                    label = _row_label(rows, button)          # read before the click: the list moves
                     self._click_row(hwnd, button)
                     self._sleep(0.5)
                     self._confirm_dialog(hwnd)
@@ -348,7 +376,9 @@ class FriendManager:
                         logger.warning("accept_friend_requests: a request is still pending after "
                                        "the click; stopping")
                         break
-                    accepted.append({"status": "accepted", "timestamp": time.time()})
+                    accepted_at = time.time()
+                    accepted.append({"status": "accepted", "timestamp": accepted_at})
+                    self._tell_accepted(accepted_at, label)
                     logger.info("Friend request accepted")
                 if clean:
                     self._sleep(0.5)          # the badge goes when the list has been seen

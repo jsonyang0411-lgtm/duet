@@ -161,6 +161,7 @@ class Bot:
         self._health: HealthMonitor | None = None
         self._friend_mgr = None
         self._auto_friend = None
+        self._new_friends = None
 
     def run(self) -> None:
         """Initialize all components and start the bot. Blocks until stopped."""
@@ -235,8 +236,12 @@ class Bot:
             party_sync.start()
         # PRM_EDGE=on: Windows only receives and sends WeChat for the Mac business service.
         edge = self._start_edge(config, router, backend, relay)
+        # New friends (Windows): friend_added events for the Mac (PRM_EDGE), 登记达人's candidates (PRM_COPILOT).
+        new_friends = self._start_new_friends(config, backend, prm, edge)
+        self._new_friends = new_friends
 
-        self._start_friend_management(config, backend, admin_handler)
+        self._start_friend_management(config, backend, admin_handler,
+                                      on_accepted=new_friends.accepts.note if new_friends is not None else None)
         admin_handler.set_status(lambda: self._status_lines(router, relay, prm, edge))
 
         # ── 6. Health monitor ───────────────────────────────────
@@ -283,6 +288,13 @@ class Bot:
         finally:
             if party_sync is not None:
                 party_sync.stop()
+            if new_friends is not None:
+                new_friends.stop()
+                try:
+                    from .web.server import register_new_friends
+                    register_new_friends(None)
+                except Exception:
+                    pass
             if self._auto_friend:
                 self._auto_friend.stop()
             if self._health:
@@ -335,12 +347,46 @@ class Bot:
         lines.append("群聊：一律不回复")
         return lines
 
-    def _start_friend_management(self, config, backend, admin_handler) -> None:
+    @staticmethod
+    def _start_new_friends(config, backend, prm, edge):
+        """The new-friend scan (src/wechat/new_friends.py), or None: only with a consumer (PRM_EDGE: a
+        ``friend_added`` event per new friend; PRM_COPILOT: new friends first in 登记达人's candidates,
+        registering one drafts her messages since she was added) and a backend whose database it can
+        read beside the poll loop (Windows wcdb).  Its records are in the bot's database (DB_PATH)."""
+        if prm is None and edge is None:
+            return None
+        if not callable(getattr(backend, "with_client", None)):
+            logger.info("New friends: this WeChat backend cannot be read beside its poll loop; not looked for")
+            return None
+        try:
+            from .wechat.new_friends import NewFriendService, NewFriendStore
+            service = NewFriendService(
+                backend, NewFriendStore(config.db_path),
+                on_found=[edge.friend_added] if edge is not None else [],
+                keep_verify=prm is not None,
+                catchup_hours=getattr(config, "prm_catchup_hours", 12))
+        except Exception:
+            logger.warning("New friends: the scan could not start", exc_info=True)
+            return None
+        if prm is not None:
+            service.set_catch_up_sink(prm.take_new_friend)
+            prm.on_registered = service.registered
+        try:
+            from .web.server import register_new_friends
+            register_new_friends(service)
+        except Exception:
+            pass
+        service.start()
+        return service
+
+    def _start_friend_management(self, config, backend, admin_handler, on_accepted=None) -> None:
         """The admin's friend commands and, with AUTO_ACCEPT_FRIENDS=on, the auto-accept worker.
 
         Both drive the WeChat window, so only a backend that has one (Windows wcdb)
         gets them; the manager shares that backend's window lock and reads the screen
         with its own OCR engine (OCR_FALLBACK is a different engine and may be off).
+        ``on_accepted(at, label)`` hears every request it accepts (the new-friend scan's
+        AcceptLog: a friend the bot let in is ``auto_accept``).
         """
         window = getattr(backend, "window_controller", None)
         if window is None:
@@ -354,6 +400,7 @@ class Bot:
                 window_controller=window,
                 ocr_engine=WindowsOcrEngine(window=window),
                 ui_lock=getattr(backend, "window_lock", None),
+                on_accepted=on_accepted,
             )
             auto = AutoFriendService(
                 manager,

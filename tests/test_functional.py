@@ -479,6 +479,57 @@ class TestPrmPages:
         page.wait_for_timeout(1500)
         assert not prm.service.is_party_chat("wxid_newcreator") and "已停用" in page.inner_text("body")
 
+    def test_deals_page_offers_new_friends_first_and_registering_one_drafts_her_messages(self, page, prm, tmp_path):
+        """登记达人: new friends first, tagged, with their greeting (masked) and how; registering one is
+        still a click of a person, and her messages since she was added become one draft job."""
+        from src.prm.service import SETTLE_SEC
+        from src.wechat.new_friends import NewFriendService, NewFriendStore
+        from src.web import server as web_server
+
+        now = prm.clock.now
+        store = NewFriendStore(str(tmp_path / "messages.db"))
+        store.add(wxid="wxid_new01", name="阿花", remark="", how="auto_accept", kind="pc", added_at=now - 60,
+                  verify_from=now - 65, verify_text="我是阿花，电话 138****8000", found_at=now - 50)
+
+        class Backend:                          # the WCDB backend reads her chat back on its next poll
+            def catch_up_chat(self, talker, name, since, sink):
+                sink([{"message_id": "m1", "chat_id": talker, "sender_id": talker, "content": "我是阿花，电话 13800138000",
+                       "msg_type": 1, "is_group": False, "timestamp": now - 65},
+                      {"message_id": "m2", "chat_id": talker, "sender_id": talker, "content": "想合作",
+                       "msg_type": 1, "is_group": False, "timestamp": now - 30}])
+
+        service = NewFriendService(Backend(), store, clock=prm.clock)
+        service.set_catch_up_sink(prm.service.take_new_friend)
+        prm.service.on_registered = service.registered
+        web_server.register_new_friends(service)
+        try:
+            page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+            page.wait_for_timeout(1500)
+            card = page.locator(".prm-new-friend", has_text="阿花")
+            text = card.inner_text()
+            for expected in ("新好友", "阿花", "wxid_new01", "机器人自动通过的", "验证消息：我是阿花，电话 138****8000"):
+                assert expected in text
+            assert "13800138000" not in page.inner_text("body")
+            options = page.locator("select[aria-label='从最近的私聊里选'] option").all_inner_texts()
+            assert options[1] == "新好友 · 阿花（wxid_new01）"
+            assert prm.relay.next_job(0, ("prm",)) is None and not prm.service.is_party_chat("wxid_new01")   # nothing yet
+            card.locator("button:has-text('选这个')").click()
+            assert page.locator("input[aria-label='达人 wxid']").input_value() == "wxid_new01"
+            assert page.locator("input[aria-label='称呼']").input_value() == "阿花"
+            register = page.locator(".prm-register").inner_text()
+            assert "阿花 是新加的好友" in register and "最多 12 小时内的" in register and "不要登记" in register
+            page.locator(".prm-register button:has-text('登记')").click()
+            page.wait_for_timeout(1200)
+            assert "加好友以来对方发的消息会合成一份草稿" in page.inner_text("body")
+            assert prm.service.is_party_chat("wxid_new01") and page.locator(".prm-new-friend").count() == 0
+            prm.clock.now += SETTLE_SEC + 1
+            job = prm.relay.next_job(0, ("prm",))
+            assert job["meta"]["new_friend"] == {"from": now - 65, "count": 2}
+            assert [line.split("] ", 1)[1] for line in job["text"].split("\n")] == [
+                "（加好友时的验证消息）我是阿花，电话 〈手机1〉", "想合作"]
+        finally:
+            web_server.register_new_friends(None)
+
     def test_deals_page_runs_a_deal_stage_mode_waybill_and_numbers(self, page, prm):
         store = prm.service.store
         page.goto(f"{BASE_URL}/#/deals", timeout=10000)

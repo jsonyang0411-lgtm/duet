@@ -106,6 +106,18 @@ def test_other_events_go_to_the_hooks(fake, tmp_path):
     assert run.seen == [], "运营亲手回复、撤回提示不当成达人消息交给路由"
 
 
+def test_a_new_friend_goes_to_the_hooks_and_is_acknowledged(fake, tmp_path):
+    """friend_added（协议版本还是 1）：Mac 端不认识也照样交给钩子、照样确认，不当成达人消息。"""
+    with Running(fake, tmp_path) as run:
+        assert wait_for(lambda: CREATOR in fake._parties)
+        event = fake.friend_added("wxid_new01", "阿花", verify_text="我是阿花", how="manual")
+        assert wait_for(lambda: any(e["type"] == "friend_added" for e in run.events))
+        assert wait_for(lambda: fake.acked_upto >= event["id"])
+    [seen] = [e for e in run.events if e["type"] == "friend_added"]
+    assert (seen["wxid"], seen["name"], seen["verify_text"], seen["how"]) == ("wxid_new01", "阿花", "我是阿花", "manual")
+    assert run.seen == []
+
+
 def test_the_list_follows_changes(fake, tmp_path):
     with Running(fake, tmp_path) as run:
         assert wait_for(lambda: fake._parties == {CREATOR})
