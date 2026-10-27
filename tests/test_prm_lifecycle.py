@@ -64,6 +64,22 @@ def test_the_bots_own_line_confirms_its_packet(bot):
     assert bot.prm.store.deal(1)["mode"] == "copilot"                         # no takeover
 
 
+def test_our_line_read_back_twice_is_not_a_takeover(bot, clock):
+    """微信发出约 1 秒后补上 server_id，Windows 换了编号把同一行又读一次、当运营亲手回复报上来（2026-10-27 联调）。"""
+    packet = drafted(bot)
+    bot.prm.decide(packet["id"], "send")
+    bot.prm.send_approved()
+    line = "确认一下：小美，手机13812345678。"
+    bot.prm.on_own_message(own(bot, line))                                    # read back: confirmed
+    clock.now += 1
+    bot.prm.on_own_message(dict(own(bot, line), edge_operator=True))          # the same line again
+    assert bot.prm.store.deal(1)["mode"] == "copilot"
+    assert not any(e["kind"] == "operator_message" for e in bot.prm.store.events(1, limit=20))
+    clock.now += 300                                                          # minutes later: a person typed it
+    bot.prm.on_own_message(dict(own(bot, line), edge_operator=True))
+    assert bot.prm.store.deal(1)["mode"] == "human"
+
+
 def test_a_hand_typed_reply_gives_the_chat_to_a_person(bot, clock):
     packet = drafted(bot)
     bot.prm.on_own_message(own(bot, "小美你好，我是运营小王，电话 13900001111 有事找我"))
