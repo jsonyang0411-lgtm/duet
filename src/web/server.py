@@ -901,6 +901,30 @@ def register_prm(service):
     _prm = service
 
 
+# The running new-friend scan (src/wechat/new_friends.py), set by Bot.run; None when the bot is
+# stopped: /api/prm then reads the bot's database (DB_PATH) itself.
+_new_friends = None
+
+
+def register_new_friends(service):
+    """Register (or with None, forget) the running new-friend scan for 登记达人's candidates."""
+    global _new_friends
+    _new_friends = service
+
+
+def _recent_new_friends() -> list[dict]:
+    """The friends found lately (newest first): from the running scan, else from the bot's database."""
+    from src.wechat.new_friends import recent_new_friends
+
+    try:
+        if _new_friends is not None:
+            return list(_new_friends.recent())
+        return recent_new_friends(os.getenv("DB_PATH", "data/messages.db").strip() or "data/messages.db")
+    except Exception:
+        logger.warning("Could not read the new friends", exc_info=True)
+        return []
+
+
 def _prm_db_path() -> Path:
     return Path(os.getenv("PRM_DB", "data/prm.db").strip() or "data/prm.db")
 
@@ -916,18 +940,29 @@ def _prm_reserved() -> set[str]:
 
 
 def _prm_candidates(state: dict) -> list[dict]:
-    """Private chats WeChat lists (data/private_chat_names.json, written by the Windows backend
-    while PRM_COPILOT is on) that are not creators yet: the register form offers them."""
+    """Who the register form offers, not creators yet: first the new friends of the last days
+    (src/wechat/new_friends.py; ``new``, their greeting masked, how they were added), newest first,
+    then the private chats WeChat lists (data/private_chat_names.json, written by the Windows
+    backend while PRM_COPILOT is on) by name."""
     path = Path("data/private_chat_names.json")
     try:
         names = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     except (OSError, ValueError):
         names = {}
-    if not isinstance(names, dict):
-        return []
+    names = names if isinstance(names, dict) else {}
     taken = {p["wxid"] for p in state.get("parties", []) if p.get("active")} | _prm_reserved()
-    out = [{"wxid": str(w), "name": str(n)} for w, n in names.items() if str(w) not in taken]
-    return sorted(out, key=lambda c: c["name"])[:300]
+    fresh = []
+    for f in _recent_new_friends():
+        wxid = str(f.get("wxid") or "")
+        if not wxid or wxid in taken or any(c["wxid"] == wxid for c in fresh):
+            continue
+        fresh.append({"wxid": wxid, "name": str(f.get("name") or names.get(wxid) or wxid), "new": True,
+                      "verify_text": str(f.get("verify_text") or ""), "how": str(f.get("how") or "unknown"),
+                      "how_label": str(f.get("how_label") or ""), "added_at": f.get("added_at"),
+                      "remark": str(f.get("remark") or "")})
+    listed = {c["wxid"] for c in fresh}
+    out = [{"wxid": str(w), "name": str(n)} for w, n in names.items() if str(w) not in taken | listed]
+    return (fresh + sorted(out, key=lambda c: c["name"]))[:300]
 
 
 def _prm_state() -> dict:
@@ -966,7 +1001,8 @@ def _prm_state_core() -> dict:
         return {**_prm.snapshot(), **settings, "enabled": True}
     stopped = {"mac_online": False, "worker_kinds": [], "can_send": False, "can_send_files": False,
                "takeover_min": _prm_int_env("PRM_TAKEOVER_MIN", 120), "holding_min": _prm_int_env("PRM_HOLDING_MIN", 10),
-               "retention_days": _prm_int_env("PRM_RETENTION_DAYS", 90), **settings}
+               "retention_days": _prm_int_env("PRM_RETENTION_DAYS", 90),
+               "catchup_hours": _prm_int_env("PRM_CATCHUP_HOURS", 12), **settings}
     store = _prm_stopped_store()
     if store is None:
         from src.prm.platforms import ACTIONS
@@ -1028,7 +1064,9 @@ def _prm_parties(data: dict) -> dict:
         if _prm is not None:
             if action == "add":
                 party = _prm.register(data.get("wxid", ""), data.get("name", ""), data.get("note", ""))
-                return {"ok": True, "party": {"id": party["id"], "name": party["name"]}}
+                # catch_up: a new friend's messages since she was added are on their way to a draft
+                return {"ok": True, "party": {"id": party["id"], "name": party["name"]},
+                        "catch_up": bool(party.get("catch_up"))}
             if action in ("enable", "disable"):
                 party = _prm.set_active(int(data.get("id")), action == "enable")
                 return {"ok": True} if party else {"ok": False, "error": "没有找到这个达人"}

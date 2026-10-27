@@ -21,6 +21,7 @@ from src.edge.service import EdgeService
 from src.edge.store import EdgeStore
 from src.relay.service import ClaudeRelay
 from src.relay.store import RelayStore
+from src.wechat.new_friends import NewFriendService, NewFriendStore
 
 ROOT = Path(__file__).resolve().parents[1]
 CREATOR, OTHER = "wxid_creator01", "wxid_creator02"
@@ -84,8 +85,55 @@ class FakeSide(Side):
         self.edge.start_sending(send_id)
         self.edge.restart()
 
+    def friend_added(self, wxid, name, verify_text="", how="manual"):
+        self.edge.friend_added(wxid, name, verify_text=verify_text, how=how)
+
+    def rebuild_db(self):
+        self.edge.rebuild_db()
+
     def close(self):
         self.edge.stop()
+
+
+class FriendsDb:
+    """WeChat's database as the new-friend scan reads it (src/wechat/new_friends.py): session rows
+    without names, messages newest first, the lines the probe saw on the real machine."""
+
+    is_open = True
+
+    def __init__(self, clock):
+        self.clock = clock
+        self.chats, self.times, self.names, self.count = {}, {}, {}, 0
+
+    def say(self, chat, sender, text, local_type=1, ago=0):
+        self.count += 1
+        at = int(self.clock.now - ago)
+        self.chats.setdefault(chat, []).insert(0, {"sender_username": sender, "message_content": text,
+                                                   "local_type": local_type, "create_time": at,
+                                                   "local_id": self.count})
+        self.times[chat] = max(self.times.get(chat, 0), at)
+
+    def get_sessions(self):
+        return [{"username": chat, "sort_timestamp": at} for chat, at in self.times.items()]
+
+    def get_messages(self, talker, limit=200):
+        return self.chats.get(talker, [])[:limit]
+
+    def get_display_names(self, usernames):
+        return {u: self.names[u] for u in usernames if u in self.names}
+
+
+class FriendsBackend:
+    """What the new-friend scan uses of the WCDB backend."""
+
+    def __init__(self, db):
+        self.db = db
+
+    def with_client(self, fn):
+        return fn(self.db)
+
+    def own_wxid(self):
+        return "wxid_bot_b6ce"
 
 
 class Clock:
@@ -123,6 +171,13 @@ class RealSide(Side):
         host, port = self.relay.address
         self.url, self.token = f"http://{host}:{port}", EDGE_TOKEN
         self.client = EdgeClient(self.url, EDGE_TOKEN)
+        # New friends as Bot._start_new_friends wires them for PRM_EDGE: found in WeChat's database,
+        # handed to the edge (whichever edge runs now: crash_while_sending starts another).
+        self.wechat_db = FriendsDb(self.clock)
+        self.friends = NewFriendService(FriendsBackend(self.wechat_db), NewFriendStore(str(tmp_path / "messages.db")),
+                                        on_found=[lambda event: self.edge.friend_added(event)], clock=self.clock,
+                                        pause=0)
+        self.friends.scan_once()                                         # its start marker
         self.ready()
 
     def _service(self):
@@ -209,6 +264,29 @@ class RealSide(Side):
         assert self.store.move_send(send_id, (P.QUEUED,), P.SENDING)      # the process died mid-send
         self.edge.stop()
         self.edge = self._service()                                       # and started again
+
+    def friend_added(self, wxid, name, verify_text="", how="manual"):
+        """WeChat writes what the probe saw (tools/friend_probe.py) and the scan finds it."""
+        db, self.clock.now = self.wechat_db, self.clock.now + 2
+        db.names[wxid] = name
+        if how == "requested":
+            db.say(wxid, "wxid_bot", "你好，我是品牌商务", ago=60)
+            db.say(wxid, wxid, "我通过了你的朋友验证请求，现在我们可以开始聊天了")
+            db.say(wxid, "", "以上是打招呼的消息", 10000)
+        else:
+            if verify_text:
+                db.say(wxid, wxid, verify_text, ago=5)
+            if how == "auto_accept":
+                self.friends.accepts.note(self.clock.now - 10)          # FriendManager accepted it just before
+            tail = "以上是打招呼的消息。" if how == "manual" else "现在可以开始聊天了。"
+            db.say(wxid, "", f"你已添加了{name}，{tail}", 10000)
+        self.friends.scan_once()
+
+    def rebuild_db(self):
+        """edge.db made anew (reinstalled, deleted): a new store under a restarted edge."""
+        self.edge.stop()
+        self.store = EdgeStore(":memory:")
+        self.edge = self._service()
 
     def close(self):
         self.edge.stop()
@@ -349,6 +427,34 @@ def test_files_come_with_the_event(side, tmp_path):
         with pytest.raises(EdgeError) as e:
             c.download(event_id, n, tmp_path / "x")
         assert e.value.status == 404
+
+
+def test_a_new_friend_is_one_event_whoever_let_her_in(side):
+    """friend_added: once per wxid, listed or not (she is not a creator yet); the greeting as it was."""
+    side.friend_added("wxid_new01", "阿花", verify_text="我是阿花，电话 13800138000", how="manual")
+    side.friend_added("wxid_new02", "小青", how="requested")
+    side.friend_added("wxid_new03", "小红", verify_text="想合作", how="auto_accept")
+    side.friend_added("wxid_new01", "阿花", verify_text="我是阿花，电话 13800138000", how="manual")   # again: once
+    events = drain(side)
+    assert types(events) == [P.FRIEND_ADDED] * 3
+    assert [{k: e[k] for k in ("wxid", "name", "remark", "verify_text", "how")} for e in events] == [
+        {"wxid": "wxid_new01", "name": "阿花", "remark": "", "verify_text": "我是阿花，电话 13800138000", "how": "manual"},
+        {"wxid": "wxid_new02", "name": "小青", "remark": "", "verify_text": "", "how": "requested"},
+        {"wxid": "wxid_new03", "name": "小红", "remark": "", "verify_text": "想合作", "how": "auto_accept"}]
+    assert all("chat_id" not in e and e["at"] for e in events)
+    assert side.client.ack(events[-1]["id"])["pending"] == 0
+
+
+def test_health_says_which_database_windows_keeps(side):
+    """db_id: made with Windows' edge.db; another one means the database was made anew."""
+    first = side.client.health()["db_id"]
+    assert isinstance(first, str) and len(first) >= 16 and side.client.health()["db_id"] == first
+    side.client.put_parties(1, [CREATOR])
+    side.rebuild_db()
+    health = side.client.health()
+    assert health["db_id"] != first and health["parties_version"] == 0
+    events = side.client.events(after=0, wait=0)
+    assert types(events) == [P.EDGE_STATUS] and events[0]["id"] == 1   # the numbering starts again
 
 
 def test_status_changes_are_events_and_in_health(side):

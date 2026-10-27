@@ -5,7 +5,8 @@
 - ``edge_sends``: the Mac's send requests; one row per ``send_id``, so it is sent once.
   After ``EDGE_KEEP_DAYS`` the text is blanked, the row stays (a retry still finds it).
 - ``edge_uploads``: files the Mac uploaded for a send (one send each).
-- ``edge_parties`` / ``edge_meta``: the list of creators and its version.
+- ``edge_parties`` / ``edge_meta``: the list of creators and its version, and ``db_id``: a
+  random id made with the database (``/edge/health``: the Mac tells a rebuilt one apart).
 
 One connection behind a lock: the HTTP threads, the route step and the sender share it.
 """
@@ -15,6 +16,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import uuid
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -104,6 +106,9 @@ class EdgeStore:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            # The database's id: made once, with the database (a database from before it gets one now).
+            self._conn.execute("INSERT OR IGNORE INTO edge_meta (key, value) VALUES ('db_id', ?)",
+                               (uuid.uuid4().hex,))
             self._conn.commit()
 
     def close(self) -> None:
@@ -328,6 +333,10 @@ class EdgeStore:
 
     def parties_version(self) -> int:
         return int(self.meta("parties_version", "0") or 0)
+
+    def db_id(self) -> str:
+        """The random id made with this database: a new one means the events start again from 1."""
+        return self.meta("db_id")
 
     def parties_digest(self) -> str:
         return self.meta("parties_digest", P.parties_digest([]))

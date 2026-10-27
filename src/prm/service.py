@@ -22,6 +22,12 @@ deal is done (delivered, or quiet that long) its receiving details are cleared e
 the Mac's case file through a ``purge`` job.  The deal actions (stage, mode,
 shipment) are in deals.py.
 
+Registering is always an operator's decision.  When the creator registered is a new friend
+(src/wechat/new_friends.py found the line WeChat writes when two people become friends), her
+messages since she was added, friend-request greeting included, become one draft job that waits
+for a person (``take_new_friend``).  WeChat's friend notices (「我通过了你的朋友验证请求…」 in her
+name, 「你已添加了…」) are never drafted.
+
 A draft with a platform action (platforms.py: 小红书 / 抖音 / 淘宝 CLIs on the Mac) comes
 with the Mac's preview of it and always waits for a person, whatever its kind's gate.
 批准并执行 moves it to ``executing`` and queues a ``platform_execute`` job (one approval
@@ -48,6 +54,7 @@ from typing import Callable, Optional
 from ..relay.attachments import KINDS as ATTACHMENT_KINDS, Held, attachment_kind
 from ..relay.service import MAX_AGE_SEC, job_meta
 from ..relay.store import PRM
+from ..wechat.new_friends import is_friend_notice
 from . import deals, gates, pii, platforms, retention
 from .result import MAX_DRAFT_CHARS, MESSAGE_KINDS, DraftError, parse_draft
 from .store import (
@@ -141,15 +148,24 @@ def missed_note(count: int, earliest: float) -> str:
     return f"{count} 条消息在机器人没在读微信时收到（最早 {_clock_text(earliest)}），没有起草，请看一下"
 
 
+def new_friend_note(count: int, earliest: float) -> str:
+    """The deal's attention for the draft of a new friend's messages from before she was registered."""
+    return (f"新加的好友，登记前发来的 {count} 条消息（最早 {_clock_text(earliest)}，含加好友时的验证消息）"
+            "起草了这份草稿，要人看过再发")
+
+
 def gap_notes(meta: dict) -> list[str]:
-    """What a draft job's ``meta`` says about messages read late (``late``) or recorded without a
-    draft (``missed``), as attention lines."""
+    """What a draft job's ``meta`` says about messages read late (``late``), recorded without a
+    draft (``missed``) or written by a new friend before she was registered (``new_friend``), as
+    attention lines (any of them: the draft waits for a person)."""
     notes = []
-    late, missed = meta.get("late"), meta.get("missed")
+    late, missed, new_friend = meta.get("late"), meta.get("missed"), meta.get("new_friend")
     if isinstance(late, dict) and late.get("from"):
         notes.append(late_note(float(late["from"])))
     if isinstance(missed, dict) and missed.get("from"):
         notes.append(missed_note(int(missed.get("count") or 1), float(missed["from"])))
+    if isinstance(new_friend, dict) and new_friend.get("from"):
+        notes.append(new_friend_note(int(new_friend.get("count") or 1), float(new_friend["from"])))
     return notes
 
 
@@ -329,6 +345,9 @@ class PrmService:
         self._send_file = send_file
         self._clock = clock
         self.on_parties_changed = on_parties_changed
+        # on_registered(wxid) -> bool: a creator was registered; True when her earlier messages are
+        # on their way (a new friend: src/wechat/new_friends.py, back through take_new_friend).
+        self.on_registered: Optional[Callable[[str], bool]] = None
         self._scrub_messages = scrub_messages
         self._takeover_sec = int(getattr(config, "prm_takeover_min", 120) or 120) * 60
         # PRM_CATCHUP_HOURS: a message read more than MAX_AGE_SEC late is drafted (always reviewed)
@@ -426,6 +445,10 @@ class PrmService:
         party = self._store.party_by_wxid(chat_id)
         if party is None:
             return False
+        if is_friend_notice(msg):
+            # 「我通过了你的朋友验证请求，现在我们可以开始聊天了」 and 「你已添加了…」: WeChat's, not hers
+            logger.info("PRM: a friend notice in party %d's chat; not drafted", party["id"])
+            return True
         self._take(msg, party, chat_id)
         return True
 
@@ -480,9 +503,11 @@ class PrmService:
         return True
 
     def _submit(self, party: dict, chat_id: str, line: str, files: tuple, at: float, age: float,
-                late: bool, now: float) -> None:
+                late: bool, now: float, new_friend: Optional[dict] = None) -> None:
         """The draft job of a creator's message (under ``_handle_lock``): the waiting drafts are
-        out of date, the deal hears of the message, the job is made or joined."""
+        out of date, the deal hears of the message, the job is made or joined.  ``new_friend``
+        (``{"from", "count"}``, take_new_friend): a new friend's messages from before she was
+        registered, one job of their own that waits for a person."""
         deal = self._store.deal_of(party["id"], now)
         text = self._mask(party["id"], f"[{_clock_text(at)}] {line}", now)
         stale = self._store.supersede(deal["id"], now, lane=LANE_REPLY)   # a 专属佣金 step stays
@@ -510,6 +535,12 @@ class PrmService:
             logger.warning("PRM: party %d's message was read %.0f min after it was written (the bot was not "
                            "reading WeChat, or this PC's clock is off); its draft waits for a person",
                            party["id"], age / 60)
+        if new_friend:
+            # Like ``late``: her messages from before the registration are one job, always reviewed.
+            meta["new_friend"] = dict(new_friend)
+            if not fresh:
+                open_job = self._relay.store.latest_open(chat_id, drafts_only=True, system=False)
+                fresh = open_job is None or not job_meta(open_job).get("new_friend")
         how, job_id = self._relay.submit(chat_id, chat_id, text, kind=PRM, files=files, settle_sec=SETTLE_SEC,
                                          meta=meta, fresh=fresh)
         logger.info("PRM: party %d message -> job #%d (%s)%s%s", party["id"], job_id, how,
@@ -582,8 +613,8 @@ class PrmService:
         history, as before (one Windows' edge queued, ``_queued``, counts as just written).
         """
         chat_id = str(msg.get("chat_id", ""))
-        if chat_id not in self._wxids:
-            return
+        if chat_id not in self._wxids or is_friend_notice(msg):
+            return                                         # (a friend notice is WeChat's, not an operator's)
         party = self._store.party_by_wxid(chat_id)
         if party is None:
             return
@@ -889,6 +920,9 @@ class PrmService:
     # ── from the console ──────────────────────────────────────────────────
 
     def register(self, wxid: str, name: str, note: str = "") -> dict:
+        """Register a creator (an operator's decision in the console; never automatic).  When she is a
+        new friend (``on_registered``), her messages since she was added become one reviewed draft
+        (take_new_friend); ``catch_up`` in the answer says so."""
         wxid = check_wxid(wxid, self._reserved)
         name, note = str(name or "").strip(), str(note or "").strip()
         if not name or len(name) > 30:
@@ -898,7 +932,53 @@ class PrmService:
         party = self._store.add_party(wxid, name, note, self._clock())
         self._parties_changed()
         logger.info("PRM: party %d registered", party["id"])
-        return party
+        caught = False
+        if self.on_registered is not None:
+            try:
+                caught = bool(self.on_registered(wxid))
+            except Exception:
+                logger.exception("PRM: party %d's earlier messages (a new friend) could not be asked for", party["id"])
+        return {**party, "catch_up": caught}
+
+    def take_new_friend(self, chat_id: str, messages: list[dict], *, verify_until: float = 0.0) -> int:
+        """A new friend registered as a creator: her messages since she was added (the WeChat backend
+        read them back on her chat's next poll: hers only, oldest first, at most PRM_CATCHUP_HOURS
+        old) become one draft job that waits for a person (``meta.new_friend``), so her first words
+        are not lost; the ones up to ``verify_until`` (the time she was added) are her friend-request
+        greeting and say so.  WeChat's friend notices are left out.  Returns how many were taken."""
+        chat_id = str(chat_id)
+        party = self._store.party_by_wxid(chat_id)
+        if party is None:
+            return 0
+        picked = [m for m in messages or [] if not m.get("is_group", False) and not is_friend_notice(m)]
+        if not picked:
+            logger.info("PRM: party %d is a new friend with no messages from before the registration", party["id"])
+            return 0
+        now = self._clock()
+        times = [float(m.get("timestamp") or 0) or now for m in picked]
+        info = {"from": min(times), "count": len(picked)}
+        taken = 0
+        for msg, at in zip(picked, times):
+            line = message_text(msg)
+            if verify_until and at <= verify_until and str(msg.get("msg_type", 1)) == "1":
+                line = f"（加好友时的验证消息）{line}"
+            files: tuple = ()
+            kind = attachment_kind(msg)
+            if kind:
+                collected, problems = self._relay.collect([Held(kind, msg, now)])
+                files = tuple(collected)
+                if problems:
+                    line += "（" + "；".join(problems) + "）"
+                elif not files:
+                    line += f"（{ATTACHMENT_KINDS[kind]}没取到）"
+            with self._handle_lock:
+                if self._recorded_for_a_person(party, line, at, now):
+                    continue
+                self._submit(party, chat_id, line, files, at, max(0.0, now - at), False, now, new_friend=info)
+                taken += 1
+        logger.info("PRM: party %d is a new friend: %d message(s) from before the registration -> one reviewed "
+                    "draft job", party["id"], taken)
+        return taken
 
     def set_active(self, party_id: int, active: bool) -> Optional[dict]:
         party = self._store.update_party(int(party_id), active=active, now=self._clock())
@@ -1306,7 +1386,7 @@ class PrmService:
             "worker_kinds": relay.get("worker_kinds", []),
             "can_send": self._send is not None, "can_send_files": self._send_file is not None,
             "takeover_min": self._takeover_sec // 60, "holding_min": self._holding_sec // 60,
-            "retention_days": self._retention_days,
+            "retention_days": self._retention_days, "catchup_hours": self._catchup_sec // 3600,
         })
 
     # ── the sender thread: approved drafts, holding replies, clean-ups ────

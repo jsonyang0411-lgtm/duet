@@ -45,7 +45,13 @@ function RegisterCard({ d, onDone }) {
   const [name, setName] = useState('')
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
+  // New friends first (src/wechat/new_friends.py: tagged, their greeting masked, how they came), then
+  // the other recent private chats. Registering stays a person's decision: a new friend may be a
+  // supplier or an acquaintance.
   const candidates = d?.candidates || []
+  const fresh = candidates.filter((c) => c.new)
+  const picked = candidates.find((c) => c.wxid === wxid.trim())
+  const hours = d?.catchup_hours ?? 12
   const pick = (value) => {
     const c = candidates.find((x) => x.wxid === value)
     if (c) { setWxid(c.wxid); setName((n) => n || c.name) }
@@ -53,8 +59,10 @@ function RegisterCard({ d, onDone }) {
   const add = async () => {
     setBusy(true)
     try {
-      await partyAction({ action: 'add', wxid: wxid.trim(), name: name.trim(), note: note.trim() })
-      toast.ok(`已登记 ${name.trim()}`)
+      const r = await partyAction({ action: 'add', wxid: wxid.trim(), name: name.trim(), note: note.trim() })
+      toast.ok(r?.catch_up
+        ? `已登记 ${name.trim()}：加好友以来对方发的消息会合成一份草稿，在「待审批」里等你看过再发`
+        : `已登记 ${name.trim()}`)
       setWxid(''); setName(''); setNote('')
       onDone()
     } catch (e) { toast.err(e.message) } finally { setBusy(false) }
@@ -62,10 +70,28 @@ function RegisterCard({ d, onDone }) {
   return (
     <Card title="登记达人" eyebrow="REGISTER" className="prm-register">
       <div className="stack" style={{ gap: 10 }}>
+        {fresh.length > 0 && (
+          <div className="stack prm-new-friends" style={{ gap: 8 }}>
+            <b>新加的好友</b>
+            {fresh.map((c) => (
+              <div key={c.wxid} className="row prm-new-friend" style={{ gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                <span className="tag cy">新好友</span>
+                <div className="grow" style={{ minWidth: 0 }}>
+                  <div><b>{c.name}</b> <span className="mono dim">{c.wxid}</span></div>
+                  <div className="dim">{c.how_label}{c.added_at ? ` · ${fmtClock(c.added_at)} 加上的` : ''}</div>
+                  <div className={c.verify_text ? '' : 'dim'} style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                    验证消息：{c.verify_text || '（没有）'}
+                  </div>
+                </div>
+                <button type="button" className="btn sm" aria-label={`选 ${c.name}`} onClick={() => pick(c.wxid)}>选这个</button>
+              </div>
+            ))}
+          </div>
+        )}
         {candidates.length > 0 && (
-          <Field label="从最近的私聊里选" hint="机器人号最近有私聊的人（达人副驾驶打开、机器人运行后才有这个列表）">
+          <Field label="从最近的私聊里选" hint="新加的好友排在最前面（标着「新好友」）；其余是机器人号最近有私聊的人（达人副驾驶打开、机器人运行后才有这个列表）">
             <Select value="" onChange={pick} aria-label="从最近的私聊里选"
-              options={[{ value: '', label: '选一个…' }, ...candidates.map((c) => ({ value: c.wxid, label: `${c.name}（${c.wxid}）` }))]} />
+              options={[{ value: '', label: '选一个…' }, ...candidates.map((c) => ({ value: c.wxid, label: `${c.new ? '新好友 · ' : ''}${c.name}（${c.wxid}）` }))]} />
           </Field>
         )}
         <div className="row" style={{ gap: 10, flexWrap: 'wrap', alignItems: 'flex-start' }}>
@@ -79,6 +105,13 @@ function RegisterCard({ d, onDone }) {
             <TextInput value={note} onChange={setNote} placeholder="比如：618 防晒" aria-label="备注" />
           </Field>
         </div>
+        {picked?.new && (
+          <Note kind="warn">
+            {`${picked.name} 是新加的好友（${picked.how_label || '说不清是怎么加的'}）。登记后，加好友以来对方发的消息（验证消息也算，`
+              + `${hours > 0 ? `最多 ${hours} 小时内的` : '只算最近 5 分钟的'}）会合成一份草稿，在「待审批」里等人看过再发。`
+              + '不是达人（比如供应商、熟人）就不要登记。'}
+          </Note>
+        )}
         <Note>登记表示这位达人已同意由我们在微信上联系。登记后，对方的私聊不会再收到自动回复：机器人不回任何话，只在「待审批」里给运营一份草稿。</Note>
         <div><button type="button" className="btn primary" disabled={busy || !wxid.trim() || !name.trim()} onClick={add}><UserPlus />登记</button></div>
       </div>

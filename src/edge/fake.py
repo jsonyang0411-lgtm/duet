@@ -11,7 +11,9 @@ same checks (protocol.py); what WeChat would do is scripted::
         edge.complete("pk-1")                            # the send went out: send_result sent
         edge.seen("pk-1", delay_s=3)                     # and was read back: send_seen
         edge.operator_says("wxid_creator01", "我来回")    # an operator typed by hand
+        edge.friend_added("wxid_new01", "阿花", verify_text="我是阿花", how="manual")   # a new friend
         edge.set_status(wechat="offline", detail="微信没开")
+        edge.rebuild_db()                                # Windows' edge.db was made anew: another db_id
 
 ``auto_send=True`` (the default) sends every accepted request at once (and, with
 ``auto_seen``, reads it back); ``fail_next`` makes the next sends fail; ``restart`` turns
@@ -65,6 +67,8 @@ class FakeEdge:
         self._status = {"wechat": P.ONLINE, "db": P.OK, "send": P.OK, "detail": ""}
         self._failures: list[str] = []
         self._seq = 0
+        self._friends: set[str] = set()
+        self.db_id = secrets.token_hex(16)        # Windows' edge.db: made with the database
         self._dir = tempfile.mkdtemp(prefix="fake-edge-")
         self._server = None
 
@@ -157,6 +161,28 @@ class FakeEdge:
             if chat_id not in self._parties:
                 return None
             return self._event(P.CHAT_NOTICE, chat_id=chat_id, text=text)
+
+    def friend_added(self, wxid: str, name: str = "", *, remark: str = "", verify_text: str = "",
+                     how: str = "unknown") -> Optional[dict]:
+        """A person became the account's friend (listed or not): ``friend_added``, once per wxid like
+        Windows (None the second time).  ``how``: auto_accept / manual / requested / unknown."""
+        with self._cond:
+            if wxid in self._friends:
+                return None
+            self._friends.add(wxid)
+            return self._event(P.FRIEND_ADDED, wxid=wxid, name=name, remark=remark, verify_text=verify_text,
+                               how=how if how in P.FRIEND_HOWS else "unknown")
+
+    def rebuild_db(self) -> str:
+        """Windows' edge.db was made anew (reinstalled, deleted): another ``db_id``, the events start
+        again from 1, no list (version 0), no sends or uploads; the state is said once, as at a start."""
+        with self._cond:
+            self.db_id = secrets.token_hex(16)
+            self._events, self._acked, self._files = [], 0, {}
+            self._uploads, self._sends, self._friends = {}, {}, set()
+            self._parties, self._parties_version, self._parties_digest = set(), 0, P.parties_digest([])
+            self._event(P.EDGE_STATUS, **{**self._status, "detail": "Windows 边缘启动了"})
+            return self.db_id
 
     def set_status(self, *, wechat: Optional[str] = None, db: Optional[str] = None, send: Optional[str] = None,
                    detail: Optional[str] = None) -> Optional[dict]:
@@ -285,7 +311,7 @@ class FakeEdge:
         with self._cond:
             pending = sum(1 for e in self._events if e["id"] > self._acked)
             return {"ok": True, "protocol": P.PROTOCOL, "parties_version": self._parties_version,
-                    **self._status, "can_send_files": True, "events_pending": pending}
+                    **self._status, "can_send_files": True, "events_pending": pending, "db_id": self.db_id}
 
     def events(self, after: int, wait: float, limit: int) -> list[dict]:
         deadline = time.monotonic() + wait
