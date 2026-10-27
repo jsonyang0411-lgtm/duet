@@ -536,20 +536,22 @@ class PrmStore:
         return {r["status"]: int(r["n"]) for r in rows}
 
     def rewrite_packets(self, deal_id: int, rewrite: Callable[[str], str]) -> int:
-        """Rewrite the text of every packet of a deal (8.2 clean-up); returns how many changed."""
+        """Rewrite the text of every packet of a deal, its platform action too (8.2 clean-up);
+        returns how many changed."""
         changed = 0
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, text, final_text, slots, intent, reason FROM action_packets WHERE deal_id = ?", (deal_id,)
+                "SELECT id, text, final_text, slots, intent, reason, platform FROM action_packets WHERE deal_id = ?",
+                (deal_id,),
             ).fetchall()
             for row in rows:
                 old = (row["text"] or "", row["final_text"], row["slots"] or "{}", row["intent"] or "",
-                       row["reason"] or "")
+                       row["reason"] or "", row["platform"] or "{}")
                 new = tuple(None if value is None else rewrite(value) for value in old)
                 if new != old:
                     self._conn.execute(
-                        "UPDATE action_packets SET text = ?, final_text = ?, slots = ?, intent = ?, reason = ?"
-                        " WHERE id = ?", (*new, row["id"]),
+                        "UPDATE action_packets SET text = ?, final_text = ?, slots = ?, intent = ?, reason = ?,"
+                        " platform = ? WHERE id = ?", (*new, row["id"]),
                     )
                     changed += 1
             self._conn.commit()

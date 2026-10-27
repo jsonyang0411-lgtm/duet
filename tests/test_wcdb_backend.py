@@ -372,7 +372,7 @@ class PrivateChatNameFallbackTests(unittest.TestCase):
         Path("data").mkdir()
         Path("data/private_chat_names.json").write_text(
             json.dumps({"wxid_new": "小丽", "wxid_twin": "测试群"}, ensure_ascii=False), encoding="utf-8")
-        self.backend = WcdbBackend(bot_display_name="林小满", groups=["测试群"])
+        self.backend = WcdbBackend(bot_display_name="商务助手", groups=["测试群"])
         self.backend._client = FakeClient()
         self.backend._add_talker("测试群", "room1@chatroom", is_group=True)
 

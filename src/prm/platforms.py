@@ -1,4 +1,4 @@
-"""Platform actions of a creator deal: the three platform CLIs on the Mac (小红书, 抖音, 淘宝).
+"""Platform actions of a creator deal: the platform CLIs on the Mac (小红书, 抖音, 淘宝, 聚水潭).
 
 When Claude and a creator have agreed in WeChat (the platform, the product, the
 commission or the exclusive price, the creator's platform account), the draft may
@@ -18,7 +18,8 @@ the Mac (tools/claude_relay/worker.py), in two phases:
    STATE_CONFLICT, exit 76 / 77 / 79 …) stops it and the console marks it red.
 
 The CLIs (xiaohongshu-engineering ``node bin/xhs.mjs``, douyin-engineering ``node
-bin/dy.mjs``, campaign-engineering ``node bin/oc.mjs``) share one discipline: a write
+bin/dy.mjs``, campaign-engineering ``node bin/oc.mjs``, jushuitan-engineering ``node
+bin/jst.mjs``: 聚水潭's sample orders) share one discipline: a write
 is a preview unless ``--execute``; it is sent once, read back, and every target gets
 an ``outcome``; the result is JSON on stdout.  They run here with an argv list (no
 shell), every value as ``--name=value`` and checked first, so nothing the model or a
@@ -51,13 +52,17 @@ REPLY_FIELDS = {
     "xhs.channel_item": {"{渠道商品ID}": "item_id"},
     "dy.designated_commission": {},
     "dy.channel_goods": {LINK: "link", "{渠道品ID}": "channel_id"},
+    "dy.creator_invite": {},
     "tb.campaign": {"{计划名}": "plan_name", "{计划ID}": "campaign_id"},
+    "jst.sample_order": {"{寄样单号}": "sample_order_no"},
 }
 PLACEHOLDER_LABELS = {LINK: "专属推广链接", "{渠道品ID}": "抖店渠道品 ID", "{渠道商品ID}": "小红书渠道商品 ID",
-                      "{计划名}": "计划名", "{计划ID}": "计划 ID"}
+                      "{计划名}": "计划名", "{计划ID}": "计划 ID", "{寄样单号}": "聚水潭寄样单号"}
 
-PLATFORMS = {"xhs": "小红书", "dy": "抖音", "tb": "淘宝"}
-CLI_FILES = {"xhs": "bin/xhs.mjs", "dy": "bin/dy.mjs", "tb": "bin/oc.mjs"}
+PLATFORMS = {"xhs": "小红书", "dy": "抖音", "tb": "淘宝", "jst": "聚水潭"}
+CLI_FILES = {"xhs": "bin/xhs.mjs", "dy": "bin/dy.mjs", "tb": "bin/oc.mjs", "jst": "bin/jst.mjs"}
+# The platforms whose products make the catalogue (聚水潭 sends the 抖店 / 小红书 shops' products).
+CATALOG_PLATFORMS = ("xhs", "dy", "tb")
 
 # Outcomes of a write, as the CLIs say them (one per target), and what this module adds.
 VERIFIED = "VERIFIED_SUCCESS"
@@ -96,7 +101,7 @@ VERDICTS = {
 EXIT_CODES = {
     0: "完成", 1: "失败或结果未知", 2: "参数错误或发送前被拒绝（什么都没发）",
     76: "验证码或限流：立刻停下，到浏览器里处理", 77: "登录失效：回调试 Chrome 重新登录",
-    79: "登录的不是指定的账号", 130: "被打断：写命令可能已经发出，先读回再说",
+    79: "登录的不是指定的账号（子账号）", 130: "被打断：写命令可能已经发出，先读回再说",
     # campaign-engineering (OpenCLI): a command that did not start
     69: "uv 没能启动", 75: "整条命令超时", 78: "不在完整的仓库检出里运行",
 }
@@ -143,6 +148,15 @@ ACTIONS = {
         "effect": "从主商品建一个达人渠道品（新渠道品要平台审核，审核通过后生效），再把这位达人绑上去；两步都核验通过才把推广链接发给达人",
         "caveat": "",
     },
+    "dy.creator_invite": {
+        "platform": "dy", "label": "抖音百应 · 达人广场邀约带货（给达人发邀约卡片）",
+        "required": ("item_id", "creator_douyin_id", "invite_text"), "optional": ("extra_item_ids", "rights"),
+        "link": False,
+        "effect": "在百应「达人广场」给这位达人发一张「邀约带货」卡片（精选联盟私信）：邀约信息、专属权益、这台 Mac 配的联系方式"
+                  "和 1–5 个推荐商品；达人马上收到，发出去收不回，占这个店铺每周的邀约次数",
+        "caveat": "这条写命令还没在真实平台上发过；达人如果已经在和店铺私信（按钮不是「邀约带货」），发出后读回证实不了，"
+                  "结果只会是 ACCEPTED_UNVERIFIED，回复不会自动发：执行后到百应 › 消息核对",
+    },
     "tb.campaign": {
         "platform": "tb", "label": "淘宝万相台 · 精准人群推广计划（建完立即暂停）",
         "required": ("item_id", "crowd_ids", "bid_target", "day_budget"), "optional": (),
@@ -150,15 +164,42 @@ ACTIONS = {
         "effect": "在万相台从零新建一个精准人群推广（自定义）计划：建成即投放，命令确认新计划后马上暂停（中间有几秒在投放、可能产生消耗）",
         "caveat": "到目前为止这条命令的真实运行读回都是 ACCEPTED_UNVERIFIED（父资源位读回暂停且锁定等），按规则回复不会自动发出：执行后请在万相台核对",
     },
+    "jst.sample_order": {
+        "platform": "jst", "label": "聚水潭 · 达人寄样单",
+        "required": ("shop", "creator_platform"),
+        "optional": ("items", "item_id", "skus", "creator_uid", "creator_account", "receiver", "logistics"),
+        "link": False,
+        "effect": "在聚水潭建一张寄样单：这位达人、收货地址、快递、同一家店的一个或几个商品和各自的 SKU、数量（这台 Mac 配的店铺）；"
+                  "达人不在达人库先加入并认领到这台 Mac 登录的子账号，新地址存到达人名下。建好后在聚水潭寄样管理审核，仓库发货",
+        "caveat": "建寄样单这条写命令还没在真实账号上提交过：第一次执行后请到聚水潭寄样管理核对；"
+                  "已经归别的账号跟进、或者寄过这个商品的达人，命令会拦下不建",
+    },
 }
 ACTION_NAMES = tuple(ACTIONS)
 PARAM_LABELS = {
     "item_id": "商品 ID", "creator_platform_id": "达人平台账号", "commission_rate": "佣金率（%）",
     "sku_prices": "SKU 专属价（元）", "title": "商品标题", "short_title": "导购短标题", "price": "渠道价（元）",
     "sku_ids": "SKU", "stock": "渠道库存", "exclusive": "专属达人带货", "crowd_ids": "达摩盘人群包",
+    "creator_douyin_id": "达人抖音号", "invite_text": "邀约信息", "extra_item_ids": "其他推荐商品", "rights": "专属权益",
     "bid_target": "出价目标", "day_budget": "日预算（元）", "note": "说明",
+    "shop": "发货店铺", "items": "寄样商品：SKU × 数量", "skus": "寄样 SKU × 数量", "creator_platform": "达人平台",
+    "creator_uid": "达人 UID",
+    "creator_account": "达人号码（抖音号 / 小红书号）", "receiver": "收货信息", "logistics": "快递",
 }
+SHOPS = ("dy", "xhs")                                   # a sample order sends one of this Mac's two shops' products
+RECEIVER_KEYS = ("name", "phone", "province", "city", "district", "address")
 BID_TARGETS = {"display_pay": "成交", "display_cart": "加购", "display_click": "点击"}
+# The 专属权益 of a 邀约带货 card, in the page's order: the word of a draft -> (the CLI's word, the page's name).
+INVITE_RIGHTS = {"high_commission": ("high-commission", "专属高佣"), "free_sample": ("free-sample", "免费申样"),
+                 "video_material": ("video-material", "视频素材支持"), "video_boost": ("video-boost", "优质视频投放")}
+INVITE_TEXT_MAX = 150                                 # the 邀约信息 field's own limit
+INVITE_MAX_ITEMS = 5                                  # the drawer's 专属推荐商品: item_id and up to 4 more
+
+_SKUS_SCHEMA = {"type": "array", "items": {
+    "type": "object",
+    "properties": {"sku_id": {"type": "string"}, "qty": {"type": "integer"}},
+    "required": ["sku_id", "qty"], "additionalProperties": False}}
+MAX_ORDER_SKUS = 50                     # 聚水潭: SKUs in one sample order (the CLI refuses more)
 
 # The JSON schema of ``platform_action`` (the draft's optional field; result.SCHEMA and the
 # worker's PRM_SCHEMA carry it).  Which parameters an action takes is checked in
@@ -180,12 +221,29 @@ ACTION_SCHEMA = {
         "sku_ids": {"type": "array", "items": {"type": "string"}},
         "stock": {"type": "integer"},
         "exclusive": {"type": "boolean"},
+        "creator_douyin_id": {"type": "string"},
+        "invite_text": {"type": "string"},
+        "extra_item_ids": {"type": "array", "items": {"type": "string"}},
+        "rights": {"type": "array", "items": {"type": "string", "enum": list(INVITE_RIGHTS)}},
         "crowd_ids": {"type": "array", "items": {"type": "string"}},
         "bid_target": {"type": "string", "enum": list(BID_TARGETS)},
         "day_budget": {"type": "integer"},
+        "shop": {"type": "string", "enum": list(SHOPS)},
+        "items": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"item_id": {"type": "string"}, "skus": _SKUS_SCHEMA},
+            "required": ["item_id", "skus"], "additionalProperties": False}},
+        "skus": _SKUS_SCHEMA,
+        "creator_platform": {"type": "string", "enum": list(SHOPS)},
+        "creator_uid": {"type": "string"},
+        "creator_account": {"type": "string"},
+        "receiver": {"type": "object",
+                     "properties": {k: {"type": "string"} for k in RECEIVER_KEYS},
+                     "required": ["name", "phone", "province", "city", "address"], "additionalProperties": False},
+        "logistics": {"type": "string"},
         "note": {"type": "string"},
     },
-    "required": ["action", "item_id"],
+    "required": ["action"],              # the item: each action's own (a sample order may name several)
     "additionalProperties": False,
 }
 
@@ -201,16 +259,28 @@ DEFAULT_LIMITS = {
     "min_price_ratio": 0.5,         # an exclusive price at least this share of the catalogue price
     "max_sku_prices": 20,
     "max_crowds": 10,
+    "max_sample_skus": 10,          # SKUs in one sample order
+    "max_sample_qty": 2,            # pieces of one SKU in it
 }
 # What the bot holds a Mac's action to: the form, the platforms' own ranges and the
 # commission cap (the Mac's other limits are the Mac's: it may have raised them).
-FORM_LIMITS = {**DEFAULT_LIMITS, "max_day_budget": 100_000_000}
+FORM_LIMITS = {**DEFAULT_LIMITS, "max_day_budget": 100_000_000,
+               "max_sample_skus": 50, "max_sample_qty": 99}
 
 _DIGITS = re.compile(r"^[1-9]\d{3,31}$")              # dy / tb ids (no leading zero)
 _HEX24 = re.compile(r"^[0-9A-Za-z]{24}$")              # a 千帆 user id
 _XHS_ID = re.compile(r"^[0-9A-Za-z]{24}$")             # an item / SKU id of 千帆
 _KEY = re.compile(r"^[0-9a-f]{32}$")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_CREATOR_NO = re.compile(r"^[0-9A-Za-z_.][0-9A-Za-z_.-]{0,39}$")   # an 抖音号 / 小红书号 / UID (聚水潭 looks it up)
+_LOGISTICS = re.compile(r"^[A-Za-z0-9_.-]{1,30}$")     # a courier code of 聚水潭 (SF, SF.COLLECT, ZTO …)
+_JST_SHOP = re.compile(r"^\d{1,20}$")                  # a shop id / account id of 聚水潭
+PHONE_TOKEN = re.compile(r"^〈手机\d+〉$")               # the draft's stand-in for a creator's number (pii.py)
+_MOBILE = re.compile(r"^1[3-9]\d{9}$")
+_ORDER_NO = re.compile(r"^YP[0-9A-Za-z]{6,30}$")
+_DOUYIN_ID = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9_.-]{1,63}$")  # an 抖音号, as douyin-engineering takes it
+_INVITE_PHONE = re.compile(r"^1[2-9]\d{9}$")                    # the invite drawer's 手机号 pattern
+_INVITE_WECHAT = re.compile(r"^[a-zA-Z_-][a-zA-Z\d_-]{5,19}$")  # and its 微信号 pattern
 
 
 def _err(code: str, message: str) -> ActionError:
@@ -290,6 +360,12 @@ def check_action(raw, *, catalog: Optional[dict] = None, limits: Optional[dict] 
     lim = _limits(limits)
     platform = spec["platform"]
     out: dict = {"action": name}
+    if platform == "jst":
+        if raw.get("shop") not in SHOPS:
+            raise _err("bad_shop", "发货店铺（shop）只能是 dy（抖店）或 xhs（小红书店）")
+        out["shop"] = raw["shop"]
+        platform = raw["shop"]                  # the products are that shop's (its catalogue, its id format)
+        raw = {**raw, "item_id": _first_item(raw)}     # the first product stands for the order (title, catalogue)
     if platform == "xhs":
         out["item_id"] = _text_id(raw["item_id"], _XHS_ID, "bad_item", "商品 ID")
     else:
@@ -365,6 +441,29 @@ def check_action(raw, *, catalog: Optional[dict] = None, limits: Optional[dict] 
             out["stock"] = stock
         if exclusive and not stock:
             raise _err("bad_stock", "专属达人带货的渠道品不能共用主商品库存：要给 stock（每个 SKU 划多少件）")
+    elif name == "dy.creator_invite":
+        out["creator_douyin_id"] = _text_id(raw["creator_douyin_id"], _DOUYIN_ID, "bad_creator", "达人的抖音号")
+        out["invite_text"] = _free_text(raw["invite_text"], "bad_text", "邀约信息", INVITE_TEXT_MAX)
+        if len(out["invite_text"].encode("utf-16-le")) // 2 > INVITE_TEXT_MAX:      # the page counts UTF-16 units (an emoji is 2)
+            raise _err("bad_text", f"邀约信息超过 {INVITE_TEXT_MAX} 个字（表情符号算 2 个）")
+        extra = raw.get("extra_item_ids") or []
+        if not isinstance(extra, list) or len(extra) > INVITE_MAX_ITEMS - 1:
+            raise _err("bad_item", f"其他推荐商品（extra_item_ids）要是列表，最多 {INVITE_MAX_ITEMS - 1} 个（加上 item_id 一共 {INVITE_MAX_ITEMS} 个）")
+        more = []
+        for other in extra:
+            other = _text_id(other, _DIGITS, "bad_item", "商品 ID")
+            if other == out["item_id"] or other in more:
+                raise _err("bad_item", f"商品 {other} 写了两次")
+            if catalog is not None and catalog_item(catalog, "dy", other) is None:
+                raise _err("not_in_catalog", f"商品 {other} 不在抖音的商品目录里（kb/products.md）")
+            more.append(other)
+        if more:
+            out["extra_item_ids"] = more
+        rights = raw.get("rights") or []
+        if not isinstance(rights, list) or any(r not in INVITE_RIGHTS for r in rights) or len(set(rights)) != len(rights):
+            raise _err("bad_rights", f"专属权益（rights）只能是这几个、每个最多一次：{'、'.join(INVITE_RIGHTS)}")
+        if rights:
+            out["rights"] = [r for r in INVITE_RIGHTS if r in rights]
     elif name == "tb.campaign":
         crowds = raw.get("crowd_ids")
         if not isinstance(crowds, list) or not crowds or len(crowds) > lim["max_crowds"]:
@@ -384,11 +483,129 @@ def check_action(raw, *, catalog: Optional[dict] = None, limits: Optional[dict] 
         if budget > lim["max_day_budget"]:
             raise _err("over_limit", f"日预算 {budget} 元超过这台 Mac 设的上限 {lim['max_day_budget']} 元")
         out["day_budget"] = budget
+    elif name == "jst.sample_order":
+        out.update(_sample_order(raw, platform, lim, catalog))
     if raw.get("note") not in (None, ""):
         if not isinstance(raw["note"], str):
             raise _err("bad_note", "说明要是文字")
         out["note"] = " ".join(raw["note"].split())[:200]
     return out
+
+
+def _first_item(raw: dict):
+    """A sample order's first product: of ``items``, or the old single ``item_id``."""
+    items = raw.get("items")
+    if items not in (None, []):
+        first = items[0].get("item_id") if isinstance(items, list) and isinstance(items[0], dict) else None
+        if raw.get("item_id") not in (None, "") and str(raw["item_id"]).strip() != str(first).strip():
+            raise _err("bad_items", "写了 items 就不要另写 item_id（写了就要和第一个商品一样）")
+        return first
+    if raw.get("item_id") in (None, ""):
+        raise _err("missing_param", "jst.sample_order 缺少商品：写 items（每项 {item_id, skus}），或者 item_id + skus")
+    return raw["item_id"]
+
+
+def _sample_order(raw: dict, shop: str, lim: dict, catalog: Optional[dict]) -> dict:
+    """The parameters of jst.sample_order besides the shop, checked: its products (``items``, or the
+    old single ``item_id`` + ``skus``), each in this shop's catalogue with SKUs of its own, at
+    most ``max_sample_skus`` SKUs in all (and 聚水潭's 50); the creator, the receiver, the courier."""
+    out: dict = {}
+    if raw.get("items") not in (None, []):
+        if raw.get("skus") not in (None, []):
+            raise _err("bad_items", "items 和 skus 只写一种：几个商品写 items（每项 {item_id, skus}）")
+        entries = raw["items"]
+        if not isinstance(entries, list):
+            raise _err("bad_items", "items 要是列表，每项 {item_id, skus}")
+    else:
+        entries = [{"item_id": raw.get("item_id"), "skus": raw.get("skus")}]
+    cap = min(lim["max_sample_skus"], MAX_ORDER_SKUS)
+    items, count = [], 0
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) - {"item_id", "skus"}:
+            raise _err("bad_items", "items 的每项写成 {item_id, skus}")
+        item_id = _text_id(entry.get("item_id"), _XHS_ID if shop == "xhs" else _DIGITS, "bad_item", "商品 ID")
+        if any(i["item_id"] == item_id for i in items):
+            raise _err("bad_items", f"商品 {item_id} 写了两次：它的 SKU 写在一项里")
+        listed_item = catalog_item(catalog, shop, item_id) if catalog is not None else None
+        if catalog is not None and listed_item is None:
+            raise _err("not_in_catalog", f"商品 {item_id} 不在{PLATFORMS[shop]}的商品目录里（kb/products.md），"
+                                         "先在 Mac 上同步商品目录，或者换目录里的商品")
+        skus = entry.get("skus")
+        if not isinstance(skus, list) or not skus:
+            raise _err("bad_sku", f"商品 {item_id} 要写寄哪些 SKU：[{{sku_id, qty}}]")
+        listed = {s.get("id") for s in (listed_item or {}).get("skus") or []}
+        clean = []
+        for sku_entry in skus:
+            if not isinstance(sku_entry, dict) or set(sku_entry) - {"sku_id", "qty"}:
+                raise _err("bad_sku", "每个寄样 SKU 写成 {sku_id, qty}")
+            sku = _text_id(sku_entry.get("sku_id"), _XHS_ID if shop == "xhs" else _DIGITS, "bad_sku", "SKU ID")
+            if any(c["sku_id"] == sku for c in clean):
+                raise _err("bad_sku", f"SKU {sku} 写了两次：数量写在一处")
+            if listed and sku not in listed:
+                raise _err("bad_sku", f"SKU {sku} 不是商品 {item_id} 的（商品目录里没有）")
+            qty = sku_entry.get("qty", 1)
+            if isinstance(qty, bool) or not isinstance(qty, int) or not (1 <= qty <= 99):
+                raise _err("bad_qty", "每个 SKU 的数量要是 1–99 的整数")
+            if qty > lim["max_sample_qty"]:
+                raise _err("over_limit", f"SKU {sku} 寄 {qty} 件，超过这台 Mac 设的上限 {lim['max_sample_qty']} 件")
+            clean.append({"sku_id": sku, "qty": qty})
+        count += len(clean)
+        items.append({"item_id": item_id, "skus": clean})
+    if count > cap:
+        raise _err("over_limit", f"这张寄样单有 {count} 个 SKU，超过上限 {cap} 个（这台 Mac 的 max_sample_skus，"
+                                 f"聚水潭一张单最多 {MAX_ORDER_SKUS} 个）：分成几张单")
+    out["items"] = items
+    if raw.get("creator_platform") not in SHOPS:
+        raise _err("bad_creator", "达人平台（creator_platform）只能是 dy（抖音）或 xhs（小红书）")
+    out["creator_platform"] = raw["creator_platform"]
+    given = [k for k in ("creator_uid", "creator_account") if raw.get(k) not in (None, "")]
+    if len(given) != 1:
+        raise _err("bad_creator", "达人的 UID（creator_uid）和号码（creator_account，抖音号 / 小红书号）给一个")
+    out[given[0]] = _text_id(raw[given[0]], _CREATOR_NO, "bad_creator", PARAM_LABELS[given[0]])
+    if raw.get("receiver") not in (None, {}):
+        out["receiver"] = _receiver(raw["receiver"])
+    if raw.get("logistics") not in (None, ""):
+        out["logistics"] = _text_id(raw["logistics"], _LOGISTICS, "bad_logistics", "快递代码（如 SF）")
+    return out
+
+
+def _receiver(raw) -> dict:
+    """A sample order's address.  The phone is a number or the draft's 〈手机N〉 (the bot puts the
+    number in only when the action goes to the Mac to be executed)."""
+    if not isinstance(raw, dict) or set(raw) - set(RECEIVER_KEYS):
+        raise _err("bad_receiver", "收货信息写成 {name, phone, province, city, district, address}")
+    out = {}
+    for key, what, limit, required in (("name", "收货人", 30, True), ("phone", "", 0, True),
+                                       ("province", "省", 20, True), ("city", "市", 20, True),
+                                       ("district", "区县", 20, False), ("address", "详细地址", 120, True)):
+        if key == "phone":
+            out["phone"] = phone_of(raw.get("phone"))
+            continue
+        value = raw.get(key)
+        if value in (None, ""):
+            if required:
+                raise _err("bad_receiver", f"收货信息缺{what}")
+            out[key] = ""
+            continue
+        out[key] = _free_text(value, "bad_receiver", what, limit)
+    return out
+
+
+def phone_of(value) -> str:
+    """A receiver's phone as an action carries it: 11 digits, or a 〈手机N〉 placeholder."""
+    text = str(value if isinstance(value, (str, int)) and not isinstance(value, bool) else "").strip()
+    if PHONE_TOKEN.match(text):
+        return text
+    digits = re.sub(r"^\+?86(?=1\d{10}$)", "", re.sub(r"[\s-]", "", text))
+    if not _MOBILE.match(digits):
+        raise _err("bad_receiver", "收件电话要是 11 位手机号（或草稿里的〈手机N〉占位符）")
+    return digits
+
+
+def catalog_platform(action: dict) -> str:
+    """Whose catalogue an action's item is in: its platform's; a sample order's, its shop's."""
+    platform = ACTIONS[action["action"]]["platform"]
+    return action.get("shop", "") if platform == "jst" else platform
 
 
 def _cap_rate(rate: Decimal, lim: dict) -> None:
@@ -500,21 +717,36 @@ def describe(action: Optional[dict], catalog_entry: Optional[dict] = None) -> li
         return []
     out = []
     for key, value in action.items():
-        if key == "action":
+        if key == "action" or (key == "item_id" and "items" in action):    # a sample order lists its products
             continue
         if key == "sku_prices":
             value = "；".join(f"{p['sku_id']}：{p['price']} 元" for p in value)
-        elif key in ("sku_ids", "crowd_ids"):
+        elif key in ("sku_ids", "crowd_ids", "extra_item_ids"):
             value = "、".join(value)
+        elif key == "rights":
+            value = "、".join(INVITE_RIGHTS[r][1] for r in value)
         elif key == "exclusive":
             value = "是（只给这一位达人）" if value else "否（达人带货，共用主商品库存）"
         elif key == "bid_target":
             value = f"{BID_TARGETS.get(value, value)}（{value}）"
         elif key == "commission_rate":
             value = f"{value}%"
+        elif key == "skus":
+            value = "；".join(f"{s['sku_id']} × {s['qty']}" for s in value)
+        elif key == "items":
+            value = "；".join(f"{i['item_id']}：" + "、".join(f"{s['sku_id']} × {s['qty']}" for s in i["skus"])
+                             for i in value)
+        elif key == "receiver":
+            value = (f"{value.get('name')} {value.get('phone')} "
+                     f"{value.get('province')}{value.get('city')}{value.get('district') or ''} {value.get('address')}")
+        elif key in ("shop", "creator_platform"):
+            value = f"{PLATFORMS.get(value, value)}（{value}）"
         out.append({"label": PARAM_LABELS.get(key, key), "value": str(value)})
     if catalog_entry and catalog_entry.get("title"):
-        out.insert(0, {"label": "商品", "value": str(catalog_entry["title"])[:80]})
+        title = str(catalog_entry["title"])[:80]
+        if len(action.get("items") or []) > 1:
+            title += f"（等 {len(action['items'])} 款）"
+        out.insert(0, {"label": "商品", "value": title})
     return out
 
 
@@ -565,15 +797,23 @@ def config(settings: dict) -> dict:
     """The Mac's ``platforms`` settings (config.json), checked::
 
         {"node": "/…/node" | None, "dirs": {"xhs": Path, …}, "missing": {"dy": "why"},
-         "limits": {…}, "env": {…}, "dy_expect_shop_id": "…", "tb_shop": "…",
+         "limits": {…}, "env": {…}, "dy_expect_shop_id": "…", "dy_invite_phone": "…", "dy_invite_wechat": "…",
+         "tb_shop": "…",
+         "jst_expect_uid": "…", "jst_shops": {"dy": "…", "xhs": "…"}, "jst_logistics": ["SF", …],
          "preview_timeout_sec": 300, "execute_timeout_sec": 900}
+
+    聚水潭 (jst): several people send samples from one company account, each with a sub-account
+    of their own and their own shops; ``jst_shops`` are this Mac's (聚水潭's shop ids, not the
+    platforms'), ``jst_expect_uid`` the sub-account the CLI must be logged in as (else exit 79),
+    ``jst_logistics`` the couriers a sample order may use (the first one when the draft names none).
 
     A platform is usable when its folder holds its CLI (``bin/xhs.mjs`` …) and node is
     found; ``enabled`` says whether any is.
     """
     raw = settings.get("platforms") if isinstance(settings.get("platforms"), dict) else {}
     out = {"node": None, "dirs": {}, "missing": {}, "limits": _limits(raw), "env": {},
-           "dy_expect_shop_id": "", "tb_shop": "",
+           "dy_expect_shop_id": "", "dy_invite_phone": "", "dy_invite_wechat": "", "dy_invite_invalid": [],
+           "tb_shop": "", "jst_expect_uid": "", "jst_shops": {}, "jst_logistics": [],
            "preview_timeout_sec": PREVIEW_TIMEOUT_SEC, "execute_timeout_sec": EXECUTE_TIMEOUT_SEC}
     for key in ("preview_timeout_sec", "execute_timeout_sec"):
         value = raw.get(key)
@@ -585,9 +825,25 @@ def config(settings: dict) -> dict:
     shop = str(raw.get("dy_expect_shop_id") or "").strip()
     if shop and _DIGITS.match(shop):
         out["dy_expect_shop_id"] = shop
+    # the contact a 邀约带货 card shows the creator: the shop's, set on the Mac, never from a draft
+    for key, pattern in (("dy_invite_phone", _INVITE_PHONE), ("dy_invite_wechat", _INVITE_WECHAT)):
+        value = str(raw.get(key) or "").strip()
+        if pattern.match(value):
+            out[key] = value
+        elif value:
+            out["dy_invite_invalid"].append(key)          # set, but not in the drawer's format: said, never used
     tb_shop = str(raw.get("tb_shop") or "").strip()
     if tb_shop and not tb_shop.startswith("-") and not _CONTROL.search(tb_shop) and len(tb_shop) <= 40:
         out["tb_shop"] = tb_shop
+    uid = str(raw.get("jst_expect_uid") or "").strip()
+    if _JST_SHOP.match(uid):
+        out["jst_expect_uid"] = uid
+    shops = raw.get("jst_shops") if isinstance(raw.get("jst_shops"), dict) else {}
+    out["jst_shops"] = {k: str(v).strip() for k, v in shops.items()
+                        if k in SHOPS and isinstance(v, (str, int)) and _JST_SHOP.match(str(v).strip())}
+    couriers = raw.get("jst_logistics")
+    couriers = [couriers] if isinstance(couriers, str) else couriers if isinstance(couriers, list) else []
+    out["jst_logistics"] = [c for c in couriers if isinstance(c, str) and _LOGISTICS.match(c)][:10]
     out["node"] = find_node(str(raw.get("node_bin") or ""))
     for platform, cli in CLI_FILES.items():
         folder = str(raw.get(platform) or "").strip()
@@ -831,8 +1087,13 @@ def _exit_problem(run: CliRun) -> str:
     return _clip(f"退出码 {run.exit_code}{'（' + meaning + '）' if meaning else ''}{'：' + line if line else ''}", 400)
 
 
+def _masked(command: str) -> str:
+    """A command line as the console shows it: an invitation's phone (the shop's) with its middle four digits hidden."""
+    return re.sub(r"(--phone=\d{3})\d{4}(\d{4})", r"\1****\2", command)
+
+
 def _step(name: str, label_: str, run: CliRun, execute: bool) -> dict:
-    return {"name": name, "label": label_, "execute": execute, "command": run.command(), "exit_code": run.exit_code,
+    return {"name": name, "label": label_, "execute": execute, "command": _masked(run.command()), "exit_code": run.exit_code,
             "seconds": run.seconds, "verdict": "", "outcome": "", "problems": [], "facts": [], "raw": _raw(run)}
 
 
@@ -904,13 +1165,32 @@ DY_STEPS = {
     "promotion": ("百应 · 给商品建推广（还没推广时）", ("buyin", "promotion-create")),
     "create": ("抖店 · 建达人渠道品", ("fxg", "channel-goods-create")),
     "bind": ("抖店 · 渠道品绑定达人", ("fxg", "channel-goods-bind")),
+    "invite": ("百应 · 达人广场邀约带货", ("buyin", "author-invite")),
 }
 _NEEDS_PROMOTION = "create its promotion first"
+NO_INVITE_CONTACT = ("这台 Mac 没配邀约卡片上给达人看的联系方式：在 ~/.claude-relay/config.json 的 platforms 里写 "
+                     "dy_invite_phone（11 位手机号）或 dy_invite_wechat（微信号），至少一个")
+
+
+def _no_contact(cfg: dict) -> str:
+    bad = cfg.get("dy_invite_invalid") or []
+    return NO_INVITE_CONTACT + (f"（填了但格式不对：{'、'.join(bad)}）" if bad else "")
+
+
+def _contact_problem(cfg: dict) -> str:
+    """Why the card's contact cannot go as configured ("" = it can): none set, or one set in the wrong format (it would be dropped)."""
+    if not (cfg.get("dy_invite_phone") or cfg.get("dy_invite_wechat")):
+        return _no_contact(cfg)
+    bad = cfg.get("dy_invite_invalid") or []
+    if bad:
+        return (f"config.json 的 platforms 里 {'、'.join(bad)} 填了但格式不对（手机号 11 位、第二位 2–9；微信号 6–20 位字母数字 _ -，不以数字开头），"
+                "照现在的配置它会被丢掉、卡片上缺这一项：改好再预览")
+    return ""
 _LINK_HOSTS = {"dy": (".jinritemai.com", ".douyin.com", ".snssdk.com"),
                "xhs": (".xiaohongshu.com", ".xhslink.com")}
 
 
-def _dy_argv(cfg: dict, step: str, action: dict, *, execute: bool, channel_id: str = "") -> list:
+def _dy_argv(cfg: dict, step: str, action: dict, *, execute: bool, channel_id: str = "", expect: Optional[dict] = None) -> list:
     a = action
     if step == "designated":
         opts = [f"--id={a['item_id']}", f"--uid={a['creator_platform_id']}", f"--to={a['commission_rate']}",
@@ -929,6 +1209,22 @@ def _dy_argv(cfg: dict, step: str, action: dict, *, execute: bool, channel_id: s
         if not _DIGITS.match(str(channel_id)):
             raise _err("bad_channel", "渠道品 ID 不对")
         opts = [f"--product-id={a['item_id']}", f"--channel-id={channel_id}", f"--uid={a['creator_platform_id']}"]
+    elif step == "invite":
+        if not (cfg.get("dy_invite_phone") or cfg.get("dy_invite_wechat")):
+            raise _err("no_contact", NO_INVITE_CONTACT)
+        opts = [f"--aweme-id={a['creator_douyin_id']}", "--product=" + ",".join([a["item_id"], *a.get("extra_item_ids", [])]),
+                f"--content={a['invite_text']}"]
+        if a.get("rights"):
+            opts.append("--rights=" + ",".join(INVITE_RIGHTS[r][0] for r in a["rights"]))
+        if cfg.get("dy_invite_phone"):
+            opts.append(f"--phone={cfg['dy_invite_phone']}")
+        if cfg.get("dy_invite_wechat"):
+            opts.append(f"--wechat={cfg['dy_invite_wechat']}")
+        opts.append("--names")                            # the operator checks the nickname against the person in the chat
+        if execute:
+            if not expect or not isinstance(expect.get("status"), int) or not isinstance(expect.get("popwindow"), int):
+                raise _err("bad_plan", "邀约带货的执行要带预览时达人的状态和门槛")
+            opts += [f"--expect-status={expect['status']}", f"--expect-popwindow={expect['popwindow']}"]
     else:
         raise _err("bad_step", f"不认识的步骤 {step}")
     if cfg.get("dy_expect_shop_id"):
@@ -1008,6 +1304,26 @@ def _dy_facts(step: str, data: dict, rec: dict, action: dict) -> None:
         low = data.get("lowCommission") if isinstance(data.get("lowCommission"), dict) else None
         if low and low.get("floor") not in (None, ""):
             rec["facts"].append(_fact("低佣金规则", f"{low.get('rule')}（底线 {low.get('floor')}%）"))
+    elif step == "invite":
+        creator = data.get("creator") if isinstance(data.get("creator"), dict) else {}
+        if creator.get("nickname"):
+            rec["facts"].append(_fact("达人昵称（请核对是不是聊天里这位）", creator["nickname"]))
+        before = data.get("statusBefore") if isinstance(data.get("statusBefore"), dict) else {}
+        if before:
+            rec["facts"].append(_fact("达人现在的按钮", before.get("button") or ""))
+            if before.get("status") != 1 and rec["verdict"] == "ready":
+                rec["verdict"] = "blocked"
+                rec["problems"].append(f"达人现在不是「邀约带货」（{before.get('button')}）：已经邀约过或在沟通，再发一张卡片收不回、"
+                                       "也核验不了；真要再发，请运营在百应页面上自己发")
+        gate = data.get("gate") if isinstance(data.get("gate"), dict) else {}
+        if gate:
+            text = f"{gate.get('popwindow')}（popwindow_type {gate.get('popwindowType')}）"
+            if gate.get("remaining") is not None:
+                text += f"；本周还剩 {gate.get('remaining')} 次"
+            rec["facts"].append(_fact("邀约门槛", text))
+        for item in data.get("products") or []:
+            if isinstance(item, dict):
+                rec["facts"].append(_fact(f"商品 {item.get('productId')}", item.get("sample") or item.get("problem") or ""))
     elif step == "promotion":
         pass
 
@@ -1077,9 +1393,30 @@ def _preview_dy_channel_goods(action: dict, cfg: dict, run_one, block: dict) -> 
                                           "两步都核验通过才把渠道品的推广链接发给达人"))
 
 
+def _preview_dy_invite(action: dict, cfg: dict, run_one, block: dict) -> None:
+    contact = _contact_problem(cfg)
+    if contact:
+        block["steps"].append({"name": "invite", "label": DY_STEPS["invite"][0], "execute": False, "command": "",
+                               "exit_code": None, "seconds": 0, "verdict": "unavailable", "outcome": "",
+                               "problems": [contact], "facts": [], "raw": ""})
+        return
+    rec, data = _dy_preview(cfg, "invite", action, run_one)
+    block["steps"].append(rec)
+    # what the approval holds the creator to: the status and the gate this preview saw
+    before = (data or {}).get("statusBefore") if isinstance((data or {}).get("statusBefore"), dict) else {}
+    gate = (data or {}).get("gate") if isinstance((data or {}).get("gate"), dict) else {}
+    status, popwindow = before.get("status"), gate.get("popwindowType")
+    if rec["verdict"] == "ready" and not (_is_int(status) and _is_int(popwindow)):
+        rec["verdict"] = "error"
+        rec["problems"].append("预览结果里没有达人现在的状态或邀约门槛，不能批准")
+    block["run"] = {"steps": ["invite"], "status": status, "popwindow": popwindow} if rec["verdict"] == "ready" else {"steps": ["invite"]}
+    block["facts"].append(_fact("批准以后", f"给抖音号 {action['creator_douyin_id']} 发一张邀约带货卡片（精选联盟私信），"
+                                          "发出去收不回；达人的按钮从「邀约带货」变成「继续沟通」才算核验通过，才发微信回复"))
+
+
 def _execute_dy(action: dict, cfg: dict, plan: dict, run_one, record: dict) -> None:
-    def write(step: str, channel_id: str = "") -> tuple:
-        run = run_one(_dy_argv(cfg, step, action, execute=True, channel_id=channel_id), "dy", True)
+    def write(step: str, channel_id: str = "", expect: Optional[dict] = None) -> tuple:
+        run = run_one(_dy_argv(cfg, step, action, execute=True, channel_id=channel_id, expect=expect), "dy", True)
         data = parse_json(run.stdout)
         rec = _step(step, DY_STEPS[step][0], run, True)
         rec["outcome"] = _execute_outcome(run, data, _rows(data), rec)
@@ -1093,6 +1430,13 @@ def _execute_dy(action: dict, cfg: dict, plan: dict, run_one, record: dict) -> N
         return rec, data
 
     name = action["action"]
+    if name == "dy.creator_invite":
+        contact = _contact_problem(cfg)
+        if contact:
+            record["problems"].append("没有执行：" + contact)
+            return
+        write("invite", expect=plan)
+        return
     if name == "dy.designated_commission":
         if plan["steps"][0] == "promotion":
             outcome, _ = write("promotion")
@@ -1141,7 +1485,9 @@ PLANS = {
     "xhs.channel_item": (("create",),),
     "dy.designated_commission": (("designated",), ("promotion", "designated")),
     "dy.channel_goods": (("create", "bind"),),
+    "dy.creator_invite": (("invite",),),
     "tb.campaign": (("create",),),
+    "jst.sample_order": (("create",),),
 }
 _VERDICT_RANK = ("error", "wrong_account", "wall", "login", "unavailable", "invalid", "blocked", "ready")
 
@@ -1203,7 +1549,7 @@ def preview(raw, cfg: dict, *, catalog: Optional[dict], heartbeat=None, context:
     block = _new_block(raw, action)
     name = action["action"]
     platform = ACTIONS[name]["platform"]
-    entry = catalog_item(catalog, platform, action["item_id"]) or {}
+    entry = catalog_item(catalog, catalog_platform(action), action["item_id"]) or {}
     block["catalog"] = {"synced_at": (catalog or {}).get("synced_at"), "title": _clip(entry.get("title", ""), 120)}
     if catalog is None:
         block["verdict"] = "invalid"
@@ -1214,7 +1560,8 @@ def preview(raw, cfg: dict, *, catalog: Optional[dict], heartbeat=None, context:
         block["problems"].append(cfg.get("missing", {}).get(platform)
                                  or f"这台 Mac 的 config.json 里没有配置{PLATFORMS[platform]}的命令行项目（platforms.{platform}）")
         return block
-    _PREVIEWS[name](action, cfg, _runner(cfg, heartbeat), block, {**(context or {}), "catalog_entry": entry or None})
+    _PREVIEWS[name](action, cfg, _runner(cfg, heartbeat), block,
+                    {**(context or {}), "catalog_entry": entry or None, "catalog": catalog})
     verdict = "ready"
     for step in block["steps"]:
         verdict = _worse_verdict(verdict, step.get("verdict") or "error")
@@ -1240,7 +1587,33 @@ def check_plan(action: dict, plan) -> dict:
         out["name"] = _plan_name(plan.get("name"))
     elif action["action"] == "tb.campaign":
         out["name"] = _tb_name(plan.get("name"))
+    elif action["action"] == "dy.creator_invite":
+        for key, low, high in (("status", 0, 9999), ("popwindow", -1, 9999)):
+            value = plan.get(key)
+            if not _is_int(value) or not (low <= value <= high):
+                raise _err("bad_plan", "邀约带货的批准里没有预览时达人的状态和门槛")
+            out[key] = value
     return out
+
+
+RECEIVER_CLEARED = "（详细地址已清除）"         # as retention.CLEARED: only the province and the city stay
+
+
+def ledger_action(action: dict) -> dict:
+    """The action as the ledger keeps it (for good): a sample order's receiver cut down the way the
+    bot's clean-up cuts it after delivery (retention.py), province and city only."""
+    receiver = action.get("receiver")
+    if not isinstance(receiver, dict):
+        return action
+    name, phone = str(receiver.get("name") or ""), str(receiver.get("phone") or "")
+    return {**action, "receiver": {
+        "name": name[:1] + "*" if name else "", "phone": phone[:3] + "****" + phone[-4:] if _MOBILE.match(phone) else phone,
+        "province": receiver.get("province"), "city": receiver.get("city"), "district": "",
+        "address": RECEIVER_CLEARED}}
+
+
+def _is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def record(outcome: str, problems: Optional[list] = None) -> dict:
@@ -1273,7 +1646,7 @@ def execute(raw, cfg: dict, *, plan, key: str, ledger, catalog: Optional[dict], 
         return out
     try:
         earlier = claim(ledger, key, {"key": key, "status": "started", "started_at": time.time(),
-                                      "action": action, "run": approved, **(context or {})})
+                                      "action": ledger_action(action), "run": approved, **(context or {})})
     except (ActionError, OSError) as e:
         out["problems"].append(f"没有执行：执行台账写不了（{e}）")
         return out
@@ -1285,7 +1658,8 @@ def execute(raw, cfg: dict, *, plan, key: str, ledger, catalog: Optional[dict], 
         return out
     try:
         _EXECUTES[platform](action, cfg, approved, _runner(cfg, heartbeat), out,
-                            {"catalog_entry": catalog_item(catalog, platform, action["item_id"])})
+                            {"catalog_entry": catalog_item(catalog, catalog_platform(action), action["item_id"]),
+                             "catalog": catalog})
         writes = [step for step in out["steps"] if step.get("execute")]
         outcome = worst(step.get("outcome") for step in writes) if writes else "NOT_RUN"
         done = {step["name"] for step in out["steps"] if step.get("outcome") in _DONE}
@@ -1306,7 +1680,7 @@ def execute(raw, cfg: dict, *, plan, key: str, ledger, catalog: Optional[dict], 
     finally:
         out["finished_at"] = time.time()
         try:
-            settle(ledger, key, {"key": key, "status": "done", "action": action, "run": approved,
+            settle(ledger, key, {"key": key, "status": "done", "action": ledger_action(action), "run": approved,
                                  "finished_at": out["finished_at"], "record": {k: v for k, v in out.items() if k != "steps"},
                                  **(context or {})})
         except OSError:
@@ -1403,6 +1777,8 @@ def check_record(value) -> dict:
     for key in ("channel_id", "group_id", "task_id", "item_id", "campaign_id", "plan_name", "review"):
         if created_in.get(key) not in (None, ""):
             created[key] = _clip(created_in[key], 200)
+    if _ORDER_NO.match(str(created_in.get("sample_order_no") or "")):
+        created["sample_order_no"] = str(created_in["sample_order_no"])
     if isinstance(created_in.get("strategy_ids"), list):
         created["strategy_ids"] = [_clip(s, 40) for s in created_in["strategy_ids"][:10]]
     link = str(created_in.get("link") or "")
@@ -1494,7 +1870,7 @@ def sync_catalog(cfg: dict, wanted: list, *, previous: Optional[dict] = None, pr
     commands.  A platform that fails keeps its previous list, marked ``stale``."""
     old = ((previous or {}).get("platforms") or {}) if isinstance(previous, dict) else {}
     out = {"version": 1, "synced_at": time.time(), "platforms": {}}
-    for platform in PLATFORMS:
+    for platform in CATALOG_PLATFORMS:
         if platform not in wanted or platform not in cfg.get("dirs", {}):
             if isinstance(old.get(platform), dict):
                 out["platforms"][platform] = old[platform]
@@ -1522,7 +1898,8 @@ def catalog_markdown(catalog: dict) -> str:
              f"同步时间：{when}（Mac 上运行 `python3 tools/claude_relay/worker.py --sync-products` 生成）。",
              "起草平台动作（platform_action）时，商品 ID 和 SKU ID 只能从这张表里取；价格是目录里的售价（元），"
              "专属价、佣金按 kb/ 里的合作规则定。SKU 后面的「编码」是聚水潭的商品编码（有的平台才有）。", ""]
-    for platform, name in PLATFORMS.items():
+    for platform in CATALOG_PLATFORMS:
+        name = PLATFORMS[platform]
         part = (catalog.get("platforms") or {}).get(platform)
         if not isinstance(part, dict):
             continue
@@ -1946,6 +2323,206 @@ def _sync_tb(cfg: dict, progress) -> dict:
     return {"items": items, "notes": notes, "complete": True}
 
 
+# ── 聚水潭 (jushuitan-engineering, node bin/jst.mjs) ─────────────────────
+# sample-create takes its order as a JSON file (a receiver's phone must not be on a command
+# line): written 0600 to a temp file for the one run, removed right after.  Its preview (no
+# --execute) only reads: the shop's on-sale product found by title (聚水潭 cannot search shop
+# products by id; the title comes from the catalogue), its SKUs (matched by the platform's SKU
+# id), the creator (UID or 抖音号 / 小红书号, exact), saved addresses, couriers, earlier samples.
+# A draft's phone is 〈手机N〉: the preview goes without it; the bot puts the number in when the
+# approved action comes back to be executed.
+
+JST_STEPS = {"preview": "聚水潭 · 寄样单预览（只读：商品、达人、地址、快递、查重）", "create": "聚水潭 · 建寄样单"}
+# The CLI's [TAG]s of a run that ended before its order could be sent.
+_JST_TAGS = ("USAGE", "REFUSED", "NOT_LOGGED_IN", "RISK", "WRONG_ACCOUNT", "NO_BROWSER", "AMBIGUOUS")
+
+
+def _jst_title(entry: Optional[dict]) -> str:
+    """What the shop's products are searched by: the catalogue title's first 30 characters."""
+    title = str((entry or {}).get("title") or "").strip().rstrip("…").strip()
+    return "" if _CONTROL.search(title) else title[:30]
+
+
+def _jst_spec(action: dict, cfg: dict, catalog: Optional[dict], *, execute: bool) -> dict:
+    """The order file of ``jst sample-create``: one goods line per SKU, each product searched by its
+    own catalogue title."""
+    shop = (cfg.get("jst_shops") or {}).get(action["shop"])
+    if not shop:
+        raise _err("no_shop", f"这台 Mac 没有配聚水潭里{PLATFORMS[action['shop']]}店铺的 ID"
+                              f"（config.json 的 platforms.jst_shops.{action['shop']}）")
+    allowed = cfg.get("jst_logistics") or []
+    if not allowed:                     # the draft never picks a courier on its own (到付 costs the creator)
+        raise _err("no_logistics", "这台 Mac 没有配寄样能用的快递：在 config.json 的 platforms.jst_logistics 里"
+                                   "写上快递代码（第一个是默认）")
+    code = action.get("logistics") or allowed[0]
+    if code not in allowed:
+        raise _err("bad_logistics", f"快递 {code} 不在这台 Mac 允许的里面（{'、'.join(allowed)}）")
+    items = action.get("items") or [{"item_id": action["item_id"], "skus": action.get("skus") or []}]
+    goods = []
+    for item in items:
+        title = _jst_title(catalog_item(catalog, action["shop"], item["item_id"]))
+        if not title:
+            raise _err("no_title", f"商品目录里没有商品 {item['item_id']} 的标题（聚水潭的店铺商品只能按标题搜）："
+                                   "先同步商品目录")
+        goods += [{"platform": action["shop"].upper(), "shop": shop, "product": item["item_id"],
+                   "title": title, "sku": s["sku_id"], "qty": s["qty"]} for s in item["skus"]]
+    by = "uid" if action.get("creator_uid") else "account"
+    spec = {"daren": {"platform": action["creator_platform"].upper(), by: action[f"creator_{by}"]},
+            "logistics": code, "goods": goods}
+    receiver = action.get("receiver")
+    if receiver:
+        phone = receiver["phone"]
+        if PHONE_TOKEN.match(phone):
+            if execute:
+                raise _err("phone_token", "收件电话还是占位符：执行时机器人要换成号码，这次没换，不执行")
+            phone = None
+        spec["receiver"] = {"name": receiver["name"], "phone": phone, "state": receiver["province"],
+                            "city": receiver["city"], "district": receiver.get("district") or "",
+                            "address": receiver["address"]}
+    return spec
+
+
+def _jst_argv(cfg: dict, spec_file: str, *, execute: bool) -> list:
+    who = [f"--expect-uid={cfg['jst_expect_uid']}"] if cfg.get("jst_expect_uid") else []
+    return [cfg["node"], CLI_FILES["jst"], "sample-create", f"--spec={spec_file}", *who,
+            *(["--execute"] if execute else [])]
+
+
+def _jst_run(cfg: dict, spec: dict, run_one, *, execute: bool) -> CliRun:
+    """One sample-create run, its order in a private temp file (removed afterwards)."""
+    import tempfile
+
+    fd, path = tempfile.mkstemp(prefix="webot-jst-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(spec, f, ensure_ascii=False)
+        return run_one(_jst_argv(cfg, path, execute=execute), "jst", execute)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def _jst_facts(data: dict, rec: dict) -> None:
+    """What the operator should see of a sample-create answer (its receiver comes masked)."""
+    d = data.get("daren") if isinstance(data.get("daren"), dict) else None
+    if d:
+        belongs = {"mine": "归这个子账号跟进", "none": "没人跟进：执行时认领到这个子账号",
+                   "others": f"归 {'、'.join(map(str, d.get('followers') or []))} 跟进"}.get(d.get("belongs"), "")
+        rec["facts"].append(_fact("达人", f"{d.get('nickName')}（{d.get('platform')} {d.get('platformNo') or ''}，"
+                                          f"粉丝 {d.get('fansNum')}）；{belongs}"
+                                          + ("" if d.get("inLibrary") else "；不在达人库：执行时先加入")))
+    r = data.get("receiver") if isinstance(data.get("receiver"), dict) else None
+    if r:
+        rec["facts"].append(_fact("收货", f"{r.get('name')} {r.get('phone')} {r.get('region')} {r.get('address')}"
+                                          f"（{r.get('source')}）"))
+    lg = data.get("logistics") if isinstance(data.get("logistics"), dict) else None
+    if lg:
+        rec["facts"].append(_fact("快递", f"{lg.get('name')}（{lg.get('code')}）"))
+    for g in data.get("goods") or []:
+        if not isinstance(g, dict):
+            continue
+        skus = "；".join(f"{k.get('itemCode')} {k.get('properties') or ''} × {k.get('qty')}"
+                        f"（售价 {k.get('price')}，平台库存 {k.get('platformStock')}）"
+                        for k in g.get("skus") or [] if isinstance(k, dict))
+        rec["facts"].append(_fact("商品", f"{g.get('title')}（{g.get('shopName') or g.get('shopId')}）：{skus}"))
+    if isinstance(data.get("repeat"), list):
+        hits = [str(h.get("orderNo") or h.get("productId")) for h in data["repeat"] if isinstance(h, dict)]
+        rec["facts"].append(_fact("查重", "寄过：" + "、".join(hits) if hits else "这位达人没寄过这个商品"))
+    for key, label_ in (("willDo", "执行时会做"), ("done", "已经做了")):
+        if data.get(key):
+            rec["facts"].append(_fact(label_, "、".join(map(str, data[key]))))
+    if data.get("orderNo"):
+        rec["facts"].append(_fact("寄样单号", f"{data['orderNo']}（{data.get('status') or ''}）"))
+    if data.get("note"):
+        rec["facts"].append(_fact("说明", data["note"]))
+
+
+def _preview_jst(action: dict, cfg: dict, run_one, block: dict, context: dict) -> None:
+    block["run"] = {"steps": ["create"]}
+    try:
+        spec = _jst_spec(action, cfg, context.get("catalog"), execute=False)
+    except ActionError as e:
+        block["steps"].append({"name": "preview", "label": JST_STEPS["preview"], "execute": False, "command": "",
+                               "exit_code": None, "seconds": 0, "verdict": "invalid", "outcome": "",
+                               "problems": [str(e)], "facts": [], "raw": ""})
+        return
+    run = _jst_run(cfg, spec, run_one, execute=False)
+    data = parse_json(run.stdout)
+    rec = _step("preview", JST_STEPS["preview"], run, False)
+    block["steps"].append(rec)
+    if not cfg.get("jst_expect_uid"):
+        rec["facts"].append(_fact("子账号", "这台 Mac 没设 jst_expect_uid：不核对调试 Chrome 里登录的是哪个子账号"))
+    if isinstance(data, dict):
+        _jst_facts(data, rec)
+    if run.error or run.stopped:
+        rec["problems"].append(_exit_problem(run))
+        rec["verdict"] = "error"
+    elif run.exit_code in _EXIT_VERDICT:
+        rec["problems"].append(_exit_problem(run))
+        rec["verdict"] = _EXIT_VERDICT[run.exit_code]
+    elif run.exit_code == 2:
+        rec["problems"].append(_exit_problem(run))
+        rec["verdict"] = "invalid"
+    elif isinstance(data, dict) and data.get("outcome") == "PREVIEW" and run.exit_code == 0:
+        rec["verdict"] = "ready"
+    elif isinstance(data, dict) and data.get("outcome") == "FAILED":
+        rec["problems"].extend(_clip(t, 500) for t in (data.get("blocked") or [data.get("note") or "命令说不能建"]))
+        rec["verdict"] = "blocked"
+    else:
+        rec["problems"].append(_exit_problem(run) if run.exit_code else "预览没有给出结果")
+        rec["verdict"] = "error"
+
+
+def _jst_outcome(run: CliRun, data, rec: dict) -> str:
+    """The outcome of an executed sample-create: its JSON's; without one, FAILED when the CLI
+    stopped before the order could go out (its [TAG] says why), else INDETERMINATE."""
+    if not isinstance(data, dict):
+        rec["problems"].append(_exit_problem(run))
+        if run.error:
+            return "FAILED"
+        tag = re.match(r"^\[([A-Z_]+)\]", _stderr_line(run.stderr))
+        if not run.stopped and run.exit_code not in (None, 130) and tag and tag.group(1) in _JST_TAGS:
+            return "FAILED"
+        return "INDETERMINATE"
+    outcome = data.get("outcome")
+    rec["problems"].extend(_clip(t, 500) for t in data.get("blocked") or [])
+    if outcome not in OUTCOMES:
+        rec["problems"].append(f"命令给的结果是 {outcome}（执行时不该是这个）")
+        return "FAILED" if outcome == "PREVIEW" else "INDETERMINATE"
+    if outcome != VERIFIED and data.get("note"):
+        rec["problems"].append(_clip(data["note"], 500))
+    if outcome == VERIFIED and not _ORDER_NO.match(str(data.get("orderNo") or "")):
+        rec["problems"].append("说建好了，可结果里没有寄样单号")
+        return "ACCEPTED_UNVERIFIED"
+    return outcome
+
+
+def _execute_jst(action: dict, cfg: dict, plan: dict, run_one, record: dict, catalog: Optional[dict] = None) -> None:
+    try:
+        spec = _jst_spec(action, cfg, catalog, execute=True)
+    except ActionError as e:
+        record["problems"].append(f"没有执行：{e}")
+        return
+    run = _jst_run(cfg, spec, run_one, execute=True)
+    data = parse_json(run.stdout)
+    rec = _step("create", JST_STEPS["create"], run, True)
+    record["steps"].append(rec)
+    rec["outcome"] = _jst_outcome(run, data, rec)
+    if isinstance(data, dict):
+        _jst_facts(data, rec)
+        if _ORDER_NO.match(str(data.get("orderNo") or "")):
+            record["created"]["sample_order_no"] = str(data["orderNo"])
+    if rec["outcome"] != VERIFIED:
+        # what the operator must check in 聚水潭 goes with the red mark (the order may exist)
+        number = record["created"].get("sample_order_no")
+        note = data.get("note") if isinstance(data, dict) else ""
+        line = "；".join(t for t in (f"聚水潭寄样单 {number}" if number else "", _clip(note or "", 300)) if t)
+        if line:
+            record["problems"].append(line)
+
+
 # ── the registries ────────────────────────────────────────────────────────
 
 _PREVIEWS = {
@@ -1953,11 +2530,14 @@ _PREVIEWS = {
     "xhs.channel_item": _preview_xhs_channel_item,
     "dy.designated_commission": lambda a, c, r, b, ctx: _preview_dy_designated(a, c, r, b),
     "dy.channel_goods": lambda a, c, r, b, ctx: _preview_dy_channel_goods(a, c, r, b),
+    "dy.creator_invite": lambda a, c, r, b, ctx: _preview_dy_invite(a, c, r, b),
     "tb.campaign": _preview_tb,
+    "jst.sample_order": _preview_jst,
 }
 _EXECUTES = {
     "xhs": lambda a, c, p, r, rec, ctx: _execute_xhs(a, c, p, r, rec),
     "dy": lambda a, c, p, r, rec, ctx: _execute_dy(a, c, p, r, rec),
     "tb": lambda a, c, p, r, rec, ctx: _execute_tb(a, c, p, r, rec, ctx.get("catalog_entry")),
+    "jst": lambda a, c, p, r, rec, ctx: _execute_jst(a, c, p, r, rec, ctx.get("catalog")),
 }
 _SYNCS = {"xhs": _sync_xhs, "dy": _sync_dy, "tb": _sync_tb}

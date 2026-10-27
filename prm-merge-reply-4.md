@@ -64,12 +64,18 @@ pyinstaller build.spec
 
 ```
 CLAUDE_RELAY=on
+CLAUDE_RELAY_ONLY=on
 PRIVATE_CHAT_ENABLED=true
 PRM_COPILOT=off
 PRM_EDGE=on
 PRM_EDGE_TOKEN=<至少 32 个字符，不能和 CLAUDE_RELAY_TOKEN 一样；Mac 业务服务用同一个>
 ```
 
+- `CLAUDE_RELAY_ONLY=on`：除了 cc 任务和名单里的达人，别的消息一律不回（你们联调清单里的 D24：名单以外的私聊不自动回复）。上一版漏了这一行，谢谢你们指出。
+  - 名单里达人的消息在路由的 `edge` 这一步就交给 Mac 了，排在 `relay_only` 前面，所以两个开关可以一起开。
+  - 只做中转也不需要 AI 密钥。
+- `PRM_EDGE_TOKEN`：在 Windows 上生成，再私下发给 Mac 那边，不要写进仓库：
+  `python -c "import secrets; print(secrets.token_urlsafe(32))"`（生成 43 个字符）。
 - `PRM_COPILOT` 和 `PRM_EDGE` 不能同时开，同时开启动时会报错。
 - 其余 `EDGE_*` 先用默认值。
 - cc 任务照常走中转，不受影响。

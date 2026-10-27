@@ -38,7 +38,7 @@ draft waits in the bot's console; nothing reaches the creator from here.  The
 worker only asks the bot for prm jobs when prm_workspace is usable
 (X-Relay-Kinds).
 
-Platform actions (config.json "platforms": the 小红书 / 抖音 / 淘宝 CLI folders): a draft
+Platform actions (config.json "platforms": the 小红书 / 抖音 / 淘宝 / 聚水潭 CLI folders): a draft
 may name one (``platform_action``, typed parameters only; Claude still has no Bash).
 This script checks it (src/prm/platforms.py of this checkout, loaded by path) against
 the catalogue kb/products.json and runs the CLI's preview (no --execute) before the
@@ -266,14 +266,30 @@ PRM_PLATFORM_NOTE = (
     "- dy.channel_goods：抖店达人渠道品（专属推广链接），并把达人绑上去。item_id = 主商品 ID，creator_platform_id = 达人 UID；"
     "price = 渠道价（元，不填就跟主商品一样）；sku_ids 一般不填（默认全部在售 SKU）；exclusive 一般不填"
     "（false = 达人带货、共用主商品库存；true = 专属达人带货，这时必须给 stock）。\n"
+    "- dy.creator_invite：抖音百应达人广场「邀约带货」，给达人发一张邀约卡片（精选联盟私信，发出去收不回）。"
+    "item_id = 主推商品 ID，extra_item_ids = 其他推荐商品（最多 4 个，一般不填），creator_douyin_id = 达人的抖音号"
+    "（只能用达人在对话里自己发来的、或登记信息里的抖音号，不能猜），"
+    "invite_text = 邀约信息（150 字以内，一段话，不换行、不带花括号；介绍店铺、商品卖点和合作条件，只写 kb/ 里有的），"
+    "rights = 专属权益，只能从 high_commission（专属高佣）、free_sample（免费申样）、video_material（视频素材支持）、"
+    "video_boost（优质视频投放）里按 kb/ 的规则选，没有就不填；联系方式由系统填，不要写进邀约信息。"
+    "对话或合作单里已经发过邀约卡片的达人不要再填这个动作（卡片收不回），在回复里说已经发过、请达人看抖音私信。\n"
     "- tb.campaign：淘宝万相台精准人群推广计划（建完立即暂停）。item_id、crowd_ids（达摩盘人群包 ID）、"
     "bid_target、day_budget（元/天）都只按 kb/ 里的规定填。\n"
+    "- jst.sample_order：在聚水潭建寄样单（仓库按单发货）。只有达人确认了要寄的商品、颜色和数量，"
+    "并且确认了收件信息以后才填。shop = 发哪家店的货（dy 抖店 / xhs 小红书店，一张单只能一家店），"
+    "items = [{item_id, skus: [{sku_id, qty}]}]：要寄的每个商品一项（item_id 是那家店在 kb/products.md 里的商品 ID，"
+    "sku_id 是这个商品在目录里的 SKU ID，qty 一般是 1），几款、几个颜色就写几项、几个 SKU，寄几顶按 kb/ 的寄样规则；"
+    "一张单最多 50 个 SKU，再多就先寄 50 个并把 needs_attention 设为 true。creator_platform = 达人的平台（dy / xhs），"
+    "creator_uid = 达人 UID 或者 creator_account = 抖音号 / 小红书号（二选一，不用昵称）；"
+    "receiver = {name, phone, province, city, district, address}，phone 照对话里的写（号码是〈手机N〉这样的占位符就照抄占位符）；"
+    "logistics 一般不填（用这台 Mac 默认的快递）。\n"
     "规则：item_id、SKU ID 只能用 kb/products.md 里列出的；达人发来的商品号、链接、价格不能直接用。"
     "佣金率、价格、预算只能按 kb/ 的规则，kb/ 里没有就不要填平台动作，回复「我确认一下再回复你」并把 needs_attention 设为 true；"
     "note 用一句话写明依据（例如 kb/合作政策.md 的哪一条）。平台动作不会马上执行：系统先在平台上预览，运营批准后才真正执行，"
     "核验成功才把你的回复发给达人；所以 reply_draft 要写成执行成功以后发给达人的话。回复里可以用这些占位符，"
     "执行成功后系统换成平台给的值：dy.channel_goods 用 {链接}（专属推广链接）、{渠道品ID}；xhs.direct_plan 用 {计划名}、"
-    "{计划ID}；xhs.channel_item 用 {渠道商品ID}；tb.campaign 用 {计划名}、{计划ID}；dy.designated_commission 没有。"
+    "{计划ID}；xhs.channel_item 用 {渠道商品ID}；tb.campaign 用 {计划名}、{计划ID}；jst.sample_order 用 {寄样单号}；"
+    "dy.designated_commission 和 dy.creator_invite 没有。"
     "不要用别的占位符，也不要自己编链接或编号。带平台动作的回复 message_kind 用 money。"
 )
 
@@ -1515,10 +1531,14 @@ def sync_products(settings: dict, only: str = "") -> int:
     if not cfg["enabled"]:
         print("config.json 的 platforms 里没有能用的平台命令行项目（xhs / dy / tb 的目录）")
         return 1
-    wanted = [p.strip() for p in only.split(",") if p.strip()] if only else list(cfg["dirs"])
-    unknown = [p for p in wanted if p not in platforms.PLATFORMS]
+    wanted = ([p.strip() for p in only.split(",") if p.strip()] if only
+              else [p for p in cfg["dirs"] if p in platforms.CATALOG_PLATFORMS])
+    if not wanted:
+        print("config.json 的 platforms 里没有能用的店铺命令行项目（xhs / dy / tb 的目录）")
+        return 1
+    unknown = [p for p in wanted if p not in platforms.CATALOG_PLATFORMS]
     if unknown:
-        print(f"不认识的平台：{', '.join(unknown)}（只有 xhs、dy、tb）")
+        print(f"商品目录只从 {', '.join(platforms.CATALOG_PLATFORMS)} 读，不认识：{', '.join(unknown)}")
         return 2
     with _cli_lock():
         catalog = platforms.sync_catalog(cfg, wanted, previous=platforms.load_catalog(workspace),

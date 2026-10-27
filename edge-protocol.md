@@ -290,6 +290,7 @@ GET  /edge/sends/<send_id>
 
 ```
 PRM_EDGE=on                    # 打开边缘（要 CLAUDE_RELAY=on、PRIVATE_CHAT_ENABLED=true；不能和 PRM_COPILOT 同时开）
+CLAUDE_RELAY_ONLY=on           # 除了 cc 任务和名单里的达人，别的消息一律不回（名单以外的私聊不自动回复）
 PRM_EDGE_TOKEN=…               # 至少 32 个字符，和 CLAUDE_RELAY_TOKEN 不同
 EDGE_DB=data/edge.db           # 事件、发送、上传、名单
 EDGE_SEND_MIN_GAP_SEC=3
