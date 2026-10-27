@@ -1691,8 +1691,12 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
             draft["attachments_missing"] = missing
         draft.pop("platform", None)                      # only this script writes the verdict
         if draft.get("platform_action") is not None:
-            draft["platform"] = platform_preview(settings, workspace, draft.pop("platform_action"), client,
-                                                 int(job["id"]), party_id)
+            raw = draft.pop("platform_action")
+            try:
+                draft["platform"] = platform_preview(settings, workspace, raw, client, int(job["id"]), party_id)
+            except Exception as e:                       # never lose the draft over its preview
+                log.exception("#%s platform preview failed", job["id"])
+                draft["platform"] = preview_failed(raw, f"Mac 上预览出错：{e}")
         result["text"] = json.dumps(draft, ensure_ascii=False)
     result["log_path"] = str(save_prm_log(job, run, result))
     log.info("#%s prm finished ok=%s in %ss", job["id"], result["ok"], result["duration_s"])
@@ -1734,6 +1738,16 @@ def platform_preview(settings: dict, workspace: Path, raw_action, client: RelayC
         block = platforms.failed_preview(raw_action, cfg, f"Mac 上预览出错：{e}")
     log.info("#%s platform preview: %s", job_id, block.get("verdict"))
     return block
+
+
+def preview_failed(raw_action, why: str) -> dict:
+    """The verdict ``error`` for an action whose preview could not be made at all (``platform_preview``
+    itself raised): the draft goes back with it, its action shown and not executable."""
+    try:
+        return platforms.failed_preview(raw_action, None, why)
+    except Exception:                                    # no platform module, or that failed too
+        return {"version": 1, "action": None, "requested": None, "verdict": "error", "problems": [why[:400]],
+                "facts": [], "steps": [], "run": {}, "previewed_at": time.time()}
 
 
 def do_platform_job(settings: dict, job: dict, client: RelayClient, workspace: Path, meta: dict) -> dict:

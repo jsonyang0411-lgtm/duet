@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -418,6 +419,56 @@ def test_promotion_first_then_a_fresh_preview_then_the_commission(node, cfg, tmp
     assert out["outcome"] == "FAILED" and len(argvs(node, "promotion-strategy-create-designated", "--execute")) == 1
 
 
+@pytest.mark.parametrize("fresh", [
+    dict(stdout=dy_designated_preview(addable=False)),
+    dict(stderr="[NOT_LOGGED_IN] the 百应 (buyin) tab is on a login page; nothing was requested\n", exit=77),
+], ids=["creator-refused", "login"])
+def test_a_promotion_whose_fresh_commission_preview_fails_is_partial(node, cfg, tmp_path, fresh):
+    """The promotion is made and verified, but the 专属佣金's fresh preview does not pass: PARTIAL (the
+    promotion stays), and the commission is never written."""
+    node.rules([rule(["promotion-create"], dy_promotion("VERIFIED_SUCCESS"), execute=True),
+                rule(["promotion-strategy-create-designated"], execute=False, **fresh),
+                rule(["promotion-strategy-create-designated"], dy_designated_done(), execute=True)])
+    out = execute(cfg, DESIGNATED, {"steps": ["promotion", "designated"]}, tmp_path)
+    assert out["outcome"] == "PARTIAL", out
+    assert [(s["name"], s["execute"], s["outcome"]) for s in out["steps"]] == [
+        ("promotion", True, "VERIFIED_SUCCESS"), ("designated", False, "NOT_RUN")]
+    assert argvs(node, "promotion-strategy-create-designated", "--execute") == []
+    assert out["problems"][0].startswith("推广建好了，但专属佣金的预览没通过")
+    entry = json.loads((tmp_path / "ledger" / f"{KEY}.json").read_text(encoding="utf-8"))
+    assert entry["status"] == "done" and entry["record"]["outcome"] == "PARTIAL"
+
+
+def test_a_channel_product_whose_answer_has_no_id_is_partial_and_binds_nobody(node, cfg, tmp_path):
+    made = dy_create_done()
+    made["channelGoods"]["created"] = {"productId": DY_ITEM}                 # verified, but no channelId
+    node.rules([rule(["channel-goods-create"], made, execute=True),
+                rule(["channel-goods-bind"], dy_bind_preview(), execute=False),
+                rule(["channel-goods-bind"], dy_bind_done(), execute=True)])
+    out = execute(cfg, CHANNEL, {"steps": ["create", "bind"]}, tmp_path)
+    assert out["outcome"] == "PARTIAL" and "没有渠道品 ID" in out["problems"][0]
+    assert argvs(node, "channel-goods-bind") == [] and "channel_id" not in out["created"]
+    assert [s["name"] for s in out["steps"]] == ["create"]
+
+
+def test_a_failure_inside_the_execution_is_indeterminate_and_the_ledger_is_settled(node, cfg, tmp_path, monkeypatch):
+    """A bug after the write went out (here: reading its answer): what the platform did is not known —
+    INDETERMINATE, never NOT_RUN — and the ledger entry is closed, so the key is not run again."""
+    def broken(data):
+        raise KeyError("createdStrategies")
+
+    monkeypatch.setattr(platforms, "_dy_created", broken)
+    node.rules([rule(["promotion-strategy-create-designated"], dy_designated_done(), execute=True)])
+    out = execute(cfg, DESIGNATED, {"steps": ["designated"]}, tmp_path)
+    assert out["outcome"] == "INDETERMINATE" and "Mac 上执行出错" in out["problems"][-1]
+    assert len(argvs(node, "--execute")) == 1
+    entry = json.loads((tmp_path / "ledger" / f"{KEY}.json").read_text(encoding="utf-8"))
+    assert entry["status"] == "done" and entry["record"]["outcome"] == "INDETERMINATE" and entry["finished_at"]
+    again = execute(cfg, DESIGNATED, {"steps": ["designated"]}, tmp_path)
+    assert again["outcome"] == "ALREADY_RUN" and again["earlier"]["outcome"] == "INDETERMINATE"
+    assert len(argvs(node, "--execute")) == 1
+
+
 def test_direct_plan_runs_with_the_previewed_buyer_and_name(node, cfg, tmp_path):
     node.rules([rule(["direct-plan"], xhs_plan("VERIFIED_SUCCESS", target="6a0000000000000000000a01"), execute=True)])
     plan = {"steps": ["create"], "buyer_id": XHS_BUYER, "name": "达人合作7-1026101500"}
@@ -525,6 +576,35 @@ def test_a_preview_stops_when_its_job_is_cancelled_a_write_does_not(tmp_path):
     assert run.stopped == "cancelled" and beats
     run = platforms.run_cli(script, tmp_path, timeout=30, heartbeat=lambda: True, every=0.2, interruptible=False)
     assert run.stopped == "" and run.exit_code == 0 and json.loads(run.stdout) == {"done": True}
+
+
+def test_two_platform_commands_never_run_at_once(tmp_path):
+    """The worker's previews and executions and --sync-products share one CliLock (the CLIs share the
+    browser tabs): runs wait for each other; a wait that runs out raises TimeoutError, holding nothing."""
+    lock = tmp_path / "platform" / "cli.lock"
+    spans = []
+
+    def run():
+        with platforms.CliLock(lock, wait=30):
+            started = time.monotonic()
+            platforms.run_cli([sys.executable, "-c", "import time; time.sleep(0.3)"], tmp_path, timeout=30)
+            spans.append((started, time.monotonic()))
+
+    threads = [threading.Thread(target=run) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    spans.sort()
+    assert len(spans) == 3 and all(first[1] <= second[0] for first, second in zip(spans, spans[1:]))
+    with platforms.CliLock(lock, wait=30):
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            with platforms.CliLock(lock, wait=0.3):
+                pass
+        assert time.monotonic() - started >= 0.3
+    with platforms.CliLock(lock, wait=0.3):                                  # let go: free again
+        pass
 
 
 def test_the_command_line_is_an_argv_list(tmp_path):
@@ -830,6 +910,21 @@ def test_a_sample_order_runs_once_with_the_number_and_the_ledger_keeps_it_masked
     assert again["outcome"] == "ALREADY_RUN" and len(node.calls()) == 1
     assert platforms.check_record(json.loads(json.dumps(out)))["created"] == {"sample_order_no": JST_ORDER,
                                                                               "creator_uid": DY_UID}
+
+
+def test_a_sample_order_without_a_receiver_sends_none(node, jcfg, tmp_path):
+    """No receiver in the draft (聚水潭 uses the address saved under the creator): neither the preview
+    nor the execution names one."""
+    bare = {k: v for k, v in SAMPLE.items() if k != "receiver"}
+    node.rules([rule(["sample-create"], jst_preview(), execute=False), rule(["sample-create"], jst_done(), execute=True)])
+    block = platforms.preview(bare, jcfg, catalog=catalog())
+    assert block["verdict"] == "ready" and "receiver" not in block["action"]
+    out = execute(jcfg, bare, {"steps": ["create"]}, tmp_path)
+    assert out["outcome"] == "VERIFIED_SUCCESS" and out["created"]["sample_order_no"] == JST_ORDER
+    shown, run = node.calls()
+    assert "--execute" not in shown["argv"] and "--execute" in run["argv"]
+    assert "receiver" not in shown["spec"] and "receiver" not in run["spec"]
+    assert "receiver" not in json.loads((tmp_path / "ledger" / f"{KEY}.json").read_text(encoding="utf-8"))["action"]
 
 
 def test_a_sample_order_with_the_placeholder_still_in_it_is_not_run(node, jcfg, tmp_path):
