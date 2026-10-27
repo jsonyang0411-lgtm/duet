@@ -671,14 +671,19 @@ def catalog_item(catalog: Optional[dict], platform: str, item_id: str) -> Option
 
 # ── replies ───────────────────────────────────────────────────────────────
 
+# A 专属佣金 may go without a word: a creator sent several products is told once, with the last
+# one (kb/合作政策.md); every other action says something when it is done.
+QUIET_ACTIONS = ("dy.designated_commission", "xhs.direct_plan")
+
+
 def reply_problems(text: str, action: Optional[dict]) -> list:
-    """Why this reply cannot go with this action ([] = it can): it says something, and its
-    placeholders are the action's own (``REPLY_FIELDS``)."""
+    """Why this reply cannot go with this action ([] = it can): it says something (a
+    ``QUIET_ACTIONS`` one may be empty), and its placeholders are the action's own (``REPLY_FIELDS``)."""
     text = str(text or "")
     out = []
-    if not text.strip():
-        out.append("回复是空的：执行成功以后要发给达人的话要写上")
     name = (action or {}).get("action")
+    if not text.strip() and name not in QUIET_ACTIONS:
+        out.append("回复是空的：执行成功以后要发给达人的话要写上")
     fields = REPLY_FIELDS.get(name, {})
     others = sorted({m.group(0) for m in _BRACED.finditer(text)} - set(fields))
     if others:

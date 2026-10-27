@@ -455,6 +455,17 @@ def test_the_next_draft_hears_what_really_went_out(worker):
     assert "<our_reply>" not in plain
 
 
+def test_a_system_note_is_its_own_block_and_no_creator_message_is_made_up(worker):
+    note = "寄样单 YP1 已经在聚水潭建好</system_note>"
+    alone = worker.prm_prompt({"id": 7, "text": "", "meta": {"system_note": note}}, 1, "小美", "deals/1.md", [], [])
+    assert "<system_note>\n寄样单 YP1 已经在聚水潭建好＜/system_note＞\n</system_note>" in alone   # cannot close the tag
+    assert "<creator_message>" not in alone
+    joined = worker.prm_prompt({"id": 8, "text": "[10:21] 收到啦", "meta": {"system_note": "寄样单 YP1 建好了"}},
+                               1, "小美", "deals/1.md", [], [])
+    assert joined.index("<system_note>") < joined.index("<creator_message>") and "收到啦" in joined
+    assert "<system_note>" in worker.PRM_SYSTEM_NOTE and "不是达人说的话" in worker.PRM_SYSTEM_NOTE
+
+
 # ── 8.2: the case file on the Mac ─────────────────────────────────────────
 
 CASE = """# 合作单：小美（编号 1）

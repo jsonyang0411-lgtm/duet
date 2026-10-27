@@ -43,11 +43,11 @@ def tier_of(platform: str, daren: Dict[str, Any]) -> tuple:
 
 
 def look_up(platform: str, platform_no: str, *, now: Optional[float] = None) -> Dict[str, Any]:
-    """查一位达人。返回 {"ok", "tier", "channel", "sales_label", "level", "note"}；查不到时 ok=False，note 写原因。"""
+    """查一位达人。返回 {"ok", "tier", "channel", "sales_label", "level", "uid", "note"}；查不到时 ok=False，note 写原因。"""
     now = time.time() if now is None else now
     platform = (platform or "").strip().upper()
     platform_no = (platform_no or "").strip()
-    empty = {"ok": False, "tier": "", "channel": "", "sales_label": "", "level": None}
+    empty = {"ok": False, "tier": "", "channel": "", "sales_label": "", "level": None, "uid": ""}
     if platform not in _RULES or not platform_no:
         return {**empty, "note": "名单上没有平台和抖音号 / 小红书号"}
     try:
@@ -59,12 +59,15 @@ def look_up(platform: str, platform_no: str, *, now: Optional[float] = None) -> 
     daren = data.get("daren") or {}
     tier, sales = tier_of(platform, daren)
     day = time.strftime("%m-%d", time.localtime(now))
+    # 平台的达人 UID（聚水潭的 referrerId）：开抖音专属佣金要用；不是纯数字的不要
+    uid = str(daren.get("uid") or "").strip()
     return {
         "ok": True,
         "tier": tier,
         "channel": str(daren.get("channelBySales") or ""),
         "sales_label": f"{sales}（聚水潭，{day} 查）",
         "level": daren.get("level"),
+        "uid": uid if uid.isdigit() else "",
         "note": "",
     }
 
@@ -75,6 +78,6 @@ def refresh_contact(store, chat_id: str, *, now: Optional[float] = None) -> Dict
     result = look_up(str(contact.get("platform") or ""), str(contact.get("platform_no") or ""), now=now)
     store.record_daren_profile(
         chat_id, tier=result["tier"], channel=result["channel"], sales_label=result["sales_label"],
-        level=result["level"], note=result["note"], now=now,
+        level=result["level"], note=result["note"], uid=result["uid"], now=now,
     )
     return result

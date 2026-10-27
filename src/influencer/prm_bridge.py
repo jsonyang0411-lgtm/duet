@@ -64,6 +64,8 @@ def profile_text(contact: dict, now: float) -> str:
         lines.append("- 名单上还没有这位达人的平台和抖音号 / 小红书号：档位、主播类型都不知道，按 kb/合作政策.md 里\"案卷没写\"处理")
     else:
         lines.append(f"- 平台：{platform}；{platform}号：{contact['platform_no']}")
+        if contact.get("platform_uid"):
+            lines.append(f"- {platform} UID：{contact['platform_uid']}（开专属佣金、建寄样单时用）")
         if contact.get("tier"):
             lines.append(f"- 档位：{contact['tier']}（{contact.get('sales_label') or ''}）")
             lines.append(f"- 主播类型：{contact.get('channel') or '不知道'}")

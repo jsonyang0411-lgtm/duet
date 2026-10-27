@@ -354,7 +354,6 @@ def test_a_preview_block_that_is_not_one_is_no_draft(bot):
 
 @pytest.mark.parametrize("text, why", [
     ("链接：{链接}", "用不了的占位符"),
-    ("", "回复是空的"),
     ("你好 {姓名}", "用不了的占位符"),
     ("打 〈手机9〉", "占位符"),
 ])
@@ -363,6 +362,14 @@ def test_the_reply_is_checked_before_the_platform_is_touched(bot, text, why):
     out = bot.prm.decide(packet["id"], "execute", text)
     assert not out["ok"] and why in out["error"]
     assert bot.prm.store.packet(packet["id"])["status"] == "pending" and len(bot.relay.store.list_jobs()) == 1
+
+
+def test_an_empty_reply_is_refused_except_for_a_commission(bot):
+    channel = drafted(bot, block(CHANNEL), reply="链接：{链接}")
+    out = bot.prm.decide(channel["id"], "execute", "")
+    assert not out["ok"] and "回复是空的" in out["error"]
+    commission = drafted(bot, reply="")              # several products: only the last one says something
+    assert bot.prm.decide(commission["id"], "execute", "")["ok"]
 
 
 def test_nothing_runs_when_the_reply_could_not_go_out(clock, tmp_path):
@@ -478,3 +485,57 @@ def test_a_sample_order_whose_placeholder_has_no_number_is_not_approved(bot):
     assert not out["ok"] and "〈手机9〉" in out["error"]
     assert bot.prm.store.packet(packet["id"])["status"] == "pending"
     assert [j for j in bot.relay.store.list_jobs(10) if '"platform_execute"' in j["meta"]] == []
+
+
+# ── a created sample order → its 专属佣金 (drafted, then approved like any platform write) ──
+
+def ordered(b, clock, reply="寄样单建好啦"):
+    """A sample order drafted, its receiver's phone known (〈手机1〉)."""
+    packet = drafted(b, preview=block(SAMPLE, run={"steps": ["create"]}), reply=reply)
+    b.prm.store.token_for(packet["party_id"], "phone", "手机", "13900001111", clock.now)
+    return packet
+
+
+def test_a_created_sample_order_asks_for_a_draft_of_its_commission(bot, clock):
+    packet = ordered(bot, clock, reply="寄样单建好啦，单号 {寄样单号}～")
+    mac_runs(bot, approve(bot, packet), record(sample_order_no=JST_ORDER))
+    bot.prm.send_approved()
+    job = bot.worker_takes()
+    meta = job["meta"]
+    assert job["text"] == "" and meta["deal_id"] == packet["deal_id"] and meta["name"] == "小美"
+    note = meta["system_note"]
+    assert JST_ORDER in note and DY_ITEM in note and "dy.designated_commission" in note and "抖音的商品" in note
+    bot.finish(job["id"], {**draft(message_kind="money", reply_draft="", slots={}), "platform": block()})
+    commission = bot.prm.store.packet_for_job(job["id"])
+    assert commission["status"] == "pending" and commission["tool"] == "dy.designated_commission"   # a person approves
+    mac_runs(bot, approve(bot, commission), record())
+    bot.prm.send_approved()
+    assert bot.texts == [(packet["chat_id"], f"寄样单建好啦，单号 {JST_ORDER}～")]   # the empty reply sends nothing
+    nxt = bot.worker_takes()
+    assert "专属佣金（20%）已经在平台上开好了" in nxt["meta"]["system_note"] and DY_ITEM in nxt["meta"]["system_note"]
+    bot.finish(nxt["id"], draft(message_kind="other", reply_draft="", slots={}))   # all done: nothing more
+    assert bot.prm.store.packet_for_job(nxt["id"])["status"] == "no_reply"
+    assert bot.worker_takes() is None
+
+
+def test_a_sample_order_not_verified_asks_for_nothing_more(bot, clock):
+    packet = ordered(bot, clock)
+    mac_runs(bot, approve(bot, packet), record("ACCEPTED_UNVERIFIED", sample_order_no=JST_ORDER))
+    assert bot.worker_takes() is None
+
+
+def test_a_sample_order_done_during_a_takeover_leaves_the_commission_to_a_person(bot, clock):
+    packet = ordered(bot, clock)
+    job = approve(bot, packet)
+    bot.prm.deal_action("mode", {"deal_id": packet["deal_id"], "mode": "human"})
+    mac_runs(bot, job, record(sample_order_no=JST_ORDER))
+    assert bot.worker_takes() is None
+    assert "该开专属佣金了" in bot.prm.store.deal(packet["deal_id"])["attention"]
+
+
+def test_only_a_sample_order_and_a_commission_have_a_next_step():
+    from src.prm.service import next_step_note
+    order = platforms.check_action({**SAMPLE, "shop": "xhs", "item_id": XHS_ITEM, "skus": [{"sku_id": "a" * 24, "qty": 1}],
+                                    "creator_platform": "xhs"})
+    assert "xhs.direct_plan" in next_step_note(order, record(sample_order_no=JST_ORDER))
+    assert next_step_note(platforms.check_action(CHANNEL), record(link=DY_LINK)) == ""

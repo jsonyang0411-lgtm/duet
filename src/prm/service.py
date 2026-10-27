@@ -945,6 +945,7 @@ class PrmService:
                     logger.info("PRM: packet %d %s verified on the platform; the reply goes out", packet["id"],
                                 action.get("action"))
                     self._wake.set()
+                    self._ask_next_step(packet, next_step_note(action, record), now)
                 return
         why = "；".join(record.get("problems") or [])
         if outcome == platforms.VERIFIED and missing:
@@ -960,6 +961,27 @@ class PrmService:
             self._store.add_event(packet["deal_id"], packet["party_id"], "platform_result", event, actor="mac", now=now)
             self._store.update_deal(packet["deal_id"], now, attention=f"#{packet['id']} {error}"[:300])
             logger.warning("PRM: packet %d %s ended %s; nothing sent", packet["id"], action.get("action"), outcome)
+
+    def _ask_next_step(self, packet: dict, note: str, now: float) -> None:
+        """A platform write that leads to the next one (a sample order → its 专属佣金): a draft
+        job of its own, told what happened in ``meta.system_note``.  What it drafts is a platform
+        action like any other: previewed on the Mac, approved by a person."""
+        if not note:
+            return
+        deal = self._store.deal(packet["deal_id"])
+        party = self._store.party(packet["party_id"])
+        if deal is None or party is None:
+            return
+        if self._mode(deal, now) != COPILOT:
+            self._store.update_deal(deal["id"], now, attention=(
+                f"#{packet['id']} 之后该开专属佣金了：现在不在副驾驶模式，系统没有起草，请运营处理")[:300])
+            return
+        meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"], "system_note": note}
+        outbound = self._outbound(deal["id"], party["id"], now)
+        if outbound:
+            meta["sent"] = outbound
+        _, job_id = self._relay.submit(packet["chat_id"], packet["chat_id"], "", kind=PRM, meta=meta, fresh=True)
+        logger.info("PRM: packet %d done; job #%d drafts the next step", packet["id"], job_id)
 
     def sweep_executing(self) -> int:
         """Executions that cannot finish any more: a job the Mac has not taken within
@@ -1198,6 +1220,31 @@ def action_for_mac(action: dict, tokens: dict) -> tuple:
     if platforms.PHONE_TOKEN.match(number):
         return action, "收件电话还是占位符，不执行"
     return {**action, "receiver": {**receiver, "phone": number}}, ""
+
+
+# The 专属佣金 action of each shop: a sample order's products get theirs once it is created.
+COMMISSION_ACTIONS = {"dy": "dy.designated_commission", "xhs": "xhs.direct_plan"}
+
+
+def next_step_note(action: dict, record: dict) -> str:
+    """What the next draft is told after a verified platform write, or "" when nothing follows:
+    a sample order → open the 专属佣金 of its products; a 专属佣金 → the next product, if any
+    (one action per draft, so one product each time; the case file says which are done)."""
+    name = action.get("action")
+    if name == "jst.sample_order":
+        shop = str(action.get("shop") or "")
+        if shop not in COMMISSION_ACTIONS:
+            return ""
+        items = "、".join(str(i.get("item_id")) for i in action.get("items") or [] if isinstance(i, dict))
+        number = str((record.get("created") or {}).get("sample_order_no") or "")
+        return (f"寄样单 {number} 已经在聚水潭建好，寄的是{platforms.PLATFORMS[shop]}的商品 {items}。"
+                f"按 kb/合作政策.md 的「佣金」给这些商品开专属佣金：这一份草稿填第一个商品的 {COMMISSION_ACTIONS[shop]}，"
+                "把哪些商品还没开记进案卷。")
+    if name in COMMISSION_ACTIONS.values():
+        return (f"商品 {action.get('item_id')} 的专属佣金（{action.get('commission_rate')}%）已经在平台上开好了。"
+                "这位达人寄样的商品里还有没开专属佣金的，就填下一个；都开完了就不要填平台动作。"
+                "按 kb/合作政策.md 的「佣金」更新案卷。")
+    return ""
 
 
 def _job_error(job: dict) -> str:
