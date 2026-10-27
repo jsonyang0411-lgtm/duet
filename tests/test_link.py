@@ -23,7 +23,7 @@ ME = "wxid_me"
 
 @pytest.mark.parametrize("address, kind", [
     ("127.0.0.1", "loopback"), ("::1", "loopback"),
-    ("192.168.9.155", "lan"), ("10.0.0.8", "lan"), ("172.20.1.2", "lan"), ("169.254.3.4", "lan"),
+    ("192.168.1.20", "lan"), ("10.0.0.8", "lan"), ("172.20.1.2", "lan"), ("169.254.3.4", "lan"),
     ("100.101.102.103", "tailscale"), ("100.64.0.1", "tailscale"), ("fd7a:115c:a1e0::1", "tailscale"),
     ("::ffff:192.168.1.2", "lan"), ("::ffff:100.100.1.1", "tailscale"),
     ("8.8.8.8", "public"), ("100.128.0.1", "public"),
@@ -40,23 +40,23 @@ def adapters(**named):
 
 
 def test_this_pcs_addresses_are_the_lans_then_tailscales(monkeypatch):
-    monkeypatch.setattr(link, "_local_addresses", lambda: ["192.168.9.155", "127.0.0.1", "169.254.7.7", "172.17.0.1"])
+    monkeypatch.setattr(link, "_local_addresses", lambda: ["192.168.1.20", "127.0.0.1", "169.254.7.7", "172.17.0.1"])
     monkeypatch.setitem(sys.modules, "psutil", adapters(
-        Ethernet=["192.168.9.155"], Tailscale=["100.101.102.103", "fd7a:115c:a1e0::5"], vEthernet=["172.30.0.1"]))
-    assert this_pc_addresses() == [{"ip": "192.168.9.155", "kind": "lan"}, {"ip": "172.17.0.1", "kind": "lan"},
+        Ethernet=["192.168.1.20"], Tailscale=["100.101.102.103", "fd7a:115c:a1e0::5"], vEthernet=["172.30.0.1"]))
+    assert this_pc_addresses() == [{"ip": "192.168.1.20", "kind": "lan"}, {"ip": "172.17.0.1", "kind": "lan"},
                                    {"ip": "100.101.102.103", "kind": "tailscale"}]
     monkeypatch.setitem(sys.modules, "psutil", None)                       # no psutil: the LAN ones
-    assert [a["ip"] for a in this_pc_addresses()] == ["192.168.9.155", "172.17.0.1"]
+    assert [a["ip"] for a in this_pc_addresses()] == ["192.168.1.20", "172.17.0.1"]
 
 
 def test_where_the_mac_connects_from_is_logged_once_per_address(caplog):
     peer = PeerLog("CLAUDE_RELAY: the Mac worker")
     with caplog.at_level(logging.INFO, logger="src.relay.link"):
-        for address in ("192.168.9.20", "192.168.9.20", "", "100.101.102.103", "100.101.102.103"):
+        for address in ("192.168.1.30", "192.168.1.30", "", "100.101.102.103", "100.101.102.103"):
             peer.note(address)
     assert [r.getMessage() for r in caplog.records] == [
-        "CLAUDE_RELAY: the Mac worker connects from 192.168.9.20 (lan)",
-        "CLAUDE_RELAY: the Mac worker now connects from 100.101.102.103 (tailscale), before from 192.168.9.20"]
+        "CLAUDE_RELAY: the Mac worker connects from 192.168.1.30 (lan)",
+        "CLAUDE_RELAY: the Mac worker now connects from 100.101.102.103 (tailscale), before from 192.168.1.30"]
     assert peer.address == "100.101.102.103" and peer.kind == "tailscale"
 
 
@@ -83,7 +83,7 @@ def test_the_relay_knows_where_the_worker_asks_from(relay):
     relay.note_worker(None, address="100.101.102.103")                    # the worker moved to Tailscale
     assert relay.snapshot()["mac_link"] == "tailscale"
     assert relay.status_text(ME).splitlines()[0] == "Mac：在线（经 Tailscale）"
-    relay.note_worker(None, address="192.168.9.20")
+    relay.note_worker(None, address="192.168.1.30")
     assert relay.status_text(ME).splitlines()[0] == "Mac：在线（经局域网）"
 
 

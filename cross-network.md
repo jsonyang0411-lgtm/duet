@@ -38,7 +38,7 @@
    ```
    bot http://100.x.y.z:8790: ok (job kinds: admin,prm)
    network: 100.x.y.z 是 Tailscale 地址，往返 25 ms（3 次的中位数）
-     Tailscale：直连（经 192.168.9.155:41641，2 ms）
+     Tailscale：直连（经 192.168.1.20:41641，2 ms）
    ```
    - 第三行说「走中转 DERP(…)」，表示两边没能直连，能用但慢一些，见第五节。
    - 说「找不到 tailscale 命令」，是 Mac 上没有 Tailscale 的命令行：在 Tailscale 菜单里装上 CLI，或直接运行 `/Applications/Tailscale.app/Contents/MacOS/Tailscale ping <Windows 的机器名>`。
