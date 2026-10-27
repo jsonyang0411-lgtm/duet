@@ -10,6 +10,7 @@ import json
 import os
 import re
 import signal
+import subprocess
 import sys
 import textwrap
 import threading
@@ -465,6 +466,44 @@ def test_a_restart_asked_while_idle_takes_no_job(worker, bot, fake_claude, tmp_p
     serving.join(30)
     assert not serving.is_alive() and fake_claude.calls() == [] and bot.sent == []
     assert stopper.exit_code() == worker.RESTART_EXIT
+
+
+PYTHONS = [sys.executable] + (["/usr/bin/python3"] if os.path.exists("/usr/bin/python3") else [])
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGUSR1"), reason="no SIGUSR1 on this platform")
+@pytest.mark.parametrize("python", PYTHONS, ids=lambda p: "system-python" if p == "/usr/bin/python3" else "venv")
+def test_a_real_worker_process_restarts_on_sigusr1_while_idle(worker, bot, fake_claude, tmp_path, monkeypatch, python):
+    """kill -USR1 <pid> to a worker waiting for a job (the real script, as start-*.command runs it): it ends
+    its long poll and exits with RESTART_EXIT, which the start script runs again at once.  Also on the
+    Mac's system Python 3.9."""
+    import src.relay.service as relay_service
+    monkeypatch.setattr(relay_service, "MAX_WAIT_SEC", 1)        # the bot holds each long poll 1 s, not 30
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps(settings(bot, fake_claude, tmp_path)), encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k not in ("RELAY_URL", "RELAY_TOKEN")}
+    env["CLAUDE_RELAY_HOME"] = str(tmp_path / "home")
+    log = tmp_path / "worker-stderr.txt"
+    with open(log, "w", encoding="utf-8") as err:
+        proc = subprocess.Popen([python, "-I", str(ROOT / "tools/claude_relay/worker.py"), "--config", str(config),
+                                 "--kinds", "admin"], env=env, stdout=subprocess.DEVNULL, stderr=err)
+    try:
+        deadline = time.monotonic() + 30
+        while not bot.relay.mac_online() and proc.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)                                         # its first long poll: it is idle
+        assert bot.relay.mac_online(), log.read_text(encoding="utf-8")
+        time.sleep(0.3)
+        proc.send_signal(signal.SIGUSR1)
+        code = proc.wait(timeout=20)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    told = log.read_text(encoding="utf-8")
+    assert code == worker.RESTART_EXIT, told
+    assert "restart requested" in told and f"restarting: the start script runs the worker again (exit {code})" in told
+    bot.ask("cc 重启以后再做")
+    assert fake_claude.calls() == [] and bot.relay.store.list_jobs(1)[0]["status"] == "pending"   # it took no job
 
 
 @pytest.mark.parametrize("name", ["start-worker.command", "start-admin-worker.command", "start-prm-worker.command"])
