@@ -3,11 +3,12 @@
 Standard library only, Python 3.9+.  Proxies are ignored: a proxy on the Mac (Clash and
 the like) must not carry LAN traffic.  Network errors (``OSError``: the Windows PC is off,
 Wi-Fi changed) are left to the caller, who retries with a back-off; refusals of the edge
-are ``EdgeError`` with the HTTP status and the edge's reason.
+are ``EdgeError`` with the HTTP status and the edge's reason.  When the Mac and Windows are
+not on one LAN, the address is Windows' Tailscale one, the same everywhere (cross-network.md).
 
 The usual loop::
 
-    edge = EdgeClient("http://<Windows 的局域网 IP>:8790", token)
+    edge = EdgeClient("http://<Windows 的局域网 IP 或 Tailscale 地址>:8790", token)
     edge.put_parties(version, wxids)            # whenever the list changes, and when
                                                 # edge.health()["parties_version"] differs
     cursor = load_cursor()                      # the last event id the Mac has stored
@@ -32,6 +33,7 @@ Sending::
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -134,7 +136,9 @@ class EdgeClient:
                 return json.loads(response.read().decode("utf-8"))
 
     def upload_bytes(self, data: bytes, name: str) -> dict:
-        with self._open("POST", f"/edge/uploads?{urlencode({'name': name})}", data=bytes(data),
+        """``upload`` of bytes in memory, also sent block by block (a slow link does not hit the
+        timeout as one send of everything would)."""
+        with self._open("POST", f"/edge/uploads?{urlencode({'name': name})}", data=io.BytesIO(bytes(data)),
                         headers={"Content-Length": str(len(data)), "Content-Type": "application/octet-stream"},
                         timeout=self.timeout * 8) as response:
             return json.loads(response.read().decode("utf-8"))

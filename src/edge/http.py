@@ -83,6 +83,9 @@ def handle(handler: BaseHTTPRequestHandler, method: str, service, token: bytes) 
         handler.close_connection = True
         _json(handler, 401, {"error": "unauthorized", "detail": "口令不对"})
         return
+    note_client = getattr(service, "note_client", None)   # the Windows edge logs where the Mac is
+    if note_client is not None:
+        note_client(handler.client_address[0])
     try:
         _route(handler, method, url.path, parse_qs(url.query), service)
     except P.EdgeError as e:

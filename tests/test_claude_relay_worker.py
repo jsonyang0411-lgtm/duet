@@ -7,6 +7,7 @@ the real one does.
 
 import importlib.util
 import json
+import os
 import re
 import sys
 import textwrap
@@ -123,6 +124,46 @@ def test_a_job_runs_in_the_project_folder_and_the_session_carries_on(worker, bot
     assert list((tmp_path / "home/outbox").glob("*.json")) == []
 
 
+def test_a_new_relay_url_in_config_json_needs_no_restart(worker, bot, fake_claude, tmp_path):
+    """The bot's address changed once (its Tailscale address, cross-network.md): the worker asks
+    there from its next round on."""
+    cfg = SimpleNamespace(
+        claude_relay="on", claude_relay_token=TOKEN, claude_relay_host="127.0.0.1", claude_relay_port=0,
+        claude_relay_prefix="cc", claude_relay_wxids=[], claude_relay_db=":memory:",
+        claude_relay_max_chars=1500, admin_wxid=ME)
+    sent = []
+    other = ClaudeRelay(cfg, store=RelayStore(":memory:"),
+                        send=lambda chat, text: sent.append(re.sub(r"（[^）]*）", "", text)) or True)
+    other.start()
+    try:
+        host, port = other.address
+        s = settings(bot, fake_claude, tmp_path)
+        config = tmp_path / "config.json"
+        config.write_text(json.dumps(s), encoding="utf-8")
+        watched = worker.SettingsFile(config, worker.load_settings(config))
+        config.write_text(json.dumps({**s, "relay_url": f"http://{host}:{port}"}), encoding="utf-8")
+        os.utime(config, ns=(time.time_ns() + 10**9, time.time_ns() + 10**9))
+        other.handle({"chat_id": ME, "sender_id": ME, "content": "cc 在新地址做", "is_group": False})
+
+        class QuickClient(worker.RelayClient):           # short long polls: a stuck worker fails, not hangs
+            def next_job(self, wait=1, settings=None, kinds=worker.ALL_KINDS):
+                return super().next_job(wait, settings, kinds)
+
+        client = QuickClient(s["relay_url"], s["token"])
+        stopper = worker.Stopper()
+        runner = threading.Thread(target=worker.serve, args=(s, client, stopper),
+                                  kwargs={"once": True, "settings_file": watched}, daemon=True)
+        runner.start()
+        runner.join(timeout=15)
+        stopper.event.set()
+        runner.join(timeout=10)
+        other.tick()
+        assert client.base_url == f"http://{host}:{port}" and sent == ["#1 完成\n完成：在新地址做"]
+        assert bot.sent == []
+    finally:
+        other.stop()
+
+
 def test_an_unknown_project_is_reported_without_running_claude(worker, bot, fake_claude, tmp_path):
     bot.ask("cc @nope 跑")
     run_one(worker, bot, settings(bot, fake_claude, tmp_path))
@@ -194,10 +235,74 @@ def test_check_and_a_wrong_token(worker, bot, fake_claude, tmp_path, capsys, mon
     monkeypatch.delenv("RELAY_URL", raising=False)
     monkeypatch.delenv("RELAY_TOKEN", raising=False)
     assert worker.main(["--config", str(cfg), "--check"]) == 0
-    assert "bot " + bot.url + ": ok" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "bot " + bot.url + ": ok" in out
+    assert "network: 127.0.0.1 是本机地址，往返 " in out                       # which network, how fast
     monkeypatch.setenv("RELAY_TOKEN", "wrong" * 8)
     assert worker.main(["--config", str(cfg), "--check"]) == 1
     assert "token wrong" in capsys.readouterr().out
+
+
+PONG_DIRECT = "pong from win-pc (100.101.102.103) via 192.168.9.155:41641 in 2ms\n"
+PONG_DERP = "pong from win-pc (100.101.102.103) via DERP(hkg) in 118ms\n"
+
+
+def test_check_tells_the_network_and_tailscales_way(worker, monkeypatch):
+    def resolve(name):
+        if name == "win-pc":
+            return "100.101.102.103"
+        raise worker.socket.gaierror("no such name")
+
+    monkeypatch.setattr(worker.socket, "gethostbyname", resolve)
+    assert [worker.address_kind(h) for h in ("192.168.9.155", "100.101.102.103", "win-pc", "8.8.8.8", "nowhere")] == [
+        "lan", "tailscale", "tailscale", "public", "unknown"]
+    calls = []
+    lan = worker.link_report("http://192.168.9.155:8790", lambda: calls.append(1))
+    assert lan == [lan[0]] and lan[0].startswith("network: 192.168.9.155 是局域网地址，往返 ") and len(calls) == 3
+    assert "这个地址连不上" in worker.link_report("http://192.168.9.155:8790")[1]   # the bot did not answer
+    assert "明文 http 经过公网" in worker.link_report("http://8.8.8.8:8790", lambda: None)[1]
+    assert worker.link_report("https://8.8.8.8", lambda: None)[1:] == []           # https: no warning
+
+    def down():
+        raise OSError("refused")
+
+    assert "往返" not in worker.link_report("http://192.168.9.155:8790", down)[0]
+    ts = worker.link_report("http://win-pc:8790", lambda: None, ping=lambda host: PONG_DERP + PONG_DIRECT)
+    assert ts[0].startswith("network: win-pc 是 Tailscale 地址，往返 ")
+    assert ts[1] == "  Tailscale：直连（经 192.168.9.155:41641，2 ms）"
+    relayed = worker.tailscale_path("win-pc", lambda host: PONG_DERP * 5 + "direct connection not established\n")
+    assert relayed.startswith("走中转 DERP(hkg)（118 ms）")
+    assert "没有回音" in worker.tailscale_path("win-pc", lambda host: "")
+    monkeypatch.setattr(worker.shutil, "which", lambda name: None)
+    monkeypatch.setattr(worker, "TAILSCALE_APP_CLI", ())
+    assert "找不到 tailscale 命令" in worker.tailscale_path("100.101.102.103")
+
+
+def test_a_file_going_back_is_read_as_it_goes(worker, tmp_path):
+    """One send of the whole file has two minutes in all (a slow link to the bot would cut a big
+    file off); read as it goes, the time limit is per block."""
+    path = tmp_path / "brief.pdf"
+    path.write_bytes(b"%PDF" + b"x" * 100_000)
+    client = worker.RelayClient("http://127.0.0.1:9", TOKEN)
+    seen = {}
+
+    class Answer:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"id": 1, "size": 100004}'
+
+    def open_(req, timeout):
+        seen.update(streamed=hasattr(req.data, "read"), length=req.get_header("Content-length"), timeout=timeout)
+        return Answer()
+
+    client.opener = SimpleNamespace(open=open_)
+    assert client.upload(7, path, "brief.pdf") == {"id": 1, "size": 100004}
+    assert seen == {"streamed": True, "length": "100004", "timeout": 120}
 
 
 def test_find_claude_prefers_the_newest_vscode_copy(worker, tmp_path, monkeypatch):

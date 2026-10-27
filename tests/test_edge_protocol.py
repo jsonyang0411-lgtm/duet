@@ -533,8 +533,36 @@ def test_the_mac_side_runs_on_the_system_python(tmp_path):
         "    c = EdgeClient(edge.url, edge.token)\n"
         "    c.put_parties(1, ['wxid_creator01'])\n"
         "    edge.creator_says('wxid_creator01', '你好')\n"
-        "    print(c.events(after=1, wait=0)[0]['text'], c.send('s', 'wxid_creator01', 'hi')['status'], sys.version_info[:2])\n",
+        "    print(c.events(after=1, wait=0)[0]['text'], c.send('s', 'wxid_creator01', 'hi')['status'],\n"
+        "          c.upload_bytes(b'abc', 'a.txt')['size'], sys.version_info[:2])\n",
         encoding="utf-8")
     run = subprocess.run([python, "-I", str(script)], capture_output=True, text=True, timeout=60)
     assert run.returncode == 0, run.stderr
-    assert run.stdout.startswith("你好 sent")
+    assert run.stdout.startswith("你好 sent 3 ")
+
+
+def test_uploads_go_block_by_block(tmp_path):
+    """One send of the whole body has the timeout in all (a slow link to Windows would cut a big
+    upload off); from a file object, the time limit is per block."""
+    client = EdgeClient("http://127.0.0.1:9", "t" * 40)
+    seen = []
+
+    class Answer:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"upload_id": "up-1", "size": 3, "sha256": "x"}'
+
+    def open_(req, timeout):
+        seen.append((hasattr(req.data, "read"), req.get_header("Content-length")))
+        return Answer()
+
+    client._opener = SimpleNamespace(open=open_)
+    client.upload_bytes(b"abc", "a.txt")
+    (tmp_path / "b.txt").write_bytes(b"abcd")
+    client.upload(tmp_path / "b.txt")
+    assert seen == [(True, "3"), (True, "4")]

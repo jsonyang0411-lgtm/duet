@@ -61,6 +61,7 @@ try:
 except ImportError:
     fcntl = None
 import glob
+import ipaddress
 import json
 import logging
 import os
@@ -68,6 +69,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -92,6 +94,13 @@ LOCK_WAIT_SEC = 60           # a restart: the old worker ends its long poll, the
 # lives in that file's "env" is handed to claude here (proxy_env).
 PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
 PROXY_PASSED = PROXY_KEYS + ("NO_PROXY",)
+# The bot on another network: Tailscale joins the two (cross-network.md); --check tells which
+# network the bot is on and whether Tailscale goes direct or through a relay.
+TAILSCALE_V4 = ipaddress.ip_network("100.64.0.0/10")
+TAILSCALE_V6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
+TAILSCALE_APP_CLI = ("/Applications/Tailscale.app/Contents/MacOS/Tailscale",)
+LINK_LABELS = {"loopback": "本机", "lan": "局域网", "tailscale": " Tailscale ", "public": "公网",
+               "unknown": "解析不了的"}
 OUTBOX_NAME = "outbox"       # "outbox-prm" for a prm-only worker (main sets it)
 
 DEFAULTS = {
@@ -441,15 +450,19 @@ class RelayClient:
             return get()
 
     def upload(self, job_id: int, path: Path, name: str) -> dict:
-        """Send a file back with a prm job (the bot keeps it for the draft)."""
+        """Send a file back with a prm job (the bot keeps it for the draft).  Read as it goes:
+        the timeout is then per block, so a slow link (the bot on another network) does not cut
+        a big file off after two minutes as one send of the whole file would."""
         def post():
             query = urllib.parse.urlencode({"name": name})
-            req = urllib.request.Request(f"{self.base_url}/relay/jobs/{job_id}/outfiles?{query}",
-                                         data=path.read_bytes(), method="POST")
-            req.add_header("Authorization", f"Bearer {self.token}")
-            req.add_header("Content-Type", "application/octet-stream")
-            with self.opener.open(req, timeout=120) as resp:
-                return json.loads(resp.read().decode("utf-8") or "{}")
+            with open(path, "rb") as f:
+                req = urllib.request.Request(f"{self.base_url}/relay/jobs/{job_id}/outfiles?{query}",
+                                             data=f, method="POST")
+                req.add_header("Authorization", f"Bearer {self.token}")
+                req.add_header("Content-Type", "application/octet-stream")
+                req.add_header("Content-Length", str(os.fstat(f.fileno()).st_size))   # not chunked
+                with self.opener.open(req, timeout=120) as resp:
+                    return json.loads(resp.read().decode("utf-8") or "{}")
         try:
             return post()
         except urllib.error.HTTPError as e:
@@ -1009,7 +1022,8 @@ def proxy_env(environ=None, settings_path: Path | None = None) -> dict:
     """The proxy for a prm job's claude when this worker has none: ``HTTP_PROXY``,
     ``HTTPS_PROXY``, ``ALL_PROXY`` and ``NO_PROXY`` (either case) from the ``env`` of Claude
     Code's settings file, which ``--restricted`` makes claude ignore.  Only for the claude
-    child process; the relay client never uses a proxy (the Windows bot is on the LAN)."""
+    child process; the relay client never uses a proxy (the Windows bot is on the LAN, or
+    reached over Tailscale)."""
     environ = os.environ if environ is None else environ
     if any(str(environ.get(k) or environ.get(k.lower()) or "").strip() for k in PROXY_KEYS):
         return {}
@@ -1027,6 +1041,79 @@ def proxy_env(environ=None, settings_path: Path | None = None) -> dict:
 
 def _without_password(url: str) -> str:
     return re.sub(r"//[^/@\s]+@", "//***@", url)
+
+
+def address_kind(host: str) -> str:
+    """The network the bot is on (as src/relay/link.py on Windows): ``loopback`` / ``lan`` /
+    ``tailscale`` / ``public``; a name is looked up first (a Tailscale machine name is fine),
+    ``unknown`` when it does not resolve."""
+    try:
+        ip = ipaddress.ip_address(str(host).strip("[]"))
+    except ValueError:
+        try:
+            ip = ipaddress.ip_address(socket.gethostbyname(host))
+        except (OSError, ValueError, UnicodeError):
+            return "unknown"
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    if ip.is_loopback:
+        return "loopback"
+    if ip in (TAILSCALE_V4 if ip.version == 4 else TAILSCALE_V6):
+        return "tailscale"
+    if ip.is_private or ip.is_link_local:
+        return "lan"
+    return "public"
+
+
+def tailscale_path(host: str, ping=None) -> str:
+    """What ``tailscale ping`` says of the way to the bot: direct (over the LAN or the internet)
+    or through one of Tailscale's relays (DERP).  ``ping(host)`` gives the command's output."""
+    if ping is None:
+        cli = shutil.which("tailscale") or next((p for p in TAILSCALE_APP_CLI if os.path.exists(p)), "")
+        if not cli:
+            return "这台 Mac 上找不到 tailscale 命令，看不出是直连还是走中转"
+
+        def ping(target):
+            try:
+                return subprocess.run([cli, "ping", "--c", "5", "--timeout", "3s", target],
+                                      capture_output=True, text=True, timeout=30).stdout
+            except (OSError, subprocess.TimeoutExpired):
+                return ""
+    pongs = re.findall(r"via (\S+) in ([\d.]+)\s*ms", ping(host) or "")
+    if not pongs:
+        return "tailscale ping 没有回音（Windows 上的 Tailscale 没开，或两台不在同一个 Tailscale 账号里）"
+    via, ms = pongs[-1]
+    if via.startswith("DERP("):
+        return (f"走中转 {via}（{float(ms):.0f} ms）：两边没能直连，会慢一些；"
+                "国内网络可以自建中转（cross-network.md）")
+    return f"直连（经 {via}，{float(ms):.0f} ms）"
+
+
+def link_report(relay_url: str, health=None, samples: int = 3, ping=None) -> list[str]:
+    """``--check``: which network the bot is on, the round trip of ``health()`` (the median of
+    ``samples``; None: the bot did not answer) and, over Tailscale, the way the packets go."""
+    url = urllib.parse.urlsplit(relay_url)
+    host = url.hostname or ""
+    kind = address_kind(host)
+    times = []
+    for _ in range(samples if health is not None else 0):
+        started = time.monotonic()
+        try:
+            health()
+        except Exception:
+            break
+        times.append((time.monotonic() - started) * 1000)
+    line = f"network: {host} 是{LINK_LABELS[kind]}地址"
+    if times:
+        line += f"，往返 {sorted(times)[len(times) // 2]:.0f} ms（{len(times)} 次的中位数）"
+    lines = [line]
+    if kind == "public" and url.scheme == "http":
+        lines.append("  注意：明文 http 经过公网，口令和消息内容在路上都能被看到；改用 Tailscale（cross-network.md）")
+    elif kind == "lan" and health is None:
+        lines.append("  Mac 不在 Windows 的局域网里时，这个地址连不上；改用 Windows 的 Tailscale 地址（cross-network.md）")
+    elif kind == "tailscale":
+        lines.append("  Tailscale：" + tailscale_path(host, ping))
+    return lines
 
 
 def prm_hook_settings() -> str:
@@ -1538,6 +1625,10 @@ def serve(settings: dict, client: RelayClient, stopper: Stopper, once: bool = Fa
     while not stopper.event.is_set():
         if settings_file is not None:
             settings = settings_file.current()
+            if settings["relay_url"] != client.base_url:  # the bot's Tailscale address, say: no restart
+                log.info("relay_url changed: %s -> %s", client.base_url, settings["relay_url"])
+                client.base_url = settings["relay_url"]
+                backoff = 5
         if not worker_kinds(settings, kinds):
             # Only prm, and prm_workspace became unusable: asking with no kinds would get cc tasks.
             log.warning("nothing to ask for (prm_workspace: %s); waiting", prm_workspace_dir(settings)[1])
@@ -1702,7 +1793,9 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         except Exception as e:
             print(f"bot {settings['relay_url']}: unreachable ({e})")
+            print("\n".join(link_report(settings["relay_url"])))
             return 1
+        print("\n".join(link_report(settings["relay_url"], client.health)))
         return 0
     if prm_only and prm_workspace_dir(settings)[0] is None:
         log.error("--kinds prm needs a usable prm_workspace: %s", prm_workspace_dir(settings)[1])

@@ -310,7 +310,7 @@ function StepRelay({ onBack, onDone }) {
             <button type="button" className="btn" onClick={copy}><Copy />复制</button>
           </div>
         </Field>
-        <Field label="端口" hint="Mac 连这台电脑的这个端口；Windows 防火墙要放行它（只放行局域网）" error={!portOk ? '1 到 65535 之间的整数' : ''}>
+        <Field label="端口" hint="Mac 连这台电脑的这个端口；Windows 防火墙要放行它（只放行局域网；Mac 不在同一个网络时用 Tailscale，再放行 100.64.0.0/10）" error={!portOk ? '1 到 65535 之间的整数' : ''}>
           <div style={{ width: 168 }}><TextInput value={port} onChange={setPort} mono /></div>
         </Field>
         {err && <Note kind="need">{err}{written && <> 其余设置已经写好，可以先进控制台，在「中转代理」页里再改。</>}</Note>}
