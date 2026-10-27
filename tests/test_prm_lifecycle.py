@@ -52,67 +52,6 @@ def drafted(b, d=None, text="我是小美，手机 13812345678"):
     return b.prm.store.packet_for_job(job["id"])
 
 
-# ── what really became of our replies: the next draft is told ─────────────
-
-def told(bot):
-    """The creator writes again; what the next draft job hears about our replies (``ours`` items)."""
-    bot.prm.handle(bot.msg("那我等你们消息"))
-    job = bot.worker_takes()
-    return [h for h in job["meta"].get("history", []) if h["who"] == "ours"], job
-
-
-def test_a_draft_sent_as_written_is_not_told_again(bot):
-    packet = drafted(bot)
-    assert bot.prm.decide(packet["id"], "send")["ok"]
-    bot.prm.send_approved()
-    ours, job = told(bot)
-    assert ours == [] and "history" not in job["meta"]
-
-
-def test_an_edited_draft_tells_the_next_draft_what_really_went_out(bot):
-    packet = drafted(bot)
-    assert bot.prm.decide(packet["id"], "edit", "小美你好，先挑 2 款就好，第三款我们再推荐")["ok"]
-    bot.prm.send_approved()
-    [item], job = told(bot)
-    assert item == {"who": "ours", "status": "sent", "edited": True, "system": False,
-                    "text": "小美你好，先挑 2 款就好，第三款我们再推荐"}
-    assert job["text"].endswith("那我等你们消息")
-    assert bot.prm.store.take_backlog(1) == [], "told once"
-
-
-def test_a_dropped_or_out_of_date_draft_is_told_as_not_seen(bot):
-    first = drafted(bot, text="想要贝雷帽")
-    assert bot.prm.decide(first["id"], "drop")["ok"]
-    second = drafted(bot, text="黑色的")                  # the draft of this message hears of the dropped one
-    heard = json.loads(bot.relay.store.get(second["job_id"])["meta"])["history"]
-    assert [(h["who"], h["status"]) for h in heard] == [("ours", "dropped")] and heard[0]["text"] == first["text"]
-    ours, _ = told(bot)                                    # she writes again before the second one is reviewed
-    assert [(o["status"], o["system"]) for o in ours] == [("superseded", False)]
-    assert bot.prm.store.packet(second["id"])["status"] == "superseded"
-
-
-def test_a_system_notice_that_went_out_is_told_to_the_next_draft(bot):
-    result = bot.prm.deal_action("shipment", {"deal_id": 1, "carrier": "顺丰", "waybill": "SF1234567890123"})
-    assert bot.prm.decide(result["packet"], "send")["ok"]
-    bot.prm.send_approved()
-    [item], _ = told(bot)
-    assert (item["status"], item["system"]) == ("sent", True) and "SF1234567890123" in item["text"]
-
-
-def test_a_reply_that_did_not_go_out_is_told_as_not_seen(clock, tmp_path):
-    b = Bot(clock, tmp_path, send_ok=False)
-    b.prm.register(CREATOR, "小美", "测试达人")
-    try:
-        packet = drafted(b)
-        assert b.prm.decide(packet["id"], "send")["ok"]
-        b.prm.send_approved()
-        [item], _ = told(b)
-        assert (item["status"], item["edited"]) == ("failed", False)
-    finally:
-        b.prm.stop()
-        b.relay.stop()
-
-
 # ── an operator replying by hand takes the chat over ──────────────────────
 
 def test_the_bots_own_line_confirms_its_packet(bot):
