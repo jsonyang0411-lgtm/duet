@@ -190,3 +190,84 @@ def test_the_bot_wires_the_list_and_drafts_to_the_influencer_module(tmp_path, fa
     backend._reply_sink(CREATOR, "好的老师", {})
     [item] = store.list_inbox()
     assert (item["kind"], item["content"]) == (INBOX_DRAFT, "好的老师")
+
+
+# ── 同事代理复现的问题（2026-10-27）────────────────────────────────────────
+
+def test_an_attachment_windows_no_longer_has_does_not_stop_the_events(fake, tmp_path):
+    """Windows 回了错误（文件没了）的附件不要了，消息照常交给路由，后面的消息也照常来，不报连不上。"""
+    fake.put_parties(1, [CREATOR])
+    with Running(fake, tmp_path) as run:
+        assert wait_for(lambda: CREATOR in fake._parties)
+        event = fake.creator_says(CREATOR, "[图片]", msg_type=3, files=[("图片-1.jpg", b"\xff\xd8picture")])
+        fake._files.pop((event["id"], 1))                                  # Windows 那边文件没了
+        fake.creator_says(CREATOR, "在吗")
+        assert wait_for(lambda: len(run.seen) == 2)
+        assert run.backend.online and run.backend.status()["problems"] == []
+    assert run.seen[0]["edge_files"] == [] and run.seen[1]["content"] == "在吗"
+
+
+def test_a_download_cut_off_is_retried_and_then_given_up_without_going_offline(fake, tmp_path, monkeypatch):
+    with Running(fake, tmp_path) as run:
+        assert wait_for(lambda: CREATOR in fake._parties)
+        calls = []
+
+        def broken(event_id, n, dest):
+            calls.append(event_id)
+            raise ConnectionResetError("网络断了")
+
+        monkeypatch.setattr(run.backend.client, "download", broken)
+        monkeypatch.setattr("src.wechat.edge_backend.BACKOFF_SEC", (0.01,) * 6)
+        fake.creator_says(CREATOR, "[图片]", msg_type=3, files=[("图片-1.jpg", b"\xff\xd8picture")])
+        assert wait_for(lambda: run.seen, timeout=8)
+        assert run.backend.online, "附件下载失败不算连不上 Windows"
+    assert len(calls) == 3 and run.seen[0]["edge_files"] == []           # 试 3 次，不要这个附件，消息照常走
+
+
+def test_events_of_a_rebuilt_windows_event_store_are_read_from_the_start(fake, tmp_path):
+    """Windows 的 edge.db 重建了（编号从 1 重新开始），Mac 记着的位置比它大：要从头读，不能静默跳过。"""
+    state = EdgeState(tmp_path / "state.json")
+    state.cursor = 500
+    state.save()
+    fake.put_parties(1, [CREATOR])
+    fake.creator_says(CREATOR, "重建以后的第一条")
+    with Running(fake, tmp_path) as run:
+        assert wait_for(lambda: run.seen)
+        assert any("事件库重建" in p for p in run.backend.status()["problems"])
+    assert run.seen[0]["content"] == "重建以后的第一条"
+    assert EdgeState(tmp_path / "state.json").cursor == fake.events_list[-1]["id"] < 500
+
+
+def test_events_read_but_not_yet_acknowledged_are_acknowledged_not_read_again(fake, tmp_path):
+    fake.put_parties(1, [CREATOR])
+    fake.creator_says(CREATOR, "已经处理过的")
+    last = fake.events_list[-1]["id"]
+    state = EdgeState(tmp_path / "state.json")
+    state.cursor = last                                                    # 处理完、存好了，确认前停了
+    state.save()
+    with Running(fake, tmp_path) as run:
+        assert wait_for(lambda: fake.acked_upto == last)
+        assert wait_for(lambda: run.backend.online)
+        assert run.backend.status()["problems"] == []
+    assert run.seen == [] and EdgeState(tmp_path / "state.json").cursor == last
+
+
+def test_a_send_that_fails_after_a_restart_still_reaches_the_failure_hook(fake, tmp_path):
+    """重启以前发的回复，之后 Windows 报失败：内存里没有了，用写盘的摘要（不是原文）交给钩子。"""
+    import json as _json
+
+    from src.wechat.edge_backend import text_digest
+    with Running(fake, tmp_path) as run:
+        assert wait_for(lambda: CREATOR in fake._parties)
+        assert run.backend.send_text(CREATOR, "地址收到啦 13900001111", send_id="pk-1")
+    saved = (tmp_path / "edge_sends.json").read_text(encoding="utf-8")
+    assert "13900001111" not in saved and "地址" not in saved              # 原文不写盘
+    assert _json.loads(saved)["pk-1"]["sha256"] == text_digest("地址收到啦 13900001111")
+    failures = []
+    with Running(fake, tmp_path) as again:                                 # 重启：内存里的发送记录没了
+        again.backend.set_send_failure_hook(lambda chat, text, why, **more: failures.append((chat, text, why, more)))
+        fake.complete("pk-1", "failed", "微信窗口找不到")
+        assert wait_for(lambda: failures)
+    chat, text, why, more = failures[0]
+    assert (chat, text) == (CREATOR, "") and "微信窗口找不到" in why
+    assert more["digest"] == text_digest("地址收到啦 13900001111") and more["sent_at"]
