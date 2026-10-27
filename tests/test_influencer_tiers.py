@@ -53,8 +53,8 @@ def test_look_up_gives_tier_channel_and_where_the_numbers_came_from(monkeypatch)
         "sales30d": {"available": True, "min": 2_500_000, "max": 5_000_000, "label": "250万~500万"},
         "channelBySales": "视频", "level": 3,
     }})
-    result = look_up("dy", " jiawen3339 ")
-    assert calls == [("lookup", "--platform", "DY", "--no", "jiawen3339")]
+    result = look_up("dy", " test_daren01 ")
+    assert calls == [("lookup", "--platform", "DY", "--no", "test_daren01")]
     assert (result["ok"], result["tier"], result["channel"], result["level"]) == (True, TIER_ANY, "视频", 3)
     assert "近 30 日销售总额 250万~500万" in result["sales_label"] and "聚水潭" in result["sales_label"]
 
@@ -97,7 +97,7 @@ class FakePrm:
 @pytest.fixture
 def setup(tmp_path):
     store = InfluencerStore(":memory:")
-    store.save_contact("wxid_a", source="t", display_name="嘉嘉", platform="DY", platform_no="jiawen3339")
+    store.save_contact("wxid_a", source="t", display_name="测试达人", platform="DY", platform_no="test_daren01")
     store.save_contact("wxid_b", source="t", display_name="没号码")
     prm = FakePrm([{"id": 7, "wxid": "wxid_a", "active": 1}, {"id": 8, "wxid": "wxid_b", "active": 1}])
     workspace = tmp_path / "ws"
@@ -118,7 +118,7 @@ def test_sync_refreshes_one_due_creator_and_writes_the_profile_files(setup):
     sync.sync()
     assert refreshed == ["wxid_a"], "只有填了号码的才查；一轮最多查一位"
     a = (workspace / PROFILE_FILE.format(party_id=7)).read_text(encoding="utf-8")
-    assert "jiawen3339" in a and "档位：不限" in a and "主播类型：视频" in a and "LV3" in a
+    assert "test_daren01" in a and "档位：不限" in a and "主播类型：视频" in a and "LV3" in a
     b = (workspace / PROFILE_FILE.format(party_id=8)).read_text(encoding="utf-8")
     assert "还没有这位达人的平台" in b
     sync.sync()

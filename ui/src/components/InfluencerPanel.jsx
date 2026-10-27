@@ -673,7 +673,7 @@ function ContactsPage() {
             <Field label="chat_id"><TextInput mono placeholder="例如 wxid_xxx" aria-label="chat_id" {...field('chat_id')} /></Field>
             <Field label="显示名"><TextInput placeholder="可不填，机器人会用微信昵称" aria-label="显示名" {...field('display_name')} /></Field>
             <Field label="平台"><Seg small label="平台" value={form.platform} onChange={(v) => setForm((f) => ({ ...f, platform: v }))} options={PLATFORM_OPTIONS} /></Field>
-            <Field label="抖音号 / 小红书号" hint="填了以后自动从聚水潭查档位、主播类型（可以先不填）"><TextInput mono placeholder="例如 jiawen3339" aria-label="抖音号或小红书号" {...field('platform_no')} /></Field>
+            <Field label="抖音号 / 小红书号" hint="填了以后自动从聚水潭查档位、主播类型（可以先不填）"><TextInput mono placeholder="例如 test_daren01" aria-label="抖音号或小红书号" {...field('platform_no')} /></Field>
             <Field label="备注"><TextInput placeholder="可不填" aria-label="备注" {...field('note')} /></Field>
           </div>
           <div className="card-foot">

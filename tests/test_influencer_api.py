@@ -216,9 +216,9 @@ def test_the_overview_comes_with_a_brief_to_copy(store):
 
 
 def test_contacts_keep_a_platform_and_number(store):
-    status, data = call("/api/influencer/contacts/action", {"chat_id": "wxid_p", "platform": "dy", "platform_no": " jiawen3339 "})
+    status, data = call("/api/influencer/contacts/action", {"chat_id": "wxid_p", "platform": "dy", "platform_no": " test_daren01 "})
     assert status == 200 and data["ok"] is True
-    assert (data["contact"]["platform"], data["contact"]["platform_no"]) == ("DY", "jiawen3339")
+    assert (data["contact"]["platform"], data["contact"]["platform_no"]) == ("DY", "test_daren01")
     _, bad = call("/api/influencer/contacts/action", {"chat_id": "wxid_p", "platform": "TB"})
     assert bad["ok"] is False and "平台" in bad["error"]
     _, missing = call("/api/influencer/contacts/action", {"chat_id": "wxid_q", "platform_no": "x"})

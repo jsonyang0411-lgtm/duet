@@ -46,7 +46,7 @@ def seed(db_path):
     )
     # 抖音达人，没有小红书账号；档位、主播类型从聚水潭来，三款商品（第 2 步）
     store.add_approval(
-        make_packet("GATE-DY", chat_id="wxid_mei", expires_at=NEXT_YEAR, platform="DY", platform_no="jiawen3339",
+        make_packet("GATE-DY", chat_id="wxid_mei", expires_at=NEXT_YEAR, platform="DY", platform_no="test_daren01",
                     tier="不限", channel="视频", sales_label="近 30 日销售总额 250万~500万（聚水潭，10-26 查）",
                     items_json='[{"name": "法式复古贝雷帽 深棕色", "qty": 1,'
                                ' "listing": {"id": "3712345678901234567", "title": "法式贝雷帽 抖音款"}},'
@@ -216,7 +216,7 @@ def test_the_overview_numbers_lead_to_their_lists(console, page):
 def test_a_douyin_request_shows_tier_channel_and_every_item(console, page):
     page.goto(f"{console.base}/#/influencer/approvals")
     dy = card(page, "GATE-DY")
-    dy.get_by_text("jiawen3339").wait_for()
+    dy.get_by_text("test_daren01").wait_for()
     for text in ("不限", "视频为主", "250万~500万", "法式复古贝雷帽 深棕色", "北欧套头帽", "共 3 款", "11 月 3 日晚上开专场",
                  "3712345678901234567", "抖音商品目录里没有"):
         assert dy.get_by_text(text).count() >= 1, text
