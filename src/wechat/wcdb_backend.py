@@ -29,13 +29,19 @@ from .window_controller import WeChatWindowController
 from .helpers import DedupSet, format_nontext_content, normalize_msg_type
 from src.pii import mask_pii
 from src.wechat.media import IMAGE_MSG_TYPES, find_existing_media_path_from_message
+from ..relay.service import MAX_AGE_SEC
 from ..send.bubbles import get_sender
 from ..send.queue import SendQueue
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_POLL_SEC = 1.0
-MAX_DEDUP_SIZE = 5000
+# Message ids remembered per chat (a read shows the last 50).  One set per chat: a busy group
+# never pushes a quiet chat's history out of it (which would hand that history on again).
+CHAT_KNOWN_SIZE = 500
+# PRM_CATCHUP_HOURS: how many of a registered creator's latest messages are read back on
+# startup and after a re-initialisation, to find the ones the bot never handled.
+CATCHUP_READ = 200
 MAX_CONSECUTIVE_ERRORS = 5   # trigger reinit after this many consecutive failures
 SESSION_REFRESH_SEC = 60.0
 # OCR cannot see who wrote a line of a group chat.
@@ -346,7 +352,14 @@ class WcdbBackend(AbstractWeChatBackend):
         self._private_filter = None
         self._own_message_hook = None
         self._db_failures = 0          # database reads failed in a row (the WeChat edge's state)
-        self._known_ids = DedupSet(max_size=MAX_DEDUP_SIZE)
+        self._known: dict[str, DedupSet] = {}      # per chat: the message ids seen (_known_set)
+        # PRM_CATCHUP_HOURS: per registered creator's chat, the messages the bot never handled
+        # (found by _prime_chat; it was stopped, the database re-opened), oldest first, for the
+        # chat's next poll; is a chat a creator's that the catch-up follows (_tracked_chat); how
+        # far each was read, as last written to chat_read_marks.
+        self._catchup: dict[str, list[dict]] = {}
+        self._tracked: dict[str, bool] = {}
+        self._read_marks: dict[str, int] = {}
         # Thread safety: WCDB DLL (ctypes) may not be thread-safe internally.
         # All _client calls are serialized through this lock.
         self._client_lock = threading.Lock()
@@ -571,9 +584,12 @@ class WcdbBackend(AbstractWeChatBackend):
             logger.error("WCDB reinitialization failed: %s", e)
             raise
         # Clear dedup set — WCDB may return messages with new IDs
-        self._known_ids = DedupSet(max_size=MAX_DEDUP_SIZE)
+        self._known = {}
+        self._tracked = {}
         # Re-resolve groups (talker IDs may have changed)
         self._resolve_groups()
+        # What came in while the database could not be read: history, except a registered
+        # creator's messages the bot never handled (PRM_CATCHUP_HOURS, _prime_chat).
         self._prime_known_ids()
         # Re-find WeChat window
         hwnd = self._window.find_hwnd()
@@ -891,9 +907,10 @@ class WcdbBackend(AbstractWeChatBackend):
                 continue
             group_name, talker, standardized = ready
             msg_id = standardized["message_id"]
-            if msg_id in self._known_ids:
+            known = self._known_set(talker)
+            if msg_id in known:
                 continue
-            self._known_ids.add(msg_id)
+            known.add(msg_id)
             # Not through the burst buffer: it holds a message until _poll_cycle flushes it (which
             # does not run while the database is down) and would merge different people's lines,
             # since every line has the same unknown speaker.  The looks are seconds apart anyway.
@@ -987,6 +1004,7 @@ class WcdbBackend(AbstractWeChatBackend):
         """Also read the private chats ``accept(username)`` says yes to, whatever PRIVATE_CHATS
         says (PRM_COPILOT: the registered creators).  Needs PRIVATE_CHAT_ENABLED=true."""
         self._private_filter = accept
+        self._tracked = {}
 
     def refresh_private_chats_soon(self) -> None:
         """The next poll looks for newly allowed private chats at once (a creator was registered)."""
@@ -1050,6 +1068,7 @@ class WcdbBackend(AbstractWeChatBackend):
         if now - self._last_session_refresh < SESSION_REFRESH_SEC:
             return
         self._last_session_refresh = now
+        self._tracked = {}                  # creators registered or removed meanwhile: asked again
 
         private_config = [
             g.strip()
@@ -1116,28 +1135,178 @@ class WcdbBackend(AbstractWeChatBackend):
         except Exception:
             logger.exception("Failed to refresh private chat sessions")
 
+    def _known_set(self, talker: str) -> DedupSet:
+        """The message ids already seen in this chat (made empty on its first read)."""
+        known = self._known.get(talker)
+        if known is None:
+            known = self._known[talker] = DedupSet(max_size=CHAT_KNOWN_SIZE)
+        return known
+
+    def _catchup_hours(self) -> int:
+        """PRM_CATCHUP_HOURS (0: a creator's messages that came in while the bot was not
+        reading stay history, as before)."""
+        try:
+            return max(0, int(getattr(self._config, "prm_catchup_hours", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _tracked_chat(self, talker: str) -> bool:
+        """Is this a registered creator's private chat whose reading is kept track of, for the
+        catch-up after a restart (``chat_read_marks``)?  Needs the message store; not with the
+        WeChat edge (PRM_EDGE: its events have rules of their own, src/edge).  Remembered until
+        the next session refresh (a creator registered or removed is asked again then)."""
+        tracked = self._tracked.get(talker)
+        if tracked is None:
+            tracked = bool(
+                self._store is not None
+                and getattr(self._config, "prm_edge", "off") != "on"
+                and not self._chat_is_group.get(talker, str(talker).endswith("@chatroom"))
+                and self._wants_private(talker)
+            )
+            self._tracked[talker] = tracked
+        return tracked
+
+    def _is_own_line(self, standardized: dict, my_wxid: str) -> bool:
+        """Did this account write it?  With the account's wxid known that is the whole test:
+        a member whose display name is the account's must still be heard.  The name is only a
+        fallback without the wxid."""
+        if my_wxid:
+            sender_id = standardized.get("sender_id", "")
+            return sender_id == my_wxid or my_wxid.startswith(sender_id) or sender_id.startswith(my_wxid)
+        sender_name = standardized.get("sender_name", "")
+        return bool(self._bot_name and (self._bot_name in sender_name or sender_name in self._bot_name))
+
     def _prime_known_ids(self) -> None:
-        """Mark currently visible WCDB messages as historical on startup."""
-        primed = 0
+        """Mark currently visible WCDB messages as historical on startup (and after a
+        re-initialisation).  PRM_CATCHUP_HOURS: in a registered creator's private chat the
+        messages the bot never handled are kept for the chat's next poll instead (_prime_chat)."""
+        primed = queued = 0
+        self._catchup = {}
+        catching_up = self._catchup_hours() > 0
         for group_name, talker in list(self._talker_ids.items()):
+            catch_up = catching_up and self._tracked_chat(talker)
             try:
                 with self._client_lock:
-                    messages = self._client.get_messages(talker=talker, limit=50)
+                    messages = self._client.get_messages(talker=talker, limit=CATCHUP_READ if catch_up else 50)
             except Exception as e:
                 logger.warning("Failed to prime WCDB state for %s: %s", group_name, e)
                 continue
-            for msg in messages or []:
-                standardized = self._standardize(
-                    msg, group_name, talker, resolve_voice=False,
-                    is_group=self._chat_is_group.get(
-                        talker, talker.endswith("@chatroom"),
-                    ),
-                )
-                if standardized is None:
-                    continue
-                self._known_ids.add(standardized["message_id"])
-                primed += 1
-        logger.info("Primed WCDB state (%d historical messages skipped)", primed)
+            marked, kept = self._prime_chat(group_name, talker, messages, catch_up=catch_up)
+            primed += marked
+            queued += kept
+        logger.info("Primed WCDB state (%d historical messages skipped%s)", primed,
+                    f"; {queued} message(s) of registered creators that came in while the bot was not "
+                    "reading are handed on" if queued else "")
+
+    def _prime_chat(self, group_name: str, talker: str, messages, *, catch_up: bool,
+                    first_read: bool = False) -> tuple[int, int]:
+        """Mark one chat's messages (``messages``: WCDB's list, newest first) as seen.  With
+        ``catch_up`` (a registered creator's chat, PRM_CATCHUP_HOURS on) the ones
+        ``_catchup_plan`` picks are kept, oldest first, for the chat's next poll instead.
+        Returns ``(marked, kept)``."""
+        is_group = self._chat_is_group.get(talker, talker.endswith("@chatroom"))
+        known = self._known_set(talker)
+        items = []
+        for msg in reversed(messages or []):
+            standardized = self._standardize(msg, group_name, talker, resolve_voice=False, is_group=is_group)
+            if standardized is not None:
+                items.append((msg, standardized))
+        picked = self._catchup_plan(talker, [s for _, s in items], first_read=first_read) if catch_up else set()
+        kept, marked = [], 0
+        for msg, standardized in items:
+            msg_id = standardized["message_id"]
+            if msg_id in picked:
+                kept.append(msg)
+            elif msg_id not in known:
+                known.add(msg_id)
+                marked += 1
+        if kept:
+            self._catchup[talker] = kept
+            logger.info("Catch-up: %d message(s) in a registered creator's chat (%s…) came in while the bot "
+                        "was not reading (the oldest at %s); handed on in order", len(kept), talker[:8],
+                        time.strftime("%m-%d %H:%M", time.localtime(min(
+                            int(s.get("timestamp") or 0) for _, s in items if s["message_id"] in picked))))
+        return marked, len(kept)
+
+    def _catchup_plan(self, talker: str, items: list[dict], *, first_read: bool = False) -> set[str]:
+        """The ids of a registered creator's messages (``items``: standardized, what WCDB shows
+        now) that the bot never handled: they are handed on, the rest is history.
+
+        The creator's lines: newer than the newest message stored for the chat (the route
+        stores every message it handles first, step ``persist``) and not stored themselves.
+        This account's own lines (an operator typing on the phone; they are never stored):
+        newer than that and than the chat's read mark (``chat_read_marks``: how far the bot
+        has read the chat as a creator's).  Without a stored message the read mark is the
+        line for the creator too; without a read mark this account's lines are history (the
+        bot never kept track of the chat, or ran a version that did not).  Nothing to go by:
+        history, as before.  The first read of a chat found after startup that the bot never
+        read as a creator's (registered just now) keeps the old rule too: only the last
+        MAX_AGE_SEC seconds are handed on, its older lines are history whatever was stored
+        of it long ago.  A message a burst still holds (a re-initialisation) is the burst's.
+        """
+        try:
+            stored_at = self._store.last_stored_at(talker)
+            mark = self._store.read_mark(talker)
+            stored = self._store.stored_ids([s["message_id"] for s in items])
+        except Exception:
+            logger.exception("Catch-up: the message store could not be read for %s…; its messages are history",
+                             talker[:8])
+            return set()
+        if first_read and mark is None:
+            creator_floor = own_floor = None
+        else:
+            creator_floor = stored_at if stored_at is not None else mark
+            own_floor = None if mark is None else max(mark, stored_at if stored_at is not None else mark)
+        held = self._burst.held_ids()
+        my_wxid = self.own_wxid()
+        recent = time.time() - MAX_AGE_SEC
+        picked = set()
+        for standardized in items:
+            msg_id = standardized["message_id"]
+            if msg_id in stored or msg_id in held:
+                continue
+            ts = int(standardized.get("timestamp") or 0)
+            floor = own_floor if self._is_own_line(standardized, my_wxid) else creator_floor
+            if floor is not None and ts > floor:
+                picked.add(msg_id)
+            elif floor is None and first_read and ts >= recent:
+                picked.add(msg_id)
+        return picked
+
+    def _hand_on_missed(self, group_name: str, talker: str, messages: list[dict],
+                        callback: MessageCallback) -> None:
+        """The messages ``_prime_chat`` kept for a registered creator's chat, oldest first, one
+        by one in this thread: no burst merging and no worker pool, so PRM hears them in order
+        (its settle makes one draft job of them) and each is stored under its own id."""
+        known = self._known_set(talker)
+        my_wxid = self.own_wxid()
+        handed = 0
+        for msg in messages:
+            if not self._running:
+                break                                  # not handed: the next start finds it again
+            standardized = self._standardize(msg, group_name, talker, is_group=False)
+            if standardized is None or standardized["message_id"] in known:
+                continue
+            known.add(standardized["message_id"])
+            if self._is_own_line(standardized, my_wxid):
+                if my_wxid:
+                    self._tell_own_message(standardized)
+                continue
+            if my_wxid:
+                standardized["_not_self_by_id"] = True
+            self._handle_message(group_name, talker, standardized, callback, screenshot=False)
+            handed += 1
+        logger.info("Catch-up: %d message(s) of a registered creator (%s…) handed on", handed, talker[:8])
+
+    def _note_read(self, talker: str, newest: int) -> None:
+        """Move the chat's read mark (``chat_read_marks``) to the newest message seen there."""
+        if newest <= self._read_marks.get(talker, -1):
+            return
+        try:
+            self._store.set_read_mark(talker, newest)
+            self._read_marks[talker] = newest
+        except Exception:
+            logger.exception("Could not note how far %s… was read", talker[:8])
 
     def _poll_group(self, group_name: str, talker: str,
                     callback: MessageCallback) -> None:
@@ -1145,12 +1314,27 @@ class WcdbBackend(AbstractWeChatBackend):
 
         Route callbacks are submitted to the thread pool so a slow send in
         one chat never blocks polling of the other chats.
+
+        A registered creator's private chat (PRM_CATCHUP_HOURS): first what the bot never
+        handled (``_prime_chat`` kept it at startup; on the first read of a chat found
+        later, it is picked now), then the new messages; the newest message time seen goes
+        to its read mark.
         """
         with self._client_lock:
             messages = self._client.get_messages(talker=talker, limit=50)
+        first_read = talker not in self._known
+        known = self._known_set(talker)
+        tracked = self._tracked_chat(talker)
+        catching_up = tracked and self._catchup_hours() > 0
+        if first_read and catching_up:
+            self._prime_chat(group_name, talker, messages, catch_up=True, first_read=True)
+        missed = self._catchup.pop(talker, None)
+        if missed:
+            self._hand_on_missed(group_name, talker, missed, callback)
         if not messages:
             return
 
+        newest = None
         for msg in reversed(messages):
             if not self._running:
                 break
@@ -1165,35 +1349,37 @@ class WcdbBackend(AbstractWeChatBackend):
             )
             if standardized is None:
                 continue
+            ts = int(standardized.get("timestamp") or 0)
+            newest = ts if newest is None else max(newest, ts)
 
             msg_id = standardized["message_id"]
-            if msg_id in self._known_ids:
+            if msg_id in known:
                 continue
-            self._known_ids.add(msg_id)
-            if self._ocr_priming:
-                continue              # the backlog of an OCR stretch: seen, not answered
+            known.add(msg_id)
+            if self._ocr_priming and not catching_up:
+                # The backlog of an OCR stretch: seen, not answered (part of it was answered
+                # from the screen).  OCR never reads a private chat: a creator's is handed on.
+                continue
 
             # Skip own messages.  With the account's wxid known that is the
             # whole test: a member whose display name is the account's must
             # still be heard.  The name is only a fallback without the wxid.
-            sender_id = standardized.get("sender_id", "")
             my_wxid = self._client._config.get("myWxid", "")
-            if my_wxid:
-                if sender_id == my_wxid or my_wxid.startswith(sender_id) or sender_id.startswith(my_wxid):
+            if self._is_own_line(standardized, my_wxid):
+                if my_wxid:
                     self._tell_own_message(standardized)
-                    continue
+                continue
+            if my_wxid:
                 # Tells the router's self_message step not to judge by the name.
                 standardized["_not_self_by_id"] = True
-            else:
-                sender_name = standardized.get("sender_name", "")
-                if self._bot_name and (self._bot_name in sender_name or sender_name in self._bot_name):
-                    continue
 
             self._trim_dedup()
 
             # A rapid same-sender run of text bubbles is one turn.
             for ready in self._burst.push(standardized):
                 self._dispatch_message(ready, callback)
+        if tracked and newest is not None:
+            self._note_read(talker, newest)
 
     def _flush_due_bursts(self, callback: MessageCallback) -> None:
         """Dispatch message bursts that have gone quiet long enough."""
@@ -1233,13 +1419,15 @@ class WcdbBackend(AbstractWeChatBackend):
             )
 
     def _handle_message(self, group_name: str, talker: str,
-                        standardized: dict, callback: MessageCallback) -> None:
-        """Execute callback and send reply (runs in thread pool worker)."""
+                        standardized: dict, callback: MessageCallback, *, screenshot: bool = True) -> None:
+        """Execute callback and send reply (runs in thread pool worker).  ``screenshot``: a
+        picture not found on disk may be taken from the chat window (not for one read late:
+        the window shows the chat as it is now)."""
         if not self._running:
             return
 
         try:
-            if int(standardized.get("msg_type", 1) or 1) in IMAGE_MSG_TYPES:
+            if screenshot and int(standardized.get("msg_type", 1) or 1) in IMAGE_MSG_TYPES:
                 standardized["_capture_media_screenshot"] = (
                     lambda name=group_name: self._capture_media_screenshot(name)
                 )

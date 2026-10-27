@@ -212,7 +212,8 @@ def test_a_failed_send_takes_back_the_newest_of_two_same_lines(tmp_path):
 
 def test_messages_windows_kept_while_the_mac_was_away_are_not_history(tmp_path):
     """Mac 离线超过 5 分钟：Windows 排队的达人消息、运营亲手回复照常处理（edge 事件不按年龄当历史丢掉）。
-    本机微信后端的旧消息（没有 edge_event_id）照旧当历史。"""
+    PRM_CATCHUP_HOURS（默认 12 小时）以内本机微信后端补交的旧消息也一样起草（草稿一律先审，
+    tests/test_prm_catchup.py）；PRM_CATCHUP_HOURS=0 时本机的旧消息照旧当历史，edge 的照常处理。"""
     from test_prm import Bot as PrmBot
 
     side = PrmBot(Clock(), tmp_path)
@@ -220,7 +221,8 @@ def test_messages_windows_kept_while_the_mac_was_away_are_not_history(tmp_path):
         side.prm.register(CREATOR, "小美")
         an_hour_ago = side.clock.now - 3600
         assert side.prm.handle(side.msg("一小时前发的", ts=an_hour_ago)) is True
-        assert side.relay.store.list_jobs() == []                          # 不是 edge 来的：历史
+        [late] = side.relay.store.list_jobs()                              # 没在读时收到的：起草，一律先审
+        assert json.loads(late["meta"])["late"] == {"from": an_hour_ago}
         assert side.prm.handle(side.msg("我到家啦", ts=an_hour_ago, edge_event_id=7)) is True
         job = side.worker_takes()
         assert job is not None and "我到家啦" in job["text"]

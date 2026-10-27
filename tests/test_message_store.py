@@ -111,7 +111,8 @@ class InitializeDbTests(unittest.TestCase):
         }
 
         # No chat archive, group memory or reply log: the business gateway keeps none.
-        self.assertEqual(tables, {"messages", "message_media", "user_last_message"})
+        # chat_read_marks only says how far a creator's chat was read (no text; PRM_CATCHUP_HOURS).
+        self.assertEqual(tables, {"messages", "message_media", "user_last_message", "chat_read_marks"})
         self.assertEqual(indexes, {
             "idx_msg_chat_time", "idx_msg_chat_sender_time",
             "idx_media_chat_time", "idx_media_chat_server",
@@ -131,7 +132,7 @@ class InitializeDbTests(unittest.TestCase):
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' "
             "AND name NOT LIKE 'sqlite_%'"
         ).fetchone()[0]
-        self.assertEqual(count, 3)
+        self.assertEqual(count, 4)
 
     def test_file_database_creates_parent_dirs_and_enables_wal(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
