@@ -843,7 +843,7 @@ def test_the_bot_keeps_only_a_sample_order_number():
 def test_jushuitan_is_no_catalogue_platform(node, jcfg):
     cat = platforms.sync_catalog(jcfg, ["jst"], previous=catalog())
     assert "jst" not in cat["platforms"] and node.calls() == []
-    assert "聚水潭" not in platforms.catalog_markdown(cat)
+    assert "## 聚水潭" not in platforms.catalog_markdown(cat)                  # 没有聚水潭这一张表（开头说明里提到编码不算）
 
 
 THREE = {"action": "jst.sample_order", "shop": "dy", "creator_platform": "dy", "creator_account": "test_daren_01",

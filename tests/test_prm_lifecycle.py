@@ -515,7 +515,7 @@ def test_a_sample_orders_receiver_is_cut_down_with_the_rest(bot, clock):
     assert bot.prm.decide(packet["id"], "execute", None)["ok"]
     before = json.dumps(bot.relay.store.list_jobs(100), ensure_ascii=False)
     assert "13812345678" in before and "张江路" in before                     # the execution job carries them
-    clock.now += 31 * DAY
+    clock.now += 91 * DAY                                                   # 签收后达人又发了消息：从那条起算 90 天（D27）
     assert bot.prm.purge_due() == 1
     everything = json.dumps([bot.prm.store.packets(limit=100), bot.relay.store.list_jobs(100)], ensure_ascii=False)
     assert "张江路" not in everything and "13812345678" not in everything
