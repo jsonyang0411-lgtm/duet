@@ -618,6 +618,13 @@ class PrmService:
             return True
         files = self._relay.store.outfiles(job["id"])
         attachments = [{"name": f["name"], "path": f["path"], "size": f["size"], "sha256": f["sha256"]} for f in files]
+        # Every file the draft named (an older worker reports only the ones it sent back): fewer came,
+        # the draft waits for a person whatever its kind's gate, and the deal and the draft say which.
+        named = draft.attachments_named if draft.attachments_named is not None else draft.attachments_to_send
+        short = ""
+        if len(named) > len(attachments):
+            lost = missing_files(named, [a["name"] for a in attachments], draft.attachments_missing)
+            short = f"草稿要附 {len(named)} 个文件，只收到 {len(attachments)} 个" + (f"：{'、'.join(lost)}" if lost else "")
         mode = self._mode(deal, now)
         shipment = self._store.latest_shipment(deal_id)
         waybill = shipment["waybill"] if shipment else ""
@@ -640,7 +647,7 @@ class PrmService:
             route, state, decided_at = deals.route_for(
                 self._store, draft.message_kind, deal=deal, now=now, text=draft.reply_draft,
                 needs_attention=draft.needs_attention, unknown_tokens=unknown, reason=draft.reason,
-                waybill=waybill, attachments=attachments)
+                waybill=waybill, attachments=attachments, files_named=len(named))
         packet_meta = {"waybill": waybill} if draft.message_kind == "shipping_notice" and waybill else {}
         if lane == LANE_SYSTEM:
             packet_meta["lane"] = LANE_SYSTEM
@@ -652,8 +659,9 @@ class PrmService:
         packet_id = self._store.add_packet(
             deal_id=deal_id, party_id=party_id, job_id=job["id"], chat_id=job["chat_id"],
             kind=draft.message_kind, text=draft.reply_draft, attachments=attachments, intent=draft.intent,
-            slots=draft.slots, stage_proposal=draft.stage_proposal, needs_attention=draft.needs_attention,
-            reason=draft.reason, status=state, route=route, decided_at=decided_at, meta=packet_meta,
+            slots=draft.slots, stage_proposal=draft.stage_proposal, needs_attention=draft.needs_attention or bool(short),
+            reason="；".join(r for r in (short, draft.reason) if r)[:500], status=state, route=route,
+            decided_at=decided_at, meta=packet_meta,
             tool=tool, platform=platform, now=now,
         )
         if state in (PENDING, APPROVED):
@@ -661,9 +669,8 @@ class PrmService:
         attention = [draft.reason] if draft.needs_attention and draft.reason else []
         if lane == LANE_SYSTEM and state == SUPERSEDED:
             attention.append(f"#{job['id']} 开专属佣金这一步的草稿没进待审批（人工接管中，或者又有了新的一步），请运营核对")
-        missing = len(draft.attachments_to_send) - len(attachments)
-        if missing > 0:
-            attention.append(f"草稿要附 {len(draft.attachments_to_send)} 个文件，只收到 {len(attachments)} 个")
+        if short:
+            attention.append(short)
         if draft.message_kind == "shipping_notice" and draft.reply_draft and not gates.waybill_ok(draft.reply_draft, waybill):
             attention.append("发货通知里的单号和系统记录对不上" if waybill else "还没有运单号，发货通知不能发")
         if draft.platform is not None and draft.platform.get("verdict") != "ready":
@@ -1309,6 +1316,26 @@ def action_target(action: dict, data: Optional[dict] = None) -> tuple:
 
 def _date_text(at: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(at))
+
+
+def missing_files(named: list, arrived: list, reported: list) -> list:
+    """The files a draft named that did not come, for the note on the deal and the draft: what the
+    Mac said it could not send back, with why (``reported``: ``[{"name", "why"}]``), else (an older
+    worker says nothing) each named one whose file name is not among the ``arrived`` names."""
+    if reported:
+        return [f"{_file_name(r['name'])}（{r['why']}）" if r.get("why") else _file_name(r["name"]) for r in reported]
+    left, out = [str(a) for a in arrived], []
+    for name in named:
+        base = _file_name(name)
+        if base in left:
+            left.remove(base)
+        else:
+            out.append(base)
+    return out
+
+
+def _file_name(path: str) -> str:
+    return str(path).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or str(path)
 
 
 def next_step_note(action: dict, record: dict, *, delivered: bool = False) -> str:

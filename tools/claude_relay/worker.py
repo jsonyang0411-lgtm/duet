@@ -33,7 +33,9 @@ and this script as a PreToolUse hook (--prm-hook) that refuses any path outside
 the workspace and any write outside deals/*.md (and denies every permission
 request).  The creator's words go in between <creator_message> tags as data.
 Claude answers with a JSON object (--json-schema): a draft and slot updates;
-files it names from assets/ are sent back to the bot (POST .../outfiles).  The
+files it names from assets/ are sent back to the bot (POST .../outfiles), and the bot
+is told every file the draft named and why one did not go (attachments_named /
+attachments_missing): a draft short of its files waits for a person.  The
 draft waits in the bot's console; nothing reaches the creator from here.  The
 worker only asks the bot for prm jobs when prm_workspace is usable
 (X-Relay-Kinds).
@@ -1580,18 +1582,26 @@ def purge_case_file(workspace: Path, party_id: int) -> dict:
     return {"ok": True, "text": f"案卷已清理，改了 {changed} 行", "duration_s": 0}
 
 
-def prm_asset(workspace: Path, rel: str) -> Path | None:
-    """A file the draft wants to send, only from assets/ (no way out through .. or links)."""
+def prm_asset_check(workspace: Path, rel: str) -> tuple[Path | None, str]:
+    """``(file, "")`` for a file the draft wants to send, only from assets/ (no way out through ..
+    or links), else ``(None, why not)``: the bot tells the operators which file did not come."""
     candidate = Path(os.path.expanduser(str(rel)))
     if not candidate.is_absolute():
         candidate = workspace / candidate
     real = os.path.realpath(candidate)
     assets = os.path.realpath(workspace / "assets")
-    if not _inside(real, assets) or real == assets or not os.path.isfile(real):
-        return None
+    if not _inside(real, assets) or real == assets:
+        return None, "不在 assets/ 里"
+    if not os.path.isfile(real):
+        return None, "assets/ 里没有这个文件"
     if os.path.getsize(real) > PRM_MAX_UPLOAD_BYTES:
-        return None
-    return Path(real)
+        return None, f"超过 {PRM_MAX_UPLOAD_BYTES // (1024 * 1024)} MB"
+    return Path(real), ""
+
+
+def prm_asset(workspace: Path, rel: str) -> Path | None:
+    """A file the draft wants to send, only from assets/ (no way out through .. or links)."""
+    return prm_asset_check(workspace, rel)[0]
 
 
 def summarize_prm(run: dict, data: dict | None, settings: dict) -> dict:
@@ -1650,18 +1660,27 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
     result = summarize_prm(run, parse_output(run["stdout"]), {**settings, "prm_timeout_min": timeout})
     if result["ok"]:
         draft = json.loads(result["text"])
-        sent = []
-        for rel in draft.get("attachments_to_send") or []:
-            path = prm_asset(workspace, str(rel))
+        named = [str(rel).strip() for rel in draft.get("attachments_to_send") or [] if str(rel).strip()]
+        sent, missing = [], []
+        for rel in named:
+            path, why = prm_asset_check(workspace, rel)
             if path is None:
-                log.warning("#%s draft names a file outside assets/ (or missing / too big); not sent back", job["id"])
+                log.warning("#%s draft names a file it cannot send back (%s)", job["id"], why)
+                missing.append({"name": rel, "why": why})
                 continue
             try:
                 client.upload(int(job["id"]), path, path.name)
-                sent.append(str(rel))
+                sent.append(rel)
             except Exception as e:
                 log.warning("#%s file %s not sent back: %s", job["id"], path.name, e)
+                missing.append({"name": rel, "why": f"没传上去：{e}"[:120]})
+        # What came back (all an older bot counts), every file the draft named and why some did
+        # not come: the bot keeps a draft short of files for a person and says which.
         draft["attachments_to_send"] = sent
+        draft["attachments_named"] = named
+        draft.pop("attachments_missing", None)
+        if missing:
+            draft["attachments_missing"] = missing
         draft.pop("platform", None)                      # only this script writes the verdict
         if draft.get("platform_action") is not None:
             draft["platform"] = platform_preview(settings, workspace, draft.pop("platform_action"), client,

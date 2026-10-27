@@ -263,6 +263,10 @@ def test_only_files_in_assets_can_go_back(worker, workspace, tmp_path):
     for bad in ("../outside.txt", "assets/../../outside.txt", "assets/link.txt", "assets/missing.png",
                 "kb/合作政策.md", str(tmp_path / "outside.txt"), "assets"):
         assert worker.prm_asset(workspace, bad) is None, bad
+    assert worker.prm_asset_check(workspace, "assets/brief.txt")[1] == ""
+    for bad, why in (("../outside.txt", "不在 assets/ 里"), ("assets/link.txt", "不在 assets/ 里"), ("assets", "不在 assets/ 里"),
+                     ("assets/missing.png", "assets/ 里没有这个文件")):
+        assert worker.prm_asset_check(workspace, bad) == (None, why), bad
 
 
 def test_a_draft_needs_structured_output(worker):
@@ -302,8 +306,42 @@ def test_a_prm_job_runs_locked_in_the_workspace_and_its_draft_waits(worker, bot,
     assert packet["status"] == "pending" and packet["text"] == "确认一下：小美〈手机1〉"
     assert [a["name"] for a in packet["attachments"]] == ["brief.txt"]       # only the file in assets/
     assert bot.texts == []                                                   # nothing went to WeChat
+    answer = json.loads(bot.relay.store.get(packet["job_id"])["result_text"])
+    assert answer["attachments_to_send"] == ["assets/brief.txt"] and len(answer["attachments_named"]) == 5
+    assert answer["attachments_missing"] == [
+        {"name": "../outside.txt", "why": "不在 assets/ 里"}, {"name": "assets/missing.png", "why": "assets/ 里没有这个文件"},
+        {"name": "assets/../../outside.txt", "why": "不在 assets/ 里"}, {"name": "assets/link.txt", "why": "不在 assets/ 里"}]
+    assert bot.prm.store.deal(1)["attention"] == (
+        "草稿要附 5 个文件，只收到 1 个：outside.txt（不在 assets/ 里）、missing.png（assets/ 里没有这个文件）、"
+        "outside.txt（不在 assets/ 里）、link.txt（不在 assets/ 里）")
+    assert packet["needs_attention"] is True
     logs = list((tmp_path / "home" / "logs" / "prm").glob("*-job1.md"))
     assert len(logs) == 1
+
+
+def test_a_file_that_did_not_upload_keeps_the_draft_for_a_person(worker, bot, fake_claude, tmp_path, workspace,
+                                                                  monkeypatch):
+    bot.prm.store.set_gate("address_confirm", "auto", 0)                     # even a kind that goes out on its own
+    (workspace / "assets" / "price.txt").write_text("价目表", encoding="utf-8")
+    real_upload = worker.RelayClient.upload
+
+    def upload(client, job_id, path, name):
+        if name == "brief.txt":
+            raise OSError("the upload ended early")
+        return real_upload(client, job_id, path, name)
+
+    monkeypatch.setattr(worker.RelayClient, "upload", upload)
+    script = Path(fake_claude.path)
+    script.write_text(script.read_text(encoding="utf-8").replace(
+        '"assets/link.txt"] if "要素材" in prompt', '"assets/link.txt"] if "要素材" in prompt else '
+        '["assets/brief.txt", "assets/price.txt"] if "两份" in prompt'), encoding="utf-8")
+    creator_says(bot, "两份资料都发我一下，电话 13812345678")                  # 〈手机1〉 of the draft is known
+    run_one(worker, bot, settings(bot, fake_claude, tmp_path, prm_workspace=str(workspace)))
+    [packet] = bot.prm.store.packets()
+    assert packet["status"] == "pending" and packet["route"] == "review"
+    assert [a["name"] for a in packet["attachments"]] == ["price.txt"]
+    assert bot.prm.store.deal(1)["attention"] == "草稿要附 2 个文件，只收到 1 个：brief.txt（没传上去：the upload ended early）"
+    assert bot.texts == []
 
 
 def test_an_answer_without_a_draft_asks_a_person(worker, bot, fake_claude, tmp_path, workspace):

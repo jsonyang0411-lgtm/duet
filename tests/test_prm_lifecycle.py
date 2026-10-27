@@ -209,6 +209,55 @@ def test_a_locked_kind_never_goes_auto(bot, clock):
     assert packet["route"] == "review" and packet["status"] == "pending"
 
 
+# Files the draft named that did not all come: the Mac says which and why; the draft waits for a
+# person whatever its kind's gate ("两份资料发你啦" must not go out with one).
+SHORT = draft(message_kind="material", reply_draft="三份资料发你啦～", slots={}, reason="kb/素材规范.md",
+              attachments_to_send=["assets/a.txt"], attachments_named=["assets/a.txt", "assets/b.pdf", "assets/c.png"],
+              attachments_missing=[{"name": "assets/b.pdf", "why": "超过 100 MB"},
+                                   {"name": "assets/c.png", "why": "assets/ 里没有这个文件"}])
+
+
+def test_a_draft_short_of_its_files_waits_for_a_person_even_when_its_kind_is_auto(bot, clock):
+    bot.prm.store.set_gate("material", "auto", clock.now)
+    packet = pending_packet(bot, SHORT, files=[("a.txt", b"a")])
+    assert packet["status"] == "pending" and packet["route"] == "review"
+    assert [a["name"] for a in packet["attachments"]] == ["a.txt"]
+    note = "草稿要附 3 个文件，只收到 1 个：b.pdf（超过 100 MB）、c.png（assets/ 里没有这个文件）"
+    assert bot.prm.store.deal(1)["attention"] == note
+    assert packet["needs_attention"] and packet["reason"] == f"{note}；kb/素材规范.md"   # the 待审批 card says it too
+    bot.prm.tick()
+    assert bot.texts == [] and bot.files == []
+
+
+def test_a_draft_with_all_its_files_goes_as_before(bot, clock):
+    bot.prm.store.set_gate("material", "auto", clock.now)
+    whole = {**SHORT, "reply_draft": "两份资料发你啦～", "attachments_to_send": ["assets/a.txt", "assets/b.txt"],
+             "attachments_named": ["assets/a.txt", "assets/b.txt"], "attachments_missing": []}
+    packet = pending_packet(bot, whole, files=[("a.txt", b"a"), ("b.txt", b"b")])
+    assert packet["status"] == "approved" and packet["route"] == "auto"
+    assert bot.prm.store.deal(1)["attention"] == "" and not packet["needs_attention"]
+    bot.prm.send_approved()
+    assert bot.texts == [(CREATOR, "两份资料发你啦～")] and len(bot.files) == 2
+
+
+def test_an_older_worker_that_reports_only_what_it_sent(bot, clock):
+    """It sends only the list of what it uploaded: as before, plus a file the bot did not get."""
+    bot.prm.store.set_gate("material", "auto", clock.now)
+    old = {k: v for k, v in SHORT.items() if k not in ("attachments_named", "attachments_missing")}
+    assert pending_packet(bot, old, files=[("a.txt", b"a")])["status"] == "approved"   # it named one, one came
+    lost = pending_packet(bot, {**old, "attachments_to_send": ["assets/a.txt", "assets/b.txt"]}, files=[("a.txt", b"a")])
+    assert lost["status"] == "pending" and lost["route"] == "review"
+    assert bot.prm.store.deal(1)["attention"] == "草稿要附 2 个文件，只收到 1 个：b.txt"
+
+
+def test_plain_reason_counts_the_files_the_draft_named():
+    base = dict(needs_attention=False, mode="copilot", unknown_tokens=[], reason="kb/素材规范.md", text="x", waybill="",
+                attachments=[{"name": "a.txt"}])
+    assert gates.plain_reason("material", **base, files_named=3) == "草稿要附 3 个文件，只收到 1 个"
+    assert gates.plain_reason("material", **base, files_named=1) == ""
+    assert gates.plain_reason("greeting", **base) == ""                       # nothing said: as before
+
+
 def test_plain_reason_rules():
     base = dict(needs_attention=False, mode="copilot", unknown_tokens=[], reason="kb/合作政策.md", text="x",
                 waybill="", attachments=[])
