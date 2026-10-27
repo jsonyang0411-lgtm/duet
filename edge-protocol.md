@@ -45,6 +45,7 @@
 - **网络**：
   - Windows 防火墙的 8790 端口只放行 Mac 的 IP。
   - TLS 暂时不做，所以达人的号码和地址会以明文经过局域网。
+  - Mac 和 Windows 不在同一个局域网时，两台都装 Tailscale，Mac 用 Windows 的 Tailscale 地址（100 开头），防火墙放行 Tailscale 网段；Tailscale 一路加密。见 `cross-network.md`。不要把 8790 映射到公网。
 - **时间**：
   - 协议里只用相对时长（秒），不要求两台机器对时。
   - 事件里的 `at` 是 Windows 记下的时间（Unix 秒），只用来显示和参考。
