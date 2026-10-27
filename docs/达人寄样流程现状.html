@@ -6,292 +6,335 @@
 <title>达人寄样流程现状</title>
 <style>
 :root {
-  --bg: #f6f5f1; --card: #ffffff; --ink: #1d1d1b; --muted: #6b6a64; --line: #d9d6cc;
-  --done: #1f7a4d; --done-bg: #e3f3ea;
-  --part: #9a6200; --part-bg: #fbf0d9;
-  --todo: #b3261e; --todo-bg: #fbe5e3;
-  --ext: #2457a6; --ext-bg: #e3ecf9;
+  --bg: #f6f5f1;
+  --panel: #ffffff;
+  --ink: #1f2328;
+  --muted: #5f6670;
+  --line: #e2dfd7;
+  --accent: #b5562b;
+  --accent-soft: #f6e6dc;
+  --ok: #1f7a4d;
+  --ok-soft: #dff1e7;
+  --test: #2f5fa7;
+  --test-soft: #e1ebf8;
+  --todo: #8a6d1d;
+  --todo-soft: #f5edd5;
+  --you: #7a3e9d;
+  --you-soft: #efe3f6;
+  --shadow: 0 1px 2px rgba(0,0,0,.05), 0 4px 16px rgba(0,0,0,.04);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #161614; --card: #22221f; --ink: #ecebe6; --muted: #a09e95; --line: #3a3934;
-    --done: #6fd39f; --done-bg: #1c3528; --part: #f0c36a; --part-bg: #3a2f17;
-    --todo: #f29b93; --todo-bg: #3d1f1c; --ext: #8db4f2; --ext-bg: #1c2a40;
+    --bg: #16181b;
+    --panel: #1f2226;
+    --ink: #e8e6e1;
+    --muted: #a3a8ae;
+    --line: #33373d;
+    --accent: #e08a5e;
+    --accent-soft: #3a2a21;
+    --ok: #6fcf9c;
+    --ok-soft: #1d3328;
+    --test: #8fb4ec;
+    --test-soft: #1f2b3d;
+    --todo: #e2c26a;
+    --todo-soft: #352e1a;
+    --you: #cfa0ea;
+    --you-soft: #2f2338;
+    --shadow: none;
   }
 }
 :root[data-theme="dark"] {
-  --bg: #161614; --card: #22221f; --ink: #ecebe6; --muted: #a09e95; --line: #3a3934;
-  --done: #6fd39f; --done-bg: #1c3528; --part: #f0c36a; --part-bg: #3a2f17;
-  --todo: #f29b93; --todo-bg: #3d1f1c; --ext: #8db4f2; --ext-bg: #1c2a40;
+  --bg: #16181b; --panel: #1f2226; --ink: #e8e6e1; --muted: #a3a8ae; --line: #33373d;
+  --accent: #e08a5e; --accent-soft: #3a2a21; --ok: #6fcf9c; --ok-soft: #1d3328;
+  --test: #8fb4ec; --test-soft: #1f2b3d; --todo: #e2c26a; --todo-soft: #352e1a;
+  --you: #cfa0ea; --you-soft: #2f2338; --shadow: none;
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--ink);
-  font: 15px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
-main { max-width: 1080px; margin: 0 auto; padding: 32px 16px 64px; }
-h1 { font-size: 26px; margin: 0 0 4px; }
-.sub { color: var(--muted); margin: 0 0 20px; }
-.legend { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
-.chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px;
-  font-size: 13px; font-weight: 600; white-space: nowrap; }
-.done { color: var(--done); background: var(--done-bg); }
-.part { color: var(--part); background: var(--part-bg); }
-.todo { color: var(--todo); background: var(--todo-bg); }
-.ext  { color: var(--ext);  background: var(--ext-bg); }
-.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 28px; }
-.summary div { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
-.summary b { display: block; font-size: 14px; margin-bottom: 4px; }
-.summary p { margin: 0; color: var(--muted); font-size: 13px; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.7 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+.wrap { max-width: 960px; margin: 0 auto; padding: 32px 16px 64px; }
+header h1 { font-size: 28px; line-height: 1.3; margin: 0 0 6px; letter-spacing: .5px; }
+header p { margin: 0; color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 8px; }
+.tag {
+  display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
+  font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 999px;
+}
+.tag.ok { background: var(--ok-soft); color: var(--ok); }
+.tag.test { background: var(--test-soft); color: var(--test); }
+.tag.todo { background: var(--todo-soft); color: var(--todo); }
+.tag.you { background: var(--you-soft); color: var(--you); }
+.legend .note { color: var(--muted); font-size: 13px; }
 
-.arch { display: grid; grid-template-columns: 1fr auto 1fr; gap: 12px; align-items: stretch; margin-bottom: 28px; }
-.arch .box { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
-.arch .box b { display: block; margin-bottom: 4px; }
-.arch .box ul { margin: 0; padding-left: 18px; font-size: 13px; color: var(--muted); }
-.arch .wire { display: flex; flex-direction: column; justify-content: center; gap: 6px; font-size: 12px; color: var(--muted); text-align: center; }
-.arch .wire span { background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; white-space: nowrap; }
-@media (max-width: 720px) { .arch { grid-template-columns: 1fr; } .arch .wire { flex-direction: row; flex-wrap: wrap; justify-content: center; } }
+/* 机器之间怎么走 */
+.lane {
+  margin: 22px 0 8px; display: grid; gap: 10px;
+  grid-template-columns: repeat(5, minmax(0, 1fr)); align-items: stretch;
+}
+.node {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  padding: 12px; box-shadow: var(--shadow); position: relative;
+}
+.node b { display: block; font-size: 14px; }
+.node span { display: block; font-size: 12.5px; color: var(--muted); line-height: 1.5; margin-top: 2px; }
+.node:not(:last-child)::after {
+  content: "→"; position: absolute; right: -10px; top: 50%; transform: translate(50%, -50%);
+  color: var(--muted); font-size: 14px;
+}
+.node.you { border-color: var(--you); }
 
-.flow { position: relative; }
-.step { display: grid; grid-template-columns: 56px 1fr; gap: 14px; }
-.rail { display: flex; flex-direction: column; align-items: center; }
-.num { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center;
-  font-weight: 700; border: 2px solid var(--line); background: var(--card); flex: none; }
-.num.done { border-color: var(--done); } .num.part { border-color: var(--part); }
-.num.todo { border-color: var(--todo); border-style: dashed; }
-.rail::after { content: ""; flex: 1; width: 2px; background: var(--line); margin: 4px 0; min-height: 18px; }
-.step:last-child .rail::after { display: none; }
-.body { padding-bottom: 22px; min-width: 0; }
-.body h2 { font-size: 17px; margin: 7px 0 2px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.where { font-size: 12px; color: var(--muted); font-weight: 400; }
-.nodes { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-top: 10px; }
-.node { background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--line);
-  border-radius: 8px; padding: 10px 12px; }
-.node.done { border-left-color: var(--done); }
-.node.part { border-left-color: var(--part); }
-.node.todo { border-left-color: var(--todo); border-style: dashed; border-left-style: solid; }
-.node.ext  { border-left-color: var(--ext); }
-.node .t { font-weight: 600; display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
-.node .t .chip { font-size: 11px; padding: 0 8px; }
-.node p { margin: 4px 0 0; font-size: 13px; color: var(--muted); }
-code { font-size: 12px; background: var(--bg); padding: 0 4px; border-radius: 4px; word-break: break-all; }
-.branch { font-size: 12px; color: var(--muted); margin: 10px 0 0; }
-.branch b { color: var(--ink); }
+h2 { font-size: 19px; margin: 40px 0 12px; display: flex; align-items: baseline; gap: 10px; }
+h2 .num {
+  font-size: 13px; color: var(--accent); background: var(--accent-soft);
+  border-radius: 6px; padding: 1px 8px; font-weight: 700;
+}
+.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.step {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  padding: 14px 16px; box-shadow: var(--shadow);
+  display: grid; grid-template-columns: 34px 1fr; gap: 4px 12px;
+}
+.step .n {
+  width: 28px; height: 28px; border-radius: 50%; background: var(--accent-soft); color: var(--accent);
+  font-weight: 700; font-size: 13px; display: grid; place-items: center; margin-top: 2px;
+}
+.step .body h3 { margin: 0; font-size: 15.5px; }
+.step .body p { margin: 4px 0 0; color: var(--muted); font-size: 14px; }
+.step .meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.step.gate { border-left: 4px solid var(--you); }
+.step ul { margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-size: 14px; }
 
-section.side { margin-top: 30px; }
-section.side h2 { font-size: 18px; }
-table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; font-size: 14px; }
-th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
-th { font-size: 13px; color: var(--muted); font-weight: 600; }
-tr:last-child td { border-bottom: none; }
-.tablewrap { overflow-x: auto; }
-footer { margin-top: 30px; color: var(--muted); font-size: 12px; }
+.gates {
+  margin-top: 40px; background: var(--you-soft); border-radius: 14px; padding: 18px 20px;
+}
+.gates h2 { margin: 0 0 8px; }
+.gates ol { margin: 0; padding-left: 20px; }
+.gates p { margin: 8px 0 0; color: var(--muted); font-size: 14px; }
+
+.next { display: grid; gap: 12px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px;
+  box-shadow: var(--shadow);
+}
+.card h3 { margin: 0 0 6px; font-size: 15px; }
+.card ul { margin: 0; padding-left: 18px; font-size: 14px; }
+footer { margin-top: 40px; color: var(--muted); font-size: 12.5px; }
+
+@media (max-width: 720px) {
+  .lane { grid-template-columns: 1fr; }
+  .node:not(:last-child)::after { content: "↓"; right: 50%; top: auto; bottom: -10px; transform: translate(50%, 50%); }
+  .next { grid-template-columns: 1fr; }
+  header h1 { font-size: 23px; }
+}
 </style>
 </head>
 <body>
-<main>
-<h1>达人寄样流程现状</h1>
-<p class="sub">从达人发来消息到发货、跟进的每一步，以及每一步做到了什么程度。依据：<code>merge-edge</code> 分支的代码（已推到 duet）、handoff.md v36，2026-10-26。</p>
+<div class="wrap">
 
-<div class="legend">
-  <span class="chip done">● 已实现（有测试）</span>
-  <span class="chip part">● 部分实现 / 只有模拟</span>
-  <span class="chip todo">● 未实现</span>
-  <span class="chip ext">● 等外部（同事、账号、真机）</span>
+<header>
+  <h1>达人寄样流程现状</h1>
+  <p>ACE7CN 达人商务智能体 · 2026-10-27 · 从找达人到寄样、开专属佣金，每一步谁来做、做到哪了</p>
+  <div class="legend">
+    <span class="tag ok">真跑过</span>
+    <span class="tag test">离线测过</span>
+    <span class="tag todo">待做</span>
+    <span class="tag you">要你点头</span>
+    <span class="note">真跑过 = 在真实账号 / 平台上跑通；离线测过 = 自动测试覆盖，还没在真实环境跑</span>
+  </div>
+</header>
+
+<div class="lane" aria-label="消息和动作怎么走">
+  <div class="node"><b>达人</b><span>在微信里发消息</span></div>
+  <div class="node"><b>Windows</b><span>收发微信（同事那边的微信边缘）</span></div>
+  <div class="node"><b>Mac · Claude</b><span>读知识库、商品目录、案卷，起草回复或平台动作</span></div>
+  <div class="node you"><b>你 · 控制台</b><span>「待审批」里发 / 改了再发 / 不发 / 批准</span></div>
+  <div class="node"><b>平台</b><span>聚水潭建寄样单，百应 / 小红书开专属佣金</span></div>
 </div>
 
-<div class="summary">
-  <div><b>能跑通的</b><p>用同事的"假 Windows"测试：达人发消息 → Claude 起草 → 运营审核 → 经 Windows 发出、读回确认；收件信息齐了 → 审批单 → 批准 → 建单、绑佣金（模拟）→ 通知进待审批。起草的沙箱在这台 Mac 上用真实 Claude 跑过两次。</p></div>
-  <div><b>等外部的</b><p>和同事的 Windows 真机联调（第 7 步）；聚水潭真实接口（要账号）；小红书 CLI 在真实千帆上跑（要登录）；业务资料（寄样规则、商品、话术，还没定）。</p></div>
-  <div><b>还没做的</b><p>自动查物流、签收后跟进发布；Mac 这边的"夜里不主动发"等防封节奏还没接到新发送路径上；真实聚水潭的运单号回填；联调通过后删旧代码（第 8 步）。</p></div>
-</div>
+<h2><span class="num">一</span>找达人</h2>
+<ol class="steps">
+  <li class="step">
+    <div class="n">1</div>
+    <div class="body">
+      <h3>在聚水潭按条件找达人，加进「我的达人」</h3>
+      <p>按销售额、粉丝数、带货等级筛；抖音、小红书都能找（小红书看直播场均）。你定条件，我用命令行查，加进达人库要你同意。</p>
+      <div class="meta"><span class="tag ok">真跑过 · 已加 8 位</span><span class="tag you">加入要你同意</span></div>
+    </div>
+  </li>
+</ol>
 
-<div class="arch" aria-label="两台电脑怎么分工">
-  <div class="box"><b>Windows（同事的 webot，只收发）</b>
-    <ul>
-      <li>登录微信，只读名单里达人的私聊</li>
-      <li>解图片、语音转文字、取文件</li>
-      <li>按 Mac 的指令发消息，同一条只发一次</li>
-      <li>读回确认；认出运营亲手回复</li>
-      <li>名单以外的私聊不回（D24）</li>
-    </ul>
-  </div>
-  <div class="wire">
-    <span>达人消息 →</span>
-    <span>← 名单</span>
-    <span>← 请发这句</span>
-    <span>发出 / 读回 →</span>
-    <span>局域网 + 口令</span>
-  </div>
-  <div class="box"><b>Mac（我们，处理一切）</b>
-    <ul>
-      <li>不登录微信</li>
-      <li>Claude 在沙箱里起草，运营在控制台审核</li>
-      <li>审批单、聚水潭建单、小红书开佣金</li>
-      <li>名单、合作单、个人信息 90 天清理</li>
-      <li>Windows 出问题时控制台顶上提醒</li>
-    </ul>
-  </div>
-</div>
+<h2><span class="num">二</span>第一次联系</h2>
+<ol class="steps">
+  <li class="step gate">
+    <div class="n">2</div>
+    <div class="body">
+      <h3>抖音达人：百应发「邀约带货」卡片</h3>
+      <p>卡片上写我们免费寄样、包邮，留我们的微信，请达人加微信聊。平台显示的「买样 / 免费申样」不用管。</p>
+      <div class="meta"><span class="tag ok">真实预览跑过</span><span class="tag todo">卡片上的微信号 / 手机号待定</span><span class="tag you">发卡片要你批</span></div>
+    </div>
+  </li>
+  <li class="step">
+    <div class="n">3</div>
+    <div class="body">
+      <h3>小红书达人：聚水潭「查看联系方式」拿微信号，手动加</h3>
+      <p>邀约卡片只有抖音有。</p>
+      <div class="meta"><span class="tag you">你来加</span></div>
+    </div>
+  </li>
+</ol>
 
-<div class="flow">
+<h2><span class="num">三</span>加上微信，进名单</h2>
+<ol class="steps">
+  <li class="step">
+    <div class="n">4</div>
+    <div class="body">
+      <h3>控制台「达人名单」里加上他，填抖音号 / 小红书号</h3>
+      <p>系统自动去聚水潭查档位、主播类型、平台 UID，写成「达人资料」给 Claude 看（每天重查一次）。</p>
+      <div class="meta"><span class="tag test">离线测过</span><span class="tag todo">达人加微信后自动进名单：等同事的探针</span></div>
+    </div>
+  </li>
+</ol>
 
-<!-- 1 -->
-<div class="step"><div class="rail"><span class="num part">1</span></div><div class="body">
-  <h2>达人发微信，Windows 转给 Mac <span class="where">同事的 Windows 边缘 + 我们的 edge 后端</span></h2>
-  <div class="nodes">
-    <div class="node done"><div class="t">Windows 读名单里的私聊、转成事件<span class="chip done">同事已完成</span></div>
-      <p>同事 <code>wechat-edge</code> 分支（<code>PRM_EDGE=on</code>）。图片、文件在 Windows 取好，Mac 下载后再交给 Claude。</p></div>
-    <div class="node done"><div class="t">Mac 拉事件、推名单<span class="chip done">已实现</span></div>
-      <p><code>WECHAT_BACKEND=edge</code>：Mac 不登录微信，去 Windows 拉消息；连不上就退避重试；重启后从上次读到的地方接着读，不重复处理。</p></div>
-    <div class="node ext"><div class="t">Windows 真机<span class="chip ext">等联调</span></div>
-      <p>同事 10-26 用旧版 EXE 在真机上测过收消息、起草、发出：读回不到 1 秒；测出"长文字被当成图片、误判运营接管"的问题，已修好并合进来。新的只收发模式还没在真机上跑过。</p></div>
-  </div>
-</div></div>
+<h2><span class="num">四</span>微信里聊天（核心）</h2>
+<ol class="steps">
+  <li class="step">
+    <div class="n">5</div>
+    <div class="body">
+      <h3>达人发消息 → Windows 收到 → Mac 上的 Claude 起草回复</h3>
+      <p>起草时读：知识库（合作政策、话术、商品）、商品目录（抖店 900 款、小红书 939 款）、这位达人的案卷和达人资料。</p>
+      <div class="meta"><span class="tag test">离线测过</span><span class="tag ok">起草质量：4 个场景离线试过都对</span></div>
+    </div>
+  </li>
+  <li class="step gate">
+    <div class="n">6</div>
+    <div class="body">
+      <h3>你在「待审批」里审每一条：原样发 / 改了再发 / 不发</h3>
+      <ul>
+        <li>你改过的话，下一份草稿照你改后的说法写。</li>
+        <li>你直接在微信里回达人，系统自动转人工接管，这段时间不起草。</li>
+        <li>寄几款看档位，佣金比例不说，钱的事转你。</li>
+      </ul>
+      <div class="meta"><span class="tag test">离线测过</span><span class="tag todo">等 Windows 接上联调</span><span class="tag you">每条都要你审</span></div>
+    </div>
+  </li>
+</ol>
 
-<!-- 2 -->
-<div class="step"><div class="rail"><span class="num done">2</span></div><div class="body">
-  <h2>是不是名单里的达人</h2>
-  <div class="nodes">
-    <div class="node done"><div class="t">一份名单<span class="chip done">已实现</span></div>
-      <p>以「达人审批 → 达人名单」为准，合作单页登记或停用的也同步回来。名单变了 Mac 就推给 Windows，Windows 只转名单里的人。</p></div>
-    <div class="node done"><div class="t">名单以外的私聊<span class="chip done">不回</span></div>
-      <p>D24：Windows 不转、不自动回复，由人工处理。</p></div>
-  </div>
-</div></div>
+<h2><span class="num">五</span>挑款、建寄样单</h2>
+<ol class="steps">
+  <li class="step">
+    <div class="n">7</div>
+    <div class="body">
+      <h3>达人挑好款和颜色尺码、确认收件信息 → Claude 起草寄样单</h3>
+      <p>控制台显示预览：达人、商品和规格、快递（中通）、地址（手机号只显示〈手机1〉这样的占位）。预览只读聚水潭，不建单。</p>
+      <div class="meta"><span class="tag test">离线测过</span><span class="tag ok">聚水潭预览真跑过</span></div>
+    </div>
+  </li>
+  <li class="step gate">
+    <div class="n">8</div>
+    <div class="body">
+      <h3>你批准 → Mac 在聚水潭建寄样单 → 把「寄样单建好啦，单号 YP…」发给达人</h3>
+      <p>建单时把达人认领到你的子账号、地址存到他名下；建完按单号读回核对。每张单只执行一次。</p>
+      <div class="meta"><span class="tag ok">建单真跑过 · YP2610272378025（测试，已拒绝）</span><span class="tag you">要你批准</span></div>
+    </div>
+  </li>
+  <li class="step">
+    <div class="n">9</div>
+    <div class="body">
+      <h3>仓库在聚水潭「寄样管理」审核，审核通过才发货</h3>
+      <div class="meta"><span class="tag you">仓库 / 你</span></div>
+    </div>
+  </li>
+</ol>
 
-<!-- 3 -->
-<div class="step"><div class="rail"><span class="num part">3</span></div><div class="body">
-  <h2>Claude 起草回复 <span class="where">同事的起草沙箱，在这台 Mac 上</span></h2>
-  <div class="nodes">
-    <div class="node done"><div class="t">号码先换成占位符<span class="chip done">已实现</span></div>
-      <p>手机号、证件号变成〈手机1〉这种占位符才交给 Claude，发出前再换回来。</p></div>
-    <div class="node done"><div class="t">沙箱起草<span class="chip done">本机跑过</span></div>
-      <p>同事的 worker（<code>--kinds prm</code>）：只能读业务资料、只能改这位达人的案卷，不能运行命令、不能上网；结果按固定格式交回（回复、类型、已确认信息、建议阶段）。代理已写进 <code>~/.claude/settings.json</code>，双击启动也能用。</p></div>
-    <div class="node part"><div class="t">业务资料（kb/）<span class="chip part">等规则</span></div>
-      <p>寄样规则、可寄的商品、常见问答还没定，现在用的是同事的样例。资料里没有的，Claude 会写"我确认一下再回复"并提醒运营。</p></div>
-  </div>
-  <p class="branch"><b>分支：达人要求提高佣金</b> ↓</p>
-  <div class="nodes">
-    <div class="node done"><div class="t">固定话术，等人审<span class="chip done">已实现</span></div>
-      <p>D22：佣金上限 25%。用户给的固定话术作为"系统消息"放进待审批，一定人审；同一位达人 6 小时内只放一条，同时记进「待处理」。</p></div>
-  </div>
-</div></div>
+<h2><span class="num">六</span>开专属佣金</h2>
+<ol class="steps">
+  <li class="step">
+    <div class="n">10</div>
+    <div class="body">
+      <h3>寄样单建好后，系统自动叫 Claude 起草开专属佣金</h3>
+      <p>20% 起步（最高 25%，代码里写死），一次开一款；抖音用达人资料里的 UID。</p>
+      <div class="meta"><span class="tag test">离线测过</span></div>
+    </div>
+  </li>
+  <li class="step gate">
+    <div class="n">11</div>
+    <div class="body">
+      <h3>你批准 → Mac 在百应 / 小红书开好 → 最后一款开好时通知达人</h3>
+      <p>百应的专属佣金第二天 0 点生效。通知不说比例，达人在选品里能看到。</p>
+      <div class="meta"><span class="tag ok">开、关专属佣金真跑过（测试 10%，已关）</span><span class="tag you">要你批准</span></div>
+    </div>
+  </li>
+</ol>
 
-<!-- 4 -->
-<div class="step"><div class="rail"><span class="num done">4</span></div><div class="body">
-  <h2>运营审核 <span class="where">控制台「待审批」页</span></h2>
-  <div class="nodes">
-    <div class="node done"><div class="t">发送 / 改了再发 / 不发<span class="chip done">已实现</span></div>
-      <p>D19：先人审。号码默认打码显示，看完整号码要点一下并留记录。</p></div>
-    <div class="node done"><div class="t">逐步自动<span class="chip done">已实现</span></div>
-      <p>某一类回复最近 20 条有 18 条原样发出、关键信息没改过，这一类以后自动发；钱和投诉永远人审；标"发错了"立刻退回人审。</p></div>
-    <div class="node done"><div class="t">没人处理先回"稍等"<span class="chip done">已实现</span></div>
-      <p>草稿放了 10 分钟没人处理，先回达人一句"收到，我确认一下马上回你"，每轮消息最多一次。</p></div>
-    <div class="node done"><div class="t">运营亲手回复 → 人工接管<span class="chip done">已实现</span></div>
-      <p>运营在微信里自己回了，Windows 认出来告诉 Mac：这位达人转人工 2 小时，等着的草稿作废；结束后下一份草稿会带上双方说过的话。</p></div>
-  </div>
-</div></div>
+<h2><span class="num">七</span>发货以后</h2>
+<ol class="steps">
+  <li class="step gate">
+    <div class="n">12</div>
+    <div class="body">
+      <h3>合作单里填运单号 → 系统起草发货通知 → 你审后发出</h3>
+      <div class="meta"><span class="tag test">离线测过</span><span class="tag todo">运单号从聚水潭自动带回</span></div>
+    </div>
+  </li>
+  <li class="step">
+    <div class="n">13</div>
+    <div class="body">
+      <h3>签收后跟进带货：发视频或开直播、看数据，决定要不要加佣金</h3>
+      <div class="meta"><span class="tag you">加佣金由你定</span></div>
+    </div>
+  </li>
+  <li class="step">
+    <div class="n">14</div>
+    <div class="body">
+      <h3>寄样结束 90 天后，系统自动清掉收件信息</h3>
+      <div class="meta"><span class="tag test">离线测过</span></div>
+    </div>
+  </li>
+</ol>
 
-<!-- 5 -->
-<div class="step"><div class="rail"><span class="num part">5</span></div><div class="body">
-  <h2>经 Windows 发出 <span class="where">Mac 下指令，Windows 发</span></h2>
-  <div class="nodes">
-    <div class="node done"><div class="t">只发一次、读回确认<span class="chip done">已实现</span></div>
-      <p>每条有编号，重复提交也只发一次。Windows 读回后草稿标"已确认"；没发出去（失败、过期、不确定）的草稿改成"没发出去"并写原因。</p></div>
-    <div class="node part"><div class="t">防封节奏<span class="chip part">只有 Windows 那层</span></div>
-      <p>Windows 管账号级节奏（两条至少隔 3 秒、每小时最多 60 条）。Mac 这边原来的"像真人打字的等待、夜里不主动发"（<code>send_policy.py</code>）还没接到新的发送路径上；参数也还没定。</p></div>
-  </div>
-</div></div>
-
-<!-- 6 -->
-<div class="step"><div class="rail"><span class="num part">6</span></div><div class="body">
-  <h2>收件信息齐了 → 生成审批单 <span class="where">合作单进「待寄出」时</span></h2>
-  <div class="nodes">
-    <div class="node done"><div class="t">从合作单生成审批单<span class="chip done">已实现</span></div>
-      <p>D26：Claude 建议进「待寄出」，或运营在合作单页改成「待寄出」时，用合作单上确认过的商品、收件人、手机、地址生成审批单。缺哪项就在合作单上提示；每位达人同时只有一张在等的单。</p></div>
-    <div class="node part"><div class="t">查库存（聚水潭）<span class="chip part">只有模拟</span></div>
-      <p>没库存就不生成，在合作单上提示，并记进「待处理」。真实接口要聚水潭账号。</p></div>
-    <div class="node part"><div class="t">查资质（小红书 CLI）<span class="chip part">待真机</span></div>
-      <p>D16：只看粉丝 ≥ 1 万，只标注不自动拒绝；点赞由运营审批时复查。要在真机上开调试 Chrome 登录千帆。</p></div>
-  </div>
-</div></div>
-
-<!-- 7 -->
-<div class="step"><div class="rail"><span class="num part">7</span></div><div class="body">
-  <h2>运营审批 → 建单、绑佣金 <span class="where">控制台「达人审批」页，批准后由代码执行</span></h2>
-  <div class="nodes">
-    <div class="node done"><div class="t">审批页<span class="chip done">已实现</span></div>
-      <p>通过或驳回；可以补填小红书账号、把佣金调低（上限 25%）；每张单只执行一次，批准时重新查库存；执行到一半中断的可以人工核对后标记（B23）。</p></div>
-    <div class="node part"><div class="t">聚水潭建出库单<span class="chip part">只有模拟</span></div>
-      <p>真实聚水潭建单时大概率还没有运单号，要仓库打单后才有，到时要回填。</p></div>
-    <div class="node part"><div class="t">小红书开专属佣金（定向计划）<span class="chip part">待真机</span></div>
-      <p>指定这位达人、这款商品、这个佣金；计划名用审批单号，不会开两次。不发推广链接，达人在选品里自己能看到（D17）。</p></div>
-  </div>
-</div></div>
-
-<!-- 8 -->
-<div class="step"><div class="rail"><span class="num done">8</span></div><div class="body">
-  <h2>通知达人 <span class="where">系统消息，进「待审批」</span></h2>
-  <div class="nodes">
-    <div class="node done"><div class="t">批准 / 驳回的通知等人审<span class="chip done">已实现</span></div>
-      <p>批准通知（带运单号、说明已开专属佣金）和驳回的婉拒话术，都作为系统消息放进待审批，审核后经 Windows 发出。审批卡上不再显示"复制"，免得发两遍。</p></div>
-    <div class="node done"><div class="t">运单号进合作单<span class="chip done">已实现</span></div>
-      <p>聚水潭给了运单号就直接记进合作单，阶段改成"已寄出"，不用运营再填。</p></div>
-  </div>
-</div></div>
-
-<!-- 9 -->
-<div class="step"><div class="rail"><span class="num part">9</span></div><div class="body">
-  <h2>发货、物流、签收 <span class="where">「合作单」页</span></h2>
-  <div class="nodes">
-    <div class="node ext"><div class="t">打包、发货<span class="chip ext">仓库 / 聚水潭</span></div>
-      <p>不归我们的代码管。</p></div>
-    <div class="node done"><div class="t">手动填运单、更新物流<span class="chip done">已实现</span></div>
-      <p>运营在合作单页填运单号会生成发货通知草稿（单号由系统填，不让模型写）；可以改成运输中、已签收、物流异常。</p></div>
-    <div class="node todo"><div class="t">自动查物流<span class="chip todo">未实现</span></div>
-      <p>要先确认聚水潭能不能返回物流轨迹，不能的话接快递100之类的服务。</p></div>
-  </div>
-</div></div>
-
-<!-- 10 -->
-<div class="step"><div class="rail"><span class="num todo">10</span></div><div class="body">
-  <h2>签收后跟进发布</h2>
-  <div class="nodes">
-    <div class="node part"><div class="t">合作单阶段<span class="chip part">只能手动</span></div>
-      <p>合作单有"素材已发、初稿已交、修改中、已发布、结案"这些阶段，运营手动改；Claude 也会建议阶段。</p></div>
-    <div class="node todo"><div class="t">主动提醒发笔记<span class="chip todo">未实现</span></div>
-      <p>还没设计。</p></div>
-  </div>
-</div></div>
-
-</div>
-
-<section class="side">
-<h2>贯穿全流程的保障</h2>
-<div class="tablewrap"><table>
-<tr><th>事项</th><th>状态</th><th>说明</th></tr>
-<tr><td>个人信息清理</td><td><span class="chip done">已实现</span></td><td>D27：一条规则，签收满 90 天或 90 天没有任何动静就清（地址只留省市、号码只留打码的），聊天记录、草稿、案卷、审批单一起清；清理后达人又来，重新计时。</td></tr>
-<tr><td>日志打码</td><td><span class="chip done">已实现</span></td><td>B14：日志和追踪文件里的电话、地址、收件人姓名都先打码。</td></tr>
-<tr><td>起草沙箱</td><td><span class="chip done">已实现</span></td><td>D25：用同事的 worker，一行不复制；Mac 上的中转只给本机用（配置检查拦着不让开到局域网）。</td></tr>
-<tr><td>Windows 出问题提醒</td><td><span class="chip done">已实现</span></td><td>连不上 Windows、微信掉线、读不了数据库、连续发不出去时，控制台每页顶上提醒；Mac 端不显示用不上的「微信连接」页。</td></tr>
-<tr><td>寄样上限</td><td><span class="chip part">机制已做，数字待定</span></td><td>D5：每位达人多少天内最多几单、每天一共最多几单。超过上限的单不能通过；数字没定，现在不限。</td></tr>
-<tr><td>防封规则</td><td><span class="chip part">只有 Windows 那层</span></td><td>见第 5 步。</td></tr>
-</table></div>
+<section class="gates">
+  <h2>你点头的地方</h2>
+  <ol>
+    <li>每一条发给达人的回复</li>
+    <li>寄样单</li>
+    <li>专属佣金</li>
+    <li>邀约卡片</li>
+  </ol>
+  <p>现在所有往外写的动作都要你点头。以后做熟了可以放权，例如专属佣金连续几次原样批准后改成自动。</p>
 </section>
 
-<section class="side">
-<h2>接下来</h2>
-<div class="tablewrap"><table>
-<tr><th>顺序</th><th>做什么</th><th>依赖</th></tr>
-<tr><td>1</td><td>和同事真机联调（计划第 7 步）：Windows 打包只收发版，Mac 配 <code>EDGE_URL</code> 和口令，按顺序测收消息、起草、审核发出、读回、接管、寄样审批</td><td>同事</td></tr>
-<tr><td>2</td><td>业务资料：寄样规则、可寄商品、常见问答、话术</td><td>用户定规则</td></tr>
-<tr><td>3</td><td>把 Mac 这边的防封节奏接到新的发送路径上</td><td>防封参数</td></tr>
-<tr><td>4</td><td>聚水潭真实接口、运单号回填；小红书 CLI 在真实千帆上跑</td><td>聚水潭账号；千帆登录</td></tr>
-<tr><td>5</td><td>联调通过后删掉不再用的旧代码（计划第 8 步）：名单里的达人已不走旧的规则流程和 <code>claude_brain</code> 直接回复</td><td>第 1 项</td></tr>
-<tr><td>6</td><td>自动查物流、签收后跟进发布</td><td>聚水潭</td></tr>
-</table></div>
-</section>
+<h2><span class="num">→</span>接下来</h2>
+<div class="next">
+  <div class="card">
+    <h3>你</h3>
+    <ul>
+      <li>聚水潭今天 14:22 前重新登录</li>
+      <li>定邀约卡片上的微信号 / 手机号</li>
+      <li>定一个当「达人」的测试微信号</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>Windows 到了以后</h3>
+    <ul>
+      <li>接上同事的微信边缘</li>
+      <li>用测试号走第 5–8 步：打招呼、挑款、给地址、起草寄样单</li>
+      <li>第 8 步看完预览点「不发」，不批准</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>之后</h3>
+    <ul>
+      <li>找一位真实达人从头到尾走一遍</li>
+      <li>同事探针出来后做「加微信自动进名单」</li>
+      <li>运单号自动带回、商品目录每天同步</li>
+    </ul>
+  </div>
+</div>
 
-<footer>本地文件，不上传。要更新时，对照 handoff.md 第 3、5、6、9 节改这一页。</footer>
-</main>
+<footer>本页是本地文件，内容以仓库根目录 handoff.md 为准（v76）。</footer>
+</div>
 </body>
 </html>
