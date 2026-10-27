@@ -399,6 +399,17 @@ class PrmStore:
             rows = self._conn.execute(sql, (*args, int(limit))).fetchall()
         return [packet_view(dict(r)) for r in rows]
 
+    def outcomes(self, deal_id: int, limit: int = 6) -> list[dict]:
+        """A deal's latest drafts a person (or a gate) decided on, newest first: sent (as drafted
+        or edited), not sent (dropped), failed.  What the creator really got from us."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM action_packets WHERE deal_id = ? AND status IN (?, ?, ?) AND decided_at IS NOT NULL"
+                " ORDER BY COALESCE(sent_at, decided_at) DESC, id DESC LIMIT ?",
+                (deal_id, SENT, DROPPED, FAILED, int(limit)),
+            ).fetchall()
+        return [packet_view(dict(r)) for r in rows]
+
     def platform_failures(self, limit: int = 50) -> list[dict]:
         """Packets with a platform action that ended ``failed`` (the platform write was not
         verified, or the reply did not go out), newest first: the console marks them red

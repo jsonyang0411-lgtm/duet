@@ -62,7 +62,7 @@ Mac 开发环境的 `.venv` 是用 uv 创建的，里面没有 pip，装依赖�
 | 页面加载 | 前端 SPA 正常渲染，不出现空白页或连接错误 |
 | 主题系统 | 浅色模式默认（明日方舟风，2026-10 改版）、Sun/Moon 按钮切换到深色、localStorage 持久化 |
 | 侧边栏导航 | 公司版（中转代理控制台）只有 运行状态/中转代理/待审批/合作单/微信连接/达人审批/运行日志 七页（Mac 端 `WECHAT_BACKEND=edge` 时没有「微信连接」）；旧链接回到运行状态 |
-| 待审批 / 合作单页（达人副驾驶） | 草稿显示（号码只显示打码的）、改了再发、不发（确认框）、标为发错了、自动发送门槛表；登记达人（管理员 wxid 被拒）、停用；展开合作单：采纳 AI 建议、切人工接管 / 恢复副驾驶、填运单号 → 待审批出现发货通知、更新物流到已签收、显示完整号码（`tests/test_functional.py::TestPrmPages`，PRM 服务在内存里，不写 data/）。接管、门槛、稍等回复、寄样、30 天清理的逻辑在 `tests/test_prm_lifecycle.py` |
+| 待审批 / 合作单页（达人副驾驶） | 草稿显示（号码只显示打码的）、改了再发、不发（确认框）、标为发错了、自动发送门槛表；登记达人（管理员 wxid 被拒）、停用；展开合作单：采纳 AI 建议、切人工接管 / 恢复副驾驶、填运单号 → 待审批出现发货通知、更新物流到已签收、显示完整号码（`tests/test_functional.py::TestPrmPages`，PRM 服务在内存里，不写 data/）。接管、门槛、稍等回复、寄样、30 天清理的逻辑在 `tests/test_prm_lifecycle.py`；每份草稿带上我方实际发出的回复（改过的、没发的）在 `tests/test_prm.py`、`tests/test_prm_worker.py` |
 | 平台联动（小红书 / 抖音 / 淘宝 / 聚水潭） | 白名单和参数检查（佣金最高 25%，Mac 的配置只能往低调）、商品目录、预览（不带 `--execute`）和执行（台账只执行一次、逐步核验、链接只认平台域名）对着假 `node`（`tests/platform_fakes.py`，答复按四个平台命令行的真实 JSON 形状），聚水潭寄样单的单子走 0600 临时文件、预览不带电话、台账和输出打码、子账号核对（`tests/test_prm_platforms.py`，含系统 Python 3.9 冒烟）；机器人侧：一律先审、批准并执行、只有 VERIFIED_SUCCESS 发、其余标红、失联 / 没人接手的兜底、重新预览、寄样单的〈手机N〉只在交给 Mac 的任务里换成号码（`tests/test_prm_platform_flow.py`）；交付后的清理也清寄样单的收货信息（`tests/test_prm_lifecycle.py`）；Mac worker 端到端（`tests/test_prm_platform_worker.py`）；控制台接口和「待审批」页（`tests/test_prm_console_api.py`、`tests/test_functional.py::TestPrmPages`） |
 | 微信边缘（PRM_EDGE） | `/edge/*` 协议：一套用例通过 Mac 端客户端同时跑假 Windows 服务端和真的 Windows 边缘（挂在中转的 HTTP 服务上），另外用 Mac 自带的 Python 3.9 跑一遍（`tests/test_edge_protocol.py`）；Windows 这一侧的消息文字、读回和运营亲手回复、节奏、状态、清理、路由步骤（`tests/test_edge_service.py`） |
 | 中转代理页 | 任务列表（取消排队/进行中的任务）、Mac 状态、中转设置（随机生成 token 只显示一次、保存条） |

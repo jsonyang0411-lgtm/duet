@@ -121,3 +121,5 @@ unsloth_compiled_cache/
 # tools/file_probe.py output (screen contents)
 probe-file.txt
 probe-file-*.png
+# tools/friend_probe.py output (masked, but still the bot's chats)
+probe-friends.txt

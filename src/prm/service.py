@@ -57,6 +57,8 @@ from .store import (
 logger = logging.getLogger(__name__)
 
 SETTLE_SEC = 8               # messages within this time of each other are one job
+OUTBOUND_TOLD = 6            # a draft job is told the deal's last this many replies (what really went out)
+OUTBOUND_CHARS = 500
 APPROVED_EXPIRE_SEC = 1800   # an approved draft not sent by then (the bot was stopped) is not sent
 SEND_TICK_SEC = 5
 OWN_MATCH_SEC = 1800         # our own line seen in WeChat within this long after sending is the bot's
@@ -385,6 +387,9 @@ class PrmService:
         stale = self._store.supersede(deal["id"], now)
         self._store.update_deal(deal["id"], now, last_message_at=sent_at or now)
         meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"]}
+        outbound = self._outbound(deal["id"], party["id"], now)
+        if outbound:
+            meta["sent"] = outbound
         backlog = self._store.take_backlog(deal["id"])
         if backlog:
             meta["history"] = [{"who": "operator" if ev["kind"] == "operator_message" else "creator",
@@ -395,6 +400,42 @@ class PrmService:
                     f"; {stale} waiting draft(s) out of date" if stale else "",
                     f"; {len(backlog)} line(s) from the takeover told" if backlog else "")
         return True
+
+    def _outbound(self, deal_id: int, party_id: int, now: float) -> list[dict]:
+        """What the creator really got from us lately, oldest first, for the next draft: the Mac's
+        case file holds the drafts as Claude wrote them, but an operator may have edited one
+        before it went out, dropped one, or the send failed; holding replies are the bot's own.
+        Told with every draft job (not once: a superseded job must not take it along); numbers
+        masked like the creator's words."""
+        items = []
+        for p in self._store.outcomes(deal_id, limit=OUTBOUND_TOLD):
+            final = p["final_text"] if p.get("final_text") is not None else p["text"]
+            at = float(p.get("sent_at") or p.get("decided_at") or 0)
+            item = {"at": at, "kind": p["kind"]}
+            if p["status"] == SENT:
+                item.update(what="sent", text=final)
+                if p.get("edited") and str(p["text"]).strip() != str(final).strip():
+                    item["draft"] = p["text"]
+                if p.get("wrong"):
+                    item["wrong"] = True
+            elif p["status"] == DROPPED:
+                item.update(what="dropped", draft=p["text"])
+            else:
+                item.update(what="failed", text=final)
+            items.append(item)
+        for ev in self._store.events(deal_id, limit=50):
+            if ev["kind"] == "holding_reply":
+                items.append({"at": float(ev["at"]), "kind": "holding", "what": "sent",
+                              "text": str(ev["detail"].get("text") or self._holding_text)})
+        items.sort(key=lambda i: i["at"])
+        out = []
+        for item in items[-OUTBOUND_TOLD:]:
+            for key in ("text", "draft"):
+                if key in item:
+                    item[key] = self._mask(party_id, str(item[key]), now)[:OUTBOUND_CHARS]
+            item["at"] = _clock_text(item["at"]) if item["at"] else ""
+            out.append(item)
+        return out
 
     def on_own_message(self, msg: dict) -> None:
         """A line this WeChat account sent in a creator's chat (the backend's hook).
