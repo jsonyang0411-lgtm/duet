@@ -639,3 +639,24 @@ def test_only_a_douyin_order_names_the_uid_and_a_commission_names_its_creator():
     commission = platforms.check_action({"action": "dy.designated_commission", "item_id": DY_ITEM,
                                          "creator_platform_id": DY_UID, "commission_rate": 20})
     assert f"开好了（达人 {DY_UID}）" in next_step_note(commission, record())
+
+
+def test_a_commission_step_waiting_in_review_sends_the_creator_no_holding_reply(bot, clock):
+    """「稍等」answers a creator who is waiting; a 专属佣金 step (the system lane) waiting for a
+    person answers nothing she asked, so she hears nothing.  Her own message still gets one."""
+    bot.prm._holding_sec = 600
+    packet = ordered(bot, clock)
+    mac_runs(bot, approve(bot, packet), record(sample_order_no=JST_ORDER))
+    bot.prm.send_approved()
+    assert bot.prm.deal_action("stage", {"deal_id": packet["deal_id"], "stage": "delivered"})["ok"]
+    step_job = bot.worker_takes()
+    bot.finish(step_job["id"], {**draft(message_kind="money", reply_draft="", slots={}), "platform": block()})
+    assert bot.prm.store.packet_for_job(step_job["id"])["meta"]["lane"] == "system"
+    told = list(bot.texts)
+    clock.now += 3600                                                       # an hour in 待审批
+    assert bot.prm.send_holding_replies() == 0 and bot.texts == told
+    bot.prm.handle(bot.msg("收到啦，很好看"))
+    reply_job = bot.worker_takes()
+    bot.finish(reply_job["id"], draft(message_kind="other", reply_draft="戴上效果怎么样～", slots={}))
+    clock.now += 3600
+    assert bot.prm.send_holding_replies() == 1 and bot.texts[-1] == (packet["chat_id"], bot.prm._holding_text)
