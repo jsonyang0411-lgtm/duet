@@ -1,6 +1,6 @@
 # 交接文档：达人商务智能体
 
-> 最后更新：2026-10-26（v61）。开发在 `merge-platforms` 分支上，还没合回 `main`（`main` 停在 `b448beb`）。每次改了什么看第 9 节。
+> 最后更新：2026-10-27（v62）。开发在 `merge-platforms` 分支上，还没合回 `main`（`main` 停在 `b448beb`）。每次改了什么看第 9 节。
 > 读者：接手这个项目的 AI 窗口，以及参与开发的同事。
 > 规矩：新窗口开工前先读完本文件；收工前更新第 3 节（当前状态）、第 5 节（计划进度）和第 9 节（变更记录）。
 
@@ -189,6 +189,7 @@
 
 其余待办：
 - 商品目录要定期重跑（`python3 tools/claude_relay/worker.py --sync-products`，上新、下架后）；还没放进定时任务。`kb/products.md` 有 800 KB，起草的 Claude 要按编号搜着看，别整个读
+- 一键邀约接进系统（v62 读了代码，见变更记录）：要先在调试版 Chrome 登录巨量百应，再只读核对邀约额度、模板，然后做"预览"版命令；第一次真邀约时运营操作、我们录一次核对
 - 运单号回填：寄样管理发货后，运单号在哪个字段 / 接口（现在列表接口的 `erpOrderVoList` 是空的）
 - 和 Windows 真机联调（等同事给 `PRM_EDGE_TOKEN`）
 
@@ -403,3 +404,4 @@ CLI 是同事的千帆商家后台命令行工具：私有仓库 `doupi-org/xiao
 - 2026-10-26 v59：第 3 步清理文档（审查报告 19 处）。handoff：抬头只留最新版本；第 0、1 节按现在的架构重写（PRM 起草、edge、聚水潭 CLI、寄样单、平台动作开佣金），代码位置标出没有入口的旧代码；第 2 节 R2、R3 标出取消的项；第 3 节换成 10-26 的状态；第 4 节补新测试文件；第 5 节换成 4 步计划和待办；第 6 节补齐被取代 / 已实现的状态（D5、D8、D16、D18、D19、D22、D26、D29、D30、D31、D32、D35、D36、D37），表按编号排序，注明提交说明里撞号的两处；"10-27 统一询问""等用户拍板"已答完，删掉；V1、V2、B24–B26 标成不用做；第 7、8 节去掉旧流程和 `JST_APP_KEY`，补 edge、PRM、聚水潭 CLI 的变量；后一个 v42 改成 v47b。备忘录重写成 10-26 版并重新生成网页；`CLAUDE.md` 的挂载点说明改成 `src/bot.py`，项目结构补 `src/influencer/`；记忆文件去掉过时的事实。没改代码。
 - 2026-10-26 v60：做第 5 节"其余待办"里的 4 件（用户说"把 5 到 8 条更新"）。① 佣金上限：同事 `src/prm/platforms.py` 加 `COMMISSION_CAP = 25`，Mac 的 config.json 只能往低调、写更大的也按 25 算，机器人端检查（`FORM_LIMITS`）也按 25；改了同事的 4 条测试和 worker README、联调清单、参考手册。② 款号对平台商品：发现千帆 SKU 的 `erpCode` 就是聚水潭 SKU 的商品编码（只读查了一次千帆商品详情和聚水潭 `goods-detail`）；目录同步存下 `code`、`products.md` 里显示"编码 …"；`prm_bridge.match_listings` 生成审批单时按编码或平台商品 ID 对，审批卡上逐款显示平台商品 ID，写了编号却对不上的标"商品目录里没有"；kb `商品.md` 加了合作单商品的写法（每款跟编号）。顺手修了聚水潭 CLI `goods --style-code` 不起作用（接口不认，返回全部款，`a428bcb` 去掉，按款号查用 `goods-detail`）。③ `~/Douyin-engineering` 快进到公司仓库最新的 `c494254`（10-21），有指定达人佣金命令了；百应相关离线测试 1333 个全过（全套有 1 个失败、91 个被连带取消，都在录制 / 变异测试工具里，和开佣金无关，没管）。④ 删旧代码：`claude_brain.py`、`mcp_server.py`、`send_policy.py`、`docs/influencer_knowledge.example.md`，handler 的规则对话（改成 `check_product` / `submit_for_approval` 两个公开方法），extract 的收件信息提取，store 的对话 / 发送队列 / 草稿读写（表和到期清理留着，老库照样清），settings 的 Claude 常数；测试相应改写（见第 4 节）。**还要用户做**：给抖店店铺 ID、登录抖店后才能让抖音目录带编码；配好 `platforms` 后跑一次 `--sync-products`。
 - 2026-10-26 v61：用户在调试版 Chrome 登录了抖店（店铺 ID 288806756）。只读核对：抖店 SKU 原始数据的 `spec_prices[].code`（如 `A7260810095A-M`）也是聚水潭商品编码（聚水潭 `queryErpItemStockInfo` 按编码查得到，编的编码全是 0），精简输出里没有，所以抖音目录同步改用 `sku-prices --raw` 自己取 id、规格名、价格、编码（`ed66677`）。配好 worker 的 `platforms`（见第 8 节），只读同步了商品目录：抖音 900 个商品、2567 个 SKU，小红书 939 个商品、2671 个 SKU，全部带编码；用真实目录试对照，`A7261010037A-M`、`A7260810095A` 两个平台都对上了。百应没登录，开佣金没碰。
+- 2026-10-27 v62：用户问能不能自动加达人微信（聚水潭「查看联系方式」每次扣"共享联系方式次数"，只剩 9 次），改看「一键邀约达人」（提示：达人同意合作后可获取联系方式）。只读读了聚水潭页面和采集插件（调试版 Chrome 里装的「插件工具箱」1.0.29，插件按页面从 `/api/market/open/plugin/config/resource/match` 下载脚本，百应页面用 `DY.*.js`）的代码，没发任何写请求。结论：**一键邀约不是聚水潭发的**，是聚水潭页面把要邀约的达人交给插件，插件用商家的百应登录调**巨量百应 IM 接口** `POST buyin.jinritemai.com/connection/pc/im/shangda/msgs/send`（批量，source 5，`receiver.account_id` 是达人在百应的 uid，`account_type` 24），成功后再调聚水潭 `/api/market/extension/request/inviteRelationBatchSave` 记邀约关系。邀约卡片 `message_content` 里有：`contact_info {phone, wechat}`（**我们自己的微信、手机，发给达人**，达人看到可以直接加我们）、`invite_card`（`card_version`、合作类目、权益 `rights`、商品 `product_ids` 和每个商品的 `author_sample_status`、专属佣金 `orient_cos_ratio_detail.orient_kol_cos_ratio` 和有效期）。额度是百应的：`GET /connection/pc/im/shop_contact_rights_info` 按达人等级分 L0-1、L2-3、L4-5、L6-7 各有总数和已用，不够时插件直接标"对应等级达人邀约额度不足"。其他：模板 `GET .../struct_template`、可带商品 `GET .../promotion/list`、账号检查 `GET .../account_check`、私信状态 `POST .../chat/batch/status`、会话列表 `POST .../conversations`、聚水潭邀约关系查询 `/api/market/extension/request/inviteRelationBatchQuery`。百应请求要页面签名（插件带了 bdms），照抖音 CLI 的做法在百应标签页里发。
