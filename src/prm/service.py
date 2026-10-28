@@ -88,7 +88,6 @@ CATCHUP_HOURS = 12           # PRM_CATCHUP_HOURS: a message read late is drafted
 OWN_FILE_EARLY_SEC = 60      # a file the bot sent shows in WeChat up to this long before its send returns
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
 _WXID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{3,63}$")
-_VOICE = re.compile(r"^\[语音\]\s*(.*)$", re.S)
 
 
 def _queued(msg: dict) -> bool:
@@ -114,26 +113,16 @@ def check_wxid(wxid: str, reserved: set) -> str:
 
 
 def message_text(msg: dict) -> str:
-    """What a message says, as one line for the draft (pictures and files by name)."""
-    try:
-        msg_type = int(msg.get("msg_type", 1) or 1)
-    except (TypeError, ValueError):
-        msg_type = 1
-    content = _QUOTE_PREFIX.sub("", str(msg.get("content", "") or "")).strip()
-    kind = attachment_kind(msg)
-    if kind == "image":
-        return "[图片]"
-    if kind == "file":
-        return f"[文件] {str(msg.get('file_name') or '').strip()}"
-    if msg_type == 34:
-        voice = _VOICE.match(content)
-        heard = voice.group(1).strip() if voice else ""
-        return f"[语音] {heard}" if heard else "[语音]（没转出文字）"
-    if msg_type == 47:
-        return "[表情]"
-    if msg_type == 43:
-        return "[视频]"
-    return content or "[消息]"
+    """What a message says, as one line for the draft: the WeChat edge's line (src/edge/text.py), so the
+    Mac is told the same in both deployments (win review F2): a picture, a file by its name (its file
+    still goes the attachment way), voice by its words, a link or mini program by its title (and its
+    address, once the backend finds one), 视频号, a transfer, a red packet, a location, a card…  A
+    message Windows' edge forwarded (``_queued``: the Mac's edge backend) comes with that line already."""
+    if _queued(msg):
+        line = _QUOTE_PREFIX.sub("", str(msg.get("content", "") or "")).strip()
+        if line:
+            return line
+    return edge_text.message_text(msg)
 
 
 def _norm(text: str) -> str:

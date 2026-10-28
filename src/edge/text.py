@@ -3,8 +3,10 @@
 
 Works on the standardized messages of the Windows backend (wcdb_backend._standardize):
 ``msg_type``, ``content`` (voice already as ``[语音] …``), ``file_name``, the ``quoted_*``
-fields of a reply, and ``special`` (the title of a link, a mini program, a card, a location;
-the line of a system message).  Nothing is dropped: an unknown type is still a line.
+fields of a reply, and ``special`` (the title of a link, a mini program, a card, a location, and
+a link's ``url`` when the backend gives one; the line of a system message).  Nothing is dropped:
+an unknown type is still a line.  The PRM copilot writes its draft jobs' lines with this too
+(src/prm/service.py ``message_text``), so both deployments tell the Mac the same.
 """
 
 from __future__ import annotations
@@ -54,6 +56,13 @@ def _title(msg: dict) -> str:
     return " ".join(str(special.get("title") or "").split())[:120]
 
 
+def _url(msg: dict) -> str:
+    """The web address of a link (``special.url``, http or https only), or ""."""
+    special = msg.get("special") if isinstance(msg.get("special"), dict) else {}
+    url = "".join(str(special.get("url") or "").split())
+    return url[:500] if url.lower().startswith(("http://", "https://")) else ""
+
+
 def message_text(msg: dict) -> str:
     """The line of a creator's (or an operator's) message."""
     msg_type = msg_type_of(msg)
@@ -82,8 +91,9 @@ def message_text(msg: dict) -> str:
         special = msg.get("special") if isinstance(msg.get("special"), dict) else {}
         kind = str(special.get("type") or "")
         label = APPMSG_LABELS.get(kind, "消息")
-        title = "" if kind in _NO_TITLE else _title(msg)
-        return f"[{label}] {title}".strip()
+        if kind in _NO_TITLE:
+            return f"[{label}]"
+        return " ".join(t for t in (f"[{label}]", _title(msg), _url(msg)) if t)
     if msg_type in SYSTEM_TYPES:
         return notice_text(msg)
     return content if content and not content.startswith("[消息类型") else f"[消息类型:{msg_type}]"

@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from src.config import BotConfig, _validate_config
+from src.edge import text as edge_text
 from src.prm import pii
 from src.prm.result import MAX_DRAFT_CHARS, DraftError, parse_draft
 from src.prm.service import HOLDING_TEXT, SETTLE_SEC, PrmService, check_wxid, message_text
@@ -538,6 +539,36 @@ def test_message_text_names_pictures_files_voice_and_stickers():
     assert message_text({"msg_type": 34, "content": "[语音]"}) == "[语音]（没转出文字）"
     assert message_text({"msg_type": 47, "content": ""}) == "[表情]"
     assert message_text({"msg_type": 1, "content": "wxid_abc: 你好"}) == "你好"
+
+
+LINK_SPECIAL = {"kind": "appmsg", "type": "5", "title": "我的小红书主页", "url": "https://www.xiaohongshu.com/user/profile/abc"}
+
+
+@pytest.mark.parametrize("msg, line", [
+    ({"msg_type": 49, "content": "[文件]", "special": LINK_SPECIAL},
+     "[链接] 我的小红书主页 https://www.xiaohongshu.com/user/profile/abc"),
+    ({"msg_type": 49, "content": "[文件]", "special": {"kind": "appmsg", "type": "5", "title": "新品测评"}}, "[链接] 新品测评"),
+    ({"msg_type": 49, "content": "[文件]", "special": {**LINK_SPECIAL, "url": "javascript:alert(1)"}}, "[链接] 我的小红书主页"),
+    ({"msg_type": 49, "content": "[文件]", "special": {"kind": "appmsg", "type": "33", "title": "店铺"}}, "[小程序] 店铺"),
+    ({"msg_type": 49, "content": "[文件]", "special": {"kind": "appmsg", "type": "51", "title": "穿搭分享"}}, "[视频号] 穿搭分享"),
+    ({"msg_type": 49, "content": "[文件]", "special": {"kind": "appmsg", "type": "2000", "title": "微信转账"}}, "[转账]"),
+    ({"msg_type": 49, "content": "[文件]", "special": {"kind": "appmsg", "type": "2001", "title": "恭喜发财"}}, "[红包]"),
+    ({"msg_type": 48, "content": "[消息类型:48]", "special": {"kind": "location", "title": "某某大厦"}}, "[位置] 某某大厦"),
+    ({"msg_type": 42, "content": "[消息类型:42]", "special": {"kind": "card", "title": "另一个达人"}}, "[名片] 另一个达人"),
+    ({"msg_type": 49, "content": "[文件]", "file_name": " brief.pdf "}, "[文件] brief.pdf"),
+], ids=["link-url", "link", "link-not-web", "mini-program", "channels", "transfer", "red-packet", "location", "card", "file"])
+def test_message_text_is_the_edges_line(msg, line):
+    """win review F2: links, mini programs, 视频号, transfers and red packets were all 「[文件]」 here, a
+    location and a card 「[消息类型:48/42]」; now the copilot's draft job says what the edge's event says."""
+    assert message_text(msg) == line == edge_text.message_text(msg)
+
+
+def test_a_line_windows_wrote_is_kept_on_the_mac():
+    """The Mac's edge backend hands on Windows' line as the content (``edge_event_id``): kept as it is."""
+    for line in ("[链接] 我的小红书主页 https://www.xiaohongshu.com/user/profile/abc", "[位置] 某某大厦", "[转账]"):
+        assert message_text({"msg_type": 49, "content": line, "edge_event_id": 7}) == line
+    assert message_text({"msg_type": 3, "content": "[图片]", "edge_event_id": 8}) == "[图片]"
+    assert message_text({"msg_type": 1, "content": "", "edge_event_id": 9}) == "[消息]"
 
 
 # ── the route ─────────────────────────────────────────────────────────────

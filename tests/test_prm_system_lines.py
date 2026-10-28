@@ -1,4 +1,4 @@
-"""WeChat's own lines in a registered creator's chat (win review F1).
+"""WeChat's own lines in a registered creator's chat (win review F1), and what she shares (F2).
 
 A recall, 拍一拍, a red packet or transfer notice is a line of type 10000 whose sender is empty, so the Windows
 backend hands it on as the creator's message.  It is nobody's words: never a draft («[消息类型:10000]»), and the
@@ -6,7 +6,8 @@ drafts waiting are not out of date for it.  Her recall puts the drafts not sent 
 answer what she took back) and the deal says so; our own recall (「你撤回了一条消息」) is only recorded; WeChat's
 lines about becoming friends keep their own handling (src/wechat/new_friends.py).  The integrated tests run the
 real WCDB backend, router, relay and PRM on a fake WeChat database (test_prm_catchup.World); the Mac's side (the
-edge's ``chat_notice``) is in tests/test_prm_over_edge.py.
+edge's ``chat_notice``) is in tests/test_prm_over_edge.py.  A link, a mini program, a transfer, a location or a
+card reaches the draft job as the edge's line (src/edge/text.py), not as 「[文件]」 or 「[消息类型:48]」.
 """
 
 import pytest
@@ -157,3 +158,29 @@ def test_a_new_friends_catch_up_leaves_wechats_lines_out(bot):
     taken = bot.prm.take_new_friend(CREATOR, [bot.msg("你好，我是小美"), recall_line(bot, '"小美" 拍了拍我')])
     [job] = bot.relay.store.list_jobs()
     assert taken == 1 and "拍了拍" not in job["text"]
+
+
+# ── links, transfers, locations, cards (win review F2) ───────────────────
+
+LINK_XML = ('<msg><appmsg appid="" sdkver="0"><title>我的小红书主页</title><des>点开看看</des><type>5</type>'
+            '<url>https://www.xiaohongshu.com/user/profile/abc</url></appmsg></msg>')
+TRANSFER_XML = '<msg><appmsg><title>微信转账</title><type>2000</type></appmsg></msg>'
+RED_PACKET_XML = '<msg><appmsg><title>恭喜发财，大吉大利</title><type>2001</type></appmsg></msg>'
+LOCATION_XML = '<msg><location x="31.2" y="121.4" label="上海市徐汇区某路1号" poiname="某某大厦"/></msg>'
+CARD_XML = '<msg username="wxid_other" nickname="另一个达人"/>'
+
+
+def test_what_she_shares_reaches_the_draft_job_by_its_title(world):
+    """Read by the real WCDB backend: the job says 「[链接] 我的小红书主页」, 「[转账]」, 「[位置] 某某大厦」…, as
+    the edge's events do (src/edge/text.py), not 「[文件]」 or 「[消息类型:48]」.  (A link's address follows
+    once the backend takes ``url`` out of the XML, wcdb_backend._special_info: not changed here.)"""
+    world.register()
+    run = world.run()
+    t = world.clock.now
+    for n, (content, local_type) in enumerate(((LINK_XML, 49), (TRANSFER_XML, 49), (RED_PACKET_XML, 49),
+                                               (LOCATION_XML, 48), (CARD_XML, 42))):
+        world.wechat.say(CREATOR, CREATOR, content, t + n, local_type=local_type)
+    run.poll()
+    [job] = world.jobs()
+    assert [line.split("] ", 1)[1] for line in job["text"].split("\n")] == [
+        "[链接] 我的小红书主页", "[转账]", "[红包]", "[位置] 某某大厦", "[名片] 另一个达人"]
