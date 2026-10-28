@@ -575,6 +575,39 @@ class PrmStore:
             ).fetchall()
         return [packet_view(dict(r)) for r in rows]
 
+    def unsure_since(self, chat_id: str, since: float) -> list[dict]:
+        """Packets the bot was stopped in the middle of sending to this chat (``failed`` /
+        ``indeterminate``: ``PrmService.start``), settled at ``since`` or later, newest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM action_packets WHERE chat_id = ? AND status = ? AND outcome = 'indeterminate'"
+                " AND sent_at >= ? ORDER BY id DESC", (chat_id, FAILED, since),
+            ).fetchall()
+        return [packet_view(dict(r)) for r in rows]
+
+    def settle_unsure(self, packet_id: int, *, sent_at: Optional[float] = None,
+                      error: Optional[str] = None) -> bool:
+        """A packet the bot was stopped in the middle of sending (``failed`` / ``indeterminate``) that
+        WeChat shows after all: with ``error`` None all of it went out (``sent`` / ``sent_confirmed``;
+        ``sent_at`` becomes the time WeChat shows when that is earlier than the restart's); with an
+        ``error`` it stays failed and says what was seen (a draft with files whose text went out).
+        True when it was such a packet."""
+        with self._lock:
+            if error is None:
+                when = "" if sent_at is None else ", sent_at = MIN(COALESCE(sent_at, ?), ?)"
+                cur = self._conn.execute(
+                    f"UPDATE action_packets SET status = ?, outcome = 'sent_confirmed', error = ''{when}"
+                    " WHERE id = ? AND status = ? AND outcome = 'indeterminate'",
+                    (SENT, *(() if sent_at is None else (sent_at, sent_at)), packet_id, FAILED),
+                )
+            else:
+                cur = self._conn.execute(
+                    "UPDATE action_packets SET error = ? WHERE id = ? AND status = ? AND outcome = 'indeterminate'",
+                    (error, packet_id, FAILED),
+                )
+            self._conn.commit()
+            return cur.rowcount == 1
+
     def reviewed(self, kind: str, since: float, limit: int) -> list[dict]:
         """The newest drafts of ``kind`` a person decided on after ``since`` (8.1's window).
         Plain replies only: a platform action is always reviewed and earns no kind ``auto``."""

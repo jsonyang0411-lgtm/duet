@@ -97,6 +97,10 @@ RESTART_FAIL_SEC = 86400
 CATCHUP_HOURS = 12           # PRM_CATCHUP_HOURS: a message read late is drafted up to this old (0-72)
 LINES_CHARS = 6000           # the creator's lines a notice of a draft not written keeps for her next draft
 OWN_FILE_EARLY_SEC = 60      # a file the bot sent shows in WeChat up to this long before its send returns
+# A draft the bot was stopped in the middle of sending (``start``), and what it says once its text was read back
+UNSURE_ERROR = "发送时机器人停了，不确定发出去没有；请到微信里看一眼，需要就手动补发"
+UNSURE_TEXT_SEEN = ("发送时机器人停了：文字已经发出去了（微信里读到了），素材文件不确定发出去没有；"
+                    "请到微信里看一眼，需要就手动补发文件")
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
 _WXID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{3,63}$")
 
@@ -451,8 +455,8 @@ class PrmService:
         ``sweep_deliveries``), then the sender thread."""
         now = self._clock()
         for p in self._store.packets((SENDING,), limit=500):
-            self._store.move(p["id"], (SENDING,), FAILED, outcome="indeterminate", sent_at=now,
-                             error="发送时机器人停了，不确定发出去没有；请到微信里看一眼，需要就手动补发")
+            # (read back after all, its line confirms it: ``_confirm``)
+            self._store.move(p["id"], (SENDING,), FAILED, outcome="indeterminate", sent_at=now, error=UNSURE_ERROR)
         try:
             started = self.sweep_deliveries()
             if started:
@@ -824,11 +828,8 @@ class PrmService:
         if msg.get("edge_seen") and not matched:
             return                                         # 我们发的读回来了，只是这次运行没记着它
         if matched:
-            # Often before its send returned (WeChat shows a line at once); a failure stays one.
-            if packet_id is not None and self._store.confirm_sent(packet_id):
-                packet = self._store.packet(packet_id) or {}
-                logger.info("PRM: packet %d seen in WeChat %.0f s after sending (sent_confirmed)", packet_id,
-                            max(0.0, now - float(packet.get("sent_at") or now)))
+            if packet_id is not None:
+                self._confirm(packet_id, msg, sent_at or now, now)
             return
         if self._read_again(chat_id, msg, now):
             # 2026-10-27 联调：Windows 微信后端的消息编号先用 server_id 算，微信发出约 1 秒后才补上 server_id，
@@ -862,6 +863,28 @@ class PrmService:
         self._store.add_event(deal["id"], party["id"], "takeover", {"until": until}, actor="system", now=now)
         logger.info("PRM: an operator wrote to party %d from WeChat; the deal is a person's until %s",
                     party["id"], time.strftime("%H:%M", time.localtime(until)))
+
+    def _confirm(self, packet_id: int, msg: dict, written: float, now: float) -> None:
+        """A packet's line (or file) read back from WeChat.  Going out or sent: ``sent_confirmed``, often
+        before its send returned (WeChat shows a line at once); a failure stays one.  A packet the bot was
+        stopped in the middle of sending (failed, ``indeterminate``: ``start``) went out after all (win
+        review F4 (d); before, its line was taken for an operator's and the chat was taken over): text
+        only, it is sent again (``sent_at`` when WeChat shows it); with files, whether they went too is
+        still unknown, so it stays red and says its text did go out."""
+        if self._store.confirm_sent(packet_id):
+            packet = self._store.packet(packet_id) or {}
+            logger.info("PRM: packet %d seen in WeChat %.0f s after sending (sent_confirmed)", packet_id,
+                        max(0.0, now - float(packet.get("sent_at") or now)))
+            return
+        packet = self._store.packet(packet_id)
+        if packet is None or (packet["status"], packet["outcome"]) != (FAILED, "indeterminate"):
+            return
+        if not packet["attachments"]:
+            if self._store.settle_unsure(packet_id, sent_at=written):
+                logger.info("PRM: packet %d, cut off by a stop, did go out (seen in WeChat): sent", packet_id)
+        elif self._own_text(msg) and self._store.settle_unsure(packet_id, error=UNSURE_TEXT_SEEN):
+            logger.info("PRM: packet %d, cut off by a stop: its text went out, its files are still unknown",
+                        packet_id)
 
     def _answered_by_hand(self, deal_id: int, written: float, now: float) -> None:
         """An operator wrote to her by hand (at ``written``): a draft of hers that was not written, and
@@ -991,12 +1014,18 @@ class PrmService:
         party = self._store.party_by_wxid(chat_id)
         if party is None:
             return False, None
+        # A draft the bot was stopped in the middle of sending (``indeterminate``: settled by ``start``
+        # when this run began, after its line was written) is looked for too (win review F4 (d)).
+        unsure = self._store.unsure_since(chat_id, written - OWN_MATCH_SEC)
         if msg_type != 1:
             # A file of a draft sent just before a restart: WeChat shows it while the draft's
             # files are going out, before its send returns (``sent_at``).
             for packet in self._store.sent_since(chat_id, written - OWN_FILE_EARLY_SEC):
                 if (packet["attachments"] and float(packet["sent_at"]) < self._started
                         and float(packet["sent_at"]) <= written + OWN_FILE_SEC):
+                    return True, packet["id"]
+            for packet in unsure:
+                if packet["attachments"]:
                     return True, packet["id"]
             return False, None
         tokens = self._store.tokens(party["id"])
@@ -1005,6 +1034,10 @@ class PrmService:
                 continue
             final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
             if _norm(pii.unmask(final, tokens)) == text:
+                return True, packet["id"]
+        for packet in unsure:
+            final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
+            if str(final or "").strip() and _norm(pii.unmask(final, tokens)) == text:
                 return True, packet["id"]
         deal = self._store.deal_of(party["id"], now)
         for ev in self._store.events(deal["id"], limit=20):

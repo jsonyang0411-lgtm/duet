@@ -392,6 +392,67 @@ def test_an_operators_line_from_long_ago_is_recorded_without_a_takeover(world):
     assert world.prm_store.deal(1)["mode"] == "copilot"
 
 
+def test_a_reply_cut_off_by_a_stop_and_read_back_after_the_restart_is_sent_not_a_takeover(world):
+    """win review F4 (d): the bot was stopped while a draft was going out (``sending``).  The restart
+    settles it as 「不确定发出去没有」 (failed, indeterminate); the catch-up then reads the line back.
+    It went out: the draft is sent again (confirmed), and no operator wrote it."""
+    world.register()
+    first = world.run()
+    world.wechat.say(CREATOR, CREATOR, "在吗", world.clock.now)
+    first.poll()
+    world.mac_drafts(first, draft(reply_draft="在的，您说", message_kind="other"))
+    [packet] = world.prm_store.packets(("pending",))
+    first.prm.decide(packet["id"], "send")
+    world.prm_store.move(packet["id"], ("approved",), "sending")      # the sender thread took it ...
+    written = world.clock.now
+    world.wechat.say(CREATOR, ME, "在的，您说", written)               # ... WeChat shows the line ...
+    first.stop()                                                      # ... and the bot stops before it returns
+    world.clock.now += 60
+    second = world.run()
+    second.prm.start()                                                # settles what the stop left half done
+    second.prm.stop()
+    settled = world.prm_store.packet(packet["id"])
+    assert (settled["status"], settled["outcome"]) == ("failed", "indeterminate")
+    second.poll()                                                     # the catch-up reads the line back
+    p = world.prm_store.packet(packet["id"])
+    assert (p["status"], p["outcome"], p["error"]) == ("sent", "sent_confirmed", "")
+    assert p["sent_at"] == written                                    # when WeChat shows it went out
+    assert world.prm_store.deal(1)["mode"] == "copilot"
+    assert world.events("operator_message") == [] and world.events("takeover") == []
+    # the operator typing the same words later is a person again
+    world.clock.now += 3 * 60
+    world.wechat.say(CREATOR, ME, "在的，您说", world.clock.now)
+    second.poll()
+    assert world.prm_store.deal(1)["mode"] == "human" and len(world.events("takeover")) == 1
+
+
+def test_a_draft_with_files_cut_off_by_a_stop_is_not_a_takeover_and_says_what_was_seen(bot):
+    """The same with a draft that has files: its text read back is ours (no takeover), but whether
+    the files went out is still unknown, so the draft stays red and says the text did go out."""
+    bot.prm.handle(bot.msg("要合作说明"))
+    job = bot.worker_takes()
+    assert bot.relay.outfile(job["id"], "合作说明.pdf", io.BytesIO(b"%PDF").read, 4)
+    bot.finish(job["id"], draft(reply_draft="合作说明发你啦", message_kind="material",
+                                attachments_to_send=["assets/合作说明.pdf"]))
+    packet = bot.prm.store.packet_for_job(job["id"])
+    bot.prm.decide(packet["id"], "send")
+    bot.prm.store.move(packet["id"], ("approved",), "sending")       # stopped while sending it
+    written = bot.clock.now
+    bot.clock.now += 60
+    restarted = PrmService(bot.prm._config, bot.relay, store=bot.prm.store, clock=bot.clock, send=bot._send)
+    restarted.start()
+    restarted.stop()
+    own = {"chat_id": CREATOR, "is_group": False, "sender_id": ME, "timestamp": written}
+    restarted.on_own_message({**own, "message_id": "row1", "content": "合作说明发你啦", "msg_type": 1})
+    p = bot.prm.store.packet(packet["id"])
+    assert (p["status"], p["outcome"]) == ("failed", "indeterminate")
+    assert "文字已经发出去了" in p["error"] and "文件" in p["error"]
+    restarted.on_own_message({**own, "message_id": "row2", "content": "[文件]", "msg_type": 49,
+                              "file_name": "合作说明.pdf"})
+    assert bot.prm.store.deal(1)["mode"] == "copilot"
+    assert [e["kind"] for e in bot.prm.store.events(1)].count("operator_message") == 0
+
+
 def test_without_a_read_mark_own_lines_stay_history(world):
     """A chat this version never kept track of (the first start after the update): its own lines
     cannot be told from ones handled already, so they are history; the creator's are handed on."""
