@@ -260,6 +260,27 @@ def test_an_execution_the_mac_never_takes_is_cancelled_after_30_minutes(bot, clo
     assert bot.relay.next_job(0, ("prm",)) is None
 
 
+def test_an_execution_whose_job_is_gone_is_unknown_after_a_minute(bot, clock):
+    """sweep_executing: the execution's relay job cannot be found any more (the relay's database was replaced or
+    cleared, say): the Mac may or may not have run it.  Within a minute of the approval it is waited for; after
+    that it ends UNKNOWN (「不知道执行了没有」), red until 我已处理, and nothing goes to the creator."""
+    packet = drafted(bot)
+    job = approve(bot, packet)
+    with bot.relay.store._lock:
+        bot.relay.store._conn.execute("DELETE FROM relay_jobs WHERE id = ?", (job["id"],))
+        bot.relay.store._conn.commit()
+    clock.now += 59
+    assert bot.prm.sweep_executing() == 0 and bot.prm.store.packet(packet["id"])["status"] == "executing"
+    clock.now += 2
+    assert bot.prm.sweep_executing() == 1
+    failed = bot.prm.store.packet(packet["id"])
+    assert failed["status"] == "failed" and failed["outcome"] == "platform_unknown"
+    assert "找不到执行任务了" in failed["platform"]["execution"]["problems"][0] and "UNKNOWN" in failed["error"]
+    assert [a["id"] for a in snap(bot)["platform_alerts"]] == [packet["id"]]
+    bot.prm.tick()
+    assert bot.texts == []
+
+
 def test_cancelled_while_running_is_never_sent(bot):
     packet = drafted(bot)
     job = approve(bot, packet)
@@ -833,6 +854,25 @@ def test_a_signature_from_before_the_order_waits_for_the_next_one(bot, clock):
     assert system_jobs(bot) == []
     for stage in ("transit", "delivered"):
         assert bot.prm.deal_action("stage", {"deal_id": 1, "stage": stage})["ok"]
+    assert len(system_jobs(bot)) == 1
+
+
+def test_adopting_the_ais_signed_for_proposal_asks_for_the_commission_too(bot, clock):
+    """kb/合作政策.md 2.1 (5): the creator says the sample came, her draft proposes 已签收, the operator adopts it
+    (采纳 AI 建议): that is a signature like marking it by hand, the 专属佣金 step is asked for (once)."""
+    order = signed_for_order(bot, clock)
+    bot.prm.handle(bot.msg("收到样品啦，很喜欢"))
+    job = bot.worker_takes()
+    bot.finish(job["id"], draft(message_kind="greeting", reply_draft="太好啦～", slots={}, stage_proposal="delivered"))
+    assert bot.prm.store.deal(order["deal_id"])["stage_proposal"] == "delivered" and system_jobs(bot) == []
+    assert bot.prm.deal_action("adopt", {"deal_id": order["deal_id"]})["ok"]
+    deal = bot.prm.store.deal(order["deal_id"])
+    assert deal["stage"] == "delivered" and deal["delivered_at"] == clock.now and deal["stage_proposal"] == ""
+    [step] = system_jobs(bot)
+    note = json.loads(step["meta"])["system_note"]
+    assert note.startswith(f"达人已经签收了寄样单 {JST_ORDER}") and f"这一份草稿只填商品 {DY_ITEM}" in note
+    assert any(e["kind"] == "stage" and e["detail"]["to"] == "delivered" for e in bot.prm.store.events(order["deal_id"]))
+    bot.prm.tick()
     assert len(system_jobs(bot)) == 1
 
 
