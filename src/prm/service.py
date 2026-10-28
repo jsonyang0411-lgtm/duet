@@ -39,7 +39,10 @@ name, 「你已添加了…」) are never drafted, nor are its other lines in he
 
 A draft with a platform action (platforms.py: 小红书 / 抖音 / 淘宝 CLIs on the Mac) comes
 with the Mac's preview of it and always waits for a person, whatever its kind's gate; so does
-every draft of a next step the bot asked for (a 专属佣金 step, ``meta.system_note``).
+every draft of a next step the bot asked for (a 专属佣金 step, ``meta.system_note``).  A verified
+sample order's products get their 专属佣金 one at a time, the bot keeping the record (``_chain``:
+which are open, which a person dropped, which ended red, which are left); a product that cannot be
+opened does not hold up the ones after it, and each is asked for once per round (a signature).
 批准并执行 moves it to ``executing`` and queues a ``platform_execute`` job (one approval
 key; the Mac runs the CLI with --execute once and never again for that key); only a
 read-back ``VERIFIED_SUCCESS`` turns it into an approved reply (the link filled in) for
@@ -71,7 +74,7 @@ from . import deals, gates, pii, platforms, retention
 from .result import MAX_DRAFT_CHARS, MESSAGE_KINDS, DraftError, parse_draft
 from .store import (
     APPROVED, COPILOT, DRAFT_NOTES, DROPPED, EXECUTING, FAILED, HUMAN, LANE_REPLY, LANE_SYSTEM, MESSAGE_TOOL, MODES,
-    NO_REPLY, PAUSED, PENDING,
+    NO_REPLY, NOTICE_CHARS, PAUSED, PENDING,
     SENDING, SENT, SHIPMENT_STATES, STAGES, SUPERSEDED, PartyError, PrmStore,
 )
 
@@ -238,7 +241,7 @@ def event_out(ev: dict) -> dict:
     elif ev["kind"] == "draft_failed" and detail.get("job"):
         name = f"#{detail['job']} 草稿没写成"
     elif ev["kind"] == "next_step" and detail.get("job"):
-        name = f"派开专属佣金的任务 #{detail['job']}"
+        name = f"派开专属佣金的任务 #{detail['job']}" + (f"（商品 {detail['item']}）" if detail.get("item") else "")
     elif ev["kind"] == "platform_recheck" and detail.get("packet"):
         name = f"#{detail['packet']} 的结果不确定，#{detail.get('for')} 要再开同一个商品：先核对平台"
     return {"id": ev["id"], "kind": ev["kind"], "name": name,
@@ -1082,6 +1085,8 @@ class PrmService:
             extra = extra if isinstance(extra, dict) else {}
             why = "Mac 失联了" if status == "lost" else str(extra.get("error") or job.get("result_text") or "没有返回内容")
             self._draft_failed(job, meta, f"#{job['id']} 草稿没写成：{why[:120]}", notes, now)
+            if meta.get("system_note"):
+                self._chain_refresh(deal_id, now)      # (not written: the chain waits for a person)
             logger.warning("PRM: job #%d %s; the deal needs a person", job["id"], status)
             return True
         if self._store.packet_for_job(job["id"]) is not None:
@@ -1090,6 +1095,8 @@ class PrmService:
             draft = parse_draft(job.get("result_text") or "")
         except DraftError as e:
             self._draft_failed(job, meta, f"#{job['id']} 的草稿格式不对（{e.code}），没有生成待审批", notes, now)
+            if meta.get("system_note"):
+                self._chain_refresh(deal_id, now)
             logger.warning("PRM: job #%d answer unusable: %s", job["id"], e)
             return True
         draft = self._mask_draft(party_id, draft, now)
@@ -1182,7 +1189,7 @@ class PrmService:
             # A person took the chat while the step was drafted: it is owed, asked for again when that ends.
             step = meta.get("step") if isinstance(meta.get("step"), dict) else {}
             self._owe_step(deal, f"#{job['id']} 开专属佣金这一步的草稿没进待审批", str(meta["system_note"]),
-                           step.get("packet"), bool(step.get("delivered")), now)
+                           step.get("packet"), bool(step.get("delivered")), now, item=step.get("item") or "")
         elif lane == LANE_SYSTEM and state == SUPERSEDED:
             attention.append(f"#{job['id']} 开专属佣金这一步的草稿没进待审批（又有了新的一步），请运营核对")
         if short:
@@ -1198,6 +1205,10 @@ class PrmService:
             attention.append(f"平台动作预览没通过：{why}"[:200])
         self._store.update_deal(deal_id, now, merge_slots=draft.slots, stage_proposal=draft.stage_proposal)
         self._store.set_notice(deal_id, DRAFT_NOTES + lane, "；".join(attention), now)   # its own notes: replaced
+        if lane == LANE_SYSTEM and state == NO_REPLY:
+            self._chain_go(deal, now)                  # the step drafted nothing: the chain goes on
+        elif lane == LANE_SYSTEM or tool in COMMISSION_ACTIONS.values():
+            self._chain_refresh(deal_id, now)
         if state == APPROVED:
             self._wake.set()
         logger.info("PRM: job #%d -> packet %d (%s, %s, %s)", job["id"], packet_id, state, route, draft.message_kind)
@@ -1382,22 +1393,25 @@ class PrmService:
                 # 已签收: the 专属佣金 chain of this signature (once); marked 已签收 again, a chain that never
                 # started is started now (mac review F2)
                 again = after["stage"] == "delivered" and action in ("stage", "adopt", "shipment_status")
-                self._examine_delivery(after, now, again=again)
+                if not self._examine_delivery(after, now, again=again):
+                    self._chain_refresh(after["id"], now)     # (moved on past the sample, say)
             elif after and before.get("delivered_at") and not after.get("delivered_at"):
                 # set back before 已签收 (to sign for it again, kb 2.1): what waited for the signature is not
                 # owed now, and a step that was not written is picked up by signing for it again
                 self._store.drop_notices(after["id"], lambda n: (n["key"] == "step" and n.get("delivered")) or (
                     str(n["key"]).startswith("failed:") and n.get("lane") == LANE_SYSTEM), now)
+                self._chain_refresh(after["id"], now)
         return result
 
     def _examine_delivery(self, deal: dict, now: float, again: bool = False) -> bool:
         """A deal marked 已签收 (``delivered_at``): looked at once per signature (``deal.chain.seen``), in the
         console's ``deal_action`` or, for one marked straight into the database while the bot was stopped,
         by ``sweep_deliveries`` (mac review F2).  With PRM_COMMISSION_AFTER=delivered a signature that came
-        after the deal's newest verified sample order (``_chain_order``) starts the chain of that order
+        after the deal's newest verified sample order (``_chain_order``) starts a round of that order's chain
         (``chain.order``, ``chain.since`` = the signature; what the signature before left is put away) and
-        its step is asked for (``_on_delivered``).  ``again``: marked 已签收 once more, the signature known
-        already: a chain of it that never started is started now.  True when this call started one."""
+        its first product is asked for (``_chain_next``), unless a bot from before ``deal.chain`` started it
+        already (``_chain_started``).  ``again``: marked 已签收 once more, the signature known already: the
+        round goes on if it can (a step that never went out, say).  True when this call started a round."""
         delivered = float(deal.get("delivered_at") or 0)
         if not delivered or deal.get("purged_at"):
             return False
@@ -1406,53 +1420,33 @@ class PrmService:
             chain = dict(deal.get("chain") or {})
             if chain.get("seen") is not None and delivered <= float(chain["seen"]):
                 if again:
-                    self._ask_first_step(deal, now)
+                    self._chain_go(deal, now, after=self._store.packet(int(chain.get("order") or 0)))
                 return False
+            before = "seen" not in chain          # never looked at: a deal of a bot from before deal.chain
             order = self._chain_order(deal["id"])
             chain["seen"] = delivered
             start = self._commission_after == "delivered" and order is not None and _order_at(order) <= delivered
+            legacy = False
             if start:
                 chain.update(order=order["id"], since=delivered)
                 # set back and signed for again while the bot was stopped: the signature before's step is not owed
                 self._store.drop_notices(deal["id"], lambda n: float(n.get("at") or 0) < delivered and (
                     (n["key"] == "step" and n.get("delivered")) or (
                         str(n["key"]).startswith("failed:") and n.get("lane") == LANE_SYSTEM)), now)
+                legacy = before and self._chain_started(self._store.deal(deal["id"]) or deal, delivered)
             self._store.update_deal(deal["id"], now, chain=chain)
-            if start:
-                self._ask_first_step(self._store.deal(deal["id"]) or deal, now)
+            deal = self._store.deal(deal["id"]) or deal
+            if start and not legacy:
+                self._chain_go(deal, now, after=order)
+            elif start:
+                self._chain_refresh(deal["id"], now)
             return start
 
-    def _ask_first_step(self, deal: dict, now: float) -> None:
-        """``_on_delivered``, its failure logged (the console's action is done all the same)."""
-        try:
-            self._on_delivered(deal, now)
-        except Exception:
-            logger.exception("PRM: the 专属佣金 step of deal %d could not be asked for", deal["id"])
-
-    def _on_delivered(self, deal: dict, now: float) -> None:
-        """The creator signed for the sample (PRM_COMMISSION_AFTER=delivered): the 专属佣金 of the sample
-        order the chain of this signature follows (``deal.chain``) is drafted now (``_ask_next_step``),
-        once: not when a step of it was asked for already, is owed, was drafted or was not written
-        (``_chain_started``), nor when every product's 专属佣金 is open (``_unopened``)."""
-        chain = deal.get("chain") or {}
-        delivered = deal.get("delivered_at")
-        if (self._commission_after != "delivered" or not delivered or chain.get("since") is None
-                or float(chain["since"]) != float(delivered)):
-            return
-        packet = self._store.packet(int(chain.get("order") or 0))
-        if packet is None or packet["deal_id"] != deal["id"] or not _verified(packet):
-            return
-        if self._chain_started(deal, float(delivered)) or not self._unopened(deal["id"], packet):
-            return
-        data = packet["platform"] or {}
-        self._ask_next_step(packet, next_step_note(data.get("action") or {}, data.get("execution") or {},
-                                                   delivered=True), now, delivered=True)
-
     def _chain_started(self, deal: dict, since: float) -> bool:
-        """Is a 专属佣金 step under way, or was one asked for since ``since`` (the signature)?  Owed
-        (``step``), its job queued or running, asked (``next_step``), drafted (a draft of the system lane,
-        a 专属佣金 draft) or not written (the system lane's ``failed:``): also what a bot from before
-        ``deal.chain`` did."""
+        """Did a bot from before ``deal.chain`` start the chain of this signature (``since``)?  A step owed
+        (``step``), its job queued or running, asked for (``next_step``), drafted (a draft of the system lane,
+        a 专属佣金 draft) or not written (the system lane's ``failed:``) since then: its round is not asked
+        for again (it goes on from what comes next)."""
         for n in deal.get("notices") or []:
             if n["key"] == "step" or (str(n["key"]).startswith("failed:") and n.get("lane") == LANE_SYSTEM
                                       and float(n.get("at") or 0) > since):
@@ -1467,16 +1461,159 @@ class PrmService:
             p.get("tool") in COMMISSION_ACTIONS.values() or (p.get("meta") or {}).get("lane") == LANE_SYSTEM)
             for p in self._store.deal_packets(deal["id"], since=since))
 
-    def _unopened(self, deal_id: int, order: dict) -> list:
-        """The products of a sample order whose 专属佣金 is not open on the platform yet (no draft of its
-        ``COMMISSION_ACTIONS`` action for that product verified), in the order's order."""
-        action = (order.get("platform") or {}).get("action") or {}
-        name = COMMISSION_ACTIONS.get(str(action.get("shop") or ""))
-        if not name:
-            return []
-        opened = {action_target((p["platform"] or {}).get("action") or {}, p["platform"])[0]
-                  for p in self._store.deal_packets(deal_id, tools=(name,)) if _verified(p)}
-        return [item for item in order_items(action) if item not in opened]
+    def _start_chain(self, order: dict, now: float) -> None:
+        """PRM_COMMISSION_AFTER=created: a sample order verified starts a round of its chain now."""
+        with self._chain_lock:
+            deal = self._store.deal(order["deal_id"])
+            if deal is None:
+                return
+            self._store.update_deal(deal["id"], now, chain={**(deal.get("chain") or {}), "order": order["id"],
+                                                            "since": now})
+            self._chain_next(self._store.deal(deal["id"]) or deal, now, after=order)
+
+    def _chain(self, deal: dict) -> Optional[dict]:
+        """Where the deal's 专属佣金 chain stands, as the bot keeps it (mac review F5: before, only the Mac's case
+        file knew, and a product that could not be opened stopped the ones after it).  The round is
+        ``deal.chain``: the verified sample order it follows and since when (a signature; with
+        PRM_COMMISSION_AFTER=created the order's verification).  ``items``: each product of the order, in its
+        order, with its state (``item_state``) and the draft that says so; ``busy``: a step of it is under
+        way (a product running or in 待审批, a step owed, its job queued or running, a step's draft waiting);
+        ``next``: the product to ask for now (not busy: the first one not asked for or decided on in this
+        round).  None: no round, or its order is not a 专属佣金 one (no ``COMMISSION_ACTIONS`` shop)."""
+        chain = deal.get("chain") or {}
+        if chain.get("since") is None or not chain.get("order"):
+            return None
+        order = self._store.packet(int(chain["order"]))
+        if order is None or order["deal_id"] != deal["id"] or not _verified(order):
+            return None
+        action = (order["platform"] or {}).get("action") or {}
+        shop = str(action.get("shop") or "")
+        name = COMMISSION_ACTIONS.get(shop)
+        ids = list(dict.fromkeys(order_items(action)))
+        if not name or not ids:
+            return None
+        since = float(chain["since"])
+        packets = self._store.deal_packets(deal["id"], tools=(name,))
+        asks = self._store.events(deal["id"], limit=None, kinds=("next_step",), since=since)
+        asked = {str(ev["detail"].get("item")) for ev in asks if ev["detail"].get("item")}
+        items = []
+        for item in ids:
+            mine = [p for p in packets if action_target((p["platform"] or {}).get("action") or {}, p["platform"])[0] == item]
+            state, packet = item_state(mine, item in asked, since)
+            items.append({"id": item, "state": state, "packet": packet})
+        party = self._store.party(deal["party_id"]) or {}
+        job = self._relay.store.latest_open(party["wxid"], drafts_only=True, system=True) if party.get("wxid") else None
+        drafting = None
+        if job is not None:
+            drafting = {"job": job["id"], "item": next((str(ev["detail"].get("item") or "") for ev in asks
+                                                        if ev["detail"].get("job") == job["id"]), "")}
+            for i in items:
+                if i["id"] == drafting["item"] and i["state"] == "asked":
+                    i["state"] = "drafting"            # (its step's draft is being written)
+        busy = ""
+        if any(i["state"] in ("running", "waiting") for i in items):
+            busy = "held"
+        elif any(n["key"] == "step" for n in deal.get("notices") or []):
+            busy = "owed"
+        elif job is not None:
+            busy = "drafting"
+        elif any((p.get("meta") or {}).get("lane") == LANE_SYSTEM
+                 for p in self._store.deal_packets(deal["id"], statuses=(PENDING,))):
+            busy = "draft"
+        created = ((order["platform"] or {}).get("execution") or {}).get("created") or {}
+        return {"order": order, "shop": shop, "action": name, "items": items, "since": since, "busy": busy,
+                "drafting": drafting, "number": str(created.get("sample_order_no") or ""),
+                "uid": str(created.get("creator_uid") or "") if shop == "dy" else "",
+                "next": None if busy else next((i["id"] for i in items if i["state"] == "todo"), None)}
+
+    def _chain_next(self, deal: dict, now: float, after: Optional[dict] = None) -> bool:
+        """The 专属佣金 chain goes on (mac review F5), under ``_chain_lock``: unless a step of it is under way
+        (``_chain``'s ``busy``), the round's next product is asked for (``_ask_next_step``: owed while a person
+        has the deal or the creator is off the list), whatever became of the one before: opened, dropped
+        (「不发」), red, nothing drafted; each product once per round.  A round with nothing left asks once
+        more only right after a 专属佣金 of it was verified (``after``), so the case file hears it is done
+        (kb 2.1: no action then).  With PRM_COMMISSION_AFTER=delivered a deal set back before 已签收 asks for
+        nothing (the next signature starts a new round).  The deal's ``chain`` notice says where it stands.
+        False: the deal has no chain (the caller's own way then)."""
+        with self._chain_lock:
+            deal = self._store.deal(deal["id"]) or deal
+            progress = self._chain(deal)
+            if progress is None:
+                return False
+            delivered = self._commission_after == "delivered"
+            done = False
+            if after is not None:
+                after = self._store.packet(after["id"]) or after
+                theirs = (after.get("platform") or {}).get("action") or {}
+                done = (theirs.get("action") == progress["action"] and _verified(after)
+                        and str(theirs.get("item_id") or "") in {i["id"] for i in progress["items"]})
+            if not progress["busy"] and (progress["next"] or done) and not (delivered and not deal.get("delivered_at")):
+                head = after if after is not None else progress["order"]
+                self._ask_next_step(head, chain_note(progress, head, delivered=delivered), now, delivered=delivered,
+                                    item=progress["next"] or "")
+                deal = self._store.deal(deal["id"]) or deal
+                progress = self._chain(deal) or progress
+            self._chain_notice(deal, progress, now)
+            return True
+
+    def _chain_go(self, deal: dict, now: float, after: Optional[dict] = None) -> None:
+        """``_chain_next``, its failure logged (what called it is done all the same: the console's action, a
+        draft that came back)."""
+        try:
+            self._chain_next(deal, now, after=after)
+        except Exception:
+            logger.exception("PRM: the 专属佣金 chain of deal %d could not go on", deal["id"])
+
+    def _chain_refresh(self, deal_id: int, now: float) -> None:
+        """The deal's ``chain`` notice, again (a draft of the chain came, a red one was dealt with …)."""
+        try:
+            with self._chain_lock:
+                deal = self._store.deal(deal_id)
+                if deal is not None:
+                    self._chain_notice(deal, self._chain(deal), now)
+        except Exception:
+            logger.exception("PRM: the 专属佣金 notice of deal %d could not be written", deal_id)
+
+    def _chain_notice(self, deal: dict, progress: Optional[dict], now: float) -> None:
+        """The deal's ``chain`` notice (``chain_notice_text``): there while the round has something under way, a
+        product left to ask for or asked for with nothing drafted, or a red one nobody marked dealt with; gone
+        when every product is open or the rest was decided by a person (「不发」, 「我已处理」), when
+        (PRM_COMMISSION_AFTER=delivered) the deal was set back before 已签收, and, for what is left or drafted
+        nothing, once the deal moved on past the sample (``MOVED_ON``: the operators are done with it)."""
+        text = ""
+        if progress is not None and not (self._commission_after == "delivered" and not deal.get("delivered_at")):
+            text = chain_notice_text(progress, RESTART_HINT, moved_on=deal.get("stage") in MOVED_ON)
+        self._store.set_notice(deal["id"], "chain", text, now)
+
+    def _chain_decided(self, packet: dict, now: float) -> None:
+        """An operator decided on a draft of the chain (a 专属佣金 draft, or a step's draft without the action):
+        the chain goes on (「不发」: that product is not opened in this round)."""
+        if packet.get("tool") in COMMISSION_ACTIONS.values() or (packet.get("meta") or {}).get("lane") == LANE_SYSTEM:
+            deal = self._store.deal(packet["deal_id"])
+            if deal is not None:
+                self._chain_go(deal, now, after=packet)
+
+    def _after_platform(self, packet_id: int, record: dict, now: float, late: bool = False) -> None:
+        """What a platform action's result means for the 专属佣金 chain: a sample order verified with
+        PRM_COMMISSION_AFTER=created starts a round of its chain; a 专属佣金's result (open, red, late) lets the
+        chain go on; for a deal without a chain (no verified sample order) a verified 专属佣金 asks for the next
+        as before (the Mac picks it from the case file).  Failures are logged: the result is recorded already."""
+        packet = self._store.packet(packet_id)
+        if packet is None:
+            return
+        action = (packet["platform"] or {}).get("action") or {}
+        name = action.get("action")
+        try:
+            if name == "jst.sample_order":
+                if not late and self._commission_after == "created" and written_state(record) == "verified":
+                    self._start_chain(packet, now)
+            elif name in COMMISSION_ACTIONS.values():
+                deal = self._store.deal(packet["deal_id"])
+                if (deal is not None and not self._chain_next(deal, now, after=None if late else packet)
+                        and not late and packet["status"] == APPROVED):
+                    self._ask_next_step(packet, next_step_note(action, record), now)
+        except Exception:
+            logger.exception("PRM: the step after packet %d could not be asked for", packet_id)
 
     def sweep_deliveries(self) -> int:
         """The deals marked 已签收 the bot has not looked at (``deal.chain.seen``): marked straight into the
@@ -1528,6 +1665,7 @@ class PrmService:
             if not self._store.move(packet["id"], (PENDING,), DROPPED, decided_at=now):
                 return {"ok": False, "error": "这条草稿已经处理过了"}
             self._person_decided(packet, now)
+            self._chain_decided(packet, now)          # 「不发」 a product: the next one is asked for (mac review F5)
             return {"ok": True, "status": DROPPED}
         if action == "execute":
             return self._approve_execute(packet, text, now)
@@ -1559,6 +1697,7 @@ class PrmService:
                                 edited=int(final != packet["text"])):
             return {"ok": False, "error": "这条草稿已经处理过了（或者达人又发了新消息，草稿已过时）"}
         self._person_decided(packet, now)
+        self._chain_decided(packet, now)
         self._wake.set()
         return {"ok": True, "status": APPROVED}
 
@@ -1633,6 +1772,8 @@ class PrmService:
                               {"packet": packet["id"], "action": action["action"], "job": job_id},
                               actor="console", now=now)
         self._person_decided(packet, now)
+        if action["action"] in COMMISSION_ACTIONS.values():
+            self._chain_refresh(packet["deal_id"], now)        # (that product is running now)
         logger.info("PRM: packet %d approved; %s goes to the Mac as job #%d", packet["id"], action["action"], job_id)
         return {"ok": True, "status": EXECUTING, "job": job_id}
 
@@ -1740,6 +1881,8 @@ class PrmService:
                               {"packet": packet["id"], **({"recheck_for": released} if released else {})},
                               actor="console", now=now)
         self._store.drop_notices(packet["deal_id"], lambda n: n["key"] == f"platform:{packet['id']}", now)
+        if packet.get("tool") in COMMISSION_ACTIONS.values():
+            self._chain_refresh(packet["deal_id"], now)
         if released:
             logger.info("PRM: packet %d checked on the platform (not there): packet %s may run", packet["id"], released)
         return {"ok": True, **({"released": released} if released else {})}
@@ -1776,6 +1919,8 @@ class PrmService:
                 block = {**block, "action": masked_action(block.get("action"), self._masker(packet["party_id"], now))}
             new = {**data, "previewing": None, **({"preview": block} if block else {})}
             self._store.set_platform(packet["id"], new, (PENDING,))
+            if packet.get("tool") in COMMISSION_ACTIONS.values():
+                self._chain_refresh(packet["deal_id"], now)    # (its preview may pass now)
             return True
         # platform_execute
         data = packet["platform"]
@@ -1817,6 +1962,7 @@ class PrmService:
                 self._store.set_platform(packet["id"], {**executed, "acked_at": None}, (FAILED,))
                 self._store.set_notice(packet["deal_id"], f"platform:{packet['id']}", (
                     f"#{packet['id']} 平台动作的结果晚到了：{platforms.outcome_text(outcome)}；回复没有自动发，请运营处理"), now)
+                self._after_platform(packet["id"], record, now, late=True)
             return
         event = {"packet": packet["id"], "action": action.get("action"), "outcome": outcome,
                  "link": (record.get("created") or {}).get("link", "")}
@@ -1838,8 +1984,7 @@ class PrmService:
                     logger.info("PRM: packet %d %s verified on the platform; the reply goes out", packet["id"],
                                 action.get("action"))
                     self._wake.set()
-                    if action.get("action") != "jst.sample_order" or self._commission_after == "created":
-                        self._ask_next_step(packet, next_step_note(action, record), now)
+                    self._after_platform(packet["id"], record, now)
                 return
         why = "；".join(record.get("problems") or [])
         if outcome == platforms.VERIFIED and missing:
@@ -1859,15 +2004,17 @@ class PrmService:
             # until an operator marks it dealt with (``_ack``), whatever the drafts after it say
             self._store.set_notice(packet["deal_id"], f"platform:{packet['id']}", f"#{packet['id']} {error}", now)
             logger.warning("PRM: packet %d %s ended %s; nothing sent", packet["id"], action.get("action"), outcome)
+            self._after_platform(packet["id"], record, now)       # one product red: the chain goes on
 
-    def _ask_next_step(self, packet: dict, note: str, now: float, delivered: bool = False) -> None:
+    def _ask_next_step(self, packet: dict, note: str, now: float, delivered: bool = False, item: str = "") -> None:
         """A platform write that leads to the next one (a sample order → its 专属佣金): a draft
         job of its own, told what happened in ``meta.system_note``.  What it drafts is a platform
         action like any other: previewed on the Mac, approved by a person; and whatever it drafts
         waits for a person, whatever its kind's gate (``on_result``: the system lane).  Not now for a
         creator the operators took off the list (inactive) or a deal a person has: the step is owed
         (a notice that stays, mac review F1) and asked for when that ends (``sweep_owed_steps``).
-        ``delivered``: the step waits for the signature (no longer owed once the deal is set back)."""
+        ``delivered``: the step waits for the signature (no longer owed once the deal is set back); ``item``: the
+        product it asks for (``_chain``; "" when the Mac picks it, or for the step that only tells it is done)."""
         if not note:
             return
         deal = self._store.deal(packet["deal_id"])
@@ -1875,12 +2022,12 @@ class PrmService:
         if deal is None or party is None:
             return
         if self._step_blocked(deal, party, now):
-            self._owe_step(deal, f"#{packet['id']} 之后该开专属佣金了", note, packet["id"], delivered, now)
+            self._owe_step(deal, f"#{packet['id']} 之后该开专属佣金了", note, packet["id"], delivered, now, item=item)
             logger.info("PRM: party %d: the next step after packet %d is owed (inactive, or a person has the deal)",
                         party["id"], packet["id"])
             return
         self._store.drop_notices(deal["id"], lambda n: n["key"] == "step", now)     # this one goes now
-        self._dispatch_step(deal, party, note, packet["id"], delivered, now)
+        self._dispatch_step(deal, party, note, packet["id"], delivered, now, item=item)
 
     def _step_blocked(self, deal: dict, party: dict, now: float) -> str:
         """Why a 专属佣金 step cannot be asked for now ("" = it can)."""
@@ -1890,28 +2037,32 @@ class PrmService:
             return "现在不在副驾驶模式，系统先不起草；切回副驾驶（或者人工接管到期）后会自动起草"
         return ""
 
-    def _owe_step(self, deal: dict, head: str, note: str, packet_id, delivered: bool, now: float) -> None:
+    def _owe_step(self, deal: dict, head: str, note: str, packet_id, delivered: bool, now: float,
+                  item: str = "") -> None:
         """The deal's ``step`` notice: «``head``：why it waits», and what ``sweep_owed_steps`` needs to ask
-        for it (the ``system_note``, the packet it follows, whether it waits for the signature)."""
+        for it (the ``system_note``, the packet it follows, whether it waits for the signature, the product)."""
         party = self._store.party(deal["party_id"]) or {}
         why = self._step_blocked(deal, party, now) or "系统一会儿就起草"
         self._store.set_notice(deal["id"], "step", f"{head}：{why}", now, head=head, note=note, packet=packet_id,
-                               delivered=bool(delivered))
+                               delivered=bool(delivered), item=str(item or ""))
 
-    def _dispatch_step(self, deal: dict, party: dict, note: str, packet_id, delivered: bool, now: float) -> int:
+    def _dispatch_step(self, deal: dict, party: dict, note: str, packet_id, delivered: bool, now: float,
+                       item: str = "") -> int:
         """The draft job of a 专属佣金 step (``meta.system_note``; ``meta.step`` says which packet it
-        follows and whether it waited for the signature, should it be owed again); returns its id."""
+        follows, whether it waited for the signature and the product it asks for, should it be owed again);
+        returns its id."""
         meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"], "system_note": note,
-                "step": {"packet": packet_id, "delivered": bool(delivered)}}
+                "step": {"packet": packet_id, "delivered": bool(delivered), "item": str(item or "")}}
         outbound = self._outbound(deal["id"], party["id"], now)
         if outbound:
             meta["sent"] = outbound
         # input_closed: the creator's next message is a reply job of its own, not part of this step
         _, job_id = self._relay.submit(party["wxid"], party["wxid"], "", kind=PRM, meta=meta, fresh=True,
                                        input_closed=True)
-        # what was asked for, when (``_chain_started``: a signature's step is asked for once)
+        # what was asked for, when (``_chain``: each product once per round)
         self._store.add_event(deal["id"], party["id"], "next_step", {"job": job_id, "after": packet_id,
-                                                                     "delivered": bool(delivered)},
+                                                                     "delivered": bool(delivered),
+                                                                     "item": str(item or "")},
                               actor="system", now=now)
         # the chain goes on: a step that was not written before is seen to
         self._store.drop_notices(deal["id"], lambda n: str(n["key"]).startswith("failed:")
@@ -1937,10 +2088,12 @@ class PrmService:
                 if owed.get("head") and owed["text"] != f"{owed['head']}：{why}":
                     self._store.set_notice(deal["id"], "step", f"{owed['head']}：{why}", now)
                 continue
-            if self._store.drop_notices(deal["id"], lambda n: n["key"] == "step", now):
-                self._dispatch_step(deal, party, str(owed.get("note") or ""), owed.get("packet"),
-                                    bool(owed.get("delivered")), now)
-                asked += 1
+            with self._chain_lock:                     # (the chain does not ask another meanwhile)
+                if self._store.drop_notices(deal["id"], lambda n: n["key"] == "step", now):
+                    self._dispatch_step(deal, party, str(owed.get("note") or ""), owed.get("packet"),
+                                        bool(owed.get("delivered")), now, item=str(owed.get("item") or ""))
+                    asked += 1
+            self._chain_refresh(deal["id"], now)
         return asked
 
     def sweep_executing(self) -> int:
@@ -2237,7 +2390,18 @@ COMMISSION_ACTIONS = {"dy": "dy.designated_commission", "xhs": "xhs.direct_plan"
 # A creator's 专属 actions: one per product and creator (a second would open a second 百应 strategy,
 # 千帆 plan or channel product); ``PrmService._opened_before`` refuses another approval.
 ONCE_ACTIONS = ("dy.designated_commission", "xhs.direct_plan", "dy.channel_goods")
-REOPEN_HINT = "点「不发」；要接着开下一个商品，把物流改回「运输中」再标「已签收」"
+# The end of ``_opened_before``'s refusal: the draft is not needed (a sample order's chain goes on by itself).
+REOPEN_HINT = "点「不发」就行（寄样单的专属佣金：系统会接着开还没开的商品）"
+# How a round's products not opened are asked for again (kb/合作政策.md 2.1): a new round, from a new signature.
+RESTART_HINT = "要重开这一轮没开的商品：把物流改回「运输中」再标「已签收」"
+# A 专属佣金 chain's products as the bot sees them (``item_state``), in the order the Mac and the deal hear them.
+CHAIN_STATES = (("opened", "已开好"), ("running", "正在执行"), ("waiting", "在待审批"), ("drafting", "正在起草"),
+                ("dropped", "这一轮不开（运营点了「不发」）"), ("not_done", "没开成"),
+                ("uncertain", "结果不确定（运营会先到平台后台核对）"), ("asked", "派过、草稿没开它"),
+                ("todo", "还没开"))
+CHAIN_LIST = 3              # product ids the deal's notice names per state (the rest are counted)
+# Stages after the sample (the content): what a chain left or drafted nothing for no longer needs saying.
+MOVED_ON = ("brief", "draft", "revise", "published", "closed")
 
 
 def action_target(action: dict, data: Optional[dict] = None) -> tuple:
@@ -2308,6 +2472,133 @@ def _released(other: dict, packet_id: int) -> bool:
     recheck = data.get("recheck") or {}
     return (recheck.get("for") == packet_id and data.get("acked_at") is not None
             and float(data["acked_at"]) >= float(recheck.get("at") or 0))
+
+
+def item_state(packets: list, asked: bool, since: float) -> tuple:
+    """``(state, packet)`` of one product of a 专属佣金 chain (``CHAIN_STATES``) from its drafts of the commission
+    action, newest first: "opened" (one verified), "running", "waiting" (in 待审批); else what this round
+    decided on (a draft of it since the round started, ``since``: "dropped" by an operator, "not_done" /
+    "uncertain" red, ``written_state``); else "asked" (a step asked for it in this round and nothing of it
+    came: no action drafted, the draft not written; "drafting" while its step's job runs: ``PrmService._chain``);
+    else "todo", with the uncertain draft of an earlier round if there is one (to be checked before a new one
+    runs: ``_opened_before``)."""
+    states = [(platform_state(p), p) for p in packets]
+    for want, state in (("verified", "opened"), ("running", "running")):
+        hit = next((p for s, p in states if s == want), None)
+        if hit is not None:
+            return state, hit
+    hit = next((p for p in packets if p["status"] == PENDING), None)
+    if hit is not None:
+        return "waiting", hit
+    for s, p in states:
+        if float(p["created_at"]) <= since:
+            continue                                   # (a draft of the signature's own time is of the one before)
+        if p["status"] == DROPPED:
+            return "dropped", p
+        if s in ("not_done", "uncertain"):
+            return s, p
+    if asked:
+        return "asked", None
+    return "todo", next((p for s, p in states if s == "uncertain"), None)
+
+
+def _ids(rows: list, limit: int, packet: bool = False) -> str:
+    """Products for a person: the first ``limit`` ids (with their draft, ``packet``), then how many more."""
+    shown = [f"{r['id']}（#{r['packet']['id']}）" if packet and r.get("packet") else r["id"] for r in rows[:limit]]
+    return "、".join(shown) + (f" 等 {len(rows)} 个" if len(rows) > limit else "")
+
+
+def chain_note(progress: dict, after: dict, *, delivered: bool) -> str:
+    """What a 专属佣金 step's draft is told (``meta.system_note``) by a bot that keeps the chain's record
+    (``PrmService._chain``): what happened just now (``after``: the sample order, or the 专属佣金 draft opened,
+    dropped, red), the one product to fill now (``progress["next"]``; none: the round is done, only the case
+    file is updated), and where every product of the order stands, last (the bot's record: a 专场's long list
+    never pushes the instruction out)."""
+    order = progress["order"]
+    shop, name, items = progress["shop"], progress["action"], progress["items"]
+    what = f"{platforms.PLATFORMS[shop]}的商品，共 {len(items)} 个，清单在最后"
+    theirs = (after.get("platform") or {}).get("action") or {}
+    head = ""
+    if after["id"] == order["id"]:
+        head = (f"达人已经签收了寄样单 {progress['number']}（{what}）。" if delivered else
+                f"寄样单 {progress['number']} 已经在聚水潭建好，寄的是{what}。")
+    elif theirs.get("action") == name:
+        item, state = str(theirs.get("item_id") or ""), platform_state(after)
+        outcome = ((after.get("platform") or {}).get("execution") or {}).get("outcome") or ""
+        if state == "verified":
+            head = (f"商品 {item} 的专属佣金（{theirs.get('commission_rate')}%）已经在平台上开好了"
+                    f"（达人 {theirs.get('creator_platform_id')}）。")
+        elif after["status"] == DROPPED:
+            head = f"商品 {item} 这一轮不开专属佣金了（运营点了「不发」）。"
+        elif state == "uncertain":
+            head = f"商品 {item} 的专属佣金结果不确定（#{after['id']} {outcome}），运营会先到平台后台核对，这一轮先跳过它。"
+        elif state == "not_done":
+            head = (f"商品 {item} 的专属佣金没开成（#{after['id']} {outcome}：{platforms.outcome_text(outcome)}），"
+                    "这一轮先跳过它。")
+    if not head:
+        head = f"接着开寄样单 {progress['number']} 的专属佣金（{what}）。"
+    who = f"聚水潭建单时查到达人的抖音 UID 是 {progress['uid']}，creator_platform_id 就填它。" if progress["uid"] else ""
+    item = progress["next"]
+    if item:
+        rest = sum(1 for i in items if i["state"] == "todo" and i["id"] != item)
+        earlier = next((i["packet"] for i in items if i["id"] == item), None)
+        todo = (f"按 kb/合作政策.md 的「开专属佣金」：这一份草稿只填商品 {item} 的 {name}（一次一个商品，开过的不要再开），"
+                + (f"这一轮这之后还要开 {rest} 个。" if rest else "这是这一轮最后一个要开的商品。")
+                + (f"它上次在 #{earlier['id']} 的结果不确定，批准前运营会先到平台后台核对。" if earlier else ""))
+    else:
+        todo = "这一轮没有要开的商品了：这一份不要填平台动作，按 kb/合作政策.md 的「开专属佣金」把进度记进案卷。"
+    told = []
+    for state, label in CHAIN_STATES:
+        rows = [i for i in items if i["state"] == state]
+        if rows:
+            told.append(f"{label}：" + "、".join(
+                f"{r['id']}（#{r['packet']['id']}）" if state in ("not_done", "uncertain") and r.get("packet") else r["id"]
+                for r in rows))
+    return (head + who + todo + "机器人的记录（以它为准，记进案卷；寄样单上的商品按顺序）：" + "；".join(told) + "。")
+
+
+def chain_notice_text(progress: dict, hint: str, moved_on: bool = False) -> str:
+    """The deal's ``chain`` notice: how many of the order's products are open and what holds up or is left, the
+    first few ids of each (``CHAIN_LIST``), and ``hint`` (how to ask again for those not opened) once nothing is
+    under way.  "" when every product is open, or nothing is under way, left to ask for, asked for with nothing
+    drafted or red and not marked dealt with; ``moved_on`` (the deal is past the sample): only under way and red."""
+    items = progress["items"]
+    by = {state: [i for i in items if i["state"] == state] for state, _ in CHAIN_STATES}
+    if len(by["opened"]) == len(items):
+        return ""
+    red = [i for i in by["not_done"] + by["uncertain"] if not ((i["packet"] or {}).get("platform") or {}).get("acked_at")]
+    if not (progress["busy"] or red or (not moved_on and (by["todo"] or by["asked"]))):
+        return ""
+    for limit in (CHAIN_LIST, 1, 0):
+        parts = [f"开好 {len(by['opened'])}/{len(items)} 个"]
+        if by["running"]:
+            parts.append(f"正在执行 {_ids(by['running'], limit, True)}")
+        if by["waiting"]:
+            blocked = any(((i["packet"].get("platform") or {}).get("preview") or {}).get("verdict") not in (None, "ready")
+                          for i in by["waiting"] if i.get("packet"))
+            parts.append(f"在待审批 {_ids(by['waiting'], limit, True)}"
+                         + ("：预览没通过，可以「重新预览」，或者点「不发」跳过它，系统接着开下一个" if blocked else ""))
+        drafting = progress.get("drafting")
+        if progress["busy"] == "drafting" and drafting:
+            parts.append("正在起草" + (f" {drafting['item']}" if drafting["item"] else "") + f"（任务 #{drafting['job']}）")
+        if progress["busy"] == "owed":
+            parts.append("这一步欠着")
+        if by["dropped"]:
+            parts.append(f"这一轮不开 {_ids(by['dropped'], limit)}（运营点了「不发」）")
+        if by["not_done"]:
+            parts.append(f"没开成 {_ids(by['not_done'], limit, True)}")
+        if by["uncertain"]:
+            parts.append(f"结果不确定 {_ids(by['uncertain'], limit, True)}，先到平台后台核对")
+        if by["asked"]:
+            parts.append(f"派过、草稿没开 {_ids(by['asked'], limit)}")
+        if by["todo"]:
+            parts.append(f"还没开 {_ids(by['todo'], limit)}")
+        text = f"专属佣金（寄样单 {progress['number']}）：" + "；".join(parts)
+        if not progress["busy"]:
+            text += f"。{hint}"
+        if len(text) <= NOTICE_CHARS or limit == 0:
+            return text
+    return text
 
 
 def _order_at(order: dict) -> float:

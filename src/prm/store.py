@@ -874,10 +874,10 @@ class PrmStore:
             self._conn.commit()
             return int(cur.lastrowid)
 
-    def events(self, deal_id: Optional[int] = None, limit: int = 50, kinds: tuple = (),
+    def events(self, deal_id: Optional[int] = None, limit: Optional[int] = 50, kinds: tuple = (),
                since: Optional[float] = None) -> list[dict]:
         """The newest events first (of these ``kinds`` only, when given; recorded at ``since`` or later,
-        when given)."""
+        when given; all of them when ``limit`` is None)."""
         sql, where, args = "SELECT * FROM deal_events", [], []
         if deal_id is not None:
             where.append("deal_id = ?")
@@ -890,8 +890,12 @@ class PrmStore:
             args += list(kinds)
         if where:
             sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            args.append(int(limit))
         with self._lock:
-            rows = self._conn.execute(sql + " ORDER BY id DESC LIMIT ?", (*args, int(limit))).fetchall()
+            rows = self._conn.execute(sql, args).fetchall()
         return [event_view(dict(r)) for r in rows]
 
     def backlog(self, deal_id: int) -> list[dict]:

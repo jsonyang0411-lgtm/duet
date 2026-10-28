@@ -11,11 +11,12 @@ import pytest
 from test_prm import CREATOR, Bot, Clock, draft
 
 from platform_fakes import (
-    DY_ITEM, DY_ITEM2, DY_ITEM3, DY_LINK, DY_SKU, DY_SKU2, DY_UID, JST_ORDER, TB_ITEM, XHS_BUYER, XHS_ITEM,
+    DY_ITEM, DY_ITEM2, DY_ITEM3, DY_LINK, DY_SKU, DY_SKU2, DY_SKU3, DY_UID, JST_ORDER, TB_ITEM, XHS_BUYER, XHS_ITEM,
 )
 from src.prm import platforms
 from src.prm.result import DraftError, parse_draft
-from src.prm.service import APPROVED_EXPIRE_SEC, PLATFORM_LOST_GRACE_SEC, SETTLE_SEC, apply_deal_action, event_out
+from src.prm.service import (APPROVED_EXPIRE_SEC, PLATFORM_LOST_GRACE_SEC, RESTART_HINT, SETTLE_SEC,
+                             apply_deal_action, event_out)
 from src.relay.service import LOST_AFTER_SEC
 
 DESIGNATED = {"action": "dy.designated_commission", "item_id": DY_ITEM, "creator_platform_id": DY_UID,
@@ -760,7 +761,8 @@ def test_signed_for_while_the_bot_was_stopped_is_asked_for_once_it_runs(bot, clo
     assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": "delivered"})["ok"]   # marked again
     assert len(system_jobs(bot)) == 1
     [asked] = bot.prm.store.events(order["deal_id"], kinds=("next_step",))
-    assert event_out(asked)["name"] == f"派开专属佣金的任务 #{step['id']}" and asked["detail"]["after"] == order["id"]
+    assert event_out(asked)["name"] == f"派开专属佣金的任务 #{step['id']}（商品 {DY_ITEM}）"
+    assert asked["detail"]["after"] == order["id"] and asked["detail"]["item"] == DY_ITEM
 
 
 def test_signed_for_while_stopped_during_a_takeover_is_owed_until_it_ends(bot, clock):
@@ -879,7 +881,7 @@ def test_a_douyin_order_tells_the_commission_draft_the_uid_it_found(bot, clock):
     bot.prm.send_approved()
     assert bot.prm.deal_action("stage", {"deal_id": packet["deal_id"], "stage": "delivered"})["ok"]
     note = bot.worker_takes()["meta"]["system_note"]
-    assert "抖音 UID 是 5100000000000099" in note and "第一个还没开的商品" in note   # the draft may know only the 抖音号
+    assert "抖音 UID 是 5100000000000099" in note and f"这一份草稿只填商品 {DY_ITEM}" in note   # it may know only the 抖音号
 
 
 def test_signed_for_again_after_a_step_back_picks_up_what_is_left(bot, clock):
@@ -953,6 +955,184 @@ def test_a_two_product_order_opens_each_commission_in_turn_and_only_the_last_one
     assert bot.worker_takes() is None and bot.texts == told + [(order["chat_id"], last)]
     assert sorted(p["platform"]["action"]["item_id"] for p in bot.prm.store.deal_packets(
         order["deal_id"], tools=("dy.designated_commission",), statuses=("sent",))) == [DY_ITEM, DY_ITEM2]
+
+
+# ── the bot keeps the chain's record (mac review F5) ─────────────────────
+# Before, only the Mac's case file knew which products were open: a product whose 专属佣金 could not
+# be opened stopped the ones after it, and 运输中 → 已签收 started from that same product again.
+
+THREE = {**TWO, "items": [*TWO["items"], {"item_id": DY_ITEM3, "skus": [{"sku_id": DY_SKU3, "qty": 1}]}]}
+
+
+def three_signed_for(b, clock):
+    """A three-product sample order made, verified, and signed for: its first step is asked for."""
+    order = drafted(b, preview=block(THREE, run={"steps": ["create"]}), reply="寄样单建好啦")
+    b.prm.store.token_for(order["party_id"], "phone", "手机", "13900001111", clock.now)
+    mac_runs(b, approve(b, order), record(sample_order_no=JST_ORDER, creator_uid=DY_UID))
+    b.prm.send_approved()
+    assert b.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": "delivered"})["ok"]
+    return order
+
+
+def step_drafts(b, item, verdict="ready", reply=""):
+    """The Mac takes the step job and drafts the 专属佣金 of ``item``: (the job, its draft)."""
+    job = b.worker_takes()
+    assert job is not None and "system_note" in job["meta"]
+    b.finish(job["id"], {**draft(message_kind="money", reply_draft=reply, slots={}),
+                         "platform": block({**DESIGNATED, "item_id": item}, verdict=verdict)})
+    return job, b.prm.store.packet_for_job(job["id"])
+
+
+def chain_attention(b):
+    return next((n["text"] for n in b.prm.store.deal(1)["notices"] if n["key"] == "chain"), "")
+
+
+@pytest.mark.parametrize("how, label", [
+    ("dropped", "这一轮不开（运营点了「不发」）："), ("not-run", "没开成："),
+    ("uncertain", "结果不确定（运营会先到平台后台核对）："), ("refused", "没开成："),
+], ids=["dropped", "mac-never-took-it", "uncertain", "refused"])
+def test_a_product_that_cannot_be_opened_does_not_hold_up_the_next(bot, clock, how, label):
+    """Its preview never passed and the operator dropped it, the Mac never took the execution (NOT_RUN after 30
+    minutes), the result is uncertain, the platform refused it: that product is skipped for this round, the next
+    one is asked for, and the system note says which is which (the bot's record, not the case file's)."""
+    three_signed_for(bot, clock)
+    job, first = step_drafts(bot, DY_ITEM, verdict="blocked" if how == "dropped" else "ready")
+    assert f"这一份草稿只填商品 {DY_ITEM} 的 dy.designated_commission" in job["meta"]["system_note"]
+    assert "这一轮这之后还要开 2 个" in job["meta"]["system_note"]
+    if how == "dropped":
+        assert f"在待审批 {DY_ITEM}（#{first['id']}）：预览没通过，可以「重新预览」，或者点「不发」跳过它" in chain_attention(bot)
+        assert bot.prm.decide(first["id"], "drop")["ok"]
+    elif how == "not-run":
+        approve(bot, first)
+        clock.now += APPROVED_EXPIRE_SEC + 1
+        bot.prm.sweep_executing()
+    else:
+        mac_runs(bot, approve(bot, first), record("UNKNOWN" if how == "uncertain" else "FAILED"))
+    second = bot.worker_takes()
+    note = second["meta"]["system_note"]
+    assert f"这一份草稿只填商品 {DY_ITEM2} 的" in note and "这一轮这之后还要开 1 个" in note
+    assert label + DY_ITEM in note and f"还没开：{DY_ITEM2}、{DY_ITEM3}" in note
+    assert note.index("这一份草稿只填") < note.index("机器人的记录")                # what to do first, the list last
+    for item, job in ((DY_ITEM2, second), (DY_ITEM3, None)):
+        if job is None:
+            job = bot.worker_takes()
+            assert f"这一份草稿只填商品 {item} 的" in job["meta"]["system_note"] and "最后一个要开的商品" in job["meta"]["system_note"]
+        bot.finish(job["id"], {**draft(message_kind="money", reply_draft="", slots={}),
+                               "platform": block({**DESIGNATED, "item_id": item})})
+        mac_runs(bot, approve(bot, bot.prm.store.packet_for_job(job["id"])), record())
+        bot.prm.send_approved()
+    final = bot.worker_takes()                                              # the round is done: the case file hears it
+    note = final["meta"]["system_note"]
+    assert "这一轮没有要开的商品了：这一份不要填平台动作" in note and f"已开好：{DY_ITEM2}、{DY_ITEM3}" in note
+    bot.finish(final["id"], draft(message_kind="other", reply_draft="", slots={}))
+    assert bot.worker_takes() is None
+    attention = bot.prm.store.deal(1)["attention"]
+    if how == "dropped":                                                    # a person's decision: nothing to say
+        assert chain_attention(bot) == ""
+    else:                                                                   # red: said until 「我已处理」
+        assert f"专属佣金（寄样单 {JST_ORDER}）：开好 2/3 个" in attention and RESTART_HINT in attention
+        assert bot.prm.decide(first["id"], "ack")["ok"] and chain_attention(bot) == ""
+
+
+def test_the_deal_says_where_the_chain_stands(bot, clock):
+    """The deal's notice follows the chain: what is drafted now, what is open, what is left; gone once all are open."""
+    three_signed_for(bot, clock)
+    [job] = system_jobs(bot)
+    assert chain_attention(bot) == (f"专属佣金（寄样单 {JST_ORDER}）：开好 0/3 个；正在起草 {DY_ITEM}（任务 #{job['id']}）；"
+                                    f"还没开 {DY_ITEM2}、{DY_ITEM3}")
+    for item in (DY_ITEM, DY_ITEM2, DY_ITEM3):
+        _, step = step_drafts(bot, item)
+        assert f"在待审批 {item}（#{step['id']}）" in chain_attention(bot)
+        mac_runs(bot, approve(bot, step), record())
+        bot.prm.send_approved()
+    assert chain_attention(bot) == ""                                       # all three open
+
+
+def test_signed_for_again_asks_again_only_for_what_is_not_open(bot, clock):
+    """kb 2.1: 运输中 → 已签收 starts a new round: the product dropped in the last one is asked for again, the open
+    ones never are; one product of the round, its note says it is the last."""
+    three_signed_for(bot, clock)
+    _, first = step_drafts(bot, DY_ITEM)
+    assert bot.prm.decide(first["id"], "drop")["ok"]
+    for item in (DY_ITEM2, DY_ITEM3):
+        _, step = step_drafts(bot, item)
+        mac_runs(bot, approve(bot, step), record())
+        bot.prm.send_approved()
+    bot.finish(bot.worker_takes()["id"], draft(message_kind="other", reply_draft="", slots={}))
+    assert bot.worker_takes() is None
+    for stage in ("transit", "delivered"):
+        assert bot.prm.deal_action("stage", {"deal_id": 1, "stage": stage})["ok"]
+    again = bot.worker_takes()
+    note = again["meta"]["system_note"]
+    assert note.startswith(f"达人已经签收了寄样单 {JST_ORDER}") and f"这一份草稿只填商品 {DY_ITEM} 的" in note
+    assert "这是这一轮最后一个要开的商品" in note and f"已开好：{DY_ITEM2}、{DY_ITEM3}" in note
+    bot.finish(again["id"], {**draft(message_kind="money", reply_draft="三款都开好啦", slots={}),
+                             "platform": block({**DESIGNATED, "item_id": DY_ITEM})})
+    mac_runs(bot, approve(bot, bot.prm.store.packet_for_job(again["id"])), record())
+    bot.prm.send_approved()
+    final = bot.worker_takes()
+    assert "这一轮没有要开的商品了" in final["meta"]["system_note"]
+    bot.finish(final["id"], draft(message_kind="other", reply_draft="", slots={}))
+    assert bot.worker_takes() is None and chain_attention(bot) == ""
+    opened = [p["platform"]["action"]["item_id"] for p in bot.prm.store.deal_packets(1, tools=("dy.designated_commission",))
+              if p["status"] == "sent"]
+    assert sorted(opened) == [DY_ITEM, DY_ITEM2, DY_ITEM3]                    # each once
+
+
+def test_an_uncertain_product_asked_again_is_not_opened_before_it_is_checked(bot, clock):
+    """The product whose result was uncertain is asked for again in the next round (its note says so), and its
+    draft waits for the operator's check like any second one (mac review F6)."""
+    three_signed_for(bot, clock)
+    _, first = step_drafts(bot, DY_ITEM)
+    mac_runs(bot, approve(bot, first), record("ACCEPTED_UNVERIFIED"))
+    for item in (DY_ITEM2, DY_ITEM3):
+        _, step = step_drafts(bot, item)
+        mac_runs(bot, approve(bot, step), record())
+        bot.prm.send_approved()
+    bot.finish(bot.worker_takes()["id"], draft(message_kind="other", reply_draft="", slots={}))
+    for stage in ("transit", "delivered"):
+        assert bot.prm.deal_action("stage", {"deal_id": 1, "stage": stage})["ok"]
+    again, second = step_drafts(bot, DY_ITEM)
+    assert f"它上次在 #{first['id']} 的结果不确定" in again["meta"]["system_note"]
+    jobs = len(bot.relay.store.list_jobs(100))
+    out = bot.prm.decide(second["id"], "execute")
+    assert not out["ok"] and "结果不确定" in out["error"] and len(bot.relay.store.list_jobs(100)) == jobs
+
+
+def test_each_product_is_asked_for_once_a_round(bot, clock):
+    """A step whose draft opens nothing (no action: the Mac thought it done, or could not fill it) moves the chain on;
+    that product is not asked for again in this round (no loop), and the deal says what was left, until the deal
+    moves on past the sample."""
+    three_signed_for(bot, clock)
+    for item in (DY_ITEM, DY_ITEM2, DY_ITEM3):
+        job = bot.worker_takes()
+        assert f"这一份草稿只填商品 {item} 的" in job["meta"]["system_note"]
+        bot.finish(job["id"], draft(message_kind="other", reply_draft="", slots={}))
+    assert bot.worker_takes() is None and len(system_jobs(bot)) == 3
+    assert f"派过、草稿没开 {DY_ITEM}、{DY_ITEM2}、{DY_ITEM3}。{RESTART_HINT}" in chain_attention(bot)
+    bot.prm.tick()
+    assert len(system_jobs(bot)) == 3
+    assert bot.prm.deal_action("stage", {"deal_id": 1, "stage": "brief"})["ok"]   # 素材已发: moved on
+    assert chain_attention(bot) == ""
+
+
+def test_a_long_order_keeps_the_notice_short_and_the_instruction_first(bot, clock):
+    """A 专场 order of many products: the deal's notice counts what it cannot name, the note still starts with
+    what to do."""
+    many = [str(30000000000000000000000000000000 + i) for i in range(50)]     # 50 products of 32-digit ids
+    order = {**THREE, "items": [{"item_id": i, "skus": [{"sku_id": str(31000000000000000000000000000000 + n), "qty": 1}]}
+                                for n, i in enumerate(many)]}
+    action = platforms.check_action(order, limits=platforms.FORM_LIMITS)
+    packet = drafted(bot, preview={**block(THREE, run={"steps": ["create"]}), "action": action}, reply="寄样单建好啦")
+    bot.prm.store.token_for(packet["party_id"], "phone", "手机", "13900001111", clock.now)
+    mac_runs(bot, approve(bot, packet), record(sample_order_no=JST_ORDER))
+    bot.prm.send_approved()
+    assert bot.prm.deal_action("stage", {"deal_id": 1, "stage": "delivered"})["ok"]
+    [job] = system_jobs(bot)
+    note = json.loads(job["meta"])["system_note"]
+    assert note.index(f"这一份草稿只填商品 {many[0]}") < 200 and len(note) < 4000 and many[-1] in note
+    text = chain_attention(bot)
+    assert len(text) <= 300 and "等 49 个" in text and text.startswith(f"专属佣金（寄样单 {JST_ORDER}）：开好 0/50 个")
 
 
 @pytest.mark.parametrize("with_action", [False, True], ids=["reply-only", "with-action"])
@@ -1075,7 +1255,7 @@ def test_a_commission_opened_once_is_not_opened_again(bot, clock):
     assert not out["ok"]
     assert f"#{first['id']}（{date_of(first['sent_at'])}）" in out["error"] and DY_ITEM in out["error"]
     assert "开过了" in out["error"]
-    assert out["error"].endswith("点「不发」；要接着开下一个商品，把物流改回「运输中」再标「已签收」")
+    assert out["error"].endswith("点「不发」就行（寄样单的专属佣金：系统会接着开还没开的商品）")
     assert bot.prm.store.packet(again["id"])["status"] == "pending"
     assert len(bot.relay.store.list_jobs(100)) == jobs                      # nothing goes to the Mac
     assert bot.prm.decide(again["id"], "drop")["ok"]
@@ -1083,8 +1263,8 @@ def test_a_commission_opened_once_is_not_opened_again(bot, clock):
 
 def test_picking_the_chain_up_again_while_a_step_runs_does_not_open_it_twice(bot, clock):
     """The operator sets the deal back to 运输中 and 已签收 while the 专属佣金 step is still running on
-    the Mac: the step is asked for again, and the Mac drafts the same product (its case file does
-    not know yet)."""
+    the Mac: the bot knows that product is running and asks for nothing more meanwhile; a draft of the
+    same product that comes anyway (a reply carrying it) is refused while it runs and after it opened."""
     order = ordered(bot, clock)
     mac_runs(bot, approve(bot, order), record(sample_order_no=JST_ORDER))
     bot.prm.send_approved()
@@ -1096,9 +1276,9 @@ def test_picking_the_chain_up_again_while_a_step_runs_does_not_open_it_twice(bot
     bot.relay.next_job(0, ("prm",))                                         # the Mac is on it
     for stage in ("transit", "delivered"):
         assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": stage})["ok"]
-    again = bot.worker_takes()
-    bot.finish(again["id"], {**draft(message_kind="money", reply_draft="", slots={}), "platform": block()})
-    second = bot.prm.store.packet_for_job(again["id"])
+    assert len(system_jobs(bot)) == 1                                       # nothing asked while it runs
+    assert "正在执行 3000000000000000101" in bot.prm.store.deal(order["deal_id"])["attention"]
+    second = drafted(bot, reply="")                                         # the same product, from a reply
     assert second["status"] == "pending" and bot.prm.store.packet(first["id"])["status"] == "executing"
     out = bot.prm.decide(second["id"], "execute")
     approved_at = bot.prm.store.packet(first["id"])["platform"]["approved_at"]

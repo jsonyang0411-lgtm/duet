@@ -13,7 +13,7 @@ import sqlite3
 import pytest
 
 from test_prm import CREATOR, Bot, Clock, draft
-from test_prm_platform_flow import JST_ORDER, approve, block, mac_runs, ordered, record
+from test_prm_platform_flow import DY_ITEM, JST_ORDER, approve, block, mac_runs, ordered, record
 
 from src.prm.service import event_out
 from src.prm.store import PrmStore
@@ -249,7 +249,8 @@ def test_a_step_owed_during_a_takeover_is_asked_for_when_it_runs_out(bot, clock)
     bot.prm.tick()
     [step] = step_jobs(bot)
     meta = json.loads(step["meta"])
-    assert "达人已经签收了寄样单" in meta["system_note"] and meta["step"] == {"packet": order["id"], "delivered": True}
+    assert "达人已经签收了寄样单" in meta["system_note"]
+    assert meta["step"] == {"packet": order["id"], "delivered": True, "item": DY_ITEM}
     assert "该开专属佣金了" not in attention(bot)
     bot.prm.tick()
     assert len(step_jobs(bot)) == 1                                         # asked once
