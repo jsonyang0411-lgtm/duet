@@ -490,8 +490,10 @@ class WcdbBackend(AbstractWeChatBackend):
         self._gap_back_at = 0.0
         self._gap_read_at: dict[str, float] = {}
         self._gap_looked: dict[str, set] = {}
-        # Thread safety: WCDB DLL (ctypes) may not be thread-safe internally.
-        # All _client calls are serialized through this lock.
+        # Thread safety: the WCDB DLL (ctypes) may not be thread-safe internally.  The client itself
+        # serializes every call into it, from any thread (wcdb_client._DLL_LOCK: the poll loop, the
+        # new-friend scan, a re-initialisation's close and open).  This lock is held around the poll
+        # loop's reads and every with_client call, so another reader gets one call in at a time.
         self._client_lock = threading.Lock()
         # WeChat window automation (sending, screenshots) takes seconds and
         # must not interleave, but it never touches the DLL: it has its own

@@ -195,6 +195,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `CLOCK_SAMPLE_SEC` / `CLOCK_SAMPLES` / `CLOCK_NOISE_SEC` / `CLOCK_SKEW_SEC` | `int` | `120` / `3` / `60` / `300` | `src/prm/service.py` | 这台电脑的钟和微信的差（win review F6）：机器人这次运行发的一句话在登记后这么多秒内读回来，才拿来测（`_clock_sample`：读到的时间（本机）减微信里写的时间）/ 取最近这么多次里最小的（读回晚了只会多，钟改对了马上算数）/ 差不到这么多秒算读回的误差、不校正 / 差这么多秒以上，每张在用的合作单写「这台电脑的时间比微信快 / 慢 …」（`clock_note`）|
 | `READ_BACK_SEC` / `READ_BACK_ROWS` | `int` / `int` | `1800` / `500` | `src/prm/service.py` | `_match_own`：这个号在达人私聊里的一行处理过以后，这么多秒内（每个聊天最多记这么多行）同一行（`_row_key`：同一个消息编号）又交来，不是新的一句，不再确认、不记运营的话、不接管；只认同一行，别的行里一模一样的字照样比对（对不上就是运营亲手打的，win review F4 (a)：以前 120 秒内同样的字一律当读回，运营照着机器人打的「好的」不接管） |
 | `MAX_CONSECUTIVE_ERRORS` | `int` | `5` | `src/wechat/wcdb_backend.py` | 连续错误触发重初始化阈值 |
+| `_DLL_LOCK` | `threading.RLock` | — | `src/wechat/wcdb_client.py` | 进 `wcdb_api.dll` 的每一次调用都拿它（`init` / `open` / `_call_json` / `get_voice_data` / 关库，任何线程、任何客户端对象；win review F11）：DLL 不一定线程安全，轮询之外新好友扫描也在自己的线程里读库，重开数据库时新旧两个客户端用的是同一个 DLL；可重入（`open` 里用 `get_sessions` 试密钥，`resolve_nickname` 调 `get_display_names`） |
 | `UNKNOWN_NAME` / `NAMESAKE` / `SendRefused` / `_name_key(name)` | `str` / `str` / 类 / 函数 | 「机器人不知道这个聊天在微信里叫什么，没法在微信里找到它，没有发。请手动发」/ 「和另一个聊天同名（都叫「{name}」），机器人没法确定发给谁，没有发：请手动发，或者在微信里给对方设一个不重复的备注（改好后重启 Windows 上的机器人）」/ `SendRefused(reason)`：假值（`bool()` 是 `False`，调用方照旧按真假判断发没发成），`reason`、`str()` 是原因 / 去掉空白、`casefold()` | `src/wechat/wcdb_backend.py` | `_window_target` 拒绝用窗口时的原因（发送、回复、截图都不做；微信边缘把 `reason` 写进 `send_result` 的 `error`，Mac 在草稿上显示）/ 比较两个聊天名是不是同名（`_add_talker`、`_namesake`、OCR 的 `_group_for_title`） |
 | `SESSION_REFRESH_SEC` / `OCR_SENDER` | `float` / `str` | `60.0` / `"OCR群友"` | `src/wechat/wcdb_backend.py` | 新私聊会话多久查一次（`_refresh_private_chats_if_due`）/ OCR 读到的消息的发言人（认不出是谁） |
 | `CATCH_UP_WAIT_SEC` / `_PRIVATE_NAMES_LOCK` | `float` / `threading.Lock` | `600.0` / — | `src/wechat/wcdb_backend.py` | `catch_up_chat` 要的聊天这么久还读不到就放弃（记 warning）/ `data/private_chat_names.json` 由轮询循环和新好友扫描两边写，写的时候拿这把锁 |
@@ -372,7 +373,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `_save_group_members(chat_members)` | 持久化群成员列表(静态) | `chat_members: dict` | `None` |
 | `set_private_filter(accept)` / `refresh_private_chats_soon()` / `_wants_private(username)` | PRM / 微信边缘：`accept(username)` 为真的私聊（登记 / 名单里的达人）不管 `PRIVATE_CHATS` 都读（自定义号也认，跳过「和机器人同名」的检查；仍要 `PRIVATE_CHAT_ENABLED=true`，也仍要能解析出显示名，发送靠它找窗口；和别的聊天同名也照读，只是不发，见 `_window_target`）；`_resolve_groups` 和 `_refresh_private_chats_if_due` 都问它，出错当作不读；登记以后 `refresh_private_chats_soon` 把 `_last_session_refresh` 清零，下一轮轮询就刷新会话（刷新时也清空 `_tracked`，换过滤器时同样） | `accept: Callable[[str], bool] \| None` / — / `username: str` | `None` / `None` / `bool` |
 | `own_wxid()` / `db_readable()` / `wechat_window_found()` / `_special_info(content, local_type)` | 给微信边缘（PRM_EDGE）用：账号自己的 wxid；数据库连续读失败少于 3 次（`_db_failures`，轮询循环里记）；微信主窗口在不在（`find_hwnd(wake=False)`，发送占着窗口时不问、返回 None）；标准化消息多一个 `special`：链接、小程序、聊天记录、转账、红包（appmsg 的 `type`、`title`，有 `url` 时也带上，2026-10-28）、名片（`nickname`）、位置（`poiname` / `label`）、系统消息（文字，撤回时取 `replacemsg`，没有就取 `revokemsg` 的 `content`：微信 4.1 原地改写的撤回，2026-10-28 真机，以前会把 `revoketime` 的「0」也拼进去），其他是 `{}` | — / — / — / `content: str, local_type: int` | `str` / `bool` / `bool \| None` / `dict` |
-| `with_client(fn)` / `recent_sessions(max_age)` | 轮询之外读数据库的人（新好友扫描，§2.37）用：持 `_client_lock` 调 `fn(client)`（一次一个调用，轮询最多等这一个调用）；数据库没打开时返回 None / 轮询循环最近一次读到的会话列表（`_refresh_private_chats_if_due`、`_resolve_groups` 记在 `_sessions_read`），不超过 `max_age` 秒才给，否则 None | `fn: Callable[[client], T]` / `max_age: float` | `T \| None` / `list \| None` |
+| `with_client(fn)` / `recent_sessions(max_age)` | 轮询之外读数据库的人（新好友扫描，§2.37）用：持 `_client_lock` 调 `fn(client)`（一次一个调用，轮询最多等这一个调用；进 DLL 的那一下另由客户端的 `_DLL_LOCK` 和所有线程串行）；数据库没打开时返回 None / 轮询循环最近一次读到的会话列表（`_refresh_private_chats_if_due`、`_resolve_groups` 记在 `_sessions_read`），不超过 `max_age` 秒才给，否则 None | `fn: Callable[[client], T]` / `max_age: float` | `T \| None` / `list \| None` |
 | `note_private_name(wxid, name)` | 新好友的名字：客户端 `remember_nickname`（之前没查到、缓存成 wxid 的换成名字，轮询才找得到她的私聊），记进 `_session_names`（发给别的同名聊天时会被拒）；有过滤器（`PRM_COPILOT` / `PRM_EDGE`）时写进 `data/private_chat_names.json`（控制台和 Mac 的私聊列表、发送时按名字找窗口） | `wxid: str, name: str` | `None` |
 | `catch_up_chat(talker, name, since, sink)` / `_admit_catch_up_chats()` / `_catch_up_new_friend(group_name, talker, request)` | 副驾驶登记了新好友（`NewFriendService.registered`）：请求记在 `_catch_up_requests`（`_catch_up_lock`），`_last_session_refresh` 清零 / 每轮开头：还没在读的聊天按给的名字 `_add_talker`（和别的聊天同名也加；没给名字的等会话刷新把它加进来，`CATCH_UP_WAIT_SEC` 后放弃）/ 这个聊天的 `_poll_group` 一开始：往回读 `CATCHUP_READ` 条（读失败把请求放回去再抛），全部记进 `_known_set`（第一次读的补交规则不再跑，什么都不会交第二次；最近的普通行也记进 `_recallable`），挑出 `since` 以后、对方说的（不是这个号的、不是微信的系统行 `edge.text.is_notice`（10000 / 10002、拍一拍）、不是好友提示 `is_friend_notice`），先 `MessageStore.insert_message`（重启后的补交认它们处理过了），登记达人私聊就 `_note_read`，再 `sink(挑出的)`（不经过路由：她的消息可能早就入库、persist 会当重复挡掉）；sink 出错只记日志 | `talker: str, name: str, since: float, sink: Callable[[list[dict]], object]` / — / `group_name, talker, request: tuple` | `None` |
 | `set_own_message_hook(hook)` / `_tell_own_message(standardized)` | PRM / 微信边缘：`_poll_group` 遇到自己（`myWxid`）发的消息，跳过之前先交给 `hook`，只限过滤器要的私聊（登记 / 名单里的达人；群聊和别的私聊不给）；`hook` 出错只记日志，轮询照常；这些消息照旧不进路由 | `hook: Callable[[dict], None] \| None` / `standardized: dict` | `None` |
@@ -411,7 +412,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 
 发送队列（`SEND_QUEUE=on`）：`__init__` 建 `SendQueue(typing=…, alive=lambda: self._running)`；`start()` 经 `_start_workers()` 建线程池（有队列时打字延迟也只要 4 个线程）并启动它，主循环结束时停止队列（最多等 15 秒，让正在发的一条把焦点和剪贴板还回去）；`stop()` 停止并丢弃没发的回复；`_handle_message` 改为 `submit(..., on_done=_log_delivery)` 后立即返回，交不出去就记 "Reply FAILED"。中转图片的截图仍在工作线程里，开着安静发送时仍可能等用户停手。
 
-锁：`_client_lock` 只串行 WCDB DLL 读取（轮询）；`_window_lock` 串行微信窗口自动化（发送回复、`send_text` / `send_file`、聊天区截图、好友管理）。窗口操作要几秒，两把锁分开后，发送期间消息轮询不再被阻塞。
+锁：进 WCDB DLL 的每一次调用由客户端自己的 `wcdb_client._DLL_LOCK` 串行（任何线程：轮询、新好友扫描、`_reinitialize` 的关库和开库；以前 `_resolve_groups` 的会话 / 群成员 / 名字、`resolve_nickname` 没缓存时查名字、`_try_voice` 取语音数据都不拿锁，会和新好友扫描同时进 DLL，win review F11）；`_client_lock` 包着轮询的读和每个 `with_client` 调用，别的线程一次只插进一个调用；`_window_lock` 串行微信窗口自动化（发送回复、`send_text` / `send_file`、聊天区截图、好友管理）。窗口操作要几秒，两把锁分开后，发送期间消息轮询不再被阻塞。
 
 窗口控制器：`__init__` 用 `WeChatWindowController(quiet=QuietSendSettings.from_config(config))` 创建，并设 `alive=lambda: self._running`（安静发送等用户停手时，机器人停止就不再等）；`start()` 找到主窗口后调用 `describe_chat_windows(群名)`，在日志里说明哪些群有独立窗口。安静发送的等待发生在 `_window_lock` 里，其他群的回复跟着排队。
 
@@ -420,15 +421,18 @@ grep "文件名" CODEBASE_REFERENCE.md
 | 函数 | 描述 | 参数 | 返回值 |
 |---|---|---|---|
 | `__init__(dll_dir)` | 初始化 WCDB 客户端 | `dll_dir: str` | `None` |
-| `init()` | 初始化 wcdb_api.dll | 无 | `bool` |
-| `open()` | 打开加密数据库 | 无 | `bool` |
-| `close()` | 关闭数据库连接 | 无 | `None` |
+| `init()` / `_init()` | 初始化 wcdb_api.dll（加载、DRM 补丁、`InitProtection`、`wcdb_init`），整个过程持 `_DLL_LOCK` | 无 | `None` |
+| `open()` / `_open()` | 打开加密数据库：逐个试密钥，用 `get_sessions` 验证，读不出会话的关掉再试下一个；整个过程持 `_DLL_LOCK`（别的线程的调用等句柄定下来） | 无 | `bool` |
+| `close()` / `_close_handle()` | 关闭数据库连接：持 `_DLL_LOCK`，别的线程正在用这个句柄的调用先做完，关掉以后句柄是 0 | 无 | `None` |
+| `_call_json(name, *args)` | 调 DLL 里返回 JSON 字符串指针的函数 `name(handle, *args, &out)`：持 `_DLL_LOCK`，句柄在锁里读（关掉的客户端不把旧句柄交给 DLL，返回 None，和调用失败一样）；返回码不是 0 → None；空指针 → `{}` | `name: str, *args` | `dict \| list \| None` |
 | `get_sessions()` | 获取所有会话列表 | 无 | `list[dict]` |
 | `get_messages(talker, limit)` | 获取指定 talker 的消息 | `talker: str, limit: int` | `list[dict]` |
 | `get_group_members(talker)` | 获取群成员列表 | `talker: str` | `list[dict] \| None` |
-| `resolve_nickname(wxid)` | 解析 wxid → 昵称 | `wxid: str` | `str` |
+| `resolve_nickname(wxid)` | 解析 wxid → 昵称：先查缓存（不拿锁）；没有时持 `_DLL_LOCK` 再查一次缓存、调 `get_display_names`、写缓存（另一个线程的 `remember_nickname` 不会被这次没查到盖掉） | `wxid: str` | `str` |
 | `get_display_names(wxids)` | 批量解析昵称 | `wxids: list[str]` | `dict[str, str]` |
-| `remember_nickname(wxid, name)` | 别处知道的名字（新好友的「你已添加了X」或显示名）换掉缓存里没查到的（`resolve_nickname` 没查到时把 wxid 本身缓存起来，新好友在成为联系人之前被查过就一直解析不出名字）；已经有名字的不动 | `wxid: str, name: str` | `None` |
+| `remember_nickname(wxid, name)` | 别处知道的名字（新好友的「你已添加了X」或显示名）换掉缓存里没查到的（`resolve_nickname` 没查到时把 wxid 本身缓存起来，新好友在成为联系人之前被查过就一直解析不出名字）；已经有名字的不动；持 `_DLL_LOCK`（新好友扫描的线程调用） | `wxid: str, name: str` | `None` |
+
+线程：所有进 DLL 的调用（上面每个函数，含 `get_voice_data`、`get_group_members`）都持模块级的 `_DLL_LOCK`（可重入），任何线程、任何客户端对象都串行；测试 `tests/test_wcdb_backend_locking.py::DllCallsAreSerializedTests`（真的客户端接在假 DLL 上：每个调用都持锁、轮询和新好友扫描同时跑也从不两个线程同时在 DLL 里、关库等正在进行的调用做完、关掉以后不再进 DLL）。
 
 ### 2.9 `src/wechat/window_controller.py` (WeChatWindowController)
 
@@ -1299,7 +1303,8 @@ WcdbBackend.start(callback)
         （读失败：连续 MAX_CONSECUTIVE_ERRORS 次 _reinitialize()；之间按 _backoff_sec 等待，开着 OCR 时边等边看屏幕）
 
 （轮询之外：新好友扫描线程每分钟 recent_sessions() / with_client(get_sessions | get_messages | get_display_names)，
-  每次只拿 _client_lock 一个调用的时间；note_private_name() 写名字，见功能 O）
+  每次只拿 _client_lock 一个调用的时间；note_private_name() 写名字，见功能 O；
+  进 DLL 的每一下，不管哪个线程，都由 WcdbNativeClient 的 _DLL_LOCK 串行）
 ```
 
 **同名的聊天**（2026-10-28）：聊天按 chat id 读（`_chat_names`），名字只拿来在微信的搜索里找它。以前按名字记，一个群叫「小美」、登记的达人也叫「小美」（`WECHAT_GROUPS=*` 先加群），或者两位达人 / 达人和 `PRIVATE_CHATS` 里的人同名时，后来的那个私聊被 `_add_talker` 拒掉：收不到、不起草、也发不出，只有一行 WARNING。现在都照读；发送、回复和截图要按名字找窗口（`navigate_to_chat` 搜索后回车选第一条，微信 4 上核对不了打开的是谁），名字和另一个聊天一样（在读的、会话列表里的、控制台私聊名单里的，`_namesake`）就不用窗口：`send_text` / `send_file` / `_send_part` / `_send_file_part` 返回假值 `SendRefused`（原因 `NAMESAKE`），截图返回空串。PRM 把草稿标成没发出去（副驾驶的错误文字是 PRM 自己的「文字没发出去」，原因在日志里；边缘模式的 `send_result` 带上原因，Mac 显示在草稿上）。
@@ -2096,7 +2101,7 @@ CREATE TABLE friend_accepts (id INTEGER PRIMARY KEY AUTOINCREMENT, at REAL NOT N
 ```
 
 关键点：
-- 不碍着轮询：自己的线程，每个数据库调用单独拿 `_client_lock`，读之间停一下；出错只记一次 warning，下一分钟再看；数据库没打开就什么都不做。
+- 不碍着轮询：自己的线程，每个数据库调用单独拿 `_client_lock`（进 DLL 时还有客户端的 `_DLL_LOCK`，和轮询线程的每个 DLL 调用串行），读之间停一下；出错只记一次 warning，下一分钟再看；数据库没打开就什么都不做。
 - 每个 wxid 只报一次（库里有、重启也认）；起点以前加的老好友不报。机器人停着时加的好友，下次启动第一次看（读 `mark` 以后变过的会话）就报。
 - `auto_accept` 靠时间对上：机器人点「通过」的时间（本机钟）和提示的时间（微信库里的）相差在 −300…+30 秒内；OCR 读到的申请行里有她的名字时按名字对。电脑的钟和微信的时间差很多时会判成 `manual` / `unknown`（真机待验证）。
 - 延迟：通过以后 1–2 分钟内报出（会话列表最多晚 20 秒，再加一次扫描的间隔）。
