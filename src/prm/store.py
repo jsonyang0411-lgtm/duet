@@ -704,11 +704,17 @@ class PrmStore:
             self._conn.commit()
             return int(cur.lastrowid)
 
-    def events(self, deal_id: Optional[int] = None, limit: int = 50) -> list[dict]:
-        sql, args = "SELECT * FROM deal_events", []
+    def events(self, deal_id: Optional[int] = None, limit: int = 50, kinds: tuple = ()) -> list[dict]:
+        """The newest events first (of these ``kinds`` only, when given)."""
+        sql, where, args = "SELECT * FROM deal_events", [], []
         if deal_id is not None:
-            sql += " WHERE deal_id = ?"
+            where.append("deal_id = ?")
             args.append(deal_id)
+        if kinds:
+            where.append(f"kind IN ({', '.join('?' * len(kinds))})")
+            args += list(kinds)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
         with self._lock:
             rows = self._conn.execute(sql + " ORDER BY id DESC LIMIT ?", (*args, int(limit))).fetchall()
         return [event_view(dict(r)) for r in rows]

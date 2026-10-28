@@ -17,7 +17,8 @@ operators reply from this WeChat account themselves (the backend hands those lin
 instead), or from the console; paused needs the console to end it.  Meanwhile the
 creator's messages are only recorded; the next draft job is told what both sides
 said (``history``).  A draft left waiting ``PRM_HOLDING_MIN`` minutes gets one
-holding reply per round of the creator's messages.  ``PRM_RETENTION_DAYS`` after a
+holding reply per round of the creator's messages (none when she was answered in that round
+already: an operator's own line, or a reply sent after her message).  ``PRM_RETENTION_DAYS`` after a
 deal is done (delivered, or quiet that long) its receiving details are cleared everywhere (8.2, retention.py),
 the Mac's case file through a ``purge`` job.  The deal actions (stage, mode,
 shipment) are in deals.py.
@@ -657,7 +658,8 @@ class PrmService:
             return
         deal = self._store.deal_of(party["id"], now)
         text = self._mask(party["id"], f"[{_clock_text(sent_at or now)}] {message_text(msg)}", now)
-        self._store.add_event(deal["id"], party["id"], "operator_message", {"text": text},
+        # ``at``: when it was written (read late, it is still an answer to what she wrote before it)
+        self._store.add_event(deal["id"], party["id"], "operator_message", {"text": text, "at": sent_at or now},
                               actor="operator", forwarded=False, now=now)
         self._store.supersede(deal["id"], now, lane=LANE_REPLY)
         mode = deals.effective_mode(deal, now)
@@ -1567,7 +1569,9 @@ class PrmService:
     def send_holding_replies(self) -> int:
         """One holding reply per round of the creator's messages whose draft waits too long
         (the Mac's replies only: a system notice, or a next step the bot asked for (the system
-        lane: a 专属佣金 waiting for a person), answers nothing the creator asked)."""
+        lane: a 专属佣金 waiting for a person), answers nothing the creator asked).  None in a
+        round she was answered already (``_answered``: an operator's own line, or something we
+        sent, after her latest message)."""
         if self._send is None or self._holding_sec <= 0:
             return 0
         now = self._clock()
@@ -1585,6 +1589,8 @@ class PrmService:
             round_at = float(deal.get("last_message_at") or packet["created_at"])
             if deal.get("holding_round") is not None and float(deal["holding_round"]) >= round_at:
                 continue                                   # already told in this round
+            if self._answered(deal, packet["chat_id"], round_at):
+                continue                                   # she heard from us after her message
             done.add(packet["deal_id"])
             noted = self._note_sent(packet["chat_id"], self._holding_text)
             try:
@@ -1601,6 +1607,20 @@ class PrmService:
             sent += 1
             logger.info("PRM: draft %d waited %d min; holding reply sent", packet["id"], self._holding_sec // 60)
         return sent
+
+    def _answered(self, deal: dict, chat_id: str, since: float) -> bool:
+        """Did the creator hear from us after her latest message (written at ``since``)?  An
+        operator's own line written then or later (even one read late, that took no chat over:
+        an operator answered on the phone while the bot was stopped, win review F13), or a reply
+        sent since (a draft, a shipping notice; one with nothing in it, as a 专属佣金 step's empty
+        reply, does not count)."""
+        if any(_event_time(ev) >= since for ev in self._store.events(deal["id"], limit=20, kinds=("operator_message",))):
+            return True
+        for packet in self._store.sent_since(chat_id, since):
+            final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
+            if str(final or "").strip() or packet["attachments"]:
+                return True
+        return False
 
     def purge_due(self) -> int:
         """Clear the details of every deal done ``PRM_RETENTION_DAYS`` ago (8.2, ``retention.purge_due_at``)."""
