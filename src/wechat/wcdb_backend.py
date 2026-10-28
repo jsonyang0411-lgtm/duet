@@ -85,6 +85,36 @@ def _md5(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
+class SendRefused:
+    """What a send the backend does not even try returns: falsy like any failed send (callers test
+    the result's truth), and ``reason`` says why in words an operator can act on."""
+
+    __slots__ = ("reason",)
+
+    def __init__(self, reason: str):
+        self.reason = reason
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __str__(self) -> str:
+        return self.reason
+
+    def __repr__(self) -> str:
+        return f"SendRefused({self.reason!r})"
+
+
+# Why the window is not used for a chat (see WcdbBackend._window_target).
+UNKNOWN_NAME = "机器人不知道这个聊天在微信里叫什么，没法在微信里找到它，没有发。请手动发"
+NAMESAKE = ("和另一个聊天同名（都叫「{name}」），机器人没法确定发给谁，没有发：请手动发，"
+            "或者在微信里给对方设一个不重复的备注（改好后重启 Windows 上的机器人）")
+
+
+def _name_key(name: str) -> str:
+    """A chat name as WeChat's search may match it: no spaces, no case."""
+    return "".join(str(name or "").split()).casefold()
+
+
 def _message_ids(msg: dict, talker: str, sender: str, content: str, ts: int) -> tuple[str, list[str]]:
     """``(message id, older ids)`` of a WCDB row (not a group's join line: that has its own).
 
@@ -380,7 +410,12 @@ class WcdbBackend(AbstractWeChatBackend):
             SendQueue(typing=get_sender().typing, alive=lambda: self._running)
             if getattr(config, "send_queue", "off") == "on" else None
         )
-        self._talker_ids: dict[str, str] = {}
+        # The chats read, by chat id (wxid / @chatroom) -> the name WeChat shows (each one is polled;
+        # two chats may have the same name), and every chat of the last session list read whose name
+        # is known, read or not (a send refuses a name another chat has: _window_target).
+        # ``_groups`` stays what WECHAT_GROUPS says (_resolve_groups reads it again on a re-open).
+        self._chat_names: dict[str, str] = {}
+        self._session_names: dict[str, str] = {}
         self._chat_is_group: dict[str, bool] = {}
         self._last_session_refresh: float = 0.0
         # PRM_COPILOT: private chats read whatever PRIVATE_CHATS says (the registered creators),
@@ -477,7 +512,7 @@ class WcdbBackend(AbstractWeChatBackend):
         else:
             self._register_groups_without_database()
 
-        if not self._talker_ids:
+        if not self._chat_names:
             logger.error("No groups resolved. Check WECHAT_GROUPS.")
             return
 
@@ -487,9 +522,9 @@ class WcdbBackend(AbstractWeChatBackend):
             logger.info("WeChat window pre-detected: HWND=%s", hwnd)
         else:
             logger.warning("WeChat window not found — will retry on first send")
-        self._window.describe_chat_windows(
-            [name for name, talker in self._talker_ids.items() if self._chat_is_group.get(talker)]
-        )
+        self._window.describe_chat_windows(list(dict.fromkeys(
+            name for talker, name in self._chat_names.items() if self._chat_is_group.get(talker)
+        )))
 
         if self._client is not None:
             self._prime_known_ids()
@@ -574,23 +609,25 @@ class WcdbBackend(AbstractWeChatBackend):
             self._send_queue.start()
 
     def send_text(self, chat_id: str, content: str) -> bool:
+        """Send a text into a chat (the relay's results, PRM's drafts, the WeChat edge's sends): the
+        window types the chat's name into WeChat's search.  A chat whose name cannot lead to it gets a
+        falsy ``SendRefused`` with the reason, and nothing is typed (``_window_target``)."""
         if not content:
             return False
 
-        chat_name = self._talker_to_name(chat_id)
-        if not chat_name:
-            logger.error("Cannot resolve chat_id=%s to chat name", chat_id)
-            return False
+        chat_name, refused = self._window_target(chat_id)
+        if refused is not None:
+            return refused
 
         with self._window_lock:
             return self._send_and_confirm(chat_name, chat_id, content)
 
     def send_file(self, chat_id: str, path: str) -> bool:
-        """Send a file into a chat (pasted, like a sticker): the Claude relay's long results."""
-        chat_name = self._talker_to_name(chat_id)
-        if not chat_name:
-            logger.error("Cannot resolve chat_id=%s to chat name", chat_id)
-            return False
+        """Send a file into a chat (pasted, like a sticker): the Claude relay's long results, PRM's and
+        the WeChat edge's files.  Refused like ``send_text``."""
+        chat_name, refused = self._window_target(chat_id)
+        if refused is not None:
+            return refused
         with self._window_lock:
             return self._window.send_file_to_chat(chat_name, path)
 
@@ -644,15 +681,17 @@ class WcdbBackend(AbstractWeChatBackend):
     # ── Group resolution ────────────────────────────────────────────
 
     def _resolve_groups(self) -> None:
-        """Map configured group names to talker IDs from WCDB sessions.
+        """Find the chats to read in WCDB's sessions: the groups WECHAT_GROUPS names (``*``: all),
+        the private chats (PRIVATE_CHAT_ENABLED, PRIVATE_CHATS, set_private_filter).
 
         WCDB session records only contain usernames (e.g. 20968749111@chatroom).
         Display names must be resolved via the DLL's get_display_names() or
-        the local nickname cache (WeChat contacts / manual overrides).
+        the local nickname cache (WeChat contacts / manual overrides).  Chats are
+        kept by their id (``_chat_names``): two of them may have the same name.
         """
         sessions = self._client.get_sessions()
         self._sessions_read = (time.monotonic(), sessions)
-        self._talker_ids = {}
+        self._chat_names = {}
         self._chat_is_group = {}
 
         # Build a map of all @chatroom entries: username -> {name, member_count}
@@ -775,7 +814,10 @@ class WcdbBackend(AbstractWeChatBackend):
                 added_private,
             )
 
-        self._groups = list(self._talker_ids.keys())
+        # Every chat of the list whose name is known, read or not: a send refuses a name one of
+        # them has too (_namesake).  self._groups stays WECHAT_GROUPS: a re-open resolves it again.
+        self._session_names = {
+            **{username: info["name"] for username, info in all_chatrooms.items()}, **private_seen}
 
         # Persist chat_id -> display_name so the web UI can show
         # human-readable group names in the console's group picker.
@@ -788,7 +830,7 @@ class WcdbBackend(AbstractWeChatBackend):
         group_members: dict[str, dict[str, str]] = {}
         selected_group_ids = [
             username
-            for username in self._talker_ids.values()
+            for username in self._chat_names
             if self._chat_is_group.get(username, username.endswith("@chatroom"))
         ]
         for username in selected_group_ids:
@@ -834,20 +876,24 @@ class WcdbBackend(AbstractWeChatBackend):
         return display or username
 
     def _add_talker(self, chat_name: str, talker: str, is_group: bool) -> bool:
+        """Read this chat from the next poll on, under its id (False only without a name or id).  A
+        name another chat read has too does not keep it out (that lost a creator's whole chat); the
+        window is not used for either of them (_window_target)."""
         chat_name = str(chat_name or "").strip()
         talker = str(talker or "").strip()
         if not chat_name or not talker:
             return False
 
-        existing = self._talker_ids.get(chat_name)
-        if existing and existing != talker:
+        key = _name_key(chat_name)
+        namesake = next((other for other, name in list(self._chat_names.items())
+                         if other != talker and _name_key(name) == key), "")
+        if namesake:
             logger.warning(
-                "Skipping chat '%s' (%s): display name collides with %s",
-                chat_name, talker[:20], existing[:20],
+                "Chat '%s' (%s) has the same name as %s: both are read; the bot sends to neither "
+                "(WeChat's search could open the other one)", chat_name, talker[:20], namesake[:20],
             )
-            return False
 
-        self._talker_ids[chat_name] = talker
+        self._chat_names[talker] = chat_name
         self._chat_is_group[talker] = bool(is_group)
         return True
 
@@ -906,22 +952,61 @@ class WcdbBackend(AbstractWeChatBackend):
             logger.warning("Failed to persist private_chat_names.json: %s", e)
 
     def _talker_to_name(self, talker_id: str) -> str:
-        for name, tid in list(self._talker_ids.items()):     # the poll thread may add chats meanwhile
-            if tid == talker_id:
-                return name
-        if not talker_id.endswith("@chatroom"):
-            # A private chat not read yet (a creator just put on the list): the name WeChat lists
-            # it under, unless another chat has that name (a send finds the chat by its name).
-            names_file = Path("data/private_chat_names.json")
-            if names_file.is_file():
-                try:
-                    data = json.loads(names_file.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    data = {}
-                display = str(data.get(talker_id) or "").strip() if isinstance(data, dict) else ""
-                if display and self._add_talker(display, talker_id, is_group=False):
-                    return display
+        """The name WeChat shows for this chat ("" when not known): a chat read; else, for a private
+        chat not read yet (a creator just put on the list), the name the console's list of private
+        chats has (data/private_chat_names.json).  Looking a name up never makes a chat read (the
+        session refresh decides that).  Whether the window may use the name: ``_window_target``."""
+        name = self._chat_names.get(talker_id)
+        if name:
+            return name
+        if talker_id.endswith("@chatroom"):
+            return ""
+        return str(self._listed_private_names().get(talker_id) or "").strip()
+
+    @staticmethod
+    def _listed_private_names() -> dict:
+        """data/private_chat_names.json (every private chat WeChat listed with a name, read or not;
+        written with PRM_COPILOT / PRM_EDGE): {} when there is none."""
+        names_file = Path("data/private_chat_names.json")
+        if not names_file.is_file():
+            return {}
+        try:
+            data = json.loads(names_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _namesake(self, talker: str, name: str) -> str:
+        """Another chat with this name (its id; "" when there is none): one the bot reads, one of the
+        last session list, or a private chat the console's list has (a friend the bot does not read
+        is found by the same search)."""
+        key = _name_key(name)
+        if not key:
+            return ""
+        for names in (self._chat_names, self._session_names, self._listed_private_names()):
+            for other, other_name in list(names.items()):     # the poll thread may add chats meanwhile
+                if other != talker and _name_key(str(other_name or "")) == key:
+                    return other
         return ""
+
+    def _window_target(self, talker: str, name: str = "") -> tuple[str, Optional[SendRefused]]:
+        """The name to type into WeChat's search to reach this chat (a send, a reply, a screenshot),
+        and why not (None: go ahead).  The window finds a chat only by that name and opens the first
+        result (window_controller.navigate_to_chat; WeChat 4 cannot be asked which chat opened), so
+        a name another chat has too could open that one: refused, nothing is typed (``NAMESAKE``: send
+        it by hand, or give her a remark of her own).  ``name``: what to go by when the chat is not
+        known (a message's ``group_name``)."""
+        name = self._talker_to_name(talker) or str(name or "").strip()
+        if not name:
+            logger.error("Cannot resolve chat_id=%s to chat name", talker)
+            return "", SendRefused(UNKNOWN_NAME)
+        other = self._namesake(talker, name)
+        if other:
+            refused = SendRefused(NAMESAKE.format(name=name))
+            logger.warning("Not using the WeChat window for %s: %s (the other chat: %s)",
+                           talker[:20], refused.reason, other[:20])
+            return name, refused
+        return name, None
 
     # ── OCR fallback ─────────────────────────────────────────────────
 
@@ -961,20 +1046,20 @@ class WcdbBackend(AbstractWeChatBackend):
             # since every line has the same unknown speaker.  The looks are seconds apart anyway.
             self._dispatch_message(standardized, callback)
 
-    def _group_for_title(self, title: str) -> str | None:
-        """The configured group that this window title is: the same name, or (for a long name that the
-        window shows cut off with an ellipsis) the only group that starts with what is shown."""
-        def norm(value: str) -> str:
-            return "".join(str(value).split()).lower()
-
-        wanted = norm(title)
-        for name in self._talker_ids:
-            if norm(name) == wanted:
-                return name
+    def _group_for_title(self, title: str) -> tuple[str, str] | None:
+        """``(name, chat id)`` of the group read that this window title is: the only one of that name,
+        or (for a long name that the window shows cut off with an ellipsis) the only group that starts
+        with what is shown.  Two groups of the name: None (the screen cannot tell which it is)."""
+        groups = [(name, talker) for talker, name in list(self._chat_names.items())
+                  if self._chat_is_group.get(talker)]
+        wanted = _name_key(title)
+        same = [group for group in groups if _name_key(group[0]) == wanted]
+        if same:
+            return same[0] if len(same) == 1 else None
         if wanted.endswith(("…", "...")):
             head = wanted.rstrip("….")
             if len(head) >= 3:
-                starts = [name for name in self._talker_ids if norm(name).startswith(head)]
+                starts = [group for group in groups if _name_key(group[0]).startswith(head)]
                 if len(starts) == 1:
                     return starts[0]
         return None
@@ -989,10 +1074,10 @@ class WcdbBackend(AbstractWeChatBackend):
         title = str(found.title_clean or "").strip()
         if not text or not title or not found.is_group:
             return None
-        group_name = self._group_for_title(title)
-        if group_name is None:
+        group = self._group_for_title(title)
+        if group is None:
             return None
-        talker = self._talker_ids[group_name]
+        group_name, talker = group
         timestamp = int(time.time())
         bot_names = {self._bot_name, getattr(self._config, "bot_display_name", None) or ""}
         bot_names.discard("")
@@ -1034,12 +1119,9 @@ class WcdbBackend(AbstractWeChatBackend):
             raise RuntimeError("the WCDB database is not open")
         self._refresh_private_chats_if_due()
         self._admit_catch_up_chats()
-        for group_name in list(self._groups):
+        for talker, group_name in list(self._chat_names.items()):     # every chat read, by its id
             if not self._running:
                 break
-            talker = self._talker_ids.get(group_name)
-            if not talker:
-                continue
             self._poll_group(group_name, talker, callback)
         self._flush_due_bursts(callback)
         # Check shutdown signal before sleeping so stop() is responsive
@@ -1096,6 +1178,7 @@ class WcdbBackend(AbstractWeChatBackend):
         remember = getattr(self._client, "remember_nickname", None)
         if callable(remember):
             remember(wxid, name)
+        self._session_names[wxid] = name           # a send to someone else of her name is refused
         if self._private_filter is not None:
             self._save_private_names({wxid: name})
 
@@ -1117,7 +1200,6 @@ class WcdbBackend(AbstractWeChatBackend):
             return
         with self._catch_up_lock:
             pending = list(self._catch_up_requests.items())
-        added = False
         for talker, (name, _since, _sink, asked_at) in pending:
             if talker in self._chat_is_group:
                 continue                                  # read already: its poll takes the request
@@ -1127,10 +1209,8 @@ class WcdbBackend(AbstractWeChatBackend):
                 logger.warning("Catch-up of a new friend's chat (%s…) given up: the chat could not be read",
                                talker[:8])
                 continue
-            if name and self._add_talker(name, talker, is_group=False):
-                added = True
-        if added:
-            self._groups = list(self._talker_ids.keys())
+            if name:
+                self._add_talker(name, talker, is_group=False)    # polled from this cycle on
 
     def _catch_up_new_friend(self, group_name: str, talker: str, request: tuple) -> None:
         """A catch_up_chat request, in the poll thread before the chat's own poll: read the chat back
@@ -1283,10 +1363,10 @@ class WcdbBackend(AbstractWeChatBackend):
                     if self._add_talker(display, username, is_group=False):
                         added += 1
 
+                self._session_names.update(seen)       # read or not: a send refuses their names too
                 if seen and self._private_filter is not None:
                     self._save_private_names(seen)
                 if added:
-                    self._groups = list(self._talker_ids.keys())
                     logger.info(
                         "Discovered %d new private chats for reply",
                         added,
@@ -1342,7 +1422,7 @@ class WcdbBackend(AbstractWeChatBackend):
         primed = queued = 0
         self._catchup = {}
         catching_up = self._catchup_hours() > 0
-        for group_name, talker in list(self._talker_ids.items()):
+        for talker, group_name in list(self._chat_names.items()):
             catch_up = catching_up and self._tracked_chat(talker)
             try:
                 with self._client_lock:
@@ -1604,7 +1684,7 @@ class WcdbBackend(AbstractWeChatBackend):
         try:
             if screenshot and int(standardized.get("msg_type", 1) or 1) in IMAGE_MSG_TYPES:
                 standardized["_capture_media_screenshot"] = (
-                    lambda name=group_name: self._capture_media_screenshot(name)
+                    lambda name=group_name, chat=talker: self._screenshot_of(name, chat)
                 )
             logger.debug(
                 "Handling message: msg_id=%s is_at=%s content=%.60s",
@@ -1634,7 +1714,7 @@ class WcdbBackend(AbstractWeChatBackend):
                     queued = self._send_queue.submit(
                         group_name, reply,
                         lambda part: self._send_part(group_name, talker, part),
-                        send_file=lambda path: self._send_file_part(group_name, path),
+                        send_file=lambda path: self._send_file_part(group_name, talker, path),
                         on_done=lambda sent: self._log_delivery(group_name, reply, sent),
                     )
                     if not queued:
@@ -1644,7 +1724,7 @@ class WcdbBackend(AbstractWeChatBackend):
                     group_name, reply,
                     lambda part: self._send_part(group_name, talker, part),
                     alive=lambda: self._running,
-                    send_file=lambda path: self._send_file_part(group_name, path),
+                    send_file=lambda path: self._send_file_part(group_name, talker, path),
                 )
                 self._log_delivery(group_name, reply, success)
         except Exception:
@@ -1667,14 +1747,30 @@ class WcdbBackend(AbstractWeChatBackend):
             )
 
     def _send_part(self, group_name: str, talker: str, text: str) -> bool:
-        """One bubble: the window lock is held per bubble, never while waiting between them."""
+        """One bubble: the window lock is held per bubble, never while waiting between them.  Refused
+        like ``send_text`` (a falsy ``SendRefused``, nothing typed) when the chat's name could open
+        another chat (``_window_target``)."""
+        name, refused = self._window_target(talker, group_name)
+        if refused is not None:
+            return refused
         with self._window_lock:
-            return self._send_and_confirm(group_name, talker, text)
+            return self._send_and_confirm(name, talker, text)
 
-    def _send_file_part(self, group_name: str, path: str) -> bool:
-        """One sticker picture, under the window lock like a text bubble."""
+    def _send_file_part(self, group_name: str, talker: str, path: str) -> bool:
+        """One sticker picture, under the window lock like a text bubble, and refused like one."""
+        name, refused = self._window_target(talker, group_name)
+        if refused is not None:
+            return refused
         with self._window_lock:
-            return self._window.send_file_to_chat(group_name, path)
+            return self._window.send_file_to_chat(name, path)
+
+    def _screenshot_of(self, group_name: str, talker: str) -> str:
+        """A picture message's ``_capture_media_screenshot``: the chat window's screenshot, or "" when
+        the chat's name could open another chat (the picture would be someone else's)."""
+        name, refused = self._window_target(talker, group_name)
+        if refused is not None:
+            return ""
+        return self._capture_media_screenshot(name)
 
     def _capture_media_screenshot(self, group_name: str) -> str:
         """The relay's screenshot of a picture it cannot find on disk, serialized with

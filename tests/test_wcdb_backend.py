@@ -329,13 +329,26 @@ class WcdbBackendStandardizeTests(unittest.TestCase):
 
         backend._resolve_groups()
 
-        self.assertEqual(backend._talker_ids["测试群"], "room1@chatroom")
-        self.assertEqual(backend._talker_ids["私聊好友"], "wxid_friend")
+        self.assertEqual(backend._chat_names, {"room1@chatroom": "测试群", "wxid_friend": "私聊好友"})
         self.assertTrue(backend._chat_is_group["room1@chatroom"])
         self.assertFalse(backend._chat_is_group["wxid_friend"])
-        self.assertNotIn("文件传输助手", backend._talker_ids)
-        self.assertNotIn("公众号", backend._talker_ids)
-        self.assertNotIn("麦当劳", backend._talker_ids)
+        self.assertEqual(backend._groups, ["*"])                # WECHAT_GROUPS, for the next re-open
+
+    def test_re_opening_the_database_resolves_wechat_groups_again_not_the_chat_names(self):
+        """_reinitialize runs _resolve_groups again: WECHAT_GROUPS=* still means every group (a new one
+        too), and the names read the first time are no group patterns (a group whose name has a
+        friend's name in it used to take her name, and her chat was dropped)."""
+        sessions = [{"username": "room1@chatroom", "displayName": "测试群"},
+                    {"username": "wxid_friend", "displayName": "私聊好友"}]
+        backend = WcdbBackend(bot_display_name="商务助手", groups=["*"],
+                              config=BotConfig(private_chat_enabled=True))
+        backend._client = FakeClient(sessions=sessions)
+        backend._resolve_groups()
+        sessions.append({"username": "room2@chatroom", "displayName": "私聊好友的群"})
+        backend._resolve_groups()                               # as _reinitialize does
+        self.assertEqual(backend._chat_names, {"room1@chatroom": "测试群", "room2@chatroom": "私聊好友的群",
+                                               "wxid_friend": "私聊好友"})
+        self.assertEqual(backend._groups, ["*"])
 
     def test_private_chat_refresh_adds_new_session_after_startup(self):
         client = FakeClient(
@@ -355,14 +368,14 @@ class WcdbBackendStandardizeTests(unittest.TestCase):
         )
         backend._refresh_private_chats_if_due()
 
-        self.assertEqual(backend._talker_ids["私聊好友"], "wxid_friend")
+        self.assertEqual(backend._chat_names["wxid_friend"], "私聊好友")
         self.assertFalse(backend._chat_is_group["wxid_friend"])
 
 
 class PrivateChatNameFallbackTests(unittest.TestCase):
     """A creator's private chat not read yet gets the name WeChat lists it under
-    (data/private_chat_names.json), never a name another chat has: a send finds the chat
-    by its name."""
+    (data/private_chat_names.json) for a send; looking it up does not make the chat read, and a
+    name another chat has is never typed into WeChat's search (the send is refused)."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -375,15 +388,25 @@ class PrivateChatNameFallbackTests(unittest.TestCase):
         self.backend = WcdbBackend(bot_display_name="商务助手", groups=["测试群"])
         self.backend._client = FakeClient()
         self.backend._add_talker("测试群", "room1@chatroom", is_group=True)
+        self.typed = []
+        self.backend._send_and_confirm = lambda name, chat, text: self.typed.append((name, chat)) or True
 
     def test_a_listed_private_chat_gets_its_name(self):
         self.assertEqual(self.backend._talker_to_name("wxid_new"), "小丽")
-        self.assertEqual(self.backend._talker_ids["小丽"], "wxid_new")
+        self.assertIs(self.backend.send_text("wxid_new", "你好"), True)
+        self.assertEqual(self.typed, [("小丽", "wxid_new")])
+        self.assertNotIn("wxid_new", self.backend._chat_names)      # the session refresh decides that
 
     def test_a_name_another_chat_has_is_not_used(self):
-        self.assertEqual(self.backend._talker_to_name("wxid_twin"), "")
-        self.assertEqual(self.backend._talker_ids["测试群"], "room1@chatroom")
+        self.assertEqual(self.backend._talker_to_name("wxid_twin"), "测试群")
+        refused = self.backend.send_text("wxid_twin", "你好")
+        self.assertFalse(refused)
+        self.assertIn("「测试群」", refused.reason)
+        self.assertFalse(self.backend.send_text("room1@chatroom", "大家好"))    # nor the group itself
+        self.assertEqual(self.typed, [])
+        self.assertEqual(self.backend._chat_names, {"room1@chatroom": "测试群"})
         self.assertEqual(self.backend._talker_to_name("wxid_unknown"), "")
+        self.assertIn("不知道这个聊天在微信里叫什么", self.backend.send_text("wxid_unknown", "你好").reason)
 
 
 if __name__ == "__main__":

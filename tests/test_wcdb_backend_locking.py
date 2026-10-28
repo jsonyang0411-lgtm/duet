@@ -110,7 +110,7 @@ class WcdbLockingTests(unittest.TestCase):
 
     def test_send_text_and_reply_sends_share_the_window_lock(self):
         self.backend._send_and_confirm = self.blocking_send
-        self.backend._talker_ids = {"测试群": "room1@chatroom"}
+        self.backend._chat_names = {"room1@chatroom": "测试群"}
         self.start(
             self.backend._handle_message,
             "测试群", "room1@chatroom", _message(), lambda msg: "好的",

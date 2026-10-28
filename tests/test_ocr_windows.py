@@ -232,7 +232,7 @@ class TestBackendGlue:
     def test_without_the_database_groups_get_ids_that_lead_back_to_their_names(self):
         be, _ = backend(groups=("测试群", "*", "游戏群"))
         be._register_groups_without_database()
-        assert be._talker_ids == {"测试群": "ocr:测试群", "游戏群": "ocr:游戏群"}
+        assert be._chat_names == {"ocr:测试群": "测试群", "ocr:游戏群": "游戏群"}
         assert be._talker_to_name("ocr:游戏群") == "游戏群" and be._chat_is_group["ocr:测试群"] is True
 
     def test_the_standard_message_has_every_key_of_a_database_message(self):
@@ -260,6 +260,17 @@ class TestBackendGlue:
         assert be._message_from_ocr(OcrMessage_for("测试群（5）", "  ")) is None
         assert be._message_from_ocr(OcrMessage_for("测试…（5）", "a")) is None                # a cut-off title that is too short to tell
 
+    def test_a_title_two_groups_have_is_not_guessed_and_private_chats_are_never_titles(self):
+        be, _ = backend()
+        be._add_talker("测试群", "room1@chatroom", is_group=True)
+        be._add_talker("测试群", "room2@chatroom", is_group=True)     # both read (by their ids)
+        be._add_talker("游戏群", "wxid_friend", is_group=False)       # a friend with a group's name
+        assert be._message_from_ocr(OcrMessage_for("测试群（5）", "a")) is None    # which of the two?
+        assert be._message_from_ocr(OcrMessage_for("游戏群（5）", "a")) is None
+        be._add_talker("游戏群", "room3@chatroom", is_group=True)
+        name, talker, _ = be._message_from_ocr(OcrMessage_for("游戏群（5）", "a"))
+        assert (name, talker) == ("游戏群", "room3@chatroom")
+
     def test_a_cut_off_title_that_fits_two_groups_is_not_guessed(self):
         be, _ = backend(groups=("一个名字非常长的群甲", "一个名字非常长的群乙"))
         be._register_groups_without_database()
@@ -282,7 +293,7 @@ class TestBackendGlue:
     def test_the_first_cycle_after_ocr_marks_the_backlog_seen(self):
         be, ocr = backend()
         be._client = FakeClient()
-        be._talker_ids = {"测试群": "room1@chatroom"}
+        be._chat_names = {"room1@chatroom": "测试群"}
         now = int(time.time())
         row = lambda i, text: {"sender_username": "wxid_u", "message_content": text, "local_type": 1,
                                "create_time": now, "local_id": i}

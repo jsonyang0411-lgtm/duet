@@ -637,14 +637,14 @@ def test_the_backend_reads_a_registered_creator_outside_private_chats(monkeypatc
     backend._client = FakeClient(sessions)
     backend.set_private_filter(lambda username: username in {"wxid_creator01", "mei_custom"})
     backend._resolve_groups()
-    assert backend._talker_ids.get("小美") == "wxid_creator01" and "朋友" not in backend._talker_ids
+    assert backend._chat_names.get("wxid_creator01") == "小美" and "wxid_friend" not in backend._chat_names
     backend._last_session_refresh = 10 ** 9
     sessions.append({"username": "mei_custom", "displayName": "自定义号达人"})
     backend._refresh_private_chats_if_due()
-    assert "自定义号达人" not in backend._talker_ids                       # not due yet
+    assert "mei_custom" not in backend._chat_names                         # not due yet
     backend.refresh_private_chats_soon()
     backend._refresh_private_chats_if_due()
-    assert backend._talker_ids.get("自定义号达人") == "mei_custom"
+    assert backend._chat_names.get("mei_custom") == "自定义号达人"
     # every named private chat is offered to the console's register form
     names = json.loads((tmp_path / "data" / "private_chat_names.json").read_text(encoding="utf-8"))
     assert names == {"wxid_creator01": "小美", "wxid_friend": "朋友", "mei_custom": "自定义号达人"}
@@ -657,7 +657,7 @@ def test_without_prm_the_backend_writes_no_private_names(monkeypatch, tmp_path):
                           config=BotConfig(private_chat_enabled=True))
     backend._client = FakeClient([{"username": "wxid_friend", "displayName": "朋友"}])
     backend._resolve_groups()
-    assert backend._talker_ids.get("朋友") == "wxid_friend"                # PRIVATE_CHATS="*" as before
+    assert backend._chat_names.get("wxid_friend") == "朋友"                # PRIVATE_CHATS="*" as before
     assert not (tmp_path / "data" / "private_chat_names.json").exists()
 
 

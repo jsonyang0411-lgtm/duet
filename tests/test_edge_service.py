@@ -19,7 +19,7 @@ from src.edge.service import EdgeService
 from src.edge.store import EdgeStore
 from src.routing import steps as S
 from src.routing.context import RouteContext, Stop
-from src.wechat.wcdb_backend import WcdbBackend, _special_info
+from src.wechat.wcdb_backend import SendRefused, WcdbBackend, _special_info
 
 CREATOR = "wxid_creator01"
 DAY = 86400
@@ -456,6 +456,23 @@ def test_what_failed_is_said_and_failures_in_a_row_mark_the_state(edge, clock, w
     sent(edge, "ok", "好了")
     edge.tick()
     assert events(edge, P.EDGE_STATUS)[-1]["send"] == P.OK
+
+
+def test_a_send_the_backend_refuses_takes_its_reason_to_the_mac(edge, wechat, tmp_path):
+    """The WCDB backend does not even try a chat whose name another chat has (a falsy SendRefused):
+    its reason goes into the send's error, which the Mac shows on the draft."""
+    reason = "和另一个聊天同名（都叫「小美」），机器人没法确定发给谁，没有发。请手动发"
+    wechat.text_ok = SendRefused(reason)
+    sent(edge, "text", "在吗")
+    edge.tick()
+    (tmp_path / "a.pdf").write_bytes(b"x")
+    up = edge.upload("a.pdf", (tmp_path / "a.pdf").open("rb").read, 1)
+    wechat.file_ok = SendRefused(reason)
+    sent(edge, "file", uploads=[up["upload_id"]])
+    edge.tick()
+    results = {e["send_id"]: e for e in events(edge, P.SEND_RESULT)}
+    assert (results["text"]["status"], results["text"]["error"]) == (P.FAILED, reason)
+    assert results["file"]["error"] == f"文件「a.pdf」没发出去：{reason}"
 
 
 def test_a_file_that_vanished_or_a_backend_without_files_fails_cleanly(tmp_path, clock, wechat):
