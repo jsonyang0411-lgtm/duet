@@ -538,6 +538,58 @@ def test_a_sample_order_whose_placeholder_has_no_number_is_not_approved(bot):
     assert [j for j in bot.relay.store.list_jobs(10) if '"platform_execute"' in j["meta"]] == []
 
 
+# ── a number the Mac read off a picture (win review F5) ──────────────────
+
+READ_OFF = "13900001111"
+
+
+def test_a_number_the_mac_read_off_a_picture_becomes_her_placeholder_before_it_is_stored(bot, clock):
+    """The creator sends her address as a screenshot: the Mac reads the number off it and writes it out in
+    the reply, the slots, the reason and the sample order.  Before anything is stored it becomes her
+    〈手机N〉 like a number she types: the console shows it masked (显示完整号码 is written down), the
+    Mac executing the order and the creator get the number back."""
+    bot.prm.handle(bot.msg("[图片]", msg_type=3))
+    job = bot.worker_takes()
+    d = draft(message_kind="address_confirm", reply_draft=f"确认一下：小美，手机 {READ_OFF}，寄样单这就建",
+              slots={"收件人": "小美", "手机": READ_OFF}, intent=f"寄样，电话 {READ_OFF}",
+              needs_attention=True, reason=f"截图里的电话 {READ_OFF}")
+    d["platform"] = block({**SAMPLE, "receiver": {**SAMPLE["receiver"], "phone": READ_OFF}}, run={"steps": ["create"]})
+    bot.finish(job["id"], d)
+    packet = bot.prm.store.packet_for_job(job["id"])
+    token = "〈手机1〉"
+    assert bot.prm.store.tokens(packet["party_id"]) == {token: ("phone", READ_OFF)}
+    stored = json.dumps([packet, bot.prm.store.deal(packet["deal_id"])], ensure_ascii=False)
+    shown = json.dumps(snap(bot), ensure_ascii=False)
+    assert READ_OFF not in stored and READ_OFF not in shown
+    [p] = snap(bot)["pending"]
+    assert p["text"] == f"确认一下：小美，手机 {token}，寄样单这就建" and p["slots"]["手机"] == token
+    assert {"label": "收货信息", "value": f"小美 {token} 上海市上海市浦东新区 张江路100号3栋1201"} in p["platform"]["params"]
+    assert p["legend"] == [{"token": token, "masked": "139****1111"}]
+    assert packet["platform"]["preview"]["action"]["receiver"]["phone"] == token
+    [party] = snap(bot)["parties"]
+    assert party["deal"]["slots"]["手机"] == token and party["deal"]["legend"] == [{"token": token, "masked": "139****1111"}]
+    assert token in party["deal"]["attention"]                               # the reason, masked too
+    assert bot.prm.reveal(packet["party_id"])["numbers"] == [{"token": token, "value": READ_OFF, "cleared": False}]
+    assert [e["detail"]["tokens"] for e in bot.prm.store.events(packet["deal_id"]) if e["kind"] == "reveal"] == [[token]]
+    execution = approve(bot, packet)
+    assert json.loads(execution["meta"])["action"]["receiver"]["phone"] == READ_OFF   # for the Mac that sends it
+    mac_runs(bot, execution, record(sample_order_no=JST_ORDER))
+    bot.prm.send_approved()
+    assert bot.texts == [(CREATOR, f"确认一下：小美，手机 {READ_OFF}，寄样单这就建")]
+
+
+def test_the_mac_gets_every_number_of_the_receiver_back_and_an_unknown_one_stops_it():
+    from src.prm.service import action_for_mac
+    tokens = {"〈手机1〉": ("phone", "13900001111"), "〈手机2〉": ("phone", "13900002222")}
+    action = platforms.check_action({**SAMPLE, "receiver": {**SAMPLE["receiver"], "address": "张江路100号，备用〈手机2〉"}})
+    out, problem = action_for_mac(action, tokens)
+    assert problem == "" and out["receiver"]["phone"] == "13900001111"
+    assert out["receiver"]["address"] == "张江路100号，备用13900002222" and action["receiver"]["address"].endswith("〈手机2〉")
+    out, problem = action_for_mac(platforms.check_action(
+        {**SAMPLE, "receiver": {**SAMPLE["receiver"], "address": "张江路100号 〈手机7〉"}}), tokens)
+    assert "〈手机7〉" in problem
+
+
 # ── a sample order → its 专属佣金 (drafted, then approved like any platform write) ──
 # PRM_COMMISSION_AFTER: delivered (the default: when the creator signed for it) or created.
 

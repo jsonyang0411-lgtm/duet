@@ -42,6 +42,7 @@ and the console shows it red until an operator marks it dealt with.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import logging
@@ -279,7 +280,10 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
             "party_name": party.get("name", "?"), "job_id": p["job_id"], "status": p["status"],
             "kind": p["kind"], "kind_label": MESSAGE_KINDS.get(p["kind"], p["kind"]), "route": p["route"],
             "text": p["text"], "final_text": p.get("final_text"), "edited": p["edited"], "wrong": p["wrong"],
-            "legend": pii.legend(f"{p['text']}\n{final}", shown(p["party_id"])),
+            "legend": pii.legend("\n".join([p["text"], final, p["intent"], p["reason"],
+                                            json.dumps(p["slots"], ensure_ascii=False),
+                                            json.dumps((p.get("platform") or {}).get("action") or {},
+                                                       ensure_ascii=False)]), shown(p["party_id"])),
             "attachments": [{"name": a.get("name"), "size": a.get("size")} for a in p["attachments"]],
             "intent": p["intent"], "slots": p["slots"], "stage_proposal": p["stage_proposal"],
             "stage_proposal_label": STAGES.get(p["stage_proposal"], ""),
@@ -908,6 +912,7 @@ class PrmService:
                 [f"#{job['id']} 的草稿格式不对（{e.code}），没有生成待审批", *notes])[:300])
             logger.warning("PRM: job #%d answer unusable: %s", job["id"], e)
             return True
+        draft = self._mask_draft(party_id, draft, now)
         files = self._relay.store.outfiles(job["id"])
         attachments = [{"name": f["name"], "path": f["path"], "size": f["size"], "sha256": f["sha256"]} for f in files]
         # Every file the draft named (an older worker reports only the ones it sent back): fewer came,
@@ -992,6 +997,28 @@ class PrmService:
             self._wake.set()
         logger.info("PRM: job #%d -> packet %d (%s, %s, %s)", job["id"], packet_id, state, route, draft.message_kind)
         return True
+
+    def _mask_draft(self, party_id: int, draft, now: float):
+        """The draft with its numbers as the creator's placeholders, before anything of it is stored.
+        The Mac reads her pictures, so a number it read off a screenshot comes back written out (win
+        review F5): in the reply, the slots, the intent and reason, a sample order's receiver.  It
+        becomes the same 〈手机N〉 as a number she types (``token_for``): the console shows it masked
+        and 显示完整号码 is written down; she (``_deliver``) and the Mac running the action
+        (``action_for_mac``) get the number back."""
+        mask = self._masker(party_id, now)
+        platform = draft.platform
+        if platform is not None:
+            platform = {**platform, "action": masked_action(platform.get("action"), mask)}
+            if isinstance(platform.get("requested"), dict):      # what a draft asked for that could not be used
+                platform["requested"] = {k: mask(v) if k in PERSONAL_PARAMS else v
+                                         for k, v in platform["requested"].items()}
+        return dataclasses.replace(draft, reply_draft=mask(draft.reply_draft), intent=mask(draft.intent),
+                                   reason=mask(draft.reason), slots={k: mask(v) for k, v in draft.slots.items()},
+                                   platform=platform, platform_refused=mask(draft.platform_refused))
+
+    def _masker(self, party_id: int, now: float) -> Callable:
+        """``_mask`` for one creator's texts; an empty one, or one that is no text, stays as it is."""
+        return lambda text: self._mask(party_id, text, now) if isinstance(text, str) and text else text
 
     # ── from the console ──────────────────────────────────────────────────
 
@@ -1308,6 +1335,8 @@ class PrmService:
                     block = platforms.check_block(preview)
                 except platforms.ActionError:
                     block = None
+            if block:                                # (its receiver as the stored one: placeholders)
+                block = {**block, "action": masked_action(block.get("action"), self._masker(packet["party_id"], now))}
             new = {**data, "previewing": None, **({"preview": block} if block else {})}
             self._store.set_platform(packet["id"], new, (PENDING,))
             return True
@@ -1661,10 +1690,29 @@ class PrmService:
         return counts
 
 
+# What of a platform action may hold a creator's own numbers: her receiver (a sample order) and the
+# note for the operators.  The rest are platform ids and our own texts, sent as they are.
+PERSONAL_PARAMS = ("receiver", "note")
+
+
+def masked_action(action, mask: Callable[[str], str]):
+    """``action`` with ``mask`` run over its ``PERSONAL_PARAMS`` (``_mask_draft``)."""
+    if not isinstance(action, dict):
+        return action
+    out = dict(action)
+    if isinstance(out.get("receiver"), dict):
+        out["receiver"] = {k: mask(v) for k, v in out["receiver"].items()}
+    if "note" in out:
+        out["note"] = mask(out["note"])
+    return out
+
+
 def action_for_mac(action: dict, tokens: dict) -> tuple:
     """``(action, problem)``: the approved action as the Mac executes it.  A sample order's
-    receiver phone is the draft's 〈手机N〉 (the model never sees numbers); the number goes in
-    here, for the Mac that sends the order and nowhere else (the packet keeps the placeholder)."""
+    receiver is the draft's: its phone a 〈手机N〉 (the model never sees numbers; one the Mac read
+    off a picture became one too, ``_mask_draft``), perhaps another one in its address; the
+    numbers go in here, for the Mac that sends the order and nowhere else (the packet keeps the
+    placeholders)."""
     receiver = action.get("receiver") if isinstance(action.get("receiver"), dict) else None
     if not receiver:
         return action, ""
@@ -1678,7 +1726,11 @@ def action_for_mac(action: dict, tokens: dict) -> tuple:
         return action, "收件电话换回号码以后不是手机号，不执行"
     if platforms.PHONE_TOKEN.match(number):
         return action, "收件电话还是占位符，不执行"
-    return {**action, "receiver": {**receiver, "phone": number}}, ""
+    unknown = pii.unknown_tokens(" ".join(str(v) for k, v in receiver.items() if k != "phone"), tokens)
+    if unknown:
+        return action, f"收货信息里的占位符对不上：{'、'.join(unknown)}（这位达人没有这个号码）"
+    fields = {k: pii.unmask(v, tokens) if isinstance(v, str) else v for k, v in receiver.items()}
+    return {**action, "receiver": {**fields, "phone": number}}, ""
 
 
 # The 专属佣金 action of each shop: a sample order's products get theirs once it is created.
