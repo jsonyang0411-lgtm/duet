@@ -3007,6 +3007,9 @@ class PrmService:
         counts["drafts"] = self._store.rewrite_packets(deal["id"], rewrite)
         counts["events"] = self._store.rewrite_events(deal["id"], rewrite)
         counts["notices"] = self._store.rewrite_notices(deal["id"], rewrite)
+        # 聚水潭's words for a rejected or deleted order ("地址不全…"): kept with the order and in the sync's answers
+        counts["samples"] = (self._store.rewrite_sample_orders(deal["id"], rewrite, now)
+                             + self._relay.store.rewrite_chat(SAMPLE_SYNC_CHAT, PRM, rewrite))
         if chat_id:
             counts["relay"] = self._relay.store.rewrite_chat(chat_id, PRM, rewrite)
             if self._scrub_messages is not None:

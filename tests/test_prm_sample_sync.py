@@ -338,6 +338,23 @@ def test_a_rejected_order_says_why_until_it_is_audited_again(bot, clock):
     assert bot.prm.store.sample_order(JST_ORDER)["done"] == ""
 
 
+def test_the_clean_up_cuts_what_jushuitan_said_of_a_deleted_order(bot, clock):
+    """8.2: 聚水潭's reason for a deletion can hold the address or the number ("地址不全…"): the clean-up cuts it in
+    the order kept, in what was done of it and in the sync's answer, as in the deal's notices and events."""
+    order = made(bot, clock)
+    why = "地址不全：桂城街道海八东路12号保利花园，电话13900001111"
+    round_says(bot, clock, (JST_ORDER, info("DELETED", reason=why)))
+    kept = bot.prm.store.sample_order(JST_ORDER)
+    assert kept["reason"] == why and why in kept["applied"]["dead"]                  # the operators see it until then
+    bot.prm.purge(bot.prm.store.deal(order["deal_id"]), clock.now)
+    everything = json.dumps([bot.prm.store.sample_order(JST_ORDER), sync_jobs(bot),
+                             bot.prm.store.events(order["deal_id"], limit=100), bot.prm.store.deal(order["deal_id"])],
+                            ensure_ascii=False)
+    for gone in ("海八东路12号", "13900001111"):
+        assert gone not in everything, gone
+    assert "地址不全" in bot.prm.store.sample_order(JST_ORDER)["reason"]
+
+
 def test_an_order_jushuitan_does_not_find_twice_is_said(bot, clock):
     order = made(bot, clock)
     round_says(bot, clock, missing=[JST_ORDER])

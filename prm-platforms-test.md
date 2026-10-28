@@ -171,7 +171,7 @@
   cd ~/Desktop/jushuitan-engineering && node bin/jst.mjs samples --order-no <测试单 YP…> --page-size 5 --expect-uid <自己的 uid>
   ```
   期望：退出码 0；`rows[0]` 有 `status`（INIT / WAITING_SEND / SENT / SIGNED / DELETED）、`sendTime`、`signTime`、`erpOrders`（`logisticsCompany`、`logisticsNo`、`sendTime`）、`rejectReason`，没有收件人姓名、电话、地址。字段名或时间的写法和这里不一样，把这一行（去掉达人昵称）发回来。77 就在调试 Chrome 里重新登录。
-- [ ] Windows（边缘模式在 Mac）：`.env` 里 `PRM_SAMPLE_SYNC_MIN=10`（测试时调短；默认 60），重启机器人。启动约 2 分钟后，控制台「中转代理」页出现一个任务「查聚水潭寄样单的状态（N 张）」，Mac 接走、几秒内完成，结果是一段 JSON（单号、状态、运单号，没有达人和收件信息）；Mac 的 worker 日志有一行 `sample status: N asked, N answered`。
+- [ ] 跑机器人的那台（副驾驶模式是 Windows；边缘模式是 Mac 上的业务服务）：`.env` 里 `PRM_SAMPLE_SYNC_MIN=10`（测试时调短；默认 60），重启机器人。启动约 2 分钟后，控制台「中转代理」页出现一个任务「查聚水潭寄样单的状态（N 张）」，Mac 接走、几秒内完成，结果是一段 JSON（单号、状态、运单号，没有达人和收件信息）；Mac 的 worker 日志有一行 `sample status: N asked, N answered`。
 - [ ] 运单号：测试单在寄样管理审核、仓库发货、聚水潭里有了运单号以后，等下一轮（10 分钟内）。期望：合作单的运单号自动填上、阶段「已寄出」，操作记录里是「系统 填运单号（聚水潭同步）」；「待审批」里出现一份发货通知（系统生成、等人审，自动发送门槛是 `auto` 也一样要人点）。测试号以外的达人点「不发」。
 - [ ] 对不上：另一张测试合作单先手动填一个错的运单号，等下一轮。期望：合作单标红「…的运单号是 X，合作单上填的是 Y：对不上，系统没有改」，运单号还是手填的那个；改对以后下一轮提醒消失。
 - [ ] 签收：测试样品签收以后（聚水潭显示已签收），等下一轮。期望：合作单自动「已签收」，操作记录里「更新物流（聚水潭同步）」，接着「派开专属佣金的任务 #N」（合作单暂停时是「…之后该开专属佣金了：现在不在副驾驶模式…」，切回副驾驶后自动派）。

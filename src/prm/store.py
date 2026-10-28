@@ -1074,6 +1074,24 @@ class PrmStore:
                                (*[fields[n] for n in names], order_no))
             self._conn.commit()
 
+    def rewrite_sample_orders(self, deal_id: int, rewrite: Callable[[str], str], now: Optional[float] = None) -> int:
+        """Rewrite what a deal's sample orders keep in 聚水潭's words (why rejected or deleted: ``reason``, and the
+        same in ``applied``) (8.2 clean-up); returns how many changed."""
+        now = time.time() if now is None else now
+        changed = 0
+        with self._lock:
+            rows = self._conn.execute("SELECT order_no, reason, applied FROM sample_orders WHERE deal_id = ?",
+                                      (deal_id,)).fetchall()
+            for row in rows:
+                old = (row["reason"] or "", row["applied"] or "{}")
+                new = tuple(rewrite(value) for value in old)
+                if new != old:
+                    self._conn.execute("UPDATE sample_orders SET reason = ?, applied = ?, updated_at = ?"
+                                       " WHERE order_no = ?", (*new, now, row["order_no"]))
+                    changed += 1
+            self._conn.commit()
+        return changed
+
     def meta_value(self, key: str) -> Optional[str]:
         with self._lock:
             row = self._conn.execute("SELECT value FROM prm_meta WHERE key = ?", (key,)).fetchone()
