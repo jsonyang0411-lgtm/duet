@@ -998,9 +998,10 @@ class PrmService:
         """A packet's line (or file) read back from WeChat.  Going out or sent: ``sent_confirmed``, often
         before its send returned (WeChat shows a line at once); a failure stays one.  A packet the bot was
         stopped in the middle of sending (failed, ``indeterminate``: ``start``) went out after all (win
-        review F4 (d); before, its line was taken for an operator's and the chat was taken over): text
-        only, it is sent again (``sent_at`` when WeChat shows it); with files, whether they went too is
-        still unknown, so it stays red and says its text did go out."""
+        review F4 (d); before, its line was taken for an operator's and the chat was taken over): it is
+        sent again (``sent_at`` when WeChat shows it) once its text, if any, and each of its files (one
+        row each, ``_file_rows``) are read back; till then it stays red, and once its text is seen it says
+        the text did go out (``UNSURE_TEXT_SEEN``)."""
         if self._store.confirm_sent(packet_id):
             packet = self._store.packet(packet_id) or {}
             logger.info("PRM: packet %d seen in WeChat %.0f s after sending (sent_confirmed)", packet_id,
