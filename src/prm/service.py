@@ -2037,6 +2037,11 @@ class PrmService:
                      "请核对后自己回达人")
         elif outcome == platforms.VERIFIED:        # verified, but the job was cancelled on the way
             error = "平台上已经核验成功，但执行任务中途被取消了，回复没有自动发出；请核对后自己回达人"
+        elif outcome == "NOT_RUN" and written_state(record, packet.get("outcome", "")) == "not_done":
+            # nothing ran (the Mac never took it, it was cancelled before it ran or while it waited for the
+            # platform command lock): nothing to check on the platform
+            error = (f"平台动作没有执行（{outcome}：{platforms.outcome_text(outcome)}），平台没有动，没有发微信"
+                     + (f"：{why}" if why else "") + "。可以重新批准：同样的动作再起草一份时照常批准就行，系统不会自己重试")[:500]
         else:
             maybe = (action.get("action") in ONCE_ACTIONS
                      and written_state(record, packet.get("outcome", "")) == "uncertain")

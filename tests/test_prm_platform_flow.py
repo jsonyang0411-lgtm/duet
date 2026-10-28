@@ -1400,10 +1400,18 @@ def made_then_refused():
     return rec
 
 
+def unknown_after_the_ledger():
+    """The Mac took the approval's ledger entry, then something went wrong: UNKNOWN, whatever its steps say."""
+    rec = record("UNKNOWN")
+    rec["problems"] = ["Mac 上执行出错：拿到台账以后出错了；先到平台后台核对"]
+    rec["steps"] = [{**write_step("designated", ""), "execute": False}]
+    return rec
+
+
 MAYBE_OPENED = [(DESIGNATED, lambda: record("ACCEPTED_UNVERIFIED")), (DESIGNATED, lambda: record("INDETERMINATE")),
-                (DESIGNATED, lambda: record("UNKNOWN")), (CHANNEL, lambda: record("PARTIAL", channel_id="7000000001")),
-                (CHANNEL, made_then_refused)]
-MAYBE_IDS = ["accepted-unverified", "indeterminate", "unknown", "partial", "made-then-refused"]
+                (DESIGNATED, lambda: record("UNKNOWN")), (DESIGNATED, unknown_after_the_ledger),
+                (CHANNEL, lambda: record("PARTIAL", channel_id="7000000001")), (CHANNEL, made_then_refused)]
+MAYBE_IDS = ["accepted-unverified", "indeterminate", "unknown", "unknown-after-the-ledger", "partial", "made-then-refused"]
 
 
 def maybe_opened(b, clock, raw, rec):
@@ -1471,6 +1479,20 @@ def test_a_check_that_finds_it_on_the_platform_lets_nothing_run(bot, clock):
     jobs = len(bot.relay.store.list_jobs(100))
     out = bot.prm.decide(third["id"], "execute")
     assert not out["ok"] and "结果不确定" in out["error"] and len(bot.relay.store.list_jobs(100)) == jobs
+
+
+def test_not_run_says_the_platform_was_not_touched_and_may_be_approved_again(bot, clock):
+    """The Mac cancelled the execution while it waited for the platform command lock (NOT_RUN, nothing ran): the red
+    mark says the platform was not touched and a draft of it may be approved again, not 「请到平台后台核对」; and a
+    second draft of the same 专属 action is approved at once (nothing to check)."""
+    rec = record("NOT_RUN")
+    rec["problems"] = ["等平台命令锁的时候任务被取消了，没有执行"]
+    first, reply = maybe_opened(bot, clock, DESIGNATED, rec)
+    assert first["status"] == "failed" and first["outcome"] == "platform_not_run"
+    assert "平台没有动" in first["error"] and "可以重新批准" in first["error"] and "等平台命令锁" in first["error"]
+    assert "请到平台后台核对" not in first["error"] and "平台上可能已经开了" not in first["error"]
+    assert f"#{first['id']} 平台动作没有执行" in bot.prm.store.deal(1)["attention"]
+    assert approve(bot, drafted(bot, reply=reply))
 
 
 @pytest.mark.parametrize("rec", [lambda: record("FAILED"), lambda: record("STATE_CONFLICT"), lambda: record("NOT_RUN")],
