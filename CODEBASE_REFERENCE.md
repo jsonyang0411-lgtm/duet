@@ -77,6 +77,7 @@ grep "文件名" CODEBASE_REFERENCE.md
    - [功能M: 微信边缘（PRM_EDGE）](#功能m-微信边缘prm_edge)
    - [功能N: 平台联动（小红书 / 抖音 / 淘宝 / 聚水潭）](#功能n-平台联动小红书--抖音--淘宝--聚水潭)
    - [功能O: 新好友（friend_added / 登记达人里的「新好友」）](#功能o-新好友friend_added--登记达人里的新好友)
+   - [功能P: 达人广场邀约的两段式批量（tools/creator_invite）](#功能p-达人广场邀约的两段式批量toolscreator_invite)
 5. [配置文件和环境变量](#5-配置文件和环境变量)
 
 ---
@@ -182,6 +183,8 @@ grep "文件名" CODEBASE_REFERENCE.md
 |---|---|---|---|---|
 | `PROJECT_ROOT` | `Path` | 自动解析 | `src/config.py` | 项目根目录（`WEBOT_APP_HOME`；frozen EXE 模式下是 EXE 所在目录） |
 | `UI_DIR` | `Path` | `ui/dist/` | `src/web/server.py` | 前端静态文件目录（frozen 时在 `_MEIPASS` 里） |
+| `DEFAULT_HOME` / `COMMISSION_CAP` / `CONTENT_MAX` / `STOP_EXITS` | `Path` / `int` / `int` / `dict` | `~/.claude-relay/platform/creator-invites` / `25` / `150` / `{76, 77, 79}` | `tools/creator_invite/invite.py` | 邀约批量工具的台账和清单默认位置；专属佣金上限（用户的规矩）；邀约文案字数（按 JS 计）；一碰到就停的退出码（见功能 P） |
+| `DEFAULT_TEMPLATES` / `DEFAULT_FIND` / `DEFAULT_RULES` / `CATEGORY_NAMES` | `dict` | 三类话术（`{品牌}` 占位）/ 帽子类目 1000003461、件单价 150–500、两组粉丝范围 / 分类与标记门槛 / 小达人·中大博主·大主播/专场型 | `tools/creator_invite/invite.py` | plan 的默认筛选、分类、话术（配置可覆盖，见 §5.7） |
 | `_LOOPBACK_HOSTS` | `frozenset[str]` | `{"127.0.0.1", "localhost", "::1"}` | `src/web/server.py` | 控制台只接受 Host / Origin 为本机的请求（防 DNS 重绑定、跨站调用） |
 | `_POST_ONLY_PATHS` | `frozenset[str]` | `/api/config`、`/api/config/import`、`/api/start`、`/api/stop`、`/api/onboarding/reset`、`/api/onboarding/step1..3`、`/api/voice/download-model`、`/api/wechat-data-dir/detect`、`/api/relay/cancel`、`/api/prm/parties`、`/api/prm/packets`、`/api/prm/deals`、`/api/prm/reveal` | `src/web/server.py` | 会改状态的端点只认 POST；GET 一律 405（网页可以用 `<img>` 悄悄发 GET，且不带 Origin） |
 | `_SECRET_ENV_KEYS` | `set[str]` | `{"VOICE_OPENAI_API_KEY"}` | `src/web/server.py` | 主配置里唯一的密钥：`/api/load-config` 打码，`/api/config` 和导入时收到打码值就保留原值 |
@@ -649,6 +652,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `tools/wechat_memory_scan.py` | 在微信进程（WeChatWin.dll）的内存里找 64 位十六进制的数据库密钥（排错用） |
 | `tools/macos/weflow_setup.py` / `chatlog_setup.py` / `lldb_keyscan.py` | macOS：准备 WeFlow 直读（诊断账号、导入密钥、验证读取）/ 经本机 chatlog 服务读取 / 用 LLDB 扫内存取密钥（写 `all_keys.json`，不打印密钥） |
 | `tools/claude_relay/worker.py` | Mac 端 worker，见 §2.26 |
+| `tools/creator_invite/invite.py`（+ `paced-dy.mjs`、`paced-jst.mjs`） | 达人广场「邀约带货」两段式批量（Mac 上运行，标准库、Python 3.9）：`plan` 只读出清单、`run --confirm <清单编号>` 只发清单里的人，见 §2.38、功能 P |
 | `scripts/run-tests.sh` | 在一次性干净虚拟环境里安装 `requirements-macos.txt` 和 `requirements-dev.txt` 并跑测试 |
 
 ### 2.23 `src/send/bubbles.py`、`src/send/queue.py`
@@ -986,6 +990,28 @@ Windows `wcdb` 后端旁边的一个线程：每分钟看有变化的私聊，�
 | `NewFriendService(backend, store, *, accepts=None, on_found=(), keep_verify=False, catchup_hours=12, clock, interval=SCAN_SEC, first_wait=FIRST_SCAN_SEC, pause=0.02)` / `start()` / `stop()` / `scan_once()` | 线程 `new-friends`：启动 `first_wait` 秒后第一次看，之后每 `interval` 秒；`scan_once` 从不抛错（第一次失败记 warning，接着失败不再记，成功后恢复）。`backend` 要有 `with_client`、`own_wxid`（可选 `recent_sessions`、`note_private_name`、`catch_up_chat`）；`on_found`：每位新好友的事件字段（边缘的 `friend_added`），哪个出错下一轮再给（同一份，不重新判断）；`keep_verify`（副驾驶）：验证消息 `mask_pii` 打码后存库给控制台 | — |
 | `NewFriendService._scan()` / `_sessions()` / `_report(added, session, now)` / `_display_name(wxid)` / `_tell(event)` | 一次：先补给上次没给出去的；会话列表（轮询循环 `SESSIONS_MAX_AGE` 秒内读过的直接用，否则 `with_client(get_sessions)`；数据库没开就结束）；只留和人的私聊；**第一次（库里没有起点）**：起点 = 现在会话里最新的时间（没有就本机现在），记下，什么都不报；之后：时间比 `mark` 新、这次运行没读过这个时间的会话（没有时间的：整行变了的），旧的在前，最多 `MAX_CHATS_PER_SCAN` 个，每个 `with_client(get_messages(chat, READ_MESSAGES))`（之间停 `pause` 秒让轮询拿锁）；报过的、库里有的跳过；`find_added` 的时间不晚于起点的不报（老好友）。`_report`：名字 = X 或 `get_display_names`，备注只在会话行里有 `remark` 时给，`how`（`requested` / `greeting` 是 `unknown` / 其余 `AcceptLog.judge`），写库（边缘模式不存验证消息），`backend.note_private_name`，日志只写 wxid 前 8 位、`how`、有没有验证消息。`mark` 推到读过的最新时间（没读完的话往回一点点，同一时间的下一轮再读）；每小时 `forget_verify(NEW_DAYS 天前)` | `list[dict]` |
 | `NewFriendService.recent(days=NEW_DAYS)` / `registered(wxid)` / `set_catch_up_sink(sink)` | 控制台的新好友列表 / `PrmService.on_registered`：登记的是 `NEW_DAYS` 天内找到的新好友时，`backend.catch_up_chat(wxid, 名字, since, sink)`，`since` = max(最早的验证消息或加上的时间, 现在 − max(`PRM_CATCHUP_HOURS`, 5 分钟))，`sink` 调 `PrmService.take_new_friend(wxid, 消息, verify_until=加上的时间)`；返回请没请 / 设 `take_new_friend` | `list[dict]` / `bool` / `None` |
+
+---
+
+### 2.38 `tools/creator_invite/invite.py`（达人广场邀约的两段式批量，见功能 P）
+
+| 名称 | 描述 | 返回值 |
+|---|---|---|
+| `load_config(path)` / `find_node(configured="")` / `check_clis(cfg, need=("dy", "jst"))` | 读并检查配置（§5.7）：店铺 ID、子账号必填，联系方式按抽屉的格式、至少一个，专属佣金 1–25，权益只认四个词，商品 1–5 款要有款号，话术 `{品牌}` 换好以后 ≤150 字（JS 计）且不写快递公司，`gap_seconds` ≥ 3，`wait_between` ≥ 10 秒；不合格 → `ToolError`（退出码 2）。`check_clis` 看两个命令行目录里有没有 `bin/dy.mjs` / `bin/jst.mjs` | `dict` / `str\|None` / — |
+| `Clis(cfg, workdir, runner=subprocess.run, stamp=None)` / `.run(which, args, timeout)` / `.env(which)` / `.requests()` | 经 `paced-dy.mjs` / `paced-jst.mjs` 跑命令行（argv 列表、不经 shell），环境里去掉 `DY_TRANSPORT`、设好命令行目录、请求间隔、共用的请求钟（`stamp`，台账目录的 `last-request`）和这次的请求记录；超时不抛，返回 `timed_out` | `CliResult(argv, exit_code, stdout, stderr, seconds, timed_out)`（`.data` 是解析出的 JSON，`.said()` 是 stderr 最后一行） |
+| `must_read(result, what)` | 读命令的 JSON；76 / 77 / 79 → `StopRun`（退出码照原样），其余失败 → `ToolError` | `dict` |
+| `Ledger(folder)` / `.lock()` / `.unlock()` / `.records()` / `.append(record)` / `.never_again()` / `.unknown()` / `.sent_this_week(moment)` | 台账 `invites.jsonl`（只追加、0600、每行 fsync）；`invites.lock` 用 `fcntl.flock` 保证同时只有一个 run；有 `attempt` 而没有 `sent: false` 的 `result` 的抖音号永不再发；本周按北京时间周一 0 点算 | — / `set` / `list` / `int` |
+| `percent(text)` / `hat_share(row)` / `female_share(row)` / `band_min(band)` / `creator_view(row)` | 从 `jst find` 的行读帽子占比、女性粉丝占比（画像只给最大的性别：男性 x% 算女性 100−x）、销售额区间下限、给清单用的字段 | `float\|None` / `dict` |
+| `classify(row, rules)` | 先判专场型（直播为主、近 30 天直播销售额下限 ≥ `big_live_min`、等级 ≥ `big_level_min`），再按粉丝：≥ `mid_fans_min` 中大博主、`small_fans_min`–`small_fans_max` 小达人；其余给出不进清单的原因 | `(类别\|None, 原因\|None)` |
+| `mix_categories(candidates)` | 查状态的先后：每类里没有标记的在前、帽子占比高的在前，再三类轮流（专场型、中大博主、小达人），清单截到 `--count` 时三类都有 | `list[dict]` |
+| `assign_products(avg_price, products)` | 主推：售价最接近件单价的那款；附带：其余有货的、按配置顺序、最多 2 款 | `list[dict]` |
+| `check_stock(cfg, clis)` / `find_creators(cfg, clis)` | `jst goods-detail`（每个款号，加起来是一款的可用库存）/ `jst find`（每组 `queries` 一次，带 `--not-added`） | `list[dict]` |
+| `build_plan(cfg, clis, ledger, count, *, moment=None)` / `make_plan_id(moment)` | plan：库存 → 找达人 → 本地筛（格式、台账、疑似同行自播号、粉丝范围；女粉 < `female_min`、帽子占比 < `low_hat_share` 只标记）→ `mix_categories`（每类里没标记、帽子占比高的在前，三类轮流）→ 每 20 位一次 `dy buyin author-invite-status`（够数就不再查；查过能邀但超出人数的进 `spare`）→ 配商品和话术；本周额度取自状态浮层 | 清单 `dict`（`plan_id`、`settings`、`products`、`weekly_quotas`、`creators`、`spare`、`excluded`、`not_checked`、`requests`） |
+| `plan_markdown(plan, plan_file)` / `excluded_table(w, rows)` / `plan_csv(plan)` / `write_plan(plan, out_dir)` | 给人看的清单（按三类分表、商品与库存、话术原文与字数、疑似同行自播号单列、其他没进的和原因）和 CSV；三份文件 0600 | `str` / `dict[str, Path]` |
+| `invite_args(cfg, plan, creator)` / `load_plan(path)` | `dy buyin author-invite` 的参数（`--name=value`，带 `--commission-rate`、`--expect-shop-id`、`--no-open`）/ 读清单并认出是 plan 写的 | `list[str]` / `dict` |
+| `run_plan(cfg, plan, confirm, clis, ledger, *, limit=None, sleep, uniform, clock)` | run：编号、清单年龄、佣金与权益和配置一致才开始；每位：台账去重、每周上限 → 两位之间等 `wait_between` → 预览（状态 1、门槛 -1、没被拦才往下；额度剩下不到 `quota_margin` 就停）→ 写 `attempt` → `--expect-status=1 --expect-popwindow=-1 --execute` → 写 `result`；76 / 77 / 79、超时、130、没结果都停，`STATE_CONFLICT` 跳过继续，连续 3 位预览失败停 | 执行摘要 `dict`（`sent`、`skipped`、`conflicts`、`stopped`、`unknown_before`、`sent_this_week`、`requests`） |
+| `run_markdown(summary)` / `main(argv=None, *, runner, sleep, uniform, clock, stdout=None)` | 执行记录（停在第几位、为什么）/ 命令行入口：`plan`、`run`、`status`；返回退出码（run 停在 76 / 77 / 79 时照原样） | `str` / `int` |
+| `paced-dy.mjs` / `paced-jst.mjs` | Node 包装：从 `CREATOR_INVITE_CLI_ROOT` 载入命令行原样运行，给抖音页面传输的 `PageTransport.prototype.request` / 聚水潭的 `fetchImpl` 排队、按 `CREATOR_INVITE_STAMP` 的时间至少隔 `CREATOR_INVITE_GAP_MS`，每个请求在 `CREATOR_INVITE_REQUEST_LOG` 记一行（时间、方法、路径） | 命令行自己的退出码 |
 
 ---
 
@@ -2058,6 +2084,36 @@ CREATE TABLE friend_accepts (id INTEGER PRIMARY KEY AUTOINCREMENT, at REAL NOT N
 
 ---
 
+### 功能P: 达人广场邀约的两段式批量（tools/creator_invite）
+
+目的：在巨量百应「达人广场」给一批抖音达人发「邀约带货」卡片，先只读出一份清单给人看，用户对这一份明确同意以后，才一位一位发；每一位都先预览、再绑定预览执行，发一位记一位，绝不重发。不经机器人和 worker，在 Mac 上手动跑（`tools/creator_invite/README.md`）。
+
+```
+invite.py plan --config C --count N
+  → load_config → check_clis → Ledger(--ledger-dir 或 home)
+  → build_plan
+      check_stock：每个款号 node paced-jst.mjs goods-detail --style-code=…（只读）
+      find_creators：每组 queries node paced-jst.mjs find --platform=DY --goods-category=… --price-min/max=… --not-added …（只读）
+      本地筛：抖音号格式 / Ledger.never_again / 帽子 ≥ 90%（疑似同行自播号）/ classify / 女粉 < 60%、帽子 < 1% 标记
+      mix_categories：每类里没标记、帽子占比高的在前，三类轮流
+      每 20 位 node paced-dy.mjs buyin author-invite-status --aweme-id=… --pause-ms=3000 --expect-shop-id=… --no-open（只读）
+      assign_products + templates
+  → write_plan：plan-<编号>.json / .md / .csv（0600）
+
+invite.py run --config C --plan F --confirm <编号>
+  → load_plan → Ledger.lock（invites.lock）
+  → run_plan：每位
+      never_again？跳过 → sent_this_week ≥ weekly_cap？停 → sleep(uniform(15, 30))
+      → 预览 buyin author-invite …（不带 --execute）→ 76/77/79 停；状态 1、门槛 -1 才往下；weeklyQuota 剩下 < quota_margin 停
+      → Ledger.append(attempt)（fsync）→ buyin author-invite … --expect-status=1 --expect-popwindow=-1 --execute
+      → Ledger.append(result: sent true/false/null) → 76/77/79、超时、130、null 停；STATE_CONFLICT 跳过
+  → run-<时间>/report.md（run_markdown）
+```
+
+两个命令行一条都不改：`paced-*.mjs` 只在外面给它们的请求排队放慢（任意两次平台请求之间 ≥ `gap_seconds`，台账目录的 `last-request` 让不同进程也守这个间隔）。
+
+---
+
 ## 5. 配置文件和环境变量
 
 ### 5.1 `.env` 文件完整配置项
@@ -2274,3 +2330,18 @@ Mac worker 的设置文件（`CLAUDE_RELAY_HOME` 可改目录）里的 `platform
 | `jst_logistics` | `list[str]`（也可以是一个 `str`） | `[]` | `config()`：只留 `_LOGISTICS` 格式的快递代码，最多 10 个 | `_jst_spec`：草稿没写 `logistics` 就用第一个；名单不空时写了的要在名单里（不在 → `bad_logistics`）；名单空、草稿也没写 → `no_logistics` |
 | `max_commission_rate` / `max_day_budget` / `min_price_ratio` / `max_sku_prices` / `max_crowds` / `max_sample_skus` / `max_sample_qty` | 数字 | `50` / `300` / `0.5` / `20` / `10` / `10` / `2`（`DEFAULT_LIMITS`） | `config()` → `_limits`：只收大于 0 的数字 | `cfg["limits"]` → `check_action(limits=…)`（`preview`、`execute`、`failed_preview`）；机器人那边不用它，用 `FORM_LIMITS` |
 | `preview_timeout_sec` / `execute_timeout_sec` | 数字（秒） | `300` / `900` | `config()`：30–3600 | `_runner` → `run_cli(timeout=…)` |
+
+### 5.7 `tools/creator_invite` 的配置（JSON，放在仓库外、权限 600；样子见 `tools/creator_invite/config.example.json`，见功能 P）
+
+| 名称 | 类型 | 默认值 | 定义位置 | 消费位置 |
+|---|---|---|---|---|
+| `node` / `dy_dir` / `jst_dir` / `cdp_endpoint` | `str` | 找 PATH 等 / `~/Desktop/douyin-engineering` / `~/Desktop/jushuitan-engineering` / `http://127.0.0.1:9222` | `load_config` | `Clis.run`（argv[0]）、`Clis.env`（`CREATOR_INVITE_CLI_ROOT`、`DY_CDP_ENDPOINT` / `JST_CDP_ENDPOINT`）、`check_clis` |
+| `dy_expect_shop_id` / `jst_expect_uid` | `str`（数字） | 必填 | `load_config` | 每条抖音命令 `--expect-shop-id=`、每条聚水潭命令 `--expect-uid=` |
+| `invite_wechat` / `invite_phone` | `str` | 至少一个 | `load_config`（抽屉的格式） | `invite_args`：`--wechat=` / `--phone=`；清单里只有打码的 |
+| `brand` / `templates` | `str` / `dict` | 空 / `DEFAULT_TEMPLATES` | `load_config`：`{品牌}` 换成 `brand`，≤150 字，不写快递公司 | 清单每位的 `content` → `--content=` |
+| `commission_rate` / `rights` | `int` / `list[str]` | `25` / `["high-commission", "video-material"]` | `load_config`（1–25；四个词） | `invite_args`；`run_plan` 要它们和清单里的一致 |
+| `products` / `min_stock` | `list[dict]` / `int` | 必填 / `10` | `load_config`（1–5 款，`id`、`name`、`price`、`styles`） | `check_stock`、`assign_products` |
+| `find` / `rules` | `dict` | `DEFAULT_FIND` / `DEFAULT_RULES` | `load_config` | `find_creators`；`classify`、疑似同行自播号（`suspect_hat_share` 90）、标记（`female_min` 60、`low_hat_share` 1） |
+| `weekly_cap` / `quota_margin` | `int` | `800` / `50` | `load_config` | `run_plan` 的两条停止条件 |
+| `gap_seconds` / `wait_between` / `plan_max_age_days` | 数字 / `[min, max]` / 数字 | `3`（≥3）/ `[15, 30]`（≥10）/ `3` | `load_config` | `Clis.env`（`CREATOR_INVITE_GAP_MS`）/ `run_plan` 两位之间 / 清单作废 |
+| `home` | `str` | `~/.claude-relay/platform/creator-invites` | `load_config` | 没给 `--ledger-dir` / `--out-dir` 时台账和 `plans/` 的位置 |

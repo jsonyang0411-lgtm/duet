@@ -1,0 +1,44 @@
+{
+  "_说明": "复制一份到仓库外（比如 ~/.claude-relay/platform/creator-invites/config.json，权限 600）再填。店铺 ID、聚水潭子账号、微信号只写在那份里，不进仓库。以 _ 开头的键工具不读。",
+  "node": "",
+  "dy_dir": "~/Desktop/douyin-engineering",
+  "jst_dir": "~/Desktop/jushuitan-engineering",
+  "cdp_endpoint": "http://127.0.0.1:9222",
+  "dy_expect_shop_id": "<抖店店铺 ID，数字>",
+  "jst_expect_uid": "<聚水潭子账号 uid，数字>",
+  "invite_wechat": "<邀约卡上给达人看的店铺微信号>",
+  "invite_phone": "",
+  "brand": "<品牌名，填进话术的 {品牌}>",
+  "commission_rate": 25,
+  "rights": ["high-commission", "video-material"],
+  "products": [
+    {"id": "<抖音商品 ID>", "name": "<名字>", "price": 339, "styles": ["<聚水潭款号>"]},
+    {"id": "<抖音商品 ID>", "name": "<名字>", "price": 228, "styles": ["<款号>", "<款号>"]},
+    {"id": "<抖音商品 ID>", "name": "<名字>", "price": 229, "styles": ["<款号>"]}
+  ],
+  "min_stock": 10,
+  "find": {
+    "goods_category": "1000003461",
+    "price_min": 150,
+    "price_max": 500,
+    "queries": [
+      {"fans_min": 5000, "fans_max": 150000, "pages": 2},
+      {"fans_min": 200000, "pages": 1}
+    ]
+  },
+  "rules": {
+    "small_fans_min": 5000,
+    "small_fans_max": 150000,
+    "mid_fans_min": 200000,
+    "big_live_min": 5000000,
+    "big_level_min": 4,
+    "suspect_hat_share": 90,
+    "female_min": 60,
+    "low_hat_share": 1
+  },
+  "weekly_cap": 800,
+  "quota_margin": 50,
+  "gap_seconds": 3,
+  "wait_between": [15, 30],
+  "plan_max_age_days": 3
+}
