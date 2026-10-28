@@ -29,7 +29,8 @@ for a person (``take_new_friend``).  WeChat's friend notices (「我通过了你
 name, 「你已添加了…」) are never drafted.
 
 A draft with a platform action (platforms.py: 小红书 / 抖音 / 淘宝 CLIs on the Mac) comes
-with the Mac's preview of it and always waits for a person, whatever its kind's gate.
+with the Mac's preview of it and always waits for a person, whatever its kind's gate; so does
+every draft of a next step the bot asked for (a 专属佣金 step, ``meta.system_note``).
 批准并执行 moves it to ``executing`` and queues a ``platform_execute`` job (one approval
 key; the Mac runs the CLI with --execute once and never again for that key); only a
 read-back ``VERIFIED_SUCCESS`` turns it into an approved reply (the link filled in) for
@@ -926,6 +927,11 @@ class PrmService:
         # job of the other lane does not make a draft out of date, nor does a draft supersede the other's.
         lane = LANE_SYSTEM if meta.get("system_note") else LANE_REPLY
         newer = self._relay.store.latest_open(job["chat_id"], drafts_only=True, system=lane == LANE_SYSTEM)
+        # A step the bot asked for whose draft has no platform action (the model left it out, or could
+        # not fill it) and still says something: nothing will happen on the platform, whatever it says.
+        stepless = ("开专属佣金这一步的草稿没带平台动作，平台上什么都不会做；回复要是说开好了，发之前请核对"
+                    if lane == LANE_SYSTEM and draft.platform is None and not refused
+                    and (draft.reply_draft or attachments) else "")
         route, decided_at = gates.REVIEW, None
         if draft.platform is not None:
             # A platform write: always a person's decision (8.1's gates do not apply).
@@ -936,8 +942,10 @@ class PrmService:
             state = SUPERSEDED                         # a person has the chat
         elif newer is not None and newer["id"] > job["id"]:
             state = SUPERSEDED                         # the creator wrote again: a newer draft is coming
-        elif notes:
-            state = PENDING                            # read late: a person decides, whatever the gate
+        elif notes or lane == LANE_SYSTEM:
+            # Read late: a person decides, whatever the gate.  The bot's own next step too: a 专属佣金
+            # step speaks of a platform write, so it never goes out by a gate (mac review F4).
+            state = PENDING
         else:
             route, state, decided_at = deals.route_for(
                 self._store, draft.message_kind, deal=deal, now=now, text=draft.reply_draft,
@@ -955,9 +963,9 @@ class PrmService:
             deal_id=deal_id, party_id=party_id, job_id=job["id"], chat_id=job["chat_id"],
             kind=draft.message_kind, text=draft.reply_draft, attachments=attachments, intent=draft.intent,
             slots=draft.slots, stage_proposal=draft.stage_proposal,
-            needs_attention=draft.needs_attention or bool(short) or bool(refused),
-            reason="；".join(r for r in (refused, short, draft.reason) if r)[:500], status=state, route=route,
-            decided_at=decided_at, meta=packet_meta,
+            needs_attention=draft.needs_attention or bool(short) or bool(refused) or bool(stepless),
+            reason="；".join(r for r in (refused, stepless, short, draft.reason) if r)[:500],
+            status=state, route=route, decided_at=decided_at, meta=packet_meta,
             tool=tool, platform=platform, now=now,
         )
         if state in (PENDING, APPROVED):
@@ -969,6 +977,8 @@ class PrmService:
             attention.append(short)
         if refused:
             attention.append(f"#{job['id']} {refused}")
+        if stepless and state != SUPERSEDED:
+            attention.append(f"#{job['id']} {stepless}")
         if draft.message_kind == "shipping_notice" and draft.reply_draft and not gates.waybill_ok(draft.reply_draft, waybill):
             attention.append("发货通知里的单号和系统记录对不上" if waybill else "还没有运单号，发货通知不能发")
         if draft.platform is not None and draft.platform.get("verdict") != "ready":
@@ -1381,7 +1391,8 @@ class PrmService:
     def _ask_next_step(self, packet: dict, note: str, now: float) -> None:
         """A platform write that leads to the next one (a sample order → its 专属佣金): a draft
         job of its own, told what happened in ``meta.system_note``.  What it drafts is a platform
-        action like any other: previewed on the Mac, approved by a person.  Not for a creator the
+        action like any other: previewed on the Mac, approved by a person; and whatever it drafts
+        waits for a person, whatever its kind's gate (``on_result``: the system lane).  Not for a creator the
         operators took off the list (inactive) or a deal a person has: the deal says so instead."""
         if not note:
             return

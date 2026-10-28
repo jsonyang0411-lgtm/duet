@@ -750,6 +750,40 @@ def test_a_two_product_order_opens_each_commission_in_turn_and_only_the_last_one
         order["deal_id"], tools=("dy.designated_commission",), statuses=("sent",))) == [DY_ITEM, DY_ITEM2]
 
 
+@pytest.mark.parametrize("with_action", [False, True], ids=["reply-only", "with-action"])
+def test_a_commission_step_always_waits_for_a_person_whatever_its_kinds_gate(bot, clock, with_action):
+    """The system lane (meta.system_note) is never sent by a gate: a 专属佣金 step whose draft forgot
+    (or could not fill) the platform action and says 「开好啦」 would tell the creator something
+    nothing on the platform did.  Such a draft waits, and says that it carries no action."""
+    order = ordered(bot, clock)
+    mac_runs(bot, approve(bot, order), record(sample_order_no=JST_ORDER))
+    bot.prm.send_approved()
+    told = list(bot.texts)
+    bot.prm.store.set_gate("other", "auto", clock.now)                       # "other" has earned auto
+    assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": "delivered"})["ok"]
+    step = bot.worker_takes()
+    assert "system_note" in step["meta"]
+    d = draft(message_kind="other", reply_draft="合作这边我给你开好专属佣金啦，明天 0 点生效～", slots={},
+              stage_proposal="", needs_attention=False, reason="开好了")
+    if with_action:
+        d["platform"] = block()
+    bot.finish(step["id"], d)
+    packet = bot.prm.store.packet_for_job(step["id"])
+    assert (packet["status"], packet["route"]) == ("pending", "review") and packet["meta"]["lane"] == "system"
+    if not with_action:
+        assert packet["needs_attention"] and "没带平台动作" in packet["reason"]
+        assert f"#{step['id']} 开专属佣金这一步的草稿没带平台动作" in bot.prm.store.deal(order["deal_id"])["attention"]
+    bot.prm.send_approved()
+    assert bot.texts == told                                                  # nothing went out on its own
+
+
+def test_a_reply_of_the_same_kind_still_goes_out_by_its_gate(bot, clock):
+    """The control: only the system lane is held back, a reply of an auto kind goes out as before."""
+    bot.prm.store.set_gate("other", "auto", clock.now)
+    packet = drafted(bot, preview=False, reply="好的老师～", kind="other")
+    assert (packet["status"], packet["route"]) == ("approved", "auto")
+
+
 def test_a_commission_step_drafted_while_a_person_took_over_is_left_to_them(bot, clock):
     order = ordered(bot, clock)
     mac_runs(bot, approve(bot, order), record(sample_order_no=JST_ORDER))
