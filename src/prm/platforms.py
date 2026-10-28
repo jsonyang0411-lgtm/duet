@@ -1854,6 +1854,9 @@ def _sync_dy(cfg: dict, progress) -> dict:
             continue
         items.append({"id": pid, "title": _clip(row.get("name") or "", 120),
                       "price": _yuan(row.get("discountPrice") or row.get("priceLower"), fen=True), "skus": []})
+        image = image_url("dy", row.get("img"))              # 主图（douyin-engineering 2026-10-28 起输出 img）
+        if image:
+            items[-1]["image"] = image
     if not data.get("complete", True):
         notes.append("抖店商品列表没读完整（页数上限等），目录里可能少了商品")
     by_id = {item["id"]: item for item in items}
@@ -1917,7 +1920,8 @@ def catalog_markdown(catalog: dict) -> str:
     lines = ["# 在售商品目录（自动生成，不要手改）", "",
              f"同步时间：{when}（Mac 上运行 `python3 tools/claude_relay/worker.py --sync-products` 生成）。",
              "起草平台动作（platform_action）时，商品 ID 和 SKU ID 只能从这张表里取；价格是目录里的售价（元），"
-             "专属价、佣金按 kb/ 里的合作规则定。SKU 后面的「编码」是聚水潭的商品编码（有的平台才有）。", ""]
+             "专属价、佣金按 kb/ 里的合作规则定。SKU 后面的「编码」是聚水潭的商品编码（有的平台才有）。"
+             "「款式图」是这款的主图（平台上的第一张），要发给达人看就把这个路径写进 attachments_to_send。", ""]
     for platform in CATALOG_PLATFORMS:
         name = PLATFORMS[platform]
         part = (catalog.get("platforms") or {}).get(platform)
@@ -1932,12 +1936,13 @@ def catalog_markdown(catalog: dict) -> str:
         if part.get("notes"):
             lines.append("")
         if items:
-            lines += ["| 商品 ID | 标题 | 售价（元） | SKU（ID：规格 售价） |", "|---|---|---|---|"]
+            lines += ["| 商品 ID | 标题 | 售价（元） | SKU（ID：规格 售价） | 款式图 |", "|---|---|---|---|---|"]
             for item in items:
                 skus = "；".join((f"{s.get('id')}：{_cell(s.get('name') or '')} {s.get('price') or ''}".strip()
                                  + (f" 编码 {s['code']}" if s.get("code") else ""))
                                 for s in item.get("skus") or [])
-                lines.append(f"| {item.get('id')} | {_cell(item.get('title') or '')} | {item.get('price') or ''} | {skus} |")
+                lines.append(f"| {item.get('id')} | {_cell(item.get('title') or '')} | {item.get('price') or ''} | {skus} |"
+                             f" {item.get('image_file') or '—'} |")
             lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -1953,6 +1958,124 @@ def write_catalog(workspace, catalog: dict) -> list:
         os.replace(str(part), str(path))
         paths.append(path)
     return paths
+
+
+# ── 款式图：目录里每款的主图，下载到 assets/products/ ─────────────────────
+# 起草的 Claude 没有命令行也不能上网：图由 --sync-products 在它之外下好，它只在 attachments_to_send 里
+# 写 kb/products.md 给的路径。只下平台自己图片 CDN 上的地址（不带登录态就能下，2026-10-28 两家各试过）。
+
+IMAGE_DIR = "assets/products"
+IMAGE_HOSTS = {"dy": (".ecombdimg.com",), "xhs": (".xiaohongshu.com",)}
+IMAGE_MAX_BYTES = 10 * 1024 * 1024
+IMAGE_TIMEOUT_SEC = 20
+_IMAGE_FILE = re.compile(r"^(?:dy|xhs|tb)-[0-9A-Za-z]{1,40}\.(?:jpg|png|webp)$")
+
+
+def image_url(platform: str, raw) -> str:
+    """平台给的主图地址，只认这家平台的图片 CDN（http 换成 https）；别的一律不要（""）。"""
+    from urllib.parse import urlsplit
+    text = str(raw or "").strip()
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return ""
+    host = (parts.hostname or "").lower()
+    if parts.scheme not in ("http", "https") or not host or _CONTROL.search(text) or len(text) > 500:
+        return ""
+    if not any(host.endswith(suffix) for suffix in IMAGE_HOSTS.get(platform, ())):
+        return ""
+    return "https://" + text.split("://", 1)[1]
+
+
+def _image_kind(data: bytes) -> str:
+    """文件头认出来的图片格式（jpg / png / webp），认不出 ""。"""
+    if data[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return ""
+
+
+def fetch_image(url: str, platform: str) -> bytes:
+    """下一张图（不走系统代理：平台的 CDN 在国内，直连；跳转到别的主机也不要）。出错抛 RuntimeError。"""
+    import urllib.request
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"}),
+                         timeout=IMAGE_TIMEOUT_SEC) as answer:
+            if not image_url(platform, answer.geturl()):
+                raise RuntimeError("跳到了平台图片 CDN 以外的地址")
+            data = answer.read(IMAGE_MAX_BYTES + 1)
+    except OSError as e:
+        raise RuntimeError(f"下载不了：{_clip(e, 120)}") from None
+    if len(data) > IMAGE_MAX_BYTES:
+        raise RuntimeError(f"超过 {IMAGE_MAX_BYTES // (1024 * 1024)} MB")
+    return data
+
+
+def fetch_images(workspace, catalog: dict, *, previous: Optional[dict] = None, fetch=None, progress=None) -> dict:
+    """把目录里每款的主图下到 assets/products/<平台>-<商品 ID>.<格式>，路径记进 item["image_file"]。
+    地址和上次一样、文件还在的不再下；下不成的这款没有图（这一节的 notes 里记一句）；目录里已经没有的款，
+    它的图删掉（只删这里按规矩命名的文件）。返回 {"fetched", "kept", "failed", "removed"} 的个数。"""
+    fetch = fetch or fetch_image
+    root = Path(workspace)
+    folder = root / IMAGE_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    before = {}
+    for platform, part in (((previous or {}).get("platforms") or {}) if isinstance(previous, dict) else {}).items():
+        for item in (part.get("items") or []) if isinstance(part, dict) else []:
+            if isinstance(item, dict) and item.get("image_file"):
+                before[(platform, str(item.get("id")))] = (item.get("image"), item["image_file"])
+    counts = {"fetched": 0, "kept": 0, "failed": 0, "removed": 0}
+    wanted = set()
+    for platform, part in (catalog.get("platforms") or {}).items():
+        if not isinstance(part, dict):
+            continue
+        failed = 0
+        for item in part.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            item.pop("image_file", None)
+            url = image_url(platform, item.get("image"))
+            if not url or not _IMAGE_FILE.match(f"{platform}-{item.get('id')}.jpg"):     # 商品 ID 拼进文件名，只收字母数字
+                continue
+            old = before.get((platform, str(item.get("id"))))
+            if old and old[0] == url and (root / old[1]).is_file():
+                item["image_file"] = old[1]
+                wanted.add(Path(old[1]).name)
+                counts["kept"] += 1
+                continue
+            try:
+                data = fetch(url, platform)
+                kind = _image_kind(data)
+                if not kind:
+                    raise RuntimeError("下来的不是图片")
+            except Exception as e:
+                failed += 1
+                if progress:
+                    progress(f"{platform} {item.get('id')} 的款式图没下成：{_clip(e, 120)}")
+                if old and (root / old[1]).is_file():         # 上一张还在：先用着，下次同步再换
+                    item["image_file"] = old[1]
+                    wanted.add(Path(old[1]).name)
+                continue
+            name = f"{platform}-{item.get('id')}.{kind}"
+            path = folder / name
+            temp = path.with_name(path.name + ".part")
+            temp.write_bytes(data)
+            os.replace(str(temp), str(path))
+            item["image_file"] = f"{IMAGE_DIR}/{name}"
+            wanted.add(name)
+            counts["fetched"] += 1
+        if failed:
+            part.setdefault("notes", []).append(f"{failed} 款的款式图这次没下载成（有上一张的用上一张，没有的这款没有图）")
+        counts["failed"] += failed
+    for path in folder.iterdir():
+        if _IMAGE_FILE.match(path.name) and path.name not in wanted:
+            path.unlink()
+            counts["removed"] += 1
+    return counts
 
 
 # ── 小红书 (xiaohongshu-engineering, node bin/xhs.mjs) ──────────────────────
@@ -2295,6 +2418,10 @@ def _sync_xhs(cfg: dict, progress) -> dict:
             continue
         items.append({"id": str(row["item_id"]), "title": _clip(row.get("item_name") or "", 120),
                       "price": _yuan(row.get("min_price"), fen=True), "skus": []})
+        pictures = row.get("images") if isinstance(row.get("images"), list) else []     # xiaohongshu-engineering F75
+        image = image_url("xhs", pictures[0].get("link") if pictures and isinstance(pictures[0], dict) else None)
+        if image:
+            items[-1]["image"] = image
         if len(items) >= MAX_CATALOG_ITEMS:
             break
     if isinstance(data, dict) and data.get("complete") is False:

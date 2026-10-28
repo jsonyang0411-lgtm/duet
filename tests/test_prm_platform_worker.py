@@ -184,18 +184,26 @@ def test_without_platforms_the_draft_note_is_unchanged_and_an_action_cannot_run(
     assert not bot.prm.decide(packet["id"], "execute")["ok"]
 
 
-def test_sync_products_writes_the_catalogue(worker, node, tmp_path, workspace):  # noqa: F811
+def test_sync_products_writes_the_catalogue(worker, node, tmp_path, workspace, monkeypatch, capsys):  # noqa: F811
+    image = "https://p3-aio.ecombdimg.com/obj/ecom-shop-material/jpeg_m_test_main"
     node.rules([
         rule(["fxg", "products"], {"site": "fxg", "complete": True, "rows": [
-            {"productId": DY_ITEM, "name": "测试主品", "priceLower": 1999, "discountPrice": 0}]}),
+            {"productId": DY_ITEM, "name": "测试主品", "priceLower": 1999, "discountPrice": 0, "img": image}]}),
         rule(["fxg", "sku-prices"], {"site": "fxg", "rows": []}),
     ])
+    fetched = []
+    monkeypatch.setattr(worker.platforms, "fetch_image",
+                        lambda url, platform: fetched.append(url) or b"\xff\xd8\xff\xe0 a picture")
     config = tmp_path / "config.json"
     config.write_text(json.dumps({"relay_url": "http://127.0.0.1:9", "token": TOKEN, "prm_workspace": str(workspace),
                                   **node.settings(xhs="", tb="")}), encoding="utf-8")
     assert worker.main(["--config", str(config), "--sync-products"]) == 0
     md = (workspace / "kb" / "products.md").read_text(encoding="utf-8")
-    assert f"| {DY_ITEM} | 测试主品 | 19.99 |" in md
+    assert f"| {DY_ITEM} | 测试主品 | 19.99 |  | assets/products/dy-{DY_ITEM}.jpg |" in md
+    assert fetched == [image] and (workspace / "assets" / "products" / f"dy-{DY_ITEM}.jpg").is_file()
+    assert "款式图：新下 1 张" in capsys.readouterr().out
+    assert worker.prm_asset(workspace, f"assets/products/dy-{DY_ITEM}.jpg") is not None   # a draft may send it
+    assert worker.main(["--config", str(config), "--sync-products"]) == 0 and fetched == [image]   # kept, not fetched again
     assert worker.main(["--config", str(config), "--sync-products", "--platforms", "pdd"]) == 2
 
 
