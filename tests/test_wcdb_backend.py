@@ -373,9 +373,10 @@ class WcdbBackendStandardizeTests(unittest.TestCase):
 
 
 class PrivateChatNameFallbackTests(unittest.TestCase):
-    """A creator's private chat not read yet gets the name WeChat lists it under
-    (data/private_chat_names.json) for a send; looking it up does not make the chat read, and a
-    name another chat has is never typed into WeChat's search (the send is refused)."""
+    """A private chat not read yet (a creator just put on the list, PRM or the WeChat edge sending to
+    her first) gets the name WeChat lists it under (data/private_chat_names.json), and is read from
+    the next poll on (fd9419b: our line and her answer are read at once).  A name another chat has is
+    never typed into WeChat's search (the send is refused); the chat is read all the same."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -391,22 +392,26 @@ class PrivateChatNameFallbackTests(unittest.TestCase):
         self.typed = []
         self.backend._send_and_confirm = lambda name, chat, text: self.typed.append((name, chat)) or True
 
-    def test_a_listed_private_chat_gets_its_name(self):
+    def test_a_listed_private_chat_gets_its_name_and_is_read_from_then_on(self):
         self.assertEqual(self.backend._talker_to_name("wxid_new"), "小丽")
+        self.assertEqual(self.backend._chat_names["wxid_new"], "小丽")         # polled from the next cycle
+        self.assertFalse(self.backend._chat_is_group["wxid_new"])
         self.assertIs(self.backend.send_text("wxid_new", "你好"), True)
         self.assertEqual(self.typed, [("小丽", "wxid_new")])
-        self.assertNotIn("wxid_new", self.backend._chat_names)      # the session refresh decides that
 
-    def test_a_name_another_chat_has_is_not_used(self):
-        self.assertEqual(self.backend._talker_to_name("wxid_twin"), "测试群")
+    def test_a_name_another_chat_has_is_refused_but_the_chat_is_read(self):
         refused = self.backend.send_text("wxid_twin", "你好")
         self.assertFalse(refused)
         self.assertIn("「测试群」", refused.reason)
+        self.assertEqual(self.backend._chat_names, {"room1@chatroom": "测试群", "wxid_twin": "测试群"})
         self.assertFalse(self.backend.send_text("room1@chatroom", "大家好"))    # nor the group itself
         self.assertEqual(self.typed, [])
-        self.assertEqual(self.backend._chat_names, {"room1@chatroom": "测试群"})
+
+    def test_a_chat_without_a_listed_name_is_refused_and_not_read(self):
         self.assertEqual(self.backend._talker_to_name("wxid_unknown"), "")
         self.assertIn("不知道这个聊天在微信里叫什么", self.backend.send_text("wxid_unknown", "你好").reason)
+        self.assertEqual(self.backend._talker_to_name("room2@chatroom"), "")    # a group is never looked up
+        self.assertEqual(self.backend._chat_names, {"room1@chatroom": "测试群"})
 
 
 if __name__ == "__main__":

@@ -49,6 +49,7 @@ class WeChat:
         self.clock = clock
         self.names: dict[str, str] = {}
         self.chats: dict[str, list[dict]] = {}
+        self.hidden: set[str] = set()            # chats not in the session list (deleted from WeChat's)
         self.count = 0
 
     def chat(self, wxid, name):
@@ -64,7 +65,7 @@ class WeChat:
 
     # what WcdbNativeClient offers
     def get_sessions(self, limit=500):
-        return [{"username": chat} for chat in self.chats]
+        return [{"username": chat} for chat in self.chats if chat not in self.hidden]
 
     def get_messages(self, talker, limit=50, offset=0):
         return [dict(m) for m in self.chats.get(talker, [])[:limit]]
@@ -272,6 +273,35 @@ def test_two_private_chats_with_one_name_are_not_sent_to_either(gateway, wechat)
     assert FRIEND not in g.backend._chat_names
     refused = g.backend.send_text(CREATOR, "你好")
     assert not refused and "「小美」" in refused.reason and g.window.typed == []
+
+
+@pytest.mark.parametrize("namesake", [False, True], ids=["own name", "a group has her name"])
+def test_a_first_send_to_a_creator_not_read_yet_starts_reading_her(gateway, wechat, tmp_path, namesake):
+    """PRM or the WeChat edge sends to a creator whose chat is not read (WeChat does not list it: the
+    chat was deleted from the list): the name comes from data/private_chat_names.json and her chat is
+    read from the next poll on, so her answer is drafted (fd9419b).  A name a group has too: the send
+    is refused, and her chat is read all the same."""
+    if namesake:
+        wechat.chat(NAMESAKE_GROUP, "小美")
+    wechat.chat(CREATOR, "小美")
+    wechat.hidden.add(CREATOR)
+    (tmp_path / "data").mkdir(exist_ok=True)
+    (tmp_path / "data" / "private_chat_names.json").write_text(
+        json.dumps({CREATOR: "小美"}, ensure_ascii=False), encoding="utf-8")
+    g = gateway()
+    g.prm.register(CREATOR, "小美")
+    g.start()
+    g.poll()
+    assert CREATOR not in g.backend._chat_names                 # not in the session list: not read
+    sent = g.backend.send_text(CREATOR, "你好，我是品牌方小王")
+    if namesake:
+        assert not sent and "「小美」" in sent.reason and g.window.typed == []
+    else:
+        assert sent is True and g.window.typed == [("小美", "你好，我是品牌方小王")]
+    assert g.backend._chat_names[CREATOR] == "小美"              # read from the next poll on
+    wechat.say(CREATOR, CREATOR, "你好呀，在的")
+    g.poll()
+    assert [lines(job) for job in g.jobs()] == [["你好呀，在的"]]
 
 
 def test_a_name_only_one_chat_has_is_sent_to_as_before(gateway, wechat):

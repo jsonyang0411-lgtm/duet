@@ -953,15 +953,20 @@ class WcdbBackend(AbstractWeChatBackend):
 
     def _talker_to_name(self, talker_id: str) -> str:
         """The name WeChat shows for this chat ("" when not known): a chat read; else, for a private
-        chat not read yet (a creator just put on the list), the name the console's list of private
-        chats has (data/private_chat_names.json).  Looking a name up never makes a chat read (the
-        session refresh decides that).  Whether the window may use the name: ``_window_target``."""
+        chat not read yet (a creator just put on the list, or one WeChat does not list any more: PRM
+        or the WeChat edge sends to her first), the name the console's list of private chats has
+        (data/private_chat_names.json), and the chat is read from the next poll on (fd9419b, the
+        Windows PC 2026-10-26: our line and her answer are read at once).  A name another chat has
+        too is added all the same; ``_window_target`` decides whether the window may use it."""
         name = self._chat_names.get(talker_id)
         if name:
             return name
         if talker_id.endswith("@chatroom"):
             return ""
-        return str(self._listed_private_names().get(talker_id) or "").strip()
+        name = str(self._listed_private_names().get(talker_id) or "").strip()
+        if name:
+            self._add_talker(name, talker_id, is_group=False)
+        return name
 
     @staticmethod
     def _listed_private_names() -> dict:
