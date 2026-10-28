@@ -5,7 +5,9 @@
                     ``mode_until`` / ``paused``), the latest slot values, the stage the AI
                     suggests, why a person should look (``notices``, JSON; ``attention`` is
                     their texts, what the console shows), when it was delivered and when its
-                    personal data was cleared (8.2)
+                    personal data was cleared (8.2), and where its 专属佣金 chain stands
+                    (``chain``, JSON: the signature the bot last looked at, the sample order
+                    the chain follows and since when; src/prm/service.py)
 ``action_packets``  every draft reply: what would be sent (text with placeholders,
                     attachments), why, and what became of it
 ``pii_tokens``      the phone and ID numbers behind the placeholders (〈手机1〉): the Mac
@@ -163,6 +165,7 @@ _ADDED_COLUMNS = (
     ("pii_tokens", "purged_at", "REAL"),
     ("action_packets", "platform", "TEXT NOT NULL DEFAULT '{}'"),
     ("deals", "notices", "TEXT NOT NULL DEFAULT '[]'"),
+    ("deals", "chain", "TEXT NOT NULL DEFAULT '{}'"),
 )
 
 # What the creators wrote, or our side's own words, waiting for the next draft job.
@@ -207,6 +210,7 @@ def deal_view(row: dict) -> dict:
     out = dict(row)
     out["slots"] = _loads(row.get("slots"), {})
     out["notices"] = notices_of(row)
+    out["chain"] = _loads(row.get("chain"), {})
     return out
 
 
@@ -358,13 +362,15 @@ class PrmStore:
 
     def update_deal(self, deal_id: int, now: Optional[float] = None, *, merge_slots: Optional[dict] = None,
                     replace_slots: Optional[dict] = None, **fields) -> None:
-        """Set ``fields`` and merge (or replace) the slot values.  (``attention`` is the notices'
-        texts: ``set_notice`` / ``drop_notices`` / ``edit_notices``.)"""
+        """Set ``fields`` and merge (or replace) the slot values; ``chain`` is a dict (stored as JSON).
+        (``attention`` is the notices' texts: ``set_notice`` / ``drop_notices`` / ``edit_notices``.)"""
         allowed = {"stage", "mode", "mode_until", "stage_proposal", "last_message_at",
-                   "delivered_at", "purged_at", "holding_round"}
+                   "delivered_at", "purged_at", "holding_round", "chain"}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"not a deal field: {sorted(unknown)}")
+        if "chain" in fields:
+            fields["chain"] = json.dumps(fields["chain"] or {}, ensure_ascii=False)
         now = time.time() if now is None else now
         with self._lock:
             row = self._conn.execute("SELECT slots FROM deals WHERE id = ?", (deal_id,)).fetchone()
@@ -458,6 +464,13 @@ class PrmStore:
         self.edit_notices(deal_id, edit)
         return changed[0]
 
+    def delivered_deals(self) -> list[dict]:
+        """The deals marked 已签收 whose details were not cleared yet (``delivered_at`` set, no ``purged_at``)."""
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM deals WHERE delivered_at IS NOT NULL AND purged_at IS NULL"
+                                      " ORDER BY id").fetchall()
+        return [deal_view(dict(r)) for r in rows]
+
     def deals_to_purge(self, now: float, days: int) -> list[dict]:
         """Deals whose details are due to be cleared (8.2, ``retention.purge_due_at``)."""
         from .retention import purge_due_at
@@ -527,10 +540,15 @@ class PrmStore:
             ).fetchall()
         return [p for p in (packet_view(dict(r)) for r in rows) if not p["platform"].get("acked_at")]
 
-    def deal_packets(self, deal_id: int, tools: tuple = (), statuses: tuple = ()) -> list[dict]:
+    def deal_packets(self, deal_id: int, tools: tuple = (), statuses: tuple = (),
+                     since: Optional[float] = None) -> list[dict]:
         """A deal's packets, newest first: of these ``tools`` (platform action names) and in these
-        ``statuses`` (all when empty).  Every one of them, however old (a 专属佣金 opened months ago)."""
+        ``statuses`` (all when empty), drafted at ``since`` or later (all when None).  Every one of
+        them, however old (a 专属佣金 opened months ago)."""
         sql, args = "SELECT * FROM action_packets WHERE deal_id = ?", [deal_id]
+        if since is not None:
+            sql += " AND created_at >= ?"
+            args.append(float(since))
         if tools:
             sql += f" AND tool IN ({', '.join('?' * len(tools))})"
             args += list(tools)
@@ -832,12 +850,17 @@ class PrmStore:
             self._conn.commit()
             return int(cur.lastrowid)
 
-    def events(self, deal_id: Optional[int] = None, limit: int = 50, kinds: tuple = ()) -> list[dict]:
-        """The newest events first (of these ``kinds`` only, when given)."""
+    def events(self, deal_id: Optional[int] = None, limit: int = 50, kinds: tuple = (),
+               since: Optional[float] = None) -> list[dict]:
+        """The newest events first (of these ``kinds`` only, when given; recorded at ``since`` or later,
+        when given)."""
         sql, where, args = "SELECT * FROM deal_events", [], []
         if deal_id is not None:
             where.append("deal_id = ?")
             args.append(deal_id)
+        if since is not None:
+            where.append("at >= ?")
+            args.append(float(since))
         if kinds:
             where.append(f"kind IN ({', '.join('?' * len(kinds))})")
             args += list(kinds)

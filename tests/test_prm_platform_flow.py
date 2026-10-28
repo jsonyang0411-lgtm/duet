@@ -15,7 +15,7 @@ from platform_fakes import (
 )
 from src.prm import platforms
 from src.prm.result import DraftError, parse_draft
-from src.prm.service import APPROVED_EXPIRE_SEC, PLATFORM_LOST_GRACE_SEC, SETTLE_SEC
+from src.prm.service import APPROVED_EXPIRE_SEC, PLATFORM_LOST_GRACE_SEC, SETTLE_SEC, apply_deal_action, event_out
 from src.relay.service import LOST_AFTER_SEC
 
 DESIGNATED = {"action": "dy.designated_commission", "item_id": DY_ITEM, "creator_platform_id": DY_UID,
@@ -719,6 +719,119 @@ def test_a_sample_order_verified_late_is_followed_by_its_commission_too(bot, clo
     assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": "delivered"})["ok"]
     step = bot.worker_takes()
     assert step is not None and JST_ORDER in step["meta"]["system_note"]
+
+
+def system_jobs(b):
+    """The 专属佣金 step jobs the bot asked for (``meta.system_note``), newest first."""
+    return [j for j in b.relay.store.list_jobs(500) if "system_note" in j["meta"]]
+
+
+def signed_for_order(b, clock):
+    """A sample order made, verified and its reply sent; the deal waits for the signature."""
+    order = ordered(b, clock)
+    mac_runs(b, approve(b, order), record(sample_order_no=JST_ORDER))
+    b.prm.send_approved()
+    clock.now += 600
+    return order
+
+
+def stopped_console(b, clock, action, **data):
+    """The console with no running service writes the database itself (src/web/server.py _prm_deal)."""
+    assert apply_deal_action(b.prm.store, action, {"deal_id": 1, **data}, now=clock.now, takeover_sec=7200)["ok"]
+
+
+@pytest.mark.parametrize("when", ["start", "tick"])
+def test_signed_for_while_the_bot_was_stopped_is_asked_for_once_it_runs(bot, clock, when):
+    """mac review F2: marked 已签收 while the bot was stopped, the chain never started, and marking it again
+    did nothing either (the signature was known).  The bot looks at a signature it has not seen when it
+    starts and every round after: asked for once."""
+    order = signed_for_order(bot, clock)
+    stopped_console(bot, clock, "stage", stage="delivered")
+    assert system_jobs(bot) == []
+    if when == "start":
+        bot.prm.start()
+        bot.prm.stop()
+    else:
+        bot.prm.tick()
+    [step] = system_jobs(bot)
+    note = json.loads(step["meta"])["system_note"]
+    assert "达人已经签收了寄样单" in note and JST_ORDER in note and DY_ITEM in note
+    bot.prm.tick()
+    assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": "delivered"})["ok"]   # marked again
+    assert len(system_jobs(bot)) == 1
+    [asked] = bot.prm.store.events(order["deal_id"], kinds=("next_step",))
+    assert event_out(asked)["name"] == f"派开专属佣金的任务 #{step['id']}" and asked["detail"]["after"] == order["id"]
+
+
+def test_signed_for_while_stopped_during_a_takeover_is_owed_until_it_ends(bot, clock):
+    """At start a person has the deal: the step is owed like any other (mac review F1), asked for once
+    the deal is back in copilot mode."""
+    signed_for_order(bot, clock)
+    stopped_console(bot, clock, "mode", mode="paused")
+    stopped_console(bot, clock, "stage", stage="delivered")
+    bot.prm.tick()
+    assert system_jobs(bot) == [] and "之后该开专属佣金了：现在不在副驾驶模式" in bot.prm.store.deal(1)["attention"]
+    assert bot.prm.deal_action("mode", {"deal_id": 1, "mode": "copilot"})["ok"]
+    bot.prm.tick()
+    bot.prm.tick()
+    assert len(system_jobs(bot)) == 1 and "该开专属佣金了" not in bot.prm.store.deal(1)["attention"]
+
+
+def test_marked_again_a_signature_whose_step_never_went_out_is_asked_for(bot, clock, monkeypatch):
+    """The step could not be queued when the deal was marked 已签收 (the console's action is done all the
+    same): marking it 已签收 again asks for it; and again does not ask twice."""
+    order = signed_for_order(bot, clock)
+    queue = bot.relay.submit
+
+    def broken(*args, **kwargs):
+        raise OSError("database is locked")
+
+    monkeypatch.setattr(bot.relay, "submit", broken)
+    assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": "delivered"})["ok"]
+    monkeypatch.setattr(bot.relay, "submit", queue)
+    bot.prm.tick()
+    assert system_jobs(bot) == []                                           # the signature is known
+    for _ in range(2):
+        assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": "delivered"})["ok"]
+    assert len(system_jobs(bot)) == 1
+
+
+@pytest.mark.parametrize("left", ["drafted", "opened"])
+def test_a_chain_a_bot_from_before_started_is_not_asked_again(bot, clock, left):
+    """A database from before ``deal.chain`` (a bot that recorded no ``next_step``): its signatures are looked
+    at once at start; one whose step was drafted, or whose products are all open, asks nothing."""
+    order = signed_for_order(bot, clock)
+    assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": "delivered"})["ok"]
+    step = bot.worker_takes()
+    bot.finish(step["id"], {**draft(message_kind="money", reply_draft="", slots={}), "platform": block()})
+    if left == "opened":
+        mac_runs(bot, approve(bot, bot.prm.store.packet_for_job(step["id"])), record())
+        bot.prm.send_approved()
+        final = bot.worker_takes()                                          # 「都开完了」: nothing to fill
+        bot.finish(final["id"], draft(message_kind="other", reply_draft="", slots={}))
+    with bot.prm.store._lock:                                               # what the bot before left
+        bot.prm.store._conn.execute("DELETE FROM deal_events WHERE kind = 'next_step'")
+        bot.prm.store._conn.execute("UPDATE deals SET chain = '{}'")
+        bot.prm.store._conn.commit()
+    jobs = len(system_jobs(bot))
+    clock.now += 60
+    bot.prm.start()
+    bot.prm.stop()
+    assert len(system_jobs(bot)) == jobs
+    assert bot.prm.store.deal(order["deal_id"])["chain"]["seen"] == bot.prm.store.deal(order["deal_id"])["delivered_at"]
+
+
+def test_a_signature_from_before_the_order_waits_for_the_next_one(bot, clock):
+    """Marked 已签收 before the sample order was made (an earlier shipment): not this order's signature.  Set
+    back to 运输中 and signed for again, it is."""
+    stopped_console(bot, clock, "stage", stage="delivered")
+    clock.now += 60
+    signed_for_order(bot, clock)
+    bot.prm.tick()
+    assert system_jobs(bot) == []
+    for stage in ("transit", "delivered"):
+        assert bot.prm.deal_action("stage", {"deal_id": 1, "stage": stage})["ok"]
+    assert len(system_jobs(bot)) == 1
 
 
 def test_a_delivered_deal_without_a_sample_order_asks_for_nothing(bot, clock):
