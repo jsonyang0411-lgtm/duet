@@ -155,12 +155,14 @@ class FakeEdge:
         with self._cond:
             return self._message(P.OPERATOR_MESSAGE, chat_id, text, msg_type, message_id)
 
-    def notice(self, chat_id: str, text: str) -> Optional[dict]:
-        """A system line in the chat, e.g. 「对方撤回了一条消息」."""
+    def notice(self, chat_id: str, text: str, written_at: Optional[int] = None) -> Optional[dict]:
+        """A system line in the chat, e.g. 「对方撤回了一条消息」.  ``written_at``: one handed on late
+        (the restart catch-up), written then."""
         with self._cond:
             if chat_id not in self._parties:
                 return None
-            return self._event(P.CHAT_NOTICE, chat_id=chat_id, text=text)
+            extra = {"written_at": int(written_at)} if written_at else {}
+            return self._event(P.CHAT_NOTICE, chat_id=chat_id, text=text, **extra)
 
     def friend_added(self, wxid: str, name: str = "", *, remark: str = "", verify_text: str = "",
                      how: str = "unknown") -> Optional[dict]:

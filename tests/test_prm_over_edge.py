@@ -186,6 +186,18 @@ def test_a_recall_windows_reports_puts_the_waiting_draft_before_a_person(mac, fa
     assert [e["kind"] for e in mac.prm.store.events(1)] == ["recall", "recall"]
 
 
+def test_a_recall_handed_on_after_a_windows_restart_goes_by_when_it_was_written(mac, fake):
+    """Windows 重启后补交的 chat_notice 带 written_at：按写的时间算晚了多久，不按转过来的时间。
+    13 小时前的撤回超过 PRM_CATCHUP_HOURS，只当历史，等着的草稿不动；同一个事件流里后面那条刚写的照常处理。"""
+    _, packet = drafted(mac, fake)
+    fake.notice(CREATOR, "对方撤回了一条消息", written_at=int(mac.clock.now) - 13 * 3600)
+    fake.notice(CREATOR, "你撤回了一条消息")
+    assert wait_for(lambda: any(e["detail"]["by"] == "operator" for e in mac.prm.store.events(1, kinds=("recall",))))
+    assert [e["detail"]["by"] for e in mac.prm.store.events(1, kinds=("recall",))] == ["operator"]
+    assert not mac.prm.store.packet(packet["id"])["needs_attention"]
+    assert mac.prm.store.packet(packet["id"])["status"] == "pending"
+
+
 # ---- 配置 ----
 
 def test_the_mac_relay_only_listens_on_this_mac():
