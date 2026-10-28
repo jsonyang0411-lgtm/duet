@@ -1140,6 +1140,101 @@ def test_only_a_verified_or_running_one_counts(bot, clock):
     assert not out["ok"] and f"#{retry['id']}" in out["error"]
 
 
+def write_step(name, outcome):
+    """One step of an execution record that ran with --execute."""
+    return {"name": name, "label": name, "execute": True, "command": "node bin/dy.mjs", "exit_code": 0,
+            "seconds": 1.0, "verdict": "", "outcome": outcome, "problems": [], "facts": [], "raw": "{}"}
+
+
+def made_then_refused():
+    """dy.channel_goods: the 渠道品 was made (VERIFIED_SUCCESS), binding the creator was refused: FAILED."""
+    rec = record("FAILED", channel_id="7000000001")
+    rec["steps"] = [write_step("create", "VERIFIED_SUCCESS"), write_step("bind", "FAILED")]
+    return rec
+
+
+MAYBE_OPENED = [(DESIGNATED, lambda: record("ACCEPTED_UNVERIFIED")), (DESIGNATED, lambda: record("INDETERMINATE")),
+                (DESIGNATED, lambda: record("UNKNOWN")), (CHANNEL, lambda: record("PARTIAL", channel_id="7000000001")),
+                (CHANNEL, made_then_refused)]
+MAYBE_IDS = ["accepted-unverified", "indeterminate", "unknown", "partial", "made-then-refused"]
+
+
+def maybe_opened(b, clock, raw, rec):
+    """A draft of this 专属 action approved; the platform may have taken it, the read-back did not prove it."""
+    reply = "链接：{链接}" if raw is CHANNEL else "专属佣金 20% 设好啦，明天 0 点生效～"
+    first = drafted(b, block(raw), reply=reply)
+    mac_runs(b, approve(b, first), rec)
+    no_next_step(b, clock)
+    return b.prm.store.packet(first["id"]), reply
+
+
+@pytest.mark.parametrize("raw, rec", MAYBE_OPENED, ids=MAYBE_IDS)
+def test_a_result_that_may_have_opened_it_stops_a_second_one_until_it_is_checked(bot, clock, raw, rec):
+    """mac review F6: only a verified (or running) one stopped a second approval.  One that ended ACCEPTED_UNVERIFIED,
+    INDETERMINATE, UNKNOWN or PARTIAL (or wrote a step before a later one failed) may well be on the platform: a
+    second draft of the same product and creator is refused, its first's red mark comes back saying what to check,
+    and only 「我已处理」 after that (the operator found it is not there) lets that draft run."""
+    first, reply = maybe_opened(bot, clock, raw, rec())
+    assert first["status"] == "failed" and "平台上可能已经开了" in first["error"]
+    assert bot.prm.decide(first["id"], "ack")["ok"]                          # seen to before: not a check
+    second = drafted(bot, block(raw), reply=reply)
+    jobs = len(bot.relay.store.list_jobs(100))
+    out = bot.prm.decide(second["id"], "execute")
+    assert not out["ok"] and "结果不确定" in out["error"] and "请先到平台后台核对" in out["error"]
+    assert f"#{first['id']}" in out["error"] and "点这一份的「不发」" in out["error"]
+    assert len(bot.relay.store.list_jobs(100)) == jobs                       # nothing goes to the Mac
+    [alert] = snap(bot)["platform_alerts"]                                   # red again, saying what to do now
+    assert alert["id"] == first["id"] and alert["error"].startswith(f"#{second['id']} 要再开同一个商品：先到平台后台核对")
+    assert alert["platform"]["recheck_for"] == second["id"] and alert["platform"]["acked_at"] is None
+    assert f"#{first['id']} 的结果不确定，#{second['id']} 要再开同一个商品" in bot.prm.store.deal(1)["attention"]
+    assert not bot.prm.decide(second["id"], "execute")["ok"]                 # not checked yet
+    assert bot.prm.decide(first["id"], "ack") == {"ok": True, "released": second["id"]}   # it is not there
+    assert snap(bot)["platform_alerts"] == [] and "结果不确定" not in bot.prm.store.deal(1)["attention"]
+    job = approve(bot, second)
+    assert json.loads(job["meta"])["op"] == "platform_execute"
+    names = [event_out(e)["name"] for e in bot.prm.store.events(1, kinds=("platform_recheck",))]
+    assert names == [f"#{first['id']} 的结果不确定，#{second['id']} 要再开同一个商品：先核对平台"] * 2
+
+
+def test_a_check_lets_only_the_draft_it_was_asked_for_run(bot, clock):
+    """「我已处理」 answers the draft that asked: another draft of the same product asks again (and takes the check
+    over); once one of them runs, the other is refused as running."""
+    first, reply = maybe_opened(bot, clock, DESIGNATED, record("UNKNOWN"))
+    second = drafted(bot, reply=reply)
+    assert not bot.prm.decide(second["id"], "execute")["ok"]
+    assert bot.prm.decide(first["id"], "ack")["released"] == second["id"]
+    third = drafted(bot, reply=reply)
+    out = bot.prm.decide(third["id"], "execute")
+    assert not out["ok"] and "结果不确定" in out["error"]
+    assert [a["id"] for a in snap(bot)["platform_alerts"]] == [first["id"]]
+    assert bot.prm.decide(first["id"], "ack")["released"] == third["id"]
+    approve(bot, third)
+    out = bot.prm.decide(second["id"], "execute")
+    assert not out["ok"] and "正在执行" in out["error"] and f"#{third['id']}" in out["error"]
+
+
+def test_a_check_that_finds_it_on_the_platform_lets_nothing_run(bot, clock):
+    """It is there: the operator drops the draft that asked, then marks the red one 「我已处理」 as it says.  A later
+    draft of the same product is asked about again; nothing reaches the Mac."""
+    first, reply = maybe_opened(bot, clock, DESIGNATED, record("ACCEPTED_UNVERIFIED"))
+    second = drafted(bot, reply=reply)
+    assert not bot.prm.decide(second["id"], "execute")["ok"]
+    assert bot.prm.decide(second["id"], "drop")["ok"] and bot.prm.decide(first["id"], "ack")["ok"]
+    third = drafted(bot, reply=reply)
+    jobs = len(bot.relay.store.list_jobs(100))
+    out = bot.prm.decide(third["id"], "execute")
+    assert not out["ok"] and "结果不确定" in out["error"] and len(bot.relay.store.list_jobs(100)) == jobs
+
+
+@pytest.mark.parametrize("rec", [lambda: record("FAILED"), lambda: record("STATE_CONFLICT"), lambda: record("NOT_RUN")],
+                         ids=["failed", "state-conflict", "not-run"])
+def test_a_result_that_wrote_nothing_does_not_stop_a_second_one(bot, clock, rec):
+    """The platform refused it, it was not sent, it did not run: nothing to check, a second draft may run."""
+    first, reply = maybe_opened(bot, clock, DESIGNATED, rec())
+    assert "平台上可能已经开了" not in first["error"]
+    assert approve(bot, drafted(bot, reply=reply))
+
+
 @pytest.mark.parametrize("raw, again", [
     ({"action": "dy.channel_goods", "item_id": DY_ITEM, "creator_platform_id": DY_UID, "price": "15"},
      {"action": "dy.channel_goods", "item_id": DY_ITEM, "creator_platform_id": DY_UID, "price": "14"}),

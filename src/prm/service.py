@@ -222,6 +222,7 @@ EVENT_NAMES = {
     "platform_execute": "批准执行平台动作", "platform_result": "平台动作结果",
     "platform_preview": "重新预览平台动作", "platform_ack": "平台动作已处理",
     "recall": "撤回了一条消息", "draft_failed": "草稿没写成", "next_step": "派开专属佣金的任务",
+    "platform_recheck": "平台动作要先核对",
 }
 # A creator's message recorded without a draft because it was read too late (PRM_CATCHUP_HOURS).
 MISSED_EVENT_NAME = "机器人没在读时达人的消息（没有起草）"
@@ -238,6 +239,8 @@ def event_out(ev: dict) -> dict:
         name = f"#{detail['job']} 草稿没写成"
     elif ev["kind"] == "next_step" and detail.get("job"):
         name = f"派开专属佣金的任务 #{detail['job']}"
+    elif ev["kind"] == "platform_recheck" and detail.get("packet"):
+        name = f"#{detail['packet']} 的结果不确定，#{detail.get('for')} 要再开同一个商品：先核对平台"
     return {"id": ev["id"], "kind": ev["kind"], "name": name,
             "actor": ev.get("actor", ""), "at": ev["at"], "detail": detail}
 
@@ -276,6 +279,7 @@ def platform_out(p: dict) -> Optional[dict]:
             "late": bool(execution.get("late")), "finished_at": execution.get("finished_at"),
         },
         "acked_at": data.get("acked_at"),
+        "recheck_for": (data.get("recheck") or {}).get("for"),
     }
 
 
@@ -1578,10 +1582,12 @@ class PrmService:
             return {"ok": False, "error": f"预览没通过，不能执行：{why}"}
         if data.get("previewing"):
             return {"ok": False, "error": "正在重新预览，等结果出来再批准"}
-        opened = self._opened_before(packet)
+        opened, unsure = self._opened_before(packet)
         if opened:
-            logger.warning("PRM: packet %d not approved: its %s ran before for this product and creator",
-                           packet["id"], action.get("action"))
+            logger.warning("PRM: packet %d not approved: its %s ran before for this product and creator%s",
+                           packet["id"], action.get("action"), " (a result not known: to be checked)" if unsure else "")
+            if unsure:
+                self._ask_recheck(packet, unsure, now)
             return {"ok": False, "error": opened}
         final = packet["text"] if text is None else str(text).strip()
         if len(final) > MAX_DRAFT_CHARS:
@@ -1602,11 +1608,13 @@ class PrmService:
             return {"ok": False, "error": "这个微信后端不能发文件（只有 Windows 数据库直读能发）"}
         approved = {**data, "key": uuid.uuid4().hex, "approved_at": now}
         with self._approve_lock:              # two drafts of one product approved at the same moment: one runs
-            opened = self._opened_before(packet)
+            opened, unsure = self._opened_before(packet)
             moved = not opened and self._store.move(
                 packet["id"], (PENDING,), EXECUTING, decided_at=now, final_text=final,
                 edited=int(final != packet["text"]), platform=approved)
         if opened:
+            if unsure:
+                self._ask_recheck(packet, unsure, now)
             return {"ok": False, "error": opened}
         if not moved:
             return {"ok": False, "error": "这条草稿已经处理过了（或者达人又发了新消息，草稿已过时）"}
@@ -1628,32 +1636,71 @@ class PrmService:
         logger.info("PRM: packet %d approved; %s goes to the Mac as job #%d", packet["id"], action["action"], job_id)
         return {"ok": True, "status": EXECUTING, "job": job_id}
 
-    def _opened_before(self, packet: dict) -> str:
-        """Why this draft's 专属 action (``ONCE_ACTIONS``) must not run: another draft of the deal has
-        the same action for the same product and creator, verified on the platform (its reply sent,
-        about to go, or held back) or running on the Mac now.  The ledger on the Mac only stops one
-        approval from running twice; this stops a second draft (a chain picked up again while a step
-        runs, a reply that carries a commission against kb/).  "" = it may run."""
+    def _opened_before(self, packet: dict) -> tuple:
+        """``(why, unsure)``: why this draft's 专属 action (``ONCE_ACTIONS``) must not run ("" = it may), and the
+        drafts whose result an operator has to check on the platform first.  Another draft of the deal has the
+        same action for the same product and creator (``platform_state``): running on the Mac now, verified on
+        the platform (its reply sent, about to go, or held back), or ended with a result that may have opened it
+        (mac review F6: ACCEPTED_UNVERIFIED, INDETERMINATE, UNKNOWN, PARTIAL …, a step of it that wrote): that
+        one stops it until an operator, asked for this draft (``_ask_recheck``), found on the platform that it
+        is not there and said so with 「我已处理」 on that red draft (``_released``).  One that wrote nothing
+        (FAILED, STATE_CONFLICT, NOT_RUN, no step that wrote) does not count.  The ledger on the Mac only stops
+        one approval from running twice; this stops a second draft (a chain picked up again while a step runs,
+        a reply that carries a commission against kb/)."""
         data = packet["platform"]
         action = data.get("action") or {}
         name = action.get("action")
         if name not in ONCE_ACTIONS:
-            return ""
+            return "", []
         item, creators = action_target(action, data)
+        what = f"商品 {item} 给达人 {action.get('creator_platform_id')} 的「{platforms.label(name)}」"
+        unsure = []
         for other in self._store.deal_packets(packet["deal_id"], tools=(name,),
                                               statuses=(EXECUTING, APPROVED, SENDING, SENT, FAILED)):
             theirs = other["platform"] or {}
             their_item, their_creators = action_target(theirs.get("action") or {}, theirs)
             if other["id"] == packet["id"] or their_item != item or not (creators & their_creators):
                 continue
-            what = f"商品 {item} 给达人 {action.get('creator_platform_id')} 的「{platforms.label(name)}」"
-            if other["status"] == EXECUTING:
+            state = platform_state(other)
+            if state == "running":
                 at = float(theirs.get("approved_at") or other.get("decided_at") or other["created_at"])
-                return f"{what}正在执行（#{other['id']}，{_date_text(at)} 批准），不能再开一次。{REOPEN_HINT}"
-            if other["status"] != FAILED or (theirs.get("execution") or {}).get("outcome") == platforms.VERIFIED:
+                return f"{what}正在执行（#{other['id']}，{_date_text(at)} 批准），不能再开一次。{REOPEN_HINT}", []
+            if state == "verified":
                 at = float(other.get("sent_at") or other.get("decided_at") or other["created_at"])
-                return f"{what}已经在 #{other['id']}（{_date_text(at)}）开过了，平台上核验成功，不能再开一次。{REOPEN_HINT}"
-        return ""
+                return f"{what}已经在 #{other['id']}（{_date_text(at)}）开过了，平台上核验成功，不能再开一次。{REOPEN_HINT}", []
+            if state == "uncertain" and not _released(other, packet["id"]):
+                unsure.append(other)
+        if not unsure:
+            return "", []
+        newest = unsure[0]
+        outcome = ((newest["platform"] or {}).get("execution") or {}).get("outcome") or "UNKNOWN"
+        at = float((newest["platform"] or {}).get("approved_at") or newest.get("decided_at") or newest["created_at"])
+        ids = "、".join(f"#{u['id']}" for u in unsure)
+        return (f"{what}上次在 {ids}（{_date_text(at)} 批准）的结果不确定（{outcome}：{platforms.outcome_text(outcome)}），"
+                "平台上可能已经开了，不能直接再开。请先到平台后台核对：平台上确实没有，就在「待审批」最上面 "
+                f"{ids} 的红色提醒上点「我已处理」，再回来批准这一份；平台上已经有了，点这一份的「不发」"), unsure
+
+    def _ask_recheck(self, packet: dict, unsure: list, now: float) -> None:
+        """This draft was refused for the uncertain result of ``unsure`` (``_opened_before``): each of them is
+        red on 待审批 again (its 「我已处理」 shows once more, whether or not it was clicked before), its error
+        and the deal's notice say what the operator is to check and what 「我已处理」 means now, and it keeps
+        which draft asked (``recheck``: ``for``, ``at``, the error it had).  「我已处理」 after this lets this
+        draft, and only this one, run (``_released``)."""
+        asking = packet["id"]
+        ask = (f"#{asking} 要再开同一个商品：先到平台后台核对。平台上确实没有，点这里的「我已处理」，再去批准 #{asking}；"
+               f"平台上已经有了，先点 #{asking} 的「不发」，再点这里的「我已处理」")
+        for other in unsure:
+            before = ((other["platform"] or {}).get("recheck") or {})
+            error = str((before.get("error") if "error" in before else other.get("error")) or "")
+            done = self._store.edit_platform(
+                other["id"], lambda data: {**data, "acked_at": None, "recheck": {"for": asking, "at": now, "error": error}},
+                (FAILED,), error=lambda _: f"{ask}。上次的结果：{error}"[:500])
+            if done is None:
+                continue
+            self._store.set_notice(other["deal_id"], f"platform:{other['id']}", f"#{other['id']} 的结果不确定，{ask}", now)
+            self._store.add_event(other["deal_id"], other["party_id"], "platform_recheck",
+                                  {"packet": other["id"], "for": asking}, actor="console", now=now)
+            logger.info("PRM: packet %d's uncertain result is to be checked before packet %d may run", other["id"], asking)
 
     def _repreview(self, packet: dict, now: float) -> dict:
         """Ask the Mac for a new preview of a waiting draft's action (after a login, say)."""
@@ -1680,16 +1727,22 @@ class PrmService:
         return {"ok": True, "status": PENDING, "job": job_id}
 
     def _ack(self, packet: dict, now: float) -> dict:
-        """An operator has dealt with a platform action that ended red."""
+        """An operator has dealt with a platform action that ended red.  Asked to check it for a draft of the
+        same 专属 action (``recheck``): the operator found it is not on the platform, and that draft may run."""
         if packet.get("tool", MESSAGE_TOOL) == MESSAGE_TOOL or packet["status"] != FAILED:
             return {"ok": False, "error": "只有没完成的平台动作能标为已处理"}
-        data = packet["platform"]
-        if data.get("acked_at") or not self._store.set_platform(packet["id"], {**data, "acked_at": now}, (FAILED,)):
+        data = self._store.edit_platform(packet["id"], lambda d: None if d.get("acked_at") else {**d, "acked_at": now},
+                                         (FAILED,))
+        if data is None:
             return {"ok": False, "error": "已经标过了"}
-        self._store.add_event(packet["deal_id"], packet["party_id"], "platform_ack", {"packet": packet["id"]},
+        released = (data.get("recheck") or {}).get("for")
+        self._store.add_event(packet["deal_id"], packet["party_id"], "platform_ack",
+                              {"packet": packet["id"], **({"recheck_for": released} if released else {})},
                               actor="console", now=now)
         self._store.drop_notices(packet["deal_id"], lambda n: n["key"] == f"platform:{packet['id']}", now)
-        return {"ok": True}
+        if released:
+            logger.info("PRM: packet %d checked on the platform (not there): packet %s may run", packet["id"], released)
+        return {"ok": True, **({"released": released} if released else {})}
 
     def _on_platform_job(self, job: dict, meta: dict, now: float) -> bool:
         """The Mac's answer to a platform job: a new preview, or the execution's outcome."""
@@ -1795,8 +1848,11 @@ class PrmService:
         elif outcome == platforms.VERIFIED:        # verified, but the job was cancelled on the way
             error = "平台上已经核验成功，但执行任务中途被取消了，回复没有自动发出；请核对后自己回达人"
         else:
+            maybe = (action.get("action") in ONCE_ACTIONS
+                     and written_state(record, packet.get("outcome", "")) == "uncertain")
             error = (f"平台动作没有核验成功（{outcome}：{platforms.outcome_text(outcome)}），没有发微信"
-                     + (f"：{why}" if why else "") + "。请到平台后台核对后自己处理，系统不会重试")[:500]
+                     + (f"：{why}" if why else "") + "。请到平台后台核对后自己处理，系统不会重试"
+                     + ("；平台上可能已经开了：同一个商品给这位达人再批准时，系统会先请你核对" if maybe else ""))[:500]
         if self._store.move(packet["id"], (EXECUTING,), FAILED, outcome=f"platform_{outcome.lower()}", sent_at=now,
                             error=error, platform=executed):
             self._store.add_event(packet["deal_id"], packet["party_id"], "platform_result", event, actor="mac", now=now)
@@ -2205,14 +2261,53 @@ def order_items(action: dict) -> list:
     return ids
 
 
+# The results of an execution that wrote nothing on the platform, when no step of it wrote either.
+NOT_WRITTEN = ("FAILED", "STATE_CONFLICT", "NOT_RUN")
+
+
+def written_state(execution: Optional[dict], packet_outcome: str = "") -> str:
+    """What an execution (its record) left on the platform: "verified" (VERIFIED_SUCCESS); "not_done"
+    (FAILED, STATE_CONFLICT or NOT_RUN, and no step of it that ran with --execute wrote: the platform
+    refused, nothing was sent, nothing ran); else "uncertain": it may be there (ACCEPTED_UNVERIFIED,
+    INDETERMINATE, UNKNOWN, PARTIAL, OBSERVED_DESIRED_STATE …, or a step that wrote before a later one
+    failed: a 渠道品 made, its binding refused).  No record at all is NOT_RUN only for a job that never
+    reached the Mac (``platform_not_run``)."""
+    execution = execution or {}
+    outcome = execution.get("outcome") or ("NOT_RUN" if packet_outcome == "platform_not_run" else "UNKNOWN")
+    if outcome == platforms.VERIFIED:
+        return "verified"
+    wrote = any(isinstance(step, dict) and step.get("execute") and step.get("outcome") not in NOT_WRITTEN
+                for step in execution.get("steps") or [])
+    return "not_done" if outcome in NOT_WRITTEN and not wrote else "uncertain"
+
+
+def platform_state(packet: dict) -> str:
+    """Where a platform draft's action stands: "running" (on the Mac now), "verified" (its reply approved,
+    being sent or sent, or held back: a placeholder the platform gave no value for, the reply not sent, a
+    late answer), "uncertain" / "not_done" (it ended red: ``written_state``), or "" (no decision: waiting,
+    not sent, out of date)."""
+    status = packet["status"]
+    if status == EXECUTING:
+        return "running"
+    if status in (APPROVED, SENDING, SENT):
+        return "verified"
+    if status != FAILED:
+        return ""
+    return written_state((packet.get("platform") or {}).get("execution"), packet.get("outcome", ""))
+
+
 def _verified(packet: dict) -> bool:
-    """Was this platform draft's action verified on the platform (VERIFIED_SUCCESS: its reply approved, being
-    sent or sent, or held back: a placeholder the platform gave no value for, the reply not sent, a late
-    answer)?"""
-    if packet["status"] in (APPROVED, SENDING, SENT):
-        return True
-    return packet["status"] == FAILED and (((packet.get("platform") or {}).get("execution") or {}).get("outcome")
-                                           == platforms.VERIFIED)
+    """Was this platform draft's action verified on the platform (``platform_state``)?"""
+    return platform_state(packet) == "verified"
+
+
+def _released(other: dict, packet_id: int) -> bool:
+    """Did an operator, asked to check ``other``'s uncertain result for draft ``packet_id`` (``_ask_recheck``),
+    mark it 「我已处理」 after that: it is not on the platform, that draft may run?"""
+    data = other.get("platform") or {}
+    recheck = data.get("recheck") or {}
+    return (recheck.get("for") == packet_id and data.get("acked_at") is not None
+            and float(data["acked_at"]) >= float(recheck.get("at") or 0))
 
 
 def _order_at(order: dict) -> float:

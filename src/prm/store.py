@@ -621,6 +621,30 @@ class PrmStore:
             self._conn.commit()
             return True
 
+    def edit_platform(self, packet_id: int, edit: Callable[[dict], Optional[dict]], statuses: tuple, *,
+                      error: Optional[Callable[[str], str]] = None) -> Optional[dict]:
+        """Change the platform JSON of a packet that is in one of ``statuses`` in one step under the lock:
+        ``edit(current)`` returns the new JSON, or None for no change; ``error(current error)`` gives its new
+        error text at the same time.  Returns the new JSON (None: not changed)."""
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT platform, error FROM action_packets WHERE id = ? AND status IN ({', '.join('?' * len(statuses))})",
+                (packet_id, *statuses),
+            ).fetchone()
+            if row is None:
+                return None
+            new = edit(_loads(row["platform"], {}))
+            if new is None:
+                return None
+            if error is None:
+                self._conn.execute("UPDATE action_packets SET platform = ? WHERE id = ?",
+                                   (json.dumps(new, ensure_ascii=False), packet_id))
+            else:
+                self._conn.execute("UPDATE action_packets SET platform = ?, error = ? WHERE id = ?",
+                                   (json.dumps(new, ensure_ascii=False), error(row["error"] or ""), packet_id))
+            self._conn.commit()
+            return new
+
     def set_outcome(self, packet_id: int, outcome: str) -> None:
         with self._lock:
             self._conn.execute("UPDATE action_packets SET outcome = ? WHERE id = ?", (outcome, packet_id))
