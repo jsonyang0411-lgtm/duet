@@ -27,14 +27,18 @@ Features:
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import sys
 import threading
 import time
 from contextlib import contextmanager
-from typing import Callable, Iterator
+from pathlib import Path
+from typing import Callable, Iterable, Iterator
 
 from .keyboard import press_key, send_combo
+from .quiet_send import title_names_chat
 from .rail_watch import RailWatcher
 
 logger = logging.getLogger(__name__)
@@ -46,6 +50,11 @@ VK_A = 0x41
 VK_V = 0x56
 
 MAX_ACCEPT_PER_RUN = 10      # a burst of requests is taken in a few runs, not all at once
+# AUTO_ACCEPT_DAILY_MAX's default.  WeChat holds back accounts that take on friends in bulk (「操作过于频繁」,
+# then days without adding friends); people who run business accounts keep automated accepting to a few
+# dozen a day.  50 covers a normal day of creators asking; past it the admin accepts by hand (同意好友).
+DAILY_MAX_DEFAULT = 50
+STUCK_RUNS = 3               # auto-accept checks in a row whose request stayed pending: it pauses
 MAX_KEYWORD_CHARS = 64
 MIN_INTERVAL_SEC = 10        # same floor as AUTO_ACCEPT_INTERVAL_SEC in config validation
 POSTPONE_RETRY_SEC = 15      # while the user is busy, look again this often (not once per interval)
@@ -63,12 +72,39 @@ NOT_FOUND_MARKERS = ("该用户不存在", "用户不存在", "查找失败", "�
 ALREADY_FRIEND_MARKERS = ("音视频通话", "语音聊天", "视频聊天", "朋友资料")   # next to "发消息" on a friend's card
 ADD_BUTTON_LABELS = ("添加到通讯录", "加为朋友", "加为联系人")
 SEND_LABELS = ("发送", "确定", "完成")
+# What WeChat shows when it holds an account back (frequency / risk control), matched in text that was not on
+# the screen before the click (a greeting in 「新的朋友」 may say anything).  「操作过于频繁，请稍后再试」 is the
+# one widely reported; the others are WeChat's words for a restricted account elsewhere, kept as a guess
+# (none of them read on this account yet).  「稍后再试」 also ends a network error: stopping then is the safe side.
+RISK_MARKERS = (
+    "过于频繁", "太频繁", "操作频繁", "频繁操作", "频率过快", "稍后再试",
+    "帐号存在异常", "账号存在异常", "帐号异常", "账号异常", "被限制", "限制使用",
+    "暂时无法添加", "无法添加朋友", "安全风险", "被盗风险", "已达上限", "达到上限",
+)
 ADD_DIALOG_TITLES = ("添加朋友", "Add Friend")   # title of WeChat 4.0's add-friend window (read on a real machine);
                                                 # exact, because the application window is "申请添加朋友"
+# WeChat 4.0's other dialogs, matched exactly (a chat opened in a window of its own has the same process and
+# class, and its title is the chat's name: 「达人朋友群」, 「小朋友」 must never be taken for one).
+APPLY_DIALOG_TITLES = ("申请添加朋友",)         # the application window (probe-apply.txt, real machine 2026-10-23)
+ACCEPT_DIALOG_TITLES = ("通过朋友验证",)         # what 「前往验证」 opens (its title not read on a real machine yet:
+                                                # a window that appears with another title is logged, never used)
+DIALOG_CLASS = "Qt51514QWindowIcon"
+DIALOG_LOOKS = 10                                # a dialog is looked for this many times, 0.1 s apart
 
 
 class _Abort(Exception):
     """The window action cannot go on safely (WeChat lost the foreground, a click failed)."""
+
+
+class AcceptResult(list):
+    """What ``accept_friend_requests`` returns: one ``{"status": "accepted", "timestamp"}`` per request
+    accepted (a list, as before), and why the run ended early: ``error`` (an unexpected error: a pywin32
+    error, a window handle gone; logged with its traceback), ``risk`` (what WeChat said when it held the
+    account back, RISK_MARKERS), ``stuck`` (a request stayed pending after its click)."""
+
+    error: str = ""
+    risk: str = ""
+    stuck: bool = False
 
 
 def _clean_text(text) -> str:
@@ -132,6 +168,21 @@ def _failure(target: str, reason: str, message: str) -> dict:
     return {"ok": False, "target": target, "reason": reason, "message": message}
 
 
+def _risk_line(rows: list[dict], seen=frozenset()) -> str:
+    """The first OCR row that reads like WeChat holding the account back (RISK_MARKERS) and is not in
+    ``seen`` (the cleaned texts that were on the screen before the click); "" when there is none."""
+    for r in rows or []:
+        text = _clean_text(r.get("t", ""))
+        if text and text not in seen and any(marker in text for marker in RISK_MARKERS):
+            return " ".join(str(r.get("t", "")).split())[:100]
+    return ""
+
+
+def _risk_failure(keyword: str, risk: str) -> dict:
+    return _failure(keyword, "risk", f"微信提示「{risk}」，可能是操作太频繁被限制了，已停止：先别再加好友、同意好友，"
+                                     "过几个小时再试")
+
+
 def print_main_window(hwnd: int):
     """A picture of the window taken without bringing it forward (Windows only)."""
     from .ocr.win_ocr import print_window
@@ -172,6 +223,8 @@ class FriendManager:
     ``rect_of`` and ``sleeper`` are seams for tests.  ``on_accepted(at, label)`` hears every
     request it accepted (AUTO_ACCEPT_FRIENDS and the admin's 同意好友 both come here): when, and
     what OCR read beside its button (the new-friend scan tells the bot's accepts from a person's).
+    ``chat_names()`` lists the chats' names (the backend's ``chat_names``): a window titled like one of
+    them is a chat open in a window of its own, never one of WeChat's dialogs.
     """
 
     def __init__(
@@ -184,6 +237,7 @@ class FriendManager:
         sleeper: Callable[[float], None] = time.sleep,
         grab_window: Callable[[int], object] = print_main_window,
         on_accepted: Callable[[float, str], None] | None = None,
+        chat_names: Callable[[], Iterable[str]] | None = None,
     ):
         self._window = window_controller
         self._ocr = ocr_engine
@@ -194,6 +248,7 @@ class FriendManager:
         self._grab_window = grab_window
         self._rail = RailWatcher(self._grab_main_window)
         self._on_accepted = on_accepted
+        self._chat_names = chat_names
 
     def _tell_accepted(self, at: float, label: str) -> None:
         if self._on_accepted is None:
@@ -245,7 +300,10 @@ class FriendManager:
                     logger.warning("Friend management: WeChat could not be brought to the front")
                     yield None
             finally:
-                window._restore_window_state(snapshot, hwnd)
+                try:
+                    window._restore_window_state(snapshot, hwnd)
+                except Exception as e:
+                    logger.warning("Friend management: the WeChat window could not be put back: %s", e)
                 self._return_focus(previous)
 
     def _foreground_window(self) -> int:
@@ -263,7 +321,13 @@ class FriendManager:
         except Exception as e:
             logger.debug("Friend management: focus could not be returned to %s: %s", previous, e)
 
-    def _foreground(self, hwnd: int) -> None:
+    def _foreground(self, hwnd: int, exact: bool = False) -> None:
+        """The window must be in front.  ``exact`` (a dialog of its own): that very window, not just any window
+        of WeChat's process (a chat open in a window of its own is one too, and keys sent to it go out)."""
+        if exact:
+            if not self._window._foreground_matches(hwnd):
+                raise _Abort(f"the dialog (HWND={hwnd}) is not the window in front")
+            return
         if not self._is_wechat_foreground(hwnd):
             raise _Abort("the WeChat window is not in the foreground")
 
@@ -285,21 +349,32 @@ class FriendManager:
 
     # ── Guarded input ───────────────────────────────────────────────────
 
-    def _key(self, hwnd: int, vk: int) -> None:
-        self._foreground(hwnd)
+    def _key(self, hwnd: int, vk: int, exact: bool = False) -> None:
+        self._foreground(hwnd, exact)
         press_key(vk)
 
-    def _combo(self, hwnd: int, mod_vk: int, key_vk: int) -> None:
-        self._foreground(hwnd)
+    def _combo(self, hwnd: int, mod_vk: int, key_vk: int, exact: bool = False) -> None:
+        self._foreground(hwnd, exact)
         send_combo(mod_vk, key_vk)
 
-    def _paste(self, hwnd: int, text: str) -> None:
+    def _paste(self, hwnd: int, text: str, exact: bool = False) -> None:
+        self._foreground(hwnd, exact)                  # before the clipboard is touched
         self._window._clipboard_text(text, hwnd)
         self._sleep(0.15)
-        self._combo(hwnd, VK_CONTROL, VK_V)
+        self._combo(hwnd, VK_CONTROL, VK_V, exact)
 
-    def _click_row(self, hwnd: int, row: dict) -> None:
-        self._foreground(hwnd)
+    def _click_at(self, hwnd: int, x: int, y: int, required: bool = True, exact: bool = True) -> bool:
+        """A click at a position of a dialog of its own, only while that very window is in front (``exact``;
+        otherwise a window of WeChat's process will do: a click only moves the focus, the keys after it are
+        checked exactly).  ``required``: a click that is not delivered stops the action; otherwise it is reported."""
+        self._foreground(hwnd, exact)
+        delivered = bool(self._clicker(x, y))
+        if not delivered and required:
+            raise _Abort("the click was not delivered")
+        return delivered
+
+    def _click_row(self, hwnd: int, row: dict, exact: bool = False) -> None:
+        self._foreground(hwnd, exact)
         rx, ry = _centre(row)
         try:
             left, top, right, bottom = self._rect_of(hwnd)
@@ -328,23 +403,41 @@ class FriendManager:
 
     # ── Accept friend requests ──────────────────────────────────────────
 
-    def accept_friend_requests(self) -> list[dict]:
-        """Open 'New Friends' and accept the pending requests, one by one.
+    def accept_friend_requests(self, limit: int | None = None) -> AcceptResult:
+        """Open 'New Friends' and accept the pending requests, one by one (at most ``limit``, and at most
+        MAX_ACCEPT_PER_RUN; a limit of 0 does not touch the window).
 
         The screen is read again after every click (the list moves), and a request
-        counts as accepted only when its button is gone afterwards.
+        counts as accepted only when its button is gone afterwards.  What WeChat says when it holds the
+        account back (RISK_MARKERS, text new after the click) ends the run (``risk``).
 
         Returns:
-            One ``{"status": "accepted", "timestamp": ...}`` per accepted request.
+            One ``{"status": "accepted", "timestamp": ...}`` per accepted request (``AcceptResult``).
         """
         if self._ocr is None:
             logger.warning("accept_friend_requests: no OCR engine, so nothing can be clicked safely")
-            return []
-        accepted: list[dict] = []
+            return AcceptResult()
+        accepted = AcceptResult()
+        runs = MAX_ACCEPT_PER_RUN if limit is None else max(0, min(MAX_ACCEPT_PER_RUN, int(limit)))
+        if runs == 0:
+            return accepted
+        try:
+            self._accept_in_window(accepted, runs)
+        except Exception as e:
+            # Not an _Abort: a pywin32 error, a window handle gone.  The session put the window back and
+            # gave the focus back; a dialog it opened was closed (_confirm_dialog).  The caller hears why.
+            logger.exception("accept_friend_requests failed")
+            accepted.error = f"{type(e).__name__}: {e}"[:200]
+        if not accepted:
+            logger.info("accept_friend_requests: nothing accepted")
+        return accepted
+
+    def _accept_in_window(self, accepted: AcceptResult, runs: int = MAX_ACCEPT_PER_RUN) -> None:
+        """``accept_friend_requests`` in the window session; the accepted ones go into ``accepted``."""
         clean = False                 # the list was read to its end: no accept button was left
         with self._ui_session() as hwnd:
             if hwnd is None:
-                return accepted
+                return
             try:
                 self._open_new_friends(hwnd)
                 rows = self._capture_ocr()
@@ -356,25 +449,36 @@ class FriendManager:
                         self._sleep(0.6)
                         rows = self._capture_ocr()
 
-                for _ in range(MAX_ACCEPT_PER_RUN):
+                for _ in range(runs):
                     button = _find_row(rows, *ACCEPT_LABELS, exact=True, min_x0=ACCEPT_MIN_X0)
                     if button is None:
                         clean = True
                         break
                     label = _row_label(rows, button)          # read before the click: the list moves
+                    seen = {_clean_text(r.get("t", "")) for r in rows}     # the screen's text before the click
+                    before = self._window_snapshot(hwnd)      # a dialog is a window that appears after it
                     self._click_row(hwnd, button)
                     self._sleep(0.5)
-                    self._confirm_dialog(hwnd)
+                    risk = self._confirm_dialog(hwnd, before)
                     rows = self._capture_ocr()
-                    if _still_there(rows, button):
+                    risk = risk or _risk_line(rows, seen)
+                    if not risk and _still_there(rows, button):
                         for _ in range(3):
                             self._sleep(0.4)
                             rows = self._capture_ocr()
-                            if not _still_there(rows, button):
+                            risk = _risk_line(rows, seen)
+                            if risk or not _still_there(rows, button):
                                 break
+                    risk = risk or self._risk_in_new_windows(hwnd, before)
+                    if risk:
+                        logger.warning("accept_friend_requests: WeChat says %r (it holds the account back?); "
+                                       "stopping", risk)
+                        accepted.risk = risk
+                        break
                     if _still_there(rows, button):
                         logger.warning("accept_friend_requests: a request is still pending after "
                                        "the click; stopping")
+                        accepted.stuck = True
                         break
                     accepted_at = time.time()
                     accepted.append({"status": "accepted", "timestamp": accepted_at})
@@ -385,9 +489,6 @@ class FriendManager:
                     self._rail.settle()       # the badges on the screen now are "nothing to do"
             except _Abort as e:
                 logger.warning("accept_friend_requests stopped: %s", e)
-        if not accepted:
-            logger.info("accept_friend_requests: nothing accepted")
-        return accepted
 
     def _scroll_contacts_top(self, hwnd: int) -> None:
         """Scroll the contacts navigation list back to the top to reveal '新的朋友'."""
@@ -421,48 +522,150 @@ class FriendManager:
         self._click_row(hwnd, row)
         self._sleep(0.6)
 
-    def _confirm_dialog(self, hwnd: int) -> None:
-        """Click the confirmation of the accept dialog, if one opened."""
+    def _confirm_dialog(self, hwnd: int, before: set | None = None) -> str:
+        """Click the confirmation of the accept dialog, if one opened: on the screen of the main window, or
+        (WeChat 4.0) a dialog window that appeared after the click (``before``: the windows until then).  A
+        dialog that cannot be confirmed safely is closed (cancelled) and the run stops.  Returns what WeChat
+        said in a dialog still open after its 确定 when that reads like a risk prompt (it is closed), else ""."""
         row = _find_row(self._capture_ocr(), *CONFIRM_LABELS, exact=True)
         if row is not None:
             self._click_row(hwnd, row)
             self._sleep(0.5)
-            return
-        popup_hwnd = self._find_popup_dialog(hwnd)
-        if popup_hwnd:
+            return ""
+        popup_hwnd = self._find_popup_dialog(hwnd, before)
+        if not popup_hwnd:
+            return ""
+        try:
             self._confirm_popup_dialog(popup_hwnd)
-            self._sleep(0.5)
+        except Exception:
+            self._close_window(popup_hwnd)            # cancelled: nothing typed anywhere else
+            raise
+        self._sleep(0.5)
+        if self._is_window_visible(popup_hwnd):       # still there after 确定: what does it say?
+            risk = _risk_line(self._capture_ocr(popup_hwnd))
+            if risk:
+                self._close_window(popup_hwnd)
+                return risk
+        return ""
 
-    def _find_popup_dialog(self, hwnd: int) -> int | None:
+    def _risk_in_new_windows(self, main_hwnd: int, before: set | None) -> str:
+        """A window of WeChat's that appeared since ``before`` and reads like a risk prompt (a message box of
+        its own): its text (it is closed), else ""."""
+        if before is None or sys.platform != "win32":
+            return ""
+        try:
+            fresh = [h for h in self._process_windows(main_hwnd) if h not in before]
+        except Exception:
+            return ""
+        for h in fresh:
+            risk = _risk_line(self._capture_ocr(h))
+            if risk:
+                self._close_window(h)
+                return risk
+        return ""
+
+    # ── WeChat 4.0's dialogs: windows of their own ─────────────────────
+
+    def _process_windows(self, main_hwnd: int) -> list[int]:
+        """The visible top-level windows of WeChat's process besides the main one (Windows only)."""
+        import win32gui, win32process
+        _, main_pid = win32process.GetWindowThreadProcessId(main_hwnd)
+        found: list[int] = []
+
+        def _enum(h, _):
+            if h != main_hwnd and win32gui.IsWindow(h) and win32gui.IsWindowVisible(h):
+                _, pid = win32process.GetWindowThreadProcessId(h)
+                if pid == main_pid:
+                    found.append(h)
+        win32gui.EnumWindows(_enum, None)
+        return found
+
+    def _window_snapshot(self, main_hwnd: int) -> set | None:
+        """WeChat's windows before a click that may open a dialog: only a window that is not among them can be
+        that dialog.  None when they cannot be listed (then no window is taken for a dialog)."""
         if sys.platform != "win32":
             return None
         try:
-            import win32gui, win32process
-            _, main_pid = win32process.GetWindowThreadProcessId(hwnd)
-            modals = []
-            def _enum(h, _):
-                if h != hwnd and win32gui.IsWindow(h) and win32gui.IsWindowVisible(h):
-                    _, pid = win32process.GetWindowThreadProcessId(h)
-                    if pid == main_pid:
-                        title = win32gui.GetWindowText(h)
-                        if any(kw in title for kw in ("验证", "确定", "朋友")):
-                            modals.append(h)
-            win32gui.EnumWindows(_enum, None)
-            return modals[0] if modals else None
-        except Exception:
+            return set(self._process_windows(main_hwnd))
+        except Exception as e:
+            logger.warning("Friend management: WeChat's windows could not be listed: %s", e)
             return None
 
+    def _is_chat_title(self, title: str) -> bool:
+        """Is this window title a chat's name (with or without a member count)?  Such a window is a chat
+        open in a window of its own."""
+        try:
+            names = list(self._chat_names() or ()) if self._chat_names is not None else []
+        except Exception:
+            logger.debug("Friend management: the chats' names could not be read", exc_info=True)
+            names = []
+        return any(title_names_chat(title, str(name or "")) for name in names)
+
+    def _find_new_dialog(self, main_hwnd: int, before: set | None, titles: tuple, *,
+                         cls: str | None = None, exclude: tuple = ()) -> int | None:
+        """A window of WeChat's process that appeared since ``before`` whose title is exactly one of
+        ``titles`` (and whose class is ``cls``) and is not a chat's name; None if there is none (yet)."""
+        if before is None or sys.platform != "win32":
+            return None
+        try:
+            import win32gui
+            for h in self._process_windows(main_hwnd):
+                if h in before or h in exclude:
+                    continue
+                title = str(win32gui.GetWindowText(h) or "").strip()
+                if title not in titles or (cls and win32gui.GetClassName(h) != cls):
+                    continue
+                if self._is_chat_title(title):
+                    logger.warning("Friend management: a window titled like a chat (%r) is not taken for a dialog",
+                                   title[:20])
+                    continue
+                return h
+        except Exception as e:
+            logger.warning("Friend management: looking for a dialog failed: %s", e)
+        return None
+
+    def _wait_for_dialog(self, main_hwnd: int, before: set | None, titles: tuple, what: str, *,
+                         cls: str | None = None, exclude: tuple = ()) -> int | None:
+        """``_find_new_dialog``, looked for DIALOG_LOOKS times; when it never shows, the titles of the windows
+        that did appear are logged (a WeChat version that titles the dialog otherwise is seen in the log)."""
+        if before is None or sys.platform != "win32":
+            return None
+        for look in range(DIALOG_LOOKS):
+            found = self._find_new_dialog(main_hwnd, before, titles, cls=cls, exclude=exclude)
+            if found:
+                return found
+            if look + 1 < DIALOG_LOOKS:
+                self._sleep(0.1)
+        try:
+            import win32gui
+            others = [str(win32gui.GetWindowText(h) or "")[:20] for h in self._process_windows(main_hwnd)
+                      if h not in before and h not in exclude]
+        except Exception:
+            others = []
+        logger.info("Friend management: no %s appeared%s", what,
+                    f" (new WeChat windows: {others}; not used)" if others else "")
+        return None
+
+    def _find_popup_dialog(self, hwnd: int, before: set | None = None) -> int | None:
+        """WeChat 4.0's confirmation of an accept (「通过朋友验证」): a window that appeared after the click on
+        the accept button (``before``), titled exactly so, not a chat's name.  It used to be the first window
+        of the process whose title contained 验证 / 确定 / 朋友: a chat open in a window of its own
+        (「达人朋友群」, 「小朋友」) was clicked into and got an Enter."""
+        return self._wait_for_dialog(hwnd, before, ACCEPT_DIALOG_TITLES, "confirmation dialog 「通过朋友验证」")
+
     def _confirm_popup_dialog(self, popup_hwnd: int) -> None:
-        if sys.platform == "win32":
-            import ctypes, win32gui
-            ctypes.windll.user32.SetForegroundWindow(popup_hwnd)
-            self._sleep(0.2)
-            rect = win32gui.GetWindowRect(popup_hwnd)
-            cx = rect[0] + int(0.318 * (rect[2] - rect[0]))
-            cy = rect[1] + int(0.930 * (rect[3] - rect[1]))
-            self._clicker(cx, cy)
-            self._sleep(0.2)
-            press_key(0x0D)
+        """Click its 确定 and press Enter, only while that very window is in front (SetForegroundWindow may
+        fail: the click and the Enter would go to whatever window is in front).  ``_Abort`` otherwise."""
+        if sys.platform != "win32":
+            return
+        self._focus_window(popup_hwnd)
+        left, top, right, bottom = self._rect_of(popup_hwnd)
+        cx = left + int(0.318 * (right - left))
+        cy = top + int(0.930 * (bottom - top))
+        if not self._click_at(popup_hwnd, cx, cy, required=False):
+            logger.info("Friend management: the click on 确定 was not delivered; Enter confirms instead")
+        self._sleep(0.2)
+        self._key(popup_hwnd, 0x0D, exact=True)
 
     # ── Add friend ──────────────────────────────────────────────────────
 
@@ -485,14 +688,20 @@ class FriendManager:
         if self._ocr is None:
             return _failure(keyword, "no_ocr", "好友管理需要屏幕识别（OCR），当前不可用")
 
-        with self._ui_session() as hwnd:
-            if hwnd is None:
-                return _failure(keyword, "no_window", "未找到微信主窗口或无法切到前台，请确保微信已启动")
-            try:
-                return self._add_friend_in_window(hwnd, keyword, message)
-            except _Abort as e:
-                logger.warning("add_friend stopped: %s", e)
-                return _failure(keyword, "aborted", f"微信窗口状态异常，已中止：{e}")
+        try:
+            with self._ui_session() as hwnd:
+                if hwnd is None:
+                    return _failure(keyword, "no_window", "未找到微信主窗口或无法切到前台，请确保微信已启动")
+                try:
+                    return self._add_friend_in_window(hwnd, keyword, message)
+                except _Abort as e:
+                    logger.warning("add_friend stopped: %s", e)
+                    return _failure(keyword, "aborted", f"微信窗口状态异常，已中止：{e}")
+        except Exception:
+            # Not an _Abort: a pywin32 error, a window handle gone.  The dialogs it opened were closed
+            # (_add_friend_wechat4), the window put back and the focus returned (_ui_session).
+            logger.exception("add_friend failed")
+            return _failure(keyword, "error", "添加好友时出错，已中止（详见日志）：请在微信里看一下申请发出去没有")
 
     def _find_search_box(self) -> dict | None:
         """The search field's placeholder row in the top left of the window (topmost, then leftmost)."""
@@ -553,27 +762,12 @@ class FriendManager:
         except Exception:
             return False
 
-    def _find_apply_dialog(self, main_hwnd: int, dialog_hwnd: int) -> int | None:
-        if sys.platform != "win32":
-            return None
-        try:
-            import win32gui, win32process
-            if not win32gui.IsWindow(main_hwnd):
-                return None
-            _, main_pid = win32process.GetWindowThreadProcessId(main_hwnd)
-            modals = []
-            def _enum(h, _):
-                if h != main_hwnd and h != dialog_hwnd and win32gui.IsWindow(h) and win32gui.IsWindowVisible(h):
-                    _, pid = win32process.GetWindowThreadProcessId(h)
-                    if pid == main_pid:
-                        cls = win32gui.GetClassName(h)
-                        title = win32gui.GetWindowText(h)
-                        if cls == "Qt51514QWindowIcon" and any(kw in title for kw in ("申请", "验证", "朋友")):
-                            modals.append(h)
-            win32gui.EnumWindows(_enum, None)
-            return modals[0] if modals else None
-        except Exception:
-            return None
+    def _find_apply_dialog(self, main_hwnd: int, dialog_hwnd: int, before: set | None = None) -> int | None:
+        """WeChat 4.0's application window (「申请添加朋友」): a window that appeared after the click on
+        「添加到通讯录」 (``before``), titled exactly so, of the dialogs' class, not the add-friend window, not
+        a chat's name.  It used to be the first window of that class whose title contained 申请 / 验证 / 朋友:
+        a chat open in a window of its own got its input box cleared and the greeting sent into it."""
+        return self._find_new_dialog(main_hwnd, before, APPLY_DIALOG_TITLES, cls=DIALOG_CLASS, exclude=(dialog_hwnd,))
 
     def _open_add_friend_dialog_wechat4(self, main_hwnd: int) -> int | None:
         if sys.platform != "win32":
@@ -586,7 +780,8 @@ class FriendManager:
         # over from an earlier run); otherwise only a window that appears now counts.
         before = self._add_dialog_candidates(main_hwnd)
         for h in before:
-            if win32gui.GetWindowText(h) in ADD_DIALOG_TITLES:
+            title = win32gui.GetWindowText(h)
+            if title in ADD_DIALOG_TITLES and not self._is_chat_title(title):
                 return h
 
         self._combo(main_hwnd, VK_CONTROL, 0x31)    # Ctrl+1: the chat tab, where the (+) is
@@ -646,8 +841,11 @@ class FriendManager:
         def _enum(h, _):
             if h != main_hwnd and win32gui.IsWindow(h) and win32gui.IsWindowVisible(h):
                 _, pid = win32process.GetWindowThreadProcessId(h)
-                if pid == main_pid and win32gui.GetClassName(h) == "Qt51514QWindowIcon":
-                    if win32gui.GetWindowText(h) in ADD_DIALOG_TITLES:
+                if pid == main_pid and win32gui.GetClassName(h) == DIALOG_CLASS:
+                    title = win32gui.GetWindowText(h)
+                    if self._is_chat_title(title):
+                        return                               # a chat open in a window of its own
+                    if title in ADD_DIALOG_TITLES:
                         found.append(h)
                         return
                     r = win32gui.GetWindowRect(h)
@@ -657,10 +855,16 @@ class FriendManager:
         return found
 
     def _add_friend_wechat4(self, hwnd: int, keyword: str, message: str) -> dict:
+        """WeChat 4.0: the add-friend window and the application window are windows of their own.  Every key
+        and paste goes to one of them only while that very window is in front (a chat open in a window of its
+        own belongs to the same process; a click only moves the focus, so WeChat in front is enough for it, as
+        before); the application window is one that appears after the click on 「添加到通讯录」, titled exactly
+        「申请添加朋友」.  When the action stops, both are closed."""
         dialog_hwnd = self._open_add_friend_dialog_wechat4(hwnd)
         if not dialog_hwnd:
             return _failure(keyword, "no_window", "无法打开微信「添加朋友」窗口")
 
+        apply_hwnd = None
         try:
             self._focus_window(dialog_hwnd)
             d_rect = self._rect_of(dialog_hwnd)
@@ -669,21 +873,25 @@ class FriendManager:
 
             input_x = d_rect[0] + int(0.35 * w)
             input_y = d_rect[1] + int(0.118 * h)
-            if not self._clicker(input_x, input_y):
-                raise _Abort("could not click search input box")
+            self._click_at(dialog_hwnd, input_x, input_y, exact=False)   # the search input box
             self._sleep(0.2)
 
-            self._combo(dialog_hwnd, VK_CONTROL, VK_A)
+            self._combo(dialog_hwnd, VK_CONTROL, VK_A, exact=True)
             self._sleep(0.05)
-            self._key(dialog_hwnd, VK_BACK)
+            self._key(dialog_hwnd, VK_BACK, exact=True)
             self._sleep(0.05)
-            self._paste(dialog_hwnd, keyword)
+            self._paste(dialog_hwnd, keyword, exact=True)
             self._sleep(0.2)
-            self._key(dialog_hwnd, 0x0D)
+            self._key(dialog_hwnd, 0x0D, exact=True)
             self._sleep(1.5)
 
             rows = self._capture_ocr(dialog_hwnd)
             card_text = "".join(_clean_text(r.get("t", "")) for r in rows)
+
+            risk = _risk_line(rows)
+            if risk:
+                self._close_window(dialog_hwnd)
+                return _risk_failure(keyword, risk)
 
             if any(marker in card_text for marker in NOT_FOUND_MARKERS):
                 self._close_window(dialog_hwnd)
@@ -698,13 +906,13 @@ class FriendManager:
                 self._close_window(dialog_hwnd)
                 return _failure(keyword, "no_add_button", f"没有找到「{keyword}」的「添加到通讯录」按钮，已中止")
 
+            before = self._window_snapshot(hwnd)                 # the application window appears after the click
             self._click_row(dialog_hwnd, add_button)
             self._sleep(0.8)
 
             # 3. Application modal dialog
-            apply_hwnd = None
-            for _ in range(10):
-                apply_hwnd = self._find_apply_dialog(hwnd, dialog_hwnd)
+            for _ in range(DIALOG_LOOKS):
+                apply_hwnd = self._find_apply_dialog(hwnd, dialog_hwnd, before)
                 if apply_hwnd:
                     break
                 self._sleep(0.1)
@@ -727,13 +935,13 @@ class FriendManager:
                     # Focus the greeting input box near top (cx=0.30, cy=0.18)
                     input_x = a_rect[0] + int(0.30 * a_w)
                     input_y = a_rect[1] + int(0.18 * a_h)
-                    if self._clicker(input_x, input_y):
+                    if self._click_at(apply_hwnd, input_x, input_y, required=False, exact=False):
                         self._sleep(0.1)
-                        self._combo(apply_hwnd, VK_CONTROL, VK_A)
+                        self._combo(apply_hwnd, VK_CONTROL, VK_A, exact=True)
                         self._sleep(0.05)
-                        self._key(apply_hwnd, VK_BACK)
+                        self._key(apply_hwnd, VK_BACK, exact=True)
                         self._sleep(0.05)
-                        self._paste(apply_hwnd, message)
+                        self._paste(apply_hwnd, message, exact=True)
                         self._sleep(0.2)
 
                 if send_button:
@@ -742,9 +950,9 @@ class FriendManager:
                     # Default position for WeChat 4.0 green "确定" button (cx=0.337, cy=0.933)
                     btn_x = a_rect[0] + int(0.337 * a_w)
                     btn_y = a_rect[1] + int(0.933 * a_h)
-                    self._clicker(btn_x, btn_y)
+                    self._click_at(apply_hwnd, btn_x, btn_y, required=False, exact=False)
                 self._sleep(0.2)
-                self._key(apply_hwnd, 0x0D)
+                self._key(apply_hwnd, 0x0D, exact=True)
                 self._sleep(1.0)
 
                 for _ in range(15):
@@ -753,14 +961,17 @@ class FriendManager:
                     self._sleep(0.1)
 
                 if self._is_window_visible(apply_hwnd):
+                    risk = _risk_line(self._capture_ocr(apply_hwnd))
                     self._close_window(apply_hwnd)
                     self._close_window(dialog_hwnd)
+                    if risk:
+                        return _risk_failure(keyword, risk)
                     return _failure(keyword, "not_sent", "申请窗口还在，申请可能没发出去，请在微信里确认")
             else:
                 if message:
-                    self._combo(target_dialog, VK_CONTROL, VK_A)
+                    self._combo(target_dialog, VK_CONTROL, VK_A, exact=True)
                     self._sleep(0.05)
-                    self._paste(target_dialog, message)
+                    self._paste(target_dialog, message, exact=True)
                     self._sleep(0.3)
                 self._click_row(target_dialog, send_button)
                 self._sleep(0.8)
@@ -774,8 +985,10 @@ class FriendManager:
                 "target": keyword,
                 "message": f"已成功向「{keyword}」发送好友申请" + (f"（附言：{message}）" if message else ""),
             }
-        except _Abort as e:
-            self._close_window(dialog_hwnd)
+        except Exception:                             # _Abort, or a pywin32 error: no dialog is left open
+            for opened in (apply_hwnd, dialog_hwnd):
+                if opened:
+                    self._close_window(opened)
             raise
 
     def _add_friend_in_window(self, hwnd: int, keyword: str, message: str) -> dict:
@@ -805,6 +1018,10 @@ class FriendManager:
         # 3. The profile card
         card = self._capture_ocr()
         card_text = "".join(_clean_text(r.get("t", "")) for r in card)
+        risk = _risk_line(card)
+        if risk:
+            self._dismiss(hwnd)
+            return _risk_failure(keyword, risk)
         if any(marker in card_text for marker in NOT_FOUND_MARKERS):
             self._dismiss(hwnd)
             return _failure(keyword, "not_found", f"未找到用户「{keyword}」，请核实微信号或手机号")
@@ -852,6 +1069,12 @@ class AutoFriendService:
     once the user has not touched keyboard or mouse for ``idle_sec`` seconds (``idle_gate``);
     until then it asks again every POSTPONE_RETRY_SEC.  ``full_check_sec`` forces a full check
     even when nothing changed, so a badge that is not recognised delays a request that long at most.
+
+    It accepts at most ``daily_max`` (AUTO_ACCEPT_DAILY_MAX) a day (this computer's calendar day), then
+    rests until the next day; what WeChat says when it holds the account back (``AcceptResult.risk``), or
+    a request that stays pending STUCK_RUNS checks in a row, pauses it until it is switched on again
+    (``enable``: the admin's 自动同意好友 开).  ``notify(text)`` tells the admin (once per day for the cap).
+    The day's count and a pause are kept in ``state_path`` (JSON), so a restart does not start over.
     """
 
     def __init__(
@@ -864,6 +1087,10 @@ class AutoFriendService:
         watch: bool = True,
         full_check_sec: float = 900,
         clock: Callable[[], float] = time.monotonic,
+        daily_max: int = DAILY_MAX_DEFAULT,
+        state_path=None,
+        notify: Callable[[str], object] | None = None,
+        wall_clock: Callable[[], float] = time.time,
     ):
         self._manager = friend_manager
         self._interval = max(MIN_INTERVAL_SEC, int(interval_sec))
@@ -879,16 +1106,126 @@ class AutoFriendService:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._state_lock = threading.Lock()
+        self._daily_max = max(1, int(daily_max))
+        self._state_path = Path(state_path) if state_path else None
+        self._notify = notify
+        self._wall_clock = wall_clock
+        self._day_lock = threading.Lock()
+        self._day = self._load_day()
 
     @property
     def enabled(self) -> bool:
         return self._enabled
 
     def enable(self) -> None:
-        """Switch on; also starts the worker if it was never started (the config had it off)."""
+        """Switch on (a pause after a risk prompt is lifted: the admin decided); also starts the worker if it
+        was never started (the config had it off).  The day's count stays: WeChat counts the day, not us."""
+        with self._day_lock:
+            if self._day.get("paused") or self._day.get("stuck"):
+                self._day["paused"] = None
+                self._day["stuck"] = 0
+                self._save_day()
         self._enabled = True
         self.start()
         logger.info("AutoFriendService enabled")
+
+    # ── the day's count and a pause (kept in state_path) ───────────────
+
+    def _today(self) -> str:
+        return time.strftime("%Y-%m-%d", time.localtime(self._wall_clock()))
+
+    def _load_day(self) -> dict:
+        day = {"day": "", "accepted": 0, "cap_told": False, "paused": None, "stuck": 0}
+        if self._state_path is not None and self._state_path.is_file():
+            try:
+                saved = json.loads(self._state_path.read_text(encoding="utf-8"))
+                if isinstance(saved, dict):
+                    day.update({k: saved[k] for k in day if k in saved})
+            except (OSError, ValueError):
+                logger.warning("AutoFriendService: %s could not be read; starting the day's count afresh",
+                               self._state_path)
+        return day
+
+    def _save_day(self) -> None:
+        if self._state_path is None:
+            return
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._state_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._day, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, self._state_path)
+        except OSError:
+            logger.warning("AutoFriendService: %s could not be written", self._state_path, exc_info=True)
+
+    def _roll_day(self) -> None:
+        today = self._today()
+        if self._day.get("day") != today:
+            self._day.update(day=today, accepted=0, cap_told=False)
+
+    def accepted_today(self) -> int:
+        with self._day_lock:
+            self._roll_day()
+            return int(self._day.get("accepted") or 0)
+
+    def status_note(self) -> str:
+        """For 查状态 and the switch's answer: where the day stands, or why it is paused."""
+        with self._day_lock:
+            self._roll_day()
+            paused = self._day.get("paused")
+            accepted = int(self._day.get("accepted") or 0)
+        if paused:
+            return f"已暂停：{paused.get('why', '')}；发「自动同意好友 开」恢复"
+        if accepted >= self._daily_max:
+            return f"今天已自动同意 {accepted} 个，到了上限 {self._daily_max}，明天继续"
+        return f"今天已自动同意 {accepted}/{self._daily_max}"
+
+    def pause(self, why: str, tell: bool = True) -> None:
+        """Stop accepting until switched on again (``enable``), also after a restart; ``tell``: the admin hears it."""
+        with self._day_lock:
+            self._day["paused"] = {"at": self._wall_clock(), "why": str(why)[:200]}
+            self._save_day()
+        logger.warning("AutoFriendService paused: %s", why)
+        if tell:
+            self._tell(f"自动同意好友已暂停：{why}。先别再加好友、同意好友，过几个小时再看；"
+                       "要恢复自动同意，发「自动同意好友 开」。")
+
+    def _tell(self, text: str) -> None:
+        if self._notify is None:
+            return
+        try:
+            self._notify(text)
+        except Exception:
+            logger.warning("AutoFriendService: the admin could not be told", exc_info=True)
+
+    def _count(self, result) -> None:
+        """Add a check's accepts to the day; a risk prompt or a request stuck STUCK_RUNS checks in a row
+        pauses; reaching the cap tells the admin (once a day)."""
+        risk = getattr(result, "risk", "")
+        risk = risk if isinstance(risk, str) else ""
+        stuck = getattr(result, "stuck", False) is True
+        with self._day_lock:
+            self._roll_day()
+            self._day["accepted"] = int(self._day.get("accepted") or 0) + len(result)
+            self._day["stuck"] = 0 if len(result) or not stuck else int(self._day.get("stuck") or 0) + 1
+            stuck_runs = self._day["stuck"]
+            self._save_day()
+        if risk:
+            self.pause(f"微信提示「{risk}」，可能是操作太频繁被限制了")
+        elif stuck_runs >= STUCK_RUNS:
+            self.pause(f"连续 {STUCK_RUNS} 次点了「接受」申请还在（可能是微信在限制，也可能是界面识别出了问题，详见日志）")
+        self._tell_cap()
+
+    def _tell_cap(self) -> None:
+        with self._day_lock:
+            accepted = int(self._day.get("accepted") or 0)
+            if accepted < self._daily_max or self._day.get("cap_told"):
+                return
+            self._day["cap_told"] = True
+            self._save_day()
+        logger.info("AutoFriendService: %d accepted today, the daily cap %d: resting until tomorrow",
+                    accepted, self._daily_max)
+        self._tell(f"自动同意好友：今天已自动同意 {accepted} 个申请，到了每天的上限 {self._daily_max}"
+                   "（AUTO_ACCEPT_DAILY_MAX），今天不再自动同意，明天自动继续。还有申请的话可以发「同意好友」手动同意。")
 
     def disable(self) -> None:
         self._enabled = False
@@ -920,6 +1257,15 @@ class AutoFriendService:
         """
         if not self._enabled:
             return []
+        with self._day_lock:
+            self._roll_day()
+            paused = bool(self._day.get("paused"))
+            remaining = self._daily_max - int(self._day.get("accepted") or 0)
+        if paused:
+            return []                          # until the admin switches it on again
+        if remaining <= 0:
+            self._tell_cap()
+            return []                          # the day's cap: the window is not touched
         try:
             if self._watch and not self._full_check_due() and self._manager.look_for_news() == RailWatcher.UNCHANGED:
                 self._postponed_since = None
@@ -937,7 +1283,7 @@ class AutoFriendService:
                             self._clock() - self._postponed_since)
             self._postponed_since = None
             self.postponed = False
-            accepted = self._manager.accept_friend_requests()
+            accepted = self._manager.accept_friend_requests(limit=remaining)
             self._last_full_check = self._clock()
             self._mark_own_input()
         except Exception:
@@ -945,6 +1291,7 @@ class AutoFriendService:
             return []
         if accepted:
             logger.info("AutoFriendService: accepted %d friend request(s)", len(accepted))
+        self._count(accepted)
         return accepted
 
     def _full_check_due(self) -> bool:

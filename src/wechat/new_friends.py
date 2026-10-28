@@ -525,6 +525,7 @@ class NewFriendService:
         self._stamps: dict[str, object] = {}       # chat -> its session's time (or row) when last read
         self._retry: dict[str, dict] = {}          # chat -> an event a sink could not take yet
         self._reported: set[str] = set()           # this run's reports (the store may fail to write)
+        self._unreadable: set[str] = set()         # chats whose last read failed (said once in the log)
         self._failing = False
         self._last_forget = 0.0
         self._stop = threading.Event()
@@ -624,17 +625,29 @@ class NewFriendService:
                 self._stamps.setdefault(username, stamp)
         changed.sort(key=lambda item: (item[1] is None, item[1] or 0.0))
         done = changed[:MAX_CHATS_PER_SCAN]
+        unread: list = []                                 # (chat, its session time) whose read failed
         for n, (username, at, session, stamp) in enumerate(done):
             if self._stop.is_set():
                 done = done[:n]
                 break
             if n and self._pause:
                 time.sleep(self._pause)                   # the poll loop gets the lock in between
-            messages = self._backend.with_client(
-                lambda client, chat=username: client.get_messages(chat, limit=READ_MESSAGES))
+            try:
+                messages = self._backend.with_client(
+                    lambda client, chat=username: client.get_messages(chat, limit=READ_MESSAGES))
+            except Exception as e:
+                # This chat could not be read (an error code: WcdbCallError): the other chats are still
+                # looked at, this one again at the next look (not stamped, the mark stays before it).
+                unread.append((username, at))
+                if username not in self._unreadable:
+                    self._unreadable.add(username)
+                    logger.warning("New friends: a private chat (%s…) could not be read (%s); looked at again "
+                                   "at the next look", username[:8], e)
+                continue
             if messages is None:
                 done = done[:n]
                 break                                     # the database closed meanwhile
+            self._unreadable.discard(username)
             self._stamps[username] = stamp
             if username in self._reported or username in self._retry or self._store.known(username):
                 continue
@@ -649,6 +662,9 @@ class NewFriendService:
             newest = max(timed)
             if len(done) < len([c for c in changed if c[1] is not None]):
                 newest -= 1e-3                            # the rest (same time too) at the next look
+            held = [at for _, at in unread if at is not None]
+            if held:
+                newest = min(newest, min(held) - 1e-3)    # a chat not read yet stays after the mark
             if newest > mark:
                 self._store.set_mark(newest)
         if now - self._last_forget >= 3600:

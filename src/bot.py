@@ -433,7 +433,8 @@ class Bot:
         gets them; the manager shares that backend's window lock and reads the screen
         with its own OCR engine (OCR_FALLBACK is a different engine and may be off).
         ``on_accepted(at, label)`` hears every request it accepts (the new-friend scan's
-        AcceptLog: a friend the bot let in is ``auto_accept``).
+        AcceptLog: a friend the bot let in is ``auto_accept``).  The backend's ``chat_names`` tell the
+        manager which window titles are chats (open in windows of their own), never its dialogs.
         """
         window = getattr(backend, "window_controller", None)
         if window is None:
@@ -448,6 +449,7 @@ class Bot:
                 ocr_engine=WindowsOcrEngine(window=window),
                 ui_lock=getattr(backend, "window_lock", None),
                 on_accepted=on_accepted,
+                chat_names=getattr(backend, "chat_names", None),
             )
             auto = AutoFriendService(
                 manager,
@@ -457,6 +459,9 @@ class Bot:
                 idle_sec=config.auto_accept_idle_sec,
                 watch=config.auto_accept_watch == "on",
                 full_check_sec=config.auto_accept_full_check_sec,
+                daily_max=config.auto_accept_daily_max,
+                state_path=Path(config.db_path).parent / "auto_accept_state.json",
+                notify=self._admin_notifier(config, backend),
             )
         except Exception:
             logger.warning("Friend management could not start", exc_info=True)
@@ -465,6 +470,20 @@ class Bot:
         admin_handler.set_friend_manager(manager, auto)
         if auto.enabled:
             auto.start()
+
+    @staticmethod
+    def _admin_notifier(config, backend):
+        """``notify(text)`` for the auto-accept worker: a private message to the admin (ADMIN_WXID) through the
+        backend's sender; without an admin or a sender, None (it is only logged)."""
+        admin = str(getattr(config, "admin_wxid", "") or "").strip()
+        send = getattr(backend, "send_text", None)
+        if not admin or not callable(send):
+            return None
+
+        def notify(text: str) -> None:
+            if not send(admin, text):
+                logger.warning("Auto-accept: the admin could not be told: %s", text)
+        return notify
 
     @staticmethod
     def _start_claude_relay(config, router, backend):

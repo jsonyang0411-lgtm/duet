@@ -272,6 +272,9 @@ class BotConfig:
     # One thread sends every message (WCDB backend): a typing pause or the wait for
     # the user to pause (SEND_QUIET) no longer holds a worker thread.
     send_queue: str = "off"
+    # "on" (WCDB backend): after WeChat's search opened a chat, its title is read from the screen (Windows
+    # OCR) and nothing is pasted into another chat the bot knows of (a name inside another one).
+    send_verify_chat: str = "on"
 
     # === Claude relay (src/relay) ===
     # "on": private messages from claude_relay_wxids (empty = ADMIN_WXID) that
@@ -359,6 +362,9 @@ class BotConfig:
     auto_accept_idle_sec: int = 60
     auto_accept_watch: str = "on"
     auto_accept_full_check_sec: int = 900
+    # At most this many requests accepted automatically a day (WeChat holds back accounts that take on
+    # friends in bulk); a risk prompt (「操作过于频繁」) pauses it until the admin switches it on again.
+    auto_accept_daily_max: int = 50
 
 
 def _validate_config(kwargs: dict) -> None:
@@ -421,7 +427,7 @@ def _validate_config(kwargs: dict) -> None:
             f"got {decision_trace_content_chars}"
         )
 
-    for send_setting in ("send_typing_delay", "send_quiet", "send_keep_clipboard", "send_queue"):
+    for send_setting in ("send_typing_delay", "send_quiet", "send_keep_clipboard", "send_queue", "send_verify_chat"):
         if kwargs.get(send_setting, "off") not in ("off", "on"):
             errors.append(f"{send_setting.upper()} must be off or on, got {kwargs.get(send_setting)}")
     send_idle_sec = kwargs.get("send_idle_sec", 3.0)
@@ -541,6 +547,8 @@ def _validate_config(kwargs: dict) -> None:
     full_check = int(kwargs.get("auto_accept_full_check_sec", 900))
     if full_check != 0 and not (60 <= full_check <= 86400):
         errors.append(f"AUTO_ACCEPT_FULL_CHECK_SEC must be 0 or between 60 and 86400, got {full_check}")
+    if not (1 <= int(kwargs.get("auto_accept_daily_max", 50)) <= 300):
+        errors.append(f"AUTO_ACCEPT_DAILY_MAX must be between 1 and 300, got {kwargs.get('auto_accept_daily_max')}")
 
     if errors:
         msg = "配置值无效:\n" + "\n".join(f"  - {err}" for err in errors)
@@ -607,6 +615,7 @@ def load_config() -> BotConfig:
         "send_keep_clipboard": _parse_switch(os.getenv("SEND_KEEP_CLIPBOARD", "on")),
         "sticker_paste": os.getenv("STICKER_PASTE", "file").strip().lower() or "file",
         "send_queue": _parse_switch(os.getenv("SEND_QUEUE", "off")),
+        "send_verify_chat": _parse_switch(os.getenv("SEND_VERIFY_CHAT", "on")),
         "claude_relay": _parse_switch(os.getenv("CLAUDE_RELAY", "off")),
         "claude_relay_token": os.getenv("CLAUDE_RELAY_TOKEN", "").strip(),
         "claude_relay_host": os.getenv("CLAUDE_RELAY_HOST", "0.0.0.0").strip() or "0.0.0.0",
@@ -643,6 +652,7 @@ def load_config() -> BotConfig:
         "auto_accept_idle_sec": int(os.getenv("AUTO_ACCEPT_IDLE_SEC", "60")),
         "auto_accept_watch": _parse_switch(os.getenv("AUTO_ACCEPT_WATCH", "on")),
         "auto_accept_full_check_sec": int(os.getenv("AUTO_ACCEPT_FULL_CHECK_SEC", "900")),
+        "auto_accept_daily_max": int(os.getenv("AUTO_ACCEPT_DAILY_MAX", "50")),
     }
 
     _validate_config(kwargs)

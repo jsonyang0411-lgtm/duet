@@ -120,6 +120,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `SEND_IDLE_SEC` | `float` | `3` (0–60；0=不等) | `src/config.py` | `src/wechat/quiet_send.py:IdleGate`：键盘鼠标静止满这么多秒才发 |
 | `SEND_IDLE_MAX_WAIT_SEC` | `float` | `30` (0–600) | `src/config.py` | 同上：最多等这么久，之后照发 |
 | `SEND_QUEUE` | `str` | `"off"` (`off`/`on`) | `src/config.py` | `src/wechat/wcdb_backend.py:__init__` → `SendQueue`：工作线程把回复交给发送线程就返回，打字延迟和安静发送的等待不再占住工作线程；开着时打字延迟不再把线程池加到 8 个 |
+| `SEND_VERIFY_CHAT` | `str` | `"on"` (`off`/`on`) | `src/config.py` | `src/wechat/wcdb_backend.py:_open_chat_check()`（win review F10）：发送、回复、截图在微信的搜索里回车打开第一条结果以后、粘贴之前，用 Windows OCR 读聊天区的标题（每次约 1 秒）：是机器人知道的**另一个**聊天（名字包含她的名字的人或群，在读的、会话列表里的、控制台私聊名单里的），或者要发私聊却打开了带人数的群，就不粘贴、返回带原因的 `SendRefused`（`WRONG_CHAT`）；读不出、看不出是谁的照旧发（和以前一样），读屏幕本身失败（没装中文 OCR、窗口太小）10 分钟内不再试。默认开：只在明确认出是别的聊天时才拒发，平时多花约 1 秒；Windows 真机还没验证过读标题，见 CLAUDE.md 手动验证第 5 条 |
 | `STICKER_PASTE` | `str` | `"file"` (`file`/`image`) | `src/config.py` | `WcdbBackend.__init__` → `WeChatWindowController(paste_files_as=…)`：粘贴图片时 `file` 粘贴文件（CF_HDROP，GIF 可以保持动图），`image` 粘贴静态图（CF_DIB，第一帧，透明处补白）；中转结果等别的文件始终按文件粘贴（`_PICTURE_SUFFIXES`） |
 | `SEND_KEEP_CLIPBOARD` | `str` | `"on"` (`off`/`on`) | `src/config.py` | `WeChatWindowController._begin_quiet/_end_quiet`：开 `SEND_QUIET` 时，发送前存下剪贴板，微信确认处理完粘贴后放回（期间剪贴板被别人改过、或微信没回应就不放回） |
 | `CLAUDE_RELAY` | `str` | `"off"` (`off`/`on`) | `src/config.py`（`on` 时要 `CLAUDE_RELAY_TOKEN` 至少 16 个字符、`CLAUDE_RELAY_WXIDS` 或 `ADMIN_WXID`、1–10 个非空白字符的前缀；`CLAUDE_RELAY_PORT` 的范围不论开关都检查） | `src/bot.py:_start_claude_relay()` 建 `ClaudeRelay`（发送用 `backend.send_text` / `send_file`，`reserved` = `AdminCommandHandler.is_command`）并挂到 `router._claude_relay`；路由步骤 `claude_relay` 把允许的人私聊里 `cc` 开头的消息变成给 Mac 的任务。需要 `PRIVATE_CHAT_ENABLED=true`。控制台「中转代理」页可改（`advanced_config` 的 `relay` 分组：开关、只做中转、`ADMIN_WXID`、`CLAUDE_RELAY_WXIDS`、token（可随机生成）、端口、监听地址、前缀、结果最长、长结果发文件、进度提醒间隔） |
@@ -155,6 +156,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `AUTO_ACCEPT_WATCH` | `str` | `"on"` (`off`/`on`) | `src/config.py` | `AutoFriendService(watch=…)`：`on` 时每个间隔先静默地看导航栏有没有**新**红点（`FriendManager.look_for_news`，PrintWindow 拍窗口，不动焦点），没有就什么也不做；`off` 时每个间隔都是一次完整检查（仍然等用户停下来） |
 | `AUTO_ACCEPT_IDLE_SEC` | `int` | `60` (0–3600) | `src/config.py` | `AutoFriendService(idle_sec=…)`：要碰屏幕的检查等键盘鼠标静止这么多秒才做（`quiet_send.IdleGate.idle_seconds()`），忙就 15 秒后再问；0 = 不等。检查结束后焦点还给用户原来的窗口 |
 | `AUTO_ACCEPT_FULL_CHECK_SEC` | `int` | `900` (0 或 60–86400) | `src/config.py` | `AutoFriendService(full_check_sec=…)`：即使红点没变化，每隔这么久也强制做一次完整检查，防止红点认不出来；0 = 不强制 |
+| `AUTO_ACCEPT_DAILY_MAX` | `int` | `50` (1–300) | `src/config.py` | `AutoFriendService(daily_max=…)`（`src/bot.py:_start_friend_management()`）：每天（这台电脑的日历日）最多自动同意多少个申请，到了就当天不再自动同意、告诉管理员一次，第二天接着来；数在 `data/auto_accept_state.json`，重启不清零。管理员的「同意好友」不受它限制。默认 50：微信对短时间大量加好友 / 通过好友的号会限制（「操作过于频繁」，之后几天不能加好友），自动化每天几十个是常见的稳妥做法，够平常一天的达人申请，多出来的由人决定 |
 | `WEBOT_APP_HOME` | `str` | `""`（自动检测） | `src/config.py:_resolve_project_root()` | `PROJECT_ROOT`（.env 和 `data/` 的位置）；`desktop_mac.py` 没设时设成 `~/Library/Application Support/webot`（打包的 app）；`src/wechat/mac_hybrid_backend.py`（聊天标题缓存 `data/group_names.json` 的位置） |
 | `WEBOT_ENV_FILE` | `str` | `""` | `src/config.py:find_env_file()` | 显式指定 .env（找不到再按 EXE 目录 → 项目根 → 当前目录找）；`desktop_mac.py` 默认设成 app home 里的 `.env.macos` |
 | `WEBOT_LOCAL_ENV_FILE` | `str` | `""` | `src/config.py:find_local_env_file()` | 显式指定本机覆盖文件；否则依次找 `%APPDATA%\webot\.env.local`、`%LOCALAPPDATA%\webot\.env.local`、`~/.webot/.env.local`、项目根和当前目录的 `.env.local`。覆盖文件里非空的值盖过共享 .env（`_load_non_empty_local_env`）；引导写的 `WCDB_KEY`、`WECHAT_DATA_DIR` 放这里 |
@@ -195,7 +197,9 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `CLOCK_SAMPLE_SEC` / `CLOCK_SAMPLES` / `CLOCK_NOISE_SEC` / `CLOCK_SKEW_SEC` | `int` | `120` / `3` / `60` / `300` | `src/prm/service.py` | 这台电脑的钟和微信的差（win review F6）：机器人这次运行发的一句话在登记后这么多秒内读回来，才拿来测（`_clock_sample`：读到的时间（本机）减微信里写的时间）/ 取最近这么多次里最小的（读回晚了只会多，钟改对了马上算数）/ 差不到这么多秒算读回的误差、不校正 / 差这么多秒以上，每张在用的合作单写「这台电脑的时间比微信快 / 慢 …」（`clock_note`）|
 | `READ_BACK_SEC` / `READ_BACK_ROWS` | `int` / `int` | `1800` / `500` | `src/prm/service.py` | `_match_own`：这个号在达人私聊里的一行处理过以后，这么多秒内（每个聊天最多记这么多行）同一行（`_row_key`：同一个消息编号）又交来，不是新的一句，不再确认、不记运营的话、不接管；只认同一行，别的行里一模一样的字照样比对（对不上就是运营亲手打的，win review F4 (a)：以前 120 秒内同样的字一律当读回，运营照着机器人打的「好的」不接管） |
 | `MAX_CONSECUTIVE_ERRORS` | `int` | `5` | `src/wechat/wcdb_backend.py` | 连续错误触发重初始化阈值 |
-| `UNKNOWN_NAME` / `NAMESAKE` / `SendRefused` / `_name_key(name)` | `str` / `str` / 类 / 函数 | 「机器人不知道这个聊天在微信里叫什么，没法在微信里找到它，没有发。请手动发」/ 「和另一个聊天同名（都叫「{name}」），机器人没法确定发给谁，没有发：请手动发，或者在微信里给对方设一个不重复的备注（改好后重启 Windows 上的机器人）」/ `SendRefused(reason)`：假值（`bool()` 是 `False`，调用方照旧按真假判断发没发成），`reason`、`str()` 是原因 / 去掉空白、`casefold()` | `src/wechat/wcdb_backend.py` | `_window_target` 拒绝用窗口时的原因（发送、回复、截图都不做；微信边缘把 `reason` 写进 `send_result` 的 `error`，Mac 在草稿上显示）/ 比较两个聊天名是不是同名（`_add_talker`、`_namesake`、OCR 的 `_group_for_title`） |
+| `_DLL_LOCK` | `threading.RLock` | — | `src/wechat/wcdb_client.py` | 进 `wcdb_api.dll` 的每一次调用都拿它（`init` / `open` / `_call_json` / `get_voice_data` / 关库，任何线程、任何客户端对象；win review F11）：DLL 不一定线程安全，轮询之外新好友扫描也在自己的线程里读库，重开数据库时新旧两个客户端用的是同一个 DLL；可重入（`open` 里用 `get_sessions` 试密钥，`resolve_nickname` 调 `get_display_names`） |
+| `WRONG_CHAT` / `VERIFY_LOOKS` / `VERIFY_PAUSE_SEC` / `VERIFY_OFF_SEC` | `str` / `int` / `float` / `int` | 「微信搜索「{name}」打开的是「{title}」，不是要发的聊天，没有发：请手动发，或者给对方设一个不和别人重名、也不被别人的名字包含的备注（改好后重启 Windows 上的机器人）」/ `3` / `0.6` / `600` | `src/wechat/wcdb_backend.py` | `SEND_VERIFY_CHAT`：拒发时的原因 / 读出是别的聊天时再读几次（屏幕可能还停在上一个聊天）、隔多久 / 读屏幕失败后多久不再试 |
+| `UNKNOWN_NAME` / `NAMESAKE` / `SendRefused` / `_name_key(name)` | `str` / `str` / 类 / 函数 | 「机器人不知道这个聊天在微信里叫什么，没法在微信里找到它，没有发。请手动发」/ 「和另一个聊天同名（都叫「{name}」），机器人没法确定发给谁，没有发：请手动发，或者在微信里给对方设一个不重复的备注（改好后重启 Windows 上的机器人）」/ `SendRefused(reason)`：假值（`bool()` 是 `False`，调用方照旧按真假判断发没发成），`reason`、`str()` 是原因（类定义在 `src/wechat/window_controller.py`，窗口看过以后也能给出；`wcdb_backend` 从那里导入，`wcdb_backend.SendRefused` 照旧可用）/ 去掉空白、`casefold()` | `src/wechat/wcdb_backend.py` | `_window_target` 拒绝用窗口时的原因（发送、回复、截图都不做；微信边缘把 `reason` 写进 `send_result` 的 `error`，Mac 在草稿上显示）/ 比较两个聊天名是不是同名（`_add_talker`、`_namesake`、OCR 的 `_group_for_title`） |
 | `SESSION_REFRESH_SEC` / `OCR_SENDER` | `float` / `str` | `60.0` / `"OCR群友"` | `src/wechat/wcdb_backend.py` | 新私聊会话多久查一次（`_refresh_private_chats_if_due`）/ OCR 读到的消息的发言人（认不出是谁） |
 | `CATCH_UP_WAIT_SEC` / `_PRIVATE_NAMES_LOCK` | `float` / `threading.Lock` | `600.0` / — | `src/wechat/wcdb_backend.py` | `catch_up_chat` 要的聊天这么久还读不到就放弃（记 warning）/ `data/private_chat_names.json` 由轮询循环和新好友扫描两边写，写的时候拿这把锁 |
 | `RECALL_WINDOW_SEC` | `int` | `300` | `src/wechat/wcdb_backend.py` | 过滤器要的私聊里这么久以内写的行每次轮询都再看一眼，被微信原地改写成撤回的报出来（`_recall_in_place`）；微信只许 2 分钟内撤回，其余是本机时钟和慢轮询的余量 |
@@ -227,7 +231,9 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `NEW_FRIENDS_LABELS` / `ACCEPT_LABELS` / `CONFIRM_LABELS` / `SEARCH_ENTRY_LABELS` / `ADD_BUTTON_LABELS` / `SEND_LABELS` / `NOT_FOUND_MARKERS` / `ALREADY_FRIEND_MARKERS` | `tuple[str, ...]` | 微信界面上的文字（`新的朋友`、`接受`、`网络查找`、`添加到通讯录`、`发送` …） | `src/wechat/friend_manager.py` | OCR 靠这些文字找按钮；微信改版时改这里（`ACCEPT_MIN_X0` = 0.40：接受按钮在行的右半边） |
 | `POSTPONE_RETRY_SEC` | `int` | `15` | `src/wechat/friend_manager.py` | 用户正忙时自动同意多久后再问一次 |
 | `RAIL_MAX_X` / `RAIL_MAX_Y` / `CELL` / `MIN_COVER` / `MIN_CELLS` / `SAME_BADGE_PX` / `RED_MIN` / `GREEN_MAX` / `BLUE_MAX` | `float` / `float` / `int` / `float` / `int` / `int` / `int` ×3 | `0.09` / `0.60` / `4` / `0.30` / `3` / `16` / `200` / `110` / `110` | `src/wechat/rail_watch.py` | 红点监视：导航栏的范围、截图里找红点的格子大小和判定、算同一个红点的最大位移、红色的阈值（真机上还没标定，见 `friend-management-test.md`） |
-| `ADD_DIALOG_TITLES` | `tuple[str, ...]` | `("添加朋友", "Add Friend")` | `src/wechat/friend_manager.py` | 4.0「添加朋友」窗口的标题；已经开着的窗口只在标题含它时才被当成这个窗口 |
+| `ADD_DIALOG_TITLES` | `tuple[str, ...]` | `("添加朋友", "Add Friend")` | `src/wechat/friend_manager.py` | 4.0「添加朋友」窗口的标题；已经开着的窗口只在标题恰好是它（而且不是聊天名）时才被当成这个窗口 |
+| `DAILY_MAX_DEFAULT` / `STUCK_RUNS` / `RISK_MARKERS` | `int` / `int` / `tuple[str, ...]` | `50` / `3` / `过于频繁`、`太频繁`、`操作频繁`、`频繁操作`、`频率过快`、`稍后再试`、`帐号存在异常`、`账号存在异常`、`帐号异常`、`账号异常`、`被限制`、`限制使用`、`暂时无法添加`、`无法添加朋友`、`安全风险`、`被盗风险`、`已达上限`、`达到上限` | `src/wechat/friend_manager.py` | `AUTO_ACCEPT_DAILY_MAX` 的默认值 / 自动同意连续几次「点了申请还在」就暂停 / 微信的风控提示（只看点击之后新出现的字；「操作过于频繁，请稍后再试」是常见的那句，其余是微信别处限制帐号时的说法，在这个号上都没见过，是推测；「稍后再试」网络出错时也会出现，那时停下也是稳妥的一边） |
+| `APPLY_DIALOG_TITLES` / `ACCEPT_DIALOG_TITLES` / `DIALOG_CLASS` / `DIALOG_LOOKS` | `tuple[str, ...]` / `tuple[str, ...]` / `str` / `int` | `("申请添加朋友",)`（真机 `probe-apply.txt`）/ `("通过朋友验证",)`（「前往验证」打开的确认窗口，真机没读到过标题，待确认）/ `"Qt51514QWindowIcon"` / `10` | `src/wechat/friend_manager.py` | 4.0 对话框按标题**恰好**匹配，只认点击之后新出现的窗口，排除标题是聊天名的窗口（win review F7）；最多看 10 次、隔 0.1 秒 |
 | `_LOW_CONFIDENCE_THRESHOLD` | `float` | `0.6` | `src/voice/pipeline.py` | 置信度低于它的转写加「[可能不准确]」 |
 | `NO_FRIEND_MANAGER` / `HELP_COMMANDS` / `STATUS_COMMANDS` / `ACCEPT_FRIENDS_COMMANDS` / `AUTO_ACCEPT_COMMANDS` / `RELAY_HELP` / `HELP_TEXT` | `str` / `tuple` / `tuple` / `tuple` / `dict[str, bool]` / `str` / `str` | 「未启用好友管理组件…」/ `帮助`、`help`、`命令` / `查状态`、`账号状态` / 同意好友的几种说法 / 自动同意开关的几种说法 → 开(True)/关(False) / 两行的命令列表 / 帮助全文 | `src/admin.py` | 管理员命令的文字（`RELAY_HELP` 附在只做中转时的 cc 帮助后面） |
 | `SCHEMA_VERSION` / `DEFAULT_DECISION_PATH` / `DEFAULT_MAX_BYTES` / `DEFAULT_BACKUPS` | `int` / `str` / `int` / `int` | `1` / `"data/decision_trace.jsonl"` / `20 MB` / `3` | `src/decision_trace.py` | 记录格式版本 / 默认路径 / 超过就旋转 / 留几份旧文件 |
@@ -281,7 +287,8 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `Bot.__init__(config)` | ~157 | 初始化 Bot 实例 | `config: BotConfig` | `None` |
 | `Bot.run()` | ~165 | 初始化所有组件并阻塞运行（调用链见 §3.2）；没有模型、触发词、昵称、表情包的装配 | 无 | `None` |
 | `Bot._status_lines(router, relay, prm, edge)` | ~297 | `查状态` 的各行：运行分钟、微信后端和 `wechat_status()`、已处理消息、中转开关和 Mac 在不在线（`relay.mac_online()`）、达人副驾驶、微信边缘、「群聊：一律不回复」 | 见左 | `list[str]` |
-| `Bot._start_friend_management(config, backend, admin_handler, on_accepted=None)` | ~317 | 后端有 `window_controller`（Windows `wcdb`）时建 `FriendManager`（自己的 `WindowsOcrEngine`，共用 `backend.window_lock`）和 `AutoFriendService`（`IdleGate(Win32Desktop(), AUTO_ACCEPT_IDLE_SEC, 0)`），`admin_handler.set_friend_manager(...)`；`AUTO_ACCEPT_FRIENDS=on` 才启动线程。`on_accepted` 交给 `FriendManager`（新好友扫描的 `AcceptLog.note`：机器人通过的申请记下时间）。别的后端只记一条 info；建不起来记 warning，不影响机器人启动 | `config, backend, admin_handler, on_accepted` | `None` |
+| `Bot._start_friend_management(config, backend, admin_handler, on_accepted=None)` | ~317 | 后端有 `window_controller`（Windows `wcdb`）时建 `FriendManager`（自己的 `WindowsOcrEngine`，共用 `backend.window_lock`）和 `AutoFriendService`（`IdleGate(Win32Desktop(), AUTO_ACCEPT_IDLE_SEC, 0)`），`admin_handler.set_friend_manager(...)`；`AUTO_ACCEPT_FRIENDS=on` 才启动线程。`on_accepted` 交给 `FriendManager`（新好友扫描的 `AcceptLog.note`：机器人通过的申请记下时间），`chat_names` 是后端的 `chat_names`；`AutoFriendService` 拿 `AUTO_ACCEPT_DAILY_MAX`、状态文件 `<DB_PATH 的目录>/auto_accept_state.json` 和 `_admin_notifier(config, backend)`（给 `ADMIN_WXID` 发私聊，没有管理员或后端不能发时是 None：只记日志）。别的后端只记一条 info；建不起来记 warning，不影响机器人启动 | `config, backend, admin_handler, on_accepted` | `None` |
+| `Bot._admin_notifier(config, backend)` | ~475 | 静态方法；自动同意好友告诉管理员的函数 `notify(text)`：`backend.send_text(ADMIN_WXID, text)`，发不出去（拒发、失败）记 warning；没有 `ADMIN_WXID` 或后端没有 `send_text` 时返回 None | `config, backend` | `Callable[[str], None] \| None` |
 | `Bot._start_claude_relay(config, router, backend)` | ~355 | 静态方法；`CLAUDE_RELAY=on` 时建 `ClaudeRelay(config, send=backend.send_text, send_file=…, reserved=router._admin.is_command, extra_help=RELAY_HELP)` 并 `start()`（端口打不开只记错误日志，任务照样排队），挂到 `router._claude_relay`，`register_relay` 给控制台 | `config, router, backend` | `ClaudeRelay \| None` |
 | `Bot._start_prm(config, router, backend, relay)` | ~386 | 静态方法；`PRM_COPILOT=on` 且中转在运行时建 `PrmService`（见 §2.32） | `config, router, backend, relay` | `PrmService \| None` |
 | `Bot._start_edge(config, router, backend, relay)` | ~426 | 静态方法；`PRM_EDGE=on` 且中转在运行时建 `EdgeService`（见 §2.33） | `config, router, backend, relay` | `EdgeService \| None` |
@@ -328,10 +335,10 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `set_status(status)` | 接上 `查状态` 的状态行（`Bot.run` 传 `lambda: _status_lines(router, relay, prm, edge)`） | `status: Callable \| None` | `None` |
 | `handle(content)` | 路由步骤 `admin_command` 调用：`帮助` / `help` / `命令`（`HELP_COMMANDS`）→ `HELP_TEXT`；其余交给 `_command`，不是命令返回 `None`（这条消息静默结束） | `content: str`（已去掉引用前缀） | `str \| None` |
 | `is_command(content)` / `_command(content)` | 认出账号命令但**不执行**（不含帮助）：`查状态` / `账号状态`、`添加好友` / `加好友` + 号码、`ACCEPT_FRIENDS_COMMANDS`、`AUTO_ACCEPT_COMMANDS`（空白归一后匹配）；`_command` 返回无参的 `run()`。`Bot._start_claude_relay` 把 `is_command` 交给中转（`reserved`），只做中转时管理员的这些命令不当任务 | `content: str` | `bool` / `callable \| None` |
-| `_cmd_status()` | `账号状态：` + 状态行（读不出来写「运行状态读取失败（详见日志）」）+ 好友管理可用 / 未启用 + 自动同意好友 开 / 关 | 无 | `str` |
-| `_cmd_add_friend(content)` | `添加好友 <号码> [附言]`（不带号码时回复用法）→ `FriendManager.add_friend(target, reason)` 返回的 `message`；没有好友组件时回复 `NO_FRIEND_MANAGER` +「添加好友操作」 | `content: str` | `str` |
-| `_cmd_accept_friends()` | → `FriendManager.accept_friend_requests()`；一个也没同意时不断言「没有申请」（也可能是窗口/识别出了问题） | 无 | `str` |
-| `_cmd_auto_accept(on)` | → `AutoFriendService.enable()` / `disable()`；没有该服务时不回复「已开启」 | `on: bool` | `str` |
+| `_cmd_status()` / `_auto_note()` | `账号状态：` + 状态行（读不出来写「运行状态读取失败（详见日志）」）+ 好友管理可用 / 未启用 + 自动同意好友 开 / 关（开着时括号里是 `AutoFriendService.status_note()`：今天的数和上限，或者为什么暂停）/ 那句说明（读不出来或不是字符串时是空串） | 无 | `str` |
+| `_cmd_add_friend(content)` | `添加好友 <号码> [附言]`（不带号码时回复用法）→ `FriendManager.add_friend(target, reason)` 返回的 `message`；没有好友组件时回复 `NO_FRIEND_MANAGER` +「添加好友操作」；`add_friend` 自己抛出异常时（兜底）回复「添加好友时出错，已中止（详见日志）…」（win review F8：以前管理员什么都收不到）；`reason` 是 `risk` 时也暂停自动同意 | `content: str` | `str` |
+| `_cmd_accept_friends()` | → `FriendManager.accept_friend_requests()`；一个也没同意时不断言「没有申请」（也可能是窗口/识别出了问题）；结果带 `risk`（微信的风控提示）时回复「微信提示「…」，可能是操作太频繁被限制了，已停止[（已同意 N 位）]…」并暂停自动同意；结果带 `error`（意外错误中途停下）时回复「同意好友时出错，已停止[，之前已同意 N 位]（详见日志）」，抛出异常时回复「同意好友时出错，已停止（详见日志）」 | 无 | `str` |
+| `_cmd_auto_accept(on)` / `_pause_auto(why)` | → `AutoFriendService.enable()`（也解除风控暂停；回复带上今天的数和上限）/ `disable()`；没有该服务时不回复「已开启」 / 命令里遇到微信的风控提示时让自动同意也暂停（不另外发消息），返回要加在回复后面的那句「；自动同意好友也已暂停（发「自动同意好友 开」恢复）」 | `on: bool` / `why: str` | `str` |
 
 ### 2.6 `src/db/`（`schema.py`、`store.py` MessageStore）
 
@@ -361,35 +368,37 @@ grep "文件名" CODEBASE_REFERENCE.md
 | 函数 | 描述 | 参数 | 返回值 |
 |---|---|---|---|
 | `__init__(bot_display_name="", groups=None, poll_sec=DEFAULT_POLL_SEC, store=None, config=None, ocr=None)` | 初始化 WCDB 后端：窗口控制器（`QuietSendSettings.from_config(config)`、`paste_files_as=STICKER_PASTE`）、OCR 备选（`_ocr_from_config`）、`SEND_QUEUE`、连发合并缓冲（`MESSAGE_BURST_*`） | 配置参数 | `None` |
-| `start(callback)` | 启动消息监听(阻塞) | `callback: MessageCallback` | `None` |
-| `send_text(chat_id, content)` / `send_file(chat_id, path)` | 发送文本 / 文件（持 `_window_lock`；中转的结果、PRM 的草稿、微信边缘的发送都走这里）：先 `_window_target(chat_id)`，窗口没法确定找到这个聊天时（名字不知道、和另一个聊天同名）返回假值 `SendRefused`（`reason` 是给人看的原因，日志里也有），什么都不打；否则 `_send_and_confirm` / `send_file_to_chat` | `chat_id: str, content: str` / `chat_id: str, path: str` | `bool \| SendRefused` |
+| `start(callback)` | 启动消息监听(阻塞)：开数据库、读会话列表（`_resolve_groups`）在同一个 try 里：这两步任何一步失败（会话列表也报错误码）都按「数据库打不开」处理（关掉客户端；开着 OCR 时不用数据库接着跑，否则控制台报错后返回） | `callback: MessageCallback` | `None` |
+| `send_text(chat_id, content)` / `send_file(chat_id, path)` | 发送文本 / 文件（持 `_window_lock`；中转的结果、PRM 的草稿、微信边缘的发送都走这里）：先 `_window_target(chat_id)`，窗口没法确定找到这个聊天时（名字不知道、和另一个聊天同名）返回假值 `SendRefused`（`reason` 是给人看的原因，日志里也有），什么都不打；否则 `_send_and_confirm` / `send_file_to_chat`（`SEND_VERIFY_CHAT` 开着时带 `check`，搜索打开的是别的聊天就不粘贴，也是 `SendRefused`） | `chat_id: str, content: str` / `chat_id: str, path: str` | `bool \| SendRefused` |
 | `stop()` | 停止监听 | 无 | `None` |
 | `window_controller`（属性） | 微信窗口控制器；好友管理操作同一个窗口 | — | `WeChatWindowController` |
 | `window_lock`（属性） | `_window_lock`：发送、截图、好友管理的每一段窗口操作都持有它 | — | `threading.Lock` |
-| `_reinitialize()` | 关闭并重开 WCDB(故障恢复)：清空每个聊天的已见集合（`_known`）、`_tracked` 和 `_recallable`，`_resolve_groups` 之后 `_prime_known_ids`（同一行重开以后编号不变，`_message_ids`；`PRM_CATCHUP_HOURS`：登记达人私聊里数据库读不了那段时间没处理过的消息留给下一轮交出去） | 无 | `None` |
+| `chat_names()` | 在读的聊天和最近一次会话列表里所有聊天的名字（去重）：好友管理（`FriendManager(chat_names=…)`，`Bot._start_friend_management` 接）认出单独打开的聊天窗口，永远不当成微信的对话框 | — | `list[str]` |
+| `_reinitialize()` | 关闭并重开 WCDB(故障恢复)：新句柄先 `_resolve_groups`（失败就抛出，已见的都不动，下次重来），再清空每个聊天的已见集合（`_known`）、`_tracked` 和 `_recallable`，然后 `_prime_known_ids`（同一行重开以后编号不变，`_message_ids`；`PRM_CATCHUP_HOURS`：登记达人私聊里数据库读不了那段时间没处理过的消息留给下一轮交出去） | 无 | `None` |
 | `_resolve_groups()` | 从会话列表找出要读的聊天：`WECHAT_GROUPS` 里的群（`*` 是全部）、私聊（`PRIVATE_CHAT_ENABLED` / `PRIVATE_CHATS` / `set_private_filter`），按 chat id 记进 `_chat_names`（同名的聊天各读各的）；会话列表里所有知道名字的聊天（群、`private_seen`，读不读都算）记进 `_session_names`（发送查同名用）；`_groups` 一直是 `WECHAT_GROUPS`（以前读完会改成读到的聊天名，`_reinitialize` 再解析时把它们当群名去匹配：`*` 找不到新群，群名里含一个好友的名字时群占了她的名字、她的私聊被丢掉） | 无 | `None` |
 | `_save_group_names(chatrooms)` | 持久化群名映射(静态) | `chatrooms: dict` | `None` |
 | `_save_group_members(chat_members)` | 持久化群成员列表(静态) | `chat_members: dict` | `None` |
 | `set_private_filter(accept)` / `refresh_private_chats_soon()` / `_wants_private(username)` | PRM / 微信边缘：`accept(username)` 为真的私聊（登记 / 名单里的达人）不管 `PRIVATE_CHATS` 都读（自定义号也认，跳过「和机器人同名」的检查；仍要 `PRIVATE_CHAT_ENABLED=true`，也仍要能解析出显示名，发送靠它找窗口；和别的聊天同名也照读，只是不发，见 `_window_target`）；`_resolve_groups` 和 `_refresh_private_chats_if_due` 都问它，出错当作不读；登记以后 `refresh_private_chats_soon` 把 `_last_session_refresh` 清零，下一轮轮询就刷新会话（刷新时也清空 `_tracked`，换过滤器时同样） | `accept: Callable[[str], bool] \| None` / — / `username: str` | `None` / `None` / `bool` |
-| `own_wxid()` / `db_readable()` / `wechat_window_found()` / `_special_info(content, local_type)` | 给微信边缘（PRM_EDGE）用：账号自己的 wxid；数据库连续读失败少于 3 次（`_db_failures`，轮询循环里记）；微信主窗口在不在（`find_hwnd(wake=False)`，发送占着窗口时不问、返回 None）；标准化消息多一个 `special`：链接、小程序、聊天记录、转账、红包（appmsg 的 `type`、`title`，有 `url` 时也带上，2026-10-28）、名片（`nickname`）、位置（`poiname` / `label`）、系统消息（文字，撤回时取 `replacemsg`，没有就取 `revokemsg` 的 `content`：微信 4.1 原地改写的撤回，2026-10-28 真机，以前会把 `revoketime` 的「0」也拼进去），其他是 `{}` | — / — / — / `content: str, local_type: int` | `str` / `bool` / `bool \| None` / `dict` |
-| `with_client(fn)` / `recent_sessions(max_age)` | 轮询之外读数据库的人（新好友扫描，§2.37）用：持 `_client_lock` 调 `fn(client)`（一次一个调用，轮询最多等这一个调用）；数据库没打开时返回 None / 轮询循环最近一次读到的会话列表（`_refresh_private_chats_if_due`、`_resolve_groups` 记在 `_sessions_read`），不超过 `max_age` 秒才给，否则 None | `fn: Callable[[client], T]` / `max_age: float` | `T \| None` / `list \| None` |
+| `own_wxid()` / `db_readable()` / `wechat_window_found()` / `_special_info(content, local_type)` | 给微信边缘（PRM_EDGE）用：账号自己的 wxid；数据库连续读失败少于 3 次（`_db_failures`，轮询循环里记；DLL 回错误码、一轮里每个聊天都读不出也算一次，`_poll_cycle`）；微信主窗口在不在（`find_hwnd(wake=False)`，发送占着窗口时不问、返回 None）；标准化消息多一个 `special`：链接、小程序、聊天记录、转账、红包（appmsg 的 `type`、`title`，有 `url` 时也带上，2026-10-28）、名片（`nickname`）、位置（`poiname` / `label`）、系统消息（文字，撤回时取 `replacemsg`，没有就取 `revokemsg` 的 `content`：微信 4.1 原地改写的撤回，2026-10-28 真机，以前会把 `revoketime` 的「0」也拼进去），其他是 `{}` | — / — / — / `content: str, local_type: int` | `str` / `bool` / `bool \| None` / `dict` |
+| `with_client(fn)` / `recent_sessions(max_age)` | 轮询之外读数据库的人（新好友扫描，§2.37）用：持 `_client_lock` 调 `fn(client)`（一次一个调用，轮询最多等这一个调用；进 DLL 的那一下另由客户端的 `_DLL_LOCK` 和所有线程串行）；数据库没打开时返回 None / 轮询循环最近一次读到的会话列表（`_refresh_private_chats_if_due`、`_resolve_groups` 记在 `_sessions_read`），不超过 `max_age` 秒才给，否则 None | `fn: Callable[[client], T]` / `max_age: float` | `T \| None` / `list \| None` |
 | `note_private_name(wxid, name)` | 新好友的名字：客户端 `remember_nickname`（之前没查到、缓存成 wxid 的换成名字，轮询才找得到她的私聊），记进 `_session_names`（发给别的同名聊天时会被拒）；有过滤器（`PRM_COPILOT` / `PRM_EDGE`）时写进 `data/private_chat_names.json`（控制台和 Mac 的私聊列表、发送时按名字找窗口） | `wxid: str, name: str` | `None` |
-| `catch_up_chat(talker, name, since, sink)` / `_admit_catch_up_chats()` / `_catch_up_new_friend(group_name, talker, request)` | 副驾驶登记了新好友（`NewFriendService.registered`）：请求记在 `_catch_up_requests`（`_catch_up_lock`），`_last_session_refresh` 清零 / 每轮开头：还没在读的聊天按给的名字 `_add_talker`（和别的聊天同名也加；没给名字的等会话刷新把它加进来，`CATCH_UP_WAIT_SEC` 后放弃）/ 这个聊天的 `_poll_group` 一开始：往回读 `CATCHUP_READ` 条（读失败把请求放回去再抛），全部记进 `_known_set`（第一次读的补交规则不再跑，什么都不会交第二次；最近的普通行也记进 `_recallable`），挑出 `since` 以后、对方说的（不是这个号的、不是微信的系统行 `edge.text.is_notice`（10000 / 10002、拍一拍）、不是好友提示 `is_friend_notice`），先 `MessageStore.insert_message`（重启后的补交认它们处理过了），登记达人私聊就 `_note_read`，再 `sink(挑出的)`（不经过路由：她的消息可能早就入库、persist 会当重复挡掉）；sink 出错只记日志 | `talker: str, name: str, since: float, sink: Callable[[list[dict]], object]` / — / `group_name, talker, request: tuple` | `None` |
+| `catch_up_chat(talker, name, since, sink)` / `_admit_catch_up_chats()` / `_catch_up_new_friend(group_name, talker, request)` | 副驾驶登记了新好友（`NewFriendService.registered`）：请求记在 `_catch_up_requests`（`_catch_up_lock`），`_last_session_refresh` 清零 / 每轮开头：还没在读的聊天按给的名字 `_add_talker`（和别的聊天同名也加；没给名字的等会话刷新把它加进来，`CATCH_UP_WAIT_SEC` 后放弃）/ 这个聊天的 `_poll_group` 一开始：往回读 `CATCHUP_READ` 条（经 `_read_messages`；DLL 回错误码时把请求放回去、返回 `False`，这一轮不碰这个聊天；别的错误把请求放回去再抛），全部记进 `_known_set`（第一次读的补交规则不再跑，什么都不会交第二次；最近的普通行也记进 `_recallable`），挑出 `since` 以后、对方说的（不是这个号的、不是微信的系统行 `edge.text.is_notice`（10000 / 10002、拍一拍）、不是好友提示 `is_friend_notice`），先 `MessageStore.insert_message`（重启后的补交认它们处理过了），登记达人私聊就 `_note_read`，再 `sink(挑出的)`（不经过路由：她的消息可能早就入库、persist 会当重复挡掉）；sink 出错只记日志 | `talker: str, name: str, since: float, sink: Callable[[list[dict]], object]` / — / `group_name, talker, request: tuple` | `None` / `None` / `bool` |
 | `set_own_message_hook(hook)` / `_tell_own_message(standardized)` | PRM / 微信边缘：`_poll_group` 遇到自己（`myWxid`）发的消息，跳过之前先交给 `hook`，只限过滤器要的私聊（登记 / 名单里的达人；群聊和别的私聊不给）；`hook` 出错只记日志，轮询照常；这些消息照旧不进路由 | `hook: Callable[[dict], None] \| None` / `standardized: dict` | `None` |
 | `_save_private_names(chats)` | 静态方法：有过滤器（`PRM_COPILOT` 或 `PRM_EDGE` 打开）时，把会话列表里所有有名字的私聊（wxid → 名字）合并写进 `data/private_chat_names.json`（原子替换，没变化不写；拿 `_PRIVATE_NAMES_LOCK`：新好友扫描经 `note_private_name` 也写）；控制台「合作单」页的「从最近的私聊里选」读它 | `chats: dict[str, str]` | `None` |
 | `_talker_to_name(talker_id)` / `_listed_private_names()` | 微信里这个聊天叫什么：先查在读的聊天（`_chat_names`）；私聊找不到时查 `data/private_chat_names.json`（刚上名单、会话还没刷新的达人，或者微信的会话列表里已经没有她：PRM / 边缘第一次给她发），用上的经 `_add_talker` 加进 `_chat_names`，从下一轮轮询起就读（fd9419b，2026-10-26 Windows 真机：我们发出的那句和她的回复马上读得到；以前轮询按 `_groups` 走，加进去以后要等别的聊天加进来才开始读，现在下一轮就读）；和别的聊天同名也照样加、照样读，只是 `_window_target` 拒发；都没有返回空串（不加）/ 静态方法：读 `data/private_chat_names.json`（读不了、不是字典就是 `{}`） | `talker_id: str` / — | `str` / `dict` |
 | `_add_talker(chat_name, talker, is_group)` | 从下一轮起读这个聊天，按 chat id 记进 `_chat_names` 和 `_chat_is_group`（没名字或没 id 才返回 `False`）；名字和另一个在读的聊天一样（`_name_key` 比，忽略空格和大小写）时照样加，只记一条 WARNING「has the same name as … both are read; the bot sends to neither」（以前直接拒绝，后来的那个私聊整个读不到：收不到、不起草、也发不出） | `chat_name: str, talker: str, is_group: bool` | `bool` |
 | `_namesake(talker, name)` | 另一个叫这个名字的聊天（返回它的 id，没有是空串）：在读的（`_chat_names`）、最近一次会话列表里的（`_session_names`）、控制台私聊名单里的（`_listed_private_names`）都算——机器人不读的好友，微信的搜索一样搜得到 | `talker: str, name: str` | `str` |
 | `_window_target(talker, name="")` | 窗口操作（发送、回复、截图）用哪个名字去微信的搜索里找这个聊天，以及为什么不行：窗口只能按名字搜、回车选第一条结果，微信 4 上又核对不了打开的是谁，所以名字不知道（`UNKNOWN_NAME`，日志「Cannot resolve chat_id」）或者有同名的聊天（`NAMESAKE`，日志 WARNING「Not using the WeChat window for …」）时返回 `SendRefused`，调用的地方什么都不打。`name`：聊天不认识时用的名字（消息的 `group_name`） | `talker: str, name: str` | `(str, SendRefused \| None)` |
-| `_poll_cycle(callback)` | 单次轮询周期：`_refresh_private_chats_if_due()` → `_admit_catch_up_chats()` → 每个在读的聊天（`_chat_names` 的快照，按 chat id：同名的各读各的）`_poll_group` → `_flush_due_bursts` | `callback: MessageCallback` | `None` |
-| `_poll_group(group_name, talker, callback)` | 轮询单个群聊消息；这个聊天有 `catch_up_chat` 的请求时先 `_catch_up_new_friend`（读回、全部记成已见、交给请求的 sink），再照常读；跳过自己的消息（`_is_own_line`）：知道账号 `myWxid` 时只按 wxid 判断，并给放行的消息打 `_not_self_by_id`（显示名和这个号一样的群友不会被当成自己）；不知道 wxid 时才按显示名判断。见过没见过按这个聊天自己的集合（`_known_set`）。登记达人的私聊（`_tracked_chat`）：`PRM_CATCHUP_HOURS` 大于 0 时，启动以后才找到的（第一次读，`_known` 里还没有它）先 `_prime_chat(first_read=True)`；`_prime_chat` 留下的（机器人没处理过的）先由 `_hand_on_missed` 按顺序交出去，再看新消息；OCR 刚结束那一轮（`_ocr_priming`）也照常处理（OCR 从不读私聊）；最后把看到的最新一条的时间写进读到的位置（`_note_read`）。过滤器要的私聊（登记达人 / 名单里的，`_wants_private`，读到新行时问一次）：新读到的普通行（不是系统行）写进 `_recallable`；已经见过、在 `_recallable` 里、现在变成系统行的（微信原地改写的撤回）交给 `_recall_in_place` / `_hand_on_recall`。电脑微信掉线以后（`_gap_watch`，要补交开着、不是第一次读）：回来以后还没往回读过、或者这一轮读到了同步进来的旧行（`_gap_rows_unseen`），先 `_gap_catch_up`，再交 `_catchup` 里的 | `group_name, talker, callback` | `None` |
+| `_poll_cycle(callback)` | 单次轮询周期：`_refresh_private_chats_if_due()` → `_admit_catch_up_chats()` → 每个在读的聊天（`_chat_names` 的快照，按 chat id：同名的各读各的）`_poll_group` → `_flush_due_bursts`；这一轮读了聊天、而且每一次都是 DLL 回的错误码（`_reads`）时抛 `WcdbCallError`：数据库读不了（旧句柄，win review F14），轮询循环照常计数、重开、开 OCR 备选、`db_readable` 变假；只是部分聊天读不出不算 | `callback: MessageCallback` | `None` |
+| `_read_messages(talker, limit)` | 在 `_client_lock` 里读一个聊天最新的 `limit` 行（新的在前）；DLL 回错误码（`WcdbCallError`）时记进这一轮的 `_reads`、返回 None（只是这个聊天读不出：这一轮跳过、下一轮再读，日志只在开始读不出时记一次 WARNING「WCDB could not read …」、读回来时记一次）；空聊天是 `[]`，不算失败；别的错误照旧抛出 | `talker: str, limit: int` | `list \| None` |
+| `_poll_group(group_name, talker, callback)` | 轮询单个群聊消息；这个聊天有 `catch_up_chat` 的请求时先 `_catch_up_new_friend`（读回、全部记成已见、交给请求的 sink；读不出就这一轮不碰这个聊天），再照常读（`_read_messages`：DLL 回错误码就直接返回，这个聊天的已见集合、第一次读的规则都不动）；每一行先不识别语音地标准化（`resolve_voice=False`：编号和语音的字无关），见过的就此跳过，新的语音行再带识别标准化一次——识别（本地 whisper 要几秒）每条只跑一次，识别失败的也不会每轮都再跑（以前最新 50 条里的语音每轮都识别一遍，失败的不进缓存，所有聊天跟着慢，win review F12）；跳过自己的消息（`_is_own_line`）：知道账号 `myWxid` 时只按 wxid 判断，并给放行的消息打 `_not_self_by_id`（显示名和这个号一样的群友不会被当成自己）；不知道 wxid 时才按显示名判断。见过没见过按这个聊天自己的集合（`_known_set`）。登记达人的私聊（`_tracked_chat`）：`PRM_CATCHUP_HOURS` 大于 0 时，启动以后才找到的（第一次读，`_known` 里还没有它）先 `_prime_chat(first_read=True)`；`_prime_chat` 留下的（机器人没处理过的）先由 `_hand_on_missed` 按顺序交出去，再看新消息；OCR 刚结束那一轮（`_ocr_priming`）也照常处理（OCR 从不读私聊）；最后把看到的最新一条的时间写进读到的位置（`_note_read`）。过滤器要的私聊（登记达人 / 名单里的，`_wants_private`，读到新行时问一次）：新读到的普通行（不是系统行）写进 `_recallable`；已经见过、在 `_recallable` 里、现在变成系统行的（微信原地改写的撤回）交给 `_recall_in_place` / `_hand_on_recall`。电脑微信掉线以后（`_gap_watch`，要补交开着、不是第一次读）：回来以后还没往回读过、或者这一轮读到了同步进来的旧行（`_gap_rows_unseen`），先 `_gap_catch_up`（读不出就这一轮到此为止，下一轮再往回读），再交 `_catchup` 里的 | `group_name, talker, callback` | `None` |
 | `_known_set(talker)` | 这个聊天见过的消息 id（`DedupSet(CHAT_KNOWN_SIZE)`，第一次读时新建）：每个聊天一套，忙的群挤不掉安静聊天的历史 | `talker: str` | `DedupSet` |
 | `_recallable_rows(talker, now)` / `_note_recallable(talker, standardized, now)` | 撤回只能在 2 分钟内做：过滤器要的私聊里最近 `RECALL_WINDOW_SEC`（300 秒）内写的普通行（不是 `edge.text.is_notice` 的系统行）记在 `_recallable[talker]`（编号 → 时间；`_poll_group` 新读到的、`_prime_chat` 启动时读到的、`_catch_up_new_friend` 读回的都记）；每次轮询先把过了时间的去掉。不多读数据库：轮询本来每秒就读、标准化每个聊天最新的 50 条，这里只是对见过的行多查一次字典 | `talker: str, now: float` / `talker, standardized: dict, now: float` | `dict[str, int]` / `None` |
 | `_recall_in_place(talker, standardized, now)` / `_hand_on_recall(recall, callback, my_wxid)` | 微信 4.1 撤回时把原来那一行原地改掉（同一个 `local_id`、同一个时间，所以编号不变；类型 10000，`<sysmsg type="revokemsg"><revokemsg><content>"小美" 撤回了一条消息</content>`，2026-10-28 真机），轮询以前当成读过的跳过。`_recall_in_place`：见过、在 `_recallable` 里、现在是系统行的，拿出来（只一次）当一条新的系统行：编号 `md5("recall|聊天|原编号")`（路由的 `persist`、边缘的事件都当新的收），`recalled_id` = 原来那条的编号，`timestamp` = 现在（发现撤回的时间），`_legacy_ids` 清空；别的返回 None。`_hand_on_recall`：连发合并还压着被撤回的那一行时（`MessageBurstBuffer.flush_holding`）先把它交出去，再交撤回；这个号的（运营撤回，「你撤回了一条消息」）交给 `_tell_own_message`，她的走路由（`_dispatch_message`）。副驾驶：PRM `handle` / `on_own_message` → `_system_line`（达人撤回：草稿改成人审、合作单提醒；运营撤回只记）；边缘：`chat_notice`（带 `recalled_message_id`）。消息库里原来那条不改（见功能 L） | `talker, standardized: dict, now: float` / `recall: dict, callback, my_wxid: str` | `dict \| None` / `None` |
 | `wechat_presence()` | 电脑微信现在登录着没有（`presence.probe(self.wechat_window_found)`：微信进程、主窗口）；不是 Windows 时 `online` 为 None（不看，永远不记掉线） | — | `dict` |
 | `note_wechat_offline(since)` / `catch_up_after_gap(since)` / `_gap_watch(now)` | 电脑微信掉线（`WechatPresence` 的 `on_offline` / `on_back`，§2.38）：记下从哪天起（`_gap_since`，两段重叠取早的）；回来时再加「盯到」`_gap_until` = 现在 + `GAP_WATCH_SEC`、`_gap_back_at` = 现在（这之前没往回读过的登记 / 名单私聊在下一轮都往回读一次，启动前就回来的也算）；`_gap_watch`：在盯着就返回起点，过了期限把这些都清掉返回 None。都在 `_catch_up_lock` 下 | `since: float` | `None` / `float \| None` |
 | `_gap_rows_unseen(talker, messages, known, since, now)` / `_row_time(msg)` / `_row_id(msg, talker)` | 这一轮读到的 50 条里有没有「这次运行没见过、掉线开始（减 `GAP_MARGIN_SEC`）以后写的、已经超过 `MAX_AGE_SEC`」的行（重新登录时同步进来的：新编号、旧时间）：只按 `local_id` 和时间算编号（`_row_id` 和 `_message_ids` 一样，不标准化），往回读过的（`_gap_looked`）不算 | — | `bool` / `int` / `str` |
-| `_gap_catch_up(group_name, talker, since)` / `_gap_plan(talker, items, since)` | 为掉线往回读一个私聊（`CATCHUP_READ` 条）：`_prime_chat(gap_since=since)`，`_gap_plan` 挑出来的进 `_catchup[talker]`（同一轮 `_hand_on_missed` 按时间顺序交出去；边缘带 `_catchup` → 事件带 `written_at`），其余记成已见；读过的行记进 `_gap_looked`（标准化不出来的行不会每轮都触发）。`_gap_plan`：掉线开始（减 `GAP_MARGIN_SEC`）以后写的、`_known_set` 里没有的（轮询见过的都交过了，单条或并在连发里）、没压在连发里、消息库没存过（副驾驶）；不用重启补交的底线：掉线以前的都是微信在线时读的，见过的编号被挤出集合以后也不能再交一遍 | `group_name, talker, since` / `talker, items, since` | `None` / `set[str]` |
+| `_gap_catch_up(group_name, talker, since)` / `_gap_plan(talker, items, since)` | 为掉线往回读一个私聊（`CATCHUP_READ` 条，`_read_messages`；DLL 回错误码时返回 `False`、往回读的时间改回原来的，下一轮再读）：`_prime_chat(gap_since=since)`，`_gap_plan` 挑出来的进 `_catchup[talker]`（同一轮 `_hand_on_missed` 按时间顺序交出去；边缘带 `_catchup` → 事件带 `written_at`），其余记成已见；读过的行记进 `_gap_looked`（标准化不出来的行不会每轮都触发）。`_gap_plan`：掉线开始（减 `GAP_MARGIN_SEC`）以后写的、`_known_set` 里没有的（轮询见过的都交过了，单条或并在连发里）、没压在连发里、消息库没存过（副驾驶）；不用重启补交的底线：掉线以前的都是微信在线时读的，见过的编号被挤出集合以后也不能再交一遍 | `group_name, talker, since` / `talker, items, since` | `bool` / `set[str]` |
 | `_catchup_hours()` / `_tracked_chat(talker)` / `_is_own_line(standardized, my_wxid)` | `PRM_CATCHUP_HOURS`（没配或不是数字算 0）/ 是不是要记读到哪儿的登记达人私聊：有消息库（开了 `PRM_EDGE` 时改成接了边缘的 `set_catchup_floor`）、不是群、过滤器要它；结果记在 `_tracked`，会话刷新时清空重问 / 是不是这个号自己发的（同 `_poll_group` 的判断） | — / `talker: str` / `standardized: dict, my_wxid: str` | `int` / `bool` / `bool` |
 | `_prime_known_ids()` / `_prime_chat(group_name, talker, messages, *, catch_up, first_read=False, gap_since=None)` | 启动和 `_reinitialize` 时把每个聊天现在看得到的消息记成已见（历史）；`PRM_CATCHUP_HOURS` 大于 0 时登记达人的私聊往回读 `CATCHUP_READ` 条，`_catchup_plan` 挑出来的不记已见，按时间顺序留在 `_catchup[talker]` 给这个聊天的下一轮；日志写一共交出几条、最早的时间；`_prime_chat` 返回 `(记成已见的, 留下的)`；过滤器要的私聊，最近的普通行记进 `_recallable`（启动后马上撤回的也认得出）；`gap_since`（`_gap_catch_up`）时按 `_gap_plan` 挑；留下的并进已经在等的 `_catchup[talker]`、按时间排（不覆盖重启补交留下的） | — / `group_name, talker, messages: list, catch_up: bool, first_read: bool` | `None` / `(int, int)` |
 | `_stored_of(talker, items)` | 这些标准化消息里消息库已经存了的（只看这个聊天）：用现在的编号存的，或用 `_legacy_ids` 里旧版本给同一行的编号存的（更新后第一次启动也认得出旧版本处理过的）；返回现在的编号 | `talker: str, items: list[dict]` | `set[str]` |
@@ -398,20 +407,22 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `_hand_on_missed(group_name, talker, messages, callback)` | 把 `_prime_chat` 留下的按时间顺序、在轮询线程里一条一条交出去：达人的话直接 `_handle_message(..., screenshot=False)`（不进合并缓冲、不进线程池：PRM 按顺序收到，8 秒的合并让它们成为一个任务，每条用自己的 id 入库），自己的话交给 `_tell_own_message`；机器人停了就停（没交的下次启动还在） | `group_name, talker, messages: list[dict], callback` | `None` |
 | `_note_read(talker, newest)` | 读到的位置往前挪（`MessageStore.set_read_mark`，只在变大时写，记在 `_read_marks`）；出错只记日志 | `talker: str, newest: int` | `None` |
 | `_handle_message(group_name, talker, standardized, callback, *, screenshot=True)` | 处理单条消息(线程池)；回复发送时持 `_window_lock`，不占 DLL 读锁；图片挂的截图函数是 `_screenshot_of`；`screenshot=False`（补交的晚到消息）时图片不挂截图函数：窗口里是现在的聊天，不是那张图 | `group_name, talker, standardized, callback, screenshot: bool` | `None` |
-| `_capture_media_screenshot(group_name)` / `_screenshot_of(group_name, talker)` | 聊天区截图（持 `_window_lock`，与发送互斥）/ `_handle_message` 挂在图片消息的 `msg["_capture_media_screenshot"]` 上的那个：`_window_target` 不行（和别的聊天同名：截到的可能是别人的聊天）时返回空串，否则 `_capture_media_screenshot`；中转 / 边缘找不到图片原图时用（`attachments.resolve`）；补交的晚到图片不挂 | `group_name: str` / `group_name, talker: str` | `str` |
+| `_capture_media_screenshot(group_name)` / `_screenshot_of(group_name, talker)` | 聊天区截图（持 `_window_lock`，与发送互斥）/ `SEND_VERIFY_CHAT` 核对时 `_screenshot_of` 直接带 `check` 调 `capture_chat_media`（搜索打开的是别的聊天就不截）； `_handle_message` 挂在图片消息的 `msg["_capture_media_screenshot"]` 上的那个：`_window_target` 不行（和别的聊天同名：截到的可能是别人的聊天）时返回空串，否则 `_capture_media_screenshot`；中转 / 边缘找不到图片原图时用（`attachments.resolve`）；补交的晚到图片不挂 | `group_name: str` / `group_name, talker: str` | `str` |
 | `_log_delivery(group_name, reply, success)` | 静态方法："Reply sent" / "Reply FAILED" 日志（直接发送和发送队列共用，文字和以前相同） | — | `None` |
 | `_send_part(group_name, talker, text)` | 一个气泡：先 `_window_target(talker, group_name)`（同名、找不到名字：返回 `SendRefused`，不打字，回复记「Reply FAILED」），再持 `_window_lock` 调 `_send_and_confirm`（锁按气泡拿，气泡之间的停顿不占锁）；`_handle_message` 把它交给 `BubbleSender.deliver` / `SendQueue.submit` | `group_name, talker, text: str` | `bool \| SendRefused` |
-| `_send_file_part(group_name, talker, path)` | 一张表情包：和文字气泡一样先 `_window_target`、再持 `_window_lock`，调 `send_file_to_chat`；`_handle_message` 把它作为 `send_file` 交给 `BubbleSender.deliver` | `group_name: str, talker: str, path: str` | `bool \| SendRefused` |
+| `_send_file_part(group_name, talker, path)` | 一张表情包：和文字气泡一样先 `_window_target`、再持 `_window_lock`，调 `send_file_to_chat`（带 `check`）；`_handle_message` 把它作为 `send_file` 交给 `BubbleSender.deliver` | `group_name: str, talker: str, path: str` | `bool \| SendRefused` |
 | `_standardize(msg, group_name, talker, resolve_voice=True, is_group=None)` | 标准化WCDB原始消息；文字消息（`local_type=1`）先试 zstd 解压：微信 4 把较长的文字压缩成十六进制存（`28b52ffd…`），不解压会被当成图片（读回比对对不上、长任务丢字），解不开的长十六进制才按图片处理。`message_id` 由 `_message_ids` 算（同一行一直是同一个；语音不管识没识别都按「[语音]」算，启动时不识别的读法和轮询的读法编号一样），进群的系统消息照旧 `md5("join|聊天|新成员|内容|时间")`；多一个内部字段 `_legacy_ids`（旧版本给这一行的编号，进群消息是空的）。`local_type` 的高 32 位在这里拆开（`_message_local_type` 留低 32 位当 `msg_type`，`_message_subtype` 拿高 32 位当 `msg_subtype`：微信 4 的 appmsg 把子类型放在高位，引用 (57 << 32) \| 49、拍一拍 (62 << 32) \| 49 = 266287972401）；拍一拍（`edge.text.is_pat`）的 `content` 是它的文字（「"小美" 拍了拍我」，XML 解不开时「[拍一拍]」），不再是「[文件]」 | `msg: dict, group_name: str, talker: str, resolve_voice: bool, is_group: bool \| None` | `dict \| None` |
 | `wcdb_backend._message_ids(msg, talker, sender, content, ts)` | 一行消息的 `(编号, 旧编号)`：编号 `md5(f"{talker}|{local_id}|{ts}")`（`local_id` / `localId`，空、`0` 算没有），微信先写进库、约一秒后才填 `server_id`，编号不跟着变（以前用 `server_id` 算，同一行先后两个编号、交出去两次：副驾驶把机器人自己的话第二次读到当成运营亲手回、接管；边缘先报 `send_seen` 又报 `operator_message`）；没有 `local_id` 时 `md5(f"{sender}|{content}|{ts}|{ts}")`（和以前一样，但从不用 `server_id`）。旧编号：2026-10-27 以前的算法（`server_id` 有就用它，否则 `local_id`，再否则发送人+内容+时间，后面加 `|时间`）按这一行现在的样子算一个，再加上 `server_id` 还空着时会算出的 `md5(f"{local_id}|{ts}")`，去重、去掉和新编号相同的 | 见左 | `tuple[str, list[str]]` |
 | `wcdb_backend._md5(text)` | `hashlib.md5(text.encode("utf-8")).hexdigest()` | `text: str` | `str` |
-| `_send_and_confirm(group_name, talker, content)` | 通过键盘发送并确认 | `group_name, talker, content` | `bool` |
+| `_send_and_confirm(group_name, talker, content)` | 通过键盘发送：`send_to_chat(group_name, content, check=…)`（`SEND_VERIFY_CHAT` 开着时） | `group_name, talker, content` | `bool \| SendRefused` |
+| `_check_kwargs(talker, name)` / `_open_chat_check(talker, name)` / `_read_title(hwnd)` | 窗口操作要带的 `{"check": …}`（不核对时是 `{}`，测试里的替身窗口照旧只收两个参数）/ `SEND_VERIFY_CHAT`（win review F10）：给这一次发送做的 `check(hwnd)`：读聊天区标题（`_read_title`），`title_verdict` 是 `ok` 就发（日志「the open chat is … as asked」），`unknown` 照旧发（日志「could not be confirmed」），`other` / `group` 隔 `VERIFY_PAUSE_SEC` 再读，读满 `VERIFY_LOOKS` 次还是就返回 `SendRefused(WRONG_CHAT)`（日志 WARNING「Not sending to …」）；读屏幕抛异常时 `VERIFY_OFF_SEC` 内不再读、照旧发。「别的聊天」= `_chat_names`、`_session_names`、`_listed_private_names()` 里除了她自己的、`_ocr_key` 和她不一样的名字。关着或者不是 Windows（测试注入 `_title_reader` 除外）时返回 None / 用 `WindowsOcrEngine(window=…).capture(hwnd)` 加 `ocr.reader.read_rows(...)["title"]` 读标题（第一次用时建，测试可以换成 `_title_reader`） | `talker: str, name: str` / 同左 / `hwnd: int` | `dict` / `Callable[[int], SendRefused \| None] \| None` / `str` |
+| `wcdb_backend.title_verdict(title, name, others, is_group)` / `_ocr_key(name)` | 读到的标题说明了什么：去掉人数（`clean_group_name`）后 `_ocr_key` 和要发的名字一样是 `ok`；在 `others`（别的聊天名的 `_ocr_key`）里是 `other`；要发私聊、标题却带人数是 `group`；空的、截断的、不认识的都是 `unknown`（不下判断）/ 只留字母、数字、汉字（OCR 读不出表情和多数符号）并 `casefold()` | 见左 | `str` / `str` |
 | `_get_voice()` | 懒初始化语音识别管道 | 无 | `VoicePipeline \| None \| False` |
-| `_try_voice(msg)` | 尝试语音识别 | `msg: dict` | `str \| None` |
+| `_try_voice(msg, talker="")` | 尝试语音识别：先查管道的缓存（按服务器编号），再从 WCDB 取语音数据（刚发的最多试 4 次、间隔 0.5 秒）交给 `VoicePipeline.process`；失败返回 None。轮询里只对新读到的语音行调用（`_poll_group`），补交的消息在 `_hand_on_missed` 里各一次 | `msg: dict, talker: str` | `str \| None` |
 
 发送队列（`SEND_QUEUE=on`）：`__init__` 建 `SendQueue(typing=…, alive=lambda: self._running)`；`start()` 经 `_start_workers()` 建线程池（有队列时打字延迟也只要 4 个线程）并启动它，主循环结束时停止队列（最多等 15 秒，让正在发的一条把焦点和剪贴板还回去）；`stop()` 停止并丢弃没发的回复；`_handle_message` 改为 `submit(..., on_done=_log_delivery)` 后立即返回，交不出去就记 "Reply FAILED"。中转图片的截图仍在工作线程里，开着安静发送时仍可能等用户停手。
 
-锁：`_client_lock` 只串行 WCDB DLL 读取（轮询）；`_window_lock` 串行微信窗口自动化（发送回复、`send_text` / `send_file`、聊天区截图、好友管理）。窗口操作要几秒，两把锁分开后，发送期间消息轮询不再被阻塞。
+锁：进 WCDB DLL 的每一次调用由客户端自己的 `wcdb_client._DLL_LOCK` 串行（任何线程：轮询、新好友扫描、`_reinitialize` 的关库和开库；以前 `_resolve_groups` 的会话 / 群成员 / 名字、`resolve_nickname` 没缓存时查名字、`_try_voice` 取语音数据都不拿锁，会和新好友扫描同时进 DLL，win review F11）；`_client_lock` 包着轮询的读和每个 `with_client` 调用，别的线程一次只插进一个调用；`_window_lock` 串行微信窗口自动化（发送回复、`send_text` / `send_file`、聊天区截图、好友管理）。窗口操作要几秒，两把锁分开后，发送期间消息轮询不再被阻塞。
 
 窗口控制器：`__init__` 用 `WeChatWindowController(quiet=QuietSendSettings.from_config(config))` 创建，并设 `alive=lambda: self._running`（安静发送等用户停手时，机器人停止就不再等）；`start()` 找到主窗口后调用 `describe_chat_windows(群名)`，在日志里说明哪些群有独立窗口。安静发送的等待发生在 `_window_lock` 里，其他群的回复跟着排队。
 
@@ -420,15 +431,19 @@ grep "文件名" CODEBASE_REFERENCE.md
 | 函数 | 描述 | 参数 | 返回值 |
 |---|---|---|---|
 | `__init__(dll_dir)` | 初始化 WCDB 客户端 | `dll_dir: str` | `None` |
-| `init()` | 初始化 wcdb_api.dll | 无 | `bool` |
-| `open()` | 打开加密数据库 | 无 | `bool` |
-| `close()` | 关闭数据库连接 | 无 | `None` |
-| `get_sessions()` | 获取所有会话列表 | 无 | `list[dict]` |
-| `get_messages(talker, limit)` | 获取指定 talker 的消息 | `talker: str, limit: int` | `list[dict]` |
+| `init()` / `_init()` | 初始化 wcdb_api.dll（加载、DRM 补丁、`InitProtection`、`wcdb_init`），整个过程持 `_DLL_LOCK` | 无 | `None` |
+| `open()` / `_open()` | 打开加密数据库：逐个试密钥，用 `get_sessions` 验证，读不出会话的关掉再试下一个；整个过程持 `_DLL_LOCK`（别的线程的调用等句柄定下来） | 无 | `bool` |
+| `close()` / `_close_handle()` | 关闭数据库连接：持 `_DLL_LOCK`，别的线程正在用这个句柄的调用先做完，关掉以后句柄是 0 | 无 | `None` |
+| `_call_json(name, *args, strict=False)` | 调 DLL 里返回 JSON 字符串指针的函数 `name(handle, *args, &out)`：持 `_DLL_LOCK`，句柄在锁里读（关掉的客户端不把旧句柄交给 DLL）；返回码不是 0、或者没打开 → None（`strict` 时抛 `WcdbCallError`：`get_messages`、`get_sessions` 这样用）；空指针 → `{}` | `name: str, *args, strict: bool` | `dict \| list \| None` |
+| `get_sessions()` | 获取所有会话列表；DLL 回错误码、或者数据库没打开时抛 `WcdbCallError`（读失败，不是「没有会话」；win review F14） | 无 | `list[dict]` |
+| `get_messages(talker, limit)` | 获取指定 talker 的消息（新的在前）；DLL 回错误码、或者数据库没打开时抛 `WcdbCallError`；返回码 0 而列表是空的、或者没有字符串，是 `[]`（真的没有消息） | `talker: str, limit: int` | `list[dict]` |
+| `WcdbCallError(call, ret=None, detail="")` | `RuntimeError` 的子类：`call` 哪个 DLL 函数、`ret` 它回的错误码（数据库没打开时是 None）。以前错误码被当成空列表：微信重新登录、升级、库重建以后旧句柄每次都回错误码，轮询一直读到 0 条、不计失败、不重开、不开 OCR、`db_readable` 一直是真，直到有人重启。`open()` 试密钥时会话列表报错误码算「这个密钥不行」（试下一个，最后 KEY_MISSING），`_load_nickname_cache` 读不出会话只记 warning | — | — |
 | `get_group_members(talker)` | 获取群成员列表 | `talker: str` | `list[dict] \| None` |
-| `resolve_nickname(wxid)` | 解析 wxid → 昵称 | `wxid: str` | `str` |
+| `resolve_nickname(wxid)` | 解析 wxid → 昵称：先查缓存（不拿锁）；没有时持 `_DLL_LOCK` 再查一次缓存、调 `get_display_names`、写缓存（另一个线程的 `remember_nickname` 不会被这次没查到盖掉） | `wxid: str` | `str` |
 | `get_display_names(wxids)` | 批量解析昵称 | `wxids: list[str]` | `dict[str, str]` |
-| `remember_nickname(wxid, name)` | 别处知道的名字（新好友的「你已添加了X」或显示名）换掉缓存里没查到的（`resolve_nickname` 没查到时把 wxid 本身缓存起来，新好友在成为联系人之前被查过就一直解析不出名字）；已经有名字的不动 | `wxid: str, name: str` | `None` |
+| `remember_nickname(wxid, name)` | 别处知道的名字（新好友的「你已添加了X」或显示名）换掉缓存里没查到的（`resolve_nickname` 没查到时把 wxid 本身缓存起来，新好友在成为联系人之前被查过就一直解析不出名字）；已经有名字的不动；持 `_DLL_LOCK`（新好友扫描的线程调用） | `wxid: str, name: str` | `None` |
+
+线程：所有进 DLL 的调用（上面每个函数，含 `get_voice_data`、`get_group_members`）都持模块级的 `_DLL_LOCK`（可重入），任何线程、任何客户端对象都串行；测试 `tests/test_wcdb_backend_locking.py::DllCallsAreSerializedTests`（真的客户端接在假 DLL 上：每个调用都持锁、轮询和新好友扫描同时跑也从不两个线程同时在 DLL 里、关库等正在进行的调用做完、关掉以后不再进 DLL）。
 
 ### 2.9 `src/wechat/window_controller.py` (WeChatWindowController)
 
@@ -441,11 +456,12 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `activate(hwnd)` | 激活微信窗口(4层策略) | `hwnd: int` | `bool` |
 | `navigate_to_chat(hwnd, group_name)` | 键盘导航到指定群聊 | `hwnd: int, group_name: str` | `bool` |
 | `send_message(hwnd, text, file_path=None)` | 键盘发送消息（Ctrl+A → Ctrl+V → Enter）：搜索结果上的回车把光标放进这个聊天的输入框，粘贴之前先在那里 Ctrl+A，粘贴替换掉输入框里原有的东西——微信给每个聊天留着输入框里的字，所以重试不会把上一次粘进去的那句再发一遍，运营在这个聊天里打了一半没发的字也不会跟着发出去（和独立窗口的 `_send_in_chat_window` 一样；文字和文件都这样）；有 `file_path` 时用 `_clipboard_file` 放图（放不上去就返回 `False`，不粘贴，免得把剪贴板里的旧文字再发一遍），粘贴后多等 `FILE_PASTE_DELAY` | `hwnd: int, text: str, file_path: str \| None` | `bool` |
-| `send_to_chat(group_name, text, max_retries=2)` | 完整发送管道(主入口)；经 `_run_send`：安静发送时外面包一层 `_begin_quiet`/`_end_quiet`，里面是 `_send_to_chat` | `group_name: str, text: str, max_retries: int` | `bool` |
-| `send_file_to_chat(group_name, path, max_retries=2)` | 发一个文件（中转的长结果、PRM 的素材、表情包气泡的图片）：同一条管道，粘贴的是文件；文件不存在直接返回 `False`；日志里的文字是 `[file] 文件名` | `group_name: str, path: str` | `bool` |
-| `_run_send(group_name, text, max_retries, file_path=None)` | 两个入口共用：有没有安静发送 | 同上 | `bool` |
-| `_send_to_chat(group_name, text, max_retries, file_path=None)` | 重试循环（原来的发送流程）；安静发送时每次先找群的独立窗口，找到就 `_send_in_chat_window`，否则主窗口搜索，激活用 `_activate_for_send`；有 `file_path` 时 `send_message(..., file_path=)` | 同上 | `bool` |
-| `capture_chat_media(group_name)` / `_capture_chat_media(group_name)` | 聊天区截图（存到 `data/vision_screenshots/`；中转 / 边缘找不到图片原图时用）；安静发送时同样等用户停手、事后还焦点；群有独立窗口时直接截它（`_conversation_bbox(sidebar=False)`，不搜索） | `group_name: str` | `str`（图片路径或空） |
+| `SendRefused(reason)` | 没有发（或者没去做）的发送返回的假值，`reason` 是给人看的原因（`wcdb_backend` 的拒发和这里 `check` 给的都是它） | `reason: str` | — |
+| `send_to_chat(group_name, text, max_retries=2, check=None)` | 完整发送管道(主入口)；经 `_run_send`：安静发送时外面包一层 `_begin_quiet`/`_end_quiet`，里面是 `_send_to_chat`；`check(hwnd)`：搜索打开聊天以后、粘贴之前问一次，返回 `SendRefused` 就不粘贴、不重试，把它返回（`SEND_VERIFY_CHAT`） | `group_name: str, text: str, max_retries: int, check` | `bool \| SendRefused` |
+| `send_file_to_chat(group_name, path, max_retries=2, check=None)` | 发一个文件（中转的长结果、PRM 的素材、表情包气泡的图片）：同一条管道，粘贴的是文件；文件不存在直接返回 `False`；日志里的文字是 `[file] 文件名`；`check` 同上 | `group_name: str, path: str` | `bool \| SendRefused` |
+| `_run_send(group_name, text, max_retries, file_path=None, check=None)` | 两个入口共用：有没有安静发送；`check` 只在给了时才往下传 | 同上 | `bool \| SendRefused` |
+| `_send_to_chat(group_name, text, max_retries, file_path=None, check=None)` | 重试循环（原来的发送流程）；安静发送时每次先找群的独立窗口，找到就 `_send_in_chat_window`（独立窗口按标题找到，不用核对），否则主窗口搜索，激活用 `_activate_for_send`；`navigate_to_chat` 之后先问 `check(hwnd)`：给出 `SendRefused` 就记一条 send failure（「another chat is open」）、放回窗口、返回它；有 `file_path` 时 `send_message(..., file_path=)` | 同上 | `bool \| SendRefused` |
+| `capture_chat_media(group_name, check=None)` / `_capture_chat_media(group_name, check=None)` | 聊天区截图（存到 `data/vision_screenshots/`；中转 / 边缘找不到图片原图时用）；安静发送时同样等用户停手、事后还焦点；群有独立窗口时直接截它（`_conversation_bbox(sidebar=False)`，不搜索）；主窗口搜索以后 `check` 说是别的聊天就不截、返回空 | `group_name: str, check` | `str`（图片路径或空） |
 | `find_chat_window(group_name)` | 找标题就是群名（可带"(人数)"）的微信独立聊天窗口（可见或最小化），记入 `_chat_windows`，这些窗口不会被当成主窗口（`find_hwnd`、`_adopt_foreground_hwnd`） | `group_name: str` | `int \| None` |
 | `describe_chat_windows(group_names)` | 安静发送时在启动日志里逐群说明有没有独立窗口 | `group_names: list[str]` | `None` |
 | `_send_in_chat_window(hwnd, group_name, text, file_path=None)` | 独立窗口里发送（也可以是图）：激活 → 剪贴板 → Ctrl+A → Ctrl+V → Enter，没有切标签和搜索；之后恢复窗口原来的最小化/隐藏状态 | `hwnd, group_name, text` | `bool` |
@@ -659,7 +675,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `tools/ocr_check.py` | 真机上检查 OCR，见 §2.27 |
 | `tools/uia_probe.py` / `tools/friend_admin.py` | 好友管理的摸底和手动工具，见 §2.28 |
 | `tools/image_probe.py` / `tools/image_key_check.py` | 图片查找和 `.dat` 密钥的检查，见 §2.30 |
-| `tools/friend_probe.py` | Windows 上运行（只读：只用 `WcdbNativeClient` 的 `get_sessions` / `get_messages`，不点、不写微信）：为 `friend_added`（`edge-friends-reply.md`）看新好友在微信 4 数据库里的样子；`--chats`（默认 8）个最新的个人私聊（`_is_private_talker`，去掉自己和 `@openim`），每个前 `--messages`（默认 12）条按时间排：类型、我 / 对方 / 系统（`is_me(sender, me)`：`myWxid` 取自微信 4 的数据文件夹名，带 `_xxxx` 后缀，消息的发送人不带，所以按「相同或差一个 `_` 后缀」认；有 `real_sender_id` 时一起写出来）、文字（号码打成 3+4、「你已添加了」后面的名字和会话名换成〈名字〉、非文字类型只写类型号，每条最多 120 字）；带好友提示的行标 `>>>`；私聊编号只写形状（`wxid_` 还是自定义、几位）；另把会话和消息的字段名列出来；同样的内容写进 `--out`（默认项目目录的 `probe-friends.txt`，不进仓库） |
+| `tools/friend_probe.py` | Windows 上运行（只读：只用 `WcdbNativeClient` 的 `get_sessions` / `get_messages`，不点、不写微信）：为 `friend_added`（`edge-friends-reply.md`）看新好友在微信 4 数据库里的样子；`--chats`（默认 8）个最新的个人私聊（`_is_private_talker`，去掉自己和 `@openim`），每个前 `--messages`（默认 12）条按时间排：类型、我 / 对方 / 系统（`is_me(sender, me)`：`myWxid` 取自微信 4 的数据文件夹名，带 `_xxxx` 后缀，消息的发送人不带，所以按「相同或差一个 `_` 后缀」认；有 `real_sender_id` 时一起写出来）、文字（号码打成 3+4、「你已添加了」后面的名字和会话名换成〈名字〉、非文字类型只写类型号，每条最多 120 字）；带好友提示的行标 `>>>`；读不出的私聊（DLL 回错误码）写一行「读不出这个私聊：…」接着看下一个；私聊编号只写形状（`wxid_` 还是自定义、几位）；另把会话和消息的字段名列出来；同样的内容写进 `--out`（默认项目目录的 `probe-friends.txt`，不进仓库） |
 | `tools/file_probe.py` | 收到的文件在微信窗口里的位置，见 §2.31 |
 | `tools/setup_wizard.py` | 命令行版的第一次设置：自动找 `dbPath`（`Documents/xwechat_files`）和 `myWxid`，用 wx_key.dll Hook 取密钥，写进 .env |
 | `tools/wechat_memory_scan.py` | 在微信进程（WeChatWin.dll）的内存里找 64 位十六进制的数据库密钥（排错用） |
@@ -801,16 +817,21 @@ grep "文件名" CODEBASE_REFERENCE.md
 
 | 名称 | 描述 | 返回值 |
 |---|---|---|
-| `FriendManager(window_controller, ocr_engine, ui_lock, clicker, rect_of, sleeper, grab_window, on_accepted=None)` | `ui_lock` 是发送路径用的窗口锁（不给就只防自己重入）；`clicker`/`rect_of`/`sleeper` 是测试接缝（默认 `click_screen`、`window_rect`、`time.sleep`）；`on_accepted(at, label)`：每通过一个申请就告诉它时间和按钮左边那一行的字（`_tell_accepted`，出错只记 warning，不影响通过；新好友扫描的 `AcceptLog.note`） | — |
-| `FriendManager._add_friend_wechat4(hwnd, keyword, message)` 及 `_is_wechat4` / `_open_add_friend_dialog_wechat4` / `_find_apply_dialog` / `_focus_window` / `_close_window` | **微信 PC 4.0**（主窗口类名含 `Qt`；真机测试得出，geigp 提交 `e17f7de`/`00362a3`）：4.0 的 Ctrl+F 不支持网络查找，「添加朋友」是单独的窗口——Ctrl+1 回聊天页 → 点 (+) 按钮（固定偏移 `rect+(285,60)`，图标没有文字）→ 弹出菜单（类名含 `ToolSaveBits`）按比例点「添加朋友」→ 找到这个窗口（`_add_dialog_candidates`：同进程、类名 `Qt51514QWindowIcon`，标题恰好是「添加朋友」（真机上读到的；「申请添加朋友」不算）；标题不对时才退回「大小 300–600 × 400–800」，这个范围只在不声明 DPI 感知的进程的逻辑像素里成立（真机上物理像素是 746×1133），也符合单独打开的聊天窗口——所以只认点菜单之后**新出现**的窗口，已经开着的只在标题恰好是「添加朋友」时才复用；Ctrl+1、点 (+)、点菜单前都核对微信在前台），点搜索输入框（比例 0.35/0.118）、粘贴、回车 → OCR **这个窗口**（`capture(hwnd)`）判断不存在/已是好友/「添加到通讯录」→ 点后弹出「申请添加朋友」模态窗口（按类名+标题关键词找）→ 点附言框（比例 0.30/0.18）粘贴 → 点「确定」（OCR 找不到时点比例 0.337/0.933，并补一次回车）→ 等窗口消失。`_close_window`：Alt+F4 只在该窗口自己拿着键盘时发，否则 `PostMessage(WM_CLOSE)` 给它。**这条路径里有按比例/固定偏移的点击和回车，不是纯 OCR**（见 `friend-management-test.md` 的第一轮结果） | `dict` |
+| `FriendManager(window_controller, ocr_engine, ui_lock, clicker, rect_of, sleeper, grab_window, on_accepted=None, chat_names=None)` | `ui_lock` 是发送路径用的窗口锁（不给就只防自己重入）；`chat_names()`：聊天的名字（`Bot._start_friend_management` 传后端的 `WcdbBackend.chat_names`），标题是其中一个名字（带不带人数都算）的窗口是单独打开的聊天，永远不当成微信的对话框（`_is_chat_title`）；`clicker`/`rect_of`/`sleeper` 是测试接缝（默认 `click_screen`、`window_rect`、`time.sleep`）；`on_accepted(at, label)`：每通过一个申请就告诉它时间和按钮左边那一行的字（`_tell_accepted`，出错只记 warning，不影响通过；新好友扫描的 `AcceptLog.note`） | — |
+| `FriendManager._add_friend_wechat4(hwnd, keyword, message)` 及 `_is_wechat4` / `_open_add_friend_dialog_wechat4` / `_find_apply_dialog` / `_focus_window` / `_close_window` | **微信 PC 4.0**（主窗口类名含 `Qt`；真机测试得出，geigp 提交 `e17f7de`/`00362a3`）：4.0 的 Ctrl+F 不支持网络查找，「添加朋友」是单独的窗口——Ctrl+1 回聊天页 → 点 (+) 按钮（固定偏移 `rect+(285,60)`，图标没有文字）→ 弹出菜单（类名含 `ToolSaveBits`）按比例点「添加朋友」→ 找到这个窗口（`_add_dialog_candidates`：同进程、类名 `Qt51514QWindowIcon`，标题恰好是「添加朋友」（真机上读到的；「申请添加朋友」不算）；标题不对时才退回「大小 300–600 × 400–800」，这个范围只在不声明 DPI 感知的进程的逻辑像素里成立（真机上物理像素是 746×1133），也符合单独打开的聊天窗口——所以只认点菜单之后**新出现**的窗口，已经开着的只在标题恰好是「添加朋友」时才复用；Ctrl+1、点 (+)、点菜单前都核对微信在前台），点搜索输入框（比例 0.35/0.118）、粘贴、回车 → OCR **这个窗口**（`capture(hwnd)`）判断不存在/已是好友/「添加到通讯录」→ 点之前记下微信的窗口（`_window_snapshot`），点后弹出的「申请添加朋友」窗口（`_find_apply_dialog`：点之后**新出现**的、标题**恰好**是 `APPLY_DIALOG_TITLES`、类名 `DIALOG_CLASS`、不是「添加朋友」窗口本身、标题不是聊天名；以前是第一个标题含「申请 / 验证 / 朋友」的同类窗口，单独打开的聊天「小朋友」会被清空输入框、贴上附言发出去，win review F7）→ 点附言框（比例 0.30/0.18）粘贴 → 点「确定」（OCR 找不到时点比例 0.337/0.933，并补一次回车）→ 等窗口消失。往「添加朋友」和「申请添加朋友」两个窗口里的每次按键、粘贴都要**那个窗口自己**在前台（`exact=True`），同一进程的别的窗口在前台（例如单独打开的聊天）就 `_Abort`（点击照旧只要微信在前台：点击只挪焦点，后面的按键再严格核对；万一 `SetForegroundWindow` 没让对话框到前台，点一下对话框就让它到前台了）；`_Abort` 或任何别的异常（pywin32 报错）都先把打开了的两个窗口关掉再抛出（以前只在 `_Abort` 时关「添加朋友」窗口，win review F8）。`_add_dialog_candidates` 和复用已开着的「添加朋友」窗口时也跳过标题是聊天名的窗口。`_close_window`：Alt+F4 只在该窗口自己拿着键盘时发，否则 `PostMessage(WM_CLOSE)` 给它。**这条路径里有按比例/固定偏移的点击和回车，不是纯 OCR**（见 `friend-management-test.md` 的第一轮结果） | `dict` |
 | `FriendManager._find_search_box()` / `friend_manager._is_search_placeholder(text)` | 搜索框的占位字那一行（最上、最左的一个）；占位字必须恰好是「搜索」或「Search」（比 OCR 读取器的 `_is_search_box` 严，因为这里决定往哪里点：「搜索结果」不算） | `dict \| None` / `bool` |
-| `FriendManager._ui_session()` | 上下文：拿锁 → `find_hwnd(force=True)` → 记下窗口状态和用户当时所在的前台窗口 → `_activate_for_send`（失败就给 `None`）→ 结束时 `_restore_window_state`（最小化/隐藏的窗口放回原样）并 `_return_focus(previous)`（焦点还给用户原来的窗口；用户中途去了别处就不动） | `int \| None` |
-| `FriendManager._key / _combo / _paste / _click_row` | 每次输入前核对 `_foreground_matches(hwnd)`，不在前台抛 `_Abort`；`_click_row` 把 OCR 行中心换算成屏幕坐标，点击没送出也抛 `_Abort` | `None` |
-| `FriendManager.accept_friend_requests()` | 通讯录 → 「新的朋友」（打不开/看不到就停）；每轮重新识别屏幕（列表会动），点最上面的「接受/通过」，出现「确定/完成」就点；之后按钮还在原处就再看 3 次（每次隔 0.4 秒，服务器慢时界面更新得晚），还在才不计数并停止；一次最多 `MAX_ACCEPT_PER_RUN`=10 个；点之前先 `_row_label(rows, button)` 记下这一行的字，确认通过后 `_tell_accepted(时间, 这行字)`（返回的结果里不带这行字：可能有对方的手机号）；没有 OCR 或窗口时返回空 | `list[{"status": "accepted", "timestamp": float}]` |
+| `FriendManager._ui_session()` | 上下文：拿锁 → `find_hwnd(force=True)` → 记下窗口状态和用户当时所在的前台窗口 → `_activate_for_send`（失败就给 `None`）→ 结束时（出了异常也一样）`_restore_window_state`（最小化/隐藏的窗口放回原样；放不回去只记 warning）并 `_return_focus(previous)`（焦点还给用户原来的窗口；用户中途去了别处就不动），锁随 `with` 释放 | `int \| None` |
+| `FriendManager._foreground(hwnd, exact=False)` / `_key / _combo / _paste / _click_row(…, exact=False)` / `_click_at(hwnd, x, y, required=True)` | 每次输入前核对前台，不在前台抛 `_Abort`：默认是主窗口或微信同一进程的窗口（4.0 的菜单）；`exact`（4.0 自己的对话框）必须是**那个窗口本身**（`_foreground_matches`），单独打开的聊天也是微信进程的窗口，按键会发到那个聊天里；`_paste` 在动剪贴板之前就核对；`_click_row` 把 OCR 行中心换算成屏幕坐标，点击没送出也抛 `_Abort`；`_click_at(hwnd, x, y, required=True, exact=True)` 按位置点对话框（确认窗口用 `exact`，添加好友的两个窗口用 `exact=False`），`required=False` 时没送出只返回 `False` | `None` / `bool` |
+| `FriendManager._window_snapshot(main)` / `_process_windows(main)` / `_is_chat_title(title)` / `_find_new_dialog(main, before, titles, *, cls=None, exclude=())` / `_wait_for_dialog(…, what)` | 4.0 的对话框是单独的窗口，和单独打开的聊天同进程、同类名，聊天窗口的标题就是聊天名（「达人朋友群」「小朋友」）：点之前记下微信可见的窗口（列不出来是 `None`，这时什么窗口都不当对话框）/ 微信进程可见的顶层窗口（除主窗口）/ 标题是不是某个聊天的名字（`quiet_send.title_names_chat`）/ 点之后新出现的、标题恰好在 `titles` 里（类名对得上）、不是聊天名的那个窗口 / 最多看 `DIALOG_LOOKS` 次（隔 0.1 秒），一直没有就在日志里写出新出现的窗口的标题（前 20 个字，微信改了对话框标题时能看到） | `set \| None` / `list[int]` / `bool` / `int \| None` / `int \| None` |
+| `FriendManager._confirm_dialog(hwnd, before=None)` / `_find_popup_dialog(hwnd, before=None)` / `_confirm_popup_dialog(popup)` | 通过申请后的确认（返回确认窗口点完「确定」还开着、里面写着风控提示时的那句话，并关掉它；否则空串）：主窗口屏幕上有「确定 / 完成」就点；否则（4.0）找点「接受 / 前往验证」**之后新出现**、标题恰好是 `ACCEPT_DIALOG_TITLES`（「通过朋友验证」，真机还没读到过这个标题：别的标题的新窗口只记日志、不用）、不是聊天名的窗口；先 `_focus_window`，**它自己在前台**才按比例 0.318/0.930 点「确定」再按回车，不在前台就 `_Abort`、把它关掉（取消），这一轮停下。以前是第一个标题含「验证 / 确定 / 朋友」的窗口，`SetForegroundWindow` 不看结果就点、回车：单独打开的「达人朋友群」「小朋友」会被点进输入区并回车，把运营打了一半的字发出去（win review F7） | `None` / `int \| None` / `None` |
+| `friend_manager.AcceptResult` | `list` 的子类：`accept_friend_requests` 的结果（每通过一个一项，和以前一样当列表用）；`error`：意外错误（pywin32 报错、窗口句柄失效…）让这一轮中途停下时的原因（类型和信息，最多 200 字；日志里有完整的 traceback），否则空串；`risk`：微信的风控提示（点了以后屏幕上新出现、`RISK_MARKERS` 里的字，那一行原文），否则空串；`stuck`：点了「接受」申请还在 | — |
+| `friend_manager._risk_line(rows, seen=frozenset())` / `_risk_failure(keyword, risk)` / `FriendManager._risk_in_new_windows(main, before)` | OCR 行里第一行像风控提示的（含 `RISK_MARKERS` 之一，去掉空白比；`seen` 里的——点之前屏幕上就有的字，例如「新的朋友」里别人的验证消息——不算）/ 添加好友的失败 `reason="risk"`（「微信提示「…」，可能是操作太频繁被限制了，已停止…」）/ 点之后新出现的微信窗口（4.0 自己的提示框）逐个 OCR，像风控提示的那个关掉并返回它的字 | `str` / `dict` / `str` |
+| `FriendManager.accept_friend_requests(limit=None)` / `_accept_in_window(accepted, runs=MAX_ACCEPT_PER_RUN)` | 最多 `limit` 个（再多也不超过 `MAX_ACCEPT_PER_RUN`；0 时不碰窗口，`AutoFriendService` 传今天还剩几个）。通讯录 → 「新的朋友」（打不开/看不到就停）；每轮重新识别屏幕（列表会动），点最上面的「接受/通过」（点之前 `_window_snapshot`），出现「确定/完成」就点（`_confirm_dialog`，4.0 的确认窗口见上）；之后按钮还在原处就再看 3 次（每次隔 0.4 秒，服务器慢时界面更新得晚），还在才不计数并停止；一次最多 `MAX_ACCEPT_PER_RUN`=10 个；点之前先 `_row_label(rows, button)` 记下这一行的字，确认通过后 `_tell_accepted(时间, 这行字)`（返回的结果里不带这行字：可能有对方的手机号）；每点一个以后看风控提示（`_confirm_dialog` 读到的、主窗口上点之后新出现的字、新出现的提示框），有就停下并记进结果的 `risk`、这一个不算；申请还在的记 `stuck`；没有 OCR 或窗口时返回空；`_Abort` 以外的异常（win review F8）记日志、写进结果的 `error`，已经通过的照样在结果里，确认窗口已关（`_confirm_dialog`），窗口放回、焦点还回、锁释放（`_ui_session`） | `AcceptResult`（`list[{"status": "accepted", "timestamp": float}]`） |
 | `friend_manager._row_label(rows, button)` | 「新的朋友」里接受按钮左边、同一行（按钮上下各一个按钮高）的 OCR 文字，从上到下、从左到右连起来（最多 200 字）：申请人的名字和验证消息。只用来认机器人通过的是哪位新好友，不写日志 | `str` |
-| `FriendManager.add_friend(keyword, message="")` | 没有 OCR 不开始。**单窗口界面（旧版）只走 OCR**（不用快捷键、不切标签页、不盲点）；**4.0 走上一行的 `_add_friend_wechat4`**（`_is_wechat4` 判断）。旧版界面：OCR 找搜索框（左上区域 `y0<0.12, x0<0.40`、文字恰好是「搜索」/「Search」，放大镜被读成字母也认）→ 点它（认不出来就什么也不输入）→ 全选删除 → 粘贴关键词 → 点「网络查找」入口 → 资料卡：不存在 / 已是好友 / 找不到「添加到通讯录」都带原因返回 → 点它 → **申请窗口（发送/确定/完成）出现后才**粘贴附言 → 点发送 → 窗口还在就报 `not_sent`。关键词压成一行、最长 `MAX_KEYWORD_CHARS`=64 | `{"ok", "target", "message", "reason"（失败时）}`；`reason`：`invalid` / `no_ocr` / `no_window` / `aborted` / `no_search_box` / `no_search_entry` / `not_found` / `already_friend` / `no_add_button` / `no_dialog` / `not_sent` |
-| `AutoFriendService(friend_manager, interval_sec=300, enabled=True, idle_gate=None, idle_sec=0, watch=True, full_check_sec=900, clock)` | 后台线程每隔 `interval_sec`（下限 10）调 `run_once()`；第一次在启动一个间隔之后；用户忙时下一次只隔 `POSTPONE_RETRY_SEC`（15）秒，不是一个完整间隔。`idle_gate` 是 `quiet_send.IdleGate`（`Bot._start_friend_management` 用 `IdleGate(Win32Desktop(), AUTO_ACCEPT_IDLE_SEC, 0)`） | — |
-| `AutoFriendService.run_once()` 的顺序 | ① 关着：什么也不做；② `watch` 且没到强制检查时间：`manager.look_for_news()` 是 `unchanged` → 直接结束（**不碰屏幕、不看用户忙不忙**）；③ 用户没停够 `idle_sec` 秒（`idle_gate.idle_seconds()`，读不出来就当空闲）→ `postponed=True`，什么也不做；④ 否则 `accept_friend_requests()`，记下强制检查的时间，`idle_gate.mark_own_input()`（检查自己的点击按键不算用户） | `list[dict]` |
+| `FriendManager.add_friend(keyword, message="")` | 没有 OCR 不开始。**单窗口界面（旧版）只走 OCR**（不用快捷键、不切标签页、不盲点）；**4.0 走上一行的 `_add_friend_wechat4`**（`_is_wechat4` 判断）。旧版界面：OCR 找搜索框（左上区域 `y0<0.12, x0<0.40`、文字恰好是「搜索」/「Search」，放大镜被读成字母也认）→ 点它（认不出来就什么也不输入）→ 全选删除 → 粘贴关键词 → 点「网络查找」入口 → 资料卡：不存在 / 已是好友 / 找不到「添加到通讯录」都带原因返回 → 点它 → **申请窗口（发送/确定/完成）出现后才**粘贴附言 → 点发送 → 窗口还在就报 `not_sent`。关键词压成一行、最长 `MAX_KEYWORD_CHARS`=64 | `{"ok", "target", "message", "reason"（失败时）}`；`reason`：`invalid` / `no_ocr` / `no_window` / `aborted` / `risk`（资料卡、或者点发送后还开着的申请窗口里有风控提示；管理员的命令同时暂停自动同意）/ `error`（`_Abort` 以外的异常：pywin32 报错、窗口句柄失效…，记日志，打开的对话框已关，message「添加好友时出错，已中止（详见日志）…」，win review F8）/ `no_search_box` / `no_search_entry` / `not_found` / `already_friend` / `no_add_button` / `no_dialog` / `not_sent` |
+| `AutoFriendService(friend_manager, interval_sec=300, enabled=True, idle_gate=None, idle_sec=0, watch=True, full_check_sec=900, clock, daily_max=DAILY_MAX_DEFAULT, state_path=None, notify=None, wall_clock=time.time)` | 后台线程每隔 `interval_sec`（下限 10）调 `run_once()`；第一次在启动一个间隔之后；用户忙时下一次只隔 `POSTPONE_RETRY_SEC`（15）秒，不是一个完整间隔。`idle_gate` 是 `quiet_send.IdleGate`（`Bot._start_friend_management` 用 `IdleGate(Win32Desktop(), AUTO_ACCEPT_IDLE_SEC, 0)`）。`daily_max`：每天最多自动同意几个（`AUTO_ACCEPT_DAILY_MAX`）；`state_path`：当天的数、告诉过管理员没有、暂停的原因、连续几次申请点了还在，存成 JSON（原子替换；读不了就从头数；None 只在内存里）；`notify(text)`：告诉管理员（出错只记 warning） | — |
+| `AutoFriendService.status_note()` / `accepted_today()` / `pause(why, tell=True)` / `enable()` / `_count(result)` / `_tell_cap()` | `查状态` 和开关的回复用：「今天已自动同意 N/上限」/「今天已自动同意 N 个，到了上限 M，明天继续」/「已暂停：原因；发「自动同意好友 开」恢复」 / 今天的数 / 暂停到被重新打开（重启也停着；`tell` 时告诉管理员）/ 打开时解除暂停和「连续卡住」的计数（今天的数不清：微信按天算）/ 一次检查之后：加上通过的个数；结果带 `risk`（微信的风控提示）就暂停，申请点了还在（`stuck`）连续 `STUCK_RUNS`=3 次也暂停，有通过的就清零；到上限就告诉管理员（每天一次） | — |
+| `AutoFriendService.run_once()` 的顺序 | ① 关着：什么也不做；①' 暂停着（风控提示、连续卡住）：什么也不做；今天已到 `daily_max`：什么也不做（窗口不碰），没告诉过管理员就告诉一次；② `watch` 且没到强制检查时间：`manager.look_for_news()` 是 `unchanged` → 直接结束（**不碰屏幕、不看用户忙不忙**）；③ 用户没停够 `idle_sec` 秒（`idle_gate.idle_seconds()`，读不出来就当空闲）→ `postponed=True`，什么也不做；④ 否则 `accept_friend_requests(limit=今天还剩几个)`，记下强制检查的时间，`idle_gate.mark_own_input()`（检查自己的点击按键不算用户），`_count(结果)` | `list[dict]` |
 | `FriendManager.look_for_news()` / `_grab_main_window()` | 静默地看：`find_hwnd(wake=False)`（不唤醒托盘窗口）→ `print_main_window(hwnd)`（`win_ocr.print_window`，PrintWindow，窗口被盖住也行，**不动焦点、不点不输**；最小化会抛错）→ `RailWatcher.look()`。不拿窗口锁。返回 `changed` / `unchanged` / `unknown`；`accept_friend_requests` 读完整个列表（没有「接受」按钮了）时 `RailWatcher.settle()`，中途失败/卡住的不 settle，下次还会问 | `str` |
 | `rail_watch.red_badges(image)` | 窗口图左侧导航栏（宽 `RAIL_MAX_X`=9%、上 `RAIL_MAX_Y`=60%）里红色圆点的中心：红色 R≥200、G≤110、B≤110，按 `CELL`=4px 看覆盖率 ≥30%，4 邻接连成块，小于 `MIN_CELLS`=3 个格子的当噪声。图像尺寸无关 | `list[(x, y)]` |
 | `rail_watch.RailWatcher(grab)` | `look()`：没有基线 → `changed`；有**新位置**的红点（离基线里每个点都超过 `SAME_BADGE_PX`=16px）→ `changed`；否则 `unchanged`；拍不到图 → `unknown`。`settle()`：**重新拍一张**当基线（不用上次 look 的图——刚同意的申请红点可能还在上一张里，进了基线下一条申请就会被当成老红点）；拍不到就清空基线。**不认哪个图标是通讯录**（没有真机标定）：新的未读消息红点也会触发一次多余的检查，红点认不出来最多让申请晚到 `full_check_sec` | — |
@@ -1004,7 +1025,7 @@ Windows `wcdb` 后端旁边的一个线程：每分钟看有变化的私聊，�
 | `NewFriendStore(path="data/messages.db")` / `started_at()` / `start(at)` / `mark()` / `set_mark(at)` / `known(wxid)` / `add(*, wxid, name, remark, how, kind, added_at, verify_from, verify_text, found_at)` / `get(wxid)` / `recent(since)` / `forget_verify(before)` / `add_accept(at)` / `accepts(since)` / `use_accept(accept_id)` / `close()` | 机器人的数据库（`DB_PATH`）上自己开一个连接（加锁、`busy_timeout`）：`new_friends`（每个 wxid 一行，`INSERT OR IGNORE`：报过的不再报）、`new_friend_state`（`started_at` 起点、`mark` 会话读到哪）、`friend_accepts`（机器人通过的时间、用过没有，留一天）；`get` / `recent` 的结果带 `how_label` | — |
 | `recent_new_friends(db_path, days=NEW_DAYS, now=None)` | 机器人停着时控制台读库：最近 `days` 天找到的新好友，新的在前；没有库文件或没有表时返回空列表，什么都不建 | `list[dict]` |
 | `NewFriendService(backend, store, *, accepts=None, on_found=(), keep_verify=False, catchup_hours=12, clock, interval=SCAN_SEC, first_wait=FIRST_SCAN_SEC, pause=0.02)` / `start()` / `stop()` / `scan_once()` | 线程 `new-friends`：启动 `first_wait` 秒后第一次看，之后每 `interval` 秒；`scan_once` 从不抛错（第一次失败记 warning，接着失败不再记，成功后恢复）。`backend` 要有 `with_client`、`own_wxid`（可选 `recent_sessions`、`note_private_name`、`catch_up_chat`）；`on_found`：每位新好友的事件字段（边缘的 `friend_added`），哪个出错下一轮再给（同一份，不重新判断）；`keep_verify`（副驾驶）：验证消息 `mask_pii` 打码后存库给控制台 | — |
-| `NewFriendService._scan()` / `_sessions()` / `_report(added, session, now)` / `_display_name(wxid)` / `_tell(event)` | 一次：先补给上次没给出去的；会话列表（轮询循环 `SESSIONS_MAX_AGE` 秒内读过的直接用，否则 `with_client(get_sessions)`；数据库没开就结束）；只留和人的私聊；**第一次（库里没有起点）**：起点 = 现在会话里最新的时间（没有就本机现在），记下，什么都不报；之后：时间比 `mark` 新、这次运行没读过这个时间的会话（没有时间的：整行变了的），旧的在前，最多 `MAX_CHATS_PER_SCAN` 个，每个 `with_client(get_messages(chat, READ_MESSAGES))`（之间停 `pause` 秒让轮询拿锁）；报过的、库里有的跳过；`find_added` 的时间不晚于起点的不报（老好友）。`_report`：名字 = X 或 `get_display_names`，备注只在会话行里有 `remark` 时给，`how`（`requested` / `greeting` 是 `unknown` / 其余 `AcceptLog.judge`），写库（边缘模式不存验证消息），`backend.note_private_name`，日志只写 wxid 前 8 位、`how`、有没有验证消息。`mark` 推到读过的最新时间（没读完的话往回一点点，同一时间的下一轮再读）；每小时 `forget_verify(NEW_DAYS 天前)` | `list[dict]` |
+| `NewFriendService._scan()` / `_sessions()` / `_report(added, session, now)` / `_display_name(wxid)` / `_tell(event)` | 一次：先补给上次没给出去的；会话列表（轮询循环 `SESSIONS_MAX_AGE` 秒内读过的直接用，否则 `with_client(get_sessions)`；数据库没开就结束）；只留和人的私聊；**第一次（库里没有起点）**：起点 = 现在会话里最新的时间（没有就本机现在），记下，什么都不报；之后：时间比 `mark` 新、这次运行没读过这个时间的会话（没有时间的：整行变了的），旧的在前，最多 `MAX_CHATS_PER_SCAN` 个，每个 `with_client(get_messages(chat, READ_MESSAGES))`（之间停 `pause` 秒让轮询拿锁；一个私聊读不出（DLL 回错误码，`WcdbCallError`）只跳过它、开始读不出时记一次 warning，不记它的时间，`mark` 停在它之前，下一次再读，以前整次就失败了，排在它后面的私聊一直读不到）；报过的、库里有的跳过；`find_added` 的时间不晚于起点的不报（老好友）。`_report`：名字 = X 或 `get_display_names`，备注只在会话行里有 `remark` 时给，`how`（`requested` / `greeting` 是 `unknown` / 其余 `AcceptLog.judge`），写库（边缘模式不存验证消息），`backend.note_private_name`，日志只写 wxid 前 8 位、`how`、有没有验证消息。`mark` 推到读过的最新时间（没读完的话往回一点点，同一时间的下一轮再读；有读不出的私聊时不越过它的时间）；每小时 `forget_verify(NEW_DAYS 天前)` | `list[dict]` |
 | `NewFriendService.recent(days=NEW_DAYS)` / `registered(wxid)` / `set_catch_up_sink(sink)` | 控制台的新好友列表 / `PrmService.on_registered`：登记的是 `NEW_DAYS` 天内找到的新好友时，`backend.catch_up_chat(wxid, 名字, since, sink)`，`since` = max(最早的验证消息或加上的时间, 现在 − max(`PRM_CATCHUP_HOURS`, 5 分钟))，`sink` 调 `PrmService.take_new_friend(wxid, 消息, verify_until=加上的时间)`；返回请没请 / 设 `take_new_friend` | `list[dict]` / `bool` / `None` |
 
 ### 2.38 `src/wechat/presence.py`（电脑微信掉线：哪段时间不在线，见功能 P）
@@ -1092,7 +1113,7 @@ Bot.run()
   │     ├── on_offline → backend.note_wechat_offline；on_back → edge.wechat_gap（边缘）+ backend.catch_up_after_gap
   │     └── register_presence(service)、start()（先看一次，再起线程 wechat-presence，每 CHECK_SEC 秒 check）
   ├── _start_friend_management(config, backend, admin_handler, on_accepted=new_friends.accepts.note)（后端有 window_controller 才建）
-  │     ├── FriendManager()              [src/wechat/friend_manager.py]（WindowsOcrEngine、backend.window_lock、on_accepted）
+  │     ├── FriendManager()              [src/wechat/friend_manager.py]（WindowsOcrEngine、backend.window_lock、on_accepted、backend.chat_names）
   │     └── AutoFriendService()          [src/wechat/friend_manager.py]
   ├── admin_handler.set_status(lambda: _status_lines(router, relay, prm, edge))
   ├── HealthMonitor(router, conn, backend, config, on_tick=update_status).start()   [src/bot.py]
@@ -1297,13 +1318,15 @@ WcdbBackend.start(callback)
               │       └── 登记达人私聊 → _note_read()（chat_read_marks：看到的最新一条的时间）
               ├── _flush_due_bursts(callback)
               └── time.sleep(poll_sec)
-        （读失败：连续 MAX_CONSECUTIVE_ERRORS 次 _reinitialize()；之间按 _backoff_sec 等待，开着 OCR 时边等边看屏幕）
+        （读失败：连续 MAX_CONSECUTIVE_ERRORS 次 _reinitialize()；之间按 _backoff_sec 等待，开着 OCR 时边等边看屏幕。
+         DLL 回错误码算读失败（WcdbCallError）：一轮里每个聊天都读不出 → _poll_cycle 抛出、计数；只有部分聊天读不出 → 跳过它们）
 
 （轮询之外：新好友扫描线程每分钟 recent_sessions() / with_client(get_sessions | get_messages | get_display_names)，
-  每次只拿 _client_lock 一个调用的时间；note_private_name() 写名字，见功能 O）
+  每次只拿 _client_lock 一个调用的时间；note_private_name() 写名字，见功能 O；
+  进 DLL 的每一下，不管哪个线程，都由 WcdbNativeClient 的 _DLL_LOCK 串行）
 ```
 
-**同名的聊天**（2026-10-28）：聊天按 chat id 读（`_chat_names`），名字只拿来在微信的搜索里找它。以前按名字记，一个群叫「小美」、登记的达人也叫「小美」（`WECHAT_GROUPS=*` 先加群），或者两位达人 / 达人和 `PRIVATE_CHATS` 里的人同名时，后来的那个私聊被 `_add_talker` 拒掉：收不到、不起草、也发不出，只有一行 WARNING。现在都照读；发送、回复和截图要按名字找窗口（`navigate_to_chat` 搜索后回车选第一条，微信 4 上核对不了打开的是谁），名字和另一个聊天一样（在读的、会话列表里的、控制台私聊名单里的，`_namesake`）就不用窗口：`send_text` / `send_file` / `_send_part` / `_send_file_part` 返回假值 `SendRefused`（原因 `NAMESAKE`），截图返回空串。PRM 把草稿标成没发出去（副驾驶的错误文字是 PRM 自己的「文字没发出去」，原因在日志里；边缘模式的 `send_result` 带上原因，Mac 显示在草稿上）。
+**同名的聊天**（2026-10-28）：聊天按 chat id 读（`_chat_names`），名字只拿来在微信的搜索里找它。以前按名字记，一个群叫「小美」、登记的达人也叫「小美」（`WECHAT_GROUPS=*` 先加群），或者两位达人 / 达人和 `PRIVATE_CHATS` 里的人同名时，后来的那个私聊被 `_add_talker` 拒掉：收不到、不起草、也发不出，只有一行 WARNING。现在都照读；发送、回复和截图要按名字找窗口（`navigate_to_chat` 搜索后回车选第一条，微信 4 上 UIA 核对不了打开的是谁；`SEND_VERIFY_CHAT` 开着时回车以后用 OCR 读标题，认出是别的聊天就不粘贴，见 `_open_chat_check`），名字和另一个聊天一样（在读的、会话列表里的、控制台私聊名单里的，`_namesake`）就不用窗口：`send_text` / `send_file` / `_send_part` / `_send_file_part` 返回假值 `SendRefused`（原因 `NAMESAKE`），截图返回空串。PRM 把草稿标成没发出去（副驾驶的错误文字是 PRM 自己的「文字没发出去」，原因在日志里；边缘模式的 `send_result` 带上原因，Mac 显示在草稿上）。
 
 **显示名从哪来**：`_resolve_session_display_name`：会话行的 `displayName` / `nickname` / `remark` 等字段（微信 4.1.15 的会话行没有名字字段，真机探针 2026-10-27）→ `WcdbNativeClient.resolve_nickname`（`_load_nickname_cache` 只装会话行里的名字和 `data/nicknames.json` 的手工覆盖；没有就调 DLL 的 `wcdb_get_display_names`，结果在这个客户端里一直缓存）→ 会话行的 `last_sender_display_name`。DLL 给的是备注还是昵称看不到源码；Mac 上同一套库的 `MacWeFlowClient._display_name_from_row` 是备注优先（`remark` → `nick_name` → `alias`），Windows 要真机确认。所以「给达人设一个不重复的备注」能绕开同名：备注优先时她的名字变成备注，不再同名；名字每次启动（或 `_reinitialize`）才重新查，改了备注要重启机器人；微信的搜索也认备注。测试：`tests/test_same_name_chats.py`（真后端、路由、中转、PRM 接在假微信 4 数据库上；边缘模式同样）。
 
@@ -1529,7 +1552,11 @@ WeChatWindowController.send_to_chat(group_name, text)  ← 主入口
   │     ├── Phase 1: Ctrl+F → 聚焦搜索框
   │     ├── Phase 2: Ctrl+A → set_clipboard → Ctrl+V → 粘贴群名
   │     ├── Phase 3: Enter → 选择第一个搜索结果
-  │     └── _verify_chat_title() — UIA 或窗口标题验证
+  │     └── _verify_chat_title() — UIA 或窗口标题验证（微信 4 上验证不了：标题是「微信」、UIA 只有骨架）
+  │
+  ├── check(hwnd)（SEND_VERIFY_CHAT=on，WcdbBackend._open_chat_check）— OCR 读聊天区标题
+  │     ├── 是要发的聊天 / 读不出、看不出 → 接着发
+  │     └── 是机器人知道的别的聊天、或要发私聊却是群（读 3 次都是）→ 不粘贴，返回 SendRefused（WRONG_CHAT）
   │
   └── send_message(hwnd, text)
         ├── _clipboard_text(text, hwnd) → _set_clipboard(text) — 写入剪贴板
@@ -1591,6 +1618,7 @@ send_to_chat(group_name, text)
 #### 调用链
 
 ```
+WcdbBackend._poll_group → 新读到的语音行（见过的不识别，win review F12）→ _standardize(resolve_voice=True) → _try_voice → VoicePipeline.process
 VoicePipeline.process(msg)
   │
   ├── 检查: voice_asr_enabled?
@@ -1813,17 +1841,21 @@ Windows（`WcdbBackend`）：数据库启动时就打不开也不会退出（有
 目的：管理员在和这个号的私聊里说 `添加好友 <号码> [附言]` / `同意好友`，或者（`AUTO_ACCEPT_FRIENDS=on`）每隔一段时间自动同意「新的朋友」里的申请。只有 Windows `wcdb` 后端（有微信窗口可操作）支持；别的后端这些命令回复「未启用好友管理组件」。
 
 ```
-Bot._start_friend_management → FriendManager(WeChatWindowController, WindowsOcrEngine, backend.window_lock)
+Bot._start_friend_management → FriendManager(WeChatWindowController, WindowsOcrEngine, backend.window_lock, chat_names=backend.chat_names)
                              → AutoFriendService（AUTO_ACCEPT_FRIENDS=on 才起线程）→ admin_handler.set_friend_manager
 
 管理员「同意好友」→ steps.admin_command → AdminCommandHandler._cmd_accept_friends → accept_friend_requests()
 后台每 N 秒        → AutoFriendService.run_once()
                        → look_for_news()（静默：PrintWindow 拍窗口，看导航栏有没有新红点）
                        → 没变化：结束，不碰前台    变了/不知道：等用户停够 AUTO_ACCEPT_IDLE_SEC 秒（忙就 15 秒后再问）
-                       → accept_friend_requests()；每 AUTO_ACCEPT_FULL_CHECK_SEC 秒不管红点也强制来一次
+                       → accept_friend_requests(limit=今天还剩几个)；每 AUTO_ACCEPT_FULL_CHECK_SEC 秒不管红点也强制来一次
+                       → 计数（data/auto_accept_state.json）：到 AUTO_ACCEPT_DAILY_MAX 当天不再做、告诉管理员一次；
+                         风控提示 / 连续 3 次点了还在 → 暂停到管理员发「自动同意好友 开」，告诉管理员
   _ui_session：窗口锁 → find_hwnd → 记状态 → 切到前台（失败就结束）
     → 通讯录 → OCR 找「新的朋友」→ 点
-    → 循环（≤10）：OCR → 最上面的「接受」→ 点 → 有「确定」就点 → OCR 看按钮还在不在
+    → 循环（≤10，自动同意时还不超过今天剩下的）：OCR → 最上面的「接受」→ 记下屏幕上的字和微信的窗口 → 点 → 有「确定」就点
+        （4.0：点之后新出现、标题恰好「通过朋友验证」、不是聊天名的窗口，它自己在前台才点「确定」、回车；不在前台就关掉它、停下）
+      → OCR 看风控提示（点之后新出现的字、新的提示框）→ 有就停（结果的 risk）→ 看按钮还在不在（还在就停，stuck）
   → 放回窗口状态 → 放锁
 
 管理员「添加好友 号码 附言」→ steps.admin_command → AdminCommandHandler._cmd_add_friend → add_friend()
@@ -1833,7 +1865,8 @@ Bot._start_friend_management → FriendManager(WeChatWindowController, WindowsOc
 
 关键点：
 - 与发送共用 `WcdbBackend._window_lock`，所以不会和正在输入的回复交错；管理员命令是在路由线程里同步执行的，要几秒。
-- 添加好友没有 OCR 就不开始。旧版单窗口界面只走 OCR（搜索框、每个按钮、每个窗口都是在屏幕上认出来的，不用 Ctrl+F，不切标签页）；微信 PC 4.0 的「添加朋友」「申请添加朋友」是独立窗口，按窗口类名/大小/标题找到后用 `capture(hwnd)` 识别，(+) 按钮和输入框按位置点，OCR 读不到「确定」时也按位置点（真机测出来的做法，不是纯 OCR；是否改成别的办法等下一轮真机结果）。每次按键/点击前核对微信在前台。
+- 添加好友没有 OCR 就不开始。旧版单窗口界面只走 OCR（搜索框、每个按钮、每个窗口都是在屏幕上认出来的，不用 Ctrl+F，不切标签页）；微信 PC 4.0 的「添加朋友」「申请添加朋友」是独立窗口，按窗口类名/大小/标题找到后用 `capture(hwnd)` 识别，(+) 按钮和输入框按位置点，OCR 读不到「确定」时也按位置点（真机测出来的做法，不是纯 OCR；是否改成别的办法等下一轮真机结果）。每次按键/点击前核对微信在前台；往 4.0 自己的对话框里输入时要**那个窗口本身**在前台。
+- 4.0 的对话框和单独打开的聊天窗口同进程、同类名（win review F7）：对话框只认点击之后**新出现**的窗口、标题**恰好**是「通过朋友验证」/「申请添加朋友」/「添加朋友」、标题不是聊天名（`WcdbBackend.chat_names`）；以前按标题关键字认，开着「达人朋友群」「小朋友」这样的聊天窗口时会点进去、回车，把运营打了一半的字或附言发到那个聊天。「通过朋友验证」这个标题真机还没读到过：新出现的窗口标题不对时日志写「no confirmation dialog … (new WeChat windows: [...]; not used)」。
 - 结果以屏幕为准：按钮还在原处就不算同意，申请窗口没关就报 `not_sent`；失败原因见 `add_friend` 返回的 `reason`。
 - OCR 用自己的 `WindowsOcrEngine`，与 `OCR_FALLBACK`（读消息用）无关，后者关着也能用。
 - 真机测试清单（要试什么、期望什么、怎么汇报）：`friend-management-test.md`。
@@ -2073,6 +2106,7 @@ Bot._start_new_friends（PRM_EDGE 或 PRM_COPILOT，Windows wcdb）→ NewFriend
   → 会话列表（WcdbBackend.recent_sessions(20) 或 with_client(get_sessions)）→ is_person_chat（不是群 / gh_ / @openim / 文件传输助手 / 自己）
   → 第一次（库里没有起点）：起点 = 会话里最新的时间，什么都不报
   → 比 mark 新的会话（最多 MAX_CHATS_PER_SCAN 个）→ with_client(get_messages(chat, 30)) → find_added
+      （一个私聊读不出：跳过它，mark 不越过它，下一次再读）
       电脑上通过：对方的验证消息 + 「你已添加了X，现在可以开始聊天了。」 → pc
       手机上通过：对方的验证消息 + 「你已添加了X，以上是打招呼的消息。」 → phone
       对方通过我们的申请：我们的打招呼 + 对方名义的「我通过了你的朋友验证请求，现在我们可以开始聊天了」+「以上是打招呼的消息」 → requested
@@ -2097,7 +2131,7 @@ CREATE TABLE friend_accepts (id INTEGER PRIMARY KEY AUTOINCREMENT, at REAL NOT N
 ```
 
 关键点：
-- 不碍着轮询：自己的线程，每个数据库调用单独拿 `_client_lock`，读之间停一下；出错只记一次 warning，下一分钟再看；数据库没打开就什么都不做。
+- 不碍着轮询：自己的线程，每个数据库调用单独拿 `_client_lock`（进 DLL 时还有客户端的 `_DLL_LOCK`，和轮询线程的每个 DLL 调用串行），读之间停一下；出错只记一次 warning，下一分钟再看；数据库没打开就什么都不做。
 - 每个 wxid 只报一次（库里有、重启也认）；起点以前加的老好友不报。机器人停着时加的好友，下次启动第一次看（读 `mark` 以后变过的会话）就报。
 - `auto_accept` 靠时间对上：机器人点「通过」的时间（本机钟）和提示的时间（微信库里的）相差在 −300…+30 秒内；OCR 读到的申请行里有她的名字时按名字对。电脑的钟和微信的时间差很多时会判成 `manual` / `unknown`（真机待验证）。
 - 延迟：通过以后 1–2 分钟内报出（会话列表最多晚 20 秒，再加一次扫描的间隔）。
@@ -2231,6 +2265,7 @@ SEND_QUIET=off                                 # Windows：等用户停手再发
 SEND_IDLE_SEC=3                                # 键鼠静止多少秒才发（0=不等）
 SEND_IDLE_MAX_WAIT_SEC=30                      # 最多等多久，之后照发
 SEND_KEEP_CLIPBOARD=on                         # 开 SEND_QUIET 时把用户的剪贴板放回去
+SEND_VERIFY_CHAT=on                            # Windows：搜索打开聊天后用 OCR 读标题，是别的聊天就不粘贴（读不出照旧发）
 SEND_QUEUE=off                                 # Windows：一个线程负责发送，等待不占工作线程（配合 SEND_QUIET/打字停顿）
 STICKER_PASTE=file                             # 图片怎么粘贴：file=粘贴文件（GIF 能动）；image=粘贴静态图
 
@@ -2278,6 +2313,7 @@ AUTO_ACCEPT_INTERVAL_SEC=300                   # 两次看一眼之间的秒数�
 AUTO_ACCEPT_WATCH=on                           # 先静默地看导航栏有没有新红点
 AUTO_ACCEPT_IDLE_SEC=60                        # 要碰屏幕的检查等键鼠静止多少秒（0=不等）
 AUTO_ACCEPT_FULL_CHECK_SEC=900                 # 没有新红点也每隔多久完整检查一次（0=不强制）
+AUTO_ACCEPT_DAILY_MAX=50                       # 每天最多自动同意几个（1–300）；风控提示时暂停到管理员重新打开
 
 # === 引导流程 ===
 ONBOARDING_DONE=false
@@ -2352,6 +2388,7 @@ macOS 的 `build-macos.spec` 见功能 F（datas：`ui/dist`、`.env.example`、
 | `data/messages.db` | `src/db/schema.py` | SQLite 消息数据库：`messages`、`message_media`、`user_last_message`（群消息和读取的私聊都在这里；名单里边缘达人的私聊不进来）、`chat_read_marks`（每个登记达人的私聊读到了哪儿，补读用，没有文字）；`wechat_gaps`（电脑微信不在线的每一段：开始、结束、`reason`、`detail`、发现的时间、`seen_at`）和 `wechat_presence`（`last_online`：最后一次确认电脑微信在线），`src/wechat/presence.py` 建 |
 | `data/bot.log` | `src/utils/logging_config.py` | 运行日志 |
 | `data/bot_status.json` | `src/bot.py:HealthMonitor` | 状态 JSON (外部监控) |
+| `data/auto_accept_state.json`（`DB_PATH` 的目录） | `src/wechat/friend_manager.py:AutoFriendService` | 自动同意好友：`day`（本机日期）、`accepted`（当天自动同意了几个）、`cap_told`（到上限的事告诉过管理员没有）、`paused`（`{at, why}`：风控提示或连续卡住以后暂停，管理员发「自动同意好友 开」才清掉）、`stuck`（连续几次点了申请还在） |
 | `data/group_names.json` | `src/wechat/wcdb_backend.py` | chat_id → {name, member_count} |
 | `data/group_members.json` | `src/wechat/wcdb_backend.py` | chat_id → {wxid: display_name} |
 | `data/private_chat_names.json` | `src/wechat/wcdb_backend.py`（`PRM_COPILOT` 或 `PRM_EDGE` 打开、后端有私聊过滤器时） | 微信会话列表里的私聊 wxid → 名字（控制台「合作单」页从里面选人登记；边缘的 `/edge/private_chats` 也读它） |

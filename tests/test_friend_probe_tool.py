@@ -82,3 +82,24 @@ def test_own_lines_are_told_apart_by_the_wxid_without_the_folder_suffix(tool):
     assert tool.is_me("wxid_me", "wxid_me_b6ce") and tool.is_me("wxid_me", "wxid_me")
     assert not tool.is_me("wxid_newfriend12345", "wxid_me_b6ce") and not tool.is_me("", "wxid_me_b6ce")
     assert not tool.is_me("wxid_m", "wxid_me_b6ce")                # a shorter id is not a prefix match
+
+
+def test_a_chat_that_cannot_be_read_is_said_and_the_others_still_shown(tool, tmp_path, capsys):
+    """The client raises on an error code (WcdbCallError, win review F14): one chat is not the end."""
+    from src.wechat.wcdb_client import WcdbCallError
+
+    real = FakeClient.get_messages
+
+    def failing(self, username, limit=200):
+        if username == "meimei_88":
+            raise WcdbCallError("wcdb_get_messages", -3)
+        return real(self, username, limit)
+
+    FakeClient.get_messages = failing
+    try:
+        assert tool.main(["--out", str(tmp_path / "probe.txt")]) == 0
+    finally:
+        FakeClient.get_messages = real
+    out = (tmp_path / "probe.txt").read_text(encoding="utf-8")
+    assert "读不出这个私聊：wcdb_get_messages failed: ret=-3" in out
+    assert "你已添加了" in out                             # the other chat is still shown

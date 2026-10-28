@@ -5,9 +5,11 @@ types and clicks, and that it types and clicks nothing it cannot see or is not a
 """
 
 import os
+import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -514,7 +516,7 @@ class AutoFriendServiceTests(unittest.TestCase):
     def test_the_worker_checks_every_interval(self):
         ticked = threading.Event()
         manager = MagicMock()
-        manager.accept_friend_requests.side_effect = lambda: ticked.set() or []
+        manager.accept_friend_requests.side_effect = lambda limit=None: ticked.set() or []
         service = AutoFriendService(manager)
         service._interval = 0.01
         service.start()
@@ -673,6 +675,17 @@ class BotFriendWiringTests(unittest.TestCase):
         self.assertIs(bot._friend_mgr._ocr, engine_class.return_value)
         self.assertIs(bot._friend_mgr._ui_lock, lock)
         admin.set_friend_manager.assert_called_once_with(bot._friend_mgr, bot._auto_friend)
+
+    def test_the_manager_knows_the_backends_chat_names(self):
+        """A chat open in a window of its own is titled with its name: never one of WeChat's dialogs."""
+        backend = WcdbBackend(bot_display_name="小助手", groups=["测试群"])
+        backend._chat_names = {"room1@chatroom": "达人朋友群", "wxid_a": "小朋友"}
+        backend._session_names = {"wxid_b": "阿明", "wxid_a": "小朋友"}
+        with patch("src.wechat.ocr.win_ocr.WindowsOcrEngine"):
+            bot, _ = self.start(backend)
+        self.assertEqual(bot._friend_mgr._chat_names(), ["达人朋友群", "小朋友", "阿明"])
+        self.assertTrue(bot._friend_mgr._is_chat_title("达人朋友群 (35)"))
+        self.assertFalse(bot._friend_mgr._is_chat_title("通过朋友验证"))
 
     def test_the_manager_tells_its_accepts_to_the_new_friend_scan(self):
         backend = SimpleNamespace(window_controller=FakeWindow(), window_lock=threading.Lock())
@@ -1189,6 +1202,563 @@ class QuietConfigTests(unittest.TestCase):
         self.assertEqual((service._idle_sec, service._watch, service._full_check_sec), (45.0, False, 120.0))
         self.assertTrue(hasattr(service._idle_gate, "idle_seconds"))
 
+
+
+# ── WeChat 4.0's dialogs are never confused with a chat open in a window of its own (win review F7) ──
+#
+# A chat can be open in a window of its own (SEND_QUIET, or by hand): same process, same window class as
+# the dialogs, and its title is the chat's name, 「达人朋友群」 or 「小朋友」 say.  Friend management used to
+# take the first window whose title merely contained 验证 / 确定 / 朋友 (申请 / 验证 / 朋友 for the
+# application window), clicked into its lower part and pressed Enter there: what an operator had typed in
+# that chat, or the greeting, went out to that chat.  Now a dialog is a window that appeared after the
+# click that opens it, titled exactly as WeChat titles it, not named like a chat, and nothing is clicked
+# or typed into it unless that very window is in front.
+
+CHAT_GROUP, CHAT_PERSON, POPUP, APPLY, ADD_DIALOG = 601, 602, 603, 604, 605
+
+
+class DesktopWindow(FakeWindow):
+    """The window controller over a FakeDesktop: one window at a time is in front (``front``)."""
+
+    def __init__(self, front=HWND):
+        super().__init__()
+        self.front = front
+
+    def _foreground_matches(self, hwnd):
+        return hwnd == self.front
+
+
+class DialogTestCase(FriendTestCase):
+    def setUp(self):
+        super().setUp()
+        self.desktop = FakeDesktop()
+        self.desktop.add(CHAT_GROUP, title="达人朋友群")               # chats open in windows of their own
+        self.desktop.add(CHAT_PERSON, title="小朋友")
+        self.window = DesktopWindow()
+        self.focusable = True                                       # does SetForegroundWindow work?
+
+    def make(self, ocr=None, chat_names=("达人朋友群", "小朋友", "测试群")):
+        manager = FriendManager(window_controller=self.window, ocr_engine=ocr or FakeOcr([]), clicker=self.click,
+                                rect_of=lambda h: self.desktop.windows[h]["rect"], sleeper=lambda s: None,
+                                chat_names=lambda: list(chat_names))
+        manager._focus_window = self.focus
+        return manager
+
+    def click(self, x, y):
+        self.clicks.append((x, y))
+        self.events.append(("click", self.window.front, x, y))
+        return self.desktop.click(x, y)
+
+    def focus(self, hwnd):
+        if self.focusable:
+            self.window.front = hwnd
+
+    def _key_event(self, event):                                     # which window had the keyboard
+        self.keys.append(event)
+        self.events.append((*event, "front", self.window.front))
+        if event == ("key", VK_RETURN) and self.window.front == APPLY:
+            self.desktop.windows.pop(APPLY, None)                     # WeChat sends the application and closes it
+
+    def run_win32(self, fn, *args):
+        with patch.object(friend_manager, "sys", SimpleNamespace(platform="win32")), \
+             patch.dict("sys.modules", self.desktop.modules()):
+            return fn(*args)
+
+
+class PopupDialogTests(DialogTestCase):
+    def before(self, manager):
+        return self.run_win32(manager._window_snapshot, HWND)
+
+    def test_a_chat_window_with_朋友_in_its_name_is_not_the_confirmation_dialog(self):
+        manager = self.make()
+        before = self.before(manager)
+        self.assertIsNone(self.run_win32(manager._find_popup_dialog, HWND, before))     # was the chat (601)
+
+    def test_a_chat_window_that_opens_meanwhile_is_not_it_either(self):
+        manager = self.make()
+        before = self.before(manager)
+        self.desktop.add(606, title="小朋友们")                        # new, but a chat's title
+        self.assertIsNone(self.run_win32(manager._find_popup_dialog, HWND, before))
+
+    def test_the_dialog_that_appears_is_found_whatever_order_windows_are_listed_in(self):
+        manager = self.make()
+        before = self.before(manager)
+        self.desktop.add(POPUP, title="通过朋友验证")
+        self.assertEqual(self.run_win32(manager._find_popup_dialog, HWND, before), POPUP)
+
+    def test_a_chat_named_like_the_dialog_is_not_it(self):
+        manager = self.make(chat_names=("通过朋友验证",))
+        before = self.before(manager)
+        self.desktop.add(POPUP, title="通过朋友验证")
+        self.assertIsNone(self.run_win32(manager._find_popup_dialog, HWND, before))
+
+    def test_without_a_list_of_the_windows_before_the_click_nothing_is_taken(self):
+        manager = self.make()
+        self.desktop.add(POPUP, title="通过朋友验证")
+        self.assertIsNone(self.run_win32(manager._find_popup_dialog, HWND, None))
+
+    def test_nothing_is_clicked_or_typed_unless_the_dialog_itself_is_in_front(self):
+        manager = self.make()
+        self.desktop.add(POPUP, title="通过朋友验证", rect=(100, 100, 500, 700))
+        self.window.front = CHAT_PERSON                               # the chat window has the keyboard
+        self.focusable = False                                        # and SetForegroundWindow does not work
+        with self.assertRaises(friend_manager._Abort):
+            self.run_win32(manager._confirm_popup_dialog, POPUP)
+        self.assertNothingHappened()                                 # no click, no Enter into 「小朋友」
+
+    def test_the_dialog_in_front_gets_the_click_and_the_enter(self):
+        manager = self.make()
+        self.desktop.add(POPUP, title="通过朋友验证", rect=(100, 100, 500, 700))
+        self.run_win32(manager._confirm_popup_dialog, POPUP)
+        self.assertEqual(self.events, [("click", POPUP, 100 + int(0.318 * 400), 100 + int(0.930 * 600)),
+                                       ("key", VK_RETURN, "front", POPUP)])
+
+    def test_an_accept_with_a_chat_window_open_types_only_into_the_dialog(self):
+        accept = row("前往验证", 0.70, 0.21, 0.80, 0.25)
+        ocr = FakeOcr([AcceptFriendRequestsTests.NEW_FRIENDS],
+                      [row("张三 申请添加你为朋友", 0.35, 0.20, 0.50, 0.25), accept],
+                      [],                                             # the main window shows no 确定
+                      [row("张三", 0.35, 0.20, 0.50, 0.25)])          # the request is gone
+        manager = self.make(ocr)
+        self.desktop.on_click = [lambda: None,                       # 新的朋友
+                                 lambda: self.desktop.add(POPUP, title="通过朋友验证", rect=(100, 100, 500, 700))]
+        result = self.run_win32(manager.accept_friend_requests)
+        self.assertEqual([r["status"] for r in result], ["accepted"])
+        typed = [e for e in self.events if e[0] in ("key", "combo")]
+        self.assertEqual(typed, [("key", VK_RETURN, "front", POPUP)])  # the one Enter, into the dialog
+        self.assertNotIn(CHAT_PERSON, [e[1] for e in self.events if e[0] == "click"])
+
+    def test_an_accept_whose_dialog_will_not_come_forward_is_stopped_and_the_dialog_closed(self):
+        accept = row("前往验证", 0.70, 0.21, 0.80, 0.25)
+        ocr = FakeOcr([AcceptFriendRequestsTests.NEW_FRIENDS],
+                      [row("张三 申请添加你为朋友", 0.35, 0.20, 0.50, 0.25), accept], [])
+        manager = self.make(ocr)
+        closed = []
+        manager._close_window = closed.append
+        self.desktop.on_click = [lambda: None, lambda: self.desktop.add(POPUP, title="通过朋友验证")]
+        self.focusable = False
+        self.window.front = HWND
+        result = self.run_win32(manager.accept_friend_requests)
+        self.assertEqual(result, [])
+        self.assertEqual([e for e in self.events if e[0] in ("key", "combo")], [])   # no Enter anywhere
+        self.assertEqual(closed, [POPUP])                             # cancelled, not left open
+
+
+class ApplyDialogTests(DialogTestCase):
+    def test_a_chat_window_is_not_the_application_window(self):
+        manager = self.make()
+        before = self.run_win32(manager._window_snapshot, HWND)
+        self.desktop.add(ADD_DIALOG, title="添加朋友")
+        self.assertIsNone(self.run_win32(manager._find_apply_dialog, HWND, ADD_DIALOG, before))   # was 601
+
+    def test_the_application_window_that_appears_is_found(self):
+        manager = self.make()
+        before = self.run_win32(manager._window_snapshot, HWND)
+        self.desktop.add(ADD_DIALOG, title="添加朋友")
+        self.desktop.add(606, title="申请添加朋友们的群")              # a chat that opened meanwhile
+        self.desktop.add(APPLY, title="申请添加朋友")
+        self.assertEqual(self.run_win32(manager._find_apply_dialog, HWND, ADD_DIALOG, before), APPLY)
+
+    def add_friend(self, apply_comes_forward=True):
+        """The 4.0 add-friend flow with 「小朋友」 open in its own window: search, 添加到通讯录, greeting, 确定."""
+        add_button = row("添加到通讯录", 0.4, 0.8, 0.6, 0.9)
+        ocr = FakeOcr([add_button], [row("发送添加朋友申请", 0.1, 0.1, 0.5, 0.2)], [])
+        manager = self.make(ocr)
+        self.desktop.add(ADD_DIALOG, title="添加朋友", rect=(200, 100, 600, 800))
+        self.window.front = ADD_DIALOG
+        closed = []
+        manager._close_window = lambda h: closed.append(h) or self.desktop.windows.pop(h, None)
+
+        def application_opens():
+            self.desktop.add(APPLY, title="申请添加朋友", rect=(200, 100, 600, 900))
+            if not apply_comes_forward:
+                self.focusable = False
+                self.window.front = CHAT_PERSON                       # say the chat window got the keyboard
+
+        self.desktop.on_click = [lambda: None, application_opens]     # the search box, 添加到通讯录
+        manager._open_add_friend_dialog_wechat4 = lambda hwnd: ADD_DIALOG
+        manager._is_window_visible = lambda h: h in self.desktop.windows
+        result = self.run_win32(manager._add_friend_wechat4, HWND, "wxid_target", "你好呀")
+        return result, closed
+
+    def test_the_greeting_goes_only_into_the_application_window(self):
+        result, closed = self.add_friend()
+        typed_into = {e[-1] for e in self.events if e[0] in ("key", "combo")}
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(typed_into, {ADD_DIALOG, APPLY})             # never 「小朋友」 (602)
+        self.assertEqual(self.window.pasted, ["wxid_target", "你好呀"])
+
+    def test_a_click_that_brings_the_dialog_forward_is_enough_when_setforegroundwindow_was_not(self):
+        """SetForegroundWindow may be refused; WeChat's main window is in front, so the click on the search box
+        goes ahead (it only moves the focus) and brings the dialog forward: then the keys are allowed."""
+        add_button = row("添加到通讯录", 0.4, 0.8, 0.6, 0.9)
+        ocr = FakeOcr([add_button], [row("发送添加朋友申请", 0.1, 0.1, 0.5, 0.2)], [])
+        manager = self.make(ocr)
+        self.desktop.add(ADD_DIALOG, title="添加朋友", rect=(200, 100, 600, 800))
+        self.focusable = False
+        self.window.front = HWND                                       # the main window, as after the menu
+        manager._close_window = lambda h: self.desktop.windows.pop(h, None)
+
+        def search_box_clicked():
+            self.window.front = ADD_DIALOG                            # Windows activates the clicked window
+
+        def application_opens():
+            self.desktop.add(APPLY, title="申请添加朋友", rect=(200, 100, 600, 900))
+            self.window.front = APPLY                                 # WeChat activates its new window
+
+        self.desktop.on_click = [search_box_clicked, application_opens]
+        manager._open_add_friend_dialog_wechat4 = lambda hwnd: ADD_DIALOG
+        manager._is_window_visible = lambda h: h in self.desktop.windows
+        gui = self.desktop.modules()
+        gui["win32gui"].GetForegroundWindow.side_effect = lambda: self.window.front
+        with patch.object(friend_manager, "sys", SimpleNamespace(platform="win32")), \
+             patch.dict("sys.modules", gui):
+            result = manager._add_friend_wechat4(HWND, "wxid_target", "你好呀")
+        self.assertTrue(result["ok"], result)
+        self.assertEqual({e[-1] for e in self.events if e[0] in ("key", "combo")}, {ADD_DIALOG, APPLY})
+
+    def test_an_application_window_that_is_not_in_front_gets_nothing_and_both_dialogs_close(self):
+        with self.assertRaises(friend_manager._Abort):
+            self.add_friend(apply_comes_forward=False)
+        self.assertNotIn(CHAT_PERSON, {e[-1] for e in self.events if e[0] in ("key", "combo")})
+        self.assertEqual(self.window.pasted, ["wxid_target"])         # the greeting was never pasted
+
+
+# ── An unexpected error inside a friend action (win review F8) ─────────────────────
+#
+# A pywin32 error (a window handle gone, a dialog closed meanwhile) is not an _Abort: it used to go all
+# the way up, the admin heard nothing at all, and WeChat 4.0's add-friend window stayed open.  Now the
+# admin is told 「…出错…（详见日志）」, the dialogs opened are closed, and the window is put back, the
+# focus returned and the window lock released as before.
+
+PYWIN_ERROR = OSError("pywintypes.error (1400, 'GetWindowRect', '无效的窗口句柄')")
+
+
+class BoomWindow(FakeWindow):
+    def _goto_contacts_tab(self, hwnd):
+        raise PYWIN_ERROR
+
+
+class UnexpectedErrorTests(FriendTestCase):
+    def setUp(self):
+        super().setUp()
+        self.lock = threading.Lock()
+
+    def manager(self, window=None, ocr=None, lock=None, click_ok=True):
+        return super().manager(window, ocr, lock=self.lock, click_ok=click_ok)
+
+    def assertPutBack(self, window):
+        self.assertEqual(window.restored, [("state", HWND)])
+        self.assertEqual(window.focus_returned, [777])
+        self.assertFalse(self.lock.locked())
+
+    def test_the_admin_hears_about_an_error_while_accepting(self):
+        window = BoomWindow()
+        admin = AdminCommandHandler(friend_manager=self.manager(window, FakeOcr([])))
+        reply = admin.handle("同意好友")
+        self.assertIn("出错", reply)
+        self.assertIn("详见日志", reply)
+        self.assertPutBack(window)
+
+    def test_requests_accepted_before_the_error_are_still_reported(self):
+        accept = row("接受", 0.70, 0.21, 0.76, 0.25)
+        second = row("接受", 0.70, 0.31, 0.76, 0.35)
+        ocr = FakeOcr([AcceptFriendRequestsTests.NEW_FRIENDS], [accept, second], [], [second], [second])
+        window = FakeWindow()
+        manager = self.manager(window, ocr)
+        clicks = []
+
+        def click(x, y):
+            clicks.append((x, y))
+            if len(clicks) == 3:                                      # the second accept: the handle is gone
+                raise PYWIN_ERROR
+            return True
+        manager._clicker = click
+        results = []
+        real = manager.accept_friend_requests
+        manager.accept_friend_requests = lambda: results.append(real()) or results[-1]
+        reply = AdminCommandHandler(friend_manager=manager).handle("同意好友")
+        self.assertEqual(len(results[0]), 1)                          # the first one went through
+        self.assertIn("1400", results[0].error)
+        self.assertEqual(reply, "同意好友时出错，已停止，之前已同意 1 位（详见日志）")
+        self.assertPutBack(window)
+
+    def test_an_error_in_the_add_friend_window_closes_it_and_tells_the_admin(self):
+        window = FakeWindow()
+        manager = self.manager(window, FakeOcr([]))
+        closed = []
+        manager._close_window = closed.append
+        manager._is_wechat4 = lambda hwnd: True
+        manager._open_add_friend_dialog_wechat4 = lambda hwnd: 999
+        manager._focus_window = lambda hwnd: None
+        manager._rect_of = lambda hwnd: (_ for _ in ()).throw(PYWIN_ERROR)
+        result = manager.add_friend("wxid_target", "你好")
+        self.assertEqual((result["ok"], result["reason"]), (False, "error"))
+        self.assertIn("详见日志", result["message"])
+        self.assertEqual(closed, [999])                                # the 「添加朋友」 window is not left open
+        reply = AdminCommandHandler(friend_manager=manager).handle("添加好友 wxid_target 你好")
+        self.assertIn("出错", reply)
+        self.assertEqual(window.restored, [("state", HWND)] * 2)
+        self.assertFalse(self.lock.locked())
+
+    def test_an_error_before_the_window_is_taken_still_gets_an_answer(self):
+        window = FakeWindow()
+        window.find_hwnd = lambda force=False, wake=True: (_ for _ in ()).throw(PYWIN_ERROR)
+        admin = AdminCommandHandler(friend_manager=self.manager(window, FakeOcr([])))
+        self.assertIn("出错", admin.handle("同意好友"))
+        self.assertIn("出错", admin.handle("添加好友 wxid_target"))
+        self.assertFalse(self.lock.locked())
+
+    def test_a_window_that_cannot_be_put_back_still_gets_the_focus_returned(self):
+        window = BoomWindow()
+        window._restore_window_state = lambda snapshot, hwnd: (_ for _ in ()).throw(PYWIN_ERROR)
+        admin = AdminCommandHandler(friend_manager=self.manager(window, FakeOcr([])))
+        self.assertIn("出错", admin.handle("同意好友"))
+        self.assertEqual(window.focus_returned, [777])
+        self.assertFalse(self.lock.locked())
+
+    def test_the_auto_accept_worker_just_logs_it(self):
+        service = AutoFriendService(self.manager(BoomWindow(), FakeOcr([])), watch=False)
+        self.assertEqual(service.run_once(), [])
+        self.assertFalse(self.lock.locked())
+
+
+# ── Auto-accept: a daily cap, and it stops when WeChat holds the account back ─────────────
+#
+# AUTO_ACCEPT_FRIENDS took at most 10 a check, every interval, with no daily limit, and did not know
+# 「操作过于频繁」 when WeChat said it.  Now at most AUTO_ACCEPT_DAILY_MAX (50) a day (kept across
+# restarts), the admin is told when it is reached (once a day), and a risk prompt (or a request that
+# stays pending three checks in a row) pauses it until the admin switches it on again.
+
+from src.wechat.friend_manager import AcceptResult, RISK_MARKERS  # noqa: E402
+
+DAY = 86400
+
+
+class CountingManager:
+    """accept_friend_requests as the service sees it: ``batches`` of results, the limit it was given."""
+
+    def __init__(self, *batches):
+        self.batches = list(batches)
+        self.limits = []
+
+    def look_for_news(self):
+        return "changed"
+
+    def accept_friend_requests(self, limit=None):
+        self.limits.append(limit)
+        batch = self.batches.pop(0) if self.batches else AcceptResult()
+        if isinstance(batch, AcceptResult):
+            return batch[:limit] if limit is not None and len(batch) > limit else batch
+        result = AcceptResult({"status": "accepted", "timestamp": 0.0} for _ in range(min(batch, limit or batch)))
+        return result
+
+
+def risky(n=0, text="操作过于频繁，请稍后再试"):
+    result = AcceptResult({"status": "accepted", "timestamp": 0.0} for _ in range(n))
+    result.risk = text
+    return result
+
+
+def stuck():
+    result = AcceptResult()
+    result.stuck = True
+    return result
+
+
+class DailyCapTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.now = time.mktime((2026, 10, 28, 9, 0, 0, 0, 0, -1))
+        self.told = []
+
+    def service(self, manager, daily_max=5, **kw):
+        return AutoFriendService(manager, watch=False, daily_max=daily_max, state_path=self.tmp / "auto_accept.json",
+                                 notify=self.told.append, wall_clock=lambda: self.now, **kw)
+
+    def test_at_most_the_daily_max_is_accepted_and_the_admin_is_told_once(self):
+        manager = CountingManager(3, 3, 3)
+        service = self.service(manager)
+        self.assertEqual(len(service.run_once()), 3)
+        self.assertEqual(len(service.run_once()), 2)                  # only what is left of the day's 5
+        self.assertEqual(manager.limits, [5, 2])
+        self.assertEqual(service.run_once(), [])                      # capped: the window is not touched
+        self.assertEqual(manager.limits, [5, 2])
+        self.assertEqual(len(self.told), 1)
+        self.assertIn("上限 5", self.told[0])
+        self.assertIn("明天", self.told[0])
+
+    def test_the_count_outlives_a_restart_and_starts_again_the_next_day(self):
+        self.service(CountingManager(5)).run_once()
+        manager = CountingManager(5)
+        restarted = self.service(manager)
+        self.assertEqual(restarted.run_once(), [])                    # the same day: still capped
+        self.assertEqual(manager.limits, [])
+        self.now += DAY
+        self.assertEqual(len(restarted.run_once()), 5)                # the next day
+        self.assertEqual(len(self.told), 2)                           # told once each day
+
+    def test_a_risk_prompt_pauses_it_until_the_admin_switches_it_on(self):
+        manager = CountingManager(risky(1), 2)
+        service = self.service(manager)
+        self.assertEqual(len(service.run_once()), 1)
+        self.assertEqual(len(self.told), 1)
+        self.assertIn("操作过于频繁", self.told[0])
+        self.assertIn("自动同意好友 开", self.told[0])
+        self.assertEqual(service.run_once(), [])                      # paused
+        self.assertEqual(self.service(CountingManager(2)).run_once(), [])   # also after a restart
+        self.now += DAY
+        self.assertEqual(service.run_once(), [])                      # and the next day
+        service.enable()
+        self.addCleanup(service.stop)
+        self.assertEqual(len(service.run_once()), 2)
+
+    def test_a_request_that_stays_pending_three_checks_in_a_row_pauses_it_too(self):
+        manager = CountingManager(stuck(), stuck(), stuck(), 1)
+        service = self.service(manager)
+        for _ in range(3):
+            service.run_once()
+        self.assertEqual(len(self.told), 1)
+        self.assertIn("连续 3 次", self.told[0])
+        self.assertEqual(service.run_once(), [])
+
+    def test_a_stuck_check_followed_by_an_accept_starts_counting_again(self):
+        manager = CountingManager(stuck(), stuck(), 1, stuck(), stuck(), 1)
+        service = self.service(manager)
+        for _ in range(6):
+            service.run_once()
+        self.assertEqual(self.told, [])
+
+    def test_status_says_how_far_the_day_is(self):
+        service = self.service(CountingManager(2), daily_max=50)
+        service.run_once()
+        self.assertEqual(service.status_note(), "今天已自动同意 2/50")
+        service.pause("微信提示「操作过于频繁」", tell=False)
+        self.assertIn("已暂停", service.status_note())
+
+    def test_a_state_file_that_cannot_be_read_starts_afresh(self):
+        (self.tmp / "auto_accept.json").write_text("{not json", encoding="utf-8")
+        self.assertEqual(len(self.service(CountingManager(1)).run_once()), 1)
+
+    def test_a_notifier_that_fails_does_not_stop_the_service(self):
+        service = AutoFriendService(CountingManager(5), watch=False, daily_max=5,
+                                    notify=lambda text: 1 / 0, wall_clock=lambda: self.now)
+        self.assertEqual(len(service.run_once()), 5)
+        self.assertEqual(service.run_once(), [])
+
+
+class RiskPromptTests(FriendTestCase):
+    NEW_FRIENDS = row("新的朋友", 0.15, 0.12, 0.25, 0.16)
+
+    def test_a_risk_prompt_after_the_click_stops_the_run(self):
+        accept = row("接受", 0.70, 0.21, 0.76, 0.25)
+        second = row("接受", 0.70, 0.31, 0.76, 0.35)
+        ocr = FakeOcr([self.NEW_FRIENDS], [accept, second], [],
+                      [accept, second, row("操作过于频繁，请稍后再试", 0.4, 0.5, 0.6, 0.55)])
+        result = self.manager(FakeWindow(), ocr).accept_friend_requests()
+        self.assertEqual(list(result), [])                            # not counted
+        self.assertEqual(result.risk, "操作过于频繁，请稍后再试")
+        self.assertEqual(len(self.clicks), 2)                         # 新的朋友 and the first 接受: no second one
+
+    def test_a_greeting_that_was_on_the_screen_before_is_no_risk_prompt(self):
+        accept = row("接受", 0.70, 0.21, 0.76, 0.25)
+        greeting = row("你好，我最近操作频繁，请稍后再试试", 0.35, 0.20, 0.60, 0.25)
+        ocr = FakeOcr([self.NEW_FRIENDS], [greeting, accept], [], [greeting])
+        result = self.manager(FakeWindow(), ocr).accept_friend_requests()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result.risk, "")
+
+    def test_the_limit_is_kept_and_a_limit_of_nothing_does_not_touch_the_window(self):
+        accept = row("接受", 0.70, 0.21, 0.76, 0.25)
+        second = row("接受", 0.70, 0.31, 0.76, 0.35)
+        ocr = FakeOcr([self.NEW_FRIENDS], [accept, second], [], [second], [second])
+        window = FakeWindow()
+        result = self.manager(window, ocr).accept_friend_requests(limit=1)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(len(self.clicks), 2)                         # 新的朋友, one 接受
+        window2 = FakeWindow()
+        self.assertEqual(self.manager(window2, FakeOcr([])).accept_friend_requests(limit=0), [])
+        self.assertEqual(window2.activations, 0)
+
+    def test_a_request_that_stays_pending_is_marked(self):
+        accept = row("接受", 0.70, 0.21, 0.76, 0.25)
+        ocr = FakeOcr([self.NEW_FRIENDS], [accept])
+        result = self.manager(FakeWindow(), ocr).accept_friend_requests()
+        self.assertEqual(list(result), [])
+        self.assertTrue(result.stuck)
+
+    def test_risk_texts_are_matched_without_spaces(self):
+        self.assertTrue(any(m in friend_manager._clean_text("操作 过于 频繁") for m in RISK_MARKERS))
+        self.assertEqual(friend_manager._risk_line([row("你的帐号存在异常", 0, 0, 1, 1)]), "你的帐号存在异常")
+        self.assertEqual(friend_manager._risk_line([row("已添加", 0, 0, 1, 1)]), "")
+
+    def test_adding_a_friend_while_wechat_holds_the_account_back_says_so(self):
+        manager = self.manager(FakeWindow(), FakeOcr([row("操作过于频繁，请稍后再试", 0.1, 0.5, 0.8, 0.6)]))
+        with patch.object(manager, "_open_add_friend_dialog_wechat4", return_value=999), \
+             patch.object(manager, "_focus_window"), patch.object(manager, "_close_window") as close:
+            res = manager._add_friend_wechat4(HWND, "wxid_target", "")
+        self.assertEqual((res["ok"], res["reason"]), (False, "risk"))
+        self.assertIn("操作过于频繁", res["message"])
+        close.assert_called_once_with(999)
+
+
+class AdminRiskAndCapTests(unittest.TestCase):
+    def setUp(self):
+        self.friend = MagicMock()
+        self.auto = AutoFriendService(CountingManager(), watch=False, daily_max=50, wall_clock=lambda: 0.0)
+        self.handler = AdminCommandHandler(friend_manager=self.friend, auto_friend_service=self.auto)
+
+    def test_a_risk_prompt_during_a_manual_accept_is_reported_and_pauses_the_auto_accept(self):
+        self.friend.accept_friend_requests.return_value = risky(1)
+        reply = self.handler.handle("同意好友")
+        self.assertIn("操作过于频繁", reply)
+        self.assertIn("已同意 1 位", reply)
+        self.assertIn("自动同意好友也已暂停", reply)
+        self.assertIn("已暂停", self.auto.status_note())
+
+    def test_a_risk_prompt_while_adding_pauses_the_auto_accept_too(self):
+        self.friend.add_friend.return_value = {"ok": False, "reason": "risk", "message": "微信提示「操作过于频繁」…"}
+        self.assertIn("操作过于频繁", self.handler.handle("添加好友 13800000000"))
+        self.assertIn("已暂停", self.auto.status_note())
+
+    def test_status_and_switching_on_say_where_the_day_stands(self):
+        self.auto._enabled = True
+        self.assertIn("自动同意好友：开（今天已自动同意 0/50）", self.handler.handle("查状态"))
+        self.auto.pause("微信提示「操作过于频繁」", tell=False)
+        self.addCleanup(self.auto.stop)
+        reply = self.handler.handle("自动同意好友 开")
+        self.assertTrue(reply.startswith("自动同意好友申请功能已开启"), reply)
+        self.assertNotIn("已暂停", self.auto.status_note())          # switching on lifts the pause
+
+
+class DailyMaxConfigTests(unittest.TestCase):
+    def test_default_and_from_the_environment(self):
+        self.assertEqual(BotConfig().auto_accept_daily_max, 50)
+        env = {"ANTHROPIC_API_KEY": "sk-ant-test-key", "AUTO_ACCEPT_DAILY_MAX": "30"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(load_config().auto_accept_daily_max, 30)
+
+    def test_out_of_range(self):
+        _validate_config({"auto_accept_daily_max": 1})
+        _validate_config({"auto_accept_daily_max": 300})
+        for value in (0, -5, 301):
+            with self.assertRaises(RuntimeError):
+                _validate_config({"auto_accept_daily_max": value})
+
+    def test_the_bot_passes_the_cap_the_state_file_and_the_admins_chat(self):
+        config = BotConfig(auto_accept_friends="off", auto_accept_daily_max=20, admin_wxid="wxid_admin",
+                           db_path=str(Path(tempfile.mkdtemp()) / "messages.db"))
+        sent = []
+        backend = SimpleNamespace(window_controller=FakeWindow(), window_lock=threading.Lock(),
+                                  send_text=lambda chat, text: sent.append((chat, text)) or True)
+        bot = Bot(config)
+        with patch("src.wechat.ocr.win_ocr.WindowsOcrEngine"):
+            bot._start_friend_management(config, backend, MagicMock())
+        service = bot._auto_friend
+        self.assertEqual(service._daily_max, 20)
+        self.assertEqual(service._state_path, Path(config.db_path).parent / "auto_accept_state.json")
+        service._notify("今天到上限了")
+        self.assertEqual(sent, [("wxid_admin", "今天到上限了")])
 
 if __name__ == "__main__":
     unittest.main()

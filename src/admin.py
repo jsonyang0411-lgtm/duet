@@ -129,8 +129,32 @@ class AdminCommandHandler:
         else:
             lines.append("好友管理：可用")
         if self._auto_friend is not None:
-            lines.append(f"自动同意好友：{'开' if self._auto_friend.enabled else '关'}")
+            note = self._auto_note() if self._auto_friend.enabled else ""
+            lines.append(f"自动同意好友：{'开' if self._auto_friend.enabled else '关'}" + (f"（{note}）" if note else ""))
         return "\n".join(lines)
+
+    def _auto_note(self) -> str:
+        """The auto-accept worker's day (``status_note``: today's count against the cap, or why it is
+        paused); "" when it cannot tell."""
+        try:
+            note = self._auto_friend.status_note()
+        except Exception:
+            logger.debug("ADMIN: the auto-accept status could not be read", exc_info=True)
+            return ""
+        return note if isinstance(note, str) else ""
+
+    def _pause_auto(self, why: str) -> str:
+        """WeChat held the account back during a command: auto-accept pauses too (the admin hears it in the
+        command's answer); the words to add to that answer."""
+        pause = getattr(self._auto_friend, "pause", None)
+        if self._auto_friend is None or not callable(pause):
+            return ""
+        try:
+            pause(why, tell=False)
+        except Exception:
+            logger.warning("ADMIN: auto-accept could not be paused", exc_info=True)
+            return ""
+        return "；自动同意好友也已暂停（发「自动同意好友 开」恢复）"
 
     def _cmd_add_friend(self, content: str) -> str:
         """Handle the '添加好友' command."""
@@ -143,15 +167,34 @@ class AdminCommandHandler:
 
         target = parts[1].strip()
         reason = parts[2].strip() if len(parts) > 2 else ""
-        res = self._friend.add_friend(target, reason)
-        return str(res.get("message", "处理完成"))
+        try:
+            res = self._friend.add_friend(target, reason)
+        except Exception:
+            logger.exception("ADMIN: 添加好友 failed")
+            return "添加好友时出错，已中止（详见日志）：请在微信里看一下申请发出去没有"
+        message = str(res.get("message", "处理完成"))
+        if res.get("reason") == "risk":                  # WeChat holds the account back
+            message += self._pause_auto("添加好友时微信提示操作太频繁")
+        return message
 
     def _cmd_accept_friends(self) -> str:
         """Handle the '同意好友' command."""
         if self._friend is None:
             return f"{NO_FRIEND_MANAGER}同意好友操作"
 
-        accepted = self._friend.accept_friend_requests()
+        try:
+            accepted = self._friend.accept_friend_requests()
+        except Exception:
+            logger.exception("ADMIN: 同意好友 failed")
+            return "同意好友时出错，已停止（详见日志）"
+        risk = getattr(accepted, "risk", "")
+        if isinstance(risk, str) and risk:
+            done = f"（已同意 {len(accepted)} 位）" if accepted else ""
+            return (f"微信提示「{risk}」，可能是操作太频繁被限制了，已停止{done}：先别再加好友、同意好友，过几个小时再试"
+                    + self._pause_auto(f"同意好友时微信提示「{risk}」"))
+        if getattr(accepted, "error", ""):
+            done = f"，之前已同意 {len(accepted)} 位" if accepted else ""
+            return f"同意好友时出错，已停止{done}（详见日志）"
         if accepted:
             return f"已成功同意 {len(accepted)} 位新好友申请"
         return "没有同意任何申请：没有待处理的申请，或微信窗口/识别出了问题（详见日志）"
@@ -162,6 +205,7 @@ class AdminCommandHandler:
             return f"{NO_FRIEND_MANAGER}自动同意开关"
         if on:
             self._auto_friend.enable()
-            return "自动同意好友申请功能已开启"
+            note = self._auto_note()
+            return "自动同意好友申请功能已开启" + (f"（{note}）" if note else "")
         self._auto_friend.disable()
         return "自动同意好友申请功能已关闭"

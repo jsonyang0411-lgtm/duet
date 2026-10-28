@@ -414,5 +414,49 @@ class PrivateChatNameFallbackTests(unittest.TestCase):
         self.assertEqual(self.backend._chat_names, {"room1@chatroom": "测试群"})
 
 
+
+class VoiceIsRecognisedOnceTests(unittest.TestCase):
+    """A voice message is recognised when it is new, never again on the polls after (win review F12): the
+    poll standardizes every row it shows (the last 50) before it knows which are new, and a voice message
+    whose recognition failed was not cached, so a local whisper ran for seconds on every poll and every
+    chat waited.  The id never depends on the words, so a seen row needs no recognition at all."""
+
+    def setUp(self):
+        self.backend = WcdbBackend(bot_display_name="商务助手", groups=["测试群"],
+                                   config=BotConfig(message_burst_enabled=False))
+        self.backend._client = FakeClient()
+        self.backend._running = True
+        self.rows = []
+        self.backend._client.get_messages = lambda talker, limit=50: list(self.rows)
+        self.asked = []
+        self.answers = {}
+        self.backend._try_voice = lambda msg, talker="": self.asked.append(msg["local_id"]) or self.answers.get(
+            msg["local_id"])
+        self.got = []
+
+    def say_voice(self, local_id):
+        self.rows.insert(0, {"sender_username": "wxid_friend", "message_content": "", "local_type": 34,
+                             "create_time": int(time.time()), "local_id": local_id})
+
+    def poll(self, times=1):
+        for _ in range(times):
+            self.backend._poll_group("私聊好友", "wxid_friend", self.got.append)
+
+    def test_a_voice_message_whose_recognition_fails_is_not_tried_on_every_poll(self):
+        self.say_voice("v1")                                   # the ASR cannot make anything of it
+        self.poll(5)
+        self.assertEqual(self.asked, ["v1"])
+        self.assertEqual([m["content"] for m in self.got], ["[语音]"])
+
+    def test_a_new_voice_message_is_still_recognised_and_a_recognised_one_not_again(self):
+        self.say_voice("v1")
+        self.poll(2)
+        self.answers["v2"] = "明天下午三点到"
+        self.say_voice("v2")
+        self.poll(3)
+        self.assertEqual(self.asked, ["v1", "v2"])
+        self.assertEqual([m["content"] for m in self.got], ["[语音]", "[语音] 明天下午三点到"])
+        self.assertEqual(len({m["message_id"] for m in self.got}), 2)
+
 if __name__ == "__main__":
     unittest.main()

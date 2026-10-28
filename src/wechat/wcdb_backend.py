@@ -24,9 +24,9 @@ from typing import Optional
 from ..edge import text as edge_text
 from .base import AbstractWeChatBackend, MessageCallback
 from .burst import MessageBurstBuffer
-from .wcdb_client import WcdbNativeClient
+from .wcdb_client import WcdbCallError, WcdbNativeClient
 from .quiet_send import QuietSendSettings
-from .window_controller import WeChatWindowController
+from .window_controller import SendRefused, WeChatWindowController
 from .helpers import DedupSet, format_nontext_content, normalize_msg_type
 from src.pii import mask_pii
 from src.wechat.media import IMAGE_MSG_TYPES, find_existing_media_path_from_message
@@ -112,29 +112,46 @@ def _row_id(msg: dict, talker: str) -> str:
     return "" if local_id in ("", "0") else _md5(f"{talker}|{local_id}|{_row_time(msg)}")
 
 
-class SendRefused:
-    """What a send the backend does not even try returns: falsy like any failed send (callers test
-    the result's truth), and ``reason`` says why in words an operator can act on."""
-
-    __slots__ = ("reason",)
-
-    def __init__(self, reason: str):
-        self.reason = reason
-
-    def __bool__(self) -> bool:
-        return False
-
-    def __str__(self) -> str:
-        return self.reason
-
-    def __repr__(self) -> str:
-        return f"SendRefused({self.reason!r})"
-
-
-# Why the window is not used for a chat (see WcdbBackend._window_target).
+# SendRefused (window_controller): what a send the backend does not go through with returns, falsy, with
+# the reason.  Why the window is not used for a chat (see WcdbBackend._window_target):
 UNKNOWN_NAME = "机器人不知道这个聊天在微信里叫什么，没法在微信里找到它，没有发。请手动发"
 NAMESAKE = ("和另一个聊天同名（都叫「{name}」），机器人没法确定发给谁，没有发：请手动发，"
             "或者在微信里给对方设一个不重复的备注（改好后重启 Windows 上的机器人）")
+# SEND_VERIFY_CHAT: the search opened another chat than the one asked for (read from the screen).
+WRONG_CHAT = ("微信搜索「{name}」打开的是「{title}」，不是要发的聊天，没有发：请手动发，或者给对方设一个"
+              "不和别人重名、也不被别人的名字包含的备注（改好后重启 Windows 上的机器人）")
+VERIFY_LOOKS = 3                 # a title that reads as another chat is read again this often, VERIFY_PAUSE_SEC apart
+VERIFY_PAUSE_SEC = 0.6           # (the screen may not show the opened chat yet)
+VERIFY_OFF_SEC = 600             # the screen could not be read (no OCR language, window too small): not tried for this long
+
+
+def _ocr_key(name: str) -> str:
+    """A chat name as OCR can read it back: letters, digits and CJK only (OCR does not read emoji or most
+    symbols), no case."""
+    return "".join(ch for ch in str(name or "") if ch.isalnum()).casefold()
+
+
+def title_verdict(title: str, name: str, others, is_group: bool) -> str:
+    """What the chat title read from the screen says about the chat the search opened for ``name``:
+    ``ok`` (it is that chat), ``other`` (it is another chat the bot knows: ``others``, their ``_ocr_key``),
+    ``group`` (a group's title, with its member count, while a private chat was asked for), ``unknown``
+    (nothing read, cut off, misread, a name the bot does not know: no judgement)."""
+    from .ocr.reader import clean_group_name
+
+    raw = " ".join(str(title or "").split())
+    if not raw:
+        return "unknown"
+    shown = clean_group_name(raw)
+    key = _ocr_key(shown)
+    if not key:
+        return "unknown"
+    if key == _ocr_key(name):
+        return "ok"
+    if key in others:
+        return "other"
+    if not is_group and shown != raw:                # 「名字 (35)」: a group
+        return "group"
+    return "unknown"
 
 
 def _name_key(name: str) -> str:
@@ -460,6 +477,11 @@ class WcdbBackend(AbstractWeChatBackend):
         self._private_filter = None
         self._own_message_hook = None
         self._db_failures = 0          # database reads failed in a row (the WeChat edge's state)
+        # This poll cycle's chat reads: [made, answered with an error code] (_read_messages); every one
+        # failing is a failed read of the database (_poll_cycle).  And the chats whose reads fail while
+        # the others read (chat id -> the error), said once in the log.
+        self._reads = [0, 0]
+        self._unreadable: dict[str, str] = {}
         self._known: dict[str, DedupSet] = {}      # per chat: the message ids seen (_known_set)
         # Per watched private chat (the private filter's): message id -> time of the ordinary rows
         # read that were written in the last RECALL_WINDOW_SEC; one rewritten into a recall is
@@ -490,8 +512,10 @@ class WcdbBackend(AbstractWeChatBackend):
         self._gap_back_at = 0.0
         self._gap_read_at: dict[str, float] = {}
         self._gap_looked: dict[str, set] = {}
-        # Thread safety: WCDB DLL (ctypes) may not be thread-safe internally.
-        # All _client calls are serialized through this lock.
+        # Thread safety: the WCDB DLL (ctypes) may not be thread-safe internally.  The client itself
+        # serializes every call into it, from any thread (wcdb_client._DLL_LOCK: the poll loop, the
+        # new-friend scan, a re-initialisation's close and open).  This lock is held around the poll
+        # loop's reads and every with_client call, so another reader gets one call in at a time.
         self._client_lock = threading.Lock()
         # WeChat window automation (sending, screenshots) takes seconds and
         # must not interleave, but it never touches the DLL: it has its own
@@ -504,6 +528,11 @@ class WcdbBackend(AbstractWeChatBackend):
         self._voice: Optional[object] = None
         self._config = config
         self._voice_config = config
+        # SEND_VERIFY_CHAT: the chat title the search opened is read from the screen before anything is pasted
+        # (_open_chat_check).  The reader is made on Windows on first use (tests give one).
+        self._verify_chat = str(getattr(config, "send_verify_chat", "on") or "on") == "on"
+        self._title_reader = None
+        self._verify_off_until = 0.0
         self._burst = MessageBurstBuffer(
             enabled=bool(getattr(config, "message_burst_enabled", True)),
             window_sec=float(getattr(config, "message_burst_window_sec", 2.2)),
@@ -523,6 +552,14 @@ class WcdbBackend(AbstractWeChatBackend):
         """Held for every stretch of window automation; friend management takes it too."""
         return self._window_lock
 
+    def chat_names(self) -> list[str]:
+        """The names of the chats read and of every chat of the last session list: a WeChat window titled
+        like one of them is a chat open in a window of its own (friend management never takes it for one
+        of WeChat's dialogs)."""
+        names = [name for _, name in list(self._chat_names.items())]
+        names += [name for _, name in list(self._session_names.items())]
+        return [name for name in dict.fromkeys(names) if name]
+
     def start(self, callback: MessageCallback) -> None:
         if not self._groups:
             logger.error("No groups configured. Set WECHAT_GROUPS in .env")
@@ -533,16 +570,23 @@ class WcdbBackend(AbstractWeChatBackend):
             self._groups, self._poll_sec, self._bot_name,
         )
 
-        # Init and open database
+        # Init and open database, and read its chat list (an error code there: the database cannot
+        # be read either, handled the same way)
         try:
             self._client = WcdbNativeClient()
             self._client.init()
             self._client.open()
             logger.info("WCDB database opened successfully")
+            self._resolve_groups()
         except Exception as e:
             if isinstance(e, (KeyboardInterrupt, SystemExit)):
                 raise
             logger.error("Failed to initialize WCDB: %s", e)
+            if self._client is not None:
+                try:
+                    self._client.close()
+                except Exception:
+                    pass
             # Push error to Web UI so the user sees a recovery path
             try:
                 from src.web.server import update_status
@@ -559,10 +603,8 @@ class WcdbBackend(AbstractWeChatBackend):
             logger.warning("OCR_FALLBACK is on: starting without the WCDB database")
             self._client = None
 
-        # Resolve group talker IDs
-        if self._client is not None:
-            self._resolve_groups()
-        else:
+        # Group talker IDs without the database (the database's were resolved above)
+        if self._client is None:
             self._register_groups_without_database()
 
         if not self._chat_names:
@@ -682,7 +724,7 @@ class WcdbBackend(AbstractWeChatBackend):
         if refused is not None:
             return refused
         with self._window_lock:
-            return self._window.send_file_to_chat(chat_name, path)
+            return self._window.send_file_to_chat(chat_name, path, **self._check_kwargs(chat_id, chat_name))
 
     def stop(self) -> None:
         self._running = False
@@ -715,13 +757,14 @@ class WcdbBackend(AbstractWeChatBackend):
             self._client = None
             logger.error("WCDB reinitialization failed: %s", e)
             raise
+        # Re-resolve groups (talker IDs may have changed).  A failure here (the new handle cannot read
+        # the chat list either) leaves what was seen as it was: the next try starts over.
+        self._resolve_groups()
         # Forget what was seen: priming below marks what WCDB shows now (a row keeps its id,
         # _message_ids), and the catch-up finds a creator's messages from the gap.
         self._known = {}
         self._tracked = {}
         self._recallable = {}
-        # Re-resolve groups (talker IDs may have changed)
-        self._resolve_groups()
         # What came in while the database could not be read: history, except a registered
         # creator's messages the bot never handled (PRM_CATCHUP_HOURS, _prime_chat).
         self._prime_known_ids()
@@ -1177,6 +1220,7 @@ class WcdbBackend(AbstractWeChatBackend):
     def _poll_cycle(self, callback: MessageCallback) -> None:
         if self._client is None or not getattr(self._client, "is_open", False):
             raise RuntimeError("the WCDB database is not open")
+        self._reads = [0, 0]
         self._refresh_private_chats_if_due()
         self._admit_catch_up_chats()
         for talker, group_name in list(self._chat_names.items()):     # every chat read, by its id
@@ -1184,6 +1228,12 @@ class WcdbBackend(AbstractWeChatBackend):
                 break
             self._poll_group(group_name, talker, callback)
         self._flush_due_bursts(callback)
+        made, failed = self._reads
+        if made and failed == made:
+            # Not one chat could be read: the database cannot be (a stale handle answers every call
+            # with an error code).  Raised so the loop counts it: re-open, OCR fallback, db_readable.
+            raise WcdbCallError("wcdb_get_messages", detail=(
+                f"every chat read of this poll failed ({failed} of {made}): the WeChat database cannot be read"))
         # Check shutdown signal before sleeping so stop() is responsive
         if not self._running:
             return
@@ -1279,20 +1329,25 @@ class WcdbBackend(AbstractWeChatBackend):
             if name:
                 self._add_talker(name, talker, is_group=False)    # polled from this cycle on
 
-    def _catch_up_new_friend(self, group_name: str, talker: str, request: tuple) -> None:
+    def _catch_up_new_friend(self, group_name: str, talker: str, request: tuple) -> bool:
         """A catch_up_chat request, in the poll thread before the chat's own poll: read the chat back
         (CATCHUP_READ messages), mark all of it seen, and hand the other party's messages since the
-        request's time to its sink (stored first, so the restart catch-up counts them as handled)."""
+        request's time to its sink (stored first, so the restart catch-up counts them as handled).
+        False when the chat could not be read (an error code: ``_read_messages``): the request waits for
+        the next poll, and this poll leaves the chat alone (nothing is handed on before the catch-up)."""
         from .new_friends import is_friend_notice
 
         _name, since, sink, _asked = request
         try:
-            with self._client_lock:
-                messages = self._client.get_messages(talker=talker, limit=CATCHUP_READ)
+            messages = self._read_messages(talker, CATCHUP_READ)
         except Exception:
             with self._catch_up_lock:
                 self._catch_up_requests.setdefault(talker, request)      # asked again at the next poll
             raise
+        if messages is None:                          # this chat cannot be read now: nothing handed on
+            with self._catch_up_lock:
+                self._catch_up_requests.setdefault(talker, request)
+            return False
         known = self._known_set(talker)
         my_wxid = self.own_wxid()
         picked, newest = [], None
@@ -1327,6 +1382,7 @@ class WcdbBackend(AbstractWeChatBackend):
             sink(picked)
         except Exception:
             logger.exception("Catch-up of a new friend (%s…): the messages could not be handed on", talker[:8])
+        return True
 
     def db_readable(self) -> bool:
         """Can the WeChat database be read (fewer than 3 failed reads in a row)?"""
@@ -1404,16 +1460,26 @@ class WcdbBackend(AbstractWeChatBackend):
                 return True
         return False
 
-    def _gap_catch_up(self, group_name: str, talker: str, since: float) -> None:
+    def _gap_catch_up(self, group_name: str, talker: str, since: float) -> bool:
         """Read a creator's chat back (CATCHUP_READ) for a gap: the rows ``_gap_plan`` picks go to
-        ``_catchup[talker]`` (handed on right after, oldest first), the rest is marked seen."""
+        ``_catchup[talker]`` (handed on right after, oldest first), the rest is marked seen.  False when
+        the chat could not be read (an error code): it is read back at the next poll instead, and this
+        poll leaves the chat alone (its late rows are not handed on as new ones meanwhile)."""
         with self._catch_up_lock:
+            previous = self._gap_read_at.get(talker)
             self._gap_read_at[talker] = time.time()
-        with self._client_lock:
-            messages = self._client.get_messages(talker=talker, limit=CATCHUP_READ)
+        messages = self._read_messages(talker, CATCHUP_READ)
+        if messages is None:
+            with self._catch_up_lock:
+                if previous is None:
+                    self._gap_read_at.pop(talker, None)
+                else:
+                    self._gap_read_at[talker] = previous
+            return False
         self._prime_chat(group_name, talker, messages, catch_up=True, gap_since=since)
         # a row that is no message (standardized to nothing) never asks for another read-back
         self._gap_looked.setdefault(talker, set()).update(i for i in (_row_id(m, talker) for m in messages or []) if i)
+        return True
 
     def _gap_plan(self, talker: str, items: list[dict], since: float) -> set[str]:
         """The ids of rows (``items``: standardized, what WCDB shows now) to hand on for a gap: written
@@ -1532,8 +1598,31 @@ class WcdbBackend(AbstractWeChatBackend):
                         "Discovered %d new private chats for reply",
                         added,
                     )
+        except WcdbCallError as e:
+            logger.warning("Failed to refresh private chat sessions: %s", e)
         except Exception:
             logger.exception("Failed to refresh private chat sessions")
+
+    def _read_messages(self, talker: str, limit: int) -> Optional[list]:
+        """WCDB's latest ``limit`` rows of a chat (newest first), read under the client lock.  An error
+        code from the DLL (``WcdbCallError``) gives None and is counted for this poll cycle: a chat
+        whose reads fail while the others read is that chat only (skipped, looked at again next poll;
+        said once in the log); every read of a cycle failing is a failed read of the database
+        (``_poll_cycle``).  A chat with nothing in it reads as [] (no failure).  Other errors raise."""
+        self._reads[0] += 1
+        try:
+            with self._client_lock:
+                messages = self._client.get_messages(talker=talker, limit=limit)
+        except WcdbCallError as e:
+            self._reads[1] += 1
+            if talker not in self._unreadable:
+                self._unreadable[talker] = str(e)
+                logger.warning("WCDB could not read %s (%s): skipped until it can be; the other chats "
+                               "are read", talker[:20], e)
+            return None
+        if self._unreadable.pop(talker, None) is not None:
+            logger.info("WCDB reads %s again", talker[:20])
+        return messages
 
     def _known_set(self, talker: str) -> DedupSet:
         """The message ids already seen in this chat (made empty on its first read)."""
@@ -1837,10 +1926,11 @@ class WcdbBackend(AbstractWeChatBackend):
         if self._catch_up_requests:
             with self._catch_up_lock:
                 request = self._catch_up_requests.pop(talker, None)
-            if request is not None:
-                self._catch_up_new_friend(group_name, talker, request)
-        with self._client_lock:
-            messages = self._client.get_messages(talker=talker, limit=50)
+            if request is not None and not self._catch_up_new_friend(group_name, talker, request):
+                return                    # the chat cannot be read now: the request waits for the next poll
+        messages = self._read_messages(talker, 50)
+        if messages is None:
+            return                        # an error code for this chat (_read_messages): nothing seen yet
         first_read = talker not in self._known
         known = self._known_set(talker)
         tracked = self._tracked_chat(talker)
@@ -1854,7 +1944,8 @@ class WcdbBackend(AbstractWeChatBackend):
             with self._catch_up_lock:
                 due = self._gap_read_at.get(talker, 0.0) < self._gap_back_at
             if due or self._gap_rows_unseen(talker, messages, known, gap_since, time.time()):
-                self._gap_catch_up(group_name, talker, gap_since)
+                if not self._gap_catch_up(group_name, talker, gap_since):
+                    return                # read back at the next poll (its late rows are not new ones)
         missed = self._catchup.pop(talker, None)
         if missed:
             self._hand_on_missed(group_name, talker, missed, callback)
@@ -1871,7 +1962,10 @@ class WcdbBackend(AbstractWeChatBackend):
             if not self._running:
                 break
 
-            standardized = self._standardize(msg, group_name, talker, is_group=is_group)
+            # Without the voice recognised: a row's id never depends on a voice message's words
+            # (_message_ids), so the rows seen already need none.  Recognition (seconds with a local
+            # whisper) runs once, for a new row below; one it fails on is not tried on every poll.
+            standardized = self._standardize(msg, group_name, talker, resolve_voice=False, is_group=is_group)
             if standardized is None:
                 continue
             ts = int(standardized.get("timestamp") or 0)
@@ -1894,6 +1988,9 @@ class WcdbBackend(AbstractWeChatBackend):
                 # The backlog of an OCR stretch: seen, not answered (part of it was answered
                 # from the screen).  OCR never reads a private chat: a creator's is handed on.
                 continue
+            if standardized.get("msg_type") == 34:
+                # a new voice message: now with its words (the id stays the one marked seen above)
+                standardized = self._standardize(msg, group_name, talker, is_group=is_group) or standardized
 
             # Skip own messages.  With the account's wxid known that is the
             # whole test: a member whose display name is the account's must
@@ -2040,7 +2137,7 @@ class WcdbBackend(AbstractWeChatBackend):
         if refused is not None:
             return refused
         with self._window_lock:
-            return self._window.send_file_to_chat(name, path)
+            return self._window.send_file_to_chat(name, path, **self._check_kwargs(talker, name))
 
     def _screenshot_of(self, group_name: str, talker: str) -> str:
         """A picture message's ``_capture_media_screenshot``: the chat window's screenshot, or "" when
@@ -2048,6 +2145,10 @@ class WcdbBackend(AbstractWeChatBackend):
         name, refused = self._window_target(talker, group_name)
         if refused is not None:
             return ""
+        check = self._check_kwargs(talker, name)
+        if check:                                  # SEND_VERIFY_CHAT: not another chat's picture either
+            with self._window_lock:
+                return self._window.capture_chat_media(name, **check)
         return self._capture_media_screenshot(name)
 
     def _capture_media_screenshot(self, group_name: str) -> str:
@@ -2055,6 +2156,73 @@ class WcdbBackend(AbstractWeChatBackend):
         normal WeChat navigation/sending."""
         with self._window_lock:
             return self._window.capture_chat_media(group_name)
+
+    # ── SEND_VERIFY_CHAT: which chat did the search open? ─────────────
+
+    def _check_kwargs(self, talker: str, name: str) -> dict:
+        """``{"check": …}`` for a window operation in this chat when the open chat is checked, else {}."""
+        check = self._open_chat_check(talker, name)
+        return {"check": check} if check is not None else {}
+
+    def _read_title(self, hwnd: int) -> str:
+        """The chat title in WeChat's main window, read by OCR ("" when none is read)."""
+        if getattr(self, "_title_reader", None) is None:
+            from .ocr.reader import read_rows
+            from .ocr.win_ocr import WindowsOcrEngine
+            engine = WindowsOcrEngine(window=self._window)
+            self._title_reader = lambda h: read_rows(engine.capture(h))["title"]
+        return str(self._title_reader(hwnd) or "")
+
+    def _open_chat_check(self, talker: str, name: str):
+        """``check(hwnd)`` for the window (SEND_VERIFY_CHAT=on): the search opens its first result, which may
+        be another chat (a name inside another's: 「Amy」 and 「Amy陈」 / 「Amy粉丝群」; one the bot does not
+        read).  After the search the chat title is read from the screen (OCR) and compared:
+
+        - the chat asked for: go ahead;
+        - another chat the bot knows of (read, in the session list, in the console's list), or a group's
+          title while a private chat was asked for: read again (VERIFY_LOOKS, the screen may lag), then a
+          ``SendRefused`` (``WRONG_CHAT``): nothing is pasted;
+        - nothing readable, cut off, a name it does not know: go ahead, as without the check.
+
+        A screen that cannot be read at all (no OCR language, a window too small) is not tried again for
+        VERIFY_OFF_SEC.  None (no check) when off, or with no way to read the screen (not Windows)."""
+        if not getattr(self, "_verify_chat", True):
+            return None
+        if getattr(self, "_title_reader", None) is None and os.name != "nt":
+            return None
+        target = _ocr_key(name)
+        others = {_ocr_key(n) for names in (self._chat_names, self._session_names, self._listed_private_names())
+                  for t, n in list(names.items()) if t != talker} - {target, ""}
+        is_group = self._chat_is_group.get(talker, str(talker).endswith("@chatroom"))
+
+        def check(hwnd):
+            if time.monotonic() < getattr(self, "_verify_off_until", 0.0):
+                return None
+            title, verdict = "", "unknown"
+            for look in range(VERIFY_LOOKS):
+                try:
+                    title = self._read_title(hwnd)
+                except Exception as e:
+                    self._verify_off_until = time.monotonic() + VERIFY_OFF_SEC
+                    logger.warning("SEND_VERIFY_CHAT: the chat title could not be read (%s); sends go on without "
+                                   "the check for %d minutes", e, VERIFY_OFF_SEC // 60)
+                    return None
+                verdict = title_verdict(title, name, others, is_group)
+                if verdict not in ("other", "group"):
+                    break
+                if look + 1 < VERIFY_LOOKS:
+                    time.sleep(VERIFY_PAUSE_SEC)
+            if verdict == "ok":
+                logger.info("SEND_VERIFY_CHAT: the open chat is %r, as asked", name)
+                return None
+            if verdict == "unknown":
+                logger.info("SEND_VERIFY_CHAT: the open chat could not be confirmed (read %r); sent as before",
+                            title[:30])
+                return None
+            refused = SendRefused(WRONG_CHAT.format(name=name, title=" ".join(title.split())[:40]))
+            logger.warning("Not sending to %s: %s", talker[:20], refused.reason)
+            return refused
+        return check
 
     # ── Voice recognition helpers ────────────────────────────────────
 
@@ -2385,5 +2553,7 @@ class WcdbBackend(AbstractWeChatBackend):
         Returns True if the keyboard send action completed successfully.
         No confirmation polling — the window controller already retries
         on failure, and polling WCDB adds 3s of latency for marginal gain.
+        With SEND_VERIFY_CHAT a chat the search opened that is positively
+        another one is not pasted into (a falsy ``SendRefused``).
         """
-        return self._window.send_to_chat(group_name, content)
+        return self._window.send_to_chat(group_name, content, **self._check_kwargs(talker, group_name))
