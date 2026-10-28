@@ -28,7 +28,8 @@ notes, which the next draft replaces, and the system's, which stay until they ar
 review F1): a draft job that gave no draft (her lines in it go with her next draft job: answered,
 not lost), a 专属佣金 step owed while a person had the chat or the creator was off the list (asked for
 when that ends, ``sweep_owed_steps``), a platform action that ended red (until 已处理), her recall,
-messages read too late to draft.
+messages read too late to draft, this PC's clock off WeChat's (measured by the bot's own lines read back:
+``_note_clock``; how late a message is read is reckoned by WeChat's clock then, win review F6).
 
 Registering is always an operator's decision.  When the creator registered is a new friend
 (src/wechat/new_friends.py found the line WeChat writes when two people become friends), her
@@ -103,6 +104,11 @@ OWN_FILE_EARLY_SEC = 60      # a file the bot sent shows in WeChat up to this lo
 UNSURE_ERROR = "发送时机器人停了，不确定发出去没有；请到微信里看一眼，需要就手动补发"
 UNSURE_TEXT_SEEN = ("发送时机器人停了：文字已经发出去了（微信里读到了），素材文件不确定发出去没有；"
                     "请到微信里看一眼，需要就手动补发文件")
+# This PC's clock against WeChat's (win review F6): measured when the bot's own line is read back
+CLOCK_SAMPLE_SEC = 120       # read back this soon after it was noted, a line of ours measures the clock
+CLOCK_SAMPLES = 3            # the smallest of the last this many measurements counts (a late read only adds)
+CLOCK_NOISE_SEC = 60         # off by less than this: read-back noise, nothing is corrected
+CLOCK_SKEW_SEC = 300         # off by this much or more: the deals say so (``clock_note``)
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
 _WXID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{3,63}$")
 
@@ -227,6 +233,16 @@ def missed_note(count: int, earliest: float) -> str:
 def recall_note(at: float) -> str:
     """The deal's attention (and a draft's reason) when the creator took a message back."""
     return f"达人撤回了一条消息（{_clock_text(at)}），待审批的草稿可能是按撤回的内容写的，发之前请核对"
+
+
+def clock_note(skew: float) -> str:
+    """The deals' notice while this PC's clock is off WeChat's by CLOCK_SKEW_SEC or more (``skew``: this
+    PC's clock minus WeChat's, as the bot's own lines read back measured it)."""
+    hours, minutes = divmod(int(round(abs(skew) / 60)), 60)
+    amount = (f"{hours} 小时" if hours else "") + (f"{minutes} 分钟" if minutes or not hours else "")
+    return (f"这台电脑的时间比微信{'快' if skew > 0 else '慢'} {amount}（机器人发出的消息读回来时测的），"
+            "消息是不是晚到已经按微信的时间算；请把电脑时间改对（Windows 设置 → 时间和语言 → 自动设置时间），"
+            "改好以后机器人再发出消息时会重新测，这条提醒自己消失")
 
 
 def failed_text(head: str, into: Optional[int] = None) -> str:
@@ -507,6 +523,12 @@ class PrmService:
         self._read_back: dict[str, dict[str, float]] = {}
         self._sent_lock = threading.Lock()
         self._started = clock()               # what this run sent is in _sent_lines / _sent_files
+        # This PC's clock minus WeChat's (win review F6), measured by this run's own lines read back
+        # (``_note_clock``); 0 until then and within CLOCK_NOISE_SEC.  ``_local`` puts WeChat's times
+        # on this PC's clock wherever they are held against it (how late a message is read, a takeover).
+        self._clock_samples: deque = deque(maxlen=CLOCK_SAMPLES)
+        self._skew = 0.0
+        self._clock_text: Optional[str] = None     # the deals' notice as last written (None: not this run)
         self._last_retention = 0.0
         self._wake = threading.Event()
         self._stopping = threading.Event()
@@ -551,6 +573,53 @@ class PrmService:
             self._store.update_deal(deal["id"], now, mode=COPILOT, mode_until=None)
             self._store.add_event(deal["id"], deal["party_id"], "mode_expired", {}, actor="system", now=now)
         return mode
+
+    # ── this PC's clock against WeChat's (win review F6) ──────────────────
+
+    def _local(self, written: float) -> float:
+        """When WeChat says something was written, on this PC's clock (``_skew``, what this run measured;
+        nothing before it measured anything)."""
+        return written + self._skew if written else written
+
+    @staticmethod
+    def _clock_sample(msg: dict, noted: float, now: float) -> Optional[float]:
+        """What one of our lines read back says of this PC's clock: read (now, this PC) minus written
+        (WeChat's time).  Only a line read back within CLOCK_SAMPLE_SEC of being noted (the delay adds to
+        it), never the Mac's edge lines (their time is when Windows handed them on)."""
+        if msg.get("edge_seen") or msg.get("edge_operator"):
+            return None
+        try:
+            written = float(msg.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            return None
+        if not written or now - noted > CLOCK_SAMPLE_SEC:
+            return None
+        return now - written
+
+    def _note_clock(self, sample: float, now: float) -> None:
+        """A measurement of this PC's clock (``_clock_sample``).  The smallest of the last CLOCK_SAMPLES
+        counts (a read-back delayed by a stalled database only adds to one; a clock put right counts at
+        once); off by CLOCK_NOISE_SEC or more it corrects WeChat's times (``_local``); off by CLOCK_SKEW_SEC
+        or more every deal says so (``clock_note``), until a measurement says it is right again."""
+        with self._sent_lock:
+            self._clock_samples.append(sample)
+            low = min(self._clock_samples)
+            skew = low if abs(low) >= CLOCK_NOISE_SEC else 0.0
+            if skew != self._skew:
+                logger.warning("PRM: this PC's clock is %+.0f s off WeChat's (measured by our own line read back)",
+                               low)
+            self._skew = skew
+        text = clock_note(skew) if abs(skew) >= CLOCK_SKEW_SEC else ""
+        if text == self._clock_text:
+            return
+        self._clock_text = text
+        active = {p["id"] for p in self._store.parties()}
+        for deal in self._store.deals():
+            have = next((n for n in deal["notices"] if n["key"] == "clock"), None)
+            if (text and deal["party_id"] in active and (have is None or have.get("text") != text)
+                    or not text and have is not None):
+                # (about this PC, not the deal: not a sign of life for the 8.2 clean-up)
+                self._store.set_notice(deal["id"], "clock", text, now, touch=False)
 
     # ── from WeChat (the route step) ──────────────────────────────────────
 
@@ -614,8 +683,9 @@ class PrmService:
         on as this account's line) is only recorded; any other line (拍一拍, a red packet notice) only
         logged.  Older than a message of hers would still be drafted (PRM_CATCHUP_HOURS): history."""
         now = self._clock()
-        written = float(msg.get("timestamp", 0) or 0) or now
-        age = now - written
+        written = float(msg.get("timestamp", 0) or 0)
+        age = now - self._local(written) if written else 0.0
+        written = written or now
         if age > MAX_AGE_SEC and ((not self._catchup_sec and not _queued(msg))
                                   or (self._catchup_sec and age > self._catchup_sec)):
             return
@@ -656,7 +726,7 @@ class PrmService:
         for the WeChat window, and the backend's own lines wait for the lock)."""
         now = self._clock()
         sent_at = float(msg.get("timestamp", 0) or 0)
-        age = now - sent_at if sent_at else 0.0
+        age = now - self._local(sent_at) if sent_at else 0.0     # (on this PC's clock: win review F6)
         late = age > MAX_AGE_SEC
         if late and not self._catchup_sec:
             if not _queued(msg):
@@ -875,7 +945,7 @@ class PrmService:
             return
         now = self._clock()
         sent_at = float(msg.get("timestamp", 0) or 0)
-        late = bool(sent_at) and now - sent_at > MAX_AGE_SEC
+        late = bool(sent_at) and now - self._local(sent_at) > MAX_AGE_SEC
         if late and not self._catchup_sec:
             if not _queued(msg):
                 return                                     # history (a chat read for the first time)
@@ -894,7 +964,7 @@ class PrmService:
             return                                         # 我们发的读回来了，只是这次运行没记着它
         if matched:
             if packet_id is not None:
-                self._confirm(packet_id, msg, sent_at or now, now)
+                self._confirm(packet_id, msg, self._local(sent_at) or now, now)
             return
         deal = self._store.deal_of(party["id"], now)
         text = self._mask(party["id"], f"[{_clock_text(sent_at or now)}] {message_text(msg)}", now)
@@ -909,10 +979,11 @@ class PrmService:
             return                                         # paused stays paused (the line is recorded)
         # Typed while the bot was not reading: the chat is a person's as long as it would have
         # been, counted from when the line was written (a later takeover is not cut short).
-        until = (sent_at if late else now) + self._takeover_sec
+        until = (self._local(sent_at) if late else now) + self._takeover_sec
         if until <= now:
             logger.info("PRM: an operator wrote to party %d from WeChat while the bot was not reading, %.0f min "
-                        "ago; recorded, too long ago to take the chat over", party["id"], (now - sent_at) / 60)
+                        "ago; recorded, too long ago to take the chat over", party["id"],
+                        (now - self._local(sent_at)) / 60)
             return
         if mode == HUMAN and until <= float(deal.get("mode_until") or 0):
             logger.info("PRM: an operator's earlier line in party %d's chat recorded; the takeover goes on",
@@ -1047,7 +1118,8 @@ class PrmService:
             msg_type = int(msg.get("msg_type", 1) or 1)
         except (TypeError, ValueError):
             msg_type = 1
-        written = min(now, float(msg.get("timestamp", 0) or 0) or now)
+        written = min(now, self._local(float(msg.get("timestamp", 0) or 0)) or now)
+        sample = None
         with self._sent_lock:
             if msg_type != 1:
                 # Each file sent covers one row of its own kind, the oldest first (win review F4 (b):
@@ -1068,7 +1140,12 @@ class PrmService:
                         lines.remove(item)
                     elif item[0] == text:
                         lines.remove(item)
-                        return True, item[2]
+                        sample = (self._clock_sample(msg, item[1], now), item[2])
+                        break
+        if sample is not None:
+            if sample[0] is not None:
+                self._note_clock(sample[0], now)
+            return True, sample[1]
         # Sent before this run (the bot restarted in between): the database, but only what
         # WeChat has not shown yet; this run's sends are all in memory, so an operator typing
         # the same words later is still seen as a person.
@@ -2296,6 +2373,7 @@ class PrmService:
             "can_send": self._send is not None, "can_send_files": self._send_file is not None,
             "takeover_min": self._takeover_sec // 60, "holding_min": self._holding_sec // 60,
             "retention_days": self._retention_days, "catchup_hours": self._catchup_sec // 3600,
+            "clock_skew_sec": int(round(self._skew)),
         })
 
     # ── the sender thread: approved drafts, holding replies, clean-ups ────
@@ -2453,7 +2531,7 @@ class PrmService:
         reply, does not count)."""
         if any(_event_time(ev) >= since for ev in self._store.events(deal["id"], limit=20, kinds=("operator_message",))):
             return True
-        for packet in self._store.sent_since(chat_id, since):
+        for packet in self._store.sent_since(chat_id, self._local(since)):
             final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
             if str(final or "").strip() or packet["attachments"]:
                 return True

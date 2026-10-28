@@ -27,7 +27,8 @@ from src.admin import RELAY_HELP, AdminCommandHandler
 from src.config import BotConfig, _validate_config
 from src.db import MessageStore, initialize_db
 from src.prm import gates
-from src.prm.service import (MISSED_EVENT_NAME, SETTLE_SEC, PrmService, event_out, late_note, missed_note)
+from src.prm.service import (CLOCK_SAMPLE_SEC, MISSED_EVENT_NAME, SETTLE_SEC, PrmService, clock_note, event_out,
+                              late_note, missed_note)
 from src.prm.store import PrmStore
 from src.relay.service import MAX_AGE_SEC, ClaudeRelay
 from src.relay.store import RelayStore
@@ -492,6 +493,122 @@ def test_a_pc_clock_ten_minutes_ahead_still_drafts(world):
     run.poll()
     deal = world.prm_store.deal(1)
     assert deal["mode"] == "human" and deal["mode_until"] > world.clock.now   # a person's, as when typed
+
+
+def test_a_pc_clock_hours_ahead_is_measured_by_the_bots_own_reply_and_corrected(world):
+    """win review F6: this PC's clock is 3 hours ahead of WeChat's.  Until the bot has sent something
+    it cannot tell (a live message looks 3 hours late: drafted, but reviewed).  Its first reply read
+    back measures the clock (sent at, by this PC, minus written at, by WeChat): the deals say so, and
+    from then on live messages are on time and an operator's own reply takes the chat over."""
+    world.register()
+    run = world.run()
+    ahead = 3 * HOUR
+    world.clock.now += ahead                                      # this PC; WeChat writes its own time
+
+    def wechat_now():
+        return world.clock.now - ahead
+
+    world.wechat.say(CREATOR, CREATOR, "在吗，想合作", wechat_now())
+    run.poll()
+    [job] = world.jobs()
+    assert json.loads(job["meta"])["late"]                        # not known yet: it looks read late
+    world.mac_drafts(run, draft(reply_draft="在的，您说", message_kind="other"))
+    [packet] = world.prm_store.packets(("pending",))
+    run.prm.decide(packet["id"], "send")
+    run.prm.send_approved()
+    world.wechat.say(CREATOR, ME, "在的，您说", wechat_now())        # the bot's reply in WeChat ...
+    world.clock.now += 1
+    run.poll()                                                    # ... read back a second later
+    assert world.prm_store.packet(packet["id"])["outcome"] == "sent_confirmed"
+    assert run.prm.snapshot()["clock_skew_sec"] == ahead + 1
+    note = clock_note(ahead + 1)
+    assert "这台电脑的时间比微信快 3 小时" in note and note in world.prm_store.deal(1)["attention"]
+
+    world.wechat.say(CREATOR, CREATOR, "那样品怎么寄", wechat_now())   # live: on time now
+    run.poll()
+    job = world.jobs()[-1]
+    assert text_lines(job) == ["那样品怎么寄"] and "late" not in json.loads(job["meta"])
+    world.clock.now += 30
+    world.wechat.say(CREATOR, ME, "我来跟你说", wechat_now())          # an operator, by hand
+    run.poll()
+    deal = world.prm_store.deal(1)
+    assert deal["mode"] == "human" and deal["mode_until"] == world.clock.now + 120 * 60
+
+    # the clock is put right, and the bot sends something again (noted, then read back): measured again,
+    # it counts at once and the notice goes
+    world.clock.now -= ahead
+    ahead = 0
+    run.prm._note_sent(CREATOR, "收到，我确认一下马上回你")
+    world.wechat.say(CREATOR, ME, "收到，我确认一下马上回你", wechat_now())
+    run.poll()
+    assert run.prm.snapshot()["clock_skew_sec"] == 0 and "电脑的时间" not in world.prm_store.deal(1)["attention"]
+
+
+def test_a_pc_clock_set_13_hours_ahead_while_running_drafts_again_once_measured(world):
+    """win review F6: 13 hours ahead every live message was older than PRM_CATCHUP_HOURS: recorded, never
+    drafted.  Once a reply of the bot's is read back (here a draft approved after the clock was changed),
+    live messages are drafted as usual."""
+    world.register()
+    run = world.run()
+    world.wechat.say(CREATOR, CREATOR, "在吗", world.clock.now)
+    run.poll()
+    world.mac_drafts(run, draft(reply_draft="在的", message_kind="other"))
+    [packet] = world.prm_store.packets(("pending",))
+    ahead = 13 * HOUR
+    world.clock.now += ahead                                      # the time zone of this PC is changed
+    run.prm.decide(packet["id"], "send")
+    run.prm.send_approved()
+    world.wechat.say(CREATOR, ME, "在的", world.clock.now - ahead)
+    run.poll()
+    world.wechat.say(CREATOR, CREATOR, "样品寄了吗", world.clock.now - ahead)
+    run.poll()
+    job = world.jobs()[-1]
+    assert text_lines(job) == ["样品寄了吗"] and "late" not in json.loads(job["meta"])
+    assert not [e for e in world.events("creator_message") if e["detail"].get("missed")]
+    assert "快 13 小时" in world.prm_store.deal(1)["attention"]
+
+
+def test_the_clock_is_measured_only_from_the_bots_own_lines_read_back_promptly(bot):
+    """What a measurement is: this run's own line (text) matched in WeChat within CLOCK_SAMPLE_SEC of
+    noting it, never the Mac's edge lines (their time is Windows' event time); a read-back delayed by a
+    stalled database only adds to a sample, so the smallest of the last few counts; within
+    CLOCK_NOISE_SEC nothing is corrected; before any measurement nothing is."""
+    prm, now = bot.prm, bot.clock.now
+    own = {"chat_id": CREATOR, "msg_type": 1, "is_group": False}
+    assert prm._skew == 0.0
+    prm._note_sent(CREATOR, "好的")
+    prm.on_own_message({**own, "message_id": "a", "content": "好的", "timestamp": now - 2 * HOUR})
+    assert prm._skew == 2 * HOUR
+    bot.clock.now += 60
+    prm._note_sent(CREATOR, "收到")
+    prm.on_own_message({**own, "message_id": "b", "content": "收到", "timestamp": bot.clock.now - 2 * HOUR - 90})
+    assert prm._skew == 2 * HOUR                                  # 90 s late (a stalled read): the smaller counts
+    prm._note_sent(CREATOR, "嗯嗯")
+    bot.clock.now += CLOCK_SAMPLE_SEC + 1                         # read back too long after it was noted
+    prm.on_own_message({**own, "message_id": "c", "content": "嗯嗯", "timestamp": bot.clock.now})
+    assert prm._skew == 2 * HOUR
+    prm._note_sent(CREATOR, "好呀")                                 # the Mac: Windows' event time, not WeChat's
+    prm.on_own_message({**own, "content": "好呀", "timestamp": bot.clock.now, "edge_seen": True,
+                        "edge_event_id": 9})
+    assert prm._skew == 2 * HOUR
+    prm._note_sent(CREATOR, "行")                                  # the clock put right: 30 s is noise
+    prm.on_own_message({**own, "message_id": "d", "content": "行", "timestamp": bot.clock.now - 30})
+    assert prm._skew == 0.0
+
+
+def test_the_clock_notice_is_no_sign_of_life_for_the_clean_up(bot):
+    """The notice is about this PC, not the deal: it does not move the deal's ``updated_at`` (the 8.2
+    clean-up counts quiet days from it), and a creator taken off the list gets none."""
+    bot.prm.register("wxid_creator02", "小丽")
+    bot.prm.set_active(2, False)
+    before = {d["id"]: d["updated_at"] for d in bot.prm.store.deals()}
+    bot.clock.now += 10 * 86400
+    bot.prm._note_sent(CREATOR, "好的")
+    bot.prm.on_own_message({"chat_id": CREATOR, "message_id": "a", "content": "好的", "msg_type": 1, "is_group": False,
+                            "timestamp": bot.clock.now - HOUR})
+    first, second = bot.prm.store.deals()
+    assert "这台电脑的时间比微信快 1 小时" in first["attention"] and "电脑的时间" not in second["attention"]
+    assert {d["id"]: d["updated_at"] for d in (first, second)} == before
 
 
 def test_the_first_read_of_a_creator_registered_later_keeps_the_old_rule(world):
