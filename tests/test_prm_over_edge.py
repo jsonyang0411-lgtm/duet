@@ -186,6 +186,18 @@ def test_a_recall_windows_reports_puts_the_waiting_draft_before_a_person(mac, fa
     assert [e["kind"] for e in mac.prm.store.events(1)] == ["recall", "recall"]
 
 
+def test_a_recall_windows_found_rewritten_in_place_is_handled_the_same(mac, fake):
+    """微信原地改写的撤回（2026-10-28）：Windows 报的 chat_notice 多带 recalled_message_id（被撤回那条的编号），
+    老的 Mac 不认识这个字段也照样按文字处理。"""
+    _, packet = drafted(mac, fake)
+    [message] = [e for e in fake.events_list if e["type"] == "creator_message"]
+    event = fake.notice(CREATOR, '"小美" 撤回了一条消息', recalled_message_id=message["message_id"])
+    assert event["recalled_message_id"] == message["message_id"]
+    assert wait_for(lambda: mac.prm.store.packet(packet["id"])["needs_attention"])
+    assert mac.prm.store.packet(packet["id"])["reason"].startswith("达人撤回了一条消息")
+    assert wait_for(lambda: fake.acked_upto >= event["id"])
+
+
 def test_a_recall_handed_on_after_a_windows_restart_goes_by_when_it_was_written(mac, fake):
     """Windows 重启后补交的 chat_notice 带 written_at：按写的时间算晚了多久，不按转过来的时间。
     13 小时前的撤回超过 PRM_CATCHUP_HOURS，只当历史，等着的草稿不动；同一个事件流里后面那条刚写的照常处理。"""

@@ -134,3 +134,115 @@ def test_a_pat_in_a_listed_chat_is_a_chat_notice(win):
     assert win.events(P.OPERATOR_MESSAGE) == [], "我们拍她不是运营亲手回复"
     run.stop()
 
+
+# ── 撤回：微信 4 原地改写那一行 ─────────────────────────────────────────────
+#
+# 真机（2026-10-28）：达人撤回时微信不新写一行，而是把原来那一行原地改掉：同一个 local_id、同一个
+# create_time，local_type 从 1 变成 10000，内容换成下面的 XML（文字在 <content> 里，不在 <replacemsg>）。
+# 消息编号 md5(聊天|local_id|时间) 不变，机器人以前当成读过的，完全看不到撤回。
+
+REVOKE_XML = ('<?xml version="1.0"?><sysmsg type="revokemsg"><revokemsg><content>"小美" 撤回了一条消息</content>'
+              '<revoketime>0</revoketime></revokemsg></sysmsg>')
+OWN_REVOKE_XML = ('<?xml version="1.0"?><sysmsg type="revokemsg"><revokemsg><content>你撤回了一条消息</content>'
+                  '<revoketime>0</revoketime></revokemsg></sysmsg>')
+
+
+def take_back(wechat, chat, text, xml=REVOKE_XML):
+    """微信原地改写：同一个 local_id、同一个时间，类型改成 10000，内容换成撤回的 XML。"""
+    row = next(r for r in wechat.chats[chat] if r["message_content"] == text)
+    row.update(local_type=10000, message_content=xml)
+    return row
+
+
+def test_the_words_of_a_revokemsg_are_in_its_content():
+    assert _special_info(REVOKE_XML, 10000) == {"kind": "system", "title": '"小美" 撤回了一条消息'}, "不带 revoketime 的 0"
+    assert _special_info(OWN_REVOKE_XML, 10000)["title"] == "你撤回了一条消息"
+    old = ('<sysmsg type="revokemsg"><revokemsg><session>wxid_creator01</session><replacemsg><![CDATA["小美" '
+           '撤回了一条消息]]></replacemsg></revokemsg></sysmsg>')
+    assert _special_info(old, 10000)["title"] == '"小美" 撤回了一条消息', "replacemsg 照旧认"
+
+
+def test_her_recall_rewritten_in_place_holds_the_waiting_draft_for_a_person(world):
+    run, packet = waiting_draft(world)
+    world.clock.now += 30
+    take_back(world.wechat, CREATOR, "地址：上海市徐汇区某路1号")
+    stored = world.stored(CREATOR)
+    run.poll()
+    held = world.prm_store.packet(packet["id"])
+    assert held["status"] == "pending" and held["needs_attention"] and held["reason"].startswith("达人撤回了一条消息")
+    assert world.prm_store.deal(1)["attention"].startswith("达人撤回了一条消息")
+    [recall] = world.events("recall")
+    assert (recall["detail"]["by"], recall["actor"]) == ("creator", "creator")
+    assert len(world.jobs()) == 1 and world.sent == []
+    assert world.stored(CREATOR) == stored + 1, "撤回这一行用自己的编号入库（不被当成重复挡掉）"
+    run.poll()
+    run.poll()
+    assert len(world.events("recall")) == 1, "只报一次"
+
+
+def test_our_own_line_rewritten_in_place_is_an_operators_recall_and_takes_nothing_over(world):
+    run, packet = waiting_draft(world)
+    world.clock.now += 30
+    world.wechat.say(CREATOR, ME, "稍等我问一下", world.clock.now)
+    run.poll()
+    assert world.prm_store.deal(1)["mode"] == "human", "运营亲手回复，照旧接管"
+    world.prm_store.update_deal(1, world.clock.now, mode="copilot", mode_until=None)
+    take_back(world.wechat, CREATOR, "稍等我问一下", OWN_REVOKE_XML)
+    run.poll()
+    [recall] = world.events("recall")
+    assert recall["detail"]["by"] == "operator"
+    assert world.prm_store.deal(1)["mode"] == "copilot", "撤回不是运营又回了一句"
+    assert len(world.events("operator_message")) == 1 and len(world.jobs()) == 1
+
+
+def test_a_recall_of_a_line_the_burst_still_holds_hands_the_line_on_first(world):
+    """她发完马上撤回（连发合并还没交出去）：那一行先交出去，再交撤回，草稿等人看。"""
+    world.register()
+    run = world.run()
+    world.wechat.say(CREATOR, CREATOR, "电话 13800001111", world.clock.now)
+    run.poll(flush=False)
+    assert world.jobs() == [], "还在连发合并里"
+    take_back(world.wechat, CREATOR, "电话 13800001111")
+    run.poll(flush=False)
+    [job] = world.jobs()
+    assert text_lines(job) == ["电话 〈手机1〉"]
+    assert [e["detail"]["by"] for e in world.events("recall")] == ["creator"]
+    world.mac_drafts(run, draft(reply_draft="收到", message_kind="other", slots={}))
+    [packet] = world.prm_store.packets(("pending",))
+    assert packet["needs_attention"] and packet["reason"].startswith("达人撤回了一条消息")
+
+
+def test_only_lines_the_bot_read_lately_in_a_watched_chat_are_looked_at(world):
+    """撤回只能在 2 分钟内做：只看最近几分钟读到的行（RECALL_WINDOW_SEC），只看登记达人的私聊。"""
+    from src.wechat.wcdb_backend import RECALL_WINDOW_SEC
+    world.register()
+    run = world.run(private_chats="*")                              # 路人的私聊也在读（只记录）
+    world.wechat.say(CREATOR, CREATOR, "很早的一句", world.clock.now - RECALL_WINDOW_SEC - 60)
+    world.wechat.say("wxid_stranger", "wxid_stranger", "路人的话", world.clock.now)
+    run.poll()
+    assert world.stored("wxid_stranger") == 1
+    take_back(world.wechat, CREATOR, "很早的一句")
+    take_back(world.wechat, "wxid_stranger", "路人的话", '<sysmsg type="revokemsg"><revokemsg><content>"路人" 撤回了一条消息'
+                                                     '</content></revokemsg></sysmsg>')
+    run.poll()
+    assert world.events("recall") == [], "早就不能撤回的行不看"
+    assert world.stored("wxid_stranger") == 1, "不是达人的私聊不看"
+
+
+def test_a_recall_in_a_listed_chat_is_a_chat_notice_with_the_recalled_id(win):
+    run = EdgeRun(win)
+    win.wechat.say(CREATOR, CREATOR, "你好", win.now)
+    win.wechat.say(CREATOR, ME, "在的", win.now + 1)
+    run.poll()
+    [hers] = win.events(P.CREATOR_MESSAGE)
+    [ours] = win.events(P.OPERATOR_MESSAGE)
+    take_back(win.wechat, CREATOR, "你好")
+    take_back(win.wechat, CREATOR, "在的", OWN_REVOKE_XML)
+    run.poll()
+    run.poll()
+    notices = win.events(P.CHAT_NOTICE)
+    assert [n["text"] for n in notices] == ['"小美" 撤回了一条消息', "你撤回了一条消息"], "每个只报一次"
+    assert [n["recalled_message_id"] for n in notices] == [hers["message_id"], ours["message_id"]]
+    assert {n["message_id"] for n in notices}.isdisjoint({hers["message_id"], ours["message_id"]}), "自己的编号"
+    assert win.lines(P.CREATOR_MESSAGE) == ["你好"] and len(win.events(P.OPERATOR_MESSAGE)) == 1
+    run.stop()

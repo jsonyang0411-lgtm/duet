@@ -4,6 +4,7 @@
 - **版本**：`protocol: 1`。2026-10-26 定稿，已经并入同事团队第二轮的 14 条意见（见 `prm-merge-reply-2.md`）。
   2026-10-27 在 v1 里加了两样，都是只增不改，版本号不变：事件 `friend_added`（第 4.1 节）和 `/edge/health` 的 `db_id`（第 3.1 节）。
   2026-10-28 又加了一样，也是只增不改：Windows 重启后补交停机期间的消息，这些事件带 `written_at`（第 4.1 节）。
+  同一天还加了 `chat_notice` 的 `recalled_message_id`（可选，第 4.1 节：微信原地改写被撤回的那一行）。
   Mac 端遇到不认识的事件类型照样往下传、照样确认，不认识的字段不用管。
 - **实现**：
   - Windows 端由我们做，在公司仓库的 `wechat-edge` 分支（从 `prm-copilot` 开出来）。
@@ -180,8 +181,8 @@ GET  /edge/sends/<send_id>
 |---|---|---|
 | `creator_message` | `chat_id`、`message_id`、`msg_type`、`text`、`quote`（可选）、`files` | 名单里的达人发来一条消息 |
 | `operator_message` | `chat_id`、`message_id`、`msg_type`、`text` | 这个微信号在达人私聊里发了一条，而且和发送记录对不上（运营亲手发的，电脑上或手机上） |
-| `chat_notice` | `chat_id`、`text` | 私聊里的系统提示（消息类型 10000、10002：撤回、红包和转账的提示…；还有拍一拍，不管谁拍谁：微信 4 里它是 49 类 appmsg，`local_type` 的高 32 位是 62，2026-10-28 起按系统提示报，以前误报成 `creator_message`），比如「对方撤回了一条消息」「"小美" 拍了拍我」，原样报。Mac 端的 PRM 按文字认撤回：达人撤回的，还没发出去的草稿改成人审、合作单上写提醒；「你撤回了一条消息」（运营撤回）只记一笔；别的提示不起草 |
-| `creator_message_recalled` | `chat_id`、`message_id` | **预留，v1 不发**。摸清微信 4 撤回在数据库里长什么样以后再实现；在那之前，撤回会以 `chat_notice` 报 |
+| `chat_notice` | `chat_id`、`text`、`recalled_message_id`（可选） | 私聊里的系统提示（消息类型 10000、10002：撤回、红包和转账的提示…；还有拍一拍，不管谁拍谁：微信 4 里它是 49 类 appmsg，`local_type` 的高 32 位是 62，2026-10-28 起按系统提示报，以前误报成 `creator_message`），比如「对方撤回了一条消息」「"小美" 拍了拍我」，原样报。Mac 端的 PRM 按文字认撤回：达人撤回的，还没发出去的草稿改成人审、合作单上写提醒；「你撤回了一条消息」（运营撤回）只记一笔；别的提示不起草 |
+| `creator_message_recalled` | `chat_id`、`message_id` | **预留，v1 不发**。撤回照旧以 `chat_notice` 报（带 `recalled_message_id`，见下面） |
 | `send_result` | `send_id`、`status`、`error` | 一条发送有了结果：`sent`、`failed`、`expired`、`indeterminate` |
 | `send_seen` | `send_id`、`delay_s` | 发出去的这条在微信里读回来了 |
 | `send_unseen` | `send_id`、`window_s` | 读回时限过了还没对上（第 5 节） |
@@ -192,6 +193,7 @@ GET  /edge/sends/<send_id>
 - `written_at`（2026-10-28 加的，可选）：只有 Windows 重启后补交的 `creator_message` / `operator_message` / `chat_notice` 带，
   是这条消息在微信里写的时间（`at` 是转出来的时间）。Mac 按它算晚了多久（Mac 的 PRM_CATCHUP_HOURS 以内起草、一律先审，
   更早的只记录、提醒运营）。补交的规则见第 5 节「Windows 停机期间的消息」。
+- `recalled_message_id`（2026-10-28 加的，可选）：只有 `chat_notice` 带。微信 4 撤回一条消息时不新写一行，而是把原来那一行原地改掉（同一个编号、同一个时间，类型改成 10000，内容换成「"小美" 撤回了一条消息」，真机 2026-10-28）。Windows 回头看名单私聊里最近几分钟读过的行，发现被改成了撤回，就报一条 `chat_notice`：它有自己的 `message_id`，`recalled_message_id` 是被撤回那条当时报的 `message_id`（`creator_message` 或 `operator_message` 的；我们发的读回来、报的是 `send_seen` 的，Mac 那边没有这个编号）。运营撤回（「你撤回了一条消息」）也一样。Mac 照旧按文字认谁撤回的，这个字段留着以后用。
 - 同一个私聊的事件按时间顺序给。
 - **对方通过我们的好友申请时**，微信会以对方的名义在私聊里写一句「我通过了你的朋友验证请求，现在我们可以开始聊天了」。这是微信的提示，不是达人说的话：在名单里的私聊按 `chat_notice` 报，不报 `creator_message`。
 
@@ -375,7 +377,8 @@ EDGE_KEEP_DAYS=7
 
 - **Windows 停机期间达人发的消息**：2026-10-28 做了（第 5 节「Windows 停机期间的消息」），还要在真机上确认
   重启后微信数据库里能读到停机期间的哪些消息（电脑微信没开时手机上收到的，开机后会不会同步进来）。
-- `creator_message_recalled`：要先在 Windows 真机上摸清撤回在数据库里的样子。
+- `creator_message_recalled`：撤回在数据库里的样子已经摸清（原地改写，2026-10-28），现在以 `chat_notice` 加 `recalled_message_id` 报；要不要改成单独的事件，等 Mac 那边用得上再说。
+- 机器人停着的时候被撤回的消息：重启后看到的已经是撤回提示，和处理过的那条同一个编号，现在不报。
 - 识别风控验证窗口（`wechat: verify`）。
 - TLS。
 - 群聊里的达人。

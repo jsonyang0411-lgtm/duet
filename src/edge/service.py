@@ -209,6 +209,13 @@ class EdgeService:
         sent_at = int(float(msg.get("timestamp", 0) or 0))
         return {"written_at": sent_at} if msg.get("_catchup") and sent_at else {}
 
+    @staticmethod
+    def _recalled(msg: dict) -> dict:
+        """A recall WeChat wrote over the line it took back (the backend's ``recalled_id``): the
+        ``message_id`` that line was reported under (``recalled_message_id`` of the chat_notice)."""
+        recalled = str(msg.get("recalled_id") or "").strip()
+        return {"recalled_message_id": recalled} if recalled else {}
+
     def handle(self, msg: dict) -> bool:
         """The route step's call: True when this is a listed creator's private message (it
         is then forwarded, silently; never answered here)."""
@@ -223,7 +230,8 @@ class EdgeService:
             return True
         message_id = str(msg.get("message_id") or "") or None
         if T.is_notice(msg) or is_friend_notice(msg):         # 「我通过了你的朋友验证请求…」 is WeChat's
-            self._emit(P.CHAT_NOTICE, chat_id, message_id, text=T.notice_text(msg), **self._written(msg))
+            self._emit(P.CHAT_NOTICE, chat_id, message_id, text=T.notice_text(msg), **self._written(msg),
+                       **self._recalled(msg))
             return True
         files = self._collect_files(msg)
         fields = {"msg_type": T.msg_type_of(msg), "text": T.message_text(msg), **self._written(msg)}
@@ -293,7 +301,8 @@ class EdgeService:
             return                                            # history (a chat read for the first time)
         message_id = str(msg.get("message_id") or "") or None
         if T.is_notice(msg) or is_friend_notice(msg):
-            self._emit(P.CHAT_NOTICE, chat_id, message_id, text=T.notice_text(msg), **self._written(msg))
+            self._emit(P.CHAT_NOTICE, chat_id, message_id, text=T.notice_text(msg), **self._written(msg),
+                       **self._recalled(msg))
             return
         matched, send_id = self._match_own(chat_id, msg, now)
         if matched:
