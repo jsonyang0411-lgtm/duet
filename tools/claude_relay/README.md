@@ -240,6 +240,7 @@ Mac：同一个 CLI 带 --execute，只发一次（执行台账：同一个批�
    python3 tools/claude_relay/worker.py --sync-products --platforms dy
    ```
    写出 `prm_workspace/kb/products.md`（给 Claude 看：商品 ID、标题、SKU、价格）和 `kb/products.json`（给代码核对）。**平台动作的商品必须在目录里**，SKU 和专属价也按目录核对；没有目录就不预览。聚水潭不单独出目录：寄样单寄的是抖店 / 小红书店的商品，用这两家的目录（聚水潭只能按标题搜店铺商品，标题也取自目录）。小红书读 `items --tab shelf --all` + `item`，抖音读 `fxg products` + `fxg sku-prices --raw`（要原始数据里 SKU 的商家编码），淘宝读万相台选品列表 `alimama items`（没有 SKU）。某个平台这次没读成，保留上一次的列表并在 md 里注明。商品有变化就再跑一次（可以放进每天的定时任务）。
+   同一次还把每款的主图下到 `prm_workspace/assets/products/<平台>-<商品 ID>.jpg`（抖店行的 `img`、千帆行的 `images`，要 douyin-engineering / xiaohongshu-engineering 的 `product-images` 分支或之后的版本；旧版本没有图片字段，目录照常、只是没有图），`products.md` 最后一列「款式图」写着路径，Claude 要发图就把它写进 `attachments_to_send`。只下平台自己图片 CDN 上的地址、不走系统代理；地址没变的不重下，下架了的款它的图删掉。第一次全部下完约 1800 张、500 MB。
 4. `python3 tools/claude_relay/worker.py --check` 多两行：`platform actions: dy=…; node …` 和商品目录的同步时间。
 
 #### 六种动作

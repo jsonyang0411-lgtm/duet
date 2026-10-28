@@ -1961,9 +1961,13 @@ def sync_products(settings: dict, only: str = "") -> int:
     if unknown:
         print(f"商品目录只从 {', '.join(platforms.CATALOG_PLATFORMS)} 读，不认识：{', '.join(unknown)}")
         return 2
+    previous = platforms.load_catalog(workspace)
     with _cli_lock():
-        catalog = platforms.sync_catalog(cfg, wanted, previous=platforms.load_catalog(workspace),
-                                         progress=lambda line: print(line, flush=True))
+        catalog = platforms.sync_catalog(cfg, wanted, previous=previous, progress=lambda line: print(line, flush=True))
+    # 款式图下到 assets/products/（起草的 Claude 只能从 assets/ 挑文件发给达人）
+    images = platforms.fetch_images(workspace, catalog, previous=previous, progress=lambda line: print(line, flush=True))
+    print(f"款式图：新下 {images['fetched']} 张，沿用 {images['kept']} 张，没下成 {images['failed']} 张，"
+          f"删掉下架的 {images['removed']} 张")
     paths = platforms.write_catalog(workspace, catalog)
     for platform, part in catalog["platforms"].items():
         state = "ok" if part.get("ok") else f"没读成：{part.get('error')}"

@@ -763,6 +763,147 @@ def test_the_catalogue_is_read_from_the_three_platforms(node, cfg, tmp_path):
         assert "--execute" not in argv and "--execute=true" not in argv
 
 
+JPEG = b"\xff\xd8\xff\xe0" + b"0" * 20
+PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 20
+DY_IMG = "https://p3-aio.ecombdimg.com/obj/ecom-shop-material/jpeg_m_test_main"
+XHS_IMG = "http://qimg.xiaohongshu.com/material_space/test-main"
+
+
+@pytest.mark.parametrize("platform, raw, expected", [
+    ("dy", DY_IMG, DY_IMG),
+    ("xhs", XHS_IMG, XHS_IMG.replace("http://", "https://")),     # 千帆给 http，换成 https（两种都试过能下）
+    ("dy", "https://ecombdimg.com.evil.example/x.jpg", ""),         # 后缀要在主机名的末尾
+    ("dy", "https://evil.example/p3-aio.ecombdimg.com/x.jpg", ""),
+    ("xhs", DY_IMG, ""),                                            # 别家的 CDN 不认
+    ("tb", DY_IMG, ""),                                             # 淘宝没有图片来源
+    ("dy", "ftp://p3-aio.ecombdimg.com/x.jpg", ""),
+    ("dy", "https://p3-aio.ecombdimg.com/x\n.jpg", ""),
+    ("dy", None, ""), ("dy", 42, ""),
+])
+def test_only_the_platforms_own_image_cdn_is_taken(platform, raw, expected):
+    assert platforms.image_url(platform, raw) == expected
+
+
+def test_the_catalogue_keeps_each_items_main_picture(node, cfg, tmp_path):
+    node.rules([
+        rule(["items", "--tab=shelf"], {"site": "ark", "complete": True, "items": [
+            {"item_id": XHS_ITEM, "item_name": "防晒霜", "min_price": 9900,
+             "images": [{"link": XHS_IMG, "width": 1440}, {"link": XHS_IMG + "-2"}]}]}),
+        rule(["item", f"--item-id={XHS_ITEM}"], {"site": "ark", "notFound": [], "items": []}),
+        rule(["fxg", "products"], {"site": "fxg", "command": "products", "complete": True, "rows": [
+            {"productId": DY_ITEM, "name": "测试主品", "priceLower": 1999, "img": DY_IMG, "pics": [DY_IMG]},
+            {"productId": DY_ITEM2, "name": "没图的", "priceLower": 999, "img": "https://evil.example/x.jpg"}]}),
+        rule(["fxg", "sku-prices", "--raw"], {"site": "fxg", "command": "sku-prices", "rows": []}),
+    ])
+    cat = platforms.sync_catalog(cfg, ["xhs", "dy"])
+    assert cat["platforms"]["xhs"]["items"][0]["image"] == XHS_IMG.replace("http://", "https://")
+    dy = cat["platforms"]["dy"]["items"]
+    assert dy[0]["image"] == DY_IMG and "image" not in dy[1]
+    ws = tmp_path / "ws"
+    (ws / "kb").mkdir(parents=True)
+    fetched = []
+    counts = platforms.fetch_images(ws, cat, fetch=lambda url, platform: fetched.append((url, platform)) or JPEG)
+    assert counts == {"fetched": 2, "kept": 0, "failed": 0, "removed": 0}
+    assert sorted(fetched) == sorted([(DY_IMG, "dy"), (XHS_IMG.replace("http://", "https://"), "xhs")])
+    assert (ws / "assets/products" / f"dy-{DY_ITEM}.jpg").read_bytes() == JPEG
+    platforms.write_catalog(ws, cat)
+    md = (ws / "kb/products.md").read_text(encoding="utf-8")
+    assert f"| {DY_ITEM} | 测试主品 | 19.99 |  | assets/products/dy-{DY_ITEM}.jpg |" in md
+    assert f"| {DY_ITEM2} | 没图的 | 9.99 |  | — |" in md and "attachments_to_send" in md
+    assert platforms.load_catalog(ws)["platforms"]["xhs"]["items"][0]["image_file"] == f"assets/products/xhs-{XHS_ITEM}.jpg"
+
+
+def _one(platform, item_id, image, **extra):
+    return {"platforms": {platform: {"items": [{"id": item_id, "image": image, **extra}], "notes": []}}}
+
+
+def test_a_picture_is_fetched_again_only_when_its_address_changed(tmp_path):
+    calls = []
+    fetch = lambda url, platform: calls.append(url) or JPEG                        # noqa: E731
+    first = _one("dy", DY_ITEM, DY_IMG)
+    platforms.fetch_images(tmp_path, first, fetch=fetch)
+    again = _one("dy", DY_ITEM, DY_IMG)
+    assert platforms.fetch_images(tmp_path, again, previous=first, fetch=fetch)["kept"] == 1 and calls == [DY_IMG]
+    assert again["platforms"]["dy"]["items"][0]["image_file"] == f"assets/products/dy-{DY_ITEM}.jpg"
+    moved = _one("dy", DY_ITEM, DY_IMG + "-new")
+    assert platforms.fetch_images(tmp_path, moved, previous=again,
+                                  fetch=lambda url, platform: calls.append(url) or PNG)["fetched"] == 1
+    assert calls[-1] == DY_IMG + "-new"
+    assert (tmp_path / "assets/products" / f"dy-{DY_ITEM}.png").is_file()           # the format from the bytes
+    assert not (tmp_path / "assets/products" / f"dy-{DY_ITEM}.jpg").exists()        # the old file went
+
+
+def test_a_picture_that_does_not_come_keeps_the_last_one_or_has_none(tmp_path):
+    first = _one("dy", DY_ITEM, DY_IMG)
+    platforms.fetch_images(tmp_path, first, fetch=lambda url, platform: JPEG)
+
+    def broken(url, platform):
+        raise RuntimeError("下载不了：timed out")
+
+    moved = _one("dy", DY_ITEM, DY_IMG + "-new")
+    lines = []
+    counts = platforms.fetch_images(tmp_path, moved, previous=first, fetch=broken, progress=lines.append)
+    assert counts["failed"] == 1 and moved["platforms"]["dy"]["items"][0]["image_file"] == f"assets/products/dy-{DY_ITEM}.jpg"
+    assert "没下成" in lines[0] and "没下载成" in moved["platforms"]["dy"]["notes"][0]
+    assert (tmp_path / "assets/products" / f"dy-{DY_ITEM}.jpg").is_file()
+    new = _one("xhs", XHS_ITEM, XHS_IMG)
+    assert platforms.fetch_images(tmp_path, new, fetch=lambda url, platform: b"<html>not a picture</html>")["failed"] == 1
+    assert "image_file" not in new["platforms"]["xhs"]["items"][0]
+    odd = _one("dy", "../../kb/x", DY_IMG)                     # an id that is not letters and digits never names a file
+    assert platforms.fetch_images(tmp_path, odd, fetch=lambda url, platform: JPEG)["fetched"] == 0
+    assert "image_file" not in odd["platforms"]["dy"]["items"][0]
+    assert not (tmp_path / "kb").exists()
+
+
+def test_pictures_of_items_no_longer_listed_go_and_nothing_else_does(tmp_path):
+    folder = tmp_path / "assets/products"
+    folder.mkdir(parents=True)
+    for name in (f"dy-{DY_ITEM2}.jpg", "运营自己放的.jpg", "dy-notes.txt"):
+        (folder / name).write_bytes(JPEG)
+    counts = platforms.fetch_images(tmp_path, _one("dy", DY_ITEM, DY_IMG), fetch=lambda url, platform: JPEG)
+    assert counts["removed"] == 1
+    assert sorted(p.name for p in folder.iterdir()) == sorted([f"dy-{DY_ITEM}.jpg", "运营自己放的.jpg", "dy-notes.txt"])
+
+
+def test_fetch_image_refuses_a_redirect_off_the_cdn_and_a_file_too_large(monkeypatch):
+    import urllib.request
+
+    class Answer:
+        def __init__(self, url, body):
+            self.url, self.body = url, body
+
+        def geturl(self):
+            return self.url
+
+        def read(self, n):
+            return self.body[:n]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    answers = []
+
+    class Opener:
+        def open(self, request, timeout):
+            assert timeout == platforms.IMAGE_TIMEOUT_SEC
+            return answers.pop(0)
+
+    seen = []
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *handlers: seen.append(handlers) or Opener())
+    answers.append(Answer(DY_IMG, JPEG))
+    assert platforms.fetch_image(DY_IMG, "dy") == JPEG
+    assert isinstance(seen[0][0], urllib.request.ProxyHandler) and seen[0][0].proxies == {}   # no system proxy
+    answers.append(Answer("https://evil.example/x.jpg", JPEG))
+    with pytest.raises(RuntimeError, match="CDN"):
+        platforms.fetch_image(DY_IMG, "dy")
+    answers.append(Answer(DY_IMG, b"\xff" * (platforms.IMAGE_MAX_BYTES + 5)))
+    with pytest.raises(RuntimeError, match="MB"):
+        platforms.fetch_image(DY_IMG, "dy")
+
+
 def test_a_platform_that_fails_keeps_its_previous_list(node, cfg):
     node.rules([rule(["fxg", "products"], stderr="[NOT_LOGGED_IN] login page\n", exit=77)])
     cat = platforms.sync_catalog(cfg, ["dy"], previous=catalog())
