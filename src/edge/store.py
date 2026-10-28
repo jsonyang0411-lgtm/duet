@@ -264,6 +264,21 @@ class EdgeStore:
                 " AND sent_at IS NOT NULL ORDER BY sent_at", (P.SENT,)).fetchall()
         return [_send_view(r) for r in rows]
 
+    def last_activity(self, chat_id: str) -> Optional[float]:
+        """When this chat was last handled: its newest message event (creator's, operator's,
+        notice) or our newest send there (sent, or read back).  None: nothing of it is kept.
+        A line WeChat shows with a later time came in while the bot was not reading (the
+        restart catch-up, ``EdgeService.catchup_floor``)."""
+        with self._lock:
+            events = self._conn.execute(
+                "SELECT MAX(at) FROM edge_events WHERE chat_id = ? AND type IN (?, ?, ?)",
+                (chat_id, P.CREATOR_MESSAGE, P.OPERATOR_MESSAGE, P.CHAT_NOTICE)).fetchone()[0]
+            sends = self._conn.execute(
+                "SELECT MAX(MAX(COALESCE(sent_at, 0), COALESCE(seen_at, 0))) FROM edge_sends WHERE chat_id = ?",
+                (chat_id,)).fetchone()[0]
+        found = [float(v) for v in (events, sends) if v]
+        return max(found) if found else None
+
     def unconfirmed(self, chat_id: str, since: float) -> list[dict]:
         """Sends to this chat that went out after ``since`` and were not read back (newest first)."""
         with self._lock:

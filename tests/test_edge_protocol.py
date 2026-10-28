@@ -672,3 +672,89 @@ def test_uploads_go_block_by_block(tmp_path):
     (tmp_path / "b.txt").write_bytes(b"abcd")
     client.upload(tmp_path / "b.txt")
     assert seen == [(True, "3"), (True, "4")]
+
+
+# ── an answer that is not the edge's (2026-10-28) ─────────────────────────
+
+class Odd:
+    """A server that answers every request with ``(status, headers, body)``: a proxy's page,
+    a cut-off answer."""
+
+    def __init__(self, status, headers, body):
+        import http.server
+
+        answer = (status, headers, body)
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                status, headers, body = answer
+                self.send_response(status)
+                for name, value in headers.items():
+                    self.send_header(name, value)
+                self.end_headers()
+                self.wfile.write(body)
+                self.wfile.flush()
+                self.close_connection = True
+
+            do_POST = do_GET
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.client = EdgeClient(f"http://127.0.0.1:{self.server.server_address[1]}", "t" * 40, timeout=5)
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@pytest.mark.parametrize("headers, body", [
+    ({"Content-Type": "text/html"}, b"<html><body>Proxy error</body></html>"),           # a proxy's page
+    ({"Content-Type": "application/json", "Content-Length": "200"}, b'{"events": [{"id": 1'),  # cut off
+    ({"Content-Type": "application/json"}, b'[1, 2]'),                                    # not an object
+])
+def test_an_answer_that_is_not_the_edges_is_an_os_error(headers, body):
+    from src.edge.client import EdgeBadAnswer
+    odd = Odd(200, headers, body)
+    try:
+        with pytest.raises(EdgeBadAnswer) as caught:
+            odd.client.events(after=0, wait=0)
+        assert isinstance(caught.value, OSError), "调用方按网络出错处理：退避重试"
+    finally:
+        odd.close()
+
+
+def test_a_proxys_error_page_is_still_an_edge_error_with_its_status():
+    odd = Odd(502, {"Content-Type": "text/html"}, b"<html>Bad Gateway</html>")
+    try:
+        with pytest.raises(EdgeError) as caught:
+            odd.client.health()
+        assert caught.value.status == 502 and caught.value.code == ""
+    finally:
+        odd.close()
+
+
+def test_a_download_cut_short_is_not_kept(tmp_path):
+    from src.edge.client import EdgeBadAnswer
+    odd = Odd(200, {"Content-Type": "image/jpeg", "Content-Length": "1000"}, b"\xff\xd8" + b"x" * 98)
+    try:
+        dest = tmp_path / "图片-1.jpg"
+        with pytest.raises(EdgeBadAnswer):
+            odd.client.download(7, 1, dest)
+        assert not dest.exists() and not (tmp_path / "图片-1.jpg.part").exists()
+    finally:
+        odd.close()
+
+
+def test_a_download_shorter_than_the_events_size_is_not_kept(side, tmp_path):
+    from src.edge.client import EdgeBadAnswer
+    side.client.put_parties(1, [CREATOR])
+    side.creator_says(CREATOR, "[图片]", files=[("图片-1.jpg", b"\xff\xd8picture")], msg_type=3)
+    [event] = drain(side)
+    dest = tmp_path / "图片-1.jpg"
+    with pytest.raises(EdgeBadAnswer):
+        side.client.download(event["id"], 1, dest, size=event["files"][0]["size"] + 5)
+    assert not dest.exists()
+    assert side.client.download(event["id"], 1, dest, size=event["files"][0]["size"]) == len(b"\xff\xd8picture")

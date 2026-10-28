@@ -2,8 +2,10 @@
 
 Standard library only, Python 3.9+.  Proxies are ignored: a proxy on the Mac (Clash and
 the like) must not carry LAN traffic.  Network errors (``OSError``: the Windows PC is off,
-Wi-Fi changed) are left to the caller, who retries with a back-off; refusals of the edge
-are ``EdgeError`` with the HTTP status and the edge's reason.  When the Mac and Windows are
+Wi-Fi changed) are left to the caller, who retries with a back-off; an answer that is not
+the edge's (cut off, or a proxy's HTML page) and a download cut short are ``EdgeBadAnswer``,
+an ``OSError`` too; refusals of the edge are ``EdgeError`` with the HTTP status and the
+edge's reason.  When the Mac and Windows are
 not on one LAN, the address is Windows' Tailscale one, the same everywhere (cross-network.md).
 
 The usual loop::
@@ -33,6 +35,7 @@ Sending::
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import os
@@ -56,6 +59,11 @@ class EdgeError(Exception):
         super().__init__(f"HTTP {status} {self.code}: {self.detail}")
 
 
+class EdgeBadAnswer(OSError):
+    """The answer was not the edge's: cut off, not JSON (a proxy's page), or a download shorter
+    than its ``Content-Length``.  An ``OSError``: the caller treats it as the network's trouble."""
+
+
 class EdgeClient:
     def __init__(self, base_url: str, token: str, timeout: float = 15.0):
         self.base_url = base_url.rstrip("/")
@@ -76,8 +84,8 @@ class EdgeClient:
         except urllib.error.HTTPError as e:
             try:
                 body = json.loads(e.read().decode("utf-8") or "{}")
-            except (ValueError, UnicodeDecodeError):
-                body = {}
+            except (ValueError, UnicodeDecodeError, OSError, http.client.IncompleteRead):
+                body = {}                                  # a proxy's page, or cut off: the status still tells
             raise EdgeError(e.code, body) from None
 
     def _call(self, method: str, path: str, body: Optional[dict] = None,
@@ -85,8 +93,24 @@ class EdgeClient:
         data = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
         headers = {"Content-Type": "application/json"} if data is not None else None
         with self._open(method, path, data, headers, timeout) as response:
+            return self._answer(response, f"{method} {path.split('?')[0]}")
+
+    @staticmethod
+    def _answer(response, what: str) -> dict:
+        """The JSON object of an answer; ``EdgeBadAnswer`` when it is cut off or not the edge's."""
+        try:
             raw = response.read()
-        return json.loads(raw.decode("utf-8")) if raw else {}
+        except http.client.IncompleteRead as e:
+            raise EdgeBadAnswer(f"{what}: the answer was cut off ({e})") from None
+        if not raw:
+            return {}
+        try:
+            answer = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            raise EdgeBadAnswer(f"{what}: the answer is not the edge's ({len(raw)} bytes, starting {raw[:40]!r})") from None
+        if not isinstance(answer, dict):
+            raise EdgeBadAnswer(f"{what}: the answer is not a JSON object")
+        return answer
 
     # ── the protocol ──────────────────────────────────────────────────────
 
@@ -104,13 +128,30 @@ class EdgeClient:
         """The Mac has stored every event up to ``upto`` (and its files): Windows may let them go."""
         return self._call("POST", "/edge/events/ack", {"upto": int(upto)})
 
-    def download(self, event_id: int, n: int, dest) -> int:
-        """Save attachment ``n`` of an event to ``dest`` (written through a .part file); its size."""
+    def download(self, event_id: int, n: int, dest, size: Optional[int] = None) -> int:
+        """Save attachment ``n`` of an event to ``dest`` (written through a .part file); its size.
+        Fewer bytes than the answer's ``Content-Length`` (or than ``size``, the event's ``files``
+        entry) is ``EdgeBadAnswer`` and ``dest`` is not written: a cut-off file is never a file."""
         dest = os.fspath(dest)
         part = dest + ".part"
-        with self._open("GET", f"/edge/events/{int(event_id)}/files/{int(n)}", timeout=self.timeout * 8) as r:
-            with open(part, "wb") as out:
-                shutil.copyfileobj(r, out, 1024 * 1024)
+        try:
+            with self._open("GET", f"/edge/events/{int(event_id)}/files/{int(n)}", timeout=self.timeout * 8) as r:
+                length = r.headers.get("Content-Length")
+                with open(part, "wb") as out:
+                    shutil.copyfileobj(r, out, 1024 * 1024)
+            got = os.path.getsize(part)
+            for expected, what in ((length, "Content-Length"), (size, "the event's size")):
+                if expected not in (None, "") and got != int(expected):
+                    raise EdgeBadAnswer(f"attachment {int(n)} of event {int(event_id)}: {got} bytes, "
+                                        f"{what} says {int(expected)}")
+        except (OSError, http.client.IncompleteRead) as e:
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+            if isinstance(e, http.client.IncompleteRead):
+                raise EdgeBadAnswer(f"attachment {int(n)} of event {int(event_id)} was cut off ({e})") from None
+            raise
         os.replace(part, dest)
         return os.path.getsize(dest)
 
@@ -133,7 +174,7 @@ class EdgeClient:
             with self._open("POST", f"/edge/uploads?{urlencode({'name': filename})}", data=f,
                             headers={"Content-Length": str(size), "Content-Type": "application/octet-stream"},
                             timeout=self.timeout * 8) as response:
-                return json.loads(response.read().decode("utf-8"))
+                return self._answer(response, "POST /edge/uploads")
 
     def upload_bytes(self, data: bytes, name: str) -> dict:
         """``upload`` of bytes in memory, also sent block by block (a slow link does not hit the
@@ -141,7 +182,7 @@ class EdgeClient:
         with self._open("POST", f"/edge/uploads?{urlencode({'name': name})}", data=io.BytesIO(bytes(data)),
                         headers={"Content-Length": str(len(data)), "Content-Type": "application/octet-stream"},
                         timeout=self.timeout * 8) as response:
-            return json.loads(response.read().decode("utf-8"))
+            return self._answer(response, "POST /edge/uploads")
 
     def send(self, send_id: str, chat_id: str, text: str = "", uploads: Iterable[str] = (),
              ttl_sec: int = P.TTL_DEFAULT_SEC) -> dict:

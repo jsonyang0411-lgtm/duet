@@ -813,13 +813,18 @@ class PrmService:
         return False, None
 
     def on_send_failed(self, chat_id: str, text: str, why: str, *, digest: str = "",
-                       sent_at: Optional[float] = None) -> None:
+                       sent_at: Optional[float] = None, file: bool = False) -> None:
         """Mac 端：Windows 报这条没发出去（失败、过期、不确定）。对应的草稿从「已发出」改成「没发出去」，
         运营在待审批页能看到原因；「稍等」这类不是草稿的，只记日志。
 
         ``digest``：Mac 重启以前发的，edge 后端只留着发出去的原文的 sha256（原文不写盘），``text`` 是空的：
-        按摘要对草稿（换回号码以后的全文），从 ``sent_at`` 前后找起，不受 OWN_MATCH_SEC 限制。"""
+        按摘要对草稿（换回号码以后的全文），从 ``sent_at`` 前后找起，不受 OWN_MATCH_SEC 限制。
+        ``file``：没发出去的是素材文件，``sent_at`` 是请 Windows 发它的时间：找那之后最先发完、带文件的草稿
+        （文字可能已经发出去、读回了，照样标红，原因里写明文字发了）。"""
         now = self._clock()
+        if file:
+            self._file_send_failed(chat_id, why, sent_at, now)
+            return
         if digest:
             self._send_failed_by_digest(chat_id, digest, why, sent_at, now)
             return
@@ -841,6 +846,25 @@ class PrmService:
                     logger.warning("PRM: packet %d was not sent by Windows: %s", packet["id"], why)
                 return
         logger.warning("PRM: a send to party %d failed (%s); no waiting draft matches it", party["id"], why)
+
+    def _file_send_failed(self, chat_id: str, why: str, sent_at: Optional[float], now: float) -> None:
+        party = self._store.party_by_wxid(chat_id)
+        if party is None:
+            return
+        asked = sent_at or now - RESTART_FAIL_SEC
+        # 一条草稿先发文字、再一个个发文件，都交给 Windows 以后才记 sent_at：文件请求的时间不晚于它
+        packets = [p for p in self._store.sent_since(chat_id, asked - 1)
+                   if p["attachments"] and p["status"] == SENT]
+        if not packets:
+            logger.warning("PRM: a file send to party %d failed (%s); no sent draft with files matches it",
+                           party["id"], why)
+            return
+        packet = min(packets, key=lambda p: float(p["sent_at"] or 0))
+        error = f"素材文件没发出去（{why}）"
+        if any(str(packet.get(k) or "").strip() for k in ("final_text", "text")):
+            error += "；文字已经发出去了，只要在微信里补发文件"
+        if self._store.move(packet["id"], (SENT,), FAILED, outcome="failed", error=error[:200]):
+            logger.warning("PRM: packet %d: a file was not sent by Windows: %s", packet["id"], why)
 
     def _send_failed_by_digest(self, chat_id: str, digest: str, why: str, sent_at: Optional[float],
                                now: float) -> None:
