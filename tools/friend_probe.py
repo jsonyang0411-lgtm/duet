@@ -126,7 +126,11 @@ def main(argv=None) -> int:
         say(f"[{n}] 私聊编号：{shape(username)}；名字：{masked_name(name)}；"
             f"有备注字段：{'是' if first(s, 'remark', 'remarkName') else '否'}；"
             f"最后一条：{time.strftime('%m-%d %H:%M', time.localtime(last)) if last else '（看不出）'}")
-        messages = client.get_messages(username, limit=max(1, args.messages)) or []
+        try:
+            messages = client.get_messages(username, limit=max(1, args.messages)) or []
+        except RuntimeError as e:                      # WcdbCallError: the DLL answered with an error code
+            say(f"    读不出这个私聊：{e}")
+            continue
         if messages and not message_fields_shown:
             say("    消息带的字段：" + "、".join(sorted(str(k) for k in messages[0].keys())))
             message_fields_shown = True

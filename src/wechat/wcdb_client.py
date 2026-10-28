@@ -24,6 +24,20 @@ logger = logging.getLogger(__name__)
 # checks a key through get_sessions(), resolve_nickname() asks get_display_names().
 _DLL_LOCK = threading.RLock()
 
+
+class WcdbCallError(RuntimeError):
+    """A read the DLL answered with an error code (``ret``), or one asked of a database that is not
+    open (``ret`` None).  ``get_messages`` and ``get_sessions`` raise it instead of answering "nothing"
+    (win review F14): after WeChat logs in again, updates or rebuilds its database, the old handle
+    answers every call with an error code, and the poll loop must count that as a failed read (it
+    re-opens the database, turns the OCR fallback on, ``db_readable`` goes False)."""
+
+    def __init__(self, call: str, ret=None, detail: str = ""):
+        self.call = call
+        self.ret = ret
+        super().__init__(detail or (f"{call} failed: ret={ret}" if ret is not None
+                                    else f"{call} not made: the database is not open"))
+
 PAGE_EXECUTE_READWRITE = 0x40
 
 # ── DRM patch offset configuration ────────────────────────────────────
@@ -451,8 +465,13 @@ class WcdbNativeClient:
 
                     self._handle = handle.value
 
-                    # Verify the key actually decrypts data
-                    sessions = self.get_sessions()
+                    # Verify the key actually decrypts data (an error code: not this key either)
+                    try:
+                        sessions = self.get_sessions()
+                    except WcdbCallError as e:
+                        logger.info("Key from %s (fmt=%s, path=%s): the session list fails (%s)",
+                                    source_label, key_fmt, path_label, e)
+                        sessions = []
                     if sessions:
                         session_count = (
                             len(sessions) if isinstance(sessions, list)
@@ -542,7 +561,11 @@ class WcdbNativeClient:
 
     def _load_nickname_cache(self):
         """Load safe nickname mappings available from the session database."""
-        sessions = self.get_sessions()
+        try:
+            sessions = self.get_sessions()
+        except WcdbCallError as e:
+            logger.warning("Nickname cache: the session list could not be read (%s)", e)
+            sessions = []
         for s in sessions:
             username = s.get("username", "")
             display = (s.get("displayName") or s.get("nickname") or "").strip()
@@ -572,19 +595,24 @@ class WcdbNativeClient:
 
     # ── Query methods ─────────────────────────────────────────────────
 
-    def _call_json(self, name, *args):
+    def _call_json(self, name, *args, strict=False):
         """Call the WCDB function ``name`` that returns a JSON string pointer: ``name(handle, *args,
         &out)``.  Under the DLL lock, and the handle is read inside it: a client closed meanwhile
         (another thread's close, a re-initialisation) never hands the DLL a closed handle (None,
-        like a failed call)."""
+        like a failed call).  ``strict``: an error code, or no open database, raises WcdbCallError
+        instead of answering None (the reads the poll loop counts: ``get_messages``, ``get_sessions``)."""
         with _DLL_LOCK:
             func = getattr(self._dll, name, None) if self._dll is not None else None
             if func is None or not self._handle:
+                if strict:
+                    raise WcdbCallError(name)
                 logger.debug("WCDB call %s not made: the database is not open", name)
                 return None
             out = ct.c_void_p()
             ret = func(self._handle, *args, ct.byref(out))
             if ret != 0:
+                if strict:
+                    raise WcdbCallError(name, ret)
                 logger.warning("WCDB call %s failed: ret=%d", name, ret)
                 return None
             if not out.value:
@@ -604,11 +632,9 @@ class WcdbNativeClient:
                 return {}
 
     def get_sessions(self, limit=500):
-        """Get all chat sessions with metadata."""
-        result = self._call_json("wcdb_get_sessions")
-        if result is None:
-            logger.warning("wcdb_get_sessions returned None (DLL call failed)")
-            return []
+        """Get all chat sessions with metadata.  An error code from the DLL (or no open database)
+        raises WcdbCallError: it is a failed read, not an empty session list."""
+        result = self._call_json("wcdb_get_sessions", strict=True)
         if isinstance(result, list):
             logger.info("Got %d sessions (list)", len(result))
             return result
@@ -620,12 +646,15 @@ class WcdbNativeClient:
         return []
 
     def get_messages(self, talker, limit=200, offset=0):
-        """Get messages for a specific chat."""
+        """Get messages for a specific chat (newest first).  An error code from the DLL (or no open
+        database) raises WcdbCallError: it is a failed read, not a chat without messages (ret 0 with
+        an empty list or no string at all is that: [])."""
         result = self._call_json(
             "wcdb_get_messages",
             talker.encode("utf-8"),
             limit,
             offset,
+            strict=True,
         )
         if isinstance(result, list):
             return result

@@ -157,128 +157,47 @@ if __name__ == "__main__":
 # client (WcdbNativeClient) runs here on a fake DLL whose every function notes whether the calling
 # thread holds the client's DLL lock and how many threads are inside the DLL at once.
 
-import ctypes as ct          # noqa: E402
-import json                  # noqa: E402
 import os                    # noqa: E402
 import tempfile              # noqa: E402
 from pathlib import Path     # noqa: E402
 from unittest.mock import patch  # noqa: E402
 
 from src.config import BotConfig  # noqa: E402
-from src.wechat import wcdb_client  # noqa: E402
-from src.wechat.wcdb_client import WcdbNativeClient  # noqa: E402
+from src.wechat.wcdb_client import WcdbCallError  # noqa: E402
+from wcdb_dll_fakes import FakeDll, data_dir, make_client  # noqa: E402
 
 DLL_GROUP = "room1@chatroom"
 DLL_FRIEND = "wxid_friend"
 
 
-def _dll_lock_held() -> bool:
-    lock = getattr(wcdb_client, "_DLL_LOCK", None)
-    return bool(lock is not None and lock._is_owned())
-
-
-class _CFunc:
-    """A ctypes function stand-in: callable, and argtypes / restype can be set on it."""
-
-    def __init__(self, fn):
-        self._fn = fn
-        self.__name__ = fn.__name__
-
-    def __call__(self, *args):
-        return self._fn(*args)
-
-
-class FakeDll:
-    """wcdb_api.dll as WcdbNativeClient calls it (ctypes: the result through the last argument)."""
-
-    wcdb_get_contacts_compact = None
-    FUNCTIONS = ("wcdb_get_sessions", "wcdb_get_messages", "wcdb_get_display_names", "wcdb_get_group_members",
-                 "wcdb_get_voice_data", "wcdb_free_string", "wcdb_close_account")
+class NewRowsDll(FakeDll):
+    """Every read of a chat shows two new rows: a text from a sender the name cache does not know (the
+    client asks the DLL for the name) and a voice message (the backend asks the DLL for its audio).
+    ``block``: an Event the next read waits for."""
 
     def __init__(self, pause=0.002):
-        for name in self.FUNCTIONS:
-            setattr(self, name, _CFunc(getattr(self, name)))
-        self.pause = pause
-        self.calls = []                  # (function, did the caller hold the DLL lock)
-        self.inside = 0
-        self.most_inside = 0
-        self._count = threading.Lock()
-        self._kept = []                  # the strings handed out stay alive
-        self._n = 0
-        self.block = None                # an Event wcdb_get_messages waits for
+        super().__init__(pause=pause)
+        self.sessions = [{"username": DLL_GROUP, "displayName": "测试群"},
+                         {"username": DLL_FRIEND, "displayName": "私聊好友"}]
+        self.block = None
         self.entered = threading.Event()
+        self._n = 0
 
-    def _enter(self, name):
-        with self._count:
-            self.calls.append((name, _dll_lock_held()))
-            self.inside += 1
-            self.most_inside = max(self.most_inside, self.inside)
-        time.sleep(self.pause)           # a call takes a while: another thread could come in meanwhile
-
-    def _leave(self):
-        with self._count:
-            self.inside -= 1
-
-    def _out(self, out, raw: bytes) -> int:
-        buf = ct.create_string_buffer(raw)
-        self._kept.append(buf)
-        out._obj.value = ct.addressof(buf)
-        return 0
-
-    def _json(self, name, out, value) -> int:
-        self._enter(name)
-        try:
-            return self._out(out, json.dumps(value, ensure_ascii=False).encode("utf-8"))
-        finally:
-            self._leave()
-
-    def wcdb_get_sessions(self, handle, out):
-        return self._json("wcdb_get_sessions", out, [{"username": DLL_GROUP, "displayName": "测试群"},
-                                                     {"username": DLL_FRIEND, "displayName": "私聊好友"}])
-
-    def wcdb_get_messages(self, handle, talker, limit, offset, out):
+    def rows(self, chat, limit):
         if self.block is not None:
             self.entered.set()
-            self._enter("wcdb_get_messages")
-            try:
-                self.block.wait(WAIT)
-                return self._out(out, b"[]")
-            finally:
-                self._leave()
+            self.block.wait(WAIT)
+            return []
         with self._count:
             self._n += 1
             n = self._n
         now = int(time.time())
-        rows = [                          # newest first; new rows on every read
+        return [                          # newest first
             {"sender_username": f"wxid_new{n}", "message_content": f"第{n}句", "local_type": 1,
              "create_time": now, "local_id": 2 * n, "server_id": f"s{2 * n}"},
             {"sender_username": f"wxid_new{n}", "message_content": "", "local_type": 34,
              "create_time": now, "local_id": 2 * n - 1, "server_id": f"s{2 * n - 1}"},
         ]
-        return self._json("wcdb_get_messages", out, rows)
-
-    def wcdb_get_display_names(self, handle, usernames, out):
-        return self._json("wcdb_get_display_names", out,
-                          {u: f"名字{u[-3:]}" for u in json.loads(usernames.decode("utf-8"))})
-
-    def wcdb_get_group_members(self, handle, chat, out):
-        return self._json("wcdb_get_group_members", out, [{"username": "wxid_member1"}, {"username": "wxid_member2"}])
-
-    def wcdb_get_voice_data(self, handle, talker, local_id, create_time, svr_id, extra, out):
-        self._enter("wcdb_get_voice_data")
-        try:
-            return self._out(out, b"0102")
-        finally:
-            self._leave()
-
-    def wcdb_free_string(self, ptr):
-        self._enter("wcdb_free_string")
-        self._leave()
-
-    def wcdb_close_account(self, handle):
-        self._enter("wcdb_close_account")
-        self._leave()
-        return 0
 
 
 class FakeVoice:
@@ -291,22 +210,17 @@ class FakeVoice:
 
 class DllCallsAreSerializedTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
-        (self.tmp / "wxid_me_1234" / "db_storage" / "session").mkdir(parents=True)
-        (self.tmp / "wxid_me_1234" / "db_storage" / "session" / "session.db").write_bytes(b"")
+        self.tmp = data_dir(Path(tempfile.mkdtemp()))
         env = patch.dict(os.environ, {"WECHAT_DATA_DIR": str(self.tmp)})
         env.start()
         self.addCleanup(env.stop)
         cwd = os.getcwd()
         os.chdir(self.tmp)                # data/group_names.json and friends land here
         self.addCleanup(os.chdir, cwd)
-        self.dll = FakeDll()
+        self.dll = NewRowsDll()
 
     def client(self):
-        client = WcdbNativeClient(dll_dir=str(self.tmp))
-        client._dll = self.dll
-        client._handle = 7
-        return client
+        return make_client(self.dll, self.tmp)
 
     def assertEveryCallHeldTheLock(self):
         self.assertTrue(self.dll.calls)
@@ -322,7 +236,7 @@ class DllCallsAreSerializedTests(unittest.TestCase):
         client.get_voice_data(DLL_FRIEND, 1, int(time.time()), "s1")
         client.resolve_nickname("wxid_unknown")              # not cached: asks the DLL
         client.close()
-        self.assertEqual({name for name, _ in self.dll.calls}, {
+        self.assertEqual(set(self.dll.names_of()), {
             "wcdb_get_sessions", "wcdb_get_messages", "wcdb_get_display_names", "wcdb_get_group_members",
             "wcdb_get_voice_data", "wcdb_free_string", "wcdb_close_account"})
         self.assertEveryCallHeldTheLock()
@@ -351,7 +265,7 @@ class DllCallsAreSerializedTests(unittest.TestCase):
         finally:
             stop.set()
             scanner.join(WAIT)
-        names = {name for name, _ in self.dll.calls}
+        names = set(self.dll.names_of())
         self.assertTrue({"wcdb_get_voice_data", "wcdb_get_group_members", "wcdb_get_display_names"} <= names)
         self.assertEveryCallHeldTheLock()
         self.assertEqual(self.dll.most_inside, 1)
@@ -363,14 +277,16 @@ class DllCallsAreSerializedTests(unittest.TestCase):
         self.assertTrue(self.dll.entered.wait(WAIT))
         closer = self.start_thread(client.close)
         closer.join(0.2)
-        self.assertNotIn("wcdb_close_account", [name for name, _ in self.dll.calls])   # the read is not done
+        self.assertNotIn("wcdb_close_account", self.dll.names_of())   # the read is not done
         self.dll.block.set()
         reader.join(WAIT)
         closer.join(WAIT)
-        self.assertEqual([name for name, _ in self.dll.calls][-1], "wcdb_close_account")
+        self.assertEqual(self.dll.names_of()[-1], "wcdb_close_account")
         before = len(self.dll.calls)
-        self.assertEqual(client.get_messages(DLL_FRIEND, limit=5), [])
-        self.assertEqual(client.get_sessions(), [])
+        with self.assertRaises(WcdbCallError):                # not open: a failed read, not "nothing"
+            client.get_messages(DLL_FRIEND, limit=5)
+        with self.assertRaises(WcdbCallError):
+            client.get_sessions()
         self.assertEqual(len(self.dll.calls), before)       # a closed handle is never passed to the DLL
 
     def start_thread(self, target):
