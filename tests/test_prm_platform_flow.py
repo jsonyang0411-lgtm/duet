@@ -538,6 +538,58 @@ def test_a_sample_order_whose_placeholder_has_no_number_is_not_approved(bot):
     assert [j for j in bot.relay.store.list_jobs(10) if '"platform_execute"' in j["meta"]] == []
 
 
+# ── a number the Mac read off a picture (win review F5) ──────────────────
+
+READ_OFF = "13900001111"
+
+
+def test_a_number_the_mac_read_off_a_picture_becomes_her_placeholder_before_it_is_stored(bot, clock):
+    """The creator sends her address as a screenshot: the Mac reads the number off it and writes it out in
+    the reply, the slots, the reason and the sample order.  Before anything is stored it becomes her
+    〈手机N〉 like a number she types: the console shows it masked (显示完整号码 is written down), the
+    Mac executing the order and the creator get the number back."""
+    bot.prm.handle(bot.msg("[图片]", msg_type=3))
+    job = bot.worker_takes()
+    d = draft(message_kind="address_confirm", reply_draft=f"确认一下：小美，手机 {READ_OFF}，寄样单这就建",
+              slots={"收件人": "小美", "手机": READ_OFF}, intent=f"寄样，电话 {READ_OFF}",
+              needs_attention=True, reason=f"截图里的电话 {READ_OFF}")
+    d["platform"] = block({**SAMPLE, "receiver": {**SAMPLE["receiver"], "phone": READ_OFF}}, run={"steps": ["create"]})
+    bot.finish(job["id"], d)
+    packet = bot.prm.store.packet_for_job(job["id"])
+    token = "〈手机1〉"
+    assert bot.prm.store.tokens(packet["party_id"]) == {token: ("phone", READ_OFF)}
+    stored = json.dumps([packet, bot.prm.store.deal(packet["deal_id"])], ensure_ascii=False)
+    shown = json.dumps(snap(bot), ensure_ascii=False)
+    assert READ_OFF not in stored and READ_OFF not in shown
+    [p] = snap(bot)["pending"]
+    assert p["text"] == f"确认一下：小美，手机 {token}，寄样单这就建" and p["slots"]["手机"] == token
+    assert {"label": "收货信息", "value": f"小美 {token} 上海市上海市浦东新区 张江路100号3栋1201"} in p["platform"]["params"]
+    assert p["legend"] == [{"token": token, "masked": "139****1111"}]
+    assert packet["platform"]["preview"]["action"]["receiver"]["phone"] == token
+    [party] = snap(bot)["parties"]
+    assert party["deal"]["slots"]["手机"] == token and party["deal"]["legend"] == [{"token": token, "masked": "139****1111"}]
+    assert token in party["deal"]["attention"]                               # the reason, masked too
+    assert bot.prm.reveal(packet["party_id"])["numbers"] == [{"token": token, "value": READ_OFF, "cleared": False}]
+    assert [e["detail"]["tokens"] for e in bot.prm.store.events(packet["deal_id"]) if e["kind"] == "reveal"] == [[token]]
+    execution = approve(bot, packet)
+    assert json.loads(execution["meta"])["action"]["receiver"]["phone"] == READ_OFF   # for the Mac that sends it
+    mac_runs(bot, execution, record(sample_order_no=JST_ORDER))
+    bot.prm.send_approved()
+    assert bot.texts == [(CREATOR, f"确认一下：小美，手机 {READ_OFF}，寄样单这就建")]
+
+
+def test_the_mac_gets_every_number_of_the_receiver_back_and_an_unknown_one_stops_it():
+    from src.prm.service import action_for_mac
+    tokens = {"〈手机1〉": ("phone", "13900001111"), "〈手机2〉": ("phone", "13900002222")}
+    action = platforms.check_action({**SAMPLE, "receiver": {**SAMPLE["receiver"], "address": "张江路100号，备用〈手机2〉"}})
+    out, problem = action_for_mac(action, tokens)
+    assert problem == "" and out["receiver"]["phone"] == "13900001111"
+    assert out["receiver"]["address"] == "张江路100号，备用13900002222" and action["receiver"]["address"].endswith("〈手机2〉")
+    out, problem = action_for_mac(platforms.check_action(
+        {**SAMPLE, "receiver": {**SAMPLE["receiver"], "address": "张江路100号 〈手机7〉"}}), tokens)
+    assert "〈手机7〉" in problem
+
+
 # ── a sample order → its 专属佣金 (drafted, then approved like any platform write) ──
 # PRM_COMMISSION_AFTER: delivered (the default: when the creator signed for it) or created.
 
@@ -748,6 +800,40 @@ def test_a_two_product_order_opens_each_commission_in_turn_and_only_the_last_one
     assert bot.worker_takes() is None and bot.texts == told + [(order["chat_id"], last)]
     assert sorted(p["platform"]["action"]["item_id"] for p in bot.prm.store.deal_packets(
         order["deal_id"], tools=("dy.designated_commission",), statuses=("sent",))) == [DY_ITEM, DY_ITEM2]
+
+
+@pytest.mark.parametrize("with_action", [False, True], ids=["reply-only", "with-action"])
+def test_a_commission_step_always_waits_for_a_person_whatever_its_kinds_gate(bot, clock, with_action):
+    """The system lane (meta.system_note) is never sent by a gate: a 专属佣金 step whose draft forgot
+    (or could not fill) the platform action and says 「开好啦」 would tell the creator something
+    nothing on the platform did.  Such a draft waits, and says that it carries no action."""
+    order = ordered(bot, clock)
+    mac_runs(bot, approve(bot, order), record(sample_order_no=JST_ORDER))
+    bot.prm.send_approved()
+    told = list(bot.texts)
+    bot.prm.store.set_gate("other", "auto", clock.now)                       # "other" has earned auto
+    assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": "delivered"})["ok"]
+    step = bot.worker_takes()
+    assert "system_note" in step["meta"]
+    d = draft(message_kind="other", reply_draft="合作这边我给你开好专属佣金啦，明天 0 点生效～", slots={},
+              stage_proposal="", needs_attention=False, reason="开好了")
+    if with_action:
+        d["platform"] = block()
+    bot.finish(step["id"], d)
+    packet = bot.prm.store.packet_for_job(step["id"])
+    assert (packet["status"], packet["route"]) == ("pending", "review") and packet["meta"]["lane"] == "system"
+    if not with_action:
+        assert packet["needs_attention"] and "没带平台动作" in packet["reason"]
+        assert f"#{step['id']} 开专属佣金这一步的草稿没带平台动作" in bot.prm.store.deal(order["deal_id"])["attention"]
+    bot.prm.send_approved()
+    assert bot.texts == told                                                  # nothing went out on its own
+
+
+def test_a_reply_of_the_same_kind_still_goes_out_by_its_gate(bot, clock):
+    """The control: only the system lane is held back, a reply of an auto kind goes out as before."""
+    bot.prm.store.set_gate("other", "auto", clock.now)
+    packet = drafted(bot, preview=False, reply="好的老师～", kind="other")
+    assert (packet["status"], packet["route"]) == ("approved", "auto")
 
 
 def test_a_commission_step_drafted_while_a_person_took_over_is_left_to_them(bot, clock):

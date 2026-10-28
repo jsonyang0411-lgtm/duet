@@ -554,6 +554,50 @@ def test_after_an_ocr_stretch_a_creators_messages_are_handed_on(world):
     assert world.stored(GROUP) == 0 and [text_lines(j) for j in world.jobs()] == [["在吗"]]
 
 
+# ── the holding reply after a gap ─────────────────────────────────────────
+
+def _a_gap(world, lines):
+    """The bot read the creator's 「你好」, was stopped, ``lines`` came in (``(sender, text, minutes)``),
+    and it ran again five hours later: the late draft of her question waits in review."""
+    world.register()
+    t0 = world.clock.now
+    first = world.run()
+    world.wechat.say(CREATOR, CREATOR, "你好", t0)
+    first.poll()
+    first.stop()                                                    # stopped (an EXE update, say)
+    for sender, text, minutes in lines:
+        world.wechat.say(CREATOR, sender, text, t0 + minutes * 60)
+    world.clock.now = t0 + 5 * HOUR
+    second = world.run()
+    second.poll()
+    world.mac_drafts(second, draft(reply_draft="你好呀", message_kind="other"))
+    world.mac_drafts(second, draft(reply_draft="我们尽快安排寄样哈", message_kind="other"))
+    [waiting] = world.prm_store.packets(("pending",))
+    assert waiting["text"] == "我们尽快安排寄样哈" and world.prm_store.deal(1)["mode"] == "copilot"
+    world.sent.clear()
+    world.clock.now += 11 * 60                                      # longer than PRM_HOLDING_MIN
+    return t0, second
+
+
+def test_no_holding_reply_once_an_operator_answered_while_the_bot_was_stopped(world):
+    """win review F13: the creator asked while the bot was stopped and an operator answered on the
+    phone.  After the restart her message is drafted (late, reviewed) and the operator's line is
+    recorded (too old to take the chat over): she was answered in this round, so no 「收到，我确认一下
+    马上回你」 hours after the answer."""
+    t0, second = _a_gap(world, [(CREATOR, "样品什么时候寄？", 10), (ME, "今天下午就寄，单号晚点发你", 15)])
+    [line] = world.events("operator_message")
+    assert line["detail"]["at"] == t0 + 15 * 60                     # when the operator wrote it
+    assert second.prm.send_holding_replies() == 0 and world.sent == []
+
+
+def test_a_late_draft_still_gets_a_holding_reply_when_nobody_answered_after_her(world):
+    """The control: the operator's line came before her question, which still waits unanswered: the
+    late draft gets its holding reply as before."""
+    _, second = _a_gap(world, [(ME, "在的，有事随时找我", 5), (CREATOR, "样品什么时候寄？", 10)])
+    assert len(world.events("operator_message")) == 1
+    assert second.prm.send_holding_replies() == 1 and world.sent == [(CREATOR, second.prm._holding_text)]
+
+
 # ── PRM on its own (either WeChat backend: the Windows database or the Mac's edge) ──
 
 @pytest.fixture

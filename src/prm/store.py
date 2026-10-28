@@ -3,8 +3,9 @@
 ``parties``         the creators the operators registered (their private chat is their wxid)
 ``deals``           one collaboration per creator: stage, mode (``copilot`` / ``human`` until
                     ``mode_until`` / ``paused``), the latest slot values, the stage the AI
-                    suggests, why a person should look (``attention``), when it was
-                    delivered and when its personal data was cleared (8.2)
+                    suggests, why a person should look (``notices``, JSON; ``attention`` is
+                    their texts, what the console shows), when it was delivered and when its
+                    personal data was cleared (8.2)
 ``action_packets``  every draft reply: what would be sent (text with placeholders,
                     attachments), why, and what became of it
 ``pii_tokens``      the phone and ID numbers behind the placeholders (〈手机1〉): the Mac
@@ -161,10 +162,20 @@ _ADDED_COLUMNS = (
     ("pii_tokens", "masked", "TEXT NOT NULL DEFAULT ''"),
     ("pii_tokens", "purged_at", "REAL"),
     ("action_packets", "platform", "TEXT NOT NULL DEFAULT '{}'"),
+    ("deals", "notices", "TEXT NOT NULL DEFAULT '[]'"),
 )
 
 # What the creators wrote, or our side's own words, waiting for the next draft job.
 BACKLOG_KINDS = ("creator_message", "operator_message")
+
+# A deal's notices: ``[{"key", "text", "at", ...}]``, what the console says about it (``attention``).
+# ``draft:<lane>`` is the latest draft's own notes (the next draft of that lane replaces them); every
+# other key is the system's and stays until what it says is dealt with (src/prm/service.py: a draft
+# that was not written, a 专属佣金 step owed, a platform action that ended red, a recall, messages
+# read too late to draft).  ``show`` False: kept for what it holds, no longer shown.
+DRAFT_NOTES = "draft:"
+NOTICE_CHARS = 300          # one notice's text
+ATTENTION_CHARS = 600       # all of them, as the console shows them
 
 
 class PartyError(ValueError):
@@ -195,7 +206,26 @@ def packet_view(row: dict) -> dict:
 def deal_view(row: dict) -> dict:
     out = dict(row)
     out["slots"] = _loads(row.get("slots"), {})
+    out["notices"] = notices_of(row)
     return out
+
+
+def notices_of(row: dict) -> list:
+    """A deal row's notices.  A deal from before them (2026-10-28) has only its ``attention``: that
+    is taken as its latest draft's notes (the next draft replaced it then too)."""
+    notices = [n for n in _loads(row.get("notices"), []) if isinstance(n, dict) and n.get("key")]
+    if not notices and row.get("attention"):
+        notices = [{"key": DRAFT_NOTES + "reply", "text": str(row["attention"])}]
+    return notices
+
+
+def attention_of(notices: list) -> str:
+    """What the console shows of a deal's notices (``deals.attention``): the system's first (what is
+    still to be dealt with, oldest first), then the latest drafts' notes."""
+    shown = [n for n in notices if n.get("text") and n.get("show", True)]
+    system = [n for n in shown if not str(n["key"]).startswith(DRAFT_NOTES)]
+    drafts = [n for n in shown if str(n["key"]).startswith(DRAFT_NOTES)]
+    return "；".join(str(n["text"]) for n in system + drafts)[:ATTENTION_CHARS]
 
 
 def event_view(row: dict) -> dict:
@@ -328,8 +358,9 @@ class PrmStore:
 
     def update_deal(self, deal_id: int, now: Optional[float] = None, *, merge_slots: Optional[dict] = None,
                     replace_slots: Optional[dict] = None, **fields) -> None:
-        """Set ``fields`` and merge (or replace) the slot values."""
-        allowed = {"stage", "mode", "mode_until", "stage_proposal", "attention", "last_message_at",
+        """Set ``fields`` and merge (or replace) the slot values.  (``attention`` is the notices'
+        texts: ``set_notice`` / ``drop_notices`` / ``edit_notices``.)"""
+        allowed = {"stage", "mode", "mode_until", "stage_proposal", "last_message_at",
                    "delivered_at", "purged_at", "holding_round"}
         unknown = set(fields) - allowed
         if unknown:
@@ -352,6 +383,80 @@ class PrmStore:
                 (*[fields[n] for n in names], deal_id),
             )
             self._conn.commit()
+
+    def edit_notices(self, deal_id: int, edit: Callable[[list], list], now: Optional[float] = None) -> list:
+        """Change a deal's notices in one step under the lock: ``edit`` gets the list and returns the
+        new one; ``attention`` follows (``attention_of``).  Returns the new list ([] for no deal)."""
+        now = time.time() if now is None else now
+        with self._lock:
+            row = self._conn.execute("SELECT notices, attention FROM deals WHERE id = ?", (deal_id,)).fetchone()
+            if row is None:
+                return []
+            before = notices_of(dict(row))
+            notices = edit([dict(n) for n in before])
+            if notices != before or attention_of(notices) != row["attention"]:
+                self._conn.execute("UPDATE deals SET notices = ?, attention = ?, updated_at = ? WHERE id = ?",
+                                   (json.dumps(notices, ensure_ascii=False), attention_of(notices), now, deal_id))
+                self._conn.commit()
+        return notices
+
+    def set_notice(self, deal_id: int, key: str, text: str, now: Optional[float] = None, **data) -> None:
+        """The deal's notice ``key`` says ``text`` (``data``: what the system keeps to deal with it later),
+        in its place when it had one; an empty ``text`` drops it."""
+        now = time.time() if now is None else now
+
+        def edit(notices):
+            old = next((n for n in notices if n["key"] == key), None)
+            if not text:
+                return [n for n in notices if n is not old]
+            item = {**(old or {}), **data, "key": key, "text": str(text)[:NOTICE_CHARS],
+                    "at": (old or {}).get("at", now)}
+            return [item if n is old else n for n in notices] if old is not None else [*notices, item]
+
+        self.edit_notices(deal_id, edit, now)
+
+    def drop_notices(self, deal_id: int, match: Callable[[dict], bool], now: Optional[float] = None) -> list:
+        """Remove the deal's notices ``match`` says yes to; returns them (one step: of two threads only
+        one gets a notice)."""
+        dropped: list = []
+
+        def edit(notices):
+            keep = []
+            for n in notices:
+                (dropped if match(n) else keep).append(n)
+            return keep
+
+        self.edit_notices(deal_id, edit, now)
+        return dropped
+
+    def deals_with_notice(self, key: str) -> list[dict]:
+        """The deals that have the notice ``key`` (the 专属佣金 steps owed: ``step``)."""
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM deals WHERE notices LIKE ? ORDER BY id",
+                                      (f'%"key": "{key}"%',)).fetchall()
+        return [d for d in (deal_view(dict(r)) for r in rows) if any(n["key"] == key for n in d["notices"])]
+
+    def rewrite_notices(self, deal_id: int, rewrite: Callable[[str], str]) -> int:
+        """Rewrite the words of a deal's notices (8.2 clean-up): their texts and the creator's lines and
+        history a notice keeps; returns how many changed."""
+        changed = [0]
+
+        def edit(notices):
+            out = []
+            for n in notices:
+                new = dict(n)
+                for k in ("text", "head", "lines"):
+                    if isinstance(new.get(k), str):
+                        new[k] = rewrite(new[k])
+                if isinstance(new.get("history"), list):
+                    new["history"] = [{**h, "text": rewrite(str(h.get("text") or ""))} if isinstance(h, dict) else h
+                                      for h in new["history"]]
+                changed[0] += int(new != n)
+                out.append(new)
+            return out
+
+        self.edit_notices(deal_id, edit)
+        return changed[0]
 
     def deals_to_purge(self, now: float, days: int) -> list[dict]:
         """Deals whose details are due to be cleared (8.2, ``retention.purge_due_at``)."""
@@ -558,6 +663,29 @@ class PrmStore:
             self._conn.commit()
             return cur.rowcount
 
+    def hold_for_review(self, deal_id: int, reason: str, now: Optional[float] = None) -> int:
+        """The Mac's drafts of this deal that have not gone out wait for a person, ``reason`` first in
+        theirs (``needs_attention``): a waiting one stays waiting, a plain reply its gate approved and
+        not being sent yet goes back to waiting (``review``).  Not the bot's own shipping notices (a
+        template).  Returns how many."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, status, reason FROM action_packets WHERE deal_id = ? AND job_id IS NOT NULL"
+                " AND (status = ? OR (status = ? AND route = 'auto' AND tool = ?))",
+                (deal_id, PENDING, APPROVED, MESSAGE_TOOL),
+            ).fetchall()
+            held = 0
+            for row in rows:
+                cur = self._conn.execute(
+                    "UPDATE action_packets SET status = ?, route = 'review', needs_attention = 1, reason = ?,"
+                    " decided_at = CASE WHEN status = ? THEN NULL ELSE decided_at END WHERE id = ? AND status = ?",
+                    (PENDING, "；".join(r for r in (reason, row["reason"]) if r)[:500], APPROVED, row["id"],
+                     row["status"]),
+                )
+                held += cur.rowcount
+            self._conn.commit()
+        return held
+
     def counts(self) -> dict:
         with self._lock:
             rows = self._conn.execute(
@@ -704,11 +832,17 @@ class PrmStore:
             self._conn.commit()
             return int(cur.lastrowid)
 
-    def events(self, deal_id: Optional[int] = None, limit: int = 50) -> list[dict]:
-        sql, args = "SELECT * FROM deal_events", []
+    def events(self, deal_id: Optional[int] = None, limit: int = 50, kinds: tuple = ()) -> list[dict]:
+        """The newest events first (of these ``kinds`` only, when given)."""
+        sql, where, args = "SELECT * FROM deal_events", [], []
         if deal_id is not None:
-            sql += " WHERE deal_id = ?"
+            where.append("deal_id = ?")
             args.append(deal_id)
+        if kinds:
+            where.append(f"kind IN ({', '.join('?' * len(kinds))})")
+            args += list(kinds)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
         with self._lock:
             rows = self._conn.execute(sql + " ORDER BY id DESC LIMIT ?", (*args, int(limit))).fetchall()
         return [event_view(dict(r)) for r in rows]
