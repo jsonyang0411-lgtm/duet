@@ -172,7 +172,8 @@ def test_the_backend_reads_titles_out_of_the_wechat_xml():
     place = '<msg><location x="31.2" y="121.5" label="上海市浦东新区" poiname="某某咖啡" /></msg>'
     recall = ('<sysmsg type="revokemsg"><revokemsg><session>wxid_creator01</session><msgid>1</msgid>'
               '<newmsgid>99</newmsgid><replacemsg><![CDATA["小美" 撤回了一条消息]]></replacemsg></revokemsg></sysmsg>')
-    assert _special_info(link, 49) == {"kind": "appmsg", "type": "5", "title": "新品测评"}
+    assert _special_info(link, 49) == {"kind": "appmsg", "type": "5", "title": "新品测评", "url": "https://x"}
+    assert "url" not in _special_info(mini, 49)                    # no address in the XML: no key
     assert _special_info(mini, 49)["type"] == "33"
     assert _special_info(card, 42) == {"kind": "card", "title": "小美的同事"}
     assert _special_info(place, 48) == {"kind": "location", "title": "某某咖啡"}

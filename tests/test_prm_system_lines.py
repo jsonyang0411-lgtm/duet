@@ -173,9 +173,9 @@ CARD_XML = '<msg username="wxid_other" nickname="另一个达人"/>'
 
 
 def test_what_she_shares_reaches_the_draft_job_by_its_title(world):
-    """Read by the real WCDB backend: the job says 「[链接] 我的小红书主页」, 「[转账]」, 「[位置] 某某大厦」…, as
-    the edge's events do (src/edge/text.py), not 「[文件]」 or 「[消息类型:48]」.  (A link's address follows
-    once the backend takes ``url`` out of the XML, wcdb_backend._special_info: not changed here.)"""
+    """Read by the real WCDB backend: the job says 「[链接] 我的小红书主页 https://…」, 「[转账]」, 「[位置] 某某大厦」…,
+    as the edge's events do (src/edge/text.py), not 「[文件]」 or 「[消息类型:48]」.  The link's address comes out
+    of the XML (wcdb_backend._special_info), so the Mac can open her page."""
     world.register()
     run = world.run()
     t = world.clock.now
@@ -185,4 +185,5 @@ def test_what_she_shares_reaches_the_draft_job_by_its_title(world):
     run.poll()
     [job] = world.jobs()
     assert [line.split("] ", 1)[1] for line in job["text"].split("\n")] == [
-        "[链接] 我的小红书主页", "[转账]", "[红包]", "[位置] 某某大厦", "[名片] 另一个达人"]
+        "[链接] 我的小红书主页 https://www.xiaohongshu.com/user/profile/abc", "[转账]", "[红包]", "[位置] 某某大厦",
+        "[名片] 另一个达人"]

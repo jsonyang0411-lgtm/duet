@@ -309,7 +309,11 @@ def _special_info(content: str, local_type: int) -> dict:
         appmsg = root if root.tag == "appmsg" else root.find("appmsg")
         if appmsg is None:
             return {}
-        return {"kind": "appmsg", "type": _text_at(appmsg, "type"), "title": _text_at(appmsg, "title")}
+        info = {"kind": "appmsg", "type": _text_at(appmsg, "type"), "title": _text_at(appmsg, "title")}
+        url = _text_at(appmsg, "url")
+        if url:
+            info["url"] = url                    # a link's address (src/edge/text.py keeps http/https only)
+        return info
     return {}
 
 
