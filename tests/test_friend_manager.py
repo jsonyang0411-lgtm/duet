@@ -5,9 +5,11 @@ types and clicks, and that it types and clicks nothing it cannot see or is not a
 """
 
 import os
+import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -514,7 +516,7 @@ class AutoFriendServiceTests(unittest.TestCase):
     def test_the_worker_checks_every_interval(self):
         ticked = threading.Event()
         manager = MagicMock()
-        manager.accept_friend_requests.side_effect = lambda: ticked.set() or []
+        manager.accept_friend_requests.side_effect = lambda limit=None: ticked.set() or []
         service = AutoFriendService(manager)
         service._interval = 0.01
         service.start()
@@ -1490,6 +1492,244 @@ class UnexpectedErrorTests(FriendTestCase):
         service = AutoFriendService(self.manager(BoomWindow(), FakeOcr([])), watch=False)
         self.assertEqual(service.run_once(), [])
         self.assertFalse(self.lock.locked())
+
+
+# ── Auto-accept: a daily cap, and it stops when WeChat holds the account back ─────────────
+#
+# AUTO_ACCEPT_FRIENDS took at most 10 a check, every interval, with no daily limit, and did not know
+# 「操作过于频繁」 when WeChat said it.  Now at most AUTO_ACCEPT_DAILY_MAX (50) a day (kept across
+# restarts), the admin is told when it is reached (once a day), and a risk prompt (or a request that
+# stays pending three checks in a row) pauses it until the admin switches it on again.
+
+from src.wechat.friend_manager import AcceptResult, RISK_MARKERS  # noqa: E402
+
+DAY = 86400
+
+
+class CountingManager:
+    """accept_friend_requests as the service sees it: ``batches`` of results, the limit it was given."""
+
+    def __init__(self, *batches):
+        self.batches = list(batches)
+        self.limits = []
+
+    def look_for_news(self):
+        return "changed"
+
+    def accept_friend_requests(self, limit=None):
+        self.limits.append(limit)
+        batch = self.batches.pop(0) if self.batches else AcceptResult()
+        if isinstance(batch, AcceptResult):
+            return batch[:limit] if limit is not None and len(batch) > limit else batch
+        result = AcceptResult({"status": "accepted", "timestamp": 0.0} for _ in range(min(batch, limit or batch)))
+        return result
+
+
+def risky(n=0, text="操作过于频繁，请稍后再试"):
+    result = AcceptResult({"status": "accepted", "timestamp": 0.0} for _ in range(n))
+    result.risk = text
+    return result
+
+
+def stuck():
+    result = AcceptResult()
+    result.stuck = True
+    return result
+
+
+class DailyCapTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.now = time.mktime((2026, 10, 28, 9, 0, 0, 0, 0, -1))
+        self.told = []
+
+    def service(self, manager, daily_max=5, **kw):
+        return AutoFriendService(manager, watch=False, daily_max=daily_max, state_path=self.tmp / "auto_accept.json",
+                                 notify=self.told.append, wall_clock=lambda: self.now, **kw)
+
+    def test_at_most_the_daily_max_is_accepted_and_the_admin_is_told_once(self):
+        manager = CountingManager(3, 3, 3)
+        service = self.service(manager)
+        self.assertEqual(len(service.run_once()), 3)
+        self.assertEqual(len(service.run_once()), 2)                  # only what is left of the day's 5
+        self.assertEqual(manager.limits, [5, 2])
+        self.assertEqual(service.run_once(), [])                      # capped: the window is not touched
+        self.assertEqual(manager.limits, [5, 2])
+        self.assertEqual(len(self.told), 1)
+        self.assertIn("上限 5", self.told[0])
+        self.assertIn("明天", self.told[0])
+
+    def test_the_count_outlives_a_restart_and_starts_again_the_next_day(self):
+        self.service(CountingManager(5)).run_once()
+        manager = CountingManager(5)
+        restarted = self.service(manager)
+        self.assertEqual(restarted.run_once(), [])                    # the same day: still capped
+        self.assertEqual(manager.limits, [])
+        self.now += DAY
+        self.assertEqual(len(restarted.run_once()), 5)                # the next day
+        self.assertEqual(len(self.told), 2)                           # told once each day
+
+    def test_a_risk_prompt_pauses_it_until_the_admin_switches_it_on(self):
+        manager = CountingManager(risky(1), 2)
+        service = self.service(manager)
+        self.assertEqual(len(service.run_once()), 1)
+        self.assertEqual(len(self.told), 1)
+        self.assertIn("操作过于频繁", self.told[0])
+        self.assertIn("自动同意好友 开", self.told[0])
+        self.assertEqual(service.run_once(), [])                      # paused
+        self.assertEqual(self.service(CountingManager(2)).run_once(), [])   # also after a restart
+        self.now += DAY
+        self.assertEqual(service.run_once(), [])                      # and the next day
+        service.enable()
+        self.addCleanup(service.stop)
+        self.assertEqual(len(service.run_once()), 2)
+
+    def test_a_request_that_stays_pending_three_checks_in_a_row_pauses_it_too(self):
+        manager = CountingManager(stuck(), stuck(), stuck(), 1)
+        service = self.service(manager)
+        for _ in range(3):
+            service.run_once()
+        self.assertEqual(len(self.told), 1)
+        self.assertIn("连续 3 次", self.told[0])
+        self.assertEqual(service.run_once(), [])
+
+    def test_a_stuck_check_followed_by_an_accept_starts_counting_again(self):
+        manager = CountingManager(stuck(), stuck(), 1, stuck(), stuck(), 1)
+        service = self.service(manager)
+        for _ in range(6):
+            service.run_once()
+        self.assertEqual(self.told, [])
+
+    def test_status_says_how_far_the_day_is(self):
+        service = self.service(CountingManager(2), daily_max=50)
+        service.run_once()
+        self.assertEqual(service.status_note(), "今天已自动同意 2/50")
+        service.pause("微信提示「操作过于频繁」", tell=False)
+        self.assertIn("已暂停", service.status_note())
+
+    def test_a_state_file_that_cannot_be_read_starts_afresh(self):
+        (self.tmp / "auto_accept.json").write_text("{not json", encoding="utf-8")
+        self.assertEqual(len(self.service(CountingManager(1)).run_once()), 1)
+
+    def test_a_notifier_that_fails_does_not_stop_the_service(self):
+        service = AutoFriendService(CountingManager(5), watch=False, daily_max=5,
+                                    notify=lambda text: 1 / 0, wall_clock=lambda: self.now)
+        self.assertEqual(len(service.run_once()), 5)
+        self.assertEqual(service.run_once(), [])
+
+
+class RiskPromptTests(FriendTestCase):
+    NEW_FRIENDS = row("新的朋友", 0.15, 0.12, 0.25, 0.16)
+
+    def test_a_risk_prompt_after_the_click_stops_the_run(self):
+        accept = row("接受", 0.70, 0.21, 0.76, 0.25)
+        second = row("接受", 0.70, 0.31, 0.76, 0.35)
+        ocr = FakeOcr([self.NEW_FRIENDS], [accept, second], [],
+                      [accept, second, row("操作过于频繁，请稍后再试", 0.4, 0.5, 0.6, 0.55)])
+        result = self.manager(FakeWindow(), ocr).accept_friend_requests()
+        self.assertEqual(list(result), [])                            # not counted
+        self.assertEqual(result.risk, "操作过于频繁，请稍后再试")
+        self.assertEqual(len(self.clicks), 2)                         # 新的朋友 and the first 接受: no second one
+
+    def test_a_greeting_that_was_on_the_screen_before_is_no_risk_prompt(self):
+        accept = row("接受", 0.70, 0.21, 0.76, 0.25)
+        greeting = row("你好，我最近操作频繁，请稍后再试试", 0.35, 0.20, 0.60, 0.25)
+        ocr = FakeOcr([self.NEW_FRIENDS], [greeting, accept], [], [greeting])
+        result = self.manager(FakeWindow(), ocr).accept_friend_requests()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result.risk, "")
+
+    def test_the_limit_is_kept_and_a_limit_of_nothing_does_not_touch_the_window(self):
+        accept = row("接受", 0.70, 0.21, 0.76, 0.25)
+        second = row("接受", 0.70, 0.31, 0.76, 0.35)
+        ocr = FakeOcr([self.NEW_FRIENDS], [accept, second], [], [second], [second])
+        window = FakeWindow()
+        result = self.manager(window, ocr).accept_friend_requests(limit=1)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(len(self.clicks), 2)                         # 新的朋友, one 接受
+        window2 = FakeWindow()
+        self.assertEqual(self.manager(window2, FakeOcr([])).accept_friend_requests(limit=0), [])
+        self.assertEqual(window2.activations, 0)
+
+    def test_a_request_that_stays_pending_is_marked(self):
+        accept = row("接受", 0.70, 0.21, 0.76, 0.25)
+        ocr = FakeOcr([self.NEW_FRIENDS], [accept])
+        result = self.manager(FakeWindow(), ocr).accept_friend_requests()
+        self.assertEqual(list(result), [])
+        self.assertTrue(result.stuck)
+
+    def test_risk_texts_are_matched_without_spaces(self):
+        self.assertTrue(any(m in friend_manager._clean_text("操作 过于 频繁") for m in RISK_MARKERS))
+        self.assertEqual(friend_manager._risk_line([row("你的帐号存在异常", 0, 0, 1, 1)]), "你的帐号存在异常")
+        self.assertEqual(friend_manager._risk_line([row("已添加", 0, 0, 1, 1)]), "")
+
+    def test_adding_a_friend_while_wechat_holds_the_account_back_says_so(self):
+        manager = self.manager(FakeWindow(), FakeOcr([row("操作过于频繁，请稍后再试", 0.1, 0.5, 0.8, 0.6)]))
+        with patch.object(manager, "_open_add_friend_dialog_wechat4", return_value=999), \
+             patch.object(manager, "_focus_window"), patch.object(manager, "_close_window") as close:
+            res = manager._add_friend_wechat4(HWND, "wxid_target", "")
+        self.assertEqual((res["ok"], res["reason"]), (False, "risk"))
+        self.assertIn("操作过于频繁", res["message"])
+        close.assert_called_once_with(999)
+
+
+class AdminRiskAndCapTests(unittest.TestCase):
+    def setUp(self):
+        self.friend = MagicMock()
+        self.auto = AutoFriendService(CountingManager(), watch=False, daily_max=50, wall_clock=lambda: 0.0)
+        self.handler = AdminCommandHandler(friend_manager=self.friend, auto_friend_service=self.auto)
+
+    def test_a_risk_prompt_during_a_manual_accept_is_reported_and_pauses_the_auto_accept(self):
+        self.friend.accept_friend_requests.return_value = risky(1)
+        reply = self.handler.handle("同意好友")
+        self.assertIn("操作过于频繁", reply)
+        self.assertIn("已同意 1 位", reply)
+        self.assertIn("自动同意好友也已暂停", reply)
+        self.assertIn("已暂停", self.auto.status_note())
+
+    def test_a_risk_prompt_while_adding_pauses_the_auto_accept_too(self):
+        self.friend.add_friend.return_value = {"ok": False, "reason": "risk", "message": "微信提示「操作过于频繁」…"}
+        self.assertIn("操作过于频繁", self.handler.handle("添加好友 13800000000"))
+        self.assertIn("已暂停", self.auto.status_note())
+
+    def test_status_and_switching_on_say_where_the_day_stands(self):
+        self.auto._enabled = True
+        self.assertIn("自动同意好友：开（今天已自动同意 0/50）", self.handler.handle("查状态"))
+        self.auto.pause("微信提示「操作过于频繁」", tell=False)
+        self.addCleanup(self.auto.stop)
+        reply = self.handler.handle("自动同意好友 开")
+        self.assertTrue(reply.startswith("自动同意好友申请功能已开启"), reply)
+        self.assertNotIn("已暂停", self.auto.status_note())          # switching on lifts the pause
+
+
+class DailyMaxConfigTests(unittest.TestCase):
+    def test_default_and_from_the_environment(self):
+        self.assertEqual(BotConfig().auto_accept_daily_max, 50)
+        env = {"ANTHROPIC_API_KEY": "sk-ant-test-key", "AUTO_ACCEPT_DAILY_MAX": "30"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(load_config().auto_accept_daily_max, 30)
+
+    def test_out_of_range(self):
+        _validate_config({"auto_accept_daily_max": 1})
+        _validate_config({"auto_accept_daily_max": 300})
+        for value in (0, -5, 301):
+            with self.assertRaises(RuntimeError):
+                _validate_config({"auto_accept_daily_max": value})
+
+    def test_the_bot_passes_the_cap_the_state_file_and_the_admins_chat(self):
+        config = BotConfig(auto_accept_friends="off", auto_accept_daily_max=20, admin_wxid="wxid_admin",
+                           db_path=str(Path(tempfile.mkdtemp()) / "messages.db"))
+        sent = []
+        backend = SimpleNamespace(window_controller=FakeWindow(), window_lock=threading.Lock(),
+                                  send_text=lambda chat, text: sent.append((chat, text)) or True)
+        bot = Bot(config)
+        with patch("src.wechat.ocr.win_ocr.WindowsOcrEngine"):
+            bot._start_friend_management(config, backend, MagicMock())
+        service = bot._auto_friend
+        self.assertEqual(service._daily_max, 20)
+        self.assertEqual(service._state_path, Path(config.db_path).parent / "auto_accept_state.json")
+        service._notify("今天到上限了")
+        self.assertEqual(sent, [("wxid_admin", "今天到上限了")])
 
 if __name__ == "__main__":
     unittest.main()

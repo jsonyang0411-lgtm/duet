@@ -359,6 +359,9 @@ class BotConfig:
     auto_accept_idle_sec: int = 60
     auto_accept_watch: str = "on"
     auto_accept_full_check_sec: int = 900
+    # At most this many requests accepted automatically a day (WeChat holds back accounts that take on
+    # friends in bulk); a risk prompt (「操作过于频繁」) pauses it until the admin switches it on again.
+    auto_accept_daily_max: int = 50
 
 
 def _validate_config(kwargs: dict) -> None:
@@ -541,6 +544,8 @@ def _validate_config(kwargs: dict) -> None:
     full_check = int(kwargs.get("auto_accept_full_check_sec", 900))
     if full_check != 0 and not (60 <= full_check <= 86400):
         errors.append(f"AUTO_ACCEPT_FULL_CHECK_SEC must be 0 or between 60 and 86400, got {full_check}")
+    if not (1 <= int(kwargs.get("auto_accept_daily_max", 50)) <= 300):
+        errors.append(f"AUTO_ACCEPT_DAILY_MAX must be between 1 and 300, got {kwargs.get('auto_accept_daily_max')}")
 
     if errors:
         msg = "配置值无效:\n" + "\n".join(f"  - {err}" for err in errors)
@@ -643,6 +648,7 @@ def load_config() -> BotConfig:
         "auto_accept_idle_sec": int(os.getenv("AUTO_ACCEPT_IDLE_SEC", "60")),
         "auto_accept_watch": _parse_switch(os.getenv("AUTO_ACCEPT_WATCH", "on")),
         "auto_accept_full_check_sec": int(os.getenv("AUTO_ACCEPT_FULL_CHECK_SEC", "900")),
+        "auto_accept_daily_max": int(os.getenv("AUTO_ACCEPT_DAILY_MAX", "50")),
     }
 
     _validate_config(kwargs)

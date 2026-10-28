@@ -27,11 +27,14 @@ Features:
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import sys
 import threading
 import time
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Callable, Iterable, Iterator
 
 from .keyboard import press_key, send_combo
@@ -47,6 +50,11 @@ VK_A = 0x41
 VK_V = 0x56
 
 MAX_ACCEPT_PER_RUN = 10      # a burst of requests is taken in a few runs, not all at once
+# AUTO_ACCEPT_DAILY_MAX's default.  WeChat holds back accounts that take on friends in bulk (「操作过于频繁」,
+# then days without adding friends); people who run business accounts keep automated accepting to a few
+# dozen a day.  50 covers a normal day of creators asking; past it the admin accepts by hand (同意好友).
+DAILY_MAX_DEFAULT = 50
+STUCK_RUNS = 3               # auto-accept checks in a row whose request stayed pending: it pauses
 MAX_KEYWORD_CHARS = 64
 MIN_INTERVAL_SEC = 10        # same floor as AUTO_ACCEPT_INTERVAL_SEC in config validation
 POSTPONE_RETRY_SEC = 15      # while the user is busy, look again this often (not once per interval)
@@ -64,6 +72,15 @@ NOT_FOUND_MARKERS = ("该用户不存在", "用户不存在", "查找失败", "�
 ALREADY_FRIEND_MARKERS = ("音视频通话", "语音聊天", "视频聊天", "朋友资料")   # next to "发消息" on a friend's card
 ADD_BUTTON_LABELS = ("添加到通讯录", "加为朋友", "加为联系人")
 SEND_LABELS = ("发送", "确定", "完成")
+# What WeChat shows when it holds an account back (frequency / risk control), matched in text that was not on
+# the screen before the click (a greeting in 「新的朋友」 may say anything).  「操作过于频繁，请稍后再试」 is the
+# one widely reported; the others are WeChat's words for a restricted account elsewhere, kept as a guess
+# (none of them read on this account yet).  「稍后再试」 also ends a network error: stopping then is the safe side.
+RISK_MARKERS = (
+    "过于频繁", "太频繁", "操作频繁", "频繁操作", "频率过快", "稍后再试",
+    "帐号存在异常", "账号存在异常", "帐号异常", "账号异常", "被限制", "限制使用",
+    "暂时无法添加", "无法添加朋友", "安全风险", "被盗风险", "已达上限", "达到上限",
+)
 ADD_DIALOG_TITLES = ("添加朋友", "Add Friend")   # title of WeChat 4.0's add-friend window (read on a real machine);
                                                 # exact, because the application window is "申请添加朋友"
 # WeChat 4.0's other dialogs, matched exactly (a chat opened in a window of its own has the same process and
@@ -81,10 +98,13 @@ class _Abort(Exception):
 
 class AcceptResult(list):
     """What ``accept_friend_requests`` returns: one ``{"status": "accepted", "timestamp"}`` per request
-    accepted (a list, as before), and ``error``: why the run ended on an unexpected error (a pywin32
-    error, a window handle gone; logged with its traceback), "" otherwise."""
+    accepted (a list, as before), and why the run ended early: ``error`` (an unexpected error: a pywin32
+    error, a window handle gone; logged with its traceback), ``risk`` (what WeChat said when it held the
+    account back, RISK_MARKERS), ``stuck`` (a request stayed pending after its click)."""
 
     error: str = ""
+    risk: str = ""
+    stuck: bool = False
 
 
 def _clean_text(text) -> str:
@@ -146,6 +166,21 @@ def _row_label(rows: list[dict], button: dict) -> str:
 
 def _failure(target: str, reason: str, message: str) -> dict:
     return {"ok": False, "target": target, "reason": reason, "message": message}
+
+
+def _risk_line(rows: list[dict], seen=frozenset()) -> str:
+    """The first OCR row that reads like WeChat holding the account back (RISK_MARKERS) and is not in
+    ``seen`` (the cleaned texts that were on the screen before the click); "" when there is none."""
+    for r in rows or []:
+        text = _clean_text(r.get("t", ""))
+        if text and text not in seen and any(marker in text for marker in RISK_MARKERS):
+            return " ".join(str(r.get("t", "")).split())[:100]
+    return ""
+
+
+def _risk_failure(keyword: str, risk: str) -> dict:
+    return _failure(keyword, "risk", f"微信提示「{risk}」，可能是操作太频繁被限制了，已停止：先别再加好友、同意好友，"
+                                     "过几个小时再试")
 
 
 def print_main_window(hwnd: int):
@@ -367,21 +402,26 @@ class FriendManager:
 
     # ── Accept friend requests ──────────────────────────────────────────
 
-    def accept_friend_requests(self) -> list[dict]:
-        """Open 'New Friends' and accept the pending requests, one by one.
+    def accept_friend_requests(self, limit: int | None = None) -> AcceptResult:
+        """Open 'New Friends' and accept the pending requests, one by one (at most ``limit``, and at most
+        MAX_ACCEPT_PER_RUN; a limit of 0 does not touch the window).
 
         The screen is read again after every click (the list moves), and a request
-        counts as accepted only when its button is gone afterwards.
+        counts as accepted only when its button is gone afterwards.  What WeChat says when it holds the
+        account back (RISK_MARKERS, text new after the click) ends the run (``risk``).
 
         Returns:
-            One ``{"status": "accepted", "timestamp": ...}`` per accepted request.
+            One ``{"status": "accepted", "timestamp": ...}`` per accepted request (``AcceptResult``).
         """
         if self._ocr is None:
             logger.warning("accept_friend_requests: no OCR engine, so nothing can be clicked safely")
             return AcceptResult()
         accepted = AcceptResult()
+        runs = MAX_ACCEPT_PER_RUN if limit is None else max(0, min(MAX_ACCEPT_PER_RUN, int(limit)))
+        if runs == 0:
+            return accepted
         try:
-            self._accept_in_window(accepted)
+            self._accept_in_window(accepted, runs)
         except Exception as e:
             # Not an _Abort: a pywin32 error, a window handle gone.  The session put the window back and
             # gave the focus back; a dialog it opened was closed (_confirm_dialog).  The caller hears why.
@@ -391,7 +431,7 @@ class FriendManager:
             logger.info("accept_friend_requests: nothing accepted")
         return accepted
 
-    def _accept_in_window(self, accepted: AcceptResult) -> None:
+    def _accept_in_window(self, accepted: AcceptResult, runs: int = MAX_ACCEPT_PER_RUN) -> None:
         """``accept_friend_requests`` in the window session; the accepted ones go into ``accepted``."""
         clean = False                 # the list was read to its end: no accept button was left
         with self._ui_session() as hwnd:
@@ -408,26 +448,36 @@ class FriendManager:
                         self._sleep(0.6)
                         rows = self._capture_ocr()
 
-                for _ in range(MAX_ACCEPT_PER_RUN):
+                for _ in range(runs):
                     button = _find_row(rows, *ACCEPT_LABELS, exact=True, min_x0=ACCEPT_MIN_X0)
                     if button is None:
                         clean = True
                         break
                     label = _row_label(rows, button)          # read before the click: the list moves
+                    seen = {_clean_text(r.get("t", "")) for r in rows}     # the screen's text before the click
                     before = self._window_snapshot(hwnd)      # a dialog is a window that appears after it
                     self._click_row(hwnd, button)
                     self._sleep(0.5)
-                    self._confirm_dialog(hwnd, before)
+                    risk = self._confirm_dialog(hwnd, before)
                     rows = self._capture_ocr()
-                    if _still_there(rows, button):
+                    risk = risk or _risk_line(rows, seen)
+                    if not risk and _still_there(rows, button):
                         for _ in range(3):
                             self._sleep(0.4)
                             rows = self._capture_ocr()
-                            if not _still_there(rows, button):
+                            risk = _risk_line(rows, seen)
+                            if risk or not _still_there(rows, button):
                                 break
+                    risk = risk or self._risk_in_new_windows(hwnd, before)
+                    if risk:
+                        logger.warning("accept_friend_requests: WeChat says %r (it holds the account back?); "
+                                       "stopping", risk)
+                        accepted.risk = risk
+                        break
                     if _still_there(rows, button):
                         logger.warning("accept_friend_requests: a request is still pending after "
                                        "the click; stopping")
+                        accepted.stuck = True
                         break
                     accepted_at = time.time()
                     accepted.append({"status": "accepted", "timestamp": accepted_at})
@@ -471,23 +521,47 @@ class FriendManager:
         self._click_row(hwnd, row)
         self._sleep(0.6)
 
-    def _confirm_dialog(self, hwnd: int, before: set | None = None) -> None:
+    def _confirm_dialog(self, hwnd: int, before: set | None = None) -> str:
         """Click the confirmation of the accept dialog, if one opened: on the screen of the main window, or
         (WeChat 4.0) a dialog window that appeared after the click (``before``: the windows until then).  A
-        dialog that cannot be confirmed safely is closed (cancelled) and the run stops."""
+        dialog that cannot be confirmed safely is closed (cancelled) and the run stops.  Returns what WeChat
+        said in a dialog still open after its 确定 when that reads like a risk prompt (it is closed), else ""."""
         row = _find_row(self._capture_ocr(), *CONFIRM_LABELS, exact=True)
         if row is not None:
             self._click_row(hwnd, row)
             self._sleep(0.5)
-            return
+            return ""
         popup_hwnd = self._find_popup_dialog(hwnd, before)
-        if popup_hwnd:
-            try:
-                self._confirm_popup_dialog(popup_hwnd)
-            except Exception:
-                self._close_window(popup_hwnd)        # cancelled: nothing typed anywhere else
-                raise
-            self._sleep(0.5)
+        if not popup_hwnd:
+            return ""
+        try:
+            self._confirm_popup_dialog(popup_hwnd)
+        except Exception:
+            self._close_window(popup_hwnd)            # cancelled: nothing typed anywhere else
+            raise
+        self._sleep(0.5)
+        if self._is_window_visible(popup_hwnd):       # still there after 确定: what does it say?
+            risk = _risk_line(self._capture_ocr(popup_hwnd))
+            if risk:
+                self._close_window(popup_hwnd)
+                return risk
+        return ""
+
+    def _risk_in_new_windows(self, main_hwnd: int, before: set | None) -> str:
+        """A window of WeChat's that appeared since ``before`` and reads like a risk prompt (a message box of
+        its own): its text (it is closed), else ""."""
+        if before is None or sys.platform != "win32":
+            return ""
+        try:
+            fresh = [h for h in self._process_windows(main_hwnd) if h not in before]
+        except Exception:
+            return ""
+        for h in fresh:
+            risk = _risk_line(self._capture_ocr(h))
+            if risk:
+                self._close_window(h)
+                return risk
+        return ""
 
     # ── WeChat 4.0's dialogs: windows of their own ─────────────────────
 
@@ -812,6 +886,11 @@ class FriendManager:
             rows = self._capture_ocr(dialog_hwnd)
             card_text = "".join(_clean_text(r.get("t", "")) for r in rows)
 
+            risk = _risk_line(rows)
+            if risk:
+                self._close_window(dialog_hwnd)
+                return _risk_failure(keyword, risk)
+
             if any(marker in card_text for marker in NOT_FOUND_MARKERS):
                 self._close_window(dialog_hwnd)
                 return _failure(keyword, "not_found", f"未找到用户「{keyword}」，请核实微信号或手机号")
@@ -880,8 +959,11 @@ class FriendManager:
                     self._sleep(0.1)
 
                 if self._is_window_visible(apply_hwnd):
+                    risk = _risk_line(self._capture_ocr(apply_hwnd))
                     self._close_window(apply_hwnd)
                     self._close_window(dialog_hwnd)
+                    if risk:
+                        return _risk_failure(keyword, risk)
                     return _failure(keyword, "not_sent", "申请窗口还在，申请可能没发出去，请在微信里确认")
             else:
                 if message:
@@ -934,6 +1016,10 @@ class FriendManager:
         # 3. The profile card
         card = self._capture_ocr()
         card_text = "".join(_clean_text(r.get("t", "")) for r in card)
+        risk = _risk_line(card)
+        if risk:
+            self._dismiss(hwnd)
+            return _risk_failure(keyword, risk)
         if any(marker in card_text for marker in NOT_FOUND_MARKERS):
             self._dismiss(hwnd)
             return _failure(keyword, "not_found", f"未找到用户「{keyword}」，请核实微信号或手机号")
@@ -981,6 +1067,12 @@ class AutoFriendService:
     once the user has not touched keyboard or mouse for ``idle_sec`` seconds (``idle_gate``);
     until then it asks again every POSTPONE_RETRY_SEC.  ``full_check_sec`` forces a full check
     even when nothing changed, so a badge that is not recognised delays a request that long at most.
+
+    It accepts at most ``daily_max`` (AUTO_ACCEPT_DAILY_MAX) a day (this computer's calendar day), then
+    rests until the next day; what WeChat says when it holds the account back (``AcceptResult.risk``), or
+    a request that stays pending STUCK_RUNS checks in a row, pauses it until it is switched on again
+    (``enable``: the admin's 自动同意好友 开).  ``notify(text)`` tells the admin (once per day for the cap).
+    The day's count and a pause are kept in ``state_path`` (JSON), so a restart does not start over.
     """
 
     def __init__(
@@ -993,6 +1085,10 @@ class AutoFriendService:
         watch: bool = True,
         full_check_sec: float = 900,
         clock: Callable[[], float] = time.monotonic,
+        daily_max: int = DAILY_MAX_DEFAULT,
+        state_path=None,
+        notify: Callable[[str], object] | None = None,
+        wall_clock: Callable[[], float] = time.time,
     ):
         self._manager = friend_manager
         self._interval = max(MIN_INTERVAL_SEC, int(interval_sec))
@@ -1008,16 +1104,126 @@ class AutoFriendService:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._state_lock = threading.Lock()
+        self._daily_max = max(1, int(daily_max))
+        self._state_path = Path(state_path) if state_path else None
+        self._notify = notify
+        self._wall_clock = wall_clock
+        self._day_lock = threading.Lock()
+        self._day = self._load_day()
 
     @property
     def enabled(self) -> bool:
         return self._enabled
 
     def enable(self) -> None:
-        """Switch on; also starts the worker if it was never started (the config had it off)."""
+        """Switch on (a pause after a risk prompt is lifted: the admin decided); also starts the worker if it
+        was never started (the config had it off).  The day's count stays: WeChat counts the day, not us."""
+        with self._day_lock:
+            if self._day.get("paused") or self._day.get("stuck"):
+                self._day["paused"] = None
+                self._day["stuck"] = 0
+                self._save_day()
         self._enabled = True
         self.start()
         logger.info("AutoFriendService enabled")
+
+    # ── the day's count and a pause (kept in state_path) ───────────────
+
+    def _today(self) -> str:
+        return time.strftime("%Y-%m-%d", time.localtime(self._wall_clock()))
+
+    def _load_day(self) -> dict:
+        day = {"day": "", "accepted": 0, "cap_told": False, "paused": None, "stuck": 0}
+        if self._state_path is not None and self._state_path.is_file():
+            try:
+                saved = json.loads(self._state_path.read_text(encoding="utf-8"))
+                if isinstance(saved, dict):
+                    day.update({k: saved[k] for k in day if k in saved})
+            except (OSError, ValueError):
+                logger.warning("AutoFriendService: %s could not be read; starting the day's count afresh",
+                               self._state_path)
+        return day
+
+    def _save_day(self) -> None:
+        if self._state_path is None:
+            return
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._state_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._day, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, self._state_path)
+        except OSError:
+            logger.warning("AutoFriendService: %s could not be written", self._state_path, exc_info=True)
+
+    def _roll_day(self) -> None:
+        today = self._today()
+        if self._day.get("day") != today:
+            self._day.update(day=today, accepted=0, cap_told=False)
+
+    def accepted_today(self) -> int:
+        with self._day_lock:
+            self._roll_day()
+            return int(self._day.get("accepted") or 0)
+
+    def status_note(self) -> str:
+        """For 查状态 and the switch's answer: where the day stands, or why it is paused."""
+        with self._day_lock:
+            self._roll_day()
+            paused = self._day.get("paused")
+            accepted = int(self._day.get("accepted") or 0)
+        if paused:
+            return f"已暂停：{paused.get('why', '')}；发「自动同意好友 开」恢复"
+        if accepted >= self._daily_max:
+            return f"今天已自动同意 {accepted} 个，到了上限 {self._daily_max}，明天继续"
+        return f"今天已自动同意 {accepted}/{self._daily_max}"
+
+    def pause(self, why: str, tell: bool = True) -> None:
+        """Stop accepting until switched on again (``enable``), also after a restart; ``tell``: the admin hears it."""
+        with self._day_lock:
+            self._day["paused"] = {"at": self._wall_clock(), "why": str(why)[:200]}
+            self._save_day()
+        logger.warning("AutoFriendService paused: %s", why)
+        if tell:
+            self._tell(f"自动同意好友已暂停：{why}。先别再加好友、同意好友，过几个小时再看；"
+                       "要恢复自动同意，发「自动同意好友 开」。")
+
+    def _tell(self, text: str) -> None:
+        if self._notify is None:
+            return
+        try:
+            self._notify(text)
+        except Exception:
+            logger.warning("AutoFriendService: the admin could not be told", exc_info=True)
+
+    def _count(self, result) -> None:
+        """Add a check's accepts to the day; a risk prompt or a request stuck STUCK_RUNS checks in a row
+        pauses; reaching the cap tells the admin (once a day)."""
+        risk = getattr(result, "risk", "")
+        risk = risk if isinstance(risk, str) else ""
+        stuck = getattr(result, "stuck", False) is True
+        with self._day_lock:
+            self._roll_day()
+            self._day["accepted"] = int(self._day.get("accepted") or 0) + len(result)
+            self._day["stuck"] = 0 if len(result) or not stuck else int(self._day.get("stuck") or 0) + 1
+            stuck_runs = self._day["stuck"]
+            self._save_day()
+        if risk:
+            self.pause(f"微信提示「{risk}」，可能是操作太频繁被限制了")
+        elif stuck_runs >= STUCK_RUNS:
+            self.pause(f"连续 {STUCK_RUNS} 次点了「接受」申请还在（可能是微信在限制，也可能是界面识别出了问题，详见日志）")
+        self._tell_cap()
+
+    def _tell_cap(self) -> None:
+        with self._day_lock:
+            accepted = int(self._day.get("accepted") or 0)
+            if accepted < self._daily_max or self._day.get("cap_told"):
+                return
+            self._day["cap_told"] = True
+            self._save_day()
+        logger.info("AutoFriendService: %d accepted today, the daily cap %d: resting until tomorrow",
+                    accepted, self._daily_max)
+        self._tell(f"自动同意好友：今天已自动同意 {accepted} 个申请，到了每天的上限 {self._daily_max}"
+                   "（AUTO_ACCEPT_DAILY_MAX），今天不再自动同意，明天自动继续。还有申请的话可以发「同意好友」手动同意。")
 
     def disable(self) -> None:
         self._enabled = False
@@ -1049,6 +1255,15 @@ class AutoFriendService:
         """
         if not self._enabled:
             return []
+        with self._day_lock:
+            self._roll_day()
+            paused = bool(self._day.get("paused"))
+            remaining = self._daily_max - int(self._day.get("accepted") or 0)
+        if paused:
+            return []                          # until the admin switches it on again
+        if remaining <= 0:
+            self._tell_cap()
+            return []                          # the day's cap: the window is not touched
         try:
             if self._watch and not self._full_check_due() and self._manager.look_for_news() == RailWatcher.UNCHANGED:
                 self._postponed_since = None
@@ -1066,7 +1281,7 @@ class AutoFriendService:
                             self._clock() - self._postponed_since)
             self._postponed_since = None
             self.postponed = False
-            accepted = self._manager.accept_friend_requests()
+            accepted = self._manager.accept_friend_requests(limit=remaining)
             self._last_full_check = self._clock()
             self._mark_own_input()
         except Exception:
@@ -1074,6 +1289,7 @@ class AutoFriendService:
             return []
         if accepted:
             logger.info("AutoFriendService: accepted %d friend request(s)", len(accepted))
+        self._count(accepted)
         return accepted
 
     def _full_check_due(self) -> bool:
