@@ -363,10 +363,11 @@ class FriendManager:
         self._sleep(0.15)
         self._combo(hwnd, VK_CONTROL, VK_V, exact)
 
-    def _click_at(self, hwnd: int, x: int, y: int, required: bool = True) -> bool:
-        """A click at a position of a dialog of its own, only while that very window is in front.
-        ``required``: a click that is not delivered stops the action; otherwise it is reported."""
-        self._foreground(hwnd, exact=True)
+    def _click_at(self, hwnd: int, x: int, y: int, required: bool = True, exact: bool = True) -> bool:
+        """A click at a position of a dialog of its own, only while that very window is in front (``exact``;
+        otherwise a window of WeChat's process will do: a click only moves the focus, the keys after it are
+        checked exactly).  ``required``: a click that is not delivered stops the action; otherwise it is reported."""
+        self._foreground(hwnd, exact)
         delivered = bool(self._clicker(x, y))
         if not delivered and required:
             raise _Abort("the click was not delivered")
@@ -855,9 +856,10 @@ class FriendManager:
 
     def _add_friend_wechat4(self, hwnd: int, keyword: str, message: str) -> dict:
         """WeChat 4.0: the add-friend window and the application window are windows of their own.  Every key
-        and click goes to one of them only while that very window is in front (a chat open in a window of its
-        own belongs to the same process); the application window is one that appears after the click on
-        「添加到通讯录」, titled exactly 「申请添加朋友」.  When the action stops, both are closed."""
+        and paste goes to one of them only while that very window is in front (a chat open in a window of its
+        own belongs to the same process; a click only moves the focus, so WeChat in front is enough for it, as
+        before); the application window is one that appears after the click on 「添加到通讯录」, titled exactly
+        「申请添加朋友」.  When the action stops, both are closed."""
         dialog_hwnd = self._open_add_friend_dialog_wechat4(hwnd)
         if not dialog_hwnd:
             return _failure(keyword, "no_window", "无法打开微信「添加朋友」窗口")
@@ -871,7 +873,7 @@ class FriendManager:
 
             input_x = d_rect[0] + int(0.35 * w)
             input_y = d_rect[1] + int(0.118 * h)
-            self._click_at(dialog_hwnd, input_x, input_y)       # the search input box
+            self._click_at(dialog_hwnd, input_x, input_y, exact=False)   # the search input box
             self._sleep(0.2)
 
             self._combo(dialog_hwnd, VK_CONTROL, VK_A, exact=True)
@@ -905,7 +907,7 @@ class FriendManager:
                 return _failure(keyword, "no_add_button", f"没有找到「{keyword}」的「添加到通讯录」按钮，已中止")
 
             before = self._window_snapshot(hwnd)                 # the application window appears after the click
-            self._click_row(dialog_hwnd, add_button, exact=True)
+            self._click_row(dialog_hwnd, add_button)
             self._sleep(0.8)
 
             # 3. Application modal dialog
@@ -933,7 +935,7 @@ class FriendManager:
                     # Focus the greeting input box near top (cx=0.30, cy=0.18)
                     input_x = a_rect[0] + int(0.30 * a_w)
                     input_y = a_rect[1] + int(0.18 * a_h)
-                    if self._click_at(apply_hwnd, input_x, input_y, required=False):
+                    if self._click_at(apply_hwnd, input_x, input_y, required=False, exact=False):
                         self._sleep(0.1)
                         self._combo(apply_hwnd, VK_CONTROL, VK_A, exact=True)
                         self._sleep(0.05)
@@ -943,12 +945,12 @@ class FriendManager:
                         self._sleep(0.2)
 
                 if send_button:
-                    self._click_row(apply_hwnd, send_button, exact=True)
+                    self._click_row(apply_hwnd, send_button)
                 else:
                     # Default position for WeChat 4.0 green "确定" button (cx=0.337, cy=0.933)
                     btn_x = a_rect[0] + int(0.337 * a_w)
                     btn_y = a_rect[1] + int(0.933 * a_h)
-                    self._click_at(apply_hwnd, btn_x, btn_y, required=False)
+                    self._click_at(apply_hwnd, btn_x, btn_y, required=False, exact=False)
                 self._sleep(0.2)
                 self._key(apply_hwnd, 0x0D, exact=True)
                 self._sleep(1.0)
@@ -971,7 +973,7 @@ class FriendManager:
                     self._sleep(0.05)
                     self._paste(target_dialog, message, exact=True)
                     self._sleep(0.3)
-                self._click_row(target_dialog, send_button, exact=True)
+                self._click_row(target_dialog, send_button)
                 self._sleep(0.8)
                 if _still_there(self._capture_ocr(target_dialog), send_button):
                     self._close_window(dialog_hwnd)

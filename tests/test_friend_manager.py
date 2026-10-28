@@ -1388,6 +1388,35 @@ class ApplyDialogTests(DialogTestCase):
         self.assertEqual(typed_into, {ADD_DIALOG, APPLY})             # never 「小朋友」 (602)
         self.assertEqual(self.window.pasted, ["wxid_target", "你好呀"])
 
+    def test_a_click_that_brings_the_dialog_forward_is_enough_when_setforegroundwindow_was_not(self):
+        """SetForegroundWindow may be refused; WeChat's main window is in front, so the click on the search box
+        goes ahead (it only moves the focus) and brings the dialog forward: then the keys are allowed."""
+        add_button = row("添加到通讯录", 0.4, 0.8, 0.6, 0.9)
+        ocr = FakeOcr([add_button], [row("发送添加朋友申请", 0.1, 0.1, 0.5, 0.2)], [])
+        manager = self.make(ocr)
+        self.desktop.add(ADD_DIALOG, title="添加朋友", rect=(200, 100, 600, 800))
+        self.focusable = False
+        self.window.front = HWND                                       # the main window, as after the menu
+        manager._close_window = lambda h: self.desktop.windows.pop(h, None)
+
+        def search_box_clicked():
+            self.window.front = ADD_DIALOG                            # Windows activates the clicked window
+
+        def application_opens():
+            self.desktop.add(APPLY, title="申请添加朋友", rect=(200, 100, 600, 900))
+            self.window.front = APPLY                                 # WeChat activates its new window
+
+        self.desktop.on_click = [search_box_clicked, application_opens]
+        manager._open_add_friend_dialog_wechat4 = lambda hwnd: ADD_DIALOG
+        manager._is_window_visible = lambda h: h in self.desktop.windows
+        gui = self.desktop.modules()
+        gui["win32gui"].GetForegroundWindow.side_effect = lambda: self.window.front
+        with patch.object(friend_manager, "sys", SimpleNamespace(platform="win32")), \
+             patch.dict("sys.modules", gui):
+            result = manager._add_friend_wechat4(HWND, "wxid_target", "你好呀")
+        self.assertTrue(result["ok"], result)
+        self.assertEqual({e[-1] for e in self.events if e[0] in ("key", "combo")}, {ADD_DIALOG, APPLY})
+
     def test_an_application_window_that_is_not_in_front_gets_nothing_and_both_dialogs_close(self):
         with self.assertRaises(friend_manager._Abort):
             self.add_friend(apply_comes_forward=False)
