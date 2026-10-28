@@ -39,6 +39,7 @@ import signal
 import subprocess
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Callable, Optional
@@ -2798,6 +2799,207 @@ def _execute_jst(action: dict, cfg: dict, plan: dict, run_one, record: dict, cat
         line = "；".join(t for t in (f"聚水潭寄样单 {number}" if number else "", _clip(note or "", 300)) if t)
         if line:
             record["problems"].append(line)
+
+
+# ── 聚水潭: where sample orders stand (`jst samples`, read-only; the bot's PRM_SAMPLE_SYNC_MIN) ──
+# The bot asks now and then about the sample orders it made (verified) that were not signed for or deleted
+# yet, in one job a batch (op "sample_status"); the worker runs this without the model, under the CLI lock.
+# Without --raw the CLI prints no receiver; of what it prints only the status, the couriers and waybills,
+# when it was sent and signed for and why it was rejected or deleted are kept (not the creator's nickname,
+# not the products).
+
+SAMPLE_STATES = {"INIT": "待审核", "WAITING_SEND": "待发货", "SENT": "已发货", "SIGNED": "已签收", "DELETED": "已删除"}
+# Why a sample-status job stopped (``stopped.verdict``): the CLI's exit (77 / 76 / 79, 2), a CLI that is not
+# there, the CLI lock not to be had, the job cancelled while it waited, anything else.
+SAMPLE_STOPS = ("login", "wall", "wrong_account", "invalid", "unavailable", "busy", "cancelled", "error")
+SAMPLES_BATCH = 20          # order numbers one `samples` call asks about
+SAMPLES_PAGE = 50           # its --page-size: every order asked about fits on the first page
+SAMPLES_GAP_SEC = 4.0       # between two calls (the CLI's own `find --pages` waits 4 s between its pages)
+MAX_SAMPLE_ORDERS = 200     # order numbers one job asks about
+MAX_SAMPLE_SHIPS = 5        # waybills kept of one order
+SAMPLE_REASON_CHARS = 200
+_WAYBILL = re.compile(r"^[A-Za-z0-9-]{6,30}$")              # a waybill as deals.py takes one
+_SAMPLE_STATUS = re.compile(r"^[A-Z][A-Z_]{0,29}$")
+_BEIJING = timezone(timedelta(hours=8))                      # 聚水潭's times without a zone
+_JST_TIME = re.compile(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[ T](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?:\.\d{1,6})?)?"
+                       r"\s*(Z|[+-]\d{2}:?\d{2})?$")
+
+
+def jst_time(value) -> Optional[float]:
+    """A time as 聚水潭 gives it, in epoch seconds (None when it is none or makes no sense): "2026-10-23 21:35:22"
+    (Beijing time unless it names its zone), an ISO time, or epoch seconds / milliseconds (a number or digits)."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    else:
+        text = str(value).strip()
+        if re.fullmatch(r"\d{9,13}(?:\.\d+)?", text):
+            number = float(text)
+        else:
+            m = _JST_TIME.match(text)
+            if not m:
+                return None
+            year, month, day, hour, minute, second, zone = m.groups()
+            try:
+                if zone is None:
+                    tz = _BEIJING
+                elif zone == "Z":
+                    tz = timezone.utc
+                else:
+                    digits = zone[1:].replace(":", "")
+                    offset = timedelta(hours=int(digits[:2]), minutes=int(digits[2:]))
+                    tz = timezone(-offset if zone[0] == "-" else offset)
+                return datetime(int(year), int(month), int(day), int(hour or 0), int(minute or 0), int(second or 0),
+                                tzinfo=tz).timestamp()
+            except (ValueError, OverflowError):
+                return None
+    if number != number:                        # NaN
+        return None
+    if number > 1e11:                           # milliseconds
+        number /= 1000.0
+    return number if 1e9 <= number < 4.1e9 else None
+
+
+def _carrier(value) -> str:
+    """A courier's name as a deal keeps it (deals.add_shipment: 1–20 characters, one line)."""
+    text = " ".join(str(value if value is not None else "").split())
+    return "" if _CONTROL.search(text) else text[:20]
+
+
+def sample_info(row) -> Optional[dict]:
+    """What the bot needs of one row of `jst samples` (the CLI's projectSample): ``{"order_no", "status", "ships":
+    [{"carrier", "waybill", "sent_at"}], "sent_at", "signed_at", "reason"}``, the waybills that look like one, each
+    once, the earliest sent first; None for a row without an order number.  The creator, the products and the shop
+    of the row are left out."""
+    if not isinstance(row, dict):
+        return None
+    number = str(row.get("orderNo") or "").strip()
+    if not _ORDER_NO.match(number):
+        return None
+    status = str(row.get("status") or "").strip().upper()
+    ships, seen = [], set()
+    for erp in row.get("erpOrders") if isinstance(row.get("erpOrders"), list) else []:
+        if not isinstance(erp, dict):
+            continue
+        waybill = str(erp.get("logisticsNo") or "").strip()
+        if not _WAYBILL.match(waybill) or waybill in seen:
+            continue
+        seen.add(waybill)
+        ships.append({"carrier": _carrier(erp.get("logisticsCompany")), "waybill": waybill,
+                      "sent_at": jst_time(erp.get("sendTime"))})
+    ships.sort(key=lambda s: (s["sent_at"] is None, s["sent_at"] or 0))
+    return {"order_no": number, "status": status if _SAMPLE_STATUS.match(status) else "",
+            "ships": ships[:MAX_SAMPLE_SHIPS], "sent_at": jst_time(row.get("sendTime")),
+            "signed_at": jst_time(row.get("signTime")),
+            "reason": _clip(row.get("rejectReason") or "", SAMPLE_REASON_CHARS)}
+
+
+def samples_argv(cfg: dict, order_nos: list) -> list:
+    """One read of `jst samples`: these order numbers (no --raw: no receiver), the sub-account checked (79)."""
+    who = [f"--expect-uid={cfg['jst_expect_uid']}"] if cfg.get("jst_expect_uid") else []
+    return [cfg["node"], CLI_FILES["jst"], "samples", "--order-no=" + ",".join(order_nos),
+            f"--page-size={SAMPLES_PAGE}", *who]
+
+
+def sample_result(asked: list, **fields) -> dict:
+    """The answer of a sample-status job as the worker hands it back (the bot reads it with check_sample_result):
+    ``orders`` {order number: ``sample_info``}, ``missing`` (asked, not in 聚水潭's answer), ``not_asked`` (left
+    when it stopped), ``stopped`` (None, or why: ``{"verdict", "exit_code", "message"}``), ``calls``."""
+    out = {"version": 1, "op": "sample_status", "orders": {}, "missing": [], "not_asked": [], "stopped": None,
+           "calls": 0, "asked": len(asked), "checked_at": time.time()}
+    out.update(fields)
+    return out
+
+
+def sample_statuses(cfg: dict, order_nos, *, heartbeat=None, sleep: Callable[[float], None] = time.sleep,
+                    gap: float = SAMPLES_GAP_SEC) -> dict:
+    """Where these sample orders stand in 聚水潭 (``sample_result``): `jst samples --order-no=…` (read-only, no
+    receiver) for ``SAMPLES_BATCH`` of them at a time, ``gap`` seconds between two calls, each call interrupted when
+    the job is cancelled (``heartbeat``).  A call that ends in 77 (login), 76 (risk), 79 (another sub-account), 2 or
+    any other failure stops it there, as it is: ``stopped`` says why, the orders not asked yet are ``not_asked``;
+    nothing is tried again (the bot asks again in its next round)."""
+    asked = list(dict.fromkeys(str(n).strip() for n in order_nos or [] if _ORDER_NO.match(str(n).strip())))
+    asked = asked[:MAX_SAMPLE_ORDERS]
+    out = sample_result(asked)
+    if "jst" not in cfg.get("dirs", {}):
+        out["stopped"] = {"verdict": "unavailable", "exit_code": None,
+                          "message": cfg.get("missing", {}).get("jst")
+                          or "这台 Mac 的 config.json 里没有配置聚水潭的命令行项目（platforms.jst）"}
+        out["not_asked"] = asked
+        return out
+    batches = [asked[i:i + SAMPLES_BATCH] for i in range(0, len(asked), SAMPLES_BATCH)]
+    for n, batch in enumerate(batches):
+        if n:
+            sleep(gap)
+        run = run_cli(samples_argv(cfg, batch), cfg["dirs"]["jst"], timeout=cfg.get("preview_timeout_sec",
+                                                                                    PREVIEW_TIMEOUT_SEC),
+                      env=cli_env(cfg), heartbeat=heartbeat, interruptible=True)
+        out["calls"] += 1
+        data = parse_json(run.stdout)
+        if (run.exit_code != 0 or run.error or run.stopped or not isinstance(data, dict)
+                or not isinstance(data.get("rows"), list)):
+            if run.stopped == "cancelled":
+                verdict = "cancelled"
+            else:
+                verdict = _EXIT_VERDICT.get(run.exit_code) or ("invalid" if run.exit_code == 2 else "error")
+            failed = run.exit_code or run.error or run.stopped
+            out["stopped"] = {"verdict": verdict, "exit_code": run.exit_code,
+                              "message": _exit_problem(run) if failed else "命令没有输出寄样单列表"}
+            out["not_asked"] = [no for rest in batches[n:] for no in rest]
+            break
+        for row in data["rows"]:
+            info = sample_info(row)
+            if info is not None and info["order_no"] in batch:
+                out["orders"][info.pop("order_no")] = info
+        out["missing"] += [no for no in batch if no not in out["orders"]]
+    out["checked_at"] = time.time()
+    return out
+
+
+def check_sample_result(value, asked=None) -> dict:
+    """The Mac's answer to a sample-status job, checked and cut to what the bot uses (``ActionError`` when it is
+    none): only order numbers it asked about (``asked``), statuses as words, waybills as deals.py takes them, each
+    once, times as numbers, reasons short; ``stopped`` with a known verdict (else ``error``)."""
+    if not isinstance(value, dict) or value.get("op") != "sample_status":
+        raise _err("bad_result", "寄样单状态的结果格式不对")
+    wanted = None if asked is None else {str(n) for n in asked}
+
+    def fits(number) -> bool:
+        return isinstance(number, str) and bool(_ORDER_NO.match(number)) and (wanted is None or number in wanted)
+
+    def when(v) -> Optional[float]:
+        ok = isinstance(v, (int, float)) and not isinstance(v, bool) and 1e9 <= v < 4.1e9
+        return float(v) if ok else None
+
+    orders = {}
+    for number, info in (value.get("orders") if isinstance(value.get("orders"), dict) else {}).items():
+        if not fits(number) or not isinstance(info, dict):
+            continue
+        status = str(info.get("status") or "").strip().upper()
+        ships = []
+        for ship in info.get("ships") if isinstance(info.get("ships"), list) else []:
+            waybill = str(ship.get("waybill") or "").strip() if isinstance(ship, dict) else ""
+            if not _WAYBILL.match(waybill) or any(s["waybill"] == waybill for s in ships):
+                continue
+            ships.append({"carrier": _carrier(ship.get("carrier")), "waybill": waybill, "sent_at": when(ship.get("sent_at"))})
+        orders[number] = {"status": status if _SAMPLE_STATUS.match(status) else "", "ships": ships[:MAX_SAMPLE_SHIPS],
+                          "sent_at": when(info.get("sent_at")), "signed_at": when(info.get("signed_at")),
+                          "reason": _clip(info.get("reason") or "", SAMPLE_REASON_CHARS)}
+    stopped = value.get("stopped")
+    if isinstance(stopped, dict):
+        code = stopped.get("exit_code")
+        stopped = {"verdict": stopped.get("verdict") if stopped.get("verdict") in SAMPLE_STOPS else "error",
+                   "exit_code": code if _is_int(code) else None, "message": _clip(stopped.get("message") or "", 300)}
+    else:
+        stopped = None
+
+    def listed(key: str) -> list:
+        items = value.get(key) if isinstance(value.get(key), list) else []
+        return [n for n in dict.fromkeys(i for i in items if isinstance(i, str)) if fits(n) and n not in orders]
+
+    return {"version": 1, "op": "sample_status", "orders": orders, "missing": listed("missing"),
+            "not_asked": listed("not_asked"), "stopped": stopped, "checked_at": when(value.get("checked_at"))}
 
 
 # ── the registries ────────────────────────────────────────────────────────

@@ -320,6 +320,28 @@ def jst_blocked(*reasons) -> dict:
     return {"outcome": "FAILED", **jst_view(), "blocked": list(reasons), "note": "有问题，什么都没发"}
 
 
+def jst_sample_row(order=JST_ORDER, status="INIT", *, waybills=(), send_time=None, sign_time=None, reject=None) -> dict:
+    """One row of ``jst samples`` without --raw (jushuitan-engineering's projectSample: no receiver), the creator,
+    shop and products in it too (the bot must not keep them).  ``waybills``: ``(company, number, sendTime)``."""
+    return {"orderNo": order, "status": status, "orderType": "SALES_APPLY", "platform": "DY",
+            "applyTime": "2026-10-26 10:00:00", "sendTime": send_time, "signTime": sign_time,
+            "daren": {"darenId": "D1", "platform": "DY", "platformNo": "test_daren_01", "nickName": "测试达人"},
+            "shop": {"shopId": JST_SHOP_DY, "shopName": "测试抖店"},
+            "items": [{"itemCode": "T100-RED-M", "styleCode": "T100", "name": "测试主品", "sku": "红色/M", "count": 1,
+                       "sent": 1 if waybills else 0, "signed": 1 if status == "SIGNED" else 0, "price": 19.99,
+                       "status": status}],
+            "totalCount": 1,
+            "erpOrders": [{"erpOrderNo": f"E{i}", "logisticsCompany": company, "logisticsNo": number, "sendTime": sent}
+                          for i, (company, number, sent) in enumerate(waybills, 1)],
+            "rejectReason": reject}
+
+
+def jst_samples(*rows, total=None, has_next=False) -> dict:
+    """What ``jst samples`` prints (exit 0): ``{command, total, hasNext, rows, sensitive}``."""
+    return {"command": "samples", "total": len(rows) if total is None else total, "hasNext": has_next,
+            "rows": list(rows), "sensitive": False}
+
+
 def jst_done(outcome="VERIFIED_SUCCESS", order=JST_ORDER, note="") -> dict:
     out = {"outcome": outcome, **jst_view(receiver={**jst_view()["receiver"], "phone": "139****1111"}),
            "done": ["新增收货地址", "提交寄样单"], "checks": [],
