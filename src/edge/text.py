@@ -20,6 +20,8 @@ APPMSG_LABELS = {
 _NO_TITLE = {"2000", "2001", "8"}             # 转账 / 红包 / 表情: the title says nothing useful
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
 SYSTEM_TYPE = 10000
+SYSTEM_TYPES = (SYSTEM_TYPE, 10002)          # WeChat's own lines (10002: the sysmsg XML of older versions)
+RECALL_MARK = "撤回了一条消息"
 
 
 def msg_type_of(msg: dict) -> int:
@@ -34,7 +36,17 @@ def is_reply(msg: dict) -> bool:
 
 
 def is_notice(msg: dict) -> bool:
-    return msg_type_of(msg) == SYSTEM_TYPE
+    """One of WeChat's own lines in the chat (a recall, 拍一拍, a red packet notice …): nobody's words."""
+    return msg_type_of(msg) in SYSTEM_TYPES
+
+
+def recall_by(text: str) -> str:
+    """Who took a message back, by WeChat's line: "us" (「你撤回了一条消息」), "them" (「"小美" 撤回了
+    一条消息」, 「对方撤回了一条消息」), or "" when the line is no recall."""
+    line = " ".join(str(text or "").split())
+    if RECALL_MARK not in line:
+        return ""
+    return "us" if line.startswith("你") else "them"
 
 
 def _title(msg: dict) -> str:
@@ -72,7 +84,7 @@ def message_text(msg: dict) -> str:
         label = APPMSG_LABELS.get(kind, "消息")
         title = "" if kind in _NO_TITLE else _title(msg)
         return f"[{label}] {title}".strip()
-    if msg_type == SYSTEM_TYPE:
+    if msg_type in SYSTEM_TYPES:
         return notice_text(msg)
     return content if content and not content.startswith("[消息类型") else f"[消息类型:{msg_type}]"
 

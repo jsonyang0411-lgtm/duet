@@ -558,6 +558,29 @@ class PrmStore:
             self._conn.commit()
             return cur.rowcount
 
+    def hold_for_review(self, deal_id: int, reason: str, now: Optional[float] = None) -> int:
+        """The Mac's drafts of this deal that have not gone out wait for a person, ``reason`` first in
+        theirs (``needs_attention``): a waiting one stays waiting, a plain reply its gate approved and
+        not being sent yet goes back to waiting (``review``).  Not the bot's own shipping notices (a
+        template).  Returns how many."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, status, reason FROM action_packets WHERE deal_id = ? AND job_id IS NOT NULL"
+                " AND (status = ? OR (status = ? AND route = 'auto' AND tool = ?))",
+                (deal_id, PENDING, APPROVED, MESSAGE_TOOL),
+            ).fetchall()
+            held = 0
+            for row in rows:
+                cur = self._conn.execute(
+                    "UPDATE action_packets SET status = ?, route = 'review', needs_attention = 1, reason = ?,"
+                    " decided_at = CASE WHEN status = ? THEN NULL ELSE decided_at END WHERE id = ? AND status = ?",
+                    (PENDING, "；".join(r for r in (reason, row["reason"]) if r)[:500], APPROVED, row["id"],
+                     row["status"]),
+                )
+                held += cur.rowcount
+            self._conn.commit()
+        return held
+
     def counts(self) -> dict:
         with self._lock:
             rows = self._conn.execute(

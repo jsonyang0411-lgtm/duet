@@ -27,7 +27,8 @@ Registering is always an operator's decision.  When the creator registered is a 
 (src/wechat/new_friends.py found the line WeChat writes when two people become friends), her
 messages since she was added, friend-request greeting included, become one draft job that waits
 for a person (``take_new_friend``).  WeChat's friend notices (「我通过了你的朋友验证请求…」 in her
-name, 「你已添加了…」) are never drafted.
+name, 「你已添加了…」) are never drafted, nor are its other lines in her chat (type 10000: a recall,
+拍一拍, a red packet notice; ``_system_line``): her recall puts the drafts not sent yet before a person.
 
 A draft with a platform action (platforms.py: 小红书 / 抖音 / 淘宝 CLIs on the Mac) comes
 with the Mac's preview of it and always waits for a person, whatever its kind's gate; so does
@@ -54,6 +55,7 @@ from collections import deque
 from pathlib import Path
 from typing import Callable, Optional
 
+from ..edge import text as edge_text
 from ..relay.attachments import KINDS as ATTACHMENT_KINDS, Held, attachment_kind
 from ..relay.service import MAX_AGE_SEC, job_meta
 from ..relay.store import PRM
@@ -152,6 +154,19 @@ def missed_note(count: int, earliest: float) -> str:
     return f"{count} 条消息在机器人没在读微信时收到（最早 {_clock_text(earliest)}），没有起草，请看一下"
 
 
+def recall_note(at: float) -> str:
+    """The deal's attention (and a draft's reason) when the creator took a message back."""
+    return f"达人撤回了一条消息（{_clock_text(at)}），待审批的草稿可能是按撤回的内容写的，发之前请核对"
+
+
+def system_line(msg: dict) -> Optional[str]:
+    """The words of one of WeChat's own lines in a chat (type 10000 / 10002: a recall, 拍一拍, a red
+    packet or transfer notice …), or None for a line someone wrote.  Their sender is empty, so the
+    Windows backend hands them on as the creator's (win review F1).  WeChat's lines about becoming
+    friends are ``is_friend_notice``'s, handled before this."""
+    return edge_text.notice_text(msg) if edge_text.is_notice(msg) else None
+
+
 def new_friend_note(count: int, earliest: float) -> str:
     """The deal's attention for the draft of a new friend's messages from before she was registered."""
     return (f"新加的好友，登记前发来的 {count} 条消息（最早 {_clock_text(earliest)}，含加好友时的验证消息）"
@@ -193,6 +208,7 @@ EVENT_NAMES = {
     "wrong": "标为发错了", "purge": "清除收件信息", "purge_case": "清除 Mac 案卷里的收件信息",
     "platform_execute": "批准执行平台动作", "platform_result": "平台动作结果",
     "platform_preview": "重新预览平台动作", "platform_ack": "平台动作已处理",
+    "recall": "撤回了一条消息",
 }
 # A creator's message recorded without a draft because it was read too late (PRM_CATCHUP_HOURS).
 MISSED_EVENT_NAME = "机器人没在读时达人的消息（没有起草）"
@@ -203,6 +219,8 @@ def event_out(ev: dict) -> dict:
     detail = dict(ev.get("detail") or {})
     name = (MISSED_EVENT_NAME if ev["kind"] == "creator_message" and detail.get("missed")
             else EVENT_NAMES.get(ev["kind"], ev["kind"]))
+    if ev["kind"] == "recall":
+        name = "运营撤回了一条消息" if detail.get("by") == "operator" else "达人撤回了一条消息"
     return {"id": ev["id"], "kind": ev["kind"], "name": name,
             "actor": ev.get("actor", ""), "at": ev["at"], "detail": detail}
 
@@ -459,8 +477,67 @@ class PrmService:
             # 「我通过了你的朋友验证请求，现在我们可以开始聊天了」 and 「你已添加了…」: WeChat's, not hers
             logger.info("PRM: a friend notice in party %d's chat; not drafted", party["id"])
             return True
+        line = system_line(msg)
+        if line is not None:
+            self._system_line(msg, party, line)            # a recall, 拍一拍 …: WeChat's, not hers either
+            return True
         self._take(msg, party, chat_id)
         return True
+
+    def on_chat_notice(self, chat_id: str, text: str, at: Optional[float] = None, event_id=None) -> None:
+        """Mac 端（edge 后端）：Windows 的微信边缘报来的私聊系统提示（``chat_notice``：撤回、拍一拍…；
+        新好友那几句提示也是这样报的）。和 Windows 本机读到的系统行一样处理（``_system_line``）；
+        新好友的提示照旧不管。"""
+        chat_id = str(chat_id or "")
+        if not self.is_party_chat(chat_id):
+            return
+        party = self._store.party_by_wxid(chat_id)
+        msg = {"chat_id": chat_id, "msg_type": edge_text.SYSTEM_TYPE, "content": str(text or ""),
+               "special": {"kind": "system", "title": str(text or "")}, "timestamp": at or 0, "is_group": False,
+               "edge_event_id": event_id if event_id not in (None, "") else "chat_notice"}
+        if party is None or is_friend_notice(msg):
+            return
+        self._system_line(msg, party, str(text or ""))
+
+    def _system_line(self, msg: dict, party: dict, line: str, own: bool = False) -> None:
+        """One of WeChat's own lines in a creator's chat (win review F1): never a draft, and the drafts
+        waiting stay as they are (it is no new message from her).  Her recall: the drafts not sent yet
+        wait for a person (they may answer what she took back), so does the draft of a job made before
+        it (``on_result``), and the deal says so.  Our own recall (「你撤回了一条消息」, ``own``: handed
+        on as this account's line) is only recorded; any other line (拍一拍, a red packet notice) only
+        logged.  Older than a message of hers would still be drafted (PRM_CATCHUP_HOURS): history."""
+        now = self._clock()
+        written = float(msg.get("timestamp", 0) or 0) or now
+        age = now - written
+        if age > MAX_AGE_SEC and ((not self._catchup_sec and not _queued(msg))
+                                  or (self._catchup_sec and age > self._catchup_sec)):
+            return
+        who = edge_text.recall_by(line)
+        if not who:
+            logger.info("PRM: a WeChat system line in party %d's chat; not drafted", party["id"])
+            return
+        ours = own or who == "us"
+        with self._handle_lock:
+            deal = self._store.deal_of(party["id"], now)
+            self._store.add_event(deal["id"], party["id"], "recall", {"by": "operator" if ours else "creator",
+                                                                       "at": written},
+                                  actor="operator" if ours else "creator", now=now)
+            if ours:
+                logger.info("PRM: an operator recalled a line in party %d's chat; recorded", party["id"])
+                return
+            note = recall_note(written)
+            held = self._store.hold_for_review(deal["id"], note, now)
+            self._store.update_deal(deal["id"], now, attention="；".join(
+                t for t in (note, deal.get("attention") or "") if t)[:300])
+        logger.info("PRM: party %d recalled a message; %d draft(s) not sent yet wait for a person", party["id"], held)
+
+    def _recalled_since(self, deal_id: int, since: float) -> Optional[float]:
+        """When the creator took a message back, if her latest recall came at ``since`` or later (a draft
+        job made before it may hold what she recalled); else None."""
+        for ev in self._store.events(deal_id, limit=10, kinds=("recall",)):
+            if ev["detail"].get("by") == "creator":
+                return float(ev["detail"].get("at") or ev["at"]) if float(ev["at"]) >= since else None
+        return None
 
     def _take(self, msg: dict, party: dict, chat_id: str) -> None:
         """``handle`` for a registered creator's message.  What is recorded and the job it joins
@@ -635,6 +712,10 @@ class PrmService:
             if not _queued(msg):
                 return                                     # history (a chat read for the first time)
             late = False                                   # Windows' queue never replays history
+        line = system_line(msg)
+        if line is not None:                               # 「你撤回了一条消息」…: WeChat's, no takeover
+            self._system_line(msg, party, line, own=True)
+            return
         with self._handle_lock:
             self._own_line(msg, party, chat_id, now, sent_at, late)
 
@@ -939,6 +1020,9 @@ class PrmService:
         stepless = ("开专属佣金这一步的草稿没带平台动作，平台上什么都不会做；回复要是说开好了，发之前请核对"
                     if lane == LANE_SYSTEM and draft.platform is None and not refused
                     and (draft.reply_draft or attachments) else "")
+        # She took a message back after this job was made: the draft may answer what she recalled.
+        recalled = self._recalled_since(deal_id, float(job.get("created_at") or 0))
+        recall = recall_note(recalled) if recalled is not None else ""
         route, decided_at = gates.REVIEW, None
         if draft.platform is not None:
             # A platform write: always a person's decision (8.1's gates do not apply).
@@ -949,9 +1033,10 @@ class PrmService:
             state = SUPERSEDED                         # a person has the chat
         elif newer is not None and newer["id"] > job["id"]:
             state = SUPERSEDED                         # the creator wrote again: a newer draft is coming
-        elif notes or lane == LANE_SYSTEM:
-            # Read late: a person decides, whatever the gate.  The bot's own next step too: a 专属佣金
-            # step speaks of a platform write, so it never goes out by a gate (mac review F4).
+        elif notes or recall or lane == LANE_SYSTEM:
+            # Read late, or she recalled something meanwhile: a person decides, whatever the gate.  The
+            # bot's own next step too: a 专属佣金 step speaks of a platform write, so it never goes out
+            # by a gate (mac review F4).
             state = PENDING
         else:
             route, state, decided_at = deals.route_for(
@@ -970,14 +1055,15 @@ class PrmService:
             deal_id=deal_id, party_id=party_id, job_id=job["id"], chat_id=job["chat_id"],
             kind=draft.message_kind, text=draft.reply_draft, attachments=attachments, intent=draft.intent,
             slots=draft.slots, stage_proposal=draft.stage_proposal,
-            needs_attention=draft.needs_attention or bool(short) or bool(refused) or bool(stepless),
-            reason="；".join(r for r in (refused, stepless, short, draft.reason) if r)[:500],
+            needs_attention=draft.needs_attention or bool(short) or bool(refused) or bool(stepless) or bool(recall),
+            reason="；".join(r for r in (recall, refused, stepless, short, draft.reason) if r)[:500],
             status=state, route=route, decided_at=decided_at, meta=packet_meta,
             tool=tool, platform=platform, now=now,
         )
         if state in (PENDING, APPROVED):
             self._store.supersede(deal_id, now, keep=packet_id, lane=lane)
-        attention = [*notes, *([draft.reason] if draft.needs_attention and draft.reason else [])]
+        attention = [*notes, *([recall] if recall else []),
+                     *([draft.reason] if draft.needs_attention and draft.reason else [])]
         if lane == LANE_SYSTEM and state == SUPERSEDED:
             attention.append(f"#{job['id']} 开专属佣金这一步的草稿没进待审批（人工接管中，或者又有了新的一步），请运营核对")
         if short:
@@ -1053,7 +1139,8 @@ class PrmService:
         party = self._store.party_by_wxid(chat_id)
         if party is None:
             return 0
-        picked = [m for m in messages or [] if not m.get("is_group", False) and not is_friend_notice(m)]
+        picked = [m for m in messages or [] if not m.get("is_group", False) and not is_friend_notice(m)
+                  and system_line(m) is None]
         if not picked:
             logger.info("PRM: party %d is a new friend with no messages from before the registration", party["id"])
             return 0

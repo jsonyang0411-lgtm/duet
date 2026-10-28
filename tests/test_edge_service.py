@@ -138,10 +138,22 @@ def test_the_db_id_is_made_with_the_database_and_kept_with_it(tmp_path, clock, w
     ({"msg_type": 49, "file_name": "合同.pdf", "content": "[文件]"}, "[文件] 合同.pdf"),
     ({"msg_type": 49, "content": "这个颜色还有吗", "quoted_content": "色卡", "quoted_server_id": "7"}, "这个颜色还有吗"),
     ({"msg_type": 10000, "special": {"kind": "system", "title": "对方撤回了一条消息"}}, "对方撤回了一条消息"),
+    ({"msg_type": 10002, "content": "[消息类型:10002]"}, "[系统消息]"),
     ({"msg_type": 50, "content": "[消息类型:50]"}, "[消息类型:50]"),
 ], ids=lambda v: str(v)[:40] if isinstance(v, dict) else None)
 def test_every_kind_of_message_has_a_line(message, line):
     assert T.message_text(message) == line
+
+
+def test_wechats_own_lines_are_notices_not_her_words(edge, clock):
+    """A recall or 拍一拍 in a listed chat (type 10000; 10002 in older versions; its sender is empty, so it
+    comes as hers) is a chat_notice, never her message; who recalled is in the words."""
+    edge.handle(msg(clock, "[消息类型:10000]", 10000, special={"kind": "system", "title": '"小美" 撤回了一条消息'}))
+    edge.handle(msg(clock, "[消息类型:10002]", 10002))
+    assert events(edge, P.CREATOR_MESSAGE) == []
+    assert [e["text"] for e in events(edge, P.CHAT_NOTICE)] == ['"小美" 撤回了一条消息', "[系统消息]"]
+    assert [T.recall_by(t) for t in ("你撤回了一条消息", '"小美" 撤回了一条消息', "对方撤回了一条消息", '"小美" 拍了拍我')] == [
+        "us", "them", "them", ""]
 
 
 def test_a_reply_says_whose_line_it_quotes():

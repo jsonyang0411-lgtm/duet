@@ -169,6 +169,23 @@ def test_a_file_from_the_draft_is_uploaded_to_windows(mac, fake, tmp_path):
     assert send["uploads"] == ["合作说明.pdf"] and send["text"] == ""
 
 
+def test_a_recall_windows_reports_puts_the_waiting_draft_before_a_person(mac, fake):
+    """Windows 把私聊里的系统提示报成 chat_notice（不当达人的话）：达人撤回了，等着的草稿改成人审、
+    合作单写提醒；运营撤回只记一笔、不接管；新好友的提示照旧不管（审查 win F1）。"""
+    _, packet = drafted(mac, fake)
+    fake.notice(CREATOR, "对方撤回了一条消息")
+    assert wait_for(lambda: mac.prm.store.packet(packet["id"])["needs_attention"])
+    held = mac.prm.store.packet(packet["id"])
+    assert held["status"] == "pending" and held["reason"].startswith("达人撤回了一条消息")
+    assert mac.prm.store.deal(1)["attention"].startswith("达人撤回了一条消息")
+    fake.notice(CREATOR, "以上是打招呼的消息")
+    fake.notice(CREATOR, "你撤回了一条消息")
+    assert wait_for(lambda: len(mac.prm.store.events(1, kinds=("recall",))) == 2)
+    assert [e["detail"]["by"] for e in mac.prm.store.events(1, kinds=("recall",))] == ["operator", "creator"]
+    assert mac.prm.store.deal(1)["mode"] == "copilot" and len(mac.relay.store.list_jobs()) == 1
+    assert [e["kind"] for e in mac.prm.store.events(1)] == ["recall", "recall"]
+
+
 # ---- 配置 ----
 
 def test_the_mac_relay_only_listens_on_this_mac():

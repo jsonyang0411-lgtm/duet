@@ -174,7 +174,7 @@ GET  /edge/sends/<send_id>
 |---|---|---|
 | `creator_message` | `chat_id`、`message_id`、`msg_type`、`text`、`quote`（可选）、`files` | 名单里的达人发来一条消息 |
 | `operator_message` | `chat_id`、`message_id`、`msg_type`、`text` | 这个微信号在达人私聊里发了一条，而且和发送记录对不上（运营亲手发的，电脑上或手机上） |
-| `chat_notice` | `chat_id`、`text` | 私聊里的系统提示，比如「对方撤回了一条消息」，原样报 |
+| `chat_notice` | `chat_id`、`text` | 私聊里的系统提示（消息类型 10000、10002：撤回、拍一拍、红包和转账的提示…），比如「对方撤回了一条消息」，原样报。Mac 端的 PRM 按文字认撤回：达人撤回的，还没发出去的草稿改成人审、合作单上写提醒；「你撤回了一条消息」（运营撤回）只记一笔；别的提示不起草 |
 | `creator_message_recalled` | `chat_id`、`message_id` | **预留，v1 不发**。摸清微信 4 撤回在数据库里长什么样以后再实现；在那之前，撤回会以 `chat_notice` 报 |
 | `send_result` | `send_id`、`status`、`error` | 一条发送有了结果：`sent`、`failed`、`expired`、`indeterminate` |
 | `send_seen` | `send_id`、`delay_s` | 发出去的这条在微信里读回来了 |
