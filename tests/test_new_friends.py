@@ -621,6 +621,7 @@ def test_registering_a_new_friend_drafts_her_messages_since_she_was_added_once(c
     assert bot.sent == []
 
     # nothing of it is handed on again: not by the next polls, not after a restart
+    assert bot.prm.decide(packet["id"], "send")["ok"] and bot.prm.send_approved() == 1   # (she got the answer)
     bot.poll()
     db.say(NEW, NEW, "收到了吗", clock.now)
     bot.poll()

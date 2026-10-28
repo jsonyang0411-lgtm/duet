@@ -211,7 +211,8 @@ def test_a_restart_hands_on_what_the_creator_wrote_meanwhile_as_one_reviewed_dra
 
     jobs = world.jobs()
     assert len(jobs) == 2                                           # the three missed messages: one job
-    assert text_lines(jobs[1]) == ["在吗", "地址：上海市浦东新区测试路1号", "电话 〈手机1〉"]
+    # (the draft that waited was never sent: her first line goes along, first)
+    assert text_lines(jobs[1]) == ["你好，想合作", "在吗", "地址：上海市浦东新区测试路1号", "电话 〈手机1〉"]
     assert json.loads(jobs[1]["meta"])["late"] == {"from": t0 + 600}
     assert world.stored(CREATOR) == 4                               # each stored under its own id
     assert world.prm_store.packet(waiting["id"])["status"] == "superseded"   # the creator wrote again
