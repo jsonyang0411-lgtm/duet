@@ -15,8 +15,8 @@ from platform_fakes import (
 )
 from src.prm import platforms
 from src.prm.result import DraftError, parse_draft
-from src.prm.service import (APPROVED_EXPIRE_SEC, PLATFORM_LOST_GRACE_SEC, RESTART_HINT, SETTLE_SEC,
-                             apply_deal_action, event_out)
+from src.prm.service import (APPROVED_EXPIRE_SEC, PLATFORM_LOST_GRACE_SEC, RESTART_HINT, RESTART_HINT_CREATED,
+                             SETTLE_SEC, apply_deal_action, event_out)
 from src.relay.service import LOST_AFTER_SEC
 
 DESIGNATED = {"action": "dy.designated_commission", "item_id": DY_ITEM, "creator_platform_id": DY_UID,
@@ -1184,18 +1184,45 @@ def test_a_commission_step_drafted_while_a_person_took_over_is_left_to_them(bot,
 
 
 def test_set_to_created_signing_for_the_sample_later_asks_nothing_more(bot, clock):
-    """PRM_COMMISSION_AFTER=created: the 专属佣金 is asked for when the order is made, so marking the
-    deal 已签收 later does not ask again."""
+    """PRM_COMMISSION_AFTER=created: the 专属佣金 is asked for when the order is made; opened then, marking the
+    deal 已签收 later asks nothing more (nothing is opened twice)."""
     bot.prm._commission_after = "created"
     order = ordered(bot, clock)
     mac_runs(bot, approve(bot, order), record(sample_order_no=JST_ORDER))
     bot.prm.send_approved()
-    step = bot.worker_takes()
+    step, commission = step_drafts(bot, DY_ITEM)
     assert "已经在聚水潭建好" in step["meta"]["system_note"]
-    bot.finish(step["id"], draft(message_kind="other", reply_draft="", slots={}))
-    assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": "delivered"})["ok"]
-    assert bot.worker_takes() is None
-    assert len([j for j in bot.relay.store.list_jobs(20) if "system_note" in j["meta"]]) == 1
+    mac_runs(bot, approve(bot, commission), record())
+    bot.prm.send_approved()
+    final = bot.worker_takes()                                              # 「都开完了」
+    bot.finish(final["id"], draft(message_kind="other", reply_draft="", slots={}))
+    for stage in ("delivered", "transit", "delivered"):
+        assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": stage})["ok"]
+    assert bot.worker_takes() is None and len(system_jobs(bot)) == 2
+
+
+def test_set_to_created_signing_for_it_picks_up_what_the_chain_left(bot, clock):
+    """mac review F3: with PRM_COMMISSION_AFTER=created the remedy (运输中 → 已签收) did nothing, the chain
+    only started when the order was made.  In this mode too a signature after the order starts a new round:
+    what is not open is asked for again, at the first signature and at each one after setting it back; the
+    deal's notice says so in this mode's words."""
+    bot.prm._commission_after = "created"
+    order = ordered(bot, clock)
+    mac_runs(bot, approve(bot, order), record(sample_order_no=JST_ORDER))
+    bot.prm.send_approved()
+    first = bot.worker_takes()
+    bot.finish(first["id"], draft(message_kind="other", reply_draft="", slots={}))   # the chain left it
+    assert f"派过、草稿没开 {DY_ITEM}。{RESTART_HINT_CREATED}" in chain_attention(bot)
+    for stage in ("transit", "delivered"):
+        assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": stage})["ok"]
+    again = bot.worker_takes()
+    assert again is not None and again["id"] != first["id"]
+    note = again["meta"]["system_note"]
+    assert note.startswith(f"达人已经签收了寄样单 {JST_ORDER}") and f"这一份草稿只填商品 {DY_ITEM}" in note
+    bot.finish(again["id"], draft(message_kind="other", reply_draft="", slots={}))
+    for stage in ("transit", "delivered"):                                  # signed for already: set back, again
+        assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": stage})["ok"]
+    assert len(system_jobs(bot)) == 3
 
 
 def test_a_commission_step_waiting_in_review_sends_the_creator_no_holding_reply(bot, clock):

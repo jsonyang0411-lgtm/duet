@@ -1406,11 +1406,13 @@ class PrmService:
     def _examine_delivery(self, deal: dict, now: float, again: bool = False) -> bool:
         """A deal marked 已签收 (``delivered_at``): looked at once per signature (``deal.chain.seen``), in the
         console's ``deal_action`` or, for one marked straight into the database while the bot was stopped,
-        by ``sweep_deliveries`` (mac review F2).  With PRM_COMMISSION_AFTER=delivered a signature that came
-        after the deal's newest verified sample order (``_chain_order``) starts a round of that order's chain
-        (``chain.order``, ``chain.since`` = the signature; what the signature before left is put away) and
-        its first product is asked for (``_chain_next``), unless a bot from before ``deal.chain`` started it
-        already (``_chain_started``).  ``again``: marked 已签收 once more, the signature known already: the
+        by ``sweep_deliveries`` (mac review F2).  A signature that came after the deal's newest verified sample
+        order (``_chain_order``) starts a round of that order's chain (``chain.order``, ``chain.since`` = the
+        signature; what the signature before left is put away) and its first product not open is asked for
+        (``_chain_next``), unless a bot from before ``deal.chain`` started it already (``_chain_started``).
+        With PRM_COMMISSION_AFTER=created the order's verification started a round already (``_start_chain``);
+        a signature starts a new one too (mac review F3: 运输中 → 已签收 did nothing in this mode), but only
+        for a round this bot started for that order (a deal of a bot from before is only looked at).  ``again``: marked 已签收 once more, the signature known already: the
         round goes on if it can (a step that never went out, say).  True when this call started a round."""
         delivered = float(deal.get("delivered_at") or 0)
         if not delivered or deal.get("purged_at"):
@@ -1425,7 +1427,9 @@ class PrmService:
             before = "seen" not in chain          # never looked at: a deal of a bot from before deal.chain
             order = self._chain_order(deal["id"])
             chain["seen"] = delivered
-            start = self._commission_after == "delivered" and order is not None and _order_at(order) <= delivered
+            start = order is not None and _order_at(order) <= delivered and (
+                self._commission_after == "delivered"
+                or (chain.get("since") is not None and chain.get("order") == order["id"]))
             legacy = False
             if start:
                 chain.update(order=order["id"], since=delivered)
@@ -1549,7 +1553,9 @@ class PrmService:
                         and str(theirs.get("item_id") or "") in {i["id"] for i in progress["items"]})
             if not progress["busy"] and (progress["next"] or done) and not (delivered and not deal.get("delivered_at")):
                 head = after if after is not None else progress["order"]
-                self._ask_next_step(head, chain_note(progress, head, delivered=delivered), now, delivered=delivered,
+                # (a round of a signature says so: with PRM_COMMISSION_AFTER=created one may start at the order)
+                signed = bool(deal.get("delivered_at")) and progress["since"] == float(deal["delivered_at"])
+                self._ask_next_step(head, chain_note(progress, head, delivered=signed), now, delivered=delivered,
                                     item=progress["next"] or "")
                 deal = self._store.deal(deal["id"]) or deal
                 progress = self._chain(deal) or progress
@@ -1582,7 +1588,8 @@ class PrmService:
         nothing, once the deal moved on past the sample (``MOVED_ON``: the operators are done with it)."""
         text = ""
         if progress is not None and not (self._commission_after == "delivered" and not deal.get("delivered_at")):
-            text = chain_notice_text(progress, RESTART_HINT, moved_on=deal.get("stage") in MOVED_ON)
+            hint = RESTART_HINT if self._commission_after == "delivered" else RESTART_HINT_CREATED
+            text = chain_notice_text(progress, hint, moved_on=deal.get("stage") in MOVED_ON)
         self._store.set_notice(deal["id"], "chain", text, now)
 
     def _chain_decided(self, packet: dict, now: float) -> None:
@@ -2394,6 +2401,8 @@ ONCE_ACTIONS = ("dy.designated_commission", "xhs.direct_plan", "dy.channel_goods
 REOPEN_HINT = "点「不发」就行（寄样单的专属佣金：系统会接着开还没开的商品）"
 # How a round's products not opened are asked for again (kb/合作政策.md 2.1): a new round, from a new signature.
 RESTART_HINT = "要重开这一轮没开的商品：把物流改回「运输中」再标「已签收」"
+# The same with PRM_COMMISSION_AFTER=created (the round starts when the order is made: a signature starts a new one).
+RESTART_HINT_CREATED = "要重开这一轮没开的商品：标「已签收」时会重开（已经签收的，把物流改回「运输中」再标「已签收」）"
 # A 专属佣金 chain's products as the bot sees them (``item_state``), in the order the Mac and the deal hear them.
 CHAIN_STATES = (("opened", "已开好"), ("running", "正在执行"), ("waiting", "在待审批"), ("drafting", "正在起草"),
                 ("dropped", "这一轮不开（运营点了「不发」）"), ("not_done", "没开成"),
