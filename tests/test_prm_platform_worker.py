@@ -4,6 +4,7 @@ operator's approval runs it with --execute exactly once, and the reply goes out 
 VERIFIED_SUCCESS.  A fake ``claude`` drafts; a fake ``node`` answers like the platform CLIs."""
 
 import json
+import os
 import sys
 import textwrap
 import time
@@ -384,3 +385,69 @@ def test_an_execution_that_breaks_once_its_key_is_taken_is_unknown(worker, bot, 
     else:
         assert executions(mac.node) == [] and job["status"] == "failed"
         assert failed["outcome"] == "platform_not_run"
+
+
+# ── a sample order's receiver in the Mac's platform log: province and city only (mac review C#2) ──
+
+def test_the_platform_log_keeps_a_sample_orders_receiver_to_province_and_city(worker, bot, mac):  # noqa: F811
+    """The log of an execution is kept for good: it used to hold the district, the start of the street and the
+    masked number (the CLI's JSON in a step's raw and the 收货 fact).  Now only the province and the city; what
+    goes back to the bot is all of it (the operators check the order until the 8.2 clean-up)."""
+    from platform_fakes import DY_SKU, JST_SHOP_DY, JST_UID, jst_done, jst_preview
+
+    s = {**mac.settings, **mac.node.settings(jst_shops={"dy": JST_SHOP_DY}, jst_expect_uid=JST_UID, jst_logistics=["SF"])}
+    mac.node.rules([rule(["sample-create"], jst_preview(), execute=False), rule(["sample-create"], jst_done(), execute=True)])
+    mac.claude.answers(reply_draft="寄样单建好啦～", platform_action={
+        "action": "jst.sample_order", "shop": "dy", "items": [{"item_id": DY_ITEM, "skus": [{"sku_id": DY_SKU, "qty": 1}]}],
+        "creator_platform": "dy", "creator_uid": DY_UID,
+        "receiver": {"name": "张三", "phone": "〈手机1〉", "province": "广东省", "city": "佛山市", "district": "南海区",
+                     "address": "某某路100号1栋101"}})
+    creator_says(bot, "收件人张三 13900001111，广东省佛山市南海区某某路100号1栋101")
+    run_one(worker, bot, s)
+    [packet] = bot.prm.store.packets()
+    assert packet["platform"]["preview"]["verdict"] == "ready", packet["platform"]["preview"]["problems"]
+    out = bot.prm.decide(packet["id"], "execute")
+    assert out["ok"], out
+    run_one(worker, bot, s)
+    done = bot.prm.store.packet(packet["id"])
+    assert done["status"] == "approved", done["error"]
+    assert "南海区" in json.dumps(done["platform"]["execution"], ensure_ascii=False)    # the bot has all of it
+    [log_file] = (mac.home / "logs" / "platform").glob(f"*-job{out['job']}.json")
+    text = log_file.read_text(encoding="utf-8")
+    for gone in ("南海区", "某某路", "13900001111"):
+        assert gone not in text, gone
+    kept = json.loads(text)
+    [step] = kept["steps"]
+    assert json.loads(step["raw"])["receiver"]["region"] == "广东省 佛山市"
+    assert {f["label"]: f["value"] for f in step["facts"]}["收货"] == "张* 139****1111 广东省 佛山市 （详细地址已清除）（新增到达人名下）"
+    assert kept["outcome"] == "VERIFIED_SUCCESS" and kept["created"]["sample_order_no"]
+
+
+def test_older_platform_logs_are_cut_down_once_they_are_a_week_old(worker, workspace, tmp_path):  # noqa: F811
+    """Logs an older worker wrote (with the district and the start of the street) are cut to province and city
+    once they are KEEP_INBOX_DAYS old, like the Mac's other prm files; each log once, keeping its time; a log that
+    is not JSON is left as it is.  prune_prm_files (every prm job) does it."""
+    from platform_fakes import jst_done
+
+    folder = tmp_path / "home" / "logs" / "platform"
+    folder.mkdir(parents=True)
+    record = worker.platforms.record("VERIFIED_SUCCESS")
+    record["steps"] = [{"name": "create", "raw": json.dumps(jst_done(), ensure_ascii=False, indent=2), "facts": [
+        {"label": "收货", "value": "张* 139****1111 广东省 佛山市 南海区 某某路 100…（12 字）（新增到达人名下）"}]}]
+    now = time.time()
+    old, young, broken = folder / "20261001-120000-job7.json", folder / "20261027-120000-job8.json", folder / "x-job9.json"
+    for path, age in ((old, 8), (young, 1), (broken, 8)):
+        path.write_text(json.dumps(record, ensure_ascii=False, indent=2) if path != broken else "{cut", encoding="utf-8")
+        os.utime(path, (now - age * 86400, now - age * 86400))
+    worker.prune_prm_files(workspace)
+    assert "南海区" not in old.read_text(encoding="utf-8") and "某某路" not in old.read_text(encoding="utf-8")
+    assert abs(old.stat().st_mtime - (now - 8 * 86400)) < 2                    # its time stays
+    assert "南海区" in young.read_text(encoding="utf-8") and broken.read_text(encoding="utf-8") == "{cut"
+    step = json.loads(old.read_text(encoding="utf-8"))["steps"][0]
+    assert json.loads(step["raw"])["receiver"]["region"] == "广东省 佛山市"
+    assert step["facts"][0]["value"] == "张* 139****1111 广东省 佛山市 （详细地址已清除）（新增到达人名下）"
+    old.write_text("touched", encoding="utf-8")                                # looked at once: not again
+    os.utime(old, (now - 8 * 86400, now - 8 * 86400))
+    assert worker.coarse_platform_logs(now - 7 * 86400) == 0 and old.read_text(encoding="utf-8") == "touched"
+    assert worker.coarse_platform_logs(now + 1) == 1                           # a week later: the young one too
+    assert "南海区" not in young.read_text(encoding="utf-8")

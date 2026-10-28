@@ -785,6 +785,10 @@ def test_the_module_runs_on_the_macs_system_python(tmp_path):
         f"s = p.check_action(json.loads({json.dumps(SAMPLE, ensure_ascii=False)!r}))\n"
         "r = p.run_cli([sys.executable, '-c', 'print(1)'], '.', timeout=10)\n"
         "assert p.ledger_action({**s, 'receiver': {**s['receiver'], 'phone': '13900001111'}})['receiver']['phone'] == '139****1111'\n"
+        "cli = {'receiver': {'name': '张*', 'phone': '139****1111', 'region': '广东省 佛山市 南海区', 'address': '某某路 100…（12 字）'}}\n"
+        "cut, changed = p.coarse_receivers({'steps': [{'raw': json.dumps(cli, ensure_ascii=False, indent=2), 'facts': [\n"
+        "    {'label': '收货', 'value': '张* 139****1111 广东省 佛山市 南海区 某某路 100…（12 字）（新增到达人名下）'}]}]})\n"
+        "assert changed and '南海区' not in json.dumps(cut, ensure_ascii=False) and '广东省 佛山市' in cut['steps'][0]['raw']\n"
         f"lock = {str(tmp_path / 'cli.lock')!r}\n"
         "with p.CliLock(lock, wait=5):\n"
         "    try:\n"
@@ -967,6 +971,41 @@ def test_a_sample_order_runs_once_with_the_number_and_the_ledger_keeps_it_masked
     assert again["outcome"] == "ALREADY_RUN" and len(node.calls()) == 1
     assert platforms.check_record(json.loads(json.dumps(out)))["created"] == {"sample_order_no": JST_ORDER,
                                                                               "creator_uid": DY_UID}
+
+
+@pytest.mark.parametrize("region, kept", [
+    ("广东省 佛山市 南海区", "广东省 佛山市"), ("上海市 上海市 浦东新区", "上海市 上海市"), ("上海 上海市 浦东新区", "上海 上海市"),
+    ("北京市 朝阳区", "北京市"), ("佛山市 南海区", "佛山市"), ("广东省 东莞市 长安镇", "广东省 东莞市"),
+    ("新疆维吾尔自治区 伊犁哈萨克自治州 伊宁市", "新疆维吾尔自治区 伊犁哈萨克自治州"), ("广东省佛山市南海区", "广东省佛山市"),
+    ("西藏自治区 阿里地区 噶尔县", "西藏自治区 阿里地区"), ("香港特别行政区 九龙城区", "香港特别行政区"),
+    ("南海区", ""), ("", ""), (None, ""),
+])
+def test_a_clis_region_keeps_its_province_and_city(region, kept):
+    assert platforms.coarse_region(region) == kept
+
+
+def test_a_receiver_is_cut_the_same_way_in_any_shape_and_any_depth():
+    """The one rule for what of a receiver may be kept for good (the bot's 8.2 clean-up, the Mac's ledger and platform
+    logs, mac review F8 / C#2): a receiver object at any depth, one in a CLI's JSON kept as text, the 收货 fact."""
+    cli = jst_done()                                         # receiver {source, name, phone, region "省 市 区", address}
+    record = {"outcome": "VERIFIED_SUCCESS", "steps": [{"raw": json.dumps(cli, ensure_ascii=False, indent=2), "facts": [
+        {"label": "收货", "value": "张* 139****1111 广东省 佛山市 南海区 某某路 100…（12 字）（新增到达人名下）"},
+        {"label": "快递", "value": "菜鸟顺丰-优惠陆运（SF）"}]}],
+        "action": {**SAMPLE, "receiver": {**RECEIVER, "phone": "13900001111"}}}
+    out, changed = platforms.coarse_receivers(record)
+    assert changed and record["action"]["receiver"]["district"] == "南海区"   # the original is not touched
+    assert out["action"]["receiver"] == {"name": "张*", "phone": "139****1111", "province": "广东省", "city": "佛山市",
+                                         "district": "", "address": platforms.RECEIVER_CLEARED}
+    raw = json.loads(out["steps"][0]["raw"])
+    assert raw["receiver"] == {**cli["receiver"], "region": "广东省 佛山市", "address": platforms.RECEIVER_CLEARED}
+    assert {k: v for k, v in raw.items() if k != "receiver"} == {k: v for k, v in cli.items() if k != "receiver"}
+    assert out["steps"][0]["facts"] == [
+        {"label": "收货", "value": "张* 139****1111 广东省 佛山市 （详细地址已清除）（新增到达人名下）"},
+        {"label": "快递", "value": "菜鸟顺丰-优惠陆运（SF）"}]
+    assert platforms.coarse_receivers(out) == (out, False)                  # again: nothing changes
+    assert platforms.coarse_receivers({"receiver": None, "raw": '{"receiver": null}', "a": [1, "x"]})[1] is False
+    assert platforms.coarse_receipt("（预览里没有电话，提交时给）") == platforms.RECEIVER_CLEARED   # not the fact's shape
+    assert platforms.ledger_action({**SAMPLE, "receiver": {**RECEIVER, "phone": "〈手机1〉"}})["receiver"]["phone"] == "〈手机1〉"
 
 
 def test_a_sample_order_without_a_receiver_sends_none(node, jcfg, tmp_path):

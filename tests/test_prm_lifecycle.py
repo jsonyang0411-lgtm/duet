@@ -564,6 +564,65 @@ def test_a_sample_orders_receiver_is_cut_down_with_the_rest(bot, clock):
     assert sent["action"]["receiver"]["phone"] == "138****5678"
 
 
+@pytest.mark.parametrize("province, city, district, address", [
+    ("广东省", "佛山市", "南海区", "桂城街道海八东路12号保利花园3座1201"),
+    ("上海市", "上海市", "浦东新区", "张江路100号3栋1201"),
+    ("浙江省", "杭州市", "西湖区", "文三路西溪花园东区5幢2单元"),
+], ids=["foshan", "shanghai", "hangzhou"])
+@pytest.mark.parametrize("slots_know_it", [False, True], ids=["no-slot", "slot"])
+def test_the_clean_up_cuts_the_sample_order_clis_answer_and_its_receipt_fact(bot, clock, province, city, district,
+                                                                               address, slots_know_it):
+    """8.2 left the district and the first characters of the street in a sample order's preview and execution:
+    the 聚水潭 CLI's own JSON kept as text in a step's raw (its receiver's region is "省 市 区") and the 收货
+    fact made from it (mac review F8, repro_purge_cli_raw.py).  Now only the province and the city stay, whether
+    the deal's slots know the full address or not; the operators still see all of it before the clean-up."""
+    from platform_fakes import JST_ORDER, jst_done, jst_preview
+    from test_prm_platform_flow import SAMPLE, mac_runs, record
+
+    from src.prm import platforms
+
+    receiver = {"name": "小美", "phone": "〈手机1〉", "province": province, "city": city, "district": district,
+                "address": address}
+    masked = {"source": "新增到达人名下", "name": "小*", "phone": "139****1111", "region": f"{province} {city} {district}",
+              "address": address[:6] + f"…（{len(address)} 字）"}           # what sample-create prints (maskReceiver)
+
+    def step(name, answer, execute):
+        out = {"name": name, "label": "聚水潭", "execute": execute, "command": "node bin/jst.mjs sample-create",
+               "exit_code": 0, "seconds": 3.0, "verdict": "" if execute else "ready",
+               "outcome": "VERIFIED_SUCCESS" if execute else "", "problems": [], "facts": [],
+               "raw": json.dumps(answer, ensure_ascii=False, indent=2) + "\n"}
+        platforms._jst_facts(answer, out)
+        return out
+
+    preview = {"version": 1, "action": platforms.check_action({**SAMPLE, "receiver": receiver}), "verdict": "ready",
+               "problems": [], "facts": [], "steps": [step("preview", {**jst_preview(), "receiver": masked}, False)],
+               "run": {"steps": ["create"]}, "catalog": None, "previewed_at": 1.0}
+    slots = {"地址": f"{province}{city}{district}{address}"} if slots_know_it else {}
+    packet = drafted(bot, {**draft(message_kind="money", reply_draft="寄样单建好啦～", slots=slots), "platform": preview},
+                     text=f"收件人小美 13900001111，{province}{city}{district}{address}")
+    out = bot.prm.decide(packet["id"], "execute", None)
+    assert out["ok"], out
+    execution = record(sample_order_no=JST_ORDER)
+    execution["steps"] = [step("create", {**jst_done(), "receiver": masked}, True)]
+    mac_runs(bot, bot.relay.store.get(out["job"]), execution)
+    shown = bot.prm.store.packet(packet["id"])["platform"]
+    assert district in json.dumps(shown, ensure_ascii=False)                  # the operators see it until then
+    bot.prm.purge(bot.prm.store.deal(packet["deal_id"]), clock.now)
+    everything = json.dumps([bot.prm.store.packets(limit=100), bot.prm.store.events(packet["deal_id"], limit=200),
+                             bot.relay.store.list_jobs(100), bot.prm.store.deal(packet["deal_id"])], ensure_ascii=False)
+    for gone in (district, address[:6], address[:4], "13900001111"):
+        assert gone not in everything, gone
+    cut = bot.prm.store.packet(packet["id"])["platform"]
+    for kept in (cut["preview"], cut["execution"]):
+        [first] = kept["steps"]
+        raw = json.loads(first["raw"])                                        # still the CLI's JSON
+        assert raw["receiver"] == {**masked, "region": f"{province} {city}", "address": retention.CLEARED}
+        facts = {f["label"]: f["value"] for f in first["facts"]}
+        assert facts["收货"] == f"小* 139****1111 {province} {city} {retention.CLEARED}（新增到达人名下）"
+    bot.prm.purge(bot.prm.store.deal(packet["deal_id"]), clock.now)           # once more: nothing changes
+    assert bot.prm.store.packet(packet["id"])["platform"] == cut
+
+
 def test_clear_receivers_leaves_other_text_alone():
     assert retention.clear_receivers("收件人小美") == "收件人小美"
     assert retention.clear_receivers('{"receiver": "x"}') == '{"receiver": "x"}'

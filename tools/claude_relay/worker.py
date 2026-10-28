@@ -1391,7 +1391,9 @@ def fetch_prm_files(client: RelayClient, job: dict, workspace: Path) -> tuple[li
 
 def prune_prm_files(workspace: Path) -> None:
     """Creators' pictures and files (inbox/) and the prm logs older than KEEP_INBOX_DAYS go,
-    at every prm job: the 8.2 clean-up long after delivery finds none of them left."""
+    at every prm job: the 8.2 clean-up long after delivery finds none of them left.  The platform
+    logs stay (the record of what was written to the platforms); those that age past the same line
+    are cut to province and city like new ones (``coarse_platform_logs``)."""
     cutoff = time.time() - KEEP_INBOX_DAYS * 86400
     for old in [*(workspace / "inbox").glob("job-*"), *(HOME_DIR / "logs" / "prm").glob("*.md")]:
         try:
@@ -1403,6 +1405,62 @@ def prune_prm_files(workspace: Path) -> None:
                 old.unlink()
         except OSError:
             pass
+    try:
+        coarse_platform_logs(cutoff)
+    except Exception as e:                               # never in the way of the job
+        log.warning("platform logs not cut down: %s", e)
+
+
+PLATFORM_LOGS_UPTO = ".coarse-upto"     # in logs/platform/: the line coarse_platform_logs got to last time
+
+
+def coarse_platform_logs(cutoff: float) -> int:
+    """Platform logs written before ``cutoff`` (KEEP_INBOX_DAYS ago, the line of the other prm files) with
+    their sample orders' receivers cut to province and city (``platforms.coarse_receivers``), as
+    ``save_platform_log`` writes them now: a worker before 2026-10-28 kept the district, the start of the
+    street and the masked number there for good (mac review C#2).  Each log is looked at once, when it
+    crosses the line (``PLATFORM_LOGS_UPTO`` keeps the line of the last round), and keeps its time.
+    Returns how many were rewritten."""
+    if platforms is None:
+        return 0
+    folder = HOME_DIR / "logs" / "platform"
+    if not folder.is_dir():
+        return 0
+    marker = folder / PLATFORM_LOGS_UPTO
+    try:
+        since = float(marker.read_text(encoding="utf-8").strip() or 0)
+    except (OSError, ValueError):
+        since = 0.0
+    upto, changed = cutoff, 0
+    for path in folder.glob("*.json"):
+        try:
+            st = path.stat()
+        except OSError:                                  # gone meanwhile
+            continue
+        if not since <= st.st_mtime < cutoff:
+            continue
+        try:
+            data, cut = platforms.coarse_receivers(json.loads(path.read_text(encoding="utf-8")))
+            if not cut:
+                continue
+            part = path.with_name(path.name + ".part")
+            part.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.utime(str(part), ns=(st.st_atime_ns, st.st_mtime_ns))
+            os.replace(str(part), str(path))
+            changed += 1
+        except OSError as e:                             # a full disk, say: this one again next time
+            log.warning("platform log %s not cut down yet (%s)", path.name, e)
+            upto = min(upto, st.st_mtime)
+        except Exception as e:                           # not JSON: it cannot be read any better next time
+            log.warning("platform log %s cannot be read (%s); left as it is", path.name, e)
+    if max(since, upto) != since:
+        try:
+            marker.write_text(repr(max(since, upto)), encoding="utf-8")
+        except OSError:
+            pass
+    if changed:
+        log.info("%d platform log(s) older than %d days cut to province and city", changed, KEEP_INBOX_DAYS)
+    return changed
 
 
 def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, failed: list) -> str:
@@ -1867,11 +1925,15 @@ def failure_result(job: dict, error) -> dict:
 
 
 def save_platform_log(job: dict, record: dict) -> Path:
-    """What an execution did, in logs/platform/ (kept: the operators' record of platform writes)."""
+    """What an execution did, in logs/platform/ (kept: the operators' record of platform writes).  A
+    sample order's receiver only with its province and city (``platforms.coarse_receivers``: the CLI's
+    own JSON in a step's ``raw`` and the 收货 fact too): the log is kept for good, the bot has the rest
+    until its 8.2 clean-up (mac review C#2)."""
     folder = HOME_DIR / "logs" / "platform"
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{time.strftime('%Y%m%d-%H%M%S')}-job{job['id']}.json"
-    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    kept, _ = platforms.coarse_receivers(record)
+    path.write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
 
 
