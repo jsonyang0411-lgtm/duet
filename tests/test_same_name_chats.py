@@ -255,6 +255,7 @@ def test_a_draft_for_a_creator_whose_name_a_group_has_is_refused_with_a_reason(g
     caplog.set_level(logging.WARNING, logger="src.wechat.wcdb_backend")
     packet = g.approve_and_send()
     assert packet["status"] == "failed"                   # PRM's failure handling: the draft shows red
+    assert "「小美」" in packet["error"] and "备注" in packet["error"]     # and says why, on the draft
     assert g.window.typed == []                           # nothing typed into either 小美
     refused = g.backend.send_text(CREATOR, "你好")
     assert not refused

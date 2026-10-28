@@ -1861,9 +1861,10 @@ class PrmService:
         if not problem and text.strip():
             noted = self._note_sent(packet["chat_id"], text, packet["id"])
             try:
-                if not self._send(packet["chat_id"], text):
+                result = self._send(packet["chat_id"], text)
+                if not result:
                     self._unnote_sent(noted)
-                    problem = "文字没发出去"
+                    problem = _refused(result) or "文字没发出去"
             except Exception:
                 self._unnote_sent(noted)
                 logger.exception("PRM: packet %d text not sent", packet["id"])
@@ -1875,9 +1876,11 @@ class PrmService:
                 break
             noted = self._note_sent(packet["chat_id"], file=True, packet_id=packet["id"])
             try:
-                if not self._send_file(packet["chat_id"], path):
+                result = self._send_file(packet["chat_id"], path)
+                if not result:
                     self._unnote_sent(noted)
-                    problem = f"文件「{item.get('name')}」没发出去"
+                    why = _refused(result)
+                    problem = f"文件「{item.get('name')}」没发出去" + (f"：{why}" if why else "")
                     break
             except Exception:
                 self._unnote_sent(noted)
@@ -2095,6 +2098,13 @@ def missing_files(named: list, arrived: list, reported: list) -> list:
 
 def _file_name(path: str) -> str:
     return str(path).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or str(path)
+
+
+def _refused(result) -> str:
+    """Why the backend did not even try a send (``wcdb_backend.SendRefused.reason``: a chat whose name
+    another chat has, a chat it cannot find in WeChat), else "": the draft says it, so the operator
+    knows to send it by hand or give her a remark of her own."""
+    return str(getattr(result, "reason", "") or "").strip()
 
 
 def next_step_note(action: dict, record: dict, *, delivered: bool = False) -> str:
