@@ -416,7 +416,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `invalidate_cache()` | 清除 HWND 缓存 | 无 | `None` |
 | `activate(hwnd)` | 激活微信窗口(4层策略) | `hwnd: int` | `bool` |
 | `navigate_to_chat(hwnd, group_name)` | 键盘导航到指定群聊 | `hwnd: int, group_name: str` | `bool` |
-| `send_message(hwnd, text, file_path=None)` | 键盘发送消息(Ctrl+V→Enter)；有 `file_path` 时用 `_clipboard_file` 放图（放不上去就返回 `False`，不粘贴，免得把剪贴板里的旧文字再发一遍），粘贴后多等 `FILE_PASTE_DELAY` | `hwnd: int, text: str, file_path: str \| None` | `bool` |
+| `send_message(hwnd, text, file_path=None)` | 键盘发送消息（Ctrl+A → Ctrl+V → Enter）：搜索结果上的回车把光标放进这个聊天的输入框，粘贴之前先在那里 Ctrl+A，粘贴替换掉输入框里原有的东西——微信给每个聊天留着输入框里的字，所以重试不会把上一次粘进去的那句再发一遍，运营在这个聊天里打了一半没发的字也不会跟着发出去（和独立窗口的 `_send_in_chat_window` 一样；文字和文件都这样）；有 `file_path` 时用 `_clipboard_file` 放图（放不上去就返回 `False`，不粘贴，免得把剪贴板里的旧文字再发一遍），粘贴后多等 `FILE_PASTE_DELAY` | `hwnd: int, text: str, file_path: str \| None` | `bool` |
 | `send_to_chat(group_name, text, max_retries=2)` | 完整发送管道(主入口)；经 `_run_send`：安静发送时外面包一层 `_begin_quiet`/`_end_quiet`，里面是 `_send_to_chat` | `group_name: str, text: str, max_retries: int` | `bool` |
 | `send_file_to_chat(group_name, path, max_retries=2)` | 发一个文件（中转的长结果、PRM 的素材、表情包气泡的图片）：同一条管道，粘贴的是文件；文件不存在直接返回 `False`；日志里的文字是 `[file] 文件名` | `group_name: str, path: str` | `bool` |
 | `_run_send(group_name, text, max_retries, file_path=None)` | 两个入口共用：有没有安静发送 | 同上 | `bool` |
@@ -1178,7 +1178,7 @@ Windows PrmService
          │
 8. WeChatWindowController.send_to_chat()
          │  (find_hwnd → activate → navigate_to_chat → send_message)
-         │  (Ctrl+F → 粘贴聊天名 → Enter → Ctrl+V 粘贴消息 → Enter)
+         │  (Ctrl+F → 粘贴聊天名 → Enter → Ctrl+A → Ctrl+V 粘贴消息 → Enter)
          │
 9. 中转结果、PRM 草稿、边缘发送：各自的发送线程 → backend.send_text / send_file（同一个窗口锁）
          │
@@ -1470,9 +1470,12 @@ WeChatWindowController.send_to_chat(group_name, text)  ← 主入口
   │
   └── send_message(hwnd, text)
         ├── _clipboard_text(text, hwnd) → _set_clipboard(text) — 写入剪贴板
-        ├── Ctrl+V — 粘贴
+        ├── Ctrl+A — 全选输入框里原有的（上一次重试粘进去的、运营打了一半的）
+        ├── Ctrl+V — 粘贴，替换掉它们
         └── Enter — 发送
 ```
+
+Ctrl+A 紧挨着 Ctrl+V、在所有前台检查之后按，所以和粘贴落在同一个地方：搜索结果上的回车之后光标就在聊天的输入框里，粘贴本来就靠这一点。微信 4 上没法用程序确认光标在哪（界面自动化只有骨架，Qt 的输入框没有自己的窗口句柄），这一点要真机看（测试：`tests/test_quiet_send.py` 的 `MainWindowScreen` 按微信的样子模拟搜索框和每个聊天的输入框：输入框里有运营打了一半的字时只发出审批过的那句；第一次粘贴后前台被点走、重试时只发一份；文件也一样）。
 
 `SEND_QUIET=on`（`WcdbBackend` 按配置创建 `WeChatWindowController(quiet=…)`，并设 `alive=lambda: self._running`）：
 

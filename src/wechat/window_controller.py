@@ -951,11 +951,12 @@ class WeChatWindowController:
     # ── Internals ─────────────────────────────────────────────────
 
     def send_message(self, hwnd: int, text: str, file_path: str | None = None) -> bool:
-        """Send a text message via keyboard only: Ctrl+V → Enter.
+        """Send a text message via keyboard only: Ctrl+A → Ctrl+V → Enter.
 
-        The caller MUST have already navigated to the correct chat and
-        ensured input area focus (via Tab in navigate_to_chat).  With
-        ``file_path`` the file is pasted instead of ``text`` (a label for logs).
+        The caller MUST have already navigated to the correct chat: the Enter
+        on the search result (navigate_to_chat) leaves the caret in that chat's
+        input box, where the paste goes.  With ``file_path`` the file is pasted
+        instead of ``text`` (a label for logs).
         """
         if not text:
             logger.warning("send_message: empty text")
@@ -1009,6 +1010,12 @@ class WeChatWindowController:
             if active:
                 hwnd = self._adopt_foreground_hwnd(hwnd, "after paste re-activation")
 
+        # Ctrl+A first, right before the paste and so in the box the paste goes
+        # into: WeChat keeps what a chat's input box holds while another chat is
+        # open, so a retry replaces its own earlier paste instead of adding to
+        # it, and a draft an operator half-typed in this chat is never sent
+        # along.  The same as in a chat's own window (_send_in_chat_window).
+        send_combo(0x11, 0x41)  # Ctrl+A
         send_combo(0x11, 0x56)  # Ctrl+V
         time.sleep(self.PASTE_SEND_DELAY + (self.FILE_PASTE_DELAY if file_path else 0))
 
