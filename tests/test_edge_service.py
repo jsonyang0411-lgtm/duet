@@ -105,6 +105,19 @@ def sent(edge, send_id, text="", uploads=(), ttl=1800):
     return edge.send({"send_id": send_id, "chat_id": CREATOR, "text": text, "uploads": list(uploads), "ttl_sec": ttl})
 
 
+# ── the database's id (/edge/health db_id) ────────────────────────────────
+
+def test_the_db_id_is_made_with_the_database_and_kept_with_it(tmp_path, clock, wechat):
+    first = EdgeStore(tmp_path / "edge.db")
+    db_id = first.db_id()
+    first.close()
+    assert len(db_id) == 32 and EdgeStore(tmp_path / "edge.db").db_id() == db_id     # a restart keeps it
+    assert EdgeStore(tmp_path / "other.db").db_id() != db_id                         # a new database: another
+    edge = make_edge(tmp_path, clock, wechat, store=EdgeStore(tmp_path / "edge.db"))
+    assert edge.health()["db_id"] == db_id
+    edge.stop()
+
+
 # ── what a message becomes ────────────────────────────────────────────────
 
 @pytest.mark.parametrize("message, line", [

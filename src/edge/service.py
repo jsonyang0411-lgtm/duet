@@ -9,11 +9,16 @@ The flow (edge-protocol.md)::
     ─► the line shows up in WeChat (``on_own_message``): ``send_seen``; an own line that is
     no send of ours: ``operator_message``; the read-back window passed: ``send_unseen``.
 
+A person who became this account's friend (src/wechat/new_friends.py finds the line WeChat
+writes) is a ``friend_added`` event, once per wxid, whether listed or not; the line WeChat
+writes for the other party when they accept our request (「我通过了你的朋友验证请求…」) is a
+``chat_notice``, never a creator's message.
+
 Nothing is ever said to a creator here unless the Mac asked for it, and a creator's
 messages are not written to the chat archive.  Windows keeps no creator content for long:
-events and their files go ``EDGE_KEEP_DAYS`` after the Mac acknowledged them, uploads a
-day after nobody used them, the text of finished sends after ``EDGE_KEEP_DAYS``.  Logs
-carry ids and counts only.
+events and their files go ``EDGE_KEEP_DAYS`` after the Mac acknowledged them (a new friend's
+greeting, which may hold a phone number, only lives in its event), uploads a day after nobody
+used them, the text of finished sends after ``EDGE_KEEP_DAYS``.  Logs carry ids and counts only.
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from ..relay.link import PeerLog
+from ..wechat.new_friends import is_friend_notice
 from . import protocol as P
 from . import text as T
 from .store import EdgeStore
@@ -191,7 +197,7 @@ class EdgeService:
             logger.info("EDGE: an old message of a listed chat is history, not forwarded")
             return True
         message_id = str(msg.get("message_id") or "") or None
-        if T.is_notice(msg):
+        if T.is_notice(msg) or is_friend_notice(msg):         # 「我通过了你的朋友验证请求…」 is WeChat's
             self._emit(P.CHAT_NOTICE, chat_id, message_id, text=T.notice_text(msg))
             return True
         files = self._collect_files(msg)
@@ -205,6 +211,22 @@ class EdgeService:
             return True
         logger.info("EDGE: creator message -> event #%d (%d file(s))", event["id"], len(files))
         return True
+
+    def friend_added(self, event: dict) -> Optional[dict]:
+        """A person became this account's friend (src/wechat/new_friends.py, once per wxid): a
+        ``friend_added`` event ``{wxid, name, remark, verify_text, how}``.  The greeting
+        (``verify_text``) may hold a phone number: it lives only in the event (gone EDGE_KEEP_DAYS
+        after the Mac acknowledged it) and is never logged."""
+        wxid = str(event.get("wxid") or "").strip()
+        if not wxid:
+            return None
+        how = str(event.get("how") or "")
+        stored = self._emit(P.FRIEND_ADDED, wxid=wxid, name=str(event.get("name") or ""),
+                            remark=str(event.get("remark") or ""), verify_text=str(event.get("verify_text") or ""),
+                            how=how if how in P.FRIEND_HOWS else "unknown")
+        if stored is not None:
+            logger.info("EDGE: new friend %s… (%s) -> event #%d", wxid[:8], stored["how"], stored["id"])
+        return stored
 
     def _resolve(self, msg: dict, kind: str, number: int) -> tuple:
         from ..relay.attachments import Held, resolve
@@ -245,7 +267,7 @@ class EdgeService:
         if not self._recent(msg, now):
             return                                            # history (a chat read for the first time)
         message_id = str(msg.get("message_id") or "") or None
-        if T.is_notice(msg):
+        if T.is_notice(msg) or is_friend_notice(msg):
             self._emit(P.CHAT_NOTICE, chat_id, message_id, text=T.notice_text(msg))
             return
         matched, send_id = self._match_own(chat_id, msg, now)
@@ -479,7 +501,7 @@ class EdgeService:
     def health(self) -> dict:
         return {"ok": True, "protocol": P.PROTOCOL, "parties_version": self._store.parties_version(),
                 **self._status, "can_send_files": self._send_file is not None,
-                "events_pending": self._store.pending()}
+                "events_pending": self._store.pending(), "db_id": self._store.db_id()}
 
     def events(self, after: int, wait: float, limit: int) -> list[dict]:
         deadline = time.monotonic() + wait

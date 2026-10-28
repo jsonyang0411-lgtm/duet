@@ -27,8 +27,12 @@ SEND_RESULT = "send_result"
 SEND_SEEN = "send_seen"
 SEND_UNSEEN = "send_unseen"
 EDGE_STATUS = "edge_status"
+FRIEND_ADDED = "friend_added"                           # a person became this account's friend (once per wxid)
 EVENT_TYPES = (CREATOR_MESSAGE, OPERATOR_MESSAGE, CHAT_NOTICE, CREATOR_MESSAGE_RECALLED,
-               SEND_RESULT, SEND_SEEN, SEND_UNSEEN, EDGE_STATUS)
+               SEND_RESULT, SEND_SEEN, SEND_UNSEEN, EDGE_STATUS, FRIEND_ADDED)
+# friend_added's ``how``: Windows accepted the request itself / a person did (PC or phone) / they
+# accepted our request / cannot be told.
+FRIEND_HOWS = ("auto_accept", "manual", "requested", "unknown")
 
 # ── sends ─────────────────────────────────────────────────────────────────
 QUEUED, SENDING = "queued", "sending"

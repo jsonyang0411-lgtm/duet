@@ -263,3 +263,72 @@ def test_a_stopped_bot_lists_no_platform_alerts(tmp_path, monkeypatch):
     monkeypatch.delenv("PRM_DB", raising=False)
     d = call("/api/prm")[1]
     assert d["platform_alerts"] == [] and "dy.channel_goods" in d["platform_actions"]
+
+
+# ── new friends in 登记达人 (src/wechat/new_friends.py) ───────────────────
+
+def _friends(tmp_path, now):
+    """The bot's database with three friends found lately: one of them is a creator already."""
+    from src.wechat.new_friends import NewFriendStore
+
+    store = NewFriendStore(str(tmp_path / "messages.db"))
+    for wxid, name, how, found, verify in (("wxid_new01", "阿花", "auto_accept", now - 600, "我是阿花，电话 138****8000"),
+                                           (CREATOR, "小美", "manual", now - 500, ""),
+                                           ("meimei_88", "小美美", "requested", now - 60, "")):
+        store.add(wxid=wxid, name=name, remark="", how=how, kind="pc", added_at=found - 5, verify_from=None,
+                  verify_text=verify, found_at=found)
+    return store
+
+
+def test_new_friends_come_first_in_the_candidates_tagged_with_greeting_and_how(running, tmp_path, monkeypatch):
+    from src.wechat.new_friends import NewFriendService
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ADMIN_WXID", "wxid_admin")                       # never offered
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "private_chat_names.json").write_text(json.dumps(
+        {"wxid_zhang": "张三", "wxid_new01": "阿花", CREATOR: "小美", "wxid_admin": "管理员"}, ensure_ascii=False),
+        encoding="utf-8")
+    now = running.relay._clock()
+    store = _friends(tmp_path, now)
+    server.register_new_friends(NewFriendService(SimpleNamespace(), store, clock=running.relay._clock))
+    try:
+        d = call("/api/prm")[1]
+    finally:
+        server.register_new_friends(None)
+    assert [c["wxid"] for c in d["candidates"]] == ["meimei_88", "wxid_new01", "wxid_zhang"]   # new, newest first
+    newest, aihua, zhang = d["candidates"]
+    assert (newest["new"], newest["how"], newest["how_label"], newest["verify_text"]) == (
+        True, "requested", "对方通过了我们的申请", "")
+    assert (aihua["name"], aihua["verify_text"], aihua["how_label"]) == ("阿花", "我是阿花，电话 138****8000", "机器人自动通过的")
+    assert zhang == {"wxid": "wxid_zhang", "name": "张三"} and d["catchup_hours"] == 12
+    # the bot stopped: read from its database (DB_PATH)
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "messages.db"))
+    assert [c["wxid"] for c in call("/api/prm")[1]["candidates"]][:2] == ["meimei_88", "wxid_new01"]
+
+
+def test_registering_a_new_friend_drafts_what_she_said_since_she_was_added(running, tmp_path):
+    from src.wechat.new_friends import NewFriendService
+
+    now = running.relay._clock()
+
+    class Backend:                                   # the WCDB backend: her chat read back on its next poll
+        def catch_up_chat(self, talker, name, since, sink):
+            sink([{"message_id": "m1", "chat_id": talker, "sender_id": talker, "content": "我是阿花 13800138000",
+                   "msg_type": 1, "is_group": False, "timestamp": now - 605},
+                  {"message_id": "m2", "chat_id": talker, "sender_id": talker, "content": "想要个样品",
+                   "msg_type": 1, "is_group": False, "timestamp": now - 300}])
+
+    service = NewFriendService(Backend(), _friends(tmp_path, now), clock=running.relay._clock)
+    service.set_catch_up_sink(running.prm.take_new_friend)
+    running.prm.on_registered = service.registered
+    answer = call("/api/prm/parties", "POST", {"action": "add", "wxid": "wxid_new01", "name": "阿花"})[1]
+    assert answer["ok"] is True and answer["catch_up"] is True
+    plain = call("/api/prm/parties", "POST", {"action": "add", "wxid": "wxid_zhang", "name": "张三"})[1]
+    assert plain["ok"] is True and plain["catch_up"] is False          # not a new friend: nothing asked for
+    running.relay._clock.now += SETTLE_SEC + 1
+    job = running.relay.next_job(0, ("prm",))
+    assert job["meta"]["name"] == "阿花" and job["meta"]["new_friend"] == {"from": now - 605, "count": 2}
+    assert [line.split("] ", 1)[1] for line in job["text"].split("\n")] == [
+        "（加好友时的验证消息）我是阿花 〈手机1〉", "想要个样品"]
+    assert running.prm.is_party_chat("wxid_new01")

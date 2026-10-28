@@ -151,6 +151,10 @@ class MessageBurstBuffer:
         ]
 
         merged["message_id"] = self._burst_id(merged, ids)
+        # What an older version made of the same burst, from its messages' older ids
+        # (``_legacy_ids``, src/wechat/wcdb_backend.py): a burst it stored is a duplicate.
+        older = [(message.get("_legacy_ids") or [""])[0] for message in messages]
+        merged["_legacy_ids"] = [self._burst_id(merged, older)] if all(older) else []
         merged["content"] = "\n".join(contents)
         merged["timestamp"] = max(int(message.get("timestamp", 0) or 0) for message in messages)
         merged["is_at_mentioned"] = any(bool(message.get("is_at_mentioned")) for message in messages)

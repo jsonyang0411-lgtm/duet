@@ -702,6 +702,12 @@ class WcdbNativeClient:
         self._nicknames[wxid] = wxid
         return wxid
 
+    def remember_nickname(self, wxid, name):
+        """A name learnt elsewhere (a new friend's 「你已添加了X」 or display name) replaces a lookup
+        that missed (``resolve_nickname`` keeps a miss as the wxid itself); a known name stays."""
+        if wxid and name and self._nicknames.get(wxid, wxid) == wxid:
+            self._nicknames[wxid] = name
+
     # ── Cleanup ───────────────────────────────────────────────────────
 
     def _close_handle(self):

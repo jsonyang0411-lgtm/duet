@@ -21,6 +21,7 @@ from src.edge.client import EdgeClient, EdgeError
 
 edge = EdgeClient("http://<Windows 的局域网 IP>:8790", token)    # PRM_EDGE_TOKEN；不在同一个网络时用 Windows 的 Tailscale 地址（cross-network.md）
 edge.put_parties(version, wxids)          # 名单有变化时推；另外 edge.health()["parties_version"] 和自己的对不上时也推
+# edge.health()["db_id"] 和上次记下的不一样：Windows 的 edge.db 是新建的，事件从 1 重新编号，从 after=0 重新拉、重推名单
 
 cursor = load_cursor()                    # Mac 已经存好的最后一个事件编号
 while True:
@@ -38,6 +39,7 @@ while True:
 up = edge.upload("/path/brief.pdf")
 edge.send("pk-88", "wxid_a", "样品这周五前寄出～", uploads=[up["upload_id"]])
 # 结果看事件：send_result（sent / failed / expired / indeterminate）、send_seen、send_unseen
+# 新好友：friend_added {wxid, name, remark, verify_text, how}，不管在不在名单里，每个 wxid 一次
 ```
 
 ## 假服务端的用法（写 Mac 端的测试）
@@ -58,6 +60,7 @@ with FakeEdge(auto_send=False) as fake:   # 在 127.0.0.1 上找一个空端口�
     fake.operator_says("wxid_creator01", "我来回")    # 运营亲手回复：operator_message
     fake.notice("wxid_creator01", "对方撤回了一条消息")   # chat_notice
     fake.set_status(wechat="offline", detail="找不到微信主窗口")   # edge_status
+    fake.friend_added("wxid_new01", "阿花", verify_text="我是阿花", how="manual")   # friend_added（同一个 wxid 只报一次）
     assert fake.sent() == [("wxid_creator01", "…", [])]
 ```
 
@@ -68,7 +71,8 @@ with FakeEdge(auto_send=False) as fake:   # 在 127.0.0.1 上找一个空端口�
 - 在 `fake.complete` 之前调 `fake.seen(send_id)`：读回比发送动作返回还早（Windows 真机上常见）。和 Windows 一样，先记下，`complete` 报完 `send_result` 紧接着报 `send_seen`（`delay_s` 为 0）；同一条只报一次，没发出去的（`failed` 等）不报；
 - `fake.start_sending(send_id)` 再 `fake.restart()`：发送进行中时 Windows 重启了，结果是 `indeterminate`；
 - `fake.expire_due()`：发送请求过了 `ttl_sec`；
-- `fake.fail_next(n, 原因)`：接下来 n 条发送失败。
+- `fake.fail_next(n, 原因)`：接下来 n 条发送失败；
+- `fake.rebuild_db()`：Windows 的 edge.db 新建了：`/edge/health` 的 `db_id` 换一个，事件从 1 重新编号，名单回到版本 0。
 
 `auto_send=True`（默认）时，收到发送请求马上就算发出去，并且马上读回。
 

@@ -197,3 +197,67 @@ def test_sync_products_writes_the_catalogue(worker, node, tmp_path, workspace): 
     md = (workspace / "kb" / "products.md").read_text(encoding="utf-8")
     assert f"| {DY_ITEM} | 测试主品 | 19.99 |" in md
     assert worker.main(["--config", str(config), "--sync-products", "--platforms", "pdd"]) == 2
+
+
+@pytest.mark.parametrize("where", ["inside", "itself"])
+def test_a_preview_that_raises_never_loses_the_draft(worker, bot, mac, monkeypatch, where):  # noqa: F811
+    """The preview of a draft's action blows up (a bug, an answer it cannot read): the reply still reaches
+    the bot, its action marked 预览出错 and not executable."""
+    def boom(*args, **kwargs):
+        raise RuntimeError("the preview broke")
+
+    if where == "inside":
+        monkeypatch.setattr(worker.platforms, "preview", boom)              # platforms.preview, in its try
+    else:
+        monkeypatch.setattr(worker, "platform_preview", boom)               # worker.platform_preview as a whole
+    creator_says(bot, "好的，就按 20% 吧")
+    run_one(worker, bot, mac.settings)
+    [packet] = bot.prm.store.packets()
+    assert packet["status"] == "pending" and packet["text"] == "专属佣金 20% 已经设好啦，明天 0 点生效～"
+    preview = packet["platform"]["preview"]
+    assert preview["verdict"] == "error" and "预览出错" in preview["problems"][0] and "the preview broke" in preview["problems"][0]
+    assert packet["tool"] == "dy.designated_commission" and preview["action"]["item_id"] == DY_ITEM
+    assert not bot.prm.decide(packet["id"], "execute")["ok"] and mac.node.calls() == []
+    assert "预览没通过" in bot.prm.store.deal(packet["deal_id"])["attention"]
+
+
+def test_a_cli_lock_that_stays_taken_is_an_error_preview_and_a_not_run_execution(worker, bot, mac, monkeypatch):  # noqa: F811
+    """Another platform command (--sync-products, say) holds the Mac's CLI lock past the wait: the preview
+    says so (the draft still comes back), the execution is NOT_RUN and its approval key is not used up."""
+    lock = mac.home / "platform" / "cli.lock"
+    monkeypatch.setattr(worker, "_cli_lock",
+                        lambda heartbeat=None: worker.platforms.CliLock(lock, wait=0.3, heartbeat=heartbeat))
+    other = worker.platforms.CliLock(lock, wait=5)
+    with other:
+        creator_says(bot, "好的，就按 20% 吧")
+        run_one(worker, bot, mac.settings)
+    [packet] = bot.prm.store.packets()
+    preview = packet["platform"]["preview"]
+    assert packet["status"] == "pending" and preview["verdict"] == "error"
+    assert "另一个平台命令还在跑" in preview["problems"][0] and mac.node.calls() == []
+    assert bot.prm.decide(packet["id"], "repreview")["ok"]                 # the other command is done
+    run_one(worker, bot, mac.settings)
+    assert bot.prm.store.packet(packet["id"])["platform"]["preview"]["verdict"] == "ready"
+    out = bot.prm.decide(packet["id"], "execute")
+    assert out["ok"]
+    with other:                                                             # and runs again meanwhile
+        run_one(worker, bot, mac.settings)
+    failed = bot.prm.store.packet(packet["id"])
+    assert failed["status"] == "failed" and failed["outcome"] == "platform_not_run" and executions(mac.node) == []
+    key = failed["platform"]["key"]
+    assert "另一个平台命令还在跑" in failed["error"] and not (mac.home / "platform" / "ledger" / f"{key}.json").exists()
+    bot.relay.submit(CREATOR, CREATOR, "", kind="prm", fresh=True, input_closed=True,   # the same approval again
+                     meta=json.loads(bot.relay.store.get(out["job"])["meta"]))
+    run_one(worker, bot, mac.settings)
+    assert len(executions(mac.node)) == 1
+    entry = json.loads((mac.home / "platform" / "ledger" / f"{key}.json").read_text(encoding="utf-8"))
+    assert entry["status"] == "done" and entry["record"]["outcome"] == "VERIFIED_SUCCESS"
+
+
+def test_a_preview_that_could_not_be_made_is_an_error_the_bot_takes(worker, monkeypatch):  # noqa: F811
+    block = worker.preview_failed({"action": "dy.designated_commission"}, "Mac 上预览出错：x")
+    assert block["verdict"] == "error" and block["action"] is None and block["requested"]
+    assert platforms.check_block(block)["verdict"] == "error"
+    monkeypatch.setattr(worker, "platforms", None)                          # no platform module at all
+    bare = worker.preview_failed(DESIGNATED, "Mac 上预览出错：y")
+    assert platforms.check_block(bare)["problems"] == ["Mac 上预览出错：y"]
