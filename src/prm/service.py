@@ -109,6 +109,30 @@ CLOCK_SAMPLE_SEC = 120       # read back this soon after it was noted, a line of
 CLOCK_SAMPLES = 3            # the smallest of the last this many measurements counts (a late read only adds)
 CLOCK_NOISE_SEC = 60         # off by less than this: read-back noise, nothing is corrected
 CLOCK_SKEW_SEC = 300         # off by this much or more: the deals say so (``clock_note``)
+# 聚水潭寄样单状态自动同步（PRM_SAMPLE_SYNC_MIN，2026-10-29）：机器人定时把核验成功、还没签收、没被删的寄样单
+# 攒成一个任务交给 Mac（``meta.op = SAMPLE_OP``，worker 不跑模型，`jst samples` 只读），答复按控制台的路改合作单。
+SAMPLE_OP = "sample_status"
+SAMPLE_SYNC_CHAT = "prm:sample-status"      # the relay job's chat id: no WeChat chat, no creator, never a draft
+SAMPLE_SYNC_FIRST_SEC = 120                 # a bot that never asked: its first round this long after its start
+SAMPLE_GIVE_UP_DAYS = 60                    # an order not signed for this long after it was made is not asked about
+SAMPLE_MISSES = 2                           # rounds in a row an order is not in 聚水潭's answer before its deal says so
+SAMPLE_ERRORS = 3                           # failed rounds in a row (a hiccup: no answer, the lock busy) before the deals say so
+SAMPLE_RISK_PAUSE_SEC = 3600                # after a risk wall (76): the next round waits this long at least (and two intervals)
+SAMPLE_RANK = {"INIT": 1, "WAITING_SEND": 2, "SENT": 3, "SIGNED": 4, "DELETED": 5}   # how far an order got: never back
+# What the deals with orders still asked about say when a round could not be made (``sample_sync``): once, until
+# a round goes through (the notice goes by itself then).
+SAMPLE_PROBLEMS = {
+    "login": "聚水潭登录失效（退出码 77），寄样单的运单号和签收没法自动同步：请在 Mac 的调试 Chrome 里重新登录聚水潭；"
+             "登录好以后这条提醒自己消失",
+    "wall": "聚水潭限流或者要人机验证（退出码 76），寄样单状态先停 {pause} 分钟再同步：请到 Mac 的调试 Chrome 里看一下；"
+            "恢复以后这条提醒自己消失",
+    "wrong_account": "Mac 的调试 Chrome 里登录的聚水潭不是这台 Mac 配的子账号（退出码 79），寄样单状态没有同步："
+                     "请换回自己的子账号；恢复以后这条提醒自己消失",
+    "invalid": "Mac 上的聚水潭命令行不认查寄样单的参数（{message}）：请更新 jushuitan-engineering",
+    "unavailable": "Mac 上查不了聚水潭（{message}），寄样单的运单号和签收没法自动同步",
+    "old_worker": "Mac 上的 worker 还不会查聚水潭寄样单的状态：更新 Mac 上的代码并重启 worker（在这之前运单号和签收照旧手动填）",
+    "error": "寄样单状态连续 {count} 次没同步成（{message}）：运单号和签收先照旧手动填",
+}
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
 _WXID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{3,63}$")
 
@@ -298,6 +322,14 @@ def _event_time(ev: dict) -> float:
         return float(ev["at"])
 
 
+def _float(value) -> Optional[float]:
+    """A number kept as text (``PrmStore.meta_value``), or None."""
+    try:
+        return float(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _later(deal: dict, at: float) -> float:
     """The deal's ``last_message_at`` after a message written at ``at`` (it never goes back)."""
     return max(float(deal.get("last_message_at") or 0), at)
@@ -311,7 +343,7 @@ EVENT_NAMES = {
     "platform_execute": "批准执行平台动作", "platform_result": "平台动作结果",
     "platform_preview": "重新预览平台动作", "platform_ack": "平台动作已处理",
     "recall": "撤回了一条消息", "draft_failed": "草稿没写成", "next_step": "派开专属佣金的任务",
-    "platform_recheck": "平台动作要先核对",
+    "platform_recheck": "平台动作要先核对", "sample_status": "聚水潭寄样单状态",
 }
 # A creator's message recorded without a draft because it was read too late (PRM_CATCHUP_HOURS).
 MISSED_EVENT_NAME = "机器人没在读时达人的消息（没有起草）"
@@ -330,6 +362,13 @@ def event_out(ev: dict) -> dict:
         name = f"派开专属佣金的任务 #{detail['job']}" + (f"（商品 {detail['item']}）" if detail.get("item") else "")
     elif ev["kind"] == "platform_recheck" and detail.get("packet"):
         name = f"#{detail['packet']} 的结果不确定，#{detail.get('for')} 要再开同一个商品：先核对平台"
+    elif ev["kind"] == "sample_status" and detail.get("order"):
+        status = str(detail.get("status") or "")
+        name = (f"聚水潭寄样单 {detail['order']}：{platforms.SAMPLE_STATES.get(status, status)}"
+                + (f"（{detail['waybill']}）" if detail.get("waybill") else "")
+                + (f"，原因：{detail['reason']}" if detail.get("reason") else ""))
+    elif ev["kind"] in ("shipment", "shipment_status", "stage") and detail.get("source") == "jst":
+        name = f"{name}（聚水潭同步）"
     return {"id": ev["id"], "kind": ev["kind"], "name": name,
             "actor": ev.get("actor", ""), "at": ev["at"], "detail": detail}
 
@@ -501,6 +540,17 @@ class PrmService:
                                    or retention.RETENTION_DAYS)
         # created | delivered: when a sample order's 专属佣金 is drafted (next_step_note)
         self._commission_after = str(getattr(config, "prm_commission_after", "delivered") or "delivered")
+        # PRM_SAMPLE_SYNC_MIN (0 = off; a config object without it, an older caller's: off): where the verified
+        # sample orders stand in 聚水潭, asked of the Mac once an interval (``sweep_sample_status``)
+        try:
+            self._sample_sync_sec = max(0, int(getattr(config, "prm_sample_sync_min", 0) or 0)) * 60
+            self._waybill_days = max(1, int(getattr(config, "prm_sample_waybill_days", 3) or 3))
+            self._sign_days = max(1, int(getattr(config, "prm_sample_sign_days", 10) or 10))
+        except (TypeError, ValueError):
+            self._sample_sync_sec, self._waybill_days, self._sign_days = 0, 3, 10
+        self._sample_lock = threading.Lock()       # one round's job queued, or one answer applied, at a time
+        self._sample_errors = 0                    # failed rounds in a row (SAMPLE_ERRORS)
+        self._sample_said = ""                     # what the deals were last told of a round that could not be made
         # 批准并执行: checking that a 专属 action is not open already and starting it is one step
         self._approve_lock = threading.Lock()
         # Starting a 专属佣金 chain: looking whether it is under way and asking for its step is one step
@@ -1274,6 +1324,8 @@ class PrmService:
     def on_result(self, job: dict) -> bool:
         """A prm job ended: its draft becomes a packet (or the deal says what went wrong)."""
         meta = job_meta(job)
+        if meta.get("op") == SAMPLE_OP:                 # 聚水潭's answer about the sample orders: no creator, no draft
+            return self._on_sample_status(job, meta)
         try:
             party_id, deal_id = int(meta["party_id"]), int(meta["deal_id"])
         except (KeyError, TypeError, ValueError):
@@ -1601,16 +1653,23 @@ class PrmService:
             except Exception:
                 logger.exception("PRM: the WeChat backend could not reload its private chats")
 
-    def deal_action(self, action: str, data: dict) -> dict:
-        """Stage / adopt / mode / shipment / shipment_status from the console (deals.py)."""
+    def deal_action(self, action: str, data: dict, *, actor: str = "console", review: bool = False,
+                    notice: bool = True, note: Optional[dict] = None) -> dict:
+        """Stage / adopt / mode / shipment / shipment_status from the console (deals.py).  The 聚水潭 sync
+        (``_sample_answer``) takes the same way with ``actor`` system, ``review`` (its shipping notice always waits
+        for a person), ``notice`` (none for an order signed for already) and ``note`` (which order, in the events).
+        An operator's change of the deal's stage or shipment sees to a deleted order's notice."""
         now = self._clock()
         try:
             before = self._store.deal(int(data.get("deal_id")))
         except (TypeError, ValueError):
             before = None
-        result = apply_deal_action(self._store, action, data, now=now, takeover_sec=self._takeover_sec)
+        result = apply_deal_action(self._store, action, data, now=now, takeover_sec=self._takeover_sec, actor=actor,
+                                   review=review, notice=notice, note=note)
         if result.get("ok"):
             self._wake.set()
+            if actor == "console" and action != "mode" and before:
+                self._drop_dead_samples(before["id"], now)
             after = self._store.deal(before["id"]) if before else None
             if after and after.get("delivered_at"):
                 # 已签收: the 专属佣金 chain of this signature (once); marked 已签收 again, a chain that never
@@ -2361,6 +2420,314 @@ class PrmService:
                 done += 1
         return done
 
+    # ── 聚水潭寄样单状态（PRM_SAMPLE_SYNC_MIN） ────────────────────────────
+
+    def sweep_sample_status(self) -> Optional[int]:
+        """PRM_SAMPLE_SYNC_MIN (0 = off): once an interval, the verified sample orders not signed for nor deleted
+        (``_live_sample_orders``) go to the Mac in one job (``meta.op = SAMPLE_OP``, the order numbers): the worker
+        reads 聚水潭 without the model and the answer comes back to ``on_result`` (``_on_sample_status``).  One job at
+        a time (the last one still queued or running: none); when the last round was is kept in the database, so a
+        restart does not ask again at once; after a risk wall (76) the next round waits longer.  Returns the job id
+        when one was queued.  Errors are logged (the sender thread goes on)."""
+        if self._sample_sync_sec <= 0:
+            return None
+        now = self._clock()
+        try:
+            with self._sample_lock:
+                if now < self._sample_due(now) or self._relay.store.latest_open(SAMPLE_SYNC_CHAT) is not None:
+                    return None
+                self._store.set_meta_value("sample_sync_at", now)
+                orders = self._live_sample_orders(now)
+                if not orders:
+                    return None
+                _, job_id = self._relay.submit(SAMPLE_SYNC_CHAT, SAMPLE_SYNC_CHAT, f"查聚水潭寄样单的状态（{len(orders)} 张）",
+                                               kind=PRM, meta={"op": SAMPLE_OP, "orders": orders}, fresh=True,
+                                               input_closed=True)
+        except Exception:
+            logger.exception("PRM: the sample orders' status could not be asked for")
+            return None
+        logger.info("PRM: job #%d asks 聚水潭 where %d sample order(s) stand", job_id, len(orders))
+        return job_id
+
+    def _sample_due(self, now: float) -> float:
+        """When the next round is due: an interval after the last one (kept in the database), not before a risk wall's
+        pause ends; a bot that never asked: SAMPLE_SYNC_FIRST_SEC after its start."""
+        last = _float(self._store.meta_value("sample_sync_at"))
+        if last is None:
+            return self._started + SAMPLE_SYNC_FIRST_SEC
+        pause = _float(self._store.meta_value("sample_sync_pause_until")) or 0.0
+        return max(min(last, now) + self._sample_sync_sec, pause)
+
+    def _register_sample_orders(self, now: float) -> None:
+        """Every sample order verified in 聚水潭 (a ``jst.sample_order`` draft whose execution is VERIFIED_SUCCESS, a
+        late one too) is kept (``PrmStore.add_sample_order``) once: asked about from then on, unless its deal is
+        cleared (8.2), it is older than SAMPLE_GIVE_UP_DAYS, or the deal was marked 已签收 after it already (by
+        hand).  A new order of a deal sees to an earlier one's deletion notice (``_drop_dead_samples``)."""
+        for packet in self._store.packets_of(("jst.sample_order",), statuses=(APPROVED, SENDING, SENT, FAILED)):
+            execution = (packet["platform"] or {}).get("execution") or {}
+            number = str((execution.get("created") or {}).get("sample_order_no") or "")
+            if execution.get("outcome") != platforms.VERIFIED or not number or self._store.sample_order(number):
+                continue
+            made = _order_at(packet)
+            deal = self._store.deal(packet["deal_id"])
+            done, applied = "", {}
+            if deal is None or deal.get("purged_at"):
+                done = "gone"
+            elif now - made > SAMPLE_GIVE_UP_DAYS * 86400:
+                done = "old"
+            elif deal.get("delivered_at") and float(deal["delivered_at"]) >= made:
+                done, applied = "signed", {"signed": "by_hand"}
+            if self._store.add_sample_order(number, packet_id=packet["id"], deal_id=packet["deal_id"],
+                                            party_id=packet["party_id"], made_at=made, done=done, applied=applied,
+                                            now=now) and not done:
+                self._drop_dead_samples(packet["deal_id"], now)
+
+    def _live_sample_orders(self, now: float) -> list:
+        """The order numbers to ask about now (at most ``platforms.MAX_SAMPLE_ORDERS``, oldest first): kept, not
+        done; one past SAMPLE_GIVE_UP_DAYS or of a deal cleared (8.2) is done from now on."""
+        self._register_sample_orders(now)
+        out = []
+        for row in self._store.sample_orders(live=True):
+            deal = self._store.deal(row["deal_id"])
+            if deal is None or deal.get("purged_at"):
+                self._store.update_sample_order(row["order_no"], now, done="gone")
+            elif now - float(row["made_at"]) > SAMPLE_GIVE_UP_DAYS * 86400:
+                self._store.update_sample_order(row["order_no"], now, done="old")
+            else:
+                out.append(row["order_no"])
+        return out[:platforms.MAX_SAMPLE_ORDERS]
+
+    def _on_sample_status(self, job: dict, meta: dict) -> bool:
+        """The Mac's answer to a sample-status job (``platforms.check_sample_result``): each order's answer
+        (``_sample_answer``), the ones 聚水潭 did not have (``_sample_missing``), and how the round went
+        (``_sample_round_end``).  A job lost or cancelled waits for the next round (a lost one's late answer still
+        counts); one that failed is a failed round."""
+        status = job["status"]
+        if status not in ("done", "failed"):
+            return True
+        now = self._clock()
+        asked = [str(n) for n in meta.get("orders") or [] if isinstance(n, str)]
+        result, stopped = None, None
+        if status == "done":
+            try:
+                result = platforms.check_sample_result(json.loads(job.get("result_text") or ""), asked)
+            except (ValueError, platforms.ActionError):
+                stopped = {"verdict": "error", "exit_code": None, "message": "Mac 交回的寄样单状态读不出来"}
+        else:
+            why = _job_error(job)
+            stopped = {"verdict": "old_worker" if "达人编号" in why else "error", "exit_code": None, "message": why}
+        with self._sample_lock:
+            if result is not None:
+                for number, info in result["orders"].items():
+                    try:
+                        self._sample_answer(number, info, now)
+                    except Exception:                  # one order's trouble does not stop the others
+                        logger.exception("PRM: sample order %s: its status could not be applied", number)
+                for number in result["missing"]:
+                    self._sample_missing(number, now)
+                stopped = result["stopped"]
+            self._sample_round_end(stopped, now)
+        return True
+
+    def _sample_answer(self, number: str, info: dict, now: float) -> None:
+        """One order's answer from 聚水潭, each change acted on once (what was done is kept in the order's
+        ``applied``; its status only goes forward, ``SAMPLE_RANK``; signed and deleted orders are not asked about
+        again), only for the deal's newest verified order (``_chain_order``: the one its 专属佣金 follow) and only
+        while the deal is not past the sample (``deals.BEFORE_DELIVERY``):
+
+        - a waybill the deal has none of since the order was made is filled in the console's way (``deal_action``
+          ``shipment``, actor system): 已寄出 and a shipping notice from the template that always waits for a person
+          (none when 聚水潭 says it is signed for already); a waybill an operator typed that is not 聚水潭's is kept,
+          the deal says so;
+        - 已签收 marks the deal 已签收 the console's way (``shipment_status``; ``stage`` when the deal has no
+          shipment of this order): the 专属佣金 chain starts, a step owed while a person has the deal or the creator
+          is off the list, as ever;
+        - deleted or rejected: the deal says so, with the reason (a deletion until a person sees to it:
+          ``_drop_dead_samples``);
+        - no waybill PRM_SAMPLE_WAYBILL_DAYS after the order was made, not signed for PRM_SAMPLE_SIGN_DAYS after it
+          was sent: the deal says so.
+        What the deal says of the order is its notice ``sample:<order>``, written again with every answer (gone when
+        there is nothing to say)."""
+        row = self._store.sample_order(number)
+        if row is None or row["done"]:
+            return
+        deal = self._store.deal(row["deal_id"])
+        if deal is None or deal.get("purged_at"):
+            self._store.update_sample_order(number, now, done="gone", checked_at=now)
+            return
+        applied = dict(row["applied"])
+        before, rank = SAMPLE_RANK.get(row["status"], 0), SAMPLE_RANK.get(info["status"], 0)
+        status = info["status"] if info["status"] and rank >= before else row["status"]
+        ships = info["ships"]
+        ship = ships[0] if ships else None
+        made = float(row["made_at"])
+        fields = {"status": status, "checked_at": now, "misses": 0, "reason": info["reason"]}
+        if ship:
+            fields.update(carrier=ship["carrier"], waybill=ship["waybill"])
+            if row["waybill"] != ship["waybill"] or row["sent_at"] is None:
+                fields["sent_at"] = ship["sent_at"] or info["sent_at"] or now
+        if status == "SIGNED":
+            fields["signed_at"] = info["signed_at"] or row["signed_at"] or now
+        if info["status"] and rank > before:
+            self._store.add_event(deal["id"], row["party_id"], "sample_status", {
+                "order": number, "status": info["status"], **({"waybill": ship["waybill"]} if ship else {}),
+                **({"reason": info["reason"]} if info["reason"] else {})}, actor="system", now=now)
+        newest = self._chain_order(deal["id"])
+        latest = newest is not None and newest["id"] == row["packet_id"]
+        notes = []
+        if status == "DELETED":
+            why = f"（{info['reason']}）" if info["reason"] else "（聚水潭没写原因）"
+            note = (f"聚水潭寄样单 {number} 被删除了{why}：样品不会寄出，这张单的专属佣金也不会开；要重寄就让达人重新确认、"
+                    "重新建寄样单（新单建好，或者在这里改一次阶段，这条提醒就去掉）")
+            applied["dead"] = f"DELETED|{info['reason']}"
+            self._store.update_sample_order(number, now, applied=applied, done="deleted", **fields)
+            self._store.set_notice(deal["id"], f"sample:{number}", note, now)
+            logger.warning("PRM: sample order %s was deleted in 聚水潭; deal %d says so", number, deal["id"])
+            return
+        if info["reason"] and status != "SIGNED":
+            notes.append(f"聚水潭寄样单 {number} 被驳回了（{info['reason']}）：请到聚水潭寄样管理处理（改好重新提交，或者删掉）")
+            applied["dead"] = f"REJECTED|{info['reason']}"
+        if ship:
+            # the deal's shipment of this order (the newest one since it was made): the sync's own, or one an operator typed
+            current = self._sample_shipment_of(deal["id"], made)
+            if current is not None and current["waybill"] == ship["waybill"]:
+                applied["waybill"] = ship["waybill"]
+            elif current is not None and current["id"] != applied.get("shipment"):
+                notes.append(f"聚水潭寄样单 {number} 的运单号是 {ship['carrier'] or '快递'} {ship['waybill']}，合作单上填的是 "
+                             f"{current['carrier']} {current['waybill']}：对不上，系统没有改，请核对")
+            elif not latest:
+                notes.append(f"聚水潭寄样单 {number} 有了运单号 {ship['carrier'] or '快递'} {ship['waybill']}，但它不是这张合作单"
+                             "最新的寄样单，系统没有填进合作单")
+            elif deal["stage"] in deals.BEFORE_DELIVERY:
+                filled = self._sample_shipment(deal, number, ship, signed=status == "SIGNED")
+                if filled is not None:
+                    applied.update(waybill=ship["waybill"], shipment=filled["id"])
+                    deal = self._store.deal(deal["id"]) or deal
+            if len(ships) > 1:
+                notes.append(f"聚水潭寄样单 {number} 有 {len(ships)} 个运单号（"
+                             + "、".join(f"{s['carrier']} {s['waybill']}".strip() for s in ships)
+                             + f"），合作单上记的是 {ship['waybill']}")
+        if status == "SIGNED":
+            fields["done"] = "signed"
+            notes = []                                 # signed for: what was missing or did not match is moot now
+            if latest and deal["stage"] in deals.BEFORE_DELIVERY:
+                if self._sample_signed(deal, number, made):
+                    applied["signed"] = fields["signed_at"]
+            else:
+                applied["signed"] = "left"             # an older order, or a deal past the sample: left as it is
+        elif latest and deal["stage"] in deals.BEFORE_DELIVERY:
+            notes += self._sample_late(number, status, ship, row, deal, made, fields, now)
+        self._store.update_sample_order(number, now, applied=applied, **fields)
+        self._store.set_notice(deal["id"], f"sample:{number}", "；".join(notes), now)
+
+    def _sample_late(self, number: str, status: str, ship, row: dict, deal: dict, made: float, fields: dict,
+                     now: float) -> list:
+        """The deal's reminders for an order not signed for: no waybill (neither 聚水潭's nor one an operator typed)
+        PRM_SAMPLE_WAYBILL_DAYS after it was made; sent PRM_SAMPLE_SIGN_DAYS ago and not signed for."""
+        typed = self._sample_shipment_of(deal["id"], made)
+        if ship is None and typed is None:
+            if now - made >= self._waybill_days * 86400:
+                state = platforms.SAMPLE_STATES.get(status, status or "状态不明")
+                return [f"聚水潭寄样单 {number} 建好 {int((now - made) // 86400)} 天了还没有运单号（{state}）："
+                        "请到聚水潭寄样管理看一下是不是没审核或者没发货"]
+            return []
+        sent = float(fields.get("sent_at") or row.get("sent_at") or (typed or {}).get("created_at") or now)
+        if now - sent >= self._sign_days * 86400:
+            which = f"{ship['carrier'] or '快递'} {ship['waybill']}" if ship else f"{typed['carrier']} {typed['waybill']}"
+            return [f"聚水潭寄样单 {number} 发货 {int((now - sent) // 86400)} 天了还没签收（{which}）：请查一下物流"]
+        return []
+
+    def _sample_shipment_of(self, deal_id: int, made: float) -> Optional[dict]:
+        """The deal's newest shipment since the order was made (one of an earlier order is not this one's)."""
+        return next((s for s in self._store.shipments(deal_id) if float(s["created_at"]) >= made - 1), None)
+
+    def _sample_shipment(self, deal: dict, number: str, ship: dict, *, signed: bool) -> Optional[dict]:
+        """The order's waybill into the deal the console's way (``deal_action`` ``shipment``, actor system): the
+        deal goes to 已寄出 and a shipping notice from the template waits for a person whatever its kind's gate
+        (``review``); none when 聚水潭 says it is signed for already.  The new shipment, or None."""
+        result = self.deal_action("shipment", {"deal_id": deal["id"], "carrier": ship["carrier"] or "快递",
+                                               "waybill": ship["waybill"]},
+                                  actor="system", review=True, notice=not signed, note={"source": "jst", "order": number})
+        if not result.get("ok"):
+            logger.warning("PRM: sample order %s: its waybill could not go into deal %d (%s)", number, deal["id"],
+                           result.get("error"))
+            return None
+        logger.info("PRM: sample order %s: waybill %s into deal %d%s", number, ship["waybill"], deal["id"],
+                    "" if signed else f"; shipping notice #{result.get('packet')} waits for a person")
+        return self._store.latest_shipment(deal["id"])
+
+    def _sample_signed(self, deal: dict, number: str, made: float) -> bool:
+        """The deal marked 已签收 the console's way, by the order's shipment when the deal has one of it
+        (``shipment_status``), else by its stage: the 专属佣金 chain of the signature starts (``deal_action`` →
+        ``_examine_delivery``)."""
+        if self._sample_shipment_of(deal["id"], made) is not None:
+            action, data = "shipment_status", {"status": "delivered"}
+        else:
+            action, data = "stage", {"stage": "delivered"}
+        result = self.deal_action(action, {"deal_id": deal["id"], **data}, actor="system",
+                                  note={"source": "jst", "order": number})
+        if not result.get("ok"):
+            logger.warning("PRM: sample order %s: deal %d could not be marked 已签收 (%s)", number, deal["id"],
+                           result.get("error"))
+            return False
+        logger.info("PRM: sample order %s signed for in 聚水潭: deal %d marked 已签收", number, deal["id"])
+        return True
+
+    def _sample_missing(self, number: str, now: float) -> None:
+        """An order 聚水潭 did not answer for: after SAMPLE_MISSES rounds in a row its deal says so."""
+        row = self._store.sample_order(number)
+        if row is None or row["done"]:
+            return
+        misses = int(row["misses"] or 0) + 1
+        self._store.update_sample_order(number, now, misses=misses, checked_at=now)
+        if misses >= SAMPLE_MISSES:
+            self._store.set_notice(row["deal_id"], f"sample:{number}", (
+                f"聚水潭里查不到寄样单 {number}（连续 {misses} 次）：可能被删掉了，或者不在这台 Mac 登录的子账号下，"
+                "请到聚水潭寄样管理核对"), now)
+
+    def _sample_round_end(self, stopped: Optional[dict], now: float) -> None:
+        """How the round went.  Through: what a round that could not be made said goes (``sample_sync``).  Stopped by
+        a login lapsed (77), a risk wall (76: the next round waits SAMPLE_RISK_PAUSE_SEC, two intervals at least),
+        another sub-account (79), a CLI that is not there or too old, a worker too old: every deal with an order
+        still asked about says so at once (``SAMPLE_PROBLEMS``), once (the same words are not written again); a
+        hiccup (no answer, the lock busy) only after SAMPLE_ERRORS rounds in a row."""
+        if stopped is None:
+            if self._sample_errors or self._sample_said:
+                logger.info("PRM: the sample orders' status came through again")
+            self._sample_errors, self._sample_said = 0, ""
+            for deal in self._store.deals_with_notice("sample_sync"):
+                self._store.edit_notices(deal["id"], lambda notices: [n for n in notices if n["key"] != "sample_sync"],
+                                         now, touch=False)
+            return
+        verdict, message = stopped.get("verdict") or "error", str(stopped.get("message") or "")
+        pause = 0
+        if verdict == "wall":
+            pause = max(2 * self._sample_sync_sec, SAMPLE_RISK_PAUSE_SEC)
+            self._store.set_meta_value("sample_sync_pause_until", now + pause)
+        if verdict in SAMPLE_PROBLEMS and verdict != "error":
+            text = SAMPLE_PROBLEMS[verdict].format(pause=pause // 60, message=message[:120])
+        else:
+            self._sample_errors += 1
+            if self._sample_errors < SAMPLE_ERRORS:
+                logger.warning("PRM: the sample orders' status did not come through (%s: %s); asked again next round",
+                               verdict, message[:200])
+                return
+            text = SAMPLE_PROBLEMS["error"].format(count=self._sample_errors, message=message[:120])
+        if text != self._sample_said:
+            logger.warning("PRM: the sample orders' status is not synced: %s", text)
+            self._sample_said = text
+        for deal_id in sorted({row["deal_id"] for row in self._store.sample_orders(live=True)}):
+            # (about the Mac and 聚水潭, not the deal: no sign of life for the 8.2 clean-up)
+            self._store.set_notice(deal_id, "sample_sync", text, now, touch=False)
+
+    def _drop_dead_samples(self, deal_id: int, now: float) -> None:
+        """A deleted order's notice is seen to: a new order of the deal was verified, or an operator changed the
+        deal's stage or shipment in the console."""
+        dead = {f"sample:{row['order_no']}" for row in self._store.sample_orders(live=False, deal_id=deal_id)
+                if row["done"] == "deleted"}
+        if dead:
+            self._store.drop_notices(deal_id, lambda n: n["key"] in dead, now)
+
     def _waybill(self, packet: dict) -> str:
         """The system's record: the deal's latest waybill (a notice of an earlier one is refused)."""
         shipment = self._store.latest_shipment(packet["deal_id"])
@@ -2374,7 +2741,7 @@ class PrmService:
             "can_send": self._send is not None, "can_send_files": self._send_file is not None,
             "takeover_min": self._takeover_sec // 60, "holding_min": self._holding_sec // 60,
             "retention_days": self._retention_days, "catchup_hours": self._catchup_sec // 3600,
-            "clock_skew_sec": int(round(self._skew)),
+            "clock_skew_sec": int(round(self._skew)), "sample_sync_min": self._sample_sync_sec // 60,
         })
 
     # ── the sender thread: approved drafts, holding replies, clean-ups ────
@@ -2394,6 +2761,7 @@ class PrmService:
         self.send_holding_replies()
         self.sweep_owed_steps()
         self.sweep_deliveries()
+        self.sweep_sample_status()
         now = self._clock()
         if now - self._last_retention >= RETENTION_CHECK_SEC:
             self._last_retention = now
@@ -2921,21 +3289,25 @@ def _job_error(job: dict) -> str:
     return str(extra.get("error") or job.get("result_text") or "没有返回内容")[:200]
 
 
-def apply_deal_action(store: PrmStore, action: str, data: dict, *, now: float, takeover_sec: float) -> dict:
-    """The console's deal actions (also when the bot is stopped: straight on the database)."""
+def apply_deal_action(store: PrmStore, action: str, data: dict, *, now: float, takeover_sec: float,
+                      actor: str = "console", review: bool = False, notice: bool = True,
+                      note: Optional[dict] = None) -> dict:
+    """The console's deal actions (also when the bot is stopped: straight on the database); the 聚水潭 sync's too
+    (``actor`` system, ``review`` / ``notice`` / ``note``: ``deals.add_shipment``)."""
     try:
         deal_id = data.get("deal_id")
         if action == "stage":
-            deals.set_stage(store, deal_id, str(data.get("stage") or ""), now=now)
+            deals.set_stage(store, deal_id, str(data.get("stage") or ""), now=now, actor=actor, note=note)
         elif action == "adopt":
-            deals.adopt_proposal(store, deal_id, now=now)
+            deals.adopt_proposal(store, deal_id, now=now, actor=actor)
         elif action == "mode":
-            deals.set_mode(store, deal_id, str(data.get("mode") or ""), now=now, takeover_sec=takeover_sec)
+            deals.set_mode(store, deal_id, str(data.get("mode") or ""), now=now, takeover_sec=takeover_sec, actor=actor)
         elif action == "shipment":
-            _, packet_id = deals.add_shipment(store, deal_id, data.get("carrier", ""), data.get("waybill", ""), now=now)
+            _, packet_id = deals.add_shipment(store, deal_id, data.get("carrier", ""), data.get("waybill", ""), now=now,
+                                              actor=actor, review=review, notice=notice, note=note)
             return {"ok": True, "packet": packet_id}
         elif action == "shipment_status":
-            deals.set_shipment_status(store, deal_id, str(data.get("status") or ""), now=now)
+            deals.set_shipment_status(store, deal_id, str(data.get("status") or ""), now=now, actor=actor, note=note)
         else:
             return {"ok": False, "error": f"不认识的操作 {action}"}
     except deals.DealError as e:

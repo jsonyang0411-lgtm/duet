@@ -582,3 +582,25 @@ def test_the_sample_status_job_runs_on_the_macs_system_python(tmp_path):
     run = subprocess.run([python, "-I", str(script)], capture_output=True, text=True, timeout=60, cwd=tmp_path, env=env)
     assert run.returncode == 0, run.stderr
     assert run.stdout.startswith("ok")
+
+
+def test_the_bots_round_goes_through_the_real_worker_and_fills_the_deal(worker, bot, jst_mac):  # noqa: F811
+    """端到端（副驾驶模式）：机器人排的一轮由真的 worker 读假的 jst samples，答复回到机器人：运单号填进合作单、
+    发货通知等人审。"""
+    from test_prm_sample_sync import verified_order
+
+    jst_mac.node.rules([rule(["samples"], jst_samples(
+        jst_sample_row(JST_ORDER, "SENT", waybills=[("顺丰速运", "SF1234567890", "2026-10-27 18:00:00")])))])
+    order = verified_order(bot.prm)
+    bot.prm._sample_sync_sec = 3600
+    bot.prm.store.set_meta_value("sample_sync_at", time.time() - 3601)       # an interval since the last round
+    job_id = bot.prm.sweep_sample_status()
+    assert job_id is not None
+    run_one(worker, bot, jst_mac.settings)
+    assert jst_mac.claude.calls() == [] and len(jst_mac.node.calls()) == 1
+    deal = bot.prm.store.deal(order["deal_id"])
+    assert deal["stage"] == "shipped" and bot.prm.store.latest_shipment(deal["id"])["waybill"] == "SF1234567890"
+    [notice] = [p for p in bot.prm.store.packets(("pending",)) if p["kind"] == "shipping_notice"]
+    assert notice["route"] == "review" and "SF1234567890" in notice["text"]
+    assert bot.prm.store.sample_order(JST_ORDER)["sent_at"] == 1793095200.0
+

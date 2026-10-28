@@ -352,3 +352,44 @@ def test_a_file_windows_could_not_send_marks_the_draft_failed_though_its_text_we
     assert wait_for(lambda: mac.prm.store.packet(packet["id"])["status"] == "failed")
     error = mac.prm.store.packet(packet["id"])["error"]
     assert "文件发送超时" in error and "文字已经发出去了" in error
+
+
+def test_the_sample_order_sync_runs_on_the_mac_side_too(mac, fake):
+    """边缘模式（PRM 在 Mac 上）：聚水潭寄样单状态照样定时交给本机的 worker（不跑模型）；有了运单号照控制台的路填进
+    合作单，发货通知一律等人审，审过以后经 Windows 发出、换成真实的话；已签收照控制台的路标上，开专属佣金的链条派出
+    第一个商品的任务。"""
+    from test_prm_sample_sync import info, verified_order
+
+    from platform_fakes import DY_ITEM, JST_ORDER
+    from src.prm import platforms
+    from src.prm.service import SAMPLE_SYNC_CHAT, SAMPLE_SYNC_FIRST_SEC
+
+    mac.prm._sample_sync_sec = 3600
+    order = verified_order(mac.prm)
+
+    def a_round(answer):
+        job_id = mac.prm.sweep_sample_status()
+        assert job_id is not None
+        job = mac.relay.next_job(0, ("prm",))
+        assert job["id"] == job_id and job["meta"] == {"op": "sample_status", "orders": [JST_ORDER]}
+        result = platforms.sample_result([JST_ORDER], orders={JST_ORDER: answer})
+        assert mac.relay.finish(job_id, {"ok": True, "text": json.dumps(result, ensure_ascii=False), "duration_s": 1})
+        mac.relay.tick()
+
+    mac.clock.now += SAMPLE_SYNC_FIRST_SEC + 1
+    a_round(info("SENT", "SF1234567890"))
+    assert mac.relay.store.get(mac.relay.store.list_jobs(1)[0]["id"])["chat_id"] == SAMPLE_SYNC_CHAT
+    deal = mac.prm.store.deal(order["deal_id"])
+    assert deal["stage"] == "shipped" and mac.prm.store.latest_shipment(deal["id"])["waybill"] == "SF1234567890"
+    [notice] = [p for p in mac.prm.store.packets(("pending",)) if p["kind"] == "shipping_notice"]
+    assert fake.sends == [], "发货通知等运营审"
+    assert mac.prm.decide(notice["id"], "send")["ok"]
+    mac.prm.send_approved()
+    [send] = fake.sends
+    assert send["chat_id"] == CREATOR and "SF1234567890" in send["text"], "审过以后经 Windows 发出"
+    mac.clock.now += 3601
+    a_round(info("SIGNED", "SF1234567890"))
+    assert mac.prm.store.deal(order["deal_id"])["stage"] == "delivered"
+    step = mac.relay.next_job(0, ("prm",))
+    assert step is not None and "达人已经签收了寄样单" in step["meta"]["system_note"] and DY_ITEM in step["meta"]["system_note"]
+
