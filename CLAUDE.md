@@ -53,7 +53,7 @@ Mac 开发环境的 `.venv` 是用 uv 创建的，里面没有 pip，装依赖�
 
 | 测试类别 | 覆盖功能 |
 |---------|---------|
-| 路由红线 | 7 个路由步骤的顺序和每一步（`tests/test_routing_steps.py`）；任何群消息（@ 机器人、cc、管理员命令、进群）、陌生私聊、旧 .env 里的聊天开关都得不到回复，被删的聊天模块不能再被导入（`tests/test_router_business.py`） |
+| 路由红线 | 7 个路由步骤的顺序和每一步（`tests/test_routing_steps.py`）；任何群消息（@ 机器人、cc、管理员命令、进群）、陌生私聊、旧 .env 里的聊天开关都得不到回复，被删的聊天模块不能再被导入（`tests/test_router_business.py`）；登记达人私聊里发「cc …」「同意」「同意好友」、图片、语音（说的是 cc 也一样）只生成草稿任务（副驾驶）/ 给 Mac 的事件（边缘），不回复、不建 cc 任务，`CLAUDE_RELAY_ONLY` 开关都一样，她在群里 @ 机器人也不回，`PRM_COPILOT` 和 `PRM_EDGE` 同开时机器人不启动（`tests/test_prm_route_redlines.py`，真的 WCDB 后端、路由、中转、PRM / 边缘接在假微信数据库上） |
 | API 端点 | Diagnose 返回结构、POST allowlist（聊天机器人的接口已删除）、配置字段默认值、`/api/relay`（任务的文字、结果里的号码打码，`tests/test_relay_console_api.py`）、`/api/prm` 和 `/api/prm/parties`、`/packets`、`/deals`、`/reveal`（`tests/test_prm_console_api.py`） |
 | 页面加载 | 前端 SPA 正常渲染，不出现空白页或连接错误 |
 | 主题系统 | 浅色模式默认（明日方舟风，2026-10 改版）、Sun/Moon 按钮切换到深色、localStorage 持久化 |

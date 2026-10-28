@@ -140,12 +140,13 @@ class Run:
     """One run of the bot, wired as Bot.run does: the WCDB backend reads WeChat and hands every
     message to the router (self → edge → persist → relay → prm → admin → silence)."""
 
-    def __init__(self, world, catchup_hours=12, private_chats="wxid_admin"):
+    def __init__(self, world, catchup_hours=12, private_chats="wxid_admin", **settings):
         self.world = world
         config = BotConfig(
             private_chat_enabled=True, private_chats=private_chats, admin_wxid=ADMIN, bot_display_name=BOT,
             claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1", claude_relay_port=0,
-            claude_relay_db=":memory:", prm_copilot="on", prm_db=":memory:", prm_catchup_hours=catchup_hours)
+            claude_relay_db=":memory:", prm_copilot="on", prm_db=":memory:", prm_catchup_hours=catchup_hours,
+            **settings)
         self.router = MessageRouter(store=world.messages, admin_handler=AdminCommandHandler(), config=config,
                                     tracer=TraceSpy())
         self.relay = ClaudeRelay(config, store=world.relay_store, clock=world.clock, files_dir=world.tmp / "relay",

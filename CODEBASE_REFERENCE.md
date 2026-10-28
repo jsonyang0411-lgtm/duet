@@ -1373,12 +1373,14 @@ WcdbBackend._handle_message(...)（线程池）/ Mac 后端 poll_once
 | 允许的人私聊发 `cc 任务`（`CLAUDE_RELAY_ONLY=on` 时不用 `cc`） | 回执（编号、前面排着几个、Mac 在不在线） |
 | 管理员私聊发账号命令（`查状态`、`添加好友 …`、`同意好友`、`自动同意好友 开 / 关`、`帮助`） | 命令的回复 |
 | 管理员私聊发别的话（`CLAUDE_RELAY_ONLY` 关着） | `silent_end`，不回 |
-| 登记 / 名单里达人的私聊 | 不回复（草稿任务 / 给 Mac 的事件） |
+| 登记 / 名单里达人的私聊：`cc …`、`同意`、`同意好友`、图片、语音（说的是 `cc …` 也一样） | 不回复、不建 cc 任务、不执行管理员命令：`PRM_COPILOT` 只有草稿任务，`PRM_EDGE` 只有给 Mac 的 `creator_message` 事件；`CLAUDE_RELAY_ONLY` 开关都一样 |
+| 登记 / 名单里的达人在群里 @ 这个号（`cc …`、`同意好友`） | 入库，不回，不起草、不转给 Mac |
+| `PRM_COPILOT` 和 `PRM_EDGE` 同时开 | 配置检查不过（`_validate_config`），`load_config` 抛错，机器人不启动 |
 | 旧 `.env` 里聊天功能的开关（AI 后端和密钥、触发词、主动发言…） | 不再被读取，启动也不检查它们 |
 
 要加一个新的前置检查：写一个 `step(ctx) -> Stop | None` 放进 `ROUTE_STEPS` 的合适位置，不用动别的步骤；`silence` 必须是最后一步。`ROUTE_STEPS` 可以在实例上换（`router._route_steps`），测试这样用。
 
-测试：`tests/test_routing_steps.py`（7 个步骤的顺序和每一步）、`tests/test_router_business.py`（上面的红线；被删的聊天模块不能再被导入）。
+测试：`tests/test_routing_steps.py`（7 个步骤的顺序和每一步）、`tests/test_router_business.py`（上面的红线；被删的聊天模块不能再被导入）、`tests/test_prm_route_redlines.py`（登记达人的红线端到端：真的 WCDB 后端接在假微信数据库上、路由、中转、PRM 或微信边缘，副驾驶和边缘两种模式、`CLAUDE_RELAY_ONLY` 开和关；管理员自己的 cc 照常建任务、回执（对照）；`PRM_COPILOT` + `PRM_EDGE` 不启动；二轮审查 win C4）。
 
 ---
 
