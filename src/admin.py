@@ -143,7 +143,11 @@ class AdminCommandHandler:
 
         target = parts[1].strip()
         reason = parts[2].strip() if len(parts) > 2 else ""
-        res = self._friend.add_friend(target, reason)
+        try:
+            res = self._friend.add_friend(target, reason)
+        except Exception:
+            logger.exception("ADMIN: 添加好友 failed")
+            return "添加好友时出错，已中止（详见日志）：请在微信里看一下申请发出去没有"
         return str(res.get("message", "处理完成"))
 
     def _cmd_accept_friends(self) -> str:
@@ -151,7 +155,14 @@ class AdminCommandHandler:
         if self._friend is None:
             return f"{NO_FRIEND_MANAGER}同意好友操作"
 
-        accepted = self._friend.accept_friend_requests()
+        try:
+            accepted = self._friend.accept_friend_requests()
+        except Exception:
+            logger.exception("ADMIN: 同意好友 failed")
+            return "同意好友时出错，已停止（详见日志）"
+        if getattr(accepted, "error", ""):
+            done = f"，之前已同意 {len(accepted)} 位" if accepted else ""
+            return f"同意好友时出错，已停止{done}（详见日志）"
         if accepted:
             return f"已成功同意 {len(accepted)} 位新好友申请"
         return "没有同意任何申请：没有待处理的申请，或微信窗口/识别出了问题（详见日志）"

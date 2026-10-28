@@ -1392,5 +1392,104 @@ class ApplyDialogTests(DialogTestCase):
         self.assertNotIn(CHAT_PERSON, {e[-1] for e in self.events if e[0] in ("key", "combo")})
         self.assertEqual(self.window.pasted, ["wxid_target"])         # the greeting was never pasted
 
+
+# ── An unexpected error inside a friend action (win review F8) ─────────────────────
+#
+# A pywin32 error (a window handle gone, a dialog closed meanwhile) is not an _Abort: it used to go all
+# the way up, the admin heard nothing at all, and WeChat 4.0's add-friend window stayed open.  Now the
+# admin is told 「…出错…（详见日志）」, the dialogs opened are closed, and the window is put back, the
+# focus returned and the window lock released as before.
+
+PYWIN_ERROR = OSError("pywintypes.error (1400, 'GetWindowRect', '无效的窗口句柄')")
+
+
+class BoomWindow(FakeWindow):
+    def _goto_contacts_tab(self, hwnd):
+        raise PYWIN_ERROR
+
+
+class UnexpectedErrorTests(FriendTestCase):
+    def setUp(self):
+        super().setUp()
+        self.lock = threading.Lock()
+
+    def manager(self, window=None, ocr=None, lock=None, click_ok=True):
+        return super().manager(window, ocr, lock=self.lock, click_ok=click_ok)
+
+    def assertPutBack(self, window):
+        self.assertEqual(window.restored, [("state", HWND)])
+        self.assertEqual(window.focus_returned, [777])
+        self.assertFalse(self.lock.locked())
+
+    def test_the_admin_hears_about_an_error_while_accepting(self):
+        window = BoomWindow()
+        admin = AdminCommandHandler(friend_manager=self.manager(window, FakeOcr([])))
+        reply = admin.handle("同意好友")
+        self.assertIn("出错", reply)
+        self.assertIn("详见日志", reply)
+        self.assertPutBack(window)
+
+    def test_requests_accepted_before_the_error_are_still_reported(self):
+        accept = row("接受", 0.70, 0.21, 0.76, 0.25)
+        second = row("接受", 0.70, 0.31, 0.76, 0.35)
+        ocr = FakeOcr([AcceptFriendRequestsTests.NEW_FRIENDS], [accept, second], [], [second], [second])
+        window = FakeWindow()
+        manager = self.manager(window, ocr)
+        clicks = []
+
+        def click(x, y):
+            clicks.append((x, y))
+            if len(clicks) == 3:                                      # the second accept: the handle is gone
+                raise PYWIN_ERROR
+            return True
+        manager._clicker = click
+        results = []
+        real = manager.accept_friend_requests
+        manager.accept_friend_requests = lambda: results.append(real()) or results[-1]
+        reply = AdminCommandHandler(friend_manager=manager).handle("同意好友")
+        self.assertEqual(len(results[0]), 1)                          # the first one went through
+        self.assertIn("1400", results[0].error)
+        self.assertEqual(reply, "同意好友时出错，已停止，之前已同意 1 位（详见日志）")
+        self.assertPutBack(window)
+
+    def test_an_error_in_the_add_friend_window_closes_it_and_tells_the_admin(self):
+        window = FakeWindow()
+        manager = self.manager(window, FakeOcr([]))
+        closed = []
+        manager._close_window = closed.append
+        manager._is_wechat4 = lambda hwnd: True
+        manager._open_add_friend_dialog_wechat4 = lambda hwnd: 999
+        manager._focus_window = lambda hwnd: None
+        manager._rect_of = lambda hwnd: (_ for _ in ()).throw(PYWIN_ERROR)
+        result = manager.add_friend("wxid_target", "你好")
+        self.assertEqual((result["ok"], result["reason"]), (False, "error"))
+        self.assertIn("详见日志", result["message"])
+        self.assertEqual(closed, [999])                                # the 「添加朋友」 window is not left open
+        reply = AdminCommandHandler(friend_manager=manager).handle("添加好友 wxid_target 你好")
+        self.assertIn("出错", reply)
+        self.assertEqual(window.restored, [("state", HWND)] * 2)
+        self.assertFalse(self.lock.locked())
+
+    def test_an_error_before_the_window_is_taken_still_gets_an_answer(self):
+        window = FakeWindow()
+        window.find_hwnd = lambda force=False, wake=True: (_ for _ in ()).throw(PYWIN_ERROR)
+        admin = AdminCommandHandler(friend_manager=self.manager(window, FakeOcr([])))
+        self.assertIn("出错", admin.handle("同意好友"))
+        self.assertIn("出错", admin.handle("添加好友 wxid_target"))
+        self.assertFalse(self.lock.locked())
+
+    def test_a_window_that_cannot_be_put_back_still_gets_the_focus_returned(self):
+        window = BoomWindow()
+        window._restore_window_state = lambda snapshot, hwnd: (_ for _ in ()).throw(PYWIN_ERROR)
+        admin = AdminCommandHandler(friend_manager=self.manager(window, FakeOcr([])))
+        self.assertIn("出错", admin.handle("同意好友"))
+        self.assertEqual(window.focus_returned, [777])
+        self.assertFalse(self.lock.locked())
+
+    def test_the_auto_accept_worker_just_logs_it(self):
+        service = AutoFriendService(self.manager(BoomWindow(), FakeOcr([])), watch=False)
+        self.assertEqual(service.run_once(), [])
+        self.assertFalse(self.lock.locked())
+
 if __name__ == "__main__":
     unittest.main()

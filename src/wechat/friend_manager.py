@@ -79,6 +79,14 @@ class _Abort(Exception):
     """The window action cannot go on safely (WeChat lost the foreground, a click failed)."""
 
 
+class AcceptResult(list):
+    """What ``accept_friend_requests`` returns: one ``{"status": "accepted", "timestamp"}`` per request
+    accepted (a list, as before), and ``error``: why the run ended on an unexpected error (a pywin32
+    error, a window handle gone; logged with its traceback), "" otherwise."""
+
+    error: str = ""
+
+
 def _clean_text(text) -> str:
     """Strip all whitespace and lower-case, so OCR spacing never breaks a match."""
     return "".join(str(text or "").split()).lower()
@@ -257,7 +265,10 @@ class FriendManager:
                     logger.warning("Friend management: WeChat could not be brought to the front")
                     yield None
             finally:
-                window._restore_window_state(snapshot, hwnd)
+                try:
+                    window._restore_window_state(snapshot, hwnd)
+                except Exception as e:
+                    logger.warning("Friend management: the WeChat window could not be put back: %s", e)
                 self._return_focus(previous)
 
     def _foreground_window(self) -> int:
@@ -367,12 +378,25 @@ class FriendManager:
         """
         if self._ocr is None:
             logger.warning("accept_friend_requests: no OCR engine, so nothing can be clicked safely")
-            return []
-        accepted: list[dict] = []
+            return AcceptResult()
+        accepted = AcceptResult()
+        try:
+            self._accept_in_window(accepted)
+        except Exception as e:
+            # Not an _Abort: a pywin32 error, a window handle gone.  The session put the window back and
+            # gave the focus back; a dialog it opened was closed (_confirm_dialog).  The caller hears why.
+            logger.exception("accept_friend_requests failed")
+            accepted.error = f"{type(e).__name__}: {e}"[:200]
+        if not accepted:
+            logger.info("accept_friend_requests: nothing accepted")
+        return accepted
+
+    def _accept_in_window(self, accepted: AcceptResult) -> None:
+        """``accept_friend_requests`` in the window session; the accepted ones go into ``accepted``."""
         clean = False                 # the list was read to its end: no accept button was left
         with self._ui_session() as hwnd:
             if hwnd is None:
-                return accepted
+                return
             try:
                 self._open_new_friends(hwnd)
                 rows = self._capture_ocr()
@@ -414,9 +438,6 @@ class FriendManager:
                     self._rail.settle()       # the badges on the screen now are "nothing to do"
             except _Abort as e:
                 logger.warning("accept_friend_requests stopped: %s", e)
-        if not accepted:
-            logger.info("accept_friend_requests: nothing accepted")
-        return accepted
 
     def _scroll_contacts_top(self, hwnd: int) -> None:
         """Scroll the contacts navigation list back to the top to reveal '新的朋友'."""
@@ -592,14 +613,20 @@ class FriendManager:
         if self._ocr is None:
             return _failure(keyword, "no_ocr", "好友管理需要屏幕识别（OCR），当前不可用")
 
-        with self._ui_session() as hwnd:
-            if hwnd is None:
-                return _failure(keyword, "no_window", "未找到微信主窗口或无法切到前台，请确保微信已启动")
-            try:
-                return self._add_friend_in_window(hwnd, keyword, message)
-            except _Abort as e:
-                logger.warning("add_friend stopped: %s", e)
-                return _failure(keyword, "aborted", f"微信窗口状态异常，已中止：{e}")
+        try:
+            with self._ui_session() as hwnd:
+                if hwnd is None:
+                    return _failure(keyword, "no_window", "未找到微信主窗口或无法切到前台，请确保微信已启动")
+                try:
+                    return self._add_friend_in_window(hwnd, keyword, message)
+                except _Abort as e:
+                    logger.warning("add_friend stopped: %s", e)
+                    return _failure(keyword, "aborted", f"微信窗口状态异常，已中止：{e}")
+        except Exception:
+            # Not an _Abort: a pywin32 error, a window handle gone.  The dialogs it opened were closed
+            # (_add_friend_wechat4), the window put back and the focus returned (_ui_session).
+            logger.exception("add_friend failed")
+            return _failure(keyword, "error", "添加好友时出错，已中止（详见日志）：请在微信里看一下申请发出去没有")
 
     def _find_search_box(self) -> dict | None:
         """The search field's placeholder row in the top left of the window (topmost, then leftmost)."""
@@ -874,7 +901,7 @@ class FriendManager:
                 "target": keyword,
                 "message": f"已成功向「{keyword}」发送好友申请" + (f"（附言：{message}）" if message else ""),
             }
-        except _Abort:
+        except Exception:                             # _Abort, or a pywin32 error: no dialog is left open
             for opened in (apply_hwnd, dialog_hwnd):
                 if opened:
                     self._close_window(opened)
