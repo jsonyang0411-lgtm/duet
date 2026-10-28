@@ -1408,3 +1408,48 @@ class WebSocketDisabledTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# /api/wechat-gaps: when PC WeChat was not online (2026-10-28)
+# ---------------------------------------------------------------------------
+
+
+class WechatGapsApiTests(unittest.TestCase):
+    """GET lists the stretches without PC WeChat an operator has not seen (the bot stopped: read
+    straight from DB_PATH, nothing made there); only a POST marks one 看过了 (a GET from another page
+    cannot)."""
+
+    def _json(self, sock):
+        return json.loads(sock.get_response_text().split("\r\n\r\n", 1)[1])
+
+    def test_get_lists_and_only_a_post_marks_seen(self):
+        from src.wechat.presence import PresenceStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "messages.db"
+            env = {"DB_PATH": str(db), "WECHAT_BACKEND": "wcdb"}
+            with patch.dict(os.environ, env):
+                _, sock = _build_handler("/api/wechat-gaps")
+                self.assertEqual(self._json(sock), {"ok": True, "source": "windows", "open": None, "gaps": []})
+                self.assertFalse(db.exists(), "a GET makes no database")
+            store = PresenceStore(str(db))
+            gap = store.add_gap(1761462000, "offline_while_running", "找不到微信主窗口", 1761462100)
+            store.close_gap(gap["id"], 1761465600)
+            store.add_gap(1761470000, "stopped_with_bot", "", 1761470100)        # going on: not shown when stopped
+            store.close()
+            with patch.dict(os.environ, env):
+                _, sock = _build_handler(f"/api/wechat-gaps?id={gap['id']}&action=seen")
+                body = self._json(sock)
+                self.assertEqual([g["id"] for g in body["gaps"]], [gap["id"]])
+                self.assertIsNone(body["open"])
+                self.assertIn("同步最近的聊天记录", body["gaps"][0]["text"])
+                payload = json.dumps({"id": gap["id"], "action": "seen"}).encode()
+                _, sock = _build_handler("/api/wechat-gaps", method="POST", body=payload,
+                                         headers={"Content-Type": "application/json"})
+                self.assertEqual(self._json(sock), {"ok": True})
+                _, sock = _build_handler("/api/wechat-gaps")
+                self.assertEqual(self._json(sock)["gaps"], [])
+                _, sock = _build_handler("/api/wechat-gaps", method="POST", body=b"[1]",
+                                         headers={"Content-Type": "application/json"})
+                self.assertFalse(self._json(sock)["ok"])

@@ -21,6 +21,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Optional
 
+from ..edge import text as edge_text
 from .base import AbstractWeChatBackend, MessageCallback
 from .burst import MessageBurstBuffer
 from .wcdb_client import WcdbNativeClient
@@ -46,6 +47,16 @@ MAX_CONSECUTIVE_ERRORS = 5   # trigger reinit after this many consecutive failur
 SESSION_REFRESH_SEC = 60.0
 # catch_up_chat: a chat asked for that is not read within this long is given up on (logged).
 CATCH_UP_WAIT_SEC = 600.0
+# WeChat 4 takes a message back by rewriting its row in place (same local_id and time, type 10000,
+# the recall's XML): the rows of a watched private chat written this long ago are looked at again
+# on every poll (_recall_in_place).  WeChat allows a recall for 2 minutes; the rest is margin for
+# this PC's clock and a slow poll.
+RECALL_WINDOW_SEC = 300
+# PC WeChat was offline (src/wechat/presence.py): rows it brings in after logging in again (synced
+# from the phone: new ids, old times) are read back and handed on as catch-up while it is offline
+# and this long after it is back; a row written up to GAP_MARGIN_SEC before the gap began counts too.
+GAP_WATCH_SEC = 3600
+GAP_MARGIN_SEC = 60
 # data/private_chat_names.json is written by the poll loop and the new-friend scan.
 _PRIVATE_NAMES_LOCK = threading.Lock()
 # OCR cannot see who wrote a line of a group chat.
@@ -83,6 +94,22 @@ def _ocr_from_config(config, window):
 
 def _md5(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+def _row_time(msg: dict) -> int:
+    """A WCDB row's ``create_time`` (0 when it has none)."""
+    try:
+        return int(msg.get("create_time", msg.get("createTime", 0)) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _row_id(msg: dict, talker: str) -> str:
+    """The message id of a WCDB row with a ``local_id`` without standardizing it (``_message_ids``),
+    "" for a row without one."""
+    local_id = msg.get("local_id", msg.get("localId"))
+    local_id = "" if local_id is None else str(local_id).strip()
+    return "" if local_id in ("", "0") else _md5(f"{talker}|{local_id}|{_row_time(msg)}")
 
 
 class SendRefused:
@@ -160,11 +187,12 @@ def _extract_media_hint(content: str) -> str:
 
 
 def _message_local_type(msg: dict) -> int:
+    """The message type: the low 32 bits of WCDB's ``local_type``.  WeChat 4 packs an app message's
+    kind into the high 32 bits (a reply (57 << 32) | 49, 拍一拍 (62 << 32) | 49 = 266287972401); that
+    kind is ``_message_subtype``'s, and the standardized message carries it as ``msg_subtype``."""
     raw = msg.get("local_type", msg.get("localType", msg.get("msg_type", 1)))
     try:
         value = int(raw)
-        # Some WeChat app messages pack subtype in the high 32 bits, e.g.
-        # quote/refer messages: (57 << 32) | 49.
         if value > 0xFFFFFFFF:
             return value & 0xFFFFFFFF
         return value
@@ -173,6 +201,7 @@ def _message_local_type(msg: dict) -> int:
 
 
 def _message_subtype(msg: dict) -> int:
+    """The high 32 bits of WCDB's ``local_type`` (an app message's kind), 0 when there are none."""
     raw = msg.get("local_type", msg.get("localType", msg.get("msg_type", 1)))
     try:
         value = int(raw)
@@ -287,7 +316,11 @@ def _special_info(content: str, local_type: int) -> dict:
         if start >= 0 and decoded[start:].lstrip().startswith("<"):
             try:
                 root = ET.fromstring(decoded[start:].strip())
-                text = _text_at(root, ".//replacemsg") or " ".join(t.strip() for t in root.itertext() if t.strip())
+                # a recall: <replacemsg>, or (WeChat 4.1, a row rewritten in place, 2026-10-28)
+                # <revokemsg><content> beside <revoketime>
+                revoke = root if root.tag == "revokemsg" else root.find(".//revokemsg")
+                text = (_text_at(root, ".//replacemsg") or _text_at(revoke, "content")
+                        or " ".join(t.strip() for t in root.itertext() if t.strip()))
             except ET.ParseError:
                 text = re.sub(r"<[^>]+>", " ", decoded)
         return {"kind": "system", "title": " ".join(str(text).split())[:200]}
@@ -428,6 +461,10 @@ class WcdbBackend(AbstractWeChatBackend):
         self._own_message_hook = None
         self._db_failures = 0          # database reads failed in a row (the WeChat edge's state)
         self._known: dict[str, DedupSet] = {}      # per chat: the message ids seen (_known_set)
+        # Per watched private chat (the private filter's): message id -> time of the ordinary rows
+        # read that were written in the last RECALL_WINDOW_SEC; one rewritten into a recall is
+        # handed on as a system line of its own (_recall_in_place).
+        self._recallable: dict[str, dict[str, int]] = {}
         # PRM_CATCHUP_HOURS: per registered creator's chat, the messages the bot never handled
         # (found by _prime_chat; it was stopped, the database re-opened), oldest first, for the
         # chat's next poll; is a chat a creator's that the catch-up follows (_tracked_chat); how
@@ -444,6 +481,15 @@ class WcdbBackend(AbstractWeChatBackend):
         self._catch_up_requests: dict[str, tuple] = {}
         self._catch_up_lock = threading.Lock()
         self._sessions_read: Optional[tuple] = None
+        # PC WeChat offline (note_wechat_offline / catch_up_after_gap, src/wechat/presence.py): since when,
+        # until when rows it brings in late are looked for (None: still offline), when it was seen back
+        # (every creator's chat read back before that is read back again), when each chat was read back
+        # for a gap.  Under _catch_up_lock.  And per chat, the rows a gap read-back looked at already.
+        self._gap_since: Optional[float] = None
+        self._gap_until: Optional[float] = None
+        self._gap_back_at = 0.0
+        self._gap_read_at: dict[str, float] = {}
+        self._gap_looked: dict[str, set] = {}
         # Thread safety: WCDB DLL (ctypes) may not be thread-safe internally.
         # All _client calls are serialized through this lock.
         self._client_lock = threading.Lock()
@@ -673,6 +719,7 @@ class WcdbBackend(AbstractWeChatBackend):
         # _message_ids), and the catch-up finds a creator's messages from the gap.
         self._known = {}
         self._tracked = {}
+        self._recallable = {}
         # Re-resolve groups (talker IDs may have changed)
         self._resolve_groups()
         # What came in while the database could not be read: history, except a registered
@@ -1103,6 +1150,7 @@ class WcdbBackend(AbstractWeChatBackend):
             "sender_name": OCR_SENDER,
             "content": text,
             "msg_type": 1,
+            "msg_subtype": 0,
             "server_id": "",
             "media_base_dir": "",
             "media_hint": "",
@@ -1248,6 +1296,8 @@ class WcdbBackend(AbstractWeChatBackend):
         known = self._known_set(talker)
         my_wxid = self.own_wxid()
         picked, newest = [], None
+        now = time.time()
+        watched = self._wants_private(talker)                # registered: a recall in place is looked for
         for msg in reversed(messages or []):
             standardized = self._standardize(msg, group_name, talker, is_group=False)
             if standardized is None:
@@ -1255,8 +1305,10 @@ class WcdbBackend(AbstractWeChatBackend):
             ts = int(standardized.get("timestamp") or 0)
             newest = ts if newest is None else max(newest, ts)
             known.add(standardized["message_id"])
+            if watched:
+                self._note_recallable(talker, standardized, now)
             if (ts < since or self._is_own_line(standardized, my_wxid) or is_friend_notice(standardized)
-                    or int(standardized.get("msg_type") or 1) == 10000):
+                    or edge_text.is_notice(standardized)):     # WeChat's lines: a recall, 拍一拍 …
                 continue
             if my_wxid:
                 standardized["_not_self_by_id"] = True
@@ -1290,6 +1342,96 @@ class WcdbBackend(AbstractWeChatBackend):
             return False
         finally:
             self._window_lock.release()
+
+    # ── PC WeChat offline (src/wechat/presence.py) ──────────────────────
+
+    def wechat_presence(self) -> dict:
+        """Is PC WeChat logged in now (``presence.probe``: its process and its main window)?  Only on
+        Windows; elsewhere there is no answer (``online`` None) and no gap is ever seen."""
+        from . import presence
+        if os.name != "nt":
+            return {"online": None, "process": None, "started_at": None, "detail": "不是 Windows，不看电脑微信"}
+        return presence.probe(self.wechat_window_found)
+
+    def note_wechat_offline(self, since: float) -> None:
+        """PC WeChat has not been online since ``since``: from now on, rows written since then that show
+        up late in a creator's chat (WeChat brings them in when it is logged in again with 「同步最近的聊天
+        记录」 ticked) are read back and handed on as catch-up (``_poll_group``), not left as history."""
+        with self._catch_up_lock:
+            self._gap_since = float(since) if self._gap_since is None else min(self._gap_since, float(since))
+            self._gap_until = None
+        logger.warning("PC WeChat is not online since %s: rows it brings in later are handed on",
+                       time.strftime("%m-%d %H:%M", time.localtime(since)))
+
+    def catch_up_after_gap(self, since: float) -> None:
+        """PC WeChat is online again after not being online since ``since``: like after a restart, every
+        registered (PRM_COPILOT) or listed (PRM_EDGE) creator's chat is read back (CATCHUP_READ) at its
+        next poll and the rows written since then that this run has not seen are handed on in order;
+        for GAP_WATCH_SEC more, rows it brings in later are read back the same way.  Needs
+        PRM_CATCHUP_HOURS above 0, like the restart catch-up."""
+        with self._catch_up_lock:
+            self._gap_since = float(since) if self._gap_since is None else min(self._gap_since, float(since))
+            self._gap_until = time.time() + GAP_WATCH_SEC
+            self._gap_back_at = time.time()
+        logger.info("PC WeChat is online again (offline since %s): the creators' chats are read back",
+                    time.strftime("%m-%d %H:%M", time.localtime(since)))
+
+    def _gap_watch(self, now: float) -> Optional[float]:
+        """Since when PC WeChat was offline, while rows it brings in late are looked for; else None."""
+        with self._catch_up_lock:
+            if self._gap_since is None:
+                return None
+            if self._gap_until is not None and now > self._gap_until:
+                self._gap_since = self._gap_until = None
+                self._gap_back_at = 0.0
+                self._gap_read_at = {}
+                self._gap_looked = {}
+                return None
+            return self._gap_since
+
+    def _gap_rows_unseen(self, talker: str, messages: list, known: DedupSet, since: float, now: float) -> bool:
+        """Do these rows (WCDB's, newest first) hold one this run has not seen, written since the gap
+        began and read late (more than MAX_AGE_SEC old): WeChat brought it in after logging in again?
+        Looked at by the row's ``local_id`` and time only (no standardizing)."""
+        line = since - GAP_MARGIN_SEC
+        looked = self._gap_looked.get(talker) or set()
+        for msg in messages or []:
+            ts = _row_time(msg)
+            if ts < line or now - ts <= MAX_AGE_SEC:
+                continue
+            row_id = _row_id(msg, talker)
+            if row_id and row_id not in known and row_id not in looked:
+                return True
+        return False
+
+    def _gap_catch_up(self, group_name: str, talker: str, since: float) -> None:
+        """Read a creator's chat back (CATCHUP_READ) for a gap: the rows ``_gap_plan`` picks go to
+        ``_catchup[talker]`` (handed on right after, oldest first), the rest is marked seen."""
+        with self._catch_up_lock:
+            self._gap_read_at[talker] = time.time()
+        with self._client_lock:
+            messages = self._client.get_messages(talker=talker, limit=CATCHUP_READ)
+        self._prime_chat(group_name, talker, messages, catch_up=True, gap_since=since)
+        # a row that is no message (standardized to nothing) never asks for another read-back
+        self._gap_looked.setdefault(talker, set()).update(i for i in (_row_id(m, talker) for m in messages or []) if i)
+
+    def _gap_plan(self, talker: str, items: list[dict], since: float) -> set[str]:
+        """The ids of rows (``items``: standardized, what WCDB shows now) to hand on for a gap: written
+        since it began (GAP_MARGIN_SEC before), not seen by this run (``_known_set``: what the poll saw
+        it handed on already, alone or in a burst), not held in a burst, not stored (PRM_COPILOT: an
+        earlier run's).  Not the restart catch-up's floors: whatever came before the gap was read while
+        WeChat was online, and an id that dropped out of the seen set must not go a second time."""
+        known = self._known_set(talker)
+        held = self._burst.held_ids()
+        try:
+            stored = self._stored_of(talker, items) if self._catchup_floor is None and self._store is not None else set()
+        except Exception:
+            logger.exception("Gap catch-up: the message store could not be read for %s…", talker[:8])
+            stored = set()
+        line = since - GAP_MARGIN_SEC
+        return {s["message_id"] for s in items
+                if s["message_id"] not in known and s["message_id"] not in held and s["message_id"] not in stored
+                and int(s.get("timestamp") or 0) >= line}
 
     def _tell_own_message(self, standardized: dict) -> None:
         hook = getattr(self, "_own_message_hook", None)
@@ -1458,10 +1600,12 @@ class WcdbBackend(AbstractWeChatBackend):
                     "reading are handed on" if queued else "")
 
     def _prime_chat(self, group_name: str, talker: str, messages, *, catch_up: bool,
-                    first_read: bool = False) -> tuple[int, int]:
+                    first_read: bool = False, gap_since: Optional[float] = None) -> tuple[int, int]:
         """Mark one chat's messages (``messages``: WCDB's list, newest first) as seen.  With
         ``catch_up`` (a registered creator's chat, PRM_CATCHUP_HOURS on) the ones
-        ``_catchup_plan`` picks are kept, oldest first, for the chat's next poll instead.
+        ``_catchup_plan`` picks are kept, oldest first, for the chat's next poll instead;
+        with ``gap_since`` (PC WeChat was offline since then: ``_gap_catch_up``) the ones
+        ``_gap_plan`` picks.  Kept rows join those kept already, in time order.
         Returns ``(marked, kept)``."""
         is_group = self._chat_is_group.get(talker, talker.endswith("@chatroom"))
         known = self._known_set(talker)
@@ -1470,19 +1614,32 @@ class WcdbBackend(AbstractWeChatBackend):
             standardized = self._standardize(msg, group_name, talker, resolve_voice=False, is_group=is_group)
             if standardized is not None:
                 items.append((msg, standardized))
-        picked = self._catchup_plan(talker, [s for _, s in items], first_read=first_read) if catch_up else set()
+        if gap_since is not None:
+            picked = self._gap_plan(talker, [s for _, s in items], gap_since)
+        else:
+            picked = self._catchup_plan(talker, [s for _, s in items], first_read=first_read) if catch_up else set()
         kept, marked = [], 0
+        now = time.time()
+        watched = not is_group and self._wants_private(talker)      # a recall in place is looked for
         for msg, standardized in items:
             msg_id = standardized["message_id"]
+            if watched:
+                self._note_recallable(talker, standardized, now)
             if msg_id in picked:
                 kept.append(msg)
             elif msg_id not in known:
                 known.add(msg_id)
                 marked += 1
         if kept:
-            self._catchup[talker] = kept
-            logger.info("Catch-up: %d message(s) in a registered creator's chat (%s…) came in while the bot "
-                        "was not reading (the oldest at %s); handed on in order", len(kept), talker[:8],
+            waiting = self._catchup.get(talker) or []
+            have = {(str(m.get("local_id", m.get("localId", ""))), m.get("create_time", m.get("createTime")))
+                    for m in waiting}
+            more = [m for m in kept if (str(m.get("local_id", m.get("localId", ""))),
+                                        m.get("create_time", m.get("createTime"))) not in have]
+            self._catchup[talker] = sorted(waiting + more, key=_row_time)
+            logger.info("Catch-up: %d message(s) in a registered creator's chat (%s…) came in while %s (the oldest "
+                        "at %s); handed on in order", len(kept), talker[:8],
+                        "PC WeChat was not online" if gap_since is not None else "the bot was not reading",
                         time.strftime("%m-%d %H:%M", time.localtime(min(
                             int(s.get("timestamp") or 0) for _, s in items if s["message_id"] in picked))))
         return marked, len(kept)
@@ -1603,6 +1760,64 @@ class WcdbBackend(AbstractWeChatBackend):
         except Exception:
             logger.exception("Could not note how far %s… was read", talker[:8])
 
+    # ── A message taken back: WeChat 4 rewrites its row in place ─────────
+
+    def _recallable_rows(self, talker: str, now: float) -> dict[str, int]:
+        """The chat's rows that may still be taken back (``_note_recallable``), the ones written
+        more than RECALL_WINDOW_SEC ago dropped."""
+        rows = self._recallable.get(talker)
+        if not rows:
+            return {}
+        for msg_id in [i for i, ts in rows.items() if now - ts > RECALL_WINDOW_SEC]:
+            del rows[msg_id]
+        if not rows:
+            del self._recallable[talker]
+        return rows
+
+    def _note_recallable(self, talker: str, standardized: dict, now: float) -> None:
+        """An ordinary row (not one of WeChat's lines) of a watched private chat, written in the last
+        RECALL_WINDOW_SEC: looked at again on every poll, in case WeChat rewrites it into a recall."""
+        if edge_text.is_notice(standardized):
+            return
+        ts = int(standardized.get("timestamp") or 0)
+        if now - ts > RECALL_WINDOW_SEC:
+            return
+        self._recallable.setdefault(talker, {})[standardized["message_id"]] = ts
+
+    def _recall_in_place(self, talker: str, standardized: dict, now: float) -> Optional[dict]:
+        """A row read before as an ordinary line that now is one of WeChat's lines: WeChat 4.1 takes a
+        message back by rewriting its row (same ``local_id`` and time, so the same message id; type
+        10000, ``<revokemsg><content>"小美" 撤回了一条消息</content>``; 2026-10-28 on the real
+        machine), which the poll would skip as read.  Returns that line as a message of its own (once):
+        its own id (made from the row's: the route's store and the edge's events take it as new),
+        ``recalled_id`` = the id the row was handed on under, written now.  None otherwise."""
+        rows = self._recallable.get(talker) or {}
+        msg_id = standardized["message_id"]
+        if msg_id not in rows or not edge_text.is_notice(standardized):
+            return None
+        del rows[msg_id]
+        recall = dict(standardized)
+        recall.update(message_id=_md5(f"recall|{talker}|{msg_id}"), recalled_id=msg_id, timestamp=int(now),
+                      _legacy_ids=[])
+        return recall
+
+    def _hand_on_recall(self, recall: dict, callback: MessageCallback, my_wxid: str) -> None:
+        """Hand on a line taken back (``_recall_in_place``) like any line of the chat: this account's
+        to the own-message hook, hers through the route.  A burst still holding the line taken back
+        goes first, so the line is never handed on after its recall."""
+        for ready in self._burst.flush_holding(recall["recalled_id"]):
+            self._dispatch_message(ready, callback)
+        talker = str(recall.get("chat_id") or "")
+        logger.info("A line in %s…'s chat was taken back (WeChat rewrote its row); handed on as WeChat's line",
+                    talker[:8])
+        if self._is_own_line(recall, my_wxid):
+            if my_wxid:
+                self._tell_own_message(recall)
+            return
+        if my_wxid:
+            recall["_not_self_by_id"] = True
+        self._dispatch_message(recall, callback)
+
     def _poll_group(self, group_name: str, talker: str,
                     callback: MessageCallback) -> None:
         """Fetch messages for one group and dispatch new ones.
@@ -1614,6 +1829,10 @@ class WcdbBackend(AbstractWeChatBackend):
         handled (``_prime_chat`` kept it at startup; on the first read of a chat found
         later, it is picked now), then the new messages; the newest message time seen goes
         to its read mark.
+
+        A watched private chat (the private filter's: a registered creator, a listed one): a row
+        read lately that WeChat rewrote into a recall is handed on as a system line of its own
+        (``_recall_in_place``).
         """
         if self._catch_up_requests:
             with self._catch_up_lock:
@@ -1628,25 +1847,31 @@ class WcdbBackend(AbstractWeChatBackend):
         catching_up = tracked and self._catchup_hours() > 0
         if first_read and catching_up:
             self._prime_chat(group_name, talker, messages, catch_up=True, first_read=True)
+        gap_since = self._gap_watch(time.time()) if catching_up and not first_read else None
+        if gap_since is not None:
+            # PC WeChat was offline: read the chat back once it is online again, and whenever rows written
+            # since then show up late (synced from the phone), so they go oldest first, as catch-up
+            with self._catch_up_lock:
+                due = self._gap_read_at.get(talker, 0.0) < self._gap_back_at
+            if due or self._gap_rows_unseen(talker, messages, known, gap_since, time.time()):
+                self._gap_catch_up(group_name, talker, gap_since)
         missed = self._catchup.pop(talker, None)
         if missed:
             self._hand_on_missed(group_name, talker, missed, callback)
         if not messages:
             return
 
+        is_group = self._chat_is_group.get(talker, talker.endswith("@chatroom"))
+        my_wxid = str(getattr(self._client, "_config", {}).get("myWxid", "") or "")
+        now = time.time()
+        recallable = self._recallable_rows(talker, now)
+        watched = None                   # is a recall in place looked for here (asked once, on a new row)
         newest = None
         for msg in reversed(messages):
             if not self._running:
                 break
 
-            standardized = self._standardize(
-                msg,
-                group_name,
-                talker,
-                is_group=self._chat_is_group.get(
-                    talker, talker.endswith("@chatroom"),
-                ),
-            )
+            standardized = self._standardize(msg, group_name, talker, is_group=is_group)
             if standardized is None:
                 continue
             ts = int(standardized.get("timestamp") or 0)
@@ -1654,8 +1879,17 @@ class WcdbBackend(AbstractWeChatBackend):
 
             msg_id = standardized["message_id"]
             if msg_id in known:
+                if recallable and msg_id in recallable:
+                    recall = self._recall_in_place(talker, standardized, now)
+                    if recall is not None:
+                        self._hand_on_recall(recall, callback, my_wxid)
                 continue
             known.add(msg_id)
+            if not is_group:
+                if watched is None:
+                    watched = self._wants_private(talker)
+                if watched:
+                    self._note_recallable(talker, standardized, now)
             if self._ocr_priming and not catching_up:
                 # The backlog of an OCR stretch: seen, not answered (part of it was answered
                 # from the screen).  OCR never reads a private chat: a creator's is handed on.
@@ -1664,7 +1898,6 @@ class WcdbBackend(AbstractWeChatBackend):
             # Skip own messages.  With the account's wxid known that is the
             # whole test: a member whose display name is the account's must
             # still be heard.  The name is only a fallback without the wxid.
-            my_wxid = self._client._config.get("myWxid", "")
             if self._is_own_line(standardized, my_wxid):
                 if my_wxid:
                     self._tell_own_message(standardized)
@@ -1982,6 +2215,10 @@ class WcdbBackend(AbstractWeChatBackend):
                 logger.debug("Failed to resolve media blob path", exc_info=True)
         elif not content:
             return None
+        if edge_text.is_pat({"msg_type": local_type, "msg_subtype": msg_subtype, "special": special_info}):
+            # 拍一拍 is WeChat's line, not a file: its words (src/edge/text.py is_notice)
+            content = edge_text.notice_text({"msg_type": local_type, "msg_subtype": msg_subtype,
+                                             "special": special_info})
         if is_group and local_type == 1 and not quote_info:
             content = _strip_wechat_group_sender_prefix(content)
             if not content:
@@ -2109,6 +2346,8 @@ class WcdbBackend(AbstractWeChatBackend):
             "sender_name": str(sender_name),
             "content": resolved_content,
             "msg_type": local_type,
+            # an app message's kind from the high 32 bits of local_type (62: 拍一拍, 57: a reply), else 0
+            "msg_subtype": msg_subtype,
             "server_id": str(msg.get("server_id", msg.get("serverId", "")) or ""),
             "media_base_dir": media_base_dir,
             "media_hint": media_hint or str(

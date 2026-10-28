@@ -13,6 +13,7 @@ same checks (protocol.py); what WeChat would do is scripted::
         edge.operator_says("wxid_creator01", "我来回")    # an operator typed by hand
         edge.friend_added("wxid_new01", "阿花", verify_text="我是阿花", how="manual")   # a new friend
         edge.set_status(wechat="offline", detail="微信没开")
+        edge.wechat_gap(1761462000, 1761465600)          # PC WeChat was not online that hour: wechat_gap
         edge.rebuild_db()                                # Windows' edge.db was made anew: another db_id
 
 ``auto_send=True`` (the default) sends every accepted request at once (and, with
@@ -155,13 +156,17 @@ class FakeEdge:
         with self._cond:
             return self._message(P.OPERATOR_MESSAGE, chat_id, text, msg_type, message_id)
 
-    def notice(self, chat_id: str, text: str, written_at: Optional[int] = None) -> Optional[dict]:
+    def notice(self, chat_id: str, text: str, written_at: Optional[int] = None,
+               recalled_message_id: Optional[str] = None) -> Optional[dict]:
         """A system line in the chat, e.g. 「对方撤回了一条消息」.  ``written_at``: one handed on late
-        (the restart catch-up), written then."""
+        (the restart catch-up), written then; ``recalled_message_id``: a recall WeChat wrote over the
+        line it took back, that line's ``message_id``."""
         with self._cond:
             if chat_id not in self._parties:
                 return None
             extra = {"written_at": int(written_at)} if written_at else {}
+            if recalled_message_id:
+                extra["recalled_message_id"] = str(recalled_message_id)
             return self._event(P.CHAT_NOTICE, chat_id=chat_id, text=text, **extra)
 
     def friend_added(self, wxid: str, name: str = "", *, remark: str = "", verify_text: str = "",
@@ -174,6 +179,13 @@ class FakeEdge:
             self._friends.add(wxid)
             return self._event(P.FRIEND_ADDED, wxid=wxid, name=name, remark=remark, verify_text=verify_text,
                                how=how if how in P.FRIEND_HOWS else "unknown")
+
+    def wechat_gap(self, start: int, end: int, reason: str = P.GAP_OFFLINE_WHILE_RUNNING) -> dict:
+        """PC WeChat was not online from ``start`` to ``end`` (Unix seconds): ``wechat_gap``."""
+        with self._cond:
+            return self._event(P.WECHAT_GAP, **{"from": int(start), "to": int(end),
+                                                "reason": reason if reason in P.GAP_REASONS else
+                                                P.GAP_OFFLINE_WHILE_RUNNING})
 
     def rebuild_db(self) -> str:
         """Windows' edge.db was made anew (reinstalled, deleted): another ``db_id``, the events start

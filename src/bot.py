@@ -239,6 +239,8 @@ class Bot:
         # New friends (Windows): friend_added events for the Mac (PRM_EDGE), 登记达人's candidates (PRM_COPILOT).
         new_friends = self._start_new_friends(config, backend, prm, edge)
         self._new_friends = new_friends
+        # When PC WeChat was not online (Windows): the console's alert, wechat_gap for the Mac, a catch-up after.
+        presence = self._start_presence(config, backend, edge)
 
         self._start_friend_management(config, backend, admin_handler,
                                       on_accepted=new_friends.accepts.note if new_friends is not None else None)
@@ -288,6 +290,13 @@ class Bot:
         finally:
             if party_sync is not None:
                 party_sync.stop()
+            if presence is not None:
+                presence.stop()
+                try:
+                    from .web.server import register_presence
+                    register_presence(None)
+                except Exception:
+                    pass
             if new_friends is not None:
                 new_friends.stop()
                 try:
@@ -374,6 +383,44 @@ class Bot:
         try:
             from .web.server import register_new_friends
             register_new_friends(service)
+        except Exception:
+            pass
+        service.start()
+        return service
+
+    @staticmethod
+    def _start_presence(config, backend, edge):
+        """The watch of PC WeChat (src/wechat/presence.py), or None for a backend that cannot tell
+        whether WeChat is logged in (only Windows wcdb has ``wechat_presence``).  A stretch without it is
+        kept in the bot's database (DB_PATH) and shown in the console until an operator has seen it;
+        while it goes on, rows WeChat brings in late are handed on (``note_wechat_offline``); when it
+        ends, the creators' chats are read back (``catch_up_after_gap``) and, with PRM_EDGE, the Mac
+        gets a ``wechat_gap`` event."""
+        probe = getattr(backend, "wechat_presence", None)
+        if not callable(probe):
+            return None
+        try:
+            from .wechat.presence import PresenceStore, WechatPresence
+
+            def offline(gap: dict) -> None:
+                note = getattr(backend, "note_wechat_offline", None)
+                if callable(note):
+                    note(gap["from"])
+
+            def back(gap: dict) -> None:
+                if edge is not None:
+                    edge.wechat_gap(gap)
+                catch_up = getattr(backend, "catch_up_after_gap", None)
+                if callable(catch_up):
+                    catch_up(gap["from"])
+
+            service = WechatPresence(PresenceStore(config.db_path), probe, on_offline=offline, on_back=back)
+        except Exception:
+            logger.warning("WeChat presence: the watch could not start", exc_info=True)
+            return None
+        try:
+            from .web.server import register_presence
+            register_presence(service)
         except Exception:
             pass
         service.start()

@@ -2,7 +2,8 @@
 ``quote`` of a reply, the line of a system notice.
 
 Works on the standardized messages of the Windows backend (wcdb_backend._standardize):
-``msg_type``, ``content`` (voice already as ``[语音] …``), ``file_name``, the ``quoted_*``
+``msg_type``, ``msg_subtype`` (an appmsg's kind from the high 32 bits of WeChat 4's
+``local_type``), ``content`` (voice already as ``[语音] …``), ``file_name``, the ``quoted_*``
 fields of a reply, and ``special`` (the title of a link, a mini program, a card, a location, and
 a link's ``url`` when the backend gives one; the line of a system message).  Nothing is dropped:
 an unknown type is still a line.  The PRM copilot writes its draft jobs' lines with this too
@@ -24,6 +25,13 @@ _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
 SYSTEM_TYPE = 10000
 SYSTEM_TYPES = (SYSTEM_TYPE, 10002)          # WeChat's own lines (10002: the sysmsg XML of older versions)
 RECALL_MARK = "撤回了一条消息"
+APPMSG_TYPE = 49
+# 拍一拍: an appmsg of kind 62.  WeChat 4 writes it with local_type (62 << 32) | 49 = 266287972401
+# (Windows, 4.1.15, 2026-10-28) and <type>62</type> in its XML; the backend keeps 49 as msg_type and
+# the high 32 bits as msg_subtype.  Only this kind is WeChat's line: a reply (57), a link (5), a file
+# (6), a transfer (2000) … carry their kind in the high bits too and are someone's message.
+PAT_SUBTYPE = 62
+PAT_LINE = "[拍一拍]"                          # its line when the XML gave no title
 
 
 def msg_type_of(msg: dict) -> int:
@@ -37,9 +45,23 @@ def is_reply(msg: dict) -> bool:
     return bool(str(msg.get("quoted_content") or "").strip() or str(msg.get("quoted_server_id") or "").strip())
 
 
+def is_pat(msg: dict) -> bool:
+    """拍一拍, whoever patted whom: an appmsg (49) of kind 62, by the high 32 bits of ``local_type``
+    (``msg_subtype``) or by the XML's ``<type>`` (``special.type``)."""
+    if msg_type_of(msg) != APPMSG_TYPE:
+        return False
+    try:
+        if int(msg.get("msg_subtype") or 0) == PAT_SUBTYPE:
+            return True
+    except (TypeError, ValueError):
+        pass
+    special = msg.get("special") if isinstance(msg.get("special"), dict) else {}
+    return str(special.get("type") or "").strip() == str(PAT_SUBTYPE)
+
+
 def is_notice(msg: dict) -> bool:
     """One of WeChat's own lines in the chat (a recall, 拍一拍, a red packet notice …): nobody's words."""
-    return msg_type_of(msg) in SYSTEM_TYPES
+    return msg_type_of(msg) in SYSTEM_TYPES or is_pat(msg)
 
 
 def recall_by(text: str) -> str:
@@ -64,9 +86,12 @@ def _url(msg: dict) -> str:
 
 
 def message_text(msg: dict) -> str:
-    """The line of a creator's (or an operator's) message."""
+    """The line of a creator's (or an operator's) message; WeChat's own line (``is_notice``) is
+    its notice text."""
     msg_type = msg_type_of(msg)
     content = _QUOTE_PREFIX.sub("", str(msg.get("content", "") or "")).strip()
+    if is_notice(msg):
+        return notice_text(msg)
     if is_reply(msg):
         return content or "[引用消息]"
     if msg_type == 1:
@@ -94,16 +119,16 @@ def message_text(msg: dict) -> str:
         if kind in _NO_TITLE:
             return f"[{label}]"
         return " ".join(t for t in (f"[{label}]", _title(msg), _url(msg)) if t)
-    if msg_type in SYSTEM_TYPES:
-        return notice_text(msg)
     return content if content and not content.startswith("[消息类型") else f"[消息类型:{msg_type}]"
 
 
 def notice_text(msg: dict) -> str:
-    """The line of a system message in the chat (「对方撤回了一条消息」)."""
+    """The line of a system message in the chat (「对方撤回了一条消息」, 「"小美" 拍了拍我」)."""
     title = _title(msg)
     if title:
         return title
+    if is_pat(msg):
+        return PAT_LINE
     content = re.sub(r"<[^>]+>", " ", str(msg.get("content", "") or ""))
     content = " ".join(content.split())
     return content if content and not content.startswith("[消息类型") else "[系统消息]"

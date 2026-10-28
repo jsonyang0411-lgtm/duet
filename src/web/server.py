@@ -894,6 +894,72 @@ def _edge_state() -> dict:
     return {"mode": "edge", **_edge_client.status()}
 
 
+# The running watch of PC WeChat (src/wechat/presence.py, Windows), set by Bot.run; None when the
+# bot is stopped: /api/wechat-gaps then reads the bot's database (DB_PATH) itself.
+_presence = None
+
+
+def register_presence(service):
+    """Register (or with None, forget) the running WeChat presence watch for /api/wechat-gaps."""
+    global _presence
+    _presence = service
+
+
+def _db_path() -> Path:
+    return Path(os.getenv("DB_PATH", "data/messages.db").strip() or "data/messages.db")
+
+
+def _mac_side() -> bool:
+    """This console is the Mac's (WECHAT_BACKEND=edge): the gaps are the ones Windows reported."""
+    return _edge_client is not None or os.getenv("WECHAT_BACKEND", "").strip() == "edge"
+
+
+def _edge_gaps():
+    """Mac 端：Windows 报来的电脑微信掉线记录（运行中的 edge 后端的；机器人停着时直接读 edge_gaps.json）。"""
+    from src.wechat.edge_backend import EdgeGaps
+    if _edge_client is not None:
+        return _edge_client.gaps
+    return EdgeGaps(_db_path().resolve().parent / "edge_gaps.json")
+
+
+def _wechat_gaps_state() -> dict:
+    """GET /api/wechat-gaps: when PC WeChat was not online (the stretches no operator has marked
+    看过了), for the alert on every page.  Windows: the bot's own record (src/wechat/presence.py), and
+    while it runs the stretch going on; the Mac (edge): the ``wechat_gap`` events Windows reported."""
+    from src.wechat.presence import gap_for_console, stored_state
+
+    if _mac_side():
+        return {"ok": True, "source": "mac", "open": None, "gaps": [gap_for_console(g) for g in _edge_gaps().unseen()]}
+    state = _presence.console() if _presence is not None else stored_state(_db_path())
+    return {"ok": True, "source": "windows", "open": gap_for_console(state["open"]) if state["open"] else None,
+            "gaps": [gap_for_console(g) for g in state["gaps"]]}
+
+
+def _wechat_gap_seen(data: dict) -> dict:
+    """POST /api/wechat-gaps {"id", "action": "seen"}: an operator has looked (看过了); not shown again."""
+    from src.wechat.presence import PresenceStore
+
+    if str(data.get("action") or "seen") != "seen":
+        return {"ok": False, "error": f"不认识的操作 {data.get('action')}"}
+    try:
+        gap_id = int(data.get("id"))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "要给出是哪一段"}
+    if _mac_side():
+        done = _edge_gaps().mark_seen(gap_id, time.time())
+    elif _presence is not None:
+        done = _presence.mark_seen(gap_id)
+    elif _db_path().exists():
+        store = PresenceStore(str(_db_path()))
+        try:
+            done = store.mark_seen(gap_id, time.time())
+        finally:
+            store.close()
+    else:
+        done = False
+    return {"ok": True} if done else {"ok": False, "error": "没有这一段，或者已经点过「看过了」"}
+
+
 # The running PrmService (PRM_COPILOT=on), set by Bot.run(); None when the bot is
 # stopped or the copilot is off.  /api/prm reads it.
 _prm = None
@@ -1299,7 +1365,8 @@ class _UIHandler(SimpleHTTPRequestHandler):
                          "/api/influencer/contacts/action",
                          "/api/influencer/inbox/action",
                          "/api/relay/cancel",
-                         "/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal"):
+                         "/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal",
+                         "/api/wechat-gaps"):
             self.do_GET()
         else:
             self._method_not_allowed()
@@ -1481,6 +1548,25 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 self.send_json(_edge_state())
             except Exception as e:
                 logger.exception("Reading the edge state failed")
+                self.send_json({"ok": False, "error": str(e)})
+            return
+
+        # ── API: when PC WeChat was not online (GET: the alert; POST: 看过了) ──
+        if self.path.split("?", 1)[0] == "/api/wechat-gaps":
+            try:
+                if self.command == "POST":
+                    content_len = int(self.headers.get("Content-Length", 0))
+                    body = self.rfile.read(content_len) if content_len else b"{}"
+                    try:
+                        data = json.loads(body)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        data = None
+                    self.send_json(_wechat_gap_seen(data) if isinstance(data, dict)
+                                   else {"ok": False, "error": "请求不是有效的 JSON"})
+                else:
+                    self.send_json(_wechat_gaps_state())
+            except Exception as e:
+                logger.exception("The WeChat gaps could not be read or marked")
                 self.send_json({"ok": False, "error": str(e)})
             return
 
