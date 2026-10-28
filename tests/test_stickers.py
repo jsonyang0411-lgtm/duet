@@ -289,7 +289,7 @@ def test_a_sticker_through_the_main_window_pastes_the_file(rig, tmp_path, monkey
                         lambda p, as_image=False, private=False: files.append(p) or True)
     assert rig.controller.send_file_to_chat("读书群", str(path)) is True
     assert files == [str(path)] and rig.clip == [("读书群", True)]           # the search, then the file
-    assert rig.keys[-2:] == [("combo", CTRL, 0x56), ("key", 0x0D)]
+    assert rig.keys[-3:] == [("combo", CTRL, 0x41), ("combo", CTRL, 0x56), ("key", 0x0D)]   # replaces the input box
 
 
 def test_a_failed_picture_is_not_pasted_and_the_clipboard_comes_back(rig, tmp_path, monkeypatch):  # noqa: F811

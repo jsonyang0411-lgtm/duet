@@ -243,7 +243,7 @@ def test_a_chat_first_read_after_the_update_does_not_run_an_old_task_again(world
     monkeypatch.setattr(world.wechat, "get_messages", unreadable_admin_chat)
     new = world.run()                                          # primes every chat but the admin's
     monkeypatch.setattr(world.wechat, "get_messages", reads)
-    assert ADMIN in new.backend._talker_ids.values() and ADMIN not in new.backend._known
+    assert ADMIN in new.backend._chat_names and ADMIN not in new.backend._known
     new.poll()
     assert len(world.jobs()) == 1 and len(world.sent) == 1 and world.stored(ADMIN) == 1
     world.wechat.say(ADMIN, ADMIN, "cc 再跑一次", world.clock.now)

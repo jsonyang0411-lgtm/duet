@@ -1,6 +1,6 @@
 import sys
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 if sys.platform != "win32":
     raise unittest.SkipTest("Windows-only HWND controller tests")
@@ -85,7 +85,7 @@ class WeChatWindowControllerTests(unittest.TestCase):
             press_key.assert_not_called()
 
     def test_send_message_uses_keyboard_only(self):
-        """Send should use Ctrl+V paste + Enter, no mouse clicks."""
+        """Send should use Ctrl+A, Ctrl+V paste + Enter, no mouse clicks."""
         controller = WeChatWindowController()
 
         with (
@@ -98,8 +98,9 @@ class WeChatWindowControllerTests(unittest.TestCase):
         ):
             self.assertTrue(controller.send_message(12345, "hello"))
 
-            # Should use Ctrl+V for paste
-            send_combo.assert_called_once_with(0x11, 0x56)
+            # Ctrl+A, then Ctrl+V: the paste replaces what the input box holds
+            # (a retry's earlier paste, an operator's half-typed draft)
+            self.assertEqual(send_combo.call_args_list, [call(0x11, 0x41), call(0x11, 0x56)])
 
             # Should use Enter to send (not click send button)
             enter_calls = [

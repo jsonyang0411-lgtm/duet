@@ -166,7 +166,7 @@ class Run:
 
     def poll(self, flush=True):
         """One poll of every chat; ``flush``: the bursts that wait are handed on too."""
-        for name, chat in list(self.backend._talker_ids.items()):
+        for chat, name in list(self.backend._chat_names.items()):
             self.backend._poll_group(name, chat, self.router.handle)
         if flush:
             for msg in self.backend._burst.flush_all():
@@ -433,10 +433,10 @@ def test_the_first_read_of_a_creator_registered_later_keeps_the_old_rule(world):
     world.wechat.say(CREATOR, CREATOR, "昨天的话", now - 20 * HOUR)
     world.wechat.say(CREATOR, CREATOR, "你好，我想合作", now - 60)
     run = world.run()
-    assert CREATOR not in run.backend._talker_ids                   # not a creator yet: not read
+    assert CREATOR not in run.backend._chat_names                   # not a creator yet: not read
     run.prm.register(CREATOR, "小美")                               # tells the backend
     run.backend._refresh_private_chats_if_due()
-    assert run.backend._talker_ids.get("小美") == CREATOR
+    assert run.backend._chat_names.get(CREATOR) == "小美"
     run.poll()
     [job] = world.jobs()
     assert text_lines(job) == ["你好，我想合作"] and world.events() == []
@@ -474,7 +474,7 @@ def test_a_creators_chat_found_only_after_startup_still_gets_what_came_in_meanwh
     world.clock.now = t0 + HOUR
     second = world.run()
     second.poll()
-    assert CREATOR not in second.backend._talker_ids.values() and len(world.jobs()) == 1
+    assert CREATOR not in second.backend._chat_names and len(world.jobs()) == 1
     world.wechat.sessions[CREATOR] = "小美"
     second.backend.refresh_private_chats_soon()
     second.backend._refresh_private_chats_if_due()
