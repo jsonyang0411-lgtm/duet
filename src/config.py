@@ -329,8 +329,8 @@ class BotConfig:
     # Where the sample orders the bot made stand in 聚水潭 (jst samples, read-only on the Mac): asked once
     # this many minutes (0 = off); a waybill fills the deal like the console's 填运单号 (the shipping notice
     # always waits for a person), 已签收 marks it like the console's (the 专属佣金 chain starts).  The deal
-    # says so when an order has no waybill PRM_SAMPLE_WAYBILL_DAYS after it was made, or is not signed for
-    # PRM_SAMPLE_SIGN_DAYS after it was sent.
+    # says so when an order is not sent PRM_SAMPLE_WAYBILL_DAYS after it was made, or is not signed for
+    # PRM_SAMPLE_SIGN_DAYS after it was sent (聚水潭's list gives no waybill as yet: the deal asks for one).
     prm_sample_sync_min: int = 60
     prm_sample_waybill_days: int = 3
     prm_sample_sign_days: int = 10

@@ -113,6 +113,9 @@ CLOCK_SKEW_SEC = 300         # off by this much or more: the deals say so (``clo
 # 攒成一个任务交给 Mac（``meta.op = SAMPLE_OP``，worker 不跑模型，`jst samples` 只读），答复按控制台的路改合作单。
 SAMPLE_OP = "sample_status"
 SAMPLE_SYNC_CHAT = "prm:sample-status"      # the relay job's chat id: no WeChat chat, no creator, never a draft
+# The deal's notice asking for the waybill of an order 聚水潭 says went out: its sample list gives none (2026-10-29, read
+# on the Mac: ``logisticsList`` and the ERP orders' ``logisticsNo`` empty, signed orders too); gone once one is typed in.
+SAMPLE_ASK = "sample-waybill:"
 SAMPLE_SYNC_FIRST_SEC = 120                 # a bot that never asked: its first round this long after its start
 SAMPLE_GIVE_UP_DAYS = 60                    # an order not signed for this long after it was made is not asked about
 SAMPLE_MISSES = 2                           # rounds in a row an order is not in 聚水潭's answer before its deal says so
@@ -1703,6 +1706,8 @@ class PrmService:
             self._wake.set()
             if actor == "console" and action != "mode" and before:
                 self._drop_dead_samples(before["id"], now)
+            if actor == "console" and action == "shipment" and before:      # the waybill 聚水潭 did not give: typed
+                self._store.drop_notices(before["id"], lambda n: n["key"].startswith(SAMPLE_ASK), now)
             after = self._store.deal(before["id"]) if before else None
             if after and after.get("delivered_at"):
                 # 已签收: the 专属佣金 chain of this signature (once); marked 已签收 again, a chain that never
@@ -2599,10 +2604,12 @@ class PrmService:
           is off the list, as ever;
         - deleted or rejected: the deal says so, with the reason (a deletion until a person sees to it:
           ``_drop_dead_samples``);
-        - no waybill PRM_SAMPLE_WAYBILL_DAYS after the order was made, not signed for PRM_SAMPLE_SIGN_DAYS after it
+        - sent in 聚水潭 without a waybill (its sample list gives none: ``SAMPLE_ASK``) and none typed in: the deal
+          asks for it (the shipping notice needs it) until an operator types it in;
+        - not sent PRM_SAMPLE_WAYBILL_DAYS after the order was made, not signed for PRM_SAMPLE_SIGN_DAYS after it
           was sent: the deal says so.
-        What the deal says of the order is its notice ``sample:<order>``, written again with every answer (gone when
-        there is nothing to say)."""
+        What the deal says of the order is its notice ``sample:<order>`` (and ``SAMPLE_ASK<order>``), written again
+        with every answer (gone when there is nothing to say)."""
         row = self._store.sample_order(number)
         if row is None or row["done"]:
             return
@@ -2621,6 +2628,8 @@ class PrmService:
             fields.update(carrier=ship["carrier"], waybill=ship["waybill"])
             if row["waybill"] != ship["waybill"] or row["sent_at"] is None:
                 fields["sent_at"] = ship["sent_at"] or info["sent_at"] or now
+        elif row["sent_at"] is None and (info["sent_at"] or status == "SENT"):
+            fields["sent_at"] = info["sent_at"] or now     # sent without a waybill (SAMPLE_ASK): 聚水潭's own time
         if status == "SIGNED":
             fields["signed_at"] = info["signed_at"] or row["signed_at"] or now
         if info["status"] and rank > before:
@@ -2637,6 +2646,7 @@ class PrmService:
             applied["dead"] = f"DELETED|{info['reason']}"
             self._store.update_sample_order(number, now, applied=applied, done="deleted", **fields)
             self._store.set_notice(deal["id"], f"sample:{number}", note, now)
+            self._store.set_notice(deal["id"], f"{SAMPLE_ASK}{number}", "", now)
             logger.warning("PRM: sample order %s was deleted in 聚水潭; deal %d says so", number, deal["id"])
             return
         if info["reason"] and status != "SIGNED":
@@ -2662,6 +2672,7 @@ class PrmService:
                 notes.append(f"聚水潭寄样单 {number} 有 {len(ships)} 个运单号（"
                              + "、".join(f"{s['carrier']} {s['waybill']}".strip() for s in ships)
                              + f"），合作单上记的是 {ship['waybill']}")
+        ask = ""
         if status == "SIGNED":
             fields["done"] = "signed"
             notes = []                                 # signed for: what was missing or did not match is moot now
@@ -2671,26 +2682,36 @@ class PrmService:
             else:
                 applied["signed"] = "left"             # an older order, or a deal past the sample: left as it is
         elif latest and deal["stage"] in deals.BEFORE_DELIVERY:
-            notes += self._sample_late(number, status, ship, row, deal, made, fields, now)
+            late, ask = self._sample_late(number, status, ship, row, deal, made, fields, now)
+            notes += late
         self._store.update_sample_order(number, now, applied=applied, **fields)
         self._store.set_notice(deal["id"], f"sample:{number}", "；".join(notes), now)
+        self._store.set_notice(deal["id"], f"{SAMPLE_ASK}{number}", ask, now)
 
     def _sample_late(self, number: str, status: str, ship, row: dict, deal: dict, made: float, fields: dict,
-                     now: float) -> list:
-        """The deal's reminders for an order not signed for: no waybill (neither 聚水潭's nor one an operator typed)
-        PRM_SAMPLE_WAYBILL_DAYS after it was made; sent PRM_SAMPLE_SIGN_DAYS ago and not signed for."""
+                     now: float) -> tuple:
+        """The deal's reminders for an order not signed for, and its ask for the waybill: ``(notes, ask)``.  Not sent
+        (no waybill, none typed in either) PRM_SAMPLE_WAYBILL_DAYS after it was made; sent in 聚水潭 without a waybill
+        and none typed in: ``ask`` (``SAMPLE_ASK``); sent PRM_SAMPLE_SIGN_DAYS ago (聚水潭's time when it gave no
+        waybill) and not signed for."""
         typed = self._sample_shipment_of(deal["id"], made)
+        went = fields.get("sent_at") or row.get("sent_at")
+        ask = ""
         if ship is None and typed is None:
-            if now - made >= self._waybill_days * 86400:
-                state = platforms.SAMPLE_STATES.get(status, status or "状态不明")
-                return [f"聚水潭寄样单 {number} 建好 {int((now - made) // 86400)} 天了还没有运单号（{state}）："
-                        "请到聚水潭寄样管理看一下是不是没审核或者没发货"]
-            return []
-        sent = float(fields.get("sent_at") or row.get("sent_at") or (typed or {}).get("created_at") or now)
+            if not went:
+                if now - made >= self._waybill_days * 86400:
+                    state = platforms.SAMPLE_STATES.get(status, status or "状态不明")
+                    return [f"聚水潭寄样单 {number} 建好 {int((now - made) // 86400)} 天了还没发货（{state}）："
+                            "请到聚水潭寄样管理看一下是不是没审核或者没发货"], ""
+                return [], ""
+            ask = (f"聚水潭显示寄样单 {number} 已发货（{_clock_text(float(went))}），但没给运单号：要给达人发发货通知，"
+                   "请在合作单上填运单号")
+        sent = float(went or (typed or {}).get("created_at") or now)
         if now - sent >= self._sign_days * 86400:
-            which = f"{ship['carrier'] or '快递'} {ship['waybill']}" if ship else f"{typed['carrier']} {typed['waybill']}"
-            return [f"聚水潭寄样单 {number} 发货 {int((now - sent) // 86400)} 天了还没签收（{which}）：请查一下物流"]
-        return []
+            which = (f"{ship['carrier'] or '快递'} {ship['waybill']}" if ship
+                     else f"{typed['carrier']} {typed['waybill']}" if typed else "聚水潭没给运单号")
+            return [f"聚水潭寄样单 {number} 发货 {int((now - sent) // 86400)} 天了还没签收（{which}）：请查一下物流"], ask
+        return [], ask
 
     def _sample_shipment_of(self, deal_id: int, made: float) -> Optional[dict]:
         """The deal's newest shipment since the order was made (one of an earlier order is not this one's)."""

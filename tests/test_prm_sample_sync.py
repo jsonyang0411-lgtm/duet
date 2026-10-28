@@ -24,6 +24,7 @@ from src.relay.store import RelayStore
 HOUR, DAY = 3600, 86400
 ORDER2 = "YP2610260000002"
 WAYBILL = "SF1234567890"
+EPOCH = 1_790_000_000.0     # 2026-09-21: the tests' clock starts near 0, and 聚水潭's times before 2001 are dropped
 
 
 @pytest.fixture
@@ -371,12 +372,12 @@ def test_an_order_jushuitan_does_not_find_twice_is_said(bot, clock):
 def test_no_waybill_days_after_the_order_and_no_signature_days_after_sending_are_said(bot, clock):
     order = made(bot, clock)
     round_says(bot, clock, (JST_ORDER, info("WAITING_SEND")))
-    assert "还没有运单号" not in attention(bot, order)
+    assert "还没发货" not in attention(bot, order)
     clock.now += 3 * DAY
     round_says(bot, clock, (JST_ORDER, info("WAITING_SEND")))
-    assert f"聚水潭寄样单 {JST_ORDER} 建好 3 天了还没有运单号（待发货）" in attention(bot, order)
+    assert f"聚水潭寄样单 {JST_ORDER} 建好 3 天了还没发货（待发货）" in attention(bot, order)
     round_says(bot, clock, (JST_ORDER, info("SENT", WAYBILL, sent=clock.now)))
-    assert "还没有运单号" not in attention(bot, order)
+    assert "还没发货" not in attention(bot, order) and "没给运单号" not in attention(bot, order)
     clock.now += 10 * DAY
     round_says(bot, clock, (JST_ORDER, info("SENT", WAYBILL)))
     assert f"聚水潭寄样单 {JST_ORDER} 发货 10 天了还没签收（顺丰速运 {WAYBILL}）" in attention(bot, order)
@@ -389,7 +390,46 @@ def test_the_reminder_days_follow_the_settings(bot, clock):
     order = made(bot, clock)
     clock.now += DAY
     round_says(bot, clock, (JST_ORDER, info("INIT")))
-    assert "建好 1 天了还没有运单号（待审核）" in attention(bot, order)
+    assert "建好 1 天了还没发货（待审核）" in attention(bot, order)
+
+
+def test_sent_without_a_waybill_asks_for_one_until_an_operator_types_it(bot, clock):
+    """聚水潭's sample list gives no waybill (2026-10-29, read on the Mac: ``logisticsList`` and the ERP orders'
+    ``logisticsNo`` empty, signed orders too): an order it says went out asks for the waybill (the shipping notice needs
+    it) instead of saying it was not sent; typed in the console, the ask goes at once, not at the next round."""
+    clock.now = EPOCH                                       # 聚水潭's times count only as real dates
+    order = made(bot, clock)
+    went = clock.now
+    clock.now += 4 * DAY
+    round_says(bot, clock, (JST_ORDER, info("SENT", sent=went)))
+    said = attention(bot, order)
+    assert f"聚水潭显示寄样单 {JST_ORDER} 已发货（" in said and "但没给运单号" in said and "还没发货" not in said
+    assert shipping_notices(bot) == [] and bot.prm.store.latest_shipment(order["deal_id"]) is None
+    assert bot.prm.store.sample_order(JST_ORDER)["sent_at"] == went
+    assert bot.prm.deal_action("shipment", {"deal_id": order["deal_id"], "carrier": "顺丰速运", "waybill": WAYBILL})["ok"]
+    assert "没给运单号" not in attention(bot, order)
+    assert [p["status"] for p in shipping_notices(bot)] == ["pending"]          # the console's own notice, as ever
+    round_says(bot, clock, (JST_ORDER, info("SENT", sent=went)))
+    assert "没给运单号" not in attention(bot, order)
+    clock.now = went + 10 * DAY
+    round_says(bot, clock, (JST_ORDER, info("SENT", sent=went)))
+    assert f"聚水潭寄样单 {JST_ORDER} 发货 10 天了还没签收（顺丰速运 {WAYBILL}）" in attention(bot, order)
+
+
+def test_sent_without_a_waybill_counts_the_signature_from_jushuitans_send_time(bot, clock):
+    clock.now = EPOCH
+    order = made(bot, clock)
+    went = clock.now
+    round_says(bot, clock, (JST_ORDER, info("SENT", sent=went)))
+    assert "还没签收" not in attention(bot, order)
+    clock.now = went + 10 * DAY
+    round_says(bot, clock, (JST_ORDER, info("SENT", sent=went)))
+    said = attention(bot, order)
+    assert f"聚水潭寄样单 {JST_ORDER} 发货 10 天了还没签收（聚水潭没给运单号）" in said and "但没给运单号" in said
+    round_says(bot, clock, (JST_ORDER, info("SIGNED", sent=went, signed=clock.now)))
+    said = attention(bot, order)
+    assert "没给运单号" not in said and "还没签收" not in said
+    assert bot.prm.store.deal(order["deal_id"])["stage"] == "delivered" and shipping_notices(bot) == []
 
 
 # ── the status only goes forward; a change once; a restart ────────────────
