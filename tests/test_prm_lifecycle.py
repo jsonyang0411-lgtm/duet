@@ -323,6 +323,39 @@ def test_no_holding_reply_while_a_person_has_the_chat_or_when_off(clock, tmp_pat
     off.relay.stop()
 
 
+def test_no_holding_reply_when_she_heard_from_us_after_her_message(bot, clock):
+    """win review F13: something went out to her after her latest message (here the shipping notice):
+    this round is answered, so the draft still waiting gets no 「稍等」.  Her next message is a new
+    round."""
+    drafted(bot, draft(message_kind="other", reply_draft="我确认一下哈", slots={}), text="样品寄了吗")
+    notice = bot.prm.deal_action("shipment", {"deal_id": 1, "carrier": "顺丰", "waybill": "SF1234567890123"})["packet"]
+    clock.now += 60
+    assert bot.prm.decide(notice, "send")["ok"] and bot.prm.send_approved() == 1
+    told = [(CREATOR, notice_text("小美", "顺丰", "SF1234567890123"))]
+    clock.now += 11 * 60
+    assert bot.prm.store.packets(("pending",)) and bot.prm.send_holding_replies() == 0 and bot.texts == told
+    drafted(bot, draft(message_kind="other", reply_draft="收到～", slots={}), text="好的")
+    clock.now += 11 * 60
+    assert bot.prm.send_holding_replies() == 1 and bot.texts == told + [(CREATOR, HOLDING_TEXT)]
+
+
+def test_no_holding_reply_after_an_operator_wrote_by_hand_in_this_round(bot, clock):
+    """An operator's own line written after her message is an answer even when it took no chat over
+    (read late: PRM_TAKEOVER_MIN had passed, win review F13); one written before her message is not."""
+    def a_round(text, operator_after):
+        asked = clock.now - 3 * 3600                     # both read late: the bot was not reading WeChat
+        bot.prm.handle(bot.msg(text, ts=asked))
+        bot.prm.on_own_message(own(bot, "运营在手机上回的", ts=asked + operator_after))
+        bot.finish(bot.worker_takes()["id"], draft(message_kind="other", reply_draft="我确认一下哈", slots={}))
+        assert bot.prm.store.deal(1)["mode"] == "copilot" and bot.prm.store.packets(("pending",))
+        clock.now += 11 * 60
+        return bot.prm.send_holding_replies()
+
+    assert a_round("样品寄了吗", -600) == 1               # written before her question: it waits unanswered
+    assert a_round("那什么时候寄", 60) == 0                # written after it: she was answered
+    assert bot.texts == [(CREATOR, HOLDING_TEXT)]
+
+
 # ── shipments, stages and modes from the console ──────────────────────────
 
 def test_a_waybill_drafts_the_shipping_notice_with_the_systems_number(bot, clock):

@@ -529,6 +529,16 @@ class Bot:
         if prm is None or not isinstance(backend, EdgeBackend):
             return None
         backend.set_send_failure_hook(prm.on_send_failed)
+        from .edge import protocol as P
+
+        def chat_notice(event: dict) -> None:
+            """撤回、拍一拍这些私聊系统提示（Windows 报 chat_notice，不当达人的话）也交给 PRM。
+            Windows 重启后补交的带 written_at（写的时间），按它算晚了多久；at 是转过来的时间。"""
+            if event.get("type") == P.CHAT_NOTICE:
+                prm.on_chat_notice(str(event.get("chat_id") or ""), str(event.get("text") or ""),
+                                   event.get("written_at") or event.get("at"), event.get("id"))
+
+        backend.add_event_hook(chat_notice)
         if influencer_store is None:
             backend.add_parties_source(prm.store.active_wxids)
             return None

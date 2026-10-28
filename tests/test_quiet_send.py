@@ -293,7 +293,7 @@ def test_without_its_own_window_the_main_window_search_is_used_without_the_alt_t
     assert rig.keys == [
         ("combo", CTRL, 0x32),                                   # Ctrl+2 contacts
         ("combo", CTRL, 0x46), ("combo", CTRL, 0x41), ("combo", CTRL, 0x56), ("key", 0x0D),  # search
-        ("combo", CTRL, 0x56), ("key", 0x0D),                    # paste and send
+        ("combo", CTRL, 0x41), ("combo", CTRL, 0x56), ("key", 0x0D),   # replace the input box, send
     ]
     assert rig.clip == [("读书群", True), ("你好", True)]
     assert rig.desktop.forwarded == [MAIN, USER]
@@ -335,6 +335,112 @@ def test_losing_the_window_before_the_paste_types_nothing_and_retries(rig, monke
     assert rig.controller.send_to_chat("读书群", "你好") is True
     assert rig.keys == [("combo", CTRL, 0x41), ("combo", CTRL, 0x56), ("key", 0x0D)]  # once
     rig.controller._log_failure.assert_called_once_with("读书群", "你好", "chat window send failed", OWN)
+
+
+# ── the main window's input box (SEND_QUIET off, or a chat without a window of its own) ──
+
+class MainWindowScreen:
+    """What WeChat's main window makes of the keys: Ctrl+F puts the caret in the search box; Enter
+    there opens the first chat whose name has the search text in it and puts the caret in that
+    chat's input box; Ctrl+A selects what the box with the caret holds and a paste replaces the
+    selection (without one it is added at the end); Enter in an input box sends what it holds.
+    WeChat keeps what each chat's input box holds while another chat is open.  Keys typed while
+    another program is in front never reach WeChat."""
+
+    def __init__(self, rig, chats=("读书群", "读书群2")):
+        self.rig, self.chats = rig, list(chats)
+        self.focus, self.search, self.chat, self.selected = "list", "", None, False
+        self.boxes: dict = {}                    # chat -> what its input box holds
+        self.sent: list = []                     # (chat, what went out)
+        self.refuse_activation = 0               # how many activations of the window fail next
+
+    def combo(self, mod, key):
+        self.rig.keys.append(("combo", mod, key))
+        if self.rig.desktop.foreground != MAIN:
+            return
+        if key == 0x32:                          # Ctrl+2: the contacts tab
+            self.focus, self.selected = "list", False
+        elif key == 0x46:                        # Ctrl+F
+            self.focus, self.selected = "search", False
+        elif key == 0x41:                        # Ctrl+A
+            self.selected = self.focus in ("search", "input")
+        elif key == 0x56:                        # Ctrl+V
+            self.paste(self.rig.clip[-1][0])
+
+    def paste(self, text):
+        if self.focus == "search":
+            self.search = text if self.selected else self.search + text
+        elif self.focus == "input":
+            self.boxes[self.chat] = text if self.selected else self.boxes.get(self.chat, "") + text
+        self.selected = False
+
+    def press(self, key):
+        self.rig.keys.append(("key", key))
+        if self.rig.desktop.foreground != MAIN or key != 0x0D:
+            return
+        if self.focus == "search":
+            found = [chat for chat in self.chats if self.search and self.search in chat]
+            if found:
+                self.chat, self.focus, self.search, self.selected = found[0], "input", "", False
+        elif self.focus == "input" and self.boxes.get(self.chat):
+            self.sent.append((self.chat, self.boxes.pop(self.chat)))
+
+    def activate(self, hwnd):
+        if self.refuse_activation:
+            self.refuse_activation -= 1
+            return False
+        self.rig.desktop.foreground = hwnd
+        return True
+
+
+@pytest.fixture(params=["SEND_QUIET=off", "SEND_QUIET=on"])
+def screen(rig, monkeypatch, request):
+    """A send through the main window's search: with SEND_QUIET=off (the default; activate) and
+    with a quiet send to a chat that has no window of its own (the key-free activation)."""
+    del rig.windows[OWN]
+    if request.param == "SEND_QUIET=off":
+        rig.controller._quiet = rig.controller._idle_gate = None
+    screen = MainWindowScreen(rig)
+    monkeypatch.setattr(wc, "send_combo", screen.combo)
+    monkeypatch.setattr(wc, "press_key", screen.press)
+    rig.activate.side_effect = screen.activate
+    monkeypatch.setattr(rig.controller, "_set_clipboard_file",
+                        lambda path, as_image=False, private=False: rig.clip.append(
+                            (f"<文件 {os.path.basename(path)}>", private)) or True)
+    return screen
+
+
+def test_the_text_replaces_what_the_chats_input_box_holds(screen):
+    screen.boxes["读书群"] = "我先打了一半"                 # an operator's draft, kept by WeChat
+    assert screen.rig.controller.send_to_chat("读书群", "你好") is True
+    assert screen.sent == [("读书群", "你好")]               # the draft did not go along
+    keys = screen.rig.keys
+    after_search = keys.index(("key", 0x0D)) + 1           # the caret is in the input box from here on
+    assert keys[after_search:] == [("combo", CTRL, 0x41), ("combo", CTRL, 0x56), ("key", 0x0D)]
+
+
+def test_a_retry_after_the_text_was_pasted_sends_it_once(screen):
+    rig, pastes, paste = screen.rig, [], screen.paste
+
+    def paste_then_lose_the_window(text):
+        paste(text)
+        pastes.append(text)
+        if len(pastes) == 2:                               # the text, before its Enter
+            rig.desktop.foreground = ELSEWHERE             # the user clicks into another program
+            screen.refuse_activation = 1                   # and WeChat does not come back at once
+    screen.paste = paste_then_lose_the_window
+    assert rig.controller.send_to_chat("读书群", "你好") is True
+    assert pastes == ["读书群", "你好", "读书群", "你好"]     # pasted twice, by the two attempts
+    assert screen.sent == [("读书群", "你好")]               # sent once: the retry replaced the first paste
+    rig.controller._log_failure.assert_called_once_with("读书群", "你好", "send failed", MAIN)
+
+
+def test_a_file_replaces_what_the_chats_input_box_holds_too(screen, tmp_path):
+    picture = tmp_path / "表情.png"
+    picture.write_bytes(b"\x89PNG")
+    screen.boxes["读书群"] = "我先打了一半"
+    assert screen.rig.controller.send_file_to_chat("读书群", str(picture)) is True
+    assert screen.sent == [("读书群", "<文件 表情.png>")]
 
 
 def test_a_window_of_another_program_or_a_hidden_one_is_not_a_chat_window(rig):

@@ -53,6 +53,12 @@ def _safe(name: str) -> str:
     return _UNSAFE.sub("_", str(name)).strip(" .")[:120] or "file"
 
 
+def _why_not(result) -> str:
+    """Why the backend did not even try a send (``wcdb_backend.SendRefused.reason``: a chat whose
+    name another chat has, a chat it cannot find), else ""; it goes to the Mac in the send's error."""
+    return str(getattr(result, "reason", "") or "").strip()
+
+
 def _private_names_file(path: str = "data/private_chat_names.json") -> dict:
     """wxid -> name of the bot account's private chats (written by the Windows backend)."""
     try:
@@ -429,16 +435,16 @@ class EdgeService:
         problem, text_sent = "", False
         if text.strip():
             noted = self._note_line(chat_id, text, send_id, self._clock())
+            result = None
             try:
-                ok = self._send_text is not None and bool(self._send_text(chat_id, text))
+                result = self._send_text(chat_id, text) if self._send_text is not None else None
             except Exception:
                 logger.exception("EDGE: send %s: the text failed", send_id)
-                ok = False
-            if ok:
+            if result:
                 text_sent = True
             else:
                 self._unnote(self._lines, chat_id, noted)
-                problem = "文字没发出去"
+                problem = _why_not(result) or "文字没发出去"
         for upload_id in [] if problem else record["uploads"]:
             upload = self._store.upload(upload_id)
             name = upload["name"] if upload else upload_id
@@ -449,14 +455,15 @@ class EdgeService:
                 problem = f"文件「{name}」在 Windows 上找不到了"
                 break
             noted = self._note_file(chat_id, None if text.strip() else send_id, self._clock())
+            result = None
             try:
-                ok = bool(self._send_file(chat_id, upload["path"]))
+                result = self._send_file(chat_id, upload["path"])
             except Exception:
                 logger.exception("EDGE: send %s: a file failed", send_id)
-                ok = False
-            if not ok:
+            if not result:
                 self._unnote(self._files, chat_id, noted)
-                problem = f"文件「{name}」没发出去"
+                why = _why_not(result)
+                problem = f"文件「{name}」没发出去" + (f"：{why}" if why else "")
                 break
         if problem:
             self._finish(send_id, P.FAILED, f"文字已发出；{problem}" if text_sent else problem)

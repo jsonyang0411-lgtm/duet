@@ -180,7 +180,7 @@ GET  /edge/sends/<send_id>
 |---|---|---|
 | `creator_message` | `chat_id`、`message_id`、`msg_type`、`text`、`quote`（可选）、`files` | 名单里的达人发来一条消息 |
 | `operator_message` | `chat_id`、`message_id`、`msg_type`、`text` | 这个微信号在达人私聊里发了一条，而且和发送记录对不上（运营亲手发的，电脑上或手机上） |
-| `chat_notice` | `chat_id`、`text` | 私聊里的系统提示，比如「对方撤回了一条消息」，原样报 |
+| `chat_notice` | `chat_id`、`text` | 私聊里的系统提示（消息类型 10000、10002：撤回、拍一拍、红包和转账的提示…），比如「对方撤回了一条消息」，原样报。Mac 端的 PRM 按文字认撤回：达人撤回的，还没发出去的草稿改成人审、合作单上写提醒；「你撤回了一条消息」（运营撤回）只记一笔；别的提示不起草 |
 | `creator_message_recalled` | `chat_id`、`message_id` | **预留，v1 不发**。摸清微信 4 撤回在数据库里长什么样以后再实现；在那之前，撤回会以 `chat_notice` 报 |
 | `send_result` | `send_id`、`status`、`error` | 一条发送有了结果：`sent`、`failed`、`expired`、`indeterminate` |
 | `send_seen` | `send_id`、`delay_s` | 发出去的这条在微信里读回来了 |
@@ -238,7 +238,7 @@ Windows 每分钟看一次会话列表，读有变化的私聊最新的几十条
 | 视频 | `[视频]` |
 | 表情 | `[表情]` |
 | 文件 | `[文件] 文件名`，附件是文件；微信还没下载完的，`files` 里写明原因 |
-| 链接 | `[链接] 标题` |
+| 链接 | `[链接] 标题`；Windows 后端读出了地址（http / https）时是 `[链接] 标题 地址` |
 | 小程序 | `[小程序] 标题` |
 | 聊天记录 | `[聊天记录] 标题` |
 | 名片 | `[名片] 昵称` |
@@ -246,8 +246,9 @@ Windows 每分钟看一次会话列表，读有变化的私聊最新的几十条
 | 转账、红包 | `[转账]`、`[红包]` |
 | 引用回复 | 达人回复的文字；另外带 `quote` |
 | 其他 | `[消息]`，或 `[消息类型:N]` |
+| 系统提示（撤回、拍一拍…） | 不是 `creator_message`：报 `chat_notice`（4.1） |
 
-**不会丢消息**：不认识的类型也会照样发一个事件。
+**不会丢消息**：不认识的类型也会照样发一个事件。达人副驾驶（`PRM_COPILOT`，Windows 直读微信）给草稿任务写的每一行也用这张表（`src/edge/text.py`），两种部署告诉 Mac 的一样。
 
 **`quote` 的格式**：`{"text": "被引用那句的文字", "from": "us", "server_id": "…"}`。
 - `from` 是被引用那句是谁说的：`us`（这个微信号）、`creator`（达人）或 `other`。

@@ -19,7 +19,7 @@ from src.edge.service import EdgeService
 from src.edge.store import EdgeStore
 from src.routing import steps as S
 from src.routing.context import RouteContext, Stop
-from src.wechat.wcdb_backend import WcdbBackend, _special_info
+from src.wechat.wcdb_backend import SendRefused, WcdbBackend, _special_info
 
 CREATOR = "wxid_creator01"
 DAY = 86400
@@ -138,10 +138,22 @@ def test_the_db_id_is_made_with_the_database_and_kept_with_it(tmp_path, clock, w
     ({"msg_type": 49, "file_name": "合同.pdf", "content": "[文件]"}, "[文件] 合同.pdf"),
     ({"msg_type": 49, "content": "这个颜色还有吗", "quoted_content": "色卡", "quoted_server_id": "7"}, "这个颜色还有吗"),
     ({"msg_type": 10000, "special": {"kind": "system", "title": "对方撤回了一条消息"}}, "对方撤回了一条消息"),
+    ({"msg_type": 10002, "content": "[消息类型:10002]"}, "[系统消息]"),
     ({"msg_type": 50, "content": "[消息类型:50]"}, "[消息类型:50]"),
 ], ids=lambda v: str(v)[:40] if isinstance(v, dict) else None)
 def test_every_kind_of_message_has_a_line(message, line):
     assert T.message_text(message) == line
+
+
+def test_wechats_own_lines_are_notices_not_her_words(edge, clock):
+    """A recall or 拍一拍 in a listed chat (type 10000; 10002 in older versions; its sender is empty, so it
+    comes as hers) is a chat_notice, never her message; who recalled is in the words."""
+    edge.handle(msg(clock, "[消息类型:10000]", 10000, special={"kind": "system", "title": '"小美" 撤回了一条消息'}))
+    edge.handle(msg(clock, "[消息类型:10002]", 10002))
+    assert events(edge, P.CREATOR_MESSAGE) == []
+    assert [e["text"] for e in events(edge, P.CHAT_NOTICE)] == ['"小美" 撤回了一条消息', "[系统消息]"]
+    assert [T.recall_by(t) for t in ("你撤回了一条消息", '"小美" 撤回了一条消息', "对方撤回了一条消息", '"小美" 拍了拍我')] == [
+        "us", "them", "them", ""]
 
 
 def test_a_reply_says_whose_line_it_quotes():
@@ -160,7 +172,8 @@ def test_the_backend_reads_titles_out_of_the_wechat_xml():
     place = '<msg><location x="31.2" y="121.5" label="上海市浦东新区" poiname="某某咖啡" /></msg>'
     recall = ('<sysmsg type="revokemsg"><revokemsg><session>wxid_creator01</session><msgid>1</msgid>'
               '<newmsgid>99</newmsgid><replacemsg><![CDATA["小美" 撤回了一条消息]]></replacemsg></revokemsg></sysmsg>')
-    assert _special_info(link, 49) == {"kind": "appmsg", "type": "5", "title": "新品测评"}
+    assert _special_info(link, 49) == {"kind": "appmsg", "type": "5", "title": "新品测评", "url": "https://x"}
+    assert "url" not in _special_info(mini, 49)                    # no address in the XML: no key
     assert _special_info(mini, 49)["type"] == "33"
     assert _special_info(card, 42) == {"kind": "card", "title": "小美的同事"}
     assert _special_info(place, 48) == {"kind": "location", "title": "某某咖啡"}
@@ -456,6 +469,23 @@ def test_what_failed_is_said_and_failures_in_a_row_mark_the_state(edge, clock, w
     sent(edge, "ok", "好了")
     edge.tick()
     assert events(edge, P.EDGE_STATUS)[-1]["send"] == P.OK
+
+
+def test_a_send_the_backend_refuses_takes_its_reason_to_the_mac(edge, wechat, tmp_path):
+    """The WCDB backend does not even try a chat whose name another chat has (a falsy SendRefused):
+    its reason goes into the send's error, which the Mac shows on the draft."""
+    reason = "和另一个聊天同名（都叫「小美」），机器人没法确定发给谁，没有发。请手动发"
+    wechat.text_ok = SendRefused(reason)
+    sent(edge, "text", "在吗")
+    edge.tick()
+    (tmp_path / "a.pdf").write_bytes(b"x")
+    up = edge.upload("a.pdf", (tmp_path / "a.pdf").open("rb").read, 1)
+    wechat.file_ok = SendRefused(reason)
+    sent(edge, "file", uploads=[up["upload_id"]])
+    edge.tick()
+    results = {e["send_id"]: e for e in events(edge, P.SEND_RESULT)}
+    assert (results["text"]["status"], results["text"]["error"]) == (P.FAILED, reason)
+    assert results["file"]["error"] == f"文件「a.pdf」没发出去：{reason}"
 
 
 def test_a_file_that_vanished_or_a_backend_without_files_fails_cleanly(tmp_path, clock, wechat):

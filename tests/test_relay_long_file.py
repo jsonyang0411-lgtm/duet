@@ -103,14 +103,15 @@ def test_old_result_files_are_deleted(tmp_path):
 def test_the_wcdb_backend_sends_a_file_into_the_named_chat(tmp_path):
     from src.wechat.wcdb_backend import WcdbBackend
     backend = WcdbBackend.__new__(WcdbBackend)
-    backend._talker_ids = {"文件传输助手": "filehelper", "我": ME}
+    backend._chat_names, backend._session_names = {"filehelper": "文件传输助手", ME: "我"}, {}
     import threading
     backend._window_lock = threading.RLock()
     backend._window = MagicMock()
     backend._window.send_file_to_chat.return_value = True
     assert backend.send_file(ME, "C:/x/中转结果-1.txt") is True
     backend._window.send_file_to_chat.assert_called_once_with("我", "C:/x/中转结果-1.txt")
-    assert backend.send_file("wxid_unknown", "C:/x/a.txt") is False
+    assert not backend.send_file("wxid_unknown", "C:/x/a.txt")                # no name: refused, not typed
+    backend._window.send_file_to_chat.assert_called_once()
 
 
 def test_sticker_paste_image_only_turns_pictures_into_images(tmp_path, monkeypatch):

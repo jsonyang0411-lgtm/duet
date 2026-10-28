@@ -827,12 +827,16 @@ def _lan_addresses() -> list[dict]:
 
 
 def _relay_job_for_console(job: dict) -> dict:
-    """A job as the console shows it: no wxid, the text cut to 200 characters."""
+    """A job as the console shows it: no wxid, the text cut to 200 characters; phone and ID numbers
+    masked first, as everywhere on the console (a draft of the Mac may carry a number it read off a
+    creator's picture, a cc task one typed in)."""
+    from src.prm.pii import mask_numbers
+
     try:
         extra = json.loads(job.get("result_json") or "{}")
     except ValueError:
         extra = {}
-    text = str(job.get("text") or "")
+    text = mask_numbers(str(job.get("text") or ""))
     return {
         "id": job["id"],
         "kind": job.get("kind") or "admin",
@@ -843,8 +847,8 @@ def _relay_job_for_console(job: dict) -> dict:
         "claimed_at": job.get("claimed_at"),
         "finished_at": job.get("finished_at"),
         "duration_s": extra.get("duration_s"),
-        "result": str(job.get("result_text") or "")[:400],
-        "error": str(extra.get("error") or "")[:300],
+        "result": mask_numbers(str(job.get("result_text") or ""))[:400],
+        "error": mask_numbers(str(extra.get("error") or ""))[:300],
         "cancel_requested": bool(job.get("cancel_requested")),
     }
 

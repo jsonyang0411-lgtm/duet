@@ -81,7 +81,7 @@ class Run:
         return None
 
     def poll(self):
-        for name, chat in list(self.backend._talker_ids.items()):
+        for chat, name in list(self.backend._chat_names.items()):
             self.backend._poll_group(name, chat, self._route)
         for msg in self.backend._burst.flush_all():
             self.backend._dispatch_message(msg, self._route)

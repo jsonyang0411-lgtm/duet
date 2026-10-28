@@ -58,14 +58,15 @@ Mac 开发环境的 `.venv` 是用 uv 创建的，里面没有 pip，装依赖�
 | 测试类别 | 覆盖功能 |
 |---------|---------|
 | 路由红线 | 7 个路由步骤的顺序和每一步（`tests/test_routing_steps.py`）；任何群消息（@ 机器人、cc、管理员命令、进群）、陌生私聊、旧 .env 里的聊天开关都得不到回复，被删的聊天模块不能再被导入（`tests/test_router_business.py`） |
-| API 端点 | Diagnose 返回结构、POST allowlist（聊天机器人的接口已删除）、配置字段默认值、`/api/relay`（`tests/test_relay_console_api.py`）、`/api/prm` 和 `/api/prm/parties`、`/packets`、`/deals`、`/reveal`（`tests/test_prm_console_api.py`） |
+| API 端点 | Diagnose 返回结构、POST allowlist（聊天机器人的接口已删除）、配置字段默认值、`/api/relay`（任务的文字、结果里的号码打码，`tests/test_relay_console_api.py`）、`/api/prm` 和 `/api/prm/parties`、`/packets`、`/deals`、`/reveal`（`tests/test_prm_console_api.py`） |
 | 页面加载 | 前端 SPA 正常渲染，不出现空白页或连接错误 |
 | 主题系统 | 浅色模式默认（明日方舟风，2026-10 改版）、Sun/Moon 按钮切换到深色、localStorage 持久化 |
 | 侧边栏导航 | 公司版（中转代理控制台）只有 运行状态/中转代理/待审批/合作单/微信连接/达人名单/运行日志 七页（Mac 端 `WECHAT_BACKEND=edge` 时没有「微信连接」）；旧链接回到运行状态 |
-| 待审批 / 合作单页（达人副驾驶） | 草稿显示（号码只显示打码的）、改了再发、不发（确认框）、标为发错了、自动发送门槛表；登记达人（管理员 wxid 被拒）、停用；登记达人里新好友排最前（标「新好友」、验证消息打码、怎么加的），选中登记后她加好友以来的消息合成一份先审的草稿（`tests/test_prm_console_api.py` 也测接口）；展开合作单：采纳 AI 建议、切人工接管 / 恢复副驾驶、填运单号 → 待审批出现发货通知、更新物流到已签收、显示完整号码（`tests/test_functional.py::TestPrmPages`，PRM 服务在内存里，不写 data/）。接管、门槛、稍等回复、寄样、30 天清理的逻辑在 `tests/test_prm_lifecycle.py`；每份草稿带上我方实际发出的回复（改过的、没发的）在 `tests/test_prm.py`、`tests/test_prm_worker.py` |
-| 平台联动（小红书 / 抖音 / 淘宝 / 聚水潭） | 白名单和参数检查（佣金最高 25%，Mac 的配置只能往低调）、商品目录、预览（不带 `--execute`）和执行（台账只执行一次、逐步核验、链接只认平台域名）对着假 `node`（`tests/platform_fakes.py`，答复按四个平台命令行的真实 JSON 形状），聚水潭寄样单的单子走 0600 临时文件、预览不带电话、台账和输出打码、子账号核对（`tests/test_prm_platforms.py`，含系统 Python 3.9 冒烟）；机器人侧：一律先审、批准并执行、只有 VERIFIED_SUCCESS 发、其余标红、失联 / 没人接手的兜底、重新预览、寄样单的〈手机N〉只在交给 Mac 的任务里换成号码（`tests/test_prm_platform_flow.py`）；交付后的清理也清寄样单的收货信息（`tests/test_prm_lifecycle.py`）；Mac worker 端到端（`tests/test_prm_platform_worker.py`）；控制台接口和「待审批」页（`tests/test_prm_console_api.py`、`tests/test_functional.py::TestPrmPages`） |
+| 待审批 / 合作单页（达人副驾驶） | 草稿显示（号码只显示打码的）、改了再发、不发（确认框）、标为发错了、自动发送门槛表；登记达人（管理员 wxid 被拒）、停用；登记达人里新好友排最前（标「新好友」、验证消息打码、怎么加的），选中登记后她加好友以来的消息合成一份先审的草稿（`tests/test_prm_console_api.py` 也测接口）；展开合作单：采纳 AI 建议、切人工接管 / 恢复副驾驶、填运单号 → 待审批出现发货通知、更新物流到已签收、显示完整号码（`tests/test_functional.py::TestPrmPages`，PRM 服务在内存里，不写 data/）。接管、门槛、稍等回复、寄样、30 天清理的逻辑在 `tests/test_prm_lifecycle.py`；微信自己写的系统行（撤回、拍一拍、红包提示）不起草、不顶掉草稿，达人撤回时没发出去的草稿改成人审、运营撤回只记录、新好友的提示照旧（`tests/test_prm_system_lines.py`，真的 WCDB 后端；Mac 端的 `chat_notice` 在 `tests/test_prm_over_edge.py`）；合作单的提醒一直显示到处理了：草稿没写成时她的话并进下一份草稿、欠着的开专属佣金那一步在接管到期 / 切回副驾驶 / 重新启用时补派、平台动作标红到「已处理」、撤回到运营做了决定（`tests/test_prm_notices.py`）；每份草稿带上我方实际发出的回复（改过的、没发的）在 `tests/test_prm.py`、`tests/test_prm_worker.py` |
+| 平台联动（小红书 / 抖音 / 淘宝 / 聚水潭） | 白名单和参数检查（佣金最高 25%，Mac 的配置只能往低调）、商品目录、预览（不带 `--execute`）和执行（台账只执行一次、逐步核验、链接只认平台域名）对着假 `node`（`tests/platform_fakes.py`，答复按四个平台命令行的真实 JSON 形状），聚水潭寄样单的单子走 0600 临时文件、预览不带电话、台账和输出打码、子账号核对（`tests/test_prm_platforms.py`，含系统 Python 3.9 冒烟）；机器人侧：一律先审、批准并执行、只有 VERIFIED_SUCCESS 发、其余标红、失联 / 没人接手的兜底、重新预览、寄样单的〈手机N〉只在交给 Mac 的任务里换成号码、Mac 从截图里读出的明文号码存库前换成〈手机N〉（`tests/test_prm_platform_flow.py`）；交付后的清理也清寄样单的收货信息（`tests/test_prm_lifecycle.py`）；Mac worker 端到端（`tests/test_prm_platform_worker.py`）；控制台接口和「待审批」页（`tests/test_prm_console_api.py`、`tests/test_functional.py::TestPrmPages`） |
 | 微信边缘（PRM_EDGE） | `/edge/*` 协议：一套用例通过 Mac 端客户端同时跑假 Windows 服务端和真的 Windows 边缘（挂在中转的 HTTP 服务上），另外用 Mac 自带的 Python 3.9 跑一遍（`tests/test_edge_protocol.py`，含新好友事件 `friend_added` 和 `/edge/health` 的库编号 `db_id`）；Windows 这一侧的消息文字、读回和运营亲手回复、节奏、状态、清理、路由步骤（`tests/test_edge_service.py`）；应答被截断 / 代理回了页面 / 附件下载被截断都按网络问题退避（`tests/test_edge_protocol.py`）；Windows 重启后补交停机期间的话（带 `written_at`、只交一次、停机前读回过的我们的话不算运营的，`tests/test_edge_catchup.py`）；Mac 端素材发送失败标红、应答丢了先问 Windows 再定、接收循环什么错都不停、按 `db_id` 认出新库（`tests/test_edge_backend.py`、`tests/test_prm_over_edge.py`） |
 | 新好友（`src/wechat/new_friends.py`） | 真机探针看到的三种加好友（电脑通过、手机通过、对方通过我们的申请）、只有「ㅤ」的私聊不算、群 / 公众号 / 企业微信 / 文件传输助手 / 自己不读、同一个 wxid 重启后也只报一次、起点以前的老好友不报、只读有变化的会话、出错不停、`how`（机器人点的通过算 `auto_accept`，按时间和 OCR 读到的名字）、边缘模式验证消息只在事件里、副驾驶模式打码存着一周后清掉；「我通过了你的朋友验证请求…」不起草、不当达人消息转发；登记新好友后她加好友以来的消息合成一份先审的草稿，只交一次、最多 `PRM_CATCHUP_HOURS`（`tests/test_new_friends.py`，真的 WCDB 后端、路由、中转、PRM 接在假微信数据库上）；`FriendManager` 每通过一个申请都告诉 `on_accepted`（`tests/test_friend_manager.py`） |
+| 同名的聊天 | 群和达人同名、两位达人同名、达人和好友同名：每个聊天按 wxid 读，达人的消息照常起草（副驾驶）/ 交给 Mac（边缘）；发送、回复、截图按名字在微信的搜索里找窗口，名字和另一个聊天一样就不做，返回带原因的 `SendRefused`（PRM 把草稿标成没发出去，边缘把原因写进 `send_result`）；设了不重复的备注、重启以后照常发；第一次给还没在读的达人发时名字取自 `data/private_chat_names.json`，从下一轮起读她（同名的照样读，只是不发）；数据库重开后 `WECHAT_GROUPS` 照旧（`tests/test_same_name_chats.py`，真的 WCDB 后端、路由、中转、PRM / 边缘接在假微信 4 数据库上；`tests/test_wcdb_backend.py`、`tests/test_ocr_windows.py`、`tests/test_edge_service.py`） |
 | 中转代理页 | 任务列表（取消排队/进行中的任务）、Mac 状态、中转设置（随机生成 token 只显示一次、保存条） |
 | 跨网络（Tailscale，`cross-network.md`） | 地址属于哪种网络、本机给 Mac 用的地址（局域网在前，再加 Tailscale 网卡）、Mac 从哪个地址来（日志、`/api/relay` 的 `mac_link`、`cc 状态`）（`tests/test_link.py`、`tests/test_relay_console_api.py`）；worker `--check` 的线路报告、改 `relay_url` 不用重启、草稿附件边读边发（`tests/test_claude_relay_worker.py`）；Mac 端上传边读边发、Python 3.9 也能跑（`tests/test_edge_protocol.py`） |
 | 微信连接页 | 私聊开关改动出现底部保存条、OCR 备选开关有自己的保存条，「放弃修改」能撤回 |
@@ -81,7 +82,7 @@ Mac 开发环境的 `.venv` 是用 uv 创建的，里面没有 pip，装依赖�
 2. **密钥提取** — 需要微信客户端运行
 3. **达人副驾驶 / 微信边缘** — 需要微信 + Mac（`prm-copilot-test.md`、`edge-protocol.md`）
 4. **好友管理** — 需要 Windows 版微信窗口（`friend-management-test.md`）；新好友识别（`friend_added`、登记达人里的「新好友」）要在真机上分别试电脑通过、手机通过、对方通过我们的申请
-5. **消息发送** — 需要微信窗口可见
+5. **消息发送** — 需要微信窗口可见；和别的聊天同名的达人不发（日志「Not using the WeChat window」），给她设一个不重复的备注、重启后能发
 
 ## 项目概述
 

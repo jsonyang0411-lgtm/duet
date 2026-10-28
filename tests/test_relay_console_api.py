@@ -79,6 +79,24 @@ def test_the_running_relay_shows_jobs_newest_first_without_wxids(relay):
     assert d["mac_address"] == "100.101.102.103" and d["mac_link"] == "tailscale"
 
 
+def test_numbers_in_the_jobs_are_shown_masked(relay):
+    """win review F5: what a job says and what came back (a draft of the Mac with a number it read off a
+    picture, a cc task with one) is shown masked, and cut only after that (no half number)."""
+    ask(relay, "cc 给 13800138000 回个电话")
+    job = relay.next_job(0)
+    relay.finish(job["id"], {"ok": False, "text": "电话 +86 139-0000-1111 打不通，身份证 11010119900307123X",
+                             "error": "13700001234 没接"})
+    relay.store.add(ME, ME, "说" * 195 + " 13800138000", "")               # the cut falls into the number
+    d = call("/api/relay")[1]
+    shown = json.dumps(d, ensure_ascii=False)
+    for number in ("13800138000", "139-0000-1111", "11010119900307123X", "13700001234"):
+        assert number not in shown
+    second, first = d["jobs"]
+    assert "138****8000" in first["text"] and first["error"] == "137****1234 没接"
+    assert "139****1111" in first["result"] and "1101**********123X" in first["result"]
+    assert second["text"] == "说" * 195 + " 138*"
+
+
 def test_cancel_from_the_console(relay):
     ask(relay, "cc 一")
     ask(relay, "cc 二")
