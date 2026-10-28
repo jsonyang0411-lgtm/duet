@@ -2912,13 +2912,15 @@ def sample_result(asked: list, **fields) -> dict:
     return out
 
 
-def sample_statuses(cfg: dict, order_nos, *, heartbeat=None, sleep: Callable[[float], None] = time.sleep,
-                    gap: float = SAMPLES_GAP_SEC) -> dict:
+def sample_statuses(cfg: dict, order_nos, *, heartbeat=None, sleep: Optional[Callable[[float], None]] = None,
+                    gap: Optional[float] = None) -> dict:
     """Where these sample orders stand in 聚水潭 (``sample_result``): `jst samples --order-no=…` (read-only, no
-    receiver) for ``SAMPLES_BATCH`` of them at a time, ``gap`` seconds between two calls, each call interrupted when
-    the job is cancelled (``heartbeat``).  A call that ends in 77 (login), 76 (risk), 79 (another sub-account), 2 or
-    any other failure stops it there, as it is: ``stopped`` says why, the orders not asked yet are ``not_asked``;
-    nothing is tried again (the bot asks again in its next round)."""
+    receiver) for ``SAMPLES_BATCH`` of them at a time, ``gap`` seconds (``SAMPLES_GAP_SEC``) between two calls, each
+    call interrupted when the job is cancelled (``heartbeat``).  A call that ends in 77 (login), 76 (risk), 79
+    (another sub-account), 2 or any other failure stops it there, as it is: ``stopped`` says why, the orders not
+    asked yet are ``not_asked``; nothing is tried again (the bot asks again in its next round)."""
+    sleep = sleep or time.sleep
+    gap = SAMPLES_GAP_SEC if gap is None else gap
     asked = list(dict.fromkeys(str(n).strip() for n in order_nos or [] if _ORDER_NO.match(str(n).strip())))
     asked = asked[:MAX_SAMPLE_ORDERS]
     out = sample_result(asked)

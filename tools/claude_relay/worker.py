@@ -49,7 +49,10 @@ draft goes back; the verdict goes with it.  After an operator's 批准并执行 
 queues a ``platform_execute`` job: the same CLI with --execute, once per approval key
 (a ledger in ~/.claude-relay/platform/ledger; a key seen before is never run again),
 and the outcome goes back.  ``--sync-products`` writes the catalogue (read-only CLI
-commands) to prm_workspace/kb/products.md and products.json.
+commands) to prm_workspace/kb/products.md and products.json.  Now and then the bot also asks
+where its 聚水潭 sample orders stand (a ``sample_status`` job, PRM_SAMPLE_SYNC_MIN): no model,
+`jst samples` (read-only, no receiver) under the same CLI lock, paced; the short answer
+(status, waybill, sent / signed, why rejected) goes back, a login lapsed or a risk wall as it is.
 
 Standard library only (macOS /usr/bin/python3 is enough).  Settings:
 ~/.claude-relay/config.json (see config.example.json); the token can live in
@@ -1741,11 +1744,13 @@ def summarize_prm(run: dict, data: dict | None, settings: dict) -> dict:
 
 
 def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper) -> dict:
+    meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
+    if meta.get("op") == "sample_status":        # 聚水潭: no creator, no model, no workspace needed
+        return do_sample_status_job(settings, job, client, meta)
     workspace, problem = prm_workspace_dir(settings)
     if workspace is None:
         log.warning("#%s prm job not run: %s", job["id"], problem)
         return {"ok": False, "text": "", "error": problem, "duration_s": 0}
-    meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
     try:
         party_id = int(meta.get("party_id"))
     except (TypeError, ValueError):
@@ -1898,6 +1903,34 @@ def do_platform_job(settings: dict, job: dict, client: RelayClient, workspace: P
                     job["id"], e)
     return {"ok": True, "text": json.dumps(record, ensure_ascii=False),
             "duration_s": round(time.monotonic() - started, 1)}
+
+
+def do_sample_status_job(settings: dict, job: dict, client: RelayClient, meta: dict) -> dict:
+    """``meta.op == "sample_status"`` (the bot's PRM_SAMPLE_SYNC_MIN): where a batch of 聚水潭 sample orders stands
+    (``meta.orders``), without the model: `jst samples` (read-only, no receiver) under the Mac's platform CLI lock,
+    a pause between two calls (``platforms.sample_statuses``).  The answer is short JSON (``platforms.sample_result``:
+    status, waybills, times, reasons; no creator, no receiver).  A login lapsed (77), a risk wall (76), another
+    sub-account (79) go back as they are, in ``stopped``: nothing is tried again here (the bot asks in its next
+    round)."""
+    if platforms is None:
+        return {"ok": False, "text": "", "error": "这台 Mac 的 worker 没有平台模块（src/prm/platforms.py）",
+                "duration_s": 0}
+    started = time.monotonic()
+    asked = [str(n) for n in meta.get("orders") or [] if isinstance(n, str)]
+    cfg = platforms.config(settings)
+    beat = _platform_heartbeat(client, int(job["id"]), "查聚水潭寄样单状态")
+    try:
+        with _cli_lock(beat):
+            result = platforms.sample_statuses(cfg, asked, heartbeat=beat)
+    except (TimeoutError, platforms.Cancelled) as e:     # another platform command kept the lock, or a cancel
+        verdict = "cancelled" if isinstance(e, platforms.Cancelled) else "busy"
+        result = platforms.sample_result(asked, stopped={"verdict": verdict, "exit_code": None, "message": str(e)},
+                                         not_asked=asked)
+    stopped = result.get("stopped") or {}
+    log.info("#%s sample status: %d asked, %d answered, %d not found%s", job["id"], len(asked),
+             len(result.get("orders") or {}), len(result.get("missing") or []),
+             f"; stopped ({stopped.get('verdict')}, exit {stopped.get('exit_code')})" if stopped else "")
+    return {"ok": True, "text": json.dumps(result, ensure_ascii=False), "duration_s": round(time.monotonic() - started, 1)}
 
 
 def platform_ledger() -> Path:

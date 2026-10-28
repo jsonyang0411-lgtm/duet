@@ -35,7 +35,7 @@ JST_ORDER = "YP2610260000001"
 FAKE_NODE = textwrap.dedent("""\
     import json, os, sys, time
     argv = sys.argv[1:]
-    entry = {"argv": argv, "cwd": os.getcwd()}
+    entry = {"argv": argv, "cwd": os.getcwd(), "at": time.time()}
     for a in argv:
         if a.startswith("--spec="):
             entry["spec"] = json.load(open(a[len("--spec="):], encoding="utf-8"))

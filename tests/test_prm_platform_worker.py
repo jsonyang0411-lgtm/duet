@@ -5,9 +5,11 @@ VERIFIED_SUCCESS.  A fake ``claude`` drafts; a fake ``node`` answers like the pl
 
 import json
 import os
+import subprocess
 import sys
 import textwrap
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -15,7 +17,8 @@ import pytest
 from test_prm_worker import CREATOR, TOKEN, bot, creator_says, run_one, settings, worker, workspace  # noqa: F401
 
 from platform_fakes import (
-    DY_ITEM, DY_UID, FakeNode, catalog, dy_designated_done, dy_designated_preview, rule,
+    DY_ITEM, DY_UID, JST_ORDER, JST_SHOP_DY, JST_UID, FakeNode, catalog, dy_designated_done, dy_designated_preview,
+    jst_sample_row, jst_samples, rule,
 )
 from src.prm import platforms
 from src.prm.result import SCHEMA
@@ -459,3 +462,123 @@ def test_older_platform_logs_are_cut_down_once_they_are_a_week_old(worker, works
     assert worker.coarse_platform_logs(now - 7 * 86400) == 0 and old.read_text(encoding="utf-8") == "touched"
     assert worker.coarse_platform_logs(now + 1) == 1                           # a week later: the young one too
     assert "南海区" not in young.read_text(encoding="utf-8")
+
+
+# ── 聚水潭寄样单状态（PRM_SAMPLE_SYNC_MIN）：不跑模型的「sample_status」任务 ──
+
+SYNC_CHAT = "prm:sample-status"
+ORDER2 = "YP2610260000002"
+
+
+@pytest.fixture
+def jst_mac(bot, fake_claude, node, tmp_path, workspace):           # noqa: F811
+    s = settings(bot, fake_claude, tmp_path, prm_workspace=str(workspace),
+                 **node.settings(jst_expect_uid=JST_UID, jst_shops={"dy": JST_SHOP_DY}, jst_logistics=["SF"]))
+    return SimpleNamespace(settings=s, node=node, claude=fake_claude, home=tmp_path / "home")
+
+
+def status_job(bot, orders):  # noqa: F811
+    """What the bot's sync round queues: one prm job, no creator, the order numbers in its meta."""
+    _, job_id = bot.relay.submit(SYNC_CHAT, SYNC_CHAT, f"查聚水潭寄样单的状态（{len(orders)} 张）", kind="prm",
+                                 meta={"op": "sample_status", "orders": list(orders)}, fresh=True, input_closed=True)
+    return job_id
+
+
+def answer_of(bot, job_id):  # noqa: F811
+    job = bot.relay.store.get(job_id)
+    assert job["status"] == "done", job
+    return json.loads(job["result_text"])
+
+
+def test_a_sample_status_job_reads_jushuitan_without_the_model_and_answers_briefly(worker, bot, jst_mac):  # noqa: F811
+    jst_mac.node.rules([rule(["samples"], jst_samples(
+        jst_sample_row(JST_ORDER, "SENT", waybills=[("顺丰速运", "SF1234567890", "2026-10-27 18:00:00")]),
+        jst_sample_row(ORDER2, "INIT")))])
+    job_id = status_job(bot, [JST_ORDER, ORDER2])
+    run_one(worker, bot, jst_mac.settings)
+    assert jst_mac.claude.calls() == []                                          # no model
+    [call] = jst_mac.node.calls()
+    assert call["argv"][:2] == ["bin/jst.mjs", "samples"] and "--raw" not in call["argv"]
+    assert f"--order-no={JST_ORDER},{ORDER2}" in call["argv"] and f"--expect-uid={JST_UID}" in call["argv"]
+    answer = answer_of(bot, job_id)
+    assert answer["op"] == "sample_status" and answer["stopped"] is None
+    assert answer["orders"][JST_ORDER]["ships"][0]["waybill"] == "SF1234567890"
+    assert answer["orders"][ORDER2]["status"] == "INIT"
+    text = bot.relay.store.get(job_id)["result_text"]
+    assert "测试达人" not in text and "test_daren_01" not in text and len(text) < 2000      # short, no creator
+    assert (jst_mac.home / "platform" / "cli.lock").exists()                     # under the platform CLI lock
+
+
+@pytest.mark.parametrize("exit_code, verdict", [(77, "login"), (76, "wall"), (79, "wrong_account")])
+def test_login_risk_and_another_account_go_back_as_they_are_and_nothing_is_retried(worker, bot, jst_mac,  # noqa: F811
+                                                                                  exit_code, verdict):
+    jst_mac.node.rules([rule(["samples"], stderr=f"[TAG] 退出码 {exit_code} 的那一行\n", exit=exit_code)])
+    orders = [f"YP26102600{i:05d}" for i in range(25)]
+    job_id = status_job(bot, orders)
+    run_one(worker, bot, jst_mac.settings)
+    assert len(jst_mac.node.calls()) == 1                                        # stopped at the first call
+    answer = answer_of(bot, job_id)
+    assert answer["stopped"]["verdict"] == verdict and answer["stopped"]["exit_code"] == exit_code
+    assert f"退出码 {exit_code} 的那一行" in answer["stopped"]["message"] and answer["not_asked"] == orders
+
+
+def test_the_job_waits_for_the_cli_lock_and_pauses_between_two_calls(worker, bot, jst_mac, monkeypatch):  # noqa: F811
+    import threading
+
+    monkeypatch.setattr(worker.platforms, "SAMPLES_GAP_SEC", 0.4)
+    orders = [f"YP26102600{i:05d}" for i in range(25)]
+    jst_mac.node.rules([rule(["samples"], jst_samples(*[jst_sample_row(n, "WAITING_SEND") for n in orders]))])
+    job_id = status_job(bot, orders)
+    other = worker.platforms.CliLock(jst_mac.home / "platform" / "cli.lock", wait=5)
+    with other:                                                       # another platform command runs meanwhile
+        serving = threading.Thread(target=run_one, args=(worker, bot, jst_mac.settings), daemon=True)
+        serving.start()
+        time.sleep(0.5)
+        assert jst_mac.node.calls() == []                             # it waits for the lock
+    serving.join(20)
+    assert not serving.is_alive()
+    first, second = jst_mac.node.calls()
+    assert second["at"] - first["at"] >= 0.4                          # paced like the CLIs' own paging
+    assert len(answer_of(bot, job_id)["orders"]) == 25
+
+
+def test_a_mac_without_the_jushuitan_cli_says_so_and_runs_nothing(worker, bot, fake_claude, node, tmp_path,  # noqa: F811
+                                                                  workspace):
+    s = settings(bot, fake_claude, tmp_path, prm_workspace=str(workspace), **node.settings(jst=""))
+    job_id = status_job(bot, [JST_ORDER])
+    run_one(worker, bot, s)
+    answer = answer_of(bot, job_id)
+    assert answer["stopped"]["verdict"] == "unavailable" and node.calls() == []
+
+
+def test_the_sample_status_job_runs_on_the_macs_system_python(tmp_path):
+    python = "/usr/bin/python3"
+    if not os.path.exists(python):
+        pytest.skip("no system python3")
+    root = Path(__file__).resolve().parents[1]
+    (tmp_path / "jst" / "bin").mkdir(parents=True)
+    (tmp_path / "jst" / "bin" / "jst.mjs").write_text(
+        "import json, sys\n"
+        "numbers = [a.split('=', 1)[1] for a in sys.argv if a.startswith('--order-no=')][0].split(',')\n"
+        "print(json.dumps({'command': 'samples', 'rows': [{'orderNo': n, 'status': 'SIGNED', 'signTime': "
+        "'2026-10-29 09:30:00', 'erpOrders': [], 'daren': {'nickName': 'x'}} for n in numbers]}))\n",
+        encoding="utf-8")
+    script = tmp_path / "smoke.py"
+    script.write_text(
+        "import importlib.util, json, sys\n"
+        f"spec = importlib.util.spec_from_file_location('w', {str(root / 'tools/claude_relay/worker.py')!r})\n"
+        "w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w)\n"
+        "class Client:\n"
+        "    def heartbeat(self, job_id, progress=None):\n"
+        "        return {'cancel': False}\n"
+        f"settings = {{'platforms': {{'jst': {str(tmp_path / 'jst')!r}, 'node_bin': sys.executable}}}}\n"
+        "job = {'id': 7, 'kind': 'prm', 'meta': {'op': 'sample_status', 'orders': ['YP2610260000001']}}\n"
+        "out = w.do_job(settings, job, Client(), w.Stopper(), ('prm',))\n"
+        "answer = json.loads(out['text'])\n"
+        "assert out['ok'] and answer['orders']['YP2610260000001']['signed_at'] == 1793237400.0, out\n"
+        "assert 'nickName' not in out['text']\n"
+        "print('ok', sys.version_info[:2])\n", encoding="utf-8")
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), "CLAUDE_RELAY_HOME": str(tmp_path / "home")}
+    run = subprocess.run([python, "-I", str(script)], capture_output=True, text=True, timeout=60, cwd=tmp_path, env=env)
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.startswith("ok")
