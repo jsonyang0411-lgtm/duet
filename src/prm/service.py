@@ -632,13 +632,22 @@ class PrmService:
         """The draft job of a creator's message (under ``_handle_lock``): the waiting drafts are
         out of date, the deal hears of the message, the job is made or joined.  ``new_friend``
         (``{"from", "count"}``, take_new_friend): a new friend's messages from before she was
-        registered, one job of their own that waits for a person."""
+        registered, one job of their own that waits for a person.
+
+        Her lines of the reply drafts this message puts out of date (they waited in 待审批, nobody sent
+        them: ``_outdated``) and of draft jobs that gave no draft (``failed:`` notices, mac review F1) go
+        before it, oldest job first, so the new draft answers them too; the job is told those drafts
+        never went out (``meta.sent``, ``_outbound``'s ``unsent``).  Before (real machine, 2026-10-28) the
+        new job had only her new line: 「请问佣金比例是多少呀」's draft waited, she sent a 拍一拍, and the
+        question was never answered."""
         deal = self._store.deal_of(party["id"], now)
         text = self._mask(party["id"], f"[{_clock_text(at)}] {line}", now)
+        waiting = self._store.deal_packets(deal["id"], statuses=(PENDING,))
         stale = self._store.supersede(deal["id"], now, lane=LANE_REPLY)   # a 专属佣金 step stays
+        outdated = self._outdated(waiting, now) if stale else []
         self._store.update_deal(deal["id"], now, last_message_at=_later(deal, at))
         meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"]}
-        outbound = self._outbound(deal["id"], party["id"], now)
+        outbound = self._outbound(deal["id"], party["id"], now, unsent=[packet for packet, _, _ in outdated])
         if outbound:
             meta["sent"] = outbound
         backlog = self._store.take_backlog(deal["id"])
@@ -666,29 +675,53 @@ class PrmService:
             if not fresh:
                 open_job = self._relay.store.latest_open(chat_id, drafts_only=True, system=False)
                 fresh = open_job is None or not job_meta(open_job).get("new_friend")
-        # Her lines of draft jobs that gave no draft (mac review F1): answered with this one, before it.
+        # Her lines of draft jobs that gave no draft (mac review F1), and of the drafts this message put out
+        # of date (``outdated``): answered with this one, before it, oldest job first.
         carried = sorted((n for n in deal["notices"] if str(n["key"]).startswith("failed:")
                           and n.get("lane") == LANE_REPLY and (n.get("lines") or n.get("history"))
                           and (not n.get("into") or self._cancelled(n["into"]))), key=lambda n: int(n.get("job") or 0))
+        earlier = sorted([*((int(n.get("job") or 0), str(n["lines"])) for n in carried if n.get("lines")),
+                          *((int(job["id"]), lines) for _, job, lines in outdated)], key=lambda pair: pair[0])
+        if earlier:
+            text = "\n".join([*(lines for _, lines in earlier), text])
         if carried:
-            text = "\n".join([*(str(n["lines"]) for n in carried if n.get("lines")), text])
             told = [h for n in carried for h in n.get("history") or [] if isinstance(h, dict)]
             if told:
                 meta["history"] = [*told, *meta.get("history", [])]
-            for n in carried:
-                for key, info in (n.get("gap") or {}).items():
-                    if key in ("late", "missed", "new_friend") and isinstance(info, dict):
-                        meta[key] = _merged_gap(meta.get(key), info)
+        for gap in [n.get("gap") or {} for n in carried] + [job_meta(job) for _, job, _ in outdated]:
+            for key, info in gap.items():
+                if key in ("late", "missed", "new_friend") and isinstance(info, dict):
+                    meta[key] = _merged_gap(meta.get(key), info)
+        if carried or outdated:
             fresh = True
         how, job_id = self._relay.submit(chat_id, chat_id, text, kind=PRM, files=files, settle_sec=SETTLE_SEC,
                                          meta=meta, fresh=fresh)
         for n in carried:
             self._store.set_notice(deal["id"], n["key"], failed_text(n.get("head") or n["text"], job_id), now,
                                    into=job_id)
-        logger.info("PRM: party %d message -> job #%d (%s)%s%s%s", party["id"], job_id, how,
+        logger.info("PRM: party %d message -> job #%d (%s)%s%s%s%s", party["id"], job_id, how,
                     f"; {stale} waiting draft(s) out of date" if stale else "",
                     f"; {len(backlog)} recorded line(s) told (a takeover, or read too late)" if backlog else "",
-                    f"; the lines of {len(carried)} draft job(s) that gave no draft go along" if carried else "")
+                    f"; the lines of {len(carried)} draft job(s) that gave no draft go along" if carried else "",
+                    f"; the lines of {len(outdated)} draft(s) not sent go along" if outdated else "")
+
+    def _outdated(self, waiting: list, now: float) -> list:
+        """The Mac's reply drafts of ``waiting`` (the deal's drafts in 待审批 a moment ago) that a message of hers
+        has just put out of date (``superseded`` now: nobody sent them), with their jobs and her lines in them
+        (the job's text and the follow-ups the Mac had: ``_job_lines``): ``[(packet, job, lines)]``.  Not a
+        专属佣金 step's (the system lane is no reply of hers), nor one approved or dropped meanwhile."""
+        out = []
+        for packet in waiting:
+            if packet.get("job_id") is None or (packet.get("meta") or {}).get("lane") == LANE_SYSTEM:
+                continue
+            packet = self._store.packet(packet["id"]) or packet
+            if packet["status"] != SUPERSEDED or packet.get("decided_at") != now:
+                continue
+            job = self._relay.store.get(int(packet["job_id"]))
+            lines = self._job_lines(job) if job is not None else ""
+            if lines:
+                out.append((packet, job, lines))
+        return out
 
     def _missed(self, party: dict, deal: dict, line: str, at: float, now: float) -> None:
         """A creator's message older than PRM_CATCHUP_HOURS when it was read: too old to draft.
@@ -709,13 +742,18 @@ class PrmService:
                        "PRM_CATCHUP_HOURS); recorded, not drafted, the deal asks a person to look",
                        party["id"], (now - at) / 3600)
 
-    def _outbound(self, deal_id: int, party_id: int, now: float) -> list[dict]:
+    def _outbound(self, deal_id: int, party_id: int, now: float, unsent: list = ()) -> list[dict]:
         """What the creator really got from us lately, oldest first, for the next draft: the Mac's
         case file holds the drafts as Claude wrote them, but an operator may have edited one
         before it went out, dropped one, or the send failed; holding replies are the bot's own.
         Told with every draft job (not once: a superseded job must not take it along); numbers
-        masked like the creator's words."""
+        masked like the creator's words.  ``unsent``: drafts her new message just put out of date
+        (``_submit``): told to the job that answers their lines as not sent (``what: failed``, the
+        worker's 「这一条没发出去，达人没看到」; ``dropped`` would say an operator chose not to send it)."""
         items = []
+        for p in unsent:
+            items.append({"at": float(p.get("created_at") or 0), "kind": p["kind"], "what": "failed",
+                          "text": p["final_text"] if p.get("final_text") is not None else p["text"]})
         for p in self._store.outcomes(deal_id, limit=OUTBOUND_TOLD):
             final = p["final_text"] if p.get("final_text") is not None else p["text"]
             at = float(p.get("sent_at") or p.get("decided_at") or 0)

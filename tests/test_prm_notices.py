@@ -72,6 +72,8 @@ def test_a_message_whose_draft_was_not_written_is_answered_with_her_next_one(bot
     bot.finish(job["id"], draft(message_kind="money", reply_draft="佣金 20%，样品可以寄两顶～", slots={}))
     assert "草稿没写成" not in attention(bot)
     assert f"#{job['id']} 的草稿也回了 #{first['id']} 没写成时她的消息" in attention(bot)
+    answer = bot.prm.store.packet_for_job(job["id"])
+    assert bot.prm.decide(answer["id"], "send")["ok"] and bot.prm.send_approved() == 1   # she got the answer
     bot.prm.handle(bot.msg("好的"))
     later = bot.worker_takes()
     assert lines_of(later) == ["好的"]                                     # carried once
@@ -94,7 +96,8 @@ def test_a_draft_of_something_else_does_not_wipe_the_reminder(bot, clock, tmp_pa
                               "也可以直接在微信里回她；图片看不清")             # the system's first
     clock.now += 60
     bot.prm.handle(bot.msg("在吗"))
-    assert lines_of(bot.worker_takes()) == ["佣金能给到多少？", "在吗"]
+    # (the picture's draft was not sent either: it goes along too, after the older job's lines)
+    assert lines_of(bot.worker_takes()) == ["佣金能给到多少？", "[图片]", "在吗"]
 
 
 @pytest.mark.parametrize("how", ["failed", "lost", "unusable"])
@@ -148,7 +151,8 @@ def test_follow_ups_the_mac_read_go_along_and_the_ones_it_never_saw_are_a_job_of
     bot.finish(leftover["id"], draft(message_kind="other", reply_draft="收到", slots={}))
     assert "草稿没写成" in attention(bot)                                    # it did not take the first two
     bot.prm.handle(bot.msg("第四句"))
-    assert lines_of(bot.worker_takes()) == ["第一句", "第二句", "第四句"]
+    # each once, oldest job first (the leftover job's draft 「收到」 was not sent: its line goes along too)
+    assert lines_of(bot.worker_takes()) == ["第一句", "第二句", "第三句", "第四句"]
 
 
 def test_a_failed_job_back_after_its_lines_went_on_is_out_of_date(bot, clock):
@@ -176,7 +180,9 @@ def test_a_lost_job_back_before_her_next_message_sees_to_its_own_reminder(bot, c
     assert "Mac 失联了" in attention(bot)
     bot.relay.heartbeat(first["id"])                                         # the Mac is back
     bot.finish(first["id"], draft(message_kind="other", reply_draft="明天寄哈", slots={}))
-    assert bot.prm.store.packet_for_job(first["id"])["status"] == "pending" and "草稿没写成" not in attention(bot)
+    late = bot.prm.store.packet_for_job(first["id"])
+    assert late["status"] == "pending" and "草稿没写成" not in attention(bot)
+    assert bot.prm.decide(late["id"], "send")["ok"] and bot.prm.send_approved() == 1
     bot.prm.handle(bot.msg("好的"))
     assert lines_of(bot.worker_takes()) == ["好的"]
 
@@ -216,6 +222,97 @@ def test_a_job_an_operator_cancelled_leaves_her_lines_for_the_next_one(bot, cloc
     job = bot.worker_takes()
     assert lines_of(job)[0] == "样品什么时候寄" and lines_of(job)[-1] == "？"
     assert f"已经并进 #{job['id']} 一起起草" in attention(bot)
+
+
+# ── a draft put out of date by her next line (real machine, 2026-10-28) ──
+# Her draft waited in 待审批 and she wrote again: the draft was superseded and the new job had only the new line;
+# the Mac was not told the draft never went out.  On the real machine she asked 「请问佣金比例是多少呀」, draft
+# #18 waited, she sent a 拍一拍 … and the new draft did not answer the commission at all.
+
+def waiting_draft(b, text="请问佣金比例是多少呀", reply="佣金是 20% 哦～"):
+    """She asks; the Mac's draft comes back and waits in 待审批."""
+    b.prm.handle(b.msg(text))
+    job = b.worker_takes()
+    b.finish(job["id"], draft(message_kind="money", reply_draft=reply, slots={}))
+    packet = b.prm.store.packet_for_job(job["id"])
+    assert packet["status"] == "pending"
+    return packet
+
+
+def test_her_lines_of_a_draft_her_next_line_put_out_of_date_go_with_it(bot, clock):
+    """The new job has the lines of the draft it put out of date before the new one, in order, and is told that
+    draft never went out (meta.sent ``failed``: the worker says 「这一条没发出去，达人没看到」); once a reply went
+    out, the next job has only her new line again."""
+    from tools.claude_relay.worker import sent_block
+    first = waiting_draft(bot)
+    clock.now += 60
+    bot.prm.handle(bot.msg("在吗"))
+    assert bot.prm.store.packet(first["id"])["status"] == "superseded"
+    job = bot.worker_takes()
+    assert lines_of(job) == ["请问佣金比例是多少呀", "在吗"]
+    [unsent] = [i for i in job["meta"]["sent"] if i["what"] != "sent"]
+    assert unsent == {"at": unsent["at"], "kind": "money", "what": "failed", "text": "佣金是 20% 哦～"}
+    told = sent_block(job["meta"]["sent"])
+    assert "这一条没发出去，达人没看到" in told and "佣金是 20% 哦～" in told and "运营没发" not in told
+    bot.finish(job["id"], draft(message_kind="money", reply_draft="在的～佣金是 20% 哦", slots={}))
+    second = bot.prm.store.packet_for_job(job["id"])
+    assert bot.prm.decide(second["id"], "send")["ok"] and bot.prm.send_approved() == 1
+    clock.now += 60
+    bot.prm.handle(bot.msg("好的"))
+    later = bot.worker_takes()
+    assert lines_of(later) == ["好的"]                                      # answered: not again
+    assert [i["what"] for i in later["meta"]["sent"]] == ["sent"]
+
+
+def test_drafts_put_out_of_date_one_after_another_keep_all_her_lines(bot, clock):
+    """Two lines while the drafts keep waiting: the third job has all three, oldest first, told once each (no
+    line twice), and only the latest draft not sent is told as such."""
+    waiting_draft(bot, "请问佣金比例是多少呀")
+    clock.now += 60
+    bot.prm.handle(bot.msg("样品能寄两顶吗"))
+    job = bot.worker_takes()
+    bot.finish(job["id"], draft(message_kind="money", reply_draft="佣金 20%，样品可以寄两顶～", slots={}))
+    clock.now += 60
+    bot.prm.handle(bot.msg("[拍一拍]"))
+    third = bot.worker_takes()
+    assert lines_of(third) == ["请问佣金比例是多少呀", "样品能寄两顶吗", "[拍一拍]"]
+    assert [i.get("text") for i in third["meta"]["sent"] if i["what"] == "failed"] == ["佣金 20%，样品可以寄两顶～"]
+
+
+def test_a_draft_not_written_and_a_draft_put_out_of_date_go_along_in_order(bot, clock):
+    """With 「草稿没写成」 (mac review F1): its lines and the outdated draft's are both taken once, oldest job first."""
+    failed(bot, "地址是上海市浦东新区")
+    clock.now += 60
+    waiting_draft(bot, "佣金多少")                                          # takes the failed job's lines along
+    clock.now += 60
+    bot.prm.handle(bot.msg("？"))
+    job = bot.worker_takes()
+    assert lines_of(job) == ["地址是上海市浦东新区", "佣金多少", "？"]
+    assert "草稿没写成" not in attention(bot)
+
+
+def test_the_system_lane_and_a_takeover_are_as_before(bot, clock):
+    """A 专属佣金 step waiting is not a reply of hers (it stays, nothing of it goes along); a draft a takeover put out
+    of date is the person's to answer: after the takeover only her new line and what both sides said go."""
+    order = signed_for(bot, clock)
+    bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": "delivered"})
+    step = bot.worker_takes()
+    bot.finish(step["id"], {**draft(message_kind="money", reply_draft="", slots={}), "platform": block()})
+    stepped = bot.prm.store.packet_for_job(step["id"])
+    clock.now += 60
+    bot.prm.handle(bot.msg("收到啦"))
+    job = bot.worker_takes()
+    assert lines_of(job) == ["收到啦"] and bot.prm.store.packet(stepped["id"])["status"] == "pending"
+    assert not any(i["what"] == "failed" for i in job["meta"].get("sent", []))
+    bot.finish(job["id"], draft(message_kind="other", reply_draft="好的～", slots={}))
+    bot.prm.deal_action("mode", {"deal_id": order["deal_id"], "mode": "human"})   # a person takes the chat
+    bot.prm.handle(bot.msg("戴着很好看"))
+    bot.prm.deal_action("mode", {"deal_id": order["deal_id"], "mode": "copilot"})
+    clock.now += 60
+    bot.prm.handle(bot.msg("什么时候发视频"))
+    after = bot.worker_takes()
+    assert lines_of(after) == ["什么时候发视频"]
+    assert [h["text"].split("] ", 1)[1] for h in after["meta"]["history"]] == ["戴着很好看"]
 
 
 # ── a 专属佣金 step owed ──────────────────────────────────────────────────
