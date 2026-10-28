@@ -597,7 +597,9 @@ class RelayStore:
                   progress: Optional[dict] = None) -> Optional[dict]:
         """Note that the worker is alive; returns ``{"cancel": bool}``, or None for an unknown job.
 
-        A job marked lost while the worker was unreachable is running again.
+        A job marked lost while the worker was unreachable is running again: its 失联 notice is
+        not owed any more (``delivered``; it used to stay owed, and the next round "delivered" the
+        running job as "#N running").
         ``progress`` (``{"steps", "doing", "plan"}``) replaces the last one when given.
         """
         now = time.time() if now is None else now
@@ -607,7 +609,12 @@ class RelayStore:
             ).fetchone()
             if row is None:
                 return None
-            if row["status"] in ("running", "lost"):
+            if row["status"] == "lost":
+                self._conn.execute(
+                    "UPDATE relay_jobs SET status = 'running', heartbeat_at = ?, delivered = 1 WHERE id = ?",
+                    (now, job_id),
+                )
+            elif row["status"] == "running":
                 self._conn.execute(
                     "UPDATE relay_jobs SET status = 'running', heartbeat_at = ? WHERE id = ?",
                     (now, job_id),
@@ -689,9 +696,12 @@ class RelayStore:
             self._conn.commit()
 
     def undelivered(self) -> list[dict]:
+        """Jobs whose last state change WeChat (or their kind's handler) has not had: only final
+        states (a running job is never a result to send)."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM relay_jobs WHERE delivered = 0 ORDER BY id"
+                "SELECT * FROM relay_jobs WHERE delivered = 0 AND status IN"
+                f" ({', '.join('?' * len(FINAL_STATES))}) ORDER BY id", FINAL_STATES,
             ).fetchall()
         return [dict(r) for r in rows]
 

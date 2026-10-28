@@ -972,13 +972,21 @@ def run_cli(argv: list, cwd, *, timeout: float, env: Optional[dict] = None,
                   chunks["err"].decode("utf-8", "replace"), round(time.monotonic() - started, 1), stopped)
 
 
+class Cancelled(Exception):
+    """The job was cancelled before its command started (``CliLock`` while it waited): nothing ran."""
+
+
 class CliLock:
     """One platform CLI at a time on this Mac (the worker and ``--sync-products`` share the
     browser tabs): an flock on ``path``, waited for up to ``wait`` seconds (``heartbeat()``
-    every 30 s meanwhile: the relay job stays alive)."""
+    every ``every`` seconds meanwhile: the relay job stays alive).  A heartbeat that says the
+    job is cancelled ends the wait with ``Cancelled``: nothing has run yet, so nothing runs
+    (mac review C#1: the cancel used to be ignored and the write went ahead)."""
 
-    def __init__(self, path, wait: float = 600.0, heartbeat: Optional[Callable[[], bool]] = None):
+    def __init__(self, path, wait: float = 600.0, heartbeat: Optional[Callable[[], bool]] = None,
+                 every: float = 30.0):
         self.path, self.wait, self.handle, self.heartbeat = Path(path), wait, None, heartbeat
+        self.every = every
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -995,17 +1003,24 @@ class CliLock:
                 if time.monotonic() >= deadline:
                     self.handle.close()
                     raise TimeoutError(f"等了 {int(self.wait)} 秒，另一个平台命令还在跑（{self.path}）")
-                if self.heartbeat is not None and time.monotonic() - beat >= 30:
+                if self.heartbeat is not None and time.monotonic() - beat >= self.every:
                     beat = time.monotonic()
-                    try:
-                        self.heartbeat()
-                    except Exception:
-                        pass
-                time.sleep(0.5)
+                    if _says_cancel(self.heartbeat):
+                        self.handle.close()
+                        raise Cancelled("任务在等另一个平台命令跑完的时候被取消了，平台没有动")
+                time.sleep(min(0.5, max(0.01, self.every / 4)))
 
     def __exit__(self, *exc):
         if self.handle is not None:
             self.handle.close()
+        return False
+
+
+def _says_cancel(heartbeat) -> bool:
+    """A heartbeat's answer: True when the job is cancelled (one that fails says nothing)."""
+    try:
+        return bool(heartbeat())
+    except Exception:
         return False
 
 
@@ -1031,6 +1046,12 @@ def claim(ledger: Path, key: str, record: dict) -> Optional[dict]:
         f.flush()
         os.fsync(f.fileno())
     return None
+
+
+def claimed(ledger, key: str) -> bool:
+    """Is the approval ``key`` in the ledger: taken by a run that may have written to the platform
+    (the worker's answer for an execution that broke on the way: UNKNOWN, never NOT_RUN)."""
+    return bool(_KEY.match(str(key))) and (Path(ledger) / f"{key}.json").exists()
 
 
 def settle(ledger: Path, key: str, record: dict) -> None:
@@ -1612,6 +1633,104 @@ def check_plan(action: dict, plan) -> dict:
 
 
 RECEIVER_CLEARED = "（详细地址已清除）"         # as retention.CLEARED: only the province and the city stay
+RECEIPT_LABEL = "收货"                          # a sample-create answer's receiver among a step's facts (_jst_facts)
+# What a receiver may keep for good is the same everywhere (the bot's clean-up after delivery, the Mac's
+# ledger and platform logs): the name's first character, the number masked, the province and the city.
+_REGION_PART = re.compile(r"^[一-龥]{2,10}$")
+_DISTRICT_END = re.compile(r"(?:(?<!自治)(?<!行政)(?<!地)区|县|旗|镇|乡|街道)$")      # 自治区、特别行政区、地区 are not
+_REGION_HEAD = re.compile(r"^(?:[一-龥]{2,7}?(?:省|自治区|特别行政区))?(?:(?![区县旗])[一-龥]{2,7}?(?:市|自治州|地区|盟))?")
+_RECEIVER_TEXT = re.compile(r'"receiver"\s*:\s*(\{[^{}]*\})')
+_RECEIPT = re.compile(r"^(\S*) (\S*) (.*?)(（[^（）]*）)?$", re.S)
+
+
+def coarse_region(region) -> str:
+    """The province and the city of a CLI's ``region`` (jushuitan-engineering's maskReceiver: state, city
+    and district joined by spaces): "广东省 佛山市 南海区" → "广东省 佛山市", "上海 上海市 浦东新区" →
+    "上海 上海市"; at most two parts, none with a district's ending; written without spaces
+    ("广东省佛山市南海区") only its province and city."""
+    kept = []
+    for part in str(region or "").split():
+        if len(kept) == 2:
+            break
+        if _REGION_PART.match(part) and not _DISTRICT_END.search(part):
+            kept.append(part)
+            continue
+        head = _REGION_HEAD.match(part).group(0) if not kept else ""
+        if head:
+            kept.append(head)
+        break
+    return " ".join(kept)
+
+
+def coarse_receiver(receiver: dict) -> dict:
+    """A sample order's receiver as it may be kept for good: the name's first character and ``*``, an
+    11-digit number masked (a 〈手机N〉 placeholder stays), the province and the city; the district and the
+    street address go.  The action's shape ({name, phone, province, city, district, address}) and the
+    CLI's ({source, name, phone, region "省 市 区", address "开头几个字…（N 字）"}) alike."""
+    name, phone = str(receiver.get("name") or ""), str(receiver.get("phone") or "")
+    out = {**receiver, "name": name[:1] + "*" if name else receiver.get("name"),
+           "phone": phone[:3] + "****" + phone[-4:] if re.fullmatch(r"1\d{10}", phone) else receiver.get("phone"),
+           "address": RECEIVER_CLEARED}
+    if "district" in receiver or "region" not in receiver:
+        out["district"] = ""
+    if "region" in receiver:
+        out["region"] = coarse_region(receiver.get("region"))
+    return out
+
+
+def coarse_receipt(text: str) -> str:
+    """The 收货 fact ("小* 139****1111 广东省 佛山市 南海区 桂城街道海八…（21 字）（新增到达人名下）") cut the
+    same way: "小* 139****1111 广东省 佛山市 （详细地址已清除）（新增到达人名下）"."""
+    text = str(text or "")
+    m = _RECEIPT.match(text)
+    if RECEIVER_CLEARED in text or m is None:
+        return text if RECEIVER_CLEARED in text else RECEIVER_CLEARED
+    name, phone, rest, source = m.groups()
+    name = name[:1] + "*" if name else name
+    phone = phone[:3] + "****" + phone[-4:] if re.fullmatch(r"1\d{10}", phone) else phone
+    return " ".join(p for p in (name, phone, coarse_region(rest)) if p) + f" {RECEIVER_CLEARED}{source or ''}"
+
+
+def _coarse_receiver_text(m) -> str:
+    try:
+        receiver = json.loads(m.group(1))
+    except ValueError:
+        return m.group(0)
+    if not isinstance(receiver, dict):
+        return m.group(0)
+    cut = coarse_receiver(receiver)
+    return m.group(0) if cut == receiver else '"receiver": ' + json.dumps(cut, ensure_ascii=False)
+
+
+def coarse_receivers(value):
+    """``(value, changed)``: ``value`` (any JSON value: an execution's record, a preview block, a draft, a
+    job's meta …) with every sample-order receiver cut by ``coarse_receiver`` — a ``receiver`` object at any
+    depth, one inside a CLI's JSON kept as text (a step's ``raw``), and the 收货 fact (``coarse_receipt``).
+    Running it again changes nothing.  The bot's clean-up (retention.clear_receivers) and the Mac's platform
+    logs (the worker's save_platform_log) both go through here (mac review F8 / C#2)."""
+    if isinstance(value, dict):
+        out, changed = {}, False
+        for key, item in value.items():
+            if key == "receiver" and isinstance(item, dict) and ("address" in item or "region" in item):
+                new = coarse_receiver(item)
+                cut = new != item
+            elif key == "value" and value.get("label") == RECEIPT_LABEL and isinstance(item, str):
+                new = coarse_receipt(item)
+                cut = new != item
+            else:
+                new, cut = coarse_receivers(item)
+            out[key] = new
+            changed = changed or cut
+        return (out, True) if changed else (value, False)
+    if isinstance(value, list):
+        items = [coarse_receivers(item) for item in value]
+        if any(cut for _, cut in items):
+            return [item for item, _ in items], True
+        return value, False
+    if isinstance(value, str) and '"receiver"' in value:
+        new = _RECEIVER_TEXT.sub(_coarse_receiver_text, value)
+        return (new, True) if new != value else (value, False)
+    return value, False
 
 
 def ledger_action(action: dict) -> dict:
@@ -1620,11 +1739,7 @@ def ledger_action(action: dict) -> dict:
     receiver = action.get("receiver")
     if not isinstance(receiver, dict):
         return action
-    name, phone = str(receiver.get("name") or ""), str(receiver.get("phone") or "")
-    return {**action, "receiver": {
-        "name": name[:1] + "*" if name else "", "phone": phone[:3] + "****" + phone[-4:] if _MOBILE.match(phone) else phone,
-        "province": receiver.get("province"), "city": receiver.get("city"), "district": "",
-        "address": RECEIVER_CLEARED}}
+    return {**action, "receiver": coarse_receiver(receiver)}
 
 
 def _is_int(value) -> bool:
@@ -1638,11 +1753,13 @@ def record(outcome: str, problems: Optional[list] = None) -> dict:
 
 
 def execute(raw, cfg: dict, *, plan, key: str, ledger, catalog: Optional[dict], heartbeat=None,
-            context: Optional[dict] = None) -> dict:
+            context: Optional[dict] = None, cancelled: Optional[Callable[[], bool]] = None) -> dict:
     """Phase 2 (the Mac, after 批准并执行): the approved steps WITH --execute, each write sent
     once, the next step only after the one before ended VERIFIED_SUCCESS (or needed no
     change).  ``key`` is taken in ``ledger`` first: a key that was taken before is never
-    run again (``ALREADY_RUN``).  Returns the record; ``outcome`` is VERIFIED_SUCCESS
+    run again (``ALREADY_RUN``).  ``cancelled()`` (the job's heartbeat) is asked once more
+    right before that: a job cancelled by then is NOT_RUN, its key not taken; once the first
+    write is under way nothing stops it.  Returns the record; ``outcome`` is VERIFIED_SUCCESS
     only when every step was and the reply has what it needs (the link)."""
     out = record("NOT_RUN")
     out["key"] = str(key)
@@ -1658,6 +1775,9 @@ def execute(raw, cfg: dict, *, plan, key: str, ledger, catalog: Optional[dict], 
     if platform not in cfg.get("dirs", {}):
         out["problems"].append("没有执行：" + (cfg.get("missing", {}).get(platform)
                                             or f"这台 Mac 没有配置{PLATFORMS[platform]}的命令行项目"))
+        return out
+    if cancelled is not None and _says_cancel(cancelled):
+        out["problems"].append("没有执行：任务在开始写平台之前被取消了，平台没有动")
         return out
     try:
         earlier = claim(ledger, key, {"key": key, "status": "started", "started_at": time.time(),
@@ -1698,8 +1818,8 @@ def execute(raw, cfg: dict, *, plan, key: str, ledger, catalog: Optional[dict], 
             settle(ledger, key, {"key": key, "status": "done", "action": ledger_action(action), "run": approved,
                                  "finished_at": out["finished_at"], "record": {k: v for k, v in out.items() if k != "steps"},
                                  **(context or {})})
-        except OSError:
-            pass
+        except Exception:                        # the entry stays "started" (never run again); the outcome
+            pass                                 # stands: a ledger that cannot be written changes nothing done
     return out
 
 
@@ -2439,7 +2559,7 @@ def _jst_facts(data: dict, rec: dict) -> None:
                                           + ("" if d.get("inLibrary") else "；不在达人库：执行时先加入")))
     r = data.get("receiver") if isinstance(data.get("receiver"), dict) else None
     if r:
-        rec["facts"].append(_fact("收货", f"{r.get('name')} {r.get('phone')} {r.get('region')} {r.get('address')}"
+        rec["facts"].append(_fact(RECEIPT_LABEL, f"{r.get('name')} {r.get('phone')} {r.get('region')} {r.get('address')}"
                                           f"（{r.get('source')}）"))
     lg = data.get("logistics") if isinstance(data.get("logistics"), dict) else None
     if lg:

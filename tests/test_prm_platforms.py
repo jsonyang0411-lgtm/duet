@@ -607,6 +607,55 @@ def test_two_platform_commands_never_run_at_once(tmp_path):
         pass
 
 
+def test_a_cancel_while_waiting_for_the_lock_ends_the_wait(tmp_path):
+    """The heartbeat says the job is cancelled while another command holds the lock: the wait ends with
+    Cancelled (it used to go on and take the lock, mac review C#1); a heartbeat that fails or says no keeps waiting."""
+    lock = tmp_path / "platform" / "cli.lock"
+    beats = []
+    with platforms.CliLock(lock, wait=30):
+        started = time.monotonic()
+        with pytest.raises(platforms.Cancelled, match="平台没有动"):
+            with platforms.CliLock(lock, wait=30, heartbeat=lambda: beats.append(1) or len(beats) >= 2, every=0.05):
+                pytest.fail("the lock was taken")
+        assert len(beats) == 2 and time.monotonic() - started < 5
+
+        def broken():
+            raise OSError("the bot is restarting")
+
+        with pytest.raises(TimeoutError):
+            with platforms.CliLock(lock, wait=0.3, heartbeat=broken, every=0.05):
+                pass
+    with platforms.CliLock(lock, wait=0.3, heartbeat=lambda: True, every=0.05):    # free: no wait, no question
+        pass
+
+
+def test_an_execution_cancelled_before_its_first_write_runs_nothing(node, cfg, tmp_path):
+    node.rules([rule(["promotion-strategy-create-designated"], dy_designated_done(), execute=True)])
+    out = platforms.execute(DESIGNATED, cfg, plan={"steps": ["designated"]}, key=KEY, ledger=tmp_path / "ledger",
+                            catalog=catalog(), cancelled=lambda: True)
+    assert out["outcome"] == "NOT_RUN" and "开始写平台之前被取消" in out["problems"][0] and node.calls() == []
+    assert not (tmp_path / "ledger" / f"{KEY}.json").exists()                  # the key is not used up
+    asked = []
+    out = platforms.execute(DESIGNATED, cfg, plan={"steps": ["designated"]}, key=KEY, ledger=tmp_path / "ledger",
+                            catalog=catalog(), cancelled=lambda: asked.append(1) and False)
+    assert out["outcome"] == "VERIFIED_SUCCESS" and asked == [1]               # asked once, before the write
+
+
+def test_a_ledger_that_cannot_be_settled_keeps_the_outcome(node, cfg, tmp_path, monkeypatch):
+    """The write is verified, then the ledger's last word cannot be written: the outcome stands (it used to
+    raise, and the worker reported 「没有执行」); the key stays taken all the same."""
+    node.rules([rule(["promotion-strategy-create-designated"], dy_designated_done(), execute=True)])
+
+    def broken(*args, **kwargs):
+        raise TypeError("cannot write it")
+
+    monkeypatch.setattr(platforms, "settle", broken)
+    out = execute(cfg, DESIGNATED, {"steps": ["designated"]}, tmp_path)
+    assert out["outcome"] == "VERIFIED_SUCCESS"
+    assert platforms.claimed(tmp_path / "ledger", KEY) and not platforms.claimed(tmp_path / "ledger", "b" * 32)
+    assert not platforms.claimed(tmp_path / "ledger", "../ledger/" + KEY)
+
+
 def test_the_command_line_is_an_argv_list(tmp_path):
     marker = tmp_path / "pwned"
     run = platforms.run_cli([sys.executable, "-c", "import sys; print(sys.argv[1:])", f"--title=x; touch {marker}"],
@@ -736,6 +785,17 @@ def test_the_module_runs_on_the_macs_system_python(tmp_path):
         f"s = p.check_action(json.loads({json.dumps(SAMPLE, ensure_ascii=False)!r}))\n"
         "r = p.run_cli([sys.executable, '-c', 'print(1)'], '.', timeout=10)\n"
         "assert p.ledger_action({**s, 'receiver': {**s['receiver'], 'phone': '13900001111'}})['receiver']['phone'] == '139****1111'\n"
+        "cli = {'receiver': {'name': '张*', 'phone': '139****1111', 'region': '广东省 佛山市 南海区', 'address': '某某路 100…（12 字）'}}\n"
+        "cut, changed = p.coarse_receivers({'steps': [{'raw': json.dumps(cli, ensure_ascii=False, indent=2), 'facts': [\n"
+        "    {'label': '收货', 'value': '张* 139****1111 广东省 佛山市 南海区 某某路 100…（12 字）（新增到达人名下）'}]}]})\n"
+        "assert changed and '南海区' not in json.dumps(cut, ensure_ascii=False) and '广东省 佛山市' in cut['steps'][0]['raw']\n"
+        f"lock = {str(tmp_path / 'cli.lock')!r}\n"
+        "with p.CliLock(lock, wait=5):\n"
+        "    try:\n"
+        "        with p.CliLock(lock, wait=5, heartbeat=lambda: True, every=0.01):\n"
+        "            raise SystemExit('the lock was taken')\n"
+        "    except p.Cancelled:\n"
+        "        pass\n"
         "print(a['commission_rate'], r.exit_code, r.stdout.strip(), sys.version_info[:2])\n",
         encoding="utf-8")
     run = subprocess.run([python, "-I", str(script)], capture_output=True, text=True, timeout=60, cwd=tmp_path)
@@ -911,6 +971,41 @@ def test_a_sample_order_runs_once_with_the_number_and_the_ledger_keeps_it_masked
     assert again["outcome"] == "ALREADY_RUN" and len(node.calls()) == 1
     assert platforms.check_record(json.loads(json.dumps(out)))["created"] == {"sample_order_no": JST_ORDER,
                                                                               "creator_uid": DY_UID}
+
+
+@pytest.mark.parametrize("region, kept", [
+    ("广东省 佛山市 南海区", "广东省 佛山市"), ("上海市 上海市 浦东新区", "上海市 上海市"), ("上海 上海市 浦东新区", "上海 上海市"),
+    ("北京市 朝阳区", "北京市"), ("佛山市 南海区", "佛山市"), ("广东省 东莞市 长安镇", "广东省 东莞市"),
+    ("新疆维吾尔自治区 伊犁哈萨克自治州 伊宁市", "新疆维吾尔自治区 伊犁哈萨克自治州"), ("广东省佛山市南海区", "广东省佛山市"),
+    ("西藏自治区 阿里地区 噶尔县", "西藏自治区 阿里地区"), ("香港特别行政区 九龙城区", "香港特别行政区"),
+    ("南海区", ""), ("", ""), (None, ""),
+])
+def test_a_clis_region_keeps_its_province_and_city(region, kept):
+    assert platforms.coarse_region(region) == kept
+
+
+def test_a_receiver_is_cut_the_same_way_in_any_shape_and_any_depth():
+    """The one rule for what of a receiver may be kept for good (the bot's 8.2 clean-up, the Mac's ledger and platform
+    logs, mac review F8 / C#2): a receiver object at any depth, one in a CLI's JSON kept as text, the 收货 fact."""
+    cli = jst_done()                                         # receiver {source, name, phone, region "省 市 区", address}
+    record = {"outcome": "VERIFIED_SUCCESS", "steps": [{"raw": json.dumps(cli, ensure_ascii=False, indent=2), "facts": [
+        {"label": "收货", "value": "张* 139****1111 广东省 佛山市 南海区 某某路 100…（12 字）（新增到达人名下）"},
+        {"label": "快递", "value": "菜鸟顺丰-优惠陆运（SF）"}]}],
+        "action": {**SAMPLE, "receiver": {**RECEIVER, "phone": "13900001111"}}}
+    out, changed = platforms.coarse_receivers(record)
+    assert changed and record["action"]["receiver"]["district"] == "南海区"   # the original is not touched
+    assert out["action"]["receiver"] == {"name": "张*", "phone": "139****1111", "province": "广东省", "city": "佛山市",
+                                         "district": "", "address": platforms.RECEIVER_CLEARED}
+    raw = json.loads(out["steps"][0]["raw"])
+    assert raw["receiver"] == {**cli["receiver"], "region": "广东省 佛山市", "address": platforms.RECEIVER_CLEARED}
+    assert {k: v for k, v in raw.items() if k != "receiver"} == {k: v for k, v in cli.items() if k != "receiver"}
+    assert out["steps"][0]["facts"] == [
+        {"label": "收货", "value": "张* 139****1111 广东省 佛山市 （详细地址已清除）（新增到达人名下）"},
+        {"label": "快递", "value": "菜鸟顺丰-优惠陆运（SF）"}]
+    assert platforms.coarse_receivers(out) == (out, False)                  # again: nothing changes
+    assert platforms.coarse_receivers({"receiver": None, "raw": '{"receiver": null}', "a": [1, "x"]})[1] is False
+    assert platforms.coarse_receipt("（预览里没有电话，提交时给）") == platforms.RECEIVER_CLEARED   # not the fact's shape
+    assert platforms.ledger_action({**SAMPLE, "receiver": {**RECEIVER, "phone": "〈手机1〉"}})["receiver"]["phone"] == "〈手机1〉"
 
 
 def test_a_sample_order_without_a_receiver_sends_none(node, jcfg, tmp_path):

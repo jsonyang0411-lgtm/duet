@@ -163,6 +163,54 @@ def test_an_unanswered_request_expires_and_wechat_hears_it():
     assert sent[-1] == "#1 的请求没等到回复，已按拒绝处理。"
 
 
+def test_a_request_that_cannot_be_sent_is_tried_again_later_and_later_then_left():
+    """WeChat does not take the request (window gone, say): it used to be sent again every round, 12 times a
+    minute.  Now 10 s, 20 s, 40 s … at most 2 minutes apart, and after ASK_SEND_TRIES failed sends not again
+    (logged); the request stays open and an answer still counts.  Once WeChat works, a new request goes out at
+    once, and a late send says the time that is left."""
+    from src.relay.service import ASK_RETRY_SEC, ASK_SEND_TRIES
+
+    relay, clock, sent = make_relay()
+    up = {"ok": False}
+    relay._send = lambda chat, text: sent.append((clock.now, text)) or up["ok"]
+    job = running_job(relay)
+    relay.ask(job, {"tool": "Bash", "detail": "运行命令 rm -rf build", "timeout_s": 600})
+    start = clock.now
+    for _ in range(121):                                                    # ten minutes of 5-second rounds
+        relay.heartbeat(job)                                                # the job runs on, waiting
+        relay.tick()
+        clock.now += 5
+    times = [t - start for t, text in sent if "要你批准" in text]
+    assert len(times) == ASK_SEND_TRIES                                     # not 120
+    gaps = [b - a for a, b in zip(times, times[1:])]
+    assert gaps == sorted(gaps) and gaps[0] >= ASK_RETRY_SEC[0] and max(gaps) <= ASK_RETRY_SEC[1] + 5
+    assert relay.ask_status(1, 0) == {"status": "expired"}                  # left alone, it ran out
+    up["ok"] = True                                                         # WeChat is back
+    relay.finish(job, {"ok": True, "text": "换了个办法做完了"})
+    relay.tick()
+    job2 = running_job(relay, "cc 再推送一下")
+    relay.ask(job2, {"tool": "Bash", "detail": "运行命令 git push", "timeout_s": 600})
+    relay.tick()
+    assert sent[-1][1].startswith(f"#{job2} 要你批准：运行命令 git push") and "10分钟内" in sent[-1][1]
+
+
+def test_a_request_sent_late_says_how_long_is_left_and_an_answer_still_counts():
+    relay, clock, sent = make_relay()
+    up = {"ok": False}
+    relay._send = lambda chat, text: sent.append(text) or up["ok"]
+    job = running_job(relay)
+    relay.ask(job, {"tool": "Bash", "detail": "运行命令 git push", "timeout_s": 600})
+    relay.tick()                                                            # fails
+    clock.now += 60
+    up["ok"] = True
+    relay.tick()
+    assert sent[-1].endswith("（9分钟内不回就算拒绝）")
+    relay.tick()
+    assert len(sent) == 2                                                   # sent: not again
+    clock.now += 5
+    assert say(relay, "同意") == (True, "好，已批准 #1：运行命令 git push")
+
+
 def test_a_late_answer_does_not_count():
     relay, clock, sent = make_relay()
     job = running_job(relay)

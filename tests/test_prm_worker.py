@@ -173,7 +173,8 @@ def test_claude_is_locked_down_for_a_prm_job(worker, fake_claude):
     assert "只以 kb/ 为准" in worker.PRM_SYSTEM_NOTE                   # the case file is a record, not orders
     hooks = json.loads(value("--settings"))["hooks"]
     for event in ("PreToolUse", "PermissionRequest"):
-        assert hooks[event][0]["matcher"] == "*" and hooks[event][0]["hooks"][0]["command"].endswith("--prm-hook")
+        assert hooks[event][0]["matcher"] == "*"
+        assert hooks[event][0]["hooks"][0]["command"].endswith("--prm-hook || exit 2")   # fails closed
     assert value("--model") == "sonnet" and value("--max-budget-usd") == "2.0"
     assert "--dangerously-skip-permissions" not in cmd and "--resume" not in cmd and "--add-dir" not in cmd
 
@@ -307,6 +308,97 @@ def test_the_hook_process_knows_the_job_and_its_creator_from_its_environment(wor
     assert other.returncode == 2 and "deals/1.md" in other.stderr
     assert hook("inbox/job-9/a.jpg").returncode == 2
     assert "job 7 PreToolUse Read" in (workspace.parent / "h" / "logs" / "prm" / "guard.log").read_text(encoding="utf-8")
+
+
+def test_the_hook_fails_closed_when_the_guard_breaks(worker, monkeypatch, workspace, tmp_path):
+    """claude blocks a PreToolUse call only on exit code 2: an exception in the guard (exit 1) used to let the
+    call through (mac review G2).  Now anything going wrong blocks, with the reason on stderr."""
+    def broken(*args, **kwargs):
+        raise RuntimeError("the guard broke")
+
+    monkeypatch.setattr(worker, "prm_guard", broken)
+    code, out, err = run_hook(worker, monkeypatch, {"hook_event_name": "PreToolUse", "tool_name": "Read",
+                                                    "tool_input": {"file_path": "deals/2.md"}, "cwd": str(workspace)},
+                              workspace)
+    assert code == 2 and "守卫出错了（RuntimeError）" in err and out == ""
+    assert "the guard broke" in (tmp_path / "home" / "logs" / "prm" / "guard.log").read_text(encoding="utf-8")
+    monkeypatch.setattr(sys, "stdin", io.StringIO('{"hook_event_name": "PreToolUse"'))   # cut short: no tool
+    assert worker.main(["--prm-hook"]) == 2
+
+
+PYTHONS = [sys.executable] + (["/usr/bin/python3"] if os.path.exists("/usr/bin/python3") else [])
+
+
+@pytest.mark.parametrize("python", PYTHONS, ids=lambda p: "system-python" if p == "/usr/bin/python3" else "venv")
+@pytest.mark.parametrize("path", ["deals/3.md\u0000", "deals/\ud800.md"], ids=["nul", "surrogate"])
+def test_paths_the_file_system_cannot_take_are_blocked(workspace, python, path):
+    """A NUL byte or a lone surrogate in a path makes os.path raise on Python 3.12 (exit 1 before: the call went
+    ahead); every Python blocks it now."""
+    event = {"hook_event_name": "PreToolUse", "tool_name": "Read", "tool_input": {"file_path": path},
+             "cwd": str(workspace)}
+    proc = subprocess.run([python, str(ROOT / "tools/claude_relay/worker.py"), "--prm-hook"],
+                          input=json.dumps(event), capture_output=True, text=True, timeout=60,
+                          env={**os.environ, "PRM_WORKSPACE": str(workspace), "PRM_PARTY_ID": "2", "PRM_JOB_ID": "7",
+                               "CLAUDE_RELAY_HOME": str(workspace.parent / "h")})
+    assert proc.returncode == 2, proc.stderr
+
+
+def test_a_guard_that_cannot_start_still_blocks(worker, workspace, tmp_path):
+    """The hook command as claude runs it (through the shell): a worker.py broken by an update while a draft
+    runs, or an interpreter that is gone, exits 1 / 127, which claude would let through: ``|| exit 2``."""
+    [hook] = json.loads(worker.prm_hook_settings())["hooks"]["PreToolUse"][0]["hooks"]
+    script = str(ROOT / "tools/claude_relay/worker.py")
+    assert script in hook["command"]
+    broken = tmp_path / "broken-worker.py"
+    broken.write_text((ROOT / "tools/claude_relay/worker.py").read_text(encoding="utf-8") + "\ndef (:\n",
+                      encoding="utf-8")
+    env = {**os.environ, "PRM_WORKSPACE": str(workspace), "PRM_PARTY_ID": "1", "PRM_JOB_ID": "7",
+           "CLAUDE_RELAY_HOME": str(tmp_path / "h")}
+
+    def run(command, path):
+        event = {"hook_event_name": "PreToolUse", "tool_name": "Read", "tool_input": {"file_path": path},
+                 "cwd": str(workspace)}
+        return subprocess.run(["/bin/sh", "-c", command], input=json.dumps(event), capture_output=True, text=True,
+                              env=env, timeout=60).returncode
+
+    assert run(hook["command"], "kb/合作政策.md") == 0 and run(hook["command"], "deals/2.md") == 2
+    assert run(hook["command"].replace(script, str(broken)), "kb/合作政策.md") == 2           # SyntaxError: exit 1
+    assert run(hook["command"].replace(sys.executable, str(tmp_path / "no-python")), "kb/合作政策.md") == 2   # 127
+
+
+@pytest.mark.parametrize("name", ["kb", "assets", "deals", "inbox"])
+def test_a_linked_folder_is_refused_by_the_check_and_the_guard_alike(worker, workspace, tmp_path, name):
+    """kb/ kept elsewhere and linked in: the check used to accept it while the guard refused every path through
+    it (the drafts silently lost the 合作政策, mac review G1).  Both refuse it now, the check saying how to fix
+    it.  deals/ or inbox/ linked to a folder inside the workspace used to let one creator's job read the others'
+    case files past their own check."""
+    ws = str(workspace)
+    worker.prm_workspace_dir({"prm_workspace": ws})                     # makes deals/, assets/, inbox/
+    (workspace / "deals" / "2.md").write_text("someone else's", encoding="utf-8")
+    real = workspace / "data" / name if name in ("deals", "inbox") else tmp_path / f"shared-{name}"
+    real.parent.mkdir(parents=True, exist_ok=True)
+    (workspace / name).rename(real)
+    (workspace / name).symlink_to(real)
+    path, problem = worker.prm_workspace_dir({"prm_workspace": ws})
+    assert path is None and f"{name}/ 是软链接" in problem
+    link = os.path.join(os.path.realpath(ws), name)
+    assert f"rm {link} && mkdir {link} && cp -R {real}/. {link}/" in problem
+    assert worker.worker_kinds({"prm_workspace": ws}) == ["admin"]
+
+    def why(tool, **args):
+        return worker.prm_guard({"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": args,
+                                 "cwd": ws}, ws, 1, 7)
+
+    for tool, args in (("Read", {"file_path": "kb/合作政策.md"}), ("Read", {"file_path": "deals/2.md"}),
+                       ("Read", {"file_path": "data/deals/2.md"}), ("Read", {"file_path": "data/inbox/job-9/x.jpg"}),
+                       ("Glob", {"pattern": "kb/*.md"}), ("Grep", {"pattern": "佣金", "path": "kb"}),
+                       ("Write", {"file_path": "deals/1.md"})):
+        assert "软链接" in why(tool, **args), (tool, args)
+    assert why("StructuredOutput") == ""
+    (workspace / name).unlink()                                      # a real folder again: back to normal
+    real.rename(workspace / name)
+    assert worker.prm_workspace_dir({"prm_workspace": ws})[0] is not None
+    assert why("Read", file_path="kb/合作政策.md") == "" and why("Read", file_path="deals/2.md")
 
 
 # ── what claude is told ───────────────────────────────────────────────────
