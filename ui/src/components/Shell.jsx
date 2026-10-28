@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   Pulse, ArrowsLeftRight, ChatCircleDots, TerminalWindow, Moon, Sun, Play, Stop, ArrowClockwise,
-  ChatTeardropText, Handshake, Package,
+  ChatTeardropText, Handshake, Package, CheckCircle,
 } from '@phosphor-icons/react'
 import { useStatus, fmtDuration } from '../store/status'
 import { useConfig } from '../store/config'
@@ -12,7 +12,7 @@ import { navigate } from '../lib/router'
 import { LogoGlyph, FigurePlaceholder } from './art'
 import { useInfluencerAttention } from './InfluencerPanel'
 import { Banner } from './ui'
-import { get } from '../api'
+import { get, post } from '../api'
 
 // The company console: the bot as a relay to Claude Code on a Mac, plus the
 // PRM copilot (drafts for registered creators: 待审批 / 合作单). The bot has
@@ -56,6 +56,50 @@ export function EdgeAlert() {
     <Banner title="Windows 那边有问题，达人的消息可能收不到、发不出">
       {edge.problems.map((p) => <div key={p}>{p}</div>)}
     </Banner>
+  )
+}
+
+/**
+ * GET /api/wechat-gaps：电脑微信哪几段时间不在线（Windows 自己记的，或 Mac 收到 Windows 报的 wechat_gap），
+ * 每 15 秒问一次；还在掉线的那段（open）只有 Windows 运行时有。
+ */
+export function useWechatGaps(intervalMs = 15000) {
+  const [data, setData] = useState(null)
+  const load = useCallback(async () => {
+    try { setData(await get('/api/wechat-gaps')) } catch { /* 控制台离线另有提示 */ }
+  }, [])
+  useEffect(() => {
+    load()
+    const t = setInterval(load, intervalMs)
+    return () => clearInterval(t)
+  }, [load, intervalMs])
+  return [data, load]
+}
+
+/** 每页顶上：电脑微信掉线的那几段，一直显示到运营点「看过了」；还没恢复的那段没有按钮，恢复后变成一条记录。 */
+export function WechatGapAlert() {
+  const [data, reload] = useWechatGaps()
+  const toast = useToast()
+  const [busy, setBusy] = useState(0)
+  const items = data ? [...(data.open ? [{ ...data.open, open: true }] : []), ...(data.gaps || [])] : []
+  if (!items.length) return null
+  const seen = async (id) => {
+    setBusy(id)
+    try { await post('/api/wechat-gaps', { id, action: 'seen' }); await reload() } catch (e) { toast.err(e.message) } finally { setBusy(0) }
+  }
+  return (
+    <div className="stack gap-alerts" style={{ gap: 0 }}>
+      {items.map((g) => (
+        <Banner
+          key={g.open ? 'open' : g.id} kind={g.open ? '' : 'warn'} title={g.title}
+          actions={g.open ? null : (
+            <button type="button" className="btn sm" disabled={busy === g.id} onClick={() => seen(g.id)}><CheckCircle />看过了</button>
+          )}
+        >
+          {g.text}
+        </Banner>
+      ))}
+    </div>
   )
 }
 

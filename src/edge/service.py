@@ -261,6 +261,22 @@ class EdgeService:
             logger.info("EDGE: new friend %s… (%s) -> event #%d", wxid[:8], stored["how"], stored["id"])
         return stored
 
+    def wechat_gap(self, gap: dict) -> Optional[dict]:
+        """PC WeChat was not online from ``from`` to ``to`` (src/wechat/presence.py, a gap that ended):
+        a ``wechat_gap`` event ``{from, to, reason}`` for the Mac's console.  Whole seconds."""
+        try:
+            start, end = int(float(gap["from"])), int(float(gap["to"]))
+        except (KeyError, TypeError, ValueError):
+            logger.warning("EDGE: a WeChat gap without its times is not reported")
+            return None
+        reason = str(gap.get("reason") or "")
+        stored = self._emit(P.WECHAT_GAP, **{"from": start, "to": max(start, end),
+                                             "reason": reason if reason in P.GAP_REASONS else P.GAP_OFFLINE_WHILE_RUNNING})
+        if stored is not None:
+            logger.info("EDGE: PC WeChat was not online for %d min (%s) -> event #%d", (end - start) // 60,
+                        stored["reason"], stored["id"])
+        return stored
+
     def _resolve(self, msg: dict, kind: str, number: int) -> tuple:
         from ..relay.attachments import Held, resolve
         return resolve(self._config, Held(kind, msg, self._clock()), number)

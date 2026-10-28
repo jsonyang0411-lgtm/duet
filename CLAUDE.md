@@ -54,7 +54,7 @@ Mac 开发环境的 `.venv` 是用 uv 创建的，里面没有 pip，装依赖�
 | 测试类别 | 覆盖功能 |
 |---------|---------|
 | 路由红线 | 7 个路由步骤的顺序和每一步（`tests/test_routing_steps.py`）；任何群消息（@ 机器人、cc、管理员命令、进群）、陌生私聊、旧 .env 里的聊天开关都得不到回复，被删的聊天模块不能再被导入（`tests/test_router_business.py`） |
-| API 端点 | Diagnose 返回结构、POST allowlist（聊天机器人的接口已删除）、配置字段默认值、`/api/relay`（任务的文字、结果里的号码打码，`tests/test_relay_console_api.py`）、`/api/prm` 和 `/api/prm/parties`、`/packets`、`/deals`、`/reveal`（`tests/test_prm_console_api.py`） |
+| API 端点 | Diagnose 返回结构、POST allowlist（聊天机器人的接口已删除）、配置字段默认值、`/api/relay`（任务的文字、结果里的号码打码，`tests/test_relay_console_api.py`）、`/api/prm` 和 `/api/prm/parties`、`/packets`、`/deals`、`/reveal`（`tests/test_prm_console_api.py`）、`/api/wechat-gaps`（GET 只读、机器人停着时不建库，POST 才标看过了，`tests/test_web_api.py`） |
 | 页面加载 | 前端 SPA 正常渲染，不出现空白页或连接错误 |
 | 主题系统 | 浅色模式默认（明日方舟风，2026-10 改版）、Sun/Moon 按钮切换到深色、localStorage 持久化 |
 | 侧边栏导航 | 公司版（中转代理控制台）只有 运行状态/中转代理/待审批/合作单/微信连接/达人名单/运行日志 七页（Mac 端 `WECHAT_BACKEND=edge` 时没有「微信连接」）；旧链接回到运行状态 |
@@ -67,7 +67,8 @@ Mac 开发环境的 `.venv` 是用 uv 创建的，里面没有 pip，装依赖�
 | 跨网络（Tailscale，`cross-network.md`） | 地址属于哪种网络、本机给 Mac 用的地址（局域网在前，再加 Tailscale 网卡）、Mac 从哪个地址来（日志、`/api/relay` 的 `mac_link`、`cc 状态`）（`tests/test_link.py`、`tests/test_relay_console_api.py`）；worker `--check` 的线路报告、改 `relay_url` 不用重启、草稿附件边读边发（`tests/test_claude_relay_worker.py`）；Mac 端上传边读边发、Python 3.9 也能跑（`tests/test_edge_protocol.py`） |
 | 微信连接页 | 私聊开关改动出现底部保存条、OCR 备选开关有自己的保存条，「放弃修改」能撤回 |
 | 首次设置 | 3 步（微信密钥 → 微信设置 → 中转设置），所有请求在测试里拦截，不写 .env |
-| Mac 端控制台（WECHAT_BACKEND=edge） | `/api/edge`、Windows 出问题时每页顶上的提醒条、Mac 端左栏不显示「微信连接」、审批卡上通知已进「待审批」时不显示复制按钮（`tests/test_edge_console.py`，`/api/edge` 用 Playwright 拦截） |
+| Mac 端控制台（WECHAT_BACKEND=edge） | `/api/edge`、Windows 出问题时每页顶上的提醒条、Mac 端左栏不显示「微信连接」、审批卡上通知已进「待审批」时不显示复制按钮、Windows 报来的电脑微信掉线（`wechat_gap`）每页顶上提醒到点「看过了」（`tests/test_edge_console.py`，`/api/edge`、`/api/wechat-gaps` 用 Playwright 拦截） |
+| 电脑微信掉线提醒（`src/wechat/presence.py`） | 怎么认：微信进程不在马上算、找不到主窗口连续两次才算、发消息占着窗口不算、两次看之间重启过（升级）也算；运行中掉线（`offline_while_running`）从最后一次确认在线到再次在线；启动时和机器人一起停过（`stopped_with_bot`：微信比库里最后一次在线晚启动、或者没开）补记一段，只停了机器人不算；控制台的字和「看过了」；回来以后登记 / 名单达人的私聊往回读 200 条，同步进来的旧行按顺序补交（边缘带 `written_at`，以前被 5 分钟的规则丢掉；副驾驶一份先审的草稿），掉线还没结束时同步进来的也交，`PRM_CATCHUP_HOURS=0` 不交，没掉线时旧行照旧当历史；`Bot._start_presence` 的接线（`tests/test_wechat_gaps.py`，真的 WCDB 后端）；`wechat_gap` 事件两边同一套用例、Mac 自带 Python 3.9 存得下（`tests/test_edge_protocol.py`）；Mac 端存到看过了为止、同一段只记一次、写不进去不确认、不认识的事件类型照样确认（`tests/test_edge_backend.py`）；Windows 控制台的提醒、还没恢复的那段没有按钮（`tests/test_functional.py::TestWechatGapAlert`） |
 | 达人名单页 | 左栏「达人名单」只有达人名单、待处理两个子页（老的审批单链接落到名单）；名单的添加（带平台和抖音号 / 小红书号）/ 停用 / 从最近私聊挑选、已在名单的再加入不清掉原来填的、待处理的回复草稿标为已处理（`tests/test_influencer_console.py`，用临时配置和数据库） |
 
 ### 手动验证清单
@@ -79,6 +80,7 @@ Mac 开发环境的 `.venv` 是用 uv 创建的，里面没有 pip，装依赖�
 3. **达人副驾驶 / 微信边缘** — 需要微信 + Mac（`prm-copilot-test.md`、`edge-protocol.md`）
 4. **好友管理** — 需要 Windows 版微信窗口（`friend-management-test.md`）；新好友识别（`friend_added`、登记达人里的「新好友」）要在真机上分别试电脑通过、手机通过、对方通过我们的申请
 5. **消息发送** — 需要微信窗口可见；和别的聊天同名的达人不发（日志「Not using the WeChat window」），给她设一个不重复的备注、重启后能发
+6. **电脑微信掉线提醒** — 需要 Windows 真机：退出微信、手机上退出电脑微信、被另一台电脑挤下线、升级微信、重启电脑、只停机器人，各看一次日志里「WeChat presence」那几行和控制台顶上的提醒（被挤下线时登录窗口会不会被当成主窗口，还没确认）；勾选「同步最近的聊天记录」重新登录后，同步进来的消息补交成草稿
 
 ## 项目概述
 

@@ -28,11 +28,17 @@ SEND_SEEN = "send_seen"
 SEND_UNSEEN = "send_unseen"
 EDGE_STATUS = "edge_status"
 FRIEND_ADDED = "friend_added"                           # a person became this account's friend (once per wxid)
+WECHAT_GAP = "wechat_gap"                               # PC WeChat was not online from ``from`` to ``to`` (2026-10-28)
 EVENT_TYPES = (CREATOR_MESSAGE, OPERATOR_MESSAGE, CHAT_NOTICE, CREATOR_MESSAGE_RECALLED,
-               SEND_RESULT, SEND_SEEN, SEND_UNSEEN, EDGE_STATUS, FRIEND_ADDED)
+               SEND_RESULT, SEND_SEEN, SEND_UNSEEN, EDGE_STATUS, FRIEND_ADDED, WECHAT_GAP)
 # friend_added's ``how``: Windows accepted the request itself / a person did (PC or phone) / they
 # accepted our request / cannot be told.
 FRIEND_HOWS = ("auto_accept", "manual", "requested", "unknown")
+# wechat_gap's ``reason``: seen going offline while the bot ran (运行中掉线) / found at the bot's start:
+# WeChat (re)started or was not there while the bot was stopped too (和机器人一起停了).
+GAP_OFFLINE_WHILE_RUNNING = "offline_while_running"
+GAP_STOPPED_WITH_BOT = "stopped_with_bot"
+GAP_REASONS = (GAP_OFFLINE_WHILE_RUNNING, GAP_STOPPED_WITH_BOT)
 
 # ── sends ─────────────────────────────────────────────────────────────────
 QUEUED, SENDING = "queued", "sending"

@@ -88,6 +88,9 @@ class FakeSide(Side):
     def friend_added(self, wxid, name, verify_text="", how="manual"):
         self.edge.friend_added(wxid, name, verify_text=verify_text, how=how)
 
+    def wechat_gap(self, start, end, reason):
+        self.edge.wechat_gap(start, end, reason)
+
     def rebuild_db(self):
         self.edge.rebuild_db()
 
@@ -282,6 +285,10 @@ class RealSide(Side):
             db.say(wxid, "", f"你已添加了{name}，{tail}", 10000)
         self.friends.scan_once()
 
+    def wechat_gap(self, start, end, reason):
+        """PC WeChat came back after a gap (src/wechat/presence.py hands the gap to the edge, Bot._start_presence)."""
+        self.edge.wechat_gap({"id": 7, "from": start + 0.4, "to": end + 0.6, "reason": reason, "detail": "找不到微信主窗口"})
+
     def rebuild_db(self):
         """edge.db made anew (reinstalled, deleted): a new store under a restarted edge."""
         self.edge.stop()
@@ -443,6 +450,21 @@ def test_a_new_friend_is_one_event_whoever_let_her_in(side):
         {"wxid": "wxid_new03", "name": "小红", "remark": "", "verify_text": "想合作", "how": "auto_accept"}]
     assert all("chat_id" not in e and e["at"] for e in events)
     assert side.client.ack(events[-1]["id"])["pending"] == 0
+
+
+def test_a_wechat_gap_is_an_event_the_mac_acknowledges(side):
+    """wechat_gap（2026-10-28 加的，只增不改）：电脑微信从 from 到 to 不在线，reason 是稳定的英文值；
+    整秒、不带聊天，确认以后不再给。"""
+    side.wechat_gap(1761462000, 1761465600, P.GAP_OFFLINE_WHILE_RUNNING)
+    side.wechat_gap(1761300000, 1761300600, P.GAP_STOPPED_WITH_BOT)
+    events = drain(side)
+    assert types(events) == [P.WECHAT_GAP] * 2
+    assert [{k: e[k] for k in ("from", "to", "reason")} for e in events] == [
+        {"from": 1761462000, "to": 1761465600, "reason": "offline_while_running"},
+        {"from": 1761300000, "to": 1761300600, "reason": "stopped_with_bot"}]
+    assert all(set(e) == {"id", "type", "at", "from", "to", "reason"} for e in events)
+    assert side.client.ack(events[-1]["id"])["pending"] == 0 and drain(side, after=events[-1]["id"]) == []
+    assert P.GAP_REASONS == ("offline_while_running", "stopped_with_bot") and P.WECHAT_GAP in P.EVENT_TYPES
 
 
 def test_health_says_which_database_windows_keeps(side):
@@ -645,6 +667,33 @@ def test_the_mac_side_runs_on_the_system_python(tmp_path):
     run = subprocess.run([python, "-I", str(script)], capture_output=True, text=True, timeout=60)
     assert run.returncode == 0, run.stderr
     assert run.stdout.startswith("你好 sent 3 ")
+
+
+def test_the_mac_side_keeps_wechat_gaps_on_the_system_python(tmp_path):
+    """wechat_gap 在 Mac 自带的 Python 3.9 上也收得下、存得下（src/wechat/edge_backend.py 的 EdgeGaps）。"""
+    python = "/usr/bin/python3"
+    if not os.path.exists(python):
+        pytest.skip("no system python3")
+    script = tmp_path / "gaps.py"
+    script.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(ROOT)!r})\n"
+        "from pathlib import Path\n"
+        "from src.edge.fake import FakeEdge\n"
+        "from src.edge.client import EdgeClient\n"
+        "from src.wechat.edge_backend import EdgeGaps\n"
+        "with FakeEdge() as edge:\n"
+        "    c = EdgeClient(edge.url, edge.token)\n"
+        "    edge.wechat_gap(1761462000, 1761465600, 'stopped_with_bot')\n"
+        "    [ev] = c.events(after=1, wait=0)\n"
+        f"    gaps = EdgeGaps(Path({str(tmp_path / 'edge_gaps.json')!r}))\n"
+        "    first, again = gaps.add(ev, 1.0), gaps.add(ev, 2.0)\n"
+        "    print(ev['type'], ev['reason'], first['id'], again, len(gaps.unseen()), gaps.mark_seen(first['id'], 3.0),\n"
+        "          gaps.unseen(), sys.version_info[:2])\n",
+        encoding="utf-8")
+    run = subprocess.run([python, "-I", str(script)], capture_output=True, text=True, timeout=60)
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.startswith("wechat_gap stopped_with_bot 1 None 1 True [] ")
 
 
 def test_uploads_go_block_by_block(tmp_path):

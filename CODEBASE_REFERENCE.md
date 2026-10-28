@@ -77,6 +77,7 @@ grep "文件名" CODEBASE_REFERENCE.md
    - [功能M: 微信边缘（PRM_EDGE）](#功能m-微信边缘prm_edge)
    - [功能N: 平台联动（小红书 / 抖音 / 淘宝 / 聚水潭）](#功能n-平台联动小红书--抖音--淘宝--聚水潭)
    - [功能O: 新好友（friend_added / 登记达人里的「新好友」）](#功能o-新好友friend_added--登记达人里的新好友)
+   - [功能P: 电脑微信掉线提醒（wechat_gap）](#功能p-电脑微信掉线提醒wechat_gap)
 5. [配置文件和环境变量](#5-配置文件和环境变量)
 
 ---
@@ -96,7 +97,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `WECHAT_DATA_DIR` | `str` | `""`（自动检测） | `src/config.py`；引导第 1 步写进本机覆盖文件 | `src/wechat/wcdb_client.py`（直接读环境变量）、`src/voice/pipeline.py` → `VoiceFileLocator`、`src/wechat/media.py`（找图片）、`src/relay/attachments.py`（找文件）、`src/web/server.py`、`tools/image_probe.py`、`tools/image_key_check.py` |
 | `BOT_DISPLAY_NAME` | `str` | `"群聊小助手"` | `src/config.py`（经 `_sanitize_display_name` 清洗） | `src/routing/steps.py:self_message()`（不知道 wxid 时按名字认出自己的消息）、`WcdbBackend`（`@` 判断、OCR 消息）、`src/bot.py:_log_banner()` |
 | `ADMIN_WXID` | `str` | `""` | `src/config.py` | `src/routing/steps.py:admin_command()`（只认它的私聊）；`ClaudeRelay`（`CLAUDE_RELAY_WXIDS` 空时的使用者；`_for_admin`）；`PrmService` / `EdgeService` 不收它当达人；`src/web/server.py:_prm_reserved()`、`tools/image_probe.py` |
-| `DB_PATH` | `str` | `"data/messages.db"` | `src/config.py` | `src/bot.py:run()` → `initialize_db()`；`Bot._start_new_friends` → `NewFriendStore(config.db_path)`（新好友的表在同一个库里）；`/api/groups` 从 .env 读它；机器人停着时 `/api/prm` 的 `_recent_new_friends` 从环境变量读它 |
+| `DB_PATH` | `str` | `"data/messages.db"` | `src/config.py` | `src/bot.py:run()` → `initialize_db()`；`Bot._start_new_friends` → `NewFriendStore(config.db_path)`（新好友的表在同一个库里）；`Bot._start_presence` → `PresenceStore(config.db_path)`（电脑微信掉线的表也在这里）；机器人停着时 `/api/wechat-gaps` 只读打开它；`/api/groups` 从 .env 读它；机器人停着时 `/api/prm` 的 `_recent_new_friends` 从环境变量读它 |
 | `POLL_INTERVAL_SEC` | `float` | `1.0`（≥0.1） | `src/config.py` | `src/bot.py:_create_wechat_backend()` → 后端的 `poll_sec` |
 | `DEDUP_WINDOW_SEC` | `int` | `60`（≥10） | `src/config.py` | 只做校验，`src/main.py` 的配置摘要打印它；当前代码未直接使用 |
 | `MESSAGE_BURST_ENABLED` / `MESSAGE_BURST_WINDOW_SEC` / `MESSAGE_BURST_MAX_MESSAGES` / `MESSAGE_BURST_MAX_CHARS` | `bool` / `float` / `int` / `int` | `True` / `2.2`（0.2–8）/ `5`（1–10）/ `200`（20–1000） | `src/config.py` | `WcdbBackend.__init__` → `MessageBurstBuffer`：同一个人连着发的短文字合成一条（一个中转任务、达人的一轮话）；控制台主配置、引导第 3 步写 `MESSAGE_BURST_ENABLED` |
@@ -196,6 +197,9 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `SESSION_REFRESH_SEC` / `OCR_SENDER` | `float` / `str` | `60.0` / `"OCR群友"` | `src/wechat/wcdb_backend.py` | 新私聊会话多久查一次（`_refresh_private_chats_if_due`）/ OCR 读到的消息的发言人（认不出是谁） |
 | `CATCH_UP_WAIT_SEC` / `_PRIVATE_NAMES_LOCK` | `float` / `threading.Lock` | `600.0` / — | `src/wechat/wcdb_backend.py` | `catch_up_chat` 要的聊天这么久还读不到就放弃（记 warning）/ `data/private_chat_names.json` 由轮询循环和新好友扫描两边写，写的时候拿这把锁 |
 | `RECALL_WINDOW_SEC` | `int` | `300` | `src/wechat/wcdb_backend.py` | 过滤器要的私聊里这么久以内写的行每次轮询都再看一眼，被微信原地改写成撤回的报出来（`_recall_in_place`）；微信只许 2 分钟内撤回，其余是本机时钟和慢轮询的余量 |
+| `GAP_WATCH_SEC` / `GAP_MARGIN_SEC` | `int` | `3600` / `60` | `src/wechat/wcdb_backend.py` | 电脑微信掉线（`note_wechat_offline`）到回来以后这么久，登记 / 名单达人的私聊里同步进来的旧行往回读、按补交交出去；掉线开始前这么多秒写的也算 |
+| `CHECK_SEC` / `OFFLINE_CONFIRM` / `LAST_ONLINE_WRITE_SEC` / `RESTART_SLACK_SEC` / `KEEP_SEEN_DAYS` / `WECHAT_PROCESSES` | `int` / `tuple` | `30` / `2` / `60` / `2` / `30` / `("weixin.exe", "wechat.exe")` | `src/wechat/presence.py` | 多久看一次电脑微信 / 找不到主窗口连续几次才算掉线 / 在线时多久写一次「最后一次确认在线」/ 进程启动时间晚了超过这么多秒算重启过 / 看过的掉线记录留几天 / 微信的进程名 |
+| `GAPS_KEEP_DAYS` / `GAPS_MAX` / `_GAPS_LOCK` | `int` / `int` / `threading.Lock` | `30` / `200` / — | `src/wechat/edge_backend.py` | Mac 端：看过的 `wechat_gap` 记录留几天、`edge_gaps.json` 最多几条；收事件的线程和控制台两边写文件时拿这把锁 |
 | `SCAN_SEC` / `FIRST_SCAN_SEC` / `READ_MESSAGES` / `MAX_CHATS_PER_SCAN` / `SESSIONS_MAX_AGE` | `int` | `60` / `15` / `30` / `100` / `20` | `src/wechat/new_friends.py` | 新好友：多久看一次会话列表 / 启动后第一次看之前等多久 / 有变化的私聊读最新几条 / 一次最多读几个私聊（其余下一次）/ 轮询循环刚读过（这么多秒内）的会话列表直接用 |
 | `MATCH_SEC` / `SKEW_SEC` / `NEW_DAYS` / `ACCEPT_KEEP_SEC` / `CATCH_UP_FLOOR_SEC` / `VERIFY_MAX_LINES` / `VERIFY_MAX_CHARS` / `VERIFY_WINDOW_SEC` | `int` | `300` / `30` / `7` / `86400` / `300` / `5` / `500` / `7 天` | `src/wechat/new_friends.py` | 机器人点的「通过」在「你已添加了」之前这么多秒内、之后这么多秒内（两边的钟）算 `auto_accept` / 控制台里「新好友」显示几天（之后打码的验证消息也清掉）/ 机器人的通过记录留多久 / `PRM_CATCHUP_HOURS=0` 时登记新好友只补最近 5 分钟 / 验证消息最多几条、几个字、最多比提示早多久（更早的是以前聊过的） |
 | `AUTO_ACCEPT` / `MANUAL` / `REQUESTED` / `UNKNOWN` / `HOWS` / `HOW_LABELS` | `str` / `tuple` / `dict` | `auto_accept` / `manual` / `requested` / `unknown`；中文名「机器人自动通过的」「手动通过的」「对方通过了我们的申请」「说不清是怎么加的」 | `src/wechat/new_friends.py` | 新好友是怎么加的（`friend_added` 的 `how`，控制台的 `how_label`）；`protocol.FRIEND_HOWS` 是同一组值 |
@@ -277,6 +281,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `Bot._start_prm(config, router, backend, relay)` | ~386 | 静态方法；`PRM_COPILOT=on` 且中转在运行时建 `PrmService`（见 §2.32） | `config, router, backend, relay` | `PrmService \| None` |
 | `Bot._start_edge(config, router, backend, relay)` | ~426 | 静态方法；`PRM_EDGE=on` 且中转在运行时建 `EdgeService`（见 §2.33） | `config, router, backend, relay` | `EdgeService \| None` |
 | `Bot._start_new_friends(config, backend, prm, edge)` | ~351 | 静态方法；新好友扫描（§2.37）：`PRM_EDGE` 或 `PRM_COPILOT` 开着、后端能在轮询之外读数据库（有 `with_client`，即 Windows `wcdb`）才建 `NewFriendService(backend, NewFriendStore(DB_PATH), on_found=[edge.friend_added]（边缘）, keep_verify=副驾驶开着, catchup_hours=PRM_CATCHUP_HOURS)`；副驾驶时 `set_catch_up_sink(prm.take_new_friend)`、`prm.on_registered = service.registered`；`register_new_friends` 给控制台，`start()`；建不起来只记 warning。`Bot.run` 把它的 `accepts.note` 作为 `on_accepted` 交给 `_start_friend_management`，退出时 `stop()` 并 `register_new_friends(None)` | `config, backend, prm, edge` | `NewFriendService \| None` |
+| `Bot._start_presence(config, backend, edge)` | ~380 | 静态方法；后端有 `wechat_presence`（Windows `wcdb`）时建 `WechatPresence(PresenceStore(config.db_path), backend.wechat_presence, on_offline=…, on_back=…)`（§2.38），`register_presence`、`start()`：开始掉线 → `backend.note_wechat_offline(gap["from"])`；结束 → `edge.wechat_gap(gap)`（`PRM_EDGE`）和 `backend.catch_up_after_gap(gap["from"])`；建不起来只记 warning、返回 None。`Bot.run` 结束时 `stop()`、`register_presence(None)` | `config, backend, edge` | `WechatPresence \| None` |
 | `Bot._log_banner()` | ~460 | 启动横幅：微信后端、`Business gateway: relay=…, prm_copilot=…, prm_edge=…; no chat model, groups are never answered`、名字、群、私聊开关、数据库 | 无 | `None` |
 | `Bot._create_wechat_backend(store=None)` | ~481 | 按 `WECHAT_BACKEND` 建 `WcdbBackend` / `MacUIBackend` / `MacHybridBackend`（`WECHAT_GROUPS` 按逗号拆开）；别的值抛 `ValueError` | `store: MessageStore` | `AbstractWeChatBackend` 子类实例 |
 
@@ -372,12 +377,16 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `_namesake(talker, name)` | 另一个叫这个名字的聊天（返回它的 id，没有是空串）：在读的（`_chat_names`）、最近一次会话列表里的（`_session_names`）、控制台私聊名单里的（`_listed_private_names`）都算——机器人不读的好友，微信的搜索一样搜得到 | `talker: str, name: str` | `str` |
 | `_window_target(talker, name="")` | 窗口操作（发送、回复、截图）用哪个名字去微信的搜索里找这个聊天，以及为什么不行：窗口只能按名字搜、回车选第一条结果，微信 4 上又核对不了打开的是谁，所以名字不知道（`UNKNOWN_NAME`，日志「Cannot resolve chat_id」）或者有同名的聊天（`NAMESAKE`，日志 WARNING「Not using the WeChat window for …」）时返回 `SendRefused`，调用的地方什么都不打。`name`：聊天不认识时用的名字（消息的 `group_name`） | `talker: str, name: str` | `(str, SendRefused \| None)` |
 | `_poll_cycle(callback)` | 单次轮询周期：`_refresh_private_chats_if_due()` → `_admit_catch_up_chats()` → 每个在读的聊天（`_chat_names` 的快照，按 chat id：同名的各读各的）`_poll_group` → `_flush_due_bursts` | `callback: MessageCallback` | `None` |
-| `_poll_group(group_name, talker, callback)` | 轮询单个群聊消息；这个聊天有 `catch_up_chat` 的请求时先 `_catch_up_new_friend`（读回、全部记成已见、交给请求的 sink），再照常读；跳过自己的消息（`_is_own_line`）：知道账号 `myWxid` 时只按 wxid 判断，并给放行的消息打 `_not_self_by_id`（显示名和这个号一样的群友不会被当成自己）；不知道 wxid 时才按显示名判断。见过没见过按这个聊天自己的集合（`_known_set`）。登记达人的私聊（`_tracked_chat`）：`PRM_CATCHUP_HOURS` 大于 0 时，启动以后才找到的（第一次读，`_known` 里还没有它）先 `_prime_chat(first_read=True)`；`_prime_chat` 留下的（机器人没处理过的）先由 `_hand_on_missed` 按顺序交出去，再看新消息；OCR 刚结束那一轮（`_ocr_priming`）也照常处理（OCR 从不读私聊）；最后把看到的最新一条的时间写进读到的位置（`_note_read`）。过滤器要的私聊（登记达人 / 名单里的，`_wants_private`，读到新行时问一次）：新读到的普通行（不是系统行）写进 `_recallable`；已经见过、在 `_recallable` 里、现在变成系统行的（微信原地改写的撤回）交给 `_recall_in_place` / `_hand_on_recall` | `group_name, talker, callback` | `None` |
+| `_poll_group(group_name, talker, callback)` | 轮询单个群聊消息；这个聊天有 `catch_up_chat` 的请求时先 `_catch_up_new_friend`（读回、全部记成已见、交给请求的 sink），再照常读；跳过自己的消息（`_is_own_line`）：知道账号 `myWxid` 时只按 wxid 判断，并给放行的消息打 `_not_self_by_id`（显示名和这个号一样的群友不会被当成自己）；不知道 wxid 时才按显示名判断。见过没见过按这个聊天自己的集合（`_known_set`）。登记达人的私聊（`_tracked_chat`）：`PRM_CATCHUP_HOURS` 大于 0 时，启动以后才找到的（第一次读，`_known` 里还没有它）先 `_prime_chat(first_read=True)`；`_prime_chat` 留下的（机器人没处理过的）先由 `_hand_on_missed` 按顺序交出去，再看新消息；OCR 刚结束那一轮（`_ocr_priming`）也照常处理（OCR 从不读私聊）；最后把看到的最新一条的时间写进读到的位置（`_note_read`）。过滤器要的私聊（登记达人 / 名单里的，`_wants_private`，读到新行时问一次）：新读到的普通行（不是系统行）写进 `_recallable`；已经见过、在 `_recallable` 里、现在变成系统行的（微信原地改写的撤回）交给 `_recall_in_place` / `_hand_on_recall`。电脑微信掉线以后（`_gap_watch`，要补交开着、不是第一次读）：回来以后还没往回读过、或者这一轮读到了同步进来的旧行（`_gap_rows_unseen`），先 `_gap_catch_up`，再交 `_catchup` 里的 | `group_name, talker, callback` | `None` |
 | `_known_set(talker)` | 这个聊天见过的消息 id（`DedupSet(CHAT_KNOWN_SIZE)`，第一次读时新建）：每个聊天一套，忙的群挤不掉安静聊天的历史 | `talker: str` | `DedupSet` |
 | `_recallable_rows(talker, now)` / `_note_recallable(talker, standardized, now)` | 撤回只能在 2 分钟内做：过滤器要的私聊里最近 `RECALL_WINDOW_SEC`（300 秒）内写的普通行（不是 `edge.text.is_notice` 的系统行）记在 `_recallable[talker]`（编号 → 时间；`_poll_group` 新读到的、`_prime_chat` 启动时读到的、`_catch_up_new_friend` 读回的都记）；每次轮询先把过了时间的去掉。不多读数据库：轮询本来每秒就读、标准化每个聊天最新的 50 条，这里只是对见过的行多查一次字典 | `talker: str, now: float` / `talker, standardized: dict, now: float` | `dict[str, int]` / `None` |
 | `_recall_in_place(talker, standardized, now)` / `_hand_on_recall(recall, callback, my_wxid)` | 微信 4.1 撤回时把原来那一行原地改掉（同一个 `local_id`、同一个时间，所以编号不变；类型 10000，`<sysmsg type="revokemsg"><revokemsg><content>"小美" 撤回了一条消息</content>`，2026-10-28 真机），轮询以前当成读过的跳过。`_recall_in_place`：见过、在 `_recallable` 里、现在是系统行的，拿出来（只一次）当一条新的系统行：编号 `md5("recall|聊天|原编号")`（路由的 `persist`、边缘的事件都当新的收），`recalled_id` = 原来那条的编号，`timestamp` = 现在（发现撤回的时间），`_legacy_ids` 清空；别的返回 None。`_hand_on_recall`：连发合并还压着被撤回的那一行时（`MessageBurstBuffer.flush_holding`）先把它交出去，再交撤回；这个号的（运营撤回，「你撤回了一条消息」）交给 `_tell_own_message`，她的走路由（`_dispatch_message`）。副驾驶：PRM `handle` / `on_own_message` → `_system_line`（达人撤回：草稿改成人审、合作单提醒；运营撤回只记）；边缘：`chat_notice`（带 `recalled_message_id`）。消息库里原来那条不改（见功能 L） | `talker, standardized: dict, now: float` / `recall: dict, callback, my_wxid: str` | `dict \| None` / `None` |
+| `wechat_presence()` | 电脑微信现在登录着没有（`presence.probe(self.wechat_window_found)`：微信进程、主窗口）；不是 Windows 时 `online` 为 None（不看，永远不记掉线） | — | `dict` |
+| `note_wechat_offline(since)` / `catch_up_after_gap(since)` / `_gap_watch(now)` | 电脑微信掉线（`WechatPresence` 的 `on_offline` / `on_back`，§2.38）：记下从哪天起（`_gap_since`，两段重叠取早的）；回来时再加「盯到」`_gap_until` = 现在 + `GAP_WATCH_SEC`、`_gap_back_at` = 现在（这之前没往回读过的登记 / 名单私聊在下一轮都往回读一次，启动前就回来的也算）；`_gap_watch`：在盯着就返回起点，过了期限把这些都清掉返回 None。都在 `_catch_up_lock` 下 | `since: float` | `None` / `float \| None` |
+| `_gap_rows_unseen(talker, messages, known, since, now)` / `_row_time(msg)` / `_row_id(msg, talker)` | 这一轮读到的 50 条里有没有「这次运行没见过、掉线开始（减 `GAP_MARGIN_SEC`）以后写的、已经超过 `MAX_AGE_SEC`」的行（重新登录时同步进来的：新编号、旧时间）：只按 `local_id` 和时间算编号（`_row_id` 和 `_message_ids` 一样，不标准化），往回读过的（`_gap_looked`）不算 | — | `bool` / `int` / `str` |
+| `_gap_catch_up(group_name, talker, since)` / `_gap_plan(talker, items, since)` | 为掉线往回读一个私聊（`CATCHUP_READ` 条）：`_prime_chat(gap_since=since)`，`_gap_plan` 挑出来的进 `_catchup[talker]`（同一轮 `_hand_on_missed` 按时间顺序交出去；边缘带 `_catchup` → 事件带 `written_at`），其余记成已见；读过的行记进 `_gap_looked`（标准化不出来的行不会每轮都触发）。`_gap_plan`：掉线开始（减 `GAP_MARGIN_SEC`）以后写的、`_known_set` 里没有的（轮询见过的都交过了，单条或并在连发里）、没压在连发里、消息库没存过（副驾驶）；不用重启补交的底线：掉线以前的都是微信在线时读的，见过的编号被挤出集合以后也不能再交一遍 | `group_name, talker, since` / `talker, items, since` | `None` / `set[str]` |
 | `_catchup_hours()` / `_tracked_chat(talker)` / `_is_own_line(standardized, my_wxid)` | `PRM_CATCHUP_HOURS`（没配或不是数字算 0）/ 是不是要记读到哪儿的登记达人私聊：有消息库（开了 `PRM_EDGE` 时改成接了边缘的 `set_catchup_floor`）、不是群、过滤器要它；结果记在 `_tracked`，会话刷新时清空重问 / 是不是这个号自己发的（同 `_poll_group` 的判断） | — / `talker: str` / `standardized: dict, my_wxid: str` | `int` / `bool` / `bool` |
-| `_prime_known_ids()` / `_prime_chat(group_name, talker, messages, *, catch_up, first_read=False)` | 启动和 `_reinitialize` 时把每个聊天现在看得到的消息记成已见（历史）；`PRM_CATCHUP_HOURS` 大于 0 时登记达人的私聊往回读 `CATCHUP_READ` 条，`_catchup_plan` 挑出来的不记已见，按时间顺序留在 `_catchup[talker]` 给这个聊天的下一轮；日志写一共交出几条、最早的时间；`_prime_chat` 返回 `(记成已见的, 留下的)`；过滤器要的私聊，最近的普通行记进 `_recallable`（启动后马上撤回的也认得出） | — / `group_name, talker, messages: list, catch_up: bool, first_read: bool` | `None` / `(int, int)` |
+| `_prime_known_ids()` / `_prime_chat(group_name, talker, messages, *, catch_up, first_read=False, gap_since=None)` | 启动和 `_reinitialize` 时把每个聊天现在看得到的消息记成已见（历史）；`PRM_CATCHUP_HOURS` 大于 0 时登记达人的私聊往回读 `CATCHUP_READ` 条，`_catchup_plan` 挑出来的不记已见，按时间顺序留在 `_catchup[talker]` 给这个聊天的下一轮；日志写一共交出几条、最早的时间；`_prime_chat` 返回 `(记成已见的, 留下的)`；过滤器要的私聊，最近的普通行记进 `_recallable`（启动后马上撤回的也认得出）；`gap_since`（`_gap_catch_up`）时按 `_gap_plan` 挑；留下的并进已经在等的 `_catchup[talker]`、按时间排（不覆盖重启补交留下的） | — / `group_name, talker, messages: list, catch_up: bool, first_read: bool` | `None` / `(int, int)` |
 | `_stored_of(talker, items)` | 这些标准化消息里消息库已经存了的（只看这个聊天）：用现在的编号存的，或用 `_legacy_ids` 里旧版本给同一行的编号存的（更新后第一次启动也认得出旧版本处理过的）；返回现在的编号 | `talker: str, items: list[dict]` | `set[str]` |
 | `_catchup_plan(talker, items, *, first_read=False)` | 登记达人私聊里机器人没处理过的消息 id：达人的话——比这个聊天存过的最新一条（`MessageStore.last_stored_at`）新、自己也没存过（`_stored_of`：现在的编号或旧版本的编号）；这个号自己的话（运营在手机上回的，从来不存）——比那条和读到的位置（`read_mark`）都新。没存过的时候读到的位置就是达人那边的线；没有读到的位置，自己的话都算历史（从没把它当达人私聊读过，或是上一个版本）；都没有就全是历史（和以前一样）。启动以后才找到、从没当达人私聊读过的聊天（刚登记），不管很久以前存过什么，只有最近 `MAX_AGE_SEC` 秒的交出去（老规矩）；合并缓冲里还压着的（重新打开数据库时）留给缓冲；读消息库出错就全当历史。微信边缘（`set_catchup_floor` 接了）走 `_edge_catchup_plan`：不看消息库，达人和这个号的话一样，比边缘说的「这个私聊最后一次有动静」（`EdgeService.catchup_floor`）晚写的都交出去；边缘什么都没留（`None`）就全是历史，第一次读的照旧只给最近 `MAX_AGE_SEC` 秒；`_hand_on_missed` 给交出去的打 `_catchup`（边缘照样转、带 `written_at`）；`_note_read` 在边缘模式下不写读到的位置 | `talker: str, items: list[dict], first_read: bool` | `set[str]` |
 | `set_catchup_floor(floor)` | `Bot._start_edge` 接：`floor(chat)` = `EdgeService.catchup_floor`；接了以后 `PRM_CATCHUP_HOURS>0` 时名单私聊也做重启补交（`_tracked_chat`、`_edge_catchup_plan`） | `None` |
@@ -559,6 +568,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `register_relay(relay)` / `_relay_snapshot(limit=30)` / `_relay_job_for_console(job)` / `_lan_addresses()` | `Bot._start_claude_relay` 登记运行中的中转（停止时登记 `None`）；`GET /api/relay` 返回 `running`、`listening`、`address`、`mac_online`、`mac_last_seen_sec`、`counts`、`jobs`（每项：编号、状态、文字前 200 字、项目、时间、用时、结果前 400 字、错误，不含 wxid；文字、结果、错误里的手机号和身份证号先 `pii.mask_numbers` 打码再截断，2026-10-28 审查 win F5）、`mac_address` / `mac_link`（Mac worker 从哪个地址、哪种网络连来）、`addresses`（`_lan_addresses()` = `src/relay/link.this_pc_addresses()`：本机 IPv4 `[{ip, kind}]`，局域网的在前，再是 Tailscale 的，Mac 的 `relay_url` 用）和 `lan_addresses`（同一串地址，只有 IP）；`POST /api/relay/cancel {id}` 取消（排队中的直接取消，进行中的让 Mac 下次心跳时停） | — | `dict` |
 | `register_prm(service)` / `_prm_state()` / `_prm_state_core()` / `_prm_candidates(state)` / `_prm_reserved()` / `_prm_parties(data)` / `_prm_packet(data)` / `_prm_db_path()` / `_prm_env_on(key)` | `Bot._start_prm` 登记运行中的 `PrmService`（停止时 `None`）。`GET /api/prm`：`prm.service.snapshot()`——`parties`（每位达人和最新的合作单：阶段、模式、槽位、AI 建议阶段、`attention`、最近消息时间）、`pending`（待审批/发送中的草稿，旧的在前）、`recent`（最近处理过的）、`counts`、`stages`/`kinds` 的中文名；每条草稿的 `legend` 只给打码号码（138****5678），号码本身不出现；再加 `enabled`/`relay_on`/`private_on`（读环境变量）、`mac_online`、`worker_kinds`、`can_send`/`can_send_files` 和 `candidates`（先是 `NEW_DAYS` 天内的新好友，新的在前：`new: true`、`verify_text`（打码的验证消息）、`how`、`how_label`、`added_at`、`remark`；再是 `data/private_chat_names.json` 里的私聊，按名字排；都去掉已登记的和 `ADMIN_WXID`/`CLAUDE_RELAY_WXIDS`，最多 300 个）、`catchup_hours`（`PRM_CATCHUP_HOURS`）；机器人停止时读 `PRM_DB`（不存在不创建）。`POST /api/prm/parties`：`{action: "add", wxid, name, note}` / `{action: "enable"\|"disable", id}`，运行中交给 `PrmService.register / set_active`（`add` 的回答多一个 `catch_up`：登记的是新好友，她加好友以来的消息正在合成一份草稿），停止时做同样的检查后直接写库；`POST /api/prm/packets {id, action: "send"\|"edit"\|"drop"\|"wrong"\|"execute"\|"repreview"\|"ack", text}` 只在运行中（`PrmService.decide`；带平台动作的草稿用 `execute`，`text` 是改过的回复）；`GET /api/prm` 另有 `platform_alerts`（没核验成功、还没标「我已处理」的平台动作）和 `platform_actions`（动作名 → 中文名；机器人停止时也有，`platform_alerts` 为空）。两个 POST 都在 `_POST_ONLY_PATHS` 里。`_relay_job_for_console` 多给 `kind`（`admin` / `prm`） | — | `dict` |
 | `register_new_friends(service)` / `_recent_new_friends()` | `Bot._start_new_friends` 登记运行中的新好友扫描（停止时 `None`）/ 最近的新好友：运行中 `service.recent()`，停止时 `new_friends.recent_new_friends(DB_PATH)`（只读，没有库或表就是空列表）；出错只记 warning、返回空 | `service` / — | `None` / `list[dict]` |
+| `register_presence(service)` / `_wechat_gaps_state()` / `_wechat_gap_seen(data)` / `_mac_side()` / `_edge_gaps()` / `_db_path()` | `Bot._start_presence` 登记运行中的 `WechatPresence`（停止时 `None`）；`GET /api/wechat-gaps`：`{ok, source, open, gaps}`，每段 `presence.gap_for_console`（`id`、`from`、`to`、`reason`、`title`、`text`）——Mac 端（`_mac_side`：登记了 edge 后端或 `WECHAT_BACKEND=edge`）`source: "mac"`、`gaps` 是 Windows 报来的（运行中 `_edge_client.gaps`，停着读 DB_PATH 目录下的 `edge_gaps.json`）、`open` 为空；Windows `source: "windows"`，运行中 `presence.console()`（有还没恢复的 `open`），停着 `presence.stored_state(DB_PATH)`（只读，不建库不建表）；`POST /api/wechat-gaps {id, action: "seen"}`：标「看过了」（还在掉线的那段、没有的、点过的返回 `{ok:false}`）。GET 不改任何东西，所以不在 `_POST_ONLY_PATHS` 里 | `service` / — / `data: dict` / — | `None` / `dict` / `dict` / `bool` |
 | `_prm_deal(data)` / `_prm_reveal(data)` / `_prm_stopped_store()` / `_prm_int_env(key, default)` | `POST /api/prm/deals {action: "stage"\|"adopt"\|"mode"\|"shipment"\|"shipment_status", deal_id, stage / mode / carrier, waybill / status}`：运行中交给 `PrmService.deal_action`（成功后叫醒发送线程），停止时 `service.apply_deal_action` 直接写 `PRM_DB`（没有库就「还没有合作单」；`PRM_TAKEOVER_MIN` 读环境变量）；`shipment` 返回 `{ok, packet}`（发货通知草稿编号）。`POST /api/prm/reveal {party_id}`：完整号码 `{ok, numbers: [{token, value, cleared}]}`，运行中 / 停止时都写一条 `reveal` 操作记录（只记占位符）。`_prm_stopped_store` 打开已有的库并补齐 `send_gates` 默认值。`GET /api/prm` 另有 `gates`（每类消息的门槛和进度）、`modes`、`shipment_states`、`takeover_min`、`holding_min`、`retention_days`；每位达人多给 `has_numbers` 和合作单的 `mode`（过期的接管算副驾驶）/`mode_label`/`mode_until`、`legend`（槽位里的占位符，打码）、`shipment`、`shipment_status_label`、`delivered_at`、`purged_at`、`purge_due_at`、`events`（最近 12 条操作记录）；草稿多给 `route`、`wrong`、`waybill`、`system`（系统按模板生成）。两个新路径都在 `_POST_ONLY_PATHS` 里 | `dict` | `dict` |
 | `_UIHandler._handle_advanced()` | `GET/POST /api/advanced`：GET 返回 `advanced_config.describe()` 的分组（密钥打码）和被 `.env.local` 覆盖的键；POST `{values:{KEY: 值}}` 先逐项 `check_value`、再合并后跑 `_validate_config`（`validate_updates`），全部合法才用 `_write_env_updates` 写共享 .env 并同步 `os.environ`；打码的密钥保留原值 | 无 | `None` |
 | `_UIHandler._send_decisions()` | `GET /api/decisions`：读 `DECISION_TRACE_PATH`（默认 `data/decision_trace.jsonl`）里最新的决策，`decision_explain.recent` 翻译成白话；参数 `limit`、`outcome`、`chat_id`、`message_id`；追踪文件坏了返回 `{ok: false}`，不断开连接 | 无 | `None` |
@@ -591,7 +601,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | 文件 | 组件 | 描述 |
 |---|---|---|
 | `App.jsx` | `App`、`Console`、`Splash` | 问 `/api/onboarding/status` 决定进引导还是控制台；控制台 = 顶栏 + 左栏 + 页面 + 保存条 |
-| `Shell.jsx` | `NAV`、`TopBar`、`RunPill`、`Rail`、`Dock`、`SaveBar` | 深色顶栏（运行状态胶囊带启动/停止、主题切换）；左栏导航 + 左下角助手小窗（立绘待定，剪影占位，台词来自运行状态）；配置有改动时的底部保存条（提交完整配置，可「保存并重启」）；「达人名单」带子页（达人名单、待处理），角标（待处理数）每 30 秒问一次 `/api/influencer/counts`；`useEdge` / `EdgeAlert`：Mac 端（`WECHAT_BACKEND=edge`）每页顶上的 Windows 提醒条，左栏不显示「微信连接」，左下角说 Windows 连没连上 |
+| `Shell.jsx` | `NAV`、`TopBar`、`RunPill`、`Rail`、`Dock`、`SaveBar` | 深色顶栏（运行状态胶囊带启动/停止、主题切换）；左栏导航 + 左下角助手小窗（立绘待定，剪影占位，台词来自运行状态）；配置有改动时的底部保存条（提交完整配置，可「保存并重启」）；「达人名单」带子页（达人名单、待处理），角标（待处理数）每 30 秒问一次 `/api/influencer/counts`；`useEdge` / `EdgeAlert`：Mac 端（`WECHAT_BACKEND=edge`）每页顶上的 Windows 提醒条，左栏不显示「微信连接」，左下角说 Windows 连没连上；`useWechatGaps` / `WechatGapAlert`（`App.jsx` 放在 `EdgeAlert` 下面）：每 15 秒问 `/api/wechat-gaps`，每段电脑微信不在线的一条提醒（`title` + `text`，黄色），点「看过了」`POST` 以后重新问；还没恢复的那段（`open`，只有 Windows 运行时有）红色、没有按钮 |
 | `ui.jsx` / `cfg.jsx` / `art.jsx` | 通用组件 / 绑定配置草稿的表单控件 / Logo 与剪影 | 斜切卡片、分段、开关、词条、密钥框（已设置时只显示尾号）、对话框、确认框 |
 | `Dashboard.jsx` | `Dashboard`、`KeyCard`、`ChecksCard`、`RecentJobs` | 运行状态：票根式主卡（标签：微信后端、中转开关；数字：已处理消息、运行时长、Mac worker）、密钥缺失时重新获取、检查与环境诊断、最近的中转任务（`/api/relay`） |
 | `RelayPanel.jsx` | `RelayPanel`、`StateCard`、`MacCard`、`JobsCard` | 中转代理：机器人/中转端口/Mac worker（在线时写经哪种网络、Mac 的地址；经公网时提醒明文）/任务数；Mac 端怎么接（`relay_url` 用 `/api/relay` 的 `addresses`，每个地址标上「同一个局域网时用」/「Tailscale，在不在同一个网络都能用，推荐」/「公网地址：不要直接用」，没有 Tailscale 地址时提示 `cross-network.md`；防火墙提示只放行局域网和 `100.64.0.0/10`）；任务表（每 5 秒刷新，展开看结果，排队中和进行中的可确认后取消，`POST /api/relay/cancel`）；中转设置 = `AdvancedFields only={['relay']}` |
@@ -895,7 +905,7 @@ Windows 只替 Mac 的业务服务收发微信（见功能 M）。`protocol.py`�
 
 | 名称 | 描述 | 返回值 |
 |---|---|---|
-| `protocol.PROTOCOL` / 事件类型 `CREATOR_MESSAGE`、`OPERATOR_MESSAGE`、`CHAT_NOTICE`、`CREATOR_MESSAGE_RECALLED`（预留）、`SEND_RESULT`、`SEND_SEEN`、`SEND_UNSEEN`、`EDGE_STATUS`、`FRIEND_ADDED`（`friend_added`，2026-10-27 加的，版本还是 1；`FRIEND_HOWS` = `auto_accept`、`manual`、`requested`、`unknown`） / 发送状态 `QUEUED`、`SENDING`、`SENT`、`FAILED`、`EXPIRED`、`INDETERMINATE` / 上限和默认值 | 两边共用的名字：文字 1500 字、一条最多 9 个附件、上传 100 MB、`ttl_sec` 60–86400（默认 1800）、长轮询最多 30 秒、名单 5000 人、`LATE_SEEN_SEC`（86400）、`HISTORY_SEC`（300）、`FAILING_AFTER`（3） | — |
+| `protocol.PROTOCOL` / 事件类型 `CREATOR_MESSAGE`、`OPERATOR_MESSAGE`、`CHAT_NOTICE`、`CREATOR_MESSAGE_RECALLED`（预留）、`SEND_RESULT`、`SEND_SEEN`、`SEND_UNSEEN`、`EDGE_STATUS`、`FRIEND_ADDED`、`WECHAT_GAP`（2026-10-28；`reason` 是 `GAP_REASONS` = `GAP_OFFLINE_WHILE_RUNNING`「offline_while_running」/ `GAP_STOPPED_WITH_BOT`「stopped_with_bot」）（`friend_added`，2026-10-27 加的，版本还是 1；`FRIEND_HOWS` = `auto_accept`、`manual`、`requested`、`unknown`） / 发送状态 `QUEUED`、`SENDING`、`SENT`、`FAILED`、`EXPIRED`、`INDETERMINATE` / 上限和默认值 | 两边共用的名字：文字 1500 字、一条最多 9 个附件、上传 100 MB、`ttl_sec` 60–86400（默认 1800）、长轮询最多 30 秒、名单 5000 人、`LATE_SEEN_SEC`（86400）、`HISTORY_SEC`（300）、`FAILING_AFTER`（3） | — |
 | `protocol.EdgeError(status, code, detail, close=False, **extra)` / `check_send(body)` / `send_digest(send)` / `check_parties(body)` / `parties_digest(wxids)` / `decide_parties(current_version, current_digest, version, wxids)` / `party_rejection(wxid, reserved)` / `clamp(value, low, high, default)` | 拒绝一个请求（`{"error", "detail", ...}`，`close` 时连接不复用）；发送请求的检查和规范化；同一个 `send_id` 算不算同一条（`chat_id` + 文字 + 附件）；名单的检查（版本从 1 开始、去重）；名单版本规则：更大 → `apply`，相等且同一份 → `same`，否则 `conflict`；不收的 wxid（群聊、格式不对、管理员和 cc 用户） | — / `dict` / `str` / `(int, list)` / `str` / `str` / `str` / `float` |
 | `http.handle(handler, method, service, token)` / `http.serve(service, token, host="127.0.0.1", port=0)` | `/edge/*` 的 HTTP，一份代码：中转的服务器（`_RelayHandler._edge`）和假服务端（`serve`）都走它。口令对了先告诉服务从哪个地址来（有 `note_client` 的才告诉：真的 Windows 边缘有，假服务端没有）；口令不对 401（关连接）、路径不对 404、方法不对 405；`EdgeError` 变成对应的状态码和 JSON，别的异常 500（不带堆栈）；附件按流读写 | — / `ThreadingHTTPServer` |
 | `client.EdgeClient(base_url, token, timeout=15)` / `health()` / `events(after, wait, limit)` / `ack(upto)` / `download(event_id, n, dest, size=None)` / `put_parties(version, wxids)` / `private_chats()` / `upload(path, name=None)` / `upload_bytes(data, name)` / `send(send_id, chat_id, text, uploads, ttl_sec)` / `send_status(send_id)` / `_answer(response, what)` / `client.EdgeError` / `client.EdgeBadAnswer` | Mac 端的客户端：每个接口一个方法；不走系统代理；拒绝时抛 `EdgeError`（`status`、`code`、`detail`、`body`；错误页不是 JSON 时 `body` 为空），网络错误留给调用方；应答被截断、不是 JSON 对象（代理的页面）抛 `EdgeBadAnswer`（`OSError` 的子类，调用方当网络问题退避）；下载先写 `.part`，字节数和 `Content-Length` 或 `size`（事件 `files` 里的）对不上就删掉 `.part`、抛 `EdgeBadAnswer`，对上了再改名；`upload` 和 `upload_bytes`（包成 `BytesIO`）都边读边发，超时按块算；`send_status` 没有时返回 None | `dict` / `list` / … |
@@ -909,6 +919,7 @@ Windows 只替 Mac 的业务服务收发微信（见功能 M）。`protocol.py`�
 | `EdgeService._probe_status()` / `_check_status()` / `_set_status(detail, **changes)` | `wechat`（主窗口在不在；`None` = 正在发送，下次再问）、`db`（数据库能不能读）、`send`；三项有变化才报 `edge_status` | — |
 | `EdgeService.note_client(address)` | 每个口令正确的 `/edge/*` 请求都告诉它 Mac 从哪个地址来；`PeerLog("EDGE: the Mac")` 第一次和换地址时各记一行日志（局域网 / Tailscale 一眼看出） | — |
 | `EdgeService.friend_added(event)` | 新好友扫描的 `on_found`（§2.37）：`{wxid, name, remark, verify_text, how}` 存成 `friend_added` 事件（不带 `chat_id`：她不一定在名单里；`how` 不认识的记成 `unknown`）；日志只写 wxid 前 8 位、`how` 和事件号，验证消息只在事件里（确认后 `EDGE_KEEP_DAYS` 随事件删） | `dict \| None` |
+| `EdgeService.wechat_gap(gap)` | `Bot._start_presence` 的 `on_back`：电脑微信不在线的一段结束了，报 `wechat_gap {from, to, reason}`（整秒；`to` 不早于 `from`；不认识的 `reason` 当 `offline_while_running`）；时间不对的不报、记 warning | `dict \| None` |
 | `EdgeService.health()` / `events(after, wait, limit)` / `ack(upto)` / `event_file(event_id, n)` / `put_parties(version, wxids)` / `private_chats()` / `upload(name, read, length)` / `send(request)` / `send_status(send_id)` / `cleanup(now=None)` | `health()` 多一个 `db_id`（`EdgeStore.db_id()`）；`http.py` 调的协议实现：长轮询等新事件（最多 30 秒，每秒醒一次）；名单生效时去掉的人还在排队的发送报 `failed`（「不在名单里」）并通知后端刷新私聊；`private_chats` 来自 `data/private_chat_names.json`，去掉名单里的、管理员、cc 用户和群；上传写到 `data/edge_files/uploads/<编号>/`，边收边算 sha256，收不全删掉；发送：同一 `send_id` 内容相同回原状态、不同 409，不在名单 403，上传不存在或已被别的发送用了 400；清理按 `EDGE_KEEP_DAYS`、未确认事件 30 天、没用的上传 24 小时 | … |
 | `steps.edge(ctx)` / `Bot._start_edge(config, router, backend, relay)` | 路由步骤：`router._edge` 为 `None` 时跳过；接了就 `trace.redact(...)`、`trace.reason("prm_edge")`、`Stop(None)`；`handle` 出错时名单里的私聊也照样结束；`_start_edge`：`PRM_EDGE=on` 且中转在运行时建服务、装过滤器、补交底线（`set_catchup_floor`）和自己消息的钩子、`relay.attach_edge`、`start()`、`router._edge`，`run()` 结束时 `stop()` 并摘掉 | `Stop \| None` / `EdgeService \| None` |
 
@@ -965,6 +976,7 @@ Windows 只替 Mac 的业务服务收发微信（见功能 M）。`protocol.py`�
 | `server.register_edge_client(backend)` / `_edge_state()` / `Bot._register_edge_client(backend)` | Bot.run 登记运行中的 edge 后端（停止时传 None）；`GET /api/edge` 返回 `{mode: "edge"/"", running, …status()}`，`mode` 看环境变量 `WECHAT_BACKEND`。前端 `Shell.jsx` 的 `useEdge` / `EdgeAlert`：每页顶上的提醒条，Mac 端左栏不显示「微信连接」，左下角说 Windows 连没连上 | `None` / `dict` |
 | `EdgeState(path)` / `save()` | `cursor`（处理到的事件编号）、`parties_version`、`parties_digest`、`db_id`（读的是 Windows 哪一份 `edge.db`，空 = 还不知道）；先写临时文件再替换 | — |
 | `EdgeSends(path)` / `add(send_id, chat_id, text, is_file, now)` / `remove(send_id)` / `get(send_id)` / `text_digest(text)` | 发出去的请求里重启以后还要认的：`send_id → {chat_id, sha256, is_file, at}`，不写原文（原文里有换回来的号码），超过 `SENT_KEEP_SEC` 的丢掉；先写临时文件再替换 | — / — / — / `dict \| None` / `str` |
+| `EdgeGaps(path)` / `add(event, now)` / `unseen()` / `mark_seen(gap_id, now)` / `_pruned(items, now)` / `EdgeBackend.gaps` | Windows 报来的电脑微信掉线（`wechat_gap`）：`_handle_event` 先 `gaps.add` 存进状态文件旁边的 `edge_gaps.json`（`[{id, from, to, reason, received_at, seen_at}]`，`id` 是 Mac 自己编的；同一段 from / to / reason 都一样的只记一次：Windows 的事件库重建、从头再读也不重复；写不进去抛 OSError，这条不确认、退避后再来），再交给钩子；`unseen()` 新的在前，控制台（`/api/wechat-gaps`）一直显示到 `mark_seen`；看过的 `GAPS_KEEP_DAYS` 天后删，最多 `GAPS_MAX` 条。都在 `_GAPS_LOCK` 下读改写（收事件的线程和控制台），先写临时文件再换；只用标准库，Python 3.9 能跑 | `None` / `dict \| None` / `list` / `bool` |
 | `event_to_message(event, files)` | 事件 → 路由的标准消息：`sender_id`/`sender_name` 用 `chat_id`（事件里没有昵称），`is_group=False`；有 `quote` 时带 `quoted_content`、`is_reply_to_bot`（引用的是我们的话）；另带 `edge_event_id`、`edge_files`（已下载到 Mac 的附件，`relay/attachments.resolve` 直接用，不在本机微信目录里找）；文件消息带 `file_name`、`file_size`；`timestamp` 用 `written_at`（Windows 重启后补交的，写的时间），没有才用 `at` | `dict` |
 | `Bot._wire_edge_backend(backend, influencer_store)` | 只对 `EdgeBackend`：名单 = 达人模块里启用的达人；回复存进达人模块「待处理」（种类 `draft`，`INBOX_DRAFT`）。没有达人模块时名单为空 | `None` |
 | `Bot._wire_edge_prm(backend, prm, influencer_store=None)` | 返回 `PartyListSync` 或 `None`。只对 `EdgeBackend` 且 `PRM_COPILOT=on`：有达人模块时名单合一（`src/influencer/prm_bridge.PartyListSync`，说明在 handoff.md）：`sync` 当名单来源（每轮同步，返回 PRM 登记着的达人；不查聚水潭，达人资料由 `PartyListSync.start()` 的后台线程每 60 秒查一位，Bot.run 接线后 start、关机时 stop），`prm.on_parties_changed` 先 `prm_changed` 再 `refresh_private_chats_soon`，接线时先同步一次；没有达人模块时名单 = PRM 登记的达人；发送失败交给 `PrmService.on_send_failed`（找到对应的「已发出、未确认」草稿，改成 `failed`、写上原因）；`chat_notice` 事件（撤回、拍一拍这些私聊系统提示）经 `add_event_hook` 交给 `PrmService.on_chat_notice`（2026-10-28；时间用 `written_at`（Windows 重启后补交的，写的时间），没有才用 `at`）。发送、`set_own_message_hook` 在 `_start_prm` 里已按普通后端接好。寄样单不经过达人模块（2026-10-27 起走 PRM 的 `jst.sample_order`） | `PartyListSync \| None` |
@@ -987,6 +999,18 @@ Windows `wcdb` 后端旁边的一个线程：每分钟看有变化的私聊，�
 | `NewFriendService(backend, store, *, accepts=None, on_found=(), keep_verify=False, catchup_hours=12, clock, interval=SCAN_SEC, first_wait=FIRST_SCAN_SEC, pause=0.02)` / `start()` / `stop()` / `scan_once()` | 线程 `new-friends`：启动 `first_wait` 秒后第一次看，之后每 `interval` 秒；`scan_once` 从不抛错（第一次失败记 warning，接着失败不再记，成功后恢复）。`backend` 要有 `with_client`、`own_wxid`（可选 `recent_sessions`、`note_private_name`、`catch_up_chat`）；`on_found`：每位新好友的事件字段（边缘的 `friend_added`），哪个出错下一轮再给（同一份，不重新判断）；`keep_verify`（副驾驶）：验证消息 `mask_pii` 打码后存库给控制台 | — |
 | `NewFriendService._scan()` / `_sessions()` / `_report(added, session, now)` / `_display_name(wxid)` / `_tell(event)` | 一次：先补给上次没给出去的；会话列表（轮询循环 `SESSIONS_MAX_AGE` 秒内读过的直接用，否则 `with_client(get_sessions)`；数据库没开就结束）；只留和人的私聊；**第一次（库里没有起点）**：起点 = 现在会话里最新的时间（没有就本机现在），记下，什么都不报；之后：时间比 `mark` 新、这次运行没读过这个时间的会话（没有时间的：整行变了的），旧的在前，最多 `MAX_CHATS_PER_SCAN` 个，每个 `with_client(get_messages(chat, READ_MESSAGES))`（之间停 `pause` 秒让轮询拿锁）；报过的、库里有的跳过；`find_added` 的时间不晚于起点的不报（老好友）。`_report`：名字 = X 或 `get_display_names`，备注只在会话行里有 `remark` 时给，`how`（`requested` / `greeting` 是 `unknown` / 其余 `AcceptLog.judge`），写库（边缘模式不存验证消息），`backend.note_private_name`，日志只写 wxid 前 8 位、`how`、有没有验证消息。`mark` 推到读过的最新时间（没读完的话往回一点点，同一时间的下一轮再读）；每小时 `forget_verify(NEW_DAYS 天前)` | `list[dict]` |
 | `NewFriendService.recent(days=NEW_DAYS)` / `registered(wxid)` / `set_catch_up_sink(sink)` | 控制台的新好友列表 / `PrmService.on_registered`：登记的是 `NEW_DAYS` 天内找到的新好友时，`backend.catch_up_chat(wxid, 名字, since, sink)`，`since` = max(最早的验证消息或加上的时间, 现在 − max(`PRM_CATCHUP_HOURS`, 5 分钟))，`sink` 调 `PrmService.take_new_friend(wxid, 消息, verify_until=加上的时间)`；返回请没请 / 设 `take_new_friend` | `list[dict]` / `bool` / `None` |
+
+### 2.38 `src/wechat/presence.py`（电脑微信掉线：哪段时间不在线，见功能 P）
+
+Windows `wcdb` 后端旁边的一个线程（`wechat-presence`）：每 `CHECK_SEC` 秒看一次电脑微信登录着没有，不在线的每一段记进机器人的库，控制台提醒到运营点「看过了」。
+
+| 名称 | 描述 | 返回值 |
+|---|---|---|
+| `wechat_start_times()` / `probe(window_found, start_times=wechat_start_times)` | 正在跑的微信进程（`WECHAT_PROCESSES`）各自的启动时间（一个都没有是空列表，没装 psutil 是 None）/ `{online, process, started_at, detail}`：没有微信进程 → `online=False`、`process=False`；`window_found()` 是 None（发消息占着窗口）→ `online=None`（这次不算）；False（出错也算）→ 找不到主窗口；True → 在线。`started_at` 是最早那个进程的 | `list \| None` / `dict` |
+| `PresenceStore(path="data/messages.db")` / `last_online()` / `set_last_online(at)` / `open_gap()` / `add_gap(started_at, reason, detail, found_at)` / `close_gap(gap_id, ended_at)` / `gap(gap_id)` / `unseen(limit=20)` / `mark_seen(gap_id, at)` / `prune(before)` / `close()` | 机器人的库（DB_PATH）里自己的连接：`wechat_gaps`（`id, started_at, ended_at, reason, detail, found_at, seen_at`；`ended_at` 为空 = 还没恢复）、`wechat_presence`（`last_online`）。`close_gap` 不早于开始、只结束开着的；`unseen` 是结束了、没看过的，新的在前；`mark_seen` 只对结束了的；`prune` 删 `before` 以前看过的。每段对外是 `{id, from, to, reason, detail, found_at, seen_at}` | — |
+| `WechatPresence(store, probe, *, clock, interval=CHECK_SEC, on_offline=None, on_back=None)` / `start(run_thread=True)` / `stop()` / `check()` | `start`：先 `_startup()`（上次留下的一段接着开；库里的 `last_online` 以后微信进程才启动、或微信根本没开 → `stopped_with_bot` 一段，在线就马上结束到进程启动的时间；进程早就在、找不到主窗口 → 等下一次确认；出错只记日志、照样往下看），再起线程；`check`：在线 → 结束开着的一段（到现在）、进程重启过就补记 [上次在线, 现在]、写 `last_online`（`LAST_ONLINE_WRITE_SEC` 一次）；不在线 → 进程不在或第 `OFFLINE_CONFIRM` 次找不到主窗口时开一段 `offline_while_running`（从上次确认在线起）；None 不算；每天清一次看过 `KEEP_SEEN_DAYS` 天的。开了 → `on_offline(gap)`，结束 → `on_back(gap)`（锁外调，出错只记日志）；每次变化记 warning（带这次看到了什么） | — |
+| `WechatPresence.console()` / `mark_seen(gap_id)` / `console_state(store, *, running)` / `stored_state(path)` | 控制台：`{open, gaps}`（`open` 只在运行中给）/ 标看过了 / 同 `console` / 机器人停着时只读打开库（`mode=ro`），没有库或表就是空的，什么都不建 | `dict` / `bool` / `dict` / `dict` |
+| `gap_notice(gap)` / `gap_for_console(gap)` / `WHY` / `CHECK_PHONE` / `SYNC_HINT` / `OPEN_HINT` | 给运营看的字：结束了的「电脑微信 10-28 14:05 到 14:32 不在线（约 27 分钟）」+ 哪种情况（`WHY`）+ 去手机上看（`CHECK_PHONE`）+ 重新登录时勾选「同步最近的聊天记录」（`SYNC_HINT`）；还没恢复的「电脑微信从 … 起不在线，还没恢复」+ `OPEN_HINT`；跨天写日期，时长写分钟 / 小时 / 天 / `{id, from, to, reason, title, text}`（两边的控制台都用） | `dict` / `dict` |
 
 ---
 
@@ -1056,6 +1080,10 @@ Bot.run()
   │     ├── NewFriendStore(config.db_path)          [src/wechat/new_friends.py]
   │     ├── on_found = [edge.friend_added]（边缘）；副驾驶：set_catch_up_sink(prm.take_new_friend)、prm.on_registered
   │     └── register_new_friends(service)、start()（线程 new-friends）
+  ├── _start_presence(config, backend, edge) → WechatPresence（后端有 wechat_presence，Windows wcdb）[src/wechat/presence.py]
+  │     ├── PresenceStore(config.db_path)：wechat_gaps、wechat_presence（最后一次确认在线）
+  │     ├── on_offline → backend.note_wechat_offline；on_back → edge.wechat_gap（边缘）+ backend.catch_up_after_gap
+  │     └── register_presence(service)、start()（先看一次，再起线程 wechat-presence，每 CHECK_SEC 秒 check）
   ├── _start_friend_management(config, backend, admin_handler, on_accepted=new_friends.accepts.note)（后端有 window_controller 才建）
   │     ├── FriendManager()              [src/wechat/friend_manager.py]（WindowsOcrEngine、backend.window_lock、on_accepted）
   │     └── AutoFriendService()          [src/wechat/friend_manager.py]
@@ -1419,6 +1447,8 @@ WcdbBackend._handle_message(...)（线程池）/ Mac 后端 poll_once
 | `POST` | `/api/relay/cancel` | 取消一个任务 `{id}` | 无 |
 | `GET` | `/api/prm` | 达人副驾驶的状态（见 §2.18 `register_prm`） | 无 |
 | `POST` | `/api/prm/parties` / `/api/prm/packets` / `/api/prm/deals` / `/api/prm/reveal` | 登记 / 停用达人、处理草稿、合作单操作、看完整号码（见 §2.18） | 无 |
+| `GET` | `/api/wechat-gaps` | 电脑微信哪几段时间不在线（运营还没点「看过了」的；Windows 运行中还有正在掉线的那段），每页顶上的提醒用（见 §2.18 `register_presence`） | 无 |
+| `POST` | `/api/wechat-gaps` | 标「看过了」：`{id, action: "seen"}` | 无 |
 | `GET` | `/api/logs` | 最近 500 行日志 | 无 |
 | `GET` | `/api/browse?path=` | 浏览文件系统目录 | 无 |
 | `POST` | `/api/wechat-data-dir/detect` | 检测自定义微信数据目录（`wxid_*`、`session.db`） | 无 |
@@ -2054,6 +2084,70 @@ CREATE TABLE friend_accepts (id INTEGER PRIMARY KEY AUTOINCREMENT, at REAL NOT N
 
 还没做的：Windows 真机验证（电脑通过、手机通过、对方通过我们的申请、重启不重报、群和公众号不报、`auto_accept` 的时间对不对得上）；机器人停着时在控制台登记新好友不会补起草（下次启动只按老规矩交最近 5 分钟的）；英文界面的微信认不出。
 
+### 功能P: 电脑微信掉线提醒（wechat_gap）
+
+真机确认（2026-10-28）：电脑微信完全退出期间达人发到手机的消息，重新登录后默认不会同步到电脑，机器人读不到；扫码登录时在手机上勾选「同步最近的聊天记录」才会同步过来，同步进来的行是新编号、旧时间。以前边缘模式只在找不到主窗口时报 `edge_status`（`wechat=offline`），Mac 顶上亮条，恢复后就灭；副驾驶模式的 Windows 控制台什么都没有；同步进来的旧行，边缘按 5 分钟的规则当历史丢掉。
+
+#### 涉及文件
+
+| 文件 | 做什么 |
+|---|---|
+| `src/wechat/presence.py` | `probe`（微信进程、主窗口）、`PresenceStore`（机器人的库里 `wechat_gaps`、`wechat_presence`）、`WechatPresence`（启动时看一次，之后每 `CHECK_SEC` 秒）、`gap_notice` / `gap_for_console`（给运营看的字）、`stored_state`（机器人停着时只读） |
+| `src/wechat/wcdb_backend.py` | `wechat_presence`、`note_wechat_offline`、`catch_up_after_gap`、`_gap_*`：掉线以后往回读、补交同步进来的行 |
+| `src/edge/service.py`、`protocol.py`、`fake.py` | `wechat_gap` 事件（`edge-protocol.md` 4.1.2） |
+| `src/wechat/edge_backend.py` | Mac 端 `EdgeGaps`：存 `edge_gaps.json`，到「看过了」为止 |
+| `src/web/server.py` | `GET` / `POST /api/wechat-gaps`（两边的控制台共用） |
+| `src/bot.py` | `_start_presence` |
+| `ui/src/components/Shell.jsx`、`ui/src/App.jsx` | `WechatGapAlert`：每页顶上的提醒和「看过了」 |
+
+#### 怎么认掉线（靠的信号）
+
+```
+probe()（每 CHECK_SEC=30 秒，只在 Windows）
+  ├── 微信进程（psutil，Weixin.exe / WeChat.exe）：一个都没有 → 掉线，马上算
+  │     └── 最早那个进程的启动时间比上次看到的晚（RESTART_SLACK_SEC 以上）→ 两次看之间重启过（升级），在线也补记一段
+  ├── 主窗口（wechat_window_found → find_hwnd(wake=False)）：找不到 → 连续 OFFLINE_CONFIRM=2 次才算
+  │     └── 发消息占着窗口 → 这次不看（online=None，不算）
+  └── 数据库读不读得了：不算（读的是文件，微信没登录也读得了；读不了另报 edge_status db=unreadable）
+被挤下线 / 手机上退出电脑微信：只剩登录窗口时，登录窗口够 200×200、有「微信」标题或 Qt 类名就会被当成主窗口 → 认不出；等真机确认（日志在每次变化时写下看到了什么）
+```
+
+#### 一段掉线怎么记
+
+```
+WechatPresence.start() → _startup()
+  ├── 上次留下没结束的一段 → 接着开着（还不在线 → on_offline；在线 → 结束：微信是那以后启动的就到启动时间，否则到现在）
+  ├── 库里有 last_online，微信进程是那以后才启动的（重启电脑、升级）或者微信根本没开 → stopped_with_bot，从 last_online 起
+  │     ├── 现在在线 → 马上结束，到微信进程启动的时间 → on_back
+  │     └── 还不在线 → 开着 → on_offline（登录了才结束）
+  ├── 进程早就在、找不到主窗口 → 再看一次还是没有才算，从 last_online 起、stopped_with_bot
+  └── 只是机器人停了、微信一直登录着 → 不算（重启补交会处理）
+check()（线程 wechat-presence）
+  ├── 在线：有开着的一段 → 结束（到现在）→ on_back；进程重启过 → 补记 [上次在线, 现在] 并结束；每 LAST_ONLINE_WRITE_SEC 写一次 last_online
+  └── 不在线：进程不在，或者第 2 次找不到主窗口 → 开一段 offline_while_running，从上次确认在线起 → on_offline
+on_offline(gap) → WcdbBackend.note_wechat_offline(gap.from)
+on_back(gap)    → EdgeService.wechat_gap(gap)（PRM_EDGE）+ WcdbBackend.catch_up_after_gap(gap.from)
+```
+
+#### 回来以后再补交一次
+
+```
+WcdbBackend._poll_group（登记 / 名单达人的私聊，PRM_CATCHUP_HOURS > 0，不是第一次读，_gap_watch 在盯着）
+  ├── 回来以后还没往回读过（_gap_read_at < _gap_back_at），或者 _gap_rows_unseen（读到了同步进来的旧行）
+  │     └── _gap_catch_up：读 CATCHUP_READ=200 条 → _prime_chat(gap_since) → _gap_plan → _catchup[talker]
+  └── _hand_on_missed：按时间顺序交出去（副驾驶：路由 → PRM 当晚到的起草、一律先审；边缘：带 written_at 的事件）
+盯多久：掉线时一直盯；回来以后 GAP_WATCH_SEC（1 小时）；掉线开始前 GAP_MARGIN_SEC（60 秒）写的也算
+副驾驶本来就会把同步进来的旧行交给 PRM（按晚到的起草），缺的是一轮只读 50 条；边缘以前直接当历史丢掉（EdgeService._recent）
+```
+
+#### 运营看到什么
+
+每页顶上（`WechatGapAlert`）：「电脑微信 10-28 14:05 到 14:32 不在线（约 27 分钟）」，下面写哪种情况（运行中掉线 / 和机器人一起停了）、「这段时间达人发来的消息，机器人可能没收到：请在手机微信上把达人的私聊看一遍，没回的直接在手机上回」「重新登录电脑微信时，请在手机的确认页上勾选「同步最近的聊天记录」…机器人会自动补交成草稿」，右边「看过了」。Windows 运行中还没恢复的那段：「电脑微信从 10-28 14:05 起不在线，还没恢复」，红色、没有按钮。Mac（`PRM_EDGE`）的控制台显示 Windows 报来的那几段（同样的字，`presence.gap_notice`）；正在掉线时照旧是 `EdgeAlert` 的「Windows 上的微信掉线了」。
+
+测试：`tests/test_wechat_gaps.py`（`probe` 的几种情况；运行中：找不到主窗口两次、进程不在马上、发消息占着不算、两次看之间重启过、`last_online` 定期写；启动时：和机器人一起停了（到微信启动）、只是机器人停了不算、微信没开开着到回来、进程起来了还没登录、找不到主窗口要再看一次、上次留下的一段接着开；第一次看出错不停；控制台和「看过了」、清理；给运营的字；真的 WCDB 后端：边缘同步进来的行带 `written_at` 交给 Mac、掉线还没结束时同步进来的也交、一次 60 条往回读 200 条按顺序、没掉线时旧行照旧当历史、`PRM_CATCHUP_HOURS=0` 不交、副驾驶 60 条进同一份先审的草稿；`Bot._start_presence` 的接线）；`tests/test_edge_protocol.py`（`wechat_gap` 两边同一套用例、Mac 自带 Python 3.9 存得下）；`tests/test_edge_backend.py`（Mac 存到看过了为止、同一段只记一次、写不进去不确认、不认识的事件类型照样确认）；`tests/test_edge_console.py`（Mac 控制台的接口和浏览器）；`tests/test_web_api.py`（`/api/wechat-gaps` 只读、POST 才标看过）；`tests/test_functional.py::TestWechatGapAlert`（Windows 控制台）。
+
+还没做的：真机验证——退出微信、手机上退出电脑微信、被另一台电脑挤下线、升级微信、重启电脑、只停机器人，各看一次日志里「WeChat presence」那几行和控制台的提醒；勾选同步重新登录后，同步进来的消息补交成草稿。
+
 ---
 
 ## 5. 配置文件和环境变量
@@ -2233,7 +2327,7 @@ macOS 的 `build-macos.spec` 见功能 F（datas：`ui/dist`、`.env.example`、
 
 | 文件路径 | 生成者 | 内容 |
 |---|---|---|
-| `data/messages.db` | `src/db/schema.py` | SQLite 消息数据库：`messages`、`message_media`、`user_last_message`（群消息和读取的私聊都在这里；名单里边缘达人的私聊不进来）、`chat_read_marks`（每个登记达人的私聊读到了哪儿，补读用，没有文字） |
+| `data/messages.db` | `src/db/schema.py` | SQLite 消息数据库：`messages`、`message_media`、`user_last_message`（群消息和读取的私聊都在这里；名单里边缘达人的私聊不进来）、`chat_read_marks`（每个登记达人的私聊读到了哪儿，补读用，没有文字）；`wechat_gaps`（电脑微信不在线的每一段：开始、结束、`reason`、`detail`、发现的时间、`seen_at`）和 `wechat_presence`（`last_online`：最后一次确认电脑微信在线），`src/wechat/presence.py` 建 |
 | `data/bot.log` | `src/utils/logging_config.py` | 运行日志 |
 | `data/bot_status.json` | `src/bot.py:HealthMonitor` | 状态 JSON (外部监控) |
 | `data/group_names.json` | `src/wechat/wcdb_backend.py` | chat_id → {name, member_count} |
@@ -2245,6 +2339,7 @@ macOS 的 `build-macos.spec` 见功能 F（datas：`ui/dist`、`.env.example`、
 | Mac：系统临时目录的 `webot-jst-*.json` | `src/prm/platforms.py:_jst_run` | 聚水潭寄样单的单子（`sample-create --spec=`，执行时含收件电话；0600，命令跑完就删） |
 | `data/claude_relay_files/outfiles/job-<编号>/` | `src/relay/service.py:ClaudeRelay.outfile` | prm 任务从 Mac 传回的素材文件（草稿发送时用） |
 | `data/edge.db` | `src/edge/store.py` | 微信边缘：给 Mac 的事件、Mac 的发送请求、上传、名单 |
+| Mac：`data/edge_gaps.json`（和 `edge_client.json`、`edge_sends.json` 一起） | `src/wechat/edge_backend.py:EdgeGaps` | Windows 报来的电脑微信掉线记录（`wechat_gap`）和运营点没点「看过了」；看过的 30 天后删 |
 | `data/edge_files/in/`、`data/edge_files/uploads/` | `src/edge/service.py` | 达人发来的图片（解开后的副本，确认后 7 天删）、Mac 上传要发的文件（24 小时没用或发送结束 7 天后删） |
 | `data/claude_relay.db` | `src/relay/store.py` | 中转的任务、会话、附件、追加的话、批准请求、传回的文件（寄样单执行任务的 `meta` 带收货信息和换回的号码，签收满 `PRM_RETENTION_DAYS` 天后剪短、打码） |
 | `data/claude_relay_files/` | `src/relay/service.py` | 太长的中转结果（`中转结果-<编号>.txt`，30 天前的删掉）、`attachments/`（复制给 Mac 的图片）、`outfiles/`（prm 任务传回的素材，见上面） |

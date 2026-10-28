@@ -52,6 +52,11 @@ CATCH_UP_WAIT_SEC = 600.0
 # on every poll (_recall_in_place).  WeChat allows a recall for 2 minutes; the rest is margin for
 # this PC's clock and a slow poll.
 RECALL_WINDOW_SEC = 300
+# PC WeChat was offline (src/wechat/presence.py): rows it brings in after logging in again (synced
+# from the phone: new ids, old times) are read back and handed on as catch-up while it is offline
+# and this long after it is back; a row written up to GAP_MARGIN_SEC before the gap began counts too.
+GAP_WATCH_SEC = 3600
+GAP_MARGIN_SEC = 60
 # data/private_chat_names.json is written by the poll loop and the new-friend scan.
 _PRIVATE_NAMES_LOCK = threading.Lock()
 # OCR cannot see who wrote a line of a group chat.
@@ -89,6 +94,22 @@ def _ocr_from_config(config, window):
 
 def _md5(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+def _row_time(msg: dict) -> int:
+    """A WCDB row's ``create_time`` (0 when it has none)."""
+    try:
+        return int(msg.get("create_time", msg.get("createTime", 0)) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _row_id(msg: dict, talker: str) -> str:
+    """The message id of a WCDB row with a ``local_id`` without standardizing it (``_message_ids``),
+    "" for a row without one."""
+    local_id = msg.get("local_id", msg.get("localId"))
+    local_id = "" if local_id is None else str(local_id).strip()
+    return "" if local_id in ("", "0") else _md5(f"{talker}|{local_id}|{_row_time(msg)}")
 
 
 class SendRefused:
@@ -460,6 +481,15 @@ class WcdbBackend(AbstractWeChatBackend):
         self._catch_up_requests: dict[str, tuple] = {}
         self._catch_up_lock = threading.Lock()
         self._sessions_read: Optional[tuple] = None
+        # PC WeChat offline (note_wechat_offline / catch_up_after_gap, src/wechat/presence.py): since when,
+        # until when rows it brings in late are looked for (None: still offline), when it was seen back
+        # (every creator's chat read back before that is read back again), when each chat was read back
+        # for a gap.  Under _catch_up_lock.  And per chat, the rows a gap read-back looked at already.
+        self._gap_since: Optional[float] = None
+        self._gap_until: Optional[float] = None
+        self._gap_back_at = 0.0
+        self._gap_read_at: dict[str, float] = {}
+        self._gap_looked: dict[str, set] = {}
         # Thread safety: WCDB DLL (ctypes) may not be thread-safe internally.
         # All _client calls are serialized through this lock.
         self._client_lock = threading.Lock()
@@ -1313,6 +1343,96 @@ class WcdbBackend(AbstractWeChatBackend):
         finally:
             self._window_lock.release()
 
+    # ── PC WeChat offline (src/wechat/presence.py) ──────────────────────
+
+    def wechat_presence(self) -> dict:
+        """Is PC WeChat logged in now (``presence.probe``: its process and its main window)?  Only on
+        Windows; elsewhere there is no answer (``online`` None) and no gap is ever seen."""
+        from . import presence
+        if os.name != "nt":
+            return {"online": None, "process": None, "started_at": None, "detail": "不是 Windows，不看电脑微信"}
+        return presence.probe(self.wechat_window_found)
+
+    def note_wechat_offline(self, since: float) -> None:
+        """PC WeChat has not been online since ``since``: from now on, rows written since then that show
+        up late in a creator's chat (WeChat brings them in when it is logged in again with 「同步最近的聊天
+        记录」 ticked) are read back and handed on as catch-up (``_poll_group``), not left as history."""
+        with self._catch_up_lock:
+            self._gap_since = float(since) if self._gap_since is None else min(self._gap_since, float(since))
+            self._gap_until = None
+        logger.warning("PC WeChat is not online since %s: rows it brings in later are handed on",
+                       time.strftime("%m-%d %H:%M", time.localtime(since)))
+
+    def catch_up_after_gap(self, since: float) -> None:
+        """PC WeChat is online again after not being online since ``since``: like after a restart, every
+        registered (PRM_COPILOT) or listed (PRM_EDGE) creator's chat is read back (CATCHUP_READ) at its
+        next poll and the rows written since then that this run has not seen are handed on in order;
+        for GAP_WATCH_SEC more, rows it brings in later are read back the same way.  Needs
+        PRM_CATCHUP_HOURS above 0, like the restart catch-up."""
+        with self._catch_up_lock:
+            self._gap_since = float(since) if self._gap_since is None else min(self._gap_since, float(since))
+            self._gap_until = time.time() + GAP_WATCH_SEC
+            self._gap_back_at = time.time()
+        logger.info("PC WeChat is online again (offline since %s): the creators' chats are read back",
+                    time.strftime("%m-%d %H:%M", time.localtime(since)))
+
+    def _gap_watch(self, now: float) -> Optional[float]:
+        """Since when PC WeChat was offline, while rows it brings in late are looked for; else None."""
+        with self._catch_up_lock:
+            if self._gap_since is None:
+                return None
+            if self._gap_until is not None and now > self._gap_until:
+                self._gap_since = self._gap_until = None
+                self._gap_back_at = 0.0
+                self._gap_read_at = {}
+                self._gap_looked = {}
+                return None
+            return self._gap_since
+
+    def _gap_rows_unseen(self, talker: str, messages: list, known: DedupSet, since: float, now: float) -> bool:
+        """Do these rows (WCDB's, newest first) hold one this run has not seen, written since the gap
+        began and read late (more than MAX_AGE_SEC old): WeChat brought it in after logging in again?
+        Looked at by the row's ``local_id`` and time only (no standardizing)."""
+        line = since - GAP_MARGIN_SEC
+        looked = self._gap_looked.get(talker) or set()
+        for msg in messages or []:
+            ts = _row_time(msg)
+            if ts < line or now - ts <= MAX_AGE_SEC:
+                continue
+            row_id = _row_id(msg, talker)
+            if row_id and row_id not in known and row_id not in looked:
+                return True
+        return False
+
+    def _gap_catch_up(self, group_name: str, talker: str, since: float) -> None:
+        """Read a creator's chat back (CATCHUP_READ) for a gap: the rows ``_gap_plan`` picks go to
+        ``_catchup[talker]`` (handed on right after, oldest first), the rest is marked seen."""
+        with self._catch_up_lock:
+            self._gap_read_at[talker] = time.time()
+        with self._client_lock:
+            messages = self._client.get_messages(talker=talker, limit=CATCHUP_READ)
+        self._prime_chat(group_name, talker, messages, catch_up=True, gap_since=since)
+        # a row that is no message (standardized to nothing) never asks for another read-back
+        self._gap_looked.setdefault(talker, set()).update(i for i in (_row_id(m, talker) for m in messages or []) if i)
+
+    def _gap_plan(self, talker: str, items: list[dict], since: float) -> set[str]:
+        """The ids of rows (``items``: standardized, what WCDB shows now) to hand on for a gap: written
+        since it began (GAP_MARGIN_SEC before), not seen by this run (``_known_set``: what the poll saw
+        it handed on already, alone or in a burst), not held in a burst, not stored (PRM_COPILOT: an
+        earlier run's).  Not the restart catch-up's floors: whatever came before the gap was read while
+        WeChat was online, and an id that dropped out of the seen set must not go a second time."""
+        known = self._known_set(talker)
+        held = self._burst.held_ids()
+        try:
+            stored = self._stored_of(talker, items) if self._catchup_floor is None and self._store is not None else set()
+        except Exception:
+            logger.exception("Gap catch-up: the message store could not be read for %s…", talker[:8])
+            stored = set()
+        line = since - GAP_MARGIN_SEC
+        return {s["message_id"] for s in items
+                if s["message_id"] not in known and s["message_id"] not in held and s["message_id"] not in stored
+                and int(s.get("timestamp") or 0) >= line}
+
     def _tell_own_message(self, standardized: dict) -> None:
         hook = getattr(self, "_own_message_hook", None)
         if hook is None or standardized.get("is_group", True):
@@ -1480,10 +1600,12 @@ class WcdbBackend(AbstractWeChatBackend):
                     "reading are handed on" if queued else "")
 
     def _prime_chat(self, group_name: str, talker: str, messages, *, catch_up: bool,
-                    first_read: bool = False) -> tuple[int, int]:
+                    first_read: bool = False, gap_since: Optional[float] = None) -> tuple[int, int]:
         """Mark one chat's messages (``messages``: WCDB's list, newest first) as seen.  With
         ``catch_up`` (a registered creator's chat, PRM_CATCHUP_HOURS on) the ones
-        ``_catchup_plan`` picks are kept, oldest first, for the chat's next poll instead.
+        ``_catchup_plan`` picks are kept, oldest first, for the chat's next poll instead;
+        with ``gap_since`` (PC WeChat was offline since then: ``_gap_catch_up``) the ones
+        ``_gap_plan`` picks.  Kept rows join those kept already, in time order.
         Returns ``(marked, kept)``."""
         is_group = self._chat_is_group.get(talker, talker.endswith("@chatroom"))
         known = self._known_set(talker)
@@ -1492,7 +1614,10 @@ class WcdbBackend(AbstractWeChatBackend):
             standardized = self._standardize(msg, group_name, talker, resolve_voice=False, is_group=is_group)
             if standardized is not None:
                 items.append((msg, standardized))
-        picked = self._catchup_plan(talker, [s for _, s in items], first_read=first_read) if catch_up else set()
+        if gap_since is not None:
+            picked = self._gap_plan(talker, [s for _, s in items], gap_since)
+        else:
+            picked = self._catchup_plan(talker, [s for _, s in items], first_read=first_read) if catch_up else set()
         kept, marked = [], 0
         now = time.time()
         watched = not is_group and self._wants_private(talker)      # a recall in place is looked for
@@ -1506,9 +1631,15 @@ class WcdbBackend(AbstractWeChatBackend):
                 known.add(msg_id)
                 marked += 1
         if kept:
-            self._catchup[talker] = kept
-            logger.info("Catch-up: %d message(s) in a registered creator's chat (%s…) came in while the bot "
-                        "was not reading (the oldest at %s); handed on in order", len(kept), talker[:8],
+            waiting = self._catchup.get(talker) or []
+            have = {(str(m.get("local_id", m.get("localId", ""))), m.get("create_time", m.get("createTime")))
+                    for m in waiting}
+            more = [m for m in kept if (str(m.get("local_id", m.get("localId", ""))),
+                                        m.get("create_time", m.get("createTime"))) not in have]
+            self._catchup[talker] = sorted(waiting + more, key=_row_time)
+            logger.info("Catch-up: %d message(s) in a registered creator's chat (%s…) came in while %s (the oldest "
+                        "at %s); handed on in order", len(kept), talker[:8],
+                        "PC WeChat was not online" if gap_since is not None else "the bot was not reading",
                         time.strftime("%m-%d %H:%M", time.localtime(min(
                             int(s.get("timestamp") or 0) for _, s in items if s["message_id"] in picked))))
         return marked, len(kept)
@@ -1716,6 +1847,14 @@ class WcdbBackend(AbstractWeChatBackend):
         catching_up = tracked and self._catchup_hours() > 0
         if first_read and catching_up:
             self._prime_chat(group_name, talker, messages, catch_up=True, first_read=True)
+        gap_since = self._gap_watch(time.time()) if catching_up and not first_read else None
+        if gap_since is not None:
+            # PC WeChat was offline: read the chat back once it is online again, and whenever rows written
+            # since then show up late (synced from the phone), so they go oldest first, as catch-up
+            with self._catch_up_lock:
+                due = self._gap_read_at.get(talker, 0.0) < self._gap_back_at
+            if due or self._gap_rows_unseen(talker, messages, known, gap_since, time.time()):
+                self._gap_catch_up(group_name, talker, gap_since)
         missed = self._catchup.pop(talker, None)
         if missed:
             self._hand_on_missed(group_name, talker, missed, callback)
