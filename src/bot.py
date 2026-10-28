@@ -574,6 +574,9 @@ class Bot:
             set_filter(edge.is_party_chat)
         else:
             logger.warning("PRM_EDGE: this WeChat backend cannot read extra private chats")
+        set_floor = getattr(backend, "set_catchup_floor", None)
+        if callable(set_floor):
+            set_floor(edge.catchup_floor)          # PRM_CATCHUP_HOURS: what came in while the bot was stopped
         if callable(set_hook):
             set_hook(edge.on_own_message)
         else:

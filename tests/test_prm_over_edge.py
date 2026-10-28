@@ -265,3 +265,30 @@ def test_a_send_that_failed_after_a_restart_is_matched_by_its_digest(tmp_path):
     finally:
         side.prm.stop()
         side.relay.stop()
+
+
+def test_a_file_windows_could_not_send_marks_the_draft_failed_though_its_text_went(mac, fake):
+    """2026-10-28 审查：素材文件在 Windows 发送失败，草稿原来一直显示「已发出」。现在改成没发出去，写明文字发了。"""
+    import io
+
+    from test_prm import draft as prm_draft
+    fake.creator_says(CREATOR, "我是小美，手机 13812345678，资料发我看看")
+    assert wait_for(lambda: mac.relay.store.list_jobs())
+    mac.clock.now += SETTLE_SEC + 1
+    job = mac.relay.next_job(0, ("prm",))
+    assert mac.relay.outfile(job["id"], "合作说明.pdf", io.BytesIO(b"%PDF brief").read, 10)
+    d = prm_draft(attachments_to_send=["assets/合作说明.pdf"])
+    assert mac.relay.finish(job["id"], {"ok": True, "text": json.dumps(d, ensure_ascii=False), "duration_s": 3})
+    mac.relay.tick()
+    packet = mac.prm.store.packet_for_job(job["id"])
+    assert mac.prm.decide(packet["id"], "send") == {"ok": True, "status": "approved"}, packet
+    assert mac.prm.send_approved() == 1, mac.prm.store.packet(packet["id"])
+    text_send, file_send = fake.sends
+    assert file_send["uploads"] == ["合作说明.pdf"]
+    fake.complete(text_send["send_id"])
+    fake.seen(text_send["send_id"])
+    assert wait_for(lambda: mac.prm.store.packet(packet["id"])["outcome"] == "sent_confirmed")
+    fake.complete(file_send["send_id"], P.FAILED, "文件发送超时")
+    assert wait_for(lambda: mac.prm.store.packet(packet["id"])["status"] == "failed")
+    error = mac.prm.store.packet(packet["id"])["error"]
+    assert "文件发送超时" in error and "文字已经发出去了" in error

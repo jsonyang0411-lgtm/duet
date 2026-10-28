@@ -396,6 +396,9 @@ class WcdbBackend(AbstractWeChatBackend):
         self._catchup: dict[str, list[dict]] = {}
         self._tracked: dict[str, bool] = {}
         self._read_marks: dict[str, int] = {}
+        # The WeChat edge (PRM_EDGE): floor(chat) -> when the edge last handled the chat (or None);
+        # its catch-up goes by that instead of the message store (set_catchup_floor).
+        self._catchup_floor = None
         # catch_up_chat (a new friend registered as a creator, src/wechat/new_friends.py): per chat
         # (name, since, sink, asked at), taken by the chat's next poll; and the session list the
         # poll loop read last (monotonic time, list) for the new-friend scan (recent_sessions).
@@ -1057,6 +1060,13 @@ class WcdbBackend(AbstractWeChatBackend):
         """The next poll looks for newly allowed private chats at once (a creator was registered)."""
         self._last_session_refresh = 0.0
 
+    def set_catchup_floor(self, floor) -> None:
+        """The WeChat edge (PRM_EDGE): ``floor(chat)`` is when it last handled a listed chat
+        (``EdgeService.catchup_floor``; None: nothing kept).  With PRM_CATCHUP_HOURS on, the
+        lines of a listed chat written after it are handed on after a restart (``_catchup``)."""
+        self._catchup_floor = floor
+        self._tracked = {}
+
     def set_own_message_hook(self, hook) -> None:
         """``hook(msg)`` hears this account's own lines in the private chats the filter wants
         (PRM_COPILOT: a registered creator's chat, where an operator may reply by hand)."""
@@ -1311,14 +1321,15 @@ class WcdbBackend(AbstractWeChatBackend):
 
     def _tracked_chat(self, talker: str) -> bool:
         """Is this a registered creator's private chat whose reading is kept track of, for the
-        catch-up after a restart (``chat_read_marks``)?  Needs the message store; not with the
-        WeChat edge (PRM_EDGE: its events have rules of their own, src/edge).  Remembered until
-        the next session refresh (a creator registered or removed is asked again then)."""
+        catch-up after a restart (``chat_read_marks``)?  Needs the message store; with the
+        WeChat edge (PRM_EDGE) the edge's floor instead (``set_catchup_floor``: it stores none
+        of these messages here).  Remembered until the next session refresh (a creator
+        registered or removed is asked again then)."""
         tracked = self._tracked.get(talker)
         if tracked is None:
+            edge = getattr(self._config, "prm_edge", "off") == "on"
             tracked = bool(
-                self._store is not None
-                and getattr(self._config, "prm_edge", "off") != "on"
+                (self._catchup_floor is not None if edge else self._store is not None)
                 and not self._chat_is_group.get(talker, str(talker).endswith("@chatroom"))
                 and self._wants_private(talker)
             )
@@ -1403,7 +1414,13 @@ class WcdbBackend(AbstractWeChatBackend):
         read as a creator's (registered just now) keeps the old rule too: only the last
         MAX_AGE_SEC seconds are handed on, its older lines are history whatever was stored
         of it long ago.  A message a burst still holds (a re-initialisation) is the burst's.
+
+        The WeChat edge (``set_catchup_floor``) stores none of a listed chat's messages here:
+        every line (hers and this account's) written after the edge last handled the chat is
+        handed on; nothing kept of the chat: history (the first read keeps the old rule).
         """
+        if self._catchup_floor is not None:
+            return self._edge_catchup_plan(talker, items, first_read=first_read)
         try:
             stored_at = self._store.last_stored_at(talker)
             mark = self._store.read_mark(talker)
@@ -1433,6 +1450,22 @@ class WcdbBackend(AbstractWeChatBackend):
                 picked.add(msg_id)
         return picked
 
+    def _edge_catchup_plan(self, talker: str, items: list[dict], *, first_read: bool) -> set[str]:
+        """``_catchup_plan`` with the WeChat edge."""
+        try:
+            floor = self._catchup_floor(talker)
+        except Exception:
+            logger.exception("Catch-up: the edge could not tell when %s… was last handled; its messages are "
+                             "history", talker[:8])
+            return set()
+        if floor is None and not first_read:
+            return set()
+        held = self._burst.held_ids()
+        recent = time.time() - MAX_AGE_SEC
+        return {s["message_id"] for s in items if s["message_id"] not in held
+                and (int(s.get("timestamp") or 0) > floor if floor is not None
+                     else int(s.get("timestamp") or 0) >= recent)}
+
     def _stored_of(self, talker: str, items: list[dict]) -> set[str]:
         """The ids of these messages (standardized) that the message store holds for the chat:
         under their id, or under an id a version up to 2026-10-27 made of the row
@@ -1458,6 +1491,8 @@ class WcdbBackend(AbstractWeChatBackend):
             if standardized is None or standardized["message_id"] in known:
                 continue
             known.add(standardized["message_id"])
+            if self._catchup_floor is not None:
+                standardized["_catchup"] = True        # the edge forwards it although it is old
             if self._is_own_line(standardized, my_wxid):
                 if my_wxid:
                     self._tell_own_message(standardized)
@@ -1469,8 +1504,9 @@ class WcdbBackend(AbstractWeChatBackend):
         logger.info("Catch-up: %d message(s) of a registered creator (%s…) handed on", handed, talker[:8])
 
     def _note_read(self, talker: str, newest: int) -> None:
-        """Move the chat's read mark (``chat_read_marks``) to the newest message seen there."""
-        if newest <= self._read_marks.get(talker, -1):
+        """Move the chat's read mark (``chat_read_marks``) to the newest message seen there.
+        Not with the WeChat edge: its catch-up goes by the edge's own record."""
+        if self._catchup_floor is not None or newest <= self._read_marks.get(talker, -1):
             return
         try:
             self._store.set_read_mark(talker, newest)

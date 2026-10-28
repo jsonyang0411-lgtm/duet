@@ -181,8 +181,27 @@ class EdgeService:
         return str(chat_id) in self._parties
 
     def _recent(self, msg: dict, now: float) -> bool:
+        """Not history: written lately, or handed on by the restart catch-up (``_catchup``)."""
+        if msg.get("_catchup"):
+            return True
         sent_at = float(msg.get("timestamp", 0) or 0)
         return not sent_at or now - sent_at <= P.HISTORY_SEC
+
+    def catchup_floor(self, chat_id: str) -> Optional[float]:
+        """The restart catch-up of a listed chat (the backend's ``set_catchup_floor``): its
+        lines written after this came in while the bot was not reading and are handed on
+        (``_catchup``, with ``written_at``); None: nothing of the chat is kept, its lines
+        stay history.  Lines handed on already are not again (one event per message id)."""
+        if str(chat_id) not in self._parties:
+            return None
+        return self._store.last_activity(str(chat_id))
+
+    @staticmethod
+    def _written(msg: dict) -> dict:
+        """A line handed on late carries when it was written (``written_at``): the event's
+        ``at`` is when it was handed on."""
+        sent_at = int(float(msg.get("timestamp", 0) or 0))
+        return {"written_at": sent_at} if msg.get("_catchup") and sent_at else {}
 
     def handle(self, msg: dict) -> bool:
         """The route step's call: True when this is a listed creator's private message (it
@@ -198,10 +217,10 @@ class EdgeService:
             return True
         message_id = str(msg.get("message_id") or "") or None
         if T.is_notice(msg) or is_friend_notice(msg):         # 「我通过了你的朋友验证请求…」 is WeChat's
-            self._emit(P.CHAT_NOTICE, chat_id, message_id, text=T.notice_text(msg))
+            self._emit(P.CHAT_NOTICE, chat_id, message_id, text=T.notice_text(msg), **self._written(msg))
             return True
         files = self._collect_files(msg)
-        fields = {"msg_type": T.msg_type_of(msg), "text": T.message_text(msg)}
+        fields = {"msg_type": T.msg_type_of(msg), "text": T.message_text(msg), **self._written(msg)}
         quote = T.quote_of(msg, self._own_wxid(), chat_id)
         if quote is not None:
             fields["quote"] = quote
@@ -268,7 +287,7 @@ class EdgeService:
             return                                            # history (a chat read for the first time)
         message_id = str(msg.get("message_id") or "") or None
         if T.is_notice(msg) or is_friend_notice(msg):
-            self._emit(P.CHAT_NOTICE, chat_id, message_id, text=T.notice_text(msg))
+            self._emit(P.CHAT_NOTICE, chat_id, message_id, text=T.notice_text(msg), **self._written(msg))
             return
         matched, send_id = self._match_own(chat_id, msg, now)
         if matched:
@@ -276,7 +295,7 @@ class EdgeService:
                 self._seen(send_id, now)
             return
         event = self._emit(P.OPERATOR_MESSAGE, chat_id, message_id, msg_type=T.msg_type_of(msg),
-                           text=T.message_text(msg))
+                           text=T.message_text(msg), **self._written(msg))
         if event is not None:
             logger.info("EDGE: an operator wrote in a listed chat by hand -> event #%d", event["id"])
 

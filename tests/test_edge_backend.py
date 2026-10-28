@@ -224,7 +224,7 @@ def test_a_download_cut_off_is_retried_and_then_given_up_without_going_offline(f
         assert wait_for(lambda: CREATOR in fake._parties)
         calls = []
 
-        def broken(event_id, n, dest):
+        def broken(event_id, n, dest, size=None):
             calls.append(event_id)
             raise ConnectionResetError("网络断了")
 
@@ -283,3 +283,133 @@ def test_a_send_that_fails_after_a_restart_still_reaches_the_failure_hook(fake, 
     chat, text, why, more = failures[0]
     assert (chat, text) == (CREATOR, "") and "微信窗口找不到" in why
     assert more["digest"] == text_digest("地址收到啦 13900001111") and more["sent_at"]
+
+
+# ---- 2026-10-28 边缘模式第二轮审查 ----
+
+def test_a_file_windows_could_not_send_reaches_the_failure_hook(fake, tmp_path):
+    """素材文件在 Windows 发送失败也要报（带 file=True 和请求的时间），草稿才会变红。"""
+    brief = tmp_path / "合作说明.pdf"
+    brief.write_bytes(b"%PDF brief")
+    failures = []
+    with Running(fake, tmp_path) as run:
+        run.backend.set_send_failure_hook(lambda chat, text, why, **more: failures.append((chat, text, why, more)))
+        assert wait_for(lambda: CREATOR in fake._parties)
+        assert run.backend.send_file(CREATOR, str(brief), send_id="pk-file")
+        fake.complete("pk-file", "failed", "文件发送超时")
+        assert wait_for(lambda: failures)
+    chat, text, why, more = failures[0]
+    assert (chat, text) == (CREATOR, "") and "文件发送超时" in why
+    assert more["file"] is True and more["sent_at"]
+
+
+def test_a_send_whose_answer_was_lost_but_windows_took_is_not_a_failure(fake, tmp_path, monkeypatch):
+    """应答在路上丢了，可 Windows 已经收下：当作交给了 Windows（不报失败，运营不会补发出重复的），
+    之后的读回照常认得。"""
+    monkeypatch.setattr("src.wechat.edge_backend.UNSURE_CHECK_SEC", 0)
+    seen = []
+    with Running(fake, tmp_path) as run:
+        run.backend.set_own_message_hook(seen.append)
+        failures = []
+        run.backend.set_send_failure_hook(lambda *a, **k: failures.append(a))
+        assert wait_for(lambda: CREATOR in fake._parties)
+        real = run.backend.client.send
+
+        def answer_lost(*args, **kwargs):
+            real(*args, **kwargs)
+            raise TimeoutError("timed out")
+
+        monkeypatch.setattr(run.backend.client, "send", answer_lost)
+        assert run.backend.send_text(CREATOR, "样品安排上啦", send_id="pk-lost") is True
+        assert wait_for(lambda: "pk-lost" not in run.backend._unsure), "问过 Windows：它收下了"
+        fake.complete("pk-lost")
+        fake.seen("pk-lost")
+        assert wait_for(lambda: seen)
+    assert failures == [] and len(fake.sends) == 1
+    assert seen[0]["content"] == "样品安排上啦" and seen[0]["edge_seen"]
+
+
+def test_a_send_whose_request_never_reached_windows_fails_after_asking(fake, tmp_path, monkeypatch):
+    monkeypatch.setattr("src.wechat.edge_backend.UNSURE_CHECK_SEC", 0)
+    failures = []
+    with Running(fake, tmp_path) as run:
+        run.backend.set_send_failure_hook(lambda chat, text, why, **more: failures.append((chat, text, why)))
+        assert wait_for(lambda: CREATOR in fake._parties)
+
+        def lost_on_the_way(*args, **kwargs):
+            raise TimeoutError("timed out")
+
+        monkeypatch.setattr(run.backend.client, "send", lost_on_the_way)
+        assert run.backend.send_text(CREATOR, "样品安排上啦", send_id="pk-gone") is True, "不知道 Windows 收没收下"
+        assert wait_for(lambda: failures)
+    assert failures == [(CREATOR, "样品安排上啦", "发送请求没送到 Windows（网络断了），没有发出去")]
+    assert fake.sends == [] and "pk-gone" not in (tmp_path / "edge_sends.json").read_text(encoding="utf-8")
+
+
+def test_a_refused_connection_is_a_failure_at_once(fake, tmp_path, monkeypatch):
+    import errno
+    import urllib.error
+    backend = EdgeBackend(client=EdgeClient(fake.url, fake.token), state_path=str(tmp_path / "state.json"))
+
+    def refused(*args, **kwargs):
+        raise urllib.error.URLError(ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused"))
+
+    monkeypatch.setattr(backend.client, "send", refused)
+    assert backend.send_text(CREATOR, "在吗", send_id="pk-refused") is False
+    assert backend._sends == {} and backend._unsure == {} and backend.sends_record.get("pk-refused") is None
+
+
+def test_the_receiving_loop_survives_any_error(fake, tmp_path, monkeypatch):
+    """长轮询的应答不对（被截断、代理回了 HTML 页面）或者别的什么错：退避以后接着收，不用人手重启。"""
+    from src.edge.client import EdgeBadAnswer
+    monkeypatch.setattr("src.wechat.edge_backend.BACKOFF_SEC", (0.01,) * 6)
+    fake.put_parties(1, [CREATOR])
+    with Running(fake, tmp_path) as run:
+        real, trouble = run.backend.client.events, [EdgeBadAnswer("cut off"), KeyError("events")]
+
+        def events(*args, **kwargs):
+            if trouble:
+                raise trouble.pop(0)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(run.backend.client, "events", events)
+        fake.creator_says(CREATOR, "还在吗")
+        assert wait_for(lambda: run.seen)
+    assert trouble == [] and run.seen[0]["content"] == "还在吗"
+
+
+def test_a_new_windows_db_id_reads_from_the_start_even_past_the_old_cursor(fake, tmp_path):
+    """Windows 换了一份 edge.db，Mac 回来之前新库的编号已经超过旧位置：按 db_id 认出来，从头读，不静默跳过。"""
+    state = EdgeState(tmp_path / "state.json")
+    state.cursor, state.db_id = 2, "0" * 32
+    state.save()
+    fake.put_parties(1, [CREATOR])
+    for text in ("第一条", "第二条", "第三条"):
+        fake.creator_says(CREATOR, text)
+    assert fake.events_list[-1]["id"] > 2
+    with Running(fake, tmp_path) as run:
+        assert wait_for(lambda: len(run.seen) == 3)
+        assert any("事件库重建" in p for p in run.backend.status()["problems"])
+    assert [m["content"] for m in run.seen] == ["第一条", "第二条", "第三条"]
+    assert EdgeState(tmp_path / "state.json").db_id == fake.db_id
+
+
+def test_the_first_db_id_is_only_remembered(fake, tmp_path):
+    """升级以后第一次看到 db_id：记下来，不当成重建。"""
+    fake.put_parties(1, [CREATOR])
+    fake.creator_says(CREATOR, "处理过的")
+    state = EdgeState(tmp_path / "state.json")
+    state.cursor = fake.events_list[-1]["id"]
+    state.save()
+    with Running(fake, tmp_path) as run:
+        assert wait_for(lambda: EdgeState(tmp_path / "state.json").db_id == fake.db_id)
+        fake.creator_says(CREATOR, "新的")
+        assert wait_for(lambda: run.seen)
+        assert run.backend.status()["problems"] == []
+    assert [m["content"] for m in run.seen] == ["新的"]
+
+
+def test_a_message_windows_handed_on_late_keeps_when_it_was_written():
+    msg = event_to_message({"id": 9, "type": "creator_message", "at": 1761530000, "written_at": 1761500000,
+                            "chat_id": CREATOR, "message_id": "m9", "text": "停机时发的"}, [])
+    assert msg["timestamp"] == 1761500000
