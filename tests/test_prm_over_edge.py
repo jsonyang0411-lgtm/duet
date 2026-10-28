@@ -130,6 +130,25 @@ def test_an_operator_replying_by_hand_takes_the_chat_over(mac, fake):
     assert mac.prm.store.packet(packet["id"])["status"] == "superseded"
 
 
+def test_the_operator_typing_our_words_a_minute_after_the_read_back_takes_the_chat_over(mac, fake):
+    """win review F4 (a)，边缘模式：我们发的那句读回来了（send_seen）；一分钟后运营在手机上打了一模一样的话，
+    Windows 报 operator_message（另一行，另一个 message_id）：运营亲手回复，切人工接管。以前 Mac 在 120 秒内
+    按文字当成同一行又读了一次，吞掉了。"""
+    _, packet = drafted(mac, fake)
+    mac.prm.decide(packet["id"], "send")
+    mac.prm.send_approved()
+    assert wait_for(lambda: fake.sends)                    # (发送线程也可能先发了)
+    [send] = fake.sends
+    fake.complete(send["send_id"])
+    fake.seen(send["send_id"])
+    assert wait_for(lambda: mac.prm.store.packet(packet["id"])["outcome"] == "sent_confirmed")
+    mac.clock.now += 60
+    fake.operator_says(CREATOR, send["text"], message_id="row-typed-by-hand")
+    assert wait_for(lambda: mac.prm.store.deal(1)["mode"] == "human"), "一模一样的话也是运营亲手发的"
+    assert [e["kind"] for e in mac.prm.store.events(1, kinds=("operator_message", "takeover"))] == [
+        "takeover", "operator_message"]
+
+
 def test_a_send_windows_could_not_make_marks_the_draft_failed(mac, fake):
     _, packet = drafted(mac, fake)
     mac.prm.decide(packet["id"], "send")

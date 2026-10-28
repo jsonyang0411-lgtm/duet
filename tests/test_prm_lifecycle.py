@@ -1,6 +1,7 @@
 """PRM copilot, the second part: takeovers, send gates (8.1), holding replies, shipments,
 numbers shown in full and the 90-day clean-up (8.2), and what the backend tells about own lines."""
 
+import itertools
 import json
 import sqlite3
 import time
@@ -14,7 +15,7 @@ from test_prm import ADMIN, CREATOR, Bot, Clock, draft, pending_packet
 from src.config import BotConfig, _validate_config
 from src.db.schema import initialize_db
 from src.db.store import MessageStore
-from src.prm import gates, pii, retention
+from src.prm import gates, pii, retention, service
 from src.prm.deals import notice_text
 from src.prm.service import HOLDING_TEXT, OWN_FILE_SEC, SETTLE_SEC, PrmService, apply_deal_action, reveal_numbers
 from src.prm.store import PrmStore
@@ -38,9 +39,13 @@ def bot(clock, tmp_path):
     b.relay.stop()
 
 
+_OWN_ROWS = itertools.count(1)
+
+
 def own(b, text, ts=None, msg_type=1):
-    """A line this WeChat account sent in the creator's chat (what the backend hands on)."""
-    return {"message_id": f"own{time.time_ns()}", "chat_id": CREATOR, "sender_id": "wxid_bot", "sender_name": "我",
+    """A line this WeChat account sent in the creator's chat (what the backend hands on): a row of its
+    own, with its own message id (the same id handed on again is the same row, ``_match_own``)."""
+    return {"message_id": f"own{next(_OWN_ROWS)}", "chat_id": CREATOR, "sender_id": "wxid_bot", "sender_name": "我",
             "content": text, "msg_type": msg_type, "is_group": False, "timestamp": b.clock.now if ts is None else ts}
 
 
@@ -65,19 +70,45 @@ def test_the_bots_own_line_confirms_its_packet(bot):
 
 
 def test_our_line_read_back_twice_is_not_a_takeover(bot, clock):
-    """微信发出约 1 秒后补上 server_id，Windows 换了编号把同一行又读一次、当运营亲手回复报上来（2026-10-27 联调）。"""
+    """微信发出约 1 秒后补上 server_id，以前的编号跟着变，同一行被读了两次、当成运营亲手回复（2026-10-27 联调）。
+    现在一行一个编号：同一个编号再交来一次不是新的一句（不接管、不再记一次）；Mac 收到同一个事件两次也一样。"""
     packet = drafted(bot)
     bot.prm.decide(packet["id"], "send")
     bot.prm.send_approved()
-    line = "确认一下：小美，手机13812345678。"
-    bot.prm.on_own_message(own(bot, line))                                    # read back: confirmed
+    line = own(bot, "确认一下：小美，手机13812345678。")
+    bot.prm.on_own_message(line)                                              # read back: confirmed
+    assert bot.prm.store.packet(packet["id"])["outcome"] == "sent_confirmed"
     clock.now += 1
-    bot.prm.on_own_message(dict(own(bot, line), edge_operator=True))          # the same line again
+    bot.prm.on_own_message(dict(line))                                        # the same row again
+    bot.prm.on_own_message(dict(line, edge_operator=True))                    # (as the Mac would get it)
     assert bot.prm.store.deal(1)["mode"] == "copilot"
     assert not any(e["kind"] == "operator_message" for e in bot.prm.store.events(1, limit=20))
-    clock.now += 300                                                          # minutes later: a person typed it
-    bot.prm.on_own_message(dict(own(bot, line), edge_operator=True))
+    typed = dict(own(bot, "我来回吧"), edge_operator=True)                     # Windows: an operator's line
+    bot.prm.on_own_message(typed)
+    clock.now += 1
+    bot.prm.on_own_message(dict(typed))                                       # the same event handed on twice
+    kinds = [e["kind"] for e in bot.prm.store.events(1, limit=20)]
     assert bot.prm.store.deal(1)["mode"] == "human"
+    assert kinds.count("operator_message") == 1 and kinds.count("takeover") == 1
+
+
+def test_a_line_without_an_id_is_known_by_its_words_and_the_second_it_was_written(bot, clock):
+    """A line with no message id: the same words written the same second are the same row read again;
+    the same words written later are another row, typed by hand (win review F4 (a))."""
+    packet = drafted(bot)
+    bot.prm.decide(packet["id"], "send")
+    bot.prm.send_approved()
+    line = {"chat_id": CREATOR, "content": "确认一下：小美，手机13812345678。", "msg_type": 1, "is_group": False,
+            "timestamp": clock.now}
+    bot.prm.on_own_message(line)                                              # read back: confirmed
+    assert bot.prm.store.packet(packet["id"])["outcome"] == "sent_confirmed"
+    clock.now += 5
+    bot.prm.on_own_message(dict(line))                                        # the same row again: nothing
+    assert bot.prm.store.deal(1)["mode"] == "copilot" and bot.prm.store.events(1) == []
+    bot.prm.on_own_message({**line, "timestamp": clock.now})                  # the same words, written later
+    assert bot.prm.store.deal(1)["mode"] == "human"
+    # no id and no time: nothing to know the row by, so it is never taken for one read again
+    assert service._row_key({"chat_id": CREATOR, "content": "好的", "msg_type": 1}) is None
 
 
 def test_a_hand_typed_reply_gives_the_chat_to_a_person(bot, clock):
@@ -116,13 +147,74 @@ def test_a_hand_typed_reply_gives_the_chat_to_a_person(bot, clock):
 
 def test_old_own_lines_and_the_bots_files_are_not_a_takeover(bot, clock):
     bot.prm.on_own_message(own(bot, "上周说过的话", ts=clock.now - 7 * DAY))  # read late: recorded, too old to take over
-    bot.prm._note_sent(CREATOR, file=True)
+    bot.prm._note_sent(CREATOR, file="/x/brief.png")                         # the bot sends a picture
     clock.now += OWN_FILE_SEC - 1
     bot.prm.on_own_message(own(bot, "[图片]", msg_type=3))                    # the brief the bot just sent
     bot.prm.on_own_message(own(bot, HOLDING_TEXT))                            # never sent: a person typed it
     assert bot.prm.store.deal(1)["mode"] == "human"
     events = [e["kind"] for e in bot.prm.store.events(1)]
     assert events.count("takeover") == 1 and events.count("operator_message") == 2
+
+
+def material(b, *names):
+    """A draft of files only (``names``), approved and sent: the packet."""
+    p = pending_packet(b, draft(reply_draft="", message_kind="material", attachments_to_send=[f"assets/{n}" for n in names]),
+                       files=[(n, b"x") for n in names])
+    b.prm.decide(p["id"], "send")
+    b.prm.send_approved()
+    assert [path.rsplit("/", 1)[-1] for _, path in b.files] == list(names)
+    return p
+
+
+def test_a_file_the_bot_sent_covers_one_row_of_its_own_kind(bot, clock):
+    """win review F4 (b): after the bot sent a file, any picture, voice message or sticker of this
+    account in that chat for ten minutes was taken for the bot's, as often as it came.  Now one file
+    sent covers one row, of its own kind: the PDF's row is the bot's; the operator's picture (even
+    one read before the PDF), voice message and sticker from the phone are a person's."""
+    p = material(bot, "合作说明.pdf")
+    clock.now += 2
+    bot.prm.on_own_message(own(bot, "[图片]", msg_type=3))                    # the operator's, first
+    assert bot.prm.store.deal(1)["mode"] == "human"
+    bot.prm.on_own_message({**own(bot, "[文件] 合作说明.pdf", msg_type=49), "file_name": "合作说明.pdf"})
+    assert bot.prm.store.packet(p["id"])["outcome"] == "sent_confirmed"     # the bot's PDF
+    clock.now += 60
+    bot.prm.on_own_message(own(bot, "[语音] 我到了", msg_type=34))
+    bot.prm.on_own_message(own(bot, "[表情]", msg_type=47))
+    bot.prm.on_own_message({**own(bot, "[文件] 合作说明.pdf", msg_type=49), "file_name": "合作说明.pdf"})
+    kinds = [e["kind"] for e in bot.prm.store.events(1)]
+    assert kinds.count("operator_message") == 4                               # the PDF once more: by hand
+
+
+def test_one_picture_sent_covers_one_picture(bot, clock):
+    material(bot, "样品图.jpg")
+    bot.prm.on_own_message(own(bot, "[图片]", msg_type=3))                    # the bot's picture
+    assert bot.prm.store.deal(1)["mode"] == "copilot"
+    clock.now += 30
+    bot.prm.on_own_message(own(bot, "[图片]", msg_type=3))                    # one more, from the phone
+    assert bot.prm.store.deal(1)["mode"] == "human"
+
+
+def test_each_file_of_a_draft_covers_a_row_of_its_kind(bot, clock):
+    """Two files: a picture and a PDF, each one row; a GIF may show as a picture or a sticker, an
+    image WeChat sent as a file by its name; a link the operator shares is no file."""
+    material(bot, "样品图.png", "动图.gif", "报价单.pdf")
+    clock.now += 3
+    bot.prm.on_own_message({**own(bot, "[链接] 店铺", msg_type=49), "special": {"type": "5", "title": "店铺"}})
+    assert bot.prm.store.deal(1)["mode"] == "human"                          # a link: the operator's
+    for row in ({**own(bot, "[文件] 报价单.pdf", msg_type=49), "file_name": "报价单.pdf"},
+                own(bot, "[表情]", msg_type=47),                              # the GIF, as a sticker
+                {**own(bot, "[文件] 样品图.png", msg_type=49), "file_name": "样品图.png"}):  # the picture, as a file
+        bot.prm.on_own_message(row)
+    assert [e["kind"] for e in bot.prm.store.events(1)].count("operator_message") == 1
+
+
+def test_the_macs_read_back_of_a_file_is_ours_whatever_it_was(bot, clock):
+    """Mac 端：Windows 已经按发送记录认出是我们发的（send_seen），拼成的消息只知道是个文件（类型 49）。"""
+    p = material(bot, "样品图.jpg")
+    bot.prm.on_own_message({"chat_id": CREATOR, "content": "", "msg_type": 49, "is_group": False,
+                            "timestamp": clock.now, "edge_seen": True, "edge_event_id": 7})
+    assert bot.prm.store.packet(p["id"])["outcome"] == "sent_confirmed"
+    assert bot.prm.store.deal(1)["mode"] == "copilot"
 
 
 def test_a_holding_reply_and_a_paused_deal_are_not_a_takeover(bot, clock):

@@ -7,9 +7,11 @@ reply on the first read, took the second for an operator typing and gave the dea
 person; the WeChat edge reported ``send_seen`` and then ``operator_message`` for one row.
 
 Now the id is made from the chat, the row's ``local_id`` and its time
-(src/wechat/wcdb_backend.py ``_message_ids``), and PRM remembers the own lines it matched for
-READ_BACK_SEC (src/prm/service.py ``_match_own``).  The first start after the update must not
-hand on again what the message store holds under the old ids (``_legacy_ids``).
+(src/wechat/wcdb_backend.py ``_message_ids``), and PRM remembers the own rows it handled by
+that id for READ_BACK_SEC (src/prm/service.py ``_match_own``): the same row handed on again is
+no new line, while the same words in another row (an operator typing what the bot just sent)
+are a person's (win review F4 (a)).  The first start after the update must not hand on again
+what the message store holds under the old ids (``_legacy_ids``).
 
 The integrated tests run the real backend over a fake WeChat database, with the router, the
 relay and PRM, as tests/test_prm_catchup.py does.
@@ -26,7 +28,6 @@ from test_prm_catchup import ADMIN, BOT, GROUP, ME, FakeWeChat, World, text_line
 
 from src.config import BotConfig
 from src.db import MessageStore, initialize_db
-from src.prm.service import READ_BACK_SEC
 from src.wechat import wcdb_backend
 from src.wechat.burst import MessageBurstBuffer
 from src.wechat.wcdb_backend import WcdbBackend
@@ -169,6 +170,32 @@ def test_the_bots_reply_read_before_and_after_its_server_id_confirms_it_and_take
     assert world.prm_store.packet(packet["id"])["outcome"] == "sent_confirmed"
     assert world.prm_store.deal(1)["mode"] == "copilot"
     assert world.events("operator_message") == [] and world.events("takeover") == []
+
+
+def test_an_operator_typing_the_bots_words_a_minute_later_takes_the_chat_over(world):
+    """win review F4 (a): the bot's 「好的」 was read back; a minute later an operator types 「好的」 by
+    hand.  That is another row (another id), so it is a person's: the chat is taken over.  Before, the
+    same words within READ_BACK_SEC were swallowed as a second read of the bot's line."""
+    world.register()
+    run = world.run()
+    world.wechat.say(CREATOR, CREATOR, "在吗，想合作", world.clock.now)
+    run.poll()
+    world.mac_drafts(run, draft(reply_draft="好的", message_kind="other"))
+    [packet] = world.prm_store.packets(("pending",))
+    run.prm.decide(packet["id"], "send")
+    run.prm.send_approved()
+    assert world.sent[-1] == (CREATOR, "好的")
+    world.wechat.say(CREATOR, ME, "好的", world.clock.now)                  # the bot's line, read back
+    run.poll()
+    run.poll()                                                             # (read again: nothing new)
+    assert world.prm_store.packet(packet["id"])["outcome"] == "sent_confirmed"
+    assert world.prm_store.deal(1)["mode"] == "copilot" and world.events("operator_message") == []
+    world.clock.now += 60
+    world.wechat.say(CREATOR, ME, "好的", world.clock.now)                  # typed by hand on the phone
+    run.poll()
+    deal = world.prm_store.deal(1)
+    assert deal["mode"] == "human" and deal["mode_until"] == world.clock.now + 120 * 60
+    assert len(world.events("operator_message")) == 1 and len(world.events("takeover")) == 1
 
 
 # ── the first start after the update ──────────────────────────────────────
@@ -333,26 +360,30 @@ def kinds(bot, deal_id=1):
     return [e["kind"] for e in bot.prm.store.events(deal_id, limit=50)]
 
 
-def test_the_bots_line_read_twice_under_two_ids_is_one_read_back(bot):
-    """As the backend did before: one row handed on before and after its server id came in."""
+def test_the_bots_line_handed_on_twice_under_its_one_id_is_one_read_back(bot):
+    """One row, one id (the backend's, whatever WeChat fills in later): handed on a second time it is
+    the same read-back, nothing more (no operator's line, no takeover)."""
     packet, text = send_a_draft(bot)
-    bot.prm.on_own_message(own(bot, text, "row15-no-server-id"))      # matched: confirms its packet
+    bot.prm.on_own_message(own(bot, text, "row15"))                   # matched: confirms its packet
     assert bot.prm.store.packet(packet["id"])["outcome"] == "sent_confirmed"
     bot.clock.now += 1
-    assert bot.prm._match_own(CREATOR, own(bot, text, "row15-server-id"), bot.clock.now) == (True, None)
-    bot.prm.on_own_message(own(bot, text, "row15-server-id"))         # the same row under a second id
+    assert bot.prm._match_own(CREATOR, own(bot, text, "row15"), bot.clock.now) == (True, None)
+    bot.prm.on_own_message(own(bot, text, "row15"))                   # the same row again
     assert bot.prm.store.deal(1)["mode"] == "copilot"
     assert "operator_message" not in kinds(bot) and "takeover" not in kinds(bot)
 
 
-def test_the_same_words_typed_after_the_read_back_window_are_a_persons(bot):
+def test_the_same_words_in_another_row_are_a_persons_at_once(bot):
+    """win review F4 (a): the bot's words typed by hand a minute after its line was read back are
+    another row (another id): a person's.  Before, the same words were swallowed as a read-back for
+    120 s after the match."""
     packet, text = send_a_draft(bot)
-    bot.prm.on_own_message(own(bot, text, "row15-no-server-id"))      # read back: confirms the packet
+    bot.prm.on_own_message(own(bot, text, "row15"))                   # read back: confirms the packet
     bot.clock.now += 1
-    bot.prm.on_own_message(own(bot, text, "row15-server-id"))         # the same row again: nothing
+    bot.prm.on_own_message(own(bot, text, "row15"))                   # the same row again: nothing
     assert bot.prm.store.deal(1)["mode"] == "copilot"
-    bot.clock.now += READ_BACK_SEC
-    bot.prm.on_own_message(own(bot, text, "row16"))                   # 121 s after the match: typed by hand
+    bot.clock.now += 60
+    bot.prm.on_own_message(own(bot, text, "row16"))                   # a minute later: typed by hand
     deal = bot.prm.store.deal(1)
     assert deal["mode"] == "human" and deal["mode_until"] == bot.clock.now + 120 * 60
     assert kinds(bot).count("operator_message") == 1 and kinds(bot).count("takeover") == 1

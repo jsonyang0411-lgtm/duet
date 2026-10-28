@@ -175,7 +175,7 @@ BACKLOG_KINDS = ("creator_message", "operator_message")
 # ``draft:<lane>`` is the latest draft's own notes (the next draft of that lane replaces them); every
 # other key is the system's and stays until what it says is dealt with (src/prm/service.py: a draft
 # that was not written, a 专属佣金 step owed, a platform action that ended red, a recall, messages
-# read too late to draft).  ``show`` False: kept for what it holds, no longer shown.
+# read too late to draft, this PC's clock off WeChat's).  ``show`` False: kept for what it holds, no longer shown.
 DRAFT_NOTES = "draft:"
 NOTICE_CHARS = 300          # one notice's text
 ATTENTION_CHARS = 600       # all of them, as the console shows them
@@ -390,9 +390,12 @@ class PrmStore:
             )
             self._conn.commit()
 
-    def edit_notices(self, deal_id: int, edit: Callable[[list], list], now: Optional[float] = None) -> list:
+    def edit_notices(self, deal_id: int, edit: Callable[[list], list], now: Optional[float] = None, *,
+                     touch: bool = True) -> list:
         """Change a deal's notices in one step under the lock: ``edit`` gets the list and returns the
-        new one; ``attention`` follows (``attention_of``).  Returns the new list ([] for no deal)."""
+        new one; ``attention`` follows (``attention_of``).  ``touch`` False: the deal's ``updated_at``
+        stays (a notice about this PC, not the deal: no sign of life for the 8.2 clean-up).  Returns the
+        new list ([] for no deal)."""
         now = time.time() if now is None else now
         with self._lock:
             row = self._conn.execute("SELECT notices, attention FROM deals WHERE id = ?", (deal_id,)).fetchone()
@@ -401,14 +404,16 @@ class PrmStore:
             before = notices_of(dict(row))
             notices = edit([dict(n) for n in before])
             if notices != before or attention_of(notices) != row["attention"]:
-                self._conn.execute("UPDATE deals SET notices = ?, attention = ?, updated_at = ? WHERE id = ?",
-                                   (json.dumps(notices, ensure_ascii=False), attention_of(notices), now, deal_id))
+                self._conn.execute(f"UPDATE deals SET notices = ?, attention = ?{', updated_at = ?' if touch else ''}"
+                                   " WHERE id = ?", (json.dumps(notices, ensure_ascii=False), attention_of(notices),
+                                                     *((now,) if touch else ()), deal_id))
                 self._conn.commit()
         return notices
 
-    def set_notice(self, deal_id: int, key: str, text: str, now: Optional[float] = None, **data) -> None:
+    def set_notice(self, deal_id: int, key: str, text: str, now: Optional[float] = None, *, touch: bool = True,
+                   **data) -> None:
         """The deal's notice ``key`` says ``text`` (``data``: what the system keeps to deal with it later),
-        in its place when it had one; an empty ``text`` drops it."""
+        in its place when it had one; an empty ``text`` drops it (``touch``: ``edit_notices``)."""
         now = time.time() if now is None else now
 
         def edit(notices):
@@ -419,7 +424,7 @@ class PrmStore:
                     "at": (old or {}).get("at", now)}
             return [item if n is old else n for n in notices] if old is not None else [*notices, item]
 
-        self.edit_notices(deal_id, edit, now)
+        self.edit_notices(deal_id, edit, now, touch=touch)
 
     def drop_notices(self, deal_id: int, match: Callable[[dict], bool], now: Optional[float] = None) -> list:
         """Remove the deal's notices ``match`` says yes to; returns them (one step: of two threads only
@@ -574,6 +579,39 @@ class PrmStore:
                 " ORDER BY id DESC", (chat_id, SENT, SENDING, since),
             ).fetchall()
         return [packet_view(dict(r)) for r in rows]
+
+    def unsure_since(self, chat_id: str, since: float) -> list[dict]:
+        """Packets the bot was stopped in the middle of sending to this chat (``failed`` /
+        ``indeterminate``: ``PrmService.start``), settled at ``since`` or later, newest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM action_packets WHERE chat_id = ? AND status = ? AND outcome = 'indeterminate'"
+                " AND sent_at >= ? ORDER BY id DESC", (chat_id, FAILED, since),
+            ).fetchall()
+        return [packet_view(dict(r)) for r in rows]
+
+    def settle_unsure(self, packet_id: int, *, sent_at: Optional[float] = None,
+                      error: Optional[str] = None) -> bool:
+        """A packet the bot was stopped in the middle of sending (``failed`` / ``indeterminate``) that
+        WeChat shows after all: with ``error`` None all of it went out (``sent`` / ``sent_confirmed``;
+        ``sent_at`` becomes the time WeChat shows when that is earlier than the restart's); with an
+        ``error`` it stays failed and says what was seen (a draft with files whose text went out).
+        True when it was such a packet."""
+        with self._lock:
+            if error is None:
+                when = "" if sent_at is None else ", sent_at = MIN(COALESCE(sent_at, ?), ?)"
+                cur = self._conn.execute(
+                    f"UPDATE action_packets SET status = ?, outcome = 'sent_confirmed', error = ''{when}"
+                    " WHERE id = ? AND status = ? AND outcome = 'indeterminate'",
+                    (SENT, *(() if sent_at is None else (sent_at, sent_at)), packet_id, FAILED),
+                )
+            else:
+                cur = self._conn.execute(
+                    "UPDATE action_packets SET error = ? WHERE id = ? AND status = ? AND outcome = 'indeterminate'",
+                    (error, packet_id, FAILED),
+                )
+            self._conn.commit()
+            return cur.rowcount == 1
 
     def reviewed(self, kind: str, since: float, limit: int) -> list[dict]:
         """The newest drafts of ``kind`` a person decided on after ``since`` (8.1's window).

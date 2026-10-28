@@ -28,7 +28,8 @@ notes, which the next draft replaces, and the system's, which stay until they ar
 review F1): a draft job that gave no draft (her lines in it go with her next draft job: answered,
 not lost), a 专属佣金 step owed while a person had the chat or the creator was off the list (asked for
 when that ends, ``sweep_owed_steps``), a platform action that ended red (until 已处理), her recall,
-messages read too late to draft.
+messages read too late to draft, this PC's clock off WeChat's (measured by the bot's own lines read back:
+``_note_clock``; how late a message is read is reckoned by WeChat's clock then, win review F6).
 
 Registering is always an operator's decision.  When the creator registered is a new friend
 (src/wechat/new_friends.py found the line WeChat writes when two people become friends), her
@@ -55,6 +56,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import itertools
 import json
 import logging
 import re
@@ -87,7 +89,8 @@ APPROVED_EXPIRE_SEC = 1800   # an approved draft not sent by then (the bot was s
 SEND_TICK_SEC = 5
 OWN_MATCH_SEC = 1800         # our own line seen in WeChat within this long after sending is the bot's
 OWN_FILE_SEC = 600           # an own picture/file this soon after the bot sent one is the bot's
-READ_BACK_SEC = 120          # our line matched in WeChat and read again this soon after: the same send
+READ_BACK_SEC = 1800         # an own row handled this long ago and handed on again (same id) is no new line
+READ_BACK_ROWS = 500         # at most this many own rows a chat remembers
 RETENTION_CHECK_SEC = 3600
 PLATFORM_LOST_GRACE_SEC = 1800   # an execution whose Mac went silent this long is given up on (red)
 PLATFORM_OPS = ("platform_execute", "platform_preview")
@@ -97,6 +100,15 @@ RESTART_FAIL_SEC = 86400
 CATCHUP_HOURS = 12           # PRM_CATCHUP_HOURS: a message read late is drafted up to this old (0-72)
 LINES_CHARS = 6000           # the creator's lines a notice of a draft not written keeps for her next draft
 OWN_FILE_EARLY_SEC = 60      # a file the bot sent shows in WeChat up to this long before its send returns
+# A draft the bot was stopped in the middle of sending (``start``), and what it says once its text was read back
+UNSURE_ERROR = "发送时机器人停了，不确定发出去没有；请到微信里看一眼，需要就手动补发"
+UNSURE_TEXT_SEEN = ("发送时机器人停了：文字已经发出去了（微信里读到了），素材文件不确定发出去没有；"
+                    "请到微信里看一眼，需要就手动补发文件")
+# This PC's clock against WeChat's (win review F6): measured when the bot's own line is read back
+CLOCK_SAMPLE_SEC = 120       # read back this soon after it was noted, a line of ours measures the clock
+CLOCK_SAMPLES = 3            # the smallest of the last this many measurements counts (a late read only adds)
+CLOCK_NOISE_SEC = 60         # off by less than this: read-back noise, nothing is corrected
+CLOCK_SKEW_SEC = 300         # off by this much or more: the deals say so (``clock_note``)
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
 _WXID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{3,63}$")
 
@@ -140,6 +152,70 @@ def _norm(text: str) -> str:
     return " ".join(str(text or "").split())
 
 
+_IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".heic", ".heif", ".tif", ".tiff")
+_VIDEO_SUFFIXES = (".mp4", ".mov", ".m4v", ".avi", ".wmv", ".mkv", ".flv", ".3gp")
+
+
+def file_kind(name: str) -> str:
+    """What WeChat shows a file the bot pastes into a chat as, by its name: ``image`` (a picture),
+    ``gif`` (a picture, or a sticker), ``video`` or ``file``."""
+    suffix = Path(str(name or "")).suffix.lower()
+    if suffix == ".gif":
+        return "gif"
+    if suffix in _IMAGE_SUFFIXES:
+        return "image"
+    if suffix in _VIDEO_SUFFIXES:
+        return "video"
+    return "file"
+
+
+def own_file_fits(kind: str, msg: dict) -> bool:
+    """Can this own line in WeChat be a file of ``kind`` (``file_kind``) the bot sent (win review F4 (b))?
+    A picture (type 3) is an image's or a GIF's, a sticker (47) only a GIF's, a video (43) a video's,
+    a file (49 with a file name, or one the backend could not read) a file's, or an image's or video's
+    WeChat sent as a file (its name says so); a voice message, a link, a mini program, a card … never.
+    The Mac's ``edge_seen`` lines are our sends Windows already read back (their type says only "a file")."""
+    if msg.get("edge_seen"):
+        return True
+    msg_type = edge_text.msg_type_of(msg)
+    if msg_type == 3:
+        return kind in ("image", "gif")
+    if msg_type == 47:
+        return kind == "gif"
+    if msg_type == 43:
+        return kind == "video"
+    if msg_type == 49:
+        name = str(msg.get("file_name") or "").strip()
+        if name:
+            return kind in ("file", file_kind(name))
+        special = msg.get("special") if isinstance(msg.get("special"), dict) else {}
+        appmsg = str(special.get("type") or "")
+        return kind == "file" and appmsg in ("", "6")      # a file the backend could not read the name of
+    return False
+
+
+def _row_key(msg: dict) -> Optional[str]:
+    """Which WeChat row an own line is, to know it when it is handed on again (``_match_own``): its
+    message id (the WCDB backend's never changes for a row; the Mac's edge lines carry Windows' id, or
+    their event's); without one, its type, words and the second WeChat says it was written (a row
+    read twice has the same; the same words typed later have another).  None when there is nothing to
+    know it by (no id, no time): such a line is never taken for a row read again."""
+    msg_id = str(msg.get("message_id") or "").strip()
+    if msg_id:
+        return f"id:{msg_id}"
+    event_id = msg.get("edge_event_id")
+    if event_id not in (None, ""):
+        return f"event:{event_id}"
+    try:
+        written = int(float(msg.get("timestamp") or 0))
+    except (TypeError, ValueError):
+        written = 0
+    if not written:
+        return None
+    words = _norm(_QUOTE_PREFIX.sub("", str(msg.get("content", "") or ""))) or str(msg.get("file_name") or "")
+    return f"line:{edge_text.msg_type_of(msg)}|{words}|{written}"
+
+
 def _clock_text(at: float) -> str:
     return time.strftime("%m-%d %H:%M", time.localtime(at))
 
@@ -157,6 +233,16 @@ def missed_note(count: int, earliest: float) -> str:
 def recall_note(at: float) -> str:
     """The deal's attention (and a draft's reason) when the creator took a message back."""
     return f"达人撤回了一条消息（{_clock_text(at)}），待审批的草稿可能是按撤回的内容写的，发之前请核对"
+
+
+def clock_note(skew: float) -> str:
+    """The deals' notice while this PC's clock is off WeChat's by CLOCK_SKEW_SEC or more (``skew``: this
+    PC's clock minus WeChat's, as the bot's own lines read back measured it)."""
+    hours, minutes = divmod(int(round(abs(skew) / 60)), 60)
+    amount = (f"{hours} 小时" if hours else "") + (f"{minutes} 分钟" if minutes or not hours else "")
+    return (f"这台电脑的时间比微信{'快' if skew > 0 else '慢'} {amount}（机器人发出的消息读回来时测的），"
+            "消息是不是晚到已经按微信的时间算；请把电脑时间改对（Windows 设置 → 时间和语言 → 自动设置时间），"
+            "改好以后机器人再发出消息时会重新测，这条提醒自己消失")
 
 
 def failed_text(head: str, into: Optional[int] = None) -> str:
@@ -425,15 +511,24 @@ class PrmService:
                                                     *(getattr(config, "claude_relay_wxids", None) or [])]
                           if str(w).strip()}
         self._wxids = self._store.active_wxids()
-        # What the bot itself sent lately, per chat: (normalized text, when, packet id); the last
-        # file send (when, packet id).
+        # What the bot itself sent lately, per chat: (normalized text, when, packet id); each file
+        # (kind, when, packet id, n): one own row of its kind each (win review F4 (b)).
         self._sent_lines: dict[str, deque] = {}
-        self._sent_files: dict[str, tuple] = {}
-        # Per chat, our own lines matched lately (normalized text -> when): read again within
-        # READ_BACK_SEC they are the same send read back a second time (_match_own).
+        self._sent_files: dict[str, deque] = {}
+        self._file_seq = itertools.count(1)
+        # A packet sent before this run (or cut off by a stop): the kinds of its files not read back yet.
+        self._file_rows: dict[int, list] = {}
+        # Per chat, the own rows handled lately (``_row_key`` -> when): handed on again within
+        # READ_BACK_SEC they are no new line (_match_own).
         self._read_back: dict[str, dict[str, float]] = {}
         self._sent_lock = threading.Lock()
         self._started = clock()               # what this run sent is in _sent_lines / _sent_files
+        # This PC's clock minus WeChat's (win review F6), measured by this run's own lines read back
+        # (``_note_clock``); 0 until then and within CLOCK_NOISE_SEC.  ``_local`` puts WeChat's times
+        # on this PC's clock wherever they are held against it (how late a message is read, a takeover).
+        self._clock_samples: deque = deque(maxlen=CLOCK_SAMPLES)
+        self._skew = 0.0
+        self._clock_text: Optional[str] = None     # the deals' notice as last written (None: not this run)
         self._last_retention = 0.0
         self._wake = threading.Event()
         self._stopping = threading.Event()
@@ -451,8 +546,8 @@ class PrmService:
         ``sweep_deliveries``), then the sender thread."""
         now = self._clock()
         for p in self._store.packets((SENDING,), limit=500):
-            self._store.move(p["id"], (SENDING,), FAILED, outcome="indeterminate", sent_at=now,
-                             error="发送时机器人停了，不确定发出去没有；请到微信里看一眼，需要就手动补发")
+            # (read back after all, its line confirms it: ``_confirm``)
+            self._store.move(p["id"], (SENDING,), FAILED, outcome="indeterminate", sent_at=now, error=UNSURE_ERROR)
         try:
             started = self.sweep_deliveries()
             if started:
@@ -478,6 +573,53 @@ class PrmService:
             self._store.update_deal(deal["id"], now, mode=COPILOT, mode_until=None)
             self._store.add_event(deal["id"], deal["party_id"], "mode_expired", {}, actor="system", now=now)
         return mode
+
+    # ── this PC's clock against WeChat's (win review F6) ──────────────────
+
+    def _local(self, written: float) -> float:
+        """When WeChat says something was written, on this PC's clock (``_skew``, what this run measured;
+        nothing before it measured anything)."""
+        return written + self._skew if written else written
+
+    @staticmethod
+    def _clock_sample(msg: dict, noted: float, now: float) -> Optional[float]:
+        """What one of our lines read back says of this PC's clock: read (now, this PC) minus written
+        (WeChat's time).  Only a line read back within CLOCK_SAMPLE_SEC of being noted (the delay adds to
+        it), never the Mac's edge lines (their time is when Windows handed them on)."""
+        if msg.get("edge_seen") or msg.get("edge_operator"):
+            return None
+        try:
+            written = float(msg.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            return None
+        if not written or now - noted > CLOCK_SAMPLE_SEC:
+            return None
+        return now - written
+
+    def _note_clock(self, sample: float, now: float) -> None:
+        """A measurement of this PC's clock (``_clock_sample``).  The smallest of the last CLOCK_SAMPLES
+        counts (a read-back delayed by a stalled database only adds to one; a clock put right counts at
+        once); off by CLOCK_NOISE_SEC or more it corrects WeChat's times (``_local``); off by CLOCK_SKEW_SEC
+        or more every deal says so (``clock_note``), until a measurement says it is right again."""
+        with self._sent_lock:
+            self._clock_samples.append(sample)
+            low = min(self._clock_samples)
+            skew = low if abs(low) >= CLOCK_NOISE_SEC else 0.0
+            if skew != self._skew:
+                logger.warning("PRM: this PC's clock is %+.0f s off WeChat's (measured by our own line read back)",
+                               low)
+            self._skew = skew
+        text = clock_note(skew) if abs(skew) >= CLOCK_SKEW_SEC else ""
+        if text == self._clock_text:
+            return
+        self._clock_text = text
+        active = {p["id"] for p in self._store.parties()}
+        for deal in self._store.deals():
+            have = next((n for n in deal["notices"] if n["key"] == "clock"), None)
+            if (text and deal["party_id"] in active and (have is None or have.get("text") != text)
+                    or not text and have is not None):
+                # (about this PC, not the deal: not a sign of life for the 8.2 clean-up)
+                self._store.set_notice(deal["id"], "clock", text, now, touch=False)
 
     # ── from WeChat (the route step) ──────────────────────────────────────
 
@@ -541,8 +683,9 @@ class PrmService:
         on as this account's line) is only recorded; any other line (拍一拍, a red packet notice) only
         logged.  Older than a message of hers would still be drafted (PRM_CATCHUP_HOURS): history."""
         now = self._clock()
-        written = float(msg.get("timestamp", 0) or 0) or now
-        age = now - written
+        written = float(msg.get("timestamp", 0) or 0)
+        age = now - self._local(written) if written else 0.0
+        written = written or now
         if age > MAX_AGE_SEC and ((not self._catchup_sec and not _queued(msg))
                                   or (self._catchup_sec and age > self._catchup_sec)):
             return
@@ -583,7 +726,7 @@ class PrmService:
         for the WeChat window, and the backend's own lines wait for the lock)."""
         now = self._clock()
         sent_at = float(msg.get("timestamp", 0) or 0)
-        age = now - sent_at if sent_at else 0.0
+        age = now - self._local(sent_at) if sent_at else 0.0     # (on this PC's clock: win review F6)
         late = age > MAX_AGE_SEC
         if late and not self._catchup_sec:
             if not _queued(msg):
@@ -802,7 +945,7 @@ class PrmService:
             return
         now = self._clock()
         sent_at = float(msg.get("timestamp", 0) or 0)
-        late = bool(sent_at) and now - sent_at > MAX_AGE_SEC
+        late = bool(sent_at) and now - self._local(sent_at) > MAX_AGE_SEC
         if late and not self._catchup_sec:
             if not _queued(msg):
                 return                                     # history (a chat read for the first time)
@@ -816,25 +959,12 @@ class PrmService:
 
     def _own_line(self, msg: dict, party: dict, chat_id: str, now: float, sent_at: float, late: bool) -> None:
         """``on_own_message`` for a creator's chat (under ``_handle_lock``)."""
-        if msg.get("edge_operator"):
-            # Mac 端：Windows 已经用发送记录比过了，对不上才报 operator_message，不再比一次
-            matched, packet_id = False, None
-        else:
-            matched, packet_id = self._match_own(chat_id, msg, now)
+        matched, packet_id = self._match_own(chat_id, msg, now)
         if msg.get("edge_seen") and not matched:
             return                                         # 我们发的读回来了，只是这次运行没记着它
         if matched:
-            # Often before its send returned (WeChat shows a line at once); a failure stays one.
-            if packet_id is not None and self._store.confirm_sent(packet_id):
-                packet = self._store.packet(packet_id) or {}
-                logger.info("PRM: packet %d seen in WeChat %.0f s after sending (sent_confirmed)", packet_id,
-                            max(0.0, now - float(packet.get("sent_at") or now)))
-            return
-        if self._read_again(chat_id, msg, now):
-            # 2026-10-27 联调：Windows 微信后端的消息编号先用 server_id 算，微信发出约 1 秒后才补上 server_id，
-            # 同一行换了编号又读一次，Windows 当成运营亲手回复报上来
-            logger.info("PRM: party %d: a line of ours read back again (WeChat changed its id), not a person's",
-                        party["id"])
+            if packet_id is not None:
+                self._confirm(packet_id, msg, self._local(sent_at) or now, now)
             return
         deal = self._store.deal_of(party["id"], now)
         text = self._mask(party["id"], f"[{_clock_text(sent_at or now)}] {message_text(msg)}", now)
@@ -849,10 +979,11 @@ class PrmService:
             return                                         # paused stays paused (the line is recorded)
         # Typed while the bot was not reading: the chat is a person's as long as it would have
         # been, counted from when the line was written (a later takeover is not cut short).
-        until = (sent_at if late else now) + self._takeover_sec
+        until = (self._local(sent_at) if late else now) + self._takeover_sec
         if until <= now:
             logger.info("PRM: an operator wrote to party %d from WeChat while the bot was not reading, %.0f min "
-                        "ago; recorded, too long ago to take the chat over", party["id"], (now - sent_at) / 60)
+                        "ago; recorded, too long ago to take the chat over", party["id"],
+                        (now - self._local(sent_at)) / 60)
             return
         if mode == HUMAN and until <= float(deal.get("mode_until") or 0):
             logger.info("PRM: an operator's earlier line in party %d's chat recorded; the takeover goes on",
@@ -862,6 +993,34 @@ class PrmService:
         self._store.add_event(deal["id"], party["id"], "takeover", {"until": until}, actor="system", now=now)
         logger.info("PRM: an operator wrote to party %d from WeChat; the deal is a person's until %s",
                     party["id"], time.strftime("%H:%M", time.localtime(until)))
+
+    def _confirm(self, packet_id: int, msg: dict, written: float, now: float) -> None:
+        """A packet's line (or file) read back from WeChat.  Going out or sent: ``sent_confirmed``, often
+        before its send returned (WeChat shows a line at once); a failure stays one.  A packet the bot was
+        stopped in the middle of sending (failed, ``indeterminate``: ``start``) went out after all (win
+        review F4 (d); before, its line was taken for an operator's and the chat was taken over): it is
+        sent again (``sent_at`` when WeChat shows it) once its text, if any, and each of its files (one
+        row each, ``_file_rows``) are read back; till then it stays red, and once its text is seen it says
+        the text did go out (``UNSURE_TEXT_SEEN``)."""
+        if self._store.confirm_sent(packet_id):
+            packet = self._store.packet(packet_id) or {}
+            logger.info("PRM: packet %d seen in WeChat %.0f s after sending (sent_confirmed)", packet_id,
+                        max(0.0, now - float(packet.get("sent_at") or now)))
+            return
+        packet = self._store.packet(packet_id)
+        if packet is None or (packet["status"], packet["outcome"]) != (FAILED, "indeterminate"):
+            return
+        final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
+        text_seen = bool(self._own_text(msg)) or packet["error"] == UNSURE_TEXT_SEEN
+        with self._sent_lock:
+            files_left = self._file_rows.get(packet_id, [None]) if packet["attachments"] else []
+        if (text_seen or not str(final or "").strip()) and not files_left:
+            if self._store.settle_unsure(packet_id, sent_at=written):
+                logger.info("PRM: packet %d, cut off by a stop, did go out (seen in WeChat): sent", packet_id)
+        elif text_seen and packet["error"] != UNSURE_TEXT_SEEN and self._store.settle_unsure(
+                packet_id, error=UNSURE_TEXT_SEEN):
+            logger.info("PRM: packet %d, cut off by a stop: its text went out, its files are not all seen yet",
+                        packet_id)
 
     def _answered_by_hand(self, deal_id: int, written: float, now: float) -> None:
         """An operator wrote to her by hand (at ``written``): a draft of hers that was not written, and
@@ -880,29 +1039,31 @@ class PrmService:
 
         self._store.edit_notices(deal_id, edit, now)
 
-    def _note_sent(self, chat_id: str, text: str = "", packet_id: Optional[int] = None, file: bool = False) -> tuple:
+    def _note_sent(self, chat_id: str, text: str = "", packet_id: Optional[int] = None,
+                   file: "bool | str" = False) -> tuple:
         """What the bot is about to send, noted before it goes (WeChat shows a line, and the
-        backend reads it back, before the send returns); ``_unnote_sent`` takes it back."""
+        backend reads it back, before the send returns): a line, or one file (``file``: its path or
+        name, whose kind is what WeChat shows it as, ``file_kind``; True: a plain file).  Returns the
+        note; ``_unnote_sent`` takes it back."""
         now = self._clock()
         with self._sent_lock:
             if file:
-                before = self._sent_files.get(chat_id)
-                self._sent_files[chat_id] = (now, packet_id)
-                return chat_id, None, before
+                entry = (file_kind(file) if isinstance(file, str) else "file", now, packet_id, next(self._file_seq))
+                self._sent_files.setdefault(chat_id, deque(maxlen=200)).append(entry)
+                return chat_id, None, entry
             item = (_norm(text), now, packet_id)
             self._sent_lines.setdefault(chat_id, deque(maxlen=50)).append(item)
             return chat_id, item, None
 
     def _unnote_sent(self, noted: tuple) -> None:
-        """It did not go out: forget that line, or put the file record back as it was (an
-        earlier file still counts as the bot's)."""
-        chat_id, item, before = noted
+        """It did not go out: forget that line or that file (the files sent before it still count as
+        the bot's; not when it was read back already)."""
+        chat_id, item, entry = noted
         with self._sent_lock:
-            if item is None:
-                if before is None:
-                    self._sent_files.pop(chat_id, None)
-                else:
-                    self._sent_files[chat_id] = before
+            if entry is not None:
+                files = self._sent_files.get(chat_id)
+                if files is not None and entry in files:
+                    files.remove(entry)
                 return
             lines = self._sent_lines.get(chat_id)
             if lines is not None and item in lines:     # (not if it was read back already)
@@ -918,49 +1079,37 @@ class PrmService:
             pass
         return _norm(_QUOTE_PREFIX.sub("", str(msg.get("content", "") or "")))
 
-    def _read_again(self, chat_id: str, msg: dict, now: float) -> bool:
-        """The same words as a line of ours matched in this chat within ``READ_BACK_SEC``: that
-        line read again.  The times are ``_read_back``'s, set by ``_match_own`` on a real match only
-        (a read-back read again does not move them, so the window is counted from the send's own
-        read-back); this covers the Mac's ``edge_operator`` lines, which skip ``_match_own``."""
-        text = self._own_text(msg)
-        if not text:
-            return False
-        with self._sent_lock:
-            at = (self._read_back.get(chat_id) or {}).get(text)
-        return at is not None and now - at <= READ_BACK_SEC
-
     def _match_own(self, chat_id: str, msg: dict, now: float) -> tuple[bool, Optional[int]]:
         """Was this own line sent by the bot? ``(True, packet id or None)`` (``_match_sent``).
 
-        A text line of ours that was matched in this chat, read again within READ_BACK_SEC,
-        is the same send read back a second time, not an operator typing: WeChat 4.1
-        writes a line it sends with no server id and fills one in a second later, and a backend
-        that took that for a new message handed the row on twice (the WCDB backend's ids no
-        longer change, src/wechat/wcdb_backend.py; this is the safety net).  The same words
-        after that are a person's again."""
-        matched, packet_id = self._match_sent(chat_id, msg, now)
-        try:
-            msg_type = int(msg.get("msg_type", 1) or 1)
-        except (TypeError, ValueError):
-            msg_type = 1
-        if msg_type != 1:
-            return matched, packet_id
-        text = _norm(_QUOTE_PREFIX.sub("", str(msg.get("content", "") or "")))
+        A row handled before and handed on again (the same ``_row_key``: the same message id, which
+        the WCDB backend never changes for a row, src/wechat/wcdb_backend.py ``_message_ids``) is no
+        new line: ``(True, None)``, nothing more is done with it, ours or an operator's (2026-10-27:
+        WeChat 4.1 fills in a line's server id a second after writing it, and the ids that used it
+        handed the bot's row on twice; an event the Mac gets twice).  Only the same row: the same
+        words in another row are matched afresh, a person's when no send of ours is waiting for them
+        (win review F4 (a): before, the same words within 120 s of a read-back were swallowed, and an
+        operator answering 「好的」 as the bot just had took nothing over).  The Mac's ``edge_operator``
+        lines were compared with the sends on Windows already: only a row handed on again is looked for."""
+        key = _row_key(msg)
         with self._sent_lock:
-            seen = self._read_back.setdefault(chat_id, {})
-            for line, at in list(seen.items()):
+            rows = self._read_back.setdefault(chat_id, {})
+            for k, at in list(rows.items()):
                 if now - at > READ_BACK_SEC:
-                    del seen[line]
-            if matched:
-                seen[text] = now
-            elif text in seen:
-                logger.info("PRM: our line in %s…'s chat read again %.0f s after it was matched (the same send, "
-                            "a second id); not an operator's", chat_id[:8], now - seen[text])
+                    del rows[k]
+            if key is not None and key in rows:
+                logger.info("PRM: a line in %s…'s chat handed on again %.0f s after it was handled (the same row); "
+                            "nothing new", chat_id[:8], now - rows[key])
                 return True, None
-            if not seen:
+            if key is not None:
+                rows[key] = now
+                while len(rows) > READ_BACK_ROWS:
+                    del rows[next(iter(rows))]
+            if not rows:
                 del self._read_back[chat_id]
-        return matched, packet_id
+        if msg.get("edge_operator"):
+            return False, None             # Mac 端：Windows 已经用发送记录比过了，对不上才报 operator_message
+        return self._match_sent(chat_id, msg, now)
 
     def _match_sent(self, chat_id: str, msg: dict, now: float) -> tuple[bool, Optional[int]]:
         """Was this own line sent by the bot (``_match_own``)?  What was sent before this run is
@@ -970,12 +1119,20 @@ class PrmService:
             msg_type = int(msg.get("msg_type", 1) or 1)
         except (TypeError, ValueError):
             msg_type = 1
-        written = min(now, float(msg.get("timestamp", 0) or 0) or now)
+        written = min(now, self._local(float(msg.get("timestamp", 0) or 0)) or now)
+        sample = None
         with self._sent_lock:
             if msg_type != 1:
-                at, pid = self._sent_files.get(chat_id) or (None, None)
-                if at is not None and now - at <= OWN_FILE_SEC:
-                    return True, pid
+                # Each file sent covers one row of its own kind, the oldest first (win review F4 (b):
+                # before, any picture, voice message or sticker for OWN_FILE_SEC after a file was ours)
+                files = self._sent_files.get(chat_id) or deque()
+                for entry in list(files):
+                    if now - entry[1] > OWN_FILE_SEC:
+                        files.remove(entry)
+                for entry in files:
+                    if own_file_fits(entry[0], msg):
+                        files.remove(entry)
+                        return True, entry[2]
             else:
                 text = _norm(_QUOTE_PREFIX.sub("", str(msg.get("content", "") or "")))
                 lines = self._sent_lines.get(chat_id) or deque()
@@ -984,19 +1141,29 @@ class PrmService:
                         lines.remove(item)
                     elif item[0] == text:
                         lines.remove(item)
-                        return True, item[2]
+                        sample = (self._clock_sample(msg, item[1], now), item[2])
+                        break
+        if sample is not None:
+            if sample[0] is not None:
+                self._note_clock(sample[0], now)
+            return True, sample[1]
         # Sent before this run (the bot restarted in between): the database, but only what
         # WeChat has not shown yet; this run's sends are all in memory, so an operator typing
         # the same words later is still seen as a person.
         party = self._store.party_by_wxid(chat_id)
         if party is None:
             return False, None
+        # A draft the bot was stopped in the middle of sending (``indeterminate``: settled by ``start``
+        # when this run began, after its line was written) is looked for too (win review F4 (d)).
+        unsure = self._store.unsure_since(chat_id, written - OWN_MATCH_SEC)
         if msg_type != 1:
             # A file of a draft sent just before a restart: WeChat shows it while the draft's
             # files are going out, before its send returns (``sent_at``).
-            for packet in self._store.sent_since(chat_id, written - OWN_FILE_EARLY_SEC):
-                if (packet["attachments"] and float(packet["sent_at"]) < self._started
-                        and float(packet["sent_at"]) <= written + OWN_FILE_SEC):
+            before = [p for p in self._store.sent_since(chat_id, written - OWN_FILE_EARLY_SEC)
+                      if p["attachments"] and float(p["sent_at"]) < self._started
+                      and float(p["sent_at"]) <= written + OWN_FILE_SEC]
+            for packet in [*before, *(p for p in unsure if p["attachments"])]:
+                if self._file_row_of(packet, msg):
                     return True, packet["id"]
             return False, None
         tokens = self._store.tokens(party["id"])
@@ -1006,12 +1173,30 @@ class PrmService:
             final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
             if _norm(pii.unmask(final, tokens)) == text:
                 return True, packet["id"]
+        for packet in unsure:
+            final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
+            if str(final or "").strip() and _norm(pii.unmask(final, tokens)) == text:
+                return True, packet["id"]
         deal = self._store.deal_of(party["id"], now)
         for ev in self._store.events(deal["id"], limit=20):
             if (ev["kind"] == "holding_reply" and written - OWN_MATCH_SEC <= ev["at"] < self._started
                     and _norm(ev["detail"].get("text")) == text):
                 return True, None
         return False, None
+
+    def _file_row_of(self, packet: dict, msg: dict) -> bool:
+        """Is this own row one of the files of ``packet``, sent before this run (``_match_sent``)?  Each
+        of its files covers one row of its kind, never more (``_file_rows`` counts them down)."""
+        with self._sent_lock:
+            left = self._file_rows.get(packet["id"])
+            if left is None:
+                left = self._file_rows[packet["id"]] = [file_kind(a.get("name") or a.get("path") or "")
+                                                        for a in packet["attachments"]]
+            for n, kind in enumerate(left):
+                if own_file_fits(kind, msg):
+                    del left[n]
+                    return True
+        return False
 
     def on_send_failed(self, chat_id: str, text: str, why: str, *, digest: str = "",
                        sent_at: Optional[float] = None, file: bool = False) -> None:
@@ -2189,6 +2374,7 @@ class PrmService:
             "can_send": self._send is not None, "can_send_files": self._send_file is not None,
             "takeover_min": self._takeover_sec // 60, "holding_min": self._holding_sec // 60,
             "retention_days": self._retention_days, "catchup_hours": self._catchup_sec // 3600,
+            "clock_skew_sec": int(round(self._skew)),
         })
 
     # ── the sender thread: approved drafts, holding replies, clean-ups ────
@@ -2253,7 +2439,7 @@ class PrmService:
             if not Path(path).is_file():
                 problem = f"文件「{item.get('name')}」在电脑上找不到了"
                 break
-            noted = self._note_sent(packet["chat_id"], file=True, packet_id=packet["id"])
+            noted = self._note_sent(packet["chat_id"], file=path, packet_id=packet["id"])
             try:
                 result = self._send_file(packet["chat_id"], path)
                 if not result:
@@ -2346,7 +2532,7 @@ class PrmService:
         reply, does not count)."""
         if any(_event_time(ev) >= since for ev in self._store.events(deal["id"], limit=20, kinds=("operator_message",))):
             return True
-        for packet in self._store.sent_since(chat_id, since):
+        for packet in self._store.sent_since(chat_id, self._local(since)):
             final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
             if str(final or "").strip() or packet["attachments"]:
                 return True
