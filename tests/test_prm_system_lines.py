@@ -115,7 +115,8 @@ def test_the_words_of_a_system_line():
 
 def test_a_draft_still_being_written_when_she_recalled_waits_for_a_person(bot):
     """The job was running when she took a message back: its draft may answer it, so it waits (even for
-    a kind that goes out on its own) and says why; a job made after the recall is drafted as usual."""
+    a kind that goes out on its own) and says why.  Once an operator decided on it (the recall is seen
+    to), a later job's draft goes by its gate again."""
     bot.prm.store.set_gate("other", "auto", bot.clock.now)
     bot.prm.handle(bot.msg("寄到张江路100号"))
     job = bot.worker_takes()
@@ -125,6 +126,7 @@ def test_a_draft_still_being_written_when_she_recalled_waits_for_a_person(bot):
     packet = bot.prm.store.packet_for_job(job["id"])
     assert (packet["status"], packet["route"]) == ("pending", "review")
     assert packet["needs_attention"] and packet["reason"].startswith("达人撤回了一条消息")
+    assert bot.prm.decide(packet["id"], "drop")["ok"]
     bot.clock.now += 60
     bot.prm.handle(bot.msg("改成寄到浦东"))
     later = bot.worker_takes()

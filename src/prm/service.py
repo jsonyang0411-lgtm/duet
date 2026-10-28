@@ -23,6 +23,13 @@ deal is done (delivered, or quiet that long) its receiving details are cleared e
 the Mac's case file through a ``purge`` job.  The deal actions (stage, mode,
 shipment) are in deals.py.
 
+What the deal says to a person (``attention``) is its notices (store.py): the latest draft's own
+notes, which the next draft replaces, and the system's, which stay until they are dealt with (mac
+review F1): a draft job that gave no draft (her lines in it go with her next draft job: answered,
+not lost), a 专属佣金 step owed while a person had the chat or the creator was off the list (asked for
+when that ends, ``sweep_owed_steps``), a platform action that ended red (until 已处理), her recall,
+messages read too late to draft.
+
 Registering is always an operator's decision.  When the creator registered is a new friend
 (src/wechat/new_friends.py found the line WeChat writes when two people become friends), her
 messages since she was added, friend-request greeting included, become one draft job that waits
@@ -63,8 +70,8 @@ from ..wechat.new_friends import is_friend_notice
 from . import deals, gates, pii, platforms, retention
 from .result import MAX_DRAFT_CHARS, MESSAGE_KINDS, DraftError, parse_draft
 from .store import (
-    APPROVED, COPILOT, DROPPED, EXECUTING, FAILED, HUMAN, LANE_REPLY, LANE_SYSTEM, MESSAGE_TOOL, MODES, NO_REPLY,
-    PAUSED, PENDING,
+    APPROVED, COPILOT, DRAFT_NOTES, DROPPED, EXECUTING, FAILED, HUMAN, LANE_REPLY, LANE_SYSTEM, MESSAGE_TOOL, MODES,
+    NO_REPLY, PAUSED, PENDING,
     SENDING, SENT, SHIPMENT_STATES, STAGES, SUPERSEDED, PartyError, PrmStore,
 )
 
@@ -85,6 +92,7 @@ HOLDING_TEXT = "收到，我确认一下马上回你"
 # Mac 重启以前发的、后来 Windows 才报失败的：没有发送时间时往回找这么久（edge 后端的发送记录留一天）
 RESTART_FAIL_SEC = 86400
 CATCHUP_HOURS = 12           # PRM_CATCHUP_HOURS: a message read late is drafted up to this old (0-72)
+LINES_CHARS = 6000           # the creator's lines a notice of a draft not written keeps for her next draft
 OWN_FILE_EARLY_SEC = 60      # a file the bot sent shows in WeChat up to this long before its send returns
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
 _WXID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{3,63}$")
@@ -148,6 +156,22 @@ def recall_note(at: float) -> str:
     return f"达人撤回了一条消息（{_clock_text(at)}），待审批的草稿可能是按撤回的内容写的，发之前请核对"
 
 
+def failed_text(head: str, into: Optional[int] = None) -> str:
+    """The notice of a draft job that gave no draft: what went wrong, and where her lines go."""
+    return f"{head}；" + (f"她这几条消息已经并进 #{into} 一起起草" if into else
+                         "她这几条消息会并进她下一条消息的草稿一起回，也可以直接在微信里回她")
+
+
+def _merged_gap(have, info: dict) -> dict:
+    """Two of a job's ``meta.late`` / ``missed`` / ``new_friend``: the earliest ``from``, counts added."""
+    if not isinstance(have, dict) or not have.get("from"):
+        return dict(info)
+    out = {**have, "from": min(float(have["from"]), float(info.get("from") or have["from"]))}
+    if "count" in have or "count" in info:
+        out["count"] = int(have.get("count") or 0) + int(info.get("count") or 0)
+    return out
+
+
 def system_line(msg: dict) -> Optional[str]:
     """The words of one of WeChat's own lines in a chat (type 10000 / 10002: a recall, 拍一拍, a red
     packet or transfer notice …), or None for a line someone wrote.  Their sender is empty, so the
@@ -197,7 +221,7 @@ EVENT_NAMES = {
     "wrong": "标为发错了", "purge": "清除收件信息", "purge_case": "清除 Mac 案卷里的收件信息",
     "platform_execute": "批准执行平台动作", "platform_result": "平台动作结果",
     "platform_preview": "重新预览平台动作", "platform_ack": "平台动作已处理",
-    "recall": "撤回了一条消息",
+    "recall": "撤回了一条消息", "draft_failed": "草稿没写成",
 }
 # A creator's message recorded without a draft because it was read too late (PRM_CATCHUP_HOURS).
 MISSED_EVENT_NAME = "机器人没在读时达人的消息（没有起草）"
@@ -210,6 +234,8 @@ def event_out(ev: dict) -> dict:
             else EVENT_NAMES.get(ev["kind"], ev["kind"]))
     if ev["kind"] == "recall":
         name = "运营撤回了一条消息" if detail.get("by") == "operator" else "达人撤回了一条消息"
+    elif ev["kind"] == "draft_failed" and detail.get("job"):
+        name = f"#{detail['job']} 草稿没写成"
     return {"id": ev["id"], "kind": ev["kind"], "name": name,
             "actor": ev.get("actor", ""), "at": ev["at"], "detail": detail}
 
@@ -516,17 +542,21 @@ class PrmService:
                 return
             note = recall_note(written)
             held = self._store.hold_for_review(deal["id"], note, now)
-            self._store.update_deal(deal["id"], now, attention="；".join(
-                t for t in (note, deal.get("attention") or "") if t)[:300])
+            # until an operator decides on one of her drafts or answers her by hand (``_person_decided``)
+            self._store.set_notice(deal["id"], "recall", note, now, recalled_at=written)
         logger.info("PRM: party %d recalled a message; %d draft(s) not sent yet wait for a person", party["id"], held)
 
-    def _recalled_since(self, deal_id: int, since: float) -> Optional[float]:
-        """When the creator took a message back, if her latest recall came at ``since`` or later (a draft
-        job made before it may hold what she recalled); else None."""
-        for ev in self._store.events(deal_id, limit=10, kinds=("recall",)):
+    def _recalled_since(self, deal: dict, since: float) -> Optional[float]:
+        """When the creator took a message back, if a draft made at ``since`` must wait for a person for
+        it: her latest recall came at ``since`` or later (a job made before it may hold what she
+        recalled), or no operator has seen to her recall yet (its notice is there); else None."""
+        for ev in self._store.events(deal["id"], limit=10, kinds=("recall",)):
             if ev["detail"].get("by") == "creator":
-                return float(ev["detail"].get("at") or ev["at"]) if float(ev["at"]) >= since else None
-        return None
+                if float(ev["at"]) >= since:
+                    return float(ev["detail"].get("at") or ev["at"])
+                break
+        notice = next((n for n in deal.get("notices") or [] if n.get("key") == "recall"), None)
+        return float(notice.get("recalled_at") or notice["at"]) if notice else None
 
     def _take(self, msg: dict, party: dict, chat_id: str) -> None:
         """``handle`` for a registered creator's message.  What is recorded and the job it joins
@@ -617,11 +647,29 @@ class PrmService:
             if not fresh:
                 open_job = self._relay.store.latest_open(chat_id, drafts_only=True, system=False)
                 fresh = open_job is None or not job_meta(open_job).get("new_friend")
+        # Her lines of draft jobs that gave no draft (mac review F1): answered with this one, before it.
+        carried = sorted((n for n in deal["notices"] if str(n["key"]).startswith("failed:")
+                          and n.get("lane") == LANE_REPLY and (n.get("lines") or n.get("history"))
+                          and (not n.get("into") or self._cancelled(n["into"]))), key=lambda n: int(n.get("job") or 0))
+        if carried:
+            text = "\n".join([*(str(n["lines"]) for n in carried if n.get("lines")), text])
+            told = [h for n in carried for h in n.get("history") or [] if isinstance(h, dict)]
+            if told:
+                meta["history"] = [*told, *meta.get("history", [])]
+            for n in carried:
+                for key, info in (n.get("gap") or {}).items():
+                    if key in ("late", "missed", "new_friend") and isinstance(info, dict):
+                        meta[key] = _merged_gap(meta.get(key), info)
+            fresh = True
         how, job_id = self._relay.submit(chat_id, chat_id, text, kind=PRM, files=files, settle_sec=SETTLE_SEC,
                                          meta=meta, fresh=fresh)
-        logger.info("PRM: party %d message -> job #%d (%s)%s%s", party["id"], job_id, how,
+        for n in carried:
+            self._store.set_notice(deal["id"], n["key"], failed_text(n.get("head") or n["text"], job_id), now,
+                                   into=job_id)
+        logger.info("PRM: party %d message -> job #%d (%s)%s%s%s", party["id"], job_id, how,
                     f"; {stale} waiting draft(s) out of date" if stale else "",
-                    f"; {len(backlog)} recorded line(s) told (a takeover, or read too late)" if backlog else "")
+                    f"; {len(backlog)} recorded line(s) told (a takeover, or read too late)" if backlog else "",
+                    f"; the lines of {len(carried)} draft job(s) that gave no draft go along" if carried else "")
 
     def _missed(self, party: dict, deal: dict, line: str, at: float, now: float) -> None:
         """A creator's message older than PRM_CATCHUP_HOURS when it was read: too old to draft.
@@ -635,8 +683,9 @@ class PrmService:
         waiting = [ev for ev in self._store.backlog(deal["id"])
                    if ev["kind"] == "creator_message" and ev["detail"].get("missed")]
         earliest = min([_event_time(ev) for ev in waiting] or [at])
-        self._store.update_deal(deal["id"], now, last_message_at=_later(deal, at),
-                                attention=missed_note(len(waiting) or 1, earliest))
+        self._store.update_deal(deal["id"], now, last_message_at=_later(deal, at))
+        # until the draft job that hears of them comes back (on_result)
+        self._store.set_notice(deal["id"], "missed", missed_note(len(waiting) or 1, earliest), now)
         logger.warning("PRM: party %d's message was read %.1f h after it was written (more than "
                        "PRM_CATCHUP_HOURS); recorded, not drafted, the deal asks a person to look",
                        party["id"], (now - at) / 3600)
@@ -736,6 +785,7 @@ class PrmService:
         self._store.add_event(deal["id"], party["id"], "operator_message", {"text": text, "at": sent_at or now},
                               actor="operator", forwarded=False, now=now)
         self._store.supersede(deal["id"], now, lane=LANE_REPLY)
+        self._answered_by_hand(deal["id"], sent_at or now, now)
         mode = deals.effective_mode(deal, now)
         if mode == PAUSED:
             logger.info("PRM: an operator wrote to party %d from WeChat; the deal stays paused", party["id"])
@@ -755,6 +805,23 @@ class PrmService:
         self._store.add_event(deal["id"], party["id"], "takeover", {"until": until}, actor="system", now=now)
         logger.info("PRM: an operator wrote to party %d from WeChat; the deal is a person's until %s",
                     party["id"], time.strftime("%H:%M", time.localtime(until)))
+
+    def _answered_by_hand(self, deal_id: int, written: float, now: float) -> None:
+        """An operator wrote to her by hand (at ``written``): a draft of hers that was not written, and
+        her recall, are seen to by a person.  The first is shown no more (its lines still go with her next
+        draft job: the case file must hear of them); the recall's notice goes."""
+        def edit(notices):
+            out = []
+            for n in notices:
+                if n["key"] == "recall" and written >= float(n.get("recalled_at") or n.get("at") or 0):
+                    continue
+                if (str(n["key"]).startswith("failed:") and n.get("lane") == LANE_REPLY
+                        and written >= float(n.get("asked_at") or 0)):
+                    n = {**n, "show": False}
+                out.append(n)
+            return out
+
+        self._store.edit_notices(deal_id, edit, now)
 
     def _note_sent(self, chat_id: str, text: str = "", packet_id: Optional[int] = None, file: bool = False) -> tuple:
         """What the bot is about to send, noted before it goes (WeChat shows a line, and the
@@ -960,6 +1027,10 @@ class PrmService:
                                       actor="mac", now=now)
             return True
         if status == "cancelled":
+            # (an operator cancelled it in the console): her lines it took along wait for the next one again
+            self._store.edit_notices(deal_id, lambda notices: [
+                {**n, "into": None, "text": failed_text(n.get("head") or n["text"])} if n.get("into") == job["id"]
+                else n for n in notices], now)
             return True
         # Messages read late (PRM_CATCHUP_HOURS): said in the deal's attention, the draft is reviewed.
         notes = gap_notes(meta)
@@ -970,7 +1041,7 @@ class PrmService:
                 extra = {}
             extra = extra if isinstance(extra, dict) else {}
             why = "Mac 失联了" if status == "lost" else str(extra.get("error") or job.get("result_text") or "没有返回内容")
-            self._store.update_deal(deal_id, now, attention="；".join([f"#{job['id']} 草稿没写成：{why[:120]}", *notes])[:300])
+            self._draft_failed(job, meta, f"#{job['id']} 草稿没写成：{why[:120]}", notes, now)
             logger.warning("PRM: job #%d %s; the deal needs a person", job["id"], status)
             return True
         if self._store.packet_for_job(job["id"]) is not None:
@@ -978,8 +1049,7 @@ class PrmService:
         try:
             draft = parse_draft(job.get("result_text") or "")
         except DraftError as e:
-            self._store.update_deal(deal_id, now, attention="；".join(
-                [f"#{job['id']} 的草稿格式不对（{e.code}），没有生成待审批", *notes])[:300])
+            self._draft_failed(job, meta, f"#{job['id']} 的草稿格式不对（{e.code}），没有生成待审批", notes, now)
             logger.warning("PRM: job #%d answer unusable: %s", job["id"], e)
             return True
         draft = self._mask_draft(party_id, draft, now)
@@ -1009,17 +1079,23 @@ class PrmService:
         stepless = ("开专属佣金这一步的草稿没带平台动作，平台上什么都不会做；回复要是说开好了，发之前请核对"
                     if lane == LANE_SYSTEM and draft.platform is None and not refused
                     and (draft.reply_draft or attachments) else "")
-        # She took a message back after this job was made: the draft may answer what she recalled.
-        recalled = self._recalled_since(deal_id, float(job.get("created_at") or 0))
+        # She took a message back after this job was made (the draft may answer what she recalled), or
+        # nobody has seen to her recall yet: a person decides.
+        recalled = self._recalled_since(deal, float(job.get("created_at") or 0)) if lane == LANE_REPLY else None
         recall = recall_note(recalled) if recalled is not None else ""
+        # A job that failed (the Mac went silent) and came back after her lines went into a later job: out of date.
+        handed_on = lane == LANE_REPLY and self._handed_on(deal, job["id"])
         route, decided_at = gates.REVIEW, None
         if draft.platform is not None:
             # A platform write: always a person's decision (8.1's gates do not apply).
-            state = SUPERSEDED if mode != COPILOT or (newer is not None and newer["id"] > job["id"]) else PENDING
+            state = (SUPERSEDED if mode != COPILOT or handed_on or (newer is not None and newer["id"] > job["id"])
+                     else PENDING)
         elif not draft.reply_draft and not attachments:
             state = NO_REPLY
         elif mode != COPILOT:
             state = SUPERSEDED                         # a person has the chat
+        elif handed_on:
+            state = SUPERSEDED                         # its lines went into a later draft job
         elif newer is not None and newer["id"] > job["id"]:
             state = SUPERSEDED                         # the creator wrote again: a newer draft is coming
         elif notes or recall or lane == LANE_SYSTEM:
@@ -1051,10 +1127,24 @@ class PrmService:
         )
         if state in (PENDING, APPROVED):
             self._store.supersede(deal_id, now, keep=packet_id, lane=lane)
-        attention = [*notes, *([recall] if recall else []),
-                     *([draft.reason] if draft.needs_attention and draft.reason else [])]
-        if lane == LANE_SYSTEM and state == SUPERSEDED:
-            attention.append(f"#{job['id']} 开专属佣金这一步的草稿没进待审批（人工接管中，或者又有了新的一步），请运营核对")
+        attention = [*notes, *([draft.reason] if draft.needs_attention and draft.reason else [])]
+        # (her recall: its own notice on the deal says so, the draft's reason too)
+        # The draft job of her lines that had no draft before (or this job itself, back late): seen to.
+        answered = self._store.drop_notices(deal_id, lambda n: n.get("into") == job["id"]
+                                            or n["key"] == f"failed:{job['id']}", now)
+        if any(n.get("into") == job["id"] for n in answered):
+            attention.append(f"#{job['id']} 的草稿也回了 " + "、".join(f"#{n.get('job')}" for n in answered
+                                                                   if n.get("into") == job["id"])
+                             + " 没写成时她的消息")
+        if meta.get("missed"):                         # told to the Mac now: the draft's notes say it
+            self._store.drop_notices(deal_id, lambda n: n["key"] == "missed", now)
+        if lane == LANE_SYSTEM and state == SUPERSEDED and mode != COPILOT:
+            # A person took the chat while the step was drafted: it is owed, asked for again when that ends.
+            step = meta.get("step") if isinstance(meta.get("step"), dict) else {}
+            self._owe_step(deal, f"#{job['id']} 开专属佣金这一步的草稿没进待审批", str(meta["system_note"]),
+                           step.get("packet"), bool(step.get("delivered")), now)
+        elif lane == LANE_SYSTEM and state == SUPERSEDED:
+            attention.append(f"#{job['id']} 开专属佣金这一步的草稿没进待审批（又有了新的一步），请运营核对")
         if short:
             attention.append(short)
         if refused:
@@ -1066,12 +1156,75 @@ class PrmService:
         if draft.platform is not None and draft.platform.get("verdict") != "ready":
             why = "；".join(draft.platform.get("problems") or []) or platforms.VERDICTS.get(draft.platform.get("verdict"), "")
             attention.append(f"平台动作预览没通过：{why}"[:200])
-        self._store.update_deal(deal_id, now, merge_slots=draft.slots,
-                                stage_proposal=draft.stage_proposal, attention="；".join(attention)[:300])
+        self._store.update_deal(deal_id, now, merge_slots=draft.slots, stage_proposal=draft.stage_proposal)
+        self._store.set_notice(deal_id, DRAFT_NOTES + lane, "；".join(attention), now)   # its own notes: replaced
         if state == APPROVED:
             self._wake.set()
         logger.info("PRM: job #%d -> packet %d (%s, %s, %s)", job["id"], packet_id, state, route, draft.message_kind)
         return True
+
+    def _draft_failed(self, job: dict, meta: dict, head: str, notes: list, now: float) -> None:
+        """A draft job that gave no draft (the Mac failed, went silent, answered nothing usable): a notice
+        that stays until it is seen to (mac review F1; before, the next draft's notes wiped it and her
+        message was never answered).  A reply job's notice keeps her lines (its text and the follow-ups
+        the Mac had, ``_job_lines``) and what it was told (``history``, ``late`` / ``missed`` /
+        ``new_friend``): her next draft job takes them along (``_submit``), and its draft, or this job's
+        own coming back late, sees to the notice; an operator answering her by hand puts it away
+        (``_answered_by_hand``).  A step the bot asked for (the system lane) is not asked again by
+        itself: its notice goes when the next step is asked for or the deal is set back before 已签收."""
+        deal_id, party_id, job_id = int(meta["deal_id"]), int(meta["party_id"]), int(job["id"])
+        lane = LANE_SYSTEM if meta.get("system_note") else LANE_REPLY
+        with self._handle_lock:                        # (``_submit`` takes these notices along)
+            if any(int(ev["detail"].get("job") or 0) == job_id
+                   for ev in self._store.events(deal_id, limit=50, kinds=("draft_failed",))):
+                return                                 # lost first, then failed: said once
+            self._store.add_event(deal_id, party_id, "draft_failed", {"job": job_id, "why": head[:200]},
+                                  actor="mac", now=now)
+            if meta.get("missed"):                     # this notice says it now
+                self._store.drop_notices(deal_id, lambda n: n["key"] == "missed", now)
+            if lane == LANE_SYSTEM:
+                self._store.set_notice(deal_id, f"failed:{job_id}", "；".join(
+                    [head.replace("草稿没写成", "开专属佣金这一步的草稿没写成", 1), *notes,
+                     "系统不会自己再起草这一步，请运营处理"]), now, job=job_id, lane=lane)
+                return
+            # this job carried the lines of earlier ones: they are in its own lines now
+            self._store.drop_notices(deal_id, lambda n: n.get("into") == job_id, now)
+            head = "；".join([head, *notes])
+            gap = {k: meta[k] for k in ("late", "missed", "new_friend") if isinstance(meta.get(k), dict)}
+            self._store.set_notice(deal_id, f"failed:{job_id}", failed_text(head), now, job=job_id, lane=lane,
+                                   head=head, lines=self._job_lines(job)[:LINES_CHARS], gap=gap,
+                                   history=[h for h in meta.get("history") or [] if isinstance(h, dict)],
+                                   asked_at=float(job.get("created_at") or now))
+
+    def _job_lines(self, job: dict) -> str:
+        """The creator's lines a draft job had: its text and the follow-ups the Mac was handed (those it
+        never saw are a job of their own already: ``ClaudeRelay._requeue_leftovers``)."""
+        rows = [str(r.get("text") or "") for r in (self._relay.store.followups(int(job["id"]), 0) or [])]
+        try:
+            later = int((json.loads(job.get("result_json") or "{}") or {}).get("followups_job") or 0)
+        except (ValueError, TypeError, AttributeError):
+            later = 0
+        if later and rows:
+            requeued = str((self._relay.store.get(later) or {}).get("text") or "")
+            for n in range(len(rows), 0, -1):
+                if "\n".join(rows[-n:]) == requeued:
+                    rows = rows[:-n]
+                    break
+        return "\n".join(t for t in [str(job.get("text") or ""), *rows] if t.strip())
+
+    def _cancelled(self, job_id) -> bool:
+        """Was this job cancelled (an operator, in the console; one cancelled before the Mac took it is
+        never handed back: ``RelayStore.cancel``)?"""
+        job = self._relay.store.get(int(job_id or 0))
+        return job is None or job["status"] == "cancelled"
+
+    def _handed_on(self, deal: dict, job_id: int) -> bool:
+        """Did this job give no draft before (lost, say) and her lines go into a later draft job?"""
+        notice = next((n for n in deal.get("notices") or [] if n.get("key") == f"failed:{job_id}"), None)
+        if notice is not None:
+            return bool(notice.get("into"))
+        return any(int(ev["detail"].get("job") or 0) == job_id
+                   for ev in self._store.events(deal["id"], limit=50, kinds=("draft_failed",)))
 
     def _mask_draft(self, party_id: int, draft, now: float):
         """The draft with its numbers as the creator's placeholders, before anything of it is stored.
@@ -1162,6 +1315,8 @@ class PrmService:
     def set_active(self, party_id: int, active: bool) -> Optional[dict]:
         party = self._store.update_party(int(party_id), active=active, now=self._clock())
         self._parties_changed()
+        if active:
+            self._wake.set()                           # a 专属佣金 step owed is asked for now (sweep_owed_steps)
         return party
 
     def _parties_changed(self) -> None:
@@ -1185,6 +1340,11 @@ class PrmService:
             after = self._store.deal(before["id"]) if before else None
             if after and after.get("delivered_at") and not before.get("delivered_at"):
                 self._on_delivered(after, now)
+            elif after and before.get("delivered_at") and not after.get("delivered_at"):
+                # set back before 已签收 (to sign for it again, kb 2.1): what waited for the signature is not
+                # owed now, and a step that was not written is picked up by signing for it again
+                self._store.drop_notices(after["id"], lambda n: (n["key"] == "step" and n.get("delivered")) or (
+                    str(n["key"]).startswith("failed:") and n.get("lane") == LANE_SYSTEM), now)
         return result
 
     def _on_delivered(self, deal: dict, now: float) -> None:
@@ -1200,7 +1360,7 @@ class PrmService:
                 if packet is not None:
                     data = packet["platform"] or {}
                     self._ask_next_step(packet, next_step_note(data.get("action") or {}, data.get("execution") or {},
-                                                               delivered=True), now)
+                                                               delivered=True), now, delivered=True)
                 return
 
     def reveal(self, party_id: int, actor: str = "console") -> dict:
@@ -1224,6 +1384,7 @@ class PrmService:
         if action == "drop":
             if not self._store.move(packet["id"], (PENDING,), DROPPED, decided_at=now):
                 return {"ok": False, "error": "这条草稿已经处理过了"}
+            self._person_decided(packet, now)
             return {"ok": True, "status": DROPPED}
         if action == "execute":
             return self._approve_execute(packet, text, now)
@@ -1254,8 +1415,14 @@ class PrmService:
         if not self._store.move(packet["id"], (PENDING,), APPROVED, decided_at=now, final_text=final,
                                 edited=int(final != packet["text"])):
             return {"ok": False, "error": "这条草稿已经处理过了（或者达人又发了新消息，草稿已过时）"}
+        self._person_decided(packet, now)
         self._wake.set()
         return {"ok": True, "status": APPROVED}
+
+    def _person_decided(self, packet: dict, now: float) -> None:
+        """An operator decided on a draft answering her: her recall (the draft said so) is seen to."""
+        if (packet.get("meta") or {}).get("lane") != LANE_SYSTEM and packet.get("job_id") is not None:
+            self._store.drop_notices(packet["deal_id"], lambda n: n["key"] == "recall", now)
 
     # ── platform actions (platforms.py; the CLIs run on the Mac) ───────────
 
@@ -1318,6 +1485,7 @@ class PrmService:
         self._store.add_event(packet["deal_id"], packet["party_id"], "platform_execute",
                               {"packet": packet["id"], "action": action["action"], "job": job_id},
                               actor="console", now=now)
+        self._person_decided(packet, now)
         logger.info("PRM: packet %d approved; %s goes to the Mac as job #%d", packet["id"], action["action"], job_id)
         return {"ok": True, "status": EXECUTING, "job": job_id}
 
@@ -1381,6 +1549,7 @@ class PrmService:
             return {"ok": False, "error": "已经标过了"}
         self._store.add_event(packet["deal_id"], packet["party_id"], "platform_ack", {"packet": packet["id"]},
                               actor="console", now=now)
+        self._store.drop_notices(packet["deal_id"], lambda n: n["key"] == f"platform:{packet['id']}", now)
         return {"ok": True}
 
     def _on_platform_job(self, job: dict, meta: dict, now: float) -> bool:
@@ -1454,8 +1623,8 @@ class PrmService:
             if packet["status"] == FAILED:
                 record["late"] = True
                 self._store.set_platform(packet["id"], {**executed, "acked_at": None}, (FAILED,))
-                self._store.update_deal(packet["deal_id"], now, attention=(
-                    f"#{packet['id']} 平台动作的结果晚到了：{platforms.outcome_text(outcome)}；回复没有自动发，请运营处理")[:300])
+                self._store.set_notice(packet["deal_id"], f"platform:{packet['id']}", (
+                    f"#{packet['id']} 平台动作的结果晚到了：{platforms.outcome_text(outcome)}；回复没有自动发，请运营处理"), now)
             return
         event = {"packet": packet["id"], "action": action.get("action"), "outcome": outcome,
                  "link": (record.get("created") or {}).get("link", "")}
@@ -1492,39 +1661,88 @@ class PrmService:
         if self._store.move(packet["id"], (EXECUTING,), FAILED, outcome=f"platform_{outcome.lower()}", sent_at=now,
                             error=error, platform=executed):
             self._store.add_event(packet["deal_id"], packet["party_id"], "platform_result", event, actor="mac", now=now)
-            self._store.update_deal(packet["deal_id"], now, attention=f"#{packet['id']} {error}"[:300])
+            # until an operator marks it dealt with (``_ack``), whatever the drafts after it say
+            self._store.set_notice(packet["deal_id"], f"platform:{packet['id']}", f"#{packet['id']} {error}", now)
             logger.warning("PRM: packet %d %s ended %s; nothing sent", packet["id"], action.get("action"), outcome)
 
-    def _ask_next_step(self, packet: dict, note: str, now: float) -> None:
+    def _ask_next_step(self, packet: dict, note: str, now: float, delivered: bool = False) -> None:
         """A platform write that leads to the next one (a sample order → its 专属佣金): a draft
         job of its own, told what happened in ``meta.system_note``.  What it drafts is a platform
         action like any other: previewed on the Mac, approved by a person; and whatever it drafts
-        waits for a person, whatever its kind's gate (``on_result``: the system lane).  Not for a creator the
-        operators took off the list (inactive) or a deal a person has: the deal says so instead."""
+        waits for a person, whatever its kind's gate (``on_result``: the system lane).  Not now for a
+        creator the operators took off the list (inactive) or a deal a person has: the step is owed
+        (a notice that stays, mac review F1) and asked for when that ends (``sweep_owed_steps``).
+        ``delivered``: the step waits for the signature (no longer owed once the deal is set back)."""
         if not note:
             return
         deal = self._store.deal(packet["deal_id"])
         party = self._store.party(packet["party_id"])
         if deal is None or party is None:
             return
-        if not party.get("active"):
-            self._store.update_deal(deal["id"], now, attention=(
-                f"#{packet['id']} 之后该开专属佣金了：这位达人已经停用（不在达人名单里），系统没有起草，请运营处理")[:300])
-            logger.info("PRM: party %d is inactive; the next step after packet %d is left to a person",
+        if self._step_blocked(deal, party, now):
+            self._owe_step(deal, f"#{packet['id']} 之后该开专属佣金了", note, packet["id"], delivered, now)
+            logger.info("PRM: party %d: the next step after packet %d is owed (inactive, or a person has the deal)",
                         party["id"], packet["id"])
             return
+        self._store.drop_notices(deal["id"], lambda n: n["key"] == "step", now)     # this one goes now
+        self._dispatch_step(deal, party, note, packet["id"], delivered, now)
+
+    def _step_blocked(self, deal: dict, party: dict, now: float) -> str:
+        """Why a 专属佣金 step cannot be asked for now ("" = it can)."""
+        if not party.get("active"):
+            return "这位达人已经停用（不在达人名单里），系统先不起草；重新启用后会自动起草"
         if self._mode(deal, now) != COPILOT:
-            self._store.update_deal(deal["id"], now, attention=(
-                f"#{packet['id']} 之后该开专属佣金了：现在不在副驾驶模式，系统没有起草，请运营处理")[:300])
-            return
-        meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"], "system_note": note}
+            return "现在不在副驾驶模式，系统先不起草；切回副驾驶（或者人工接管到期）后会自动起草"
+        return ""
+
+    def _owe_step(self, deal: dict, head: str, note: str, packet_id, delivered: bool, now: float) -> None:
+        """The deal's ``step`` notice: «``head``：why it waits», and what ``sweep_owed_steps`` needs to ask
+        for it (the ``system_note``, the packet it follows, whether it waits for the signature)."""
+        party = self._store.party(deal["party_id"]) or {}
+        why = self._step_blocked(deal, party, now) or "系统一会儿就起草"
+        self._store.set_notice(deal["id"], "step", f"{head}：{why}", now, head=head, note=note, packet=packet_id,
+                               delivered=bool(delivered))
+
+    def _dispatch_step(self, deal: dict, party: dict, note: str, packet_id, delivered: bool, now: float) -> int:
+        """The draft job of a 专属佣金 step (``meta.system_note``; ``meta.step`` says which packet it
+        follows and whether it waited for the signature, should it be owed again); returns its id."""
+        meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"], "system_note": note,
+                "step": {"packet": packet_id, "delivered": bool(delivered)}}
         outbound = self._outbound(deal["id"], party["id"], now)
         if outbound:
             meta["sent"] = outbound
         # input_closed: the creator's next message is a reply job of its own, not part of this step
-        _, job_id = self._relay.submit(packet["chat_id"], packet["chat_id"], "", kind=PRM, meta=meta, fresh=True,
+        _, job_id = self._relay.submit(party["wxid"], party["wxid"], "", kind=PRM, meta=meta, fresh=True,
                                        input_closed=True)
-        logger.info("PRM: packet %d done; job #%d drafts the next step", packet["id"], job_id)
+        # the chain goes on: a step that was not written before is seen to
+        self._store.drop_notices(deal["id"], lambda n: str(n["key"]).startswith("failed:")
+                                 and n.get("lane") == LANE_SYSTEM, now)
+        logger.info("PRM: packet %s done; job #%d drafts the next step", packet_id, job_id)
+        return job_id
+
+    def sweep_owed_steps(self) -> int:
+        """The 专属佣金 steps owed (the step came up while a person had the deal, or the creator was off
+        the list): asked for once the deal is back in copilot mode (the takeover ran out, an operator
+        switched it back) and the creator is on the list again; one that waited for the signature is
+        dropped when the deal was set back before 已签收.  Returns how many were asked for."""
+        asked = 0
+        now = self._clock()
+        for deal in self._store.deals_with_notice("step"):
+            owed = next(n for n in deal["notices"] if n["key"] == "step")
+            party = self._store.party(deal["party_id"])
+            if party is None or (owed.get("delivered") and not deal.get("delivered_at")):
+                self._store.drop_notices(deal["id"], lambda n: n["key"] == "step", now)
+                continue
+            why = self._step_blocked(deal, party, now)
+            if why:
+                if owed.get("head") and owed["text"] != f"{owed['head']}：{why}":
+                    self._store.set_notice(deal["id"], "step", f"{owed['head']}：{why}", now)
+                continue
+            if self._store.drop_notices(deal["id"], lambda n: n["key"] == "step", now):
+                self._dispatch_step(deal, party, str(owed.get("note") or ""), owed.get("packet"),
+                                    bool(owed.get("delivered")), now)
+                asked += 1
+        return asked
 
     def sweep_executing(self) -> int:
         """Executions that cannot finish any more: a job the Mac has not taken within
@@ -1586,6 +1804,7 @@ class PrmService:
         self.sweep_executing()
         self.send_approved()
         self.send_holding_replies()
+        self.sweep_owed_steps()
         now = self._clock()
         if now - self._last_retention >= RETENTION_CHECK_SEC:
             self._last_retention = now
@@ -1752,6 +1971,7 @@ class PrmService:
                                 purged_at=now)
         counts["drafts"] = self._store.rewrite_packets(deal["id"], rewrite)
         counts["events"] = self._store.rewrite_events(deal["id"], rewrite)
+        counts["notices"] = self._store.rewrite_notices(deal["id"], rewrite)
         if chat_id:
             counts["relay"] = self._relay.store.rewrite_chat(chat_id, PRM, rewrite)
             if self._scrub_messages is not None:
