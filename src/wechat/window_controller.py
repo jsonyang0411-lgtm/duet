@@ -75,6 +75,26 @@ VISION_SCREENSHOT_DIR = Path("data/vision_screenshots")
 _PICTURE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
 
 
+class SendRefused:
+    """What a send the backend (or the window, after looking) does not go through with returns: falsy like
+    any failed send (callers test the result's truth), and ``reason`` says why in words an operator can act
+    on.  (Defined here so the window controller can give one; ``wcdb_backend`` imports it from here.)"""
+
+    __slots__ = ("reason",)
+
+    def __init__(self, reason: str):
+        self.reason = reason
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __str__(self) -> str:
+        return self.reason
+
+    def __repr__(self) -> str:
+        return f"SendRefused({self.reason!r})"
+
+
 @dataclass
 class WindowCandidate:
     """A candidate WeChat window with scoring info."""
@@ -1046,7 +1066,7 @@ class WeChatWindowController:
     # ── Full send pipeline ────────────────────────────────────────
 
     def send_to_chat(self, group_name: str, text: str,
-                     max_retries: int = 2) -> bool:
+                     max_retries: int = 2, check=None) -> bool:
         """Complete send pipeline: find → activate → navigate → send.
 
         This is the main entry point for sending a message.
@@ -1056,6 +1076,9 @@ class WeChatWindowController:
             group_name: Target group chat name.
             text: Message content.
             max_retries: Max retry attempts on failure.
+            check: ``check(hwnd)`` after the search opened a chat in the main window and before
+                anything is pasted: a ``SendRefused`` when the chat open is positively another one
+                (nothing is pasted, no retry; that is returned), None to go ahead.
 
         Returns:
             True if successfully sent.
@@ -1063,29 +1086,30 @@ class WeChatWindowController:
         if not group_name or not text:
             logger.error("send_to_chat: empty group_name or text")
             return False
-        return self._run_send(group_name, text, max_retries)
+        return self._run_send(group_name, text, max_retries, check=check)
 
-    def send_file_to_chat(self, group_name: str, path: str, max_retries: int = 2) -> bool:
+    def send_file_to_chat(self, group_name: str, path: str, max_retries: int = 2, check=None) -> bool:
         """Send a file the same way: paste it, then Enter (a sticker, a relay result)."""
         if not group_name or not path or not Path(path).is_file():
             logger.error("send_file_to_chat: no group name or no file at %r", path)
             return False
-        return self._run_send(group_name, f"[file] {Path(path).name}", max_retries, file_path=str(path))
+        return self._run_send(group_name, f"[file] {Path(path).name}", max_retries, file_path=str(path), check=check)
 
     def _run_send(self, group_name: str, text: str, max_retries: int,
-                  file_path: str | None = None) -> bool:
+                  file_path: str | None = None, check=None) -> bool:
+        extra = {"check": check} if check is not None else {}
         if self._quiet is None:
-            return self._send_to_chat(group_name, text, max_retries, file_path=file_path)
+            return self._send_to_chat(group_name, text, max_retries, file_path=file_path, **extra)
         session = self._begin_quiet()
         if session is None:
             return False
         try:
-            return self._send_to_chat(group_name, text, max_retries, file_path=file_path)
+            return self._send_to_chat(group_name, text, max_retries, file_path=file_path, **extra)
         finally:
             self._end_quiet(session)
 
     def _send_to_chat(self, group_name: str, text: str, max_retries: int,
-                      file_path: str | None = None) -> bool:
+                      file_path: str | None = None, check=None) -> bool:
         _ensure_default_desktop()
         state_to_restore: WindowSnapshot | None = None
         last_hwnd: int | None = None
@@ -1135,6 +1159,14 @@ class WeChatWindowController:
             else:
                 hwnd = self._adopt_foreground_hwnd(hwnd, "after navigation")
             last_hwnd = hwnd
+
+            # The search opens its first result: is that the chat?  Positively another one: nothing is
+            # pasted and the send ends here (searching again opens the same one).
+            refused = check(hwnd) if check is not None else None
+            if refused is not None:
+                self._log_failure(group_name, text, "another chat is open", hwnd)
+                self._restore_window_state(state_to_restore, hwnd)
+                return refused
 
             sent = (self.send_message(hwnd, text, file_path=file_path) if file_path
                     else self.send_message(hwnd, text))
@@ -1337,9 +1369,10 @@ class WeChatWindowController:
         except Exception as e:
             logger.debug("Clipboard could not be restored: %s", e)
 
-    def capture_chat_media(self, group_name: str) -> str:
+    def capture_chat_media(self, group_name: str, check=None) -> str:
         """Capture only the visible conversation pane (the relay's fallback for a
-        picture it cannot find on disk).
+        picture it cannot find on disk).  ``check``: as for ``send_to_chat`` (a chat
+        the search opened that is positively another one is not captured).
 
         The caller is responsible for deleting the returned temporary file
         once it has been passed on.
@@ -1347,16 +1380,16 @@ class WeChatWindowController:
         if not group_name:
             return ""
         if self._quiet is None:
-            return self._capture_chat_media(group_name)
+            return self._capture_chat_media(group_name, check)
         session = self._begin_quiet()
         if session is None:
             return ""
         try:
-            return self._capture_chat_media(group_name)
+            return self._capture_chat_media(group_name, check)
         finally:
             self._end_quiet(session)
 
-    def _capture_chat_media(self, group_name: str) -> str:
+    def _capture_chat_media(self, group_name: str, check=None) -> str:
         chat_hwnd = self.find_chat_window(group_name) if self._session else None
         hwnd = chat_hwnd or self.find_hwnd(force=True)
         if not hwnd:
@@ -1374,6 +1407,9 @@ class WeChatWindowController:
             time.sleep(0.25)
             if not chat_hwnd:
                 hwnd = self._adopt_foreground_hwnd(hwnd, "vision capture")
+                if check is not None and check(hwnd) is not None:
+                    logger.warning("Vision capture skipped: the search opened another chat than %r", group_name)
+                    return ""
             left, top, right, bottom = win32gui.GetWindowRect(hwnd)
             width, height = right - left, bottom - top
             if width < MIN_WINDOW_WIDTH or height < MIN_WINDOW_HEIGHT:

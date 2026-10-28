@@ -26,7 +26,7 @@ from .base import AbstractWeChatBackend, MessageCallback
 from .burst import MessageBurstBuffer
 from .wcdb_client import WcdbCallError, WcdbNativeClient
 from .quiet_send import QuietSendSettings
-from .window_controller import WeChatWindowController
+from .window_controller import SendRefused, WeChatWindowController
 from .helpers import DedupSet, format_nontext_content, normalize_msg_type
 from src.pii import mask_pii
 from src.wechat.media import IMAGE_MSG_TYPES, find_existing_media_path_from_message
@@ -112,29 +112,46 @@ def _row_id(msg: dict, talker: str) -> str:
     return "" if local_id in ("", "0") else _md5(f"{talker}|{local_id}|{_row_time(msg)}")
 
 
-class SendRefused:
-    """What a send the backend does not even try returns: falsy like any failed send (callers test
-    the result's truth), and ``reason`` says why in words an operator can act on."""
-
-    __slots__ = ("reason",)
-
-    def __init__(self, reason: str):
-        self.reason = reason
-
-    def __bool__(self) -> bool:
-        return False
-
-    def __str__(self) -> str:
-        return self.reason
-
-    def __repr__(self) -> str:
-        return f"SendRefused({self.reason!r})"
-
-
-# Why the window is not used for a chat (see WcdbBackend._window_target).
+# SendRefused (window_controller): what a send the backend does not go through with returns, falsy, with
+# the reason.  Why the window is not used for a chat (see WcdbBackend._window_target):
 UNKNOWN_NAME = "机器人不知道这个聊天在微信里叫什么，没法在微信里找到它，没有发。请手动发"
 NAMESAKE = ("和另一个聊天同名（都叫「{name}」），机器人没法确定发给谁，没有发：请手动发，"
             "或者在微信里给对方设一个不重复的备注（改好后重启 Windows 上的机器人）")
+# SEND_VERIFY_CHAT: the search opened another chat than the one asked for (read from the screen).
+WRONG_CHAT = ("微信搜索「{name}」打开的是「{title}」，不是要发的聊天，没有发：请手动发，或者给对方设一个"
+              "不和别人重名、也不被别人的名字包含的备注（改好后重启 Windows 上的机器人）")
+VERIFY_LOOKS = 3                 # a title that reads as another chat is read again this often, VERIFY_PAUSE_SEC apart
+VERIFY_PAUSE_SEC = 0.6           # (the screen may not show the opened chat yet)
+VERIFY_OFF_SEC = 600             # the screen could not be read (no OCR language, window too small): not tried for this long
+
+
+def _ocr_key(name: str) -> str:
+    """A chat name as OCR can read it back: letters, digits and CJK only (OCR does not read emoji or most
+    symbols), no case."""
+    return "".join(ch for ch in str(name or "") if ch.isalnum()).casefold()
+
+
+def title_verdict(title: str, name: str, others, is_group: bool) -> str:
+    """What the chat title read from the screen says about the chat the search opened for ``name``:
+    ``ok`` (it is that chat), ``other`` (it is another chat the bot knows: ``others``, their ``_ocr_key``),
+    ``group`` (a group's title, with its member count, while a private chat was asked for), ``unknown``
+    (nothing read, cut off, misread, a name the bot does not know: no judgement)."""
+    from .ocr.reader import clean_group_name
+
+    raw = " ".join(str(title or "").split())
+    if not raw:
+        return "unknown"
+    shown = clean_group_name(raw)
+    key = _ocr_key(shown)
+    if not key:
+        return "unknown"
+    if key == _ocr_key(name):
+        return "ok"
+    if key in others:
+        return "other"
+    if not is_group and shown != raw:                # 「名字 (35)」: a group
+        return "group"
+    return "unknown"
 
 
 def _name_key(name: str) -> str:
@@ -511,6 +528,11 @@ class WcdbBackend(AbstractWeChatBackend):
         self._voice: Optional[object] = None
         self._config = config
         self._voice_config = config
+        # SEND_VERIFY_CHAT: the chat title the search opened is read from the screen before anything is pasted
+        # (_open_chat_check).  The reader is made on Windows on first use (tests give one).
+        self._verify_chat = str(getattr(config, "send_verify_chat", "on") or "on") == "on"
+        self._title_reader = None
+        self._verify_off_until = 0.0
         self._burst = MessageBurstBuffer(
             enabled=bool(getattr(config, "message_burst_enabled", True)),
             window_sec=float(getattr(config, "message_burst_window_sec", 2.2)),
@@ -702,7 +724,7 @@ class WcdbBackend(AbstractWeChatBackend):
         if refused is not None:
             return refused
         with self._window_lock:
-            return self._window.send_file_to_chat(chat_name, path)
+            return self._window.send_file_to_chat(chat_name, path, **self._check_kwargs(chat_id, chat_name))
 
     def stop(self) -> None:
         self._running = False
@@ -2115,7 +2137,7 @@ class WcdbBackend(AbstractWeChatBackend):
         if refused is not None:
             return refused
         with self._window_lock:
-            return self._window.send_file_to_chat(name, path)
+            return self._window.send_file_to_chat(name, path, **self._check_kwargs(talker, name))
 
     def _screenshot_of(self, group_name: str, talker: str) -> str:
         """A picture message's ``_capture_media_screenshot``: the chat window's screenshot, or "" when
@@ -2123,6 +2145,10 @@ class WcdbBackend(AbstractWeChatBackend):
         name, refused = self._window_target(talker, group_name)
         if refused is not None:
             return ""
+        check = self._check_kwargs(talker, name)
+        if check:                                  # SEND_VERIFY_CHAT: not another chat's picture either
+            with self._window_lock:
+                return self._window.capture_chat_media(name, **check)
         return self._capture_media_screenshot(name)
 
     def _capture_media_screenshot(self, group_name: str) -> str:
@@ -2130,6 +2156,73 @@ class WcdbBackend(AbstractWeChatBackend):
         normal WeChat navigation/sending."""
         with self._window_lock:
             return self._window.capture_chat_media(group_name)
+
+    # ── SEND_VERIFY_CHAT: which chat did the search open? ─────────────
+
+    def _check_kwargs(self, talker: str, name: str) -> dict:
+        """``{"check": …}`` for a window operation in this chat when the open chat is checked, else {}."""
+        check = self._open_chat_check(talker, name)
+        return {"check": check} if check is not None else {}
+
+    def _read_title(self, hwnd: int) -> str:
+        """The chat title in WeChat's main window, read by OCR ("" when none is read)."""
+        if getattr(self, "_title_reader", None) is None:
+            from .ocr.reader import read_rows
+            from .ocr.win_ocr import WindowsOcrEngine
+            engine = WindowsOcrEngine(window=self._window)
+            self._title_reader = lambda h: read_rows(engine.capture(h))["title"]
+        return str(self._title_reader(hwnd) or "")
+
+    def _open_chat_check(self, talker: str, name: str):
+        """``check(hwnd)`` for the window (SEND_VERIFY_CHAT=on): the search opens its first result, which may
+        be another chat (a name inside another's: 「Amy」 and 「Amy陈」 / 「Amy粉丝群」; one the bot does not
+        read).  After the search the chat title is read from the screen (OCR) and compared:
+
+        - the chat asked for: go ahead;
+        - another chat the bot knows of (read, in the session list, in the console's list), or a group's
+          title while a private chat was asked for: read again (VERIFY_LOOKS, the screen may lag), then a
+          ``SendRefused`` (``WRONG_CHAT``): nothing is pasted;
+        - nothing readable, cut off, a name it does not know: go ahead, as without the check.
+
+        A screen that cannot be read at all (no OCR language, a window too small) is not tried again for
+        VERIFY_OFF_SEC.  None (no check) when off, or with no way to read the screen (not Windows)."""
+        if not getattr(self, "_verify_chat", True):
+            return None
+        if getattr(self, "_title_reader", None) is None and os.name != "nt":
+            return None
+        target = _ocr_key(name)
+        others = {_ocr_key(n) for names in (self._chat_names, self._session_names, self._listed_private_names())
+                  for t, n in list(names.items()) if t != talker} - {target, ""}
+        is_group = self._chat_is_group.get(talker, str(talker).endswith("@chatroom"))
+
+        def check(hwnd):
+            if time.monotonic() < getattr(self, "_verify_off_until", 0.0):
+                return None
+            title, verdict = "", "unknown"
+            for look in range(VERIFY_LOOKS):
+                try:
+                    title = self._read_title(hwnd)
+                except Exception as e:
+                    self._verify_off_until = time.monotonic() + VERIFY_OFF_SEC
+                    logger.warning("SEND_VERIFY_CHAT: the chat title could not be read (%s); sends go on without "
+                                   "the check for %d minutes", e, VERIFY_OFF_SEC // 60)
+                    return None
+                verdict = title_verdict(title, name, others, is_group)
+                if verdict not in ("other", "group"):
+                    break
+                if look + 1 < VERIFY_LOOKS:
+                    time.sleep(VERIFY_PAUSE_SEC)
+            if verdict == "ok":
+                logger.info("SEND_VERIFY_CHAT: the open chat is %r, as asked", name)
+                return None
+            if verdict == "unknown":
+                logger.info("SEND_VERIFY_CHAT: the open chat could not be confirmed (read %r); sent as before",
+                            title[:30])
+                return None
+            refused = SendRefused(WRONG_CHAT.format(name=name, title=" ".join(title.split())[:40]))
+            logger.warning("Not sending to %s: %s", talker[:20], refused.reason)
+            return refused
+        return check
 
     # ── Voice recognition helpers ────────────────────────────────────
 
@@ -2460,5 +2553,7 @@ class WcdbBackend(AbstractWeChatBackend):
         Returns True if the keyboard send action completed successfully.
         No confirmation polling — the window controller already retries
         on failure, and polling WCDB adds 3s of latency for marginal gain.
+        With SEND_VERIFY_CHAT a chat the search opened that is positively
+        another one is not pasted into (a falsy ``SendRefused``).
         """
-        return self._window.send_to_chat(group_name, content)
+        return self._window.send_to_chat(group_name, content, **self._check_kwargs(talker, group_name))

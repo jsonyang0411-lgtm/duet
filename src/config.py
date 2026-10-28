@@ -272,6 +272,9 @@ class BotConfig:
     # One thread sends every message (WCDB backend): a typing pause or the wait for
     # the user to pause (SEND_QUIET) no longer holds a worker thread.
     send_queue: str = "off"
+    # "on" (WCDB backend): after WeChat's search opened a chat, its title is read from the screen (Windows
+    # OCR) and nothing is pasted into another chat the bot knows of (a name inside another one).
+    send_verify_chat: str = "on"
 
     # === Claude relay (src/relay) ===
     # "on": private messages from claude_relay_wxids (empty = ADMIN_WXID) that
@@ -424,7 +427,7 @@ def _validate_config(kwargs: dict) -> None:
             f"got {decision_trace_content_chars}"
         )
 
-    for send_setting in ("send_typing_delay", "send_quiet", "send_keep_clipboard", "send_queue"):
+    for send_setting in ("send_typing_delay", "send_quiet", "send_keep_clipboard", "send_queue", "send_verify_chat"):
         if kwargs.get(send_setting, "off") not in ("off", "on"):
             errors.append(f"{send_setting.upper()} must be off or on, got {kwargs.get(send_setting)}")
     send_idle_sec = kwargs.get("send_idle_sec", 3.0)
@@ -612,6 +615,7 @@ def load_config() -> BotConfig:
         "send_keep_clipboard": _parse_switch(os.getenv("SEND_KEEP_CLIPBOARD", "on")),
         "sticker_paste": os.getenv("STICKER_PASTE", "file").strip().lower() or "file",
         "send_queue": _parse_switch(os.getenv("SEND_QUEUE", "off")),
+        "send_verify_chat": _parse_switch(os.getenv("SEND_VERIFY_CHAT", "on")),
         "claude_relay": _parse_switch(os.getenv("CLAUDE_RELAY", "off")),
         "claude_relay_token": os.getenv("CLAUDE_RELAY_TOKEN", "").strip(),
         "claude_relay_host": os.getenv("CLAUDE_RELAY_HOST", "0.0.0.0").strip() or "0.0.0.0",

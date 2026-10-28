@@ -120,6 +120,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `SEND_IDLE_SEC` | `float` | `3` (0–60；0=不等) | `src/config.py` | `src/wechat/quiet_send.py:IdleGate`：键盘鼠标静止满这么多秒才发 |
 | `SEND_IDLE_MAX_WAIT_SEC` | `float` | `30` (0–600) | `src/config.py` | 同上：最多等这么久，之后照发 |
 | `SEND_QUEUE` | `str` | `"off"` (`off`/`on`) | `src/config.py` | `src/wechat/wcdb_backend.py:__init__` → `SendQueue`：工作线程把回复交给发送线程就返回，打字延迟和安静发送的等待不再占住工作线程；开着时打字延迟不再把线程池加到 8 个 |
+| `SEND_VERIFY_CHAT` | `str` | `"on"` (`off`/`on`) | `src/config.py` | `src/wechat/wcdb_backend.py:_open_chat_check()`（win review F10）：发送、回复、截图在微信的搜索里回车打开第一条结果以后、粘贴之前，用 Windows OCR 读聊天区的标题（每次约 1 秒）：是机器人知道的**另一个**聊天（名字包含她的名字的人或群，在读的、会话列表里的、控制台私聊名单里的），或者要发私聊却打开了带人数的群，就不粘贴、返回带原因的 `SendRefused`（`WRONG_CHAT`）；读不出、看不出是谁的照旧发（和以前一样），读屏幕本身失败（没装中文 OCR、窗口太小）10 分钟内不再试。默认开：只在明确认出是别的聊天时才拒发，平时多花约 1 秒；Windows 真机还没验证过读标题，见 CLAUDE.md 手动验证第 5 条 |
 | `STICKER_PASTE` | `str` | `"file"` (`file`/`image`) | `src/config.py` | `WcdbBackend.__init__` → `WeChatWindowController(paste_files_as=…)`：粘贴图片时 `file` 粘贴文件（CF_HDROP，GIF 可以保持动图），`image` 粘贴静态图（CF_DIB，第一帧，透明处补白）；中转结果等别的文件始终按文件粘贴（`_PICTURE_SUFFIXES`） |
 | `SEND_KEEP_CLIPBOARD` | `str` | `"on"` (`off`/`on`) | `src/config.py` | `WeChatWindowController._begin_quiet/_end_quiet`：开 `SEND_QUIET` 时，发送前存下剪贴板，微信确认处理完粘贴后放回（期间剪贴板被别人改过、或微信没回应就不放回） |
 | `CLAUDE_RELAY` | `str` | `"off"` (`off`/`on`) | `src/config.py`（`on` 时要 `CLAUDE_RELAY_TOKEN` 至少 16 个字符、`CLAUDE_RELAY_WXIDS` 或 `ADMIN_WXID`、1–10 个非空白字符的前缀；`CLAUDE_RELAY_PORT` 的范围不论开关都检查） | `src/bot.py:_start_claude_relay()` 建 `ClaudeRelay`（发送用 `backend.send_text` / `send_file`，`reserved` = `AdminCommandHandler.is_command`）并挂到 `router._claude_relay`；路由步骤 `claude_relay` 把允许的人私聊里 `cc` 开头的消息变成给 Mac 的任务。需要 `PRIVATE_CHAT_ENABLED=true`。控制台「中转代理」页可改（`advanced_config` 的 `relay` 分组：开关、只做中转、`ADMIN_WXID`、`CLAUDE_RELAY_WXIDS`、token（可随机生成）、端口、监听地址、前缀、结果最长、长结果发文件、进度提醒间隔） |
@@ -197,7 +198,8 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `READ_BACK_SEC` / `READ_BACK_ROWS` | `int` / `int` | `1800` / `500` | `src/prm/service.py` | `_match_own`：这个号在达人私聊里的一行处理过以后，这么多秒内（每个聊天最多记这么多行）同一行（`_row_key`：同一个消息编号）又交来，不是新的一句，不再确认、不记运营的话、不接管；只认同一行，别的行里一模一样的字照样比对（对不上就是运营亲手打的，win review F4 (a)：以前 120 秒内同样的字一律当读回，运营照着机器人打的「好的」不接管） |
 | `MAX_CONSECUTIVE_ERRORS` | `int` | `5` | `src/wechat/wcdb_backend.py` | 连续错误触发重初始化阈值 |
 | `_DLL_LOCK` | `threading.RLock` | — | `src/wechat/wcdb_client.py` | 进 `wcdb_api.dll` 的每一次调用都拿它（`init` / `open` / `_call_json` / `get_voice_data` / 关库，任何线程、任何客户端对象；win review F11）：DLL 不一定线程安全，轮询之外新好友扫描也在自己的线程里读库，重开数据库时新旧两个客户端用的是同一个 DLL；可重入（`open` 里用 `get_sessions` 试密钥，`resolve_nickname` 调 `get_display_names`） |
-| `UNKNOWN_NAME` / `NAMESAKE` / `SendRefused` / `_name_key(name)` | `str` / `str` / 类 / 函数 | 「机器人不知道这个聊天在微信里叫什么，没法在微信里找到它，没有发。请手动发」/ 「和另一个聊天同名（都叫「{name}」），机器人没法确定发给谁，没有发：请手动发，或者在微信里给对方设一个不重复的备注（改好后重启 Windows 上的机器人）」/ `SendRefused(reason)`：假值（`bool()` 是 `False`，调用方照旧按真假判断发没发成），`reason`、`str()` 是原因 / 去掉空白、`casefold()` | `src/wechat/wcdb_backend.py` | `_window_target` 拒绝用窗口时的原因（发送、回复、截图都不做；微信边缘把 `reason` 写进 `send_result` 的 `error`，Mac 在草稿上显示）/ 比较两个聊天名是不是同名（`_add_talker`、`_namesake`、OCR 的 `_group_for_title`） |
+| `WRONG_CHAT` / `VERIFY_LOOKS` / `VERIFY_PAUSE_SEC` / `VERIFY_OFF_SEC` | `str` / `int` / `float` / `int` | 「微信搜索「{name}」打开的是「{title}」，不是要发的聊天，没有发：请手动发，或者给对方设一个不和别人重名、也不被别人的名字包含的备注（改好后重启 Windows 上的机器人）」/ `3` / `0.6` / `600` | `src/wechat/wcdb_backend.py` | `SEND_VERIFY_CHAT`：拒发时的原因 / 读出是别的聊天时再读几次（屏幕可能还停在上一个聊天）、隔多久 / 读屏幕失败后多久不再试 |
+| `UNKNOWN_NAME` / `NAMESAKE` / `SendRefused` / `_name_key(name)` | `str` / `str` / 类 / 函数 | 「机器人不知道这个聊天在微信里叫什么，没法在微信里找到它，没有发。请手动发」/ 「和另一个聊天同名（都叫「{name}」），机器人没法确定发给谁，没有发：请手动发，或者在微信里给对方设一个不重复的备注（改好后重启 Windows 上的机器人）」/ `SendRefused(reason)`：假值（`bool()` 是 `False`，调用方照旧按真假判断发没发成），`reason`、`str()` 是原因（类定义在 `src/wechat/window_controller.py`，窗口看过以后也能给出；`wcdb_backend` 从那里导入，`wcdb_backend.SendRefused` 照旧可用）/ 去掉空白、`casefold()` | `src/wechat/wcdb_backend.py` | `_window_target` 拒绝用窗口时的原因（发送、回复、截图都不做；微信边缘把 `reason` 写进 `send_result` 的 `error`，Mac 在草稿上显示）/ 比较两个聊天名是不是同名（`_add_talker`、`_namesake`、OCR 的 `_group_for_title`） |
 | `SESSION_REFRESH_SEC` / `OCR_SENDER` | `float` / `str` | `60.0` / `"OCR群友"` | `src/wechat/wcdb_backend.py` | 新私聊会话多久查一次（`_refresh_private_chats_if_due`）/ OCR 读到的消息的发言人（认不出是谁） |
 | `CATCH_UP_WAIT_SEC` / `_PRIVATE_NAMES_LOCK` | `float` / `threading.Lock` | `600.0` / — | `src/wechat/wcdb_backend.py` | `catch_up_chat` 要的聊天这么久还读不到就放弃（记 warning）/ `data/private_chat_names.json` 由轮询循环和新好友扫描两边写，写的时候拿这把锁 |
 | `RECALL_WINDOW_SEC` | `int` | `300` | `src/wechat/wcdb_backend.py` | 过滤器要的私聊里这么久以内写的行每次轮询都再看一眼，被微信原地改写成撤回的报出来（`_recall_in_place`）；微信只许 2 分钟内撤回，其余是本机时钟和慢轮询的余量 |
@@ -367,7 +369,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 |---|---|---|---|
 | `__init__(bot_display_name="", groups=None, poll_sec=DEFAULT_POLL_SEC, store=None, config=None, ocr=None)` | 初始化 WCDB 后端：窗口控制器（`QuietSendSettings.from_config(config)`、`paste_files_as=STICKER_PASTE`）、OCR 备选（`_ocr_from_config`）、`SEND_QUEUE`、连发合并缓冲（`MESSAGE_BURST_*`） | 配置参数 | `None` |
 | `start(callback)` | 启动消息监听(阻塞)：开数据库、读会话列表（`_resolve_groups`）在同一个 try 里：这两步任何一步失败（会话列表也报错误码）都按「数据库打不开」处理（关掉客户端；开着 OCR 时不用数据库接着跑，否则控制台报错后返回） | `callback: MessageCallback` | `None` |
-| `send_text(chat_id, content)` / `send_file(chat_id, path)` | 发送文本 / 文件（持 `_window_lock`；中转的结果、PRM 的草稿、微信边缘的发送都走这里）：先 `_window_target(chat_id)`，窗口没法确定找到这个聊天时（名字不知道、和另一个聊天同名）返回假值 `SendRefused`（`reason` 是给人看的原因，日志里也有），什么都不打；否则 `_send_and_confirm` / `send_file_to_chat` | `chat_id: str, content: str` / `chat_id: str, path: str` | `bool \| SendRefused` |
+| `send_text(chat_id, content)` / `send_file(chat_id, path)` | 发送文本 / 文件（持 `_window_lock`；中转的结果、PRM 的草稿、微信边缘的发送都走这里）：先 `_window_target(chat_id)`，窗口没法确定找到这个聊天时（名字不知道、和另一个聊天同名）返回假值 `SendRefused`（`reason` 是给人看的原因，日志里也有），什么都不打；否则 `_send_and_confirm` / `send_file_to_chat`（`SEND_VERIFY_CHAT` 开着时带 `check`，搜索打开的是别的聊天就不粘贴，也是 `SendRefused`） | `chat_id: str, content: str` / `chat_id: str, path: str` | `bool \| SendRefused` |
 | `stop()` | 停止监听 | 无 | `None` |
 | `window_controller`（属性） | 微信窗口控制器；好友管理操作同一个窗口 | — | `WeChatWindowController` |
 | `window_lock`（属性） | `_window_lock`：发送、截图、好友管理的每一段窗口操作都持有它 | — | `threading.Lock` |
@@ -405,14 +407,16 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `_hand_on_missed(group_name, talker, messages, callback)` | 把 `_prime_chat` 留下的按时间顺序、在轮询线程里一条一条交出去：达人的话直接 `_handle_message(..., screenshot=False)`（不进合并缓冲、不进线程池：PRM 按顺序收到，8 秒的合并让它们成为一个任务，每条用自己的 id 入库），自己的话交给 `_tell_own_message`；机器人停了就停（没交的下次启动还在） | `group_name, talker, messages: list[dict], callback` | `None` |
 | `_note_read(talker, newest)` | 读到的位置往前挪（`MessageStore.set_read_mark`，只在变大时写，记在 `_read_marks`）；出错只记日志 | `talker: str, newest: int` | `None` |
 | `_handle_message(group_name, talker, standardized, callback, *, screenshot=True)` | 处理单条消息(线程池)；回复发送时持 `_window_lock`，不占 DLL 读锁；图片挂的截图函数是 `_screenshot_of`；`screenshot=False`（补交的晚到消息）时图片不挂截图函数：窗口里是现在的聊天，不是那张图 | `group_name, talker, standardized, callback, screenshot: bool` | `None` |
-| `_capture_media_screenshot(group_name)` / `_screenshot_of(group_name, talker)` | 聊天区截图（持 `_window_lock`，与发送互斥）/ `_handle_message` 挂在图片消息的 `msg["_capture_media_screenshot"]` 上的那个：`_window_target` 不行（和别的聊天同名：截到的可能是别人的聊天）时返回空串，否则 `_capture_media_screenshot`；中转 / 边缘找不到图片原图时用（`attachments.resolve`）；补交的晚到图片不挂 | `group_name: str` / `group_name, talker: str` | `str` |
+| `_capture_media_screenshot(group_name)` / `_screenshot_of(group_name, talker)` | 聊天区截图（持 `_window_lock`，与发送互斥）/ `SEND_VERIFY_CHAT` 核对时 `_screenshot_of` 直接带 `check` 调 `capture_chat_media`（搜索打开的是别的聊天就不截）； `_handle_message` 挂在图片消息的 `msg["_capture_media_screenshot"]` 上的那个：`_window_target` 不行（和别的聊天同名：截到的可能是别人的聊天）时返回空串，否则 `_capture_media_screenshot`；中转 / 边缘找不到图片原图时用（`attachments.resolve`）；补交的晚到图片不挂 | `group_name: str` / `group_name, talker: str` | `str` |
 | `_log_delivery(group_name, reply, success)` | 静态方法："Reply sent" / "Reply FAILED" 日志（直接发送和发送队列共用，文字和以前相同） | — | `None` |
 | `_send_part(group_name, talker, text)` | 一个气泡：先 `_window_target(talker, group_name)`（同名、找不到名字：返回 `SendRefused`，不打字，回复记「Reply FAILED」），再持 `_window_lock` 调 `_send_and_confirm`（锁按气泡拿，气泡之间的停顿不占锁）；`_handle_message` 把它交给 `BubbleSender.deliver` / `SendQueue.submit` | `group_name, talker, text: str` | `bool \| SendRefused` |
-| `_send_file_part(group_name, talker, path)` | 一张表情包：和文字气泡一样先 `_window_target`、再持 `_window_lock`，调 `send_file_to_chat`；`_handle_message` 把它作为 `send_file` 交给 `BubbleSender.deliver` | `group_name: str, talker: str, path: str` | `bool \| SendRefused` |
+| `_send_file_part(group_name, talker, path)` | 一张表情包：和文字气泡一样先 `_window_target`、再持 `_window_lock`，调 `send_file_to_chat`（带 `check`）；`_handle_message` 把它作为 `send_file` 交给 `BubbleSender.deliver` | `group_name: str, talker: str, path: str` | `bool \| SendRefused` |
 | `_standardize(msg, group_name, talker, resolve_voice=True, is_group=None)` | 标准化WCDB原始消息；文字消息（`local_type=1`）先试 zstd 解压：微信 4 把较长的文字压缩成十六进制存（`28b52ffd…`），不解压会被当成图片（读回比对对不上、长任务丢字），解不开的长十六进制才按图片处理。`message_id` 由 `_message_ids` 算（同一行一直是同一个；语音不管识没识别都按「[语音]」算，启动时不识别的读法和轮询的读法编号一样），进群的系统消息照旧 `md5("join|聊天|新成员|内容|时间")`；多一个内部字段 `_legacy_ids`（旧版本给这一行的编号，进群消息是空的）。`local_type` 的高 32 位在这里拆开（`_message_local_type` 留低 32 位当 `msg_type`，`_message_subtype` 拿高 32 位当 `msg_subtype`：微信 4 的 appmsg 把子类型放在高位，引用 (57 << 32) \| 49、拍一拍 (62 << 32) \| 49 = 266287972401）；拍一拍（`edge.text.is_pat`）的 `content` 是它的文字（「"小美" 拍了拍我」，XML 解不开时「[拍一拍]」），不再是「[文件]」 | `msg: dict, group_name: str, talker: str, resolve_voice: bool, is_group: bool \| None` | `dict \| None` |
 | `wcdb_backend._message_ids(msg, talker, sender, content, ts)` | 一行消息的 `(编号, 旧编号)`：编号 `md5(f"{talker}|{local_id}|{ts}")`（`local_id` / `localId`，空、`0` 算没有），微信先写进库、约一秒后才填 `server_id`，编号不跟着变（以前用 `server_id` 算，同一行先后两个编号、交出去两次：副驾驶把机器人自己的话第二次读到当成运营亲手回、接管；边缘先报 `send_seen` 又报 `operator_message`）；没有 `local_id` 时 `md5(f"{sender}|{content}|{ts}|{ts}")`（和以前一样，但从不用 `server_id`）。旧编号：2026-10-27 以前的算法（`server_id` 有就用它，否则 `local_id`，再否则发送人+内容+时间，后面加 `|时间`）按这一行现在的样子算一个，再加上 `server_id` 还空着时会算出的 `md5(f"{local_id}|{ts}")`，去重、去掉和新编号相同的 | 见左 | `tuple[str, list[str]]` |
 | `wcdb_backend._md5(text)` | `hashlib.md5(text.encode("utf-8")).hexdigest()` | `text: str` | `str` |
-| `_send_and_confirm(group_name, talker, content)` | 通过键盘发送并确认 | `group_name, talker, content` | `bool` |
+| `_send_and_confirm(group_name, talker, content)` | 通过键盘发送：`send_to_chat(group_name, content, check=…)`（`SEND_VERIFY_CHAT` 开着时） | `group_name, talker, content` | `bool \| SendRefused` |
+| `_check_kwargs(talker, name)` / `_open_chat_check(talker, name)` / `_read_title(hwnd)` | 窗口操作要带的 `{"check": …}`（不核对时是 `{}`，测试里的替身窗口照旧只收两个参数）/ `SEND_VERIFY_CHAT`（win review F10）：给这一次发送做的 `check(hwnd)`：读聊天区标题（`_read_title`），`title_verdict` 是 `ok` 就发（日志「the open chat is … as asked」），`unknown` 照旧发（日志「could not be confirmed」），`other` / `group` 隔 `VERIFY_PAUSE_SEC` 再读，读满 `VERIFY_LOOKS` 次还是就返回 `SendRefused(WRONG_CHAT)`（日志 WARNING「Not sending to …」）；读屏幕抛异常时 `VERIFY_OFF_SEC` 内不再读、照旧发。「别的聊天」= `_chat_names`、`_session_names`、`_listed_private_names()` 里除了她自己的、`_ocr_key` 和她不一样的名字。关着或者不是 Windows（测试注入 `_title_reader` 除外）时返回 None / 用 `WindowsOcrEngine(window=…).capture(hwnd)` 加 `ocr.reader.read_rows(...)["title"]` 读标题（第一次用时建，测试可以换成 `_title_reader`） | `talker: str, name: str` / 同左 / `hwnd: int` | `dict` / `Callable[[int], SendRefused \| None] \| None` / `str` |
+| `wcdb_backend.title_verdict(title, name, others, is_group)` / `_ocr_key(name)` | 读到的标题说明了什么：去掉人数（`clean_group_name`）后 `_ocr_key` 和要发的名字一样是 `ok`；在 `others`（别的聊天名的 `_ocr_key`）里是 `other`；要发私聊、标题却带人数是 `group`；空的、截断的、不认识的都是 `unknown`（不下判断）/ 只留字母、数字、汉字（OCR 读不出表情和多数符号）并 `casefold()` | 见左 | `str` / `str` |
 | `_get_voice()` | 懒初始化语音识别管道 | 无 | `VoicePipeline \| None \| False` |
 | `_try_voice(msg, talker="")` | 尝试语音识别：先查管道的缓存（按服务器编号），再从 WCDB 取语音数据（刚发的最多试 4 次、间隔 0.5 秒）交给 `VoicePipeline.process`；失败返回 None。轮询里只对新读到的语音行调用（`_poll_group`），补交的消息在 `_hand_on_missed` 里各一次 | `msg: dict, talker: str` | `str \| None` |
 
@@ -452,11 +456,12 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `activate(hwnd)` | 激活微信窗口(4层策略) | `hwnd: int` | `bool` |
 | `navigate_to_chat(hwnd, group_name)` | 键盘导航到指定群聊 | `hwnd: int, group_name: str` | `bool` |
 | `send_message(hwnd, text, file_path=None)` | 键盘发送消息（Ctrl+A → Ctrl+V → Enter）：搜索结果上的回车把光标放进这个聊天的输入框，粘贴之前先在那里 Ctrl+A，粘贴替换掉输入框里原有的东西——微信给每个聊天留着输入框里的字，所以重试不会把上一次粘进去的那句再发一遍，运营在这个聊天里打了一半没发的字也不会跟着发出去（和独立窗口的 `_send_in_chat_window` 一样；文字和文件都这样）；有 `file_path` 时用 `_clipboard_file` 放图（放不上去就返回 `False`，不粘贴，免得把剪贴板里的旧文字再发一遍），粘贴后多等 `FILE_PASTE_DELAY` | `hwnd: int, text: str, file_path: str \| None` | `bool` |
-| `send_to_chat(group_name, text, max_retries=2)` | 完整发送管道(主入口)；经 `_run_send`：安静发送时外面包一层 `_begin_quiet`/`_end_quiet`，里面是 `_send_to_chat` | `group_name: str, text: str, max_retries: int` | `bool` |
-| `send_file_to_chat(group_name, path, max_retries=2)` | 发一个文件（中转的长结果、PRM 的素材、表情包气泡的图片）：同一条管道，粘贴的是文件；文件不存在直接返回 `False`；日志里的文字是 `[file] 文件名` | `group_name: str, path: str` | `bool` |
-| `_run_send(group_name, text, max_retries, file_path=None)` | 两个入口共用：有没有安静发送 | 同上 | `bool` |
-| `_send_to_chat(group_name, text, max_retries, file_path=None)` | 重试循环（原来的发送流程）；安静发送时每次先找群的独立窗口，找到就 `_send_in_chat_window`，否则主窗口搜索，激活用 `_activate_for_send`；有 `file_path` 时 `send_message(..., file_path=)` | 同上 | `bool` |
-| `capture_chat_media(group_name)` / `_capture_chat_media(group_name)` | 聊天区截图（存到 `data/vision_screenshots/`；中转 / 边缘找不到图片原图时用）；安静发送时同样等用户停手、事后还焦点；群有独立窗口时直接截它（`_conversation_bbox(sidebar=False)`，不搜索） | `group_name: str` | `str`（图片路径或空） |
+| `SendRefused(reason)` | 没有发（或者没去做）的发送返回的假值，`reason` 是给人看的原因（`wcdb_backend` 的拒发和这里 `check` 给的都是它） | `reason: str` | — |
+| `send_to_chat(group_name, text, max_retries=2, check=None)` | 完整发送管道(主入口)；经 `_run_send`：安静发送时外面包一层 `_begin_quiet`/`_end_quiet`，里面是 `_send_to_chat`；`check(hwnd)`：搜索打开聊天以后、粘贴之前问一次，返回 `SendRefused` 就不粘贴、不重试，把它返回（`SEND_VERIFY_CHAT`） | `group_name: str, text: str, max_retries: int, check` | `bool \| SendRefused` |
+| `send_file_to_chat(group_name, path, max_retries=2, check=None)` | 发一个文件（中转的长结果、PRM 的素材、表情包气泡的图片）：同一条管道，粘贴的是文件；文件不存在直接返回 `False`；日志里的文字是 `[file] 文件名`；`check` 同上 | `group_name: str, path: str` | `bool \| SendRefused` |
+| `_run_send(group_name, text, max_retries, file_path=None, check=None)` | 两个入口共用：有没有安静发送；`check` 只在给了时才往下传 | 同上 | `bool \| SendRefused` |
+| `_send_to_chat(group_name, text, max_retries, file_path=None, check=None)` | 重试循环（原来的发送流程）；安静发送时每次先找群的独立窗口，找到就 `_send_in_chat_window`（独立窗口按标题找到，不用核对），否则主窗口搜索，激活用 `_activate_for_send`；`navigate_to_chat` 之后先问 `check(hwnd)`：给出 `SendRefused` 就记一条 send failure（「another chat is open」）、放回窗口、返回它；有 `file_path` 时 `send_message(..., file_path=)` | 同上 | `bool \| SendRefused` |
+| `capture_chat_media(group_name, check=None)` / `_capture_chat_media(group_name, check=None)` | 聊天区截图（存到 `data/vision_screenshots/`；中转 / 边缘找不到图片原图时用）；安静发送时同样等用户停手、事后还焦点；群有独立窗口时直接截它（`_conversation_bbox(sidebar=False)`，不搜索）；主窗口搜索以后 `check` 说是别的聊天就不截、返回空 | `group_name: str, check` | `str`（图片路径或空） |
 | `find_chat_window(group_name)` | 找标题就是群名（可带"(人数)"）的微信独立聊天窗口（可见或最小化），记入 `_chat_windows`，这些窗口不会被当成主窗口（`find_hwnd`、`_adopt_foreground_hwnd`） | `group_name: str` | `int \| None` |
 | `describe_chat_windows(group_names)` | 安静发送时在启动日志里逐群说明有没有独立窗口 | `group_names: list[str]` | `None` |
 | `_send_in_chat_window(hwnd, group_name, text, file_path=None)` | 独立窗口里发送（也可以是图）：激活 → 剪贴板 → Ctrl+A → Ctrl+V → Enter，没有切标签和搜索；之后恢复窗口原来的最小化/隐藏状态 | `hwnd, group_name, text` | `bool` |
@@ -1320,7 +1325,7 @@ WcdbBackend.start(callback)
   进 DLL 的每一下，不管哪个线程，都由 WcdbNativeClient 的 _DLL_LOCK 串行）
 ```
 
-**同名的聊天**（2026-10-28）：聊天按 chat id 读（`_chat_names`），名字只拿来在微信的搜索里找它。以前按名字记，一个群叫「小美」、登记的达人也叫「小美」（`WECHAT_GROUPS=*` 先加群），或者两位达人 / 达人和 `PRIVATE_CHATS` 里的人同名时，后来的那个私聊被 `_add_talker` 拒掉：收不到、不起草、也发不出，只有一行 WARNING。现在都照读；发送、回复和截图要按名字找窗口（`navigate_to_chat` 搜索后回车选第一条，微信 4 上核对不了打开的是谁），名字和另一个聊天一样（在读的、会话列表里的、控制台私聊名单里的，`_namesake`）就不用窗口：`send_text` / `send_file` / `_send_part` / `_send_file_part` 返回假值 `SendRefused`（原因 `NAMESAKE`），截图返回空串。PRM 把草稿标成没发出去（副驾驶的错误文字是 PRM 自己的「文字没发出去」，原因在日志里；边缘模式的 `send_result` 带上原因，Mac 显示在草稿上）。
+**同名的聊天**（2026-10-28）：聊天按 chat id 读（`_chat_names`），名字只拿来在微信的搜索里找它。以前按名字记，一个群叫「小美」、登记的达人也叫「小美」（`WECHAT_GROUPS=*` 先加群），或者两位达人 / 达人和 `PRIVATE_CHATS` 里的人同名时，后来的那个私聊被 `_add_talker` 拒掉：收不到、不起草、也发不出，只有一行 WARNING。现在都照读；发送、回复和截图要按名字找窗口（`navigate_to_chat` 搜索后回车选第一条，微信 4 上 UIA 核对不了打开的是谁；`SEND_VERIFY_CHAT` 开着时回车以后用 OCR 读标题，认出是别的聊天就不粘贴，见 `_open_chat_check`），名字和另一个聊天一样（在读的、会话列表里的、控制台私聊名单里的，`_namesake`）就不用窗口：`send_text` / `send_file` / `_send_part` / `_send_file_part` 返回假值 `SendRefused`（原因 `NAMESAKE`），截图返回空串。PRM 把草稿标成没发出去（副驾驶的错误文字是 PRM 自己的「文字没发出去」，原因在日志里；边缘模式的 `send_result` 带上原因，Mac 显示在草稿上）。
 
 **显示名从哪来**：`_resolve_session_display_name`：会话行的 `displayName` / `nickname` / `remark` 等字段（微信 4.1.15 的会话行没有名字字段，真机探针 2026-10-27）→ `WcdbNativeClient.resolve_nickname`（`_load_nickname_cache` 只装会话行里的名字和 `data/nicknames.json` 的手工覆盖；没有就调 DLL 的 `wcdb_get_display_names`，结果在这个客户端里一直缓存）→ 会话行的 `last_sender_display_name`。DLL 给的是备注还是昵称看不到源码；Mac 上同一套库的 `MacWeFlowClient._display_name_from_row` 是备注优先（`remark` → `nick_name` → `alias`），Windows 要真机确认。所以「给达人设一个不重复的备注」能绕开同名：备注优先时她的名字变成备注，不再同名；名字每次启动（或 `_reinitialize`）才重新查，改了备注要重启机器人；微信的搜索也认备注。测试：`tests/test_same_name_chats.py`（真后端、路由、中转、PRM 接在假微信 4 数据库上；边缘模式同样）。
 
@@ -1546,7 +1551,11 @@ WeChatWindowController.send_to_chat(group_name, text)  ← 主入口
   │     ├── Phase 1: Ctrl+F → 聚焦搜索框
   │     ├── Phase 2: Ctrl+A → set_clipboard → Ctrl+V → 粘贴群名
   │     ├── Phase 3: Enter → 选择第一个搜索结果
-  │     └── _verify_chat_title() — UIA 或窗口标题验证
+  │     └── _verify_chat_title() — UIA 或窗口标题验证（微信 4 上验证不了：标题是「微信」、UIA 只有骨架）
+  │
+  ├── check(hwnd)（SEND_VERIFY_CHAT=on，WcdbBackend._open_chat_check）— OCR 读聊天区标题
+  │     ├── 是要发的聊天 / 读不出、看不出 → 接着发
+  │     └── 是机器人知道的别的聊天、或要发私聊却是群（读 3 次都是）→ 不粘贴，返回 SendRefused（WRONG_CHAT）
   │
   └── send_message(hwnd, text)
         ├── _clipboard_text(text, hwnd) → _set_clipboard(text) — 写入剪贴板
@@ -2255,6 +2264,7 @@ SEND_QUIET=off                                 # Windows：等用户停手再发
 SEND_IDLE_SEC=3                                # 键鼠静止多少秒才发（0=不等）
 SEND_IDLE_MAX_WAIT_SEC=30                      # 最多等多久，之后照发
 SEND_KEEP_CLIPBOARD=on                         # 开 SEND_QUIET 时把用户的剪贴板放回去
+SEND_VERIFY_CHAT=on                            # Windows：搜索打开聊天后用 OCR 读标题，是别的聊天就不粘贴（读不出照旧发）
 SEND_QUEUE=off                                 # Windows：一个线程负责发送，等待不占工作线程（配合 SEND_QUIET/打字停顿）
 STICKER_PASTE=file                             # 图片怎么粘贴：file=粘贴文件（GIF 能动）；image=粘贴静态图
 
