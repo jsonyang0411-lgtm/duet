@@ -21,6 +21,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Optional
 
+from ..edge import text as edge_text
 from .base import AbstractWeChatBackend, MessageCallback
 from .burst import MessageBurstBuffer
 from .wcdb_client import WcdbNativeClient
@@ -160,11 +161,12 @@ def _extract_media_hint(content: str) -> str:
 
 
 def _message_local_type(msg: dict) -> int:
+    """The message type: the low 32 bits of WCDB's ``local_type``.  WeChat 4 packs an app message's
+    kind into the high 32 bits (a reply (57 << 32) | 49, 拍一拍 (62 << 32) | 49 = 266287972401); that
+    kind is ``_message_subtype``'s, and the standardized message carries it as ``msg_subtype``."""
     raw = msg.get("local_type", msg.get("localType", msg.get("msg_type", 1)))
     try:
         value = int(raw)
-        # Some WeChat app messages pack subtype in the high 32 bits, e.g.
-        # quote/refer messages: (57 << 32) | 49.
         if value > 0xFFFFFFFF:
             return value & 0xFFFFFFFF
         return value
@@ -173,6 +175,7 @@ def _message_local_type(msg: dict) -> int:
 
 
 def _message_subtype(msg: dict) -> int:
+    """The high 32 bits of WCDB's ``local_type`` (an app message's kind), 0 when there are none."""
     raw = msg.get("local_type", msg.get("localType", msg.get("msg_type", 1)))
     try:
         value = int(raw)
@@ -1103,6 +1106,7 @@ class WcdbBackend(AbstractWeChatBackend):
             "sender_name": OCR_SENDER,
             "content": text,
             "msg_type": 1,
+            "msg_subtype": 0,
             "server_id": "",
             "media_base_dir": "",
             "media_hint": "",
@@ -1256,7 +1260,7 @@ class WcdbBackend(AbstractWeChatBackend):
             newest = ts if newest is None else max(newest, ts)
             known.add(standardized["message_id"])
             if (ts < since or self._is_own_line(standardized, my_wxid) or is_friend_notice(standardized)
-                    or int(standardized.get("msg_type") or 1) == 10000):
+                    or edge_text.is_notice(standardized)):     # WeChat's lines: a recall, 拍一拍 …
                 continue
             if my_wxid:
                 standardized["_not_self_by_id"] = True
@@ -1982,6 +1986,10 @@ class WcdbBackend(AbstractWeChatBackend):
                 logger.debug("Failed to resolve media blob path", exc_info=True)
         elif not content:
             return None
+        if edge_text.is_pat({"msg_type": local_type, "msg_subtype": msg_subtype, "special": special_info}):
+            # 拍一拍 is WeChat's line, not a file: its words (src/edge/text.py is_notice)
+            content = edge_text.notice_text({"msg_type": local_type, "msg_subtype": msg_subtype,
+                                             "special": special_info})
         if is_group and local_type == 1 and not quote_info:
             content = _strip_wechat_group_sender_prefix(content)
             if not content:
@@ -2109,6 +2117,8 @@ class WcdbBackend(AbstractWeChatBackend):
             "sender_name": str(sender_name),
             "content": resolved_content,
             "msg_type": local_type,
+            # an app message's kind from the high 32 bits of local_type (62: 拍一拍, 57: a reply), else 0
+            "msg_subtype": msg_subtype,
             "server_id": str(msg.get("server_id", msg.get("serverId", "")) or ""),
             "media_base_dir": media_base_dir,
             "media_hint": media_hint or str(
