@@ -147,13 +147,74 @@ def test_a_hand_typed_reply_gives_the_chat_to_a_person(bot, clock):
 
 def test_old_own_lines_and_the_bots_files_are_not_a_takeover(bot, clock):
     bot.prm.on_own_message(own(bot, "上周说过的话", ts=clock.now - 7 * DAY))  # read late: recorded, too old to take over
-    bot.prm._note_sent(CREATOR, file=True)
+    bot.prm._note_sent(CREATOR, file="/x/brief.png")                         # the bot sends a picture
     clock.now += OWN_FILE_SEC - 1
     bot.prm.on_own_message(own(bot, "[图片]", msg_type=3))                    # the brief the bot just sent
     bot.prm.on_own_message(own(bot, HOLDING_TEXT))                            # never sent: a person typed it
     assert bot.prm.store.deal(1)["mode"] == "human"
     events = [e["kind"] for e in bot.prm.store.events(1)]
     assert events.count("takeover") == 1 and events.count("operator_message") == 2
+
+
+def material(b, *names):
+    """A draft of files only (``names``), approved and sent: the packet."""
+    p = pending_packet(b, draft(reply_draft="", message_kind="material", attachments_to_send=[f"assets/{n}" for n in names]),
+                       files=[(n, b"x") for n in names])
+    b.prm.decide(p["id"], "send")
+    b.prm.send_approved()
+    assert [path.rsplit("/", 1)[-1] for _, path in b.files] == list(names)
+    return p
+
+
+def test_a_file_the_bot_sent_covers_one_row_of_its_own_kind(bot, clock):
+    """win review F4 (b): after the bot sent a file, any picture, voice message or sticker of this
+    account in that chat for ten minutes was taken for the bot's, as often as it came.  Now one file
+    sent covers one row, of its own kind: the PDF's row is the bot's; the operator's picture (even
+    one read before the PDF), voice message and sticker from the phone are a person's."""
+    p = material(bot, "合作说明.pdf")
+    clock.now += 2
+    bot.prm.on_own_message(own(bot, "[图片]", msg_type=3))                    # the operator's, first
+    assert bot.prm.store.deal(1)["mode"] == "human"
+    bot.prm.on_own_message({**own(bot, "[文件] 合作说明.pdf", msg_type=49), "file_name": "合作说明.pdf"})
+    assert bot.prm.store.packet(p["id"])["outcome"] == "sent_confirmed"     # the bot's PDF
+    clock.now += 60
+    bot.prm.on_own_message(own(bot, "[语音] 我到了", msg_type=34))
+    bot.prm.on_own_message(own(bot, "[表情]", msg_type=47))
+    bot.prm.on_own_message({**own(bot, "[文件] 合作说明.pdf", msg_type=49), "file_name": "合作说明.pdf"})
+    kinds = [e["kind"] for e in bot.prm.store.events(1)]
+    assert kinds.count("operator_message") == 4                               # the PDF once more: by hand
+
+
+def test_one_picture_sent_covers_one_picture(bot, clock):
+    material(bot, "样品图.jpg")
+    bot.prm.on_own_message(own(bot, "[图片]", msg_type=3))                    # the bot's picture
+    assert bot.prm.store.deal(1)["mode"] == "copilot"
+    clock.now += 30
+    bot.prm.on_own_message(own(bot, "[图片]", msg_type=3))                    # one more, from the phone
+    assert bot.prm.store.deal(1)["mode"] == "human"
+
+
+def test_each_file_of_a_draft_covers_a_row_of_its_kind(bot, clock):
+    """Two files: a picture and a PDF, each one row; a GIF may show as a picture or a sticker, an
+    image WeChat sent as a file by its name; a link the operator shares is no file."""
+    material(bot, "样品图.png", "动图.gif", "报价单.pdf")
+    clock.now += 3
+    bot.prm.on_own_message({**own(bot, "[链接] 店铺", msg_type=49), "special": {"type": "5", "title": "店铺"}})
+    assert bot.prm.store.deal(1)["mode"] == "human"                          # a link: the operator's
+    for row in ({**own(bot, "[文件] 报价单.pdf", msg_type=49), "file_name": "报价单.pdf"},
+                own(bot, "[表情]", msg_type=47),                              # the GIF, as a sticker
+                {**own(bot, "[文件] 样品图.png", msg_type=49), "file_name": "样品图.png"}):  # the picture, as a file
+        bot.prm.on_own_message(row)
+    assert [e["kind"] for e in bot.prm.store.events(1)].count("operator_message") == 1
+
+
+def test_the_macs_read_back_of_a_file_is_ours_whatever_it_was(bot, clock):
+    """Mac 端：Windows 已经按发送记录认出是我们发的（send_seen），拼成的消息只知道是个文件（类型 49）。"""
+    p = material(bot, "样品图.jpg")
+    bot.prm.on_own_message({"chat_id": CREATOR, "content": "", "msg_type": 49, "is_group": False,
+                            "timestamp": clock.now, "edge_seen": True, "edge_event_id": 7})
+    assert bot.prm.store.packet(p["id"])["outcome"] == "sent_confirmed"
+    assert bot.prm.store.deal(1)["mode"] == "copilot"
 
 
 def test_a_holding_reply_and_a_paused_deal_are_not_a_takeover(bot, clock):

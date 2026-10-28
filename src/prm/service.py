@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import itertools
 import json
 import logging
 import re
@@ -143,6 +144,48 @@ def message_text(msg: dict) -> str:
 
 def _norm(text: str) -> str:
     return " ".join(str(text or "").split())
+
+
+_IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".heic", ".heif", ".tif", ".tiff")
+_VIDEO_SUFFIXES = (".mp4", ".mov", ".m4v", ".avi", ".wmv", ".mkv", ".flv", ".3gp")
+
+
+def file_kind(name: str) -> str:
+    """What WeChat shows a file the bot pastes into a chat as, by its name: ``image`` (a picture),
+    ``gif`` (a picture, or a sticker), ``video`` or ``file``."""
+    suffix = Path(str(name or "")).suffix.lower()
+    if suffix == ".gif":
+        return "gif"
+    if suffix in _IMAGE_SUFFIXES:
+        return "image"
+    if suffix in _VIDEO_SUFFIXES:
+        return "video"
+    return "file"
+
+
+def own_file_fits(kind: str, msg: dict) -> bool:
+    """Can this own line in WeChat be a file of ``kind`` (``file_kind``) the bot sent (win review F4 (b))?
+    A picture (type 3) is an image's or a GIF's, a sticker (47) only a GIF's, a video (43) a video's,
+    a file (49 with a file name, or one the backend could not read) a file's, or an image's or video's
+    WeChat sent as a file (its name says so); a voice message, a link, a mini program, a card … never.
+    The Mac's ``edge_seen`` lines are our sends Windows already read back (their type says only "a file")."""
+    if msg.get("edge_seen"):
+        return True
+    msg_type = edge_text.msg_type_of(msg)
+    if msg_type == 3:
+        return kind in ("image", "gif")
+    if msg_type == 47:
+        return kind == "gif"
+    if msg_type == 43:
+        return kind == "video"
+    if msg_type == 49:
+        name = str(msg.get("file_name") or "").strip()
+        if name:
+            return kind in ("file", file_kind(name))
+        special = msg.get("special") if isinstance(msg.get("special"), dict) else {}
+        appmsg = str(special.get("type") or "")
+        return kind == "file" and appmsg in ("", "6")      # a file the backend could not read the name of
+    return False
 
 
 def _row_key(msg: dict) -> Optional[str]:
@@ -452,10 +495,13 @@ class PrmService:
                                                     *(getattr(config, "claude_relay_wxids", None) or [])]
                           if str(w).strip()}
         self._wxids = self._store.active_wxids()
-        # What the bot itself sent lately, per chat: (normalized text, when, packet id); the last
-        # file send (when, packet id).
+        # What the bot itself sent lately, per chat: (normalized text, when, packet id); each file
+        # (kind, when, packet id, n): one own row of its kind each (win review F4 (b)).
         self._sent_lines: dict[str, deque] = {}
-        self._sent_files: dict[str, tuple] = {}
+        self._sent_files: dict[str, deque] = {}
+        self._file_seq = itertools.count(1)
+        # A packet sent before this run (or cut off by a stop): the kinds of its files not read back yet.
+        self._file_rows: dict[int, list] = {}
         # Per chat, the own rows handled lately (``_row_key`` -> when): handed on again within
         # READ_BACK_SEC they are no new line (_match_own).
         self._read_back: dict[str, dict[str, float]] = {}
@@ -892,11 +938,16 @@ class PrmService:
         packet = self._store.packet(packet_id)
         if packet is None or (packet["status"], packet["outcome"]) != (FAILED, "indeterminate"):
             return
-        if not packet["attachments"]:
+        final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
+        text_seen = bool(self._own_text(msg)) or packet["error"] == UNSURE_TEXT_SEEN
+        with self._sent_lock:
+            files_left = self._file_rows.get(packet_id, [None]) if packet["attachments"] else []
+        if (text_seen or not str(final or "").strip()) and not files_left:
             if self._store.settle_unsure(packet_id, sent_at=written):
                 logger.info("PRM: packet %d, cut off by a stop, did go out (seen in WeChat): sent", packet_id)
-        elif self._own_text(msg) and self._store.settle_unsure(packet_id, error=UNSURE_TEXT_SEEN):
-            logger.info("PRM: packet %d, cut off by a stop: its text went out, its files are still unknown",
+        elif text_seen and packet["error"] != UNSURE_TEXT_SEEN and self._store.settle_unsure(
+                packet_id, error=UNSURE_TEXT_SEEN):
+            logger.info("PRM: packet %d, cut off by a stop: its text went out, its files are not all seen yet",
                         packet_id)
 
     def _answered_by_hand(self, deal_id: int, written: float, now: float) -> None:
@@ -916,29 +967,31 @@ class PrmService:
 
         self._store.edit_notices(deal_id, edit, now)
 
-    def _note_sent(self, chat_id: str, text: str = "", packet_id: Optional[int] = None, file: bool = False) -> tuple:
+    def _note_sent(self, chat_id: str, text: str = "", packet_id: Optional[int] = None,
+                   file: "bool | str" = False) -> tuple:
         """What the bot is about to send, noted before it goes (WeChat shows a line, and the
-        backend reads it back, before the send returns); ``_unnote_sent`` takes it back."""
+        backend reads it back, before the send returns): a line, or one file (``file``: its path or
+        name, whose kind is what WeChat shows it as, ``file_kind``; True: a plain file).  Returns the
+        note; ``_unnote_sent`` takes it back."""
         now = self._clock()
         with self._sent_lock:
             if file:
-                before = self._sent_files.get(chat_id)
-                self._sent_files[chat_id] = (now, packet_id)
-                return chat_id, None, before
+                entry = (file_kind(file) if isinstance(file, str) else "file", now, packet_id, next(self._file_seq))
+                self._sent_files.setdefault(chat_id, deque(maxlen=200)).append(entry)
+                return chat_id, None, entry
             item = (_norm(text), now, packet_id)
             self._sent_lines.setdefault(chat_id, deque(maxlen=50)).append(item)
             return chat_id, item, None
 
     def _unnote_sent(self, noted: tuple) -> None:
-        """It did not go out: forget that line, or put the file record back as it was (an
-        earlier file still counts as the bot's)."""
-        chat_id, item, before = noted
+        """It did not go out: forget that line or that file (the files sent before it still count as
+        the bot's; not when it was read back already)."""
+        chat_id, item, entry = noted
         with self._sent_lock:
-            if item is None:
-                if before is None:
-                    self._sent_files.pop(chat_id, None)
-                else:
-                    self._sent_files[chat_id] = before
+            if entry is not None:
+                files = self._sent_files.get(chat_id)
+                if files is not None and entry in files:
+                    files.remove(entry)
                 return
             lines = self._sent_lines.get(chat_id)
             if lines is not None and item in lines:     # (not if it was read back already)
@@ -997,9 +1050,16 @@ class PrmService:
         written = min(now, float(msg.get("timestamp", 0) or 0) or now)
         with self._sent_lock:
             if msg_type != 1:
-                at, pid = self._sent_files.get(chat_id) or (None, None)
-                if at is not None and now - at <= OWN_FILE_SEC:
-                    return True, pid
+                # Each file sent covers one row of its own kind, the oldest first (win review F4 (b):
+                # before, any picture, voice message or sticker for OWN_FILE_SEC after a file was ours)
+                files = self._sent_files.get(chat_id) or deque()
+                for entry in list(files):
+                    if now - entry[1] > OWN_FILE_SEC:
+                        files.remove(entry)
+                for entry in files:
+                    if own_file_fits(entry[0], msg):
+                        files.remove(entry)
+                        return True, entry[2]
             else:
                 text = _norm(_QUOTE_PREFIX.sub("", str(msg.get("content", "") or "")))
                 lines = self._sent_lines.get(chat_id) or deque()
@@ -1021,12 +1081,11 @@ class PrmService:
         if msg_type != 1:
             # A file of a draft sent just before a restart: WeChat shows it while the draft's
             # files are going out, before its send returns (``sent_at``).
-            for packet in self._store.sent_since(chat_id, written - OWN_FILE_EARLY_SEC):
-                if (packet["attachments"] and float(packet["sent_at"]) < self._started
-                        and float(packet["sent_at"]) <= written + OWN_FILE_SEC):
-                    return True, packet["id"]
-            for packet in unsure:
-                if packet["attachments"]:
+            before = [p for p in self._store.sent_since(chat_id, written - OWN_FILE_EARLY_SEC)
+                      if p["attachments"] and float(p["sent_at"]) < self._started
+                      and float(p["sent_at"]) <= written + OWN_FILE_SEC]
+            for packet in [*before, *(p for p in unsure if p["attachments"])]:
+                if self._file_row_of(packet, msg):
                     return True, packet["id"]
             return False, None
         tokens = self._store.tokens(party["id"])
@@ -1046,6 +1105,20 @@ class PrmService:
                     and _norm(ev["detail"].get("text")) == text):
                 return True, None
         return False, None
+
+    def _file_row_of(self, packet: dict, msg: dict) -> bool:
+        """Is this own row one of the files of ``packet``, sent before this run (``_match_sent``)?  Each
+        of its files covers one row of its kind, never more (``_file_rows`` counts them down)."""
+        with self._sent_lock:
+            left = self._file_rows.get(packet["id"])
+            if left is None:
+                left = self._file_rows[packet["id"]] = [file_kind(a.get("name") or a.get("path") or "")
+                                                        for a in packet["attachments"]]
+            for n, kind in enumerate(left):
+                if own_file_fits(kind, msg):
+                    del left[n]
+                    return True
+        return False
 
     def on_send_failed(self, chat_id: str, text: str, why: str, *, digest: str = "",
                        sent_at: Optional[float] = None, file: bool = False) -> None:
@@ -2287,7 +2360,7 @@ class PrmService:
             if not Path(path).is_file():
                 problem = f"文件「{item.get('name')}」在电脑上找不到了"
                 break
-            noted = self._note_sent(packet["chat_id"], file=True, packet_id=packet["id"])
+            noted = self._note_sent(packet["chat_id"], file=path, packet_id=packet["id"])
             try:
                 result = self._send_file(packet["chat_id"], path)
                 if not result:

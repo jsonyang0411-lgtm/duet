@@ -426,14 +426,16 @@ def test_a_reply_cut_off_by_a_stop_and_read_back_after_the_restart_is_sent_not_a
     assert world.prm_store.deal(1)["mode"] == "human" and len(world.events("takeover")) == 1
 
 
-def test_a_draft_with_files_cut_off_by_a_stop_is_not_a_takeover_and_says_what_was_seen(bot):
-    """The same with a draft that has files: its text read back is ours (no takeover), but whether
-    the files went out is still unknown, so the draft stays red and says the text did go out."""
-    bot.prm.handle(bot.msg("要合作说明"))
+def test_a_draft_with_files_cut_off_by_a_stop_is_sent_once_its_text_and_every_file_are_seen(bot):
+    """The same with a draft that has files: its text read back is ours (no takeover), but while one of
+    its files is not seen it may not have gone out: the draft stays red and says its text did go out.
+    Each of its files covers one row of its kind (win review F4 (b)); all seen, it is sent."""
+    bot.prm.handle(bot.msg("要合作说明和样品图"))
     job = bot.worker_takes()
-    assert bot.relay.outfile(job["id"], "合作说明.pdf", io.BytesIO(b"%PDF").read, 4)
-    bot.finish(job["id"], draft(reply_draft="合作说明发你啦", message_kind="material",
-                                attachments_to_send=["assets/合作说明.pdf"]))
+    for name in ("合作说明.pdf", "样品图.jpg"):
+        assert bot.relay.outfile(job["id"], name, io.BytesIO(b"x").read, 1)
+    bot.finish(job["id"], draft(reply_draft="合作说明和样品图发你啦", message_kind="material",
+                                attachments_to_send=["assets/合作说明.pdf", "assets/样品图.jpg"]))
     packet = bot.prm.store.packet_for_job(job["id"])
     bot.prm.decide(packet["id"], "send")
     bot.prm.store.move(packet["id"], ("approved",), "sending")       # stopped while sending it
@@ -443,14 +445,20 @@ def test_a_draft_with_files_cut_off_by_a_stop_is_not_a_takeover_and_says_what_wa
     restarted.start()
     restarted.stop()
     own = {"chat_id": CREATOR, "is_group": False, "sender_id": ME, "timestamp": written}
-    restarted.on_own_message({**own, "message_id": "row1", "content": "合作说明发你啦", "msg_type": 1})
+    restarted.on_own_message({**own, "message_id": "row1", "content": "合作说明和样品图发你啦", "msg_type": 1})
     p = bot.prm.store.packet(packet["id"])
     assert (p["status"], p["outcome"]) == ("failed", "indeterminate")
     assert "文字已经发出去了" in p["error"] and "文件" in p["error"]
-    restarted.on_own_message({**own, "message_id": "row2", "content": "[文件]", "msg_type": 49,
+    restarted.on_own_message({**own, "message_id": "row2", "content": "[文件] 合作说明.pdf", "msg_type": 49,
                               "file_name": "合作说明.pdf"})
+    assert bot.prm.store.packet(packet["id"])["status"] == "failed"       # the picture: not seen yet
+    restarted.on_own_message({**own, "message_id": "row3", "content": "[图片]", "msg_type": 3})
+    p = bot.prm.store.packet(packet["id"])
+    assert (p["status"], p["outcome"], p["error"]) == ("sent", "sent_confirmed", "")
     assert bot.prm.store.deal(1)["mode"] == "copilot"
     assert [e["kind"] for e in bot.prm.store.events(1)].count("operator_message") == 0
+    restarted.on_own_message({**own, "message_id": "row4", "content": "[图片]", "msg_type": 3})
+    assert bot.prm.store.deal(1)["mode"] == "human"                       # one more picture: by hand
 
 
 def test_without_a_read_mark_own_lines_stay_history(world):
@@ -768,10 +776,15 @@ def test_a_file_sent_just_before_a_stop_and_read_back_after_it_is_the_bots(bot):
     restarted.on_own_message({"chat_id": CREATOR, "content": "[文件]", "msg_type": 49, "is_group": False,
                               "timestamp": sent_at - 2})
     assert bot.prm.store.deal(1)["mode"] == "copilot"
+    # its one file covers one row (win review F4 (b)): another file just after it is an operator's
+    restarted.on_own_message({"chat_id": CREATOR, "content": "[文件]", "msg_type": 49, "is_group": False,
+                              "timestamp": sent_at + 30})
+    assert bot.prm.store.deal(1)["mode"] == "human"
+    assert [e["kind"] for e in bot.prm.store.events(1)].count("operator_message") == 1
     # a file an operator sends later is a person's
     restarted.on_own_message({"chat_id": CREATOR, "content": "[图片]", "msg_type": 3, "is_group": False,
                               "timestamp": bot.clock.now})
-    assert bot.prm.store.deal(1)["mode"] == "human"
+    assert [e["kind"] for e in bot.prm.store.events(1)].count("operator_message") == 2
 
 
 def test_catchup_hours_are_checked():
