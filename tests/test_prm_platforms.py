@@ -607,6 +607,40 @@ def test_two_platform_commands_never_run_at_once(tmp_path):
         pass
 
 
+def test_a_cancel_while_waiting_for_the_lock_ends_the_wait(tmp_path):
+    """The heartbeat says the job is cancelled while another command holds the lock: the wait ends with
+    Cancelled (it used to go on and take the lock, mac review C#1); a heartbeat that fails or says no keeps waiting."""
+    lock = tmp_path / "platform" / "cli.lock"
+    beats = []
+    with platforms.CliLock(lock, wait=30):
+        started = time.monotonic()
+        with pytest.raises(platforms.Cancelled, match="平台没有动"):
+            with platforms.CliLock(lock, wait=30, heartbeat=lambda: beats.append(1) or len(beats) >= 2, every=0.05):
+                pytest.fail("the lock was taken")
+        assert len(beats) == 2 and time.monotonic() - started < 5
+
+        def broken():
+            raise OSError("the bot is restarting")
+
+        with pytest.raises(TimeoutError):
+            with platforms.CliLock(lock, wait=0.3, heartbeat=broken, every=0.05):
+                pass
+    with platforms.CliLock(lock, wait=0.3, heartbeat=lambda: True, every=0.05):    # free: no wait, no question
+        pass
+
+
+def test_an_execution_cancelled_before_its_first_write_runs_nothing(node, cfg, tmp_path):
+    node.rules([rule(["promotion-strategy-create-designated"], dy_designated_done(), execute=True)])
+    out = platforms.execute(DESIGNATED, cfg, plan={"steps": ["designated"]}, key=KEY, ledger=tmp_path / "ledger",
+                            catalog=catalog(), cancelled=lambda: True)
+    assert out["outcome"] == "NOT_RUN" and "开始写平台之前被取消" in out["problems"][0] and node.calls() == []
+    assert not (tmp_path / "ledger" / f"{KEY}.json").exists()                  # the key is not used up
+    asked = []
+    out = platforms.execute(DESIGNATED, cfg, plan={"steps": ["designated"]}, key=KEY, ledger=tmp_path / "ledger",
+                            catalog=catalog(), cancelled=lambda: asked.append(1) and False)
+    assert out["outcome"] == "VERIFIED_SUCCESS" and asked == [1]               # asked once, before the write
+
+
 def test_the_command_line_is_an_argv_list(tmp_path):
     marker = tmp_path / "pwned"
     run = platforms.run_cli([sys.executable, "-c", "import sys; print(sys.argv[1:])", f"--title=x; touch {marker}"],
@@ -736,6 +770,13 @@ def test_the_module_runs_on_the_macs_system_python(tmp_path):
         f"s = p.check_action(json.loads({json.dumps(SAMPLE, ensure_ascii=False)!r}))\n"
         "r = p.run_cli([sys.executable, '-c', 'print(1)'], '.', timeout=10)\n"
         "assert p.ledger_action({**s, 'receiver': {**s['receiver'], 'phone': '13900001111'}})['receiver']['phone'] == '139****1111'\n"
+        f"lock = {str(tmp_path / 'cli.lock')!r}\n"
+        "with p.CliLock(lock, wait=5):\n"
+        "    try:\n"
+        "        with p.CliLock(lock, wait=5, heartbeat=lambda: True, every=0.01):\n"
+        "            raise SystemExit('the lock was taken')\n"
+        "    except p.Cancelled:\n"
+        "        pass\n"
         "print(a['commission_rate'], r.exit_code, r.stdout.strip(), sys.version_info[:2])\n",
         encoding="utf-8")
     run = subprocess.run([python, "-I", str(script)], capture_output=True, text=True, timeout=60, cwd=tmp_path)

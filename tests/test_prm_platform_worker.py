@@ -261,3 +261,81 @@ def test_a_preview_that_could_not_be_made_is_an_error_the_bot_takes(worker, monk
     monkeypatch.setattr(worker, "platforms", None)                          # no platform module at all
     bare = worker.preview_failed(DESIGNATED, "Mac 上预览出错：y")
     assert platforms.check_block(bare)["problems"] == ["Mac 上预览出错：y"]
+
+
+# ── a cancel before the write starts (mac review C#1) ─────────────────────
+
+def approved_job(worker, bot, mac):  # noqa: F811
+    """A draft with a ready action, approved: its execution job is queued (``decide``'s answer)."""
+    creator_says(bot, "好的，就按 20% 吧")
+    run_one(worker, bot, mac.settings)
+    [packet] = bot.prm.store.packets()
+    out = bot.prm.decide(packet["id"], "execute")
+    assert out["ok"]
+    return packet, out
+
+
+def test_cancelling_while_the_cli_lock_is_taken_runs_nothing(worker, bot, mac):  # noqa: F811
+    """Another platform command (--sync-products, a preview) holds the lock; the operator cancels the execution
+    in the console meanwhile: the heartbeat says so while the job waits, nothing is executed (it used to take
+    the lock afterwards and write anyway), the result is NOT_RUN and the approval key stays unused."""
+    import threading
+
+    packet, out = approved_job(worker, bot, mac)
+    other = worker.platforms.CliLock(mac.home / "platform" / "cli.lock", wait=5)
+    with other:
+        serving = threading.Thread(target=run_one, args=(worker, bot, mac.settings), daemon=True)
+        serving.start()
+        deadline = time.monotonic() + 20
+        while bot.relay.store.get(out["job"])["status"] != "running" and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert bot.prm.store.packet(packet["id"])["status"] == "executing"
+        assert bot.relay.cancel_from_console(out["job"]) == "requested"
+        serving.join(10)                                        # done while the other command still runs
+        assert not serving.is_alive()
+    assert executions(mac.node) == []
+    job = bot.relay.store.get(out["job"])
+    record = json.loads(job["result_text"])
+    assert job["status"] == "cancelled" and record["outcome"] == "NOT_RUN" and "平台没有动" in record["problems"][0]
+    failed = bot.prm.store.packet(packet["id"])
+    assert failed["status"] == "failed" and failed["outcome"] == "platform_not_run"
+    assert not (mac.home / "platform" / "ledger" / f"{failed['platform']['key']}.json").exists()
+
+
+def test_a_job_cancelled_by_the_time_it_has_the_lock_runs_nothing(worker, bot, mac):  # noqa: F811
+    """The lock is free, but the cancel came in between the Mac taking the job and its first write: asked once
+    more right before the write, nothing is executed."""
+    packet, out = approved_job(worker, bot, mac)
+    client = worker.RelayClient(mac.settings["relay_url"], mac.settings["token"])
+    job = client.next_job(wait=1, settings=mac.settings, kinds=("prm",))
+    assert job["id"] == out["job"] and bot.relay.cancel_from_console(out["job"]) == "requested"
+    result = worker.do_job(mac.settings, job, client, worker.Stopper(), ("prm",))
+    record = json.loads(result["text"])
+    assert result["ok"] and record["outcome"] == "NOT_RUN" and "开始写平台之前被取消" in record["problems"][0]
+    assert executions(mac.node) == []
+    assert not (mac.home / "platform" / "ledger" / f"{record['key']}.json").exists()
+    assert worker.deliver(client, job["id"], result, worker.Stopper())
+    bot.relay.tick()
+    failed = bot.prm.store.packet(packet["id"])
+    assert failed["status"] == "failed" and failed["outcome"] == "platform_not_run"
+
+
+def test_a_write_under_way_is_not_stopped_by_a_cancel(worker, bot, mac):  # noqa: F811
+    """Cancelled while the CLI is writing: it runs to its end (stopping a write half way is worse), the outcome
+    is the platform's, and the reply does not go out on its own."""
+    import threading
+
+    mac.node.rules([rule(["promotion-strategy-create-designated"], dy_designated_preview(), execute=False),
+                    rule(["promotion-strategy-create-designated"], dy_designated_done(), execute=True, sleep=1.5)])
+    packet, out = approved_job(worker, bot, mac)
+    serving = threading.Thread(target=run_one, args=(worker, bot, mac.settings), daemon=True)
+    serving.start()
+    deadline = time.monotonic() + 20
+    while not executions(mac.node) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert bot.relay.cancel_from_console(out["job"]) == "requested"
+    serving.join(30)
+    record = json.loads(bot.relay.store.get(out["job"])["result_text"])
+    assert record["outcome"] == "VERIFIED_SUCCESS" and len(executions(mac.node)) == 1
+    done = bot.prm.store.packet(packet["id"])
+    assert done["status"] == "failed" and "中途被取消" in done["error"]

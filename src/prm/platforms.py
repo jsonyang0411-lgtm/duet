@@ -972,13 +972,21 @@ def run_cli(argv: list, cwd, *, timeout: float, env: Optional[dict] = None,
                   chunks["err"].decode("utf-8", "replace"), round(time.monotonic() - started, 1), stopped)
 
 
+class Cancelled(Exception):
+    """The job was cancelled before its command started (``CliLock`` while it waited): nothing ran."""
+
+
 class CliLock:
     """One platform CLI at a time on this Mac (the worker and ``--sync-products`` share the
     browser tabs): an flock on ``path``, waited for up to ``wait`` seconds (``heartbeat()``
-    every 30 s meanwhile: the relay job stays alive)."""
+    every ``every`` seconds meanwhile: the relay job stays alive).  A heartbeat that says the
+    job is cancelled ends the wait with ``Cancelled``: nothing has run yet, so nothing runs
+    (mac review C#1: the cancel used to be ignored and the write went ahead)."""
 
-    def __init__(self, path, wait: float = 600.0, heartbeat: Optional[Callable[[], bool]] = None):
+    def __init__(self, path, wait: float = 600.0, heartbeat: Optional[Callable[[], bool]] = None,
+                 every: float = 30.0):
         self.path, self.wait, self.handle, self.heartbeat = Path(path), wait, None, heartbeat
+        self.every = every
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -995,17 +1003,24 @@ class CliLock:
                 if time.monotonic() >= deadline:
                     self.handle.close()
                     raise TimeoutError(f"等了 {int(self.wait)} 秒，另一个平台命令还在跑（{self.path}）")
-                if self.heartbeat is not None and time.monotonic() - beat >= 30:
+                if self.heartbeat is not None and time.monotonic() - beat >= self.every:
                     beat = time.monotonic()
-                    try:
-                        self.heartbeat()
-                    except Exception:
-                        pass
-                time.sleep(0.5)
+                    if _says_cancel(self.heartbeat):
+                        self.handle.close()
+                        raise Cancelled("任务在等另一个平台命令跑完的时候被取消了，平台没有动")
+                time.sleep(min(0.5, max(0.01, self.every / 4)))
 
     def __exit__(self, *exc):
         if self.handle is not None:
             self.handle.close()
+        return False
+
+
+def _says_cancel(heartbeat) -> bool:
+    """A heartbeat's answer: True when the job is cancelled (one that fails says nothing)."""
+    try:
+        return bool(heartbeat())
+    except Exception:
         return False
 
 
@@ -1638,11 +1653,13 @@ def record(outcome: str, problems: Optional[list] = None) -> dict:
 
 
 def execute(raw, cfg: dict, *, plan, key: str, ledger, catalog: Optional[dict], heartbeat=None,
-            context: Optional[dict] = None) -> dict:
+            context: Optional[dict] = None, cancelled: Optional[Callable[[], bool]] = None) -> dict:
     """Phase 2 (the Mac, after 批准并执行): the approved steps WITH --execute, each write sent
     once, the next step only after the one before ended VERIFIED_SUCCESS (or needed no
     change).  ``key`` is taken in ``ledger`` first: a key that was taken before is never
-    run again (``ALREADY_RUN``).  Returns the record; ``outcome`` is VERIFIED_SUCCESS
+    run again (``ALREADY_RUN``).  ``cancelled()`` (the job's heartbeat) is asked once more
+    right before that: a job cancelled by then is NOT_RUN, its key not taken; once the first
+    write is under way nothing stops it.  Returns the record; ``outcome`` is VERIFIED_SUCCESS
     only when every step was and the reply has what it needs (the link)."""
     out = record("NOT_RUN")
     out["key"] = str(key)
@@ -1658,6 +1675,9 @@ def execute(raw, cfg: dict, *, plan, key: str, ledger, catalog: Optional[dict], 
     if platform not in cfg.get("dirs", {}):
         out["problems"].append("没有执行：" + (cfg.get("missing", {}).get(platform)
                                             or f"这台 Mac 没有配置{PLATFORMS[platform]}的命令行项目"))
+        return out
+    if cancelled is not None and _says_cancel(cancelled):
+        out["problems"].append("没有执行：任务在开始写平台之前被取消了，平台没有动")
         return out
     try:
         earlier = claim(ledger, key, {"key": key, "status": "started", "started_at": time.time(),

@@ -1760,7 +1760,9 @@ def _platform_heartbeat(client: RelayClient, job_id: int, doing: str):
 
 
 def _cli_lock(heartbeat=None):
-    return platforms.CliLock(HOME_DIR / "platform" / "cli.lock", heartbeat=heartbeat)
+    """The Mac's one-command-at-a-time lock; while it waits the job's heartbeat goes on, and a
+    cancel ends the wait (``platforms.Cancelled``: nothing ran)."""
+    return platforms.CliLock(HOME_DIR / "platform" / "cli.lock", heartbeat=heartbeat, every=HEARTBEAT_SEC)
 
 
 def platform_preview(settings: dict, workspace: Path, raw_action, client: RelayClient, job_id: int,
@@ -1777,7 +1779,7 @@ def platform_preview(settings: dict, workspace: Path, raw_action, client: RelayC
         with _cli_lock(beat):
             block = platforms.preview(raw_action, cfg, catalog=platforms.load_catalog(workspace), heartbeat=beat,
                                       context={"party_id": party_id, "job_id": job_id})
-    except TimeoutError as e:
+    except (TimeoutError, platforms.Cancelled) as e:
         block = platforms.failed_preview(raw_action, cfg, str(e))
     except Exception as e:                               # never lose the draft over a preview
         log.exception("#%s platform preview failed", job_id)
@@ -1813,11 +1815,14 @@ def do_platform_job(settings: dict, job: dict, client: RelayClient, workspace: P
     context = {"job_id": int(job["id"]), "packet_id": meta.get("packet_id"), "party_id": meta.get("party_id")}
     beat = _platform_heartbeat(client, int(job["id"]), "平台执行")
     try:
+        # cancelled while it waits for the lock, or by the time it has it: NOT_RUN, nothing written
+        # (mac review C#1); once the first write is under way it runs to its end
         with _cli_lock(beat):
             record = platforms.execute(action, cfg, plan=meta.get("run"), key=str(meta.get("key") or ""),
                                        ledger=HOME_DIR / "platform" / "ledger",
-                                       catalog=platforms.load_catalog(workspace), heartbeat=beat, context=context)
-    except TimeoutError as e:
+                                       catalog=platforms.load_catalog(workspace), heartbeat=beat, context=context,
+                                       cancelled=beat)
+    except (TimeoutError, platforms.Cancelled) as e:
         record = platforms.record("NOT_RUN", [f"没有执行：{e}"])
         record["key"] = str(meta.get("key") or "")
     log.info("#%s platform execute: %s", job["id"], record.get("outcome"))
