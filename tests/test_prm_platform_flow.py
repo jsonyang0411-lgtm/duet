@@ -681,6 +681,46 @@ def test_by_default_the_commission_waits_until_the_creator_signed_for_the_sample
     assert bot.worker_takes() is None                                       # signed for once: asked once
 
 
+def test_the_signature_finds_its_sample_order_however_much_was_said_since(bot, clock):
+    """mac review F9: the order was looked for among the deal's newest 200 events only.  A person had the
+    chat between the order and the signature (every line of hers an event): 已签收 asked for nothing and said
+    nothing.  The order is found by its own execution record now."""
+    order = ordered(bot, clock)
+    mac_runs(bot, approve(bot, order), record(sample_order_no=JST_ORDER))
+    bot.prm.send_approved()
+    assert bot.prm.deal_action("mode", {"deal_id": order["deal_id"], "mode": "paused"})["ok"]
+    for i in range(250):                                                    # the days until she signs for it
+        clock.now += 60
+        bot.prm.handle(bot.msg(f"第 {i} 句"))
+    assert len(bot.prm.store.events(order["deal_id"], limit=1000)) > 250
+    assert bot.prm.deal_action("mode", {"deal_id": order["deal_id"], "mode": "copilot"})["ok"]
+    assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": "delivered"})["ok"]
+    step = [j for j in bot.relay.store.list_jobs(500) if "system_note" in j["meta"]]
+    assert len(step) == 1
+    note = json.loads(step[0]["meta"])["system_note"]
+    assert "达人已经签收了寄样单" in note and JST_ORDER in note and DY_ITEM in note
+
+
+def test_a_sample_order_verified_late_is_followed_by_its_commission_too(bot, clock):
+    """The Mac went silent while it made the order, the bot gave up on it (red), then its answer came:
+    VERIFIED_SUCCESS, the order is in 聚水潭.  Signed for, its 专属佣金 is asked for like any other's."""
+    order = ordered(bot, clock)
+    job = approve(bot, order)
+    taken = bot.relay.next_job(0, ("prm",))
+    clock.now += LOST_AFTER_SEC + 1
+    bot.relay.tick()
+    clock.now += PLATFORM_LOST_GRACE_SEC + 1
+    bot.prm.tick()
+    assert bot.prm.store.packet(order["id"])["status"] == "failed"
+    assert bot.relay.finish(job["id"], {"ok": True, "text": json.dumps(record(sample_order_no=JST_ORDER,
+                                                                             key=taken["meta"]["key"]))})
+    bot.relay.tick()
+    assert bot.prm.store.packet(order["id"])["platform"]["execution"]["late"] is True
+    assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": "delivered"})["ok"]
+    step = bot.worker_takes()
+    assert step is not None and JST_ORDER in step["meta"]["system_note"]
+
+
 def test_a_delivered_deal_without_a_sample_order_asks_for_nothing(bot, clock):
     packet = drafted(bot, preview=False, reply="好的")
     assert bot.prm.deal_action("stage", {"deal_id": packet["deal_id"], "stage": "delivered"})["ok"]

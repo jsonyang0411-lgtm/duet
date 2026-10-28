@@ -1376,16 +1376,22 @@ class PrmService:
         the deal's last created sample order is drafted now (``_ask_next_step``)."""
         if self._commission_after != "delivered":
             return
-        for ev in self._store.events(deal["id"], limit=200):        # newest first
-            detail = ev["detail"]
-            if (ev["kind"] == "platform_result" and detail.get("action") == "jst.sample_order"
-                    and detail.get("outcome") == platforms.VERIFIED):
-                packet = self._store.packet(int(detail.get("packet") or 0))
-                if packet is not None:
-                    data = packet["platform"] or {}
-                    self._ask_next_step(packet, next_step_note(data.get("action") or {}, data.get("execution") or {},
-                                                               delivered=True), now, delivered=True)
-                return
+        packet = self._chain_order(deal["id"])
+        if packet is not None:
+            data = packet["platform"] or {}
+            self._ask_next_step(packet, next_step_note(data.get("action") or {}, data.get("execution") or {},
+                                                       delivered=True), now, delivered=True)
+
+    def _chain_order(self, deal_id: int) -> Optional[dict]:
+        """The deal's newest sample order verified on the platform, the one its 专属佣金 follow: found by the
+        orders' own execution records, every one of them however much was said since (mac review F9: only
+        the newest 200 events were looked at, and a takeover's chat pushed the order's out).  An order whose
+        verification came late (given up on, then the Mac's answer) counts too: it is in 聚水潭."""
+        for packet in self._store.deal_packets(deal_id, tools=("jst.sample_order",),
+                                               statuses=(APPROVED, SENDING, SENT, FAILED)):     # newest first
+            if ((packet["platform"] or {}).get("execution") or {}).get("outcome") == platforms.VERIFIED:
+                return packet
+        return None
 
     def reveal(self, party_id: int, actor: str = "console") -> dict:
         return reveal_numbers(self._store, int(party_id), now=self._clock(), actor=actor)
