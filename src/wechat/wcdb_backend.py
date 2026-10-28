@@ -1932,7 +1932,10 @@ class WcdbBackend(AbstractWeChatBackend):
             if not self._running:
                 break
 
-            standardized = self._standardize(msg, group_name, talker, is_group=is_group)
+            # Without the voice recognised: a row's id never depends on a voice message's words
+            # (_message_ids), so the rows seen already need none.  Recognition (seconds with a local
+            # whisper) runs once, for a new row below; one it fails on is not tried on every poll.
+            standardized = self._standardize(msg, group_name, talker, resolve_voice=False, is_group=is_group)
             if standardized is None:
                 continue
             ts = int(standardized.get("timestamp") or 0)
@@ -1955,6 +1958,9 @@ class WcdbBackend(AbstractWeChatBackend):
                 # The backlog of an OCR stretch: seen, not answered (part of it was answered
                 # from the screen).  OCR never reads a private chat: a creator's is handed on.
                 continue
+            if standardized.get("msg_type") == 34:
+                # a new voice message: now with its words (the id stays the one marked seen above)
+                standardized = self._standardize(msg, group_name, talker, is_group=is_group) or standardized
 
             # Skip own messages.  With the account's wxid known that is the
             # whole test: a member whose display name is the account's must
