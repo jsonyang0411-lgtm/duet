@@ -344,6 +344,7 @@ EVENT_NAMES = {
     "platform_preview": "重新预览平台动作", "platform_ack": "平台动作已处理",
     "recall": "撤回了一条消息", "draft_failed": "草稿没写成", "next_step": "派开专属佣金的任务",
     "platform_recheck": "平台动作要先核对", "sample_status": "聚水潭寄样单状态",
+    "commission_covered": "邀约卡开过专属佣金，当作开好",
 }
 # A creator's message recorded without a draft because it was read too late (PRM_CATCHUP_HOURS).
 MISSED_EVENT_NAME = "机器人没在读时达人的消息（没有起草）"
@@ -367,6 +368,8 @@ def event_out(ev: dict) -> dict:
         name = (f"聚水潭寄样单 {detail['order']}：{platforms.SAMPLE_STATES.get(status, status)}"
                 + (f"（{detail['waybill']}）" if detail.get("waybill") else "")
                 + (f"，原因：{detail['reason']}" if detail.get("reason") else ""))
+    elif ev["kind"] == "commission_covered" and detail.get("item"):
+        name = f"商品 {detail['item']} 邀约卡开过 {detail.get('rate')}% 专属佣金，当作开好"
     elif ev["kind"] in ("shipment", "shipment_status", "stage") and detail.get("source") == "jst":
         name = f"{name}（聚水潭同步）"
     return {"id": ev["id"], "kind": ev["kind"], "name": name,
@@ -840,6 +843,9 @@ class PrmService:
         outdated = self._outdated(waiting, now) if stale else []
         self._store.update_deal(deal["id"], now, last_message_at=_later(deal, at))
         meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"]}
+        creator = self._creator_ids(deal["id"])
+        if creator:
+            meta["creator"] = creator                  # her 抖音号: the Mac looks up the invite ledger by it
         outbound = self._outbound(deal["id"], party["id"], now, unsent=[packet for packet, _, _ in outdated])
         if outbound:
             meta["sent"] = outbound
@@ -948,6 +954,8 @@ class PrmService:
             items.append({"at": float(p.get("created_at") or 0), "kind": p["kind"], "what": "failed",
                           "text": p["final_text"] if p.get("final_text") is not None else p["text"]})
         for p in self._store.outcomes(deal_id, limit=OUTBOUND_TOLD):
+            if _covered(p) is not None:
+                continue                               # not run (the invite card opened it): nothing she was told
             final = p["final_text"] if p.get("final_text") is not None else p["text"]
             at = float(p.get("sent_at") or p.get("decided_at") or 0)
             item = {"at": at, "kind": p["kind"]}
@@ -1375,6 +1383,18 @@ class PrmService:
             logger.warning("PRM: job #%d answer unusable: %s", job["id"], e)
             return True
         draft = self._mask_draft(party_id, draft, now)
+        # A 专属佣金 the invite card (邀约卡 with a 专属佣金) opened already, as the Mac's preview found it in the invite
+        # ledger (``covered``): a step of the chain is dropped and counts as open (the chain goes on); a reply keeps its
+        # words for a person, without the action.
+        lane = LANE_SYSTEM if meta.get("system_note") else LANE_REPLY
+        cover = (draft.platform or {}).get("covered") if draft.platform is not None else None
+        covered_note = ""
+        if cover:
+            item = str(((draft.platform or {}).get("action") or {}).get("item_id") or "")
+            covered_note = cover_text(cover, item)
+            if lane == LANE_REPLY:
+                draft = dataclasses.replace(draft, platform=None)
+                cover = None
         files = self._relay.store.outfiles(job["id"])
         attachments = [{"name": f["name"], "path": f["path"], "size": f["size"], "sha256": f["sha256"]} for f in files]
         # Every file the draft named (an older worker reports only the ones it sent back): fewer came,
@@ -1384,6 +1404,8 @@ class PrmService:
         # a draft, without it, for a person (it was written as if the action had run).
         refused = (f"平台动作没过机器人这边的检查（{draft.platform_refused}），草稿里去掉了它，平台上什么都不会做；"
                    "回复是按执行成功写的，发之前请核对") if draft.platform_refused else ""
+        if covered_note and not cover:
+            refused = f"{covered_note}，草稿里去掉了平台动作，平台上什么都不会做；回复是按执行成功写的，发之前请核对"
         short = ""
         if len(named) > len(attachments):
             lost = missing_files(named, [a["name"] for a in attachments], draft.attachments_missing)
@@ -1394,7 +1416,6 @@ class PrmService:
         unknown = pii.unknown_tokens(draft.reply_draft, self._store.tokens(party_id))
         # Two lanes: the creator's replies and the bot's own next steps (meta.system_note); a newer
         # job of the other lane does not make a draft out of date, nor does a draft supersede the other's.
-        lane = LANE_SYSTEM if meta.get("system_note") else LANE_REPLY
         newer = self._relay.store.latest_open(job["chat_id"], drafts_only=True, system=lane == LANE_SYSTEM)
         # A step the bot asked for whose draft has no platform action (the model left it out, or could
         # not fill it) and still says something: nothing will happen on the platform, whatever it says.
@@ -1412,6 +1433,8 @@ class PrmService:
             # A platform write: always a person's decision (8.1's gates do not apply).
             state = (SUPERSEDED if mode != COPILOT or handed_on or (newer is not None and newer["id"] > job["id"])
                      else PENDING)
+            if cover and state == PENDING:
+                state, decided_at = DROPPED, now       # opened by the invite card: nothing for a person to approve
         elif not draft.reply_draft and not attachments:
             state = NO_REPLY
         elif mode != COPILOT:
@@ -1442,11 +1465,19 @@ class PrmService:
             deal_id=deal_id, party_id=party_id, job_id=job["id"], chat_id=job["chat_id"],
             kind=draft.message_kind, text=draft.reply_draft, attachments=attachments, intent=draft.intent,
             slots=draft.slots, stage_proposal=draft.stage_proposal,
-            needs_attention=draft.needs_attention or bool(short) or bool(refused) or bool(stepless) or bool(recall),
-            reason="；".join(r for r in (recall, refused, stepless, short, draft.reason) if r)[:500],
+            needs_attention=(draft.needs_attention or bool(short) or bool(refused) or bool(stepless) or bool(recall))
+            and state != DROPPED,
+            reason="；".join(r for r in (recall, covered_note if state == DROPPED else "", refused, stepless, short,
+                                         draft.reason) if r)[:500],
             status=state, route=route, decided_at=decided_at, meta=packet_meta,
             tool=tool, platform=platform, now=now,
         )
+        if state == DROPPED:
+            self._store.set_outcome(packet_id, "covered")
+            self._store.add_event(deal_id, party_id, "commission_covered", {
+                "packet": packet_id, "item": str(((platform or {}).get("action") or {}).get("item_id") or ""),
+                "rate": cover.get("rate"), "at": cover.get("at"), "aweme_id": cover.get("aweme_id")},
+                actor="mac", now=now)
         if state in (PENDING, APPROVED):
             self._store.supersede(deal_id, now, keep=packet_id, lane=lane)
         attention = [*notes, *([draft.reason] if draft.needs_attention and draft.reason else [])]
@@ -1475,13 +1506,15 @@ class PrmService:
             attention.append(f"#{job['id']} {stepless}")
         if draft.message_kind == "shipping_notice" and draft.reply_draft and not gates.waybill_ok(draft.reply_draft, waybill):
             attention.append("发货通知里的单号和系统记录对不上" if waybill else "还没有运单号，发货通知不能发")
-        if draft.platform is not None and draft.platform.get("verdict") != "ready":
+        if draft.platform is not None and draft.platform.get("verdict") != "ready" and not cover:
             why = "；".join(draft.platform.get("problems") or []) or platforms.VERDICTS.get(draft.platform.get("verdict"), "")
             attention.append(f"平台动作预览没通过：{why}"[:200])
         self._store.update_deal(deal_id, now, merge_slots=draft.slots, stage_proposal=draft.stage_proposal)
         self._store.set_notice(deal_id, DRAFT_NOTES + lane, "；".join(attention), now)   # its own notes: replaced
         if lane == LANE_SYSTEM and state == NO_REPLY:
             self._chain_go(deal, now)                  # the step drafted nothing: the chain goes on
+        elif state == DROPPED:
+            self._chain_go(deal, now, after=self._store.packet(packet_id))    # opened by the invite card: the next one
         elif lane == LANE_SYSTEM or tool in COMMISSION_ACTIONS.values():
             self._chain_refresh(deal_id, now)
         if state == APPROVED:
@@ -1831,7 +1864,7 @@ class PrmService:
             if after is not None:
                 after = self._store.packet(after["id"]) or after
                 theirs = (after.get("platform") or {}).get("action") or {}
-                done = (theirs.get("action") == progress["action"] and _verified(after)
+                done = (theirs.get("action") == progress["action"] and (_verified(after) or _covered(after) is not None)
                         and str(theirs.get("item_id") or "") in {i["id"] for i in progress["items"]})
             if not progress["busy"] and (progress["next"] or done) and not (delivered and not deal.get("delivered_at")):
                 head = after if after is not None else progress["order"]
@@ -2048,6 +2081,9 @@ class PrmService:
             return {"ok": False, "error": "这条草稿已经处理过了（或者达人又发了新消息，草稿已过时）"}
         meta = {"op": "platform_execute", "party_id": packet["party_id"], "deal_id": packet["deal_id"],
                 "packet_id": packet["id"], "key": approved["key"], "action": mac_action, "run": preview.get("run") or {}}
+        creator = self._creator_ids(packet["deal_id"])
+        if creator:
+            meta["creator"] = creator                  # (the Mac looks at the invite ledger once more before it writes)
         try:
             _, job_id = self._relay.submit(packet["chat_id"], packet["chat_id"], "", kind=PRM, meta=meta,
                                            fresh=True, input_closed=True)
@@ -2145,6 +2181,9 @@ class PrmService:
             return {"ok": False, "error": "这条草稿已经处理过了，或者已经在重新预览"}
         meta = {"op": "platform_preview", "party_id": packet["party_id"], "deal_id": packet["deal_id"],
                 "packet_id": packet["id"], "action": action}
+        creator = self._creator_ids(packet["deal_id"])
+        if creator:
+            meta["creator"] = creator
         try:
             _, job_id = self._relay.submit(packet["chat_id"], packet["chat_id"], "", kind=PRM, meta=meta,
                                            fresh=True, input_closed=True)
@@ -2260,6 +2299,19 @@ class PrmService:
                 event[key] = str(action[key])
         if (record.get("created") or {}).get("sample_order_no"):
             event["sample_order_no"] = record["created"]["sample_order_no"]
+        if outcome == "NOT_RUN" and record.get("covered") and action.get("action") == "dy.designated_commission":
+            # the invite card went out between the preview and the approval: the Mac wrote nothing, the product is
+            # open all the same (not red: there is nothing to check)
+            note = cover_text(record["covered"], str(action.get("item_id") or ""))
+            if self._store.move(packet["id"], (EXECUTING,), DROPPED, outcome="covered", decided_at=now,
+                                error=f"{note}，没有执行"[:500], platform=executed):
+                self._store.add_event(packet["deal_id"], packet["party_id"], "platform_result", event, actor="mac", now=now)
+                self._store.add_event(packet["deal_id"], packet["party_id"], "commission_covered", {
+                    "packet": packet["id"], "item": str(action.get("item_id") or ""), "rate": record["covered"].get("rate"),
+                    "at": record["covered"].get("at"), "aweme_id": record["covered"].get("aweme_id")}, actor="mac", now=now)
+                logger.info("PRM: packet %d not run: the invite card opened its 专属佣金 already", packet["id"])
+                self._after_platform(packet["id"], record, now)
+            return
         missing = []
         if outcome == platforms.VERIFIED and not cancelled:
             final, missing = platforms.fill_reply(
@@ -2347,6 +2399,9 @@ class PrmService:
         returns its id."""
         meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"], "system_note": note,
                 "step": {"packet": packet_id, "delivered": bool(delivered), "item": str(item or "")}}
+        creator = self._creator_ids(deal["id"])
+        if creator:
+            meta["creator"] = creator
         outbound = self._outbound(deal["id"], party["id"], now)
         if outbound:
             meta["sent"] = outbound
@@ -2728,6 +2783,26 @@ class PrmService:
         if dead:
             self._store.drop_notices(deal_id, lambda n: n["key"] in dead, now)
 
+    def _creator_ids(self, deal_id: int) -> dict:
+        """The creator's 抖音号 (and 抖音 UID) as the deal's verified 抖店 sample orders found them: ``{"douyin_ids",
+        "uid"}`` ({} when none), told to the Mac with her draft jobs (``meta.creator``) so its preview of a 专属佣金 can
+        look her up in the invite ledger (``platforms.invite_cover``).  An order the worker recorded before
+        ``created.creator_account`` gives it from the CLI's own answer (its ``daren.platformNo``)."""
+        douyin, uid = [], ""
+        for packet in self._store.deal_packets(deal_id, tools=("jst.sample_order",),
+                                               statuses=(APPROVED, SENDING, SENT, FAILED)):
+            data = packet["platform"] or {}
+            action, execution = data.get("action") or {}, data.get("execution") or {}
+            if execution.get("outcome") != platforms.VERIFIED or action.get("creator_platform") != "dy":
+                continue
+            created = execution.get("created") or {}
+            for value in (created.get("creator_account"), action.get("creator_account"), _platform_no(execution)):
+                value = str(value or "").strip()
+                if value and platforms.creator_account_ok(value) and value not in douyin:
+                    douyin.append(value)
+            uid = uid or str(created.get("creator_uid") or action.get("creator_uid") or "")
+        return {"douyin_ids": douyin[:5], "uid": uid} if douyin or uid else {}
+
     def _waybill(self, packet: dict) -> str:
         """The system's record: the deal's latest waybill (a notice of an earlier one is refused)."""
         shipment = self._store.latest_shipment(packet["deal_id"])
@@ -3001,7 +3076,8 @@ RESTART_HINT = "要重开这一轮没开的商品：把物流改回「运输中�
 # The same with PRM_COMMISSION_AFTER=created (the round starts when the order is made: a signature starts a new one).
 RESTART_HINT_CREATED = "要重开这一轮没开的商品：标「已签收」时会重开（已经签收的，把物流改回「运输中」再标「已签收」）"
 # A 专属佣金 chain's products as the bot sees them (``item_state``), in the order the Mac and the deal hear them.
-CHAIN_STATES = (("opened", "已开好"), ("running", "正在执行"), ("waiting", "在待审批"), ("drafting", "正在起草"),
+CHAIN_STATES = (("opened", "已开好"), ("covered", "邀约卡开过（当作开好）"), ("running", "正在执行"), ("waiting", "在待审批"),
+                ("drafting", "正在起草"),
                 ("dropped", "这一轮不开（运营点了「不发」）"), ("not_done", "没开成"),
                 ("uncertain", "结果不确定（运营会先到平台后台核对）"), ("asked", "派过、草稿没开它"),
                 ("todo", "还没开"))
@@ -3071,6 +3147,22 @@ def _verified(packet: dict) -> bool:
     return platform_state(packet) == "verified"
 
 
+def _covered(packet: dict) -> Optional[dict]:
+    """The invite card's cover of a 专属佣金 draft the bot did not run (``dropped`` / ``covered``: the Mac found the
+    creator's 邀约卡 with a 专属佣金 for this product in the invite ledger, at the preview or at the execution), or None."""
+    if packet.get("status") != DROPPED or packet.get("outcome") != "covered":
+        return None
+    data = packet.get("platform") or {}
+    return (data.get("preview") or {}).get("covered") or (data.get("execution") or {}).get("covered") or {}
+
+
+def cover_text(cover: dict, item: str) -> str:
+    """「这位达人的商品 X 已经由邀约卡开过 25% 专属佣金（2026-10-28 15:00 发的邀约卡）」"""
+    when = str(cover.get("at") or "")[:16].replace("T", " ")
+    return (f"这位达人的商品 {item} 已经由邀约卡开过 {cover.get('rate')}% 专属佣金"
+            + (f"（{when} 发的邀约卡）" if when else "") + "，平台上已经有指定达人佣金策略，当作开好了")
+
+
 def _released(other: dict, packet_id: int) -> bool:
     """Did an operator, asked to check ``other``'s uncertain result for draft ``packet_id`` (``_ask_recheck``),
     mark it 「我已处理」 after that: it is not on the platform, that draft may run?"""
@@ -3089,10 +3181,15 @@ def item_state(packets: list, asked: bool, since: float) -> tuple:
     else "todo", with the uncertain draft of an earlier round if there is one (to be checked before a new one
     runs: ``_opened_before``)."""
     states = [(platform_state(p), p) for p in packets]
-    for want, state in (("verified", "opened"), ("running", "running")):
-        hit = next((p for s, p in states if s == want), None)
-        if hit is not None:
-            return state, hit
+    hit = next((p for s, p in states if s == "verified"), None)
+    if hit is not None:
+        return "opened", hit
+    hit = next((p for p in packets if _covered(p) is not None), None)
+    if hit is not None:                                # the invite card opened it (long-term): open, whatever the round
+        return "covered", hit
+    hit = next((p for s, p in states if s == "running"), None)
+    if hit is not None:
+        return "running", hit
     hit = next((p for p in packets if p["status"] == PENDING), None)
     if hit is not None:
         return "waiting", hit
@@ -3134,6 +3231,10 @@ def chain_note(progress: dict, after: dict, *, delivered: bool) -> str:
         if state == "verified":
             head = (f"商品 {item} 的专属佣金（{theirs.get('commission_rate')}%）已经在平台上开好了"
                     f"（达人 {theirs.get('creator_platform_id')}）。")
+        elif _covered(after) is not None:
+            cover = _covered(after)
+            head = (f"商品 {item} 已经由邀约卡开过 {cover.get('rate')}% 专属佣金（{str(cover.get('at') or '')[:16].replace('T', ' ')}"
+                    "发的邀约卡），平台上已经有指定达人佣金策略，当作开好了，不用再开。")
         elif after["status"] == DROPPED:
             head = f"商品 {item} 这一轮不开专属佣金了（运营点了「不发」）。"
         elif state == "uncertain":
@@ -3170,13 +3271,15 @@ def chain_notice_text(progress: dict, hint: str, moved_on: bool = False) -> str:
     drafted or red and not marked dealt with; ``moved_on`` (the deal is past the sample): only under way and red."""
     items = progress["items"]
     by = {state: [i for i in items if i["state"] == state] for state, _ in CHAIN_STATES}
-    if len(by["opened"]) == len(items):
+    opened = len(by["opened"]) + len(by["covered"])         # one the invite card opened counts as open
+    if opened == len(items):
         return ""
     red = [i for i in by["not_done"] + by["uncertain"] if not ((i["packet"] or {}).get("platform") or {}).get("acked_at")]
     if not (progress["busy"] or red or (not moved_on and (by["todo"] or by["asked"]))):
         return ""
     for limit in (CHAIN_LIST, 1, 0):
-        parts = [f"开好 {len(by['opened'])}/{len(items)} 个"]
+        parts = [f"开好 {opened}/{len(items)} 个" + (f"（其中邀约卡开过 {_ids(by['covered'], limit)}）" if by["covered"]
+                                                     else "")]
         if by["running"]:
             parts.append(f"正在执行 {_ids(by['running'], limit, True)}")
         if by["waiting"]:
@@ -3276,6 +3379,20 @@ def next_step_note(action: dict, record: dict, *, delivered: bool = False) -> st
                 f"（达人 {action.get('creator_platform_id')}）。"
                 "这位达人寄样的商品里还有没开专属佣金的，就给这位达人填下一个；都开完了就不要填平台动作。"
                 "按 kb/合作政策.md 的「开专属佣金」更新案卷。")
+    return ""
+
+
+def _platform_no(execution: dict) -> str:
+    """The creator's 抖音号 / 小红书号 in a sample order's own CLI answer (a step's ``raw``: jst sample-create's
+    ``daren.platformNo``), "" when there is none."""
+    for step in execution.get("steps") or []:
+        raw = step.get("raw") if isinstance(step, dict) else None
+        if not isinstance(raw, str) or "platformNo" not in raw:
+            continue
+        data = platforms.parse_json(raw)
+        daren = data.get("daren") if isinstance(data, dict) and isinstance(data.get("daren"), dict) else {}
+        if daren.get("platformNo"):
+            return str(daren["platformNo"])
     return ""
 
 

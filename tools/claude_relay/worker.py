@@ -1802,7 +1802,8 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
         if draft.get("platform_action") is not None:
             raw = draft.pop("platform_action")
             try:
-                draft["platform"] = platform_preview(settings, workspace, raw, client, int(job["id"]), party_id)
+                draft["platform"] = platform_preview(settings, workspace, raw, client, int(job["id"]), party_id,
+                                                     creator=meta.get("creator"))
             except Exception as e:                       # never lose the draft over its preview
                 log.exception("#%s platform preview failed", job["id"])
                 draft["platform"] = preview_failed(raw, f"Mac 上预览出错：{e}")
@@ -1828,9 +1829,22 @@ def _cli_lock(heartbeat=None):
     return platforms.CliLock(HOME_DIR / "platform" / "cli.lock", heartbeat=heartbeat, every=HEARTBEAT_SEC)
 
 
+def invite_context(settings: dict, creator=None) -> dict:
+    """What a 专属佣金's preview and execution need to look the creator up in the batch invite tool's ledger
+    (tools/creator_invite: a 邀约卡 with a 专属佣金 already gave her a strategy for its products): the ledger
+    (``platforms.dy_invite_ledger`` of config.json, else ~/.claude-relay/platform/creator-invites, the tool's own
+    default) and her 抖音号 as the bot knows them (``meta.creator.douyin_ids``: its verified 抖店 sample orders)."""
+    cfg = platforms.config(settings) if platforms is not None else {}
+    ledger = cfg.get("dy_invite_ledger") or str(HOME_DIR / "platform" / "creator-invites")
+    ids = (creator or {}).get("douyin_ids") if isinstance(creator, dict) else None
+    return {"invite_ledger": ledger,
+            "douyin_ids": [str(d) for d in ids if isinstance(d, str)][:5] if isinstance(ids, list) else []}
+
+
 def platform_preview(settings: dict, workspace: Path, raw_action, client: RelayClient, job_id: int,
-                     party_id: int = 0) -> dict:
-    """The Mac's verdict on a draft's platform action (the bot gets it as ``platform``)."""
+                     party_id: int = 0, creator=None) -> dict:
+    """The Mac's verdict on a draft's platform action (the bot gets it as ``platform``).  ``creator``: the job's
+    ``meta.creator`` (``invite_context``)."""
     if platforms is None:
         return {"version": 1, "action": None, "requested": raw_action if isinstance(raw_action, dict) else None,
                 "verdict": "unavailable", "problems": ["这台 Mac 的 worker 没有平台模块（src/prm/platforms.py）"],
@@ -1841,7 +1855,8 @@ def platform_preview(settings: dict, workspace: Path, raw_action, client: RelayC
     try:
         with _cli_lock(beat):
             block = platforms.preview(raw_action, cfg, catalog=platforms.load_catalog(workspace), heartbeat=beat,
-                                      context={"party_id": party_id, "job_id": job_id})
+                                      context={"party_id": party_id, "job_id": job_id,
+                                               **invite_context(settings, creator)})
     except (TimeoutError, platforms.Cancelled) as e:
         block = platforms.failed_preview(raw_action, cfg, str(e))
     except Exception as e:                               # never lose the draft over a preview
@@ -1869,13 +1884,14 @@ def do_platform_job(settings: dict, job: dict, client: RelayClient, workspace: P
     started = time.monotonic()
     if meta.get("op") == "platform_preview":
         block = platform_preview(settings, workspace, meta.get("action"), client, int(job["id"]),
-                                 int(meta.get("party_id") or 0))
+                                 int(meta.get("party_id") or 0), creator=meta.get("creator"))
         return {"ok": True, "text": json.dumps(block, ensure_ascii=False),
                 "duration_s": round(time.monotonic() - started, 1)}
     cfg = platforms.config(settings)
     action = meta.get("action") if isinstance(meta.get("action"), dict) else {}
     log.info("#%s platform execute: %s (packet %s)", job["id"], action.get("action"), meta.get("packet_id"))
-    context = {"job_id": int(job["id"]), "packet_id": meta.get("packet_id"), "party_id": meta.get("party_id")}
+    context = {"job_id": int(job["id"]), "packet_id": meta.get("packet_id"), "party_id": meta.get("party_id"),
+               **invite_context(settings, meta.get("creator"))}
     key = str(meta.get("key") or "")
     beat = _platform_heartbeat(client, int(job["id"]), "平台执行")
     record, locked = None, False

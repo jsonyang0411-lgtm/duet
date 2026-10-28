@@ -577,6 +577,8 @@ def test_the_sample_status_job_runs_on_the_macs_system_python(tmp_path):
         "answer = json.loads(out['text'])\n"
         "assert out['ok'] and answer['orders']['YP2610260000001']['signed_at'] == 1793237400.0, out\n"
         "assert 'nickName' not in out['text']\n"
+        "ctx = w.invite_context(settings, {'douyin_ids': ['test_daren_01', 7]})\n"
+        "assert ctx['douyin_ids'] == ['test_daren_01'] and ctx['invite_ledger'].endswith('creator-invites'), ctx\n"
         "print('ok', sys.version_info[:2])\n", encoding="utf-8")
     env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), "CLAUDE_RELAY_HOME": str(tmp_path / "home")}
     run = subprocess.run([python, "-I", str(script)], capture_output=True, text=True, timeout=60, cwd=tmp_path, env=env)
@@ -604,3 +606,27 @@ def test_the_bots_round_goes_through_the_real_worker_and_fills_the_deal(worker, 
     assert notice["route"] == "review" and "SF1234567890" in notice["text"]
     assert bot.prm.store.sample_order(JST_ORDER)["sent_at"] == 1793095200.0
 
+
+def test_the_mac_reads_the_invite_ledger_and_a_product_the_card_opened_is_not_opened_again(worker, bot, mac):  # noqa: F811
+    """衔接（邀约卡的 25%）：批量邀约工具的台账在 Mac 上（默认 ~/.claude-relay/platform/creator-invites/invites.jsonl）。
+    机器人把达人的抖音号随起草任务交给 Mac（``meta.creator``，来自核验成功的抖店寄样单）；草稿要开的专属佣金这一款邀约卡
+    已经开过，预览不跑命令行，草稿里的平台动作去掉、回复留给运营核对。"""
+    from test_prm_sample_sync import verified_order
+
+    ledger = mac.home / "platform" / "creator-invites" / "invites.jsonl"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text("".join(json.dumps(line, ensure_ascii=False) + "\n" for line in [
+        {"at": "2026-10-28T15:00:00+08:00", "event": "attempt", "attempt": "9f1c00000001", "plan_id": "P1",
+         "aweme_id": "test_daren_01", "products": [DY_ITEM], "commission_rate": 25, "category": "small"},
+        {"at": "2026-10-28T15:00:05+08:00", "event": "result", "attempt": "9f1c00000001", "plan_id": "P1",
+         "aweme_id": "test_daren_01", "exit": 0, "outcome": "VERIFIED_SUCCESS", "platform_writes": 1, "sent": True,
+         "timed_out": False}]), encoding="utf-8")
+    verified_order(bot.prm, account="test_daren_01")
+    creator_says(bot, "好的，就按 20% 吧")
+    job = bot.relay.store.list_jobs(1)[0]
+    assert json.loads(job["meta"])["creator"]["douyin_ids"] == ["test_daren_01"]
+    run_one(worker, bot, mac.settings)
+    assert mac.node.calls() == []                                            # the platform is not asked
+    [packet] = [p for p in bot.prm.store.packets() if p["job_id"] == job["id"]]
+    assert packet["tool"] == "message.send" and packet["status"] == "pending" and packet["needs_attention"]
+    assert "邀约卡开过 25%" in packet["reason"]

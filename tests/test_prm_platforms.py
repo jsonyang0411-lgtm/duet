@@ -950,6 +950,15 @@ def test_the_module_runs_on_the_macs_system_python(tmp_path):
         "got = p.check_sample_result(json.loads(json.dumps(out)), ['YP2610260000001', 'YP2610260000002'])\n"
         "assert got['orders']['YP2610260000001']['ships'][0]['sent_at'] == 1793095200.0, out\n"
         "assert got['missing'] == ['YP2610260000002'] and 'nickName' not in json.dumps(out), out\n"
+        # 邀约卡已经开过的专属佣金：读台账
+        f"inv = pathlib.Path({str(tmp_path / 'invites')!r}); inv.mkdir()\n"
+        "(inv / 'invites.jsonl').write_text(json.dumps({'at': '2026-10-28T15:00:00+08:00', 'event': 'attempt', "
+        "'attempt': 'a1', 'aweme_id': 'test_daren_01', 'products': ['3000000000000000101'], 'commission_rate': 25}) + "
+        "'\\n' + json.dumps({'event': 'result', 'attempt': 'a1', 'sent': True, 'outcome': 'VERIFIED_SUCCESS'}) + "
+        "'\\n', encoding='utf-8')\n"
+        "cover = p.invite_cover(str(inv), '3000000000000000101', douyin_ids=['test_daren_01'])\n"
+        "assert cover['state'] == 'covered' and cover['rate'] == 25, cover\n"
+        "assert p.covered_of({'by': 'invite', **cover}, a)['rate'] == 25\n"
         "print(a['commission_rate'], r.exit_code, r.stdout.strip(), sys.version_info[:2])\n",
         encoding="utf-8")
     run = subprocess.run([python, "-I", str(script)], capture_output=True, text=True, timeout=60, cwd=tmp_path)
@@ -1112,7 +1121,8 @@ def test_a_sample_order_runs_once_with_the_number_and_the_ledger_keeps_it_masked
     approved = {**SAMPLE, "receiver": {**RECEIVER, "phone": "13900001111"}}      # as the bot sends it
     out = execute(jcfg, approved, {"steps": ["create"]}, tmp_path)
     assert out["outcome"] == "VERIFIED_SUCCESS", out
-    assert out["created"] == {"sample_order_no": JST_ORDER, "creator_uid": DY_UID}     # the 抖音 UID 聚水潭 found
+    assert out["created"] == {"sample_order_no": JST_ORDER, "creator_uid": DY_UID,       # the 抖音 UID 聚水潭 found
+                              "creator_account": "test_daren_01"}                        # and the 抖音号
     [call] = node.calls()
     assert "--execute" in call["argv"] and call["spec"]["receiver"]["phone"] == "13900001111"
     facts = {f["label"]: f["value"] for f in out["steps"][0]["facts"]}
@@ -1123,8 +1133,8 @@ def test_a_sample_order_runs_once_with_the_number_and_the_ledger_keeps_it_masked
                                                         "city": "佛山市", "district": "", "address": "（详细地址已清除）"}
     again = execute(jcfg, approved, {"steps": ["create"]}, tmp_path)
     assert again["outcome"] == "ALREADY_RUN" and len(node.calls()) == 1
-    assert platforms.check_record(json.loads(json.dumps(out)))["created"] == {"sample_order_no": JST_ORDER,
-                                                                              "creator_uid": DY_UID}
+    assert platforms.check_record(json.loads(json.dumps(out)))["created"] == {
+        "sample_order_no": JST_ORDER, "creator_uid": DY_UID, "creator_account": "test_daren_01"}
 
 
 @pytest.mark.parametrize("region, kept", [
@@ -1220,7 +1230,8 @@ def test_a_sample_order_keeps_the_creator_uid_only_when_it_is_a_douyin_one(node,
     answer["daren"] = {**answer["daren"], "platformUid": None, "referrerId": "6aaa5100a553c3001554dc79"}
     node.rules([rule(["sample-create"], answer, execute=True)])
     out = execute(jcfg, {**SAMPLE, "receiver": {**RECEIVER, "phone": "13900001111"}}, {"steps": ["create"]}, tmp_path)
-    assert out["outcome"] == "VERIFIED_SUCCESS" and out["created"] == {"sample_order_no": JST_ORDER}
+    assert out["outcome"] == "VERIFIED_SUCCESS" and out["created"] == {"sample_order_no": JST_ORDER,
+                                                                        "creator_account": "test_daren_01"}
 
 def test_jushuitan_is_no_catalogue_platform(node, jcfg):
     cat = platforms.sync_catalog(jcfg, ["jst"], previous=catalog())
@@ -1291,7 +1302,8 @@ def test_several_products_run_in_one_order(node, jcfg, tmp_path):
     node.rules([rule(["sample-create"], jst_done(), execute=True)])
     approved = {**THREE, "receiver": {**RECEIVER, "phone": "13900001111"}}
     out = execute(jcfg, approved, {"steps": ["create"]}, tmp_path)
-    assert out["outcome"] == "VERIFIED_SUCCESS" and out["created"] == {"sample_order_no": JST_ORDER, "creator_uid": DY_UID}
+    assert out["outcome"] == "VERIFIED_SUCCESS" and out["created"] == {"sample_order_no": JST_ORDER, "creator_uid": DY_UID,
+                                                                        "creator_account": "test_daren_01"}
     [call] = node.calls()
     assert "--execute" in call["argv"] and len(call["spec"]["goods"]) == 4
     assert {g["title"] for g in call["spec"]["goods"]} == {"测试主品", "测试贝雷帽 秋冬羊毛款", "测试药盒帽"}
@@ -1425,3 +1437,123 @@ def test_the_bot_keeps_only_what_it_asked_about_in_the_shape_it_uses():
     for bad in ("not a dict", {"op": "platform_execute"}, None):
         with pytest.raises(ActionError):
             platforms.check_sample_result(bad, [JST_ORDER])
+
+
+# ── 邀约卡已经开过的专属佣金（批量邀约工具的台账 invites.jsonl，2026-10-29） ──
+
+INVITED = "test_daren_01"                    # the creator's 抖音号 (jst_view's platformNo)
+
+
+def invite_ledger(folder, *lines):
+    """The batch invite tool's ledger (tools/creator_invite, branch creator-invite-batch): one JSON a line."""
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "invites.jsonl"
+    path.write_text("".join(json.dumps(line, ensure_ascii=False) + "\n" for line in lines), encoding="utf-8")
+    return path
+
+
+def card(attempt="9f1c00000001", aweme=INVITED, products=(DY_ITEM, DY_ITEM2), rate=25, sent=True,
+         outcome="VERIFIED_SUCCESS", at="2026-10-28T15:00:00+08:00"):
+    out = [{"at": at, "event": "attempt", "attempt": attempt, "plan_id": "P20261028-1500-ab12", "aweme_id": aweme,
+            "products": list(products), "commission_rate": rate, "category": "small"}]
+    if sent != "no result":
+        out.append({"at": at, "event": "result", "attempt": attempt, "plan_id": "P20261028-1500-ab12", "aweme_id": aweme,
+                    "exit": 0, "outcome": outcome, "platform_writes": 1 if sent else 0, "sent": sent, "timed_out": False})
+    return out
+
+
+def test_a_product_the_invite_card_opened_is_not_opened_again_and_the_cli_is_not_run(node, cfg, tmp_path):
+    """衔接（2026-10-29）：抖音命令行 `buyin author-invite --commission-rate 25` 发出邀约卡时，平台马上给这位达人、卡上的
+    商品建一条长期有效的指定达人佣金策略。之后这位达人寄样签收，开佣金链条再给同一款开 dy.designated_commission：命令行认不出
+    「已经有策略」（只看平台的 check/user，可加时还可能把达人迁到新策略）。Mac 上的预览先查邀约台账：这一款这位达人的邀约卡
+    发出去了，就不跑命令行，预览说「邀约卡开过」，机器人当作开好。"""
+    node.rules([rule(["promotion-strategy-create-designated"], dy_designated_preview(), execute=False)])
+    ledger = invite_ledger(tmp_path / "invites", {"at": "2026-10-28T14:59:00+08:00", "event": "run-start"}, *card())
+    block = platforms.preview(DESIGNATED, cfg, catalog=catalog(),
+                              context={"invite_ledger": str(ledger.parent), "douyin_ids": [INVITED]})
+    assert argvs(node, "promotion-strategy-create-designated") == []           # nothing asked of the platform
+    assert block["verdict"] == "blocked" and block["covered"] == {
+        "by": "invite", "rate": 25, "at": "2026-10-28T15:00:00+08:00", "aweme_id": INVITED,
+        "attempt": "9f1c00000001", "outcome": "VERIFIED_SUCCESS"}
+    assert "邀约卡" in block["problems"][0] and "25%" in block["problems"][0]
+    kept = platforms.check_block(json.loads(json.dumps(block, ensure_ascii=False)))
+    assert kept["covered"] == block["covered"] and kept["verdict"] == "blocked"
+
+
+@pytest.mark.parametrize("lines, why", [
+    (card(aweme="someone_else"), "another creator"),
+    (card(products=(DY_ITEM2,)), "another product"),
+    (card(rate=None), "a card without a 专属佣金"),
+    (card(sent=False, outcome="STATE_CONFLICT"), "a card that did not go out"),
+    ([], "no card at all"),
+])
+def test_an_invite_that_did_not_open_this_product_for_this_creator_changes_nothing(node, cfg, tmp_path, lines, why):
+    node.rules([rule(["promotion-strategy-create-designated"], dy_designated_preview(), execute=False)])
+    ledger = invite_ledger(tmp_path / "invites", *lines)
+    block = platforms.preview(DESIGNATED, cfg, catalog=catalog(),
+                              context={"invite_ledger": str(ledger), "douyin_ids": [INVITED]})
+    assert block["verdict"] == "ready" and "covered" not in block, why
+    assert len(argvs(node, "promotion-strategy-create-designated")) == 1
+
+
+@pytest.mark.parametrize("sent, outcome", [(None, None), (True, "INDETERMINATE"), ("no result", None)])
+def test_an_invite_whose_card_may_have_gone_out_is_said_before_approval(node, cfg, tmp_path, sent, outcome):
+    node.rules([rule(["promotion-strategy-create-designated"], dy_designated_preview(), execute=False)])
+    ledger = invite_ledger(tmp_path / "invites", *card(sent=sent, outcome=outcome))
+    block = platforms.preview(DESIGNATED, cfg, catalog=catalog(),
+                              context={"invite_ledger": str(ledger), "douyin_ids": [INVITED]})
+    assert block["verdict"] == "ready" and "covered" not in block                 # a person decides
+    [said] = [f for f in block["facts"] if f["label"].startswith("注意")]
+    assert "邀约卡" in said["value"] and "不确定" in said["value"] and "百应" in said["value"]
+
+
+def test_a_card_that_went_out_counts_over_an_earlier_one_whose_result_is_not_known(node, cfg, tmp_path):
+    ledger = invite_ledger(tmp_path / "invites", *card(attempt="a1", sent=None, outcome=None, at="2026-10-27T10:00:00+08:00"),
+                           *card(attempt="a2", at="2026-10-28T15:00:00+08:00"),
+                           *card(attempt="a3", sent="no result", at="2026-10-29T09:00:00+08:00"))
+    cover = platforms.invite_cover(ledger, DY_ITEM, douyin_ids=["TEST_DAREN_01"])           # (case is not looked at)
+    assert cover["state"] == "covered" and cover["attempt"] == "a2"
+    assert platforms.invite_cover(ledger, DY_ITEM3, douyin_ids=[INVITED]) is None              # not on the card
+    assert platforms.invite_cover(tmp_path / "nowhere", DY_ITEM, douyin_ids=[INVITED]) is None
+
+
+def test_the_ledger_is_matched_by_the_uid_when_the_tool_writes_one(node, cfg, tmp_path):
+    lines = card(aweme="whoever")
+    lines[0]["uid"] = DY_UID
+    ledger = invite_ledger(tmp_path / "invites", *lines)
+    block = platforms.preview(DESIGNATED, cfg, catalog=catalog(), context={"invite_ledger": str(ledger)})
+    assert block["covered"]["rate"] == 25 and node.calls() == []
+
+
+def test_a_ledger_that_cannot_be_read_is_said_and_the_preview_goes_on(node, cfg, tmp_path):
+    node.rules([rule(["promotion-strategy-create-designated"], dy_designated_preview(), execute=False)])
+    folder = tmp_path / "invites"
+    (folder / "invites.jsonl").mkdir(parents=True)                                # not a file
+    block = platforms.preview(DESIGNATED, cfg, catalog=catalog(),
+                              context={"invite_ledger": str(folder), "douyin_ids": [INVITED]})
+    assert block["verdict"] == "ready"
+    assert any(f["label"] == "邀约卡台账" and "读不了" in f["value"] for f in block["facts"])
+    missing = platforms.preview(DESIGNATED, cfg, catalog=catalog(),
+                                context={"invite_ledger": str(tmp_path / "none"), "douyin_ids": [INVITED]})
+    assert missing["verdict"] == "ready" and not any(f["label"] == "邀约卡台账" for f in missing["facts"])
+
+
+def test_the_bot_keeps_a_cover_only_for_a_blocked_designated_commission():
+    cover = {"by": "invite", "rate": 25, "at": "2026-10-28T15:00:00+08:00", "aweme_id": INVITED, "attempt": "a1",
+             "outcome": "VERIFIED_SUCCESS"}
+    base = {"version": 1, "action": DESIGNATED, "verdict": "blocked", "problems": ["邀约卡开过"], "facts": [], "steps": [],
+            "run": {}, "previewed_at": 1.0}
+    assert platforms.check_block({**base, "covered": cover})["covered"] == cover
+    assert "covered" not in platforms.check_block({**base, "verdict": "ready", "run": {"steps": ["designated"]},
+                                                   "covered": cover})
+    assert "covered" not in platforms.check_block({**base, "action": CHANNEL, "covered": cover})
+    assert "covered" not in platforms.check_block({**base, "covered": {**cover, "rate": "lots"}})
+
+
+def test_a_sample_order_records_the_creators_douyin_id_it_found(node, jcfg, tmp_path):
+    node.rules([rule(["sample-create"], jst_done(), execute=True)])
+    approved = {**SAMPLE, "receiver": {**RECEIVER, "phone": "13900001111"}}
+    out = execute(jcfg, approved, {"steps": ["create"]}, tmp_path)
+    assert out["created"]["creator_account"] == "test_daren_01"
+    assert platforms.check_record(json.loads(json.dumps(out)))["created"]["creator_account"] == "test_daren_01"
+    assert "creator_account" not in platforms.check_record({**out, "created": {"creator_account": "x y; rm"}})["created"]

@@ -56,7 +56,7 @@ def made(b, clock, number=JST_ORDER):
     return b.prm.store.packet(order["id"])
 
 
-def verified_order(prm, chat=CREATOR, number=JST_ORDER, at=None):
+def verified_order(prm, chat=CREATOR, number=JST_ORDER, at=None, account=""):
     """A ``jst.sample_order`` draft whose execution was verified (its reply sent), put straight into the store (the
     edge and the worker tests have no Mac drafting it)."""
     from platform_fakes import DY_SKU, DY_UID
@@ -67,7 +67,8 @@ def verified_order(prm, chat=CREATOR, number=JST_ORDER, at=None):
                                      "skus": [{"sku_id": DY_SKU, "qty": 1}], "creator_platform": "dy",
                                      "creator_uid": DY_UID})
     execution = platforms.record("VERIFIED_SUCCESS")
-    execution["created"] = {"sample_order_no": number, "creator_uid": DY_UID}
+    execution["created"] = {"sample_order_no": number, "creator_uid": DY_UID,
+                            **({"creator_account": account} if account else {})}
     packet_id = prm.store.add_packet(
         deal_id=deal["id"], party_id=party["id"], job_id=None, chat_id=chat, kind="money", text="寄样单建好啦",
         attachments=[], intent="", slots={}, stage_proposal="", needs_attention=False, reason="", status="sent",

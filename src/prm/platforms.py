@@ -613,6 +613,11 @@ def phone_of(value) -> str:
     return digits
 
 
+def creator_account_ok(value) -> bool:
+    """Is this a creator's 抖音号 / 小红书号 / UID as 聚水潭 takes one (``_CREATOR_NO``)?"""
+    return isinstance(value, str) and bool(_CREATOR_NO.match(value.strip()))
+
+
 def catalog_platform(action: dict) -> str:
     """Whose catalogue an action's item is in: its platform's; a sample order's, its shop's."""
     platform = ACTIONS[action["action"]]["platform"]
@@ -829,6 +834,7 @@ def config(settings: dict) -> dict:
     raw = settings.get("platforms") if isinstance(settings.get("platforms"), dict) else {}
     out = {"node": None, "dirs": {}, "missing": {}, "limits": _limits(raw), "env": {},
            "dy_expect_shop_id": "", "dy_invite_phone": "", "dy_invite_wechat": "", "dy_invite_invalid": [],
+           "dy_invite_ledger": "",
            "tb_shop": "", "jst_expect_uid": "", "jst_shops": {}, "jst_logistics": [],
            "preview_timeout_sec": PREVIEW_TIMEOUT_SEC, "execute_timeout_sec": EXECUTE_TIMEOUT_SEC}
     for key in ("preview_timeout_sec", "execute_timeout_sec"):
@@ -848,6 +854,9 @@ def config(settings: dict) -> dict:
             out[key] = value
         elif value:
             out["dy_invite_invalid"].append(key)          # set, but not in the drawer's format: said, never used
+    ledger = str(raw.get("dy_invite_ledger") or "").strip()
+    if ledger and not _CONTROL.search(ledger):
+        out["dy_invite_ledger"] = os.path.expanduser(ledger)
     tb_shop = str(raw.get("tb_shop") or "").strip()
     if tb_shop and not tb_shop.startswith("-") and not _CONTROL.search(tb_shop) and len(tb_shop) <= 40:
         out["tb_shop"] = tb_shop
@@ -1404,7 +1413,13 @@ def _dy_created(data) -> dict:
     return out
 
 
-def _preview_dy_designated(action: dict, cfg: dict, run_one, block: dict) -> None:
+def _preview_dy_designated(action: dict, cfg: dict, run_one, block: dict, context: Optional[dict] = None) -> None:
+    cover = _invite_check(action, context, block)
+    if cover is not None:                       # the invite card opened it: nothing to ask the platform
+        block["covered"] = covered_of({"by": "invite", **cover}, action)
+        block["steps"].append(_covered_step(cover, action["item_id"]))
+        block["run"] = {"steps": ["designated"]}
+        return
     rec, _ = _dy_preview(cfg, "designated", action, run_one)
     block["steps"].append(rec)
     if rec["verdict"] != "needs_promotion":
@@ -1451,7 +1466,7 @@ def _preview_dy_invite(action: dict, cfg: dict, run_one, block: dict) -> None:
                                           "发出去收不回；达人的按钮从「邀约带货」变成「继续沟通」才算核验通过，才发微信回复"))
 
 
-def _execute_dy(action: dict, cfg: dict, plan: dict, run_one, record: dict) -> None:
+def _execute_dy(action: dict, cfg: dict, plan: dict, run_one, record: dict, context: Optional[dict] = None) -> None:
     def write(step: str, channel_id: str = "", expect: Optional[dict] = None) -> tuple:
         run = run_one(_dy_argv(cfg, step, action, execute=True, channel_id=channel_id, expect=expect), "dy", True)
         data = parse_json(run.stdout)
@@ -1475,6 +1490,11 @@ def _execute_dy(action: dict, cfg: dict, plan: dict, run_one, record: dict) -> N
         write("invite", expect=plan)
         return
     if name == "dy.designated_commission":
+        cover = _invite_check(action, context, record)
+        if cover is not None:                   # the card went out after the preview: nothing is written
+            record["covered"] = covered_of({"by": "invite", **cover}, action)
+            record["problems"].append(invite_cover_text(cover, action["item_id"]) + "，没有执行")
+            return
         if plan["steps"][0] == "promotion":
             outcome, _ = write("promotion")
             if outcome not in _DONE:
@@ -1512,6 +1532,125 @@ def _execute_dy(action: dict, cfg: dict, plan: dict, run_one, record: dict) -> N
         record["problems"].append(f"渠道品 {channel_id} 建好了，但绑定达人的预览没通过，没有绑定：" + "；".join(bind["problems"]))
         return
     write("bind", channel_id)
+
+
+# ── 邀约卡已经开过的专属佣金（批量邀约工具的台账，2026-10-29） ──────────────
+# douyin-engineering 的 `buyin author-invite --commission-rate 25`（批量邀约工具 tools/creator_invite 发的卡）一发出去，
+# 平台马上给这位达人、卡上的商品建一条长期有效的指定达人佣金策略。之后寄样签收，开佣金的链条再给同一款开
+# dy.designated_commission：命令行认不出「已经有策略」（它只看平台的 check/user；可加时还可能把达人迁到新策略，真机没验证过）。
+# 所以这台 Mac 的预览先查邀约台账（invites.jsonl：attempt {attempt, aweme_id, products, commission_rate}，再一行 result
+# {attempt, sent, outcome}）：这位达人（抖音号，台账将来记了 uid 也认）这一款的卡确实发出去了，就不跑命令行、说「邀约卡开过」
+# （``covered``），机器人当作开好；发没发出去不确定的，照常预览，批准前先提醒核对；执行时再查一次。
+
+INVITE_LEDGER_FILE = "invites.jsonl"
+# The card went out (the tool's ``sent`` true) with these outcomes: the strategy is there.  Other outcomes with ``sent``
+# true, no result yet or ``sent`` null: it may be (``unsure``).
+INVITE_SENT_OUTCOMES = (VERIFIED, "ACCEPTED_UNVERIFIED")
+
+
+def _invite_time(text) -> str:
+    """"2026-10-28T15:00:00+08:00" → "2026-10-28 15:00" (as written, Beijing time)."""
+    return str(text or "")[:16].replace("T", " ")
+
+
+def invite_cover(ledger, item_id: str, *, douyin_ids=(), uid: str = "") -> Optional[dict]:
+    """Did a 邀约带货 card with a 专属佣金 go to this creator for this product (the batch invite tool's ledger on this
+    Mac, ``ledger``: its folder or the invites.jsonl itself)?  ``{"state": "covered" | "unsure", "rate", "at",
+    "aweme_id", "attempt", "outcome"}``: covered = the card went out (``sent`` true, VERIFIED_SUCCESS or
+    ACCEPTED_UNVERIFIED): the platform gave the creator a 指定达人佣金 strategy for its products then; unsure = it may
+    have (no result, ``sent`` null, another outcome with ``sent`` true).  The creator is one of ``douyin_ids`` (her
+    抖音号, as the tool writes ``aweme_id``; case is not looked at), or ``uid`` when the tool writes one.  None: no such
+    card, or no ledger at all; a ledger that cannot be read raises ``OSError``."""
+    if not ledger:
+        return None
+    path = Path(os.path.expanduser(str(ledger)))
+    if path.is_dir():
+        path = path / INVITE_LEDGER_FILE
+    if not path.exists():
+        return None
+    names = {str(d).strip().lower() for d in douyin_ids or () if str(d).strip()}
+    uid = str(uid or "").strip()
+    attempts, results = {}, {}
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue                                     # a line cut by a crash
+        if not isinstance(rec, dict) or not rec.get("attempt"):
+            continue
+        if rec.get("event") == "attempt":
+            attempts[str(rec["attempt"])] = rec
+        elif rec.get("event") == "result":
+            results[str(rec["attempt"])] = rec
+    best = None
+    for key, rec in attempts.items():
+        who = str(rec.get("aweme_id") or "").strip().lower()
+        if not ((who and who in names) or (uid and str(rec.get("uid") or "").strip() == uid)):
+            continue
+        products = [str(p).strip() for p in rec.get("products") or [] if isinstance(p, (str, int))]
+        rate = rec.get("commission_rate")
+        if str(item_id) not in products or not _is_int(rate) or not 1 <= rate <= 80:
+            continue
+        result = results.get(key) or {}
+        sent, outcome = result.get("sent"), str(result.get("outcome") or "")
+        if result and sent is False:
+            continue                                     # nothing went out
+        state = "covered" if sent is True and outcome in INVITE_SENT_OUTCOMES else "unsure"
+        found = {"state": state, "rate": rate, "at": _clip(rec.get("at") or "", 40),
+                 "aweme_id": str(rec.get("aweme_id") or "")[:64], "attempt": _clip(key, 40),
+                 "outcome": outcome if outcome in OUTCOMES else ""}
+        if best is None or (state == "covered", found["at"]) > (best["state"] == "covered", best["at"]):
+            best = found                                 # a card that went out beats one that may have; the latest
+    return best
+
+
+def invite_cover_text(cover: dict, item_id: str) -> str:
+    when = _invite_time(cover.get("at"))
+    if cover.get("state") == "unsure":
+        return (f"邀约台账里有一张带 {cover['rate']}% 专属佣金、含商品 {item_id} 的邀约卡（{when}，抖音号 {cover.get('aweme_id')}），"
+                "发没发出去不确定：要是发出去了，平台上这款已经有这位达人的指定达人佣金策略，再开会把她换到新的策略；"
+                "批准前先到百应 › 消息 / 推广策略里核对")
+    return (f"这位达人的商品 {item_id} 已经由邀约卡开过 {cover['rate']}% 专属佣金（{when} 发的邀约卡，抖音号 "
+            f"{cover.get('aweme_id')}），平台上已经有指定达人佣金策略，不用再开")
+
+
+def _invite_check(action: dict, context: Optional[dict], block: dict) -> Optional[dict]:
+    """A 专属佣金's look at the invite ledger (``context``: ``invite_ledger``, ``douyin_ids``): the cover found, or None.
+    An unreadable ledger, or a card that may have gone out, is said among ``block``'s facts."""
+    ledger = (context or {}).get("invite_ledger")
+    if not ledger:
+        return None
+    try:
+        cover = invite_cover(ledger, action["item_id"], douyin_ids=(context or {}).get("douyin_ids") or (),
+                             uid=action.get("creator_platform_id", ""))
+    except OSError as e:
+        block["facts"].append(_fact("邀约卡台账", f"读不了（{_clip(e, 120)}），没核对邀约卡开过的专属佣金"))
+        return None
+    if cover is not None and cover["state"] == "unsure":
+        block["facts"].insert(0, _fact("注意（邀约卡）", invite_cover_text(cover, action["item_id"])))
+        return None
+    return cover
+
+
+def _covered_step(cover: dict, item_id: str) -> dict:
+    return {"name": "invite_ledger", "label": "邀约卡台账（这台 Mac，只读）", "execute": False, "command": "",
+            "exit_code": None, "seconds": 0, "verdict": "blocked", "outcome": "",
+            "problems": [invite_cover_text(cover, item_id)], "facts": [], "raw": ""}
+
+
+def covered_of(value, action: Optional[dict] = None) -> Optional[dict]:
+    """``covered`` of a preview or an execution record, checked (None when it is not one): only a dy.designated_commission's."""
+    if not isinstance(value, dict) or value.get("by") != "invite":
+        return None
+    if action is not None and action.get("action") != "dy.designated_commission":
+        return None
+    rate = value.get("rate")
+    if not _is_int(rate) or not 1 <= rate <= 80:
+        return None
+    aweme = str(value.get("aweme_id") or "")
+    return {"by": "invite", "rate": rate, "at": _clip(value.get("at") or "", 40),
+            "aweme_id": aweme if _DOUYIN_ID.match(aweme) else "", "attempt": _clip(value.get("attempt") or "", 40),
+            "outcome": value.get("outcome") if value.get("outcome") in OUTCOMES else ""}
 
 
 # ── the two phases ────────────────────────────────────────────────────────
@@ -1747,6 +1886,11 @@ def _is_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+# What of an execution's ``context`` the ledger keeps (who asked); the rest (the invite ledger's path, the creator's
+# 抖音号) is only for the run.
+LEDGER_CONTEXT = ("job_id", "packet_id", "party_id")
+
+
 def record(outcome: str, problems: Optional[list] = None) -> dict:
     """An execution's record (what the worker hands back)."""
     return {"version": 1, "op": "platform_execute", "outcome": outcome, "problems": list(problems or []),
@@ -1780,9 +1924,10 @@ def execute(raw, cfg: dict, *, plan, key: str, ledger, catalog: Optional[dict], 
     if cancelled is not None and _says_cancel(cancelled):
         out["problems"].append("没有执行：任务在开始写平台之前被取消了，平台没有动")
         return out
+    kept = {k: v for k, v in (context or {}).items() if k in LEDGER_CONTEXT}
     try:
         earlier = claim(ledger, key, {"key": key, "status": "started", "started_at": time.time(),
-                                      "action": ledger_action(action), "run": approved, **(context or {})})
+                                      "action": ledger_action(action), "run": approved, **kept})
     except (ActionError, OSError) as e:
         out["problems"].append(f"没有执行：执行台账写不了（{e}）")
         return out
@@ -1794,7 +1939,8 @@ def execute(raw, cfg: dict, *, plan, key: str, ledger, catalog: Optional[dict], 
         return out
     try:
         _EXECUTES[platform](action, cfg, approved, _runner(cfg, heartbeat), out,
-                            {"catalog_entry": catalog_item(catalog, catalog_platform(action), action["item_id"]),
+                            {**(context or {}),
+                             "catalog_entry": catalog_item(catalog, catalog_platform(action), action["item_id"]),
                              "catalog": catalog})
         writes = [step for step in out["steps"] if step.get("execute")]
         outcome = worst(step.get("outcome") for step in writes) if writes else "NOT_RUN"
@@ -1818,7 +1964,7 @@ def execute(raw, cfg: dict, *, plan, key: str, ledger, catalog: Optional[dict], 
         try:
             settle(ledger, key, {"key": key, "status": "done", "action": ledger_action(action), "run": approved,
                                  "finished_at": out["finished_at"], "record": {k: v for k, v in out.items() if k != "steps"},
-                                 **(context or {})})
+                                 **kept})
         except Exception:                        # the entry stays "started" (never run again); the outcome
             pass                                 # stands: a ledger that cannot be written changes nothing done
     return out
@@ -1882,7 +2028,9 @@ def check_block(block) -> dict:
         plan = check_plan(action, block.get("run"))
     catalog = block.get("catalog") if isinstance(block.get("catalog"), dict) else {}
     synced = catalog.get("synced_at")
+    covered = covered_of(block.get("covered"), action) if verdict == "blocked" and action else None
     return {
+        **({"covered": covered} if covered is not None else {}),
         "version": 1, "action": action,
         "requested": _requested(block.get("requested")) if block.get("requested") is not None else None,
         "verdict": verdict, "problems": _texts(block.get("problems"), 500, 20), "facts": _facts(block.get("facts")),
@@ -1920,6 +2068,8 @@ def check_record(value) -> dict:
         created["sample_order_no"] = str(created_in["sample_order_no"])
     if _DIGITS.match(str(created_in.get("creator_uid") or "")):
         created["creator_uid"] = str(created_in["creator_uid"])
+    if creator_account_ok(created_in.get("creator_account")):
+        created["creator_account"] = str(created_in["creator_account"]).strip()
     if isinstance(created_in.get("strategy_ids"), list):
         created["strategy_ids"] = [_clip(s, 40) for s in created_in["strategy_ids"][:10]]
     link = str(created_in.get("link") or "")
@@ -1928,10 +2078,14 @@ def check_record(value) -> dict:
         if platform:
             created["link"] = check_link(link, platform)
     outcome = value["outcome"]
-    return {"version": 1, "op": "platform_execute", "outcome": outcome, "key": _clip(value.get("key", ""), 40),
-            "problems": _texts(value.get("problems"), 500, 20), "facts": _facts(value.get("facts")),
-            "steps": _steps(value.get("steps")), "created": created,
-            "finished_at": value["finished_at"] if isinstance(value.get("finished_at"), (int, float)) else None}
+    out = {"version": 1, "op": "platform_execute", "outcome": outcome, "key": _clip(value.get("key", ""), 40),
+           "problems": _texts(value.get("problems"), 500, 20), "facts": _facts(value.get("facts")),
+           "steps": _steps(value.get("steps")), "created": created,
+           "finished_at": value["finished_at"] if isinstance(value.get("finished_at"), (int, float)) else None}
+    covered = covered_of(value.get("covered")) if outcome == "NOT_RUN" else None
+    if covered is not None:                     # not run: the invite card had opened it (_execute_dy)
+        out["covered"] = covered
+    return out
 
 
 # ── the catalogue: what each platform has on sale (read-only commands) ────
@@ -2792,6 +2946,10 @@ def _execute_jst(action: dict, cfg: dict, plan: dict, run_one, record: dict, cat
         uid = str(daren.get("platformUid") or daren.get("referrerId") or "")
         if _DIGITS.match(uid):
             record["created"]["creator_uid"] = uid
+        # and their 抖音号 / 小红书号: the invite ledger knows a creator by it (dy.designated_commission's preview)
+        account = str(daren.get("platformNo") or "").strip()
+        if creator_account_ok(account):
+            record["created"]["creator_account"] = account
     if rec["outcome"] != VERIFIED:
         # what the operator must check in 聚水潭 goes with the red mark (the order may exist)
         number = record["created"].get("sample_order_no")
@@ -3009,7 +3167,7 @@ def check_sample_result(value, asked=None) -> dict:
 _PREVIEWS = {
     "xhs.direct_plan": _preview_xhs_direct_plan,
     "xhs.channel_item": _preview_xhs_channel_item,
-    "dy.designated_commission": lambda a, c, r, b, ctx: _preview_dy_designated(a, c, r, b),
+    "dy.designated_commission": lambda a, c, r, b, ctx: _preview_dy_designated(a, c, r, b, ctx),
     "dy.channel_goods": lambda a, c, r, b, ctx: _preview_dy_channel_goods(a, c, r, b),
     "dy.creator_invite": lambda a, c, r, b, ctx: _preview_dy_invite(a, c, r, b),
     "tb.campaign": _preview_tb,
@@ -3017,7 +3175,7 @@ _PREVIEWS = {
 }
 _EXECUTES = {
     "xhs": lambda a, c, p, r, rec, ctx: _execute_xhs(a, c, p, r, rec),
-    "dy": lambda a, c, p, r, rec, ctx: _execute_dy(a, c, p, r, rec),
+    "dy": lambda a, c, p, r, rec, ctx: _execute_dy(a, c, p, r, rec, ctx),
     "tb": lambda a, c, p, r, rec, ctx: _execute_tb(a, c, p, r, rec, ctx.get("catalog_entry")),
     "jst": lambda a, c, p, r, rec, ctx: _execute_jst(a, c, p, r, rec, ctx.get("catalog")),
 }
