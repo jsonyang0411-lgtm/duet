@@ -433,7 +433,8 @@ class Bot:
         gets them; the manager shares that backend's window lock and reads the screen
         with its own OCR engine (OCR_FALLBACK is a different engine and may be off).
         ``on_accepted(at, label)`` hears every request it accepts (the new-friend scan's
-        AcceptLog: a friend the bot let in is ``auto_accept``).
+        AcceptLog: a friend the bot let in is ``auto_accept``).  The backend's ``chat_names`` tell the
+        manager which window titles are chats (open in windows of their own), never its dialogs.
         """
         window = getattr(backend, "window_controller", None)
         if window is None:
@@ -448,6 +449,7 @@ class Bot:
                 ocr_engine=WindowsOcrEngine(window=window),
                 ui_lock=getattr(backend, "window_lock", None),
                 on_accepted=on_accepted,
+                chat_names=getattr(backend, "chat_names", None),
             )
             auto = AutoFriendService(
                 manager,

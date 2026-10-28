@@ -674,6 +674,17 @@ class BotFriendWiringTests(unittest.TestCase):
         self.assertIs(bot._friend_mgr._ui_lock, lock)
         admin.set_friend_manager.assert_called_once_with(bot._friend_mgr, bot._auto_friend)
 
+    def test_the_manager_knows_the_backends_chat_names(self):
+        """A chat open in a window of its own is titled with its name: never one of WeChat's dialogs."""
+        backend = WcdbBackend(bot_display_name="小助手", groups=["测试群"])
+        backend._chat_names = {"room1@chatroom": "达人朋友群", "wxid_a": "小朋友"}
+        backend._session_names = {"wxid_b": "阿明", "wxid_a": "小朋友"}
+        with patch("src.wechat.ocr.win_ocr.WindowsOcrEngine"):
+            bot, _ = self.start(backend)
+        self.assertEqual(bot._friend_mgr._chat_names(), ["达人朋友群", "小朋友", "阿明"])
+        self.assertTrue(bot._friend_mgr._is_chat_title("达人朋友群 (35)"))
+        self.assertFalse(bot._friend_mgr._is_chat_title("通过朋友验证"))
+
     def test_the_manager_tells_its_accepts_to_the_new_friend_scan(self):
         backend = SimpleNamespace(window_controller=FakeWindow(), window_lock=threading.Lock())
         heard = MagicMock()
@@ -1189,6 +1200,197 @@ class QuietConfigTests(unittest.TestCase):
         self.assertEqual((service._idle_sec, service._watch, service._full_check_sec), (45.0, False, 120.0))
         self.assertTrue(hasattr(service._idle_gate, "idle_seconds"))
 
+
+
+# ── WeChat 4.0's dialogs are never confused with a chat open in a window of its own (win review F7) ──
+#
+# A chat can be open in a window of its own (SEND_QUIET, or by hand): same process, same window class as
+# the dialogs, and its title is the chat's name, 「达人朋友群」 or 「小朋友」 say.  Friend management used to
+# take the first window whose title merely contained 验证 / 确定 / 朋友 (申请 / 验证 / 朋友 for the
+# application window), clicked into its lower part and pressed Enter there: what an operator had typed in
+# that chat, or the greeting, went out to that chat.  Now a dialog is a window that appeared after the
+# click that opens it, titled exactly as WeChat titles it, not named like a chat, and nothing is clicked
+# or typed into it unless that very window is in front.
+
+CHAT_GROUP, CHAT_PERSON, POPUP, APPLY, ADD_DIALOG = 601, 602, 603, 604, 605
+
+
+class DesktopWindow(FakeWindow):
+    """The window controller over a FakeDesktop: one window at a time is in front (``front``)."""
+
+    def __init__(self, front=HWND):
+        super().__init__()
+        self.front = front
+
+    def _foreground_matches(self, hwnd):
+        return hwnd == self.front
+
+
+class DialogTestCase(FriendTestCase):
+    def setUp(self):
+        super().setUp()
+        self.desktop = FakeDesktop()
+        self.desktop.add(CHAT_GROUP, title="达人朋友群")               # chats open in windows of their own
+        self.desktop.add(CHAT_PERSON, title="小朋友")
+        self.window = DesktopWindow()
+        self.focusable = True                                       # does SetForegroundWindow work?
+
+    def make(self, ocr=None, chat_names=("达人朋友群", "小朋友", "测试群")):
+        manager = FriendManager(window_controller=self.window, ocr_engine=ocr or FakeOcr([]), clicker=self.click,
+                                rect_of=lambda h: self.desktop.windows[h]["rect"], sleeper=lambda s: None,
+                                chat_names=lambda: list(chat_names))
+        manager._focus_window = self.focus
+        return manager
+
+    def click(self, x, y):
+        self.clicks.append((x, y))
+        self.events.append(("click", self.window.front, x, y))
+        return self.desktop.click(x, y)
+
+    def focus(self, hwnd):
+        if self.focusable:
+            self.window.front = hwnd
+
+    def _key_event(self, event):                                     # which window had the keyboard
+        self.keys.append(event)
+        self.events.append((*event, "front", self.window.front))
+        if event == ("key", VK_RETURN) and self.window.front == APPLY:
+            self.desktop.windows.pop(APPLY, None)                     # WeChat sends the application and closes it
+
+    def run_win32(self, fn, *args):
+        with patch.object(friend_manager, "sys", SimpleNamespace(platform="win32")), \
+             patch.dict("sys.modules", self.desktop.modules()):
+            return fn(*args)
+
+
+class PopupDialogTests(DialogTestCase):
+    def before(self, manager):
+        return self.run_win32(manager._window_snapshot, HWND)
+
+    def test_a_chat_window_with_朋友_in_its_name_is_not_the_confirmation_dialog(self):
+        manager = self.make()
+        before = self.before(manager)
+        self.assertIsNone(self.run_win32(manager._find_popup_dialog, HWND, before))     # was the chat (601)
+
+    def test_a_chat_window_that_opens_meanwhile_is_not_it_either(self):
+        manager = self.make()
+        before = self.before(manager)
+        self.desktop.add(606, title="小朋友们")                        # new, but a chat's title
+        self.assertIsNone(self.run_win32(manager._find_popup_dialog, HWND, before))
+
+    def test_the_dialog_that_appears_is_found_whatever_order_windows_are_listed_in(self):
+        manager = self.make()
+        before = self.before(manager)
+        self.desktop.add(POPUP, title="通过朋友验证")
+        self.assertEqual(self.run_win32(manager._find_popup_dialog, HWND, before), POPUP)
+
+    def test_a_chat_named_like_the_dialog_is_not_it(self):
+        manager = self.make(chat_names=("通过朋友验证",))
+        before = self.before(manager)
+        self.desktop.add(POPUP, title="通过朋友验证")
+        self.assertIsNone(self.run_win32(manager._find_popup_dialog, HWND, before))
+
+    def test_without_a_list_of_the_windows_before_the_click_nothing_is_taken(self):
+        manager = self.make()
+        self.desktop.add(POPUP, title="通过朋友验证")
+        self.assertIsNone(self.run_win32(manager._find_popup_dialog, HWND, None))
+
+    def test_nothing_is_clicked_or_typed_unless_the_dialog_itself_is_in_front(self):
+        manager = self.make()
+        self.desktop.add(POPUP, title="通过朋友验证", rect=(100, 100, 500, 700))
+        self.window.front = CHAT_PERSON                               # the chat window has the keyboard
+        self.focusable = False                                        # and SetForegroundWindow does not work
+        with self.assertRaises(friend_manager._Abort):
+            self.run_win32(manager._confirm_popup_dialog, POPUP)
+        self.assertNothingHappened()                                 # no click, no Enter into 「小朋友」
+
+    def test_the_dialog_in_front_gets_the_click_and_the_enter(self):
+        manager = self.make()
+        self.desktop.add(POPUP, title="通过朋友验证", rect=(100, 100, 500, 700))
+        self.run_win32(manager._confirm_popup_dialog, POPUP)
+        self.assertEqual(self.events, [("click", POPUP, 100 + int(0.318 * 400), 100 + int(0.930 * 600)),
+                                       ("key", VK_RETURN, "front", POPUP)])
+
+    def test_an_accept_with_a_chat_window_open_types_only_into_the_dialog(self):
+        accept = row("前往验证", 0.70, 0.21, 0.80, 0.25)
+        ocr = FakeOcr([AcceptFriendRequestsTests.NEW_FRIENDS],
+                      [row("张三 申请添加你为朋友", 0.35, 0.20, 0.50, 0.25), accept],
+                      [],                                             # the main window shows no 确定
+                      [row("张三", 0.35, 0.20, 0.50, 0.25)])          # the request is gone
+        manager = self.make(ocr)
+        self.desktop.on_click = [lambda: None,                       # 新的朋友
+                                 lambda: self.desktop.add(POPUP, title="通过朋友验证", rect=(100, 100, 500, 700))]
+        result = self.run_win32(manager.accept_friend_requests)
+        self.assertEqual([r["status"] for r in result], ["accepted"])
+        typed = [e for e in self.events if e[0] in ("key", "combo")]
+        self.assertEqual(typed, [("key", VK_RETURN, "front", POPUP)])  # the one Enter, into the dialog
+        self.assertNotIn(CHAT_PERSON, [e[1] for e in self.events if e[0] == "click"])
+
+    def test_an_accept_whose_dialog_will_not_come_forward_is_stopped_and_the_dialog_closed(self):
+        accept = row("前往验证", 0.70, 0.21, 0.80, 0.25)
+        ocr = FakeOcr([AcceptFriendRequestsTests.NEW_FRIENDS],
+                      [row("张三 申请添加你为朋友", 0.35, 0.20, 0.50, 0.25), accept], [])
+        manager = self.make(ocr)
+        closed = []
+        manager._close_window = closed.append
+        self.desktop.on_click = [lambda: None, lambda: self.desktop.add(POPUP, title="通过朋友验证")]
+        self.focusable = False
+        self.window.front = HWND
+        result = self.run_win32(manager.accept_friend_requests)
+        self.assertEqual(result, [])
+        self.assertEqual([e for e in self.events if e[0] in ("key", "combo")], [])   # no Enter anywhere
+        self.assertEqual(closed, [POPUP])                             # cancelled, not left open
+
+
+class ApplyDialogTests(DialogTestCase):
+    def test_a_chat_window_is_not_the_application_window(self):
+        manager = self.make()
+        before = self.run_win32(manager._window_snapshot, HWND)
+        self.desktop.add(ADD_DIALOG, title="添加朋友")
+        self.assertIsNone(self.run_win32(manager._find_apply_dialog, HWND, ADD_DIALOG, before))   # was 601
+
+    def test_the_application_window_that_appears_is_found(self):
+        manager = self.make()
+        before = self.run_win32(manager._window_snapshot, HWND)
+        self.desktop.add(ADD_DIALOG, title="添加朋友")
+        self.desktop.add(606, title="申请添加朋友们的群")              # a chat that opened meanwhile
+        self.desktop.add(APPLY, title="申请添加朋友")
+        self.assertEqual(self.run_win32(manager._find_apply_dialog, HWND, ADD_DIALOG, before), APPLY)
+
+    def add_friend(self, apply_comes_forward=True):
+        """The 4.0 add-friend flow with 「小朋友」 open in its own window: search, 添加到通讯录, greeting, 确定."""
+        add_button = row("添加到通讯录", 0.4, 0.8, 0.6, 0.9)
+        ocr = FakeOcr([add_button], [row("发送添加朋友申请", 0.1, 0.1, 0.5, 0.2)], [])
+        manager = self.make(ocr)
+        self.desktop.add(ADD_DIALOG, title="添加朋友", rect=(200, 100, 600, 800))
+        self.window.front = ADD_DIALOG
+        closed = []
+        manager._close_window = lambda h: closed.append(h) or self.desktop.windows.pop(h, None)
+
+        def application_opens():
+            self.desktop.add(APPLY, title="申请添加朋友", rect=(200, 100, 600, 900))
+            if not apply_comes_forward:
+                self.focusable = False
+                self.window.front = CHAT_PERSON                       # say the chat window got the keyboard
+
+        self.desktop.on_click = [lambda: None, application_opens]     # the search box, 添加到通讯录
+        manager._open_add_friend_dialog_wechat4 = lambda hwnd: ADD_DIALOG
+        manager._is_window_visible = lambda h: h in self.desktop.windows
+        result = self.run_win32(manager._add_friend_wechat4, HWND, "wxid_target", "你好呀")
+        return result, closed
+
+    def test_the_greeting_goes_only_into_the_application_window(self):
+        result, closed = self.add_friend()
+        typed_into = {e[-1] for e in self.events if e[0] in ("key", "combo")}
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(typed_into, {ADD_DIALOG, APPLY})             # never 「小朋友」 (602)
+        self.assertEqual(self.window.pasted, ["wxid_target", "你好呀"])
+
+    def test_an_application_window_that_is_not_in_front_gets_nothing_and_both_dialogs_close(self):
+        with self.assertRaises(friend_manager._Abort):
+            self.add_friend(apply_comes_forward=False)
+        self.assertNotIn(CHAT_PERSON, {e[-1] for e in self.events if e[0] in ("key", "combo")})
+        self.assertEqual(self.window.pasted, ["wxid_target"])         # the greeting was never pasted
 
 if __name__ == "__main__":
     unittest.main()

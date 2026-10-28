@@ -530,6 +530,14 @@ class WcdbBackend(AbstractWeChatBackend):
         """Held for every stretch of window automation; friend management takes it too."""
         return self._window_lock
 
+    def chat_names(self) -> list[str]:
+        """The names of the chats read and of every chat of the last session list: a WeChat window titled
+        like one of them is a chat open in a window of its own (friend management never takes it for one
+        of WeChat's dialogs)."""
+        names = [name for _, name in list(self._chat_names.items())]
+        names += [name for _, name in list(self._session_names.items())]
+        return [name for name in dict.fromkeys(names) if name]
+
     def start(self, callback: MessageCallback) -> None:
         if not self._groups:
             logger.error("No groups configured. Set WECHAT_GROUPS in .env")

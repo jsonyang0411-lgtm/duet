@@ -32,9 +32,10 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
-from typing import Callable, Iterator
+from typing import Callable, Iterable, Iterator
 
 from .keyboard import press_key, send_combo
+from .quiet_send import title_names_chat
 from .rail_watch import RailWatcher
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,13 @@ ADD_BUTTON_LABELS = ("添加到通讯录", "加为朋友", "加为联系人")
 SEND_LABELS = ("发送", "确定", "完成")
 ADD_DIALOG_TITLES = ("添加朋友", "Add Friend")   # title of WeChat 4.0's add-friend window (read on a real machine);
                                                 # exact, because the application window is "申请添加朋友"
+# WeChat 4.0's other dialogs, matched exactly (a chat opened in a window of its own has the same process and
+# class, and its title is the chat's name: 「达人朋友群」, 「小朋友」 must never be taken for one).
+APPLY_DIALOG_TITLES = ("申请添加朋友",)         # the application window (probe-apply.txt, real machine 2026-10-23)
+ACCEPT_DIALOG_TITLES = ("通过朋友验证",)         # what 「前往验证」 opens (its title not read on a real machine yet:
+                                                # a window that appears with another title is logged, never used)
+DIALOG_CLASS = "Qt51514QWindowIcon"
+DIALOG_LOOKS = 10                                # a dialog is looked for this many times, 0.1 s apart
 
 
 class _Abort(Exception):
@@ -172,6 +180,8 @@ class FriendManager:
     ``rect_of`` and ``sleeper`` are seams for tests.  ``on_accepted(at, label)`` hears every
     request it accepted (AUTO_ACCEPT_FRIENDS and the admin's 同意好友 both come here): when, and
     what OCR read beside its button (the new-friend scan tells the bot's accepts from a person's).
+    ``chat_names()`` lists the chats' names (the backend's ``chat_names``): a window titled like one of
+    them is a chat open in a window of its own, never one of WeChat's dialogs.
     """
 
     def __init__(
@@ -184,6 +194,7 @@ class FriendManager:
         sleeper: Callable[[float], None] = time.sleep,
         grab_window: Callable[[int], object] = print_main_window,
         on_accepted: Callable[[float, str], None] | None = None,
+        chat_names: Callable[[], Iterable[str]] | None = None,
     ):
         self._window = window_controller
         self._ocr = ocr_engine
@@ -194,6 +205,7 @@ class FriendManager:
         self._grab_window = grab_window
         self._rail = RailWatcher(self._grab_main_window)
         self._on_accepted = on_accepted
+        self._chat_names = chat_names
 
     def _tell_accepted(self, at: float, label: str) -> None:
         if self._on_accepted is None:
@@ -263,7 +275,13 @@ class FriendManager:
         except Exception as e:
             logger.debug("Friend management: focus could not be returned to %s: %s", previous, e)
 
-    def _foreground(self, hwnd: int) -> None:
+    def _foreground(self, hwnd: int, exact: bool = False) -> None:
+        """The window must be in front.  ``exact`` (a dialog of its own): that very window, not just any window
+        of WeChat's process (a chat open in a window of its own is one too, and keys sent to it go out)."""
+        if exact:
+            if not self._window._foreground_matches(hwnd):
+                raise _Abort(f"the dialog (HWND={hwnd}) is not the window in front")
+            return
         if not self._is_wechat_foreground(hwnd):
             raise _Abort("the WeChat window is not in the foreground")
 
@@ -285,21 +303,31 @@ class FriendManager:
 
     # ── Guarded input ───────────────────────────────────────────────────
 
-    def _key(self, hwnd: int, vk: int) -> None:
-        self._foreground(hwnd)
+    def _key(self, hwnd: int, vk: int, exact: bool = False) -> None:
+        self._foreground(hwnd, exact)
         press_key(vk)
 
-    def _combo(self, hwnd: int, mod_vk: int, key_vk: int) -> None:
-        self._foreground(hwnd)
+    def _combo(self, hwnd: int, mod_vk: int, key_vk: int, exact: bool = False) -> None:
+        self._foreground(hwnd, exact)
         send_combo(mod_vk, key_vk)
 
-    def _paste(self, hwnd: int, text: str) -> None:
+    def _paste(self, hwnd: int, text: str, exact: bool = False) -> None:
+        self._foreground(hwnd, exact)                  # before the clipboard is touched
         self._window._clipboard_text(text, hwnd)
         self._sleep(0.15)
-        self._combo(hwnd, VK_CONTROL, VK_V)
+        self._combo(hwnd, VK_CONTROL, VK_V, exact)
 
-    def _click_row(self, hwnd: int, row: dict) -> None:
-        self._foreground(hwnd)
+    def _click_at(self, hwnd: int, x: int, y: int, required: bool = True) -> bool:
+        """A click at a position of a dialog of its own, only while that very window is in front.
+        ``required``: a click that is not delivered stops the action; otherwise it is reported."""
+        self._foreground(hwnd, exact=True)
+        delivered = bool(self._clicker(x, y))
+        if not delivered and required:
+            raise _Abort("the click was not delivered")
+        return delivered
+
+    def _click_row(self, hwnd: int, row: dict, exact: bool = False) -> None:
+        self._foreground(hwnd, exact)
         rx, ry = _centre(row)
         try:
             left, top, right, bottom = self._rect_of(hwnd)
@@ -362,9 +390,10 @@ class FriendManager:
                         clean = True
                         break
                     label = _row_label(rows, button)          # read before the click: the list moves
+                    before = self._window_snapshot(hwnd)      # a dialog is a window that appears after it
                     self._click_row(hwnd, button)
                     self._sleep(0.5)
-                    self._confirm_dialog(hwnd)
+                    self._confirm_dialog(hwnd, before)
                     rows = self._capture_ocr()
                     if _still_there(rows, button):
                         for _ in range(3):
@@ -421,48 +450,126 @@ class FriendManager:
         self._click_row(hwnd, row)
         self._sleep(0.6)
 
-    def _confirm_dialog(self, hwnd: int) -> None:
-        """Click the confirmation of the accept dialog, if one opened."""
+    def _confirm_dialog(self, hwnd: int, before: set | None = None) -> None:
+        """Click the confirmation of the accept dialog, if one opened: on the screen of the main window, or
+        (WeChat 4.0) a dialog window that appeared after the click (``before``: the windows until then).  A
+        dialog that cannot be confirmed safely is closed (cancelled) and the run stops."""
         row = _find_row(self._capture_ocr(), *CONFIRM_LABELS, exact=True)
         if row is not None:
             self._click_row(hwnd, row)
             self._sleep(0.5)
             return
-        popup_hwnd = self._find_popup_dialog(hwnd)
+        popup_hwnd = self._find_popup_dialog(hwnd, before)
         if popup_hwnd:
-            self._confirm_popup_dialog(popup_hwnd)
+            try:
+                self._confirm_popup_dialog(popup_hwnd)
+            except Exception:
+                self._close_window(popup_hwnd)        # cancelled: nothing typed anywhere else
+                raise
             self._sleep(0.5)
 
-    def _find_popup_dialog(self, hwnd: int) -> int | None:
+    # ── WeChat 4.0's dialogs: windows of their own ─────────────────────
+
+    def _process_windows(self, main_hwnd: int) -> list[int]:
+        """The visible top-level windows of WeChat's process besides the main one (Windows only)."""
+        import win32gui, win32process
+        _, main_pid = win32process.GetWindowThreadProcessId(main_hwnd)
+        found: list[int] = []
+
+        def _enum(h, _):
+            if h != main_hwnd and win32gui.IsWindow(h) and win32gui.IsWindowVisible(h):
+                _, pid = win32process.GetWindowThreadProcessId(h)
+                if pid == main_pid:
+                    found.append(h)
+        win32gui.EnumWindows(_enum, None)
+        return found
+
+    def _window_snapshot(self, main_hwnd: int) -> set | None:
+        """WeChat's windows before a click that may open a dialog: only a window that is not among them can be
+        that dialog.  None when they cannot be listed (then no window is taken for a dialog)."""
         if sys.platform != "win32":
             return None
         try:
-            import win32gui, win32process
-            _, main_pid = win32process.GetWindowThreadProcessId(hwnd)
-            modals = []
-            def _enum(h, _):
-                if h != hwnd and win32gui.IsWindow(h) and win32gui.IsWindowVisible(h):
-                    _, pid = win32process.GetWindowThreadProcessId(h)
-                    if pid == main_pid:
-                        title = win32gui.GetWindowText(h)
-                        if any(kw in title for kw in ("验证", "确定", "朋友")):
-                            modals.append(h)
-            win32gui.EnumWindows(_enum, None)
-            return modals[0] if modals else None
-        except Exception:
+            return set(self._process_windows(main_hwnd))
+        except Exception as e:
+            logger.warning("Friend management: WeChat's windows could not be listed: %s", e)
             return None
 
+    def _is_chat_title(self, title: str) -> bool:
+        """Is this window title a chat's name (with or without a member count)?  Such a window is a chat
+        open in a window of its own."""
+        try:
+            names = list(self._chat_names() or ()) if self._chat_names is not None else []
+        except Exception:
+            logger.debug("Friend management: the chats' names could not be read", exc_info=True)
+            names = []
+        return any(title_names_chat(title, str(name or "")) for name in names)
+
+    def _find_new_dialog(self, main_hwnd: int, before: set | None, titles: tuple, *,
+                         cls: str | None = None, exclude: tuple = ()) -> int | None:
+        """A window of WeChat's process that appeared since ``before`` whose title is exactly one of
+        ``titles`` (and whose class is ``cls``) and is not a chat's name; None if there is none (yet)."""
+        if before is None or sys.platform != "win32":
+            return None
+        try:
+            import win32gui
+            for h in self._process_windows(main_hwnd):
+                if h in before or h in exclude:
+                    continue
+                title = str(win32gui.GetWindowText(h) or "").strip()
+                if title not in titles or (cls and win32gui.GetClassName(h) != cls):
+                    continue
+                if self._is_chat_title(title):
+                    logger.warning("Friend management: a window titled like a chat (%r) is not taken for a dialog",
+                                   title[:20])
+                    continue
+                return h
+        except Exception as e:
+            logger.warning("Friend management: looking for a dialog failed: %s", e)
+        return None
+
+    def _wait_for_dialog(self, main_hwnd: int, before: set | None, titles: tuple, what: str, *,
+                         cls: str | None = None, exclude: tuple = ()) -> int | None:
+        """``_find_new_dialog``, looked for DIALOG_LOOKS times; when it never shows, the titles of the windows
+        that did appear are logged (a WeChat version that titles the dialog otherwise is seen in the log)."""
+        if before is None or sys.platform != "win32":
+            return None
+        for look in range(DIALOG_LOOKS):
+            found = self._find_new_dialog(main_hwnd, before, titles, cls=cls, exclude=exclude)
+            if found:
+                return found
+            if look + 1 < DIALOG_LOOKS:
+                self._sleep(0.1)
+        try:
+            import win32gui
+            others = [str(win32gui.GetWindowText(h) or "")[:20] for h in self._process_windows(main_hwnd)
+                      if h not in before and h not in exclude]
+        except Exception:
+            others = []
+        logger.info("Friend management: no %s appeared%s", what,
+                    f" (new WeChat windows: {others}; not used)" if others else "")
+        return None
+
+    def _find_popup_dialog(self, hwnd: int, before: set | None = None) -> int | None:
+        """WeChat 4.0's confirmation of an accept (「通过朋友验证」): a window that appeared after the click on
+        the accept button (``before``), titled exactly so, not a chat's name.  It used to be the first window
+        of the process whose title contained 验证 / 确定 / 朋友: a chat open in a window of its own
+        (「达人朋友群」, 「小朋友」) was clicked into and got an Enter."""
+        return self._wait_for_dialog(hwnd, before, ACCEPT_DIALOG_TITLES, "confirmation dialog 「通过朋友验证」")
+
     def _confirm_popup_dialog(self, popup_hwnd: int) -> None:
-        if sys.platform == "win32":
-            import ctypes, win32gui
-            ctypes.windll.user32.SetForegroundWindow(popup_hwnd)
-            self._sleep(0.2)
-            rect = win32gui.GetWindowRect(popup_hwnd)
-            cx = rect[0] + int(0.318 * (rect[2] - rect[0]))
-            cy = rect[1] + int(0.930 * (rect[3] - rect[1]))
-            self._clicker(cx, cy)
-            self._sleep(0.2)
-            press_key(0x0D)
+        """Click its 确定 and press Enter, only while that very window is in front (SetForegroundWindow may
+        fail: the click and the Enter would go to whatever window is in front).  ``_Abort`` otherwise."""
+        if sys.platform != "win32":
+            return
+        self._focus_window(popup_hwnd)
+        left, top, right, bottom = self._rect_of(popup_hwnd)
+        cx = left + int(0.318 * (right - left))
+        cy = top + int(0.930 * (bottom - top))
+        if not self._click_at(popup_hwnd, cx, cy, required=False):
+            logger.info("Friend management: the click on 确定 was not delivered; Enter confirms instead")
+        self._sleep(0.2)
+        self._key(popup_hwnd, 0x0D, exact=True)
 
     # ── Add friend ──────────────────────────────────────────────────────
 
@@ -553,27 +660,12 @@ class FriendManager:
         except Exception:
             return False
 
-    def _find_apply_dialog(self, main_hwnd: int, dialog_hwnd: int) -> int | None:
-        if sys.platform != "win32":
-            return None
-        try:
-            import win32gui, win32process
-            if not win32gui.IsWindow(main_hwnd):
-                return None
-            _, main_pid = win32process.GetWindowThreadProcessId(main_hwnd)
-            modals = []
-            def _enum(h, _):
-                if h != main_hwnd and h != dialog_hwnd and win32gui.IsWindow(h) and win32gui.IsWindowVisible(h):
-                    _, pid = win32process.GetWindowThreadProcessId(h)
-                    if pid == main_pid:
-                        cls = win32gui.GetClassName(h)
-                        title = win32gui.GetWindowText(h)
-                        if cls == "Qt51514QWindowIcon" and any(kw in title for kw in ("申请", "验证", "朋友")):
-                            modals.append(h)
-            win32gui.EnumWindows(_enum, None)
-            return modals[0] if modals else None
-        except Exception:
-            return None
+    def _find_apply_dialog(self, main_hwnd: int, dialog_hwnd: int, before: set | None = None) -> int | None:
+        """WeChat 4.0's application window (「申请添加朋友」): a window that appeared after the click on
+        「添加到通讯录」 (``before``), titled exactly so, of the dialogs' class, not the add-friend window, not
+        a chat's name.  It used to be the first window of that class whose title contained 申请 / 验证 / 朋友:
+        a chat open in a window of its own got its input box cleared and the greeting sent into it."""
+        return self._find_new_dialog(main_hwnd, before, APPLY_DIALOG_TITLES, cls=DIALOG_CLASS, exclude=(dialog_hwnd,))
 
     def _open_add_friend_dialog_wechat4(self, main_hwnd: int) -> int | None:
         if sys.platform != "win32":
@@ -586,7 +678,8 @@ class FriendManager:
         # over from an earlier run); otherwise only a window that appears now counts.
         before = self._add_dialog_candidates(main_hwnd)
         for h in before:
-            if win32gui.GetWindowText(h) in ADD_DIALOG_TITLES:
+            title = win32gui.GetWindowText(h)
+            if title in ADD_DIALOG_TITLES and not self._is_chat_title(title):
                 return h
 
         self._combo(main_hwnd, VK_CONTROL, 0x31)    # Ctrl+1: the chat tab, where the (+) is
@@ -646,8 +739,11 @@ class FriendManager:
         def _enum(h, _):
             if h != main_hwnd and win32gui.IsWindow(h) and win32gui.IsWindowVisible(h):
                 _, pid = win32process.GetWindowThreadProcessId(h)
-                if pid == main_pid and win32gui.GetClassName(h) == "Qt51514QWindowIcon":
-                    if win32gui.GetWindowText(h) in ADD_DIALOG_TITLES:
+                if pid == main_pid and win32gui.GetClassName(h) == DIALOG_CLASS:
+                    title = win32gui.GetWindowText(h)
+                    if self._is_chat_title(title):
+                        return                               # a chat open in a window of its own
+                    if title in ADD_DIALOG_TITLES:
                         found.append(h)
                         return
                     r = win32gui.GetWindowRect(h)
@@ -657,10 +753,15 @@ class FriendManager:
         return found
 
     def _add_friend_wechat4(self, hwnd: int, keyword: str, message: str) -> dict:
+        """WeChat 4.0: the add-friend window and the application window are windows of their own.  Every key
+        and click goes to one of them only while that very window is in front (a chat open in a window of its
+        own belongs to the same process); the application window is one that appears after the click on
+        「添加到通讯录」, titled exactly 「申请添加朋友」.  When the action stops, both are closed."""
         dialog_hwnd = self._open_add_friend_dialog_wechat4(hwnd)
         if not dialog_hwnd:
             return _failure(keyword, "no_window", "无法打开微信「添加朋友」窗口")
 
+        apply_hwnd = None
         try:
             self._focus_window(dialog_hwnd)
             d_rect = self._rect_of(dialog_hwnd)
@@ -669,17 +770,16 @@ class FriendManager:
 
             input_x = d_rect[0] + int(0.35 * w)
             input_y = d_rect[1] + int(0.118 * h)
-            if not self._clicker(input_x, input_y):
-                raise _Abort("could not click search input box")
+            self._click_at(dialog_hwnd, input_x, input_y)       # the search input box
             self._sleep(0.2)
 
-            self._combo(dialog_hwnd, VK_CONTROL, VK_A)
+            self._combo(dialog_hwnd, VK_CONTROL, VK_A, exact=True)
             self._sleep(0.05)
-            self._key(dialog_hwnd, VK_BACK)
+            self._key(dialog_hwnd, VK_BACK, exact=True)
             self._sleep(0.05)
-            self._paste(dialog_hwnd, keyword)
+            self._paste(dialog_hwnd, keyword, exact=True)
             self._sleep(0.2)
-            self._key(dialog_hwnd, 0x0D)
+            self._key(dialog_hwnd, 0x0D, exact=True)
             self._sleep(1.5)
 
             rows = self._capture_ocr(dialog_hwnd)
@@ -698,13 +798,13 @@ class FriendManager:
                 self._close_window(dialog_hwnd)
                 return _failure(keyword, "no_add_button", f"没有找到「{keyword}」的「添加到通讯录」按钮，已中止")
 
-            self._click_row(dialog_hwnd, add_button)
+            before = self._window_snapshot(hwnd)                 # the application window appears after the click
+            self._click_row(dialog_hwnd, add_button, exact=True)
             self._sleep(0.8)
 
             # 3. Application modal dialog
-            apply_hwnd = None
-            for _ in range(10):
-                apply_hwnd = self._find_apply_dialog(hwnd, dialog_hwnd)
+            for _ in range(DIALOG_LOOKS):
+                apply_hwnd = self._find_apply_dialog(hwnd, dialog_hwnd, before)
                 if apply_hwnd:
                     break
                 self._sleep(0.1)
@@ -727,24 +827,24 @@ class FriendManager:
                     # Focus the greeting input box near top (cx=0.30, cy=0.18)
                     input_x = a_rect[0] + int(0.30 * a_w)
                     input_y = a_rect[1] + int(0.18 * a_h)
-                    if self._clicker(input_x, input_y):
+                    if self._click_at(apply_hwnd, input_x, input_y, required=False):
                         self._sleep(0.1)
-                        self._combo(apply_hwnd, VK_CONTROL, VK_A)
+                        self._combo(apply_hwnd, VK_CONTROL, VK_A, exact=True)
                         self._sleep(0.05)
-                        self._key(apply_hwnd, VK_BACK)
+                        self._key(apply_hwnd, VK_BACK, exact=True)
                         self._sleep(0.05)
-                        self._paste(apply_hwnd, message)
+                        self._paste(apply_hwnd, message, exact=True)
                         self._sleep(0.2)
 
                 if send_button:
-                    self._click_row(apply_hwnd, send_button)
+                    self._click_row(apply_hwnd, send_button, exact=True)
                 else:
                     # Default position for WeChat 4.0 green "确定" button (cx=0.337, cy=0.933)
                     btn_x = a_rect[0] + int(0.337 * a_w)
                     btn_y = a_rect[1] + int(0.933 * a_h)
-                    self._clicker(btn_x, btn_y)
+                    self._click_at(apply_hwnd, btn_x, btn_y, required=False)
                 self._sleep(0.2)
-                self._key(apply_hwnd, 0x0D)
+                self._key(apply_hwnd, 0x0D, exact=True)
                 self._sleep(1.0)
 
                 for _ in range(15):
@@ -758,11 +858,11 @@ class FriendManager:
                     return _failure(keyword, "not_sent", "申请窗口还在，申请可能没发出去，请在微信里确认")
             else:
                 if message:
-                    self._combo(target_dialog, VK_CONTROL, VK_A)
+                    self._combo(target_dialog, VK_CONTROL, VK_A, exact=True)
                     self._sleep(0.05)
-                    self._paste(target_dialog, message)
+                    self._paste(target_dialog, message, exact=True)
                     self._sleep(0.3)
-                self._click_row(target_dialog, send_button)
+                self._click_row(target_dialog, send_button, exact=True)
                 self._sleep(0.8)
                 if _still_there(self._capture_ocr(target_dialog), send_button):
                     self._close_window(dialog_hwnd)
@@ -774,8 +874,10 @@ class FriendManager:
                 "target": keyword,
                 "message": f"已成功向「{keyword}」发送好友申请" + (f"（附言：{message}）" if message else ""),
             }
-        except _Abort as e:
-            self._close_window(dialog_hwnd)
+        except _Abort:
+            for opened in (apply_hwnd, dialog_hwnd):
+                if opened:
+                    self._close_window(opened)
             raise
 
     def _add_friend_in_window(self, hwnd: int, keyword: str, message: str) -> dict:
