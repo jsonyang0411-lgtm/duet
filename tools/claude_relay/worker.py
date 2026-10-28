@@ -1813,22 +1813,57 @@ def do_platform_job(settings: dict, job: dict, client: RelayClient, workspace: P
     action = meta.get("action") if isinstance(meta.get("action"), dict) else {}
     log.info("#%s platform execute: %s (packet %s)", job["id"], action.get("action"), meta.get("packet_id"))
     context = {"job_id": int(job["id"]), "packet_id": meta.get("packet_id"), "party_id": meta.get("party_id")}
+    key = str(meta.get("key") or "")
     beat = _platform_heartbeat(client, int(job["id"]), "平台执行")
+    record, locked = None, False
     try:
         # cancelled while it waits for the lock, or by the time it has it: NOT_RUN, nothing written
         # (mac review C#1); once the first write is under way it runs to its end
         with _cli_lock(beat):
-            record = platforms.execute(action, cfg, plan=meta.get("run"), key=str(meta.get("key") or ""),
-                                       ledger=HOME_DIR / "platform" / "ledger",
+            locked = True
+            record = platforms.execute(action, cfg, plan=meta.get("run"), key=key, ledger=platform_ledger(),
                                        catalog=platforms.load_catalog(workspace), heartbeat=beat, context=context,
                                        cancelled=beat)
-    except (TimeoutError, platforms.Cancelled) as e:
-        record = platforms.record("NOT_RUN", [f"没有执行：{e}"])
-        record["key"] = str(meta.get("key") or "")
+    except Exception as e:
+        if record is not None:                           # it ran; only letting go of the lock went wrong
+            log.warning("#%s platform execute: the CLI lock was not let go cleanly (%s)", job["id"], e)
+        elif not locked and isinstance(e, (TimeoutError, platforms.Cancelled)):
+            record = platforms.record("NOT_RUN", [f"没有执行：{e}"])        # it never got to the platform
+            record["key"] = key
+        else:
+            raise                                        # serve() -> failure_result: UNKNOWN once the key is taken
     log.info("#%s platform execute: %s", job["id"], record.get("outcome"))
-    save_platform_log(job, record)
+    try:
+        save_platform_log(job, record)
+    except Exception as e:                               # the write is done: its log changes nothing (mac review F7)
+        log.warning("#%s platform execute: its log was not written (%s); the outcome goes back as it is",
+                    job["id"], e)
     return {"ok": True, "text": json.dumps(record, ensure_ascii=False),
             "duration_s": round(time.monotonic() - started, 1)}
+
+
+def platform_ledger() -> Path:
+    """The execution ledger: one file per approval key (platforms.claim)."""
+    return HOME_DIR / "platform" / "ledger"
+
+
+def failure_result(job: dict, error) -> dict:
+    """What goes back for a job that raised in the worker (serve): ok=False and why.  But a platform
+    execution whose approval key is in the ledger may have written to the platform already: it goes back
+    as an execution record UNKNOWN, never as "not run" (an operator could approve it again; mac review F7)."""
+    meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
+    if str(job.get("kind") or "") == "prm" and meta.get("op") == "platform_execute" and platforms is not None:
+        key = str(meta.get("key") or "")
+        try:
+            taken = platforms.claimed(platform_ledger(), key)
+        except Exception:
+            taken = True                                 # cannot tell: it may have run
+        if taken:
+            record = platforms.record("UNKNOWN", [f"Mac 上执行时出错（{_short(error, 200)}），不知道平台上执行了没有；"
+                                                  "请到平台后台核对"])
+            record["key"] = key
+            return {"ok": True, "text": json.dumps(record, ensure_ascii=False), "duration_s": 0}
+    return {"ok": False, "text": "", "error": f"Mac 上的 worker 出错：{error}", "duration_s": 0}
 
 
 def save_platform_log(job: dict, record: dict) -> Path:
@@ -2141,25 +2176,59 @@ def outbox_dir() -> Path:
 
 
 def deliver(client: RelayClient, job_id: int, result: dict, stopper: Stopper) -> bool:
-    """Write the result to the outbox, then send it until the bot has it."""
-    path = outbox_dir() / f"{job_id}.json"
-    path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    """Write the result to the outbox, then send it until the bot has it.  It is written whole or not
+    at all (a .part renamed): a full disk leaves no half file for every next start to trip over, and
+    the result is then sent from memory instead (a platform write's outcome must still get back,
+    mac review F7)."""
+    part = None
+    try:
+        path = outbox_dir() / f"{job_id}.json"
+        part = path.with_name(path.name + ".part")
+        part.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+        os.replace(str(part), str(path))
+    except OSError as e:
+        log.warning("#%s result not saved in the outbox (%s); sending it from memory", job_id, e)
+        if part is not None:
+            try:
+                part.unlink()
+            except OSError:
+                pass
+        return _send_until_taken(client, job_id, result, stopper, None)
     return flush_one(client, path, stopper)
 
 
 def flush_one(client: RelayClient, path: Path, stopper: Stopper) -> bool:
     job_id = int(path.stem)
-    result = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        result = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:                   # cut short (an older worker on a full disk): set aside
+        log.error("#%s result in %s cannot be read (%s); moved aside as .bad", job_id, path, e)
+        try:
+            os.replace(str(path), str(path.with_suffix(".bad")))
+        except OSError:
+            pass
+        return True
+    return _send_until_taken(client, job_id, result, stopper, path)
+
+
+def _send_until_taken(client: RelayClient, job_id: int, result: dict, stopper: Stopper, path: Path | None) -> bool:
+    """Send a result until the bot has it (then its outbox copy ``path`` goes); False when the worker
+    stops first (the copy stays for the next start; without one the result is lost, and said so)."""
     backoff = 5
     while True:
         try:
             if client.send_result(job_id, result):
-                path.unlink(missing_ok=True)
+                if path is not None:
+                    path.unlink(missing_ok=True)
                 return True
         except Exception as e:
             log.warning("#%s result not delivered (%s); retry in %ss", job_id, e, backoff)
         if stopper.event.wait(backoff):
-            log.info("#%s result stays in %s for the next start", job_id, path)
+            if path is not None:
+                log.info("#%s result stays in %s for the next start", job_id, path)
+            else:
+                log.error("#%s result lost: the worker stopped before the bot had it (the outbox could not hold it)",
+                          job_id)
             return False
         backoff = min(backoff * 2, MAX_BACKOFF_SEC)
 
@@ -2221,7 +2290,7 @@ def serve(settings: dict, client: RelayClient, stopper: Stopper, once: bool = Fa
             result = do_job(settings, job, client, stopper, kinds)
         except Exception as e:
             log.exception("#%s failed in the worker", job.get("id"))
-            result = {"ok": False, "text": "", "error": f"Mac 上的 worker 出错：{e}", "duration_s": 0}
+            result = failure_result(job, e)
         deliver(client, int(job["id"]), result, stopper)
         if once:
             return

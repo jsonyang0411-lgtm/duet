@@ -339,3 +339,48 @@ def test_a_write_under_way_is_not_stopped_by_a_cancel(worker, bot, mac):  # noqa
     assert record["outcome"] == "VERIFIED_SUCCESS" and len(executions(mac.node)) == 1
     done = bot.prm.store.packet(packet["id"])
     assert done["status"] == "failed" and "中途被取消" in done["error"]
+
+
+# ── once the approval key is taken: never "not run" (mac review F7) ───────
+
+def test_a_platform_log_that_cannot_be_written_changes_nothing(worker, bot, mac, monkeypatch):  # noqa: F811
+    """The write is done and verified, then the Mac cannot write its log (a full disk): the outcome goes back as
+    it is (it used to become 「Mac 没有执行」 NOT_RUN, and the same 专属佣金 could be approved once more)."""
+    def full_disk(job, record):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(worker, "save_platform_log", full_disk)
+    packet, out = approved_job(worker, bot, mac)
+    run_one(worker, bot, mac.settings)
+    assert len(executions(mac.node)) == 1
+    done = bot.prm.store.packet(packet["id"])
+    assert done["status"] == "approved", done["error"]
+    assert done["platform"]["execution"]["outcome"] == "VERIFIED_SUCCESS"
+
+
+@pytest.mark.parametrize("when", ["after", "before"])
+def test_an_execution_that_breaks_once_its_key_is_taken_is_unknown(worker, bot, mac, monkeypatch, when):  # noqa: F811
+    """Something breaks in the worker after the approval key went into the ledger (here: after the platform
+    call): the bot gets UNKNOWN 「不知道执行了没有」, never NOT_RUN.  Broken before the key was taken: NOT_RUN."""
+    real = worker.platforms.execute
+
+    def breaks(*args, **kwargs):
+        if when == "before":
+            raise RuntimeError("broke before the ledger")
+        real(*args, **kwargs)
+        raise RuntimeError("broke after the platform call")
+
+    monkeypatch.setattr(worker.platforms, "execute", breaks)
+    packet, out = approved_job(worker, bot, mac)
+    run_one(worker, bot, mac.settings)
+    job = bot.relay.store.get(out["job"])
+    failed = bot.prm.store.packet(packet["id"])
+    assert failed["status"] == "failed"
+    if when == "after":
+        record = json.loads(job["result_text"])
+        assert len(executions(mac.node)) == 1 and job["status"] == "done"
+        assert record["outcome"] == "UNKNOWN" and "broke after the platform call" in record["problems"][0]
+        assert failed["outcome"] == "platform_unknown" and "UNKNOWN" in failed["error"]
+    else:
+        assert executions(mac.node) == [] and job["status"] == "failed"
+        assert failed["outcome"] == "platform_not_run"

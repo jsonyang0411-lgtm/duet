@@ -641,6 +641,21 @@ def test_an_execution_cancelled_before_its_first_write_runs_nothing(node, cfg, t
     assert out["outcome"] == "VERIFIED_SUCCESS" and asked == [1]               # asked once, before the write
 
 
+def test_a_ledger_that_cannot_be_settled_keeps_the_outcome(node, cfg, tmp_path, monkeypatch):
+    """The write is verified, then the ledger's last word cannot be written: the outcome stands (it used to
+    raise, and the worker reported 「没有执行」); the key stays taken all the same."""
+    node.rules([rule(["promotion-strategy-create-designated"], dy_designated_done(), execute=True)])
+
+    def broken(*args, **kwargs):
+        raise TypeError("cannot write it")
+
+    monkeypatch.setattr(platforms, "settle", broken)
+    out = execute(cfg, DESIGNATED, {"steps": ["designated"]}, tmp_path)
+    assert out["outcome"] == "VERIFIED_SUCCESS"
+    assert platforms.claimed(tmp_path / "ledger", KEY) and not platforms.claimed(tmp_path / "ledger", "b" * 32)
+    assert not platforms.claimed(tmp_path / "ledger", "../ledger/" + KEY)
+
+
 def test_the_command_line_is_an_argv_list(tmp_path):
     marker = tmp_path / "pwned"
     run = platforms.run_cli([sys.executable, "-c", "import sys; print(sys.argv[1:])", f"--title=x; touch {marker}"],

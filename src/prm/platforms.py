@@ -1048,6 +1048,12 @@ def claim(ledger: Path, key: str, record: dict) -> Optional[dict]:
     return None
 
 
+def claimed(ledger, key: str) -> bool:
+    """Is the approval ``key`` in the ledger: taken by a run that may have written to the platform
+    (the worker's answer for an execution that broke on the way: UNKNOWN, never NOT_RUN)."""
+    return bool(_KEY.match(str(key))) and (Path(ledger) / f"{key}.json").exists()
+
+
 def settle(ledger: Path, key: str, record: dict) -> None:
     """Write the end of an execution into its ledger entry (in place, atomically)."""
     path = Path(ledger) / f"{key}.json"
@@ -1718,8 +1724,8 @@ def execute(raw, cfg: dict, *, plan, key: str, ledger, catalog: Optional[dict], 
             settle(ledger, key, {"key": key, "status": "done", "action": ledger_action(action), "run": approved,
                                  "finished_at": out["finished_at"], "record": {k: v for k, v in out.items() if k != "steps"},
                                  **(context or {})})
-        except OSError:
-            pass
+        except Exception:                        # the entry stays "started" (never run again); the outcome
+            pass                                 # stands: a ledger that cannot be written changes nothing done
     return out
 
 
