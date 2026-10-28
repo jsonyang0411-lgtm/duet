@@ -199,6 +199,8 @@ PRM_TOOLS = "Read,Edit,Write,Glob,Grep"
 PRM_DENIED_TOOLS = "Bash,WebFetch,WebSearch,Task,NotebookEdit"
 PRM_WRITE_TOOLS = ("Edit", "Write")
 PRM_ALWAYS_ALLOWED = ("StructuredOutput",)     # how --json-schema hands in the answer
+# The workspace's own folders: real folders, never symbolic links (prm_workspace_dir, prm_guard).
+PRM_FOLDERS = ("kb", "deals", "assets", "inbox")
 PRM_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 # What a draft is told of the bot's <system_note>: a sample order of 50 products (聚水潭's most, ids
 # up to 32 digits) makes about 2000 characters, its instruction first (service.next_step_note).
@@ -1076,12 +1078,37 @@ def _inside(path: str, folder: str) -> bool:
     return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
 
 
+def prm_linked_folders(workspace) -> list[str]:
+    """Which of the workspace's own folders (``PRM_FOLDERS``) are symbolic links, as "kb/" …: the
+    guard judges every path by where it really is, so a linked kb/ could never be read (and a
+    linked deals/ or inbox/ would hide the creators' folders from their own check)."""
+    return [f"{name}/" for name in PRM_FOLDERS if os.path.islink(os.path.join(str(workspace), name))]
+
+
+def _linked_problem(workspace: Path, linked: list[str]) -> str:
+    """Why a workspace with linked folders is refused, and the commands that fix it."""
+    fixes = []
+    for name in linked:
+        link = os.path.join(str(workspace), name.rstrip("/"))
+        try:
+            target = os.path.join(str(workspace), os.readlink(link))    # a relative link starts in the workspace
+        except OSError:
+            target = "<原来的文件夹>"
+        fixes.append(f"rm {shlex.quote(link)} && mkdir {shlex.quote(link)} && "
+                     f"cp -R {shlex.quote(target)}/. {shlex.quote(link)}/")
+    return (f"prm_workspace 里的 {'、'.join(linked)} 是软链接：起草的 Claude 只能用业务资料目录里面的文件"
+            "（守卫按真实路径判断，链接指到的地方一律不让读，草稿会读不到合作政策）。"
+            "换成真的文件夹、把文件复制进来（rm 只删链接，原来的文件不动）：" + "；".join(fixes))
+
+
 def prm_workspace_dir(settings: dict) -> tuple[Path | None, str]:
     """The workspace for prm jobs, or (None, why it cannot be used).
 
     It must exist and hold kb/ (the operators' knowledge); it must not be the
     home folder or lie in a code repository (a creator's words must never get
-    near code).  deals/, assets/ and inbox/ are made when missing.
+    near code).  kb/, deals/, assets/ and inbox/ are real folders: a symbolic link
+    is refused here, as the guard refuses every path through it (mac review G1).
+    deals/, assets/ and inbox/ are made when missing.
     """
     configured = str(settings.get("prm_workspace") or "").strip()
     if not configured:
@@ -1095,6 +1122,9 @@ def prm_workspace_dir(settings: dict) -> tuple[Path | None, str]:
     for folder in (path, *path.parents):
         if (folder / ".git").exists():
             return None, f"prm_workspace 在代码仓库里（{folder}），换一个单独的业务资料目录"
+    linked = prm_linked_folders(path)
+    if linked:
+        return None, _linked_problem(path, linked)
     if not (path / "kb").is_dir():
         return None, f"prm_workspace 里没有 kb/ 知识库目录：{path}"
     for sub in ("deals", "assets", "inbox"):
@@ -1219,8 +1249,11 @@ def link_report(relay_url: str, health=None, samples: int = 3, ping=None) -> lis
 
 
 def prm_hook_settings() -> str:
-    """``--settings`` JSON: this script guards every tool call and denies every permission request."""
-    command = f"{shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__).resolve()))} --prm-hook"
+    """``--settings`` JSON: this script guards every tool call and denies every permission request.
+    ``|| exit 2``: claude blocks a PreToolUse call only on exit code 2 (any other failure lets it
+    through), so a guard that cannot even start (this file broken by an update while a draft runs,
+    the interpreter gone) blocks too (mac review G2)."""
+    command = f"{shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__).resolve()))} --prm-hook || exit 2"
     hook = [{"matcher": "*", "hooks": [{"type": "command", "command": command, "timeout": 30}]}]
     return json.dumps({"hooks": {"PreToolUse": hook, "PermissionRequest": hook}})
 
@@ -1882,7 +1915,10 @@ def prm_guard(event: dict, workspace: str, party_id=None, job_id=None) -> str:
     commission) or pictures into a reply.  kb/ and assets/ are read as before; a Glob / Grep must
     start below a folder that holds no deals/ or inbox/ (it reaches everything under its root).
     Without the party or the job (the hook's environment lacks them) deals/ and inbox/ are closed;
-    the case-insensitive file system cannot open them under another spelling (DEALS/2.md)."""
+    the case-insensitive file system cannot open them under another spelling (DEALS/2.md).  A
+    workspace whose kb/, deals/, assets/ or inbox/ is a symbolic link is refused as a whole, as
+    ``prm_workspace_dir`` refuses it (a linked deals/ would take the creators' folders out of
+    their own check)."""
     if event.get("hook_event_name") == "PermissionRequest":
         return "达人副驾驶任务不允许任何需要批准的操作"
     tool = str(event.get("tool_name") or "")
@@ -1892,6 +1928,9 @@ def prm_guard(event: dict, workspace: str, party_id=None, job_id=None) -> str:
     if not workspace:
         return "没有业务资料目录，什么都不能做"
     root = os.path.realpath(workspace)
+    linked = prm_linked_folders(root)
+    if linked:
+        return f"{tool} 不能用：业务资料目录里的 {'、'.join(linked)} 是软链接（要换成真的文件夹），什么都不放行"
     cwd = str(event.get("cwd") or root)
     party, job = _job_number(party_id), _job_number(job_id)
     deals, inbox = os.path.join(root, "deals"), os.path.join(root, "inbox")
@@ -1960,8 +1999,24 @@ def run_prm_hook() -> int:
     """``--prm-hook``: claude's PreToolUse / PermissionRequest hook for prm jobs.
 
     A refused tool call exits 2 with the reason on stderr (claude tells the model);
-    a permission request is always denied.
+    a permission request is always denied.  It fails closed: claude blocks a PreToolUse call
+    only on exit code 2 (any other failure is a non-blocking error, the call goes ahead), so
+    whatever goes wrong in here (an event it cannot read, a path the file system cannot take,
+    a bug) exits 2 too (mac review G2; ``prm_hook_settings`` covers a script that cannot start).
     """
+    try:
+        return _prm_hook()
+    except BaseException as e:                           # never let a call through on an error
+        why = f"守卫出错了（{type(e).__name__}），这一步按拒绝处理"
+        try:
+            print(why, file=sys.stderr)
+            _guard_note(f"job {os.environ.get('PRM_JOB_ID') or os.environ.get('RELAY_JOB_ID') or '?'}: {why}: {e!r}")
+        except BaseException:
+            pass
+        return 2
+
+
+def _prm_hook() -> int:
     try:
         event = json.loads(sys.stdin.read() or "{}")
     except ValueError:
@@ -1982,13 +2037,14 @@ def run_prm_hook() -> int:
 
 
 def _guard_note(line: str) -> None:
-    """A refusal, appended to logs/prm/guard.log (the hook's stderr is for claude only)."""
+    """A refusal, appended to logs/prm/guard.log (the hook's stderr is for claude only); never
+    raises (a path with a lone surrogate in it cannot be written as UTF-8 as it is)."""
     try:
         folder = HOME_DIR / "logs" / "prm"
         folder.mkdir(parents=True, exist_ok=True)
-        with open(folder / "guard.log", "a", encoding="utf-8") as f:
+        with open(folder / "guard.log", "a", encoding="utf-8", errors="backslashreplace") as f:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {line}\n")
-    except OSError:
+    except Exception:
         pass
 
 
