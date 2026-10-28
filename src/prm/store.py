@@ -20,6 +20,11 @@
                     the operators' own WeChat replies, a creator's messages while a person
                     has the chat, holding replies, numbers shown in full, clean-ups.  The
                     audit trail, and the backlog the next draft job is told about.
+``sample_orders``   the sample orders verified in 聚水潭 and where they stand there (status,
+                    waybill, sent / signed for, why rejected or deleted), what the deal got of
+                    them (``applied``) and whether they are still asked about (``done`` empty):
+                    PRM_SAMPLE_SYNC_MIN, src/prm/service.py
+``prm_meta``        small values the service keeps over a restart (when the sync last asked)
 
 A packet's life: ``pending`` (waits in the console) -> ``approved`` (an operator said
 send, or the kind's gate is ``auto``) -> ``sending`` -> ``sent`` | ``failed``; or
@@ -151,6 +156,30 @@ CREATE TABLE IF NOT EXISTS deal_events (
     at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS deal_events_deal ON deal_events(deal_id, id);
+CREATE TABLE IF NOT EXISTS sample_orders (
+    order_no TEXT PRIMARY KEY,
+    packet_id INTEGER NOT NULL,
+    deal_id INTEGER NOT NULL,
+    party_id INTEGER NOT NULL,
+    made_at REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT '',
+    carrier TEXT NOT NULL DEFAULT '',
+    waybill TEXT NOT NULL DEFAULT '',
+    sent_at REAL,
+    signed_at REAL,
+    reason TEXT NOT NULL DEFAULT '',
+    misses INTEGER NOT NULL DEFAULT 0,
+    checked_at REAL,
+    done TEXT NOT NULL DEFAULT '',
+    applied TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sample_orders_deal ON sample_orders(deal_id);
+CREATE TABLE IF NOT EXISTS prm_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT ''
+);
 """
 
 # Columns added after the first version: (table, column, type).
@@ -235,6 +264,12 @@ def attention_of(notices: list) -> str:
 def event_view(row: dict) -> dict:
     out = dict(row)
     out["detail"] = _loads(row.get("detail"), {})
+    return out
+
+
+def sample_order_view(row: dict) -> dict:
+    out = dict(row)
+    out["applied"] = _loads(row.get("applied"), {})
     return out
 
 
@@ -564,6 +599,17 @@ class PrmStore:
             rows = self._conn.execute(sql + " ORDER BY id DESC", args).fetchall()
         return [packet_view(dict(r)) for r in rows]
 
+    def packets_of(self, tools: tuple, statuses: tuple = ()) -> list[dict]:
+        """Every deal's packets of these ``tools`` (platform action names), in these ``statuses`` (all when empty),
+        newest first (the sample orders the 聚水潭 sync keeps: ``jst.sample_order``)."""
+        sql, args = f"SELECT * FROM action_packets WHERE tool IN ({', '.join('?' * len(tools))})", list(tools)
+        if statuses:
+            sql += f" AND status IN ({', '.join('?' * len(statuses))})"
+            args += list(statuses)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY id DESC", args).fetchall()
+        return [packet_view(dict(r)) for r in rows]
+
     def packet_for_job(self, job_id: int) -> Optional[dict]:
         with self._lock:
             row = self._conn.execute(
@@ -869,6 +915,12 @@ class PrmStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def shipments(self, deal_id: int) -> list[dict]:
+        """A deal's shipments, newest first."""
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM shipments WHERE deal_id = ? ORDER BY id DESC", (deal_id,)).fetchall()
+        return [dict(r) for r in rows]
+
     def set_shipment_status(self, shipment_id: int, status: str, now: Optional[float] = None) -> None:
         now = time.time() if now is None else now
         with self._lock:
@@ -969,3 +1021,66 @@ class PrmStore:
                     changed += 1
             self._conn.commit()
         return changed
+
+    # ── sample orders in 聚水潭 (PRM_SAMPLE_SYNC_MIN, src/prm/service.py) ──────
+
+    def add_sample_order(self, order_no: str, *, packet_id: int, deal_id: int, party_id: int, made_at: float,
+                         done: str = "", applied: Optional[dict] = None, now: Optional[float] = None) -> bool:
+        """Start keeping a verified sample order (its packet, deal, creator, when it was made); True when it is
+        new (an order kept already stays as it is)."""
+        now = time.time() if now is None else now
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO sample_orders (order_no, packet_id, deal_id, party_id, made_at, done, applied,"
+                " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (order_no, packet_id, deal_id, party_id, made_at, done, json.dumps(applied or {}, ensure_ascii=False),
+                 now, now),
+            )
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def sample_order(self, order_no: str) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM sample_orders WHERE order_no = ?", (order_no,)).fetchone()
+        return sample_order_view(dict(row)) if row else None
+
+    def sample_orders(self, *, live: Optional[bool] = None, deal_id: Optional[int] = None) -> list[dict]:
+        """The sample orders kept, oldest first: ``live`` True only those still asked about (``done`` empty), False
+        only those that are not; of one deal (``deal_id``)."""
+        sql, where, args = "SELECT * FROM sample_orders", [], []
+        if live is not None:
+            where.append("done = ''" if live else "done != ''")
+        if deal_id is not None:
+            where.append("deal_id = ?")
+            args.append(deal_id)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY made_at, order_no", args).fetchall()
+        return [sample_order_view(dict(r)) for r in rows]
+
+    def update_sample_order(self, order_no: str, now: Optional[float] = None, **fields) -> None:
+        allowed = {"status", "carrier", "waybill", "sent_at", "signed_at", "reason", "misses", "checked_at", "done",
+                   "applied"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"not a sample order field: {sorted(unknown)}")
+        if "applied" in fields:
+            fields["applied"] = json.dumps(fields["applied"] or {}, ensure_ascii=False)
+        fields["updated_at"] = time.time() if now is None else now
+        names = sorted(fields)
+        with self._lock:
+            self._conn.execute(f"UPDATE sample_orders SET {', '.join(f'{n} = ?' for n in names)} WHERE order_no = ?",
+                               (*[fields[n] for n in names], order_no))
+            self._conn.commit()
+
+    def meta_value(self, key: str) -> Optional[str]:
+        with self._lock:
+            row = self._conn.execute("SELECT value FROM prm_meta WHERE key = ?", (key,)).fetchone()
+        return None if row is None else str(row["value"])
+
+    def set_meta_value(self, key: str, value) -> None:
+        with self._lock:
+            self._conn.execute("INSERT INTO prm_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET"
+                               " value = excluded.value", (key, str(value)))
+            self._conn.commit()

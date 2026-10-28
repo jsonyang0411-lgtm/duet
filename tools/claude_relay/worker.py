@@ -49,7 +49,10 @@ draft goes back; the verdict goes with it.  After an operator's 批准并执行 
 queues a ``platform_execute`` job: the same CLI with --execute, once per approval key
 (a ledger in ~/.claude-relay/platform/ledger; a key seen before is never run again),
 and the outcome goes back.  ``--sync-products`` writes the catalogue (read-only CLI
-commands) to prm_workspace/kb/products.md and products.json.
+commands) to prm_workspace/kb/products.md and products.json.  Now and then the bot also asks
+where its 聚水潭 sample orders stand (a ``sample_status`` job, PRM_SAMPLE_SYNC_MIN): no model,
+`jst samples` (read-only, no receiver) under the same CLI lock, paced; the short answer
+(status, waybill, sent / signed, why rejected) goes back, a login lapsed or a risk wall as it is.
 
 Standard library only (macOS /usr/bin/python3 is enough).  Settings:
 ~/.claude-relay/config.json (see config.example.json); the token can live in
@@ -1741,11 +1744,13 @@ def summarize_prm(run: dict, data: dict | None, settings: dict) -> dict:
 
 
 def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper) -> dict:
+    meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
+    if meta.get("op") == "sample_status":        # 聚水潭: no creator, no model, no workspace needed
+        return do_sample_status_job(settings, job, client, meta)
     workspace, problem = prm_workspace_dir(settings)
     if workspace is None:
         log.warning("#%s prm job not run: %s", job["id"], problem)
         return {"ok": False, "text": "", "error": problem, "duration_s": 0}
-    meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
     try:
         party_id = int(meta.get("party_id"))
     except (TypeError, ValueError):
@@ -1797,7 +1802,8 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
         if draft.get("platform_action") is not None:
             raw = draft.pop("platform_action")
             try:
-                draft["platform"] = platform_preview(settings, workspace, raw, client, int(job["id"]), party_id)
+                draft["platform"] = platform_preview(settings, workspace, raw, client, int(job["id"]), party_id,
+                                                     creator=meta.get("creator"))
             except Exception as e:                       # never lose the draft over its preview
                 log.exception("#%s platform preview failed", job["id"])
                 draft["platform"] = preview_failed(raw, f"Mac 上预览出错：{e}")
@@ -1823,9 +1829,22 @@ def _cli_lock(heartbeat=None):
     return platforms.CliLock(HOME_DIR / "platform" / "cli.lock", heartbeat=heartbeat, every=HEARTBEAT_SEC)
 
 
+def invite_context(settings: dict, creator=None) -> dict:
+    """What a 专属佣金's preview and execution need to look the creator up in the batch invite tool's ledger
+    (tools/creator_invite: a 邀约卡 with a 专属佣金 already gave her a strategy for its products): the ledger
+    (``platforms.dy_invite_ledger`` of config.json, else ~/.claude-relay/platform/creator-invites, the tool's own
+    default) and her 抖音号 as the bot knows them (``meta.creator.douyin_ids``: its verified 抖店 sample orders)."""
+    cfg = platforms.config(settings) if platforms is not None else {}
+    ledger = cfg.get("dy_invite_ledger") or str(HOME_DIR / "platform" / "creator-invites")
+    ids = (creator or {}).get("douyin_ids") if isinstance(creator, dict) else None
+    return {"invite_ledger": ledger,
+            "douyin_ids": [str(d) for d in ids if isinstance(d, str)][:5] if isinstance(ids, list) else []}
+
+
 def platform_preview(settings: dict, workspace: Path, raw_action, client: RelayClient, job_id: int,
-                     party_id: int = 0) -> dict:
-    """The Mac's verdict on a draft's platform action (the bot gets it as ``platform``)."""
+                     party_id: int = 0, creator=None) -> dict:
+    """The Mac's verdict on a draft's platform action (the bot gets it as ``platform``).  ``creator``: the job's
+    ``meta.creator`` (``invite_context``)."""
     if platforms is None:
         return {"version": 1, "action": None, "requested": raw_action if isinstance(raw_action, dict) else None,
                 "verdict": "unavailable", "problems": ["这台 Mac 的 worker 没有平台模块（src/prm/platforms.py）"],
@@ -1836,7 +1855,8 @@ def platform_preview(settings: dict, workspace: Path, raw_action, client: RelayC
     try:
         with _cli_lock(beat):
             block = platforms.preview(raw_action, cfg, catalog=platforms.load_catalog(workspace), heartbeat=beat,
-                                      context={"party_id": party_id, "job_id": job_id})
+                                      context={"party_id": party_id, "job_id": job_id,
+                                               **invite_context(settings, creator)})
     except (TimeoutError, platforms.Cancelled) as e:
         block = platforms.failed_preview(raw_action, cfg, str(e))
     except Exception as e:                               # never lose the draft over a preview
@@ -1864,13 +1884,14 @@ def do_platform_job(settings: dict, job: dict, client: RelayClient, workspace: P
     started = time.monotonic()
     if meta.get("op") == "platform_preview":
         block = platform_preview(settings, workspace, meta.get("action"), client, int(job["id"]),
-                                 int(meta.get("party_id") or 0))
+                                 int(meta.get("party_id") or 0), creator=meta.get("creator"))
         return {"ok": True, "text": json.dumps(block, ensure_ascii=False),
                 "duration_s": round(time.monotonic() - started, 1)}
     cfg = platforms.config(settings)
     action = meta.get("action") if isinstance(meta.get("action"), dict) else {}
     log.info("#%s platform execute: %s (packet %s)", job["id"], action.get("action"), meta.get("packet_id"))
-    context = {"job_id": int(job["id"]), "packet_id": meta.get("packet_id"), "party_id": meta.get("party_id")}
+    context = {"job_id": int(job["id"]), "packet_id": meta.get("packet_id"), "party_id": meta.get("party_id"),
+               **invite_context(settings, meta.get("creator"))}
     key = str(meta.get("key") or "")
     beat = _platform_heartbeat(client, int(job["id"]), "平台执行")
     record, locked = None, False
@@ -1898,6 +1919,34 @@ def do_platform_job(settings: dict, job: dict, client: RelayClient, workspace: P
                     job["id"], e)
     return {"ok": True, "text": json.dumps(record, ensure_ascii=False),
             "duration_s": round(time.monotonic() - started, 1)}
+
+
+def do_sample_status_job(settings: dict, job: dict, client: RelayClient, meta: dict) -> dict:
+    """``meta.op == "sample_status"`` (the bot's PRM_SAMPLE_SYNC_MIN): where a batch of 聚水潭 sample orders stands
+    (``meta.orders``), without the model: `jst samples` (read-only, no receiver) under the Mac's platform CLI lock,
+    a pause between two calls (``platforms.sample_statuses``).  The answer is short JSON (``platforms.sample_result``:
+    status, waybills, times, reasons; no creator, no receiver).  A login lapsed (77), a risk wall (76), another
+    sub-account (79) go back as they are, in ``stopped``: nothing is tried again here (the bot asks in its next
+    round)."""
+    if platforms is None:
+        return {"ok": False, "text": "", "error": "这台 Mac 的 worker 没有平台模块（src/prm/platforms.py）",
+                "duration_s": 0}
+    started = time.monotonic()
+    asked = [str(n) for n in meta.get("orders") or [] if isinstance(n, str)]
+    cfg = platforms.config(settings)
+    beat = _platform_heartbeat(client, int(job["id"]), "查聚水潭寄样单状态")
+    try:
+        with _cli_lock(beat):
+            result = platforms.sample_statuses(cfg, asked, heartbeat=beat)
+    except (TimeoutError, platforms.Cancelled) as e:     # another platform command kept the lock, or a cancel
+        verdict = "cancelled" if isinstance(e, platforms.Cancelled) else "busy"
+        result = platforms.sample_result(asked, stopped={"verdict": verdict, "exit_code": None, "message": str(e)},
+                                         not_asked=asked)
+    stopped = result.get("stopped") or {}
+    log.info("#%s sample status: %d asked, %d answered, %d not found%s", job["id"], len(asked),
+             len(result.get("orders") or {}), len(result.get("missing") or []),
+             f"; stopped ({stopped.get('verdict')}, exit {stopped.get('exit_code')})" if stopped else "")
+    return {"ok": True, "text": json.dumps(result, ensure_ascii=False), "duration_s": round(time.monotonic() - started, 1)}
 
 
 def platform_ledger() -> Path:

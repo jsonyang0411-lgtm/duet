@@ -1519,3 +1519,101 @@ def test_a_channel_product_or_a_plan_is_not_made_twice_either(bot, clock, raw, a
     second = drafted(bot, block(again, run=run and {**run, "name": "达人合作1-1027100500"}), reply="好啦")
     out = bot.prm.decide(second["id"], "execute")
     assert not out["ok"] and f"#{first['id']}" in out["error"]
+
+
+# ── a product the invite card opened already (邀约卡的 25% 专属佣金，2026-10-29) ──
+# douyin-engineering's `buyin author-invite --commission-rate 25` (the batch invite tool, tools/creator_invite) makes
+# the platform give the creator a long-term 指定达人佣金 strategy for the card's products at once.  The chain must not
+# open those again: the Mac's preview reads the invite ledger and says so (``covered``).
+
+COVER = {"by": "invite", "rate": 25, "at": "2026-10-28T15:00:00+08:00", "aweme_id": "test_daren_01",
+         "attempt": "9f1c00000001", "outcome": "VERIFIED_SUCCESS"}
+
+
+def covered(item, cover=COVER):
+    """The Mac's preview of a 专属佣金 the invite card opened already: blocked, ``covered`` says by what."""
+    return block({**DESIGNATED, "item_id": item}, verdict="blocked", run={}, covered=cover,
+                 problems=[f"这位达人的商品 {item} 已经由邀约卡开过 25% 专属佣金，不用再开"])
+
+
+def test_a_product_the_invite_card_opened_counts_as_opened_and_the_chain_goes_on(bot, clock):
+    """衔接：寄样单签收，开佣金的链条派到一款邀约卡（带 25% 专属佣金）已经开过的商品，Mac 的预览认出来：这份草稿不进
+    待审批、平台上什么都不做，链条当它开好了、马上派下一款；都开过了这一轮照常收尾；合作单写明是邀约卡开的。"""
+    order = three_signed_for(bot, clock)
+    job = bot.worker_takes()
+    bot.finish(job["id"], {**draft(message_kind="money", reply_draft="", slots={}), "platform": covered(DY_ITEM)})
+    first = bot.prm.store.packet_for_job(job["id"])
+    assert first["status"] == "dropped" and first["outcome"] == "covered" and first["decided_at"] == clock.now
+    assert "邀约卡" in first["reason"] and bot.prm.store.packets(("pending",)) == []
+    assert not bot.prm.decide(first["id"], "execute")["ok"]
+    second = bot.worker_takes()                                              # the chain goes on at once
+    note = second["meta"]["system_note"]
+    assert f"商品 {DY_ITEM} 已经由邀约卡开过 25% 专属佣金" in note and f"这一份草稿只填商品 {DY_ITEM2} 的" in note
+    assert f"邀约卡开过（当作开好）：{DY_ITEM}" in note
+    assert f"开好 1/3 个（其中邀约卡开过 {DY_ITEM}）" in chain_attention(bot)
+    ev = next(e for e in bot.prm.store.events(order["deal_id"], limit=30) if e["kind"] == "commission_covered")
+    assert ev["detail"]["item"] == DY_ITEM and ev["actor"] == "mac"
+    assert event_out(ev)["name"] == f"商品 {DY_ITEM} 邀约卡开过 25% 专属佣金，当作开好"
+    bot.finish(second["id"], {**draft(message_kind="money", reply_draft="", slots={}), "platform": block(
+        {**DESIGNATED, "item_id": DY_ITEM2})})
+    step2 = bot.prm.store.packet_for_job(second["id"])
+    mac_runs(bot, approve(bot, step2), record())                             # one opened the usual way
+    bot.prm.send_approved()
+    third = bot.worker_takes()
+    bot.finish(third["id"], {**draft(message_kind="money", reply_draft="", slots={}), "platform": covered(DY_ITEM3)})
+    final = bot.worker_takes()                                               # all open: the round is done, once
+    assert "这一轮没有要开的商品了" in final["meta"]["system_note"]
+    assert f"已开好：{DY_ITEM2}" in final["meta"]["system_note"]
+    bot.finish(final["id"], draft(message_kind="other", reply_draft="", slots={}))
+    assert bot.worker_takes() is None and chain_attention(bot) == ""
+    executions = [j for j in bot.relay.store.list_jobs(100) if '"platform_execute"' in j["meta"]]
+    assert len(executions) == 2                                              # the order and DY_ITEM2 only
+
+
+def test_a_reply_that_carries_a_commission_the_invite_card_opened_keeps_its_words_without_the_action(bot, clock):
+    packet = drafted(bot, preview=covered(DY_ITEM), reply="专属佣金给你开好啦～")
+    assert packet["tool"] == "message.send" and packet["status"] == "pending" and packet["needs_attention"]
+    assert "邀约卡开过 25%" in packet["reason"] and "发之前请核对" in packet["reason"]
+    assert "邀约卡开过 25%" in bot.prm.store.deal(packet["deal_id"])["attention"]
+
+
+def test_the_creators_douyin_id_goes_with_her_jobs_so_the_mac_can_look_her_up(bot, clock):
+    order = ordered(bot, clock)
+    mac_runs(bot, approve(bot, order), record(sample_order_no=JST_ORDER, creator_uid=DY_UID,
+                                              creator_account="test_daren_01"))
+    bot.prm.send_approved()
+    assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": "delivered"})["ok"]
+    step = bot.worker_takes()
+    assert step["meta"]["creator"] == {"douyin_ids": ["test_daren_01"], "uid": DY_UID}
+    bot.relay.store.cancel_if_pending(step["id"], clock.now)
+    bot.prm.handle(bot.msg("佣金什么时候生效呀"))
+    assert bot.worker_takes()["meta"]["creator"]["douyin_ids"] == ["test_daren_01"]
+
+
+def test_an_order_from_before_finds_her_douyin_id_in_the_clis_own_answer(bot, clock):
+    from platform_fakes import jst_done
+    order = ordered(bot, clock)
+    rec = record(sample_order_no=JST_ORDER, creator_uid=DY_UID)                  # no creator_account (an older worker)
+    rec["steps"] = [{"name": "create", "label": "聚水潭 · 建寄样单", "execute": True, "command": "node bin/jst.mjs",
+                     "exit_code": 0, "seconds": 3, "verdict": "", "outcome": "VERIFIED_SUCCESS", "problems": [],
+                     "facts": [], "raw": json.dumps(jst_done(), ensure_ascii=False, indent=2)}]
+    mac_runs(bot, approve(bot, order), rec)
+    assert bot.prm._creator_ids(order["deal_id"]) == {"douyin_ids": ["test_daren_01"], "uid": DY_UID}
+
+
+def test_an_approval_run_after_the_invite_card_went_out_is_not_executed_and_counts_as_opened(bot, clock):
+    """The preview passed (no card yet); the card went out before the operator approved: the Mac finds it in the
+    ledger when it would execute, runs nothing (NOT_RUN with ``covered``), and the bot counts the product as opened."""
+    three_signed_for(bot, clock)
+    _, first = step_drafts(bot, DY_ITEM)
+    job = approve(bot, first)
+    assert json.loads(job["meta"])["creator"]["uid"] == DY_UID
+    rec = platforms.record("NOT_RUN", ["这位达人的商品已经由邀约卡开过 25% 专属佣金，没有执行"])
+    rec["covered"] = COVER
+    mac_runs(bot, job, rec)
+    done = bot.prm.store.packet(first["id"])
+    assert done["status"] == "dropped" and done["outcome"] == "covered"
+    assert bot.prm.snapshot()["platform_alerts"] == []                       # not red: nothing to check
+    second = bot.worker_takes()
+    assert f"这一份草稿只填商品 {DY_ITEM2} 的" in second["meta"]["system_note"]
+    assert f"开好 1/3 个（其中邀约卡开过 {DY_ITEM}）" in chain_attention(bot)

@@ -326,6 +326,14 @@ class BotConfig:
     # person to look.  After a restart the Windows backend hands such messages on
     # (wcdb_backend._catchup_plan).  0 = the old rule: older than 5 minutes is history.
     prm_catchup_hours: int = 12
+    # Where the sample orders the bot made stand in 聚水潭 (jst samples, read-only on the Mac): asked once
+    # this many minutes (0 = off); a waybill fills the deal like the console's 填运单号 (the shipping notice
+    # always waits for a person), 已签收 marks it like the console's (the 专属佣金 chain starts).  The deal
+    # says so when an order has no waybill PRM_SAMPLE_WAYBILL_DAYS after it was made, or is not signed for
+    # PRM_SAMPLE_SIGN_DAYS after it was sent.
+    prm_sample_sync_min: int = 60
+    prm_sample_waybill_days: int = 3
+    prm_sample_sign_days: int = 10
     # === WeChat edge (src/edge, edge-protocol.md) for the Mac business service ===
     # "on": Windows only receives and sends WeChat messages for the creators the Mac lists;
     # the Mac pulls /edge/* on the relay's port with PRM_EDGE_TOKEN.  Not with PRM_COPILOT.
@@ -498,6 +506,13 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(f"PRM_COMMISSION_AFTER must be delivered or created, got {kwargs.get('prm_commission_after')}")
     if not (0 <= int(kwargs.get("prm_catchup_hours", 12)) <= 72):
         errors.append(f"PRM_CATCHUP_HOURS must be between 0 and 72, got {kwargs.get('prm_catchup_hours')}")
+    sync_min = int(kwargs.get("prm_sample_sync_min", 60))
+    if not (sync_min == 0 or 10 <= sync_min <= 1440):
+        errors.append(f"PRM_SAMPLE_SYNC_MIN must be 0 (off) or between 10 and 1440, got {kwargs.get('prm_sample_sync_min')}")
+    if not (1 <= int(kwargs.get("prm_sample_waybill_days", 3)) <= 30):
+        errors.append(f"PRM_SAMPLE_WAYBILL_DAYS must be between 1 and 30, got {kwargs.get('prm_sample_waybill_days')}")
+    if not (1 <= int(kwargs.get("prm_sample_sign_days", 10)) <= 60):
+        errors.append(f"PRM_SAMPLE_SIGN_DAYS must be between 1 and 60, got {kwargs.get('prm_sample_sign_days')}")
     prm_edge = kwargs.get("prm_edge", "off")
     if prm_edge not in ("off", "on"):
         errors.append(f"PRM_EDGE must be off or on, got {prm_edge}")
@@ -635,6 +650,9 @@ def load_config() -> BotConfig:
         "prm_retention_days": int(os.getenv("PRM_RETENTION_DAYS", "90")),
         "prm_commission_after": os.getenv("PRM_COMMISSION_AFTER", "delivered").strip().lower() or "delivered",
         "prm_catchup_hours": int(os.getenv("PRM_CATCHUP_HOURS", "12")),
+        "prm_sample_sync_min": int(os.getenv("PRM_SAMPLE_SYNC_MIN", "60")),
+        "prm_sample_waybill_days": int(os.getenv("PRM_SAMPLE_WAYBILL_DAYS", "3")),
+        "prm_sample_sign_days": int(os.getenv("PRM_SAMPLE_SIGN_DAYS", "10")),
         "prm_edge": _parse_switch(os.getenv("PRM_EDGE", "off")),
         "prm_edge_token": os.getenv("PRM_EDGE_TOKEN", "").strip(),
         "edge_url": os.getenv("EDGE_URL", "").strip(),

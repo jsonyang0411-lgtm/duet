@@ -19,8 +19,8 @@ from platform_fakes import (
     DRY_STDERR, DY_CHANNEL, DY_ITEM, DY_ITEM2, DY_ITEM3, DY_LINK, DY_SKU, DY_SKU2, DY_SKU2B, DY_SKU3, DY_UID, JST_ORDER, JST_SHOP_DY, JST_SHOP_XHS, JST_UID,
     TB_CAMPAIGN, TB_CROWD, TB_ITEM, TB_PRECHECK, XHS_BUYER, XHS_ITEM, XHS_SKU, FakeNode, catalog, dy_bind_done,
     dy_bind_preview, dy_create_done, dy_create_preview, dy_designated_done, dy_designated_preview, dy_promotion,
-    jst_blocked, jst_done, jst_preview, rule, tb_done, tb_row, xhs_buyers, xhs_channel_done, xhs_channel_preview,
-    xhs_plan,
+    jst_blocked, jst_done, jst_preview, jst_sample_row, jst_samples, rule, tb_done, tb_row, xhs_buyers,
+    xhs_channel_done, xhs_channel_preview, xhs_plan,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -937,6 +937,28 @@ def test_the_module_runs_on_the_macs_system_python(tmp_path):
         "            raise SystemExit('the lock was taken')\n"
         "    except p.Cancelled:\n"
         "        pass\n"
+        # 聚水潭寄样单状态：读时间、整理一行、跑一次（这里的「node」就是这个 Python，跑的是假的 bin/jst.mjs）
+        "assert p.jst_time('2026-10-27 18:00:00') == 1793095200.0 and p.jst_time(1793095200000) == 1793095200.0\n"
+        f"jst = {str(tmp_path / 'jst')!r}\n"
+        "import os, pathlib; pathlib.Path(jst, 'bin').mkdir(parents=True)\n"
+        "pathlib.Path(jst, 'bin', 'jst.mjs').write_text('import json, sys\\nprint(json.dumps({\"command\": \"samples\", '\n"
+        "    '\"rows\": [{\"orderNo\": sys.argv[2].split(\"=\")[1].split(\",\")[0], \"status\": \"SENT\", '\n"
+        "    '\"erpOrders\": [{\"logisticsCompany\": \"SF\", \"logisticsNo\": \"SF1234567890\", '\n"
+        "    '\"sendTime\": \"2026-10-27 18:00:00\"}], \"daren\": {\"nickName\": \"x\"}}]}))\\n', encoding='utf-8')\n"
+        "cfg = {'node': sys.executable, 'dirs': {'jst': pathlib.Path(jst)}, 'env': {}, 'preview_timeout_sec': 30}\n"
+        "out = p.sample_statuses(cfg, ['YP2610260000001', 'YP2610260000002'], sleep=lambda s: None)\n"
+        "got = p.check_sample_result(json.loads(json.dumps(out)), ['YP2610260000001', 'YP2610260000002'])\n"
+        "assert got['orders']['YP2610260000001']['ships'][0]['sent_at'] == 1793095200.0, out\n"
+        "assert got['missing'] == ['YP2610260000002'] and 'nickName' not in json.dumps(out), out\n"
+        # 邀约卡已经开过的专属佣金：读台账
+        f"inv = pathlib.Path({str(tmp_path / 'invites')!r}); inv.mkdir()\n"
+        "(inv / 'invites.jsonl').write_text(json.dumps({'at': '2026-10-28T15:00:00+08:00', 'event': 'attempt', "
+        "'attempt': 'a1', 'aweme_id': 'test_daren_01', 'products': ['3000000000000000101'], 'commission_rate': 25}) + "
+        "'\\n' + json.dumps({'event': 'result', 'attempt': 'a1', 'sent': True, 'outcome': 'VERIFIED_SUCCESS'}) + "
+        "'\\n', encoding='utf-8')\n"
+        "cover = p.invite_cover(str(inv), '3000000000000000101', douyin_ids=['test_daren_01'])\n"
+        "assert cover['state'] == 'covered' and cover['rate'] == 25, cover\n"
+        "assert p.covered_of({'by': 'invite', **cover}, a)['rate'] == 25\n"
         "print(a['commission_rate'], r.exit_code, r.stdout.strip(), sys.version_info[:2])\n",
         encoding="utf-8")
     run = subprocess.run([python, "-I", str(script)], capture_output=True, text=True, timeout=60, cwd=tmp_path)
@@ -1099,7 +1121,8 @@ def test_a_sample_order_runs_once_with_the_number_and_the_ledger_keeps_it_masked
     approved = {**SAMPLE, "receiver": {**RECEIVER, "phone": "13900001111"}}      # as the bot sends it
     out = execute(jcfg, approved, {"steps": ["create"]}, tmp_path)
     assert out["outcome"] == "VERIFIED_SUCCESS", out
-    assert out["created"] == {"sample_order_no": JST_ORDER, "creator_uid": DY_UID}     # the 抖音 UID 聚水潭 found
+    assert out["created"] == {"sample_order_no": JST_ORDER, "creator_uid": DY_UID,       # the 抖音 UID 聚水潭 found
+                              "creator_account": "test_daren_01"}                        # and the 抖音号
     [call] = node.calls()
     assert "--execute" in call["argv"] and call["spec"]["receiver"]["phone"] == "13900001111"
     facts = {f["label"]: f["value"] for f in out["steps"][0]["facts"]}
@@ -1110,8 +1133,8 @@ def test_a_sample_order_runs_once_with_the_number_and_the_ledger_keeps_it_masked
                                                         "city": "佛山市", "district": "", "address": "（详细地址已清除）"}
     again = execute(jcfg, approved, {"steps": ["create"]}, tmp_path)
     assert again["outcome"] == "ALREADY_RUN" and len(node.calls()) == 1
-    assert platforms.check_record(json.loads(json.dumps(out)))["created"] == {"sample_order_no": JST_ORDER,
-                                                                              "creator_uid": DY_UID}
+    assert platforms.check_record(json.loads(json.dumps(out)))["created"] == {
+        "sample_order_no": JST_ORDER, "creator_uid": DY_UID, "creator_account": "test_daren_01"}
 
 
 @pytest.mark.parametrize("region, kept", [
@@ -1207,7 +1230,8 @@ def test_a_sample_order_keeps_the_creator_uid_only_when_it_is_a_douyin_one(node,
     answer["daren"] = {**answer["daren"], "platformUid": None, "referrerId": "6aaa5100a553c3001554dc79"}
     node.rules([rule(["sample-create"], answer, execute=True)])
     out = execute(jcfg, {**SAMPLE, "receiver": {**RECEIVER, "phone": "13900001111"}}, {"steps": ["create"]}, tmp_path)
-    assert out["outcome"] == "VERIFIED_SUCCESS" and out["created"] == {"sample_order_no": JST_ORDER}
+    assert out["outcome"] == "VERIFIED_SUCCESS" and out["created"] == {"sample_order_no": JST_ORDER,
+                                                                        "creator_account": "test_daren_01"}
 
 def test_jushuitan_is_no_catalogue_platform(node, jcfg):
     cat = platforms.sync_catalog(jcfg, ["jst"], previous=catalog())
@@ -1278,7 +1302,258 @@ def test_several_products_run_in_one_order(node, jcfg, tmp_path):
     node.rules([rule(["sample-create"], jst_done(), execute=True)])
     approved = {**THREE, "receiver": {**RECEIVER, "phone": "13900001111"}}
     out = execute(jcfg, approved, {"steps": ["create"]}, tmp_path)
-    assert out["outcome"] == "VERIFIED_SUCCESS" and out["created"] == {"sample_order_no": JST_ORDER, "creator_uid": DY_UID}
+    assert out["outcome"] == "VERIFIED_SUCCESS" and out["created"] == {"sample_order_no": JST_ORDER, "creator_uid": DY_UID,
+                                                                        "creator_account": "test_daren_01"}
     [call] = node.calls()
     assert "--execute" in call["argv"] and len(call["spec"]["goods"]) == 4
     assert {g["title"] for g in call["spec"]["goods"]} == {"测试主品", "测试贝雷帽 秋冬羊毛款", "测试药盒帽"}
+
+
+# ── 聚水潭: where sample orders stand (`jst samples`, read-only; PRM_SAMPLE_SYNC_MIN) ──
+
+ORDER2, ORDER3 = "YP2610260000002", "YP2610260000003"
+
+
+def test_sample_statuses_reads_each_order_without_the_receiver_or_the_creator(node, jcfg):
+    node.rules([rule(["samples"], jst_samples(
+        jst_sample_row(JST_ORDER, "SENT", waybills=[("顺丰速运", "SF1234567890", "2026-10-27 18:00:00")],
+                       send_time="2026-10-27 18:00:00"),
+        jst_sample_row(ORDER2, "SIGNED", waybills=[("中通", "ZT7700000001", 1793095200000)],
+                       sign_time="2026-10-29 09:30:00"),
+        jst_sample_row(ORDER3, "DELETED", reject="地址不全，重新提交"),
+        jst_sample_row("YP2610260000099", "SENT")))])                           # not asked: left out
+    slept = []
+    out = platforms.sample_statuses(jcfg, [JST_ORDER, ORDER2, ORDER3, JST_ORDER, "--raw", "YP1"], sleep=slept.append)
+    [call] = node.calls()
+    assert call["argv"] == ["bin/jst.mjs", "samples", f"--order-no={JST_ORDER},{ORDER2},{ORDER3}", "--page-size=50",
+                            f"--expect-uid={JST_UID}"]
+    assert "--raw" not in call["argv"] and "--execute" not in call["argv"] and slept == []
+    assert call["cwd"] == str(node.dirs["jst"].resolve())
+    assert out["op"] == "sample_status" and out["stopped"] is None and out["calls"] == 1 and out["missing"] == []
+    assert set(out["orders"]) == {JST_ORDER, ORDER2, ORDER3}
+    sent = out["orders"][JST_ORDER]
+    assert sent["status"] == "SENT" and sent["ships"] == [
+        {"carrier": "顺丰速运", "waybill": "SF1234567890", "sent_at": 1793095200.0}]      # Beijing time
+    assert sent["sent_at"] == 1793095200.0 and sent["signed_at"] is None and sent["reason"] == ""
+    assert out["orders"][ORDER2]["ships"][0]["sent_at"] == 1793095200.0                     # milliseconds
+    assert out["orders"][ORDER2]["signed_at"] == 1793237400.0
+    assert out["orders"][ORDER3] == {"status": "DELETED", "ships": [], "sent_at": None, "signed_at": None,
+                                     "reason": "地址不全，重新提交"}
+    text = json.dumps(out, ensure_ascii=False)
+    for kept_out in ("测试达人", "test_daren_01", "测试抖店", "T100", "红色"):
+        assert kept_out not in text
+    assert platforms.check_sample_result(json.loads(text), [JST_ORDER, ORDER2, ORDER3])["orders"] == out["orders"]
+
+
+def test_sample_statuses_asks_in_batches_with_a_pause_between_calls(node, jcfg):
+    numbers = [f"YP26102600{i:05d}" for i in range(45)]
+    node.rules([rule(["samples"], jst_samples(*[jst_sample_row(n, "WAITING_SEND") for n in numbers]))])
+    slept = []
+    out = platforms.sample_statuses(jcfg, numbers, sleep=slept.append)
+    calls = [c["argv"][2] for c in node.calls()]
+    assert [len(c.split("=", 1)[1].split(",")) for c in calls] == [20, 20, 5]
+    assert slept == [platforms.SAMPLES_GAP_SEC] * 2 and platforms.SAMPLES_GAP_SEC >= 3
+    assert out["calls"] == 3 and len(out["orders"]) == 45
+    many = platforms.sample_statuses(jcfg, [f"YP26102601{i:05d}" for i in range(250)], sleep=lambda s: None)
+    assert many["asked"] == platforms.MAX_SAMPLE_ORDERS
+
+
+def test_an_order_not_in_the_answer_is_missing(node, jcfg):
+    node.rules([rule(["samples"], jst_samples(jst_sample_row(JST_ORDER, "INIT")))])
+    out = platforms.sample_statuses(jcfg, [JST_ORDER, ORDER2], sleep=lambda s: None)
+    assert list(out["orders"]) == [JST_ORDER] and out["missing"] == [ORDER2] and out["stopped"] is None
+
+
+@pytest.mark.parametrize("exit_code, stderr, verdict", [
+    (77, "[NOT_LOGGED_IN] 聚水潭登录失效（登录状态已失效）：到调试版 Chrome 里重新登录\n", "login"),
+    (76, "[RISK] /api/market/daren/sampleOrder/list 被限流（[10001]请求太频繁啦）：停下\n", "wall"),
+    (79, "[WRONG_ACCOUNT] 登录的是账号 900002，不是指定的 900001\n", "wrong_account"),
+    (2, "[USAGE] 不认识的参数：--order-no\n", "invalid"),
+    (1, "[FAILED] POST /api/market/daren/sampleOrder/list 失败：fetch failed\n", "error"),
+])
+def test_a_call_that_fails_stops_the_job_as_it_is_and_nothing_is_tried_again(node, jcfg, exit_code, stderr, verdict):
+    numbers = [f"YP26102600{i:05d}" for i in range(30)]
+    node.rules([rule([f"--order-no={','.join(numbers[20:])}"], stderr=stderr, exit=exit_code),
+                rule(["samples"], jst_samples(*[jst_sample_row(n, "SENT") for n in numbers[:20]]))])
+    out = platforms.sample_statuses(jcfg, numbers, sleep=lambda s: None)
+    assert out["calls"] == 2 and len(node.calls()) == 2                       # the second call failed: no third
+    assert len(out["orders"]) == 20 and out["not_asked"] == numbers[20:]
+    assert out["stopped"]["verdict"] == verdict and out["stopped"]["exit_code"] == exit_code
+    assert stderr.strip()[:20] in out["stopped"]["message"]
+    checked = platforms.check_sample_result(json.loads(json.dumps(out)), numbers)
+    assert checked["stopped"] == out["stopped"] and checked["not_asked"] == numbers[20:]
+
+
+def test_no_jushuitan_cli_on_this_mac_asks_nothing(node):
+    cfg = platforms.config(node.settings(jst=""))
+    out = platforms.sample_statuses(cfg, [JST_ORDER])
+    assert node.calls() == [] and out["stopped"]["verdict"] == "unavailable" and out["not_asked"] == [JST_ORDER]
+    assert "platforms.jst" in out["stopped"]["message"]
+
+
+def test_an_answer_without_a_list_is_an_error(node, jcfg):
+    node.rules([rule(["samples"], {"command": "samples"})])
+    out = platforms.sample_statuses(jcfg, [JST_ORDER])
+    assert out["stopped"]["verdict"] == "error" and out["not_asked"] == [JST_ORDER]
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("2026-10-27 18:00:00", 1793095200.0),
+    ("2026/10/27 18:00", 1793095200.0),
+    ("2026-10-27T10:00:00Z", 1793095200.0),
+    ("2026-10-27T18:00:00+08:00", 1793095200.0),
+    (1793095200, 1793095200.0),
+    (1793095200000, 1793095200.0),
+    ("1793095200000", 1793095200.0),
+    ("2026-10-27", 1793030400.0),
+    (None, None), ("", None), (True, None), ("昨天", None), ("2026-13-45 99:00:00", None), (0, None),
+    ("2026-10-27 18:00:00+99:00", None),
+])
+def test_jushuitans_times_are_read_as_beijing_time(value, expected):
+    assert platforms.jst_time(value) == expected
+
+
+def test_the_bot_keeps_only_what_it_asked_about_in_the_shape_it_uses():
+    raw = {"op": "sample_status", "orders": {
+        JST_ORDER: {"status": "sent", "ships": [
+            {"carrier": "顺丰\n速运", "waybill": "SF1234567890", "sent_at": 1793095200},
+            {"carrier": "x", "waybill": "SF1234567890", "sent_at": None},              # the same waybill twice
+            {"carrier": "y", "waybill": "SF 123; rm", "sent_at": None},                # not a waybill
+            "junk"],
+            "sent_at": "yesterday", "signed_at": True, "reason": "x" * 500, "daren": {"nickName": "测试达人"}},
+        ORDER2: {"status": "<b>", "ships": "none"},
+        "YP2610260000099": {"status": "SIGNED"},                                     # not asked about
+        "../etc": {"status": "SENT"}},
+        "missing": [ORDER3, "--raw", ORDER3], "not_asked": [JST_ORDER],
+        "stopped": {"verdict": "rm -rf", "exit_code": "77", "message": "m" * 999}}
+    out = platforms.check_sample_result(raw, [JST_ORDER, ORDER2, ORDER3])
+    assert set(out["orders"]) == {JST_ORDER, ORDER2}
+    assert out["orders"][JST_ORDER] == {"status": "SENT", "ships": [
+        {"carrier": "顺丰 速运", "waybill": "SF1234567890", "sent_at": 1793095200.0}],
+        "sent_at": None, "signed_at": None, "reason": "x" * 200 + "…"}
+    assert out["orders"][ORDER2] == {"status": "", "ships": [], "sent_at": None, "signed_at": None, "reason": ""}
+    assert out["missing"] == [ORDER3] and out["not_asked"] == []                   # (answered after all)
+    assert out["stopped"] == {"verdict": "error", "exit_code": None, "message": "m" * 300 + "…"}
+    for bad in ("not a dict", {"op": "platform_execute"}, None):
+        with pytest.raises(ActionError):
+            platforms.check_sample_result(bad, [JST_ORDER])
+
+
+# ── 邀约卡已经开过的专属佣金（批量邀约工具的台账 invites.jsonl，2026-10-29） ──
+
+INVITED = "test_daren_01"                    # the creator's 抖音号 (jst_view's platformNo)
+
+
+def invite_ledger(folder, *lines):
+    """The batch invite tool's ledger (tools/creator_invite, branch creator-invite-batch): one JSON a line."""
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "invites.jsonl"
+    path.write_text("".join(json.dumps(line, ensure_ascii=False) + "\n" for line in lines), encoding="utf-8")
+    return path
+
+
+def card(attempt="9f1c00000001", aweme=INVITED, products=(DY_ITEM, DY_ITEM2), rate=25, sent=True,
+         outcome="VERIFIED_SUCCESS", at="2026-10-28T15:00:00+08:00"):
+    out = [{"at": at, "event": "attempt", "attempt": attempt, "plan_id": "P20261028-1500-ab12", "aweme_id": aweme,
+            "products": list(products), "commission_rate": rate, "category": "small"}]
+    if sent != "no result":
+        out.append({"at": at, "event": "result", "attempt": attempt, "plan_id": "P20261028-1500-ab12", "aweme_id": aweme,
+                    "exit": 0, "outcome": outcome, "platform_writes": 1 if sent else 0, "sent": sent, "timed_out": False})
+    return out
+
+
+def test_a_product_the_invite_card_opened_is_not_opened_again_and_the_cli_is_not_run(node, cfg, tmp_path):
+    """衔接（2026-10-29）：抖音命令行 `buyin author-invite --commission-rate 25` 发出邀约卡时，平台马上给这位达人、卡上的
+    商品建一条长期有效的指定达人佣金策略。之后这位达人寄样签收，开佣金链条再给同一款开 dy.designated_commission：命令行认不出
+    「已经有策略」（只看平台的 check/user，可加时还可能把达人迁到新策略）。Mac 上的预览先查邀约台账：这一款这位达人的邀约卡
+    发出去了，就不跑命令行，预览说「邀约卡开过」，机器人当作开好。"""
+    node.rules([rule(["promotion-strategy-create-designated"], dy_designated_preview(), execute=False)])
+    ledger = invite_ledger(tmp_path / "invites", {"at": "2026-10-28T14:59:00+08:00", "event": "run-start"}, *card())
+    block = platforms.preview(DESIGNATED, cfg, catalog=catalog(),
+                              context={"invite_ledger": str(ledger.parent), "douyin_ids": [INVITED]})
+    assert argvs(node, "promotion-strategy-create-designated") == []           # nothing asked of the platform
+    assert block["verdict"] == "blocked" and block["covered"] == {
+        "by": "invite", "rate": 25, "at": "2026-10-28T15:00:00+08:00", "aweme_id": INVITED,
+        "attempt": "9f1c00000001", "outcome": "VERIFIED_SUCCESS"}
+    assert "邀约卡" in block["problems"][0] and "25%" in block["problems"][0]
+    kept = platforms.check_block(json.loads(json.dumps(block, ensure_ascii=False)))
+    assert kept["covered"] == block["covered"] and kept["verdict"] == "blocked"
+
+
+@pytest.mark.parametrize("lines, why", [
+    (card(aweme="someone_else"), "another creator"),
+    (card(products=(DY_ITEM2,)), "another product"),
+    (card(rate=None), "a card without a 专属佣金"),
+    (card(sent=False, outcome="STATE_CONFLICT"), "a card that did not go out"),
+    ([], "no card at all"),
+])
+def test_an_invite_that_did_not_open_this_product_for_this_creator_changes_nothing(node, cfg, tmp_path, lines, why):
+    node.rules([rule(["promotion-strategy-create-designated"], dy_designated_preview(), execute=False)])
+    ledger = invite_ledger(tmp_path / "invites", *lines)
+    block = platforms.preview(DESIGNATED, cfg, catalog=catalog(),
+                              context={"invite_ledger": str(ledger), "douyin_ids": [INVITED]})
+    assert block["verdict"] == "ready" and "covered" not in block, why
+    assert len(argvs(node, "promotion-strategy-create-designated")) == 1
+
+
+@pytest.mark.parametrize("sent, outcome", [(None, None), (True, "INDETERMINATE"), ("no result", None)])
+def test_an_invite_whose_card_may_have_gone_out_is_said_before_approval(node, cfg, tmp_path, sent, outcome):
+    node.rules([rule(["promotion-strategy-create-designated"], dy_designated_preview(), execute=False)])
+    ledger = invite_ledger(tmp_path / "invites", *card(sent=sent, outcome=outcome))
+    block = platforms.preview(DESIGNATED, cfg, catalog=catalog(),
+                              context={"invite_ledger": str(ledger), "douyin_ids": [INVITED]})
+    assert block["verdict"] == "ready" and "covered" not in block                 # a person decides
+    [said] = [f for f in block["facts"] if f["label"].startswith("注意")]
+    assert "邀约卡" in said["value"] and "不确定" in said["value"] and "百应" in said["value"]
+
+
+def test_a_card_that_went_out_counts_over_an_earlier_one_whose_result_is_not_known(node, cfg, tmp_path):
+    ledger = invite_ledger(tmp_path / "invites", *card(attempt="a1", sent=None, outcome=None, at="2026-10-27T10:00:00+08:00"),
+                           *card(attempt="a2", at="2026-10-28T15:00:00+08:00"),
+                           *card(attempt="a3", sent="no result", at="2026-10-29T09:00:00+08:00"))
+    cover = platforms.invite_cover(ledger, DY_ITEM, douyin_ids=["TEST_DAREN_01"])           # (case is not looked at)
+    assert cover["state"] == "covered" and cover["attempt"] == "a2"
+    assert platforms.invite_cover(ledger, DY_ITEM3, douyin_ids=[INVITED]) is None              # not on the card
+    assert platforms.invite_cover(tmp_path / "nowhere", DY_ITEM, douyin_ids=[INVITED]) is None
+
+
+def test_the_ledger_is_matched_by_the_uid_when_the_tool_writes_one(node, cfg, tmp_path):
+    lines = card(aweme="whoever")
+    lines[0]["uid"] = DY_UID
+    ledger = invite_ledger(tmp_path / "invites", *lines)
+    block = platforms.preview(DESIGNATED, cfg, catalog=catalog(), context={"invite_ledger": str(ledger)})
+    assert block["covered"]["rate"] == 25 and node.calls() == []
+
+
+def test_a_ledger_that_cannot_be_read_is_said_and_the_preview_goes_on(node, cfg, tmp_path):
+    node.rules([rule(["promotion-strategy-create-designated"], dy_designated_preview(), execute=False)])
+    folder = tmp_path / "invites"
+    (folder / "invites.jsonl").mkdir(parents=True)                                # not a file
+    block = platforms.preview(DESIGNATED, cfg, catalog=catalog(),
+                              context={"invite_ledger": str(folder), "douyin_ids": [INVITED]})
+    assert block["verdict"] == "ready"
+    assert any(f["label"] == "邀约卡台账" and "读不了" in f["value"] for f in block["facts"])
+    missing = platforms.preview(DESIGNATED, cfg, catalog=catalog(),
+                                context={"invite_ledger": str(tmp_path / "none"), "douyin_ids": [INVITED]})
+    assert missing["verdict"] == "ready" and not any(f["label"] == "邀约卡台账" for f in missing["facts"])
+
+
+def test_the_bot_keeps_a_cover_only_for_a_blocked_designated_commission():
+    cover = {"by": "invite", "rate": 25, "at": "2026-10-28T15:00:00+08:00", "aweme_id": INVITED, "attempt": "a1",
+             "outcome": "VERIFIED_SUCCESS"}
+    base = {"version": 1, "action": DESIGNATED, "verdict": "blocked", "problems": ["邀约卡开过"], "facts": [], "steps": [],
+            "run": {}, "previewed_at": 1.0}
+    assert platforms.check_block({**base, "covered": cover})["covered"] == cover
+    assert "covered" not in platforms.check_block({**base, "verdict": "ready", "run": {"steps": ["designated"]},
+                                                   "covered": cover})
+    assert "covered" not in platforms.check_block({**base, "action": CHANNEL, "covered": cover})
+    assert "covered" not in platforms.check_block({**base, "covered": {**cover, "rate": "lots"}})
+
+
+def test_a_sample_order_records_the_creators_douyin_id_it_found(node, jcfg, tmp_path):
+    node.rules([rule(["sample-create"], jst_done(), execute=True)])
+    approved = {**SAMPLE, "receiver": {**RECEIVER, "phone": "13900001111"}}
+    out = execute(jcfg, approved, {"steps": ["create"]}, tmp_path)
+    assert out["created"]["creator_account"] == "test_daren_01"
+    assert platforms.check_record(json.loads(json.dumps(out)))["created"]["creator_account"] == "test_daren_01"
+    assert "creator_account" not in platforms.check_record({**out, "created": {"creator_account": "x y; rm"}})["created"]
