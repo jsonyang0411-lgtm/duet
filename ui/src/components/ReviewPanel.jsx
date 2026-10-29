@@ -1,8 +1,8 @@
 import { Fragment, useState } from 'react'
-import { ArrowClockwise, PaperPlaneRight, PencilSimple, X, Paperclip, WarningCircle, Eye, EyeSlash, Flag, Lightning, CheckCircle } from '@phosphor-icons/react'
+import { ArrowClockwise, PaperPlaneRight, PencilSimple, X, Paperclip, WarningCircle, Eye, EyeSlash, Flag, Lightning, CheckCircle, Copy, ChatsCircle } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
-import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform } from '../lib/prm'
+import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, buyinNotes, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, copyBuyin, buyinSent } from '../lib/prm'
 import { PageHead, Card, Note, Banner, Empty, Confirm, TextArea } from './ui'
 
 // 待审批: what the Mac drafted for the registered creators. Nothing reaches a
@@ -11,6 +11,8 @@ import { PageHead, Card, Note, Banner, Empty, Confirm, TextArea } from './ui'
 // A draft with a platform action (小红书 / 抖音 / 淘宝) shows the Mac's preview of it;
 // 批准并执行 runs it on the platform once, and only a verified write lets the
 // reply go out. Anything less is listed red at the top until marked dealt with.
+// A 抖音百应 private-message draft (PRM_BUYIN_SYNC_MIN) is never sent by the bot: an
+// operator copies it, sends it in 百应 by hand and says so (已在百应发了).
 
 export default function ReviewPanel() {
   const { data, err, reload } = usePrm(4000)
@@ -25,13 +27,16 @@ export default function ReviewPanel() {
         />
         {err && <Note kind="need">{err}</Note>}
         {setupProblems(data).map(([kind, text]) => <Note key={text} kind={kind}>{text}</Note>)}
+        {buyinNotes(data).map(([kind, text]) => <Note key={text} kind={kind} icon={ChatsCircle}>{text}</Note>)}
         {!data && <Empty title="正在读取…" />}
         <PlatformAlerts alerts={data?.platform_alerts || []} onDone={reload} />
         {data && !pending.length && (
           <Empty title="现在没有要审批的草稿">已登记的达人发来消息后，Mac 写好的回复会出现在这里。</Empty>
         )}
         <div className="stack" style={{ gap: 12 }}>
-          {pending.map((p) => <DraftCard key={p.id} p={p} canSend={!!data?.can_send} onDone={reload} />)}
+          {pending.map((p) => (p.channel === 'buyin'
+            ? <BuyinCard key={p.id} p={p} onDone={reload} />
+            : <DraftCard key={p.id} p={p} canSend={!!data?.can_send} onDone={reload} />))}
         </div>
         <RecentCard d={data} onDone={reload} />
         <GatesCard d={data} />
@@ -254,6 +259,97 @@ function DraftCard({ p, canSend, onDone }) {
   )
 }
 
+/** A 抖音百应 private-message draft: copied, sent in 百应 by an operator, said so here. Not gated on the bot's WeChat. */
+function BuyinCard({ p, onDone }) {
+  const toast = useToast()
+  const shown = p.final_text ?? p.text
+  const [editing, setEditing] = useState(false)
+  const [text, setText] = useState(shown)
+  const [busy, setBusy] = useState(false)
+  const [dropping, setDropping] = useState(false)
+  const [copied, setCopied] = useState(null)        // the text with the full numbers, once copied
+  const b = p.buyin || {}
+  const slots = Object.entries(p.slots || {})
+  const copy = async (body) => {
+    setBusy(true)
+    try {
+      const r = await copyBuyin(p.id, body)
+      setCopied(r.text)
+      try { await navigator.clipboard.writeText(r.text); toast.ok('已复制：到百应私信里粘贴发给达人，发完点「已在百应发了」') } catch { toast.err('没能放进剪贴板：请选中下面的字自己复制') }
+      setEditing(false)
+      onDone()
+    } catch (e) { toast.err(e.message) } finally { setBusy(false) }
+  }
+  const act = async (action) => {
+    setBusy(true)
+    try {
+      if (action === 'sent') await buyinSent(p.id, editing && text !== shown ? text : undefined)
+      else await decide(p.id, 'drop')
+      toast.ok(action === 'sent' ? '记下了：已在百应手动发出' : '这条不发了')
+      setDropping(false)
+      onDone()
+    } catch (e) { toast.err(e.message) } finally { setBusy(false) }
+  }
+  const [label, kind] = PACKET_STATES[p.status] || [p.status, 'pend']
+  return (
+    <Card
+      title={`${p.party_name} · 百应私信`}
+      eyebrow={`DRAFT #${p.id}`}
+      sub={`${fmtClock(p.created_at)} 写好 · ${p.kind_label}${b.name ? ` · 百应里的昵称：${b.name}` : ''}${p.stage_proposal_label ? ` · 建议阶段：${p.stage_proposal_label}` : ''}`}
+      actions={<><span className="tag warn">百应私信 · 运营手动发</span><span className={`tag ${kind}`}>{label}</span></>}
+      className="prm-draft prm-buyin"
+    >
+      <div className="stack" style={{ gap: 8 }}>
+        <Note icon={ChatsCircle}>达人是在抖音百应（精选联盟私信）里发的，机器人不能在百应里发消息：点「复制」，到百应里粘贴发给她，发完点「已在百应发了」。</Note>
+        {p.needs_attention && <Note kind="warn" icon={WarningCircle}>要特别注意{p.reason ? `：${p.reason}` : ''}</Note>}
+        {b.replied_at && <Note kind="warn">百应里我们在 {fmtClock(b.replied_at)} 已经回过她了（运营在百应里发的），这份可能不用发了。</Note>}
+        {b.said && (
+          <div><b>她在百应说：</b><div className="prm-said dim" style={{ whiteSpace: 'pre-wrap' }}>{b.said}</div></div>
+        )}
+        {p.intent && <div><b>达人想要：</b>{p.intent}</div>}
+        {!p.needs_attention && p.reason && <div className="dim"><b>依据：</b>{p.reason}</div>}
+        {slots.length > 0 && (
+          <div className="row" style={{ flexWrap: 'wrap', gap: 6 }}>
+            {slots.map(([k, v]) => <span key={k} className="tag">{k}：{v}</span>)}
+          </div>
+        )}
+        <div className="f-hint">在百应里发给她的回复：</div>
+        {editing
+          ? <TextArea value={text} onChange={setText} rows={5} aria-label="修改要复制的内容" />
+          : <div className="prm-text" style={{ whiteSpace: 'pre-wrap' }}>{shown}</div>}
+        <Numbers partyId={p.party_id} legend={p.legend} />
+        {copied !== null && (
+          <div className="stack" style={{ gap: 4 }}>
+            <div className="f-hint">已复制（含完整号码，这次复制记在合作单里）：</div>
+            <textarea className="textarea mono" readOnly rows={3} value={copied} aria-label="已复制的内容" onFocus={(e) => e.target.select()} />
+          </div>
+        )}
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+          {editing ? (
+            <>
+              <button type="button" className="btn primary" disabled={busy || !text.trim()} onClick={() => copy(text)}><Copy />复制改好的</button>
+              <button type="button" className="btn" disabled={busy} onClick={() => { setEditing(false); setText(shown) }}>取消修改</button>
+            </>
+          ) : (
+            <>
+              <button type="button" className="btn primary" disabled={busy} onClick={() => copy(undefined)}><Copy />复制</button>
+              <button type="button" className="btn" disabled={busy} onClick={() => setEditing(true)}><PencilSimple />改了再复制</button>
+            </>
+          )}
+          <button type="button" className="btn" disabled={busy} onClick={() => act('sent')}><CheckCircle />已在百应发了</button>
+          <button type="button" className="btn ghost" disabled={busy} onClick={() => setDropping(true)}><X />不发</button>
+        </div>
+      </div>
+      {dropping && (
+        <Confirm title={`不发 #${p.id}？`} confirmLabel="不发" cancelLabel="再想想" danger busy={busy}
+          onConfirm={() => act('drop')} onCancel={() => setDropping(false)}>
+          这条百应私信的草稿不用了，机器人本来也不会发它。她在百应再发消息时，会有新的草稿。
+        </Confirm>
+      )}
+    </Card>
+  )
+}
+
 function RecentCard({ d, onDone }) {
   const toast = useToast()
   const [asking, setAsking] = useState(null)
@@ -279,15 +375,20 @@ function RecentCard({ d, onDone }) {
               const [label, kind] = PACKET_STATES[p.status] || [p.status, 'pend']
               const shown = p.final_text ?? p.text
               const confirmed = p.outcome === 'sent_confirmed'
+              const buyin = p.channel === 'buyin'
               return (
                 <tr key={p.id}>
                   <td className="num">#{p.id}</td>
                   <td>{p.party_name}</td>
-                  <td>{p.kind_label}</td>
+                  <td>{buyin ? `百应私信 · ${p.kind_label}` : p.kind_label}</td>
                   <td>
-                    <span className={`tag ${kind}`} title={p.status === 'sent' ? (confirmed ? '在微信里看到了这条' : '按键已发出，还没在微信里看到') : undefined}>
-                      {label}{p.status === 'sent' ? (confirmed ? ' · 已确认' : ' · 未确认') : ''}{p.edited ? ' · 改过' : ''}
-                    </span>
+                    {buyin && p.status === 'sent' ? (
+                      <span className="tag ok" title="运营在百应里手动发的（机器人没有发）">已在百应手动发{p.edited ? ' · 改过' : ''}</span>
+                    ) : (
+                      <span className={`tag ${kind}`} title={p.status === 'sent' ? (confirmed ? '在微信里看到了这条' : '按键已发出，还没在微信里看到') : undefined}>
+                        {label}{p.status === 'sent' ? (confirmed ? ' · 已确认' : ' · 未确认') : ''}{p.edited ? ' · 改过' : ''}
+                      </span>
+                    )}
                     {p.route === 'auto' && <span className="tag ok">自动</span>}
                     {p.wrong && <span className="tag need">发错了</span>}
                     {p.platform && <span className={`tag ${p.platform.execution ? outcomeTag(p.platform.execution.outcome) : 'off'}`} title={p.platform.label}>
@@ -298,7 +399,7 @@ function RecentCard({ d, onDone }) {
                   <td className="ellipsis" style={{ maxWidth: 360 }} title={shown}>{shown || '—'}</td>
                   <td className="num">{fmtClock(p.sent_at || p.decided_at || p.created_at)}</td>
                   <td>
-                    {p.status === 'sent' && !p.wrong && (
+                    {p.status === 'sent' && !p.wrong && !buyin && (
                       <button type="button" className="btn sm ghost" onClick={() => setAsking(p)}><Flag />标为发错了</button>
                     )}
                   </td>

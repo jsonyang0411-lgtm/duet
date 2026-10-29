@@ -41,6 +41,11 @@ export const outcomeTag = (outcome) => (outcome === 'VERIFIED_SUCCESS' ? 'ok' : 
 /** 批准并执行 (text: the reply as edited; undefined = as drafted). */
 export const executePlatform = (id, text) => decide(id, 'execute', text)
 export const repreview = (id) => decide(id, 'repreview')
+// 抖音百应私信的草稿（PRM_BUYIN_SYNC_MIN）：机器人发不了，运营复制以后自己到百应里发。
+/** The reply with the full numbers (text: as edited; undefined = as drafted); every copy is written down. */
+export const copyBuyin = (id, text) => decide(id, 'copy', text)
+/** The operator sent it in 百应 by hand (text: what went out, when it was edited). */
+export const buyinSent = (id, text) => decide(id, 'manual_sent', text)
 export const ackPlatform = (id) => decide(id, 'ack')
 export const partyAction = (body) => post('/api/prm/parties', body)
 export const dealAction = (body) => post('/api/prm/deals', body)
@@ -68,8 +73,24 @@ export function eventText(ev, stages = {}, modes = {}, shipmentStates = {}) {
     case 'platform_result': return `${ev.name}：#${d.packet} ${d.outcome || ''}${d.link ? ` ${d.link}` : ''}`
     case 'platform_preview': return `${ev.name}：#${d.packet}`
     case 'platform_ack': return `${ev.name}：#${d.packet}`
+    case 'buyin_message': return `${ev.name}：${d.text || ''}`
+    case 'buyin_copy': case 'buyin_sent': return `${ev.name}：#${d.packet}${d.edited ? '（改过）' : ''}`
+    case 'buyin_draft_failed': return `${ev.name}：#${d.job} ${d.why || ''}`
     default: return ev.name
   }
+}
+
+/** What the 待审批 page says of the 百应 private messages: why they cannot be read, who wrote that is not on the list. */
+export function buyinNotes(d) {
+  const b = d?.buyin
+  if (!b || !d?.buyin_sync_min) return []
+  const out = []
+  if (b.status?.text) out.push(['warn', b.status.text])
+  if (b.unmatched_count > 0) {
+    const names = (b.unmatched || []).map((u) => u.name).filter(Boolean)
+    out.push(['', `百应里有 ${b.unmatched_count} 位没登记的达人发了消息，到百应里看${names.length ? `：${names.join('、')}` : ''}（登记了抖音号的达人才会起草）`])
+  }
+  return out
 }
 
 /** What is wrong with the setup, in the order a person has to fix it ([] = ready). */

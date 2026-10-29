@@ -458,6 +458,71 @@ class TestPrmPages:
         assert prm.service.store.packet(2)["status"] == "dropped"
         assert "现在没有要审批的草稿" in page.inner_text("body") and prm.sent == []
 
+    def test_review_page_copies_a_baiying_draft_and_marks_it_sent_by_hand(self, page, prm):
+        """抖音百应私信（PRM_BUYIN_SYNC_MIN）：草稿卡片是「百应私信 · 运营手动发」，号码只显示占位符；复制 / 改了再复制
+        拿到带完整号码的字（记一笔），已在百应发了 → 已发出（运营手动），不发要确认；机器人在微信里什么都不发。"""
+        import json as _json
+        import re as _re
+        from src.prm import platforms
+        from src.prm.service import BUYIN_SYNC_CHAT
+
+        service, relay, clock = prm.service, prm.relay, prm.clock
+        service.creator_directory = lambda: [{"wxid": "wxid_creator01", "platform": "DY", "platform_no": "xiaomei_dy",
+                                              "platform_uid": ""}]
+
+        def baiying(cid, mid, text, reply):
+            relay.submit(BUYIN_SYNC_CHAT, BUYIN_SYNC_CHAT, "读抖音百应私信（精选联盟）", kind="prm",
+                         meta={"op": "buyin_inbox"}, fresh=True, input_closed=True)
+            poll = relay.next_job(0, ("prm",))
+            convo = platforms.im_conversation({"conversationId": cid, "creator": {"awemeId": "xiaomei_dy",
+                                                                                   "nickname": "小美的抖音"},
+                                               "messages": [{"id": mid, "at": clock.now, "from": "creator", "text": text}]})
+            relay.finish(poll["id"], {"ok": True, "text": _json.dumps(platforms.im_result(conversations=[convo]),
+                                                                       ensure_ascii=False)})
+            relay.tick()
+            job = relay.next_job(0, ("prm",))
+            assert job["meta"]["channel"] == "buyin"
+            d = {"intent": "问佣金", "slots": {}, "stage_proposal": "", "message_kind": "faq", "reply_draft": reply,
+                 "attachments_to_send": [], "needs_attention": False, "reason": "kb/合作政策.md"}
+            relay.finish(job["id"], {"ok": True, "text": _json.dumps(d, ensure_ascii=False)})
+            relay.tick()
+            return service.store.packet_for_job(job["id"])
+
+        first = baiying("conv_a", "a1", "佣金多少？我电话 13900001111", "你好呀，佣金 20%，电话〈手机2〉是你的吗？")
+        second = baiying("conv_b", "b1", "第二个会话里问的", "好的收到～")
+        page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-buyin", has_text="佣金多少")
+        text = card.inner_text()
+        for expected in ("百应私信 · 运营手动发", "小美 · 百应私信", "她在百应说", "百应里的昵称：小美的抖音", "〈手机2〉",
+                         "你好呀，佣金 20%", "机器人不能在百应里发消息"):
+            assert expected in text, expected
+        assert "13900001111" not in page.inner_text("body")
+        assert card.locator("button:has-text('发送')").count() == 0
+        card.locator("button").filter(has_text=_re.compile(r"^\s*复制\s*$")).click()
+        page.wait_for_timeout(1000)
+        assert "13900001111" in card.locator("textarea[aria-label='已复制的内容']").input_value()
+        assert service.store.events(first["deal_id"], kinds=("buyin_copy",))
+        card.locator("button:has-text('改了再复制')").click()
+        card.locator("textarea[aria-label='修改要复制的内容']").fill("改过的：电话〈手机2〉")
+        card.locator("button:has-text('复制改好的')").click()
+        page.wait_for_timeout(1000)
+        assert card.locator("textarea[aria-label='已复制的内容']").input_value() == "改过的：电话13900001111"
+        card.locator("button:has-text('已在百应发了')").click()
+        page.wait_for_timeout(1500)
+        done = service.store.packet(first["id"])
+        assert (done["status"], done["outcome"], done["final_text"]) == ("sent", "sent_by_hand", "改过的：电话〈手机2〉")
+        row = page.locator(".prm-recent tr", has_text=f"#{first['id']}")
+        assert "已在百应手动发" in row.inner_text() and row.locator("button:has-text('标为发错了')").count() == 0
+        other = page.locator(".prm-buyin", has_text="第二个会话里问的")
+        other.locator("button:has-text('不发')").click()
+        page.wait_for_timeout(300)
+        page.locator("[role=dialog] button:has-text('不发')").click()
+        page.wait_for_timeout(1500)
+        assert service.store.packet(second["id"])["status"] == "dropped"
+        assert page.locator(".prm-buyin").count() == 0 and prm.sent == []
+
     def test_deals_page_registers_and_disables_a_creator(self, page, prm):
         page.goto(f"{BASE_URL}/#/deals", timeout=10000)
         page.wait_for_timeout(1500)
