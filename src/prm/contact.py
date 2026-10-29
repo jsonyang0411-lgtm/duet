@@ -7,12 +7,17 @@
   威 / 加V / ➕V …): an unlabelled latin string (a word, a product code, a link, an 抖音号) is never taken, there are
   far too many of those.
 - ``mask_contacts(text)``: the same text with those contacts in their masked form.
+- ``first_contacts(text)``: the first 微信号 and the first 手机号 of ``find_contacts`` (what the 百应 inbox hands
+  ``on_buyin_contact`` for a message she typed them in).
 - ``masked`` / ``masked_contact`` / ``masked_line``: the masked forms that everything outside ``friend_adds.wechat /
   phone`` shows: the logs, the console, the events, the Mac's prompts.  A 微信号 keeps its first two and last two
-  characters (``ab****yz``), a mobile number its first three and last four (``138****0000``).
+  characters (``ab****yz``; shorter than 5: ``****``), a phone its first three and last four (``138****0000``;
+  shorter than 8: ``****``, as 3 + 4 would show all of it): the same rule as the 百应 inbox's (dy-im-inbox).
 
-``masked_line`` is the line the 百应 inbox (dy-im-inbox, webot-04) writes for a 联系方式卡片 in its own records:
-「[联系方式卡片] 微信号 ab****yz、手机 138****0001（加微信 #12）」 (agreed 2026-10-29).
+``masked_line`` is the line the 百应 inbox (dy-im-inbox, webot-04; ``service.buyin_contact_line``) writes for a
+联系方式卡片 in its own records: 「[联系方式卡片] 微信号 ab****yz、手机 138****0001（加微信 #12）」 (agreed 2026-10-29),
+「[联系方式卡片]（这次没读到号码）」 when the card's values were not read, 「[联系方式卡片]（卡片上只有店铺自己的联系方式）」
+when the Mac took out the shop's own (``why: "own"``).
 """
 
 from __future__ import annotations
@@ -25,6 +30,8 @@ WECHAT, PHONE = "wechat", "phone"
 KINDS = (WECHAT, PHONE)
 LABELS = {WECHAT: "微信号", PHONE: "手机"}
 CARD_HEAD = "[联系方式卡片]"
+UNREAD = "（这次没读到号码）"                     # a card whose values the 百应 page did not give this time
+OWN = "（卡片上只有店铺自己的联系方式）"            # a card that held only the shop's own (the Mac took them out)
 
 
 class ContactError(ValueError):
@@ -89,15 +96,14 @@ def parse_contacts(contact) -> dict:
 
 
 def masked(kind: str, value: str) -> str:
-    """ab****yz / 138****0000: enough to recognise her, not enough to add her."""
-    value = str(value or "")
+    """ab****yz / 138****0000: enough to recognise her, not enough to add her ("" for no value).  A 微信号 keeps its
+    first 2 and last 2 characters (shorter than 5: ****), a phone its first 3 and last 4 (shorter than 8: ****)."""
+    value = str(value or "").strip()
     if not value:
         return ""
-    if kind == PHONE and len(value) == 11:
-        return f"{value[:3]}****{value[-4:]}"
-    if len(value) >= 5:
-        return f"{value[:2]}****{value[-2:]}"
-    return "*" * len(value)
+    if kind == PHONE:
+        return "****" if len(value) < 8 else f"{value[:3]}****{value[-4:]}"
+    return "****" if len(value) < 5 else f"{value[:2]}****{value[-2:]}"
 
 
 def masked_contact(contact) -> dict:
@@ -108,11 +114,13 @@ def masked_contact(contact) -> dict:
 
 def masked_line(contact, add_id=None, head: str = CARD_HEAD) -> str:
     """「[联系方式卡片] 微信号 ab****yz、手机 138****0001（加微信 #12）」: the one line a record outside friend_adds keeps of
-    a contact (``contact``: the full values, or ``{"unavailable": True}`` when the card's number was not read)."""
+    a contact (``contact``: the full values; ``{"unavailable": True, "why"}`` when the card's values were not read,
+    ``why: "own"`` when it held only the shop's own: ``OWN``, else ``UNREAD``).  ``add_id``: the 加微信 record."""
     contact = contact if isinstance(contact, dict) else {}
-    parts = [f"{LABELS[kind]} {masked(kind, contact[kind])}" for kind in KINDS if contact.get(kind)]
-    said = "、".join(parts) if parts else "这次没读到号码"
-    return f"{head} {said}" + (f"（加微信 #{int(add_id)}）" if add_id else "")
+    parts = [] if contact.get("unavailable") else [
+        f"{LABELS[kind]} {masked(kind, contact[kind])}" for kind in KINDS if str(contact.get(kind) or "").strip()]
+    line = f"{head} " + "、".join(parts) if parts else head + (OWN if contact.get("why") == "own" else UNREAD)
+    return line + (f"（加微信 #{int(add_id)}）" if add_id is not None else "")
 
 
 def has_masked(text) -> bool:
@@ -142,6 +150,14 @@ def find_contacts(text) -> list[dict]:
     links = [m.span() for m in _URL.finditer(text)]
     found = [f for f in found if not any(a < f["end"] and f["start"] < b for a, b in links)]
     return sorted(found, key=lambda f: f["start"])
+
+
+def first_contacts(text) -> dict:
+    """``{"wechat"?, "phone"?}``: the first 微信号 and the first 手机号 ``find_contacts`` finds in ``text`` ({}: none)."""
+    out: dict = {}
+    for found in find_contacts(text):
+        out.setdefault(found["kind"], found["value"])
+    return out
 
 
 def mask_contacts(text) -> str:

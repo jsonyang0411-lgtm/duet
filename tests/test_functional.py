@@ -715,6 +715,7 @@ class TestPrmPages:
                           register=prm.service.register, spawn=lambda fn: fn(), clear_clipboard=lambda text: False)
         adds.attach(AdminCommandHandler(friend_manager=manager), None, None)
         prm.service.friend_adds = adds
+        prm.service.on_buyin_contact = adds.offer_from_buyin              # (the 百应 inbox's hook, as PrmService wires it)
         return adds, manager
 
     def test_review_page_adds_a_baiying_contact_once_after_its_confirmation(self, page, prm):
@@ -870,6 +871,55 @@ class TestPrmPages:
         page.goto(f"{BASE_URL}/#/review", timeout=10000)
         page.wait_for_timeout(1500)
         assert page.locator(".prm-friend-adds").count() == 0
+
+    def test_review_page_says_who_left_a_contact_and_the_baiying_draft_names_its_record(self, page, prm):
+        """加百应达人微信第 7 步：「待审批」页百应那一行说没登记的达人里有几位留了联系方式（见下面的「加微信」），我们邀约的
+        达人发的联系方式卡片成了一张加微信卡；百应草稿卡上说这个会话留过的联系方式是哪一条加微信、到哪一步了；完整号码哪儿都
+        不显示。号码、抖音号、名字都是编的。"""
+        import json as _json
+        from src.prm import platforms
+        from src.prm.service import BUYIN_SYNC_CHAT
+
+        self._friend_adds_on(prm)
+        service, relay, clock = prm.service, prm.relay, prm.clock
+        service._buyin_sec = 600                                     # PRM_BUYIN_SYNC_MIN=10
+        service.creator_directory = lambda: [{"wxid": "wxid_creator01", "platform": "DY", "platform_no": "xiaomei_dy",
+                                              "platform_uid": ""}]
+        # she left her card in 百应 before she was registered, and was linked since
+        early, _ = service.store.add_friend_add(state="linked", now=clock.now, source="buyin_card",
+                                                conversation_id="conv_reg", message_id="r0", aweme_id="xiaomei_dy",
+                                                nickname="小美的抖音", masked={"wechat": "zq****83"})
+        relay.submit(BUYIN_SYNC_CHAT, BUYIN_SYNC_CHAT, "读抖音百应私信（精选联盟）", kind="prm",
+                     meta={"op": "buyin_inbox"}, fresh=True, input_closed=True)
+        poll = relay.next_job(0, ("prm",))
+        card = {"wechat": "zq_test_wx_83", "phone": "13700001234"}
+        convs = [platforms.im_conversation(c) for c in (
+            {"conversationId": "conv_inv", "creator": {"buyinId": "1777000000000000042", "awemeId": "invited_test_dy",
+                                                       "nickname": "邀约的测试达人"},
+             "invited": {"aweme_id": "invited_test_dy", "invited_at": "2026-10-29T15:00:00+08:00",
+                         "plan_id": "PTEST-plan-0001"},
+             "messages": [{"id": "i1", "at": clock.now, "from": "creator", "kind": "contact", "contact": card}]},
+            {"conversationId": "conv_reg", "creator": {"awemeId": "xiaomei_dy", "nickname": "小美的抖音"},
+             "messages": [{"id": "r1", "at": clock.now, "from": "creator", "text": "样品什么时候到？"}]})]
+        relay.finish(poll["id"], {"ok": True, "text": _json.dumps(platforms.im_result(conversations=convs),
+                                                                   ensure_ascii=False)})
+        relay.tick()
+        job = relay.next_job(0, ("prm",))
+        assert job["meta"]["channel"] == "buyin" and job["meta"]["creator"]["douyin_ids"] == ["xiaomei_dy"]
+        d = {"intent": "问样品", "slots": {}, "stage_proposal": "", "message_kind": "faq", "reply_draft": "这两天就到哦",
+             "attachments_to_send": [], "needs_attention": False, "reason": "kb/合作政策.md"}
+        relay.finish(job["id"], {"ok": True, "text": _json.dumps(d, ensure_ascii=False)})
+        relay.tick()
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        text = page.inner_text("body")
+        for expected in ("百应里有 1 位没登记的达人发了消息", "其中 1 位留了联系方式，见下面的「加微信」",
+                         "加微信 · 邀约的测试达人", "微信号 zq****83", "手机 137****1234"):
+            assert expected in text, expected
+        draft = page.locator(".prm-buyin", has_text="样品什么时候到")
+        assert (f"她在这个会话里留了联系方式（微信号 zq****83）→「加微信 #{early['id']}」：已登记并关联"
+                in draft.inner_text())
+        assert "zq_test_wx_83" not in text and "13700001234" not in text
 
 class TestWechatGapAlert:
     """电脑微信掉线的提醒（Windows：机器人自己记的，副驾驶模式的控制台也有）：每页顶上一直显示到运营点「看过了」，

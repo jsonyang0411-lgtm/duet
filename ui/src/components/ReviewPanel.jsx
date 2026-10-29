@@ -2,7 +2,7 @@ import { Fragment, useState } from 'react'
 import { ArrowClockwise, PaperPlaneRight, PencilSimple, X, Paperclip, WarningCircle, Eye, EyeSlash, Flag, Lightning, CheckCircle, Copy, ChatsCircle } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
-import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, buyinNotes, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, copyBuyin, buyinSent } from '../lib/prm'
+import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, buyinNotes, buyinFriendAddLine, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, copyBuyin, buyinSent } from '../lib/prm'
 import { PageHead, Card, Note, Banner, Empty, Confirm, TextArea } from './ui'
 import { FriendAddList } from './FriendAddCard'
 
@@ -306,6 +306,7 @@ function BuyinCard({ p, onDone }) {
         <Note icon={ChatsCircle}>达人是在抖音百应（精选联盟私信）里发的，机器人不能在百应里发消息：点「复制」，到百应里粘贴发给她，发完点「已在百应发了」。</Note>
         {p.needs_attention && <Note kind="warn" icon={WarningCircle}>要特别注意{p.reason ? `：${p.reason}` : ''}</Note>}
         {b.replied_at && <Note kind="warn">百应里我们在 {fmtClock(b.replied_at)} 已经回过她了（运营在百应里发的），这份可能不用发了。</Note>}
+        {b.friend_add && <div className="dim prm-buyin-friend-add">{buyinFriendAddLine(b.friend_add)}</div>}
         {b.said && (
           <div><b>她在百应说：</b><div className="prm-said dim" style={{ whiteSpace: 'pre-wrap' }}>{b.said}</div></div>
         )}

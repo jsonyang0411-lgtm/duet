@@ -361,6 +361,30 @@ def test_the_shops_own_contact_is_taken_out_of_her_cards():
     assert platforms.im_strip_own(convs, {}) == 0
 
 
+def test_the_shops_own_contact_typed_back_in_her_words_is_no_contact_of_hers():
+    """加百应达人微信第 7 步：她把邀约卡上我们的微信号 / 手机号打回来，Mac 就换成「（店铺的微信号）」「（店铺的手机号）」，
+    机器人不会提议去加店铺自己；她自己的号照旧，我方的话不动，更长的号不算。"""
+    from src.prm import contact
+
+    cfg = {"dy_invite_wechat": SHOP_WECHAT, "dy_invite_phone": SHOP_PHONE}
+    at = int(T0 * 1000)
+    convs = parsed(real_conv("c1", *[
+        {"id": "t1", "at": at, "from": "creator", "kind": "text",
+         "text": f"已加你微信 {SHOP_WECHAT.upper()} 啦，我的是 vx {WECHAT}"},
+        {"id": "t2", "at": at + 1, "from": "creator", "kind": "text", "text": "电话打 +86 136-0000-0000 吗"},
+        {"id": "t3", "at": at + 2, "from": "shop", "kind": "text", "text": f"加我 {SHOP_WECHAT}"},
+        {"id": "t4", "at": at + 3, "from": "creator", "kind": "text", "text": f"微信 {SHOP_WECHAT}x 是我的"},
+        {"id": "t5", "at": at + 4, "from": "creator", "kind": "text", "text": "电话 136000000001 不对"}]))
+    assert platforms.im_strip_own(convs, cfg) == 2
+    texts = [m["text"] for m in convs[0]["messages"]]
+    assert texts[0] == f"已加你微信 （店铺的微信号） 啦，我的是 vx {WECHAT}"
+    assert texts[1] == "电话打 （店铺的手机号） 吗"
+    assert texts[2:] == [f"加我 {SHOP_WECHAT}", f"微信 {SHOP_WECHAT}x 是我的", "电话 136000000001 不对"]
+    assert contact.first_contacts(texts[0]) == {"wechat": WECHAT} and contact.first_contacts(texts[1]) == {}
+    assert contact.first_contacts(texts[3]) == {"wechat": f"{SHOP_WECHAT}x"}
+    assert platforms.im_strip_own(convs, {}) == 0
+
+
 @pytest.mark.parametrize("code, verdict, words", [
     ("NO_CHAT_TAB", "unavailable", "没开百应「精选联盟私信」页"),
     ("CHAT_OFFLINE", "error", "私信连接断了"),
@@ -472,3 +496,29 @@ def test_a_memory_only_result_is_sent_again_until_taken_and_lost_when_the_worker
     gone = Client([OSError("bot down")])
     assert not worker.deliver_from_memory(gone, 8, {"ok": True, "text": WECHAT}, stopper(True))
     assert "never written to the outbox" in caplog.text and WECHAT not in caplog.text
+
+
+def test_a_buyin_draft_gets_the_invite_background_by_the_conversations_douyin_id(worker, bot, dy_mac):  # noqa: F811
+    """加百应达人微信第 7 步：百应的草稿任务也带着她的抖音号（会话里的，``meta.creator``），Mac 打开
+    ``prm_invite_background`` 时提示里有 <invite_background>（在「不是微信」那段之后、她的话之前），关着就没有。台账、清单、
+    号码都是编的（tests/test_prm_worker.py 的 ``invite_files``）。"""
+    from test_prm_worker import invite_files
+
+    invite_files(dy_mac.home)
+    convo = {"conversationId": CID, "creator": {"uid": DY_UID, "awemeId": "dy_demo01", "nickname": "小美的抖音"},
+             "messages": [said("m1", "看到你们的邀约卡了，佣金多少？")]}
+    dy_mac.node.rules([rule(["buyin", "im-inbox"], {"command": "im-inbox", "conversations": [convo], "cursor": None})])
+    dy_mac.claude.answers(reply_draft="你好呀，佣金按卡上的来～")
+    poll_job(bot)
+    run_one(worker, bot, dy_mac.settings)                                        # the round
+    run_one(worker, bot, {**dy_mac.settings, "prm_invite_background": True})     # her draft
+    [call] = dy_mac.claude.calls()
+    prompt = call["prompt"]
+    assert "<invite_background>" in prompt and "抖音号 dy_demo01" in prompt and "测试贝雷帽" in prompt
+    assert prompt.index("不是微信") < prompt.index("<invite_background>") < prompt.index("<creator_message>")
+    convo["messages"] = [said("m2", "在吗", ago=5)]
+    dy_mac.node.rules([rule(["buyin", "im-inbox"], {"command": "im-inbox", "conversations": [convo], "cursor": None})])
+    poll_job(bot)
+    run_one(worker, bot, dy_mac.settings)
+    run_one(worker, bot, dy_mac.settings)                                        # switched off (the default)
+    assert len(dy_mac.claude.calls()) == 2 and "<invite_background>" not in dy_mac.claude.calls()[-1]["prompt"]

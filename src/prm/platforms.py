@@ -3456,11 +3456,33 @@ def _same_phone(a: str, b: str) -> bool:
     return bool(digits[0]) and digits[0] == digits[1]
 
 
+IM_OWN_WECHAT_TEXT = "（店铺的微信号）"
+IM_OWN_PHONE_TEXT = "（店铺的手机号）"
+
+
+def _own_out_of_text(text: str, wechat: str, phone: str) -> str:
+    """``text`` with the shop's own WeChat id (``wechat``, a whole word, case not looked at) and phone (``phone``;
+    spaces, dashes and a leading +86 between its digits allowed) replaced by ``IM_OWN_WECHAT_TEXT`` /
+    ``IM_OWN_PHONE_TEXT``."""
+    out = str(text or "")
+    if wechat:
+        out = re.sub(r"(?<![A-Za-z0-9_-])" + re.escape(wechat) + r"(?![A-Za-z0-9_-])", IM_OWN_WECHAT_TEXT, out,
+                     flags=re.IGNORECASE)
+    digits = re.sub(r"\D", "", phone or "")
+    digits = digits[2:] if len(digits) == 13 and digits.startswith("86") else digits
+    if len(digits) >= 7:
+        out = re.sub(r"(?<!\d)(?:\+?86[\s-]?)?" + r"[\s-]?".join(digits) + r"(?!\d)", IM_OWN_PHONE_TEXT, out)
+    return out
+
+
 def im_strip_own(conversations: list, cfg: dict) -> int:
     """Take the shop's own contact out of the creators' contact cards (``contact`` of kind "contact"): a WeChat id
     equal to ``dy_invite_wechat`` (case not looked at) or a phone equal to ``dy_invite_phone`` (the contact our invite
-    card shows the creator) is removed; a card left with nothing is ``{"unavailable": True, "why": "own"}``.  Changes
-    ``conversations`` in place; returns how many cards changed."""
+    card shows the creator) is removed; a card left with nothing is ``{"unavailable": True, "why": "own"}``.  Out of
+    her own words too (kind "text" from the creator: she often types the invite card's contact back): replaced by
+    ``IM_OWN_WECHAT_TEXT`` / ``IM_OWN_PHONE_TEXT``, so the bot never offers to add the shop itself (加百应达人微信 reads
+    contacts in her words, ``contact.find_contacts``).  Changes ``conversations`` in place; returns how many cards and
+    lines changed."""
     wechat = str(cfg.get("dy_invite_wechat") or "").strip().lower()
     phone = str(cfg.get("dy_invite_phone") or "").strip()
     if not wechat and not phone:
@@ -3468,6 +3490,12 @@ def im_strip_own(conversations: list, cfg: dict) -> int:
     changed = 0
     for conv in conversations:
         for msg in conv.get("messages") or []:
+            if msg.get("kind") == "text" and msg.get("from") == "creator" and msg.get("text"):
+                text = _own_out_of_text(msg["text"], wechat, phone)
+                if text != msg["text"]:
+                    msg["text"] = text
+                    changed += 1
+                continue
             contact = msg.get("contact")
             if msg.get("kind") != "contact" or not isinstance(contact, dict) or contact.get("unavailable"):
                 continue

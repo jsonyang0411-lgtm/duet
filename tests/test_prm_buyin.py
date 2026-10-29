@@ -847,13 +847,14 @@ class Hook:
         return self.answer
 
 
-def everything_kept(b, caplog=None) -> str:
-    """Every row of prm.db and of the relay's jobs, the snapshot, the events and notices, the captured log: one text."""
+def everything_kept(b, caplog=None, skip=()) -> str:
+    """Every row of prm.db and of the relay's jobs, the snapshot, the events and notices, the captured log: one text
+    (``skip``: tables left out)."""
     parts = []
     for store in (b.prm.store, b.relay.store):
         with store._lock:
             tables = [r[0] for r in store._conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
-            for table in tables:
+            for table in (t for t in tables if t not in skip):
                 parts += [json.dumps([tuple(r) for r in store._conn.execute(f"SELECT * FROM {table}")],
                                      ensure_ascii=False, default=str)]
     parts.append(json.dumps(b.prm.snapshot(), ensure_ascii=False, default=str))
@@ -1098,3 +1099,143 @@ def test_the_relay_database_file_keeps_no_trace_of_a_replaced_inbox_answer(tmp_p
     assert store.replace_result(job_id, json.dumps({"op": "buyin_inbox", "summary": {"messages": 1}}))
     store.close()
     assert b"made_up_wx_trace_" not in path.read_bytes()
+
+
+# ── 加百应达人微信第 7 步（功能 R）：她打字留的联系方式、真的钩子、页面上的两句 ──────────────────────────────
+# Her typed contact goes to on_buyin_contact like a card (source "buyin_text", only in ours); her line is kept with the
+# 微信号 masked and the phone a 〈手机N〉 (as on WeChat).  With PRM_FRIEND_ADD on, the full numbers live only in
+# friend_adds.  Every number, id and name below is made up.
+
+TYPED_WX = "zq_typed_wx_7"
+TYPED_PHONE = "13700005678"
+OTHER_WX = "zq_other_wx_9"
+
+
+def friend_adds_on(b):
+    """PRM_FRIEND_ADD=on: the real hook (FriendAdds.offer_from_buyin), as PrmService wires it."""
+    from src.prm.friend_adds import FriendAdds
+
+    b.prm.friend_adds = FriendAdds(b.prm.store, config(prm_friend_add="on"), clock=b.clock, register=b.prm.register)
+    b.prm.on_buyin_contact = b.prm.friend_adds.offer_from_buyin
+    return b.prm.friend_adds
+
+
+def test_a_contact_she_types_in_ours_goes_to_the_hook_once_and_her_line_keeps_it_masked(bot, clock, caplog):
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    hook = bot.prm.on_buyin_contact = Hook({"id": 7, "state": "offered", "masked": {}})
+    party = next(p for p in bot.prm.store.parties() if p["wxid"] == CREATOR)
+    t0 = clock.now
+    messages = (line("t0", f"有事加我 vx {OTHER_WX}", t0 - 9, "shop"),          # our side's own: masked, never told
+                line("t1", f"我微信 {TYPED_WX}，电话 {TYPED_PHONE}", t0 - 5),
+                line("t2", "我的抖音号 abcdef123，看中了 3000000000000000101", t0 - 3))   # no label: no contact
+    poll = round_says(bot, clock, conv(*messages))
+    assert hook.events == [{
+        "source": "buyin_text", "conversation_id": CID, "message_id": "t1", "at": t0 - 5,
+        "creator": {"aweme_id": "", "uid": "", "nickname": "小美的抖音"},
+        "contact": {"wechat": TYPED_WX, "phone": TYPED_PHONE, "unavailable": False, "why": ""},
+        "party_id": party["id"], "invited": None}]
+    texts = [ev["detail"]["text"] for ev in reversed(buyin_events(bot))]
+    assert texts[0].endswith("有事加我 vx zq****_9") and "加微信" not in texts[0]
+    assert texts[1].endswith("我微信 zq****_7，电话 〈手机1〉（加微信 #7）")
+    assert "abcdef123" in texts[2] and "加微信" not in texts[2]
+    [job] = jobs_of(bot, BUYIN_CHAT + CID)
+    assert "zq****_7" in job["text"] and "〈手机1〉" in job["text"]
+    assert json.loads(job["meta"])["history"][0]["text"].endswith("zq****_9")
+    summary = json.loads(bot.relay.store.get(poll["id"])["result_text"])["summary"]
+    assert (summary["typed_contacts"], summary["contacts"]) == (1, 0)
+    round_says(bot, clock, conv(*messages, line("t3", "在吗", clock.now)))     # the CLI's window overlaps
+    assert len(hook.events) == 1
+    kept = everything_kept(bot, caplog)
+    assert TYPED_WX not in kept and OTHER_WX not in kept
+    assert TYPED_PHONE not in everything_kept(bot, caplog, skip=("pii_tokens",))  # (〈手机1〉 keeps it, as on WeChat)
+
+
+def test_her_nickname_keeps_no_contact_either(bot, clock):
+    round_says(bot, clock, conv(line("n1", "你好", clock.now), nickname=f"小美 vx {TYPED_WX} 13700005678"))
+    thread = bot.prm.store.buyin_thread(CID)
+    assert TYPED_WX not in thread["nickname"] and "13700005678" not in thread["nickname"]
+    [job] = jobs_of(bot, BUYIN_CHAT + CID)
+    assert TYPED_WX not in json.dumps(job, ensure_ascii=False)
+
+
+def test_with_the_feature_on_our_invites_contact_is_one_record_and_its_numbers_live_only_there(bot, clock, caplog):
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    friend_adds_on(bot)
+    invited = dict(INVITED, aweme_id="invited_typed")
+    poll = round_says(bot, clock, card_conv(line("k1", f"加我微信：{TYPED_WX}", clock.now - 9), cid="conv_k",
+                                            aweme="invited_typed", invited=invited))
+    [record] = bot.prm.store.friend_adds()
+    assert (record["source"], record["state"], record["wechat"], record["phone"]) == (
+        "buyin_text", "offered", TYPED_WX, "")
+    assert (record["conversation_id"], record["message_id"], record["aweme_id"]) == ("conv_k", "k1", "invited_typed")
+    assert record["invited"]["plan_id"] == INVITED["plan_id"] and record["nickname"] == "邀约的达人"
+    assert json.loads(bot.relay.store.get(poll["id"])["result_text"])["summary"]["typed_contacts"] == 1
+    # her card a round later (the conversation remembers it is our invite): her 抖音号 has an open record already
+    round_says(bot, clock, card_conv(card_line("k2", clock.now), cid="conv_k"))
+    assert [r["id"] for r in bot.prm.store.friend_adds()] == [record["id"]]
+    snap = bot.prm.snapshot()
+    assert (snap["buyin"]["unmatched_count"], snap["buyin"]["contacts_left"]) == (1, 1)
+    [shown] = snap["friend_adds"]
+    assert shown["masked"] == {"wechat": "zq****_7"} and shown["source"] == "buyin_text"
+    # somebody else's conversation: her words are never looked into
+    round_says(bot, clock, card_conv(line("x1", f"我微信 {OTHER_WX}", clock.now), cid="conv_x",
+                                     buyin="1777000000000000099"))
+    assert len(bot.prm.store.friend_adds()) == 1
+    # a registered creator: nothing to add, no record; her line keeps it masked, without 加微信
+    round_says(bot, clock, conv(line("r1", f"我的vx {OTHER_WX}", clock.now - 1), card_line("r2", clock.now), aweme=AWEME))
+    assert len(bot.prm.store.friend_adds()) == 1
+    texts = [ev["detail"]["text"] for ev in buyin_events(bot)]
+    assert any(t.endswith("我的vx zq****_9") for t in texts) and not any("加微信" in t for t in texts)
+    assert any(t.endswith("[联系方式卡片] 微信号 zq****83、手机 137****1234") for t in texts)
+    # the full numbers: in friend_adds only (the one she typed); the card's went nowhere
+    assert TYPED_WX in everything_kept(bot)
+    outside = everything_kept(bot, caplog, skip=("friend_adds",))
+    for value in (TYPED_WX, OTHER_WX, WECHAT, CARD_PHONE):
+        assert value not in outside, value
+    assert WECHAT not in everything_kept(bot) and CARD_PHONE not in everything_kept(bot)
+
+
+def test_a_card_whose_number_was_not_read_is_filled_in_by_what_she_types_next(bot, clock):
+    friend_adds_on(bot)
+    invited = dict(INVITED, aweme_id="invited_unread")
+    round_says(bot, clock, card_conv(card_line("u1", clock.now, {"unavailable": True, "why": "read-failed"}),
+                                     cid="conv_u", aweme="invited_unread", invited=invited))
+    [record] = bot.prm.store.friend_adds()
+    assert record["state"] == "needs_view" and not record["wechat"]
+    round_says(bot, clock, card_conv(line("u2", f"微信号是 {TYPED_WX}", clock.now), cid="conv_u"))
+    [record] = bot.prm.store.friend_adds()
+    assert (record["state"], record["wechat"], record["unavailable"]) == ("offered", TYPED_WX, False)
+
+
+def test_the_baiying_draft_card_names_the_friend_add_record_of_its_conversation(bot, clock):
+    friend_adds_on(bot)
+    linked, _ = bot.prm.store.add_friend_add(state="linked", now=clock.now, source="buyin_card", conversation_id=CID,
+                                             message_id="early1", aweme_id=AWEME, nickname="小美的抖音",
+                                             masked={"wechat": "zq****83"})
+    job, packet = buyin_draft(bot, clock, text="你好，样品什么时候到？")
+    assert json.loads(job["meta"])["channel"] == "buyin"
+    out = next(p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"])
+    assert out["buyin"]["friend_add"] == {"id": linked["id"], "state": "linked", "label": "已登记并关联", "open": False,
+                                          "masked": {"wechat": "zq****83"}}
+    # none for another conversation
+    assert bot.prm.store.friend_adds(conversation_id="conv_none") == []
+
+
+def test_a_buyin_draft_job_carries_her_douyin_id_for_the_invite_background(bot, clock):
+    round_says(bot, clock, card_conv(line("d1", "你好，看到你们的邀约卡了", clock.now), cid=CID, aweme=AWEME))
+    [job] = jobs_of(bot, BUYIN_CHAT + CID)
+    assert json.loads(job["meta"])["creator"] == {"uid": "", "douyin_ids": [AWEME]}
+    # the deal's own 抖音号 first (a link), the conversation's after it (it remembers it), once whatever the case
+    party = next(p for p in bot.prm.store.parties() if p["wxid"] == CREATOR)
+    bot.prm.store.add_creator_link(party["id"], "dy_linked01", source="register", now=clock.now)
+    round_says(bot, clock, card_conv(line("d2", "在吗", clock.now), cid=CID))
+    [pending] = [j for j in jobs_of(bot, BUYIN_CHAT + CID) if j["status"] == "pending"]
+    assert json.loads(pending["meta"])["creator"]["douyin_ids"] == ["dy_linked01", AWEME]
+    bot.prm.store.add_creator_link(party["id"], AWEME.upper(), source="register", now=clock.now)
+    round_says(bot, clock, card_conv(line("d3", "在吗？", clock.now), cid=CID))
+    [pending] = [j for j in jobs_of(bot, BUYIN_CHAT + CID) if j["status"] == "pending"]
+    assert json.loads(pending["meta"])["creator"]["douyin_ids"] == ["dy_linked01", AWEME.upper()]

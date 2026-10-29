@@ -10,12 +10,14 @@ Where a record comes from:
 
 - ``paste``: an operator types her 抖音号 and the 微信号 / 手机号 she left (合作单 page); with no number she is waited
   for (``waiting``: she adds us).
-- ``offer_from_buyin``: the 百应 inbox's hook (``PrmService.on_buyin_contact``).  dy-im-inbox calls it for each new
-  联系方式卡片 (and, later, each contact in her own words) of a conversation WE invited (its ledger match gave
-  ``invited``) or of a registered creator (``party_id``); another person's conversations are never stored, only
-  counted there.  STEP 7, NOT WIRED YET: nothing calls it until dy-im-inbox's contact commit is merged; the event is
-  the one agreed with webot-04 on 2026-10-29 (``creator.uid`` is the page's buyinId; ``contact`` the full values from
-  ``card/msgs``, or ``{"unavailable": true, "why": older | not-answered | read-failed | no-card-id | own}``).
+- ``offer_from_buyin``: the 百应 inbox's hook (``PrmService.on_buyin_contact``, its default).  The inbox
+  (``PrmService._buyin_contacts``) calls it for each new 联系方式卡片 (source "buyin_card") and each line of hers with a
+  contact typed in (source "buyin_text", ``contact.first_contacts``) of a conversation that is ours: one WE invited
+  (the Mac's ledger match gave ``invited``) or a registered creator's (``party_id``: nothing to add, she is a WeChat
+  friend already; nothing is stored).  Another person's conversations never reach it (only counted there).  The
+  event is the one agreed with webot-04 on 2026-10-29 (``creator.uid`` is the page's buyinId; ``contact`` the full
+  values from ``card/msgs`` or her words, or ``{"unavailable": true, "why": older | not-answered | read-failed |
+  no-card-id | own}``).
 
 The safety rules (design §6):
 
@@ -95,7 +97,6 @@ REASONS = {
     "by_phone": "运营说在手机上加了",
     "unsure_sent": "运营在微信里看过：申请发出去了",
     "unsure_not_sent": "运营在微信里看过：申请没发出去",
-    "registered": "她已经是登记达人，不用加",
     "requested_days": "申请发出去 14 天她还没通过，号码按规定清除了",
     "untouched_days": "7 天没人处理，号码按规定清除了",
     "max_days": "留了 30 天，号码按规定清除了",
@@ -319,14 +320,19 @@ class FriendAdds:
         return greeting_for(self._template, nickname, self._brand)
 
     def offer_from_buyin(self, event) -> Optional[dict]:
-        """The 百应 inbox's hook (``PrmService.on_buyin_contact``, dy-im-inbox step 7): one call per new contact of a
-        conversation; returns ``{"id", "state", "masked"}`` or None (the switch is off, not our conversation, nothing
-        to add, our own number she sent back).  The same (conversation, message) again gives the same record."""
+        """The 百应 inbox's hook (``PrmService.on_buyin_contact``, ``_buyin_contacts``): one call per new contact card
+        (source "buyin_card") or line of hers with a contact typed in ("buyin_text") of a conversation that is ours;
+        returns ``{"id", "state", "masked"}`` or None (the switch is off, not our invite, a registered creator: she is
+        a WeChat friend already and her deal has the masked line; nothing to add; our own number she sent back).  The
+        same (conversation, message) again gives the same record, and so does another one of hers while hers is open
+        (one open record per 抖音号)."""
         if not self._enabled or not isinstance(event, dict):
             return None
         invited = invited_of(event.get("invited"))
-        party_id = self._party_id(event.get("party_id"))
-        if not invited and party_id is None:
+        if self._party_id(event.get("party_id")) is not None:
+            logger.info("FriendAdds: a registered creator left a contact in 百应; nothing to add")
+            return None                               # (the 百应 inbox recorded the masked line in her deal)
+        if not invited:
             return None                               # another person's conversation: never stored
         given = event.get("contact") if isinstance(event.get("contact"), dict) else {}
         if given.get("unavailable") and str(given.get("why") or "") == "own":
@@ -357,8 +363,6 @@ class FriendAdds:
             fields = dict(source=source, conversation_id=cid, message_id=mid, aweme_id=aweme,
                           creator_uid=_clip(creator.get("uid"), 40), nickname=contact.clean_name(creator.get("nickname")),
                           masked=masked_contact(values), unavailable=unavailable, invited=invited)
-            if party_id is not None:
-                return self._registered_left_contact(party_id, values, fields, now)
             same = self._open_for(aweme)
             if same is not None:
                 if same["state"] == NEEDS_VIEW and values:
@@ -373,20 +377,6 @@ class FriendAdds:
             logger.info("FriendAdds: #%d %s from 百应 (%s)", record["id"], record["state"],
                         contact.masked_line(values, head=source))
             self.match_recent()
-        return self._summary(record)
-
-    def _registered_left_contact(self, party_id: int, values: dict, fields: dict, now: float) -> dict:
-        """A registered creator left her contact in 百应: she is a WeChat friend already, nothing to add; the record
-        is ``linked`` at once (no number kept) and her deal says so."""
-        deal = self._store.deal_of(party_id, now)
-        record, made = self._store.add_friend_add(
-            state=LINKED, now=now, party_id=party_id, deal_id=deal["id"], reason="registered", linked_at=now,
-            closed_at=now, cleared_at=now, **fields)
-        if made:
-            self._store.add_event(deal["id"], party_id, "friend_add_contact", {
-                "add": record["id"], "line": contact.masked_line(values, record["id"]),
-                "conversation": fields["conversation_id"]}, actor="creator", now=now)
-            logger.info("FriendAdds: #%d a registered creator left her contact in 百应: nothing to add", record["id"])
         return self._summary(record)
 
     def paste(self, aweme_id, nickname="", contact_values=None, greeting=None, *, actor: str = "console") -> dict:

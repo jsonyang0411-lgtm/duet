@@ -82,9 +82,12 @@ def test_both_in_one_line_in_order_and_masked_in_place():
 # ── the masked forms ──────────────────────────────────────────────────────────
 
 def test_masked_forms():
+    """The 百应 inbox's rule too (service.buyin_mask_wechat / buyin_mask_phone wrap these)."""
     assert masked("wechat", "abcdefyz") == "ab****yz"
     assert masked("phone", "13800000000") == "138****0000"
-    assert masked("wechat", "") == "" and masked("wechat", "abc") == "***"
+    assert masked("wechat", "") == "" and masked("wechat", "abc") == "****" and masked("wechat", " abcd ") == "****"
+    assert masked("wechat", "abcde") == "ab****de"
+    assert masked("phone", "1234567") == "****" and masked("phone", "+8613800000000") == "+86****0000"
     assert masked_contact({"wechat": "abcdefyz", "phone": "13800000000", "unavailable": False}) == {
         "wechat": "ab****yz", "phone": "138****0000"}
     assert masked_contact(None) == {}
@@ -95,8 +98,20 @@ def test_the_card_line_is_the_one_the_baiying_inbox_writes():
     assert masked_line({"wechat": "abcdefyz", "phone": "13800000001"}, 12) == (
         "[联系方式卡片] 微信号 ab****yz、手机 138****0001（加微信 #12）")
     assert masked_line({"phone": "13800000001"}) == "[联系方式卡片] 手机 138****0001"
-    assert masked_line({"unavailable": True, "why": "read-failed"}, 3) == "[联系方式卡片] 这次没读到号码（加微信 #3）"
+    assert masked_line({"unavailable": True, "why": "read-failed"}, 3) == "[联系方式卡片]（这次没读到号码）（加微信 #3）"
+    assert masked_line({"unavailable": True, "why": "own"}) == "[联系方式卡片]（卡片上只有店铺自己的联系方式）"
+    assert masked_line({"unavailable": True, "wechat": "abcdefyz"}) == "[联系方式卡片]（这次没读到号码）"   # not shown
+    assert masked_line(None) == masked_line({"wechat": "  "}) == "[联系方式卡片]（这次没读到号码）"
     assert masked_line({"wechat": "abcdefyz"}, head="[她打字留的]") == "[她打字留的] 微信号 ab****yz"
+    assert masked_line({"wechat": "abcdefyz"}, 0).endswith("（加微信 #0）")
+
+
+def test_the_first_contact_of_each_kind_she_typed():
+    assert C.first_contacts("我微信 abc_12345，电话 13800000000，备用 13900000000，vx: zzz_99999") == {
+        "wechat": "abc_12345", "phone": "13800000000"}
+    assert C.first_contacts("手机 138 0000 0000") == {"phone": "13800000000"}
+    assert C.first_contacts("我的抖音号 abcdef123，链接 https://example.com/vx/abc123456") == {}
+    assert C.first_contacts("") == {} and C.first_contacts(None) == {}
 
 
 def test_has_masked():

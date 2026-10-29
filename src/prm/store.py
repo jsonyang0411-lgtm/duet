@@ -1352,8 +1352,8 @@ class PrmStore:
         return friend_add_view(dict(row)) if row else None
 
     def friend_adds(self, *, states: Optional[tuple] = None, aweme_id: Optional[str] = None,
-                    limit: Optional[int] = None) -> list[dict]:
-        """The records, newest first: in these ``states``, of this 抖音号 (any case)."""
+                    conversation_id: Optional[str] = None, limit: Optional[int] = None) -> list[dict]:
+        """The records, newest first: in these ``states``, of this 抖音号 (any case), made from this 百应 conversation."""
         sql, where, args = "SELECT * FROM friend_adds", [], []
         if states:
             where.append(f"state IN ({', '.join('?' * len(states))})")
@@ -1361,6 +1361,9 @@ class PrmStore:
         if aweme_id is not None:
             where.append("LOWER(aweme_id) = LOWER(?)")
             args.append(str(aweme_id))
+        if conversation_id is not None:
+            where.append("conversation_id = ?")
+            args.append(str(conversation_id))
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY id DESC"

@@ -302,15 +302,17 @@ def test_a_card_whose_number_was_not_read_needs_an_operator_and_our_own_number_i
     assert world.adds.offer_from_buyin(buyin_event(contact={"wechat": "1not-an-id"})) is None    # nothing usable
 
 
-def test_a_registered_creator_who_left_her_contact_is_not_added(world):
+def test_a_registered_creator_who_left_her_contact_is_not_added_and_nothing_is_kept(world, caplog):
+    """She is a WeChat friend already: no record, no number, no event of ours (the 百应 inbox records the masked
+    line in her deal itself, tests/test_prm_buyin.py), and the answer None leaves 「加微信 #N」 out of that line."""
     party = world.prm.register(CREATOR, "小美")
-    out = world.adds.offer_from_buyin(buyin_event(party_id=party["id"], invited=None))
-    record = world.record(out["id"])
-    assert record["state"] == "linked" and record["reason"] == "registered" and record["party_id"] == party["id"]
-    assert (record["wechat"], record["phone"]) == ("", "") and record["masked"]["wechat"] == "ab****yz"
-    [ev] = world.store.events(world.store.deal_of(party["id"])["id"], kinds=("friend_add_contact",))
-    assert ev["detail"]["line"] == f"[联系方式卡片] 微信号 ab****yz、手机 138****0000（加微信 #{out['id']}）"
-    assert WECHAT not in json.dumps(ev, ensure_ascii=False) and world.manager.calls == []
+    for invited in (None, buyin_event()["invited"]):
+        assert world.adds.offer_from_buyin(buyin_event(party_id=party["id"], invited=invited)) is None
+        assert world.adds.offer_from_buyin(buyin_event(party_id=party["id"], invited=invited, source="buyin_text",
+                                                       contact={"wechat": WECHAT})) is None
+    assert world.store.friend_adds() == [] and world.manager.calls == []
+    events = world.store.events(world.store.deal_of(party["id"])["id"], limit=None)
+    assert WECHAT not in json.dumps(events, ensure_ascii=False) and WECHAT not in caplog.text
 
 
 def test_a_paste_needs_her_douyin_id_and_valid_numbers(world):
