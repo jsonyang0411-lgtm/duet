@@ -583,6 +583,20 @@ def test_a_mixed_send_order_takes_the_three_categories_in_turn_best_first(env):
     assert code == 2
 
 
+def test_run_sends_only_the_ones_the_user_picked_from_the_list(env, tmp_path):
+    plan_file, plan_id = make_plan(env)
+    env.log.unlink()
+    pick = tmp_path / "pick.txt"
+    pick.write_text("# 用户挑的\ndy_big_b\ndy_small_a\n", encoding="utf-8")
+    code, out, _ = env.main(["run", "--config", env.write_config(send_order="mixed"), "--plan", plan_file, "--confirm", plan_id,
+                             "--ledger-dir", str(env.tmp / "ledger"), "--only", f"@{pick}"])
+    assert code == 0 and [x["aweme_id"] for x in out["sent"]] == ["dy_small_a", "dy_big_b"], "only those two, in the send order"
+    assert {a.split("=", 1)[1] for c in env.calls() for a in c["args"] if a.startswith("--aweme-id=")} == {"dy_small_a", "dy_big_b"}
+    for bad in ("dy_not_on_the_list", "bad id!"):
+        code, _, _ = run_now(env, plan_file, plan_id, "--only", bad)
+        assert code == 2, bad
+
+
 def test_run_needs_the_plan_id_the_user_agreed_to_and_a_fresh_list(env):
     plan_file, plan_id = make_plan(env)
     env.log.unlink()

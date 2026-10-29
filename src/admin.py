@@ -11,6 +11,8 @@ from typing import Callable, Iterable, Optional
 logger = logging.getLogger(__name__)
 
 NO_FRIEND_MANAGER = "未启用好友管理组件（需要 Windows 版微信窗口），无法执行"
+_ADD_FRIEND_CMD = re.compile(r"^(?:添加好友|加好友)(?:[:：\s]|$)", re.IGNORECASE)
+_ADD_FRIEND_STRIP = re.compile(r"^(?:添加好友|加好友)\s*[:：]?\s*", re.IGNORECASE)
 HELP_COMMANDS = ("帮助", "help", "命令")
 STATUS_COMMANDS = ("查状态", "账号状态")
 ACCEPT_FRIENDS_COMMANDS = ("同意好友", "通过好友", "接受好友", "同意申请")
@@ -122,11 +124,11 @@ class AdminCommandHandler:
         if content in STATUS_COMMANDS:
             return self._cmd_status
         # ── Friend commands (they drive the WeChat window and take seconds) ──
-        if content.split(None, 1)[:1] in (["添加好友"], ["加好友"]):
+        if _ADD_FRIEND_CMD.match(content):
             return lambda: self._cmd_add_friend(content)
         if content in ACCEPT_FRIENDS_COMMANDS:
             return self._cmd_accept_friends
-        switch = AUTO_ACCEPT_COMMANDS.get(" ".join(content.split()))
+        switch = AUTO_ACCEPT_COMMANDS.get(" ".join(content.replace("：", " ").replace(":", " ").split()))
         if switch is not None:
             return lambda: self._cmd_auto_accept(switch)
         if content in FRIEND_ADDS_COMMANDS:
@@ -203,12 +205,13 @@ class AdminCommandHandler:
         if self._friend is None:
             return f"{NO_FRIEND_MANAGER}添加好友操作"
 
-        parts = content.split(None, 2)
-        if len(parts) < 2:
+        rest = _ADD_FRIEND_STRIP.sub("", content).strip()
+        parts = rest.split(None, 1)
+        if not parts or not parts[0].strip():
             return "请指定要添加的微信号或手机号，例如：添加好友 13800000000 申请理由"
 
-        target = parts[1].strip()
-        reason = parts[2].strip() if len(parts) > 2 else ""
+        target = parts[0].strip()
+        reason = parts[1].strip() if len(parts) > 1 else ""
         res = self.add_friend_checked(target, reason)
         return str(res.get("message", "处理完成")) + str(res.get("paused") or "")
 

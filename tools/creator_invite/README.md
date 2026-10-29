@@ -74,9 +74,10 @@
 ## 第二段：run
 
 ```bash
-/usr/bin/python3 tools/creator_invite/invite.py run --config <配置> --plan <plan-编号.json> --confirm <编号> [--limit N] [--ledger-dir <目录>]
+/usr/bin/python3 tools/creator_invite/invite.py run --config <配置> --plan <plan-编号.json> --confirm <编号> [--limit N] [--only <抖音号,…|@文件>] [--ledger-dir <目录>]
 ```
 
+- `--only`：这次只发清单里用户挑的那几位（抖音号用逗号分开，或 `@文件` 每行一个），照发的先后；写了清单上没有的号就不发、退出码 2。
 - `--confirm` 必须写**这份清单的编号**（用户同意的是哪一份就写哪一份）；编号不对、清单超过 `plan_max_age_days`、清单里的专属佣金或权益和现在的配置不一样，都不发、退出码 2。
 - 只发清单里的人，按清单顺序。每一位：
   1. 先跑一次**不带** `--execute` 的 `dy buyin author-invite`（预览）。只有预览说状态 1、门槛 -1（不弹确认）、没被拦的才往下走，其余记一笔「跳过」。

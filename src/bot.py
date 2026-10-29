@@ -453,10 +453,12 @@ class Bot:
             from .wechat.friend_manager import AutoFriendService, FriendManager
             from .wechat.ocr.win_ocr import WindowsOcrEngine
             from .wechat.quiet_send import IdleGate, Win32Desktop
+            idle_gate = IdleGate(Win32Desktop(), 1.0, 10.0)
             manager = FriendManager(
                 window_controller=window,
                 ocr_engine=WindowsOcrEngine(window=window),
                 ui_lock=getattr(backend, "window_lock", None),
+                idle_gate=idle_gate,
                 on_accepted=on_accepted,
                 chat_names=getattr(backend, "chat_names", None),
             )
