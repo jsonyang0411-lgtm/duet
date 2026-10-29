@@ -192,7 +192,7 @@ def test_only_drafts_made_and_finished_inside_the_window_are_judged(clock, tmp_p
     clock.now = at(18, 0) + 5
     b.finish(job["id"], reply(text="在的呀～"))
     late = b.prm.store.packet_for_job(job["id"])
-    assert state(late) == WAITS and "下班时段开始以前建的" in late["meta"]["night_held"]
+    assert state(late) == WAITS and "任务建的时候没算作下班时段（还没到点" in late["meta"]["night_held"]
     clock.now = at(18, 30)
     b.prm.tick()                                                             # the sender thread's round
     assert state(b.prm.store.packet(waiting["id"])) == WAITS and state(b.prm.store.packet(late["id"])) == WAITS
@@ -236,15 +236,22 @@ def test_while_this_pcs_clock_is_off_wechats_nothing_goes_out_by_itself_at_night
 
 def test_a_clock_notice_left_by_a_run_before_suspends_until_measured(bot, clock):
     """Restarted with a deal still saying this PC's clock was off (nothing measured it right since): suspended
-    until the bot's own line read back says it is right."""
+    until the bot's own line read back says it is right.  A job made while it was suspended was not told it is
+    night: its draft waits even when the clock is right by the time it comes, and says why."""
     bot.prm.store.set_notice(1, "clock", service.clock_note(2 * 3600), clock.now, touch=False)
     assert "上次运行" in bot.prm.snapshot()["night"]["suspended"]
     held = drafted(bot, reply(text="好的呀～"), text="你好")
     assert state(held) == WAITS and "时间和微信对不上" in held["meta"]["night_held"]
     clock.now += 11 * 60
-    assert bot.prm.send_holding_replies() == 1
-    bot.prm.on_own_message(own(bot, HOLDING_TEXT, clock.now - 1))
+    assert bot.prm.send_holding_replies() == 1 and bot.texts == [(CREATOR, HOLDING_TEXT)]   # the day's words
+    bot.prm.handle(bot.msg("在吗"))                                          # a job made while suspended
+    job = bot.worker_takes()
+    assert "night" not in job["meta"]
+    bot.prm.on_own_message(own(bot, HOLDING_TEXT, clock.now - 1))            # measured: the clock is right
     assert bot.prm.snapshot()["night"]["suspended"] == ""
+    bot.finish(job["id"], reply(text="在的呀～"))
+    late = bot.prm.store.packet_for_job(job["id"])
+    assert state(late) == WAITS and "电脑时间和微信对不上" in late["meta"]["night_held"]
     assert state(drafted(bot, reply(text="好的呀～"), text="好的")) == GOES
 
 

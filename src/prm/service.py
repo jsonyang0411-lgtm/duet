@@ -768,8 +768,9 @@ class PrmService:
         them: may it go out by itself in the night window?  None: the window is not in play (off, or now is outside
         it; nothing is said); "": it goes (route ``gates.NIGHT``); else why it waits as by day (``meta.night_held``).
         Over ``gates.night_reason`` (complaints, ``plain_reason``, the red line, a flagged draft only as one holding
-        line): this PC's clock is right, the job was made inside the window (``meta.night``: the Mac was told it is
-        night and wrote by the kb's night rules; a draft of a job from before the window waits), it is a WeChat draft
+        line): this PC's clock is right, the job was made inside the window with a clock to trust (``meta.night``: the
+        Mac was told it is night and wrote by the kb's night rules; a draft of a job from before the window, or from
+        while the clock was off, waits), it is a WeChat draft
         (another channel's, ``meta.channel``, never), its platform action was not refused or covered, all its files
         came."""
         if self._night is None or not gates.in_night(self._night, now):
@@ -777,7 +778,7 @@ class PrmService:
         if self._clock_off():
             return "这台电脑的时间和微信对不上，下班时段不自动发"
         if not isinstance(meta.get("night"), dict):
-            return "草稿任务是下班时段开始以前建的，Mac 起草时不知道是下班时段"
+            return "草稿任务建的时候没算作下班时段（还没到点，或者电脑时间和微信对不上），Mac 起草时不知道是下班时段"
         if str(meta.get("channel") or "wechat") != "wechat":
             return "不是微信私聊的草稿"
         if refused:
