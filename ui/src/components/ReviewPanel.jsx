@@ -4,6 +4,7 @@ import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
 import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, buyinNotes, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, copyBuyin, buyinSent } from '../lib/prm'
 import { PageHead, Card, Note, Banner, Empty, Confirm, TextArea } from './ui'
+import { FriendAddList } from './FriendAddCard'
 
 // 待审批: what the Mac drafted for the registered creators. Nothing reaches a
 // creator until somebody here clicks 发送 (or edits and sends). A new message
@@ -13,6 +14,7 @@ import { PageHead, Card, Note, Banner, Empty, Confirm, TextArea } from './ui'
 // reply go out. Anything less is listed red at the top until marked dealt with.
 // A 抖音百应 private-message draft (PRM_BUYIN_SYNC_MIN) is never sent by the bot: an
 // operator copies it, sends it in 百应 by hand and says so (已在百应发了).
+// 加微信 (PRM_FRIEND_ADD): the contacts 百应 creators left, one confirmed friend request each (FriendAddCard.jsx).
 
 export default function ReviewPanel() {
   const { data, err, reload } = usePrm(4000)
@@ -30,6 +32,7 @@ export default function ReviewPanel() {
         {buyinNotes(data).map(([kind, text]) => <Note key={text} kind={kind} icon={ChatsCircle}>{text}</Note>)}
         {!data && <Empty title="正在读取…" />}
         <PlatformAlerts alerts={data?.platform_alerts || []} onDone={reload} />
+        <FriendAddList d={data} onDone={reload} />
         {data && !pending.length && (
           <Empty title="现在没有要审批的草稿">已登记的达人发来消息后，Mac 写好的回复会出现在这里。</Empty>
         )}

@@ -166,6 +166,13 @@ class AdvancedPostTests(_TempEnv):
         }})
         self.assertTrue(body["ok"], body)
 
+    def test_an_error_is_shown_on_the_field_it_names_not_on_a_shorter_key(self):
+        """PRM_FRIEND_ADD_BRAND's message starts with PRM_FRIEND_ADD too (加百应达人微信, 功能 R)."""
+        status, body = _request("/api/advanced", "POST", {"values": {"PRM_FRIEND_ADD_BRAND": "牌" * 21}})
+        self.assertFalse(body["ok"])
+        self.assertIn("PRM_FRIEND_ADD_BRAND", body["errors"])
+        self.assertNotIn("PRM_FRIEND_ADD", body["errors"])
+
     def test_masked_secret_keeps_the_stored_one(self):
         status, body = _request("/api/advanced", "POST", {"values": {"CLAUDE_RELAY_TOKEN": "stor***0000",
                                                                      "SEND_TYPING_DELAY": "on"}})

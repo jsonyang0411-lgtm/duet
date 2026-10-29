@@ -109,6 +109,7 @@ SWEEP_SEC = 600
 CLOSED_SHOWN = 20                  # ended records the console lists
 ADMIN_LISTED = 10
 INVITED_KEYS = ("aweme_id", "invited_at", "plan_id", "attempt", "category", "products", "commission_rate")
+CATEGORY_LABELS = {"small": "小达人", "mid": "中大博主", "big": "大主播/专场型"}   # tools/creator_invite's three
 DAY = 86400
 
 
@@ -720,6 +721,7 @@ class FriendAdds:
         return {"enabled": self._enabled, "can_add": self.can_add(), "today": self.today(now), "cap": self._daily_max,
                 "gap_sec": self._gap_sec, "last_at": last,
                 "next_at": last + self._gap_sec if last is not None and now - last < self._gap_sec else None,
+                "wait_sec": int(last + self._gap_sec - now) + 1 if last is not None and now - last < self._gap_sec else 0,
                 "paused_why": self._paused_why(), "busy_id": busy["id"] if busy else None,
                 "blocked_why": self.blocked_why(now) if self._enabled else "", "greeting_max": GREETING_MAX,
                 "default_greeting": self.greeting(""), "brand_set": bool(self._brand)}
@@ -764,3 +766,96 @@ class FriendAdds:
         except FriendAddError as e:
             return f"没有改：{e}"
         return f"#{int(add_id)} 记成不加了（号码已清除）"
+
+
+# ── the console's view (GET /api/prm: src/prm/service.py snapshot; also read while the bot is stopped) ─────
+
+def _values_until(record: dict) -> Optional[float]:
+    """When the record's full numbers will be cleared at the latest (design §6.10); None when there are none."""
+    if not record.get("wechat") and not record.get("phone"):
+        return None
+    due = [float(record["created_at"]) + VALUES_MAX_DAYS * DAY]
+    if record["state"] == REQUESTED:
+        due.append(float(record.get("requested_at") or record["updated_at"]) + REQUESTED_DAYS * DAY)
+    elif record["state"] in OPEN and record["state"] != ADDING:
+        due.append(float(record["updated_at"]) + UNTOUCHED_DAYS * DAY)
+    return min(due)
+
+
+def invited_out(invited: dict) -> dict:
+    """The invite of a record for the console: when the card went out, which plan, its category, how many products,
+    the 专属佣金 on the card."""
+    invited = invited if isinstance(invited, dict) else {}
+    if not invited:
+        return {}
+    out = {k: invited[k] for k in ("invited_at", "plan_id", "attempt", "category", "commission_rate") if k in invited}
+    if invited.get("category"):
+        out["category_label"] = CATEGORY_LABELS.get(str(invited["category"]), str(invited["category"]))
+    if isinstance(invited.get("products"), list):
+        out["products"] = len(invited["products"])
+    return out
+
+
+def record_out(record: dict, now: float, greetings: dict) -> dict:
+    """One record for the console: never a full number (``masked``; ``has_wechat`` / ``has_phone`` say whether it is
+    still there for 添加 / 显示完整).  ``greetings``: greeting -> the open records' ids that have it (the same greeting
+    twice: after she accepted, nobody can tell which one she is)."""
+    linkable = (record["state"] == EXPIRED and now - float(record["created_at"]) <= LINK_DAYS * DAY) or (
+        record["state"] in OPEN and record["state"] not in (ADDING, BLOCKED))
+    is_open = record["state"] in OPEN
+    has_values = bool(record.get("wechat") or record.get("phone"))
+    same = [i for i in greetings.get(" ".join(str(record.get("greeting") or "").split()), []) if i != record["id"]]
+    return {
+        "id": record["id"], "state": record["state"], "state_label": STATES.get(record["state"], record["state"]),
+        "source": record["source"], "source_label": SOURCES.get(record["source"], record["source"]),
+        "conversation_id": record.get("conversation_id", ""), "aweme_id": record["aweme_id"],
+        "nickname": record["nickname"], "masked": dict(record.get("masked") or {}),
+        "has_wechat": bool(record.get("wechat")), "has_phone": bool(record.get("phone")),
+        "cleared": bool(record.get("cleared_at")) and not has_values, "unavailable": bool(record.get("unavailable")),
+        "greeting": record.get("greeting", ""), "same_greeting": same if is_open else [],
+        "invited": invited_out(record.get("invited") or {}),
+        "candidate": dict(record.get("candidate") or {}), "party_id": record.get("party_id"),
+        "deal_id": record.get("deal_id"), "wxid": record.get("wxid", ""),
+        "link_on_accept": bool(record.get("link_on_accept")), "reason": record.get("reason", ""),
+        "reason_text": REASONS.get(record.get("reason", ""), record.get("reason", "")),
+        "created_at": record["created_at"], "updated_at": record["updated_at"],
+        "requested_at": record.get("requested_at"), "linked_at": record.get("linked_at"),
+        "closed_at": record.get("closed_at"), "values_until": _values_until(record),
+        "open": is_open, "can_link": linkable,
+        "listed": is_open or (linkable and bool((record.get("candidate") or {}).get("wxid"))),
+    }
+
+
+def friend_adds_out(store, now: Optional[float] = None, closed: int = CLOSED_SHOWN) -> list[dict]:
+    """The console's records: every open one and the latest ``closed`` that ended, newest first."""
+    now = time.time() if now is None else now
+    open_records = store.friend_adds(states=OPEN)
+    ended = store.friend_adds(states=ENDED, limit=closed)
+    greetings: dict = {}
+    for record in open_records:
+        text = " ".join(str(record.get("greeting") or "").split())
+        if text:
+            greetings.setdefault(text, []).append(record["id"])
+    rows = sorted([*open_records, *ended], key=lambda r: -int(r["id"]))
+    out = []
+    for record in rows:
+        item = record_out(record, now, greetings)
+        last = next(iter(store.friend_attempts(add_id=record["id"])), None)
+        item["last_attempt"] = ({"at": last["at"], "by": last["by"], "kind": last["kind"], "reason": last["reason"]}
+                                if last else None)
+        out.append(item)
+    return out
+
+
+def stopped_status(store, *, enabled: bool, daily_max: int = DAILY_MAX_DEFAULT, gap_sec: int = GAP_SEC_DEFAULT,
+                   now: Optional[float] = None) -> dict:
+    """``FriendAdds.status`` for a stopped bot (the console reads the database itself): nothing can be added."""
+    now = time.time() if now is None else now
+    attempts = store.friend_attempts() if store is not None else []
+    today = len([a for a in attempts if float(a["at"]) >= _local_midnight(now)])
+    return {"enabled": bool(enabled), "can_add": False, "today": today,
+            "cap": min(max(int(daily_max), DAILY_MAX_RANGE[0]), DAILY_MAX_RANGE[1]),
+            "gap_sec": min(max(int(gap_sec), GAP_SEC_RANGE[0]), GAP_SEC_RANGE[1]),
+            "last_at": float(attempts[0]["at"]) if attempts else None, "next_at": None, "wait_sec": 0,
+            "paused_why": "", "busy_id": None, "blocked_why": "机器人没有运行" if enabled else "",
+            "greeting_max": GREETING_MAX, "default_greeting": "", "brand_set": False}

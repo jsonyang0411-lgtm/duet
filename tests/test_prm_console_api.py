@@ -332,3 +332,145 @@ def test_registering_a_new_friend_drafts_what_she_said_since_she_was_added(runni
     assert [line.split("] ", 1)[1] for line in job["text"].split("\n")] == [
         "（加好友时的验证消息）我是阿花 〈手机1〉", "想要个样品"]
     assert running.prm.is_party_chat("wxid_new01")
+
+
+# ── 加百应达人微信 (功能 R): GET /api/prm's friend_adds / friend_add_status, POST /api/prm/friend-adds ──────────
+# Every value is made up.
+
+class _Manager:
+    """FriendManager.add_friend as the console's add sees it (no WeChat window)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def add_friend(self, keyword, message=""):
+        self.calls.append((keyword, message))
+        return {"ok": True, "target": keyword, "message": f"已成功向「{keyword}」发送好友申请"}
+
+
+@pytest.fixture
+def adds(running):
+    """The running bot with 加百应达人微信 on (PRM_FRIEND_ADD=on) and a fake friend manager behind the real admin
+    handler; the add runs at once (no thread)."""
+    from src.admin import AdminCommandHandler
+    from src.prm.friend_adds import FriendAdds
+
+    prm = running.prm
+    manager = _Manager()
+    prm.friend_adds = FriendAdds(prm.store, SimpleNamespace(prm_friend_add="on"), clock=running.relay._clock,
+                                 register=prm.register, spawn=lambda fn: fn(), clear_clipboard=lambda text: False)
+    prm.friend_adds.attach(AdminCommandHandler(friend_manager=manager), None, None)
+    yield SimpleNamespace(prm=prm, manager=manager, clock=running.relay._clock)
+
+
+def paste(body=None):
+    return call("/api/prm/friend-adds", "POST", {
+        "action": "paste", "aweme_id": "dy_demo01", "nickname": "小鹿",
+        "contact": {"wechat": "abcdefyz", "phone": "13800000000"}, **(body or {})})[1]
+
+
+def test_the_page_shows_the_records_masked_and_the_switchs_status(adds):
+    assert paste() == {"ok": True, "id": 1, "state": "offered"}
+    d = call("/api/prm")[1]
+    [r] = d["friend_adds"]
+    assert (r["state"], r["state_label"], r["nickname"], r["aweme_id"], r["source_label"]) == (
+        "offered", "待确认", "小鹿", "dy_demo01", "运营手动填的")
+    assert r["masked"] == {"wechat": "ab****yz", "phone": "138****0000"} and r["has_wechat"] and r["has_phone"]
+    assert r["greeting"] == "您好小鹿，百应上联系您的～" and r["listed"] and r["open"] and r["last_attempt"] is None
+    status = d["friend_add_status"]
+    assert (status["enabled"], status["can_add"], status["today"], status["cap"], status["gap_sec"]) == (
+        True, True, 0, 10, 120)
+    text = json.dumps(d, ensure_ascii=False)
+    assert "abcdefyz" not in text and "13800000000" not in text
+
+
+def test_one_add_from_the_console_and_every_full_look_is_written_down(adds):
+    paste()
+    out = call("/api/prm/friend-adds", "POST", {"id": 1, "action": "add", "use": "wechat",
+                                                 "greeting": "您好小鹿，我们在百应上聊过～"})[1]
+    assert out["ok"] and out["state"] == "requested" and out["target"] == "ab****yz"
+    assert "abcdefyz" not in json.dumps(out, ensure_ascii=False)
+    assert adds.manager.calls == [("abcdefyz", "您好小鹿，我们在百应上聊过～")]
+    again = call("/api/prm/friend-adds", "POST", {"id": 1, "action": "add"})[1]
+    assert again["ok"] is False and "已经发过申请" in again["error"] and len(adds.manager.calls) == 1
+    d = call("/api/prm")[1]
+    assert d["friend_add_status"]["today"] == 1 and d["friend_add_status"]["wait_sec"] > 0
+    assert d["friend_adds"][0]["last_attempt"]["by"] == "console"
+    shown = call("/api/prm/friend-adds", "POST", {"id": 1, "action": "reveal"})[1]
+    assert (shown["wechat"], shown["phone"]) == ("abcdefyz", "13800000000")
+    assert [x["actor"] for x in adds.prm.store.friend_add(1)["reveals"]] == ["console"]
+    assert call("/api/prm/friend-adds", "POST", {"id": 1, "action": "nonsense"})[1]["ok"] is False
+    assert call("/api/prm/friend-adds", "POST", {"id": 99, "action": "drop"})[1] == {
+        "ok": False, "error": "没有这一条加微信的记录"}
+    assert call("/api/prm/friend-adds", "POST", {"action": "paste", "aweme_id": ""})[1]["ok"] is False
+
+
+def test_linking_from_the_console_registers_her_and_her_deal_shows_the_douyin_id(adds):
+    paste()
+    call("/api/prm/friend-adds", "POST", {"id": 1, "action": "add"})
+    out = call("/api/prm/friend-adds", "POST", {"id": 1, "action": "link", "wxid": "wxid_demo"})[1]
+    assert out["ok"] and out["state"] == "linked" and out["party_id"]
+    d = call("/api/prm")[1]
+    party = next(p for p in d["parties"] if p["wxid"] == "wxid_demo")
+    assert party["name"] == "小鹿" and party["note"] == "百应邀约 · 抖音号 dy_demo01"
+    [link] = party["deal"]["links"]
+    assert (link["account"], link["source"], link["add_id"]) == ("dy_demo01", "friend_add", 1)
+    assert [e["name"] for e in party["deal"]["events"]] == ["关联抖音号 dy_demo01（加微信 #1）"]
+    [r] = d["friend_adds"]
+    assert r["state"] == "linked" and not r["listed"] and r["cleared"] and not r["has_wechat"]
+    bad = call("/api/prm/friend-adds", "POST", {"id": 1, "action": "link", "wxid": "wxid_other"})[1]
+    assert bad["ok"] is False and "不能关联" in bad["error"]
+    paste({"aweme_id": "dy_demo02"})
+    chatroom = call("/api/prm/friend-adds", "POST", {"id": 2, "action": "link", "wxid": "room1@chatroom"})[1]
+    assert chatroom["ok"] is False and "群聊" in chatroom["error"]                # PartyError, as a clean answer
+
+
+def test_registering_with_a_douyin_id_and_unlinking_it(running):
+    out = call("/api/prm/parties", "POST", {"action": "add", "wxid": "wxid_new01", "name": "阿花",
+                                            "douyin_id": "dy_demo02"})[1]
+    party_id = out["party"]["id"]
+    links = running.prm.store.creator_links(party_id)
+    assert [(l["account"], l["source"]) for l in links] == [("dy_demo02", "register")]
+    bad = call("/api/prm/parties", "POST", {"action": "add", "wxid": "wxid_new02", "name": "阿青", "douyin_id": "有中文"})[1]
+    assert bad["ok"] is False and "抖音号" in bad["error"] and not running.prm.is_party_chat("wxid_new02")
+    assert call("/api/prm/parties", "POST", {"action": "unlink", "id": party_id, "account": "dy_demo02"})[1] == {"ok": True}
+    assert running.prm.store.creator_links(party_id) == []
+    again = call("/api/prm/parties", "POST", {"action": "unlink", "id": party_id, "account": "dy_demo02"})[1]
+    assert again["ok"] is False
+    events = [e["name"] for e in call("/api/prm")[1]["parties"][1]["deal"]["events"]]
+    assert events[:2] == ["取消关联抖音号 dy_demo02", "关联抖音号 dy_demo02"]
+
+
+def test_the_friend_add_endpoint_is_post_only_and_refuses_other_sites(adds):
+    status, answer = call("/api/prm/friend-adds")
+    assert status == 405 and answer["ok"] is False
+    raw = json.dumps({"action": "paste", "aweme_id": "dy_demo01", "contact": {"wechat": "abcdefyz"}}).encode()
+    _, sock = _build_handler("/api/prm/friend-adds", method="POST", body=raw,
+                             headers={"Content-Type": "application/json", "Origin": "https://evil.example"})
+    assert sock.get_response_text().split("\r\n", 1)[0].split()[1] == "403"
+    assert adds.prm.store.friend_adds() == []
+
+
+def test_a_stopped_bot_shows_the_records_but_adds_and_reveals_nothing(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PRM_DB", raising=False)
+    monkeypatch.setenv("PRM_FRIEND_ADD", "on")
+    d = call("/api/prm")[1]
+    assert d["friend_adds"] == [] and d["friend_add_status"]["enabled"] is True
+    assert d["friend_add_status"]["can_add"] is False and not (tmp_path / "data" / "prm.db").exists()
+    store = PrmStore(tmp_path / "data" / "prm.db")
+    record, _ = store.add_friend_add(state="offered", source="paste", aweme_id="dy_demo01", wechat="abcdefyz",
+                                     masked={"wechat": "ab****yz"}, now=time.time())
+    store.add_friend_attempt(record["id"], by="console", kind="wechat", now=time.time())
+    store.close()
+    d = call("/api/prm")[1]
+    assert [r["masked"] for r in d["friend_adds"]] == [{"wechat": "ab****yz"}]
+    assert "abcdefyz" not in json.dumps(d, ensure_ascii=False) and d["friend_add_status"]["today"] == 1
+    for body in ({"action": "paste", "aweme_id": "dy_demo02"}, {"id": 1, "action": "add"}, {"id": 1, "action": "reveal"}):
+        answer = call("/api/prm/friend-adds", "POST", body)[1]
+        assert answer["ok"] is False and "机器人没有运行" in answer["error"], body
+    out = call("/api/prm/parties", "POST", {"action": "add", "wxid": "wxid_new01", "name": "阿花", "douyin_id": "dy_demo03"})[1]
+    assert out["ok"]
+    store = PrmStore(tmp_path / "data" / "prm.db")
+    assert [l["account"] for l in store.creator_links(out["party"]["id"])] == ["dy_demo03"]
+    store.close()

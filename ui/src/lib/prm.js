@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { get, post } from '../api'
+import { fmtClock } from './relay'
 
 // GET /api/prm: the PRM copilot's creators, the drafts waiting for a person and
 // the recent ones (src/web/server.py _prm_state). Polled while a page shows it.
@@ -51,6 +52,30 @@ export const partyAction = (body) => post('/api/prm/parties', body)
 export const dealAction = (body) => post('/api/prm/deals', body)
 /** The full numbers behind a creator's placeholders; every look is written down (8.2). */
 export const revealNumbers = (partyId) => post('/api/prm/reveal', { party_id: partyId })
+
+// 加百应达人微信（PRM_FRIEND_ADD，src/prm/friend_adds.py）：一次确认 = 一次好友申请，号码只显示打码的，显示完整 / 复制都记一笔。
+/** POST /api/prm/friend-adds {action, id?, ...}: paste / add / edit / sent_by_phone / sent_already / not_sent / wait_her / drop / link / not_her / link_on_accept / reveal. */
+export const friendAddAction = (body) => post('/api/prm/friend-adds', body)
+export const FRIEND_ADD_TAGS = {
+  offered: 'cy', needs_view: 'warn', waiting: 'pend', adding: 'pend', requested: 'ok', not_found: 'warn', known: 'ok',
+  failed: 'warn', unsure: 'warn', blocked: 'need', linked: 'ok', dropped: 'off', expired: 'off',
+}
+/** "今天控制台已加 3/10 · 上一次 14:02 · 2 分钟内不能再加". */
+export function friendAddStatusLine(st) {
+  if (!st || !st.enabled) return ''
+  const parts = [`今天控制台已加 ${st.today ?? 0}/${st.cap ?? 10}`]
+  if (st.last_at) parts.push(`上一次 ${fmtClock(st.last_at)}`)
+  if (st.wait_sec > 0) parts.push(st.wait_sec < 120 ? `${st.wait_sec} 秒内不能再加` : `约 ${Math.round(st.wait_sec / 60)} 分钟内不能再加`)
+  return parts.join(' · ')
+}
+/** "10-29 11:00 发的邀约卡（小达人，4 款，卡上没开专属佣金）" ('' without an invite). */
+export function inviteLine(inv) {
+  if (!inv || !(inv.invited_at || inv.plan_id)) return ''
+  const at = typeof inv.invited_at === 'number' ? fmtClock(inv.invited_at) : String(inv.invited_at || '').slice(5, 16).replace('T', ' ')
+  const bits = [inv.category_label, inv.products ? `${inv.products} 款` : '',
+    inv.commission_rate > 0 ? `卡上开了 ${inv.commission_rate}% 专属佣金` : (inv.commission_rate === 0 ? '卡上没开专属佣金' : '')].filter(Boolean)
+  return `${at ? `${at} ` : ''}发的邀约卡${bits.length ? `（${bits.join('，')}）` : ''}${inv.plan_id ? ` · 清单 ${inv.plan_id}` : ''}`
+}
 
 export const MODE_TAGS = { copilot: 'cy', human: 'warn', paused: 'off' }
 /** Who did it (deal_events.actor). */

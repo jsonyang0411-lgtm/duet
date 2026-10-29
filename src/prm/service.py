@@ -73,7 +73,7 @@ from ..relay.service import MAX_AGE_SEC, job_meta
 from ..relay.store import PRM
 from ..wechat.new_friends import is_friend_notice
 from . import contact, deals, gates, pii, platforms, retention
-from .friend_adds import FriendAdds
+from .friend_adds import FriendAdds, friend_adds_out
 from .result import MAX_DRAFT_CHARS, MESSAGE_KINDS, DraftError, parse_draft
 from .store import (
     APPROVED, BUYIN_TOOL, COPILOT, DRAFT_NOTES, DROPPED, EXECUTING, FAILED, HUMAN, LANE_BUYIN, LANE_REPLY, LANE_SYSTEM,
@@ -198,6 +198,70 @@ def check_wxid(wxid: str, reserved: set) -> str:
 # operator gave 登记达人.
 LINK_SOURCES = ("friend_add", "register")
 CREATOR_IDS_NOTICE = "creator_ids"          # the deal's notice: her 抖音号 from two sources that do not agree
+
+
+def sample_creator_ids(store: PrmStore, deal_id: int) -> tuple:
+    """The 抖音号 and 抖音 UID the deal's verified 抖店 sample orders found: ``(douyin_ids, uid)``.  An order the worker
+    recorded before ``created.creator_account`` gives it from the CLI's own answer (its ``daren.platformNo``)."""
+    douyin, uid = [], ""
+    for packet in store.deal_packets(deal_id, tools=("jst.sample_order",), statuses=(APPROVED, SENDING, SENT, FAILED)):
+        data = packet["platform"] or {}
+        action, execution = data.get("action") or {}, data.get("execution") or {}
+        if execution.get("outcome") != platforms.VERIFIED or action.get("creator_platform") != "dy":
+            continue
+        created = execution.get("created") or {}
+        for value in (created.get("creator_account"), action.get("creator_account"), _platform_no(execution)):
+            value = str(value or "").strip()
+            if value and platforms.creator_account_ok(value) and value not in douyin:
+                douyin.append(value)
+        uid = uid or str(created.get("creator_uid") or action.get("creator_uid") or "")
+    return douyin, uid
+
+
+def creator_ids_notice(store: PrmStore, deal_id: int, now: float) -> None:
+    """Her 抖音号 from her verified sample order and from an operator's link do not agree: the deal says so
+    (``CREATOR_IDS_NOTICE``) until they do; a wrong link could make a 专属佣金 look opened by an invite card
+    (design §8.4).  Not a sign of life of the deal (``touch`` False)."""
+    deal = store.deal(deal_id)
+    if deal is None:
+        return
+    sample, _ = sample_creator_ids(store, deal_id)
+    linked = [str(link["account"]) for link in store.creator_links(deal["party_id"]) if link["platform"] == "dy"]
+    text = ""
+    if sample and linked and {s.lower() for s in sample} != {a.lower() for a in linked}:
+        text = (f"合作单里的抖音号对不上：关联的 {'、'.join(linked)}，寄样单的 {'、'.join(sample)}，请核对。"
+                "开专属佣金时按台账判断「邀约卡开过没有」会受影响")
+    if text or any(n["key"] == CREATOR_IDS_NOTICE for n in deal["notices"]):
+        store.set_notice(deal_id, CREATOR_IDS_NOTICE, text, now, touch=False)
+
+
+def link_creator(store: PrmStore, party: dict, link: dict, *, now: float, actor: str = "console") -> bool:
+    """Who a registered creator is on 抖音 (``check_link``'s ``link``): ``creator_links`` (the first link of an account
+    stays) and a ``friend_add_link`` event on her deal (her 抖音号, the record, when the invite card went out; never a
+    number); the deal says so when her sample order knows another 抖音号 (``creator_ids_notice``).  True when new."""
+    deal = store.deal_of(party["id"], now)
+    made = store.add_creator_link(party["id"], link["account"], uid=link["uid"], uid_source=link["uid_source"],
+                                  nickname=link["nickname"], source=link["source"], add_id=link["add_id"], now=now)
+    detail = {"account": link["account"], "source": link["source"], "new": made}
+    for key in ("add_id", "invited_at", "plan_id"):
+        if link.get(key):
+            detail[key] = link[key]
+    store.add_event(deal["id"], party["id"], "friend_add_link", detail, actor=actor, now=now)
+    creator_ids_notice(store, deal["id"], now)
+    return made
+
+
+def unlink_creator(store: PrmStore, party_id: int, account: str, *, now: float, actor: str = "console") -> dict:
+    """An operator says a creator's 抖音 link was wrong (取消关联): it goes, her deal says so (``creator_unlinked``)."""
+    party = store.party(int(party_id))
+    if party is None:
+        return {"ok": False, "error": "没有找到这个达人"}
+    if not store.delete_creator_link(party["id"], str(account or "").strip()):
+        return {"ok": False, "error": "这位达人没有关联这个抖音号"}
+    deal = store.deal_of(party["id"], now)
+    store.add_event(deal["id"], party["id"], "creator_unlinked", {"account": str(account).strip()}, actor=actor, now=now)
+    creator_ids_notice(store, deal["id"], now)
+    return {"ok": True}
 
 
 def check_link(link) -> Optional[dict]:
@@ -426,6 +490,7 @@ EVENT_NAMES = {
     "buyin_message": "百应私信", "buyin_copy": "复制百应私信草稿（含完整号码）", "buyin_sent": "运营已在百应手动发出",
     "buyin_draft_failed": "百应私信的草稿没写成",
     "friend_add_link": "关联抖音号", "friend_add_contact": "她在百应里留了联系方式（已经是登记达人，不用加）",
+    "creator_unlinked": "取消关联抖音号",
 }
 # A creator's message recorded without a draft because it was read too late (PRM_CATCHUP_HOURS).
 MISSED_EVENT_NAME = "机器人没在读时达人的消息（没有起草）"
@@ -455,6 +520,8 @@ def event_out(ev: dict) -> dict:
         name = "百应私信：我方（运营在百应里回的）" if detail.get("from") == "shop" else "百应私信：达人"
     elif ev["kind"] == "friend_add_contact" and detail.get("line"):
         name = f"她在百应里留了联系方式（已经是登记达人，不用加）：{detail['line']}"
+    elif ev["kind"] == "creator_unlinked" and detail.get("account"):
+        name = f"取消关联抖音号 {detail['account']}"
     elif ev["kind"] == "friend_add_link" and detail.get("account"):
         name = (f"关联抖音号 {detail['account']}" + (f"（加微信 #{detail['add_id']}）" if detail.get("add_id") else "")
                 + (f"，{str(detail['invited_at'])[:16].replace('T', ' ')} 发的邀约卡" if detail.get("invited_at") else ""))
@@ -567,6 +634,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
             "active": bool(p["active"]), "authorized_at": p["authorized_at"],
             "has_numbers": bool(store.token_rows(p["id"])),       # cleared ones too: shown as （已清除）
             "deal": {
+                "links": links_out(store, p["id"]),
                 "id": deal["id"], "stage": deal["stage"], "stage_label": STAGES.get(deal["stage"], ""),
                 "mode": mode, "mode_label": MODES.get(mode, mode),
                 "mode_until": deal.get("mode_until") if mode == HUMAN else None,
@@ -590,12 +658,26 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
         "recent": [packet_out(p) for p in recent],
         "platform_alerts": [packet_out(p) for p in store.platform_failures()],
         "buyin": buyin_out(store, now),
+        "friend_adds": friend_adds_out(store, now),
         "platform_actions": {name: spec["label"] for name, spec in platforms.ACTIONS.items()},
         "counts": store.counts(),
         "gates": gates_out(store),
         "stages": STAGES, "kinds": MESSAGE_KINDS, "modes": MODES, "shipment_states": SHIPMENT_STATES,
         **(extra or {}),
     }
+
+
+def links_out(store: PrmStore, party_id: int) -> list[dict]:
+    """Who a creator is on 抖音 (``creator_links``) for her deal: her 抖音号, where the link came from, and for a
+    加百应达人微信 record when its invite card went out (功能 R)."""
+    out = []
+    for link in store.creator_links(party_id):
+        record = store.friend_add(link["add_id"]) if link.get("add_id") else None
+        invited = (record or {}).get("invited") or {}
+        out.append({"account": link["account"], "platform": link["platform"], "source": link["source"],
+                    "nickname": link["nickname"], "add_id": link["add_id"], "created_at": link["created_at"],
+                    "invited_at": invited.get("invited_at") or None, "plan_id": invited.get("plan_id") or None})
+    return out
 
 
 def buyin_packet_out(store: PrmStore, p: dict) -> Optional[dict]:
@@ -1802,17 +1884,15 @@ class PrmService:
         """Who a registered creator is on 抖音 (``check_link``'s ``link``): ``creator_links`` (the first link of an
         account stays) and a ``friend_add_link`` event on her deal (her 抖音号, the record, when the invite card went
         out; never a number); the deal says so when her sample order knows another 抖音号 (``_creator_ids_notice``)."""
-        deal = self._store.deal_of(party["id"], now)
-        made = self._store.add_creator_link(party["id"], link["account"], uid=link["uid"], uid_source=link["uid_source"],
-                                            nickname=link["nickname"], source=link["source"], add_id=link["add_id"],
-                                            now=now)
-        detail = {"account": link["account"], "source": link["source"], "new": made}
-        for key in ("add_id", "invited_at", "plan_id"):
-            if link.get(key):
-                detail[key] = link[key]
-        self._store.add_event(deal["id"], party["id"], "friend_add_link", detail, actor="console", now=now)
-        self._creator_ids_notice(deal["id"], now)
+        made = link_creator(self._store, party, link, now=now)
         logger.info("PRM: party %d linked to a 抖音号 (%s%s)", party["id"], link["source"], "" if made else ", known already")
+
+    def unlink_creator(self, party_id: int, account: str) -> dict:
+        """取消关联 from the console (``unlink_creator``)."""
+        out = unlink_creator(self._store, party_id, account, now=self._clock())
+        if out.get("ok"):
+            logger.info("PRM: party %d unlinked from a 抖音号", int(party_id))
+        return out
 
     def take_new_friend(self, chat_id: str, messages: list[dict], *, verify_until: float = 0.0) -> int:
         """A new friend registered as a creator: her messages since she was added (the WeChat backend
@@ -3595,39 +3675,12 @@ class PrmService:
         return out
 
     def _sample_creator_ids(self, deal_id: int) -> tuple:
-        """The 抖音号 and 抖音 UID the deal's verified 抖店 sample orders found: ``(douyin_ids, uid)``.  An order the
-        worker recorded before ``created.creator_account`` gives it from the CLI's own answer (its
-        ``daren.platformNo``)."""
-        douyin, uid = [], ""
-        for packet in self._store.deal_packets(deal_id, tools=("jst.sample_order",),
-                                               statuses=(APPROVED, SENDING, SENT, FAILED)):
-            data = packet["platform"] or {}
-            action, execution = data.get("action") or {}, data.get("execution") or {}
-            if execution.get("outcome") != platforms.VERIFIED or action.get("creator_platform") != "dy":
-                continue
-            created = execution.get("created") or {}
-            for value in (created.get("creator_account"), action.get("creator_account"), _platform_no(execution)):
-                value = str(value or "").strip()
-                if value and platforms.creator_account_ok(value) and value not in douyin:
-                    douyin.append(value)
-            uid = uid or str(created.get("creator_uid") or action.get("creator_uid") or "")
-        return douyin, uid
+        """``sample_creator_ids`` of this service's store."""
+        return sample_creator_ids(self._store, deal_id)
 
     def _creator_ids_notice(self, deal_id: int, now: float) -> None:
-        """Her 抖音号 from her verified sample order and from an operator's link do not agree: the deal says so
-        (``CREATOR_IDS_NOTICE``) until they do; a wrong link could make a 专属佣金 look opened by an invite card
-        (design §8.4).  Not a sign of life of the deal (``touch`` False)."""
-        deal = self._store.deal(deal_id)
-        if deal is None:
-            return
-        sample, _ = self._sample_creator_ids(deal_id)
-        linked = [str(link["account"]) for link in self._store.creator_links(deal["party_id"]) if link["platform"] == "dy"]
-        text = ""
-        if sample and linked and {s.lower() for s in sample} != {a.lower() for a in linked}:
-            text = (f"合作单里的抖音号对不上：关联的 {'、'.join(linked)}，寄样单的 {'、'.join(sample)}，请核对。"
-                    "开专属佣金时按台账判断「邀约卡开过没有」会受影响")
-        if text or any(n["key"] == CREATOR_IDS_NOTICE for n in deal["notices"]):
-            self._store.set_notice(deal_id, CREATOR_IDS_NOTICE, text, now, touch=False)
+        """``creator_ids_notice`` of this service's store."""
+        creator_ids_notice(self._store, deal_id, now)
 
     def _waybill(self, packet: dict) -> str:
         """The system's record: the deal's latest waybill (a notice of an earlier one is refused)."""
@@ -3643,7 +3696,7 @@ class PrmService:
             "takeover_min": self._takeover_sec // 60, "holding_min": self._holding_sec // 60,
             "retention_days": self._retention_days, "catchup_hours": self._catchup_sec // 3600,
             "clock_skew_sec": int(round(self._skew)), "sample_sync_min": self._sample_sync_sec // 60,
-            "buyin_sync_min": self._buyin_sec // 60,
+            "buyin_sync_min": self._buyin_sec // 60, "friend_add_status": self.friend_adds.status(),
         })
 
     # ── the sender thread: approved drafts, holding replies, clean-ups ────

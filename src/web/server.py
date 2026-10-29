@@ -1075,6 +1075,7 @@ def _prm_state_core() -> dict:
                "catchup_hours": _prm_int_env("PRM_CATCHUP_HOURS", 12),
                "buyin_sync_min": _prm_int_env("PRM_BUYIN_SYNC_MIN", 0), **settings}
     store = _prm_stopped_store()
+    stopped["friend_add_status"] = _friend_add_stopped_status(store)
     if store is None:
         from src.prm.platforms import ACTIONS
         from src.prm.result import MESSAGE_KINDS
@@ -1082,11 +1083,43 @@ def _prm_state_core() -> dict:
         return {"ok": True, "running": False, "parties": [], "pending": [], "recent": [], "counts": {}, "gates": [],
                 "platform_alerts": [], "platform_actions": {k: v["label"] for k, v in ACTIONS.items()},
                 "stages": STAGES, "kinds": MESSAGE_KINDS, "modes": MODES, "shipment_states": SHIPMENT_STATES,
-                **stopped}
+                "friend_adds": [], **stopped}
     try:
         return prm_snapshot(store, running=False, retention_days=stopped["retention_days"], extra=stopped)
     finally:
         store.close()
+
+
+def _friend_add_stopped_status(store) -> dict:
+    """加百应达人微信's status while the bot is stopped: the switch and the numbers as .env says, today's adds from the
+    database (``store`` None: none yet); nothing can be added (``can_add`` False)."""
+    from src.prm.friend_adds import stopped_status
+
+    return stopped_status(store, enabled=_prm_env_on("PRM_FRIEND_ADD"),
+                          daily_max=_prm_int_env("PRM_FRIEND_ADD_DAILY_MAX", 10),
+                          gap_sec=_prm_int_env("PRM_FRIEND_ADD_GAP_SEC", 120))
+
+
+def _prm_friend_adds(data: dict) -> dict:
+    """POST /api/prm/friend-adds {action, id?, ...}: 加百应达人微信 (src/prm/friend_adds.py).  ``paste`` {aweme_id,
+    nickname?, contact {wechat?, phone?}, greeting?} makes a record; on a record (``id``): ``add`` {use?, greeting?}
+    (one friend request, its confirmation was the page's), ``edit`` {contact}, ``sent_by_phone``, ``sent_already``,
+    ``not_sent``, ``wait_her``, ``drop``, ``link`` {wxid, name?}, ``not_her``, ``link_on_accept`` {on}, ``reveal`` (the full
+    numbers, for this page only; every look is written down).  Only a running bot does any of them."""
+    from src.prm.friend_adds import FriendAddError
+    from src.prm.store import PartyError
+
+    if _prm is None:
+        return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能处理加微信"}
+    action = str(data.get("action") or "")
+    try:
+        if action == "paste":
+            contact = data.get("contact") if isinstance(data.get("contact"), dict) else {}
+            return _prm.friend_adds.paste(data.get("aweme_id"), data.get("nickname") or "", contact,
+                                          data.get("greeting"))
+        return _prm.friend_adds.act(data.get("id"), action, data)
+    except (FriendAddError, PartyError) as e:
+        return {"ok": False, "error": str(e)}
 
 
 def _prm_deal(data: dict) -> dict:
@@ -1126,15 +1159,21 @@ def _prm_reveal(data: dict) -> dict:
 
 
 def _prm_parties(data: dict) -> dict:
-    """POST /api/prm/parties: {"action": "add", "wxid", "name", "note"} | {"action": "enable"|"disable", "id"}."""
-    from src.prm.service import check_wxid
+    """POST /api/prm/parties: {"action": "add", "wxid", "name", "note", "douyin_id"?} | {"action": "enable"|"disable", "id"}
+    | {"action": "unlink", "id", "account"}.  ``douyin_id`` (optional): who she is on 抖音 (``creator_links``, source
+    register; 加百应达人微信); ``unlink``: an operator says a 抖音 link was wrong."""
+    from src.prm.service import check_link, check_wxid, link_creator, unlink_creator
     from src.prm.store import PartyError, PrmStore
 
     action = str(data.get("action") or "")
+    douyin = str(data.get("douyin_id") or "").strip()
+    link = {"account": douyin, "source": "register"} if douyin else None
     try:
         if _prm is not None:
+            if action == "unlink":
+                return _prm.unlink_creator(int(data.get("id")), str(data.get("account") or ""))
             if action == "add":
-                party = _prm.register(data.get("wxid", ""), data.get("name", ""), data.get("note", ""))
+                party = _prm.register(data.get("wxid", ""), data.get("name", ""), data.get("note", ""), link=link)
                 # catch_up: a new friend's messages since she was added are on their way to a draft
                 return {"ok": True, "party": {"id": party["id"], "name": party["name"]},
                         "catch_up": bool(party.get("catch_up"))}
@@ -1146,6 +1185,8 @@ def _prm_parties(data: dict) -> dict:
         reserved = _prm_reserved()
         store = PrmStore(_prm_db_path())
         try:
+            if action == "unlink":
+                return unlink_creator(store, int(data.get("id")), str(data.get("account") or ""), now=time.time())
             if action == "add":
                 wxid = check_wxid(data.get("wxid", ""), reserved)
                 name, note = str(data.get("name") or "").strip(), str(data.get("note") or "").strip()
@@ -1153,7 +1194,10 @@ def _prm_parties(data: dict) -> dict:
                     return {"ok": False, "error": "称呼要填，最多 30 个字"}
                 if len(note) > 200:
                     return {"ok": False, "error": "备注最多 200 个字"}
+                link = check_link(link)
                 party = store.add_party(wxid, name, note)
+                if link is not None:
+                    link_creator(store, party, link, now=time.time())
                 return {"ok": True, "party": {"id": party["id"], "name": party["name"]}}
             if action in ("enable", "disable"):
                 party = store.update_party(int(data.get("id")), active=action == "enable")
@@ -1256,6 +1300,7 @@ _POST_ONLY_PATHS = frozenset({
     "/api/voice/download-model", "/api/wechat-data-dir/detect",
     "/api/influencer/contacts/action", "/api/influencer/inbox/action",
     "/api/relay/cancel", "/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal",
+    "/api/prm/friend-adds",
 })
 
 
@@ -1369,7 +1414,7 @@ class _UIHandler(SimpleHTTPRequestHandler):
                          "/api/influencer/inbox/action",
                          "/api/relay/cancel",
                          "/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal",
-                         "/api/wechat-gaps"):
+                         "/api/prm/friend-adds", "/api/wechat-gaps"):
             self.do_GET()
         else:
             self._method_not_allowed()
@@ -1581,7 +1626,8 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 logger.exception("Reading the PRM state failed")
                 self.send_json({"ok": False, "error": str(e)})
             return
-        if self.path in ("/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal"):
+        if self.path in ("/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal",
+                         "/api/prm/friend-adds"):
             content_len = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len) if content_len else b"{}"
             try:
@@ -1593,7 +1639,8 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "请求不是有效的 JSON"})
                 return
             handler = {"/api/prm/parties": _prm_parties, "/api/prm/packets": _prm_packet,
-                       "/api/prm/deals": _prm_deal, "/api/prm/reveal": _prm_reveal}[self.path]
+                       "/api/prm/deals": _prm_deal, "/api/prm/reveal": _prm_reveal,
+                       "/api/prm/friend-adds": _prm_friend_adds}[self.path]
             try:
                 self.send_json(handler(data))
             except Exception as e:

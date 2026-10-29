@@ -144,3 +144,7 @@
 .prm-cmd { font-size: var(--fs-xs); color: var(--ink-2); overflow-wrap: anywhere; }
 .prm-raw { max-height: 320px; overflow: auto; margin: 4px 0 0; padding: 8px; border: 1px solid var(--rule); background: var(--card-2); font-family: var(--f-mono); font-size: var(--fs-xs); white-space: pre-wrap; word-break: break-all; }
 .prm-alerts .banner .b-text { display: flex; flex-direction: column; gap: 2px; }
+
+/* ---------- 待审批 · 加微信（PRM_FRIEND_ADD） ---------- */
+.prm-friend-add.blocked { border-color: var(--need-line); }
+.prm-friend-add input[type="checkbox"], .prm-link-options input[type="radio"] { width: 15px; height: 15px; margin: 0; accent-color: var(--cy-ink); }
