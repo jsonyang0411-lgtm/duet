@@ -189,7 +189,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `PROJECT_ROOT` | `Path` | 自动解析 | `src/config.py` | 项目根目录（`WEBOT_APP_HOME`；frozen EXE 模式下是 EXE 所在目录） |
 | `UI_DIR` | `Path` | `ui/dist/` | `src/web/server.py` | 前端静态文件目录（frozen 时在 `_MEIPASS` 里） |
 | `DEFAULT_HOME` / `COMMISSION_CAP` / `CONTENT_MAX` / `STOP_EXITS`（另有 `IDENTITY_UNVERIFIABLE`、`LOGIN_HINT`：百应掉登录时的停和提示） | `Path` / `int` / `int` / `dict` | `~/.claude-relay/platform/creator-invites` / `25` / `150` / `{76, 77, 79}` | `tools/creator_invite/invite.py` | 邀约批量工具的台账和清单默认位置；专属佣金上限（用户的规矩）；邀约文案字数（按 JS 计）；一碰到就停的退出码（见功能 Q） |
-| `DEFAULT_TEMPLATES` / `DEFAULT_FIND` / `DEFAULT_RULES` / `CATEGORY_NAMES` | `dict` | 三类话术（`{品牌}` 占位）/ 帽子类目 1000003461、件单价 150–500、两组粉丝范围（5000–20 万、20 万以上）/ 分类、不进清单与标记的门槛（小达人 5000 到 20 万、中大博主 ≥ 20 万、女粉 < 60 不进）/ 小达人·中大博主·大主播/专场型 | `tools/creator_invite/invite.py` | plan 的默认筛选、分类、话术（配置可覆盖，见 §5.7） |
+| `DEFAULT_TEMPLATES` / `DEFAULT_FIND` / `DEFAULT_RULES` / `CATEGORY_NAMES` | `dict` | 三类话术（`{品牌}` 占位）/ 帽子类目 1000003461、件单价 150–500、两组粉丝范围（5000–20 万：平台先筛 LV2 以上、近 30 天销售额 ≥ 1 万；20 万以上：只筛 LV2 以上）/ 分类、不进清单与标记的门槛（小达人 5000 到 20 万、中大博主 ≥ 20 万、女粉 < 60 不进；专门带自己牌子的：`own_brand_words`、`matrix_min`；可能骗样的：`min_level`、`min_sales30d`、`hidden_sales_min_level`、`min_sales_per_fan` / `sales_per_fan_from`；只标记：`own_hat_flag`、`single_category_flag`；手动 `drop_ids` / `keep_ids`）/ 小达人·中大博主·大主播/专场型 | `tools/creator_invite/invite.py` | plan 的默认筛选、分类、话术（配置可覆盖，见 §5.7） |
 | `_LOOPBACK_HOSTS` | `frozenset[str]` | `{"127.0.0.1", "localhost", "::1"}` | `src/web/server.py` | 控制台只接受 Host / Origin 为本机的请求（防 DNS 重绑定、跨站调用） |
 | `_POST_ONLY_PATHS` | `frozenset[str]` | `/api/config`、`/api/config/import`、`/api/start`、`/api/stop`、`/api/onboarding/reset`、`/api/onboarding/step1..3`、`/api/voice/download-model`、`/api/wechat-data-dir/detect`、`/api/relay/cancel`、`/api/prm/parties`、`/api/prm/packets`、`/api/prm/deals`、`/api/prm/reveal` | `src/web/server.py` | 会改状态的端点只认 POST；GET 一律 405（网页可以用 `<img>` 悄悄发 GET，且不带 Origin） |
 | `_SECRET_ENV_KEYS` | `set[str]` | `{"VOICE_OPENAI_API_KEY"}` | `src/web/server.py` | 主配置里唯一的密钥：`/api/load-config` 打码，`/api/config` 和导入时收到打码值就保留原值 |
@@ -1067,11 +1067,13 @@ Windows `wcdb` 后端旁边的一个线程（`wechat-presence`）：每 `CHECK_S
 | `Ledger(folder)` / `.lock()` / `.unlock()` / `.records()` / `.append(record)` / `.never_again()` / `.unknown()` / `.sent_this_week(moment)` | 台账 `invites.jsonl`（只追加、0600、每行 fsync）；`invites.lock` 用 `fcntl.flock` 保证同时只有一个 run；有 `attempt` 而没有 `sent: false` 的 `result` 的抖音号永不再发；本周按北京时间周一 0 点算 | — / `set` / `list` / `int` |
 | `percent(text)` / `hat_share(row)` / `female_share(row)` / `band_min(band)` / `creator_view(row)` | 从 `jst find` 的行读帽子占比、女性粉丝占比（画像只给最大的性别：男性 x% 算女性 100−x）、销售额区间下限、给清单用的字段 | `float\|None` / `dict` |
 | `classify(row, rules)` | 先判专场型（直播为主、近 30 天直播销售额下限 ≥ `big_live_min`、等级 ≥ `big_level_min`），再按粉丝：≥ `mid_fans_min` 中大博主、≥ `small_fans_min` 小达人（15–20 万也算，用户 2026-10-29）；不到 `small_fans_min` 给出不进清单的原因 | `(类别\|None, 原因\|None)` |
+| `sales_floor(row)` / `top_category(row)` / `name_stem(nickname)` | 近 30 天销售额下限（无数据为 None）/ 卖得最多的细分品类和占比 / 昵称里店名那段（第一个括号、点、横线、竖线、空格前面的，「小鹿（日常穿搭）」→「小鹿」；英文不分大小写） | `float\|None` / `(str\|None, float)` / `str` |
+| `own_brand_reason(view, rules, stems)` / `sample_risk_reason(row, view, rules)` | 专门带自己牌子（名字像店铺 / 品牌号、同一个店名开头的号这次找到 ≥ `matrix_min` 个）/ 可能骗样品（LV 低于 `min_level`、销售额下限 < `min_sales30d`、无数据且 LV < `hidden_sales_min_level`、粉丝 ≥ `sales_per_fan_from` 时每粉 < `min_sales_per_fan` 元）的原因，没有就 None | `str\|None` |
 | `mix_categories(candidates)` | 查状态的先后：每类里没有标记的在前、帽子占比高的在前，再三类轮流（专场型、中大博主、小达人），清单截到 `--count` 时三类都有 | `list[dict]` |
 | `assign_products(avg_price, products)` | 主推：售价最接近件单价的那款；附带：其余配得上的全部、按配置顺序（配置最多 5 款 = 一张卡的上限） | `list[dict]` |
-| `check_stock(cfg, clis)` / `find_creators(cfg, clis)` | `min_stock` 为 0（默认）时不发请求、每款都配（`stock` 为 None）；大于 0 时 `jst goods-detail`（每个款号，加起来是一款的可用库存）/ `jst find`（每组 `queries` 一次，带 `--not-added`） | `list[dict]` |
-| `build_plan(cfg, clis, ledger, count, *, moment=None)` / `make_plan_id(moment)` | plan：库存 → 找达人 → 本地筛（格式、台账、疑似同行自播号、女粉 < `female_min`、粉丝不到 `small_fans_min`；帽子占比 < `low_hat_share`、粉丝性别不知道只标记）→ `mix_categories`（每类里没标记、帽子占比高的在前，三类轮流）→ 每 20 位一次 `dy buyin author-invite-status`（够数就不再查；查过能邀但超出人数的进 `spare`）→ 配商品和话术；本周额度取自状态浮层 | 清单 `dict`（`plan_id`、`settings`、`products`、`weekly_quotas`、`creators`、`spare`、`excluded`、`not_checked`、`requests`） |
-| `plan_markdown(plan, plan_file)` / `excluded_table(w, rows)` / `plan_csv(plan)` / `write_plan(plan, out_dir)` | 给人看的清单（按三类分表、商品与库存（没查时写「没查」）、话术原文与字数、疑似同行自播号单列、其他没进的和原因）和 CSV；三份文件 0600 | `str` / `dict[str, Path]` |
+| `check_stock(cfg, clis)` / `find_creators(cfg, clis)` | `min_stock` 为 0（默认）时不发请求、每款都配（`stock` 为 None）；大于 0 时 `jst goods-detail`（每个款号，加起来是一款的可用库存）/ `jst find`（每组 `queries` 一次，带 `--not-added`，组里的 `fans_*`、`level_*`、`sales_*` 换成 `--fans-*`、`--level-*`、`--sales-*`） | `list[dict]` |
+| `build_plan(cfg, clis, ledger, count, *, moment=None)` / `make_plan_id(moment)` | plan：库存 → 找达人 → 本地筛（格式、台账、`drop_ids`、疑似同行自播号、女粉 < `female_min`、专门带自己牌子的 `group: own_brand`、可能骗样的 `group: sample_risk`（`keep_ids` 里的不按这两组去掉）、粉丝不到 `small_fans_min`；帽子占比 < `low_hat_share`、粉丝性别不知道、帽子占比 ≥ `own_hat_flag`、一类别的货 ≥ `single_category_flag` 只标记）→ `mix_categories`（每类里没标记、帽子占比高的在前，三类轮流）→ 每 20 位一次 `dy buyin author-invite-status`（够数就不再查；查过能邀但超出人数的进 `spare`）→ 配商品和话术；本周额度取自状态浮层 | 清单 `dict`（`plan_id`、`settings`、`products`、`weekly_quotas`、`creators`、`spare`、`excluded`、`not_checked`、`requests`） |
+| `plan_markdown(plan, plan_file)` / `excluded_table(w, rows)` / `plan_csv(plan)` / `write_plan(plan, out_dir)` | 给人看的清单（按三类分表、商品与库存（没查时写「没查」）、话术原文与字数、疑似同行自播号 / 专门带自己牌子的 / 可能骗样品的各一张表、其他没进的和原因）和 CSV；三份文件 0600 | `str` / `dict[str, Path]` |
 | `invite_args(cfg, plan, creator)` / `load_plan(path)` | `dy buyin author-invite` 的参数（`--name=value`，带 `--commission-rate`、`--expect-shop-id`、`--no-open`）/ 读清单并认出是 plan 写的 | `list[str]` / `dict` |
 | `run_plan(cfg, plan, confirm, clis, ledger, *, limit=None, sleep, uniform, clock)` | run：编号、清单年龄、佣金与权益和配置一致才开始；每位：台账去重、每周上限 → 两位之间等 `wait_between` → 预览（状态 1、门槛 -1、没被拦才往下；额度剩下不到 `quota_margin` 就停）→ 写 `attempt` → `--expect-status=1 --expect-popwindow=-1 --execute` → 写 `result`；76 / 77 / 79、超时、130、没结果都停，`STATE_CONFLICT` 跳过继续，连续 3 位预览失败停 | 执行摘要 `dict`（`sent`、`skipped`、`conflicts`、`stopped`、`unknown_before`、`sent_this_week`、`requests`） |
 | `run_markdown(summary)` / `main(argv=None, *, runner, sleep, uniform, clock, stdout=None)` | 执行记录（停在第几位、为什么）/ 命令行入口：`plan`、`run`、`status`；返回退出码（run 停在 76 / 77 / 79 时照原样） | `str` / `int` |
@@ -2368,7 +2370,7 @@ invite.py plan --config C --count N
   → build_plan
       check_stock：min_stock 为 0（默认）不发请求；大于 0 时每个款号 node paced-jst.mjs goods-detail --style-code=…（只读）
       find_creators：每组 queries node paced-jst.mjs find --platform=DY --goods-category=… --price-min/max=… --not-added …（只读）
-      本地筛：抖音号格式 / Ledger.never_again / 帽子 ≥ 90%（疑似同行自播号）/ 女粉 < 60% 不进 / classify / 帽子 < 1%、性别不知道标记
+      本地筛：抖音号格式 / Ledger.never_again / drop_ids / 帽子 ≥ 90%（疑似同行自播号）/ 女粉 < 60% 不进 / own_brand_reason、sample_risk_reason 不进（keep_ids 例外）/ classify / 帽子 < 1%、性别不知道、帽子 ≥ 50%、一类货 ≥ 90% 标记
       mix_categories：每类里没标记、帽子占比高的在前，三类轮流
       每 20 位 node paced-dy.mjs buyin author-invite-status --aweme-id=… --pause-ms=3000 --expect-shop-id=… --no-open（只读）
       assign_products（主推 + 其余全部，≤ 5 款）+ templates
@@ -2621,9 +2623,9 @@ Mac worker 的设置文件（`CLAUDE_RELAY_HOME` 可改目录）里的 `platform
 | `dy_expect_shop_id` / `jst_expect_uid` | `str`（数字） | 必填 | `load_config` | 每条抖音命令 `--expect-shop-id=`、每条聚水潭命令 `--expect-uid=` |
 | `invite_wechat` / `invite_phone` | `str` | 至少一个 | `load_config`（抽屉的格式） | `invite_args`：`--wechat=` / `--phone=`；清单里只有打码的 |
 | `brand` / `templates` | `str` / `dict` | 空 / `DEFAULT_TEMPLATES` | `load_config`：`{品牌}` 换成 `brand`，≤150 字，不写快递公司 | 清单每位的 `content` → `--content=` |
-| `commission_rate` / `rights` | `int` / `list[str]` | `25` / `["high-commission", "video-material"]` | `load_config`（1–25；四个词） | `invite_args`；`run_plan` 要它们和清单里的一致 |
+| `commission_rate` / `rights` | `int` / `list[str]` | `25` / `["high-commission"]`（视频素材支持 2026-10-29 去掉） | `load_config`（1–25；四个词） | `invite_args`；`run_plan` 要它们和清单里的一致 |
 | `products` / `min_stock` | `list[dict]` / `int` | 必填 / `0` | `load_config`（1–5 款，`id`、`name`、`price`、`styles`；`styles` 在 `min_stock` > 0 时必填；`min_stock` 0 = 不看库存，老板 2026-10-29） | `check_stock`、`assign_products` |
-| `find` / `rules` | `dict` | `DEFAULT_FIND` / `DEFAULT_RULES` | `load_config` | `find_creators`；`classify`（`small_fans_min` 5000、`mid_fans_min` 20 万）、疑似同行自播号（`suspect_hat_share` 90）、不进清单（`female_min` 60）、标记（`low_hat_share` 1） |
+| `find` / `rules` | `dict` | `DEFAULT_FIND` / `DEFAULT_RULES` | `load_config` | `find_creators`；`classify`（`small_fans_min` 5000、`mid_fans_min` 20 万）、疑似同行自播号（`suspect_hat_share` 90）、不进清单（`female_min` 60、`own_brand_reason`、`sample_risk_reason`、`drop_ids`）、标记（`low_hat_share` 1、`own_hat_flag` 50、`single_category_flag` 90） |
 | `weekly_cap` / `quota_margin` | `int` | `800` / `50` | `load_config` | `run_plan` 的两条停止条件 |
 | `gap_seconds` / `wait_between` / `plan_max_age_days` | 数字 / `[min, max]` / 数字 | `3`（≥3）/ `[15, 30]`（≥10）/ `3` | `load_config` | `Clis.env`（`CREATOR_INVITE_GAP_MS`）/ `run_plan` 两位之间 / 清单作废 |
 | `home` | `str` | `~/.claude-relay/platform/creator-invites` | `load_config` | 没给 `--ledger-dir` / `--out-dir` 时台账和 `plans/` 的位置 |

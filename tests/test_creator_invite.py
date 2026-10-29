@@ -107,11 +107,14 @@ FAKE_NODE = textwrap.dedent("""\
 """)
 
 
-def row(aweme, fans, *, nick=None, level=3, hat="12.0%", sex="女性 90.00%", live_min=1000000, channel="直播", avg=300.0):
+def row(aweme, fans, *, nick=None, level=3, hat="12.0%", sex="女性 90.00%", live_min=1000000, channel="直播", avg=300.0,
+        hidden=False, goods=None):
+    sales = ({"available": False, "min": None, "max": None, "label": "无数据"} if hidden
+             else {"available": True, "min": live_min, "max": None, "label": f"{live_min}起"})
     return {"platformNo": aweme, "nickName": nick or f"测试达人{aweme[-3:]}", "fansNum": fans, "level": level,
-            "sales30d": {"available": True, "min": live_min, "max": None, "label": "测试区间"},
-            "sales30dLive": {"available": True, "min": live_min, "max": None, "label": "x"}, "channelBySales": channel, "mainChannel": channel,
-            "avgPrice": avg, "category": "服饰内衣", "recentGoods": [{"name": "大衣", "ratio": "50%"}, {"name": "帽子", "ratio": hat}],
+            "sales30d": sales, "sales30dLive": {**sales, "label": "x"}, "channelBySales": channel, "mainChannel": channel,
+            "avgPrice": avg, "category": "服饰内衣",
+            "recentGoods": [{"name": n, "ratio": r} for n, r in goods] if goods else [{"name": "大衣", "ratio": "50%"}, {"name": "帽子", "ratio": hat}],
             "fans": {"sex": sex}}
 
 
@@ -129,7 +132,7 @@ def creators():
         row("dy_mid_a", 250000, avg=230.0, live_min=200000),
         row("dy_big_a", 760000, level=5, live_min=10000000, avg=229.0),   # 专场型
         row("dy_big_b", 250000, level=4, live_min=5000000, avg=288.0),    # 专场型 by the rule, though under 300k fans
-        row("dy_video_big", 13000, level=4, live_min=0, channel="视频", hat="0.5%"),  # video seller: by fans, a small one; hardly any hats
+        row("dy_video_big", 13000, level=4, live_min=20000, channel="视频", hat="0.5%"),  # video seller: by fans, a small one; hardly any hats
         row("dy_male_fans", 70000, sex="男性 61.00%"),                    # female 39%: not on the list (we sell women's hats)
     ]
 
@@ -227,7 +230,9 @@ def test_plan_is_read_only_and_builds_the_list_by_the_users_rules(env):
     finds = [c["args"] for c in calls if c["args"][0] == "find"]
     assert finds[0][:6] == ["find", "--platform=DY", "--goods-category=1000003461", "--price-min=150", "--price-max=500", "--not-added"]
     assert "--fans-min=5000" in finds[0] and "--fans-max=200000" in finds[0] and "--pages=2" in finds[0] and "--expect-uid=900001" in finds[0]
-    assert "--fans-min=200000" in finds[1]
+    assert "--level-min=2" in finds[0] and "--sales-min=10000" in finds[0], "the platform drops the likely sample-takers first"
+    assert "--fans-min=200000" in finds[1] and "--level-min=2" in finds[1]
+    assert not any(a.startswith("--sales-min") for a in finds[1]), "a big creator who hides her sales is not dropped by the search"
     status = [c["args"] for c in calls if c["args"][:2] == ["buyin", "author-invite-status"]]
     assert len(status) == 1 and "--expect-shop-id=9100000000000001" in status[0] and "--no-open" in status[0]
     plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
@@ -263,7 +268,7 @@ def test_plan_is_read_only_and_builds_the_list_by_the_users_rules(env):
     assert plan["ledger_sent_this_week"] == 1
     md = Path(out["files"]["md"]).read_text(encoding="utf-8")
     assert f"run --config <配置> --plan {out['files']['json']} --confirm {plan['plan_id']}" in md and "还没有发任何邀约" in md
-    assert "粉丝 5000～200000，第 1 页起读 2 页；粉丝 200000 以上，第 1 页起读 1 页" in md
+    assert "粉丝 5000～200000、带货等级 LV2～LV7、近 30 天销售额 ≥ 10000 元，第 1 页起读 2 页；粉丝 200000 以上、带货等级 LV2～LV7，第 1 页起读 1 页" in md
     assert "不看库存，能挂上卡的都配" in md and "| 没查 | 配 |" in md
     assert "## 疑似同行自播号" in md and "dy_suspect" in md.split("## 疑似同行自播号")[1].split("## 其他没进清单的")[0]
     assert "LV2-LV3 已用 7 / 上限 2500" in md
@@ -303,6 +308,56 @@ def test_plan_counts_stops_and_stock(env):
     assert [c["args"][0] for c in env.calls()].count("find") == 1 and not any(c["args"][:1] == ["buyin"] for c in env.calls())
 
 
+def test_plan_drops_creators_who_sell_their_own_brand_and_likely_sample_takers(env):
+    env.scenario(scenario(missing=[], status={}, creators=[
+        row("dy_ok", 80000),
+        row("dy_shop", 60000, nick="小美女装（官方）"),                       # a shop's own account by its name
+        row("dy_mx_a", 40000, nick="小鹿（日常穿搭）"), row("dy_mx_b", 30000, nick="小鹿·通勤"),  # one shop's accounts
+        row("dy_mx_c", 40000, nick="Mia(轻奢极简)"), row("dy_mx_d", 30000, nick="MIA-精选", sex="女性 40.00%"),  # the same, any case
+        row("dy_lv1", 40000, level=1),                                    # sells little: 带货等级 LV1
+        row("dy_low", 40000, live_min=5000),                              # under 10 000 yuan in 30 days
+        row("dy_hidden2", 40000, level=2, hidden=True),                   # sales not shown and only LV2
+        row("dy_hidden3", 40000, level=3, hidden=True),                   # not shown, but LV3: kept
+        row("dy_fanmany", 300000, live_min=50000),                        # 300k fans, from 50k yuan: 0.17 a fan
+        row("dy_fanok", 300000, live_min=100000),                         # 0.33 a fan: kept
+        row("dy_kept", 50000, level=1),                                   # LV1, but a person said keep her
+        row("dy_dropped", 50000),                                         # a person said never
+        row("dy_ownhat", 50000, hat="57.0%"),                             # flagged: may make hats herself
+        row("dy_onecat", 50000, goods=[("连衣裙", "99%"), ("帽子", "1.0%")]),   # flagged: one kind of goods only
+    ]))
+    code, out = plan_now(env, config={"rules": {"keep_ids": ["dy_kept"], "drop_ids": ["dy_dropped"]}})
+    assert code == 0, out
+    plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
+    by = {c["aweme_id"]: c for c in plan["creators"]}
+    assert set(by) == {"dy_ok", "dy_hidden3", "dy_fanok", "dy_kept", "dy_ownhat", "dy_onecat"}
+    gone = {c["aweme_id"]: c for c in plan["excluded"]}
+    assert {k for k, c in gone.items() if c.get("group") == "own_brand"} == {"dy_shop", "dy_mx_a", "dy_mx_b", "dy_mx_c"}
+    assert gone["dy_mx_d"]["reason"].startswith("女性粉丝 40.0%"), "out for its fans, but still counted for the shop's name"
+    assert gone["dy_shop"]["reason"].startswith("名字像店铺 / 品牌号（「女装」）")
+    assert gone["dy_mx_a"]["reason"].startswith("店铺矩阵号（这次找到 2 个「小鹿」开头的号）")
+    assert {k for k, c in gone.items() if c.get("group") == "sample_risk"} == {"dy_lv1", "dy_low", "dy_hidden2", "dy_fanmany"}
+    assert gone["dy_lv1"]["reason"].startswith("带货等级 LV1（低于 LV2）")
+    assert gone["dy_low"]["reason"].startswith("近 30 天销售额只有 5000起（低于 10000 元）")
+    assert gone["dy_hidden2"]["reason"].startswith("近 30 天销售额不公开、带货等级只有 LV2")
+    assert "粉多卖少" in gone["dy_fanmany"]["reason"]
+    assert gone["dy_dropped"]["reason"] == "手动排除（配置 rules.drop_ids）"
+    assert by["dy_ownhat"]["flags"] == ["帽子占比 57.0%：可能自己做帽子，发之前看一眼她的橱窗"]
+    assert by["dy_onecat"]["flags"] == ["近 30 天 99% 是连衣裙：可能只带一个牌子，看一眼"]
+    assert [c["aweme_id"] for c in plan["creators"] if c["category"] == "small"][-2:] == ["dy_ownhat", "dy_onecat"], "flagged ones go last"
+    md = Path(out["files"]["md"]).read_text(encoding="utf-8")
+    own = md.split("## 专门带自己牌子的")[1].split("## 可能骗样品的")[0]
+    risky = md.split("## 可能骗样品的")[1].split("## 其他没进清单的")[0]
+    assert "dy_shop" in own and "dy_mx_b" in own and "dy_lv1" not in own
+    assert "dy_lv1" in risky and "dy_fanmany" in risky and "dy_shop" not in risky
+    assert "视频素材" not in json.dumps(plan["templates"], ensure_ascii=False), "the texts no longer offer 视频素材支持 (2026-10-29)"
+    assert plan["settings"]["rights"] == ["high-commission"]
+    rules = tool.DEFAULT_RULES
+    assert tool.name_stem("小鹿（时尚穿搭）") == tool.name_stem("小鹿•精选") == "小鹿" and tool.name_stem("木子-琳琳") == "木子"
+    assert tool.name_stem("🌟港风男装") == "港风男装" and tool.name_stem("Amy小米") == "amy小米"
+    assert tool.name_stem("Mia(轻奢极简每日上新)") == tool.name_stem("MIA-轻奢精选女装") == "mia"
+    assert tool.sample_risk_reason(row("x", 9000, level=2, live_min=10000), tool.creator_view(row("x", 9000, level=2, live_min=10000)), rules) is None
+
+
 def test_plan_mixes_the_three_categories_and_puts_the_better_fits_first(env):
     code, out = plan_now(env, count=3)
     assert code == 0, out
@@ -340,6 +395,8 @@ def test_config_is_checked_before_anything_runs(env):
                       ({"templates": {"mid": "顺丰包邮"}}, "快递公司"), ({"rights": ["free-sample", "nope"]}, "rights"),
                       ({"wait_between": [5, 8]}, "wait_between"), ({"gap_seconds": 1}, "gap_seconds"), ({"brand": ""}, "brand"),
                       ({"min_stock": 10, "products": [{"id": P_BERET, "name": "测试贝雷帽", "price": 339}]}, "styles"),
+                      ({"rules": {"own_brand_words": "女装|(["}}, "own_brand_words"), ({"rules": {"drop_ids": ["bad id!"]}}, "drop_ids"),
+                      ({"find": {**tool.DEFAULT_FIND, "queries": [{"fans_min": 5000, "level_min": 9}]}}, "level_min"),
                       ({"products": [{"id": f"30000000000000002{i:02d}", "name": f"款{i}", "price": 200} for i in range(6)]}, "5 款")):
         cfg = env.write_config(**over)
         code, _, _ = env.main(["plan", "--config", cfg, "--out-dir", str(env.tmp / "p"), "--ledger-dir", str(env.tmp / "l")])
@@ -386,7 +443,7 @@ def test_run_previews_then_executes_bound_to_the_preview_and_records_each_one(en
         assert execute[:len(preview)] == preview, "the execution is the preview's command plus the binding"
         assert execute[len(preview):] == ["--expect-status=1", "--expect-popwindow=-1", "--execute"]
     first = calls[0]
-    assert "--commission-rate=25" in first and "--rights=high-commission,video-material" in first and "--wechat=shop_test_wx" in first
+    assert "--commission-rate=25" in first and "--rights=high-commission" in first and "--wechat=shop_test_wx" in first, "no 视频素材支持 (2026-10-29)"
     assert "--expect-shop-id=9100000000000001" in first and "--no-open" in first
     assert f"--product={P_PILLBOX},{P_BERET},{P_EQUESTRIAN}" in first, "the main product first, then all the others"
     assert len(sleeps) == 6 and all(s == 22.5 for s in sleeps), "15–30 s between two creators (the middle, with this uniform)"

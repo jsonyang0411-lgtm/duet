@@ -63,19 +63,23 @@ SENT_OUTCOMES = ("VERIFIED_SUCCESS", "ACCEPTED_UNVERIFIED", "INDETERMINATE", "CH
 
 CATEGORY_NAMES = {"small": "小达人", "mid": "中大博主", "big": "大主播/专场型"}
 CATEGORY_ORDER = ("small", "mid", "big")
-# 三类话术（用户 2026-10-28 定的要点；{品牌} 换成配置里的 brand；只写「包邮」，不写快递公司）
+# 三类话术（用户 2026-10-28 定的要点；{品牌} 换成配置里的 brand；只写「包邮」，不写快递公司；
+# 2026-10-29 去掉了「视频素材支持」，卡上也不再勾这项权益）
 DEFAULT_TEMPLATES = {
     "small": "您好！我们是原创设计师帽饰品牌{品牌}，主打英伦复古、老钱风女帽，客单价高、转化好。很喜欢您的穿搭内容，"
-             "诚邀您带我们的帽子：25%专属高佣，免费寄样包邮，另有视频素材支持。期待合作～",
+             "诚邀您带我们的帽子：25%专属高佣，免费寄样包邮。期待合作～",
     "mid": "您好！我们是设计师女帽品牌{品牌}（英伦复古/老钱风），一直关注您的内容，诚邀您合作带货：现货样品任选3顶，"
-           "免费包邮寄出；25%专属高佣，另有视频素材支持。期待您的回复～",
+           "免费包邮寄出；25%专属高佣。期待您的回复～",
     "big": "您好！我们是设计师女帽品牌{品牌}，主打英伦复古、老钱风全系帽饰。诚邀您做一场品牌专场：专场样品看中多少款寄多少款，"
            "全系现货锁库存；25%专属高佣，优质视频投流支持。期待合作！",
 }
 DEFAULT_FIND = {
     "goods_category": "1000003461",     # 帽子（服装 > 服装配饰 > 帽子）
     "price_min": 150, "price_max": 500,
-    "queries": [{"fans_min": 5000, "fans_max": 200000, "pages": 2}, {"fans_min": 200000, "pages": 1}],
+    # 平台那边先筛掉一部分「可能骗样」的（等级 LV2 以上；小达人近 30 天销售额区间下限 ≥ 1 万。20 万粉以上不按销售额筛：
+    # 销售额不公开的大主播平台会整个筛掉），翻的页就不浪费在这些人身上；本地照样按 DEFAULT_RULES 再查一遍
+    "queries": [{"fans_min": 5000, "fans_max": 200000, "level_min": 2, "sales_min": 10000, "pages": 2},
+                {"fans_min": 200000, "level_min": 2, "pages": 1}],
 }
 DEFAULT_RULES = {
     "small_fans_min": 5000, "mid_fans_min": 200000,        # 小达人 5000～20 万（15～20 万也算小达人：用户 2026-10-29），中大博主 ≥ 20 万
@@ -83,6 +87,17 @@ DEFAULT_RULES = {
     "suspect_hat_share": 90.0,
     "female_min": 60.0,                                    # 女性粉丝低于它的不进清单（我们卖女帽：用户 2026-10-29）
     "low_hat_share": 1.0,                                  # 帽子占比低于它的标出来（只是标，不去掉）
+    # 专门带自己牌子的不进（用户 2026-10-29）：名字像店铺 / 品牌号，或这次找到的人里好几个号用同一个店名开头（店铺矩阵号）
+    "own_brand_words": "女装|男装|童装|服饰|服装|羽绒|皮草|鹅绒|貂|大码|工厂|厂家|源头|档口|批发|尾货|仓储|仓库|老板娘|旗舰|官方|专卖|门店|实体|店|品牌|定制|高定|上新",
+    "matrix_min": 2,
+    # 可能骗样品自己用的不进（用户 2026-10-29）：带货等级低、卖得少、销售额不公开又等级不高、粉丝多卖得少
+    "min_level": 2,                                        # 带货等级低于 LV2
+    "min_sales30d": 10000,                                 # 近 30 天销售额区间下限低于 1 万元
+    "hidden_sales_min_level": 3,                           # 销售额不公开（无数据）时，等级低于 LV3
+    "min_sales_per_fan": 0.2, "sales_per_fan_from": 50000, # 粉丝 5 万以上时，销售额下限 ÷ 粉丝数不到 0.2 元
+    # 只标出来给人看：帽子占比高（可能自己做帽子）、近 30 天几乎只卖一类别的货（可能只带一个牌子）
+    "own_hat_flag": 50.0, "single_category_flag": 90.0,
+    "drop_ids": [], "keep_ids": [],                        # 手动：一定不要的抖音号 / 不按「自己牌子」「骗样」两组规则去掉的抖音号
 }
 
 
@@ -183,7 +198,7 @@ def load_config(path: Optional[str]) -> dict:
         raise ToolError("配置 invite_wechat / invite_phone 至少要一个：邀约卡上给达人看的联系方式", EXIT_USAGE)
     cfg["brand"] = str(raw.get("brand") or "").strip()
     cfg["commission_rate"] = _number(raw, "commission_rate", COMMISSION_CAP, 1, COMMISSION_CAP, integer=True)
-    rights = raw.get("rights", ["high-commission", "video-material"])
+    rights = raw.get("rights", ["high-commission"])          # 视频素材支持 2026-10-29 去掉了
     if not isinstance(rights, list) or not rights or any(r not in RIGHT_WORDS for r in rights) or len(set(rights)) != len(rights):
         raise ToolError(f"配置 rights 要是 {', '.join(RIGHT_WORDS)} 里的几个", EXIT_USAGE)
     cfg["rights"] = list(rights)
@@ -218,14 +233,25 @@ def load_config(path: Optional[str]) -> dict:
     for q in queries:
         if not isinstance(q, dict):
             raise ToolError("find.queries 的每一组要是一个对象", EXIT_USAGE)
-        for key in ("fans_min", "fans_max"):
+        for key in ("fans_min", "fans_max", "sales_min", "sales_max"):
             if key in q:
                 _number(q, key, q[key], 0, 10 ** 10, integer=True)
+        for key in ("level_min", "level_max"):
+            if key in q:
+                _number(q, key, q[key], 0, 7, integer=True)
         _number(q, "pages", q.get("pages", 1), 1, 5, integer=True)
         _number(q, "page", q.get("page", 1), 1, 500, integer=True)
     cfg["find"] = find
     rules = dict(DEFAULT_RULES)
     rules.update(raw.get("rules") or {})
+    try:
+        re.compile(str(rules["own_brand_words"] or ""))
+    except re.error as e:
+        raise ToolError(f"配置 rules.own_brand_words 不是正则表达式：{e}", EXIT_USAGE)
+    for key in ("drop_ids", "keep_ids"):
+        ids = rules.get(key)
+        if not isinstance(ids, list) or not all(isinstance(x, str) and AWEME_ID.match(x) for x in ids):
+            raise ToolError(f"配置 rules.{key} 要是抖音号的列表", EXIT_USAGE)
     cfg["rules"] = rules
     templates = dict(DEFAULT_TEMPLATES)
     templates.update(raw.get("templates") or {})
@@ -462,6 +488,61 @@ def band_min(band) -> float:
     return float(band.get("min") or 0) if isinstance(band, dict) and band.get("available") else 0.0
 
 
+def sales_floor(row: dict) -> Optional[float]:
+    """近 30 天销售额区间的下限（元）；平台没给（达人不公开，「无数据」）是 None。"""
+    band = row.get("sales30d")
+    return float(band.get("min") or 0) if isinstance(band, dict) and band.get("available") else None
+
+
+def top_category(row: dict):
+    """近 30 天卖得最多的细分品类和它的占比（%）；没有就 (None, 0)。"""
+    best, share = None, 0.0
+    for g in row.get("recentGoods") or []:
+        value = percent(g.get("ratio")) if isinstance(g, dict) else None
+        if value is not None and value > share:
+            best, share = g.get("name"), value
+    return best, share
+
+
+def name_stem(nickname: str) -> str:
+    """昵称里店名的那一段：第一个括号 / 点 / 横线 / 竖线 / 空格前面的（「小鹿（日常穿搭）」→「小鹿」，「木子-琳琳」→「木子」）；
+    没有这些分隔的，整个昵称就是它自己。英文不分大小写（「Mia(…)」和「MIA-…」算同一家：2026-10-29 真遇到过只差大小写的同一家店）。"""
+    text = re.sub(r"^[\W_]+", "", nickname or "")
+    m = re.match(r"^([^（(•·\-|｜【\[\s]{2,})[（(•·\-|｜【\[\s]", text)
+    return (m.group(1) if m else text).casefold()
+
+
+def own_brand_reason(view: dict, rules: dict, stems: Dict[str, int]) -> Optional[str]:
+    """专门带自己牌子的多半不接别人的货：名字像店铺 / 品牌号，或店铺矩阵号（同一个店名开头的号这次找到 ≥ matrix_min 个）。"""
+    words = str(rules["own_brand_words"] or "")
+    hit = re.search(words, view["nickname"]) if words else None
+    if hit:
+        return f"名字像店铺 / 品牌号（「{hit.group(0)}」）：多半专门带自己的牌子"
+    stem = name_stem(view["nickname"])
+    if stem and stems.get(stem, 0) >= rules["matrix_min"]:
+        return f"店铺矩阵号（这次找到 {stems[stem]} 个「{stem}」开头的号）：多半专门带自己的牌子"
+    return None
+
+
+def sample_risk_reason(row: dict, view: dict, rules: dict) -> Optional[str]:
+    """可能骗样品自己用的：带货等级低、近 30 天卖得少、销售额不公开又等级不高、粉丝多卖得少。"""
+    level = view["level"] or 0
+    if level < rules["min_level"]:
+        return f"带货等级 LV{level}（低于 LV{rules['min_level']}）：卖得少，骗样风险高"
+    floor = sales_floor(row)
+    if floor is None:
+        if level < rules["hidden_sales_min_level"]:
+            return f"近 30 天销售额不公开、带货等级只有 LV{level}：骗样风险高"
+        return None
+    if floor < rules["min_sales30d"]:
+        return f"近 30 天销售额只有 {view['sales30d']}（低于 {rules['min_sales30d']:g} 元）：骗样风险高"
+    fans = view["fans"] or 0
+    if fans >= rules["sales_per_fan_from"] and floor / fans < rules["min_sales_per_fan"]:
+        return (f"粉丝 {fans}、近 30 天销售额只有 {view['sales30d']}（每个粉丝不到 {rules['min_sales_per_fan']:g} 元）：粉多卖少，"
+                "骗样风险高")
+    return None
+
+
 def classify(row: dict, rules: dict):
     """(类别, 不进清单的原因)：先看专场型，再按粉丝分中大博主（≥ 20 万）/ 小达人（5000 到 20 万，15～20 万也算）；太小的不进。"""
     fans = row.get("fansNum") or 0
@@ -511,7 +592,8 @@ def find_creators(cfg: dict, clis: Clis) -> List[dict]:
     for q in find["queries"]:
         args = ["find", "--platform=DY", f"--goods-category={find['goods_category']}", f"--price-min={find['price_min']}",
                 f"--price-max={find['price_max']}", "--not-added"]
-        for key, flag in (("fans_min", "--fans-min"), ("fans_max", "--fans-max"), ("level_min", "--level-min"), ("level_max", "--level-max")):
+        for key, flag in (("fans_min", "--fans-min"), ("fans_max", "--fans-max"), ("level_min", "--level-min"), ("level_max", "--level-max"),
+                          ("sales_min", "--sales-min"), ("sales_max", "--sales-max")):
             if key in q:
                 args.append(f"{flag}={int(q[key])}")
         args += [f"--page={int(q.get('page', 1))}", f"--pages={int(q.get('pages', 1))}", f"--expect-uid={cfg['jst_expect_uid']}"]
@@ -562,6 +644,10 @@ def build_plan(cfg: dict, clis: Clis, ledger: Ledger, count: int, *, moment: Opt
     invited = ledger.never_again()
     excluded: List[dict] = []
     candidates: List[dict] = []
+    stems: Dict[str, int] = {}
+    for aweme, nick in {str(r.get("platformNo") or ""): str(r.get("nickName") or "") for r in rows}.items():
+        stem = name_stem(nick)
+        stems[stem] = stems.get(stem, 0) + 1
     seen = set()
     for row in rows:
         view = creator_view(row)
@@ -575,12 +661,24 @@ def build_plan(cfg: dict, clis: Clis, ledger: Ledger, count: int, *, moment: Opt
         if aweme in invited:
             excluded.append({**view, "reason": "台账里已经邀约过（或不知道上次发出去没有）"})
             continue
+        if aweme in rules["drop_ids"]:
+            excluded.append({**view, "reason": "手动排除（配置 rules.drop_ids）"})
+            continue
         if view["hat_share"] is not None and view["hat_share"] >= rules["suspect_hat_share"]:
             excluded.append({**view, "reason": f"疑似同行自播号（帽子占比 {view['hat_share']}% ≥ {rules['suspect_hat_share']}%）", "suspect": True})
             continue
         if view["female_share"] is not None and view["female_share"] < rules["female_min"]:
             excluded.append({**view, "reason": f"女性粉丝 {view['female_share']}%（低于 {rules['female_min']}%）"})
             continue
+        if aweme not in rules["keep_ids"]:
+            why = own_brand_reason(view, rules, stems)
+            if why:
+                excluded.append({**view, "reason": why, "group": "own_brand"})
+                continue
+            why = sample_risk_reason(row, view, rules)
+            if why:
+                excluded.append({**view, "reason": why, "group": "sample_risk"})
+                continue
         category, why = classify(row, rules)
         if category is None:
             excluded.append({**view, "reason": why})
@@ -590,6 +688,11 @@ def build_plan(cfg: dict, clis: Clis, ledger: Ledger, count: int, *, moment: Opt
             flags.append(f"帽子占比只有 {view['hat_share']}%")
         if view["female_share"] is None:
             flags.append("粉丝性别不知道")
+        if view["hat_share"] is not None and view["hat_share"] >= rules["own_hat_flag"]:
+            flags.append(f"帽子占比 {view['hat_share']}%：可能自己做帽子，发之前看一眼她的橱窗")
+        cat, share = top_category(row)
+        if cat and cat != "帽子" and share >= rules["single_category_flag"]:
+            flags.append(f"近 30 天 {share:g}% 是{cat}：可能只带一个牌子，看一眼")
         candidates.append({**view, "category": category, "flags": flags})
     candidates = mix_categories(candidates)
     picked: List[dict] = []
@@ -641,10 +744,16 @@ def build_plan(cfg: dict, clis: Clis, ledger: Ledger, count: int, *, moment: Opt
 def fans_range(q: dict) -> str:
     lo, hi = q.get("fans_min"), q.get("fans_max")
     if lo is not None and hi is not None:
-        return f"{lo}～{hi}"
-    if lo is not None:
-        return f"{lo} 以上"
-    return f"{hi} 以下" if hi is not None else "不限"
+        text = f"{lo}～{hi}"
+    elif lo is not None:
+        text = f"{lo} 以上"
+    else:
+        text = f"{hi} 以下" if hi is not None else "不限"
+    if q.get("level_min") is not None or q.get("level_max") is not None:
+        text += f"、带货等级 LV{q.get('level_min', 0)}～LV{q.get('level_max', 7)}"
+    if q.get("sales_min") is not None:
+        text += f"、近 30 天销售额 ≥ {q['sales_min']} 元"
+    return text
 
 
 def plan_markdown(plan: dict, plan_file: str) -> str:
@@ -687,9 +796,15 @@ def plan_markdown(plan: dict, plan_file: str) -> str:
     for key in CATEGORY_ORDER:
         w(f"- **{CATEGORY_NAMES[key]}**（{js_length(plan['templates'][key])} 字）：{plan['templates'][key]}\n")
     suspects = [c for c in plan["excluded"] if c.get("suspect")]
-    others = [c for c in plan["excluded"] if not c.get("suspect")]
+    own = [c for c in plan["excluded"] if c.get("group") == "own_brand"]
+    risky = [c for c in plan["excluded"] if c.get("group") == "sample_risk"]
+    others = [c for c in plan["excluded"] if not c.get("suspect") and c.get("group") not in ("own_brand", "sample_risk")]
     w(f"\n## 疑似同行自播号（帽子占比 ≥ {plan['settings']['rules']['suspect_hat_share']:g}%，默认不进清单，{len(suspects)} 位）\n\n")
     excluded_table(w, suspects)
+    w(f"\n## 专门带自己牌子的（名字像店铺 / 品牌号、店铺矩阵号，不进清单，{len(own)} 位；要留下哪位，把抖音号写进配置 rules.keep_ids）\n\n")
+    excluded_table(w, own)
+    w(f"\n## 可能骗样品的（带货等级低、卖得少、销售额不公开、粉多卖少，不进清单，{len(risky)} 位；要留下哪位，写进 rules.keep_ids）\n\n")
+    excluded_table(w, risky)
     w(f"\n## 其他没进清单的（{len(others)} 位）\n\n")
     excluded_table(w, others)
     if plan.get("spare"):
