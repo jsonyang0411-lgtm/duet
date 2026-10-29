@@ -412,7 +412,14 @@ class FriendManager:
                     return
             raise _Abort(f"the dialog (HWND={hwnd}) is not the window in front")
         if not self._is_wechat_foreground(hwnd):
-            raise _Abort("the WeChat window is not in the foreground")
+            if self._window is not None:
+                try:
+                    self._window.activate(hwnd)
+                except Exception as e:
+                    logger.debug("Friend management: activate failed in _foreground: %s", e)
+                self._sleep(0.2)
+            if not self._is_wechat_foreground(hwnd):
+                raise _Abort("the WeChat window is not in the foreground")
 
     def _is_wechat_foreground(self, hwnd: int) -> bool:
         if self._window._foreground_matches(hwnd):
@@ -809,6 +816,14 @@ class FriendManager:
 
     def _focus_window(self, hwnd: int) -> None:
         if sys.platform == "win32":
+            _safe_ensure_default_desktop()
+            if self._window is not None:
+                try:
+                    if self._window.activate(hwnd):
+                        self._sleep(0.2)
+                        return
+                except Exception as e:
+                    logger.debug("_focus_window activate failed: %s", e)
             import ctypes
             ctypes.windll.user32.SetForegroundWindow(hwnd)
             self._sleep(0.2)

@@ -185,3 +185,21 @@ if not post_click_window(main_hwnd, plus_x, plus_y):
 
 ### 3. 实机验证结果
 - 在 4K 200% 真机环境下，连续 3 轮自动化弹窗测试均在 0.4 秒内秒开并安全关闭，100% 成功。
+
+---
+
+## 八、前台焦点保护深化：弹窗激活与 _focus_window 增强（2026-10-29 16:20）
+
+在解决 4K DPI 缩放问题后，真机 16:15 测试成功弹出了「添加朋友」对话框，但在准备点击对话框内搜索框时，抛出 `add_friend stopped: the WeChat window is not in the foreground`。
+
+### 1. 根因剖析
+- 新对话框弹出后，代码调用 `_focus_window(dialog_hwnd)`。
+- 原实现仅调用了 `ctypes.windll.user32.SetForegroundWindow(hwnd)`。在 Windows 10/11 防前台抢占机制下，后台进程调用 `SetForegroundWindow` 会静默失败返回 0，窗口并不能真正获得前台焦点。
+- 如果用户正在终端或编辑器中，前台窗口仍然是用户的其他程序。
+- 随后 `_click_at` 校验前台窗口，发现前台不是微信进程，直接抛出 `_Abort("the WeChat window is not in the foreground")`。
+
+### 2. 修复方案
+1. **`_focus_window` 升级为分层强制激活**：
+   优先使用 `WeChatWindowController.activate(hwnd)`（利用键盘 Priming、`AllowSetForegroundWindow(-1)` 及 `AttachThreadInput`），保证新弹出的子对话框能坚实地取得系统前台焦点。
+2. **`_foreground` 增加前台恢复重试机制**：
+   当 `not self._is_wechat_foreground(hwnd)` 时，先尝试调用 `self._window.activate(hwnd)` 唤醒一次，只有在系统级确实无法前台时才中止，避免因瞬时焦点切换动画或用户偶尔停留在终端而直接报错。
