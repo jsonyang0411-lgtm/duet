@@ -307,6 +307,13 @@ class BotConfig:
     # PRIVATE_CHAT_ENABLED=true.
     prm_copilot: str = "off"
     prm_db: str = "data/prm.db"
+    # PRM_AUTO_REGISTER (2026-10-29): "on": every new friend the new-friend scan finds (src/wechat/new_friends.py:
+    # Windows wcdb, copilot mode only, never PRM_EDGE) is registered as a full creator, as if an operator had clicked
+    # 登记 (PrmService.new_friend_found -> register_found on PRM's own thread): her messages since she was added become
+    # one draft that waits for a person, her later drafts go through the gates and the night window like any creator's.
+    # Never the admin or a cc user, never a wxid that has a party already (an operator's 停用 sticks).  "off": as before,
+    # registering is a person's click in the console.
+    prm_auto_register: str = "off"
     # An operator's own WeChat reply in a creator's chat (or the console) gives the chat to
     # a person for this long: the creator's messages are only recorded meanwhile.
     prm_takeover_min: int = 120
@@ -500,6 +507,10 @@ def _validate_config(kwargs: dict) -> None:
         # Only when the caller knows it (the console's advanced page checks its own keys only).
         if "private_chat_enabled" in kwargs and not kwargs["private_chat_enabled"]:
             errors.append("PRM_COPILOT=on needs PRIVATE_CHAT_ENABLED=true (creators write in private chats)")
+    # (on without PRM_COPILOT, or with PRM_EDGE, it only does nothing: Bot._start_new_friends logs so.  Not refused:
+    # turning the copilot off in a hurry must not stop the bot from starting.)
+    if kwargs.get("prm_auto_register", "off") not in ("off", "on"):
+        errors.append(f"PRM_AUTO_REGISTER must be off or on, got {kwargs.get('prm_auto_register')}")
     if not (5 <= int(kwargs.get("prm_takeover_min", 120)) <= 1440):
         errors.append(f"PRM_TAKEOVER_MIN must be between 5 and 1440, got {kwargs.get('prm_takeover_min')}")
     if not (0 <= int(kwargs.get("prm_holding_min", 10)) <= 120):
@@ -661,6 +672,7 @@ def load_config() -> BotConfig:
         "claude_relay_long_file": _parse_switch(os.getenv("CLAUDE_RELAY_LONG_FILE", "on")),
         "prm_copilot": _parse_switch(os.getenv("PRM_COPILOT", "off")),
         "prm_db": os.getenv("PRM_DB", "data/prm.db").strip() or "data/prm.db",
+        "prm_auto_register": _parse_switch(os.getenv("PRM_AUTO_REGISTER", "off")),
         "prm_takeover_min": int(os.getenv("PRM_TAKEOVER_MIN", "120")),
         "prm_holding_min": int(os.getenv("PRM_HOLDING_MIN", "10")),
         "prm_holding_text": os.getenv("PRM_HOLDING_TEXT", "收到，我确认一下马上回你").strip() or "收到，我确认一下马上回你",

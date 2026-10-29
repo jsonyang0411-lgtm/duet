@@ -429,3 +429,57 @@ def test_the_night_settings_are_in_the_allow_list_and_checked():
     assert adv.validate_updates({"PRM_NIGHT_AUTO_HOURS": ""}, {}) == {}
     assert set(adv.validate_updates({"PRM_NIGHT_AUTO_HOURS": "18-9"}, {})) == {"PRM_NIGHT_AUTO_HOURS"}
     assert set(adv.validate_updates({"PRM_NIGHT_HOLDING_TEXT": "好" * 61}, {})) == {"PRM_NIGHT_HOLDING_TEXT"}
+
+
+# ── PRM_AUTO_REGISTER: new friends the bot registered ─────────────────────────
+
+def test_a_friend_the_bot_registered_is_tagged_no_candidate_and_can_be_stopped_for_good(running, tmp_path, monkeypatch):
+    from src.wechat.new_friends import NewFriendService
+
+    monkeypatch.chdir(tmp_path)
+    now = running.relay._clock()
+    server.register_new_friends(NewFriendService(SimpleNamespace(), _friends(tmp_path, now), clock=running.relay._clock))
+    try:
+        assert call("/api/prm")[1]["auto_register"] is False                 # the fixture's switch: off
+        party = running.prm.auto_register_friend({"wxid": "wxid_new01", "name": "阿花", "how": "auto_accept"})
+        d = call("/api/prm")[1]
+        shown = {p["wxid"]: p for p in d["parties"]}
+        assert (shown["wxid_new01"]["auto"], shown[CREATOR]["auto"]) == (True, False)
+        assert shown["wxid_new01"]["note"] == "自动登记（新好友，机器人自动通过）" and shown["wxid_new01"]["name"] == "阿花"
+        assert shown["wxid_new01"]["deal"]["events"][0]["name"] == "自动登记（新好友，机器人自动通过）"
+        assert [c["wxid"] for c in d["candidates"] if c.get("new")] == ["meimei_88"]   # registered: not offered
+        # 停用 works for her, and sticks: the bot never starts her again
+        assert call("/api/prm/parties", "POST", {"action": "disable", "id": party["id"]})[1] == {"ok": True}
+        assert not running.prm.is_party_chat("wxid_new01")
+        assert running.prm.auto_register_friend({"wxid": "wxid_new01", "name": "阿花", "how": "auto_accept"}) is None
+        d = call("/api/prm")[1]
+        stopped = next(p for p in d["parties"] if p["wxid"] == "wxid_new01")
+        assert (stopped["active"], stopped["auto"]) == (False, True)
+        again = next(c for c in d["candidates"] if c["wxid"] == "wxid_new01")
+        assert (again["new"], again["inactive"]) == (True, True)            # offered again, marked stopped
+        assert next(c for c in d["candidates"] if c["wxid"] == "meimei_88")["inactive"] is False
+        # a person registering her again: a person's creator now
+        answer = call("/api/prm/parties", "POST", {"action": "add", "wxid": "wxid_new01", "name": "阿花",
+                                                   "note": "运营确认是达人"})[1]
+        assert answer["ok"] is True
+        shown = next(p for p in call("/api/prm")[1]["parties"] if p["wxid"] == "wxid_new01")
+        assert (shown["active"], shown["auto"], shown["note"]) == (True, False, "运营确认是达人")
+    finally:
+        server.register_new_friends(None)
+
+
+def test_a_stopped_bot_says_whether_new_friends_are_registered_and_tags_them(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PRM_DB", raising=False)
+    monkeypatch.delenv("PRM_AUTO_REGISTER", raising=False)
+    assert call("/api/prm")[1]["auto_register"] is False
+    monkeypatch.setenv("PRM_AUTO_REGISTER", "on")
+    assert call("/api/prm")[1]["auto_register"] is True                       # as .env says (the next start)
+    store = PrmStore(tmp_path / "data" / "prm.db")
+    store.add_party("wxid_new01", "阿花", "自动登记（新好友，她加我们）", auto=True)
+    store.add_party(CREATOR, "小美")
+    store.close()
+    d = call("/api/prm")[1]
+    assert [(p["wxid"], p["auto"]) for p in d["parties"]] == [("wxid_new01", True), (CREATOR, False)]
+    assert call("/api/prm/parties", "POST", {"action": "disable", "id": 1})[1] == {"ok": True}
+    assert call("/api/prm")[1]["parties"][0]["active"] is False

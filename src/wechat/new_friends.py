@@ -20,7 +20,10 @@ look ever sets a start marker, so friends from before it are never reported):
 - PRM_COPILOT: 登记达人's candidates in the console put new friends first, with their verify
   text (masked) and how they were added; registering one hands her messages since she was
   added to PRM as one reviewed draft job (``registered`` -> the backend's ``catch_up_chat``
-  -> ``PrmService.take_new_friend``).  Registering stays a person's decision.
+  -> ``PrmService.take_new_friend``).  Registering is a person's decision, unless
+  PRM_AUTO_REGISTER=on: then ``on_found`` is ``PrmService.new_friend_found``, which only queues
+  her; PRM's sender thread registers her after this look, so ``registered`` is never called
+  from inside a look (it would be with the look's ``_scan_lock`` held).
 
 How a friend came (``how``): ``requested`` for 「我通过了你的朋友验证请求」; ``auto_accept`` when
 the bot itself accepted the request a few minutes before the line (``AcceptLog``, fed by
@@ -499,9 +502,10 @@ class NewFriendService:
     database is not open), ``own_wxid()``, and optionally ``recent_sessions(max_age)`` (the poll
     loop's last session list), ``note_private_name(wxid, name)`` and ``catch_up_chat(talker, name,
     since, sink)``.  ``on_found``: called with each new friend's event fields (``wxid``, ``name``,
-    ``remark``, ``verify_text``, ``how``; the WeChat edge's ``friend_added``); one that raises is
-    tried again at the next look.  ``keep_verify`` (PRM_COPILOT): the verify text is kept, masked,
-    for the console."""
+    ``remark``, ``verify_text``, ``how``; the WeChat edge's ``friend_added``, or PRM_AUTO_REGISTER's
+    ``PrmService.new_friend_found``), inside the look (``_scan_lock`` held: a sink must not call back
+    into this service); one that raises is tried again at the next look.  ``keep_verify``
+    (PRM_COPILOT): the verify text is kept, masked, for the console."""
 
     def __init__(self, backend, store: NewFriendStore, *, accepts: Optional[AcceptLog] = None,
                  on_found: Iterable[Callable[[dict], object]] = (), keep_verify: bool = False,
@@ -733,10 +737,11 @@ class NewFriendService:
         return self._store.recent(self._clock() - days * 86400)
 
     def registered(self, wxid: str) -> bool:
-        """A creator was registered (PrmService.on_registered): when she is a new friend, her messages
-        since she was added (her greeting too; at most PRM_CATCHUP_HOURS old, 5 minutes with 0) go to
-        PRM as one draft job, read back on her chat's next poll (the backend's ``catch_up_chat``).
-        True when that was asked for."""
+        """A creator was registered (PrmService.on_registered: by a person in the console, or with
+        PRM_AUTO_REGISTER by PRM's sender thread, never inside this service's look): when she is a new
+        friend, her messages since she was added (her greeting too; at most PRM_CATCHUP_HOURS old, 5
+        minutes with 0) go to PRM as one draft job, read back on her chat's next poll (the backend's
+        ``catch_up_chat``).  True when that was asked for."""
         sink = self._catch_up_sink
         ask = getattr(self._backend, "catch_up_chat", None)
         record = self._store.get(str(wxid))

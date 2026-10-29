@@ -532,6 +532,18 @@ class LoadConfigTests(unittest.TestCase):
         with patch.dict(os.environ, {"PRM_NIGHT_HOLDING_TEXT": "  "}, clear=True):
             self.assertEqual(load_config().prm_night_holding_text, night_text)
 
+    def test_load_config_auto_register(self):
+        """PRM_AUTO_REGISTER: off unless set, the usual on/off spellings; on without PRM_COPILOT only does nothing
+        (the bot still starts: turning the copilot off in a hurry must not stop it)."""
+        from src.config import load_config
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(load_config().prm_auto_register, "off")
+        for raw, value in (("on", "on"), (" yes ", "on"), ("TRUE", "on"), ("1", "on"), ("off", "off"), ("0", "off"),
+                           ("", "off")):
+            with patch.dict(os.environ, {"PRM_AUTO_REGISTER": raw}, clear=True):
+                self.assertEqual(load_config().prm_auto_register, value, raw)
+
 
 class ValidateConfigTests(unittest.TestCase):
     """Tests for _validate_config() numeric range validation."""
@@ -649,6 +661,16 @@ class LoadConfigValidationIntegrationTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError) as ctx:
                     load_config()
                 self.assertIn("PRM_NIGHT_AUTO_HOURS", str(ctx.exception))
+
+    def test_an_auto_register_that_is_no_switch_stops_the_start(self):
+        """PRM_AUTO_REGISTER is on or off; anything else is refused (never guessed)."""
+        from src.config import load_config
+
+        for value in ("always", "全部", "2"):
+            with patch.dict(os.environ, {"PRM_AUTO_REGISTER": value}, clear=True):
+                with self.assertRaises(RuntimeError) as ctx:
+                    load_config()
+                self.assertIn("PRM_AUTO_REGISTER must be off or on", str(ctx.exception))
 
 
 if __name__ == "__main__":

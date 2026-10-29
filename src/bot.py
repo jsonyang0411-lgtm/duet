@@ -360,23 +360,37 @@ class Bot:
     def _start_new_friends(config, backend, prm, edge):
         """The new-friend scan (src/wechat/new_friends.py), or None: only with a consumer (PRM_EDGE: a
         ``friend_added`` event per new friend; PRM_COPILOT: new friends first in 登记达人's candidates,
-        registering one drafts her messages since she was added) and a backend whose database it can
-        read beside the poll loop (Windows wcdb).  Its records are in the bot's database (DB_PATH)."""
+        registering one drafts her messages since she was added; with PRM_AUTO_REGISTER=on every new friend
+        goes to ``prm.new_friend_found``, which the PRM sender thread registers) and a backend whose database
+        it can read beside the poll loop (Windows wcdb).  Its records are in the bot's database (DB_PATH)."""
+        wanted = str(getattr(config, "prm_auto_register", "off") or "off").strip().lower() == "on"
+        auto = edge is None and prm is not None and bool(getattr(prm, "auto_register", False))
+        if wanted and not auto:
+            logger.info("PRM_AUTO_REGISTER is on but this bot runs no PRM copilot (PRM_COPILOT off, or PRM_EDGE): "
+                        "new friends are not registered automatically")
         if prm is None and edge is None:
             return None
         if not callable(getattr(backend, "with_client", None)):
-            logger.info("New friends: this WeChat backend cannot be read beside its poll loop; not looked for")
+            logger.info("New friends: this WeChat backend cannot be read beside its poll loop; not looked for%s",
+                        " (PRM_AUTO_REGISTER registers nobody)" if auto else "")
             return None
+        on_found = [edge.friend_added] if edge is not None else []
+        if auto:
+            # Only queued inside the scan's look; registered on the PRM sender thread (PrmService.register_found)
+            on_found.append(prm.new_friend_found)
         try:
             from .wechat.new_friends import NewFriendService, NewFriendStore
             service = NewFriendService(
                 backend, NewFriendStore(config.db_path),
-                on_found=[edge.friend_added] if edge is not None else [],
+                on_found=on_found,
                 keep_verify=prm is not None,
                 catchup_hours=getattr(config, "prm_catchup_hours", 12))
         except Exception:
             logger.warning("New friends: the scan could not start", exc_info=True)
             return None
+        if auto:
+            logger.info("New friends: PRM_AUTO_REGISTER=on: every new friend is registered as a creator "
+                        "(not the admin, the cc users, nor a wxid that has a party, stopped ones included)")
         if prm is not None:
             service.set_catch_up_sink(prm.take_new_friend)
             prm.on_registered = service.registered

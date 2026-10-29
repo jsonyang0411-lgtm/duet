@@ -39,7 +39,12 @@ when that ends, ``sweep_owed_steps``), a platform action that ended red (until �
 messages read too late to draft, this PC's clock off WeChat's (measured by the bot's own lines read back:
 ``_note_clock``; how late a message is read is reckoned by WeChat's clock then, win review F6).
 
-Registering is always an operator's decision.  When the creator registered is a new friend
+Registering is an operator's decision, unless PRM_AUTO_REGISTER is on (2026-10-29): then every new friend
+the new-friend scan finds is registered by the bot as a full creator (``new_friend_found`` queues her inside
+the scan's look; the sender thread registers her at the start of its next round, ``register_found``, outside
+the scan's locks: ``register`` calls back into the scan through ``on_registered``), never the admin or a cc
+user, never a wxid that has a party, active or stopped (an operator's 停用 sticks).  When the creator
+registered is a new friend
 (src/wechat/new_friends.py found the line WeChat writes when two people become friends), her
 messages since she was added, friend-request greeting included, become one draft job that waits
 for a person (``take_new_friend``).  WeChat's friend notices (「我通过了你的朋友验证请求…」 in her
@@ -79,7 +84,7 @@ from ..edge import text as edge_text
 from ..relay.attachments import KINDS as ATTACHMENT_KINDS, Held, attachment_kind
 from ..relay.service import MAX_AGE_SEC, job_meta
 from ..relay.store import PRM
-from ..wechat.new_friends import is_friend_notice
+from ..wechat.new_friends import FILLER, is_friend_notice, is_person_chat
 from . import deals, gates, pii, platforms, retention
 from .result import MAX_DRAFT_CHARS, MESSAGE_KINDS, DraftError, parse_draft
 from .store import (
@@ -387,9 +392,28 @@ EVENT_NAMES = {
     "platform_recheck": "平台动作要先核对", "sample_status": "聚水潭寄样单状态",
     "commission_covered": "邀约卡开过专属佣金，当作开好",
     "night_send": "夜间自动发出", "night_done": "夜间自动回的过渡话已处理",
+    "auto_register": "自动登记（新好友）",
 }
 # A creator's message recorded without a draft because it was read too late (PRM_CATCHUP_HOURS).
 MISSED_EVENT_NAME = "机器人没在读时达人的消息（没有起草）"
+# PRM_AUTO_REGISTER (2026-10-29): the deal's event of a new friend the bot registered, and how she was added (the
+# new-friend scan's ``how``) as her note and the event say it.
+AUTO_EVENT = "auto_register"
+AUTO_HOWS = {"requested": "我们加她", "manual": "她加我们", "auto_accept": "机器人自动通过", "unknown": "说不清"}
+AUTO_NAME_CHARS = 30         # a creator's 称呼 (``register``)
+AUTO_NOTE_CHARS = 200        # her note
+
+
+def auto_name(name, wxid: str) -> str:
+    """The 称呼 PRM_AUTO_REGISTER gives a new friend: her WeChat name as the scan read it, whitespace (and U+3164
+    fillers, a blank-looking nickname) collapsed, at most 30 characters; 「新好友 <wxid 前 8 位>」 without one."""
+    text = " ".join(str(name or "").replace(FILLER, " ").split())[:AUTO_NAME_CHARS].strip()
+    return text or f"新好友 {str(wxid or '')[:8]}"
+
+
+def auto_note(how: str) -> str:
+    """Her note: 「自动登记（新好友，<how>）」 (``AUTO_HOWS``; an unknown ``how`` is 说不清)."""
+    return f"自动登记（新好友，{AUTO_HOWS.get(str(how or ''), AUTO_HOWS['unknown'])}）"[:AUTO_NOTE_CHARS]
 
 
 def event_out(ev: dict) -> dict:
@@ -418,6 +442,8 @@ def event_out(ev: dict) -> dict:
         name = f"夜间自动回的过渡话 #{detail['packet']} 已处理"
     elif ev["kind"] == "wrong" and detail.get("night"):
         name = "标为发错了（夜间自动发出的）"
+    elif ev["kind"] == AUTO_EVENT:
+        name = f"自动登记（新好友，{AUTO_HOWS.get(str(detail.get('how') or ''), AUTO_HOWS['unknown'])}）"
     elif ev["kind"] in ("shipment", "shipment_status", "stage") and detail.get("source") == "jst":
         name = f"{name}（聚水潭同步）"
     return {"id": ev["id"], "kind": ev["kind"], "name": name,
@@ -524,13 +550,14 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
         deal = newest.get(p["id"])
         if not deal:
             return {"id": p["id"], "wxid": p["wxid"], "name": p["name"], "note": p["note"],
-                    "active": bool(p["active"]), "authorized_at": p["authorized_at"], "deal": None}
+                    "active": bool(p["active"]), "auto": bool(p.get("auto_registered")),
+                    "authorized_at": p["authorized_at"], "deal": None}
         mode = deals.effective_mode(deal, now)
         shipment = store.latest_shipment(deal["id"])
         slots = deal.get("slots", {})
         return {
             "id": p["id"], "wxid": p["wxid"], "name": p["name"], "note": p["note"],
-            "active": bool(p["active"]), "authorized_at": p["authorized_at"],
+            "active": bool(p["active"]), "auto": bool(p.get("auto_registered")), "authorized_at": p["authorized_at"],
             "has_numbers": bool(store.token_rows(p["id"])),       # cleared ones too: shown as （已清除）
             "deal": {
                 "id": deal["id"], "stage": deal["stage"], "stage_label": STAGES.get(deal["stage"], ""),
@@ -631,6 +658,11 @@ class PrmService:
         self._reserved = {str(w).strip() for w in [getattr(config, "admin_wxid", ""),
                                                     *(getattr(config, "claude_relay_wxids", None) or [])]
                           if str(w).strip()}
+        # PRM_AUTO_REGISTER (a config object without it, an older caller's: off): the new friends the scan found
+        # (``new_friend_found``: wxid, name, how; never her greeting), registered by the sender thread (``register_found``)
+        self._auto_register = str(getattr(config, "prm_auto_register", "off") or "off").strip().lower() == "on"
+        self._found: deque = deque()
+        self._found_lock = threading.Lock()
         self._wxids = self._store.active_wxids()
         # What the bot itself sent lately, per chat: (normalized text, when, packet id); each file
         # (kind, when, packet id, n): one own row of its kind each (win review F4 (b)).
@@ -659,6 +691,11 @@ class PrmService:
     @property
     def store(self) -> PrmStore:
         return self._store
+
+    @property
+    def auto_register(self) -> bool:
+        """PRM_AUTO_REGISTER is on: Bot._start_new_friends hands the scan's new friends to ``new_friend_found``."""
+        return self._auto_register
 
     # ── lifecycle ─────────────────────────────────────────────────────────
 
@@ -1758,18 +1795,33 @@ class PrmService:
     # ── from the console ──────────────────────────────────────────────────
 
     def register(self, wxid: str, name: str, note: str = "") -> dict:
-        """Register a creator (an operator's decision in the console; never automatic).  When she is a
-        new friend (``on_registered``), her messages since she was added become one reviewed draft
-        (take_new_friend); ``catch_up`` in the answer says so."""
+        """Register a creator (an operator's decision in the console; with PRM_AUTO_REGISTER the bot registers
+        new friends the same way, ``auto_register_friend``).  When she is a new friend (``on_registered``), her
+        messages since she was added become one reviewed draft (take_new_friend); ``catch_up`` in the answer
+        says so."""
+        return self._register(wxid, name, note)
+
+    def _register(self, wxid: str, name: str, note: str, how: Optional[str] = None) -> dict:
+        """``register``; ``how`` (PRM_AUTO_REGISTER: how the new friend was added): the bot's registration, only of a
+        wxid with no party at all (``PrmStore.add_party(auto=True)``), the deal's record says so (``AUTO_EVENT``) and
+        the log line names only the wxid's first 8 characters."""
         wxid = check_wxid(wxid, self._reserved)
         name, note = str(name or "").strip(), str(note or "").strip()
         if not name or len(name) > 30:
             raise PartyError("称呼要填，最多 30 个字")
         if len(note) > 200:
             raise PartyError("备注最多 200 个字")
-        party = self._store.add_party(wxid, name, note, self._clock())
+        now = self._clock()
+        party = self._store.add_party(wxid, name, note, now, auto=how is not None)
+        if how is not None:
+            deal = self._store.deal_of(party["id"], now)
+            self._store.add_event(deal["id"], party["id"], AUTO_EVENT, {"how": how}, actor="system", now=now)
         self._parties_changed()
-        logger.info("PRM: party %d registered", party["id"])
+        if how is not None:
+            logger.info("PRM: new friend %s… registered automatically as party %d (PRM_AUTO_REGISTER; %s)",
+                        wxid[:8], party["id"], how)
+        else:
+            logger.info("PRM: party %d registered", party["id"])
         caught = False
         if self.on_registered is not None:
             try:
@@ -1777,6 +1829,83 @@ class PrmService:
             except Exception:
                 logger.exception("PRM: party %d's earlier messages (a new friend) could not be asked for", party["id"])
         return {**party, "catch_up": caught}
+
+    # ── PRM_AUTO_REGISTER: every new friend is registered by the bot ──────
+
+    def new_friend_found(self, event: dict) -> None:
+        """The new-friend scan's ``on_found`` (Bot._start_new_friends, copilot mode with PRM_AUTO_REGISTER=on): her
+        wxid, name and how she was added are queued (never her greeting) and the sender thread is woken; it registers
+        her at the start of its next round (``register_found``).  Never ``register`` here: the scan calls this inside
+        its look, holding its ``_scan_lock``, and ``register`` calls back into the scan (``on_registered`` =
+        ``NewFriendService.registered``, then the backend's ``catch_up_chat``).  Never raises (a sink that raises
+        would get the event again at every look); off, it does nothing."""
+        if not self._auto_register:
+            return
+        try:
+            item = {"wxid": str(event.get("wxid") or "").strip(), "name": str(event.get("name") or ""),
+                    "how": str(event.get("how") or "")}
+        except Exception:
+            logger.warning("PRM: a new friend's event could not be read; not registered automatically", exc_info=True)
+            return
+        with self._found_lock:
+            self._found.append(item)
+        self._wake.set()
+
+    def register_found(self) -> int:
+        """The new friends ``new_friend_found`` queued, registered one by one (oldest first) on the sender thread
+        (``tick``), with none of the scan's locks held.  Returns how many were registered; one that is not (a rule
+        says no, an error) is logged and stays in 登记达人's candidates for a person.  Never raises."""
+        with self._found_lock:
+            found = list(self._found)
+            self._found.clear()
+        done = 0
+        for event in found:
+            if self.auto_register_friend(event) is not None:
+                done += 1
+        return done
+
+    def auto_register_friend(self, event: dict) -> Optional[dict]:
+        """Register one new friend (``{wxid, name, how}``) as a full creator, as an operator's 登记 does
+        (``_register``: her messages since she was added become one reviewed draft through ``on_registered``):
+        称呼 ``auto_name``, note ``auto_note``, the deal's record ``AUTO_EVENT``, one log line with the wxid's first 8
+        characters.  None when she is not registered (``_not_auto``: the admin or a cc user, not a person's private
+        chat, a party already, active or stopped) or an error came (logged; never raised)."""
+        wxid = ""
+        try:
+            wxid = str(event.get("wxid") or "").strip()
+            how = str(event.get("how") or "").strip() or "unknown"
+            why = self._not_auto(wxid)
+            if why:
+                logger.info("PRM: new friend %s… not registered automatically: %s", wxid[:8], why)
+                return None
+            return self._register(wxid, auto_name(event.get("name"), wxid), auto_note(how), how=how)
+        except PartyError:
+            # (its text may hold a creator's name: never logged) - a party made meanwhile, by a person
+            logger.info("PRM: new friend %s… not registered automatically: she has a party already (made meanwhile)",
+                        wxid[:8])
+        except Exception:
+            logger.warning("PRM: new friend %s… could not be registered automatically; she stays in 登记达人's list "
+                           "for a person", wxid[:8], exc_info=True)
+        return None
+
+    def _not_auto(self, wxid: str) -> str:
+        """Why PRM_AUTO_REGISTER leaves this wxid alone ("" = it may register her): not a person's private chat (a
+        group, an official account, 文件传输助手: the scan never reports them either), the admin or a cc user, no wxid
+        a creator can have (``check_wxid``), or a party with this wxid already, active or stopped (an operator's 停用
+        sticks; a person may register her again in the console)."""
+        if not is_person_chat(wxid):
+            return "not a person's private chat"
+        if wxid in self._reserved:
+            return "the admin or a cc user (never a creator)"
+        try:
+            check_wxid(wxid, self._reserved)
+        except PartyError:
+            return "not a wxid a creator can have"
+        party = self._store.party_by_wxid(wxid, include_inactive=True)
+        if party is not None:
+            return "she has a party already (stopped: an operator's 停用 stays)" if not party["active"] else \
+                "she is registered already"
+        return ""
 
     def take_new_friend(self, chat_id: str, messages: list[dict], *, verify_until: float = 0.0) -> int:
         """A new friend registered as a creator: her messages since she was added (the WeChat backend
@@ -2989,7 +3118,7 @@ class PrmService:
             "takeover_min": self._takeover_sec // 60, "holding_min": self._holding_sec // 60,
             "retention_days": self._retention_days, "catchup_hours": self._catchup_sec // 3600,
             "clock_skew_sec": int(round(self._skew)), "sample_sync_min": self._sample_sync_sec // 60,
-            "night": self._night_status(self._clock()),
+            "night": self._night_status(self._clock()), "auto_register": self._auto_register,
         })
 
     # ── the sender thread: approved drafts, holding replies, clean-ups ────
@@ -3004,6 +3133,7 @@ class PrmService:
             self._wake.clear()
 
     def tick(self) -> None:
+        self.register_found()                          # PRM_AUTO_REGISTER: the new friends the scan queued
         self.sweep_executing()
         self.send_approved()
         self.send_holding_replies()

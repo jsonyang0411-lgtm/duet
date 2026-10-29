@@ -1,6 +1,7 @@
 """New friends (src/wechat/new_friends.py): found in WeChat's database beside the poll loop, reported
 once each, told apart by how they came; WeChat's friend notices are nobody's words; in copilot mode
-registering a new friend drafts her messages since she was added (one reviewed job).
+registering a new friend drafts her messages since she was added (one reviewed job), and with
+PRM_AUTO_REGISTER=on the bot registers every new friend itself (on PRM's sender thread, after the look).
 
 The WeChat database is a fake shaped like the real one (WeChat 4.1.15.36, tools/friend_probe.py,
 2026-10-27): session rows carry no names, messages newest first, system lines type 10000, this
@@ -9,6 +10,7 @@ account's own lines from its wxid without the data folder's suffix.
 
 import json
 import logging
+import sqlite3
 import threading
 import time
 
@@ -514,13 +516,17 @@ def test_the_notice_is_never_forwarded_as_a_creators_message(tmp_path, clock):
 
 class Copilot:
     """The bot in copilot mode as Bot.run wires it: the WCDB backend over the fake database, the
-    router, the relay, PRM and the new-friend scan (the bot's database in tmp_path)."""
+    router, the relay, PRM and the new-friend scan (the bot's database in tmp_path).  ``auto_register``:
+    PRM_AUTO_REGISTER (the scan's ``on_found`` is then PRM's ``new_friend_found``, as Bot._start_new_friends
+    makes it); ``night``: PRM_NIGHT_AUTO_HOURS; ``relay_wxids``: the cc users; ``scan``: the scan's timing."""
 
-    def __init__(self, tmp_path, clock, db, private_chats="*", catchup_hours=12, prm_store=None, relay_store=None):
+    def __init__(self, tmp_path, clock, db, private_chats="*", catchup_hours=12, prm_store=None, relay_store=None,
+                 auto_register="off", night="", relay_wxids=(), **scan):
         config = BotConfig(
             private_chat_enabled=True, private_chats=private_chats, admin_wxid=ADMIN, bot_display_name=BOT,
             claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1", claude_relay_port=0,
-            claude_relay_db=":memory:", prm_copilot="on", prm_db=":memory:", prm_catchup_hours=catchup_hours)
+            claude_relay_db=":memory:", prm_copilot="on", prm_db=":memory:", prm_catchup_hours=catchup_hours,
+            prm_auto_register=auto_register, prm_night_auto_hours=night, claude_relay_wxids=list(relay_wxids))
         self.clock, self.db = clock, db
         self.messages = MessageStore(initialize_db(str(tmp_path / "messages.db")))
         self.router = MessageRouter(store=self.messages, admin_handler=AdminCommandHandler(), config=config,
@@ -543,7 +549,8 @@ class Copilot:
         self.backend._prime_known_ids()
         self.backend._running = True
         self.friends = NewFriendService(self.backend, NewFriendStore(str(tmp_path / "messages.db")),
-                                        keep_verify=True, catchup_hours=catchup_hours, clock=clock, pause=0)
+                                        on_found=[self.prm.new_friend_found] if self.prm.auto_register else [],
+                                        keep_verify=True, catchup_hours=catchup_hours, clock=clock, pause=0, **scan)
         self.friends.set_catch_up_sink(self.prm.take_new_friend)
         self.prm.on_registered = self.friends.registered
 
@@ -568,6 +575,7 @@ class Copilot:
 
     def stop(self):
         self.backend._running = False
+        self.friends.stop()
         self.prm.stop()
         self.relay.stop()
 
@@ -732,3 +740,294 @@ def test_the_bot_starts_the_scan_only_for_a_mode_that_uses_it(tmp_path, db, monk
         service.stop()
         from src.web import server
         server.register_new_friends(None)
+
+
+# ── copilot mode with PRM_AUTO_REGISTER=on: every new friend becomes a creator ──
+
+HELPER = "wxid_helper000000001"      # a cc user (CLAUDE_RELAY_WXIDS)
+
+
+def auto_lines(caplog):
+    return [r.getMessage() for r in caplog.records if "registered automatically" in r.getMessage()]
+
+
+def within(seconds, fn, *args):
+    """``fn(*args)`` on a thread of its own: its result, or a failure when it has not ended after ``seconds`` (a
+    deadlock is a failed test, not a suite that never ends)."""
+    out = {}
+
+    def run():
+        try:
+            out["value"] = fn(*args)
+        except BaseException as e:                       # (raised again below, on the test's thread)
+            out["error"] = e
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    assert not worker.is_alive(), f"{getattr(fn, '__name__', fn)} did not end within {seconds} s"
+    if "error" in out:
+        raise out["error"]
+    return out.get("value")
+
+
+def test_off_a_new_friend_still_waits_for_a_person(copilot_bot, db, clock):
+    """PRM_AUTO_REGISTER off (the default): exactly as before, nobody is registered by the bot."""
+    bot = copilot_bot()
+    assert bot.prm.auto_register is False and bot.friends._on_found == []
+    bot.friends.scan_once()
+    clock.now += 120
+    accepted_on_pc(db, NEW, "阿花", clock.now)
+    bot.poll()
+    [found] = bot.friends.scan_once()
+    bot.prm.new_friend_found(found)                                  # even were it handed over: nothing
+    bot.prm.tick()
+    bot.poll()
+    assert bot.prm.store.parties(include_inactive=True) == [] and bot.jobs() == []
+    assert not bot.prm.is_party_chat(NEW)
+
+
+def test_on_a_new_friend_is_registered_after_the_look_and_her_messages_are_one_reviewed_draft(
+        copilot_bot, db, clock, caplog):
+    bot = copilot_bot(auto_register="on")
+    assert bot.prm.auto_register is True and bot.friends._on_found == [bot.prm.new_friend_found]
+    bot.friends.scan_once()                                          # the start marker
+    clock.now += 120
+    t = clock.now
+    accepted_on_phone(db, NEW, "阿花", t)                             # her greeting at t-5, added at t
+    db.say(NEW, NEW, "在吗？想要个样品", t + 30)
+    clock.now = t + 60
+    bot.poll()                                                       # PRIVATE_CHATS=*: read, stored, silence
+    with caplog.at_level(logging.INFO):
+        [found] = within(10, bot.friends.scan_once)
+        # inside the look she was only queued: register() (-> on_registered -> the scan's registered) never runs
+        # while the scan holds its lock
+        assert bot.prm.store.parties(include_inactive=True) == []
+        within(10, bot.prm.tick)                                     # the sender thread's next round
+    [party] = bot.prm.store.parties()
+    assert (party["wxid"], party["name"], party["note"], party["auto_registered"]) == (
+        NEW, "阿花", "自动登记（新好友，她加我们）", 1)
+    assert bot.prm.is_party_chat(NEW)
+    [event] = bot.prm.store.events(bot.prm.store.deal_of(party["id"])["id"])
+    assert (event["kind"], event["detail"], event["actor"]) == ("auto_register", {"how": MANUAL}, "system")
+    assert auto_lines(caplog) == [f"PRM: new friend {NEW[:8]}… registered automatically as party 1 "
+                                  "(PRM_AUTO_REGISTER; manual)"]
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "阿花" not in logged and "13800138000" not in logged and NEW not in logged
+
+    bot.poll()                                                       # her chat read back on its next poll
+    [job] = bot.jobs()
+    assert lines(job) == ["（加好友时的验证消息）我是阿花，做美妆的，电话 〈手机1〉", "在吗？想要个样品"]
+    assert json.loads(job["meta"])["new_friend"] == {"from": t - 5, "count": 2}
+    bot.prm.store.set_gate("faq", gates.AUTO, clock.now)             # even a kind that has earned "auto"
+    bot.mac_drafts()
+    [packet] = bot.prm.store.packets(("pending", "approved"))
+    assert (packet["status"], packet["route"]) == ("pending", "review") and bot.sent == []
+
+    # after it, she is a creator like any other: her next draft goes by its gate
+    assert bot.prm.decide(packet["id"], "send")["ok"] and bot.prm.send_approved() == 1
+    db.say(NEW, NEW, "那佣金怎么算", clock.now)
+    bot.poll()
+    assert len(bot.jobs()) == 2 and "new_friend" not in json.loads(bot.jobs()[-1]["meta"])
+    bot.mac_drafts()
+    [later] = bot.prm.store.packets(("pending", "approved"))
+    assert (later["status"], later["route"]) == ("approved", "auto")
+
+
+def test_at_night_her_first_draft_still_waits_and_a_later_one_may_go_out_by_itself(copilot_bot, db, clock):
+    """The 下班时段 is on and it is inside it now: the catch-up draft of the friend the bot registered waits for a
+    person (a new friend's job is never told it is night); once that is done her next draft may go out by itself."""
+    hour = time.localtime(clock.now).tm_hour
+    bot = copilot_bot(auto_register="on", night=f"{hour:02d}:00-{(hour + 2) % 24:02d}:00")
+    bot.friends.scan_once()
+    clock.now += 60
+    accepted_on_pc(db, NEW, "阿花", clock.now)
+    bot.poll()
+    bot.friends.scan_once()
+    assert bot.prm.register_found() == 1
+    bot.poll()
+    [job] = bot.jobs()
+    meta = json.loads(job["meta"])
+    assert meta["new_friend"]["count"] == 1 and "night" not in meta
+    bot.mac_drafts()
+    [first] = bot.prm.store.packets(("pending", "approved"))
+    assert (first["status"], first["route"]) == ("pending", "review") and bot.sent == []
+    assert bot.prm.decide(first["id"], "send")["ok"] and bot.prm.send_approved() == 1
+    db.say(NEW, NEW, "你们是做什么产品的", clock.now)
+    bot.poll()
+    assert "night" in json.loads(bot.jobs()[-1]["meta"])
+    bot.mac_drafts()
+    [later] = bot.prm.store.packets(("pending", "approved"))
+    assert (later["status"], later["route"]) == ("approved", "night")
+
+
+def test_the_admin_cc_users_and_anyone_with_a_party_are_never_registered_or_started_again(
+        copilot_bot, db, clock, caplog):
+    bot = copilot_bot(auto_register="on", relay_wxids=[HELPER])
+    bot.friends.scan_once()
+    bot.prm.register(CUSTOM, "运营起的称呼", "运营登记的")             # an operator's creator
+    stopped = bot.prm.register(ASKED, "品牌小青", "运营登记过")
+    bot.prm.set_active(stopped["id"], False)                        # an operator's 停用
+    clock.now += 120
+    for n, (wxid, name) in enumerate(((ADMIN, "管理员"), (HELPER, "助理"), (CUSTOM, "小美美"), (ASKED, "品牌小青"))):
+        accepted_on_pc(db, wxid, name, clock.now + n)
+    bot.poll()
+    with caplog.at_level(logging.INFO):
+        assert len(bot.friends.scan_once()) == 4                     # all four are new friends to the scan
+        assert bot.prm.register_found() == 0
+    parties = {p["wxid"]: p for p in bot.prm.store.parties(include_inactive=True)}
+    assert set(parties) == {CUSTOM, ASKED}
+    assert ({k: parties[CUSTOM][k] for k in ("name", "note", "active", "auto_registered")}
+            == {"name": "运营起的称呼", "note": "运营登记的", "active": 1, "auto_registered": 0})
+    assert (parties[ASKED]["active"], parties[ASKED]["note"]) == (0, "运营登记过")     # 停用 sticks
+    assert not bot.prm.is_party_chat(ASKED) and bot.prm.store.events(None, kinds=("auto_register",)) == []
+    said = auto_lines(caplog)
+    assert len(said) == 4 and all("not registered automatically" in line for line in said)
+    assert sum("the admin or a cc user" in line for line in said) == 2
+    assert any("stopped: an operator's 停用 stays" in line for line in said)
+    # nor a group, an official account or one of WeChat's own chats, were one ever handed over
+    for wxid in ("room1@chatroom", "gh_abcdef123456", "filehelper", "wangzong@openim"):
+        bot.prm.new_friend_found({"wxid": wxid, "name": "谁", "how": MANUAL})
+    assert bot.prm.register_found() == 0 and len(bot.prm.store.parties(include_inactive=True)) == 2
+
+
+def test_a_friend_seen_again_after_a_restart_is_not_registered_twice(copilot_bot, db, clock):
+    bot = copilot_bot(auto_register="on")
+    bot.friends.scan_once()
+    clock.now += 120
+    accepted_on_pc(db, NEW, "阿花", clock.now)
+    bot.poll()
+    bot.friends.scan_once()
+    assert bot.prm.register_found() == 1
+    bot.poll()
+    assert len(bot.jobs()) == 1
+    bot.stop()
+    clock.now += 600
+    again = copilot_bot(auto_register="on", prm_store=bot.prm.store, relay_store=bot.relay.store)
+    db.say(NEW, NEW, "你好？", clock.now)
+    again.poll()
+    assert again.friends.scan_once() == [] and again.prm.register_found() == 0      # reported once, ever
+    again.prm.new_friend_found({"wxid": NEW, "name": "阿花", "how": MANUAL})       # and were she handed over again
+    assert again.prm.register_found() == 0
+    assert len(again.prm.store.parties(include_inactive=True)) == 1
+    assert len(again.prm.store.events(None, kinds=("auto_register",))) == 1
+    assert lines(again.jobs()[-1])[-1] == "你好？"                  # a creator's message (it joins the job not taken)
+
+
+def test_an_error_in_register_never_stops_the_scan_and_she_stays_a_candidate(
+        copilot_bot, db, clock, caplog, monkeypatch):
+    from src.web import server
+
+    bot = copilot_bot(auto_register="on")
+    bot.friends.scan_once()
+    clock.now += 120
+    accepted_on_pc(db, NEW, "阿花", clock.now)
+    bot.poll()
+    real = bot.prm.store.add_party
+
+    def locked(wxid, *args, **kwargs):
+        if wxid == NEW:
+            raise sqlite3.OperationalError("database is locked")
+        return real(wxid, *args, **kwargs)
+
+    monkeypatch.setattr(bot.prm.store, "add_party", locked)
+    with caplog.at_level(logging.INFO):
+        assert [e["wxid"] for e in bot.friends.scan_once()] == [NEW]
+        bot.prm.tick()                                               # the round goes on (it would send, sweep ...)
+    assert bot.prm.store.parties(include_inactive=True) == []
+    [warning] = [r for r in caplog.records if r.levelno == logging.WARNING and r.name == "src.prm.service"]
+    assert "could not be registered automatically" in warning.getMessage() and "阿花" not in warning.getMessage()
+    # the scan goes on: the next new friend is found and registered
+    clock.now += 60
+    accepted_on_pc(db, CUSTOM, "小美美", clock.now)
+    bot.poll()
+    assert [e["wxid"] for e in bot.friends.scan_once()] == [CUSTOM]
+    assert bot.prm.register_found() == 1 and bot.prm.is_party_chat(CUSTOM)
+    # she stays in 登记达人's list, for a person to register
+    server.register_new_friends(bot.friends)
+    try:
+        offered = [c["wxid"] for c in server._prm_candidates(bot.prm.snapshot()) if c.get("new")]
+    finally:
+        server.register_new_friends(None)
+    assert offered == [NEW]
+    monkeypatch.undo()
+    assert bot.prm.register(NEW, "阿花")["catch_up"] is True
+
+
+def test_with_both_threads_running_she_is_registered_and_nothing_hangs(copilot_bot, db, clock):
+    """The real threads: the scan's (new-friends) and PRM's sender thread, beside the poll loop (this test)."""
+    bot = copilot_bot(auto_register="on", interval=1, first_wait=0)
+    bot.friends.start()
+    bot.prm.start()
+    scan_thread, prm_thread = bot.friends._thread, bot.prm._thread
+    deadline = time.monotonic() + 15
+    try:
+        while bot.friends.store.started_at() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert bot.friends.store.started_at() is not None            # the first look: the start marker
+        clock.now += 120
+        accepted_on_phone(db, NEW, "阿花", clock.now)
+        db.say(NEW, NEW, "在吗", clock.now + 10)
+        clock.now += 30
+        while not bot.jobs() and time.monotonic() < deadline:        # the poll loop, beside both threads: the
+            within(10, bot.poll)                                     # sessions, then her chat read back once
+            time.sleep(0.05)                                         # she is registered
+        assert bot.prm.store.party_by_wxid(NEW)["auto_registered"] == 1
+    finally:
+        within(20, bot.friends.stop)
+        within(20, bot.prm.stop)
+    assert not scan_thread.is_alive() and not prm_thread.is_alive()
+    [job] = bot.jobs()
+    assert json.loads(job["meta"])["new_friend"]["count"] == 2
+
+
+def test_her_name_note_and_record():
+    from src.prm.service import auto_name, auto_note, event_out
+
+    assert auto_name("  阿花 　 美妆\n号 ", NEW) == "阿花 美妆 号"            # whitespace collapsed
+    assert auto_name("长" * 40, NEW) == "长" * 30
+    assert auto_name("ㅤㅤ", NEW) == auto_name(None, NEW) == "新好友 wxid_new"    # no name (U+3164 only, or none)
+    assert auto_name("", CUSTOM) == "新好友 meimei_8"
+    assert [auto_note(h) for h in (REQUESTED, MANUAL, AUTO_ACCEPT, UNKNOWN, "")] == [
+        "自动登记（新好友，我们加她）", "自动登记（新好友，她加我们）", "自动登记（新好友，机器人自动通过）",
+        "自动登记（新好友，说不清）", "自动登记（新好友，说不清）"]
+    ev = {"id": 1, "kind": "auto_register", "detail": {"how": AUTO_ACCEPT}, "actor": "system", "at": 0}
+    assert event_out(ev)["name"] == "自动登记（新好友，机器人自动通过）"
+
+
+def test_the_bot_hands_new_friends_to_prm_only_in_copilot_mode_with_the_switch_on(tmp_path, db, monkeypatch, caplog):
+    from src.bot import Bot
+    from src.web import server
+
+    monkeypatch.chdir(tmp_path)
+    backend = Backend(db)
+
+    class Prm:
+        on_registered = None
+
+        def __init__(self, auto):
+            self.auto_register = auto
+
+        def take_new_friend(self, *a, **k):
+            return 0
+
+        def new_friend_found(self, event):
+            pass
+
+    def sinks(config, prm, edge):
+        service = Bot._start_new_friends(config, backend, prm, edge)
+        try:
+            return list(service._on_found)
+        finally:
+            service.stop()
+            server.register_new_friends(None)
+
+    on = BotConfig(db_path=str(tmp_path / "messages.db"), prm_auto_register="on")
+    off = BotConfig(db_path=str(tmp_path / "messages.db"))
+    prm = Prm(True)
+    assert sinks(on, prm, None) == [prm.new_friend_found]
+    assert sinks(off, Prm(False), None) == []
+    edge = type("E", (), {"friend_added": lambda self, e: None})()
+    with caplog.at_level(logging.INFO):
+        assert sinks(on, None, edge) == [edge.friend_added]          # edge mode: the Mac's friend_added only
+    assert any("PRM_AUTO_REGISTER is on but this bot runs no PRM copilot" in r.getMessage() for r in caplog.records)

@@ -1011,9 +1011,10 @@ def _prm_reserved() -> set[str]:
 
 def _prm_candidates(state: dict) -> list[dict]:
     """Who the register form offers, not creators yet: first the new friends of the last days
-    (src/wechat/new_friends.py; ``new``, their greeting masked, how they were added), newest first,
-    then the private chats WeChat lists (data/private_chat_names.json, written by the Windows
-    backend while PRM_COPILOT is on) by name."""
+    (src/wechat/new_friends.py; ``new``, their greeting masked, how they were added; ``inactive``: she has a
+    stopped party, registering her starts it again), newest first, then the private chats WeChat lists
+    (data/private_chat_names.json, written by the Windows backend while PRM_COPILOT is on) by name.  A
+    registered creator (an operator's or PRM_AUTO_REGISTER's) is never offered."""
     path = Path("data/private_chat_names.json")
     try:
         names = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
@@ -1021,6 +1022,7 @@ def _prm_candidates(state: dict) -> list[dict]:
         names = {}
     names = names if isinstance(names, dict) else {}
     taken = {p["wxid"] for p in state.get("parties", []) if p.get("active")} | _prm_reserved()
+    stopped = {p["wxid"] for p in state.get("parties", []) if not p.get("active")}
     fresh = []
     for f in _recent_new_friends():
         wxid = str(f.get("wxid") or "")
@@ -1029,7 +1031,7 @@ def _prm_candidates(state: dict) -> list[dict]:
         fresh.append({"wxid": wxid, "name": str(f.get("name") or names.get(wxid) or wxid), "new": True,
                       "verify_text": str(f.get("verify_text") or ""), "how": str(f.get("how") or "unknown"),
                       "how_label": str(f.get("how_label") or ""), "added_at": f.get("added_at"),
-                      "remark": str(f.get("remark") or "")})
+                      "remark": str(f.get("remark") or ""), "inactive": wxid in stopped})
     listed = {c["wxid"] for c in fresh}
     out = [{"wxid": str(w), "name": str(n)} for w, n in names.items() if str(w) not in taken | listed]
     return (fresh + sorted(out, key=lambda c: c["name"]))[:300]
@@ -1085,7 +1087,8 @@ def _prm_state_core() -> dict:
     stopped = {"mac_online": False, "worker_kinds": [], "can_send": False, "can_send_files": False,
                "takeover_min": _prm_int_env("PRM_TAKEOVER_MIN", 120), "holding_min": _prm_int_env("PRM_HOLDING_MIN", 10),
                "retention_days": _prm_int_env("PRM_RETENTION_DAYS", 90),
-               "catchup_hours": _prm_int_env("PRM_CATCHUP_HOURS", 12), "night": _prm_night_env(), **settings}
+               "catchup_hours": _prm_int_env("PRM_CATCHUP_HOURS", 12), "night": _prm_night_env(),
+               "auto_register": _prm_env_on("PRM_AUTO_REGISTER"), **settings}
     store = _prm_stopped_store()
     if store is None:
         from src.prm.platforms import ACTIONS

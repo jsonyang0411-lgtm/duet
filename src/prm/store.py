@@ -1,6 +1,7 @@
 """PRM copilot storage (``PRM_COPILOT=on``), one SQLite file (``PRM_DB``, data/prm.db).
 
-``parties``         the creators the operators registered (their private chat is their wxid)
+``parties``         the creators the operators registered (their private chat is their wxid);
+                    ``auto_registered``: the bot registered her as a new friend (PRM_AUTO_REGISTER)
 ``deals``           one collaboration per creator: stage, mode (``copilot`` / ``human`` until
                     ``mode_until`` / ``paused``), the latest slot values, the stage the AI
                     suggests, why a person should look (``notices``, JSON; ``attention`` is
@@ -196,6 +197,7 @@ _ADDED_COLUMNS = (
     ("action_packets", "platform", "TEXT NOT NULL DEFAULT '{}'"),
     ("deals", "notices", "TEXT NOT NULL DEFAULT '[]'"),
     ("deals", "chain", "TEXT NOT NULL DEFAULT '{}'"),
+    ("parties", "auto_registered", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 # What the creators wrote, or our side's own words, waiting for the next draft job.
@@ -306,23 +308,29 @@ class PrmStore:
 
     # ── creators ──────────────────────────────────────────────────────────
 
-    def add_party(self, wxid: str, name: str, note: str = "", now: Optional[float] = None) -> dict:
-        """Register a creator (a removed one comes back) and open their deal."""
+    def add_party(self, wxid: str, name: str, note: str = "", now: Optional[float] = None, *,
+                  auto: bool = False) -> dict:
+        """Register a creator (a removed one comes back) and open their deal.  ``auto`` (PRM_AUTO_REGISTER, the bot
+        registering a new friend): only a wxid that has no party at all, active or stopped (an operator's 停用 sticks;
+        checked in the same step as the insert), marked ``auto_registered``.  A person registering a stopped party
+        again makes it a person's (``auto_registered`` 0)."""
         now = time.time() if now is None else now
         with self._lock:
             row = self._conn.execute("SELECT * FROM parties WHERE wxid = ?", (wxid,)).fetchone()
             if row is not None and row["active"]:
                 raise PartyError(f"{wxid} 已经登记过了（{row['name']}）")
+            if row is not None and auto:
+                raise PartyError(f"{wxid} 停用过，不自动登记")
             if row is not None:
                 self._conn.execute(
-                    "UPDATE parties SET name = ?, note = ?, active = 1, authorized_at = ?, updated_at = ?"
-                    " WHERE id = ?", (name, note, now, now, row["id"]),
+                    "UPDATE parties SET name = ?, note = ?, active = 1, auto_registered = 0, authorized_at = ?,"
+                    " updated_at = ? WHERE id = ?", (name, note, now, now, row["id"]),
                 )
                 party_id = int(row["id"])
             else:
                 cur = self._conn.execute(
-                    "INSERT INTO parties (wxid, name, note, authorized_at, created_at, updated_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?)", (wxid, name, note, now, now, now),
+                    "INSERT INTO parties (wxid, name, note, authorized_at, created_at, updated_at, auto_registered)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?)", (wxid, name, note, now, now, now, int(bool(auto))),
                 )
                 party_id = int(cur.lastrowid)
             if self._conn.execute("SELECT 1 FROM deals WHERE party_id = ?", (party_id,)).fetchone() is None:
@@ -353,12 +361,11 @@ class PrmStore:
             row = self._conn.execute("SELECT * FROM parties WHERE id = ?", (party_id,)).fetchone()
         return dict(row) if row else None
 
-    def party_by_wxid(self, wxid: str) -> Optional[dict]:
-        """The registered (active) creator with this wxid."""
+    def party_by_wxid(self, wxid: str, include_inactive: bool = False) -> Optional[dict]:
+        """The registered (active) creator with this wxid; ``include_inactive``: a stopped one too."""
+        sql = "SELECT * FROM parties WHERE wxid = ?" + ("" if include_inactive else " AND active = 1")
         with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM parties WHERE wxid = ? AND active = 1", (wxid,)
-            ).fetchone()
+            row = self._conn.execute(sql, (wxid,)).fetchone()
         return dict(row) if row else None
 
     def parties(self, include_inactive: bool = False) -> list[dict]:
