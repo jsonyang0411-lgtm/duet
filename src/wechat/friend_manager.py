@@ -81,8 +81,13 @@ RISK_MARKERS = (
     "帐号存在异常", "账号存在异常", "帐号异常", "账号异常", "被限制", "限制使用",
     "暂时无法添加", "无法添加朋友", "安全风险", "被盗风险", "已达上限", "达到上限",
 )
-ADD_DIALOG_TITLES = ("添加朋友", "Add Friend", "微信", "Weixin")   # title of WeChat 4.0's add-friend window (read on a real machine);
+ADD_DIALOG_TITLES = ("添加朋友", "Add Friend")   # title of WeChat 4.0's add-friend window (read on a real machine);
                                                 # exact, because the application window is "申请添加朋友"
+# Some WeChat 4.x builds title the add-friend window plainly 「微信」 / 「Weixin」 (geigp, 2026-10-29). So are other
+# windows of the process, so these titles count ONLY for a window that appears right after our click on 「添加朋友」,
+# never for one that was already open (taking such a window for the dialog made the keys go elsewhere: 「the dialog
+# … is not the window in front」).
+GENERIC_DIALOG_TITLES = ("微信", "Weixin")
 # WeChat 4.0's other dialogs, matched exactly (a chat opened in a window of its own has the same process and
 # class, and its title is the chat's name: 「达人朋友群」, 「小朋友」 must never be taken for one).
 APPLY_DIALOG_TITLES = ("申请添加朋友",)         # the application window (probe-apply.txt, real machine 2026-10-23)
@@ -361,9 +366,21 @@ class FriendManager:
         """The window must be in front.  ``exact`` (a dialog of its own): that very window, not just any window
         of WeChat's process (a chat open in a window of its own is one too, and keys sent to it go out)."""
         if exact:
-            if not self._window._foreground_matches(hwnd):
-                raise _Abort(f"the dialog (HWND={hwnd}) is not the window in front")
-            return
+            if self._window._foreground_matches(hwnd):
+                return
+            # Another window of WeChat's own process is in front (the main window, the closing (+) menu, a focus
+            # change still under way): bring the dialog forward once and look again.  Any other program in front
+            # stops it as before: keys never go to the user's own window.
+            if self._is_wechat_foreground(hwnd):
+                try:
+                    self._window.activate(hwnd)
+                except Exception as e:
+                    logger.debug("Friend management: the dialog could not be brought forward: %s", e)
+                self._sleep(0.2)
+                if self._window._foreground_matches(hwnd):
+                    logger.info("Friend management: the dialog (HWND=%s) was brought in front again", hwnd)
+                    return
+            raise _Abort(f"the dialog (HWND={hwnd}) is not the window in front")
         if not self._is_wechat_foreground(hwnd):
             raise _Abort("the WeChat window is not in the foreground")
 
@@ -404,8 +421,7 @@ class FriendManager:
         otherwise a window of WeChat's process will do: a click only moves the focus, the keys after it are
         checked exactly).  ``required``: a click that is not delivered stops the action; otherwise it is reported."""
         self._foreground(hwnd, exact)
-        post_click_window(hwnd, x, y)
-        delivered = bool(self._clicker(x, y))
+        delivered = bool(self._clicker(x, y))          # ONE click: a posted click before it made every button get two
         if not delivered and required:
             raise _Abort("the click was not delivered")
         return delivered
@@ -419,8 +435,7 @@ class FriendManager:
             raise _Abort(f"the window position is unknown ({e})") from e
         x = left + int(rx * max(1, right - left))
         y = top + int(ry * max(1, bottom - top))
-        post_click_window(hwnd, x, y)
-        if not self._clicker(x, y):
+        if not self._clicker(x, y):                    # ONE click (see _click_at)
             raise _Abort("the click was not delivered")
 
     def _dismiss(self, hwnd: int) -> None:
@@ -896,8 +911,8 @@ class FriendManager:
                     title = win32gui.GetWindowText(h)
                     if self._is_chat_title(title):
                         return                               # a chat open in a window of its own
-                    if title in ADD_DIALOG_TITLES:
-                        found.append(h)
+                    if title in ADD_DIALOG_TITLES or title in GENERIC_DIALOG_TITLES:
+                        found.append(h)                      # (a generic title is used only if the window is new)
                         return
                     r = win32gui.GetWindowRect(h)
                     if 300 <= r[2] - r[0] <= 600 and 400 <= r[3] - r[1] <= 800:

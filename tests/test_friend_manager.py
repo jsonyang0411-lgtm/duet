@@ -810,6 +810,56 @@ class CaptureTargetTests(FriendTestCase):
         self.assertEqual(ocr.capture.call_count, 1)
 
 
+class OneClickAndFrontTests(FriendTestCase):
+    """2026-10-29 (geigp's real machine): every button got two clicks (a posted one and a physical one), and a dialog
+    behind another window of WeChat's own process stopped the action at once."""
+
+    def test_a_click_on_a_dialog_button_is_one_click(self):
+        manager = self.manager(FakeWindow(), FakeOcr([]))
+        posted = []
+        with patch.object(friend_manager, "post_click_window", side_effect=lambda *a: posted.append(a) or True), \
+             patch.object(friend_manager, "sys", SimpleNamespace(platform="win32")):
+            manager._click_at(999, 10, 20)
+            manager._click_row(999, row("添加到通讯录", 0.4, 0.5, 0.6, 0.55))
+        self.assertEqual(len(self.clicks), 2, "one physical click each")
+        self.assertEqual(posted, [], "no second, posted click on top of it")
+
+    def test_a_dialog_behind_a_wechat_window_is_brought_forward_and_the_action_goes_on(self):
+        window = FakeWindow()
+        window.foreground = False
+        activated = []
+
+        def activate(hwnd):
+            activated.append(hwnd)
+            window.foreground = True
+            return True
+        window.activate = activate
+        manager = self.manager(window, FakeOcr([]))
+        manager._is_wechat_foreground = lambda hwnd: True               # WeChat's own window is in front
+        manager._foreground(999, exact=True)                            # no _Abort
+        self.assertEqual(activated, [999])
+
+    def test_a_dialog_that_cannot_be_brought_forward_still_stops_the_action(self):
+        window = FakeWindow()
+        window.foreground = False
+        window.activate = lambda hwnd: False
+        manager = self.manager(window, FakeOcr([]))
+        manager._is_wechat_foreground = lambda hwnd: True
+        with self.assertRaises(friend_manager._Abort):
+            manager._foreground(999, exact=True)
+
+    def test_another_program_in_front_is_never_pushed_aside(self):
+        window = FakeWindow()
+        window.foreground = False
+        activated = []
+        window.activate = lambda hwnd: activated.append(hwnd)
+        manager = self.manager(window, FakeOcr([]))
+        manager._is_wechat_foreground = lambda hwnd: False              # the user's own program is in front
+        with self.assertRaises(friend_manager._Abort):
+            manager._foreground(999, exact=True)
+        self.assertEqual(activated, [], "keys never go to the user's window, and it is not taken from them")
+
+
 class FakeDesktop:
     """A few top-level windows with the win32gui / win32process calls the 4.0 dialog lookup makes."""
 
@@ -892,6 +942,21 @@ class OpenAddFriendDialogTests(FriendTestCase):
         desktop.on_click = [lambda: desktop.add(self.MENU, cls=FakeDesktop.MENU_CLASS, rect=(10, 60, 200, 300)),
                             lambda: desktop.add(self.DIALOG, rect=(1545, 470, 2291, 1603))]
         self.assertIsNone(self.open(desktop))
+
+    def test_a_window_titled_plainly_weixin_counts_only_if_it_appears_after_the_click(self):
+        """Some 4.x builds title the add-friend window 「微信」 (geigp, 2026-10-29). Other windows of the process are
+        titled so too: one that was already open is never taken for the dialog (keys went there), a new one is."""
+        desktop = FakeDesktop()
+        other = 505
+        desktop.add(other, title="微信", rect=(100, 100, 500, 800))              # already open: not the dialog
+        desktop.on_click = [lambda: desktop.add(self.MENU, cls=FakeDesktop.MENU_CLASS, rect=(10, 60, 200, 300)),
+                            lambda: desktop.add(self.DIALOG, title="微信", rect=(1545, 470, 2291, 1603))]
+        self.assertEqual(self.open(desktop), self.DIALOG)
+        self.assertEqual(desktop.clicks, 2, "the (+) and 「添加朋友」 were clicked: the old 「微信」 window was not used")
+        lone = FakeDesktop()
+        lone.add(other, title="Weixin", rect=(100, 100, 500, 800))
+        lone.on_click = [lambda: lone.add(self.MENU, cls=FakeDesktop.MENU_CLASS, rect=(10, 60, 200, 300))]
+        self.assertIsNone(self.open(lone), "nothing new appeared: no dialog, whatever the old window is called")
 
     def test_the_application_window_is_not_a_leftover_add_dialog(self):
         desktop = FakeDesktop()
