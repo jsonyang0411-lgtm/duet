@@ -95,6 +95,14 @@ GROUPS: list[dict] = [
             # No "requires": CLAUDE_RELAY lives in another group; saving checks it (_validate_config).
             {"key": "PRM_COPILOT", "type": "onoff", "default": "off", "label": "打开达人副驾驶",
              "help": "打开后在上面登记达人的 wxid；没登记的人照旧。要先打开 Claude 中转，改完要重启机器人。"},
+            {"key": "PRM_AUTO_REGISTER", "type": "onoff", "default": "off", "label": "新好友自动登记成达人",
+             "platform": WCDB_ONLY,
+             "help": "打开后，机器人认出的每个新加的好友（我们加她、她加我们、机器人自动通过的都算）都自动登记成正式达人，"
+                     "和点「登记」一样：加好友以来她发的消息合成一份草稿，在「待审批」里等人看过再发；之后的草稿和别的达人一样"
+                     "走自动发送门槛和下班时段自动回复。注意：客户、快递、同事这些不是达人的人也会被登记、收到草稿，第一份审过以后"
+                     "夜里还可能被自动回复；在上面的名单里点「停用」去掉一个，停用的不会再被自动登记。管理员和能用 cc 的人从不登记。"
+                     "关着 = 和以前一样，由人点「登记」。改完要重启机器人；Mac 上的 worker 不用动。",
+             "requires": [{"key": "PRM_COPILOT", "is": "on", "text": "达人副驾驶打开时才用"}]},
             {"key": "PRM_TAKEOVER_MIN", "type": "int", "min": 5, "max": 1440, "default": "120",
              "label": "人工接管多久", "unit": "分钟",
              "help": "运营用这个微信号亲手回了达人（手机或电脑上），或在合作单里点「人工接管」，这段时间里达人的消息只记录、"

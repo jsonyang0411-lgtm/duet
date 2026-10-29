@@ -530,6 +530,40 @@ class TestPrmPages:
         finally:
             web_server.register_new_friends(None)
 
+    def test_deals_page_tags_a_friend_the_bot_registered_and_stops_her_for_good(self, page, prm, tmp_path):
+        """PRM_AUTO_REGISTER: the register card says the switch is on, the friend the bot registered is no candidate
+        and is tagged 自动登记 in the list; 停用 takes her off, she comes back among the new friends marked 已停用,
+        and the bot never registers her again."""
+        from types import SimpleNamespace
+        from src.wechat.new_friends import NewFriendService, NewFriendStore
+        from src.web import server as web_server
+
+        now = prm.clock.now
+        store = NewFriendStore(str(tmp_path / "messages.db"))
+        store.add(wxid="wxid_new02", name="阿青", remark="", how="requested", kind="requested", added_at=now - 60,
+                  verify_from=None, verify_text="", found_at=now - 50)
+        web_server.register_new_friends(NewFriendService(SimpleNamespace(), store, clock=prm.clock))
+        prm.service._auto_register = True                       # PRM_AUTO_REGISTER=on, as the console shows it
+        try:
+            assert prm.service.auto_register_friend({"wxid": "wxid_new02", "name": "阿青", "how": "requested"})
+            page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+            page.wait_for_timeout(1500)
+            assert "新好友自动登记已打开" in page.locator(".prm-register").inner_text()
+            assert page.locator(".prm-new-friend").count() == 0              # registered: not offered
+            row = page.locator(".prm-parties tr", has_text="阿青")
+            assert row.locator(".tag", has_text="自动登记").count() == 1
+            assert "自动登记（新好友，我们加她）" in row.inner_text()
+            assert page.locator(".prm-parties tr", has_text="小美").locator(".tag", has_text="自动登记").count() == 0
+            row.locator("button:has-text('停用')").click()
+            page.wait_for_timeout(1500)
+            assert not prm.service.is_party_chat("wxid_new02") and "已停用" in row.inner_text()
+            again = page.locator(".prm-new-friend", has_text="阿青")
+            assert again.locator(".tag", has_text="已停用").count() == 1    # offered again, marked stopped
+            assert prm.service.auto_register_friend({"wxid": "wxid_new02", "name": "阿青", "how": "requested"}) is None
+            assert prm.service.store.party_by_wxid("wxid_new02", include_inactive=True)["active"] == 0
+        finally:
+            web_server.register_new_friends(None)
+
     def test_deals_page_runs_a_deal_stage_mode_waybill_and_numbers(self, page, prm):
         store = prm.service.store
         page.goto(f"{BASE_URL}/#/deals", timeout=10000)

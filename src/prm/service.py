@@ -1892,7 +1892,9 @@ class PrmService:
         """Why PRM_AUTO_REGISTER leaves this wxid alone ("" = it may register her): not a person's private chat (a
         group, an official account, 文件传输助手: the scan never reports them either), the admin or a cc user, no wxid
         a creator can have (``check_wxid``), or a party with this wxid already, active or stopped (an operator's 停用
-        sticks; a person may register her again in the console)."""
+        sticks; a person may register her again in the console).  (``is_person_chat`` reads the WCDB backend's list
+        of WeChat's own chats: that module is loaded wherever the scan runs, Windows wcdb; elsewhere the import fails,
+        which ``auto_register_friend`` logs, and she stays a candidate.)"""
         if not is_person_chat(wxid):
             return "not a person's private chat"
         if wxid in self._reserved:

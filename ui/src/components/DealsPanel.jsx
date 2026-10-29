@@ -46,8 +46,9 @@ function RegisterCard({ d, onDone }) {
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
   // New friends first (src/wechat/new_friends.py: tagged, their greeting masked, how they came), then
-  // the other recent private chats. Registering stays a person's decision: a new friend may be a
-  // supplier or an acquaintance.
+  // the other recent private chats. Registering is a person's decision (a new friend may be a supplier
+  // or an acquaintance), unless PRM_AUTO_REGISTER is on: then the bot registers every new friend itself
+  // (tagged 自动登记 in the list below) and only those it left (a stopped one, an error) are offered here.
   const candidates = d?.candidates || []
   const fresh = candidates.filter((c) => c.new)
   const picked = candidates.find((c) => c.wxid === wxid.trim())
@@ -70,6 +71,13 @@ function RegisterCard({ d, onDone }) {
   return (
     <Card title="登记达人" eyebrow="REGISTER" className="prm-register">
       <div className="stack" style={{ gap: 10 }}>
+        {d?.enabled && d?.auto_register && (
+          <Note kind="warn">
+            新好友自动登记已打开（PRM_AUTO_REGISTER）：机器人认出的每个新加的好友都会自动登记成达人（下面的名单里标「自动登记」），
+            加好友以来的消息合成一份草稿，在「待审批」里等人看过再发；之后的草稿和别的达人一样走自动发送门槛和下班时段自动回复。
+            客户、快递、同事这些不是达人的人也会被登记：在下面点「停用」去掉，停用的不会再被自动登记。管理员和能用 cc 的人从不登记。
+          </Note>
+        )}
         {fresh.length > 0 && (
           <div className="stack prm-new-friends" style={{ gap: 8 }}>
             <b>新加的好友</b>
@@ -77,7 +85,10 @@ function RegisterCard({ d, onDone }) {
               <div key={c.wxid} className="row prm-new-friend" style={{ gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' }}>
                 <span className="tag cy">新好友</span>
                 <div className="grow" style={{ minWidth: 0 }}>
-                  <div><b>{c.name}</b> <span className="mono dim">{c.wxid}</span></div>
+                  <div>
+                    <b>{c.name}</b> <span className="mono dim">{c.wxid}</span>
+                    {c.inactive && <span className="tag off" style={{ marginLeft: 6 }} title="登记过、又停用了：再登记就是重新启用">已停用</span>}
+                  </div>
                   <div className="dim">{c.how_label}{c.added_at ? ` · ${fmtClock(c.added_at)} 加上的` : ''}</div>
                   <div className={c.verify_text ? '' : 'dim'} style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
                     验证消息：{c.verify_text || '（没有）'}
@@ -150,7 +161,11 @@ function PartiesCard({ d, open, setOpen, onDone }) {
                         {expanded ? <CaretDown /> : <CaretRight />}
                       </button>
                     </td>
-                    <td><b>{p.name}</b><div className="mono dim">{p.wxid}</div>{p.note && <div className="dim">{p.note}</div>}{!p.active && <span className="tag off">已停用</span>}</td>
+                    <td>
+                      <b>{p.name}</b>
+                      {p.auto && <span className="tag warn" style={{ marginLeft: 6 }} title="新加的好友，机器人自动登记的（PRM_AUTO_REGISTER）；不是达人的点「停用」">自动登记</span>}
+                      <div className="mono dim">{p.wxid}</div>{p.note && <div className="dim">{p.note}</div>}{!p.active && <span className="tag off">已停用</span>}
+                    </td>
                     <td>
                       {deal.stage_label || '—'}
                       {deal.stage_proposal && deal.stage_proposal !== deal.stage && <div className="dim">AI 建议：{deal.stage_proposal_label}</div>}

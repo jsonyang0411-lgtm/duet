@@ -483,3 +483,20 @@ def test_a_stopped_bot_says_whether_new_friends_are_registered_and_tags_them(tmp
     assert [(p["wxid"], p["auto"]) for p in d["parties"]] == [("wxid_new01", True), (CREATOR, False)]
     assert call("/api/prm/parties", "POST", {"action": "disable", "id": 1})[1] == {"ok": True}
     assert call("/api/prm")[1]["parties"][0]["active"] is False
+
+
+def test_the_auto_register_switch_is_in_the_allow_list_and_checked():
+    from src.web import advanced_config as adv
+
+    keys = [f["key"] for f in next(g for g in adv.GROUPS if g["id"] == "prm")["fields"]]
+    assert keys.index("PRM_AUTO_REGISTER") == keys.index("PRM_COPILOT") + 1
+    field = adv.FIELDS["PRM_AUTO_REGISTER"]
+    assert (field["type"], field["default"], field["platform"]) == ("onoff", "off", adv.WCDB_ONLY)
+    assert field["requires"] == [{"key": "PRM_COPILOT", "is": "on", "text": "达人副驾驶打开时才用"}]
+    for words in ("重启机器人", "停用", "管理员", "不是达人", "等人看过再发", "下班时段自动回复"):
+        assert words in field["help"]
+    assert adv.normalize("PRM_AUTO_REGISTER", "") == "off" and adv.normalize("PRM_AUTO_REGISTER", "yes") == "on"
+    assert adv.validate_updates({"PRM_AUTO_REGISTER": "on"}, {}) == {}            # (with the copilot off: no effect)
+    assert adv.validate_updates({"PRM_AUTO_REGISTER": "on", "PRM_COPILOT": "on", "CLAUDE_RELAY": "on",
+                                 "CLAUDE_RELAY_TOKEN": "x" * 20, "ADMIN_WXID": "wxid_admin"}, {}) == {}
+    assert set(adv.validate_updates({"PRM_AUTO_REGISTER": "always"}, {})) == {"PRM_AUTO_REGISTER"}
