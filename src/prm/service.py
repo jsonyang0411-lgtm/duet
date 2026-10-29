@@ -73,6 +73,7 @@ from ..relay.service import MAX_AGE_SEC, job_meta
 from ..relay.store import PRM
 from ..wechat.new_friends import is_friend_notice
 from . import contact, deals, gates, pii, platforms, retention
+from .friend_adds import FriendAdds
 from .result import MAX_DRAFT_CHARS, MESSAGE_KINDS, DraftError, parse_draft
 from .store import (
     APPROVED, BUYIN_TOOL, COPILOT, DRAFT_NOTES, DROPPED, EXECUTING, FAILED, HUMAN, LANE_BUYIN, LANE_REPLY, LANE_SYSTEM,
@@ -424,7 +425,7 @@ EVENT_NAMES = {
     "commission_covered": "邀约卡开过专属佣金，当作开好",
     "buyin_message": "百应私信", "buyin_copy": "复制百应私信草稿（含完整号码）", "buyin_sent": "运营已在百应手动发出",
     "buyin_draft_failed": "百应私信的草稿没写成",
-    "friend_add_link": "关联抖音号",
+    "friend_add_link": "关联抖音号", "friend_add_contact": "她在百应里留了联系方式（已经是登记达人，不用加）",
 }
 # A creator's message recorded without a draft because it was read too late (PRM_CATCHUP_HOURS).
 MISSED_EVENT_NAME = "机器人没在读时达人的消息（没有起草）"
@@ -452,6 +453,8 @@ def event_out(ev: dict) -> dict:
         name = f"商品 {detail['item']} 邀约卡开过 {detail.get('rate')}% 专属佣金，当作开好"
     elif ev["kind"] == "buyin_message":
         name = "百应私信：我方（运营在百应里回的）" if detail.get("from") == "shop" else "百应私信：达人"
+    elif ev["kind"] == "friend_add_contact" and detail.get("line"):
+        name = f"她在百应里留了联系方式（已经是登记达人，不用加）：{detail['line']}"
     elif ev["kind"] == "friend_add_link" and detail.get("account"):
         name = (f"关联抖音号 {detail['account']}" + (f"（加微信 #{detail['add_id']}）" if detail.get("add_id") else "")
                 + (f"，{str(detail['invited_at'])[:16].replace('T', ' ')} 发的邀约卡" if detail.get("invited_at") else ""))
@@ -687,6 +690,12 @@ class PrmService:
         # who a 百应 creator is by her 抖音号 / 抖音 UID (Bot._wire_prm_directory); None: only the ids the deals' verified
         # 抖店 sample orders found (``_creator_ids``)
         self.creator_directory: Optional[Callable[[], list]] = None
+        # 加百应达人微信 (PRM_FRIEND_ADD, default off; src/prm/friend_adds.py): the records, one add_friend per
+        # confirmation (Bot.run attaches the admin handler and the auto-accept).  ``on_buyin_contact(event)`` is the 百应
+        # inbox's hook: dy-im-inbox calls it for each new contact of a conversation we invited or of a registered
+        # creator (STEP 7, not wired yet: nothing calls it before dy-im-inbox's contact commit is merged)
+        self.friend_adds = FriendAdds(self._store, config, clock=clock, register=self.register)
+        self.on_buyin_contact = self.friend_adds.offer_from_buyin
         # 批准并执行: checking that a 专属 action is not open already and starting it is one step
         self._approve_lock = threading.Lock()
         # Starting a 专属佣金 chain: looking whether it is under way and asking for its step is one step
@@ -731,6 +740,10 @@ class PrmService:
         """Settle what a stopped bot left half done (a send cut off; a deal marked 已签收 meanwhile:
         ``sweep_deliveries``), then the sender thread."""
         now = self._clock()
+        try:
+            self.friend_adds.start()               # (an add cut off by a stop: unsure)
+        except Exception:
+            logger.exception("PRM: the friend-add records could not be looked at")
         for p in self._store.packets((SENDING,), limit=500):
             # (read back after all, its line confirms it: ``_confirm``)
             self._store.move(p["id"], (SENDING,), FAILED, outcome="indeterminate", sent_at=now, error=UNSURE_ERROR)
@@ -3814,6 +3827,10 @@ class PrmService:
             self._buyin_scrub_jobs()
         except Exception:
             logger.exception("PRM: the 百应 inbox jobs could not be looked at; tried again later")
+        try:                                       # 加百应达人微信: the numbers' time, the ended records' (design §6.10)
+            self.friend_adds.sweep(now, retention_days=self._retention_days, force=True)
+        except Exception:
+            logger.exception("PRM: the friend-add records could not be cleaned up; tried again later")
         for deal in self._store.deals_to_purge(now, self._retention_days):
             try:
                 self.purge(deal, now)

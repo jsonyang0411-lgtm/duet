@@ -626,5 +626,44 @@ class LoadConfigValidationIntegrationTests(unittest.TestCase):
             self.assertIn("MESSAGE_BURST_WINDOW_SEC", str(ctx.exception))
 
 
+
+class FriendAddConfigTests(unittest.TestCase):
+    """加百应达人微信 (PRM_FRIEND_ADD, CODEBASE_REFERENCE 功能 R): off by default; its numbers stay in their ranges."""
+
+    def test_defaults_and_what_the_env_says(self):
+        from src.config import BotConfig, load_config
+
+        self.assertEqual((BotConfig().prm_friend_add, BotConfig().prm_friend_add_daily_max,
+                          BotConfig().prm_friend_add_gap_sec, BotConfig().prm_friend_add_brand),
+                         ("off", 10, 120, ""))
+        with patch.dict(os.environ, {}, clear=True):
+            config = load_config()
+        self.assertEqual(config.prm_friend_add, "off")
+        self.assertEqual(config.prm_friend_add_greeting, "您好{昵称}，我是{品牌}，百应上联系您的～")
+        with patch.dict(os.environ, {"PRM_FRIEND_ADD": "yes", "PRM_FRIEND_ADD_DAILY_MAX": "5",
+                                     "PRM_FRIEND_ADD_GAP_SEC": "300", "PRM_FRIEND_ADD_GREETING": " 你好{昵称} ",
+                                     "PRM_FRIEND_ADD_BRAND": " 测试品牌 "}, clear=True):
+            config = load_config()
+        self.assertEqual((config.prm_friend_add, config.prm_friend_add_daily_max, config.prm_friend_add_gap_sec,
+                          config.prm_friend_add_greeting, config.prm_friend_add_brand),
+                         ("on", 5, 300, "你好{昵称}", "测试品牌"))
+
+    def test_values_out_of_range_are_refused(self):
+        from src.config import _validate_config
+
+        _validate_config({"prm_friend_add": "on", "prm_friend_add_daily_max": 30, "prm_friend_add_gap_sec": 30})
+        for key, value, name in (("prm_friend_add", "maybe", "PRM_FRIEND_ADD"),
+                                 ("prm_friend_add_daily_max", 0, "PRM_FRIEND_ADD_DAILY_MAX"),
+                                 ("prm_friend_add_daily_max", 31, "PRM_FRIEND_ADD_DAILY_MAX"),
+                                 ("prm_friend_add_gap_sec", 29, "PRM_FRIEND_ADD_GAP_SEC"),
+                                 ("prm_friend_add_gap_sec", 3601, "PRM_FRIEND_ADD_GAP_SEC"),
+                                 ("prm_friend_add_greeting", "", "PRM_FRIEND_ADD_GREETING"),
+                                 ("prm_friend_add_greeting", "长" * 61, "PRM_FRIEND_ADD_GREETING"),
+                                 ("prm_friend_add_brand", "牌" * 21, "PRM_FRIEND_ADD_BRAND")):
+            with self.assertRaises(RuntimeError) as ctx:
+                _validate_config({key: value})
+            self.assertIn(name, str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5,6 +5,7 @@ the route step ``admin_command``); a group message never reaches this handler.
 """
 
 import logging
+import re
 from typing import Callable, Iterable, Optional
 
 logger = logging.getLogger(__name__)
@@ -19,13 +20,17 @@ AUTO_ACCEPT_COMMANDS = {                 # whitespace-normalised text -> switch 
     "自动同意好友 关": False, "自动同意好友 关闭": False, "关闭自动同意": False,
     "自动同意好友关": False, "自动同意好友关闭": False,
 }
+# 加百应达人微信 (src/prm/friend_adds.py, PRM_FRIEND_ADD): the records' list, one add, not to be added.
+FRIEND_ADDS_COMMANDS = ("待加达人", "待加的达人")
+FRIEND_ADD_COMMAND = re.compile(r"^(不加达人|加达人)\s*#?\s*(\d{1,9})$")
+NO_FRIEND_ADDS = "加百应达人微信没打开（要达人副驾驶和 PRM_FRIEND_ADD）"
 
 
 # The management commands in one line each: the Claude relay's help lists them when the
 # bot only relays (CLAUDE_RELAY_ONLY=on), where this handler's own help does not fit.
 RELAY_HELP = (
     "管理命令（只有管理员能用，不会交给 Mac）：\n"
-    "查状态 / 添加好友 号码 [附言] / 同意好友 / 自动同意好友 开|关"
+    "查状态 / 添加好友 号码 [附言] / 同意好友 / 自动同意好友 开|关 / 待加达人 / 加达人 编号 / 不加达人 编号"
 )
 
 HELP_TEXT = (
@@ -34,6 +39,8 @@ HELP_TEXT = (
     "  添加好友 <号码> [附言]     搜索并发送添加好友申请\n"
     "  同意好友 / 通过好友        立即检查并同意所有好友申请\n"
     "  自动同意好友 开 / 关        切换后台自动同意功能\n"
+    "  待加达人                    百应达人留的、还没加的微信（号码打码）\n"
+    "  加达人 <编号> / 不加达人 <编号>  发一次好友申请 / 记成不加\n"
     "  帮助 / help                 显示本帮助\n"
     "开了中转时，cc 开头的私聊转给 Mac 上的 Claude Code（cc 帮助 看中转命令）"
 )
@@ -47,6 +54,7 @@ class AdminCommandHandler:
       添加好友 <微信号/手机号> [附言] → 搜索并发送好友申请
       同意好友 / 通过好友        → 立即检查并同意所有待处理的好友申请
       自动同意好友 开 / 关      → 切换后台自动同意开关
+      待加达人 / 加达人 N / 不加达人 N → 加百应达人微信（src/prm/friend_adds.py）的记录、发一次申请、不加
       帮助 / help / 命令        → show help text
 
     Usage:
@@ -65,6 +73,7 @@ class AdminCommandHandler:
         self._friend = friend_manager
         self._auto_friend = auto_friend_service
         self._status = status
+        self._friend_adds = None
 
     def set_friend_manager(self, friend_manager, auto_friend_service=None) -> None:
         """Attach or update the FriendManager and AutoFriendService instances."""
@@ -75,6 +84,15 @@ class AdminCommandHandler:
     def set_status(self, status: Optional[Callable[[], Iterable[str]]]) -> None:
         """Attach the Bot's status lines for 查状态."""
         self._status = status
+
+    def set_friend_adds(self, friend_adds) -> None:
+        """加百应达人微信 (src/prm/friend_adds.py ``FriendAdds``) for 待加达人 / 加达人 N / 不加达人 N."""
+        self._friend_adds = friend_adds
+
+    @property
+    def can_add_friends(self) -> bool:
+        """There is a friend manager to drive the WeChat window (加百应达人微信 shows its button only then)."""
+        return self._friend is not None
 
     def handle(self, content: str) -> str | None:
         """Parse and execute an admin command. Returns reply text or None.
@@ -111,6 +129,12 @@ class AdminCommandHandler:
         switch = AUTO_ACCEPT_COMMANDS.get(" ".join(content.split()))
         if switch is not None:
             return lambda: self._cmd_auto_accept(switch)
+        if content in FRIEND_ADDS_COMMANDS:
+            return self._cmd_friend_adds
+        match = FRIEND_ADD_COMMAND.match(content)
+        if match:
+            add, add_id = match.group(1) == "加达人", int(match.group(2))
+            return lambda: self._cmd_friend_add(add, add_id)
         return None
 
     # ── Command implementations ────────────────────────────────────
@@ -156,6 +180,24 @@ class AdminCommandHandler:
             return ""
         return "；自动同意好友也已暂停（发「自动同意好友 开」恢复）"
 
+    def add_friend_checked(self, target: str, greeting: str = "") -> dict:
+        """One ``add_friend`` call with the breaker of the 添加好友 command: WeChat's risk prompt pauses the auto-accept
+        too (``paused``: the words saying so, "" without an auto-accept service).  No friend manager: ``reason``
+        ``no_manager``; an exception: logged, ``reason`` ``error``.  加百应达人微信 (src/prm/friend_adds.py) adds this
+        way; the answer's ``message`` holds the target as typed (its callers decide what to show)."""
+        if self._friend is None:
+            return {"ok": False, "target": target, "reason": "no_manager", "message": f"{NO_FRIEND_MANAGER}添加好友操作"}
+        try:
+            res = self._friend.add_friend(target, greeting)
+        except Exception:
+            logger.exception("ADMIN: 添加好友 failed")
+            return {"ok": False, "target": target, "reason": "error",
+                    "message": "添加好友时出错，已中止（详见日志）：请在微信里看一下申请发出去没有"}
+        res = dict(res) if isinstance(res, dict) else {"ok": False, "target": target, "reason": "error"}
+        if res.get("reason") == "risk":                  # WeChat holds the account back
+            res["paused"] = self._pause_auto("添加好友时微信提示操作太频繁")
+        return res
+
     def _cmd_add_friend(self, content: str) -> str:
         """Handle the '添加好友' command."""
         if self._friend is None:
@@ -167,15 +209,20 @@ class AdminCommandHandler:
 
         target = parts[1].strip()
         reason = parts[2].strip() if len(parts) > 2 else ""
-        try:
-            res = self._friend.add_friend(target, reason)
-        except Exception:
-            logger.exception("ADMIN: 添加好友 failed")
-            return "添加好友时出错，已中止（详见日志）：请在微信里看一下申请发出去没有"
-        message = str(res.get("message", "处理完成"))
-        if res.get("reason") == "risk":                  # WeChat holds the account back
-            message += self._pause_auto("添加好友时微信提示操作太频繁")
-        return message
+        res = self.add_friend_checked(target, reason)
+        return str(res.get("message", "处理完成")) + str(res.get("paused") or "")
+
+    def _cmd_friend_adds(self) -> str:
+        """「待加达人」: 加百应达人微信's records not done yet (numbers masked)."""
+        if self._friend_adds is None:
+            return NO_FRIEND_ADDS
+        return self._friend_adds.admin_pending_text()
+
+    def _cmd_friend_add(self, add: bool, add_id: int) -> str:
+        """「加达人 N」 (one add, the console's checks; the answer after the window action) / 「不加达人 N」."""
+        if self._friend_adds is None:
+            return NO_FRIEND_ADDS
+        return self._friend_adds.admin_add(add_id) if add else self._friend_adds.admin_drop(add_id)
 
     def _cmd_accept_friends(self) -> str:
         """Handle the '同意好友' command."""

@@ -1760,5 +1760,75 @@ class DailyMaxConfigTests(unittest.TestCase):
         service._notify("今天到上限了")
         self.assertEqual(sent, [("wxid_admin", "今天到上限了")])
 
+
+class AddFriendCheckedTests(unittest.TestCase):
+    """add_friend_checked (加百应达人微信 adds this way, src/prm/friend_adds.py): the admin's 添加好友 without its words;
+    the command itself answers word for word as before (AdminFriendCommandTests, AdminRiskAndCapTests)."""
+
+    def test_without_a_friend_manager_it_says_so_and_adds_nothing(self):
+        handler = AdminCommandHandler()
+        res = handler.add_friend_checked("13800000000", "你好")
+        self.assertEqual((res["ok"], res["reason"]), (False, "no_manager"))
+        self.assertFalse(handler.can_add_friends)
+
+    def test_an_exception_is_an_error_and_is_logged(self):
+        friend = MagicMock()
+        friend.add_friend.side_effect = RuntimeError("the window handle went away")
+        with self.assertLogs("src.admin", level="ERROR"):
+            res = AdminCommandHandler(friend_manager=friend).add_friend_checked("13800000000")
+        self.assertEqual(res["reason"], "error")
+        self.assertEqual(res["message"], "添加好友时出错，已中止（详见日志）：请在微信里看一下申请发出去没有")
+
+    def test_a_risk_prompt_pauses_the_auto_accept_and_says_so(self):
+        friend = MagicMock()
+        answer = {"ok": False, "reason": "risk", "message": "微信提示「操作过于频繁」…"}
+        friend.add_friend.return_value = answer
+        auto = AutoFriendService(CountingManager(), watch=False, daily_max=50, wall_clock=lambda: 0.0)
+        handler = AdminCommandHandler(friend_manager=friend, auto_friend_service=auto)
+        res = handler.add_friend_checked("13800000000", "你好")
+        friend.add_friend.assert_called_once_with("13800000000", "你好")
+        self.assertIn("自动同意好友也已暂停", res["paused"])
+        self.assertEqual(auto.paused_why(), "添加好友时微信提示操作太频繁")
+        self.assertNotIn("paused", answer)                          # the manager's own answer is left alone
+        self.assertTrue(handler.can_add_friends)
+
+    def test_an_answer_that_went_through_is_passed_on_as_it_is(self):
+        friend = MagicMock()
+        friend.add_friend.return_value = {"ok": True, "target": "abcdefyz", "message": "已成功向「abcdefyz」发送好友申请"}
+        res = AdminCommandHandler(friend_manager=friend).add_friend_checked("abcdefyz", "")
+        self.assertEqual(res, {"ok": True, "target": "abcdefyz", "message": "已成功向「abcdefyz」发送好友申请"})
+
+    def test_paused_why_only_reads(self):
+        auto = AutoFriendService(CountingManager(), watch=False, wall_clock=lambda: 0.0)
+        self.assertEqual(auto.paused_why(), "")
+        auto.pause("微信提示「操作过于频繁」", tell=False)
+        for _ in range(2):                                           # reading it changes nothing
+            self.assertEqual(auto.paused_why(), "微信提示「操作过于频繁」")
+        self.assertIn("已暂停", auto.status_note())
+
+
+class BotFriendAddsWiringTests(unittest.TestCase):
+    """Bot.run gives 加百应达人微信 the admin handler, the auto-accept service and the admin's notifier."""
+
+    def test_the_friend_adds_get_the_handler_and_the_auto_accept(self):
+        config = BotConfig(admin_wxid="wxid_admin")
+        bot = Bot(config)
+        bot._auto_friend = object()
+        prm = SimpleNamespace(friend_adds=MagicMock())
+        admin = AdminCommandHandler()
+        bot._wire_friend_adds(config, SimpleNamespace(send_text=lambda chat, text: True), admin, prm)
+        handler, auto, notify = prm.friend_adds.attach.call_args.args
+        self.assertIs(handler, admin)
+        self.assertIs(auto, bot._auto_friend)
+        self.assertTrue(callable(notify))
+        self.assertIs(admin._friend_adds, prm.friend_adds)
+
+    def test_without_the_prm_nothing_is_wired(self):
+        admin = AdminCommandHandler()
+        Bot(BotConfig())._wire_friend_adds(BotConfig(), SimpleNamespace(), admin, None)
+        self.assertIsNone(admin._friend_adds)
+        self.assertIn("没打开", admin.handle("待加达人"))
+
+
 if __name__ == "__main__":
     unittest.main()

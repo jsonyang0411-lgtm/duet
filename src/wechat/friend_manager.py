@@ -1179,6 +1179,12 @@ class AutoFriendService:
             return f"今天已自动同意 {accepted} 个，到了上限 {self._daily_max}，明天继续"
         return f"今天已自动同意 {accepted}/{self._daily_max}"
 
+    def paused_why(self) -> str:
+        """Why it is paused ("" when it is not); only reads (加百应达人微信 asks before every add, src/prm/friend_adds.py)."""
+        with self._day_lock:
+            paused = self._day.get("paused")
+        return str(paused.get("why") or "已暂停") if isinstance(paused, dict) else ("已暂停" if paused else "")
+
     def pause(self, why: str, tell: bool = True) -> None:
         """Stop accepting until switched on again (``enable``), also after a restart; ``tell``: the admin hears it."""
         with self._day_lock:

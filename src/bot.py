@@ -246,6 +246,9 @@ class Bot:
 
         self._start_friend_management(config, backend, admin_handler,
                                       on_accepted=new_friends.accepts.note if new_friends is not None else None)
+        # 加百应达人微信 (PRM_FRIEND_ADD): its one add per confirmation goes through the admin handler's add_friend_checked
+        # (the 添加好友 breaker) and waits while the auto-accept is paused; the admin's 待加达人 / 加达人 N / 不加达人 N
+        self._wire_friend_adds(config, backend, admin_handler, prm)
         admin_handler.set_status(lambda: self._status_lines(router, relay, prm, edge))
 
         # ── 6. Health monitor ───────────────────────────────────
@@ -472,6 +475,15 @@ class Bot:
         admin_handler.set_friend_manager(manager, auto)
         if auto.enabled:
             auto.start()
+
+    def _wire_friend_adds(self, config, backend, admin_handler, prm) -> None:
+        """加百应达人微信 (src/prm/friend_adds.py): the admin handler (``add_friend_checked``; no friend manager, as on the
+        Mac: nothing is added there, the number can be copied), the auto-accept service (its pause stops every add)
+        and the admin's notifier; the admin's commands.  Without the PRM nothing is wired."""
+        if prm is None:
+            return
+        prm.friend_adds.attach(admin_handler, self._auto_friend, self._admin_notifier(config, backend))
+        admin_handler.set_friend_adds(prm.friend_adds)
 
     @staticmethod
     def _admin_notifier(config, backend):

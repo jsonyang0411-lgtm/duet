@@ -339,6 +339,16 @@ class BotConfig:
     # console says it cannot be read).  A registered creator's new lines become a 百应 draft in 待审批 that an operator
     # copies and sends in 百应 by hand; the bot never sends it.
     prm_buyin_sync_min: int = 0
+    # 加百应达人微信 (src/prm/friend_adds.py, CODEBASE_REFERENCE 功能 R): "on" lets an operator turn the contact a creator
+    # left in 百应 into ONE WeChat friend request (the console's 「添加该达人微信」, or the admin's 加达人 N) through the
+    # friend manager's add_friend (Windows: the WeChat window), at most prm_friend_add_daily_max a day and
+    # prm_friend_add_gap_sec apart; WeChat's risk prompt pauses it with the auto-accept.  Off (the default): nothing of
+    # it is kept or done.  The greeting: {昵称} her 百应 nickname, {品牌} prm_friend_add_brand (this PC's .env only).
+    prm_friend_add: str = "off"
+    prm_friend_add_daily_max: int = 10
+    prm_friend_add_gap_sec: int = 120
+    prm_friend_add_greeting: str = "您好{昵称}，我是{品牌}，百应上联系您的～"
+    prm_friend_add_brand: str = ""
     # === WeChat edge (src/edge, edge-protocol.md) for the Mac business service ===
     # "on": Windows only receives and sends WeChat messages for the creators the Mac lists;
     # the Mac pulls /edge/* on the relay's port with PRM_EDGE_TOKEN.  Not with PRM_COPILOT.
@@ -521,6 +531,17 @@ def _validate_config(kwargs: dict) -> None:
     buyin_min = int(kwargs.get("prm_buyin_sync_min", 0))
     if not (buyin_min == 0 or 5 <= buyin_min <= 1440):
         errors.append(f"PRM_BUYIN_SYNC_MIN must be 0 (off) or between 5 and 1440, got {kwargs.get('prm_buyin_sync_min')}")
+    friend_add = kwargs.get("prm_friend_add", "off")
+    if friend_add not in ("off", "on"):
+        errors.append(f"PRM_FRIEND_ADD must be off or on, got {friend_add}")
+    if not (1 <= int(kwargs.get("prm_friend_add_daily_max", 10)) <= 30):
+        errors.append(f"PRM_FRIEND_ADD_DAILY_MAX must be between 1 and 30, got {kwargs.get('prm_friend_add_daily_max')}")
+    if not (30 <= int(kwargs.get("prm_friend_add_gap_sec", 120)) <= 3600):
+        errors.append(f"PRM_FRIEND_ADD_GAP_SEC must be between 30 and 3600, got {kwargs.get('prm_friend_add_gap_sec')}")
+    if not (1 <= len(str(kwargs.get("prm_friend_add_greeting", "您好{昵称}，我是{品牌}，百应上联系您的～")).strip()) <= 60):
+        errors.append("PRM_FRIEND_ADD_GREETING must be 1-60 characters")
+    if len(str(kwargs.get("prm_friend_add_brand", "") or "").strip()) > 20:
+        errors.append("PRM_FRIEND_ADD_BRAND must be at most 20 characters")
     prm_edge = kwargs.get("prm_edge", "off")
     if prm_edge not in ("off", "on"):
         errors.append(f"PRM_EDGE must be off or on, got {prm_edge}")
@@ -662,6 +683,11 @@ def load_config() -> BotConfig:
         "prm_sample_waybill_days": int(os.getenv("PRM_SAMPLE_WAYBILL_DAYS", "3")),
         "prm_sample_sign_days": int(os.getenv("PRM_SAMPLE_SIGN_DAYS", "10")),
         "prm_buyin_sync_min": int(os.getenv("PRM_BUYIN_SYNC_MIN", "0")),
+        "prm_friend_add": _parse_switch(os.getenv("PRM_FRIEND_ADD", "off")),
+        "prm_friend_add_daily_max": int(os.getenv("PRM_FRIEND_ADD_DAILY_MAX", "10")),
+        "prm_friend_add_gap_sec": int(os.getenv("PRM_FRIEND_ADD_GAP_SEC", "120")),
+        "prm_friend_add_greeting": os.getenv("PRM_FRIEND_ADD_GREETING", "").strip() or "您好{昵称}，我是{品牌}，百应上联系您的～",
+        "prm_friend_add_brand": os.getenv("PRM_FRIEND_ADD_BRAND", "").strip(),
         "prm_edge": _parse_switch(os.getenv("PRM_EDGE", "off")),
         "prm_edge_token": os.getenv("PRM_EDGE_TOKEN", "").strip(),
         "edge_url": os.getenv("EDGE_URL", "").strip(),
