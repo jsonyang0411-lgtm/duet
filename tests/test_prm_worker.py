@@ -694,6 +694,83 @@ def test_a_big_orders_note_keeps_every_product_and_the_instruction(worker):
     assert told.index("第一个还没开的商品") < told.index(ids[0])                  # what to do, then the list
 
 
+# ── 下班时段 (PRM_NIGHT_AUTO_HOURS on Windows) ────────────────────────────
+
+NIGHT_LINE = "现在是下班时段（本机时间 21:30，下班时段 18:00–09:00）：运营不在，满足条件的回复会直接发给达人，按 kb/ 里下班时段的规则写。"
+
+
+def test_a_job_made_in_the_night_window_says_so_and_no_other_does(worker):
+    """Windows puts ``meta.night`` into a draft job made inside its 下班时段: the prompt says the operators are
+    away and a reply that passes the bot's checks goes out as it is; without it the prompt is as it was."""
+    job = {"id": 11, "text": "[10-29 21:30] 好呀，可以寄来看看", "meta": {"night": {"window": "18:00-09:00", "at": "21:30"}}}
+    prompt = worker.prm_prompt(job, 1, "小美", "deals/1.md", [], [])
+    assert NIGHT_LINE in prompt.split("\n")
+    assert prompt.index("合作单：") < prompt.index(NIGHT_LINE) < prompt.index("<creator_message>")
+    plain = worker.prm_prompt({"id": 12, "text": "你好", "meta": {}}, 1, "小美", "deals/1.md", [], [])
+    assert "下班时段" not in plain
+    for meta in ({"night": None}, {"night": "18:00-09:00"}, {"late": {"from": "?"}}):
+        assert worker.prm_prompt({"id": 12, "text": "你好", "meta": meta}, 1, "小美", "deals/1.md", [], []) == plain
+    odd = worker.prm_prompt({"id": 13, "text": "你好", "meta": {"night": {"window": "整晚", "at": "<b>"}}},
+                            1, "小美", "deals/1.md", [], [])
+    assert "现在是下班时段：运营不在，满足条件的回复会直接发给达人" in odd and "<b>" not in odd and "整晚" not in odd
+    note = worker.PRM_SYSTEM_NOTE
+    assert "任务里写明现在是下班时段时" in note and "needs_attention 为 true 的" in note
+    assert "不带任何数字、比例、金额、日期，也不做任何承诺" in note and "可能原样发给达人" in note
+
+
+@pytest.fixture
+def night_bot(tmp_path):
+    """A bot whose 下班时段 is the two hours around now (this machine's clock), so its draft jobs are night ones."""
+    local = time.localtime()
+    minute = local.tm_hour * 60 + local.tm_min
+    start, end = (minute - 60) % 1440, (minute + 60) % 1440
+    cfg = SimpleNamespace(
+        claude_relay="on", claude_relay_token=TOKEN, claude_relay_host="127.0.0.1", claude_relay_port=0,
+        claude_relay_prefix="cc", claude_relay_wxids=[], claude_relay_db=":memory:",
+        claude_relay_max_chars=1500, admin_wxid="wxid_admin", prm_copilot="on", prm_db=":memory:",
+        prm_night_auto_hours=f"{start // 60:02d}:{start % 60:02d}-{end // 60:02d}:{end % 60:02d}")
+    relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), files_dir=tmp_path / "relay", send=lambda c, t: True)
+    prm = PrmService(cfg, relay, store=PrmStore(":memory:"), send=lambda c, t: True, send_file=lambda c, p: True)
+    prm.register(CREATOR, "小美")
+    relay.start()
+    host, port = relay.address
+    yield SimpleNamespace(relay=relay, prm=prm, url=f"http://{host}:{port}", texts=[], window=cfg.prm_night_auto_hours)
+    relay.stop()
+
+
+def test_a_night_job_runs_through_the_worker_and_its_plain_draft_goes_out_by_itself(worker, night_bot, fake_claude,
+                                                                                    tmp_path, workspace):
+    """End to end: the bot's job carries ``meta.night``, the worker tells Claude, the draft (her own number as
+    〈手机1〉, nothing to hold it) comes back and the bot sends it by itself (route ``night``)."""
+    creator_says(night_bot, "我是小美，电话 13812345678")
+    run_one(worker, night_bot, settings(night_bot, fake_claude, tmp_path, prm_workspace=str(workspace)))
+    [call] = fake_claude.calls()
+    start, end = night_bot.window.split("-")
+    assert f"下班时段 {start}–{end}）：运营不在，满足条件的回复会直接发给达人" in call["prompt"]
+    [packet] = night_bot.prm.store.packets()
+    assert (packet["status"], packet["route"], packet["text"]) == ("approved", "night", "确认一下：小美〈手机1〉")
+
+
+def test_the_night_line_works_on_the_macs_own_python(tmp_path):
+    """The worker stays standard library and Python 3.9 (macOS's /usr/bin/python3): the night line too."""
+    python = "/usr/bin/python3"
+    if not os.path.exists(python):
+        pytest.skip("no system python3")
+    script = tmp_path / "smoke.py"
+    script.write_text(
+        "import importlib.util, sys\n"
+        f"spec = importlib.util.spec_from_file_location('w', {str(ROOT / 'tools/claude_relay/worker.py')!r})\n"
+        "w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w)\n"
+        "job = {'id': 1, 'text': '[10-29 21:30] 你好', 'meta': {'night': {'window': '18:00-09:00', 'at': '21:30'}}}\n"
+        f"assert {NIGHT_LINE!r} in w.prm_prompt(job, 1, '小美', 'deals/1.md', [], []).split('\\n')\n"
+        "assert '下班时段' not in w.prm_prompt({'id': 2, 'text': '你好', 'meta': {}}, 1, '小美', 'deals/1.md', [], [])\n"
+        "print('ok', sys.version_info[:2])\n", encoding="utf-8")
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), "CLAUDE_RELAY_HOME": str(tmp_path / "home")}
+    run = subprocess.run([python, "-I", str(script)], capture_output=True, text=True, timeout=60, cwd=tmp_path, env=env)
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.startswith("ok")
+
+
 # ── 8.2: the case file on the Mac ─────────────────────────────────────────
 
 CASE = """# 合作单：小美（编号 1）

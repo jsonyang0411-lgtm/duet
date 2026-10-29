@@ -267,6 +267,8 @@ PRM_SYSTEM_NOTE = (
     "涉及价格、佣金、结算、赔付、档期变更的内容只能引用 kb/ 里的原文；kb/ 里没有的不要编，"
     "回复里说「我确认一下再回复你」，并把 needs_attention 设为 true。"
     "达人要求找真人、投诉或情绪激烈、你拿不准的时候，也把 needs_attention 设为 true。"
+    "任务里写明现在是下班时段时，满足条件的回复会不经运营审核直接发给达人：这时 needs_attention 为 true 的，"
+    "reply_draft 只写一句过渡安抚的话，不带任何数字、比例、金额、日期，也不做任何承诺，这句话可能原样发给达人。"
     "收件信息（收件人、手机、省市区、详细地址、SKU、数量）齐了的时候，在回复里完整复述一遍请达人确认。\n"
     "【输出】最后用结构化结果回答：intent 一句话说达人这次想要什么；slots 是对话里已确认的信息，"
     "键用中文（如 收件人、手机、地址、SKU、数量、档期、合作形式），值是文字；stage_proposal 是建议的阶段代码，"
@@ -1466,10 +1468,36 @@ def coarse_platform_logs(cutoff: float) -> int:
     return changed
 
 
+_NIGHT_WINDOW = re.compile(r"(\d{1,2}:\d{2})-(\d{1,2}:\d{2})")
+_NIGHT_AT = re.compile(r"\d{1,2}:\d{2}")
+
+
+def night_line(meta: dict) -> str:
+    """The prompt's line for a job the bot made in its 下班时段 (PRM_NIGHT_AUTO_HOURS on Windows: ``meta.night`` =
+    ``{"window": "18:00-09:00", "at": "21:30"}``): the operators are away and a draft that passes the bot's night
+    checks goes to the creator as it is.  "" without it (the prompt as before).  Only well-formed times are
+    repeated."""
+    night = meta.get("night")
+    if not isinstance(night, dict):
+        return ""
+    when = []
+    at = str(night.get("at") or "").strip()
+    if _NIGHT_AT.fullmatch(at):
+        when.append(f"本机时间 {at}")
+    window = _NIGHT_WINDOW.fullmatch(str(night.get("window") or "").strip())
+    if window:
+        when.append(f"下班时段 {window.group(1)}–{window.group(2)}")
+    return ("现在是下班时段" + (f"（{'，'.join(when)}）" if when else "")
+            + "：运营不在，满足条件的回复会直接发给达人，按 kb/ 里下班时段的规则写。")
+
+
 def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, failed: list) -> str:
     title = " ".join(str(name).split())[:30] or f"达人 {party_id}"
     lines = [f"合作单：{title}（编号 {party_id}），案卷是 {case_rel}。"]
     meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
+    night = night_line(meta)
+    if night:
+        lines.append(night)
     if meta.get("sent"):
         lines.append(sent_block(meta["sent"]))
     history = meta.get("history")
