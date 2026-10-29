@@ -904,11 +904,14 @@ class FriendManager:
                     self._close_window(dialog_hwnd)
                     return _failure(keyword, "not_found", f"未找到用户「{keyword}」，请核实微信号或手机号")
 
-                if any(marker in card_text for marker in ALREADY_FRIEND_MARKERS):
+                found = _find_row(rows, *ADD_BUTTON_LABELS)
+                # A stranger's card can show 「朋友资料」 too: a friend's card is one with 「发消息」 and no add
+                # button (as on the older path).
+                if (found is None and "发消息" in card_text
+                        and any(marker in card_text for marker in ALREADY_FRIEND_MARKERS)):
                     self._close_window(dialog_hwnd)
                     return _failure(keyword, "already_friend", f"用户「{keyword}」已是您的微信好友，无需重复添加")
 
-                found = _find_row(rows, *ADD_BUTTON_LABELS)
                 if found is not None and seen is not None and _still_there([found], seen):
                     add_button = found
                     break

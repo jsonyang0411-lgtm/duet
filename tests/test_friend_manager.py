@@ -730,7 +730,7 @@ class WeChat4AddFriendTests(FriendTestCase):
             self.assertEqual(res["reason"], "not_found")
 
     def test_wechat4_already_friend(self):
-        manager = self.manager(FakeWindow(), FakeOcr([row("朋友资料", 0.1, 0.4, 0.3, 0.45), row("语音聊天", 0.4, 0.8, 0.6, 0.9)]))
+        manager = self.manager(FakeWindow(), FakeOcr([row("朋友资料", 0.1, 0.4, 0.3, 0.45), row("发消息", 0.1, 0.7, 0.3, 0.75), row("语音聊天", 0.4, 0.8, 0.6, 0.9)]))
         with patch.object(manager, "_open_add_friend_dialog_wechat4", return_value=999), \
              patch.object(manager, "_focus_window"), \
              patch.object(manager, "_close_window"):
@@ -773,6 +773,12 @@ class WeChat4AddFriendTests(FriendTestCase):
         self.assertTrue(self.wechat4(ocr)["ok"])
         self.assertEqual(ocr.captures, 5)                # low, middle, middle, the send button, the check
         self.assertEqual(self.clicks[1], (500, 534))     # the middle spot, not the low one
+
+    def test_wechat4_a_strangers_card_with_friend_words_is_not_taken_for_a_friend(self):
+        add_btn = row("添加到通讯录", 0.4, 0.8, 0.6, 0.9)
+        words = row("朋友资料", 0.1, 0.4, 0.3, 0.45)
+        ocr = FakeOcr([words], [words, add_btn], [words, add_btn], [row("发送", 0.4, 0.8, 0.6, 0.9)], [])
+        self.assertTrue(self.wechat4(ocr)["ok"])
 
     def test_wechat4_gives_up_when_the_button_never_settles(self):
         res = self.wechat4(FakeOcr([]))
