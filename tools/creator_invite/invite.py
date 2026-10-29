@@ -303,6 +303,14 @@ def load_config(path: Optional[str]) -> dict:
         raise ToolError("配置 wait_between 要是 [最少秒, 最多秒]，至少 10 秒", EXIT_USAGE)
     cfg["wait_between"] = [float(wait[0]), float(wait[1])]
     cfg["plan_max_age_days"] = _number(raw, "plan_max_age_days", 3, 0.01, 30)
+    # follow（达人回没回邀约卡，用户 2026-10-29）：北京时间几点到几点查、发卡后跟几天、一次最多查几位
+    hours = raw.get("follow_hours", [9, 23])
+    if (not isinstance(hours, list) or len(hours) != 2 or not all(isinstance(h, int) and not isinstance(h, bool) for h in hours)
+            or not 0 <= hours[0] < hours[1] <= 24):
+        raise ToolError("配置 follow_hours 要是 [开始点, 结束点]，北京时间 0 到 24 的整点，比如 [9, 23]", EXIT_USAGE)
+    cfg["follow_hours"] = list(hours)
+    cfg["follow_days"] = _number(raw, "follow_days", 14, 1, 60, integer=True)
+    cfg["follow_max"] = _number(raw, "follow_max", 40, 1, 200, integer=True)
     cfg["home"] = Path(os.path.expanduser(str(raw.get("home") or DEFAULT_HOME)))
     return cfg
 
@@ -1131,6 +1139,123 @@ def run_markdown(summary: dict) -> str:
     return out.getvalue()
 
 
+# ── follow: who answered a card ──────────────────────────────────────────────
+# 发过卡的达人，百应按钮从 2「继续沟通 · 待回复」变成 4「已建联」（她回了）或 3「已拒绝」时，在这台 Mac 上弹通知，叫运营去百应
+# 「合作消息」看（用户 2026-10-29：「达人要我们加她微信，我能及时看到吗」→ Mac 弹通知）。只读：每位一次搜索 + 每 20 位一次状态读
+# （douyin-engineering 的 buyin author-invite-status），不读也不发私信。由 LaunchAgent 每 30 分钟跑一次（README）。
+# 百应的「待回复会话数」（/connection/pc/im/conversations/all_unreply）不用：2026-10-29 发了二十多张卡时它是 0 / 0，看来只算达人
+# 主动发起的会话。
+
+FOLLOW_STATE = "follow-state.json"
+FOLLOW_LOG = "follow.jsonl"
+FINAL_STATUSES = {3, 4, 99, 100, 101}                       # 回了 / 拒绝 / 不能再沟通：不再查
+STATUS_WORDS = {1: "邀约带货", 2: "继续沟通 · 待回复", 3: "继续沟通 · 达人已拒绝", 4: "继续沟通 · 已建联", 99: "邀约带货（禁用）",
+                100: "在线沟通", 101: "在线沟通（禁用）"}
+PROBLEM_EVERY = timedelta(hours=2)                          # 查不了时最多两小时提醒一次
+
+
+def _when(text) -> Optional[datetime]:
+    try:
+        moment = datetime.fromisoformat(str(text))
+    except (TypeError, ValueError):
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=BJT)
+
+
+def mac_notify(title: str, text: str, runner: Callable = subprocess.run) -> None:
+    """A macOS notification (osascript; the texts go in as arguments, never into the script). A failure is only logged."""
+    script = ['-e', 'on run argv', '-e', 'display notification (item 2 of argv) with title (item 1 of argv) sound name "Glass"', '-e', 'end run']
+    try:
+        runner(["/usr/bin/osascript", *script, title[:120], text[:400]], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        sys.stderr.write(f"[follow] 弹不出通知：{e}\n")
+
+
+def follow_invites(cfg: dict, clis: Clis, ledger: Ledger, *, clock: Callable = now_bjt,
+                   notify: Optional[Callable] = None) -> dict:
+    """查一轮：台账里发出去了的卡（sent true），发卡后 follow_days 天内、还没回 / 没拒的；发卡 2 天内的隔 25 分钟以上查一次，
+    更早的隔 115 分钟以上，一次最多 follow_max 位（最久没查的先查）。状态变了就通知并记进 follow.jsonl；状态存在 follow-state.json。"""
+    now = clock()
+    hours = cfg["follow_hours"]
+    if not hours[0] <= now.astimezone(BJT).hour < hours[1]:
+        return {"skipped": f"北京时间 {hours[0]}～{hours[1]} 点之外不查"}
+    state_path = ledger.folder / FOLLOW_STATE
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        if not isinstance(state, dict):
+            raise ValueError("not an object")
+    except (OSError, ValueError):
+        state = {}
+    creators = state.setdefault("creators", {})
+    sent: Dict[str, datetime] = {}
+    for a in ledger._attempts().values():
+        at = _when(a.get("at"))
+        if a.get("sent") is True and a.get("aweme_id") and at is not None:
+            sent[a["aweme_id"]] = min(sent.get(a["aweme_id"], at), at)
+    due = []
+    for aweme, at in sent.items():
+        known = creators.get(aweme) or {}
+        if known.get("status") in FINAL_STATUSES or now - at > timedelta(days=cfg["follow_days"]):
+            continue
+        last = _when(known.get("checked_at"))
+        every = timedelta(minutes=25 if now - at < timedelta(days=2) else 115)
+        if last is not None and now - last < every:
+            continue
+        due.append((last or datetime(2000, 1, 1, tzinfo=BJT), aweme))
+    due = [aweme for _, aweme in sorted(due)][:cfg["follow_max"]]
+    summary = {"checked": len(due), "changes": [], "waiting": 0, "problem": None}
+    if due:
+        result = clis.run("dy", ["buyin", "author-invite-status", f"--aweme-id={','.join(due)}", "--names", "--pause-ms=4000",
+                                 f"--expect-shop-id={cfg['dy_expect_shop_id']}", "--no-open"], 1800)
+        if result.exit_code != 0 or result.data is None:
+            why = (LOGIN_HINT if result.unverifiable() else STOP_EXITS.get(result.exit_code)
+                   or ("命令行超时" if result.timed_out else f"命令行退出码 {result.exit_code}：{result.said()[:160]}"))
+            summary["problem"] = why
+            problem = state.get("problem") or {}
+            last = _when(problem.get("notified_at"))
+            if notify and (last is None or now - last >= PROBLEM_EVERY):
+                notify("百应：这次查不了达人回复", f"{why}。处理好以后会接着查")
+                problem["notified_at"] = now.isoformat(timespec="seconds")
+            state["problem"] = {**problem, "why": why, "at": now.isoformat(timespec="seconds")}
+        else:
+            state["problem"] = None
+            for c in result.data.get("creators") or []:
+                aweme = str(c.get("awemeId") or "") if isinstance(c, dict) else ""
+                if aweme not in due:
+                    continue
+                known = creators.get(aweme) or {}
+                status = c.get("status") if c.get("found") else None
+                entry = {**known, "status": status, "nickname": str(c.get("nickname") or known.get("nickname") or ""),
+                         "checked_at": now.isoformat(timespec="seconds")}
+                if status is not None and status != known.get("status"):
+                    entry["changed_at"] = now.isoformat(timespec="seconds")
+                    if status != 2:
+                        summary["changes"].append({"aweme_id": aweme, "nickname": entry["nickname"], "from": known.get("status"), "to": status})
+                creators[aweme] = entry
+    summary["waiting"] = sum(1 for aweme in sent if (creators.get(aweme) or {}).get("status") not in FINAL_STATUSES)
+    for change in summary["changes"]:
+        rec = {"at": now.isoformat(timespec="seconds"), **change}
+        fd = os.open(str(ledger.folder / FOLLOW_LOG), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, (json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8"))
+        finally:
+            os.close(fd)
+    if notify:
+        for change in summary["changes"][:4]:
+            who = f"{change['nickname'] or '达人'}（{change['aweme_id']}）"
+            if change["to"] == 4:
+                notify("百应：达人回复了邀约", f"{who} 回复了：去百应「合作消息」看她说什么，要加微信就加")
+            elif change["to"] == 3:
+                notify("百应：达人拒绝了邀约", f"{who} 拒绝了")
+            else:
+                notify("百应：邀约状态变了", f"{who} 现在是「{STATUS_WORDS.get(change['to'], change['to'])}」")
+        if len(summary["changes"]) > 4:
+            notify("百应：还有达人回复", f"另外还有 {len(summary['changes']) - 4} 位的状态变了：去百应「合作消息」看")
+    state["checked_at"] = now.isoformat(timespec="seconds")
+    private_write(state_path, json.dumps(state, ensure_ascii=False, indent=1) + "\n")
+    return summary
+
+
 # ── command line ─────────────────────────────────────────────────────────────
 
 def main(argv: Optional[List[str]] = None, *, runner: Callable = subprocess.run, sleep: Callable = time.sleep,
@@ -1152,6 +1277,10 @@ def main(argv: Optional[List[str]] = None, *, runner: Callable = subprocess.run,
     p_status = sub.add_parser("status", help="看台账：本周发了几位、哪些不知道发出去没有")
     p_status.add_argument("--config", required=True)
     p_status.add_argument("--ledger-dir")
+    p_follow = sub.add_parser("follow", help="只读：发过卡的达人回没回（按钮状态），变了就在这台 Mac 上弹通知")
+    p_follow.add_argument("--config", required=True)
+    p_follow.add_argument("--ledger-dir")
+    p_follow.add_argument("--no-notify", action="store_true", help="只打印，不弹通知")
     args = parser.parse_args(argv)
     try:
         cfg = load_config(args.config)
@@ -1162,6 +1291,21 @@ def main(argv: Optional[List[str]] = None, *, runner: Callable = subprocess.run,
                                      "never_again": len(ledger.never_again()), "unknown": ledger.unknown()}, ensure_ascii=False, indent=1) + "\n")
             return EXIT_OK
         check_clis(cfg)
+        if args.command == "follow":
+            try:
+                ledger.lock()                                    # 正在发卡（run 拿着锁）就这次不查
+            except ToolError:
+                stdout.write(json.dumps({"skipped": "正在发邀约卡，这次不查"}, ensure_ascii=False) + "\n")
+                return EXIT_OK
+            try:
+                moment = clock()
+                clis = Clis(cfg, ledger.folder / "follow-work" / moment.strftime("%Y%m%d"), runner=runner, stamp=ledger.folder / "last-request")
+                summary = follow_invites(cfg, clis, ledger, clock=clock,
+                                         notify=None if args.no_notify else (lambda title, text: mac_notify(title, text, runner)))
+            finally:
+                ledger.unlock()
+            stdout.write(json.dumps({"at": moment.isoformat(timespec="seconds"), **summary, "requests": clis.requests()}, ensure_ascii=False, indent=1) + "\n")
+            return EXIT_OK
         if args.command == "plan":
             if not 1 <= args.count <= 100:
                 raise ToolError("--count 在 1 到 100 之间", EXIT_USAGE)

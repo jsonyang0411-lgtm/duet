@@ -35,6 +35,7 @@
 | `gap_seconds` | 任意两次平台请求之间至少隔几秒（不能小于 3） | 3 |
 | `wait_between` | 发两位之间随机等多少秒（正式配置 2026-10-29 起用 [180, 300]：3～5 分钟一位） | [15, 30] |
 | `plan_max_age_days` | 清单多少天后作废、要重新 plan | 3 |
+| `follow_hours` / `follow_days` / `follow_max` | follow：北京时间几点到几点查 / 发卡后跟几天 / 一次最多查几位 | [9, 23] / 14 / 40 |
 | `home` | 台账和清单的默认位置 | `~/.claude-relay/platform/creator-invites` |
 
 ## 第一段：plan
@@ -99,6 +100,24 @@
 | `--limit` 到了 | 停 |
 
 **接着上次停下的地方**：同一个命令重跑就行。台账里有 `attempt`、又没有「没发出去」的 `result` 的抖音号，永远不再发——哪怕进程在写完 `attempt` 之后死掉。
+
+## 第三段：follow（达人回没回，在这台 Mac 上弹通知）
+
+```bash
+/usr/bin/python3 tools/creator_invite/invite.py follow --config <配置> [--ledger-dir <目录>] [--no-notify]
+```
+
+用户 2026-10-29：「达人要我们加她微信，我能及时看到吗」→ 在 Mac 上弹通知。只读，不读也不发私信：
+
+- 查谁：台账里发出去了的卡（`sent: true`），发卡后 `follow_days` 天内、还没回也没拒的。发卡 2 天内的隔 25 分钟以上查一次，更早的隔 115 分钟以上；一次最多 `follow_max` 位，最久没查的先查。北京时间 `follow_hours` 之外不查。
+- 怎么查：`dy buyin author-invite-status --aweme-id=… --names`（每位一次搜索 + 每 20 位一次状态读，请求之间至少 4 秒，和 run 共用一个请求钟）。
+- 按钮从 2「继续沟通 · 待回复」变成 4「已建联」（她回了）→ 弹「百应：达人回复了邀约」，写着昵称和抖音号，叫运营去百应「合作消息」看她说了什么、要不要加微信；变成 3「已拒绝」→ 弹「拒绝了」；99 / 100 / 101 → 弹「状态变了」。回了 / 拒了 / 不能沟通的以后不再查。一次最多弹 4 条，多的合成一条。
+- 查不了（登录失效、掉登录、验证码、调试 Chrome 没开……）→ 弹「这次查不了」，两小时最多一次。
+- 正在发卡（run 拿着台账锁）时这一轮跳过。
+- 记录：`follow-state.json`（每位最后看到的状态、什么时候查的）和 `follow.jsonl`（每次变化），都在台账目录、0600。
+- 没用百应的「待回复会话数」（`/connection/pc/im/conversations/all_unreply`）：2026-10-29 发了二十多张卡时它是 0 / 0，看来只算达人主动发起的会话。
+
+每 30 分钟自动跑：放一个 LaunchAgent（`~/Library/LaunchAgents/<名字>.plist`，`StartInterval` 1800，`ProgramArguments` 是上面那条命令，`StandardOutPath` / `StandardErrorPath` 写到台账目录的 `follow.log`），`launchctl load` 它；停掉就 `launchctl unload` 再删 plist。调试 Chrome 要开着百应的页面。
 
 ## 台账
 

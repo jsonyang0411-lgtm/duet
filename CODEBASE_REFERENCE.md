@@ -1077,7 +1077,8 @@ Windows `wcdb` 后端旁边的一个线程（`wechat-presence`）：每 `CHECK_S
 | `plan_markdown(plan, plan_file)` / `excluded_table(w, rows)` / `plan_csv(plan)` / `write_plan(plan, out_dir)` | 给人看的清单（每行带来源：聚水潭 / 抖音 / 两边都有；抖音那边找到、查了多少一行；按三类分表、商品与库存（没查时写「没查」）、话术原文与字数、疑似同行自播号 / 专门带自己牌子的 / 可能骗样品的各一张表、其他没进的和原因）和 CSV；三份文件 0600 | `str` / `dict[str, Path]` |
 | `invite_args(cfg, plan, creator)` / `load_plan(path)` | `dy buyin author-invite` 的参数（`--name=value`；`--rights` 一个都不勾时写 `none`，比例大于 0 才带 `--commission-rate`；`--expect-shop-id`、`--no-open`）/ 读清单并认出是 plan 写的 | `list[str]` / `dict` |
 | `run_plan(cfg, plan, confirm, clis, ledger, *, limit=None, sleep, uniform, clock)` | run：编号、清单年龄、佣金与权益和配置一致才开始；每位：台账去重、`rules.drop_ids`（清单出了以后又说不要的）跳过、每周上限、每天上限（`Ledger.sent_today`）→ 两位之间等 `wait_between` → 预览（状态 1、门槛 -1、没被拦才往下；额度剩下不到 `quota_margin` 就停）→ 写 `attempt` → `--expect-status=1 --expect-popwindow=-1 --execute` → 写 `result`；76 / 77 / 79、超时、130、没结果都停，`STATE_CONFLICT` 跳过继续，连续 3 位预览失败停 | 执行摘要 `dict`（`sent`、`skipped`、`conflicts`、`stopped`、`unknown_before`、`sent_this_week`、`requests`） |
-| `run_markdown(summary)` / `main(argv=None, *, runner, sleep, uniform, clock, stdout=None)` | 执行记录（停在第几位、为什么）/ 命令行入口：`plan`、`run`、`status`；返回退出码（run 停在 76 / 77 / 79 时照原样） | `str` / `int` |
+| `follow_invites(cfg, clis, ledger, *, clock=now_bjt, notify=None)` / `mac_notify(title, text, runner=subprocess.run)` | follow 一轮：台账里 `sent: true` 的卡、`follow_days` 天内、状态不在 `FINAL_STATUSES`（3 / 4 / 99 / 100 / 101）的，发卡 2 天内隔 25 分钟、更早隔 115 分钟才再查，最多 `follow_max` 位；`dy buyin author-invite-status --names` 一次查完；状态变了（不是 2）就 `notify`（最多 4 条 + 1 条合计）并追加 `follow.jsonl`；查不了时两小时最多通知一次（`PROBLEM_EVERY`）；`follow_hours` 之外不查；状态存 `follow-state.json`（0600）/ macOS 通知（`osascript`，标题和正文作参数传进去，不拼进脚本） | 摘要 `dict`（`checked`、`changes`、`waiting`、`problem` 或 `skipped`）/ — |
+| `run_markdown(summary)` / `main(argv=None, *, runner, sleep, uniform, clock, stdout=None)` | 执行记录（停在第几位、为什么）/ 命令行入口：`plan`、`run`、`status`、`follow`（拿不到台账锁＝正在发卡，这一轮跳过）；返回退出码（run 停在 76 / 77 / 79 时照原样） | `str` / `int` |
 | `paced-dy.mjs` / `paced-jst.mjs` | Node 包装：从 `CREATOR_INVITE_CLI_ROOT` 载入命令行原样运行，给抖音页面传输的 `PageTransport.prototype.request` / 聚水潭的 `fetchImpl` 排队、按 `CREATOR_INVITE_STAMP` 的时间至少隔 `CREATOR_INVITE_GAP_MS`，每个请求在 `CREATOR_INVITE_REQUEST_LOG` 记一行（时间、方法、路径） | 命令行自己的退出码 |
 
 ---
@@ -2386,6 +2387,11 @@ invite.py run --config C --plan F --confirm <编号>
       → Ledger.append(attempt：商品、比例、权益、预览说的每款样品 samples 和提醒 warnings)（fsync）→ buyin author-invite … --expect-status=1 --expect-popwindow=-1 --execute
       → Ledger.append(result: sent true/false/null；发送前核对登录没过 = false) → 76/77/79、核对登录没过、超时、130、null 停；STATE_CONFLICT 跳过
   → run-<时间>/report.md（run_markdown）
+
+invite.py follow --config C（LaunchAgent 每 30 分钟）
+  → Ledger.lock（拿不到＝正在发卡，跳过）→ follow_invites：follow_hours 之外跳过 → 台账里发出去了的、该查的（≤ follow_max）
+      → node paced-dy.mjs buyin author-invite-status --aweme-id=… --names --pause-ms=4000 --expect-shop-id=… --no-open（只读）
+      → 状态变成 4 / 3 / 99 / 100 / 101：mac_notify（osascript）+ follow.jsonl；查不了：两小时最多通知一次 → follow-state.json
 ```
 
 两个命令行一条都不改：`paced-*.mjs` 只在外面给它们的请求排队放慢（任意两次平台请求之间 ≥ `gap_seconds`，台账目录的 `last-request` 让不同进程也守这个间隔）。
@@ -2630,4 +2636,5 @@ Mac worker 的设置文件（`CLAUDE_RELAY_HOME` 可改目录）里的 `platform
 | `find` / `rules` | `dict` | `DEFAULT_FIND`（`dy_queries` 默认空、`dy_lookup_max` 60）/ `DEFAULT_RULES` | `load_config`（`dy_queries` 只许 `buyin authors-*` 加筛选和页数，`DY_SEARCH_FORBIDDEN` 里的不许写） | `find_creators`、`find_on_douyin`；`classify`（`small_fans_min` 5000、`mid_fans_min` 20 万）、疑似同行自播号（`suspect_hat_share` 90）、不进清单（`female_min` 60、`own_brand_reason`、`sample_risk_reason`、`drop_ids`）、标记（`low_hat_share` 1、`own_hat_flag` 50、`single_category_flag` 90） |
 | `weekly_cap` / `daily_cap` / `quota_margin` | `int` | `800` / `20` / `50` | `load_config` | `run_plan` 的停止条件（每周、每天的台账数，平台额度余量） |
 | `gap_seconds` / `wait_between` / `plan_max_age_days` | 数字 / `[min, max]` / 数字 | `3`（≥3）/ `[15, 30]`（≥10）/ `3` | `load_config` | `Clis.env`（`CREATOR_INVITE_GAP_MS`）/ `run_plan` 两位之间 / 清单作废 |
+| `follow_hours` / `follow_days` / `follow_max` | `[int, int]` / `int` / `int` | `[9, 23]` / `14` / `40` | `load_config`（北京时间整点、开始 < 结束） | `follow_invites`：几点到几点查、发卡后跟几天、一次最多查几位 |
 | `home` | `str` | `~/.claude-relay/platform/creator-invites` | `load_config` | 没给 `--ledger-dir` / `--out-dir` 时台账和 `plans/` 的位置 |

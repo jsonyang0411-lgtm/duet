@@ -89,7 +89,7 @@ FAKE_NODE = textwrap.dedent("""\
                 creators.append({"awemeId": a, "found": False, "why": "the creator search answered 0 row(s)"})
                 continue
             s = scenario.get("status", {}).get(a, 1)
-            creators.append({"awemeId": a, "found": True, "status": s, "button": "邀约带货 (status 1)" if s == 1 else "继续沟通 · 待回复 (status 2)",
+            creators.append({"awemeId": a, "found": True, "status": s, "nickname": "达人" + a[-3:], "button": "邀约带货 (status 1)" if s == 1 else "继续沟通 · 待回复 (status 2)",
                              "invitable": s == 1, "hoverText": scenario["hover"], "weeklyQuota": scenario["quota"]})
         out({"site": "buyin", "command": "author-invite-status", "creators": creators,
              "summary": {"weeklyQuotas": [scenario["quota"]]}})
@@ -711,6 +711,88 @@ def test_one_run_at_a_time(env):
         assert code == 2
     finally:
         held.unlock()
+
+
+# ── follow: who answered a card ─────────────────────────────────────────────
+
+def sent_cards(env, *cards, ledger="ledger"):
+    led = tool.Ledger(env.tmp / ledger)
+    for i, (aweme, at) in enumerate(cards):
+        stamp = at.isoformat(timespec="seconds")
+        led.append({"event": "attempt", "attempt": f"f{i}", "aweme_id": aweme, "plan_id": "Pf", "at": stamp})
+        led.append({"event": "result", "attempt": f"f{i}", "aweme_id": aweme, "sent": True, "outcome": "VERIFIED_SUCCESS", "at": stamp})
+    return led
+
+
+def follow_now(env, at, ledger="ledger", **config):
+    notes = []
+
+    def runner(argv, **kw):
+        if argv[0] == "/usr/bin/osascript":
+            notes.append((argv[-2], argv[-1]))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return subprocess.run(argv, **kw)
+    code, out, _ = env.main(["follow", "--config", env.write_config(**config), "--ledger-dir", str(env.tmp / ledger)], clock=lambda: at, runner=runner)
+    return code, out, notes
+
+
+def test_follow_tells_this_mac_when_a_creator_answers_a_card(env):
+    sent_cards(env, ("dy_fa", NOW - timedelta(hours=1)), ("dy_fb", NOW - timedelta(hours=1)), ("dy_fc", NOW - timedelta(days=3)),
+               ("dy_old", NOW - timedelta(days=20)))
+    env.scenario(scenario(status={"dy_fa": 4, "dy_fb": 2, "dy_fc": 3}))
+    code, out, notes = follow_now(env, NOW)
+    assert code == 0 and out["checked"] == 3 and out["waiting"] == 2, "dy_old is past follow_days (14): not asked about, still counted as waiting"
+    [ask] = [c["args"] for c in env.calls()]
+    assert ask[:3] == ["buyin", "author-invite-status", "--aweme-id=dy_fa,dy_fb,dy_fc"] and "--names" in ask and "--pause-ms=4000" in ask
+    assert "--expect-shop-id=9100000000000001" in ask and not any("--execute" in a for a in ask)
+    assert [(c["aweme_id"], c["to"]) for c in out["changes"]] == [("dy_fa", 4), ("dy_fc", 3)]
+    assert notes == [("百应：达人回复了邀约", "达人_fa（dy_fa） 回复了：去百应「合作消息」看她说什么，要加微信就加"),
+                     ("百应：达人拒绝了邀约", "达人_fc（dy_fc） 拒绝了")]
+    log = [json.loads(l) for l in (env.tmp / "ledger" / "follow.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [(r["aweme_id"], r["from"], r["to"]) for r in log] == [("dy_fa", None, 4), ("dy_fc", None, 3)]
+    for name in ("follow.jsonl", "follow-state.json"):
+        assert stat.S_IMODE(os.stat(env.tmp / "ledger" / name).st_mode) == 0o600
+    # 10 minutes later: the answered ones are done, the waiting one was just asked about
+    env.log.unlink()
+    code, out, notes = follow_now(env, NOW + timedelta(minutes=10))
+    assert out["checked"] == 0 and env.calls() == [] and notes == []
+    # 30 minutes later the new one is asked again; one sent 3 days ago waits two hours between two looks
+    env.scenario(scenario(status={"dy_fb": 4}))
+    code, out, notes = follow_now(env, NOW + timedelta(minutes=30))
+    assert out["checked"] == 1 and [c["aweme_id"] for c in out["changes"]] == ["dy_fb"] and len(notes) == 1
+    sent_cards(env, ("dy_fd", NOW - timedelta(days=3)), ledger="ledger2")
+    env.scenario(scenario(status={"dy_fd": 2}))
+    follow_now(env, NOW, ledger="ledger2")
+    env.log.unlink()
+    follow_now(env, NOW + timedelta(minutes=60), ledger="ledger2")
+    assert env.calls() == [], "sent 3 days ago: not again within 115 minutes"
+    follow_now(env, NOW + timedelta(minutes=120), ledger="ledger2")
+    assert len(env.calls()) == 1
+
+
+def test_follow_keeps_quiet_at_night_and_says_once_when_it_cannot_look(env, tmp_path):
+    sent_cards(env, ("dy_fa", NOW - timedelta(hours=1)))
+    code, out, notes = follow_now(env, NOW.replace(hour=2))
+    assert out["skipped"].startswith("北京时间 9～23 点之外不查") and env.calls() == [] and notes == []
+    env.scenario(scenario(exits={"status": 77}))
+    code, out, notes = follow_now(env, NOW)
+    assert out["problem"] == "登录失效（退出码 77）" and notes == [("百应：这次查不了达人回复", "登录失效（退出码 77）。处理好以后会接着查")]
+    code, out, notes = follow_now(env, NOW + timedelta(minutes=30))
+    assert out["problem"] and notes == [], "at most once in two hours"
+    code, out, notes = follow_now(env, NOW + timedelta(hours=2, minutes=1))
+    assert len(notes) == 1
+    # while a run sends cards, follow does not look
+    held = tool.Ledger(env.tmp / "ledger")
+    held.lock()
+    try:
+        env.log.unlink()
+        code, out, notes = follow_now(env, NOW + timedelta(hours=3))
+        assert code == 0 and out == {"skipped": "正在发邀约卡，这次不查"} and env.calls() == []
+    finally:
+        held.unlock()
+    calls = []
+    tool.mac_notify("标题", '她说"加我"', runner=lambda argv, **kw: calls.append(argv))
+    assert calls[0][0] == "/usr/bin/osascript" and calls[0][-2:] == ["标题", '她说"加我"'], "the texts are arguments, never part of the script"
 
 
 # ── the pacing wrappers, with real node ─────────────────────────────────────
