@@ -500,6 +500,15 @@ class TestPrmPages:
             assert expected in text, expected
         assert "13900001111" not in page.inner_text("body")
         assert card.locator("button:has-text('发送')").count() == 0
+        head = card.locator(".card-head h2").bounding_box()            # 宽屏：两个标签和标题在同一行
+        assert all(abs(t.bounding_box()["y"] - head["y"]) < head["height"] for t in card.locator(".card-head .tag").all())
+        page.set_viewport_size({"width": 390, "height": 844})          # 手机宽度：右上角的两个标签折到下一行，不被截掉
+        page.wait_for_timeout(300)
+        box = card.bounding_box()
+        for tag in card.locator(".card-head .tag").all():
+            t = tag.bounding_box()
+            assert box["x"] <= t["x"] and t["x"] + t["width"] <= min(box["x"] + box["width"], 390), (t, box)
+        page.set_viewport_size({"width": 1440, "height": 900})
         card.locator("button").filter(has_text=_re.compile(r"^\s*复制\s*$")).click()
         page.wait_for_timeout(1000)
         assert "13900001111" in card.locator("textarea[aria-label='已复制的内容']").input_value()
