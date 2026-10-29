@@ -95,6 +95,17 @@ ACCEPT_DIALOG_TITLES = ("通过朋友验证",)         # what 「前往验证」
                                                 # a window that appears with another title is logged, never used)
 DIALOG_CLASS = "Qt51514QWindowIcon"
 DIALOG_LOOKS = 10                                # a dialog is looked for this many times, 0.1 s apart
+# add_friend's ``remark`` (备注; 加百应达人微信 asks for 「抖音-<百应昵称>」): only in WeChat 4.0's application window, whose
+# controls UIA cannot see (probe-apply.txt), and nobody has looked yet where its remark field is.  So it is found by OCR or
+# not at all: a row reading exactly one of REMARK_LABELS (a trailing colon aside), nothing beside it on its line, and the
+# first row right below it (within REMARK_REACH label heights, overlapping it horizontally: normally her pre-filled
+# nickname) is the input.  A row below that reads like another part of the window (APPLY_WORDS) is no input.
+REMARK_LABELS = ("备注", "备注名", "设置备注")
+REMARK_REACH = 3.0
+APPLY_WORDS = ("标签", "权限", "朋友圈", "仅聊天", "不让", "不看", "确定", "取消", "发送", "完成")
+# Words of the application window worth naming in the log when no remark field was seen (never anything she wrote)
+APPLY_LANDMARKS = ("发送添加朋友申请", *REMARK_LABELS, "标签", "朋友权限", "设置朋友权限", "确定", "取消")
+REMARK_MAX_CHARS = 32
 
 
 class _Abort(Exception):
@@ -167,6 +178,50 @@ def _row_label(rows: list[dict], button: dict) -> str:
              and _clean_text(r.get("t", "")) not in ACCEPT_LABELS]
     parts.sort(key=lambda r: (r.get("y0", 0.0), r.get("x0", 0.0)))
     return " ".join(str(r.get("t", "")).strip() for r in parts)[:200]
+
+
+def _label_text(row: dict) -> str:
+    """A row's cleaned text without a trailing colon (a label may be read 「备注：」)."""
+    return _clean_text(row.get("t", "")).rstrip(":：")
+
+
+def _remark_field(rows: list[dict]) -> tuple[dict | None, str]:
+    """The remark's input among the OCR rows of WeChat 4.0's application window, and why there is none ("" when found):
+    the first row right below a label reading exactly 备注 / 备注名 / 设置备注 (the topmost such label), its top at most
+    REMARK_REACH label heights under the label's bottom, overlapping the label horizontally.  Nothing is guessed: no
+    such label, a row beside the label on its line (another layout: the row below would be the next field), nothing
+    right below it, or a row below that reads like another part of the window (标签, 朋友权限, a button, a second
+    label) give None."""
+    labels = [r for r in rows if _label_text(r) in REMARK_LABELS]
+    if not labels:
+        return None, "no 备注 label"
+    label = min(labels, key=lambda r: (float(r.get("y0", 0.0)), float(r.get("x0", 0.0))))
+    x0, x1 = float(label.get("x0", 0.0)), float(label.get("x1", 0.0))
+    y0, y1 = float(label.get("y0", 0.0)), float(label.get("y1", 0.0))
+    height = max(y1 - y0, 1e-6)
+    middle = (y0 + y1) / 2
+    others = [r for r in rows if r is not label]
+    if any(float(r.get("x0", 0.0)) >= x1 and float(r.get("y0", 1.0)) <= middle <= float(r.get("y1", 0.0))
+           for r in others):
+        return None, "something beside the label on its line"
+    below = [r for r in others
+             if float(r.get("y0", 0.0)) >= y1 - 0.25 * height
+             and float(r.get("y0", 0.0)) - y1 <= REMARK_REACH * height
+             and float(r.get("x0", 1.0)) <= x1 and float(r.get("x1", 0.0)) >= x0]
+    if not below:
+        return None, "nothing right below the label"
+    field = min(below, key=lambda r: (float(r.get("y0", 0.0)), float(r.get("x0", 0.0))))
+    text = _label_text(field)
+    if not text or text in REMARK_LABELS or any(word in text for word in APPLY_WORDS):
+        return None, "the row below the label is another part of the window"
+    return field, ""
+
+
+def _landmarks(rows: list[dict]) -> str:
+    """The application window's own words OCR read and where (``APPLY_LANDMARKS`` only: never her nickname or our
+    greeting), for the log line of a remark field that was not seen."""
+    seen = [f"{_label_text(r)}@{float(r.get('y0', 0.0)):.2f}" for r in rows if _label_text(r) in APPLY_LANDMARKS]
+    return ", ".join(seen[:12]) or "none of its labels"
 
 
 def _failure(target: str, reason: str, message: str) -> dict:
@@ -284,6 +339,7 @@ class FriendManager:
         self._rail = RailWatcher(self._grab_main_window)
         self._on_accepted = on_accepted
         self._chat_names = chat_names
+        self._remark_told = False                    # the single-window UI's "no remark here" is logged once
 
     def _tell_accepted(self, at: float, label: str) -> None:
         if self._on_accepted is None:
@@ -722,16 +778,28 @@ class FriendManager:
 
     # ── Add friend ──────────────────────────────────────────────────────
 
-    def add_friend(self, keyword: str, message: str = "") -> dict:
+    def add_friend(self, keyword: str, message: str = "", remark: str = "") -> dict:
         """Search and add a new WeChat friend by phone number or WeChat ID.
 
         Args:
             keyword: Target phone number, wxid, or search keyword.
             message: Greeting / verification message to send.
+            remark: The remark (备注) she gets on our side (加百应达人微信: 「抖音-<百应昵称>」).  Only WeChat 4.0's
+                application window gets it, typed into its 「备注」 field when OCR shows that field (``_fill_remark``);
+                otherwise nothing is clicked for it and the request goes without it.  "" (the admin's 添加好友):
+                the window is driven exactly as it always was.
 
         Returns:
-            Result dict with keys: 'ok' (bool), 'target' (str), 'message' (str), 'reason' (str, on failure).
+            Result dict with keys: 'ok' (bool), 'target' (str), 'message' (str), 'reason' (str, on failure);
+            with a ``remark`` also 'remark_set' (bool: it was typed into the 「备注」 field).
         """
+        remark = " ".join(str(remark or "").split())[:REMARK_MAX_CHARS]
+        result = self._add_friend(keyword, message, remark)
+        if remark:
+            result = {**result, "remark_set": bool(result.get("remark_set"))}
+        return result
+
+    def _add_friend(self, keyword: str, message: str, remark: str) -> dict:
         keyword = " ".join(str(keyword or "").split())
         message = " ".join(str(message or "").split())
         if not keyword:
@@ -746,7 +814,7 @@ class FriendManager:
                 if hwnd is None:
                     return _failure(keyword, "no_window", "未找到微信主窗口或无法切到前台，请确保微信已启动")
                 try:
-                    return self._add_friend_in_window(hwnd, keyword, message)
+                    return self._add_friend_in_window(hwnd, keyword, message, remark)
                 except _Abort as e:
                     logger.warning("add_friend stopped: %s", e)
                     return _failure(keyword, "aborted", f"微信窗口状态异常，已中止：{e}")
@@ -920,12 +988,13 @@ class FriendManager:
         win32gui.EnumWindows(_enum, None)
         return found
 
-    def _add_friend_wechat4(self, hwnd: int, keyword: str, message: str) -> dict:
+    def _add_friend_wechat4(self, hwnd: int, keyword: str, message: str, remark: str = "") -> dict:
         """WeChat 4.0: the add-friend window and the application window are windows of their own.  Every key
         and paste goes to one of them only while that very window is in front (a chat open in a window of its
         own belongs to the same process; a click only moves the focus, so WeChat in front is enough for it, as
         before); the application window is one that appears after the click on 「添加到通讯录」, titled exactly
-        「申请添加朋友」.  When the action stops, both are closed."""
+        「申请添加朋友」.  When the action stops, both are closed.  A ``remark`` goes into that window's 「备注」 field
+        before the greeting, only when OCR shows the field (``_fill_remark``; the answer then has ``remark_set``)."""
         dialog_hwnd = self._open_add_friend_dialog_wechat4(hwnd)
         if not dialog_hwnd:
             return _failure(keyword, "no_window", "无法打开微信「添加朋友」窗口")
@@ -993,10 +1062,13 @@ class FriendManager:
                 self._close_window(dialog_hwnd)
                 return _failure(keyword, "no_dialog", "没有出现填写附言的申请窗口（对方可能无需验证，或界面不同），请在微信里确认是否已发出")
 
+            extra = {"remark_set": False} if remark else {}      # (the answer has it only when a remark was asked)
             if apply_hwnd:
                 a_rect = self._rect_of(apply_hwnd)
                 a_w = a_rect[2] - a_rect[0]
                 a_h = a_rect[3] - a_rect[1]
+                if remark:                                       # before the greeting: OCR read the window as it is
+                    extra = {"remark_set": self._fill_remark(apply_hwnd, app_rows, a_rect, remark)}
                 if message:
                     # Focus the greeting input box near top (cx=0.30, cy=0.18)
                     input_x = a_rect[0] + int(0.30 * a_w)
@@ -1031,9 +1103,12 @@ class FriendManager:
                     self._close_window(apply_hwnd)
                     self._close_window(dialog_hwnd)
                     if risk:
-                        return _risk_failure(keyword, risk)
-                    return _failure(keyword, "not_sent", "申请窗口还在，申请可能没发出去，请在微信里确认")
+                        return {**_risk_failure(keyword, risk), **extra}
+                    return {**_failure(keyword, "not_sent", "申请窗口还在，申请可能没发出去，请在微信里确认"), **extra}
             else:
+                if remark:
+                    logger.info("Friend management: no application window of its own appeared, so no remark field "
+                                "(备注) was seen; the request goes without it")
                 if message:
                     self._combo(target_dialog, VK_CONTROL, VK_A, exact=True)
                     self._sleep(0.05)
@@ -1050,6 +1125,7 @@ class FriendManager:
                 "ok": True,
                 "target": keyword,
                 "message": f"已成功向「{keyword}」发送好友申请" + (f"（附言：{message}）" if message else ""),
+                **extra,
             }
         except Exception:                             # _Abort, or a pywin32 error: no dialog is left open
             for opened in (apply_hwnd, dialog_hwnd):
@@ -1057,9 +1133,51 @@ class FriendManager:
                     self._close_window(opened)
             raise
 
-    def _add_friend_in_window(self, hwnd: int, keyword: str, message: str) -> dict:
+    def _fill_remark(self, apply_hwnd: int, rows: list[dict], rect, remark: str) -> bool:
+        """The remark into the 「备注」 field of the application window: its input row (``_remark_field`` over the OCR
+        rows read when the window opened) is clicked like the greeting box, then Ctrl+A, Backspace and the remark
+        pasted, each into that very window (exact foreground checks, as for the greeting).  True when it was typed.
+        No field seen: nothing is clicked for it (an INFO line says so, with the window's own labels OCR read).  The
+        remark never stops the request: a click not delivered or an error is logged and the request goes without it;
+        only ``_Abort`` (that window lost the foreground) ends the add, as it does for the greeting."""
+        field, why = _remark_field(rows)
+        if field is None:
+            logger.info("Friend management: no remark field (备注) was seen in the application window (%s; read: %s); "
+                        "the request goes without it", why, _landmarks(rows))
+            return False
+        try:
+            left, top, right, bottom = rect
+            rx, ry = _centre(field)
+            x = left + int(rx * max(1, right - left))
+            y = top + int(ry * max(1, bottom - top))
+            if not self._click_at(apply_hwnd, x, y, required=False, exact=False):
+                logger.info("Friend management: the click on the remark field was not delivered; "
+                            "the request goes without the remark")
+                return False
+            self._sleep(0.1)
+            self._combo(apply_hwnd, VK_CONTROL, VK_A, exact=True)
+            self._sleep(0.05)
+            self._key(apply_hwnd, VK_BACK, exact=True)
+            self._sleep(0.05)
+            self._paste(apply_hwnd, remark, exact=True)
+            self._sleep(0.2)
+        except _Abort:
+            raise
+        except Exception:
+            logger.warning("Friend management: the remark could not be typed; the request goes without it",
+                           exc_info=True)
+            return False
+        logger.info("Friend management: the remark was typed into the field below the 备注 label (y %.2f)",
+                    float(field.get("y0", 0.0)))
+        return True
+
+    def _add_friend_in_window(self, hwnd: int, keyword: str, message: str, remark: str = "") -> dict:
         if self._is_wechat4(hwnd):
-            return self._add_friend_wechat4(hwnd, keyword, message)
+            return self._add_friend_wechat4(hwnd, keyword, message, remark)
+        if remark and not self._remark_told:
+            self._remark_told = True
+            logger.info("Friend management: the remark (备注) is typed only into WeChat 4.0's application window; "
+                        "this WeChat window is not 4.0's, so requests go without it (said once)")
         # 1. The search box is found on the screen and clicked; nothing is typed before it is seen
         box = self._find_search_box()
         if box is None:

@@ -182,15 +182,18 @@ class AdminCommandHandler:
             return ""
         return "；自动同意好友也已暂停（发「自动同意好友 开」恢复）"
 
-    def add_friend_checked(self, target: str, greeting: str = "") -> dict:
+    def add_friend_checked(self, target: str, greeting: str = "", remark: str = "") -> dict:
         """One ``add_friend`` call with the breaker of the 添加好友 command: WeChat's risk prompt pauses the auto-accept
         too (``paused``: the words saying so, "" without an auto-accept service).  No friend manager: ``reason``
         ``no_manager``; an exception: logged, ``reason`` ``error``.  加百应达人微信 (src/prm/friend_adds.py) adds this
-        way; the answer's ``message`` holds the target as typed (its callers decide what to show)."""
+        way, with her ``remark`` (passed on only when there is one: the 添加好友 command calls ``add_friend(target,
+        greeting)`` as it always did); the answer's ``message`` holds the target as typed (its callers decide what to
+        show), ``remark_set`` whether the remark went into the application window."""
         if self._friend is None:
             return {"ok": False, "target": target, "reason": "no_manager", "message": f"{NO_FRIEND_MANAGER}添加好友操作"}
         try:
-            res = self._friend.add_friend(target, greeting)
+            res = (self._friend.add_friend(target, greeting, remark=remark) if remark
+                   else self._friend.add_friend(target, greeting))
         except Exception:
             logger.exception("ADMIN: 添加好友 failed")
             return {"ok": False, "target": target, "reason": "error",

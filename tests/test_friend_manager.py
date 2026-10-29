@@ -1499,6 +1499,217 @@ class ApplyDialogTests(DialogTestCase):
         self.assertEqual(self.window.pasted, ["wxid_target"])         # the greeting was never pasted
 
 
+# ── The remark (备注) of a request (加百应达人微信, 2026-10-29) ───────────────────────────────
+#
+# add_friend's ``remark`` goes into the 「备注」 field of WeChat 4.0's application window.  That window has no UIA
+# controls and nobody has seen yet where its remark field is, so the field is found by OCR (a label reading 备注 /
+# 备注名 / 设置备注, its input the first row right below it) or not at all: nothing is clicked for it then, and the
+# request goes out as before.  Without a remark the window is driven exactly as it was.
+
+class RemarkFieldTests(unittest.TestCase):
+    LABEL = row("备注", 0.05, 0.30, 0.10, 0.33)
+    NICK = row("小鹿🌸", 0.06, 0.36, 0.20, 0.39)
+
+    def test_the_first_row_right_below_the_label_is_the_input(self):
+        field, why = friend_manager._remark_field([row("发送添加朋友申请", 0.05, 0.08, 0.40, 0.11), self.LABEL,
+                                                   row("标签", 0.05, 0.50, 0.10, 0.53), self.NICK])
+        self.assertEqual((field, why), (self.NICK, ""))
+
+    def test_the_label_may_read_otherwise(self):
+        for text in ("备注名", "设置备注", "备 注：", "备注:"):
+            field, _ = friend_manager._remark_field([row(text, 0.05, 0.30, 0.12, 0.33), self.NICK])
+            self.assertEqual(field, self.NICK, text)
+
+    def test_nothing_is_guessed(self):
+        cases = {
+            "no label": [row("备注信息", 0.05, 0.30, 0.15, 0.33), self.NICK],
+            "the label beside its input": [self.LABEL, row("小鹿", 0.20, 0.30, 0.40, 0.33), row("标签", 0.05, 0.36, 0.10, 0.39)],
+            "too far below": [self.LABEL, row("小鹿", 0.06, 0.43, 0.20, 0.46)],
+            "not under the label": [self.LABEL, row("小鹿", 0.50, 0.36, 0.70, 0.39)],
+            "the next label (an empty field)": [self.LABEL, row("标签", 0.05, 0.36, 0.10, 0.39)],
+            "a button": [self.LABEL, row("确定", 0.06, 0.36, 0.12, 0.39)],
+            "a placeholder like a label": [self.LABEL, row("备注名", 0.06, 0.36, 0.14, 0.39)],
+            "the friend permissions": [self.LABEL, row("设置朋友权限", 0.05, 0.36, 0.20, 0.39)],
+        }
+        for case, rows in cases.items():
+            field, why = friend_manager._remark_field(rows)
+            self.assertIsNone(field, case)
+            self.assertTrue(why, case)
+
+    def test_the_topmost_label_counts_and_a_row_above_it_is_never_its_input(self):
+        rows = [row("我是测试号", 0.06, 0.25, 0.30, 0.28), self.LABEL, self.NICK, row("备注", 0.05, 0.70, 0.10, 0.73)]
+        self.assertEqual(friend_manager._remark_field(rows)[0], self.NICK)
+
+    def test_the_log_names_only_the_windows_own_words(self):
+        rows = [row("发送添加朋友申请", 0.05, 0.08, 0.40, 0.11), row("我是测试号", 0.06, 0.13, 0.30, 0.16),
+                row("小鹿🌸", 0.06, 0.36, 0.20, 0.39), row("确定", 0.30, 0.90, 0.40, 0.95)]
+        self.assertEqual(friend_manager._landmarks(rows), "发送添加朋友申请@0.08, 确定@0.90")
+
+
+class RemarkTests(DialogTestCase):
+    GREETING_ROWS = [row("发送添加朋友申请", 0.1, 0.1, 0.5, 0.2)]          # what ApplyDialogTests' window shows
+    LABEL = row("备注", 0.05, 0.30, 0.10, 0.33)
+    NICK = row("小鹿🌸", 0.06, 0.36, 0.20, 0.39)                          # her nickname, pre-filled in the field
+    FIELD_ROWS = [row("发送添加朋友申请", 0.05, 0.08, 0.40, 0.11), row("我是测试号", 0.06, 0.13, 0.30, 0.16), LABEL, NICK,
+                  row("标签", 0.05, 0.47, 0.10, 0.50)]
+    # The 4.0 add with 「小朋友」 open in its own window, as it was before the remark (captured on 1a7037e): the search
+    # box, the number, Enter; 添加到通讯录; the greeting box, the greeting; the green 确定 by position; Enter.
+    BEFORE = [("click", ADD_DIALOG, 340, 182), ("combo", CTRL, KEY_A, "front", ADD_DIALOG),
+              ("key", VK_BACK, "front", ADD_DIALOG), ("combo", CTRL, KEY_V, "front", ADD_DIALOG),
+              ("key", VK_RETURN, "front", ADD_DIALOG), ("click", ADD_DIALOG, 400, 695),
+              ("click", APPLY, 320, 244), ("combo", CTRL, KEY_A, "front", APPLY), ("key", VK_BACK, "front", APPLY),
+              ("combo", CTRL, KEY_V, "front", APPLY), ("click", APPLY, 334, 846), ("key", VK_RETURN, "front", APPLY)]
+
+    def add(self, apply_rows, *remark, on_remark_click=None, clicker=None):
+        """``_add_friend_wechat4`` (ApplyDialogTests' set-up); ``apply_rows``: what OCR reads in the application window;
+        ``on_remark_click``: what happens on the third click (the remark field's, when it is clicked)."""
+        ocr = FakeOcr([row("添加到通讯录", 0.4, 0.8, 0.6, 0.9)], apply_rows, [])
+        manager = self.make(ocr)
+        self.desktop.add(ADD_DIALOG, title="添加朋友", rect=(200, 100, 600, 800))
+        self.window.front = ADD_DIALOG
+        self.closed = []
+        manager._close_window = lambda h: self.closed.append(h) or self.desktop.windows.pop(h, None)
+        self.desktop.on_click = [lambda: None, lambda: self.desktop.add(APPLY, title="申请添加朋友", rect=(200, 100, 600, 900)),
+                                 on_remark_click or (lambda: None)]
+        self.desktop.clicks = 0
+        if clicker is not None:
+            manager._clicker = clicker
+        manager._open_add_friend_dialog_wechat4 = lambda hwnd: ADD_DIALOG
+        manager._is_window_visible = lambda h: h in self.desktop.windows
+        return self.run_win32(manager._add_friend_wechat4, HWND, "wxid_target", "你好呀", *remark)
+
+    @staticmethod
+    def remark_events(field=NICK):
+        """The remark's click (the field's centre in the 400 x 800 application window at 200, 100) and its keys."""
+        x = 200 + int((field["x0"] + field["x1"]) / 2 * 400)
+        y = 100 + int((field["y0"] + field["y1"]) / 2 * 800)
+        return [("click", APPLY, x, y), ("combo", CTRL, KEY_A, "front", APPLY), ("key", VK_BACK, "front", APPLY),
+                ("combo", CTRL, KEY_V, "front", APPLY)]
+
+    def test_without_a_remark_the_window_is_driven_exactly_as_before(self):
+        for rows in (self.GREETING_ROWS, self.FIELD_ROWS):            # a remark field on the screen changes nothing
+            with self.subTest(rows=len(rows)):
+                self.setUp()
+                for remark in ((), ("",)):
+                    self.events.clear()
+                    self.window.pasted.clear()
+                    result = self.add(rows, *remark)
+                    self.assertEqual(self.events, self.BEFORE)
+                    self.assertEqual(self.window.pasted, ["wxid_target", "你好呀"])
+                    self.assertEqual(sorted(result), ["message", "ok", "target"])        # no remark_set either
+
+    def test_the_remark_goes_into_the_field_below_its_label_before_the_greeting(self):
+        with self.assertLogs("src.wechat.friend_manager", level="INFO") as logs:
+            result = self.add(self.FIELD_ROWS, "抖音-小鹿")
+        self.assertTrue(result["ok"], result)
+        self.assertIs(result["remark_set"], True)
+        self.assertEqual(self.events, self.BEFORE[:6] + self.remark_events() + self.BEFORE[6:])
+        self.assertEqual(self.window.pasted, ["wxid_target", "抖音-小鹿", "你好呀"])
+        self.assertNotIn(CHAT_PERSON, {e[-1] for e in self.events if e[0] in ("key", "combo")})
+        self.assertTrue(any("the remark was typed" in line for line in logs.output))
+        self.assertFalse(any("小鹿" in line for line in logs.output))                   # her name never in the log
+
+    def test_no_field_on_the_screen_means_no_click_for_it_and_the_request_goes_as_before(self):
+        cases = {"no label": self.GREETING_ROWS,
+                 "nothing below the label": [self.LABEL, row("标签", 0.05, 0.47, 0.10, 0.50)],
+                 "the label beside its input": [self.LABEL, row("小鹿", 0.20, 0.30, 0.40, 0.33)]}
+        for case, rows in cases.items():
+            with self.subTest(case=case):
+                self.setUp()
+                with self.assertLogs("src.wechat.friend_manager", level="INFO") as logs:
+                    result = self.add(rows, "抖音-小鹿")
+                self.assertTrue(result["ok"], result)
+                self.assertIs(result["remark_set"], False)
+                self.assertEqual(self.events, self.BEFORE)
+                self.assertEqual(self.window.pasted, ["wxid_target", "你好呀"])
+                said = [r for r in logs.records if "no remark field (备注) was seen" in r.getMessage()]
+                self.assertEqual([r.levelname for r in said], ["INFO"], logs.output)
+
+    def test_a_remark_click_that_is_not_delivered_leaves_the_remark_out_not_the_request(self):
+        clicks = []
+
+        def clicker(x, y):
+            clicks.append((x, y))
+            self.events.append(("click", self.window.front, x, y))
+            self.desktop.click(x, y)
+            return len(clicks) != 3                                   # the remark field's click is lost
+        result = self.add(self.FIELD_ROWS, "抖音-小鹿", clicker=clicker)
+        self.assertTrue(result["ok"], result)
+        self.assertIs(result["remark_set"], False)
+        self.assertEqual(self.events, self.BEFORE[:6] + self.remark_events()[:1] + self.BEFORE[6:])
+        self.assertEqual(self.window.pasted, ["wxid_target", "你好呀"])
+
+    def test_an_error_while_typing_the_remark_does_not_fail_the_request(self):
+        real = self.window._clipboard_text
+
+        def clipboard(text, hwnd):
+            if text == "抖音-小鹿":
+                raise OSError("OpenClipboard failed")
+            real(text, hwnd)
+        self.window._clipboard_text = clipboard
+        with self.assertLogs("src.wechat.friend_manager", level="WARNING"):
+            result = self.add(self.FIELD_ROWS, "抖音-小鹿")
+        self.assertTrue(result["ok"], result)
+        self.assertIs(result["remark_set"], False)
+        self.assertEqual(self.window.pasted, ["wxid_target", "你好呀"])               # the greeting still went in
+
+    def test_the_application_window_losing_the_keyboard_still_stops_everything(self):
+        def chat_takes_the_keyboard():
+            self.focusable = False
+            self.window.front = CHAT_PERSON
+        with self.assertRaises(friend_manager._Abort):
+            self.add(self.FIELD_ROWS, "抖音-小鹿", on_remark_click=chat_takes_the_keyboard)
+        self.assertNotIn(CHAT_PERSON, {e[-1] for e in self.events if e[0] in ("key", "combo")})
+        self.assertEqual(self.window.pasted, ["wxid_target"])                          # neither remark nor greeting
+        self.assertEqual(self.closed, [APPLY, ADD_DIALOG])
+
+    def test_add_friend_answers_remark_set_only_when_a_remark_was_asked(self):
+        manager = self.make()
+        manager._is_wechat4 = lambda hwnd: True
+        given = []
+
+        def wechat4(hwnd, keyword, message, remark=""):
+            given.append(remark)
+            return {"ok": True, "target": keyword, "message": "已成功", **({"remark_set": True} if remark else {})}
+        manager._add_friend_wechat4 = wechat4
+        self.assertNotIn("remark_set", manager.add_friend("wxid_target", "你好呀"))
+        self.assertIs(manager.add_friend("wxid_target", "你好呀", remark=" 抖音-\n小鹿 ")["remark_set"], True)
+        self.assertIs(manager.add_friend("wxid_target", "你好呀", remark="抖" * 40)["remark_set"], True)
+        self.assertEqual(given, ["", "抖音- 小鹿", "抖" * friend_manager.REMARK_MAX_CHARS])
+        failed = manager.add_friend(" ", "你好呀", remark="抖音-小鹿")                    # (before the window: invalid)
+        self.assertEqual((failed["reason"], failed["remark_set"]), ("invalid", False))
+
+
+class RemarkOnTheSingleWindowUiTests(FriendTestCase):
+    """The single-window UI (WeChat 3.x): its application dialog is not read for a remark; said once, the request as
+    before."""
+
+    # The 3.x add of AddFriendTests.test_sends_the_application_with_the_greeting, as it was (captured on 1a7037e)
+    BEFORE = [("click", 100, 60), ("combo", CTRL, KEY_A), ("key", VK_BACK), ("combo", CTRL, KEY_V), ("click", 224, 175),
+              ("click", 600, 725), ("combo", CTRL, KEY_A), ("combo", CTRL, KEY_V), ("click", 540, 675), ("key", VK_ESCAPE)]
+
+    def run_add(self, manager, **kw):
+        self.events.clear()
+        window = manager._window
+        window.pasted.clear()
+        manager._ocr = FakeOcr([AddFriendTests.SEARCH_BOX], [AddFriendTests.ENTRY], [AddFriendTests.ADD],
+                               [AddFriendTests.SEND], [])
+        return manager.add_friend("newbie", "Hello!", **kw)
+
+    def test_the_remark_is_left_out_and_said_once(self):
+        manager = self.manager(FakeWindow(), FakeOcr([]))
+        self.assertNotIn("remark_set", self.run_add(manager))
+        self.assertEqual(self.events, self.BEFORE)
+        with self.assertLogs("src.wechat.friend_manager", level="INFO") as logs:
+            for _ in range(2):
+                result = self.run_add(manager, remark="抖音-小鹿")
+                self.assertTrue(result["ok"])
+                self.assertIs(result["remark_set"], False)
+                self.assertEqual(self.events, self.BEFORE)
+                self.assertEqual(manager._window.pasted, ["newbie", "Hello!"])
+        self.assertEqual(sum("(said once)" in line for line in logs.output), 1)
+
+
 # ── An unexpected error inside a friend action (win review F8) ─────────────────────
 #
 # A pywin32 error (a window handle gone, a dialog closed meanwhile) is not an _Abort: it used to go all
@@ -1872,6 +2083,19 @@ class AddFriendCheckedTests(unittest.TestCase):
         friend.add_friend.return_value = {"ok": True, "target": "abcdefyz", "message": "已成功向「abcdefyz」发送好友申请"}
         res = AdminCommandHandler(friend_manager=friend).add_friend_checked("abcdefyz", "")
         self.assertEqual(res, {"ok": True, "target": "abcdefyz", "message": "已成功向「abcdefyz」发送好友申请"})
+
+    def test_a_remark_is_passed_on_only_when_there_is_one_and_never_by_the_admins_command(self):
+        friend = MagicMock()
+        friend.add_friend.return_value = {"ok": True, "target": "abcdefyz", "message": "已成功", "remark_set": True}
+        handler = AdminCommandHandler(friend_manager=friend)
+        res = handler.add_friend_checked("abcdefyz", "你好", remark="抖音-小鹿")
+        friend.add_friend.assert_called_once_with("abcdefyz", "你好", remark="抖音-小鹿")
+        self.assertIs(res["remark_set"], True)
+        for call in (lambda: handler.add_friend_checked("abcdefyz", "你好", remark=""),
+                     lambda: handler.handle("添加好友 abcdefyz 你好"), lambda: handler.handle("加好友：abcdefyz 你好")):
+            friend.reset_mock()
+            call()
+            friend.add_friend.assert_called_once_with("abcdefyz", "你好")       # exactly the call it always was
 
     def test_paused_why_only_reads(self):
         auto = AutoFriendService(CountingManager(), watch=False, wall_clock=lambda: 0.0)
