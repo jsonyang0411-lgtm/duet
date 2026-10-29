@@ -959,6 +959,9 @@ def test_the_module_runs_on_the_macs_system_python(tmp_path):
         "cover = p.invite_cover(str(inv), '3000000000000000101', douyin_ids=['test_daren_01'])\n"
         "assert cover['state'] == 'covered' and cover['rate'] == 25, cover\n"
         "assert p.covered_of({'by': 'invite', **cover}, a)['rate'] == 25\n"
+        # 邀约背景（加百应达人微信第 6 步）：同一份台账
+        "hist = p.invite_history(str(inv), ['TEST_DAREN_01'])\n"
+        "assert [h['commission_rate'] for h in hist] == [25] and hist[0]['sent'] is True, hist\n"
         "print(a['commission_rate'], r.exit_code, r.stdout.strip(), sys.version_info[:2])\n",
         encoding="utf-8")
     run = subprocess.run([python, "-I", str(script)], capture_output=True, text=True, timeout=60, cwd=tmp_path)
@@ -1558,3 +1561,48 @@ def test_a_sample_order_records_the_creators_douyin_id_it_found(node, jcfg, tmp_
     assert out["created"]["creator_account"] == "test_daren_01"
     assert platforms.check_record(json.loads(json.dumps(out)))["created"]["creator_account"] == "test_daren_01"
     assert "creator_account" not in platforms.check_record({**out, "created": {"creator_account": "x y; rm"}})["created"]
+
+
+# ── 邀约背景（加百应达人微信第 6 步，功能 R）：她收到过的邀约卡，给起草用 ─────────────
+
+def plan_file(folder, plan_id="P20261028-1500-ab12", content="您好！我们是测试帽饰品牌，合作细节加微信详聊～"):
+    """The batch invite tool's plan beside its ledger: the products' names, each creator's card words (made up)."""
+    (folder / "plans").mkdir(parents=True, exist_ok=True)
+    plan = {"plan_id": plan_id, "products": [{"id": DY_ITEM, "name": "测试贝雷帽"}, {"id": DY_ITEM2, "name": "测试药盒帽"}],
+            "creators": [{"aweme_id": INVITED, "content": content}, {"aweme_id": "someone_else", "content": "别人的话"}]}
+    (folder / "plans" / f"plan-{plan_id}.json").write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+
+
+def test_invite_history_gives_her_cards_newest_first_with_the_plans_words_and_names(tmp_path):
+    ledger = invite_ledger(tmp_path / "invites", *card(attempt="a1", rate=25, at="2026-10-29T09:00:00+08:00"),
+                           *card(attempt="a2", rate=0, at="2026-10-29T15:00:00+08:00"),
+                           *card(attempt="a3", sent=False, outcome="STATE_CONFLICT", at="2026-10-29T16:00:00+08:00"),
+                           *card(attempt="a4", aweme="someone_else", at="2026-10-29T17:00:00+08:00"))
+    plan_file(tmp_path / "invites")
+    cards = platforms.invite_history(ledger.parent, ["TEST_DAREN_01"])           # (case is not looked at)
+    assert [c["attempt"] for c in cards] == ["a2", "a1"]                            # newest first; not sent: left out
+    first = cards[0]
+    assert (first["commission_rate"], first["sent"], first["category"], first["plan_id"]) == (
+        0, True, "small", "P20261028-1500-ab12")
+    assert first["content"] == "您好！我们是测试帽饰品牌，合作细节加微信详聊～"
+    assert [(p["id"], p["name"]) for p in first["products"]] == [(DY_ITEM, "测试贝雷帽"), (DY_ITEM2, "测试药盒帽")]
+    assert [c["attempt"] for c in platforms.invite_history(ledger, [INVITED], limit=1)] == ["a2"]   # the file, at most 1
+
+
+def test_invite_history_without_a_plan_a_ledger_or_a_card_for_her(tmp_path):
+    ledger = invite_ledger(tmp_path / "invites", *card(sent="no result"),
+                           {"at": "2026-10-29T10:00:00+08:00", "event": "attempt", "attempt": "x1", "plan_id": "../../etc",
+                            "aweme_id": INVITED, "products": [DY_ITEM], "commission_rate": 0})
+    cards = platforms.invite_history(ledger, [INVITED])
+    assert [(c["attempt"], c["sent"]) for c in cards] == [("x1", None), ("9f1c00000001", None)]   # (not known)
+    assert all(c["content"] == "" and c["products"][0]["name"] == "" for c in cards)              # no plan: ids only
+    assert platforms.invite_history(ledger, ["nobody"]) == [] and platforms.invite_history(ledger, []) == []
+    assert platforms.invite_history(tmp_path / "nowhere", [INVITED]) == []
+    (tmp_path / "invites" / "plans").mkdir()
+    (tmp_path / "invites" / "plans" / "plan-P20261028-1500-ab12.json").write_text("{not json", encoding="utf-8")
+    assert platforms.invite_history(ledger, [INVITED])[1]["content"] == ""                       # a broken plan
+    broken = tmp_path / "broken"
+    (broken / "invites.jsonl").mkdir(parents=True)                                                # cannot be read
+    with pytest.raises(OSError):
+        platforms.invite_history(broken, [INVITED])
+

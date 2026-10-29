@@ -1604,6 +1604,97 @@ def invite_cover(ledger, item_id: str, *, douyin_ids=(), uid: str = "") -> Optio
     return best
 
 
+# ── 邀约背景：起草时告诉 Mac 这位达人是怎么被邀约来的（加百应达人微信，功能 R 第 6 步） ────────────────
+# 批量邀约工具的台账（invites.jsonl：attempt 行有商品、比例、权益、每款样品、类别，result 行说发没发出去）和清单
+# （<台账目录>/plans/plan-<编号>.json：creators[] 里每位卡上的话 content，products[] 里商品名）。worker 的 invite_block 把它
+# 写成提示里的 <invite_background>（只是数据）。只用标准库，macOS 自带的 /usr/bin/python3（3.9）也能跑。
+
+INVITE_PLANS_DIR = "plans"
+INVITE_HISTORY_MAX = 3
+INVITE_RIGHT_NAMES = {"free-sample": "免费申样", "high-commission": "专属高佣", "video-material": "视频素材支持",
+                      "video-boost": "优质视频投放"}
+INVITE_CATEGORY_NAMES = {"small": "小达人", "mid": "中大博主", "big": "大主播/专场型"}
+_PLAN_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _invite_plan(folder: Path, plan_id: str, cache: dict) -> Optional[dict]:
+    """The batch invite tool's plan ``plan-<plan_id>.json`` beside its ledger (None: no such plan, or not readable)."""
+    if not _PLAN_ID.match(str(plan_id or "")):
+        return None
+    if plan_id not in cache:
+        try:
+            plan = json.loads((folder / INVITE_PLANS_DIR / f"plan-{plan_id}.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            plan = None
+        cache[plan_id] = plan if isinstance(plan, dict) else None
+    return cache[plan_id]
+
+
+def invite_history(ledger, douyin_ids, limit: int = INVITE_HISTORY_MAX) -> list:
+    """The 邀约带货 cards the batch invite tool sent this creator (its ledger on this Mac, ``ledger``: its folder or the
+    invites.jsonl itself), newest first, at most ``limit``; a card that surely did not go out (``sent`` false) is left
+    out.  Each ``{"at", "aweme_id", "plan_id", "attempt", "category", "products": [{"id", "name"}], "commission_rate",
+    "rights", "samples", "content", "sent", "outcome"}``: ``sent`` True (went out) or None (not known: no result, or
+    ``sent`` null); ``content`` (the card's words) and the products' names come from the plan when it is there.  The
+    creator is one of ``douyin_ids`` (her 抖音号; case is not looked at).  [] when there is no ledger or no card for her;
+    a ledger that cannot be read raises ``OSError``."""
+    names = {str(d).strip().lower() for d in douyin_ids or () if str(d).strip()}
+    if not ledger or not names:
+        return []
+    path = Path(os.path.expanduser(str(ledger)))
+    if path.is_dir():
+        path = path / INVITE_LEDGER_FILE
+    if not path.exists():
+        return []
+    attempts, results = {}, {}
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue                                     # a line cut by a crash
+        if not isinstance(rec, dict) or not rec.get("attempt"):
+            continue
+        if rec.get("event") == "attempt":
+            attempts[str(rec["attempt"])] = rec
+        elif rec.get("event") == "result":
+            results[str(rec["attempt"])] = rec
+    cards = []
+    for key, rec in attempts.items():
+        if str(rec.get("aweme_id") or "").strip().lower() not in names:
+            continue
+        result = results.get(key) or {}
+        if result.get("sent") is False:
+            continue                                     # nothing went out
+        rate = rec.get("commission_rate")
+        cards.append({
+            "at": _clip(rec.get("at") or "", 40), "aweme_id": _clip(rec.get("aweme_id") or "", 64),
+            "plan_id": _clip(rec.get("plan_id") or "", 64), "attempt": _clip(key, 40),
+            "category": _clip(rec.get("category") or "", 20),
+            "products": [{"id": _clip(i, 40), "name": ""} for i in rec.get("products") or [] if isinstance(i, (str, int))],
+            "commission_rate": rate if _is_int(rate) else None,
+            "rights": [_clip(r, 30) for r in rec.get("rights") or [] if isinstance(r, str)],
+            "samples": {_clip(k, 40): _clip(v, 60) for k, v in (rec.get("samples") or {}).items()}
+            if isinstance(rec.get("samples"), dict) else {},
+            "content": "", "sent": True if result.get("sent") is True else None,
+            "outcome": _clip(result.get("outcome") or "", 40)})
+    cards.sort(key=lambda c: c["at"], reverse=True)
+    cards = cards[:max(1, int(limit))]
+    plans: dict = {}
+    for card in cards:
+        plan = _invite_plan(path.parent, card["plan_id"], plans)
+        if plan is None:
+            continue
+        for row in plan.get("creators") or []:
+            if isinstance(row, dict) and str(row.get("aweme_id") or "").strip().lower() == card["aweme_id"].lower():
+                card["content"] = _clip(row.get("content") or "", 600)
+                break
+        titles = {str(item.get("id")): _clip(item.get("name") or "", 60) for item in plan.get("products") or []
+                  if isinstance(item, dict) and item.get("id") is not None}
+        for product in card["products"]:
+            product["name"] = titles.get(product["id"], "")
+    return cards
+
+
 def invite_cover_text(cover: dict, item_id: str) -> str:
     when = _invite_time(cover.get("at"))
     if cover.get("state") == "unsure":
