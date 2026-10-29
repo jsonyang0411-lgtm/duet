@@ -73,7 +73,7 @@ FAKE_NODE = textwrap.dedent("""\
         out({"command": "find", "platform": "DY", "total": len(rows), "rows": rows, "stopped": scenario.get("find_stopped")})
     if args[:2] == ["buyin", "author-invite-status"]:
         code = exits.get("status")
-        if code: sys.stderr.write("[WALL] 验证码\\n"); sys.exit(code)
+        if code: sys.stderr.write(scenario.get("said", {}).get("status", "[WALL] 验证码") + "\\n"); sys.exit(code)
         creators = []
         for a in opt["aweme-id"].split(","):
             if a in scenario.get("missing", []):
@@ -88,7 +88,8 @@ FAKE_NODE = textwrap.dedent("""\
         a = opt["aweme-id"]
         phase = "execute" if opt.get("execute") else "preview"
         code = exits.get(a + ":" + phase)
-        if code and phase == "preview": sys.stderr.write("[STOP]\\n"); sys.exit(code)
+        said = scenario.get("said", {}).get(a + ":" + phase)
+        if code and (phase == "preview" or said): sys.stderr.write((said or "[STOP]") + "\\n"); sys.exit(code)
         status = scenario.get("preview_status", {}).get(a, 1)
         gate = scenario.get("preview_gate", {}).get(a, -1)
         quota = scenario.get("preview_quota", {}).get(a, scenario["quota"])
@@ -427,6 +428,35 @@ def test_run_stops_at_once_on_76_77_79_and_says_where(env, phase, exit_code):
     if phase == "execute":
         assert out["sent"][-1]["aweme_id"] == "dy_small_b", "a card that may have gone out is counted as sent"
         assert "dy_small_b" in tool.Ledger(env.tmp / "ledger").never_again()
+
+
+GONE = ("[IDENTITY_UNVERIFIABLE] the expected identity could not be checked on buyin (the answer carried no usable identity field "
+        "(shopId: an id of zero (an anonymous or unset session), not an identity)); the request itself was not sent\n"
+        "hint: An expectation that cannot be checked is not a pass. Only the identity request was sent.\n"
+        "note: this run had sent 1 platform request when it stopped")
+
+
+def test_a_logged_out_buyin_tab_stops_the_plan_and_says_so(env, capsys):
+    env.scenario(scenario(exits={"status": 1}, said={"status": GONE}))
+    code, _ = plan_now(env)
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "百应掉登录了" in err and "[IDENTITY_UNVERIFIABLE]" in err, "the CLI's own error line, not its trailing note"
+    assert "note: this run" not in err
+
+
+@pytest.mark.parametrize("phase", ["preview", "execute"])
+def test_a_logged_out_buyin_tab_stops_the_run_at_once_and_nothing_counts_as_sent(env, phase):
+    plan_file, plan_id = make_plan(env, exits={f"dy_small_b:{phase}": 1}, said={f"dy_small_b:{phase}": GONE})
+    env.log.unlink()
+    code, out, _ = run_now(env, plan_file, plan_id)
+    assert code == 1
+    assert out["stopped"]["at"] == 1 and "百应掉登录了" in out["stopped"]["why"]
+    assert [x["aweme_id"] for x in out["sent"]] == ["dy_small_a"]
+    assert not any(a.startswith("--aweme-id=dy_gap") for c in env.calls() for a in c["args"]), "nothing after the stop"
+    assert "dy_small_b" not in tool.Ledger(env.tmp / "ledger").never_again(), "the check failed before the card's request: a rerun sends her"
+    results = [r for r in ledger_lines(env) if r.get("event") == "result" and r.get("aweme_id") == "dy_small_b"]
+    assert results == [] if phase == "preview" else [r["sent"] for r in results] == [False]
 
 
 def test_run_skips_a_state_conflict_and_goes_on_and_a_later_plan_may_ask_again(env):

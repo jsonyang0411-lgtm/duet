@@ -44,6 +44,10 @@ DEFAULT_HOME = Path.home() / ".claude-relay" / "platform" / "creator-invites"
 EXIT_OK, EXIT_FAILED, EXIT_USAGE = 0, 1, 2
 EXIT_WALL, EXIT_LOGIN, EXIT_ACCOUNT, EXIT_INTERRUPTED = 76, 77, 79, 130
 STOP_EXITS = {EXIT_WALL: "验证码或限流（退出码 76）", EXIT_LOGIN: "登录失效（退出码 77）", EXIT_ACCOUNT: "登录的不是指定的账号（退出码 79）"}
+# The douyin CLI could not tell which login the tab is (exit 1; 2026-10-29 live: getUser gave shop id 0 = a 百应 tab that
+# had logged out). It checks before the command's own request, so nothing else went out — and nothing will, until a person logs in.
+IDENTITY_UNVERIFIABLE = "[IDENTITY_UNVERIFIABLE]"
+LOGIN_HINT = "核对不了调试 Chrome 里登录的是哪家店，多半是百应掉登录了：在调试 Chrome 里重新登录百应、开着百应的页面，再重跑"
 
 AWEME_ID = re.compile(r"^[A-Za-z0-9_.-]{2,64}$")          # what douyin-engineering's author-invite takes
 WECHAT = re.compile(r"^[a-zA-Z_-][a-zA-Z\d_-]{5,19}$")      # the drawer's own patterns
@@ -273,9 +277,14 @@ class CliResult:
             self.data = None
 
     def said(self) -> str:
-        """The CLI's own last words on stderr, for the operator (one line, at most 300 characters)."""
-        lines = [l for l in self.stderr.strip().splitlines() if l.strip()]
-        return (lines[-1] if lines else "")[:300]
+        """The CLI's own words on stderr, for the operator (one line, at most 300 characters): its last error line
+        (「[CODE] …」, how both CLIs say what went wrong), else its last line (a trailing note says less)."""
+        lines = [l.strip() for l in self.stderr.strip().splitlines() if l.strip()]
+        tagged = [l for l in lines if re.match(r"^\[[A-Z_]+\]", l)]
+        return ((tagged or lines or [""])[-1])[:300]
+
+    def unverifiable(self) -> bool:
+        return self.exit_code != 0 and IDENTITY_UNVERIFIABLE in self.stderr
 
 
 class Clis:
@@ -331,6 +340,8 @@ def must_read(result: CliResult, what: str) -> dict:
     """A read's JSON, or the stop / failure it ended with."""
     if result.exit_code in STOP_EXITS:
         raise StopRun(f"{what}：{STOP_EXITS[result.exit_code]}，立刻停下。命令行说：{result.said()}", result.exit_code)
+    if result.unverifiable():
+        raise StopRun(f"{what}：{LOGIN_HINT}。命令行说：{result.said()}")
     if result.timed_out:
         raise ToolError(f"{what}：命令行超时")
     if result.exit_code != 0 or result.data is None:
@@ -788,6 +799,10 @@ def run_plan(cfg: dict, plan: dict, confirm: str, clis: Clis, ledger: Ledger, *,
             summary["stopped"] = {"why": f"预览 {aweme}：{STOP_EXITS[preview.exit_code]}", "at": index, "exit": preview.exit_code}
             ledger.append({"event": "stop", "plan_id": plan["plan_id"], "aweme_id": aweme, "phase": "preview", "exit": preview.exit_code})
             break
+        if preview.unverifiable():
+            summary["stopped"] = {"why": f"预览 {aweme}：{LOGIN_HINT}（{preview.said()}）", "at": index, "exit": EXIT_FAILED}
+            ledger.append({"event": "stop", "plan_id": plan["plan_id"], "aweme_id": aweme, "phase": "preview", "exit": preview.exit_code})
+            break
         item = ((preview.data or {}).get("items") or [{}])[0] if preview.data else {}
         if preview.exit_code != 0 or not item:
             previews_failed += 1
@@ -819,7 +834,9 @@ def run_plan(cfg: dict, plan: dict, confirm: str, clis: Clis, ledger: Ledger, *,
         done = clis.run("dy", [*args, "--expect-status=1", "--expect-popwindow=-1", "--execute"], 900)
         outcome = (((done.data or {}).get("items") or [{}])[0] or {}).get("outcome") if done.data else None
         writes = (done.data or {}).get("platformWrites") if done.data else None
-        if done.data is None or done.timed_out:
+        if done.unverifiable() and not done.timed_out:
+            sent = False                                  # the login check failed before the card's own request: nothing went out
+        elif done.data is None or done.timed_out:
             sent = None                                   # no answer: not known — never sent again
         elif outcome in SENT_OUTCOMES or (isinstance(writes, int) and writes > 0):
             sent = True
@@ -831,6 +848,10 @@ def run_plan(cfg: dict, plan: dict, confirm: str, clis: Clis, ledger: Ledger, *,
         if done.exit_code in STOP_EXITS:
             (summary["sent"] if sent else summary["skipped"]).append(entry)
             summary["stopped"] = {"why": f"发送 {aweme}：{STOP_EXITS[done.exit_code]}", "at": index, "exit": done.exit_code}
+            break
+        if done.unverifiable() and not done.timed_out:
+            summary["skipped"].append({**entry, "why": "没发出去：发送前核对登录没过"})
+            summary["stopped"] = {"why": f"发送 {aweme}：{LOGIN_HINT}（{done.said()}）。这位没发出去，重跑会再发她", "at": index, "exit": EXIT_FAILED}
             break
         if done.exit_code == EXIT_INTERRUPTED or done.timed_out or sent is None:
             summary["stopped"] = {"why": f"发送 {aweme} 的结果不知道（退出码 {done.exit_code}{'，超时' if done.timed_out else ''}）：先到百应里看，不会重发", "at": index}
@@ -920,7 +941,7 @@ def main(argv: Optional[List[str]] = None, *, runner: Callable = subprocess.run,
         private_write(clis.workdir / "report.md", run_markdown(summary))
         stdout.write(json.dumps(summary, ensure_ascii=False, indent=1) + "\n")
         exit_code = (summary["stopped"] or {}).get("exit")
-        return exit_code if exit_code in STOP_EXITS else EXIT_OK
+        return exit_code if exit_code in STOP_EXITS or exit_code == EXIT_FAILED else EXIT_OK
     except ToolError as e:
         sys.stderr.write(f"[{'STOP' if isinstance(e, StopRun) else 'ERROR'}] {e}\n")
         return e.exit_code

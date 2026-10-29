@@ -188,7 +188,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 |---|---|---|---|---|
 | `PROJECT_ROOT` | `Path` | 自动解析 | `src/config.py` | 项目根目录（`WEBOT_APP_HOME`；frozen EXE 模式下是 EXE 所在目录） |
 | `UI_DIR` | `Path` | `ui/dist/` | `src/web/server.py` | 前端静态文件目录（frozen 时在 `_MEIPASS` 里） |
-| `DEFAULT_HOME` / `COMMISSION_CAP` / `CONTENT_MAX` / `STOP_EXITS` | `Path` / `int` / `int` / `dict` | `~/.claude-relay/platform/creator-invites` / `25` / `150` / `{76, 77, 79}` | `tools/creator_invite/invite.py` | 邀约批量工具的台账和清单默认位置；专属佣金上限（用户的规矩）；邀约文案字数（按 JS 计）；一碰到就停的退出码（见功能 Q） |
+| `DEFAULT_HOME` / `COMMISSION_CAP` / `CONTENT_MAX` / `STOP_EXITS`（另有 `IDENTITY_UNVERIFIABLE`、`LOGIN_HINT`：百应掉登录时的停和提示） | `Path` / `int` / `int` / `dict` | `~/.claude-relay/platform/creator-invites` / `25` / `150` / `{76, 77, 79}` | `tools/creator_invite/invite.py` | 邀约批量工具的台账和清单默认位置；专属佣金上限（用户的规矩）；邀约文案字数（按 JS 计）；一碰到就停的退出码（见功能 Q） |
 | `DEFAULT_TEMPLATES` / `DEFAULT_FIND` / `DEFAULT_RULES` / `CATEGORY_NAMES` | `dict` | 三类话术（`{品牌}` 占位）/ 帽子类目 1000003461、件单价 150–500、两组粉丝范围（5000–20 万、20 万以上）/ 分类、不进清单与标记的门槛（小达人 5000 到 20 万、中大博主 ≥ 20 万、女粉 < 60 不进）/ 小达人·中大博主·大主播/专场型 | `tools/creator_invite/invite.py` | plan 的默认筛选、分类、话术（配置可覆盖，见 §5.7） |
 | `_LOOPBACK_HOSTS` | `frozenset[str]` | `{"127.0.0.1", "localhost", "::1"}` | `src/web/server.py` | 控制台只接受 Host / Origin 为本机的请求（防 DNS 重绑定、跨站调用） |
 | `_POST_ONLY_PATHS` | `frozenset[str]` | `/api/config`、`/api/config/import`、`/api/start`、`/api/stop`、`/api/onboarding/reset`、`/api/onboarding/step1..3`、`/api/voice/download-model`、`/api/wechat-data-dir/detect`、`/api/relay/cancel`、`/api/prm/parties`、`/api/prm/packets`、`/api/prm/deals`、`/api/prm/reveal` | `src/web/server.py` | 会改状态的端点只认 POST；GET 一律 405（网页可以用 `<img>` 悄悄发 GET，且不带 Origin） |
@@ -1063,7 +1063,7 @@ Windows `wcdb` 后端旁边的一个线程（`wechat-presence`）：每 `CHECK_S
 |---|---|---|
 | `load_config(path)` / `find_node(configured="")` / `check_clis(cfg, need=("dy", "jst"))` | 读并检查配置（§5.7）：店铺 ID、子账号必填，联系方式按抽屉的格式、至少一个，专属佣金 1–25，权益只认四个词，商品 1–5 款要有款号，话术 `{品牌}` 换好以后 ≤150 字（JS 计）且不写快递公司，`gap_seconds` ≥ 3，`wait_between` ≥ 10 秒；不合格 → `ToolError`（退出码 2）。`check_clis` 看两个命令行目录里有没有 `bin/dy.mjs` / `bin/jst.mjs` | `dict` / `str\|None` / — |
 | `Clis(cfg, workdir, runner=subprocess.run, stamp=None)` / `.run(which, args, timeout)` / `.env(which)` / `.requests()` | 经 `paced-dy.mjs` / `paced-jst.mjs` 跑命令行（argv 列表、不经 shell），环境里去掉 `DY_TRANSPORT`、设好命令行目录、请求间隔、共用的请求钟（`stamp`，台账目录的 `last-request`）和这次的请求记录；超时不抛，返回 `timed_out` | `CliResult(argv, exit_code, stdout, stderr, seconds, timed_out)`（`.data` 是解析出的 JSON，`.said()` 是 stderr 最后一行） |
-| `must_read(result, what)` | 读命令的 JSON；76 / 77 / 79 → `StopRun`（退出码照原样），其余失败 → `ToolError` | `dict` |
+| `must_read(result, what)` / `CliResult.said()` / `CliResult.unverifiable()` | 读命令的 JSON；76 / 77 / 79 → `StopRun`（退出码照原样），抖音命令行核对不了登录（`[IDENTITY_UNVERIFIABLE]`，百应掉登录时就是这样）→ `StopRun`（退出码 1，`LOGIN_HINT` 提示重新登录百应），其余失败 → `ToolError`；`said` 取命令行 stderr 里最后一行「[代码] …」报错（没有就最后一行）/ 是不是核对不了登录 | `dict` / `str` / `bool` |
 | `Ledger(folder)` / `.lock()` / `.unlock()` / `.records()` / `.append(record)` / `.never_again()` / `.unknown()` / `.sent_this_week(moment)` | 台账 `invites.jsonl`（只追加、0600、每行 fsync）；`invites.lock` 用 `fcntl.flock` 保证同时只有一个 run；有 `attempt` 而没有 `sent: false` 的 `result` 的抖音号永不再发；本周按北京时间周一 0 点算 | — / `set` / `list` / `int` |
 | `percent(text)` / `hat_share(row)` / `female_share(row)` / `band_min(band)` / `creator_view(row)` | 从 `jst find` 的行读帽子占比、女性粉丝占比（画像只给最大的性别：男性 x% 算女性 100−x）、销售额区间下限、给清单用的字段 | `float\|None` / `dict` |
 | `classify(row, rules)` | 先判专场型（直播为主、近 30 天直播销售额下限 ≥ `big_live_min`、等级 ≥ `big_level_min`），再按粉丝：≥ `mid_fans_min` 中大博主、≥ `small_fans_min` 小达人（15–20 万也算，用户 2026-10-29）；不到 `small_fans_min` 给出不进清单的原因 | `(类别\|None, 原因\|None)` |
@@ -2378,9 +2378,9 @@ invite.py run --config C --plan F --confirm <编号>
   → load_plan → Ledger.lock（invites.lock）
   → run_plan：每位
       never_again？跳过 → sent_this_week ≥ weekly_cap？停 → sleep(uniform(15, 30))
-      → 预览 buyin author-invite …（不带 --execute）→ 76/77/79 停；状态 1、门槛 -1 才往下；weeklyQuota 剩下 < quota_margin 停
+      → 预览 buyin author-invite …（不带 --execute）→ 76/77/79 停；[IDENTITY_UNVERIFIABLE]（百应掉登录）停；状态 1、门槛 -1 才往下；weeklyQuota 剩下 < quota_margin 停
       → Ledger.append(attempt)（fsync）→ buyin author-invite … --expect-status=1 --expect-popwindow=-1 --execute
-      → Ledger.append(result: sent true/false/null) → 76/77/79、超时、130、null 停；STATE_CONFLICT 跳过
+      → Ledger.append(result: sent true/false/null；发送前核对登录没过 = false) → 76/77/79、核对登录没过、超时、130、null 停；STATE_CONFLICT 跳过
   → run-<时间>/report.md（run_markdown）
 ```
 
