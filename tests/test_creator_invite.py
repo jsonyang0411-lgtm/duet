@@ -788,6 +788,8 @@ def test_follow_keeps_quiet_at_night_and_says_once_when_it_cannot_look(env, tmp_
         env.log.unlink()
         code, out, notes = follow_now(env, NOW + timedelta(hours=3))
         assert code == 0 and out == {"skipped": "正在发邀约卡，这次不查"} and env.calls() == []
+        runs = [json.loads(l) for l in (env.tmp / "ledger" / "follow.log").read_text(encoding="utf-8").splitlines()]
+        assert [r.get("skipped") or r.get("problem") for r in runs][-2:] == ["登录失效（退出码 77）", "正在发邀约卡，这次不查"], "one line a run"
     finally:
         held.unlock()
     calls = []

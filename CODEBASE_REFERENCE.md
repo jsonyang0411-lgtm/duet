@@ -689,7 +689,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `tools/wechat_memory_scan.py` | 在微信进程（WeChatWin.dll）的内存里找 64 位十六进制的数据库密钥（排错用） |
 | `tools/macos/weflow_setup.py` / `chatlog_setup.py` / `lldb_keyscan.py` | macOS：准备 WeFlow 直读（诊断账号、导入密钥、验证读取）/ 经本机 chatlog 服务读取 / 用 LLDB 扫内存取密钥（写 `all_keys.json`，不打印密钥） |
 | `tools/claude_relay/worker.py` | Mac 端 worker，见 §2.26 |
-| `tools/creator_invite/invite.py`（+ `paced-dy.mjs`、`paced-jst.mjs`） | 达人广场「邀约带货」两段式批量（Mac 上运行，标准库、Python 3.9）：`plan` 只读出清单、`run --confirm <清单编号>` 只发清单里的人，见 §2.38、功能 Q |
+| `tools/creator_invite/invite.py`（+ `paced-dy.mjs`、`paced-jst.mjs`、`start-follow.command`） | 达人广场「邀约带货」两段式批量（Mac 上运行，标准库、Python 3.9）：`plan` 只读出清单、`run --confirm <清单编号>` 只发清单里的人，见 §2.38、功能 Q |
 | `scripts/run-tests.sh` | 在一次性干净虚拟环境里安装 `requirements-macos.txt` 和 `requirements-dev.txt` 并跑测试 |
 
 ### 2.23 `src/send/bubbles.py`、`src/send/queue.py`
@@ -1077,7 +1077,7 @@ Windows `wcdb` 后端旁边的一个线程（`wechat-presence`）：每 `CHECK_S
 | `plan_markdown(plan, plan_file)` / `excluded_table(w, rows)` / `plan_csv(plan)` / `write_plan(plan, out_dir)` | 给人看的清单（每行带来源：聚水潭 / 抖音 / 两边都有；抖音那边找到、查了多少一行；按三类分表、商品与库存（没查时写「没查」）、话术原文与字数、疑似同行自播号 / 专门带自己牌子的 / 可能骗样品的各一张表、其他没进的和原因）和 CSV；三份文件 0600 | `str` / `dict[str, Path]` |
 | `invite_args(cfg, plan, creator)` / `load_plan(path)` | `dy buyin author-invite` 的参数（`--name=value`；`--rights` 一个都不勾时写 `none`，比例大于 0 才带 `--commission-rate`；`--expect-shop-id`、`--no-open`）/ 读清单并认出是 plan 写的 | `list[str]` / `dict` |
 | `run_plan(cfg, plan, confirm, clis, ledger, *, limit=None, sleep, uniform, clock)` | run：编号、清单年龄、佣金与权益和配置一致才开始；每位：台账去重、`rules.drop_ids`（清单出了以后又说不要的）跳过、每周上限、每天上限（`Ledger.sent_today`）→ 两位之间等 `wait_between` → 预览（状态 1、门槛 -1、没被拦才往下；额度剩下不到 `quota_margin` 就停）→ 写 `attempt` → `--expect-status=1 --expect-popwindow=-1 --execute` → 写 `result`；76 / 77 / 79、超时、130、没结果都停，`STATE_CONFLICT` 跳过继续，连续 3 位预览失败停 | 执行摘要 `dict`（`sent`、`skipped`、`conflicts`、`stopped`、`unknown_before`、`sent_this_week`、`requests`） |
-| `follow_invites(cfg, clis, ledger, *, clock=now_bjt, notify=None)` / `mac_notify(title, text, runner=subprocess.run)` | follow 一轮：台账里 `sent: true` 的卡、`follow_days` 天内、状态不在 `FINAL_STATUSES`（3 / 4 / 99 / 100 / 101）的，发卡 2 天内隔 25 分钟、更早隔 115 分钟才再查，最多 `follow_max` 位；`dy buyin author-invite-status --names` 一次查完；状态变了（不是 2）就 `notify`（最多 4 条 + 1 条合计）并追加 `follow.jsonl`；查不了时两小时最多通知一次（`PROBLEM_EVERY`）；`follow_hours` 之外不查；状态存 `follow-state.json`（0600）/ macOS 通知（`osascript`，标题和正文作参数传进去，不拼进脚本） | 摘要 `dict`（`checked`、`changes`、`waiting`、`problem` 或 `skipped`）/ — |
+| `follow_invites(cfg, clis, ledger, *, clock=now_bjt, notify=None)` / `mac_notify(title, text, runner=subprocess.run)` / `follow_log(ledger, report)`（每轮一行写进 `follow.log`，0600） | follow 一轮：台账里 `sent: true` 的卡、`follow_days` 天内、状态不在 `FINAL_STATUSES`（3 / 4 / 99 / 100 / 101）的，发卡 2 天内隔 25 分钟、更早隔 115 分钟才再查，最多 `follow_max` 位；`dy buyin author-invite-status --names` 一次查完；状态变了（不是 2）就 `notify`（最多 4 条 + 1 条合计）并追加 `follow.jsonl`；查不了时两小时最多通知一次（`PROBLEM_EVERY`）；`follow_hours` 之外不查；状态存 `follow-state.json`（0600）/ macOS 通知（`osascript`，标题和正文作参数传进去，不拼进脚本） | 摘要 `dict`（`checked`、`changes`、`waiting`、`problem` 或 `skipped`）/ — |
 | `run_markdown(summary)` / `main(argv=None, *, runner, sleep, uniform, clock, stdout=None)` | 执行记录（停在第几位、为什么）/ 命令行入口：`plan`、`run`、`status`、`follow`（拿不到台账锁＝正在发卡，这一轮跳过）；返回退出码（run 停在 76 / 77 / 79 时照原样） | `str` / `int` |
 | `paced-dy.mjs` / `paced-jst.mjs` | Node 包装：从 `CREATOR_INVITE_CLI_ROOT` 载入命令行原样运行，给抖音页面传输的 `PageTransport.prototype.request` / 聚水潭的 `fetchImpl` 排队、按 `CREATOR_INVITE_STAMP` 的时间至少隔 `CREATOR_INVITE_GAP_MS`，每个请求在 `CREATOR_INVITE_REQUEST_LOG` 记一行（时间、方法、路径） | 命令行自己的退出码 |
 
@@ -2388,7 +2388,7 @@ invite.py run --config C --plan F --confirm <编号>
       → Ledger.append(result: sent true/false/null；发送前核对登录没过 = false) → 76/77/79、核对登录没过、超时、130、null 停；STATE_CONFLICT 跳过
   → run-<时间>/report.md（run_markdown）
 
-invite.py follow --config C（LaunchAgent 每 30 分钟）
+invite.py follow --config C（start-follow.command：终端窗口里每 30 分钟一次；launchd 读不了桌面上的仓库）
   → Ledger.lock（拿不到＝正在发卡，跳过）→ follow_invites：follow_hours 之外跳过 → 台账里发出去了的、该查的（≤ follow_max）
       → node paced-dy.mjs buyin author-invite-status --aweme-id=… --names --pause-ms=4000 --expect-shop-id=… --no-open（只读）
       → 状态变成 4 / 3 / 99 / 100 / 101：mac_notify（osascript）+ follow.jsonl；查不了：两小时最多通知一次 → follow-state.json

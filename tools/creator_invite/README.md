@@ -114,10 +114,10 @@
 - 按钮从 2「继续沟通 · 待回复」变成 4「已建联」（她回了）→ 弹「百应：达人回复了邀约」，写着昵称和抖音号，叫运营去百应「合作消息」看她说了什么、要不要加微信；变成 3「已拒绝」→ 弹「拒绝了」；99 / 100 / 101 → 弹「状态变了」。回了 / 拒了 / 不能沟通的以后不再查。一次最多弹 4 条，多的合成一条。
 - 查不了（登录失效、掉登录、验证码、调试 Chrome 没开……）→ 弹「这次查不了」，两小时最多一次。
 - 正在发卡（run 拿着台账锁）时这一轮跳过。
-- 记录：`follow-state.json`（每位最后看到的状态、什么时候查的）和 `follow.jsonl`（每次变化），都在台账目录、0600。
+- 记录：`follow-state.json`（每位最后看到的状态、什么时候查的）、`follow.jsonl`（每次变化）、`follow.log`（每跑一轮一行：查了几位、谁变了、出了什么问题、为什么跳过），都在台账目录、0600。
 - 没用百应的「待回复会话数」（`/connection/pc/im/conversations/all_unreply`）：2026-10-29 发了二十多张卡时它是 0 / 0，看来只算达人主动发起的会话。
 
-每 30 分钟自动跑：放一个 LaunchAgent（`~/Library/LaunchAgents/<名字>.plist`，`StartInterval` 1800，`ProgramArguments` 是上面那条命令，`StandardOutPath` / `StandardErrorPath` 写到台账目录的 `follow.log`），`launchctl load` 它；停掉就 `launchctl unload` 再删 plist。调试 Chrome 要开着百应的页面。
+每 30 分钟自动跑：双击 `tools/creator_invite/start-follow.command`（终端窗口里循环跑 follow，Ctrl+C 或关窗口就停），开机就跑就把它加进「系统设置 › 通用 › 登录项」，和 Mac worker 的 `start-prm-worker.command` 一样。不用 LaunchAgent：仓库在「桌面」上，launchd 的后台任务读不了桌面（2026-10-29 试过：Operation not permitted），终端可以。调试 Chrome 要开着百应的页面。
 
 ## 台账
 

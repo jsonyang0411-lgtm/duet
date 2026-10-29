@@ -1162,6 +1162,16 @@ def _when(text) -> Optional[datetime]:
     return moment if moment.tzinfo else moment.replace(tzinfo=BJT)
 
 
+def follow_log(ledger: Ledger, report: dict) -> None:
+    """One line a run in the ledger folder's follow.log (0600): what was looked at, what changed, why it was skipped."""
+    fd = os.open(str(ledger.folder / "follow.log"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.write(fd, (json.dumps(report, ensure_ascii=False) + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+    os.chmod(str(ledger.folder / "follow.log"), 0o600)
+
+
 def mac_notify(title: str, text: str, runner: Callable = subprocess.run) -> None:
     """A macOS notification (osascript; the texts go in as arguments, never into the script). A failure is only logged."""
     script = ['-e', 'on run argv', '-e', 'display notification (item 2 of argv) with title (item 1 of argv) sound name "Glass"', '-e', 'end run']
@@ -1295,6 +1305,7 @@ def main(argv: Optional[List[str]] = None, *, runner: Callable = subprocess.run,
             try:
                 ledger.lock()                                    # 正在发卡（run 拿着锁）就这次不查
             except ToolError:
+                follow_log(ledger, {"at": clock().isoformat(timespec="seconds"), "skipped": "正在发邀约卡，这次不查"})
                 stdout.write(json.dumps({"skipped": "正在发邀约卡，这次不查"}, ensure_ascii=False) + "\n")
                 return EXIT_OK
             try:
@@ -1304,7 +1315,9 @@ def main(argv: Optional[List[str]] = None, *, runner: Callable = subprocess.run,
                                          notify=None if args.no_notify else (lambda title, text: mac_notify(title, text, runner)))
             finally:
                 ledger.unlock()
-            stdout.write(json.dumps({"at": moment.isoformat(timespec="seconds"), **summary, "requests": clis.requests()}, ensure_ascii=False, indent=1) + "\n")
+            report = {"at": moment.isoformat(timespec="seconds"), **summary, "requests": clis.requests()}
+            follow_log(ledger, report)
+            stdout.write(json.dumps(report, ensure_ascii=False, indent=1) + "\n")
             return EXIT_OK
         if args.command == "plan":
             if not 1 <= args.count <= 100:
