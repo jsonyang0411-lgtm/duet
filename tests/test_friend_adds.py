@@ -13,7 +13,7 @@ from test_prm import ADMIN, CREATOR, Clock, config
 
 from src.admin import AdminCommandHandler
 from src.prm import friend_adds as FA
-from src.prm.friend_adds import FriendAddError, check_greeting, greeting_for
+from src.prm.friend_adds import FriendAddError, check_greeting, greeting_for, remark_text
 from src.prm.service import PrmService
 from src.prm.store import PrmStore
 from src.relay.service import ClaudeRelay
@@ -27,20 +27,25 @@ DAY = 86400
 
 class FakeManager:
     """FriendManager as the add path sees it: each add_friend answered from ``answers`` (a reason, a dict, an
-    exception); its ``message`` holds the number, as the real one's does."""
+    exception); its ``message`` holds the number, as the real one's does.  ``remarks``: the remark of each call ("" when
+    none was passed); ``sees_remark``: whether the application window showed its 「备注」 field (``remark_set``)."""
 
     def __init__(self):
         self.answers = []
         self.calls = []
+        self.remarks = []
+        self.sees_remark = True
 
-    def add_friend(self, keyword, message=""):
+    def add_friend(self, keyword, message="", remark=""):
         self.calls.append((keyword, message))
+        self.remarks.append(remark)
         answer = self.answers.pop(0) if self.answers else "ok"
         if isinstance(answer, Exception):
             raise answer
+        typed = {"remark_set": self.sees_remark} if remark else {}
         if answer == "ok":
-            return {"ok": True, "target": keyword, "message": f"已成功向「{keyword}」发送好友申请（附言：{message}）"}
-        return {"ok": False, "target": keyword, "reason": answer, "message": f"「{keyword}」：{answer}"}
+            return {"ok": True, "target": keyword, "message": f"已成功向「{keyword}」发送好友申请（附言：{message}）", **typed}
+        return {"ok": False, "target": keyword, "reason": answer, "message": f"「{keyword}」：{answer}", **typed}
 
     def look_for_news(self):                         # (the auto-accept service never runs here)
         return "changed"
@@ -355,6 +360,75 @@ def test_the_brand_and_the_greeting_come_from_the_settings(tmp_path):
         w.stop()
 
 
+# ── the remark (备注) she gets in our WeChat (user, 2026-10-29) ─────────────────
+
+def test_the_remark_is_her_baiying_nickname_or_her_douyin_id_in_at_most_16_characters():
+    template = FA.REMARK_DEFAULT
+    assert remark_text(template, "小鹿", AWEME) == "抖音-小鹿"
+    assert remark_text(template, "  Amy   Chen ", AWEME) == "抖音-Amy Chen"                       # blanks collapsed
+    assert remark_text(template, "一二三四五六七八九十一二三四五六七", AWEME) == "抖音-一二三四五六七八九十一二三"   # 16 in all
+    assert remark_text(template, "小鹿 138****0000", AWEME) == "抖音-dy_demo01"                    # a masked number in it
+    assert remark_text(template, "", AWEME) == "抖音-dy_demo01"
+    assert remark_text(template, "", "dy_a_very_long_douyin_id") == "抖音-dy_a_very_lon"            # 16 in all
+    assert remark_text(template, "", "") == "" and remark_text("", "小鹿", AWEME) == ""            # nothing to use / off
+    assert remark_text(template, "一二三四五六七八九十", AWEME, suffix="-mo01") == "抖音-一二三四五六七八-mo01"
+    assert remark_text("百应达人{昵称}", "小鹿", AWEME) == "百应达人小鹿"
+
+
+def test_every_record_gets_a_remark_no_other_one_has(world):
+    first = world.paste()                                                    # 小鹿 · dy_demo01
+    second = world.paste(aweme="dy_demo02", wechat="", phone="13900000000")  # another 小鹿
+    third = world.adds.paste("dy_demo03", "", {})["id"]                      # no nickname: her 抖音号
+    fourth = world.adds.paste("DY_MO02", "小鹿", {})["id"]                   # 抖音-小鹿, 抖音-小鹿-mo02 are both taken
+    assert [world.record(i)["remark"] for i in (first, second, third, fourth)] == [
+        "抖音-小鹿", "抖音-小鹿-mo02", "抖音-dy_demo03", ""]
+    world.adds.act(first, "drop")                                            # a record not added frees its remark
+    fifth = world.paste(aweme="dy_demo05", wechat="", phone="13700000000")
+    assert world.record(fifth)["remark"] == "抖音-小鹿"
+    world.later(7 * DAY + 1)
+    world.adds.sweep(force=True)                                             # nobody touched them: expired
+    assert world.record(fifth)["state"] == "expired"
+    sixth = world.paste(aweme="dy_demo06", wechat="abcdefgh", phone="")
+    assert world.record(sixth)["remark"] == "抖音-小鹿-mo06"                  # an expired record's remark still counts
+    out = world.adds.offer_from_buyin(buyin_event(creator={"aweme_id": "dy_demo07", "uid": "", "nickname": "小青"},
+                                                  invited={**buyin_event()["invited"], "aweme_id": "dy_demo07"}))
+    assert world.record(out["id"])["remark"] == "抖音-小青"                  # the 百应 inbox's records too
+
+
+def test_the_remark_goes_with_the_one_add_and_whether_it_was_typed_is_kept(world, caplog):
+    caplog.set_level(logging.DEBUG)
+    add_id = world.paste()
+    out = world.adds.confirm(add_id)
+    assert world.manager.remarks == ["抖音-小鹿"] and (out["remark"], out["remark_set"]) == ("抖音-小鹿", True)
+    assert world.record(add_id)["remark_set"] is True
+    world.manager.sees_remark = False                          # the application window showed no 「备注」 field
+    world.later(121)
+    other = world.paste(aweme="dy_demo02", nickname="小青")
+    answer = world.admin.handle(f"加达人 {other}")
+    assert answer == (f"已向 ab****yz 发好友申请（#{other}，附言：您好小青，百应上联系您的～，备注没填上（申请窗口里没认出「备注」栏））"
+                      "；今天已加 2/10")
+    record = world.record(other)
+    assert (record["state"], record["remark"], record["remark_set"]) == ("requested", "抖音-小青", False)
+    assert "the remark was typed" in caplog.text and "the remark was not typed" in caplog.text
+    assert "抖音-小鹿" not in caplog.text and "抖音-小青" not in caplog.text          # the remark is her name: not logged
+
+
+def test_with_the_remark_switched_off_add_friend_gets_none(tmp_path):
+    w = World(tmp_path, prm_friend_add_remark="")
+    try:
+        add_id = w.paste()
+        assert w.record(add_id)["remark"] == ""
+        out = w.adds.confirm(add_id)
+        assert w.manager.remarks == [""] and (out["remark"], out["remark_set"]) == ("", False)
+    finally:
+        w.stop()
+    w = World(tmp_path, prm_friend_add_remark="百应-{昵称}")
+    try:
+        assert w.record(w.paste())["remark"] == "百应-小鹿"
+    finally:
+        w.stop()
+
+
 # ── an operator's other answers ───────────────────────────────────────────────
 
 def test_drop_clears_the_numbers_and_nothing_can_be_done_after(world):
@@ -474,7 +548,7 @@ def test_the_admins_commands_list_add_and_drop_with_masked_numbers(world):
     assert f"#{first} 小鹿 {AWEME} 微信号 ab****yz、手机 138****0000 待确认" in listed
     assert "手机 139****0000" in listed and WECHAT not in listed and PHONE not in listed
     answer = world.admin.handle(f"加达人 {first}")
-    assert answer == f"已向 ab****yz 发好友申请（#{first}，附言：您好小鹿，百应上联系您的～）；今天已加 1/10"
+    assert answer == f"已向 ab****yz 发好友申请（#{first}，附言：您好小鹿，百应上联系您的～，备注：抖音-小鹿）；今天已加 1/10"
     assert world.store.friend_attempts()[0]["by"] == "admin"
     assert world.admin.handle(f"加达人 {second}").startswith("没有加：离上一次加好友")
     assert world.admin.handle(f"不加达人 #{second}") == f"#{second} 记成不加了（号码已清除）"
@@ -572,6 +646,29 @@ def test_the_wechat_id_she_gave_being_the_new_friends_wxid_is_sure(world):
     candidate = world.adds.on_new_friend(friend(wxid="MeiMei_88", how="manual"))
     assert candidate["level"] == "sure" and candidate["evidence"] == ["她给的微信号就是这个新好友的微信号"]
     assert world.record(add_id)["candidate"]["wxid"] == "MeiMei_88"
+
+
+def test_her_name_on_our_side_being_the_remark_is_sure(world):
+    """WeChat shows a friend by the remark set for her: the remark our request carried says which record she is, also
+    with two requests waiting and our greeting not read in the new chat."""
+    first = sent(world, "dy_demo01", "小鹿")
+    second = sent(world, "dy_demo02", "小青", wechat="abcdefgh")
+    candidate = world.adds.on_new_friend(friend(name="抖音-小青", own_greeting=""))
+    assert candidate["level"] == "sure" and candidate["evidence"] == ["她在我们这边显示的名字就是加她时写的备注"]
+    assert world.record(second)["candidate"]["wxid"] == "wxid_demo" and world.record(first)["candidate"] == {}
+    assert world.store.parties() == [] and world.record(second)["state"] == "requested"    # never linked by itself
+    other = world.adds.paste("dy_demo03", "", {})["id"]                                     # waiting for her
+    assert world.adds.on_new_friend(friend(wxid="wxid_other", how="manual", name="", remark="抖音-dy_demo03"))["level"] == "sure"
+    assert world.record(other)["candidate"]["wxid"] == "wxid_other"
+
+
+def test_two_open_records_with_the_same_remark_point_at_nobody(world):
+    first = sent(world, "dy_demo01", "小鹿")
+    second = sent(world, "dy_demo02", "小青", wechat="abcdefgh")
+    world.store.update_friend_add(second, now=world.clock.now, remark="抖音-小鹿")      # (as an older record might have)
+    assert world.adds.on_new_friend(friend(name="抖音-小鹿", own_greeting="")) is None
+    assert world.record(first)["candidate"] == {} and world.record(second)["candidate"] == {}
+    assert world.adds.on_new_friend(friend(wxid="wxid_next", name="抖音-小鹿 ", own_greeting="")) is None
 
 
 def test_she_added_us_naming_her_baiying_nickname_or_baiying_is_possible(world):

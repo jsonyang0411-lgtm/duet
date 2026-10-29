@@ -134,6 +134,13 @@ GROUPS: list[dict] = [
             {"key": "PRM_FRIEND_ADD_BRAND", "type": "text", "default": "", "label": "附言里的品牌名",
              "help": "只存在这台电脑的 .env 里，不进代码仓库；不填时附言里的「我是{品牌}，」整段不写。最多 20 个字。",
              "requires": [{"key": "PRM_FRIEND_ADD", "is": "on", "text": "加百应达人微信打开时才用"}]},
+            {"key": "PRM_FRIEND_ADD_REMARK", "type": "text", "default": "抖音-{昵称}", "empty_ok": True,
+             "placeholder": "空着：不设备注", "label": "加好友时给她的备注",
+             "help": "她在我们微信里显示的名字（微信的「备注」）。{昵称} 是她的百应昵称（没有昵称、昵称里有号码时用抖音号），"
+                     "填好以后最多 16 个字，和别的记录一样时后面加「-抖音号后 4 位」；{昵称} 以外最多 10 个字。机器人在「申请添加朋友」"
+                     "窗口里认出「备注」栏才填，认不出就不填、申请照发。她通过以后显示的就是这个名字，认人更准，发消息也不会和别人同名。"
+                     "清空保存 = 不设备注。",
+             "requires": [{"key": "PRM_FRIEND_ADD", "is": "on", "text": "加百应达人微信打开时才用"}]},
         ],
     },
     {
@@ -175,11 +182,12 @@ _FLOAT = re.compile(r"[+-]?(\d+(\.\d*)?|\.\d+)")
 
 
 def normalize(key: str, raw: str | None) -> str:
-    """The value as the bot reads it, written the canonical way."""
+    """The value as the bot reads it, written the canonical way.  An empty value is the default, except for a field
+    with ``empty_ok`` that is set but empty (``PRM_FRIEND_ADD_REMARK=``: no remark); unset (``None``) is the default."""
     field = FIELDS[key]
     kind = field["type"]
     value = "" if raw is None else str(raw).strip()
-    if value == "":
+    if value == "" and not (field.get("empty_ok") and raw is not None):
         value = field["default"]
     if kind == "onoff":
         return _parse_switch(value)

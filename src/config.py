@@ -349,6 +349,9 @@ class BotConfig:
     prm_friend_add_gap_sec: int = 120
     prm_friend_add_greeting: str = "您好{昵称}，我是{品牌}，百应上联系您的～"
     prm_friend_add_brand: str = ""
+    # The remark (备注) she gets in our WeChat when the bot adds her: {昵称} her 百应 nickname (her 抖音号 when it has
+    # none or a masked number), at most 16 characters once filled in; "" (PRM_FRIEND_ADD_REMARK= in .env) = no remark.
+    prm_friend_add_remark: str = "抖音-{昵称}"
     # === WeChat edge (src/edge, edge-protocol.md) for the Mac business service ===
     # "on": Windows only receives and sends WeChat messages for the creators the Mac lists;
     # the Mac pulls /edge/* on the relay's port with PRM_EDGE_TOKEN.  Not with PRM_COPILOT.
@@ -542,6 +545,9 @@ def _validate_config(kwargs: dict) -> None:
         errors.append("PRM_FRIEND_ADD_GREETING must be 1-60 characters")
     if len(str(kwargs.get("prm_friend_add_brand", "") or "").strip()) > 20:
         errors.append("PRM_FRIEND_ADD_BRAND must be at most 20 characters")
+    remark = str(kwargs.get("prm_friend_add_remark", "抖音-{昵称}") or "").strip()
+    if remark and (remark.count("{昵称}") != 1 or len(remark.replace("{昵称}", "")) > 10):
+        errors.append("PRM_FRIEND_ADD_REMARK must be empty (no remark) or hold {昵称} once and at most 10 other characters")
     prm_edge = kwargs.get("prm_edge", "off")
     if prm_edge not in ("off", "on"):
         errors.append(f"PRM_EDGE must be off or on, got {prm_edge}")
@@ -688,6 +694,7 @@ def load_config() -> BotConfig:
         "prm_friend_add_gap_sec": int(os.getenv("PRM_FRIEND_ADD_GAP_SEC", "120")),
         "prm_friend_add_greeting": os.getenv("PRM_FRIEND_ADD_GREETING", "").strip() or "您好{昵称}，我是{品牌}，百应上联系您的～",
         "prm_friend_add_brand": os.getenv("PRM_FRIEND_ADD_BRAND", "").strip(),
+        "prm_friend_add_remark": os.getenv("PRM_FRIEND_ADD_REMARK", "抖音-{昵称}").strip(),   # set but empty: no remark
         "prm_edge": _parse_switch(os.getenv("PRM_EDGE", "off")),
         "prm_edge_token": os.getenv("PRM_EDGE_TOKEN", "").strip(),
         "edge_url": os.getenv("EDGE_URL", "").strip(),

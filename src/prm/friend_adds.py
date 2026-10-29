@@ -32,9 +32,16 @@ The safety rules (design §6):
   linked or dropped, 14 days after a request she did not accept, 7 days after nobody touched the record, 30 days at
   most; the logs, the console, the events and the admin's answers only ever have the masked form.
 
+The remark (备注, user 2026-10-29: creators' WeChat names are random and differ from their 百应 names): a record is made
+with the remark she should get in our WeChat (``remark_for``: ``PRM_FRIEND_ADD_REMARK``, default 「抖音-{昵称}」, her 百应
+nickname or her 抖音号, at most 16 characters, made unique among the records not yet deleted); the add hands it to
+``add_friend``, which types it into the 「备注」 field of WeChat 4.0's application window only when OCR shows that field
+(``remark_set``: whether it did).  The display name WeChat then gives her is that remark.
+
 Who she is once she accepted (design §7): the new-friend scan (src/wechat/new_friends.py) hands every new friend to
 ``on_new_friend``; it only writes a ``candidate`` on the one record she fits best, with how sure (``sure``: the 微信号
-she gave is the new friend's wxid, or she accepted our request and our greeting in the new chat is this record's own
+she gave is the new friend's wxid, or her name on our side is this record's remark, used by no other open record, or
+she accepted our request and our greeting in the new chat is this record's own
 greeting, word for word, used by no other open record; ``likely``: she accepted our request and this is the only one
 waiting for that, or a friend appeared within 2 minutes of an add that saw no application window; ``possible``: she
 added us and her greeting names her 百应 nickname, her 抖音号 or 百应 / 抖音 / 邀约, or her WeChat name is like her 百应
@@ -128,6 +135,10 @@ HINT_WORDS = ("百应", "抖音", "邀约", "精选联盟")           # in her g
 NO_DIALOG_SEC = 120               # a friend this soon after an add that saw no application window may be that one
 HOW_LABELS = {"requested": "通过了我们的申请", "manual": "加了我们（手动通过的）", "auto_accept": "加了我们（机器人自动通过的）",
               "unknown": "加上了（说不清是怎么加的）"}
+REMARK_DEFAULT = "抖音-{昵称}"       # PRM_FRIEND_ADD_REMARK's default; "" there: no remark
+REMARK_MAX = 16                    # the whole remark (WeChat's own limit is not known: kept short)
+REMARK_TAIL = 4                    # a remark another record has gets "-" and the last 4 characters of her 抖音号
+REMARK_KEPT = (*OPEN, LINKED, EXPIRED)   # the records whose remarks a new one must not repeat (all but dropped ones)
 DAY = 86400
 
 
@@ -156,6 +167,27 @@ def greeting_for(template, nickname, brand) -> str:
         if len(text) <= GREETING_MAX:
             return text
     return text[:GREETING_MAX]
+
+
+def _same(text) -> str:
+    """A name as WeChat shows it, for comparing: one line, blanks collapsed."""
+    return " ".join(str(text or "").split())
+
+
+def remark_text(template, nickname, aweme_id, suffix: str = "") -> str:
+    """The remark (备注) a record asks for: ``PRM_FRIEND_ADD_REMARK`` with ``{昵称}`` her 百应 nickname (blanks collapsed;
+    her 抖音号 when the nickname is empty or holds a masked number), clipped so that the whole remark, ``suffix``
+    included, is at most REMARK_MAX characters.  "" when the template is empty (no remark) or she has neither."""
+    template = _clip(template, 100)
+    if not template:
+        return ""
+    nick = _clip(nickname, 200)
+    if not nick or contact.has_masked(nick) or contact.find_contacts(nick):
+        nick = _clip(aweme_id, 200)
+    room = REMARK_MAX - len(template.replace("{昵称}", "")) - len(suffix)
+    if not nick or room <= 0:
+        return ""
+    return _same(template.replace("{昵称}", nick[:room], 1) + suffix)
 
 
 def check_greeting(text) -> str:
@@ -254,6 +286,7 @@ class FriendAdds:
         self._gap_sec = self._int(config, "prm_friend_add_gap_sec", GAP_SEC_DEFAULT, GAP_SEC_RANGE)
         self._template = _clip(getattr(config, "prm_friend_add_greeting", "") or GREETING_DEFAULT, 200) or GREETING_DEFAULT
         self._brand = _clip(getattr(config, "prm_friend_add_brand", "") or "", BRAND_CHARS)
+        self._remark_template = _clip(getattr(config, "prm_friend_add_remark", REMARK_DEFAULT), 100)   # "": no remark
         self._admin = None
         self._auto = None
         self._notify: Optional[Callable[[str], object]] = None
@@ -319,6 +352,24 @@ class FriendAdds:
     def greeting(self, nickname: str = "") -> str:
         return greeting_for(self._template, nickname, self._brand)
 
+    def remark_for(self, nickname, aweme_id) -> str:
+        """The remark a new record asks for (``remark_text``), never one that a record not yet deleted (open, linked or
+        expired; any case) has: then "-" and the last 4 characters of her 抖音号 go after it, and when that is taken
+        too, or there is no 抖音号 to tell her by, there is no remark ("": two chats of the same name are not sent
+        to, src/wechat/wcdb_backend.py).  Called under the lock that makes the record."""
+        base = remark_text(self._remark_template, nickname, aweme_id)
+        if not base:
+            return ""
+        taken = {_same(r.get("remark")).lower() for r in self._store.friend_adds(states=REMARK_KEPT) if r.get("remark")}
+        if base.lower() not in taken:
+            return base
+        aweme = str(aweme_id or "").strip()
+        tailed = remark_text(self._remark_template, nickname, aweme, suffix=f"-{aweme[-REMARK_TAIL:]}") if aweme else ""
+        if tailed and tailed.lower() not in taken:
+            return tailed
+        logger.info("FriendAdds: another record has the same remark and her 抖音号 does not tell them apart: no remark")
+        return ""
+
     def offer_from_buyin(self, event) -> Optional[dict]:
         """The 百应 inbox's hook (``PrmService.on_buyin_contact``, ``_buyin_contacts``): one call per new contact card
         (source "buyin_card") or line of hers with a contact typed in ("buyin_text") of a conversation that is ours;
@@ -372,7 +423,7 @@ class FriendAdds:
                 return self._summary(same)
             record, made = self._store.add_friend_add(
                 state=OFFERED if values else NEEDS_VIEW, now=now, greeting=self.greeting(fields["nickname"]),
-                **self._values(values), **fields)
+                remark=self.remark_for(fields["nickname"], aweme), **self._values(values), **fields)
         if made:
             logger.info("FriendAdds: #%d %s from 百应 (%s)", record["id"], record["state"],
                         contact.masked_line(values, head=source))
@@ -404,7 +455,8 @@ class FriendAdds:
                 raise FriendAddError(f"抖音号 {aweme} 已经关联了登记达人「{party.get('name') or linked[0]['party_id']}」")
             record, _ = self._store.add_friend_add(
                 state=OFFERED if values else WAITING, now=now, source="paste", aweme_id=aweme, nickname=nick,
-                masked=masked_contact(values), greeting=text, **self._values(values))
+                masked=masked_contact(values), greeting=text, remark=self.remark_for(nick, aweme),
+                **self._values(values))
         logger.info("FriendAdds: #%d %s by %s (paste, %s)", record["id"], record["state"], actor,
                     contact.masked_line(values, head="paste") if values else "no number")
         self.match_recent()
@@ -470,7 +522,8 @@ class FriendAdds:
 
     def confirm(self, add_id, *, by: str = "console", greeting=None, use=None, wait: bool = False) -> dict:
         """An operator's 「添加该达人微信」 (``by`` console) or the admin's 加达人 N (``by`` admin, ``wait``: the answer
-        says how it went): one add_friend call, or a refusal saying why.  ``use``: the 微信号 or the 手机号."""
+        says how it went): one add_friend call (with the record's remark), or a refusal saying why.  ``use``: the 微信号
+        or the 手机号.  The answer has the remark and, once the add is done, ``remark_set``."""
         if not self._enabled:
             raise FriendAddError("加百应达人微信没打开（PRM_FRIEND_ADD）")
         now = self._clock()
@@ -488,7 +541,7 @@ class FriendAdds:
                                                                             if record.get("cleared_at") else ""))
             text = check_greeting(greeting) if greeting is not None else record["greeting"]
             if not self._store.move_friend_add(record["id"], (record["state"],), ADDING, now=now, greeting=text,
-                                               reason=""):
+                                               reason="", remark_set=False):
                 raise FriendAddError("这条刚刚被处理了，刷新看看")
             attempt = self._store.add_friend_attempt(record["id"], by=by, kind=use, now=now)
         shown = contact.masked(use, target)
@@ -497,7 +550,7 @@ class FriendAdds:
 
         def run() -> None:
             try:
-                self._add(record["id"], attempt, use, target, text, by)
+                self._add(record["id"], attempt, use, target, text, by, record.get("remark") or "")
             finally:
                 finished.set()
 
@@ -512,13 +565,15 @@ class FriendAdds:
             finished.wait(ADD_WAIT_SEC)
         after = self._store.friend_add(record["id"]) or record
         return {"ok": True, "id": after["id"], "state": after["state"], "reason": after.get("reason", ""),
-                "target": shown, "greeting": text}
+                "target": shown, "greeting": text, "remark": record.get("remark") or "",
+                "remark_set": bool(after.get("remark_set"))}
 
-    def _add(self, add_id: int, attempt: int, use: str, target: str, text: str, by: str) -> None:
-        """The add itself (in its own thread): one ``add_friend_checked``, its reason into the record's state.  Its
-        ``message`` holds the number: it is never stored nor logged."""
+    def _add(self, add_id: int, attempt: int, use: str, target: str, text: str, by: str, remark: str = "") -> None:
+        """The add itself (in its own thread): one ``add_friend_checked`` (with the remark), its reason into the
+        record's state and whether the remark went into the application window (``remark_set``).  Its ``message``
+        holds the number: it is never stored nor logged; nor is the remark (her nickname)."""
         try:
-            result = self._admin.add_friend_checked(target, text)
+            result = self._admin.add_friend_checked(target, text, remark=remark)
         except Exception:
             logger.exception("FriendAdds: #%d add_friend failed", add_id)
             result = {"ok": False, "reason": "error"}
@@ -533,10 +588,12 @@ class FriendAdds:
                  if reason == "already_friend" else BLOCKED if reason == "risk" else FAILED
                  if reason in SURE_NOT_SENT else UNSURE)
         extra = {"requested_at": now} if state == REQUESTED else {}
-        self._store.move_friend_add(add_id, (ADDING,), state, now=now, reason=reason, **extra)
+        remark_set = bool(remark) and bool(result.get("remark_set"))
+        self._store.move_friend_add(add_id, (ADDING,), state, now=now, reason=reason, remark_set=remark_set, **extra)
         self._store.finish_friend_attempt(attempt, reason, now=now)
         log = logger.warning if state in (BLOCKED, UNSURE) else logger.info
-        log("FriendAdds: #%d %s (%s; %s %s)", add_id, state, reason, LABELS[use], contact.masked(use, target))
+        log("FriendAdds: #%d %s (%s; %s %s%s)", add_id, state, reason, LABELS[use], contact.masked(use, target),
+            "; the remark was typed" if remark_set else "; the remark was not typed" if remark else "")
         if state == BLOCKED and by != "admin":
             self._tell(f"控制台加百应达人微信（#{add_id}）时微信提示「操作过于频繁」：自动同意好友和控制台加好友都暂停了。"
                        "先别再加好友、同意好友，过几个小时再发「自动同意好友 开」继续。")
@@ -814,6 +871,11 @@ class FriendAdds:
         added_at = float(friend.get("added_at") or 0)
         if record.get("wechat") and record["wechat"].lower() == wxid.lower():
             return SURE, ["她给的微信号就是这个新好友的微信号"]
+        remark = _same(record.get("remark"))
+        if remark and remark in (_same(friend.get("name")), _same(friend.get("remark"))):
+            if not [r for r in self._store.friend_adds(states=OPEN)
+                    if r["id"] != record["id"] and _same(r.get("remark")).lower() == remark.lower()]:
+                return SURE, ["她在我们这边显示的名字就是加她时写的备注"]
         asked = self._store.friend_attempts(add_id=record["id"])        # (newest first)
         sent_at = float(record.get("requested_at") or 0) or (float(asked[0]["at"]) if asked else 0)
         if how == "requested" and record["state"] in (REQUESTED, UNSURE, EXPIRED) and sent_at:
@@ -900,7 +962,10 @@ class FriendAdds:
         state, reason = out["state"], out.get("reason") or ""
         head = f"#{out['id']} "
         if state == REQUESTED:
-            done = f"已向 {out['target']} 发好友申请（{head.strip()}" + (f"，附言：{out['greeting']}" if out["greeting"] else "") + "）"
+            said = [f"附言：{out['greeting']}"] if out["greeting"] else []
+            if out.get("remark"):
+                said.append(f"备注：{out['remark']}" if out.get("remark_set") else "备注没填上（申请窗口里没认出「备注」栏）")
+            done = f"已向 {out['target']} 发好友申请（{head.strip()}" + "".join(f"，{x}" for x in said) + "）"
             return f"{done}；今天已加 {self.today()}/{self._daily_max}"
         if state == ADDING:
             return f"{head}还在加（微信窗口还在操作），等一会儿发「待加达人」看结果"
@@ -962,6 +1027,7 @@ def record_out(record: dict, now: float, greetings: dict) -> dict:
         "has_wechat": bool(record.get("wechat")), "has_phone": bool(record.get("phone")),
         "cleared": bool(record.get("cleared_at")) and not has_values, "unavailable": bool(record.get("unavailable")),
         "greeting": record.get("greeting", ""), "same_greeting": same if is_open else [],
+        "remark": record.get("remark", ""), "remark_set": bool(record.get("remark_set")),
         "invited": invited_out(record.get("invited") or {}),
         "candidate": dict(record.get("candidate") or {}), "party_id": record.get("party_id"),
         "deal_id": record.get("deal_id"), "wxid": record.get("wxid", ""),

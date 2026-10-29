@@ -556,10 +556,12 @@ class Copilot:
                                         keep_verify=True, catchup_hours=catchup_hours, clock=clock, pause=0)
         self.friends.set_catch_up_sink(self.prm.take_new_friend)
         self.prm.on_registered = self.friends.registered
-        self.added = []
-        if friend_add:
-            manager = SimpleNamespace(add_friend=lambda keyword, message="": self.added.append((keyword, message))
-                                      or {"ok": True, "target": keyword, "message": "已成功"})
+        self.added, self.remarks = [], []
+        if friend_add:                    # (a 4.0 window whose 「备注」 field OCR saw: remark_set)
+            manager = SimpleNamespace(add_friend=lambda keyword, message="", remark="": self.added.append((keyword, message))
+                                      or self.remarks.append(remark)
+                                      or {"ok": True, "target": keyword, "message": "已成功",
+                                          **({"remark_set": True} if remark else {})})
             self.prm.friend_adds.attach(AdminCommandHandler(friend_manager=manager), None, None)
             self.prm.friend_adds.spawn, self.prm.friend_adds.clear_clipboard = (lambda fn: fn()), (lambda text: False)
             self.prm.friend_adds.set_new_friends(self.friends)
@@ -800,6 +802,34 @@ def test_our_greeting_in_the_new_chat_says_which_request_she_accepted_and_linkin
     deal = bot.prm.store.deal_of(out["party_id"])
     assert deal["mode"] == "copilot"                                 # our greeting took nothing over
     assert [e["kind"] for e in bot.prm.store.events(deal["id"])] == ["friend_add_link"]
+
+
+def test_her_name_on_our_side_is_the_remark_of_our_request_and_says_which_one_she_accepted(copilot_bot, db, clock):
+    """The remark our request carried (「抖音-〈百应昵称〉」) is the name WeChat gives her once she accepted: the scan
+    reads it as her display name (wcdb_get_display_names), and with two requests waiting and our greeting not in the
+    new chat it alone says which record she is.  Nobody is registered by it."""
+    bot = copilot_bot(friend_add=True)
+    bot.friends.scan_once()                                          # the start marker
+    clock.now += 120
+    adds = bot.prm.friend_adds
+    first = adds.paste("dy_demo01", "小鹿", {"wechat": "abcdefyz"})["id"]
+    adds.confirm(first)
+    clock.now += 121
+    second = adds.paste("dy_demo02", "小青", {"wechat": "abcdefgh"})["id"]
+    adds.confirm(second)
+    assert bot.remarks == ["抖音-小鹿", "抖音-小青"]
+    t = clock.now + 600
+    db.names[NEW] = "抖音-小青"                                       # WeChat shows her by the remark we typed
+    db.say(NEW, NEW, PASSED_LINE, t)                                 # she accepted; our greeting is not in the chat
+    db.system(NEW, "以上是打招呼的消息", t + 1)
+    clock.now = t + 60
+    bot.poll()
+    [found] = bot.friends.scan_once()
+    assert (found["how"], found["name"], found["own_greeting"]) == (REQUESTED, "抖音-小青", "")
+    candidate = adds._store.friend_add(second)["candidate"]
+    assert (candidate["wxid"], candidate["level"]) == (NEW, "sure")
+    assert candidate["evidence"] == ["她在我们这边显示的名字就是加她时写的备注"]
+    assert adds._store.friend_add(first)["candidate"] == {} and bot.prm.store.parties() == []
 
 
 def test_she_adds_us_naming_baiying_and_is_offered_for_the_record_waiting_for_her(copilot_bot, db, clock):

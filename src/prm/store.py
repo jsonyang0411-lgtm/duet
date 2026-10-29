@@ -32,8 +32,9 @@
 ``prm_meta``        small values the service keeps over a restart (when the sync last asked)
 ``friend_adds``     加百应达人微信 (PRM_FRIEND_ADD, src/prm/friend_adds.py): a creator's contact left in 百应, one record
                     each (one per 百应 message): her 抖音号 and nickname, the full 微信号 / 手机号 (the only place they
-                    are kept, cleared later; ``masked`` stays), the greeting, the invite, where it stands (``state``),
-                    the new friend that may be her (``candidate``) and, once linked, her chat and party
+                    are kept, cleared later; ``masked`` stays), the greeting, the remark (备注) she gets in our WeChat and
+                    whether it is on her (``remark_set``), the invite, where it stands (``state``), the new friend that
+                    may be her (``candidate``) and, once linked, her chat and party
 ``friend_add_attempts``  every add_friend call made for a record (who, with which number kind, what came of it): the
                     audit, the day's count and the gap between two adds; no number in it
 ``creator_links``   who a registered creator is on 抖音 (her 抖音号, as an operator confirmed it): ``_creator_ids``
@@ -288,6 +289,8 @@ _ADDED_COLUMNS = (
     ("buyin_threads", "buyin_id", "TEXT NOT NULL DEFAULT ''"),
     ("buyin_threads", "invited", "TEXT NOT NULL DEFAULT '{}'"),
     ("buyin_threads", "contacts", "INTEGER NOT NULL DEFAULT 0"),
+    ("friend_adds", "remark", "TEXT NOT NULL DEFAULT ''"),            # 加百应达人微信的备注 (2026-10-29)
+    ("friend_adds", "remark_set", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 # What the creators wrote, or our side's own words, waiting for the next draft job.
@@ -378,15 +381,17 @@ FRIEND_ADD_JSON = {"masked": {}, "invited": {}, "candidate": {}, "rejected": [],
 FRIEND_ADD_FIELDS = {"source", "conversation_id", "message_id", "aweme_id", "creator_uid", "nickname", "wechat", "phone",
                      "masked", "unavailable", "greeting", "invited", "party_id", "deal_id", "reason", "candidate",
                      "rejected", "wxid", "link_on_accept", "reveals", "requested_at", "linked_at", "cleared_at",
-                     "closed_at"}
+                     "closed_at", "remark", "remark_set"}
+FRIEND_ADD_FLAGS = ("unavailable", "link_on_accept", "remark_set")
 
 
 def friend_add_view(row: dict) -> dict:
     out = dict(row)
     for key, empty in FRIEND_ADD_JSON.items():
         out[key] = _loads(row.get(key), empty)
-    out["unavailable"] = bool(row.get("unavailable"))
-    out["link_on_accept"] = bool(row.get("link_on_accept"))
+    for key in FRIEND_ADD_FLAGS:
+        out[key] = bool(row.get(key))
+    out["remark"] = str(row.get("remark") or "")
     return out
 
 
@@ -399,7 +404,7 @@ def _friend_add_values(fields: dict) -> dict:
     for key, value in fields.items():
         if key in FRIEND_ADD_JSON:
             value = json.dumps(value if value is not None else FRIEND_ADD_JSON[key], ensure_ascii=False)
-        elif key in ("unavailable", "link_on_accept"):
+        elif key in FRIEND_ADD_FLAGS:
             value = int(bool(value))
         out[key] = value
     return out

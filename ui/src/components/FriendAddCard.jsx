@@ -2,13 +2,14 @@ import { useState } from 'react'
 import { UserPlus, X, Eye, EyeSlash, Copy, CheckCircle, DeviceMobile, HandWaving, PencilSimple, LinkSimple, Warning } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
-import { friendAddAction, FRIEND_ADD_TAGS, friendAddStatusLine, inviteLine } from '../lib/prm'
+import { friendAddAction, FRIEND_ADD_TAGS, friendAddStatusLine, inviteLine, remarkLine } from '../lib/prm'
 import { Card, Note, Confirm, Dialog, Field, TextInput, Seg } from './ui'
 
 // 加百应达人微信 (PRM_FRIEND_ADD, src/prm/friend_adds.py): a creator invited in 百应 left her 微信号 / 手机号. One
 // click on 「添加该达人微信」 (after its confirmation) is ONE friend request through the friend manager; nothing is
 // ever retried by itself. Numbers are masked unless 显示完整 / 复制号码 is clicked (each look is written down).
-// Once she accepted, 「是她，登记并关联」 registers her as a creator with her 抖音号.
+// Once she accepted, 「是她，登记并关联」 registers her as a creator with her 抖音号. The remark (备注) she gets in our
+// WeChat (「抖音-<百应昵称>」) is shown next to the greeting; the add types it only when it sees the 「备注」 field.
 
 const KIND_LABELS = { wechat: '微信号', phone: '手机' }
 
@@ -69,6 +70,7 @@ function FriendAddCard({ r, st, d, onDone }) {
   const length = [...(greeting || '')].length
   const max = st.greeting_max || 30
   const invite = inviteLine(r.invited)
+  const remark = remarkLine(r)
   return (
     <Card
       title={`加微信 · ${r.nickname || '（没有昵称）'}`}
@@ -103,6 +105,11 @@ function FriendAddCard({ r, st, d, onDone }) {
                 <TextInput value={greeting} onChange={setGreeting} aria-label={`#${r.id} 的附言`} />
               </Field>
             )}
+            {r.remark && (
+              <div className="prm-remark">{remark}<span className="dim">{canAddHere
+                ? '（她在我们微信里显示的名字：申请窗口里认出「备注」栏就填进去，认不出就不填，申请照发）'
+                : '（在手机上加的时候填进「备注」）'}</span></div>
+            )}
             <label className="row" style={{ gap: 6, alignItems: 'center' }}>
               <input type="checkbox" checked={!!r.link_on_accept} disabled={busy} aria-label={`#${r.id} 她通过以后按这份邀约登记`}
                 onChange={(e) => act('link_on_accept', { on: e.target.checked })} />
@@ -125,6 +132,8 @@ function FriendAddCard({ r, st, d, onDone }) {
         )}
 
         {editing && <EditNumbers r={r} busy={busy} onSave={(contact) => act('edit', { contact }, '号码已保存，再确认添加')} onCancel={() => setEditing(false)} />}
+
+        {!addable && !editing && remark && r.open && <div className="prm-remark">{remark}</div>}
 
         {!addable && !editing && (
           <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
@@ -152,7 +161,7 @@ function FriendAddCard({ r, st, d, onDone }) {
       {confirming && (
         <Confirm title={`添加 #${r.id} 的微信？`} confirmLabel="确定添加" cancelLabel="取消" busy={busy}
           onConfirm={() => act('add', { use, greeting }, '已开始添加：别动键盘鼠标')} onCancel={() => setConfirming(false)}>
-          机器人会在这台电脑的微信里搜索 {target}，发一条好友申请（附言：{greeting || '不带附言'}）。接下来大约 10 秒它会操作微信窗口，请别动键盘鼠标。点一次只发一次申请，不会自动重试。
+          机器人会在这台电脑的微信里搜索 {target}，发一条好友申请（附言：{greeting || '不带附言'}{r.remark ? `；备注：${r.remark}` : ''}）。接下来大约 10 秒它会操作微信窗口，请别动键盘鼠标。点一次只发一次申请，不会自动重试。
         </Confirm>
       )}
       {dropping && (

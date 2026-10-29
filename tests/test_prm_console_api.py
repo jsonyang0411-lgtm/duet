@@ -338,14 +338,18 @@ def test_registering_a_new_friend_drafts_what_she_said_since_she_was_added(runni
 # Every value is made up.
 
 class _Manager:
-    """FriendManager.add_friend as the console's add sees it (no WeChat window)."""
+    """FriendManager.add_friend as the console's add sees it (no WeChat window; a 4.0 application window whose 「备注」
+    field OCR saw)."""
 
     def __init__(self):
         self.calls = []
+        self.remarks = []
 
-    def add_friend(self, keyword, message=""):
+    def add_friend(self, keyword, message="", remark=""):
         self.calls.append((keyword, message))
-        return {"ok": True, "target": keyword, "message": f"已成功向「{keyword}」发送好友申请"}
+        self.remarks.append(remark)
+        return {"ok": True, "target": keyword, "message": f"已成功向「{keyword}」发送好友申请",
+                **({"remark_set": True} if remark else {})}
 
 
 @pytest.fixture
@@ -377,6 +381,7 @@ def test_the_page_shows_the_records_masked_and_the_switchs_status(adds):
         "offered", "待确认", "小鹿", "dy_demo01", "运营手动填的")
     assert r["masked"] == {"wechat": "ab****yz", "phone": "138****0000"} and r["has_wechat"] and r["has_phone"]
     assert r["greeting"] == "您好小鹿，百应上联系您的～" and r["listed"] and r["open"] and r["last_attempt"] is None
+    assert (r["remark"], r["remark_set"]) == ("抖音-小鹿", False)
     status = d["friend_add_status"]
     assert (status["enabled"], status["can_add"], status["today"], status["cap"], status["gap_sec"]) == (
         True, True, 0, 10, 120)
@@ -389,13 +394,14 @@ def test_one_add_from_the_console_and_every_full_look_is_written_down(adds):
     out = call("/api/prm/friend-adds", "POST", {"id": 1, "action": "add", "use": "wechat",
                                                  "greeting": "您好小鹿，我们在百应上聊过～"})[1]
     assert out["ok"] and out["state"] == "requested" and out["target"] == "ab****yz"
+    assert (out["remark"], out["remark_set"]) == ("抖音-小鹿", True)
     assert "abcdefyz" not in json.dumps(out, ensure_ascii=False)
-    assert adds.manager.calls == [("abcdefyz", "您好小鹿，我们在百应上聊过～")]
+    assert adds.manager.calls == [("abcdefyz", "您好小鹿，我们在百应上聊过～")] and adds.manager.remarks == ["抖音-小鹿"]
     again = call("/api/prm/friend-adds", "POST", {"id": 1, "action": "add"})[1]
     assert again["ok"] is False and "已经发过申请" in again["error"] and len(adds.manager.calls) == 1
     d = call("/api/prm")[1]
     assert d["friend_add_status"]["today"] == 1 and d["friend_add_status"]["wait_sec"] > 0
-    assert d["friend_adds"][0]["last_attempt"]["by"] == "console"
+    assert d["friend_adds"][0]["last_attempt"]["by"] == "console" and d["friend_adds"][0]["remark_set"] is True
     shown = call("/api/prm/friend-adds", "POST", {"id": 1, "action": "reveal"})[1]
     assert (shown["wechat"], shown["phone"]) == ("abcdefyz", "13800000000")
     assert [x["actor"] for x in adds.prm.store.friend_add(1)["reveals"]] == ["console"]

@@ -664,6 +664,23 @@ class FriendAddConfigTests(unittest.TestCase):
                 _validate_config({key: value})
             self.assertIn(name, str(ctx.exception))
 
+    def test_the_remark_has_a_default_and_set_but_empty_is_none(self):
+        """PRM_FRIEND_ADD_REMARK (the remark she gets in our WeChat, 2026-10-29): unset is 「抖音-{昵称}」, set but empty is
+        no remark; otherwise {昵称} once and at most 10 other characters."""
+        from src.config import BotConfig, _validate_config, load_config
+
+        self.assertEqual(BotConfig().prm_friend_add_remark, "抖音-{昵称}")
+        for env, expected in (({}, "抖音-{昵称}"), ({"PRM_FRIEND_ADD_REMARK": ""}, ""),
+                              ({"PRM_FRIEND_ADD_REMARK": " 百应-{昵称} "}, "百应-{昵称}")):
+            with patch.dict(os.environ, env, clear=True):
+                self.assertEqual(load_config().prm_friend_add_remark, expected, env)
+        for good in ("", "抖音-{昵称}", "{昵称}", "一二三四五六七八九十{昵称}"):
+            _validate_config({"prm_friend_add_remark": good})
+        for bad in ("抖音", "{昵称}-{昵称}", "一二三四五六七八九十一{昵称}"):
+            with self.assertRaises(RuntimeError) as ctx:
+                _validate_config({"prm_friend_add_remark": bad})
+            self.assertIn("PRM_FRIEND_ADD_REMARK", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

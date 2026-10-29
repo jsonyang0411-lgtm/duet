@@ -51,7 +51,43 @@ def test_a_record_keeps_its_values_and_its_json_columns(store):
     assert record["invited"] == {"aweme_id": AWEME, "plan_id": "P1"}
     assert record["candidate"] == {} and record["reveals"] == [] and record["rejected"] == []
     assert record["unavailable"] is False and record["link_on_accept"] is True
+    assert (record["remark"], record["remark_set"]) == ("", False)
     assert store.friend_add(1) == record and store.friend_add(99) is None
+
+
+# friend_adds as the table was before the remark (2026-10-29)
+OLD_FRIEND_ADDS = """CREATE TABLE friend_adds (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL,
+    conversation_id TEXT NOT NULL DEFAULT '', message_id TEXT NOT NULL DEFAULT '', aweme_id TEXT NOT NULL DEFAULT '',
+    creator_uid TEXT NOT NULL DEFAULT '', nickname TEXT NOT NULL DEFAULT '', wechat TEXT NOT NULL DEFAULT '',
+    phone TEXT NOT NULL DEFAULT '', masked TEXT NOT NULL DEFAULT '{}', unavailable INTEGER NOT NULL DEFAULT 0,
+    greeting TEXT NOT NULL DEFAULT '', invited TEXT NOT NULL DEFAULT '{}', party_id INTEGER, deal_id INTEGER,
+    state TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', candidate TEXT NOT NULL DEFAULT '{}',
+    rejected TEXT NOT NULL DEFAULT '[]', wxid TEXT NOT NULL DEFAULT '', link_on_accept INTEGER NOT NULL DEFAULT 1,
+    reveals TEXT NOT NULL DEFAULT '[]', created_at REAL NOT NULL, updated_at REAL NOT NULL, requested_at REAL,
+    linked_at REAL, cleared_at REAL, closed_at REAL)"""
+
+
+def test_an_old_friend_adds_table_gets_the_remark_columns(tmp_path):
+    path = tmp_path / "prm.db"
+    old = sqlite3.connect(str(path))
+    old.execute(OLD_FRIEND_ADDS)
+    old.execute("INSERT INTO friend_adds (source, aweme_id, state, created_at, updated_at) VALUES ('paste', ?, 'requested',"
+                " 1, 1)", (AWEME,))
+    old.commit()
+    old.close()
+    for _ in range(2):                                   # opening it twice changes nothing more
+        PrmStore(path).close()
+    s = PrmStore(path)
+    try:
+        before = s.friend_add(1)
+        assert (before["state"], before["remark"], before["remark_set"]) == ("requested", "", False)
+        made, _ = offered(s, remark="抖音-小鹿")
+        assert (made["remark"], made["remark_set"]) == ("抖音-小鹿", False)
+        assert s.move_friend_add(made["id"], ("offered",), "requested", now=3.0, remark_set=True)
+        assert s.friend_add(made["id"])["remark_set"] is True
+        assert s.update_friend_add(made["id"], now=4.0, remark_set=False) and s.friend_add(made["id"])["remark_set"] is False
+    finally:
+        s.close()
 
 
 def test_one_baiying_message_is_one_record_but_pasted_ones_are_each_their_own(store):

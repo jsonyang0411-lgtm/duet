@@ -68,6 +68,15 @@ export function friendAddStatusLine(st) {
   if (st.wait_sec > 0) parts.push(st.wait_sec < 120 ? `${st.wait_sec} 秒内不能再加` : `约 ${Math.round(st.wait_sec / 60)} 分钟内不能再加`)
   return parts.join(' · ')
 }
+/** "备注：抖音-小鹿（已填进好友申请）": the remark (备注) a 加微信 record gives her in our WeChat, and whether the add typed
+ *  it into the application window ('' without a remark). */
+export function remarkLine(r) {
+  if (!r?.remark) return ''
+  let note = ''
+  if (r.remark_set) note = r.state === 'linked' ? '' : '（已填进好友申请）'
+  else if (r.last_attempt && r.state === 'requested') note = '（申请窗口里没认出「备注」栏，这次没填上）'
+  return `备注：${r.remark}${note}`
+}
 /** A 百应 draft's line of the 加微信 record made from its conversation: "她在这个会话里留了联系方式（微信号 ab****yz）→
  *  「加微信 #12」：已发申请，等她通过（见上面）" ('' without one). */
 export function buyinFriendAddLine(fa) {

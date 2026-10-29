@@ -711,13 +711,16 @@ class TestPrmPages:
         from src.admin import AdminCommandHandler
         from src.prm.friend_adds import FriendAdds
 
-        class Manager:
+        class Manager:                                  # (a 4.0 application window whose 「备注」 field OCR saw)
             def __init__(self):
                 self.calls = []
+                self.remarks = []
 
-            def add_friend(self, keyword, message=""):
+            def add_friend(self, keyword, message="", remark=""):
                 self.calls.append((keyword, message))
-                return {"ok": True, "target": keyword, "message": f"已成功向「{keyword}」发送好友申请"}
+                self.remarks.append(remark)
+                return {"ok": True, "target": keyword, "message": f"已成功向「{keyword}」发送好友申请",
+                        **({"remark_set": True} if remark else {})}
 
         manager = Manager()
         adds = FriendAdds(prm.service.store, SimpleNamespace(prm_friend_add="on"), clock=prm.clock,
@@ -739,6 +742,8 @@ class TestPrmPages:
             assert expected in text, expected
         assert "今天控制台已加 0/10" in page.inner_text("body") and "abcdefyz" not in page.inner_text("body")
         assert card.locator("input[aria-label='#1 的附言']").input_value() == "您好小鹿，百应上联系您的～"
+        remark = card.locator(".prm-remark").inner_text()                        # the remark, next to the greeting
+        assert "备注：抖音-小鹿" in remark and "认出「备注」栏就填进去" in remark
         card.locator("button:has-text('显示完整')").click()                      # written down, this page only
         page.wait_for_timeout(800)
         assert "abcdefyz" in card.inner_text() and len(adds._store.friend_add(1)["reveals"]) == 1
@@ -749,13 +754,15 @@ class TestPrmPages:
         dialog = page.locator("[role=dialog]")
         said = dialog.inner_text()
         assert "搜索 ab****yz" in said and "不会自动重试" in said and "别动键盘鼠标" in said
+        assert "附言：您好小鹿，百应上联系您的～；备注：抖音-小鹿" in said
         assert manager.calls == []                                               # nothing before 确定添加
         dialog.locator("button:has-text('确定添加')").click()
         page.wait_for_timeout(1500)
-        assert manager.calls == [("abcdefyz", "您好小鹿，百应上联系您的～")]
+        assert manager.calls == [("abcdefyz", "您好小鹿，百应上联系您的～")] and manager.remarks == ["抖音-小鹿"]
         assert adds._store.friend_add(1)["state"] == "requested"
         text = page.locator(".prm-friend-add", has_text="小鹿").inner_text()
         assert "已发申请" in text and "她已经通过了，我来选是哪个聊天" in text and "添加该达人微信" not in text
+        assert "备注：抖音-小鹿（已填进好友申请）" in text
         assert "今天控制台已加 1/10" in page.inner_text("body")
 
     def test_review_page_drops_a_contact_after_asking_and_links_another_to_her_chat(self, page, prm):
