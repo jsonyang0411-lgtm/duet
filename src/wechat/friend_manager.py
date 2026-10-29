@@ -90,6 +90,7 @@ ACCEPT_DIALOG_TITLES = ("通过朋友验证",)         # what 「前往验证」
                                                 # a window that appears with another title is logged, never used)
 DIALOG_CLASS = "Qt51514QWindowIcon"
 DIALOG_LOOKS = 10                                # a dialog is looked for this many times, 0.1 s apart
+CARD_LOOKS = 16                                  # the search result is read this many times, 0.5 s apart
 
 
 class _Abort(Exception):
@@ -883,25 +884,35 @@ class FriendManager:
             self._paste(dialog_hwnd, keyword, exact=True)
             self._sleep(0.2)
             self._key(dialog_hwnd, 0x0D, exact=True)
-            self._sleep(1.5)
 
-            rows = self._capture_ocr(dialog_hwnd)
-            card_text = "".join(_clean_text(r.get("t", "")) for r in rows)
+            # The result comes in over the network and the card slides into place (seen on a slow VM: the
+            # button shows low down first, then jumps to the middle), so it is read again until the button
+            # is at the same spot twice in a row.
+            add_button = None
+            seen = None
+            for _ in range(CARD_LOOKS):
+                self._sleep(0.5)
+                rows = self._capture_ocr(dialog_hwnd)
+                card_text = "".join(_clean_text(r.get("t", "")) for r in rows)
 
-            risk = _risk_line(rows)
-            if risk:
-                self._close_window(dialog_hwnd)
-                return _risk_failure(keyword, risk)
+                risk = _risk_line(rows)
+                if risk:
+                    self._close_window(dialog_hwnd)
+                    return _risk_failure(keyword, risk)
 
-            if any(marker in card_text for marker in NOT_FOUND_MARKERS):
-                self._close_window(dialog_hwnd)
-                return _failure(keyword, "not_found", f"未找到用户「{keyword}」，请核实微信号或手机号")
+                if any(marker in card_text for marker in NOT_FOUND_MARKERS):
+                    self._close_window(dialog_hwnd)
+                    return _failure(keyword, "not_found", f"未找到用户「{keyword}」，请核实微信号或手机号")
 
-            if any(marker in card_text for marker in ALREADY_FRIEND_MARKERS):
-                self._close_window(dialog_hwnd)
-                return _failure(keyword, "already_friend", f"用户「{keyword}」已是您的微信好友，无需重复添加")
+                if any(marker in card_text for marker in ALREADY_FRIEND_MARKERS):
+                    self._close_window(dialog_hwnd)
+                    return _failure(keyword, "already_friend", f"用户「{keyword}」已是您的微信好友，无需重复添加")
 
-            add_button = _find_row(rows, *ADD_BUTTON_LABELS)
+                found = _find_row(rows, *ADD_BUTTON_LABELS)
+                if found is not None and seen is not None and _still_there([found], seen):
+                    add_button = found
+                    break
+                seen = found
             if add_button is None:
                 self._close_window(dialog_hwnd)
                 return _failure(keyword, "no_add_button", f"没有找到「{keyword}」的「添加到通讯录」按钮，已中止")

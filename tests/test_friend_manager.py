@@ -741,7 +741,7 @@ class WeChat4AddFriendTests(FriendTestCase):
     def test_wechat4_send_success(self):
         add_btn = row("添加到通讯录", 0.4, 0.8, 0.6, 0.9)
         send_btn = row("发送", 0.4, 0.8, 0.6, 0.9)
-        ocr = FakeOcr([add_btn], [send_btn], [])
+        ocr = FakeOcr([add_btn], [add_btn], [send_btn], [])
         window = FakeWindow()
         manager = self.manager(window, ocr)
         with patch.object(manager, "_open_add_friend_dialog_wechat4", return_value=999), \
@@ -752,6 +752,32 @@ class WeChat4AddFriendTests(FriendTestCase):
             self.assertEqual(res["target"], "new_friend")
             self.assertIn("你好呀", res["message"])
 
+
+    def wechat4(self, ocr):
+        manager = self.manager(FakeWindow(), ocr)
+        with patch.object(manager, "_open_add_friend_dialog_wechat4", return_value=999), \
+             patch.object(manager, "_focus_window"), \
+             patch.object(manager, "_close_window"):
+            return manager._add_friend_wechat4(HWND, "new_friend", "你好呀")
+
+    def test_wechat4_waits_for_a_slow_search_result(self):
+        add_btn = row("添加到通讯录", 0.4, 0.8, 0.6, 0.9)
+        ocr = FakeOcr([], [], [], [add_btn], [add_btn], [row("发送", 0.4, 0.8, 0.6, 0.9)], [])
+        res = self.wechat4(ocr)
+        self.assertTrue(res["ok"])
+
+    def test_wechat4_clicks_the_button_where_it_settled(self):
+        low = row("添加到通讯录", 0.4, 0.9, 0.6, 0.97)     # the card still sliding in
+        middle = row("添加到通讯录", 0.4, 0.5, 0.6, 0.57)
+        ocr = FakeOcr([low], [middle], [middle], [row("发送", 0.4, 0.8, 0.6, 0.9)], [])
+        self.assertTrue(self.wechat4(ocr)["ok"])
+        self.assertEqual(ocr.captures, 5)                # low, middle, middle, the send button, the check
+        self.assertEqual(self.clicks[1], (500, 534))     # the middle spot, not the low one
+
+    def test_wechat4_gives_up_when_the_button_never_settles(self):
+        res = self.wechat4(FakeOcr([]))
+        self.assertEqual(res["reason"], "no_add_button")
+        self.assertEqual(len(self.clicks), 1)            # only the search box
 
 class CloseWindowTests(FriendTestCase):
     """_close_window sends Alt+F4 only to a window that has the keyboard (Windows API faked)."""
@@ -1362,7 +1388,7 @@ class ApplyDialogTests(DialogTestCase):
     def add_friend(self, apply_comes_forward=True):
         """The 4.0 add-friend flow with 「小朋友」 open in its own window: search, 添加到通讯录, greeting, 确定."""
         add_button = row("添加到通讯录", 0.4, 0.8, 0.6, 0.9)
-        ocr = FakeOcr([add_button], [row("发送添加朋友申请", 0.1, 0.1, 0.5, 0.2)], [])
+        ocr = FakeOcr([add_button], [add_button], [row("发送添加朋友申请", 0.1, 0.1, 0.5, 0.2)], [])
         manager = self.make(ocr)
         self.desktop.add(ADD_DIALOG, title="添加朋友", rect=(200, 100, 600, 800))
         self.window.front = ADD_DIALOG
@@ -1392,7 +1418,7 @@ class ApplyDialogTests(DialogTestCase):
         """SetForegroundWindow may be refused; WeChat's main window is in front, so the click on the search box
         goes ahead (it only moves the focus) and brings the dialog forward: then the keys are allowed."""
         add_button = row("添加到通讯录", 0.4, 0.8, 0.6, 0.9)
-        ocr = FakeOcr([add_button], [row("发送添加朋友申请", 0.1, 0.1, 0.5, 0.2)], [])
+        ocr = FakeOcr([add_button], [add_button], [row("发送添加朋友申请", 0.1, 0.1, 0.5, 0.2)], [])
         manager = self.make(ocr)
         self.desktop.add(ADD_DIALOG, title="添加朋友", rect=(200, 100, 600, 800))
         self.focusable = False
