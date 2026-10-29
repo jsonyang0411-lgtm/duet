@@ -100,7 +100,7 @@ class WhatIsAnswered(GatewayCase):
         assert "#2" in router.handle(admin_msg("a4", "cc 添加好友 是什么功能"))   # with cc: a task too
         assert self.relay.store.get(2)["text"] == "添加好友 是什么功能"
         help_text = router.handle(admin_msg("a5", "帮助"))
-        assert "不用打 cc" in help_text and "添加好友 号码 [附言]" in help_text and "查状态" in help_text
+        assert "不用打 cc" in help_text and "添加好友 号码 [备注=名字] [附言]" in help_text and "查状态" in help_text
 
 
 class OldChatSettingsDoNothing(GatewayCase):

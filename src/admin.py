@@ -5,6 +5,7 @@ the route step ``admin_command``); a group message never reaches this handler.
 """
 
 import logging
+import re
 from typing import Callable, Iterable, Optional
 
 logger = logging.getLogger(__name__)
@@ -25,13 +26,13 @@ AUTO_ACCEPT_COMMANDS = {                 # whitespace-normalised text -> switch 
 # bot only relays (CLAUDE_RELAY_ONLY=on), where this handler's own help does not fit.
 RELAY_HELP = (
     "管理命令（只有管理员能用，不会交给 Mac）：\n"
-    "查状态 / 添加好友 号码 [附言] / 同意好友 / 自动同意好友 开|关"
+    "查状态 / 添加好友 号码 [备注=名字] [附言] / 同意好友 / 自动同意好友 开|关"
 )
 
 HELP_TEXT = (
     "可用命令（只在管理员私聊里有效，群聊一律不回复）：\n"
     "  查状态                        微信连接、各开关和已处理的消息数\n"
-    "  添加好友 <号码> [附言]     搜索并发送添加好友申请\n"
+    "  添加好友 <号码> [备注=名字] [附言]  搜索并发送添加好友申请\n"
     "  同意好友 / 通过好友        立即检查并同意所有好友申请\n"
     "  自动同意好友 开 / 关        切换后台自动同意功能\n"
     "  帮助 / help                 显示本帮助\n"
@@ -167,8 +168,13 @@ class AdminCommandHandler:
 
         target = parts[1].strip()
         reason = parts[2].strip() if len(parts) > 2 else ""
+        remark = ""
+        named = re.match(r"备注[=＝:：]\s*(\S+)\s*(.*)$", reason, re.S)   # 添加好友 号 备注=昵称-抖音 附言
+        if named:
+            remark, reason = named.group(1), named.group(2).strip()
         try:
-            res = self._friend.add_friend(target, reason)
+            res = (self._friend.add_friend(target, reason, remark=remark) if remark
+                   else self._friend.add_friend(target, reason))
         except Exception:
             logger.exception("ADMIN: 添加好友 failed")
             return "添加好友时出错，已中止（详见日志）：请在微信里看一下申请发出去没有"

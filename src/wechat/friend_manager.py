@@ -90,6 +90,9 @@ ACCEPT_DIALOG_TITLES = ("通过朋友验证",)         # what 「前往验证」
                                                 # a window that appears with another title is logged, never used)
 DIALOG_CLASS = "Qt51514QWindowIcon"
 DIALOG_LOOKS = 10                                # a dialog is looked for this many times, 0.1 s apart
+REMARK_BOX_BELOW_LABEL = 0.063   # 4.0 申请添加朋友: the remark box is this far below its 「备注」 label
+REMARK_BOX_Y = 0.375            # where the remark box is when the label was not read
+MAX_REMARK_CHARS = 30
 CARD_LOOKS = 16                                  # the search result is read this many times, 0.5 s apart
 
 
@@ -670,18 +673,20 @@ class FriendManager:
 
     # ── Add friend ──────────────────────────────────────────────────────
 
-    def add_friend(self, keyword: str, message: str = "") -> dict:
+    def add_friend(self, keyword: str, message: str = "", remark: str = "") -> dict:
         """Search and add a new WeChat friend by phone number or WeChat ID.
 
         Args:
             keyword: Target phone number, wxid, or search keyword.
             message: Greeting / verification message to send.
+            remark: The name the new friend is saved under (备注); WeChat 4.0 only.
 
         Returns:
             Result dict with keys: 'ok' (bool), 'target' (str), 'message' (str), 'reason' (str, on failure).
         """
         keyword = " ".join(str(keyword or "").split())
         message = " ".join(str(message or "").split())
+        remark = " ".join(str(remark or "").split())[:MAX_REMARK_CHARS]
         if not keyword:
             return _failure(keyword, "invalid", "请输入有效的微信号或手机号")
         if len(keyword) > MAX_KEYWORD_CHARS:
@@ -694,7 +699,7 @@ class FriendManager:
                 if hwnd is None:
                     return _failure(keyword, "no_window", "未找到微信主窗口或无法切到前台，请确保微信已启动")
                 try:
-                    return self._add_friend_in_window(hwnd, keyword, message)
+                    return self._add_friend_in_window(hwnd, keyword, message, remark)
                 except _Abort as e:
                     logger.warning("add_friend stopped: %s", e)
                     return _failure(keyword, "aborted", f"微信窗口状态异常，已中止：{e}")
@@ -855,7 +860,7 @@ class FriendManager:
         win32gui.EnumWindows(_enum, None)
         return found
 
-    def _add_friend_wechat4(self, hwnd: int, keyword: str, message: str) -> dict:
+    def _add_friend_wechat4(self, hwnd: int, keyword: str, message: str, remark: str = "") -> dict:
         """WeChat 4.0: the add-friend window and the application window are windows of their own.  Every key
         and paste goes to one of them only while that very window is in front (a chat open in a window of its
         own belongs to the same process; a click only moves the focus, so WeChat in front is enough for it, as
@@ -941,6 +946,7 @@ class FriendManager:
                 self._close_window(dialog_hwnd)
                 return _failure(keyword, "no_dialog", "没有出现填写附言的申请窗口（对方可能无需验证，或界面不同），请在微信里确认是否已发出")
 
+            remark_set = False
             if apply_hwnd:
                 a_rect = self._rect_of(apply_hwnd)
                 a_w = a_rect[2] - a_rect[0]
@@ -957,6 +963,20 @@ class FriendManager:
                         self._sleep(0.05)
                         self._paste(apply_hwnd, message, exact=True)
                         self._sleep(0.2)
+                if remark:
+                    # The box under 「备注」 holds the friend's own name already: it is replaced
+                    label = _find_row(app_rows, "备注", exact=True)
+                    box_y = _centre(label)[1] + REMARK_BOX_BELOW_LABEL if label else REMARK_BOX_Y
+                    if self._click_at(apply_hwnd, a_rect[0] + int(0.5 * a_w), a_rect[1] + int(box_y * a_h),
+                                      required=False, exact=False):
+                        self._sleep(0.1)
+                        self._combo(apply_hwnd, VK_CONTROL, VK_A, exact=True)
+                        self._sleep(0.05)
+                        self._key(apply_hwnd, VK_BACK, exact=True)
+                        self._sleep(0.05)
+                        self._paste(apply_hwnd, remark, exact=True)
+                        self._sleep(0.2)
+                        remark_set = True
 
                 if send_button:
                     self._click_row(apply_hwnd, send_button)
@@ -997,7 +1017,8 @@ class FriendManager:
             return {
                 "ok": True,
                 "target": keyword,
-                "message": f"已成功向「{keyword}」发送好友申请" + (f"（附言：{message}）" if message else ""),
+                "message": f"已成功向「{keyword}」发送好友申请" + (f"（附言：{message}）" if message else "")
+                           + (f"，备注「{remark}」" if remark_set else "，备注没填上，请通过后手动改" if remark else ""),
             }
         except Exception:                             # _Abort, or a pywin32 error: no dialog is left open
             for opened in (apply_hwnd, dialog_hwnd):
@@ -1005,9 +1026,9 @@ class FriendManager:
                     self._close_window(opened)
             raise
 
-    def _add_friend_in_window(self, hwnd: int, keyword: str, message: str) -> dict:
+    def _add_friend_in_window(self, hwnd: int, keyword: str, message: str, remark: str = "") -> dict:
         if self._is_wechat4(hwnd):
-            return self._add_friend_wechat4(hwnd, keyword, message)
+            return self._add_friend_wechat4(hwnd, keyword, message, remark)
         # 1. The search box is found on the screen and clicked; nothing is typed before it is seen
         box = self._find_search_box()
         if box is None:

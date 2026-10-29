@@ -540,6 +540,18 @@ class AdminFriendCommandTests(unittest.TestCase):
         self.assertIn("已成功向「13800000000」发送好友申请", handler.handle("添加好友 13800000000 请通过"))
         self.friend.add_friend.assert_called_once_with("13800000000", "请通过")
 
+    def test_add_friend_with_a_remark(self):
+        for text in ("添加好友 Lhn-0223 备注=诗依闺女装-抖音 老师好~加您聊下寄样",
+                     "添加好友 Lhn-0223 备注：诗依闺女装-抖音 老师好~加您聊下寄样"):
+            handler = self.handler()
+            handler.handle(text)
+            self.friend.add_friend.assert_called_once_with("Lhn-0223", "老师好~加您聊下寄样", remark="诗依闺女装-抖音")
+
+    def test_add_friend_with_only_a_remark(self):
+        handler = self.handler()
+        handler.handle("添加好友 Lhn-0223 备注=诗依-抖音")
+        self.friend.add_friend.assert_called_once_with("Lhn-0223", "", remark="诗依-抖音")
+
     def test_add_friend_short_form_and_extra_spaces(self):
         handler = self.handler()
         handler.handle("加好友   13800000000")
@@ -1391,10 +1403,10 @@ class ApplyDialogTests(DialogTestCase):
         self.desktop.add(APPLY, title="申请添加朋友")
         self.assertEqual(self.run_win32(manager._find_apply_dialog, HWND, ADD_DIALOG, before), APPLY)
 
-    def add_friend(self, apply_comes_forward=True):
+    def add_friend(self, apply_comes_forward=True, remark="", apply_rows=None):
         """The 4.0 add-friend flow with 「小朋友」 open in its own window: search, 添加到通讯录, greeting, 确定."""
         add_button = row("添加到通讯录", 0.4, 0.8, 0.6, 0.9)
-        ocr = FakeOcr([add_button], [add_button], [row("发送添加朋友申请", 0.1, 0.1, 0.5, 0.2)], [])
+        ocr = FakeOcr([add_button], [add_button], apply_rows or [row("发送添加朋友申请", 0.1, 0.1, 0.5, 0.2)], [])
         manager = self.make(ocr)
         self.desktop.add(ADD_DIALOG, title="添加朋友", rect=(200, 100, 600, 800))
         self.window.front = ADD_DIALOG
@@ -1410,8 +1422,23 @@ class ApplyDialogTests(DialogTestCase):
         self.desktop.on_click = [lambda: None, application_opens]     # the search box, 添加到通讯录
         manager._open_add_friend_dialog_wechat4 = lambda hwnd: ADD_DIALOG
         manager._is_window_visible = lambda h: h in self.desktop.windows
-        result = self.run_win32(manager._add_friend_wechat4, HWND, "wxid_target", "你好呀")
+        result = self.run_win32(manager._add_friend_wechat4, HWND, "wxid_target", "你好呀", remark)
         return result, closed
+
+    def test_the_remark_replaces_the_name_under_its_label(self):
+        rows = [row("发送添加朋友申请", 0.1, 0.1, 0.5, 0.2), row("备注", 0.05, 0.31, 0.15, 0.34)]
+        result, _ = self.add_friend(remark="诗依-抖音", apply_rows=rows)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.window.pasted, ["wxid_target", "你好呀", "诗依-抖音"])
+        self.assertIn("备注「诗依-抖音」", result["message"])
+        remark_click = [e for e in self.events if e[0] == "click"][-2]   # the last click is 确定
+        self.assertEqual(remark_click[-2:], (400, 100 + int((0.325 + 0.063) * 800)))
+        after = self.events[self.events.index(remark_click) + 1:]
+        self.assertEqual([e[1:3] for e in after if e[0] == "combo"][:2], [(0x11, 0x41), (0x11, 0x56)])
+
+    def test_without_a_remark_nothing_more_is_typed(self):
+        result, _ = self.add_friend()
+        self.assertNotIn("备注", result["message"])
 
     def test_the_greeting_goes_only_into_the_application_window(self):
         result, closed = self.add_friend()
