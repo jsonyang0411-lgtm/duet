@@ -293,8 +293,13 @@ def load_config(path: Optional[str]) -> dict:
             raise ToolError(f"{CATEGORY_NAMES[key]}的话术里写了快递公司：只写「包邮」", EXIT_USAGE)
         cfg["templates"][key] = text
     cfg["weekly_cap"] = _number(raw, "weekly_cap", 800, 1, 5000, integer=True)
-    # 每天最多发几张（2026-10-29：同店另一位 3 分钟发了 20 张，像是碰了平台风控——我们放慢、限量）
-    cfg["daily_cap"] = _number(raw, "daily_cap", 20, 1, 1000, integer=True)
+    # 每天最多发几张；0（默认）= 不限（2026-10-29 先加了 20 张一天，同天用户说去掉：发不发由用户说了算，节奏靠 wait_between）
+    cfg["daily_cap"] = _number(raw, "daily_cap", 0, 0, 1000, integer=True)
+    # 发的先后：category（默认）= 清单的顺序（小达人、中大博主、专场型）；mixed = 三类轮流、每类里最合适的先发（mix_categories），
+    # 每天按 daily_cap 发一批时，每一批都是剩下的里面最合适的那些（用户 2026-10-29：合适的都留作候选，按天来发）
+    cfg["send_order"] = str(raw.get("send_order") or "category")
+    if cfg["send_order"] not in ("category", "mixed"):
+        raise ToolError("配置 send_order 要是 category 或 mixed", EXIT_USAGE)
     cfg["quota_margin"] = _number(raw, "quota_margin", 50, 0, 5000, integer=True)
     cfg["gap_seconds"] = _number(raw, "gap_seconds", 3, 3, 60)
     wait = raw.get("wait_between", [15, 30])
@@ -729,11 +734,25 @@ def creator_view(row: dict) -> dict:
     }
 
 
+def _both_routes(pool: List[dict]) -> List[dict]:
+    """Inside one category: no flag first, then the higher hat share; a tie is taken from the two routes (聚水潭 / 抖音) in turn,
+    so that a list cut at --count holds both (2026-10-29: with the wider categories nearly every row had a hat share of 0, and
+    the 聚水潭 rows, found first, filled a 40 list on their own)."""
+    key = lambda c: (bool(c["flags"]), -(c["hat_share"] or 0.0))
+    route = lambda c: 1 if c.get("source") == "抖音" else 0
+    rank: Dict[int, int] = {}
+    seen = [0, 0]
+    for c in sorted(pool, key=key):
+        rank[id(c)] = seen[route(c)]
+        seen[route(c)] += 1
+    return sorted(pool, key=lambda c: (*key(c), rank[id(c)], route(c)))
+
+
 def mix_categories(candidates: List[dict]) -> List[dict]:
-    """The order the platform's status is asked in: inside each category the ones without a flag first, then the higher hat share;
-    then the categories taken in turn (大主播/专场型, 中大博主, 小达人, 大主播 …) so that a list cut at --count has all three."""
-    pools = {k: sorted((c for c in candidates if c["category"] == k), key=lambda c: (bool(c["flags"]), -(c["hat_share"] or 0.0)))
-             for k in ("big", "mid", "small")}
+    """The order the platform's status is asked in: inside each category the ones without a flag first, then the higher hat share,
+    the two routes in turn on a tie (_both_routes); then the categories taken in turn (大主播/专场型, 中大博主, 小达人, 大主播 …) so
+    that a list cut at --count has all three."""
+    pools = {k: _both_routes([c for c in candidates if c["category"] == k]) for k in ("big", "mid", "small")}
     out: List[dict] = []
     while any(pools.values()):
         for k in ("big", "mid", "small"):
@@ -1019,7 +1038,8 @@ def run_plan(cfg: dict, plan: dict, confirm: str, clis: Clis, ledger: Ledger, *,
     ledger.append({"event": "run-start", "plan_id": plan["plan_id"]})
     previews_failed = 0
     first = True
-    for index, creator in enumerate(plan["creators"]):
+    creators = mix_categories(plan["creators"]) if cfg["send_order"] == "mixed" else plan["creators"]
+    for index, creator in enumerate(creators):
         aweme = creator.get("aweme_id")
         if limit is not None and len(summary["sent"]) >= limit:
             summary["stopped"] = {"why": f"这次只发 {limit} 位（--limit）", "at": index}
@@ -1038,7 +1058,7 @@ def run_plan(cfg: dict, plan: dict, confirm: str, clis: Clis, ledger: Ledger, *,
             summary["stopped"] = {"why": f"我们自己的每周上限 {cfg['weekly_cap']} 到了（本周已发 {week}）", "at": index}
             break
         today = ledger.sent_today(clock())
-        if today >= cfg["daily_cap"]:
+        if cfg["daily_cap"] and today >= cfg["daily_cap"]:
             summary["stopped"] = {"why": f"每天上限 {cfg['daily_cap']} 到了（今天已发 {today}）：明天接着发", "at": index}
             break
         if not first:

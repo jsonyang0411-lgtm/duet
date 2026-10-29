@@ -454,6 +454,12 @@ def test_plan_mixes_the_three_categories_and_puts_the_better_fits_first(env):
     order = tool.mix_categories([{"category": k, "flags": f, "hat_share": h, "id": i} for i, (k, f, h) in enumerate(
         [("small", [], 5.0), ("small", ["x"], 50.0), ("small", [], 20.0), ("mid", [], 1.0), ("big", ["y"], 3.0)])])
     assert [o["id"] for o in order] == [4, 3, 2, 0, 1]
+    # a tie (same flags, same hat share) is taken from the two routes in turn, so a list cut short still holds both
+    rows = [{"category": "small", "flags": ["帽子占比只有 0.0%"], "hat_share": 0.0, "source": s, "id": i}
+            for i, s in enumerate(["聚水潭", "聚水潭", "聚水潭", "抖音", "抖音", "两边都有"])]
+    assert [o["id"] for o in tool.mix_categories(rows)] == [0, 3, 1, 4, 2, 5]
+    assert [o["id"] for o in tool.mix_categories(rows + [{"category": "small", "flags": [], "hat_share": 5.0, "source": "抖音", "id": 9}])][0] == 9, \
+        "a better fit still goes first, whichever route found her"
 
 
 def test_plan_checks_status_twenty_at_a_time(env):
@@ -565,6 +571,18 @@ def test_run_records_what_the_preview_said_of_each_products_sample(env):
                                                {"aweme_id": "dy_x", "content": "x", "products": {"main": P_BERET, "extras": []}})
 
 
+def test_a_mixed_send_order_takes_the_three_categories_in_turn_best_first(env):
+    plan_file, plan_id = make_plan(env)
+    env.log.unlink()
+    code, out, _ = env.main(["run", "--config", env.write_config(send_order="mixed"), "--plan", plan_file, "--confirm", plan_id,
+                             "--ledger-dir", str(env.tmp / "ledger"), "--limit", "4"])
+    assert code == 0
+    assert [x["aweme_id"] for x in out["sent"]] == ["dy_big_a", "dy_mid_a", "dy_small_a", "dy_big_b"], \
+        "a day's batch is the best of what is left in each category, not all the small ones first"
+    code, _, _ = env.main(["status", "--config", env.write_config(send_order="sideways")])
+    assert code == 2
+
+
 def test_run_needs_the_plan_id_the_user_agreed_to_and_a_fresh_list(env):
     plan_file, plan_id = make_plan(env)
     env.log.unlink()
@@ -667,6 +685,7 @@ def test_run_leaves_out_who_was_dropped_after_the_list_and_keeps_a_daily_cap(env
     assert sleeps == [240.0], "3 to 5 minutes between two creators (the middle, with this uniform)"
     led = tool.Ledger(env.tmp / "ledger")
     assert led.sent_today(NOW) == 3 and led.sent_today(NOW + timedelta(days=3650)) == 0, "the ledger writes the real time: a day far ahead has none"
+    assert tool.load_config(env.write_config())["daily_cap"] == 0, "no daily cap unless the config sets one (the user, 2026-10-29)"
 
 
 def test_a_crash_between_the_attempt_and_its_result_never_leads_to_a_second_send(env):
