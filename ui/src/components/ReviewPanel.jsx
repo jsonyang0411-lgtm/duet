@@ -2,7 +2,7 @@ import { Fragment, useState } from 'react'
 import { ArrowClockwise, PaperPlaneRight, PencilSimple, X, Paperclip, WarningCircle, Eye, EyeSlash, Flag, Lightning, CheckCircle } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
-import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform } from '../lib/prm'
+import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, dealAction, nightStatus } from '../lib/prm'
 import { PageHead, Card, Note, Banner, Empty, Confirm, TextArea } from './ui'
 
 // 待审批: what the Mac drafted for the registered creators. Nothing reaches a
@@ -11,6 +11,9 @@ import { PageHead, Card, Note, Banner, Empty, Confirm, TextArea } from './ui'
 // A draft with a platform action (小红书 / 抖音 / 淘宝) shows the Mac's preview of it;
 // 批准并执行 runs it on the platform once, and only a verified write lets the
 // reply go out. Anything less is listed red at the top until marked dealt with.
+// 下班时段 (PRM_NIGHT_AUTO_HOURS): inside the window a draft that passes every night rule goes
+// out by itself (tag 夜间自动发出); a holding line sent for a flagged draft stays at the top
+// until 已处理; the status line sits above the gate table.
 
 export default function ReviewPanel() {
   const { data, err, reload } = usePrm(4000)
@@ -27,6 +30,7 @@ export default function ReviewPanel() {
         {setupProblems(data).map(([kind, text]) => <Note key={text} kind={kind}>{text}</Note>)}
         {!data && <Empty title="正在读取…" />}
         <PlatformAlerts alerts={data?.platform_alerts || []} onDone={reload} />
+        <NightAlerts alerts={data?.night_alerts || []} onDone={reload} />
         {data && !pending.length && (
           <Empty title="现在没有要审批的草稿">已登记的达人发来消息后，Mac 写好的回复会出现在这里。</Empty>
         )}
@@ -79,6 +83,36 @@ function PlatformAlerts({ alerts, onDone }) {
             {ex?.created?.link && <div className="f-hint">平台给的链接：<span className="mono">{ex.created.link}</span></div>}
             {ex?.created?.channel_id && <div className="f-hint">渠道品 ID：<span className="mono">{ex.created.channel_id}</span></div>}
             {(ex?.problems || []).map((t) => <div key={t} className="f-err">{t}</div>)}
+          </Banner>
+        )
+      })}
+    </div>
+  )
+}
+
+/** Holding lines the 下班时段 window sent for drafts the model flagged: each stays until 已处理. */
+function NightAlerts({ alerts, onDone }) {
+  const toast = useToast()
+  const [busy, setBusy] = useState('')
+  if (!alerts.length) return null
+  const done = async (a) => {
+    const key = `${a.deal_id}:${a.packet}`
+    setBusy(key)
+    try {
+      await dealAction({ action: 'night_done', deal_id: a.deal_id, packet: a.packet })
+      toast.ok('已标为处理过了')
+      onDone()
+    } catch (e) { toast.err(e.message) } finally { setBusy('') }
+  }
+  return (
+    <div className="stack prm-night-alerts" style={{ gap: 8 }}>
+      {alerts.map((a) => {
+        const key = `${a.deal_id}:${a.packet}`
+        return (
+          <Banner key={key} kind="warn" title={`${a.party_name} · 夜间自动回了过渡的话${a.packet ? `（#${a.packet}）` : ''}`}
+            actions={<button type="button" className="btn sm" disabled={busy === key} onClick={() => done(a)}><CheckCircle />已处理</button>}>
+            <div>{a.text}</div>
+            {a.at && <div className="f-hint">{fmtClock(a.at)} 发出；运营跟进以后点「已处理」</div>}
           </Banner>
         )
       })}
@@ -166,13 +200,14 @@ function DraftCard({ p, canSend, onDone }) {
       title={`${p.party_name} · ${p.kind_label}`}
       eyebrow={`DRAFT #${p.id}`}
       sub={`${fmtClock(p.created_at)} ${p.system ? '系统生成' : '写好'}${p.stage_proposal_label ? ` · 建议阶段：${p.stage_proposal_label}` : ''}`}
-      actions={<>{p.route === 'auto' && <span className="tag ok" title="这类消息已经达到自动发送门槛">自动发送</span>}<span className={`tag ${kind}`}>{label}</span></>}
+      actions={<>{p.route === 'auto' && <span className="tag ok" title="这类消息已经达到自动发送门槛">自动发送</span>}{p.route === 'night' && <span className="tag cy" title="下班时段里满足全部安全条件，没经过人审">夜间自动发出</span>}<span className={`tag ${kind}`}>{label}</span></>}
       className="prm-draft"
     >
       <div className="stack" style={{ gap: 8 }}>
         {p.needs_attention && (
           <Note kind="warn" icon={WarningCircle}>要特别注意{p.reason ? `：${p.reason}` : ''}</Note>
         )}
+        {p.night_held && <div className="f-hint prm-night-held">夜间没有自动发：{p.night_held}</div>}
         {p.intent && <div><b>达人想要：</b>{p.intent}</div>}
         {!p.needs_attention && p.reason && <div className="dim"><b>依据：</b>{p.reason}</div>}
         {slots.length > 0 && (
@@ -264,7 +299,7 @@ function RecentCard({ d, onDone }) {
     setBusy(true)
     try {
       await decide(p.id, 'wrong')
-      toast.ok(`已标为发错了：「${p.kind_label}」以后都先审，重新计数`)
+      toast.ok(`已标为发错了${p.route === 'night' ? '（夜间自动发出的）' : ''}：「${p.kind_label}」以后都先审，重新计数`)
       setAsking(null)
       onDone()
     } catch (e) { toast.err(e.message) } finally { setBusy(false) }
@@ -289,6 +324,8 @@ function RecentCard({ d, onDone }) {
                       {label}{p.status === 'sent' ? (confirmed ? ' · 已确认' : ' · 未确认') : ''}{p.edited ? ' · 改过' : ''}
                     </span>
                     {p.route === 'auto' && <span className="tag ok">自动</span>}
+                    {p.route === 'night' && <span className="tag cy" title="下班时段里满足全部安全条件，没经过人审">夜间自动发出</span>}
+                    {p.route === 'night' && p.needs_attention && <span className="tag warn" title={p.reason}>要注意</span>}
                     {p.wrong && <span className="tag need">发错了</span>}
                     {p.platform && <span className={`tag ${p.platform.execution ? outcomeTag(p.platform.execution.outcome) : 'off'}`} title={p.platform.label}>
                       平台 · {p.platform.execution ? p.platform.execution.outcome : '没执行'}</span>}
@@ -311,6 +348,7 @@ function RecentCard({ d, onDone }) {
       {asking && (
         <Confirm title={`#${asking.id} 发错了？`} confirmLabel="标为发错了" cancelLabel="不标" danger busy={busy}
           onConfirm={() => wrong(asking)} onCancel={() => setAsking(null)}>
+          {asking.route === 'night' && '这条是下班时段自动发出的（没经过人审）。'}
           「{asking.kind_label}」这类消息会马上退回「先审后发」，自动发送的计数从头开始。已经发出去的消息收不回来，需要的话请在微信里补一句。
         </Confirm>
       )}
@@ -318,14 +356,35 @@ function RecentCard({ d, onDone }) {
   )
 }
 
+/** 下班时段自动回复 (PRM_NIGHT_AUTO_HOURS): on or off, night or day now, and why it is held when it is. */
+function NightLine({ n }) {
+  if (!n) return null
+  const [kind, text] = nightStatus(n)
+  return (
+    <div className="prm-night" style={{ marginBottom: 12 }}>
+      <Note kind={kind}>
+        <b>{text}</b>
+        {n.suspended && <div>{n.suspended}</div>}
+        <div className="f-hint">
+          {n.on
+            ? '下班时段里，Mac 写好的回复满足全部安全条件才直接发给达人（不看下面的门槛）：不是投诉，佣金不超过 25%，不提坑位费、保底、返现这类，模型要求注意的只发一句不带数字的过渡话；平台动作、补读的、新好友、撤回、人工接管的照旧等运营。'
+            : '在「合作单」页下面的设置里填「下班时段自动回复」（例如 18:00-09:00）就打开。'}
+          改了设置要重启机器人才生效。
+        </div>
+      </Note>
+    </div>
+  )
+}
+
 /** 8.1: which kinds still wait for a person, and how far each is from going out on its own. */
 function GatesCard({ d }) {
   const gates = d?.gates || []
-  if (!gates.length) return null
+  if (!gates.length && !d?.night) return null
   return (
     <Card title="自动发送门槛" eyebrow="GATES" className="prm-gates"
-      sub="某类消息最近 N 条里运营原样发出的条数达标、而且没改过金额 / 号码 / 日期，这一类以后就直接发；钱和投诉一直先审">
-      <div className="scroll" style={{ overflowX: 'auto' }}>
+      sub="某类消息最近 N 条里运营原样发出的条数达标、而且没改过金额 / 号码 / 日期，这一类以后就直接发；钱和投诉一直先审（下班时段另有规则，见下面这一行）">
+      <NightLine n={d?.night} />
+      {gates.length > 0 && <div className="scroll" style={{ overflowX: 'auto' }}>
         <table className="table">
           <thead><tr><th>类型</th><th>现在</th><th>最近审过的</th><th>原样发出</th><th>门槛</th></tr></thead>
           <tbody>
@@ -340,7 +399,7 @@ function GatesCard({ d }) {
             ))}
           </tbody>
         </table>
-      </div>
+      </div>}
     </Card>
   )
 }

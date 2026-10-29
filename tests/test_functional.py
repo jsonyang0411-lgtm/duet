@@ -596,6 +596,80 @@ class TestPrmPages:
         assert [e["kind"] for e in prm.service.store.events(1, limit=1)] == ["wrong"]
 
 
+    @pytest.fixture
+    def night(self):
+        """A running PRM service at 21:30 (this machine's clock) with the 下班时段 18:00-09:00 on: a flagged draft went
+        out as one holding line, a plain 20% one went out, a 30% one waits."""
+        import json as _json
+        import time as _time
+        from types import SimpleNamespace
+        from src.prm.service import SETTLE_SEC, PrmService
+        from src.prm.store import PrmStore
+        from src.relay.service import ClaudeRelay
+        from src.relay.store import RelayStore
+        from src.web import server as web_server
+
+        class Clock:
+            now = _time.mktime((2026, 10, 29, 21, 30, 0, 0, 0, -1))
+
+            def __call__(self):
+                return self.now
+
+        clock = Clock()
+        cfg = SimpleNamespace(
+            claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1", claude_relay_port=0,
+            claude_relay_prefix="cc", claude_relay_wxids=[], claude_relay_db=":memory:",
+            claude_relay_max_chars=1500, admin_wxid="wxid_admin", prm_copilot="on", prm_db=":memory:",
+            prm_night_auto_hours="18:00-09:00",
+        )
+        sent = []
+        relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=clock)
+        service = PrmService(cfg, relay, store=PrmStore(":memory:"), clock=clock,
+                             send=lambda c, t: sent.append((c, t)) or True, send_file=lambda c, p: True)
+        service.register("wxid_creator01", "小美", "测试达人")
+        line = "好呀～您的意向我都记下啦！明早我第一时间拉个小群，一起跟您敲定选款和寄样细节哈！"
+        for text, more in (("好呀，可以寄来看看", {"reply_draft": line, "needs_attention": True,
+                                                   "reason": "已进入寄样阶段，请运营拉三方群"}),
+                           ("佣金多少呀", {"reply_draft": "我们达人合作的佣金是 20%～", "message_kind": "money"}),
+                           ("能给 30% 吗", {"reply_draft": "可以给到 30%～", "message_kind": "money"})):
+            service.handle({"chat_id": "wxid_creator01", "sender_id": "wxid_creator01", "content": text,
+                            "msg_type": 1, "is_group": False, "timestamp": clock.now})
+            clock.now += SETTLE_SEC + 1
+            job = relay.next_job(0, ("prm",))
+            draft = {"intent": "问合作", "slots": {}, "stage_proposal": "", "message_kind": "other",
+                     "attachments_to_send": [], "needs_attention": False, "reason": "kb/合作政策.md", **more}
+            relay.finish(job["id"], {"ok": True, "text": _json.dumps(draft, ensure_ascii=False)})
+            relay.tick()
+            service.send_approved()
+        web_server.register_prm(service)
+        yield SimpleNamespace(service=service, sent=sent, relay=relay, clock=clock)
+        web_server.register_prm(None)
+        relay.stop()
+
+    def test_review_page_shows_the_night_window_its_sends_and_the_notice_until_seen_to(self, page, night):
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.get_by_text("下班时段自动回复：18:00–09:00（现在是下班时段）").wait_for()
+        alerts = page.locator(".prm-night-alerts").inner_text()
+        assert "小美 · 夜间自动回了过渡的话（#1）" in alerts and "要注意：已进入寄样阶段，请运营拉三方群" in alerts
+        recent = page.locator(".prm-recent")
+        assert recent.inner_text().count("夜间自动发出") == 2 and "要注意" in recent.inner_text()
+        waiting = page.locator(".prm-draft", has_text="可以给到 30%").inner_text()
+        assert "夜间没有自动发：说到了「30%」（超过 25%）" in waiting
+        assert [t for _, t in night.sent] == ["好呀～您的意向我都记下啦！明早我第一时间拉个小群，一起跟您敲定选款和寄样细节哈！",
+                                              "我们达人合作的佣金是 20%～"]
+        page.locator(".prm-night-alerts button:has-text('已处理')").click()
+        page.locator(".prm-night-alerts").wait_for(state="detached")
+        assert night.service.store.deal(1)["attention"] == ""
+        assert night.service.store.events(1, limit=1)[0]["kind"] == "night_done"
+        recent.locator("tr", has_text="佣金是 20%").locator("button:has-text('标为发错了')").click()
+        dialog = page.locator("[role=dialog]")
+        assert "这条是下班时段自动发出的" in dialog.inner_text()
+        dialog.locator("button:has-text('标为发错了')").click()
+        page.wait_for_timeout(1500)
+        assert night.service.store.packet(2)["wrong"] is True
+        assert night.service.store.events(1, limit=1)[0]["detail"]["night"] is True
+
+
 class TestWechatGapAlert:
     """电脑微信掉线的提醒（Windows：机器人自己记的，副驾驶模式的控制台也有）：每页顶上一直显示到运营点「看过了」，
     还没恢复的那段没有按钮（src/wechat/presence.py，真的 /api/wechat-gaps）。"""

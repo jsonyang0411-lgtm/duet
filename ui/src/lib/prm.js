@@ -72,6 +72,14 @@ export function eventText(ev, stages = {}, modes = {}, shipmentStates = {}) {
   }
 }
 
+/** 下班时段自动回复 (``night`` of GET /api/prm): [note kind, the status line]. */
+export function nightStatus(n) {
+  if (n.error) return ['need', `下班时段自动回复：${n.error}`]
+  if (!n.on) return ['', '下班时段自动回复：关着']
+  const now = n.inside ? '现在是下班时段' : '现在是上班时段'
+  return n.suspended ? ['warn', `下班时段自动回复：${n.window}（${now}；暂停，不自动发）`] : ['cy', `下班时段自动回复：${n.window}（${now}）`]
+}
+
 /** What is wrong with the setup, in the order a person has to fix it ([] = ready). */
 export function setupProblems(d) {
   if (!d) return []

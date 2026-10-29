@@ -27,7 +27,8 @@
 ``prm_meta``        small values the service keeps over a restart (when the sync last asked)
 
 A packet's life: ``pending`` (waits in the console) -> ``approved`` (an operator said
-send, or the kind's gate is ``auto``) -> ``sending`` -> ``sent`` | ``failed``; or
+send, the kind's gate is ``auto``, or the 下班时段 window sent it: route ``night``) -> ``sending`` ->
+``sent`` | ``failed``; or
 ``pending`` -> ``dropped`` (not sent) | ``superseded`` (the creator wrote again, a newer
 draft follows).  ``no_reply`` is a draft that says nothing needs to be sent.  Moves are
 compare-and-set (``move``), so a double click or two threads never send one packet twice.
@@ -204,7 +205,8 @@ BACKLOG_KINDS = ("creator_message", "operator_message")
 # ``draft:<lane>`` is the latest draft's own notes (the next draft of that lane replaces them); every
 # other key is the system's and stays until what it says is dealt with (src/prm/service.py: a draft
 # that was not written, a 专属佣金 step owed, a platform action that ended red, a recall, messages
-# read too late to draft, this PC's clock off WeChat's).  ``show`` False: kept for what it holds, no longer shown.
+# read too late to draft, this PC's clock off WeChat's, a holding line the night window sent: ``night:<packet>``).
+# ``show`` False: kept for what it holds, no longer shown.
 DRAFT_NOTES = "draft:"
 NOTICE_CHARS = 300          # one notice's text
 ATTENTION_CHARS = 600       # all of them, as the console shows them
@@ -661,7 +663,8 @@ class PrmStore:
 
     def reviewed(self, kind: str, since: float, limit: int) -> list[dict]:
         """The newest drafts of ``kind`` a person decided on after ``since`` (8.1's window).
-        Plain replies only: a platform action is always reviewed and earns no kind ``auto``."""
+        Plain replies only: a platform action is always reviewed and earns no kind ``auto``; what a gate
+        (``auto``) or the night window (``night``, PRM_NIGHT_AUTO_HOURS) sent was no person's decision."""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM action_packets WHERE kind = ? AND route = 'review' AND tool = ? AND status IN (?, ?, ?)"
@@ -791,13 +794,13 @@ class PrmStore:
 
     def hold_for_review(self, deal_id: int, reason: str, now: Optional[float] = None) -> int:
         """The Mac's drafts of this deal that have not gone out wait for a person, ``reason`` first in
-        theirs (``needs_attention``): a waiting one stays waiting, a plain reply its gate approved and
-        not being sent yet goes back to waiting (``review``).  Not the bot's own shipping notices (a
-        template).  Returns how many."""
+        theirs (``needs_attention``): a waiting one stays waiting, a plain reply its gate (``auto``) or the
+        night window (``night``, PRM_NIGHT_AUTO_HOURS) approved and not being sent yet goes back to waiting
+        (``review``).  Not the bot's own shipping notices (a template).  Returns how many."""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id, status, reason FROM action_packets WHERE deal_id = ? AND job_id IS NOT NULL"
-                " AND (status = ? OR (status = ? AND route = 'auto' AND tool = ?))",
+                " AND (status = ? OR (status = ? AND route IN ('auto', 'night') AND tool = ?))",
                 (deal_id, PENDING, APPROVED, MESSAGE_TOOL),
             ).fetchall()
             held = 0

@@ -332,3 +332,100 @@ def test_registering_a_new_friend_drafts_what_she_said_since_she_was_added(runni
     assert [line.split("] ", 1)[1] for line in job["text"].split("\n")] == [
         "（加好友时的验证消息）我是阿花 〈手机1〉", "想要个样品"]
     assert running.prm.is_party_chat("wxid_new01")
+
+
+# ── 下班时段自动回复 (PRM_NIGHT_AUTO_HOURS) ──────────────────────────────────
+
+def test_the_night_window_and_its_notice_from_the_running_console(tmp_path):
+    """The window on and it is 21:30: /api/prm says where it stands; the holding line the bot sent for a draft the
+    model flagged is a notice (night_alerts, the deal's attention) until 「已处理」 (POST /api/prm/deals night_done)."""
+    clock = Clock()
+    clock.now = time.mktime((2026, 10, 29, 21, 30, 0, 0, 0, -1))
+    cfg = SimpleNamespace(claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1",
+                          claude_relay_port=0, claude_relay_prefix="cc", claude_relay_wxids=[],
+                          claude_relay_db=":memory:", claude_relay_max_chars=1500, admin_wxid="wxid_admin",
+                          prm_copilot="on", prm_db=":memory:", prm_night_auto_hours="18:00-09:00")
+    sent = []
+    relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=clock, files_dir=tmp_path / "relay")
+    prm = PrmService(cfg, relay, store=PrmStore(":memory:"), clock=clock,
+                     send=lambda c, t: sent.append((c, t)) or True, send_file=lambda c, p: True)
+    prm.register(CREATOR, "小美", "测试达人")
+    prm.handle({"chat_id": CREATOR, "sender_id": CREATOR, "content": "好呀，可以寄来看看", "msg_type": 1,
+                "is_group": False, "timestamp": clock.now})
+    clock.now += SETTLE_SEC + 1
+    job = relay.next_job(0, ("prm",))
+    line = "好呀～您的意向我都记下啦！明早我第一时间拉个小群，一起跟您敲定选款和寄样细节哈！"
+    draft = {"intent": "想要样品", "slots": {}, "stage_proposal": "agreed", "message_kind": "other", "reply_draft": line,
+             "attachments_to_send": [], "needs_attention": True, "reason": "已进入寄样阶段，请运营拉三方群"}
+    relay.finish(job["id"], {"ok": True, "text": json.dumps(draft, ensure_ascii=False)})
+    relay.tick()
+    assert prm.send_approved() == 1 and sent == [(CREATOR, line)]
+    server.register_prm(prm)
+    try:
+        d = call("/api/prm")[1]
+        assert d["night"] == {"on": True, "window": "18:00–09:00", "inside": True, "suspended": "", "error": ""}
+        [alert] = d["night_alerts"]
+        assert alert["deal_id"] == 1 and alert["party_name"] == "小美" and "已进入寄样阶段" in alert["text"]
+        [packet] = d["recent"]
+        assert packet["route"] == "night" and packet["needs_attention"] is True and packet["id"] == alert["packet"]
+        assert d["parties"][0]["deal"]["attention"] == "夜间已自动回了过渡的话，要注意：已进入寄样阶段，请运营拉三方群"
+        done = {"action": "night_done", "deal_id": 1, "packet": alert["packet"]}
+        assert call("/api/prm/deals", "POST", done)[1] == {"ok": True}
+        d = call("/api/prm")[1]
+        assert d["night_alerts"] == [] and d["parties"][0]["deal"]["attention"] == ""
+        assert d["parties"][0]["deal"]["events"][0]["name"] == f"夜间自动回的过渡话 #{alert['packet']} 已处理"
+        assert call("/api/prm/deals", "POST", done)[1]["ok"] is False
+        assert call("/api/prm/deals", "POST", {**done, "packet": "x"})[1]["ok"] is False
+    finally:
+        server.register_prm(None)
+        relay.stop()
+
+
+def test_a_stopped_bot_shows_the_night_window_as_env_says_and_sees_to_its_notices(tmp_path, monkeypatch):
+    from src.prm import gates
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PRM_DB", raising=False)
+    monkeypatch.delenv("PRM_NIGHT_AUTO_HOURS", raising=False)
+    assert call("/api/prm")[1]["night"] == {"on": False, "window": "", "inside": False, "suspended": "", "error": ""}
+    monkeypatch.setenv("PRM_NIGHT_AUTO_HOURS", "18:00-09:00")
+    night = call("/api/prm")[1]["night"]
+    assert night["on"] is True and night["window"] == "18:00–09:00" and night["error"] == ""
+    assert night["inside"] is gates.in_night((18 * 60, 9 * 60), time.time())
+    monkeypatch.setenv("PRM_NIGHT_AUTO_HOURS", "18-9")
+    night = call("/api/prm")[1]["night"]
+    assert night["on"] is False and "PRM_NIGHT_AUTO_HOURS" in night["error"] and "18:00-09:00" in night["error"]
+    # notices the running bot left: seen to while it is stopped (straight on the database)
+    assert call("/api/prm/parties", "POST", {"action": "add", "wxid": CREATOR, "name": "小美"})[1]["ok"] is True
+    store = PrmStore(tmp_path / "data" / "prm.db")
+    for packet in (7, 9):
+        store.set_notice(1, f"night:{packet}", f"夜间已自动回了过渡的话，要注意：第 {packet} 份拿不准", time.time(),
+                         packet=packet)
+    store.close()
+    d = call("/api/prm")[1]
+    assert [a["packet"] for a in d["night_alerts"]] == [7, 9] and "第 7 份拿不准" in d["parties"][0]["deal"]["attention"]
+    assert call("/api/prm/deals", "POST", {"action": "night_done", "deal_id": 1, "packet": 7})[1] == {"ok": True}
+    assert [a["packet"] for a in call("/api/prm")[1]["night_alerts"]] == [9]
+    assert call("/api/prm/deals", "POST", {"action": "night_done", "deal_id": 1})[1] == {"ok": True}   # every one left
+    d = call("/api/prm")[1]
+    assert d["night_alerts"] == [] and d["parties"][0]["deal"]["attention"] == ""
+    assert [e["kind"] for e in d["parties"][0]["deal"]["events"]][:2] == ["night_done", "night_done"]
+    assert call("/api/prm/deals", "POST", {"action": "night_done", "deal_id": 5})[1]["ok"] is False
+
+
+def test_the_night_settings_are_in_the_allow_list_and_checked():
+    from src.prm.service import NIGHT_HOLDING_TEXT
+    from src.web import advanced_config as adv
+
+    keys = [f["key"] for f in next(g for g in adv.GROUPS if g["id"] == "prm")["fields"]]
+    assert keys.index("PRM_NIGHT_AUTO_HOURS") == keys.index("PRM_HOLDING_TEXT") + 1
+    assert keys.index("PRM_NIGHT_HOLDING_TEXT") == keys.index("PRM_NIGHT_AUTO_HOURS") + 1
+    hours = adv.FIELDS["PRM_NIGHT_AUTO_HOURS"]
+    assert hours["type"] == "text" and hours["default"] == "" and "重启机器人" in hours["help"]
+    assert "worker" in hours["help"] and "25%" in hours["help"]
+    assert adv.FIELDS["PRM_NIGHT_HOLDING_TEXT"]["default"] == NIGHT_HOLDING_TEXT
+    assert adv.normalize("PRM_NIGHT_HOLDING_TEXT", "  ") == NIGHT_HOLDING_TEXT and adv.normalize("PRM_NIGHT_AUTO_HOURS", "") == ""
+    assert adv.validate_updates({"PRM_NIGHT_AUTO_HOURS": "18:00-09:00"}, {}) == {}
+    assert adv.validate_updates({"PRM_NIGHT_AUTO_HOURS": ""}, {}) == {}
+    assert set(adv.validate_updates({"PRM_NIGHT_AUTO_HOURS": "18-9"}, {})) == {"PRM_NIGHT_AUTO_HOURS"}
+    assert set(adv.validate_updates({"PRM_NIGHT_HOLDING_TEXT": "好" * 61}, {})) == {"PRM_NIGHT_HOLDING_TEXT"}

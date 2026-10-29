@@ -1049,6 +1049,19 @@ def _prm_int_env(key: str, default: int) -> int:
         return default
 
 
+def _prm_night_env() -> dict:
+    """The 下班时段 status for a stopped bot: PRM_NIGHT_AUTO_HOURS as .env says (what the bot takes at its next start)."""
+    from src.prm.gates import night_window
+    from src.prm.service import night_status
+
+    raw = os.getenv("PRM_NIGHT_AUTO_HOURS", "")
+    try:
+        return night_status(night_window(raw), time.time())
+    except ValueError:
+        return night_status(None, time.time(), error=f"PRM_NIGHT_AUTO_HOURS 填得不对（{raw.strip()[:40]}）："
+                                                       "要写成 18:00-09:00 这样，机器人启动时会拒绝")
+
+
 def _prm_stopped_store():
     """The PRM database for a stopped bot (gates seeded), or None when there is none yet."""
     from src.prm.gates import DEFAULT_GATES
@@ -1072,7 +1085,7 @@ def _prm_state_core() -> dict:
     stopped = {"mac_online": False, "worker_kinds": [], "can_send": False, "can_send_files": False,
                "takeover_min": _prm_int_env("PRM_TAKEOVER_MIN", 120), "holding_min": _prm_int_env("PRM_HOLDING_MIN", 10),
                "retention_days": _prm_int_env("PRM_RETENTION_DAYS", 90),
-               "catchup_hours": _prm_int_env("PRM_CATCHUP_HOURS", 12), **settings}
+               "catchup_hours": _prm_int_env("PRM_CATCHUP_HOURS", 12), "night": _prm_night_env(), **settings}
     store = _prm_stopped_store()
     if store is None:
         from src.prm.platforms import ACTIONS
@@ -1089,7 +1102,7 @@ def _prm_state_core() -> dict:
 
 
 def _prm_deal(data: dict) -> dict:
-    """POST /api/prm/deals {action: stage | adopt | mode | shipment | shipment_status, deal_id, ...}."""
+    """POST /api/prm/deals {action: stage | adopt | mode | shipment | shipment_status | night_done, deal_id, ...}."""
     from src.prm.service import apply_deal_action
 
     action = str(data.get("action") or "")

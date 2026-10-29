@@ -314,6 +314,12 @@ class BotConfig:
     # messages (8.1); 0 = never.
     prm_holding_min: int = 10
     prm_holding_text: str = "收到，我确认一下马上回你"
+    # 下班时段自动回复 ("18:00-09:00", may pass midnight; empty = off): inside it, by this PC's clock, a creator-reply
+    # draft whose kind has not earned "auto" still goes out by itself when every night rule holds (src/prm/gates.py
+    # night_reason: no complaint, nothing plain_reason minds, no commission above 25 % or 坑位 / 保底 …, a flagged
+    # draft only as one holding line); holding replies inside it say prm_night_holding_text.
+    prm_night_auto_hours: str = ""
+    prm_night_holding_text: str = "收到～您说的我都记下啦，明早第一时间回复您哈～"
     # A delivered deal's receiving details (address, phone and ID numbers) are cleared
     # everywhere this many days after delivery (8.2).
     prm_retention_days: int = 90
@@ -500,6 +506,17 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(f"PRM_HOLDING_MIN must be between 0 and 120, got {kwargs.get('prm_holding_min')}")
     if not (1 <= len(str(kwargs.get("prm_holding_text", "收到，我确认一下马上回你")).strip()) <= 60):
         errors.append("PRM_HOLDING_TEXT must be 1-60 characters")
+    if str(kwargs.get("prm_night_auto_hours", "") or "").strip():
+        from src.prm.gates import night_window
+
+        try:
+            night_window(kwargs["prm_night_auto_hours"])
+        except ValueError:
+            errors.append("PRM_NIGHT_AUTO_HOURS must be HH:MM-HH:MM (like 18:00-09:00, may pass midnight; "
+                          f"empty = off), got {kwargs.get('prm_night_auto_hours')}")
+    if not (1 <= len(str(kwargs.get("prm_night_holding_text", "收到～您说的我都记下啦，明早第一时间回复您哈～")).strip())
+            <= 60):
+        errors.append("PRM_NIGHT_HOLDING_TEXT must be 1-60 characters")
     if not (1 <= int(kwargs.get("prm_retention_days", 90)) <= 365):
         errors.append(f"PRM_RETENTION_DAYS must be between 1 and 365, got {kwargs.get('prm_retention_days')}")
     if kwargs.get("prm_commission_after", "delivered") not in ("delivered", "created"):
@@ -647,6 +664,9 @@ def load_config() -> BotConfig:
         "prm_takeover_min": int(os.getenv("PRM_TAKEOVER_MIN", "120")),
         "prm_holding_min": int(os.getenv("PRM_HOLDING_MIN", "10")),
         "prm_holding_text": os.getenv("PRM_HOLDING_TEXT", "收到，我确认一下马上回你").strip() or "收到，我确认一下马上回你",
+        "prm_night_auto_hours": os.getenv("PRM_NIGHT_AUTO_HOURS", "").strip(),
+        "prm_night_holding_text": (os.getenv("PRM_NIGHT_HOLDING_TEXT", "收到～您说的我都记下啦，明早第一时间回复您哈～").strip()
+                                   or "收到～您说的我都记下啦，明早第一时间回复您哈～"),
         "prm_retention_days": int(os.getenv("PRM_RETENTION_DAYS", "90")),
         "prm_commission_after": os.getenv("PRM_COMMISSION_AFTER", "delivered").strip().lower() or "delivered",
         "prm_catchup_hours": int(os.getenv("PRM_CATCHUP_HOURS", "12")),

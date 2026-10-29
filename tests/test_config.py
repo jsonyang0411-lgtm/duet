@@ -517,6 +517,21 @@ class LoadConfigTests(unittest.TestCase):
         self.assertEqual((config.send_typing_delay, config.send_quiet, config.send_queue), ("on", "on", "on"))
         self.assertEqual((config.send_keep_clipboard, config.sticker_paste), ("off", "image"))
 
+    def test_load_config_night_window(self):
+        """下班时段自动回复: off unless set; the window and the night's holding line are read and stripped."""
+        from src.config import load_config
+
+        night_text = "收到～您说的我都记下啦，明早第一时间回复您哈～"
+        with patch.dict(os.environ, {}, clear=True):
+            config = load_config()
+        self.assertEqual((config.prm_night_auto_hours, config.prm_night_holding_text), ("", night_text))
+        with patch.dict(os.environ, {"PRM_NIGHT_AUTO_HOURS": " 18:00-09:00 ", "PRM_NIGHT_HOLDING_TEXT": " 收到啦～明早回您 "},
+                        clear=True):
+            config = load_config()
+        self.assertEqual((config.prm_night_auto_hours, config.prm_night_holding_text), ("18:00-09:00", "收到啦～明早回您"))
+        with patch.dict(os.environ, {"PRM_NIGHT_HOLDING_TEXT": "  "}, clear=True):
+            self.assertEqual(load_config().prm_night_holding_text, night_text)
+
 
 class ValidateConfigTests(unittest.TestCase):
     """Tests for _validate_config() numeric range validation."""
@@ -624,6 +639,16 @@ class LoadConfigValidationIntegrationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 load_config()
             self.assertIn("MESSAGE_BURST_WINDOW_SEC", str(ctx.exception))
+
+    def test_a_night_window_that_is_none_stops_the_start(self):
+        """PRM_NIGHT_AUTO_HOURS that is not HH:MM-HH:MM: the bot refuses to start (it never guesses an hour)."""
+        from src.config import load_config
+
+        for value in ("18-9", "18:00-18:00", "晚上"):
+            with patch.dict(os.environ, {"PRM_NIGHT_AUTO_HOURS": value}, clear=True):
+                with self.assertRaises(RuntimeError) as ctx:
+                    load_config()
+                self.assertIn("PRM_NIGHT_AUTO_HOURS", str(ctx.exception))
 
 
 if __name__ == "__main__":

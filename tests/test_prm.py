@@ -47,9 +47,10 @@ def config(**overrides):
 
 
 class Bot:
-    """The relay and the PRM service as Bot.run wires them, with a fake WeChat."""
+    """The relay and the PRM service as Bot.run wires them, with a fake WeChat.  ``prm``: settings of the PRM
+    service only (``prm_night_auto_hours="18:00-09:00"``, say)."""
 
-    def __init__(self, clock, tmp_path, send_ok=True, files_ok=True, with_files=True):
+    def __init__(self, clock, tmp_path, send_ok=True, files_ok=True, with_files=True, **prm):
         self.clock = clock
         self.texts, self.files = [], []
         self.send_ok, self.files_ok = send_ok, files_ok
@@ -57,7 +58,7 @@ class Bot:
         self.relay = ClaudeRelay(config(), store=RelayStore(":memory:"), clock=clock, files_dir=tmp_path / "relay",
                                  send=lambda c, t: self.relay_sent.append((c, t)) or True)
         self.changed = 0
-        self.prm = PrmService(config(), self.relay, store=PrmStore(":memory:"), clock=clock,
+        self.prm = PrmService(config(**prm), self.relay, store=PrmStore(":memory:"), clock=clock,
                               send=self._send, send_file=self._send_file if with_files else None,
                               on_parties_changed=self._changed)
 
