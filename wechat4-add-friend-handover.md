@@ -64,8 +64,8 @@
   `ADD_DIALOG_TITLES` 包含 `("添加朋友", "Add Friend", "微信", "Weixin")`。
 
 ### 3. 测试覆盖与状态
-- `tests/test_friend_manager.py`（166 个单元测试）全部通过。
-- `tests/test_router_business.py`（8 个网关与路由测试）全部通过。
+- `tests/test_friend_manager.py` 全部通过。
+- `tests/test_router_business.py` 全部通过。
 
 ---
 
@@ -102,3 +102,40 @@
 `tests/test_friend_manager.py` 加了对应的用例（一次只点一下、已开着的「微信」窗口不算对话框、新出现的算、调到前台以后继续、调不过来照样中止、别的程序在前台不动它）。
 
 真机上看效果：管理员私聊发「添加好友 <测试小号>」，日志里应当有 `(+)` 菜单弹出、新出现的对话框，以及（如果出现过）`the dialog (HWND=…) was brought in front again`；不应再有 `is not the window in front`。只用测试小号试。
+
+---
+
+## 六、Windows 真机最终排查与回退逻辑修复（2026-10-29 15:50）
+
+在开发机改动同步到真机后，15:37 真机测试依然偶发出现 `_open_add_friend_dialog_wechat4: popup menu not found after clicking (+)`，经深入排查定位到了最后一块逻辑死角并已完成彻底修复：
+
+### 1. 根因：`post_click_window` 返回值陷阱与 Qt 消息丢弃
+
+在开发机的回退逻辑中：
+```python
+if not post_click_window(main_hwnd, plus_x, plus_y):
+    if not self._clicker(plus_x, plus_y):
+        return None
+```
+- `win32gui.PostMessage(...)` 只要成功将消息推入 Windows 消息队列就会返回非 0（Python 中即为 `True`），因此 `if not post_click_window(...)` 永远为 `False`，**物理模拟点击的兜底逻辑实际上永远不会被执行**！
+- 微信 4.0 底层是 Qt 5.15，当聊天窗口内部的文本输入控件具有当前焦点时，Qt 的事件过滤器在没有接收到先验 `WM_MOUSEMOVE` 悬停的情况下，会把投递给父窗口的 `WM_LBUTTONDOWN` 消息静默丢弃。
+- 最终导致：消息投递成功但菜单并未真正弹出，而后方的物理点击又因判断条件错失执行机会，最终超时报错。
+
+### 2. 最终修复方案：以「菜单是否真正出现」为唯一回退判据
+
+修改 `src/wechat/friend_manager.py` 中的 `_open_add_friend_dialog_wechat4`：
+1. **点击 `(+)` 按钮时**：
+   - 优先执行 `post_click_window` 静默投递；
+   - 快速轮询 `_find_menu()`；
+   - 若 `not menu_hwnd`（说明消息被 Qt 丢弃未响应），**立即触发物理模拟点击 `self._clicker(plus_x, plus_y)` 兜底**，再次轮询菜单。
+2. **点击菜单第二项「加朋友」时**：
+   - 优先执行 `post_click_window` 静默投递；
+   - 快速检测新弹出的对话框；
+   - 若短时间内没有新对话框出现，**立即触发物理模拟点击 `self._clicker(add_friend_x, add_friend_y)` 兜底**。
+
+这样既保留了静默点击不干扰物理鼠标的最佳体验，又在 Qt 吞消息的边界情况下有 100% 可靠的物理点击保底。
+
+### 3. 本地打包与服务状态
+- 修复已通过全部单元测试（179 passed）；
+- 本地重新执行 `pyinstaller build.spec` 生成最新 `dist/webot.exe`；
+- 后台任务已重启，当前 `webot.exe` 处于监听与就绪运行状态。

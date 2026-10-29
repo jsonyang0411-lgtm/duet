@@ -861,14 +861,22 @@ class FriendManager:
         menu_hwnd = _find_menu()
         if not menu_hwnd:
             for attempt in range(2):
-                if not post_click_window(main_hwnd, plus_x, plus_y):
-                    if not self._clicker(plus_x, plus_y):
-                        return None
-                for _ in range(15):
-                    self._sleep(0.08)
+                # 1. 优先尝试无感消息投递
+                post_click_window(main_hwnd, plus_x, plus_y)
+                for _ in range(5):
+                    self._sleep(0.06)
                     menu_hwnd = _find_menu()
                     if menu_hwnd:
                         break
+                # 2. 若无感投递未检测到菜单出现（Qt丢弃消息），立即用物理模拟点击补击兜底
+                if not menu_hwnd:
+                    if not self._clicker(plus_x, plus_y):
+                        return None
+                    for _ in range(12):
+                        self._sleep(0.06)
+                        menu_hwnd = _find_menu()
+                        if menu_hwnd:
+                            break
                 if menu_hwnd:
                     break
                 self._sleep(0.2)
@@ -881,17 +889,28 @@ class FriendManager:
         m_rect = win32gui.GetWindowRect(menu_hwnd)
         add_friend_x = m_rect[0] + int(0.5 * (m_rect[2] - m_rect[0]))
         add_friend_y = m_rect[1] + int(0.51 * (m_rect[3] - m_rect[1]))
-        if not post_click_window(menu_hwnd, add_friend_x, add_friend_y):
-            if not self._clicker(add_friend_x, add_friend_y):
-                return None
-        self._sleep(0.5)
 
-        for _ in range(25):
+        # 点击加朋友：优先无感投递，若对话框未在短时间内出现则物理模拟点击
+        post_click_window(menu_hwnd, add_friend_x, add_friend_y)
+        dialog_found = None
+        for _ in range(5):
+            self._sleep(0.08)
             fresh = [h for h in self._add_dialog_candidates(main_hwnd) if h not in before]
             if fresh:
-                return fresh[0]
-            self._sleep(0.08)
-        return None
+                dialog_found = fresh[0]
+                break
+
+        if not dialog_found:
+            if not self._clicker(add_friend_x, add_friend_y):
+                return None
+            for _ in range(20):
+                self._sleep(0.08)
+                fresh = [h for h in self._add_dialog_candidates(main_hwnd) if h not in before]
+                if fresh:
+                    return fresh[0]
+            return None
+
+        return dialog_found
 
     def _add_dialog_candidates(self, main_hwnd: int) -> list[int]:
         """Visible windows of WeChat's process, besides the main one, that may be the add-friend window.
