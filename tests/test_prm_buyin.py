@@ -114,7 +114,8 @@ def buyin_draft(b, clock, text=f"你好，佣金多少？我电话 {PHONE}", mid
 
 
 def deal(b):
-    return b.prm.store.deal_of(b.prm.store.party_by_wxid(CREATOR)["id"])
+    party = next(p for p in b.prm.store.parties(include_inactive=True) if p["wxid"] == CREATOR)   # (off the list too)
+    return b.prm.store.deal_of(party["id"])
 
 
 def buyin_events(b):
@@ -716,3 +717,92 @@ def test_the_answer_is_cut_to_the_contract_on_both_sides():
     assert argv == ["/n", "bin/dy.mjs", "buyin", "im-inbox", '--after={"t":1}', f"--limit={platforms.IM_LIMIT}",
                     "--names", "--expect-shop-id=7000000000000001"]
     assert "--execute" not in argv and platforms.im_inbox_argv({"node": "/n"})[4:] == ["--limit=50", "--names"]
+
+
+# ── re-review 2026-10-29 ─────────────────────────────────────────────────
+
+def test_a_takeover_while_her_draft_is_written_holds_it_and_it_is_drafted_after(bot, clock):
+    round_says(bot, clock, conv(line("m1", "佣金多少？", clock.now)))
+    [job] = jobs_of(bot, BUYIN_CHAT + CID)
+    bot.prm.on_own_message(bot.msg("运营在微信里亲手回了一句"))               # a takeover before the draft is back
+    packet = mac_drafts(bot, job)
+    assert packet["status"] == "superseded"
+    [notice] = held(bot)
+    assert notice["upto"] == packet["meta"]["upto"] and "人工接管期间她在百应私信里发了 1 条消息" in notice["text"]
+    clock.now += bot.prm._takeover_sec + 1
+    bot.prm.tick()                                                              # the takeover ran out: drafted once
+    again = [j for j in jobs_of(bot, BUYIN_CHAT + CID) if j["id"] != job["id"]]
+    assert len(again) == 1 and "佣金多少？" in again[0]["text"] and held(bot) == []
+    assert mac_drafts(bot, again[0])["status"] == "pending"
+
+
+def test_a_conversation_failing_every_round_is_said_then_skipped_and_the_cursor_moves(bot, clock, monkeypatch):
+    real = bot.prm._buyin_draft_job
+
+    def broken(party, deal_, cid, *a, **k):
+        if cid == CID:
+            raise RuntimeError("这个会话坏了")
+        return real(party, deal_, cid, *a, **k)
+
+    monkeypatch.setattr(bot.prm, "_buyin_draft_job", broken)
+    bad = conv(line("m1", "坏会话里的话", clock.now))
+    good = conv(line("g1", "好会话", clock.now), cid="conv_ok")
+    round_says(bot, clock, bad, good, cursor={"t": 1})
+    assert len(jobs_of(bot, BUYIN_CHAT + "conv_ok")) == 1                        # the others are taken in
+    assert bot.prm.store.meta_value("buyin_cursor") is None and bot.prm.snapshot()["buyin"]["status"] is None
+    round_says(bot, clock, bad, good, cursor={"t": 1})
+    status = bot.prm.snapshot()["buyin"]["status"]
+    assert "1 个会话连续 2 轮没处理成" in status["text"] and "这个会话坏了" in status["text"]
+    assert bot.prm.store.meta_value("buyin_cursor") is None
+    round_says(bot, clock, bad, good, cursor={"t": 1})                           # the third: skipped
+    assert json.loads(bot.prm.store.meta_value("buyin_cursor")) == {"t": 1}
+    assert "m1" in bot.prm.store.buyin_thread(CID)["seen"] and bot.prm.snapshot()["buyin"]["status"] is None
+    [skipped] = [n for n in deal(bot)["notices"] if n["key"] == f"buyin_skipped:{CID}"]
+    assert "连续 3 轮都处理不了" in skipped["text"] and "到百应里看" in deal(bot)["attention"]
+    monkeypatch.setattr(bot.prm, "_buyin_draft_job", real)
+    round_says(bot, clock, conv(line("m2", "我方回她了", clock.now, "shop")))  # answered: the notice goes
+    assert not any(n["key"] == f"buyin_skipped:{CID}" for n in deal(bot)["notices"])
+
+
+def test_a_held_notice_says_honestly_why_nothing_is_drafted(bot, clock):
+    d = deal(bot)
+    bot.prm.deal_action("mode", {"deal_id": d["id"], "mode": "paused"})
+    round_says(bot, clock, conv(line("m1", "暂停时问的", clock.now)))
+    assert "恢复副驾驶后会起草一份" in held(bot)[0]["text"]
+    party = bot.prm.store.party_by_wxid(CREATOR)
+    bot.prm.set_active(party["id"], False)
+    bot.prm.deal_action("mode", {"deal_id": d["id"], "mode": "copilot"})
+    clock.now += 5
+    bot.prm.tick()
+    assert "这位达人已停用，不会起草" in held(bot)[0]["text"] and jobs_of(bot, BUYIN_CHAT + CID) == []
+    bot.prm._buyin_sec = 0                                                      # the switch off
+    bot.prm.set_active(party["id"], True)
+    clock.now += 5
+    bot.prm.tick()
+    assert "百应私信的起草已经关了" in held(bot)[0]["text"] and jobs_of(bot, BUYIN_CHAT + CID) == []
+    bot.prm._buyin_sec = INTERVAL                                               # on again: drafted once
+    clock.now += 5
+    bot.prm.tick()
+    assert len(jobs_of(bot, BUYIN_CHAT + CID)) == 1 and held(bot) == []
+
+
+def test_a_held_conversation_that_cannot_be_drafted_is_logged_seldom(bot, clock, monkeypatch, caplog):
+    import logging
+
+    d = deal(bot)
+    bot.prm.deal_action("mode", {"deal_id": d["id"], "mode": "paused"})
+    round_says(bot, clock, conv(line("m1", "暂停时问的", clock.now)))
+    bot.prm.deal_action("mode", {"deal_id": d["id"], "mode": "copilot"})
+    monkeypatch.setattr(bot.prm, "_buyin_draft_job", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("排不进去")))
+    caplog.set_level(logging.ERROR, logger="src.prm.service")
+
+    def logged():
+        return [r for r in caplog.records if "could not be drafted" in r.getMessage()]
+
+    for _ in range(10):                                                         # every 5 s for 50 s
+        clock.now += 5
+        bot.prm.sweep_buyin_held()
+    assert len(logged()) == 1 and held(bot)                                     # tried every round, said once
+    clock.now += 600
+    bot.prm.sweep_buyin_held()
+    assert len(logged()) == 2

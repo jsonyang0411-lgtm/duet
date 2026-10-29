@@ -152,6 +152,8 @@ BUYIN_SAID_CHARS = 1500                     # her lines a 百应 draft keeps for
 BUYIN_UNMATCHED_DAYS = 7                    # a conversation of nobody on the list is shown, and kept, this long
 BUYIN_ERRORS = 3                            # failed rounds in a row (a hiccup) before the console says so
 BUYIN_RISK_PAUSE_SEC = 3600                 # after a risk wall (76): the next round waits this long at least
+BUYIN_CONV_TRIES = 3                        # rounds in a row one conversation fails before it is skipped (the deal says so)
+BUYIN_LOG_EVERY_SEC = 600                   # a held conversation that keeps failing to be drafted: logged this seldom
 BUYIN_KINDS = {"card": "[卡片]", "other": "[其他消息]"}
 # What the 待审批 page says when a round could not be made (until one goes through).
 BUYIN_PROBLEMS = {
@@ -162,6 +164,8 @@ BUYIN_PROBLEMS = {
     "unavailable": "百应私信读不了（{message}）；在这之前达人在百应里的消息请直接到百应里看、在百应里回",
     "old_worker": "Mac 上的 worker 还不会读百应私信：更新 Mac 上的代码并重启 worker（在这之前请直接到百应里看）",
     "error": "百应私信连续 {count} 次没读成（{message}）：先直接到百应里看",
+    "conversations": "百应私信里有 {count} 个会话连续 {rounds} 轮没处理成（{message}）：下一轮再试；连续 {tries} 轮不成的会跳过，"
+                     "登记达人的合作单上会提醒，请直接到百应里看",
 }
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
 _WXID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{3,63}$")
@@ -642,6 +646,9 @@ class PrmService:
             self._buyin_sec = 0
         self._buyin_lock = threading.RLock()       # one round queued or applied, or one decision on a 百应 draft, at a time
         self._buyin_errors = 0                     # failed rounds in a row (BUYIN_ERRORS)
+        self._buyin_conv_errors: dict = {}         # conversation id -> rounds in a row it failed (BUYIN_CONV_TRIES)
+        self._buyin_fail_rounds = 0                # rounds in a row with a conversation that failed
+        self._buyin_held_logged: dict = {}         # held notice key -> when its drafting failure was last logged
         # creator_directory() -> [{"wxid", "platform", "platform_no", "platform_uid"}]: the 达人名单 (src/influencer),
         # who a 百应 creator is by her 抖音号 / 抖音 UID (Bot._wire_prm_directory); None: only the ids the deals' verified
         # 抖店 sample orders found (``_creator_ids``)
@@ -2970,20 +2977,33 @@ class PrmService:
         else:
             why = _job_error(job)
             stopped = {"verdict": "old_worker" if "达人编号" in why else "error", "exit_code": None, "message": why}
-        summary = {"conversations": 0, "messages": 0, "drafts": 0, "recorded": 0, "unmatched": 0, "failed": 0}
+        summary = {"conversations": 0, "messages": 0, "drafts": 0, "recorded": 0, "unmatched": 0, "failed": 0,
+                   "skipped": 0}
+        why = ""
         with self._buyin_lock:
             if result is not None:
                 index = self._buyin_index()
                 for conv in result["conversations"]:
+                    cid = conv["conversation_id"]
                     try:
                         self._buyin_conversation(conv, index, now, summary)
-                    except Exception:                  # one conversation's trouble does not stop the others
+                        self._buyin_conv_errors.pop(cid, None)
+                    except Exception as e:             # one conversation's trouble does not stop the others
+                        tries = self._buyin_conv_errors.get(cid, 0) + 1
+                        why = why or f"{type(e).__name__}: {e}"[:160]
+                        if tries >= BUYIN_CONV_TRIES and self._buyin_give_up(conv, index, now, summary, why):
+                            self._buyin_conv_errors.pop(cid, None)
+                            logger.exception("PRM: a 百应 conversation failed %d rounds in a row; skipped (its messages "
+                                             "count as seen, the deal says so)", tries)
+                            continue
+                        self._buyin_conv_errors[cid] = tries
                         summary["failed"] += 1
-                        logger.exception("PRM: a 百应 conversation could not be taken in; read again next round")
+                        logger.exception("PRM: a 百应 conversation could not be taken in (%d round(s) in a row); read "
+                                         "again next round", tries)
                 stopped = result["stopped"]
                 if stopped is None and not summary["failed"] and result["cursor"] is not None:
                     self._store.set_meta_value("buyin_cursor", json.dumps(result["cursor"], ensure_ascii=False))
-            self._buyin_round_end(stopped, now)
+            self._buyin_round_end(stopped, now, failed=summary["failed"], why=why)
             self._store.drop_buyin_threads(unmatched_before=now - BUYIN_UNMATCHED_DAYS * 86400)
         self._relay.store.replace_result(job["id"], json.dumps(
             {"op": BUYIN_OP, "summary": summary, "stopped": stopped}, ensure_ascii=False))
@@ -3129,10 +3149,7 @@ class PrmService:
         mode = self._mode(deal, now)
         if mode != COPILOT:
             summary["recorded"] += 1
-            self._store.set_notice(deal["id"], f"buyin_held:{cid}", (
-                f"{MODES.get(mode, mode)}期间她在百应私信里发了 {len(waiting)} 条消息（最早 "
-                f"{_clock_text(min(float(d['at']) for d in waiting))}），没有起草：恢复副驾驶后会起草一份，急的话直接到百应里回"),
-                now, conversation=cid, upto=max(float(d["at"]) for d in waiting))
+            self._buyin_hold(deal["id"], cid, waiting, mode, now)
             logger.info("PRM: party %d wrote in 百应 while the deal is %s; recorded, not drafted (the deal says so)",
                         party["id"], mode)
             return None
@@ -3157,27 +3174,86 @@ class PrmService:
         logger.info("PRM: party %d's %d new 百应 line(s) -> job #%d", party["id"], len(hers), job_id)
         return job_id
 
+    def _buyin_held_text(self, notice: dict, mode: str, active: bool) -> str:
+        """What a ``buyin_held`` notice says, honestly for now: while a person has the deal she will be drafted for
+        after it; with the switch off, or the creator off the list, nothing will be (re-enabling her, or the switch,
+        drafts it then)."""
+        count = int(notice.get("count") or 1)
+        earliest = _clock_text(float(notice.get("earliest") or notice.get("at") or 0))
+        said = f"她在百应私信里发了 {count} 条消息（最早 {earliest}），没有起草："
+        if self._buyin_sec <= 0:
+            return said + "百应私信的起草已经关了（PRM_BUYIN_SYNC_MIN=0），请直接到百应里回"
+        if not active:
+            return said + "这位达人已停用，不会起草（重新启用后会起草一份），请直接到百应里回"
+        if mode != COPILOT:
+            return f"{MODES.get(mode, mode)}期间{said}恢复副驾驶后会起草一份，急的话直接到百应里回"
+        return said + "马上起草一份"
+
+    def _buyin_hold(self, deal_id: int, cid: str, waiting: list, mode: str, now: float) -> None:
+        """Her 百应 lines ``waiting`` are not drafted because a person has the deal: its notice ``buyin_held:<cid>``
+        (how many, the earliest, ``upto`` the newest: ``_buyin_notices_answered``), drafted once the deal is back in
+        copilot mode (``sweep_buyin_held``)."""
+        if not waiting:
+            return
+        data = {"conversation": cid, "count": len(waiting), "earliest": min(float(d["at"]) for d in waiting),
+                "upto": max(float(d["at"]) for d in waiting)}
+        self._store.set_notice(deal_id, f"buyin_held:{cid}", self._buyin_held_text(data, mode, True), now, **data)
+
+    def _buyin_give_up(self, conv: dict, index: dict, now: float, summary: dict, why: str) -> bool:
+        """A conversation that failed BUYIN_CONV_TRIES rounds in a row (``_on_buyin_inbox``): its new messages count as
+        seen, so the cursor moves on and the others are not crowded out, and a registered creator's deal says how many
+        of her lines were skipped (``buyin_skipped:<conversation>``, until she is answered); nothing of it is drafted.
+        False when even that could not be done (the round counts it as failed then)."""
+        cid = conv["conversation_id"]
+        try:
+            thread = self._store.buyin_thread(cid) or {}
+            known = set(thread.get("seen") or [])
+            new = [m for m in conv["messages"] if m["id"] not in known]
+            self._store.save_buyin_thread(cid, now, seen=[*(thread.get("seen") or []), *(m["id"] for m in new)][-BUYIN_SEEN:])
+            summary["skipped"] += 1
+            hers = [float(m["at"] or now) for m in new if m["from"] == "creator"]
+            try:
+                party = self._buyin_party(conv["creator"], index)
+            except Exception:
+                party = None
+            if party is not None and hers:
+                deal = self._store.deal_of(party["id"], now)
+                self._store.set_notice(deal["id"], f"buyin_skipped:{cid}", (
+                    f"她在百应私信里有 {len(hers)} 条消息（最早 {_clock_text(min(hers))}），机器人连续 {BUYIN_CONV_TRIES} 轮"
+                    f"都处理不了（{why[:80]}），跳过了、没有起草：请到百应里看、在百应里回"), now, conversation=cid,
+                    upto=max(hers))
+            return True
+        except Exception:
+            logger.exception("PRM: a 百应 conversation could not even be skipped")
+            return False
+
     def _buyin_notices_answered(self, deal_id: int, cid: str, answered: float, now: float) -> None:
         """Her 百应 lines up to ``answered`` are answered (our line in 百应, an operator's decision on a 百应 draft): the
-        deal's notices of that conversation's lines held back or read too late that they cover go."""
-        keys = (f"buyin_held:{cid}", f"buyin_old:{cid}")
+        deal's notices of that conversation's lines held back, read too late or skipped that they cover go."""
+        keys = (f"buyin_held:{cid}", f"buyin_old:{cid}", f"buyin_skipped:{cid}")
         self._store.drop_notices(deal_id, lambda n: n["key"] in keys and float(n.get("upto") or 0) <= answered, now)
 
     def sweep_buyin_held(self) -> int:
         """Her 百应 lines held back while a person had the deal (``buyin_held:<conversation>``): once the deal is back in
-        copilot mode (the takeover ran out, an operator switched it back) and she is on the list, one draft job of the
-        lines still not answered (``_buyin_draft_job``); nothing left to draft (answered meanwhile, or all too old: their
-        own notice), the notice goes.  Off with the switch.  Returns how many jobs were queued."""
-        if self._buyin_sec <= 0:
-            return 0
+        copilot mode (the takeover ran out, an operator switched it back), she is on the list and the switch is on, one
+        draft job of the lines still not answered (``_buyin_draft_job``); nothing left to draft (answered meanwhile, or
+        all too old: their own notice), the notice goes.  Otherwise the notice is kept and says why nothing is drafted
+        (``_buyin_held_text``: a person has the deal, she is off the list, the switch is off; ``touch=False``).  A
+        conversation whose job cannot be queued is tried again every round, its failure logged once BUYIN_LOG_EVERY_SEC.
+        Returns how many jobs were queued."""
         now = self._clock()
         asked = 0
         for deal in self._store.deals_with_notice_prefix("buyin_held:"):
             party = self._store.party(deal["party_id"])
-            if party is None or not party.get("active") or self._mode(deal, now) != COPILOT:
-                continue
+            active = bool(party and party.get("active"))
+            mode = self._mode(deal, now)
             for notice in [n for n in deal["notices"] if str(n["key"]).startswith("buyin_held:")]:
                 cid = str(notice.get("conversation") or notice["key"].split(":", 1)[1])
+                if self._buyin_sec <= 0 or not active or mode != COPILOT:
+                    text = self._buyin_held_text(notice, mode, active)
+                    if text != notice.get("text"):
+                        self._store.set_notice(deal["id"], notice["key"], text, now, touch=False)
+                    continue
                 try:
                     with self._buyin_lock:
                         thread = self._store.buyin_thread(cid) or {}
@@ -3189,8 +3265,14 @@ class PrmService:
                             self._store.drop_notices(deal["id"], lambda n: n["key"] == notice["key"], now)
                         else:
                             asked += 1
+                        self._buyin_held_logged.pop(notice["key"], None)
                 except Exception:
-                    logger.exception("PRM: the 百应 lines held back in deal %d could not be drafted; tried again", deal["id"])
+                    last = self._buyin_held_logged.get(notice["key"])
+                    if last is None or now - last >= BUYIN_LOG_EVERY_SEC:
+                        self._buyin_held_logged[notice["key"]] = now
+                        logger.exception("PRM: the 百应 lines held back in deal %d could not be drafted; tried again "
+                                         "every round (said again in %d min if it goes on)", deal["id"],
+                                         BUYIN_LOG_EVERY_SEC // 60)
         if asked:
             logger.info("PRM: %d 百应 conversation(s) held back while a person had the deal: drafted now", asked)
         return asked
@@ -3215,13 +3297,24 @@ class PrmService:
             logger.info("PRM: %d 百应 inbox job(s) still held the answer as it came; only a summary is kept now", done)
         return done
 
-    def _buyin_round_end(self, stopped: Optional[dict], now: float) -> None:
+    def _buyin_round_end(self, stopped: Optional[dict], now: float, failed: int = 0, why: str = "") -> None:
         """How the 百应 round went (``buyin_status`` in the database, what the 待审批 page says).  Through: nothing to
         say.  Stopped by a login lapsed (77), a risk wall (76: the next round waits BUYIN_RISK_PAUSE_SEC, two intervals
         at least), another shop (79), a CLI without the command or too old, a worker too old: said at once
         (``BUYIN_PROBLEMS``); a hiccup (no answer, the lock busy) only after BUYIN_ERRORS rounds in a row.  The next
-        round comes after the interval as ever (a CLI that has no reader yet is asked once an interval, no more)."""
-        if stopped is None:
+        round comes after the interval as ever (a CLI that has no reader yet is asked once an interval, no more).  A round
+        that went through but had ``failed`` conversations (not taken in, read again next round): said from the second
+        such round in a row (``BUYIN_PROBLEMS["conversations"]``), until a round has none (one failing BUYIN_CONV_TRIES
+        rounds is skipped: ``_buyin_give_up``)."""
+        if stopped is None and failed:
+            self._buyin_errors = 0
+            self._buyin_fail_rounds += 1
+            if self._buyin_fail_rounds < 2:
+                logger.warning("PRM: %d 百应 conversation(s) not taken in (%s); read again next round", failed, why)
+                return
+            stopped = {"verdict": "conversations", "message": why}
+        elif stopped is None:
+            self._buyin_fail_rounds = 0
             if self._buyin_errors or self._store.meta_value("buyin_status"):
                 logger.info("PRM: the 百应 private messages came through again")
             self._buyin_errors = 0
@@ -3232,7 +3325,10 @@ class PrmService:
         if verdict == "wall":
             pause = max(2 * self._buyin_sec, BUYIN_RISK_PAUSE_SEC)
             self._store.set_meta_value("buyin_pause_until", now + pause)
-        if verdict in BUYIN_PROBLEMS and verdict != "error":
+        if verdict == "conversations":
+            text = BUYIN_PROBLEMS["conversations"].format(count=failed, rounds=self._buyin_fail_rounds,
+                                                          message=message[:120], tries=BUYIN_CONV_TRIES)
+        elif verdict in BUYIN_PROBLEMS and verdict != "error":
             text = BUYIN_PROBLEMS[verdict].format(pause=pause // 60, message=message[:160])
         else:
             self._buyin_errors += 1
@@ -3301,6 +3397,14 @@ class PrmService:
             state = SUPERSEDED                         # she wrote again in 百应: a newer draft is coming, or here
         else:
             state = PENDING
+        if state == SUPERSEDED and mode != COPILOT:
+            # a person took the deal while it was drafted (a WeChat takeover too): her lines wait for the end of it
+            # (``sweep_buyin_held`` drafts them once), the deal says so (re-review 2026-10-29: nothing was left)
+            with self._buyin_lock:
+                thread = self._store.buyin_thread(cid) or {}
+                answered = max(float(thread.get("last_shop_at") or 0), float(thread.get("answered_upto") or 0))
+                self._buyin_hold(deal_id, cid, [d for d in self._buyin_lines(deal_id, cid) if d.get("from") == "creator"
+                                                and float(d.get("at") or 0) > answered], mode, now)
         packet_meta = {"channel": BUYIN_CHANNEL, "lane": LANE_BUYIN, "conversation": cid,
                        "buyin_name": str(meta.get("buyin_name") or ""), "upto": _float(meta.get("upto")),
                        "lines": int(meta.get("lines") or 0), "said": str(job.get("text") or "")[:BUYIN_SAID_CHARS]}
