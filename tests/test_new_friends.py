@@ -732,3 +732,33 @@ def test_the_bot_starts_the_scan_only_for_a_mode_that_uses_it(tmp_path, db, monk
         service.stop()
         from src.web import server
         server.register_new_friends(None)
+
+
+def test_the_admin_is_told_of_a_new_friend_by_remark_and_how_she_came():
+    from src.wechat.new_friends import admin_notice
+    msg = admin_notice({"wxid": "wxid_new01", "name": "阿花", "remark": "阿花服饰-抖音", "how": "requested",
+                        "verify_text": "我是阿花 13800000000"})
+    assert msg == "新好友：阿花服饰-抖音（微信名 阿花） 通过了我们的好友申请，可以跟进了。"
+    assert "138" not in msg                                            # the verify text stays out
+    assert admin_notice({"wxid": "wxid_new02", "name": "小林", "how": "auto_accept"}) == "新好友：小林（机器人自动通过的）。"
+    assert admin_notice({"wxid": "wxid_new03abc", "how": "?"}) == "新好友：wxid_new…（说不清是怎么加的）。"
+
+
+def test_the_admin_notice_goes_after_the_edge_event_and_never_fails_the_scan(tmp_path):
+    from src.bot import Bot
+    sent = []
+
+    class Sender:
+        def send_text(self, to, text):
+            sent.append((to, text))
+            if "坏" in text:
+                raise RuntimeError("发不出去")
+            return True
+
+    config = BotConfig(db_path=str(tmp_path / "messages.db"), admin_wxid="wxid_admin")
+    [tell] = Bot._new_friend_notifier(config, Sender())
+    tell({"wxid": "wxid_new01", "name": "阿花", "how": "requested"})
+    tell({"wxid": "wxid_admin", "name": "管理员自己", "how": "manual"})   # the admin is not told of themself
+    tell({"wxid": "wxid_new02", "name": "坏", "how": "manual"})           # a failed send does not raise
+    assert [t for t, _ in sent] == ["wxid_admin", "wxid_admin"] and "阿花" in sent[0][1]
+    assert Bot._new_friend_notifier(BotConfig(db_path=str(tmp_path / "m.db")), Sender()) == []   # no admin

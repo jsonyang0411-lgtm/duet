@@ -371,7 +371,8 @@ class Bot:
             from .wechat.new_friends import NewFriendService, NewFriendStore
             service = NewFriendService(
                 backend, NewFriendStore(config.db_path),
-                on_found=[edge.friend_added] if edge is not None else [],
+                on_found=[*([edge.friend_added] if edge is not None else []),
+                          *Bot._new_friend_notifier(config, backend)],
                 keep_verify=prm is not None,
                 catchup_hours=getattr(config, "prm_catchup_hours", 12))
         except Exception:
@@ -387,6 +388,26 @@ class Bot:
             pass
         service.start()
         return service
+
+    @staticmethod
+    def _new_friend_notifier(config, backend) -> list:
+        """The admin (ADMIN_WXID) is told of each new friend in a private message (``admin_notice``), so a
+        creator who accepted our request can be followed up at once; [] without an admin or a sender.  It
+        never raises: the edge's event before it must not be sent again for it."""
+        notify = Bot._admin_notifier(config, backend)
+        if notify is None:
+            return []
+        admin = str(getattr(config, "admin_wxid", "") or "").strip()
+        from .wechat.new_friends import admin_notice
+
+        def tell(event: dict) -> None:
+            if str(event.get("wxid") or "") == admin:
+                return
+            try:
+                notify(admin_notice(event))
+            except Exception:
+                logger.warning("New friends: the admin could not be told", exc_info=True)
+        return [tell]
 
     @staticmethod
     def _start_presence(config, backend, edge):

@@ -17,6 +17,7 @@ lines and reports each new friend once (``NewFriendStore`` in the bot's database
 look ever sets a start marker, so friends from before it are never reported):
 
 - PRM_EDGE: a ``friend_added`` event for the Mac (``EdgeService.friend_added``);
+- with ADMIN_WXID: a private message to the admin (``admin_notice``: who, and how they came);
 - PRM_COPILOT: 登记达人's candidates in the console put new friends first, with their verify
   text (masked) and how they were added; registering one hands her messages since she was
   added to PRM as one reviewed draft job (``registered`` -> the backend's ``catch_up_chat``
@@ -65,6 +66,21 @@ AUTO_ACCEPT, MANUAL, REQUESTED, UNKNOWN = "auto_accept", "manual", "requested", 
 HOWS = (AUTO_ACCEPT, MANUAL, REQUESTED, UNKNOWN)
 HOW_LABELS = {AUTO_ACCEPT: "机器人自动通过的", MANUAL: "手动通过的", REQUESTED: "对方通过了我们的申请",
               UNKNOWN: "说不清是怎么加的"}
+
+
+
+def admin_notice(event: dict) -> str:
+    """The admin's message for a new friend: the remark (else the name, else the wxid's start) and how
+    they came.  The verify text is left out (it may hold a phone number)."""
+    remark = str(event.get("remark") or "").strip()
+    name = str(event.get("name") or "").strip()
+    who = remark or name or f"{str(event.get('wxid') or '')[:8]}…"
+    if remark and name and name != remark:
+        who = f"{remark}（微信名 {name}）"
+    how = event.get("how")
+    if how == REQUESTED:
+        return f"新好友：{who} 通过了我们的好友申请，可以跟进了。"
+    return f"新好友：{who}（{HOW_LABELS.get(how, HOW_LABELS[UNKNOWN])}）。"
 
 # Which line said so (kept as ``kind``): accepted on the PC / on the phone / 「你已添加了」 of another
 # wording / they accepted our request / only 「以上是打招呼的消息」.
