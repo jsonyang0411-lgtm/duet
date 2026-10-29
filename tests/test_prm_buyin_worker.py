@@ -17,7 +17,7 @@ import pytest
 from test_prm_platform_worker import DESIGNATED, fake_claude, node  # noqa: F401
 from test_prm_worker import CREATOR, bot, run_one, settings, worker, workspace  # noqa: F401
 
-from platform_fakes import DY_UID, rule
+from platform_fakes import DY_UID, catalog, dy_designated_preview, rule
 from src.prm import platforms
 from src.prm.service import BUYIN_CHAT, BUYIN_SYNC_CHAT
 from src.prm.store import BUYIN_TOOL
@@ -119,8 +119,11 @@ def test_a_mac_without_the_douyin_cli_runs_nothing(worker, bot, fake_claude, nod
 
 
 def test_a_buyin_draft_is_told_it_is_baiying_and_runs_no_preview_nor_upload(worker, bot, dy_mac):  # noqa: F811
+    # a Mac where the action's preview would run (the catalogue and the CLI's answer are there)
+    (dy_mac.workspace / "kb" / "products.json").write_text(json.dumps(catalog(), ensure_ascii=False), encoding="utf-8")
     dy_mac.node.rules([rule(["buyin", "im-inbox"], inbox(said("m0", "邀约卡片：帽子专场", "shop", 3600, "card"),
-                                                         said("m1", "佣金多少？")))])
+                                                         said("m1", "佣金多少？"))),
+                       rule(["promotion-strategy-create-designated"], dy_designated_preview(), execute=False)])
     poll_job(bot)
     run_one(worker, bot, dy_mac.settings)                                        # the round
     dy_mac.claude.answers(platform_action=DESIGNATED, attachments_to_send=["assets/brief.txt"],
@@ -131,8 +134,11 @@ def test_a_buyin_draft_is_told_it_is_baiying_and_runs_no_preview_nor_upload(work
     for expected in ("抖音百应", "不是微信", "店铺的微信在邀约卡片上", "不要填 platform_action", "小美的抖音",
                      "<creator_message>", "佣金多少？", "<operator_message>", "[卡片] 邀约卡片"):
         assert expected in prompt, expected
-    assert len(dy_mac.node.calls()) == 1                                         # only the read: no preview
+    assert [c["argv"][1:3] for c in dy_mac.node.calls()] == [["buyin", "im-inbox"]]   # only the read: no preview
     [packet] = [p for p in bot.prm.store.packets(("pending",)) if p["tool"] == BUYIN_TOOL]
+    sent_back = json.loads(bot.relay.store.get(packet["job_id"])["result_text"])
+    assert "platform" not in sent_back and sent_back["platform_action"]["action"] == DESIGNATED["action"]   # unrun
+    assert sent_back["attachments_to_send"] == [] and sent_back["attachments_named"] == ["assets/brief.txt"]
     assert packet["platform"] == {} and packet["attachments"] == [] and packet["text"] == "你好呀，佣金 20% 哦"
     assert "不带平台动作" in packet["reason"] and "不带附件" in packet["reason"]
     assert bot.relay.store.outfiles(packet["job_id"]) == []                     # nothing went back

@@ -514,6 +514,13 @@ class PrmStore:
                                       (f'%"key": "{key}"%',)).fetchall()
         return [d for d in (deal_view(dict(r)) for r in rows) if any(n["key"] == key for n in d["notices"])]
 
+    def deals_with_notice_prefix(self, prefix: str) -> list[dict]:
+        """The deals that have a notice whose key starts with ``prefix`` (the 百应 lines held back: ``buyin_held:``)."""
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM deals WHERE notices LIKE ? ORDER BY id",
+                                      (f'%"key": "{prefix}%',)).fetchall()
+        return [d for d in (deal_view(dict(r)) for r in rows) if any(str(n["key"]).startswith(prefix) for n in d["notices"])]
+
     def rewrite_notices(self, deal_id: int, rewrite: Callable[[str], str]) -> int:
         """Rewrite the words of a deal's notices (8.2 clean-up): their texts and the creator's lines and
         history a notice keeps; returns how many changed."""

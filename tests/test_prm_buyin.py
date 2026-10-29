@@ -176,7 +176,8 @@ def test_her_new_lines_are_recorded_masked_and_become_a_buyin_draft_job(bot, clo
     texts = [ev["detail"]["text"] for ev in reversed(buyin_events(bot))]
     assert len(texts) == 2 and PHONE not in "".join(texts) and "〈手机1〉" in texts[1]
     assert {ev["actor"] for ev in buyin_events(bot)} == {"creator", "operator"}
-    assert deal(bot)["last_message_at"] == clock.now - (INTERVAL + 1) - 60     # her line (when she wrote it): a sign of life
+    d = deal(bot)
+    assert d["last_message_at"] is None and d["updated_at"] == clock.now      # a sign of life, not her WeChat round
     # the poll job keeps only a summary of what it read
     kept = bot.relay.store.get(poll["id"])["result_text"]
     assert PHONE not in kept and "佣金" not in kept and json.loads(kept)["summary"]["drafts"] == 1
@@ -220,6 +221,7 @@ def test_copy_gives_the_full_numbers_back_and_is_written_down(bot, clock):
 def test_sent_in_baiying_by_hand_is_sent_and_takes_nothing_over(bot, clock):
     _, packet = buyin_draft(bot, clock)
     assert bot.prm.decide(packet["id"], "manual_sent", "你好呀，佣金 20%～") == {"ok": True, "status": "sent"}
+    assert bot.prm.store.buyin_thread(CID)["answered_upto"] == packet["meta"]["upto"]   # her lines are answered
     done = bot.prm.store.packet(packet["id"])
     assert (done["status"], done["outcome"], done["final_text"]) == ("sent", "sent_by_hand", "你好呀，佣金 20%～")
     assert done["sent_at"] == clock.now and done["edited"]
@@ -232,6 +234,14 @@ def test_sent_in_baiying_by_hand_is_sent_and_takes_nothing_over(bot, clock):
     # our own line in 百应 (an operator there) is no takeover either
     round_says(bot, clock, conv(line("m3", "你好呀，佣金 20%～", clock.now, "shop")))
     assert deal(bot)["mode"] == "copilot" and not jobs_of(bot, CREATOR)
+
+
+def test_her_lines_a_manual_send_answered_do_not_come_again(bot, clock):
+    _, packet = buyin_draft(bot, clock, text="佣金多少", mid="m1")
+    bot.prm.decide(packet["id"], "manual_sent")
+    round_says(bot, clock, conv(line("m2", "那寄样呢", clock.now)))             # (our line not read back yet)
+    newest = jobs_of(bot, BUYIN_CHAT + CID)[0]
+    assert newest["text"].endswith("那寄样呢") and "佣金多少" not in newest["text"]
 
 
 def test_the_bot_never_sends_it_and_it_cannot_be_marked_wrong(bot, clock):
@@ -277,6 +287,31 @@ def test_no_wechat_holding_reply_is_sent_for_a_buyin_draft(bot, clock):
     assert bot.prm.send_holding_replies() == 0 and bot.texts == []
 
 
+def test_a_buyin_line_brings_no_second_wechat_holding_reply(bot, clock):
+    bot.prm._holding_sec = 600
+    job = wechat_job(bot, "微信里问的")
+    bot.finish(job["id"], draft(message_kind="faq", reply_draft="微信的草稿"))
+    clock.now += 601
+    assert bot.prm.send_holding_replies() == 1 and len(bot.texts) == 1        # her WeChat round: once
+    round_says(bot, clock, conv(line("m1", "百应里又问了一句", clock.now)))
+    clock.now += 601
+    bot.prm.tick()
+    assert len(bot.texts) == 1                                                  # 百应 is no new WeChat round
+
+
+def test_the_sender_thread_never_sends_a_buyin_draft_even_if_one_were_approved(bot, clock, monkeypatch):
+    _, packet = buyin_draft(bot, clock)
+    assert bot.prm.store.move(packet["id"], ("pending",), "approved", decided_at=clock.now)
+    real_deliver = bot.prm._deliver
+    monkeypatch.setattr(bot.prm, "_deliver", lambda p: pytest.fail("send_approved handed a 百应 draft on"))
+    assert bot.prm.send_approved() == 0
+    assert bot.prm.store.packet(packet["id"])["status"] == "pending" and bot.texts == []
+    # and _deliver itself refuses one (the second guard)
+    assert bot.prm.store.move(packet["id"], ("pending",), "sending")
+    assert real_deliver(bot.prm.store.packet(packet["id"])) == 0
+    assert bot.prm.store.packet(packet["id"])["status"] == "pending" and bot.texts == [] and bot.files == []
+
+
 def test_platform_alerts_and_the_outbound_record_leave_buyin_drafts_out(bot, clock):
     _, packet = buyin_draft(bot, clock)
     d = deal(bot)
@@ -320,10 +355,51 @@ def test_a_newer_round_cancels_the_queued_job_and_another_conversation_is_its_ow
     assert bot.relay.store.get(first["id"])["status"] == "cancelled"
     [latest] = [j for j in jobs_of(bot, BUYIN_CHAT + CID) if j["status"] == "pending"]
     assert "第一句" in latest["text"] and "第二句" in latest["text"]
-    a = mac_drafts(bot, latest)
     [other] = jobs_of(bot, BUYIN_CHAT + "conv_8002")
     b2 = mac_drafts(bot, other)
-    assert a["status"] == "pending" and b2["status"] == "pending"            # two conversations, two drafts
+    a = mac_drafts(bot, latest)                                              # (drafted after the other conversation's)
+    assert bot.prm.store.packet(a["id"])["status"] == "pending"
+    assert bot.prm.store.packet(b2["id"])["status"] == "pending"              # two conversations, two drafts
+    # her next line in conversation A: only A's draft is out of date
+    round_says(bot, clock, conv(line("m3", "第三句", clock.now)))
+    [newest] = [j for j in jobs_of(bot, BUYIN_CHAT + CID) if j["status"] == "pending"]
+    a2 = mac_drafts(bot, newest)
+    assert bot.prm.store.packet(a["id"])["status"] == "superseded" and a2["status"] == "pending"
+    assert bot.prm.store.packet(b2["id"])["status"] == "pending"
+
+
+def test_the_buyin_lane_supersedes_only_the_conversation_it_is_given():
+    store = PrmStore(":memory:")
+    party = store.add_party(CREATOR, "小美")
+    d = store.deal_of(party["id"])
+
+    def add(chat, job, tool=BUYIN_TOOL):
+        return store.add_packet(deal_id=d["id"], party_id=party["id"], job_id=job, chat_id=chat, kind="faq", text="x",
+                                attachments=[], intent="", slots={}, stage_proposal="", needs_attention=False,
+                                reason="", tool=tool)
+
+    a_old, b, wechat, a_new = add(BUYIN_CHAT + "a", 1), add(BUYIN_CHAT + "b", 2), add(CREATOR, 3, "message.send"), \
+        add(BUYIN_CHAT + "a", 4)
+    assert store.supersede(d["id"], keep=a_new, lane="buyin", chat_id=BUYIN_CHAT + "a") == 1
+    assert [store.packet(i)["status"] for i in (a_old, b, wechat, a_new)] == ["superseded", "pending", "pending", "pending"]
+    assert store.supersede(d["id"], lane="reply") == 1                         # the WeChat reply lane: WeChat only
+    assert [store.packet(i)["status"] for i in (b, wechat, a_new)] == ["pending", "superseded", "pending"]
+
+
+def test_an_older_draft_coming_back_after_the_newer_one_never_puts_it_out_of_date(bot, clock):
+    round_says(bot, clock, conv(line("m1", "第一句", clock.now)))
+    [first] = jobs_of(bot, BUYIN_CHAT + CID)
+    claim(bot, first["id"])                                                    # the Mac is drafting the first
+    round_says(bot, clock, conv(line("m2", "第二句", clock.now)))
+    [second] = [j for j in jobs_of(bot, BUYIN_CHAT + CID) if j["id"] != first["id"]]
+    newer = mac_drafts(bot, second, reply_draft="两句都回了")                 # the newer one comes back first
+    older = mac_drafts(bot, first, reply_draft="只回了第一句")
+    assert older["status"] == "superseded"
+    assert bot.prm.store.packet(newer["id"])["status"] == "pending"
+    bot.prm.decide(newer["id"], "manual_sent")                                 # decided: the older one is still none
+    round_says(bot, clock, conv(line("m3", "第三句", clock.now)))
+    [third] = [j for j in jobs_of(bot, BUYIN_CHAT + CID) if j["status"] == "pending"]
+    assert "第一句" not in third["text"] and "第二句" not in third["text"]      # her answered lines stay answered
 
 
 def test_a_running_job_that_comes_back_after_a_newer_one_is_out_of_date(bot, clock):
@@ -335,19 +411,55 @@ def test_a_running_job_that_comes_back_after_a_newer_one_is_out_of_date(bot, clo
     assert bot.prm.store.packet_for_job(first["id"])["status"] == "superseded"
 
 
-def test_while_a_person_has_the_deal_her_buyin_lines_are_only_recorded(bot, clock):
+def held(b):
+    return [n for n in deal(b)["notices"] if n["key"] == f"buyin_held:{CID}"]
+
+
+def test_while_a_person_has_the_deal_her_buyin_lines_wait_with_a_notice_and_are_drafted_after(bot, clock):
     d = deal(bot)
-    assert bot.prm.deal_action("mode", {"deal_id": d["id"], "mode": "human"})["ok"]
-    round_says(bot, clock, conv(line("m1", "接管时在百应问的", clock.now)))
+    assert bot.prm.deal_action("mode", {"deal_id": d["id"], "mode": "paused"})["ok"]
+    round_says(bot, clock, conv(line("m1", "暂停时在百应问的", clock.now)))
     assert jobs_of(bot, BUYIN_CHAT + CID) == [] and len(buyin_events(bot)) == 1
+    [notice] = held(bot)
+    assert "暂停期间她在百应私信里发了 1 条消息" in notice["text"] and "恢复副驾驶后会起草" in deal(bot)["attention"]
+    for _ in range(3):
+        clock.now += 5
+        bot.prm.tick()                                                          # paused: still nothing
+    assert jobs_of(bot, BUYIN_CHAT + CID) == [] and held(bot)
     bot.prm.deal_action("mode", {"deal_id": d["id"], "mode": "copilot"})
-    round_says(bot, clock, conv(line("m2", "接管结束后又问", clock.now)))
+    clock.now += 5
+    bot.prm.tick()                                                              # back in copilot: one draft
     [job] = jobs_of(bot, BUYIN_CHAT + CID)
-    assert "接管时在百应问的" in job["text"] and "接管结束后又问" in job["text"]
+    assert "暂停时在百应问的" in job["text"] and held(bot) == []
+    clock.now += 5
+    bot.prm.tick()
+    assert len(jobs_of(bot, BUYIN_CHAT + CID)) == 1                              # once
     # a draft that comes back while a person has the deal again (a WeChat takeover too) is held back
     bot.prm.on_own_message(bot.msg("运营亲手回的"))
     assert deal(bot)["mode"] == "human"
     assert mac_drafts(bot, job)["status"] == "superseded"
+
+
+def test_a_wechat_takeover_holds_her_buyin_question_until_it_runs_out(bot, clock):
+    bot.prm.on_own_message(bot.msg("运营在微信里亲手回的"))                     # 120 minutes a person's
+    round_says(bot, clock, conv(line("q1", "佣金多少？", clock.now)))
+    assert jobs_of(bot, BUYIN_CHAT + CID) == [] and "人工接管期间她在百应私信里发了 1 条消息" in held(bot)[0]["text"]
+    clock.now += bot.prm._takeover_sec + 1
+    bot.prm.tick()                                                              # the takeover ran out
+    [job] = jobs_of(bot, BUYIN_CHAT + CID)
+    assert "佣金多少？" in job["text"] and held(bot) == [] and deal(bot)["mode"] == "copilot"
+
+
+def test_held_lines_answered_in_baiying_meanwhile_are_not_drafted(bot, clock):
+    d = deal(bot)
+    bot.prm.deal_action("mode", {"deal_id": d["id"], "mode": "human"})
+    round_says(bot, clock, conv(line("m1", "接管时问的", clock.now)))
+    round_says(bot, clock, conv(line("m2", "运营在百应里回了", clock.now, "shop")))
+    assert held(bot) == []                                                      # answered: the notice goes
+    bot.prm.deal_action("mode", {"deal_id": d["id"], "mode": "copilot"})
+    clock.now += 5
+    bot.prm.tick()
+    assert jobs_of(bot, BUYIN_CHAT + CID) == []
 
 
 def test_her_wechat_recall_does_not_hold_buyin_drafts_and_a_buyin_decision_does_not_see_to_it(bot, clock):
@@ -411,9 +523,43 @@ def test_each_message_is_taken_once_by_its_id(bot, clock):
     assert len(buyin_events(bot)) == 1 and len(jobs_of(bot, BUYIN_CHAT + CID)) == 1
 
 
-def test_her_lines_read_a_day_late_are_recorded_not_drafted(bot, clock):
+def test_her_lines_read_a_day_late_are_not_drafted_and_the_deal_says_so(bot, clock):
     round_says(bot, clock, conv(line("old", "上周问的", clock.now - BUYIN_MAX_AGE_SEC - 3600)))
     assert jobs_of(bot, BUYIN_CHAT + CID) == [] and len(buyin_events(bot)) == 1
+    [notice] = [n for n in deal(bot)["notices"] if n["key"] == f"buyin_old:{CID}"]
+    assert "1 条消息读到时已经过了 24 小时" in notice["text"] and "到百应里看" in deal(bot)["attention"]
+    # her new line is drafted (the old one as its history), the notice stays until she is answered
+    round_says(bot, clock, conv(line("new", "在吗", clock.now)))
+    [job] = jobs_of(bot, BUYIN_CHAT + CID)
+    assert "在吗" in job["text"] and "上周问的" not in job["text"] and "上周问的" in json.dumps(json.loads(job["meta"]),
+                                                                                         ensure_ascii=False)
+    packet = mac_drafts(bot, job)
+    assert any(n["key"] == f"buyin_old:{CID}" for n in deal(bot)["notices"])
+    bot.prm.decide(packet["id"], "manual_sent")
+    assert not any(n["key"].startswith("buyin_") for n in deal(bot)["notices"])
+
+
+def test_a_conversation_whose_job_could_not_be_queued_comes_again_with_the_next_round(bot, clock, monkeypatch):
+    real = bot.relay.submit
+
+    def broken(chat, *a, **k):
+        if chat.startswith(BUYIN_CHAT):
+            raise RuntimeError("the relay database is locked")
+        return real(chat, *a, **k)
+
+    monkeypatch.setattr(bot.relay, "submit", broken)
+    round_says(bot, clock, conv(line("m1", "这句不能丢", clock.now)), cursor={"t": "after-m1"})
+    assert jobs_of(bot, BUYIN_CHAT + CID) == []
+    assert "m1" not in (bot.prm.store.buyin_thread(CID) or {}).get("seen", [])
+    assert bot.prm.store.meta_value("buyin_cursor") is None                   # the same is read again
+    monkeypatch.setattr(bot.relay, "submit", real)
+    poll = next_round(bot, clock)
+    assert json.loads(poll["meta"])["cursor"] is None
+    mac_reads(bot, poll, conv(line("m1", "这句不能丢", clock.now - 700)), cursor={"t": "after-m1"})
+    [job] = jobs_of(bot, BUYIN_CHAT + CID)
+    assert "这句不能丢" in job["text"] and len(buyin_events(bot)) == 1          # recorded once
+    assert "m1" in bot.prm.store.buyin_thread(CID)["seen"]
+    assert json.loads(bot.prm.store.meta_value("buyin_cursor")) == {"t": "after-m1"}
 
 
 # ── when it cannot be read ───────────────────────────────────────────────
@@ -450,6 +596,37 @@ def test_an_old_worker_a_login_lapse_a_risk_wall_and_hiccups(bot, clock):
         assert bot.prm.snapshot()["buyin"]["status"] is None                    # a hiccup is not said at once
     bot.prm._on_buyin_inbox({"id": 1001, "status": "done", "result_text": "{}"}, {})
     assert "连续 3 次" in bot.prm.snapshot()["buyin"]["status"]["text"]
+
+
+def test_a_cancelled_or_lost_inbox_job_keeps_none_of_the_words(bot, clock):
+    job = next_round(bot, clock)
+    claim(bot, job["id"])
+    assert bot.relay.store.cancel(job["id"]) == "requested"                    # cancelled while the Mac finishes
+    raw = platforms.im_result(conversations=[platforms.im_conversation(
+        conv(line("u1", f"没登记的人 {PHONE}", clock.now), cid="conv_x", uid="5199999999999999"))])
+    assert bot.relay.finish(job["id"], {"ok": True, "text": json.dumps(raw, ensure_ascii=False), "duration_s": 1})
+    bot.relay.tick()
+    kept = bot.relay.store.get(job["id"])
+    assert kept["status"] == "cancelled" and PHONE not in kept["result_text"] and "没登记" not in kept["result_text"]
+    assert bot.prm.store.meta_value("buyin_cursor") is None and bot.prm.store.buyin_thread("conv_x") is None
+
+
+def test_an_inbox_answer_left_as_it_came_is_cut_to_a_summary_by_the_hourly_clean_up(bot, clock):
+    job = next_round(bot, clock)
+    raw = json.dumps(platforms.im_result(conversations=[platforms.im_conversation(
+        conv(line("u1", f"留下来的原话 {PHONE}", clock.now)))]), ensure_ascii=False)
+    with bot.relay.store._lock:                                                 # (a bot from before the rule)
+        bot.relay.store._conn.execute("UPDATE relay_jobs SET status = 'done', result_text = ?, delivered = 1"
+                                      " WHERE id = ?", (raw, job["id"]))
+        bot.relay.store._conn.commit()
+    pending = next_round(bot, clock)                                            # not handed on yet: left alone
+    with bot.relay.store._lock:
+        bot.relay.store._conn.execute("UPDATE relay_jobs SET status = 'done', result_text = ?, delivered = 0"
+                                      " WHERE id = ?", (raw, pending["id"]))
+        bot.relay.store._conn.commit()
+    bot.prm.purge_due()
+    assert PHONE not in bot.relay.store.get(job["id"])["result_text"]
+    assert bot.relay.store.get(pending["id"])["result_text"] == raw
 
 
 # ── what goes wrong with a draft, and the 90-day clean-up ────────────────

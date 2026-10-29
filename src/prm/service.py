@@ -699,6 +699,10 @@ class PrmService:
                 logger.info("PRM: %d deal(s) signed for while the bot was stopped: their 专属佣金 step asked for", started)
         except Exception:
             logger.exception("PRM: the deals signed for while the bot was stopped could not be looked at")
+        try:
+            self._buyin_scrub_jobs()               # (a 百应 inbox answer kept as it came, by a slip before: a summary)
+        except Exception:
+            logger.exception("PRM: the 百应 inbox jobs could not be looked at")
         self._thread = threading.Thread(target=self._loop, name="prm-sender", daemon=True)
         self._thread.start()
 
@@ -2946,10 +2950,15 @@ class PrmService:
         """The Mac's answer to a 百应 inbox job (``platforms.check_im_result``): each conversation
         (``_buyin_conversation``), the cursor for the next round (only when the round went through), how the round
         went (``_buyin_round_end``); the conversations of nobody on the list quiet for BUYIN_UNMATCHED_DAYS are
-        forgotten.  A job lost or cancelled waits for the next round; one that failed is a failed round.  Then the
-        job keeps only a summary of its answer (the creators' words as they wrote them were in it)."""
+        forgotten.  A job lost or cancelled waits for the next round (the cursor stays: it reads the same again); one
+        that failed is a failed round.  Whatever the status, the job then keeps only a summary of its answer (the
+        creators' words as they wrote them were in it, nobody's on the list too; a job cancelled while the Mac was
+        finishing it has its full answer: review 2026-10-29).  A conversation that could not be taken in (its draft
+        job could not be queued, say) is not marked seen and the cursor stays, so the next round has it again."""
         status = job["status"]
         if status not in ("done", "failed"):
+            self._relay.store.replace_result(job["id"], json.dumps(
+                {"op": BUYIN_OP, "summary": None, "status": status}, ensure_ascii=False))
             return True
         now = self._clock()
         result, stopped = None, None
@@ -2961,7 +2970,7 @@ class PrmService:
         else:
             why = _job_error(job)
             stopped = {"verdict": "old_worker" if "达人编号" in why else "error", "exit_code": None, "message": why}
-        summary = {"conversations": 0, "messages": 0, "drafts": 0, "recorded": 0, "unmatched": 0}
+        summary = {"conversations": 0, "messages": 0, "drafts": 0, "recorded": 0, "unmatched": 0, "failed": 0}
         with self._buyin_lock:
             if result is not None:
                 index = self._buyin_index()
@@ -2969,9 +2978,10 @@ class PrmService:
                     try:
                         self._buyin_conversation(conv, index, now, summary)
                     except Exception:                  # one conversation's trouble does not stop the others
-                        logger.exception("PRM: a 百应 conversation could not be taken in")
+                        summary["failed"] += 1
+                        logger.exception("PRM: a 百应 conversation could not be taken in; read again next round")
                 stopped = result["stopped"]
-                if stopped is None and result["cursor"] is not None:
+                if stopped is None and not summary["failed"] and result["cursor"] is not None:
                     self._store.set_meta_value("buyin_cursor", json.dumps(result["cursor"], ensure_ascii=False))
             self._buyin_round_end(stopped, now)
             self._store.drop_buyin_threads(unmatched_before=now - BUYIN_UNMATCHED_DAYS * 86400)
@@ -3032,10 +3042,13 @@ class PrmService:
     def _buyin_conversation(self, conv: dict, index: dict, now: float, summary: dict) -> None:
         """One conversation of a 百应 round (under ``_buyin_lock``): only the messages it has not seen (by id).  A
         registered creator's (``_buyin_party``): every new line, hers and ours (an operator in 百应: no takeover, it
-        is no WeChat line), is recorded masked as a ``buyin_message`` event, hers count as a sign of life, and new
-        lines of hers become a draft job (``_buyin_draft_job``).  Nobody's on the list: no party is made (a wxid
-        cannot be made up, and the 达人名单 would get it); only her nickname, how many of her lines wait since our
-        last one and when, for the 待审批 page's line (none of her words is kept)."""
+        is no WeChat line), is recorded masked as a ``buyin_message`` event (once per message id), hers count as a
+        sign of life for the 8.2 clean-up (the deal's ``updated_at``; never its ``last_message_at``: that is her
+        latest WeChat line, the round of the WeChat holding reply, review 2026-10-29), and new lines of hers become a
+        draft job (``_buyin_draft_job``).  The messages count as seen only once that is done (a job that could not be
+        queued raises: they come again with the next round).  Nobody's on the list: no party is made (a wxid cannot
+        be made up, and the 达人名单 would get it); only her nickname, how many of her lines wait since our last one
+        and when, for the 待审批 page's line (none of her words is kept)."""
         cid = conv["conversation_id"]
         creator = conv["creator"]
         thread = self._store.buyin_thread(cid) or {}
@@ -3062,16 +3075,21 @@ class PrmService:
                 summary["unmatched"] += 1
             return
         deal = self._store.deal_of(party["id"], now)
+        recorded = {d.get("id") for d in self._buyin_lines(deal["id"], cid)}
         for m, at in sorted(stamp, key=lambda pair: pair[1]):
+            if m["id"] in recorded:
+                continue                               # (recorded by a round whose job could not be queued)
             text = self._mask(party["id"], f"[{_clock_text(at)}] {self._buyin_text(m)}", now)
             self._store.add_event(deal["id"], party["id"], "buyin_message", {
                 "conversation": cid, "id": m["id"], "from": m["from"], "kind": m["kind"], "text": text, "at": at},
                 actor="creator" if m["from"] == "creator" else "operator", now=now)
         if hers:
-            self._store.update_deal(deal["id"], now, last_message_at=_later(deal, max(hers)))
-        self._store.save_buyin_thread(cid, now, party_id=party["id"], deal_id=deal["id"], unanswered=0, **fields)
+            self._store.update_deal(deal["id"], now)   # a sign of life (updated_at), not her WeChat round
+        answered = max(float(fields["last_shop_at"] or 0), float(thread.get("answered_upto") or 0))
         if hers:
-            self._buyin_draft_job(party, deal, cid, now, summary)
+            self._buyin_draft_job(party, deal, cid, now, summary, answered=answered, nickname=fields["nickname"])
+        self._store.save_buyin_thread(cid, now, party_id=party["id"], deal_id=deal["id"], unanswered=0, **fields)
+        self._buyin_notices_answered(deal["id"], cid, answered, now)
 
     def _buyin_lines(self, deal_id: int, cid: str) -> list:
         """The conversation's lines the deal recorded (``buyin_message`` events: masked), oldest first."""
@@ -3085,24 +3103,39 @@ class PrmService:
                  for ev in self._store.events(deal_id, limit=None, kinds=("buyin_message",))}
         return {c for c in named | {t["conversation_id"] for t in self._store.buyin_threads(deal_id=deal_id)} if c}
 
-    def _buyin_draft_job(self, party: dict, deal: dict, cid: str, now: float, summary: dict) -> Optional[int]:
-        """The draft job of a registered creator's new 百应 lines (under ``_buyin_lock``): her lines not answered yet
-        (after our last line in that conversation and after the lines of a 百应 draft an operator decided on), not
-        older than BUYIN_MAX_AGE_SEC, go as her message; the conversation before them as its history.  Its own chat
+    def _buyin_draft_job(self, party: dict, deal: dict, cid: str, now: float, summary: dict, *, answered: float,
+                         nickname: str = "") -> Optional[int]:
+        """The draft job of a registered creator's 百应 lines not answered yet (under ``_buyin_lock``): after
+        ``answered`` (our last line in that conversation, or the lines of a 百应 draft an operator decided on).  Those
+        not older than BUYIN_MAX_AGE_SEC go as her message, the conversation before them as its history.  Its own chat
         (``BUYIN_CHAT`` + the conversation id): no WeChat job takes them in nor they a WeChat line; a queued job of the
-        same conversation is cancelled (its lines are in this one).  While a person has the deal (人工接管 / 暂停, a
-        WeChat takeover included) her 百应 lines are only recorded: the next draft after it, when she writes in 百应
-        again, has them.  None when no job was made."""
+        same conversation is cancelled (its lines are in this one).  Nothing is lost silently (review 2026-10-29): her
+        lines read too late have the deal's notice ``buyin_old:<conversation>``; while a person has the deal (人工接管 /
+        暂停, a WeChat takeover included) they are not drafted and ``buyin_held:<conversation>`` says so, until the deal
+        is back in copilot mode (``sweep_buyin_held`` drafts them then) or they are answered (``_buyin_notices_answered``).
+        None when no job was made."""
+        lines = self._buyin_lines(deal["id"], cid)
+        waiting = [d for d in lines if d.get("from") == "creator" and float(d.get("at") or 0) > answered]
+        if not waiting:
+            summary["recorded"] += 1
+            return None
+        hers = [d for d in waiting if now - float(d.get("at") or 0) <= BUYIN_MAX_AGE_SEC]
+        stale = [d for d in waiting if d not in hers]
+        if stale:
+            self._store.set_notice(deal["id"], f"buyin_old:{cid}", (
+                f"她在百应私信里有 {len(stale)} 条消息读到时已经过了 {BUYIN_MAX_AGE_SEC // 3600} 小时（最早 "
+                f"{_clock_text(min(float(d['at']) for d in stale))}），没有起草：请到百应里看、在百应里回"), now,
+                conversation=cid, upto=max(float(d["at"]) for d in stale))
         mode = self._mode(deal, now)
         if mode != COPILOT:
             summary["recorded"] += 1
-            logger.info("PRM: party %d wrote in 百应 while the deal is %s; recorded, not drafted", party["id"], mode)
+            self._store.set_notice(deal["id"], f"buyin_held:{cid}", (
+                f"{MODES.get(mode, mode)}期间她在百应私信里发了 {len(waiting)} 条消息（最早 "
+                f"{_clock_text(min(float(d['at']) for d in waiting))}），没有起草：恢复副驾驶后会起草一份，急的话直接到百应里回"),
+                now, conversation=cid, upto=max(float(d["at"]) for d in waiting))
+            logger.info("PRM: party %d wrote in 百应 while the deal is %s; recorded, not drafted (the deal says so)",
+                        party["id"], mode)
             return None
-        thread = self._store.buyin_thread(cid) or {}
-        answered = max(float(thread.get("last_shop_at") or 0), float(thread.get("answered_upto") or 0))
-        lines = self._buyin_lines(deal["id"], cid)
-        hers = [d for d in lines if d.get("from") == "creator" and float(d.get("at") or 0) > answered
-                and now - float(d.get("at") or 0) <= BUYIN_MAX_AGE_SEC]
         if not hers:
             summary["recorded"] += 1
             return None
@@ -3111,7 +3144,7 @@ class PrmService:
         history = [{"who": "operator" if d.get("from") == "shop" else "creator", "text": str(d.get("text") or "")}
                    for d in lines if d.get("id") not in ids and float(d.get("at") or 0) <= upto][-BUYIN_HISTORY:]
         meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"], "channel": BUYIN_CHANNEL,
-                "conversation": cid, "buyin_name": thread.get("nickname") or "", "upto": upto, "lines": len(hers),
+                "conversation": cid, "buyin_name": nickname, "upto": upto, "lines": len(hers),
                 **({"history": history} if history else {})}
         chat = BUYIN_CHAT + cid
         older = self._relay.store.latest_open(chat, drafts_only=True)
@@ -3119,9 +3152,68 @@ class PrmService:
             self._relay.store.cancel_if_pending(older["id"], now)
         _, job_id = self._relay.submit(chat, chat, "\n".join(str(d.get("text") or "") for d in hers), kind=PRM,
                                        meta=meta, fresh=True, input_closed=True)
+        self._store.drop_notices(deal["id"], lambda n: n["key"] == f"buyin_held:{cid}", now)
         summary["drafts"] += 1
         logger.info("PRM: party %d's %d new 百应 line(s) -> job #%d", party["id"], len(hers), job_id)
         return job_id
+
+    def _buyin_notices_answered(self, deal_id: int, cid: str, answered: float, now: float) -> None:
+        """Her 百应 lines up to ``answered`` are answered (our line in 百应, an operator's decision on a 百应 draft): the
+        deal's notices of that conversation's lines held back or read too late that they cover go."""
+        keys = (f"buyin_held:{cid}", f"buyin_old:{cid}")
+        self._store.drop_notices(deal_id, lambda n: n["key"] in keys and float(n.get("upto") or 0) <= answered, now)
+
+    def sweep_buyin_held(self) -> int:
+        """Her 百应 lines held back while a person had the deal (``buyin_held:<conversation>``): once the deal is back in
+        copilot mode (the takeover ran out, an operator switched it back) and she is on the list, one draft job of the
+        lines still not answered (``_buyin_draft_job``); nothing left to draft (answered meanwhile, or all too old: their
+        own notice), the notice goes.  Off with the switch.  Returns how many jobs were queued."""
+        if self._buyin_sec <= 0:
+            return 0
+        now = self._clock()
+        asked = 0
+        for deal in self._store.deals_with_notice_prefix("buyin_held:"):
+            party = self._store.party(deal["party_id"])
+            if party is None or not party.get("active") or self._mode(deal, now) != COPILOT:
+                continue
+            for notice in [n for n in deal["notices"] if str(n["key"]).startswith("buyin_held:")]:
+                cid = str(notice.get("conversation") or notice["key"].split(":", 1)[1])
+                try:
+                    with self._buyin_lock:
+                        thread = self._store.buyin_thread(cid) or {}
+                        answered = max(float(thread.get("last_shop_at") or 0), float(thread.get("answered_upto") or 0))
+                        summary = {"drafts": 0, "recorded": 0}
+                        job_id = self._buyin_draft_job(party, self._store.deal(deal["id"]) or deal, cid, now, summary,
+                                                       answered=answered, nickname=thread.get("nickname") or "")
+                        if job_id is None:
+                            self._store.drop_notices(deal["id"], lambda n: n["key"] == notice["key"], now)
+                        else:
+                            asked += 1
+                except Exception:
+                    logger.exception("PRM: the 百应 lines held back in deal %d could not be drafted; tried again", deal["id"])
+        if asked:
+            logger.info("PRM: %d 百应 conversation(s) held back while a person had the deal: drafted now", asked)
+        return asked
+
+    def _buyin_scrub_jobs(self) -> int:
+        """A 百应 inbox job handled already that still holds the Mac's answer as it came (a bot from before this
+        rule, a job cut off): only a summary stays (the clean-up after any slip; ``purge_due`` and ``start``).  A job
+        not handed to ``on_result`` yet is left alone.  Returns how many."""
+        done = 0
+        for job in self._relay.store.recent(BUYIN_SYNC_CHAT, limit=500):
+            if job["status"] in ("pending", "running") or not job.get("delivered"):
+                continue
+            try:
+                value = json.loads(job.get("result_text") or "")
+            except ValueError:
+                value = None
+            if isinstance(value, dict) and "conversations" in value:
+                self._relay.store.replace_result(job["id"], json.dumps(
+                    {"op": BUYIN_OP, "summary": None, "status": job["status"]}, ensure_ascii=False))
+                done += 1
+        if done:
+            logger.info("PRM: %d 百应 inbox job(s) still held the answer as it came; only a summary is kept now", done)
+        return done
 
     def _buyin_round_end(self, stopped: Optional[dict], now: float) -> None:
         """How the 百应 round went (``buyin_status`` in the database, what the 待审批 page says).  Through: nothing to
@@ -3197,12 +3289,16 @@ class PrmService:
                          + "，需要的话到百应里自己发")
         mode = self._mode(deal, now)
         newer = self._relay.store.latest_open(job["chat_id"], drafts_only=True)
+        # a newer job of the conversation came back first (its draft is pending, or decided): this one has fewer of her
+        # lines and never puts that one out of date (review 2026-10-29)
+        drafted = any(p["chat_id"] == job["chat_id"] and int(p.get("job_id") or 0) > int(job["id"])
+                      for p in self._store.deal_packets(deal_id, tools=(BUYIN_TOOL,)))
         if not draft.reply_draft:
             state = NO_REPLY
         elif mode != COPILOT:
             state = SUPERSEDED                         # a person has the deal (a WeChat takeover too): held back
-        elif newer is not None and newer["id"] > job["id"]:
-            state = SUPERSEDED                         # she wrote again in 百应: a newer draft is coming
+        elif (newer is not None and newer["id"] > job["id"]) or drafted:
+            state = SUPERSEDED                         # she wrote again in 百应: a newer draft is coming, or here
         else:
             state = PENDING
         packet_meta = {"channel": BUYIN_CHANNEL, "lane": LANE_BUYIN, "conversation": cid,
@@ -3236,6 +3332,9 @@ class PrmService:
             thread = self._store.buyin_thread(cid)
             if thread is not None and float(thread.get("answered_upto") or 0) < upto:
                 self._store.save_buyin_thread(cid, now, answered_upto=upto)
+            if thread is not None:
+                self._buyin_notices_answered(packet["deal_id"], cid, max(upto, float(thread.get("last_shop_at") or 0)),
+                                             now)
 
     def _decide_buyin(self, packet: dict, action: str, text: Optional[str], now: float) -> dict:
         """An operator's choice on a 百应 draft (``decide``): copy (the reply with the full numbers back, for 百应: each
@@ -3343,6 +3442,7 @@ class PrmService:
         self.sweep_deliveries()
         self.sweep_sample_status()
         self.sweep_buyin()
+        self.sweep_buyin_held()
         now = self._clock()
         if now - self._last_retention >= RETENTION_CHECK_SEC:
             self._last_retention = now
@@ -3366,7 +3466,13 @@ class PrmService:
         return sent
 
     def _deliver(self, packet: dict) -> int:
-        """Text first, then the files; stops at the first failure (never sent twice)."""
+        """Text first, then the files; stops at the first failure (never sent twice).  A 百应 draft is never sent
+        (``send_approved`` keeps it back already; this is the second guard): back to waiting, nothing sent."""
+        if is_buyin(packet):
+            self._store.move(packet["id"], (SENDING, APPROVED), PENDING, decided_at=None)
+            logger.warning("PRM: packet %d is a 百应 draft: the bot does not send it (an operator does, in 百应)",
+                           packet["id"])
+            return 0
         tokens = self._store.tokens(packet["party_id"])
         final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
         text = pii.unmask(final, tokens)
@@ -3494,6 +3600,10 @@ class PrmService:
         """Clear the details of every deal done ``PRM_RETENTION_DAYS`` ago (8.2, ``retention.purge_due_at``)."""
         now = self._clock()
         done = 0
+        try:
+            self._buyin_scrub_jobs()
+        except Exception:
+            logger.exception("PRM: the 百应 inbox jobs could not be looked at; tried again later")
         for deal in self._store.deals_to_purge(now, self._retention_days):
             try:
                 self.purge(deal, now)
