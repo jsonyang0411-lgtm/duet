@@ -81,7 +81,7 @@ RISK_MARKERS = (
     "帐号存在异常", "账号存在异常", "帐号异常", "账号异常", "被限制", "限制使用",
     "暂时无法添加", "无法添加朋友", "安全风险", "被盗风险", "已达上限", "达到上限",
 )
-ADD_DIALOG_TITLES = ("添加朋友", "Add Friend")   # title of WeChat 4.0's add-friend window (read on a real machine);
+ADD_DIALOG_TITLES = ("添加朋友", "Add Friend", "微信", "Weixin")   # title of WeChat 4.0's add-friend window (read on a real machine);
                                                 # exact, because the application window is "申请添加朋友"
 # WeChat 4.0's other dialogs, matched exactly (a chat opened in a window of its own has the same process and
 # class, and its title is the chat's name: 「达人朋友群」, 「小朋友」 must never be taken for one).
@@ -189,6 +189,34 @@ def print_main_window(hwnd: int):
     return print_window(hwnd)
 
 
+def _safe_ensure_default_desktop():
+    try:
+        from .keyboard import _ensure_default_desktop
+        _ensure_default_desktop()
+    except Exception:
+        pass
+
+
+def post_click_window(hwnd: int, screen_x: int, screen_y: int) -> bool:
+    """Send WM_LBUTTONDOWN and WM_LBUTTONUP directly to hwnd's message queue without moving cursor."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import win32con, win32gui
+        _safe_ensure_default_desktop()
+        if not (win32gui.IsWindow(hwnd) and win32gui.IsWindowVisible(hwnd)):
+            return False
+        cx, cy = win32gui.ScreenToClient(hwnd, (int(screen_x), int(screen_y)))
+        lParam = (cy << 16) | (cx & 0xFFFF)
+        win32gui.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lParam)
+        time.sleep(0.04)
+        win32gui.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, lParam)
+        return True
+    except Exception as e:
+        logger.debug("post_click_window failed for HWND=%s (%s, %s): %s", hwnd, screen_x, screen_y, e)
+        return False
+
+
 def window_rect(hwnd: int) -> tuple[int, int, int, int]:
     """The window rectangle in screen pixels (Windows only)."""
     import win32gui
@@ -238,10 +266,12 @@ class FriendManager:
         grab_window: Callable[[int], object] = print_main_window,
         on_accepted: Callable[[float, str], None] | None = None,
         chat_names: Callable[[], Iterable[str]] | None = None,
+        idle_gate=None,
     ):
         self._window = window_controller
         self._ocr = ocr_engine
         self._ui_lock = ui_lock if ui_lock is not None else threading.Lock()
+        self._idle_gate = idle_gate
         self._clicker = clicker or click_screen
         self._rect_of = rect_of
         self._sleep = sleeper
@@ -284,7 +314,13 @@ class FriendManager:
         The window is put back the way it was found (minimized / hidden) and the focus goes back
         to the window the user was in.
         """
+        _safe_ensure_default_desktop()
         with self._ui_lock:
+            if getattr(self, "_idle_gate", None) is not None:
+                try:
+                    self._idle_gate.wait()
+                except Exception:
+                    pass
             window = self._window
             hwnd = window.find_hwnd(force=True) if window is not None else None
             if not hwnd:
@@ -368,6 +404,7 @@ class FriendManager:
         otherwise a window of WeChat's process will do: a click only moves the focus, the keys after it are
         checked exactly).  ``required``: a click that is not delivered stops the action; otherwise it is reported."""
         self._foreground(hwnd, exact)
+        post_click_window(hwnd, x, y)
         delivered = bool(self._clicker(x, y))
         if not delivered and required:
             raise _Abort("the click was not delivered")
@@ -382,6 +419,7 @@ class FriendManager:
             raise _Abort(f"the window position is unknown ({e})") from e
         x = left + int(rx * max(1, right - left))
         y = top + int(ry * max(1, bottom - top))
+        post_click_window(hwnd, x, y)
         if not self._clicker(x, y):
             raise _Abort("the click was not delivered")
 
@@ -772,6 +810,7 @@ class FriendManager:
     def _open_add_friend_dialog_wechat4(self, main_hwnd: int) -> int | None:
         if sys.platform != "win32":
             return None
+        _safe_ensure_default_desktop()
         import win32gui, win32process
         _, main_pid = win32process.GetWindowThreadProcessId(main_hwnd)
 
@@ -785,28 +824,39 @@ class FriendManager:
                 return h
 
         self._combo(main_hwnd, VK_CONTROL, 0x31)    # Ctrl+1: the chat tab, where the (+) is
-        self._sleep(0.4)
+        self._sleep(0.3)
 
         self._foreground(main_hwnd)
         rect = self._rect_of(main_hwnd)
-        plus_x = rect[0] + 285
-        plus_y = rect[1] + 60
-        if not self._clicker(plus_x, plus_y):
-            return None
-        self._sleep(0.4)
+        plus_x = rect[0] + 280
+        plus_y = rect[1] + 56
+        self._sleep(0.2)
 
-        menu_hwnd = None
-        for _ in range(10):
+        def _find_menu() -> int | None:
+            found = None
             def _enum_menu(h, _):
-                nonlocal menu_hwnd
+                nonlocal found
                 if h != main_hwnd and win32gui.IsWindow(h) and win32gui.IsWindowVisible(h):
                     _, pid = win32process.GetWindowThreadProcessId(h)
                     if pid == main_pid and "Qt51514QWindowToolSaveBits" in win32gui.GetClassName(h):
-                        menu_hwnd = h
+                        found = h
             win32gui.EnumWindows(_enum_menu, None)
-            if menu_hwnd:
-                break
-            self._sleep(0.1)
+            return found
+
+        menu_hwnd = _find_menu()
+        if not menu_hwnd:
+            for attempt in range(2):
+                if not post_click_window(main_hwnd, plus_x, plus_y):
+                    if not self._clicker(plus_x, plus_y):
+                        return None
+                for _ in range(15):
+                    self._sleep(0.08)
+                    menu_hwnd = _find_menu()
+                    if menu_hwnd:
+                        break
+                if menu_hwnd:
+                    break
+                self._sleep(0.2)
 
         if not menu_hwnd:
             logger.warning("_open_add_friend_dialog_wechat4: popup menu not found after clicking (+)")
@@ -815,16 +865,17 @@ class FriendManager:
         self._foreground(main_hwnd)
         m_rect = win32gui.GetWindowRect(menu_hwnd)
         add_friend_x = m_rect[0] + int(0.5 * (m_rect[2] - m_rect[0]))
-        add_friend_y = m_rect[1] + int(0.454 * (m_rect[3] - m_rect[1]))
-        if not self._clicker(add_friend_x, add_friend_y):
-            return None
-        self._sleep(0.8)
+        add_friend_y = m_rect[1] + int(0.51 * (m_rect[3] - m_rect[1]))
+        if not post_click_window(menu_hwnd, add_friend_x, add_friend_y):
+            if not self._clicker(add_friend_x, add_friend_y):
+                return None
+        self._sleep(0.5)
 
-        for _ in range(15):
+        for _ in range(25):
             fresh = [h for h in self._add_dialog_candidates(main_hwnd) if h not in before]
             if fresh:
                 return fresh[0]
-            self._sleep(0.1)
+            self._sleep(0.08)
         return None
 
     def _add_dialog_candidates(self, main_hwnd: int) -> list[int]:
