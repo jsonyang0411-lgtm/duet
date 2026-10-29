@@ -13,22 +13,22 @@
   "rights": ["high-commission", "video-material"],
   "products": [
     {"id": "<抖音商品 ID>", "name": "<名字>", "price": 339, "styles": ["<聚水潭款号>"]},
-    {"id": "<抖音商品 ID>", "name": "<名字>", "price": 228, "styles": ["<款号>", "<款号>"]},
-    {"id": "<抖音商品 ID>", "name": "<名字>", "price": 229, "styles": ["<款号>"]}
+    {"id": "<抖音商品 ID>", "name": "<名字>", "price": 398, "styles": ["<款号>"]},
+    {"id": "<抖音商品 ID>", "name": "<名字>", "price": 229, "styles": ["<款号>"]},
+    {"id": "<抖音商品 ID>", "name": "<名字>", "price": 228, "styles": ["<款号>", "<款号>"]}
   ],
-  "min_stock": 10,
+  "min_stock": 0,
   "find": {
     "goods_category": "1000003461",
     "price_min": 150,
     "price_max": 500,
     "queries": [
-      {"fans_min": 5000, "fans_max": 150000, "pages": 2},
+      {"fans_min": 5000, "fans_max": 200000, "pages": 2},
       {"fans_min": 200000, "pages": 1}
     ]
   },
   "rules": {
     "small_fans_min": 5000,
-    "small_fans_max": 150000,
     "mid_fans_min": 200000,
     "big_live_min": 5000000,
     "big_level_min": 4,

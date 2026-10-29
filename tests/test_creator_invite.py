@@ -117,9 +117,9 @@ def row(aweme, fans, *, nick=None, level=3, hat="12.0%", sex="女性 90.00%", li
 def creators():
     return [
         row("dy_small_a", 30000, avg=190.0),
-        row("dy_small_b", 60000, avg=380.0, sex="男性 61.00%"),          # female 39%: flagged, kept
+        row("dy_small_b", 60000, avg=380.0, sex="女性 75.00%"),
         row("dy_suspect", 28000, hat="99.80%"),                           # 疑似同行自播号
-        row("dy_gap", 170000),                                            # 15万～20万: not decided
+        row("dy_gap", 170000),                                            # 15万～20万: a small one (the user, 2026-10-29)
         row("dy_tiny", 3000),                                             # 粉丝不到 5000
         row("bad id!", 40000),                                            # not a Douyin id the CLI takes
         row("dy_invited", 45000),                                         # in the ledger already
@@ -129,6 +129,7 @@ def creators():
         row("dy_big_a", 760000, level=5, live_min=10000000, avg=229.0),   # 专场型
         row("dy_big_b", 250000, level=4, live_min=5000000, avg=288.0),    # 专场型 by the rule, though under 300k fans
         row("dy_video_big", 13000, level=4, live_min=0, channel="视频", hat="0.5%"),  # video seller: by fans, a small one; hardly any hats
+        row("dy_male_fans", 70000, sex="男性 61.00%"),                    # female 39%: not on the list (we sell women's hats)
     ]
 
 
@@ -195,8 +196,8 @@ def env(tmp_path, monkeypatch):
     return Env()
 
 
-def plan_now(env, *extra, count=30, ledger="ledger"):
-    cfg = env.write_config()
+def plan_now(env, *extra, count=30, ledger="ledger", config=None):
+    cfg = env.write_config(**(config or {}))
     out_dir = env.tmp / "plans"
     code, out, _ = env.main(["plan", "--config", cfg, "--count", str(count), "--out-dir", str(out_dir), "--ledger-dir", str(env.tmp / ledger), *extra])
     return code, out
@@ -220,24 +221,26 @@ def test_plan_is_read_only_and_builds_the_list_by_the_users_rules(env):
     assert all(c["dy_transport"] is None for c in calls), "DY_TRANSPORT is taken away: the page transport, which the wrapper paces"
     assert all(c["gap"] == "3000" for c in calls)
     assert {c["stamp"] for c in calls} == {str(env.tmp / "ledger" / "last-request")}, "one request clock, in the ledger folder, for every run that uses it"
-    assert [c["wrapper"] for c in calls if c["args"][0] == "goods-detail"] == ["paced-jst.mjs"] * 4
+    assert not any(c["args"][0] == "goods-detail" for c in calls), "stock is not looked at by default (the boss, 2026-10-29)"
+    assert all(c["wrapper"] == "paced-jst.mjs" for c in calls if c["args"][0] == "find")
     finds = [c["args"] for c in calls if c["args"][0] == "find"]
     assert finds[0][:6] == ["find", "--platform=DY", "--goods-category=1000003461", "--price-min=150", "--price-max=500", "--not-added"]
-    assert "--fans-min=5000" in finds[0] and "--fans-max=150000" in finds[0] and "--pages=2" in finds[0] and "--expect-uid=900001" in finds[0]
+    assert "--fans-min=5000" in finds[0] and "--fans-max=200000" in finds[0] and "--pages=2" in finds[0] and "--expect-uid=900001" in finds[0]
     assert "--fans-min=200000" in finds[1]
     status = [c["args"] for c in calls if c["args"][:2] == ["buyin", "author-invite-status"]]
     assert len(status) == 1 and "--expect-shop-id=9100000000000001" in status[0] and "--no-open" in status[0]
     plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
     by = {c["aweme_id"]: c for c in plan["creators"]}
-    assert set(by) == {"dy_small_a", "dy_small_b", "dy_mid_a", "dy_big_a", "dy_big_b", "dy_video_big"}
-    assert [c["category"] for c in plan["creators"]] == ["small", "small", "small", "mid", "big", "big"], "grouped by category; inside one, no flag first, then the higher hat share"
-    assert by["dy_big_b"]["category"] == "big" and by["dy_video_big"]["category"] == "small"
-    assert by["dy_small_b"]["flags"] == ["女性粉丝 39.0%（低于 60.0%）"]
+    assert set(by) == {"dy_small_a", "dy_small_b", "dy_gap", "dy_mid_a", "dy_big_a", "dy_big_b", "dy_video_big"}
+    assert [c["category"] for c in plan["creators"]] == ["small"] * 4 + ["mid", "big", "big"], "grouped by category; inside one, no flag first, then the higher hat share"
+    assert [c["aweme_id"] for c in plan["creators"]][:4] == ["dy_small_a", "dy_small_b", "dy_gap", "dy_video_big"]
+    assert by["dy_big_b"]["category"] == "big" and by["dy_video_big"]["category"] == "small" and by["dy_gap"]["category"] == "small"
+    assert by["dy_small_b"]["flags"] == []
     assert by["dy_video_big"]["flags"] == ["帽子占比只有 0.5%"], "flagged for a person to look at, not taken out"
-    # the products: the one closest to the creator's 件单价 leads, the other two follow; the beret has 28 in stock (20 + 8), the pillbox 25
+    # the products: the one closest to the creator's 件单价 leads, all the others follow; stock is not asked
     assert by["dy_small_a"]["products"] == {"main": P_PILLBOX, "extras": [P_BERET, P_EQUESTRIAN]}
     assert by["dy_small_b"]["products"] == {"main": P_BERET, "extras": [P_PILLBOX, P_EQUESTRIAN]}
-    assert [p["stock"] for p in plan["products"]] == [28, 25, 11]
+    assert [(p["stock"], p["in_stock"]) for p in plan["products"]] == [(None, True)] * 3
     assert by["dy_big_a"]["content"].startswith("您好！我们是设计师女帽品牌测试品牌，主打英伦复古")
     assert "{品牌}" not in json.dumps(plan, ensure_ascii=False)
     reasons = {c["aweme_id"]: c["reason"] for c in plan["excluded"]}
@@ -245,9 +248,12 @@ def test_plan_is_read_only_and_builds_the_list_by_the_users_rules(env):
     assert reasons["dy_invited"].startswith("台账里已经邀约过")
     assert reasons["dy_talking"].startswith("平台状态不是「邀约带货」")
     assert reasons["dy_ghost"].startswith("百应搜不到这个抖音号")
-    assert "dy_gap" not in reasons and "dy_tiny" not in reasons, "the default searches do not even ask for them"
+    assert reasons["dy_male_fans"] == "女性粉丝 39.0%（低于 60.0%）", "under 60% women: off the list, with the reason"
+    assert "dy_tiny" not in reasons, "the default searches do not even ask for it"
     rules = tool.DEFAULT_RULES
-    assert tool.classify(row("dy_gap", 170000), rules) == (None, "粉丝在 150000～200000 之间：用户还没定算哪一类")
+    assert tool.classify(row("dy_gap", 170000), rules) == ("small", None), "15万～20万 is a small one (the user, 2026-10-29)"
+    assert tool.classify(row("x", 199999, live_min=0), rules) == ("small", None)
+    assert tool.classify(row("x", 200000, live_min=0), rules) == ("mid", None)
     assert tool.classify(row("dy_tiny", 3000), rules) == (None, "粉丝不到 5000")
     assert tool.classify(row("x", 300000, level=3, live_min=10000000), rules) == ("mid", None), "LV3: not 专场型 however big the sales"
     assert tool.classify(row("x", 9000, level=4, live_min=5000000), rules) == ("big", None), "专场型 goes by the live sales and the level, not the fans"
@@ -256,32 +262,39 @@ def test_plan_is_read_only_and_builds_the_list_by_the_users_rules(env):
     assert plan["ledger_sent_this_week"] == 1
     md = Path(out["files"]["md"]).read_text(encoding="utf-8")
     assert f"run --config <配置> --plan {out['files']['json']} --confirm {plan['plan_id']}" in md and "还没有发任何邀约" in md
-    assert "粉丝 5000～150000，第 1 页起读 2 页；粉丝 200000 以上，第 1 页起读 1 页" in md
+    assert "粉丝 5000～200000，第 1 页起读 2 页；粉丝 200000 以上，第 1 页起读 1 页" in md
+    assert "不看库存，能挂上卡的都配" in md and "| 没查 | 配 |" in md
     assert "## 疑似同行自播号" in md and "dy_suspect" in md.split("## 疑似同行自播号")[1].split("## 其他没进清单的")[0]
     assert "LV2-LV3 已用 7 / 上限 2500" in md
     assert "shop_test_wx" not in md and "shop_test_wx" not in Path(out["files"]["json"]).read_text(encoding="utf-8"), "the contact is masked in the plan"
     for f in out["files"].values():
         assert stat.S_IMODE(os.stat(f).st_mode) == 0o600
-    assert out["by_category"] == {"小达人": 3, "中大博主": 1, "大主播/专场型": 2}
+    assert out["by_category"] == {"小达人": 4, "中大博主": 1, "大主播/专场型": 2}
 
 
 def test_plan_counts_stops_and_stock(env):
+    stocked = {"min_stock": 10}                           # stock is looked at only when the config asks for it
     env.scenario(scenario(stock={"S-BERET": [5], "S-PILL-A": [13], "S-PILL-B": [12], "S-EQ": [11]}))
-    code, out = plan_now(env, count=2)
+    code, out = plan_now(env, count=2, config=stocked)
     assert code == 0, out
+    assert [c["wrapper"] for c in env.calls() if c["args"][0] == "goods-detail"] == ["paced-jst.mjs"] * 4, "one read a style code"
     plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
     assert len(plan["creators"]) == 2
+    assert [p["stock"] for p in plan["products"]] == [5, 25, 11]
     assert [p["in_stock"] for p in plan["products"]] == [False, True, True], "below 10: not offered"
     assert all(P_BERET not in [c["products"]["main"], *c["products"]["extras"]] for c in plan["creators"])
     assert all(len(c["products"]["extras"]) == 1 for c in plan["creators"]), "two products in stock: a main one and one more"
+    assert "可用库存低于 10 的不配" in Path(out["files"]["md"]).read_text(encoding="utf-8")
     for where, code_expected in (("find", 77), ("status", 76), ("stock", 79)):
         env.scenario(scenario(exits={where: code_expected}))
-        code, out = plan_now(env)
+        code, out = plan_now(env, config=stocked)
         assert code == code_expected, where
         assert "立刻停下" in out or out == "", where
     env.scenario(scenario(stock={"S-BERET": [1], "S-PILL-A": [1], "S-PILL-B": [1], "S-EQ": [1]}))
-    code, _ = plan_now(env)
+    code, _ = plan_now(env, config=stocked)
     assert code == 1, "nothing in stock: no list"
+    code, out = plan_now(env)
+    assert code == 0, "the default does not look at stock: the same products are all offered"
     env.scenario(scenario(find_stopped="第 2 页被限流，已停下：[10001]请求太频繁"))
     env.log.unlink()
     code, _ = plan_now(env)
@@ -294,7 +307,7 @@ def test_plan_mixes_the_three_categories_and_puts_the_better_fits_first(env):
     assert code == 0, out
     plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
     assert [c["category"] for c in plan["creators"]] == ["small", "mid", "big"], "one of each, not the first three the search gave"
-    assert plan["creators"][0]["aweme_id"] == "dy_small_a", "inside a category: no flag first (dy_small_b is flagged), then the higher hat share"
+    assert plan["creators"][0]["aweme_id"] == "dy_small_a", "inside a category: no flag first, then the higher hat share (a tie: the search's order)"
     assert {c["aweme_id"] for c in plan["spare"]} >= {"dy_big_b"}, "checked and invitable but over the count: kept as spare, not dropped"
     md = Path(out["files"]["md"]).read_text(encoding="utf-8")
     assert "## 备选（查过状态、可以邀约" in md
@@ -324,12 +337,18 @@ def test_config_is_checked_before_anything_runs(env):
     for over, why in (({"commission_rate": 26}, "commission_rate"), ({"invite_wechat": "", "invite_phone": ""}, "invite_wechat"),
                       ({"dy_expect_shop_id": ""}, "dy_expect_shop_id"), ({"templates": {"small": "x" * 151}}, "150"),
                       ({"templates": {"mid": "顺丰包邮"}}, "快递公司"), ({"rights": ["free-sample", "nope"]}, "rights"),
-                      ({"wait_between": [5, 8]}, "wait_between"), ({"gap_seconds": 1}, "gap_seconds"), ({"brand": ""}, "brand")):
+                      ({"wait_between": [5, 8]}, "wait_between"), ({"gap_seconds": 1}, "gap_seconds"), ({"brand": ""}, "brand"),
+                      ({"min_stock": 10, "products": [{"id": P_BERET, "name": "测试贝雷帽", "price": 339}]}, "styles"),
+                      ({"products": [{"id": f"30000000000000002{i:02d}", "name": f"款{i}", "price": 200} for i in range(6)]}, "5 款")):
         cfg = env.write_config(**over)
         code, _, _ = env.main(["plan", "--config", cfg, "--out-dir", str(env.tmp / "p"), "--ledger-dir", str(env.tmp / "l")])
         assert code == 2, over
     assert env.calls() == []
     assert tool.js_length("😀a") == 3
+    # without min_stock a product needs no style codes; a card takes the main one and all the others (at most 5 in all)
+    assert tool.load_config(env.write_config(products=[{"id": P_BERET, "name": "测试贝雷帽", "price": 339}]))["products"][0]["styles"] == []
+    five = [{"id": f"30000000000000003{i:02d}", "price": price} for i, price in enumerate((339, 398, 229, 228, 469))]
+    assert [p["id"] for p in tool.assign_products(400.0, five)] == [five[1]["id"], five[0]["id"], five[2]["id"], five[3]["id"], five[4]["id"]]
 
 
 # ── run ─────────────────────────────────────────────────────────────────────
@@ -360,7 +379,7 @@ def test_run_previews_then_executes_bound_to_the_preview_and_records_each_one(en
     code, out, sleeps = run_now(env, plan_file, plan_id)
     assert code == 0, out
     calls = [c["args"] for c in env.calls()]
-    assert len(calls) == 12, "six creators: a preview and an execution each"
+    assert len(calls) == 14, "seven creators: a preview and an execution each"
     for preview, execute in zip(calls[0::2], calls[1::2]):
         assert "--execute" not in preview
         assert execute[:len(preview)] == preview, "the execution is the preview's command plus the binding"
@@ -368,8 +387,9 @@ def test_run_previews_then_executes_bound_to_the_preview_and_records_each_one(en
     first = calls[0]
     assert "--commission-rate=25" in first and "--rights=high-commission,video-material" in first and "--wechat=shop_test_wx" in first
     assert "--expect-shop-id=9100000000000001" in first and "--no-open" in first
-    assert len(sleeps) == 5 and all(s == 22.5 for s in sleeps), "15–30 s between two creators (the middle, with this uniform)"
-    assert [x["aweme_id"] for x in out["sent"]] == ["dy_small_a", "dy_small_b", "dy_video_big", "dy_mid_a", "dy_big_a", "dy_big_b"]
+    assert f"--product={P_PILLBOX},{P_BERET},{P_EQUESTRIAN}" in first, "the main product first, then all the others"
+    assert len(sleeps) == 6 and all(s == 22.5 for s in sleeps), "15–30 s between two creators (the middle, with this uniform)"
+    assert [x["aweme_id"] for x in out["sent"]] == ["dy_small_a", "dy_small_b", "dy_gap", "dy_video_big", "dy_mid_a", "dy_big_a", "dy_big_b"]
     events = [(r["event"], r.get("aweme_id")) for r in ledger_lines(env)]
     run = events[events.index(("run-start", None)):]
     assert run[1:3] == [("attempt", "dy_small_a"), ("result", "dy_small_a")], "the attempt is written BEFORE the execution, the result after"
@@ -432,7 +452,7 @@ def test_run_skips_what_the_preview_does_not_bear_out(env):
 def test_run_stops_when_the_platform_quota_runs_low_or_our_own_weekly_cap_is_reached(env):
     plan_file, plan_id = make_plan(env, preview_quota={"dy_video_big": {"levels": "LV2-LV3", "used": 2460, "limit": 2500}})
     code, out, _ = run_now(env, plan_file, plan_id)
-    assert code == 0 and "只剩 40 次" in out["stopped"]["why"] and len(out["sent"]) == 2
+    assert code == 0 and "只剩 40 次" in out["stopped"]["why"] and len(out["sent"]) == 3
     # our own cap: 800 a week by default; here 3, and 2 were sent this week already
     led = tool.Ledger(env.tmp / "ledger2")
     plan_file, plan_id = make_plan(env)
@@ -471,9 +491,9 @@ def test_resume_goes_on_where_the_last_run_stopped(env):
     code, out, _ = run_now(env, plan_file, plan_id, "--limit", "2")
     assert [x["aweme_id"] for x in out["sent"]] == ["dy_small_a", "dy_small_b"] and "--limit" in out["stopped"]["why"]
     code, out, _ = run_now(env, plan_file, plan_id)
-    assert [x["aweme_id"] for x in out["sent"]] == ["dy_video_big", "dy_mid_a", "dy_big_a", "dy_big_b"]
+    assert [x["aweme_id"] for x in out["sent"]] == ["dy_gap", "dy_video_big", "dy_mid_a", "dy_big_a", "dy_big_b"]
     code, out, _ = env.main(["status", "--config", env.write_config(), "--ledger-dir", str(env.tmp / "ledger")], clock=lambda: NOW)
-    assert out["sent_this_week"] == 7 and out["unknown"] == [], "the six of this list and the one invited before"
+    assert out["sent_this_week"] == 8 and out["unknown"] == [], "the seven of this list and the one invited before"
 
 
 def test_one_run_at_a_time(env):

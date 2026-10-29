@@ -4,9 +4,9 @@
 plan（只读，什么都不发）：
   聚水潭命令行 ``jst find`` 按条件找达人（可以翻页）→ 去掉台账里邀约过的 → 抖音命令行
   ``dy buyin author-invite-status`` 一次查一批平台状态，只留「邀约带货」（状态 1）的 → 帽子占比
-  ≥ 90% 的单列为「疑似同行自播号」不进清单，女性粉丝低于 60% 的标出来 → 按三类配话术和 3 款
-  商品（主推 1 款 + 附带 2 款，库存低于 10 的款不配）→ 读出本周额度 → 写一份给人看的清单
-  （Markdown + CSV）和一份给第二段用的 JSON。
+  ≥ 90% 的单列为「疑似同行自播号」、女性粉丝低于 60% 的，都不进清单 → 按三类配话术和商品（主推
+  1 款 + 配置里其余的都附带，一张卡最多 5 款；默认不看库存，配置 min_stock 大于 0 才查、才去掉
+  缺货的）→ 读出本周额度 → 写一份给人看的清单（Markdown + CSV）和一份给第二段用的 JSON。
 
 run（要 ``--confirm <清单编号>`` 和清单文件）：只发清单里的人。每位先只读预览，再带
 ``--expect-status 1 --expect-popwindow -1 --execute`` 发送（预览绑定执行）。发一位记一位：本地台账
@@ -71,12 +71,13 @@ DEFAULT_TEMPLATES = {
 DEFAULT_FIND = {
     "goods_category": "1000003461",     # 帽子（服装 > 服装配饰 > 帽子）
     "price_min": 150, "price_max": 500,
-    "queries": [{"fans_min": 5000, "fans_max": 150000, "pages": 2}, {"fans_min": 200000, "pages": 1}],
+    "queries": [{"fans_min": 5000, "fans_max": 200000, "pages": 2}, {"fans_min": 200000, "pages": 1}],
 }
 DEFAULT_RULES = {
-    "small_fans_min": 5000, "small_fans_max": 150000, "mid_fans_min": 200000,
+    "small_fans_min": 5000, "mid_fans_min": 200000,        # 小达人 5000～20 万（15～20 万也算小达人：用户 2026-10-29），中大博主 ≥ 20 万
     "big_live_min": 5000000, "big_level_min": 4,          # 专场型：直播为主、近 30 天直播销售额区间下限 ≥ 500 万、LV4 及以上
-    "suspect_hat_share": 90.0, "female_min": 60.0,
+    "suspect_hat_share": 90.0,
+    "female_min": 60.0,                                    # 女性粉丝低于它的不进清单（我们卖女帽：用户 2026-10-29）
     "low_hat_share": 1.0,                                  # 帽子占比低于它的标出来（只是标，不去掉）
 }
 
@@ -182,23 +183,25 @@ def load_config(path: Optional[str]) -> dict:
     if not isinstance(rights, list) or not rights or any(r not in RIGHT_WORDS for r in rights) or len(set(rights)) != len(rights):
         raise ToolError(f"配置 rights 要是 {', '.join(RIGHT_WORDS)} 里的几个", EXIT_USAGE)
     cfg["rights"] = list(rights)
+    # 0（默认）= 不看库存：能挂上卡的都配（老板 2026-10-29）；大于 0 才按款号查聚水潭的可用库存、不配缺货的
+    cfg["min_stock"] = _number(raw, "min_stock", 0, 0, 100000, integer=True)
     products = raw.get("products")
     if not isinstance(products, list) or not 1 <= len(products) <= 5:
-        raise ToolError("配置 products 要列 1 到 5 款商品：{id, name, price, styles}", EXIT_USAGE)
+        raise ToolError("配置 products 要列 1 到 5 款商品（一张卡最多 5 款）：{id, name, price, styles}", EXIT_USAGE)
     cfg["products"] = []
     for p in products:
         if not isinstance(p, dict):
             raise ToolError("products 的每一项要是一个对象", EXIT_USAGE)
-        pid, name, styles = str(p.get("id") or ""), str(p.get("name") or "").strip(), p.get("styles")
+        pid, name, styles = str(p.get("id") or ""), str(p.get("name") or "").strip(), p.get("styles", [])
         price = p.get("price")
         if not PRODUCT_ID.match(pid) or not name or isinstance(price, bool) or not isinstance(price, (int, float)) or price <= 0:
             raise ToolError("products 的每一项要有 id（抖音商品 ID）、name、price（元）", EXIT_USAGE)
-        if not isinstance(styles, list) or not styles or not all(isinstance(s, str) and STYLE_CODE.match(s) for s in styles):
-            raise ToolError(f"商品 {name} 要写 styles：聚水潭的款号（查真实可用库存用）", EXIT_USAGE)
+        if (not isinstance(styles, list) or (cfg["min_stock"] and not styles)
+                or not all(isinstance(s, str) and STYLE_CODE.match(s) for s in styles)):
+            raise ToolError(f"商品 {name} 的 styles 要是聚水潭的款号（min_stock 大于 0 时必填，查真实可用库存用）", EXIT_USAGE)
         cfg["products"].append({"id": pid, "name": name, "price": float(price), "styles": list(styles)})
     if len({p["id"] for p in cfg["products"]}) != len(cfg["products"]):
         raise ToolError("products 里有重复的商品", EXIT_USAGE)
-    cfg["min_stock"] = _number(raw, "min_stock", 10, 0, 100000, integer=True)
     find = dict(DEFAULT_FIND)
     find.update(raw.get("find") or {})
     if not re.match(r"^\d{4,15}(,\d{4,15})*$", str(find.get("goods_category"))):
@@ -449,7 +452,7 @@ def band_min(band) -> float:
 
 
 def classify(row: dict, rules: dict):
-    """(类别, 不进清单的原因)：先看专场型，再按粉丝分小达人 / 中大博主；两类之间和太小的不进。"""
+    """(类别, 不进清单的原因)：先看专场型，再按粉丝分中大博主（≥ 20 万）/ 小达人（5000 到 20 万，15～20 万也算）；太小的不进。"""
     fans = row.get("fansNum") or 0
     level = row.get("level") or 0
     if (row.get("channelBySales") == "直播" and band_min(row.get("sales30dLive")) >= rules["big_live_min"]
@@ -457,25 +460,25 @@ def classify(row: dict, rules: dict):
         return "big", None
     if fans >= rules["mid_fans_min"]:
         return "mid", None
-    if rules["small_fans_min"] <= fans <= rules["small_fans_max"]:
+    if fans >= rules["small_fans_min"]:
         return "small", None
-    if fans < rules["small_fans_min"]:
-        return None, f"粉丝不到 {rules['small_fans_min']}"
-    return None, f"粉丝在 {rules['small_fans_max']}～{rules['mid_fans_min']} 之间：用户还没定算哪一类"
+    return None, f"粉丝不到 {rules['small_fans_min']}"
 
 
 def assign_products(avg_price, products: List[dict]) -> List[dict]:
-    """主推：售价最接近达人件单价的那款（一样近取配置里靠前的）；附带：其余有货的，按配置顺序，最多 2 款。"""
+    """主推：售价最接近达人件单价的那款（一样近取配置里靠前的）；附带：其余配得上的全部，按配置顺序（配置最多 5 款 = 一张卡的上限）。"""
     if not products:
         return []
     if isinstance(avg_price, (int, float)) and avg_price > 0:
         main = min(products, key=lambda p: (abs(p["price"] - avg_price), products.index(p)))
     else:
         main = products[0]
-    return [main] + [p for p in products if p is not main][:2]
+    return [main] + [p for p in products if p is not main]
 
 
 def check_stock(cfg: dict, clis: Clis) -> List[dict]:
+    if not cfg["min_stock"]:                              # 不看库存：一个请求都不发，每款都配
+        return [{**p, "stock": None, "missing_styles": [], "in_stock": True} for p in cfg["products"]]
     out = []
     for p in cfg["products"]:
         stock, missing = 0, []
@@ -564,6 +567,9 @@ def build_plan(cfg: dict, clis: Clis, ledger: Ledger, count: int, *, moment: Opt
         if view["hat_share"] is not None and view["hat_share"] >= rules["suspect_hat_share"]:
             excluded.append({**view, "reason": f"疑似同行自播号（帽子占比 {view['hat_share']}% ≥ {rules['suspect_hat_share']}%）", "suspect": True})
             continue
+        if view["female_share"] is not None and view["female_share"] < rules["female_min"]:
+            excluded.append({**view, "reason": f"女性粉丝 {view['female_share']}%（低于 {rules['female_min']}%）"})
+            continue
         category, why = classify(row, rules)
         if category is None:
             excluded.append({**view, "reason": why})
@@ -573,8 +579,6 @@ def build_plan(cfg: dict, clis: Clis, ledger: Ledger, count: int, *, moment: Opt
             flags.append(f"帽子占比只有 {view['hat_share']}%")
         if view["female_share"] is None:
             flags.append("粉丝性别不知道")
-        elif view["female_share"] < rules["female_min"]:
-            flags.append(f"女性粉丝 {view['female_share']}%（低于 {rules['female_min']}%）")
         candidates.append({**view, "category": category, "flags": flags})
     candidates = mix_categories(candidates)
     picked: List[dict] = []
@@ -649,9 +653,12 @@ def plan_markdown(plan: dict, plan_file: str) -> str:
       + "；".join(f"粉丝 {fans_range(q)}，第 {q.get('page', 1)} 页起读 {q.get('pages', 1)} 页" for q in f["queries"]) + "\n")
     req = plan.get("requests") or {}
     w(f"- 生成这份清单用了平台请求：聚水潭 {req.get('jst', 0)} 次、抖音 {req.get('dy', 0)} 次\n\n")
-    w("## 商品（主推 1 款 + 附带 2 款；库存低于 %d 的不配）\n\n| 商品 ID | 名字 | 售价 | 聚水潭款号 | 可用库存 | 配不配 |\n|---|---|---|---|---|---|\n" % s["min_stock"])
+    w(f"## 商品（主推 1 款 + 其余{'有货的' if s['min_stock'] else '的'}都附带；"
+      + (f"可用库存低于 {s['min_stock']} 的不配" if s["min_stock"] else "不看库存，能挂上卡的都配") + "）\n\n")
+    w("| 商品 ID | 名字 | 售价 | 聚水潭款号 | 可用库存 | 配不配 |\n|---|---|---|---|---|---|\n")
     for p in plan["products"]:
-        w(f"| {p['id']} | {p['name']} | ¥{p['price']:g} | {'、'.join(p['styles'])} | {p['stock']} | {'配' if p['in_stock'] else '不配'} |\n")
+        w(f"| {p['id']} | {p['name']} | ¥{p['price']:g} | {'、'.join(p['styles']) or '-'} | {'没查' if p['stock'] is None else p['stock']} | "
+          f"{'配' if p['in_stock'] else '不配'} |\n")
     w("\n")
     for key in CATEGORY_ORDER:
         rows = [c for c in plan["creators"] if c["category"] == key]
