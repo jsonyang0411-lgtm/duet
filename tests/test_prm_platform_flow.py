@@ -1617,3 +1617,22 @@ def test_an_approval_run_after_the_invite_card_went_out_is_not_executed_and_coun
     second = bot.worker_takes()
     assert f"这一份草稿只填商品 {DY_ITEM2} 的" in second["meta"]["system_note"]
     assert f"开好 1/3 个（其中邀约卡开过 {DY_ITEM}）" in chain_attention(bot)
+
+
+def test_a_linked_douyin_id_lets_the_mac_find_her_invite_card_when_the_order_had_only_her_uid(bot, clock, tmp_path):
+    """加百应达人微信 (功能 R, design §8.4): her sample order gave only her UID; the 抖音号 an operator linked her to
+    goes with the 专属佣金 step (meta.creator), so the Mac's look at the invite ledger finds the card that opened it."""
+    assert bot.prm.register(CREATOR, "小美", link={"account": "test_daren_01", "source": "friend_add"})["linked"]
+    three_signed_for(bot, clock)
+    creator = bot.worker_takes()["meta"]["creator"]
+    assert creator == {"douyin_ids": ["test_daren_01"], "uid": DY_UID}
+    ledger = tmp_path / "creator-invites" / "invites.jsonl"
+    ledger.parent.mkdir()
+    rows = [{"at": "2026-10-28T15:00:00+08:00", "event": "attempt", "attempt": "9f1c00000001", "plan_id": "P1",
+             "aweme_id": "test_daren_01", "products": [DY_ITEM, DY_ITEM2], "commission_rate": 25, "category": "small"},
+            {"at": "2026-10-28T15:00:04+08:00", "event": "result", "attempt": "9f1c00000001", "plan_id": "P1",
+             "aweme_id": "test_daren_01", "exit": 0, "outcome": "VERIFIED_SUCCESS", "sent": True}]
+    ledger.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    cover = platforms.invite_cover(ledger.parent, DY_ITEM, douyin_ids=creator["douyin_ids"], uid=creator["uid"])
+    assert cover["state"] == "covered" and cover["rate"] == 25
+    assert platforms.invite_cover(ledger.parent, DY_ITEM, douyin_ids=[], uid=creator["uid"]) is None   # without it

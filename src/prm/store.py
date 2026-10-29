@@ -28,6 +28,14 @@
                     creator a conversation is (none: nobody on the list matched), the message ids handled, when
                     she and our side last wrote and up to when her lines are answered; src/prm/service.py
 ``prm_meta``        small values the service keeps over a restart (when the sync last asked)
+``friend_adds``     加百应达人微信 (PRM_FRIEND_ADD, src/prm/friend_adds.py): a creator's contact left in 百应, one record
+                    each (one per 百应 message): her 抖音号 and nickname, the full 微信号 / 手机号 (the only place they
+                    are kept, cleared later; ``masked`` stays), the greeting, the invite, where it stands (``state``),
+                    the new friend that may be her (``candidate``) and, once linked, her chat and party
+``friend_add_attempts``  every add_friend call made for a record (who, with which number kind, what came of it): the
+                    audit, the day's count and the gap between two adds; no number in it
+``creator_links``   who a registered creator is on 抖音 (her 抖音号, as an operator confirmed it): ``_creator_ids``
+                    reads it
 
 A packet's life: ``pending`` (waits in the console) -> ``approved`` (an operator said
 send, or the kind's gate is ``auto``) -> ``sending`` -> ``sent`` | ``failed``; or
@@ -206,6 +214,60 @@ CREATE TABLE IF NOT EXISTS prm_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS friend_adds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    conversation_id TEXT NOT NULL DEFAULT '',
+    message_id TEXT NOT NULL DEFAULT '',
+    aweme_id TEXT NOT NULL DEFAULT '',
+    creator_uid TEXT NOT NULL DEFAULT '',
+    nickname TEXT NOT NULL DEFAULT '',
+    wechat TEXT NOT NULL DEFAULT '',
+    phone TEXT NOT NULL DEFAULT '',
+    masked TEXT NOT NULL DEFAULT '{}',
+    unavailable INTEGER NOT NULL DEFAULT 0,
+    greeting TEXT NOT NULL DEFAULT '',
+    invited TEXT NOT NULL DEFAULT '{}',
+    party_id INTEGER,
+    deal_id INTEGER,
+    state TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    candidate TEXT NOT NULL DEFAULT '{}',
+    rejected TEXT NOT NULL DEFAULT '[]',
+    wxid TEXT NOT NULL DEFAULT '',
+    link_on_accept INTEGER NOT NULL DEFAULT 1,
+    reveals TEXT NOT NULL DEFAULT '[]',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    requested_at REAL,
+    linked_at REAL,
+    cleared_at REAL,
+    closed_at REAL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS friend_adds_msg ON friend_adds(conversation_id, message_id) WHERE message_id != '';
+CREATE INDEX IF NOT EXISTS friend_adds_state ON friend_adds(state, aweme_id);
+CREATE TABLE IF NOT EXISTS friend_add_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    add_id INTEGER NOT NULL,
+    at REAL NOT NULL,
+    by TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    finished_at REAL
+);
+CREATE INDEX IF NOT EXISTS friend_add_attempts_at ON friend_add_attempts(at);
+CREATE TABLE IF NOT EXISTS creator_links (
+    party_id INTEGER NOT NULL,
+    platform TEXT NOT NULL DEFAULT 'dy',
+    account TEXT NOT NULL,
+    uid TEXT NOT NULL DEFAULT '',
+    uid_source TEXT NOT NULL DEFAULT '',
+    nickname TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL,
+    add_id INTEGER,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (party_id, platform, account)
+);
 """
 
 # Columns added after the first version: (table, column, type).
@@ -302,6 +364,38 @@ def sample_order_view(row: dict) -> dict:
 def buyin_thread_view(row: dict) -> dict:
     out = dict(row)
     out["seen"] = [str(i) for i in _loads(row.get("seen"), [])]
+    return out
+
+
+# 加百应达人微信 (src/prm/friend_adds.py): the JSON columns of a record, and what may be set besides its state.
+FRIEND_ADD_JSON = {"masked": {}, "invited": {}, "candidate": {}, "rejected": [], "reveals": []}
+FRIEND_ADD_FIELDS = {"source", "conversation_id", "message_id", "aweme_id", "creator_uid", "nickname", "wechat", "phone",
+                     "masked", "unavailable", "greeting", "invited", "party_id", "deal_id", "reason", "candidate",
+                     "rejected", "wxid", "link_on_accept", "reveals", "requested_at", "linked_at", "cleared_at",
+                     "closed_at"}
+
+
+def friend_add_view(row: dict) -> dict:
+    out = dict(row)
+    for key, empty in FRIEND_ADD_JSON.items():
+        out[key] = _loads(row.get(key), empty)
+    out["unavailable"] = bool(row.get("unavailable"))
+    out["link_on_accept"] = bool(row.get("link_on_accept"))
+    return out
+
+
+def _friend_add_values(fields: dict) -> dict:
+    """``fields`` as columns: the JSON ones written as JSON, the flags as 0 / 1; an unknown one is a ValueError."""
+    unknown = set(fields) - FRIEND_ADD_FIELDS
+    if unknown:
+        raise ValueError(f"not a friend_adds field: {sorted(unknown)}")
+    out = {}
+    for key, value in fields.items():
+        if key in FRIEND_ADD_JSON:
+            value = json.dumps(value if value is not None else FRIEND_ADD_JSON[key], ensure_ascii=False)
+        elif key in ("unavailable", "link_on_accept"):
+            value = int(bool(value))
+        out[key] = value
     return out
 
 
@@ -1212,3 +1306,207 @@ class PrmStore:
             self._conn.execute("INSERT INTO prm_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET"
                                " value = excluded.value", (key, str(value)))
             self._conn.commit()
+
+    # ── 加百应达人微信 (PRM_FRIEND_ADD, src/prm/friend_adds.py; CODEBASE_REFERENCE 功能 R) ─────
+
+    def add_friend_add(self, *, state: str, now: Optional[float] = None, **fields) -> tuple[dict, bool]:
+        """A new record in ``state`` (``fields``: ``FRIEND_ADD_FIELDS``; dicts and lists are stored as JSON).  With a
+        ``message_id`` one 百应 message is one record: the one there is comes back.  Returns (record, made)."""
+        now = time.time() if now is None else now
+        values = _friend_add_values(fields)
+        values.update(state=state, created_at=now, updated_at=now)
+        names = sorted(values)
+        with self._lock:
+            cur = self._conn.execute(
+                f"INSERT OR IGNORE INTO friend_adds ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})",
+                [values[n] for n in names])
+            self._conn.commit()
+            if cur.rowcount == 1:
+                row = self._conn.execute("SELECT * FROM friend_adds WHERE id = ?", (cur.lastrowid,)).fetchone()
+                return friend_add_view(dict(row)), True
+            row = self._conn.execute("SELECT * FROM friend_adds WHERE conversation_id = ? AND message_id = ?",
+                                     (values.get("conversation_id", ""), values.get("message_id", ""))).fetchone()
+        return friend_add_view(dict(row)), False
+
+    def friend_add(self, add_id: int) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM friend_adds WHERE id = ?", (int(add_id),)).fetchone()
+        return friend_add_view(dict(row)) if row else None
+
+    def friend_add_by_message(self, conversation_id: str, message_id: str) -> Optional[dict]:
+        """The record of one 百应 message (None for none, or no message id)."""
+        if not message_id:
+            return None
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM friend_adds WHERE conversation_id = ? AND message_id = ?",
+                                     (conversation_id, message_id)).fetchone()
+        return friend_add_view(dict(row)) if row else None
+
+    def friend_adds(self, *, states: Optional[tuple] = None, aweme_id: Optional[str] = None,
+                    limit: Optional[int] = None) -> list[dict]:
+        """The records, newest first: in these ``states``, of this 抖音号 (any case)."""
+        sql, where, args = "SELECT * FROM friend_adds", [], []
+        if states:
+            where.append(f"state IN ({', '.join('?' * len(states))})")
+            args += list(states)
+        if aweme_id is not None:
+            where.append("LOWER(aweme_id) = LOWER(?)")
+            args.append(str(aweme_id))
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            args.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        return [friend_add_view(dict(r)) for r in rows]
+
+    def move_friend_add(self, add_id: int, from_states: tuple, to_state: str, now: Optional[float] = None,
+                        **fields) -> bool:
+        """Compare-and-set: the record goes to ``to_state`` (and ``fields`` are set) only if it is in one of
+        ``from_states``; a double click or two threads move it once."""
+        values = _friend_add_values(fields)
+        values["updated_at"] = time.time() if now is None else now
+        names = sorted(values)
+        with self._lock:
+            cur = self._conn.execute(
+                f"UPDATE friend_adds SET state = ?{''.join(f', {n} = ?' for n in names)}"
+                f" WHERE id = ? AND state IN ({', '.join('?' * len(from_states))})",
+                (to_state, *[values[n] for n in names], int(add_id), *from_states))
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def update_friend_add(self, add_id: int, now: Optional[float] = None, *, states: Optional[tuple] = None,
+                          **fields) -> bool:
+        """Set ``fields`` of a record (only while it is in ``states``, when given); True when it was changed."""
+        values = _friend_add_values(fields)
+        values["updated_at"] = time.time() if now is None else now
+        names = sorted(values)
+        sql = f"UPDATE friend_adds SET {', '.join(f'{n} = ?' for n in names)} WHERE id = ?"
+        args = [*[values[n] for n in names], int(add_id)]
+        if states:
+            sql += f" AND state IN ({', '.join('?' * len(states))})"
+            args += list(states)
+        with self._lock:
+            cur = self._conn.execute(sql, args)
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def clear_friend_add_values(self, add_id: int, now: Optional[float] = None) -> bool:
+        """Clear a record's full numbers (``masked`` stays); True when there was one to clear."""
+        now = time.time() if now is None else now
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE friend_adds SET wechat = '', phone = '', cleared_at = COALESCE(cleared_at, ?), updated_at = ?"
+                " WHERE id = ? AND (wechat != '' OR phone != '')", (now, now, int(add_id)))
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def delete_friend_adds(self, *, closed_before: float) -> int:
+        """Forget the records that ended (``closed_at``) before ``closed_before``, their attempts too; how many."""
+        with self._lock:
+            ids = [r["id"] for r in self._conn.execute(
+                "SELECT id FROM friend_adds WHERE closed_at IS NOT NULL AND closed_at < ?", (float(closed_before),))]
+            if ids:
+                marks = ", ".join("?" * len(ids))
+                self._conn.execute(f"DELETE FROM friend_add_attempts WHERE add_id IN ({marks})", ids)
+                self._conn.execute(f"DELETE FROM friend_adds WHERE id IN ({marks})", ids)
+                self._conn.commit()
+        return len(ids)
+
+    def scrub_friend_adds(self, party_id: int, rewrite: Callable[[str], str], now: Optional[float] = None) -> int:
+        """8.2 clean-up of a creator: her records' numbers are cleared (once more: linking cleared them already) and
+        their nicknames rewritten (numbers masked), her 抖音 links' nicknames too; returns how many changed."""
+        now = time.time() if now is None else now
+        changed = 0
+        with self._lock:
+            for row in self._conn.execute("SELECT id, nickname, wechat, phone FROM friend_adds WHERE party_id = ?",
+                                          (int(party_id),)).fetchall():
+                nickname = rewrite(row["nickname"] or "")
+                if nickname != row["nickname"] or row["wechat"] or row["phone"]:
+                    self._conn.execute(
+                        "UPDATE friend_adds SET nickname = ?, wechat = '', phone = '', cleared_at = COALESCE(cleared_at, ?),"
+                        " updated_at = ? WHERE id = ?", (nickname, now, now, row["id"]))
+                    changed += 1
+            for row in self._conn.execute("SELECT platform, account, nickname FROM creator_links WHERE party_id = ?",
+                                          (int(party_id),)).fetchall():
+                nickname = rewrite(row["nickname"] or "")
+                if nickname != row["nickname"]:
+                    self._conn.execute("UPDATE creator_links SET nickname = ? WHERE party_id = ? AND platform = ?"
+                                       " AND account = ?", (nickname, int(party_id), row["platform"], row["account"]))
+                    changed += 1
+            self._conn.commit()
+        return changed
+
+    def add_friend_attempt(self, add_id: int, *, by: str, kind: str, now: Optional[float] = None) -> int:
+        """One add_friend call for a record (``by`` console / admin, ``kind`` wechat / phone); returns its id."""
+        now = time.time() if now is None else now
+        with self._lock:
+            cur = self._conn.execute("INSERT INTO friend_add_attempts (add_id, at, by, kind) VALUES (?, ?, ?, ?)",
+                                     (int(add_id), now, str(by), str(kind)))
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def finish_friend_attempt(self, attempt_id: int, reason: str, now: Optional[float] = None) -> None:
+        now = time.time() if now is None else now
+        with self._lock:
+            self._conn.execute("UPDATE friend_add_attempts SET reason = ?, finished_at = ? WHERE id = ?",
+                               (str(reason), now, int(attempt_id)))
+            self._conn.commit()
+
+    def friend_attempts(self, *, since: Optional[float] = None, add_id: Optional[int] = None,
+                        unfinished: bool = False) -> list[dict]:
+        """The add_friend calls, newest first: made at ``since`` or later, of one record, or not finished."""
+        sql, where, args = "SELECT * FROM friend_add_attempts", [], []
+        if since is not None:
+            where.append("at >= ?")
+            args.append(float(since))
+        if add_id is not None:
+            where.append("add_id = ?")
+            args.append(int(add_id))
+        if unfinished:
+            where.append("finished_at IS NULL")
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY at DESC, id DESC", args).fetchall()
+        return [dict(r) for r in rows]
+
+    def add_creator_link(self, party_id: int, account: str, *, platform: str = "dy", uid: str = "",
+                         uid_source: str = "", nickname: str = "", source: str, add_id: Optional[int] = None,
+                         now: Optional[float] = None) -> bool:
+        """Who a registered creator is on 抖音 (an operator confirmed it); the first link of an account stays.  True
+        when it is new."""
+        now = time.time() if now is None else now
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO creator_links (party_id, platform, account, uid, uid_source, nickname, source,"
+                " add_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (int(party_id), platform, str(account), str(uid or ""), str(uid_source or ""), str(nickname or ""),
+                 str(source), add_id, now))
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def creator_links(self, party_id: Optional[int] = None, *, account: Optional[str] = None) -> list[dict]:
+        """The 抖音 links, oldest first: of one creator, or of one 抖音号 (any case)."""
+        sql, where, args = "SELECT * FROM creator_links", [], []
+        if party_id is not None:
+            where.append("party_id = ?")
+            args.append(int(party_id))
+        if account is not None:
+            where.append("LOWER(account) = LOWER(?)")
+            args.append(str(account))
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY created_at, account", args).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_creator_link(self, party_id: int, account: str, platform: str = "dy") -> bool:
+        """An operator says a link was wrong (取消关联); True when there was one."""
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM creator_links WHERE party_id = ? AND platform = ? AND account = ?",
+                                     (int(party_id), platform, str(account)))
+            self._conn.commit()
+            return cur.rowcount == 1

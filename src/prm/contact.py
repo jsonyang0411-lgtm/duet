@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 
-from .pii import _PHONE
+from .pii import _PHONE, mask_numbers
 
 WECHAT, PHONE = "wechat", "phone"
 KINDS = (WECHAT, PHONE)
@@ -150,3 +150,9 @@ def mask_contacts(text) -> str:
     for f in reversed(find_contacts(text)):
         text = text[:f["start"]] + masked(f["kind"], f["value"]) + text[f["end"]:]
     return text
+
+
+def clean_name(text, limit: int = 30) -> str:
+    """A name a creator gave herself (her 百应 nickname) as it is kept: one line, every phone / ID number and labelled
+    微信号 in it masked, at most ``limit`` characters."""
+    return mask_contacts(mask_numbers(" ".join(str(text or "").split())[:200]))[:limit]
