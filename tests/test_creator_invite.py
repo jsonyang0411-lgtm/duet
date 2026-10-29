@@ -349,7 +349,8 @@ def test_plan_drops_creators_who_sell_their_own_brand_and_likely_sample_takers(e
     risky = md.split("## 可能骗样品的")[1].split("## 其他没进清单的")[0]
     assert "dy_shop" in own and "dy_mx_b" in own and "dy_lv1" not in own
     assert "dy_lv1" in risky and "dy_fanmany" in risky and "dy_shop" not in risky
-    assert "视频素材" not in json.dumps(plan["templates"], ensure_ascii=False), "the texts no longer offer 视频素材支持 (2026-10-29)"
+    texts = json.dumps(plan["templates"], ensure_ascii=False)
+    assert "视频素材" not in texts and "25%" not in texts and "专属高佣" not in texts, "the commission is on the card only (2026-10-29)"
     assert plan["settings"]["rights"] == ["high-commission"]
     rules = tool.DEFAULT_RULES
     assert tool.name_stem("小鹿（时尚穿搭）") == tool.name_stem("小鹿•精选") == "小鹿" and tool.name_stem("木子-琳琳") == "木子"
