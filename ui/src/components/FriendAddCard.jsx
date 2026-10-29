@@ -9,7 +9,9 @@ import { Card, Note, Confirm, Dialog, Field, TextInput, Seg } from './ui'
 // click on 「添加该达人微信」 (after its confirmation) is ONE friend request through the friend manager; nothing is
 // ever retried by itself. Numbers are masked unless 显示完整 / 复制号码 is clicked (each look is written down).
 // Once she accepted, 「是她，登记并关联」 registers her as a creator with her 抖音号. The remark (备注) she gets in our
-// WeChat (「抖音-<百应昵称>」) is shown next to the greeting; the add types it only when it sees the 「备注」 field.
+// WeChat (「抖音-<百应昵称>」) is shown next to the greeting; the add types it only when it sees the 「备注」 field. A
+// linked record whose remark is not on her (she added us, the field was not seen) suggests setting it on the phone,
+// with a copy button, until 「备注设好了」: nothing is automated there.
 
 const KIND_LABELS = { wechat: '微信号', phone: '手机' }
 
@@ -62,6 +64,12 @@ function FriendAddCard({ r, st, d, onDone }) {
     const value = out && (out[use] || out.wechat || out.phone)
     if (!value) return
     try { await navigator.clipboard.writeText(value); toast.ok('号码已复制（这次查看记下了）：到手机微信里搜索添加') } catch { toast.err('没能放进剪贴板：点「显示完整」自己抄') }
+  }
+  const copyRemark = async () => {
+    try {
+      await navigator.clipboard.writeText(r.remark_hint)
+      toast.ok('备注已复制：在手机微信里打开她的资料 › 设置备注和标签，粘贴进「备注」')
+    } catch { toast.err('没能放进剪贴板：照着上面的字打一遍') }
   }
   const tag = FRIEND_ADD_TAGS[r.state] || 'pend'
   const canAddHere = st.enabled && st.can_add
@@ -134,6 +142,20 @@ function FriendAddCard({ r, st, d, onDone }) {
         {editing && <EditNumbers r={r} busy={busy} onSave={(contact) => act('edit', { contact }, '号码已保存，再确认添加')} onCancel={() => setEditing(false)} />}
 
         {!addable && !editing && remark && r.open && <div className="prm-remark">{remark}</div>}
+        {r.remark_hint && (
+          <Note kind="cy" icon={DeviceMobile}>
+            <div className="stack prm-remark-hint" style={{ gap: 6 }}>
+              <div>
+                建议在手机微信里给她设备注：<b className="mono">{r.remark_hint}</b>
+                <span className="dim">（备注没经我们的申请带到她身上：她是自己加的我们、申请窗口里没认出「备注」栏，或者聊天是手选的。机器人不会去改；设好以后她在我们微信里就显示这个名字）</span>
+              </div>
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                <button type="button" className="btn sm" disabled={busy} onClick={copyRemark}><Copy />复制备注</button>
+                <button type="button" className="btn sm" disabled={busy} onClick={() => act('remark_done', {}, '记下了：备注设好了')}><CheckCircle />备注设好了</button>
+              </div>
+            </div>
+          </Note>
+        )}
 
         {!addable && !editing && (
           <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>

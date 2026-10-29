@@ -738,6 +738,59 @@ def test_registering_her_by_hand_with_the_douyin_id_closes_the_record(world):
     assert record["wechat"] == "" and record["masked"]["wechat"] == "ab****yz"
 
 
+# ── after 「是她，登记并关联」: her remark on the phone (Step 2) ───────────────────
+
+def hint_of(world, add_id):
+    """The console's ``remark_hint`` and ``listed`` of a record."""
+    from src.prm.friend_adds import friend_adds_out
+    item = next(r for r in friend_adds_out(world.store, world.clock.now) if r["id"] == add_id)
+    return item["remark_hint"], item["listed"]
+
+
+def test_after_linking_the_remark_is_suggested_when_our_request_did_not_put_it_on_her(world):
+    typed = sent(world, "dy_demo01", "小鹿")                                  # the remark went into the request ...
+    world.adds.on_new_friend(friend(own_greeting="您好小鹿，百应上联系您的～"))       # ... and she accepted that request
+    assert world.adds.link(typed, "wxid_demo")["remark_hint"] == ""
+    assert world.record(typed)["remark_set"] is True and hint_of(world, typed) == ("", False)
+
+    world.manager.sees_remark = False                                       # the 「备注」 field was not seen
+    untyped = sent(world, "dy_demo02", "小青", wechat="abcdefgh")
+    world.adds.on_new_friend(friend(wxid="wxid_qing", own_greeting="您好小青，百应上联系您的～"))
+    assert world.adds.link(untyped, "wxid_qing")["remark_hint"] == "抖音-小青"
+    assert world.record(untyped)["remark_set"] is False and hint_of(world, untyped) == ("抖音-小青", True)
+
+    waiting = world.adds.paste("dy_demo03", "小白", {})["id"]                 # she added us: no request of ours
+    world.adds.on_new_friend(friend(wxid="wxid_bai", how="manual", verify_text="百应上的小白"))
+    assert world.adds.link(waiting, "wxid_bai")["remark_hint"] == "抖音-小白"
+
+    world.manager.sees_remark = True
+    picked = sent(world, "dy_demo04", "小红", wechat="abcdefgi")              # typed, but a chat picked by hand:
+    assert world.adds.link(picked, "wxid_hong")["remark_hint"] == "抖音-小红"  # how she came is not known
+
+    named = sent(world, "dy_demo05", "小紫", wechat="abcdefgj")               # her name on our side is the remark
+    world.manager.sees_remark = False
+    world.adds.on_new_friend(friend(wxid="wxid_zi", how="manual", name="抖音-小紫"))
+    assert world.adds.link(named, "wxid_zi")["remark_hint"] == ""
+
+    assert world.adds.act(untyped, "remark_done")["state"] == "linked"       # an operator set it on the phone
+    assert world.record(untyped)["remark_set"] is True and hint_of(world, untyped) == ("", False)
+    for add_id in (untyped, typed, world.paste(aweme="dy_demo06")):          # done / on her / not linked
+        with pytest.raises(FriendAddError, match="没有要在手机上设的备注"):
+            world.adds.act(add_id, "remark_done")
+    assert world.manager.calls[-1][0] == "abcdefgj" and len(world.manager.calls) == 4    # nothing added for it
+
+
+def test_registering_her_by_hand_follows_the_same_rule(world):
+    first = sent(world, "dy_demo01", "小鹿")                                  # typed; she accepted that request
+    world.adds.on_new_friend(friend(own_greeting="您好小鹿，百应上联系您的～"))
+    world.prm.register("wxid_demo", "小鹿", link={"account": "dy_demo01", "source": "register"})
+    assert world.record(first)["state"] == "linked" and hint_of(world, first) == ("", False)
+    world.manager.sees_remark = False
+    second = sent(world, "dy_demo02", "小青", wechat="abcdefgh")
+    world.prm.register("wxid_qing", "小青", link={"account": "dy_demo02", "source": "register"})
+    assert world.record(second)["remark_set"] is False and hint_of(world, second) == ("抖音-小青", True)
+
+
 def test_the_records_console_view_carries_the_candidate_and_lists_an_expired_one_with_one(world):
     from src.prm.friend_adds import friend_adds_out
     add_id = sent(world, "dy_demo01", "小鹿")

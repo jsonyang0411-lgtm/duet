@@ -770,6 +770,7 @@ class TestPrmPages:
         adds.paste("dy_demo01", "小鹿", {"wechat": "abcdefyz"})
         adds.paste("dy_demo02", "小青", {"phone": "13900000000"})
         adds.confirm(2)                                                          # (sent: waits for her)
+        page.context.grant_permissions(["clipboard-read", "clipboard-write"])
         page.goto(f"{BASE_URL}/#/review", timeout=10000)
         page.wait_for_timeout(1500)
         page.locator(".prm-friend-add", has_text="小鹿").locator("button:has-text('不加')").click()
@@ -789,6 +790,16 @@ class TestPrmPages:
         party = prm.service.store.party_by_wxid("wxid_xiaoqing")
         assert party["name"] == "小青" and adds._store.friend_add(2)["state"] == "linked"
         assert [l["account"] for l in prm.service.store.creator_links(party["id"])] == ["dy_demo02"]
+        # a chat picked by hand (how she came is not known): the card stays and suggests her remark on the phone
+        card = page.locator(".prm-friend-add", has_text="小青")
+        assert "已登记并关联" in card.inner_text()
+        assert "建议在手机微信里给她设备注：抖音-小青" in card.locator(".prm-remark-hint").inner_text()
+        card.locator("button:has-text('复制备注')").click()
+        page.wait_for_timeout(500)
+        assert page.evaluate("navigator.clipboard.readText()") == "抖音-小青"
+        card.locator("button:has-text('备注设好了')").click()
+        page.wait_for_timeout(1500)
+        assert adds._store.friend_add(2)["remark_set"] is True
         assert page.locator(".prm-friend-add").count() == 0 and len(manager.calls) == 1
 
     def test_deals_page_pastes_a_contact_and_registers_a_creator_with_her_douyin_id(self, page, prm):
@@ -875,7 +886,8 @@ class TestPrmPages:
             party = prm.service.store.party_by_wxid("wxid_xiaolu")
             assert party["name"] == "小鹿" and adds._store.friend_add(1)["state"] == "linked"
             assert [l["account"] for l in prm.service.store.creator_links(party["id"])] == ["dy_demo01"]
-            assert page.locator(".prm-friend-add").count() == 0
+            assert adds._store.friend_add(1)["remark_set"] is True       # she accepted our request, which had it
+            assert page.locator(".prm-friend-add").count() == 0          # (so nothing to set on the phone)
         finally:
             web_server.register_new_friends(None)
 

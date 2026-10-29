@@ -36,7 +36,10 @@ The remark (备注, user 2026-10-29: creators' WeChat names are random and diffe
 with the remark she should get in our WeChat (``remark_for``: ``PRM_FRIEND_ADD_REMARK``, default 「抖音-{昵称}」, her 百应
 nickname or her 抖音号, at most 16 characters, made unique among the records not yet deleted); the add hands it to
 ``add_friend``, which types it into the 「备注」 field of WeChat 4.0's application window only when OCR shows that field
-(``remark_set``: whether it did).  The display name WeChat then gives her is that remark.
+(``remark_set``: whether it did).  The display name WeChat then gives her is that remark.  When she is linked and the
+remark is not on her by our request (she added us, the field was not seen, a chat picked by hand), ``remark_set`` is
+false and the console suggests setting it on the phone (``remark_hint``) until an operator says it is done
+(``remark_done``); nothing is automated there.
 
 Who she is once she accepted (design §7): the new-friend scan (src/wechat/new_friends.py) hands every new friend to
 ``on_new_friend``; it only writes a ``candidate`` on the one record she fits best, with how sure (``sure``: the 微信号
@@ -188,6 +191,18 @@ def remark_text(template, nickname, aweme_id, suffix: str = "") -> str:
     if not nick or room <= 0:
         return ""
     return _same(template.replace("{昵称}", nick[:room], 1) + suffix)
+
+
+def _remark_on_her(record: dict, wxid: str) -> bool:
+    """Is the record's remark on her in our WeChat once she is linked to ``wxid``?  Only when the new friend that is her
+    candidate is that chat and either her name on our side is the remark, or she came by accepting our request
+    (``how`` requested) and the request carried it (``remark_set``).  Otherwise (she added us; the field was not seen;
+    a chat an operator picked by hand, how she came not known) not."""
+    remark = _same(record.get("remark"))
+    candidate = record.get("candidate") or {}
+    if not remark or str(candidate.get("wxid") or "") != str(wxid or ""):
+        return False
+    return _same(candidate.get("name")) == remark or (bool(record.get("remark_set")) and candidate.get("how") == "requested")
 
 
 def check_greeting(text) -> str:
@@ -672,6 +687,10 @@ class FriendAdds:
                 self._store.clear_friend_add_values(record["id"], now=now)
             elif action == "link_on_accept":
                 self._store.update_friend_add(record["id"], now=now, link_on_accept=bool(data.get("on")))
+            elif action == "remark_done":                 # an operator set her remark on the phone (Step 2)
+                if record["state"] != LINKED or not record.get("remark") or record.get("remark_set"):
+                    raise FriendAddError(f"#{record['id']} 现在没有要在手机上设的备注")
+                self._store.update_friend_add(record["id"], now=now, remark_set=True)
             elif action == "not_her":
                 wxid = str((record.get("candidate") or {}).get("wxid") or "")
                 if not wxid:
@@ -720,7 +739,8 @@ class FriendAdds:
         """「是她，登记并关联」: always an operator's decision.  She is registered with her 抖音号 (``PrmService.register``
         with ``link``: the party, ``creator_links`` and the deal's event before her catch-up is asked for); a
         record whose 「她通过以后按这份邀约登记」 is off only keeps which chat she is.  The record ends ``linked``, its
-        numbers cleared."""
+        numbers cleared, ``remark_set`` whether its remark is on her (``_remark_on_her``; the answer's ``remark_hint``
+        is the remark to set on the phone when it is not)."""
         now = self._clock()
         with self._lock:
             record = self._record(add_id)
@@ -743,15 +763,18 @@ class FriendAdds:
                 party = self._register(wxid, _clip(name, NICKNAME_CHARS) or record["nickname"] or f"百应达人 {aweme}",
                                        note, link=link if aweme else None)
             deal = self._store.deal_of(party["id"], now) if party else None
+            on_her = _remark_on_her(record, wxid)
             if not self._store.move_friend_add(
                     record["id"], (record["state"],), LINKED, now=now, wxid=wxid, linked_at=now, closed_at=now,
-                    party_id=party["id"] if party else None, deal_id=deal["id"] if deal else None):
+                    party_id=party["id"] if party else None, deal_id=deal["id"] if deal else None, remark_set=on_her):
                 raise FriendAddError("这条刚刚被处理了，刷新看看")
             self._store.clear_friend_add_values(record["id"], now=now)
-        logger.info("FriendAdds: #%d linked by %s to %s… (%s)", record["id"], actor, wxid[:8],
-                    f"party {party['id']}" if party else "not registered")
+        logger.info("FriendAdds: #%d linked by %s to %s… (%s%s)", record["id"], actor, wxid[:8],
+                    f"party {party['id']}" if party else "not registered",
+                    "; the remark is to be set on the phone" if record.get("remark") and not on_her else "")
         return {"ok": True, "id": record["id"], "state": LINKED, "party_id": party["id"] if party else None,
-                "catch_up": bool((party or {}).get("catch_up"))}
+                "catch_up": bool((party or {}).get("catch_up")),
+                "remark_hint": "" if on_her else record.get("remark") or ""}
 
     def _linkable(self, record: dict, now: float) -> bool:
         if record["state"] == EXPIRED:
@@ -917,7 +940,7 @@ class FriendAdds:
                     continue
                 if self._store.move_friend_add(record["id"], (record["state"],), LINKED, now=now, wxid=wxid,
                                                linked_at=now, closed_at=now, party_id=party["id"], deal_id=deal["id"],
-                                               reason="registered_by_hand"):
+                                               reason="registered_by_hand", remark_set=_remark_on_her(record, wxid)):
                     self._store.clear_friend_add_values(record["id"], now=now)
                     done += 1
                     logger.info("FriendAdds: #%d linked: she was registered by hand with this 抖音号", record["id"])
@@ -1010,15 +1033,22 @@ def invited_out(invited: dict) -> dict:
     return out
 
 
+def remark_hint(record: dict) -> str:
+    """The remark an operator should set on her phone (Step 2): a linked record whose remark is not on her ("" else)."""
+    return (record.get("remark") or "") if record["state"] == LINKED and not record.get("remark_set") else ""
+
+
 def record_out(record: dict, now: float, greetings: dict) -> dict:
     """One record for the console: never a full number (``masked``; ``has_wechat`` / ``has_phone`` say whether it is
     still there for 添加 / 显示完整).  ``greetings``: greeting -> the open records' ids that have it (the same greeting
-    twice: after she accepted, nobody can tell which one she is)."""
+    twice: after she accepted, nobody can tell which one she is).  A linked record stays on the page (``listed``) while
+    it suggests setting her remark on the phone (``remark_hint``)."""
     linkable = (record["state"] == EXPIRED and now - float(record["created_at"]) <= LINK_DAYS * DAY) or (
         record["state"] in OPEN and record["state"] not in (ADDING, BLOCKED))
     is_open = record["state"] in OPEN
     has_values = bool(record.get("wechat") or record.get("phone"))
     same = [i for i in greetings.get(" ".join(str(record.get("greeting") or "").split()), []) if i != record["id"]]
+    hint = remark_hint(record)
     return {
         "id": record["id"], "state": record["state"], "state_label": STATES.get(record["state"], record["state"]),
         "source": record["source"], "source_label": SOURCES.get(record["source"], record["source"]),
@@ -1027,7 +1057,7 @@ def record_out(record: dict, now: float, greetings: dict) -> dict:
         "has_wechat": bool(record.get("wechat")), "has_phone": bool(record.get("phone")),
         "cleared": bool(record.get("cleared_at")) and not has_values, "unavailable": bool(record.get("unavailable")),
         "greeting": record.get("greeting", ""), "same_greeting": same if is_open else [],
-        "remark": record.get("remark", ""), "remark_set": bool(record.get("remark_set")),
+        "remark": record.get("remark", ""), "remark_set": bool(record.get("remark_set")), "remark_hint": hint,
         "invited": invited_out(record.get("invited") or {}),
         "candidate": dict(record.get("candidate") or {}), "party_id": record.get("party_id"),
         "deal_id": record.get("deal_id"), "wxid": record.get("wxid", ""),
@@ -1037,7 +1067,7 @@ def record_out(record: dict, now: float, greetings: dict) -> dict:
         "requested_at": record.get("requested_at"), "linked_at": record.get("linked_at"),
         "closed_at": record.get("closed_at"), "values_until": _values_until(record),
         "open": is_open, "can_link": linkable,
-        "listed": is_open or (linkable and bool((record.get("candidate") or {}).get("wxid"))),
+        "listed": is_open or (linkable and bool((record.get("candidate") or {}).get("wxid"))) or bool(hint),
     }
 
 

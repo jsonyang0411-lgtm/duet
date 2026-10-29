@@ -54,7 +54,7 @@ export const dealAction = (body) => post('/api/prm/deals', body)
 export const revealNumbers = (partyId) => post('/api/prm/reveal', { party_id: partyId })
 
 // 加百应达人微信（PRM_FRIEND_ADD，src/prm/friend_adds.py）：一次确认 = 一次好友申请，号码只显示打码的，显示完整 / 复制都记一笔。
-/** POST /api/prm/friend-adds {action, id?, ...}: paste / add / edit / sent_by_phone / sent_already / not_sent / wait_her / drop / link / not_her / link_on_accept / reveal. */
+/** POST /api/prm/friend-adds {action, id?, ...}: paste / add / edit / sent_by_phone / sent_already / not_sent / wait_her / drop / link / not_her / link_on_accept / reveal / remark_done. */
 export const friendAddAction = (body) => post('/api/prm/friend-adds', body)
 export const FRIEND_ADD_TAGS = {
   offered: 'cy', needs_view: 'warn', waiting: 'pend', adding: 'pend', requested: 'ok', not_found: 'warn', known: 'ok',

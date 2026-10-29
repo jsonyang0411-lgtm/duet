@@ -416,6 +416,7 @@ def test_linking_from_the_console_registers_her_and_her_deal_shows_the_douyin_id
     call("/api/prm/friend-adds", "POST", {"id": 1, "action": "add"})
     out = call("/api/prm/friend-adds", "POST", {"id": 1, "action": "link", "wxid": "wxid_demo"})[1]
     assert out["ok"] and out["state"] == "linked" and out["party_id"]
+    assert out["remark_hint"] == "抖音-小鹿"                    # a chat picked by hand: set her remark on the phone
     d = call("/api/prm")[1]
     party = next(p for p in d["parties"] if p["wxid"] == "wxid_demo")
     assert party["name"] == "小鹿" and party["note"] == "百应邀约 · 抖音号 dy_demo01"
@@ -423,7 +424,13 @@ def test_linking_from_the_console_registers_her_and_her_deal_shows_the_douyin_id
     assert (link["account"], link["source"], link["add_id"]) == ("dy_demo01", "friend_add", 1)
     assert [e["name"] for e in party["deal"]["events"]] == ["关联抖音号 dy_demo01（加微信 #1）"]
     [r] = d["friend_adds"]
-    assert r["state"] == "linked" and not r["listed"] and r["cleared"] and not r["has_wechat"]
+    assert r["state"] == "linked" and r["cleared"] and not r["has_wechat"]
+    assert (r["listed"], r["remark_hint"], r["remark_set"]) == (True, "抖音-小鹿", False)     # the card stays for it
+    assert call("/api/prm/friend-adds", "POST", {"id": 1, "action": "remark_done"})[1]["ok"] is True
+    [r] = call("/api/prm")[1]["friend_adds"]
+    assert (r["listed"], r["remark_hint"], r["remark_set"]) == (False, "", True)
+    again = call("/api/prm/friend-adds", "POST", {"id": 1, "action": "remark_done"})[1]
+    assert again["ok"] is False and "没有要在手机上设的备注" in again["error"]
     bad = call("/api/prm/friend-adds", "POST", {"id": 1, "action": "link", "wxid": "wxid_other"})[1]
     assert bad["ok"] is False and "不能关联" in bad["error"]
     paste({"aweme_id": "dy_demo02"})

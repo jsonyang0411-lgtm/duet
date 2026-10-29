@@ -1114,7 +1114,8 @@ def _prm_friend_adds(data: dict) -> dict:
     nickname?, contact {wechat?, phone?}, greeting?} makes a record; on a record (``id``): ``add`` {use?, greeting?}
     (one friend request, its confirmation was the page's), ``edit`` {contact}, ``sent_by_phone``, ``sent_already``,
     ``not_sent``, ``wait_her``, ``drop``, ``link`` {wxid, name?}, ``not_her``, ``link_on_accept`` {on}, ``reveal`` (the full
-    numbers, for this page only; every look is written down).  Only a running bot does any of them."""
+    numbers, for this page only; every look is written down), ``remark_done`` (her remark was set on the phone).  Only a
+    running bot does any of them."""
     from src.prm.friend_adds import FriendAddError
     from src.prm.store import PartyError
 
