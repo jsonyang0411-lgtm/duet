@@ -365,18 +365,20 @@ class Bot:
     def _start_new_friends(config, backend, prm, edge):
         """The new-friend scan (src/wechat/new_friends.py), or None: only with a consumer (PRM_EDGE: a
         ``friend_added`` event per new friend; PRM_COPILOT: new friends first in 登记达人's candidates,
-        registering one drafts her messages since she was added) and a backend whose database it can
+        registering one drafts her messages since she was added; and 加百应达人微信's ``on_new_friend``: which
+        of its records she may be, never registering anyone) and a backend whose database it can
         read beside the poll loop (Windows wcdb).  Its records are in the bot's database (DB_PATH)."""
         if prm is None and edge is None:
             return None
         if not callable(getattr(backend, "with_client", None)):
             logger.info("New friends: this WeChat backend cannot be read beside its poll loop; not looked for")
             return None
+        adds = getattr(prm, "friend_adds", None) if prm is not None else None
         try:
             from .wechat.new_friends import NewFriendService, NewFriendStore
             service = NewFriendService(
                 backend, NewFriendStore(config.db_path),
-                on_found=[edge.friend_added] if edge is not None else [],
+                on_found=[edge.friend_added] if edge is not None else [adds.on_new_friend] if adds is not None else [],
                 keep_verify=prm is not None,
                 catchup_hours=getattr(config, "prm_catchup_hours", 12))
         except Exception:
@@ -385,6 +387,8 @@ class Bot:
         if prm is not None:
             service.set_catch_up_sink(prm.take_new_friend)
             prm.on_registered = service.registered
+            if adds is not None:
+                adds.set_new_friends(service)     # (a record made after she became a friend looks back)
         try:
             from .web.server import register_new_friends
             register_new_friends(service)

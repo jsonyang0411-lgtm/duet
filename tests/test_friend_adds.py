@@ -523,3 +523,139 @@ def test_an_add_that_could_not_be_started_is_failed_not_stuck(world):
     assert world.adds.confirm(add_id)["state"] == "failed"
     assert world.record(add_id)["reason"] == "not_started" and world.manager.calls == []
     assert world.store.friend_attempts()[0]["reason"] == "not_started"
+
+
+# ── who she is once she accepted (design §7): candidates, never a link ────────
+
+def friend(wxid="wxid_demo", how="requested", own_greeting="", verify_text="", name="小鹿🌸", added_at=None, **more):
+    """A new friend as the scan hands her on (src/wechat/new_friends.py ``_report``)."""
+    return {"wxid": wxid, "name": name, "remark": "", "verify_text": verify_text, "how": how,
+            "own_greeting": own_greeting, "kind": "requested" if how == "requested" else "pc",
+            "added_at": added_at, **more}
+
+
+def sent(world, aweme, nickname, wechat=WECHAT, greeting=None):
+    """A record pasted and added (a request went out); the gap passes."""
+    add_id = world.paste(aweme=aweme, nickname=nickname, wechat=wechat, phone="")
+    world.adds.confirm(add_id, greeting=greeting)
+    world.later(121)
+    return add_id
+
+
+def test_our_own_greeting_word_for_word_says_which_request_she_accepted(world):
+    first = sent(world, "dy_demo01", "小鹿")
+    second = sent(world, "dy_demo02", "小青", wechat="abcdefgh")
+    candidate = world.adds.on_new_friend(friend(own_greeting="您好小青，百应上联系您的～", added_at=world.clock.now))
+    assert candidate["level"] == "sure" and candidate["level_label"] == "确定是她"
+    assert candidate["evidence"] == ["她通过了我们的申请，新私聊里我方的打招呼和这份附言一字不差"]
+    assert world.record(second)["candidate"]["wxid"] == "wxid_demo" and world.record(first)["candidate"] == {}
+    assert (world.record(second)["state"], world.store.parties()) == ("requested", [])   # never linked by itself
+
+
+def test_the_same_greeting_twice_or_two_requests_waiting_point_at_nobody(world):
+    first = sent(world, "dy_demo01", "小鹿", greeting="您好，百应上联系您的～")
+    second = sent(world, "dy_demo02", "小青", wechat="abcdefgh", greeting="您好，百应上联系您的～")
+    assert world.adds.on_new_friend(friend(own_greeting="您好，百应上联系您的～")) is None
+    assert world.record(first)["candidate"] == {} and world.record(second)["candidate"] == {}
+
+
+def test_the_only_request_waiting_is_likely_her(world):
+    add_id = sent(world, "dy_demo01", "小鹿")
+    candidate = world.adds.on_new_friend(friend(own_greeting="", added_at=world.clock.now))      # (greeting not read)
+    assert (candidate["level"], world.record(add_id)["candidate"]["level"]) == ("likely", "likely")
+
+
+def test_the_wechat_id_she_gave_being_the_new_friends_wxid_is_sure(world):
+    add_id = world.adds.paste("dy_demo01", "小鹿", {"wechat": "meimei_88"})["id"]
+    candidate = world.adds.on_new_friend(friend(wxid="MeiMei_88", how="manual"))
+    assert candidate["level"] == "sure" and candidate["evidence"] == ["她给的微信号就是这个新好友的微信号"]
+    assert world.record(add_id)["candidate"]["wxid"] == "MeiMei_88"
+
+
+def test_she_added_us_naming_her_baiying_nickname_or_baiying_is_possible(world):
+    add_id = world.adds.paste("dy_demo01", "小鹿", {})["id"]                                     # waiting for her
+    assert world.adds.on_new_friend(friend(how="manual", verify_text="想合作", name="阿花")) is None
+    candidate = world.adds.on_new_friend(friend(wxid="wxid_other", how="manual", verify_text="你好，我是百应上的小鹿"))
+    assert candidate["level"] == "possible" and candidate["evidence"] == ["她加我们时的验证消息里有「小鹿」"]
+    assert world.record(add_id)["candidate"]["wxid"] == "wxid_other"
+
+
+def test_a_friend_right_after_an_add_with_no_application_window_is_likely(world):
+    world.manager.answers = ["no_dialog"]
+    add_id = world.paste()
+    attempt_at = world.clock.now
+    world.adds.confirm(add_id)
+    assert world.record(add_id)["state"] == "unsure"
+    candidate = world.adds.on_new_friend(friend(how="manual", added_at=attempt_at + 60))
+    assert candidate["level"] == "likely" and "2 分钟内" in candidate["evidence"][0]
+
+
+def test_not_her_clears_it_and_that_friend_is_not_offered_for_the_record_again(world):
+    add_id = sent(world, "dy_demo01", "小鹿")
+    world.adds.on_new_friend(friend())
+    assert world.adds.act(add_id, "not_her")["state"] == "requested"
+    record = world.record(add_id)
+    assert record["candidate"] == {} and record["rejected"] == ["wxid_demo"]
+    assert world.adds.on_new_friend(friend()) is None
+    with pytest.raises(FriendAddError, match="没有可能是她的新好友"):
+        world.adds.act(add_id, "not_her")
+    assert world.adds.on_new_friend(friend(wxid="wxid_next"))["wxid"] == "wxid_next"
+
+
+def test_a_better_candidate_replaces_a_weaker_one_never_the_other_way(world):
+    add_id = sent(world, "dy_demo01", "小鹿")
+    world.adds.on_new_friend(friend(wxid="wxid_maybe", own_greeting=""))                       # likely
+    world.adds.on_new_friend(friend(wxid="wxid_sure", own_greeting="您好小鹿，百应上联系您的～"))    # sure
+    assert world.record(add_id)["candidate"]["wxid"] == "wxid_sure"
+    assert world.adds.on_new_friend(friend(wxid="wxid_later", own_greeting="")) is None
+    assert world.record(add_id)["candidate"]["wxid"] == "wxid_sure"
+
+
+def test_a_chat_linked_already_is_never_offered_again(world):
+    add_id = sent(world, "dy_demo01", "小鹿")
+    world.adds.link(add_id, "wxid_demo")
+    other = sent(world, "dy_demo02", "小青", wechat="abcdefgh")
+    assert world.adds.on_new_friend(friend(own_greeting="")) is None
+    assert world.record(other)["candidate"] == {}
+
+
+def test_a_record_made_after_she_became_a_friend_looks_back(world):
+    class Scan:                                                      # the new-friend scan's recent()
+        def recent(self):
+            return [friend(wxid="wxid_early", how="manual", verify_text="百应邀约来的", added_at=world.clock.now - 60)]
+
+    world.adds.set_new_friends(Scan())
+    add_id = world.adds.paste("dy_demo01", "小鹿", {})["id"]
+    assert world.record(add_id)["candidate"]["wxid"] == "wxid_early"
+    assert world.record(add_id)["candidate"]["level"] == "possible"
+
+
+def test_registering_her_by_hand_with_the_douyin_id_closes_the_record(world):
+    add_id = sent(world, "dy_demo01", "小鹿")
+    party = world.prm.register("wxid_demo", "小鹿", link={"account": "DY_DEMO01", "source": "register"})
+    record = world.record(add_id)
+    assert (record["state"], record["reason"], record["party_id"], record["wxid"]) == (
+        "linked", "registered_by_hand", party["id"], "wxid_demo")
+    assert record["wechat"] == "" and record["masked"]["wechat"] == "ab****yz"
+
+
+def test_the_records_console_view_carries_the_candidate_and_lists_an_expired_one_with_one(world):
+    from src.prm.friend_adds import friend_adds_out
+    add_id = sent(world, "dy_demo01", "小鹿")
+    world.later(14 * DAY + 10)
+    world.adds.sweep(force=True)
+    assert world.record(add_id)["state"] == "expired"
+    [item] = friend_adds_out(world.store, world.clock.now)
+    assert not item["listed"] and item["can_link"]                       # expired, linkable for 30 days
+    world.adds.on_new_friend(friend(own_greeting="您好小鹿，百应上联系您的～"))
+    [item] = friend_adds_out(world.store, world.clock.now)
+    assert item["listed"] and item["candidate"]["level"] == "sure"
+    assert world.adds.link(add_id, "wxid_demo")["state"] == "linked"
+
+
+def test_with_the_switch_off_no_new_friend_is_looked_at(tmp_path):
+    w = World(tmp_path, prm_friend_add="off")
+    try:
+        assert w.adds.on_new_friend(friend()) is None and w.adds.match_recent() == 0
+    finally:
+        w.stop()

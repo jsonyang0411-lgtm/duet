@@ -27,9 +27,14 @@ the bot itself accepted the request a few minutes before the line (``AcceptLog``
 FriendManager.accept_friend_requests: AUTO_ACCEPT_FRIENDS or the admin's 同意好友); ``manual``
 for 「你已添加了」 otherwise; ``unknown`` when that cannot be told.
 
+When they accepted our request, our own greeting in the new chat (``own_greeting``: this account's
+type-1 lines just before WeChat's line, at most OWN_GREETING_LINES) goes with the event too: 加百应达人微信
+(src/prm/friend_adds.py, PRM_COPILOT's ``on_found``) tells which of its requests she accepted by it.  The
+edge's ``friend_added`` copies only its own fields, so the edge protocol is as it was.
+
 The verify text may hold a phone number: it goes only into the edge's event (deleted with the
 events after EDGE_KEEP_DAYS) or, masked, into the console's list (cleared after NEW_DAYS); never
-into the chat store or a log.  Errors are logged and the next look tries again: nothing here
+into the chat store or a log.  The own greeting is kept (copilot mode only) as long as the verify text.  Errors are logged and the next look tries again: nothing here
 stops the bot or holds the poll loop for longer than one database call.
 """
 
@@ -60,6 +65,7 @@ CATCH_UP_FLOOR_SEC = 300     # PRM_CATCHUP_HOURS=0: only the last 5 minutes (rel
 VERIFY_MAX_LINES = 5
 VERIFY_MAX_CHARS = 500
 VERIFY_WINDOW_SEC = 7 * 86400   # a greeting is at most this much older than the line (older: earlier talk)
+OWN_GREETING_LINES = 3          # our own lines before 「我通过了你的朋友验证请求」 kept as our greeting
 
 AUTO_ACCEPT, MANUAL, REQUESTED, UNKNOWN = "auto_accept", "manual", "requested", "unknown"
 HOWS = (AUTO_ACCEPT, MANUAL, REQUESTED, UNKNOWN)
@@ -211,13 +217,15 @@ def _added_name(text: str) -> str:
 class Added:
     """A chat's newest becoming-friends line: ``kind`` (PC / PHONE / ADDED_OTHER / PASSED /
     GREETING_ONLY), the name in 「你已添加了X」, its time, and the other party's greeting before it
-    (``(time, text)``, oldest first; only for 「你已添加了」)."""
+    (``(time, text)``, oldest first; only for 「你已添加了」); for PASSED (they accepted our request) our own
+    greeting before it (``own_greeting``: this account's text lines, oldest first, one per line)."""
 
     wxid: str
     kind: str
     at: float
     name: str = ""
     verify: list = field(default_factory=list)
+    own_greeting: str = ""
 
     @property
     def verify_text(self) -> str:
@@ -262,6 +270,18 @@ def find_added(messages: Iterable[dict], wxid: str, me: str = "") -> Optional[Ad
             if not is_filler(text):
                 verify.append((at, text.replace(FILLER, "").strip()))
         added.verify = list(reversed(verify))
+    elif kind == PASSED:
+        own = []
+        for msg_type, at, sender, text in reversed(lines[:index]):
+            if added.at - at > VERIFY_WINDOW_SEC or len(own) >= OWN_GREETING_LINES:
+                break
+            if msg_type != 1:
+                continue                          # (a system line in between)
+            if not is_me(sender, me):
+                break                             # her words: an earlier talk
+            if not is_filler(text):
+                own.append(text.replace(FILLER, "").strip())
+        added.own_greeting = "\n".join(reversed(own))[:VERIFY_MAX_CHARS]
     return added
 
 
@@ -351,6 +371,11 @@ CREATE TABLE IF NOT EXISTS friend_accepts (
 );
 """
 
+# Columns added after the first version: (table, column, type).
+_ADDED_COLUMNS = (
+    ("new_friends", "own_greeting", "TEXT NOT NULL DEFAULT ''"),   # 加百应达人微信 (2026-10-29)
+)
+
 
 def _connect(path: str) -> sqlite3.Connection:
     if str(path) != ":memory:":
@@ -377,6 +402,10 @@ class NewFriendStore:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            for table, column, kind in _ADDED_COLUMNS:          # a database from before these columns
+                columns = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+                if column not in columns:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
             self._conn.commit()
 
     def close(self) -> None:
@@ -418,13 +447,13 @@ class NewFriendStore:
             return self._conn.execute("SELECT 1 FROM new_friends WHERE wxid = ?", (wxid,)).fetchone() is not None
 
     def add(self, *, wxid: str, name: str, remark: str, how: str, kind: str, added_at: float,
-            verify_from: Optional[float], verify_text: str, found_at: float) -> bool:
+            verify_from: Optional[float], verify_text: str, found_at: float, own_greeting: str = "") -> bool:
         """Write a new friend down; False when this wxid was reported already."""
         with self._lock:
             cur = self._conn.execute(
                 "INSERT OR IGNORE INTO new_friends (wxid, name, remark, how, kind, added_at, verify_from,"
-                " verify_text, found_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (wxid, name, remark, how, kind, added_at, verify_from, verify_text, found_at))
+                " verify_text, found_at, own_greeting) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (wxid, name, remark, how, kind, added_at, verify_from, verify_text, found_at, own_greeting))
             self._conn.commit()
             return cur.rowcount == 1
 
@@ -441,10 +470,10 @@ class NewFriendStore:
         return [_record_out(r) for r in rows]
 
     def forget_verify(self, before: float) -> int:
-        """Clear the (masked) verify text of friends found before ``before``."""
+        """Clear the (masked) verify text, and our own greeting, of friends found before ``before``."""
         with self._lock:
-            cur = self._conn.execute("UPDATE new_friends SET verify_text = '' WHERE found_at < ? AND verify_text != ''",
-                                     (before,))
+            cur = self._conn.execute("UPDATE new_friends SET verify_text = '', own_greeting = '' WHERE found_at < ?"
+                                     " AND (verify_text != '' OR own_greeting != '')", (before,))
             self._conn.commit()
             return cur.rowcount
 
@@ -499,7 +528,8 @@ class NewFriendService:
     database is not open), ``own_wxid()``, and optionally ``recent_sessions(max_age)`` (the poll
     loop's last session list), ``note_private_name(wxid, name)`` and ``catch_up_chat(talker, name,
     since, sink)``.  ``on_found``: called with each new friend's event fields (``wxid``, ``name``,
-    ``remark``, ``verify_text``, ``how``; the WeChat edge's ``friend_added``); one that raises is
+    ``remark``, ``verify_text``, ``how``, ``own_greeting``, ``kind``, ``added_at``; the WeChat edge's
+    ``friend_added`` takes the first five, 加百应达人微信's ``on_new_friend`` all); one that raises is
     tried again at the next look.  ``keep_verify`` (PRM_COPILOT): the verify text is kept, masked,
     for the console."""
 
@@ -692,7 +722,8 @@ class NewFriendService:
             how = UNKNOWN
         else:
             how = self.accepts.judge(added.name or display, added.at, phone=added.kind == PHONE)
-        event = {"wxid": added.wxid, "name": name, "remark": remark, "verify_text": verify_text, "how": how}
+        event = {"wxid": added.wxid, "name": name, "remark": remark, "verify_text": verify_text, "how": how,
+                 "own_greeting": added.own_greeting, "kind": added.kind, "added_at": added.at}
         self._reported.add(added.wxid)
         try:
             masked = ""
@@ -700,7 +731,8 @@ class NewFriendService:
                 from src.pii import mask_pii
                 masked = mask_pii(verify_text)
             self._store.add(wxid=added.wxid, name=name, remark=remark, how=how, kind=added.kind, added_at=added.at,
-                            verify_from=added.verify_from, verify_text=masked, found_at=now)
+                            verify_from=added.verify_from, verify_text=masked, found_at=now,
+                            own_greeting=added.own_greeting if self._keep_verify else "")
         except Exception:
             logger.warning("New friends: %s… could not be written down", added.wxid[:8], exc_info=True)
         note = getattr(self._backend, "note_private_name", None)

@@ -449,6 +449,8 @@ def test_a_new_friend_is_one_event_whoever_let_her_in(side):
         {"wxid": "wxid_new02", "name": "小青", "remark": "", "verify_text": "", "how": "requested"},
         {"wxid": "wxid_new03", "name": "小红", "remark": "", "verify_text": "想合作", "how": "auto_accept"}]
     assert all("chat_id" not in e and e["at"] for e in events)
+    # the scan's event has more for 加百应达人微信 (own_greeting, kind, added_at): the edge protocol stays as it was
+    assert not any({"own_greeting", "kind", "added_at"} & set(e) for e in events)
     assert side.client.ack(events[-1]["id"])["pending"] == 0
 
 

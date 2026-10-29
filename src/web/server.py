@@ -1021,6 +1021,14 @@ def _prm_candidates(state: dict) -> list[dict]:
         names = {}
     names = names if isinstance(names, dict) else {}
     taken = {p["wxid"] for p in state.get("parties", []) if p.get("active")} | _prm_reserved()
+    # 加百应达人微信 (功能 R): a new friend a record says may be her is marked with it (「选这个」 brings her 抖音号)
+    hinted: dict = {}
+    for r in state.get("friend_adds") or []:
+        candidate = r.get("candidate") or {}
+        if r.get("listed") and candidate.get("wxid"):
+            hinted.setdefault(str(candidate["wxid"]), {
+                "id": r["id"], "nickname": r.get("nickname", ""), "aweme_id": r.get("aweme_id", ""),
+                "level": candidate.get("level"), "level_label": candidate.get("level_label", "")})
     fresh = []
     for f in _recent_new_friends():
         wxid = str(f.get("wxid") or "")
@@ -1029,9 +1037,10 @@ def _prm_candidates(state: dict) -> list[dict]:
         fresh.append({"wxid": wxid, "name": str(f.get("name") or names.get(wxid) or wxid), "new": True,
                       "verify_text": str(f.get("verify_text") or ""), "how": str(f.get("how") or "unknown"),
                       "how_label": str(f.get("how_label") or ""), "added_at": f.get("added_at"),
-                      "remark": str(f.get("remark") or "")})
+                      "remark": str(f.get("remark") or ""), **({"friend_add": hinted[wxid]} if wxid in hinted else {})})
     listed = {c["wxid"] for c in fresh}
-    out = [{"wxid": str(w), "name": str(n)} for w, n in names.items() if str(w) not in taken | listed]
+    out = [{"wxid": str(w), "name": str(n), **({"friend_add": hinted[str(w)]} if str(w) in hinted else {})}
+           for w, n in names.items() if str(w) not in taken | listed]
     return (fresh + sorted(out, key=lambda c: c["name"]))[:300]
 
 

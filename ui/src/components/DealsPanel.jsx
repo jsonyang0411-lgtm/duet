@@ -58,7 +58,10 @@ function RegisterCard({ d, onDone }) {
   const hours = d?.catchup_hours ?? 12
   const pick = (value) => {
     const c = candidates.find((x) => x.wxid === value)
-    if (c) { setWxid(c.wxid); setName((n) => n || c.name) }
+    if (c) {
+      setWxid(c.wxid); setName((n) => n || c.name)
+      if (withDouyin && c.friend_add?.aweme_id) setDouyin(c.friend_add.aweme_id)   // 加微信: her 抖音号 comes along
+    }
   }
   const add = async () => {
     setBusy(true)
@@ -82,7 +85,8 @@ function RegisterCard({ d, onDone }) {
               <div key={c.wxid} className="row prm-new-friend" style={{ gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' }}>
                 <span className="tag cy">新好友</span>
                 <div className="grow" style={{ minWidth: 0 }}>
-                  <div><b>{c.name}</b> <span className="mono dim">{c.wxid}</span></div>
+                  <div><b>{c.name}</b> <span className="mono dim">{c.wxid}</span>
+                    {c.friend_add && <span className="tag warn" style={{ marginLeft: 6 }}>{`${c.friend_add.level_label || '可能是她'}：百应的${c.friend_add.nickname || '达人'}（#${c.friend_add.id}）`}</span>}</div>
                   <div className="dim">{c.how_label}{c.added_at ? ` · ${fmtClock(c.added_at)} 加上的` : ''}</div>
                   <div className={c.verify_text ? '' : 'dim'} style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
                     验证消息：{c.verify_text || '（没有）'}

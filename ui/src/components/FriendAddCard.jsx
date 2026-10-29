@@ -81,6 +81,12 @@ function FriendAddCard({ r, st, d, onDone }) {
         {invite && <div className="f-hint">邀约：{invite}</div>}
         <ContactLine r={r} full={full} onReveal={reveal} onHide={() => setFull(null)} />
         <StateNote r={r} st={st} />
+        {r.candidate?.wxid && r.can_link && (
+          <CandidateNote r={r} busy={busy}
+            onYes={() => act('link', { wxid: r.candidate.wxid, name: r.nickname },
+              r.link_on_accept ? '已登记并关联：她的抖音号记进合作单了' : '记下了是这个聊天')}
+            onNo={() => act('not_her', {}, '记下了：不是她，这个新好友不会再给这一条')} />
+        )}
 
         {addable && !editing && (
           <div className="stack" style={{ gap: 8 }}>
@@ -158,6 +164,26 @@ function FriendAddCard({ r, st, d, onDone }) {
       {linking && <LinkPicker r={r} d={d} busy={busy} onLink={(wxid, name) => act('link', { wxid, name },
         r.link_on_accept ? '已登记并关联：她的抖音号记进合作单了' : '记下了是这个聊天')} onCancel={() => setLinking(false)} />}
     </Card>
+  )
+}
+
+/** A new friend that may be her (the bot never links by itself): who, how she came, why, how sure. */
+function CandidateNote({ r, busy, onYes, onNo }) {
+  const c = r.candidate
+  return (
+    <Note kind={c.level === 'sure' ? 'ok' : 'warn'} icon={LinkSimple}>
+      <div className="stack prm-candidate" style={{ gap: 6 }}>
+        <div>
+          新好友「{c.name || c.wxid}」（<span className="mono">{c.wxid}</span>）{c.at ? `${fmtClock(c.at)} ` : ''}{c.how_label}；
+          {(c.evidence || []).join('；')} → <b>{c.level_label}</b>
+        </div>
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+          <button type="button" className="btn sm primary" disabled={busy} onClick={onYes}><CheckCircle />
+            {r.link_on_accept ? '是她，登记并关联' : '是她，记下这个聊天'}</button>
+          <button type="button" className="btn sm" disabled={busy} onClick={onNo}><X />不是她</button>
+        </div>
+      </div>
+    </Note>
   )
 }
 

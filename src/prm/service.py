@@ -1886,6 +1886,11 @@ class PrmService:
         out; never a number); the deal says so when her sample order knows another 抖音号 (``_creator_ids_notice``)."""
         made = link_creator(self._store, party, link, now=now)
         logger.info("PRM: party %d linked to a 抖音号 (%s%s)", party["id"], link["source"], "" if made else ", known already")
+        if link["source"] == "register":           # registered by hand with the 抖音号 a 加微信 record waits for
+            try:
+                self.friend_adds.linked_by_register(party, link["account"], party["wxid"])
+            except Exception:
+                logger.exception("PRM: the 加微信 records of party %d's 抖音号 could not be closed", party["id"])
 
     def unlink_creator(self, party_id: int, account: str) -> dict:
         """取消关联 from the console (``unlink_creator``)."""

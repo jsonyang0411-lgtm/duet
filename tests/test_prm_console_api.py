@@ -474,3 +474,29 @@ def test_a_stopped_bot_shows_the_records_but_adds_and_reveals_nothing(tmp_path, 
     store = PrmStore(tmp_path / "data" / "prm.db")
     assert [l["account"] for l in store.creator_links(out["party"]["id"])] == ["dy_demo03"]
     store.close()
+
+
+def test_a_new_friend_a_record_points_at_is_marked_in_the_candidates_and_not_her_clears_it(adds, tmp_path):
+    """功能 R step 5: 登记达人's new friends show 「可能是百应的小鹿（#1）」 (and 选这个 brings her 抖音号); 不是她 clears it."""
+    from src.wechat.new_friends import NewFriendService
+
+    paste()
+    call("/api/prm/friend-adds", "POST", {"id": 1, "action": "add"})
+    service = NewFriendService(SimpleNamespace(), _friends(tmp_path, adds.clock.now), clock=adds.clock)
+    server.register_new_friends(service)
+    try:
+        adds.prm.friend_adds.on_new_friend({"wxid": "meimei_88", "name": "小美美", "how": "requested",
+                                             "own_greeting": "您好小鹿，百应上联系您的～", "added_at": adds.clock.now})
+        d = call("/api/prm")[1]
+        [r] = d["friend_adds"]
+        assert r["candidate"]["wxid"] == "meimei_88" and r["candidate"]["level_label"] == "确定是她"
+        marked = next(c for c in d["candidates"] if c["wxid"] == "meimei_88")
+        assert marked["friend_add"] == {"id": 1, "nickname": "小鹿", "aweme_id": "dy_demo01", "level": "sure",
+                                        "level_label": "确定是她"}
+        assert "friend_add" not in next(c for c in d["candidates"] if c["wxid"] == "wxid_new01")
+        assert call("/api/prm/friend-adds", "POST", {"id": 1, "action": "not_her"})[1]["ok"] is True
+        d = call("/api/prm")[1]
+        assert d["friend_adds"][0]["candidate"] == {}
+        assert "friend_add" not in next(c for c in d["candidates"] if c["wxid"] == "meimei_88")
+    finally:
+        server.register_new_friends(None)

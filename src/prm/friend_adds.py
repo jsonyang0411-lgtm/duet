@@ -29,6 +29,15 @@ The safety rules (design §6):
 - the full numbers are on disk only in ``friend_adds.wechat / phone`` (``add_friend`` needs them): cleared when she is
   linked or dropped, 14 days after a request she did not accept, 7 days after nobody touched the record, 30 days at
   most; the logs, the console, the events and the admin's answers only ever have the masked form.
+
+Who she is once she accepted (design §7): the new-friend scan (src/wechat/new_friends.py) hands every new friend to
+``on_new_friend``; it only writes a ``candidate`` on the one record she fits best, with how sure (``sure``: the 微信号
+she gave is the new friend's wxid, or she accepted our request and our greeting in the new chat is this record's own
+greeting, word for word, used by no other open record; ``likely``: she accepted our request and this is the only one
+waiting for that, or a friend appeared within 2 minutes of an add that saw no application window; ``possible``: she
+added us and her greeting names her 百应 nickname, her 抖音号 or 百应 / 抖音 / 邀约, or her WeChat name is like her 百应
+nickname) and why.  Never more: linking is always an operator's 「是她，登记并关联」 (user, 2026-10-29); 「不是她」
+clears it and that friend is not offered for the record again.
 """
 
 from __future__ import annotations
@@ -90,6 +99,7 @@ REASONS = {
     "requested_days": "申请发出去 14 天她还没通过，号码按规定清除了",
     "untouched_days": "7 天没人处理，号码按规定清除了",
     "max_days": "留了 30 天，号码按规定清除了",
+    "registered_by_hand": "在「登记达人」里填了这个抖音号，一起关联了",
 }
 
 # ── settings (src/config.py; the tests' config objects have none: the defaults) ─
@@ -110,6 +120,13 @@ CLOSED_SHOWN = 20                  # ended records the console lists
 ADMIN_LISTED = 10
 INVITED_KEYS = ("aweme_id", "invited_at", "plan_id", "attempt", "category", "products", "commission_rate")
 CATEGORY_LABELS = {"small": "小达人", "mid": "中大博主", "big": "大主播/专场型"}   # tools/creator_invite's three
+SURE, LIKELY, POSSIBLE = "sure", "likely", "possible"
+LEVELS = {SURE: "确定是她", LIKELY: "很可能是她", POSSIBLE: "可能是她"}
+LEVEL_RANK = {POSSIBLE: 1, LIKELY: 2, SURE: 3}
+HINT_WORDS = ("百应", "抖音", "邀约", "精选联盟")           # in her greeting when she adds us: she may be one of ours
+NO_DIALOG_SEC = 120               # a friend this soon after an add that saw no application window may be that one
+HOW_LABELS = {"requested": "通过了我们的申请", "manual": "加了我们（手动通过的）", "auto_accept": "加了我们（机器人自动通过的）",
+              "unknown": "加上了（说不清是怎么加的）"}
 DAY = 86400
 
 
@@ -168,6 +185,11 @@ def invited_of(value) -> dict:
     if isinstance(rate, (int, float)) and not isinstance(rate, bool) and 0 <= rate <= 80:
         out["commission_rate"] = rate
     return out
+
+
+def _norm(text) -> str:
+    """A text compared word for word: one line per line, blanks collapsed, lower case."""
+    return "\n".join(" ".join(line.split()) for line in str(text or "").split("\n") if line.strip()).lower()
 
 
 def _local_midnight(now: float) -> float:
@@ -236,6 +258,7 @@ class FriendAdds:
         self._notify: Optional[Callable[[str], object]] = None
         self._lock = threading.RLock()               # a confirmation's checks and its compare-and-set; links
         self._last_sweep = 0.0
+        self._new_friends = None                     # the new-friend scan (``recent()``), for match_recent
 
     @staticmethod
     def _int(config, name: str, default: int, bounds: tuple) -> int:
@@ -246,6 +269,11 @@ class FriendAdds:
         return min(max(value, bounds[0]), bounds[1])
 
     # ── wiring (Bot.run) ──────────────────────────────────────────────────
+
+    def set_new_friends(self, source) -> None:
+        """The new-friend scan (Bot._start_new_friends): its ``recent()`` friends are looked at again when a record
+        is made or sent after she became a friend (``match_recent``)."""
+        self._new_friends = source
 
     def attach(self, admin=None, auto=None, notify: Optional[Callable[[str], object]] = None) -> None:
         """The admin handler (``add_friend_checked``, ``can_add_friends``), the auto-accept service (``paused_why``)
@@ -344,6 +372,7 @@ class FriendAdds:
         if made:
             logger.info("FriendAdds: #%d %s from 百应 (%s)", record["id"], record["state"],
                         contact.masked_line(values, head=source))
+            self.match_recent()
         return self._summary(record)
 
     def _registered_left_contact(self, party_id: int, values: dict, fields: dict, now: float) -> dict:
@@ -388,6 +417,7 @@ class FriendAdds:
                 masked=masked_contact(values), greeting=text, **self._values(values))
         logger.info("FriendAdds: #%d %s by %s (paste, %s)", record["id"], record["state"], actor,
                     contact.masked_line(values, head="paste") if values else "no number")
+        self.match_recent()
         return {"ok": True, "id": record["id"], "state": record["state"]}
 
     @staticmethod
@@ -520,6 +550,8 @@ class FriendAdds:
         if state == BLOCKED and by != "admin":
             self._tell(f"控制台加百应达人微信（#{add_id}）时微信提示「操作过于频繁」：自动同意好友和控制台加好友都暂停了。"
                        "先别再加好友、同意好友，过几个小时再发「自动同意好友 开」继续。")
+        if state in (REQUESTED, KNOWN, UNSURE):
+            self.match_recent()                       # (she may have been quicker than the scan)
 
     def _tell(self, text: str) -> None:
         if self._notify is None:
@@ -593,10 +625,18 @@ class FriendAdds:
                 self._store.clear_friend_add_values(record["id"], now=now)
             elif action == "link_on_accept":
                 self._store.update_friend_add(record["id"], now=now, link_on_accept=bool(data.get("on")))
+            elif action == "not_her":
+                wxid = str((record.get("candidate") or {}).get("wxid") or "")
+                if not wxid:
+                    raise FriendAddError(f"#{record['id']} 现在没有可能是她的新好友")
+                self._store.update_friend_add(record["id"], now=now, candidate={},
+                                              rejected=[*(record.get("rejected") or []), wxid][-20:])
             else:
                 raise FriendAddError(f"不认识的操作 {action}")
             after = self._store.friend_add(record["id"])
         logger.info("FriendAdds: #%d %s by %s -> %s", after["id"], action, actor, after["state"])
+        if action in ("sent_by_phone", "sent_already", "wait_her", "edit", "not_her"):
+            self.match_recent()
         return {"ok": True, "id": after["id"], "state": after["state"]}
 
     def _edit(self, record: dict, data: dict, now: float) -> None:
@@ -696,6 +736,7 @@ class FriendAdds:
                     changed += 1
                     logger.info("FriendAdds: #%d expired (%s): its numbers cleared", record["id"], why)
             changed += self._store.delete_friend_adds(closed_before=now - max(1, int(retention_days)) * DAY)
+        self.match_recent()
         return changed
 
     @staticmethod
@@ -711,6 +752,124 @@ class FriendAdds:
                 return ""
             return "untouched_days"
         return ""
+
+    # ── who she is (design §7): candidates, never a link ──────────────────
+
+    def on_new_friend(self, event) -> Optional[dict]:
+        """A new friend of this account (the scan's ``on_found``, copilot mode): the candidate it became, or None.  A
+        database error raises: the scan hands the event on again at its next look."""
+        if not self._enabled or not isinstance(event, dict) or not str(event.get("wxid") or "").strip():
+            return None
+        return self._place(dict(event), self._clock())
+
+    def match_recent(self) -> int:
+        """Look again at the scan's new friends of the last days (a record made, or sent, after she became a friend):
+        how many got a candidate.  Never raises."""
+        if not self._enabled or self._new_friends is None:
+            return 0
+        try:
+            friends = list(self._new_friends.recent())
+        except Exception:
+            logger.debug("FriendAdds: the new friends could not be read", exc_info=True)
+            return 0
+        placed = 0
+        for friend in sorted(friends, key=lambda f: float(f.get("added_at") or 0)):
+            try:
+                placed += int(self._place(dict(friend), self._clock()) is not None)
+            except Exception:
+                logger.warning("FriendAdds: a new friend could not be looked at", exc_info=True)
+        return placed
+
+    def _place(self, friend: dict, now: float) -> Optional[dict]:
+        """The record ``friend`` fits best gets her as its ``candidate`` (only one record at the best level; one with a
+        better candidate keeps it; a friend an operator said is not her is never offered for it again)."""
+        wxid = str(friend.get("wxid") or "").strip()
+        with self._lock:
+            if any(r.get("wxid") == wxid for r in self._store.friend_adds(states=(LINKED,))):
+                return None                           # linked already: that chat is somebody's
+            records = [r for r in self._store.friend_adds(states=(*OPEN, EXPIRED)) if self._linkable(r, now)]
+            judged = []
+            for record in records:
+                if wxid in (record.get("rejected") or []):
+                    continue
+                verdict = self._judge(record, friend, records)
+                if verdict is not None:
+                    judged.append((record, *verdict))
+            if not judged:
+                return None
+            best = max(LEVEL_RANK[level] for _, level, _ in judged)
+            top = [item for item in judged if LEVEL_RANK[item[1]] == best]
+            if len(top) > 1:
+                logger.info("FriendAdds: a new friend fits %d records equally; none is given her", len(top))
+                return None
+            record, level, evidence = top[0]
+            held = record.get("candidate") or {}
+            if held.get("wxid") == wxid and held.get("level") == level:
+                return None                           # (told already)
+            if held.get("wxid") and held.get("wxid") != wxid and LEVEL_RANK.get(held.get("level"), 0) >= LEVEL_RANK[level]:
+                return None                           # a candidate as good or better stays
+            candidate = {"wxid": wxid, "name": _clip(friend.get("name") or friend.get("remark"), 40),
+                         "how": str(friend.get("how") or "unknown"),
+                         "how_label": HOW_LABELS.get(str(friend.get("how") or ""), HOW_LABELS["unknown"]),
+                         "level": level, "level_label": LEVELS[level], "evidence": evidence,
+                         "at": friend.get("added_at"), "found_at": now}
+            self._store.update_friend_add(record["id"], now=now, candidate=candidate)
+        logger.info("FriendAdds: #%d a new friend %s… may be her (%s)", record["id"], wxid[:8], level)
+        return candidate
+
+    def _judge(self, record: dict, friend: dict, records: list) -> Optional[tuple]:
+        """How sure it is that ``friend`` is the creator of ``record``: ``(level, [why…])`` or None."""
+        wxid = str(friend.get("wxid") or "")
+        how = str(friend.get("how") or "")
+        added_at = float(friend.get("added_at") or 0)
+        if record.get("wechat") and record["wechat"].lower() == wxid.lower():
+            return SURE, ["她给的微信号就是这个新好友的微信号"]
+        asked = self._store.friend_attempts(add_id=record["id"])        # (newest first)
+        sent_at = float(record.get("requested_at") or 0) or (float(asked[0]["at"]) if asked else 0)
+        if how == "requested" and record["state"] in (REQUESTED, UNSURE, EXPIRED) and sent_at:
+            ours = _norm(friend.get("own_greeting"))
+            mine = _norm(record.get("greeting"))
+            if ours and mine and (ours == mine or mine in ours.split("\n")):
+                same = [r for r in records if _norm(r.get("greeting")) == mine]
+                if len(same) == 1:
+                    return SURE, ["她通过了我们的申请，新私聊里我方的打招呼和这份附言一字不差"]
+            waiting = [r for r in records if r["state"] in (REQUESTED, UNSURE)]
+            if record["state"] in (REQUESTED, UNSURE) and len(waiting) == 1 and (not added_at or added_at >= sent_at - 60):
+                return LIKELY, ["她通过了我们的申请，现在只有这一条在等她通过"]
+        if (record["state"] == UNSURE and record.get("reason") == "no_dialog" and asked
+                and 0 <= added_at - float(asked[0]["at"]) <= NO_DIALOG_SEC):
+            return LIKELY, ["加完以后 2 分钟内成了新好友（她可能设了加好友不用验证）"]
+        if how != "requested":
+            said = _norm(friend.get("verify_text"))
+            nick = _norm(record.get("nickname"))
+            words = [w for w in (nick if len(nick) >= 2 and not contact.has_masked(nick) else "",
+                                 _norm(record.get("aweme_id")), *HINT_WORDS) if w]
+            hits = [w for w in words if w in said]
+            if hits:
+                return POSSIBLE, [f"她加我们时的验证消息里有「{hits[0]}」"]
+            name = _norm(friend.get("name"))
+            if len(nick) >= 2 and len(name) >= 2 and not contact.has_masked(nick) and (nick in name or name in nick):
+                return POSSIBLE, ["她的微信名字和百应昵称像"]
+        return None
+
+    def linked_by_register(self, party: dict, account: str, wxid: str) -> int:
+        """登记达人 with her 抖音号 (``PrmService.register``'s ``link``, source register: an operator registered her by
+        hand, say after picking the new friend this record pointed at): the open records of that 抖音号 end
+        ``linked`` too (their numbers cleared).  Returns how many."""
+        now = self._clock()
+        done = 0
+        with self._lock:
+            deal = self._store.deal_of(party["id"], now)
+            for record in self._store.friend_adds(states=(*OPEN, EXPIRED), aweme_id=account):
+                if record["state"] == ADDING or not self._linkable(record, now):
+                    continue
+                if self._store.move_friend_add(record["id"], (record["state"],), LINKED, now=now, wxid=wxid,
+                                               linked_at=now, closed_at=now, party_id=party["id"], deal_id=deal["id"],
+                                               reason="registered_by_hand"):
+                    self._store.clear_friend_add_values(record["id"], now=now)
+                    done += 1
+                    logger.info("FriendAdds: #%d linked: she was registered by hand with this 抖音号", record["id"])
+        return done
 
     # ── the console, the admin ────────────────────────────────────────────
 

@@ -781,6 +781,54 @@ class TestPrmPages:
         page.wait_for_timeout(1500)
         assert prm.service.store.creator_links(party["id"]) == []
 
+    def test_review_page_shows_who_may_be_her_and_only_an_operator_links_her(self, page, prm, tmp_path):
+        """功能 R step 5: a new friend that fits a record is shown on its card (how sure, why); 不是她 clears it;
+        是她，登记并关联 registers her; 登记达人's list marks the new friend and 选这个 brings her 抖音号."""
+        from src.wechat.new_friends import NewFriendService, NewFriendStore
+        from src.web import server as web_server
+
+        adds, _ = self._friend_adds_on(prm)
+        adds.paste("dy_demo01", "小鹿", {"wechat": "abcdefyz"})
+        adds.confirm(1)
+        now = prm.clock.now
+        store = NewFriendStore(str(tmp_path / "messages.db"))
+        for wxid, name in (("wxid_wrong01", "路人甲"), ("wxid_xiaolu", "小鹿🌸")):
+            store.add(wxid=wxid, name=name, remark="", how="requested", kind="requested", added_at=now, verify_from=None,
+                      verify_text="", found_at=now)
+        web_server.register_new_friends(NewFriendService(object(), store, clock=prm.clock))
+        try:
+            adds.on_new_friend({"wxid": "wxid_wrong01", "name": "路人甲", "how": "requested", "own_greeting": "",
+                                "added_at": now})
+            page.goto(f"{BASE_URL}/#/review", timeout=10000)
+            page.wait_for_timeout(1500)
+            card = page.locator(".prm-friend-add", has_text="小鹿")
+            note = card.locator(".prm-candidate").inner_text()
+            assert "新好友「路人甲」" in note and "很可能是她" in note and "只有这一条在等她通过" in note
+            card.locator(".prm-candidate button:has-text('不是她')").click()
+            page.wait_for_timeout(1200)
+            assert adds._store.friend_add(1)["rejected"] == ["wxid_wrong01"] and card.locator(".prm-candidate").count() == 0
+            assert prm.service.store.parties()[1:] == []                  # nobody registered by itself
+            adds.on_new_friend({"wxid": "wxid_xiaolu", "name": "小鹿🌸", "how": "requested",
+                                "own_greeting": "您好小鹿，百应上联系您的～", "added_at": now + 5})
+            page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+            page.wait_for_timeout(1500)
+            row = page.locator(".prm-new-friend", has_text="wxid_xiaolu")
+            assert "确定是她：百应的小鹿（#1）" in row.inner_text()
+            row.locator("button:has-text('选这个')").click()
+            assert page.locator("input[aria-label='达人抖音号（可选）']").input_value() == "dy_demo01"
+            page.goto(f"{BASE_URL}/#/review", timeout=10000)
+            page.wait_for_timeout(1500)
+            card = page.locator(".prm-friend-add", has_text="小鹿")
+            assert "确定是她" in card.locator(".prm-candidate").inner_text()
+            card.locator(".prm-candidate button:has-text('是她，登记并关联')").click()
+            page.wait_for_timeout(1500)
+            party = prm.service.store.party_by_wxid("wxid_xiaolu")
+            assert party["name"] == "小鹿" and adds._store.friend_add(1)["state"] == "linked"
+            assert [l["account"] for l in prm.service.store.creator_links(party["id"])] == ["dy_demo01"]
+            assert page.locator(".prm-friend-add").count() == 0
+        finally:
+            web_server.register_new_friends(None)
+
     def test_with_the_switch_off_the_pages_have_nothing_of_it(self, page, prm):
         page.goto(f"{BASE_URL}/#/deals", timeout=10000)
         page.wait_for_timeout(1500)
