@@ -155,7 +155,13 @@ BUYIN_ERRORS = 3                            # failed rounds in a row (a hiccup) 
 BUYIN_RISK_PAUSE_SEC = 3600                 # after a risk wall (76): the next round waits this long at least
 BUYIN_CONV_TRIES = 3                        # rounds in a row one conversation fails before it is skipped (the deal says so)
 BUYIN_LOG_EVERY_SEC = 600                   # a held conversation that keeps failing to be drafted: logged this seldom
-BUYIN_KINDS = {"card": "[卡片]", "other": "[其他消息]"}
+BUYIN_KINDS = {"card": "[卡片]", "contact": "[联系方式卡片]", "other": "[其他消息]"}
+# A creator's contact card (kind "contact") is recorded only masked (``buyin_contact_line``): its WeChat id and phone in
+# full live only in memory while a round is taken in, and in the ``on_buyin_contact`` call (never in prm.db, events,
+# notices, pii tokens, relay jobs or logs).  A WeChat id she types in her own words is not masked (pii masks phone and
+# ID numbers only): a known gap (tools/claude_relay/README.md「百应私信」).
+BUYIN_CONTACT_UNREAD = "[联系方式卡片]（这次没读到号码）"
+BUYIN_CONTACT_OWN = "[联系方式卡片]（卡片上只有店铺自己的联系方式）"
 # What the 待审批 page says when a round could not be made (until one goes through).
 BUYIN_PROBLEMS = {
     "login": "抖音百应登录失效（退出码 77），百应私信读不了：请在 Mac 的调试 Chrome 里重新登录百应；登录好以后这条提醒自己消失",
@@ -694,19 +700,56 @@ def buyin_packet_out(store: PrmStore, p: dict) -> Optional[dict]:
             "lines": int(meta.get("lines") or 0), "replied_at": shop if shop and shop > upto else None}
 
 
+def buyin_mask_wechat(value) -> str:
+    """A WeChat id as the bot keeps and shows it: its first 2 and last 2 characters (shorter than 5: ****)."""
+    text = str(value or "").strip()
+    return "****" if len(text) < 5 else f"{text[:2]}****{text[-2:]}"
+
+
+def buyin_mask_phone(value) -> str:
+    """A phone as the bot keeps and shows it: 3 digits, ****, the last 4 (shorter than 8: ****, as 3 + 4 would show all
+    of it)."""
+    text = str(value or "").strip()
+    return "****" if len(text) < 8 else f"{text[:3]}****{text[-4:]}"
+
+
+def buyin_contact_line(contact, add_id: Optional[int] = None) -> str:
+    """A creator's 百应 contact card as the bot records it: "[联系方式卡片] 微信号 ab****yz、手机 138****0001", with
+    "（加微信 #<id>）" when ``on_buyin_contact`` gave an id; ``BUYIN_CONTACT_UNREAD`` when the card's values were not
+    read, ``BUYIN_CONTACT_OWN`` when it held only the shop's own (``platforms.im_strip_own``).  Never a full value."""
+    contact = contact if isinstance(contact, dict) else {}
+    parts = []
+    if not contact.get("unavailable"):
+        if contact.get("wechat"):
+            parts.append(f"微信号 {buyin_mask_wechat(contact['wechat'])}")
+        if contact.get("phone"):
+            parts.append(f"手机 {buyin_mask_phone(contact['phone'])}")
+    if parts:
+        line = "[联系方式卡片] " + "、".join(parts)
+    else:
+        line = BUYIN_CONTACT_OWN if contact.get("why") == "own" else BUYIN_CONTACT_UNREAD
+    return line + (f"（加微信 #{add_id}）" if add_id is not None else "")
+
+
 def buyin_out(store: PrmStore, now: float) -> dict:
     """What the 待审批 page says of the 百应 private messages (PRM_BUYIN_SYNC_MIN): why the last rounds could not be
-    made (``status``, None when the last one went through), when the last round was asked for, and the conversations
-    of nobody on the list whose lines wait for an answer (``unmatched``: their 百应 nicknames, when the CLI gave them;
-    nothing of what they wrote is kept)."""
+    made (``status``, None when the last one went through), when the last round was asked for, the conversations
+    of nobody on the list whose lines wait for an answer (``unmatched``: their 百应 nicknames, when the CLI gave them,
+    and ``invited`` when one is our invite: her 抖音号, when and by which plan; nothing of what they wrote is kept),
+    and how many contact cards came in the conversations that are not ours (``others_contacts``: neither on the list
+    nor our invite; their values are never kept)."""
     status = _json_value(store.meta_value("buyin_status"))
-    waiting = [t for t in store.buyin_threads(matched=False) if int(t.get("unanswered") or 0) > 0
+    unmatched = store.buyin_threads(matched=False)
+    waiting = [t for t in unmatched if int(t.get("unanswered") or 0) > 0
                and now - float(t.get("last_creator_at") or now) <= BUYIN_UNMATCHED_DAYS * 86400]
     return {"status": status if isinstance(status, dict) and status.get("text") else None,
             "asked_at": _float(store.meta_value("buyin_sync_at")),
-            "unmatched": [{"name": t["nickname"], "count": int(t["unanswered"]), "at": t.get("last_creator_at")}
+            "unmatched": [{"name": t["nickname"], "count": int(t["unanswered"]), "at": t.get("last_creator_at"),
+                           "invited": {k: str(t["invited"].get(k) or "") for k in ("aweme_id", "invited_at", "plan_id")}
+                           if t.get("invited") else None}
                           for t in waiting[:20]],
-            "unmatched_count": len(waiting)}
+            "unmatched_count": len(waiting),
+            "others_contacts": sum(int(t.get("contacts") or 0) for t in unmatched if not t.get("invited"))}
 
 
 class PrmService:
@@ -773,11 +816,13 @@ class PrmService:
         # 抖店 sample orders found (``_creator_ids``)
         self.creator_directory: Optional[Callable[[], list]] = None
         # 加百应达人微信 (PRM_FRIEND_ADD, default off; src/prm/friend_adds.py): the records, one add_friend per
-        # confirmation (Bot.run attaches the admin handler and the auto-accept).  ``on_buyin_contact(event)`` is the 百应
-        # inbox's hook: dy-im-inbox calls it for each new contact of a conversation we invited or of a registered
-        # creator (STEP 7, not wired yet: nothing calls it before dy-im-inbox's contact commit is merged)
+        # confirmation (Bot.run attaches the admin handler and the auto-accept)
         self.friend_adds = FriendAdds(self._store, config, clock=clock, register=self.register)
-        self.on_buyin_contact = self.friend_adds.offer_from_buyin
+        # on_buyin_contact(event) -> {"id", "state", "masked"} | None: told of each new contact card a creator sent in a
+        # 百应 conversation that is ours (our invite, or a registered creator's), with its values in full
+        # (``_buyin_contacts``), and of each contact she typed in her own words there: 加百应达人微信's offer_from_buyin
+        # (None while PRM_FRIEND_ADD is off: the card is recorded masked all the same).  None: nobody is told.
+        self.on_buyin_contact: Optional[Callable[[dict], Optional[dict]]] = self.friend_adds.offer_from_buyin
         # 批准并执行: checking that a 专属 action is not open already and starting it is one step
         self._approve_lock = threading.Lock()
         # Starting a 专属佣金 chain: looking whether it is under way and asking for its step is one step
@@ -3142,7 +3187,7 @@ class PrmService:
             why = _job_error(job)
             stopped = {"verdict": "old_worker" if "达人编号" in why else "error", "exit_code": None, "message": why}
         summary = {"conversations": 0, "messages": 0, "drafts": 0, "recorded": 0, "unmatched": 0, "failed": 0,
-                   "skipped": 0}
+                   "skipped": 0, "invited": 0, "contacts": 0, "others_contacts": 0}
         why = ""
         with self._buyin_lock:
             if result is not None:
@@ -3173,8 +3218,10 @@ class PrmService:
             {"op": BUYIN_OP, "summary": summary, "stopped": stopped}, ensure_ascii=False))
         if result is not None:
             logger.info("PRM: 百应 inbox #%d: %d conversation(s), %d new message(s), %d draft job(s), %d recorded only, "
-                        "%d of nobody on the list", job["id"], summary["conversations"], summary["messages"],
-                        summary["drafts"], summary["recorded"], summary["unmatched"])
+                        "%d of nobody on the list, %d our invite(s); %d contact card(s) in ours, %d in others'",
+                        job["id"], summary["conversations"], summary["messages"], summary["drafts"],
+                        summary["recorded"], summary["unmatched"], summary["invited"], summary["contacts"],
+                        summary["others_contacts"])
         return True
 
     def _buyin_index(self) -> dict:
@@ -3232,7 +3279,14 @@ class PrmService:
         draft job (``_buyin_draft_job``).  The messages count as seen only once that is done (a job that could not be
         queued raises: they come again with the next round).  Nobody's on the list: no party is made (a wxid cannot
         be made up, and the 达人名单 would get it); only her nickname, how many of her lines wait since our last one
-        and when, for the 待审批 page's line (none of her words is kept)."""
+        and when, for the 待审批 page's line (none of her words is kept), and our invite when it is one.
+
+        Who she is: her 抖音 UID / 抖音号 as this round or an earlier one gave them (the 百应 page itself gives neither,
+        only her 百应 id: the Mac's invite ledger match gives her 抖音号 while our invite card is in what it read, and
+        the conversation keeps it, with ``invited``, after the card has scrolled out).  Her contact cards (kind
+        "contact") are recorded only masked (``buyin_contact_line``); in a conversation that is ours (our invite, or a
+        registered creator's) each new one goes to ``on_buyin_contact`` with its values (``_buyin_contacts``), in any
+        other only their number is kept (``others_contacts``)."""
         cid = conv["conversation_id"]
         creator = conv["creator"]
         thread = self._store.buyin_thread(cid) or {}
@@ -3240,16 +3294,28 @@ class PrmService:
         new = [m for m in conv["messages"] if m["id"] not in known]
         summary["conversations"] += 1
         summary["messages"] += len(new)
-        party = self._buyin_party(creator, index)
         stamp = [(m, float(m["at"] or now)) for m in new]
         hers = [at for m, at in stamp if m["from"] == "creator"]
         ours = [at for m, at in stamp if m["from"] == "shop"]
+        invited = conv.get("invited") or thread.get("invited") or None
         fields = {"nickname": pii.mask_numbers(creator.get("nickname") or "") or thread.get("nickname") or "",
                   "creator_uid": creator.get("uid") or thread.get("creator_uid") or "",
                   "aweme_id": creator.get("aweme_id") or thread.get("aweme_id") or "",
+                  "buyin_id": creator.get("buyin_id") or thread.get("buyin_id") or "", "invited": invited,
                   "seen": [*(thread.get("seen") or []), *(m["id"] for m in new)][-BUYIN_SEEN:],
                   "last_creator_at": max([float(thread.get("last_creator_at") or 0), *hers]) or None,
                   "last_shop_at": max([float(thread.get("last_shop_at") or 0), *ours]) or None}
+        party = self._buyin_party({"uid": fields["creator_uid"], "aweme_id": fields["aweme_id"]}, index)
+        if conv.get("invited"):
+            summary["invited"] += 1
+        cards = [(m, at) for m, at in stamp if m["kind"] == "contact"]
+        added: dict = {}
+        if cards and party is None and invited is None:
+            summary["others_contacts"] += len(cards)    # somebody else's conversation: not ours to handle
+            fields["contacts"] = int(thread.get("contacts") or 0) + len(cards)
+        elif cards:
+            summary["contacts"] += len(cards)
+            added = self._buyin_contacts(cid, cards, fields, party, invited)
         if party is None:
             waiting = int(thread.get("unanswered") or 0) if thread.get("party_id") is None else 0
             for m, _ in sorted(stamp, key=lambda pair: pair[1]):
@@ -3263,7 +3329,10 @@ class PrmService:
         for m, at in sorted(stamp, key=lambda pair: pair[1]):
             if m["id"] in recorded:
                 continue                               # (recorded by a round whose job could not be queued)
-            text = self._mask(party["id"], f"[{_clock_text(at)}] {self._buyin_text(m)}", now)
+            if m["kind"] == "contact":                 # masked here, never through the pii tokens (they keep values)
+                text = f"[{_clock_text(at)}] {buyin_contact_line(m.get('contact'), added.get(m['id']))}"
+            else:
+                text = self._mask(party["id"], f"[{_clock_text(at)}] {self._buyin_text(m)}", now)
             self._store.add_event(deal["id"], party["id"], "buyin_message", {
                 "conversation": cid, "id": m["id"], "from": m["from"], "kind": m["kind"], "text": text, "at": at},
                 actor="creator" if m["from"] == "creator" else "operator", now=now)
@@ -3274,6 +3343,45 @@ class PrmService:
             self._buyin_draft_job(party, deal, cid, now, summary, answered=answered, nickname=fields["nickname"])
         self._store.save_buyin_thread(cid, now, party_id=party["id"], deal_id=deal["id"], unanswered=0, **fields)
         self._buyin_notices_answered(deal["id"], cid, answered, now)
+
+    def _buyin_contacts(self, cid: str, cards: list, fields: dict, party: Optional[dict],
+                        invited: Optional[dict]) -> dict:
+        """Tell ``on_buyin_contact`` (when it is set) of each new contact card ``cards`` (``[(message, at)]``) of a 百应
+        conversation that is ours, once per message the conversation had not seen (calling it again for the same one,
+        after a round that could not be taken in, is for the hook to bear).  The event::
+
+            {"source": "buyin_card", "conversation_id", "message_id", "at",
+             "creator": {"aweme_id", "uid": <her 百应 id or "">, "nickname": <numbers masked>},
+             "contact": {"wechat": <full or "">, "phone": <full or "">, "unavailable": bool, "why": <str or "">},
+             "party_id": <the registered creator's id or None>, "invited": <our invite or None>}
+
+        Its answer ``{"id": int, "state", "masked"}`` gives the id the masked line names (message id -> id); a hook
+        that raises is logged without any value and the round goes on."""
+        hook = getattr(self, "on_buyin_contact", None)
+        if not callable(hook):
+            return {}
+        out = {}
+        for m, at in cards:
+            contact = m.get("contact") if isinstance(m.get("contact"), dict) else {"unavailable": True, "why": "unknown"}
+            unavailable = bool(contact.get("unavailable")) or not (contact.get("wechat") or contact.get("phone"))
+            event = {"source": "buyin_card", "conversation_id": cid, "message_id": m["id"], "at": at,
+                     "creator": {"aweme_id": fields["aweme_id"], "uid": fields["buyin_id"],
+                                 "nickname": fields["nickname"]},
+                     "contact": {"wechat": "" if unavailable else str(contact.get("wechat") or ""),
+                                 "phone": "" if unavailable else str(contact.get("phone") or ""),
+                                 "unavailable": unavailable,
+                                 "why": str(contact.get("why") or "unknown") if unavailable else ""},
+                     "party_id": party["id"] if party is not None else None,
+                     "invited": dict(invited) if invited else None}
+            try:
+                answer = hook(event)
+            except Exception as e:                     # never the values: the event holds them, the message may too
+                logger.warning("PRM: on_buyin_contact failed on a 百应 contact card (%s); the round goes on",
+                               type(e).__name__)
+                continue
+            if isinstance(answer, dict) and isinstance(answer.get("id"), int) and not isinstance(answer["id"], bool):
+                out[m["id"]] = answer["id"]
+        return out
 
     def _buyin_lines(self, deal_id: int, cid: str) -> list:
         """The conversation's lines the deal recorded (``buyin_message`` events: masked), oldest first."""
@@ -3377,7 +3485,9 @@ class PrmService:
             summary["skipped"] += 1
             hers = [float(m["at"] or now) for m in new if m["from"] == "creator"]
             try:
-                party = self._buyin_party(conv["creator"], index)
+                party = self._buyin_party({"uid": conv["creator"].get("uid") or thread.get("creator_uid") or "",
+                                           "aweme_id": conv["creator"].get("aweme_id") or thread.get("aweme_id") or ""},
+                                          index)
             except Exception:
                 party = None
             if party is not None and hers:

@@ -22,7 +22,8 @@ When claude needs an approval (wechat_approval, on by default), its
 PermissionRequest hook is this script again (--permission-hook): it sends the
 request to the bot, the bot asks in WeChat, and the answer allows or denies the
 step.  No answer within approval_timeout_min minutes is a denial.  A result is written to the
-outbox first and sent until the bot has it, so a Windows restart loses nothing.
+outbox first and sent until the bot has it, so a Windows restart loses nothing (but a 抖音百应
+inbox answer, MEMORY_ONLY_OPS: the creators' contact numbers in full are never written here).
 
 PRM jobs (kind "prm", PRM_COPILOT on the bot): a registered creator's messages,
 for a drafted reply.  The text is somebody else's, so the job runs locked down
@@ -2061,9 +2062,13 @@ def do_buyin_inbox_job(settings: dict, job: dict, client: RelayClient, meta: dic
     """``meta.op == "buyin_inbox"`` (the bot's PRM_BUYIN_SYNC_MIN): the new 抖音百应 private messages after the bot's
     ``meta.cursor``, without the model: `dy buyin im-inbox` (read-only, never --execute) under the Mac's platform CLI
     lock (``platforms.im_inbox``).  The answer is ``platforms.im_result``'s JSON: the conversations as the CLI gave
-    them (the bot masks numbers before anything is stored or drafted, and keeps only a summary of this answer), the
-    next cursor; a login lapsed (77), a risk wall (76), another shop (79), a CLI without the command (``unavailable``)
-    in ``stopped``.  Nothing of the creators' words is logged or written to a file here."""
+    them (the creators' contact cards with their WeChat ids and phones in full, the shop's own contact taken out; the
+    bot masks numbers before anything is stored or drafted, and keeps only a summary of this answer), the ones that
+    are our invites marked from the batch invite tool's ledger (the same ledger as ``invite_context``: her 抖音号,
+    ``invited``), the next cursor; a login lapsed (77), a risk wall (76), another shop (79), a CLI without the
+    command (``unavailable``), the chat page not open / its connection down / its code changed in ``stopped``.
+    Nothing of the creators' words is logged or written to a file here: the log has counts, and the answer goes to
+    the bot from memory, never through the outbox (``MEMORY_ONLY_OPS``)."""
     if platforms is None:
         return {"ok": False, "text": "", "error": "这台 Mac 的 worker 没有平台模块（src/prm/platforms.py）",
                 "duration_s": 0}
@@ -2074,16 +2079,20 @@ def do_buyin_inbox_job(settings: dict, job: dict, client: RelayClient, meta: dic
         limit = int(meta.get("limit") or platforms.IM_LIMIT)
     except (TypeError, ValueError):
         limit = platforms.IM_LIMIT
+    ledger = invite_context(settings)["invite_ledger"]
     try:
         with _cli_lock(beat):
-            result = platforms.im_inbox(cfg, meta.get("cursor"), limit=limit, heartbeat=beat)
+            result = platforms.im_inbox(cfg, meta.get("cursor"), limit=limit, heartbeat=beat, ledger=ledger,
+                                        warn=log.warning)
     except (TimeoutError, platforms.Cancelled) as e:     # another platform command kept the lock, or a cancel
         verdict = "cancelled" if isinstance(e, platforms.Cancelled) else "busy"
         result = platforms.im_result(stopped={"verdict": verdict, "exit_code": None, "message": str(e)})
     stopped = result.get("stopped") or {}
     conversations = result.get("conversations") or []
-    log.info("#%s 百应 inbox: %d conversation(s), %d message(s)%s", job["id"], len(conversations),
-             sum(len(c.get("messages") or []) for c in conversations),
+    log.info("#%s 百应 inbox: %d conversation(s), %d message(s), %d contact card(s), %d matched to an invite%s",
+             job["id"], len(conversations), sum(len(c.get("messages") or []) for c in conversations),
+             sum(1 for c in conversations for m in c.get("messages") or [] if m.get("kind") == "contact"),
+             sum(1 for c in conversations if c.get("invited")),
              f"; stopped ({stopped.get('verdict')}, exit {stopped.get('exit_code')})" if stopped else "")
     return {"ok": True, "text": json.dumps(result, ensure_ascii=False), "duration_s": round(time.monotonic() - started, 1)}
 
@@ -2423,10 +2432,30 @@ def run_permission_hook() -> int:
 
 # ── delivery that survives restarts ──────────────────────────────────────
 
+# Jobs whose result never goes through the outbox: a 百应 inbox answer holds the creators' words and their contact
+# cards' WeChat ids and phones in full, so it is sent from memory only (``deliver_from_memory``), never written to a
+# file on this Mac.  When the worker stops before the bot has it, it is lost, and that is all right: the bot's cursor
+# did not move (it moves only with an answer it took in), so its next round reads the same messages again.
+MEMORY_ONLY_OPS = ("buyin_inbox",)
+
+
+def memory_only(job: dict) -> bool:
+    """Is ``job``'s result one that is never written to the outbox (``MEMORY_ONLY_OPS``)?"""
+    meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
+    return str(job.get("kind") or "") == "prm" and meta.get("op") in MEMORY_ONLY_OPS
+
+
 def outbox_dir() -> Path:
     folder = HOME_DIR / OUTBOX_NAME
     folder.mkdir(parents=True, exist_ok=True)
     return folder
+
+
+def deliver_from_memory(client: RelayClient, job_id: int, result: dict, stopper: Stopper) -> bool:
+    """Send a ``memory_only`` result until the bot has it, retrying like ``deliver``, without ever touching the outbox:
+    lost when the worker stops first (the bot reads the same again in its next round, ``MEMORY_ONLY_OPS``)."""
+    return _send_until_taken(client, job_id, result, stopper, None,
+                             lost="it is never written to the outbox; the bot reads the same again next round")
 
 
 def deliver(client: RelayClient, job_id: int, result: dict, stopper: Stopper) -> bool:
@@ -2465,9 +2494,10 @@ def flush_one(client: RelayClient, path: Path, stopper: Stopper) -> bool:
     return _send_until_taken(client, job_id, result, stopper, path)
 
 
-def _send_until_taken(client: RelayClient, job_id: int, result: dict, stopper: Stopper, path: Path | None) -> bool:
+def _send_until_taken(client: RelayClient, job_id: int, result: dict, stopper: Stopper, path: Path | None,
+                      lost: str = "the outbox could not hold it") -> bool:
     """Send a result until the bot has it (then its outbox copy ``path`` goes); False when the worker
-    stops first (the copy stays for the next start; without one the result is lost, and said so)."""
+    stops first (the copy stays for the next start; without one the result is lost, and said so: ``lost``)."""
     backoff = 5
     while True:
         try:
@@ -2481,8 +2511,7 @@ def _send_until_taken(client: RelayClient, job_id: int, result: dict, stopper: S
             if path is not None:
                 log.info("#%s result stays in %s for the next start", job_id, path)
             else:
-                log.error("#%s result lost: the worker stopped before the bot had it (the outbox could not hold it)",
-                          job_id)
+                log.error("#%s result lost: the worker stopped before the bot had it (%s)", job_id, lost)
             return False
         backoff = min(backoff * 2, MAX_BACKOFF_SEC)
 
@@ -2545,7 +2574,10 @@ def serve(settings: dict, client: RelayClient, stopper: Stopper, once: bool = Fa
         except Exception as e:
             log.exception("#%s failed in the worker", job.get("id"))
             result = failure_result(job, e)
-        deliver(client, int(job["id"]), result, stopper)
+        if memory_only(job):                             # (a 百应 inbox answer: never a file on this Mac)
+            deliver_from_memory(client, int(job["id"]), result, stopper)
+        else:
+            deliver(client, int(job["id"]), result, stopper)
         if once:
             return
 

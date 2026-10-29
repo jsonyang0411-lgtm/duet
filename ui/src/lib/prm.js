@@ -105,16 +105,26 @@ export function eventText(ev, stages = {}, modes = {}, shipmentStates = {}) {
   }
 }
 
-/** What the 待审批 page says of the 百应 private messages: why they cannot be read, who wrote that is not on the list. */
+/** One creator of the 百应 line below: her nickname, and when the conversation is our invite (the Mac's invite ledger), her 抖音号 and when. */
+function buyinWho(u) {
+  const inv = u?.invited
+  if (!inv) return u?.name || ''
+  const when = String(inv.invited_at || '').slice(5, 16).replace('T', ' ')
+  return `${u.name || '（没有昵称）'}（我们邀约的 · 抖音号 ${inv.aweme_id}${when ? ` · ${when} 邀约` : ''}）`
+}
+
+/** What the 待审批 page says of the 百应 private messages: why they cannot be read, who wrote that is not on the list
+ *  (our invites marked), how many contact cards came in conversations that are not ours. */
 export function buyinNotes(d) {
   const b = d?.buyin
   if (!b || !d?.buyin_sync_min) return []
   const out = []
   if (b.status?.text) out.push(['warn', b.status.text])
   if (b.unmatched_count > 0) {
-    const names = (b.unmatched || []).map((u) => u.name).filter(Boolean)
+    const names = (b.unmatched || []).map(buyinWho).filter(Boolean)
     out.push(['', `百应里有 ${b.unmatched_count} 位没登记的达人发了消息，到百应里看${names.length ? `：${names.join('、')}` : ''}（登记了抖音号的达人才会起草）`])
   }
+  if (b.others_contacts > 0) out.push(['', `别人邀约的会话里有 ${b.others_contacts} 张联系方式卡片，不归我们处理`])
   return out
 }
 
