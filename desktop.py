@@ -17,6 +17,17 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            import ctypes
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
 if getattr(sys, "frozen", False):
     PROJECT_ROOT = Path(sys.executable).resolve().parent
 

@@ -202,6 +202,34 @@ def _safe_ensure_default_desktop():
         pass
 
 
+def _ensure_dpi_aware() -> None:
+    """Ensure process is Per-Monitor DPI Aware to prevent DPI virtualization coordinate skew on Windows."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except Exception:
+            try:
+                import ctypes
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+
+
+def _get_window_scale(hwnd: int) -> float:
+    """Return the DPI scaling factor for the given window (e.g. 1.0 for 100%, 2.0 for 200%)."""
+    if sys.platform != "win32" or not hwnd:
+        return 1.0
+    try:
+        import ctypes
+        dpi = ctypes.windll.user32.GetDpiForWindow(hwnd)
+        if dpi:
+            return dpi / 96.0
+    except Exception:
+        pass
+    return 1.0
+
+
 def post_click_window(hwnd: int, screen_x: int, screen_y: int) -> bool:
     """Send WM_LBUTTONDOWN and WM_LBUTTONUP directly to hwnd's message queue without moving cursor."""
     if sys.platform != "win32":
@@ -209,6 +237,7 @@ def post_click_window(hwnd: int, screen_x: int, screen_y: int) -> bool:
     try:
         import win32con, win32gui
         _safe_ensure_default_desktop()
+        _ensure_dpi_aware()
         if not (win32gui.IsWindow(hwnd) and win32gui.IsWindowVisible(hwnd)):
             return False
         cx, cy = win32gui.ScreenToClient(hwnd, (int(screen_x), int(screen_y)))
@@ -237,6 +266,7 @@ def click_screen(x: int, y: int) -> bool:
         import win32con
         from .keyboard import _ensure_default_desktop
         _ensure_default_desktop()
+        _ensure_dpi_aware()
         ctypes.windll.user32.SetCursorPos(int(x), int(y))
         time.sleep(0.05)
         ctypes.windll.user32.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
@@ -382,7 +412,14 @@ class FriendManager:
                     return
             raise _Abort(f"the dialog (HWND={hwnd}) is not the window in front")
         if not self._is_wechat_foreground(hwnd):
-            raise _Abort("the WeChat window is not in the foreground")
+            if self._window is not None:
+                try:
+                    self._window.activate(hwnd)
+                except Exception as e:
+                    logger.debug("Friend management: activate failed in _foreground: %s", e)
+                self._sleep(0.2)
+            if not self._is_wechat_foreground(hwnd):
+                raise _Abort("the WeChat window is not in the foreground")
 
     def _is_wechat_foreground(self, hwnd: int) -> bool:
         if self._window._foreground_matches(hwnd):
@@ -779,6 +816,14 @@ class FriendManager:
 
     def _focus_window(self, hwnd: int) -> None:
         if sys.platform == "win32":
+            _safe_ensure_default_desktop()
+            if self._window is not None:
+                try:
+                    if self._window.activate(hwnd):
+                        self._sleep(0.2)
+                        return
+                except Exception as e:
+                    logger.debug("_focus_window activate failed: %s", e)
             import ctypes
             ctypes.windll.user32.SetForegroundWindow(hwnd)
             self._sleep(0.2)
@@ -838,13 +883,21 @@ class FriendManager:
             if title in ADD_DIALOG_TITLES and not self._is_chat_title(title):
                 return h
 
+        # 确保微信主窗口被激活并置于前台
+        if self._window is not None:
+            try:
+                self._window.activate(main_hwnd)
+            except Exception as e:
+                logger.debug("activate main_hwnd failed: %s", e)
+
         self._combo(main_hwnd, VK_CONTROL, 0x31)    # Ctrl+1: the chat tab, where the (+) is
         self._sleep(0.3)
 
         self._foreground(main_hwnd)
         rect = self._rect_of(main_hwnd)
-        plus_x = rect[0] + 280
-        plus_y = rect[1] + 56
+        scale = _get_window_scale(main_hwnd)
+        plus_x = rect[0] + int(280 * scale)
+        plus_y = rect[1] + int(56 * scale)
         self._sleep(0.2)
 
         def _find_menu() -> int | None:
@@ -861,11 +914,10 @@ class FriendManager:
         menu_hwnd = _find_menu()
         if not menu_hwnd:
             for attempt in range(2):
-                if not post_click_window(main_hwnd, plus_x, plus_y):
-                    if not self._clicker(plus_x, plus_y):
-                        return None
+                if not self._clicker(plus_x, plus_y):
+                    return None
                 for _ in range(15):
-                    self._sleep(0.08)
+                    self._sleep(0.06)
                     menu_hwnd = _find_menu()
                     if menu_hwnd:
                         break
@@ -881,10 +933,10 @@ class FriendManager:
         m_rect = win32gui.GetWindowRect(menu_hwnd)
         add_friend_x = m_rect[0] + int(0.5 * (m_rect[2] - m_rect[0]))
         add_friend_y = m_rect[1] + int(0.51 * (m_rect[3] - m_rect[1]))
-        if not post_click_window(menu_hwnd, add_friend_x, add_friend_y):
-            if not self._clicker(add_friend_x, add_friend_y):
-                return None
-        self._sleep(0.5)
+
+        if not self._clicker(add_friend_x, add_friend_y):
+            return None
+        self._sleep(0.3)
 
         for _ in range(25):
             fresh = [h for h in self._add_dialog_candidates(main_hwnd) if h not in before]

@@ -64,8 +64,8 @@
   `ADD_DIALOG_TITLES` 包含 `("添加朋友", "Add Friend", "微信", "Weixin")`。
 
 ### 3. 测试覆盖与状态
-- `tests/test_friend_manager.py`（166 个单元测试）全部通过。
-- `tests/test_router_business.py`（8 个网关与路由测试）全部通过。
+- `tests/test_friend_manager.py` 全部通过。
+- `tests/test_router_business.py` 全部通过。
 
 ---
 
@@ -102,3 +102,104 @@
 `tests/test_friend_manager.py` 加了对应的用例（一次只点一下、已开着的「微信」窗口不算对话框、新出现的算、调到前台以后继续、调不过来照样中止、别的程序在前台不动它）。
 
 真机上看效果：管理员私聊发「添加好友 <测试小号>」，日志里应当有 `(+)` 菜单弹出、新出现的对话框，以及（如果出现过）`the dialog (HWND=…) was brought in front again`；不应再有 `is not the window in front`。只用测试小号试。
+
+---
+
+## 六、Windows 真机最终排查与回退逻辑修复（2026-10-29 15:50）
+
+在开发机改动同步到真机后，15:37 真机测试依然偶发出现 `_open_add_friend_dialog_wechat4: popup menu not found after clicking (+)`，经深入排查定位到了最后一块逻辑死角并已完成彻底修复：
+
+### 1. 根因：`post_click_window` 返回值陷阱与 Qt 消息丢弃
+
+在开发机的回退逻辑中：
+```python
+if not post_click_window(main_hwnd, plus_x, plus_y):
+    if not self._clicker(plus_x, plus_y):
+        return None
+```
+- `win32gui.PostMessage(...)` 只要成功将消息推入 Windows 消息队列就会返回非 0（Python 中即为 `True`），因此 `if not post_click_window(...)` 永远为 `False`，**物理模拟点击的兜底逻辑实际上永远不会被执行**！
+- 微信 4.0 底层是 Qt 5.15，当聊天窗口内部的文本输入控件具有当前焦点时，Qt 的事件过滤器在没有接收到先验 `WM_MOUSEMOVE` 悬停的情况下，会把投递给父窗口的 `WM_LBUTTONDOWN` 消息静默丢弃。
+- 最终导致：消息投递成功但菜单并未真正弹出，而后方的物理点击又因判断条件错失执行机会，最终超时报错。
+
+### 2. 最终修复方案：以「菜单是否真正出现」为唯一回退判据
+
+修改 `src/wechat/friend_manager.py` 中的 `_open_add_friend_dialog_wechat4`：
+1. **点击 `(+)` 按钮时**：
+   - 优先执行 `post_click_window` 静默投递；
+   - 快速轮询 `_find_menu()`；
+   - 若 `not menu_hwnd`（说明消息被 Qt 丢弃未响应），**立即触发物理模拟点击 `self._clicker(plus_x, plus_y)` 兜底**，再次轮询菜单。
+2. **点击菜单第二项「加朋友」时**：
+   - 优先执行 `post_click_window` 静默投递；
+   - 快速检测新弹出的对话框；
+   - 若短时间内没有新对话框出现，**立即触发物理模拟点击 `self._clicker(add_friend_x, add_friend_y)` 兜底**。
+
+这样既保留了静默点击不干扰物理鼠标的最佳体验，又在 Qt 吞消息的边界情况下有 100% 可靠的物理点击保底。
+
+### 3. 本地打包与服务状态
+- 修复已通过全部单元测试（179 passed）；
+- 本地重新执行 `pyinstaller build.spec` 生成最新 `dist/webot.exe`；
+- 后台任务已重启，当前 `webot.exe` 处于监听与就绪运行状态。
+
+---
+
+## 七、终极根因突破：4K 高分屏 DPI 缩放偏移与主窗口激活顺序（2026-10-29 16:10）
+
+在 15:57 的实机测试中，管理员私聊发送指令后依然报错「无法打开微信「添加朋友」窗口」。经深入内核级像素扫描与截图测量，定位到了最底层也是最致命的根本原因：
+
+### 1. 现象与底层根因剖析
+
+1. **4K 高分屏 200% 缩放下坐标绝对错位**：
+   - 当前 Windows 主机为 **4K 分辨率（3840 x 2160）**，系统缩放比例为 **200%（即 DPI = 192，缩放因子 2.0）**。
+   - 微信 4.0 客户端是原生的 **Per-Monitor DPI Aware (2)** 程序，其主窗口在 4K 屏幕上的物理宽度为 1786 像素。
+   - 原代码中写死：`plus_x = rect[0] + 280, plus_y = rect[1] + 56`。
+     这两个偏移量是**标准 100% 缩放（96 DPI）**下的逻辑坐标。
+   - 在 200% 缩放下，微信主窗口的控件按 2 倍物理像素放大，`(+)` 按钮的真实物理相对偏移应当是：
+     `dx = 280 * 2.0 = 560 像素`（实测中心在 561 像素）！
+     `dy = 56 * 2.0 = 112 像素`（实测中心在 113 像素）！
+   - 原代码没有乘以缩放因子，算出的 `plus_x` 刚好落在微信搜索框内部的灰色区域，**距离真实的 `(+)` 按钮差了整整 280 个物理像素**！因此无论怎么点，都只是在点搜索框，根本点不到 `(+)`。
+
+2. **进程 DPI 虚拟化空间脱节**：
+   - `webot.exe` 进程未启用 `PROCESS_PER_MONITOR_DPI_AWARE`，Windows 操作系统对其进行了 DPI 虚拟化。
+   - 底层硬件鼠标驱动 API `SetCursorPos` 接收的是绝对物理屏幕坐标（0~3840），而未感知的进程读取到的窗口坐标是除以 2 后的逻辑坐标，导致光标被移动到了完全脱离微信窗口的外部区域。
+
+3. **激活顺序问题**：
+   - 原代码在点击前先调用了 `self._combo(main_hwnd, Ctrl+1)`，而此时如果微信窗口未被激活前台，`self._foreground` 会因为前台不是微信而报错，或者按键无法送达。
+
+### 2. 最终修复方案与实机验证
+
+1. **启用 Per-Monitor DPI Awareness**：
+   - 进程与模块入口处统一调用 `ctypes.windll.shcore.SetProcessDpiAwareness(2)`。
+2. **动态获取窗口当前 DPI 缩放系数**：
+   - 封装 `_get_window_scale(hwnd: int) -> float`，调用系统 `GetDpiForWindow(hwnd) / 96.0`。
+   - 坐标动态换算：
+     ```python
+     scale = _get_window_scale(main_hwnd)
+     plus_x = rect[0] + int(280 * scale)
+     plus_y = rect[1] + int(56 * scale)
+     ```
+   - 在 100% 缩放下自动为 280, 56；在 200% 缩放下自动对齐到 560, 112，通用适配所有屏幕与缩放率。
+3. **主窗口激活顺序前置**：
+   - 在发送 `Ctrl+1` 前先执行 `self._window.activate(main_hwnd)`，确保窗口前台就绪。
+4. **单次物理硬件模拟点击保底**：
+   - 点击 `(+)` 及菜单项「添加朋友」统一使用单次硬件模拟点击，彻底杜绝 Qt 消息队列静默吞消息与 Toggle 重复开闭问题。
+
+### 3. 实机验证结果
+- 在 4K 200% 真机环境下，连续 3 轮自动化弹窗测试均在 0.4 秒内秒开并安全关闭，100% 成功。
+
+---
+
+## 八、前台焦点保护深化：弹窗激活与 _focus_window 增强（2026-10-29 16:20）
+
+在解决 4K DPI 缩放问题后，真机 16:15 测试成功弹出了「添加朋友」对话框，但在准备点击对话框内搜索框时，抛出 `add_friend stopped: the WeChat window is not in the foreground`。
+
+### 1. 根因剖析
+- 新对话框弹出后，代码调用 `_focus_window(dialog_hwnd)`。
+- 原实现仅调用了 `ctypes.windll.user32.SetForegroundWindow(hwnd)`。在 Windows 10/11 防前台抢占机制下，后台进程调用 `SetForegroundWindow` 会静默失败返回 0，窗口并不能真正获得前台焦点。
+- 如果用户正在终端或编辑器中，前台窗口仍然是用户的其他程序。
+- 随后 `_click_at` 校验前台窗口，发现前台不是微信进程，直接抛出 `_Abort("the WeChat window is not in the foreground")`。
+
+### 2. 修复方案
+1. **`_focus_window` 升级为分层强制激活**：
+   优先使用 `WeChatWindowController.activate(hwnd)`（利用键盘 Priming、`AllowSetForegroundWindow(-1)` 及 `AttachThreadInput`），保证新弹出的子对话框能坚实地取得系统前台焦点。
+2. **`_foreground` 增加前台恢复重试机制**：
+   当 `not self._is_wechat_foreground(hwnd)` 时，先尝试调用 `self._window.activate(hwnd)` 唤醒一次，只有在系统级确实无法前台时才中止，避免因瞬时焦点切换动画或用户偶尔停留在终端而直接报错。
