@@ -144,3 +144,7 @@
 .prm-cmd { font-size: var(--fs-xs); color: var(--ink-2); overflow-wrap: anywhere; }
 .prm-raw { max-height: 320px; overflow: auto; margin: 4px 0 0; padding: 8px; border: 1px solid var(--rule); background: var(--card-2); font-family: var(--f-mono); font-size: var(--fs-xs); white-space: pre-wrap; word-break: break-all; }
 .prm-alerts .banner .b-text { display: flex; flex-direction: column; gap: 2px; }
+/* A draft's corner tags go under the title when the card is narrow (phone width) instead of sticking out of it. */
+.prm-draft .card-head { flex-wrap: wrap; }
+.prm-draft .card-head > .stack { flex: 1 1 220px; }
+.prm-draft .card-head > .row { flex-wrap: wrap; }
