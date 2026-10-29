@@ -934,6 +934,7 @@ class FriendManager:
             if add_button is None:
                 self._close_window(dialog_hwnd)
                 return _failure(keyword, "no_add_button", f"没有找到「{keyword}」的「添加到通讯录」按钮，已中止")
+            logger.info("add_friend: add button read at y=%.3f", _centre(add_button)[1])
 
             before = self._window_snapshot(hwnd)                 # the application window appears after the click
             self._click_row(dialog_hwnd, add_button)
@@ -946,6 +947,7 @@ class FriendManager:
                     break
                 self._sleep(0.1)
 
+            logger.info("add_friend: application window %s", apply_hwnd or "not found, using the add-friend window")
             target_dialog = apply_hwnd if apply_hwnd else dialog_hwnd
             self._focus_window(target_dialog)
             app_rows = self._capture_ocr(target_dialog)
@@ -1030,6 +1032,8 @@ class FriendManager:
                     return _failure(keyword, "not_sent", "申请窗口还在，申请可能没发出去，请在微信里确认")
 
             self._close_window(dialog_hwnd)
+            logger.info("add_friend: sent (greeting %s, remark %s)", "yes" if message else "no",
+                        "read back" if remark_set else "not read back" if remark else "none")
             return {
                 "ok": True,
                 "target": keyword,
