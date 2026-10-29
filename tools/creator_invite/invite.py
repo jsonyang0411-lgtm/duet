@@ -293,6 +293,8 @@ def load_config(path: Optional[str]) -> dict:
             raise ToolError(f"{CATEGORY_NAMES[key]}的话术里写了快递公司：只写「包邮」", EXIT_USAGE)
         cfg["templates"][key] = text
     cfg["weekly_cap"] = _number(raw, "weekly_cap", 800, 1, 5000, integer=True)
+    # 每天最多发几张（2026-10-29：同店另一位 3 分钟发了 20 张，像是碰了平台风控——我们放慢、限量）
+    cfg["daily_cap"] = _number(raw, "daily_cap", 20, 1, 1000, integer=True)
     cfg["quota_margin"] = _number(raw, "quota_margin", 50, 0, 5000, integer=True)
     cfg["gap_seconds"] = _number(raw, "gap_seconds", 3, 3, 60)
     wait = raw.get("wait_between", [15, 30])
@@ -470,7 +472,13 @@ class Ledger:
         return [a["aweme_id"] for a in self._attempts().values() if a["sent"] is None]
 
     def sent_this_week(self, moment: datetime) -> int:
-        start = week_start(moment)
+        return self.sent_since(week_start(moment))
+
+    def sent_today(self, moment: datetime) -> int:
+        return self.sent_since(moment.astimezone(BJT).replace(hour=0, minute=0, second=0, microsecond=0))
+
+    def sent_since(self, start: datetime) -> int:
+        """发出去了或不知道发出去没有的卡，从 ``start`` 起有几张（读不懂时间的也算上，宁多不少）。"""
         n = 0
         for a in self._attempts().values():
             if a["sent"] is False:
@@ -1014,9 +1022,16 @@ def run_plan(cfg: dict, plan: dict, confirm: str, clis: Clis, ledger: Ledger, *,
         if aweme in ledger.never_again():
             summary["skipped"].append({"aweme_id": aweme, "why": "台账里已经发过（或不知道发出去没有）：绝不再发"})
             continue
+        if aweme in cfg["rules"]["drop_ids"]:                # 清单出了以后用户又说不要的
+            summary["skipped"].append({"aweme_id": aweme, "why": "手动排除（配置 rules.drop_ids）"})
+            continue
         week = ledger.sent_this_week(clock())
         if week >= cfg["weekly_cap"]:
             summary["stopped"] = {"why": f"我们自己的每周上限 {cfg['weekly_cap']} 到了（本周已发 {week}）", "at": index}
+            break
+        today = ledger.sent_today(clock())
+        if today >= cfg["daily_cap"]:
+            summary["stopped"] = {"why": f"每天上限 {cfg['daily_cap']} 到了（今天已发 {today}）：明天接着发", "at": index}
             break
         if not first:
             sleep(uniform(*cfg["wait_between"]))

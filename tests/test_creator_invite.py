@@ -655,6 +655,20 @@ def test_run_stops_when_the_platform_quota_runs_low_or_our_own_weekly_cap_is_rea
     assert led.sent_this_week(NOW) == 3 and led.sent_this_week(NOW + timedelta(days=5)) == 0
 
 
+def test_run_leaves_out_who_was_dropped_after_the_list_and_keeps_a_daily_cap(env):
+    plan_file, plan_id = make_plan(env)
+    cfg = env.write_config(rules={"drop_ids": ["dy_small_b", "dy_mid_a"]}, daily_cap=3, wait_between=[180, 300])
+    env.log.unlink()
+    code, out, sleeps = env.main(["run", "--config", cfg, "--plan", plan_file, "--confirm", plan_id, "--ledger-dir", str(env.tmp / "ledger")])
+    assert code == 0
+    skipped = {x["aweme_id"]: x["why"] for x in out["skipped"]}
+    assert skipped["dy_small_b"].startswith("手动排除") and not any(a == "--aweme-id=dy_small_b" for c in env.calls() for a in c["args"])
+    assert len(out["sent"]) == 2 and "每天上限 3 到了（今天已发 3）" in out["stopped"]["why"], "one was sent earlier today (invited_before)"
+    assert sleeps == [240.0], "3 to 5 minutes between two creators (the middle, with this uniform)"
+    led = tool.Ledger(env.tmp / "ledger")
+    assert led.sent_today(NOW) == 3 and led.sent_today(NOW + timedelta(days=3650)) == 0, "the ledger writes the real time: a day far ahead has none"
+
+
 def test_a_crash_between_the_attempt_and_its_result_never_leads_to_a_second_send(env):
     plan_file, plan_id = make_plan(env)
     led = tool.Ledger(env.tmp / "ledger")
