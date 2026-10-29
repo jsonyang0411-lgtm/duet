@@ -1022,7 +1022,8 @@ def load_plan(path: str) -> dict:
 
 
 def run_plan(cfg: dict, plan: dict, confirm: str, clis: Clis, ledger: Ledger, *, limit: Optional[int] = None,
-             sleep: Callable = time.sleep, uniform: Callable = random.uniform, clock: Callable = now_bjt) -> dict:
+             only: Optional[set] = None, sleep: Callable = time.sleep, uniform: Callable = random.uniform,
+             clock: Callable = now_bjt) -> dict:
     if confirm != plan.get("plan_id"):
         raise ToolError(f"--confirm 要写这份清单的编号 {plan.get('plan_id')}（用户同意的是哪一份，就写哪一份）", EXIT_USAGE)
     try:
@@ -1039,6 +1040,11 @@ def run_plan(cfg: dict, plan: dict, confirm: str, clis: Clis, ledger: Ledger, *,
     previews_failed = 0
     first = True
     creators = mix_categories(plan["creators"]) if cfg["send_order"] == "mixed" else plan["creators"]
+    if only is not None:                                     # 用户从清单里挑的这几位（--only），照发的先后
+        missing = sorted(only - {c.get("aweme_id") for c in creators})
+        if missing:
+            raise ToolError(f"--only 里有清单上没有的抖音号：{'、'.join(missing[:10])}", EXIT_USAGE)
+        creators = [c for c in creators if c.get("aweme_id") in only]
     for index, creator in enumerate(creators):
         aweme = creator.get("aweme_id")
         if limit is not None and len(summary["sent"]) >= limit:
@@ -1138,6 +1144,24 @@ def run_plan(cfg: dict, plan: dict, confirm: str, clis: Clis, ledger: Ledger, *,
     summary["sent_this_week"] = ledger.sent_this_week(clock())
     summary["requests"] = clis.requests()
     return summary
+
+
+def only_ids(text: Optional[str]) -> Optional[set]:
+    """--only：「a,b,c」或「@文件」（每行一个抖音号，# 开头的行不算）。"""
+    if not text:
+        return None
+    if text.startswith("@"):
+        try:
+            raw = Path(text[1:]).expanduser().read_text(encoding="utf-8").splitlines()
+        except OSError as e:
+            raise ToolError(f"读不了 --only 的文件：{e}", EXIT_USAGE)
+    else:
+        raw = text.split(",")
+    ids = {x.strip() for x in raw if x.strip() and not x.strip().startswith("#")}
+    bad = sorted(x for x in ids if not AWEME_ID.match(x))
+    if not ids or bad:
+        raise ToolError(f"--only 要写抖音号{'（这些不像抖音号：' + '、'.join(bad[:5]) + '）' if bad else ''}", EXIT_USAGE)
+    return ids
 
 
 def run_markdown(summary: dict) -> str:
@@ -1303,6 +1327,7 @@ def main(argv: Optional[List[str]] = None, *, runner: Callable = subprocess.run,
     p_run.add_argument("--plan", required=True, help="plan 写的 JSON 清单")
     p_run.add_argument("--confirm", required=True, help="清单编号（用户同意的那一份的编号）")
     p_run.add_argument("--limit", type=int, help="这次最多发几位")
+    p_run.add_argument("--only", help="这次只发清单里的这几位：抖音号用逗号分开，或 @文件（每行一个）")
     p_run.add_argument("--ledger-dir", help="台账目录（默认 <home>）")
     p_status = sub.add_parser("status", help="看台账：本周发了几位、哪些不知道发出去没有")
     p_status.add_argument("--config", required=True)
@@ -1359,7 +1384,8 @@ def main(argv: Optional[List[str]] = None, *, runner: Callable = subprocess.run,
         ledger.lock()
         try:
             clis = Clis(cfg, ledger.folder / f"run-{clock().strftime('%Y%m%d-%H%M%S')}", runner=runner, stamp=ledger.folder / "last-request")
-            summary = run_plan(cfg, plan, args.confirm, clis, ledger, limit=args.limit, sleep=sleep, uniform=uniform, clock=clock)
+            summary = run_plan(cfg, plan, args.confirm, clis, ledger, limit=args.limit, only=only_ids(args.only),
+                               sleep=sleep, uniform=uniform, clock=clock)
         finally:
             ledger.unlock()
         private_write(clis.workdir / "report.md", run_markdown(summary))
