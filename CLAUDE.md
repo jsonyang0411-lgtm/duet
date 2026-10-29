@@ -86,6 +86,7 @@ Mac 开发环境的 `.venv` 是用 uv 创建的，里面没有 pip，装依赖�
 5. **消息发送** — 需要微信窗口可见；和别的聊天同名的达人不发（日志「Not using the WeChat window」），给她设一个不重复的备注、重启后能发；`SEND_VERIFY_CHAT=on`（默认）时每次发送日志里应有「SEND_VERIFY_CHAT: the open chat is … as asked」（如果一直是「could not be confirmed」，说明这台机器读不出标题，核对没起作用，把那几行发回来）；再拿小号试一次包含关系：小号 A 的备注设成「测试A」、小号 B 设成「测试A2」，只登记 A，让机器人给 A 发：发到 A；把 A 的备注改成别的、让「测试A」只能搜到 B（重启机器人），再发：日志「Not sending to …」、没有发到 B，草稿标成没发出去、原因写着打开的是「测试A2」
 6. **电脑微信掉线提醒** — 需要 Windows 真机：退出微信、手机上退出电脑微信、被另一台电脑挤下线、升级微信、重启电脑、只停机器人，各看一次日志里「WeChat presence」那几行和控制台顶上的提醒（被挤下线时登录窗口会不会被当成主窗口，还没确认）；勾选「同步最近的聊天记录」重新登录后，同步进来的消息补交成草稿
 7. **读库出错** — 需要 Windows 真机：机器人开着时，在电脑微信里退出登录再登录（或升级微信后再登录）。看日志：出现「Poll error … (WcdbCallError)」（以前什么都没有、一直读到 0 条），约半分钟内「Reinitializing WCDB backend」「WCDB reinitialized successfully」，之后用小号给大号发一句，机器人照常收到（副驾驶出草稿 / 边缘报事件）；如果只出现「WCDB could not read …」而别的聊天照常，说明只是那一个聊天读不出（记下是哪类聊天）
+8. **在家打开控制台**（`tools/claude_relay/open-console.command`）— 需要 Windows 装好 OpenSSH 服务器、放好 Mac 的公钥（`cross-network.md` 第九节）：Mac 双击脚本，浏览器自动打开控制台，能点「发送」；关掉终端窗口后页面连不上
 
 ## 项目概述
 

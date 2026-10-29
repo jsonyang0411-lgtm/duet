@@ -689,6 +689,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `tools/wechat_memory_scan.py` | 在微信进程（WeChatWin.dll）的内存里找 64 位十六进制的数据库密钥（排错用） |
 | `tools/macos/weflow_setup.py` / `chatlog_setup.py` / `lldb_keyscan.py` | macOS：准备 WeFlow 直读（诊断账号、导入密钥、验证读取）/ 经本机 chatlog 服务读取 / 用 LLDB 扫内存取密钥（写 `all_keys.json`，不打印密钥） |
 | `tools/claude_relay/worker.py` | Mac 端 worker，见 §2.26 |
+| `tools/claude_relay/open-console.command` | 在家用 Mac 的浏览器操作 Windows 控制台（`cross-network.md` 第九节）：`ssh -N -L 127.0.0.1:<7327，被占用时 17327>:127.0.0.1:7327 <用户>@<relay_url 的主机>`（`ExitOnForwardFailure`、`ServerAliveInterval=30`、`StrictHostKeyChecking=accept-new`），地址取 `~/.claude-relay/config.json`（或 `CLAUDE_RELAY_CONFIG`）的 `relay_url`，用户名第一次问、存 `~/.claude-relay/console-tunnel-user`；隧道通了 `open` 一次浏览器，断线 10 秒后重连。控制台不用改：`_UIHandler._request_origin_ok` 只看 Host / Origin 的主机名是不是本机（不看端口），经隧道来的请求就是 127.0.0.1 |
 | `tools/creator_invite/invite.py`（+ `paced-dy.mjs`、`paced-jst.mjs`、`start-follow.command`） | 达人广场「邀约带货」两段式批量（Mac 上运行，标准库、Python 3.9）：`plan` 只读出清单、`run --confirm <清单编号>` 只发清单里的人，见 §2.38、功能 Q |
 | `scripts/run-tests.sh` | 在一次性干净虚拟环境里安装 `requirements-macos.txt` 和 `requirements-dev.txt` 并跑测试 |
 
