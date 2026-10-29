@@ -383,9 +383,13 @@ def test_plan_also_finds_creators_on_douyin_and_looks_each_new_one_up_in_jushuit
                 {"awemeId": "dy_sq_missing", "nickname": "查不到", "fansNum": 9000},
                 {"awemeId": "dy_sq_added", "nickname": "有人跟", "fansNum": 20000},
                 {"awemeId": "dy_sq_male", "nickname": "男粉多", "fansNum": 50000},
-                {"awemeId": "dy_sq_new", "nickname": "广场新人", "fansNum": 40000}],         # the same one twice
+                {"awemeId": "dy_sq_new", "nickname": "广场新人", "fansNum": 40000},          # the same one twice
+                {"awemeId": "dy_sq_talked", "nickname": "沟通过", "fansNum": 30000, "imStatus": 2},
+                {"awemeId": "dy_sq_crm", "nickname": "在库里", "fansNum": 30000, "imStatus": 1, "inCrm": True},
+                {"awemeId": "dy_sq_cheap", "nickname": "便宜货", "fansNum": 30000, "imStatus": 1, "inCrm": False}],
         lookup={"dy_sq_new": sq_new, "dy_sq_added": {**row("dy_sq_added", 20000), "added": True},
-                "dy_sq_male": {**row("dy_sq_male", 50000, sex="男性 70.00%"), "added": False}}))
+                "dy_sq_male": {**row("dy_sq_male", 50000, sex="男性 70.00%"), "added": False},
+                "dy_sq_cheap": {**row("dy_sq_cheap", 30000, avg=59.9), "added": False}}))
     code, out = plan_now(env, config={"find": {**tool.DEFAULT_FIND, "dy_queries": [SQUARE]}})
     assert code == 0, out
     calls = env.calls()
@@ -393,8 +397,8 @@ def test_plan_also_finds_creators_on_douyin_and_looks_each_new_one_up_in_jushuit
     assert square == [[*SQUARE["args"], "--expect-shop-id=9100000000000001", "--no-open"]]
     assert all(c["wrapper"] == "paced-dy.mjs" for c in calls if c["args"][:2] == ["buyin", "authors-square"])
     looked = [c["args"] for c in calls if c["args"][:1] == ["lookup"]]
-    assert [a[2] for a in looked] == ["--no=dy_sq_new", "--no=dy_sq_missing", "--no=dy_sq_added", "--no=dy_sq_male"], \
-        "only the new ones, once each, in the order the square gave them"
+    assert [a[2] for a in looked] == ["--no=dy_sq_new", "--no=dy_sq_missing", "--no=dy_sq_added", "--no=dy_sq_male", "--no=dy_sq_cheap"], \
+        "only the new ones, once each, in the order the square gave them; not those the square already says are taken"
     assert all("--expect-uid=900001" in a for a in looked)
     plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
     by = {c["aweme_id"]: c for c in plan["creators"]}
@@ -404,16 +408,29 @@ def test_plan_also_finds_creators_on_douyin_and_looks_each_new_one_up_in_jushuit
     assert gone["dy_sq_missing"]["reason"].startswith("聚水潭查不到这个号") and gone["dy_sq_missing"]["source"] == "抖音"
     assert gone["dy_sq_added"]["reason"].startswith("已经在聚水潭「我的达人」里")
     assert gone["dy_sq_male"]["reason"].startswith("女性粉丝 30.0%"), "a 抖音 one goes through the same rules"
-    assert plan["douyin"] == {"found": 5, "new": 4, "looked_up": 4, "not_looked_up": 0, "both": 1}
+    assert gone["dy_sq_talked"]["reason"].startswith("百应里的按钮已经不是「邀约带货」（状态 2")
+    assert gone["dy_sq_crm"]["reason"] == "已经在本店百应达人库里"
+    assert gone["dy_sq_cheap"]["reason"].startswith("件单价 59.9 元不在 150～500 元")
+    assert plan["douyin"] == {"found": 8, "new": 5, "looked_up": 5, "not_looked_up": 0, "both": 1, "stopped": None}
     md = Path(out["files"]["md"]).read_text(encoding="utf-8")
-    assert "抖音达人广场也找了（1 组搜索）：找到 5 位，其中 1 位聚水潭那边也找到了；新的 4 位按抖音号到聚水潭查了 4 位" in md
+    assert "抖音达人广场也找了（1 组搜索）：找到 8 位，其中 1 位聚水潭那边也找到了；新的 5 位按抖音号到聚水潭查了 5 位" in md
     assert "| 来源 | 抖音号 |" in md and "| 抖音 | dy_sq_new |" in md
     # at most dy_lookup_max look-ups a plan; a lost 聚水潭 login stops it
     env.log.unlink()
     code, out = plan_now(env, config={"find": {**tool.DEFAULT_FIND, "dy_queries": [SQUARE], "dy_lookup_max": 2}})
     plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
-    assert len([c for c in env.calls() if c["args"][:1] == ["lookup"]]) == 2 and plan["douyin"]["not_looked_up"] == 2
-    assert "还有 2 位超过一次最多查的 2 位、没查" in Path(out["files"]["md"]).read_text(encoding="utf-8")
+    assert len([c for c in env.calls() if c["args"][:1] == ["lookup"]]) == 2 and plan["douyin"]["not_looked_up"] == 3
+    assert "还有 3 位没查（超过一次最多查的 2 位）" in Path(out["files"]["md"]).read_text(encoding="utf-8")
+    # 聚水潭 rate-limits a look-up: no more look-ups, the list is still made from what was found
+    env.scenario(scenario(square=[{"awemeId": "dy_sq_new", "nickname": "x", "fansNum": 1}, {"awemeId": "dy_sq_two", "nickname": "y", "fansNum": 1}],
+                          exits={"lookup": 76}))
+    env.log.unlink()
+    code, out = plan_now(env, config={"find": {**tool.DEFAULT_FIND, "dy_queries": [SQUARE]}})
+    assert code == 0, out
+    plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
+    assert plan["douyin"]["looked_up"] == 0 and plan["douyin"]["not_looked_up"] == 2 and "限流" in plan["douyin"]["stopped"]
+    assert len([c for c in env.calls() if c["args"][:1] == ["lookup"]]) == 1, "not one more look-up after the wall"
+    assert {c["aweme_id"] for c in plan["creators"]} >= {"dy_small_a", "dy_mid_a"}, "the 聚水潭 side is still on the list"
     env.scenario(scenario(square=[{"awemeId": "dy_sq_new", "nickname": "x", "fansNum": 1}], exits={"lookup": 77}))
     code, _ = plan_now(env, config={"find": {**tool.DEFAULT_FIND, "dy_queries": [SQUARE]}})
     assert code == 77

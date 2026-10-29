@@ -633,10 +633,11 @@ def find_creators(cfg: dict, clis: Clis) -> List[dict]:
 
 
 def find_on_douyin(cfg: dict, clis: Clis, known: set) -> dict:
-    """百应达人广场那边找到的人（find.dy_queries 每组一条只读搜索）：聚水潭那边已经有的只记一笔「两边都有」，新的每位到聚水潭
-    按抖音号查一次（jst lookup，最多 dy_lookup_max 位），拿到和 jst find 一样的行（粉丝画像、近 30 天带货品类和销售额），
-    这样两边的人走同一套规则。查不到的、已经在聚水潭「我的达人」里的不进。"""
-    out = {"rows": [], "both": set(), "excluded": [], "found": 0, "new": 0, "looked_up": 0, "not_looked_up": 0}
+    """百应达人广场那边找到的人（find.dy_queries 每组一条只读搜索）：聚水潭那边已经有的只记一笔「两边都有」；行上的按钮已经不是
+    「邀约带货」（imStatus 不是 1：本店沟通过、禁用）的、已经在本店百应达人库里（inCrm）的不查也不进；其余的每位到聚水潭按抖音号
+    查一次（jst lookup，最多 dy_lookup_max 位），拿到和 jst find 一样的行（粉丝画像、近 30 天带货品类和销售额），这样两边的人走
+    同一套规则；聚水潭查不到的、已经在聚水潭「我的达人」里的、件单价不在 find.price_min～price_max 的不进。"""
+    out = {"rows": [], "both": set(), "excluded": [], "found": 0, "new": 0, "looked_up": 0, "not_looked_up": 0, "stopped": None}
     queries = cfg["find"].get("dy_queries") or []
     if not queries:
         return out
@@ -652,12 +653,19 @@ def find_on_douyin(cfg: dict, clis: Clis, known: set) -> dict:
             out["found"] += 1
             if aweme in known:
                 out["both"].add(aweme)
+            elif r.get("imStatus") not in (None, NOT_INVITED):
+                out["excluded"].append({"aweme_id": aweme, "nickname": str(r.get("nickname") or ""), "fans": r.get("fansNum"),
+                                        "hat_share": None, "female_share": None, "source": "抖音",
+                                        "reason": f"百应里的按钮已经不是「邀约带货」（状态 {r.get('imStatus')}：本店沟通过或不能邀约）"})
+            elif r.get("inCrm") is True:
+                out["excluded"].append({"aweme_id": aweme, "nickname": str(r.get("nickname") or ""), "fans": r.get("fansNum"),
+                                        "hat_share": None, "female_share": None, "source": "抖音", "reason": "已经在本店百应达人库里"})
             else:
                 order.append(aweme)
     out["new"] = len(order)
     for aweme in order[cfg["find"]["dy_lookup_max"]:]:
         out["not_looked_up"] += 1
-    for aweme in order[:cfg["find"]["dy_lookup_max"]]:
+    for index, aweme in enumerate(order[:cfg["find"]["dy_lookup_max"]]):
         r = names[aweme]
         stub = {"aweme_id": aweme, "nickname": str(r.get("nickname") or ""), "fans": r.get("fansNum"), "hat_share": None,
                 "female_share": None, "source": "抖音"}
@@ -666,6 +674,13 @@ def find_on_douyin(cfg: dict, clis: Clis, known: set) -> dict:
             continue
         found = clis.run("jst", ["lookup", "--platform=DY", f"--no={aweme}", f"--expect-uid={cfg['jst_expect_uid']}"], 300)
         out["looked_up"] += 1
+        if found.exit_code == EXIT_WALL:
+            # 聚水潭限流：不再往下查（不绕过），已经查到的照常进清单，没查的记个数——一份清单不因为这个作废
+            left = len(order[:cfg["find"]["dy_lookup_max"]]) - index
+            out["looked_up"] -= 1
+            out["not_looked_up"] += left
+            out["stopped"] = f"聚水潭按抖音号查到第 {index + 1} 位时限流（{found.said()[:120]}）：后面 {left} 位没查，过一会儿重新出清单再查"
+            break
         if found.exit_code in STOP_EXITS:
             raise StopRun(f"聚水潭按抖音号查达人：{STOP_EXITS[found.exit_code]}，立刻停下。命令行说：{found.said()}", found.exit_code)
         if found.exit_code != 0 or found.data is None:
@@ -677,6 +692,12 @@ def find_on_douyin(cfg: dict, clis: Clis, known: set) -> dict:
             continue
         if daren.get("added"):
             out["excluded"].append({**stub, "reason": "已经在聚水潭「我的达人」里（有人在跟），不进"})
+            continue
+        price = daren.get("avgPrice")
+        lo, hi = cfg["find"]["price_min"], cfg["find"]["price_max"]
+        if isinstance(price, (int, float)) and not isinstance(price, bool) and not lo <= price <= hi:
+            out["excluded"].append({**creator_view({**daren, "platformNo": aweme}), "source": "抖音",
+                                    "reason": f"件单价 {price} 元不在 {lo:g}～{hi:g} 元（和聚水潭那边一样的条件）"})
             continue
         out["rows"].append({**daren, "platformNo": aweme, "_source": "抖音"})
     return out
@@ -819,7 +840,7 @@ def build_plan(cfg: dict, clis: Clis, ledger: Ledger, count: int, *, moment: Opt
         "weekly_quotas": quotas, "ledger_sent_this_week": ledger.sent_this_week(moment),
         "templates": cfg["templates"], "creators": picked, "spare": spare, "excluded": excluded,
         "not_checked": len(not_checked), "requests": clis.requests(),
-        "douyin": {k: douyin[k] for k in ("found", "new", "looked_up", "not_looked_up")} | {"both": len(douyin["both"])},
+        "douyin": {k: douyin[k] for k in ("found", "new", "looked_up", "not_looked_up", "stopped")} | {"both": len(douyin["both"])},
     }
 
 
@@ -858,7 +879,8 @@ def plan_markdown(plan: dict, plan_file: str) -> str:
     if f.get("dy_queries"):
         w(f"- 抖音达人广场也找了（{len(f['dy_queries'])} 组搜索）：找到 {dy.get('found', 0)} 位，其中 {dy.get('both', 0)} 位聚水潭那边也找到了；"
           f"新的 {dy.get('new', 0)} 位按抖音号到聚水潭查了 {dy.get('looked_up', 0)} 位"
-          + (f"，还有 {dy['not_looked_up']} 位超过一次最多查的 {f.get('dy_lookup_max')} 位、没查" if dy.get("not_looked_up") else "") + "\n")
+          + (f"，还有 {dy['not_looked_up']} 位没查" + ("" if dy.get("stopped") else f"（超过一次最多查的 {f.get('dy_lookup_max')} 位）")
+             if dy.get("not_looked_up") else "") + (f"。**{dy['stopped']}**" if dy.get("stopped") else "") + "\n")
     req = plan.get("requests") or {}
     w(f"- 生成这份清单用了平台请求：聚水潭 {req.get('jst', 0)} 次、抖音 {req.get('dy', 0)} 次\n\n")
     w(f"## 商品（主推 1 款 + 其余{'有货的' if s['min_stock'] else '的'}都附带；"
