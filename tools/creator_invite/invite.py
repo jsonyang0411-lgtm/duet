@@ -59,6 +59,7 @@ DIGITS = re.compile(r"^\d{1,20}$")
 PRODUCT_ID = re.compile(r"^\d{6,25}$")
 STYLE_CODE = re.compile(r"^[A-Za-z0-9_-]{2,40}$")
 RIGHT_WORDS = ("high-commission", "free-sample", "video-material", "video-boost")
+RIGHT_NAMES = {"high-commission": "专属高佣", "free-sample": "免费申样", "video-material": "视频素材支持", "video-boost": "优质视频投放"}
 COMMISSION_CAP = 25                                        # the user's own ceiling (2026-10-28), also enforced by the CLI
 CONTENT_MAX = 150                                          # the drawer's limit, counted as JS counts (UTF-16 units)
 NOT_INVITED, GATE_OPEN = 1, -1                              # status 1 = 邀约带货 (enabled); popwindow -1 = no confirmation
@@ -200,10 +201,15 @@ def load_config(path: Optional[str]) -> dict:
     if not cfg["invite_wechat"] and not cfg["invite_phone"]:
         raise ToolError("配置 invite_wechat / invite_phone 至少要一个：邀约卡上给达人看的联系方式", EXIT_USAGE)
     cfg["brand"] = str(raw.get("brand") or "").strip()
-    cfg["commission_rate"] = _number(raw, "commission_rate", COMMISSION_CAP, 1, COMMISSION_CAP, integer=True)
-    rights = raw.get("rights", ["high-commission"])          # 视频素材支持 2026-10-29 去掉了
-    if not isinstance(rights, list) or not rights or any(r not in RIGHT_WORDS for r in rights) or len(set(rights)) != len(rights):
-        raise ToolError(f"配置 rights 要是 {', '.join(RIGHT_WORDS)} 里的几个", EXIT_USAGE)
+    # 卡上的专属佣金：0（默认）= 不开，卡只为让达人加微信，佣金到微信里谈（用户 2026-10-29 下午）；1–25 = 卡一发出去
+    # 平台就给卡上的商品开这个比例的长期专属佣金
+    cfg["commission_rate"] = _number(raw, "commission_rate", 0, 0, COMMISSION_CAP, integer=True)
+    rights = raw.get("rights", ["free-sample"])               # 2026-10-29 下午：只勾免费申样
+    if not isinstance(rights, list) or any(r not in RIGHT_WORDS for r in rights) or len(set(rights)) != len(rights):
+        raise ToolError(f"配置 rights 要是 {', '.join(RIGHT_WORDS)} 里的几个（也可以一个都不勾）", EXIT_USAGE)
+    if ("high-commission" in rights) != bool(cfg["commission_rate"]):
+        raise ToolError("配置 rights 里的 high-commission（专属高佣）和 commission_rate 要一起有、一起没有：勾专属高佣就写比例，"
+                        "不开专属佣金就别勾", EXIT_USAGE)
     cfg["rights"] = list(rights)
     # 0（默认）= 不看库存：能挂上卡的都配（老板 2026-10-29）；大于 0 才按款号查聚水潭的可用库存、不配缺货的
     cfg["min_stock"] = _number(raw, "min_stock", 0, 0, 100000, integer=True)
@@ -839,7 +845,8 @@ def plan_markdown(plan: dict, plan_file: str) -> str:
     w(f"# 达人邀约清单 {plan['plan_id']}\n\n")
     w(f"只读生成于 {plan['created_at']}，**还没有发任何邀约**。确认这份清单以后，才由用户明确同意执行：\n\n")
     w(f"```\npython3 tools/creator_invite/invite.py run --config <配置> --plan {plan_file} --confirm {plan['plan_id']}\n```\n\n")
-    w(f"- 卡片：专属佣金 {s['commission_rate']}%（长期），权益 {'、'.join(s['rights'])}，联系方式 {s['contact']} {s['contact_masked']}\n")
+    card = f"专属佣金 {s['commission_rate']}%（长期）" if s["commission_rate"] else "不开专属佣金（佣金到微信里谈）"
+    w(f"- 卡片：{card}，权益 {'、'.join(RIGHT_NAMES.get(r, r) for r in s['rights']) or '一项都不勾'}，联系方式 {s['contact']} {s['contact_masked']}\n")
     quotas = "；".join(f"{q.get('levels')} 已用 {q.get('used')} / 上限 {q.get('limit')}" for q in plan["weekly_quotas"]) or "没读到"
     w(f"- 平台本周邀约次数（按达人等级分档，按钮浮层的原话读出）：{quotas}\n")
     w(f"- 我们自己的每周上限 {s['weekly_cap']}，台账里本周已发 {plan['ledger_sent_this_week']}；平台额度低于余量 {s['quota_margin']} 就停\n")
@@ -936,7 +943,9 @@ def write_plan(plan: dict, out_dir: Path) -> Dict[str, Path]:
 def invite_args(cfg: dict, plan: dict, creator: dict) -> List[str]:
     products = [creator["products"]["main"], *creator["products"]["extras"]]
     args = ["buyin", "author-invite", f"--aweme-id={creator['aweme_id']}", f"--product={','.join(products)}", f"--content={creator['content']}",
-            f"--rights={','.join(plan['settings']['rights'])}", f"--commission-rate={plan['settings']['commission_rate']}"]
+            f"--rights={','.join(plan['settings']['rights']) or 'none'}"]
+    if plan["settings"]["commission_rate"]:                 # 0 = 卡上不开专属佣金
+        args.append(f"--commission-rate={plan['settings']['commission_rate']}")
     if cfg["invite_wechat"]:
         args.append(f"--wechat={cfg['invite_wechat']}")
     if cfg["invite_phone"]:
@@ -1024,9 +1033,12 @@ def run_plan(cfg: dict, plan: dict, confirm: str, clis: Clis, ledger: Ledger, *,
                 ledger.append({"event": "stop", "plan_id": plan["plan_id"], "aweme_id": aweme, "phase": "quota", "left": left})
                 break
         attempt = secrets.token_hex(6)
+        # what the preview said of the card: each product's sample (免费申样 / 买样) and the CLI's warnings (免费申样 ticked for a 买样 product …)
+        samples = {str(p.get("productId")): p.get("sample") for p in preview.data.get("products") or [] if isinstance(p, dict) and p.get("productId")}
+        warnings = [str(x)[:300] for x in preview.data.get("warnings") or []][:5]
         ledger.append({"event": "attempt", "attempt": attempt, "plan_id": plan["plan_id"], "aweme_id": aweme,
                        "products": [creator["products"]["main"], *creator["products"]["extras"]], "commission_rate": plan["settings"]["commission_rate"],
-                       "category": creator.get("category")})
+                       "rights": plan["settings"]["rights"], "samples": samples, "warnings": warnings, "category": creator.get("category")})
         done = clis.run("dy", [*args, "--expect-status=1", "--expect-popwindow=-1", "--execute"], 900)
         outcome = (((done.data or {}).get("items") or [{}])[0] or {}).get("outcome") if done.data else None
         writes = (done.data or {}).get("platformWrites") if done.data else None
@@ -1040,7 +1052,7 @@ def run_plan(cfg: dict, plan: dict, confirm: str, clis: Clis, ledger: Ledger, *,
             sent = False                                  # STATE_CONFLICT, FAILED before the send …: nothing went out
         ledger.append({"event": "result", "attempt": attempt, "plan_id": plan["plan_id"], "aweme_id": aweme, "exit": done.exit_code,
                        "outcome": outcome, "platform_writes": writes, "sent": sent, "timed_out": done.timed_out})
-        entry = {"aweme_id": aweme, "outcome": outcome, "exit": done.exit_code, "sent": sent}
+        entry = {"aweme_id": aweme, "outcome": outcome, "exit": done.exit_code, "sent": sent, **({"warnings": warnings} if warnings else {})}
         if done.exit_code in STOP_EXITS:
             (summary["sent"] if sent else summary["skipped"]).append(entry)
             summary["stopped"] = {"why": f"发送 {aweme}：{STOP_EXITS[done.exit_code]}", "at": index, "exit": done.exit_code}
@@ -1076,7 +1088,8 @@ def run_markdown(summary: dict) -> str:
         if summary[key]:
             w(f"\n## {title}\n\n")
             for x in summary[key]:
-                w(f"- {x.get('aweme_id')}：{x.get('outcome') or ''} {x.get('why') or ''}\n")
+                w(f"- {x.get('aweme_id')}：{x.get('outcome') or ''} {x.get('why') or ''}"
+                  + (f"（提醒：{'；'.join(x['warnings'])}）" if x.get("warnings") else "") + "\n")
     return out.getvalue()
 
 

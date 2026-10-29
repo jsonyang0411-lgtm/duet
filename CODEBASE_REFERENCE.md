@@ -1075,7 +1075,7 @@ Windows `wcdb` 后端旁边的一个线程（`wechat-presence`）：每 `CHECK_S
 | `check_stock(cfg, clis)` / `find_creators(cfg, clis)` | `min_stock` 为 0（默认）时不发请求、每款都配（`stock` 为 None）；大于 0 时 `jst goods-detail`（每个款号，加起来是一款的可用库存）/ `jst find`（每组 `queries` 一次，带 `--not-added`，组里的 `fans_*`、`level_*`、`sales_*` 换成 `--fans-*`、`--level-*`、`--sales-*`） | `list[dict]` |
 | `build_plan(cfg, clis, ledger, count, *, moment=None)` / `make_plan_id(moment)` | plan：库存 → 找达人（聚水潭 `find_creators` + 抖音 `find_on_douyin`，两边都有的标出来）→ 本地筛（格式、台账、`drop_ids`、疑似同行自播号、女粉 < `female_min`、专门带自己牌子的 `group: own_brand`、可能骗样的 `group: sample_risk`（`keep_ids` 里的不按这两组去掉）、粉丝不到 `small_fans_min`；帽子占比 < `low_hat_share`、粉丝性别不知道、帽子占比 ≥ `own_hat_flag`、一类别的货 ≥ `single_category_flag` 只标记）→ `mix_categories`（每类里没标记、帽子占比高的在前，三类轮流）→ 每 20 位一次 `dy buyin author-invite-status`（够数就不再查；查过能邀但超出人数的进 `spare`）→ 配商品和话术；本周额度取自状态浮层 | 清单 `dict`（`plan_id`、`settings`、`products`、`weekly_quotas`、`creators`、`spare`、`excluded`、`not_checked`、`requests`、`douyin`：抖音那边找到 / 新的 / 查了 / 没查 / 两边都有的人数） |
 | `plan_markdown(plan, plan_file)` / `excluded_table(w, rows)` / `plan_csv(plan)` / `write_plan(plan, out_dir)` | 给人看的清单（每行带来源：聚水潭 / 抖音 / 两边都有；抖音那边找到、查了多少一行；按三类分表、商品与库存（没查时写「没查」）、话术原文与字数、疑似同行自播号 / 专门带自己牌子的 / 可能骗样品的各一张表、其他没进的和原因）和 CSV；三份文件 0600 | `str` / `dict[str, Path]` |
-| `invite_args(cfg, plan, creator)` / `load_plan(path)` | `dy buyin author-invite` 的参数（`--name=value`，带 `--commission-rate`、`--expect-shop-id`、`--no-open`）/ 读清单并认出是 plan 写的 | `list[str]` / `dict` |
+| `invite_args(cfg, plan, creator)` / `load_plan(path)` | `dy buyin author-invite` 的参数（`--name=value`；`--rights` 一个都不勾时写 `none`，比例大于 0 才带 `--commission-rate`；`--expect-shop-id`、`--no-open`）/ 读清单并认出是 plan 写的 | `list[str]` / `dict` |
 | `run_plan(cfg, plan, confirm, clis, ledger, *, limit=None, sleep, uniform, clock)` | run：编号、清单年龄、佣金与权益和配置一致才开始；每位：台账去重、每周上限 → 两位之间等 `wait_between` → 预览（状态 1、门槛 -1、没被拦才往下；额度剩下不到 `quota_margin` 就停）→ 写 `attempt` → `--expect-status=1 --expect-popwindow=-1 --execute` → 写 `result`；76 / 77 / 79、超时、130、没结果都停，`STATE_CONFLICT` 跳过继续，连续 3 位预览失败停 | 执行摘要 `dict`（`sent`、`skipped`、`conflicts`、`stopped`、`unknown_before`、`sent_this_week`、`requests`） |
 | `run_markdown(summary)` / `main(argv=None, *, runner, sleep, uniform, clock, stdout=None)` | 执行记录（停在第几位、为什么）/ 命令行入口：`plan`、`run`、`status`；返回退出码（run 停在 76 / 77 / 79 时照原样） | `str` / `int` |
 | `paced-dy.mjs` / `paced-jst.mjs` | Node 包装：从 `CREATOR_INVITE_CLI_ROOT` 载入命令行原样运行，给抖音页面传输的 `PageTransport.prototype.request` / 聚水潭的 `fetchImpl` 排队、按 `CREATOR_INVITE_STAMP` 的时间至少隔 `CREATOR_INVITE_GAP_MS`，每个请求在 `CREATOR_INVITE_REQUEST_LOG` 记一行（时间、方法、路径） | 命令行自己的退出码 |
@@ -2383,7 +2383,7 @@ invite.py run --config C --plan F --confirm <编号>
   → run_plan：每位
       never_again？跳过 → sent_this_week ≥ weekly_cap？停 → sleep(uniform(15, 30))
       → 预览 buyin author-invite …（不带 --execute）→ 76/77/79 停；[IDENTITY_UNVERIFIABLE]（百应掉登录）停；状态 1、门槛 -1 才往下；weeklyQuota 剩下 < quota_margin 停
-      → Ledger.append(attempt)（fsync）→ buyin author-invite … --expect-status=1 --expect-popwindow=-1 --execute
+      → Ledger.append(attempt：商品、比例、权益、预览说的每款样品 samples 和提醒 warnings)（fsync）→ buyin author-invite … --expect-status=1 --expect-popwindow=-1 --execute
       → Ledger.append(result: sent true/false/null；发送前核对登录没过 = false) → 76/77/79、核对登录没过、超时、130、null 停；STATE_CONFLICT 跳过
   → run-<时间>/report.md（run_markdown）
 ```
@@ -2625,7 +2625,7 @@ Mac worker 的设置文件（`CLAUDE_RELAY_HOME` 可改目录）里的 `platform
 | `dy_expect_shop_id` / `jst_expect_uid` | `str`（数字） | 必填 | `load_config` | 每条抖音命令 `--expect-shop-id=`、每条聚水潭命令 `--expect-uid=` |
 | `invite_wechat` / `invite_phone` | `str` | 至少一个 | `load_config`（抽屉的格式） | `invite_args`：`--wechat=` / `--phone=`；清单里只有打码的 |
 | `brand` / `templates` | `str` / `dict` | 空 / `DEFAULT_TEMPLATES` | `load_config`：`{品牌}` 换成 `brand`，≤150 字，不写快递公司 | 清单每位的 `content` → `--content=` |
-| `commission_rate` / `rights` | `int` / `list[str]` | `25` / `["high-commission"]`（视频素材支持 2026-10-29 去掉） | `load_config`（1–25；四个词） | `invite_args`；`run_plan` 要它们和清单里的一致 |
+| `commission_rate` / `rights` | `int` / `list[str]` | `0`（卡上不开专属佣金，佣金到微信里谈）/ `["free-sample"]`（2026-10-29 下午；`high-commission` 和比例要一起有、一起没有，权益可以一个都不勾） | `load_config`（1–25；四个词） | `invite_args`；`run_plan` 要它们和清单里的一致 |
 | `products` / `min_stock` | `list[dict]` / `int` | 必填 / `0` | `load_config`（1–5 款，`id`、`name`、`price`、`styles`；`styles` 在 `min_stock` > 0 时必填；`min_stock` 0 = 不看库存，老板 2026-10-29） | `check_stock`、`assign_products` |
 | `find` / `rules` | `dict` | `DEFAULT_FIND`（`dy_queries` 默认空、`dy_lookup_max` 60）/ `DEFAULT_RULES` | `load_config`（`dy_queries` 只许 `buyin authors-*` 加筛选和页数，`DY_SEARCH_FORBIDDEN` 里的不许写） | `find_creators`、`find_on_douyin`；`classify`（`small_fans_min` 5000、`mid_fans_min` 20 万）、疑似同行自播号（`suspect_hat_share` 90）、不进清单（`female_min` 60、`own_brand_reason`、`sample_risk_reason`、`drop_ids`）、标记（`low_hat_share` 1、`own_hat_flag` 50、`single_category_flag` 90） |
 | `weekly_cap` / `quota_margin` | `int` | `800` / `50` | `load_config` | `run_plan` 的两条停止条件 |

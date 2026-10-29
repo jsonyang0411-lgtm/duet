@@ -107,7 +107,9 @@ FAKE_NODE = textwrap.dedent("""\
             out({"executed": False, "platformWrites": 0, "items": [{"targetId": a, "outcome": "PREVIEW", "blocked": blocked,
                  "detail": "blocked (the square shows this creator's button disabled)" if blocked else "creator would get a card",
                  "currentValue": "邀约带货 (status %d); gate %d" % (status, gate)}],
-                 "gate": {"popwindowType": gate}, "statusBefore": {"status": status, "weeklyQuota": quota}})
+                 "gate": {"popwindowType": gate}, "statusBefore": {"status": status, "weeklyQuota": quota},
+                 "products": [{"productId": x, "sample": scenario.get("sample", {}).get(x, "买样")} for x in opt["product"].split(",")],
+                 **({"warnings": scenario["warnings"]} if scenario.get("warnings") else {})})
         outcome = scenario.get("outcome", {}).get(a, "VERIFIED_SUCCESS")
         writes = 0 if outcome in ("STATE_CONFLICT", "FAILED") else 1
         out({"executed": True, "platformWrites": writes, "items": [{"targetId": a, "outcome": outcome}]}, code or (0 if outcome == "VERIFIED_SUCCESS" else 1))
@@ -360,7 +362,8 @@ def test_plan_drops_creators_who_sell_their_own_brand_and_likely_sample_takers(e
     assert "dy_lv1" in risky and "dy_fanmany" in risky and "dy_shop" not in risky
     texts = json.dumps(plan["templates"], ensure_ascii=False)
     assert "视频素材" not in texts and "25%" not in texts and "专属高佣" not in texts, "the commission is on the card only (2026-10-29)"
-    assert plan["settings"]["rights"] == ["high-commission"]
+    assert plan["settings"]["rights"] == ["free-sample"] and plan["settings"]["commission_rate"] == 0
+    assert "- 卡片：不开专属佣金（佣金到微信里谈），权益 免费申样，联系方式 微信" in md
     rules = tool.DEFAULT_RULES
     assert tool.name_stem("小鹿（时尚穿搭）") == tool.name_stem("小鹿•精选") == "小鹿" and tool.name_stem("木子-琳琳") == "木子"
     assert tool.name_stem("🌟港风男装") == "港风男装" and tool.name_stem("Amy小米") == "amy小米"
@@ -453,7 +456,8 @@ def test_plan_checks_status_twenty_at_a_time(env):
 
 
 def test_config_is_checked_before_anything_runs(env):
-    for over, why in (({"commission_rate": 26}, "commission_rate"), ({"invite_wechat": "", "invite_phone": ""}, "invite_wechat"),
+    for over, why in (({"commission_rate": 26, "rights": ["high-commission"]}, "commission_rate"), ({"invite_wechat": "", "invite_phone": ""}, "invite_wechat"),
+                      ({"rights": ["high-commission"]}, "专属高佣 needs a rate"), ({"commission_rate": 25}, "a rate needs 专属高佣"),
                       ({"dy_expect_shop_id": ""}, "dy_expect_shop_id"), ({"templates": {"small": "x" * 151}}, "150"),
                       ({"templates": {"mid": "顺丰包邮"}}, "快递公司"), ({"rights": ["free-sample", "nope"]}, "rights"),
                       ({"wait_between": [5, 8]}, "wait_between"), ({"gap_seconds": 1}, "gap_seconds"), ({"brand": ""}, "brand"),
@@ -506,7 +510,8 @@ def test_run_previews_then_executes_bound_to_the_preview_and_records_each_one(en
         assert execute[:len(preview)] == preview, "the execution is the preview's command plus the binding"
         assert execute[len(preview):] == ["--expect-status=1", "--expect-popwindow=-1", "--execute"]
     first = calls[0]
-    assert "--commission-rate=25" in first and "--rights=high-commission" in first and "--wechat=shop_test_wx" in first, "no 视频素材支持 (2026-10-29)"
+    assert "--rights=free-sample" in first and "--wechat=shop_test_wx" in first, "only 免费申样 on the card (2026-10-29 afternoon)"
+    assert not any(a.startswith("--commission-rate") for a in first), "no 专属佣金 on the card: the rate is talked over on WeChat"
     assert "--expect-shop-id=9100000000000001" in first and "--no-open" in first
     assert f"--product={P_PILLBOX},{P_BERET},{P_EQUESTRIAN}" in first, "the main product first, then all the others"
     assert len(sleeps) == 6 and all(s == 22.5 for s in sleeps), "15–30 s between two creators (the middle, with this uniform)"
@@ -523,6 +528,25 @@ def test_run_previews_then_executes_bound_to_the_preview_and_records_each_one(en
     assert all("绝不再发" in x["why"] for x in out["skipped"])
 
 
+def test_run_records_what_the_preview_said_of_each_products_sample(env):
+    warn = "免费申样 is ticked, but 2 of the 3 product(s) have no free sample and go as 买样"
+    plan_file, plan_id = make_plan(env, sample={P_PILLBOX: "免费申样"}, warnings=[warn])
+    code, out, _ = run_now(env, plan_file, plan_id, "--limit", "1")
+    assert code == 0 and out["sent"][0]["warnings"] == [warn]
+    attempt = [r for r in ledger_lines(env) if r.get("event") == "attempt"][-1]
+    assert attempt["samples"] == {P_PILLBOX: "免费申样", P_BERET: "买样", P_EQUESTRIAN: "买样"}
+    assert attempt["warnings"] == [warn] and attempt["rights"] == ["free-sample"] and attempt["commission_rate"] == 0
+    report = sorted((env.tmp / "ledger").glob("run-*/report.md"))[-1].read_text(encoding="utf-8")
+    assert "（提醒：免费申样 is ticked" in report
+    # a 专属佣金 on the card still works when the config asks for it
+    cfg = env.write_config(commission_rate=25, rights=["high-commission", "free-sample"])
+    assert tool.invite_args(tool.load_config(cfg), {"settings": {"rights": ["high-commission", "free-sample"], "commission_rate": 25}},
+                            {"aweme_id": "dy_x", "content": "x", "products": {"main": P_BERET, "extras": []}})[5:7] == \
+        ["--rights=high-commission,free-sample", "--commission-rate=25"]
+    assert "--rights=none" in tool.invite_args(tool.load_config(env.write_config(rights=[])), {"settings": {"rights": [], "commission_rate": 0}},
+                                               {"aweme_id": "dy_x", "content": "x", "products": {"main": P_BERET, "extras": []}})
+
+
 def test_run_needs_the_plan_id_the_user_agreed_to_and_a_fresh_list(env):
     plan_file, plan_id = make_plan(env)
     env.log.unlink()
@@ -530,7 +554,7 @@ def test_run_needs_the_plan_id_the_user_agreed_to_and_a_fresh_list(env):
     assert code == 2 and env.calls() == []
     code, _, _ = run_now(env, plan_file, plan_id, clock=lambda: NOW + timedelta(days=4))
     assert code == 2 and env.calls() == [], "older than plan_max_age_days (3)"
-    cfg = env.write_config(commission_rate=20)
+    cfg = env.write_config(commission_rate=20, rights=["high-commission"])
     code, _, _ = env.main(["run", "--config", cfg, "--plan", plan_file, "--confirm", plan_id, "--ledger-dir", str(env.tmp / "ledger")])
     assert code == 2 and env.calls() == [], "the card would differ from the list that was agreed to"
 
