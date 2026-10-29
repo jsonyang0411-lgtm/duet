@@ -733,8 +733,18 @@ class FriendManager:
     def _focus_window(self, hwnd: int) -> None:
         if sys.platform == "win32":
             import ctypes
-            ctypes.windll.user32.SetForegroundWindow(hwnd)
+            user32 = ctypes.windll.user32
+            user32.SetForegroundWindow(hwnd)
             self._sleep(0.2)
+            # Windows' foreground lock refuses that quietly while another program has the keyboard (seen
+            # 2026-10-29 on the VM: 「the dialog is not the window in front」 twice in 7 tries); then the
+            # controller's layered activation (AttachThreadInput, Alt+Esc), which works on that machine.
+            if user32.GetForegroundWindow() != hwnd and hasattr(self._window, "activate"):
+                try:
+                    self._window.activate(hwnd)
+                except Exception as e:
+                    logger.warning("Friend management: activating window %s failed: %s", hwnd, e)
+                self._sleep(0.2)
 
     def _close_window(self, hwnd: int) -> None:
         """Close one of WeChat's dialog windows.

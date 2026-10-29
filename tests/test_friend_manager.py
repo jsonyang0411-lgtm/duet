@@ -797,6 +797,28 @@ class WeChat4AddFriendTests(FriendTestCase):
         self.assertEqual(res["reason"], "no_add_button")
         self.assertEqual(len(self.clicks), 1)            # only the search box
 
+class FocusWindowTests(FriendTestCase):
+    """_focus_window falls back to the controller's activation when SetForegroundWindow was refused."""
+
+    def focus(self, front_after):
+        import ctypes
+        user32 = MagicMock()
+        user32.GetForegroundWindow.return_value = front_after
+        window = MagicMock()
+        manager = self.manager(window, FakeOcr([]))
+        with patch.object(friend_manager, "sys", SimpleNamespace(platform="win32")), \
+             patch.object(ctypes, "windll", SimpleNamespace(user32=user32), create=True):
+            manager._focus_window(999)
+        user32.SetForegroundWindow.assert_called_once_with(999)
+        return window
+
+    def test_refused_then_the_controller_activates_it(self):
+        self.focus(front_after=555).activate.assert_called_once_with(999)
+
+    def test_not_again_when_it_came_to_the_front(self):
+        self.focus(front_after=999).activate.assert_not_called()
+
+
 class CloseWindowTests(FriendTestCase):
     """_close_window sends Alt+F4 only to a window that has the keyboard (Windows API faked)."""
 
