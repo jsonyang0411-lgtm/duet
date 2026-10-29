@@ -19,7 +19,7 @@ from src.prm.service import (BUYIN_CHAT, BUYIN_FIRST_SEC, BUYIN_MAX_AGE_SEC, BUY
                              BUYIN_UNMATCHED_DAYS, PrmService, event_out)
 from src.prm.store import BUYIN_TOOL, PrmStore
 from src.relay.service import ClaudeRelay
-from src.relay.store import RelayStore
+from src.relay.store import PRM, RelayStore
 
 EPOCH = 1_790_000_000.0        # 百应's times before 2001 are dropped (platforms.jst_time)
 UID = "5100000000000002"
@@ -1079,3 +1079,21 @@ def test_the_full_numbers_are_nowhere_after_the_rounds_the_drafts_and_the_clean_
     kept = everything_kept(bot, caplog)
     assert WECHAT not in kept and CARD_PHONE not in kept
     assert "zq****83" in kept                                                    # (the masked line is there)
+
+
+def test_the_relay_database_file_keeps_no_trace_of_a_replaced_inbox_answer(tmp_path):
+    # The bot holds a 百应 inbox answer (her words, contact numbers in full) only until it replaces it with its summary:
+    # SQLite's secure_delete overwrites what was replaced, so the database file itself has no copy left in free pages.
+    path = tmp_path / "relay.db"
+    store = RelayStore(path)
+    with store._lock:
+        assert store._conn.execute("PRAGMA secure_delete").fetchone()[0] == 1
+    job_id = store.add("prm:buyin-inbox", "bot", "百应私信", kind=PRM, input_closed=True)
+    with store._lock:
+        store._conn.execute("UPDATE relay_jobs SET status = 'running' WHERE id = ?", (job_id,))
+        store._conn.commit()
+    marker = "made_up_wx_trace_" + "x" * 20000                         # big enough to need overflow pages
+    assert store.finish(job_id, ok=True, text=json.dumps({"op": "buyin_inbox", "w": marker})) is True
+    assert store.replace_result(job_id, json.dumps({"op": "buyin_inbox", "summary": {"messages": 1}}))
+    store.close()
+    assert b"made_up_wx_trace_" not in path.read_bytes()

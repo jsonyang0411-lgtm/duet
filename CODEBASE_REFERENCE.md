@@ -2671,7 +2671,7 @@ macOS 的 `build-macos.spec` 见功能 F（datas：`ui/dist`、`.env.example`、
 | `data/edge.db` | `src/edge/store.py` | 微信边缘：给 Mac 的事件、Mac 的发送请求、上传、名单 |
 | Mac：`data/edge_gaps.json`（和 `edge_client.json`、`edge_sends.json` 一起） | `src/wechat/edge_backend.py:EdgeGaps` | Windows 报来的电脑微信掉线记录（`wechat_gap`）和运营点没点「看过了」；看过的 30 天后删 |
 | `data/edge_files/in/`、`data/edge_files/uploads/` | `src/edge/service.py` | 达人发来的图片（解开后的副本，确认后 7 天删）、Mac 上传要发的文件（24 小时没用或发送结束 7 天后删） |
-| `data/claude_relay.db` | `src/relay/store.py` | 中转的任务、会话、附件、追加的话、批准请求、传回的文件（寄样单执行任务的 `meta` 带收货信息和换回的号码，签收满 `PRM_RETENTION_DAYS` 天后剪短、打码） |
+| `data/claude_relay.db` | `src/relay/store.py` | 中转的任务、会话、附件、追加的话、批准请求、传回的文件（寄样单执行任务的 `meta` 带收货信息和换回的号码，签收满 `PRM_RETENTION_DAYS` 天后剪短、打码；连接开 `PRAGMA secure_delete = ON`：百应私信的答复带完整号码，换成统计以后旧内容用 0 覆盖） |
 | `data/claude_relay_files/` | `src/relay/service.py` | 太长的中转结果（`中转结果-<编号>.txt`，30 天前的删掉）、`attachments/`（复制给 Mac 的图片）、`outfiles/`（prm 任务传回的素材，见上面） |
 | `data/media_cache/` | `src/wechat/media.py` | 从 `.dat` 解出来的图片（按内容哈希命名） |
 | `data/vision_screenshots/` | `src/wechat/window_controller.py` | 找不到图片原图时截的聊天区 |

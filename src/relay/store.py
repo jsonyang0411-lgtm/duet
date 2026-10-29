@@ -133,6 +133,9 @@ class RelayStore:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # What is replaced or deleted is overwritten with zeros, not left in free pages: a 抖音百应 inbox answer holds the
+        # creators' words and contact numbers in full until the bot replaces it with its summary (replace_result).
+        self._conn.execute("PRAGMA secure_delete = ON")
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(_SCHEMA)
