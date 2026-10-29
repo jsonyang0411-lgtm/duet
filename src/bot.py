@@ -230,6 +230,8 @@ class Bot:
         relay = self._start_claude_relay(config, router, backend)
         # PRM_COPILOT=on: registered creators' messages become silent draft jobs.
         prm = self._start_prm(config, router, backend, relay)
+        # PRM_BUYIN_SYNC_MIN: who a 抖音百应 private message is from, by the 达人名单's 抖音号 / 平台 UID
+        self._wire_prm_directory(prm, influencer_store)
         # WECHAT_BACKEND=edge 加 PRM_COPILOT=on：名单合一、发送失败告诉 PRM；达人资料在后台线程里查
         party_sync = self._wire_edge_prm(backend, prm, influencer_store)
         if party_sync is not None:
@@ -555,6 +557,21 @@ class Bot:
             pass
         logger.info("PRM_COPILOT: %d registered creator(s)", len(prm.store.active_wxids()))
         return prm
+
+    @staticmethod
+    def _wire_prm_directory(prm, influencer_store) -> None:
+        """The PRM's ``creator_directory``: the 达人名单 (src/influencer) rows that are on (wxid, 平台, 抖音号 / 小红书号, 平台
+        UID), by which a 抖音百应 private message is matched to a registered creator (PRM_BUYIN_SYNC_MIN).  Without the
+        list (or the PRM) nothing is wired: only the ids the deals' verified 抖店 sample orders found are used."""
+        if prm is None or influencer_store is None:
+            return
+        store = influencer_store
+
+        def directory() -> list:
+            return [{"wxid": c["chat_id"], "platform": c.get("platform") or "", "platform_no": c.get("platform_no") or "",
+                     "platform_uid": c.get("platform_uid") or ""} for c in store.list_contacts() if c.get("enabled")]
+
+        prm.creator_directory = directory
 
     @staticmethod
     def _wire_edge_backend(backend, influencer_store) -> None:

@@ -421,6 +421,14 @@ class RelayStore:
                                (json.dumps(data, ensure_ascii=False), job_id))
             self._conn.commit()
 
+    def replace_result(self, job_id: int, text: str) -> bool:
+        """Put ``text`` in place of a finished job's result (the PRM's 百应 inbox job: once its answer is handled,
+        only a summary stays, not the creators' words as they wrote them).  True when the job is there."""
+        with self._lock:
+            cur = self._conn.execute("UPDATE relay_jobs SET result_text = ? WHERE id = ?", (str(text), job_id))
+            self._conn.commit()
+            return cur.rowcount == 1
+
     def take_leftovers(self, job_id: int) -> list[dict]:
         """Follow-ups the worker never handed on (the job ended first); they count as taken."""
         with self._lock:

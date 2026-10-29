@@ -3162,6 +3162,167 @@ def check_sample_result(value, asked=None) -> dict:
             "not_asked": listed("not_asked"), "stopped": stopped, "checked_at": when(value.get("checked_at"))}
 
 
+# ── 抖音百应私信 (精选联盟 IM; `dy buyin im-inbox`, read-only; the bot's PRM_BUYIN_SYNC_MIN) ──
+# Creators invited by 邀约带货 may answer in 百应's own private messages, not in WeChat.  The bot asks now and then
+# (op "buyin_inbox"); the worker runs this without the model, under the CLI lock.  The command does not exist in
+# douyin-engineering yet: its contract is in tools/claude_relay/README.md (「百应私信」), and until it is there the
+# CLI answers a usage error (exit 2, "[USAGE] unknown command") and the round is ``unavailable``.  It never runs with
+# --execute; nothing is sent to 百应 from here (an operator copies a draft and sends it in 百应 by hand).
+
+IM_COMMAND = ("buyin", "im-inbox")
+IM_STOPS = ("login", "wall", "wrong_account", "invalid", "unavailable", "busy", "cancelled", "error")
+IM_FROM = ("creator", "shop")
+IM_KINDS = ("text", "card", "other")
+IM_LIMIT = 50                # conversations one call asks for (--limit)
+IM_MESSAGES = 50             # messages of one conversation kept (the newest)
+IM_TEXT_CHARS = 1000         # one message's text
+IM_NAME_CHARS = 40           # a creator's nickname
+IM_CURSOR_CHARS = 4000       # the CLI's cursor (opaque JSON) as the bot keeps it
+_IM_ID = re.compile(r"^[0-9A-Za-z_:.@=+/-]{1,128}$")        # a conversation's or message's id as the CLI gives it
+_IM_TEXT_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")    # control characters but the line break
+
+
+def _im_text(value, limit: int) -> str:
+    return _IM_TEXT_CONTROL.sub("", str(value if value is not None else "")).strip()[:limit]
+
+
+def im_cursor(value):
+    """The CLI's cursor as the bot keeps it and hands back (``--after``): any JSON up to ``IM_CURSOR_CHARS`` when
+    written out, else None (the next call starts from the CLI's own default; the bot knows the messages it had)."""
+    if value is None or value == "":
+        return None
+    try:
+        text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return None
+    return value if len(text) <= IM_CURSOR_CHARS and not _CONTROL.search(text) else None
+
+
+def im_message(raw) -> Optional[dict]:
+    """One message of a conversation as the bot takes it: ``{"id", "at", "from", "kind", "text"}`` (None without an id
+    or a sender the contract names: ``from`` is "creator" or "shop", our side, an operator in 百应)."""
+    if not isinstance(raw, dict):
+        return None
+    msg_id = str(raw.get("id") if raw.get("id") is not None else "").strip()
+    sender = str(raw.get("from") or "").strip().lower()
+    if not _IM_ID.match(msg_id) or sender not in IM_FROM:
+        return None
+    kind = str(raw.get("kind") or "text").strip().lower()
+    return {"id": msg_id, "at": jst_time(raw.get("at")), "from": sender, "kind": kind if kind in IM_KINDS else "other",
+            "text": _im_text(raw.get("text"), IM_TEXT_CHARS)}
+
+
+def im_conversation(raw) -> Optional[dict]:
+    """One conversation as the bot takes it: ``{"conversation_id", "creator": {"uid", "aweme_id", "nickname"},
+    "messages": [...]}`` (``im_message``, each id once, oldest first, the newest ``IM_MESSAGES``); None without a
+    conversation id.  ``uid`` is the creator's 抖音 UID (digits), ``aweme_id`` her 抖音号, ``nickname`` only with
+    ``--names``."""
+    if not isinstance(raw, dict):
+        return None
+    cid = str(raw.get("conversationId") or raw.get("conversation_id") or "").strip()
+    if not _IM_ID.match(cid):
+        return None
+    who = raw.get("creator") if isinstance(raw.get("creator"), dict) else {}
+    uid = str(who.get("uid") if who.get("uid") is not None else "").strip()
+    aweme = str(who.get("awemeId") or who.get("aweme_id") or "").strip()
+    nickname = " ".join(_im_text(who.get("nickname"), IM_NAME_CHARS * 2).split())[:IM_NAME_CHARS]
+    messages, seen = [], set()
+    for item in raw.get("messages") if isinstance(raw.get("messages"), list) else []:
+        msg = im_message(item)
+        if msg is None or msg["id"] in seen:
+            continue
+        seen.add(msg["id"])
+        messages.append(msg)
+    messages.sort(key=lambda m: (m["at"] is None, m["at"] or 0))
+    return {"conversation_id": cid,
+            "creator": {"uid": uid if _DIGITS.match(uid) else "", "aweme_id": aweme if _DOUYIN_ID.match(aweme) else "",
+                        "nickname": nickname},
+            "messages": messages[-IM_MESSAGES:]}
+
+
+def im_inbox_argv(cfg: dict, cursor=None, limit: int = IM_LIMIT) -> list:
+    """One read of `dy buyin im-inbox` (read-only, never --execute): after the bot's cursor (none the first time),
+    at most ``limit`` conversations, the nicknames (``--names``), the shop checked (79) like every dy step."""
+    opts = []
+    cursor = im_cursor(cursor)
+    if cursor is not None:
+        opts.append("--after=" + json.dumps(cursor, ensure_ascii=False, separators=(",", ":")))
+    opts += [f"--limit={max(1, min(int(limit or IM_LIMIT), IM_LIMIT))}", "--names"]
+    if cfg.get("dy_expect_shop_id"):
+        opts.append(f"--expect-shop-id={cfg['dy_expect_shop_id']}")
+    return [cfg["node"], CLI_FILES["dy"], *IM_COMMAND, *opts]
+
+
+def im_result(**fields) -> dict:
+    """The answer of a 百应 inbox job as the worker hands it back (the bot reads it with ``check_im_result``):
+    ``conversations`` (``im_conversation``), ``cursor`` (the CLI's, for the next call; None: keep the last one),
+    ``stopped`` (None, or why: ``{"verdict", "exit_code", "message"}``)."""
+    out = {"version": 1, "op": "buyin_inbox", "conversations": [], "cursor": None, "stopped": None,
+           "checked_at": time.time()}
+    out.update(fields)
+    return out
+
+
+def _unknown_command(run: CliRun) -> bool:
+    """The CLI does not have the command (douyin-engineering before `buyin im-inbox`: exit 2, "[USAGE] unknown command")."""
+    return run.exit_code == 2 and "unknown command" in str(run.stderr or "").lower()
+
+
+def im_inbox(cfg: dict, cursor=None, *, limit: int = IM_LIMIT, heartbeat=None) -> dict:
+    """The new 百应 private messages (``im_result``): one `dy buyin im-inbox` call (read-only, interrupted when the job
+    is cancelled).  77 (login), 76 (risk wall), 79 (another shop), 2 (a usage error: ``invalid``, or ``unavailable``
+    for a CLI without the command), no JSON of the contract's shape: ``stopped`` says why, nothing is tried again
+    (the bot asks in its next round).  A Mac without the 抖音 CLI is ``unavailable`` and runs nothing."""
+    if "dy" not in cfg.get("dirs", {}):
+        return im_result(stopped={"verdict": "unavailable", "exit_code": None,
+                                  "message": cfg.get("missing", {}).get("dy")
+                                  or "这台 Mac 的 config.json 里没有配置抖音的命令行项目（platforms.dy）"})
+    run = run_cli(im_inbox_argv(cfg, cursor, limit), cfg["dirs"]["dy"],
+                  timeout=cfg.get("preview_timeout_sec", PREVIEW_TIMEOUT_SEC), env=cli_env(cfg), heartbeat=heartbeat,
+                  interruptible=True)
+    data = parse_json(run.stdout)
+    shaped = (isinstance(data, dict) and str(data.get("command") or "").split()[-1:] == ["im-inbox"]
+              and isinstance(data.get("conversations"), list))
+    if run.exit_code != 0 or run.error or run.stopped or not shaped:
+        if run.stopped == "cancelled":
+            verdict = "cancelled"
+        elif _unknown_command(run):
+            verdict = "unavailable"
+        else:
+            verdict = _EXIT_VERDICT.get(run.exit_code) or ("invalid" if run.exit_code == 2 else "error")
+        if verdict == "unavailable":
+            message = "Mac 上的抖音命令行还没有读百应私信的命令（buyin im-inbox）：douyin-engineering 加上它以前读不了"
+        elif run.exit_code or run.error or run.stopped:
+            message = _exit_problem(run)
+        else:
+            message = "命令没有输出百应私信列表"
+        return im_result(stopped={"verdict": verdict, "exit_code": run.exit_code, "message": message})
+    conversations = [c for c in (im_conversation(r) for r in data["conversations"][:IM_LIMIT]) if c is not None]
+    return im_result(conversations=conversations, cursor=im_cursor(data.get("cursor")))
+
+
+def check_im_result(value) -> dict:
+    """The Mac's answer to a 百应 inbox job, checked again on the bot (``ActionError`` when it is none of that shape):
+    every conversation through ``im_conversation`` (its own output is taken as it is), at most ``IM_LIMIT``; the
+    cursor as ``im_cursor``; ``stopped`` with a known verdict (else ``error``)."""
+    if not isinstance(value, dict) or value.get("op") != "buyin_inbox":
+        raise _err("bad_result", "百应私信的结果格式不对")
+    conversations = []
+    for raw in (value.get("conversations") if isinstance(value.get("conversations"), list) else [])[:IM_LIMIT]:
+        conv = im_conversation(raw)
+        if conv is not None:
+            conversations.append(conv)
+    stopped = value.get("stopped")
+    if isinstance(stopped, dict):
+        code = stopped.get("exit_code")
+        stopped = {"verdict": stopped.get("verdict") if stopped.get("verdict") in IM_STOPS else "error",
+                   "exit_code": code if _is_int(code) else None, "message": _clip(stopped.get("message") or "", 300)}
+    else:
+        stopped = None
+    return {"version": 1, "op": "buyin_inbox", "conversations": conversations, "cursor": im_cursor(value.get("cursor")),
+            "stopped": stopped}
+
+
 # ── the registries ────────────────────────────────────────────────────────
 
 _PREVIEWS = {

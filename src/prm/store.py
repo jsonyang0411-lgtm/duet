@@ -24,6 +24,9 @@
                     waybill, sent / signed for, why rejected or deleted), what the deal got of
                     them (``applied``) and whether they are still asked about (``done`` empty):
                     PRM_SAMPLE_SYNC_MIN, src/prm/service.py
+``buyin_threads``   抖音百应 private-message conversations (精选联盟私信, PRM_BUYIN_SYNC_MIN): which registered
+                    creator a conversation is (none: nobody on the list matched), the message ids handled, when
+                    she and our side last wrote and up to when her lines are answered; src/prm/service.py
 ``prm_meta``        small values the service keeps over a restart (when the sync last asked)
 
 A packet's life: ``pending`` (waits in the console) -> ``approved`` (an operator said
@@ -31,6 +34,11 @@ send, or the kind's gate is ``auto``) -> ``sending`` -> ``sent`` | ``failed``; o
 ``pending`` -> ``dropped`` (not sent) | ``superseded`` (the creator wrote again, a newer
 draft follows).  ``no_reply`` is a draft that says nothing needs to be sent.  Moves are
 compare-and-set (``move``), so a double click or two threads never send one packet twice.
+
+A 百应 private-message draft (``tool`` ``BUYIN_TOOL``, ``meta.channel`` "buyin", its chat ``buyin:<conversation>``)
+never goes out by the bot: ``pending`` -> ``sent`` (outcome ``sent_by_hand``: an operator copied it and sent it in
+百应 by hand) | ``dropped`` | ``superseded`` (a newer draft of the same conversation); it is no WeChat reply (its
+own supersede lane, no gate, no 「标为发错了」, not told to later WeChat drafts).
 
 A packet with a platform action (``tool`` is the action's name, ``platform`` the JSON:
 the action, the Mac's preview, the execution; src/prm/platforms.py) is always reviewed:
@@ -53,7 +61,9 @@ DROPPED, SUPERSEDED, NO_REPLY = "dropped", "superseded", "no_reply"
 EXECUTING = "executing"      # a platform action an operator approved, running on the Mac
 PACKET_STATES = (PENDING, APPROVED, SENDING, SENT, FAILED, DROPPED, SUPERSEDED, NO_REPLY, EXECUTING)
 LANE_SYSTEM, LANE_REPLY = "system", "reply"   # supersede(lane=): the bot's next steps, the replies
+LANE_BUYIN = "buyin"         # supersede(lane=): the 抖音百应 private-message drafts (never a WeChat reply's lane)
 MESSAGE_TOOL = "message.send"   # ``tool`` of a plain reply (a platform action's name otherwise)
+BUYIN_TOOL = "buyin.reply"      # ``tool`` of a 百应 private-message draft: an operator sends it in 百应 by hand
 
 # The stages of a collaboration (docs: 合作单状态机); the AI may only suggest these.
 STAGES = {
@@ -176,6 +186,22 @@ CREATE TABLE IF NOT EXISTS sample_orders (
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sample_orders_deal ON sample_orders(deal_id);
+CREATE TABLE IF NOT EXISTS buyin_threads (
+    conversation_id TEXT PRIMARY KEY,
+    party_id INTEGER,
+    deal_id INTEGER,
+    nickname TEXT NOT NULL DEFAULT '',
+    creator_uid TEXT NOT NULL DEFAULT '',
+    aweme_id TEXT NOT NULL DEFAULT '',
+    seen TEXT NOT NULL DEFAULT '[]',
+    last_creator_at REAL,
+    last_shop_at REAL,
+    answered_upto REAL,
+    unanswered INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS buyin_threads_party ON buyin_threads(party_id);
 CREATE TABLE IF NOT EXISTS prm_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT ''
@@ -270,6 +296,12 @@ def event_view(row: dict) -> dict:
 def sample_order_view(row: dict) -> dict:
     out = dict(row)
     out["applied"] = _loads(row.get("applied"), {})
+    return out
+
+
+def buyin_thread_view(row: dict) -> dict:
+    out = dict(row)
+    out["seen"] = [str(i) for i in _loads(row.get("seen"), [])]
     return out
 
 
@@ -560,23 +592,24 @@ class PrmStore:
 
     def outcomes(self, deal_id: int, limit: int = 6) -> list[dict]:
         """A deal's latest drafts a person (or a gate) decided on, newest first: sent (as drafted
-        or edited), not sent (dropped), failed.  What the creator really got from us."""
+        or edited), not sent (dropped), failed.  What the creator really got from us in WeChat: a 百应
+        private-message draft (``BUYIN_TOOL``, sent there by hand) is none of it."""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM action_packets WHERE deal_id = ? AND status IN (?, ?, ?) AND decided_at IS NOT NULL"
-                " ORDER BY COALESCE(sent_at, decided_at) DESC, id DESC LIMIT ?",
-                (deal_id, SENT, DROPPED, FAILED, int(limit)),
+                " AND tool != ? ORDER BY COALESCE(sent_at, decided_at) DESC, id DESC LIMIT ?",
+                (deal_id, SENT, DROPPED, FAILED, BUYIN_TOOL, int(limit)),
             ).fetchall()
         return [packet_view(dict(r)) for r in rows]
 
     def platform_failures(self, limit: int = 50) -> list[dict]:
         """Packets with a platform action that ended ``failed`` (the platform write was not
         verified, or the reply did not go out), newest first: the console marks them red
-        until an operator says they are dealt with (``platform.acked_at``)."""
+        until an operator says they are dealt with (``platform.acked_at``).  A 百应 draft is no platform action."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM action_packets WHERE tool != ? AND status = ? ORDER BY id DESC LIMIT ?",
-                (MESSAGE_TOOL, FAILED, int(limit)),
+                "SELECT * FROM action_packets WHERE tool NOT IN (?, ?) AND status = ? ORDER BY id DESC LIMIT ?",
+                (MESSAGE_TOOL, BUYIN_TOOL, FAILED, int(limit)),
             ).fetchall()
         return [p for p in (packet_view(dict(r)) for r in rows) if not p["platform"].get("acked_at")]
 
@@ -768,23 +801,36 @@ class PrmStore:
             return cur.rowcount == 1
 
     def supersede(self, deal_id: int, now: Optional[float] = None, keep: Optional[int] = None,
-                  system_kind: Optional[str] = None, lane: Optional[str] = None) -> int:
+                  system_kind: Optional[str] = None, lane: Optional[str] = None,
+                  chat_id: Optional[str] = None) -> int:
         """Pending drafts of this deal (but ``keep``) are out of date: ``superseded``; returns how many.
         The Mac's drafts (they answer the creator), or with ``system_kind`` the system's own drafts of
         that kind (a shipping notice is not out of date because the creator wrote).  ``lane``: only the
-        Mac's drafts of that lane — ``LANE_SYSTEM`` (a next step the bot asked for, ``meta.lane``) or
-        ``LANE_REPLY`` (the others): a reply and a 专属佣金 step do not put each other out of date."""
+        Mac's drafts of that lane — ``LANE_SYSTEM`` (a next step the bot asked for, ``meta.lane``),
+        ``LANE_BUYIN`` (the 百应 private-message drafts, ``BUYIN_TOOL``) or ``LANE_REPLY`` (the WeChat
+        replies: neither of those): a reply, a 专属佣金 step and a 百应 draft never put each other out of
+        date.  ``chat_id``: only the drafts of that chat (a 百应 conversation's own)."""
         now = time.time() if now is None else now
         which = "job_id IS NOT NULL" if system_kind is None else "job_id IS NULL AND kind = ?"
+        args: list = []
         if system_kind is None and lane is not None:
-            which += (" AND meta LIKE '%\"lane\": \"system\"%'" if lane == LANE_SYSTEM
-                      else " AND meta NOT LIKE '%\"lane\": \"system\"%'")
+            if lane == LANE_SYSTEM:
+                which += " AND meta LIKE '%\"lane\": \"system\"%'"
+            elif lane == LANE_BUYIN:
+                which += " AND tool = ?"
+                args.append(BUYIN_TOOL)
+            else:
+                which += " AND meta NOT LIKE '%\"lane\": \"system\"%' AND tool != ?"
+                args.append(BUYIN_TOOL)
+        if chat_id is not None:
+            which += " AND chat_id = ?"
+            args.append(chat_id)
         with self._lock:
             cur = self._conn.execute(
                 f"UPDATE action_packets SET status = ?, decided_at = ? WHERE deal_id = ? AND status = ?"
                 f" AND id != ? AND {which}",
                 (SUPERSEDED, now, deal_id, PENDING, -1 if keep is None else keep,
-                 *(() if system_kind is None else (system_kind,))),
+                 *(() if system_kind is None else (system_kind,)), *args),
             )
             self._conn.commit()
             return cur.rowcount
@@ -793,12 +839,12 @@ class PrmStore:
         """The Mac's drafts of this deal that have not gone out wait for a person, ``reason`` first in
         theirs (``needs_attention``): a waiting one stays waiting, a plain reply its gate approved and
         not being sent yet goes back to waiting (``review``).  Not the bot's own shipping notices (a
-        template).  Returns how many."""
+        template), nor a 百应 private-message draft (her WeChat recall says nothing of 百应).  Returns how many."""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id, status, reason FROM action_packets WHERE deal_id = ? AND job_id IS NOT NULL"
-                " AND (status = ? OR (status = ? AND route = 'auto' AND tool = ?))",
-                (deal_id, PENDING, APPROVED, MESSAGE_TOOL),
+                " AND tool != ? AND (status = ? OR (status = ? AND route = 'auto' AND tool = ?))",
+                (deal_id, BUYIN_TOOL, PENDING, APPROVED, MESSAGE_TOOL),
             ).fetchall()
             held = 0
             for row in rows:
@@ -820,22 +866,24 @@ class PrmStore:
         return {r["status"]: int(r["n"]) for r in rows}
 
     def rewrite_packets(self, deal_id: int, rewrite: Callable[[str], str]) -> int:
-        """Rewrite the text of every packet of a deal, its platform action too (8.2 clean-up);
-        returns how many changed."""
+        """Rewrite the text of every packet of a deal, its platform action too (8.2 clean-up), and a 百应
+        draft's ``meta`` (it keeps her 百应 lines for the console); returns how many changed."""
         changed = 0
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, text, final_text, slots, intent, reason, platform FROM action_packets WHERE deal_id = ?",
-                (deal_id,),
+                "SELECT id, tool, text, final_text, slots, intent, reason, platform, meta FROM action_packets"
+                " WHERE deal_id = ?", (deal_id,),
             ).fetchall()
             for row in rows:
                 old = (row["text"] or "", row["final_text"], row["slots"] or "{}", row["intent"] or "",
                        row["reason"] or "", row["platform"] or "{}")
                 new = tuple(None if value is None else rewrite(value) for value in old)
-                if new != old:
+                meta = row["meta"] or "{}"
+                new_meta = rewrite(meta) if row["tool"] == BUYIN_TOOL else meta
+                if new != old or new_meta != meta:
                     self._conn.execute(
                         "UPDATE action_packets SET text = ?, final_text = ?, slots = ?, intent = ?, reason = ?,"
-                        " platform = ? WHERE id = ?", (*new, row["id"]),
+                        " platform = ?, meta = ? WHERE id = ?", (*new, new_meta, row["id"]),
                     )
                     changed += 1
             self._conn.commit()
@@ -1091,6 +1139,61 @@ class PrmStore:
                     changed += 1
             self._conn.commit()
         return changed
+
+    # ── 抖音百应 private messages (PRM_BUYIN_SYNC_MIN, src/prm/service.py) ─────
+
+    def buyin_thread(self, conversation_id: str) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM buyin_threads WHERE conversation_id = ?",
+                                     (conversation_id,)).fetchone()
+        return buyin_thread_view(dict(row)) if row else None
+
+    def buyin_threads(self, *, party_id: Optional[int] = None, deal_id: Optional[int] = None,
+                      matched: Optional[bool] = None) -> list[dict]:
+        """The 百应 conversations kept, the latest her line first: of one creator (``party_id``) or deal
+        (``deal_id``); ``matched`` True only those of a registered creator, False only the others."""
+        sql, where, args = "SELECT * FROM buyin_threads", [], []
+        if party_id is not None:
+            where.append("party_id = ?")
+            args.append(party_id)
+        if deal_id is not None:
+            where.append("deal_id = ?")
+            args.append(deal_id)
+        if matched is not None:
+            where.append("party_id IS NOT NULL" if matched else "party_id IS NULL")
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY COALESCE(last_creator_at, 0) DESC, conversation_id",
+                                      args).fetchall()
+        return [buyin_thread_view(dict(r)) for r in rows]
+
+    def save_buyin_thread(self, conversation_id: str, now: Optional[float] = None, **fields) -> None:
+        """Keep a 百应 conversation (made when new) with ``fields`` set; ``seen`` is a list (stored as JSON)."""
+        allowed = {"party_id", "deal_id", "nickname", "creator_uid", "aweme_id", "seen", "last_creator_at",
+                   "last_shop_at", "answered_upto", "unanswered"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"not a 百应 conversation field: {sorted(unknown)}")
+        if "seen" in fields:
+            fields["seen"] = json.dumps(list(fields["seen"] or []), ensure_ascii=False)
+        now = time.time() if now is None else now
+        with self._lock:
+            self._conn.execute("INSERT OR IGNORE INTO buyin_threads (conversation_id, created_at, updated_at)"
+                               " VALUES (?, ?, ?)", (conversation_id, now, now))
+            fields["updated_at"] = now
+            names = sorted(fields)
+            self._conn.execute(f"UPDATE buyin_threads SET {', '.join(f'{n} = ?' for n in names)}"
+                               " WHERE conversation_id = ?", (*[fields[n] for n in names], conversation_id))
+            self._conn.commit()
+
+    def drop_buyin_threads(self, *, unmatched_before: float) -> int:
+        """Forget the conversations of nobody on the list that were quiet since ``unmatched_before``; returns how many."""
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM buyin_threads WHERE party_id IS NULL AND updated_at < ?",
+                                     (float(unmatched_before),))
+            self._conn.commit()
+            return cur.rowcount
 
     def meta_value(self, key: str) -> Optional[str]:
         with self._lock:

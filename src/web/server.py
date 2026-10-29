@@ -1072,7 +1072,8 @@ def _prm_state_core() -> dict:
     stopped = {"mac_online": False, "worker_kinds": [], "can_send": False, "can_send_files": False,
                "takeover_min": _prm_int_env("PRM_TAKEOVER_MIN", 120), "holding_min": _prm_int_env("PRM_HOLDING_MIN", 10),
                "retention_days": _prm_int_env("PRM_RETENTION_DAYS", 90),
-               "catchup_hours": _prm_int_env("PRM_CATCHUP_HOURS", 12), **settings}
+               "catchup_hours": _prm_int_env("PRM_CATCHUP_HOURS", 12),
+               "buyin_sync_min": _prm_int_env("PRM_BUYIN_SYNC_MIN", 0), **settings}
     store = _prm_stopped_store()
     if store is None:
         from src.prm.platforms import ACTIONS
@@ -1168,8 +1169,10 @@ def _prm_parties(data: dict) -> dict:
 
 def _prm_packet(data: dict) -> dict:
     """POST /api/prm/packets: {"id", "action": "send" | "edit" | "drop" | "wrong" | "execute" | "repreview"
-    | "ack", "text"}; a draft with a platform action is approved with "execute" (text: the reply as
-    edited), see PrmService.decide."""
+    | "ack" | "copy" | "manual_sent", "text"}; a draft with a platform action is approved with "execute" (text: the
+    reply as edited); a 抖音百应 draft is copied ("copy": the answer's ``text`` is the reply with the full numbers, each
+    copy written down) and marked "manual_sent" once an operator sent it in 百应 by hand (the bot sends it nowhere),
+    see PrmService.decide."""
     try:
         packet_id = int(data.get("id"))
     except (TypeError, ValueError):
