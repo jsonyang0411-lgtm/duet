@@ -190,7 +190,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `PROJECT_ROOT` | `Path` | 自动解析 | `src/config.py` | 项目根目录（`WEBOT_APP_HOME`；frozen EXE 模式下是 EXE 所在目录） |
 | `UI_DIR` | `Path` | `ui/dist/` | `src/web/server.py` | 前端静态文件目录（frozen 时在 `_MEIPASS` 里） |
 | `DEFAULT_HOME` / `COMMISSION_CAP` / `CONTENT_MAX` / `STOP_EXITS`（另有 `IDENTITY_UNVERIFIABLE`、`LOGIN_HINT`：百应掉登录时的停和提示） | `Path` / `int` / `int` / `dict` | `~/.claude-relay/platform/creator-invites` / `25` / `150` / `{76, 77, 79}` | `tools/creator_invite/invite.py` | 邀约批量工具的台账和清单默认位置；专属佣金上限（用户的规矩）；邀约文案字数（按 JS 计）；一碰到就停的退出码（见功能 Q） |
-| `DEFAULT_TEMPLATES` / `DEFAULT_FIND` / `DEFAULT_RULES` / `CATEGORY_NAMES` | `dict` | 三类话术（`{品牌}` 占位）/ 帽子类目 1000003461、件单价 150–500、两组粉丝范围（5000–20 万、20 万以上）/ 分类、不进清单与标记的门槛（小达人 5000 到 20 万、中大博主 ≥ 20 万、女粉 < 60 不进）/ 小达人·中大博主·大主播/专场型 | `tools/creator_invite/invite.py` | plan 的默认筛选、分类、话术（配置可覆盖，见 §5.7） |
+| `DEFAULT_TEMPLATES` / `DEFAULT_FIND` / `DEFAULT_RULES` / `CATEGORY_NAMES` | `dict` | 三类话术（`{品牌}` 占位）/ 帽子类目 1000003461、件单价 150–500、两组粉丝范围（5000–20 万：平台先筛 LV2 以上、近 30 天销售额 ≥ 1 万；20 万以上：只筛 LV2 以上）/ 分类、不进清单与标记的门槛（小达人 5000 到 20 万、中大博主 ≥ 20 万、女粉 < 60 不进；专门带自己牌子的：`own_brand_words`、`matrix_min`；可能骗样的：`min_level`、`min_sales30d`、`hidden_sales_min_level`、`min_sales_per_fan` / `sales_per_fan_from`；只标记：`own_hat_flag`、`single_category_flag`；手动 `drop_ids` / `keep_ids`）/ 小达人·中大博主·大主播/专场型 | `tools/creator_invite/invite.py` | plan 的默认筛选、分类、话术（配置可覆盖，见 §5.7） |
 | `_LOOPBACK_HOSTS` | `frozenset[str]` | `{"127.0.0.1", "localhost", "::1"}` | `src/web/server.py` | 控制台只接受 Host / Origin 为本机的请求（防 DNS 重绑定、跨站调用） |
 | `_POST_ONLY_PATHS` | `frozenset[str]` | `/api/config`、`/api/config/import`、`/api/start`、`/api/stop`、`/api/onboarding/reset`、`/api/onboarding/step1..3`、`/api/voice/download-model`、`/api/wechat-data-dir/detect`、`/api/relay/cancel`、`/api/prm/parties`、`/api/prm/packets`、`/api/prm/deals`、`/api/prm/reveal` | `src/web/server.py` | 会改状态的端点只认 POST；GET 一律 405（网页可以用 `<img>` 悄悄发 GET，且不带 Origin） |
 | `_SECRET_ENV_KEYS` | `set[str]` | `{"VOICE_OPENAI_API_KEY"}` | `src/web/server.py` | 主配置里唯一的密钥：`/api/load-config` 打码，`/api/config` 和导入时收到打码值就保留原值 |
@@ -693,7 +693,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `tools/wechat_memory_scan.py` | 在微信进程（WeChatWin.dll）的内存里找 64 位十六进制的数据库密钥（排错用） |
 | `tools/macos/weflow_setup.py` / `chatlog_setup.py` / `lldb_keyscan.py` | macOS：准备 WeFlow 直读（诊断账号、导入密钥、验证读取）/ 经本机 chatlog 服务读取 / 用 LLDB 扫内存取密钥（写 `all_keys.json`，不打印密钥） |
 | `tools/claude_relay/worker.py` | Mac 端 worker，见 §2.26 |
-| `tools/creator_invite/invite.py`（+ `paced-dy.mjs`、`paced-jst.mjs`） | 达人广场「邀约带货」两段式批量（Mac 上运行，标准库、Python 3.9）：`plan` 只读出清单、`run --confirm <清单编号>` 只发清单里的人，见 §2.38、功能 Q |
+| `tools/creator_invite/invite.py`（+ `paced-dy.mjs`、`paced-jst.mjs`、`start-follow.command`） | 达人广场「邀约带货」两段式批量（Mac 上运行，标准库、Python 3.9）：`plan` 只读出清单、`run --confirm <清单编号>` 只发清单里的人，见 §2.38、功能 Q |
 | `scripts/run-tests.sh` | 在一次性干净虚拟环境里安装 `requirements-macos.txt` 和 `requirements-dev.txt` 并跑测试 |
 
 ### 2.23 `src/send/bubbles.py`、`src/send/queue.py`
@@ -1072,17 +1072,21 @@ Windows `wcdb` 后端旁边的一个线程（`wechat-presence`）：每 `CHECK_S
 | `load_config(path)` / `find_node(configured="")` / `check_clis(cfg, need=("dy", "jst"))` | 读并检查配置（§5.7）：店铺 ID、子账号必填，联系方式按抽屉的格式、至少一个，专属佣金 1–25，权益只认四个词，商品 1–5 款要有款号，话术 `{品牌}` 换好以后 ≤150 字（JS 计）且不写快递公司，`gap_seconds` ≥ 3，`wait_between` ≥ 10 秒；不合格 → `ToolError`（退出码 2）。`check_clis` 看两个命令行目录里有没有 `bin/dy.mjs` / `bin/jst.mjs` | `dict` / `str\|None` / — |
 | `Clis(cfg, workdir, runner=subprocess.run, stamp=None)` / `.run(which, args, timeout)` / `.env(which)` / `.requests()` | 经 `paced-dy.mjs` / `paced-jst.mjs` 跑命令行（argv 列表、不经 shell），环境里去掉 `DY_TRANSPORT`、设好命令行目录、请求间隔、共用的请求钟（`stamp`，台账目录的 `last-request`）和这次的请求记录；超时不抛，返回 `timed_out` | `CliResult(argv, exit_code, stdout, stderr, seconds, timed_out)`（`.data` 是解析出的 JSON，`.said()` 是 stderr 最后一行） |
 | `must_read(result, what)` / `CliResult.said()` / `CliResult.unverifiable()` | 读命令的 JSON；76 / 77 / 79 → `StopRun`（退出码照原样），抖音命令行核对不了登录（`[IDENTITY_UNVERIFIABLE]`，百应掉登录时就是这样）→ `StopRun`（退出码 1，`LOGIN_HINT` 提示重新登录百应），其余失败 → `ToolError`；`said` 取命令行 stderr 里最后一行「[代码] …」报错（没有就最后一行）/ 是不是核对不了登录 | `dict` / `str` / `bool` |
-| `Ledger(folder)` / `.lock()` / `.unlock()` / `.records()` / `.append(record)` / `.never_again()` / `.unknown()` / `.sent_this_week(moment)` | 台账 `invites.jsonl`（只追加、0600、每行 fsync）；`invites.lock` 用 `fcntl.flock` 保证同时只有一个 run；有 `attempt` 而没有 `sent: false` 的 `result` 的抖音号永不再发；本周按北京时间周一 0 点算 | — / `set` / `list` / `int` |
+| `Ledger(folder)` / `.lock()` / `.unlock()` / `.records()` / `.append(record)` / `.never_again()` / `.unknown()` / `.sent_this_week(moment)` / `.sent_today(moment)` / `.sent_since(start)` | 台账 `invites.jsonl`（只追加、0600、每行 fsync）；`invites.lock` 用 `fcntl.flock` 保证同时只有一个 run；有 `attempt` 而没有 `sent: false` 的 `result` 的抖音号永不再发；本周按北京时间周一 0 点、今天按北京时间 0 点算（读不懂时间的也算上） | — / `set` / `list` / `int` |
 | `percent(text)` / `hat_share(row)` / `female_share(row)` / `band_min(band)` / `creator_view(row)` | 从 `jst find` 的行读帽子占比、女性粉丝占比（画像只给最大的性别：男性 x% 算女性 100−x）、销售额区间下限、给清单用的字段 | `float\|None` / `dict` |
 | `classify(row, rules)` | 先判专场型（直播为主、近 30 天直播销售额下限 ≥ `big_live_min`、等级 ≥ `big_level_min`），再按粉丝：≥ `mid_fans_min` 中大博主、≥ `small_fans_min` 小达人（15–20 万也算，用户 2026-10-29）；不到 `small_fans_min` 给出不进清单的原因 | `(类别\|None, 原因\|None)` |
-| `mix_categories(candidates)` | 查状态的先后：每类里没有标记的在前、帽子占比高的在前，再三类轮流（专场型、中大博主、小达人），清单截到 `--count` 时三类都有 | `list[dict]` |
+| `find_on_douyin(cfg, clis, known)` | 抖音那边也找：`find.dy_queries` 每组一条百应达人广场只读搜索（经 `paced-dy.mjs`，补 `--expect-shop-id`、`--no-open`）；`known`（聚水潭找到的抖音号）里的记进 `both`；行上 `imStatus` 不是 1、`inCrm` 为真的直接进 `excluded`；其余每位 `jst lookup --no=<抖音号>`（最多 `dy_lookup_max` 位）换成和 `jst find` 一样的行、标 `_source: 抖音`；查不到、出错、已在「我的达人」里、件单价不在 `price_min`～`price_max` 的进 `excluded`；查的时候聚水潭 76 就不再查（`stopped`），77 / 79 停 | `dict`（`rows`、`both`、`excluded`、`found`、`new`、`looked_up`、`not_looked_up`、`stopped`） |
+| `sales_floor(row)` / `top_category(row)` / `name_stem(nickname)` | 近 30 天销售额下限（无数据为 None）/ 卖得最多的细分品类和占比 / 昵称里店名那段（第一个括号、点、横线、竖线、空格前面的，「小鹿（日常穿搭）」→「小鹿」；英文不分大小写） | `float\|None` / `(str\|None, float)` / `str` |
+| `own_brand_reason(view, rules, stems)` / `sample_risk_reason(row, view, rules)` | 专门带自己牌子（名字像店铺 / 品牌号、同一个店名开头的号这次找到 ≥ `matrix_min` 个）/ 可能骗样品（LV 低于 `min_level`、销售额下限 < `min_sales30d`、无数据且 LV < `hidden_sales_min_level`、粉丝 ≥ `sales_per_fan_from` 时每粉 < `min_sales_per_fan` 元）的原因，没有就 None | `str\|None` |
+| `mix_categories(candidates)` / `_both_routes(pool)` | 查状态的先后：每类里没有标记的在前、帽子占比高的在前，打平时聚水潭 / 抖音两条路线轮流（`_both_routes`），再三类轮流（专场型、中大博主、小达人），清单截到 `--count` 时三类都有 | `list[dict]` |
 | `assign_products(avg_price, products)` | 主推：售价最接近件单价的那款；附带：其余配得上的全部、按配置顺序（配置最多 5 款 = 一张卡的上限） | `list[dict]` |
-| `check_stock(cfg, clis)` / `find_creators(cfg, clis)` | `min_stock` 为 0（默认）时不发请求、每款都配（`stock` 为 None）；大于 0 时 `jst goods-detail`（每个款号，加起来是一款的可用库存）/ `jst find`（每组 `queries` 一次，带 `--not-added`） | `list[dict]` |
-| `build_plan(cfg, clis, ledger, count, *, moment=None)` / `make_plan_id(moment)` | plan：库存 → 找达人 → 本地筛（格式、台账、疑似同行自播号、女粉 < `female_min`、粉丝不到 `small_fans_min`；帽子占比 < `low_hat_share`、粉丝性别不知道只标记）→ `mix_categories`（每类里没标记、帽子占比高的在前，三类轮流）→ 每 20 位一次 `dy buyin author-invite-status`（够数就不再查；查过能邀但超出人数的进 `spare`）→ 配商品和话术；本周额度取自状态浮层 | 清单 `dict`（`plan_id`、`settings`、`products`、`weekly_quotas`、`creators`、`spare`、`excluded`、`not_checked`、`requests`） |
-| `plan_markdown(plan, plan_file)` / `excluded_table(w, rows)` / `plan_csv(plan)` / `write_plan(plan, out_dir)` | 给人看的清单（按三类分表、商品与库存（没查时写「没查」）、话术原文与字数、疑似同行自播号单列、其他没进的和原因）和 CSV；三份文件 0600 | `str` / `dict[str, Path]` |
-| `invite_args(cfg, plan, creator)` / `load_plan(path)` | `dy buyin author-invite` 的参数（`--name=value`，带 `--commission-rate`、`--expect-shop-id`、`--no-open`）/ 读清单并认出是 plan 写的 | `list[str]` / `dict` |
-| `run_plan(cfg, plan, confirm, clis, ledger, *, limit=None, sleep, uniform, clock)` | run：编号、清单年龄、佣金与权益和配置一致才开始；每位：台账去重、每周上限 → 两位之间等 `wait_between` → 预览（状态 1、门槛 -1、没被拦才往下；额度剩下不到 `quota_margin` 就停）→ 写 `attempt` → `--expect-status=1 --expect-popwindow=-1 --execute` → 写 `result`；76 / 77 / 79、超时、130、没结果都停，`STATE_CONFLICT` 跳过继续，连续 3 位预览失败停 | 执行摘要 `dict`（`sent`、`skipped`、`conflicts`、`stopped`、`unknown_before`、`sent_this_week`、`requests`） |
-| `run_markdown(summary)` / `main(argv=None, *, runner, sleep, uniform, clock, stdout=None)` | 执行记录（停在第几位、为什么）/ 命令行入口：`plan`、`run`、`status`；返回退出码（run 停在 76 / 77 / 79 时照原样） | `str` / `int` |
+| `check_stock(cfg, clis)` / `find_creators(cfg, clis)` | `min_stock` 为 0（默认）时不发请求、每款都配（`stock` 为 None）；大于 0 时 `jst goods-detail`（每个款号，加起来是一款的可用库存）/ `jst find`（每组 `queries` 一次，带 `--not-added`，组里的 `fans_*`、`level_*`、`sales_*` 换成 `--fans-*`、`--level-*`、`--sales-*`） | `list[dict]` |
+| `build_plan(cfg, clis, ledger, count, *, moment=None)` / `make_plan_id(moment)` | plan：库存 → 找达人（聚水潭 `find_creators` + 抖音 `find_on_douyin`，两边都有的标出来）→ 本地筛（格式、台账、`drop_ids`、疑似同行自播号、女粉 < `female_min`、专门带自己牌子的 `group: own_brand`、可能骗样的 `group: sample_risk`（`keep_ids` 里的不按这两组去掉）、粉丝不到 `small_fans_min`；帽子占比 < `low_hat_share`、粉丝性别不知道、帽子占比 ≥ `own_hat_flag`、一类别的货 ≥ `single_category_flag` 只标记）→ `mix_categories`（每类里没标记、帽子占比高的在前，三类轮流）→ 每 20 位一次 `dy buyin author-invite-status`（够数就不再查；查过能邀但超出人数的进 `spare`）→ 配商品和话术；本周额度取自状态浮层 | 清单 `dict`（`plan_id`、`settings`、`products`、`weekly_quotas`、`creators`、`spare`、`excluded`、`not_checked`、`requests`、`douyin`：抖音那边找到 / 新的 / 查了 / 没查 / 两边都有的人数） |
+| `plan_markdown(plan, plan_file)` / `excluded_table(w, rows)` / `plan_csv(plan)` / `write_plan(plan, out_dir)` | 给人看的清单（每行带来源：聚水潭 / 抖音 / 两边都有；抖音那边找到、查了多少一行；按三类分表、商品与库存（没查时写「没查」）、话术原文与字数、疑似同行自播号 / 专门带自己牌子的 / 可能骗样品的各一张表、其他没进的和原因）和 CSV；三份文件 0600 | `str` / `dict[str, Path]` |
+| `invite_args(cfg, plan, creator)` / `load_plan(path)` | `dy buyin author-invite` 的参数（`--name=value`；`--rights` 一个都不勾时写 `none`，比例大于 0 才带 `--commission-rate`；`--expect-shop-id`、`--no-open`）/ 读清单并认出是 plan 写的 | `list[str]` / `dict` |
+| `run_plan(cfg, plan, confirm, clis, ledger, *, limit=None, sleep, uniform, clock)` | run：编号、清单年龄、佣金与权益和配置一致才开始；按 `send_order` 定先后；每位：台账去重、`rules.drop_ids`（清单出了以后又说不要的）跳过、每周上限、每天上限（`Ledger.sent_today`）→ 两位之间等 `wait_between` → 预览（状态 1、门槛 -1、没被拦才往下；额度剩下不到 `quota_margin` 就停）→ 写 `attempt` → `--expect-status=1 --expect-popwindow=-1 --execute` → 写 `result`；76 / 77 / 79、超时、130、没结果都停，`STATE_CONFLICT` 跳过继续，连续 3 位预览失败停 | 执行摘要 `dict`（`sent`、`skipped`、`conflicts`、`stopped`、`unknown_before`、`sent_this_week`、`requests`） |
+| `follow_invites(cfg, clis, ledger, *, clock=now_bjt, notify=None)` / `mac_notify(title, text, runner=subprocess.run)` / `follow_log(ledger, report)`（每轮一行写进 `follow.log`，0600） | follow 一轮：台账里 `sent: true` 的卡、`follow_days` 天内、状态不在 `FINAL_STATUSES`（3 / 4 / 99 / 100 / 101）的，发卡 2 天内隔 25 分钟、更早隔 115 分钟才再查，最多 `follow_max` 位；`dy buyin author-invite-status --names` 一次查完；状态变了（不是 2）就 `notify`（最多 4 条 + 1 条合计）并追加 `follow.jsonl`；查不了时两小时最多通知一次（`PROBLEM_EVERY`）；`follow_hours` 之外不查；状态存 `follow-state.json`（0600）/ macOS 通知（`osascript`，标题和正文作参数传进去，不拼进脚本） | 摘要 `dict`（`checked`、`changes`、`waiting`、`problem` 或 `skipped`）/ — |
+| `run_markdown(summary)` / `main(argv=None, *, runner, sleep, uniform, clock, stdout=None)` | 执行记录（停在第几位、为什么）/ 命令行入口：`plan`、`run`、`status`、`follow`（拿不到台账锁＝正在发卡，这一轮跳过）；返回退出码（run 停在 76 / 77 / 79 时照原样） | `str` / `int` |
 | `paced-dy.mjs` / `paced-jst.mjs` | Node 包装：从 `CREATOR_INVITE_CLI_ROOT` 载入命令行原样运行，给抖音页面传输的 `PageTransport.prototype.request` / 聚水潭的 `fetchImpl` 排队、按 `CREATOR_INVITE_STAMP` 的时间至少隔 `CREATOR_INVITE_GAP_MS`，每个请求在 `CREATOR_INVITE_REQUEST_LOG` 记一行（时间、方法、路径） | 命令行自己的退出码 |
 
 ---
@@ -2439,7 +2443,8 @@ invite.py plan --config C --count N
   → build_plan
       check_stock：min_stock 为 0（默认）不发请求；大于 0 时每个款号 node paced-jst.mjs goods-detail --style-code=…（只读）
       find_creators：每组 queries node paced-jst.mjs find --platform=DY --goods-category=… --price-min/max=… --not-added …（只读）
-      本地筛：抖音号格式 / Ledger.never_again / 帽子 ≥ 90%（疑似同行自播号）/ 女粉 < 60% 不进 / classify / 帽子 < 1%、性别不知道标记
+      find_on_douyin：每组 dy_queries node paced-dy.mjs buyin authors-… <筛选> --expect-shop-id=… --no-open（只读）→ 聚水潭没有的每位 node paced-jst.mjs lookup --platform=DY --no=…（只读，≤ dy_lookup_max）
+      本地筛：抖音号格式 / Ledger.never_again / drop_ids / 帽子 ≥ 90%（疑似同行自播号）/ 女粉 < 60% 不进 / own_brand_reason、sample_risk_reason 不进（keep_ids 例外）/ classify / 帽子 < 1%、性别不知道、帽子 ≥ 50%、一类货 ≥ 90% 标记
       mix_categories：每类里没标记、帽子占比高的在前，三类轮流
       每 20 位 node paced-dy.mjs buyin author-invite-status --aweme-id=… --pause-ms=3000 --expect-shop-id=… --no-open（只读）
       assign_products（主推 + 其余全部，≤ 5 款）+ templates
@@ -2450,9 +2455,14 @@ invite.py run --config C --plan F --confirm <编号>
   → run_plan：每位
       never_again？跳过 → sent_this_week ≥ weekly_cap？停 → sleep(uniform(15, 30))
       → 预览 buyin author-invite …（不带 --execute）→ 76/77/79 停；[IDENTITY_UNVERIFIABLE]（百应掉登录）停；状态 1、门槛 -1 才往下；weeklyQuota 剩下 < quota_margin 停
-      → Ledger.append(attempt)（fsync）→ buyin author-invite … --expect-status=1 --expect-popwindow=-1 --execute
+      → Ledger.append(attempt：商品、比例、权益、预览说的每款样品 samples 和提醒 warnings)（fsync）→ buyin author-invite … --expect-status=1 --expect-popwindow=-1 --execute
       → Ledger.append(result: sent true/false/null；发送前核对登录没过 = false) → 76/77/79、核对登录没过、超时、130、null 停；STATE_CONFLICT 跳过
   → run-<时间>/report.md（run_markdown）
+
+invite.py follow --config C（start-follow.command：终端窗口里每 30 分钟一次；launchd 读不了桌面上的仓库）
+  → Ledger.lock（拿不到＝正在发卡，跳过）→ follow_invites：follow_hours 之外跳过 → 台账里发出去了的、该查的（≤ follow_max）
+      → node paced-dy.mjs buyin author-invite-status --aweme-id=… --names --pause-ms=4000 --expect-shop-id=… --no-open（只读）
+      → 状态变成 4 / 3 / 99 / 100 / 101：mac_notify（osascript）+ follow.jsonl；查不了：两小时最多通知一次 → follow-state.json
 ```
 
 两个命令行一条都不改：`paced-*.mjs` 只在外面给它们的请求排队放慢（任意两次平台请求之间 ≥ `gap_seconds`，台账目录的 `last-request` 让不同进程也守这个间隔）。
@@ -2693,9 +2703,11 @@ Mac worker 的设置文件（`CLAUDE_RELAY_HOME` 可改目录）里的 `platform
 | `dy_expect_shop_id` / `jst_expect_uid` | `str`（数字） | 必填 | `load_config` | 每条抖音命令 `--expect-shop-id=`、每条聚水潭命令 `--expect-uid=` |
 | `invite_wechat` / `invite_phone` | `str` | 至少一个 | `load_config`（抽屉的格式） | `invite_args`：`--wechat=` / `--phone=`；清单里只有打码的 |
 | `brand` / `templates` | `str` / `dict` | 空 / `DEFAULT_TEMPLATES` | `load_config`：`{品牌}` 换成 `brand`，≤150 字，不写快递公司 | 清单每位的 `content` → `--content=` |
-| `commission_rate` / `rights` | `int` / `list[str]` | `25` / `["high-commission", "video-material"]` | `load_config`（1–25；四个词） | `invite_args`；`run_plan` 要它们和清单里的一致 |
+| `commission_rate` / `rights` | `int` / `list[str]` | `0`（卡上不开专属佣金，佣金到微信里谈）/ `["free-sample"]`（2026-10-29 下午；`high-commission` 和比例要一起有、一起没有，权益可以一个都不勾） | `load_config`（1–25；四个词） | `invite_args`；`run_plan` 要它们和清单里的一致 |
 | `products` / `min_stock` | `list[dict]` / `int` | 必填 / `0` | `load_config`（1–5 款，`id`、`name`、`price`、`styles`；`styles` 在 `min_stock` > 0 时必填；`min_stock` 0 = 不看库存，老板 2026-10-29） | `check_stock`、`assign_products` |
-| `find` / `rules` | `dict` | `DEFAULT_FIND` / `DEFAULT_RULES` | `load_config` | `find_creators`；`classify`（`small_fans_min` 5000、`mid_fans_min` 20 万）、疑似同行自播号（`suspect_hat_share` 90）、不进清单（`female_min` 60）、标记（`low_hat_share` 1） |
-| `weekly_cap` / `quota_margin` | `int` | `800` / `50` | `load_config` | `run_plan` 的两条停止条件 |
+| `find` / `rules` | `dict` | `DEFAULT_FIND`（`dy_queries` 默认空、`dy_lookup_max` 60）/ `DEFAULT_RULES` | `load_config`（`dy_queries` 只许 `buyin authors-*` 加筛选和页数，`DY_SEARCH_FORBIDDEN` 里的不许写） | `find_creators`、`find_on_douyin`；`classify`（`small_fans_min` 5000、`mid_fans_min` 20 万）、疑似同行自播号（`suspect_hat_share` 90）、不进清单（`female_min` 60、`own_brand_reason`、`sample_risk_reason`、`drop_ids`）、标记（`low_hat_share` 1、`own_hat_flag` 50、`single_category_flag` 90） |
+| `weekly_cap` / `daily_cap` / `quota_margin` | `int` | `800` / `0`（不限）/ `50` | `load_config` | `run_plan` 的停止条件（每周、每天的台账数，平台额度余量） |
+| `send_order` | `str` | `category` | `load_config`（`category` / `mixed`） | `run_plan`：`mixed` 时按 `mix_categories(plan["creators"])` 的先后发（三类轮流、每类里最合适的先发） |
 | `gap_seconds` / `wait_between` / `plan_max_age_days` | 数字 / `[min, max]` / 数字 | `3`（≥3）/ `[15, 30]`（≥10）/ `3` | `load_config` | `Clis.env`（`CREATOR_INVITE_GAP_MS`）/ `run_plan` 两位之间 / 清单作废 |
+| `follow_hours` / `follow_days` / `follow_max` | `[int, int]` / `int` / `int` | `[9, 23]` / `14` / `40` | `load_config`（北京时间整点、开始 < 结束） | `follow_invites`：几点到几点查、发卡后跟几天、一次最多查几位 |
 | `home` | `str` | `~/.claude-relay/platform/creator-invites` | `load_config` | 没给 `--ledger-dir` / `--out-dir` 时台账和 `plans/` 的位置 |

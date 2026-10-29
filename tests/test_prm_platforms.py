@@ -1484,6 +1484,7 @@ def test_a_product_the_invite_card_opened_is_not_opened_again_and_the_cli_is_not
     (card(aweme="someone_else"), "another creator"),
     (card(products=(DY_ITEM2,)), "another product"),
     (card(rate=None), "a card without a 专属佣金"),
+    (card(rate=0), "the tool's card without a 专属佣金 (2026-10-29: the rate is talked over on WeChat)"),
     (card(sent=False, outcome="STATE_CONFLICT"), "a card that did not go out"),
     ([], "no card at all"),
 ])
