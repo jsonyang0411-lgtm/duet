@@ -361,7 +361,8 @@ def test_plan_drops_creators_who_sell_their_own_brand_and_likely_sample_takers(e
     assert "dy_shop" in own and "dy_mx_b" in own and "dy_lv1" not in own
     assert "dy_lv1" in risky and "dy_fanmany" in risky and "dy_shop" not in risky
     texts = json.dumps(plan["templates"], ensure_ascii=False)
-    assert "视频素材" not in texts and "25%" not in texts and "专属高佣" not in texts, "the commission is on the card only (2026-10-29)"
+    assert "视频素材" not in texts and "25%" not in texts and "专属高佣" not in texts, "no commission in the texts (2026-10-29)"
+    assert all("合作细节加微信详聊" in plan["templates"][k] for k in ("small", "mid", "big")), "the card is there to bring her to WeChat"
     assert plan["settings"]["rights"] == ["free-sample"] and plan["settings"]["commission_rate"] == 0
     assert "- 卡片：不开专属佣金（佣金到微信里谈），权益 免费申样，联系方式 微信" in md
     rules = tool.DEFAULT_RULES
