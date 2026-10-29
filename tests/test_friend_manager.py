@@ -1425,10 +1425,11 @@ class ApplyDialogTests(DialogTestCase):
         self.desktop.add(APPLY, title="申请添加朋友")
         self.assertEqual(self.run_win32(manager._find_apply_dialog, HWND, ADD_DIALOG, before), APPLY)
 
-    def add_friend(self, apply_comes_forward=True, remark="", apply_rows=None):
+    def add_friend(self, apply_comes_forward=True, remark="", apply_rows=None, read_back=None):
         """The 4.0 add-friend flow with 「小朋友」 open in its own window: search, 添加到通讯录, greeting, 确定."""
         add_button = row("添加到通讯录", 0.4, 0.8, 0.6, 0.9)
-        ocr = FakeOcr([add_button], [add_button], apply_rows or [row("发送添加朋友申请", 0.1, 0.1, 0.5, 0.2)], [])
+        screens = [[add_button], [add_button], apply_rows or [row("发送添加朋友申请", 0.1, 0.1, 0.5, 0.2)]]
+        ocr = FakeOcr(*screens, *([read_back] if read_back is not None else []), [])
         manager = self.make(ocr)
         self.desktop.add(ADD_DIALOG, title="添加朋友", rect=(200, 100, 600, 800))
         self.window.front = ADD_DIALOG
@@ -1447,16 +1448,28 @@ class ApplyDialogTests(DialogTestCase):
         result = self.run_win32(manager._add_friend_wechat4, HWND, "wxid_target", "你好呀", remark)
         return result, closed
 
-    def test_the_remark_replaces_the_name_under_its_label(self):
+    def remark_click(self):
+        clicks = [e for e in self.events if e[0] == "click"]
+        return clicks[2]                  # the search box, 添加到通讯录, then the remark box (before the greeting)
+
+    def test_the_remark_replaces_the_name_under_its_label_before_the_greeting(self):
         rows = [row("发送添加朋友申请", 0.1, 0.1, 0.5, 0.2), row("备注", 0.05, 0.31, 0.15, 0.34)]
-        result, _ = self.add_friend(remark="诗依-抖音", apply_rows=rows)
+        result, _ = self.add_friend(remark="诗依-抖音", apply_rows=rows, read_back=[row("诗依-抖音", 0.4, 0.4, 0.6, 0.45)])
         self.assertTrue(result["ok"], result)
-        self.assertEqual(self.window.pasted, ["wxid_target", "你好呀", "诗依-抖音"])
+        self.assertEqual(self.window.pasted, ["wxid_target", "诗依-抖音", "你好呀"])
         self.assertIn("备注「诗依-抖音」", result["message"])
-        remark_click = [e for e in self.events if e[0] == "click"][-2]   # the last click is 确定
-        self.assertEqual(remark_click[-2:], (400, 100 + int((0.325 + 0.063) * 800)))
-        after = self.events[self.events.index(remark_click) + 1:]
-        self.assertEqual([e[1:3] for e in after if e[0] == "combo"][:2], [(0x11, 0x41), (0x11, 0x56)])
+        self.assertEqual(self.remark_click()[-2:], (400, 100 + int((0.325 + 0.063) * 800)))
+
+    def test_where_the_label_is_not_read_the_measured_spot_is_clicked(self):
+        result, _ = self.add_friend(remark="诗依-抖音", read_back=[row("诗依-抖音", 0.4, 0.4, 0.6, 0.45)])
+        self.assertEqual(self.remark_click()[-2:], (400, 100 + int(0.449 * 800)))
+        self.assertIn("备注「诗依-抖音」", result["message"])
+
+    def test_a_remark_not_read_back_is_not_reported_as_set(self):
+        result, _ = self.add_friend(remark="诗依-抖音", read_back=[row("测试", 0.4, 0.4, 0.6, 0.45)])
+        self.assertTrue(result["ok"], result)
+        self.assertIn("备注可能没填上", result["message"])
+        self.assertNotIn("备注「", result["message"])
 
     def test_without_a_remark_nothing_more_is_typed(self):
         result, _ = self.add_friend()

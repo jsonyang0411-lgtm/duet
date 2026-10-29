@@ -91,7 +91,7 @@ ACCEPT_DIALOG_TITLES = ("通过朋友验证",)         # what 「前往验证」
 DIALOG_CLASS = "Qt51514QWindowIcon"
 DIALOG_LOOKS = 10                                # a dialog is looked for this many times, 0.1 s apart
 REMARK_BOX_BELOW_LABEL = 0.063   # 4.0 申请添加朋友: the remark box is this far below its 「备注」 label
-REMARK_BOX_Y = 0.375            # where the remark box is when the label was not read
+REMARK_BOX_Y = 0.449            # where the remark box is when the label was not read (2026-10-29 VM: 291 of 648 px)
 MAX_REMARK_CHARS = 30
 CARD_LOOKS = 16                                  # the search result is read this many times, 0.5 s apart
 
@@ -961,6 +961,27 @@ class FriendManager:
                 a_rect = self._rect_of(apply_hwnd)
                 a_w = a_rect[2] - a_rect[0]
                 a_h = a_rect[3] - a_rect[1]
+                if remark:
+                    # Before the greeting: a click that misses the box leaves the keys in the greeting box,
+                    # and the greeting typed next puts that right.  The box under 「备注」 holds the friend's
+                    # own name already: it is replaced.  The small grey label is often not read.
+                    label = _find_row(app_rows, "备注", exact=True)
+                    box_y = _centre(label)[1] + REMARK_BOX_BELOW_LABEL if label else REMARK_BOX_Y
+                    if self._click_at(apply_hwnd, a_rect[0] + int(0.5 * a_w), a_rect[1] + int(box_y * a_h),
+                                      required=False, exact=False):
+                        self._sleep(0.1)
+                        self._combo(apply_hwnd, VK_CONTROL, VK_A, exact=True)
+                        self._sleep(0.05)
+                        self._key(apply_hwnd, VK_BACK, exact=True)
+                        self._sleep(0.05)
+                        self._paste(apply_hwnd, remark, exact=True)
+                        self._sleep(0.3)
+                        # A delivered click is no proof: the name has to be read on the window
+                        wanted = _clean_text(remark)
+                        remark_set = any(wanted in _clean_text(r.get("t", "")) for r in self._capture_ocr(apply_hwnd))
+                        if not remark_set:
+                            logger.warning("add_friend: the remark was not read back on the application window")
+
                 if message:
                     # Focus the greeting input box near top (cx=0.30, cy=0.18)
                     input_x = a_rect[0] + int(0.30 * a_w)
@@ -973,21 +994,6 @@ class FriendManager:
                         self._sleep(0.05)
                         self._paste(apply_hwnd, message, exact=True)
                         self._sleep(0.2)
-                if remark:
-                    # The box under 「备注」 holds the friend's own name already: it is replaced
-                    label = _find_row(app_rows, "备注", exact=True)
-                    box_y = _centre(label)[1] + REMARK_BOX_BELOW_LABEL if label else REMARK_BOX_Y
-                    if self._click_at(apply_hwnd, a_rect[0] + int(0.5 * a_w), a_rect[1] + int(box_y * a_h),
-                                      required=False, exact=False):
-                        self._sleep(0.1)
-                        self._combo(apply_hwnd, VK_CONTROL, VK_A, exact=True)
-                        self._sleep(0.05)
-                        self._key(apply_hwnd, VK_BACK, exact=True)
-                        self._sleep(0.05)
-                        self._paste(apply_hwnd, remark, exact=True)
-                        self._sleep(0.2)
-                        remark_set = True
-
                 if send_button:
                     self._click_row(apply_hwnd, send_button)
                 else:
@@ -1028,7 +1034,7 @@ class FriendManager:
                 "ok": True,
                 "target": keyword,
                 "message": f"已成功向「{keyword}」发送好友申请" + (f"（附言：{message}）" if message else "")
-                           + (f"，备注「{remark}」" if remark_set else "，备注没填上，请通过后手动改" if remark else ""),
+                           + (f"，备注「{remark}」" if remark_set else "，备注可能没填上，请通过后核对一下" if remark else ""),
             }
         except Exception:                             # _Abort, or a pywin32 error: no dialog is left open
             for opened in (apply_hwnd, dialog_hwnd):
