@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import re
 
-from . import pii
+from . import pii, platforms
 
 RETENTION_DAYS = 90
 DAY = 86400
@@ -249,43 +249,22 @@ def scrub(text: str, addresses: list[str]) -> str:
 
 
 def clear_receivers(text: str) -> str:
-    """A JSON text (a packet's platform action, a relay job's meta …) with every sample-order
-    receiver (platforms.py's ``{name, phone, province, city, district, address}``) cut down:
-    the name to its first character, the number masked, the street address cleared.  Text that
-    is not JSON, or has no receiver, comes back as it was."""
+    """A JSON text (a packet's platform action and its preview / execution, a relay job's meta and result
+    …) with every sample-order receiver cut down (``platforms.coarse_receivers``, the same rule as the Mac's
+    ledger and platform logs): the name to its first character, the number masked, only the province and
+    the city — the action's ``{name, phone, province, city, district, address}``, the 聚水潭 CLI's own
+    JSON kept as text in a step's ``raw`` (``region`` "省 市 区", ``address`` its first characters) and the
+    收货 fact made from it (mac review F8: those two used to keep the district and the start of the street).
+    Text that is not JSON, or has no receiver, comes back as it was."""
     text = str(text or "")
-    if '"receiver"' not in text:
+    if "receiver" not in text and platforms.RECEIPT_LABEL not in text:
         return text
     try:
         data = json.loads(text)
     except ValueError:
         return text
-    changed = []
-
-    def walk(node):
-        if isinstance(node, dict):
-            for key, value in list(node.items()):
-                if key == "receiver" and isinstance(value, dict) and "address" in value:
-                    cut = _cut_receiver(value)
-                    if cut != value:
-                        node[key] = cut
-                        changed.append(key)
-                else:
-                    walk(value)
-        elif isinstance(node, list):
-            for value in node:
-                walk(value)
-
-    walk(data)
+    data, changed = platforms.coarse_receivers(data)
     return json.dumps(data, ensure_ascii=False) if changed else text
-
-
-def _cut_receiver(receiver: dict) -> dict:
-    """Province and city stay (as everywhere else); the district goes with the street address."""
-    name, phone = str(receiver.get("name") or ""), str(receiver.get("phone") or "")
-    return {**receiver, "name": name[:1] + "*" if name else name,
-            "phone": pii.masked_value(pii.PHONE, phone) if re.fullmatch(r"1\d{10}", phone) else phone,
-            "district": "", "address": CLEARED}
 
 
 def cleared_slots(slots: dict) -> dict:

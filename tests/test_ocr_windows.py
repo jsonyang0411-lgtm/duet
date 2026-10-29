@@ -109,12 +109,35 @@ class FakeWindow:
 
 
 def engine_with(runner, window=None, grabber=None):
-    image = Image.new("RGB", (400, 300), (255, 255, 255))
+    image = Image.new("RGB", (800, 600), (255, 255, 255))        # a main window: read at its own size
     return WindowsOcrEngine(window=window or FakeWindow(), runner=runner,
                             grabber=grabber or (lambda hwnd: image), powershell="powershell.exe")
 
 
 class TestEngine:
+    def test_a_small_window_is_read_at_twice_its_size(self):
+        seen = {}
+
+        def powershell(cmd, kwargs):
+            seen["size"] = Image.open(kwargs["env"]["WEBOT_OCR_IMAGE"]).size
+            return done('{"t": "添加到通讯录", "x": 200, "y": 600, "w": 200, "h": 40}\n')
+
+        small = Image.new("RGB", (376, 568), (255, 255, 255))
+        rows = engine_with(FakeRunner(**{"*": powershell}), grabber=lambda hwnd: small).capture(777)
+        assert seen["size"] == (752, 1136)
+        assert abs(rows[0]["y0"] - 600 / 1136) < 1e-6                      # fractions of the read picture
+
+    def test_a_main_window_is_read_at_its_own_size(self):
+        seen = {}
+
+        def powershell(cmd, kwargs):
+            seen["size"] = Image.open(kwargs["env"]["WEBOT_OCR_IMAGE"]).size
+            return done("")
+
+        big = Image.new("RGB", (996, 574), (255, 255, 255))
+        engine_with(FakeRunner(**{"*": powershell}), grabber=lambda hwnd: big).capture()
+        assert seen["size"] == (996, 574)
+
     def test_a_look_returns_rows_and_deletes_the_picture(self):
         seen = {}
 
@@ -122,7 +145,7 @@ class TestEngine:
             seen["cmd"], seen["kwargs"] = cmd, kwargs
             seen["image"] = kwargs["env"]["WEBOT_OCR_IMAGE"]
             assert os.path.exists(seen["image"])
-            lines = ('\ufeff{"t": "你 好", "x": 40, "y": 30, "w": 80, "h": 20}\n'
+            lines = ('\ufeff{"t": "你 好", "x": 80, "y": 30, "w": 80, "h": 20}\n'
                      "warning: not json\n"
                      '{"t": "在吗", "x": 40, "y": 90, "w": 80, "h": 20}\n')
             return done(lines)

@@ -11,9 +11,32 @@ import json
 import logging
 import os
 import sys
+import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Every call into wcdb_api.dll holds this lock, from any thread and through any client object.  The
+# DLL is not known to be thread-safe, and the poll loop is not its only caller: the new-friend scan
+# (src/wechat/new_friends.py) reads the database from a thread of its own, and a re-initialisation
+# makes a new client (and closes the old one) while another thread may still hold the old one.  One
+# lock for the process, not one per client: both clients drive the same DLL.  Re-entrant: open()
+# checks a key through get_sessions(), resolve_nickname() asks get_display_names().
+_DLL_LOCK = threading.RLock()
+
+
+class WcdbCallError(RuntimeError):
+    """A read the DLL answered with an error code (``ret``), or one asked of a database that is not
+    open (``ret`` None).  ``get_messages`` and ``get_sessions`` raise it instead of answering "nothing"
+    (win review F14): after WeChat logs in again, updates or rebuilds its database, the old handle
+    answers every call with an error code, and the poll loop must count that as a failed read (it
+    re-opens the database, turns the OCR fallback on, ``db_readable`` goes False)."""
+
+    def __init__(self, call: str, ret=None, detail: str = ""):
+        self.call = call
+        self.ret = ret
+        super().__init__(detail or (f"{call} failed: ret={ret}" if ret is not None
+                                    else f"{call} not made: the database is not open"))
 
 PAGE_EXECUTE_READWRITE = 0x40
 
@@ -286,7 +309,11 @@ class WcdbNativeClient:
         }
 
     def init(self):
-        """Load wcdb_api.dll, patch DRM, and initialize the WCDB engine."""
+        """Load wcdb_api.dll, patch DRM, and initialize the WCDB engine (under the DLL lock)."""
+        with _DLL_LOCK:
+            self._init()
+
+    def _init(self):
         os.add_dll_directory(self._dll_dir)
         dll_path = os.path.join(self._dll_dir, "wcdb_api.dll")
         self._dll = ct.CDLL(dll_path)
@@ -370,8 +397,13 @@ class WcdbNativeClient:
         """Open the WeChat session.db for the configured account.
 
         Tries cached keys first.  If they produce 0 sessions (stale key),
-        attempts live extraction from the running WeChat process.
+        attempts live extraction from the running WeChat process.  Under the DLL lock: another
+        thread's call waits until the handle is settled (a key that reads nothing is closed again).
         """
+        with _DLL_LOCK:
+            return self._open()
+
+    def _open(self):
         my_wxid = self._config.get("myWxid", "")
         db_base = self._config.get("dbPath", "")
         wxid_base = "_".join(my_wxid.split("_")[:3])
@@ -433,8 +465,13 @@ class WcdbNativeClient:
 
                     self._handle = handle.value
 
-                    # Verify the key actually decrypts data
-                    sessions = self.get_sessions()
+                    # Verify the key actually decrypts data (an error code: not this key either)
+                    try:
+                        sessions = self.get_sessions()
+                    except WcdbCallError as e:
+                        logger.info("Key from %s (fmt=%s, path=%s): the session list fails (%s)",
+                                    source_label, key_fmt, path_label, e)
+                        sessions = []
                     if sessions:
                         session_count = (
                             len(sessions) if isinstance(sessions, list)
@@ -524,7 +561,11 @@ class WcdbNativeClient:
 
     def _load_nickname_cache(self):
         """Load safe nickname mappings available from the session database."""
-        sessions = self.get_sessions()
+        try:
+            sessions = self.get_sessions()
+        except WcdbCallError as e:
+            logger.warning("Nickname cache: the session list could not be read (%s)", e)
+            sessions = []
         for s in sessions:
             username = s.get("username", "")
             display = (s.get("displayName") or s.get("nickname") or "").strip()
@@ -554,36 +595,46 @@ class WcdbNativeClient:
 
     # ── Query methods ─────────────────────────────────────────────────
 
-    def _call_json(self, func, *args):
-        """Call a WCDB function that returns a JSON string pointer."""
-        out = ct.c_void_p()
-        ret = func(*args, ct.byref(out))
-        if ret != 0:
-            logger.warning("WCDB call %s failed: ret=%d", func.__name__, ret)
-            return None
-        if not out.value:
-            logger.debug("WCDB call %s returned null pointer", func.__name__)
-            return {}
-        try:
-            data = _read_gbk_string(out)
-            self._dll.wcdb_free_string(out)
-            return json.loads(data)
-        except json.JSONDecodeError as e:
-            logger.debug("JSON parse error: %s", e)
-            self._dll.wcdb_free_string(out)
-            return {}
-        except Exception as e:
-            logger.warning("Unexpected error in _call_json for %s: %s",
-                           func.__name__, e)
-            self._dll.wcdb_free_string(out)
-            return {}
+    def _call_json(self, name, *args, strict=False):
+        """Call the WCDB function ``name`` that returns a JSON string pointer: ``name(handle, *args,
+        &out)``.  Under the DLL lock, and the handle is read inside it: a client closed meanwhile
+        (another thread's close, a re-initialisation) never hands the DLL a closed handle (None,
+        like a failed call).  ``strict``: an error code, or no open database, raises WcdbCallError
+        instead of answering None (the reads the poll loop counts: ``get_messages``, ``get_sessions``)."""
+        with _DLL_LOCK:
+            func = getattr(self._dll, name, None) if self._dll is not None else None
+            if func is None or not self._handle:
+                if strict:
+                    raise WcdbCallError(name)
+                logger.debug("WCDB call %s not made: the database is not open", name)
+                return None
+            out = ct.c_void_p()
+            ret = func(self._handle, *args, ct.byref(out))
+            if ret != 0:
+                if strict:
+                    raise WcdbCallError(name, ret)
+                logger.warning("WCDB call %s failed: ret=%d", name, ret)
+                return None
+            if not out.value:
+                logger.debug("WCDB call %s returned null pointer", name)
+                return {}
+            try:
+                data = _read_gbk_string(out)
+                self._dll.wcdb_free_string(out)
+                return json.loads(data)
+            except json.JSONDecodeError as e:
+                logger.debug("JSON parse error: %s", e)
+                self._dll.wcdb_free_string(out)
+                return {}
+            except Exception as e:
+                logger.warning("Unexpected error in _call_json for %s: %s", name, e)
+                self._dll.wcdb_free_string(out)
+                return {}
 
     def get_sessions(self, limit=500):
-        """Get all chat sessions with metadata."""
-        result = self._call_json(self._dll.wcdb_get_sessions, self._handle)
-        if result is None:
-            logger.warning("wcdb_get_sessions returned None (DLL call failed)")
-            return []
+        """Get all chat sessions with metadata.  An error code from the DLL (or no open database)
+        raises WcdbCallError: it is a failed read, not an empty session list."""
+        result = self._call_json("wcdb_get_sessions", strict=True)
         if isinstance(result, list):
             logger.info("Got %d sessions (list)", len(result))
             return result
@@ -595,13 +646,15 @@ class WcdbNativeClient:
         return []
 
     def get_messages(self, talker, limit=200, offset=0):
-        """Get messages for a specific chat."""
+        """Get messages for a specific chat (newest first).  An error code from the DLL (or no open
+        database) raises WcdbCallError: it is a failed read, not a chat without messages (ret 0 with
+        an empty list or no string at all is that: [])."""
         result = self._call_json(
-            self._dll.wcdb_get_messages,
-            self._handle,
+            "wcdb_get_messages",
             talker.encode("utf-8"),
             limit,
             offset,
+            strict=True,
         )
         if isinstance(result, list):
             return result
@@ -615,8 +668,7 @@ class WcdbNativeClient:
             return {}
         username_json = json.dumps(usernames, ensure_ascii=False).encode("utf-8")
         result = self._call_json(
-            self._dll.wcdb_get_display_names,
-            self._handle,
+            "wcdb_get_display_names",
             username_json,
         )
         if isinstance(result, dict):
@@ -625,11 +677,10 @@ class WcdbNativeClient:
 
     def get_contacts(self, keyword="", limit=1000):
         """Get contacts list."""
-        if not self._dll.wcdb_get_contacts_compact:
+        if not getattr(self._dll, "wcdb_get_contacts_compact", None):
             return []
         result = self._call_json(
-            self._dll.wcdb_get_contacts_compact,
-            self._handle,
+            "wcdb_get_contacts_compact",
             json.dumps([keyword], ensure_ascii=False).encode("utf-8"),
         )
         if isinstance(result, list):
@@ -640,11 +691,10 @@ class WcdbNativeClient:
 
     def get_group_members(self, chat_id):
         """Get member list for a group chat. Returns list of {username, avatarUrl, ...}."""
-        if not self._dll.wcdb_get_group_members:
+        if not getattr(self._dll, "wcdb_get_group_members", None):
             return []
         result = self._call_json(
-            self._dll.wcdb_get_group_members,
-            self._handle,
+            "wcdb_get_group_members",
             chat_id.encode("utf-8"),
         )
         if isinstance(result, list):
@@ -656,71 +706,81 @@ class WcdbNativeClient:
     def get_voice_data(
         self, talker: str, local_id: int, create_time: int, msg_svr_id: int | str
     ):
-        """Fetch voice audio bytes from WCDB media database for a voice message (localType=34)."""
-        if not self._handle or not getattr(self._dll, "wcdb_get_voice_data", None):
-            return None
-        out = ct.c_void_p()
+        """Fetch voice audio bytes from WCDB media database for a voice message (localType=34).
+        Under the DLL lock, with the handle read inside it (``_call_json``)."""
         session_bytes = talker.encode("utf-8") if isinstance(talker, str) else talker
         try:
             svrid_val = int(msg_svr_id)
         except (ValueError, TypeError):
             svrid_val = 0
-        ret = self._dll.wcdb_get_voice_data(
-            self._handle,
-            session_bytes,
-            int(local_id or 0),
-            int(create_time or 0),
-            svrid_val,
-            b"[]",
-            ct.byref(out),
-        )
-        if ret != 0 or not out:
-            return None
-        try:
-            raw_s = ct.string_at(out)
-            if not raw_s:
+        with _DLL_LOCK:
+            fn = getattr(self._dll, "wcdb_get_voice_data", None) if self._dll is not None else None
+            if not self._handle or not fn:
                 return None
-            hex_str = raw_s.decode("utf-8", errors="replace").strip()
-            if not hex_str:
+            out = ct.c_void_p()
+            ret = fn(
+                self._handle,
+                session_bytes,
+                int(local_id or 0),
+                int(create_time or 0),
+                svrid_val,
+                b"[]",
+                ct.byref(out),
+            )
+            if ret != 0 or not out:
                 return None
-            return bytes.fromhex(hex_str)
-        except Exception as e:
-            logger.warning("Failed to decode voice hex data: %s", e)
-            return None
-        finally:
-            self._dll.wcdb_free_string(out)
+            try:
+                raw_s = ct.string_at(out)
+                if not raw_s:
+                    return None
+                hex_str = raw_s.decode("utf-8", errors="replace").strip()
+                if not hex_str:
+                    return None
+                return bytes.fromhex(hex_str)
+            except Exception as e:
+                logger.warning("Failed to decode voice hex data: %s", e)
+                return None
+            finally:
+                self._dll.wcdb_free_string(out)
 
     def resolve_nickname(self, wxid):
-        """Get display name for a wxid from cache."""
-        if wxid in self._nicknames:
-            return self._nicknames[wxid]
-        # Try to look up
-        names = self.get_display_names([wxid])
-        if wxid in names:
-            self._nicknames[wxid] = names[wxid]
-            return names[wxid]
-        self._nicknames[wxid] = wxid
-        return wxid
+        """Get display name for a wxid from cache; a miss asks the DLL (under the DLL lock, which
+        also keeps ``remember_nickname`` from another thread from being overwritten by the miss)."""
+        name = self._nicknames.get(wxid)
+        if name is not None:
+            return name
+        with _DLL_LOCK:
+            if wxid in self._nicknames:                  # looked up or learnt meanwhile
+                return self._nicknames[wxid]
+            names = self.get_display_names([wxid])
+            if wxid in names:
+                self._nicknames[wxid] = names[wxid]
+                return names[wxid]
+            self._nicknames[wxid] = wxid
+            return wxid
 
     def remember_nickname(self, wxid, name):
         """A name learnt elsewhere (a new friend's 「你已添加了X」 or display name) replaces a lookup
         that missed (``resolve_nickname`` keeps a miss as the wxid itself); a known name stays."""
-        if wxid and name and self._nicknames.get(wxid, wxid) == wxid:
-            self._nicknames[wxid] = name
+        with _DLL_LOCK:
+            if wxid and name and self._nicknames.get(wxid, wxid) == wxid:
+                self._nicknames[wxid] = name
 
     # ── Cleanup ───────────────────────────────────────────────────────
 
     def _close_handle(self):
-        """Close current DB handle safely (no-op if already closed)."""
-        if self._handle:
-            try:
-                wcdb_close = self._dll.wcdb_close_account
-                wcdb_close.argtypes = [ct.c_int64]
-                wcdb_close.restype = ct.c_int32
-                wcdb_close(self._handle)
-            except Exception:
-                pass
-            self._handle = 0
+        """Close current DB handle safely (no-op if already closed).  Under the DLL lock: a call
+        another thread is making with this handle ends first, and none starts after."""
+        with _DLL_LOCK:
+            if self._handle:
+                try:
+                    wcdb_close = self._dll.wcdb_close_account
+                    wcdb_close.argtypes = [ct.c_int64]
+                    wcdb_close.restype = ct.c_int32
+                    wcdb_close(self._handle)
+                except Exception:
+                    pass
+                self._handle = 0
 
     def close(self):
         self._close_handle()

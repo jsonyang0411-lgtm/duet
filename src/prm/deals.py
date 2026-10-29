@@ -9,6 +9,10 @@ with the system's carrier and waybill (the model never writes the number).  It w
 for review like any draft, unless shipping notices have earned ``auto`` (8.1); either
 way the number in what is sent must be the deal's latest waybill (``gates.waybill_ok``).
 The creator writing does not make it out of date; a newer waybill does.
+
+The 聚水潭 sync (PRM_SAMPLE_SYNC_MIN, service.py) takes the same functions with ``actor``
+system: its shipping notice always waits for a person (``review``), none is drafted for an
+order signed for already (``notice``), and ``note`` (which order) goes into the events.
 """
 
 from __future__ import annotations
@@ -38,7 +42,8 @@ def _deal(store: PrmStore, deal_id) -> dict:
     return deal
 
 
-def set_stage(store: PrmStore, deal_id, stage: str, *, now: float, actor: str = "console") -> dict:
+def set_stage(store: PrmStore, deal_id, stage: str, *, now: float, actor: str = "console",
+              note: Optional[dict] = None) -> dict:
     deal = _deal(store, deal_id)
     if stage not in STAGES:
         raise DealError(f"不认识的阶段 {stage}")
@@ -48,7 +53,7 @@ def set_stage(store: PrmStore, deal_id, stage: str, *, now: float, actor: str = 
     elif stage in BEFORE_DELIVERY and deal.get("delivered_at") and not deal.get("purged_at"):
         fields["delivered_at"] = None                 # set by mistake, or sent again: not delivered yet
     store.update_deal(deal["id"], now, **fields)
-    store.add_event(deal["id"], deal["party_id"], "stage", {"from": deal["stage"], "to": stage},
+    store.add_event(deal["id"], deal["party_id"], "stage", {"from": deal["stage"], "to": stage, **(note or {})},
                     actor=actor, now=now)
     return store.deal(deal["id"])
 
@@ -86,8 +91,11 @@ def notice_text(name: str, carrier: str, waybill: str) -> str:
 
 
 def add_shipment(store: PrmStore, deal_id, carrier: str, waybill: str, *, now: float,
-                 actor: str = "console") -> tuple[dict, int]:
-    """Record the waybill, move the deal to 已寄出, draft the shipping notice: ``(shipment, packet_id)``."""
+                 actor: str = "console", review: bool = False, notice: bool = True,
+                 note: Optional[dict] = None) -> tuple[dict, Optional[int]]:
+    """Record the waybill, move the deal to 已寄出, draft the shipping notice: ``(shipment, packet_id)``.
+    ``review``: the notice waits for a person whatever its kind's gate; ``notice`` False: none is drafted
+    (``packet_id`` None); ``note``: added to the events (the 聚水潭 sync's order: ``{"source", "order"}``)."""
     deal = _deal(store, deal_id)
     carrier, waybill = str(carrier or "").strip(), str(waybill or "").strip()
     if not carrier or len(carrier) > 20 or "\n" in carrier:
@@ -96,24 +104,34 @@ def add_shipment(store: PrmStore, deal_id, carrier: str, waybill: str, *, now: f
         raise DealError("运单号只能是 6–30 位字母、数字或短横线")
     party = store.party(deal["party_id"]) or {}
     shipment = store.add_shipment(deal["id"], carrier, waybill, now)
-    store.add_event(deal["id"], deal["party_id"], "shipment", {"carrier": carrier, "waybill": waybill},
+    store.add_event(deal["id"], deal["party_id"], "shipment", {"carrier": carrier, "waybill": waybill, **(note or {})},
                     actor=actor, now=now)
-    set_stage(store, deal["id"], "shipped", now=now, actor=actor)
+    set_stage(store, deal["id"], "shipped", now=now, actor=actor, note=note)
+    if not notice:
+        return shipment, None
     text = notice_text(party.get("name", ""), carrier, waybill)
-    route, status, decided_at = route_for(store, "shipping_notice", deal=store.deal(deal["id"]), now=now,
-                                          text=text, waybill=waybill)
+    if review:
+        route, status, decided_at = gates.REVIEW, PENDING, None
+    else:
+        route, status, decided_at = route_for(store, "shipping_notice", deal=store.deal(deal["id"]), now=now,
+                                              text=text, waybill=waybill)
+    order = str((note or {}).get("order") or "")
     packet_id = store.add_packet(
         deal_id=deal["id"], party_id=deal["party_id"], job_id=None, chat_id=party.get("wxid", ""),
         kind="shipping_notice", text=text, attachments=[], intent="通知达人样品已寄出",
         slots={"快递公司": carrier, "运单号": waybill}, stage_proposal="", needs_attention=False,
-        reason="运营在控制台填了运单号，系统按模板生成", status=status, route=route, decided_at=decided_at,
-        meta={"waybill": waybill, "carrier": carrier, "source": "system", "shipment_id": shipment["id"]}, now=now,
+        reason=(f"聚水潭寄样单 {order} 有了运单号，系统自动填上、按模板生成，要人看过再发" if order
+                else "运营在控制台填了运单号，系统按模板生成"),
+        status=status, route=route, decided_at=decided_at,
+        meta={"waybill": waybill, "carrier": carrier, "source": "system", "shipment_id": shipment["id"],
+              **({"sample_order": order} if order else {})}, now=now,
     )
     store.supersede(deal["id"], now, keep=packet_id, system_kind="shipping_notice")   # an earlier waybill's
     return shipment, packet_id
 
 
-def set_shipment_status(store: PrmStore, deal_id, status: str, *, now: float, actor: str = "console") -> dict:
+def set_shipment_status(store: PrmStore, deal_id, status: str, *, now: float, actor: str = "console",
+                        note: Optional[dict] = None) -> dict:
     deal = _deal(store, deal_id)
     if status not in SHIPMENT_STATES:
         raise DealError(f"不认识的物流状态 {status}")
@@ -121,9 +139,9 @@ def set_shipment_status(store: PrmStore, deal_id, status: str, *, now: float, ac
     if shipment is None:
         raise DealError("还没有填运单号")
     store.set_shipment_status(shipment["id"], status, now)
-    store.add_event(deal["id"], deal["party_id"], "shipment_status", {"status": status, "waybill": shipment["waybill"]},
-                    actor=actor, now=now)
-    return set_stage(store, deal["id"], status, now=now, actor=actor)
+    store.add_event(deal["id"], deal["party_id"], "shipment_status",
+                    {"status": status, "waybill": shipment["waybill"], **(note or {})}, actor=actor, now=now)
+    return set_stage(store, deal["id"], status, now=now, actor=actor, note=note)
 
 
 def route_for(store: PrmStore, kind: str, *, deal: dict, now: float, text: str, needs_attention: bool = False,

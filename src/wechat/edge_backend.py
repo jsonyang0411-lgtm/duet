@@ -16,6 +16,9 @@ Windows 只收发微信（D18）；这台 Mac 跑业务：路由、达人模块�
 - send_result 是失败、过期、不确定的，交给 set_send_failure_hook 的钩子，让草稿改成没发出去（文字和文件都报）；
 - 发送请求的应答丢了（超时、断线、被截断）：Windows 可能已经收下了，先当交给了 Windows，之后按 send_id 问它，
   它说没有这个请求才报失败（同一个 send_id 不会发两次，运营看到红字再补发也不会重复）。
+
+Windows 报的电脑微信掉线（wechat_gap：哪段时间电脑微信不在线）存进 edge_gaps.json（EdgeGaps），控制台
+（GET /api/wechat-gaps）一直提醒到运营点「看过了」。
 """
 
 from __future__ import annotations
@@ -55,6 +58,11 @@ EVENTS_RESET_NOTICE_SEC = 3600
 UNSURE_CHECK_SEC = 10
 # 这些错误说明请求根本没到 Windows（连接被拒、网络不通），可以放心算失败
 NEVER_REACHED = (errno.ECONNREFUSED, errno.EHOSTUNREACH, errno.ENETUNREACH, errno.EHOSTDOWN, errno.ENETDOWN)
+# Windows 报来的电脑微信掉线记录（wechat_gap）：运营看过的留多少天、最多留几条
+GAPS_KEEP_DAYS = 30
+GAPS_MAX = 200
+# edge_gaps.json 由收事件的线程和控制台（「看过了」）两边写
+_GAPS_LOCK = threading.Lock()
 
 
 class AttachmentNotYet(Exception):
@@ -133,6 +141,71 @@ class EdgeSends:
         return self.items.get(send_id)
 
 
+class EdgeGaps:
+    """Windows 报来的电脑微信掉线记录（wechat_gap 事件，edge-protocol.md 4.1.2），存在 edge_gaps.json：
+    ``[{"id", "from", "to", "reason", "received_at", "seen_at"}]``。控制台一直显示到运营点「看过了」，看过的
+    GAPS_KEEP_DAYS 天后删。同一段（from、to、reason 都一样）只记一次：Windows 的事件库重建过、Mac 从头再读也不重复。
+    写的时候先写临时文件再换；写不进去抛 OSError（那条事件不确认，下一轮再来）。"""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+
+    def _read(self) -> List[Dict[str, Any]]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        return [g for g in data if isinstance(g, dict)] if isinstance(data, list) else []
+
+    def _write(self, items: List[Dict[str, Any]]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(self.path)
+
+    @staticmethod
+    def _pruned(items: List[Dict[str, Any]], now: float) -> List[Dict[str, Any]]:
+        keep = [g for g in items if not g.get("seen_at") or now - float(g["seen_at"]) <= GAPS_KEEP_DAYS * 86400]
+        while len(keep) > GAPS_MAX:
+            seen = [g for g in keep if g.get("seen_at")]
+            keep.remove(min(seen or keep, key=lambda g: int(g.get("id") or 0)))
+        return keep
+
+    def add(self, event: Dict[str, Any], now: float) -> Optional[Dict[str, Any]]:
+        """记下一条 wechat_gap 事件，返回记下的那条；同一段已经有了（或时间不对）返回 None。"""
+        try:
+            start, end = int(event["from"]), int(event["to"])
+        except (KeyError, TypeError, ValueError):
+            logger.warning("[edge] 事件 %s 是 wechat_gap 但没有时间，不记", event.get("id"))
+            return None
+        reason = str(event.get("reason") or "")
+        with _GAPS_LOCK:
+            items = self._read()
+            if any(g.get("from") == start and g.get("to") == end and g.get("reason") == reason for g in items):
+                return None
+            gap = {"id": max([int(g.get("id") or 0) for g in items] + [0]) + 1, "from": start, "to": end,
+                   "reason": reason, "received_at": now, "seen_at": None}
+            self._write(self._pruned(items + [gap], now))
+        return dict(gap)
+
+    def unseen(self) -> List[Dict[str, Any]]:
+        """还没看过的，新的在前。"""
+        with _GAPS_LOCK:
+            items = self._read()
+        return sorted((g for g in items if not g.get("seen_at")), key=lambda g: -int(g.get("id") or 0))
+
+    def mark_seen(self, gap_id: int, now: float) -> bool:
+        """运营点了「看过了」；没有这一条或者已经看过了返回 False。"""
+        with _GAPS_LOCK:
+            items = self._read()
+            hit = next((g for g in items if int(g.get("id") or 0) == int(gap_id) and not g.get("seen_at")), None)
+            if hit is None:
+                return False
+            hit["seen_at"] = now
+            self._write(self._pruned(items, now))
+        return True
+
+
 def event_to_message(event: Dict[str, Any], files: List[str]) -> Dict[str, Any]:
     """Windows 的 creator_message / operator_message 事件 → 路由认识的标准消息（见 base.py）。
     事件里没有昵称，用 chat_id 代替。files 是已经下载到这台 Mac 上的附件（relay/attachments.py 直接用）。"""
@@ -201,6 +274,8 @@ class EdgeBackend(AbstractWeChatBackend):
         data_dir = Path(getattr(config, "db_path", "data/messages.db")).resolve().parent
         self.state = EdgeState(Path(state_path) if state_path else data_dir / "edge_client.json")
         self.sends_record = EdgeSends(self.state.path.with_name("edge_sends.json"))
+        # Windows 报来的电脑微信掉线记录（wechat_gap）：控制台显示到运营点「看过了」
+        self.gaps = EdgeGaps(self.state.path.with_name("edge_gaps.json"))
         self.files_dir = Path(files_dir) if files_dir else data_dir / "edge_files"
         self._sleep = sleep
         self._clock = clock
@@ -422,6 +497,13 @@ class EdgeBackend(AbstractWeChatBackend):
                     self._unsure.pop(str(event.get("send_id") or ""), None)
                 if event.get("status") in FAILED_RESULTS:
                     self._send_failed(event)
+            elif kind == P.WECHAT_GAP:
+                # 先存好（写不进去就抛出去，这条不确认、下一轮再来），控制台一直提醒到运营点「看过了」
+                gap = self.gaps.add(event, self._clock())
+                if gap is not None:
+                    logger.warning("[edge] Windows 报：电脑微信 %s 到 %s 不在线（%s），控制台提醒运营去手机上看",
+                                   time.strftime("%m-%d %H:%M", time.localtime(gap["from"])),
+                                   time.strftime("%m-%d %H:%M", time.localtime(gap["to"])), gap["reason"])
             self._run_hooks(event)
         if event.get("type") == P.EDGE_STATUS:
             self.edge_status = {k: event.get(k) for k in ("wechat", "db", "send", "detail", "at")}

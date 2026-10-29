@@ -230,6 +230,29 @@ def test_a_result_waits_in_the_outbox_until_the_bot_has_it(worker, bot, fake_cla
     assert not (tmp_path / "home/outbox/1.json").exists()
 
 
+def test_a_full_disk_neither_loses_the_result_nor_stops_the_worker(worker, bot, fake_claude, tmp_path):
+    """The outbox cannot be written (a full disk, here a folder it may not write): the result is sent from memory
+    and no half file is left behind.  A half file an older worker left is set aside, instead of stopping every
+    start of the worker (mac review F7: after a platform write the outcome must still get back)."""
+    s = settings(bot, fake_claude, tmp_path)
+    bot.ask("cc 跑")
+    client = worker.RelayClient(s["relay_url"], s["token"])
+    job = client.next_job(0)
+    outbox = tmp_path / "home" / "outbox"
+    outbox.mkdir(parents=True)
+    outbox.chmod(0o500)
+    try:
+        assert worker.deliver(client, job["id"], {"ok": True, "text": "磁盘满了也送到"}, worker.Stopper()) is True
+        assert list(outbox.iterdir()) == []
+    finally:
+        outbox.chmod(0o700)
+    bot.relay.tick()
+    assert bot.sent == ["#1 完成\n磁盘满了也送到"]
+    (outbox / "5.json").write_text('{"ok": tr', encoding="utf-8")         # what a full disk left before
+    worker.flush_outbox(client, worker.Stopper())
+    assert not (outbox / "5.json").exists() and (outbox / "5.bad").exists()
+
+
 def test_check_and_a_wrong_token(worker, bot, fake_claude, tmp_path, capsys, monkeypatch):
     s = settings(bot, fake_claude, tmp_path)
     cfg = tmp_path / "config.json"

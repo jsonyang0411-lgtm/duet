@@ -5,7 +5,9 @@
                     ``mode_until`` / ``paused``), the latest slot values, the stage the AI
                     suggests, why a person should look (``notices``, JSON; ``attention`` is
                     their texts, what the console shows), when it was delivered and when its
-                    personal data was cleared (8.2)
+                    personal data was cleared (8.2), and where its 专属佣金 chain stands
+                    (``chain``, JSON: the signature the bot last looked at, the sample order
+                    the chain follows and since when; src/prm/service.py)
 ``action_packets``  every draft reply: what would be sent (text with placeholders,
                     attachments), why, and what became of it
 ``pii_tokens``      the phone and ID numbers behind the placeholders (〈手机1〉): the Mac
@@ -18,6 +20,11 @@
                     the operators' own WeChat replies, a creator's messages while a person
                     has the chat, holding replies, numbers shown in full, clean-ups.  The
                     audit trail, and the backlog the next draft job is told about.
+``sample_orders``   the sample orders verified in 聚水潭 and where they stand there (status,
+                    waybill, sent / signed for, why rejected or deleted), what the deal got of
+                    them (``applied``) and whether they are still asked about (``done`` empty):
+                    PRM_SAMPLE_SYNC_MIN, src/prm/service.py
+``prm_meta``        small values the service keeps over a restart (when the sync last asked)
 
 A packet's life: ``pending`` (waits in the console) -> ``approved`` (an operator said
 send, or the kind's gate is ``auto``) -> ``sending`` -> ``sent`` | ``failed``; or
@@ -149,6 +156,30 @@ CREATE TABLE IF NOT EXISTS deal_events (
     at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS deal_events_deal ON deal_events(deal_id, id);
+CREATE TABLE IF NOT EXISTS sample_orders (
+    order_no TEXT PRIMARY KEY,
+    packet_id INTEGER NOT NULL,
+    deal_id INTEGER NOT NULL,
+    party_id INTEGER NOT NULL,
+    made_at REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT '',
+    carrier TEXT NOT NULL DEFAULT '',
+    waybill TEXT NOT NULL DEFAULT '',
+    sent_at REAL,
+    signed_at REAL,
+    reason TEXT NOT NULL DEFAULT '',
+    misses INTEGER NOT NULL DEFAULT 0,
+    checked_at REAL,
+    done TEXT NOT NULL DEFAULT '',
+    applied TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sample_orders_deal ON sample_orders(deal_id);
+CREATE TABLE IF NOT EXISTS prm_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT ''
+);
 """
 
 # Columns added after the first version: (table, column, type).
@@ -163,6 +194,7 @@ _ADDED_COLUMNS = (
     ("pii_tokens", "purged_at", "REAL"),
     ("action_packets", "platform", "TEXT NOT NULL DEFAULT '{}'"),
     ("deals", "notices", "TEXT NOT NULL DEFAULT '[]'"),
+    ("deals", "chain", "TEXT NOT NULL DEFAULT '{}'"),
 )
 
 # What the creators wrote, or our side's own words, waiting for the next draft job.
@@ -172,7 +204,7 @@ BACKLOG_KINDS = ("creator_message", "operator_message")
 # ``draft:<lane>`` is the latest draft's own notes (the next draft of that lane replaces them); every
 # other key is the system's and stays until what it says is dealt with (src/prm/service.py: a draft
 # that was not written, a 专属佣金 step owed, a platform action that ended red, a recall, messages
-# read too late to draft).  ``show`` False: kept for what it holds, no longer shown.
+# read too late to draft, this PC's clock off WeChat's).  ``show`` False: kept for what it holds, no longer shown.
 DRAFT_NOTES = "draft:"
 NOTICE_CHARS = 300          # one notice's text
 ATTENTION_CHARS = 600       # all of them, as the console shows them
@@ -207,6 +239,7 @@ def deal_view(row: dict) -> dict:
     out = dict(row)
     out["slots"] = _loads(row.get("slots"), {})
     out["notices"] = notices_of(row)
+    out["chain"] = _loads(row.get("chain"), {})
     return out
 
 
@@ -231,6 +264,12 @@ def attention_of(notices: list) -> str:
 def event_view(row: dict) -> dict:
     out = dict(row)
     out["detail"] = _loads(row.get("detail"), {})
+    return out
+
+
+def sample_order_view(row: dict) -> dict:
+    out = dict(row)
+    out["applied"] = _loads(row.get("applied"), {})
     return out
 
 
@@ -358,13 +397,15 @@ class PrmStore:
 
     def update_deal(self, deal_id: int, now: Optional[float] = None, *, merge_slots: Optional[dict] = None,
                     replace_slots: Optional[dict] = None, **fields) -> None:
-        """Set ``fields`` and merge (or replace) the slot values.  (``attention`` is the notices'
-        texts: ``set_notice`` / ``drop_notices`` / ``edit_notices``.)"""
+        """Set ``fields`` and merge (or replace) the slot values; ``chain`` is a dict (stored as JSON).
+        (``attention`` is the notices' texts: ``set_notice`` / ``drop_notices`` / ``edit_notices``.)"""
         allowed = {"stage", "mode", "mode_until", "stage_proposal", "last_message_at",
-                   "delivered_at", "purged_at", "holding_round"}
+                   "delivered_at", "purged_at", "holding_round", "chain"}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"not a deal field: {sorted(unknown)}")
+        if "chain" in fields:
+            fields["chain"] = json.dumps(fields["chain"] or {}, ensure_ascii=False)
         now = time.time() if now is None else now
         with self._lock:
             row = self._conn.execute("SELECT slots FROM deals WHERE id = ?", (deal_id,)).fetchone()
@@ -384,9 +425,12 @@ class PrmStore:
             )
             self._conn.commit()
 
-    def edit_notices(self, deal_id: int, edit: Callable[[list], list], now: Optional[float] = None) -> list:
+    def edit_notices(self, deal_id: int, edit: Callable[[list], list], now: Optional[float] = None, *,
+                     touch: bool = True) -> list:
         """Change a deal's notices in one step under the lock: ``edit`` gets the list and returns the
-        new one; ``attention`` follows (``attention_of``).  Returns the new list ([] for no deal)."""
+        new one; ``attention`` follows (``attention_of``).  ``touch`` False: the deal's ``updated_at``
+        stays (a notice about this PC, not the deal: no sign of life for the 8.2 clean-up).  Returns the
+        new list ([] for no deal)."""
         now = time.time() if now is None else now
         with self._lock:
             row = self._conn.execute("SELECT notices, attention FROM deals WHERE id = ?", (deal_id,)).fetchone()
@@ -395,14 +439,16 @@ class PrmStore:
             before = notices_of(dict(row))
             notices = edit([dict(n) for n in before])
             if notices != before or attention_of(notices) != row["attention"]:
-                self._conn.execute("UPDATE deals SET notices = ?, attention = ?, updated_at = ? WHERE id = ?",
-                                   (json.dumps(notices, ensure_ascii=False), attention_of(notices), now, deal_id))
+                self._conn.execute(f"UPDATE deals SET notices = ?, attention = ?{', updated_at = ?' if touch else ''}"
+                                   " WHERE id = ?", (json.dumps(notices, ensure_ascii=False), attention_of(notices),
+                                                     *((now,) if touch else ()), deal_id))
                 self._conn.commit()
         return notices
 
-    def set_notice(self, deal_id: int, key: str, text: str, now: Optional[float] = None, **data) -> None:
+    def set_notice(self, deal_id: int, key: str, text: str, now: Optional[float] = None, *, touch: bool = True,
+                   **data) -> None:
         """The deal's notice ``key`` says ``text`` (``data``: what the system keeps to deal with it later),
-        in its place when it had one; an empty ``text`` drops it."""
+        in its place when it had one; an empty ``text`` drops it (``touch``: ``edit_notices``)."""
         now = time.time() if now is None else now
 
         def edit(notices):
@@ -413,7 +459,7 @@ class PrmStore:
                     "at": (old or {}).get("at", now)}
             return [item if n is old else n for n in notices] if old is not None else [*notices, item]
 
-        self.edit_notices(deal_id, edit, now)
+        self.edit_notices(deal_id, edit, now, touch=touch)
 
     def drop_notices(self, deal_id: int, match: Callable[[dict], bool], now: Optional[float] = None) -> list:
         """Remove the deal's notices ``match`` says yes to; returns them (one step: of two threads only
@@ -457,6 +503,13 @@ class PrmStore:
 
         self.edit_notices(deal_id, edit)
         return changed[0]
+
+    def delivered_deals(self) -> list[dict]:
+        """The deals marked 已签收 whose details were not cleared yet (``delivered_at`` set, no ``purged_at``)."""
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM deals WHERE delivered_at IS NOT NULL AND purged_at IS NULL"
+                                      " ORDER BY id").fetchall()
+        return [deal_view(dict(r)) for r in rows]
 
     def deals_to_purge(self, now: float, days: int) -> list[dict]:
         """Deals whose details are due to be cleared (8.2, ``retention.purge_due_at``)."""
@@ -527,13 +580,29 @@ class PrmStore:
             ).fetchall()
         return [p for p in (packet_view(dict(r)) for r in rows) if not p["platform"].get("acked_at")]
 
-    def deal_packets(self, deal_id: int, tools: tuple = (), statuses: tuple = ()) -> list[dict]:
+    def deal_packets(self, deal_id: int, tools: tuple = (), statuses: tuple = (),
+                     since: Optional[float] = None) -> list[dict]:
         """A deal's packets, newest first: of these ``tools`` (platform action names) and in these
-        ``statuses`` (all when empty).  Every one of them, however old (a 专属佣金 opened months ago)."""
+        ``statuses`` (all when empty), drafted at ``since`` or later (all when None).  Every one of
+        them, however old (a 专属佣金 opened months ago)."""
         sql, args = "SELECT * FROM action_packets WHERE deal_id = ?", [deal_id]
+        if since is not None:
+            sql += " AND created_at >= ?"
+            args.append(float(since))
         if tools:
             sql += f" AND tool IN ({', '.join('?' * len(tools))})"
             args += list(tools)
+        if statuses:
+            sql += f" AND status IN ({', '.join('?' * len(statuses))})"
+            args += list(statuses)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY id DESC", args).fetchall()
+        return [packet_view(dict(r)) for r in rows]
+
+    def packets_of(self, tools: tuple, statuses: tuple = ()) -> list[dict]:
+        """Every deal's packets of these ``tools`` (platform action names), in these ``statuses`` (all when empty),
+        newest first (the sample orders the 聚水潭 sync keeps: ``jst.sample_order``)."""
+        sql, args = f"SELECT * FROM action_packets WHERE tool IN ({', '.join('?' * len(tools))})", list(tools)
         if statuses:
             sql += f" AND status IN ({', '.join('?' * len(statuses))})"
             args += list(statuses)
@@ -556,6 +625,39 @@ class PrmStore:
                 " ORDER BY id DESC", (chat_id, SENT, SENDING, since),
             ).fetchall()
         return [packet_view(dict(r)) for r in rows]
+
+    def unsure_since(self, chat_id: str, since: float) -> list[dict]:
+        """Packets the bot was stopped in the middle of sending to this chat (``failed`` /
+        ``indeterminate``: ``PrmService.start``), settled at ``since`` or later, newest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM action_packets WHERE chat_id = ? AND status = ? AND outcome = 'indeterminate'"
+                " AND sent_at >= ? ORDER BY id DESC", (chat_id, FAILED, since),
+            ).fetchall()
+        return [packet_view(dict(r)) for r in rows]
+
+    def settle_unsure(self, packet_id: int, *, sent_at: Optional[float] = None,
+                      error: Optional[str] = None) -> bool:
+        """A packet the bot was stopped in the middle of sending (``failed`` / ``indeterminate``) that
+        WeChat shows after all: with ``error`` None all of it went out (``sent`` / ``sent_confirmed``;
+        ``sent_at`` becomes the time WeChat shows when that is earlier than the restart's); with an
+        ``error`` it stays failed and says what was seen (a draft with files whose text went out).
+        True when it was such a packet."""
+        with self._lock:
+            if error is None:
+                when = "" if sent_at is None else ", sent_at = MIN(COALESCE(sent_at, ?), ?)"
+                cur = self._conn.execute(
+                    f"UPDATE action_packets SET status = ?, outcome = 'sent_confirmed', error = ''{when}"
+                    " WHERE id = ? AND status = ? AND outcome = 'indeterminate'",
+                    (SENT, *(() if sent_at is None else (sent_at, sent_at)), packet_id, FAILED),
+                )
+            else:
+                cur = self._conn.execute(
+                    "UPDATE action_packets SET error = ? WHERE id = ? AND status = ? AND outcome = 'indeterminate'",
+                    (error, packet_id, FAILED),
+                )
+            self._conn.commit()
+            return cur.rowcount == 1
 
     def reviewed(self, kind: str, since: float, limit: int) -> list[dict]:
         """The newest drafts of ``kind`` a person decided on after ``since`` (8.1's window).
@@ -602,6 +704,30 @@ class PrmStore:
                                (json.dumps(platform or {}, ensure_ascii=False), packet_id))
             self._conn.commit()
             return True
+
+    def edit_platform(self, packet_id: int, edit: Callable[[dict], Optional[dict]], statuses: tuple, *,
+                      error: Optional[Callable[[str], str]] = None) -> Optional[dict]:
+        """Change the platform JSON of a packet that is in one of ``statuses`` in one step under the lock:
+        ``edit(current)`` returns the new JSON, or None for no change; ``error(current error)`` gives its new
+        error text at the same time.  Returns the new JSON (None: not changed)."""
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT platform, error FROM action_packets WHERE id = ? AND status IN ({', '.join('?' * len(statuses))})",
+                (packet_id, *statuses),
+            ).fetchone()
+            if row is None:
+                return None
+            new = edit(_loads(row["platform"], {}))
+            if new is None:
+                return None
+            if error is None:
+                self._conn.execute("UPDATE action_packets SET platform = ? WHERE id = ?",
+                                   (json.dumps(new, ensure_ascii=False), packet_id))
+            else:
+                self._conn.execute("UPDATE action_packets SET platform = ?, error = ? WHERE id = ?",
+                                   (json.dumps(new, ensure_ascii=False), error(row["error"] or ""), packet_id))
+            self._conn.commit()
+            return new
 
     def set_outcome(self, packet_id: int, outcome: str) -> None:
         with self._lock:
@@ -789,6 +915,12 @@ class PrmStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def shipments(self, deal_id: int) -> list[dict]:
+        """A deal's shipments, newest first."""
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM shipments WHERE deal_id = ? ORDER BY id DESC", (deal_id,)).fetchall()
+        return [dict(r) for r in rows]
+
     def set_shipment_status(self, shipment_id: int, status: str, now: Optional[float] = None) -> None:
         now = time.time() if now is None else now
         with self._lock:
@@ -832,19 +964,28 @@ class PrmStore:
             self._conn.commit()
             return int(cur.lastrowid)
 
-    def events(self, deal_id: Optional[int] = None, limit: int = 50, kinds: tuple = ()) -> list[dict]:
-        """The newest events first (of these ``kinds`` only, when given)."""
+    def events(self, deal_id: Optional[int] = None, limit: Optional[int] = 50, kinds: tuple = (),
+               since: Optional[float] = None) -> list[dict]:
+        """The newest events first (of these ``kinds`` only, when given; recorded at ``since`` or later,
+        when given; all of them when ``limit`` is None)."""
         sql, where, args = "SELECT * FROM deal_events", [], []
         if deal_id is not None:
             where.append("deal_id = ?")
             args.append(deal_id)
+        if since is not None:
+            where.append("at >= ?")
+            args.append(float(since))
         if kinds:
             where.append(f"kind IN ({', '.join('?' * len(kinds))})")
             args += list(kinds)
         if where:
             sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            args.append(int(limit))
         with self._lock:
-            rows = self._conn.execute(sql + " ORDER BY id DESC LIMIT ?", (*args, int(limit))).fetchall()
+            rows = self._conn.execute(sql, args).fetchall()
         return [event_view(dict(r)) for r in rows]
 
     def backlog(self, deal_id: int) -> list[dict]:
@@ -880,3 +1021,84 @@ class PrmStore:
                     changed += 1
             self._conn.commit()
         return changed
+
+    # ── sample orders in 聚水潭 (PRM_SAMPLE_SYNC_MIN, src/prm/service.py) ──────
+
+    def add_sample_order(self, order_no: str, *, packet_id: int, deal_id: int, party_id: int, made_at: float,
+                         done: str = "", applied: Optional[dict] = None, now: Optional[float] = None) -> bool:
+        """Start keeping a verified sample order (its packet, deal, creator, when it was made); True when it is
+        new (an order kept already stays as it is)."""
+        now = time.time() if now is None else now
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO sample_orders (order_no, packet_id, deal_id, party_id, made_at, done, applied,"
+                " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (order_no, packet_id, deal_id, party_id, made_at, done, json.dumps(applied or {}, ensure_ascii=False),
+                 now, now),
+            )
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def sample_order(self, order_no: str) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM sample_orders WHERE order_no = ?", (order_no,)).fetchone()
+        return sample_order_view(dict(row)) if row else None
+
+    def sample_orders(self, *, live: Optional[bool] = None, deal_id: Optional[int] = None) -> list[dict]:
+        """The sample orders kept, oldest first: ``live`` True only those still asked about (``done`` empty), False
+        only those that are not; of one deal (``deal_id``)."""
+        sql, where, args = "SELECT * FROM sample_orders", [], []
+        if live is not None:
+            where.append("done = ''" if live else "done != ''")
+        if deal_id is not None:
+            where.append("deal_id = ?")
+            args.append(deal_id)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY made_at, order_no", args).fetchall()
+        return [sample_order_view(dict(r)) for r in rows]
+
+    def update_sample_order(self, order_no: str, now: Optional[float] = None, **fields) -> None:
+        allowed = {"status", "carrier", "waybill", "sent_at", "signed_at", "reason", "misses", "checked_at", "done",
+                   "applied"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"not a sample order field: {sorted(unknown)}")
+        if "applied" in fields:
+            fields["applied"] = json.dumps(fields["applied"] or {}, ensure_ascii=False)
+        fields["updated_at"] = time.time() if now is None else now
+        names = sorted(fields)
+        with self._lock:
+            self._conn.execute(f"UPDATE sample_orders SET {', '.join(f'{n} = ?' for n in names)} WHERE order_no = ?",
+                               (*[fields[n] for n in names], order_no))
+            self._conn.commit()
+
+    def rewrite_sample_orders(self, deal_id: int, rewrite: Callable[[str], str], now: Optional[float] = None) -> int:
+        """Rewrite what a deal's sample orders keep in 聚水潭's words (why rejected or deleted: ``reason``, and the
+        same in ``applied``) (8.2 clean-up); returns how many changed."""
+        now = time.time() if now is None else now
+        changed = 0
+        with self._lock:
+            rows = self._conn.execute("SELECT order_no, reason, applied FROM sample_orders WHERE deal_id = ?",
+                                      (deal_id,)).fetchall()
+            for row in rows:
+                old = (row["reason"] or "", row["applied"] or "{}")
+                new = tuple(rewrite(value) for value in old)
+                if new != old:
+                    self._conn.execute("UPDATE sample_orders SET reason = ?, applied = ?, updated_at = ?"
+                                       " WHERE order_no = ?", (*new, now, row["order_no"]))
+                    changed += 1
+            self._conn.commit()
+        return changed
+
+    def meta_value(self, key: str) -> Optional[str]:
+        with self._lock:
+            row = self._conn.execute("SELECT value FROM prm_meta WHERE key = ?", (key,)).fetchone()
+        return None if row is None else str(row["value"])
+
+    def set_meta_value(self, key: str, value) -> None:
+        with self._lock:
+            self._conn.execute("INSERT INTO prm_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET"
+                               " value = excluded.value", (key, str(value)))
+            self._conn.commit()

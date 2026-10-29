@@ -596,6 +596,41 @@ class TestPrmPages:
         assert [e["kind"] for e in prm.service.store.events(1, limit=1)] == ["wrong"]
 
 
+class TestWechatGapAlert:
+    """电脑微信掉线的提醒（Windows：机器人自己记的，副驾驶模式的控制台也有）：每页顶上一直显示到运营点「看过了」，
+    还没恢复的那段没有按钮（src/wechat/presence.py，真的 /api/wechat-gaps）。"""
+
+    @pytest.fixture
+    def presence(self, tmp_path):
+        from types import SimpleNamespace
+        from src.wechat.presence import PresenceStore, WechatPresence
+        from src.web import server as web_server
+
+        store = PresenceStore(str(tmp_path / "messages.db"))
+        service = WechatPresence(store, lambda: {"online": None})
+        web_server.register_presence(service)
+        yield SimpleNamespace(store=store, service=service)
+        web_server.register_presence(None)
+        store.close()
+
+    def test_a_gap_shows_until_seen_and_the_one_going_on_has_no_button(self, page, presence):
+        now = time.time()
+        closed = presence.store.add_gap(now - 3600, "offline_while_running", "找不到微信主窗口", now - 3500)
+        presence.store.close_gap(closed["id"], now - 1800)
+        presence.store.add_gap(now - 600, "stopped_with_bot", "机器人启动时电脑微信没开", now - 500)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.get_by_text("不在线（约 30 分钟）", exact=False).wait_for()
+        alerts = page.locator(".gap-alerts").inner_text()
+        for words in ("还没恢复", "机器人在运行，发现电脑微信不在线了", "可能没收到", "手机微信上把达人的私聊看一遍",
+                      "同步最近的聊天记录"):
+            assert words in alerts
+        assert page.locator(".gap-alerts button:has-text('看过了')").count() == 1, "还没恢复的那段不能点掉"
+        page.locator(".gap-alerts button:has-text('看过了')").click()
+        page.get_by_text("不在线（约 30 分钟）", exact=False).wait_for(state="detached")
+        assert presence.store.gap(closed["id"])["seen_at"] is not None
+        assert "还没恢复" in page.locator(".gap-alerts").inner_text()
+
+
 class TestOnboardingForTheAgentConsole:
     def test_three_steps_end_with_the_relay(self, page):
         """Every request of the wizard is answered here: nothing is written to .env."""

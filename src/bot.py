@@ -239,6 +239,8 @@ class Bot:
         # New friends (Windows): friend_added events for the Mac (PRM_EDGE), 登记达人's candidates (PRM_COPILOT).
         new_friends = self._start_new_friends(config, backend, prm, edge)
         self._new_friends = new_friends
+        # When PC WeChat was not online (Windows): the console's alert, wechat_gap for the Mac, a catch-up after.
+        presence = self._start_presence(config, backend, edge)
 
         self._start_friend_management(config, backend, admin_handler,
                                       on_accepted=new_friends.accepts.note if new_friends is not None else None)
@@ -288,6 +290,13 @@ class Bot:
         finally:
             if party_sync is not None:
                 party_sync.stop()
+            if presence is not None:
+                presence.stop()
+                try:
+                    from .web.server import register_presence
+                    register_presence(None)
+                except Exception:
+                    pass
             if new_friends is not None:
                 new_friends.stop()
                 try:
@@ -379,6 +388,44 @@ class Bot:
         service.start()
         return service
 
+    @staticmethod
+    def _start_presence(config, backend, edge):
+        """The watch of PC WeChat (src/wechat/presence.py), or None for a backend that cannot tell
+        whether WeChat is logged in (only Windows wcdb has ``wechat_presence``).  A stretch without it is
+        kept in the bot's database (DB_PATH) and shown in the console until an operator has seen it;
+        while it goes on, rows WeChat brings in late are handed on (``note_wechat_offline``); when it
+        ends, the creators' chats are read back (``catch_up_after_gap``) and, with PRM_EDGE, the Mac
+        gets a ``wechat_gap`` event."""
+        probe = getattr(backend, "wechat_presence", None)
+        if not callable(probe):
+            return None
+        try:
+            from .wechat.presence import PresenceStore, WechatPresence
+
+            def offline(gap: dict) -> None:
+                note = getattr(backend, "note_wechat_offline", None)
+                if callable(note):
+                    note(gap["from"])
+
+            def back(gap: dict) -> None:
+                if edge is not None:
+                    edge.wechat_gap(gap)
+                catch_up = getattr(backend, "catch_up_after_gap", None)
+                if callable(catch_up):
+                    catch_up(gap["from"])
+
+            service = WechatPresence(PresenceStore(config.db_path), probe, on_offline=offline, on_back=back)
+        except Exception:
+            logger.warning("WeChat presence: the watch could not start", exc_info=True)
+            return None
+        try:
+            from .web.server import register_presence
+            register_presence(service)
+        except Exception:
+            pass
+        service.start()
+        return service
+
     def _start_friend_management(self, config, backend, admin_handler, on_accepted=None) -> None:
         """The admin's friend commands and, with AUTO_ACCEPT_FRIENDS=on, the auto-accept worker.
 
@@ -386,7 +433,8 @@ class Bot:
         gets them; the manager shares that backend's window lock and reads the screen
         with its own OCR engine (OCR_FALLBACK is a different engine and may be off).
         ``on_accepted(at, label)`` hears every request it accepts (the new-friend scan's
-        AcceptLog: a friend the bot let in is ``auto_accept``).
+        AcceptLog: a friend the bot let in is ``auto_accept``).  The backend's ``chat_names`` tell the
+        manager which window titles are chats (open in windows of their own), never its dialogs.
         """
         window = getattr(backend, "window_controller", None)
         if window is None:
@@ -401,6 +449,7 @@ class Bot:
                 ocr_engine=WindowsOcrEngine(window=window),
                 ui_lock=getattr(backend, "window_lock", None),
                 on_accepted=on_accepted,
+                chat_names=getattr(backend, "chat_names", None),
             )
             auto = AutoFriendService(
                 manager,
@@ -410,6 +459,9 @@ class Bot:
                 idle_sec=config.auto_accept_idle_sec,
                 watch=config.auto_accept_watch == "on",
                 full_check_sec=config.auto_accept_full_check_sec,
+                daily_max=config.auto_accept_daily_max,
+                state_path=Path(config.db_path).parent / "auto_accept_state.json",
+                notify=self._admin_notifier(config, backend),
             )
         except Exception:
             logger.warning("Friend management could not start", exc_info=True)
@@ -418,6 +470,20 @@ class Bot:
         admin_handler.set_friend_manager(manager, auto)
         if auto.enabled:
             auto.start()
+
+    @staticmethod
+    def _admin_notifier(config, backend):
+        """``notify(text)`` for the auto-accept worker: a private message to the admin (ADMIN_WXID) through the
+        backend's sender; without an admin or a sender, None (it is only logged)."""
+        admin = str(getattr(config, "admin_wxid", "") or "").strip()
+        send = getattr(backend, "send_text", None)
+        if not admin or not callable(send):
+            return None
+
+        def notify(text: str) -> None:
+            if not send(admin, text):
+                logger.warning("Auto-accept: the admin could not be told: %s", text)
+        return notify
 
     @staticmethod
     def _start_claude_relay(config, router, backend):

@@ -413,3 +413,53 @@ def test_a_message_windows_handed_on_late_keeps_when_it_was_written():
     msg = event_to_message({"id": 9, "type": "creator_message", "at": 1761530000, "written_at": 1761500000,
                             "chat_id": CREATOR, "message_id": "m9", "text": "停机时发的"}, [])
     assert msg["timestamp"] == 1761500000
+
+
+# ---- 电脑微信掉线（wechat_gap，2026-10-28） ----
+
+def test_a_wechat_gap_is_kept_until_an_operator_has_seen_it(fake, tmp_path):
+    """Windows 报的 wechat_gap：存进 edge_gaps.json 再确认，Mac 当时不在线也不会漏；同一段只记一次（Windows 的
+    事件库重建、Mac 从头再读也一样）；运营点了「看过了」就不再显示。"""
+    from src.wechat.edge_backend import EdgeGaps
+    gap = fake.wechat_gap(1761462000, 1761465600, "stopped_with_bot")
+    with Running(fake, tmp_path) as run:
+        assert wait_for(lambda: fake.acked_upto >= gap["id"])
+        assert any(e["type"] == "wechat_gap" for e in run.events), "也交给钩子（PRM 不管它）"
+    store = EdgeGaps(tmp_path / "edge_gaps.json")
+    [kept] = store.unseen()
+    assert (kept["from"], kept["to"], kept["reason"], kept["seen_at"]) == (1761462000, 1761465600, "stopped_with_bot", None)
+    assert run.seen == [], "不是达人的话"
+    fake.rebuild_db()
+    fake.wechat_gap(1761462000, 1761465600, "stopped_with_bot")         # 同一段又报了一次
+    with Running(fake, tmp_path):
+        assert wait_for(lambda: fake.acked_upto >= 2)
+    assert len(store.unseen()) == 1
+    assert store.mark_seen(kept["id"], time.time()) and store.unseen() == []
+    assert store.mark_seen(kept["id"], time.time()) is False
+
+
+def test_a_gap_that_cannot_be_stored_is_not_acknowledged(fake, tmp_path, monkeypatch):
+    """edge_gaps.json 写不进去：这条不确认，退避以后再来，写进去了才确认。"""
+    from src.wechat.edge_backend import EdgeGaps
+    monkeypatch.setattr("src.wechat.edge_backend.BACKOFF_SEC", (0.01,) * 6)
+    real, failures = EdgeGaps.add, [OSError("disk full")]
+
+    def add(self, event, now):
+        if failures:
+            raise failures.pop(0)
+        return real(self, event, now)
+
+    monkeypatch.setattr(EdgeGaps, "add", add)
+    gap = fake.wechat_gap(1761462000, 1761465600)
+    with Running(fake, tmp_path):
+        assert wait_for(lambda: fake.acked_upto >= gap["id"])
+    assert failures == [] and len(EdgeGaps(tmp_path / "edge_gaps.json").unseen()) == 1
+
+
+def test_an_event_of_a_kind_the_mac_does_not_know_is_passed_on_and_acknowledged(fake, tmp_path):
+    """协议只增不改：老版本的 Mac 遇到不认识的事件类型（比如 wechat_gap 之前的 Mac 看 wechat_gap）只是跳过、照样确认。"""
+    with fake._cond:
+        unknown = fake._event("something_new", note="以后加的")
+    with Running(fake, tmp_path) as run:
+        assert wait_for(lambda: fake.acked_upto >= unknown["id"])
+    assert [e["type"] for e in run.events if e["type"] == "something_new"] == ["something_new"] and run.seen == []

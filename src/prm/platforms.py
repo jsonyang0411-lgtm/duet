@@ -39,6 +39,7 @@ import signal
 import subprocess
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Callable, Optional
@@ -612,6 +613,11 @@ def phone_of(value) -> str:
     return digits
 
 
+def creator_account_ok(value) -> bool:
+    """Is this a creator's 抖音号 / 小红书号 / UID as 聚水潭 takes one (``_CREATOR_NO``)?"""
+    return isinstance(value, str) and bool(_CREATOR_NO.match(value.strip()))
+
+
 def catalog_platform(action: dict) -> str:
     """Whose catalogue an action's item is in: its platform's; a sample order's, its shop's."""
     platform = ACTIONS[action["action"]]["platform"]
@@ -828,6 +834,7 @@ def config(settings: dict) -> dict:
     raw = settings.get("platforms") if isinstance(settings.get("platforms"), dict) else {}
     out = {"node": None, "dirs": {}, "missing": {}, "limits": _limits(raw), "env": {},
            "dy_expect_shop_id": "", "dy_invite_phone": "", "dy_invite_wechat": "", "dy_invite_invalid": [],
+           "dy_invite_ledger": "",
            "tb_shop": "", "jst_expect_uid": "", "jst_shops": {}, "jst_logistics": [],
            "preview_timeout_sec": PREVIEW_TIMEOUT_SEC, "execute_timeout_sec": EXECUTE_TIMEOUT_SEC}
     for key in ("preview_timeout_sec", "execute_timeout_sec"):
@@ -847,6 +854,9 @@ def config(settings: dict) -> dict:
             out[key] = value
         elif value:
             out["dy_invite_invalid"].append(key)          # set, but not in the drawer's format: said, never used
+    ledger = str(raw.get("dy_invite_ledger") or "").strip()
+    if ledger and not _CONTROL.search(ledger):
+        out["dy_invite_ledger"] = os.path.expanduser(ledger)
     tb_shop = str(raw.get("tb_shop") or "").strip()
     if tb_shop and not tb_shop.startswith("-") and not _CONTROL.search(tb_shop) and len(tb_shop) <= 40:
         out["tb_shop"] = tb_shop
@@ -972,13 +982,21 @@ def run_cli(argv: list, cwd, *, timeout: float, env: Optional[dict] = None,
                   chunks["err"].decode("utf-8", "replace"), round(time.monotonic() - started, 1), stopped)
 
 
+class Cancelled(Exception):
+    """The job was cancelled before its command started (``CliLock`` while it waited): nothing ran."""
+
+
 class CliLock:
     """One platform CLI at a time on this Mac (the worker and ``--sync-products`` share the
     browser tabs): an flock on ``path``, waited for up to ``wait`` seconds (``heartbeat()``
-    every 30 s meanwhile: the relay job stays alive)."""
+    every ``every`` seconds meanwhile: the relay job stays alive).  A heartbeat that says the
+    job is cancelled ends the wait with ``Cancelled``: nothing has run yet, so nothing runs
+    (mac review C#1: the cancel used to be ignored and the write went ahead)."""
 
-    def __init__(self, path, wait: float = 600.0, heartbeat: Optional[Callable[[], bool]] = None):
+    def __init__(self, path, wait: float = 600.0, heartbeat: Optional[Callable[[], bool]] = None,
+                 every: float = 30.0):
         self.path, self.wait, self.handle, self.heartbeat = Path(path), wait, None, heartbeat
+        self.every = every
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -995,17 +1013,24 @@ class CliLock:
                 if time.monotonic() >= deadline:
                     self.handle.close()
                     raise TimeoutError(f"等了 {int(self.wait)} 秒，另一个平台命令还在跑（{self.path}）")
-                if self.heartbeat is not None and time.monotonic() - beat >= 30:
+                if self.heartbeat is not None and time.monotonic() - beat >= self.every:
                     beat = time.monotonic()
-                    try:
-                        self.heartbeat()
-                    except Exception:
-                        pass
-                time.sleep(0.5)
+                    if _says_cancel(self.heartbeat):
+                        self.handle.close()
+                        raise Cancelled("任务在等另一个平台命令跑完的时候被取消了，平台没有动")
+                time.sleep(min(0.5, max(0.01, self.every / 4)))
 
     def __exit__(self, *exc):
         if self.handle is not None:
             self.handle.close()
+        return False
+
+
+def _says_cancel(heartbeat) -> bool:
+    """A heartbeat's answer: True when the job is cancelled (one that fails says nothing)."""
+    try:
+        return bool(heartbeat())
+    except Exception:
         return False
 
 
@@ -1031,6 +1056,12 @@ def claim(ledger: Path, key: str, record: dict) -> Optional[dict]:
         f.flush()
         os.fsync(f.fileno())
     return None
+
+
+def claimed(ledger, key: str) -> bool:
+    """Is the approval ``key`` in the ledger: taken by a run that may have written to the platform
+    (the worker's answer for an execution that broke on the way: UNKNOWN, never NOT_RUN)."""
+    return bool(_KEY.match(str(key))) and (Path(ledger) / f"{key}.json").exists()
 
 
 def settle(ledger: Path, key: str, record: dict) -> None:
@@ -1382,7 +1413,13 @@ def _dy_created(data) -> dict:
     return out
 
 
-def _preview_dy_designated(action: dict, cfg: dict, run_one, block: dict) -> None:
+def _preview_dy_designated(action: dict, cfg: dict, run_one, block: dict, context: Optional[dict] = None) -> None:
+    cover = _invite_check(action, context, block)
+    if cover is not None:                       # the invite card opened it: nothing to ask the platform
+        block["covered"] = covered_of({"by": "invite", **cover}, action)
+        block["steps"].append(_covered_step(cover, action["item_id"]))
+        block["run"] = {"steps": ["designated"]}
+        return
     rec, _ = _dy_preview(cfg, "designated", action, run_one)
     block["steps"].append(rec)
     if rec["verdict"] != "needs_promotion":
@@ -1429,7 +1466,7 @@ def _preview_dy_invite(action: dict, cfg: dict, run_one, block: dict) -> None:
                                           "发出去收不回；达人的按钮从「邀约带货」变成「继续沟通」才算核验通过，才发微信回复"))
 
 
-def _execute_dy(action: dict, cfg: dict, plan: dict, run_one, record: dict) -> None:
+def _execute_dy(action: dict, cfg: dict, plan: dict, run_one, record: dict, context: Optional[dict] = None) -> None:
     def write(step: str, channel_id: str = "", expect: Optional[dict] = None) -> tuple:
         run = run_one(_dy_argv(cfg, step, action, execute=True, channel_id=channel_id, expect=expect), "dy", True)
         data = parse_json(run.stdout)
@@ -1453,6 +1490,11 @@ def _execute_dy(action: dict, cfg: dict, plan: dict, run_one, record: dict) -> N
         write("invite", expect=plan)
         return
     if name == "dy.designated_commission":
+        cover = _invite_check(action, context, record)
+        if cover is not None:                   # the card went out after the preview: nothing is written
+            record["covered"] = covered_of({"by": "invite", **cover}, action)
+            record["problems"].append(invite_cover_text(cover, action["item_id"]) + "，没有执行")
+            return
         if plan["steps"][0] == "promotion":
             outcome, _ = write("promotion")
             if outcome not in _DONE:
@@ -1490,6 +1532,125 @@ def _execute_dy(action: dict, cfg: dict, plan: dict, run_one, record: dict) -> N
         record["problems"].append(f"渠道品 {channel_id} 建好了，但绑定达人的预览没通过，没有绑定：" + "；".join(bind["problems"]))
         return
     write("bind", channel_id)
+
+
+# ── 邀约卡已经开过的专属佣金（批量邀约工具的台账，2026-10-29） ──────────────
+# douyin-engineering 的 `buyin author-invite --commission-rate 25`（批量邀约工具 tools/creator_invite 发的卡）一发出去，
+# 平台马上给这位达人、卡上的商品建一条长期有效的指定达人佣金策略。之后寄样签收，开佣金的链条再给同一款开
+# dy.designated_commission：命令行认不出「已经有策略」（它只看平台的 check/user；可加时还可能把达人迁到新策略，真机没验证过）。
+# 所以这台 Mac 的预览先查邀约台账（invites.jsonl：attempt {attempt, aweme_id, products, commission_rate}，再一行 result
+# {attempt, sent, outcome}）：这位达人（抖音号，台账将来记了 uid 也认）这一款的卡确实发出去了，就不跑命令行、说「邀约卡开过」
+# （``covered``），机器人当作开好；发没发出去不确定的，照常预览，批准前先提醒核对；执行时再查一次。
+
+INVITE_LEDGER_FILE = "invites.jsonl"
+# The card went out (the tool's ``sent`` true) with these outcomes: the strategy is there.  Other outcomes with ``sent``
+# true, no result yet or ``sent`` null: it may be (``unsure``).
+INVITE_SENT_OUTCOMES = (VERIFIED, "ACCEPTED_UNVERIFIED")
+
+
+def _invite_time(text) -> str:
+    """"2026-10-28T15:00:00+08:00" → "2026-10-28 15:00" (as written, Beijing time)."""
+    return str(text or "")[:16].replace("T", " ")
+
+
+def invite_cover(ledger, item_id: str, *, douyin_ids=(), uid: str = "") -> Optional[dict]:
+    """Did a 邀约带货 card with a 专属佣金 go to this creator for this product (the batch invite tool's ledger on this
+    Mac, ``ledger``: its folder or the invites.jsonl itself)?  ``{"state": "covered" | "unsure", "rate", "at",
+    "aweme_id", "attempt", "outcome"}``: covered = the card went out (``sent`` true, VERIFIED_SUCCESS or
+    ACCEPTED_UNVERIFIED): the platform gave the creator a 指定达人佣金 strategy for its products then; unsure = it may
+    have (no result, ``sent`` null, another outcome with ``sent`` true).  The creator is one of ``douyin_ids`` (her
+    抖音号, as the tool writes ``aweme_id``; case is not looked at), or ``uid`` when the tool writes one.  None: no such
+    card, or no ledger at all; a ledger that cannot be read raises ``OSError``."""
+    if not ledger:
+        return None
+    path = Path(os.path.expanduser(str(ledger)))
+    if path.is_dir():
+        path = path / INVITE_LEDGER_FILE
+    if not path.exists():
+        return None
+    names = {str(d).strip().lower() for d in douyin_ids or () if str(d).strip()}
+    uid = str(uid or "").strip()
+    attempts, results = {}, {}
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue                                     # a line cut by a crash
+        if not isinstance(rec, dict) or not rec.get("attempt"):
+            continue
+        if rec.get("event") == "attempt":
+            attempts[str(rec["attempt"])] = rec
+        elif rec.get("event") == "result":
+            results[str(rec["attempt"])] = rec
+    best = None
+    for key, rec in attempts.items():
+        who = str(rec.get("aweme_id") or "").strip().lower()
+        if not ((who and who in names) or (uid and str(rec.get("uid") or "").strip() == uid)):
+            continue
+        products = [str(p).strip() for p in rec.get("products") or [] if isinstance(p, (str, int))]
+        rate = rec.get("commission_rate")
+        if str(item_id) not in products or not _is_int(rate) or not 1 <= rate <= 80:
+            continue
+        result = results.get(key) or {}
+        sent, outcome = result.get("sent"), str(result.get("outcome") or "")
+        if result and sent is False:
+            continue                                     # nothing went out
+        state = "covered" if sent is True and outcome in INVITE_SENT_OUTCOMES else "unsure"
+        found = {"state": state, "rate": rate, "at": _clip(rec.get("at") or "", 40),
+                 "aweme_id": str(rec.get("aweme_id") or "")[:64], "attempt": _clip(key, 40),
+                 "outcome": outcome if outcome in OUTCOMES else ""}
+        if best is None or (state == "covered", found["at"]) > (best["state"] == "covered", best["at"]):
+            best = found                                 # a card that went out beats one that may have; the latest
+    return best
+
+
+def invite_cover_text(cover: dict, item_id: str) -> str:
+    when = _invite_time(cover.get("at"))
+    if cover.get("state") == "unsure":
+        return (f"邀约台账里有一张带 {cover['rate']}% 专属佣金、含商品 {item_id} 的邀约卡（{when}，抖音号 {cover.get('aweme_id')}），"
+                "发没发出去不确定：要是发出去了，平台上这款已经有这位达人的指定达人佣金策略，再开会把她换到新的策略；"
+                "批准前先到百应 › 消息 / 推广策略里核对")
+    return (f"这位达人的商品 {item_id} 已经由邀约卡开过 {cover['rate']}% 专属佣金（{when} 发的邀约卡，抖音号 "
+            f"{cover.get('aweme_id')}），平台上已经有指定达人佣金策略，不用再开")
+
+
+def _invite_check(action: dict, context: Optional[dict], block: dict) -> Optional[dict]:
+    """A 专属佣金's look at the invite ledger (``context``: ``invite_ledger``, ``douyin_ids``): the cover found, or None.
+    An unreadable ledger, or a card that may have gone out, is said among ``block``'s facts."""
+    ledger = (context or {}).get("invite_ledger")
+    if not ledger:
+        return None
+    try:
+        cover = invite_cover(ledger, action["item_id"], douyin_ids=(context or {}).get("douyin_ids") or (),
+                             uid=action.get("creator_platform_id", ""))
+    except OSError as e:
+        block["facts"].append(_fact("邀约卡台账", f"读不了（{_clip(e, 120)}），没核对邀约卡开过的专属佣金"))
+        return None
+    if cover is not None and cover["state"] == "unsure":
+        block["facts"].insert(0, _fact("注意（邀约卡）", invite_cover_text(cover, action["item_id"])))
+        return None
+    return cover
+
+
+def _covered_step(cover: dict, item_id: str) -> dict:
+    return {"name": "invite_ledger", "label": "邀约卡台账（这台 Mac，只读）", "execute": False, "command": "",
+            "exit_code": None, "seconds": 0, "verdict": "blocked", "outcome": "",
+            "problems": [invite_cover_text(cover, item_id)], "facts": [], "raw": ""}
+
+
+def covered_of(value, action: Optional[dict] = None) -> Optional[dict]:
+    """``covered`` of a preview or an execution record, checked (None when it is not one): only a dy.designated_commission's."""
+    if not isinstance(value, dict) or value.get("by") != "invite":
+        return None
+    if action is not None and action.get("action") != "dy.designated_commission":
+        return None
+    rate = value.get("rate")
+    if not _is_int(rate) or not 1 <= rate <= 80:
+        return None
+    aweme = str(value.get("aweme_id") or "")
+    return {"by": "invite", "rate": rate, "at": _clip(value.get("at") or "", 40),
+            "aweme_id": aweme if _DOUYIN_ID.match(aweme) else "", "attempt": _clip(value.get("attempt") or "", 40),
+            "outcome": value.get("outcome") if value.get("outcome") in OUTCOMES else ""}
 
 
 # ── the two phases ────────────────────────────────────────────────────────
@@ -1612,6 +1773,104 @@ def check_plan(action: dict, plan) -> dict:
 
 
 RECEIVER_CLEARED = "（详细地址已清除）"         # as retention.CLEARED: only the province and the city stay
+RECEIPT_LABEL = "收货"                          # a sample-create answer's receiver among a step's facts (_jst_facts)
+# What a receiver may keep for good is the same everywhere (the bot's clean-up after delivery, the Mac's
+# ledger and platform logs): the name's first character, the number masked, the province and the city.
+_REGION_PART = re.compile(r"^[一-龥]{2,10}$")
+_DISTRICT_END = re.compile(r"(?:(?<!自治)(?<!行政)(?<!地)区|县|旗|镇|乡|街道)$")      # 自治区、特别行政区、地区 are not
+_REGION_HEAD = re.compile(r"^(?:[一-龥]{2,7}?(?:省|自治区|特别行政区))?(?:(?![区县旗])[一-龥]{2,7}?(?:市|自治州|地区|盟))?")
+_RECEIVER_TEXT = re.compile(r'"receiver"\s*:\s*(\{[^{}]*\})')
+_RECEIPT = re.compile(r"^(\S*) (\S*) (.*?)(（[^（）]*）)?$", re.S)
+
+
+def coarse_region(region) -> str:
+    """The province and the city of a CLI's ``region`` (jushuitan-engineering's maskReceiver: state, city
+    and district joined by spaces): "广东省 佛山市 南海区" → "广东省 佛山市", "上海 上海市 浦东新区" →
+    "上海 上海市"; at most two parts, none with a district's ending; written without spaces
+    ("广东省佛山市南海区") only its province and city."""
+    kept = []
+    for part in str(region or "").split():
+        if len(kept) == 2:
+            break
+        if _REGION_PART.match(part) and not _DISTRICT_END.search(part):
+            kept.append(part)
+            continue
+        head = _REGION_HEAD.match(part).group(0) if not kept else ""
+        if head:
+            kept.append(head)
+        break
+    return " ".join(kept)
+
+
+def coarse_receiver(receiver: dict) -> dict:
+    """A sample order's receiver as it may be kept for good: the name's first character and ``*``, an
+    11-digit number masked (a 〈手机N〉 placeholder stays), the province and the city; the district and the
+    street address go.  The action's shape ({name, phone, province, city, district, address}) and the
+    CLI's ({source, name, phone, region "省 市 区", address "开头几个字…（N 字）"}) alike."""
+    name, phone = str(receiver.get("name") or ""), str(receiver.get("phone") or "")
+    out = {**receiver, "name": name[:1] + "*" if name else receiver.get("name"),
+           "phone": phone[:3] + "****" + phone[-4:] if re.fullmatch(r"1\d{10}", phone) else receiver.get("phone"),
+           "address": RECEIVER_CLEARED}
+    if "district" in receiver or "region" not in receiver:
+        out["district"] = ""
+    if "region" in receiver:
+        out["region"] = coarse_region(receiver.get("region"))
+    return out
+
+
+def coarse_receipt(text: str) -> str:
+    """The 收货 fact ("小* 139****1111 广东省 佛山市 南海区 桂城街道海八…（21 字）（新增到达人名下）") cut the
+    same way: "小* 139****1111 广东省 佛山市 （详细地址已清除）（新增到达人名下）"."""
+    text = str(text or "")
+    m = _RECEIPT.match(text)
+    if RECEIVER_CLEARED in text or m is None:
+        return text if RECEIVER_CLEARED in text else RECEIVER_CLEARED
+    name, phone, rest, source = m.groups()
+    name = name[:1] + "*" if name else name
+    phone = phone[:3] + "****" + phone[-4:] if re.fullmatch(r"1\d{10}", phone) else phone
+    return " ".join(p for p in (name, phone, coarse_region(rest)) if p) + f" {RECEIVER_CLEARED}{source or ''}"
+
+
+def _coarse_receiver_text(m) -> str:
+    try:
+        receiver = json.loads(m.group(1))
+    except ValueError:
+        return m.group(0)
+    if not isinstance(receiver, dict):
+        return m.group(0)
+    cut = coarse_receiver(receiver)
+    return m.group(0) if cut == receiver else '"receiver": ' + json.dumps(cut, ensure_ascii=False)
+
+
+def coarse_receivers(value):
+    """``(value, changed)``: ``value`` (any JSON value: an execution's record, a preview block, a draft, a
+    job's meta …) with every sample-order receiver cut by ``coarse_receiver`` — a ``receiver`` object at any
+    depth, one inside a CLI's JSON kept as text (a step's ``raw``), and the 收货 fact (``coarse_receipt``).
+    Running it again changes nothing.  The bot's clean-up (retention.clear_receivers) and the Mac's platform
+    logs (the worker's save_platform_log) both go through here (mac review F8 / C#2)."""
+    if isinstance(value, dict):
+        out, changed = {}, False
+        for key, item in value.items():
+            if key == "receiver" and isinstance(item, dict) and ("address" in item or "region" in item):
+                new = coarse_receiver(item)
+                cut = new != item
+            elif key == "value" and value.get("label") == RECEIPT_LABEL and isinstance(item, str):
+                new = coarse_receipt(item)
+                cut = new != item
+            else:
+                new, cut = coarse_receivers(item)
+            out[key] = new
+            changed = changed or cut
+        return (out, True) if changed else (value, False)
+    if isinstance(value, list):
+        items = [coarse_receivers(item) for item in value]
+        if any(cut for _, cut in items):
+            return [item for item, _ in items], True
+        return value, False
+    if isinstance(value, str) and '"receiver"' in value:
+        new = _RECEIVER_TEXT.sub(_coarse_receiver_text, value)
+        return (new, True) if new != value else (value, False)
+    return value, False
 
 
 def ledger_action(action: dict) -> dict:
@@ -1620,15 +1879,16 @@ def ledger_action(action: dict) -> dict:
     receiver = action.get("receiver")
     if not isinstance(receiver, dict):
         return action
-    name, phone = str(receiver.get("name") or ""), str(receiver.get("phone") or "")
-    return {**action, "receiver": {
-        "name": name[:1] + "*" if name else "", "phone": phone[:3] + "****" + phone[-4:] if _MOBILE.match(phone) else phone,
-        "province": receiver.get("province"), "city": receiver.get("city"), "district": "",
-        "address": RECEIVER_CLEARED}}
+    return {**action, "receiver": coarse_receiver(receiver)}
 
 
 def _is_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+# What of an execution's ``context`` the ledger keeps (who asked); the rest (the invite ledger's path, the creator's
+# 抖音号) is only for the run.
+LEDGER_CONTEXT = ("job_id", "packet_id", "party_id")
 
 
 def record(outcome: str, problems: Optional[list] = None) -> dict:
@@ -1638,11 +1898,13 @@ def record(outcome: str, problems: Optional[list] = None) -> dict:
 
 
 def execute(raw, cfg: dict, *, plan, key: str, ledger, catalog: Optional[dict], heartbeat=None,
-            context: Optional[dict] = None) -> dict:
+            context: Optional[dict] = None, cancelled: Optional[Callable[[], bool]] = None) -> dict:
     """Phase 2 (the Mac, after 批准并执行): the approved steps WITH --execute, each write sent
     once, the next step only after the one before ended VERIFIED_SUCCESS (or needed no
     change).  ``key`` is taken in ``ledger`` first: a key that was taken before is never
-    run again (``ALREADY_RUN``).  Returns the record; ``outcome`` is VERIFIED_SUCCESS
+    run again (``ALREADY_RUN``).  ``cancelled()`` (the job's heartbeat) is asked once more
+    right before that: a job cancelled by then is NOT_RUN, its key not taken; once the first
+    write is under way nothing stops it.  Returns the record; ``outcome`` is VERIFIED_SUCCESS
     only when every step was and the reply has what it needs (the link)."""
     out = record("NOT_RUN")
     out["key"] = str(key)
@@ -1659,9 +1921,13 @@ def execute(raw, cfg: dict, *, plan, key: str, ledger, catalog: Optional[dict], 
         out["problems"].append("没有执行：" + (cfg.get("missing", {}).get(platform)
                                             or f"这台 Mac 没有配置{PLATFORMS[platform]}的命令行项目"))
         return out
+    if cancelled is not None and _says_cancel(cancelled):
+        out["problems"].append("没有执行：任务在开始写平台之前被取消了，平台没有动")
+        return out
+    kept = {k: v for k, v in (context or {}).items() if k in LEDGER_CONTEXT}
     try:
         earlier = claim(ledger, key, {"key": key, "status": "started", "started_at": time.time(),
-                                      "action": ledger_action(action), "run": approved, **(context or {})})
+                                      "action": ledger_action(action), "run": approved, **kept})
     except (ActionError, OSError) as e:
         out["problems"].append(f"没有执行：执行台账写不了（{e}）")
         return out
@@ -1673,7 +1939,8 @@ def execute(raw, cfg: dict, *, plan, key: str, ledger, catalog: Optional[dict], 
         return out
     try:
         _EXECUTES[platform](action, cfg, approved, _runner(cfg, heartbeat), out,
-                            {"catalog_entry": catalog_item(catalog, catalog_platform(action), action["item_id"]),
+                            {**(context or {}),
+                             "catalog_entry": catalog_item(catalog, catalog_platform(action), action["item_id"]),
                              "catalog": catalog})
         writes = [step for step in out["steps"] if step.get("execute")]
         outcome = worst(step.get("outcome") for step in writes) if writes else "NOT_RUN"
@@ -1697,9 +1964,9 @@ def execute(raw, cfg: dict, *, plan, key: str, ledger, catalog: Optional[dict], 
         try:
             settle(ledger, key, {"key": key, "status": "done", "action": ledger_action(action), "run": approved,
                                  "finished_at": out["finished_at"], "record": {k: v for k, v in out.items() if k != "steps"},
-                                 **(context or {})})
-        except OSError:
-            pass
+                                 **kept})
+        except Exception:                        # the entry stays "started" (never run again); the outcome
+            pass                                 # stands: a ledger that cannot be written changes nothing done
     return out
 
 
@@ -1761,7 +2028,9 @@ def check_block(block) -> dict:
         plan = check_plan(action, block.get("run"))
     catalog = block.get("catalog") if isinstance(block.get("catalog"), dict) else {}
     synced = catalog.get("synced_at")
+    covered = covered_of(block.get("covered"), action) if verdict == "blocked" and action else None
     return {
+        **({"covered": covered} if covered is not None else {}),
         "version": 1, "action": action,
         "requested": _requested(block.get("requested")) if block.get("requested") is not None else None,
         "verdict": verdict, "problems": _texts(block.get("problems"), 500, 20), "facts": _facts(block.get("facts")),
@@ -1799,6 +2068,8 @@ def check_record(value) -> dict:
         created["sample_order_no"] = str(created_in["sample_order_no"])
     if _DIGITS.match(str(created_in.get("creator_uid") or "")):
         created["creator_uid"] = str(created_in["creator_uid"])
+    if creator_account_ok(created_in.get("creator_account")):
+        created["creator_account"] = str(created_in["creator_account"]).strip()
     if isinstance(created_in.get("strategy_ids"), list):
         created["strategy_ids"] = [_clip(s, 40) for s in created_in["strategy_ids"][:10]]
     link = str(created_in.get("link") or "")
@@ -1807,10 +2078,14 @@ def check_record(value) -> dict:
         if platform:
             created["link"] = check_link(link, platform)
     outcome = value["outcome"]
-    return {"version": 1, "op": "platform_execute", "outcome": outcome, "key": _clip(value.get("key", ""), 40),
-            "problems": _texts(value.get("problems"), 500, 20), "facts": _facts(value.get("facts")),
-            "steps": _steps(value.get("steps")), "created": created,
-            "finished_at": value["finished_at"] if isinstance(value.get("finished_at"), (int, float)) else None}
+    out = {"version": 1, "op": "platform_execute", "outcome": outcome, "key": _clip(value.get("key", ""), 40),
+           "problems": _texts(value.get("problems"), 500, 20), "facts": _facts(value.get("facts")),
+           "steps": _steps(value.get("steps")), "created": created,
+           "finished_at": value["finished_at"] if isinstance(value.get("finished_at"), (int, float)) else None}
+    covered = covered_of(value.get("covered")) if outcome == "NOT_RUN" else None
+    if covered is not None:                     # not run: the invite card had opened it (_execute_dy)
+        out["covered"] = covered
+    return out
 
 
 # ── the catalogue: what each platform has on sale (read-only commands) ────
@@ -2566,7 +2841,7 @@ def _jst_facts(data: dict, rec: dict) -> None:
                                           + ("" if d.get("inLibrary") else "；不在达人库：执行时先加入")))
     r = data.get("receiver") if isinstance(data.get("receiver"), dict) else None
     if r:
-        rec["facts"].append(_fact("收货", f"{r.get('name')} {r.get('phone')} {r.get('region')} {r.get('address')}"
+        rec["facts"].append(_fact(RECEIPT_LABEL, f"{r.get('name')} {r.get('phone')} {r.get('region')} {r.get('address')}"
                                           f"（{r.get('source')}）"))
     lg = data.get("logistics") if isinstance(data.get("logistics"), dict) else None
     if lg:
@@ -2671,6 +2946,10 @@ def _execute_jst(action: dict, cfg: dict, plan: dict, run_one, record: dict, cat
         uid = str(daren.get("platformUid") or daren.get("referrerId") or "")
         if _DIGITS.match(uid):
             record["created"]["creator_uid"] = uid
+        # and their 抖音号 / 小红书号: the invite ledger knows a creator by it (dy.designated_commission's preview)
+        account = str(daren.get("platformNo") or "").strip()
+        if creator_account_ok(account):
+            record["created"]["creator_account"] = account
     if rec["outcome"] != VERIFIED:
         # what the operator must check in 聚水潭 goes with the red mark (the order may exist)
         number = record["created"].get("sample_order_no")
@@ -2680,12 +2959,215 @@ def _execute_jst(action: dict, cfg: dict, plan: dict, run_one, record: dict, cat
             record["problems"].append(line)
 
 
+# ── 聚水潭: where sample orders stand (`jst samples`, read-only; the bot's PRM_SAMPLE_SYNC_MIN) ──
+# The bot asks now and then about the sample orders it made (verified) that were not signed for or deleted
+# yet, in one job a batch (op "sample_status"); the worker runs this without the model, under the CLI lock.
+# Without --raw the CLI prints no receiver; of what it prints only the status, the couriers and waybills,
+# when it was sent and signed for and why it was rejected or deleted are kept (not the creator's nickname,
+# not the products).
+
+SAMPLE_STATES = {"INIT": "待审核", "WAITING_SEND": "待发货", "SENT": "已发货", "SIGNED": "已签收", "DELETED": "已删除"}
+# Why a sample-status job stopped (``stopped.verdict``): the CLI's exit (77 / 76 / 79, 2), a CLI that is not
+# there, the CLI lock not to be had, the job cancelled while it waited, anything else.
+SAMPLE_STOPS = ("login", "wall", "wrong_account", "invalid", "unavailable", "busy", "cancelled", "error")
+SAMPLES_BATCH = 20          # order numbers one `samples` call asks about
+SAMPLES_PAGE = 50           # its --page-size: every order asked about fits on the first page
+SAMPLES_GAP_SEC = 4.0       # between two calls (the CLI's own `find --pages` waits 4 s between its pages)
+MAX_SAMPLE_ORDERS = 200     # order numbers one job asks about
+MAX_SAMPLE_SHIPS = 5        # waybills kept of one order
+SAMPLE_REASON_CHARS = 200
+_WAYBILL = re.compile(r"^[A-Za-z0-9-]{6,30}$")              # a waybill as deals.py takes one
+_SAMPLE_STATUS = re.compile(r"^[A-Z][A-Z_]{0,29}$")
+_BEIJING = timezone(timedelta(hours=8))                      # 聚水潭's times without a zone
+_JST_TIME = re.compile(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[ T](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?:\.\d{1,6})?)?"
+                       r"\s*(Z|[+-]\d{2}:?\d{2})?$")
+
+
+def jst_time(value) -> Optional[float]:
+    """A time as 聚水潭 gives it, in epoch seconds (None when it is none or makes no sense): "2026-10-23 21:35:22"
+    (Beijing time unless it names its zone), an ISO time, or epoch seconds / milliseconds (a number or digits)."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    else:
+        text = str(value).strip()
+        if re.fullmatch(r"\d{9,13}(?:\.\d+)?", text):
+            number = float(text)
+        else:
+            m = _JST_TIME.match(text)
+            if not m:
+                return None
+            year, month, day, hour, minute, second, zone = m.groups()
+            try:
+                if zone is None:
+                    tz = _BEIJING
+                elif zone == "Z":
+                    tz = timezone.utc
+                else:
+                    digits = zone[1:].replace(":", "")
+                    offset = timedelta(hours=int(digits[:2]), minutes=int(digits[2:]))
+                    tz = timezone(-offset if zone[0] == "-" else offset)
+                return datetime(int(year), int(month), int(day), int(hour or 0), int(minute or 0), int(second or 0),
+                                tzinfo=tz).timestamp()
+            except (ValueError, OverflowError):
+                return None
+    if number != number:                        # NaN
+        return None
+    if number > 1e11:                           # milliseconds
+        number /= 1000.0
+    return number if 1e9 <= number < 4.1e9 else None
+
+
+def _carrier(value) -> str:
+    """A courier's name as a deal keeps it (deals.add_shipment: 1–20 characters, one line)."""
+    text = " ".join(str(value if value is not None else "").split())
+    return "" if _CONTROL.search(text) else text[:20]
+
+
+def sample_info(row) -> Optional[dict]:
+    """What the bot needs of one row of `jst samples` (the CLI's projectSample): ``{"order_no", "status", "ships":
+    [{"carrier", "waybill", "sent_at"}], "sent_at", "signed_at", "reason"}``, the waybills that look like one, each
+    once, the earliest sent first; None for a row without an order number.  The creator, the products and the shop
+    of the row are left out."""
+    if not isinstance(row, dict):
+        return None
+    number = str(row.get("orderNo") or "").strip()
+    if not _ORDER_NO.match(number):
+        return None
+    status = str(row.get("status") or "").strip().upper()
+    ships, seen = [], set()
+    for erp in row.get("erpOrders") if isinstance(row.get("erpOrders"), list) else []:
+        if not isinstance(erp, dict):
+            continue
+        waybill = str(erp.get("logisticsNo") or "").strip()
+        if not _WAYBILL.match(waybill) or waybill in seen:
+            continue
+        seen.add(waybill)
+        ships.append({"carrier": _carrier(erp.get("logisticsCompany")), "waybill": waybill,
+                      "sent_at": jst_time(erp.get("sendTime"))})
+    ships.sort(key=lambda s: (s["sent_at"] is None, s["sent_at"] or 0))
+    return {"order_no": number, "status": status if _SAMPLE_STATUS.match(status) else "",
+            "ships": ships[:MAX_SAMPLE_SHIPS], "sent_at": jst_time(row.get("sendTime")),
+            "signed_at": jst_time(row.get("signTime")),
+            "reason": _clip(row.get("rejectReason") or "", SAMPLE_REASON_CHARS)}
+
+
+def samples_argv(cfg: dict, order_nos: list) -> list:
+    """One read of `jst samples`: these order numbers (no --raw: no receiver), the sub-account checked (79)."""
+    who = [f"--expect-uid={cfg['jst_expect_uid']}"] if cfg.get("jst_expect_uid") else []
+    return [cfg["node"], CLI_FILES["jst"], "samples", "--order-no=" + ",".join(order_nos),
+            f"--page-size={SAMPLES_PAGE}", *who]
+
+
+def sample_result(asked: list, **fields) -> dict:
+    """The answer of a sample-status job as the worker hands it back (the bot reads it with check_sample_result):
+    ``orders`` {order number: ``sample_info``}, ``missing`` (asked, not in 聚水潭's answer), ``not_asked`` (left
+    when it stopped), ``stopped`` (None, or why: ``{"verdict", "exit_code", "message"}``), ``calls``."""
+    out = {"version": 1, "op": "sample_status", "orders": {}, "missing": [], "not_asked": [], "stopped": None,
+           "calls": 0, "asked": len(asked), "checked_at": time.time()}
+    out.update(fields)
+    return out
+
+
+def sample_statuses(cfg: dict, order_nos, *, heartbeat=None, sleep: Optional[Callable[[float], None]] = None,
+                    gap: Optional[float] = None) -> dict:
+    """Where these sample orders stand in 聚水潭 (``sample_result``): `jst samples --order-no=…` (read-only, no
+    receiver) for ``SAMPLES_BATCH`` of them at a time, ``gap`` seconds (``SAMPLES_GAP_SEC``) between two calls, each
+    call interrupted when the job is cancelled (``heartbeat``).  A call that ends in 77 (login), 76 (risk), 79
+    (another sub-account), 2 or any other failure stops it there, as it is: ``stopped`` says why, the orders not
+    asked yet are ``not_asked``; nothing is tried again (the bot asks again in its next round)."""
+    sleep = sleep or time.sleep
+    gap = SAMPLES_GAP_SEC if gap is None else gap
+    asked = list(dict.fromkeys(str(n).strip() for n in order_nos or [] if _ORDER_NO.match(str(n).strip())))
+    asked = asked[:MAX_SAMPLE_ORDERS]
+    out = sample_result(asked)
+    if "jst" not in cfg.get("dirs", {}):
+        out["stopped"] = {"verdict": "unavailable", "exit_code": None,
+                          "message": cfg.get("missing", {}).get("jst")
+                          or "这台 Mac 的 config.json 里没有配置聚水潭的命令行项目（platforms.jst）"}
+        out["not_asked"] = asked
+        return out
+    batches = [asked[i:i + SAMPLES_BATCH] for i in range(0, len(asked), SAMPLES_BATCH)]
+    for n, batch in enumerate(batches):
+        if n:
+            sleep(gap)
+        run = run_cli(samples_argv(cfg, batch), cfg["dirs"]["jst"], timeout=cfg.get("preview_timeout_sec",
+                                                                                    PREVIEW_TIMEOUT_SEC),
+                      env=cli_env(cfg), heartbeat=heartbeat, interruptible=True)
+        out["calls"] += 1
+        data = parse_json(run.stdout)
+        if (run.exit_code != 0 or run.error or run.stopped or not isinstance(data, dict)
+                or not isinstance(data.get("rows"), list)):
+            if run.stopped == "cancelled":
+                verdict = "cancelled"
+            else:
+                verdict = _EXIT_VERDICT.get(run.exit_code) or ("invalid" if run.exit_code == 2 else "error")
+            failed = run.exit_code or run.error or run.stopped
+            out["stopped"] = {"verdict": verdict, "exit_code": run.exit_code,
+                              "message": _exit_problem(run) if failed else "命令没有输出寄样单列表"}
+            out["not_asked"] = [no for rest in batches[n:] for no in rest]
+            break
+        for row in data["rows"]:
+            info = sample_info(row)
+            if info is not None and info["order_no"] in batch:
+                out["orders"][info.pop("order_no")] = info
+        out["missing"] += [no for no in batch if no not in out["orders"]]
+    out["checked_at"] = time.time()
+    return out
+
+
+def check_sample_result(value, asked=None) -> dict:
+    """The Mac's answer to a sample-status job, checked and cut to what the bot uses (``ActionError`` when it is
+    none): only order numbers it asked about (``asked``), statuses as words, waybills as deals.py takes them, each
+    once, times as numbers, reasons short; ``stopped`` with a known verdict (else ``error``)."""
+    if not isinstance(value, dict) or value.get("op") != "sample_status":
+        raise _err("bad_result", "寄样单状态的结果格式不对")
+    wanted = None if asked is None else {str(n) for n in asked}
+
+    def fits(number) -> bool:
+        return isinstance(number, str) and bool(_ORDER_NO.match(number)) and (wanted is None or number in wanted)
+
+    def when(v) -> Optional[float]:
+        ok = isinstance(v, (int, float)) and not isinstance(v, bool) and 1e9 <= v < 4.1e9
+        return float(v) if ok else None
+
+    orders = {}
+    for number, info in (value.get("orders") if isinstance(value.get("orders"), dict) else {}).items():
+        if not fits(number) or not isinstance(info, dict):
+            continue
+        status = str(info.get("status") or "").strip().upper()
+        ships = []
+        for ship in info.get("ships") if isinstance(info.get("ships"), list) else []:
+            waybill = str(ship.get("waybill") or "").strip() if isinstance(ship, dict) else ""
+            if not _WAYBILL.match(waybill) or any(s["waybill"] == waybill for s in ships):
+                continue
+            ships.append({"carrier": _carrier(ship.get("carrier")), "waybill": waybill, "sent_at": when(ship.get("sent_at"))})
+        orders[number] = {"status": status if _SAMPLE_STATUS.match(status) else "", "ships": ships[:MAX_SAMPLE_SHIPS],
+                          "sent_at": when(info.get("sent_at")), "signed_at": when(info.get("signed_at")),
+                          "reason": _clip(info.get("reason") or "", SAMPLE_REASON_CHARS)}
+    stopped = value.get("stopped")
+    if isinstance(stopped, dict):
+        code = stopped.get("exit_code")
+        stopped = {"verdict": stopped.get("verdict") if stopped.get("verdict") in SAMPLE_STOPS else "error",
+                   "exit_code": code if _is_int(code) else None, "message": _clip(stopped.get("message") or "", 300)}
+    else:
+        stopped = None
+
+    def listed(key: str) -> list:
+        items = value.get(key) if isinstance(value.get(key), list) else []
+        return [n for n in dict.fromkeys(i for i in items if isinstance(i, str)) if fits(n) and n not in orders]
+
+    return {"version": 1, "op": "sample_status", "orders": orders, "missing": listed("missing"),
+            "not_asked": listed("not_asked"), "stopped": stopped, "checked_at": when(value.get("checked_at"))}
+
+
 # ── the registries ────────────────────────────────────────────────────────
 
 _PREVIEWS = {
     "xhs.direct_plan": _preview_xhs_direct_plan,
     "xhs.channel_item": _preview_xhs_channel_item,
-    "dy.designated_commission": lambda a, c, r, b, ctx: _preview_dy_designated(a, c, r, b),
+    "dy.designated_commission": lambda a, c, r, b, ctx: _preview_dy_designated(a, c, r, b, ctx),
     "dy.channel_goods": lambda a, c, r, b, ctx: _preview_dy_channel_goods(a, c, r, b),
     "dy.creator_invite": lambda a, c, r, b, ctx: _preview_dy_invite(a, c, r, b),
     "tb.campaign": _preview_tb,
@@ -2693,7 +3175,7 @@ _PREVIEWS = {
 }
 _EXECUTES = {
     "xhs": lambda a, c, p, r, rec, ctx: _execute_xhs(a, c, p, r, rec),
-    "dy": lambda a, c, p, r, rec, ctx: _execute_dy(a, c, p, r, rec),
+    "dy": lambda a, c, p, r, rec, ctx: _execute_dy(a, c, p, r, rec, ctx),
     "tb": lambda a, c, p, r, rec, ctx: _execute_tb(a, c, p, r, rec, ctx.get("catalog_entry")),
     "jst": lambda a, c, p, r, rec, ctx: _execute_jst(a, c, p, r, rec, ctx.get("catalog")),
 }

@@ -57,6 +57,8 @@ START_NOTE_AFTER_SEC = 20   # a job that waited this long in the queue gets a "s
 SUMMARY_CHARS = 300         # the message after a result file starts with this much of it
 KEEP_FILES_DAYS = 30        # result files older than this are deleted when a new one is written
 ASK_TIMEOUT_SEC = (60, 3600)  # the range a worker may give an approval request to be answered
+ASK_RETRY_SEC = (10, 120)   # an approval request whose send failed: again after 10 s, doubling, at most 2 min apart
+ASK_SEND_TRIES = 6          # ... and not tried again after this many failed sends (about 4.5 minutes)
 MAX_OUTFILE_BYTES = 100 * 1024 * 1024   # one file a prm job's worker sends back
 MAX_OUTFILES = 9                        # files per prm job
 
@@ -179,6 +181,8 @@ class ClaudeRelay:
         self._stopping = threading.Event()
         self._last_seen = 0.0
         self._send_failed_at: dict[tuple[int, str], float] = {}
+        # Approval requests whose send failed: ask id -> (failed sends, when to try again); _send_asks only.
+        self._ask_failures: dict[int, tuple[int, float]] = {}
         self._thread: Optional[threading.Thread] = None
         self._server = None
         # PRM_EDGE: the WeChat edge answers /edge/* on this server (attach_edge).
@@ -608,10 +612,27 @@ class ClaudeRelay:
                 self._asks_changed.notify_all()
 
     def _send_asks(self) -> None:
-        """New requests to WeChat; a note when one ran out unanswered."""
-        for ask in self._store.unsent_asks():
+        """New requests to WeChat; a note when one ran out unanswered.
+
+        A request whose send fails is tried again later and later (``ASK_RETRY_SEC``: 10 s, doubling,
+        at most 2 minutes apart; it used to be every round, 12 times a minute) and, after
+        ``ASK_SEND_TRIES`` failed sends, not again (logged; it stays open, an answer still counts, and
+        it is denied when it runs out like an unanswered one).  A request that goes out clears its
+        count; once WeChat takes messages again, every new request goes out at once as before.
+        """
+        now = self._clock()
+        unsent = self._store.unsent_asks()
+        waiting = {ask["id"] for ask in unsent}
+        for ask_id in [i for i in self._ask_failures if i not in waiting]:
+            del self._ask_failures[ask_id]                  # sent, answered, ran out or cancelled
+        for ask in unsent:
+            failures, next_at = self._ask_failures.get(ask["id"], (0, 0.0))
+            if failures >= ASK_SEND_TRIES or now < next_at:
+                continue
+            # A late send says how long is left, not the whole time it was given.
+            left = ask["expires_at"] - (ask["created_at"] if not failures else now)
             text = (f"#{ask['job_id']} 要你批准：{ask['detail']}\n"
-                    f"回复「同意」或「拒绝」（{format_duration(ask['expires_at'] - ask['created_at'])}内不回就算拒绝）")
+                    f"回复「同意」或「拒绝」（{format_duration(left)}内不回就算拒绝）")
             try:
                 sent = bool(self._send(ask["chat_id"], text))
             except Exception:
@@ -619,6 +640,18 @@ class ClaudeRelay:
                 sent = False
             if sent:
                 self._store.mark_ask_sent(ask["id"])
+                self._ask_failures.pop(ask["id"], None)
+                continue
+            failures += 1
+            if failures >= ASK_SEND_TRIES:
+                logger.error("CLAUDE_RELAY: approval request %d of #%d not sent after %d tries; not trying again "
+                             "(it is denied when it runs out unanswered)", ask["id"], ask["job_id"], failures)
+            else:
+                delay = min(ASK_RETRY_SEC[0] * 2 ** (failures - 1), ASK_RETRY_SEC[1])
+                next_at = now + delay
+                logger.warning("CLAUDE_RELAY: approval request %d of #%d not sent (try %d); next try in %d s",
+                               ask["id"], ask["job_id"], failures, delay)
+            self._ask_failures[ask["id"]] = (failures, next_at)
         self._expire_asks()
         for ask in self._store.expired_unnoted():
             try:

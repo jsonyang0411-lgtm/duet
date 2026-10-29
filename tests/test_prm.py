@@ -736,8 +736,9 @@ def test_a_draft_sent_as_it_was_carries_no_second_copy_and_holding_replies_are_t
     bot.prm.handle(bot.msg("？"))
     job = bot.worker_takes()
     meta = json.loads(job["meta"]) if isinstance(job["meta"], str) else job["meta"]
-    assert [(i["what"], i["kind"]) for i in meta["sent"]] == [("sent", "faq"), ("sent", "holding")]
-    assert "draft" not in meta["sent"][0] and meta["sent"][1]["text"]
+    # (「稍后回复你」 waited and 「？」 put it out of date: told as not sent)
+    assert [(i["what"], i["kind"]) for i in meta["sent"]] == [("sent", "faq"), ("failed", "faq"), ("sent", "holding")]
+    assert "draft" not in meta["sent"][0] and meta["sent"][1]["text"] == "稍后回复你" and meta["sent"][2]["text"]
 
 
 def test_only_the_last_replies_are_told(bot, clock):
@@ -751,4 +752,4 @@ def test_only_the_last_replies_are_told(bot, clock):
     bot.prm.handle(bot.msg("最后一个问题"))
     job = bot.worker_takes()
     meta = json.loads(job["meta"]) if isinstance(job["meta"], str) else job["meta"]
-    assert [i["text"] for i in meta["sent"]] == [*[f"第 {n} 条" for n in range(3, 8)], HOLDING_TEXT]
+    assert [i["text"] for i in meta["sent"]] == [*[f"第 {n} 条" for n in range(4, 8)], "稍后回复你", HOLDING_TEXT]

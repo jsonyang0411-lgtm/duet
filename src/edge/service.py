@@ -209,6 +209,13 @@ class EdgeService:
         sent_at = int(float(msg.get("timestamp", 0) or 0))
         return {"written_at": sent_at} if msg.get("_catchup") and sent_at else {}
 
+    @staticmethod
+    def _recalled(msg: dict) -> dict:
+        """A recall WeChat wrote over the line it took back (the backend's ``recalled_id``): the
+        ``message_id`` that line was reported under (``recalled_message_id`` of the chat_notice)."""
+        recalled = str(msg.get("recalled_id") or "").strip()
+        return {"recalled_message_id": recalled} if recalled else {}
+
     def handle(self, msg: dict) -> bool:
         """The route step's call: True when this is a listed creator's private message (it
         is then forwarded, silently; never answered here)."""
@@ -223,7 +230,8 @@ class EdgeService:
             return True
         message_id = str(msg.get("message_id") or "") or None
         if T.is_notice(msg) or is_friend_notice(msg):         # 「我通过了你的朋友验证请求…」 is WeChat's
-            self._emit(P.CHAT_NOTICE, chat_id, message_id, text=T.notice_text(msg), **self._written(msg))
+            self._emit(P.CHAT_NOTICE, chat_id, message_id, text=T.notice_text(msg), **self._written(msg),
+                       **self._recalled(msg))
             return True
         files = self._collect_files(msg)
         fields = {"msg_type": T.msg_type_of(msg), "text": T.message_text(msg), **self._written(msg)}
@@ -251,6 +259,22 @@ class EdgeService:
                             how=how if how in P.FRIEND_HOWS else "unknown")
         if stored is not None:
             logger.info("EDGE: new friend %s… (%s) -> event #%d", wxid[:8], stored["how"], stored["id"])
+        return stored
+
+    def wechat_gap(self, gap: dict) -> Optional[dict]:
+        """PC WeChat was not online from ``from`` to ``to`` (src/wechat/presence.py, a gap that ended):
+        a ``wechat_gap`` event ``{from, to, reason}`` for the Mac's console.  Whole seconds."""
+        try:
+            start, end = int(float(gap["from"])), int(float(gap["to"]))
+        except (KeyError, TypeError, ValueError):
+            logger.warning("EDGE: a WeChat gap without its times is not reported")
+            return None
+        reason = str(gap.get("reason") or "")
+        stored = self._emit(P.WECHAT_GAP, **{"from": start, "to": max(start, end),
+                                             "reason": reason if reason in P.GAP_REASONS else P.GAP_OFFLINE_WHILE_RUNNING})
+        if stored is not None:
+            logger.info("EDGE: PC WeChat was not online for %d min (%s) -> event #%d", (end - start) // 60,
+                        stored["reason"], stored["id"])
         return stored
 
     def _resolve(self, msg: dict, kind: str, number: int) -> tuple:
@@ -293,7 +317,8 @@ class EdgeService:
             return                                            # history (a chat read for the first time)
         message_id = str(msg.get("message_id") or "") or None
         if T.is_notice(msg) or is_friend_notice(msg):
-            self._emit(P.CHAT_NOTICE, chat_id, message_id, text=T.notice_text(msg), **self._written(msg))
+            self._emit(P.CHAT_NOTICE, chat_id, message_id, text=T.notice_text(msg), **self._written(msg),
+                       **self._recalled(msg))
             return
         matched, send_id = self._match_own(chat_id, msg, now)
         if matched:

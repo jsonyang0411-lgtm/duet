@@ -95,6 +95,15 @@ class MessageBurstBuffer:
         self._pending.clear()
         return ready
 
+    def flush_holding(self, message_id: str) -> list[dict]:
+        """Return the pending burst that holds this message now (removed from the buffer): a
+        line of it was taken back, and the burst goes before the recall (src/wechat/wcdb_backend.py
+        ``_hand_on_recall``)."""
+        message_id = str(message_id or "")
+        keys = [key for key, pending in self._pending.items()
+                if any(str(m.get("message_id", "")) == message_id for m in pending.messages)]
+        return [self._merge(self._pending.pop(key).messages) for key in keys]
+
     def held_ids(self) -> set[str]:
         """The ids of the messages held here, not handed on yet (the catch-up after a
         re-initialisation leaves them to the buffer)."""

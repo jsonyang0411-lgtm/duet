@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 RUN_TIMEOUT_SEC = 30
 LANGUAGES = "zh-Hans-CN,zh-CN"        # tried in order, then the languages of the user profile
 MIN_WINDOW_SIZE = 300                  # px; smaller is a tray or helper window
+SMALL_WINDOW_PX = 600                  # a window narrower than this is read at twice its size
 BG_OFFSET_PX = 8                       # the bubble colour is sampled this far left of the text
 INSTALL_HINT = ("Add-WindowsCapability -Online -Name Language.OCR~~~zh-CN~0.0.1.0 "
                 "(PowerShell as administrator)")
@@ -205,6 +206,12 @@ class WindowsOcrEngine:
             raise RuntimeError("the OCR recognizer is not available")
         target_hwnd = hwnd if hwnd is not None else self._find_window()
         image = self._grab(target_hwnd)
+        if image.width < SMALL_WINDOW_PX:
+            # Read at its own size, WeChat 4.0's 376 px wide 「添加朋友」 window gave 「添加到通讯余」 and dropped
+            # most lines (2026-10-29, a 100 % VM); at twice the size every line was right.  The rows are in
+            # fractions of the image, so the clicks are not changed by this.
+            from PIL import Image
+            image = image.resize((image.width * 2, image.height * 2), Image.LANCZOS)
         return rows_from_lines(self._recognize(image), image)
 
     def _find_window(self) -> int:

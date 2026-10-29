@@ -272,6 +272,9 @@ class BotConfig:
     # One thread sends every message (WCDB backend): a typing pause or the wait for
     # the user to pause (SEND_QUIET) no longer holds a worker thread.
     send_queue: str = "off"
+    # "on" (WCDB backend): after WeChat's search opened a chat, its title is read from the screen (Windows
+    # OCR) and nothing is pasted into another chat the bot knows of (a name inside another one).
+    send_verify_chat: str = "on"
 
     # === Claude relay (src/relay) ===
     # "on": private messages from claude_relay_wxids (empty = ADMIN_WXID) that
@@ -323,6 +326,14 @@ class BotConfig:
     # person to look.  After a restart the Windows backend hands such messages on
     # (wcdb_backend._catchup_plan).  0 = the old rule: older than 5 minutes is history.
     prm_catchup_hours: int = 12
+    # Where the sample orders the bot made stand in 聚水潭 (jst samples, read-only on the Mac): asked once
+    # this many minutes (0 = off); a waybill fills the deal like the console's 填运单号 (the shipping notice
+    # always waits for a person), 已签收 marks it like the console's (the 专属佣金 chain starts).  The deal
+    # says so when an order is not sent PRM_SAMPLE_WAYBILL_DAYS after it was made, or is not signed for
+    # PRM_SAMPLE_SIGN_DAYS after it was sent (聚水潭's list gives no waybill as yet: the deal asks for one).
+    prm_sample_sync_min: int = 60
+    prm_sample_waybill_days: int = 3
+    prm_sample_sign_days: int = 10
     # === WeChat edge (src/edge, edge-protocol.md) for the Mac business service ===
     # "on": Windows only receives and sends WeChat messages for the creators the Mac lists;
     # the Mac pulls /edge/* on the relay's port with PRM_EDGE_TOKEN.  Not with PRM_COPILOT.
@@ -359,6 +370,9 @@ class BotConfig:
     auto_accept_idle_sec: int = 60
     auto_accept_watch: str = "on"
     auto_accept_full_check_sec: int = 900
+    # At most this many requests accepted automatically a day (WeChat holds back accounts that take on
+    # friends in bulk); a risk prompt (「操作过于频繁」) pauses it until the admin switches it on again.
+    auto_accept_daily_max: int = 50
 
 
 def _validate_config(kwargs: dict) -> None:
@@ -421,7 +435,7 @@ def _validate_config(kwargs: dict) -> None:
             f"got {decision_trace_content_chars}"
         )
 
-    for send_setting in ("send_typing_delay", "send_quiet", "send_keep_clipboard", "send_queue"):
+    for send_setting in ("send_typing_delay", "send_quiet", "send_keep_clipboard", "send_queue", "send_verify_chat"):
         if kwargs.get(send_setting, "off") not in ("off", "on"):
             errors.append(f"{send_setting.upper()} must be off or on, got {kwargs.get(send_setting)}")
     send_idle_sec = kwargs.get("send_idle_sec", 3.0)
@@ -492,6 +506,13 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(f"PRM_COMMISSION_AFTER must be delivered or created, got {kwargs.get('prm_commission_after')}")
     if not (0 <= int(kwargs.get("prm_catchup_hours", 12)) <= 72):
         errors.append(f"PRM_CATCHUP_HOURS must be between 0 and 72, got {kwargs.get('prm_catchup_hours')}")
+    sync_min = int(kwargs.get("prm_sample_sync_min", 60))
+    if not (sync_min == 0 or 10 <= sync_min <= 1440):
+        errors.append(f"PRM_SAMPLE_SYNC_MIN must be 0 (off) or between 10 and 1440, got {kwargs.get('prm_sample_sync_min')}")
+    if not (1 <= int(kwargs.get("prm_sample_waybill_days", 3)) <= 30):
+        errors.append(f"PRM_SAMPLE_WAYBILL_DAYS must be between 1 and 30, got {kwargs.get('prm_sample_waybill_days')}")
+    if not (1 <= int(kwargs.get("prm_sample_sign_days", 10)) <= 60):
+        errors.append(f"PRM_SAMPLE_SIGN_DAYS must be between 1 and 60, got {kwargs.get('prm_sample_sign_days')}")
     prm_edge = kwargs.get("prm_edge", "off")
     if prm_edge not in ("off", "on"):
         errors.append(f"PRM_EDGE must be off or on, got {prm_edge}")
@@ -541,6 +562,8 @@ def _validate_config(kwargs: dict) -> None:
     full_check = int(kwargs.get("auto_accept_full_check_sec", 900))
     if full_check != 0 and not (60 <= full_check <= 86400):
         errors.append(f"AUTO_ACCEPT_FULL_CHECK_SEC must be 0 or between 60 and 86400, got {full_check}")
+    if not (1 <= int(kwargs.get("auto_accept_daily_max", 50)) <= 300):
+        errors.append(f"AUTO_ACCEPT_DAILY_MAX must be between 1 and 300, got {kwargs.get('auto_accept_daily_max')}")
 
     if errors:
         msg = "配置值无效:\n" + "\n".join(f"  - {err}" for err in errors)
@@ -607,6 +630,7 @@ def load_config() -> BotConfig:
         "send_keep_clipboard": _parse_switch(os.getenv("SEND_KEEP_CLIPBOARD", "on")),
         "sticker_paste": os.getenv("STICKER_PASTE", "file").strip().lower() or "file",
         "send_queue": _parse_switch(os.getenv("SEND_QUEUE", "off")),
+        "send_verify_chat": _parse_switch(os.getenv("SEND_VERIFY_CHAT", "on")),
         "claude_relay": _parse_switch(os.getenv("CLAUDE_RELAY", "off")),
         "claude_relay_token": os.getenv("CLAUDE_RELAY_TOKEN", "").strip(),
         "claude_relay_host": os.getenv("CLAUDE_RELAY_HOST", "0.0.0.0").strip() or "0.0.0.0",
@@ -626,6 +650,9 @@ def load_config() -> BotConfig:
         "prm_retention_days": int(os.getenv("PRM_RETENTION_DAYS", "90")),
         "prm_commission_after": os.getenv("PRM_COMMISSION_AFTER", "delivered").strip().lower() or "delivered",
         "prm_catchup_hours": int(os.getenv("PRM_CATCHUP_HOURS", "12")),
+        "prm_sample_sync_min": int(os.getenv("PRM_SAMPLE_SYNC_MIN", "60")),
+        "prm_sample_waybill_days": int(os.getenv("PRM_SAMPLE_WAYBILL_DAYS", "3")),
+        "prm_sample_sign_days": int(os.getenv("PRM_SAMPLE_SIGN_DAYS", "10")),
         "prm_edge": _parse_switch(os.getenv("PRM_EDGE", "off")),
         "prm_edge_token": os.getenv("PRM_EDGE_TOKEN", "").strip(),
         "edge_url": os.getenv("EDGE_URL", "").strip(),
@@ -643,6 +670,7 @@ def load_config() -> BotConfig:
         "auto_accept_idle_sec": int(os.getenv("AUTO_ACCEPT_IDLE_SEC", "60")),
         "auto_accept_watch": _parse_switch(os.getenv("AUTO_ACCEPT_WATCH", "on")),
         "auto_accept_full_check_sec": int(os.getenv("AUTO_ACCEPT_FULL_CHECK_SEC", "900")),
+        "auto_accept_daily_max": int(os.getenv("AUTO_ACCEPT_DAILY_MAX", "50")),
     }
 
     _validate_config(kwargs)

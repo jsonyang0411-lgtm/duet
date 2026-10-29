@@ -130,6 +130,25 @@ def test_an_operator_replying_by_hand_takes_the_chat_over(mac, fake):
     assert mac.prm.store.packet(packet["id"])["status"] == "superseded"
 
 
+def test_the_operator_typing_our_words_a_minute_after_the_read_back_takes_the_chat_over(mac, fake):
+    """win review F4 (a)，边缘模式：我们发的那句读回来了（send_seen）；一分钟后运营在手机上打了一模一样的话，
+    Windows 报 operator_message（另一行，另一个 message_id）：运营亲手回复，切人工接管。以前 Mac 在 120 秒内
+    按文字当成同一行又读了一次，吞掉了。"""
+    _, packet = drafted(mac, fake)
+    mac.prm.decide(packet["id"], "send")
+    mac.prm.send_approved()
+    assert wait_for(lambda: fake.sends)                    # (发送线程也可能先发了)
+    [send] = fake.sends
+    fake.complete(send["send_id"])
+    fake.seen(send["send_id"])
+    assert wait_for(lambda: mac.prm.store.packet(packet["id"])["outcome"] == "sent_confirmed")
+    mac.clock.now += 60
+    fake.operator_says(CREATOR, send["text"], message_id="row-typed-by-hand")
+    assert wait_for(lambda: mac.prm.store.deal(1)["mode"] == "human"), "一模一样的话也是运营亲手发的"
+    assert [e["kind"] for e in mac.prm.store.events(1, kinds=("operator_message", "takeover"))] == [
+        "takeover", "operator_message"]
+
+
 def test_a_send_windows_could_not_make_marks_the_draft_failed(mac, fake):
     _, packet = drafted(mac, fake)
     mac.prm.decide(packet["id"], "send")
@@ -184,6 +203,18 @@ def test_a_recall_windows_reports_puts_the_waiting_draft_before_a_person(mac, fa
     assert [e["detail"]["by"] for e in mac.prm.store.events(1, kinds=("recall",))] == ["operator", "creator"]
     assert mac.prm.store.deal(1)["mode"] == "copilot" and len(mac.relay.store.list_jobs()) == 1
     assert [e["kind"] for e in mac.prm.store.events(1)] == ["recall", "recall"]
+
+
+def test_a_recall_windows_found_rewritten_in_place_is_handled_the_same(mac, fake):
+    """微信原地改写的撤回（2026-10-28）：Windows 报的 chat_notice 多带 recalled_message_id（被撤回那条的编号），
+    老的 Mac 不认识这个字段也照样按文字处理。"""
+    _, packet = drafted(mac, fake)
+    [message] = [e for e in fake.events_list if e["type"] == "creator_message"]
+    event = fake.notice(CREATOR, '"小美" 撤回了一条消息', recalled_message_id=message["message_id"])
+    assert event["recalled_message_id"] == message["message_id"]
+    assert wait_for(lambda: mac.prm.store.packet(packet["id"])["needs_attention"])
+    assert mac.prm.store.packet(packet["id"])["reason"].startswith("达人撤回了一条消息")
+    assert wait_for(lambda: fake.acked_upto >= event["id"])
 
 
 def test_a_recall_handed_on_after_a_windows_restart_goes_by_when_it_was_written(mac, fake):
@@ -321,3 +352,44 @@ def test_a_file_windows_could_not_send_marks_the_draft_failed_though_its_text_we
     assert wait_for(lambda: mac.prm.store.packet(packet["id"])["status"] == "failed")
     error = mac.prm.store.packet(packet["id"])["error"]
     assert "文件发送超时" in error and "文字已经发出去了" in error
+
+
+def test_the_sample_order_sync_runs_on_the_mac_side_too(mac, fake):
+    """边缘模式（PRM 在 Mac 上）：聚水潭寄样单状态照样定时交给本机的 worker（不跑模型）；有了运单号照控制台的路填进
+    合作单，发货通知一律等人审，审过以后经 Windows 发出、换成真实的话；已签收照控制台的路标上，开专属佣金的链条派出
+    第一个商品的任务。"""
+    from test_prm_sample_sync import info, verified_order
+
+    from platform_fakes import DY_ITEM, JST_ORDER
+    from src.prm import platforms
+    from src.prm.service import SAMPLE_SYNC_CHAT, SAMPLE_SYNC_FIRST_SEC
+
+    mac.prm._sample_sync_sec = 3600
+    order = verified_order(mac.prm)
+
+    def a_round(answer):
+        job_id = mac.prm.sweep_sample_status()
+        assert job_id is not None
+        job = mac.relay.next_job(0, ("prm",))
+        assert job["id"] == job_id and job["meta"] == {"op": "sample_status", "orders": [JST_ORDER]}
+        result = platforms.sample_result([JST_ORDER], orders={JST_ORDER: answer})
+        assert mac.relay.finish(job_id, {"ok": True, "text": json.dumps(result, ensure_ascii=False), "duration_s": 1})
+        mac.relay.tick()
+
+    mac.clock.now += SAMPLE_SYNC_FIRST_SEC + 1
+    a_round(info("SENT", "SF1234567890"))
+    assert mac.relay.store.get(mac.relay.store.list_jobs(1)[0]["id"])["chat_id"] == SAMPLE_SYNC_CHAT
+    deal = mac.prm.store.deal(order["deal_id"])
+    assert deal["stage"] == "shipped" and mac.prm.store.latest_shipment(deal["id"])["waybill"] == "SF1234567890"
+    [notice] = [p for p in mac.prm.store.packets(("pending",)) if p["kind"] == "shipping_notice"]
+    assert fake.sends == [], "发货通知等运营审"
+    assert mac.prm.decide(notice["id"], "send")["ok"]
+    mac.prm.send_approved()
+    [send] = fake.sends
+    assert send["chat_id"] == CREATOR and "SF1234567890" in send["text"], "审过以后经 Windows 发出"
+    mac.clock.now += 3601
+    a_round(info("SIGNED", "SF1234567890"))
+    assert mac.prm.store.deal(order["deal_id"])["stage"] == "delivered"
+    step = mac.relay.next_job(0, ("prm",))
+    assert step is not None and "达人已经签收了寄样单" in step["meta"]["system_note"] and DY_ITEM in step["meta"]["system_note"]
+

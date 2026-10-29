@@ -27,7 +27,8 @@ from src.admin import RELAY_HELP, AdminCommandHandler
 from src.config import BotConfig, _validate_config
 from src.db import MessageStore, initialize_db
 from src.prm import gates
-from src.prm.service import (MISSED_EVENT_NAME, SETTLE_SEC, PrmService, event_out, late_note, missed_note)
+from src.prm.service import (CLOCK_SAMPLE_SEC, MISSED_EVENT_NAME, SETTLE_SEC, PrmService, clock_note, event_out,
+                              late_note, missed_note)
 from src.prm.store import PrmStore
 from src.relay.service import MAX_AGE_SEC, ClaudeRelay
 from src.relay.store import RelayStore
@@ -139,12 +140,13 @@ class Run:
     """One run of the bot, wired as Bot.run does: the WCDB backend reads WeChat and hands every
     message to the router (self → edge → persist → relay → prm → admin → silence)."""
 
-    def __init__(self, world, catchup_hours=12, private_chats="wxid_admin"):
+    def __init__(self, world, catchup_hours=12, private_chats="wxid_admin", **settings):
         self.world = world
         config = BotConfig(
             private_chat_enabled=True, private_chats=private_chats, admin_wxid=ADMIN, bot_display_name=BOT,
             claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1", claude_relay_port=0,
-            claude_relay_db=":memory:", prm_copilot="on", prm_db=":memory:", prm_catchup_hours=catchup_hours)
+            claude_relay_db=":memory:", prm_copilot="on", prm_db=":memory:", prm_catchup_hours=catchup_hours,
+            **settings)
         self.router = MessageRouter(store=world.messages, admin_handler=AdminCommandHandler(), config=config,
                                     tracer=TraceSpy())
         self.relay = ClaudeRelay(config, store=world.relay_store, clock=world.clock, files_dir=world.tmp / "relay",
@@ -211,7 +213,8 @@ def test_a_restart_hands_on_what_the_creator_wrote_meanwhile_as_one_reviewed_dra
 
     jobs = world.jobs()
     assert len(jobs) == 2                                           # the three missed messages: one job
-    assert text_lines(jobs[1]) == ["在吗", "地址：上海市浦东新区测试路1号", "电话 〈手机1〉"]
+    # (the draft that waited was never sent: her first line goes along, first)
+    assert text_lines(jobs[1]) == ["你好，想合作", "在吗", "地址：上海市浦东新区测试路1号", "电话 〈手机1〉"]
     assert json.loads(jobs[1]["meta"])["late"] == {"from": t0 + 600}
     assert world.stored(CREATOR) == 4                               # each stored under its own id
     assert world.prm_store.packet(waiting["id"])["status"] == "superseded"   # the creator wrote again
@@ -391,6 +394,75 @@ def test_an_operators_line_from_long_ago_is_recorded_without_a_takeover(world):
     assert world.prm_store.deal(1)["mode"] == "copilot"
 
 
+def test_a_reply_cut_off_by_a_stop_and_read_back_after_the_restart_is_sent_not_a_takeover(world):
+    """win review F4 (d): the bot was stopped while a draft was going out (``sending``).  The restart
+    settles it as 「不确定发出去没有」 (failed, indeterminate); the catch-up then reads the line back.
+    It went out: the draft is sent again (confirmed), and no operator wrote it."""
+    world.register()
+    first = world.run()
+    world.wechat.say(CREATOR, CREATOR, "在吗", world.clock.now)
+    first.poll()
+    world.mac_drafts(first, draft(reply_draft="在的，您说", message_kind="other"))
+    [packet] = world.prm_store.packets(("pending",))
+    first.prm.decide(packet["id"], "send")
+    world.prm_store.move(packet["id"], ("approved",), "sending")      # the sender thread took it ...
+    written = world.clock.now
+    world.wechat.say(CREATOR, ME, "在的，您说", written)               # ... WeChat shows the line ...
+    first.stop()                                                      # ... and the bot stops before it returns
+    world.clock.now += 60
+    second = world.run()
+    second.prm.start()                                                # settles what the stop left half done
+    second.prm.stop()
+    settled = world.prm_store.packet(packet["id"])
+    assert (settled["status"], settled["outcome"]) == ("failed", "indeterminate")
+    second.poll()                                                     # the catch-up reads the line back
+    p = world.prm_store.packet(packet["id"])
+    assert (p["status"], p["outcome"], p["error"]) == ("sent", "sent_confirmed", "")
+    assert p["sent_at"] == written                                    # when WeChat shows it went out
+    assert world.prm_store.deal(1)["mode"] == "copilot"
+    assert world.events("operator_message") == [] and world.events("takeover") == []
+    # the operator typing the same words later is a person again
+    world.clock.now += 3 * 60
+    world.wechat.say(CREATOR, ME, "在的，您说", world.clock.now)
+    second.poll()
+    assert world.prm_store.deal(1)["mode"] == "human" and len(world.events("takeover")) == 1
+
+
+def test_a_draft_with_files_cut_off_by_a_stop_is_sent_once_its_text_and_every_file_are_seen(bot):
+    """The same with a draft that has files: its text read back is ours (no takeover), but while one of
+    its files is not seen it may not have gone out: the draft stays red and says its text did go out.
+    Each of its files covers one row of its kind (win review F4 (b)); all seen, it is sent."""
+    bot.prm.handle(bot.msg("要合作说明和样品图"))
+    job = bot.worker_takes()
+    for name in ("合作说明.pdf", "样品图.jpg"):
+        assert bot.relay.outfile(job["id"], name, io.BytesIO(b"x").read, 1)
+    bot.finish(job["id"], draft(reply_draft="合作说明和样品图发你啦", message_kind="material",
+                                attachments_to_send=["assets/合作说明.pdf", "assets/样品图.jpg"]))
+    packet = bot.prm.store.packet_for_job(job["id"])
+    bot.prm.decide(packet["id"], "send")
+    bot.prm.store.move(packet["id"], ("approved",), "sending")       # stopped while sending it
+    written = bot.clock.now
+    bot.clock.now += 60
+    restarted = PrmService(bot.prm._config, bot.relay, store=bot.prm.store, clock=bot.clock, send=bot._send)
+    restarted.start()
+    restarted.stop()
+    own = {"chat_id": CREATOR, "is_group": False, "sender_id": ME, "timestamp": written}
+    restarted.on_own_message({**own, "message_id": "row1", "content": "合作说明和样品图发你啦", "msg_type": 1})
+    p = bot.prm.store.packet(packet["id"])
+    assert (p["status"], p["outcome"]) == ("failed", "indeterminate")
+    assert "文字已经发出去了" in p["error"] and "文件" in p["error"]
+    restarted.on_own_message({**own, "message_id": "row2", "content": "[文件] 合作说明.pdf", "msg_type": 49,
+                              "file_name": "合作说明.pdf"})
+    assert bot.prm.store.packet(packet["id"])["status"] == "failed"       # the picture: not seen yet
+    restarted.on_own_message({**own, "message_id": "row3", "content": "[图片]", "msg_type": 3})
+    p = bot.prm.store.packet(packet["id"])
+    assert (p["status"], p["outcome"], p["error"]) == ("sent", "sent_confirmed", "")
+    assert bot.prm.store.deal(1)["mode"] == "copilot"
+    assert [e["kind"] for e in bot.prm.store.events(1)].count("operator_message") == 0
+    restarted.on_own_message({**own, "message_id": "row4", "content": "[图片]", "msg_type": 3})
+    assert bot.prm.store.deal(1)["mode"] == "human"                       # one more picture: by hand
+
+
 def test_without_a_read_mark_own_lines_stay_history(world):
     """A chat this version never kept track of (the first start after the update): its own lines
     cannot be told from ones handled already, so they are history; the creator's are handed on."""
@@ -422,6 +494,122 @@ def test_a_pc_clock_ten_minutes_ahead_still_drafts(world):
     run.poll()
     deal = world.prm_store.deal(1)
     assert deal["mode"] == "human" and deal["mode_until"] > world.clock.now   # a person's, as when typed
+
+
+def test_a_pc_clock_hours_ahead_is_measured_by_the_bots_own_reply_and_corrected(world):
+    """win review F6: this PC's clock is 3 hours ahead of WeChat's.  Until the bot has sent something
+    it cannot tell (a live message looks 3 hours late: drafted, but reviewed).  Its first reply read
+    back measures the clock (sent at, by this PC, minus written at, by WeChat): the deals say so, and
+    from then on live messages are on time and an operator's own reply takes the chat over."""
+    world.register()
+    run = world.run()
+    ahead = 3 * HOUR
+    world.clock.now += ahead                                      # this PC; WeChat writes its own time
+
+    def wechat_now():
+        return world.clock.now - ahead
+
+    world.wechat.say(CREATOR, CREATOR, "在吗，想合作", wechat_now())
+    run.poll()
+    [job] = world.jobs()
+    assert json.loads(job["meta"])["late"]                        # not known yet: it looks read late
+    world.mac_drafts(run, draft(reply_draft="在的，您说", message_kind="other"))
+    [packet] = world.prm_store.packets(("pending",))
+    run.prm.decide(packet["id"], "send")
+    run.prm.send_approved()
+    world.wechat.say(CREATOR, ME, "在的，您说", wechat_now())        # the bot's reply in WeChat ...
+    world.clock.now += 1
+    run.poll()                                                    # ... read back a second later
+    assert world.prm_store.packet(packet["id"])["outcome"] == "sent_confirmed"
+    assert run.prm.snapshot()["clock_skew_sec"] == ahead + 1
+    note = clock_note(ahead + 1)
+    assert "这台电脑的时间比微信快 3 小时" in note and note in world.prm_store.deal(1)["attention"]
+
+    world.wechat.say(CREATOR, CREATOR, "那样品怎么寄", wechat_now())   # live: on time now
+    run.poll()
+    job = world.jobs()[-1]
+    assert text_lines(job) == ["那样品怎么寄"] and "late" not in json.loads(job["meta"])
+    world.clock.now += 30
+    world.wechat.say(CREATOR, ME, "我来跟你说", wechat_now())          # an operator, by hand
+    run.poll()
+    deal = world.prm_store.deal(1)
+    assert deal["mode"] == "human" and deal["mode_until"] == world.clock.now + 120 * 60
+
+    # the clock is put right, and the bot sends something again (noted, then read back): measured again,
+    # it counts at once and the notice goes
+    world.clock.now -= ahead
+    ahead = 0
+    run.prm._note_sent(CREATOR, "收到，我确认一下马上回你")
+    world.wechat.say(CREATOR, ME, "收到，我确认一下马上回你", wechat_now())
+    run.poll()
+    assert run.prm.snapshot()["clock_skew_sec"] == 0 and "电脑的时间" not in world.prm_store.deal(1)["attention"]
+
+
+def test_a_pc_clock_set_13_hours_ahead_while_running_drafts_again_once_measured(world):
+    """win review F6: 13 hours ahead every live message was older than PRM_CATCHUP_HOURS: recorded, never
+    drafted.  Once a reply of the bot's is read back (here a draft approved after the clock was changed),
+    live messages are drafted as usual."""
+    world.register()
+    run = world.run()
+    world.wechat.say(CREATOR, CREATOR, "在吗", world.clock.now)
+    run.poll()
+    world.mac_drafts(run, draft(reply_draft="在的", message_kind="other"))
+    [packet] = world.prm_store.packets(("pending",))
+    ahead = 13 * HOUR
+    world.clock.now += ahead                                      # the time zone of this PC is changed
+    run.prm.decide(packet["id"], "send")
+    run.prm.send_approved()
+    world.wechat.say(CREATOR, ME, "在的", world.clock.now - ahead)
+    run.poll()
+    world.wechat.say(CREATOR, CREATOR, "样品寄了吗", world.clock.now - ahead)
+    run.poll()
+    job = world.jobs()[-1]
+    assert text_lines(job) == ["样品寄了吗"] and "late" not in json.loads(job["meta"])
+    assert not [e for e in world.events("creator_message") if e["detail"].get("missed")]
+    assert "快 13 小时" in world.prm_store.deal(1)["attention"]
+
+
+def test_the_clock_is_measured_only_from_the_bots_own_lines_read_back_promptly(bot):
+    """What a measurement is: this run's own line (text) matched in WeChat within CLOCK_SAMPLE_SEC of
+    noting it, never the Mac's edge lines (their time is Windows' event time); a read-back delayed by a
+    stalled database only adds to a sample, so the smallest of the last few counts; within
+    CLOCK_NOISE_SEC nothing is corrected; before any measurement nothing is."""
+    prm, now = bot.prm, bot.clock.now
+    own = {"chat_id": CREATOR, "msg_type": 1, "is_group": False}
+    assert prm._skew == 0.0
+    prm._note_sent(CREATOR, "好的")
+    prm.on_own_message({**own, "message_id": "a", "content": "好的", "timestamp": now - 2 * HOUR})
+    assert prm._skew == 2 * HOUR
+    bot.clock.now += 60
+    prm._note_sent(CREATOR, "收到")
+    prm.on_own_message({**own, "message_id": "b", "content": "收到", "timestamp": bot.clock.now - 2 * HOUR - 90})
+    assert prm._skew == 2 * HOUR                                  # 90 s late (a stalled read): the smaller counts
+    prm._note_sent(CREATOR, "嗯嗯")
+    bot.clock.now += CLOCK_SAMPLE_SEC + 1                         # read back too long after it was noted
+    prm.on_own_message({**own, "message_id": "c", "content": "嗯嗯", "timestamp": bot.clock.now})
+    assert prm._skew == 2 * HOUR
+    prm._note_sent(CREATOR, "好呀")                                 # the Mac: Windows' event time, not WeChat's
+    prm.on_own_message({**own, "content": "好呀", "timestamp": bot.clock.now, "edge_seen": True,
+                        "edge_event_id": 9})
+    assert prm._skew == 2 * HOUR
+    prm._note_sent(CREATOR, "行")                                  # the clock put right: 30 s is noise
+    prm.on_own_message({**own, "message_id": "d", "content": "行", "timestamp": bot.clock.now - 30})
+    assert prm._skew == 0.0
+
+
+def test_the_clock_notice_is_no_sign_of_life_for_the_clean_up(bot):
+    """The notice is about this PC, not the deal: it does not move the deal's ``updated_at`` (the 8.2
+    clean-up counts quiet days from it), and a creator taken off the list gets none."""
+    bot.prm.register("wxid_creator02", "小丽")
+    bot.prm.set_active(2, False)
+    before = {d["id"]: d["updated_at"] for d in bot.prm.store.deals()}
+    bot.clock.now += 10 * 86400
+    bot.prm._note_sent(CREATOR, "好的")
+    bot.prm.on_own_message({"chat_id": CREATOR, "message_id": "a", "content": "好的", "msg_type": 1, "is_group": False,
+                            "timestamp": bot.clock.now - HOUR})
+    first, second = bot.prm.store.deals()
+    assert "这台电脑的时间比微信快 1 小时" in first["attention"] and "电脑的时间" not in second["attention"]
+    assert {d["id"]: d["updated_at"] for d in (first, second)} == before
 
 
 def test_the_first_read_of_a_creator_registered_later_keeps_the_old_rule(world):
@@ -706,10 +894,15 @@ def test_a_file_sent_just_before_a_stop_and_read_back_after_it_is_the_bots(bot):
     restarted.on_own_message({"chat_id": CREATOR, "content": "[文件]", "msg_type": 49, "is_group": False,
                               "timestamp": sent_at - 2})
     assert bot.prm.store.deal(1)["mode"] == "copilot"
+    # its one file covers one row (win review F4 (b)): another file just after it is an operator's
+    restarted.on_own_message({"chat_id": CREATOR, "content": "[文件]", "msg_type": 49, "is_group": False,
+                              "timestamp": sent_at + 30})
+    assert bot.prm.store.deal(1)["mode"] == "human"
+    assert [e["kind"] for e in bot.prm.store.events(1)].count("operator_message") == 1
     # a file an operator sends later is a person's
     restarted.on_own_message({"chat_id": CREATOR, "content": "[图片]", "msg_type": 3, "is_group": False,
                               "timestamp": bot.clock.now})
-    assert bot.prm.store.deal(1)["mode"] == "human"
+    assert [e["kind"] for e in bot.prm.store.events(1)].count("operator_message") == 2
 
 
 def test_catchup_hours_are_checked():

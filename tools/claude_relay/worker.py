@@ -49,7 +49,10 @@ draft goes back; the verdict goes with it.  After an operator's 批准并执行 
 queues a ``platform_execute`` job: the same CLI with --execute, once per approval key
 (a ledger in ~/.claude-relay/platform/ledger; a key seen before is never run again),
 and the outcome goes back.  ``--sync-products`` writes the catalogue (read-only CLI
-commands) to prm_workspace/kb/products.md and products.json.
+commands) to prm_workspace/kb/products.md and products.json.  Now and then the bot also asks
+where its 聚水潭 sample orders stand (a ``sample_status`` job, PRM_SAMPLE_SYNC_MIN): no model,
+`jst samples` (read-only, no receiver) under the same CLI lock, paced; the short answer
+(status, waybill, sent / signed, why rejected) goes back, a login lapsed or a risk wall as it is.
 
 Standard library only (macOS /usr/bin/python3 is enough).  Settings:
 ~/.claude-relay/config.json (see config.example.json); the token can live in
@@ -199,6 +202,8 @@ PRM_TOOLS = "Read,Edit,Write,Glob,Grep"
 PRM_DENIED_TOOLS = "Bash,WebFetch,WebSearch,Task,NotebookEdit"
 PRM_WRITE_TOOLS = ("Edit", "Write")
 PRM_ALWAYS_ALLOWED = ("StructuredOutput",)     # how --json-schema hands in the answer
+# The workspace's own folders: real folders, never symbolic links (prm_workspace_dir, prm_guard).
+PRM_FOLDERS = ("kb", "deals", "assets", "inbox")
 PRM_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 # What a draft is told of the bot's <system_note>: a sample order of 50 products (聚水潭's most, ids
 # up to 32 digits) makes about 2000 characters, its instruction first (service.next_step_note).
@@ -1076,12 +1081,37 @@ def _inside(path: str, folder: str) -> bool:
     return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
 
 
+def prm_linked_folders(workspace) -> list[str]:
+    """Which of the workspace's own folders (``PRM_FOLDERS``) are symbolic links, as "kb/" …: the
+    guard judges every path by where it really is, so a linked kb/ could never be read (and a
+    linked deals/ or inbox/ would hide the creators' folders from their own check)."""
+    return [f"{name}/" for name in PRM_FOLDERS if os.path.islink(os.path.join(str(workspace), name))]
+
+
+def _linked_problem(workspace: Path, linked: list[str]) -> str:
+    """Why a workspace with linked folders is refused, and the commands that fix it."""
+    fixes = []
+    for name in linked:
+        link = os.path.join(str(workspace), name.rstrip("/"))
+        try:
+            target = os.path.join(str(workspace), os.readlink(link))    # a relative link starts in the workspace
+        except OSError:
+            target = "<原来的文件夹>"
+        fixes.append(f"rm {shlex.quote(link)} && mkdir {shlex.quote(link)} && "
+                     f"cp -R {shlex.quote(target)}/. {shlex.quote(link)}/")
+    return (f"prm_workspace 里的 {'、'.join(linked)} 是软链接：起草的 Claude 只能用业务资料目录里面的文件"
+            "（守卫按真实路径判断，链接指到的地方一律不让读，草稿会读不到合作政策）。"
+            "换成真的文件夹、把文件复制进来（rm 只删链接，原来的文件不动）：" + "；".join(fixes))
+
+
 def prm_workspace_dir(settings: dict) -> tuple[Path | None, str]:
     """The workspace for prm jobs, or (None, why it cannot be used).
 
     It must exist and hold kb/ (the operators' knowledge); it must not be the
     home folder or lie in a code repository (a creator's words must never get
-    near code).  deals/, assets/ and inbox/ are made when missing.
+    near code).  kb/, deals/, assets/ and inbox/ are real folders: a symbolic link
+    is refused here, as the guard refuses every path through it (mac review G1).
+    deals/, assets/ and inbox/ are made when missing.
     """
     configured = str(settings.get("prm_workspace") or "").strip()
     if not configured:
@@ -1095,6 +1125,9 @@ def prm_workspace_dir(settings: dict) -> tuple[Path | None, str]:
     for folder in (path, *path.parents):
         if (folder / ".git").exists():
             return None, f"prm_workspace 在代码仓库里（{folder}），换一个单独的业务资料目录"
+    linked = prm_linked_folders(path)
+    if linked:
+        return None, _linked_problem(path, linked)
     if not (path / "kb").is_dir():
         return None, f"prm_workspace 里没有 kb/ 知识库目录：{path}"
     for sub in ("deals", "assets", "inbox"):
@@ -1219,8 +1252,11 @@ def link_report(relay_url: str, health=None, samples: int = 3, ping=None) -> lis
 
 
 def prm_hook_settings() -> str:
-    """``--settings`` JSON: this script guards every tool call and denies every permission request."""
-    command = f"{shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__).resolve()))} --prm-hook"
+    """``--settings`` JSON: this script guards every tool call and denies every permission request.
+    ``|| exit 2``: claude blocks a PreToolUse call only on exit code 2 (any other failure lets it
+    through), so a guard that cannot even start (this file broken by an update while a draft runs,
+    the interpreter gone) blocks too (mac review G2)."""
+    command = f"{shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__).resolve()))} --prm-hook || exit 2"
     hook = [{"matcher": "*", "hooks": [{"type": "command", "command": command, "timeout": 30}]}]
     return json.dumps({"hooks": {"PreToolUse": hook, "PermissionRequest": hook}})
 
@@ -1358,7 +1394,9 @@ def fetch_prm_files(client: RelayClient, job: dict, workspace: Path) -> tuple[li
 
 def prune_prm_files(workspace: Path) -> None:
     """Creators' pictures and files (inbox/) and the prm logs older than KEEP_INBOX_DAYS go,
-    at every prm job: the 8.2 clean-up long after delivery finds none of them left."""
+    at every prm job: the 8.2 clean-up long after delivery finds none of them left.  The platform
+    logs stay (the record of what was written to the platforms); those that age past the same line
+    are cut to province and city like new ones (``coarse_platform_logs``)."""
     cutoff = time.time() - KEEP_INBOX_DAYS * 86400
     for old in [*(workspace / "inbox").glob("job-*"), *(HOME_DIR / "logs" / "prm").glob("*.md")]:
         try:
@@ -1370,6 +1408,62 @@ def prune_prm_files(workspace: Path) -> None:
                 old.unlink()
         except OSError:
             pass
+    try:
+        coarse_platform_logs(cutoff)
+    except Exception as e:                               # never in the way of the job
+        log.warning("platform logs not cut down: %s", e)
+
+
+PLATFORM_LOGS_UPTO = ".coarse-upto"     # in logs/platform/: the line coarse_platform_logs got to last time
+
+
+def coarse_platform_logs(cutoff: float) -> int:
+    """Platform logs written before ``cutoff`` (KEEP_INBOX_DAYS ago, the line of the other prm files) with
+    their sample orders' receivers cut to province and city (``platforms.coarse_receivers``), as
+    ``save_platform_log`` writes them now: a worker before 2026-10-28 kept the district, the start of the
+    street and the masked number there for good (mac review C#2).  Each log is looked at once, when it
+    crosses the line (``PLATFORM_LOGS_UPTO`` keeps the line of the last round), and keeps its time.
+    Returns how many were rewritten."""
+    if platforms is None:
+        return 0
+    folder = HOME_DIR / "logs" / "platform"
+    if not folder.is_dir():
+        return 0
+    marker = folder / PLATFORM_LOGS_UPTO
+    try:
+        since = float(marker.read_text(encoding="utf-8").strip() or 0)
+    except (OSError, ValueError):
+        since = 0.0
+    upto, changed = cutoff, 0
+    for path in folder.glob("*.json"):
+        try:
+            st = path.stat()
+        except OSError:                                  # gone meanwhile
+            continue
+        if not since <= st.st_mtime < cutoff:
+            continue
+        try:
+            data, cut = platforms.coarse_receivers(json.loads(path.read_text(encoding="utf-8")))
+            if not cut:
+                continue
+            part = path.with_name(path.name + ".part")
+            part.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.utime(str(part), ns=(st.st_atime_ns, st.st_mtime_ns))
+            os.replace(str(part), str(path))
+            changed += 1
+        except OSError as e:                             # a full disk, say: this one again next time
+            log.warning("platform log %s not cut down yet (%s)", path.name, e)
+            upto = min(upto, st.st_mtime)
+        except Exception as e:                           # not JSON: it cannot be read any better next time
+            log.warning("platform log %s cannot be read (%s); left as it is", path.name, e)
+    if max(since, upto) != since:
+        try:
+            marker.write_text(repr(max(since, upto)), encoding="utf-8")
+        except OSError:
+            pass
+    if changed:
+        log.info("%d platform log(s) older than %d days cut to province and city", changed, KEEP_INBOX_DAYS)
+    return changed
 
 
 def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, failed: list) -> str:
@@ -1650,11 +1744,13 @@ def summarize_prm(run: dict, data: dict | None, settings: dict) -> dict:
 
 
 def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper) -> dict:
+    meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
+    if meta.get("op") == "sample_status":        # 聚水潭: no creator, no model, no workspace needed
+        return do_sample_status_job(settings, job, client, meta)
     workspace, problem = prm_workspace_dir(settings)
     if workspace is None:
         log.warning("#%s prm job not run: %s", job["id"], problem)
         return {"ok": False, "text": "", "error": problem, "duration_s": 0}
-    meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
     try:
         party_id = int(meta.get("party_id"))
     except (TypeError, ValueError):
@@ -1706,7 +1802,8 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
         if draft.get("platform_action") is not None:
             raw = draft.pop("platform_action")
             try:
-                draft["platform"] = platform_preview(settings, workspace, raw, client, int(job["id"]), party_id)
+                draft["platform"] = platform_preview(settings, workspace, raw, client, int(job["id"]), party_id,
+                                                     creator=meta.get("creator"))
             except Exception as e:                       # never lose the draft over its preview
                 log.exception("#%s platform preview failed", job["id"])
                 draft["platform"] = preview_failed(raw, f"Mac 上预览出错：{e}")
@@ -1727,12 +1824,27 @@ def _platform_heartbeat(client: RelayClient, job_id: int, doing: str):
 
 
 def _cli_lock(heartbeat=None):
-    return platforms.CliLock(HOME_DIR / "platform" / "cli.lock", heartbeat=heartbeat)
+    """The Mac's one-command-at-a-time lock; while it waits the job's heartbeat goes on, and a
+    cancel ends the wait (``platforms.Cancelled``: nothing ran)."""
+    return platforms.CliLock(HOME_DIR / "platform" / "cli.lock", heartbeat=heartbeat, every=HEARTBEAT_SEC)
+
+
+def invite_context(settings: dict, creator=None) -> dict:
+    """What a 专属佣金's preview and execution need to look the creator up in the batch invite tool's ledger
+    (tools/creator_invite: a 邀约卡 with a 专属佣金 already gave her a strategy for its products): the ledger
+    (``platforms.dy_invite_ledger`` of config.json, else ~/.claude-relay/platform/creator-invites, the tool's own
+    default) and her 抖音号 as the bot knows them (``meta.creator.douyin_ids``: its verified 抖店 sample orders)."""
+    cfg = platforms.config(settings) if platforms is not None else {}
+    ledger = cfg.get("dy_invite_ledger") or str(HOME_DIR / "platform" / "creator-invites")
+    ids = (creator or {}).get("douyin_ids") if isinstance(creator, dict) else None
+    return {"invite_ledger": ledger,
+            "douyin_ids": [str(d) for d in ids if isinstance(d, str)][:5] if isinstance(ids, list) else []}
 
 
 def platform_preview(settings: dict, workspace: Path, raw_action, client: RelayClient, job_id: int,
-                     party_id: int = 0) -> dict:
-    """The Mac's verdict on a draft's platform action (the bot gets it as ``platform``)."""
+                     party_id: int = 0, creator=None) -> dict:
+    """The Mac's verdict on a draft's platform action (the bot gets it as ``platform``).  ``creator``: the job's
+    ``meta.creator`` (``invite_context``)."""
     if platforms is None:
         return {"version": 1, "action": None, "requested": raw_action if isinstance(raw_action, dict) else None,
                 "verdict": "unavailable", "problems": ["这台 Mac 的 worker 没有平台模块（src/prm/platforms.py）"],
@@ -1743,8 +1855,9 @@ def platform_preview(settings: dict, workspace: Path, raw_action, client: RelayC
     try:
         with _cli_lock(beat):
             block = platforms.preview(raw_action, cfg, catalog=platforms.load_catalog(workspace), heartbeat=beat,
-                                      context={"party_id": party_id, "job_id": job_id})
-    except TimeoutError as e:
+                                      context={"party_id": party_id, "job_id": job_id,
+                                               **invite_context(settings, creator)})
+    except (TimeoutError, platforms.Cancelled) as e:
         block = platforms.failed_preview(raw_action, cfg, str(e))
     except Exception as e:                               # never lose the draft over a preview
         log.exception("#%s platform preview failed", job_id)
@@ -1771,34 +1884,105 @@ def do_platform_job(settings: dict, job: dict, client: RelayClient, workspace: P
     started = time.monotonic()
     if meta.get("op") == "platform_preview":
         block = platform_preview(settings, workspace, meta.get("action"), client, int(job["id"]),
-                                 int(meta.get("party_id") or 0))
+                                 int(meta.get("party_id") or 0), creator=meta.get("creator"))
         return {"ok": True, "text": json.dumps(block, ensure_ascii=False),
                 "duration_s": round(time.monotonic() - started, 1)}
     cfg = platforms.config(settings)
     action = meta.get("action") if isinstance(meta.get("action"), dict) else {}
     log.info("#%s platform execute: %s (packet %s)", job["id"], action.get("action"), meta.get("packet_id"))
-    context = {"job_id": int(job["id"]), "packet_id": meta.get("packet_id"), "party_id": meta.get("party_id")}
+    context = {"job_id": int(job["id"]), "packet_id": meta.get("packet_id"), "party_id": meta.get("party_id"),
+               **invite_context(settings, meta.get("creator"))}
+    key = str(meta.get("key") or "")
     beat = _platform_heartbeat(client, int(job["id"]), "平台执行")
+    record, locked = None, False
     try:
+        # cancelled while it waits for the lock, or by the time it has it: NOT_RUN, nothing written
+        # (mac review C#1); once the first write is under way it runs to its end
         with _cli_lock(beat):
-            record = platforms.execute(action, cfg, plan=meta.get("run"), key=str(meta.get("key") or ""),
-                                       ledger=HOME_DIR / "platform" / "ledger",
-                                       catalog=platforms.load_catalog(workspace), heartbeat=beat, context=context)
-    except TimeoutError as e:
-        record = platforms.record("NOT_RUN", [f"没有执行：{e}"])
-        record["key"] = str(meta.get("key") or "")
+            locked = True
+            record = platforms.execute(action, cfg, plan=meta.get("run"), key=key, ledger=platform_ledger(),
+                                       catalog=platforms.load_catalog(workspace), heartbeat=beat, context=context,
+                                       cancelled=beat)
+    except Exception as e:
+        if record is not None:                           # it ran; only letting go of the lock went wrong
+            log.warning("#%s platform execute: the CLI lock was not let go cleanly (%s)", job["id"], e)
+        elif not locked and isinstance(e, (TimeoutError, platforms.Cancelled)):
+            record = platforms.record("NOT_RUN", [f"没有执行：{e}"])        # it never got to the platform
+            record["key"] = key
+        else:
+            raise                                        # serve() -> failure_result: UNKNOWN once the key is taken
     log.info("#%s platform execute: %s", job["id"], record.get("outcome"))
-    save_platform_log(job, record)
+    try:
+        save_platform_log(job, record)
+    except Exception as e:                               # the write is done: its log changes nothing (mac review F7)
+        log.warning("#%s platform execute: its log was not written (%s); the outcome goes back as it is",
+                    job["id"], e)
     return {"ok": True, "text": json.dumps(record, ensure_ascii=False),
             "duration_s": round(time.monotonic() - started, 1)}
 
 
+def do_sample_status_job(settings: dict, job: dict, client: RelayClient, meta: dict) -> dict:
+    """``meta.op == "sample_status"`` (the bot's PRM_SAMPLE_SYNC_MIN): where a batch of 聚水潭 sample orders stands
+    (``meta.orders``), without the model: `jst samples` (read-only, no receiver) under the Mac's platform CLI lock,
+    a pause between two calls (``platforms.sample_statuses``).  The answer is short JSON (``platforms.sample_result``:
+    status, waybills, times, reasons; no creator, no receiver).  A login lapsed (77), a risk wall (76), another
+    sub-account (79) go back as they are, in ``stopped``: nothing is tried again here (the bot asks in its next
+    round)."""
+    if platforms is None:
+        return {"ok": False, "text": "", "error": "这台 Mac 的 worker 没有平台模块（src/prm/platforms.py）",
+                "duration_s": 0}
+    started = time.monotonic()
+    asked = [str(n) for n in meta.get("orders") or [] if isinstance(n, str)]
+    cfg = platforms.config(settings)
+    beat = _platform_heartbeat(client, int(job["id"]), "查聚水潭寄样单状态")
+    try:
+        with _cli_lock(beat):
+            result = platforms.sample_statuses(cfg, asked, heartbeat=beat)
+    except (TimeoutError, platforms.Cancelled) as e:     # another platform command kept the lock, or a cancel
+        verdict = "cancelled" if isinstance(e, platforms.Cancelled) else "busy"
+        result = platforms.sample_result(asked, stopped={"verdict": verdict, "exit_code": None, "message": str(e)},
+                                         not_asked=asked)
+    stopped = result.get("stopped") or {}
+    log.info("#%s sample status: %d asked, %d answered, %d not found%s", job["id"], len(asked),
+             len(result.get("orders") or {}), len(result.get("missing") or []),
+             f"; stopped ({stopped.get('verdict')}, exit {stopped.get('exit_code')})" if stopped else "")
+    return {"ok": True, "text": json.dumps(result, ensure_ascii=False), "duration_s": round(time.monotonic() - started, 1)}
+
+
+def platform_ledger() -> Path:
+    """The execution ledger: one file per approval key (platforms.claim)."""
+    return HOME_DIR / "platform" / "ledger"
+
+
+def failure_result(job: dict, error) -> dict:
+    """What goes back for a job that raised in the worker (serve): ok=False and why.  But a platform
+    execution whose approval key is in the ledger may have written to the platform already: it goes back
+    as an execution record UNKNOWN, never as "not run" (an operator could approve it again; mac review F7)."""
+    meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
+    if str(job.get("kind") or "") == "prm" and meta.get("op") == "platform_execute" and platforms is not None:
+        key = str(meta.get("key") or "")
+        try:
+            taken = platforms.claimed(platform_ledger(), key)
+        except Exception:
+            taken = True                                 # cannot tell: it may have run
+        if taken:
+            record = platforms.record("UNKNOWN", [f"Mac 上执行时出错（{_short(error, 200)}），不知道平台上执行了没有；"
+                                                  "请到平台后台核对"])
+            record["key"] = key
+            return {"ok": True, "text": json.dumps(record, ensure_ascii=False), "duration_s": 0}
+    return {"ok": False, "text": "", "error": f"Mac 上的 worker 出错：{error}", "duration_s": 0}
+
+
 def save_platform_log(job: dict, record: dict) -> Path:
-    """What an execution did, in logs/platform/ (kept: the operators' record of platform writes)."""
+    """What an execution did, in logs/platform/ (kept: the operators' record of platform writes).  A
+    sample order's receiver only with its province and city (``platforms.coarse_receivers``: the CLI's
+    own JSON in a step's ``raw`` and the 收货 fact too): the log is kept for good, the bot has the rest
+    until its 8.2 clean-up (mac review C#2)."""
     folder = HOME_DIR / "logs" / "platform"
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{time.strftime('%Y%m%d-%H%M%S')}-job{job['id']}.json"
-    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    kept, _ = platforms.coarse_receivers(record)
+    path.write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
 
 
@@ -1886,7 +2070,10 @@ def prm_guard(event: dict, workspace: str, party_id=None, job_id=None) -> str:
     commission) or pictures into a reply.  kb/ and assets/ are read as before; a Glob / Grep must
     start below a folder that holds no deals/ or inbox/ (it reaches everything under its root).
     Without the party or the job (the hook's environment lacks them) deals/ and inbox/ are closed;
-    the case-insensitive file system cannot open them under another spelling (DEALS/2.md)."""
+    the case-insensitive file system cannot open them under another spelling (DEALS/2.md).  A
+    workspace whose kb/, deals/, assets/ or inbox/ is a symbolic link is refused as a whole, as
+    ``prm_workspace_dir`` refuses it (a linked deals/ would take the creators' folders out of
+    their own check)."""
     if event.get("hook_event_name") == "PermissionRequest":
         return "达人副驾驶任务不允许任何需要批准的操作"
     tool = str(event.get("tool_name") or "")
@@ -1896,6 +2083,9 @@ def prm_guard(event: dict, workspace: str, party_id=None, job_id=None) -> str:
     if not workspace:
         return "没有业务资料目录，什么都不能做"
     root = os.path.realpath(workspace)
+    linked = prm_linked_folders(root)
+    if linked:
+        return f"{tool} 不能用：业务资料目录里的 {'、'.join(linked)} 是软链接（要换成真的文件夹），什么都不放行"
     cwd = str(event.get("cwd") or root)
     party, job = _job_number(party_id), _job_number(job_id)
     deals, inbox = os.path.join(root, "deals"), os.path.join(root, "inbox")
@@ -1964,8 +2154,24 @@ def run_prm_hook() -> int:
     """``--prm-hook``: claude's PreToolUse / PermissionRequest hook for prm jobs.
 
     A refused tool call exits 2 with the reason on stderr (claude tells the model);
-    a permission request is always denied.
+    a permission request is always denied.  It fails closed: claude blocks a PreToolUse call
+    only on exit code 2 (any other failure is a non-blocking error, the call goes ahead), so
+    whatever goes wrong in here (an event it cannot read, a path the file system cannot take,
+    a bug) exits 2 too (mac review G2; ``prm_hook_settings`` covers a script that cannot start).
     """
+    try:
+        return _prm_hook()
+    except BaseException as e:                           # never let a call through on an error
+        why = f"守卫出错了（{type(e).__name__}），这一步按拒绝处理"
+        try:
+            print(why, file=sys.stderr)
+            _guard_note(f"job {os.environ.get('PRM_JOB_ID') or os.environ.get('RELAY_JOB_ID') or '?'}: {why}: {e!r}")
+        except BaseException:
+            pass
+        return 2
+
+
+def _prm_hook() -> int:
     try:
         event = json.loads(sys.stdin.read() or "{}")
     except ValueError:
@@ -1986,13 +2192,14 @@ def run_prm_hook() -> int:
 
 
 def _guard_note(line: str) -> None:
-    """A refusal, appended to logs/prm/guard.log (the hook's stderr is for claude only)."""
+    """A refusal, appended to logs/prm/guard.log (the hook's stderr is for claude only); never
+    raises (a path with a lone surrogate in it cannot be written as UTF-8 as it is)."""
     try:
         folder = HOME_DIR / "logs" / "prm"
         folder.mkdir(parents=True, exist_ok=True)
-        with open(folder / "guard.log", "a", encoding="utf-8") as f:
+        with open(folder / "guard.log", "a", encoding="utf-8", errors="backslashreplace") as f:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {line}\n")
-    except OSError:
+    except Exception:
         pass
 
 
@@ -2084,25 +2291,59 @@ def outbox_dir() -> Path:
 
 
 def deliver(client: RelayClient, job_id: int, result: dict, stopper: Stopper) -> bool:
-    """Write the result to the outbox, then send it until the bot has it."""
-    path = outbox_dir() / f"{job_id}.json"
-    path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    """Write the result to the outbox, then send it until the bot has it.  It is written whole or not
+    at all (a .part renamed): a full disk leaves no half file for every next start to trip over, and
+    the result is then sent from memory instead (a platform write's outcome must still get back,
+    mac review F7)."""
+    part = None
+    try:
+        path = outbox_dir() / f"{job_id}.json"
+        part = path.with_name(path.name + ".part")
+        part.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+        os.replace(str(part), str(path))
+    except OSError as e:
+        log.warning("#%s result not saved in the outbox (%s); sending it from memory", job_id, e)
+        if part is not None:
+            try:
+                part.unlink()
+            except OSError:
+                pass
+        return _send_until_taken(client, job_id, result, stopper, None)
     return flush_one(client, path, stopper)
 
 
 def flush_one(client: RelayClient, path: Path, stopper: Stopper) -> bool:
     job_id = int(path.stem)
-    result = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        result = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:                   # cut short (an older worker on a full disk): set aside
+        log.error("#%s result in %s cannot be read (%s); moved aside as .bad", job_id, path, e)
+        try:
+            os.replace(str(path), str(path.with_suffix(".bad")))
+        except OSError:
+            pass
+        return True
+    return _send_until_taken(client, job_id, result, stopper, path)
+
+
+def _send_until_taken(client: RelayClient, job_id: int, result: dict, stopper: Stopper, path: Path | None) -> bool:
+    """Send a result until the bot has it (then its outbox copy ``path`` goes); False when the worker
+    stops first (the copy stays for the next start; without one the result is lost, and said so)."""
     backoff = 5
     while True:
         try:
             if client.send_result(job_id, result):
-                path.unlink(missing_ok=True)
+                if path is not None:
+                    path.unlink(missing_ok=True)
                 return True
         except Exception as e:
             log.warning("#%s result not delivered (%s); retry in %ss", job_id, e, backoff)
         if stopper.event.wait(backoff):
-            log.info("#%s result stays in %s for the next start", job_id, path)
+            if path is not None:
+                log.info("#%s result stays in %s for the next start", job_id, path)
+            else:
+                log.error("#%s result lost: the worker stopped before the bot had it (the outbox could not hold it)",
+                          job_id)
             return False
         backoff = min(backoff * 2, MAX_BACKOFF_SEC)
 
@@ -2164,7 +2405,7 @@ def serve(settings: dict, client: RelayClient, stopper: Stopper, once: bool = Fa
             result = do_job(settings, job, client, stopper, kinds)
         except Exception as e:
             log.exception("#%s failed in the worker", job.get("id"))
-            result = {"ok": False, "text": "", "error": f"Mac 上的 worker 出错：{e}", "duration_s": 0}
+            result = failure_result(job, e)
         deliver(client, int(job["id"]), result, stopper)
         if once:
             return

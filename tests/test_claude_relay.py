@@ -133,6 +133,23 @@ class TestStore:
         assert store.finish(job, ok=True, text="还是做完了") is True
         assert store.get(job)["status"] == "done"
 
+    def test_a_job_back_from_lost_owes_no_message_and_is_no_result_to_send(self):
+        """The heartbeat brings a lost job back: its 失联 notice is not owed any more, and a running job is never
+        "undelivered" (it used to stay so, and the next round sent "#1 running")."""
+        store = RelayStore(":memory:")
+        job = store.add("chat", ME, "x", now=0)
+        store.claim_next(now=10)
+        store.mark_lost(older_than=11)
+        assert [j["status"] for j in store.undelivered()] == ["lost"]
+        store.heartbeat(job, now=20)
+        assert store.get(job)["status"] == "running" and store.get(job)["delivered"] == 1
+        assert store.undelivered() == []
+        with store._lock:                                    # whatever else leaves a running job unsent
+            store._conn.execute("UPDATE relay_jobs SET delivered = 0 WHERE id = ?", (job,))
+        assert store.undelivered() == []
+        store.finish(job, ok=True, text="做完了", now=30)
+        assert [j["status"] for j in store.undelivered()] == ["done"]
+
     def test_cancel_a_queued_job_at_once_and_a_running_one_through_the_heartbeat(self):
         store = RelayStore(":memory:")
         running = store.add("chat", ME, "a")
@@ -256,6 +273,53 @@ class TestDelivery:
         clock.now += LOST_AFTER_SEC + 1
         relay.tick()
         assert "失去联系" in sent[0][1] and "cc 重试 1" in sent[0][1]
+
+    def test_a_job_back_while_its_lost_notice_goes_out_is_not_sent_as_running(self, clock, sent):
+        """The Mac's heartbeat comes back while WeChat is typing the 失联 notice (repro_relay_running.py): that
+        notice goes out, nothing more until the result; it used to be followed by "#1 running"."""
+        relay = None
+
+        def send(chat, text):
+            sent.append(text)
+            if "失去联系" in text:
+                relay.heartbeat(job_id, {})
+            return True
+
+        relay = ClaudeRelay(config(), store=RelayStore(":memory:"), send=send, clock=clock)
+        relay.handle(pm("cc 跑一下测试", clock=clock))
+        job_id = relay.next_job(0)["id"]
+        clock.now += LOST_AFTER_SEC + 1
+        relay.tick()
+        clock.now += 5
+        relay.tick()
+        assert len(sent) == 1 and "失去联系" in sent[0]                # (the receipt is the router's to send)
+        relay.finish(job_id, {"ok": True, "text": "还是做完了"})
+        relay.tick()
+        assert sent[1:] == ["#1 完成\n还是做完了"]
+
+    def test_a_kinds_handler_is_never_handed_a_running_job(self, clock):
+        """The same race on a creator's draft job (src/prm): the heartbeat comes back while its handler takes the
+        'lost'; the next round used to hand it the job again as 'running' (a draft with no result)."""
+        r = ClaudeRelay(config(), store=RelayStore(":memory:"), send=lambda chat, text: True, clock=clock)
+        seen = []
+
+        def handler(job):
+            seen.append(job["status"])
+            if job["status"] == "lost":
+                r.heartbeat(job_id, {})
+            return True
+
+        r.register_kind("prm", handler)
+        _, job_id = r.submit("wxid_creator", "wxid_creator", "你好", kind="prm", meta={"party_id": 1}, fresh=True)
+        assert r.next_job(0, ("prm",))["id"] == job_id
+        clock.now += LOST_AFTER_SEC + 1
+        r.tick()
+        clock.now += 5
+        r.tick()
+        assert seen == ["lost"]
+        r.finish(job_id, {"ok": True, "text": "{}"})
+        r.tick()
+        assert seen == ["lost", "done"]
 
     def test_cancelled_and_long_results(self, clock, sent):
         r = ClaudeRelay(config(claude_relay_max_chars=100), store=RelayStore(":memory:"), clock=clock,
