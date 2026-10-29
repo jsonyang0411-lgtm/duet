@@ -523,6 +523,39 @@ class TestPrmPages:
         assert service.store.packet(second["id"])["status"] == "dropped"
         assert page.locator(".prm-buyin").count() == 0 and prm.sent == []
 
+    def test_review_page_marks_our_baiying_invites_and_counts_others_contact_cards(self, page, prm):
+        """百应私信：没登记的达人里我们邀约的（Mac 按邀约台账认出来的）写「我们邀约的 · 抖音号」和邀约时间；别人邀约的会话里
+        的联系方式卡片只说有几张、不归我们处理；号码哪儿都不显示。号码、抖音号、名字都是编的。"""
+        import json as _json
+        from src.prm import platforms
+        from src.prm.service import BUYIN_SYNC_CHAT
+
+        service, relay, clock = prm.service, prm.relay, prm.clock
+        service._buyin_sec = 600                                     # PRM_BUYIN_SYNC_MIN=10
+        relay.submit(BUYIN_SYNC_CHAT, BUYIN_SYNC_CHAT, "读抖音百应私信（精选联盟）", kind="prm",
+                     meta={"op": "buyin_inbox"}, fresh=True, input_closed=True)
+        poll = relay.next_job(0, ("prm",))
+        card = {"wechat": "zq_test_wx_83", "phone": "13700001234"}
+        convs = [platforms.im_conversation(c) for c in (
+            {"conversationId": "conv_inv", "creator": {"buyinId": "1777000000000000042", "awemeId": "invited_test_dy",
+                                                       "nickname": "邀约的测试达人"},
+             "invited": {"aweme_id": "invited_test_dy", "invited_at": "2026-10-29T15:00:00+08:00",
+                         "plan_id": "PTEST-plan-0001"},
+             "messages": [{"id": "i1", "at": clock.now, "from": "creator", "kind": "contact", "contact": card}]},
+            {"conversationId": "conv_other", "creator": {"buyinId": "1777000000000000043", "nickname": "别人的测试达人"},
+             "messages": [{"id": "o1", "at": clock.now, "from": "creator", "kind": "contact", "contact": card}]})]
+        relay.finish(poll["id"], {"ok": True, "text": _json.dumps(platforms.im_result(conversations=convs),
+                                                                   ensure_ascii=False)})
+        relay.tick()
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        text = page.inner_text("body")
+        for expected in ("百应里有 2 位没登记的达人发了消息",
+                         "邀约的测试达人（我们邀约的 · 抖音号 invited_test_dy · 10-29 15:00 邀约）", "别人的测试达人",
+                         "别人邀约的会话里有 1 张联系方式卡片，不归我们处理"):
+            assert expected in text, expected
+        assert "zq_test_wx_83" not in text and "13700001234" not in text
+
     def test_deals_page_registers_and_disables_a_creator(self, page, prm):
         page.goto(f"{BASE_URL}/#/deals", timeout=10000)
         page.wait_for_timeout(1500)

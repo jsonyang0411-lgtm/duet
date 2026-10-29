@@ -25,8 +25,10 @@
                     them (``applied``) and whether they are still asked about (``done`` empty):
                     PRM_SAMPLE_SYNC_MIN, src/prm/service.py
 ``buyin_threads``   抖音百应 private-message conversations (精选联盟私信, PRM_BUYIN_SYNC_MIN): which registered
-                    creator a conversation is (none: nobody on the list matched), the message ids handled, when
-                    she and our side last wrote and up to when her lines are answered; src/prm/service.py
+                    creator a conversation is (none: nobody on the list matched), her 百应 id and 抖音号, our
+                    invite it is (``invited``, from the Mac's invite ledger match), the message ids handled, when
+                    she and our side last wrote and up to when her lines are answered, how many contact cards came
+                    in a conversation that is not ours (never their values); src/prm/service.py
 ``prm_meta``        small values the service keeps over a restart (when the sync last asked)
 
 A packet's life: ``pending`` (waits in the console) -> ``approved`` (an operator said
@@ -221,6 +223,9 @@ _ADDED_COLUMNS = (
     ("action_packets", "platform", "TEXT NOT NULL DEFAULT '{}'"),
     ("deals", "notices", "TEXT NOT NULL DEFAULT '[]'"),
     ("deals", "chain", "TEXT NOT NULL DEFAULT '{}'"),
+    ("buyin_threads", "buyin_id", "TEXT NOT NULL DEFAULT ''"),
+    ("buyin_threads", "invited", "TEXT NOT NULL DEFAULT '{}'"),
+    ("buyin_threads", "contacts", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 # What the creators wrote, or our side's own words, waiting for the next draft job.
@@ -302,6 +307,7 @@ def sample_order_view(row: dict) -> dict:
 def buyin_thread_view(row: dict) -> dict:
     out = dict(row)
     out["seen"] = [str(i) for i in _loads(row.get("seen"), [])]
+    out["invited"] = _loads(row.get("invited"), {}) or None
     return out
 
 
@@ -1176,14 +1182,17 @@ class PrmStore:
         return [buyin_thread_view(dict(r)) for r in rows]
 
     def save_buyin_thread(self, conversation_id: str, now: Optional[float] = None, **fields) -> None:
-        """Keep a 百应 conversation (made when new) with ``fields`` set; ``seen`` is a list (stored as JSON)."""
+        """Keep a 百应 conversation (made when new) with ``fields`` set; ``seen`` is a list, ``invited`` a dict or None
+        (stored as JSON)."""
         allowed = {"party_id", "deal_id", "nickname", "creator_uid", "aweme_id", "seen", "last_creator_at",
-                   "last_shop_at", "answered_upto", "unanswered"}
+                   "last_shop_at", "answered_upto", "unanswered", "buyin_id", "invited", "contacts"}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"not a 百应 conversation field: {sorted(unknown)}")
         if "seen" in fields:
             fields["seen"] = json.dumps(list(fields["seen"] or []), ensure_ascii=False)
+        if "invited" in fields:
+            fields["invited"] = json.dumps(dict(fields["invited"] or {}), ensure_ascii=False)
         now = time.time() if now is None else now
         with self._lock:
             self._conn.execute("INSERT OR IGNORE INTO buyin_threads (conversation_id, created_at, updated_at)"
