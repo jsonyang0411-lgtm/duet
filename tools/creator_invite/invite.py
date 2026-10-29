@@ -47,6 +47,9 @@ STOP_EXITS = {EXIT_WALL: "验证码或限流（退出码 76）", EXIT_LOGIN: "�
 # The douyin CLI could not tell which login the tab is (exit 1; 2026-10-29 live: getUser gave shop id 0 = a 百应 tab that
 # had logged out). It checks before the command's own request, so nothing else went out — and nothing will, until a person logs in.
 IDENTITY_UNVERIFIABLE = "[IDENTITY_UNVERIFIABLE]"
+# A 抖音 search in the config may only filter and page: these the tool sets itself, or they would bypass the pacing, write a file or act.
+DY_SEARCH_FORBIDDEN = ("--execute", "--raw", "--out", "--with-values", "--expect-shop-id", "--expect-user-id", "--expect-aavid",
+                       "--transport", "--session-file", "--session-from", "--no-open", "--format", "--fields")
 LOGIN_HINT = "核对不了调试 Chrome 里登录的是哪家店，多半是百应掉登录了：在调试 Chrome 里重新登录百应、开着百应的页面，再重跑"
 
 AWEME_ID = re.compile(r"^[A-Za-z0-9_.-]{2,64}$")          # what douyin-engineering's author-invite takes
@@ -241,6 +244,21 @@ def load_config(path: Optional[str]) -> dict:
                 _number(q, key, q[key], 0, 7, integer=True)
         _number(q, "pages", q.get("pages", 1), 1, 5, integer=True)
         _number(q, "page", q.get("page", 1), 1, 500, integer=True)
+    # 抖音那边也找（用户 2026-10-29）：百应达人广场的只读搜索，参数原样写在配置里（douyin-engineering 的 buyin authors-*）
+    dy_queries = find.get("dy_queries") or []
+    if not isinstance(dy_queries, list) or len(dy_queries) > 10:
+        raise ToolError("配置 find.dy_queries 要是 0 到 10 组抖音达人广场的搜索", EXIT_USAGE)
+    for q in dy_queries:
+        args = q.get("args") if isinstance(q, dict) else None
+        if (not isinstance(args, list) or not 2 <= len(args) <= 30 or not all(isinstance(a, str) for a in args)
+                or args[0] != "buyin" or not re.match(r"^authors-[a-z-]{2,30}$", args[1])):
+            raise ToolError("find.dy_queries 的每一组要写 args：[\"buyin\", \"authors-…\", \"--参数=值\", …]（只读的找达人命令）", EXIT_USAGE)
+        for a in args[2:]:
+            name = a.split("=", 1)[0]
+            if not re.match(r"^--[a-z][a-z0-9-]{0,40}(=[^\s]{1,120})?$", a) or name in DY_SEARCH_FORBIDDEN:
+                raise ToolError(f"find.dy_queries 里的参数 {a[:60]} 不行：只写筛选和页数（{'、'.join(DY_SEARCH_FORBIDDEN)} 由工具管或不许用）", EXIT_USAGE)
+    find["dy_queries"] = dy_queries
+    find["dy_lookup_max"] = _number(find, "dy_lookup_max", find.get("dy_lookup_max", 60), 0, 500, integer=True)
     cfg["find"] = find
     rules = dict(DEFAULT_RULES)
     rules.update(raw.get("rules") or {})
@@ -607,8 +625,59 @@ def find_creators(cfg: dict, clis: Clis) -> List[dict]:
     return rows
 
 
+def find_on_douyin(cfg: dict, clis: Clis, known: set) -> dict:
+    """百应达人广场那边找到的人（find.dy_queries 每组一条只读搜索）：聚水潭那边已经有的只记一笔「两边都有」，新的每位到聚水潭
+    按抖音号查一次（jst lookup，最多 dy_lookup_max 位），拿到和 jst find 一样的行（粉丝画像、近 30 天带货品类和销售额），
+    这样两边的人走同一套规则。查不到的、已经在聚水潭「我的达人」里的不进。"""
+    out = {"rows": [], "both": set(), "excluded": [], "found": 0, "new": 0, "looked_up": 0, "not_looked_up": 0}
+    queries = cfg["find"].get("dy_queries") or []
+    if not queries:
+        return out
+    order: List[str] = []
+    names: Dict[str, dict] = {}
+    for q in queries:
+        data = must_read(clis.run("dy", [*q["args"], f"--expect-shop-id={cfg['dy_expect_shop_id']}", "--no-open"], 900), "抖音达人广场找达人")
+        for r in data.get("rows") or []:
+            aweme = str(r.get("awemeId") or "") if isinstance(r, dict) else ""
+            if not aweme or aweme in names:
+                continue
+            names[aweme] = r
+            out["found"] += 1
+            if aweme in known:
+                out["both"].add(aweme)
+            else:
+                order.append(aweme)
+    out["new"] = len(order)
+    for aweme in order[cfg["find"]["dy_lookup_max"]:]:
+        out["not_looked_up"] += 1
+    for aweme in order[:cfg["find"]["dy_lookup_max"]]:
+        r = names[aweme]
+        stub = {"aweme_id": aweme, "nickname": str(r.get("nickname") or ""), "fans": r.get("fansNum"), "hat_share": None,
+                "female_share": None, "source": "抖音"}
+        if not AWEME_ID.match(aweme):
+            out["excluded"].append({**stub, "reason": "抖音号格式命令行不收"})
+            continue
+        found = clis.run("jst", ["lookup", "--platform=DY", f"--no={aweme}", f"--expect-uid={cfg['jst_expect_uid']}"], 300)
+        out["looked_up"] += 1
+        if found.exit_code in STOP_EXITS:
+            raise StopRun(f"聚水潭按抖音号查达人：{STOP_EXITS[found.exit_code]}，立刻停下。命令行说：{found.said()}", found.exit_code)
+        if found.exit_code != 0 or found.data is None:
+            out["excluded"].append({**stub, "reason": f"聚水潭查这个号出错（退出码 {found.exit_code}）：{found.said()[:120]}"})
+            continue
+        daren = found.data.get("daren") if found.data.get("found") else None
+        if not isinstance(daren, dict):
+            out["excluded"].append({**stub, "reason": "聚水潭查不到这个号：没有粉丝画像和带货数据，规则筛不了，不进"})
+            continue
+        if daren.get("added"):
+            out["excluded"].append({**stub, "reason": "已经在聚水潭「我的达人」里（有人在跟），不进"})
+            continue
+        out["rows"].append({**daren, "platformNo": aweme, "_source": "抖音"})
+    return out
+
+
 def creator_view(row: dict) -> dict:
     return {
+        "source": row.get("_source") or "聚水潭",
         "aweme_id": str(row.get("platformNo") or ""), "nickname": str(row.get("nickName") or ""),
         "fans": row.get("fansNum"), "sales30d": (row.get("sales30d") or {}).get("label") if isinstance(row.get("sales30d"), dict) else None,
         "avg_price": row.get("avgPrice"), "level": row.get("level"), "channel": row.get("channelBySales") or row.get("mainChannel"),
@@ -641,8 +710,13 @@ def build_plan(cfg: dict, clis: Clis, ledger: Ledger, count: int, *, moment: Opt
     if not usable:
         raise ToolError(f"配置的商品没有一款可用库存 ≥ {cfg['min_stock']}：不出清单")
     rows = find_creators(cfg, clis)
+    douyin = find_on_douyin(cfg, clis, {str(r.get("platformNo") or "") for r in rows})
+    for r in rows:
+        if str(r.get("platformNo") or "") in douyin["both"]:
+            r["_source"] = "两边都有"
+    rows = rows + douyin["rows"]
     invited = ledger.never_again()
-    excluded: List[dict] = []
+    excluded: List[dict] = list(douyin["excluded"])
     candidates: List[dict] = []
     stems: Dict[str, int] = {}
     for aweme, nick in {str(r.get("platformNo") or ""): str(r.get("nickName") or "") for r in rows}.items():
@@ -738,6 +812,7 @@ def build_plan(cfg: dict, clis: Clis, ledger: Ledger, count: int, *, moment: Opt
         "weekly_quotas": quotas, "ledger_sent_this_week": ledger.sent_this_week(moment),
         "templates": cfg["templates"], "creators": picked, "spare": spare, "excluded": excluded,
         "not_checked": len(not_checked), "requests": clis.requests(),
+        "douyin": {k: douyin[k] for k in ("found", "new", "looked_up", "not_looked_up")} | {"both": len(douyin["both"])},
     }
 
 
@@ -771,6 +846,11 @@ def plan_markdown(plan: dict, plan_file: str) -> str:
     f = s["find"]
     w(f"- 筛选：类目 {f['goods_category']}，件单价 {f['price_min']}～{f['price_max']} 元，没加进达人库；"
       + "；".join(f"粉丝 {fans_range(q)}，第 {q.get('page', 1)} 页起读 {q.get('pages', 1)} 页" for q in f["queries"]) + "\n")
+    dy = plan.get("douyin") or {}
+    if f.get("dy_queries"):
+        w(f"- 抖音达人广场也找了（{len(f['dy_queries'])} 组搜索）：找到 {dy.get('found', 0)} 位，其中 {dy.get('both', 0)} 位聚水潭那边也找到了；"
+          f"新的 {dy.get('new', 0)} 位按抖音号到聚水潭查了 {dy.get('looked_up', 0)} 位"
+          + (f"，还有 {dy['not_looked_up']} 位超过一次最多查的 {f.get('dy_lookup_max')} 位、没查" if dy.get("not_looked_up") else "") + "\n")
     req = plan.get("requests") or {}
     w(f"- 生成这份清单用了平台请求：聚水潭 {req.get('jst', 0)} 次、抖音 {req.get('dy', 0)} 次\n\n")
     w(f"## 商品（主推 1 款 + 其余{'有货的' if s['min_stock'] else '的'}都附带；"
@@ -785,10 +865,11 @@ def plan_markdown(plan: dict, plan_file: str) -> str:
         w(f"## {CATEGORY_NAMES[key]}（{len(rows)} 位）\n\n")
         if not rows:
             continue
-        w("| # | 抖音号 | 昵称 | 粉丝 | 近 30 天销售额 | 件单价 | 等级 | 主播类型 | 帽子占比 | 女粉 | 主推 / 附带 | 状态 | 提醒 |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+        w("| # | 来源 | 抖音号 | 昵称 | 粉丝 | 近 30 天销售额 | 件单价 | 等级 | 主播类型 | 帽子占比 | 女粉 | 主推 / 附带 | 状态 | 提醒 |\n"
+          "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
         for i, c in enumerate(rows, 1):
             prods = names.get(c["products"]["main"], c["products"]["main"]) + " / " + "、".join(names.get(x, x) for x in c["products"]["extras"])
-            w(f"| {i} | {c['aweme_id']} | {c['nickname']} | {c['fans']} | {c['sales30d'] or '-'} | {c['avg_price']} | LV{c['level']} | {c['channel'] or '-'} | "
+            w(f"| {i} | {c.get('source') or '聚水潭'} | {c['aweme_id']} | {c['nickname']} | {c['fans']} | {c['sales30d'] or '-'} | {c['avg_price']} | LV{c['level']} | {c['channel'] or '-'} | "
               f"{'-' if c['hat_share'] is None else str(c['hat_share']) + '%'} | {'-' if c['female_share'] is None else str(c['female_share']) + '%'} | {prods} | "
               f"{c.get('button') or c.get('status')} | {'；'.join(c['flags'])} |\n")
         w("\n")
@@ -822,9 +903,9 @@ def excluded_table(w, rows: List[dict]) -> None:
     if not rows:
         w("没有。\n")
         return
-    w("| 抖音号 | 昵称 | 粉丝 | 帽子占比 | 女粉 | 原因 |\n|---|---|---|---|---|---|\n")
+    w("| 来源 | 抖音号 | 昵称 | 粉丝 | 帽子占比 | 女粉 | 原因 |\n|---|---|---|---|---|---|---|\n")
     for c in rows:
-        w(f"| {c['aweme_id']} | {c['nickname']} | {c['fans']} | {'-' if c.get('hat_share') is None else str(c['hat_share']) + '%'} | "
+        w(f"| {c.get('source') or '聚水潭'} | {c['aweme_id']} | {c['nickname']} | {c['fans']} | {'-' if c.get('hat_share') is None else str(c['hat_share']) + '%'} | "
           f"{'-' if c.get('female_share') is None else str(c['female_share']) + '%'} | {c['reason']} |\n")
 
 
@@ -832,9 +913,9 @@ def plan_csv(plan: dict) -> str:
     names = {p["id"]: p["name"] for p in plan["products"]}
     out = io.StringIO()
     writer = csv.writer(out)
-    writer.writerow(["类别", "抖音号", "昵称", "粉丝", "近30天销售额", "件单价", "等级", "主播类型", "帽子占比%", "女粉%", "主推", "附带", "状态", "提醒", "话术"])
+    writer.writerow(["类别", "来源", "抖音号", "昵称", "粉丝", "近30天销售额", "件单价", "等级", "主播类型", "帽子占比%", "女粉%", "主推", "附带", "状态", "提醒", "话术"])
     for c in plan["creators"]:
-        writer.writerow([CATEGORY_NAMES[c["category"]], c["aweme_id"], c["nickname"], c["fans"], c["sales30d"], c["avg_price"], c["level"], c["channel"],
+        writer.writerow([CATEGORY_NAMES[c["category"]], c.get("source") or "聚水潭", c["aweme_id"], c["nickname"], c["fans"], c["sales30d"], c["avg_price"], c["level"], c["channel"],
                          c["hat_share"], c["female_share"], names.get(c["products"]["main"]), "、".join(names.get(x, x) for x in c["products"]["extras"]),
                          c.get("button"), "；".join(c["flags"]), c["content"]])
     return out.getvalue()

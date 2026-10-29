@@ -6,7 +6,7 @@
 2. **run（要用户对这一份清单明确同意）**：只发清单里的人，一位一位发，发一位记一位。
 
 工具只调两个命令行，自己不碰平台：
-- 聚水潭 `jushuitan-engineering`（`node bin/jst.mjs`）：`find` 找达人；配置了 `min_stock` 时还用 `goods-detail` 查真实可用库存。
+- 聚水潭 `jushuitan-engineering`（`node bin/jst.mjs`）：`find` 找达人、`lookup` 按抖音号查一位（抖音那边找到的人用它补数据）；配置了 `min_stock` 时还用 `goods-detail` 查真实可用库存。
 - 抖音 `douyin-engineering`（`node bin/dy.mjs`）：`buyin author-invite-status` 一次查一批达人的邀约状态，`buyin author-invite` 预览 / 发送一张邀约卡。
   要用带 `--commission-rate` 和 `author-invite-status` 的版本（douyin-engineering 的分支 `author-invite-commission`，2026-10-29 已并入它的本地 main）。
 
@@ -27,7 +27,7 @@
 | `rights` | 权益：`high-commission`（专属高佣）、`video-material`（视频素材支持）、`free-sample`、`video-boost` | 只有专属高佣（视频素材支持 2026-10-29 去掉了） |
 | `products` | 1 到 5 款（一张卡最多 5 款）：`{id 抖音商品 ID, name, price 售价（元）, styles 聚水潭款号}`；`styles` 只在 `min_stock` 大于 0 时必填 | 必填 |
 | `min_stock` | 0 = 不看库存，能挂上卡的都配（老板 2026-10-29）；大于 0 时，一款的真实可用库存（各款号加起来）低于它就不配 | 0 |
-| `find` | 找达人的条件：`goods_category`（帽子 1000003461，以后可以换中高端女装的类目）、`price_min` / `price_max`（件单价）、`queries`（几组粉丝范围，每组 `pages` 页，每页 20 位；每组还可以写 `level_min` / `level_max`、`sales_min` / `sales_max`，交给平台先筛） | 见下 |
+| `find` | 找达人的条件：`goods_category`（帽子 1000003461，以后可以换中高端女装的类目）、`price_min` / `price_max`（件单价）、`queries`（几组粉丝范围，每组 `pages` 页，每页 20 位；每组还可以写 `level_min` / `level_max`、`sales_min` / `sales_max`，交给平台先筛）；`dy_queries`（抖音那边也找：每组 `{"args": ["buyin", "authors-…", "--筛选=值", …]}`，原样交给抖音命令行的只读找达人命令，只许写筛选和页数）、`dy_lookup_max`（抖音那边找到的新人一次最多到聚水潭查几位，默认 60） | 见下 |
 | `rules` | 分类、不进清单和标记的门槛（见下「本地先筛」和「三类」）；`drop_ids` 一定不要的抖音号、`keep_ids` 不按「自己牌子」「骗样」两组规则去掉的抖音号 | 见下 |
 | `templates` | 三类话术，`small` / `mid` / `big`；不写就用内置的三条 | 内置 |
 | `weekly_cap` | 我们自己每周最多发几位 | 800 |
@@ -46,7 +46,7 @@
 做的事（全是只读命令，没有一条带 `--execute`）：
 
 1. 只有 `min_stock` 大于 0 时：每款商品的每个款号 `jst goods-detail`，加起来是这款的真实可用库存，低于 `min_stock` 的不配。默认 0，不看库存、一个请求都不发。
-2. 每组 `queries` 跑一次 `jst find --platform DY --goods-category … --price-min … --price-max … --not-added`（带粉丝范围、页数）。默认两组都让平台先筛掉带货等级低于 LV2 的，小达人那组再筛掉近 30 天销售额不到 1 万的（20 万粉以上不按销售额筛：销售额不公开的大主播会被平台整个筛掉）。
+2. 两边都找（用户 2026-10-29）：聚水潭——每组 `queries` 跑一次 `jst find --platform DY --goods-category … --price-min … --price-max … --not-added`（带粉丝范围、页数）；抖音——每组 `dy_queries` 跑一次百应达人广场的只读搜索（工具补上 `--expect-shop-id`、`--no-open`），聚水潭那边已经找到的记成「两边都有」，新的每位到聚水潭按抖音号查一次（`jst lookup`，最多 `dy_lookup_max` 位），拿到和 `jst find` 一样的数据（粉丝画像、近 30 天带货品类和销售额），这样两边的人走下面同一套规则；聚水潭查不到的、已经在聚水潭「我的达人」里（有人在跟）的不进。清单的每一行都写着来源（聚水潭 / 抖音 / 两边都有）。默认两组都让平台先筛掉带货等级低于 LV2 的，小达人那组再筛掉近 30 天销售额不到 1 万的（20 万粉以上不按销售额筛：销售额不公开的大主播会被平台整个筛掉）。
 3. 本地先筛：抖音号格式命令行不收的、台账里邀约过的（或不知道上次发出去没有的）去掉；**帽子占比 ≥ 90% 的标「疑似同行自播号」，默认不进清单，单独列一张表**；**女性粉丝低于 60% 的不进**（我们卖女帽，用户 2026-10-29；粉丝画像只给占比最大的性别：「男性 62%」算女性 38%）；粉丝不到 5000 的不进；`rules.drop_ids` 里的不进。
    **专门带自己牌子的不进**（用户 2026-10-29）：名字像店铺 / 品牌号（`own_brand_words`：女装、男装、服饰、服装、羽绒、皮草、大码、工厂、档口、老板娘、旗舰、官方、店、品牌、定制、高定、上新……），或者这次找到的人里有 ≥ `matrix_min`（2）个号用同一个店名开头（「小鹿（…）」「木子-…」这种店铺矩阵号；店名是昵称里第一个括号、点、横线、竖线、空格前面那段，英文不分大小写）。
    **可能骗样品自己用的不进**（用户 2026-10-29）：带货等级低于 LV2（`min_level`）；近 30 天销售额区间下限不到 1 万元（`min_sales30d`）；销售额不公开（「无数据」）而且等级低于 LV3（`hidden_sales_min_level`）；粉丝 5 万以上（`sales_per_fan_from`）、销售额下限 ÷ 粉丝数不到 0.2 元（`min_sales_per_fan`，粉多卖少）。
