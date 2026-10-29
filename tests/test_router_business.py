@@ -94,6 +94,7 @@ class WhatIsAnswered(GatewayCase):
     def test_relay_only_takes_every_line_of_the_admin_but_the_account_commands(self):
         router = self.gateway(relay_only=True)
         assert "未启用好友管理组件" in router.handle(admin_msg("a1", "添加好友 abc 你好"))
+        assert "未启用好友管理组件" in router.handle(admin_msg("a1b", "添加好友：test_wxid_001 附言"))
         assert router.handle(admin_msg("a2", "查状态")).startswith("账号状态")
         assert self.jobs() == 0                                              # nothing went to the Mac
         assert "#1" in router.handle(admin_msg("a3", "跑一下测试"))

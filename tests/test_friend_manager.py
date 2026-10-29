@@ -544,6 +544,16 @@ class AdminFriendCommandTests(unittest.TestCase):
         handler = self.handler()
         handler.handle("加好友   13800000000")
         self.friend.add_friend.assert_called_once_with("13800000000", "")
+    def test_add_friend_with_colon_and_no_spaces(self):
+        handler = self.handler()
+        handler.handle("添加好友：test_target_001")
+        self.friend.add_friend.assert_called_once_with("test_target_001", "")
+
+    def test_add_friend_with_colon_and_reason(self):
+        handler = self.handler()
+        handler.handle("加好友:test_target_001 合作沟通")
+        self.friend.add_friend.assert_called_once_with("test_target_001", "合作沟通")
+
 
     def test_add_friend_without_a_target_explains_the_usage(self):
         handler = self.handler()
@@ -910,7 +920,7 @@ class OpenAddFriendDialogTests(FriendTestCase):
     def test_the_menu_is_not_clicked_when_it_never_appears(self):
         desktop = FakeDesktop()
         self.assertIsNone(self.open(desktop))
-        self.assertEqual(desktop.clicks, 1)                              # only the (+)
+        self.assertEqual(desktop.clicks, 2)                              # retried the (+)
 
 
 def badge_picture(*positions):
