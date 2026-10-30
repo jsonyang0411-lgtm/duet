@@ -319,6 +319,22 @@ def test_a_card_far_from_every_card_of_ours_is_somebody_elses(tmp_path):
         assert platforms.invite_match(ledger, convs) == 0 and convs[0].get("other_invite") is not True
 
 
+def test_a_card_of_ours_whose_result_came_late_is_never_somebody_elses(tmp_path):
+    """Review 2026-10-30: the send or its check was slow, so the result row came minutes after the card went out.  The
+    card is too far from the result to be paired (it stays nobody's: listed), but it fell inside our attempt-to-result
+    span with our words, so it is never called a colleague's (that flag would hide our own invitee for good)."""
+    folder = invite_ledger(tmp_path / "inv", ("test_daren_01", T0, True))
+    rows = [json.loads(line) for line in (folder / "invites.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.startswith("{\"at")]
+    rows[0]["at"] = iso(T0 - 300)                         # the attempt: five minutes before its result
+    (folder / "invites.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    convs = parsed(real_conv("c1", invite_card("9001", T0 - 280)),                    # ours, sent long before the result
+                   real_conv("c2", invite_card("9002", T0 - 280, "同事的邀约卡")),       # the same minute, other words
+                   real_conv("c3", invite_card("9003", T0 - 400)))                    # before our attempt: not ours
+    assert platforms.invite_match(folder, convs) == 0
+    assert [(c["invited"], c.get("other_invite", False)) for c in convs] == [(None, False), (None, True), (None, True)]
+
+
 @pytest.mark.parametrize("offset, matched", [(60, 1), (-60, 1), (61, 0), (-61, 0)])
 def test_only_a_card_within_60_seconds_of_the_result_fits(tmp_path, offset, matched):
     ledger = invite_ledger(tmp_path / "inv", ("test_daren_01", T0, True))

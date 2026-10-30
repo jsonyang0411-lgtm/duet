@@ -3555,9 +3555,10 @@ def invite_match(ledger, conversations: list, *, window_sec: float = INVITE_MATC
 
     Somebody else's invite (2026-10-30: colleagues send 邀约带货 cards from the same shop, with their own WeChat on
     them, and their creators' answers are not ours to handle): a conversation not matched none of whose invite cards
-    can be ours gets ``other_invite`` true.  A card can be ours when a card of ours may have gone out then (at most
-    ``window_sec`` from a ``result`` not known unsent; an ``attempt`` with no result yet, up to INVITE_OPEN_ATTEMPT_SEC
-    after it) and it says what ours said (the head of the plan's text for her), or either cannot be told (her plan
+    can be ours gets ``other_invite`` true.  A card can be ours when a card of ours may have gone out then (from
+    ``window_sec`` before its ``attempt`` to ``window_sec`` after its ``result``, for a result not known unsent: a slow
+    send writes the result late; an attempt with no result yet, up to INVITE_OPEN_ATTEMPT_SEC after it) and it says
+    what ours said (the head of the plan's text for her), or either cannot be told (her plan
     unreadable, the card with no text): a colleague's card sent the same minute says other words.  Only a colleague's
     card the same minute with our very words stays unsure (listed as nobody's); without a ledger that can be read
     nothing is called somebody else's."""
@@ -3581,26 +3582,46 @@ def invite_match(ledger, conversations: list, *, window_sec: float = INVITE_MATC
         return 0
     folder, attempts, results = rows
     plans: dict = {}
-    sent = []                                            # (result time, invite text's head squeezed, invited)
-    for key, result in results.items():
-        attempt = attempts.get(key)
-        at = jst_time(result.get("at"))
-        if result.get("sent") is not True or not isinstance(attempt, dict) or at is None:
-            continue
-        aweme = _im_word(attempt.get("aweme_id"), 64)
-        plan_id = _im_word(attempt.get("plan_id"), 40)
+
+    def head_of(attempt) -> str:
+        """The head of the invite text the plan gave the attempt's creator (squeezed; "" when it cannot be read)."""
+        aweme = _im_word((attempt or {}).get("aweme_id"), 64)
+        plan_id = _im_word((attempt or {}).get("plan_id"), 40)
         if not _DOUYIN_ID.match(aweme) or not _INVITE_PLAN_ID.match(plan_id):
-            continue
-        if not any(abs(card_at - at) <= window_sec for _, card_at, _ in cards):
-            continue                                     # no card of this round near it: its plan is not read
+            return ""
         if plan_id not in plans:
             plans[plan_id] = _invite_plan(folder, plan_id)
-        head = _squeezed(_invite_content(plans[plan_id], aweme))[:INVITE_MATCH_CHARS]
-        if not head:
+        return _squeezed(_invite_content(plans[plan_id], aweme))[:INVITE_MATCH_CHARS]
+
+    sent = []                                            # (result time, invite text's head squeezed, invited)
+    ours = []                                            # (from, to, head or ""): a card of ours may have gone out then
+    for key in {*attempts, *results}:
+        attempt, result = attempts.get(key), results.get(key)
+        attempt = attempt if isinstance(attempt, dict) else None
+        if result is not None and result.get("sent") is False:
+            continue                                     # nothing went out
+        tried_at = jst_time(attempt.get("at")) if attempt is not None else None
+        if result is not None:
+            at = jst_time(result.get("at"))
+            if at is None:
+                continue
+            # from the attempt on: a slow send or check writes the result long after the card went out (review 2026-10-30)
+            span = (min(at, tried_at if tried_at is not None else at) - window_sec, at + window_sec)
+        elif tried_at is not None:
+            span = (tried_at - window_sec, tried_at + INVITE_OPEN_ATTEMPT_SEC)
+        else:
             continue
-        invited = im_invited({"aweme_id": aweme, "invited_at": attempt.get("at") or result.get("at"),
-                              "plan_id": plan_id, "attempt": key, "category": attempt.get("category"),
-                              "products": attempt.get("products"), "commission_rate": attempt.get("commission_rate")})
+        if not any(span[0] <= card_at <= span[1] for _, card_at, _ in cards):
+            continue                                     # no card of this round near it: its plan is not read
+        head = head_of(attempt)
+        ours.append((*span, head))
+        if result is None or result.get("sent") is not True or attempt is None or not head:
+            continue
+        invited = im_invited({"aweme_id": _im_word(attempt.get("aweme_id"), 64),
+                              "invited_at": attempt.get("at") or result.get("at"),
+                              "plan_id": _im_word(attempt.get("plan_id"), 40), "attempt": key,
+                              "category": attempt.get("category"), "products": attempt.get("products"),
+                              "commission_rate": attempt.get("commission_rate")})
         if invited is not None:
             sent.append((at, head, invited))
     missing = sum(1 for plan in plans.values() if plan is None)
@@ -3626,28 +3647,6 @@ def invite_match(ledger, conversations: list, *, window_sec: float = INVITE_MATC
             creator["aweme_id"] = invited["aweme_id"]
         conv["invited"] = dict(invited)
         matched += 1
-    # When a card of ours may have gone out (around each result not known unsent; after each attempt with no result)
-    # and what it said (the head of the plan's text for her; None when it cannot be read: any text may be ours)
-    def head_of(attempt) -> Optional[str]:
-        aweme = _im_word((attempt or {}).get("aweme_id"), 64)
-        plan_id = _im_word((attempt or {}).get("plan_id"), 40)
-        if not _DOUYIN_ID.match(aweme) or not _INVITE_PLAN_ID.match(plan_id):
-            return None
-        if plan_id not in plans:
-            plans[plan_id] = _invite_plan(folder, plan_id)
-        return _squeezed(_invite_content(plans[plan_id], aweme))[:INVITE_MATCH_CHARS] or None
-
-    ours = []                                            # (from, to, the text's head or None)
-    for key in {*attempts, *results}:
-        attempt, result = attempts.get(key), results.get(key)
-        if result is not None and result.get("sent") is False:
-            continue                                     # nothing went out
-        at = jst_time((result or attempt).get("at"))
-        if at is None:
-            continue
-        start, end = at - window_sec, at + (window_sec if result is not None else INVITE_OPEN_ATTEMPT_SEC)
-        if any(start <= card_at <= end for _, card_at, _ in cards):
-            ours.append((start, end, head_of(attempt)))
     shown: dict = {}                                     # conversation index -> its invite cards (time, text squeezed)
     for index, card_at, text in cards:
         shown.setdefault(index, []).append((card_at, text))
@@ -3656,7 +3655,7 @@ def invite_match(ledger, conversations: list, *, window_sec: float = INVITE_MATC
         if conv.get("invited"):
             continue
         # one of ours only when a card of ours went out then and its text is ours (or either cannot be told)
-        if not any(start <= at <= end and (head is None or text in ("", "[卡片]") or head in text)
+        if not any(start <= at <= end and (not head or text in ("", "[卡片]") or head in text)
                    for at, text in its_cards for start, end, head in ours):
             conv["other_invite"] = True
     return matched
