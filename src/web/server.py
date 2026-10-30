@@ -1061,17 +1061,18 @@ def _prm_int_env(key: str, default: int) -> int:
         return default
 
 
-def _prm_night_env() -> dict:
-    """The 下班时段 status for a stopped bot: PRM_NIGHT_AUTO_HOURS as .env says (what the bot takes at its next start)."""
+def _prm_night_env(auto: bool = False) -> dict:
+    """The 下班时段 status for a stopped bot: PRM_NIGHT_AUTO_HOURS as .env says (what the bot takes at its next start);
+    ``auto``: 自动模式 as its database keeps it (``night_status``)."""
     from src.prm.gates import night_window
     from src.prm.service import night_status
 
     raw = os.getenv("PRM_NIGHT_AUTO_HOURS", "")
     try:
-        return night_status(night_window(raw), time.time())
+        return night_status(night_window(raw), time.time(), auto=auto)
     except ValueError:
         return night_status(None, time.time(), error=f"PRM_NIGHT_AUTO_HOURS 填得不对（{raw.strip()[:40]}）："
-                                                       "要写成 18:00-09:00 这样，机器人启动时会拒绝")
+                                                       "要写成 18:00-09:00 这样，机器人启动时会拒绝", auto=auto)
 
 
 def _prm_stopped_store():
@@ -1088,19 +1089,21 @@ def _prm_stopped_store():
 
 
 def _prm_state_core() -> dict:
-    from src.prm.service import snapshot as prm_snapshot
+    from src.prm.service import auto_mode_of, snapshot as prm_snapshot
 
     settings = {"enabled": _prm_env_on("PRM_COPILOT"), "relay_on": _prm_env_on("CLAUDE_RELAY"),
                 "private_on": _prm_env_on("PRIVATE_CHAT_ENABLED")}
     if _prm is not None:
         return {**_prm.snapshot(), **settings, "enabled": True}
+    store = _prm_stopped_store()
+    # 自动模式 as the database keeps it (what the bot takes at its next start)
+    auto = auto_mode_of(store) if store is not None else {"on": False, "since": None, "by": ""}
     stopped = {"mac_online": False, "worker_kinds": [], "can_send": False, "can_send_files": False,
                "takeover_min": _prm_int_env("PRM_TAKEOVER_MIN", 120), "holding_min": _prm_int_env("PRM_HOLDING_MIN", 10),
                "retention_days": _prm_int_env("PRM_RETENTION_DAYS", 90),
-               "catchup_hours": _prm_int_env("PRM_CATCHUP_HOURS", 12), "night": _prm_night_env(),
-               "auto_register": _prm_env_on("PRM_AUTO_REGISTER"),
+               "catchup_hours": _prm_int_env("PRM_CATCHUP_HOURS", 12), "night": _prm_night_env(auto["on"]),
+               "auto_register": _prm_env_on("PRM_AUTO_REGISTER"), "auto_mode": auto,
                "buyin_sync_min": _prm_int_env("PRM_BUYIN_SYNC_MIN", 0), **settings}
-    store = _prm_stopped_store()
     stopped["friend_add_status"] = _friend_add_stopped_status(store)
     if store is None:
         from src.prm.platforms import ACTIONS
@@ -1162,6 +1165,26 @@ def _prm_deal(data: dict) -> dict:
     try:
         return apply_deal_action(store, action, data, now=time.time(),
                                  takeover_sec=_prm_int_env("PRM_TAKEOVER_MIN", 120) * 60)
+    finally:
+        store.close()
+
+
+def _prm_auto(data: dict) -> dict:
+    """POST /api/prm/auto {"on": true | false}: the console's 自动模式 (the 下班时段 rules at any hour, until switched
+    off).  Running: ``PrmService.set_auto_mode``.  Stopped: straight into the database, as the stopped bot's deal
+    actions and 登记达人 are (``write_auto_mode``; a database not made yet is made, as 登记达人 makes it): the bot takes
+    it at its next start."""
+    from src.prm.service import write_auto_mode
+    from src.prm.store import PrmStore
+
+    on = data.get("on")
+    if not isinstance(on, bool):
+        return {"ok": False, "error": "要说打开还是关掉自动模式（on 填 true 或 false）"}
+    if _prm is not None:
+        return _prm.set_auto_mode(on)
+    store = PrmStore(_prm_db_path())
+    try:
+        return {"ok": True, "auto_mode": write_auto_mode(store, on, now=time.time())}
     finally:
         store.close()
 
@@ -1328,6 +1351,7 @@ _POST_ONLY_PATHS = frozenset({
     "/api/influencer/contacts/action", "/api/influencer/inbox/action",
     "/api/relay/cancel", "/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal",
     "/api/prm/friend-adds",
+    "/api/prm/auto",
 })
 
 
@@ -1441,7 +1465,7 @@ class _UIHandler(SimpleHTTPRequestHandler):
                          "/api/influencer/inbox/action",
                          "/api/relay/cancel",
                          "/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal",
-                         "/api/prm/friend-adds", "/api/wechat-gaps"):
+                         "/api/prm/friend-adds", "/api/prm/auto", "/api/wechat-gaps"):
             self.do_GET()
         else:
             self._method_not_allowed()
@@ -1654,7 +1678,7 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 self.send_json({"ok": False, "error": str(e)})
             return
         if self.path in ("/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal",
-                         "/api/prm/friend-adds"):
+                         "/api/prm/friend-adds", "/api/prm/auto"):
             content_len = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len) if content_len else b"{}"
             try:
@@ -1667,7 +1691,7 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 return
             handler = {"/api/prm/parties": _prm_parties, "/api/prm/packets": _prm_packet,
                        "/api/prm/deals": _prm_deal, "/api/prm/reveal": _prm_reveal,
-                       "/api/prm/friend-adds": _prm_friend_adds}[self.path]
+                       "/api/prm/friend-adds": _prm_friend_adds, "/api/prm/auto": _prm_auto}[self.path]
             try:
                 self.send_json(handler(data))
             except Exception as e:

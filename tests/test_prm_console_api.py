@@ -1,4 +1,5 @@
-"""The console's PRM API: GET /api/prm, POST /api/prm/parties, /api/prm/packets, /api/prm/deals, /api/prm/reveal."""
+"""The console's PRM API: GET /api/prm, POST /api/prm/parties, /api/prm/packets, /api/prm/deals, /api/prm/reveal,
+/api/prm/auto."""
 
 import json
 import time
@@ -212,7 +213,7 @@ def test_an_opening_is_asked_for_from_the_running_console_and_refused_while_stop
 
 
 def test_changes_need_a_post_and_a_body():
-    for path in ("/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal"):
+    for path in ("/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal", "/api/prm/auto"):
         assert call(path)[0] == 405                                         # a GET must not change anything
     _, sock = _build_handler("/api/prm/parties", method="POST", body=b"not json",
                              headers={"Content-Type": "application/json"})
@@ -391,7 +392,8 @@ def test_the_night_window_and_its_notice_from_the_running_console(tmp_path):
     server.register_prm(prm)
     try:
         d = call("/api/prm")[1]
-        assert d["night"] == {"on": True, "window": "18:00–09:00", "inside": True, "suspended": "", "error": ""}
+        assert d["night"] == {"on": True, "window": "18:00–09:00", "inside": True, "suspended": "", "error": "",
+                              "auto": False}
         [alert] = d["night_alerts"]
         assert alert["deal_id"] == 1 and alert["party_name"] == "小美" and "已进入寄样阶段" in alert["text"]
         [packet] = d["recent"]
@@ -415,7 +417,8 @@ def test_a_stopped_bot_shows_the_night_window_as_env_says_and_sees_to_its_notice
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("PRM_DB", raising=False)
     monkeypatch.delenv("PRM_NIGHT_AUTO_HOURS", raising=False)
-    assert call("/api/prm")[1]["night"] == {"on": False, "window": "", "inside": False, "suspended": "", "error": ""}
+    assert call("/api/prm")[1]["night"] == {"on": False, "window": "", "inside": False, "suspended": "", "error": "",
+                                            "auto": False}
     monkeypatch.setenv("PRM_NIGHT_AUTO_HOURS", "18:00-09:00")
     night = call("/api/prm")[1]["night"]
     assert night["on"] is True and night["window"] == "18:00–09:00" and night["error"] == ""
@@ -457,6 +460,69 @@ def test_the_night_settings_are_in_the_allow_list_and_checked():
     assert adv.validate_updates({"PRM_NIGHT_AUTO_HOURS": ""}, {}) == {}
     assert set(adv.validate_updates({"PRM_NIGHT_AUTO_HOURS": "18-9"}, {})) == {"PRM_NIGHT_AUTO_HOURS"}
     assert set(adv.validate_updates({"PRM_NIGHT_HOLDING_TEXT": "好" * 61}, {})) == {"PRM_NIGHT_HOLDING_TEXT"}
+
+
+# ── 自动模式 (POST /api/prm/auto, 2026-10-30) ──────────────────────────────────
+
+def test_auto_mode_is_switched_from_the_running_console_at_once(running):
+    """The running bot: POST /api/prm/auto switches it at once (PrmService.set_auto_mode); /api/prm says so, and the
+    night status says it is what puts the night rules in force (the fixture sets no window)."""
+    clock = running.relay._clock
+    d = call("/api/prm")[1]
+    assert d["auto_mode"] == {"on": False, "since": None, "by": ""} and d["night"]["auto"] is False
+    status, answer = call("/api/prm/auto", "POST", {"on": True})
+    assert status == 200 and answer == {"ok": True, "auto_mode": {"on": True, "since": clock.now, "by": "console"}}
+    assert running.prm.auto_mode["on"] is True
+    d = call("/api/prm")[1]
+    assert d["auto_mode"]["on"] is True
+    assert d["night"] == {"on": False, "window": "", "inside": False, "suspended": "", "error": "", "auto": True}
+    made = clock.now
+    running.prm.handle({"chat_id": CREATOR, "sender_id": CREATOR, "content": "好的谢谢", "msg_type": 1,
+                        "is_group": False, "timestamp": made})
+    clock.now += SETTLE_SEC + 1
+    job = running.relay.next_job(0, ("prm",))
+    assert job["meta"]["night"] == {"auto": True, "at": time.strftime("%H:%M", time.localtime(made))}
+    for bad in ({}, {"on": "yes"}, {"on": 1}, {"on": None}):
+        answer = call("/api/prm/auto", "POST", bad)[1]
+        assert answer["ok"] is False and "on 填 true 或 false" in answer["error"], bad
+    assert running.prm.auto_mode["on"] is True                               # (a bad request changes nothing)
+    assert call("/api/prm/auto", "POST", {"on": False})[1]["auto_mode"]["on"] is False
+    d = call("/api/prm")[1]
+    assert d["auto_mode"]["on"] is False and d["night"]["auto"] is False
+
+
+def test_auto_mode_is_kept_for_the_next_start_while_the_bot_is_stopped(tmp_path, monkeypatch):
+    """Stopped: straight into the database, as the stopped bot's deal actions and 登记达人 (made when there is none
+    yet); /api/prm reads it back and the bot that starts on that database has it on."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PRM_DB", raising=False)
+    monkeypatch.delenv("PRM_NIGHT_AUTO_HOURS", raising=False)
+    d = call("/api/prm")[1]
+    assert d["running"] is False and d["auto_mode"] == {"on": False, "since": None, "by": ""}
+    db = tmp_path / "data" / "prm.db"
+    assert not db.exists()
+    answer = call("/api/prm/auto", "POST", {"on": True})[1]
+    assert answer["ok"] is True and answer["auto_mode"]["on"] is True and answer["auto_mode"]["by"] == "console"
+    assert db.exists()
+    d = call("/api/prm")[1]
+    assert d["auto_mode"]["on"] is True and (d["night"]["on"], d["night"]["auto"]) == (False, True)
+    monkeypatch.setenv("PRM_NIGHT_AUTO_HOURS", "18:00-09:00")
+    night = call("/api/prm")[1]["night"]
+    assert night["on"] is True and night["auto"] is (not night["inside"])    # inside the window it is the night's
+    cfg = SimpleNamespace(claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1",
+                          claude_relay_port=0, claude_relay_prefix="cc", claude_relay_wxids=[],
+                          claude_relay_db=":memory:", claude_relay_max_chars=1500, admin_wxid="wxid_admin",
+                          prm_copilot="on", prm_db=str(db))
+    relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), files_dir=tmp_path / "relay")
+    store = PrmStore(db)
+    try:
+        assert PrmService(cfg, relay, store=store).auto_mode["on"] is True   # the next start
+    finally:
+        store.close()
+        relay.stop()
+    assert call("/api/prm/auto", "POST", {"on": "off"})[1]["ok"] is False
+    assert call("/api/prm/auto", "POST", {"on": False})[1]["auto_mode"]["on"] is False
+    assert call("/api/prm")[1]["auto_mode"]["on"] is False
 
 
 # ── PRM_AUTO_REGISTER: new friends the bot registered ─────────────────────────

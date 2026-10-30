@@ -697,6 +697,9 @@ def test_a_big_orders_note_keeps_every_product_and_the_instruction(worker):
 # ── 下班时段 (PRM_NIGHT_AUTO_HOURS on Windows) ────────────────────────────
 
 NIGHT_LINE = "现在是下班时段（本机时间 21:30，下班时段 18:00–09:00）：运营不在，满足条件的回复会直接发给达人，按 kb/ 里下班时段的规则写。"
+# 自动模式 by day (the console's switch, 2026-10-30: ``meta.night = {"auto": true, "at"}``)
+AUTO_LINE = ("现在是自动模式（本机时间 14:30）：运营暂时不在电脑前，满足条件的回复会直接发给达人，按 kb/ 里自动模式的规则写，"
+             "过渡的话不说「明早」。")
 
 
 def test_a_job_made_in_the_night_window_says_so_and_no_other_does(worker):
@@ -714,8 +717,38 @@ def test_a_job_made_in_the_night_window_says_so_and_no_other_does(worker):
                             1, "小美", "deals/1.md", [], [])
     assert "现在是下班时段：运营不在，满足条件的回复会直接发给达人" in odd and "<b>" not in odd and "整晚" not in odd
     note = worker.PRM_SYSTEM_NOTE
-    assert "任务里写明现在是下班时段时" in note and "needs_attention 为 true 的" in note
+    assert "任务里写明现在是下班时段或自动模式时" in note and "needs_attention 为 true 的" in note
     assert "不带任何数字、比例、金额、日期，也不做任何承诺" in note and "可能原样发给达人" in note
+
+
+def test_a_job_made_in_auto_mode_by_day_says_so_and_promises_no_mingzao(worker):
+    """自动模式 by day: the prompt says the operators are away from the computer for now, a reply that passes the bot's
+    checks goes out as it is, by the kb's 自动模式 rules, and no holding line says 「明早」; the night line stays as it
+    was, and so does a prompt without ``meta.night``."""
+    job = {"id": 14, "text": "[10-30 14:30] 好呀，可以寄来看看", "meta": {"night": {"auto": True, "at": "14:30"}}}
+    prompt = worker.prm_prompt(job, 1, "小美", "deals/1.md", [], [])
+    assert AUTO_LINE in prompt.split("\n") and "下班时段" not in prompt
+    assert prompt.index("合作单：") < prompt.index(AUTO_LINE) < prompt.index("<creator_message>")
+    assert worker.night_line({"night": {"auto": True}}) == (
+        "现在是自动模式：运营暂时不在电脑前，满足条件的回复会直接发给达人，按 kb/ 里自动模式的规则写，过渡的话不说「明早」。")
+    assert "<b>" not in worker.night_line({"night": {"auto": True, "at": "<b>"}})
+    assert worker.night_line({"night": {"window": "18:00-09:00", "at": "21:30"}}) == NIGHT_LINE
+    plain = worker.prm_prompt({"id": 12, "text": "你好", "meta": {}}, 1, "小美", "deals/1.md", [], [])
+    assert "自动模式" not in plain
+
+
+def test_an_auto_mode_job_runs_through_the_worker_and_its_plain_draft_goes_out_by_itself(worker, bot, fake_claude,
+                                                                                        tmp_path, workspace):
+    """End to end, no window set: 自动模式 switched on, the bot's job carries ``meta.night`` ``{"auto": true}``, the
+    worker tells Claude, and the plain draft comes back and goes out by itself (route ``night``, ``meta.auto_mode``)."""
+    assert bot.prm.set_auto_mode(True)["auto_mode"]["on"] is True
+    creator_says(bot, "我是小美，电话 13812345678")
+    run_one(worker, bot, settings(bot, fake_claude, tmp_path, prm_workspace=str(workspace)))
+    [call] = fake_claude.calls()
+    assert "现在是自动模式（本机时间 " in call["prompt"] and "过渡的话不说「明早」。" in call["prompt"]
+    [packet] = bot.prm.store.packets()
+    assert (packet["status"], packet["route"], packet["text"]) == ("approved", "night", "确认一下：小美〈手机1〉")
+    assert packet["meta"] == {"auto_mode": True}
 
 
 @pytest.fixture
@@ -752,7 +785,7 @@ def test_a_night_job_runs_through_the_worker_and_its_plain_draft_goes_out_by_its
 
 
 def test_the_night_line_works_on_the_macs_own_python(tmp_path):
-    """The worker stays standard library and Python 3.9 (macOS's /usr/bin/python3): the night line too."""
+    """The worker stays standard library and Python 3.9 (macOS's /usr/bin/python3): the night line too, and 自动模式's."""
     python = "/usr/bin/python3"
     if not os.path.exists(python):
         pytest.skip("no system python3")
@@ -763,6 +796,8 @@ def test_the_night_line_works_on_the_macs_own_python(tmp_path):
         "w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w)\n"
         "job = {'id': 1, 'text': '[10-29 21:30] 你好', 'meta': {'night': {'window': '18:00-09:00', 'at': '21:30'}}}\n"
         f"assert {NIGHT_LINE!r} in w.prm_prompt(job, 1, '小美', 'deals/1.md', [], []).split('\\n')\n"
+        "auto = {'id': 3, 'text': '[10-30 14:30] 你好', 'meta': {'night': {'auto': True, 'at': '14:30'}}}\n"
+        f"assert {AUTO_LINE!r} in w.prm_prompt(auto, 1, '小美', 'deals/1.md', [], []).split('\\n')\n"
         "assert '下班时段' not in w.prm_prompt({'id': 2, 'text': '你好', 'meta': {}}, 1, '小美', 'deals/1.md', [], [])\n"
         "print('ok', sys.version_info[:2])\n", encoding="utf-8")
     env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), "CLAUDE_RELAY_HOME": str(tmp_path / "home")}

@@ -1,8 +1,8 @@
 import { Fragment, useState } from 'react'
-import { ArrowClockwise, PaperPlaneRight, PencilSimple, X, Paperclip, WarningCircle, Eye, EyeSlash, Flag, Lightning, CheckCircle, Copy, ChatsCircle } from '@phosphor-icons/react'
+import { ArrowClockwise, PaperPlaneRight, PencilSimple, X, Paperclip, WarningCircle, Eye, EyeSlash, Flag, Lightning, CheckCircle, Copy, ChatsCircle, Robot, HandPalm } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
-import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, buyinNotes, buyinFriendAddLine, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, dealAction, nightStatus, copyBuyin, buyinSent } from '../lib/prm'
+import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, buyinNotes, buyinFriendAddLine, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, dealAction, nightStatus, copyBuyin, buyinSent, setAutoMode } from '../lib/prm'
 import { PageHead, Card, Note, Banner, Empty, Confirm, TextArea } from './ui'
 import { FriendAddList } from './FriendAddCard'
 
@@ -18,6 +18,8 @@ import { FriendAddList } from './FriendAddCard'
 // A 抖音百应 private-message draft (PRM_BUYIN_SYNC_MIN) is never sent by the bot: an
 // operator copies it, sends it in 百应 by hand and says so (已在百应发了).
 // 加微信 (PRM_FRIEND_ADD): the contacts 百应 creators left, one confirmed friend request each (FriendAddCard.jsx).
+// 自动模式: the same rules at any hour, switched at the top of the page (on: a warn line with
+// the button that switches it off); what it sent by day is tagged 自动模式发出.
 
 export default function ReviewPanel() {
   const { data, err, reload } = usePrm(4000)
@@ -34,6 +36,7 @@ export default function ReviewPanel() {
         {setupProblems(data).map(([kind, text]) => <Note key={text} kind={kind}>{text}</Note>)}
         {buyinNotes(data).map(([kind, text]) => <Note key={text} kind={kind} icon={ChatsCircle}>{text}</Note>)}
         {!data && <Empty title="正在读取…" />}
+        <AutoModeBar d={data} onDone={reload} />
         <PlatformAlerts alerts={data?.platform_alerts || []} onDone={reload} />
         <NightAlerts alerts={data?.night_alerts || []} onDone={reload} />
         <FriendAddList d={data} onDone={reload} />
@@ -98,7 +101,63 @@ function PlatformAlerts({ alerts, onDone }) {
   )
 }
 
-/** Holding lines the 下班时段 window sent for drafts the model flagged: each stays until 已处理. */
+/** 自动模式 (POST /api/prm/auto): the 下班时段 rules at any hour, until switched off. Off: the button, and a confirm
+ * dialog that says what happens; on: a warn line with when it was switched on and the button that switches it off
+ * (no confirm: off is the safe way). Stopped, the switch is kept for the bot's next start. */
+function AutoModeBar({ d, onDone }) {
+  const toast = useToast()
+  const [asking, setAsking] = useState(false)
+  const [busy, setBusy] = useState(false)
+  if (!d?.enabled) return null
+  const a = d.auto_mode || {}
+  const toggle = async (on) => {
+    setBusy(true)
+    try {
+      await setAutoMode(on)
+      toast.ok(on ? `自动模式已打开${d.running ? '' : '（机器人启动以后生效）'}：满足安全条件的草稿会直接发给达人` : '自动模式已关掉：草稿照旧等你审批')
+      setAsking(false)
+      onDone()
+    } catch (e) { toast.err(e.message) } finally { setBusy(false) }
+  }
+  return (
+    <div className="prm-auto" style={{ marginBottom: 12 }}>
+      {a.on ? (
+        <Banner kind="warn" title={`自动模式开着（${fmtClock(a.since)} 打开）`}
+          actions={<button type="button" className="btn sm" disabled={busy} onClick={() => toggle(false)}><HandPalm />关掉自动模式</button>}>
+          满足安全条件的草稿不经你审批直接发给达人，拿不准的只回一句过渡的话；投诉、平台动作、新好友的第一份草稿、开场白照旧等你。
+          {!d.running && ' 机器人现在没在运行：启动以后照这个自动发。'}
+        </Banner>
+      ) : (
+        <Note>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap', justifyContent: 'space-between' }}>
+            <span>自动模式关着：草稿照常等你审批。要离开电脑时按「打开自动模式」，满足安全条件的草稿就直接发出。</span>
+            <button type="button" className="btn sm" disabled={busy} onClick={() => setAsking(true)}><Robot />打开自动模式</button>
+          </div>
+        </Note>
+      )}
+      {asking && (
+        <Confirm title="打开自动模式？" confirmLabel="打开自动模式" cancelLabel="再想想" busy={busy}
+          onConfirm={() => toggle(true)} onCancel={() => setAsking(false)}>
+          <div className="stack" style={{ gap: 6 }}>
+            <div>打开以后不管几点，都照下班时段的规则：满足安全条件的草稿<b>不经你审批直接发出</b>（佣金不超过 25%，不提坑位费、保底、返现这类）；拿不准的只回一句过渡的话，这一页顶上留提醒，你看过点「已处理」。</div>
+            <div>投诉、平台动作、新好友的第一份草稿、开场白（还有补读的、人工接管的）照旧等你；现在已经在「待审批」里的草稿也照旧等你。</div>
+            <div>一直开着，机器人重启也不关；再按一下「关掉自动模式」就关掉。</div>
+          </div>
+        </Confirm>
+      )}
+    </div>
+  )
+}
+
+/** A draft the 下班时段 window (or 自动模式 by day: ``auto_mode``) sent by itself. */
+function NightTag({ p }) {
+  if (p.route !== 'night') return null
+  return p.auto_mode
+    ? <span className="tag cy" title="自动模式下满足全部安全条件，没经过人审">自动模式发出</span>
+    : <span className="tag cy" title="下班时段里满足全部安全条件，没经过人审">夜间自动发出</span>
+}
+
+/** Holding lines the 下班时段 window (or 自动模式) sent for drafts the model flagged: each stays until 已处理. */
 function NightAlerts({ alerts, onDone }) {
   const toast = useToast()
   const [busy, setBusy] = useState('')
@@ -117,7 +176,7 @@ function NightAlerts({ alerts, onDone }) {
       {alerts.map((a) => {
         const key = `${a.deal_id}:${a.packet}`
         return (
-          <Banner key={key} kind="warn" title={`${a.party_name} · 夜间自动回了过渡的话${a.packet ? `（#${a.packet}）` : ''}`}
+          <Banner key={key} kind="warn" title={`${a.party_name} · ${a.auto ? '自动模式' : '夜间'}自动回了过渡的话${a.packet ? `（#${a.packet}）` : ''}`}
             actions={<button type="button" className="btn sm" disabled={busy === key} onClick={() => done(a)}><CheckCircle />已处理</button>}>
             <div>{a.text}</div>
             {a.at && <div className="f-hint">{fmtClock(a.at)} 发出；运营跟进以后点「已处理」</div>}
@@ -208,14 +267,14 @@ function DraftCard({ p, canSend, onDone }) {
       title={`${p.party_name} · ${p.kind_label}`}
       eyebrow={`DRAFT #${p.id}`}
       sub={`${fmtClock(p.created_at)} ${p.system ? '系统生成' : '写好'}${p.stage_proposal_label ? ` · 建议阶段：${p.stage_proposal_label}` : ''}`}
-      actions={<>{p.opening && <span className="tag cy" title="她还没跟我们说过话：这是我们先打招呼的话，要人看过再发">开场白</span>}{p.route === 'auto' && <span className="tag ok" title="这类消息已经达到自动发送门槛">自动发送</span>}{p.route === 'night' && <span className="tag cy" title="下班时段里满足全部安全条件，没经过人审">夜间自动发出</span>}<span className={`tag ${kind}`}>{label}</span></>}
+      actions={<>{p.opening && <span className="tag cy" title="她还没跟我们说过话：这是我们先打招呼的话，要人看过再发">开场白</span>}{p.route === 'auto' && <span className="tag ok" title="这类消息已经达到自动发送门槛">自动发送</span>}<NightTag p={p} /><span className={`tag ${kind}`}>{label}</span></>}
       className="prm-draft"
     >
       <div className="stack" style={{ gap: 8 }}>
         {p.needs_attention && (
           <Note kind="warn" icon={WarningCircle}>要特别注意{p.reason ? `：${p.reason}` : ''}</Note>
         )}
-        {p.night_held && <div className="f-hint prm-night-held">夜间没有自动发：{p.night_held}</div>}
+        {p.night_held && <div className="f-hint prm-night-held">{p.auto_mode ? '自动模式没有自动发' : '夜间没有自动发'}：{p.night_held}</div>}
         {p.intent && <div><b>{p.opening ? '这一条：' : '达人想要：'}</b>{p.intent}</div>}
         {!p.needs_attention && p.reason && <div className="dim"><b>依据：</b>{p.reason}</div>}
         {slots.length > 0 && (
@@ -399,7 +458,7 @@ function RecentCard({ d, onDone }) {
     setBusy(true)
     try {
       await decide(p.id, 'wrong')
-      toast.ok(`已标为发错了${p.route === 'night' ? '（夜间自动发出的）' : ''}：「${p.kind_label}」以后都先审，重新计数`)
+      toast.ok(`已标为发错了${p.route === 'night' ? (p.auto_mode ? '（自动模式发出的）' : '（夜间自动发出的）') : ''}：「${p.kind_label}」以后都先审，重新计数`)
       setAsking(null)
       onDone()
     } catch (e) { toast.err(e.message) } finally { setBusy(false) }
@@ -429,7 +488,7 @@ function RecentCard({ d, onDone }) {
                       </span>
                     )}
                     {p.route === 'auto' && <span className="tag ok">自动</span>}
-                    {p.route === 'night' && <span className="tag cy" title="下班时段里满足全部安全条件，没经过人审">夜间自动发出</span>}
+                    <NightTag p={p} />
                     {p.route === 'night' && p.needs_attention && <span className="tag warn" title={p.reason}>要注意</span>}
                     {p.wrong && <span className="tag need">发错了</span>}
                     {p.platform && <span className={`tag ${p.platform.execution ? outcomeTag(p.platform.execution.outcome) : 'off'}`} title={p.platform.label}>
@@ -453,7 +512,7 @@ function RecentCard({ d, onDone }) {
       {asking && (
         <Confirm title={`#${asking.id} 发错了？`} confirmLabel="标为发错了" cancelLabel="不标" danger busy={busy}
           onConfirm={() => wrong(asking)} onCancel={() => setAsking(null)}>
-          {asking.route === 'night' && '这条是下班时段自动发出的（没经过人审）。'}
+          {asking.route === 'night' && (asking.auto_mode ? '这条是自动模式自动发出的（没经过人审）。' : '这条是下班时段自动发出的（没经过人审）。')}
           「{asking.kind_label}」这类消息会马上退回「先审后发」，自动发送的计数从头开始。已经发出去的消息收不回来，需要的话请在微信里补一句。
         </Confirm>
       )}
@@ -461,7 +520,8 @@ function RecentCard({ d, onDone }) {
   )
 }
 
-/** 下班时段自动回复 (PRM_NIGHT_AUTO_HOURS): on or off, night or day now, and why it is held when it is. */
+/** 下班时段自动回复 (PRM_NIGHT_AUTO_HOURS): on or off, night or day now (自动模式 too: ``n.auto``), and why it is held
+ * when it is. */
 function NightLine({ n }) {
   if (!n) return null
   const [kind, text] = nightStatus(n)
@@ -471,10 +531,10 @@ function NightLine({ n }) {
         <b>{text}</b>
         {n.suspended && <div>{n.suspended}</div>}
         <div className="f-hint">
-          {n.on
-            ? '下班时段里，Mac 写好的回复满足全部安全条件才直接发给达人（不看下面的门槛）：不是投诉，佣金不超过 25%，不提坑位费、保底、返现这类，模型要求注意的只发一句不带数字的过渡话；平台动作、补读的、新好友、撤回、人工接管的照旧等运营。'
+          {n.on || n.auto
+            ? `${n.auto ? '自动模式开着，不管几点' : '下班时段里'}，Mac 写好的回复满足全部安全条件才直接发给达人（不看下面的门槛）：不是投诉，佣金不超过 25%，不提坑位费、保底、返现这类，模型要求注意的只发一句不带数字的过渡话；平台动作、补读的、新好友、撤回、人工接管的照旧等运营。`
             : '在「合作单」页下面的设置里填「下班时段自动回复」（例如 18:00-09:00）就打开。'}
-          改了设置要重启机器人才生效。
+          改了设置要重启机器人才生效（自动模式在这一页顶上开关，不用重启）。
         </div>
       </Note>
     </div>

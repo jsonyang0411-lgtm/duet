@@ -20,7 +20,8 @@ finds nothing: never a complaint, everything ``plain_reason`` checks but the att
 one safe holding line (``night_holding_problem``).  A night send never counts toward its kind's gate (a
 person did not decide on it: ``PrmStore.reviewed`` takes ``review`` only).  Which drafts are judged at
 all (the reply lane, made and finished inside the window, this PC's clock right) is
-src/prm/service.py's ``_night_judge``.
+src/prm/service.py's ``_night_judge``.  自动模式 (the console's switch, 2026-10-30) judges by the same rules at any
+hour (route ``night`` too).
 """
 
 from __future__ import annotations
@@ -261,10 +262,11 @@ def night_holding_ok(text: str) -> bool:
 
 
 def night_reason(kind: str, *, needs_attention: bool, mode: str, unknown_tokens: list, reason: str, text: str,
-                 waybill: str, attachments: list, files_named: int = 0) -> str:
+                 waybill: str, attachments: list, files_named: int = 0, when: str = "夜里") -> str:
     """Why a draft that waits for a person must not go out by itself in the night window either ("" = it may):
     a complaint never; everything ``plain_reason`` checks but the model's attention; ``night_red_line``; and a
-    draft the model flagged goes only as one safe holding line without files (``night_holding_problem``)."""
+    draft the model flagged goes only as one safe holding line without files (``night_holding_problem``).
+    ``when``: how the reasons name the time (自动模式 by day: 「自动模式下」)."""
     if kind == "complaint":
         return "投诉一律等运营"
     why = plain_reason(kind, needs_attention=False, mode=mode, unknown_tokens=unknown_tokens, reason=reason,
@@ -276,7 +278,7 @@ def night_reason(kind: str, *, needs_attention: bool, mode: str, unknown_tokens:
         return red
     if needs_attention:
         if attachments:
-            return "模型要求注意，草稿还带着文件（夜里只发一句过渡的话）"
+            return f"模型要求注意，草稿还带着文件（{when}只发一句过渡的话）"
         problem = night_holding_problem(text)
         if problem:
             return f"模型要求注意，回复又不是一句稳妥的过渡话：{problem}"

@@ -14,6 +14,7 @@ import { FriendAddPasteCard } from './FriendAddCard'
 // messages then go, silently, to the Mac for a draft that waits in 待审批. A deal
 // opens (below the list, so it fits any width) into its stage, its mode (copilot /
 // a person has it / paused), the sample shipment, the numbers and the audit trail.
+// 自动模式 on (switched on 待审批): one warn line at the top says so.
 
 export default function DealsPanel() {
   const { data, err, reload } = usePrm(6000)
@@ -29,6 +30,11 @@ export default function DealsPanel() {
         />
         {err && <Note kind="need">{err}</Note>}
         {setupProblems(data).map(([kind, text]) => <Note key={text} kind={kind}>{text}</Note>)}
+        {data?.enabled && data?.auto_mode?.on && (
+          <div className="prm-auto-note" style={{ marginBottom: 12 }}>
+            <Note kind="warn">自动模式开着（{fmtClock(data.auto_mode.since)} 打开）：满足安全条件的草稿不经审批直接发给达人；在「待审批」页顶上关掉。</Note>
+          </div>
+        )}
         <RegisterCard d={data} onDone={reload} />
         <FriendAddPasteCard d={data} onDone={reload} />
         <PartiesCard d={data} open={open} setOpen={setOpen} onDone={reload} />
