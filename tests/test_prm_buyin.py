@@ -349,6 +349,24 @@ def test_wechat_and_buyin_drafts_never_put_each_other_out_of_date(bot, clock):
     assert bot.prm.store.packet(second["id"])["status"] == "pending"
 
 
+def test_a_buyin_draft_never_stands_in_the_way_of_a_wechat_opening(bot, clock):
+    """She writes in 百应 only (a registered creator, linked by her 抖音号): her 百应 lines are not WeChat lines
+    (``last_message_at`` stays empty) and their draft waiting in 待审批 is no WeChat draft, so 「写开场白」 (our first
+    WeChat line, 2026-10-30) is asked for; its draft and the 百应 one wait side by side."""
+    _, buyin = buyin_draft(bot, clock, text="百应里问的佣金")
+    assert deal(bot).get("last_message_at") is None
+    asked = bot.prm.deal_action("opening", {"deal_id": deal(bot)["id"]})
+    assert asked["ok"] is True
+    job = bot.relay.store.get(asked["job"])
+    assert json.loads(job["meta"])["opening"] == {"how": "", "by": "console"} and job["chat_id"] == CREATOR
+    claim(bot, job["id"])
+    bot.finish(job["id"], draft(message_kind="greeting", reply_draft="你好呀～我是 ACE7CN 的运营"))
+    opening = bot.prm.store.packet_for_job(job["id"])
+    assert opening["status"] == "pending" and opening["meta"]["opening"] is True
+    assert bot.prm.store.packet(buyin["id"])["status"] == "pending"
+    assert bot.prm.deal_action("opening", {"deal_id": deal(bot)["id"]})["error"] == "「待审批」里已经有她的草稿"
+
+
 def test_a_newer_round_cancels_the_queued_job_and_another_conversation_is_its_own(bot, clock):
     round_says(bot, clock, conv(line("m1", "第一句", clock.now)))
     [first] = jobs_of(bot, BUYIN_CHAT + CID)

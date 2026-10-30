@@ -481,6 +481,26 @@ def test_link_registers_her_with_her_douyin_id_and_ends_the_record(world):
         world.adds.link(add_id, "wxid_demo")
 
 
+def test_a_friend_the_bot_registered_already_is_only_linked_when_an_operator_says_it_is_her(world):
+    """PRM_AUTO_REGISTER (2026-10-29) registers every new friend before anyone says 「是她」 (merged 2026-10-30): the record
+    links that party (her 抖音号 and its event), no second party is made, nothing is caught up again, the bot's name and
+    note stay, and it is still an operator's click: the bot itself never links."""
+    add_id = world.paste()
+    world.adds.confirm(add_id)
+    party = world.prm.auto_register_friend({"wxid": "wxid_demo", "name": "抖音-小鹿", "how": "requested"})
+    assert party is not None and world.store.creator_links(party["id"]) == []         # registered, not linked
+    out = world.adds.link(add_id, "wxid_demo")
+    assert (out["party_id"], out["catch_up"]) == (party["id"], False)
+    assert [p["id"] for p in world.store.parties()] == [party["id"]]
+    [link] = world.store.creator_links(party["id"])
+    assert (link["account"], link["source"], link["add_id"]) == (AWEME, "friend_add", add_id)
+    stored = world.store.party(party["id"])
+    assert (stored["name"], stored["note"], stored["auto_registered"]) == ("抖音-小鹿", "自动登记（新好友，我们加她）", 1)
+    assert world.record(add_id)["state"] == "linked"
+    events = [e["kind"] for e in world.store.events(world.store.deal_of(party["id"])["id"], limit=None)]
+    assert "auto_register" in events and "friend_add_link" in events
+
+
 def test_a_record_not_to_be_registered_only_keeps_which_chat_she_is(world):
     add_id = world.paste()
     world.adds.act(add_id, "link_on_accept", {"on": False})

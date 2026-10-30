@@ -2370,7 +2370,8 @@ class PrmService:
 
     def _no_opening(self, party: dict, deal: dict, now: float) -> str:
         """Why no 开场白 is drafted for her now ("" = it is): off the list, a person has the chat, she wrote to us
-        already (her messages are drafted), or a reply draft of hers is being written or waits in 待审批."""
+        already on WeChat (her messages are drafted), or a WeChat reply draft of hers is being written or waits in
+        待审批 (a 百应 one is another channel: it neither counts as her WeChat line nor stands in the way)."""
         if not party.get("active"):
             return "这位达人已经停用（不在达人名单里），不写开场白"
         if self._mode(deal, now) != COPILOT:
@@ -2379,7 +2380,7 @@ class PrmService:
             return "她已经发过消息了：她的消息会自己起草，不用开场白"
         if self._relay.store.latest_open(party["wxid"], drafts_only=True, system=False) is not None:
             return "她的草稿正在写，写好会出现在「待审批」里"
-        if any((p.get("meta") or {}).get("lane") != LANE_SYSTEM
+        if any((p.get("meta") or {}).get("lane") not in (LANE_SYSTEM, LANE_BUYIN)
                for p in self._store.deal_packets(deal["id"], statuses=(PENDING, APPROVED, SENDING))):
             return "「待审批」里已经有她的草稿"
         return ""
