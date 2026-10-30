@@ -135,6 +135,13 @@ export function nightStatus(n) {
   return n.suspended ? ['warn', `${head}（${now}；暂停，不自动发）`] : [auto ? 'warn' : 'cy', `${head}（${now}）`]
 }
 
+/** How many WeChat messages a reply goes out as (the bot's ``reply_parts``, src/prm/service.py): its paragraphs (a blank
+ * line between two), at most ``most`` (``reply_parts`` of GET /api/prm; the ones past it join the last one). */
+export function replyPartCount(text, most) {
+  const parts = String(text || '').replace(/\r\n/g, '\n').split(/\n[ \t　]*\n/).filter((p) => p.trim())
+  return Math.min(parts.length, Math.max(1, most || 1))
+}
+
 /** One creator of the 百应 line below: her nickname, and when the conversation is our invite (the Mac's invite ledger), her 抖音号 and when. */
 function buyinWho(u) {
   const inv = u?.invited

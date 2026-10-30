@@ -832,3 +832,21 @@ def test_three_party_is_shown_and_made_from_the_running_console_and_refused_whil
     for action in ("group", "group_try", "group_made", "group_none"):
         assert call("/api/prm/deals", "POST", {"action": action, "deal_id": 1})[1] == {
             "ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能拉群"}
+
+
+def test_the_running_console_says_how_many_messages_a_reply_may_be(tmp_path):
+    """PRM_REPLY_PARTS (src/prm/service.py reply_parts, 2026-10-30): GET /api/prm's ``reply_parts`` (the 待审批 page says
+    「会分 N 条发」 of a draft with blank lines); 1 for a config without it (one message, as before)."""
+    for parts, shown in ((3, 3), (None, 1)):
+        cfg = SimpleNamespace(claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1",
+                              claude_relay_port=0, claude_relay_prefix="cc", claude_relay_wxids=[],
+                              claude_relay_db=":memory:", claude_relay_max_chars=1500, admin_wxid="wxid_admin",
+                              prm_copilot="on", prm_db=":memory:", **({} if parts is None else {"prm_reply_parts": parts}))
+        relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=Clock(), files_dir=tmp_path / f"relay{shown}")
+        prm = PrmService(cfg, relay, store=PrmStore(":memory:"), clock=Clock(), send=lambda c, t: True)
+        server.register_prm(prm)
+        try:
+            assert call("/api/prm")[1]["reply_parts"] == shown
+        finally:
+            server.register_prm(None)
+            relay.stop()

@@ -2,7 +2,7 @@ import { Fragment, useState } from 'react'
 import { ArrowClockwise, PaperPlaneRight, PencilSimple, X, Paperclip, WarningCircle, Eye, EyeSlash, Flag, Lightning, CheckCircle, Copy, ChatsCircle, Robot, HandPalm } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
-import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, buyinNotes, buyinFriendAddLine, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, dealAction, nightStatus, copyBuyin, buyinSent, setAutoMode } from '../lib/prm'
+import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, buyinNotes, buyinFriendAddLine, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, dealAction, nightStatus, copyBuyin, buyinSent, setAutoMode, replyPartCount } from '../lib/prm'
 import { PageHead, Card, Note, Banner, Empty, Confirm, TextArea } from './ui'
 import { FriendAddList } from './FriendAddCard'
 
@@ -46,7 +46,7 @@ export default function ReviewPanel() {
         <div className="stack" style={{ gap: 12 }}>
           {pending.map((p) => (p.channel === 'buyin'
             ? <BuyinCard key={p.id} p={p} onDone={reload} />
-            : <DraftCard key={p.id} p={p} canSend={!!data?.can_send} onDone={reload} />))}
+            : <DraftCard key={p.id} p={p} canSend={!!data?.can_send} replyParts={data?.reply_parts || 1} onDone={reload} />))}
         </div>
         <RecentCard d={data} onDone={reload} />
         <GatesCard d={data} />
@@ -238,7 +238,7 @@ function PlatformBox({ pf }) {
   )
 }
 
-function DraftCard({ p, canSend, onDone }) {
+function DraftCard({ p, canSend, replyParts = 1, onDone }) {
   const toast = useToast()
   const [editing, setEditing] = useState(false)
   const [text, setText] = useState(p.text)
@@ -262,6 +262,7 @@ function DraftCard({ p, canSend, onDone }) {
   }
   const [label, kind] = PACKET_STATES[p.status] || [p.status, 'pend']
   const slots = Object.entries(p.slots || {})
+  const parts = replyPartCount(editing ? text : p.text, replyParts)   // PRM_REPLY_PARTS: a blank line starts the next message
   return (
     <Card
       title={`${p.party_name} · ${p.kind_label}`}
@@ -287,6 +288,9 @@ function DraftCard({ p, canSend, onDone }) {
         {editing
           ? <TextArea value={text} onChange={setText} rows={5} aria-label="修改要发的内容" />
           : <div className="prm-text" style={{ whiteSpace: 'pre-wrap' }}>{p.text || <span className="dim">（只发附件，没有文字）</span>}</div>}
+        {replyParts > 1 && (editing || parts > 1) && (
+          <div className="f-hint prm-parts">{parts > 1 ? `会分 ${parts} 条发` : '整段一条发'}（空一行就是分开发，最多 {replyParts} 条）</div>
+        )}
         {p.waybill && <div className="f-hint">系统里的运单号：<span className="mono">{p.waybill}</span>（发出的内容里必须是这个单号）</div>}
         <Numbers partyId={p.party_id} legend={p.legend} />
         {p.attachments?.length > 0 && (

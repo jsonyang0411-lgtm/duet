@@ -184,6 +184,16 @@ class AdvancedPostTests(_TempEnv):
             self.assertFalse(body["ok"])
             self.assertEqual(list(body["errors"]), [key], body)
 
+    def test_reply_parts_is_shown_and_its_error_lands_on_it(self):
+        """PRM_REPLY_PARTS (src/prm/service.py reply_parts, 2026-10-30): 3 by default; 0 or 6 is refused on its own field."""
+        groups = _request("/api/advanced")[1]["groups"]
+        fields = {f["key"]: f for g in groups for f in g["fields"]}
+        self.assertEqual(fields["PRM_REPLY_PARTS"]["value"], "3")
+        for value in ("0", "6"):
+            status, body = _request("/api/advanced", "POST", {"values": {"PRM_REPLY_PARTS": value}})
+            self.assertFalse(body["ok"])
+            self.assertEqual(list(body["errors"]), ["PRM_REPLY_PARTS"], body)
+
     def test_the_remark_can_be_saved_empty_and_stays_empty(self):
         """PRM_FRIEND_ADD_REMARK (加百应达人微信, 功能 R): unset shows the default; saved empty it stays empty (no remark),
         where any other empty text field would be its default; a bad one is refused on its own field."""

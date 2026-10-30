@@ -321,6 +321,9 @@ class BotConfig:
     # messages (8.1); 0 = never.
     prm_holding_min: int = 10
     prm_holding_text: str = "收到，我确认一下马上回你"
+    # A reply goes out as up to this many WeChat messages, one per paragraph of its draft (a blank line between
+    # two), a typing pause apart (src/prm/service.py reply_parts); 1 = one message, as before.
+    prm_reply_parts: int = 3
     # 下班时段自动回复 ("18:00-09:00", may pass midnight; empty = off): inside it, by this PC's clock, a creator-reply
     # draft whose kind has not earned "auto" still goes out by itself when every night rule holds (src/prm/gates.py
     # night_reason: no complaint, nothing plain_reason minds, no commission above 25 % or 坑位 / 保底 …, a flagged
@@ -541,6 +544,8 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(f"PRM_HOLDING_MIN must be between 0 and 120, got {kwargs.get('prm_holding_min')}")
     if not (1 <= len(str(kwargs.get("prm_holding_text", "收到，我确认一下马上回你")).strip()) <= 60):
         errors.append("PRM_HOLDING_TEXT must be 1-60 characters")
+    if not (1 <= int(kwargs.get("prm_reply_parts", 3)) <= 5):
+        errors.append(f"PRM_REPLY_PARTS must be between 1 and 5, got {kwargs.get('prm_reply_parts')}")
     if str(kwargs.get("prm_night_auto_hours", "") or "").strip():
         from src.prm.gates import night_window
 
@@ -726,6 +731,7 @@ def load_config() -> BotConfig:
         "prm_takeover_min": int(os.getenv("PRM_TAKEOVER_MIN", "120")),
         "prm_holding_min": int(os.getenv("PRM_HOLDING_MIN", "10")),
         "prm_holding_text": os.getenv("PRM_HOLDING_TEXT", "收到，我确认一下马上回你").strip() or "收到，我确认一下马上回你",
+        "prm_reply_parts": int(os.getenv("PRM_REPLY_PARTS", "3")),
         "prm_night_auto_hours": os.getenv("PRM_NIGHT_AUTO_HOURS", "").strip(),
         "prm_night_holding_text": (os.getenv("PRM_NIGHT_HOLDING_TEXT", "收到～您说的我都记下啦，明早第一时间回复您哈～").strip()
                                    or "收到～您说的我都记下啦，明早第一时间回复您哈～"),

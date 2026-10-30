@@ -98,6 +98,7 @@ from ..edge import text as edge_text
 from ..relay.attachments import KINDS as ATTACHMENT_KINDS, Held, attachment_kind
 from ..relay.service import MAX_AGE_SEC, job_meta
 from ..relay.store import PRM
+from ..send.bubbles import typing_delay
 from ..wechat.new_friends import FILLER, is_friend_notice, is_person_chat
 from . import contact, deals, gates, pii, platforms, retention
 from .friend_adds import OPEN as FRIEND_ADD_OPEN, STATES as FRIEND_ADD_STATES, FriendAdds, friend_adds_out
@@ -117,6 +118,7 @@ OUTBOUND_CHARS = 500
 APPROVED_EXPIRE_SEC = 1800   # an approved draft not sent by then (the bot was stopped) is not sent
 SEND_TICK_SEC = 5
 OWN_MATCH_SEC = 1800         # our own line seen in WeChat within this long after sending is the bot's
+PART_LATE_SEC = 120          # a part of a reply in parts is written before its send returned (``sent_at``), give or take
 OWN_FILE_SEC = 600           # an own picture/file this soon after the bot sent one is the bot's
 READ_BACK_SEC = 1800         # an own row handled this long ago and handed on again (same id) is no new line
 READ_BACK_ROWS = 500         # at most this many own rows a chat remembers
@@ -124,6 +126,12 @@ RETENTION_CHECK_SEC = 3600
 PLATFORM_LOST_GRACE_SEC = 1800   # an execution whose Mac went silent this long is given up on (red)
 PLATFORM_OPS = ("platform_execute", "platform_preview")
 HOLDING_TEXT = "收到，我确认一下马上回你"
+# PRM_REPLY_PARTS (2026-10-30, 「一下子发一大段很怪」): a reply goes out as up to this many WeChat messages, one per
+# paragraph of the draft (a blank line between two: ``reply_parts``), a typing pause apart (src/send/bubbles.py
+# ``typing_delay``); 1 = one message, blank lines and all, as before.  A config object without it (an older caller's): 1.
+REPLY_PARTS = 3
+REPLY_PARTS_MAX = 5
+_PARAGRAPH = re.compile(r"\n[ \t　]*\n")
 # 下班时段 (PRM_NIGHT_AUTO_HOURS, 2026-10-29): the holding reply inside the window (PRM_NIGHT_HOLDING_TEXT), and the key
 # of a deal's notice of a holding line the window sent for a draft the model flagged (``night:<packet id>``, until 已处理)
 NIGHT_HOLDING_TEXT = "收到～您说的我都记下啦，明早第一时间回复您哈～"
@@ -347,6 +355,21 @@ def message_text(msg: dict) -> str:
 
 def _norm(text: str) -> str:
     return " ".join(str(text or "").split())
+
+
+def reply_parts(text: str, most: int = REPLY_PARTS) -> list[str]:
+    """The WeChat messages a reply goes out as (``_deliver``): its paragraphs (a blank line between two, white space on
+    it or not), each stripped, the empty ones dropped, those past ``most`` joined to the last one (a line break
+    between).  ``most`` 1: the text as it is, one message.  [] for a text of nothing but white space."""
+    if not str(text or "").strip():
+        return []
+    if most <= 1:
+        return [text]
+    parts = [p.strip() for p in _PARAGRAPH.split(str(text).replace("\r\n", "\n"))]
+    parts = [p for p in parts if p]
+    if len(parts) > most:
+        parts = parts[:most - 1] + ["\n".join(parts[most - 1:])]
+    return parts
 
 
 _IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".heic", ".heif", ".tif", ".tiff")
@@ -954,7 +977,8 @@ class PrmService:
                  send_file: Optional[Callable[[str, str], bool]] = None,
                  clock: Callable[[], float] = time.time,
                  on_parties_changed: Optional[Callable[[], None]] = None,
-                 scrub_messages: Optional[Callable[[str, Callable[[str], str]], int]] = None):
+                 scrub_messages: Optional[Callable[[str, Callable[[str], str]], int]] = None,
+                 pause: Optional[Callable[[float], bool]] = None):
         self._config = config
         self._relay = relay
         self._store = store if store is not None else PrmStore(config.prm_db)
@@ -980,6 +1004,14 @@ class PrmService:
         self._handle_lock = threading.Lock()
         self._holding_sec = int(getattr(config, "prm_holding_min", 10) or 0) * 60
         self._holding_text = str(getattr(config, "prm_holding_text", "") or HOLDING_TEXT).strip() or HOLDING_TEXT
+        # PRM_REPLY_PARTS: a reply's paragraphs go out as messages of their own (``_deliver``), and the Mac is told it may
+        # write them (``_reply_meta``).  Never on the Mac's edge side (WECHAT_BACKEND=edge): Windows tells it of a send
+        # that failed by the send's whole text (``on_send_failed``), which one part of a draft is not.
+        try:
+            parts = int(getattr(config, "prm_reply_parts", 1) or 1)
+        except (TypeError, ValueError):
+            parts = 1
+        self._reply_parts = 1 if getattr(config, "wechat_backend", "") == "edge" else min(max(parts, 1), REPLY_PARTS_MAX)
         # PRM_NIGHT_AUTO_HOURS (empty: off, everything as before; a config object without it, an older caller's: off):
         # inside the window a reply draft that waits for a person by the gates may still go out by itself when every
         # night rule holds (``_night_judge``); its job is told it is night (``meta.night``, ``_submit``) and holding
@@ -1055,6 +1087,8 @@ class PrmService:
         self._file_seq = itertools.count(1)
         # A packet sent before this run (or cut off by a stop): the kinds of its files not read back yet.
         self._file_rows: dict[int, list] = {}
+        # ... and of a reply in parts, the parts not read back yet (``_sent_part``: one line each, like the files).
+        self._text_rows: dict[int, list] = {}
         # Per chat, the own rows handled lately (``_row_key`` -> when): handed on again within
         # READ_BACK_SEC they are no new line (_match_own).
         self._read_back: dict[str, dict[str, float]] = {}
@@ -1069,6 +1103,8 @@ class PrmService:
         self._last_retention = 0.0
         self._wake = threading.Event()
         self._stopping = threading.Event()
+        # pause(sec) between two messages of a reply: True when the bot is stopping (the rest of it is not sent)
+        self._pause = pause if pause is not None else self._stopping.wait
         self._thread: Optional[threading.Thread] = None
         relay.register_kind(PRM, self.on_result)
 
@@ -1217,6 +1253,14 @@ class PrmService:
         on in the console, at any hour) with a clock to trust?  ``auto_on``: as ``_auto_by_day``'s."""
         on = self.auto_mode["on"] if auto_on is None else auto_on
         return (self._in_window(now) or on) and not self._clock_off()
+
+    def _reply_meta(self, meta: dict) -> dict:
+        """A WeChat reply's draft job (her message's, a 开场白's, a 专属佣金 step's) with ``meta.reply_parts`` when
+        PRM_REPLY_PARTS is above 1: the Mac may write the reply as that many messages, a blank line between two
+        (worker.parts_line); ``_deliver`` sends them so.  The same dict."""
+        if self._reply_parts > 1:
+            meta["reply_parts"] = self._reply_parts
+        return meta
 
     def _night_meta(self, now: float) -> dict:
         """A draft job's ``meta.night`` (``_submit``): inside the window ``{"window": "18:00-09:00", "at": "21:30"}``,
@@ -1512,7 +1556,7 @@ class PrmService:
             # itself (``_night_judge``).  Not for a job that always waits for a person (read late, a new friend's).
             meta["night"] = self._night_meta(now)
         how, job_id = self._relay.submit(chat_id, chat_id, text, kind=PRM, files=files, settle_sec=SETTLE_SEC,
-                                         meta=meta, fresh=fresh)
+                                         meta=self._reply_meta(meta), fresh=fresh)
         for n in carried:
             self._store.set_notice(deal["id"], n["key"], failed_text(n.get("head") or n["text"], job_id), now,
                                    into=job_id)
@@ -1676,9 +1720,9 @@ class PrmService:
         before its send returned (WeChat shows a line at once); a failure stays one.  A packet the bot was
         stopped in the middle of sending (failed, ``indeterminate``: ``start``) went out after all (win
         review F4 (d); before, its line was taken for an operator's and the chat was taken over): it is
-        sent again (``sent_at`` when WeChat shows it) once its text, if any, and each of its files (one
-        row each, ``_file_rows``) are read back; till then it stays red, and once its text is seen it says
-        the text did go out (``UNSURE_TEXT_SEEN``)."""
+        sent again (``sent_at`` when WeChat shows it) once its text, if any (a reply in parts: each part,
+        ``_text_rows``), and each of its files (one row each, ``_file_rows``) are read back; till then it
+        stays red, and once its text is seen it says the text did go out (``UNSURE_TEXT_SEEN``)."""
         if self._store.confirm_sent(packet_id):
             packet = self._store.packet(packet_id) or {}
             logger.info("PRM: packet %d seen in WeChat %.0f s after sending (sent_confirmed)", packet_id,
@@ -1688,9 +1732,10 @@ class PrmService:
         if packet is None or (packet["status"], packet["outcome"]) != (FAILED, "indeterminate"):
             return
         final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
-        text_seen = bool(self._own_text(msg)) or packet["error"] == UNSURE_TEXT_SEEN
         with self._sent_lock:
             files_left = self._file_rows.get(packet_id, [None]) if packet["attachments"] else []
+            parts_left = self._text_rows.get(packet_id)   # (a reply in parts: its text is seen once every part is)
+        text_seen = (bool(self._own_text(msg)) and not parts_left) or packet["error"] == UNSURE_TEXT_SEEN
         if (text_seen or not str(final or "").strip()) and not files_left:
             if self._store.settle_unsure(packet_id, sent_at=written):
                 logger.info("PRM: packet %d, cut off by a stop, did go out (seen in WeChat): sent", packet_id)
@@ -1848,14 +1893,11 @@ class PrmService:
             return False, None
         tokens = self._store.tokens(party["id"])
         for packet in self._store.sent_since(chat_id, written - OWN_MATCH_SEC):
-            if packet["outcome"] != "sent_unconfirmed" or float(packet["sent_at"]) >= self._started:
-                continue
-            final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
-            if _norm(pii.unmask(final, tokens)) == text:
+            if float(packet["sent_at"]) < self._started and self._sent_part(
+                    packet, text, tokens, written, unconfirmed=packet["outcome"] == "sent_unconfirmed"):
                 return True, packet["id"]
         for packet in unsure:
-            final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
-            if str(final or "").strip() and _norm(pii.unmask(final, tokens)) == text:
+            if self._sent_part(packet, text, tokens, written, unconfirmed=True):
                 return True, packet["id"]
         deal = self._store.deal_of(party["id"], now)
         for ev in self._store.events(deal["id"], limit=20):
@@ -1863,6 +1905,33 @@ class PrmService:
                     and _norm(ev["detail"].get("text")) == text):
                 return True, None
         return False, None
+
+    def _sent_part(self, packet: dict, text: str, tokens: dict, written: float, *, unconfirmed: bool) -> bool:
+        """Is ``text`` (an own text line's normalized words, written at ``written``) a line ``packet`` went out as before
+        this run (``_match_sent``)?  A reply in one message: its text, while it is not confirmed (``unconfirmed``).  A
+        reply in parts (``reply_parts``): each part once (``_text_rows`` counts them down; the first one read back
+        confirmed it), and only written before its send returned (give or take PART_LATE_SEC: the same words typed
+        later are a person's); or its whole text once (it went out in one message, before PRM_REPLY_PARTS)."""
+        final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
+        if not str(final or "").strip():
+            return False
+        whole = pii.unmask(final, tokens)
+        parts = reply_parts(whole, self._reply_parts)
+        if len(parts) <= 1:
+            return unconfirmed and _norm(whole) == text
+        if written > float(packet["sent_at"] or 0) + PART_LATE_SEC:
+            return False
+        with self._sent_lock:
+            left = self._text_rows.get(packet["id"])
+            if left is None:
+                left = self._text_rows[packet["id"]] = [_norm(p) for p in parts]
+            if text in left:
+                left.remove(text)
+                return True
+            if text == _norm(whole) and len(left) == len(parts):
+                left.clear()
+                return True
+        return False
 
     def _file_row_of(self, packet: dict, msg: dict) -> bool:
         """Is this own row one of the files of ``packet``, sent before this run (``_match_sent``)?  Each
@@ -2554,7 +2623,8 @@ class PrmService:
         told = history_of(self._store.backlog(deal["id"]))
         if told:
             meta["history"] = told
-        _, job_id = self._relay.submit(party["wxid"], party["wxid"], "", kind=PRM, meta=meta, fresh=True)
+        _, job_id = self._relay.submit(party["wxid"], party["wxid"], "", kind=PRM, meta=self._reply_meta(meta),
+                                       fresh=True)
         self._store.add_event(deal["id"], party["id"], OPENING, {"job": job_id, "how": how, "by": by},
                               actor="console" if by == "console" else "system", now=now)
         # one not written before: this one is on its way
@@ -3343,8 +3413,8 @@ class PrmService:
         if outbound:
             meta["sent"] = outbound
         # input_closed: the creator's next message is a reply job of its own, not part of this step
-        _, job_id = self._relay.submit(party["wxid"], party["wxid"], "", kind=PRM, meta=meta, fresh=True,
-                                       input_closed=True)
+        _, job_id = self._relay.submit(party["wxid"], party["wxid"], "", kind=PRM, meta=self._reply_meta(meta),
+                                       fresh=True, input_closed=True)
         # what was asked for, when (``_chain``: each product once per round)
         self._store.add_event(deal["id"], party["id"], "next_step", {"job": job_id, "after": packet_id,
                                                                      "delivered": bool(delivered),
@@ -4455,6 +4525,7 @@ class PrmService:
             "night": self._night_status(self._clock()), "auto_register": self._auto_register,
             "buyin_sync_min": self._buyin_sec // 60, "friend_add_status": self.friend_adds.status(),
             "auto_mode": self.auto_mode, "three_party": self.three_party.status(),
+            "reply_parts": self._reply_parts,
         })
 
     # ── the sender thread: approved drafts, holding replies, clean-ups ────
@@ -4501,7 +4572,8 @@ class PrmService:
         return sent
 
     def _deliver(self, packet: dict) -> int:
-        """Text first, then the files; stops at the first failure (never sent twice).  A 百应 draft is never sent
+        """Text first (its paragraphs as messages of their own, PRM_REPLY_PARTS), then the files; stops at the first
+        failure (never sent twice).  A 百应 draft is never sent
         (``send_approved`` keeps it back already; this is the second guard): back to waiting, nothing sent."""
         if is_buyin(packet):
             self._store.move(packet["id"], (SENDING, APPROVED), PENDING, decided_at=None)
@@ -4516,10 +4588,20 @@ class PrmService:
             problem = "草稿里有对不上的占位符（号码可能已按规定清除）"
         elif packet["kind"] == "shipping_notice" and not gates.waybill_ok(final, self._waybill(packet)):
             problem = "发货通知里的单号和系统记录对不上"
-        if not problem and text.strip():
-            noted = self._note_sent(packet["chat_id"], text, packet["id"])
+        # The text as PRM_REPLY_PARTS messages (``reply_parts``), each noted before it goes, a typing pause apart; a part
+        # that fails ends it (never sent twice), and says how many went out.
+        parts = reply_parts(text, self._reply_parts) if not problem else []
+        for n, part in enumerate(parts):
+            if n and self._pause(typing_delay(part)):
+                # The bot is stopping (its WeChat backend stopped first): the rest is not sent, and the draft stays
+                # sending, as one cut off by a stop: the next start settles it as 「不确定发出去没有」 and knows the parts
+                # read back by it (``_sent_part``), never an operator's (marked failed now, they would be).
+                logger.warning("PRM: packet %d: the bot stopped after %d of its %d messages; the rest not sent",
+                               packet["id"], n, len(parts))
+                return 0
+            noted = self._note_sent(packet["chat_id"], part, packet["id"])
             try:
-                result = self._send(packet["chat_id"], text)
+                result = self._send(packet["chat_id"], part)
                 if not result:
                     self._unnote_sent(noted)
                     problem = _refused(result) or "文字没发出去"
@@ -4527,6 +4609,11 @@ class PrmService:
                 self._unnote_sent(noted)
                 logger.exception("PRM: packet %d text not sent", packet["id"])
                 problem = "文字发送出错"
+            if problem:
+                if n:
+                    problem = (f"分 {len(parts)} 条发，前 {n} 条发出去了，第 {n + 1} 条没发出去（{problem}）；"
+                               "剩下的请在微信里手动补发")
+                break
         for item in packet["attachments"] if not problem else ():
             path = str(item.get("path") or "")
             if not Path(path).is_file():
@@ -4556,7 +4643,8 @@ class PrmService:
         # The backend says the keystrokes went through; seeing the line in WeChat confirms it
         # (often already, before the send returned).
         self._store.mark_sent(packet["id"], now)
-        logger.info("PRM: packet %d sent (%d chars, %d file(s))", packet["id"], len(text), len(packet["attachments"]))
+        logger.info("PRM: packet %d sent (%d chars%s, %d file(s))", packet["id"], len(text),
+                    f" in {len(parts)} messages" if len(parts) > 1 else "", len(packet["attachments"]))
         if packet["route"] == gates.NIGHT:
             self._night_sent(packet, now)
         self._update_gate(packet, now)

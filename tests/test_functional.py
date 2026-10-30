@@ -390,6 +390,34 @@ class TestPrmPages:
         assert packet["status"] == "approved" and packet["final_text"] == "在的，小美你好～" and packet["edited"]
         assert "发送中" in page.inner_text("body")
 
+    def test_review_page_says_a_draft_goes_out_as_several_messages(self, page, prm):
+        """PRM_REPLY_PARTS (2026-10-30): a draft with blank lines says 「会分 N 条发」; while it is edited the line says
+        how the text will go; a draft of one paragraph says nothing."""
+        import json as _json
+        from src.prm.service import SETTLE_SEC
+
+        prm.service._reply_parts = 3                                       # (PRM_REPLY_PARTS=3)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        assert "条发（空一行就是分开发" not in page.inner_text("body")       # 「在的，有什么可以帮你？」: one message
+        prm.service.handle({"chat_id": "wxid_creator01", "sender_id": "wxid_creator01", "content": "均价多少呀",
+                            "msg_type": 1, "is_group": False, "timestamp": prm.clock.now})
+        prm.clock.now += SETTLE_SEC + 1
+        job = prm.relay.next_job(0, ("prm",))
+        d = {"intent": "问价", "slots": {}, "stage_proposal": "", "message_kind": "faq",
+             "reply_draft": "好呀～\n\n贝雷帽 399 元，小礼帽 269 元\n\n你平时主要在抖音还是小红书呀？",
+             "attachments_to_send": [], "needs_attention": False, "reason": "kb/products.md"}
+        prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(d, ensure_ascii=False)})
+        prm.relay.tick()
+        page.reload()
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="贝雷帽 399 元")
+        assert "会分 3 条发（空一行就是分开发，最多 3 条）" in card.inner_text()
+        card.locator("button:has-text('改了再发')").click()
+        card.locator("textarea[aria-label='修改要发的内容']").fill("好呀～贝雷帽 399 元")
+        page.wait_for_timeout(300)
+        assert "整段一条发（空一行就是分开发，最多 3 条）" in card.inner_text()
+
     def test_review_page_runs_a_platform_action_once_and_shows_it_red_when_unverified(self, page, prm):
         import json as _json
         from src.prm import platforms

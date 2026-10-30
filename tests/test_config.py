@@ -766,5 +766,28 @@ class GroupConfigTests(unittest.TestCase):
             self.assertIn(name, str(ctx.exception))
 
 
+class ReplyPartsConfigTests(unittest.TestCase):
+    """PRM_REPLY_PARTS (src/prm/service.py reply_parts, 2026-10-30): a reply in up to 3 messages by default, 1-5."""
+
+    def test_defaults_and_what_the_env_says(self):
+        from src.config import BotConfig, load_config
+
+        self.assertEqual(BotConfig().prm_reply_parts, 3)
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(load_config().prm_reply_parts, 3)
+        with patch.dict(os.environ, {"PRM_REPLY_PARTS": "1"}, clear=True):
+            self.assertEqual(load_config().prm_reply_parts, 1)
+
+    def test_bad_values_are_refused(self):
+        from src.config import _validate_config
+
+        for good in (1, 3, 5):
+            _validate_config({"prm_reply_parts": good})
+        for bad in (0, 6, -1):
+            with self.assertRaises(RuntimeError) as ctx:
+                _validate_config({"prm_reply_parts": bad})
+            self.assertIn("PRM_REPLY_PARTS", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

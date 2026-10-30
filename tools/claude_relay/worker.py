@@ -1633,6 +1633,20 @@ def invite_block(settings: dict, creator=None) -> str:
     return "\n".join(lines)
 
 
+def parts_line(meta: dict) -> str:
+    """The prompt's line when the bot sends a reply as several WeChat messages (PRM_REPLY_PARTS on Windows, 2026-10-30:
+    ``meta.reply_parts`` = the most): a blank line in reply_draft starts the next one.  "" without it, or for 1 (the
+    prompt as before: the reply is one message)."""
+    try:
+        most = int(meta.get("reply_parts") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if most < 2:
+        return ""
+    return (f"像真人发微信那样，reply_draft 可以分成几条短消息发：条与条之间空一行，最多 {min(most, 5)} 条"
+            "（多出来的会并进最后一条）；一件事一条，每条一两句。一两句话说得完就只写一条，不要硬拆。")
+
+
 def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, failed: list, invite: str = "") -> str:
     """The task of a creator's WeChat draft (a 百应 one: ``buyin_prompt``); ``invite``: ``invite_block``'s
     <invite_background> ("" for none)."""
@@ -1649,6 +1663,9 @@ def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, fa
     group = three_party_line(meta)
     if group:
         lines.append(group)
+    parts = parts_line(meta)
+    if parts:
+        lines.append(parts)
     if meta.get("sent"):
         lines.append(sent_block(meta["sent"]))
     if invite:

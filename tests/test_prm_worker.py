@@ -908,6 +908,47 @@ def test_the_group_line_works_on_the_macs_own_python(tmp_path):
     assert run.stdout.startswith("ok")
 
 
+# ── 分几条发 (the bot's ``meta.reply_parts``: PRM_REPLY_PARTS on Windows, 2026-10-30) ──
+
+PARTS_LINE = ("像真人发微信那样，reply_draft 可以分成几条短消息发：条与条之间空一行，最多 3 条（多出来的会并进最后一条）；"
+              "一件事一条，每条一两句。一两句话说得完就只写一条，不要硬拆。")
+
+
+def test_a_job_says_a_reply_may_be_several_messages(worker):
+    """Windows puts ``meta.reply_parts`` (PRM_REPLY_PARTS above 1) into every WeChat reply's draft job: the prompt says a
+    blank line starts the next message and how many there may be; without it (or 1, or junk) the prompt is as it was.
+    A 百应 draft (copied into 百应 by hand) never says it."""
+    job = {"id": 33, "text": "[10-30 19:59] 均价多少呀，你家", "meta": {"reply_parts": 3}}
+    prompt = worker.prm_prompt(job, 1, "小美", "deals/1.md", [], [])
+    assert PARTS_LINE in prompt.split("\n")
+    assert prompt.index("合作单：") < prompt.index(PARTS_LINE) < prompt.index("<creator_message>")
+    plain = worker.prm_prompt({"id": 34, "text": "你好", "meta": {}}, 1, "小美", "deals/1.md", [], [])
+    assert "空一行" not in plain
+    for meta in ({"reply_parts": 1}, {"reply_parts": 0}, {"reply_parts": "三"}, {"reply_parts": None}):
+        assert worker.prm_prompt({"id": 34, "text": "你好", "meta": meta}, 1, "小美", "deals/1.md", [], []) == plain
+    assert "最多 5 条" in worker.parts_line({"reply_parts": 9})
+    buyin = {"id": 35, "text": "[10-30 20:00] 你好", "meta": {"channel": "buyin", "reply_parts": 3}}
+    assert "空一行" not in worker.prm_prompt(buyin, 1, "小美", "deals/1.md", [], [])
+
+
+def test_the_parts_line_works_on_the_macs_own_python(tmp_path):
+    python = "/usr/bin/python3"
+    if not os.path.exists(python):
+        pytest.skip("no system python3")
+    script = tmp_path / "smoke.py"
+    script.write_text(
+        "import importlib.util, sys\n"
+        f"spec = importlib.util.spec_from_file_location('w', {str(ROOT / 'tools/claude_relay/worker.py')!r})\n"
+        "w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w)\n"
+        "job = {'id': 1, 'text': '[10-30 19:59] 均价多少呀', 'meta': {'reply_parts': 3}}\n"
+        f"assert {PARTS_LINE!r} in w.prm_prompt(job, 1, '小美', 'deals/1.md', [], []).split('\\n')\n"
+        "print('ok', sys.version_info[:2])\n", encoding="utf-8")
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), "CLAUDE_RELAY_HOME": str(tmp_path / "home")}
+    run = subprocess.run([python, "-I", str(script)], capture_output=True, text=True, timeout=60, cwd=tmp_path, env=env)
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.startswith("ok")
+
+
 # ── 8.2: the case file on the Mac ─────────────────────────────────────────
 
 CASE = """# 合作单：小美（编号 1）
