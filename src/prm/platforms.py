@@ -3554,11 +3554,13 @@ def invite_match(ledger, conversations: list, *, window_sec: float = INVITE_MATC
     many matched.
 
     Somebody else's invite (2026-10-30: colleagues send 邀约带货 cards from the same shop, with their own WeChat on
-    them, and their creators' answers are not ours to handle): a conversation not matched whose every invite card is
-    more than ``window_sec`` from every card of ours that may have gone out (a ``result`` not known unsent; an
-    ``attempt`` with no result yet, up to INVITE_OPEN_ATTEMPT_SEC after it) gets ``other_invite`` true.  A card near
-    one of ours (the pairing ambiguous, its plan unreadable) is never called somebody else's; without a ledger that
-    can be read nothing is."""
+    them, and their creators' answers are not ours to handle): a conversation not matched none of whose invite cards
+    can be ours gets ``other_invite`` true.  A card can be ours when a card of ours may have gone out then (at most
+    ``window_sec`` from a ``result`` not known unsent; an ``attempt`` with no result yet, up to INVITE_OPEN_ATTEMPT_SEC
+    after it) and it says what ours said (the head of the plan's text for her), or either cannot be told (her plan
+    unreadable, the card with no text): a colleague's card sent the same minute says other words.  Only a colleague's
+    card the same minute with our very words stays unsure (listed as nobody's); without a ledger that can be read
+    nothing is called somebody else's."""
     warn = warn or _log.warning
     cards = []                                           # (conversation index, its card's time, its text squeezed)
     for index, conv in enumerate(conversations or []):
@@ -3624,17 +3626,38 @@ def invite_match(ledger, conversations: list, *, window_sec: float = INVITE_MATC
             creator["aweme_id"] = invited["aweme_id"]
         conv["invited"] = dict(invited)
         matched += 1
-    # When a card of ours may have gone out: around each result not known unsent, after each attempt with no result
-    ours = [(at - window_sec, at + window_sec) for at in (jst_time(r.get("at")) for r in results.values()
-                                                          if r.get("sent") is not False) if at is not None]
-    ours += [(at - window_sec, at + INVITE_OPEN_ATTEMPT_SEC) for at in (jst_time(a.get("at")) for key, a in attempts.items()
-                                                                       if key not in results) if at is not None]
-    times: dict = {}                                     # conversation index -> its invite cards' times
-    for index, card_at, _ in cards:
-        times.setdefault(index, []).append(card_at)
-    for index, card_times in times.items():
+    # When a card of ours may have gone out (around each result not known unsent; after each attempt with no result)
+    # and what it said (the head of the plan's text for her; None when it cannot be read: any text may be ours)
+    def head_of(attempt) -> Optional[str]:
+        aweme = _im_word((attempt or {}).get("aweme_id"), 64)
+        plan_id = _im_word((attempt or {}).get("plan_id"), 40)
+        if not _DOUYIN_ID.match(aweme) or not _INVITE_PLAN_ID.match(plan_id):
+            return None
+        if plan_id not in plans:
+            plans[plan_id] = _invite_plan(folder, plan_id)
+        return _squeezed(_invite_content(plans[plan_id], aweme))[:INVITE_MATCH_CHARS] or None
+
+    ours = []                                            # (from, to, the text's head or None)
+    for key in {*attempts, *results}:
+        attempt, result = attempts.get(key), results.get(key)
+        if result is not None and result.get("sent") is False:
+            continue                                     # nothing went out
+        at = jst_time((result or attempt).get("at"))
+        if at is None:
+            continue
+        start, end = at - window_sec, at + (window_sec if result is not None else INVITE_OPEN_ATTEMPT_SEC)
+        if any(start <= card_at <= end for _, card_at, _ in cards):
+            ours.append((start, end, head_of(attempt)))
+    shown: dict = {}                                     # conversation index -> its invite cards (time, text squeezed)
+    for index, card_at, text in cards:
+        shown.setdefault(index, []).append((card_at, text))
+    for index, its_cards in shown.items():
         conv = conversations[index]
-        if not conv.get("invited") and not any(start <= t <= end for t in card_times for start, end in ours):
+        if conv.get("invited"):
+            continue
+        # one of ours only when a card of ours went out then and its text is ours (or either cannot be told)
+        if not any(start <= at <= end and (head is None or text in ("", "[卡片]") or head in text)
+                   for at, text in its_cards for start, end, head in ours):
             conv["other_invite"] = True
     return matched
 
