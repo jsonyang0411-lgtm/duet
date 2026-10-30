@@ -302,7 +302,7 @@ function DealDetail({ p, d, onDone }) {
           <b>开场白</b>
           <div className="f-hint">
             她还没跟我们说过话。点「写开场白」，Mac 按 kb 里的破冰写法写一句先打招呼的话，在「待审批」里等你看过再发。
-            新加的好友通过以后一直没说话，系统会自己写一份，不用点。
+            新加的好友通过以后一直没说话，系统会自己写一份，不用点；加好友过了很久才登记的，系统不知道她之前说没说过，不自己写，会留一条提示请你看一眼微信。
           </div>
           <div>
             <button type="button" className="btn" disabled={busy || !p.active || deal.mode !== 'copilot'}

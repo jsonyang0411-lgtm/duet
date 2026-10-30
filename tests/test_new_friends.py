@@ -26,7 +26,7 @@ from src.edge import protocol as P
 from src.edge.service import EdgeService
 from src.edge.store import EdgeStore
 from src.prm import gates
-from src.prm.service import SETTLE_SEC, PrmService, new_friend_note, opening_note
+from src.prm.service import OPENING_UNSURE_TEXT, SETTLE_SEC, PrmService, new_friend_note, opening_note
 from src.prm.store import PrmStore
 from src.relay.service import ClaudeRelay
 from src.relay.store import RelayStore
@@ -1100,6 +1100,58 @@ def test_a_friend_who_accepted_our_request_and_said_nothing_gets_one_reviewed_op
     bot.poll()
     bot.poll()
     assert len(bot.jobs()) == 1                                      # asked for once
+
+
+def test_a_friend_registered_long_after_she_was_added_gets_no_opening_by_itself_but_a_notice(copilot_bot, db, clock):
+    """Review 2026-10-30: registered more than PRM_CATCHUP_HOURS after she was added, the read-back does not reach back
+    to her first lines, so nothing of hers in it does not mean she has not written.  No 开场白 by itself: a notice asks a
+    person to look, and goes when one is asked for."""
+    bot = copilot_bot(catchup_hours=1)
+    bot.friends.scan_once()
+    clock.now += 120
+    t = clock.now
+    they_accepted(db, ASKED, t)
+    clock.now = t + 60
+    bot.poll()
+    assert [e["how"] for e in bot.friends.scan_once()] == [REQUESTED]
+    clock.now = t + 2 * 3600                                         # registered two hours on (the window is one)
+    party = bot.prm.register(ASKED, "小青")
+    assert party["catch_up"] is True
+    bot.poll()
+    assert bot.jobs() == []
+    deal_id = bot.prm.store.deal_of(party["id"])["id"]
+    assert bot.prm.store.deal(deal_id)["attention"] == OPENING_UNSURE_TEXT
+    asked = bot.prm.deal_action("opening", {"deal_id": deal_id})     # the operator looked: she has not written
+    assert asked["ok"] is True and bot.prm.store.deal(deal_id)["attention"] == ""
+    assert json.loads(bot.jobs()[-1]["meta"])["opening"] == {"how": "", "by": "console"}
+
+
+def test_the_look_at_her_chat_notice_goes_when_an_operator_writes_to_her_or_she_writes(copilot_bot, db, clock):
+    for who in ("operator", "creator"):
+        bot = copilot_bot(catchup_hours=1)
+        bot.friends.scan_once()
+        clock.now += 120
+        wxid = f"{ASKED}_{who}"
+        db.names[wxid] = "品牌小青"                                   # (the read-back reads her chat under its name)
+        they_accepted(db, wxid, clock.now)
+        clock.now += 60
+        bot.poll()
+        bot.friends.scan_once()
+        clock.now += 2 * 3600
+        party = bot.prm.register(wxid, "小青")
+        bot.poll()
+        deal_id = bot.prm.store.deal_of(party["id"])["id"]
+        assert bot.prm.store.deal(deal_id)["attention"] == OPENING_UNSURE_TEXT
+        clock.now += 60
+        if who == "operator":
+            db.say(wxid, ME_SENDER, "你好呀～我是 ACE7CN 的运营", clock.now)   # on the phone: a person greeted her
+            bot.poll()
+        else:
+            db.say(wxid, wxid, "你好，在吗", clock.now)
+            bot.poll()
+            bot.mac_drafts()
+        assert OPENING_UNSURE_TEXT not in bot.prm.store.deal(deal_id)["attention"], who
+        bot.stop()
 
 
 def test_with_auto_register_at_night_her_opening_still_waits_for_a_person(copilot_bot, db, clock):

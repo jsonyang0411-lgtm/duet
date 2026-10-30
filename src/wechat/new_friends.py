@@ -572,7 +572,7 @@ class NewFriendService:
         return self._store
 
     def set_catch_up_sink(self, sink: Optional[Callable[..., object]]) -> None:
-        """``sink(wxid, messages, verify_until=...)``: PRM_COPILOT's PrmService.take_new_friend."""
+        """``sink(wxid, messages, verify_until=..., how=..., whole=...)``: PRM_COPILOT's PrmService.take_new_friend."""
         self._catch_up_sink = sink
 
     # ── lifecycle ─────────────────────────────────────────────────────────
@@ -774,8 +774,10 @@ class NewFriendService:
         PRM_AUTO_REGISTER by PRM's sender thread, never inside this service's look): when she is a new
         friend, her messages since she was added (her greeting too; at most PRM_CATCHUP_HOURS old, 5
         minutes with 0) go to PRM as one draft job, read back on her chat's next poll (the backend's
-        ``catch_up_chat``), with how she was added (``how``: none of hers, PRM drafts our first line, 开场白).
-        True when that was asked for."""
+        ``catch_up_chat``), with how she was added (``how``) and whether the read-back reaches back to when she was
+        added (``whole``: only then does "none of hers" mean she has not written, and PRM drafts our first line,
+        开场白; registered more than the window after, she may have written before it).  True when that was
+        asked for."""
         sink = self._catch_up_sink
         ask = getattr(self._backend, "catch_up_chat", None)
         record = self._store.get(str(wxid))
@@ -785,11 +787,13 @@ class NewFriendService:
         if now - float(record["found_at"]) > NEW_DAYS * 86400:
             return False
         added_at = float(record["added_at"])
-        since = max(float(record["verify_from"] or added_at), now - self._catchup_sec)
+        first = float(record["verify_from"] or added_at)
+        since = max(first, now - self._catchup_sec)
         how = str(record["how"] or "")
+        whole = since <= first                     # the read-back reaches back to her first line (her greeting)
 
         def hand_on(messages: list, wxid: str = str(wxid)) -> object:
-            return sink(wxid, messages, verify_until=added_at, how=how)
+            return sink(wxid, messages, verify_until=added_at, how=how, whole=whole)
 
         ask(str(wxid), str(record["name"] or ""), since, hand_on)
         logger.info("New friends: %s… registered as a creator; her messages since she was added go to PRM",

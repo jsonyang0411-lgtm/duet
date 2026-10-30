@@ -620,6 +620,12 @@ AUTO_NOTE_CHARS = 200        # her note
 # packet's ``meta.opening``, the deal's event (``OPENING``: which job, how, by) and the console's deal action
 # (「写开场白」, ``ask_opening``).
 OPENING = "opening"
+# A new friend registered more than PRM_CATCHUP_HOURS after she was added, with nothing of hers in the read-back: what
+# she wrote before it is not known, so no 开场白 by itself; this notice (``opening`` too) asks a person to look (review
+# 2026-10-30).  A 开场白 asked for, a reply draft of hers, or an operator writing to her by hand sees to it.
+OPENING_UNSURE = "opening_unsure"
+OPENING_UNSURE_TEXT = ("她是加好友过了很久才登记的，超出了补读的时间（PRM_CATCHUP_HOURS）：补读的这段里她没说话，更早的不知道，"
+                       "所以没自动写开场白；看一眼微信，她还没说过话就在合作单里点「写开场白」")
 
 
 def auto_name(name, wxid: str) -> str:
@@ -1661,12 +1667,15 @@ class PrmService:
     def _answered_by_hand(self, deal_id: int, written: float, now: float) -> None:
         """An operator wrote to her by hand (at ``written``): a draft of hers that was not written, and
         her recall, are seen to by a person.  The first is shown no more (its lines still go with her next
-        draft job: the case file must hear of them); the recall's notice goes."""
+        draft job: the case file must hear of them); the recall's notice goes, and so does the one asking
+        whether she needs a 开场白 (``OPENING_UNSURE``)."""
         def edit(notices):
             out = []
             for n in notices:
                 if n["key"] == "recall" and written >= float(n.get("recalled_at") or n.get("at") or 0):
                     continue
+                if n["key"] == OPENING_UNSURE and written >= float(n.get("at") or 0):
+                    continue                           # a person greeted her: no 开场白 to think of
                 if (str(n["key"]).startswith("failed:") and n.get("lane") == LANE_REPLY
                         and written >= float(n.get("asked_at") or 0)):
                     n = {**n, "show": False}
@@ -2369,14 +2378,17 @@ class PrmService:
             logger.info("PRM: party %d unlinked from a 抖音号", int(party_id))
         return out
 
-    def take_new_friend(self, chat_id: str, messages: list[dict], *, verify_until: float = 0.0, how: str = "") -> int:
+    def take_new_friend(self, chat_id: str, messages: list[dict], *, verify_until: float = 0.0, how: str = "",
+                        whole: bool = False) -> int:
         """A new friend registered as a creator: her messages since she was added (the WeChat backend
         read them back on her chat's next poll: hers only, oldest first, at most PRM_CATCHUP_HOURS
         old) become one draft job that waits for a person (``meta.new_friend``), so her first words
         are not lost; the ones up to ``verify_until`` (the time she was added) are her friend-request
         greeting and say so.  WeChat's friend notices are left out.  Nothing of hers (she accepted our
         friend request and has not written): one 开场白 draft job instead (``_ask_opening``; ``how``: how she
-        was added, the new-friend scan's).  Returns how many of her messages were taken."""
+        was added, the new-friend scan's), only when the read-back reached back to when she was added (``whole``,
+        ``NewFriendService.registered``; registered later than PRM_CATCHUP_HOURS, she may have written before the
+        window: review 2026-10-30).  Returns how many of her messages were taken."""
         chat_id = str(chat_id)
         party = self._store.party_by_wxid(chat_id)
         if party is None:
@@ -2384,6 +2396,16 @@ class PrmService:
         picked = [m for m in messages or [] if not m.get("is_group", False) and not is_friend_notice(m)
                   and system_line(m) is None]
         if not picked:
+            if not whole:
+                now = self._clock()
+                with self._handle_lock:
+                    deal = self._store.deal_of(party["id"], now)
+                    if not deal.get("last_message_at"):
+                        self._store.set_notice(deal["id"], OPENING_UNSURE, OPENING_UNSURE_TEXT, now, opening=True)
+                logger.info("PRM: party %d is a new friend with no messages in the catch-up window, which does not reach "
+                            "back to when she was added; no 开场白 (she may have written before it), a notice asks a "
+                            "person to look", party["id"])
+                return 0
             with self._handle_lock:
                 job_id, why = self._ask_opening(party, how=how)
             logger.info("PRM: party %d is a new friend with no messages from before the registration; %s", party["id"],
