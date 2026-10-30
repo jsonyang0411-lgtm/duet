@@ -25,7 +25,7 @@ from src.edge import protocol as P
 from src.edge.service import EdgeService
 from src.edge.store import EdgeStore
 from src.prm import gates
-from src.prm.service import SETTLE_SEC, PrmService, new_friend_note
+from src.prm.service import SETTLE_SEC, PrmService, new_friend_note, opening_note
 from src.prm.store import PrmStore
 from src.relay.service import ClaudeRelay
 from src.relay.store import RelayStore
@@ -1031,3 +1031,170 @@ def test_the_bot_hands_new_friends_to_prm_only_in_copilot_mode_with_the_switch_o
     with caplog.at_level(logging.INFO):
         assert sinks(on, None, edge) == [edge.friend_added]          # edge mode: the Mac's friend_added only
     assert any("PRM_AUTO_REGISTER is on but this bot runs no PRM copilot" in r.getMessage() for r in caplog.records)
+
+
+# ── 开场白: a creator who has not written gets one reviewed draft of our first line (2026-10-30) ──
+
+def test_a_friend_who_accepted_our_request_and_said_nothing_gets_one_reviewed_opening(copilot_bot, db, clock):
+    """Real machine, 2026-10-30: she accepted our friend request, said nothing, and 待审批 stayed empty (WeChat's notice
+    is all her chat had, and it is never drafted).  Registering her now asks the Mac for our first line: a job with no
+    message of hers, a draft that waits for a person whatever its kind's gate, no holding reply, tagged for the console."""
+    bot = copilot_bot()
+    bot.friends.scan_once()                                          # the start marker
+    clock.now += 120
+    t = clock.now
+    they_accepted(db, ASKED, t)                                      # our greeting, her accept, 以上是打招呼的消息
+    clock.now = t + 60
+    bot.poll()
+    assert [e["how"] for e in bot.friends.scan_once()] == [REQUESTED]
+    party = bot.prm.register(ASKED, "小青")
+    assert party["catch_up"] is True
+    bot.poll()
+    [job] = bot.jobs()
+    meta = json.loads(job["meta"])
+    assert job["text"] == "" and meta["opening"] == {"how": REQUESTED, "by": "new_friend"}
+    assert "new_friend" not in meta and "night" not in meta
+    deal_id = bot.prm.store.deal_of(party["id"])["id"]
+    [event] = bot.prm.store.events(deal_id, kinds=("opening",))
+    assert (event["detail"], event["actor"]) == ({"job": job["id"], "how": REQUESTED, "by": "new_friend"}, "system")
+
+    bot.prm.store.set_gate("greeting", gates.AUTO, clock.now)        # even a kind that has earned "auto" waits
+    bot.mac_drafts(kind="greeting")
+    [packet] = bot.prm.store.packets(("pending", "approved"))
+    assert (packet["status"], packet["route"], packet["meta"].get("opening")) == ("pending", "review", True)
+    assert bot.prm.store.deal(deal_id)["attention"].startswith(opening_note({"how": REQUESTED}))
+    assert opening_note({"how": REQUESTED}) == "她通过了我们的好友申请：这份是我们先打招呼的开场白，要人看过再发"
+    [shown] = bot.prm.snapshot()["pending"]
+    assert shown["opening"] is True
+    clock.now += 3600                                                # an hour in 待审批: no 「收到，我确认一下…」 to her
+    assert bot.prm.send_holding_replies() == 0 and bot.sent == []
+    assert bot.prm.decide(packet["id"], "send")["ok"] and bot.prm.send_approved() == 1
+    assert bot.sent == [(ASKED, "你好阿花～欢迎")]
+    bot.poll()
+    bot.poll()
+    assert len(bot.jobs()) == 1                                      # asked for once
+
+
+def test_with_auto_register_at_night_her_opening_still_waits_for_a_person(copilot_bot, db, clock):
+    hour = time.localtime(clock.now).tm_hour
+    bot = copilot_bot(auto_register="on", night=f"{hour:02d}:00-{(hour + 2) % 24:02d}:00")
+    bot.friends.scan_once()
+    clock.now += 120
+    they_accepted(db, ASKED, clock.now)
+    clock.now += 60
+    bot.poll()
+    bot.friends.scan_once()
+    assert bot.prm.register_found() == 1
+    bot.poll()
+    [job] = bot.jobs()
+    meta = json.loads(job["meta"])
+    assert meta["opening"] == {"how": REQUESTED, "by": "new_friend"} and "night" not in meta   # never told it is night
+    bot.mac_drafts(kind="greeting")
+    [packet] = bot.prm.store.packets(("pending", "approved"))
+    assert (packet["status"], packet["route"]) == ("pending", "review") and bot.sent == []
+
+
+def test_her_message_joins_the_opening_job_not_taken_yet_and_then_gets_the_holding_reply(copilot_bot, db, clock):
+    bot = copilot_bot()
+    bot.friends.scan_once()
+    clock.now += 120
+    they_accepted(db, ASKED, clock.now)
+    clock.now += 60
+    bot.poll()
+    bot.friends.scan_once()
+    bot.prm.register(ASKED, "小青")
+    bot.poll()
+    db.say(ASKED, ASKED, "在吗", clock.now)                           # before the Mac took the job
+    bot.poll()
+    [job] = bot.jobs()
+    assert lines(job) == ["在吗"] and "opening" in json.loads(job["meta"])
+    bot.mac_drafts(kind="greeting")
+    [packet] = bot.prm.store.packets(("pending",))
+    clock.now += 11 * 60
+    assert bot.prm.send_holding_replies() == 1                      # she wrote: a round of hers, as for any draft
+
+
+def test_her_message_outdates_a_waiting_opening_and_her_job_hears_it_never_went_out(copilot_bot, db, clock):
+    bot = copilot_bot()
+    bot.friends.scan_once()
+    clock.now += 120
+    they_accepted(db, ASKED, clock.now)
+    clock.now += 60
+    bot.poll()
+    bot.friends.scan_once()
+    bot.prm.register(ASKED, "小青")
+    bot.poll()
+    [opening] = bot.jobs()
+    bot.mac_drafts(kind="greeting")
+    [packet] = bot.prm.store.packets(("pending",))
+    db.say(ASKED, ASKED, "你好，你们是什么品牌", clock.now)
+    bot.poll()
+    assert bot.prm.store.packet(packet["id"])["status"] == "superseded"
+    reply = bot.jobs()[-1]
+    assert reply["id"] != opening["id"] and lines(reply) == ["你好，你们是什么品牌"]      # nothing put before her line
+    meta = json.loads(reply["meta"])
+    assert "opening" not in meta
+    assert [(s["what"], s["text"]) for s in meta["sent"]] == [("failed", "你好阿花～欢迎")]   # 「没发出去，达人没看到」
+
+
+def test_an_opening_the_mac_did_not_write_says_so_until_one_is_asked_for_again(copilot_bot, db, clock):
+    bot = copilot_bot()
+    bot.friends.scan_once()
+    clock.now += 120
+    they_accepted(db, ASKED, clock.now)
+    clock.now += 60
+    bot.poll()
+    bot.friends.scan_once()
+    party = bot.prm.register(ASKED, "小青")
+    bot.poll()
+    [job] = bot.jobs()
+    clock.now += SETTLE_SEC + 1
+    taken = bot.relay.next_job(0, ("prm",))
+    bot.relay.finish(taken["id"], {"ok": False, "text": "", "error": "claude 没有给出结构化结果"})
+    bot.relay.tick()
+    deal_id = bot.prm.store.deal_of(party["id"])["id"]
+    attention = bot.prm.store.deal(deal_id)["attention"]
+    assert attention.startswith(f"#{job['id']} 开场白没写成：claude 没有给出结构化结果")
+    assert "可以在合作单里点「写开场白」再写一次，或者直接在微信里跟她打招呼" in attention
+    assert "她这几条消息" not in attention                          # she has said nothing to take along
+    asked = bot.prm.deal_action("opening", {"deal_id": deal_id})
+    assert asked["ok"] is True and asked["job"] == bot.jobs()[-1]["id"]
+    assert bot.prm.store.deal(deal_id)["attention"] == ""
+    assert json.loads(bot.jobs()[-1]["meta"])["opening"] == {"how": "", "by": "console"}
+
+
+def test_the_console_asks_for_an_opening_only_for_a_creator_who_has_not_written(copilot_bot, db, clock):
+    from src.prm.service import event_out
+
+    bot = copilot_bot()
+    bot.friends.scan_once()
+    party = bot.prm.register(OLD, "老朋友")                         # no new friend: nothing asked for by itself
+    bot.poll()
+    assert bot.jobs() == []
+    deal_id = bot.prm.store.deal_of(party["id"])["id"]
+    asked = bot.prm.deal_action("opening", {"deal_id": deal_id})
+    assert asked["ok"] is True
+    [job] = bot.jobs()
+    assert job["id"] == asked["job"] and job["text"] == ""
+    assert json.loads(job["meta"])["opening"] == {"how": "", "by": "console"}
+    [event] = bot.prm.store.events(deal_id, kinds=("opening",))
+    assert event["actor"] == "console" and event_out(event)["name"] == f"派写开场白的任务 #{job['id']}（运营点的）"
+    assert bot.prm.deal_action("opening", {"deal_id": deal_id}) == {
+        "ok": False, "error": "她的草稿正在写，写好会出现在「待审批」里"}
+    bot.mac_drafts(kind="greeting")
+    [packet] = bot.prm.store.packets(("pending",))
+    assert bot.prm.store.deal(deal_id)["attention"].startswith("运营点了「写开场白」：这份是我们先打招呼的话")
+    assert bot.prm.deal_action("opening", {"deal_id": deal_id})["error"] == "「待审批」里已经有她的草稿"
+    assert bot.prm.decide(packet["id"], "drop")["ok"]               # 不发: another may be asked for
+    bot.prm.deal_action("mode", {"deal_id": deal_id, "mode": "human"})
+    assert "不在副驾驶模式" in bot.prm.deal_action("opening", {"deal_id": deal_id})["error"]
+    bot.prm.deal_action("mode", {"deal_id": deal_id, "mode": "copilot"})
+    bot.prm.set_active(party["id"], False)
+    assert "已经停用" in bot.prm.deal_action("opening", {"deal_id": deal_id})["error"]
+    bot.prm.set_active(party["id"], True)
+    db.say(OLD, OLD, "你好", clock.now)                              # she writes: her messages are drafted instead
+    bot.poll()
+    assert bot.prm.deal_action("opening", {"deal_id": deal_id})["error"] == "她已经发过消息了：她的消息会自己起草，不用开场白"
+    assert bot.prm.deal_action("opening", {"deal_id": 999}) == {"ok": False, "error": "没有找到这个合作单"}
+    assert bot.prm.deal_action("opening", {"deal_id": "x"}) == {"ok": False, "error": "没有找到这个合作单"}
+    assert [json.loads(j["meta"]).get("opening") is not None for j in bot.jobs()] == [True, False]

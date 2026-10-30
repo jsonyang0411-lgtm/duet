@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  ArrowClockwise, UserPlus, Prohibit, ArrowCounterClockwise, CaretDown, CaretRight, Eye, EyeSlash, Truck, Check,
+  ArrowClockwise, UserPlus, Prohibit, ArrowCounterClockwise, CaretDown, CaretRight, Eye, EyeSlash, Truck, Check, HandWaving,
 } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
@@ -62,7 +62,7 @@ function RegisterCard({ d, onDone }) {
     try {
       const r = await partyAction({ action: 'add', wxid: wxid.trim(), name: name.trim(), note: note.trim() })
       toast.ok(r?.catch_up
-        ? `已登记 ${name.trim()}：加好友以来对方发的消息会合成一份草稿，在「待审批」里等你看过再发`
+        ? `已登记 ${name.trim()}：加好友以来对方发的消息会合成一份草稿（还没说话就写一份开场白），在「待审批」里等你看过再发`
         : `已登记 ${name.trim()}`)
       setWxid(''); setName(''); setNote('')
       onDone()
@@ -74,7 +74,7 @@ function RegisterCard({ d, onDone }) {
         {d?.enabled && d?.auto_register && (
           <Note kind="warn">
             新好友自动登记已打开（PRM_AUTO_REGISTER）：机器人认出的每个新加的好友都会自动登记成达人（下面的名单里标「自动登记」），
-            加好友以来的消息合成一份草稿，在「待审批」里等人看过再发；之后的草稿和别的达人一样走自动发送门槛和下班时段自动回复。
+            加好友以来的消息合成一份草稿（还没说话的写一份开场白），在「待审批」里等人看过再发；之后的草稿和别的达人一样走自动发送门槛和下班时段自动回复。
             客户、快递、同事这些不是达人的人也会被登记：在下面点「停用」去掉，停用的不会再被自动登记。管理员和能用 cc 的人从不登记。
           </Note>
         )}
@@ -119,8 +119,8 @@ function RegisterCard({ d, onDone }) {
         {picked?.new && (
           <Note kind="warn">
             {`${picked.name} 是新加的好友（${picked.how_label || '说不清是怎么加的'}）。登记后，加好友以来对方发的消息（验证消息也算，`
-              + `${hours > 0 ? `最多 ${hours} 小时内的` : '只算最近 5 分钟的'}）会合成一份草稿，在「待审批」里等人看过再发。`
-              + '不是达人（比如供应商、熟人）就不要登记。'}
+              + `${hours > 0 ? `最多 ${hours} 小时内的` : '只算最近 5 分钟的'}）会合成一份草稿，在「待审批」里等人看过再发；`
+              + '对方还没说过话（比如刚通过我们的好友申请），就写一份开场白，也是等人看过再发。不是达人（比如供应商、熟人）就不要登记。'}
           </Note>
         )}
         <Note>登记表示这位达人已同意由我们在微信上联系。登记后，对方的私聊不会再收到自动回复：机器人不回任何话，只在「待审批」里给运营一份草稿。</Note>
@@ -268,6 +268,23 @@ function DealDetail({ p, d, onDone }) {
           {deal.mode === 'copilot' && `副驾驶：Mac 起草，运营审批。你用这个微信号亲手回了达人，会自动切到人工接管 ${d?.takeover_min || 120} 分钟。`}
         </div>
       </div>
+
+      {!deal.last_message_at && (
+        <div className="stack prm-opening" style={{ gap: 6 }}>
+          <b>开场白</b>
+          <div className="f-hint">
+            她还没跟我们说过话。点「写开场白」，Mac 按 kb 里的破冰写法写一句先打招呼的话，在「待审批」里等你看过再发。
+            新加的好友通过以后一直没说话，系统会自己写一份，不用点。
+          </div>
+          <div>
+            <button type="button" className="btn" disabled={busy || !p.active || deal.mode !== 'copilot'}
+              onClick={() => run({ action: 'opening' }, '已请 Mac 写开场白，写好会出现在「待审批」里')}>
+              <HandWaving />写开场白
+            </button>
+            {(!p.active || deal.mode !== 'copilot') && <span className="dim" style={{ marginLeft: 8 }}>{!p.active ? '已停用的达人不写' : '先恢复副驾驶'}</span>}
+          </div>
+        </div>
+      )}
 
       <div className="stack" style={{ gap: 6 }}>
         <b>寄样</b>

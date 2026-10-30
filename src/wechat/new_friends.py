@@ -20,7 +20,8 @@ look ever sets a start marker, so friends from before it are never reported):
 - PRM_COPILOT: 登记达人's candidates in the console put new friends first, with their verify
   text (masked) and how they were added; registering one hands her messages since she was
   added to PRM as one reviewed draft job (``registered`` -> the backend's ``catch_up_chat``
-  -> ``PrmService.take_new_friend``).  Registering is a person's decision, unless
+  -> ``PrmService.take_new_friend``; none of hers, as when she accepted our request: a
+  reviewed draft of our first line, 开场白).  Registering is a person's decision, unless
   PRM_AUTO_REGISTER=on: then ``on_found`` is ``PrmService.new_friend_found``, which only queues
   her; PRM's sender thread registers her after this look, so ``registered`` is never called
   from inside a look (it would be with the look's ``_scan_lock`` held).
@@ -741,7 +742,8 @@ class NewFriendService:
         PRM_AUTO_REGISTER by PRM's sender thread, never inside this service's look): when she is a new
         friend, her messages since she was added (her greeting too; at most PRM_CATCHUP_HOURS old, 5
         minutes with 0) go to PRM as one draft job, read back on her chat's next poll (the backend's
-        ``catch_up_chat``).  True when that was asked for."""
+        ``catch_up_chat``), with how she was added (``how``: none of hers, PRM drafts our first line, 开场白).
+        True when that was asked for."""
         sink = self._catch_up_sink
         ask = getattr(self._backend, "catch_up_chat", None)
         record = self._store.get(str(wxid))
@@ -752,9 +754,10 @@ class NewFriendService:
             return False
         added_at = float(record["added_at"])
         since = max(float(record["verify_from"] or added_at), now - self._catchup_sec)
+        how = str(record["how"] or "")
 
         def hand_on(messages: list, wxid: str = str(wxid)) -> object:
-            return sink(wxid, messages, verify_until=added_at)
+            return sink(wxid, messages, verify_until=added_at, how=how)
 
         ask(str(wxid), str(record["name"] or ""), since, hand_on)
         logger.info("New friends: %s… registered as a creator; her messages since she was added go to PRM",

@@ -1491,6 +1491,27 @@ def night_line(meta: dict) -> str:
             + "：运营不在，满足条件的回复会直接发给达人，按 kb/ 里下班时段的规则写。")
 
 
+# How a new friend came (the bot's ``meta.opening.how``, its new-friend scan's words): who spoke last.
+OPENING_HOWS = {"requested": "她刚通过了我们的好友申请（是我们加的她）", "manual": "她刚加了我们的好友",
+                "auto_accept": "她刚加了我们的好友"}
+
+
+def opening_line(meta: dict) -> str:
+    """The prompt's line for the bot's 开场白 job (``meta.opening`` = ``{"how", "by"}``, 2026-10-30): a creator who has
+    not written to us yet (a new friend whose catch-up found nothing of hers, or an operator's 「写开场白」 in the
+    console, ``by`` console), so the job has no message of hers and asks for our first line.  "" without it (the
+    prompt as before)."""
+    opening = meta.get("opening")
+    if not isinstance(opening, dict):
+        return ""
+    if opening.get("by") == "console":
+        who = "运营请你给这位达人写开场白：她还没跟我们说过话"
+    else:
+        who = OPENING_HOWS.get(str(opening.get("how") or ""), "她刚加上好友") + "，还没说过话"
+    return (f"{who}。这一次没有达人的消息，要写的是我们主动发的第一句（开场白），按 kb/ 里开场白和破冰（场景 A）的写法；"
+            "她的作品、穿搭这些你不知道的不要编。我们已经跟她打过招呼的（看 <our_reply>），就写一句自然的跟进，不要重复自我介绍。")
+
+
 def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, failed: list) -> str:
     title = " ".join(str(name).split())[:30] or f"达人 {party_id}"
     lines = [f"合作单：{title}（编号 {party_id}），案卷是 {case_rel}。"]
@@ -1513,6 +1534,9 @@ def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, fa
     if late_at:
         lines.append(f"达人这次的消息是机器人没在读微信的时候收到的（最早 {late_at}），过了一阵才交给你："
                      "起草时想到已经隔了一阵，运营会先看过再发。")
+    opening = opening_line(meta)
+    if opening:
+        lines.append(opening)
     if meta.get("system_note"):
         lines.append(f"<system_note>\n{_untagged(str(meta['system_note']))[:SYSTEM_NOTE_CHARS]}\n</system_note>")
     if got:
@@ -1520,7 +1544,7 @@ def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, fa
     if failed:
         lines.append("还有附件没能从 Windows 取到：" + "、".join(failed))
     text = str(job.get("text") or "")
-    if text.strip() or not meta.get("system_note"):
+    if text.strip() or not (meta.get("system_note") or opening):
         lines.append(creator_block(text))
     lines.append("先读案卷和 kb/ 里相关的内容，更新案卷，然后给出结构化结果。")
     return "\n".join(lines)

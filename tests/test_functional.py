@@ -564,6 +564,43 @@ class TestPrmPages:
         finally:
             web_server.register_new_friends(None)
 
+    def test_deals_page_asks_for_an_opening_and_the_review_page_tags_it(self, page, prm):
+        """开场白: a creator who has not written has 「写开场白」 in her deal (小美, who wrote, has none); a click asks
+        the Mac for our first line, whose draft waits in 待审批 tagged 开场白; asked again meanwhile, it says why not."""
+        import json as _json
+        from src.prm.service import SETTLE_SEC
+
+        prm.service.register("wxid_quiet01", "小青")
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.wait_for_timeout(1500)
+        page.locator("button[aria-label='展开 小美']").click()
+        page.wait_for_timeout(300)
+        assert page.locator(".prm-opening").count() == 0                    # she wrote: her messages are drafted
+        page.locator("button[aria-label='展开 小青']").click()
+        page.wait_for_timeout(300)
+        block = page.locator(".prm-opening")
+        assert "她还没跟我们说过话" in block.inner_text()
+        block.locator("button:has-text('写开场白')").click()
+        page.wait_for_timeout(1200)
+        assert "已请 Mac 写开场白" in page.inner_text("body")
+        prm.clock.now += SETTLE_SEC + 1
+        job = prm.relay.next_job(0, ("prm",))
+        assert job["meta"]["opening"] == {"how": "", "by": "console"} and job["text"] == ""
+        block.locator("button:has-text('写开场白')").click()                # while it is being written
+        page.wait_for_timeout(1200)
+        assert "她的草稿正在写" in page.inner_text("body")
+        draft = {"intent": "开场白：先打招呼", "slots": {}, "stage_proposal": "", "message_kind": "greeting",
+                 "reply_draft": "小青你好呀～我是 ACE7CN 的", "attachments_to_send": [], "needs_attention": False,
+                 "reason": "kb/合作政策.md 场景 A1"}
+        prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(draft, ensure_ascii=False)})
+        prm.relay.tick()
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="小青你好呀")
+        assert card.locator(".tag", has_text="开场白").count() == 1
+        assert "这一条：开场白：先打招呼" in card.inner_text()
+        assert page.locator(".prm-draft", has_text="在的，有什么可以帮你？").locator(".tag", has_text="开场白").count() == 0
+
     def test_deals_page_runs_a_deal_stage_mode_waybill_and_numbers(self, page, prm):
         store = prm.service.store
         page.goto(f"{BASE_URL}/#/deals", timeout=10000)

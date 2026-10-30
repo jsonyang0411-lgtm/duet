@@ -183,6 +183,34 @@ def test_deals_and_numbers_work_while_the_bot_is_stopped(tmp_path, monkeypatch):
     assert call("/api/prm/packets", "POST", {"id": answer["packet"], "action": "wrong"})[1]["ok"] is False
 
 
+def test_an_opening_is_asked_for_from_the_running_console_and_refused_while_stopped(running, tmp_path, monkeypatch):
+    """POST /api/prm/deals {action: opening}: 「写开场白」 for a creator who has not written (a job with ``meta.opening``,
+    its draft tagged ``opening`` in /api/prm); 小美, who wrote, is told why not; a stopped bot cannot ask the Mac."""
+    assert call("/api/prm/parties", "POST", {"action": "add", "wxid": "wxid_quiet01", "name": "小青"})[1]["ok"] is True
+    deal_id = next(p["deal"]["id"] for p in call("/api/prm")[1]["parties"] if p["name"] == "小青")
+    answer = call("/api/prm/deals", "POST", {"action": "opening", "deal_id": deal_id})[1]
+    assert answer["ok"] is True
+    running.relay._clock.now += SETTLE_SEC + 1
+    job = running.relay.next_job(0, ("prm",))
+    assert job["id"] == answer["job"] and job["meta"]["opening"] == {"how": "", "by": "console"}
+    draft = {"intent": "开场白", "slots": {}, "stage_proposal": "", "message_kind": "greeting",
+             "reply_draft": "小青你好呀～", "attachments_to_send": [], "needs_attention": False, "reason": "场景 A1"}
+    running.relay.finish(job["id"], {"ok": True, "text": json.dumps(draft, ensure_ascii=False)})
+    running.relay.tick()
+    d = call("/api/prm")[1]
+    assert [(p["party_name"], p["opening"]) for p in d["pending"]] == [("小美", False), ("小青", True)]
+    events = next(p["deal"]["events"] for p in d["parties"] if p["name"] == "小青")
+    assert any(e["name"] == f"派写开场白的任务 #{job['id']}（运营点的）" for e in events)
+    she_wrote = call("/api/prm/deals", "POST", {"action": "opening", "deal_id": 1})[1]
+    assert she_wrote == {"ok": False, "error": "她已经发过消息了：她的消息会自己起草，不用开场白"}
+    server.register_prm(None)                                       # the bot stopped
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PRM_DB", raising=False)
+    assert call("/api/prm/parties", "POST", {"action": "add", "wxid": CREATOR, "name": "小美"})[1]["ok"] is True
+    stopped = call("/api/prm/deals", "POST", {"action": "opening", "deal_id": 1})[1]
+    assert stopped == {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能写开场白"}
+
+
 def test_changes_need_a_post_and_a_body():
     for path in ("/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal"):
         assert call(path)[0] == 405                                         # a GET must not change anything

@@ -771,6 +771,63 @@ def test_the_night_line_works_on_the_macs_own_python(tmp_path):
     assert run.stdout.startswith("ok")
 
 
+# ── 开场白 (the bot's ``meta.opening``: a creator who has not written to us) ──
+
+def test_an_opening_job_asks_for_our_first_line_and_makes_up_no_message_of_hers(worker):
+    """The bot's 开场白 job has no message of hers: the prompt says so and how she came, with no <creator_message>
+    block; a message of hers that joined the job keeps its block; without ``meta.opening`` the prompt is as it was."""
+    job = {"id": 21, "text": "", "meta": {"opening": {"how": "requested", "by": "new_friend"}}}
+    prompt = worker.prm_prompt(job, 1, "小青", "deals/1.md", [], [])
+    line = worker.opening_line(job["meta"])
+    assert line.startswith("她刚通过了我们的好友申请（是我们加的她），还没说过话。这一次没有达人的消息，要写的是我们主动发的第一句")
+    assert line in prompt.split("\n") and "<creator_message>" not in prompt
+    assert "kb/ 里开场白和破冰（场景 A）" in line and "不知道的不要编" in line and "<our_reply>" in line
+    assert worker.opening_line({"opening": {"how": "", "by": "console"}}).startswith(
+        "运营请你给这位达人写开场白：她还没跟我们说过话。")
+    assert worker.opening_line({"opening": {"how": "manual"}}).startswith("她刚加了我们的好友，还没说过话。")
+    assert worker.opening_line({"opening": {}}).startswith("她刚加上好友，还没说过话。")
+    joined = worker.prm_prompt({"id": 22, "text": "[10:21] 在吗", "meta": job["meta"]}, 1, "小青", "deals/1.md", [], [])
+    assert joined.index(line) < joined.index("<creator_message>") and "在吗" in joined
+    plain = worker.prm_prompt({"id": 23, "text": "你好", "meta": {}}, 1, "小青", "deals/1.md", [], [])
+    assert "开场白" not in plain
+    for meta in ({"opening": None}, {"opening": "yes"}):
+        assert worker.prm_prompt({"id": 23, "text": "你好", "meta": meta}, 1, "小青", "deals/1.md", [], []) == plain
+
+
+def test_the_consoles_opening_runs_through_the_worker_and_waits_for_a_person(worker, bot, fake_claude, tmp_path,
+                                                                            workspace):
+    """End to end (the real relay and worker): 「写开场白」 for a creator who has not written; Claude is told to write
+    our first line, with no message of hers, and the draft waits in 待审批 as one."""
+    asked = bot.prm.deal_action("opening", {"deal_id": 1})
+    assert asked["ok"] is True
+    run_one(worker, bot, settings(bot, fake_claude, tmp_path, prm_workspace=str(workspace)))
+    [call] = fake_claude.calls()
+    assert "运营请你给这位达人写开场白：她还没跟我们说过话。" in call["prompt"]
+    assert "<creator_message>" not in call["prompt"]
+    [packet] = bot.prm.store.packets()
+    assert (packet["status"], packet["job_id"], packet["meta"].get("opening")) == ("pending", asked["job"], True)
+    assert bot.texts == []
+
+
+def test_the_opening_line_works_on_the_macs_own_python(tmp_path):
+    python = "/usr/bin/python3"
+    if not os.path.exists(python):
+        pytest.skip("no system python3")
+    script = tmp_path / "smoke.py"
+    script.write_text(
+        "import importlib.util, sys\n"
+        f"spec = importlib.util.spec_from_file_location('w', {str(ROOT / 'tools/claude_relay/worker.py')!r})\n"
+        "w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w)\n"
+        "job = {'id': 1, 'text': '', 'meta': {'opening': {'how': 'requested', 'by': 'new_friend'}}}\n"
+        "p = w.prm_prompt(job, 1, '小青', 'deals/1.md', [], [])\n"
+        "assert w.opening_line(job['meta']) in p.split('\\n') and '<creator_message>' not in p\n"
+        "print('ok', sys.version_info[:2])\n", encoding="utf-8")
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), "CLAUDE_RELAY_HOME": str(tmp_path / "home")}
+    run = subprocess.run([python, "-I", str(script)], capture_output=True, text=True, timeout=60, cwd=tmp_path, env=env)
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.startswith("ok")
+
+
 # ── 8.2: the case file on the Mac ─────────────────────────────────────────
 
 CASE = """# 合作单：小美（编号 1）
