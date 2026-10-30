@@ -422,6 +422,10 @@ class PrmStore:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # What is cleared or deleted is overwritten with zeros, not left in free pages (review 2026-10-30): the full
+        # numbers of a 加微信 record, the placeholders' after delivery (purge_tokens) and the rows the purge deletes, as
+        # claude_relay.db does (src/relay/store.py).
+        self._conn.execute("PRAGMA secure_delete = ON")
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(_SCHEMA)

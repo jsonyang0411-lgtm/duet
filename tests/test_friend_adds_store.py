@@ -199,3 +199,17 @@ def test_the_clean_up_of_a_creator_clears_her_records_and_masks_their_nicknames(
         "", "", "小鹿 138****0000", 9.0)
     assert store.creator_links(party["id"])[0]["nickname"] == "小鹿 138****0000"
     assert store.friend_add(other["id"])["wechat"] == "abcdefyz"           # someone else's stays as it is
+
+
+def test_the_database_file_keeps_no_trace_of_cleared_numbers(tmp_path):
+    # Review 2026-10-30: prm.db holds full numbers until they are cleared (a 加微信 record's; the placeholders' after
+    # delivery): SQLite's secure_delete overwrites what was cleared, so the file itself has no copy left in free pages.
+    path = tmp_path / "prm.db"
+    s = PrmStore(path)
+    with s._lock:
+        assert s._conn.execute("PRAGMA secure_delete").fetchone()[0] == 1
+    marker = "made_up_wx_trace_" + "x" * 20000                         # big enough to need overflow pages
+    record, _ = offered(s, wechat=marker)
+    assert s.clear_friend_add_values(record["id"]) is True
+    s.close()
+    assert b"made_up_wx_trace_" not in path.read_bytes()
