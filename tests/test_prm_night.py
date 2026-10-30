@@ -1,23 +1,26 @@
-"""下班时段自动回复（PRM_NIGHT_AUTO_HOURS，2026-10-29）.
+"""下班时段自动回复（PRM_NIGHT_AUTO_HOURS，2026-10-29）and 自动模式 (the console's switch, 2026-10-30).
 
 The operators go home at 18:00; evenings are when creators answer most.  Inside the window (this PC's local time)
 a creator-reply draft whose kind has not earned ``auto`` still goes out by itself, but only when every safety rule
 holds (src/prm/gates.py ``night_reason``, src/prm/service.py ``_night_judge``); anything in doubt waits as by day.
-Empty (the default) the bot is what it was.  The names and numbers here are made up.
+Empty (the default) the bot is what it was.  自动模式 puts the same rules in force at any hour, until it is switched
+off (at the end of this file).  The names and numbers here are made up.
 """
 
 import json
+import logging
 import time
 
 import pytest
 
-from test_prm import CREATOR, Bot, Clock, a_picture, draft, pending_packet
+from test_prm import CREATOR, Bot, Clock, a_picture, config, draft, pending_packet
 from test_prm_platform_flow import DESIGNATED, block
 
 from src.config import BotConfig, _validate_config
 from src.prm import gates, platforms, service
-from src.prm.service import HOLDING_TEXT, NIGHT_HOLDING_TEXT, SETTLE_SEC, event_out
-from src.relay.store import PRM
+from src.prm.service import AUTO_HOLDING_TEXT, HOLDING_TEXT, NIGHT_HOLDING_TEXT, SETTLE_SEC, PrmService, event_out
+from src.relay.service import ClaudeRelay
+from src.relay.store import PRM, RelayStore
 
 HOURS = "18:00-09:00"
 # kb 合作政策 第 0.5 节「下班时段」的那句（寄样阶段的过渡话）
@@ -146,7 +149,7 @@ def test_with_the_setting_empty_nothing_changes(clock, tmp_path):
     assert "night" not in meta and packet == {"status": "pending", "route": "review", "meta": {},
                                               "needs_attention": False, "reason": "收件信息齐了"}
     assert texts == [(CREATOR, HOLDING_TEXT)] and events == ["holding_reply"] and attention == "" and alerts == []
-    assert status == {"on": False, "window": "", "inside": False, "suspended": "", "error": ""}
+    assert status == {"on": False, "window": "", "inside": False, "suspended": "", "error": "", "auto": False}
 
 
 # ── rule 1: inside the window, by this PC's clock ─────────────────────────
@@ -348,11 +351,25 @@ def _handed_on(b):
     return b.prm.store.packet_for_job(first["id"])
 
 
-@pytest.mark.parametrize("make, status", [
+def _opening(b):
+    """A 开场白 (our first line to a creator who has not written): always reviewed, its job never told it is night."""
+    party = b.prm.register("wxid_quiet01", "小青", "测试达人")
+    answer = b.prm.ask_opening(b.prm.store.deal_of(party["id"])["id"])
+    job = b.worker_takes()
+    assert job["id"] == answer["job"] and "night" not in job["meta"]
+    b.finish(job["id"], reply("greeting", "小青你好呀～很高兴认识你"))
+    return b.prm.store.packet_for_job(job["id"])
+
+
+# What waits for a person whatever the hour: the night window's and 自动模式's tests alike
+WAITING = [
     (_platform_action, "pending"), (_taken_over, "superseded"), (_paused, "superseded"), (_newer_job, "superseded"),
     (_read_late, "pending"), (_recalled, "pending"), (_system_lane, "pending"), (_buyin, "pending"),
-    (_new_friend, "pending"), (_handed_on, "superseded"),
-], ids=lambda v: getattr(v, "__name__", v))
+    (_new_friend, "pending"), (_handed_on, "superseded"), (_opening, "pending"),
+]
+
+
+@pytest.mark.parametrize("make, status", WAITING, ids=lambda v: getattr(v, "__name__", v))
 def test_what_waits_for_a_person_by_day_waits_at_night_too(bot, tmp_path, make, status):
     bot.tmp = tmp_path
     packet = make(bot)
@@ -445,7 +462,7 @@ def test_a_flagged_draft_goes_as_one_holding_line_and_the_deal_says_so_until_see
     assert bot.prm.store.deal(1)["attention"] == notice
     [alert] = bot.prm.snapshot()["night_alerts"]
     assert alert == {"deal_id": 1, "party_id": 1, "party_name": "小美", "packet": packet["id"], "text": notice,
-                     "at": clock.now}
+                     "at": clock.now, "auto": False}
     assert event_out(bot.prm.store.events(1, limit=1)[0])["name"] == (
         f"夜间自动发出 #{packet['id']}（模型要求注意，发的是一句过渡的话）")
     clock.now += 600
@@ -547,7 +564,7 @@ def test_the_holding_reply_inside_the_window_says_the_nights_words(clock, tmp_pa
 
 def test_the_console_says_where_the_window_stands(bot, clock):
     assert bot.prm.snapshot()["night"] == {"on": True, "window": "18:00–09:00", "inside": True, "suspended": "",
-                                           "error": ""}
+                                           "error": "", "auto": False}
     clock.now = at(9, 30, day=30)
     assert bot.prm.snapshot()["night"]["inside"] is False
     held = drafted(bot, reply("money", "可以给到 30%～"))
@@ -556,3 +573,253 @@ def test_the_console_says_where_the_window_stands(bot, clock):
     held = drafted(bot, reply("money", "可以给到 30%～"), text="那 30% 呢")
     shown = next(p for p in bot.prm.snapshot()["pending"] if p["id"] == held["id"])
     assert shown["night_held"] == "说到了「30%」（超过 25%）" and shown["route"] == "review"
+
+
+# ── 自动模式 (the console's switch, 2026-10-30): the night rules at any hour, until switched off ──────────
+
+# A holding line by 自动模式's rules (kb): no 「明早」, no number
+AUTO_LINE = "好的～这个我记下啦，稍后跟负责人确认好第一时间回您哈！"
+
+
+@pytest.fixture
+def auto_bot(tmp_path):
+    """No 下班时段 set, 14:30, 自动模式 switched on in the console."""
+    b = make_bot(Clock(at(14, 30, day=30)), tmp_path)
+    assert b.prm.set_auto_mode(True)["auto_mode"]["on"] is True
+    yield b
+    b.prm.stop()
+    b.relay.stop()
+
+
+def test_auto_mode_is_off_until_switched_on_and_the_switch_outlives_a_restart(clock, tmp_path, caplog):
+    clock.now = at(14, 30, day=30)
+    b = make_bot(clock, tmp_path)
+    off = {"on": False, "since": None, "by": ""}
+    assert b.prm.auto_mode == off and b.prm.snapshot()["auto_mode"] == off
+    since = clock.now
+    with caplog.at_level(logging.INFO, logger="src.prm.service"):
+        assert b.prm.set_auto_mode(True) == {"ok": True, "auto_mode": {"on": True, "since": since, "by": "console"}}
+        clock.now += 60
+        assert b.prm.set_auto_mode(True)["auto_mode"]["since"] == since      # a double click: the time it went on stays
+    said = [r.getMessage() for r in caplog.records if "auto mode" in r.getMessage()]
+    assert len(said) == 1 and said[0].startswith("PRM: auto mode switched on (console)")
+    assert json.loads(b.prm.store.meta_value(service.AUTO_MODE)) == {"on": True, "since": since, "by": "console"}
+    # the bot restarted on the same database: still on; switched off there, this one reads it at once
+    again = PrmService(config(), ClaudeRelay(config(), store=RelayStore(":memory:"), clock=clock), store=b.prm.store,
+                       clock=clock)
+    assert again.auto_mode == {"on": True, "since": since, "by": "console"}
+    assert again.set_auto_mode(False)["auto_mode"] == {"on": False, "since": clock.now, "by": "console"}
+    assert b.prm.auto_mode["on"] is False and b.prm.snapshot()["night"]["auto"] is False
+    for raw in ("not json", '{"on": "yes"}', '{"on": 1}', "[]", ""):
+        b.prm.store.set_meta_value(service.AUTO_MODE, raw)
+        assert b.prm.auto_mode["on"] is False, raw
+    b.relay.stop()
+
+
+def test_a_plain_draft_goes_out_by_itself_in_auto_mode_and_says_so(auto_bot):
+    b = auto_bot
+    b.prm.handle(b.msg("你好"))
+    job = b.worker_takes()
+    assert job["meta"]["night"] == {"auto": True, "at": "14:30"}              # no window: by day, and the Mac is told
+    b.finish(job["id"], reply("greeting", "好的呀～很高兴认识你"))
+    packet = b.prm.store.packet_for_job(job["id"])
+    assert state(packet) == GOES and packet["meta"] == {"auto_mode": True} and not packet["needs_attention"]
+    assert b.prm.store.gate("greeting")["route"] == "review"                 # its kind has not earned auto
+    assert b.prm.send_approved() == 1 and b.texts == [(CREATOR, "好的呀～很高兴认识你")]
+    [ev] = b.prm.store.events(1)
+    assert ev["detail"] == {"packet": packet["id"], "kind": "greeting", "holding": False, "auto": True}
+    assert event_out(ev)["name"] == f"自动模式发出 #{packet['id']}"
+    shown = next(p for p in b.prm.snapshot()["recent"] if p["id"] == packet["id"])
+    assert (shown["route"], shown["auto_mode"], shown["night_held"]) == ("night", True, "")
+    assert b.prm.store.reviewed("greeting", 0, 20) == [] and b.prm.store.deal(1)["attention"] == ""
+    b.clock.now += 60
+    assert b.prm.decide(packet["id"], "wrong") == {"ok": True, "status": "wrong"}
+    wrong = b.prm.store.events(1, limit=1)[0]
+    assert wrong["detail"] == {"packet": packet["id"], "kind": "greeting", "night": True, "auto": True}
+    assert event_out(wrong)["name"] == "标为发错了（自动模式发出的）"
+    assert b.prm.store.gate("greeting")["reset_at"] == b.clock.now
+
+
+def test_a_flagged_draft_goes_out_in_auto_mode_only_as_one_holding_line_and_the_notice_says_so(auto_bot):
+    b = auto_bot
+    packet = drafted(b, reply("other", AUTO_LINE, needs_attention=True, reason=SAMPLE_REASON, stage_proposal="agreed"),
+                     text="好呀，可以寄来看看")
+    assert state(packet) == GOES and packet["needs_attention"] and packet["meta"] == {"auto_mode": True}
+    assert b.prm.send_approved() == 1 and b.texts == [(CREATOR, AUTO_LINE)]
+    notice = f"自动模式下自动回了过渡的话，要注意：{SAMPLE_REASON}"
+    assert b.prm.store.deal(1)["attention"] == notice
+    [alert] = b.prm.snapshot()["night_alerts"]
+    assert alert == {"deal_id": 1, "party_id": 1, "party_name": "小美", "packet": packet["id"], "text": notice,
+                     "at": b.clock.now, "auto": True}
+    assert event_out(b.prm.store.events(1, limit=1)[0])["name"] == (
+        f"自动模式发出 #{packet['id']}（模型要求注意，发的是一句过渡的话）")
+    assert b.prm.deal_action("night_done", {"deal_id": 1, "packet": packet["id"]}) == {"ok": True}
+    done = b.prm.store.events(1, limit=1)[0]
+    assert done["detail"] == {"packet": packet["id"], "auto": True}
+    assert event_out(done)["name"] == f"自动模式自动回的过渡话 #{packet['id']} 已处理"
+    assert b.prm.store.deal(1)["attention"] == "" and b.prm.snapshot()["night_alerts"] == []
+
+
+@pytest.mark.parametrize("words, why", [
+    ("好的～稍后给您寄 3 顶，记下啦", "有数字"),
+    ("好的～坑位的事我记下啦", "说到了「坑位」"),
+    ("这个我跟老板申请一下哈～", "没有说会记下"),
+], ids=["digit", "坑位", "no-cue"])
+def test_a_flagged_draft_that_is_no_safe_holding_line_waits_and_says_auto_mode(auto_bot, words, why):
+    packet = drafted(auto_bot, reply("other", words, needs_attention=True, reason="拿不准"))
+    assert state(packet) == WAITS and why in packet["meta"]["night_held"] and packet["meta"]["auto_mode"] is True
+    shown = next(p for p in auto_bot.prm.snapshot()["pending"] if p["id"] == packet["id"])
+    assert shown["auto_mode"] is True and why in shown["night_held"]
+    auto_bot.prm.send_approved()
+    assert auto_bot.texts == [] and auto_bot.prm.snapshot()["night_alerts"] == []
+
+
+def test_a_flagged_draft_with_files_waits_and_the_reason_names_auto_mode(auto_bot):
+    packet = pending_packet(auto_bot, reply("material", AUTO_LINE, reason="kb/素材规范.md 拿不准", needs_attention=True,
+                                            attachments_to_send=["assets/a.txt"]), files=[("a.txt", b"a")])
+    assert state(packet) == WAITS
+    assert packet["meta"]["night_held"] == "模型要求注意，草稿还带着文件（自动模式下只发一句过渡的话）"
+
+
+def test_drafts_waiting_when_it_is_switched_on_wait_and_a_job_from_before_says_why(clock, tmp_path):
+    clock.now = at(14, 30, day=30)
+    b = make_bot(clock, tmp_path)
+    b.prm.register("wxid_creator02", "小兰", "测试达人")
+    waiting = drafted(b, reply("greeting", "好的呀～"), text="你好")
+    b.prm.handle(b.msg("在吗", chat="wxid_creator02"))                       # a job made before the switch
+    job = b.worker_takes()
+    assert "night" not in job["meta"] and state(waiting) == WAITS
+    b.prm.set_auto_mode(True)
+    b.prm.tick()                                                             # the sender thread's round
+    assert state(b.prm.store.packet(waiting["id"])) == WAITS and b.texts == []
+    b.finish(job["id"], reply("greeting", "在的呀～"))
+    held = b.prm.store.packet_for_job(job["id"])
+    assert state(held) == WAITS and held["meta"]["auto_mode"] is True
+    assert held["meta"]["night_held"] == ("草稿任务建的时候自动模式还没打开（或者电脑时间和微信对不上），"
+                                          "Mac 起草时不知道是自动模式")
+    assert state(drafted(b, reply("greeting", "好的呀～"), text="好的")) == GOES      # the next job is told
+    b.relay.stop()
+
+
+def test_switched_off_the_drafts_wait_for_a_person_again(auto_bot):
+    """Pressed again: a draft whose job was made while it was on waits as by day, its packet says nothing of the night
+    rules, the next job is told nothing, the holding reply says the day's words."""
+    b = auto_bot
+    b.prm.handle(b.msg("你好"))
+    job = b.worker_takes()
+    assert job["meta"]["night"]["auto"] is True
+    assert b.prm.set_auto_mode(False)["auto_mode"]["on"] is False
+    b.finish(job["id"], reply("greeting", "好的呀～"))
+    packet = b.prm.store.packet_for_job(job["id"])
+    assert state(packet) == WAITS and packet["meta"] == {}
+    b.prm.handle(b.msg("在吗"))
+    later = b.worker_takes()
+    assert "night" not in later["meta"]
+    b.finish(later["id"], reply("greeting", "在的呀～"))
+    assert state(b.prm.store.packet_for_job(later["id"])) == WAITS
+    b.clock.now += 11 * 60
+    assert b.prm.send_holding_replies() == 1 and b.texts == [(CREATOR, HOLDING_TEXT)]
+    assert b.prm.snapshot()["night"] == {"on": False, "window": "", "inside": False, "suspended": "", "error": "",
+                                         "auto": False}
+
+
+def test_while_this_pcs_clock_is_off_auto_mode_sends_nothing_by_itself(auto_bot):
+    b = auto_bot
+    first = drafted(b, reply(text="好的呀～"), text="你好")
+    assert state(first) == GOES and b.prm.send_approved() == 1
+    b.prm.on_own_message(own(b, "好的呀～", b.clock.now - 3 * 3600))          # read back: this PC is 3 hours fast
+    status = b.prm.snapshot()["night"]
+    assert status["auto"] is True and status["on"] is False
+    assert "比微信快 3 小时：自动模式先不自动发" in status["suspended"]
+    b.prm.handle(b.msg("在吗"))
+    job = b.worker_takes()
+    assert "night" not in job["meta"]                                        # not told
+    b.finish(job["id"], reply(text="在的呀～"))
+    held = b.prm.store.packet_for_job(job["id"])
+    assert state(held) == WAITS and held["meta"]["night_held"] == "这台电脑的时间和微信对不上，自动模式先不自动发"
+    b.clock.now += 11 * 60
+    assert b.prm.send_holding_replies() == 1 and b.texts[-1] == (CREATOR, HOLDING_TEXT)    # the day's words
+    b.prm.on_own_message(own(b, HOLDING_TEXT, b.clock.now - 2))              # put right: measured again
+    assert b.prm.snapshot()["night"]["suspended"] == ""
+    assert state(drafted(b, reply(text="好的呀～"), text="好的")) == GOES
+
+
+def test_a_clock_notice_left_by_a_run_before_suspends_auto_mode_too(auto_bot):
+    b = auto_bot
+    b.prm.store.set_notice(1, "clock", service.clock_note(2 * 3600), b.clock.now, touch=False)
+    suspended = b.prm.snapshot()["night"]["suspended"]
+    assert "上次运行" in suspended and "自动模式先不自动发" in suspended
+    held = drafted(b, reply(text="好的呀～"), text="你好")
+    assert state(held) == WAITS and held["meta"]["night_held"] == "这台电脑的时间和微信对不上，自动模式先不自动发"
+
+
+def test_inside_the_window_auto_mode_speaks_the_nights_words_and_by_day_its_own(clock, tmp_path):
+    clock.now = at(21, 30)
+    b = make_bot(clock, tmp_path, prm_night_auto_hours=HOURS)
+    b.prm.set_auto_mode(True)
+    assert b.prm.snapshot()["night"] == {"on": True, "window": "18:00–09:00", "inside": True, "suspended": "",
+                                         "error": "", "auto": False}
+    b.prm.handle(b.msg("好呀，可以寄来看看"))
+    job = b.worker_takes()
+    assert job["meta"]["night"] == {"window": HOURS, "at": "21:30"}
+    b.finish(job["id"], reply("other", SAMPLE_LINE, needs_attention=True, reason=SAMPLE_REASON))
+    night = b.prm.store.packet_for_job(job["id"])
+    assert state(night) == GOES and night["meta"] == {}
+    assert b.prm.send_approved() == 1
+    assert b.prm.store.deal(1)["attention"] == f"夜间已自动回了过渡的话，要注意：{SAMPLE_REASON}"
+    assert b.prm.snapshot()["night_alerts"][0]["auto"] is False
+    assert event_out(b.prm.store.events(1, limit=1)[0])["name"].startswith(f"夜间自动发出 #{night['id']}")
+    clock.now += 60
+    assert state(drafted(b, reply("money", "可以给到 30%～"), text="能给 30% 吗")) == WAITS
+    clock.now += 11 * 60
+    assert b.prm.send_holding_replies() == 1 and b.texts[-1] == (CREATOR, NIGHT_HOLDING_TEXT)
+    # the next day at 14:00, still on: 自动模式's own words
+    clock.now = at(14, 0, day=30)
+    status = b.prm.snapshot()["night"]
+    assert (status["inside"], status["auto"]) == (False, True)
+    b.prm.handle(b.msg("那 25% 呢"))
+    job = b.worker_takes()
+    assert job["meta"]["night"] == {"auto": True, "at": "14:00"}
+    b.finish(job["id"], reply("money", "可以给到 30%～"))
+    day = b.prm.store.packet_for_job(job["id"])
+    assert state(day) == WAITS and day["meta"] == {"auto_mode": True, "night_held": "说到了「30%」（超过 25%）"}
+    clock.now += 11 * 60
+    assert b.prm.send_holding_replies() == 1 and b.texts[-1] == (CREATOR, AUTO_HOLDING_TEXT)
+    b.relay.stop()
+
+
+def test_the_holding_reply_in_auto_mode_by_day_says_no_mingzao(auto_bot):
+    assert "明早" not in AUTO_HOLDING_TEXT and gates.night_holding_ok(AUTO_HOLDING_TEXT)
+    assert gates.night_holding_ok(AUTO_LINE)
+    held = drafted(auto_bot, reply("money", "可以给到 30%～"))
+    assert state(held) == WAITS
+    auto_bot.clock.now += 11 * 60
+    assert auto_bot.prm.send_holding_replies() == 1 and auto_bot.texts == [(CREATOR, AUTO_HOLDING_TEXT)]
+    assert auto_bot.prm.store.events(1, limit=1)[0]["detail"]["text"] == AUTO_HOLDING_TEXT
+
+
+@pytest.mark.parametrize("make, status", WAITING, ids=lambda v: getattr(v, "__name__", v))
+def test_what_waits_for_a_person_by_day_waits_in_auto_mode_too(auto_bot, tmp_path, make, status):
+    auto_bot.tmp = tmp_path
+    packet = make(auto_bot)
+    assert packet["status"] == status and packet["route"] == "review"
+    auto_bot.prm.send_approved()
+    assert packet["text"] not in [text for _, text in auto_bot.texts]
+
+
+def test_the_console_says_when_auto_mode_is_what_puts_the_night_rules_in_force(clock, tmp_path):
+    clock.now = at(14, 30, day=30)
+    b = make_bot(clock, tmp_path, prm_night_auto_hours=HOURS)
+    b.prm.set_auto_mode(True)
+    snap = b.prm.snapshot()
+    assert snap["auto_mode"] == {"on": True, "since": clock.now, "by": "console"}
+    assert snap["night"] == {"on": True, "window": "18:00–09:00", "inside": False, "suspended": "", "error": "",
+                             "auto": True}
+    clock.now = at(21, 30, day=30)
+    assert b.prm.snapshot()["night"]["auto"] is False                        # inside the window: the night's own
+    b.relay.stop()
+    plain = make_bot(clock, tmp_path / "plain")                              # no window at all
+    plain.prm.set_auto_mode(True)
+    assert plain.prm.snapshot()["night"] == {"on": False, "window": "", "inside": False, "suspended": "", "error": "",
+                                             "auto": True}
+    plain.relay.stop()
