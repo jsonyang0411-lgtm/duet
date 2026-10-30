@@ -666,6 +666,62 @@ class TestPrmPages:
         assert "发错了" in recent.inner_text() and "标为发错了" not in recent.inner_text()
         assert [e["kind"] for e in prm.service.store.events(1, limit=1)] == ["wrong"]
 
+    def test_review_page_switches_auto_mode_on_after_asking_and_off_with_one_press(self, page, prm):
+        """自动模式 (2026-10-30): the switch at the top of 待审批 asks first and says what happens; on, 待审批 and 合作单 say
+        since when, the night status line says it is what applies, the draft waiting already still waits, and what it
+        sent by itself is tagged 自动模式发出 (its 标为发错了 says so); off is one press, no question."""
+        import json as _json
+        import time as _time
+        from src.prm.service import SETTLE_SEC
+
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        bar = page.locator(".prm-auto")
+        bar.get_by_text("自动模式关着").wait_for()
+        bar.locator("button:has-text('打开自动模式')").click()
+        dialog = page.locator("[role=dialog]")
+        text = dialog.inner_text()
+        for expected in ("打开自动模式？", "不经你审批直接发出", "拿不准的只回一句过渡的话",
+                         "投诉、平台动作、新好友的第一份草稿、开场白", "再按一下「关掉自动模式」就关掉"):
+            assert expected in text
+        dialog.locator("button:has-text('再想想')").click()
+        dialog.wait_for(state="detached")
+        assert prm.service.auto_mode["on"] is False                           # nothing until it is confirmed
+        bar.locator("button:has-text('打开自动模式')").click()
+        dialog.locator("button:has-text('打开自动模式')").click()
+        since = _time.strftime("%H:%M", _time.localtime(prm.clock.now))
+        bar.get_by_text(f"自动模式开着（{since} 打开）").wait_for()
+        assert prm.service.auto_mode["on"] is True and bar.locator("button:has-text('关掉自动模式')").count() == 1
+        assert "下班时段自动回复：关着（自动模式开着，照下班时段的规则自动发）" in page.locator(".prm-gates").inner_text()
+        assert prm.service.store.packet(2)["status"] == "pending"              # the draft waiting already still waits
+        # her next message is drafted in 自动模式 and goes out by itself
+        prm.service.handle({"chat_id": "wxid_creator01", "sender_id": "wxid_creator01", "content": "好的谢谢",
+                            "msg_type": 1, "is_group": False, "timestamp": prm.clock.now})
+        prm.clock.now += SETTLE_SEC + 1
+        job = prm.relay.next_job(0, ("prm",))
+        assert job["meta"]["night"]["auto"] is True
+        draft = {"intent": "道谢", "slots": {}, "stage_proposal": "", "message_kind": "greeting",
+                 "reply_draft": "不客气呀～有事随时找我哈", "attachments_to_send": [], "needs_attention": False,
+                 "reason": "kb/合作政策.md"}
+        prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(draft, ensure_ascii=False)})
+        prm.relay.tick()
+        assert prm.service.send_approved() == 1 and prm.sent[-1] == ("wxid_creator01", "不客气呀～有事随时找我哈")
+        page.reload()
+        row = page.locator(".prm-recent tr", has_text="不客气呀")
+        row.locator(".tag", has_text="自动模式发出").wait_for()
+        assert "夜间自动发出" not in page.locator(".prm-recent").inner_text()
+        row.locator("button:has-text('标为发错了')").click()
+        assert "这条是自动模式自动发出的" in dialog.inner_text()
+        dialog.locator("button:has-text('不标')").click()
+        dialog.wait_for(state="detached")
+        # 合作单 says it is on too
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.locator(".prm-auto-note").get_by_text(f"自动模式开着（{since} 打开）").wait_for()
+        # off: one press, no question
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        bar.locator("button:has-text('关掉自动模式')").click()
+        bar.get_by_text("自动模式关着").wait_for()
+        assert dialog.count() == 0 and prm.service.auto_mode["on"] is False
+
 
     @pytest.fixture
     def night(self):
