@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   ArrowClockwise, UserPlus, Prohibit, ArrowCounterClockwise, CaretDown, CaretRight, Eye, EyeSlash, Truck, Check, HandWaving,
+  UsersThree, Copy,
 } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
 import { usePrm, partyAction, dealAction, revealNumbers, setupProblems, eventText, MODE_TAGS, ACTORS } from '../lib/prm'
-import { PageHead, Card, Note, Empty, Field, TextInput, Select, Seg } from './ui'
+import { PageHead, Card, Note, Empty, Field, TextInput, Select, Seg, Confirm } from './ui'
 import { AdvancedFields } from './AdvancedPanel'
 import { FriendAddPasteCard } from './FriendAddCard'
 
@@ -314,6 +315,8 @@ function DealDetail({ p, d, onDone }) {
         </div>
       )}
 
+      {d?.three_party?.enabled && <ThreePartyBlock p={p} d={d} busy={busy} run={run} />}
+
       <div className="stack" style={{ gap: 6 }}>
         <b>寄样</b>
         {deal.shipment
@@ -383,6 +386,85 @@ function DealDetail({ p, d, onDone }) {
             </div>
           ))}
         </div>
+      )}
+    </div>
+  )
+}
+
+
+/** 三方群 (src/prm/three_party.py, 2026-10-30): 「拉三方群」 makes the group in this PC's WeChat (her and PRM_GROUP_WITH,
+ *  picked in 「发起群聊」 and read back before 「完成」; nothing is said in it and it is not renamed: the suggested name is
+ *  there to copy); 「先试一下」 picks them and cancels.  A run that may or may not have made it asks 「建好了 / 没建成」. */
+function ThreePartyBlock({ p, d, busy, run }) {
+  const toast = useToast()
+  const [asking, setAsking] = useState(false)
+  const tp = d.three_party || {}
+  const g = p.deal.three_party || {}
+  const names = (tp.with || []).join('、')
+  const suggested = String(tp.name_template || '{昵称}').replace('{昵称}', p.name)
+  const working = tp.busy === p.deal.id
+  const making = g.state === 'creating'
+  const why = tp.why || (!p.active ? '已停用的达人不拉群' : '') || (tp.busy && !working ? '另一个群正在建，等它好了再点' : '')
+  const copyName = async () => {
+    try {
+      await navigator.clipboard.writeText(suggested)
+      toast.ok(`群名已复制：在手机微信里打开这个群 › 群聊名称，粘贴「${suggested}」`)
+    } catch { toast.err(`没能放进剪贴板：群名是「${suggested}」`) }
+  }
+  const tried = g.tried
+  return (
+    <div className="stack prm-group" style={{ gap: 6 }}>
+      <b>三方群</b>
+      {g.state === 'created' && (
+        <>
+          <div><UsersThree style={{ verticalAlign: -2 }} /> 三方群已建好（{fmtClock(g.at)}{g.made ? '' : '，手动标的'}）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span className="f-hint">建议在手机微信里把群名改成「{suggested}」（机器人不改群名，也不在群里说话）。</span>
+            <button type="button" className="btn sm" onClick={copyName}><Copy />复制群名</button>
+            <button type="button" className="btn sm ghost" disabled={busy}
+              onClick={() => run({ action: 'group_none' }, '记下了：这位达人现在没有三方群')}>群已经不在了</button>
+          </div>
+        </>
+      )}
+      {g.state === 'unsure' && (
+        <>
+          <Note kind="warn">不确定建没建成：{g.why}</Note>
+          <div className="row" style={{ gap: 8 }}>
+            <button type="button" className="btn primary" disabled={busy} onClick={() => run({ action: 'group_made' }, '记下了：三方群建好了')}><Check />建好了</button>
+            <button type="button" className="btn" disabled={busy} onClick={() => run({ action: 'group_none' }, '记下了：没建成，可以再拉一次')}>没建成</button>
+          </div>
+        </>
+      )}
+      {(making || working) && (
+        <Note kind="warn">{making ? '正在这台电脑的微信里建群' : '正在试（不建群）'}：大约半分钟，请别动键盘鼠标。</Note>
+      )}
+      {(!g.state || g.state === 'failed') && !working && (
+        <>
+          {g.state === 'failed' && <Note kind="need">上次没建成：{g.why}</Note>}
+          <div className="f-hint">
+            谈到寄样时拉三方群：机器人在这台电脑微信的「发起群聊」里搜她和 {names}，各自恰好搜到一个才勾上，读一遍已选的人没错才点「完成」。
+            它不在群里说话，也不改群名。第一次用之前可以先点「先试一下」：勾上再取消，不建群。
+          </div>
+          {tried && (
+            <div className={tried.ok ? 'f-hint' : 'f-err'}>{fmtClock(tried.at)} 试过：{tried.message}</div>
+          )}
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <button type="button" className="btn primary" disabled={busy || !!why} onClick={() => setAsking(true)}><UsersThree />拉三方群</button>
+            <button type="button" className="btn" disabled={busy || !!why} onClick={() => run({ action: 'group_try' }, '在试了：大约半分钟，别动键盘鼠标')}>先试一下（不建群）</button>
+            <button type="button" className="btn sm ghost" disabled={busy}
+              onClick={() => run({ action: 'group_made' }, '记下了：三方群建好了')}>已经手动建好了</button>
+            {why && <span className="dim">{why}</span>}
+          </div>
+        </>
+      )}
+      {asking && (
+        <Confirm title={`给 ${p.name} 拉三方群？`} confirmLabel="拉群" cancelLabel="再想想" busy={busy}
+          onConfirm={() => { setAsking(false); run({ action: 'group' }, '开始建群了：大约半分钟，别动键盘鼠标') }}
+          onCancel={() => setAsking(false)}>
+          机器人会在这台电脑的微信里点「+」›「发起群聊」，搜她在微信里的名字和 {names}，各自恰好搜到一个才勾上，读一遍已选的人没错才点「完成」。
+          接下来大约半分钟它会操作微信窗口，请别动键盘鼠标。点一次只建一个群，不会自动重试。机器人不会在群里说话；
+          群建好以后，请在手机上把群名改成「{suggested}」。
+        </Confirm>
       )}
     </div>
   )

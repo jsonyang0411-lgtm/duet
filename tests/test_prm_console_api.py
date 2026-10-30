@@ -775,3 +775,60 @@ def test_a_new_friend_a_record_points_at_is_marked_in_the_candidates_and_not_her
         assert "friend_add" not in next(c for c in d["candidates"] if c["wxid"] == "meimei_88")
     finally:
         server.register_new_friends(None)
+
+
+def test_three_party_is_shown_and_made_from_the_running_console_and_refused_while_stopped(tmp_path, monkeypatch):
+    """三方群 (src/prm/three_party.py, 2026-10-30): GET /api/prm's ``three_party`` (who goes in besides her, the suggested
+    name with the brand filled in) and each deal's; POST /api/prm/deals group / group_try / group_made / group_none
+    while running; a stopped bot shows PRM_GROUP_WITH from .env and says it cannot make one."""
+    from test_three_party import BOSS, HER, NEW_GROUP, Admin, Auto, Backend
+
+    clock = Clock()
+    cfg = SimpleNamespace(claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1",
+                          claude_relay_port=0, claude_relay_prefix="cc", claude_relay_wxids=[],
+                          claude_relay_db=":memory:", claude_relay_max_chars=1500, admin_wxid="wxid_admin",
+                          prm_copilot="on", prm_db=":memory:", prm_group_with=BOSS, prm_friend_add_brand="品牌测试")
+    relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=clock, files_dir=tmp_path / "relay")
+    prm = PrmService(cfg, relay, store=PrmStore(":memory:"), clock=clock, send=lambda c, t: True)
+    party = prm.register(CREATOR, "小美", "测试达人")
+    backend = Backend()
+    admin = Admin(backend)
+    prm.three_party.attach(admin, Auto(), backend)
+    prm.three_party.spawn = lambda fn: fn()
+    prm.three_party._sleep = lambda s: None
+    server.register_prm(prm)
+    try:
+        def deal_group():
+            d = call("/api/prm")[1]
+            return d["three_party"], next(p["deal"]["three_party"] for p in d["parties"] if p["id"] == party["id"])
+
+        deal_id = prm.store.deal_of(party["id"])["id"]
+        assert deal_group() == ({"enabled": True, "with": [BOSS], "why": "", "busy": None,
+                                 "name_template": "品牌测试×{昵称}"}, {})
+        assert call("/api/prm/deals", "POST", {"action": "group_try", "deal_id": deal_id})[1] == {"ok": True,
+                                                                                                    "state": "trying"}
+        assert deal_group()[1]["tried"]["ok"] is True and admin.calls == [([HER, BOSS], True)]
+        assert call("/api/prm/deals", "POST", {"action": "group", "deal_id": deal_id})[1]["ok"] is True
+        shown = deal_group()[1]
+        assert (shown["state"], shown["label"], shown["made"], shown["chat_name"]) == ("created", "已建好", True,
+                                                                                       f"{BOSS}、{HER}")
+        assert prm.store.deal(deal_id)["three_party"]["chat"] == NEW_GROUP
+        assert call("/api/prm/deals", "POST", {"action": "group_none", "deal_id": deal_id})[1]["ok"] is True
+        assert deal_group()[1] == {"tried": shown["tried"]}
+        assert call("/api/prm/deals", "POST", {"action": "group_made", "deal_id": deal_id})[1]["ok"] is True
+        assert (deal_group()[1]["state"], deal_group()[1]["made"]) == ("created", False)
+    finally:
+        server.register_prm(None)
+        relay.stop()
+    monkeypatch.chdir(tmp_path)                                    # the bot stopped
+    monkeypatch.delenv("PRM_DB", raising=False)
+    monkeypatch.setenv("PRM_COPILOT", "on")
+    monkeypatch.setenv("PRM_GROUP_WITH", f"{BOSS}，王总测试")
+    monkeypatch.setenv("PRM_FRIEND_ADD_BRAND", "品牌测试")
+    assert call("/api/prm/parties", "POST", {"action": "add", "wxid": CREATOR, "name": "小美"})[1]["ok"] is True
+    d = call("/api/prm")[1]
+    assert d["three_party"] == {"enabled": True, "with": [BOSS, "王总测试"], "why": "机器人没有运行", "busy": None,
+                                "name_template": "品牌测试×{昵称}"}
+    for action in ("group", "group_try", "group_made", "group_none"):
+        assert call("/api/prm/deals", "POST", {"action": action, "deal_id": 1})[1] == {
+            "ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能拉群"}

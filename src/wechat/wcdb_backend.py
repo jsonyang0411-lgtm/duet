@@ -1299,6 +1299,50 @@ class WcdbBackend(AbstractWeChatBackend):
         if self._private_filter is not None:
             self._save_private_names({wxid: name})
 
+    # ── 三方群 (src/prm/three_party.py) ──────────────────────────────
+
+    def chat_target(self, talker: str) -> tuple[str, str]:
+        """The name the window types to reach this chat (``_window_target``, a send's) and why it may not be used
+        ("" = it may): 三方群 searches her by that name in WeChat's 「发起群聊」 window, so a name another chat has too
+        is refused as a send is."""
+        name, refused = self._window_target(str(talker or ""))
+        return name, (str(getattr(refused, "reason", "") or "不能用这个名字") if refused is not None else "")
+
+    def group_ids(self) -> Optional[set]:
+        """The group chats of WeChat's session list now (their ids), read beside the poll loop (``with_client``):
+        what was there before a group is made.  None while the database cannot be read."""
+        def read(client) -> set:
+            return {str(s.get("username") or "") for s in client.get_sessions() or [] if isinstance(s, dict)
+                    and str(s.get("username") or "").endswith("@chatroom")}
+        try:
+            return self.with_client(read)
+        except Exception:
+            logger.warning("三方群: the session list could not be read", exc_info=True)
+            return None
+
+    def find_group_with(self, member: str, known) -> Optional[dict]:
+        """A group chat of the session list now that is not in ``known`` (``group_ids`` from before it was made) and
+        has ``member`` (a wxid) among its members: ``{"chat", "name", "members"}`` (its id, the name WeChat gives it,
+        how many are in it), or None (not there yet, or the database cannot be read)."""
+        known = set(known or ())
+
+        def read(client) -> Optional[dict]:
+            for session in client.get_sessions() or []:
+                chat = str((session or {}).get("username") or "") if isinstance(session, dict) else ""
+                if not chat.endswith("@chatroom") or chat in known:
+                    continue
+                users = [str(m.get("username") or m.get("userName") or "") for m in client.get_group_members(chat) or []
+                         if isinstance(m, dict)]
+                if member in users:
+                    names = client.get_display_names([chat]) or {}
+                    return {"chat": chat, "name": str(names.get(chat) or ""), "members": len(users)}
+            return None
+        try:
+            return self.with_client(read)
+        except Exception:
+            logger.warning("三方群: the new group could not be looked for", exc_info=True)
+            return None
+
     def catch_up_chat(self, talker: str, name: str, since: float, sink) -> None:
         """Hand a private chat's messages written since ``since`` to ``sink(messages)`` on the chat's
         next poll, past the route (they may be stored already): a new friend just registered as a

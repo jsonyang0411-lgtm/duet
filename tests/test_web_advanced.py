@@ -173,6 +173,17 @@ class AdvancedPostTests(_TempEnv):
         self.assertIn("PRM_FRIEND_ADD_BRAND", body["errors"])
         self.assertNotIn("PRM_FRIEND_ADD", body["errors"])
 
+    def test_the_group_settings_are_shown_and_their_errors_land_on_them(self):
+        """三方群 (src/prm/three_party.py): PRM_GROUP_WITH empty by default (no 「拉三方群」), PRM_GROUP_NAME's default; a bad
+        value is refused on its own field."""
+        groups = _request("/api/advanced")[1]["groups"]
+        fields = {f["key"]: f for g in groups for f in g["fields"]}
+        self.assertEqual((fields["PRM_GROUP_WITH"]["value"], fields["PRM_GROUP_NAME"]["value"]), ("", "{品牌}×{昵称}"))
+        for key, value in (("PRM_GROUP_WITH", "a,b,c,d"), ("PRM_GROUP_NAME", "三方群")):
+            status, body = _request("/api/advanced", "POST", {"values": {key: value}})
+            self.assertFalse(body["ok"])
+            self.assertEqual(list(body["errors"]), [key], body)
+
     def test_the_remark_can_be_saved_empty_and_stays_empty(self):
         """PRM_FRIEND_ADD_REMARK (加百应达人微信, 功能 R): unset shows the default; saved empty it stays empty (no remark),
         where any other empty text field would be its default; a bad one is refused on its own field."""

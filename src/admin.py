@@ -203,6 +203,24 @@ class AdminCommandHandler:
             res["paused"] = self._pause_auto("添加好友时微信提示操作太频繁")
         return res
 
+    def create_group_checked(self, members, *, dry_run: bool = False) -> dict:
+        """One ``create_group`` call (三方群, src/prm/three_party.py: the 「发起群聊」 window, ``dry_run`` for 「先试一下」)
+        with the 添加好友 command's breaker: WeChat's risk prompt pauses the auto-accept too (``paused``: the words
+        saying so).  No friend manager: ``reason`` ``no_manager``; an exception: logged, ``reason`` ``error``."""
+        create = getattr(self._friend, "create_group", None)
+        if not callable(create):
+            return {"ok": False, "reason": "no_manager", "message": f"{NO_FRIEND_MANAGER}拉群操作"}
+        try:
+            res = create(list(members), dry_run=dry_run)
+        except Exception:
+            logger.exception("ADMIN: 拉群 failed")
+            return {"ok": False, "reason": "error", "message": "拉群时出错，已中止（详见日志）：请在微信里看一下群建了没有"}
+        res = dict(res) if isinstance(res, dict) else {"ok": False, "reason": "error",
+                                                         "message": "拉群时出错，已中止：请在微信里看一下群建了没有"}
+        if res.get("reason") == "risk":                  # WeChat holds the account back
+            res["paused"] = self._pause_auto("拉群时微信提示操作太频繁")
+        return res
+
     def _cmd_add_friend(self, content: str) -> str:
         """Handle the '添加好友' command."""
         if self._friend is None:

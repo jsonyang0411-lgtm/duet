@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -106,6 +107,21 @@ APPLY_WORDS = ("标签", "权限", "朋友圈", "仅聊天", "不让", "不看",
 # Words of the application window worth naming in the log when no remark field was seen (never anything she wrote)
 APPLY_LANDMARKS = ("发送添加朋友申请", *REMARK_LABELS, "标签", "朋友权限", "设置朋友权限", "确定", "取消")
 REMARK_MAX_CHARS = 32
+# 三方群 (src/prm/three_party.py, 2026-10-30): a group of this account and a few contacts, made through WeChat 4.0's (+)
+# menu → 「发起群聊」 → its contact picker, a window of its own.  Neither the menu item's place nor the picker's title or
+# layout was read on a real machine yet, so the item is found by OCR (by its place, the menu's top one, only when OCR
+# reads nothing of the menu; the window that opens must then carry one of the picker's own titles) and in the picker
+# nothing is clicked that OCR does not read: its search box (「搜索」), each member's one row reading exactly that name in
+# the list (its left part), 「完成」.  Before 「完成」 what is picked (its right part) is read back: exactly the members.
+GROUP_MENU_LABELS = ("发起群聊",)
+GROUP_PICKER_TITLES = ("发起群聊", "选择联系人", "创建群聊")
+GROUP_MENU_ITEM_Y = 0.17          # 「发起群聊」 in the (+) menu: the top of its three items (添加朋友 is at 0.51)
+GROUP_SPLIT_X = 0.5               # a picker row whose centre is left of this is in the list, else among the picked
+GROUP_DONE = re.compile(r"(完成|确定)([(（]\d+[)）])?")
+GROUP_PICKER_WORDS = ("搜索", "完成", "取消", "确定", "发起群聊", "选择联系人", "创建群聊", "已选择", "联系人", "请勾选",
+                      "群聊", "最近", "星标", "全选", "多选", "添加成员")
+GROUP_MEMBERS_MAX = 4
+GROUP_NAME_MAX_CHARS = 30
 
 
 class _Abort(Exception):
@@ -241,6 +257,24 @@ def _risk_line(rows: list[dict], seen=frozenset()) -> str:
 def _risk_failure(keyword: str, risk: str) -> dict:
     return _failure(keyword, "risk", f"微信提示「{risk}」，可能是操作太频繁被限制了，已停止：先别再加好友、同意好友，"
                                      "过几个小时再试")
+
+
+def _name_key(text) -> str:
+    """A contact's name as OCR reads it back: letters, digits and CJK only (no emoji, symbols or spaces), no case
+    (src/wechat/wcdb_backend.py's ``_ocr_key``, the send path's check of the chat it opened)."""
+    return "".join(ch for ch in str(text or "") if ch.isalnum()).casefold()
+
+
+def _group_failure(reason: str, message: str, **extra) -> dict:
+    return {"ok": False, "reason": reason, "message": message, **extra}
+
+
+def _picker_landmarks(rows: list[dict]) -> str:
+    """The 「发起群聊」 window's own words OCR read and where (``GROUP_PICKER_WORDS`` only: never a contact's name), for
+    the log line of a picker that did not look as expected."""
+    seen = [f"{_label_text(r)}@({_centre(r)[0]:.2f},{_centre(r)[1]:.2f})" for r in rows
+            if any(word in _label_text(r) for word in GROUP_PICKER_WORDS)]
+    return ", ".join(seen[:12]) or "none of its words"
 
 
 def print_main_window(hwnd: int):
@@ -935,21 +969,13 @@ class FriendManager:
         a chat open in a window of its own got its input box cleared and the greeting sent into it."""
         return self._find_new_dialog(main_hwnd, before, APPLY_DIALOG_TITLES, cls=DIALOG_CLASS, exclude=(dialog_hwnd,))
 
-    def _open_add_friend_dialog_wechat4(self, main_hwnd: int) -> int | None:
-        if sys.platform != "win32":
-            return None
-        _safe_ensure_default_desktop()
+    def _plus_menu(self, main_hwnd: int) -> int | None:
+        """WeChat 4.0's (+) menu beside the search box (添加朋友, 发起群聊): the main window in front, Ctrl+1 (the chat
+        tab, where the (+) is), then the (+) clicked by its place until the menu shows (a window of WeChat's process
+        of class …ToolSaveBits; one open already is used), at most twice.  Its window, or None (a click not
+        delivered, no menu)."""
         import win32gui, win32process
         _, main_pid = win32process.GetWindowThreadProcessId(main_hwnd)
-
-        # Class and size also fit a chat opened in a window of its own, so a window that is
-        # already open is used only if its title says it is the add-friend window (one left
-        # over from an earlier run); otherwise only a window that appears now counts.
-        before = self._add_dialog_candidates(main_hwnd)
-        for h in before:
-            title = win32gui.GetWindowText(h)
-            if title in ADD_DIALOG_TITLES and not self._is_chat_title(title):
-                return h
 
         # 确保微信主窗口被激活并置于前台
         if self._window is not None:
@@ -994,7 +1020,27 @@ class FriendManager:
                 self._sleep(0.2)
 
         if not menu_hwnd:
-            logger.warning("_open_add_friend_dialog_wechat4: popup menu not found after clicking (+)")
+            logger.warning("Friend management: the (+) popup menu was not found after clicking (+)")
+            return None
+        return menu_hwnd
+
+    def _open_add_friend_dialog_wechat4(self, main_hwnd: int) -> int | None:
+        if sys.platform != "win32":
+            return None
+        _safe_ensure_default_desktop()
+        import win32gui
+
+        # Class and size also fit a chat opened in a window of its own, so a window that is
+        # already open is used only if its title says it is the add-friend window (one left
+        # over from an earlier run); otherwise only a window that appears now counts.
+        before = self._add_dialog_candidates(main_hwnd)
+        for h in before:
+            title = win32gui.GetWindowText(h)
+            if title in ADD_DIALOG_TITLES and not self._is_chat_title(title):
+                return h
+
+        menu_hwnd = self._plus_menu(main_hwnd)
+        if not menu_hwnd:
             return None
 
         self._foreground(main_hwnd)
@@ -1294,6 +1340,226 @@ class FriendManager:
             "target": keyword,
             "message": f"已成功向「{keyword}」发送好友申请" + (f"（附言：{message}）" if message else ""),
         }
+
+    # ── 三方群: a group of this account and a few contacts (WeChat 4.0) ──
+
+    def create_group(self, members: Iterable[str], *, dry_run: bool = False) -> dict:
+        """A WeChat group of this account and ``members``: the names to search in WeChat 4.0's 「发起群聊」 window (her
+        chat's name and the people of PRM_GROUP_WITH, src/prm/three_party.py), each of which must be exactly one row of
+        the picker's list; at most GROUP_MEMBERS_MAX, none twice.  ``dry_run`` (「先试一下」): everything up to 「完成」
+        (each one found and picked, the picked ones read back), then the window is closed and nothing is made.
+
+        Nothing is said in the group and it is not renamed (the bot never speaks in groups; WeChat's chat-info icon has
+        no text to read).  Returns ``{"ok": True, "message", "picked"}`` (and ``dry_run``), or ``{"ok": False, "reason",
+        "message"}``: invalid / no_ocr / no_window / unsupported / no_picker / not_found / namesake / not_picked / extra
+        / no_done / aborted (nothing was made, the window it opened is closed) or not_created / risk / error (「完成」 may
+        have been clicked: the message says to look in WeChat).  Names are never logged."""
+        names = [" ".join(str(m or "").split()) for m in members or ()]
+        keys = [_name_key(n) for n in names]
+        if (not names or len(names) > GROUP_MEMBERS_MAX or not all(keys) or len(set(keys)) != len(keys)
+                or any(len(n) > MAX_KEYWORD_CHARS for n in names)):
+            return _group_failure("invalid", f"要拉进群的人不对：1～{GROUP_MEMBERS_MAX} 个不重复的名字，"
+                                             "每个名字里要有字母、数字或汉字")
+        if self._ocr is None:
+            return _group_failure("no_ocr", "拉群需要屏幕识别（OCR），当前不可用")
+        try:
+            with self._ui_session() as hwnd:
+                if hwnd is None:
+                    return _group_failure("no_window", "未找到微信主窗口或无法切到前台，请确保微信已启动")
+                if not self._is_wechat4(hwnd):
+                    return _group_failure("unsupported", "这台电脑的微信不是 4.0 的界面，机器人只会在 4.0 里拉群：请在微信里手动建")
+                try:
+                    return self._create_group_wechat4(hwnd, names, dry_run)
+                except _Abort as e:
+                    logger.warning("create_group stopped: %s", e)
+                    return _group_failure("aborted", f"微信窗口状态异常，已中止，没有建群：{e}")
+        except Exception:
+            # Not an _Abort: a pywin32 error, a window handle gone.  The picker it opened was closed
+            # (_create_group_wechat4), the window put back and the focus returned (_ui_session).
+            logger.exception("create_group failed")
+            return _group_failure("error", "拉群时出错，已中止（详见日志）：请在微信里看一下群建了没有")
+
+    def _create_group_wechat4(self, hwnd: int, members: list[str], dry_run: bool) -> dict:
+        """``create_group`` in the window session: the picker (``_open_group_picker_wechat4``), its search box and
+        「完成」 read before anything is typed, each member picked (``_pick_member``), the picked ones read back (every
+        member, nobody else: ``_extra_pick``), then 「完成」 once and the picker must close.  The picker is closed
+        whenever it stops before that."""
+        picker = self._open_group_picker_wechat4(hwnd)
+        if not picker:
+            return _group_failure("no_picker", "没打开微信的「发起群聊」窗口，什么也没勾，没有建群")
+        try:
+            self._focus_window(picker)
+            rows = self._capture_ocr(picker)
+            box = min((r for r in rows if _is_search_placeholder(r.get("t", ""))),
+                      key=lambda r: (r.get("y0", 0.0), r.get("x0", 0.0)), default=None)
+            if box is None or _group_done(rows) is None:
+                logger.info("Friend management: the window that opened does not look like 「发起群聊」 (no 搜索 box or 完成 "
+                            "read; read: %s); closed, nothing picked", _picker_landmarks(rows))
+                self._close_window(picker)
+                return _group_failure("no_picker", "打开的窗口不像「发起群聊」（没认出搜索框和「完成」），已关掉，什么也没勾，没有建群")
+            for member in members:
+                failure = self._pick_member(picker, box, member)
+                if failure is not None:
+                    self._close_window(picker)
+                    return failure
+            rows = self._capture_ocr(picker)
+            picked = [r for r in rows if _centre(r)[0] >= GROUP_SPLIT_X]
+            wanted = {_name_key(m) for m in members}
+            missing = [m for m in members if not any(_name_key(r.get("t")) == _name_key(m) for r in picked)]
+            extra = [r for r in picked if _extra_pick(r, wanted)]
+            if missing or extra:
+                logger.info("Friend management: 「发起群聊」: the picked ones read back are not the members (%d missing, %d "
+                            "other row(s) at %s; read: %s); closed, no group made", len(missing), len(extra),
+                            [f"{_centre(r)[1]:.2f}" for r in extra[:6]], _picker_landmarks(rows))
+                self._close_window(picker)
+                if extra:
+                    return _group_failure("extra", "已选的人里除了要拉的，还读到了别的名字，已关掉，没有建群：请在微信里手动建")
+                return _group_failure("not_picked", f"已选的人里没读到「{missing[0]}」，已关掉，没有建群")
+            if dry_run:
+                self._close_window(picker)
+                logger.info("Friend management: 「发起群聊」 tried: %d member(s) found and picked, closed without 完成",
+                            len(members))
+                return {"ok": True, "dry_run": True, "picked": list(members),
+                        "message": "试过了：「发起群聊」打得开，" + "、".join(f"「{m}」" for m in members)
+                                   + "都搜得到、勾得上；没有点「完成」，没有建群"}
+            done = _group_done(rows)
+            if done is None:
+                logger.info("Friend management: 「发起群聊」: 完成 was not read after picking (read: %s)", _picker_landmarks(rows))
+                self._close_window(picker)
+                return _group_failure("no_done", "勾好以后没认出「完成」，已关掉，没有建群")
+            before = self._window_snapshot(hwnd)
+            self._click_row(picker, done)                  # ONE click; from here on the group may exist
+            for _ in range(30):
+                if not self._is_window_visible(picker):
+                    break
+                self._sleep(0.1)
+            if self._is_window_visible(picker):
+                risk = _risk_line(self._capture_ocr(picker))
+                self._close_window(picker)
+                if risk:
+                    return _group_failure("risk", f"微信提示「{risk}」，可能是操作太频繁被限制了：群可能没建成，请在微信里看一眼，"
+                                                  "先别再加好友、拉群")
+                return _group_failure("not_created", "点了「完成」以后「发起群聊」窗口还在：群可能没建成，请在微信里看一眼")
+            risk = self._risk_in_new_windows(hwnd, before)
+            if risk:
+                return _group_failure("risk", f"微信提示「{risk}」，可能是操作太频繁被限制了：群可能没建成，请在微信里看一眼，"
+                                              "先别再加好友、拉群")
+            logger.info("Friend management: a group of %d member(s) was made in 「发起群聊」", len(members))
+            return {"ok": True, "picked": list(members), "message": "群建好了：" + "、".join(f"「{m}」" for m in members)}
+        except Exception:                                  # _Abort, or a pywin32 error: the picker is not left open
+            self._close_window(picker)
+            raise
+
+    def _pick_member(self, picker: int, box: dict, member: str) -> dict | None:
+        """One member picked in the 「发起群聊」 window: the name typed into its search box (clicked where OCR read it
+        before anything was typed; Ctrl+A, Backspace and the paste only while the picker itself is in front), the ONE
+        row of the list below the box that reads exactly that name (``_name_key``) clicked, then the name read among the
+        picked ones.  None when picked, else the failure (nothing more is clicked)."""
+        key = _name_key(member)
+        self._click_row(picker, box)
+        self._sleep(0.2)
+        self._combo(picker, VK_CONTROL, VK_A, exact=True)
+        self._sleep(0.05)
+        self._key(picker, VK_BACK, exact=True)
+        self._sleep(0.05)
+        self._paste(picker, member, exact=True)
+        self._sleep(0.8)
+        top = float(box.get("y1", 0.0))
+        for look in range(2):                          # the list may still be filtering: one more look after a pause
+            if look:
+                self._sleep(0.8)
+            rows = self._capture_ocr(picker)
+            risk = _risk_line(rows)
+            if risk:
+                return _group_failure("risk", f"微信提示「{risk}」，可能是操作太频繁被限制了，已停止，没有建群：先别再加好友、拉群")
+            hits = [r for r in rows if _centre(r)[0] < GROUP_SPLIT_X and float(r.get("y0", 0.0)) >= top
+                    and _name_key(r.get("t")) == key]
+            if hits:
+                break
+        if not hits:
+            logger.info("Friend management: 「发起群聊」: a member's name was not read in the list (%d row(s); read: %s)",
+                        len(rows), _picker_landmarks(rows))
+            return _group_failure("not_found", f"在「发起群聊」里没搜到「{member}」，没有建群：看看这个微信号的通讯录里"
+                                               "是不是叫这个名字")
+        if len(hits) > 1:
+            return _group_failure("namesake", f"「{member}」在「发起群聊」里搜出 {len(hits)} 个同名的，没有勾，没有建群："
+                                              "给要拉的那位设一个不重名的备注")
+        self._click_row(picker, hits[0])
+        self._sleep(0.5)
+        rows = self._capture_ocr(picker)
+        if not any(_centre(r)[0] >= GROUP_SPLIT_X and _name_key(r.get("t")) == key for r in rows):
+            logger.info("Friend management: 「发起群聊」: a member was clicked but not read among the picked ones (read: %s)",
+                        _picker_landmarks(rows))
+            return _group_failure("not_picked", f"点了「{member}」，已选的人里没读到，已关掉，没有建群")
+        return None
+
+    def _open_group_picker_wechat4(self, main_hwnd: int) -> int | None:
+        """WeChat 4.0's 「发起群聊」 window: the (+) menu (``_plus_menu``), its 「发起群聊」 clicked where OCR reads it (a
+        menu read without it is closed; one OCR reads nothing of is clicked at the item's place, GROUP_MENU_ITEM_Y),
+        and the window that appears after the click titled exactly one of GROUP_PICKER_TITLES (with the item read,
+        plainly 「微信」 / 「Weixin」 too), never a chat's name.  An add-friend window that opened instead is closed.
+        None when there is no picker."""
+        if sys.platform != "win32":
+            return None
+        _safe_ensure_default_desktop()
+        import win32gui
+        before = self._window_snapshot(main_hwnd)
+        if before is None:
+            return None
+        menu_hwnd = self._plus_menu(main_hwnd)
+        if not menu_hwnd:
+            return None
+        left, top, right, bottom = win32gui.GetWindowRect(menu_hwnd)
+        rows = self._capture_ocr(menu_hwnd)
+        item = _find_row(rows, *GROUP_MENU_LABELS, exact=True)
+        if item is not None:
+            cx, cy = _centre(item)
+            x, y = left + int(cx * max(1, right - left)), top + int(cy * max(1, bottom - top))
+        elif any(_clean_text(r.get("t", "")) for r in rows):
+            logger.info("Friend management: the (+) menu was read without 「发起群聊」 (read: %s); nothing clicked",
+                        ", ".join(_label_text(r) for r in rows[:6]))
+            self._dismiss(main_hwnd)
+            return None
+        else:
+            x, y = left + int(0.5 * (right - left)), top + int(GROUP_MENU_ITEM_Y * (bottom - top))
+        self._foreground(main_hwnd)
+        if not self._clicker(x, y):
+            return None
+        self._sleep(0.3)
+        for look in range(DIALOG_LOOKS):
+            picker = self._find_new_dialog(main_hwnd, before, GROUP_PICKER_TITLES, exclude=(menu_hwnd,))
+            if picker is None and item is not None:      # the item was read: a new dialog titled plainly 「微信」 too
+                picker = self._find_new_dialog(main_hwnd, before, GENERIC_DIALOG_TITLES, cls=DIALOG_CLASS,
+                                               exclude=(menu_hwnd,))
+            if picker:
+                return picker
+            if look + 1 < DIALOG_LOOKS:
+                self._sleep(0.1)
+        logger.info("Friend management: no 「发起群聊」 window appeared after the click on 「发起群聊」 (%s)",
+                    "read in the menu" if item is not None else "the menu's top item, OCR read nothing of the menu")
+        try:
+            for h in self._process_windows(main_hwnd):
+                if h not in before and str(win32gui.GetWindowText(h) or "").strip() in ADD_DIALOG_TITLES:
+                    logger.info("Friend management: the add-friend window opened instead of 「发起群聊」; closed")
+                    self._close_window(h)
+        except Exception:
+            logger.debug("Friend management: the windows after 「发起群聊」 could not be looked at", exc_info=True)
+        return None
+
+
+def _group_done(rows: list[dict]) -> dict | None:
+    """The 「发起群聊」 window's 「完成」 (or 确定, a count beside it) as OCR read it: the lowest one."""
+    found = [r for r in rows if GROUP_DONE.fullmatch(_label_text(r))]
+    return max(found, key=lambda r: r.get("y0", 0.0)) if found else None
+
+
+def _extra_pick(row: dict, wanted: set) -> bool:
+    """A row among the picked ones that is neither a member nor the window's own words (a button, 「已选择…」, a count):
+    somebody else would be in the group."""
+    key = _name_key(row.get("t"))
+    if not key or key in wanted or key.isdigit():
+        return False
+    return not any(word in _label_text(row) for word in GROUP_PICKER_WORDS)
 
 
 class AutoFriendService:

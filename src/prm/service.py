@@ -102,6 +102,7 @@ from ..wechat.new_friends import FILLER, is_friend_notice, is_person_chat
 from . import contact, deals, gates, pii, platforms, retention
 from .friend_adds import OPEN as FRIEND_ADD_OPEN, STATES as FRIEND_ADD_STATES, FriendAdds, friend_adds_out
 from .result import MAX_DRAFT_CHARS, MESSAGE_KINDS, DraftError, parse_draft
+from .three_party import EVENT as GROUP_EVENT, ThreeParty, state_out as group_state_out
 from .store import (
     APPROVED, BUYIN_TOOL, COPILOT, DRAFT_NOTES, DROPPED, EXECUTING, FAILED, HUMAN, LANE_BUYIN, LANE_REPLY, LANE_SYSTEM,
     MESSAGE_TOOL, MODES, NO_REPLY, NOTICE_CHARS, PAUSED, PENDING,
@@ -609,7 +610,13 @@ EVENT_NAMES = {
     "buyin_message": "百应私信", "buyin_copy": "复制百应私信草稿（含完整号码）", "buyin_sent": "运营已在百应手动发出",
     "buyin_draft_failed": "百应私信的草稿没写成",
     "friend_add_link": "关联抖音号", "creator_unlinked": "取消关联抖音号",
+    GROUP_EVENT: "三方群",
 }
+# 三方群 (src/prm/three_party.py): the console's deal actions (「拉三方群」, 「先试一下」, 「建好了」, 「没建成」) and how the
+# deal's record names each step
+GROUP_ACTIONS = ("group", "group_try", "group_made", "group_none")
+GROUP_EVENT_NAMES = {"creating": "开始拉三方群", "created": "三方群建好了", "unsure": "三方群不确定建没建成",
+                     "failed": "三方群没建成", "": "三方群的记录清掉了（没建成）"}
 # A creator's message recorded without a draft because it was read too late (PRM_CATCHUP_HOURS).
 MISSED_EVENT_NAME = "机器人没在读时达人的消息（没有起草）"
 # PRM_AUTO_REGISTER (2026-10-29): the deal's event of a new friend the bot registered, and how she was added (the
@@ -678,6 +685,9 @@ def event_out(ev: dict) -> dict:
         name = f"派写开场白的任务 #{detail['job']}" + ("（运营点的）" if detail.get("by") == "console" else "（新好友还没说话）")
     elif ev["kind"] == "buyin_message":
         name = "百应私信：我方（运营在百应里回的）" if detail.get("from") == "shop" else "百应私信：达人"
+    elif ev["kind"] == GROUP_EVENT:
+        name = GROUP_EVENT_NAMES.get(str(detail.get("state") or ""), "三方群") + (
+            "（运营点的）" if ev.get("actor") == "console" and detail.get("state") in ("creating", "created", "") else "")
     elif ev["kind"] == "creator_unlinked" and detail.get("account"):
         name = f"取消关联抖音号 {detail['account']}"
     elif ev["kind"] == "friend_add_link" and detail.get("account"):
@@ -738,11 +748,13 @@ def gates_out(store: PrmStore) -> list[dict]:
 
 
 def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, limit: int = 40,
-             retention_days: int = retention.RETENTION_DAYS, now: Optional[float] = None) -> dict:
+             retention_days: int = retention.RETENTION_DAYS, now: Optional[float] = None,
+             group_of: Callable[[dict], dict] = group_state_out) -> dict:
     """What the console shows (GET /api/prm); also built from the database when the bot is stopped.
     Numbers appear only masked (``legend``); the full ones need ``reveal``.  ``night_alerts``: the deals' notices
     of holding lines the night window (``auto``: 自动模式 by day) sent (``NIGHT_NOTICE``), each until 「已处理」
-    (``night_done``)."""
+    (``night_done``).  ``group_of(deal)``: a deal's 三方群 (``three_party.state_out``; the running bot's adds its last
+    「先试一下」)."""
     now = time.time() if now is None else now
     parties = {p["id"]: p for p in store.parties(include_inactive=True)}
     newest = {}
@@ -818,6 +830,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
                 if shipment else None,
                 "shipment_status_label": SHIPMENT_STATES.get((shipment or {}).get("status", ""), ""),
                 "events": [event_out(e) for e in store.events(deal["id"], limit=12)],
+                "three_party": group_of(deal),
             },
         }
 
@@ -1013,6 +1026,8 @@ class PrmService:
         # 加百应达人微信 (PRM_FRIEND_ADD, default off; src/prm/friend_adds.py): the records, one add_friend per
         # confirmation (Bot.run attaches the admin handler and the auto-accept)
         self.friend_adds = FriendAdds(self._store, config, clock=clock, register=self.register)
+        # 三方群 (src/prm/three_party.py): 「拉三方群」 in a deal makes the group in the WeChat window (Bot.run attaches it)
+        self.three_party = ThreeParty(self._store, config, clock=clock)
         # on_buyin_contact(event) -> {"id", "state", "masked"} | None: told of each new contact card a creator sent in a
         # 百应 conversation that is ours (our invite, or a registered creator's), with its values in full
         # (``_buyin_contacts``), and of each contact she typed in her own words there: 加百应达人微信's offer_from_buyin
@@ -1089,6 +1104,10 @@ class PrmService:
             self.friend_adds.start()               # (an add cut off by a stop: unsure)
         except Exception:
             logger.exception("PRM: the friend-add records could not be looked at")
+        try:
+            self.three_party.settle()              # (a group cut off by a stop: unsure)
+        except Exception:
+            logger.exception("PRM: the deals' 三方群 could not be looked at")
         for p in self._store.packets((SENDING,), limit=500):
             # (read back after all, its line confirms it: ``_confirm``)
             self._store.move(p["id"], (SENDING,), FAILED, outcome="indeterminate", sent_at=now, error=UNSURE_ERROR)
@@ -1440,6 +1459,9 @@ class PrmService:
         creator = self._creator_ids(deal["id"])
         if creator:
             meta["creator"] = creator                  # her 抖音号: the Mac looks up the invite ledger by it
+        group = self.three_party.job_meta(deal)
+        if group:
+            meta["three_party"] = group                # 三方群 made: the case file's 【待拉三方群】 is done
         outbound = self._outbound(deal["id"], party["id"], now, unsent=[packet for packet, _, _ in outdated])
         if outbound:
             meta["sent"] = outbound
@@ -2580,9 +2602,15 @@ class PrmService:
         for a person), ``notice`` (none for an order signed for already) and ``note`` (which order, in the events).
         An operator's change of the deal's stage or shipment sees to a deleted order's notice.  ``night_done``
         (「已处理」 on a holding line the night window sent) only drops that notice; ``opening`` (「写开场白」) asks
-        for one 开场白 draft (``ask_opening``)."""
+        for one 开场白 draft (``ask_opening``); ``group`` / ``group_try`` / ``group_made`` / ``group_none`` are 三方群's
+        (``three_party``: 「拉三方群」, 「先试一下」, 「建好了」, 「没建成」)."""
         if action == OPENING:
             return self.ask_opening(data.get("deal_id"))
+        if action in GROUP_ACTIONS:
+            deal_id = data.get("deal_id")
+            if action in ("group", "group_try"):
+                return self.three_party.start(deal_id, dry_run=action == "group_try", actor=actor)
+            return self.three_party.mark(deal_id, made=action == "group_made", actor=actor)
         now = self._clock()
         if action == NIGHT_DONE:
             return apply_deal_action(self._store, action, data, now=now, takeover_sec=self._takeover_sec, actor=actor)
@@ -4416,7 +4444,8 @@ class PrmService:
 
     def snapshot(self) -> dict:
         relay = self._relay.snapshot()
-        return snapshot(self._store, running=True, retention_days=self._retention_days, now=self._clock(), extra={
+        return snapshot(self._store, running=True, retention_days=self._retention_days, now=self._clock(),
+                        group_of=self.three_party.deal_out, extra={
             "mac_online": relay.get("mac_online", False),
             "worker_kinds": relay.get("worker_kinds", []),
             "can_send": self._send is not None, "can_send_files": self._send_file is not None,
@@ -4425,7 +4454,7 @@ class PrmService:
             "clock_skew_sec": int(round(self._skew)), "sample_sync_min": self._sample_sync_sec // 60,
             "night": self._night_status(self._clock()), "auto_register": self._auto_register,
             "buyin_sync_min": self._buyin_sec // 60, "friend_add_status": self.friend_adds.status(),
-            "auto_mode": self.auto_mode,
+            "auto_mode": self.auto_mode, "three_party": self.three_party.status(),
         })
 
     # ── the sender thread: approved drafts, holding replies, clean-ups ────
@@ -4646,6 +4675,9 @@ class PrmService:
         counts["friend_adds"] = self._store.scrub_friend_adds(deal["party_id"], contact.clean_name, now)
         self._store.update_deal(deal["id"], now, replace_slots=retention.cleared_slots(deal.get("slots") or {}),
                                 purged_at=now)
+        group = deal.get("three_party") or {}
+        if group.get("name") or group.get("chat"):     # 三方群: WeChat's name for it holds hers
+            self._store.update_deal(deal["id"], now, three_party={k: group[k] for k in ("state", "at", "by") if k in group})
         counts["drafts"] = self._store.rewrite_packets(deal["id"], rewrite)
         counts["events"] = self._store.rewrite_events(deal["id"], rewrite)
         counts["notices"] = self._store.rewrite_notices(deal["id"], rewrite)
@@ -5079,6 +5111,8 @@ def apply_deal_action(store: PrmStore, action: str, data: dict, *, now: float, t
             return night_done(store, deal_id, data.get("packet"), now=now, actor=actor)
         elif action == OPENING:                        # (running: PrmService.ask_opening)
             return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能写开场白"}
+        elif action in GROUP_ACTIONS:                  # (running: PrmService.three_party)
+            return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能拉群"}
         else:
             return {"ok": False, "error": f"不认识的操作 {action}"}
     except deals.DealError as e:

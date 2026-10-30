@@ -295,6 +295,7 @@ _ADDED_COLUMNS = (
     ("buyin_threads", "other_invite", "INTEGER NOT NULL DEFAULT 0"),   # somebody else's invite card (2026-10-30)
     ("friend_adds", "remark", "TEXT NOT NULL DEFAULT ''"),            # 加百应达人微信的备注 (2026-10-29)
     ("friend_adds", "remark_set", "INTEGER NOT NULL DEFAULT 0"),
+    ("deals", "three_party", "TEXT NOT NULL DEFAULT '{}'"),           # 三方群 (src/prm/three_party.py, 2026-10-30)
 )
 
 # What the creators wrote, or our side's own words, waiting for the next draft job.
@@ -341,6 +342,7 @@ def deal_view(row: dict) -> dict:
     out["slots"] = _loads(row.get("slots"), {})
     out["notices"] = notices_of(row)
     out["chain"] = _loads(row.get("chain"), {})
+    out["three_party"] = _loads(row.get("three_party"), {})
     return out
 
 
@@ -549,15 +551,16 @@ class PrmStore:
 
     def update_deal(self, deal_id: int, now: Optional[float] = None, *, merge_slots: Optional[dict] = None,
                     replace_slots: Optional[dict] = None, **fields) -> None:
-        """Set ``fields`` and merge (or replace) the slot values; ``chain`` is a dict (stored as JSON).
-        (``attention`` is the notices' texts: ``set_notice`` / ``drop_notices`` / ``edit_notices``.)"""
+        """Set ``fields`` and merge (or replace) the slot values; ``chain`` and ``three_party`` are dicts (stored as
+        JSON).  (``attention`` is the notices' texts: ``set_notice`` / ``drop_notices`` / ``edit_notices``.)"""
         allowed = {"stage", "mode", "mode_until", "stage_proposal", "last_message_at",
-                   "delivered_at", "purged_at", "holding_round", "chain"}
+                   "delivered_at", "purged_at", "holding_round", "chain", "three_party"}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"not a deal field: {sorted(unknown)}")
-        if "chain" in fields:
-            fields["chain"] = json.dumps(fields["chain"] or {}, ensure_ascii=False)
+        for name in ("chain", "three_party"):
+            if name in fields:
+                fields[name] = json.dumps(fields[name] or {}, ensure_ascii=False)
         now = time.time() if now is None else now
         with self._lock:
             row = self._conn.execute("SELECT slots FROM deals WHERE id = ?", (deal_id,)).fetchone()

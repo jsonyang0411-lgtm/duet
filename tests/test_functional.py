@@ -714,6 +714,62 @@ class TestPrmPages:
         assert "这一条：开场白：先打招呼" in card.inner_text()
         assert page.locator(".prm-draft", has_text="在的，有什么可以帮你？").locator(".tag", has_text="开场白").count() == 0
 
+    def test_deals_page_makes_a_three_party_group_after_asking_and_tries_one_first(self, page, prm):
+        """三方群 (src/prm/three_party.py, 2026-10-30): with PRM_GROUP_WITH set, a deal has 「拉三方群」 and 「先试一下」; the
+        group is made only after the confirmation, which names who goes in and the suggested name; made, the deal
+        shows it with 「复制群名」; 「群已经不在了」 takes it back; one the bot is unsure of asks 「建好了 / 没建成」.
+        Every name is made up."""
+        from types import SimpleNamespace
+        from test_three_party import Admin, Auto, Backend
+        from src.prm.three_party import ThreeParty
+
+        service = prm.service
+        service.three_party = ThreeParty(service.store, SimpleNamespace(prm_group_with="老板测试",
+                                                                         prm_friend_add_brand="品牌测试"))
+        backend = Backend()
+        admin = Admin(backend)
+        service.three_party.attach(admin, Auto(), backend)
+        service.three_party.spawn = lambda fn: fn()
+        service.three_party._sleep = lambda s: None
+        deal_id = service.store.deal_of(service.store.party_by_wxid("wxid_creator01")["id"])["id"]
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.wait_for_timeout(1500)
+        page.locator("button[aria-label='展开 小美']").click()
+        page.wait_for_timeout(300)
+        block = page.locator(".prm-group")
+        assert "勾上她和 老板测试" not in block.inner_text() and "老板测试" in block.inner_text()
+        block.locator("button:has-text('先试一下')").click()
+        page.wait_for_timeout(1200)
+        assert admin.calls == [(["小美测试", "老板测试"], True)]
+        assert "试过：" in block.inner_text()
+        block.locator("button:has-text('拉三方群')").click()
+        page.wait_for_timeout(300)
+        dialog = page.locator(".dialog, [role='dialog']").last
+        text = dialog.inner_text()
+        assert "老板测试" in text and "「品牌测试×小美」" in text and "不会自动重试" in text
+        assert len(admin.calls) == 1                                      # nothing before the confirmation
+        dialog.locator("button:has-text('拉群')").click()
+        page.wait_for_timeout(1500)
+        assert admin.calls[-1] == (["小美测试", "老板测试"], False)
+        text = block.inner_text()
+        assert "三方群已建好" in text and "「品牌测试×小美」" in text and block.locator("button:has-text('复制群名')").count() == 1
+        assert block.locator("button:has-text('拉三方群')").count() == 0
+        block.locator("button:has-text('群已经不在了')").click()
+        page.wait_for_timeout(1200)
+        assert block.locator("button:has-text('拉三方群')").count() == 1
+        service.store.update_deal(deal_id, None, three_party={"state": "unsure", "at": prm.clock.now,
+                                                             "why": "点了「完成」以后「发起群聊」窗口还在"})
+        page.reload(timeout=10000)
+        page.wait_for_timeout(1500)
+        page.locator("button[aria-label='展开 小美']").click()
+        page.wait_for_timeout(300)
+        block = page.locator(".prm-group")
+        assert "不确定建没建成：点了「完成」以后「发起群聊」窗口还在" in block.inner_text()
+        block.locator("button:has-text('建好了')").click()
+        page.wait_for_timeout(1200)
+        assert "三方群已建好" in block.inner_text() and "手动标的" in block.inner_text()
+        assert service.store.deal(deal_id)["three_party"]["state"] == "created"
+
     def test_deals_page_runs_a_deal_stage_mode_waybill_and_numbers(self, page, prm):
         store = prm.service.store
         page.goto(f"{BASE_URL}/#/deals", timeout=10000)

@@ -1105,6 +1105,7 @@ def _prm_state_core() -> dict:
                "auto_register": _prm_env_on("PRM_AUTO_REGISTER"), "auto_mode": auto,
                "buyin_sync_min": _prm_int_env("PRM_BUYIN_SYNC_MIN", 0), **settings}
     stopped["friend_add_status"] = _friend_add_stopped_status(store)
+    stopped["three_party"] = _three_party_stopped_status()
     if store is None:
         from src.prm.platforms import ACTIONS
         from src.prm.result import MESSAGE_KINDS
@@ -1117,6 +1118,17 @@ def _prm_state_core() -> dict:
         return prm_snapshot(store, running=False, retention_days=stopped["retention_days"], extra=stopped)
     finally:
         store.close()
+
+
+def _three_party_stopped_status() -> dict:
+    """三方群 while the bot is stopped (src/prm/three_party.py ``ThreeParty.status``, from .env): who would go in, and
+    that no group can be made now."""
+    from src.prm.three_party import NAME_DEFAULT, group_with, suggested_name
+
+    names = group_with(os.getenv("PRM_GROUP_WITH", ""))
+    template = os.getenv("PRM_GROUP_NAME", "").strip() or NAME_DEFAULT
+    return {"enabled": bool(names), "with": names, "why": "机器人没有运行" if names else "", "busy": None,
+            "name_template": suggested_name(template, os.getenv("PRM_FRIEND_ADD_BRAND", "").strip(), "{昵称}")}
 
 
 def _friend_add_stopped_status(store) -> dict:
@@ -1153,7 +1165,8 @@ def _prm_friend_adds(data: dict) -> dict:
 
 
 def _prm_deal(data: dict) -> dict:
-    """POST /api/prm/deals {action: stage | adopt | mode | shipment | shipment_status | night_done, deal_id, ...}."""
+    """POST /api/prm/deals {action: stage | adopt | mode | shipment | shipment_status | night_done | opening | group |
+    group_try | group_made | group_none, deal_id, ...} (``group*``: 三方群, src/prm/three_party.py; only while running)."""
     from src.prm.service import apply_deal_action
 
     action = str(data.get("action") or "")

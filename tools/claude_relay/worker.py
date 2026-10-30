@@ -1526,6 +1526,23 @@ def opening_line(meta: dict) -> str:
             "就写一句自然的跟进，不要重复自我介绍。")
 
 
+_GROUP_AT = re.compile(r"\d{2}-\d{2} \d{2}:\d{2}")
+
+
+def three_party_line(meta: dict) -> str:
+    """The prompt's line for a deal whose 三方群 is made (the bot's ``meta.three_party`` = ``{"at": "10-30 14:30"}``,
+    2026-10-30: 「拉三方群」 in the console, or an operator's 「建好了」): the case file's 【待拉三方群】 is done and the
+    choice of the samples is talked over in the group (kb 第 0.5 节).  "" without it (the prompt as before).  Only a
+    well-formed time is repeated."""
+    group = meta.get("three_party")
+    if not isinstance(group, dict):
+        return ""
+    at = str(group.get("at") or "").strip()
+    when = f"（{at} 建的）" if _GROUP_AT.fullmatch(at) else ""
+    return (f"这位达人的三方群已经拉好了{when}：案卷「待确认 / 待答复」里的【待拉三方群】改成【已拉三方群】；"
+            "选款、寄样这些细节请她到群里聊，私聊里照 kb/ 第 0.5 节回。")
+
+
 # A draft of a 抖音百应 private message (the bot's PRM_BUYIN_SYNC_MIN, ``meta.channel == "buyin"``): what the model is told
 # besides the usual note (that one speaks of WeChat).
 BUYIN_NOTE = (
@@ -1629,6 +1646,9 @@ def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, fa
     night = night_line(meta)
     if night:
         lines.append(night)
+    group = three_party_line(meta)
+    if group:
+        lines.append(group)
     if meta.get("sent"):
         lines.append(sent_block(meta["sent"]))
     if invite:

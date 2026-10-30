@@ -729,5 +729,42 @@ class FriendAddConfigTests(unittest.TestCase):
             self.assertIn("PRM_FRIEND_ADD_REMARK", str(ctx.exception))
 
 
+
+class GroupConfigTests(unittest.TestCase):
+    """三方群 (src/prm/three_party.py, 2026-10-30): nobody to put in (no 「拉三方群」) by default; at most 3 different names;
+    the suggested group name holds {昵称} once."""
+
+    def test_defaults_and_what_the_env_says(self):
+        from src.config import BotConfig, load_config
+
+        self.assertEqual((BotConfig().prm_group_with, BotConfig().prm_group_name), ("", "{品牌}×{昵称}"))
+        with patch.dict(os.environ, {}, clear=True):
+            config = load_config()
+        self.assertEqual((config.prm_group_with, config.prm_group_name), ("", "{品牌}×{昵称}"))
+        with patch.dict(os.environ, {"PRM_GROUP_WITH": " 老板测试，王总 ", "PRM_GROUP_NAME": " {昵称}的群 "}, clear=True):
+            config = load_config()
+        self.assertEqual((config.prm_group_with, config.prm_group_name), ("老板测试，王总", "{昵称}的群"))
+        with patch.dict(os.environ, {"PRM_GROUP_NAME": ""}, clear=True):
+            self.assertEqual(load_config().prm_group_name, "{品牌}×{昵称}")
+
+    def test_bad_values_are_refused(self):
+        from src.config import _validate_config
+
+        for good in ("", "老板测试", "老板测试,王总、李 四"):
+            _validate_config({"prm_group_with": good})
+        for good in ("{品牌}×{昵称}", "{昵称}", "合作一二三四五六七八九十{昵称}"):
+            _validate_config({"prm_group_name": good})
+        for key, value, name in (("prm_group_with", "a,b,c,d", "PRM_GROUP_WITH"),
+                                 ("prm_group_with", "老板测试,老板测试", "PRM_GROUP_WITH"),
+                                 ("prm_group_with", "长" * 21, "PRM_GROUP_WITH"),
+                                 ("prm_group_with", "🌸", "PRM_GROUP_WITH"),
+                                 ("prm_group_name", "三方群", "PRM_GROUP_NAME"),
+                                 ("prm_group_name", "{昵称}{昵称}", "PRM_GROUP_NAME"),
+                                 ("prm_group_name", "一二三四五六七八九十一二三{昵称}", "PRM_GROUP_NAME")):
+            with self.assertRaises(RuntimeError) as ctx:
+                _validate_config({key: value})
+            self.assertIn(name, str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

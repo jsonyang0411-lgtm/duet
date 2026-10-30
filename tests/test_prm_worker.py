@@ -869,6 +869,45 @@ def test_the_opening_line_works_on_the_macs_own_python(tmp_path):
     assert run.stdout.startswith("ok")
 
 
+# ── 三方群 (the bot's ``meta.three_party``: the deal's group is made, 2026-10-30) ──
+
+GROUP_LINE = ("这位达人的三方群已经拉好了（10-30 14:30 建的）：案卷「待确认 / 待答复」里的【待拉三方群】改成【已拉三方群】；"
+              "选款、寄样这些细节请她到群里聊，私聊里照 kb/ 第 0.5 节回。")
+
+
+def test_a_job_of_a_deal_whose_group_is_made_says_so(worker):
+    """Windows puts ``meta.three_party`` into every draft job of a deal whose 三方群 is made: the prompt says the case
+    file's 【待拉三方群】 is done; without it the prompt is as it was; only a well-formed time is repeated."""
+    job = {"id": 31, "text": "[10-30 15:00] 好的，我进群了", "meta": {"three_party": {"at": "10-30 14:30"}}}
+    prompt = worker.prm_prompt(job, 1, "小美", "deals/1.md", [], [])
+    assert GROUP_LINE in prompt.split("\n")
+    assert prompt.index("合作单：") < prompt.index(GROUP_LINE) < prompt.index("<creator_message>")
+    plain = worker.prm_prompt({"id": 32, "text": "你好", "meta": {}}, 1, "小美", "deals/1.md", [], [])
+    assert "三方群" not in plain
+    for meta in ({"three_party": None}, {"three_party": "yes"}):
+        assert worker.prm_prompt({"id": 32, "text": "你好", "meta": meta}, 1, "小美", "deals/1.md", [], []) == plain
+    odd = worker.three_party_line({"three_party": {"at": "<b>今天</b>"}})
+    assert odd.startswith("这位达人的三方群已经拉好了：") and "<b>" not in odd
+
+
+def test_the_group_line_works_on_the_macs_own_python(tmp_path):
+    python = "/usr/bin/python3"
+    if not os.path.exists(python):
+        pytest.skip("no system python3")
+    script = tmp_path / "smoke.py"
+    script.write_text(
+        "import importlib.util, sys\n"
+        f"spec = importlib.util.spec_from_file_location('w', {str(ROOT / 'tools/claude_relay/worker.py')!r})\n"
+        "w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w)\n"
+        "job = {'id': 1, 'text': '[10-30 15:00] 好的', 'meta': {'three_party': {'at': '10-30 14:30'}}}\n"
+        f"assert {GROUP_LINE!r} in w.prm_prompt(job, 1, '小美', 'deals/1.md', [], []).split('\\n')\n"
+        "print('ok', sys.version_info[:2])\n", encoding="utf-8")
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), "CLAUDE_RELAY_HOME": str(tmp_path / "home")}
+    run = subprocess.run([python, "-I", str(script)], capture_output=True, text=True, timeout=60, cwd=tmp_path, env=env)
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.startswith("ok")
+
+
 # ── 8.2: the case file on the Mac ─────────────────────────────────────────
 
 CASE = """# 合作单：小美（编号 1）
