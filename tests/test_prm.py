@@ -754,3 +754,109 @@ def test_only_the_last_replies_are_told(bot, clock):
     job = bot.worker_takes()
     meta = json.loads(job["meta"]) if isinstance(job["meta"], str) else job["meta"]
     assert [i["text"] for i in meta["sent"]] == [*[f"第 {n} 条" for n in range(4, 8)], "稍后回复你", HOLDING_TEXT]
+
+
+# ── 加百应达人微信 (功能 R): who a registered creator is on 抖音 ────────────────────
+# Her 抖音号 comes from her verified 抖店 sample orders and from an operator's link (creator_links); the Mac gets both
+# (meta.creator), the commission's UID stays the sample order's.  Every value is made up.
+
+def _sample_order(bot, deal_id, account="", uid=""):
+    """A verified 抖店 sample order of the deal (what _creator_ids reads), straight into the store."""
+    action = {"action": "jst.sample_order", "creator_platform": "dy", "creator_uid": uid,
+              **({"creator_account": account} if account else {})}
+    execution = {"outcome": "VERIFIED_SUCCESS", "created": {"creator_account": account, "creator_uid": uid}}
+    return bot.prm.store.add_packet(deal_id=deal_id, party_id=1, job_id=None, chat_id=CREATOR, kind="other", text="",
+                                    attachments=[], intent="", slots={}, stage_proposal="", needs_attention=False,
+                                    reason="", status="sent", tool="jst.sample_order",
+                                    platform={"action": action, "execution": execution})
+
+
+def _meta(job):
+    return json.loads(job["meta"]) if isinstance(job["meta"], str) else job["meta"]
+
+
+def test_a_linked_douyin_id_joins_the_sample_orders_ones(bot, clock):
+    deal = bot.prm.store.deal_of(1)
+    assert bot.prm._creator_ids(deal["id"]) == {}
+    bot.prm.store.add_creator_link(1, "dy_demo01", source="friend_add", now=clock.now)
+    assert bot.prm._creator_ids(deal["id"]) == {"douyin_ids": ["dy_demo01"], "uid": ""}
+    _sample_order(bot, deal["id"], account="dy_demo02", uid="5100000000000002")
+    bot.prm.store.add_creator_link(1, "DY_DEMO02", source="register", now=clock.now + 1)    # another case: once
+    assert bot.prm._creator_ids(deal["id"]) == {"douyin_ids": ["dy_demo02", "dy_demo01"], "uid": "5100000000000002"}
+    for n in range(3, 9):
+        bot.prm.store.add_creator_link(1, f"dy_demo0{n}", source="register", now=clock.now + n)
+    assert bot.prm._creator_ids(deal["id"])["douyin_ids"] == ["dy_demo02", "dy_demo01", "dy_demo03", "dy_demo04",
+                                                               "dy_demo05"]
+
+
+def test_the_baiying_conversations_id_is_never_the_commissions_uid(bot, clock):
+    deal = bot.prm.store.deal_of(1)
+    bot.prm.store.add_creator_link(1, "dy_demo01", uid="7000000001", uid_source="buyin_im", source="friend_add",
+                                   now=clock.now)
+    assert bot.prm._creator_ids(deal["id"]) == {"douyin_ids": ["dy_demo01"], "uid": "", "uid_im": "7000000001"}
+
+
+def test_her_draft_jobs_carry_the_linked_douyin_id(bot, clock):
+    bot.prm.register("wxid_linked01", "小鹿", link={"account": "dy_demo01", "source": "friend_add", "add_id": 3})
+    bot.prm.handle(bot.msg("你好，想合作", chat="wxid_linked01"))
+    assert _meta(bot.worker_takes())["creator"] == {"douyin_ids": ["dy_demo01"], "uid": ""}
+
+
+def test_registering_with_a_link_writes_it_before_her_earlier_messages_are_asked_for(bot, clock):
+    """The order of design §8.1: the party, the link, its event, then on_registered (her catch-up job's
+    meta.creator already has her 抖音号)."""
+    seen = []
+
+    def registered(wxid):
+        party = bot.prm.store.party_by_wxid(wxid)
+        deal = bot.prm.store.deal_of(party["id"])
+        seen.append((bot.prm._creator_ids(deal["id"]), [e["kind"] for e in bot.prm.store.events(deal["id"])]))
+        return True
+
+    bot.prm.on_registered = registered
+    party = bot.prm.register("wxid_new01", "小鹿", "百应邀约 · 抖音号 dy_demo01", link={
+        "account": "dy_demo01", "source": "friend_add", "add_id": 7, "nickname": "小鹿 13800000000",
+        "invited_at": "2026-10-29T11:00:00+08:00", "plan_id": "P20261029-1100-abcd"})
+    assert party["catch_up"] is True
+    assert seen == [({"douyin_ids": ["dy_demo01"], "uid": ""}, ["friend_add_link"])]
+    [link] = bot.prm.store.creator_links(party["id"])
+    assert (link["account"], link["source"], link["add_id"], link["nickname"]) == (
+        "dy_demo01", "friend_add", 7, "小鹿 138****0000")
+    [ev] = bot.prm.store.events(bot.prm.store.deal_of(party["id"])["id"], kinds=("friend_add_link",))
+    assert ev["detail"] == {"account": "dy_demo01", "source": "friend_add", "new": True, "add_id": 7,
+                            "invited_at": "2026-10-29T11:00:00+08:00", "plan_id": "P20261029-1100-abcd"}
+    from src.prm.service import event_out
+    assert event_out(ev)["name"] == "关联抖音号 dy_demo01（加微信 #7），2026-10-29 11:00 发的邀约卡"
+    assert "13800000000" not in json.dumps([ev, link], ensure_ascii=False)
+
+
+def test_a_creator_registered_already_only_gets_the_link(bot):
+    calls = []
+    bot.prm.on_registered = lambda wxid: calls.append(wxid) or True
+    out = bot.prm.register(CREATOR, "小美", link={"account": "dy_demo01", "source": "friend_add"})
+    assert (out["id"], out["linked"], out["catch_up"], calls) == (1, True, False, [])
+    assert [link["account"] for link in bot.prm.store.creator_links(1)] == ["dy_demo01"]
+    with pytest.raises(PartyError):                       # without a link: registered already, as before
+        bot.prm.register(CREATOR, "小美")
+
+
+@pytest.mark.parametrize("link, word", [({"account": "抖音号有中文"}, "抖音号"), ({"account": ""}, "抖音号"),
+                                        ({"account": "dy_demo01", "source": "elsewhere"}, "来源"), ("dy_demo01", "抖音号")])
+def test_a_link_that_is_not_one_registers_nobody(bot, link, word):
+    with pytest.raises(PartyError) as e:
+        bot.prm.register("wxid_new02", "阿花", link=link)
+    assert word in str(e.value) and not bot.prm.is_party_chat("wxid_new02")
+
+
+def test_two_douyin_ids_that_do_not_agree_are_on_the_deal_until_they_do(bot, clock):
+    deal = bot.prm.store.deal_of(1)
+    _sample_order(bot, deal["id"], account="dy_demo02")
+    before = bot.prm.store.deal(deal["id"])["updated_at"]
+    bot.prm.register(CREATOR, "小美", link={"account": "dy_demo01", "source": "register"})
+    after = bot.prm.store.deal(deal["id"])
+    [notice] = [n for n in after["notices"] if n["key"] == "creator_ids"]
+    assert "关联的 dy_demo01，寄样单的 dy_demo02，请核对" in notice["text"] and "邀约卡开过没有" in notice["text"]
+    assert "抖音号对不上" in after["attention"] and after["updated_at"] == before      # no sign of life (8.2)
+    assert bot.prm.store.delete_creator_link(1, "dy_demo01")
+    bot.prm.register(CREATOR, "小美", link={"account": "DY_DEMO02", "source": "register"})
+    assert not [n for n in bot.prm.store.deal(deal["id"])["notices"] if n["key"] == "creator_ids"]

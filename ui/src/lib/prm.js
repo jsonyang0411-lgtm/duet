@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { get, post } from '../api'
+import { fmtClock } from './relay'
 
 // GET /api/prm: the PRM copilot's creators, the drafts waiting for a person and
 // the recent ones (src/web/server.py _prm_state). Polled while a page shows it.
@@ -41,11 +42,57 @@ export const outcomeTag = (outcome) => (outcome === 'VERIFIED_SUCCESS' ? 'ok' : 
 /** 批准并执行 (text: the reply as edited; undefined = as drafted). */
 export const executePlatform = (id, text) => decide(id, 'execute', text)
 export const repreview = (id) => decide(id, 'repreview')
+// 抖音百应私信的草稿（PRM_BUYIN_SYNC_MIN）：机器人发不了，运营复制以后自己到百应里发。
+/** The reply with the full numbers (text: as edited; undefined = as drafted); every copy is written down. */
+export const copyBuyin = (id, text) => decide(id, 'copy', text)
+/** The operator sent it in 百应 by hand (text: what went out, when it was edited). */
+export const buyinSent = (id, text) => decide(id, 'manual_sent', text)
 export const ackPlatform = (id) => decide(id, 'ack')
 export const partyAction = (body) => post('/api/prm/parties', body)
 export const dealAction = (body) => post('/api/prm/deals', body)
 /** The full numbers behind a creator's placeholders; every look is written down (8.2). */
 export const revealNumbers = (partyId) => post('/api/prm/reveal', { party_id: partyId })
+
+// 加百应达人微信（PRM_FRIEND_ADD，src/prm/friend_adds.py）：一次确认 = 一次好友申请，号码只显示打码的，显示完整 / 复制都记一笔。
+/** POST /api/prm/friend-adds {action, id?, ...}: paste / add / edit / sent_by_phone / sent_already / not_sent / wait_her / drop / link / not_her / link_on_accept / reveal / remark_done. */
+export const friendAddAction = (body) => post('/api/prm/friend-adds', body)
+export const FRIEND_ADD_TAGS = {
+  offered: 'cy', needs_view: 'warn', waiting: 'pend', adding: 'pend', requested: 'ok', not_found: 'warn', known: 'ok',
+  failed: 'warn', unsure: 'warn', blocked: 'need', linked: 'ok', dropped: 'off', expired: 'off',
+}
+/** "今天控制台已加 3/10 · 上一次 14:02 · 2 分钟内不能再加". */
+export function friendAddStatusLine(st) {
+  if (!st || !st.enabled) return ''
+  const parts = [`今天控制台已加 ${st.today ?? 0}/${st.cap ?? 10}`]
+  if (st.last_at) parts.push(`上一次 ${fmtClock(st.last_at)}`)
+  if (st.wait_sec > 0) parts.push(st.wait_sec < 120 ? `${st.wait_sec} 秒内不能再加` : `约 ${Math.round(st.wait_sec / 60)} 分钟内不能再加`)
+  return parts.join(' · ')
+}
+/** "备注：抖音-小鹿（已填进好友申请）": the remark (备注) a 加微信 record gives her in our WeChat, and whether the add typed
+ *  it into the application window ('' without a remark). */
+export function remarkLine(r) {
+  if (!r?.remark) return ''
+  let note = ''
+  if (r.remark_set) note = r.state === 'linked' ? '' : '（已填进好友申请）'
+  else if (r.last_attempt && r.state === 'requested') note = '（申请窗口里没认出「备注」栏，这次没填上）'
+  return `备注：${r.remark}${note}`
+}
+/** A 百应 draft's line of the 加微信 record made from its conversation: "她在这个会话里留了联系方式（微信号 ab****yz）→
+ *  「加微信 #12」：已发申请，等她通过（见上面）" ('' without one). */
+export function buyinFriendAddLine(fa) {
+  if (!fa) return ''
+  const m = fa.masked || {}
+  const said = [m.wechat ? `微信号 ${m.wechat}` : '', m.phone ? `手机 ${m.phone}` : ''].filter(Boolean).join('、')
+  return `她在这个会话里留了联系方式${said ? `（${said}）` : ''}→「加微信 #${fa.id}」：${fa.label}${fa.open ? '（见上面）' : ''}`
+}
+/** "10-29 11:00 发的邀约卡（小达人，4 款，卡上没开专属佣金）" ('' without an invite). */
+export function inviteLine(inv) {
+  if (!inv || !(inv.invited_at || inv.plan_id)) return ''
+  const at = typeof inv.invited_at === 'number' ? fmtClock(inv.invited_at) : String(inv.invited_at || '').slice(5, 16).replace('T', ' ')
+  const bits = [inv.category_label, inv.products ? `${inv.products} 款` : '',
+    inv.commission_rate > 0 ? `卡上开了 ${inv.commission_rate}% 专属佣金` : (inv.commission_rate === 0 ? '卡上没开专属佣金' : '')].filter(Boolean)
+  return `${at ? `${at} ` : ''}发的邀约卡${bits.length ? `（${bits.join('，')}）` : ''}${inv.plan_id ? ` · 清单 ${inv.plan_id}` : ''}`
+}
 
 export const MODE_TAGS = { copilot: 'cy', human: 'warn', paused: 'off' }
 /** Who did it (deal_events.actor). */
@@ -68,6 +115,9 @@ export function eventText(ev, stages = {}, modes = {}, shipmentStates = {}) {
     case 'platform_result': return `${ev.name}：#${d.packet} ${d.outcome || ''}${d.link ? ` ${d.link}` : ''}`
     case 'platform_preview': return `${ev.name}：#${d.packet}`
     case 'platform_ack': return `${ev.name}：#${d.packet}`
+    case 'buyin_message': return `${ev.name}：${d.text || ''}`
+    case 'buyin_copy': case 'buyin_sent': return `${ev.name}：#${d.packet}${d.edited ? '（改过）' : ''}`
+    case 'buyin_draft_failed': return `${ev.name}：#${d.job} ${d.why || ''}`
     default: return ev.name
   }
 }
@@ -78,6 +128,31 @@ export function nightStatus(n) {
   if (!n.on) return ['', '下班时段自动回复：关着']
   const now = n.inside ? '现在是下班时段' : '现在是上班时段'
   return n.suspended ? ['warn', `下班时段自动回复：${n.window}（${now}；暂停，不自动发）`] : ['cy', `下班时段自动回复：${n.window}（${now}）`]
+}
+
+/** One creator of the 百应 line below: her nickname, and when the conversation is our invite (the Mac's invite ledger), her 抖音号 and when. */
+function buyinWho(u) {
+  const inv = u?.invited
+  if (!inv) return u?.name || ''
+  const when = String(inv.invited_at || '').slice(5, 16).replace('T', ' ')
+  return `${u.name || '（没有昵称）'}（我们邀约的 · 抖音号 ${inv.aweme_id}${when ? ` · ${when} 邀约` : ''}）`
+}
+
+/** What the 待审批 page says of the 百应 private messages: why they cannot be read, who wrote that is not on the list
+ *  (our invites marked; how many of them left a contact: the 加微信 cards below), how many contact cards came in
+ *  conversations that are not ours. */
+export function buyinNotes(d) {
+  const b = d?.buyin
+  if (!b || !d?.buyin_sync_min) return []
+  const out = []
+  if (b.status?.text) out.push(['warn', b.status.text])
+  if (b.unmatched_count > 0) {
+    const names = (b.unmatched || []).map(buyinWho).filter(Boolean)
+    const left = b.contacts_left > 0 ? `；其中 ${b.contacts_left} 位留了联系方式，见下面的「加微信」` : ''
+    out.push(['', `百应里有 ${b.unmatched_count} 位没登记的达人发了消息，到百应里看${names.length ? `：${names.join('、')}` : ''}（登记了抖音号的达人才会起草）${left}`])
+  }
+  if (b.others_contacts > 0) out.push(['', `别人邀约的会话里有 ${b.others_contacts} 张联系方式卡片，不归我们处理`])
+  return out
 }
 
 /** What is wrong with the setup, in the order a person has to fix it ([] = ready). */

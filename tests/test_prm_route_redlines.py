@@ -13,7 +13,7 @@ Bot.run wires them (tests/test_prm_catchup.py ``World``; the edge as tests/test_
 """
 
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -102,6 +102,37 @@ def test_whatever_a_registered_creator_writes_only_becomes_a_draft_job(world, re
     admin_jobs = ["admin"] * (2 if relay_only == "on" else 1)
     assert [job["kind"] for job in world.jobs()] == ["prm"] * len(jobs) + admin_jobs
     assert {chat for chat, _ in world.sent} == {ADMIN}
+
+
+def test_the_friend_add_commands_in_a_creators_chat_are_her_words_and_add_nobody(world):
+    """加百应达人微信 (功能 R): 「待加达人」「加达人 1」「不加达人 1」 in a registered creator's chat only become her draft
+    job: no answer, no add, the record as it was; the admin's own 加达人 1 in the admin's chat adds once."""
+    world.register()
+    run = world.run(prm_friend_add="on")
+    manager = MagicMock()
+    manager.add_friend.return_value = {"ok": True, "target": "abcdefyz", "message": "已成功向「abcdefyz」发送好友申请"}
+    admin, adds = run.router._admin, run.prm.friend_adds
+    admin.set_friend_manager(manager, None)
+    adds.attach(admin, None, None)
+    admin.set_friend_adds(adds)
+    adds.spawn, adds.clear_clipboard = (lambda fn: fn()), (lambda text: False)
+    record = adds.paste("dy_demo01", "小鹿", {"wechat": "abcdefyz"})
+    t = world.clock.now
+    for n, text in enumerate(("待加达人", f"加达人 {record['id']}", f"不加达人 {record['id']}")):
+        world.wechat.say(CREATOR, CREATOR, text, t + n * 10)
+        world.clock.now = t + n * 10
+        run.poll()
+    jobs = world.jobs()
+    assert jobs and {job["kind"] for job in jobs} == {"prm"}
+    assert [line for job in jobs for line in text_lines(job)] == ["待加达人", "加达人 1", "不加达人 1"]
+    assert world.sent == [] and manager.add_friend.call_count == 0
+    assert run.prm.store.friend_add(record["id"])["state"] == "offered"
+    world.clock.now += 10
+    world.wechat.say(ADMIN, ADMIN, f"加达人 {record['id']}", world.clock.now)      # the control
+    run.poll()
+    assert manager.add_friend.call_count == 1 and run.prm.store.friend_add(record["id"])["state"] == "requested"
+    [(chat, said)] = world.sent
+    assert chat == ADMIN and said.startswith("已向 ab****yz 发好友申请") and "abcdefyz" not in said
 
 
 # ── PRM_EDGE (Windows is only the WeChat edge; the Mac drafts) ─────────────────

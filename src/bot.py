@@ -230,6 +230,8 @@ class Bot:
         relay = self._start_claude_relay(config, router, backend)
         # PRM_COPILOT=on: registered creators' messages become silent draft jobs.
         prm = self._start_prm(config, router, backend, relay)
+        # PRM_BUYIN_SYNC_MIN: who a 抖音百应 private message is from, by the 达人名单's 抖音号 / 平台 UID
+        self._wire_prm_directory(prm, influencer_store)
         # WECHAT_BACKEND=edge 加 PRM_COPILOT=on：名单合一、发送失败告诉 PRM；达人资料在后台线程里查
         party_sync = self._wire_edge_prm(backend, prm, influencer_store)
         if party_sync is not None:
@@ -244,6 +246,9 @@ class Bot:
 
         self._start_friend_management(config, backend, admin_handler,
                                       on_accepted=new_friends.accepts.note if new_friends is not None else None)
+        # 加百应达人微信 (PRM_FRIEND_ADD): its one add per confirmation goes through the admin handler's add_friend_checked
+        # (the 添加好友 breaker) and waits while the auto-accept is paused; the admin's 待加达人 / 加达人 N / 不加达人 N
+        self._wire_friend_adds(config, backend, admin_handler, prm)
         admin_handler.set_status(lambda: self._status_lines(router, relay, prm, edge))
 
         # ── 6. Health monitor ───────────────────────────────────
@@ -361,8 +366,10 @@ class Bot:
         """The new-friend scan (src/wechat/new_friends.py), or None: only with a consumer (PRM_EDGE: a
         ``friend_added`` event per new friend; PRM_COPILOT: new friends first in 登记达人's candidates,
         registering one drafts her messages since she was added; with PRM_AUTO_REGISTER=on every new friend
-        goes to ``prm.new_friend_found``, which the PRM sender thread registers) and a backend whose database
-        it can read beside the poll loop (Windows wcdb).  Its records are in the bot's database (DB_PATH)."""
+        goes to ``prm.new_friend_found``, which the PRM sender thread registers; and 加百应达人微信's
+        ``on_new_friend``: which of its records she may be, never registering or linking anyone) and a backend
+        whose database it can read beside the poll loop (Windows wcdb).  Its records are in the bot's database
+        (DB_PATH)."""
         wanted = str(getattr(config, "prm_auto_register", "off") or "off").strip().lower() == "on"
         auto = edge is None and prm is not None and bool(getattr(prm, "auto_register", False))
         if wanted and not auto:
@@ -374,7 +381,8 @@ class Bot:
             logger.info("New friends: this WeChat backend cannot be read beside its poll loop; not looked for%s",
                         " (PRM_AUTO_REGISTER registers nobody)" if auto else "")
             return None
-        on_found = [edge.friend_added] if edge is not None else []
+        adds = getattr(prm, "friend_adds", None) if prm is not None else None
+        on_found = [edge.friend_added] if edge is not None else [adds.on_new_friend] if adds is not None else []
         if auto:
             # Only queued inside the scan's look; registered on the PRM sender thread (PrmService.register_found)
             on_found.append(prm.new_friend_found)
@@ -394,6 +402,8 @@ class Bot:
         if prm is not None:
             service.set_catch_up_sink(prm.take_new_friend)
             prm.on_registered = service.registered
+            if adds is not None:
+                adds.set_new_friends(service)     # (a record made after she became a friend looks back)
         try:
             from .web.server import register_new_friends
             register_new_friends(service)
@@ -487,6 +497,15 @@ class Bot:
         if auto.enabled:
             auto.start()
 
+    def _wire_friend_adds(self, config, backend, admin_handler, prm) -> None:
+        """加百应达人微信 (src/prm/friend_adds.py): the admin handler (``add_friend_checked``; no friend manager, as on the
+        Mac: nothing is added there, the number can be copied), the auto-accept service (its pause stops every add)
+        and the admin's notifier; the admin's commands.  Without the PRM nothing is wired."""
+        if prm is None:
+            return
+        prm.friend_adds.attach(admin_handler, self._auto_friend, self._admin_notifier(config, backend))
+        admin_handler.set_friend_adds(prm.friend_adds)
+
     @staticmethod
     def _admin_notifier(config, backend):
         """``notify(text)`` for the auto-accept worker: a private message to the admin (ADMIN_WXID) through the
@@ -571,6 +590,21 @@ class Bot:
             pass
         logger.info("PRM_COPILOT: %d registered creator(s)", len(prm.store.active_wxids()))
         return prm
+
+    @staticmethod
+    def _wire_prm_directory(prm, influencer_store) -> None:
+        """The PRM's ``creator_directory``: the 达人名单 (src/influencer) rows that are on (wxid, 平台, 抖音号 / 小红书号, 平台
+        UID), by which a 抖音百应 private message is matched to a registered creator (PRM_BUYIN_SYNC_MIN).  Without the
+        list (or the PRM) nothing is wired: only the ids the deals' verified 抖店 sample orders found are used."""
+        if prm is None or influencer_store is None:
+            return
+        store = influencer_store
+
+        def directory() -> list:
+            return [{"wxid": c["chat_id"], "platform": c.get("platform") or "", "platform_no": c.get("platform_no") or "",
+                     "platform_uid": c.get("platform_uid") or ""} for c in store.list_contacts() if c.get("enabled")]
+
+        prm.creator_directory = directory
 
     @staticmethod
     def _wire_edge_backend(backend, influencer_store) -> None:

@@ -458,6 +458,113 @@ class TestPrmPages:
         assert prm.service.store.packet(2)["status"] == "dropped"
         assert "现在没有要审批的草稿" in page.inner_text("body") and prm.sent == []
 
+    def test_review_page_copies_a_baiying_draft_and_marks_it_sent_by_hand(self, page, prm):
+        """抖音百应私信（PRM_BUYIN_SYNC_MIN）：草稿卡片是「百应私信 · 运营手动发」，号码只显示占位符；复制 / 改了再复制
+        拿到带完整号码的字（记一笔），已在百应发了 → 已发出（运营手动），不发要确认；机器人在微信里什么都不发。"""
+        import json as _json
+        import re as _re
+        from src.prm import platforms
+        from src.prm.service import BUYIN_SYNC_CHAT
+
+        service, relay, clock = prm.service, prm.relay, prm.clock
+        service.creator_directory = lambda: [{"wxid": "wxid_creator01", "platform": "DY", "platform_no": "xiaomei_dy",
+                                              "platform_uid": ""}]
+
+        def baiying(cid, mid, text, reply):
+            relay.submit(BUYIN_SYNC_CHAT, BUYIN_SYNC_CHAT, "读抖音百应私信（精选联盟）", kind="prm",
+                         meta={"op": "buyin_inbox"}, fresh=True, input_closed=True)
+            poll = relay.next_job(0, ("prm",))
+            convo = platforms.im_conversation({"conversationId": cid, "creator": {"awemeId": "xiaomei_dy",
+                                                                                   "nickname": "小美的抖音"},
+                                               "messages": [{"id": mid, "at": clock.now, "from": "creator", "text": text}]})
+            relay.finish(poll["id"], {"ok": True, "text": _json.dumps(platforms.im_result(conversations=[convo]),
+                                                                       ensure_ascii=False)})
+            relay.tick()
+            job = relay.next_job(0, ("prm",))
+            assert job["meta"]["channel"] == "buyin"
+            d = {"intent": "问佣金", "slots": {}, "stage_proposal": "", "message_kind": "faq", "reply_draft": reply,
+                 "attachments_to_send": [], "needs_attention": False, "reason": "kb/合作政策.md"}
+            relay.finish(job["id"], {"ok": True, "text": _json.dumps(d, ensure_ascii=False)})
+            relay.tick()
+            return service.store.packet_for_job(job["id"])
+
+        first = baiying("conv_a", "a1", "佣金多少？我电话 13900001111", "你好呀，佣金 20%，电话〈手机2〉是你的吗？")
+        second = baiying("conv_b", "b1", "第二个会话里问的", "好的收到～")
+        page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-buyin", has_text="佣金多少")
+        text = card.inner_text()
+        for expected in ("百应私信 · 运营手动发", "小美 · 百应私信", "她在百应说", "百应里的昵称：小美的抖音", "〈手机2〉",
+                         "你好呀，佣金 20%", "机器人不能在百应里发消息"):
+            assert expected in text, expected
+        assert "13900001111" not in page.inner_text("body")
+        assert card.locator("button:has-text('发送')").count() == 0
+        head = card.locator(".card-head h2").bounding_box()            # 宽屏：两个标签和标题在同一行
+        assert all(abs(t.bounding_box()["y"] - head["y"]) < head["height"] for t in card.locator(".card-head .tag").all())
+        page.set_viewport_size({"width": 390, "height": 844})          # 手机宽度：右上角的两个标签折到下一行，不被截掉
+        page.wait_for_timeout(300)
+        box = card.bounding_box()
+        for tag in card.locator(".card-head .tag").all():
+            t = tag.bounding_box()
+            assert box["x"] <= t["x"] and t["x"] + t["width"] <= min(box["x"] + box["width"], 390), (t, box)
+        page.set_viewport_size({"width": 1440, "height": 900})
+        card.locator("button").filter(has_text=_re.compile(r"^\s*复制\s*$")).click()
+        page.wait_for_timeout(1000)
+        assert "13900001111" in card.locator("textarea[aria-label='已复制的内容']").input_value()
+        assert service.store.events(first["deal_id"], kinds=("buyin_copy",))
+        card.locator("button:has-text('改了再复制')").click()
+        card.locator("textarea[aria-label='修改要复制的内容']").fill("改过的：电话〈手机2〉")
+        card.locator("button:has-text('复制改好的')").click()
+        page.wait_for_timeout(1000)
+        assert card.locator("textarea[aria-label='已复制的内容']").input_value() == "改过的：电话13900001111"
+        card.locator("button:has-text('已在百应发了')").click()
+        page.wait_for_timeout(1500)
+        done = service.store.packet(first["id"])
+        assert (done["status"], done["outcome"], done["final_text"]) == ("sent", "sent_by_hand", "改过的：电话〈手机2〉")
+        row = page.locator(".prm-recent tr", has_text=f"#{first['id']}")
+        assert "已在百应手动发" in row.inner_text() and row.locator("button:has-text('标为发错了')").count() == 0
+        other = page.locator(".prm-buyin", has_text="第二个会话里问的")
+        other.locator("button:has-text('不发')").click()
+        page.wait_for_timeout(300)
+        page.locator("[role=dialog] button:has-text('不发')").click()
+        page.wait_for_timeout(1500)
+        assert service.store.packet(second["id"])["status"] == "dropped"
+        assert page.locator(".prm-buyin").count() == 0 and prm.sent == []
+
+    def test_review_page_marks_our_baiying_invites_and_counts_others_contact_cards(self, page, prm):
+        """百应私信：没登记的达人里我们邀约的（Mac 按邀约台账认出来的）写「我们邀约的 · 抖音号」和邀约时间；别人邀约的会话里
+        的联系方式卡片只说有几张、不归我们处理；号码哪儿都不显示。号码、抖音号、名字都是编的。"""
+        import json as _json
+        from src.prm import platforms
+        from src.prm.service import BUYIN_SYNC_CHAT
+
+        service, relay, clock = prm.service, prm.relay, prm.clock
+        service._buyin_sec = 600                                     # PRM_BUYIN_SYNC_MIN=10
+        relay.submit(BUYIN_SYNC_CHAT, BUYIN_SYNC_CHAT, "读抖音百应私信（精选联盟）", kind="prm",
+                     meta={"op": "buyin_inbox"}, fresh=True, input_closed=True)
+        poll = relay.next_job(0, ("prm",))
+        card = {"wechat": "zq_test_wx_83", "phone": "13700001234"}
+        convs = [platforms.im_conversation(c) for c in (
+            {"conversationId": "conv_inv", "creator": {"buyinId": "1777000000000000042", "awemeId": "invited_test_dy",
+                                                       "nickname": "邀约的测试达人"},
+             "invited": {"aweme_id": "invited_test_dy", "invited_at": "2026-10-29T15:00:00+08:00",
+                         "plan_id": "PTEST-plan-0001"},
+             "messages": [{"id": "i1", "at": clock.now, "from": "creator", "kind": "contact", "contact": card}]},
+            {"conversationId": "conv_other", "creator": {"buyinId": "1777000000000000043", "nickname": "别人的测试达人"},
+             "messages": [{"id": "o1", "at": clock.now, "from": "creator", "kind": "contact", "contact": card}]})]
+        relay.finish(poll["id"], {"ok": True, "text": _json.dumps(platforms.im_result(conversations=convs),
+                                                                   ensure_ascii=False)})
+        relay.tick()
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        text = page.inner_text("body")
+        for expected in ("百应里有 2 位没登记的达人发了消息",
+                         "邀约的测试达人（我们邀约的 · 抖音号 invited_test_dy · 10-29 15:00 邀约）", "别人的测试达人",
+                         "别人邀约的会话里有 1 张联系方式卡片，不归我们处理"):
+            assert expected in text, expected
+        assert "zq_test_wx_83" not in text and "13700001234" not in text
+
     def test_deals_page_registers_and_disables_a_creator(self, page, prm):
         page.goto(f"{BASE_URL}/#/deals", timeout=10000)
         page.wait_for_timeout(1500)
@@ -740,6 +847,251 @@ class TestPrmPages:
         assert night.service.store.packet(2)["wrong"] is True
         assert night.service.store.events(1, limit=1)[0]["detail"]["night"] is True
 
+    # ── 加百应达人微信 (PRM_FRIEND_ADD, 功能 R): the 加微信 cards, the paste form, 登记达人's 抖音号 ───────────
+    @staticmethod
+    def _friend_adds_on(prm):
+        """Switch 加百应达人微信 on for this in-memory service, a fake friend manager behind the real admin handler."""
+        from types import SimpleNamespace
+        from src.admin import AdminCommandHandler
+        from src.prm.friend_adds import FriendAdds
+
+        class Manager:                                  # (a 4.0 application window whose 「备注」 field OCR saw)
+            def __init__(self):
+                self.calls = []
+                self.remarks = []
+
+            def add_friend(self, keyword, message="", remark=""):
+                self.calls.append((keyword, message))
+                self.remarks.append(remark)
+                return {"ok": True, "target": keyword, "message": f"已成功向「{keyword}」发送好友申请",
+                        **({"remark_set": True} if remark else {})}
+
+        manager = Manager()
+        adds = FriendAdds(prm.service.store, SimpleNamespace(prm_friend_add="on"), clock=prm.clock,
+                          register=prm.service.register, spawn=lambda fn: fn(), clear_clipboard=lambda text: False)
+        adds.attach(AdminCommandHandler(friend_manager=manager), None, None)
+        prm.service.friend_adds = adds
+        prm.service.on_buyin_contact = adds.offer_from_buyin              # (the 百应 inbox's hook, as PrmService wires it)
+        return adds, manager
+
+    def test_review_page_adds_a_baiying_contact_once_after_its_confirmation(self, page, prm):
+        adds, manager = self._friend_adds_on(prm)
+        adds.paste("dy_demo01", "小鹿", {"wechat": "abcdefyz", "phone": "13800000000"})
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-friend-add", has_text="小鹿")
+        text = card.inner_text()
+        for expected in ("加微信 · 小鹿", "抖音号 dy_demo01", "运营手动填的", "微信号 ab****yz", "手机 138****0000", "待确认",
+                         "添加该达人微信", "我在手机上加了", "请她加我们", "不加"):
+            assert expected in text, expected
+        assert "今天控制台已加 0/10" in page.inner_text("body") and "abcdefyz" not in page.inner_text("body")
+        assert card.locator("input[aria-label='#1 的附言']").input_value() == "您好小鹿，百应上联系您的～"
+        remark = card.locator(".prm-remark").inner_text()                        # the remark, next to the greeting
+        assert "备注：抖音-小鹿" in remark and "认出「备注」栏就填进去" in remark
+        card.locator("button:has-text('显示完整')").click()                      # written down, this page only
+        page.wait_for_timeout(800)
+        assert "abcdefyz" in card.inner_text() and len(adds._store.friend_add(1)["reveals"]) == 1
+        card.locator("button:has-text('隐藏')").click()
+        card.locator("[aria-label='#1 用哪个加'] button:has-text('微信号')").click()
+        card.locator("button:has-text('添加该达人微信')").click()
+        page.wait_for_timeout(300)
+        dialog = page.locator("[role=dialog]")
+        said = dialog.inner_text()
+        assert "搜索 ab****yz" in said and "不会自动重试" in said and "别动键盘鼠标" in said
+        assert "附言：您好小鹿，百应上联系您的～；备注：抖音-小鹿" in said
+        assert manager.calls == []                                               # nothing before 确定添加
+        dialog.locator("button:has-text('确定添加')").click()
+        page.wait_for_timeout(1500)
+        assert manager.calls == [("abcdefyz", "您好小鹿，百应上联系您的～")] and manager.remarks == ["抖音-小鹿"]
+        assert adds._store.friend_add(1)["state"] == "requested"
+        text = page.locator(".prm-friend-add", has_text="小鹿").inner_text()
+        assert "已发申请" in text and "她已经通过了，我来选是哪个聊天" in text and "添加该达人微信" not in text
+        assert "备注：抖音-小鹿（已填进好友申请）" in text
+        assert "今天控制台已加 1/10" in page.inner_text("body")
+
+    def test_review_page_drops_a_contact_after_asking_and_links_another_to_her_chat(self, page, prm):
+        adds, manager = self._friend_adds_on(prm)
+        adds.paste("dy_demo01", "小鹿", {"wechat": "abcdefyz"})
+        adds.paste("dy_demo02", "小青", {"phone": "13900000000"})
+        adds.confirm(2)                                                          # (sent: waits for her)
+        page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        page.locator(".prm-friend-add", has_text="小鹿").locator("button:has-text('不加')").click()
+        page.wait_for_timeout(300)
+        assert "号码会马上清除" in page.locator("[role=dialog]").inner_text()
+        page.locator("[role=dialog] button:has-text('不加')").click()
+        page.wait_for_timeout(1500)
+        assert adds._store.friend_add(1)["state"] == "dropped" and adds._store.friend_add(1)["wechat"] == ""
+        assert page.locator(".prm-friend-add", has_text="小鹿").count() == 0
+        page.locator(".prm-friend-add", has_text="小青").locator("button:has-text('她已经通过了，我来选是哪个聊天')").click()
+        page.wait_for_timeout(300)
+        dialog = page.locator("[role=dialog]")
+        assert "dy_demo02" in dialog.inner_text()
+        dialog.locator("input[aria-label='#2 关联的 wxid']").fill("wxid_xiaoqing")
+        dialog.locator("button:has-text('是她，登记并关联')").click()
+        page.wait_for_timeout(1500)
+        party = prm.service.store.party_by_wxid("wxid_xiaoqing")
+        assert party["name"] == "小青" and adds._store.friend_add(2)["state"] == "linked"
+        assert [l["account"] for l in prm.service.store.creator_links(party["id"])] == ["dy_demo02"]
+        # a chat picked by hand (how she came is not known): the card stays and suggests her remark on the phone
+        card = page.locator(".prm-friend-add", has_text="小青")
+        assert "已登记并关联" in card.inner_text()
+        assert "建议在手机微信里给她设备注：抖音-小青" in card.locator(".prm-remark-hint").inner_text()
+        card.locator("button:has-text('复制备注')").click()
+        page.wait_for_timeout(500)
+        assert page.evaluate("navigator.clipboard.readText()") == "抖音-小青"
+        card.locator("button:has-text('备注设好了')").click()
+        page.wait_for_timeout(1500)
+        assert adds._store.friend_add(2)["remark_set"] is True
+        assert page.locator(".prm-friend-add").count() == 0 and len(manager.calls) == 1
+
+    def test_deals_page_pastes_a_contact_and_registers_a_creator_with_her_douyin_id(self, page, prm):
+        adds, _ = self._friend_adds_on(prm)
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.wait_for_timeout(1500)
+        form = page.locator(".prm-friend-paste")
+        assert "手动登记百应达人留的联系方式" in form.inner_text() and "可能记一次「查看」" in form.inner_text()
+        assert form.locator("button:has-text('记下来')").is_disabled()          # the 抖音号 is required
+        form.locator("input[aria-label='百应达人的抖音号']").fill("有中文")
+        form.locator("button:has-text('记下来')").click()
+        page.wait_for_timeout(800)
+        assert "要填她的抖音号" in page.inner_text("body") and adds._store.friend_adds() == []
+        form.locator("input[aria-label='百应达人的抖音号']").fill("dy_demo03")
+        form.locator("input[aria-label='她留的微信号']").fill("1abc")
+        form.locator("button:has-text('记下来')").click()
+        page.wait_for_timeout(800)
+        assert "字母开头" in page.inner_text("body") and adds._store.friend_adds() == []
+        form.locator("input[aria-label='她留的微信号']").fill("abcdefgh")
+        form.locator("input[aria-label='百应昵称']").fill("小白")
+        form.locator("button:has-text('记下来')").click()
+        page.wait_for_timeout(1200)
+        [record] = adds._store.friend_adds()
+        assert (record["aweme_id"], record["nickname"], record["wechat"], record["state"]) == (
+            "dy_demo03", "小白", "abcdefgh", "offered")
+        assert "到「待审批 › 加微信」确认添加" in page.inner_text("body")
+        register = page.locator(".prm-register")
+        register.locator("input[aria-label='达人 wxid']").fill("wxid_xiaohua")
+        register.locator("input[aria-label='称呼']").fill("小花")
+        register.locator("input[aria-label='达人抖音号（可选）']").fill("dy_demo05")
+        register.locator("button:has-text('登记')").click()
+        page.wait_for_timeout(1500)
+        party = prm.service.store.party_by_wxid("wxid_xiaohua")
+        assert [(l["account"], l["source"]) for l in prm.service.store.creator_links(party["id"])] == [("dy_demo05", "register")]
+        page.locator("button[aria-label='展开 小花']").click()
+        page.wait_for_timeout(500)
+        detail = page.locator(".prm-deal")
+        assert "登记时填的：抖音号 dy_demo05" in detail.inner_text()
+        detail.locator(".prm-links button:has-text('取消关联')").click()
+        page.wait_for_timeout(1500)
+        assert prm.service.store.creator_links(party["id"]) == []
+
+    def test_review_page_shows_who_may_be_her_and_only_an_operator_links_her(self, page, prm, tmp_path):
+        """功能 R step 5: a new friend that fits a record is shown on its card (how sure, why); 不是她 clears it;
+        是她，登记并关联 registers her; 登记达人's list marks the new friend and 选这个 brings her 抖音号."""
+        from src.wechat.new_friends import NewFriendService, NewFriendStore
+        from src.web import server as web_server
+
+        adds, _ = self._friend_adds_on(prm)
+        adds.paste("dy_demo01", "小鹿", {"wechat": "abcdefyz"})
+        adds.confirm(1)
+        now = prm.clock.now
+        store = NewFriendStore(str(tmp_path / "messages.db"))
+        for wxid, name in (("wxid_wrong01", "路人甲"), ("wxid_xiaolu", "小鹿🌸")):
+            store.add(wxid=wxid, name=name, remark="", how="requested", kind="requested", added_at=now, verify_from=None,
+                      verify_text="", found_at=now)
+        web_server.register_new_friends(NewFriendService(object(), store, clock=prm.clock))
+        try:
+            adds.on_new_friend({"wxid": "wxid_wrong01", "name": "路人甲", "how": "requested", "own_greeting": "",
+                                "added_at": now})
+            page.goto(f"{BASE_URL}/#/review", timeout=10000)
+            page.wait_for_timeout(1500)
+            card = page.locator(".prm-friend-add", has_text="小鹿")
+            note = card.locator(".prm-candidate").inner_text()
+            assert "新好友「路人甲」" in note and "很可能是她" in note and "只有这一条在等她通过" in note
+            card.locator(".prm-candidate button:has-text('不是她')").click()
+            page.wait_for_timeout(1200)
+            assert adds._store.friend_add(1)["rejected"] == ["wxid_wrong01"] and card.locator(".prm-candidate").count() == 0
+            assert prm.service.store.parties()[1:] == []                  # nobody registered by itself
+            adds.on_new_friend({"wxid": "wxid_xiaolu", "name": "小鹿🌸", "how": "requested",
+                                "own_greeting": "您好小鹿，百应上联系您的～", "added_at": now + 5})
+            page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+            page.wait_for_timeout(1500)
+            row = page.locator(".prm-new-friend", has_text="wxid_xiaolu")
+            assert "确定是她：百应的小鹿（#1）" in row.inner_text()
+            row.locator("button:has-text('选这个')").click()
+            assert page.locator("input[aria-label='达人抖音号（可选）']").input_value() == "dy_demo01"
+            page.goto(f"{BASE_URL}/#/review", timeout=10000)
+            page.wait_for_timeout(1500)
+            card = page.locator(".prm-friend-add", has_text="小鹿")
+            assert "确定是她" in card.locator(".prm-candidate").inner_text()
+            card.locator(".prm-candidate button:has-text('是她，登记并关联')").click()
+            page.wait_for_timeout(1500)
+            party = prm.service.store.party_by_wxid("wxid_xiaolu")
+            assert party["name"] == "小鹿" and adds._store.friend_add(1)["state"] == "linked"
+            assert [l["account"] for l in prm.service.store.creator_links(party["id"])] == ["dy_demo01"]
+            assert adds._store.friend_add(1)["remark_set"] is True       # she accepted our request, which had it
+            assert page.locator(".prm-friend-add").count() == 0          # (so nothing to set on the phone)
+        finally:
+            web_server.register_new_friends(None)
+
+    def test_with_the_switch_off_the_pages_have_nothing_of_it(self, page, prm):
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.wait_for_timeout(1500)
+        assert page.locator(".prm-friend-paste").count() == 0
+        assert page.locator("input[aria-label='达人抖音号（可选）']").count() == 0
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        assert page.locator(".prm-friend-adds").count() == 0
+
+    def test_review_page_says_who_left_a_contact_and_the_baiying_draft_names_its_record(self, page, prm):
+        """加百应达人微信第 7 步：「待审批」页百应那一行说没登记的达人里有几位留了联系方式（见下面的「加微信」），我们邀约的
+        达人发的联系方式卡片成了一张加微信卡；百应草稿卡上说这个会话留过的联系方式是哪一条加微信、到哪一步了；完整号码哪儿都
+        不显示。号码、抖音号、名字都是编的。"""
+        import json as _json
+        from src.prm import platforms
+        from src.prm.service import BUYIN_SYNC_CHAT
+
+        self._friend_adds_on(prm)
+        service, relay, clock = prm.service, prm.relay, prm.clock
+        service._buyin_sec = 600                                     # PRM_BUYIN_SYNC_MIN=10
+        service.creator_directory = lambda: [{"wxid": "wxid_creator01", "platform": "DY", "platform_no": "xiaomei_dy",
+                                              "platform_uid": ""}]
+        # she left her card in 百应 before she was registered, and was linked since
+        early, _ = service.store.add_friend_add(state="linked", now=clock.now, source="buyin_card",
+                                                conversation_id="conv_reg", message_id="r0", aweme_id="xiaomei_dy",
+                                                nickname="小美的抖音", masked={"wechat": "zq****83"})
+        relay.submit(BUYIN_SYNC_CHAT, BUYIN_SYNC_CHAT, "读抖音百应私信（精选联盟）", kind="prm",
+                     meta={"op": "buyin_inbox"}, fresh=True, input_closed=True)
+        poll = relay.next_job(0, ("prm",))
+        card = {"wechat": "zq_test_wx_83", "phone": "13700001234"}
+        convs = [platforms.im_conversation(c) for c in (
+            {"conversationId": "conv_inv", "creator": {"buyinId": "1777000000000000042", "awemeId": "invited_test_dy",
+                                                       "nickname": "邀约的测试达人"},
+             "invited": {"aweme_id": "invited_test_dy", "invited_at": "2026-10-29T15:00:00+08:00",
+                         "plan_id": "PTEST-plan-0001"},
+             "messages": [{"id": "i1", "at": clock.now, "from": "creator", "kind": "contact", "contact": card}]},
+            {"conversationId": "conv_reg", "creator": {"awemeId": "xiaomei_dy", "nickname": "小美的抖音"},
+             "messages": [{"id": "r1", "at": clock.now, "from": "creator", "text": "样品什么时候到？"}]})]
+        relay.finish(poll["id"], {"ok": True, "text": _json.dumps(platforms.im_result(conversations=convs),
+                                                                   ensure_ascii=False)})
+        relay.tick()
+        job = relay.next_job(0, ("prm",))
+        assert job["meta"]["channel"] == "buyin" and job["meta"]["creator"]["douyin_ids"] == ["xiaomei_dy"]
+        d = {"intent": "问样品", "slots": {}, "stage_proposal": "", "message_kind": "faq", "reply_draft": "这两天就到哦",
+             "attachments_to_send": [], "needs_attention": False, "reason": "kb/合作政策.md"}
+        relay.finish(job["id"], {"ok": True, "text": _json.dumps(d, ensure_ascii=False)})
+        relay.tick()
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        text = page.inner_text("body")
+        for expected in ("百应里有 1 位没登记的达人发了消息", "其中 1 位留了联系方式，见下面的「加微信」",
+                         "加微信 · 邀约的测试达人", "微信号 zq****83", "手机 137****1234"):
+            assert expected in text, expected
+        draft = page.locator(".prm-buyin", has_text="样品什么时候到")
+        assert (f"她在这个会话里留了联系方式（微信号 zq****83）→「加微信 #{early['id']}」：已登记并关联"
+                in draft.inner_text())
+        assert "zq_test_wx_83" not in text and "13700001234" not in text
 
 class TestWechatGapAlert:
     """电脑微信掉线的提醒（Windows：机器人自己记的，副驾驶模式的控制台也有）：每页顶上一直显示到运营点「看过了」，

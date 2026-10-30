@@ -33,6 +33,7 @@ packets, the reply).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import signal
@@ -43,6 +44,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Callable, Optional
+
+_log = logging.getLogger(__name__)   # (invite_match's warnings when the worker hands it none of its own)
 
 LINK = "{链接}"            # in a reply: the link the platform made, filled in after VERIFIED_SUCCESS
 _BRACED = re.compile(r"\{[^{}\s]{1,12}\}")
@@ -1553,14 +1556,10 @@ def _invite_time(text) -> str:
     return str(text or "")[:16].replace("T", " ")
 
 
-def invite_cover(ledger, item_id: str, *, douyin_ids=(), uid: str = "") -> Optional[dict]:
-    """Did a 邀约带货 card with a 专属佣金 go to this creator for this product (the batch invite tool's ledger on this
-    Mac, ``ledger``: its folder or the invites.jsonl itself)?  ``{"state": "covered" | "unsure", "rate", "at",
-    "aweme_id", "attempt", "outcome"}``: covered = the card went out (``sent`` true, VERIFIED_SUCCESS or
-    ACCEPTED_UNVERIFIED): the platform gave the creator a 指定达人佣金 strategy for its products then; unsure = it may
-    have (no result, ``sent`` null, another outcome with ``sent`` true).  The creator is one of ``douyin_ids`` (her
-    抖音号, as the tool writes ``aweme_id``; case is not looked at), or ``uid`` when the tool writes one.  None: no such
-    card, or no ledger at all; a ledger that cannot be read raises ``OSError``."""
+def _invite_ledger(ledger) -> Optional[tuple]:
+    """The batch invite tool's ledger (``ledger``: its folder or the invites.jsonl itself): ``(folder, attempts,
+    results)``, the ``attempt`` and ``result`` rows by attempt id; None when there is no ledger.  A line cut by a crash
+    is passed over; a ledger that cannot be read raises ``OSError``."""
     if not ledger:
         return None
     path = Path(os.path.expanduser(str(ledger)))
@@ -1568,8 +1567,6 @@ def invite_cover(ledger, item_id: str, *, douyin_ids=(), uid: str = "") -> Optio
         path = path / INVITE_LEDGER_FILE
     if not path.exists():
         return None
-    names = {str(d).strip().lower() for d in douyin_ids or () if str(d).strip()}
-    uid = str(uid or "").strip()
     attempts, results = {}, {}
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
@@ -1582,6 +1579,23 @@ def invite_cover(ledger, item_id: str, *, douyin_ids=(), uid: str = "") -> Optio
             attempts[str(rec["attempt"])] = rec
         elif rec.get("event") == "result":
             results[str(rec["attempt"])] = rec
+    return path.parent, attempts, results
+
+
+def invite_cover(ledger, item_id: str, *, douyin_ids=(), uid: str = "") -> Optional[dict]:
+    """Did a 邀约带货 card with a 专属佣金 go to this creator for this product (the batch invite tool's ledger on this
+    Mac, ``ledger``: its folder or the invites.jsonl itself)?  ``{"state": "covered" | "unsure", "rate", "at",
+    "aweme_id", "attempt", "outcome"}``: covered = the card went out (``sent`` true, VERIFIED_SUCCESS or
+    ACCEPTED_UNVERIFIED): the platform gave the creator a 指定达人佣金 strategy for its products then; unsure = it may
+    have (no result, ``sent`` null, another outcome with ``sent`` true).  The creator is one of ``douyin_ids`` (her
+    抖音号, as the tool writes ``aweme_id``; case is not looked at), or ``uid`` when the tool writes one.  None: no such
+    card, or no ledger at all; a ledger that cannot be read raises ``OSError``."""
+    rows = _invite_ledger(ledger)
+    if rows is None:
+        return None
+    _, attempts, results = rows
+    names = {str(d).strip().lower() for d in douyin_ids or () if str(d).strip()}
+    uid = str(uid or "").strip()
     best = None
     for key, rec in attempts.items():
         who = str(rec.get("aweme_id") or "").strip().lower()
@@ -1602,6 +1616,71 @@ def invite_cover(ledger, item_id: str, *, douyin_ids=(), uid: str = "") -> Optio
         if best is None or (state == "covered", found["at"]) > (best["state"] == "covered", best["at"]):
             best = found                                 # a card that went out beats one that may have; the latest
     return best
+
+
+# ── 邀约背景：起草时告诉 Mac 这位达人是怎么被邀约来的（加百应达人微信，功能 R 第 6 步） ────────────────
+# 批量邀约工具的台账（invites.jsonl：attempt 行有商品、比例、权益、每款样品、类别，result 行说发没发出去）和清单
+# （<台账目录>/plans/plan-<编号>.json：creators[] 里每位卡上的话 content，products[] 里商品名）。worker 的 invite_block 把它
+# 写成提示里的 <invite_background>（只是数据）。只用标准库，macOS 自带的 /usr/bin/python3（3.9）也能跑。
+
+INVITE_PLANS_DIR = "plans"
+INVITE_HISTORY_MAX = 3
+INVITE_RIGHT_NAMES = {"free-sample": "免费申样", "high-commission": "专属高佣", "video-material": "视频素材支持",
+                      "video-boost": "优质视频投放"}
+INVITE_CATEGORY_NAMES = {"small": "小达人", "mid": "中大博主", "big": "大主播/专场型"}
+_PLAN_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def invite_history(ledger, douyin_ids, limit: int = INVITE_HISTORY_MAX) -> list:
+    """The 邀约带货 cards the batch invite tool sent this creator (its ledger on this Mac, ``ledger``: its folder or the
+    invites.jsonl itself; ``_invite_ledger``), newest first, at most ``limit``; a card that surely did not go out
+    (``sent`` false) is left out.  Each ``{"at", "aweme_id", "plan_id", "attempt", "category", "products": [{"id",
+    "name"}], "commission_rate", "rights", "samples", "content", "sent", "outcome"}``: ``sent`` True (went out) or None
+    (not known: no result, or ``sent`` null); ``content`` (the card's words, ``_invite_content``) and the products'
+    names come from the plan (``_invite_plan``; only a plan id of letters, digits, ``_`` and ``-``) when it is there.  The
+    creator is one of ``douyin_ids`` (her 抖音号; case is not looked at).  [] when there is no ledger or no card for her;
+    a ledger that cannot be read raises ``OSError``."""
+    names = {str(d).strip().lower() for d in douyin_ids or () if str(d).strip()}
+    read = _invite_ledger(ledger) if names else None
+    if read is None:
+        return []
+    folder, attempts, results = read
+    cards = []
+    for key, rec in attempts.items():
+        if str(rec.get("aweme_id") or "").strip().lower() not in names:
+            continue
+        result = results.get(key) or {}
+        if result.get("sent") is False:
+            continue                                     # nothing went out
+        rate = rec.get("commission_rate")
+        cards.append({
+            "at": _clip(rec.get("at") or "", 40), "aweme_id": _clip(rec.get("aweme_id") or "", 64),
+            "plan_id": _clip(rec.get("plan_id") or "", 64), "attempt": _clip(key, 40),
+            "category": _clip(rec.get("category") or "", 20),
+            "products": [{"id": _clip(i, 40), "name": ""} for i in rec.get("products") or [] if isinstance(i, (str, int))],
+            "commission_rate": rate if _is_int(rate) else None,
+            "rights": [_clip(r, 30) for r in rec.get("rights") or [] if isinstance(r, str)],
+            "samples": {_clip(k, 40): _clip(v, 60) for k, v in (rec.get("samples") or {}).items()}
+            if isinstance(rec.get("samples"), dict) else {},
+            "content": "", "sent": True if result.get("sent") is True else None,
+            "outcome": _clip(result.get("outcome") or "", 40)})
+    cards.sort(key=lambda c: c["at"], reverse=True)
+    cards = cards[:max(1, int(limit))]
+    plans: dict = {}
+    for card in cards:
+        if not _PLAN_ID.match(card["plan_id"]):
+            continue                                     # (never a path out of the plans folder)
+        if card["plan_id"] not in plans:
+            plans[card["plan_id"]] = _invite_plan(folder, card["plan_id"])
+        plan = plans[card["plan_id"]]
+        if plan is None:
+            continue
+        card["content"] = _clip(_invite_content(plan, card["aweme_id"]), 600)
+        titles = {str(item.get("id")): _clip(item.get("name") or "", 60) for item in plan.get("products") or []
+                  if isinstance(item, dict) and item.get("id") is not None}
+        for product in card["products"]:
+            product["name"] = titles.get(product["id"], "")
+    return cards
 
 
 def invite_cover_text(cover: dict, item_id: str) -> str:
@@ -3160,6 +3239,447 @@ def check_sample_result(value, asked=None) -> dict:
 
     return {"version": 1, "op": "sample_status", "orders": orders, "missing": listed("missing"),
             "not_asked": listed("not_asked"), "stopped": stopped, "checked_at": when(value.get("checked_at"))}
+
+
+# ── 抖音百应私信 (精选联盟 IM; `dy buyin im-inbox`, read-only; the bot's PRM_BUYIN_SYNC_MIN) ──
+# Creators invited by 邀约带货 may answer in 百应's own private messages, not in WeChat.  The bot asks now and then
+# (op "buyin_inbox"); the worker runs this without the model, under the CLI lock.  The command is douyin-engineering's
+# `buyin im-inbox` (its branch im-inbox, 2026-10-29): it reads the 「精选联盟私信」 page the operator keeps open in the
+# Mac's debug Chrome (never opens, reloads or clicks it); the contract is in tools/claude_relay/README.md
+# (「百应私信」).  A CLI from before it answers a usage error (exit 2, "[USAGE] unknown command") and the round is
+# ``unavailable``.  It never runs with --execute; nothing is sent to 百应 from here (an operator copies a draft and
+# sends it in 百应 by hand).
+#
+# The page knows a creator by her 百应 id (``buyinId``, the page's outerId), never by her 抖音号 or 抖音 UID: the
+# worker finds her 抖音号 in the batch invite tool's ledger when our invite card is in the conversation
+# (``invite_match``).  A creator's contact card (kind "contact") comes with her WeChat id / phone in full: the
+# shop's own contact is taken out here (``im_strip_own``) and the bot masks the rest before anything is kept.
+
+IM_COMMAND = ("buyin", "im-inbox")
+IM_STOPS = ("login", "wall", "wrong_account", "invalid", "unavailable", "busy", "cancelled", "error")
+IM_FROM = ("creator", "shop")
+IM_KINDS = ("text", "card", "contact", "other")
+IM_CONTACT_CHARS = 64        # a contact card's WeChat id or phone
+# Why a contact card has no values: the CLI's own reasons, and this module's ("own": only the shop's own contact,
+# taken out; "unknown": nothing usable came).
+IM_CONTACT_WHY = ("older", "not-answered", "read-failed", "no-card-id", "own", "unknown")
+IM_CONTACT_TEXT = "[联系方式卡片]"   # a contact card's text as the bot takes it (the CLI's own may hold the numbers)
+INVITE_CARD = "alliance_invite_card"   # ``card`` of our 邀约带货 card in a conversation (its text is the invite)
+# invite_match: a card and a ledger ``result`` this far apart at most (measured 2026-10-29: the card's time is
+# 3.4–4.3 s after the result's; five cards of the same text went out under 3 minutes apart, so 180 s would pair
+# them wrongly, 60 s does not), and this much of the plan's invite text the card must hold.
+INVITE_MATCH_SEC = 60
+INVITE_MATCH_CHARS = 30
+IM_LIMIT = 50                # conversations one call asks for (--limit)
+IM_MESSAGES = 50             # messages of one conversation kept (the newest)
+IM_TEXT_CHARS = 1000         # one message's text
+IM_NAME_CHARS = 40           # a creator's nickname
+IM_CURSOR_CHARS = 4000       # the CLI's cursor (opaque JSON) as the bot keeps it
+_IM_ID = re.compile(r"^[0-9A-Za-z_:.@=+/-]{1,128}$")        # a conversation's or message's id as the CLI gives it
+_IM_TEXT_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")    # control characters but the line break
+_IM_CARD = re.compile(r"^[a-z_]{1,40}$")                     # a card's type (alliance_invite_card, goods_card …)
+_IM_BUYIN_ID = re.compile(r"^\d{1,30}$")                      # a creator's 百应 id (the page's outerId)
+_IM_PRODUCT = re.compile(r"^\d{1,30}$")                       # a product id an invite named
+_INVITE_PLAN_ID = re.compile(r"^[A-Za-z0-9_-]{1,40}$")         # the invite tool's plan id (P<date>-<time>-<4 hex>)
+
+
+def _im_text(value, limit: int) -> str:
+    return _IM_TEXT_CONTROL.sub("", str(value if value is not None else "")).strip()[:limit]
+
+
+def im_cursor(value):
+    """The CLI's cursor as the bot keeps it and hands back (``--after``): any JSON up to ``IM_CURSOR_CHARS`` when
+    written out, else None (the next call starts from the CLI's own default; the bot knows the messages it had)."""
+    if value is None or value == "":
+        return None
+    try:
+        text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return None
+    return value if len(text) <= IM_CURSOR_CHARS and not _CONTROL.search(text) else None
+
+
+def _im_word(value, limit: int) -> str:
+    """A short one-line text of a ledger or an invite (anything but a text or a number: "")."""
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return ""
+    return " ".join(_CONTROL.sub(" ", str(value)).split())[:limit]
+
+
+def im_contact(value) -> dict:
+    """A contact card's values as the bot takes them: ``{"wechat"?, "phone"?}`` (stripped, one line, at most
+    ``IM_CONTACT_CHARS``; a longer one is not used), or ``{"unavailable": True, "why"}`` (``IM_CONTACT_WHY``): the
+    CLI says so, or nothing usable came ("unknown")."""
+    if isinstance(value, dict):
+        if value.get("unavailable") is True:
+            why = str(value.get("why") or "")
+            return {"unavailable": True, "why": why if why in IM_CONTACT_WHY else "unknown"}
+        out = {}
+        for key in ("wechat", "phone"):
+            item = value.get(key)
+            text = item.strip() if isinstance(item, str) else ""
+            if text and len(text) <= IM_CONTACT_CHARS and not _CONTROL.search(text):
+                out[key] = text
+        if out:
+            return out
+    return {"unavailable": True, "why": "unknown"}
+
+
+def im_invited(value) -> Optional[dict]:
+    """Our invite a conversation is (``invite_match`` on the Mac; the bot checks it again): ``{"aweme_id", "invited_at",
+    "plan_id", "attempt", "category", "products", "commission_rate"}``, or None (not one, or no 抖音号)."""
+    if not isinstance(value, dict):
+        return None
+    aweme = _im_word(value.get("aweme_id"), 64)
+    if not _DOUYIN_ID.match(aweme):
+        return None
+    products = value.get("products") if isinstance(value.get("products"), list) else []
+    rate = value.get("commission_rate")
+    return {"aweme_id": aweme, "invited_at": _im_word(value.get("invited_at"), 40),
+            "plan_id": _im_word(value.get("plan_id"), 40), "attempt": _im_word(value.get("attempt"), 40),
+            "category": _im_word(value.get("category"), 20),
+            "products": [p for p in (_im_word(p, 30) for p in products if not isinstance(p, float))
+                         if _IM_PRODUCT.match(p)][:10],
+            "commission_rate": rate if _is_int(rate) and 0 <= rate <= 80 else None}
+
+
+def im_message(raw) -> Optional[dict]:
+    """One message of a conversation as the bot takes it: ``{"id", "at", "from", "kind", "text"}`` (None without an id
+    or a sender the contract names: ``from`` is "creator" or "shop", our side, an operator in 百应).  A card (kind
+    "card") also has ``card``, its type (``alliance_invite_card`` is our invite, ``contact_card`` the shop's own
+    contact; "" when it is not one); a creator's contact card (kind "contact") has ``contact`` (``im_contact``) and
+    ``IM_CONTACT_TEXT`` as its text (the CLI's own text may hold the numbers)."""
+    if not isinstance(raw, dict):
+        return None
+    msg_id = str(raw.get("id") if raw.get("id") is not None else "").strip()
+    sender = str(raw.get("from") or "").strip().lower()
+    if not _IM_ID.match(msg_id) or sender not in IM_FROM:
+        return None
+    kind = str(raw.get("kind") or "text").strip().lower()
+    kind = kind if kind in IM_KINDS else "other"
+    out = {"id": msg_id, "at": jst_time(raw.get("at")), "from": sender, "kind": kind,
+           "text": _im_text(raw.get("text"), IM_TEXT_CHARS)}
+    if kind == "card":
+        card = str(raw.get("card") or "").strip()
+        out["card"] = card if _IM_CARD.match(card) else ""
+    elif kind == "contact":
+        out["text"] = IM_CONTACT_TEXT
+        out["contact"] = im_contact(raw.get("contact"))
+    return out
+
+
+def im_conversation(raw) -> Optional[dict]:
+    """One conversation as the bot takes it: ``{"conversation_id", "creator": {"uid", "aweme_id", "nickname",
+    "buyin_id"}, "messages": [...], "invited"}`` (``im_message``, each id once, oldest first, the newest
+    ``IM_MESSAGES``); None without a conversation id.  ``buyin_id`` is the creator's 百应 id (``buyinId``: all the
+    page knows of her), ``uid`` her 抖音 UID (digits) and ``aweme_id`` her 抖音号 when anybody knows them (the page
+    does not: the worker's ``invite_match`` fills ``aweme_id``), ``nickname`` only with ``--names``; ``invited`` our
+    invite this conversation is (``im_invited``) or None."""
+    if not isinstance(raw, dict):
+        return None
+    cid = str(raw.get("conversationId") or raw.get("conversation_id") or "").strip()
+    if not _IM_ID.match(cid):
+        return None
+    who = raw.get("creator") if isinstance(raw.get("creator"), dict) else {}
+    uid = str(who.get("uid") if who.get("uid") is not None else "").strip()
+    aweme = str(who.get("awemeId") or who.get("aweme_id") or "").strip()
+    buyin = who.get("buyinId") if who.get("buyinId") is not None else who.get("buyin_id")
+    buyin = str(buyin if isinstance(buyin, (str, int)) and not isinstance(buyin, bool) else "").strip()
+    nickname = " ".join(_im_text(who.get("nickname"), IM_NAME_CHARS * 2).split())[:IM_NAME_CHARS]
+    messages, seen = [], set()
+    for item in raw.get("messages") if isinstance(raw.get("messages"), list) else []:
+        msg = im_message(item)
+        if msg is None or msg["id"] in seen:
+            continue
+        seen.add(msg["id"])
+        messages.append(msg)
+    messages.sort(key=lambda m: (m["at"] is None, m["at"] or 0))
+    return {"conversation_id": cid,
+            "creator": {"uid": uid if _DIGITS.match(uid) else "", "aweme_id": aweme if _DOUYIN_ID.match(aweme) else "",
+                        "nickname": nickname, "buyin_id": buyin if _IM_BUYIN_ID.match(buyin) else ""},
+            "messages": messages[-IM_MESSAGES:], "invited": im_invited(raw.get("invited"))}
+
+
+def im_inbox_argv(cfg: dict, cursor=None, limit: int = IM_LIMIT) -> list:
+    """One read of `dy buyin im-inbox` (read-only, never --execute): after the bot's cursor (none the first time),
+    at most ``limit`` conversations, the nicknames (``--names``), the shop checked (79) like every dy step."""
+    opts = []
+    cursor = im_cursor(cursor)
+    if cursor is not None:
+        opts.append("--after=" + json.dumps(cursor, ensure_ascii=False, separators=(",", ":")))
+    opts += [f"--limit={max(1, min(int(limit or IM_LIMIT), IM_LIMIT))}", "--names"]
+    if cfg.get("dy_expect_shop_id"):
+        opts.append(f"--expect-shop-id={cfg['dy_expect_shop_id']}")
+    return [cfg["node"], CLI_FILES["dy"], *IM_COMMAND, *opts]
+
+
+def im_result(**fields) -> dict:
+    """The answer of a 百应 inbox job as the worker hands it back (the bot reads it with ``check_im_result``):
+    ``conversations`` (``im_conversation``), ``cursor`` (the CLI's, for the next call; None: keep the last one),
+    ``stopped`` (None, or why: ``{"verdict", "exit_code", "message"}``)."""
+    out = {"version": 1, "op": "buyin_inbox", "conversations": [], "cursor": None, "stopped": None,
+           "checked_at": time.time()}
+    out.update(fields)
+    return out
+
+
+def _unknown_command(run: CliRun) -> bool:
+    """The CLI does not have the command (douyin-engineering before `buyin im-inbox`: exit 2, "[USAGE] unknown command")."""
+    return run.exit_code == 2 and "unknown command" in str(run.stderr or "").lower()
+
+
+# `buyin im-inbox`'s own failures (exit 1, stderr "[CODE] …"): what the 待审批 page says, and the verdict.  The chat
+# page not open and the page's code changed stay so until a person acts: said at once (``unavailable``); the IM
+# connection down may come back by itself: a hiccup (``error``, said after a few rounds).
+IM_PROBLEMS = {
+    "NO_CHAT_TAB": ("unavailable", "Mac 的调试 Chrome 里没开百应「精选联盟私信」页：读私信要它开着（命令不开、不刷新它）"),
+    "CHAT_OFFLINE": ("error", "百应聊天页的私信连接断了：请在 Mac 的调试 Chrome 里刷新「精选联盟私信」页"),
+    "PAGE_CHANGED": ("unavailable", "百应聊天页的代码变了，读私信的命令要先更新"),
+}
+
+
+def _im_problem(run: CliRun) -> Optional[str]:
+    """The im-inbox failure ``run`` is (``IM_PROBLEMS``' key), or None."""
+    if run.exit_code != 1:
+        return None
+    for line in str(run.stderr or "").splitlines():
+        m = re.match(r"^\s*\[([A-Z][A-Z_]+)\]", line)
+        if m and m.group(1) in IM_PROBLEMS:
+            return m.group(1)
+    return None
+
+
+def _same_phone(a: str, b: str) -> bool:
+    """Two phone numbers alike but for spaces, dashes and a leading +86."""
+    digits = [re.sub(r"\D", "", str(x or "")) for x in (a, b)]
+    digits = [d[2:] if len(d) == 13 and d.startswith("86") else d for d in digits]
+    return bool(digits[0]) and digits[0] == digits[1]
+
+
+IM_OWN_WECHAT_TEXT = "（店铺的微信号）"
+IM_OWN_PHONE_TEXT = "（店铺的手机号）"
+
+
+def _own_out_of_text(text: str, wechat: str, phone: str) -> str:
+    """``text`` with the shop's own WeChat id (``wechat``, a whole word, case not looked at) and phone (``phone``;
+    spaces, dashes and a leading +86 between its digits allowed) replaced by ``IM_OWN_WECHAT_TEXT`` /
+    ``IM_OWN_PHONE_TEXT``."""
+    out = str(text or "")
+    if wechat:
+        out = re.sub(r"(?<![A-Za-z0-9_-])" + re.escape(wechat) + r"(?![A-Za-z0-9_-])", IM_OWN_WECHAT_TEXT, out,
+                     flags=re.IGNORECASE)
+    digits = re.sub(r"\D", "", phone or "")
+    digits = digits[2:] if len(digits) == 13 and digits.startswith("86") else digits
+    if len(digits) >= 7:
+        out = re.sub(r"(?<!\d)(?:\+?86[\s-]?)?" + r"[\s-]?".join(digits) + r"(?!\d)", IM_OWN_PHONE_TEXT, out)
+    return out
+
+
+def im_strip_own(conversations: list, cfg: dict) -> int:
+    """Take the shop's own contact out of the creators' contact cards (``contact`` of kind "contact"): a WeChat id
+    equal to ``dy_invite_wechat`` (case not looked at) or a phone equal to ``dy_invite_phone`` (the contact our invite
+    card shows the creator) is removed; a card left with nothing is ``{"unavailable": True, "why": "own"}``.  Out of
+    her own words too (kind "text" from the creator: she often types the invite card's contact back): replaced by
+    ``IM_OWN_WECHAT_TEXT`` / ``IM_OWN_PHONE_TEXT``, so the bot never offers to add the shop itself (加百应达人微信 reads
+    contacts in her words, ``contact.find_contacts``).  Changes ``conversations`` in place; returns how many cards and
+    lines changed."""
+    wechat = str(cfg.get("dy_invite_wechat") or "").strip().lower()
+    phone = str(cfg.get("dy_invite_phone") or "").strip()
+    if not wechat and not phone:
+        return 0
+    changed = 0
+    for conv in conversations:
+        for msg in conv.get("messages") or []:
+            if msg.get("kind") == "text" and msg.get("from") == "creator" and msg.get("text"):
+                text = _own_out_of_text(msg["text"], wechat, phone)
+                if text != msg["text"]:
+                    msg["text"] = text
+                    changed += 1
+                continue
+            contact = msg.get("contact")
+            if msg.get("kind") != "contact" or not isinstance(contact, dict) or contact.get("unavailable"):
+                continue
+            kept = dict(contact)
+            if wechat and str(kept.get("wechat") or "").lower() == wechat:
+                kept.pop("wechat")
+            if phone and kept.get("phone") and _same_phone(kept["phone"], phone):
+                kept.pop("phone")
+            if kept != contact:
+                msg["contact"] = kept or {"unavailable": True, "why": "own"}
+                changed += 1
+    return changed
+
+
+def _squeezed(text) -> str:
+    """A text without any white space (a card's text and the plan's invite text are compared so)."""
+    return re.sub(r"\s+", "", str(text or ""))
+
+
+def _invite_plan(folder: Path, plan_id: str) -> Optional[dict]:
+    """The invite tool's plan ``<ledger folder>/plans/plan-<plan_id>.json`` (None: missing or not readable)."""
+    try:
+        plan = json.loads((folder / "plans" / f"plan-{plan_id}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return plan if isinstance(plan, dict) else None
+
+
+def _invite_content(plan: Optional[dict], aweme_id: str) -> str:
+    """The invite text the plan gave this creator (its ``creators`` and ``spare`` entries; "" when none)."""
+    for entry in [*((plan or {}).get("creators") or []), *((plan or {}).get("spare") or [])]:
+        if (isinstance(entry, dict) and str(entry.get("aweme_id") or "").strip().lower() == aweme_id.lower()
+                and isinstance(entry.get("content"), str) and entry["content"].strip()):
+            return entry["content"]
+    return ""
+
+
+def invite_match(ledger, conversations: list, *, window_sec: float = INVITE_MATCH_SEC, warn=None) -> int:
+    """Which conversations are our invites (the batch invite tool's ledger on this Mac, ``ledger``: its folder or the
+    invites.jsonl itself, as ``invite_cover``)?  Each ``result`` row with ``sent`` true, with its ``attempt`` row (the
+    creator's 抖音号, the plan, the category, the products, the commission rate, when), and the invite text the plan
+    gave her (``<ledger folder>/plans/plan-<plan_id>.json``: her ``creators`` / ``spare`` entry's ``content``).  A
+    conversation fits a result when one of its shop messages with card ``INVITE_CARD`` is at most ``window_sec`` from
+    the result's ``at`` (the ledger's time, +08:00; a message's in seconds or milliseconds) and its text holds the
+    first ``INVITE_MATCH_CHARS`` characters of that content (the whole when shorter; white space is not compared).
+    Only a pairing nobody else shares counts: the conversation fits exactly one result and that result exactly one
+    conversation (the same invite text often goes to several creators minutes apart).  Then the conversation's
+    ``invited`` (``im_invited``) is set, and ``creator.aweme_id`` when it is empty.  No invite card, no content, no
+    ledger: nothing matched.  A ledger or a plan that cannot be read never fails the job: ``warn`` (a logger's
+    warning; this module's by default) is told, without any value.  Changes ``conversations`` in place; returns how
+    many matched."""
+    warn = warn or _log.warning
+    cards = []                                           # (conversation index, its card's time, its text squeezed)
+    for index, conv in enumerate(conversations or []):
+        for msg in conv.get("messages") or []:
+            at = jst_time(msg.get("at"))
+            if msg.get("from") == "shop" and msg.get("kind") == "card" and msg.get("card") == INVITE_CARD and at:
+                cards.append((index, at, _squeezed(msg.get("text"))))
+    if not cards or not ledger:
+        return 0
+    try:
+        rows = _invite_ledger(ledger)
+    except OSError as e:
+        warn("百应 inbox: the invite ledger cannot be read (%s); no conversation is matched to an invite this round",
+             type(e).__name__)
+        return 0
+    if rows is None:
+        warn("百应 inbox: there is no invite ledger; %d invite card(s) not matched to an invite", len(cards))
+        return 0
+    folder, attempts, results = rows
+    plans: dict = {}
+    sent = []                                            # (result time, invite text's head squeezed, invited)
+    for key, result in results.items():
+        attempt = attempts.get(key)
+        at = jst_time(result.get("at"))
+        if result.get("sent") is not True or not isinstance(attempt, dict) or at is None:
+            continue
+        aweme = _im_word(attempt.get("aweme_id"), 64)
+        plan_id = _im_word(attempt.get("plan_id"), 40)
+        if not _DOUYIN_ID.match(aweme) or not _INVITE_PLAN_ID.match(plan_id):
+            continue
+        if not any(abs(card_at - at) <= window_sec for _, card_at, _ in cards):
+            continue                                     # no card of this round near it: its plan is not read
+        if plan_id not in plans:
+            plans[plan_id] = _invite_plan(folder, plan_id)
+        head = _squeezed(_invite_content(plans[plan_id], aweme))[:INVITE_MATCH_CHARS]
+        if not head:
+            continue
+        invited = im_invited({"aweme_id": aweme, "invited_at": attempt.get("at") or result.get("at"),
+                              "plan_id": plan_id, "attempt": key, "category": attempt.get("category"),
+                              "products": attempt.get("products"), "commission_rate": attempt.get("commission_rate")})
+        if invited is not None:
+            sent.append((at, head, invited))
+    missing = sum(1 for plan in plans.values() if plan is None)
+    if missing:
+        warn("百应 inbox: %d invite plan file(s) missing or unreadable; their cards are not matched", missing)
+    fits: dict = {}                                      # conversation index -> the results it fits
+    for index, card_at, text in cards:
+        for number, (at, head, _) in enumerate(sent):
+            if abs(card_at - at) <= window_sec and head in text:
+                fits.setdefault(index, set()).add(number)
+    taken: dict = {}                                     # result -> the conversations it fits
+    for index, numbers in fits.items():
+        for number in numbers:
+            taken.setdefault(number, set()).add(index)
+    matched = 0
+    for index, numbers in fits.items():
+        if len(numbers) != 1 or len(taken[next(iter(numbers))]) != 1:
+            continue                                     # more than one way to pair them: none
+        invited = sent[next(iter(numbers))][2]
+        conv = conversations[index]
+        creator = conv.setdefault("creator", {})
+        if not creator.get("aweme_id"):
+            creator["aweme_id"] = invited["aweme_id"]
+        conv["invited"] = dict(invited)
+        matched += 1
+    return matched
+
+
+def im_inbox(cfg: dict, cursor=None, *, limit: int = IM_LIMIT, heartbeat=None, ledger=None, warn=None) -> dict:
+    """The new 百应 private messages (``im_result``): one `dy buyin im-inbox` call (read-only, interrupted when the job
+    is cancelled).  77 (login), 76 (risk wall), 79 (another shop), 2 (a usage error: ``invalid``, or ``unavailable``
+    for a CLI without the command), 1 with the command's own codes (``IM_PROBLEMS``: the chat page not open, its IM
+    connection down, its code changed), no JSON of the contract's shape: ``stopped`` says why, nothing is tried again
+    (the bot asks in its next round).  A Mac without the 抖音 CLI is ``unavailable`` and runs nothing.  What came is
+    then cleaned on the Mac: the shop's own contact out of the creators' contact cards (``im_strip_own``), and with
+    ``ledger`` (the invite tool's, as ``invite_match``) the conversations that are our invites marked (``warn``: told
+    when the ledger cannot be read)."""
+    if "dy" not in cfg.get("dirs", {}):
+        return im_result(stopped={"verdict": "unavailable", "exit_code": None,
+                                  "message": cfg.get("missing", {}).get("dy")
+                                  or "这台 Mac 的 config.json 里没有配置抖音的命令行项目（platforms.dy）"})
+    run = run_cli(im_inbox_argv(cfg, cursor, limit), cfg["dirs"]["dy"],
+                  timeout=cfg.get("preview_timeout_sec", PREVIEW_TIMEOUT_SEC), env=cli_env(cfg), heartbeat=heartbeat,
+                  interruptible=True)
+    data = parse_json(run.stdout)
+    shaped = (isinstance(data, dict) and str(data.get("command") or "").split()[-1:] == ["im-inbox"]
+              and isinstance(data.get("conversations"), list))
+    if run.exit_code != 0 or run.error or run.stopped or not shaped:
+        problem = None if run.stopped or run.error else _im_problem(run)
+        if run.stopped == "cancelled":
+            verdict = "cancelled"
+        elif _unknown_command(run):
+            verdict = "unavailable"
+        elif problem is not None:
+            verdict = IM_PROBLEMS[problem][0]
+        else:
+            verdict = _EXIT_VERDICT.get(run.exit_code) or ("invalid" if run.exit_code == 2 else "error")
+        if problem is not None:
+            message = IM_PROBLEMS[problem][1]
+        elif verdict == "unavailable":
+            message = "Mac 上的抖音命令行还没有读百应私信的命令（buyin im-inbox）：douyin-engineering 加上它以前读不了"
+        elif run.exit_code or run.error or run.stopped:
+            message = _exit_problem(run)
+        else:
+            message = "命令没有输出百应私信列表"
+        return im_result(stopped={"verdict": verdict, "exit_code": run.exit_code, "message": message})
+    conversations = [c for c in (im_conversation(r) for r in data["conversations"][:IM_LIMIT]) if c is not None]
+    im_strip_own(conversations, cfg)
+    if ledger:
+        invite_match(ledger, conversations, warn=warn)
+    return im_result(conversations=conversations, cursor=im_cursor(data.get("cursor")))
+
+
+def check_im_result(value) -> dict:
+    """The Mac's answer to a 百应 inbox job, checked again on the bot (``ActionError`` when it is none of that shape):
+    every conversation through ``im_conversation`` (its own output is taken as it is), at most ``IM_LIMIT``; the
+    cursor as ``im_cursor``; ``stopped`` with a known verdict (else ``error``)."""
+    if not isinstance(value, dict) or value.get("op") != "buyin_inbox":
+        raise _err("bad_result", "百应私信的结果格式不对")
+    conversations = []
+    for raw in (value.get("conversations") if isinstance(value.get("conversations"), list) else [])[:IM_LIMIT]:
+        conv = im_conversation(raw)
+        if conv is not None:
+            conversations.append(conv)
+    stopped = value.get("stopped")
+    if isinstance(stopped, dict):
+        code = stopped.get("exit_code")
+        stopped = {"verdict": stopped.get("verdict") if stopped.get("verdict") in IM_STOPS else "error",
+                   "exit_code": code if _is_int(code) else None, "message": _clip(stopped.get("message") or "", 300)}
+    else:
+        stopped = None
+    return {"version": 1, "op": "buyin_inbox", "conversations": conversations, "cursor": im_cursor(value.get("cursor")),
+            "stopped": stopped}
 
 
 # ── the registries ────────────────────────────────────────────────────────

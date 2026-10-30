@@ -13,6 +13,7 @@ import logging
 import sqlite3
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -189,15 +190,19 @@ def started(tmp_path, backend, clock, **kw):
 
 def test_the_three_ways_of_the_probe_are_found_with_name_greeting_and_how(tmp_path, db, backend, clock):
     service = started(tmp_path, backend, clock)
-    accepted_on_pc(db, NEW, "阿花", clock.now)
-    accepted_on_phone(db, CUSTOM, "小美美", clock.now + 1, greeting="想合作，加个微信")
-    they_accepted(db, ASKED, clock.now + 2)
+    t = clock.now
+    accepted_on_pc(db, NEW, "阿花", t)
+    accepted_on_phone(db, CUSTOM, "小美美", t + 1, greeting="想合作，加个微信")
+    they_accepted(db, ASKED, t + 2)
     found = {e["wxid"]: e for e in service.scan_once()}
-    assert found == {
+    assert {wxid: {k: e[k] for k in ("wxid", "name", "remark", "verify_text", "how")} for wxid, e in found.items()} == {
         NEW: {"wxid": NEW, "name": "阿花", "remark": "", "verify_text": GREETING, "how": MANUAL},
         CUSTOM: {"wxid": CUSTOM, "name": "小美美", "remark": "", "verify_text": "想合作，加个微信", "how": MANUAL},
         ASKED: {"wxid": ASKED, "name": "品牌小青", "remark": "", "verify_text": "", "how": REQUESTED},
     }
+    # 加百应达人微信 (功能 R): which line it was, when, and our own greeting when she accepted our request
+    assert {wxid: (e["kind"], e["added_at"], e["own_greeting"]) for wxid, e in found.items()} == {
+        NEW: ("pc", t, ""), CUSTOM: ("phone", t + 1, ""), ASKED: ("requested", t + 2, "你好，我是品牌商务小王")}
     assert {r["wxid"]: r["kind"] for r in service.store.recent(0)} == {NEW: "pc", CUSTOM: "phone", ASKED: "requested"}
     assert backend.names == {NEW: "阿花", CUSTOM: "小美美", ASKED: "品牌小青"}       # names for the console / sends
 
@@ -521,12 +526,13 @@ class Copilot:
     makes it); ``night``: PRM_NIGHT_AUTO_HOURS; ``relay_wxids``: the cc users; ``scan``: the scan's timing."""
 
     def __init__(self, tmp_path, clock, db, private_chats="*", catchup_hours=12, prm_store=None, relay_store=None,
-                 auto_register="off", night="", relay_wxids=(), **scan):
+                 auto_register="off", night="", relay_wxids=(), friend_add=False, **scan):
         config = BotConfig(
             private_chat_enabled=True, private_chats=private_chats, admin_wxid=ADMIN, bot_display_name=BOT,
             claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1", claude_relay_port=0,
             claude_relay_db=":memory:", prm_copilot="on", prm_db=":memory:", prm_catchup_hours=catchup_hours,
-            prm_auto_register=auto_register, prm_night_auto_hours=night, claude_relay_wxids=list(relay_wxids))
+            prm_auto_register=auto_register, prm_night_auto_hours=night, claude_relay_wxids=list(relay_wxids),
+            prm_friend_add="on" if friend_add else "off")
         self.clock, self.db = clock, db
         self.messages = MessageStore(initialize_db(str(tmp_path / "messages.db")))
         self.router = MessageRouter(store=self.messages, admin_handler=AdminCommandHandler(), config=config,
@@ -548,11 +554,22 @@ class Copilot:
         self.backend._resolve_groups()
         self.backend._prime_known_ids()
         self.backend._running = True
+        # 加百应达人微信 (friend_add): as Bot._start_new_friends wires it, a fake friend manager behind the admin handler
         self.friends = NewFriendService(self.backend, NewFriendStore(str(tmp_path / "messages.db")),
-                                        on_found=[self.prm.new_friend_found] if self.prm.auto_register else [],
+                                        on_found=([self.prm.friend_adds.on_new_friend] if friend_add else [])
+                                        + ([self.prm.new_friend_found] if self.prm.auto_register else []),
                                         keep_verify=True, catchup_hours=catchup_hours, clock=clock, pause=0, **scan)
         self.friends.set_catch_up_sink(self.prm.take_new_friend)
         self.prm.on_registered = self.friends.registered
+        self.added, self.remarks = [], []
+        if friend_add:                    # (a 4.0 window whose 「备注」 field OCR saw: remark_set)
+            manager = SimpleNamespace(add_friend=lambda keyword, message="", remark="": self.added.append((keyword, message))
+                                      or self.remarks.append(remark)
+                                      or {"ok": True, "target": keyword, "message": "已成功",
+                                          **({"remark_set": True} if remark else {})})
+            self.prm.friend_adds.attach(AdminCommandHandler(friend_manager=manager), None, None)
+            self.prm.friend_adds.spawn, self.prm.friend_adds.clear_clipboard = (lambda fn: fn()), (lambda text: False)
+            self.prm.friend_adds.set_new_friends(self.friends)
 
     def poll(self):
         self.backend.refresh_private_chats_soon()
@@ -728,6 +745,16 @@ def test_the_bot_starts_the_scan_only_for_a_mode_that_uses_it(tmp_path, db, monk
     try:
         assert prm.on_registered == service.registered and service._catch_up_sink == prm.take_new_friend
         assert service._keep_verify is True and service._catchup_sec == 6 * 3600
+    finally:
+        service.stop()
+        from src.web import server
+        server.register_new_friends(None)
+    adds = SimpleNamespace(on_new_friend=lambda event: None, set_new_friends=lambda source: seen.append(source))
+    seen = []
+    prm.friend_adds = adds                                                    # 加百应达人微信 (功能 R)
+    service = Bot._start_new_friends(config, backend, prm, None)
+    try:
+        assert service._on_found == [adds.on_new_friend] and seen == [service]
     finally:
         service.stop()
         from src.web import server
@@ -1222,3 +1249,105 @@ def test_an_opening_asked_for_after_an_operator_greeted_her_by_hand_hears_of_it(
     bot.poll()
     later = json.loads(bot.jobs()[-1]["meta"])
     assert [h["who"] for h in later["history"]] == ["operator"] and "opening" not in later
+
+
+# ── 加百应达人微信 (功能 R): who accepted which request, and linking her ─────────
+# The real WCDB backend over the fake database; WeChat writes what the probe saw (they_accepted): our greeting,
+# her 「我通过了你的朋友验证请求」, 「以上是打招呼的消息」.  Every value is made up.
+
+def test_our_greeting_in_the_new_chat_says_which_request_she_accepted_and_linking_drafts_her_words(copilot_bot, db,
+                                                                                                   clock):
+    bot = copilot_bot(friend_add=True)
+    bot.friends.scan_once()                                          # the start marker
+    clock.now += 120
+    adds = bot.prm.friend_adds
+    first = adds.paste("dy_demo01", "小鹿", {"wechat": "abcdefyz"})["id"]
+    adds.confirm(first)
+    clock.now += 121
+    second = adds.paste("dy_demo02", "小青", {"wechat": "abcdefgh"})["id"]
+    adds.confirm(second)
+    assert [g for _, g in bot.added] == ["您好小鹿，百应上联系您的～", "您好小青，百应上联系您的～"]
+    t = clock.now + 600
+    they_accepted(db, NEW, t, our_greeting="您好小鹿，百应上联系您的～")   # our greeting at t-60
+    db.say(NEW, NEW, "你好呀，样品还有吗", t + 30)
+    clock.now = t + 60
+    bot.poll()                                                       # her chat: read, stored, silence
+    [found] = bot.friends.scan_once()
+    assert (found["how"], found["own_greeting"]) == (REQUESTED, "您好小鹿，百应上联系您的～")
+    record = adds._store.friend_add(first)
+    assert record["candidate"]["level"] == "sure" and record["candidate"]["wxid"] == NEW
+    assert adds._store.friend_add(second)["candidate"] == {} and bot.prm.store.parties() == []   # nobody linked
+    assert bot.jobs() == [] and bot.sent == []
+    assert bot.friends.store.get(NEW)["own_greeting"] == "您好小鹿，百应上联系您的～"
+
+    out = adds.link(first, NEW)                                      # an operator's 「是她，登记并关联」
+    assert out["catch_up"] is True
+    bot.poll()
+    [job] = bot.jobs()
+    meta = json.loads(job["meta"])
+    assert meta["creator"] == {"douyin_ids": ["dy_demo01"], "uid": ""} and meta["new_friend"]["count"] == 1
+    assert lines(job) == ["你好呀，样品还有吗"]                         # hers only: no notice, not our greeting
+    deal = bot.prm.store.deal_of(out["party_id"])
+    assert deal["mode"] == "copilot"                                 # our greeting took nothing over
+    assert [e["kind"] for e in bot.prm.store.events(deal["id"])] == ["friend_add_link"]
+
+
+def test_her_name_on_our_side_is_the_remark_of_our_request_and_says_which_one_she_accepted(copilot_bot, db, clock):
+    """The remark our request carried (「抖音-〈百应昵称〉」) is the name WeChat gives her once she accepted: the scan
+    reads it as her display name (wcdb_get_display_names), and with two requests waiting and our greeting not in the
+    new chat it alone says which record she is.  Nobody is registered by it."""
+    bot = copilot_bot(friend_add=True)
+    bot.friends.scan_once()                                          # the start marker
+    clock.now += 120
+    adds = bot.prm.friend_adds
+    first = adds.paste("dy_demo01", "小鹿", {"wechat": "abcdefyz"})["id"]
+    adds.confirm(first)
+    clock.now += 121
+    second = adds.paste("dy_demo02", "小青", {"wechat": "abcdefgh"})["id"]
+    adds.confirm(second)
+    assert bot.remarks == ["抖音-小鹿", "抖音-小青"]
+    t = clock.now + 600
+    db.names[NEW] = "抖音-小青"                                       # WeChat shows her by the remark we typed
+    db.say(NEW, NEW, PASSED_LINE, t)                                 # she accepted; our greeting is not in the chat
+    db.system(NEW, "以上是打招呼的消息", t + 1)
+    clock.now = t + 60
+    bot.poll()
+    [found] = bot.friends.scan_once()
+    assert (found["how"], found["name"], found["own_greeting"]) == (REQUESTED, "抖音-小青", "")
+    candidate = adds._store.friend_add(second)["candidate"]
+    assert (candidate["wxid"], candidate["level"]) == (NEW, "sure")
+    assert candidate["evidence"] == ["她在我们这边显示的名字就是加她时写的备注"]
+    assert adds._store.friend_add(first)["candidate"] == {} and bot.prm.store.parties() == []
+
+
+def test_she_adds_us_naming_baiying_and_is_offered_for_the_record_waiting_for_her(copilot_bot, db, clock):
+    bot = copilot_bot(friend_add=True)
+    bot.friends.scan_once()
+    clock.now += 120
+    add_id = bot.prm.friend_adds.paste("dy_demo01", "小鹿", {})["id"]           # no number: she adds us
+    accepted_on_pc(db, NEW, "鹿鹿", clock.now, greeting="你好，我是百应上的小鹿")
+    clock.now += 30
+    bot.poll()
+    bot.friends.scan_once()
+    candidate = bot.prm.friend_adds._store.friend_add(add_id)["candidate"]
+    assert (candidate["wxid"], candidate["level"], candidate["how"]) == (NEW, "possible", MANUAL)
+    assert bot.prm.store.parties() == []
+
+
+def test_an_old_database_gets_the_own_greeting_column(tmp_path):
+    path = tmp_path / "messages.db"
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE new_friends (wxid TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', remark TEXT NOT NULL"
+                 " DEFAULT '', how TEXT NOT NULL, kind TEXT NOT NULL DEFAULT '', added_at REAL NOT NULL, verify_from REAL,"
+                 " verify_text TEXT NOT NULL DEFAULT '', found_at REAL NOT NULL)")
+    conn.execute("INSERT INTO new_friends (wxid, how, added_at, found_at) VALUES ('wxid_before', 'manual', 1, 1)")
+    conn.commit()
+    conn.close()
+    store = NewFriendStore(str(path))
+    assert store.get("wxid_before")["own_greeting"] == ""
+    assert store.add(wxid=NEW, name="阿花", remark="", how=REQUESTED, kind="requested", added_at=2.0, verify_from=None,
+                     verify_text="", found_at=2.0, own_greeting="您好阿花")
+    assert store.get(NEW)["own_greeting"] == "您好阿花"
+    assert store.forget_verify(3.0) == 1 and store.get(NEW)["own_greeting"] == ""
+    store.close()
+

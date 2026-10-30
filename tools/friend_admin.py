@@ -7,6 +7,9 @@ Usage:
     # Search and send friend request to a wxid or phone number
     python tools/friend_admin.py --add 13800000000 --message "你好，请通过一下"
 
+    # ... with a remark (备注) typed into WeChat 4.0's application window when OCR finds its field
+    python tools/friend_admin.py --add 13800000000 --message "你好" --remark "抖音-测试"
+
     # Inspect current WeChat window and OCR preview
     python tools/friend_admin.py --status
 """
@@ -37,6 +40,7 @@ def main() -> None:
     parser.add_argument("--accept", action="store_true", help="Accept all pending friend requests")
     parser.add_argument("--add", metavar="TARGET", help="Search and add a friend by phone number or wxid")
     parser.add_argument("--message", default="", help="Greeting message / reason for adding friend")
+    parser.add_argument("--remark", default="", help="Remark (备注) for the new friend (WeChat 4.0 only, found by OCR)")
     parser.add_argument("--status", action="store_true", help="Check WeChat window and OCR state")
     args = parser.parse_args()
 
@@ -81,9 +85,13 @@ def main() -> None:
     if args.add:
         target = args.add.strip()
         msg = args.message.strip()
-        print(f"Sending friend request to: {target} (message: {msg!r})...")
-        res = mgr.add_friend(target, message=msg)
+        remark = args.remark.strip()
+        print(f"Sending friend request to: {target} (message: {msg!r}" + (f", remark: {remark!r}" if remark else "") + ")...")
+        res = mgr.add_friend(target, message=msg, remark=remark) if remark else mgr.add_friend(target, message=msg)
         print(f"Result: {res.get('message')}")
+        if remark:
+            print("Remark: " + ("typed into the 备注 field" if res.get("remark_set") else
+                                "NOT typed (no 备注 field seen: send the 'Friend management' log lines above)"))
         if not res.get("ok"):
             sys.exit(1)
         return

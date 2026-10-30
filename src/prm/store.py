@@ -25,7 +25,21 @@
                     waybill, sent / signed for, why rejected or deleted), what the deal got of
                     them (``applied``) and whether they are still asked about (``done`` empty):
                     PRM_SAMPLE_SYNC_MIN, src/prm/service.py
+``buyin_threads``   抖音百应 private-message conversations (精选联盟私信, PRM_BUYIN_SYNC_MIN): which registered
+                    creator a conversation is (none: nobody on the list matched), her 百应 id and 抖音号, our
+                    invite it is (``invited``, from the Mac's invite ledger match), the message ids handled, when
+                    she and our side last wrote and up to when her lines are answered, how many contact cards came
+                    in a conversation that is not ours (never their values); src/prm/service.py
 ``prm_meta``        small values the service keeps over a restart (when the sync last asked)
+``friend_adds``     加百应达人微信 (PRM_FRIEND_ADD, src/prm/friend_adds.py): a creator's contact left in 百应, one record
+                    each (one per 百应 message): her 抖音号 and nickname, the full 微信号 / 手机号 (the only place they
+                    are kept, cleared later; ``masked`` stays), the greeting, the remark (备注) she gets in our WeChat and
+                    whether it is on her (``remark_set``), the invite, where it stands (``state``), the new friend that
+                    may be her (``candidate``) and, once linked, her chat and party
+``friend_add_attempts``  every add_friend call made for a record (who, with which number kind, what came of it): the
+                    audit, the day's count and the gap between two adds; no number in it
+``creator_links``   who a registered creator is on 抖音 (her 抖音号, as an operator confirmed it): ``_creator_ids``
+                    reads it
 
 A packet's life: ``pending`` (waits in the console) -> ``approved`` (an operator said
 send, the kind's gate is ``auto``, or the 下班时段 window sent it: route ``night``) -> ``sending`` ->
@@ -33,6 +47,11 @@ send, the kind's gate is ``auto``, or the 下班时段 window sent it: route ``n
 ``pending`` -> ``dropped`` (not sent) | ``superseded`` (the creator wrote again, a newer
 draft follows).  ``no_reply`` is a draft that says nothing needs to be sent.  Moves are
 compare-and-set (``move``), so a double click or two threads never send one packet twice.
+
+A 百应 private-message draft (``tool`` ``BUYIN_TOOL``, ``meta.channel`` "buyin", its chat ``buyin:<conversation>``)
+never goes out by the bot: ``pending`` -> ``sent`` (outcome ``sent_by_hand``: an operator copied it and sent it in
+百应 by hand) | ``dropped`` | ``superseded`` (a newer draft of the same conversation); it is no WeChat reply (its
+own supersede lane, no gate, no 「标为发错了」, not told to later WeChat drafts).
 
 A packet with a platform action (``tool`` is the action's name, ``platform`` the JSON:
 the action, the Mac's preview, the execution; src/prm/platforms.py) is always reviewed:
@@ -55,7 +74,9 @@ DROPPED, SUPERSEDED, NO_REPLY = "dropped", "superseded", "no_reply"
 EXECUTING = "executing"      # a platform action an operator approved, running on the Mac
 PACKET_STATES = (PENDING, APPROVED, SENDING, SENT, FAILED, DROPPED, SUPERSEDED, NO_REPLY, EXECUTING)
 LANE_SYSTEM, LANE_REPLY = "system", "reply"   # supersede(lane=): the bot's next steps, the replies
+LANE_BUYIN = "buyin"         # supersede(lane=): the 抖音百应 private-message drafts (never a WeChat reply's lane)
 MESSAGE_TOOL = "message.send"   # ``tool`` of a plain reply (a platform action's name otherwise)
+BUYIN_TOOL = "buyin.reply"      # ``tool`` of a 百应 private-message draft: an operator sends it in 百应 by hand
 
 # The stages of a collaboration (docs: 合作单状态机); the AI may only suggest these.
 STAGES = {
@@ -178,9 +199,79 @@ CREATE TABLE IF NOT EXISTS sample_orders (
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sample_orders_deal ON sample_orders(deal_id);
+CREATE TABLE IF NOT EXISTS buyin_threads (
+    conversation_id TEXT PRIMARY KEY,
+    party_id INTEGER,
+    deal_id INTEGER,
+    nickname TEXT NOT NULL DEFAULT '',
+    creator_uid TEXT NOT NULL DEFAULT '',
+    aweme_id TEXT NOT NULL DEFAULT '',
+    seen TEXT NOT NULL DEFAULT '[]',
+    last_creator_at REAL,
+    last_shop_at REAL,
+    answered_upto REAL,
+    unanswered INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS buyin_threads_party ON buyin_threads(party_id);
 CREATE TABLE IF NOT EXISTS prm_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS friend_adds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    conversation_id TEXT NOT NULL DEFAULT '',
+    message_id TEXT NOT NULL DEFAULT '',
+    aweme_id TEXT NOT NULL DEFAULT '',
+    creator_uid TEXT NOT NULL DEFAULT '',
+    nickname TEXT NOT NULL DEFAULT '',
+    wechat TEXT NOT NULL DEFAULT '',
+    phone TEXT NOT NULL DEFAULT '',
+    masked TEXT NOT NULL DEFAULT '{}',
+    unavailable INTEGER NOT NULL DEFAULT 0,
+    greeting TEXT NOT NULL DEFAULT '',
+    invited TEXT NOT NULL DEFAULT '{}',
+    party_id INTEGER,
+    deal_id INTEGER,
+    state TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    candidate TEXT NOT NULL DEFAULT '{}',
+    rejected TEXT NOT NULL DEFAULT '[]',
+    wxid TEXT NOT NULL DEFAULT '',
+    link_on_accept INTEGER NOT NULL DEFAULT 1,
+    reveals TEXT NOT NULL DEFAULT '[]',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    requested_at REAL,
+    linked_at REAL,
+    cleared_at REAL,
+    closed_at REAL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS friend_adds_msg ON friend_adds(conversation_id, message_id) WHERE message_id != '';
+CREATE INDEX IF NOT EXISTS friend_adds_state ON friend_adds(state, aweme_id);
+CREATE TABLE IF NOT EXISTS friend_add_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    add_id INTEGER NOT NULL,
+    at REAL NOT NULL,
+    by TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    finished_at REAL
+);
+CREATE INDEX IF NOT EXISTS friend_add_attempts_at ON friend_add_attempts(at);
+CREATE TABLE IF NOT EXISTS creator_links (
+    party_id INTEGER NOT NULL,
+    platform TEXT NOT NULL DEFAULT 'dy',
+    account TEXT NOT NULL,
+    uid TEXT NOT NULL DEFAULT '',
+    uid_source TEXT NOT NULL DEFAULT '',
+    nickname TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL,
+    add_id INTEGER,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (party_id, platform, account)
 );
 """
 
@@ -198,6 +289,11 @@ _ADDED_COLUMNS = (
     ("deals", "notices", "TEXT NOT NULL DEFAULT '[]'"),
     ("deals", "chain", "TEXT NOT NULL DEFAULT '{}'"),
     ("parties", "auto_registered", "INTEGER NOT NULL DEFAULT 0"),
+    ("buyin_threads", "buyin_id", "TEXT NOT NULL DEFAULT ''"),
+    ("buyin_threads", "invited", "TEXT NOT NULL DEFAULT '{}'"),
+    ("buyin_threads", "contacts", "INTEGER NOT NULL DEFAULT 0"),
+    ("friend_adds", "remark", "TEXT NOT NULL DEFAULT ''"),            # 加百应达人微信的备注 (2026-10-29)
+    ("friend_adds", "remark_set", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 # What the creators wrote, or our side's own words, waiting for the next draft job.
@@ -274,6 +370,47 @@ def event_view(row: dict) -> dict:
 def sample_order_view(row: dict) -> dict:
     out = dict(row)
     out["applied"] = _loads(row.get("applied"), {})
+    return out
+
+
+def buyin_thread_view(row: dict) -> dict:
+    out = dict(row)
+    out["seen"] = [str(i) for i in _loads(row.get("seen"), [])]
+    out["invited"] = _loads(row.get("invited"), {}) or None
+    return out
+
+
+# 加百应达人微信 (src/prm/friend_adds.py): the JSON columns of a record, and what may be set besides its state.
+FRIEND_ADD_JSON = {"masked": {}, "invited": {}, "candidate": {}, "rejected": [], "reveals": []}
+FRIEND_ADD_FIELDS = {"source", "conversation_id", "message_id", "aweme_id", "creator_uid", "nickname", "wechat", "phone",
+                     "masked", "unavailable", "greeting", "invited", "party_id", "deal_id", "reason", "candidate",
+                     "rejected", "wxid", "link_on_accept", "reveals", "requested_at", "linked_at", "cleared_at",
+                     "closed_at", "remark", "remark_set"}
+FRIEND_ADD_FLAGS = ("unavailable", "link_on_accept", "remark_set")
+
+
+def friend_add_view(row: dict) -> dict:
+    out = dict(row)
+    for key, empty in FRIEND_ADD_JSON.items():
+        out[key] = _loads(row.get(key), empty)
+    for key in FRIEND_ADD_FLAGS:
+        out[key] = bool(row.get(key))
+    out["remark"] = str(row.get("remark") or "")
+    return out
+
+
+def _friend_add_values(fields: dict) -> dict:
+    """``fields`` as columns: the JSON ones written as JSON, the flags as 0 / 1; an unknown one is a ValueError."""
+    unknown = set(fields) - FRIEND_ADD_FIELDS
+    if unknown:
+        raise ValueError(f"not a friend_adds field: {sorted(unknown)}")
+    out = {}
+    for key, value in fields.items():
+        if key in FRIEND_ADD_JSON:
+            value = json.dumps(value if value is not None else FRIEND_ADD_JSON[key], ensure_ascii=False)
+        elif key in FRIEND_ADD_FLAGS:
+            value = int(bool(value))
+        out[key] = value
     return out
 
 
@@ -491,6 +628,13 @@ class PrmStore:
                                       (f'%"key": "{key}"%',)).fetchall()
         return [d for d in (deal_view(dict(r)) for r in rows) if any(n["key"] == key for n in d["notices"])]
 
+    def deals_with_notice_prefix(self, prefix: str) -> list[dict]:
+        """The deals that have a notice whose key starts with ``prefix`` (the 百应 lines held back: ``buyin_held:``)."""
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM deals WHERE notices LIKE ? ORDER BY id",
+                                      (f'%"key": "{prefix}%',)).fetchall()
+        return [d for d in (deal_view(dict(r)) for r in rows) if any(str(n["key"]).startswith(prefix) for n in d["notices"])]
+
     def rewrite_notices(self, deal_id: int, rewrite: Callable[[str], str]) -> int:
         """Rewrite the words of a deal's notices (8.2 clean-up): their texts and the creator's lines and
         history a notice keeps; returns how many changed."""
@@ -569,23 +713,24 @@ class PrmStore:
 
     def outcomes(self, deal_id: int, limit: int = 6) -> list[dict]:
         """A deal's latest drafts a person (or a gate) decided on, newest first: sent (as drafted
-        or edited), not sent (dropped), failed.  What the creator really got from us."""
+        or edited), not sent (dropped), failed.  What the creator really got from us in WeChat: a 百应
+        private-message draft (``BUYIN_TOOL``, sent there by hand) is none of it."""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM action_packets WHERE deal_id = ? AND status IN (?, ?, ?) AND decided_at IS NOT NULL"
-                " ORDER BY COALESCE(sent_at, decided_at) DESC, id DESC LIMIT ?",
-                (deal_id, SENT, DROPPED, FAILED, int(limit)),
+                " AND tool != ? ORDER BY COALESCE(sent_at, decided_at) DESC, id DESC LIMIT ?",
+                (deal_id, SENT, DROPPED, FAILED, BUYIN_TOOL, int(limit)),
             ).fetchall()
         return [packet_view(dict(r)) for r in rows]
 
     def platform_failures(self, limit: int = 50) -> list[dict]:
         """Packets with a platform action that ended ``failed`` (the platform write was not
         verified, or the reply did not go out), newest first: the console marks them red
-        until an operator says they are dealt with (``platform.acked_at``)."""
+        until an operator says they are dealt with (``platform.acked_at``).  A 百应 draft is no platform action."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM action_packets WHERE tool != ? AND status = ? ORDER BY id DESC LIMIT ?",
-                (MESSAGE_TOOL, FAILED, int(limit)),
+                "SELECT * FROM action_packets WHERE tool NOT IN (?, ?) AND status = ? ORDER BY id DESC LIMIT ?",
+                (MESSAGE_TOOL, BUYIN_TOOL, FAILED, int(limit)),
             ).fetchall()
         return [p for p in (packet_view(dict(r)) for r in rows) if not p["platform"].get("acked_at")]
 
@@ -778,23 +923,36 @@ class PrmStore:
             return cur.rowcount == 1
 
     def supersede(self, deal_id: int, now: Optional[float] = None, keep: Optional[int] = None,
-                  system_kind: Optional[str] = None, lane: Optional[str] = None) -> int:
+                  system_kind: Optional[str] = None, lane: Optional[str] = None,
+                  chat_id: Optional[str] = None) -> int:
         """Pending drafts of this deal (but ``keep``) are out of date: ``superseded``; returns how many.
         The Mac's drafts (they answer the creator), or with ``system_kind`` the system's own drafts of
         that kind (a shipping notice is not out of date because the creator wrote).  ``lane``: only the
-        Mac's drafts of that lane — ``LANE_SYSTEM`` (a next step the bot asked for, ``meta.lane``) or
-        ``LANE_REPLY`` (the others): a reply and a 专属佣金 step do not put each other out of date."""
+        Mac's drafts of that lane — ``LANE_SYSTEM`` (a next step the bot asked for, ``meta.lane``),
+        ``LANE_BUYIN`` (the 百应 private-message drafts, ``BUYIN_TOOL``) or ``LANE_REPLY`` (the WeChat
+        replies: neither of those): a reply, a 专属佣金 step and a 百应 draft never put each other out of
+        date.  ``chat_id``: only the drafts of that chat (a 百应 conversation's own)."""
         now = time.time() if now is None else now
         which = "job_id IS NOT NULL" if system_kind is None else "job_id IS NULL AND kind = ?"
+        args: list = []
         if system_kind is None and lane is not None:
-            which += (" AND meta LIKE '%\"lane\": \"system\"%'" if lane == LANE_SYSTEM
-                      else " AND meta NOT LIKE '%\"lane\": \"system\"%'")
+            if lane == LANE_SYSTEM:
+                which += " AND meta LIKE '%\"lane\": \"system\"%'"
+            elif lane == LANE_BUYIN:
+                which += " AND tool = ?"
+                args.append(BUYIN_TOOL)
+            else:
+                which += " AND meta NOT LIKE '%\"lane\": \"system\"%' AND tool != ?"
+                args.append(BUYIN_TOOL)
+        if chat_id is not None:
+            which += " AND chat_id = ?"
+            args.append(chat_id)
         with self._lock:
             cur = self._conn.execute(
                 f"UPDATE action_packets SET status = ?, decided_at = ? WHERE deal_id = ? AND status = ?"
                 f" AND id != ? AND {which}",
                 (SUPERSEDED, now, deal_id, PENDING, -1 if keep is None else keep,
-                 *(() if system_kind is None else (system_kind,))),
+                 *(() if system_kind is None else (system_kind,)), *args),
             )
             self._conn.commit()
             return cur.rowcount
@@ -803,12 +961,13 @@ class PrmStore:
         """The Mac's drafts of this deal that have not gone out wait for a person, ``reason`` first in
         theirs (``needs_attention``): a waiting one stays waiting, a plain reply its gate (``auto``) or the
         night window (``night``, PRM_NIGHT_AUTO_HOURS) approved and not being sent yet goes back to waiting
-        (``review``).  Not the bot's own shipping notices (a template).  Returns how many."""
+        (``review``).  Not the bot's own shipping notices (a template), nor a 百应 private-message draft (her
+        WeChat recall says nothing of 百应).  Returns how many."""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id, status, reason FROM action_packets WHERE deal_id = ? AND job_id IS NOT NULL"
-                " AND (status = ? OR (status = ? AND route IN ('auto', 'night') AND tool = ?))",
-                (deal_id, PENDING, APPROVED, MESSAGE_TOOL),
+                " AND tool != ? AND (status = ? OR (status = ? AND route IN ('auto', 'night') AND tool = ?))",
+                (deal_id, BUYIN_TOOL, PENDING, APPROVED, MESSAGE_TOOL),
             ).fetchall()
             held = 0
             for row in rows:
@@ -830,22 +989,24 @@ class PrmStore:
         return {r["status"]: int(r["n"]) for r in rows}
 
     def rewrite_packets(self, deal_id: int, rewrite: Callable[[str], str]) -> int:
-        """Rewrite the text of every packet of a deal, its platform action too (8.2 clean-up);
-        returns how many changed."""
+        """Rewrite the text of every packet of a deal, its platform action too (8.2 clean-up), and a 百应
+        draft's ``meta`` (it keeps her 百应 lines for the console); returns how many changed."""
         changed = 0
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, text, final_text, slots, intent, reason, platform FROM action_packets WHERE deal_id = ?",
-                (deal_id,),
+                "SELECT id, tool, text, final_text, slots, intent, reason, platform, meta FROM action_packets"
+                " WHERE deal_id = ?", (deal_id,),
             ).fetchall()
             for row in rows:
                 old = (row["text"] or "", row["final_text"], row["slots"] or "{}", row["intent"] or "",
                        row["reason"] or "", row["platform"] or "{}")
                 new = tuple(None if value is None else rewrite(value) for value in old)
-                if new != old:
+                meta = row["meta"] or "{}"
+                new_meta = rewrite(meta) if row["tool"] == BUYIN_TOOL else meta
+                if new != old or new_meta != meta:
                     self._conn.execute(
                         "UPDATE action_packets SET text = ?, final_text = ?, slots = ?, intent = ?, reason = ?,"
-                        " platform = ? WHERE id = ?", (*new, row["id"]),
+                        " platform = ?, meta = ? WHERE id = ?", (*new, new_meta, row["id"]),
                     )
                     changed += 1
             self._conn.commit()
@@ -1102,6 +1263,64 @@ class PrmStore:
             self._conn.commit()
         return changed
 
+    # ── 抖音百应 private messages (PRM_BUYIN_SYNC_MIN, src/prm/service.py) ─────
+
+    def buyin_thread(self, conversation_id: str) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM buyin_threads WHERE conversation_id = ?",
+                                     (conversation_id,)).fetchone()
+        return buyin_thread_view(dict(row)) if row else None
+
+    def buyin_threads(self, *, party_id: Optional[int] = None, deal_id: Optional[int] = None,
+                      matched: Optional[bool] = None) -> list[dict]:
+        """The 百应 conversations kept, the latest her line first: of one creator (``party_id``) or deal
+        (``deal_id``); ``matched`` True only those of a registered creator, False only the others."""
+        sql, where, args = "SELECT * FROM buyin_threads", [], []
+        if party_id is not None:
+            where.append("party_id = ?")
+            args.append(party_id)
+        if deal_id is not None:
+            where.append("deal_id = ?")
+            args.append(deal_id)
+        if matched is not None:
+            where.append("party_id IS NOT NULL" if matched else "party_id IS NULL")
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY COALESCE(last_creator_at, 0) DESC, conversation_id",
+                                      args).fetchall()
+        return [buyin_thread_view(dict(r)) for r in rows]
+
+    def save_buyin_thread(self, conversation_id: str, now: Optional[float] = None, **fields) -> None:
+        """Keep a 百应 conversation (made when new) with ``fields`` set; ``seen`` is a list, ``invited`` a dict or None
+        (stored as JSON)."""
+        allowed = {"party_id", "deal_id", "nickname", "creator_uid", "aweme_id", "seen", "last_creator_at",
+                   "last_shop_at", "answered_upto", "unanswered", "buyin_id", "invited", "contacts"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"not a 百应 conversation field: {sorted(unknown)}")
+        if "seen" in fields:
+            fields["seen"] = json.dumps(list(fields["seen"] or []), ensure_ascii=False)
+        if "invited" in fields:
+            fields["invited"] = json.dumps(dict(fields["invited"] or {}), ensure_ascii=False)
+        now = time.time() if now is None else now
+        with self._lock:
+            self._conn.execute("INSERT OR IGNORE INTO buyin_threads (conversation_id, created_at, updated_at)"
+                               " VALUES (?, ?, ?)", (conversation_id, now, now))
+            fields["updated_at"] = now
+            names = sorted(fields)
+            self._conn.execute(f"UPDATE buyin_threads SET {', '.join(f'{n} = ?' for n in names)}"
+                               " WHERE conversation_id = ?", (*[fields[n] for n in names], conversation_id))
+            self._conn.commit()
+
+    def drop_buyin_threads(self, *, unmatched_before: float) -> int:
+        """Forget the conversations of nobody on the list that were quiet since ``unmatched_before``; returns how many."""
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM buyin_threads WHERE party_id IS NULL AND updated_at < ?",
+                                     (float(unmatched_before),))
+            self._conn.commit()
+            return cur.rowcount
+
     def meta_value(self, key: str) -> Optional[str]:
         with self._lock:
             row = self._conn.execute("SELECT value FROM prm_meta WHERE key = ?", (key,)).fetchone()
@@ -1112,3 +1331,210 @@ class PrmStore:
             self._conn.execute("INSERT INTO prm_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET"
                                " value = excluded.value", (key, str(value)))
             self._conn.commit()
+
+    # ── 加百应达人微信 (PRM_FRIEND_ADD, src/prm/friend_adds.py; CODEBASE_REFERENCE 功能 R) ─────
+
+    def add_friend_add(self, *, state: str, now: Optional[float] = None, **fields) -> tuple[dict, bool]:
+        """A new record in ``state`` (``fields``: ``FRIEND_ADD_FIELDS``; dicts and lists are stored as JSON).  With a
+        ``message_id`` one 百应 message is one record: the one there is comes back.  Returns (record, made)."""
+        now = time.time() if now is None else now
+        values = _friend_add_values(fields)
+        values.update(state=state, created_at=now, updated_at=now)
+        names = sorted(values)
+        with self._lock:
+            cur = self._conn.execute(
+                f"INSERT OR IGNORE INTO friend_adds ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})",
+                [values[n] for n in names])
+            self._conn.commit()
+            if cur.rowcount == 1:
+                row = self._conn.execute("SELECT * FROM friend_adds WHERE id = ?", (cur.lastrowid,)).fetchone()
+                return friend_add_view(dict(row)), True
+            row = self._conn.execute("SELECT * FROM friend_adds WHERE conversation_id = ? AND message_id = ?",
+                                     (values.get("conversation_id", ""), values.get("message_id", ""))).fetchone()
+        return friend_add_view(dict(row)), False
+
+    def friend_add(self, add_id: int) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM friend_adds WHERE id = ?", (int(add_id),)).fetchone()
+        return friend_add_view(dict(row)) if row else None
+
+    def friend_add_by_message(self, conversation_id: str, message_id: str) -> Optional[dict]:
+        """The record of one 百应 message (None for none, or no message id)."""
+        if not message_id:
+            return None
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM friend_adds WHERE conversation_id = ? AND message_id = ?",
+                                     (conversation_id, message_id)).fetchone()
+        return friend_add_view(dict(row)) if row else None
+
+    def friend_adds(self, *, states: Optional[tuple] = None, aweme_id: Optional[str] = None,
+                    conversation_id: Optional[str] = None, limit: Optional[int] = None) -> list[dict]:
+        """The records, newest first: in these ``states``, of this 抖音号 (any case), made from this 百应 conversation."""
+        sql, where, args = "SELECT * FROM friend_adds", [], []
+        if states:
+            where.append(f"state IN ({', '.join('?' * len(states))})")
+            args += list(states)
+        if aweme_id is not None:
+            where.append("LOWER(aweme_id) = LOWER(?)")
+            args.append(str(aweme_id))
+        if conversation_id is not None:
+            where.append("conversation_id = ?")
+            args.append(str(conversation_id))
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            args.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        return [friend_add_view(dict(r)) for r in rows]
+
+    def move_friend_add(self, add_id: int, from_states: tuple, to_state: str, now: Optional[float] = None,
+                        **fields) -> bool:
+        """Compare-and-set: the record goes to ``to_state`` (and ``fields`` are set) only if it is in one of
+        ``from_states``; a double click or two threads move it once."""
+        values = _friend_add_values(fields)
+        values["updated_at"] = time.time() if now is None else now
+        names = sorted(values)
+        with self._lock:
+            cur = self._conn.execute(
+                f"UPDATE friend_adds SET state = ?{''.join(f', {n} = ?' for n in names)}"
+                f" WHERE id = ? AND state IN ({', '.join('?' * len(from_states))})",
+                (to_state, *[values[n] for n in names], int(add_id), *from_states))
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def update_friend_add(self, add_id: int, now: Optional[float] = None, *, states: Optional[tuple] = None,
+                          **fields) -> bool:
+        """Set ``fields`` of a record (only while it is in ``states``, when given); True when it was changed."""
+        values = _friend_add_values(fields)
+        values["updated_at"] = time.time() if now is None else now
+        names = sorted(values)
+        sql = f"UPDATE friend_adds SET {', '.join(f'{n} = ?' for n in names)} WHERE id = ?"
+        args = [*[values[n] for n in names], int(add_id)]
+        if states:
+            sql += f" AND state IN ({', '.join('?' * len(states))})"
+            args += list(states)
+        with self._lock:
+            cur = self._conn.execute(sql, args)
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def clear_friend_add_values(self, add_id: int, now: Optional[float] = None) -> bool:
+        """Clear a record's full numbers (``masked`` stays); True when there was one to clear."""
+        now = time.time() if now is None else now
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE friend_adds SET wechat = '', phone = '', cleared_at = COALESCE(cleared_at, ?), updated_at = ?"
+                " WHERE id = ? AND (wechat != '' OR phone != '')", (now, now, int(add_id)))
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def delete_friend_adds(self, *, closed_before: float) -> int:
+        """Forget the records that ended (``closed_at``) before ``closed_before``, their attempts too; how many."""
+        with self._lock:
+            ids = [r["id"] for r in self._conn.execute(
+                "SELECT id FROM friend_adds WHERE closed_at IS NOT NULL AND closed_at < ?", (float(closed_before),))]
+            if ids:
+                marks = ", ".join("?" * len(ids))
+                self._conn.execute(f"DELETE FROM friend_add_attempts WHERE add_id IN ({marks})", ids)
+                self._conn.execute(f"DELETE FROM friend_adds WHERE id IN ({marks})", ids)
+                self._conn.commit()
+        return len(ids)
+
+    def scrub_friend_adds(self, party_id: int, rewrite: Callable[[str], str], now: Optional[float] = None) -> int:
+        """8.2 clean-up of a creator: her records' numbers are cleared (once more: linking cleared them already) and
+        their nicknames rewritten (numbers masked), her 抖音 links' nicknames too; returns how many changed."""
+        now = time.time() if now is None else now
+        changed = 0
+        with self._lock:
+            for row in self._conn.execute("SELECT id, nickname, wechat, phone FROM friend_adds WHERE party_id = ?",
+                                          (int(party_id),)).fetchall():
+                nickname = rewrite(row["nickname"] or "")
+                if nickname != row["nickname"] or row["wechat"] or row["phone"]:
+                    self._conn.execute(
+                        "UPDATE friend_adds SET nickname = ?, wechat = '', phone = '', cleared_at = COALESCE(cleared_at, ?),"
+                        " updated_at = ? WHERE id = ?", (nickname, now, now, row["id"]))
+                    changed += 1
+            for row in self._conn.execute("SELECT platform, account, nickname FROM creator_links WHERE party_id = ?",
+                                          (int(party_id),)).fetchall():
+                nickname = rewrite(row["nickname"] or "")
+                if nickname != row["nickname"]:
+                    self._conn.execute("UPDATE creator_links SET nickname = ? WHERE party_id = ? AND platform = ?"
+                                       " AND account = ?", (nickname, int(party_id), row["platform"], row["account"]))
+                    changed += 1
+            self._conn.commit()
+        return changed
+
+    def add_friend_attempt(self, add_id: int, *, by: str, kind: str, now: Optional[float] = None) -> int:
+        """One add_friend call for a record (``by`` console / admin, ``kind`` wechat / phone); returns its id."""
+        now = time.time() if now is None else now
+        with self._lock:
+            cur = self._conn.execute("INSERT INTO friend_add_attempts (add_id, at, by, kind) VALUES (?, ?, ?, ?)",
+                                     (int(add_id), now, str(by), str(kind)))
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def finish_friend_attempt(self, attempt_id: int, reason: str, now: Optional[float] = None) -> None:
+        now = time.time() if now is None else now
+        with self._lock:
+            self._conn.execute("UPDATE friend_add_attempts SET reason = ?, finished_at = ? WHERE id = ?",
+                               (str(reason), now, int(attempt_id)))
+            self._conn.commit()
+
+    def friend_attempts(self, *, since: Optional[float] = None, add_id: Optional[int] = None,
+                        unfinished: bool = False) -> list[dict]:
+        """The add_friend calls, newest first: made at ``since`` or later, of one record, or not finished."""
+        sql, where, args = "SELECT * FROM friend_add_attempts", [], []
+        if since is not None:
+            where.append("at >= ?")
+            args.append(float(since))
+        if add_id is not None:
+            where.append("add_id = ?")
+            args.append(int(add_id))
+        if unfinished:
+            where.append("finished_at IS NULL")
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY at DESC, id DESC", args).fetchall()
+        return [dict(r) for r in rows]
+
+    def add_creator_link(self, party_id: int, account: str, *, platform: str = "dy", uid: str = "",
+                         uid_source: str = "", nickname: str = "", source: str, add_id: Optional[int] = None,
+                         now: Optional[float] = None) -> bool:
+        """Who a registered creator is on 抖音 (an operator confirmed it); the first link of an account stays.  True
+        when it is new."""
+        now = time.time() if now is None else now
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO creator_links (party_id, platform, account, uid, uid_source, nickname, source,"
+                " add_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (int(party_id), platform, str(account), str(uid or ""), str(uid_source or ""), str(nickname or ""),
+                 str(source), add_id, now))
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def creator_links(self, party_id: Optional[int] = None, *, account: Optional[str] = None) -> list[dict]:
+        """The 抖音 links, oldest first: of one creator, or of one 抖音号 (any case)."""
+        sql, where, args = "SELECT * FROM creator_links", [], []
+        if party_id is not None:
+            where.append("party_id = ?")
+            args.append(int(party_id))
+        if account is not None:
+            where.append("LOWER(account) = LOWER(?)")
+            args.append(str(account))
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY created_at, account", args).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_creator_link(self, party_id: int, account: str, platform: str = "dy") -> bool:
+        """An operator says a link was wrong (取消关联); True when there was one."""
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM creator_links WHERE party_id = ? AND platform = ? AND account = ?",
+                                     (int(party_id), platform, str(account)))
+            self._conn.commit()
+            return cur.rowcount == 1

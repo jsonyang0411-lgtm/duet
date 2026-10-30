@@ -7,6 +7,7 @@ import { fmtClock } from '../lib/relay'
 import { usePrm, partyAction, dealAction, revealNumbers, setupProblems, eventText, MODE_TAGS, ACTORS } from '../lib/prm'
 import { PageHead, Card, Note, Empty, Field, TextInput, Select, Seg } from './ui'
 import { AdvancedFields } from './AdvancedPanel'
+import { FriendAddPasteCard } from './FriendAddCard'
 
 // 合作单: the creators whose private messages get drafted replies (PRM_COPILOT).
 // Registering one here means the creator agreed to be contacted on WeChat; their
@@ -29,6 +30,7 @@ export default function DealsPanel() {
         {err && <Note kind="need">{err}</Note>}
         {setupProblems(data).map(([kind, text]) => <Note key={text} kind={kind}>{text}</Note>)}
         <RegisterCard d={data} onDone={reload} />
+        <FriendAddPasteCard d={data} onDone={reload} />
         <PartiesCard d={data} open={open} setOpen={setOpen} onDone={reload} />
         {current && <DealCard key={current.id} p={current} d={data} onClose={() => setOpen(null)} onDone={reload} />}
         <div className="stack" style={{ gap: 12, marginTop: 16 }}>
@@ -44,7 +46,9 @@ function RegisterCard({ d, onDone }) {
   const [wxid, setWxid] = useState('')
   const [name, setName] = useState('')
   const [note, setNote] = useState('')
+  const [douyin, setDouyin] = useState('')
   const [busy, setBusy] = useState(false)
+  const withDouyin = !!d?.friend_add_status?.enabled          // 加百应达人微信 on: who she is on 抖音 (optional)
   // New friends first (src/wechat/new_friends.py: tagged, their greeting masked, how they came), then
   // the other recent private chats. Registering is a person's decision (a new friend may be a supplier
   // or an acquaintance), unless PRM_AUTO_REGISTER is on: then the bot registers every new friend itself
@@ -55,16 +59,20 @@ function RegisterCard({ d, onDone }) {
   const hours = d?.catchup_hours ?? 12
   const pick = (value) => {
     const c = candidates.find((x) => x.wxid === value)
-    if (c) { setWxid(c.wxid); setName((n) => n || c.name) }
+    if (c) {
+      setWxid(c.wxid); setName((n) => n || c.name)
+      if (withDouyin && c.friend_add?.aweme_id) setDouyin(c.friend_add.aweme_id)   // 加微信: her 抖音号 comes along
+    }
   }
   const add = async () => {
     setBusy(true)
     try {
-      const r = await partyAction({ action: 'add', wxid: wxid.trim(), name: name.trim(), note: note.trim() })
+      const r = await partyAction({ action: 'add', wxid: wxid.trim(), name: name.trim(), note: note.trim(),
+        ...(withDouyin && douyin.trim() ? { douyin_id: douyin.trim() } : {}) })
       toast.ok(r?.catch_up
         ? `已登记 ${name.trim()}：加好友以来对方发的消息会合成一份草稿（还没说话就写一份开场白），在「待审批」里等你看过再发`
         : `已登记 ${name.trim()}`)
-      setWxid(''); setName(''); setNote('')
+      setWxid(''); setName(''); setNote(''); setDouyin('')
       onDone()
     } catch (e) { toast.err(e.message) } finally { setBusy(false) }
   }
@@ -88,6 +96,7 @@ function RegisterCard({ d, onDone }) {
                   <div>
                     <b>{c.name}</b> <span className="mono dim">{c.wxid}</span>
                     {c.inactive && <span className="tag off" style={{ marginLeft: 6 }} title="登记过、又停用了：再登记就是重新启用">已停用</span>}
+                    {c.friend_add && <span className="tag warn" style={{ marginLeft: 6 }}>{`${c.friend_add.level_label || '可能是她'}：百应的${c.friend_add.nickname || '达人'}（#${c.friend_add.id}）`}</span>}
                   </div>
                   <div className="dim">{c.how_label}{c.added_at ? ` · ${fmtClock(c.added_at)} 加上的` : ''}</div>
                   <div className={c.verify_text ? '' : 'dim'} style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
@@ -115,6 +124,11 @@ function RegisterCard({ d, onDone }) {
           <Field label="备注（可选）" className="grow">
             <TextInput value={note} onChange={setNote} placeholder="比如：618 防晒" aria-label="备注" />
           </Field>
+          {withDouyin && (
+            <Field label="抖音号（可选）" hint="知道她的抖音号就填：Mac 起草时按它带上邀约背景" className="grow">
+              <TextInput mono value={douyin} onChange={setDouyin} placeholder="dy_xxx" aria-label="达人抖音号（可选）" />
+            </Field>
+          )}
         </div>
         {picked?.new && (
           <Note kind="warn">
@@ -233,6 +247,14 @@ function DealDetail({ p, d, onDone }) {
       onDone()
     } catch (e) { toast.err(e.message) } finally { setBusy(false) }
   }
+  const runParty = async (body, done) => {
+    setBusy(true)
+    try {
+      await partyAction(body)
+      toast.ok(done)
+      onDone()
+    } catch (e) { toast.err(e.message) } finally { setBusy(false) }
+  }
   const reveal = async () => {
     try {
       const r = await revealNumbers(p.id)
@@ -316,6 +338,20 @@ function DealDetail({ p, d, onDone }) {
           </div>
         )}
       </div>
+
+      {deal.links?.length > 0 && (
+        <div className="stack prm-links" style={{ gap: 6 }}>
+          <b>抖音号</b>
+          {deal.links.map((l) => (
+            <div key={l.account} className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <span>{l.source === 'friend_add' ? '来自百应邀约' : '登记时填的'}：抖音号 <span className="mono">{l.account}</span>
+                {l.add_id ? `（加微信 #${l.add_id}）` : ''}{l.invited_at ? `，${String(l.invited_at).slice(5, 16).replace('T', ' ')} 发卡` : ''}</span>
+              <button type="button" className="btn sm ghost" disabled={busy}
+                onClick={() => runParty({ action: 'unlink', id: p.id, account: l.account }, `已取消关联 ${l.account}`)}>取消关联</button>
+            </div>
+          ))}
+        </div>
+      )}
 
       {(p.has_numbers || deal.legend?.length > 0) && (
         <div className="stack" style={{ gap: 6 }}>

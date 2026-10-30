@@ -17,6 +17,7 @@ from test_prm_platform_flow import DESIGNATED, block
 from src.config import BotConfig, _validate_config
 from src.prm import gates, platforms, service
 from src.prm.service import HOLDING_TEXT, NIGHT_HOLDING_TEXT, SETTLE_SEC, event_out
+from src.prm.store import BUYIN_TOOL
 from src.relay.store import PRM
 
 HOURS = "18:00-09:00"
@@ -316,13 +317,14 @@ def _system_lane(b):
 
 
 def _buyin(b):
-    """A 百应私信 draft (``meta.channel``, a branch of its own): sent by an operator in 百应, never by the window."""
+    """A 百应私信 draft (``meta.channel``): its own path (``BUYIN_TOOL``, PRM_BUYIN_SYNC_MIN), copied and sent by an
+    operator in 百应, never by the bot, so never by the window either (it is not judged by it at all)."""
     _, job_id = b.relay.submit(CREATOR, CREATOR, "[10-29 21:30] 你好", kind=PRM, fresh=True, meta={
         "party_id": 1, "deal_id": 1, "name": "小美", "channel": "buyin", "night": {"window": HOURS, "at": "21:30"}})
     job = b.worker_takes()
     b.finish(job["id"], reply())
     packet = b.prm.store.packet_for_job(job_id)
-    assert packet["meta"]["night_held"] == "不是微信私聊的草稿"
+    assert packet["tool"] == BUYIN_TOOL and "night_held" not in packet["meta"]
     return packet
 
 

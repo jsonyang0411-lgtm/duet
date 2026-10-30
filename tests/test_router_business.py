@@ -50,6 +50,8 @@ GROUP_MESSAGES = [
     dict(content=f"{BOT} 在吗"),
     dict(content="cc 跑一下测试", sender_id=ADMIN, sender_name="管理员"),
     dict(content="同意好友", sender_id=ADMIN, sender_name="管理员"),
+    dict(content="加达人 1", sender_id=ADMIN, sender_name="管理员"),           # 加百应达人微信's commands (功能 R)
+    dict(content="待加达人", sender_id=ADMIN, sender_name="管理员"),
     dict(content=f"@{BOT} 帮助", sender_id=ADMIN, sender_name="管理员", is_at_mentioned=True),
     dict(content="\"新人\"加入了群聊", is_system_join=True, new_member_id="wxid_new"),
     dict(content="[图片]", msg_type=3),
@@ -75,7 +77,7 @@ class NoGroupIsEverAnswered(GatewayCase):
 class NoStrangerIsEverAnswered(GatewayCase):
     def test_a_private_chat_that_is_no_task_ends_in_silence(self):
         router = self.gateway()
-        for i, text in enumerate(("你好", "在吗？", "cc 跑一下测试", "帮助", "同意好友", "总结一下")):
+        for i, text in enumerate(("你好", "在吗？", "cc 跑一下测试", "帮助", "同意好友", "总结一下", "加达人 1", "待加达人")):
             assert router.handle(private_msg(f"p{i}", text)) is None, text
         assert self.jobs() == 0
 
@@ -102,6 +104,9 @@ class WhatIsAnswered(GatewayCase):
         assert self.relay.store.get(2)["text"] == "添加好友 是什么功能"
         help_text = router.handle(admin_msg("a5", "帮助"))
         assert "不用打 cc" in help_text and "添加好友 号码 [附言]" in help_text and "查状态" in help_text
+        assert "加达人 编号" in help_text
+        assert "没打开" in router.handle(admin_msg("a6", "加达人 1"))          # a command, never a task for the Mac
+        assert self.jobs() == 2
 
 
 class OldChatSettingsDoNothing(GatewayCase):

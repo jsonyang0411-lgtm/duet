@@ -132,6 +132,33 @@ GROUPS: list[dict] = [
              "label": "处理完多久清除收件信息", "unit": "天",
              "help": "合作单签收满这么多天，或者这么多天没有任何动静（没有消息、没有改动，比如结案、审批没通过），"
                      "地址只留省市、手机号和证件号只留打码的，聊天记录、草稿、中转记录、Mac 上的案卷都一起清。"},
+            # 加百应达人微信 (src/prm/friend_adds.py, CODEBASE_REFERENCE 功能 R)
+            {"key": "PRM_FRIEND_ADD", "type": "onoff", "default": "off", "label": "加百应达人微信", "platform": WCDB_ONLY,
+             "help": "百应邀约来的达人留了微信号 / 手机号：在「合作单」页手动登记，到「待审批 › 加微信」确认一次，机器人就用好友管理"
+                     "发一次好友申请（不会自动重试；微信提示操作频繁时自动同意好友也暂停，管理员发「自动同意好友 开」才继续）。"
+                     "她通过以后点「是她，登记并关联」。关着时什么都不记、不加。改完要重启机器人。"},
+            {"key": "PRM_FRIEND_ADD_DAILY_MAX", "type": "int", "min": 1, "max": 30, "default": "10",
+             "label": "每天最多加几个", "unit": "个",
+             "help": "控制台和管理员「加达人 编号」加起来，每调一次加好友算一个（没发出去的也算）。管理员自己的「添加好友」不算。",
+             "requires": [{"key": "PRM_FRIEND_ADD", "is": "on", "text": "加百应达人微信打开时才用"}]},
+            {"key": "PRM_FRIEND_ADD_GAP_SEC", "type": "int", "min": 30, "max": 3600, "default": "120",
+             "label": "两次加好友至少隔多久", "unit": "秒",
+             "requires": [{"key": "PRM_FRIEND_ADD", "is": "on", "text": "加百应达人微信打开时才用"}]},
+            {"key": "PRM_FRIEND_ADD_GREETING", "type": "text", "default": "您好{昵称}，我是{品牌}，百应上联系您的～",
+             "label": "默认附言",
+             "help": "{昵称} 是她百应昵称的前 8 个字（昵称里有号码时不用），{品牌} 是下面的品牌名；填好以后最多 30 个字，加之前可以改。"
+                     "每个人的附言不一样，她通过以后才认得出是谁。",
+             "requires": [{"key": "PRM_FRIEND_ADD", "is": "on", "text": "加百应达人微信打开时才用"}]},
+            {"key": "PRM_FRIEND_ADD_BRAND", "type": "text", "default": "", "label": "附言里的品牌名",
+             "help": "只存在这台电脑的 .env 里，不进代码仓库；不填时附言里的「我是{品牌}，」整段不写。最多 20 个字。",
+             "requires": [{"key": "PRM_FRIEND_ADD", "is": "on", "text": "加百应达人微信打开时才用"}]},
+            {"key": "PRM_FRIEND_ADD_REMARK", "type": "text", "default": "抖音-{昵称}", "empty_ok": True,
+             "placeholder": "空着：不设备注", "label": "加好友时给她的备注",
+             "help": "她在我们微信里显示的名字（微信的「备注」）。{昵称} 是她的百应昵称（没有昵称、昵称里有号码时用抖音号），"
+                     "填好以后最多 16 个字，和别的记录一样时后面加「-抖音号后 4 位」；{昵称} 以外最多 10 个字。机器人在「申请添加朋友」"
+                     "窗口里认出「备注」栏才填，认不出就不填、申请照发。她通过以后显示的就是这个名字，认人更准，发消息也不会和别人同名。"
+                     "清空保存 = 不设备注。",
+             "requires": [{"key": "PRM_FRIEND_ADD", "is": "on", "text": "加百应达人微信打开时才用"}]},
         ],
     },
     {
@@ -173,11 +200,12 @@ _FLOAT = re.compile(r"[+-]?(\d+(\.\d*)?|\.\d+)")
 
 
 def normalize(key: str, raw: str | None) -> str:
-    """The value as the bot reads it, written the canonical way."""
+    """The value as the bot reads it, written the canonical way.  An empty value is the default, except for a field
+    with ``empty_ok`` that is set but empty (``PRM_FRIEND_ADD_REMARK=``: no remark); unset (``None``) is the default."""
     field = FIELDS[key]
     kind = field["type"]
     value = "" if raw is None else str(raw).strip()
-    if value == "":
+    if value == "" and not (field.get("empty_ok") and raw is not None):
         value = field["default"]
     if kind == "onoff":
         return _parse_switch(value)
@@ -270,7 +298,8 @@ def validate_updates(updates: dict, current: dict[str, str]) -> dict[str, str]:
     except RuntimeError as exc:
         lines = [ln.strip(" -") for ln in str(exc).splitlines()[1:] if ln.strip()]
         for line in lines:
-            hit = next((k for k in FIELDS if line.startswith(k)), None)
+            # the longest key the line starts with: PRM_FRIEND_ADD_BRAND's message is not PRM_FRIEND_ADD's
+            hit = next((k for k in sorted(FIELDS, key=len, reverse=True) if line.startswith(k)), None)
             if line.startswith("CLAUDE_RELAY=on needs "):
                 # two messages start alike: each belongs to the field it names
                 hit = "CLAUDE_RELAY_TOKEN" if "CLAUDE_RELAY_TOKEN" in line else "CLAUDE_RELAY_WXIDS"
