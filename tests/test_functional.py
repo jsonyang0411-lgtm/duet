@@ -534,7 +534,8 @@ class TestPrmPages:
 
     def test_review_page_marks_our_baiying_invites_and_counts_others_contact_cards(self, page, prm):
         """百应私信：没登记的达人里我们邀约的（Mac 按邀约台账认出来的）写「我们邀约的 · 抖音号」和邀约时间；别人邀约的会话里
-        的联系方式卡片只说有几张、不归我们处理；号码哪儿都不显示。号码、抖音号、名字都是编的。"""
+        的联系方式卡片只说有几张、不归我们处理；店里同事邀约的（Mac 说 ``other_invite``）不列名字、只说有几位；号码哪儿都不
+        显示。号码、抖音号、名字都是编的。"""
         import json as _json
         from src.prm import platforms
         from src.prm.service import BUYIN_SYNC_CHAT
@@ -552,7 +553,10 @@ class TestPrmPages:
                          "plan_id": "PTEST-plan-0001"},
              "messages": [{"id": "i1", "at": clock.now, "from": "creator", "kind": "contact", "contact": card}]},
             {"conversationId": "conv_other", "creator": {"buyinId": "1777000000000000043", "nickname": "别人的测试达人"},
-             "messages": [{"id": "o1", "at": clock.now, "from": "creator", "kind": "contact", "contact": card}]})]
+             "messages": [{"id": "o1", "at": clock.now, "from": "creator", "kind": "contact", "contact": card}]},
+            {"conversationId": "conv_colleague", "creator": {"buyinId": "1777000000000000044", "nickname": "同事邀约的测试达人"},
+             "other_invite": True,
+             "messages": [{"id": "c1", "at": clock.now, "from": "creator", "kind": "text", "text": "你好"}]})]
         relay.finish(poll["id"], {"ok": True, "text": _json.dumps(platforms.im_result(conversations=convs),
                                                                    ensure_ascii=False)})
         relay.tick()
@@ -561,8 +565,10 @@ class TestPrmPages:
         text = page.inner_text("body")
         for expected in ("百应里有 2 位没登记的达人发了消息",
                          "邀约的测试达人（我们邀约的 · 抖音号 invited_test_dy · 10-29 15:00 邀约）", "别人的测试达人",
-                         "别人邀约的会话里有 1 张联系方式卡片，不归我们处理"):
+                         "别人邀约的会话里有 1 张联系方式卡片，不归我们处理",
+                         "另有 1 位是店里同事邀约的（卡片不是我们这边发的），她们的回复不归我们管"):
             assert expected in text, expected
+        assert "同事邀约的测试达人" not in text
         assert "zq_test_wx_83" not in text and "13700001234" not in text
 
     def test_deals_page_registers_and_disables_a_creator(self, page, prm):

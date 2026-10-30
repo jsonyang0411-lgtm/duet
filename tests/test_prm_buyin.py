@@ -494,6 +494,33 @@ def test_her_wechat_recall_does_not_hold_buyin_drafts_and_a_buyin_decision_does_
 
 # ── who it is ─────────────────────────────────────────────────────────────
 
+def test_a_colleagues_invite_is_counted_not_listed_and_stays_theirs(bot, clock):
+    """A conversation the Mac found to be somebody else's invite (``other_invite``: a colleague's card on this shop,
+    2026-10-30): not listed on the 待审批 page, only counted (``others_invited``); kept once seen, after its card has
+    scrolled out too; one later found to be our invite is ours (listed, marked) and no longer theirs."""
+    theirs = {**conv(line("o1", "你好，看到邀约了", clock.now), cid="conv_31", uid="", nickname="同事的达人"),
+              "other_invite": True}
+    round_says(bot, clock, theirs, conv(line("m1", "在吗", clock.now), cid="conv_32", uid="", nickname="陌生达人"))
+    snap = bot.prm.snapshot()["buyin"]
+    assert (snap["unmatched_count"], snap["others_invited"]) == (1, 1)
+    assert [u["name"] for u in snap["unmatched"]] == ["陌生达人"]
+    assert bot.prm.store.buyin_thread("conv_31")["other_invite"] is True
+    assert jobs_of(bot, BUYIN_CHAT + "conv_31") == []                       # (nobody on the list: never drafted)
+    # her next line without the card (scrolled out of what the page holds): still theirs
+    round_says(bot, clock, conv(line("o2", "怎么合作", clock.now), cid="conv_31", uid="", nickname="同事的达人"))
+    snap = bot.prm.snapshot()["buyin"]
+    assert (snap["unmatched_count"], snap["others_invited"]) == (1, 1)
+    # found to be our invite after all: ours
+    invited = {"aweme_id": "ours_dy", "invited_at": "2026-10-30T10:00:00+08:00", "plan_id": "P20261030-1000-abcd",
+               "attempt": "att01"}
+    round_says(bot, clock, {**conv(line("o3", "好的", clock.now), cid="conv_31", uid="", nickname="同事的达人"),
+                            "invited": invited, "other_invite": True})
+    snap = bot.prm.snapshot()["buyin"]
+    assert (snap["unmatched_count"], snap["others_invited"]) == (2, 0)
+    assert next(u for u in snap["unmatched"] if u["name"] == "同事的达人")["invited"]["aweme_id"] == "ours_dy"
+    assert bot.prm.store.buyin_thread("conv_31")["other_invite"] is False
+
+
 def test_nobody_on_the_list_makes_no_party_and_the_page_says_how_many_wrote(bot, clock):
     parties = len(bot.prm.store.parties(include_inactive=True))
     round_says(bot, clock, conv(line("u1", f"我是新来的 {PHONE}", clock.now), cid="conv_9", uid="5199999999999999",

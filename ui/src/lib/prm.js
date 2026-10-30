@@ -144,8 +144,8 @@ function buyinWho(u) {
 }
 
 /** What the 待审批 page says of the 百应 private messages: why they cannot be read, who wrote that is not on the list
- *  (our invites marked; how many of them left a contact: the 加微信 cards below), how many contact cards came in
- *  conversations that are not ours. */
+ *  (our invites marked; how many of them left a contact: the 加微信 cards below), how many of a colleague's invites
+ *  answered (only counted: not ours to handle), how many contact cards came in conversations that are not ours. */
 export function buyinNotes(d) {
   const b = d?.buyin
   if (!b || !d?.buyin_sync_min) return []
@@ -156,6 +156,7 @@ export function buyinNotes(d) {
     const left = b.contacts_left > 0 ? `；其中 ${b.contacts_left} 位留了联系方式，见下面的「加微信」` : ''
     out.push(['', `百应里有 ${b.unmatched_count} 位没登记的达人发了消息，到百应里看${names.length ? `：${names.join('、')}` : ''}（登记了抖音号的达人才会起草）${left}`])
   }
+  if (b.others_invited > 0) out.push(['', `另有 ${b.others_invited} 位是店里同事邀约的（卡片不是我们这边发的），她们的回复不归我们管`])
   if (b.others_contacts > 0) out.push(['', `别人邀约的会话里有 ${b.others_contacts} 张联系方式卡片，不归我们处理`])
   return out
 }

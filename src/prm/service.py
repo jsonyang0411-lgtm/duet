@@ -899,11 +899,14 @@ def buyin_out(store: PrmStore, now: float) -> dict:
     and ``invited`` when one is our invite: her 抖音号, when and by which plan; nothing of what they wrote is kept), how
     many of those have a 加微信 record not done with (``contacts_left``: by the conversation or her 抖音号; the
     cards are above the drafts), and how many contact cards came in the conversations that are not ours
-    (``others_contacts``: neither on the list nor our invite; their values are never kept)."""
+    (``others_contacts``: neither on the list nor our invite; their values are never kept).  The conversations of
+    somebody else's invite card (``other_invite``: a colleague's, 2026-10-30) are not listed, only counted
+    (``others_invited``): their answers are not ours to handle."""
     status = _json_value(store.meta_value("buyin_status"))
     unmatched = store.buyin_threads(matched=False)
-    waiting = [t for t in unmatched if int(t.get("unanswered") or 0) > 0
-               and now - float(t.get("last_creator_at") or now) <= BUYIN_UNMATCHED_DAYS * 86400]
+    answering = [t for t in unmatched if int(t.get("unanswered") or 0) > 0
+                 and now - float(t.get("last_creator_at") or now) <= BUYIN_UNMATCHED_DAYS * 86400]
+    waiting = [t for t in answering if not t.get("other_invite")]
     adds = store.friend_adds(states=FRIEND_ADD_OPEN)
     cids = {a["conversation_id"] for a in adds if a.get("conversation_id")}
     awemes = {str(a["aweme_id"]).lower() for a in adds if a.get("aweme_id")}
@@ -917,7 +920,8 @@ def buyin_out(store: PrmStore, now: float) -> dict:
             # of those, the ones with a 加微信 record not done with (by the conversation, or her 抖音号)
             "contacts_left": sum(1 for t in waiting if t["conversation_id"] in cids
                                  or (t.get("aweme_id") and str(t["aweme_id"]).lower() in awemes)),
-            "others_contacts": sum(int(t.get("contacts") or 0) for t in unmatched if not t.get("invited"))}
+            "others_contacts": sum(int(t.get("contacts") or 0) for t in unmatched if not t.get("invited")),
+            "others_invited": sum(1 for t in answering if t.get("other_invite"))}
 
 
 class PrmService:
@@ -3800,11 +3804,14 @@ class PrmService:
         hers = [at for m, at in stamp if m["from"] == "creator"]
         ours = [at for m, at in stamp if m["from"] == "shop"]
         invited = conv.get("invited") or thread.get("invited") or None
+        # somebody else's invite card on this shop (the Mac's ``invite_match``: a colleague's), kept once seen; ours wins
+        other = invited is None and bool(conv.get("other_invite") or thread.get("other_invite"))
         fields = {"nickname": contact.mask_contacts(pii.mask_numbers(creator.get("nickname") or ""))
                   or thread.get("nickname") or "",
                   "creator_uid": creator.get("uid") or thread.get("creator_uid") or "",
                   "aweme_id": creator.get("aweme_id") or thread.get("aweme_id") or "",
                   "buyin_id": creator.get("buyin_id") or thread.get("buyin_id") or "", "invited": invited,
+                  "other_invite": other,
                   "seen": [*(thread.get("seen") or []), *(m["id"] for m in new)][-BUYIN_SEEN:],
                   "last_creator_at": max([float(thread.get("last_creator_at") or 0), *hers]) or None,
                   "last_shop_at": max([float(thread.get("last_shop_at") or 0), *ours]) or None}

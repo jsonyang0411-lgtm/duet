@@ -292,6 +292,7 @@ _ADDED_COLUMNS = (
     ("buyin_threads", "buyin_id", "TEXT NOT NULL DEFAULT ''"),
     ("buyin_threads", "invited", "TEXT NOT NULL DEFAULT '{}'"),
     ("buyin_threads", "contacts", "INTEGER NOT NULL DEFAULT 0"),
+    ("buyin_threads", "other_invite", "INTEGER NOT NULL DEFAULT 0"),   # somebody else's invite card (2026-10-30)
     ("friend_adds", "remark", "TEXT NOT NULL DEFAULT ''"),            # 加百应达人微信的备注 (2026-10-29)
     ("friend_adds", "remark_set", "INTEGER NOT NULL DEFAULT 0"),
 )
@@ -377,6 +378,7 @@ def buyin_thread_view(row: dict) -> dict:
     out = dict(row)
     out["seen"] = [str(i) for i in _loads(row.get("seen"), [])]
     out["invited"] = _loads(row.get("invited"), {}) or None
+    out["other_invite"] = bool(row.get("other_invite"))
     return out
 
 
@@ -1293,9 +1295,9 @@ class PrmStore:
 
     def save_buyin_thread(self, conversation_id: str, now: Optional[float] = None, **fields) -> None:
         """Keep a 百应 conversation (made when new) with ``fields`` set; ``seen`` is a list, ``invited`` a dict or None
-        (stored as JSON)."""
+        (stored as JSON), ``other_invite`` a flag."""
         allowed = {"party_id", "deal_id", "nickname", "creator_uid", "aweme_id", "seen", "last_creator_at",
-                   "last_shop_at", "answered_upto", "unanswered", "buyin_id", "invited", "contacts"}
+                   "last_shop_at", "answered_upto", "unanswered", "buyin_id", "invited", "contacts", "other_invite"}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"not a 百应 conversation field: {sorted(unknown)}")

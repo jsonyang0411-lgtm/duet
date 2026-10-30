@@ -285,6 +285,34 @@ def test_a_conversation_is_our_invite_when_one_card_fits_one_ledger_result(tmp_p
     assert known[0]["creator"]["aweme_id"] == "already_known" and known[0]["invited"]["aweme_id"] == "test_daren_01"
 
 
+def test_a_card_far_from_every_card_of_ours_is_somebody_elses(tmp_path):
+    """Colleagues send 邀约带货 cards from the same shop (2026-10-30): a card more than 60 s from every card of ours that
+    may have gone out is theirs (``other_invite``); one near a card of ours (even unpaired), near an attempt of ours with
+    no result yet, or with no ledger that can be read, never is; ours stays ours."""
+    folder = invite_ledger(tmp_path / "inv", ("test_daren_01", T0, True), ("test_daren_02", T0 + 900, False))
+    with (folder / "invites.jsonl").open("a", encoding="utf-8") as f:     # an attempt with no result (a run cut off)
+        f.write("\n" + json.dumps({"at": iso(T0 + 2000), "event": "attempt", "attempt": "att09", "plan_id": PLAN,
+                                    "aweme_id": "test_daren_09"}, ensure_ascii=False) + "\n")
+    convs = parsed(real_conv("c1", invite_card("9001", T0 + 4)),                       # ours: matched
+                   real_conv("c2", invite_card("9002", T0 + 300, "同事的邀约卡")),        # nobody of ours near it
+                   real_conv("c3", invite_card("9003", T0 + 905, "同事的邀约卡")),        # near a result not sent
+                   real_conv("c4", invite_card("9004", T0 + 2300, "同事的邀约卡")),       # within an open attempt's span
+                   real_conv("c5", invite_card("9005", T0 + 30, "另一张卡的字")),         # near ours, not paired
+                   real_conv("c6", {"id": "9006", "at": int(T0 * 1000), "from": "creator", "kind": "text",
+                                    "text": "你好"}))                                   # no card at all
+    assert platforms.invite_match(folder, convs) == 1
+    assert [c.get("other_invite", False) for c in convs] == [False, True, True, False, False, False]
+    assert convs[0]["invited"]["aweme_id"] == "test_daren_01" and convs[1]["invited"] is None
+    assert platforms.INVITE_OPEN_ATTEMPT_SEC == 600
+    # what the bot takes: only True itself; nothing without a ledger, or with one that cannot be read
+    assert platforms.im_conversation({**real_conv("c2"), "other_invite": True})["other_invite"] is True
+    assert platforms.im_conversation({**real_conv("c2"), "other_invite": "yes"})["other_invite"] is False
+    assert platforms.im_conversation(real_conv("c2"))["other_invite"] is False
+    for ledger in ("", tmp_path / "none"):
+        convs = parsed(real_conv("c2", invite_card("9002", T0 + 300, "同事的邀约卡")))
+        assert platforms.invite_match(ledger, convs) == 0 and convs[0].get("other_invite") is not True
+
+
 @pytest.mark.parametrize("offset, matched", [(60, 1), (-60, 1), (61, 0), (-61, 0)])
 def test_only_a_card_within_60_seconds_of_the_result_fits(tmp_path, offset, matched):
     ledger = invite_ledger(tmp_path / "inv", ("test_daren_01", T0, True))
