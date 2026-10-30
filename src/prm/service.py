@@ -48,8 +48,9 @@ messages read too late to draft, this PC's clock off WeChat's (measured by the b
 
 Registering is an operator's decision, unless PRM_AUTO_REGISTER is on (2026-10-29): then every new friend
 the new-friend scan finds is registered by the bot as a full creator (``new_friend_found`` queues her inside
-the scan's look; the sender thread registers her at the start of its next round, ``register_found``, outside
-the scan's locks: ``register`` calls back into the scan through ``on_registered``), never the admin or a cc
+the scan's look, kept in prm_meta over a restart; the sender thread registers her at the start of its next
+round, ``register_found``, outside the scan's locks: ``register`` calls back into the scan through
+``on_registered``), never the admin or a cc
 user, never a wxid that has a party, active or stopped (an operator's 停用 sticks).  When the creator
 registered is a new friend
 (src/wechat/new_friends.py found the line WeChat writes when two people become friends), her
@@ -614,6 +615,9 @@ MISSED_EVENT_NAME = "机器人没在读时达人的消息（没有起草）"
 # PRM_AUTO_REGISTER (2026-10-29): the deal's event of a new friend the bot registered, and how she was added (the
 # new-friend scan's ``how``) as her note and the event say it.
 AUTO_EVENT = "auto_register"
+# prm_meta: the new friends ``new_friend_found`` queued that ``register_found`` has not seen to yet (a JSON list of
+# {wxid, name, how}), kept across a restart (``resume_found``; review 2026-10-30)
+AUTO_QUEUE = "auto_register_queue"
 AUTO_HOWS = {"requested": "我们加她", "manual": "她加我们", "auto_accept": "机器人自动通过", "unknown": "说不清"}
 AUTO_NAME_CHARS = 30         # a creator's 称呼 (``register``)
 AUTO_NOTE_CHARS = 200        # her note
@@ -2297,8 +2301,10 @@ class PrmService:
         wxid, name and how she was added are queued (never her greeting) and the sender thread is woken; it registers
         her at the start of its next round (``register_found``).  Never ``register`` here: the scan calls this inside
         its look, holding its ``_scan_lock``, and ``register`` calls back into the scan (``on_registered`` =
-        ``NewFriendService.registered``, then the backend's ``catch_up_chat``).  Never raises (a sink that raises
-        would get the event again at every look); off, it does nothing."""
+        ``NewFriendService.registered``, then the backend's ``catch_up_chat``).  The queue is kept in prm_meta too
+        (``AUTO_QUEUE``): the scan reports a new friend once, ever, and a restart before that round would lose her
+        (``resume_found``).  Never raises (a sink that raises would get the event again at every look); off, it does
+        nothing."""
         if not self._auto_register:
             return
         try:
@@ -2309,20 +2315,62 @@ class PrmService:
             return
         with self._found_lock:
             self._found.append(item)
+            self._keep_found()
         self._wake.set()
 
     def register_found(self) -> int:
         """The new friends ``new_friend_found`` queued, registered one by one (oldest first) on the sender thread
         (``tick``), with none of the scan's locks held.  Returns how many were registered; one that is not (a rule
-        says no, an error) is logged and stays in 登记达人's candidates for a person.  Never raises."""
+        says no, an error) is logged and stays in 登记达人's candidates for a person.  Each one seen to leaves the
+        queue, the kept one too (``AUTO_QUEUE``).  Never raises."""
         with self._found_lock:
             found = list(self._found)
-            self._found.clear()
         done = 0
         for event in found:
             if self.auto_register_friend(event) is not None:
                 done += 1
+            with self._found_lock:                     # seen to: off the queue
+                try:
+                    self._found.remove(event)
+                except ValueError:
+                    pass
+                self._keep_found()
         return done
+
+    def resume_found(self) -> int:
+        """At start, once the new-friend scan is wired (Bot._start_new_friends, PRM_AUTO_REGISTER on): the new friends
+        queued before a restart and not seen to (``AUTO_QUEUE``; review 2026-10-30: the queue lived in memory only)
+        go back on the queue, ahead of any queued since, and the sender thread is woken.  Returns how many."""
+        kept = self._kept_found()
+        with self._found_lock:
+            back = [e for e in kept if e not in self._found]
+            self._found.extendleft(reversed(back))
+            if back:
+                self._keep_found()
+        if back:
+            logger.info("PRM: %d new friend(s) queued before the restart are registered in the next round", len(back))
+            self._wake.set()
+        return len(back)
+
+    def _kept_found(self) -> list:
+        """The queue as ``AUTO_QUEUE`` keeps it (``[{wxid, name, how}]``; [] none, or unreadable: logged)."""
+        try:
+            data = json.loads(self._store.meta_value(AUTO_QUEUE) or "[]")
+        except Exception:
+            logger.warning("PRM: the kept queue of new friends could not be read; not registered automatically",
+                           exc_info=True)
+            return []
+        items = [e for e in (data if isinstance(data, list) else []) if isinstance(e, dict)]
+        return [{"wxid": str(e.get("wxid") or "").strip(), "name": str(e.get("name") or ""),
+                 "how": str(e.get("how") or "")} for e in items if str(e.get("wxid") or "").strip()]
+
+    def _keep_found(self) -> None:
+        """``AUTO_QUEUE`` = the queue now (under ``_found_lock``).  An error is logged, never raised: she is still
+        registered in this run, only a restart before it would lose her."""
+        try:
+            self._store.set_meta_value(AUTO_QUEUE, json.dumps(list(self._found), ensure_ascii=False))
+        except Exception:
+            logger.warning("PRM: the queue of new friends could not be kept for a restart", exc_info=True)
 
     def auto_register_friend(self, event: dict) -> Optional[dict]:
         """Register one new friend (``{wxid, name, how}``) as a full creator, as an operator's 登记 does

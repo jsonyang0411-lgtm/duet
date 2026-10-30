@@ -404,6 +404,8 @@ class Bot:
             prm.on_registered = service.registered
             if adds is not None:
                 adds.set_new_friends(service)     # (a record made after she became a friend looks back)
+        if auto:
+            prm.resume_found()                    # the new friends queued before a restart, not registered yet
         try:
             from .web.server import register_new_friends
             register_new_friends(service)

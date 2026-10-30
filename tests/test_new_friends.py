@@ -26,7 +26,7 @@ from src.edge import protocol as P
 from src.edge.service import EdgeService
 from src.edge.store import EdgeStore
 from src.prm import gates
-from src.prm.service import OPENING_UNSURE_TEXT, SETTLE_SEC, PrmService, new_friend_note, opening_note
+from src.prm.service import AUTO_QUEUE, OPENING_UNSURE_TEXT, SETTLE_SEC, PrmService, new_friend_note, opening_note
 from src.prm.store import PrmStore
 from src.relay.service import ClaudeRelay
 from src.relay.store import RelayStore
@@ -561,6 +561,8 @@ class Copilot:
                                         keep_verify=True, catchup_hours=catchup_hours, clock=clock, pause=0, **scan)
         self.friends.set_catch_up_sink(self.prm.take_new_friend)
         self.prm.on_registered = self.friends.registered
+        if self.prm.auto_register:
+            self.prm.resume_found()
         self.added, self.remarks = [], []
         if friend_add:                    # (a 4.0 window whose 「备注」 field OCR saw: remark_set)
             manager = SimpleNamespace(add_friend=lambda keyword, message="", remark="": self.added.append((keyword, message))
@@ -941,6 +943,28 @@ def test_a_friend_seen_again_after_a_restart_is_not_registered_twice(copilot_bot
     assert lines(again.jobs()[-1])[-1] == "你好？"                  # a creator's message (it joins the job not taken)
 
 
+def test_a_new_friend_queued_when_the_bot_stopped_is_registered_after_the_restart(copilot_bot, db, clock):
+    """Review 2026-10-30: the scan reports a new friend once, ever, and the queue lived in memory only: a restart in the
+    seconds before the sender thread's round lost her.  It is kept in prm_meta and taken up again at start."""
+    bot = copilot_bot(auto_register="on")
+    bot.friends.scan_once()
+    clock.now += 120
+    accepted_on_pc(db, NEW, "阿花", clock.now)
+    bot.poll()
+    assert [e["wxid"] for e in bot.friends.scan_once()] == [NEW]      # queued; the bot stops before its round
+    assert [e["wxid"] for e in json.loads(bot.prm.store.meta_value(AUTO_QUEUE))] == [NEW]
+    bot.stop()
+    clock.now += 60
+    again = copilot_bot(auto_register="on", prm_store=bot.prm.store, relay_store=bot.relay.store)
+    assert again.friends.scan_once() == []                            # reported once, ever
+    assert again.prm.register_found() == 1 and again.prm.is_party_chat(NEW)
+    assert json.loads(again.prm.store.meta_value(AUTO_QUEUE)) == []   # seen to: off the kept queue
+    again.poll()
+    [job] = again.jobs()
+    assert json.loads(job["meta"])["new_friend"]["count"] == 1      # her greeting, drafted as for any new friend
+    assert again.prm.resume_found() == 0 and again.prm.register_found() == 0
+
+
 def test_an_error_in_register_never_stops_the_scan_and_she_stays_a_candidate(
         copilot_bot, db, clock, caplog, monkeypatch):
     from src.web import server
@@ -1034,12 +1058,17 @@ def test_the_bot_hands_new_friends_to_prm_only_in_copilot_mode_with_the_switch_o
 
         def __init__(self, auto):
             self.auto_register = auto
+            self.resumed = 0
 
         def take_new_friend(self, *a, **k):
             return 0
 
         def new_friend_found(self, event):
             pass
+
+        def resume_found(self):
+            self.resumed += 1
+            return 0
 
     def sinks(config, prm, edge):
         service = Bot._start_new_friends(config, backend, prm, edge)
@@ -1051,9 +1080,10 @@ def test_the_bot_hands_new_friends_to_prm_only_in_copilot_mode_with_the_switch_o
 
     on = BotConfig(db_path=str(tmp_path / "messages.db"), prm_auto_register="on")
     off = BotConfig(db_path=str(tmp_path / "messages.db"))
-    prm = Prm(True)
+    prm, stays = Prm(True), Prm(False)
     assert sinks(on, prm, None) == [prm.new_friend_found]
-    assert sinks(off, Prm(False), None) == []
+    assert prm.resumed == 1                                          # the queue kept over a restart is taken up
+    assert sinks(off, stays, None) == [] and stays.resumed == 0
     edge = type("E", (), {"friend_added": lambda self, e: None})()
     with caplog.at_level(logging.INFO):
         assert sinks(on, None, edge) == [edge.friend_added]          # edge mode: the Mac's friend_added only
