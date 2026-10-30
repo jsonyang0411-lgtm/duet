@@ -1509,13 +1509,16 @@ def opening_line(meta: dict) -> str:
     else:
         who = OPENING_HOWS.get(str(opening.get("how") or ""), "她刚加上好友") + "，还没说过话"
     return (f"{who}。这一次没有达人的消息，要写的是我们主动发的第一句（开场白），按 kb/ 里开场白和破冰（场景 A）的写法；"
-            "她的作品、穿搭这些你不知道的不要编。我们已经跟她打过招呼的（看 <our_reply>），就写一句自然的跟进，不要重复自我介绍。")
+            "她的作品、穿搭这些你不知道的不要编。我们已经跟她打过招呼的（看 <our_reply> 和 <operator_message>），"
+            "就写一句自然的跟进，不要重复自我介绍。")
 
 
 def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, failed: list) -> str:
     title = " ".join(str(name).split())[:30] or f"达人 {party_id}"
     lines = [f"合作单：{title}（编号 {party_id}），案卷是 {case_rel}。"]
     meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
+    text = str(job.get("text") or "")
+    opening = opening_line(meta)
     night = night_line(meta)
     if night:
         lines.append(night)
@@ -1525,7 +1528,8 @@ def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, fa
     if history:
         lines.append(history_block(history))
         missed = any(isinstance(item, dict) and item.get("missed") for item in history)
-        lines.append("下面是达人最新发来的消息。" if missed else "人工接管结束了，下面是达人最新发来的消息。")
+        if text.strip() or not opening:            # (a 开场白: no message of hers comes after it)
+            lines.append("下面是达人最新发来的消息。" if missed else "人工接管结束了，下面是达人最新发来的消息。")
     late = meta.get("late") if isinstance(meta.get("late"), dict) else {}
     try:
         late_at = time.strftime("%m-%d %H:%M", time.localtime(float(late.get("from"))))
@@ -1534,7 +1538,6 @@ def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, fa
     if late_at:
         lines.append(f"达人这次的消息是机器人没在读微信的时候收到的（最早 {late_at}），过了一阵才交给你："
                      "起草时想到已经隔了一阵，运营会先看过再发。")
-    opening = opening_line(meta)
     if opening:
         lines.append(opening)
     if meta.get("system_note"):
@@ -1543,7 +1546,6 @@ def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, fa
         lines.append("达人这次还发来了附件（用 Read 打开，图片可以直接看）：" + "、".join(got))
     if failed:
         lines.append("还有附件没能从 Windows 取到：" + "、".join(failed))
-    text = str(job.get("text") or "")
     if text.strip() or not (meta.get("system_note") or opening):
         lines.append(creator_block(text))
     lines.append("先读案卷和 kb/ 里相关的内容，更新案卷，然后给出结构化结果。")

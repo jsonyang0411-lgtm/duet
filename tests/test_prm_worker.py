@@ -781,13 +781,19 @@ def test_an_opening_job_asks_for_our_first_line_and_makes_up_no_message_of_hers(
     line = worker.opening_line(job["meta"])
     assert line.startswith("她刚通过了我们的好友申请（是我们加的她），还没说过话。这一次没有达人的消息，要写的是我们主动发的第一句")
     assert line in prompt.split("\n") and "<creator_message>" not in prompt
-    assert "kb/ 里开场白和破冰（场景 A）" in line and "不知道的不要编" in line and "<our_reply>" in line
+    assert "kb/ 里开场白和破冰（场景 A）" in line and "不知道的不要编" in line and "<our_reply> 和 <operator_message>" in line
     assert worker.opening_line({"opening": {"how": "", "by": "console"}}).startswith(
         "运营请你给这位达人写开场白：她还没跟我们说过话。")
     assert worker.opening_line({"opening": {"how": "manual"}}).startswith("她刚加了我们的好友，还没说过话。")
     assert worker.opening_line({"opening": {}}).startswith("她刚加上好友，还没说过话。")
     joined = worker.prm_prompt({"id": 22, "text": "[10:21] 在吗", "meta": job["meta"]}, 1, "小青", "deals/1.md", [], [])
     assert joined.index(line) < joined.index("<creator_message>") and "在吗" in joined
+    # an operator greeted her by hand meanwhile: told as a record, and no 「下面是达人最新发来的消息」 with nothing after it
+    told = worker.prm_prompt({"id": 24, "text": "", "meta": {**job["meta"], "history": [
+        {"who": "operator", "text": "[09:10] 你好呀～我是 ACE7CN 的"}]}}, 1, "小青", "deals/1.md", [], [])
+    assert "<operator_message>\n[09:10] 你好呀～我是 ACE7CN 的\n</operator_message>" in told
+    assert "下面是达人最新发来的消息" not in told and "<creator_message>\n" not in told
+    assert told.index("</operator_message>") < told.index(line)
     plain = worker.prm_prompt({"id": 23, "text": "你好", "meta": {}}, 1, "小青", "deals/1.md", [], [])
     assert "开场白" not in plain
     for meta in ({"opening": None}, {"opening": "yes"}):

@@ -1198,3 +1198,27 @@ def test_the_console_asks_for_an_opening_only_for_a_creator_who_has_not_written(
     assert bot.prm.deal_action("opening", {"deal_id": 999}) == {"ok": False, "error": "没有找到这个合作单"}
     assert bot.prm.deal_action("opening", {"deal_id": "x"}) == {"ok": False, "error": "没有找到这个合作单"}
     assert [json.loads(j["meta"]).get("opening") is not None for j in bot.jobs()] == [True, False]
+
+
+def test_an_opening_asked_for_after_an_operator_greeted_her_by_hand_hears_of_it(copilot_bot, db, clock):
+    """An operator greeted her by hand (a takeover); once it is over, 「写开场白」's job is told what was said
+    (``meta.history``: the Mac writes a follow-up, not a second introduction), and the line is not used up: her next
+    draft job hears of it too."""
+    bot = copilot_bot()
+    bot.friends.scan_once()
+    party = bot.prm.register(OLD, "老朋友")
+    bot.poll()
+    deal_id = bot.prm.store.deal_of(party["id"])["id"]
+    db.say(OLD, ME_SENDER, "你好呀～我是 ACE7CN 的", clock.now)        # an operator, on the phone
+    bot.poll()
+    assert "不在副驾驶模式" in bot.prm.deal_action("opening", {"deal_id": deal_id})["error"]
+    clock.now += 3 * 3600                                            # the takeover is over
+    assert bot.prm.deal_action("opening", {"deal_id": deal_id})["ok"] is True
+    [job] = bot.jobs()
+    told = json.loads(job["meta"])["history"]
+    assert [(h["who"], h["text"].split("] ", 1)[1]) for h in told] == [("operator", "你好呀～我是 ACE7CN 的")]
+    bot.mac_drafts(kind="greeting")
+    db.say(OLD, OLD, "你好", clock.now)                              # she answers before it went out
+    bot.poll()
+    later = json.loads(bot.jobs()[-1]["meta"])
+    assert [h["who"] for h in later["history"]] == ["operator"] and "opening" not in later

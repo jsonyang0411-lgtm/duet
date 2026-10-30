@@ -377,6 +377,14 @@ def gap_notes(meta: dict) -> list[str]:
     return notes
 
 
+def history_of(backlog: list) -> list[dict]:
+    """A draft job's ``meta.history``: the recorded lines it is told (``take_backlog``: what both sides said while a
+    person had the chat, her messages read too late to draft), oldest first."""
+    return [{"who": "operator" if ev["kind"] == "operator_message" else "creator",
+             "text": str(ev["detail"].get("text", "")),
+             **({"missed": True} if ev["detail"].get("missed") else {})} for ev in backlog]
+
+
 def _event_time(ev: dict) -> float:
     """When a recorded message was written (its own time when kept, else when it was recorded)."""
     try:
@@ -1042,9 +1050,7 @@ class PrmService:
         backlog = self._store.take_backlog(deal["id"])
         fresh = bool(backlog)
         if backlog:
-            meta["history"] = [{"who": "operator" if ev["kind"] == "operator_message" else "creator",
-                                "text": str(ev["detail"].get("text", "")),
-                                **({"missed": True} if ev["detail"].get("missed") else {})} for ev in backlog]
+            meta["history"] = history_of(backlog)
             missed = [ev for ev in backlog if ev["kind"] == "creator_message" and ev["detail"].get("missed")]
             if missed:
                 meta["missed"] = {"count": len(missed), "from": min(_event_time(ev) for ev in missed)}
@@ -2008,8 +2014,8 @@ class PrmService:
 
     def _ask_opening(self, party: dict, *, how: str = "", by: str = "new_friend") -> tuple:
         """One draft job of our first line to a creator who has not written to us (``meta.opening``: how she came,
-        who asked; told what we sent her, ``meta.sent``), under ``_handle_lock``: ``(job id, "")``, or ``(None, why
-        not)`` (``_no_opening``).  It always waits for a person (``gap_notes``), never by night, never gets a holding
+        who asked; told what we sent her, ``meta.sent``, and what an operator wrote to her by hand, ``meta.history``),
+        under ``_handle_lock``: ``(job id, "")``, or ``(None, why not)`` (``_no_opening``).  It always waits for a person (``gap_notes``), never by night, never gets a holding
         reply; a message of hers joins it, or outdates its draft (``_outdated``), like any reply draft's."""
         now = self._clock()
         deal = self._store.deal_of(party["id"], now)
@@ -2024,6 +2030,11 @@ class PrmService:
         outbound = self._outbound(deal["id"], party["id"], now)
         if outbound:
             meta["sent"] = outbound
+        # What an operator wrote to her by hand while a person had the chat (she has written nothing: no line of hers
+        # is recorded): told, not taken, so her next draft job still hears of it should this one give no draft.
+        told = history_of(self._store.backlog(deal["id"]))
+        if told:
+            meta["history"] = told
         _, job_id = self._relay.submit(party["wxid"], party["wxid"], "", kind=PRM, meta=meta, fresh=True)
         self._store.add_event(deal["id"], party["id"], OPENING, {"job": job_id, "how": how, "by": by},
                               actor="console" if by == "console" else "system", now=now)
