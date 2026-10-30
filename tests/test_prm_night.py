@@ -825,3 +825,68 @@ def test_the_console_says_when_auto_mode_is_what_puts_the_night_rules_in_force(c
     assert plain.prm.snapshot()["night"] == {"on": False, "window": "", "inside": False, "suspended": "", "error": "",
                                              "auto": True}
     plain.relay.stop()
+
+
+# ── review 2026-10-30: a draft of the window's back by day; the switch read once per judgement ──
+
+def test_a_draft_written_in_the_window_and_back_by_day_waits_in_auto_mode(clock, tmp_path):
+    """Its job was made at 08:55, inside the window: the Mac wrote by the night's words (its holding line may promise
+    「明早」).  It came back at 09:05 with 自动模式 on: it waits for a person, it never goes out by day with them."""
+    clock.now = at(8, 55, day=30)
+    b = make_bot(clock, tmp_path, prm_night_auto_hours=HOURS)
+    b.prm.set_auto_mode(True)
+    b.prm.handle(b.msg("好呀，可以寄来看看"))
+    job = b.worker_takes()
+    assert job["meta"]["night"] == {"window": HOURS, "at": "08:55"}
+    clock.now = at(9, 5, day=30)
+    b.finish(job["id"], reply("other", HOLD_LINE))
+    packet = b.prm.store.packet_for_job(job["id"])
+    assert state(packet) == WAITS
+    assert packet["meta"] == {"auto_mode": True,
+                              "night_held": "草稿任务是下班时段建的，Mac 按夜里的说法写的（过渡的话可能说「明早」），白天的自动模式不自动发"}
+    # a job of 自动模式's own (made at 09:05): its draft goes
+    b.prm.handle(b.msg("那什么时候寄呀"))
+    job = b.worker_takes()
+    assert job["meta"]["night"]["auto"] is True
+    b.finish(job["id"], reply("other", "好的～我确认好第一时间回您哈"))
+    assert state(b.prm.store.packet_for_job(job["id"])) == GOES
+    b.prm.stop()
+    b.relay.stop()
+
+
+def switched_off_after_one_read(b, monkeypatch):
+    """The console switches 自动模式 off right after the next read of it (a click between two reads)."""
+    real = b.prm.store.meta_value
+    reads = []
+
+    def meta_value(key):
+        value = real(key)
+        if key == service.AUTO_MODE:
+            reads.append(value)
+            if len(reads) == 1:
+                b.prm.store.set_meta_value(service.AUTO_MODE, json.dumps({"on": False, "since": b.clock.now,
+                                                                          "by": "console"}))
+        return value
+
+    monkeypatch.setattr(b.prm.store, "meta_value", meta_value)
+    return reads
+
+
+def test_one_judgement_reads_the_switch_once(auto_bot, monkeypatch):
+    """Switched off between two reads of one judgement, a draft that went by 自动模式 was tagged as the night's (its
+    record: 夜间自动发出, by day), and a holding reply by day said the night's 「明早」: each reads the switch once."""
+    b = auto_bot
+    b.prm.handle(b.msg("你好"))
+    job = b.worker_takes()
+    reads = switched_off_after_one_read(b, monkeypatch)
+    b.finish(job["id"], reply("greeting", "好的呀～很高兴认识你"))
+    packet = b.prm.store.packet_for_job(job["id"])
+    assert state(packet) == GOES and packet["meta"] == {"auto_mode": True} and len(reads) == 1
+    monkeypatch.undo()
+    b.prm.set_auto_mode(True)
+    held = drafted(b, reply("money", "可以给到 30%～"), text="能给 30% 吗")
+    assert state(held) == WAITS
+    b.clock.now += 11 * 60
+    reads = switched_off_after_one_read(b, monkeypatch)
+    assert b.prm.send_holding_replies() == 1 and b.texts[-1] == (CREATOR, AUTO_HOLDING_TEXT)
+    assert len(reads) == 1

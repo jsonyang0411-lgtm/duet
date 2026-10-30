@@ -34,8 +34,9 @@ never counts toward a kind's gate; holding replies inside the window say PRM_NIG
 自动模式 (2026-10-30; off = everything as before): the console's one-press switch (待审批, ``POST /api/prm/auto``) puts
 the night window's rules in force at any hour, until it is switched off, with no window set too (``set_auto_mode``;
 kept in the store over a restart, ``auto_mode_of``).  Inside the window it is the night's, words and all; outside it
-(by day: ``_auto_by_day``) the job says so (``meta.night`` ``{"auto": true, "at"}``: the Mac promises no 「明早」), the
-holding reply says AUTO_HOLDING_TEXT, and what it sent or held says 自动模式 (the packet's ``meta.auto_mode``).
+(by day: ``_auto_by_day``) the job says so (``meta.night`` ``{"auto": true, "at"}``: the Mac promises no 「明早」; a
+draft of a job made in the window waits by day), the holding reply says AUTO_HOLDING_TEXT, and what it sent or held
+says 自动模式 (the packet's ``meta.auto_mode``).  One judgement reads the switch once (``auto_on``).
 
 What the deal says to a person (``attention``) is its notices (store.py): the latest draft's own
 notes, which the next draft replaces, and the system's, which stay until they are dealt with (mac
@@ -1181,15 +1182,18 @@ class PrmService:
         """Is ``now`` inside the 下班时段 (the window set, by this PC's clock)?"""
         return self._night is not None and gates.in_night(self._night, now)
 
-    def _auto_by_day(self, now: float) -> bool:
+    def _auto_by_day(self, now: float, auto_on: Optional[bool] = None) -> bool:
         """Is it 自动模式 that puts the night rules in force now (switched on, ``now`` outside the window or none set)?
-        Inside the window the night's own words count, 自动模式 or not."""
-        return not self._in_window(now) and self.auto_mode["on"]
+        Inside the window the night's own words count, 自动模式 or not.  ``auto_on``: the switch as the caller read it
+        (one judgement reads it once: review 2026-10-30); None reads it now."""
+        on = self.auto_mode["on"] if auto_on is None else auto_on
+        return not self._in_window(now) and on
 
-    def _night_active(self, now: float) -> bool:
+    def _night_active(self, now: float, auto_on: Optional[bool] = None) -> bool:
         """Do the night rules apply now (the 下班时段: ``now`` inside the window by this PC's clock; or 自动模式 switched
-        on in the console, at any hour) with a clock to trust?"""
-        return (self._in_window(now) or self.auto_mode["on"]) and not self._clock_off()
+        on in the console, at any hour) with a clock to trust?  ``auto_on``: as ``_auto_by_day``'s."""
+        on = self.auto_mode["on"] if auto_on is None else auto_on
+        return (self._in_window(now) or on) and not self._clock_off()
 
     def _night_meta(self, now: float) -> dict:
         """A draft job's ``meta.night`` (``_submit``): inside the window ``{"window": "18:00-09:00", "at": "21:30"}``,
@@ -1206,7 +1210,8 @@ class PrmService:
                             auto=auto)
 
     def _night_judge(self, meta: dict, draft, *, refused: str, short: str, unknown: list, waybill: str,
-                     attachments: list, named: int, mode: str, now: float) -> Optional[str]:
+                     attachments: list, named: int, mode: str, now: float,
+                     auto_on: Optional[bool] = None) -> Optional[str]:
         """A reply draft that reached the gates (``on_result``'s last step: no platform action, a reply, the deal in
         copilot mode, no newer job, nothing read late or recalled, not the system lane) and waits for a person by
         them: may it go out by itself in the night window (or 自动模式, ``_night_active``)?  None: neither is in play
@@ -1215,11 +1220,13 @@ class PrmService:
         Over ``gates.night_reason`` (complaints, ``plain_reason``, the red line, a flagged draft only as one holding
         line): this PC's clock is right, the job was made under the night rules with a clock to trust (``meta.night``:
         the Mac was told it is night or 自动模式 and wrote by the kb's rules for it; a draft of a job from before the
-        window or the switch, or from while the clock was off, waits), it is a WeChat draft
-        (another channel's, ``meta.channel``, never), its platform action was not refused or covered, all its files
-        came."""
+        window or the switch, or from while the clock was off, waits; 自动模式 by day, one of a job made in the window
+        waits too: the Mac wrote by the night's words, its holding line may promise 「明早」, review 2026-10-30), it is
+        a WeChat draft (another channel's, ``meta.channel``, never), its platform action was not refused or covered,
+        all its files came.  ``auto_on``: the switch as ``on_result`` read it (its packet's tag says the same)."""
+        auto_on = self.auto_mode["on"] if auto_on is None else auto_on
         window = self._in_window(now)
-        if not window and not self.auto_mode["on"]:
+        if not window and not auto_on:
             return None
         auto = not window                              # 自动模式 by day: its own words
         if self._clock_off():
@@ -1227,6 +1234,8 @@ class PrmService:
         if not isinstance(meta.get("night"), dict):
             return ("草稿任务建的时候自动模式还没打开（或者电脑时间和微信对不上），Mac 起草时不知道是自动模式" if auto else
                     "草稿任务建的时候没算作下班时段（还没到点，或者电脑时间和微信对不上），Mac 起草时不知道是下班时段")
+        if auto and meta["night"].get("auto") is not True:
+            return "草稿任务是下班时段建的，Mac 按夜里的说法写的（过渡的话可能说「明早」），白天的自动模式不自动发"
         if str(meta.get("channel") or "wechat") != "wechat":
             return "不是微信私聊的草稿"
         if refused:
@@ -2021,6 +2030,7 @@ class PrmService:
         handed_on = lane == LANE_REPLY and self._handed_on(deal, job["id"])
         route, decided_at = gates.REVIEW, None
         night_held = None                              # 下班时段: why a draft judged by the night window waits
+        auto_on = self.auto_mode["on"]                 # 自动模式, read once: the judgement and the packet's tag agree
         if draft.platform is not None:
             # A platform write: always a person's decision (8.1's gates do not apply).
             state = (SUPERSEDED if mode != COPILOT or handed_on or (newer is not None and newer["id"] > job["id"])
@@ -2049,7 +2059,7 @@ class PrmService:
                 # 下班时段 (PRM_NIGHT_AUTO_HOURS) or 自动模式: it may still go out by itself; only here, never before this step
                 night_held = self._night_judge(meta, draft, refused=refused, short=short, unknown=unknown,
                                                waybill=waybill, attachments=attachments, named=len(named), mode=mode,
-                                               now=now)
+                                               now=now, auto_on=auto_on)
                 if night_held == "":
                     route, state, decided_at = gates.NIGHT, APPROVED, now
         packet_meta = {"waybill": waybill} if draft.message_kind == "shipping_notice" and waybill else {}
@@ -2057,7 +2067,7 @@ class PrmService:
             packet_meta["lane"] = LANE_SYSTEM
         if isinstance(meta.get(OPENING), dict):
             packet_meta[OPENING] = True                # (the console's tag; no holding reply for it)
-        by_auto = night_held is not None and self._auto_by_day(now)
+        by_auto = night_held is not None and self._auto_by_day(now, auto_on)
         if by_auto:
             packet_meta[AUTO_MODE] = True              # 自动模式 by day sent or held it: the console and the record say so
         if night_held:
@@ -4522,8 +4532,9 @@ class PrmService:
                 continue                                   # she heard from us after her message
             done.add(packet["deal_id"])
             if text is None:
-                text = ((AUTO_HOLDING_TEXT if self._auto_by_day(now) else self._night_holding_text)
-                        if self._night_active(now) else self._holding_text)
+                auto_on = self.auto_mode["on"]         # read once: the words of the night and of 自动模式 agree
+                text = ((AUTO_HOLDING_TEXT if self._auto_by_day(now, auto_on) else self._night_holding_text)
+                        if self._night_active(now, auto_on) else self._holding_text)
             noted = self._note_sent(packet["chat_id"], text)
             try:
                 ok = bool(self._send(packet["chat_id"], text))
