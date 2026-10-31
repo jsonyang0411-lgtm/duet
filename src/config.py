@@ -374,6 +374,15 @@ class BotConfig:
     # her 称呼 (the bot does not rename the group itself).
     prm_group_with: str = ""
     prm_group_name: str = "{品牌}×{昵称}"
+    # 老板拉的群 (src/prm/boss_groups.py, 2026-10-31): "on": a group a boss of PRM_GROUP_WITH makes with a creator and this
+    # account (found after the switch first ran; at most prm_boss_group_max members) is taken over: with exactly one
+    # person besides us and the boss she is registered and our first line in the group is drafted (it waits for a
+    # person); else the console asks which member she is.  Her lines there are drafted like her private ones (the
+    # gates, 下班时段 and 自动模式 alike; no holding reply in a group); the boss's and the other members' lines are only
+    # context, every other group stays silent.  Needs PRM_COPILOT=on and PRM_GROUP_WITH (the console says so otherwise).
+    # "off" (the default): nothing of it.
+    prm_boss_groups: str = "off"
+    prm_boss_group_max: int = 6
     # === WeChat edge (src/edge, edge-protocol.md) for the Mac business service ===
     # "on": Windows only receives and sends WeChat messages for the creators the Mac lists;
     # the Mac pulls /edge/* on the relay's port with PRM_EDGE_TOKEN.  Not with PRM_COPILOT.
@@ -596,6 +605,12 @@ def _validate_config(kwargs: dict) -> None:
     group_name = str(kwargs.get("prm_group_name", "{品牌}×{昵称}") or "").strip()
     if group_name.count("{昵称}") != 1 or len(group_name.replace("{昵称}", "").replace("{品牌}", "")) > 12:
         errors.append("PRM_GROUP_NAME must hold {昵称} once and at most 12 other characters ({品牌} aside)")
+    # (on without PRM_COPILOT or PRM_GROUP_WITH it only does nothing: the console says why.  Not refused, as
+    # PRM_AUTO_REGISTER is not.)
+    if kwargs.get("prm_boss_groups", "off") not in ("off", "on"):
+        errors.append(f"PRM_BOSS_GROUPS must be off or on, got {kwargs.get('prm_boss_groups')}")
+    if not (3 <= int(kwargs.get("prm_boss_group_max", 6)) <= 20):
+        errors.append(f"PRM_BOSS_GROUP_MAX must be between 3 and 20, got {kwargs.get('prm_boss_group_max')}")
     prm_edge = kwargs.get("prm_edge", "off")
     if prm_edge not in ("off", "on"):
         errors.append(f"PRM_EDGE must be off or on, got {prm_edge}")
@@ -750,6 +765,8 @@ def load_config() -> BotConfig:
         "prm_friend_add_remark": os.getenv("PRM_FRIEND_ADD_REMARK", "抖音-{昵称}").strip(),   # set but empty: no remark
         "prm_group_with": os.getenv("PRM_GROUP_WITH", "").strip(),
         "prm_group_name": os.getenv("PRM_GROUP_NAME", "").strip() or "{品牌}×{昵称}",
+        "prm_boss_groups": _parse_switch(os.getenv("PRM_BOSS_GROUPS", "off")),
+        "prm_boss_group_max": int(os.getenv("PRM_BOSS_GROUP_MAX", "6")),
         "prm_edge": _parse_switch(os.getenv("PRM_EDGE", "off")),
         "prm_edge_token": os.getenv("PRM_EDGE_TOKEN", "").strip(),
         "edge_url": os.getenv("EDGE_URL", "").strip(),

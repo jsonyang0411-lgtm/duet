@@ -850,3 +850,115 @@ def test_the_running_console_says_how_many_messages_a_reply_may_be(tmp_path):
         finally:
             server.register_prm(None)
             relay.stop()
+
+
+def test_boss_groups_from_the_running_console_and_while_stopped(tmp_path, monkeypatch):
+    """老板拉的群 (src/prm/boss_groups.py, 2026-10-31): GET /api/prm's ``boss_groups`` (a pending group lists only the members
+    she may be, never us, the boss or the admin, with its ``size``; the waiting and linked counts) and her deal's
+    ``source``; POST /api/prm/boss-groups/pick and /ignore (POST only, the local page only); 「群已经不在了」 on the deal
+    of a group the bot took over stops reading it.  A stopped bot shows .env's switch and the database's groups and says
+    it cannot do either."""
+    from test_prm_boss_groups import BOSS, BOSS_ID, GROUP, GROUP_NAME, ME, MEMBER, OTHER, Backend
+
+    clock = Clock()
+    cfg = SimpleNamespace(claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1",
+                          claude_relay_port=0, claude_relay_prefix="cc", claude_relay_wxids=[],
+                          claude_relay_db=":memory:", claude_relay_max_chars=1500, admin_wxid="wxid_admin",
+                          prm_copilot="on", prm_db=":memory:", prm_boss_groups="on", prm_group_with=BOSS)
+    relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=clock, files_dir=tmp_path / "relay")
+    prm = PrmService(cfg, relay, store=PrmStore(":memory:"), clock=clock, send=lambda c, t: True)
+    backend = Backend()
+    prm.boss_groups.attach(backend)
+    server.register_prm(prm)
+    try:
+        assert prm.boss_groups.scan() == 0
+        backend.groups[GROUP] = {"name": GROUP_NAME, "members": [ME, BOSS_ID, CREATOR, MEMBER, "wxid_admin"]}
+        backend.groups[OTHER] = {"name": "另一个群", "members": [ME, BOSS_ID, "wxid_x0001", "wxid_x0002"]}
+        clock.now += 61
+        assert prm.boss_groups.scan() == 0
+        shown = call("/api/prm")[1]["boss_groups"]
+        assert (shown["enabled"], shown["why_not"], shown["boss"], shown["waiting"], shown["linked"]) == (
+            True, "", [BOSS], 0, 0)
+        group = next(g for g in shown["pending"] if g["chat"] == GROUP)
+        assert group["members"] == [{"wxid": CREATOR, "name": "小美"}, {"wxid": MEMBER, "name": "测试达人"}]
+        assert (group["name"], group["size"]) == (GROUP_NAME, 5)
+        for path in ("/api/prm/boss-groups/pick", "/api/prm/boss-groups/ignore"):
+            assert call(path)[0] == 405                                  # a GET changes nothing
+            raw = json.dumps({"chat": OTHER, "wxid": "wxid_x0001"}).encode()
+            _, sock = _build_handler(path, method="POST", body=raw,
+                                     headers={"Content-Type": "application/json", "Origin": "https://evil.example"})
+            assert sock.get_response_text().split("\r\n", 1)[0].split()[1] == "403"
+        assert prm.store.boss_group(OTHER)["state"] == "pending"
+        for wxid in (BOSS_ID, ME, "wxid_admin"):
+            assert call("/api/prm/boss-groups/pick", "POST", {"chat": GROUP, "wxid": wxid})[1]["ok"] is False
+        out = call("/api/prm/boss-groups/pick", "POST", {"chat": GROUP, "wxid": CREATOR})[1]
+        party = prm.store.party_by_wxid(CREATOR)
+        assert out == {"ok": True, "party_id": party["id"], "deal_id": prm.store.deal_of(party["id"])["id"]}
+        assert call("/api/prm/boss-groups/ignore", "POST", {"chat": OTHER})[1] == {"ok": True}
+        assert call("/api/prm/boss-groups/ignore", "POST", {"chat": OTHER})[1]["ok"] is False
+        d = call("/api/prm")[1]
+        assert d["boss_groups"]["pending"] == [] and d["boss_groups"]["linked"] == 1
+        her = next(p for p in d["parties"] if p["wxid"] == CREATOR)
+        assert her["source"] == her["deal"]["source"] == "boss_group"
+        assert (her["deal"]["three_party"]["by"], her["deal"]["three_party"]["chat_name"]) == ("boss", GROUP_NAME)
+        assert call("/api/prm/deals", "POST", {"action": "group_none", "deal_id": out["deal_id"]})[1]["ok"] is True
+        assert prm.store.boss_group(GROUP)["state"] == "gone" and backend.unwatched == [GROUP]
+        assert not prm.is_party_group(GROUP) and call("/api/prm")[1]["boss_groups"]["linked"] == 0
+    finally:
+        server.register_prm(None)
+        relay.stop()
+    monkeypatch.chdir(tmp_path)                                    # the bot stopped
+    monkeypatch.delenv("PRM_DB", raising=False)
+    monkeypatch.setenv("PRM_COPILOT", "on")
+    monkeypatch.setenv("PRM_BOSS_GROUPS", "on")
+    monkeypatch.setenv("PRM_GROUP_WITH", BOSS)
+    monkeypatch.setenv("ADMIN_WXID", "wxid_admin")
+    assert call("/api/prm")[1]["boss_groups"] == {"enabled": True, "why_not": "机器人没有运行", "boss": [BOSS],
+                                                   "pending": [], "waiting": 0, "linked": 0}
+    store = PrmStore(tmp_path / "data" / "prm.db")
+    store.add_boss_group(GROUP, name=GROUP_NAME, found_at=time.time(), state="pending", boss=[{"wxid": BOSS_ID, "name": BOSS}],
+                         members=[{"wxid": BOSS_ID, "name": BOSS}, {"wxid": CREATOR, "name": "小美"},
+                                  {"wxid": MEMBER, "name": "测试达人"}, {"wxid": "wxid_admin", "name": "管理员"}])
+    store.close()
+    [pending] = call("/api/prm")[1]["boss_groups"]["pending"]
+    assert pending["members"] == [{"wxid": CREATOR, "name": "小美"}, {"wxid": MEMBER, "name": "测试达人"}]
+    for path, body in (("/api/prm/boss-groups/pick", {"chat": GROUP, "wxid": CREATOR}),
+                       ("/api/prm/boss-groups/ignore", {"chat": GROUP})):
+        assert call(path, "POST", body)[1] == {"ok": False,
+                                               "error": "机器人没有运行（或没打开达人副驾驶），现在不能处理老板拉的群"}
+    monkeypatch.setenv("PRM_BOSS_GROUPS", "off")
+    assert call("/api/prm")[1]["boss_groups"] == {"enabled": False, "why_not": "", "boss": [BOSS], "pending": [],
+                                                   "waiting": 0, "linked": 0}
+
+
+def test_the_running_console_shows_a_group_draft_where_it_goes(tmp_path):
+    """老板拉的群: a packet of her line in the group says so (``channel`` group, ``group_name``); others are ``wechat``."""
+    from test_prm_boss_groups import BOSS, BOSS_ID, GROUP, GROUP_NAME, ME, Backend
+
+    clock = Clock()
+    cfg = SimpleNamespace(claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1",
+                          claude_relay_port=0, claude_relay_prefix="cc", claude_relay_wxids=[],
+                          claude_relay_db=":memory:", claude_relay_max_chars=1500, admin_wxid="wxid_admin",
+                          prm_copilot="on", prm_db=":memory:", prm_boss_groups="on", prm_group_with=BOSS)
+    relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=clock, files_dir=tmp_path / "relay")
+    prm = PrmService(cfg, relay, store=PrmStore(":memory:"), clock=clock, send=lambda c, t: True)
+    backend = Backend()
+    prm.boss_groups.attach(backend)
+    prm.boss_groups.scan()
+    backend.groups[GROUP] = {"name": GROUP_NAME, "members": [ME, BOSS_ID, CREATOR]}
+    clock.now += 61
+    prm.boss_groups.scan()
+    server.register_prm(prm)
+    try:
+        clock.now += SETTLE_SEC + 1
+        job = relay.next_job(0, ("prm",))                              # the group's 开场白
+        relay.finish(job["id"], {"ok": True, "text": json.dumps({
+            "intent": "打招呼", "slots": {}, "stage_proposal": "", "message_kind": "greeting",
+            "reply_draft": "您好～", "attachments_to_send": [], "needs_attention": False, "reason": ""},
+            ensure_ascii=False)})
+        relay.tick()
+        [packet] = call("/api/prm")[1]["pending"]
+        assert (packet["channel"], packet["group_name"], packet["opening"]) == ("group", GROUP_NAME, True)
+    finally:
+        server.register_prm(None)
+        relay.stop()
