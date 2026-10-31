@@ -1583,7 +1583,7 @@ class PrmService:
             late = False                   # Windows' queue never replays history: drafted as it always was
         at = sent_at or now
         line = message_text(msg)
-        if group is not None or self.boss_groups.party_has_group(party["id"]):
+        if group is not None or self.boss_groups.masks(party):
             line = self.boss_groups.hide(line)     # 老板拉的群: the bosses' names never go to the Mac (PRM_BOSS_CALL)
         if late and age > self._catchup_sec:
             with self._handle_lock:
@@ -2166,8 +2166,10 @@ class PrmService:
         confirmed it), and only written before its send returned (give or take PART_LATE_SEC: the same words typed
         later are a person's); or its whole text once (it went out in one message, before PRM_REPLY_PARTS).  ``group``
         (a 老板拉的群's packet, review 2026-10-31: the watch hands a line of ours read back before a restart on again): a
-        reply in one message counts too when it is confirmed, once, like a part, and only written within PART_LATE_SEC
-        of its send."""
+        reply in one message counts too when it is confirmed, once, like a part; a confirmed one only when written
+        within PART_LATE_SEC of its send.  One not confirmed (``unconfirmed``: sent but not read back, or cut off by a
+        stop) has no lower bound, as in her private chat (second review 2026-10-31 F1: the ``sent_at`` of one cut off
+        is the restart's, ``start``, and this PC's clock may be ahead of WeChat's before this run measured it)."""
         final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
         if not str(final or "").strip():
             return False
@@ -2177,7 +2179,7 @@ class PrmService:
             return unconfirmed and _norm(whole) == text
         if written > float(packet["sent_at"] or 0) + PART_LATE_SEC:
             return False
-        if group and written < float(packet["sent_at"] or 0) - PART_LATE_SEC:
+        if group and not unconfirmed and written < float(packet["sent_at"] or 0) - PART_LATE_SEC:
             return False
         with self._sent_lock:
             left = self._text_rows.get(packet["id"])
@@ -2814,7 +2816,8 @@ class PrmService:
         friend request and has not written): one 开场白 draft job instead (``_ask_opening``; ``how``: how she
         was added, the new-friend scan's), only when the read-back reached back to when she was added (``whole``,
         ``NewFriendService.registered``; registered later than PRM_CATCHUP_HOURS, she may have written before the
-        window: review 2026-10-30).  Returns how many of her messages were taken."""
+        window: review 2026-10-30).  A creator a boss introduced (老板拉的群 taken over, or being taken over) has the
+        bosses' names hidden in them (``hide``).  Returns how many of her messages were taken."""
         chat_id = str(chat_id)
         party = self._store.party_by_wxid(chat_id)
         if party is None:
@@ -2843,6 +2846,10 @@ class PrmService:
         taken = 0
         for msg, at in zip(picked, times):
             line = message_text(msg)
+            if self.boss_groups.masks(party):
+                # 老板拉的群 (second review 2026-10-31 F9): a creator the boss introduced (her group taken over, or being
+                # taken over now) speaks of him: his name never goes to the Mac, as in her live lines (``_take``)
+                line = self.boss_groups.hide(line)
             if verify_until and at <= verify_until and str(msg.get("msg_type", 1)) == "1":
                 line = f"（加好友时的验证消息）{line}"
             files: tuple = ()

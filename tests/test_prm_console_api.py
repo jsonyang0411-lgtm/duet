@@ -877,8 +877,8 @@ def test_boss_groups_from_the_running_console_and_while_stopped(tmp_path, monkey
         clock.now += 61
         assert prm.boss_groups.scan() == 0
         shown = call("/api/prm")[1]["boss_groups"]
-        assert (shown["enabled"], shown["why_not"], shown["boss"], shown["boss_call"], shown["waiting"],
-                shown["linked"]) == (True, "", [BOSS], "老板", 0, 0)
+        assert (shown["enabled"], shown["why_not"], shown["warning"], shown["boss"], shown["boss_call"],
+                shown["waiting"], shown["linked"]) == (True, "", "", [BOSS], "老板", 0, 0)
         group = next(g for g in shown["pending"] if g["chat"] == GROUP)
         assert group["members"] == [{"wxid": CREATOR, "name": "小美"}, {"wxid": MEMBER, "name": "测试达人"}]
         assert (group["name"], group["size"]) == (GROUP_NAME, 5)
@@ -914,8 +914,9 @@ def test_boss_groups_from_the_running_console_and_while_stopped(tmp_path, monkey
     monkeypatch.setenv("PRM_GROUP_WITH", BOSS)
     monkeypatch.setenv("ADMIN_WXID", "wxid_admin")
     monkeypatch.setenv("PRM_BOSS_CALL", " 大老板 ")
-    assert call("/api/prm")[1]["boss_groups"] == {"enabled": True, "why_not": "机器人没有运行", "boss": [BOSS],
-                                                   "boss_call": "大老板", "pending": [], "waiting": 0, "linked": 0}
+    assert call("/api/prm")[1]["boss_groups"] == {"enabled": True, "why_not": "机器人没有运行", "warning": "",
+                                                   "boss": [BOSS], "boss_call": "大老板", "pending": [], "waiting": 0,
+                                                   "linked": 0}
     store = PrmStore(tmp_path / "data" / "prm.db")
     store.add_boss_group(GROUP, name=GROUP_NAME, found_at=time.time(), state="pending", boss=[{"wxid": BOSS_ID, "name": BOSS}],
                          members=[{"wxid": BOSS_ID, "name": BOSS}, {"wxid": CREATOR, "name": "小美"},
@@ -929,8 +930,40 @@ def test_boss_groups_from_the_running_console_and_while_stopped(tmp_path, monkey
                                                "error": "机器人没有运行（或没打开达人副驾驶），现在不能处理老板拉的群"}
     monkeypatch.setenv("PRM_BOSS_GROUPS", "off")
     monkeypatch.delenv("PRM_BOSS_CALL")
-    assert call("/api/prm")[1]["boss_groups"] == {"enabled": False, "why_not": "", "boss": [BOSS], "boss_call": "老板",
-                                                   "pending": [], "waiting": 0, "linked": 0}
+    assert call("/api/prm")[1]["boss_groups"] == {"enabled": False, "why_not": "", "warning": "", "boss": [BOSS],
+                                                   "boss_call": "老板", "pending": [], "waiting": 0, "linked": 0}
+
+
+def test_the_console_warns_of_an_unknown_boss_name_and_still_lets_a_person_pick(tmp_path):
+    """老板拉的群, second review 2026-10-31 F3: a name of PRM_GROUP_WITH no one contact has is ``boss_groups.warning`` in
+    GET /api/prm (``why_not`` stays "": the card's buttons are on), the groups found wait in ``pending``, and the POST
+    pick takes one over."""
+    from test_prm_boss_groups import BOSS, BOSS_ID, GROUP, GROUP_NAME, ME, Backend
+
+    clock = Clock()
+    cfg = SimpleNamespace(claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1",
+                          claude_relay_port=0, claude_relay_prefix="cc", claude_relay_wxids=[],
+                          claude_relay_db=":memory:", claude_relay_max_chars=1500, admin_wxid="wxid_admin",
+                          prm_copilot="on", prm_db=":memory:", prm_boss_groups="on", prm_group_with=f"{BOSS}，老板二")
+    relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=clock, files_dir=tmp_path / "relay")
+    prm = PrmService(cfg, relay, store=PrmStore(":memory:"), clock=clock, send=lambda c, t: True)
+    backend = Backend(contacts={BOSS: BOSS_ID})
+    prm.boss_groups.attach(backend)
+    server.register_prm(prm)
+    try:
+        assert prm.boss_groups.scan() == 0
+        backend.groups[GROUP] = {"name": GROUP_NAME, "members": [ME, BOSS_ID, CREATOR], "joined_at": clock.now}
+        clock.now += 61
+        assert prm.boss_groups.scan() == 0
+        shown = call("/api/prm")[1]["boss_groups"]
+        assert shown["why_not"] == "" and shown["warning"].startswith("PRM_GROUP_WITH 里的「老板二」在这个微信里找不到")
+        [pending] = shown["pending"]
+        assert pending["chat"] == GROUP and pending["members"] == [{"wxid": CREATOR, "name": "小美"}]
+        out = call("/api/prm/boss-groups/pick", "POST", {"chat": GROUP, "wxid": CREATOR})[1]
+        assert out["ok"] is True and prm.is_party_group(GROUP)
+    finally:
+        server.register_prm(None)
+        relay.stop()
 
 
 def test_the_running_console_shows_a_group_draft_where_it_goes(tmp_path):
@@ -947,7 +980,7 @@ def test_the_running_console_shows_a_group_draft_where_it_goes(tmp_path):
     backend = Backend()
     prm.boss_groups.attach(backend)
     prm.boss_groups.scan()
-    backend.groups[GROUP] = {"name": GROUP_NAME, "members": [ME, BOSS_ID, CREATOR]}
+    backend.groups[GROUP] = {"name": GROUP_NAME, "members": [ME, BOSS_ID, CREATOR], "joined_at": clock.now}
     clock.now += 61
     prm.boss_groups.scan()
     server.register_prm(prm)

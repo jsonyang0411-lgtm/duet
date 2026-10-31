@@ -107,15 +107,16 @@ export const ignoreBossGroup = (chat) => post('/api/prm/boss-groups/ignore', { c
 export const inGroup = (p) => p?.channel === 'group'
 /** A creator the boss introduced in a group he made with us (``source`` "boss_group" of the party or of her deal). */
 export const bossIntroduced = (p) => p?.source === 'boss_group' || p?.deal?.source === 'boss_group'
-/** The 「老板拉的群」 card's line of counts: "已接手 2 个群；1 个群在等她进群（…）；1 个群要你选哪个是她" (one sentence that
- *  says so when nothing was found yet). */
+/** The 「老板拉的群」 card's line of counts: "已接手 2 个群；1 个群在等她进群或者等群里有消息（…）；1 个群要你选哪个是她" (one
+ *  sentence that says so when nothing was found yet). A group waits for her to come in, for its first lines, or while
+ *  her 三方群 is being made (second review 2026-10-31): the bot looks again at each scan. */
 export function bossGroupsLine(bg) {
   const linked = bg?.linked || 0
   const waiting = bg?.waiting || 0
   const pending = (bg?.pending || []).length
   if (!linked && !waiting && !pending) return '还没有发现老板新拉的群。'
   return [`已接手 ${linked} 个群`,
-    waiting ? `${waiting} 个群在等她进群（群里现在只有老板和我们，她进来以后机器人自己接手）` : '',
+    waiting ? `${waiting} 个群在等她进群或者等群里有消息（机器人每分钟再看一次）` : '',
     pending ? `${pending} 个群要你选哪个是她` : ''].filter(Boolean).join('；')
 }
 

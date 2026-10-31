@@ -307,8 +307,8 @@ def test_the_scan_finds_the_bosss_new_group_through_the_backend_and_takes_her_ov
     assert [(x["who"], x["text"]) for x in meta["group"]["lines"]] == [("老板", INTRO)]  # what he said, before it
     assert meta["three_party"]["at"] and BOSS_NAME not in job["meta"]
     shown = call("/api/prm")[1]
-    assert shown["boss_groups"] == {"enabled": True, "why_not": "", "boss": [BOSS_NAME], "boss_call": "老板",
-                                    "pending": [], "waiting": 0, "linked": 1}
+    assert shown["boss_groups"] == {"enabled": True, "why_not": "", "warning": "", "boss": [BOSS_NAME],
+                                    "boss_call": "老板", "pending": [], "waiting": 0, "linked": 1}
     her = next(p for p in shown["parties"] if p["wxid"] == HER)
     assert her["source"] == her["deal"]["source"] == "boss_group"
     assert (her["deal"]["three_party"]["by"], her["deal"]["three_party"]["chat_name"]) == ("boss", GROUP_NAME)
@@ -762,6 +762,32 @@ def test_an_old_group_whose_chat_was_deleted_is_not_taken_over_when_it_comes_bac
     assert run.scan() == 0 and world.prm_store.parties() == []
 
 
+def test_an_old_group_deleted_with_its_history_waits_for_the_consoles_pick(world):
+    """Second review F4, repro n3: the boss's group of a month ago whose chat was deleted on this PC together with its
+    local history.  A new line brings it back: its history is that one line (complete, recent, no 「邀请你加入了群聊」
+    line).  It is no certainly new group: it waits for the console's 「是她」 (「拿不准是不是新拉的群」), never taken over or
+    read by itself; 「是她」 takes it over."""
+    t = world.clock.now
+    world.db.group(GROUP, GROUP_NAME, [BOSS, HER, ME_SENDER], t - 30 * 86400)
+    world.db.line(GROUP, BOSS, "上个月说的那个事", t - 29 * 86400)
+    world.db.times.pop(GROUP)                                                 # its chat deleted on this PC ...
+    world.db.chats.pop(GROUP)                                                 # ... with its local history
+    run = world.run()
+    assert run.prm.boss_groups.scan() == 0
+    assert GROUP not in json.loads(world.prm_store.meta_value(bg.BASELINE))
+    world.db.line(GROUP, BOSS, "小美在吗", world.clock.now)                   # the chat is back
+    run.poll()
+    assert run.scan() == 0
+    row = world.prm_store.boss_group(GROUP)
+    assert (row["state"], row["why"]) == ("pending", bg.MAYBE_WHY)
+    assert world.prm_store.parties() == [] and GROUP not in run.backend._watched and world.jobs() == []
+    [pending] = call("/api/prm")[1]["boss_groups"]["pending"]
+    assert (pending["why"], pending["members"]) == (bg.MAYBE_WHY, [{"wxid": HER, "name": HER_NAME}])
+    assert run.scan() == 0 and world.prm_store.parties() == []
+    assert call(PICK, "POST", {"chat": GROUP, "wxid": HER})[1]["ok"] is True
+    assert run.prm.is_party_group(GROUP) and GROUP in run.backend._watched
+
+
 class Admin:
     """The admin handler as 「拉三方群」 uses it (``create_group_checked``: WeChat's 「发起群聊」 window, faked): the group of
     the names picked and this account shows up in WeChat's database; ``meanwhile`` runs while the window makes it."""
@@ -888,7 +914,7 @@ def test_with_the_switch_off_the_same_database_gives_no_scan_no_watch_and_no_job
         assert run.lines() == [(HER, "老板好～你们家主要是什么产品呀")] and world.stored(GROUP) == 1   # read, silent
     else:
         assert run.lines() == [] and GROUP not in run.backend._chat_names
-    assert call("/api/prm")[1]["boss_groups"] == {"enabled": False, "why_not": "", "boss": [BOSS_NAME],
+    assert call("/api/prm")[1]["boss_groups"] == {"enabled": False, "why_not": "", "warning": "", "boss": [BOSS_NAME],
                                                    "boss_call": "老板", "pending": [], "waiting": 0, "linked": 0}
     assert asked == []
 
