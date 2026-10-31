@@ -33,7 +33,8 @@ Read/Edit/Write/Glob/Grep, no MCP servers, no slash commands, no saved session,
 and this script as a PreToolUse hook (--prm-hook) that refuses any path outside
 the workspace, any other creator's case file or attachments (deals/<party>.md and
 inbox/job-<id>/ of this job only) and any write but that case file (and denies every
-permission request).  The creator's words go in between <creator_message> tags as data.
+permission request).  The creator's words go in between <creator_message> tags as data; the
+operators' 起草备注 for this creator (the bot's meta.note) between <operator_note> tags.
 Claude answers with a JSON object (--json-schema): a draft and slot updates;
 files it names from assets/ are sent back to the bot (POST .../outfiles), and the bot
 is told every file the draft named and why one did not go (attachments_named /
@@ -1571,7 +1572,7 @@ def buyin_history_block(history: list) -> str:
 def buyin_prompt(job: dict, party_id: int, name: str, case_rel: str, invite: str = "") -> str:
     """The task of a 百应 private-message draft (``meta.channel == "buyin"``): her new 百应 lines, the conversation
     before them, and how the reply goes out (``BUYIN_NOTE``); ``invite``: ``invite_block``'s <invite_background> ("" for
-    none), after the note and before the conversation."""
+    none), after the note and before the conversation; the deal's 起草备注 (``operator_note_block``) after it."""
     title = " ".join(str(name).split())[:30] or f"达人 {party_id}"
     meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
     nickname = " ".join(str(meta.get("buyin_name") or "").split())[:40]
@@ -1580,6 +1581,9 @@ def buyin_prompt(job: dict, party_id: int, name: str, case_rel: str, invite: str
              BUYIN_NOTE]
     if invite:
         lines.append(invite)
+    note = operator_note_block(meta)
+    if note:
+        lines.append(note)
     if meta.get("history"):
         lines.append(buyin_history_block(meta["history"]))
     lines.append("下面是达人在百应私信里最新发来、还没回的消息。")
@@ -1647,9 +1651,28 @@ def parts_line(meta: dict) -> str:
             "（多出来的会并进最后一条）；一件事一条，每条一两句。一两句话说得完就只写一条，不要硬拆。")
 
 
+# 起草备注 (the bot's ``meta.note``, 2026-10-31): what the operators tell the Mac about this creator, for every draft of
+# hers (her WeChat signature said 「直接发链接和brief，感兴趣的会回复！勿催视频，不接语音」, say).  This rule line goes
+# before the block, only with a note.
+OPERATOR_NOTE_RULE = ("<operator_note> 是运营写给你的说明（比如她签名里对合作沟通的要求），照着写，和 kb 的默认说法冲突时以它为准"
+                      "（价钱、佣金、寄样这些硬规则除外）；不要把备注原文发给达人。")
+OPERATOR_NOTE_CHARS = 600    # the bot keeps 300 (its masking may make a 微信号 a little longer); anything past this is cut
+
+
+def operator_note_block(meta: dict) -> str:
+    """The prompt's <operator_note> block, its rule line (``OPERATOR_NOTE_RULE``) first: the deal's 起草备注 as the bot
+    sent it (``meta.note``, masked like her words).  Tag-like text inside cannot close or forge a tag (``_untagged``).
+    "" without a note, or one that is not text (the prompt as before)."""
+    note = meta.get("note")
+    if not isinstance(note, str) or not note.strip():
+        return ""
+    return f"{OPERATOR_NOTE_RULE}\n<operator_note>\n{_untagged(note.strip())[:OPERATOR_NOTE_CHARS]}\n</operator_note>"
+
+
 def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, failed: list, invite: str = "") -> str:
     """The task of a creator's WeChat draft (a 百应 one: ``buyin_prompt``); ``invite``: ``invite_block``'s
-    <invite_background> ("" for none)."""
+    <invite_background> ("" for none).  The deal's 起草备注 (``operator_note_block``) comes after what we sent her and
+    the invite background, before the record of a takeover and her message."""
     title = " ".join(str(name).split())[:30] or f"达人 {party_id}"
     lines = [f"合作单：{title}（编号 {party_id}），案卷是 {case_rel}。"]
     meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
@@ -1670,6 +1693,9 @@ def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, fa
         lines.append(sent_block(meta["sent"]))
     if invite:
         lines.append(invite)
+    note = operator_note_block(meta)
+    if note:
+        lines.append(note)
     history = meta.get("history")
     if history:
         lines.append(history_block(history))

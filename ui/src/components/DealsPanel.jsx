@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   ArrowClockwise, UserPlus, Prohibit, ArrowCounterClockwise, CaretDown, CaretRight, Eye, EyeSlash, Truck, Check, HandWaving,
-  UsersThree, Copy,
+  UsersThree, Copy, PencilSimple,
 } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
-import { usePrm, partyAction, dealAction, revealNumbers, setupProblems, eventText, MODE_TAGS, ACTORS } from '../lib/prm'
-import { PageHead, Card, Note, Empty, Field, TextInput, Select, Seg, Confirm } from './ui'
+import {
+  usePrm, partyAction, dealAction, revealNumbers, setupProblems, eventText, MODE_TAGS, ACTORS, DRAFT_NOTE_MAX, draftNoteText,
+  saveDraftNote,
+} from '../lib/prm'
+import { PageHead, Card, Note, Empty, Field, TextInput, TextArea, Select, Seg, Confirm } from './ui'
 import { AdvancedFields } from './AdvancedPanel'
 import { FriendAddPasteCard } from './FriendAddCard'
 
@@ -14,7 +17,8 @@ import { FriendAddPasteCard } from './FriendAddCard'
 // Registering one here means the creator agreed to be contacted on WeChat; their
 // messages then go, silently, to the Mac for a draft that waits in 待审批. A deal
 // opens (below the list, so it fits any width) into its stage, its mode (copilot /
-// a person has it / paused), the sample shipment, the numbers and the audit trail.
+// a person has it / paused), its 起草备注 for the Mac, the sample shipment, the numbers
+// and the audit trail.
 // 自动模式 on (switched on 待审批): one warn line at the top says so.
 
 export default function DealsPanel() {
@@ -298,6 +302,8 @@ function DealDetail({ p, d, onDone }) {
         </div>
       </div>
 
+      <DraftNoteBlock p={p} onDone={onDone} />
+
       {!deal.last_message_at && (
         <div className="stack prm-opening" style={{ gap: 6 }}>
           <b>开场白</b>
@@ -391,6 +397,59 @@ function DealDetail({ p, d, onDone }) {
   )
 }
 
+/** 起草备注 (the deal action draft_note, 2026-10-31): what the operators tell the Mac about this creator, say her WeChat
+ *  signature's 「直接发链接和 brief、不接语音」. Every draft of hers follows it, the 开场白 too; unlike her 备注 (which the
+ *  bot writes for a friend it registered) only an operator writes it. Saved empty, it is cleared; an error stays here. */
+function DraftNoteBlock({ p, onDone }) {
+  const toast = useToast()
+  const saved = p.deal.draft_note || ''
+  const [editing, setEditing] = useState(false)
+  const [text, setText] = useState(saved)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { if (!editing) setText(saved) }, [saved, editing])
+  const length = draftNoteText(text).length
+  const hint = '写给 Mac 起草时看的，比如她签名里的要求：直接发链接和 brief、不接语音'
+  const cancel = () => { setEditing(false); setText(saved); setError('') }
+  const save = async () => {
+    if (length > DRAFT_NOTE_MAX) { setError(`起草备注最多 ${DRAFT_NOTE_MAX} 个字（现在 ${length} 个）`); return }
+    setBusy(true)
+    try {
+      await saveDraftNote(p.deal.id, text)
+      toast.ok(length ? '起草备注已保存：之后她的草稿都照它写' : '起草备注已清掉')
+      setEditing(false)
+      setError('')
+      onDone()
+    } catch (e) { setError(e.message) } finally { setBusy(false) }
+  }
+  return (
+    <div className="stack prm-draft-note" style={{ gap: 6 }}>
+      <b>起草备注</b>
+      {editing ? (
+        <>
+          <Field hint={`${hint}。空着保存就是清掉。`} error={error}>
+            <TextArea value={text} rows={3} aria-label={`${p.name} 的起草备注`} aria-invalid={error ? 'true' : undefined}
+              placeholder="比如：直接发链接和 brief，感兴趣的会回复；勿催视频，不接语音"
+              onChange={(value) => { setText(value); setError('') }} />
+          </Field>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <button type="button" className="btn primary" disabled={busy} onClick={save}><Check />保存</button>
+            <button type="button" className="btn" disabled={busy} onClick={cancel}>取消</button>
+            <span className={length > DRAFT_NOTE_MAX ? 'f-err' : 'dim'}>{length}/{DRAFT_NOTE_MAX} 字</span>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className={saved ? '' : 'dim'} style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{saved || '（没有）'}</div>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <button type="button" className="btn sm" onClick={() => setEditing(true)}><PencilSimple />{saved ? '改备注' : '写备注'}</button>
+            <span className="f-hint">{hint}</span>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
 
 /** 三方群 (src/prm/three_party.py, 2026-10-30): 「拉三方群」 makes the group in this PC's WeChat (her and PRM_GROUP_WITH,
  *  picked in 「发起群聊」 and read back before 「完成」; nothing is said in it and it is not renamed: the suggested name is

@@ -65,6 +65,13 @@ WeChat's notice is all her chat has), or an operator's 「写开场白」 in the
 job has no creator message and says so (``meta.opening``; the worker's ``opening_line``); her message
 outdates it like any reply draft (the next job hears it was not sent), and no holding reply goes for it.
 
+An operator may tell the Mac how to write to a creator (起草备注, 2026-10-31: her WeChat signature said
+「直接发链接和brief，感兴趣的会回复！勿催视频，不接语音」): the deal action ``draft_note`` keeps it on the deal
+(``set_draft_note``; only an operator writes it, unlike her party ``note``), and every draft job of the deal carries it
+(``meta.note``, masked like her words: ``_with_note``): her messages', the 开场白's, a 专属佣金 step's, her 百应 drafts'.
+The worker puts it in <operator_note>; a deal without one gets the jobs it got before.  The clean-up cuts it like the
+deal's other words (``purge``).
+
 A draft with a platform action (platforms.py: 小红书 / 抖音 / 淘宝 CLIs on the Mac) comes
 with the Mac's preview of it and always waits for a person, whatever its kind's gate; so does
 every draft of a next step the bot asked for (a 专属佣金 step, ``meta.system_note``).  A verified
@@ -106,7 +113,7 @@ from .result import MAX_DRAFT_CHARS, MESSAGE_KINDS, DraftError, parse_draft
 from .three_party import EVENT as GROUP_EVENT, ThreeParty, state_out as group_state_out
 from .store import (
     APPROVED, BUYIN_TOOL, COPILOT, DRAFT_NOTES, DROPPED, EXECUTING, FAILED, HUMAN, LANE_BUYIN, LANE_REPLY, LANE_SYSTEM,
-    MESSAGE_TOOL, MODES, NO_REPLY, NOTICE_CHARS, PAUSED, PENDING,
+    DRAFT_NOTE_CHARS, MESSAGE_TOOL, MODES, NO_REPLY, NOTICE_CHARS, PAUSED, PENDING,
     SENDING, SENT, SHIPMENT_STATES, STAGES, SUPERSEDED, PartyError, PrmStore,
 )
 
@@ -633,13 +640,15 @@ EVENT_NAMES = {
     "buyin_message": "百应私信", "buyin_copy": "复制百应私信草稿（含完整号码）", "buyin_sent": "运营已在百应手动发出",
     "buyin_draft_failed": "百应私信的草稿没写成",
     "friend_add_link": "关联抖音号", "creator_unlinked": "取消关联抖音号",
-    GROUP_EVENT: "三方群",
+    GROUP_EVENT: "三方群", "draft_note": "改起草备注",
 }
 # 三方群 (src/prm/three_party.py): the console's deal actions (「拉三方群」, 「先试一下」, 「建好了」, 「没建成」) and how the
 # deal's record names each step
 GROUP_ACTIONS = ("group", "group_try", "group_made", "group_none")
 GROUP_EVENT_NAMES = {"creating": "开始拉三方群", "created": "三方群建好了", "unsure": "三方群不确定建没建成",
                      "failed": "三方群没建成", "": "三方群的记录清掉了（没建成）"}
+# 起草备注 (2026-10-31): the console's deal action, and its event (how long the note is now: never its words)
+DRAFT_NOTE = "draft_note"
 # A creator's message recorded without a draft because it was read too late (PRM_CATCHUP_HOURS).
 MISSED_EVENT_NAME = "机器人没在读时达人的消息（没有起草）"
 # PRM_AUTO_REGISTER (2026-10-29): the deal's event of a new friend the bot registered, and how she was added (the
@@ -713,6 +722,8 @@ def event_out(ev: dict) -> dict:
             "（运营点的）" if ev.get("actor") == "console" and detail.get("state") in ("creating", "created", "") else "")
     elif ev["kind"] == "creator_unlinked" and detail.get("account"):
         name = f"取消关联抖音号 {detail['account']}"
+    elif ev["kind"] == DRAFT_NOTE:
+        name = f"改起草备注（{detail['chars']} 字）" if detail.get("chars") else "清掉起草备注"
     elif ev["kind"] == "friend_add_link" and detail.get("account"):
         name = (f"关联抖音号 {detail['account']}" + (f"（加微信 #{detail['add_id']}）" if detail.get("add_id") else "")
                 + (f"，{str(detail['invited_at'])[:16].replace('T', ' ')} 发的邀约卡" if detail.get("invited_at") else ""))
@@ -854,6 +865,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
                 "shipment_status_label": SHIPMENT_STATES.get((shipment or {}).get("status", ""), ""),
                 "events": [event_out(e) for e in store.events(deal["id"], limit=12)],
                 "three_party": group_of(deal),
+                "draft_note": str(deal.get("draft_note") or ""),      # 起草备注: as the operators wrote it
             },
         }
 
@@ -1262,6 +1274,16 @@ class PrmService:
             meta["reply_parts"] = self._reply_parts
         return meta
 
+    def _with_note(self, meta: dict, deal: dict, now: float) -> dict:
+        """A draft job of the deal (her message's, a 开场白's, a 专属佣金 step's, a 百应 draft's) with ``meta.note`` when the
+        deal has a 起草备注 (``draft_note``, the operators' words for the Mac: worker.operator_note_block), masked like her
+        words: a phone or ID number as its placeholder (〈手机1〉), a 微信号 after a label masked (``contact.mask_contacts``,
+        as her 百应 lines).  No note: no key (the job as it was before).  The same dict."""
+        note = str(deal.get("draft_note") or "").strip()
+        if note:
+            meta["note"] = contact.mask_contacts(self._mask(deal["party_id"], note, now))
+        return meta
+
     def _night_meta(self, now: float) -> dict:
         """A draft job's ``meta.night`` (``_submit``): inside the window ``{"window": "18:00-09:00", "at": "21:30"}``,
         自动模式 by day ``{"auto": True, "at": "14:30"}`` (worker.night_line words each)."""
@@ -1556,7 +1578,7 @@ class PrmService:
             # itself (``_night_judge``).  Not for a job that always waits for a person (read late, a new friend's).
             meta["night"] = self._night_meta(now)
         how, job_id = self._relay.submit(chat_id, chat_id, text, kind=PRM, files=files, settle_sec=SETTLE_SEC,
-                                         meta=self._reply_meta(meta), fresh=fresh)
+                                         meta=self._reply_meta(self._with_note(meta, deal, now)), fresh=fresh)
         for n in carried:
             self._store.set_notice(deal["id"], n["key"], failed_text(n.get("head") or n["text"], job_id), now,
                                    into=job_id)
@@ -2602,7 +2624,8 @@ class PrmService:
 
     def _ask_opening(self, party: dict, *, how: str = "", by: str = "new_friend") -> tuple:
         """One draft job of our first line to a creator who has not written to us (``meta.opening``: how she came,
-        who asked; told what we sent her, ``meta.sent``, and what an operator wrote to her by hand, ``meta.history``),
+        who asked; told what we sent her, ``meta.sent``, what an operator wrote to her by hand, ``meta.history``, and
+        the deal's 起草备注, ``meta.note``),
         under ``_handle_lock``: ``(job id, "")``, or ``(None, why not)`` (``_no_opening``).  It always waits for a person (``gap_notes``), never by night, never gets a holding
         reply; a message of hers joins it, or outdates its draft (``_outdated``), like any reply draft's."""
         now = self._clock()
@@ -2623,8 +2646,8 @@ class PrmService:
         told = history_of(self._store.backlog(deal["id"]))
         if told:
             meta["history"] = told
-        _, job_id = self._relay.submit(party["wxid"], party["wxid"], "", kind=PRM, meta=self._reply_meta(meta),
-                                       fresh=True)
+        _, job_id = self._relay.submit(party["wxid"], party["wxid"], "", kind=PRM,
+                                       meta=self._reply_meta(self._with_note(meta, deal, now)), fresh=True)
         self._store.add_event(deal["id"], party["id"], OPENING, {"job": job_id, "how": how, "by": by},
                               actor="console" if by == "console" else "system", now=now)
         # one not written before: this one is on its way
@@ -2650,6 +2673,32 @@ class PrmService:
             return "「待审批」里已经有她的草稿"
         return ""
 
+    def set_draft_note(self, deal_id, text, actor: str = "console") -> dict:
+        """「起草备注」 in the console (the deal action ``draft_note`` {text}): what the operators tell the Mac about this
+        creator, which every draft job of the deal carries from now on (``_with_note``); "" clears it.  Whitespace is
+        collapsed (``store.draft_note_text``); longer than DRAFT_NOTE_CHARS is refused, not cut.  A change is one event
+        (``chars``: how long the note is now; its words are in no event and no log line).  ``{"ok": True, "draft_note"}``,
+        or ``{"ok": False, "error"}`` saying why not."""
+        try:
+            deal = self._store.deal(int(deal_id))
+        except (TypeError, ValueError):
+            deal = None
+        if deal is None:
+            return {"ok": False, "error": "没有找到这张合作单"}
+        if not isinstance(text, str):
+            return {"ok": False, "error": "要给出起草备注的文字（空着就是清掉）"}
+        note = " ".join(text.split())
+        if len(note) > DRAFT_NOTE_CHARS:
+            return {"ok": False, "error": f"起草备注最多 {DRAFT_NOTE_CHARS} 个字（现在 {len(note)} 个）"}
+        if note == str(deal.get("draft_note") or ""):
+            return {"ok": True, "draft_note": note}    # (a second click: nothing changed, nothing recorded)
+        now = self._clock()
+        self._store.update_deal(deal["id"], now, draft_note=note)
+        self._store.add_event(deal["id"], deal["party_id"], DRAFT_NOTE, {"chars": len(note)}, actor=actor, now=now)
+        logger.info("PRM: deal %d's draft note %s (%d characters)", deal["id"], "written" if note else "cleared",
+                    len(note))
+        return {"ok": True, "draft_note": note}
+
     def set_active(self, party_id: int, active: bool) -> Optional[dict]:
         party = self._store.update_party(int(party_id), active=active, now=self._clock())
         self._parties_changed()
@@ -2673,9 +2722,12 @@ class PrmService:
         An operator's change of the deal's stage or shipment sees to a deleted order's notice.  ``night_done``
         (「已处理」 on a holding line the night window sent) only drops that notice; ``opening`` (「写开场白」) asks
         for one 开场白 draft (``ask_opening``); ``group`` / ``group_try`` / ``group_made`` / ``group_none`` are 三方群's
-        (``three_party``: 「拉三方群」, 「先试一下」, 「建好了」, 「没建成」)."""
+        (``three_party``: 「拉三方群」, 「先试一下」, 「建好了」, 「没建成」); ``draft_note`` {text} keeps the deal's 起草备注
+        (``set_draft_note``)."""
         if action == OPENING:
             return self.ask_opening(data.get("deal_id"))
+        if action == DRAFT_NOTE:
+            return self.set_draft_note(data.get("deal_id"), data.get("text"), actor=actor)
         if action in GROUP_ACTIONS:
             deal_id = data.get("deal_id")
             if action in ("group", "group_try"):
@@ -3413,8 +3465,9 @@ class PrmService:
         if outbound:
             meta["sent"] = outbound
         # input_closed: the creator's next message is a reply job of its own, not part of this step
-        _, job_id = self._relay.submit(party["wxid"], party["wxid"], "", kind=PRM, meta=self._reply_meta(meta),
-                                       fresh=True, input_closed=True)
+        _, job_id = self._relay.submit(party["wxid"], party["wxid"], "", kind=PRM,
+                                       meta=self._reply_meta(self._with_note(meta, deal, now)), fresh=True,
+                                       input_closed=True)
         # what was asked for, when (``_chain``: each product once per round)
         self._store.add_event(deal["id"], party["id"], "next_step", {"job": job_id, "after": packet_id,
                                                                      "delivered": bool(delivered),
@@ -4109,7 +4162,8 @@ class PrmService:
         暂停, a WeChat takeover included) they are not drafted and ``buyin_held:<conversation>`` says so, until the deal
         is back in copilot mode (``sweep_buyin_held`` drafts them then) or they are answered (``_buyin_notices_answered``).
         Like a WeChat draft its meta has her 抖音号 (``creator``: ``_creator_ids`` and the conversation's ``aweme``) for
-        the Mac's invite background (worker ``invite_block``).  None when no job was made."""
+        the Mac's invite background (worker ``invite_block``), and the deal's 起草备注 (``note``, ``_with_note``).  None
+        when no job was made."""
         lines = self._buyin_lines(deal["id"], cid)
         waiting = [d for d in lines if d.get("from") == "creator" and float(d.get("at") or 0) > answered]
         if not waiting:
@@ -4149,7 +4203,7 @@ class PrmService:
         if older is not None and older["status"] == "pending":
             self._relay.store.cancel_if_pending(older["id"], now)
         _, job_id = self._relay.submit(chat, chat, "\n".join(str(d.get("text") or "") for d in hers), kind=PRM,
-                                       meta=meta, fresh=True, input_closed=True)
+                                       meta=self._with_note(meta, deal, now), fresh=True, input_closed=True)
         self._store.drop_notices(deal["id"], lambda n: n["key"] == f"buyin_held:{cid}", now)
         summary["drafts"] += 1
         logger.info("PRM: party %d's %d new 百应 line(s) -> job #%d", party["id"], len(hers), job_id)
@@ -4761,8 +4815,14 @@ class PrmService:
         counts = {"numbers": self._store.purge_tokens(deal["party_id"], pii.masked_value, now)}
         # 加百应达人微信: her records' numbers (cleared when she was linked: once more), numbers in her 百应 nickname
         counts["friend_adds"] = self._store.scrub_friend_adds(deal["party_id"], contact.clean_name, now)
+        # 起草备注 (the operators' words, perhaps her signature's): cut like the deal's notices, a 微信号 after a label
+        # masked as in her 百应 nickname (``contact.clean_name``)
+        note = str(deal.get("draft_note") or "")
+        fields = {"draft_note": contact.mask_contacts(rewrite(note))} if note else {}
+        if note:
+            counts["draft_note"] = int(fields["draft_note"] != note)
         self._store.update_deal(deal["id"], now, replace_slots=retention.cleared_slots(deal.get("slots") or {}),
-                                purged_at=now)
+                                purged_at=now, **fields)
         group = deal.get("three_party") or {}
         if group.get("name") or group.get("chat"):     # 三方群: WeChat's name for it holds hers
             self._store.update_deal(deal["id"], now, three_party={k: group[k] for k in ("state", "at", "by") if k in group})
@@ -5180,7 +5240,8 @@ def apply_deal_action(store: PrmStore, action: str, data: dict, *, now: float, t
                       note: Optional[dict] = None) -> dict:
     """The console's deal actions (also when the bot is stopped: straight on the database); the 聚水潭 sync's too
     (``actor`` system, ``review`` / ``notice`` / ``note``: ``deals.add_shipment``).  ``night_done`` {deal_id, packet}:
-    「已处理」 on a holding line the night window sent (``night_done``)."""
+    「已处理」 on a holding line the night window sent (``night_done``).  ``opening``, the 三方群 ones and ``draft_note`` are
+    the running bot's only (``PrmService.deal_action``): a stopped one says so."""
     try:
         deal_id = data.get("deal_id")
         if action == "stage":
@@ -5201,6 +5262,8 @@ def apply_deal_action(store: PrmStore, action: str, data: dict, *, now: float, t
             return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能写开场白"}
         elif action in GROUP_ACTIONS:                  # (running: PrmService.three_party)
             return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能拉群"}
+        elif action == DRAFT_NOTE:                     # (running: PrmService.set_draft_note)
+            return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能改起草备注"}
         else:
             return {"ok": False, "error": f"不认识的操作 {action}"}
     except deals.DealError as e:
