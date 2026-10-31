@@ -1134,8 +1134,12 @@ def run_plan(cfg: dict, plan: dict, confirm: str, clis: Clis, ledger: Ledger, *,
                        "products": [creator["products"]["main"], *creator["products"]["extras"]], "commission_rate": plan["settings"]["commission_rate"],
                        "rights": plan["settings"]["rights"], "samples": samples, "warnings": warnings, "category": creator.get("category")})
         done = clis.run("dy", [*args, "--expect-status=1", "--expect-popwindow=-1", "--execute"], 900)
-        outcome = (((done.data or {}).get("items") or [{}])[0] or {}).get("outcome") if done.data else None
+        answer = (((done.data or {}).get("items") or [{}])[0] or {}) if done.data else {}
+        outcome = answer.get("outcome") if done.data else None
         writes = (done.data or {}).get("platformWrites") if done.data else None
+        # what the CLI said of a send it did not see arrive (its per-target detail, with the platform's own words when it gave
+        # any, else its last error line): kept, so a refusal the page never showed can be read afterwards (2026-10-31)
+        detail = "" if outcome in CONFIRMED_OUTCOMES else str(answer.get("detail") or done.said() or "").strip()[:400]
         if done.unverifiable() and not done.timed_out:
             sent = False                                  # the login check failed before the card's own request: nothing went out
         elif done.data is None or done.timed_out:
@@ -1145,8 +1149,9 @@ def run_plan(cfg: dict, plan: dict, confirm: str, clis: Clis, ledger: Ledger, *,
         else:
             sent = False                                  # STATE_CONFLICT, FAILED before the send …: nothing went out
         ledger.append({"event": "result", "attempt": attempt, "plan_id": plan["plan_id"], "aweme_id": aweme, "exit": done.exit_code,
-                       "outcome": outcome, "platform_writes": writes, "sent": sent, "timed_out": done.timed_out})
-        entry = {"aweme_id": aweme, "outcome": outcome, "exit": done.exit_code, "sent": sent, **({"warnings": warnings} if warnings else {})}
+                       "outcome": outcome, "platform_writes": writes, "sent": sent, "timed_out": done.timed_out, **({"detail": detail} if detail else {})})
+        entry = {"aweme_id": aweme, "outcome": outcome, "exit": done.exit_code, "sent": sent, **({"warnings": warnings} if warnings else {}),
+                 **({"detail": detail} if detail else {})}
         if done.exit_code in STOP_EXITS:
             (summary["sent"] if sent else summary["skipped"]).append(entry)
             summary["stopped"] = {"why": f"发送 {aweme}：{STOP_EXITS[done.exit_code]}", "at": index, "exit": done.exit_code}

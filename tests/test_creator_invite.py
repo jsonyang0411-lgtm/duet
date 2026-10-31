@@ -112,7 +112,9 @@ FAKE_NODE = textwrap.dedent("""\
                  **({"warnings": scenario["warnings"]} if scenario.get("warnings") else {})})
         outcome = scenario.get("outcome", {}).get(a, "VERIFIED_SUCCESS")
         writes = 0 if outcome in ("STATE_CONFLICT", "FAILED") else 1
-        out({"executed": True, "platformWrites": writes, "items": [{"targetId": a, "outcome": outcome}]}, code or (0 if outcome == "VERIFIED_SUCCESS" else 1))
+        detail = scenario.get("detail", {}).get(a)
+        out({"executed": True, "platformWrites": writes, "items": [{"targetId": a, "outcome": outcome, **({"detail": detail} if detail else {})}]},
+            code or (0 if outcome == "VERIFIED_SUCCESS" else 1))
     sys.stderr.write("[FAKE] no answer for " + " ".join(args) + "\\n")
     sys.exit(99)
 """)
@@ -666,13 +668,18 @@ def test_a_card_that_never_arrived_is_written_back_as_not_sent_and_the_run_stops
     """2026-10-31 live: from the 50th card in 24 hours the platform took the request and sent no card (INDETERMINATE, her
     button still 邀约带货), and the run went on through nine more. Now one more look at her button, a little later: still
     1 → not sent (a rerun sends her) and the run stops, saying how many went out in the last 24 hours."""
-    plan_file, plan_id = make_plan(env, outcome={"dy_small_b": "INDETERMINATE"})
+    said = "the platform reported an error it did not attribute to any target (errorCount=n/a, …)"
+    plan_file, plan_id = make_plan(env, outcome={"dy_small_b": "INDETERMINATE"}, detail={"dy_small_b": said})
     env.log.unlink()
     code, out, sleeps = run_now(env, plan_file, plan_id)
     assert code == 0
     assert [x["aweme_id"] for x in out["sent"]] == ["dy_small_a"]
-    assert out["skipped"] == [{"aweme_id": "dy_small_b", "outcome": "NOT_DELIVERED", "exit": 1, "sent": False, "checked_status": 1,
+    assert out["skipped"] == [{"aweme_id": "dy_small_b", "outcome": "NOT_DELIVERED", "exit": 1, "sent": False, "checked_status": 1, "detail": said,
                                "why": "命令行说 INDETERMINATE，再查她的按钮还是「邀约带货」：卡没送到，重跑会再发她"}]
+    first = [r for r in ledger_lines(env) if r.get("event") == "result" and r.get("aweme_id") == "dy_small_b"][0]
+    assert first["detail"] == said, "what the CLI said of the send is kept in the ledger (the platform's own words, when it gave any)"
+    assert not any("detail" in r for r in ledger_lines(env) if r.get("event") == "result" and r.get("aweme_id") == "dy_small_a"), \
+        "nothing kept for a card the CLI saw arrive"
     assert out["stopped"]["at"] == 1 and "没把卡发出去" in out["stopped"]["why"]
     assert "台账里这 24 小时发出去 2 张" in out["stopped"]["why"], "dy_invited earlier and dy_small_a now; not the one that never arrived"
     calls = [c["args"] for c in env.calls()]

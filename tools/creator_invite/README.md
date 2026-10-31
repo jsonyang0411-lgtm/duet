@@ -138,7 +138,7 @@
 {"at": "…", "event": "run-end", "plan_id": "…", "sent": 12, "stopped": "…"}
 ```
 
-`sent`：`true` 发出去了（`VERIFIED_SUCCESS`、`ACCEPTED_UNVERIFIED`、`INDETERMINATE`……，或命令行说发了写请求），`false` 没发（`STATE_CONFLICT`、发送前就被拦），`null` 不知道。同一张卡（同一个 `attempt`）有两行 `result` 时以后一行为准：没核实成功、再查按钮还是「邀约带货」的，后一行是 `{"outcome": "NOT_DELIVERED", "sent": false, "checked_status": 1}`。联系方式不写进台账。
+`sent`：`true` 发出去了（`VERIFIED_SUCCESS`、`ACCEPTED_UNVERIFIED`、`INDETERMINATE`……，或命令行说发了写请求），`false` 没发（`STATE_CONFLICT`、发送前就被拦），`null` 不知道。命令行没看到卡到了的（不是 `VERIFIED_SUCCESS` / `OBSERVED_DESIRED_STATE`），`result` 里还有 `detail`：命令行对这一位说的话（平台给了原话时就在里面），没有就是它最后一行报错，最多 400 字——平台不在页面上说的拒绝，事后能在这里看到。同一张卡（同一个 `attempt`）有两行 `result` 时以后一行为准：没核实成功、再查按钮还是「邀约带货」的，后一行是 `{"outcome": "NOT_DELIVERED", "sent": false, "checked_status": 1}`。联系方式不写进台账。
 
 ```bash
 /usr/bin/python3 tools/creator_invite/invite.py status --config <配置> [--ledger-dir <目录>]   # 本周发了几位、哪些不知道发出去没有
