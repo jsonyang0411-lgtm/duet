@@ -123,6 +123,15 @@ WRONG_CHAT = ("微信搜索「{name}」打开的是「{title}」，不是要发�
 VERIFY_LOOKS = 3                 # a title that reads as another chat is read again this often, VERIFY_PAUSE_SEC apart
 VERIFY_PAUSE_SEC = 0.6           # (the screen may not show the opened chat yet)
 VERIFY_OFF_SEC = 600             # the screen could not be read (no OCR language, window too small): not tried for this long
+# 老板拉的群 (src/prm/boss_groups.py): a watched group whose name WeChat does not give (a group nobody named, or one
+# not read yet) is known only by its id, which WeChat's search cannot find.
+GROUP_NO_NAME = ("机器人不知道这个群在微信里叫什么（群还没有群名，或者还没读到），没法在微信里找到它，没有发：请手动发，"
+                 "或者在微信里给群起一个不和别的聊天重名的群名")
+NAMES_BATCH = 200                # wxids per get_display_names call
+# A group member's row (wcdb_get_group_members) is known to carry ``username``; a name field it may carry is used when
+# get_display_names gives none (her nickname in the group): which ones WeChat 4's rows have is to be seen on a real PC.
+_MEMBER_NAME_KEYS = ("remark", "displayName", "display_name", "groupNickname", "group_nickname", "roomNickname",
+                     "nickName", "nickname", "nick_name")
 
 
 def _ocr_key(name: str) -> str:
@@ -377,6 +386,37 @@ def _strip_wechat_group_sender_prefix(content: str) -> str:
     ).strip()
 
 
+def _strip_sender_prefix(content: str, sender: str) -> str:
+    """A group line's leading ``<sender>:\n`` for any sender id: an old account's custom id has no wxid_ prefix,
+    which ``_strip_wechat_group_sender_prefix`` alone leaves in her words (a watched group's lines)."""
+    sender, text = str(sender or "").strip(), str(content or "").lstrip()
+    if sender and text.startswith(sender + ":"):
+        return text[len(sender) + 1:].strip()
+    return str(content or "")
+
+
+def _member_rows(rows) -> list[tuple[str, dict]]:
+    """``(wxid, row)`` of each member of a group (wcdb_get_group_members' rows), once each, in their order."""
+    out, seen = [], set()
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        wxid = str(row.get("username") or row.get("userName") or row.get("user_name") or "").strip()
+        if wxid and wxid not in seen:
+            seen.add(wxid)
+            out.append((wxid, row))
+    return out
+
+
+def _row_name(row: dict, wxid: str) -> str:
+    """A name a member's own row gives (``_MEMBER_NAME_KEYS``; not the wxid itself), else ""."""
+    for key in _MEMBER_NAME_KEYS:
+        name = " ".join(str(row.get(key) or "").split())
+        if name and name != wxid:
+            return name
+    return ""
+
+
 def _session_username(session: dict) -> str:
     return str(
         session.get("username")
@@ -512,6 +552,18 @@ class WcdbBackend(AbstractWeChatBackend):
         self._gap_back_at = 0.0
         self._gap_read_at: dict[str, float] = {}
         self._gap_looked: dict[str, set] = {}
+        # 老板拉的群 (watch_group, src/prm/boss_groups.py): the watched groups (chat id -> {"since", "name", "looked_at"}),
+        # read whatever WECHAT_GROUPS says; per group, since when its catch-up is still to run (taken by its next poll);
+        # the ones only the watch made read, and the ones unwatched since (dropped by the next poll).  Under
+        # _catch_up_lock.  Per group, the ids of the lines this run handed on (to the route, or this account's to the
+        # own-message hook; a burst's lines with it): a catch-up never hands one on again.  And when each group a boss
+        # was found in began (its oldest line read), for boss_groups.
+        self._watched: dict[str, dict] = {}
+        self._watch_pending: dict[str, float] = {}
+        self._watch_added: set[str] = set()
+        self._unwatched: set[str] = set()
+        self._handed: dict[str, DedupSet] = {}
+        self._group_started: dict[str, float] = {}
         # Thread safety: the WCDB DLL (ctypes) may not be thread-safe internally.  The client itself
         # serializes every call into it, from any thread (wcdb_client._DLL_LOCK: the poll loop, the
         # new-friend scan, a re-initialisation's close and open).  This lock is held around the poll
@@ -766,8 +818,10 @@ class WcdbBackend(AbstractWeChatBackend):
         self._tracked = {}
         self._recallable = {}
         # What came in while the database could not be read: history, except a registered
-        # creator's messages the bot never handled (PRM_CATCHUP_HOURS, _prime_chat).
+        # creator's messages the bot never handled (PRM_CATCHUP_HOURS, _prime_chat), and a watched
+        # group's lines not handed on yet (its catch-up runs again at its next poll: _watch_catch_up).
         self._prime_known_ids()
+        self._rearm_watched()
         # Re-find WeChat window
         hwnd = self._window.find_hwnd()
         if hwnd:
@@ -790,6 +844,7 @@ class WcdbBackend(AbstractWeChatBackend):
         self._sessions_read = (time.monotonic(), sessions)
         self._chat_names = {}
         self._chat_is_group = {}
+        self._watch_added = set()               # a watched group is read again from the next poll on (_admit_watched_groups)
 
         # Build a map of all @chatroom entries: username -> {name, member_count}
         all_chatrooms: dict[str, dict] = {}
@@ -1054,8 +1109,12 @@ class WcdbBackend(AbstractWeChatBackend):
         or the WeChat edge sends to her first), the name the console's list of private chats has
         (data/private_chat_names.json), and the chat is read from the next poll on (fd9419b, the
         Windows PC 2026-10-26: our line and her answer are read at once).  A name another chat has
-        too is added all the same; ``_window_target`` decides whether the window may use it."""
+        too is added all the same; ``_window_target`` decides whether the window may use it.  A watched
+        group (``watch_group``) not read yet, or read under its id while WeChat gave no name: the name
+        WeChat gives it now (``_watched_name``)."""
         name = self._chat_names.get(talker_id)
+        if talker_id.endswith("@chatroom") and (not name or name == talker_id) and self._is_watched(talker_id):
+            name = self._watched_name(talker_id) or name
         if name:
             return name
         if talker_id.endswith("@chatroom"):
@@ -1097,11 +1156,17 @@ class WcdbBackend(AbstractWeChatBackend):
         result (window_controller.navigate_to_chat; WeChat 4 cannot be asked which chat opened), so
         a name another chat has too could open that one: refused, nothing is typed (``NAMESAKE``: send
         it by hand, or give her a remark of her own).  ``name``: what to go by when the chat is not
-        known (a message's ``group_name``)."""
+        known (a message's ``group_name``).  A group known only by its id (WeChat gives it no name:
+        nobody named it, or it is not read yet) is refused too (``GROUP_NO_NAME``): the search would
+        be typed the id."""
         name = self._talker_to_name(talker) or str(name or "").strip()
         if not name:
             logger.error("Cannot resolve chat_id=%s to chat name", talker)
             return "", SendRefused(UNKNOWN_NAME)
+        if name == talker and talker.endswith("@chatroom"):
+            refused = SendRefused(GROUP_NO_NAME)
+            logger.warning("Not using the WeChat window for %s: %s", talker[:20], refused.reason)
+            return name, refused
         other = self._namesake(talker, name)
         if other:
             refused = SendRefused(NAMESAKE.format(name=name))
@@ -1223,6 +1288,7 @@ class WcdbBackend(AbstractWeChatBackend):
         self._reads = [0, 0]
         self._refresh_private_chats_if_due()
         self._admit_catch_up_chats()
+        self._admit_watched_groups()
         for talker, group_name in list(self._chat_names.items()):     # every chat read, by its id
             if not self._running:
                 break
@@ -1262,7 +1328,9 @@ class WcdbBackend(AbstractWeChatBackend):
         self._own_message_hook = hook
 
     def own_wxid(self) -> str:
-        """This WeChat account's wxid ("" when not known yet)."""
+        """This WeChat account's wxid ("" when not known yet): ``myWxid``, the name of WeChat 4's data folder, which
+        carries a suffix (wxid_abc_b6ce) that its own lines and the group member lists do not (wxid_abc; new_friends
+        ``is_me``).  ``group_members`` and ``boss_groups`` give this account's own entry under this id."""
         return str(getattr(self._client, "_config", {}).get("myWxid", "") or "") if self._client else ""
 
     # ── Readers beside the poll loop (src/wechat/new_friends.py) ─────
@@ -1342,6 +1410,242 @@ class WcdbBackend(AbstractWeChatBackend):
         except Exception:
             logger.warning("三方群: the new group could not be looked for", exc_info=True)
             return None
+
+    # ── 老板拉的群 (src/prm/boss_groups.py) ───────────────────────────────
+    # A boss (PRM_GROUP_WITH) makes a small group of himself, a creator who is his friend and this account; PRM takes
+    # it over and drafts her lines there.  These readers run beside the poll loop (PRM's thread), one database call
+    # per ``with_client`` (the poll loop waits for one call at most); the watch is the poll loop's.
+
+    def contact_ids(self, names) -> dict:
+        """Each name as PRM_GROUP_WITH writes it (a boss: a contact's name as this account sees it, the remark when
+        one is set) -> the one wxid with that name, or None when nobody has it or more than one has (never a guess).
+        Names compare as the same-name rule does (no spaces, no case: ``_name_key``).  Everyone the database shows
+        with a name counts (``_people``): the private chats of the session list and of the console's list, and the
+        members of every group of the session list (a boss is in each group he makes); this account never does.
+        The keys are the names as given; all None while the database cannot be read.  Logs counts only."""
+        asked = [str(name) for name in names or []]
+        found: dict = {name: None for name in asked}
+        keys = {name: _name_key(name) for name in asked if _name_key(name)}
+        if not keys:
+            return found
+        people = self._people()
+        if people is None:
+            return found
+        for name, key in keys.items():
+            ids = {wxid for wxid, other in people.items() if _name_key(other) == key}
+            found[name] = next(iter(ids)) if len(ids) == 1 else None
+        logger.debug("老板拉的群: %d of %d name(s) are one contact's", sum(1 for v in found.values() if v),
+                     len(found))
+        return found
+
+    def boss_groups(self, members_any, known, max_members) -> Optional[list]:
+        """The group chats of the session list now that are not in ``known`` (PRM's baseline and the groups it has
+        seen to) and have a wxid of ``members_any`` (the bosses') among their members, with at most ``max_members``
+        members (this account included), the one begun last first::
+
+            [{"chat": id, "name": its name in WeChat ("" when none), "members": [{"wxid", "name"}],
+              "created_at": its oldest line's time or None}]
+
+        Members as ``group_members`` gives them; ``created_at``: the time of the oldest of its latest CATCHUP_READ
+        lines, when this account was added for a new group (read once a run).  None while the database cannot be
+        read.  Every new group's member list is read (who is in it, how many); names are looked up only for the
+        groups given (a big group's members' names never are)."""
+        from .new_friends import session_time
+
+        wanted = {str(wxid).strip() for wxid in members_any or () if str(wxid or "").strip()}
+        known = {str(chat) for chat in known or ()}
+        try:
+            limit = int(max_members)
+        except (TypeError, ValueError):
+            limit = 0
+        try:
+            sessions = self.with_client(lambda client: client.get_sessions())
+            if sessions is None:
+                return None
+            groups: dict[str, Optional[float]] = {}
+            for session in sessions or []:
+                chat = _session_username(session) if isinstance(session, dict) else ""
+                if chat.endswith("@chatroom") and chat not in known and chat not in groups:
+                    groups[chat] = session_time(session)
+            found = []
+            for chat, last_at in (groups.items() if wanted else ()):
+                rows = self.with_client(lambda client, chat=chat: client.get_group_members(chat))
+                if rows is None:
+                    return None
+                members = _member_rows(rows)
+                if not members or len(members) > limit or not wanted & {wxid for wxid, _ in members}:
+                    continue
+                names = self._display_names([chat] + [wxid for wxid, _ in members])
+                if names is None:
+                    return None
+                found.append(({"chat": chat, "name": names.get(chat, ""),
+                               "members": self._members_out(members, names),
+                               "created_at": self._group_created_at(chat)}, last_at))
+        except Exception:
+            logger.warning("老板拉的群: the groups could not be looked at", exc_info=True)
+            return None
+        found.sort(key=lambda item: -float(item[0]["created_at"] or item[1] or 0))
+        logger.debug("老板拉的群: %d new group(s) looked at, %d with a boss and at most %d members", len(groups),
+                     len(found), limit)
+        return [group for group, _ in found]
+
+    def group_members(self, chat: str) -> Optional[list]:
+        """A group's members now, ``[{"wxid", "name"}]`` in the database's order: ``name`` = the name this account sees
+        (get_display_names: the remark or her nickname), else one her member row gives (her nickname in the group),
+        else ""; this account's own entry is under ``own_wxid()``.  None while the database cannot be read, or when it
+        gives no member at all (a group always has this account: an empty list is a read that failed)."""
+        chat = str(chat or "").strip()
+        try:
+            rows = self.with_client(lambda client: client.get_group_members(chat))
+            members = _member_rows(rows) if rows is not None else []
+            names = self._display_names([wxid for wxid, _ in members]) if members else None
+        except Exception:
+            logger.warning("老板拉的群: the members of %s… could not be read", chat[:8], exc_info=True)
+            return None
+        if names is None:
+            return None
+        return self._members_out(members, names)
+
+    def watch_group(self, chat: str, since: float) -> None:
+        """From the next poll on, read this group whatever WECHAT_GROUPS says, and hand its lines through the route as
+        group messages (the standardized shape: ``is_group`` True, ``chat_id`` = the group, ``sender_id`` = the
+        member's wxid …), each on its own; this account's own lines go to the own-message hook instead, and WeChat's
+        lines there (no sender: joins, 拍一拍, a recall) go through the route too.  First, once, its catch-up: the
+        lines written since ``since`` that were not handed on before (stored by the route, or handed on in this run),
+        oldest first (``_watch_catch_up``).  In memory: PRM watches every linked group again at start, ``since`` =
+        its last handled line.  Watching a watched group again runs its catch-up again (nothing goes twice)."""
+        chat = str(chat or "").strip()
+        if not chat.endswith("@chatroom"):
+            logger.warning("老板拉的群: %s… is no group chat; not watched", chat[:8])
+            return
+        try:
+            since = float(since or 0)
+        except (TypeError, ValueError):
+            since = 0.0
+        with self._catch_up_lock:
+            entry = self._watched.setdefault(chat, {"since": since, "name": "", "looked_at": None})
+            entry["since"] = min(float(entry["since"]), since)
+            pending = self._watch_pending.get(chat)
+            self._watch_pending[chat] = since if pending is None else min(pending, since)
+            self._unwatched.discard(chat)
+        logger.info("老板拉的群: watching group %s… (its lines since %s are handed on once)", chat[:8],
+                    time.strftime("%m-%d %H:%M", time.localtime(since)))
+
+    def unwatch_group(self, chat: str) -> None:
+        """Stop the watch: from the next poll on the group is read only if WECHAT_GROUPS names it, as any group (its own
+        lines to no hook, its lines silent); a catch-up not run yet is dropped."""
+        chat = str(chat or "").strip()
+        with self._catch_up_lock:
+            was = self._watched.pop(chat, None)
+            self._watch_pending.pop(chat, None)
+            if was is not None:
+                self._unwatched.add(chat)
+        if was is not None:
+            logger.info("老板拉的群: group %s… is not watched any more", chat[:8])
+
+    def _people(self) -> Optional[dict]:
+        """wxid -> name of everyone the database shows with a name (``contact_ids``): the private chats of the session
+        list now and of data/private_chat_names.json (a chat WeChat lists no more), and the members of every group
+        of the session list; names from get_display_names (the database's now win over the list's).  Not this
+        account, no group, official account or WeChat's own chat.  None while the database cannot be read."""
+        from .new_friends import is_me, is_person_chat
+
+        me = self.own_wxid()
+        try:
+            sessions = self.with_client(lambda client: client.get_sessions())
+            if sessions is None:
+                return None
+            chats = list(dict.fromkeys(_session_username(s) for s in sessions or [] if isinstance(s, dict)))
+            wxids = [chat for chat in chats if is_person_chat(chat, me)]
+            for chat in chats:
+                if not chat.endswith("@chatroom"):
+                    continue
+                rows = self.with_client(lambda client, chat=chat: client.get_group_members(chat))
+                if rows is None:
+                    return None
+                wxids += [wxid for wxid, _ in _member_rows(rows)]
+            wxids = [wxid for wxid in dict.fromkeys(wxids) if is_person_chat(wxid, me) and not is_me(wxid, me)]
+            names = self._display_names(wxids)
+        except Exception:
+            logger.warning("老板拉的群: the contacts could not be read", exc_info=True)
+            return None
+        if names is None:
+            return None
+        listed = {str(wxid): " ".join(str(name or "").split())
+                  for wxid, name in self._listed_private_names().items()
+                  if is_person_chat(str(wxid), me) and str(name or "").strip()}
+        return {**listed, **names}
+
+    def _display_names(self, wxids: list) -> Optional[dict]:
+        """get_display_names for these ids, NAMES_BATCH a call: {id: name} of the ones with a name (not the id
+        itself).  None when the database closed meanwhile."""
+        names: dict[str, str] = {}
+        wxids = [str(wxid) for wxid in wxids if wxid]
+        for start in range(0, len(wxids), NAMES_BATCH):
+            batch = wxids[start:start + NAMES_BATCH]
+            got = self.with_client(lambda client, batch=batch: client.get_display_names(batch))
+            if got is None:
+                return None
+            for wxid, name in (got.items() if isinstance(got, dict) else ()):
+                name = " ".join(str(name or "").split())
+                if name and name != str(wxid):
+                    names[str(wxid)] = name
+        return names
+
+    def _members_out(self, members: list, names: dict) -> list:
+        """``[{"wxid", "name"}]`` of a group's member rows (``group_members``)."""
+        from .new_friends import is_me
+
+        me = self.own_wxid()
+        return [{"wxid": me if me and is_me(wxid, me) else wxid, "name": names.get(wxid) or _row_name(row, wxid)}
+                for wxid, row in members]
+
+    def _group_created_at(self, chat: str) -> Optional[float]:
+        """When a group began for this account: the time of the oldest of its latest CATCHUP_READ rows (any row,
+        WeChat's 「邀请你加入了群聊」 line included); None when it shows none or cannot be read.  Kept for the run."""
+        if chat in self._group_started:
+            return self._group_started[chat]
+        try:
+            rows = self.with_client(lambda client: client.get_messages(talker=chat, limit=CATCHUP_READ))
+        except Exception:
+            logger.debug("老板拉的群: the lines of %s… could not be read", chat[:8], exc_info=True)
+            return None
+        times = [_row_time(row) for row in rows or [] if isinstance(row, dict)]
+        times = [t for t in times if t > 0]
+        if not times:
+            return None
+        self._group_started[chat] = float(min(times))
+        return self._group_started[chat]
+
+    def _is_watched(self, chat: str) -> bool:
+        """Is this group watched (``watch_group``)?"""
+        return str(chat or "") in (getattr(self, "_watched", None) or {})
+
+    def _watched_name(self, chat: str) -> str:
+        """The name WeChat gives a watched group ("" when none): the last session list's, else get_display_names (asked
+        at most once every SESSION_REFRESH_SEC while there is none: a new group may get its name later).  Kept once
+        known (a group renamed later is found by its new name after a restart, as a renamed contact is)."""
+        entry = (getattr(self, "_watched", None) or {}).get(chat)
+        if entry is None:
+            return ""
+        if entry.get("name"):
+            return str(entry["name"])
+        name = str((getattr(self, "_session_names", None) or {}).get(chat) or "").strip()
+        if not name or name == chat:
+            looked_at = entry.get("looked_at")
+            if looked_at is not None and time.monotonic() - looked_at < SESSION_REFRESH_SEC:
+                return ""
+            entry["looked_at"] = time.monotonic()
+            try:
+                got = self.with_client(lambda client: client.get_display_names([chat])) or {}
+            except Exception:
+                logger.debug("老板拉的群: no name for %s…", chat[:8], exc_info=True)
+                got = {}
+            name = " ".join(str(got.get(chat) or "").split()) if isinstance(got, dict) else ""
+        if not name or name == chat:
+            return ""
+        entry["name"] = name
+        return name
 
     def catch_up_chat(self, talker: str, name: str, since: float, sink) -> None:
         """Hand a private chat's messages written since ``since`` to ``sink(messages)`` on the chat's
@@ -1426,6 +1730,125 @@ class WcdbBackend(AbstractWeChatBackend):
             sink(picked)
         except Exception:
             logger.exception("Catch-up of a new friend (%s…): the messages could not be handed on", talker[:8])
+        return True
+
+    # ── 老板拉的群: a watched group in the poll loop ─────────────────────
+
+    def _admit_watched_groups(self) -> None:
+        """The watched groups (``watch_group``) that are not read are read from this cycle on, under the name WeChat
+        gives them (``_watched_name``; their id while it gives none, which a send refuses: ``_window_target``); one
+        read under its id gets its name once WeChat gives one.  A group unwatched since that only the watch made
+        read is read no more (a group WECHAT_GROUPS names stays)."""
+        if not self._watched and not self._unwatched:
+            return
+        with self._catch_up_lock:
+            watched = list(self._watched)
+            dropped, self._unwatched = self._unwatched, set()
+        for chat in dropped:
+            if chat in self._watch_added and chat not in self._watched:
+                self._watch_added.discard(chat)
+                self._chat_names.pop(chat, None)
+                self._chat_is_group.pop(chat, None)
+        for chat in watched:
+            current = self._chat_names.get(chat)
+            if current and current != chat:
+                continue                                   # read, under its name
+            name = self._watched_name(chat)
+            if current is None:
+                self._add_talker(name or chat, chat, is_group=True)
+                self._watch_added.add(chat)
+                logger.info("老板拉的群: group %s… is read from now on%s", chat[:8],
+                            "" if name else " (WeChat gives it no name yet: nothing is sent to it)")
+            elif name:
+                self._chat_names[chat] = name
+
+    def _rearm_watched(self) -> None:
+        """Every watched group's catch-up runs again at its next poll (the database was re-opened: what came in
+        meanwhile was marked seen by priming); what was handed on or stored is not handed on again."""
+        with self._catch_up_lock:
+            for chat, entry in self._watched.items():
+                since = float(entry.get("since") or 0)
+                pending = self._watch_pending.get(chat)
+                self._watch_pending[chat] = since if pending is None else min(pending, since)
+
+    def _handed_set(self, talker: str) -> DedupSet:
+        """The ids of a group's lines this run handed on (``_dispatch_message``, ``_tell_own_message``)."""
+        handed = self._handed.get(talker)
+        if handed is None:
+            handed = self._handed[talker] = DedupSet(max_size=CHAT_KNOWN_SIZE)
+        return handed
+
+    def _line_is_own(self, standardized: dict, my_wxid: str) -> bool:
+        """``_is_own_line``, except in a watched group: there by the wxid alone (new_friends ``is_me``), and a line
+        without a sender (WeChat's own lines: a join, 拍一拍, a recall) is nobody's, handed on through the route,
+        not to the own-message hook (``_is_own_line`` takes "" for this account's: it is a prefix of any id)."""
+        chat = str(standardized.get("chat_id") or "")
+        if not (standardized.get("is_group") and self._is_watched(chat)):
+            return self._is_own_line(standardized, my_wxid)
+        sender = str(standardized.get("sender_id") or "")
+        if not sender:
+            return False
+        if my_wxid:
+            from .new_friends import is_me
+            return is_me(sender, my_wxid)
+        return self._is_own_line(standardized, my_wxid)
+
+    def _watch_catch_up(self, group_name: str, talker: str, since: float, callback: MessageCallback) -> bool:
+        """A watched group's catch-up (``watch_group``), in the poll thread before the group's own poll: read it back
+        (CATCHUP_READ), mark all of it seen, and hand on, oldest first, its lines written since ``since`` that were
+        not handed on before: not stored (the route stores every line it gets first, step ``persist``), not handed on
+        in this run (``_handed_set``), not held in a burst.  One by one in this thread (no burst merging, no worker
+        pool, so the route hears them in order): this account's own to the own-message hook, the others' through the
+        route.  False when the group could not be read (an error code): the catch-up waits for the next poll, and this
+        poll leaves the group alone (nothing of it is handed on before the catch-up)."""
+        messages = self._read_messages(talker, CATCHUP_READ)
+        if messages is None:
+            with self._catch_up_lock:
+                if talker in self._watched:
+                    pending = self._watch_pending.get(talker)
+                    self._watch_pending[talker] = since if pending is None else min(pending, since)
+            return False
+        known = self._known_set(talker)
+        handed = self._handed_set(talker)
+        held = self._burst.held_ids()
+        my_wxid = self.own_wxid()
+        now = time.time()
+        rows = []
+        for msg in reversed(messages or []):
+            standardized = self._standardize(msg, group_name, talker, resolve_voice=False, is_group=True)
+            if standardized is not None:
+                rows.append((msg, standardized))
+        try:
+            stored = self._stored_of(talker, [s for _, s in rows]) if self._store is not None else set()
+        except Exception:
+            logger.exception("Group catch-up: the message store could not be read for %s…", talker[:8])
+            stored = set()
+        picked = []
+        for msg, standardized in rows:
+            msg_id = standardized["message_id"]
+            known.add(msg_id)
+            self._note_recallable(talker, standardized, now)
+            if (int(standardized.get("timestamp") or 0) >= since and msg_id not in stored and msg_id not in handed
+                    and msg_id not in held):
+                picked.append((msg, standardized))
+        routed = own = 0
+        for msg, standardized in picked:
+            if not self._running:
+                break                            # not handed on: PRM watches the group again at the next start
+            if standardized.get("msg_type") == 34:
+                standardized = self._standardize(msg, group_name, talker, is_group=True) or standardized
+            handed.add(standardized["message_id"])
+            if self._line_is_own(standardized, my_wxid):
+                if my_wxid:
+                    self._tell_own_message(standardized)
+                    own += 1
+                continue
+            if my_wxid:
+                standardized["_not_self_by_id"] = True
+            self._handle_message(group_name, talker, standardized, callback, screenshot=False)
+            routed += 1
+        logger.info("Group catch-up (%s…): %d line(s) since %s handed on, %d of this account's to the hook",
+                    talker[:8], routed, time.strftime("%m-%d %H:%M", time.localtime(since)), own)
         return True
 
     def db_readable(self) -> bool:
@@ -1544,10 +1967,18 @@ class WcdbBackend(AbstractWeChatBackend):
                 and int(s.get("timestamp") or 0) >= line}
 
     def _tell_own_message(self, standardized: dict) -> None:
+        """This account's own line to the own-message hook: in a private chat the filter wants (a registered
+        creator's: an operator replying by hand, the bot's own reply read back), and in a watched group
+        (``watch_group``: the same, in the group); never in any other group."""
         hook = getattr(self, "_own_message_hook", None)
-        if hook is None or standardized.get("is_group", True):
+        if hook is None:
             return
-        if not self._wants_private(str(standardized.get("chat_id", ""))):
+        chat = str(standardized.get("chat_id", ""))
+        if standardized.get("is_group", True):
+            if not self._is_watched(chat):
+                return
+            self._handed_set(chat).add(str(standardized.get("message_id") or ""))
+        elif not self._wants_private(chat):
             return
         try:
             hook(standardized)
@@ -1943,7 +2374,7 @@ class WcdbBackend(AbstractWeChatBackend):
         talker = str(recall.get("chat_id") or "")
         logger.info("A line in %s…'s chat was taken back (WeChat rewrote its row); handed on as WeChat's line",
                     talker[:8])
-        if self._is_own_line(recall, my_wxid):
+        if self._line_is_own(recall, my_wxid):
             if my_wxid:
                 self._tell_own_message(recall)
             return
@@ -1966,12 +2397,23 @@ class WcdbBackend(AbstractWeChatBackend):
         A watched private chat (the private filter's: a registered creator, a listed one): a row
         read lately that WeChat rewrote into a recall is handed on as a system line of its own
         (``_recall_in_place``).
+
+        A watched group (``watch_group``): first its catch-up, once (``_watch_catch_up``); then its
+        new lines each on its own (no burst: every line is stored under its own id, so a catch-up
+        after a restart knows what was handed on), this account's to the own-message hook, a line
+        without a sender (WeChat's) through the route; a recall in place is looked for as in a
+        watched private chat, and an OCR stretch's backlog is handed on (OCR cannot tell her lines).
         """
         if self._catch_up_requests:
             with self._catch_up_lock:
                 request = self._catch_up_requests.pop(talker, None)
             if request is not None and not self._catch_up_new_friend(group_name, talker, request):
                 return                    # the chat cannot be read now: the request waits for the next poll
+        if self._watch_pending:
+            with self._catch_up_lock:
+                since = self._watch_pending.pop(talker, None)
+            if since is not None and not self._watch_catch_up(group_name, talker, since, callback):
+                return                    # the group cannot be read now: its catch-up waits for the next poll
         messages = self._read_messages(talker, 50)
         if messages is None:
             return                        # an error code for this chat (_read_messages): nothing seen yet
@@ -1997,6 +2439,7 @@ class WcdbBackend(AbstractWeChatBackend):
             return
 
         is_group = self._chat_is_group.get(talker, talker.endswith("@chatroom"))
+        watched_group = is_group and self._is_watched(talker)
         my_wxid = str(getattr(self._client, "_config", {}).get("myWxid", "") or "")
         now = time.time()
         recallable = self._recallable_rows(talker, now)
@@ -2028,9 +2471,12 @@ class WcdbBackend(AbstractWeChatBackend):
                     watched = self._wants_private(talker)
                 if watched:
                     self._note_recallable(talker, standardized, now)
-            if self._ocr_priming and not catching_up:
+            elif watched_group:
+                self._note_recallable(talker, standardized, now)
+            if self._ocr_priming and not catching_up and not watched_group:
                 # The backlog of an OCR stretch: seen, not answered (part of it was answered
-                # from the screen).  OCR never reads a private chat: a creator's is handed on.
+                # from the screen).  OCR never reads a private chat: a creator's is handed on,
+                # and so is a watched group's (OCR cannot tell who wrote a group's line).
                 continue
             if standardized.get("msg_type") == 34:
                 # a new voice message: now with its words (the id stays the one marked seen above)
@@ -2039,7 +2485,8 @@ class WcdbBackend(AbstractWeChatBackend):
             # Skip own messages.  With the account's wxid known that is the
             # whole test: a member whose display name is the account's must
             # still be heard.  The name is only a fallback without the wxid.
-            if self._is_own_line(standardized, my_wxid):
+            # (A watched group: _line_is_own, a line without a sender is nobody's.)
+            if self._line_is_own(standardized, my_wxid):
                 if my_wxid:
                     self._tell_own_message(standardized)
                 continue
@@ -2049,6 +2496,9 @@ class WcdbBackend(AbstractWeChatBackend):
 
             self._trim_dedup()
 
+            if watched_group:
+                self._dispatch_message(standardized, callback)    # each line on its own, under its own id
+                continue
             # A rapid same-sender run of text bubbles is one turn.
             for ready in self._burst.push(standardized):
                 self._dispatch_message(ready, callback)
@@ -2070,6 +2520,12 @@ class WcdbBackend(AbstractWeChatBackend):
         talker = str(standardized.get("chat_id") or "")
         if not group_name or not talker:
             return
+        if standardized.get("is_group"):
+            # handed on in this run, a burst's lines with it: a watched group's catch-up never hands one on again
+            handed = self._handed_set(talker)
+            for msg_id in (standardized.get("message_id"), *(standardized.get("_burst_message_ids") or ())):
+                if msg_id:
+                    handed.add(str(msg_id))
 
         if standardized.get("_burst_count", 1) > 1:
             logger.info(
@@ -2337,10 +2793,15 @@ class WcdbBackend(AbstractWeChatBackend):
     def _standardize(self, msg: dict, group_name: str,
                      talker: str, resolve_voice: bool = True,
                      is_group: bool | None = None) -> Optional[dict]:
-        """Convert WCDB raw message to standard format."""
+        """Convert WCDB raw message to standard format.
+
+        A watched group (``watch_group``): no line is left out by the keyword filter below (it was made for
+        WeChat's notices as text, and drops a member's own words too: 「谢谢老板邀请」), and the sender's
+        ``<id>:`` prefix is taken off whatever the id looks like."""
         # WCDB message fields: sender_username, message_content, local_type, create_time
         if is_group is None:
             is_group = str(talker).endswith("@chatroom")
+        watched_group = bool(is_group) and self._is_watched(talker)
         sender = str(msg.get("sender_username", msg.get("senderUsername", msg.get("sender", ""))))
         if not sender and not is_group:
             sender = talker
@@ -2433,6 +2894,8 @@ class WcdbBackend(AbstractWeChatBackend):
                                              "special": special_info})
         if is_group and local_type == 1 and not quote_info:
             content = _strip_wechat_group_sender_prefix(content)
+            if watched_group:
+                content = _strip_sender_prefix(content, sender)
             if not content:
                 return None
 
@@ -2456,8 +2919,8 @@ class WcdbBackend(AbstractWeChatBackend):
                 new_member_id, group_name[:20],
             )
 
-        # Filter other system messages (but NOT join events)
-        if is_group and not is_system_join:
+        # Filter other system messages (but NOT join events; nothing in a watched group)
+        if is_group and not is_system_join and not watched_group:
             _FILTER_KEYWORDS = (
                 "修改群名", "退出了群聊",
                 "撤回了一条消息", "被移除", "开启了朋友验证",
