@@ -1,13 +1,15 @@
 """老板拉的群 (功能 U, the backend's part): a boss (PRM_GROUP_WITH) makes a small WeChat group of himself, a creator who is
 his friend and this account, and PRM takes it over.  The WCDB backend finds the bosses' wxids by name (``contact_ids``),
 the new small groups a boss is in (``boss_groups``: with whether their whole history was read and when this account
-came in, by WeChat's line) and their members (``group_members``), and says quietly whether she has a private chat with
-us (``has_private_chat``); a watched group (``watch_group``) is read whatever WECHAT_GROUPS says and its lines go
-through the route as group messages, one by one in order in the poll thread (its catch-up once, oldest first, the lines
-at ``since`` or later; ``watch_caught_up`` once it ran; after a restart and a re-opened database only what was not
-handed on yet), this account's own lines there to the own-message hook; a send reaches a group by the name WeChat
-gives it, like any chat, a name another chat has too is refused, and so is a search that opened a chat whose title
-shows no member count (SEND_VERIFY_CHAT).  Every other group is read and kept silent as before.
+came in, by WeChat's line; one whose members or lines cannot be read now is given as ``unreadable``) and their members
+(``group_members``), tells WeChat's clock (``wechat_now``: the newest session time), and says quietly whether she has
+a private chat with us (``has_private_chat``); a watched group (``watch_group``) is read whatever WECHAT_GROUPS says and
+its lines go through the route as group messages, one by one in order in the poll thread (its catch-up once, oldest
+first, the lines at ``since`` or later; ``watch_caught_up`` once it ran; after a restart and a re-opened database only
+what was not handed on yet), this account's own lines there to the own-message hook; a send reaches a group by the
+name WeChat gives it, like any chat, a name another chat has too is refused, and so is a search that opened a private
+chat the bot knows (its title without a member count, SEND_VERIFY_CHAT: ``NOT_A_GROUP``); a title the bot does not
+know, or one whose count OCR cut off, is sent to as before.  Every other group is read and kept silent as before.
 
 The real WcdbBackend over the fake WeChat 4 database of tests/test_new_friends.py (session rows without names, names
 from get_display_names, messages newest first, this account's own lines from its wxid without the data folder's suffix;
@@ -30,8 +32,8 @@ from src.config import BotConfig
 from src.db import MessageStore, initialize_db
 from src.router import MessageRouter
 from src.wechat import wcdb_backend
-from src.wechat.wcdb_backend import (CATCHUP_READ, GROUP_NO_NAME, JOINED_LINE, NOT_A_GROUP, VERIFY_LOOKS, WcdbBackend,
-                                     title_verdict)
+from src.wechat.wcdb_backend import (CATCHUP_READ, GROUP_NO_NAME, JOINED_LINE, NOT_A_GROUP, VERIFY_LOOKS, WRONG_CHAT,
+                                     WcdbBackend, _ocr_key, title_verdict)
 from src.wechat.wcdb_client import WcdbCallError
 from src.wechat.window_controller import SendRefused
 
@@ -360,20 +362,128 @@ def test_history_complete_is_whether_the_groups_whole_history_was_read(tmp_path,
         False, None, float(int(t - 80000)))                                 # WeChat's line is no longer among them
 
 
-def test_a_group_whose_lines_cannot_be_read_now_is_left_out_until_they_can(tmp_path, db, clock):
-    made(db, f'"{BOSS_NAME}"邀请你加入了群聊', clock.now - 60)
+UNREADABLE = {"chat": GROUP, "unreadable": True}                        # those two keys only
+
+
+def test_a_group_whose_lines_cannot_be_read_now_is_given_as_unreadable_until_they_can(tmp_path, db, clock):
+    """(second review, N5) Never left out: PRM took a group the backend gave none of back twice for one with no boss and
+    did not look at it again for an hour.  Unreadable at two calls (one a minute), readable at the third: given as
+    unreadable twice (no name, no member, no guess), then as it is; another new boss group is given all along."""
+    t = clock.now
+    made(db, f'"{BOSS_NAME}"邀请你加入了群聊', t - 60)
+    other = "1000000007@chatroom"
+    made(db, f'"{BOSS_NAME}"邀请你加入了群聊', t - 3600, chat=other, members=(BOSS, TESTER, ME_SENDER))
     run = Run(tmp_path, db)
     real = db.get_messages
 
     def flaky(talker, limit=200, offset=0):
-        if talker == GROUP:
+        if talker == GROUP and misses:
+            misses.pop()
             raise WcdbCallError("wcdb_get_messages", -1)
         return real(talker, limit, offset)
+    misses = [1, 1]
     db.get_messages = flaky
-    assert run.backend.boss_groups({BOSS}, KNOWN, 6) == []                # not now (never a guess) …
-    db.get_messages = real
-    [found] = run.backend.boss_groups({BOSS}, KNOWN, 6)                  # … at the next call
-    assert found["chat"] == GROUP and found["joined_at"] == float(int(clock.now - 60))
+    for _ in range(2):
+        first, second = run.backend.boss_groups({BOSS}, KNOWN, 6)
+        assert first == UNREADABLE and second["chat"] == other and "unreadable" not in second
+    [found, second] = run.backend.boss_groups({BOSS}, KNOWN, 6)
+    assert found["chat"] == GROUP and found["joined_at"] == float(int(t - 60)) and "unreadable" not in found
+    assert [m["wxid"] for m in found["members"]] == [BOSS, HER, ME] and second["chat"] == other
+
+
+@pytest.mark.parametrize("how", ["error code", "no member yet"])
+def test_a_group_whose_members_cannot_be_read_now_is_given_as_unreadable(tmp_path, db, clock, how):
+    """Its members answer with an error code (only this group's: the others are read), or with none at all (a group
+    always has this account: WeChat may not have written a new group's members yet): it may be a boss's, so it is given
+    as unreadable, in its place by its session's time; once they read, as it is.  A group of the baseline (``known``)
+    and a new one without a boss are never given."""
+    t = clock.now
+    made(db, f'"{BOSS_NAME}"邀请你加入了群聊', t - 60)
+    made(db, f'"{BOSS_NAME}"邀请你加入了群聊', t - 600, chat="1000000004@chatroom", members=(HER, TESTER, ME_SENDER))
+    old = "1000000008@chatroom"
+    made(db, f'"{BOSS_NAME}"邀请你加入了群聊', t - 30, chat=old, members=(BOSS, HER, ME_SENDER))
+    run = Run(tmp_path, db)
+    real = db.get_group_members
+    if how == "error code":
+        def flaky(chat):
+            if chat in (GROUP, old):
+                raise WcdbCallError("wcdb_get_group_members", -2)
+            return real(chat)
+        db.get_group_members = flaky
+    else:
+        db.members[GROUP], db.members[old] = [], []
+    assert run.backend.boss_groups({BOSS}, KNOWN | {old}, 6) == [UNREADABLE]
+    db.get_group_members = real
+    db.members[GROUP], db.members[old] = [BOSS, HER, ME_SENDER], [BOSS, HER, ME_SENDER]
+    [found] = run.backend.boss_groups({BOSS}, KNOWN | {old}, 6)
+    assert found["chat"] == GROUP and [m["wxid"] for m in found["members"]] == [BOSS, HER, ME]
+
+
+def test_an_unreadable_group_stands_in_its_place_and_the_database_closed_is_still_none(tmp_path, db, clock):
+    t = clock.now
+    made(db, f'"{BOSS_NAME}"邀请你加入了群聊', t - 600)                  # begun before the other one …
+    later = "1000000009@chatroom"
+    made(db, f'"{BOSS_NAME}"邀请你加入了群聊', t - 300, chat=later, members=(BOSS, TESTER, ME_SENDER))
+    db.members[later] = []                                               # … whose members are not written yet
+    run = Run(tmp_path, db)
+    assert [g["chat"] for g in run.backend.boss_groups({BOSS}, KNOWN, 6)] == [later, GROUP]   # begun last first
+    assert run.backend.boss_groups({BOSS}, KNOWN, 6)[0] == {"chat": later, "unreadable": True}
+    db.fail = True                                                       # the database itself: nothing at all
+    assert run.backend.boss_groups({BOSS}, KNOWN, 6) is None
+    db.fail = False
+    run.backend._client = None
+    assert run.backend.boss_groups({BOSS}, KNOWN, 6) is None
+
+
+# ── wechat_now: WeChat's clock, by the session list ─────────────────────────
+
+def test_wechat_now_is_the_newest_session_time_in_wechats_clock(tmp_path, db, clock):
+    """This PC's clock three hours ahead of WeChat's: ``wechat_now`` is WeChat's time (the newest line written, read
+    off the session list), never this PC's, and moves on as WeChat writes."""
+    wechat = float(int(time.time())) - 3 * 3600
+    db.line(NOTICE_GROUP, COLLEAGUE, "明天开会", wechat - 60)
+    db.say(HER, HER, "你好", wechat - 5)
+    run = Run(tmp_path, db)
+    assert run.backend.wechat_now() == wechat - 5
+    db.line(NOTICE_GROUP, COLLEAGUE, "收到", wechat)
+    assert run.backend.wechat_now() == wechat
+
+
+def test_wechat_now_takes_a_sessions_last_line_before_its_order_key_and_milliseconds_as_seconds(tmp_path, db, clock):
+    """A session row of WeChat 4: ``last_timestamp`` (its last line) before ``sort_timestamp`` (the list's order key,
+    which need not be a line's time); milliseconds are seconds; a row without a time is passed over."""
+    t = float(int(clock.now))
+    run = Run(tmp_path, db)
+    db.get_sessions = lambda limit=500: [
+        {"username": GROUP, "sort_timestamp": t + 3 * 3600, "last_timestamp": t - 10},
+        {"username": HER, "sort_timestamp": (t - 20) * 1000},                  # (milliseconds)
+        {"username": TESTER, "last_timestamp": 0, "sort_timestamp": t - 30},
+        {"username": STRANGER}, "not a row"]
+    assert run.backend.wechat_now() == t - 10
+    db.get_sessions = lambda limit=500: [{"username": STRANGER}]
+    assert run.backend.wechat_now() is None                                     # no session gives a time
+    db.get_sessions = lambda limit=500: []
+    assert run.backend.wechat_now() is None
+
+
+def test_wechat_now_while_the_database_cannot_be_read_is_none_and_quiet(tmp_path, db, clock, caplog):
+    run = Run(tmp_path, db)
+    with caplog.at_level(logging.DEBUG, logger="src.wechat.wcdb_backend"):
+        assert run.backend.wechat_now() == clock.now - 20 * 86400              # (the db fixture's newest line)
+        db.fail = True
+        assert run.backend.wechat_now() is None
+
+        def broken(limit=500):
+            raise WcdbCallError("wcdb_get_sessions", -3)
+        db.fail, db.get_sessions = False, broken                               # an error code: no session list
+        assert run.backend.wechat_now() is None
+        del db.get_sessions
+        run.backend._client = None                                             # the database is not open
+        assert run.backend.wechat_now() is None
+    assert not [r for r in caplog.records if r.levelno >= logging.INFO]
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    for name in (BOSS_NAME, HER_NAME, NOTICE_NAME, OWN_NAME, BOSS, HER, OLD_GROUP, NOTICE_GROUP):
+        assert name not in text
 
 
 # ── has_private_chat: has she a private chat with us, quietly ──────────────────
@@ -848,22 +958,47 @@ def test_a_group_wechat_gives_no_name_is_not_typed_until_it_has_one(tmp_path, db
     assert run.backend._window.typed == [(GROUP_NAME, "你好小美～")]
 
 
+KNOWN_PRIVATE = {_ocr_key("小美美"), _ocr_key("Amy 陈")}                      # private chats the bot knows
+KNOWN_OTHERS = KNOWN_PRIVATE | {_ocr_key(NOTICE_NAME)}                         # every other chat it knows
+
+
 @pytest.mark.parametrize("title, name, is_group, verdict", [
     ("小美 (3)", "小美", True, "ok"),                          # a group's title: its member count
     ("小美（3）", "小美", True, "ok"),
-    ("小美美", "小美", True, "private"),                        # a contact the bot does not know, opened for the group
-    ("小美", "小美", True, "private"),                          # a contact of the group's very name
-    ("小美美美美…", "小美合作群", True, "private"),              # cut off, and not the group's name either
-    ("小美合…", "小美合作群", True, "unknown"),                  # cut off: its member count may be too
-    ("小美美 (8)", "小美", True, "unknown"),                    # a group the bot does not know: no judgement, as before
+    ("小美合作群(3", "小美合作群", True, "ok"),                  # (second review, F10) OCR cut its count off …
+    ("小美合作群（3", "小美合作群", True, "ok"),
+    ("小美合作群 (35人", "小美合作群", True, "ok"),
+    ("小美合作群(", "小美合作群", True, "ok"),                   # … even all of it but its bracket
+    ("小美美", "小美", True, "private"),                        # a private chat the bot knows, opened for the group
+    ("AMY陈", "小美", True, "private"),                         # (「Amy 陈」: no spaces, no case)
+    ("小美美(3", "小美", True, "other"),                        # a known name with a count cut off: a group's title
+    ("小美美 (3)", "小美", True, "other"),                      # (another known chat: as before)
+    ("公司通知群", "小美", True, "other"),                      # a known group, its count lost
+    ("小美", "小美", True, "unknown"),                          # the group's own name, its count lost: sent as before
+    ("小美美美美", "小美", True, "unknown"),                    # a contact the bot does not know: sent as before
+    ("小美美美美…", "小美合作群", True, "unknown"),              # cut off, not known
+    ("小美美美美 (8)", "小美", True, "unknown"),                # a group the bot does not know: as before
+    ("小美美美美(8", "小美", True, "unknown"),
     ("", "小美", True, "unknown"),                             # nothing read: as before
     ("……", "小美", True, "unknown"),
-    ("小美美", "小美", False, "unknown"),                       # a private send: as before
+    ("小美美", "小美", False, "other"),                         # a private send: as before (a known chat) …
+    ("小美美美美", "小美", False, "unknown"),                   # … one it does not know …
     ("小美", "小美", False, "ok"),
-    ("小美美 (8)", "小美", False, "group"),
+    ("小美美美美 (8)", "小美", False, "group"),                 # … a group's title …
+    ("小美美美美(8", "小美", False, "unknown"),                 # … a count cut off is no count for it
+    ("小美(3", "小美", False, "unknown"),
 ])
 def test_what_a_title_says_when_a_group_was_asked_for(title, name, is_group, verdict):
-    assert title_verdict(title, name, set(), is_group) == verdict
+    assert title_verdict(title, name, KNOWN_OTHERS - {_ocr_key(name)}, is_group, KNOWN_PRIVATE) == verdict
+
+
+def test_a_private_chat_whose_name_reads_like_the_groups_is_known_too():
+    """The group 「小美」 and a private chat 「小美🌸」 (no namesake: the names differ, so the search is typed): OCR does
+    not read the emoji, so a title 「小美」 without a count may be hers.  Refused; with a count it is the group."""
+    private = {_ocr_key("小美🌸")}
+    assert title_verdict("小美", "小美", set(), True, private) == "private"
+    assert title_verdict("小美 (3)", "小美", set(), True, private) == "ok"
+    assert title_verdict("小美", "小美", set(), True) == "unknown"                # nobody known by it
 
 
 def reading(run, *titles):
@@ -880,30 +1015,65 @@ def reading(run, *titles):
     return reads
 
 
-@pytest.mark.parametrize("title", ["小美美", HER_NAME])
-def test_a_group_send_whose_search_opened_a_chat_without_a_member_count_is_refused(tmp_path, db, clock, title):
-    """SEND_VERIFY_CHAT: the boss named the group 「小美」 after her, the search opened the contact 「小美美」 (or a
-    contact 「小美」 the bot does not know): no member count, not the group.  Read again first (the screen may still
-    show the chat before), then refused: nothing pasted, no file, no screenshot of that chat."""
+MEIMEI = "小美美"                                                          # a contact whose name holds the group's
+
+
+@pytest.mark.parametrize("known", ["session list", "console's list", "read"])
+def test_a_group_send_whose_search_opened_a_known_private_chat_is_refused(tmp_path, db, clock, known):
+    """SEND_VERIFY_CHAT: the boss named the group 「小美」 after her, and the search opened the contact 「小美美」, a
+    private chat the bot knows (WeChat lists it, the console's list has it, or the bot reads it): no member count,
+    not the group.  Read again first (the screen may still show the chat before), then refused (``NOT_A_GROUP``):
+    nothing pasted, no file, no screenshot of that chat."""
     db.group(GROUP, HER_NAME, [BOSS, HER, ME_SENDER], clock.now - 60)
-    run = sending(tmp_path, db, title)
-    reads = reading(run, title)
+    db.names[STRANGER] = MEIMEI
+    if known == "session list":
+        db.say(STRANGER, STRANGER, "在吗", clock.now - 30)
+    elif known == "console's list":
+        listed = tmp_path / "data" / "private_chat_names.json"
+        listed.parent.mkdir(exist_ok=True)
+        listed.write_text(json.dumps({STRANGER: MEIMEI}, ensure_ascii=False), encoding="utf-8")
+    run = sending(tmp_path, db, MEIMEI)
+    if known == "read":
+        run.backend._add_talker(MEIMEI, STRANGER, is_group=False)        # (a creator's chat, read before WeChat lists it)
+    reads = reading(run, MEIMEI)
     run.backend.watch_group(GROUP, since=clock.now)
     run.poll()
     refused = run.backend.send_text(GROUP, "你好小美～")
     assert isinstance(refused, SendRefused) and not refused
-    assert refused.reason == NOT_A_GROUP.format(name=HER_NAME, title=title) and len(reads) == VERIFY_LOOKS
+    assert refused.reason == NOT_A_GROUP.format(name=HER_NAME, title=MEIMEI) and len(reads) == VERIFY_LOOKS
     assert not run.backend.send_file(GROUP, str(tmp_path / "样品.png"))
     assert run.backend._screenshot_of(HER_NAME, GROUP) == ""
     assert run.backend._window.typed == [] and run.backend._window.shots == []
 
 
+def test_a_group_send_whose_title_reads_as_a_known_private_chat_of_the_groups_name_is_refused(tmp_path, db, clock):
+    """「小美🌸」 is no namesake of the group 「小美」 (the names differ: the search is typed), but OCR reads her title
+    「小美」: without a member count it may be hers, so the send is refused; with the group's count it goes."""
+    db.group(GROUP, HER_NAME, [BOSS, HER, ME_SENDER], clock.now - 60)
+    db.names[STRANGER] = "小美🌸"
+    db.say(STRANGER, STRANGER, "在吗", clock.now - 30)
+    run = sending(tmp_path, db, HER_NAME)
+    run.backend.watch_group(GROUP, since=clock.now)
+    run.poll()
+    refused = run.backend.send_text(GROUP, "你好小美～")
+    assert isinstance(refused, SendRefused) and refused.reason == NOT_A_GROUP.format(name=HER_NAME, title=HER_NAME)
+    run.backend._title_reader = lambda hwnd: f"{HER_NAME} (3)"
+    assert run.backend.send_text(GROUP, "你好小美～") is True
+    assert run.backend._window.typed == [(HER_NAME, "你好小美～")]
+
+
 @pytest.mark.parametrize("titles", [
     [f"{HER_NAME} (3)"],
-    ["小美美", f"{HER_NAME} (3)"],                               # the screen still showed the chat before
+    [f"{NOTICE_NAME} (4)", f"{HER_NAME} (3)"],                   # the screen still showed the chat before
+    [f"{HER_NAME}(3"], [f"{HER_NAME}（3"], [f"{HER_NAME} (3人"],  # (second review, F10) OCR cut its count off
+    [MEIMEI], [HER_NAME],                                         # a contact the bot does not know, its own name
     [""], ["……"], [RuntimeError("Windows has no OCR language installed")],      # cannot be read: as before
-], ids=["its title", "read again", "nothing read", "no letters", "no OCR"])
-def test_a_group_send_goes_ahead_with_the_groups_title_or_one_that_cannot_be_read(tmp_path, db, clock, titles):
+], ids=["its title", "read again", "count cut", "full-width count cut", "count of 人 cut", "unknown contact",
+        "its own name without a count", "nothing read", "no letters", "no OCR"])
+def test_a_group_send_goes_ahead_with_the_groups_title_or_one_the_bot_does_not_know(tmp_path, db, clock, titles):
+    """Only a known private chat's title is refused: a title the bot does not know goes ahead, as it did before the
+    groups were sent to (a contact never seen; the group's own name, its member count lost), and so does a group's
+    title whose count OCR cut off at the end."""
     db.group(GROUP, HER_NAME, [BOSS, HER, ME_SENDER], clock.now - 60)
     run = sending(tmp_path, db, "")
     reading(run, *titles)
@@ -913,27 +1083,79 @@ def test_a_group_send_goes_ahead_with_the_groups_title_or_one_that_cannot_be_rea
     assert run.backend._window.typed == [(HER_NAME, "你好小美～")]
 
 
+def test_a_group_whose_count_ocr_cut_off_is_sent_to_as_asked(tmp_path, db, clock, caplog):
+    """(second review, F10) This PC's OCR reads the group's title without its closing bracket, 「小美合作群(3」: a group's
+    title all the same (refused, every group draft on such a PC would fail), and the one asked for."""
+    db.group(GROUP, GROUP_NAME, [BOSS, HER, ME_SENDER], clock.now - 60)
+    db.say(HER, HER, "你好", clock.now - 30)                    # her private chat, known (her name is in the group's)
+    run = sending(tmp_path, db, f"{GROUP_NAME}(3")
+    run.backend.watch_group(GROUP, since=clock.now)
+    run.poll()
+    with caplog.at_level(logging.INFO, logger="src.wechat.wcdb_backend"):
+        assert run.backend.send_text(GROUP, "你好小美～") is True
+        run.backend._title_reader = lambda hwnd: f"{GROUP_NAME}（3"
+        assert run.backend.send_text(GROUP, "我是品牌的运营") is True
+    assert run.backend._window.typed == [(GROUP_NAME, "你好小美～"), (GROUP_NAME, "我是品牌的运营")]
+    assert sum("as asked" in r.getMessage() for r in caplog.records) == 2
+
+
 def test_a_private_send_is_checked_as_before(tmp_path, db, clock):
-    """Her private chat (the console's list names it): a title the bot does not know is no judgement, as it was."""
+    """Her private chat (the console's list names it): a title the bot does not know is no judgement, as it was, and a
+    count cut off is no count for it; a group's title, or another private chat the bot knows, is refused
+    (``WRONG_CHAT``), never ``NOT_A_GROUP``."""
     listed = tmp_path / "data" / "private_chat_names.json"
     listed.parent.mkdir(exist_ok=True)
-    listed.write_text(json.dumps({HER: HER_NAME}, ensure_ascii=False), encoding="utf-8")
-    for title in ("小美美", HER_NAME):
+    listed.write_text(json.dumps({HER: HER_NAME, STRANGER: MEIMEI}, ensure_ascii=False), encoding="utf-8")
+    for title in ("小美美美美", HER_NAME, "小美美美美(8", f"{HER_NAME}(3"):
         run = sending(tmp_path, db, title)
         assert run.backend.send_text(HER, "你好～") is True
         assert run.backend._window.typed == [(HER_NAME, "你好～")]
-    run = sending(tmp_path, db, f"{GROUP_NAME} (3)")                     # a group's title, for her private chat
-    assert not run.backend.send_text(HER, "你好～") and run.backend._window.typed == []
+    for title in (f"{GROUP_NAME} (3)", MEIMEI):                          # a group's title; a private chat it knows
+        run = sending(tmp_path, db, title)
+        refused = run.backend.send_text(HER, "你好～")
+        assert isinstance(refused, SendRefused) and refused.reason == WRONG_CHAT.format(name=HER_NAME, title=title)
+        assert run.backend._window.typed == []
+
+
+def test_a_refused_send_logs_the_ids_first_characters_and_the_verdict_only(tmp_path, db, clock, caplog):
+    """(second review, F12) The reason, with the names, goes back to the caller (PRM shows it on the draft); the log
+    line has the chat id's first 8 characters and the verdict only: a known private chat opened for the group
+    (NOT_A_GROUP), another known chat (WRONG_CHAT), a group WeChat gives no name (GROUP_NO_NAME)."""
+    db.group(GROUP, GROUP_NAME, [BOSS, HER, ME_SENDER], clock.now - 60)
+    nameless = "1000000010@chatroom"
+    db.group(nameless, "", [BOSS, TESTER, ME_SENDER], clock.now - 50)
+    db.names[STRANGER] = MEIMEI
+    db.say(STRANGER, STRANGER, "在吗", clock.now - 30)
+    run = sending(tmp_path, db, MEIMEI)
+    run.backend.watch_group(GROUP, since=clock.now)
+    run.backend.watch_group(nameless, since=clock.now)
+    run.poll()
+    caplog.set_level(logging.DEBUG, logger="src.wechat.wcdb_backend")
+    caplog.clear()
+    assert run.backend.send_text(GROUP, "你好小美～").reason == NOT_A_GROUP.format(name=GROUP_NAME, title=MEIMEI)
+    run.backend._title_reader = lambda hwnd: f"{NOTICE_NAME} (4)"
+    assert run.backend.send_text(GROUP, "你好小美～").reason == WRONG_CHAT.format(name=GROUP_NAME,
+                                                                                  title=f"{NOTICE_NAME} (4)")
+    assert run.backend.send_text(nameless, "你好").reason == GROUP_NO_NAME
+    said = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(said) == 3 and all(line.startswith("Not ") and "10000000…" in line for line in said)
+    assert "'private' (NOT_A_GROUP)" in said[0] and "'other' (WRONG_CHAT)" in said[1]
+    for name in (GROUP_NAME, MEIMEI, NOTICE_NAME, HER_NAME, GROUP, nameless):
+        assert all(name not in line for line in said)
 
 
 def test_no_name_is_logged(tmp_path, db, clock, caplog):
     t = clock.now
     db.group(GROUP, GROUP_NAME, [BOSS, HER, ME_SENDER], t - 60)
     db.line(GROUP, HER, "在吗", t - 30)
+    unread = "1000000011@chatroom"
+    db.group(unread, "老板测试和小美的另一个群", [BOSS, HER, ME_SENDER], t - 50)
+    db.members[unread] = []                                              # (its members are not written yet)
     with caplog.at_level(logging.DEBUG, logger="src.wechat.wcdb_backend"):
         run = Run(tmp_path, db).start()
         run.backend.contact_ids([BOSS_NAME])
-        run.backend.boss_groups({BOSS}, set(), 6)
+        assert {"chat": unread, "unreadable": True} in run.backend.boss_groups({BOSS}, set(), 6)
+        assert run.backend.wechat_now() == t - 30
         run.backend.group_members(GROUP)
         run.backend.watch_group(GROUP, since=t - 60)
         run.poll()
