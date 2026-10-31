@@ -13,6 +13,8 @@ from unittest.mock import patch
 from router_support import ADMIN, BOT, NOW, RouterCase, admin_msg, group_msg, private_msg
 
 from src.admin import RELAY_HELP
+from src.prm.service import PrmService
+from src.prm.store import PrmStore
 from src.relay.service import ClaudeRelay
 from src.relay.store import RelayStore
 
@@ -72,6 +74,66 @@ class NoGroupIsEverAnswered(GatewayCase):
         router = self.gateway()
         router.handle(group_msg("g1", f"@{BOT} 你好", is_at_mentioned=True))
         assert self.stored(router, "g1") == 1 and router.messages_processed == 1
+
+
+class TheBossGroupIsTheOneException(GatewayCase):
+    """老板拉的群 (PRM_BOSS_GROUPS, src/prm/boss_groups.py): a group a boss made with a creator and us, once the bot took it
+    over, is the route's one exception: HER lines there become a silent draft job (never a reply).  The boss's and every
+    other member's lines there (an @, a cc, the admin's commands, a join line, a picture, a voice) stay unanswered and
+    make no job; every other group stays silent; with the switch off nothing changes."""
+
+    BOSS_GROUP = "200000001@chatroom"
+    HER = "wxid_creator01"
+
+    def boss_gateway(self, on=True):
+        from test_prm_boss_groups import BOSS, BOSS_ID, ME, Backend
+
+        router = self.gateway()
+        cfg = SimpleNamespace(admin_wxid=ADMIN, claude_relay_wxids=[], prm_copilot="on",
+                              prm_boss_groups="on" if on else "off", prm_group_with=BOSS)
+        self.prm = PrmService(cfg, self.relay, store=PrmStore(":memory:"), clock=lambda: NOW,
+                              send=lambda chat, text: self.fail(f"nothing is sent ({chat})"))
+        backend = Backend()
+        self.prm.boss_groups.attach(backend)
+        self.prm.boss_groups.scan()                                     # the baseline
+        backend.groups[self.BOSS_GROUP] = {"name": "老板测试、小美", "members": [ME, BOSS_ID, self.HER],
+                                           "joined_at": NOW}               # (WeChat's line that we were added)
+        self.prm.boss_groups._scanned = 0
+        self.prm.boss_groups.scan()                                     # taken over (on)
+        router._prm = self.prm
+        self.boss_id = BOSS_ID
+        return router
+
+    def drafts(self):
+        return [j for j in self.relay.store.list_jobs(limit=1000) if j["kind"] == "prm" and j["text"]]
+
+    def test_only_her_lines_in_the_linked_group_become_draft_jobs_and_nothing_is_answered(self):
+        router = self.boss_gateway()
+        self.assertTrue(self.prm.is_party_group(self.BOSS_GROUP))
+        for i, fields in enumerate(GROUP_MESSAGES):                     # the boss, the admin, anyone but her
+            fields = {"sender_id": self.boss_id, "sender_name": "老板测试", **fields}
+            assert router.handle(group_msg(f"b{i}", chat_id=self.BOSS_GROUP, **fields)) is None, fields
+        for i, fields in enumerate(GROUP_MESSAGES):                     # her lines in every other group
+            fields = {**fields, "sender_id": self.HER, "sender_name": "小美"}
+            assert router.handle(group_msg(f"o{i}", **fields)) is None, fields
+            assert self.trace.notes["ended_by"] == "silence", fields
+        assert self.drafts() == [] and [j["kind"] for j in self.relay.store.list_jobs(limit=1000)] == ["prm"]
+        assert router.handle(group_msg("h1", "老板好，你们家主要卖什么", chat_id=self.BOSS_GROUP, sender_id=self.HER,
+                                       sender_name="小美")) is None
+        assert self.trace.notes["ended_by"] == "prm" and self.trace.redacted == "[老板拉的群（已接手），内容不记录]"
+        [job] = self.drafts()
+        assert job["chat_id"] == self.BOSS_GROUP and job["text"].endswith("老板好，你们家主要卖什么")
+        assert self.stored(router, "b0") == 1 and self.stored(router, "o0") == 1     # read and kept, never answered
+
+    def test_with_the_switch_off_the_boss_group_is_one_more_silent_group(self):
+        router = self.boss_gateway(on=False)
+        self.assertFalse(self.prm.is_party_group(self.BOSS_GROUP))
+        for i, fields in enumerate(GROUP_MESSAGES):
+            for sender in (self.boss_id, self.HER):
+                fields = {**fields, "sender_id": sender}
+                assert router.handle(group_msg(f"{sender}{i}", chat_id=self.BOSS_GROUP, **fields)) is None, fields
+                assert self.trace.notes["ended_by"] == "silence", fields
+        assert self.relay.store.list_jobs(limit=1000) == []
 
 
 class NoStrangerIsEverAnswered(GatewayCase):

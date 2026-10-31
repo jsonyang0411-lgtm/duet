@@ -42,6 +42,16 @@
                     audit, the day's count and the gap between two adds; no number in it
 ``creator_links``   who a registered creator is on 抖音 (her 抖音号, as an operator confirmed it): ``_creator_ids``
                     reads it
+``boss_groups``     老板拉的群 (PRM_BOSS_GROUPS, src/prm/boss_groups.py): each group a boss of PRM_GROUP_WITH made with us
+                    that the scan found (not in prm_meta's ``boss_groups_baseline``): when found and its oldest line
+                    (``made_at``), where it stands (``state``: pending / waiting / linked / ignored / gone), her party
+                    and deal once linked, its members but us and the bosses in it (names stay in prm.db only), why, the
+                    last line handled, ours too (the watch's start after a restart: the next second), the boss's and
+                    other members' lines kept for her next draft (``lines``, each with its number ``seq``, given in
+                    order by ``line_seq``: a reply sent drops every line numbered up to the highest its job was told),
+                    when we last answered there (``replied_at``), while its 开场白 waits for the watch's catch-up, when it
+                    was taken over (``opening_due``), and WeChat's line that we were added (``joined_at``, WeChat's
+                    clock: only a group added to after the baseline is taken over by itself, review 2026-10-31 F4)
 
 A packet's life: ``pending`` (waits in the console) -> ``approved`` (an operator said
 send, the kind's gate is ``auto``, or the 下班时段 window sent it: route ``night``) -> ``sending`` ->
@@ -275,6 +285,25 @@ CREATE TABLE IF NOT EXISTS creator_links (
     created_at REAL NOT NULL,
     PRIMARY KEY (party_id, platform, account)
 );
+CREATE TABLE IF NOT EXISTS boss_groups (
+    chat TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    found_at REAL NOT NULL,
+    made_at REAL,
+    state TEXT NOT NULL,
+    party_id INTEGER,
+    deal_id INTEGER,
+    members TEXT NOT NULL DEFAULT '[]',
+    boss TEXT NOT NULL DEFAULT '[]',
+    why TEXT NOT NULL DEFAULT '',
+    last_line_at REAL,
+    lines TEXT NOT NULL DEFAULT '[]',
+    replied_at REAL,
+    updated_at REAL NOT NULL,
+    line_seq INTEGER NOT NULL DEFAULT 0,
+    opening_due REAL,
+    joined_at REAL
+);
 """
 
 # Columns added after the first version: (table, column, type).
@@ -299,6 +328,13 @@ _ADDED_COLUMNS = (
     ("friend_adds", "remark_set", "INTEGER NOT NULL DEFAULT 0"),
     ("deals", "three_party", "TEXT NOT NULL DEFAULT '{}'"),           # 三方群 (src/prm/three_party.py, 2026-10-30)
     ("deals", "draft_note", "TEXT NOT NULL DEFAULT ''"),              # 起草备注 (operator-written, 2026-10-31)
+    # 老板拉的群 (src/prm/boss_groups.py, review 2026-10-31): the kept lines' numbers, the 开场白 waiting for the catch-up;
+    # her latest line per chat (``last_by_chat``: a 稍等 round is one chat's, ``send_holding_replies``)
+    ("boss_groups", "line_seq", "INTEGER NOT NULL DEFAULT 0"),
+    ("boss_groups", "opening_due", "REAL"),
+    ("deals", "last_by_chat", "TEXT NOT NULL DEFAULT '{}'"),
+    # 老板拉的群, second review 2026-10-31 (F4): WeChat's line that we were added (the scan's confidence rule)
+    ("boss_groups", "joined_at", "REAL"),
 )
 
 # What the creators wrote, or our side's own words, waiting for the next draft job.
@@ -350,6 +386,7 @@ def deal_view(row: dict) -> dict:
     out["notices"] = notices_of(row)
     out["chain"] = _loads(row.get("chain"), {})
     out["three_party"] = _loads(row.get("three_party"), {})
+    out["last_by_chat"] = _loads(row.get("last_by_chat"), {})
     return out
 
 
@@ -412,6 +449,27 @@ def friend_add_view(row: dict) -> dict:
     for key in FRIEND_ADD_FLAGS:
         out[key] = bool(row.get(key))
     out["remark"] = str(row.get("remark") or "")
+    return out
+
+
+# 老板拉的群 (src/prm/boss_groups.py): the JSON columns of a group's row, and what may be set besides its state.
+BOSS_GROUP_JSON = {"members": [], "boss": [], "lines": []}
+BOSS_GROUP_FIELDS = {"name", "found_at", "made_at", "state", "party_id", "deal_id", "members", "boss", "why",
+                     "last_line_at", "lines", "replied_at", "opening_due", "joined_at"}
+
+
+def _seq(line: dict) -> int:
+    """A kept line's number (``boss_groups.lines[].seq``); 0 without one (kept by an older version) or a bad one."""
+    try:
+        return int(line.get("seq") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def boss_group_view(row: dict) -> dict:
+    out = dict(row)
+    for key, empty in BOSS_GROUP_JSON.items():
+        out[key] = [x for x in _loads(row.get(key), empty) if isinstance(x, dict)]
     return out
 
 
@@ -563,15 +621,15 @@ class PrmStore:
 
     def update_deal(self, deal_id: int, now: Optional[float] = None, *, merge_slots: Optional[dict] = None,
                     replace_slots: Optional[dict] = None, **fields) -> None:
-        """Set ``fields`` and merge (or replace) the slot values; ``chain`` and ``three_party`` are dicts (stored as
-        JSON), ``draft_note`` is kept as ``draft_note_text`` makes it.  (``attention`` is the notices' texts:
+        """Set ``fields`` and merge (or replace) the slot values; ``chain``, ``three_party`` and ``last_by_chat`` are dicts
+        (stored as JSON), ``draft_note`` is kept as ``draft_note_text`` makes it.  (``attention`` is the notices' texts:
         ``set_notice`` / ``drop_notices`` / ``edit_notices``.)"""
         allowed = {"stage", "mode", "mode_until", "stage_proposal", "last_message_at",
-                   "delivered_at", "purged_at", "holding_round", "chain", "three_party", "draft_note"}
+                   "delivered_at", "purged_at", "holding_round", "chain", "three_party", "draft_note", "last_by_chat"}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"not a deal field: {sorted(unknown)}")
-        for name in ("chain", "three_party"):
+        for name in ("chain", "three_party", "last_by_chat"):
             if name in fields:
                 fields[name] = json.dumps(fields[name] or {}, ensure_ascii=False)
         if "draft_note" in fields:
@@ -907,6 +965,22 @@ class PrmStore:
                                    (json.dumps(new, ensure_ascii=False), error(row["error"] or ""), packet_id))
             self._conn.commit()
             return new
+
+    def aim_packet(self, packet_id: int, chat_id: str, meta: dict) -> bool:
+        """A packet not sent yet goes to another chat (老板拉的群: a packet the bot started itself for a creator with no
+        private chat with us): its ``chat_id``, and ``meta`` merged into its meta.  True when it was changed."""
+        live = (PENDING, APPROVED, SENDING)
+        with self._lock:
+            row = self._conn.execute(f"SELECT meta FROM action_packets WHERE id = ? AND status IN ({', '.join('?' * 3)})",
+                                     (packet_id, *live)).fetchone()
+            if row is None:
+                return False
+            cur = self._conn.execute(
+                f"UPDATE action_packets SET chat_id = ?, meta = ? WHERE id = ? AND status IN ({', '.join('?' * 3)})",
+                (str(chat_id), json.dumps({**_loads(row["meta"], {}), **(meta or {})}, ensure_ascii=False), packet_id,
+                 *live))
+            self._conn.commit()
+            return cur.rowcount == 1
 
     def set_outcome(self, packet_id: int, outcome: str) -> None:
         with self._lock:
@@ -1562,3 +1636,159 @@ class PrmStore:
                                      (int(party_id), platform, str(account)))
             self._conn.commit()
             return cur.rowcount == 1
+
+    # ── 老板拉的群 (PRM_BOSS_GROUPS, src/prm/boss_groups.py) ──────────────────
+
+    def add_boss_group(self, chat: str, *, name: str, found_at: float, state: str, members: list, boss: list,
+                       why: str = "", made_at: Optional[float] = None, joined_at: Optional[float] = None,
+                       now: Optional[float] = None) -> bool:
+        """A group the scan found (``made_at``: its oldest line, when the backend knows it; ``joined_at``: WeChat's line
+        that we were added, WeChat's clock); a group kept already stays as it is.  True when it is new."""
+        now = time.time() if now is None else now
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO boss_groups (chat, name, found_at, made_at, joined_at, state, members, boss, why,"
+                " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (str(chat), str(name or ""), float(found_at), made_at, joined_at, str(state),
+                 json.dumps(members or [], ensure_ascii=False), json.dumps(boss or [], ensure_ascii=False),
+                 str(why or ""), now))
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def boss_group(self, chat: str) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM boss_groups WHERE chat = ?", (str(chat),)).fetchone()
+        return boss_group_view(dict(row)) if row else None
+
+    def boss_groups(self, states: tuple = (), *, deal_id: Optional[int] = None) -> list[dict]:
+        """The groups kept, the newest found first: in these ``states`` (all when empty), of this deal (any when None)."""
+        sql, where, args = "SELECT * FROM boss_groups", [], []
+        if states:
+            where.append(f"state IN ({', '.join('?' * len(states))})")
+            args += list(states)
+        if deal_id is not None:
+            where.append("deal_id = ?")
+            args.append(int(deal_id))
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY found_at DESC, chat", args).fetchall()
+        return [boss_group_view(dict(r)) for r in rows]
+
+    def update_boss_group(self, chat: str, now: Optional[float] = None, *, states: tuple = (), **fields) -> bool:
+        """Set ``fields`` (``BOSS_GROUP_FIELDS``; the JSON ones as lists), only while the group is in one of ``states``
+        when given (compare-and-set: of two clicks only one takes it).  True when it changed."""
+        unknown = set(fields) - BOSS_GROUP_FIELDS
+        if unknown:
+            raise ValueError(f"not a boss_groups field: {sorted(unknown)}")
+        for key in BOSS_GROUP_JSON:
+            if key in fields:
+                fields[key] = json.dumps(fields[key] or [], ensure_ascii=False)
+        fields["updated_at"] = time.time() if now is None else now
+        names = sorted(fields)
+        sql = f"UPDATE boss_groups SET {', '.join(f'{n} = ?' for n in names)} WHERE chat = ?"
+        args = [*[fields[n] for n in names], str(chat)]
+        if states:
+            sql += f" AND state IN ({', '.join('?' * len(states))})"
+            args += list(states)
+        with self._lock:
+            cur = self._conn.execute(sql, args)
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def note_boss_group_line(self, chat: str, at: float) -> None:
+        """A line of the group was handled (``last_line_at`` never goes back: the watch starts there after a restart)."""
+        with self._lock:
+            self._conn.execute("UPDATE boss_groups SET last_line_at = MAX(COALESCE(last_line_at, 0), ?) WHERE chat = ?",
+                               (float(at), str(chat)))
+            self._conn.commit()
+
+    def add_boss_group_line(self, chat: str, line: dict, keep: int) -> Optional[int]:
+        """One of the boss's or the other members' lines for her next draft (``{"who", "at", "text"}``, masked), with the
+        group's next number (``seq``, from ``line_seq``: never given twice): the newest ``keep`` by when they were
+        written are kept.  A line written long ago and handed on late (the watch's catch-up) is kept like any other.
+        Returns its number (None: no such group)."""
+        with self._lock:
+            row = self._conn.execute("SELECT lines, line_seq FROM boss_groups WHERE chat = ?", (str(chat),)).fetchone()
+            if row is None:
+                return None
+            seq = int(row["line_seq"] or 0) + 1
+            lines = [x for x in _loads(row["lines"], []) if isinstance(x, dict)] + [{**dict(line), "seq": seq}]
+            lines = sorted(lines, key=lambda x: (float(x.get("at") or 0), _seq(x)))
+            self._conn.execute("UPDATE boss_groups SET lines = ?, line_seq = ? WHERE chat = ?",
+                               (json.dumps(lines[-int(keep):], ensure_ascii=False), seq, str(chat)))
+            self._conn.commit()
+            return seq
+
+    def boss_group_replied(self, chat: str, seqs=None, now: Optional[float] = None) -> int:
+        """We answered in the group: every kept line numbered up to the highest of ``seqs`` goes (the numbers the sent
+        reply's job was told: the lines kept before those and not told, older ones, were before our reply too, second
+        review 2026-10-31 F7; a line without a number, kept by an older version, counts as 0); None (an operator's own
+        line there) every line kept now.  A line kept later stays, whenever it was written.  ``replied_at`` says when.
+        Returns how many went."""
+        now = time.time() if now is None else now
+        with self._lock:
+            row = self._conn.execute("SELECT lines, line_seq FROM boss_groups WHERE chat = ?", (str(chat),)).fetchone()
+            if row is None:
+                return 0
+            lines = [x for x in _loads(row["lines"], []) if isinstance(x, dict)]
+            if seqs is None:
+                upto = int(row["line_seq"] or 0)
+            else:
+                upto = 0
+                for n in seqs or ():
+                    try:
+                        upto = max(upto, int(n))
+                    except (TypeError, ValueError):
+                        continue
+            kept = [x for x in lines if _seq(x) > upto]
+            self._conn.execute("UPDATE boss_groups SET replied_at = ?, lines = ? WHERE chat = ?",
+                               (now, json.dumps(kept, ensure_ascii=False), str(chat)))
+            self._conn.commit()
+            return len(lines) - len(kept)
+
+    def delete_boss_groups(self, *, state: str, before: float) -> list[str]:
+        """Drop the groups in ``state`` not changed since ``before``; returns their ids."""
+        with self._lock:
+            rows = self._conn.execute("SELECT chat FROM boss_groups WHERE state = ? AND updated_at < ?",
+                                      (str(state), float(before))).fetchall()
+            chats = [str(r["chat"]) for r in rows]
+            self._conn.executemany("DELETE FROM boss_groups WHERE chat = ?", [(c,) for c in chats])
+            self._conn.commit()
+        return chats
+
+    def scrub_boss_groups(self, deal_id: int, now: Optional[float] = None) -> int:
+        """8.2 clean-up of a deal's groups: the names of their members and of the group (WeChat's name for it holds
+        hers) and the lines kept go; the ids stay (the group stays hers).  Returns how many rows changed."""
+        now = time.time() if now is None else now
+        changed = 0
+        with self._lock:
+            rows = self._conn.execute("SELECT chat, name, members, boss, lines FROM boss_groups WHERE deal_id = ?",
+                                      (int(deal_id),)).fetchall()
+            for row in rows:
+                members = [{"wxid": str(m.get("wxid") or ""), "name": ""}
+                           for m in _loads(row["members"], []) if isinstance(m, dict)]
+                new = (json.dumps(members, ensure_ascii=False), "[]")
+                if row["name"] or new != (row["members"], row["lines"]):
+                    self._conn.execute("UPDATE boss_groups SET name = '', members = ?, lines = ?, updated_at = ?"
+                                       " WHERE chat = ?", (*new, now, row["chat"]))
+                    changed += 1
+            self._conn.commit()
+        return changed
+
+    def clear_event_keys(self, deal_id: int, kind: str, keys: tuple) -> int:
+        """Take ``keys`` out of the details of a deal's events of ``kind`` (8.2: the group's name in 老板拉的群's record).
+        Returns how many changed."""
+        changed = 0
+        with self._lock:
+            rows = self._conn.execute("SELECT id, detail FROM deal_events WHERE deal_id = ? AND kind = ?",
+                                      (int(deal_id), str(kind))).fetchall()
+            for row in rows:
+                detail = _loads(row["detail"], {})
+                if any(k in detail for k in keys):
+                    self._conn.execute("UPDATE deal_events SET detail = ? WHERE id = ?",
+                                       (json.dumps({k: v for k, v in detail.items() if k not in keys},
+                                                   ensure_ascii=False), row["id"]))
+                    changed += 1
+            self._conn.commit()
+        return changed

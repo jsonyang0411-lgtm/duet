@@ -7,8 +7,14 @@ group 「Amy粉丝群」), or a chat the bot does not read, could open someone e
 went there.  Now the title is read by OCR after the search: another chat the bot knows of, or a group's title
 when a private chat was asked for, is refused (nothing pasted, the reason given); a title that cannot be read or
 judged changes nothing (sent as before), so an OCR problem never stops the sends.
+
+A group asked for (老板拉的群, tests/test_boss_groups_backend.py): a title without a member count is refused only when
+it reads as a private chat the bot knows (``NOT_A_GROUP``); a count OCR cut off (「测试群(35」) is a group's title all
+the same, and a title the bot does not know goes ahead as before (second review 2026-10-31, F10).  A refusal is logged
+with the chat id's first 8 characters and the verdict, no name (F12).
 """
 
+import logging
 import os
 from unittest.mock import patch
 
@@ -16,11 +22,13 @@ import pytest
 
 from src.config import BotConfig, _validate_config, load_config
 from src.wechat import wcdb_backend
-from src.wechat.wcdb_backend import VERIFY_LOOKS, WcdbBackend, _ocr_key, title_verdict
+from src.wechat.wcdb_backend import NOT_A_GROUP, VERIFY_LOOKS, WRONG_CHAT, WcdbBackend, _ocr_key, title_verdict
 from src.wechat.window_controller import SendRefused, WeChatWindowController
 
 AMY = "wxid_amy"
 OTHERS = {_ocr_key("Amy陈"), _ocr_key("Amy粉丝群")}
+PRIVATE = {_ocr_key("Amy"), _ocr_key("Amy陈")}           # the private chats the bot knows (a group asked for)
+ROOM = "room1@chatroom"
 
 
 @pytest.mark.parametrize("title, name, is_group, verdict", [
@@ -37,9 +45,26 @@ OTHERS = {_ocr_key("Amy陈"), _ocr_key("Amy粉丝群")}
     ("……", "Amy", False, "unknown"),
     ("一个名字非常长的…", "一个名字非常长的达人号", False, "unknown"),   # cut off on the screen
     ("测试群二 (5)", "测试群", True, "unknown"),           # a group asked for, another group's title unknown
+    ("Amy同学群 (8", "Amy", False, "unknown"),            # a private chat asked for: a count cut off is none
+    ("Amy(3", "Amy", False, "unknown"),
 ])
 def test_what_a_title_says(title, name, is_group, verdict):
     assert title_verdict(title, name, OTHERS, is_group) == verdict
+    if not is_group:                                      # (the private chats known play no part in a private send)
+        assert title_verdict(title, name, OTHERS, is_group, PRIVATE | {_ocr_key(title)}) == verdict
+
+
+@pytest.mark.parametrize("title, verdict", [
+    ("测试群 (35)", "ok"),
+    ("测试群(35", "ok"), ("测试群（35", "ok"), ("测试群 (35人", "ok"), ("测试群(", "ok"),   # OCR cut the count off
+    ("Amy陈", "private"), (" amy ", "private"),           # a private chat the bot knows: not the group
+    ("Amy粉丝群", "other"), ("Amy陈 (3)", "other"),        # another chat it knows (a group's count lost; a count)
+    ("测试群", "unknown"),                                 # its own name, its count lost: sent as before
+    ("Amy同学", "unknown"), ("Amy同学群 (8)", "unknown"),    # a contact, a group, the bot does not know
+    ("", "unknown"), ("……", "unknown"),
+])
+def test_what_a_title_says_when_a_group_was_asked_for(title, verdict):
+    assert title_verdict(title, "测试群", OTHERS | {_ocr_key("Amy")}, True, PRIVATE) == verdict
 
 
 # ── the window: a refusal means nothing is pasted ───────────────────────────────
@@ -185,6 +210,31 @@ def test_files_and_screenshots_are_checked_too(setup, tmp_path):
 def test_a_group_is_checked_against_its_own_title(setup):
     backend, _ = setup(["测试群 (35)"])
     assert backend.send_text("room1@chatroom", "大家好") is True
+
+
+@pytest.mark.parametrize("title", ["测试群(35", "测试群（35", "测试群", "Amy同学", "Amy同学群 (8)"])
+def test_a_group_send_goes_ahead_with_a_cut_count_or_a_title_the_bot_does_not_know(setup, title):
+    """(F10) OCR lost the closing bracket of the group's count, or the title is one the bot does not know (the group's
+    own name with its count lost, a contact or a group never seen): sent as before."""
+    backend, reads = setup([title])
+    assert backend.send_text(ROOM, "大家好") is True
+    assert backend._window.typed == [("测试群", "大家好")] and len(reads) == 1
+
+
+@pytest.mark.parametrize("title, reason", [("Amy陈", NOT_A_GROUP), ("Amy", NOT_A_GROUP), ("Amy粉丝群", WRONG_CHAT)])
+def test_a_group_send_into_a_known_private_chat_or_another_chat_is_refused(setup, caplog, title, reason):
+    """A private chat the bot knows (the session list, a chat read) opened for the group: ``NOT_A_GROUP``; another known
+    group, its count lost: ``WRONG_CHAT`` as before.  Read again first; nothing pasted; the log line has the group id's
+    first 8 characters and the verdict only (the reason, with the names, is the caller's)."""
+    backend, reads = setup([title])
+    caplog.set_level(logging.WARNING, logger="src.wechat.wcdb_backend")
+    refused = backend.send_text(ROOM, "大家好")
+    assert isinstance(refused, SendRefused) and refused.reason == reason.format(name="测试群", title=title)
+    assert backend._window.typed == [] and len(reads) == VERIFY_LOOKS
+    [line] = [r.getMessage() for r in caplog.records]
+    assert line.startswith(f"Not sending to {ROOM[:8]}…:") and ("NOT_A_GROUP" if reason == NOT_A_GROUP
+                                                                 else "WRONG_CHAT") in line
+    assert ROOM not in line and "测试群" not in line and title not in line
 
 
 # ── the setting ───────────────────────────────────────────────────────────────

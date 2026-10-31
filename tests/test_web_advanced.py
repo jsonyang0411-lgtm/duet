@@ -194,6 +194,29 @@ class AdvancedPostTests(_TempEnv):
             self.assertFalse(body["ok"])
             self.assertEqual(list(body["errors"]), ["PRM_REPLY_PARTS"], body)
 
+    def test_the_boss_group_settings_are_shown_and_their_errors_land_on_them(self):
+        """老板拉的群 (src/prm/boss_groups.py, 2026-10-31): off, 「老板」 and 6 by default; PRM_BOSS_CALL (review 2026-10-31:
+        what the Mac is told the boss is called) right after the switch; a bad value is refused on its own field
+        (PRM_BOSS_GROUP_MAX's and PRM_BOSS_CALL's messages do not start with PRM_BOSS_GROUPS)."""
+        from src.web import advanced_config as adv
+
+        groups = _request("/api/advanced")[1]["groups"]
+        fields = {f["key"]: f for g in groups for f in g["fields"]}
+        self.assertEqual((fields["PRM_BOSS_GROUPS"]["value"], fields["PRM_BOSS_CALL"]["value"],
+                          fields["PRM_BOSS_GROUP_MAX"]["value"]), ("off", "老板", "6"))
+        for key in ("PRM_BOSS_GROUP_MAX", "PRM_BOSS_CALL"):
+            self.assertEqual(fields[key]["requires"][0]["key"], "PRM_BOSS_GROUPS")
+        prm = next(g for g in groups if g["id"] == "prm")
+        self.assertEqual([f["key"] for f in prm["fields"]][-3:], ["PRM_BOSS_GROUPS", "PRM_BOSS_CALL", "PRM_BOSS_GROUP_MAX"])
+        for key, value in (("PRM_BOSS_GROUP_MAX", "2"), ("PRM_BOSS_GROUP_MAX", "21"), ("PRM_BOSS_GROUPS", "maybe"),
+                           ("PRM_BOSS_CALL", "一二三四五六七八九十一")):
+            status, body = _request("/api/advanced", "POST", {"values": {key: value}})
+            self.assertFalse(body["ok"])
+            self.assertEqual(list(body["errors"]), [key], body)
+        self.assertEqual(adv.validate_updates({"PRM_BOSS_GROUPS": "on", "PRM_BOSS_GROUP_MAX": "10",
+                                               "PRM_BOSS_CALL": "大老板"}, {}), {})
+        self.assertEqual(adv.normalize("PRM_BOSS_CALL", ""), "老板")             # (empty: the default)
+
     def test_the_remark_can_be_saved_empty_and_stays_empty(self):
         """PRM_FRIEND_ADD_REMARK (加百应达人微信, 功能 R): unset shows the default; saved empty it stays empty (no remark),
         where any other empty text field would be its default; a bad one is refused on its own field."""
