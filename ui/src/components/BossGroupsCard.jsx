@@ -12,6 +12,13 @@ import { Card, Note, Confirm } from './ui'
 // with her (POST pick {chat, wxid}, no question: the opening waits for a person anyway), 「这个群不是达人」 drops it for
 // good after a confirmation (POST ignore {chat}). One line counts the groups taken over and those waiting for her to
 // join; ``why_not`` says why it cannot run (its buttons are off then). Off (or a bot without it): nothing at all.
+// A group the bot did not take over by itself says why (its own ``why``: she was stopped, registering failed, …);
+// one without a ``why`` and with more than one member listed says more than one may be her.
+// (The card keeps its name 「老板拉的群」 whatever ``boss_call`` is: the 待审批 page's note sends operators to it by that
+// name.)
+
+/** A pending group with no reason of its own and more than one member listed: more than one may be her. */
+const unsure = (g) => !g.why && (g.members || []).length > 1
 
 /** The 合作单 page's card, at its top. */
 export function BossGroupsCard({ d, onDone }) {
@@ -43,7 +50,7 @@ export function BossGroupsCard({ d, onDone }) {
         <div className="f-hint">
           群里除了老板和我们只有她一个人时，机器人自己接手：把她登记成达人，写一份在群里打招呼的开场白，等你在「待审批」里看过再发。
           之后她在群里说的话照常起草，和私聊的草稿一个规矩（先审、门槛、下班时段、自动模式都照旧），发在群里，老板也看得到；老板和别人说的话不起草。
-          {pending.length > 0 && ' 群里不止一个人可能是她时，在下面点哪个是她。'}
+          {pending.some(unsure) && ' 群里不止一个人可能是她时，在下面点哪个是她。'}
         </div>
         <div className="prm-boss-counts">{bossGroupsLine(bg)}</div>
         {pending.map((g) => (
@@ -61,14 +68,18 @@ export function BossGroupsCard({ d, onDone }) {
   )
 }
 
-/** One group waiting for a person: its name, when it was found, and who may be her (each with 「是她」). */
+/** One group waiting for a person: its name, when it was found, why the bot did not take it over (its ``why``) or that
+ *  more than one may be her, and who may be her (each with 「是她」). */
 function BossGroupRow({ g, disabled, onPick, onIgnore }) {
+  const found = g.found_at ? `${fmtClock(g.found_at)} 发现` : ''
+  const line = [found, unsure(g) ? '群里不止一个人可能是她，点哪个是她' : ''].filter(Boolean).join('：')
   return (
     <div className="stack prm-boss-group" style={{ gap: 6 }}>
       <div>
         <b><UsersThree style={{ verticalAlign: -2 }} /> {g.name || '（没有群名）'}</b>{' '}
-        <span className="dim">{g.found_at ? `${fmtClock(g.found_at)} 发现：` : ''}群里不止一个人可能是她，点哪个是她</span>
+        {line && <span className="dim">{line}</span>}
       </div>
+      {g.why && <Note kind="warn">{g.why}</Note>}
       {(g.members || []).map((m) => (
         <div key={m.wxid} className="row prm-boss-member" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <span>{m.name || '（没有名字）'}</span>
