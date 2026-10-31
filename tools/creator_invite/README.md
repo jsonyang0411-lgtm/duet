@@ -34,6 +34,7 @@
 | `quota_margin` | 平台本周额度剩下不到这么多就停 | 50 |
 | `gap_seconds` | 任意两次平台请求之间至少隔几秒（不能小于 3） | 3 |
 | `wait_between` | 发两位之间随机等多少秒（正式配置 2026-10-29 起用 [180, 300]：3～5 分钟一位） | [15, 30] |
+| `recheck_after_seconds` | 命令行没核实成功的一张卡，等几秒再查一次她的按钮（见 run 第 5 步） | 20 |
 | `plan_max_age_days` | 清单多少天后作废、要重新 plan（按天分批发一份大清单时放到 7） | 3 |
 | `send_order` | 发的先后：`category` 照清单顺序（小达人、中大博主、专场型）；`mixed` 三类轮流、每类里最合适的先发——每天按 `daily_cap` 发一批时，每批都是剩下里最合适的（2026-10-29：合适的都留作候选，按天来发） | category |
 | `follow_hours` / `follow_days` / `follow_max` | follow：北京时间几点到几点查 / 发卡后跟几天 / 一次最多查几位 | [9, 23] / 14 / 40 |
@@ -84,6 +85,7 @@
   2. 读预览里本周的次数（`statusBefore.weeklyQuota`）：剩下的不到 `quota_margin` 就**停**。
   3. 台账里先写一行 `attempt`（落盘后才往下），再带 `--expect-status 1 --expect-popwindow -1 --execute` 发送：预览和执行绑在一起，这期间状态或门槛变了，命令行就 `STATE_CONFLICT`、什么都不发。
   4. 台账里写一行 `result`。
+  5. 命令行没核实成功（`INDETERMINATE`、`ACCEPTED_UNVERIFIED` 这些：发了写请求，却没看到卡到了），等 `recheck_after_seconds`（默认 20 秒）再只读查一次她的按钮（`dy buyin author-invite-status`）：还是 1「邀约带货」就是卡没送到，台账再写一行这张卡的 `result`（`outcome` `NOT_DELIVERED`、`sent: false`、`checked_status: 1`），然后停；变成 2「继续沟通 · 待回复」等就是到了，照常往下发。
 - 两位之间随机等 15～30 秒（`wait_between`）；任意两次平台请求之间至少 3 秒。
 - 一台 Mac 上同一个台账同时只能有一个 run（`invites.lock`）。
 
@@ -97,6 +99,8 @@
 | 我们自己本周已发（台账）到了 `weekly_cap`，或今天已发到了 `daily_cap` | 停（周一 0 点 / 每天 0 点按北京时间重新算）；明天同一个命令接着发 |
 | 清单出了以后又写进 `rules.drop_ids` 的人 | 跳过，一个请求都不发 |
 | 发送超时、被打断（130）、没拿到结果 | 停；这位记为「不知道发出去没有」，**以后也不会再发**，到百应 › 消息里看 |
+| 命令行没核实成功，再查她的按钮还是「邀约带货」（2026-10-31 真遇到过：24 小时里发到第 50 张起，平台收下请求却不发卡，也不报错） | 停，说这 24 小时台账里发出去几张；这位记为**没发出去**，过几个小时重跑会再发她和后面的 |
+| 命令行没核实成功，再查她的按钮也没查到 | 停；这位照旧算「可能发出去了」，**以后不会再发**，到百应里看 |
 | 连续 3 位预览失败 | 停，查原因 |
 | `STATE_CONFLICT` | 跳过这位、继续；什么都没发，以后的 plan 会重新查她 |
 | `--limit` 到了 | 停 |
@@ -134,7 +138,7 @@
 {"at": "…", "event": "run-end", "plan_id": "…", "sent": 12, "stopped": "…"}
 ```
 
-`sent`：`true` 发出去了（`VERIFIED_SUCCESS`、`ACCEPTED_UNVERIFIED`、`INDETERMINATE`……，或命令行说发了写请求），`false` 没发（`STATE_CONFLICT`、发送前就被拦），`null` 不知道。联系方式不写进台账。
+`sent`：`true` 发出去了（`VERIFIED_SUCCESS`、`ACCEPTED_UNVERIFIED`、`INDETERMINATE`……，或命令行说发了写请求），`false` 没发（`STATE_CONFLICT`、发送前就被拦），`null` 不知道。命令行没看到卡到了的（不是 `VERIFIED_SUCCESS` / `OBSERVED_DESIRED_STATE`），`result` 里还有 `detail`：命令行对这一位说的话（平台给了原话时就在里面），没有就是它最后一行报错，最多 400 字——平台不在页面上说的拒绝，事后能在这里看到。同一张卡（同一个 `attempt`）有两行 `result` 时以后一行为准：没核实成功、再查按钮还是「邀约带货」的，后一行是 `{"outcome": "NOT_DELIVERED", "sent": false, "checked_status": 1}`。联系方式不写进台账。
 
 ```bash
 /usr/bin/python3 tools/creator_invite/invite.py status --config <配置> [--ledger-dir <目录>]   # 本周发了几位、哪些不知道发出去没有
@@ -151,4 +155,4 @@
 
 ## 测试
 
-`tests/test_creator_invite.py`：全部离线，用假的 `node`（答复照两个命令行的 JSON 形状，数据都是编的）。覆盖：plan 只读、筛选和分类（15～20 万算小达人、女粉 < 60% 不进）、配商品（主推 + 其余全部，最多 5 款）、默认不查库存、设了 `min_stock` 才查和不配缺货的、每 20 位一次状态查询；run 的预览绑定执行、不重发（进程在 `attempt` 之后死掉、发送超时）、76 / 77 / 79 立刻停、`STATE_CONFLICT` 跳过、平台额度和每周上限、接着上次、同时只能一个 run；两个包装用真的 node 测请求间隔；再用 `/usr/bin/python3`（3.9）跑一遍 plan。
+`tests/test_creator_invite.py`：全部离线，用假的 `node`（答复照两个命令行的 JSON 形状，数据都是编的）。覆盖：plan 只读、筛选和分类（15～20 万算小达人、女粉 < 60% 不进）、配商品（主推 + 其余全部，最多 5 款）、默认不查库存、设了 `min_stock` 才查和不配缺货的、每 20 位一次状态查询；run 的预览绑定执行、不重发（进程在 `attempt` 之后死掉、发送超时）、76 / 77 / 79 立刻停、`STATE_CONFLICT` 跳过、没核实成功的卡再查一次按钮（还是「邀约带货」记没发出去并停、重跑再发她；到了就接着发；查不到就停、不再发她）、平台额度和每周上限、接着上次、同时只能一个 run；两个包装用真的 node 测请求间隔；再用 `/usr/bin/python3`（3.9）跑一遍 plan。
