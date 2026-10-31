@@ -26,6 +26,7 @@ import logging
 import re
 import threading
 import time
+from contextlib import contextmanager
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -140,6 +141,15 @@ class ThreeParty:
         tried = self._tries.get(int((deal or {}).get("id") or 0))
         return {**out, "tried": dict(tried)} if tried else out
 
+    @contextmanager
+    def guard(self):
+        """Hold the lock 「拉三方群」 starts a group under: while it is held no group is started (``start`` reads the deal
+        again under it).  Yields the deal whose group is being made (or tried) now, or None.  老板拉的群 checks a deal's
+        group and links one the boss made under it (src/prm/boss_groups.py ``take_over``): our own 三方群 is never taken
+        for the boss's."""
+        with self._lock:
+            yield self._busy
+
     def job_meta(self, deal: Optional[dict]) -> Optional[dict]:
         """What a draft job of this deal tells the Mac of its group (``meta.three_party``): ``{"at": "MM-DD HH:MM"}``
         once it is made (by the bot or marked by hand), else None."""
@@ -190,6 +200,14 @@ class ThreeParty:
         with self._lock:
             if self._busy is not None:
                 return {"ok": False, "error": "另一个群正在建（或正在试）：等它好了再点"}
+            if not dry_run:
+                # Read again under the lock: 老板拉的群 (src/prm/boss_groups.py ``take_over``) may have just linked a group
+                # the boss made with her as this deal's (it checks and links under this lock too, ``guard``)
+                state = str(((self._store.deal(deal["id"]) or {}).get("three_party") or {}).get("state") or "")
+                if state == CREATED:
+                    return {"ok": False, "error": "这位达人的三方群已经建好了"}
+                if state == UNSURE:
+                    return {"ok": False, "error": "上次不确定建没建成：先在微信里看一眼，点「建好了」或「没建成」"}
             self._busy = deal["id"]
         now = self._clock()
         if not dry_run:
