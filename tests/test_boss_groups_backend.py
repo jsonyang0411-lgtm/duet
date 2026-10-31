@@ -1,10 +1,13 @@
 """老板拉的群 (功能 U, the backend's part): a boss (PRM_GROUP_WITH) makes a small WeChat group of himself, a creator who is
 his friend and this account, and PRM takes it over.  The WCDB backend finds the bosses' wxids by name (``contact_ids``),
-the new small groups a boss is in (``boss_groups``) and their members (``group_members``); a watched group
-(``watch_group``) is read whatever WECHAT_GROUPS says and its lines go through the route as group messages (its
-catch-up once, oldest first; after a restart and a re-opened database only what was not handed on yet), this account's
-own lines there to the own-message hook; a send reaches a group by the name WeChat gives it, like any chat, and a name
-another chat has too is refused.  Every other group is read and kept silent as before.
+the new small groups a boss is in (``boss_groups``: with whether their whole history was read and when this account
+came in, by WeChat's line) and their members (``group_members``), and says quietly whether she has a private chat with
+us (``has_private_chat``); a watched group (``watch_group``) is read whatever WECHAT_GROUPS says and its lines go
+through the route as group messages, one by one in order in the poll thread (its catch-up once, oldest first, the lines
+at ``since`` or later; ``watch_caught_up`` once it ran; after a restart and a re-opened database only what was not
+handed on yet), this account's own lines there to the own-message hook; a send reaches a group by the name WeChat
+gives it, like any chat, a name another chat has too is refused, and so is a search that opened a chat whose title
+shows no member count (SEND_VERIFY_CHAT).  Every other group is read and kept silent as before.
 
 The real WcdbBackend over the fake WeChat 4 database of tests/test_new_friends.py (session rows without names, names
 from get_display_names, messages newest first, this account's own lines from its wxid without the data folder's suffix;
@@ -12,7 +15,10 @@ group members added here), a real router and message store (the route stores eve
 own-message hook and the window write down what they got.  Every name and id is made up.
 """
 
+import json
 import logging
+import threading
+import time
 
 import pytest
 
@@ -24,7 +30,8 @@ from src.config import BotConfig
 from src.db import MessageStore, initialize_db
 from src.router import MessageRouter
 from src.wechat import wcdb_backend
-from src.wechat.wcdb_backend import GROUP_NO_NAME, WcdbBackend
+from src.wechat.wcdb_backend import (CATCHUP_READ, GROUP_NO_NAME, JOINED_LINE, NOT_A_GROUP, VERIFY_LOOKS, WcdbBackend,
+                                     title_verdict)
 from src.wechat.wcdb_client import WcdbCallError
 from src.wechat.window_controller import SendRefused
 
@@ -74,6 +81,7 @@ class Window:
 
     def __init__(self):
         self.typed = []
+        self.shots = []
 
     def send_to_chat(self, name, text, max_retries=2, check=None):
         refused = check(100) if check is not None else None
@@ -81,6 +89,15 @@ class Window:
             return refused
         self.typed.append((name, text))
         return True
+
+    def send_file_to_chat(self, name, path, max_retries=2, check=None):
+        return self.send_to_chat(name, f"<文件 {path}>", max_retries, check)
+
+    def capture_chat_media(self, name, check=None):
+        if check is not None and check(100) is not None:
+            return ""
+        self.shots.append(name)
+        return "shot.png"
 
     def find_hwnd(self, *args, **kwargs):
         return None
@@ -210,6 +227,7 @@ def test_boss_groups_are_the_new_small_groups_a_boss_is_in(tmp_path, db, clock):
     db.group(big, "老板的大群", [BOSS, ME_SENDER] + [f"wxid_member{i:010d}" for i in range(5)], t - 400)
     assert run.backend.boss_groups({BOSS}, baseline, 6) == [{
         "chat": GROUP, "name": GROUP_NAME, "created_at": float(int(t - 600)),
+        "history_complete": True, "joined_at": float(int(t - 600)),     # WeChat's 「邀请你加入了群聊」 line
         "members": [{"wxid": BOSS, "name": BOSS_NAME}, {"wxid": HER, "name": HER_NAME},
                     {"wxid": ME, "name": OWN_NAME}]}]                    # this account: under own_wxid()
     assert run.backend.own_wxid() == ME and ME != ME_SENDER
@@ -251,6 +269,176 @@ def test_group_members_now_and_none_while_they_cannot_be_read(tmp_path, db, cloc
     del db.get_sessions
     run.backend._client = None                                          # the database is not open
     assert run.backend.group_members(GROUP) is None and run.backend.boss_groups({BOSS}, set(), 6) is None
+
+
+# ── boss_groups: is the group really new for us (history_complete, joined_at) ──
+
+INTRO = "给大家介绍一下，这是小美"
+# WeChat 4's own lines (type 10000, put into the fake database as WeChat words them) when this account comes in …
+JOINED = [
+    f'"{BOSS_NAME}"邀请你加入了群聊',                                         # what GroupDb.group writes
+    f'"{BOSS_NAME}"邀请你加入了群聊，群聊参与人还有：{HER_NAME}',
+    f'"{BOSS_NAME}"邀请你和"{HER_NAME}"加入了群聊',                          # he made it with her and us
+    f'"{BOSS_NAME}"邀请你和"{HER_NAME}"、"{TESTER_NAME}"加入了群聊',
+    "你加入了群聊",
+    f'你通过扫描"{BOSS_NAME}"分享的二维码加入群聊',
+    f'你邀请"{HER_NAME}"、"{BOSS_NAME}"加入了群聊',                          # this account made it
+]
+# … and the lines of someone else coming in, or none at all
+NOT_JOINED = [
+    f'"{BOSS_NAME}"邀请"{HER_NAME}"加入了群聊',
+    f'"{HER_NAME}"通过扫描"{BOSS_NAME}"分享的二维码加入群聊',
+    f'"你好呀"邀请"{HER_NAME}"加入了群聊',                                    # a member called 你好呀
+    f'"{BOSS_NAME}"邀请"你好呀"加入了群聊',
+    f'"{BOSS_NAME}"修改群名为"{GROUP_NAME}"',
+    "你撤回了一条消息",
+    f'你被"{BOSS_NAME}"移出了群聊',
+]
+KNOWN = {OLD_GROUP, NOTICE_GROUP}                                       # the baseline of the db fixture
+
+
+def made(db, line, at, chat=GROUP, members=(BOSS, HER, ME_SENDER)):
+    """A group WeChat lists, its first row one of WeChat's lines (``line``), the boss's introduction after it."""
+    db.names[chat] = GROUP_NAME
+    db.members[chat] = list(members)
+    db.system(chat, line, at)
+    db.line(chat, BOSS, INTRO, at + 10)
+
+
+@pytest.mark.parametrize("line", JOINED)
+def test_joined_at_is_when_wechats_line_says_this_account_came_into_the_group(tmp_path, db, clock, line):
+    assert JOINED_LINE.search(line)
+    made(db, line, clock.now - 600)
+    [found] = Run(tmp_path, db).backend.boss_groups({BOSS}, KNOWN, 6)
+    assert (found["joined_at"], found["created_at"], found["history_complete"]) == (
+        float(int(clock.now - 600)), float(int(clock.now - 600)), True)
+
+
+@pytest.mark.parametrize("line", NOT_JOINED)
+def test_a_line_of_someone_else_coming_in_is_no_joined_at(tmp_path, db, clock, line):
+    assert not JOINED_LINE.search(line)
+    made(db, line, clock.now - 600)
+    [found] = Run(tmp_path, db).backend.boss_groups({BOSS}, KNOWN, 6)
+    assert (found["joined_at"], found["created_at"], found["history_complete"]) == (
+        None, float(int(clock.now - 600)), True)
+
+
+def test_only_wechats_own_lines_count_and_the_oldest_of_them(tmp_path, db, clock):
+    """A member's words of the very text are hers, never WeChat's line; added, taken out and added again: since the
+    first time (the oldest line)."""
+    t = clock.now
+    db.names[GROUP], db.members[GROUP] = GROUP_NAME, [BOSS, HER, ME_SENDER]
+    db.line(GROUP, HER, f'"{BOSS_NAME}"邀请你加入了群聊', t - 900)
+    [found] = Run(tmp_path, db).backend.boss_groups({BOSS}, KNOWN, 6)
+    assert found["joined_at"] is None and found["created_at"] == float(int(t - 900))
+    db.system(GROUP, f'"{BOSS_NAME}"邀请你加入了群聊', t - 800)
+    db.system(GROUP, f'你被"{BOSS_NAME}"移出了群聊', t - 700)
+    db.system(GROUP, f'"{BOSS_NAME}"邀请你加入了群聊', t - 600)
+    [found] = Run(tmp_path, db).backend.boss_groups({BOSS}, KNOWN, 6)
+    assert found["joined_at"] == float(int(t - 800))
+
+
+def test_history_complete_is_whether_the_groups_whole_history_was_read(tmp_path, db, clock):
+    """Fewer rows than CATCHUP_READ came back: all of it (WeChat shows a new member nothing from before she came in,
+    so a group this account was just added to begins with WeChat's line).  A busy old group: its line is older than
+    the rows read, so it is no joined_at; ``created_at`` is the oldest row read.  Read once a run."""
+    t = clock.now
+    db.group(GROUP, GROUP_NAME, [BOSS, HER, ME_SENDER], t - 86400)      # this account was added a day ago
+    for i in range(CATCHUP_READ - 2):
+        db.line(GROUP, BOSS, f"第{i}句", t - 80000 + i)
+    first = Run(tmp_path, db)
+    [found] = first.backend.boss_groups({BOSS}, KNOWN, 6)
+    assert (found["history_complete"], found["joined_at"], found["created_at"]) == (
+        True, float(int(t - 86400)), float(int(t - 86400)))                 # CATCHUP_READ - 1 rows
+    db.line(GROUP, BOSS, "又一句", t - 70000)
+    assert first.backend.boss_groups({BOSS}, KNOWN, 6) == [found]         # (read once a run)
+    [found] = Run(tmp_path, db).backend.boss_groups({BOSS}, KNOWN, 6)    # CATCHUP_READ rows: not all of it, maybe
+    assert (found["history_complete"], found["joined_at"]) == (False, float(int(t - 86400)))
+    db.line(GROUP, BOSS, "再一句", t - 60000)
+    [found] = Run(tmp_path, db).backend.boss_groups({BOSS}, KNOWN, 6)
+    assert (found["history_complete"], found["joined_at"], found["created_at"]) == (
+        False, None, float(int(t - 80000)))                                 # WeChat's line is no longer among them
+
+
+def test_a_group_whose_lines_cannot_be_read_now_is_left_out_until_they_can(tmp_path, db, clock):
+    made(db, f'"{BOSS_NAME}"邀请你加入了群聊', clock.now - 60)
+    run = Run(tmp_path, db)
+    real = db.get_messages
+
+    def flaky(talker, limit=200, offset=0):
+        if talker == GROUP:
+            raise WcdbCallError("wcdb_get_messages", -1)
+        return real(talker, limit, offset)
+    db.get_messages = flaky
+    assert run.backend.boss_groups({BOSS}, KNOWN, 6) == []                # not now (never a guess) …
+    db.get_messages = real
+    [found] = run.backend.boss_groups({BOSS}, KNOWN, 6)                  # … at the next call
+    assert found["chat"] == GROUP and found["joined_at"] == float(int(clock.now - 60))
+
+
+# ── has_private_chat: has she a private chat with us, quietly ──────────────────
+
+def test_has_private_chat_by_the_consoles_list_and_the_session_list(tmp_path, db, clock):
+    """She is only in the boss's group: no.  WeChat listed her private chat before (data/private_chat_names.json), or
+    lists it now (the session list): yes; her chat is not read because of it."""
+    t = clock.now
+    db.group(GROUP, GROUP_NAME, [BOSS, HER, ME_SENDER], t - 60)
+    run = Run(tmp_path, db).start()
+    assert run.backend.has_private_chat(HER) is False
+    listed = tmp_path / "data" / "private_chat_names.json"
+    listed.parent.mkdir(exist_ok=True)
+    listed.write_text(json.dumps({HER: HER_NAME}, ensure_ascii=False), encoding="utf-8")
+    assert run.backend.has_private_chat(HER) is True
+    listed.unlink()
+    assert run.backend.has_private_chat(HER) is False
+    db.say(HER, HER, "你好", t)                                            # she adds us: WeChat lists her chat
+    run.backend.refresh_private_chats_soon()
+    run.poll()
+    assert run.backend.has_private_chat(HER) is True
+    assert HER not in run.backend._chat_names                            # (PRIVATE_CHATS is the admin's chat only)
+
+
+def test_a_registered_creators_chat_read_is_hers_and_a_namesake_still_counts(tmp_path, db, clock):
+    """A chat the bot reads (she is registered: the private filter wants her).  Another chat of her name: her chat is
+    there all the same (a send to it is refused until she has a remark of her own)."""
+    db.say(HER, HER, "你好", clock.now - 30)
+    db.names[STRANGER] = HER_NAME
+    db.say(STRANGER, STRANGER, "在吗", clock.now - 20)                    # another 小美
+    run = Run(tmp_path, db)
+    run.backend.set_private_filter(lambda wxid: wxid == HER)
+    run.start()
+    assert HER in run.backend._chat_names and run.backend.has_private_chat(HER) is True
+    refused = run.backend.send_text(HER, "你好")
+    assert isinstance(refused, SendRefused) and "没法确定发给谁" in refused.reason
+
+
+def test_has_private_chat_is_never_a_group_this_account_or_wechats_own_chats(tmp_path, db, clock):
+    db.group(GROUP, GROUP_NAME, [BOSS, HER, ME_SENDER], clock.now - 60)
+    listed = tmp_path / "data" / "private_chat_names.json"
+    listed.parent.mkdir(exist_ok=True)
+    listed.write_text(json.dumps({"gh_0123456789ab": "品牌公众号", "filehelper": "文件传输助手", ME_SENDER: OWN_NAME,
+                                  GROUP: GROUP_NAME}, ensure_ascii=False), encoding="utf-8")
+    run = Run(tmp_path, db, groups=("*",)).start()
+    assert run.backend._chat_names[GROUP] == GROUP_NAME                  # (a chat read, under its name)
+    for chat in (GROUP, ME, ME_SENDER, "gh_0123456789ab", "filehelper", "", None):
+        assert run.backend.has_private_chat(chat) is False
+
+
+def test_has_private_chat_logs_nothing_and_a_send_logs_only_the_ids_first_characters(tmp_path, db, clock, caplog):
+    """PRM asks for every message the bot starts for her: never a log line, never her wxid, nothing read from the
+    database.  ``chat_target`` (a send's rule) still says ERROR for a chat it cannot name, with the id's first 8
+    characters only."""
+    db.group(GROUP, GROUP_NAME, [BOSS, HER, ME_SENDER], clock.now - 60)
+    run = Run(tmp_path, db).start()
+    read = list(db.read)
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG):
+        assert run.backend.has_private_chat(HER) is False
+    assert caplog.records == [] and db.read == read
+    with caplog.at_level(logging.DEBUG):
+        assert run.backend.chat_target(HER)[0] == ""
+    [error] = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert HER[:8] in error.getMessage() and HER not in error.getMessage()
 
 
 # ── watch_group: read, routed as group messages, the catch-up once ─────────────
@@ -406,6 +594,149 @@ def test_unwatching_reads_the_group_only_if_wechat_groups_names_it(tmp_path, db,
     assert run.lines() == [(HER, "还在吗")] and [m["content"] for m in run.own] == ["在的"]
 
 
+# ── the catch-up's since, after a restart ───────────────────────────────────
+
+def test_the_catch_up_hands_on_the_lines_written_at_since_or_later(tmp_path, db, clock):
+    """``timestamp >= since``: PRM gives its last line handled + 1 s, so that line's second is never handed on again
+    (this account's lines are never stored: only ``since`` keeps them from the own-message hook)."""
+    t = clock.now
+    db.names[GROUP], db.members[GROUP] = GROUP_NAME, [BOSS, HER, ME_SENDER]
+    db.line(GROUP, HER, "上一句", t - 101)                                 # since - 1
+    db.line(GROUP, ME_SENDER, "我们回的上一句", t - 101)
+    db.line(GROUP, HER, "这一句", t - 100)                                 # since
+    db.line(GROUP, ME_SENDER, "我们回的这一句", t - 100)
+    db.line(GROUP, BOSS, "下一句", t - 99)
+    run = Run(tmp_path, db).start()
+    run.backend.watch_group(GROUP, since=t - 100)
+    run.poll()
+    assert run.lines() == [(HER, "这一句"), (BOSS, "下一句")]
+    assert [m["content"] for m in run.own] == ["我们回的这一句"]
+
+
+@pytest.mark.parametrize("groups", [(NOTICE_NAME,), ("*",)], ids=["not in WECHAT_GROUPS", "WECHAT_GROUPS=*"])
+def test_after_a_restart_our_line_read_back_before_since_is_not_handed_on_again(tmp_path, db, clock, groups):
+    """(test_r1) Our reply read back before the stop is PRM's last line handled; watched again from it + 1 s, it does
+    not reach the own-message hook a second time (PRM would take it for an operator's), and her line of the very
+    next second, written while the bot was stopped, is handed on."""
+    t = clock.now
+    db.group(GROUP, GROUP_NAME, [BOSS, HER, ME_SENDER], t - 900)
+    first = Run(tmp_path, db, groups=groups).start()
+    first.backend.watch_group(GROUP, since=t - 900)
+    db.line(GROUP, HER, "在吗", t - 100)
+    first.poll()
+    db.line(GROUP, ME_SENDER, "在的，您好～", t - 50)                        # the bot's reply, read back in this run
+    first.poll()
+    assert [m["content"] for m in first.own] == ["在的，您好～"]
+    last = first.own[-1]["timestamp"]                                    # PRM's last line handled: ours
+    first.stop()
+    db.line(GROUP, HER, "我想了解一下合作", last + 1)                       # while the bot was stopped
+    clock.now = t + 120
+    second = Run(tmp_path, db, groups=groups, messages=first.messages)
+    second.backend.watch_group(GROUP, since=last + 1)                    # PRM at start, before the poll loop
+    second.start()
+    second.poll()
+    assert second.own == [] and second.lines() == [(HER, "我想了解一下合作")]
+    second.poll()
+    assert second.own == [] and len(second.lines()) == 1
+
+
+# ── watch_caught_up: the catch-up has run ───────────────────────────────────
+
+def test_watch_caught_up_once_the_catch_up_ran_since_the_latest_watch(tmp_path, db, clock):
+    t = clock.now
+    made(db, f'"{BOSS_NAME}"邀请你加入了群聊', t - 120)
+    run = Run(tmp_path, db).start()
+    assert run.backend.watch_caught_up(GROUP) is False                    # not watched
+    run.backend.watch_group(GROUP, since=t - 300)
+    assert run.backend.watch_caught_up(GROUP) is False                    # its catch-up is still to run
+    run.poll()
+    assert run.backend.watch_caught_up(GROUP) is True
+    assert run.lines()[-1] == (BOSS, INTRO)                               # the boss's introduction is handed on by then
+    run.poll()
+    assert run.backend.watch_caught_up(GROUP) is True
+    run.backend.watch_group(GROUP, since=t - 300)                         # watched again (PRM at start …)
+    assert run.backend.watch_caught_up(GROUP) is False
+    run.poll()
+    assert run.backend.watch_caught_up(GROUP) is True and len(run.lines()) == 2    # (nothing twice)
+    run.backend.unwatch_group(GROUP)
+    assert run.backend.watch_caught_up(GROUP) is False
+    assert run.backend.watch_caught_up(NOTICE_GROUP) is False             # read (WECHAT_GROUPS), never watched
+
+
+def test_watch_caught_up_waits_for_a_group_that_cannot_be_read_and_for_a_watch_during_the_catch_up(
+        tmp_path, db, clock):
+    t = clock.now
+    made(db, f'"{BOSS_NAME}"邀请你加入了群聊', t - 120)
+    run = Run(tmp_path, db).start()
+    real = db.get_messages
+
+    def flaky(talker, limit=200, offset=0):
+        if talker == GROUP:
+            raise WcdbCallError("wcdb_get_messages", -1)
+        return real(talker, limit, offset)
+    db.get_messages = flaky
+    run.backend.watch_group(GROUP, since=t - 300)
+    run.poll()
+    assert run.backend.watch_caught_up(GROUP) is False and run.lines() == []
+    db.get_messages = real
+    route = run.route
+
+    def watching_again(msg):                     # PRM watches the group again while its catch-up runs
+        if msg.get("content") == INTRO:
+            run.backend.watch_group(GROUP, since=t - 300)
+        return route(msg)
+    run.route = watching_again
+    run.poll()
+    assert run.lines() == [("", f'"{BOSS_NAME}"邀请你加入了群聊'), (BOSS, INTRO)]
+    assert run.backend.watch_caught_up(GROUP) is False                    # that watch's catch-up is still to run
+    run.poll()
+    assert run.backend.watch_caught_up(GROUP) is True and len(run.lines()) == 2
+
+
+# ── the order: a watched group's lines one by one, in the poll thread ─────────
+
+def test_a_watched_groups_lines_reach_the_route_in_order_and_other_chats_keep_the_pool(tmp_path, db, clock):
+    """With the bot's worker pool running: her picture takes a while (looked for on disk), and the words after it,
+    the boss's line before it, her recall, the catch-up's lines all reach the route one by one in the order WeChat
+    wrote them, in the poll thread; every other chat's lines still go through the pool."""
+    t = clock.now
+    db.group(GROUP, GROUP_NAME, [BOSS, HER, ME_SENDER], t - 60)
+    run = Run(tmp_path, db).start()
+    run.backend._start_workers()
+    heard = []
+    route = run.route
+
+    def slow_for_a_picture(msg):
+        if msg["msg_type"] == 3:
+            time.sleep(0.2)
+        heard.append((msg["chat_id"], msg["special"].get("title") if msg["msg_type"] == 10000 else msg["content"],
+                      threading.current_thread().name))
+        return route(msg)
+    run.route = slow_for_a_picture
+    try:
+        db.say(GROUP, HER, f"{HER}:\n<msg><img/></msg>", t - 30, local_type=3)    # before the watch: the catch-up's
+        db.line(GROUP, HER, "这是我的主页", t - 29)
+        run.backend.watch_group(GROUP, since=t - 60)
+        run.poll()
+        db.line(GROUP, BOSS, "她是我朋友", t + 1)
+        db.say(GROUP, HER, f"{HER}:\n<msg><img/></msg>", t + 2, local_type=3)
+        db.line(GROUP, HER, "这是我的数据", t + 3)
+        db.line(NOTICE_GROUP, COLLEAGUE, "明天开会", t + 4)
+        run.poll()
+        row = next(r for r in db.chats[GROUP] if r["message_content"].endswith("这是我的数据"))
+        row.update(local_type=10000, message_content=REVOKE_XML)          # she takes it back
+        db.line(GROUP, HER, "发错了", t + 5)
+        run.poll()
+    finally:
+        run.backend._pool.shutdown(wait=True)
+    here = threading.current_thread().name
+    assert [(text, thread) for chat, text, thread in heard if chat == GROUP] == [
+        (f'"{BOSS_NAME}"邀请你加入了群聊', here), ("[图片]", here), ("这是我的主页", here),
+        ("她是我朋友", here), ("[图片]", here), ("这是我的数据", here), ('"小美" 撤回了一条消息', here), ("发错了", here)]
+    [(text, thread)] = [(text, thread) for chat, text, thread in heard if chat == NOTICE_GROUP]
+    assert text == "明天开会" and thread.startswith("bot-cb-") and thread != here
+
+
 # ── this account's own lines ──────────────────────────────────────────────
 
 def test_own_lines_in_a_watched_group_reach_the_hook_and_other_groups_stay_as_they_were(tmp_path, db, clock):
@@ -515,6 +846,84 @@ def test_a_group_wechat_gives_no_name_is_not_typed_until_it_has_one(tmp_path, db
     assert run.backend._chat_names[GROUP] == GROUP_NAME
     assert run.backend.send_text(GROUP, "你好小美～") is True
     assert run.backend._window.typed == [(GROUP_NAME, "你好小美～")]
+
+
+@pytest.mark.parametrize("title, name, is_group, verdict", [
+    ("小美 (3)", "小美", True, "ok"),                          # a group's title: its member count
+    ("小美（3）", "小美", True, "ok"),
+    ("小美美", "小美", True, "private"),                        # a contact the bot does not know, opened for the group
+    ("小美", "小美", True, "private"),                          # a contact of the group's very name
+    ("小美美美美…", "小美合作群", True, "private"),              # cut off, and not the group's name either
+    ("小美合…", "小美合作群", True, "unknown"),                  # cut off: its member count may be too
+    ("小美美 (8)", "小美", True, "unknown"),                    # a group the bot does not know: no judgement, as before
+    ("", "小美", True, "unknown"),                             # nothing read: as before
+    ("……", "小美", True, "unknown"),
+    ("小美美", "小美", False, "unknown"),                       # a private send: as before
+    ("小美", "小美", False, "ok"),
+    ("小美美 (8)", "小美", False, "group"),
+])
+def test_what_a_title_says_when_a_group_was_asked_for(title, name, is_group, verdict):
+    assert title_verdict(title, name, set(), is_group) == verdict
+
+
+def reading(run, *titles):
+    """The opened chat's title as the screen gives it, one per look (the last one again); what was read."""
+    reads, titles = [], list(titles)
+
+    def reader(hwnd):
+        reads.append(hwnd)
+        title = titles.pop(0) if len(titles) > 1 else titles[0]
+        if isinstance(title, Exception):
+            raise title
+        return title
+    run.backend._title_reader = reader
+    return reads
+
+
+@pytest.mark.parametrize("title", ["小美美", HER_NAME])
+def test_a_group_send_whose_search_opened_a_chat_without_a_member_count_is_refused(tmp_path, db, clock, title):
+    """SEND_VERIFY_CHAT: the boss named the group 「小美」 after her, the search opened the contact 「小美美」 (or a
+    contact 「小美」 the bot does not know): no member count, not the group.  Read again first (the screen may still
+    show the chat before), then refused: nothing pasted, no file, no screenshot of that chat."""
+    db.group(GROUP, HER_NAME, [BOSS, HER, ME_SENDER], clock.now - 60)
+    run = sending(tmp_path, db, title)
+    reads = reading(run, title)
+    run.backend.watch_group(GROUP, since=clock.now)
+    run.poll()
+    refused = run.backend.send_text(GROUP, "你好小美～")
+    assert isinstance(refused, SendRefused) and not refused
+    assert refused.reason == NOT_A_GROUP.format(name=HER_NAME, title=title) and len(reads) == VERIFY_LOOKS
+    assert not run.backend.send_file(GROUP, str(tmp_path / "样品.png"))
+    assert run.backend._screenshot_of(HER_NAME, GROUP) == ""
+    assert run.backend._window.typed == [] and run.backend._window.shots == []
+
+
+@pytest.mark.parametrize("titles", [
+    [f"{HER_NAME} (3)"],
+    ["小美美", f"{HER_NAME} (3)"],                               # the screen still showed the chat before
+    [""], ["……"], [RuntimeError("Windows has no OCR language installed")],      # cannot be read: as before
+], ids=["its title", "read again", "nothing read", "no letters", "no OCR"])
+def test_a_group_send_goes_ahead_with_the_groups_title_or_one_that_cannot_be_read(tmp_path, db, clock, titles):
+    db.group(GROUP, HER_NAME, [BOSS, HER, ME_SENDER], clock.now - 60)
+    run = sending(tmp_path, db, "")
+    reading(run, *titles)
+    run.backend.watch_group(GROUP, since=clock.now)
+    run.poll()
+    assert run.backend.send_text(GROUP, "你好小美～") is True
+    assert run.backend._window.typed == [(HER_NAME, "你好小美～")]
+
+
+def test_a_private_send_is_checked_as_before(tmp_path, db, clock):
+    """Her private chat (the console's list names it): a title the bot does not know is no judgement, as it was."""
+    listed = tmp_path / "data" / "private_chat_names.json"
+    listed.parent.mkdir(exist_ok=True)
+    listed.write_text(json.dumps({HER: HER_NAME}, ensure_ascii=False), encoding="utf-8")
+    for title in ("小美美", HER_NAME):
+        run = sending(tmp_path, db, title)
+        assert run.backend.send_text(HER, "你好～") is True
+        assert run.backend._window.typed == [(HER_NAME, "你好～")]
+    run = sending(tmp_path, db, f"{GROUP_NAME} (3)")                     # a group's title, for her private chat
+    assert not run.backend.send_text(HER, "你好～") and run.backend._window.typed == []
 
 
 def test_no_name_is_logged(tmp_path, db, clock, caplog):
