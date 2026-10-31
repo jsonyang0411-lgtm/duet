@@ -50,6 +50,12 @@ export const buyinSent = (id, text) => decide(id, 'manual_sent', text)
 export const ackPlatform = (id) => decide(id, 'ack')
 export const partyAction = (body) => post('/api/prm/parties', body)
 export const dealAction = (body) => post('/api/prm/deals', body)
+// 起草备注 (the deal action draft_note, 2026-10-31): what the operators tell the Mac about this creator; every draft of
+// hers (the 开场白 too) follows it. Saved empty, it is cleared; the bot collapses whitespace and keeps at most 300 characters.
+export const DRAFT_NOTE_MAX = 300
+/** The note as the bot keeps it (whitespace collapsed): its length is what the limit counts. */
+export const draftNoteText = (text) => String(text || '').split(/\s+/).filter(Boolean).join(' ')
+export const saveDraftNote = (dealId, text) => dealAction({ deal_id: dealId, action: 'draft_note', text: draftNoteText(text) })
 /** 自动模式 (POST /api/prm/auto): the 下班时段 rules at any hour, until switched off. */
 export const setAutoMode = (on) => post('/api/prm/auto', { on })
 /** The full numbers behind a creator's placeholders; every look is written down (8.2). */

@@ -742,6 +742,51 @@ class TestPrmPages:
         assert "这一条：开场白：先打招呼" in card.inner_text()
         assert page.locator(".prm-draft", has_text="在的，有什么可以帮你？").locator(".tag", has_text="开场白").count() == 0
 
+    def test_deals_page_edits_saves_and_shows_the_draft_note(self, page, prm):
+        """起草备注 (2026-10-31): an opened deal shows its note (none yet) with the hint; 「写备注」 opens the field, 「保存」
+        keeps it through the deal action (one line, as the bot keeps it) and her next draft job carries it; more than
+        300 characters, or the bot refusing, says why right there and keeps nothing; saved empty, it is cleared."""
+        from src.prm.service import SETTLE_SEC
+
+        store = prm.service.store
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.wait_for_timeout(1500)
+        page.locator("button[aria-label='展开 小美']").click()
+        page.wait_for_timeout(300)
+        block = page.locator(".prm-draft-note")
+        text = block.inner_text()
+        assert "起草备注" in text and "（没有）" in text
+        assert "写给 Mac 起草时看的，比如她签名里的要求：直接发链接和 brief、不接语音" in text
+        block.locator("button:has-text('写备注')").click()
+        field = block.locator("textarea[aria-label='小美 的起草备注']")
+        field.fill("长" * 301)
+        assert "301/300 字" in block.inner_text()
+        block.locator("button:has-text('保存')").click()
+        page.wait_for_timeout(500)
+        assert "起草备注最多 300 个字（现在 301 个）" in block.inner_text() and store.deal(1)["draft_note"] == ""
+        field.fill("直接发链接和brief，感兴趣的会回复！\n勿催视频，不接语音")
+        block.locator("button:has-text('保存')").click()
+        page.wait_for_timeout(1500)
+        kept = "直接发链接和brief，感兴趣的会回复！ 勿催视频，不接语音"
+        assert store.deal(1)["draft_note"] == kept
+        assert kept in block.inner_text() and block.locator("textarea").count() == 0
+        assert "改起草备注" in page.locator(".prm-deal").inner_text()            # the deal's record
+        prm.service.handle({"chat_id": "wxid_creator01", "sender_id": "wxid_creator01", "content": "佣金多少",
+                            "msg_type": 1, "is_group": False, "timestamp": prm.clock.now})
+        prm.clock.now += SETTLE_SEC + 1
+        assert prm.relay.next_job(0, ("prm",))["meta"]["note"] == kept
+        # the bot says no: said in the field, the note kept as it was
+        prm.service.set_draft_note = lambda *a, **k: {"ok": False, "error": "测试：现在不能改"}
+        block.locator("button:has-text('改备注')").click()
+        block.locator("textarea[aria-label='小美 的起草备注']").fill("")
+        block.locator("button:has-text('保存')").click()
+        page.wait_for_timeout(800)
+        assert "测试：现在不能改" in block.inner_text() and store.deal(1)["draft_note"] == kept
+        del prm.service.set_draft_note
+        block.locator("button:has-text('保存')").click()                    # saved empty: cleared
+        page.wait_for_timeout(1500)
+        assert store.deal(1)["draft_note"] == "" and "（没有）" in block.inner_text()
+
     def test_deals_page_makes_a_three_party_group_after_asking_and_tries_one_first(self, page, prm):
         """三方群 (src/prm/three_party.py, 2026-10-30): with PRM_GROUP_WITH set, a deal has 「拉三方群」 and 「先试一下」; the
         group is made only after the confirmation, which names who goes in and the suggested name; made, the deal

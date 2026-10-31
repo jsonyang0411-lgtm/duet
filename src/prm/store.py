@@ -8,7 +8,9 @@
                     their texts, what the console shows), when it was delivered and when its
                     personal data was cleared (8.2), and where its 专属佣金 chain stands
                     (``chain``, JSON: the signature the bot last looked at, the sample order
-                    the chain follows and since when; src/prm/service.py)
+                    the chain follows and since when; src/prm/service.py), and the operators'
+                    起草备注 for the Mac (``draft_note``: their own words, never the bot's; every
+                    draft job of the deal carries it)
 ``action_packets``  every draft reply: what would be sent (text with placeholders,
                     attachments), why, and what became of it
 ``pii_tokens``      the phone and ID numbers behind the placeholders (〈手机1〉): the Mac
@@ -296,6 +298,7 @@ _ADDED_COLUMNS = (
     ("friend_adds", "remark", "TEXT NOT NULL DEFAULT ''"),            # 加百应达人微信的备注 (2026-10-29)
     ("friend_adds", "remark_set", "INTEGER NOT NULL DEFAULT 0"),
     ("deals", "three_party", "TEXT NOT NULL DEFAULT '{}'"),           # 三方群 (src/prm/three_party.py, 2026-10-30)
+    ("deals", "draft_note", "TEXT NOT NULL DEFAULT ''"),              # 起草备注 (operator-written, 2026-10-31)
 )
 
 # What the creators wrote, or our side's own words, waiting for the next draft job.
@@ -310,6 +313,10 @@ BACKLOG_KINDS = ("creator_message", "operator_message")
 DRAFT_NOTES = "draft:"
 NOTICE_CHARS = 300          # one notice's text
 ATTENTION_CHARS = 600       # all of them, as the console shows them
+# A deal's 起草备注 (``draft_note``, 2026-10-31): what the operators tell the Mac about this creator for every draft of
+# hers (her WeChat signature said 「直接发链接和brief，感兴趣的会回复！勿催视频，不接语音」, say).  Only an operator writes
+# it (her party ``note`` is the bot's for a creator it registered, and may name her groups).
+DRAFT_NOTE_CHARS = 300
 
 
 class PartyError(ValueError):
@@ -344,6 +351,11 @@ def deal_view(row: dict) -> dict:
     out["chain"] = _loads(row.get("chain"), {})
     out["three_party"] = _loads(row.get("three_party"), {})
     return out
+
+
+def draft_note_text(text) -> str:
+    """A deal's 起草备注 as it is kept: whitespace collapsed (one line), at most DRAFT_NOTE_CHARS characters."""
+    return " ".join(str(text or "").split())[:DRAFT_NOTE_CHARS]
 
 
 def notices_of(row: dict) -> list:
@@ -552,15 +564,18 @@ class PrmStore:
     def update_deal(self, deal_id: int, now: Optional[float] = None, *, merge_slots: Optional[dict] = None,
                     replace_slots: Optional[dict] = None, **fields) -> None:
         """Set ``fields`` and merge (or replace) the slot values; ``chain`` and ``three_party`` are dicts (stored as
-        JSON).  (``attention`` is the notices' texts: ``set_notice`` / ``drop_notices`` / ``edit_notices``.)"""
+        JSON), ``draft_note`` is kept as ``draft_note_text`` makes it.  (``attention`` is the notices' texts:
+        ``set_notice`` / ``drop_notices`` / ``edit_notices``.)"""
         allowed = {"stage", "mode", "mode_until", "stage_proposal", "last_message_at",
-                   "delivered_at", "purged_at", "holding_round", "chain", "three_party"}
+                   "delivered_at", "purged_at", "holding_round", "chain", "three_party", "draft_note"}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"not a deal field: {sorted(unknown)}")
         for name in ("chain", "three_party"):
             if name in fields:
                 fields[name] = json.dumps(fields[name] or {}, ensure_ascii=False)
+        if "draft_note" in fields:
+            fields["draft_note"] = draft_note_text(fields["draft_note"])
         now = time.time() if now is None else now
         with self._lock:
             row = self._conn.execute("SELECT slots FROM deals WHERE id = ?", (deal_id,)).fetchone()

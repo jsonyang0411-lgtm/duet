@@ -212,6 +212,43 @@ def test_an_opening_is_asked_for_from_the_running_console_and_refused_while_stop
     assert stopped == {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能写开场白"}
 
 
+def test_the_draft_note_is_kept_from_the_running_console_and_refused_while_stopped(running, tmp_path, monkeypatch):
+    """POST /api/prm/deals {action: draft_note, text} (起草备注, 2026-10-31): the operators' words for the Mac, kept on the
+    deal (whitespace collapsed) and shown in GET /api/prm's deal; her next draft job carries them (``meta.note``); too
+    long is refused, empty clears it; another site's page cannot change it; a stopped bot cannot keep one (refused like
+    写开场白)."""
+    words = "直接发链接和brief，感兴趣的会回复！\n勿催视频，不接语音"
+    kept = "直接发链接和brief，感兴趣的会回复！ 勿催视频，不接语音"
+    deal = call("/api/prm")[1]["parties"][0]["deal"]
+    assert deal["draft_note"] == ""
+    answer = call("/api/prm/deals", "POST", {"action": "draft_note", "deal_id": deal["id"], "text": words})[1]
+    assert answer == {"ok": True, "draft_note": kept}
+    deal = call("/api/prm")[1]["parties"][0]["deal"]
+    assert deal["draft_note"] == kept and deal["events"][0]["name"] == f"改起草备注（{len(kept)} 字）"
+    running.prm.handle({"chat_id": CREATOR, "sender_id": CREATOR, "content": "你们的帽子怎么合作", "msg_type": 1,
+                        "is_group": False, "timestamp": running.relay._clock()})
+    running.relay._clock.now += SETTLE_SEC + 1
+    assert running.relay.next_job(0, ("prm",))["meta"]["note"] == kept
+    too_long = call("/api/prm/deals", "POST", {"action": "draft_note", "deal_id": deal["id"], "text": "长" * 301})[1]
+    assert too_long == {"ok": False, "error": "起草备注最多 300 个字（现在 301 个）"}
+    raw = json.dumps({"action": "draft_note", "deal_id": deal["id"], "text": "别的网站写的"}).encode()
+    _, sock = _build_handler("/api/prm/deals", method="POST", body=raw,
+                             headers={"Content-Type": "application/json", "Origin": "https://evil.example"})
+    assert sock.get_response_text().split("\r\n", 1)[0].split()[1] == "403"
+    assert call("/api/prm/deals")[0] == 405                                 # a GET changes nothing
+    assert call("/api/prm")[1]["parties"][0]["deal"]["draft_note"] == kept
+    cleared = call("/api/prm/deals", "POST", {"action": "draft_note", "deal_id": deal["id"], "text": ""})[1]
+    assert cleared == {"ok": True, "draft_note": ""}
+    assert call("/api/prm")[1]["parties"][0]["deal"]["events"][0]["name"] == "清掉起草备注"
+    server.register_prm(None)                                       # the bot stopped
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PRM_DB", raising=False)
+    assert call("/api/prm/parties", "POST", {"action": "add", "wxid": CREATOR, "name": "小美"})[1]["ok"] is True
+    stopped = call("/api/prm/deals", "POST", {"action": "draft_note", "deal_id": 1, "text": "不接语音"})[1]
+    assert stopped == {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能改起草备注"}
+    assert call("/api/prm")[1]["parties"][0]["deal"]["draft_note"] == ""
+
+
 def test_changes_need_a_post_and_a_body():
     for path in ("/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal", "/api/prm/auto"):
         assert call(path)[0] == 405                                         # a GET must not change anything
