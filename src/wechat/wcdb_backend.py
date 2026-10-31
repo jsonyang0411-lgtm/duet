@@ -127,10 +127,14 @@ VERIFY_OFF_SEC = 600             # the screen could not be read (no OCR language
 # not read yet) is known only by its id, which WeChat's search cannot find.
 GROUP_NO_NAME = ("机器人不知道这个群在微信里叫什么（群还没有群名，或者还没读到），没法在微信里找到它，没有发：请手动发，"
                  "或者在微信里给群起一个不和别的聊天重名的群名")
-# SEND_VERIFY_CHAT, a send to a group: the search opened a chat whose title reads but shows no member count (a private
-# chat, or a title the bot does not know: the group 「小美」 asked for, the contact 「小美美」 opened).
+# SEND_VERIFY_CHAT, a send to a group: the search opened a private chat the bot knows (one of the session list, one it
+# reads, one of data/private_chat_names.json), its title read with no member count: the group 「小美」 asked for, the
+# contact 「小美美」 opened (title_verdict ``private``).
 NOT_A_GROUP = ("微信搜索「{name}」打开的是「{title}」，不是群（群聊的标题带人数），没有发：请手动发到群里，或者在微信里"
                "给群起一个不和别的聊天重名、也不被别的名字包含的群名（改好后重启 Windows 上的机器人）")
+# A member count cut off at the end of a group's title as OCR reads it (its closing bracket lost, or more:
+# 「小美合作群(3」, 「小美合作群（3」, 「小美合作群(」): a group's title all the same (title_verdict).
+_CUT_COUNT = re.compile(r"\s*[\(（]\s*(?:\d+\s*人?\s*)?$")
 # boss_groups' ``joined_at``: WeChat's own lines (type 10000 / 10002) saying this account came into a group.  The texts
 # (WeChat 4, Chinese): added by someone 「"老板测试"邀请你加入了群聊」 (「，群聊参与人还有：小美」 may follow), made by
 # someone with this account and others 「"老板测试"邀请你和"小美"加入了群聊」, joined by itself 「你加入了群聊」 /
@@ -153,34 +157,41 @@ def _ocr_key(name: str) -> str:
     return "".join(ch for ch in str(name or "") if ch.isalnum()).casefold()
 
 
-def title_verdict(title: str, name: str, others, is_group: bool) -> str:
+def title_verdict(title: str, name: str, others, is_group: bool, private=frozenset()) -> str:
     """What the chat title read from the screen says about the chat the search opened for ``name``:
     ``ok`` (it is that chat), ``other`` (it is another chat the bot knows: ``others``, their ``_ocr_key``),
     ``group`` (a group's title, with its member count, while a private chat was asked for), ``private`` (a group
-    was asked for and the title reads but shows no member count: a private chat's, or one the bot does not know,
-    even of the group's very name), ``unknown`` (nothing read, cut off, misread, a name the bot does not know: no
-    judgement).  A group's title always shows its member count (「小美合作群 (3)」); one cut off with an ellipsis
-    may have lost it, so a cut-off title the group's name begins with (「小美合…」, at least 3 characters) is no
-    judgement either."""
+    was asked for and the title, with no member count, reads as a private chat the bot knows: ``private``, their
+    ``_ocr_key``), ``unknown`` (nothing read, cut off, misread, a name the bot does not know: no judgement).
+
+    A group asked for (老板拉的群): a group's title shows its member count (「小美合作群 (3)」), and one whose count
+    OCR cut off at the end (「小美合作群(3」, 「小美合作群（3」: ``_CUT_COUNT``) is a group's title as well; it is ``ok``
+    only with a count.  A title without one is refused (``private``) only when it reads as a known private chat,
+    compared as the other verdicts compare (``_ocr_key``: no spaces, no case, what OCR reads; a private chat
+    「小美🌸」 reads as 「小美」, even when that is the group's own name).  Another known chat's title is ``other``; every
+    other title without a count is ``unknown``, sent as before: one the bot does not know (a contact never seen, the
+    group's own name with its count lost, one cut off with an ellipsis).  A private chat asked for: as before
+    (``private`` and a cut-off count play no part)."""
     from .ocr.reader import clean_group_name
 
     raw = " ".join(str(title or "").split())
     if not raw:
         return "unknown"
     shown = clean_group_name(raw)
+    counted = shown != raw                           # 「名字 (35)」: a group
+    if is_group and not counted and _CUT_COUNT.search(raw):
+        shown, counted = _CUT_COUNT.sub("", raw), True   # 「名字(3」: its count cut off by OCR, a group's all the same
     key = _ocr_key(shown)
     if not key:
         return "unknown"
-    counted = shown != raw                           # 「名字 (35)」: a group
     if key == _ocr_key(name) and (counted or not is_group):
         return "ok"
+    if is_group and not counted and key in private:
+        return "private"
     if key in others:
         return "other"
     if not is_group and counted:
         return "group"
-    if is_group and not counted:
-        cut = shown.endswith(("…", "...")) and len(key) >= 3 and _ocr_key(name).startswith(key)
-        return "unknown" if cut else "private"
     return "unknown"
 
 
@@ -1194,7 +1205,7 @@ class WcdbBackend(AbstractWeChatBackend):
             return "", SendRefused(UNKNOWN_NAME)
         if name == talker and talker.endswith("@chatroom"):
             refused = SendRefused(GROUP_NO_NAME)
-            logger.warning("Not using the WeChat window for %s: %s", talker[:20], refused.reason)
+            logger.warning("Not using the WeChat window for %s…: %s", talker[:8], refused.reason)   # (no name in it)
             return name, refused
         other = self._namesake(talker, name)
         if other:
@@ -1480,10 +1491,15 @@ class WcdbBackend(AbstractWeChatBackend):
         a new member nothing from before); ``history_complete``, fewer rows than CATCHUP_READ came back (the group's
         whole history was read); ``joined_at``, the time of WeChat's line among them that this account was added
         or invited, or made the group with others (``JOINED_LINE``; the oldest when there are more), None when none
-        is there.  PRM takes over only a group that is really new for us.  A group whose lines cannot be read now is
-        left out (asked again at the next call).  None while the database cannot be read.  Every new group's member
-        list is read (who is in it, how many); names and lines are read only for the groups given (a big group's
-        never are)."""
+        is there.  PRM takes over only a group that is really new for us.
+
+        A group whose members or lines cannot be read now is given as ``{"chat": id, "unreadable": True}``, those two
+        keys only, in its place by its session's time (it may be a boss's: PRM never counts it as looked at and asks
+        again at the next call): its members answered with an error code, or with no member at all (a group always has
+        this account: WeChat may not have written a new group's members yet), or its lines could not be read (an error
+        code, the database closed while they were read).  None while the database cannot be read (the session list,
+        or the database closed meanwhile).  Every new group's member list is read (who is in it, how many); names and
+        lines are read only for the groups given (a big group's never are)."""
         from .new_friends import session_time
 
         wanted = {str(wxid).strip() for wxid in members_any or () if str(wxid or "").strip()}
@@ -1492,6 +1508,7 @@ class WcdbBackend(AbstractWeChatBackend):
             limit = int(max_members)
         except (TypeError, ValueError):
             limit = 0
+        unreadable = 0
         try:
             sessions = self.with_client(lambda client: client.get_sessions())
             if sessions is None:
@@ -1503,27 +1520,59 @@ class WcdbBackend(AbstractWeChatBackend):
                     groups[chat] = session_time(session)
             found = []
             for chat, last_at in (groups.items() if wanted else ()):
-                rows = self.with_client(lambda client, chat=chat: client.get_group_members(chat))
-                if rows is None:
-                    return None
-                members = _member_rows(rows)
-                if not members or len(members) > limit or not wanted & {wxid for wxid, _ in members}:
+                try:
+                    rows = self.with_client(lambda client, chat=chat: client.get_group_members(chat))
+                    if rows is None:
+                        return None
+                    members = _member_rows(rows)
+                    if members and (len(members) > limit or not wanted & {wxid for wxid, _ in members}):
+                        continue                # (no boss in it, or too many members: no boss group)
+                    names = self._display_names([chat] + [wxid for wxid, _ in members]) if members else {}
+                    if names is None:
+                        return None
+                except WcdbCallError:           # (an error code for this group: the others are read all the same)
+                    members, names = [], {}
+                history = self._history_of(chat) if members else None
+                if history is None:             # (its members or its lines cannot be read now: asked again next call)
+                    unreadable += 1
+                    found.append(({"chat": chat, "unreadable": True}, last_at))
                     continue
-                names = self._display_names([chat] + [wxid for wxid, _ in members])
-                if names is None:
-                    return None
-                history = self._history_of(chat)
-                if history is None:
-                    continue                    # (its lines could not be read: asked again at the next call)
                 found.append(({"chat": chat, "name": names.get(chat, ""),
                                "members": self._members_out(members, names), **history}, last_at))
         except Exception:
             logger.warning("老板拉的群: the groups could not be looked at", exc_info=True)
             return None
-        found.sort(key=lambda item: -float(item[0]["created_at"] or item[1] or 0))
-        logger.debug("老板拉的群: %d new group(s) looked at, %d with a boss and at most %d members", len(groups),
-                     len(found), limit)
+        found.sort(key=lambda item: -float(item[0].get("created_at") or item[1] or 0))
+        logger.debug("老板拉的群: %d new group(s) looked at, %d with a boss and at most %d members, %d not readable now",
+                     len(groups), len(found) - unreadable, limit, unreadable)
         return [group for group, _ in found]
+
+    def wechat_now(self) -> Optional[float]:
+        """WeChat's clock now, as near as its database tells it (老板拉的群: PRM takes its baseline in it and compares a
+        group's own WeChat times with it, ``joined_at`` / ``created_at``; this PC's clock may be hours off): the newest
+        session time of the session list now, in seconds (``session_time``), taking each session's ``last_timestamp``
+        (when its last line was written) before its ``sort_timestamp`` (the list's order key: it need not be a line's
+        time, a draft may move it).  At most WeChat's now: on a quiet account, when anything was written last.  None
+        while the database cannot be read, or when no session gives a time.  Quiet: no name is ever logged (a debug
+        line when the session list cannot be read)."""
+        from .new_friends import session_time
+
+        try:
+            sessions = self.with_client(lambda client: client.get_sessions())
+        except Exception:
+            logger.debug("老板拉的群: no session list to tell WeChat's time by", exc_info=True)
+            return None
+        if sessions is None:
+            return None
+        times = []
+        for session in sessions or []:
+            if not isinstance(session, dict):
+                continue
+            at = session_time({key: session[key] for key in ("last_timestamp", "lastTimestamp") if key in session})
+            at = at if at is not None else session_time(session)
+            if at is not None:
+                times.append(at)
+        return max(times) if times else None
 
     def group_members(self, chat: str) -> Optional[list]:
         """A group's members now, ``[{"wxid", "name"}]`` in the database's order: ``name`` = the name this account sees
@@ -2791,22 +2840,29 @@ class WcdbBackend(AbstractWeChatBackend):
         - another chat the bot knows of (read, in the session list, in the console's list), or a group's
           title while a private chat was asked for: read again (VERIFY_LOOKS, the screen may lag), then a
           ``SendRefused`` (``WRONG_CHAT``): nothing is pasted;
-        - a group asked for (老板拉的群) and a title that reads but shows no member count (a private chat's, or one
-          it does not know, even of the group's own name): read again the same way, then a ``SendRefused``
-          (``NOT_A_GROUP``): nothing is pasted;
-        - nothing readable, cut off, a name it does not know: go ahead, as without the check (for a group: a
-          title with a member count).
+        - a group asked for (老板拉的群) and a title without a member count that reads as a private chat the bot
+          knows (read, in the session list, in the console's list: their names as ``title_verdict`` compares them;
+          the group's own name too, when a private chat's reads the same): read again the same way, then a
+          ``SendRefused`` (``NOT_A_GROUP``): nothing is pasted;
+        - nothing readable, cut off, a name it does not know (for a group: also its own name or a contact's
+          without a count, and a count OCR cut off: 「小美合作群(3」): go ahead, as without the check.
 
-        A screen that cannot be read at all (no OCR language, a window too small) is not tried again for
-        VERIFY_OFF_SEC.  None (no check) when off, or with no way to read the screen (not Windows)."""
+        A refusal is logged with the chat id's first 8 characters and the verdict only (the reason, with the
+        names, goes back to the caller).  A screen that cannot be read at all (no OCR language, a window too
+        small) is not tried again for VERIFY_OFF_SEC.  None (no check) when off, or with no way to read the
+        screen (not Windows)."""
         if not getattr(self, "_verify_chat", True):
             return None
         if getattr(self, "_title_reader", None) is None and os.name != "nt":
             return None
         target = _ocr_key(name)
-        others = {_ocr_key(n) for names in (self._chat_names, self._session_names, self._listed_private_names())
-                  for t, n in list(names.items()) if t != talker} - {target, ""}
+        known = [(str(t), n) for names in (self._chat_names, self._session_names, self._listed_private_names())
+                 for t, n in list(names.items()) if t != talker]
+        others = {_ocr_key(n) for _, n in known} - {target, ""}
         is_group = self._chat_is_group.get(talker, str(talker).endswith("@chatroom"))
+        # (a group asked for: the private chats known, by their names as OCR reads them, the group's own name kept)
+        private = ({_ocr_key(n) for t, n in known
+                    if not t.endswith("@chatroom") and not self._chat_is_group.get(t)} - {""}) if is_group else set()
 
         def check(hwnd):
             if time.monotonic() < getattr(self, "_verify_off_until", 0.0):
@@ -2820,7 +2876,7 @@ class WcdbBackend(AbstractWeChatBackend):
                     logger.warning("SEND_VERIFY_CHAT: the chat title could not be read (%s); sends go on without "
                                    "the check for %d minutes", e, VERIFY_OFF_SEC // 60)
                     return None
-                verdict = title_verdict(title, name, others, is_group)
+                verdict = title_verdict(title, name, others, is_group, private)
                 if verdict not in ("other", "group", "private"):
                     break
                 if look + 1 < VERIFY_LOOKS:
@@ -2834,7 +2890,8 @@ class WcdbBackend(AbstractWeChatBackend):
                 return None
             reason = NOT_A_GROUP if verdict == "private" else WRONG_CHAT
             refused = SendRefused(reason.format(name=name, title=" ".join(title.split())[:40]))
-            logger.warning("Not sending to %s: %s", talker[:20], refused.reason)
+            logger.warning("Not sending to %s…: SEND_VERIFY_CHAT read the open chat's title as %r (%s); nothing is "
+                           "pasted", talker[:8], verdict, "NOT_A_GROUP" if verdict == "private" else "WRONG_CHAT")
             return refused
         return check
 
