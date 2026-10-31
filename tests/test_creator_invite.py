@@ -662,6 +662,65 @@ def test_run_skips_a_state_conflict_and_goes_on_and_a_later_plan_may_ask_again(e
     assert "dy_small_b" not in tool.Ledger(env.tmp / "ledger").never_again(), "nothing went out: a later plan may ask again"
 
 
+def test_a_card_that_never_arrived_is_written_back_as_not_sent_and_the_run_stops(env):
+    """2026-10-31 live: from the 50th card in 24 hours the platform took the request and sent no card (INDETERMINATE, her
+    button still 邀约带货), and the run went on through nine more. Now one more look at her button, a little later: still
+    1 → not sent (a rerun sends her) and the run stops, saying how many went out in the last 24 hours."""
+    plan_file, plan_id = make_plan(env, outcome={"dy_small_b": "INDETERMINATE"})
+    env.log.unlink()
+    code, out, sleeps = run_now(env, plan_file, plan_id)
+    assert code == 0
+    assert [x["aweme_id"] for x in out["sent"]] == ["dy_small_a"]
+    assert out["skipped"] == [{"aweme_id": "dy_small_b", "outcome": "NOT_DELIVERED", "exit": 1, "sent": False, "checked_status": 1,
+                               "why": "命令行说 INDETERMINATE，再查她的按钮还是「邀约带货」：卡没送到，重跑会再发她"}]
+    assert out["stopped"]["at"] == 1 and "没把卡发出去" in out["stopped"]["why"]
+    assert "台账里这 24 小时发出去 2 张" in out["stopped"]["why"], "dy_invited earlier and dy_small_a now; not the one that never arrived"
+    calls = [c["args"] for c in env.calls()]
+    assert calls[-1] == ["buyin", "author-invite-status", "--aweme-id=dy_small_b", "--pause-ms=4000",
+                         "--expect-shop-id=9100000000000001", "--no-open"], "a read-only look, right after her execution"
+    assert "--execute" in calls[-2] and "--aweme-id=dy_small_b" in calls[-2]
+    assert sleeps == [22.5, 20.0], "the usual wait before her, then recheck_after_seconds before the look"
+    results = [(r["outcome"], r["sent"]) for r in ledger_lines(env) if r.get("event") == "result" and r.get("aweme_id") == "dy_small_b"]
+    assert results == [("INDETERMINATE", True), ("NOT_DELIVERED", False)], "the CLI's answer first, then what her button said"
+    led = tool.Ledger(env.tmp / "ledger")
+    assert "dy_small_b" not in led.never_again() and led.unknown() == []
+    report = sorted((env.tmp / "ledger").glob("run-*/report.md"))[-1].read_text(encoding="utf-8")
+    assert "停在清单第 2 位" in report and "卡没送到" in report
+    # hours later the platform takes cards again: the same command sends her and goes on
+    env.scenario(scenario())
+    code, out, _ = run_now(env, plan_file, plan_id)
+    assert code == 0 and out["stopped"] is None
+    assert [x["aweme_id"] for x in out["sent"]][:2] == ["dy_small_b", "dy_gap"] and len(out["sent"]) == 6
+    assert tool.load_config(env.write_config())["recheck_after_seconds"] == 20
+    code, _, _ = env.main(["status", "--config", env.write_config(recheck_after_seconds=-1)])
+    assert code == 2
+
+
+def test_a_card_the_cli_could_not_confirm_that_did_arrive_counts_and_the_run_goes_on(env):
+    plan_file, plan_id = make_plan(env)
+    env.scenario(scenario(outcome={"dy_small_b": "ACCEPTED_UNVERIFIED"}, status={"dy_talking": 2, "dy_small_b": 2}))
+    code, out, _ = run_now(env, plan_file, plan_id)
+    assert code == 0 and out["stopped"] is None and len(out["sent"]) == 7
+    b = next(x for x in out["sent"] if x["aweme_id"] == "dy_small_b")
+    assert (b["outcome"], b["sent"], b["checked_status"]) == ("ACCEPTED_UNVERIFIED", True, 2), "her button: 继续沟通 · 待回复"
+    assert [r["sent"] for r in ledger_lines(env) if r.get("event") == "result" and r.get("aweme_id") == "dy_small_b"] == [True]
+    assert "dy_small_b" in tool.Ledger(env.tmp / "ledger").never_again()
+    assert "checked_status" not in next(x for x in out["sent"] if x["aweme_id"] == "dy_small_a"), "a verified card is not looked at again"
+
+
+@pytest.mark.parametrize("why", ["the read fails", "the search does not find her"])
+def test_a_card_the_cli_could_not_confirm_whose_button_cannot_be_read_stops_the_run_and_is_never_sent_again(env, why):
+    plan_file, plan_id = make_plan(env)
+    broken = {"exits": {"status": 1}} if why == "the read fails" else {"missing": ["dy_ghost", "dy_small_b"]}
+    env.scenario(scenario(outcome={"dy_small_b": "INDETERMINATE"}, **broken))
+    env.log.unlink()
+    code, out, _ = run_now(env, plan_file, plan_id)
+    assert code == 0 and out["stopped"]["at"] == 1 and "再查她的按钮也没查到" in out["stopped"]["why"]
+    assert [(x["aweme_id"], x["sent"], x.get("checked_status", "-")) for x in out["sent"]] == [("dy_small_a", True, "-"), ("dy_small_b", True, None)]
+    assert "dy_small_b" in tool.Ledger(env.tmp / "ledger").never_again(), "it may have gone out: never sent again"
+    assert not any(a.startswith("--aweme-id=dy_gap") for c in env.calls() for a in c["args"]), "nothing after the stop"
+
+
 def test_run_skips_what_the_preview_does_not_bear_out(env):
     plan_file, plan_id = make_plan(env, preview_status={"dy_small_a": 2}, preview_gate={"dy_small_b": 4}, blocked=["dy_video_big"])
     code, out, _ = run_now(env, plan_file, plan_id)

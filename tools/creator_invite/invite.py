@@ -12,7 +12,9 @@ run（要 ``--confirm <清单编号>`` 和清单文件）：只发清单里的�
 ``--expect-status 1 --expect-popwindow -1 --execute`` 发送（预览绑定执行）。发一位记一位：本地台账
 追加写、0600，执行之前先记「开始发」，同一个抖音号绝不发第二次，进程中途死掉重跑也不会重发。
 两位之间随机等 15～30 秒；退出码 76 / 77 / 79 立刻停；STATE_CONFLICT 跳过这位、继续；平台本周
-额度低于余量、或我们自己的每周上限（默认 800）到了也停；重跑就接着上次停下的地方。
+额度低于余量、或我们自己的每周上限（默认 800）到了也停；重跑就接着上次停下的地方。命令行没核实成功
+的一张卡（INDETERMINATE 等），等 recheck_after_seconds 再只读查一次她的按钮：还是「邀约带货」就是卡没
+送到，台账改记没发出去、停下（2026-10-31：24 小时里第 50 张起平台收下请求却不发卡）；查不到也停。
 
 两个命令行都经本目录的放慢包装（paced-dy.mjs / paced-jst.mjs）调用：任意两次平台请求之间至少
 隔 gap_seconds（默认 3 秒，跨进程也算）。只用标准库，macOS 自带的 Python 3.9 能跑。
@@ -64,6 +66,10 @@ COMMISSION_CAP = 25                                        # the user's own ceil
 CONTENT_MAX = 150                                          # the drawer's limit, counted as JS counts (UTF-16 units)
 NOT_INVITED, GATE_OPEN = 1, -1                              # status 1 = 邀约带货 (enabled); popwindow -1 = no confirmation
 SENT_OUTCOMES = ("VERIFIED_SUCCESS", "ACCEPTED_UNVERIFIED", "INDETERMINATE", "CHANGED_WITH_SIDE_EFFECT", "OBSERVED_DESIRED_STATE")
+# A card the CLI saw arrive. Any other sent outcome gets one more look at her button (run_plan; 2026-10-31 live: from the
+# 50th card in 24 hours the platform took the request but sent no card — INDETERMINATE, her button still 邀约带货).
+CONFIRMED_OUTCOMES = ("VERIFIED_SUCCESS", "OBSERVED_DESIRED_STATE")
+NOT_DELIVERED = "NOT_DELIVERED"                            # our own outcome: that look saw status 1, so no card arrived
 
 CATEGORY_NAMES = {"small": "小达人", "mid": "中大博主", "big": "大主播/专场型"}
 CATEGORY_ORDER = ("small", "mid", "big")
@@ -307,6 +313,8 @@ def load_config(path: Optional[str]) -> dict:
             or not 10 <= wait[0] <= wait[1] <= 600):
         raise ToolError("配置 wait_between 要是 [最少秒, 最多秒]，至少 10 秒", EXIT_USAGE)
     cfg["wait_between"] = [float(wait[0]), float(wait[1])]
+    # 命令行没核实成功的一张卡，等几秒再查一次她的按钮（还是「邀约带货」= 卡没送到，停下；2026-10-31）
+    cfg["recheck_after_seconds"] = _number(raw, "recheck_after_seconds", 20, 0, 600)
     cfg["plan_max_age_days"] = _number(raw, "plan_max_age_days", 3, 0.01, 30)
     # follow（达人回没回邀约卡，用户 2026-10-29）：北京时间几点到几点查、发卡后跟几天、一次最多查几位
     hours = raw.get("follow_hours", [9, 23])
@@ -1021,6 +1029,20 @@ def load_plan(path: str) -> dict:
     return plan
 
 
+def card_status(cfg: dict, clis: Clis, aweme: str) -> Optional[int]:
+    """Her button now (``buyin author-invite-status``, read-only): 1 = 邀约带货 (no card from us), 2 / 3 / 4 … = a card is
+    there; None = could not tell (the read failed, or the search did not find her)."""
+    result = clis.run("dy", ["buyin", "author-invite-status", f"--aweme-id={aweme}", "--pause-ms=4000",
+                             f"--expect-shop-id={cfg['dy_expect_shop_id']}", "--no-open"], 600)
+    if result.exit_code != 0 or result.data is None:
+        return None
+    for c in result.data.get("creators") or []:
+        if isinstance(c, dict) and str(c.get("awemeId") or "") == aweme and c.get("found"):
+            status = c.get("status")
+            return status if isinstance(status, int) and not isinstance(status, bool) else None
+    return None
+
+
 def run_plan(cfg: dict, plan: dict, confirm: str, clis: Clis, ledger: Ledger, *, limit: Optional[int] = None,
              only: Optional[set] = None, sleep: Callable = time.sleep, uniform: Callable = random.uniform,
              clock: Callable = now_bjt) -> dict:
@@ -1139,6 +1161,25 @@ def run_plan(cfg: dict, plan: dict, confirm: str, clis: Clis, ledger: Ledger, *,
         if outcome == "STATE_CONFLICT":
             summary["conflicts"].append(entry)
             continue
+        if sent and outcome not in CONFIRMED_OUTCOMES:
+            # the CLI did not see the card arrive: one more look at her button, a little later
+            sleep(cfg["recheck_after_seconds"])
+            seen = card_status(cfg, clis, aweme)
+            entry["checked_status"] = seen
+            if seen == NOT_INVITED:                       # no card: written back as not sent (a rerun sends her), and stop
+                ledger.append({"event": "result", "attempt": attempt, "plan_id": plan["plan_id"], "aweme_id": aweme, "exit": done.exit_code,
+                               "outcome": NOT_DELIVERED, "platform_writes": writes, "sent": False, "timed_out": False, "checked_status": seen})
+                summary["skipped"].append({**entry, "outcome": NOT_DELIVERED, "sent": False,
+                                           "why": f"命令行说 {outcome}，再查她的按钮还是「邀约带货」：卡没送到，重跑会再发她"})
+                day = ledger.sent_since(clock() - timedelta(hours=24))
+                summary["stopped"] = {"why": f"发送 {aweme}：平台收下了请求，却没把卡发出去（她的按钮还是「邀约带货」）。多半是平台 24 小时里"
+                                             f"发卡的上限到了（台账里这 24 小时发出去 {day} 张）：过几个小时再发，她和后面的重跑会再发", "at": index}
+                break
+            if seen is None:                              # could not look: it may have gone out — never sent again, and stop
+                summary["sent"].append(entry)
+                summary["stopped"] = {"why": f"发送 {aweme} 没核实成功（{outcome}），再查她的按钮也没查到：先停下，到百应里看她（不会重发她）",
+                                      "at": index}
+                break
         (summary["sent"] if sent else summary["skipped"]).append(entry)
     ledger.append({"event": "run-end", "plan_id": plan["plan_id"], "sent": len(summary["sent"]), "stopped": (summary["stopped"] or {}).get("why")})
     summary["sent_this_week"] = ledger.sent_this_week(clock())
