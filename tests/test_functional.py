@@ -1398,7 +1398,7 @@ class TestPrmPages:
         text = card.inner_text()
         for expected in ("老板拉的群", "老板（老板测试）", "老板测试的小群", "测试达人", "wxid_test_a", "测试助理",
                          "老板测试的家人群", "测试亲戚", "（没有名字）", "wxid_test_d",
-                         "已接手 2 个群；1 个群在等她进群（群里现在只有老板和我们", "2 个群要你选哪个是她"):
+                         "已接手 2 个群；1 个群在等她进群或者等群里有消息（机器人每分钟再看一次）", "2 个群要你选哪个是她"):
             assert expected in text, expected
         first = card.locator(".prm-boss-group", has_text="老板测试的小群")
         assert first.locator("button:has-text('是她')").count() == 2
@@ -1487,6 +1487,51 @@ class TestPrmPages:
         page.goto(f"{BASE_URL}/#/review", timeout=10000)
         page.get_by_text("老板拉了 3 个新群，要你看一眼：到「合作单」页顶上的「老板拉的群」里选哪个是她").wait_for()
         assert "不止一个人" not in page.locator("body").inner_text()
+
+    def test_deals_page_warns_of_an_unknown_boss_name_and_its_buttons_stay_on(self, page, prm):
+        """Second review 2026-10-31 F3: ``warning`` (a name of PRM_GROUP_WITH no one contact has: no group is taken over
+        by itself) is a warning note on the card while every 是她 and 这个群不是达人 stays on (only ``why_not`` turns them
+        off); a group held for that very reason does not say it again, one held for its own reason (「拿不准」) does;
+        是她 posts {chat, wxid}; 待审批 says the groups wait for a look."""
+        now = prm.clock.now
+        warning = ("PRM_GROUP_WITH 里的「老板二」在这个微信里找不到 / 有重名：认出来以前，老板拉的群不会自动接手"
+                   "（找到的群在这里等你点「是她」）")
+        maybe = "拿不准是不是新拉的群：是的话点「是她」"
+
+        def group(n, why):
+            return {"chat": f"test_group_2{n}@chatroom", "name": f"测试群2{n}", "found_at": now, "size": 3, "why": why,
+                    "members": [{"wxid": f"wxid_test_2{n}a", "name": f"测试成员2{n}a"}]}
+
+        bg = {"enabled": True, "why_not": "", "warning": warning, "boss": ["老板测试", "老板二"], "boss_call": "老板",
+              "waiting": 1, "linked": 0, "pending": [group(1, warning), group(2, maybe)]}
+        posted = []
+
+        def answer(route):
+            body = route.request.post_data_json
+            posted.append((route.request.url.rsplit("/", 1)[1], body))
+            bg["pending"] = [g for g in bg["pending"] if g["chat"] != body["chat"]]
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"ok": True, "party_id": 9, "deal_id": 9}))
+
+        self._serve_prm(page, lambda state: state.update(boss_groups=json.loads(json.dumps(bg))))
+        page.route("**/api/prm/boss-groups/*", answer)
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        card = page.locator(".prm-boss-groups")
+        card.locator(".note", has_text="「老板二」").first.wait_for()
+        notes = card.locator(".note").all_inner_texts()
+        assert notes.count(warning) == 1 and notes.count(maybe) == 1, notes          # (said once, above the groups)
+        rows = {n: card.locator(".prm-boss-group", has_text=f"测试群2{n}") for n in (1, 2)}
+        assert rows[1].locator(".note").count() == 0 and rows[2].locator(".note").inner_text() == maybe
+        assert "1 个群在等她进群或者等群里有消息（机器人每分钟再看一次）" in card.inner_text()
+        buttons = card.locator("button").all()
+        assert len(buttons) == 4 and not any(b.is_disabled() for b in buttons)    # 2 是她, 2 这个群不是达人
+        rows[1].locator("button:has-text('是她')").click()
+        page.get_by_text("已接手「测试群21」：测试成员21a 登记成达人").wait_for()
+        assert posted == [("pick", {"chat": "test_group_21@chatroom", "wxid": "wxid_test_21a"})]
+        rows[1].wait_for(state="detached")
+        assert card.locator(".note", has_text="「老板二」").count() == 1            # (still warned of: still not known)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.get_by_text("老板拉了 1 个新群，要你看一眼：到「合作单」页顶上的「老板拉的群」里选哪个是她").wait_for()
 
     def test_deals_page_says_why_boss_groups_cannot_run_and_has_nothing_of_them_when_off(self, page, prm):
         """On but unable to run, the card says why (and its buttons are off: a stopped bot lists the groups it found);

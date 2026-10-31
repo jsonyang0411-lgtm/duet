@@ -96,7 +96,8 @@ class TheBossGroupIsTheOneException(GatewayCase):
         backend = Backend()
         self.prm.boss_groups.attach(backend)
         self.prm.boss_groups.scan()                                     # the baseline
-        backend.groups[self.BOSS_GROUP] = {"name": "老板测试、小美", "members": [ME, BOSS_ID, self.HER]}
+        backend.groups[self.BOSS_GROUP] = {"name": "老板测试、小美", "members": [ME, BOSS_ID, self.HER],
+                                           "joined_at": NOW}               # (WeChat's line that we were added)
         self.prm.boss_groups._scanned = 0
         self.prm.boss_groups.scan()                                     # taken over (on)
         router._prm = self.prm

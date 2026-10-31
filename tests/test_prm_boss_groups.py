@@ -38,23 +38,30 @@ _IDS = itertools.count(1)
 
 
 class Backend:
-    """The WCDB backend as 老板拉的群 uses it (spec §4 and the review's 2026-10-31 additions): the groups of WeChat's
-    session list, each with its members (``joined_at`` / ``history_complete`` given when a test sets them), the
-    watches and whether their catch-up ran (``slow``: only once ``catch_up`` says the poll ran it; else at once), the
-    private chats WeChat has (``has_private_chat``, quiet)."""
+    """The WCDB backend as 老板拉的群 uses it (spec §4 and the reviews' 2026-10-31 additions): the groups of WeChat's
+    session list, each with its members (``joined_at`` / ``history_complete`` given when a test sets them; ``unreadable``
+    groups are given back as ``{"chat", "unreadable": True}``), WeChat's time now (``wechat_now``: ``wechat``, a value or
+    a callable; ``make`` gives it the test's clock), the watches and whether their catch-up ran (``slow``: only once
+    ``catch_up`` says the poll ran it; else at once), the private chats WeChat has (``has_private_chat``, quiet)."""
 
-    def __init__(self, *, own=ME, contacts=None, friends=(), slow=False):
+    def __init__(self, *, own=ME, contacts=None, friends=(), slow=False, wechat=None):
         self.own = own
         self.contacts = {BOSS: BOSS_ID} if contacts is None else dict(contacts)
         self.groups = {OLD: {"name": "老群", "members": [ME, BOSS_ID, "wxid_old01"]}}
         self.readable = True
+        self.unreadable: set = set()           # groups whose lines or members cannot be read now
         self.friends = set(friends)            # whose private chat WeChat has
         self.slow = slow
+        self.wechat = wechat
         self.caught: set = set()
         self.watched, self.unwatched, self.calls = {}, [], []
 
     def own_wxid(self):
         return self.own
+
+    def wechat_now(self):
+        """The newest session time of WeChat's session list (WeChat's clock)."""
+        return self.wechat() if callable(self.wechat) else self.wechat
 
     def db_readable(self):
         return self.readable
@@ -76,6 +83,9 @@ class Backend:
             if chat in known:
                 continue
             self.calls.append(f"members:{chat}")                   # (the backend reads each group's members)
+            if chat in self.unreadable:
+                found.append({"chat": chat, "unreadable": True})
+                continue
             if set(g["members"]) & set(members_any) and len(g["members"]) <= max_members:
                 found.append({"chat": chat, "name": g["name"], "created_at": g.get("created_at"),
                               "members": [{"wxid": w, "name": NAMES.get(w, "")} for w in g["members"]],
@@ -113,16 +123,30 @@ class Backend:
         self.calls.append("chat_target")
         return (NAMES.get(wxid, ""), "") if wxid in self.friends else ("", "不知道她在微信里叫什么")
 
+    def find_group_with(self, member, known):
+        """「拉三方群」 looks for the group it made (src/prm/three_party.py ``_find``)."""
+        for chat, g in self.groups.items():
+            if chat not in known and member in g["members"]:
+                return {"chat": chat, "name": g["name"], "members": len(g["members"])}
+        return None
+
 
 @pytest.fixture
 def clock():
     return Clock(time.mktime((2026, 10, 31, 14, 30, 0, 0, 0, -1)))
 
 
+def on_wechats_clock(backend, clock):
+    """The backend's ``wechat_now`` follows the test's clock (WeChat's and this PC's clocks agree), unless a test set it."""
+    if getattr(backend, "wechat", None) is None and callable(getattr(backend, "wechat_now", None)):
+        backend.wechat = lambda: clock.now
+    return backend
+
+
 def make(clock, tmp_path, *, on=True, backend=None, stored=None, **prm):
     prm.setdefault("prm_group_with", BOSS)
     b = Bot(clock, tmp_path, prm_boss_groups="on" if on else "off", **prm)
-    b.backend = backend or Backend()
+    b.backend = on_wechats_clock(backend or Backend(), clock)
     b.prm.boss_groups.attach(b.backend, stored=stored)
     b.pauses = []
     b.prm._pause = lambda sec: b.pauses.append(sec) or False
@@ -133,7 +157,7 @@ def restart(b, backend=None):
     """The bot restarted: a new PRM service on the same prm.db and relay database, a new backend (its watches gone)."""
     b.prm.stop()
     b.prm = PrmService(b.prm._config, b.relay, store=b.prm.store, clock=b.clock, send=b._send, send_file=b._send_file)
-    b.backend = backend or Backend()
+    b.backend = on_wechats_clock(backend or Backend(), b.clock)
     b.prm.boss_groups.attach(b.backend)
     b.prm._pause = lambda sec: b.pauses.append(sec) or False
     return b
@@ -261,8 +285,8 @@ def test_exactly_one_person_besides_us_and_the_boss_is_taken_over(bot, clock):
     shown = snap["parties"][0]
     assert shown["source"] == shown["deal"]["source"] == "boss_group"
     assert (shown["deal"]["three_party"]["by"], shown["deal"]["three_party"]["chat_name"]) == ("boss", GROUP_NAME)
-    assert snap["boss_groups"] == {"enabled": True, "why_not": "", "boss": [BOSS], "boss_call": "老板", "pending": [],
-                                   "waiting": 0, "linked": 1}
+    assert snap["boss_groups"] == {"enabled": True, "why_not": "", "warning": "", "boss": [BOSS], "boss_call": "老板",
+                                   "pending": [], "waiting": 0, "linked": 1}
 
 
 def test_the_opening_always_waits_for_a_person_and_shows_where_it_goes(clock, tmp_path):
@@ -349,16 +373,16 @@ def test_a_registered_creator_only_gets_the_group_linked(bot):
 
 
 @pytest.mark.parametrize("made", [
-    {"state": "creating", "by": "console"},
     {"state": "unsure", "by": "console"},
     {"state": "created", "by": "console"},                          # 「建好了」 by hand: no group id kept
     {"state": "created", "by": "console", "chat": OTHER, "name": "品牌测试×小美", "members": 3},
     {"state": "created", "by": "boss", "chat": OTHER, "name": "另一个老板拉的群", "members": 3},
-], ids=["creating", "unsure", "marked made", "made", "another boss group"])
+], ids=["unsure", "marked made", "made", "another boss group"])
 def test_a_group_whose_one_candidate_has_a_three_party_group_is_never_taken_over(bot, made):
     """Review 2026-10-31 (3): 「拉三方群」 makes her, the boss and us a group; when its id is not kept (unsure, 「建好了」 by
-    hand) it looks just like the boss's own.  A group whose one candidate has a 三方群 made, being made or unsure is kept
-    ignored (「她已经有三方群」): no takeover, no watch, no 开场白, her deal as it was; never looked at again."""
+    hand) it looks just like the boss's own.  A group whose one candidate has a 三方群 made or unsure is kept ignored
+    (「她已经有三方群」): no takeover, no watch, no 开场白, her deal as it was; never looked at again.  (One being made right
+    now waits instead: ``test_a_group_found_while_her_three_party_group_is_being_made_waits_and_is_looked_at_again``.)"""
     party = bot.prm.register(CREATOR, "小美", "测试达人")
     deal_id = bot.prm.store.deal_of(party["id"])["id"]
     made = {**made, "at": bot.clock.now}
@@ -390,21 +414,29 @@ def test_our_own_three_party_group_marked_made_by_hand_is_not_taken_over(bot):
     assert job_of(bot) is None and bot.relay.store.list_jobs(limit=10) == []
 
 
-@pytest.mark.parametrize("how", ["state written meanwhile", "being made right now"])
+@pytest.mark.parametrize("how", ["made meanwhile", "being made: state written", "being made: not written yet"])
 def test_the_takeover_looks_at_her_three_party_group_again_right_before_it_links(bot, how):
     """Review 2026-10-31 (3), the race: what the scan saw of her deal may be out of date by the takeover (「拉三方群」 runs
     on the console's thread).  Right before the link, under ThreeParty's lock (``guard``), her deal is read again: a
-    三方群 written meanwhile, or one being made right now (its state not written yet), and the group is ignored."""
+    三方群 made meanwhile, and the group is ignored; one being made right now (its state written or not yet), and the
+    group waits, looked at again once it is done (second review F8: never ignored for it)."""
     party = bot.prm.register(CREATOR, "小美", "测试达人")
     deal_id = bot.prm.store.deal_of(party["id"])["id"]
     bot.prm.boss_groups._has_group = lambda wxid: False                 # (the scan saw her deal before the write)
-    if how == "state written meanwhile":
+    bot.prm.boss_groups._making = lambda people: False
+    if how == "made meanwhile":
+        bot.prm.store.update_deal(deal_id, bot.clock.now, three_party={"state": "created", "at": bot.clock.now,
+                                                                       "by": "console"})
+    elif how == "being made: state written":
         bot.prm.store.update_deal(deal_id, bot.clock.now, three_party={"state": "creating", "at": bot.clock.now,
                                                                        "by": "console"})
     else:
         bot.prm.three_party._busy = deal_id
     assert boss_makes(bot) == 0
-    assert bot.prm.store.boss_group(GROUP)["why"] == "她已经有三方群" and not bot.prm.is_party_group(GROUP)
+    row = bot.prm.store.boss_group(GROUP)
+    assert (row["state"], row["why"]) == (("ignored", "她已经有三方群") if how == "made meanwhile" else
+                                          ("waiting", bg.MAKING_WHY))
+    assert not bot.prm.is_party_group(GROUP)
     assert bot.backend.watched == {} and bot.prm.store.events(deal_id, kinds=(bg.EVENT,)) == []
 
 
@@ -536,9 +568,10 @@ def write(b, d=None, chat=GROUP):
 
 
 def test_a_reply_sent_drops_only_the_lines_its_job_was_told(bot):
-    """Review 2026-10-31 (5): the lines kept for her are dropped by number once a reply that was told them is sent; a
-    line kept after its job was made stays for the next one, whenever it was written (the watch's catch-up hands on a
-    line written long before late; before, one written before the job was dropped by its time)."""
+    """Review 2026-10-31 (5): the lines kept for her are dropped by number once a reply that was told them is sent (up
+    to the highest number told, second review F7); a line kept after its job was made stays for the next one, whenever
+    it was written (the watch's catch-up hands on a line written long before late; before, one written before the job
+    was dropped by its time)."""
     boss_makes(bot)
     no_opening(bot)
     bot.prm.handle(gmsg(bot, "以后由运营跟你对接", sender=BOSS_ID))
@@ -931,8 +964,8 @@ def test_off_nothing_at_all(clock, tmp_path):
     assert b.prm.boss_groups.ignore(GROUP)["ok"] is False
     assert b.prm.boss_groups.start() == 0 and b.backend.watched == {}
     snap = b.prm.snapshot()
-    assert snap["boss_groups"] == {"enabled": False, "why_not": "", "boss": [BOSS], "boss_call": "老板", "pending": [],
-                                   "waiting": 0, "linked": 0}
+    assert snap["boss_groups"] == {"enabled": False, "why_not": "", "warning": "", "boss": [BOSS], "boss_call": "老板",
+                                   "pending": [], "waiting": 0, "linked": 0}
     out = ship(b, store.deal_of(party["id"])["id"])
     assert out["chat_id"] == CREATOR and "channel" not in out["meta"]
     b.prm.handle(b.msg("你好"))
@@ -965,12 +998,15 @@ def test_a_deals_own_three_party_group_is_never_taken_over(bot):
 
 @pytest.mark.parametrize("state", ["creating", "unsure"])
 def test_a_group_of_two_found_while_her_three_party_is_being_made_or_unsure_is_not_taken_over(bot, state):
+    """One of two candidates has a 「拉三方群」 that ended unsure: maybe that very group, ignored; one being made right now:
+    the group waits and is looked at again once it is done (second review F8)."""
     party = bot.prm.register(CREATOR, "小美", "测试达人")
     deal_id = bot.prm.store.deal_of(party["id"])["id"]
     bot.prm.store.update_deal(deal_id, bot.clock.now, three_party={"state": state, "at": bot.clock.now, "by": "console"})
     assert boss_makes(bot, members=(ME, BOSS_ID, CREATOR, MEMBER)) == 0
     row = bot.prm.store.boss_group(GROUP)
-    assert (row["state"], row["why"]) == ("ignored", bg.OURS_WHY) and not bot.prm.is_party_group(GROUP)
+    assert (row["state"], row["why"]) == (("ignored", bg.OURS_WHY) if state == "unsure" else ("waiting", bg.MAKING_WHY))
+    assert not bot.prm.is_party_group(GROUP)
     assert bot.prm.store.deal(deal_id)["three_party"]["state"] == state and bot.backend.watched == {}
 
 
@@ -989,42 +1025,93 @@ def test_the_watch_starts_at_the_groups_oldest_line_when_the_backend_knows_it(bo
     assert bot.prm.store.deal_of(party["id"])["three_party"]["at"] == found
 
 
+def timed(group: dict, start: float) -> dict:
+    """A test's group keys with its times (seconds from ``start``) as times; True / False / None as they are."""
+    return {k: (start + v if isinstance(v, int) and not isinstance(v, bool) else v) for k, v in group.items()}
+
+
 @pytest.mark.parametrize("group", [
-    {"joined_at": "old"},                                           # we were added a month ago
-    {"created_at": "old", "history_complete": True},                # its whole history begins a month ago
-    {"created_at": "new", "history_complete": False},               # its last lines are new: its start is not known
-    {"history_complete": False},                                    # nothing known
-], ids=["joined long ago", "began long ago", "start unknown", "nothing known"])
-def test_a_group_that_is_not_new_for_us_is_never_taken_over(bot, group):
-    """Review 2026-10-31 (4): an old group whose chat was deleted is not in the baseline and comes back in the session
-    list like a new one.  Only a group that began for us (we were added, or its whole history began) after the
-    baseline, give or take NEW_MARGIN_SEC, is taken over; any other one is kept ignored (「不是新拉的群」), for good."""
+    {"joined_at": -30 * 86400},                                     # we were added a month ago
+    {"created_at": -30 * 86400, "history_complete": True},          # its whole history begins a month ago
+    {"created_at": -2 * 86400, "history_complete": False},          # a line of two days before was read
+], ids=["joined long ago", "began long ago", "a line long ago"])
+def test_a_group_clearly_older_than_the_baseline_is_never_taken_over(bot, group):
+    """Review 2026-10-31 (4), second review F4: an old group whose chat was deleted is not in the baseline and comes back
+    in the session list like a new one.  One begun for us (WeChat's line that we were added, or its oldest line read)
+    more than a day (OLD_SEC) before the baseline is kept ignored (「不是新拉的群」), for good."""
     assert bot.prm.boss_groups.scan() == 0                          # the baseline
-    times = {"old": bot.clock.now - 30 * 86400, "new": bot.clock.now}
+    start = bot.clock.now
     bot.backend.groups[GROUP] = {"name": GROUP_NAME, "members": [ME, BOSS_ID, CREATOR],
-                                 **{k: times.get(v, v) for k, v in group.items()}}
+                                 **timed(group, start)}
     bot.clock.now += bg.BOSS_SCAN_SEC + 1
     assert bot.prm.boss_groups.scan() == 0
     row = bot.prm.store.boss_group(GROUP)
     assert (row["state"], row["why"]) == ("ignored", "不是新拉的群")
     assert bot.prm.store.parties() == [] and bot.backend.watched == {} and bot.relay.store.list_jobs(limit=10) == []
+    assert bot.prm.snapshot()["boss_groups"]["pending"] == []
     bot.clock.now += bg.BOSS_SCAN_SEC + 1
     assert bot.prm.boss_groups.scan() == 0 and bot.prm.store.parties() == []
 
 
 @pytest.mark.parametrize("group", [
-    {"joined_at": -500},                                            # added just before the baseline (within 600 s)
-    {"created_at": -500, "history_complete": True},
-    {"joined_at": 3600, "history_complete": False},                 # added after it: its earlier lines do not matter
-    {"created_at": None},                                           # a backend that says neither (as before)
-], ids=["joined just before", "began just before", "joined after", "older backend"])
-def test_a_group_that_began_for_us_after_the_baseline_is_taken_over(bot, group):
+    {"created_at": 0, "history_complete": True},                    # a complete history begun now, no line we were added
+    {"created_at": -500, "history_complete": True},                 # ... begun just before the baseline
+    {"created_at": 0, "history_complete": False},                   # its last lines are new: its start is not known
+    {"history_complete": False},                                    # nothing known
+    {"joined_at": -3 * 3600, "history_complete": True},             # we were added the day before the baseline
+    {"created_at": 0},                                              # a backend that says neither (an older one)
+    {"created_at": None},
+], ids=["complete, no join line", "began just before", "start unknown", "nothing known", "joined the day before",
+        "older backend", "older backend, no line"])
+def test_a_group_that_may_be_new_waits_for_the_console(bot, group):
+    """Second review 2026-10-31 (F4, repro n3): only a group that WeChat's line says we were added to after the baseline
+    is taken over by itself.  Any other boss group, even one whose whole history is recent (an old group whose chat was
+    deleted with its history comes back so), waits for a person: pending, 「拿不准是不是新拉的群：是的话点「是她」」 (one
+    「是她」 for her alone); nothing is ignored silently.  It is not asked again by the next scans; 「是她」 takes it over."""
     assert bot.prm.boss_groups.scan() == 0
     start = bot.clock.now
     bot.backend.groups[GROUP] = {"name": GROUP_NAME, "members": [ME, BOSS_ID, CREATOR],
-                                 **{k: (start + v if isinstance(v, int) else v) for k, v in group.items()}}
+                                 **timed(group, start)}
+    bot.clock.now += bg.BOSS_SCAN_SEC + 1
+    assert bot.prm.boss_groups.scan() == 0
+    row = bot.prm.store.boss_group(GROUP)
+    assert (row["state"], row["why"]) == ("pending", "拿不准是不是新拉的群：是的话点「是她」")
+    assert bot.prm.store.parties() == [] and bot.backend.watched == {} and bot.relay.store.list_jobs(limit=10) == []
+    [pending] = bot.prm.snapshot()["boss_groups"]["pending"]
+    assert (pending["why"], pending["members"]) == (bg.MAYBE_WHY, [{"wxid": CREATOR, "name": "小美"}])
+    bot.clock.now += bg.BOSS_SCAN_SEC + 1
+    asked = bot.backend.calls.count(f"members:{GROUP}")
+    assert bot.prm.boss_groups.scan() == 0 and bot.backend.calls.count(f"members:{GROUP}") == asked
+    assert bot.prm.boss_groups.pick(GROUP, CREATOR)["ok"] is True and bot.prm.is_party_group(GROUP)
+
+
+def test_an_old_group_deleted_with_its_history_waits_for_the_console(bot):
+    """Second review, repro n3 on the fake backend: the boss's group of a month ago whose chat was deleted with its local
+    history comes back when somebody writes: its history is that one line (complete, recent), no line that we were
+    added.  Pending (「拿不准」), never taken over by itself; 「这个群不是达人」 puts it away."""
+    assert bot.prm.boss_groups.scan() == 0
+    bot.backend.groups[GROUP] = {"name": GROUP_NAME, "members": [ME, BOSS_ID, CREATOR], "joined_at": None,
+                                 "history_complete": True, "created_at": bot.clock.now + 30}
+    bot.clock.now += bg.BOSS_SCAN_SEC + 1
+    assert bot.prm.boss_groups.scan() == 0
+    assert bot.prm.store.boss_group(GROUP)["state"] == "pending" and bot.prm.store.parties() == []
+    assert bot.prm.boss_groups.ignore(GROUP) == {"ok": True}
+    assert bot.prm.store.boss_group(GROUP)["state"] == "ignored"
+
+
+@pytest.mark.parametrize("group", [
+    {"joined_at": -500},                                            # added just before the baseline (within 600 s)
+    {"joined_at": 3600, "history_complete": False},                 # added after it: its earlier lines do not matter
+    {"joined_at": 3600, "created_at": -30 * 86400, "history_complete": False},     # ... even ones of a month before
+], ids=["joined just before", "joined after", "joined after, old lines"])
+def test_a_group_we_were_added_to_after_the_baseline_is_taken_over(bot, group):
+    assert bot.prm.boss_groups.scan() == 0
+    start = bot.clock.now
+    bot.backend.groups[GROUP] = {"name": GROUP_NAME, "members": [ME, BOSS_ID, CREATOR],
+                                 **timed(group, start)}
     bot.clock.now += 2 * 3600
     assert bot.prm.boss_groups.scan() == 1 and bot.prm.is_party_group(GROUP)
+    assert bot.prm.store.boss_group(GROUP)["joined_at"] == start + group["joined_at"]
 
 
 def test_lines_the_route_kept_before_the_takeover_are_handed_on_once(clock, tmp_path):
@@ -1034,7 +1121,7 @@ def test_lines_the_route_kept_before_the_takeover_are_handed_on_once(clock, tmp_
     messages = MessageStore(initialize_db(":memory:"))
     b = make(clock, tmp_path, stored=messages.get_messages_since)
     assert b.prm.boss_groups.scan() == 0
-    b.backend.groups[GROUP] = {"name": GROUP_NAME, "members": [ME, BOSS_ID, CREATOR]}
+    b.backend.groups[GROUP] = {"name": GROUP_NAME, "members": [ME, BOSS_ID, CREATOR], "joined_at": clock.now}
     intro = gmsg(b, "大家好，以后由运营跟你对接", sender=BOSS_ID, ts=clock.now)
     hers = gmsg(b, "好的老板，你们家主要卖什么", ts=clock.now + 20)
     ours = dict(gmsg(b, "收到", sender=ME, ts=clock.now + 30))
@@ -1056,7 +1143,7 @@ def test_only_the_bosss_introduction_kept_goes_with_the_opening(clock, tmp_path)
     messages = MessageStore(initialize_db(":memory:"))
     b = make(clock, tmp_path, stored=messages.get_messages_since)
     assert b.prm.boss_groups.scan() == 0
-    b.backend.groups[GROUP] = {"name": GROUP_NAME, "members": [ME, BOSS_ID, CREATOR]}
+    b.backend.groups[GROUP] = {"name": GROUP_NAME, "members": [ME, BOSS_ID, CREATOR], "joined_at": clock.now}
     assert messages.insert_message(gmsg(b, "大家好，以后由运营跟你对接", sender=BOSS_ID, ts=clock.now))
     clock.now += bg.BOSS_SCAN_SEC + 1
     b.prm.boss_groups.scan()
@@ -1154,16 +1241,18 @@ def test_an_unknown_boss_name_stops_every_automatic_takeover_and_says_which(cloc
     backend = Backend(contacts={BOSS: BOSS_ID, "老板二": None})
     b = make(clock, tmp_path, backend=backend, prm_group_with=f"{BOSS},老板二")
     assert b.prm.boss_groups.scan() == 0
-    assert b.prm.boss_groups.why_not() == ""                          # (the first scan only keeps the baseline)
+    assert b.prm.boss_groups.why_not() == b.prm.boss_groups.warning() == ""     # (the first scan keeps the baseline)
     backend.groups[GROUP] = {"name": "老板们", "members": [ME, BOSS_ID, "wxid_boss02x"], "joined_at": clock.now}
     clock.now += bg.BOSS_SCAN_SEC + 1
     assert b.prm.boss_groups.scan() == 0
-    why = b.prm.boss_groups.why_not()
+    why = b.prm.boss_groups.warning()                                 # (second review F3: a warning, not why_not)
     assert why.startswith("PRM_GROUP_WITH 里的「老板二」在这个微信里找不到 / 有重名") and "老板测试" not in why
+    assert b.prm.boss_groups.why_not() == ""
     row = b.prm.store.boss_group(GROUP)
     assert (row["state"], row["why"]) == ("pending", b.prm.boss_groups._unknown_why())
     assert b.prm.store.parties() == [] and backend.watched == {} and b.relay.store.list_jobs(limit=10) == []
-    assert b.prm.snapshot()["boss_groups"]["why_not"] == why
+    shown = b.prm.snapshot()["boss_groups"]
+    assert (shown["why_not"], shown["warning"]) == ("", why)
     backend.groups[OTHER] = {"name": "另一个群", "members": [ME, BOSS_ID, CREATOR], "joined_at": clock.now}
     clock.now += bg.BOSS_SCAN_SEC + 1
     assert b.prm.boss_groups.scan() == 0 and b.prm.store.boss_group(OTHER)["state"] == "pending"   # her too: a person
@@ -1333,7 +1422,8 @@ def test_the_bosses_ids_are_read_once_an_hour_and_again_for_another_group_with(b
     bot.prm._config.prm_group_with = f"{BOSS},老板二"
     bot.clock.now += bg.BOSS_SCAN_SEC + 1
     bot.prm.boss_groups.scan()
-    assert bot.backend.calls.count("contact_ids") == 3 and "「老板二」" in bot.prm.boss_groups.why_not()
+    assert bot.backend.calls.count("contact_ids") == 3 and "「老板二」" in bot.prm.boss_groups.warning()
+    assert bot.prm.boss_groups.why_not() == ""
 
 
 def test_a_failed_read_of_the_bosses_is_tried_again_at_the_next_scan(bot):
@@ -1459,3 +1549,362 @@ def test_a_step_owed_to_a_creator_who_can_be_reached_nowhere_logs_nothing_round_
     assert "发不了消息给她" in next(n for n in bot.prm.store.deal(deal["id"])["notices"] if n["key"] == "step")["text"]
     said = [r.getMessage() for r in caplog.records if r.name.startswith("src.prm")]
     assert not any(CREATOR in m for m in said) and len(said) <= 2, said
+
+
+# ── second review 2026-10-31: the fixes ───────────────────────────────────
+
+@pytest.mark.parametrize("later", [60, 300])
+def test_a_group_reply_cut_off_by_a_stop_and_read_back_after_a_late_restart_is_ours(clock, tmp_path, later):
+    """F1, repro n1: a group reply in two parts stopped after the first, which was not read back before the stop
+    (``indeterminate``: PrmService.start writes the restart's time as its ``sent_at``).  After a restart minutes later
+    the watch's catch-up hands that part on: the bot's (a packet not confirmed has no lower bound, as in her private
+    chat), no takeover, the packet still unsure (its second part never went out); the same words in another row are a
+    person's."""
+    b = make(clock, tmp_path, prm_reply_parts=3)
+    boss_makes(b)
+    no_opening(b)
+    b.prm.handle(gmsg(b, "在吗"))
+    _, packet = drafted(b, plain(b, "您好～\n\n在的"))
+    b.prm.decide(packet["id"], "send")
+    b.prm._pause = lambda sec: True                                   # the bot stops in the pause after the first part
+    b.prm.send_approved()
+    assert b.prm.store.packet(packet["id"])["status"] == "sending" and b.texts == [(GROUP, "您好～")]
+    written = clock.now                                               # the first part's time in WeChat
+    clock.now += later
+    restart(b)
+    b.prm._stopping.set()                                             # (its sender thread ends at once)
+    b.prm.start()
+    unsure = b.prm.store.packet(packet["id"])
+    assert (unsure["status"], unsure["outcome"], unsure["sent_at"]) == ("failed", "indeterminate", clock.now)
+    b.prm.on_own_message(own(b, "您好～", ts=written))                 # the catch-up hands the first part on
+    deal = b.prm.store.deal(packet["deal_id"])
+    assert deal["mode"] == "copilot" and b.prm.store.events(deal["id"], kinds=("operator_message",)) == []
+    assert b.prm.store.packet(packet["id"])["outcome"] == "indeterminate"
+    b.prm.on_own_message(own(b, "您好～", ts=written + 5))             # the same words in another row
+    assert b.prm.store.deal(packet["deal_id"])["mode"] == "human"
+
+
+@pytest.mark.parametrize("chat", ["group", "private"])
+def test_an_unconfirmed_reply_read_back_after_a_restart_with_this_pcs_clock_ahead_is_ours(clock, tmp_path, chat):
+    """F1, repro n1c: a reply sent but not read back before a stop (``sent_unconfirmed``) by a PC whose clock is 10
+    minutes ahead of WeChat's; after a restart (the skew not measured again yet) its line comes with WeChat's time, 10
+    minutes before the packet's ``sent_at``: the bot's, in the group as in her private chat (as before there)."""
+    b = make(clock, tmp_path)
+    if chat == "group":
+        boss_makes(b)
+        no_opening(b)
+        b.prm.handle(gmsg(b, "在吗"))
+        target = GROUP
+    else:
+        b.prm.register(CREATOR, "小美", "测试达人")
+        b.prm.handle(b.msg("在吗"))
+        target = CREATOR
+    _, packet = drafted(b, plain(b, "您好～在的"), chat=target)
+    b.prm.decide(packet["id"], "send")
+    b.prm.send_approved()
+    sent = b.prm.store.packet(packet["id"])
+    assert (sent["status"], sent["outcome"]) == ("sent", "sent_unconfirmed")
+    clock.now += 60
+    restart(b)
+    b.prm.on_own_message(own(b, "您好～在的", chat=target, ts=sent["sent_at"] - 600))
+    deal = b.prm.store.deal(packet["deal_id"])
+    assert deal["mode"] == "copilot" and b.prm.store.packet(packet["id"])["outcome"] == "sent_confirmed"
+
+
+def test_the_baseline_is_on_wechats_clock_and_a_new_group_is_new_with_this_pcs_clock_hours_off(clock, tmp_path):
+    """F2, repro n2: the baseline's time is WeChat's (``wechat_now``: the newest session time, when it was kept) and the
+    groups' WeChat times are held against it, never this PC's clock: with this PC 3 hours fast, a group the boss makes
+    a minute after the switch's first scan is taken over; one we were added to a month before (WeChat's clock) is old."""
+    backend = Backend(wechat=lambda: clock.now - 3 * 3600)           # this PC is 3 hours fast
+    b = make(clock, tmp_path, backend=backend)
+    assert b.prm.boss_groups.scan() == 0
+    wechat = clock.now - 3 * 3600
+    assert float(b.prm.store.meta_value(bg.BASELINE_AT)) == wechat
+    backend.groups[GROUP] = {"name": GROUP_NAME, "members": [ME, BOSS_ID, CREATOR], "joined_at": wechat + 60,
+                             "history_complete": True, "created_at": wechat + 60}
+    backend.groups[OTHER] = {"name": "上个月的群", "members": [ME, BOSS_ID, MEMBER], "joined_at": wechat - 30 * 86400,
+                             "history_complete": True, "created_at": wechat - 30 * 86400}
+    clock.now += bg.BOSS_SCAN_SEC + 1
+    assert b.prm.boss_groups.scan() == 1 and b.prm.is_party_group(GROUP)
+    assert b.prm.store.boss_group(OTHER)["why"] == "不是新拉的群"
+    b.prm.stop()
+    b.relay.stop()
+
+
+class NoClockBackend(Backend):
+    """A backend that cannot say WeChat's time (no ``wechat_now``: from before the second review)."""
+    wechat_now = None
+
+
+@pytest.mark.parametrize("measured", [True, False], ids=["skew measured", "skew not measured"])
+def test_a_backend_without_wechats_time_has_the_baseline_on_this_pcs_clock_less_the_skew(clock, tmp_path, measured):
+    """F2 on a backend without ``wechat_now``: the baseline's time is this PC's clock less the skew this run measured.
+    Measured, the boss's new group is new; not measured yet (this PC 3 hours fast), it is no longer ignored: it waits for
+    the console's 「是她」 (「拿不准」)."""
+    b = make(clock, tmp_path, backend=NoClockBackend())
+    if measured:
+        b.prm._skew = 3 * 3600.0                                      # (this run read one of our lines back: 3 h fast)
+    assert b.prm.boss_groups.scan() == 0
+    assert float(b.prm.store.meta_value(bg.BASELINE_AT)) == clock.now - (3 * 3600 if measured else 0)
+    wechat = clock.now - 3 * 3600
+    b.backend.groups[GROUP] = {"name": GROUP_NAME, "members": [ME, BOSS_ID, CREATOR], "joined_at": wechat + 60,
+                               "history_complete": True, "created_at": wechat + 60}
+    clock.now += bg.BOSS_SCAN_SEC + 1
+    assert b.prm.boss_groups.scan() == (1 if measured else 0)
+    row = b.prm.store.boss_group(GROUP)
+    assert (row["state"], row["why"]) == (("linked", "") if measured else ("pending", bg.MAYBE_WHY))
+    b.prm.stop()
+    b.relay.stop()
+
+
+def test_an_unknown_boss_name_is_a_warning_and_the_groups_wait_for_a_pick(clock, tmp_path):
+    """F3, repro n6: PRM_GROUP_WITH names two bosses and the second is no one contact's.  The scan goes on: ``why_not``
+    stays empty (the console's buttons are on), ``warning`` says which name, the group of one candidate waits for
+    「是她」 (no takeover by itself) and the console's pick takes it over.  A stopped bot has no warning."""
+    b = make(clock, tmp_path, prm_group_with=f"{BOSS}，老板二", backend=Backend(contacts={BOSS: BOSS_ID}))
+    assert boss_makes(b, members=(ME, BOSS_ID, CREATOR)) == 0
+    status = b.prm.boss_groups.status()
+    assert status["why_not"] == "" and status["warning"].startswith("PRM_GROUP_WITH 里的「老板二」在这个微信里找不到 / 有重名")
+    assert "认出来以前，老板拉的群不会自动接手" in status["warning"] and BOSS not in status["warning"]
+    [pending] = status["pending"]
+    assert pending["why"] == status["warning"] and [m["wxid"] for m in pending["members"]] == [CREATOR]
+    assert b.prm.store.parties() == [] and b.backend.watched == {}
+    assert b.prm.boss_groups.pick(GROUP, CREATOR)["ok"] is True and b.prm.is_party_group(GROUP)
+    assert bg.boss_groups_out(b.prm.store, enabled=True, why_not="机器人没有运行", boss=[BOSS])["warning"] == ""
+    b.backend.contacts = {BOSS: BOSS_ID, "老板二": "wxid_boss02"}       # the name put right: no warning
+    clock.now += bg.BOSS_IDS_RETRY_SEC + 1
+    b.prm.boss_groups.scan()
+    assert b.prm.boss_groups.warning() == "" and b.prm.boss_groups.status()["warning"] == ""
+    b.prm.stop()
+    b.relay.stop()
+
+
+def test_no_boss_known_at_all_is_why_the_scan_cannot_run(bot):
+    """F3: ``why_not`` only when the scan cannot run at all, as when no name of PRM_GROUP_WITH is a contact's."""
+    bot.backend.contacts = {}
+    assert bot.prm.boss_groups.scan() == 0                            # the baseline
+    bot.clock.now += bg.BOSS_SCAN_SEC + 1
+    assert bot.prm.boss_groups.scan() is None
+    assert bot.prm.boss_groups.why_not() == ("PRM_GROUP_WITH 里的「老板测试」在这个微信里找不到 / 有重名："
+                                             "要和这个微信号里他的备注或名字一样，而且只有一个人叫这个名字")
+    assert bot.prm.boss_groups.warning() == ""
+
+
+def test_a_group_with_no_line_yet_waits_and_is_looked_at_again_until_its_lines_are_there(bot):
+    """F5, repro n4: the backend gives a group with no line read yet (its whole history read: none; both times None).
+    It waits (counted), the backend is asked for it again at each scan, and once its lines are there it is judged: we
+    were added after the baseline: taken over."""
+    assert bot.prm.boss_groups.scan() == 0
+    bot.backend.groups[GROUP] = {"name": GROUP_NAME, "members": [ME, BOSS_ID, CREATOR], "joined_at": None,
+                                 "history_complete": True, "created_at": None}
+    bot.clock.now += bg.BOSS_SCAN_SEC + 1
+    found = bot.clock.now
+    assert bot.prm.boss_groups.scan() == 0
+    row = bot.prm.store.boss_group(GROUP)
+    assert (row["state"], row["why"]) == ("waiting", bg.NO_LINES_WHY)
+    assert bot.prm.snapshot()["boss_groups"]["waiting"] == 1 and bot.prm.store.parties() == []
+    asked = bot.backend.calls.count(f"members:{GROUP}")
+    bot.clock.now += bg.BOSS_SCAN_SEC + 1
+    assert bot.prm.boss_groups.scan() == 0 and bot.backend.calls.count(f"members:{GROUP}") == asked + 1
+    assert bot.backend.calls.count("group_members") == 0               # (asked for through boss_groups only)
+    bot.backend.groups[GROUP].update(joined_at=bot.clock.now - 30, created_at=bot.clock.now - 30)   # its lines are there
+    bot.clock.now += bg.BOSS_SCAN_SEC + 1
+    assert bot.prm.boss_groups.scan() == 1 and bot.prm.is_party_group(GROUP)
+    row = bot.prm.store.boss_group(GROUP)
+    assert (row["state"], row["found_at"], row["joined_at"]) == ("linked", found, bot.clock.now - bg.BOSS_SCAN_SEC - 31)
+
+
+@pytest.mark.parametrize("lines", [
+    {"joined_at": None, "created_at": "now"},                       # a line, none that we were added: maybe
+    {"joined_at": "long ago", "created_at": "long ago"},            # old after all
+    None,                                                           # never a line, BOSS_WAIT_DAYS on
+], ids=["no join line", "old", "never a line"])
+def test_a_group_whose_first_lines_say_it_may_not_be_new_is_never_taken_over(bot, lines):
+    assert bot.prm.boss_groups.scan() == 0
+    bot.backend.groups[GROUP] = {"name": GROUP_NAME, "members": [ME, BOSS_ID, CREATOR], "joined_at": None,
+                                 "history_complete": True, "created_at": None}
+    bot.clock.now += bg.BOSS_SCAN_SEC + 1
+    assert bot.prm.boss_groups.scan() == 0
+    if lines is None:
+        bot.clock.now += bg.BOSS_WAIT_DAYS * 86400 + 1
+    else:
+        times = {"now": bot.clock.now, "long ago": bot.clock.now - 30 * 86400, None: None}
+        bot.backend.groups[GROUP].update({k: times[v] for k, v in lines.items()})
+        bot.clock.now += bg.BOSS_SCAN_SEC + 1
+    assert bot.prm.boss_groups.scan() == 0
+    row = bot.prm.store.boss_group(GROUP)
+    expected = {"no join line": ("pending", bg.MAYBE_WHY), "old": ("ignored", bg.NOT_NEW_WHY),
+                "never a line": ("ignored", bg.QUIET_WHY)}
+    assert (row["state"], row["why"]) == expected["no join line" if lines and lines["joined_at"] is None
+                                                  else "old" if lines else "never a line"]
+    assert bot.prm.store.parties() == [] and bot.backend.watched == {}
+
+
+class Flaky(Backend):
+    """A backend that cannot read GROUP's lines or members for ``misses`` calls: it says so (``unreadable``)."""
+
+    def __init__(self, misses, **kw):
+        super().__init__(**kw)
+        self.misses = misses
+
+    def boss_groups(self, members_any, known, max_members):
+        if GROUP in self.groups and self.misses > 0:
+            self.misses -= 1
+            self.unreadable.add(GROUP)
+        else:
+            self.unreadable.discard(GROUP)
+        return super().boss_groups(members_any, known, max_members)
+
+
+def test_a_group_the_backend_cannot_read_now_is_asked_for_again_and_never_counted_as_looked_at(clock, tmp_path):
+    """F6, repro n5 (its PRM side): a group whose lines or members cannot be read now comes back as ``{"chat",
+    "unreadable": True}``.  It is not kept, never counted as one with no boss (``_note_looked``), and asked for again at
+    the next scan: readable from the third scan on, it is taken over then."""
+    b = make(clock, tmp_path, backend=Flaky(2))
+    assert b.prm.boss_groups.scan() == 0
+    b.backend.groups[GROUP] = {"name": GROUP_NAME, "members": [ME, BOSS_ID, CREATOR], "joined_at": clock.now,
+                               "history_complete": True, "created_at": clock.now}
+    taken = []
+    for n in range(5):                                                # five scans, a minute apart
+        clock.now += bg.BOSS_SCAN_SEC + 1
+        taken.append(b.prm.boss_groups.scan())
+        if n < 2:
+            assert b.prm.store.boss_group(GROUP) is None
+            assert GROUP not in b.prm.boss_groups._looked | b.prm.boss_groups._once
+    assert taken == [0, 0, 1, 0, 0] and b.prm.is_party_group(GROUP)
+    b.prm.stop()
+    b.relay.stop()
+
+
+def test_a_reply_sent_drops_every_line_kept_up_to_the_last_its_job_was_told(bot):
+    """F7, repro n7: a job is told the newest LINES_TOLD (10) of the lines kept; the reply sent drops every kept line
+    numbered up to the highest it was told, the older ones not told too (they came before our reply): her next job is
+    not told them as the group's latest lines."""
+    boss_makes(bot)
+    no_opening(bot)
+    for n in range(12):
+        bot.clock.now += 1
+        bot.prm.handle(gmsg(bot, f"老板的第{n + 1}句", sender=BOSS_ID))
+    bot.clock.now += 1
+    bot.prm.handle(gmsg(bot, "在吗"))
+    job, packet = drafted(bot, plain(bot, "在的～"))
+    told = [x["text"] for x in json.loads(job["meta"])["group"]["lines"]]
+    assert told == [f"老板的第{n}句" for n in range(3, 13)] and packet["meta"]["group_told"] == list(range(3, 13))
+    bot.prm.decide(packet["id"], "send")
+    bot.prm.send_approved()
+    assert bot.prm.store.boss_group(GROUP)["lines"] == []
+    bot.clock.now += 60
+    bot.prm.handle(gmsg(bot, "那寄样怎么弄"))
+    assert json.loads(job_of(bot)["meta"])["group"]["lines"] == []
+
+
+def test_lines_kept_without_a_number_by_an_older_version_go_with_the_next_reply(bot):
+    """The review's note: a kept line without ``seq`` (a prm.db an older version wrote) counts as 0 and goes with the
+    next reply sent, whatever its job was told."""
+    boss_makes(bot)
+    no_opening(bot)
+    bot.prm.store.update_boss_group(GROUP, bot.clock.now, lines=[{"who": "老板", "at": bot.clock.now - 60,
+                                                                  "text": "以前留下的一句"}])
+    bot.prm.handle(gmsg(bot, "在吗"))
+    job, packet = drafted(bot, plain(bot))
+    assert [x["text"] for x in json.loads(job["meta"])["group"]["lines"]] == ["以前留下的一句"]
+    assert packet["meta"]["group_told"] == []
+    bot.prm.decide(packet["id"], "send")
+    bot.prm.send_approved()
+    assert bot.prm.store.boss_group(GROUP)["lines"] == []
+
+
+def make_groups(bot, result=None):
+    """「拉三方群」 wired (the admin handler's ``create_group_checked`` faked: ``result``; a group it makes shows up as
+    OTHER); its thread is not run until the test runs ``spawned[0]()``."""
+    bot.backend.friends.add(CREATOR)                                  # (her chat's name: ``chat_target``)
+
+    def create(members, dry_run=False):
+        if not dry_run and (result or {"ok": True}).get("ok"):
+            bot.backend.groups[OTHER] = {"name": "品牌测试×小美", "members": [ME, BOSS_ID, CREATOR]}
+        return dict(result or {"ok": True})
+
+    bot.prm.three_party.attach(SimpleNamespace(can_add_friends=True, create_group_checked=create), None, bot.backend)
+    spawned = []
+    bot.prm.three_party.spawn = spawned.append
+    bot.prm.three_party._sleep = lambda sec: None
+    return spawned
+
+
+def test_a_three_party_try_running_never_counts_as_her_group(bot):
+    """F8: 「先试一下」 makes nothing.  While it runs (10-30 s on a real PC) the scan takes the boss's group over as ever,
+    and the try ending changes nothing of it."""
+    party = bot.prm.register(CREATOR, "小美", "测试达人")
+    deal_id = bot.prm.store.deal_of(party["id"])["id"]
+    spawned = make_groups(bot)
+    assert bot.prm.three_party.start(deal_id, dry_run=True) == {"ok": True, "state": "trying"}
+    assert boss_makes(bot) == 1 and bot.prm.is_party_group(GROUP)
+    spawned[0]()                                                      # the try ends
+    assert bot.prm.store.deal(deal_id)["three_party"]["chat"] == GROUP and bot.prm.three_party.status()["busy"] is None
+
+
+@pytest.mark.parametrize("result", [
+    {"ok": False, "reason": "not_found", "message": "没在「发起群聊」里找到她"},       # nothing made
+    {"ok": False, "reason": "not_created", "message": "窗口没关"},                  # unsure
+    {"ok": True, "message": "群建好了"},                                            # made (another group)
+], ids=["not made", "unsure", "made"])
+def test_a_group_found_while_her_three_party_group_is_being_made_waits_and_is_looked_at_again(bot, result):
+    """F8: while 「拉三方群」 makes her 三方群 the boss's group (it may be that very group) waits, never ignored for it, and
+    is looked at again at the next scans: nothing made, it is taken over; unsure or made, she has a 三方群 (ignored)."""
+    party = bot.prm.register(CREATOR, "小美", "测试达人")
+    deal_id = bot.prm.store.deal_of(party["id"])["id"]
+    spawned = make_groups(bot, result)
+    assert bot.prm.three_party.start(deal_id) == {"ok": True, "state": "creating"}
+    assert boss_makes(bot) == 0
+    row = bot.prm.store.boss_group(GROUP)
+    assert (row["state"], row["why"]) == ("waiting", bg.MAKING_WHY) and not bot.prm.is_party_group(GROUP)
+    assert bot.prm.snapshot()["boss_groups"]["waiting"] == 1
+    bot.clock.now += bg.BOSS_SCAN_SEC + 1
+    assert bot.prm.boss_groups.scan() == 0 and bot.prm.store.boss_group(GROUP)["state"] == "waiting"   # still making
+    spawned[0]()                                                      # 「拉三方群」 ends
+    bot.clock.now += bg.BOSS_SCAN_SEC + 1
+    taken = bot.prm.boss_groups.scan()
+    row = bot.prm.store.boss_group(GROUP)
+    if result.get("reason") == "not_found":
+        assert taken == 1 and row["state"] == "linked" and bot.prm.is_party_group(GROUP)
+    else:
+        assert taken == 0 and (row["state"], row["why"]) == ("ignored", bg.HAS_GROUP_WHY)
+        assert not bot.prm.is_party_group(GROUP) and bot.backend.watched == {}
+
+
+def test_a_creator_the_boss_introduced_has_his_name_hidden_in_her_new_friend_catch_up(bot):
+    """F9: the takeover registers a creator who is a new friend of ours; her private chat's catch-up (take_new_friend:
+    her lines since she was added, 「我是老板测试介绍的」) goes to the Mac with the boss called PRM_BOSS_CALL, as her live
+    lines there do."""
+    assert boss_makes(bot) == 1
+    no_opening(bot)
+    assert bot.prm.take_new_friend(CREATOR, [bot.msg("我是老板测试介绍的", ts=bot.clock.now - 60)],
+                                   verify_until=bot.clock.now - 120) == 1
+    job = job_of(bot, CREATOR)
+    assert BOSS not in job["text"] and job["text"].endswith("我是老板介绍的")
+
+
+def test_her_catch_up_read_while_the_takeover_has_not_linked_her_group_yet_is_masked_too(bot):
+    """F9: the catch-up is read by the backend's poll thread; one read after the takeover registered her and before it
+    linked the group is masked all the same (``masks``: she is being taken over)."""
+    real = bot.prm.boss_groups._register
+
+    def register(wxid, name, note):
+        party = real(wxid, name, note)
+        assert not bot.prm.boss_groups.party_has_group(party["id"])       # (not linked yet)
+        bot.prm.take_new_friend(wxid, [bot.msg("我是老板测试介绍的", ts=bot.clock.now - 60)])
+        return party
+
+    bot.prm.boss_groups._register = register
+    assert boss_makes(bot) == 1
+    job = job_of(bot, CREATOR)
+    assert BOSS not in job["text"] and job["text"].endswith("我是老板介绍的")
+    assert not bot.prm.boss_groups.masks({"id": 0, "wxid": CREATOR})  # (done: by her linked group from now on)
+
+
+def test_a_creator_without_a_boss_group_has_her_catch_up_as_before(bot):
+    """F9 leaves every other creator's catch-up as it was."""
+    party = bot.prm.register(MEMBER, "测试达人", "")
+    assert not bot.prm.boss_groups.masks(party)
+    bot.prm.take_new_friend(MEMBER, [bot.msg("我是老板测试介绍的", chat=MEMBER, ts=bot.clock.now - 60)])
+    assert job_of(bot, MEMBER)["text"].endswith("我是老板测试介绍的")

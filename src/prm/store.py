@@ -46,9 +46,10 @@
                     and deal once linked, its members but us and the bosses in it (names stay in prm.db only), why, the
                     last line handled, ours too (the watch's start after a restart: the next second), the boss's and
                     other members' lines kept for her next draft (``lines``, each with its number ``seq``, given in
-                    order by ``line_seq``: a reply sent drops the lines its job was told, by number), when we last
-                    answered there (``replied_at``) and, while its 开场白 waits for the watch's catch-up, when it was
-                    taken over (``opening_due``)
+                    order by ``line_seq``: a reply sent drops every line numbered up to the highest its job was told),
+                    when we last answered there (``replied_at``), while its 开场白 waits for the watch's catch-up, when it
+                    was taken over (``opening_due``), and WeChat's line that we were added (``joined_at``, WeChat's
+                    clock: only a group added to after the baseline is taken over by itself, review 2026-10-31 F4)
 
 A packet's life: ``pending`` (waits in the console) -> ``approved`` (an operator said
 send, the kind's gate is ``auto``, or the 下班时段 window sent it: route ``night``) -> ``sending`` ->
@@ -298,7 +299,8 @@ CREATE TABLE IF NOT EXISTS boss_groups (
     replied_at REAL,
     updated_at REAL NOT NULL,
     line_seq INTEGER NOT NULL DEFAULT 0,
-    opening_due REAL
+    opening_due REAL,
+    joined_at REAL
 );
 """
 
@@ -328,6 +330,8 @@ _ADDED_COLUMNS = (
     ("boss_groups", "line_seq", "INTEGER NOT NULL DEFAULT 0"),
     ("boss_groups", "opening_due", "REAL"),
     ("deals", "last_by_chat", "TEXT NOT NULL DEFAULT '{}'"),
+    # 老板拉的群, second review 2026-10-31 (F4): WeChat's line that we were added (the scan's confidence rule)
+    ("boss_groups", "joined_at", "REAL"),
 )
 
 # What the creators wrote, or our side's own words, waiting for the next draft job.
@@ -439,7 +443,15 @@ def friend_add_view(row: dict) -> dict:
 # 老板拉的群 (src/prm/boss_groups.py): the JSON columns of a group's row, and what may be set besides its state.
 BOSS_GROUP_JSON = {"members": [], "boss": [], "lines": []}
 BOSS_GROUP_FIELDS = {"name", "found_at", "made_at", "state", "party_id", "deal_id", "members", "boss", "why",
-                     "last_line_at", "lines", "replied_at", "opening_due"}
+                     "last_line_at", "lines", "replied_at", "opening_due", "joined_at"}
+
+
+def _seq(line: dict) -> int:
+    """A kept line's number (``boss_groups.lines[].seq``); 0 without one (kept by an older version) or a bad one."""
+    try:
+        return int(line.get("seq") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def boss_group_view(row: dict) -> dict:
@@ -1613,15 +1625,16 @@ class PrmStore:
     # ── 老板拉的群 (PRM_BOSS_GROUPS, src/prm/boss_groups.py) ──────────────────
 
     def add_boss_group(self, chat: str, *, name: str, found_at: float, state: str, members: list, boss: list,
-                       why: str = "", made_at: Optional[float] = None, now: Optional[float] = None) -> bool:
-        """A group the scan found (``made_at``: its oldest line, when the backend knows it); a group kept already stays
-        as it is.  True when it is new."""
+                       why: str = "", made_at: Optional[float] = None, joined_at: Optional[float] = None,
+                       now: Optional[float] = None) -> bool:
+        """A group the scan found (``made_at``: its oldest line, when the backend knows it; ``joined_at``: WeChat's line
+        that we were added, WeChat's clock); a group kept already stays as it is.  True when it is new."""
         now = time.time() if now is None else now
         with self._lock:
             cur = self._conn.execute(
-                "INSERT OR IGNORE INTO boss_groups (chat, name, found_at, made_at, state, members, boss, why, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (str(chat), str(name or ""), float(found_at), made_at, str(state),
+                "INSERT OR IGNORE INTO boss_groups (chat, name, found_at, made_at, joined_at, state, members, boss, why,"
+                " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (str(chat), str(name or ""), float(found_at), made_at, joined_at, str(state),
                  json.dumps(members or [], ensure_ascii=False), json.dumps(boss or [], ensure_ascii=False),
                  str(why or ""), now))
             self._conn.commit()
@@ -1686,16 +1699,18 @@ class PrmStore:
                 return None
             seq = int(row["line_seq"] or 0) + 1
             lines = [x for x in _loads(row["lines"], []) if isinstance(x, dict)] + [{**dict(line), "seq": seq}]
-            lines = sorted(lines, key=lambda x: (float(x.get("at") or 0), int(x.get("seq") or 0)))
+            lines = sorted(lines, key=lambda x: (float(x.get("at") or 0), _seq(x)))
             self._conn.execute("UPDATE boss_groups SET lines = ?, line_seq = ? WHERE chat = ?",
                                (json.dumps(lines[-int(keep):], ensure_ascii=False), seq, str(chat)))
             self._conn.commit()
             return seq
 
     def boss_group_replied(self, chat: str, seqs=None, now: Optional[float] = None) -> int:
-        """We answered in the group: the kept lines numbered ``seqs`` go (the ones the sent reply's job was told); None
-        (an operator's own line there) every line kept now.  A line kept later stays, whenever it was written.
-        ``replied_at`` says when.  Returns how many went."""
+        """We answered in the group: every kept line numbered up to the highest of ``seqs`` goes (the numbers the sent
+        reply's job was told: the lines kept before those and not told, older ones, were before our reply too, second
+        review 2026-10-31 F7; a line without a number, kept by an older version, counts as 0); None (an operator's own
+        line there) every line kept now.  A line kept later stays, whenever it was written.  ``replied_at`` says when.
+        Returns how many went."""
         now = time.time() if now is None else now
         with self._lock:
             row = self._conn.execute("SELECT lines, line_seq FROM boss_groups WHERE chat = ?", (str(chat),)).fetchone()
@@ -1703,16 +1718,15 @@ class PrmStore:
                 return 0
             lines = [x for x in _loads(row["lines"], []) if isinstance(x, dict)]
             if seqs is None:
-                last = int(row["line_seq"] or 0)
-                kept = [x for x in lines if int(x.get("seq") or 0) > last]
+                upto = int(row["line_seq"] or 0)
             else:
-                told = set()
+                upto = 0
                 for n in seqs or ():
                     try:
-                        told.add(int(n))
+                        upto = max(upto, int(n))
                     except (TypeError, ValueError):
                         continue
-                kept = [x for x in lines if int(x.get("seq") or 0) not in told]
+            kept = [x for x in lines if _seq(x) > upto]
             self._conn.execute("UPDATE boss_groups SET replied_at = ?, lines = ? WHERE chat = ?",
                                (now, json.dumps(kept, ensure_ascii=False), str(chat)))
             self._conn.commit()

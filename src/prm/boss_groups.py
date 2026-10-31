@@ -5,22 +5,29 @@ Some creators are the boss's WeChat friends, not ours.  He makes a small group: 
 creator and this account; from then on we handle her.  The scan (``sweep``, every BOSS_SCAN_SEC on PRM's sender thread)
 asks the WeChat backend for the group chats it does not know (``boss_groups``: neither in the baseline its first run
 kept, prm_meta ``boss_groups_baseline``, nor found before, nor looked at twice already with no boss in them or too many
-members) that have a boss among their members and at most PRM_BOSS_GROUP_MAX members.  A group that is not new for us
-(``_new``: it began, or we were added, more than NEW_MARGIN_SEC before the baseline, or the backend cannot tell: an old
-group whose chat was deleted comes back like a new one) is kept ``ignored``.  Her ``candidates`` are the members but us,
-the bosses (by wxid, and anyone named like one), the admin and the cc users:
+members) that have a boss among their members and at most PRM_BOSS_GROUP_MAX members; one whose lines or members could
+not be read now (``{"chat", "unreadable": True}``) is asked for again at the next scan, never taken for one without a
+boss.  Is a group new for us (``_judge``: WeChat's times against the baseline's, ``BASELINE_AT``, kept on WeChat's clock,
+the backend's ``wechat_now`` then; never this PC's clock)?  Certainly new only when WeChat's line that we were added
+(``joined_at``) is at most NEW_MARGIN_SEC older than the baseline; begun for us more than OLD_SEC before it: kept
+``ignored`` (「不是新拉的群」); no line in it yet: ``waiting`` (the backend hands it back at each scan until its lines are
+there); any other (no line that we were added: an old group whose chat was deleted with its history comes back looking
+new) waits for a person (``pending``, 「拿不准是不是新拉的群」).  Her ``candidates`` are the members but us, the bosses (by
+wxid, and anyone named like one), the admin and the cc users:
 
-- exactly one: the bot takes over (``take_over``);
-- two or more: ``pending``: the console asks which member she is (``pick``; 「这个群不是达人」 is ``ignore``);
-- none: ``waiting``: its members are read again each scan for BOSS_WAIT_DAYS (one comes in: taken over), then it is
+- exactly one, the group certainly new and every boss name known: the bot takes over (``take_over``);
+- one otherwise, or two or more: ``pending``: the console asks which member she is (``pick``; 「这个群不是达人」 is
+  ``ignore``);
+- none: ``waiting``: its members are read again each scan for BOSS_WAIT_DAYS (one comes in: as above), then it is
   ``ignored``.
 
 A name of PRM_GROUP_WITH that is no one contact's (none, or two: ``contact_ids``) stops every automatic takeover: the
-console says which name, and the groups found wait for its 「是她」 (``pending``).  A deal's own 三方群 (「拉三方群」 makes
-her, the boss and us a group too) is never one: every deal's ``three_party.chat`` goes into the baseline, and a group
-whose one candidate has a 三方群 made, being made or unsure (「建好了」 by hand too: no group id kept) is kept ``ignored``;
-the takeover checks again right before it links the group, under the lock 「拉三方群」 starts one under
-(ThreeParty ``guard``).
+console warns which name (``warning``; ``why_not`` only says why the scan cannot run at all), and the groups found wait
+for its 「是她」 (``pending``).  A deal's own 三方群 (「拉三方群」 makes her, the boss and us a group too) is never one: every
+deal's ``three_party.chat`` goes into the baseline, and a group whose one candidate has a 三方群 made or unsure (「建好了」
+by hand too: no group id kept) is kept ``ignored``; while 「拉三方群」 makes one for her (a 「先试一下」 makes nothing: it does
+not count) the group waits and is looked at again once it is done (``waiting``); the takeover checks again right before
+it links the group, under the lock 「拉三方群」 starts one under (ThreeParty ``guard``).
 
 Taking over: she is registered (her note 「老板介绍（老板拉的群：<群名>）」) unless she is an active creator already; the group
 is linked to her deal (``deals.three_party`` ``{"state": "created", "by": "boss", "chat", "name", ...}``: the 三方群 block
@@ -74,7 +81,9 @@ BOSS_WATCH_BACK_SEC = 300          # the watch hands on the group's lines from t
 BOSS_IDS_SEC = 3600                # the bosses' wxids (``contact_ids`` reads every group's members): read again this seldom
 BOSS_IDS_RETRY_SEC = 600           # ... while a name of PRM_GROUP_WITH is no one contact's (it may be put right)
 OPENING_WAIT_SEC = 90              # a backend that cannot say its watch caught up: the group 开场白 this long after the takeover
-NEW_MARGIN_SEC = 600               # a group begun (we were added) up to this long before the baseline still counts as new
+NEW_MARGIN_SEC = 600               # we were added up to this long before the baseline: still certainly a new group
+OLD_SEC = 86400                    # a group begun for us (we were added, or its oldest line read) this long before it: old
+NEW, MAYBE, OLD, EMPTY = "new", "maybe", "old", "empty"     # ``_judge``: is a group new for us
 KNOWS_SEC = 60                     # ``knows_private``: the backend's answer for one creator is kept this long
 REPLAY_MAX = 200                   # the lines stored before a takeover handed on (the newest)
 SEEN_IDS = 500                     # message ids of a linked group remembered (the route and the replay hand one on once)
@@ -87,7 +96,9 @@ NAME_CHARS = 60                    # a group's name as kept
 NAME_MAX = 30                      # her 称呼 (PrmService.register)
 CALL_DEFAULT, CALL_MAX = "老板", 10  # PRM_BOSS_CALL: what the Mac is told the boss is called
 BASELINE = "boss_groups_baseline"  # prm_meta: the group ids there were when the feature first ran (JSON list)
-BASELINE_AT = "boss_groups_baseline_at"    # prm_meta: when (this PC's clock): a group begun before it is not new
+# prm_meta: when, on WeChat's clock (the backend's ``wechat_now`` then: the newest session time; a backend without it:
+# this PC's clock less the skew this run measured): a group we were added to before it is no certainly new one
+BASELINE_AT = "boss_groups_baseline_at"
 PENDING, WAITING, LINKED, IGNORED, GONE = "pending", "waiting", "linked", "ignored", "gone"
 STATES = (PENDING, WAITING, LINKED, IGNORED, GONE)
 CHANNEL = "group"                  # a group job's and packet's ``meta.channel``
@@ -103,9 +114,13 @@ NOBODY_WHY = f"{BOSS_WAIT_DAYS} 天里群里一直只有老板和我们，不再
 IGNORE_WHY = "运营说这个群不是达人"
 GONE_WHY = "运营说这个群已经不在了"
 STOPPED_WHY = "她在达人名单里停用过：要接手的话请在这里点「是她」"
-OURS_WHY = "像是合作单上「拉三方群」建的群（那次正在建，或者不确定建没建成），不接手"
+OURS_WHY = "像是合作单上「拉三方群」建的群（不确定那次建没建成），不接手"
 HAS_GROUP_WHY = "她已经有三方群"
 NOT_NEW_WHY = "不是新拉的群"
+MAYBE_WHY = "拿不准是不是新拉的群：是的话点「是她」"
+NO_LINES_WHY = "群里还没有消息：有了以后再看是不是新拉的群"
+QUIET_WHY = f"{BOSS_WAIT_DAYS} 天里群里一直没有消息，不再看这个群"
+MAKING_WHY = "她的三方群正在建（合作单上的「拉三方群」）：建完以后再看这个群"
 UNKNOWN_WHY = "PRM_GROUP_WITH 里的{names}在这个微信里找不到 / 有重名"
 
 
@@ -173,19 +188,22 @@ def told_lines(group) -> list[int]:
 
 
 def boss_groups_out(store, *, enabled: bool, why_not: str = "", boss=(), reserved=(),
-                    boss_call: str = CALL_DEFAULT) -> dict:
+                    boss_call: str = CALL_DEFAULT, warning: str = "") -> dict:
     """What the console shows (GET /api/prm ``boss_groups``; also the stopped bot's, from .env): on or off, why it cannot
-    run now, the bosses (PRM_GROUP_WITH) and what the Mac is told they are called (``boss_call``, PRM_BOSS_CALL), the
+    run at all now (``why_not``: the console's buttons are off then), what it warns of while it runs (``warning``, ""
+    when nothing: a name of PRM_GROUP_WITH no one contact has, so no group is taken over by itself; the buttons stay
+    on), the bosses (PRM_GROUP_WITH) and what the Mac is told they are called (``boss_call``, PRM_BOSS_CALL), the
     groups waiting for an operator to say who she is (``pending``: their name, only the members she may be (a 「是她」
-    each: never us, a boss, the admin or a cc user), how many are in it (``size``), when found, why), how many wait for
-    her to come in and how many are taken over."""
+    each: never us, a boss, the admin or a cc user), how many are in it (``size``), when found, why), how many wait (for
+    her to come in, for their first lines, for her 三方群 being made) and how many are taken over."""
     rows = store.boss_groups() if store is not None and enabled else []
     pending = [{"chat": r["chat"], "name": r["name"], "found_at": r["found_at"], "why": r["why"],
                 "size": len(r["members"]) + 1,
                 "members": [{"wxid": m["wxid"], "name": m.get("name") or ""}
                             for m in candidates(r["members"], {b.get("wxid") for b in r["boss"]}, reserved, boss)]}
                for r in rows if r["state"] == PENDING]
-    return {"enabled": bool(enabled), "why_not": str(why_not or "") if enabled else "", "boss": list(boss),
+    return {"enabled": bool(enabled), "why_not": str(why_not or "") if enabled else "",
+            "warning": str(warning or "") if enabled else "", "boss": list(boss),
             "boss_call": str(boss_call or CALL_DEFAULT), "pending": pending,
             "waiting": sum(1 for r in rows if r["state"] == WAITING),
             "linked": sum(1 for r in rows if r["state"] == LINKED)}
@@ -198,13 +216,20 @@ def _clock_text(at) -> str:
         return ""
 
 
+def waits_for_lines(row: Optional[dict]) -> bool:
+    """A group kept ``waiting`` because it had no line yet (``NO_LINES_WHY``): the scan asks the backend for it again
+    (its times), until its lines are there or BOSS_WAIT_DAYS are over."""
+    return bool(row) and row.get("state") == WAITING and row.get("why") == NO_LINES_WHY
+
+
 class BossGroups:
     """The 老板拉的群 of one PRM service (see the module's doc).  ``register(wxid, name, note)``: PrmService.register;
     ``opening(party, chat)``: PrmService._group_opening (``(job id, "")`` or ``(None, why not)``); ``handle(msg)``:
     PrmService.handle (a line stored before the takeover, handed on once); ``reserved``: the admin and the cc users;
-    ``local(at)``: a time WeChat gives on this PC's clock (PrmService._local); ``guard()``: ThreeParty.guard (the lock
-    「拉三方群」 starts a group under, yielding the deal being made now).  ``attach`` gives it the WeChat backend and the
-    bot's message store (Bot._start_prm, before PrmService.start)."""
+    ``local(at)``: a time WeChat gives on this PC's clock (PrmService._local: only the baseline's time of a backend
+    without ``wechat_now`` is worked out with it, ``_wechat_clock``); ``guard()``: ThreeParty.guard (the lock 「拉三方群」
+    starts a group under, yielding the deal being made now, never one only tried).  ``attach`` gives it the WeChat
+    backend and the bot's message store (Bot._start_prm, before PrmService.start)."""
 
     def __init__(self, store, config=None, *, clock: Callable[[], float] = time.time, reserved=(),
                  register: Optional[Callable[..., dict]] = None,
@@ -239,6 +264,8 @@ class BossGroups:
         self._lock = threading.RLock()            # one scan, pick, ignore or opening at a time
         self._scanned = 0.0
         self._why = ""                            # why the last scan could not look (the console's why_not)
+        self._warning = ""                        # what the last scan that looked warns of (the console's warning)
+        self._taking: frozenset = frozenset()     # wxids being taken over now (registered, the group not linked yet)
         self._bosses: dict[str, str] = {}         # the bosses' wxids as last read (``contact_ids``) -> their names
         self._bosses_at = 0.0                     # ... when (BOSS_IDS_SEC; 0: read again at the next scan)
         self._bosses_for: tuple = ()              # ... for these names of PRM_GROUP_WITH
@@ -287,16 +314,23 @@ class BossGroups:
                    for name in ("boss_groups", "group_ids", "own_wxid", "contact_ids"))
 
     def why_not(self) -> str:
-        """Why no boss group is found or taken over by itself now ("" = it is)."""
+        """Why the scan cannot run at all now ("" = it can): no boss named, a backend that cannot, the database, no
+        boss known (the console's buttons are off while it says so)."""
         if not self._with:
             return NO_BOSS_WHY
         if not self._can_scan():
             return NO_BACKEND_WHY
         return self._why
 
+    def warning(self) -> str:
+        """What the scan warns of while it runs ("" = nothing): a name of PRM_GROUP_WITH no one contact has (none, or
+        two): no group is taken over by itself, the groups found wait for the console's 「是她」, whose buttons stay on
+        (second review 2026-10-31 F3: before, it was ``why_not`` and the console turned them off)."""
+        return self._warning if self._on and not self.why_not() else ""
+
     def status(self) -> dict:
         return boss_groups_out(self._store, enabled=self._on, why_not=self.why_not() if self._on else "",
-                               boss=self._with, reserved=self._reserved, boss_call=self._call)
+                               boss=self._with, reserved=self._reserved, boss_call=self._call, warning=self.warning())
 
     # ── what the PRM service asks (any thread; no lock of this class is taken) ──
 
@@ -323,6 +357,13 @@ class BossGroups:
             return self._on and int(party_id) in self._linked.values()
         except (TypeError, ValueError):
             return False
+
+    def masks(self, party: Optional[dict]) -> bool:
+        """Do her words go to the Mac with the bosses' names hidden (``hide``)?  A creator with a group the bot took
+        over, or one being taken over right now (registered, her group not linked yet: her new-friend catch-up may be
+        read meanwhile, second review 2026-10-31 F9)."""
+        party = party or {}
+        return self.party_has_group(party.get("id")) or (self._on and str(party.get("wxid") or "") in self._taking)
 
     def reach_group(self, party_id) -> Optional[dict]:
         """The newest group the bot took over for this creator that she is still in (no ``LEFT_NOTICE`` on her deal), or
@@ -475,31 +516,33 @@ class BossGroups:
                 self._why = "微信数据库现在读不了，能读了以后才开始找老板拉的群"
                 return None
             self._store.set_meta_value(BASELINE, json.dumps(sorted(str(i) for i in ids)))
-            self._store.set_meta_value(BASELINE_AT, repr(float(now)))
+            self._store.set_meta_value(BASELINE_AT, repr(float(self._wechat_clock(now))))
             self._why = ""
             logger.info("PRM: boss groups: the %d group(s) there are now are never taken over (the baseline)", len(ids))
             return 0
         if self._baseline_at() is None:        # (a baseline kept before its time was: it counts from now)
-            self._store.set_meta_value(BASELINE_AT, repr(float(now)))
+            self._store.set_meta_value(BASELINE_AT, repr(float(self._wechat_clock(now))))
         own = str(self._backend.own_wxid() or "")
         if not own:
             self._why = "还不知道这个微信号自己的 wxid（微信数据库还没读到），稍后自动再找"
             return None
         self._read_bosses(names, now)
-        if not self._bosses:
+        if not self._bosses:                   # (no boss known at all: nothing can be looked for)
             self._why = (NO_READ_WHY if self._ids_failed else
-                         self._unknown_why() if self._unknown else
-                         f"通讯录里认不出老板（PRM_GROUP_WITH：{'、'.join(names)}）：要和这个微信号里他的备注或名字一样，"
-                         "而且只有一个人叫这个名字")
+                         UNKNOWN_WHY.format(names=self._quoted(self._unknown or names))
+                         + "：要和这个微信号里他的备注或名字一样，而且只有一个人叫这个名字")
             return None
-        self._why = self._unknown_why() if self._unknown else ""
+        # A boss known, another name no one contact's: the scan goes on, no group is taken over by itself; the console
+        # warns (``warning``) and its buttons stay on (second review 2026-10-31 F3)
+        self._why, self._warning = "", (self._unknown_why() if self._unknown else "")
         # The deals' own 三方群 (「拉三方群」: her, the boss and us, like a boss group) are never "new": kept in the
         # baseline as soon as a deal has one, so a deal's clean-up (it drops the group's id) does not make it new.
         made = {str((d.get("three_party") or {}).get("chat") or "") for d in self._store.deals()} - {""}
         if made - baseline:
             baseline |= made
             self._store.set_meta_value(BASELINE, json.dumps(sorted(baseline)))
-        known = baseline | {r["chat"] for r in self._store.boss_groups()} | self._looked
+        # (a group kept waiting for its first lines is asked for again: the backend reads its lines anew, ``_found``)
+        known = baseline | {r["chat"] for r in self._store.boss_groups() if not waits_for_lines(r)} | self._looked
         there = self._group_ids()              # (the groups it gives none of back were looked at: ``_note_looked``)
         found = self._backend.boss_groups(set(self._bosses), known, self._max)
         if found is None:
@@ -508,7 +551,7 @@ class BossGroups:
         self._note_looked(there, known, found)
         taken = 0
         for group in reversed(list(found)):    # (newest first from the backend: the oldest is seen to first)
-            taken += self._found(group, own, now)
+            taken += self._found(group, own, now) if isinstance(group, dict) else 0
         taken += self._look_again(own, now)
         self._look_at_linked(own, now)
         self._openings(now)
@@ -520,9 +563,30 @@ class BossGroups:
             self._with = group_with(getattr(self._config, "prm_group_with", ""))
         return self._with
 
+    @staticmethod
+    def _quoted(names) -> str:
+        return "、".join(f"「{n}」" for n in names)
+
     def _unknown_why(self) -> str:
-        names = "、".join(f"「{n}」" for n in self._unknown)
-        return UNKNOWN_WHY.format(names=names) + "：认出来以前，老板拉的群不会自动接手（找到的群在这里等你点「是她」）"
+        """The console's ``warning`` (and a group's ``why``) while a name of PRM_GROUP_WITH is no one contact's."""
+        return (UNKNOWN_WHY.format(names=self._quoted(self._unknown))
+                + "：认出来以前，老板拉的群不会自动接手（找到的群在这里等你点「是她」）")
+
+    def _wechat_clock(self, now: float) -> float:
+        """This moment on WeChat's clock (the baseline's time, ``BASELINE_AT``; second review 2026-10-31 F2: a PC whose
+        clock is hours off took every new group for an old one): the backend's ``wechat_now`` (the newest session time
+        of WeChat's session list), else (a backend without it, or nothing there) this PC's clock less the skew this run
+        measured (``local``; none until one of our own lines was read back)."""
+        ask = getattr(self._backend, "wechat_now", None)
+        if callable(ask):
+            try:
+                at = _num(ask())
+            except Exception:
+                logger.debug("PRM: boss groups: WeChat's time could not be read", exc_info=True)
+                at = None
+            if at is not None and at > 0:
+                return at
+        return now - (self._local(now) - now)
 
     def _readable(self) -> bool:
         readable = getattr(self._backend, "db_readable", None)
@@ -588,7 +652,9 @@ class BossGroups:
 
     def _note_looked(self, there: Optional[set], known: set, found) -> None:
         """The groups of the session list the backend looked at and gave none of back (no boss in them, or too many
-        members): looked at twice, they are left out of the next scans (``known``) until the bosses are read again."""
+        members): looked at twice, they are left out of the next scans (``known``) until the bosses are read again.  One
+        it could not read now (``{"chat", "unreadable": True}``) is given back: never counted (second review 2026-10-31
+        F6: before, a group whose lines could not be read twice was not looked at for an hour)."""
         if there is None:
             return
         handed = {str(g.get("chat") or "") for g in found or [] if isinstance(g, dict)}
@@ -596,20 +662,30 @@ class BossGroups:
         self._looked |= quiet & self._once
         self._once = quiet - self._looked
 
-    def _new(self, group: dict) -> bool:
-        """Is this group new for us (``NOT_NEW_WHY`` otherwise)?  It began for us (``joined_at``: WeChat's line that we
-        were added; else ``created_at``, its oldest line, only when the backend read its whole history,
-        ``history_complete``) at most NEW_MARGIN_SEC before the baseline.  A backend that says neither: its
-        ``created_at`` alone, when it gives one (as before)."""
-        start_at = self._baseline_at() or 0.0
-        joined = _num(group.get("joined_at"))
-        made = _num(group.get("created_at"))
-        if "joined_at" not in group and "history_complete" not in group:
-            return made is None or self._local(made) >= start_at - NEW_MARGIN_SEC
-        began = joined if joined is not None else made
-        if began is None or (joined is None and not group.get("history_complete")):
-            return False
-        return self._local(began) >= start_at - NEW_MARGIN_SEC
+    def _judge(self, group: dict) -> str:
+        """Is this group new for us (second review 2026-10-31 F2, F4, F5)?  WeChat's times, never this PC's clock,
+        against the baseline's (``BASELINE_AT``, on WeChat's clock): NEW, certainly (WeChat's line that we were added,
+        ``joined_at``, at most NEW_MARGIN_SEC older than the baseline: the scan may take it over by itself); OLD (we were
+        added, or its oldest line read, ``created_at``, more than OLD_SEC before it: 「不是新拉的群」); EMPTY (no line in it
+        yet: the backend read its whole history, ``history_complete``, and found none; looked at again at the next
+        scans); else MAYBE (no line that we were added, as an old group whose chat was deleted with its history has when
+        it comes back, or one of the day before the baseline, or times not known: a person decides)."""
+        base = self._baseline_at()
+        joined, made = _num(group.get("joined_at")), _num(group.get("created_at"))
+        if base is None:
+            return MAYBE
+        if joined is not None and joined >= base - NEW_MARGIN_SEC:
+            return NEW
+        if any(at is not None and at < base - OLD_SEC for at in (joined, made)):
+            return OLD
+        if joined is None and made is None and group.get("history_complete"):
+            return EMPTY
+        return MAYBE
+
+    def _sure(self, row: dict) -> bool:
+        """Is a group kept certainly new (``_judge``'s NEW, by the ``joined_at`` kept with it)?"""
+        base, joined = self._baseline_at(), _num(row.get("joined_at"))
+        return base is not None and joined is not None and joined >= base - NEW_MARGIN_SEC
 
     def _present(self, members: list) -> list[dict]:
         """The bosses among ``members`` (``[{"wxid", "name"}]``, their names as PRM_GROUP_WITH writes them)."""
@@ -617,9 +693,15 @@ class BossGroups:
         return [{"wxid": w, "name": n} for w, n in self._bosses.items() if w in there]
 
     def _ours(self, people: list) -> bool:
-        """Is one of them a creator whose deal's 「拉三方群」 is being made or ended unsure (no group id kept: this may be
-        that very group)?"""
-        return any(self._group_state(m["wxid"]) in (CREATING, UNSURE) for m in people)
+        """Is one of them a creator whose deal's 「拉三方群」 ended unsure (no group id kept: this may be that very
+        group)?"""
+        return any(self._group_state(m["wxid"]) == UNSURE for m in people)
+
+    def _making(self, people: list) -> bool:
+        """Is 「拉三方群」 making a group for one of them now (her deal's 三方群 ``creating``; a 「先试一下」 makes nothing and
+        writes no state)?  This may be that very group: it waits and is looked at again once that is done (second review
+        2026-10-31 F8: never ignored for it)."""
+        return any(self._group_state(m["wxid"]) == CREATING for m in people)
 
     def _group_state(self, wxid: str) -> str:
         """Her deal's 三方群 state ("" when she has none, or no deal)."""
@@ -628,41 +710,67 @@ class BossGroups:
         return str((deal.get("three_party") or {}).get("state") or "")
 
     def _has_group(self, wxid: str) -> bool:
-        """Has she a 三方群 made, being made or unsure (「建好了」 by hand too)?  A group whose one candidate she is may be
-        that very one: never taken over (``HAS_GROUP_WHY``)."""
-        return self._group_state(wxid) in (CREATING, UNSURE, CREATED)
+        """Has she a 三方群 made or unsure (「建好了」 by hand too)?  A group whose one candidate she is may be that very
+        one: never taken over (``HAS_GROUP_WHY``)."""
+        return self._group_state(wxid) in (UNSURE, CREATED)
+
+    def _decide(self, people: list, sure: bool) -> tuple:
+        """What becomes of a boss group that is not old (``_judge``), ``people`` its members but us and the bosses
+        (``candidates``), ``sure`` whether it is certainly new: ``(state, why, a note for the log)``.  Only ``(PENDING,
+        "")`` with one of them is taken over by the scan itself: certainly new, every boss name known, nothing in the
+        way (second review 2026-10-31 F4: any doubt waits for the console's 「是她」, nothing is ignored silently)."""
+        if self._making(people):
+            return WAITING, MAKING_WHY, ": a 三方群 is being made for her (拉三方群), looked at again once it is done"
+        if len(people) == 1 and self._has_group(people[0]["wxid"]):
+            return IGNORED, HAS_GROUP_WHY, ": she has a 三方群 (made or unsure), not taken over"
+        if len(people) > 1 and self._ours(people):
+            return IGNORED, OURS_WHY, ": maybe a deal's own 三方群 (unsure), not taken over"
+        if not people:
+            return WAITING, ("" if sure else MAYBE_WHY), ""
+        if not sure:
+            return PENDING, MAYBE_WHY, ": maybe no new group (no line that we were added), the console asks"
+        if self._unknown:
+            return PENDING, self._unknown_why(), ": a boss name is no one contact's, the console asks"
+        return PENDING, "", ""
 
     def _found(self, group: dict, own: str, now: float) -> int:
-        """A group the backend found: kept (pending, waiting or ignored) and, with exactly one person besides us and the
-        bosses and nothing in the way, taken over.  Returns 1 when it was taken over."""
+        """A group the backend found: kept (``_judge``: ignored when old, waiting when it has no line yet; else
+        ``_decide``: pending, waiting or ignored) and, with exactly one person besides us and the bosses, certainly new
+        and nothing in the way, taken over.  One the backend could not read now (``unreadable``) is left for the next
+        scan, never kept or counted; one kept waiting for its first lines comes back here (``waits_for_lines``).
+        Returns 1 when it was taken over."""
         chat = str((group or {}).get("chat") or "")
-        if not chat.endswith("@chatroom"):
-            return 0
+        if not chat.endswith("@chatroom") or group.get("unreadable"):
+            return 0                           # (its lines or members could not be read now: asked for at the next scan)
         members = clean_members(group.get("members"), own)
         present = self._present(members)
         if not present:
             self._looked.add(chat)             # (no boss in it after all: not looked at again until the bosses are read)
             return 0
+        row = self._store.boss_group(chat)
+        if row is not None and not waits_for_lines(row):
+            return 0                           # (kept already)
         self._ask_again(members)
         joined = _num(group.get("joined_at"))
         made = joined if joined is not None else _num(group.get("created_at"))
         name = str(group.get("name") or "")[:NAME_CHARS]
-        if not self._new(group):
-            if self._store.add_boss_group(chat, name=name, found_at=now, made_at=made, state=IGNORED, members=members,
-                                          boss=present, why=NOT_NEW_WHY, now=now):
-                logger.info("PRM: boss group %s… found, but it is no new group (it began before the switch's baseline, "
-                            "or when is not known); not taken over", chat[:8])
+        fields = {"name": name, "made_at": made, "joined_at": joined, "members": members, "boss": present}
+        how = self._judge(group)
+        if how == EMPTY:
+            if row is None and self._keep(chat, None, now, state=WAITING, why=NO_LINES_WHY, **fields):
+                logger.info("PRM: boss group %s… found (%d member(s)), no line in it yet; looked at again at each scan",
+                            chat[:8], len(members) + 1)
+            elif row is not None and members != row["members"]:
+                self._store.update_boss_group(chat, now, states=(WAITING,), name=name, members=members, boss=present)
+            return 0
+        if how == OLD:
+            if self._keep(chat, row, now, state=IGNORED, why=NOT_NEW_WHY, **fields):
+                logger.info("PRM: boss group %s… found, but it is no new group (begun for us over a day before the "
+                            "switch's baseline); not taken over", chat[:8])
             return 0
         people = candidates(members, self._bosses, self._reserved, self._with)
-        state, why, note = (PENDING if people else WAITING), "", ""
-        if len(people) == 1 and self._has_group(people[0]["wxid"]):
-            state, why, note = IGNORED, HAS_GROUP_WHY, ": she has a 三方群 (made, being made or unsure), not taken over"
-        elif len(people) > 1 and self._ours(people):
-            state, why, note = IGNORED, OURS_WHY, ": maybe a deal's own 三方群 (being made or unsure), not taken over"
-        elif self._unknown and people:
-            why, note = self._unknown_why(), ": a boss name is no one contact's, the console asks"
-        if not self._store.add_boss_group(chat, name=name, found_at=now, made_at=made, state=state, members=members,
-                                          boss=present, why=why, now=now):
+        state, why, note = self._decide(people, how == NEW)
+        if not self._keep(chat, row, now, state=state, why=why, **fields):
             return 0
         logger.info("PRM: boss group %s… found (%d member(s), %d boss(es), %d may be her)%s", chat[:8],
                     len(members) + 1, len(present), len(people), note)
@@ -670,20 +778,31 @@ class BossGroups:
             return int(bool(self.take_over(chat, people[0]["wxid"], people[0]["name"], actor="system").get("ok")))
         return 0
 
+    def _keep(self, chat: str, row: Optional[dict], now: float, **fields) -> bool:
+        """A group found kept: a new row, or the row of one that waited for its first lines brought up to date (it keeps
+        when it was found).  True when it changed."""
+        if row is None:
+            return self._store.add_boss_group(chat, found_at=now, now=now, **fields)
+        return self._store.update_boss_group(chat, now, states=(WAITING,), **fields)
+
     def _look_again(self, own: str, now: float) -> int:
-        """The groups waiting for her to come in: their members read again; one comes in: taken over (two: pending; one
-        with a 三方群 of her own: ignored; a boss name no one contact's: pending); after BOSS_WAIT_DAYS they are
-        ignored."""
+        """The groups kept waiting: after BOSS_WAIT_DAYS they are ignored.  One with no line yet is handed back by the
+        backend at each scan (``_found``); the others' members are read again, and each is decided again (``_decide``:
+        she came in, or the 三方群 being made for her is done: taken over, pending or ignored; else it waits on)."""
         taken = 0
         for row in self._store.boss_groups((WAITING,)):
             chat = row["chat"]
-            if float(row["found_at"]) >= now:
-                continue                       # (found in this very scan: its members were just read)
+            if max(float(row["found_at"]), float(row.get("updated_at") or 0)) >= now:
+                continue                       # (found, or decided, in this very scan: its members were just read)
+            quiet = waits_for_lines(row)
             if now - float(row["found_at"]) > BOSS_WAIT_DAYS * 86400:
-                self._store.update_boss_group(chat, now, states=(WAITING,), state=IGNORED, why=NOBODY_WHY)
-                logger.info("PRM: boss group %s…: nobody but us and the boss in %d days; not looked at any more",
-                            chat[:8], BOSS_WAIT_DAYS)
+                self._store.update_boss_group(chat, now, states=(WAITING,), state=IGNORED,
+                                              why=QUIET_WHY if quiet else NOBODY_WHY)
+                logger.info("PRM: boss group %s…: %s in %d days; not looked at any more", chat[:8],
+                            "no line" if quiet else "nobody but us and the boss", BOSS_WAIT_DAYS)
                 continue
+            if quiet:
+                continue                       # (asked for again through ``boss_groups``: its lines and its members)
             raw = self._backend.group_members(chat) if callable(getattr(self._backend, "group_members", None)) else None
             if raw is None:
                 continue
@@ -691,27 +810,16 @@ class BossGroups:
             self._ask_again(members)
             people = candidates(members, set(self._bosses) | {b.get("wxid") for b in row["boss"]}, self._reserved,
                                 self._with)
-            if not people:
-                if members != row["members"]:
-                    self._store.update_boss_group(chat, now, states=(WAITING,), members=members)
+            state, why, note = self._decide(people, self._sure(row))
+            if state == WAITING:
+                if (members, why) != (row["members"], row["why"]):
+                    self._store.update_boss_group(chat, now, states=(WAITING,), members=members, why=why)
                 continue
             boss = self._present(members) or row["boss"]
-            if len(people) == 1 and self._has_group(people[0]["wxid"]):
-                self._store.update_boss_group(chat, now, states=(WAITING,), state=IGNORED, members=members, boss=boss,
-                                              why=HAS_GROUP_WHY)
-                logger.info("PRM: boss group %s…: the one who came in has a 三方群; not taken over", chat[:8])
-                continue
-            if len(people) > 1 and self._ours(people):
-                self._store.update_boss_group(chat, now, states=(WAITING,), state=IGNORED, members=members, boss=boss,
-                                              why=OURS_WHY)
-                logger.info("PRM: boss group %s…: maybe a deal's own 三方群; not taken over", chat[:8])
-                continue
-            why = self._unknown_why() if self._unknown else ""
-            self._store.update_boss_group(chat, now, states=(WAITING,), state=PENDING, members=members, boss=boss,
+            self._store.update_boss_group(chat, now, states=(WAITING,), state=state, members=members, boss=boss,
                                           why=why)
-            logger.info("PRM: boss group %s…: %d may be her now%s", chat[:8], len(people),
-                        "; a boss name is no one contact's, the console asks" if why else "")
-            if len(people) == 1 and not why:
+            logger.info("PRM: boss group %s…: %d may be her now%s", chat[:8], len(people), note)
+            if state == PENDING and len(people) == 1 and not why:
                 taken += int(bool(self.take_over(chat, people[0]["wxid"], people[0]["name"], actor="system").get("ok")))
         return taken
 
@@ -743,53 +851,69 @@ class BossGroups:
         creator already, the group linked to her deal (``_link``), watched (``watch_group``), the lines kept before
         handed on (``_replay``), the deal's record (``EVENT``), one log line without names; the group 开场白 is asked
         for once the watch caught up (``_openings``).  ``actor``: system (the scan: a stopped creator is left for the
-        console; one with a 三方群 made, being made or unsure, looked at again right before the link under ThreeParty's
-        lock, is not taken over) or console (``pick``).  ``{"ok": True, "party_id", "deal_id"}`` or ``{"ok": False,
-        "error"}`` (the group is pending then, ``why`` says it; ignored for her 三方群)."""
+        console; one with a 三方群 made or unsure, looked at again right before the link under ThreeParty's lock, is not
+        taken over; while 「拉三方群」 makes one for her, never a 「先试一下」, the group waits and is looked at again once that
+        is done) or console (``pick``).  ``{"ok": True, "party_id", "deal_id"}`` or ``{"ok": False, "error"}`` (the group
+        is pending then, ``why`` says it; ignored for her 三方群; waiting while hers is being made)."""
         with self._lock:
             row = self._store.boss_group(str(chat or ""))
             if row is None or row["state"] not in (PENDING, WAITING):
                 return {"ok": False, "error": "这个群不在待认领的名单里（可能已经接手了，或者不管了）"}
-            now = self._clock()
             wxid = str(wxid or "").strip()
-            party = self._store.party_by_wxid(wxid)
-            made = False
-            if party is None:
-                if actor != "console" and self._store.party_by_wxid(wxid, include_inactive=True) is not None:
-                    return self._held(row, STOPPED_WHY, "a stopped creator", now)
-                if self._register is None:
-                    return self._held(row, "机器人这边没法登记达人", "no registering", now)
-                try:
-                    party = self._register(wxid, her_name(name, wxid), her_note(row["name"]))
-                except PartyError as e:
-                    return self._held(row, f"没登记成：{e}", "registering failed", now)
-                made = True
-            with self._guard() as busy:        # (「拉三方群」 starts none meanwhile; ``busy``: the deal it makes one for)
-                deal = self._store.deal_of(int(party["id"]), now)
-                state = str((deal.get("three_party") or {}).get("state") or "")
-                if actor != "console" and (state in (CREATING, UNSURE, CREATED) or busy == deal["id"]):
-                    self._store.update_boss_group(row["chat"], now, states=(PENDING, WAITING), state=IGNORED,
-                                                  why=HAS_GROUP_WHY)
-                    logger.info("PRM: boss group %s…: party %d's deal has a 三方群 (made, being made or unsure); not "
-                                "taken over", row["chat"][:8], party["id"])
-                    return {"ok": False, "error": HAS_GROUP_WHY}
-                kept = self._link(deal, row, now)
-                self._store.update_boss_group(row["chat"], now, states=(PENDING, WAITING), state=LINKED,
-                                              party_id=int(party["id"]), deal_id=int(deal["id"]), why="",
-                                              opening_due=now)
-                self._linked = {**self._linked, row["chat"]: int(party["id"])}
-            self._store.add_event(deal["id"], party["id"], EVENT,
-                                  {"name": row["name"], "new": made, **({"kept": True} if kept else {})},
-                                  actor="console" if actor == "console" else "system", now=now)
-            since = self._since(row)
-            self._watch(row["chat"], since)
-            self._replay(row["chat"], since, now)  # (her words before it: a reply job, then no 开场白)
-            self._due = {**self._due, row["chat"]: now}
-            logger.info("PRM: boss group %s… taken over (%s): party %d %s%s; its 开场白 once its lines so far are read",
-                        row["chat"][:8], "the console" if actor == "console" else "the scan", party["id"],
-                        "registered" if made else "linked", ", her deal keeps its 三方群" if kept else "")
-            self._openings(now)                # (a backend whose watch caught up at once)
-            return {"ok": True, "party_id": int(party["id"]), "deal_id": int(deal["id"])}
+            # (registered and not linked yet, her new-friend catch-up may be read: it is masked all the same, ``masks``)
+            self._taking = self._taking | {wxid}
+            try:
+                return self._take_over(row, wxid, name, actor)
+            finally:
+                self._taking = self._taking - {wxid}
+
+    def _take_over(self, row: dict, wxid: str, name: str, actor: str) -> dict:
+        """``take_over`` (under ``_lock``)."""
+        now = self._clock()
+        party = self._store.party_by_wxid(wxid)
+        made = False
+        if party is None:
+            if actor != "console" and self._store.party_by_wxid(wxid, include_inactive=True) is not None:
+                return self._held(row, STOPPED_WHY, "a stopped creator", now)
+            if self._register is None:
+                return self._held(row, "机器人这边没法登记达人", "no registering", now)
+            try:
+                party = self._register(wxid, her_name(name, wxid), her_note(row["name"]))
+            except PartyError as e:
+                return self._held(row, f"没登记成：{e}", "registering failed", now)
+            made = True
+        with self._guard() as busy:            # (「拉三方群」 starts none meanwhile; ``busy``: the deal it makes one for)
+            deal = self._store.deal_of(int(party["id"]), now)
+            state = str((deal.get("three_party") or {}).get("state") or "")
+            if actor != "console" and (state == CREATING or busy == deal["id"]):
+                # (this may be the very group it makes: second review 2026-10-31 F8, looked at again once it is done)
+                self._store.update_boss_group(row["chat"], now, states=(PENDING, WAITING), state=WAITING,
+                                              why=MAKING_WHY)
+                logger.info("PRM: boss group %s…: a 三方群 is being made for party %d; looked at again once it is done",
+                            row["chat"][:8], party["id"])
+                return {"ok": False, "error": MAKING_WHY}
+            if actor != "console" and state in (UNSURE, CREATED):
+                self._store.update_boss_group(row["chat"], now, states=(PENDING, WAITING), state=IGNORED,
+                                              why=HAS_GROUP_WHY)
+                logger.info("PRM: boss group %s…: party %d's deal has a 三方群 (made or unsure); not taken over",
+                            row["chat"][:8], party["id"])
+                return {"ok": False, "error": HAS_GROUP_WHY}
+            kept = self._link(deal, row, now)
+            self._store.update_boss_group(row["chat"], now, states=(PENDING, WAITING), state=LINKED,
+                                          party_id=int(party["id"]), deal_id=int(deal["id"]), why="", opening_due=now)
+            self._linked = {**self._linked, row["chat"]: int(party["id"])}
+        self._store.add_event(deal["id"], party["id"], EVENT,
+                              {"name": row["name"], "new": made, **({"kept": True} if kept else {})},
+                              actor="console" if actor == "console" else "system", now=now)
+        since = self._since(row)
+        self._watch(row["chat"], since)
+        self._replay(row["chat"], since, now)  # (her words before it: a reply job, then no 开场白)
+        self._due = {**self._due, row["chat"]: now}
+        logger.info("PRM: boss group %s… taken over (%s): party %d %s%s; its 开场白 once its lines so far are read",
+                    row["chat"][:8], "the console" if actor == "console" else "the scan", party["id"],
+                    "registered" if made else "linked", ", her deal keeps its 三方群" if kept else "")
+        self._openings(now)                    # (a backend whose watch caught up at once)
+        return {"ok": True, "party_id": int(party["id"]), "deal_id": int(deal["id"])}
 
     def _held(self, row: dict, why: str, code: str, now: float) -> dict:
         """Not taken over: the group waits for the console (``pending``, ``why``)."""

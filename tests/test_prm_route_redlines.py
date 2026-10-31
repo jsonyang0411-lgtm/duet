@@ -151,7 +151,8 @@ def test_in_a_boss_group_taken_over_only_her_lines_become_draft_jobs(world, on):
     fake = Backend(own=ME)
     run.prm.boss_groups.attach(fake)
     run.prm.boss_groups.scan()                                      # the baseline
-    fake.groups[GROUP] = {"name": "测试群", "members": [ME, BOSS_ID, CREATOR]}
+    fake.groups[GROUP] = {"name": "测试群", "members": [ME, BOSS_ID, CREATOR],
+                          "joined_at": world.clock.now}           # (WeChat's line that we were added)
     run.prm.boss_groups._scanned = 0
     assert run.prm.boss_groups.scan() == (1 if on else None)
     world.clock.now += 10
