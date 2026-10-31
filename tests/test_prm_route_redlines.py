@@ -12,6 +12,7 @@ The real WCDB backend over a fake WeChat database, the router, the relay and PRM
 Bot.run wires them (tests/test_prm_catchup.py ``World``; the edge as tests/test_same_name_chats.py wires it).
 """
 
+import json
 import os
 from unittest.mock import MagicMock, patch
 
@@ -19,7 +20,7 @@ import pytest
 
 from router_support import ADMIN, BOT, TraceSpy
 from test_prm import CREATOR
-from test_prm_catchup import GROUP, FakeWeChat, World, text_lines
+from test_prm_catchup import GROUP, ME, FakeWeChat, World, text_lines
 
 from src.admin import RELAY_HELP, AdminCommandHandler
 from src.config import BotConfig, _validate_config, load_config
@@ -133,6 +134,45 @@ def test_the_friend_add_commands_in_a_creators_chat_are_her_words_and_add_nobody
     assert manager.add_friend.call_count == 1 and run.prm.store.friend_add(record["id"])["state"] == "requested"
     [(chat, said)] = world.sent
     assert chat == ADMIN and said.startswith("已向 ab****yz 发好友申请") and "abcdefyz" not in said
+
+
+@pytest.mark.parametrize("on", [True, False])
+def test_in_a_boss_group_taken_over_only_her_lines_become_draft_jobs(world, on):
+    """老板拉的群 (PRM_BOSS_GROUPS, src/prm/boss_groups.py): the real WCDB backend reads every group (WECHAT_GROUPS *).  Once
+    PRM took the boss's group over (its scan's backend calls are the fake of tests/test_prm_boss_groups.py: the backend
+    part builds them) her line there is a draft job of the group and nothing more; the boss's and another member's
+    lines there, and her lines in another group, get no answer and no job.  With the switch off: no job at all."""
+    from test_prm_boss_groups import BOSS, BOSS_ID, Backend
+
+    other = "room2@chatroom"
+    world.register()
+    world.wechat.sessions[other] = "别的群"
+    run = world.run(prm_boss_groups="on" if on else "off", prm_group_with=BOSS)
+    fake = Backend(own=ME)
+    run.prm.boss_groups.attach(fake)
+    run.prm.boss_groups.scan()                                      # the baseline
+    fake.groups[GROUP] = {"name": "测试群", "members": [ME, BOSS_ID, CREATOR]}
+    run.prm.boss_groups._scanned = 0
+    assert run.prm.boss_groups.scan() == (1 if on else None)
+    world.clock.now += 10
+    world.wechat.say(GROUP, BOSS_ID, "大家好，以后由运营跟你对接", world.clock.now)
+    world.wechat.say(GROUP, "wxid_guest07", f"@{BOT} 你好", world.clock.now + 1)     # (not "wxid_me…": that is ours)
+    world.wechat.say(other, CREATOR, "cc 帮我查一下订单", world.clock.now + 2)
+    world.clock.now += 5
+    run.poll()
+    assert [job for job in world.jobs() if job["text"]] == []
+    world.clock.now += 10
+    world.wechat.say(GROUP, CREATOR, "好的老板", world.clock.now)
+    run.poll()
+    drafts = [job for job in world.jobs() if job["text"]]
+    assert world.sent == [] and world.stored(GROUP) == 3 and world.stored(other) == 1
+    if not on:
+        assert drafts == [] and world.jobs() == []
+        return
+    [job] = drafts
+    assert job["kind"] == "prm" and job["chat_id"] == GROUP and text_lines(job) == ["好的老板"]
+    meta = json.loads(job["meta"])
+    assert meta["channel"] == "group" and [x["who"] for x in meta["group"]["lines"]] == ["老板", "群成员"]
 
 
 # ── PRM_EDGE (Windows is only the WeChat edge; the Mac drafts) ─────────────────
