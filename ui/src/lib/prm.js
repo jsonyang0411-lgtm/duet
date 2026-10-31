@@ -194,8 +194,12 @@ export function buyinNotes(d) {
 /** What the 待审批 page says of 老板拉的群: the groups where a person has to say which member she is ([] = none, or off). */
 export function bossGroupNotes(d) {
   const bg = d?.boss_groups
-  const n = (bg?.enabled && bg.pending?.length) || 0
-  return n ? [['warn', `老板拉了 ${n} 个新群，群里不止一个人可能是她：到「合作单」页顶上的「老板拉的群」里选哪个是她，选了机器人才接手。`]] : []
+  const pending = (bg?.enabled && bg.pending) || []
+  if (!pending.length) return []
+  // a group held for its own reason (her 三方群, 不是新拉的群, a boss name not found …) says so on the card
+  const why = pending.some((g) => g?.why)
+  return [['warn', `老板拉了 ${pending.length} 个新群，${why ? '要你看一眼' : '群里不止一个人可能是她'}：`
+    + '到「合作单」页顶上的「老板拉的群」里选哪个是她，选了机器人才接手。']]
 }
 
 /** What is wrong with the setup, in the order a person has to fix it ([] = ready). */

@@ -339,10 +339,6 @@ def test_the_scan_finds_the_bosss_new_group_through_the_backend_and_takes_her_ov
     assert run.lines() == [("", INVITED), (BOSS, INTRO)]                      # (ours never goes through the route)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "needs the backend part's WcdbBackend.watch_caught_up (review 2026-10-31, item 5): PRM asks for the group 开场白 "
-    "once the watch's catch-up ran; this backend cannot say so, so it waits OPENING_WAIT_SEC (90 s) after the takeover "
-    "(test_a_backend_that_cannot_say_its_catch_up_ran_gets_the_opening_90_seconds_on covers that)"))
 def test_the_opening_the_mac_takes_tells_the_bosss_introduction(world):
     """The boss introduced her in the group before the scan found it (his words come seconds after he makes it, the
     scan up to a minute later): the 开场白 is asked for at the sender thread's first round after the watch's catch-up

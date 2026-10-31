@@ -1483,6 +1483,10 @@ class TestPrmPages:
         assert posted[1:] == [("pick", {"chat": "test_group_13@chatroom", "wxid": "wxid_test_3b"})]
         # no group left that more than one may be her: nothing says so, the hint neither
         assert card.locator(".prm-boss-group").count() == 3 and "不止一个人" not in card.inner_text()
+        # 待审批's line above the drafts: groups with a why of their own are not 「不止一个人可能是她」
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.get_by_text("老板拉了 3 个新群，要你看一眼：到「合作单」页顶上的「老板拉的群」里选哪个是她").wait_for()
+        assert "不止一个人" not in page.locator("body").inner_text()
 
     def test_deals_page_says_why_boss_groups_cannot_run_and_has_nothing_of_them_when_off(self, page, prm):
         """On but unable to run, the card says why (and its buttons are off: a stopped bot lists the groups it found);
