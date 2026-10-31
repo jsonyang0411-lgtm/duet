@@ -148,6 +148,8 @@
 .prm-draft .card-head { flex-wrap: wrap; }
 .prm-draft .card-head > .stack { flex: 1 1 220px; }
 .prm-draft .card-head > .row { flex-wrap: wrap; }
+/* 老板拉的群: a long group name in the 「群里 · <群名>」 tag ends in … instead of pushing the tag out of the card. */
+.prm-group-tag .prm-group-name { max-width: 50vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---------- 待审批 · 加微信（PRM_FRIEND_ADD） ---------- */
 .prm-friend-add.blocked { border-color: var(--need-line); }

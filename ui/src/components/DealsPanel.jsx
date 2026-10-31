@@ -5,10 +5,11 @@ import {
 } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
-import { usePrm, partyAction, dealAction, revealNumbers, setupProblems, eventText, MODE_TAGS, ACTORS } from '../lib/prm'
+import { usePrm, partyAction, dealAction, revealNumbers, setupProblems, eventText, MODE_TAGS, ACTORS, bossIntroduced } from '../lib/prm'
 import { PageHead, Card, Note, Empty, Field, TextInput, Select, Seg, Confirm } from './ui'
 import { AdvancedFields } from './AdvancedPanel'
 import { FriendAddPasteCard } from './FriendAddCard'
+import { BossGroupsCard } from './BossGroupsCard'
 
 // 合作单: the creators whose private messages get drafted replies (PRM_COPILOT).
 // Registering one here means the creator agreed to be contacted on WeChat; their
@@ -16,6 +17,8 @@ import { FriendAddPasteCard } from './FriendAddCard'
 // opens (below the list, so it fits any width) into its stage, its mode (copilot /
 // a person has it / paused), the sample shipment, the numbers and the audit trail.
 // 自动模式 on (switched on 待审批): one warn line at the top says so.
+// 老板拉的群 (PRM_BOSS_GROUPS): the card at the top (BossGroupsCard.jsx); a creator taken over from such a group is
+// tagged 老板介绍 in the list, and her deal's 三方群 block says 老板拉的群 (``three_party.by`` "boss").
 
 export default function DealsPanel() {
   const { data, err, reload } = usePrm(6000)
@@ -36,6 +39,7 @@ export default function DealsPanel() {
             <Note kind="warn">自动模式开着（{fmtClock(data.auto_mode.since)} 打开）：满足安全条件的草稿不经审批直接发给达人；在「待审批」页顶上关掉。</Note>
           </div>
         )}
+        <BossGroupsCard d={data} onDone={reload} />
         <RegisterCard d={data} onDone={reload} />
         <FriendAddPasteCard d={data} onDone={reload} />
         <PartiesCard d={data} open={open} setOpen={setOpen} onDone={reload} />
@@ -185,6 +189,7 @@ function PartiesCard({ d, open, setOpen, onDone }) {
                     <td>
                       <b>{p.name}</b>
                       {p.auto && <span className="tag warn" style={{ marginLeft: 6 }} title="新加的好友，机器人自动登记的（PRM_AUTO_REGISTER）；不是达人的点「停用」">自动登记</span>}
+                      {bossIntroduced(p) && <span className="tag cy" style={{ marginLeft: 6 }} title="老板拉群介绍给我们的达人（老板拉的群，PRM_BOSS_GROUPS）：她在那个群里说的话起草，审过发到群里">老板介绍</span>}
                       <div className="mono dim">{p.wxid}</div>{p.note && <div className="dim">{p.note}</div>}{!p.active && <span className="tag off">已停用</span>}
                     </td>
                     <td>
@@ -394,7 +399,9 @@ function DealDetail({ p, d, onDone }) {
 
 /** 三方群 (src/prm/three_party.py, 2026-10-30): 「拉三方群」 makes the group in this PC's WeChat (her and PRM_GROUP_WITH,
  *  picked in 「发起群聊」 and read back before 「完成」; nothing is said in it and it is not renamed: the suggested name is
- *  there to copy); 「先试一下」 picks them and cancels.  A run that may or may not have made it asks 「建好了 / 没建成」. */
+ *  there to copy); 「先试一下」 picks them and cancels.  A run that may or may not have made it asks 「建好了 / 没建成」.
+ *  A group the boss made with her and us (``by`` "boss", 老板拉的群, PRM_BOSS_GROUPS) is hers already: it says so and what
+ *  the bot does there (her lines drafted, sent in the group), without the name to copy (the boss named it). */
 function ThreePartyBlock({ p, d, busy, run }) {
   const toast = useToast()
   const [asking, setAsking] = useState(false)
@@ -412,17 +419,29 @@ function ThreePartyBlock({ p, d, busy, run }) {
     } catch { toast.err(`没能放进剪贴板：群名是「${suggested}」`) }
   }
   const tried = g.tried
+  const gone = (
+    <button type="button" className="btn sm ghost" disabled={busy}
+      onClick={() => run({ action: 'group_none' }, '记下了：这位达人现在没有三方群')}>群已经不在了</button>
+  )
   return (
     <div className="stack prm-group" style={{ gap: 6 }}>
       <b>三方群</b>
-      {g.state === 'created' && (
+      {g.state === 'created' && g.by === 'boss' && (
+        <>
+          <div><UsersThree style={{ verticalAlign: -2 }} /> 老板拉的群（{fmtClock(g.at)} 发现）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span className="f-hint">老板把她和我们拉进了这个群，之后由我们跟她对接：她在群里说的话照常起草，回复发在群里，老板也看得到；老板和别人说的话不起草。</span>
+            {gone}
+          </div>
+        </>
+      )}
+      {g.state === 'created' && g.by !== 'boss' && (
         <>
           <div><UsersThree style={{ verticalAlign: -2 }} /> 三方群已建好（{fmtClock(g.at)}{g.made ? '' : '，手动标的'}）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
           <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             <span className="f-hint">建议在手机微信里把群名改成「{suggested}」（机器人不改群名，也不在群里说话）。</span>
             <button type="button" className="btn sm" onClick={copyName}><Copy />复制群名</button>
-            <button type="button" className="btn sm ghost" disabled={busy}
-              onClick={() => run({ action: 'group_none' }, '记下了：这位达人现在没有三方群')}>群已经不在了</button>
+            {gone}
           </div>
         </>
       )}

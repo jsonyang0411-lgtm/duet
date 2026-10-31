@@ -96,6 +96,29 @@ export function inviteLine(inv) {
   return `${at ? `${at} ` : ''}发的邀约卡${bits.length ? `（${bits.join('，')}）` : ''}${inv.plan_id ? ` · 清单 ${inv.plan_id}` : ''}`
 }
 
+// 老板拉的群（PRM_BOSS_GROUPS，src/prm/boss_groups.py）：老板（PRM_GROUP_WITH）把他微信里的达人和我们这个号拉进一个小群，之后由我们
+// 跟她对接。群里除了老板和我们只有一个人时机器人自己接手；不止一个时「合作单」顶上问哪个是她。只有她在群里说的话起草，和私聊的草稿一个
+// 规矩（先审、门槛、下班时段、自动模式）发在群里，老板也看得到。
+/** POST /api/prm/boss-groups/pick {chat, wxid}: she is this member of the pending group: the bot takes it over. */
+export const pickBossGroup = (chat, wxid) => post('/api/prm/boss-groups/pick', { chat, wxid })
+/** POST /api/prm/boss-groups/ignore {chat}: not a creator's group: never offered again, and stays silent like any group. */
+export const ignoreBossGroup = (chat) => post('/api/prm/boss-groups/ignore', { chat })
+/** A draft that goes out in a boss group (``channel`` "group" of a packet; any other value, or none, is her private chat). */
+export const inGroup = (p) => p?.channel === 'group'
+/** A creator the boss introduced in a group he made with us (``source`` "boss_group" of the party or of her deal). */
+export const bossIntroduced = (p) => p?.source === 'boss_group' || p?.deal?.source === 'boss_group'
+/** The 「老板拉的群」 card's line of counts: "已接手 2 个群；1 个群在等她进群（…）；1 个群要你选哪个是她" (one sentence that
+ *  says so when nothing was found yet). */
+export function bossGroupsLine(bg) {
+  const linked = bg?.linked || 0
+  const waiting = bg?.waiting || 0
+  const pending = (bg?.pending || []).length
+  if (!linked && !waiting && !pending) return '还没有发现老板新拉的群。'
+  return [`已接手 ${linked} 个群`,
+    waiting ? `${waiting} 个群在等她进群（群里现在只有老板和我们，她进来以后机器人自己接手）` : '',
+    pending ? `${pending} 个群要你选哪个是她` : ''].filter(Boolean).join('；')
+}
+
 export const MODE_TAGS = { copilot: 'cy', human: 'warn', paused: 'off' }
 /** Who did it (deal_events.actor). */
 export const ACTORS = { console: '控制台', system: '系统', operator: '运营（微信里）', creator: '达人', mac: 'Mac' }
@@ -166,6 +189,13 @@ export function buyinNotes(d) {
   if (b.others_invited > 0) out.push(['', `另有 ${b.others_invited} 位是店里同事邀约的（卡片不是我们这边发的），她们的回复不归我们管`])
   if (b.others_contacts > 0) out.push(['', `别人邀约的会话里有 ${b.others_contacts} 张联系方式卡片，不归我们处理`])
   return out
+}
+
+/** What the 待审批 page says of 老板拉的群: the groups where a person has to say which member she is ([] = none, or off). */
+export function bossGroupNotes(d) {
+  const bg = d?.boss_groups
+  const n = (bg?.enabled && bg.pending?.length) || 0
+  return n ? [['warn', `老板拉了 ${n} 个新群，群里不止一个人可能是她：到「合作单」页顶上的「老板拉的群」里选哪个是她，选了机器人才接手。`]] : []
 }
 
 /** What is wrong with the setup, in the order a person has to fix it ([] = ready). */
