@@ -166,6 +166,54 @@ class AdvancedPostTests(_TempEnv):
         }})
         self.assertTrue(body["ok"], body)
 
+    def test_an_error_is_shown_on_the_field_it_names_not_on_a_shorter_key(self):
+        """PRM_FRIEND_ADD_BRAND's message starts with PRM_FRIEND_ADD too (加百应达人微信, 功能 R)."""
+        status, body = _request("/api/advanced", "POST", {"values": {"PRM_FRIEND_ADD_BRAND": "牌" * 21}})
+        self.assertFalse(body["ok"])
+        self.assertIn("PRM_FRIEND_ADD_BRAND", body["errors"])
+        self.assertNotIn("PRM_FRIEND_ADD", body["errors"])
+
+    def test_the_group_settings_are_shown_and_their_errors_land_on_them(self):
+        """三方群 (src/prm/three_party.py): PRM_GROUP_WITH empty by default (no 「拉三方群」), PRM_GROUP_NAME's default; a bad
+        value is refused on its own field."""
+        groups = _request("/api/advanced")[1]["groups"]
+        fields = {f["key"]: f for g in groups for f in g["fields"]}
+        self.assertEqual((fields["PRM_GROUP_WITH"]["value"], fields["PRM_GROUP_NAME"]["value"]), ("", "{品牌}×{昵称}"))
+        for key, value in (("PRM_GROUP_WITH", "a,b,c,d"), ("PRM_GROUP_NAME", "三方群")):
+            status, body = _request("/api/advanced", "POST", {"values": {key: value}})
+            self.assertFalse(body["ok"])
+            self.assertEqual(list(body["errors"]), [key], body)
+
+    def test_reply_parts_is_shown_and_its_error_lands_on_it(self):
+        """PRM_REPLY_PARTS (src/prm/service.py reply_parts, 2026-10-30): 3 by default; 0 or 6 is refused on its own field."""
+        groups = _request("/api/advanced")[1]["groups"]
+        fields = {f["key"]: f for g in groups for f in g["fields"]}
+        self.assertEqual(fields["PRM_REPLY_PARTS"]["value"], "3")
+        for value in ("0", "6"):
+            status, body = _request("/api/advanced", "POST", {"values": {"PRM_REPLY_PARTS": value}})
+            self.assertFalse(body["ok"])
+            self.assertEqual(list(body["errors"]), ["PRM_REPLY_PARTS"], body)
+
+    def test_the_remark_can_be_saved_empty_and_stays_empty(self):
+        """PRM_FRIEND_ADD_REMARK (加百应达人微信, 功能 R): unset shows the default; saved empty it stays empty (no remark),
+        where any other empty text field would be its default; a bad one is refused on its own field."""
+        def shown():
+            groups = _request("/api/advanced")[1]["groups"]
+            return next(f for g in groups for f in g["fields"] if f["key"] == "PRM_FRIEND_ADD_REMARK")
+
+        self.assertEqual((shown()["value"], shown()["placeholder"]), ("抖音-{昵称}", "空着：不设备注"))
+        status, body = _request("/api/advanced", "POST", {"values": {"PRM_FRIEND_ADD_REMARK": ""}})
+        self.assertTrue(body["ok"], body)
+        self.assertEqual(self.env_values()["PRM_FRIEND_ADD_REMARK"], "")
+        self.assertEqual(shown()["value"], "")
+        status, body = _request("/api/advanced", "POST", {"values": {"PRM_FRIEND_ADD_REMARK": "抖音-{昵称}{昵称}"}})
+        self.assertFalse(body["ok"])
+        self.assertIn("PRM_FRIEND_ADD_REMARK", body["errors"])
+        self.assertNotIn("PRM_FRIEND_ADD", body["errors"])
+        status, body = _request("/api/advanced", "POST", {"values": {"PRM_FRIEND_ADD_GREETING": ""}})
+        self.assertTrue(body["ok"], body)                                       # (the greeting: empty is its default)
+        self.assertEqual(self.env_values()["PRM_FRIEND_ADD_GREETING"], "您好{昵称}，我是{品牌}，百应上联系您的～")
+
     def test_masked_secret_keeps_the_stored_one(self):
         status, body = _request("/api/advanced", "POST", {"values": {"CLAUDE_RELAY_TOKEN": "stor***0000",
                                                                      "SEND_TYPING_DELAY": "on"}})

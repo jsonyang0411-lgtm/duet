@@ -517,6 +517,33 @@ class LoadConfigTests(unittest.TestCase):
         self.assertEqual((config.send_typing_delay, config.send_quiet, config.send_queue), ("on", "on", "on"))
         self.assertEqual((config.send_keep_clipboard, config.sticker_paste), ("off", "image"))
 
+    def test_load_config_night_window(self):
+        """下班时段自动回复: off unless set; the window and the night's holding line are read and stripped."""
+        from src.config import load_config
+
+        night_text = "收到～您说的我都记下啦，明早第一时间回复您哈～"
+        with patch.dict(os.environ, {}, clear=True):
+            config = load_config()
+        self.assertEqual((config.prm_night_auto_hours, config.prm_night_holding_text), ("", night_text))
+        with patch.dict(os.environ, {"PRM_NIGHT_AUTO_HOURS": " 18:00-09:00 ", "PRM_NIGHT_HOLDING_TEXT": " 收到啦～明早回您 "},
+                        clear=True):
+            config = load_config()
+        self.assertEqual((config.prm_night_auto_hours, config.prm_night_holding_text), ("18:00-09:00", "收到啦～明早回您"))
+        with patch.dict(os.environ, {"PRM_NIGHT_HOLDING_TEXT": "  "}, clear=True):
+            self.assertEqual(load_config().prm_night_holding_text, night_text)
+
+    def test_load_config_auto_register(self):
+        """PRM_AUTO_REGISTER: off unless set, the usual on/off spellings; on without PRM_COPILOT only does nothing
+        (the bot still starts: turning the copilot off in a hurry must not stop it)."""
+        from src.config import load_config
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(load_config().prm_auto_register, "off")
+        for raw, value in (("on", "on"), (" yes ", "on"), ("TRUE", "on"), ("1", "on"), ("off", "off"), ("0", "off"),
+                           ("", "off")):
+            with patch.dict(os.environ, {"PRM_AUTO_REGISTER": raw}, clear=True):
+                self.assertEqual(load_config().prm_auto_register, value, raw)
+
 
 class ValidateConfigTests(unittest.TestCase):
     """Tests for _validate_config() numeric range validation."""
@@ -624,6 +651,142 @@ class LoadConfigValidationIntegrationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 load_config()
             self.assertIn("MESSAGE_BURST_WINDOW_SEC", str(ctx.exception))
+
+    def test_a_night_window_that_is_none_stops_the_start(self):
+        """PRM_NIGHT_AUTO_HOURS that is not HH:MM-HH:MM: the bot refuses to start (it never guesses an hour)."""
+        from src.config import load_config
+
+        for value in ("18-9", "18:00-18:00", "晚上"):
+            with patch.dict(os.environ, {"PRM_NIGHT_AUTO_HOURS": value}, clear=True):
+                with self.assertRaises(RuntimeError) as ctx:
+                    load_config()
+                self.assertIn("PRM_NIGHT_AUTO_HOURS", str(ctx.exception))
+
+    def test_an_auto_register_that_is_no_switch_stops_the_start(self):
+        """PRM_AUTO_REGISTER is on or off; anything else is refused (never guessed)."""
+        from src.config import load_config
+
+        for value in ("always", "全部", "2"):
+            with patch.dict(os.environ, {"PRM_AUTO_REGISTER": value}, clear=True):
+                with self.assertRaises(RuntimeError) as ctx:
+                    load_config()
+                self.assertIn("PRM_AUTO_REGISTER must be off or on", str(ctx.exception))
+
+
+
+class FriendAddConfigTests(unittest.TestCase):
+    """加百应达人微信 (PRM_FRIEND_ADD, CODEBASE_REFERENCE 功能 R): off by default; its numbers stay in their ranges."""
+
+    def test_defaults_and_what_the_env_says(self):
+        from src.config import BotConfig, load_config
+
+        self.assertEqual((BotConfig().prm_friend_add, BotConfig().prm_friend_add_daily_max,
+                          BotConfig().prm_friend_add_gap_sec, BotConfig().prm_friend_add_brand),
+                         ("off", 10, 120, ""))
+        with patch.dict(os.environ, {}, clear=True):
+            config = load_config()
+        self.assertEqual(config.prm_friend_add, "off")
+        self.assertEqual(config.prm_friend_add_greeting, "您好{昵称}，我是{品牌}，百应上联系您的～")
+        with patch.dict(os.environ, {"PRM_FRIEND_ADD": "yes", "PRM_FRIEND_ADD_DAILY_MAX": "5",
+                                     "PRM_FRIEND_ADD_GAP_SEC": "300", "PRM_FRIEND_ADD_GREETING": " 你好{昵称} ",
+                                     "PRM_FRIEND_ADD_BRAND": " 测试品牌 "}, clear=True):
+            config = load_config()
+        self.assertEqual((config.prm_friend_add, config.prm_friend_add_daily_max, config.prm_friend_add_gap_sec,
+                          config.prm_friend_add_greeting, config.prm_friend_add_brand),
+                         ("on", 5, 300, "你好{昵称}", "测试品牌"))
+
+    def test_values_out_of_range_are_refused(self):
+        from src.config import _validate_config
+
+        _validate_config({"prm_friend_add": "on", "prm_friend_add_daily_max": 30, "prm_friend_add_gap_sec": 30})
+        for key, value, name in (("prm_friend_add", "maybe", "PRM_FRIEND_ADD"),
+                                 ("prm_friend_add_daily_max", 0, "PRM_FRIEND_ADD_DAILY_MAX"),
+                                 ("prm_friend_add_daily_max", 31, "PRM_FRIEND_ADD_DAILY_MAX"),
+                                 ("prm_friend_add_gap_sec", 29, "PRM_FRIEND_ADD_GAP_SEC"),
+                                 ("prm_friend_add_gap_sec", 3601, "PRM_FRIEND_ADD_GAP_SEC"),
+                                 ("prm_friend_add_greeting", "", "PRM_FRIEND_ADD_GREETING"),
+                                 ("prm_friend_add_greeting", "长" * 61, "PRM_FRIEND_ADD_GREETING"),
+                                 ("prm_friend_add_brand", "牌" * 21, "PRM_FRIEND_ADD_BRAND")):
+            with self.assertRaises(RuntimeError) as ctx:
+                _validate_config({key: value})
+            self.assertIn(name, str(ctx.exception))
+
+    def test_the_remark_has_a_default_and_set_but_empty_is_none(self):
+        """PRM_FRIEND_ADD_REMARK (the remark she gets in our WeChat, 2026-10-29): unset is 「抖音-{昵称}」, set but empty is
+        no remark; otherwise {昵称} once and at most 10 other characters."""
+        from src.config import BotConfig, _validate_config, load_config
+
+        self.assertEqual(BotConfig().prm_friend_add_remark, "抖音-{昵称}")
+        for env, expected in (({}, "抖音-{昵称}"), ({"PRM_FRIEND_ADD_REMARK": ""}, ""),
+                              ({"PRM_FRIEND_ADD_REMARK": " 百应-{昵称} "}, "百应-{昵称}")):
+            with patch.dict(os.environ, env, clear=True):
+                self.assertEqual(load_config().prm_friend_add_remark, expected, env)
+        for good in ("", "抖音-{昵称}", "{昵称}", "一二三四五六七八九十{昵称}"):
+            _validate_config({"prm_friend_add_remark": good})
+        for bad in ("抖音", "{昵称}-{昵称}", "一二三四五六七八九十一{昵称}"):
+            with self.assertRaises(RuntimeError) as ctx:
+                _validate_config({"prm_friend_add_remark": bad})
+            self.assertIn("PRM_FRIEND_ADD_REMARK", str(ctx.exception))
+
+
+
+class GroupConfigTests(unittest.TestCase):
+    """三方群 (src/prm/three_party.py, 2026-10-30): nobody to put in (no 「拉三方群」) by default; at most 3 different names;
+    the suggested group name holds {昵称} once."""
+
+    def test_defaults_and_what_the_env_says(self):
+        from src.config import BotConfig, load_config
+
+        self.assertEqual((BotConfig().prm_group_with, BotConfig().prm_group_name), ("", "{品牌}×{昵称}"))
+        with patch.dict(os.environ, {}, clear=True):
+            config = load_config()
+        self.assertEqual((config.prm_group_with, config.prm_group_name), ("", "{品牌}×{昵称}"))
+        with patch.dict(os.environ, {"PRM_GROUP_WITH": " 老板测试，王总 ", "PRM_GROUP_NAME": " {昵称}的群 "}, clear=True):
+            config = load_config()
+        self.assertEqual((config.prm_group_with, config.prm_group_name), ("老板测试，王总", "{昵称}的群"))
+        with patch.dict(os.environ, {"PRM_GROUP_NAME": ""}, clear=True):
+            self.assertEqual(load_config().prm_group_name, "{品牌}×{昵称}")
+
+    def test_bad_values_are_refused(self):
+        from src.config import _validate_config
+
+        for good in ("", "老板测试", "老板测试,王总、李 四"):
+            _validate_config({"prm_group_with": good})
+        for good in ("{品牌}×{昵称}", "{昵称}", "合作一二三四五六七八九十{昵称}"):
+            _validate_config({"prm_group_name": good})
+        for key, value, name in (("prm_group_with", "a,b,c,d", "PRM_GROUP_WITH"),
+                                 ("prm_group_with", "老板测试,老板测试", "PRM_GROUP_WITH"),
+                                 ("prm_group_with", "长" * 21, "PRM_GROUP_WITH"),
+                                 ("prm_group_with", "🌸", "PRM_GROUP_WITH"),
+                                 ("prm_group_name", "三方群", "PRM_GROUP_NAME"),
+                                 ("prm_group_name", "{昵称}{昵称}", "PRM_GROUP_NAME"),
+                                 ("prm_group_name", "一二三四五六七八九十一二三{昵称}", "PRM_GROUP_NAME")):
+            with self.assertRaises(RuntimeError) as ctx:
+                _validate_config({key: value})
+            self.assertIn(name, str(ctx.exception))
+
+
+class ReplyPartsConfigTests(unittest.TestCase):
+    """PRM_REPLY_PARTS (src/prm/service.py reply_parts, 2026-10-30): a reply in up to 3 messages by default, 1-5."""
+
+    def test_defaults_and_what_the_env_says(self):
+        from src.config import BotConfig, load_config
+
+        self.assertEqual(BotConfig().prm_reply_parts, 3)
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(load_config().prm_reply_parts, 3)
+        with patch.dict(os.environ, {"PRM_REPLY_PARTS": "1"}, clear=True):
+            self.assertEqual(load_config().prm_reply_parts, 1)
+
+    def test_bad_values_are_refused(self):
+        from src.config import _validate_config
+
+        for good in (1, 3, 5):
+            _validate_config({"prm_reply_parts": good})
+        for bad in (0, 6, -1):
+            with self.assertRaises(RuntimeError) as ctx:
+                _validate_config({"prm_reply_parts": bad})
+            self.assertIn("PRM_REPLY_PARTS", str(ctx.exception))
 
 
 if __name__ == "__main__":

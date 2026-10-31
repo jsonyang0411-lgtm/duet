@@ -307,6 +307,13 @@ class BotConfig:
     # PRIVATE_CHAT_ENABLED=true.
     prm_copilot: str = "off"
     prm_db: str = "data/prm.db"
+    # PRM_AUTO_REGISTER (2026-10-29): "on": every new friend the new-friend scan finds (src/wechat/new_friends.py:
+    # Windows wcdb, copilot mode only, never PRM_EDGE) is registered as a full creator, as if an operator had clicked
+    # 登记 (PrmService.new_friend_found -> register_found on PRM's own thread): her messages since she was added become
+    # one draft that waits for a person, her later drafts go through the gates and the night window like any creator's.
+    # Never the admin or a cc user, never a wxid that has a party already (an operator's 停用 sticks).  "off": as before,
+    # registering is a person's click in the console.
+    prm_auto_register: str = "off"
     # An operator's own WeChat reply in a creator's chat (or the console) gives the chat to
     # a person for this long: the creator's messages are only recorded meanwhile.
     prm_takeover_min: int = 120
@@ -314,6 +321,15 @@ class BotConfig:
     # messages (8.1); 0 = never.
     prm_holding_min: int = 10
     prm_holding_text: str = "收到，我确认一下马上回你"
+    # A reply goes out as up to this many WeChat messages, one per paragraph of its draft (a blank line between
+    # two), a typing pause apart (src/prm/service.py reply_parts); 1 = one message, as before.
+    prm_reply_parts: int = 3
+    # 下班时段自动回复 ("18:00-09:00", may pass midnight; empty = off): inside it, by this PC's clock, a creator-reply
+    # draft whose kind has not earned "auto" still goes out by itself when every night rule holds (src/prm/gates.py
+    # night_reason: no complaint, nothing plain_reason minds, no commission above 25 % or 坑位 / 保底 …, a flagged
+    # draft only as one holding line); holding replies inside it say prm_night_holding_text.
+    prm_night_auto_hours: str = ""
+    prm_night_holding_text: str = "收到～您说的我都记下啦，明早第一时间回复您哈～"
     # A delivered deal's receiving details (address, phone and ID numbers) are cleared
     # everywhere this many days after delivery (8.2).
     prm_retention_days: int = 90
@@ -334,6 +350,30 @@ class BotConfig:
     prm_sample_sync_min: int = 60
     prm_sample_waybill_days: int = 3
     prm_sample_sign_days: int = 10
+    # The 抖音百应 private messages (精选联盟私信) of the creators invited by 邀约带货: asked of the Mac once this many
+    # minutes (0 = off, the default; the Mac's `dy buyin im-inbox`, read-only, is still to be written: until then the
+    # console says it cannot be read).  A registered creator's new lines become a 百应 draft in 待审批 that an operator
+    # copies and sends in 百应 by hand; the bot never sends it.
+    prm_buyin_sync_min: int = 0
+    # 加百应达人微信 (src/prm/friend_adds.py, CODEBASE_REFERENCE 功能 R): "on" lets an operator turn the contact a creator
+    # left in 百应 into ONE WeChat friend request (the console's 「添加该达人微信」, or the admin's 加达人 N) through the
+    # friend manager's add_friend (Windows: the WeChat window), at most prm_friend_add_daily_max a day and
+    # prm_friend_add_gap_sec apart; WeChat's risk prompt pauses it with the auto-accept.  Off (the default): nothing of
+    # it is kept or done.  The greeting: {昵称} her 百应 nickname, {品牌} prm_friend_add_brand (this PC's .env only).
+    prm_friend_add: str = "off"
+    prm_friend_add_daily_max: int = 10
+    prm_friend_add_gap_sec: int = 120
+    prm_friend_add_greeting: str = "您好{昵称}，我是{品牌}，百应上联系您的～"
+    prm_friend_add_brand: str = ""
+    # The remark (备注) she gets in our WeChat when the bot adds her: {昵称} her 百应 nickname (her 抖音号 when it has
+    # none or a masked number), at most 16 characters once filled in; "" (PRM_FRIEND_ADD_REMARK= in .env) = no remark.
+    prm_friend_add_remark: str = "抖音-{昵称}"
+    # 三方群 (src/prm/three_party.py, 2026-10-30): who goes into the group of 「拉三方群」 besides her and this account, by
+    # their names in this account's contacts (their 备注), comma-separated, at most 3 (this PC's .env only, never the
+    # repo); "" (the default) = no 「拉三方群」.  The group name the console suggests: {品牌} prm_friend_add_brand, {昵称}
+    # her 称呼 (the bot does not rename the group itself).
+    prm_group_with: str = ""
+    prm_group_name: str = "{品牌}×{昵称}"
     # === WeChat edge (src/edge, edge-protocol.md) for the Mac business service ===
     # "on": Windows only receives and sends WeChat messages for the creators the Mac lists;
     # the Mac pulls /edge/* on the relay's port with PRM_EDGE_TOKEN.  Not with PRM_COPILOT.
@@ -494,12 +534,29 @@ def _validate_config(kwargs: dict) -> None:
         # Only when the caller knows it (the console's advanced page checks its own keys only).
         if "private_chat_enabled" in kwargs and not kwargs["private_chat_enabled"]:
             errors.append("PRM_COPILOT=on needs PRIVATE_CHAT_ENABLED=true (creators write in private chats)")
+    # (on without PRM_COPILOT, or with PRM_EDGE, it only does nothing: Bot._start_new_friends logs so.  Not refused:
+    # turning the copilot off in a hurry must not stop the bot from starting.)
+    if kwargs.get("prm_auto_register", "off") not in ("off", "on"):
+        errors.append(f"PRM_AUTO_REGISTER must be off or on, got {kwargs.get('prm_auto_register')}")
     if not (5 <= int(kwargs.get("prm_takeover_min", 120)) <= 1440):
         errors.append(f"PRM_TAKEOVER_MIN must be between 5 and 1440, got {kwargs.get('prm_takeover_min')}")
     if not (0 <= int(kwargs.get("prm_holding_min", 10)) <= 120):
         errors.append(f"PRM_HOLDING_MIN must be between 0 and 120, got {kwargs.get('prm_holding_min')}")
     if not (1 <= len(str(kwargs.get("prm_holding_text", "收到，我确认一下马上回你")).strip()) <= 60):
         errors.append("PRM_HOLDING_TEXT must be 1-60 characters")
+    if not (1 <= int(kwargs.get("prm_reply_parts", 3)) <= 5):
+        errors.append(f"PRM_REPLY_PARTS must be between 1 and 5, got {kwargs.get('prm_reply_parts')}")
+    if str(kwargs.get("prm_night_auto_hours", "") or "").strip():
+        from src.prm.gates import night_window
+
+        try:
+            night_window(kwargs["prm_night_auto_hours"])
+        except ValueError:
+            errors.append("PRM_NIGHT_AUTO_HOURS must be HH:MM-HH:MM (like 18:00-09:00, may pass midnight; "
+                          f"empty = off), got {kwargs.get('prm_night_auto_hours')}")
+    if not (1 <= len(str(kwargs.get("prm_night_holding_text", "收到～您说的我都记下啦，明早第一时间回复您哈～")).strip())
+            <= 60):
+        errors.append("PRM_NIGHT_HOLDING_TEXT must be 1-60 characters")
     if not (1 <= int(kwargs.get("prm_retention_days", 90)) <= 365):
         errors.append(f"PRM_RETENTION_DAYS must be between 1 and 365, got {kwargs.get('prm_retention_days')}")
     if kwargs.get("prm_commission_after", "delivered") not in ("delivered", "created"):
@@ -513,6 +570,32 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(f"PRM_SAMPLE_WAYBILL_DAYS must be between 1 and 30, got {kwargs.get('prm_sample_waybill_days')}")
     if not (1 <= int(kwargs.get("prm_sample_sign_days", 10)) <= 60):
         errors.append(f"PRM_SAMPLE_SIGN_DAYS must be between 1 and 60, got {kwargs.get('prm_sample_sign_days')}")
+    buyin_min = int(kwargs.get("prm_buyin_sync_min", 0))
+    if not (buyin_min == 0 or 5 <= buyin_min <= 1440):
+        errors.append(f"PRM_BUYIN_SYNC_MIN must be 0 (off) or between 5 and 1440, got {kwargs.get('prm_buyin_sync_min')}")
+    friend_add = kwargs.get("prm_friend_add", "off")
+    if friend_add not in ("off", "on"):
+        errors.append(f"PRM_FRIEND_ADD must be off or on, got {friend_add}")
+    if not (1 <= int(kwargs.get("prm_friend_add_daily_max", 10)) <= 30):
+        errors.append(f"PRM_FRIEND_ADD_DAILY_MAX must be between 1 and 30, got {kwargs.get('prm_friend_add_daily_max')}")
+    if not (30 <= int(kwargs.get("prm_friend_add_gap_sec", 120)) <= 3600):
+        errors.append(f"PRM_FRIEND_ADD_GAP_SEC must be between 30 and 3600, got {kwargs.get('prm_friend_add_gap_sec')}")
+    if not (1 <= len(str(kwargs.get("prm_friend_add_greeting", "您好{昵称}，我是{品牌}，百应上联系您的～")).strip()) <= 60):
+        errors.append("PRM_FRIEND_ADD_GREETING must be 1-60 characters")
+    if len(str(kwargs.get("prm_friend_add_brand", "") or "").strip()) > 20:
+        errors.append("PRM_FRIEND_ADD_BRAND must be at most 20 characters")
+    remark = str(kwargs.get("prm_friend_add_remark", "抖音-{昵称}") or "").strip()
+    if remark and (remark.count("{昵称}") != 1 or len(remark.replace("{昵称}", "")) > 10):
+        errors.append("PRM_FRIEND_ADD_REMARK must be empty (no remark) or hold {昵称} once and at most 10 other characters")
+    group_raw = str(kwargs.get("prm_group_with", "") or "")
+    group_names = [" ".join(n.split()) for n in re.split(r"[,，、;；]", group_raw) if n.strip()]
+    if len(group_names) > 3 or len(set(group_names)) != len(group_names):
+        errors.append("PRM_GROUP_WITH must name at most 3 different people (comma-separated)")
+    elif any(len(n) > 20 or not any(ch.isalnum() for ch in n) for n in group_names):
+        errors.append("PRM_GROUP_WITH: each name must be 1-20 characters with a letter, a digit or a Chinese character")
+    group_name = str(kwargs.get("prm_group_name", "{品牌}×{昵称}") or "").strip()
+    if group_name.count("{昵称}") != 1 or len(group_name.replace("{昵称}", "").replace("{品牌}", "")) > 12:
+        errors.append("PRM_GROUP_NAME must hold {昵称} once and at most 12 other characters ({品牌} aside)")
     prm_edge = kwargs.get("prm_edge", "off")
     if prm_edge not in ("off", "on"):
         errors.append(f"PRM_EDGE must be off or on, got {prm_edge}")
@@ -644,15 +727,29 @@ def load_config() -> BotConfig:
         "claude_relay_long_file": _parse_switch(os.getenv("CLAUDE_RELAY_LONG_FILE", "on")),
         "prm_copilot": _parse_switch(os.getenv("PRM_COPILOT", "off")),
         "prm_db": os.getenv("PRM_DB", "data/prm.db").strip() or "data/prm.db",
+        "prm_auto_register": _parse_switch(os.getenv("PRM_AUTO_REGISTER", "off")),
         "prm_takeover_min": int(os.getenv("PRM_TAKEOVER_MIN", "120")),
         "prm_holding_min": int(os.getenv("PRM_HOLDING_MIN", "10")),
         "prm_holding_text": os.getenv("PRM_HOLDING_TEXT", "收到，我确认一下马上回你").strip() or "收到，我确认一下马上回你",
+        "prm_reply_parts": int(os.getenv("PRM_REPLY_PARTS", "3")),
+        "prm_night_auto_hours": os.getenv("PRM_NIGHT_AUTO_HOURS", "").strip(),
+        "prm_night_holding_text": (os.getenv("PRM_NIGHT_HOLDING_TEXT", "收到～您说的我都记下啦，明早第一时间回复您哈～").strip()
+                                   or "收到～您说的我都记下啦，明早第一时间回复您哈～"),
         "prm_retention_days": int(os.getenv("PRM_RETENTION_DAYS", "90")),
         "prm_commission_after": os.getenv("PRM_COMMISSION_AFTER", "delivered").strip().lower() or "delivered",
         "prm_catchup_hours": int(os.getenv("PRM_CATCHUP_HOURS", "12")),
         "prm_sample_sync_min": int(os.getenv("PRM_SAMPLE_SYNC_MIN", "60")),
         "prm_sample_waybill_days": int(os.getenv("PRM_SAMPLE_WAYBILL_DAYS", "3")),
         "prm_sample_sign_days": int(os.getenv("PRM_SAMPLE_SIGN_DAYS", "10")),
+        "prm_buyin_sync_min": int(os.getenv("PRM_BUYIN_SYNC_MIN", "0")),
+        "prm_friend_add": _parse_switch(os.getenv("PRM_FRIEND_ADD", "off")),
+        "prm_friend_add_daily_max": int(os.getenv("PRM_FRIEND_ADD_DAILY_MAX", "10")),
+        "prm_friend_add_gap_sec": int(os.getenv("PRM_FRIEND_ADD_GAP_SEC", "120")),
+        "prm_friend_add_greeting": os.getenv("PRM_FRIEND_ADD_GREETING", "").strip() or "您好{昵称}，我是{品牌}，百应上联系您的～",
+        "prm_friend_add_brand": os.getenv("PRM_FRIEND_ADD_BRAND", "").strip(),
+        "prm_friend_add_remark": os.getenv("PRM_FRIEND_ADD_REMARK", "抖音-{昵称}").strip(),   # set but empty: no remark
+        "prm_group_with": os.getenv("PRM_GROUP_WITH", "").strip(),
+        "prm_group_name": os.getenv("PRM_GROUP_NAME", "").strip() or "{品牌}×{昵称}",
         "prm_edge": _parse_switch(os.getenv("PRM_EDGE", "off")),
         "prm_edge_token": os.getenv("PRM_EDGE_TOKEN", "").strip(),
         "edge_url": os.getenv("EDGE_URL", "").strip(),

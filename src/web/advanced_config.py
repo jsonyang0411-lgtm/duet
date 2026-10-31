@@ -95,6 +95,14 @@ GROUPS: list[dict] = [
             # No "requires": CLAUDE_RELAY lives in another group; saving checks it (_validate_config).
             {"key": "PRM_COPILOT", "type": "onoff", "default": "off", "label": "打开达人副驾驶",
              "help": "打开后在上面登记达人的 wxid；没登记的人照旧。要先打开 Claude 中转，改完要重启机器人。"},
+            {"key": "PRM_AUTO_REGISTER", "type": "onoff", "default": "off", "label": "新好友自动登记成达人",
+             "platform": WCDB_ONLY,
+             "help": "打开后，机器人认出的每个新加的好友（我们加她、她加我们、机器人自动通过的都算）都自动登记成正式达人，"
+                     "和点「登记」一样：加好友以来她发的消息合成一份草稿，在「待审批」里等人看过再发；之后的草稿和别的达人一样"
+                     "走自动发送门槛和下班时段自动回复。注意：客户、快递、同事这些不是达人的人也会被登记、收到草稿，第一份审过以后"
+                     "夜里还可能被自动回复；在上面的名单里点「停用」去掉一个，停用的不会再被自动登记。管理员和能用 cc 的人从不登记。"
+                     "关着 = 和以前一样，由人点「登记」。改完要重启机器人；Mac 上的 worker 不用动。",
+             "requires": [{"key": "PRM_COPILOT", "is": "on", "text": "达人副驾驶打开时才用"}]},
             {"key": "PRM_TAKEOVER_MIN", "type": "int", "min": 5, "max": 1440, "default": "120",
              "label": "人工接管多久", "unit": "分钟",
              "help": "运营用这个微信号亲手回了达人（手机或电脑上），或在合作单里点「人工接管」，这段时间里达人的消息只记录、"
@@ -104,6 +112,21 @@ GROUPS: list[dict] = [
              "help": "草稿在「待审批」里放了这么久还没人处理，先自动回达人一句下面的话（达人每发一轮消息最多一次），草稿继续等。0 = 不回。"},
             {"key": "PRM_HOLDING_TEXT", "type": "text", "default": "收到，我确认一下马上回你", "label": "先回的那句话",
              "help": "1–60 个字。"},
+            {"key": "PRM_NIGHT_AUTO_HOURS", "type": "text", "default": "", "label": "下班时段自动回复",
+             "help": "填运营下班的时段，例如 18:00-09:00（可以跨过半夜，按这台电脑的时间）；空着 = 关，和以前一样按门槛先审。"
+                     "这个时段里 Mac 写好的回复要满足夜间的全部安全条件才直接发给达人：不是投诉；佣金不超过 25%，"
+                     "不提坑位费、保底、返现、定金、专属价这类；占位符、kb/ 出处、运单号、文件都对得上；"
+                     "模型要求注意的只能是一句不带任何数字的过渡话（合作单上留一条提醒，点「已处理」才消失）。"
+                     "平台动作、补读的消息、新好友、撤回、人工接管的照旧等运营；这台电脑的时间和微信对不上时一律不自动发。"
+                     "改完要重启机器人；Mac 上的 worker 也要重启一次，草稿任务里才会写明现在是下班时段。"},
+            {"key": "PRM_NIGHT_HOLDING_TEXT", "type": "text", "default": "收到～您说的我都记下啦，明早第一时间回复您哈～",
+             "label": "下班时段先回的那句话",
+             "help": "1–60 个字。下班时段里草稿等了「草稿等多久先回一句」那么久还没人处理，先回达人这一句（上班时段还是上面那句）。"},
+            {"key": "PRM_REPLY_PARTS", "type": "int", "min": 1, "max": 5, "default": "3",
+             "label": "一条回复最多分几条发", "unit": "条",
+             "help": "像真人发微信那样，一条回复分成几条短消息发：草稿里空一行就是分开发，两条之间停一两秒（按字数，像在打字）；"
+                     "Mac 写草稿时会被告知最多能分几条。超出的段落并进最后一条。1 = 和以前一样整段一条发。改完要重启机器人。",
+             "requires": [{"key": "PRM_COPILOT", "is": "on", "text": "达人副驾驶打开时才用"}]},
             {"key": "PRM_CATCHUP_HOURS", "type": "int", "min": 0, "max": 72, "default": "12",
              "label": "没在读时收到的消息补多久", "unit": "小时",
              "help": "机器人停着（更新 EXE、重启）或数据库重新打开的那段时间里达人发来的消息，重新读到时照样交给副驾驶："
@@ -114,6 +137,44 @@ GROUPS: list[dict] = [
              "label": "处理完多久清除收件信息", "unit": "天",
              "help": "合作单签收满这么多天，或者这么多天没有任何动静（没有消息、没有改动，比如结案、审批没通过），"
                      "地址只留省市、手机号和证件号只留打码的，聊天记录、草稿、中转记录、Mac 上的案卷都一起清。"},
+            # 加百应达人微信 (src/prm/friend_adds.py, CODEBASE_REFERENCE 功能 R)
+            {"key": "PRM_FRIEND_ADD", "type": "onoff", "default": "off", "label": "加百应达人微信", "platform": WCDB_ONLY,
+             "help": "百应邀约来的达人留了微信号 / 手机号：在「合作单」页手动登记，到「待审批 › 加微信」确认一次，机器人就用好友管理"
+                     "发一次好友申请（不会自动重试；微信提示操作频繁时自动同意好友也暂停，管理员发「自动同意好友 开」才继续）。"
+                     "她通过以后点「是她，登记并关联」。关着时什么都不记、不加。改完要重启机器人。"},
+            {"key": "PRM_FRIEND_ADD_DAILY_MAX", "type": "int", "min": 1, "max": 30, "default": "10",
+             "label": "每天最多加几个", "unit": "个",
+             "help": "控制台和管理员「加达人 编号」加起来，每调一次加好友算一个（没发出去的也算）。管理员自己的「添加好友」不算。",
+             "requires": [{"key": "PRM_FRIEND_ADD", "is": "on", "text": "加百应达人微信打开时才用"}]},
+            {"key": "PRM_FRIEND_ADD_GAP_SEC", "type": "int", "min": 30, "max": 3600, "default": "120",
+             "label": "两次加好友至少隔多久", "unit": "秒",
+             "requires": [{"key": "PRM_FRIEND_ADD", "is": "on", "text": "加百应达人微信打开时才用"}]},
+            {"key": "PRM_FRIEND_ADD_GREETING", "type": "text", "default": "您好{昵称}，我是{品牌}，百应上联系您的～",
+             "label": "默认附言",
+             "help": "{昵称} 是她百应昵称的前 8 个字（昵称里有号码时不用），{品牌} 是下面的品牌名；填好以后最多 30 个字，加之前可以改。"
+                     "每个人的附言不一样，她通过以后才认得出是谁。",
+             "requires": [{"key": "PRM_FRIEND_ADD", "is": "on", "text": "加百应达人微信打开时才用"}]},
+            {"key": "PRM_FRIEND_ADD_BRAND", "type": "text", "default": "", "label": "附言里的品牌名",
+             "help": "只存在这台电脑的 .env 里，不进代码仓库；不填时附言里的「我是{品牌}，」整段不写。最多 20 个字。",
+             "requires": [{"key": "PRM_FRIEND_ADD", "is": "on", "text": "加百应达人微信打开时才用"}]},
+            {"key": "PRM_FRIEND_ADD_REMARK", "type": "text", "default": "抖音-{昵称}", "empty_ok": True,
+             "placeholder": "空着：不设备注", "label": "加好友时给她的备注",
+             "help": "她在我们微信里显示的名字（微信的「备注」）。{昵称} 是她的百应昵称（没有昵称、昵称里有号码时用抖音号），"
+                     "填好以后最多 16 个字，和别的记录一样时后面加「-抖音号后 4 位」；{昵称} 以外最多 10 个字。机器人在「申请添加朋友」"
+                     "窗口里认出「备注」栏才填，认不出就不填、申请照发。她通过以后显示的就是这个名字，认人更准，发消息也不会和别人同名。"
+                     "清空保存 = 不设备注。",
+             "requires": [{"key": "PRM_FRIEND_ADD", "is": "on", "text": "加百应达人微信打开时才用"}]},
+            # 三方群 (src/prm/three_party.py, 2026-10-30)
+            {"key": "PRM_GROUP_WITH", "type": "text", "default": "", "empty_ok": True, "platform": WCDB_ONLY,
+             "placeholder": "空着：合作单上没有「拉三方群」", "label": "拉三方群时一起拉进群的人",
+             "help": "合作单上点「拉三方群」，机器人在电脑微信的「发起群聊」里搜她和这里的人，各自恰好搜到一个才勾上，读一遍已选的人"
+                     "没错才点「完成」。写他们在这个微信号通讯录里的名字（设了备注就写备注），多个用逗号隔开，最多 3 个，比如老板。"
+                     "只存在这台电脑的 .env 里，不进代码仓库。机器人只建群：不在群里说话，也不改群名。改完要重启机器人。",
+             "requires": [{"key": "PRM_COPILOT", "is": "on", "text": "达人副驾驶打开时才用"}]},
+            {"key": "PRM_GROUP_NAME", "type": "text", "default": "{品牌}×{昵称}", "label": "建议的群名",
+             "help": "群建好以后，合作单上提示你在手机上把群名改成这个（旁边有「复制群名」）。{品牌} 是「附言里的品牌名」，"
+                     "{昵称} 是她在名单里的称呼；{昵称} 要有一次，其余最多 12 个字。",
+             "requires": [{"key": "PRM_COPILOT", "is": "on", "text": "达人副驾驶打开时才用"}]},
         ],
     },
     {
@@ -155,11 +216,12 @@ _FLOAT = re.compile(r"[+-]?(\d+(\.\d*)?|\.\d+)")
 
 
 def normalize(key: str, raw: str | None) -> str:
-    """The value as the bot reads it, written the canonical way."""
+    """The value as the bot reads it, written the canonical way.  An empty value is the default, except for a field
+    with ``empty_ok`` that is set but empty (``PRM_FRIEND_ADD_REMARK=``: no remark); unset (``None``) is the default."""
     field = FIELDS[key]
     kind = field["type"]
     value = "" if raw is None else str(raw).strip()
-    if value == "":
+    if value == "" and not (field.get("empty_ok") and raw is not None):
         value = field["default"]
     if kind == "onoff":
         return _parse_switch(value)
@@ -252,7 +314,8 @@ def validate_updates(updates: dict, current: dict[str, str]) -> dict[str, str]:
     except RuntimeError as exc:
         lines = [ln.strip(" -") for ln in str(exc).splitlines()[1:] if ln.strip()]
         for line in lines:
-            hit = next((k for k in FIELDS if line.startswith(k)), None)
+            # the longest key the line starts with: PRM_FRIEND_ADD_BRAND's message is not PRM_FRIEND_ADD's
+            hit = next((k for k in sorted(FIELDS, key=len, reverse=True) if line.startswith(k)), None)
             if line.startswith("CLAUDE_RELAY=on needs "):
                 # two messages start alike: each belongs to the field it names
                 hit = "CLAUDE_RELAY_TOKEN" if "CLAUDE_RELAY_TOKEN" in line else "CLAUDE_RELAY_WXIDS"

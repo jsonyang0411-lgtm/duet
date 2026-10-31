@@ -1,18 +1,21 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  ArrowClockwise, UserPlus, Prohibit, ArrowCounterClockwise, CaretDown, CaretRight, Eye, EyeSlash, Truck, Check,
+  ArrowClockwise, UserPlus, Prohibit, ArrowCounterClockwise, CaretDown, CaretRight, Eye, EyeSlash, Truck, Check, HandWaving,
+  UsersThree, Copy,
 } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
 import { usePrm, partyAction, dealAction, revealNumbers, setupProblems, eventText, MODE_TAGS, ACTORS } from '../lib/prm'
-import { PageHead, Card, Note, Empty, Field, TextInput, Select, Seg } from './ui'
+import { PageHead, Card, Note, Empty, Field, TextInput, Select, Seg, Confirm } from './ui'
 import { AdvancedFields } from './AdvancedPanel'
+import { FriendAddPasteCard } from './FriendAddCard'
 
 // 合作单: the creators whose private messages get drafted replies (PRM_COPILOT).
 // Registering one here means the creator agreed to be contacted on WeChat; their
 // messages then go, silently, to the Mac for a draft that waits in 待审批. A deal
 // opens (below the list, so it fits any width) into its stage, its mode (copilot /
 // a person has it / paused), the sample shipment, the numbers and the audit trail.
+// 自动模式 on (switched on 待审批): one warn line at the top says so.
 
 export default function DealsPanel() {
   const { data, err, reload } = usePrm(6000)
@@ -28,7 +31,13 @@ export default function DealsPanel() {
         />
         {err && <Note kind="need">{err}</Note>}
         {setupProblems(data).map(([kind, text]) => <Note key={text} kind={kind}>{text}</Note>)}
+        {data?.enabled && data?.auto_mode?.on && (
+          <div className="prm-auto-note" style={{ marginBottom: 12 }}>
+            <Note kind="warn">自动模式开着（{fmtClock(data.auto_mode.since)} 打开）：满足安全条件的草稿不经审批直接发给达人；在「待审批」页顶上关掉。</Note>
+          </div>
+        )}
         <RegisterCard d={data} onDone={reload} />
+        <FriendAddPasteCard d={data} onDone={reload} />
         <PartiesCard d={data} open={open} setOpen={setOpen} onDone={reload} />
         {current && <DealCard key={current.id} p={current} d={data} onClose={() => setOpen(null)} onDone={reload} />}
         <div className="stack" style={{ gap: 12, marginTop: 16 }}>
@@ -44,32 +53,46 @@ function RegisterCard({ d, onDone }) {
   const [wxid, setWxid] = useState('')
   const [name, setName] = useState('')
   const [note, setNote] = useState('')
+  const [douyin, setDouyin] = useState('')
   const [busy, setBusy] = useState(false)
+  const withDouyin = !!d?.friend_add_status?.enabled          // 加百应达人微信 on: who she is on 抖音 (optional)
   // New friends first (src/wechat/new_friends.py: tagged, their greeting masked, how they came), then
-  // the other recent private chats. Registering stays a person's decision: a new friend may be a
-  // supplier or an acquaintance.
+  // the other recent private chats. Registering is a person's decision (a new friend may be a supplier
+  // or an acquaintance), unless PRM_AUTO_REGISTER is on: then the bot registers every new friend itself
+  // (tagged 自动登记 in the list below) and only those it left (a stopped one, an error) are offered here.
   const candidates = d?.candidates || []
   const fresh = candidates.filter((c) => c.new)
   const picked = candidates.find((c) => c.wxid === wxid.trim())
   const hours = d?.catchup_hours ?? 12
   const pick = (value) => {
     const c = candidates.find((x) => x.wxid === value)
-    if (c) { setWxid(c.wxid); setName((n) => n || c.name) }
+    if (c) {
+      setWxid(c.wxid); setName((n) => n || c.name)
+      if (withDouyin && c.friend_add?.aweme_id) setDouyin(c.friend_add.aweme_id)   // 加微信: her 抖音号 comes along
+    }
   }
   const add = async () => {
     setBusy(true)
     try {
-      const r = await partyAction({ action: 'add', wxid: wxid.trim(), name: name.trim(), note: note.trim() })
+      const r = await partyAction({ action: 'add', wxid: wxid.trim(), name: name.trim(), note: note.trim(),
+        ...(withDouyin && douyin.trim() ? { douyin_id: douyin.trim() } : {}) })
       toast.ok(r?.catch_up
-        ? `已登记 ${name.trim()}：加好友以来对方发的消息会合成一份草稿，在「待审批」里等你看过再发`
+        ? `已登记 ${name.trim()}：加好友以来对方发的消息会合成一份草稿（还没说话就写一份开场白），在「待审批」里等你看过再发`
         : `已登记 ${name.trim()}`)
-      setWxid(''); setName(''); setNote('')
+      setWxid(''); setName(''); setNote(''); setDouyin('')
       onDone()
     } catch (e) { toast.err(e.message) } finally { setBusy(false) }
   }
   return (
     <Card title="登记达人" eyebrow="REGISTER" className="prm-register">
       <div className="stack" style={{ gap: 10 }}>
+        {d?.enabled && d?.auto_register && (
+          <Note kind="warn">
+            新好友自动登记已打开（PRM_AUTO_REGISTER）：机器人认出的每个新加的好友都会自动登记成达人（下面的名单里标「自动登记」），
+            加好友以来的消息合成一份草稿（还没说话的写一份开场白），在「待审批」里等人看过再发；之后的草稿和别的达人一样走自动发送门槛和下班时段自动回复。
+            客户、快递、同事这些不是达人的人也会被登记：在下面点「停用」去掉，停用的不会再被自动登记。管理员和能用 cc 的人从不登记。
+          </Note>
+        )}
         {fresh.length > 0 && (
           <div className="stack prm-new-friends" style={{ gap: 8 }}>
             <b>新加的好友</b>
@@ -77,7 +100,11 @@ function RegisterCard({ d, onDone }) {
               <div key={c.wxid} className="row prm-new-friend" style={{ gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' }}>
                 <span className="tag cy">新好友</span>
                 <div className="grow" style={{ minWidth: 0 }}>
-                  <div><b>{c.name}</b> <span className="mono dim">{c.wxid}</span></div>
+                  <div>
+                    <b>{c.name}</b> <span className="mono dim">{c.wxid}</span>
+                    {c.inactive && <span className="tag off" style={{ marginLeft: 6 }} title="登记过、又停用了：再登记就是重新启用">已停用</span>}
+                    {c.friend_add && <span className="tag warn" style={{ marginLeft: 6 }}>{`${c.friend_add.level_label || '可能是她'}：百应的${c.friend_add.nickname || '达人'}（#${c.friend_add.id}）`}</span>}
+                  </div>
                   <div className="dim">{c.how_label}{c.added_at ? ` · ${fmtClock(c.added_at)} 加上的` : ''}</div>
                   <div className={c.verify_text ? '' : 'dim'} style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
                     验证消息：{c.verify_text || '（没有）'}
@@ -104,12 +131,17 @@ function RegisterCard({ d, onDone }) {
           <Field label="备注（可选）" className="grow">
             <TextInput value={note} onChange={setNote} placeholder="比如：618 防晒" aria-label="备注" />
           </Field>
+          {withDouyin && (
+            <Field label="抖音号（可选）" hint="知道她的抖音号就填：Mac 起草时按它带上邀约背景" className="grow">
+              <TextInput mono value={douyin} onChange={setDouyin} placeholder="dy_xxx" aria-label="达人抖音号（可选）" />
+            </Field>
+          )}
         </div>
         {picked?.new && (
           <Note kind="warn">
             {`${picked.name} 是新加的好友（${picked.how_label || '说不清是怎么加的'}）。登记后，加好友以来对方发的消息（验证消息也算，`
-              + `${hours > 0 ? `最多 ${hours} 小时内的` : '只算最近 5 分钟的'}）会合成一份草稿，在「待审批」里等人看过再发。`
-              + '不是达人（比如供应商、熟人）就不要登记。'}
+              + `${hours > 0 ? `最多 ${hours} 小时内的` : '只算最近 5 分钟的'}）会合成一份草稿，在「待审批」里等人看过再发；`
+              + '对方还没说过话（比如刚通过我们的好友申请），就写一份开场白，也是等人看过再发。不是达人（比如供应商、熟人）就不要登记。'}
           </Note>
         )}
         <Note>登记表示这位达人已同意由我们在微信上联系。登记后，对方的私聊不会再收到自动回复：机器人不回任何话，只在「待审批」里给运营一份草稿。</Note>
@@ -150,7 +182,11 @@ function PartiesCard({ d, open, setOpen, onDone }) {
                         {expanded ? <CaretDown /> : <CaretRight />}
                       </button>
                     </td>
-                    <td><b>{p.name}</b><div className="mono dim">{p.wxid}</div>{p.note && <div className="dim">{p.note}</div>}{!p.active && <span className="tag off">已停用</span>}</td>
+                    <td>
+                      <b>{p.name}</b>
+                      {p.auto && <span className="tag warn" style={{ marginLeft: 6 }} title="新加的好友，机器人自动登记的（PRM_AUTO_REGISTER）；不是达人的点「停用」">自动登记</span>}
+                      <div className="mono dim">{p.wxid}</div>{p.note && <div className="dim">{p.note}</div>}{!p.active && <span className="tag off">已停用</span>}
+                    </td>
                     <td>
                       {deal.stage_label || '—'}
                       {deal.stage_proposal && deal.stage_proposal !== deal.stage && <div className="dim">AI 建议：{deal.stage_proposal_label}</div>}
@@ -218,6 +254,14 @@ function DealDetail({ p, d, onDone }) {
       onDone()
     } catch (e) { toast.err(e.message) } finally { setBusy(false) }
   }
+  const runParty = async (body, done) => {
+    setBusy(true)
+    try {
+      await partyAction(body)
+      toast.ok(done)
+      onDone()
+    } catch (e) { toast.err(e.message) } finally { setBusy(false) }
+  }
   const reveal = async () => {
     try {
       const r = await revealNumbers(p.id)
@@ -254,6 +298,25 @@ function DealDetail({ p, d, onDone }) {
         </div>
       </div>
 
+      {!deal.last_message_at && (
+        <div className="stack prm-opening" style={{ gap: 6 }}>
+          <b>开场白</b>
+          <div className="f-hint">
+            她还没跟我们说过话。点「写开场白」，Mac 按 kb 里的破冰写法写一句先打招呼的话，在「待审批」里等你看过再发。
+            新加的好友通过以后一直没说话，系统会自己写一份，不用点；加好友过了很久才登记的，系统不知道她之前说没说过，不自己写，会留一条提示请你看一眼微信。
+          </div>
+          <div>
+            <button type="button" className="btn" disabled={busy || !p.active || deal.mode !== 'copilot'}
+              onClick={() => run({ action: 'opening' }, '已请 Mac 写开场白，写好会出现在「待审批」里')}>
+              <HandWaving />写开场白
+            </button>
+            {(!p.active || deal.mode !== 'copilot') && <span className="dim" style={{ marginLeft: 8 }}>{!p.active ? '已停用的达人不写' : '先恢复副驾驶'}</span>}
+          </div>
+        </div>
+      )}
+
+      {d?.three_party?.enabled && <ThreePartyBlock p={p} d={d} busy={busy} run={run} />}
+
       <div className="stack" style={{ gap: 6 }}>
         <b>寄样</b>
         {deal.shipment
@@ -285,6 +348,20 @@ function DealDetail({ p, d, onDone }) {
         )}
       </div>
 
+      {deal.links?.length > 0 && (
+        <div className="stack prm-links" style={{ gap: 6 }}>
+          <b>抖音号</b>
+          {deal.links.map((l) => (
+            <div key={l.account} className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <span>{l.source === 'friend_add' ? '来自百应邀约' : '登记时填的'}：抖音号 <span className="mono">{l.account}</span>
+                {l.add_id ? `（加微信 #${l.add_id}）` : ''}{l.invited_at ? `，${String(l.invited_at).slice(5, 16).replace('T', ' ')} 发卡` : ''}</span>
+              <button type="button" className="btn sm ghost" disabled={busy}
+                onClick={() => runParty({ action: 'unlink', id: p.id, account: l.account }, `已取消关联 ${l.account}`)}>取消关联</button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {(p.has_numbers || deal.legend?.length > 0) && (
         <div className="stack" style={{ gap: 6 }}>
           <b>号码</b>
@@ -309,6 +386,85 @@ function DealDetail({ p, d, onDone }) {
             </div>
           ))}
         </div>
+      )}
+    </div>
+  )
+}
+
+
+/** 三方群 (src/prm/three_party.py, 2026-10-30): 「拉三方群」 makes the group in this PC's WeChat (her and PRM_GROUP_WITH,
+ *  picked in 「发起群聊」 and read back before 「完成」; nothing is said in it and it is not renamed: the suggested name is
+ *  there to copy); 「先试一下」 picks them and cancels.  A run that may or may not have made it asks 「建好了 / 没建成」. */
+function ThreePartyBlock({ p, d, busy, run }) {
+  const toast = useToast()
+  const [asking, setAsking] = useState(false)
+  const tp = d.three_party || {}
+  const g = p.deal.three_party || {}
+  const names = (tp.with || []).join('、')
+  const suggested = String(tp.name_template || '{昵称}').replace('{昵称}', p.name)
+  const working = tp.busy === p.deal.id
+  const making = g.state === 'creating'
+  const why = tp.why || (!p.active ? '已停用的达人不拉群' : '') || (tp.busy && !working ? '另一个群正在建，等它好了再点' : '')
+  const copyName = async () => {
+    try {
+      await navigator.clipboard.writeText(suggested)
+      toast.ok(`群名已复制：在手机微信里打开这个群 › 群聊名称，粘贴「${suggested}」`)
+    } catch { toast.err(`没能放进剪贴板：群名是「${suggested}」`) }
+  }
+  const tried = g.tried
+  return (
+    <div className="stack prm-group" style={{ gap: 6 }}>
+      <b>三方群</b>
+      {g.state === 'created' && (
+        <>
+          <div><UsersThree style={{ verticalAlign: -2 }} /> 三方群已建好（{fmtClock(g.at)}{g.made ? '' : '，手动标的'}）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span className="f-hint">建议在手机微信里把群名改成「{suggested}」（机器人不改群名，也不在群里说话）。</span>
+            <button type="button" className="btn sm" onClick={copyName}><Copy />复制群名</button>
+            <button type="button" className="btn sm ghost" disabled={busy}
+              onClick={() => run({ action: 'group_none' }, '记下了：这位达人现在没有三方群')}>群已经不在了</button>
+          </div>
+        </>
+      )}
+      {g.state === 'unsure' && (
+        <>
+          <Note kind="warn">不确定建没建成：{g.why}</Note>
+          <div className="row" style={{ gap: 8 }}>
+            <button type="button" className="btn primary" disabled={busy} onClick={() => run({ action: 'group_made' }, '记下了：三方群建好了')}><Check />建好了</button>
+            <button type="button" className="btn" disabled={busy} onClick={() => run({ action: 'group_none' }, '记下了：没建成，可以再拉一次')}>没建成</button>
+          </div>
+        </>
+      )}
+      {(making || working) && (
+        <Note kind="warn">{making ? '正在这台电脑的微信里建群' : '正在试（不建群）'}：大约半分钟，请别动键盘鼠标。</Note>
+      )}
+      {(!g.state || g.state === 'failed') && !working && (
+        <>
+          {g.state === 'failed' && <Note kind="need">上次没建成：{g.why}</Note>}
+          <div className="f-hint">
+            谈到寄样时拉三方群：机器人在这台电脑微信的「发起群聊」里搜她和 {names}，各自恰好搜到一个才勾上，读一遍已选的人没错才点「完成」。
+            它不在群里说话，也不改群名。第一次用之前可以先点「先试一下」：勾上再取消，不建群。
+          </div>
+          {tried && (
+            <div className={tried.ok ? 'f-hint' : 'f-err'}>{fmtClock(tried.at)} 试过：{tried.message}</div>
+          )}
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <button type="button" className="btn primary" disabled={busy || !!why} onClick={() => setAsking(true)}><UsersThree />拉三方群</button>
+            <button type="button" className="btn" disabled={busy || !!why} onClick={() => run({ action: 'group_try' }, '在试了：大约半分钟，别动键盘鼠标')}>先试一下（不建群）</button>
+            <button type="button" className="btn sm ghost" disabled={busy}
+              onClick={() => run({ action: 'group_made' }, '记下了：三方群建好了')}>已经手动建好了</button>
+            {why && <span className="dim">{why}</span>}
+          </div>
+        </>
+      )}
+      {asking && (
+        <Confirm title={`给 ${p.name} 拉三方群？`} confirmLabel="拉群" cancelLabel="再想想" busy={busy}
+          onConfirm={() => { setAsking(false); run({ action: 'group' }, '开始建群了：大约半分钟，别动键盘鼠标') }}
+          onCancel={() => setAsking(false)}>
+          机器人会在这台电脑的微信里点「+」›「发起群聊」，搜她在微信里的名字和 {names}，各自恰好搜到一个才勾上，读一遍已选的人没错才点「完成」。
+          接下来大约半分钟它会操作微信窗口，请别动键盘鼠标。点一次只建一个群，不会自动重试。机器人不会在群里说话；
+          群建好以后，请在手机上把群名改成「{suggested}」。
+        </Confirm>
       )}
     </div>
   )

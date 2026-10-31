@@ -23,6 +23,21 @@ deal is done (delivered, or quiet that long) its receiving details are cleared e
 the Mac's case file through a ``purge`` job.  The deal actions (stage, mode,
 shipment) are in deals.py.
 
+下班时段 (``PRM_NIGHT_AUTO_HOURS``, 2026-10-29; empty = off, everything as before): the operators go home at 18:00
+and evenings are when creators answer most.  Inside the window (this PC's local time, its clock right: ``_clock_off``)
+a reply draft that waits for a person at the gates' step still goes out by itself (route ``night``) when every night
+rule holds (``_night_judge``, gates.py ``night_reason``); everything ``on_result`` sends to a person before that step
+stays as by day.  Its job was told it is night (``meta.night``, made in ``_submit``); a flagged draft goes only as
+one safe holding line and leaves the deal a notice until 已处理 (``_night_sent``, ``night_done``); a night send
+never counts toward a kind's gate; holding replies inside the window say PRM_NIGHT_HOLDING_TEXT.
+
+自动模式 (2026-10-30; off = everything as before): the console's one-press switch (待审批, ``POST /api/prm/auto``) puts
+the night window's rules in force at any hour, until it is switched off, with no window set too (``set_auto_mode``;
+kept in the store over a restart, ``auto_mode_of``).  Inside the window it is the night's, words and all; outside it
+(by day: ``_auto_by_day``) the job says so (``meta.night`` ``{"auto": true, "at"}``: the Mac promises no 「明早」; a
+draft of a job made in the window waits by day), the holding reply says AUTO_HOLDING_TEXT, and what it sent or held
+says 自动模式 (the packet's ``meta.auto_mode``).  One judgement reads the switch once (``auto_on``).
+
 What the deal says to a person (``attention``) is its notices (store.py): the latest draft's own
 notes, which the next draft replaces, and the system's, which stay until they are dealt with (mac
 review F1): a draft job that gave no draft (her lines in it go with her next draft job: answered,
@@ -31,12 +46,24 @@ when that ends, ``sweep_owed_steps``), a platform action that ended red (until �
 messages read too late to draft, this PC's clock off WeChat's (measured by the bot's own lines read back:
 ``_note_clock``; how late a message is read is reckoned by WeChat's clock then, win review F6).
 
-Registering is always an operator's decision.  When the creator registered is a new friend
+Registering is an operator's decision, unless PRM_AUTO_REGISTER is on (2026-10-29): then every new friend
+the new-friend scan finds is registered by the bot as a full creator (``new_friend_found`` queues her inside
+the scan's look, kept in prm_meta over a restart; the sender thread registers her at the start of its next
+round, ``register_found``, outside the scan's locks: ``register`` calls back into the scan through
+``on_registered``), never the admin or a cc
+user, never a wxid that has a party, active or stopped (an operator's 停用 sticks).  When the creator
+registered is a new friend
 (src/wechat/new_friends.py found the line WeChat writes when two people become friends), her
 messages since she was added, friend-request greeting included, become one draft job that waits
 for a person (``take_new_friend``).  WeChat's friend notices (「我通过了你的朋友验证请求…」 in her
 name, 「你已添加了…」) are never drafted, nor are its other lines in her chat (type 10000: a recall,
 拍一拍, a red packet notice; ``_system_line``): her recall puts the drafts not sent yet before a person.
+
+A creator who has not written to us yet gets one draft of our first line (开场白, 2026-10-30), always
+reviewed: a new friend whose catch-up found nothing of hers (she accepted our friend request, and
+WeChat's notice is all her chat has), or an operator's 「写开场白」 in the console (``ask_opening``).  Its
+job has no creator message and says so (``meta.opening``; the worker's ``opening_line``); her message
+outdates it like any reply draft (the next job hears it was not sent), and no holding reply goes for it.
 
 A draft with a platform action (platforms.py: 小红书 / 抖音 / 淘宝 CLIs on the Mac) comes
 with the Mac's preview of it and always waits for a person, whatever its kind's gate; so does
@@ -71,12 +98,15 @@ from ..edge import text as edge_text
 from ..relay.attachments import KINDS as ATTACHMENT_KINDS, Held, attachment_kind
 from ..relay.service import MAX_AGE_SEC, job_meta
 from ..relay.store import PRM
-from ..wechat.new_friends import is_friend_notice
-from . import deals, gates, pii, platforms, retention
+from ..send.bubbles import typing_delay
+from ..wechat.new_friends import FILLER, is_friend_notice, is_person_chat
+from . import contact, deals, gates, pii, platforms, retention
+from .friend_adds import OPEN as FRIEND_ADD_OPEN, STATES as FRIEND_ADD_STATES, FriendAdds, friend_adds_out
 from .result import MAX_DRAFT_CHARS, MESSAGE_KINDS, DraftError, parse_draft
+from .three_party import EVENT as GROUP_EVENT, ThreeParty, state_out as group_state_out
 from .store import (
-    APPROVED, COPILOT, DRAFT_NOTES, DROPPED, EXECUTING, FAILED, HUMAN, LANE_REPLY, LANE_SYSTEM, MESSAGE_TOOL, MODES,
-    NO_REPLY, NOTICE_CHARS, PAUSED, PENDING,
+    APPROVED, BUYIN_TOOL, COPILOT, DRAFT_NOTES, DROPPED, EXECUTING, FAILED, HUMAN, LANE_BUYIN, LANE_REPLY, LANE_SYSTEM,
+    MESSAGE_TOOL, MODES, NO_REPLY, NOTICE_CHARS, PAUSED, PENDING,
     SENDING, SENT, SHIPMENT_STATES, STAGES, SUPERSEDED, PartyError, PrmStore,
 )
 
@@ -88,6 +118,7 @@ OUTBOUND_CHARS = 500
 APPROVED_EXPIRE_SEC = 1800   # an approved draft not sent by then (the bot was stopped) is not sent
 SEND_TICK_SEC = 5
 OWN_MATCH_SEC = 1800         # our own line seen in WeChat within this long after sending is the bot's
+PART_LATE_SEC = 120          # a part of a reply in parts is written before its send returned (``sent_at``), give or take
 OWN_FILE_SEC = 600           # an own picture/file this soon after the bot sent one is the bot's
 READ_BACK_SEC = 1800         # an own row handled this long ago and handed on again (same id) is no new line
 READ_BACK_ROWS = 500         # at most this many own rows a chat remembers
@@ -95,6 +126,21 @@ RETENTION_CHECK_SEC = 3600
 PLATFORM_LOST_GRACE_SEC = 1800   # an execution whose Mac went silent this long is given up on (red)
 PLATFORM_OPS = ("platform_execute", "platform_preview")
 HOLDING_TEXT = "收到，我确认一下马上回你"
+# PRM_REPLY_PARTS (2026-10-30, 「一下子发一大段很怪」): a reply goes out as up to this many WeChat messages, one per
+# paragraph of the draft (a blank line between two: ``reply_parts``), a typing pause apart (src/send/bubbles.py
+# ``typing_delay``); 1 = one message, blank lines and all, as before.  A config object without it (an older caller's): 1.
+REPLY_PARTS = 3
+REPLY_PARTS_MAX = 5
+_PARAGRAPH = re.compile(r"\n[ \t　]*\n")
+# 下班时段 (PRM_NIGHT_AUTO_HOURS, 2026-10-29): the holding reply inside the window (PRM_NIGHT_HOLDING_TEXT), and the key
+# of a deal's notice of a holding line the window sent for a draft the model flagged (``night:<packet id>``, until 已处理)
+NIGHT_HOLDING_TEXT = "收到～您说的我都记下啦，明早第一时间回复您哈～"
+NIGHT_NOTICE = "night:"
+NIGHT_DONE = "night_done"            # the deal action of 「已处理」 on such a notice (``night_done``)
+# 自动模式 (2026-10-30): the console's switch (its ``prm_meta`` key: ``auto_mode_of``), and the holding reply while it is
+# what applies (by day: no 「明早」; no setting of its own)
+AUTO_MODE = "auto_mode"
+AUTO_HOLDING_TEXT = "收到～您说的我都记下啦，稍后确认好第一时间回复您哈～"
 # Mac 重启以前发的、后来 Windows 才报失败的：没有发送时间时往回找这么久（edge 后端的发送记录留一天）
 RESTART_FAIL_SEC = 86400
 CATCHUP_HOURS = 12           # PRM_CATCHUP_HOURS: a message read late is drafted up to this old (0-72)
@@ -136,6 +182,44 @@ SAMPLE_PROBLEMS = {
     "old_worker": "Mac 上的 worker 还不会查聚水潭寄样单的状态：更新 Mac 上的代码并重启 worker（在这之前运单号和签收照旧手动填）",
     "error": "寄样单状态连续 {count} 次没同步成（{message}）：运单号和签收先照旧手动填",
 }
+# 抖音百应私信（PRM_BUYIN_SYNC_MIN，2026-10-29，默认关）：邀约带货的达人可能在百应自己的私信（精选联盟私信）里回，不在微信里。
+# 机器人定时请 Mac 读一次新消息（``meta.op = BUYIN_OP``，worker 不跑模型，`dy buyin im-inbox` 只读，契约见
+# tools/claude_relay/README.md「百应私信」），登记达人的新话由 Mac 起草一份百应私信草稿（``meta.channel = BUYIN_CHANNEL``，
+# 聊天编号 ``BUYIN_CHAT + 会话编号``），待审批里运营复制、自己到百应里发，机器人哪儿都不发它。
+BUYIN_OP = "buyin_inbox"
+BUYIN_SYNC_CHAT = "prm:buyin-inbox"         # the poll job's chat id: no WeChat chat, no creator, never a draft
+BUYIN_CHAT = "buyin:"                       # a 百应 draft job's (and packet's) chat id: this + the conversation id
+BUYIN_CHANNEL = "buyin"                     # ``meta.channel`` of those jobs and packets
+BUYIN_FIRST_SEC = 120                       # a bot that never asked: its first round this long after its start
+BUYIN_MAX_AGE_SEC = 86400                   # her 百应 line read this long after it was written: recorded, not drafted
+BUYIN_HISTORY = 20                          # earlier lines of the conversation a draft job is told
+BUYIN_SEEN = 500                            # message ids a conversation remembers (the newest)
+BUYIN_SAID_CHARS = 1500                     # her lines a 百应 draft keeps for the console
+BUYIN_UNMATCHED_DAYS = 7                    # a conversation of nobody on the list is shown, and kept, this long
+BUYIN_ERRORS = 3                            # failed rounds in a row (a hiccup) before the console says so
+BUYIN_RISK_PAUSE_SEC = 3600                 # after a risk wall (76): the next round waits this long at least
+BUYIN_CONV_TRIES = 3                        # rounds in a row one conversation fails before it is skipped (the deal says so)
+BUYIN_LOG_EVERY_SEC = 600                   # a held conversation that keeps failing to be drafted: logged this seldom
+BUYIN_KINDS = {"card": "[卡片]", "contact": "[联系方式卡片]", "other": "[其他消息]"}
+# A creator's contact card (kind "contact") is recorded only masked (``buyin_contact_line``): its WeChat id and phone in
+# full live only in memory while a round is taken in, and in the ``on_buyin_contact`` call (never in prm.db, events,
+# notices, pii tokens, relay jobs or logs).  A contact she types in her own words (``contact.find_contacts``: a 微信号
+# only after a label) goes to the same call (source "buyin_text") in a conversation that is ours; her line is kept
+# with her phone as 〈手机N〉 (pii, as on WeChat) and the 微信号 masked (``contact.mask_contacts``).
+BUYIN_CONTACT_UNREAD = contact.CARD_HEAD + contact.UNREAD
+BUYIN_CONTACT_OWN = contact.CARD_HEAD + contact.OWN
+# What the 待审批 page says when a round could not be made (until one goes through).
+BUYIN_PROBLEMS = {
+    "login": "抖音百应登录失效（退出码 77），百应私信读不了：请在 Mac 的调试 Chrome 里重新登录百应；登录好以后这条提醒自己消失",
+    "wall": "抖音百应限流或者要人机验证（退出码 76），百应私信先停 {pause} 分钟再读：请到 Mac 的调试 Chrome 里看一下",
+    "wrong_account": "Mac 的调试 Chrome 里登录的百应不是这台 Mac 配的店铺（退出码 79），百应私信没有读：请换回自己的店铺",
+    "invalid": "Mac 上的抖音命令行不认读百应私信的参数（{message}）：请更新 douyin-engineering",
+    "unavailable": "百应私信读不了（{message}）；在这之前达人在百应里的消息请直接到百应里看、在百应里回",
+    "old_worker": "Mac 上的 worker 还不会读百应私信：更新 Mac 上的代码并重启 worker（在这之前请直接到百应里看）",
+    "error": "百应私信连续 {count} 次没读成（{message}）：先直接到百应里看",
+    "conversations": "百应私信里有 {count} 个会话连续 {rounds} 轮没处理成（{message}）：下一轮再试；连续 {tries} 轮不成的会跳过，"
+                     "登记达人的合作单上会提醒，请直接到百应里看",
+}
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
 _WXID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{3,63}$")
 
@@ -162,6 +246,100 @@ def check_wxid(wxid: str, reserved: set) -> str:
     return wxid
 
 
+# Where a creator's 抖音 link came from (``creator_links.source``): 加百应达人微信's 「是她，登记并关联」, or the 抖音号 an
+# operator gave 登记达人.
+LINK_SOURCES = ("friend_add", "register")
+CREATOR_IDS_NOTICE = "creator_ids"          # the deal's notice: her 抖音号 from two sources that do not agree
+
+
+def sample_creator_ids(store: PrmStore, deal_id: int) -> tuple:
+    """The 抖音号 and 抖音 UID the deal's verified 抖店 sample orders found: ``(douyin_ids, uid)``.  An order the worker
+    recorded before ``created.creator_account`` gives it from the CLI's own answer (its ``daren.platformNo``)."""
+    douyin, uid = [], ""
+    for packet in store.deal_packets(deal_id, tools=("jst.sample_order",), statuses=(APPROVED, SENDING, SENT, FAILED)):
+        data = packet["platform"] or {}
+        action, execution = data.get("action") or {}, data.get("execution") or {}
+        if execution.get("outcome") != platforms.VERIFIED or action.get("creator_platform") != "dy":
+            continue
+        created = execution.get("created") or {}
+        for value in (created.get("creator_account"), action.get("creator_account"), _platform_no(execution)):
+            value = str(value or "").strip()
+            if value and platforms.creator_account_ok(value) and value not in douyin:
+                douyin.append(value)
+        uid = uid or str(created.get("creator_uid") or action.get("creator_uid") or "")
+    return douyin, uid
+
+
+def creator_ids_notice(store: PrmStore, deal_id: int, now: float) -> None:
+    """Her 抖音号 from her verified sample order and from an operator's link do not agree: the deal says so
+    (``CREATOR_IDS_NOTICE``) until they do; a wrong link could make a 专属佣金 look opened by an invite card
+    (design §8.4).  Not a sign of life of the deal (``touch`` False)."""
+    deal = store.deal(deal_id)
+    if deal is None:
+        return
+    sample, _ = sample_creator_ids(store, deal_id)
+    linked = [str(link["account"]) for link in store.creator_links(deal["party_id"]) if link["platform"] == "dy"]
+    text = ""
+    if sample and linked and {s.lower() for s in sample} != {a.lower() for a in linked}:
+        text = (f"合作单里的抖音号对不上：关联的 {'、'.join(linked)}，寄样单的 {'、'.join(sample)}，请核对。"
+                "开专属佣金时按台账判断「邀约卡开过没有」会受影响")
+    if text or any(n["key"] == CREATOR_IDS_NOTICE for n in deal["notices"]):
+        store.set_notice(deal_id, CREATOR_IDS_NOTICE, text, now, touch=False)
+
+
+def link_creator(store: PrmStore, party: dict, link: dict, *, now: float, actor: str = "console") -> bool:
+    """Who a registered creator is on 抖音 (``check_link``'s ``link``): ``creator_links`` (the first link of an account
+    stays) and a ``friend_add_link`` event on her deal (her 抖音号, the record, when the invite card went out; never a
+    number); the deal says so when her sample order knows another 抖音号 (``creator_ids_notice``).  True when new."""
+    deal = store.deal_of(party["id"], now)
+    made = store.add_creator_link(party["id"], link["account"], uid=link["uid"], uid_source=link["uid_source"],
+                                  nickname=link["nickname"], source=link["source"], add_id=link["add_id"], now=now)
+    detail = {"account": link["account"], "source": link["source"], "new": made}
+    for key in ("add_id", "invited_at", "plan_id"):
+        if link.get(key):
+            detail[key] = link[key]
+    store.add_event(deal["id"], party["id"], "friend_add_link", detail, actor=actor, now=now)
+    creator_ids_notice(store, deal["id"], now)
+    return made
+
+
+def unlink_creator(store: PrmStore, party_id: int, account: str, *, now: float, actor: str = "console") -> dict:
+    """An operator says a creator's 抖音 link was wrong (取消关联): it goes, her deal says so (``creator_unlinked``)."""
+    party = store.party(int(party_id))
+    if party is None:
+        return {"ok": False, "error": "没有找到这个达人"}
+    if not store.delete_creator_link(party["id"], str(account or "").strip()):
+        return {"ok": False, "error": "这位达人没有关联这个抖音号"}
+    deal = store.deal_of(party["id"], now)
+    store.add_event(deal["id"], party["id"], "creator_unlinked", {"account": str(account).strip()}, actor=actor, now=now)
+    creator_ids_notice(store, deal["id"], now)
+    return {"ok": True}
+
+
+def check_link(link) -> Optional[dict]:
+    """``register``'s ``link`` as it is kept (``{account, uid, uid_source, nickname, source, add_id, invited_at,
+    plan_id}``), None for none, or PartyError (in Chinese) why it cannot be."""
+    if link is None:
+        return None
+    if not isinstance(link, dict):
+        raise PartyError("关联的抖音号不对")
+    account = str(link.get("account") or "").strip()
+    if not platforms.creator_account_ok(account):
+        raise PartyError("抖音号只能是字母、数字、下划线、点或短横线（最多 40 个）")
+    source = str(link.get("source") or "register")
+    if source not in LINK_SOURCES:
+        raise PartyError(f"不认识的关联来源 {source}")
+    uid = " ".join(str(link.get("uid") or "").split())[:40]
+    try:
+        add_id = int(link["add_id"]) if link.get("add_id") not in (None, "") else None
+    except (TypeError, ValueError):
+        add_id = None
+    return {"account": account, "uid": uid, "uid_source": str(link.get("uid_source") or "")[:20] if uid else "",
+            "nickname": contact.clean_name(link.get("nickname")), "source": source, "add_id": add_id,
+            "invited_at": " ".join(str(link.get("invited_at") or "").split())[:40],
+            "plan_id": " ".join(str(link.get("plan_id") or "").split())[:64]}
+
+
 def message_text(msg: dict) -> str:
     """What a message says, as one line for the draft: the WeChat edge's line (src/edge/text.py), so the
     Mac is told the same in both deployments (win review F2): a picture, a file by its name (its file
@@ -177,6 +355,21 @@ def message_text(msg: dict) -> str:
 
 def _norm(text: str) -> str:
     return " ".join(str(text or "").split())
+
+
+def reply_parts(text: str, most: int = REPLY_PARTS) -> list[str]:
+    """The WeChat messages a reply goes out as (``_deliver``): its paragraphs (a blank line between two, white space on
+    it or not), each stripped, the empty ones dropped, those past ``most`` joined to the last one (a line break
+    between).  ``most`` 1: the text as it is, one message.  [] for a text of nothing but white space."""
+    if not str(text or "").strip():
+        return []
+    if most <= 1:
+        return [text]
+    parts = [p.strip() for p in _PARAGRAPH.split(str(text).replace("\r\n", "\n"))]
+    parts = [p for p in parts if p]
+    if len(parts) > most:
+        parts = parts[:most - 1] + ["\n".join(parts[most - 1:])]
+    return parts
 
 
 _IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".heic", ".heif", ".tif", ".tiff")
@@ -262,14 +455,69 @@ def recall_note(at: float) -> str:
     return f"达人撤回了一条消息（{_clock_text(at)}），待审批的草稿可能是按撤回的内容写的，发之前请核对"
 
 
+def _skew_text(skew: float) -> str:
+    """「快 3 小时」 / 「慢 12 分钟」: this PC's clock against WeChat's (``skew``: this PC's minus WeChat's)."""
+    hours, minutes = divmod(int(round(abs(skew) / 60)), 60)
+    amount = (f"{hours} 小时" if hours else "") + (f"{minutes} 分钟" if minutes or not hours else "")
+    return f"{'快' if skew > 0 else '慢'} {amount}"
+
+
 def clock_note(skew: float) -> str:
     """The deals' notice while this PC's clock is off WeChat's by CLOCK_SKEW_SEC or more (``skew``: this
     PC's clock minus WeChat's, as the bot's own lines read back measured it)."""
-    hours, minutes = divmod(int(round(abs(skew) / 60)), 60)
-    amount = (f"{hours} 小时" if hours else "") + (f"{minutes} 分钟" if minutes or not hours else "")
-    return (f"这台电脑的时间比微信{'快' if skew > 0 else '慢'} {amount}（机器人发出的消息读回来时测的），"
+    return (f"这台电脑的时间比微信{_skew_text(skew)}（机器人发出的消息读回来时测的），"
             "消息是不是晚到已经按微信的时间算；请把电脑时间改对（Windows 设置 → 时间和语言 → 自动设置时间），"
             "改好以后机器人再发出消息时会重新测，这条提醒自己消失")
+
+
+def night_clock_text(skew: Optional[float], what: str = "下班时段") -> str:
+    """Why the night window (``what``: or 自动模式 by day) sends nothing by itself (``PrmService._clock_off``): this PC's
+    clock is off WeChat's by ``skew`` as this run measured it, or (None) a run before measured it off and nothing
+    measured it since."""
+    if skew is None:
+        return (f"上次运行测到这台电脑的时间和微信对不上，这次还没测过：{what}先不自动发"
+                "（机器人发出的消息读回来、测过时间以后自动恢复）")
+    return (f"这台电脑的时间比微信{_skew_text(skew)}：{what}先不自动发；请把电脑时间改对，"
+            "改好以后机器人再发出消息时会重新测，自动恢复")
+
+
+def night_status(window, now: float, suspended: str = "", error: str = "", auto: bool = False) -> dict:
+    """What the console says of the 下班时段 (PRM_NIGHT_AUTO_HOURS; ``window``: ``gates.night_window``, None = off):
+    ``{"on", "window" ("18:00–09:00"), "inside" (now, by this PC's clock), "suspended" (why nothing goes out by itself
+    at night now: ``night_clock_text``), "error" (a setting the bot would refuse), "auto"}``.  ``auto``: 自动模式 is on
+    (the console's switch); the answer's ``auto`` says it is what puts the night rules in force now (no window, or
+    now outside it), and ``suspended`` then speaks for it with no window too."""
+    if window is None:
+        return {"on": False, "window": "", "inside": False, "suspended": suspended if auto else "", "error": error,
+                "auto": bool(auto)}
+    inside = gates.in_night(window, now)
+    return {"on": True, "window": gates.night_window_text(window), "inside": inside,
+            "suspended": suspended, "error": "", "auto": bool(auto) and not inside}
+
+
+def auto_mode_of(store: PrmStore) -> dict:
+    """The console's 自动模式 as the store keeps it (``write_auto_mode``): ``{"on", "since" (when it was last switched,
+    None never), "by"}``; off when it was never switched or cannot be read."""
+    try:
+        data = json.loads(store.meta_value(AUTO_MODE) or "{}")
+    except ValueError:
+        data = {}
+    data = data if isinstance(data, dict) else {}
+    return {"on": data.get("on") is True, "since": _float(data.get("since")), "by": str(data.get("by") or "")}
+
+
+def write_auto_mode(store: PrmStore, on: bool, *, now: float, actor: str = "console") -> dict:
+    """Switch 自动模式 on or off (``auto_mode_of`` afterwards; one log line).  Switched to what it is already, nothing
+    changes (a double click keeps the time it was switched on).  Also when the bot is stopped: straight on the
+    database, it applies at the next start."""
+    have = auto_mode_of(store)
+    if have["on"] == bool(on):
+        return have
+    store.set_meta_value(AUTO_MODE, json.dumps({"on": bool(on), "since": now, "by": str(actor)}))
+    logger.info("PRM: auto mode switched %s (%s)%s", "on" if on else "off", actor,
+                ": a draft that passes the night window's rules goes out by itself until it is switched off" if on
+                else ": drafts wait for a person again (unless their kind's gate or the night window says otherwise)")
+    return auto_mode_of(store)
 
 
 def failed_text(head: str, into: Optional[int] = None) -> str:
@@ -302,10 +550,19 @@ def new_friend_note(count: int, earliest: float) -> str:
             "起草了这份草稿，要人看过再发")
 
 
+def opening_note(opening: dict) -> str:
+    """The deal's attention for a 开场白 draft (``meta.opening``)."""
+    if opening.get("by") == "console":
+        return "运营点了「写开场白」：这份是我们先打招呼的话，要人看过再发"
+    who = "她通过了我们的好友申请" if opening.get("how") == "requested" else "新加的好友"
+    return f"{who}：这份是我们先打招呼的开场白，要人看过再发"
+
+
 def gap_notes(meta: dict) -> list[str]:
     """What a draft job's ``meta`` says about messages read late (``late``), recorded without a
-    draft (``missed``) or written by a new friend before she was registered (``new_friend``), as
-    attention lines (any of them: the draft waits for a person)."""
+    draft (``missed``) or written by a new friend before she was registered (``new_friend``), and
+    our first line to a creator who had not written (``opening``), as attention lines (any of them:
+    the draft waits for a person)."""
     notes = []
     late, missed, new_friend = meta.get("late"), meta.get("missed"), meta.get("new_friend")
     if isinstance(late, dict) and late.get("from"):
@@ -314,7 +571,17 @@ def gap_notes(meta: dict) -> list[str]:
         notes.append(missed_note(int(missed.get("count") or 1), float(missed["from"])))
     if isinstance(new_friend, dict) and new_friend.get("from"):
         notes.append(new_friend_note(int(new_friend.get("count") or 1), float(new_friend["from"])))
+    if isinstance(meta.get(OPENING), dict):
+        notes.append(opening_note(meta[OPENING]))
     return notes
+
+
+def history_of(backlog: list) -> list[dict]:
+    """A draft job's ``meta.history``: the recorded lines it is told (``take_backlog``: what both sides said while a
+    person had the chat, her messages read too late to draft), oldest first."""
+    return [{"who": "operator" if ev["kind"] == "operator_message" else "creator",
+             "text": str(ev["detail"].get("text", "")),
+             **({"missed": True} if ev["detail"].get("missed") else {})} for ev in backlog]
 
 
 def _event_time(ev: dict) -> float:
@@ -333,6 +600,19 @@ def _float(value) -> Optional[float]:
         return None
 
 
+def _json_value(text):
+    """A value kept as JSON text (``PrmStore.meta_value``), or None."""
+    try:
+        return json.loads(text) if text not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def is_buyin(packet: dict) -> bool:
+    """Is this a 抖音百应 private-message draft (an operator sends it in 百应 by hand; never the bot)?"""
+    return packet.get("tool") == BUYIN_TOOL
+
+
 def _later(deal: dict, at: float) -> float:
     """The deal's ``last_message_at`` after a message written at ``at`` (it never goes back)."""
     return max(float(deal.get("last_message_at") or 0), at)
@@ -348,9 +628,51 @@ EVENT_NAMES = {
     "recall": "撤回了一条消息", "draft_failed": "草稿没写成", "next_step": "派开专属佣金的任务",
     "platform_recheck": "平台动作要先核对", "sample_status": "聚水潭寄样单状态",
     "commission_covered": "邀约卡开过专属佣金，当作开好",
+    "night_send": "夜间自动发出", "night_done": "夜间自动回的过渡话已处理",
+    "auto_register": "自动登记（新好友）", "opening": "派写开场白的任务",
+    "buyin_message": "百应私信", "buyin_copy": "复制百应私信草稿（含完整号码）", "buyin_sent": "运营已在百应手动发出",
+    "buyin_draft_failed": "百应私信的草稿没写成",
+    "friend_add_link": "关联抖音号", "creator_unlinked": "取消关联抖音号",
+    GROUP_EVENT: "三方群",
 }
+# 三方群 (src/prm/three_party.py): the console's deal actions (「拉三方群」, 「先试一下」, 「建好了」, 「没建成」) and how the
+# deal's record names each step
+GROUP_ACTIONS = ("group", "group_try", "group_made", "group_none")
+GROUP_EVENT_NAMES = {"creating": "开始拉三方群", "created": "三方群建好了", "unsure": "三方群不确定建没建成",
+                     "failed": "三方群没建成", "": "三方群的记录清掉了（没建成）"}
 # A creator's message recorded without a draft because it was read too late (PRM_CATCHUP_HOURS).
 MISSED_EVENT_NAME = "机器人没在读时达人的消息（没有起草）"
+# PRM_AUTO_REGISTER (2026-10-29): the deal's event of a new friend the bot registered, and how she was added (the
+# new-friend scan's ``how``) as her note and the event say it.
+AUTO_EVENT = "auto_register"
+# prm_meta: the new friends ``new_friend_found`` queued that ``register_found`` has not seen to yet (a JSON list of
+# {wxid, name, how}), kept across a restart (``resume_found``; review 2026-10-30)
+AUTO_QUEUE = "auto_register_queue"
+AUTO_HOWS = {"requested": "我们加她", "manual": "她加我们", "auto_accept": "机器人自动通过", "unknown": "说不清"}
+AUTO_NAME_CHARS = 30         # a creator's 称呼 (``register``)
+AUTO_NOTE_CHARS = 200        # her note
+# 开场白 (2026-10-30): the job's ``meta.opening`` ({"how": the new-friend scan's, "by": new_friend | console}), the
+# packet's ``meta.opening``, the deal's event (``OPENING``: which job, how, by) and the console's deal action
+# (「写开场白」, ``ask_opening``).
+OPENING = "opening"
+# A new friend registered more than PRM_CATCHUP_HOURS after she was added, with nothing of hers in the read-back: what
+# she wrote before it is not known, so no 开场白 by itself; this notice (``opening`` too) asks a person to look (review
+# 2026-10-30).  A 开场白 asked for, a reply draft of hers, or an operator writing to her by hand sees to it.
+OPENING_UNSURE = "opening_unsure"
+OPENING_UNSURE_TEXT = ("她是加好友过了很久才登记的，超出了补读的时间（PRM_CATCHUP_HOURS）：补读的这段里她没说话，更早的不知道，"
+                       "所以没自动写开场白；看一眼微信，她还没说过话就在合作单里点「写开场白」")
+
+
+def auto_name(name, wxid: str) -> str:
+    """The 称呼 PRM_AUTO_REGISTER gives a new friend: her WeChat name as the scan read it, whitespace (and U+3164
+    fillers, a blank-looking nickname) collapsed, at most 30 characters; 「新好友 <wxid 前 8 位>」 without one."""
+    text = " ".join(str(name or "").replace(FILLER, " ").split())[:AUTO_NAME_CHARS].strip()
+    return text or f"新好友 {str(wxid or '')[:8]}"
+
+
+def auto_note(how: str) -> str:
+    """Her note: 「自动登记（新好友，<how>）」 (``AUTO_HOWS``; an unknown ``how`` is 说不清)."""
+    return f"自动登记（新好友，{AUTO_HOWS.get(str(how or ''), AUTO_HOWS['unknown'])}）"[:AUTO_NOTE_CHARS]
 
 
 def event_out(ev: dict) -> dict:
@@ -373,6 +695,27 @@ def event_out(ev: dict) -> dict:
                 + (f"，原因：{detail['reason']}" if detail.get("reason") else ""))
     elif ev["kind"] == "commission_covered" and detail.get("item"):
         name = f"商品 {detail['item']} 邀约卡开过 {detail.get('rate')}% 专属佣金，当作开好"
+    elif ev["kind"] == "night_send" and detail.get("packet"):
+        name = (f"{'自动模式发出' if detail.get('auto') else '夜间自动发出'} #{detail['packet']}"
+                + ("（模型要求注意，发的是一句过渡的话）" if detail.get("holding") else ""))
+    elif ev["kind"] == "night_done" and detail.get("packet"):
+        name = f"{'自动模式' if detail.get('auto') else '夜间'}自动回的过渡话 #{detail['packet']} 已处理"
+    elif ev["kind"] == "wrong" and detail.get("night"):
+        name = "标为发错了（自动模式发出的）" if detail.get("auto") else "标为发错了（夜间自动发出的）"
+    elif ev["kind"] == AUTO_EVENT:
+        name = f"自动登记（新好友，{AUTO_HOWS.get(str(detail.get('how') or ''), AUTO_HOWS['unknown'])}）"
+    elif ev["kind"] == OPENING and detail.get("job"):
+        name = f"派写开场白的任务 #{detail['job']}" + ("（运营点的）" if detail.get("by") == "console" else "（新好友还没说话）")
+    elif ev["kind"] == "buyin_message":
+        name = "百应私信：我方（运营在百应里回的）" if detail.get("from") == "shop" else "百应私信：达人"
+    elif ev["kind"] == GROUP_EVENT:
+        name = GROUP_EVENT_NAMES.get(str(detail.get("state") or ""), "三方群") + (
+            "（运营点的）" if ev.get("actor") == "console" and detail.get("state") in ("creating", "created", "") else "")
+    elif ev["kind"] == "creator_unlinked" and detail.get("account"):
+        name = f"取消关联抖音号 {detail['account']}"
+    elif ev["kind"] == "friend_add_link" and detail.get("account"):
+        name = (f"关联抖音号 {detail['account']}" + (f"（加微信 #{detail['add_id']}）" if detail.get("add_id") else "")
+                + (f"，{str(detail['invited_at'])[:16].replace('T', ' ')} 发的邀约卡" if detail.get("invited_at") else ""))
     elif ev["kind"] in ("shipment", "shipment_status", "stage") and detail.get("source") == "jst":
         name = f"{name}（聚水潭同步）"
     return {"id": ev["id"], "kind": ev["kind"], "name": name,
@@ -381,8 +724,8 @@ def event_out(ev: dict) -> dict:
 
 def platform_out(p: dict) -> Optional[dict]:
     """A packet's platform action for the console (None for a plain reply): what it will do,
-    the Mac's preview, the execution and whether it can be approved now."""
-    if p.get("tool", MESSAGE_TOOL) == MESSAGE_TOOL:
+    the Mac's preview, the execution and whether it can be approved now.  A 百应 draft is none."""
+    if p.get("tool", MESSAGE_TOOL) in (MESSAGE_TOOL, BUYIN_TOOL):
         return None
     data = p.get("platform") or {}
     action = data.get("action")
@@ -428,14 +771,25 @@ def gates_out(store: PrmStore) -> list[dict]:
 
 
 def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, limit: int = 40,
-             retention_days: int = retention.RETENTION_DAYS, now: Optional[float] = None) -> dict:
+             retention_days: int = retention.RETENTION_DAYS, now: Optional[float] = None,
+             group_of: Callable[[dict], dict] = group_state_out) -> dict:
     """What the console shows (GET /api/prm); also built from the database when the bot is stopped.
-    Numbers appear only masked (``legend``); the full ones need ``reveal``."""
+    Numbers appear only masked (``legend``); the full ones need ``reveal``.  ``night_alerts``: the deals' notices
+    of holding lines the night window (``auto``: 自动模式 by day) sent (``NIGHT_NOTICE``), each until 「已处理」
+    (``night_done``).  ``group_of(deal)``: a deal's 三方群 (``three_party.state_out``; the running bot's adds its last
+    「先试一下」)."""
     now = time.time() if now is None else now
     parties = {p["id"]: p for p in store.parties(include_inactive=True)}
     newest = {}
+    night_alerts = []
     for deal in store.deals():
         newest[deal["party_id"]] = deal                # the newest deal of each creator
+        for n in deal["notices"]:
+            if str(n.get("key") or "").startswith(NIGHT_NOTICE) and n.get("text"):
+                night_alerts.append({"deal_id": deal["id"], "party_id": deal["party_id"],
+                                     "party_name": (parties.get(deal["party_id"]) or {}).get("name", "?"),
+                                     "packet": n.get("packet"), "text": n["text"], "at": n.get("at"),
+                                     "auto": bool(n.get("auto"))})
     pending = list(reversed(store.packets((PENDING, EXECUTING, APPROVED, SENDING), limit=200)))
     recent = store.packets((SENT, FAILED, DROPPED, SUPERSEDED, NO_REPLY), limit=limit)
     shown_cache: dict[int, dict] = {}
@@ -456,7 +810,8 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
             "legend": pii.legend("\n".join([p["text"], final, p["intent"], p["reason"],
                                             json.dumps(p["slots"], ensure_ascii=False),
                                             json.dumps((p.get("platform") or {}).get("action") or {},
-                                                       ensure_ascii=False)]), shown(p["party_id"])),
+                                                       ensure_ascii=False), str(p["meta"].get("said") or "")]),
+                                 shown(p["party_id"])),
             "attachments": [{"name": a.get("name"), "size": a.get("size")} for a in p["attachments"]],
             "intent": p["intent"], "slots": p["slots"], "stage_proposal": p["stage_proposal"],
             "stage_proposal_label": STAGES.get(p["stage_proposal"], ""),
@@ -465,21 +820,26 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
             "outcome": p["outcome"], "error": p["error"],
             "created_at": p["created_at"], "decided_at": p["decided_at"], "sent_at": p["sent_at"],
             "tool": p.get("tool", MESSAGE_TOOL), "platform": platform_out(p),
+            "night_held": str(p["meta"].get("night_held") or ""), "opening": bool(p["meta"].get(OPENING)),
+            "channel": BUYIN_CHANNEL if is_buyin(p) else "wechat", "buyin": buyin_packet_out(store, p),
+            "auto_mode": bool(p["meta"].get(AUTO_MODE)),
         }
 
     def party_out(p: dict) -> dict:
         deal = newest.get(p["id"])
         if not deal:
             return {"id": p["id"], "wxid": p["wxid"], "name": p["name"], "note": p["note"],
-                    "active": bool(p["active"]), "authorized_at": p["authorized_at"], "deal": None}
+                    "active": bool(p["active"]), "auto": bool(p.get("auto_registered")),
+                    "authorized_at": p["authorized_at"], "deal": None}
         mode = deals.effective_mode(deal, now)
         shipment = store.latest_shipment(deal["id"])
         slots = deal.get("slots", {})
         return {
             "id": p["id"], "wxid": p["wxid"], "name": p["name"], "note": p["note"],
-            "active": bool(p["active"]), "authorized_at": p["authorized_at"],
+            "active": bool(p["active"]), "auto": bool(p.get("auto_registered")), "authorized_at": p["authorized_at"],
             "has_numbers": bool(store.token_rows(p["id"])),       # cleared ones too: shown as （已清除）
             "deal": {
+                "links": links_out(store, p["id"]),
                 "id": deal["id"], "stage": deal["stage"], "stage_label": STAGES.get(deal["stage"], ""),
                 "mode": mode, "mode_label": MODES.get(mode, mode),
                 "mode_until": deal.get("mode_until") if mode == HUMAN else None,
@@ -493,6 +853,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
                 if shipment else None,
                 "shipment_status_label": SHIPMENT_STATES.get((shipment or {}).get("status", ""), ""),
                 "events": [event_out(e) for e in store.events(deal["id"], limit=12)],
+                "three_party": group_of(deal),
             },
         }
 
@@ -502,6 +863,9 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
         "pending": [packet_out(p) for p in pending],
         "recent": [packet_out(p) for p in recent],
         "platform_alerts": [packet_out(p) for p in store.platform_failures()],
+        "night_alerts": night_alerts,
+        "buyin": buyin_out(store, now),
+        "friend_adds": friend_adds_out(store, now),
         "platform_actions": {name: spec["label"] for name, spec in platforms.ACTIONS.items()},
         "counts": store.counts(),
         "gates": gates_out(store),
@@ -510,13 +874,111 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
     }
 
 
+def links_out(store: PrmStore, party_id: int) -> list[dict]:
+    """Who a creator is on 抖音 (``creator_links``) for her deal: her 抖音号, where the link came from, and for a
+    加百应达人微信 record when its invite card went out (功能 R)."""
+    out = []
+    for link in store.creator_links(party_id):
+        record = store.friend_add(link["add_id"]) if link.get("add_id") else None
+        invited = (record or {}).get("invited") or {}
+        out.append({"account": link["account"], "platform": link["platform"], "source": link["source"],
+                    "nickname": link["nickname"], "add_id": link["add_id"], "created_at": link["created_at"],
+                    "invited_at": invited.get("invited_at") or None, "plan_id": invited.get("plan_id") or None})
+    return out
+
+
+def buyin_packet_out(store: PrmStore, p: dict) -> Optional[dict]:
+    """A 百应 draft's own part for the console (None for any other packet): the conversation, her nickname there, her
+    lines it answers (masked) and, when our side wrote in that conversation after them (an operator in 百应), when."""
+    if not is_buyin(p):
+        return None
+    meta = p.get("meta") or {}
+    cid = str(meta.get("conversation") or "")
+    thread = store.buyin_thread(cid) if cid else None
+    upto = _float(meta.get("upto")) or 0.0
+    shop = _float((thread or {}).get("last_shop_at"))
+    return {"conversation": cid, "name": str(meta.get("buyin_name") or ""), "said": str(meta.get("said") or ""),
+            "lines": int(meta.get("lines") or 0), "replied_at": shop if shop and shop > upto else None,
+            "friend_add": buyin_friend_add(store, cid)}
+
+
+def buyin_friend_add(store: PrmStore, cid: str) -> Optional[dict]:
+    """The newest 加微信 record (src/prm/friend_adds.py) made from this 百应 conversation, for its draft's card
+    (``{"id", "state", "label", "open", "masked"}``, masked values only), or None."""
+    record = next(iter(store.friend_adds(conversation_id=cid, limit=1)), None) if cid else None
+    if record is None:
+        return None
+    return {"id": record["id"], "state": record["state"], "label": FRIEND_ADD_STATES.get(record["state"], record["state"]),
+            "open": record["state"] in FRIEND_ADD_OPEN, "masked": dict(record.get("masked") or {})}
+
+
+def buyin_mask_wechat(value) -> str:
+    """A WeChat id as the bot keeps and shows it: its first 2 and last 2 characters (shorter than 5: ****;
+    ``contact.masked``, the rule 加百应达人微信 shows them by too)."""
+    return contact.masked(contact.WECHAT, value) or "****"
+
+
+def buyin_mask_phone(value) -> str:
+    """A phone as the bot keeps and shows it: 3 digits, ****, the last 4 (shorter than 8: ****, as 3 + 4 would show all
+    of it; ``contact.masked``)."""
+    return contact.masked(contact.PHONE, value) or "****"
+
+
+def buyin_contact_line(card, add_id: Optional[int] = None) -> str:
+    """A creator's 百应 contact card as the bot records it (``contact.masked_line``): "[联系方式卡片] 微信号 ab****yz、手机
+    138****0001", with "（加微信 #<id>）" when ``on_buyin_contact`` gave an id; ``BUYIN_CONTACT_UNREAD`` when the card's
+    values were not read, ``BUYIN_CONTACT_OWN`` when it held only the shop's own (``platforms.im_strip_own``).  Never a
+    full value."""
+    return contact.masked_line(card if isinstance(card, dict) else {}, add_id)
+
+
+def buyin_text_line(text: str, add_id: Optional[int] = None) -> str:
+    """A line of hers (already through the pii tokens: her phone is 〈手机N〉) as the bot records it: a 微信号 she typed
+    after a label masked (``contact.mask_contacts``), and "（加微信 #<id>）" when ``on_buyin_contact`` gave an id for
+    the contact in it."""
+    return contact.mask_contacts(text) + (f"（加微信 #{add_id}）" if add_id is not None else "")
+
+
+def buyin_out(store: PrmStore, now: float) -> dict:
+    """What the 待审批 page says of the 百应 private messages (PRM_BUYIN_SYNC_MIN): why the last rounds could not be
+    made (``status``, None when the last one went through), when the last round was asked for, the conversations
+    of nobody on the list whose lines wait for an answer (``unmatched``: their 百应 nicknames, when the CLI gave them,
+    and ``invited`` when one is our invite: her 抖音号, when and by which plan; nothing of what they wrote is kept), how
+    many of those have a 加微信 record not done with (``contacts_left``: by the conversation or her 抖音号; the
+    cards are above the drafts), and how many contact cards came in the conversations that are not ours
+    (``others_contacts``: neither on the list nor our invite; their values are never kept).  The conversations of
+    somebody else's invite card (``other_invite``: a colleague's, 2026-10-30) are not listed, only counted
+    (``others_invited``): their answers are not ours to handle."""
+    status = _json_value(store.meta_value("buyin_status"))
+    unmatched = store.buyin_threads(matched=False)
+    answering = [t for t in unmatched if int(t.get("unanswered") or 0) > 0
+                 and now - float(t.get("last_creator_at") or now) <= BUYIN_UNMATCHED_DAYS * 86400]
+    waiting = [t for t in answering if not t.get("other_invite")]
+    adds = store.friend_adds(states=FRIEND_ADD_OPEN)
+    cids = {a["conversation_id"] for a in adds if a.get("conversation_id")}
+    awemes = {str(a["aweme_id"]).lower() for a in adds if a.get("aweme_id")}
+    return {"status": status if isinstance(status, dict) and status.get("text") else None,
+            "asked_at": _float(store.meta_value("buyin_sync_at")),
+            "unmatched": [{"name": t["nickname"], "count": int(t["unanswered"]), "at": t.get("last_creator_at"),
+                           "invited": {k: str(t["invited"].get(k) or "") for k in ("aweme_id", "invited_at", "plan_id")}
+                           if t.get("invited") else None}
+                          for t in waiting[:20]],
+            "unmatched_count": len(waiting),
+            # of those, the ones with a 加微信 record not done with (by the conversation, or her 抖音号)
+            "contacts_left": sum(1 for t in waiting if t["conversation_id"] in cids
+                                 or (t.get("aweme_id") and str(t["aweme_id"]).lower() in awemes)),
+            "others_contacts": sum(int(t.get("contacts") or 0) for t in unmatched if not t.get("invited")),
+            "others_invited": sum(1 for t in answering if t.get("other_invite"))}
+
+
 class PrmService:
     def __init__(self, config, relay, *, store: Optional[PrmStore] = None,
                  send: Optional[Callable[[str, str], bool]] = None,
                  send_file: Optional[Callable[[str, str], bool]] = None,
                  clock: Callable[[], float] = time.time,
                  on_parties_changed: Optional[Callable[[], None]] = None,
-                 scrub_messages: Optional[Callable[[str, Callable[[str], str]], int]] = None):
+                 scrub_messages: Optional[Callable[[str, Callable[[str], str]], int]] = None,
+                 pause: Optional[Callable[[float], bool]] = None):
         self._config = config
         self._relay = relay
         self._store = store if store is not None else PrmStore(config.prm_db)
@@ -542,6 +1004,26 @@ class PrmService:
         self._handle_lock = threading.Lock()
         self._holding_sec = int(getattr(config, "prm_holding_min", 10) or 0) * 60
         self._holding_text = str(getattr(config, "prm_holding_text", "") or HOLDING_TEXT).strip() or HOLDING_TEXT
+        # PRM_REPLY_PARTS: a reply's paragraphs go out as messages of their own (``_deliver``), and the Mac is told it may
+        # write them (``_reply_meta``).  Never on the Mac's edge side (WECHAT_BACKEND=edge): Windows tells it of a send
+        # that failed by the send's whole text (``on_send_failed``), which one part of a draft is not.
+        try:
+            parts = int(getattr(config, "prm_reply_parts", 1) or 1)
+        except (TypeError, ValueError):
+            parts = 1
+        self._reply_parts = 1 if getattr(config, "wechat_backend", "") == "edge" else min(max(parts, 1), REPLY_PARTS_MAX)
+        # PRM_NIGHT_AUTO_HOURS (empty: off, everything as before; a config object without it, an older caller's: off):
+        # inside the window a reply draft that waits for a person by the gates may still go out by itself when every
+        # night rule holds (``_night_judge``); its job is told it is night (``meta.night``, ``_submit``) and holding
+        # replies say PRM_NIGHT_HOLDING_TEXT.  Nothing of it while this PC's clock is off WeChat's (``_clock_off``).
+        # 自动模式 (the console's switch, ``auto_mode``: in the store, no setting) puts the same rules in force at any hour.
+        try:
+            self._night = gates.night_window(getattr(config, "prm_night_auto_hours", "") or "")
+        except ValueError:
+            logger.warning("PRM: PRM_NIGHT_AUTO_HOURS is not HH:MM-HH:MM (like 18:00-09:00); the night window is off")
+            self._night = None
+        self._night_holding_text = (str(getattr(config, "prm_night_holding_text", "") or NIGHT_HOLDING_TEXT).strip()
+                                    or NIGHT_HOLDING_TEXT)
         self._retention_days = int(getattr(config, "prm_retention_days", retention.RETENTION_DAYS)
                                    or retention.RETENTION_DAYS)
         # created | delivered: when a sample order's 专属佣金 is drafted (next_step_note)
@@ -557,6 +1039,32 @@ class PrmService:
         self._sample_lock = threading.Lock()       # one round's job queued, or one answer applied, at a time
         self._sample_errors = 0                    # failed rounds in a row (SAMPLE_ERRORS)
         self._sample_said = ""                     # what the deals were last told of a round that could not be made
+        # PRM_BUYIN_SYNC_MIN (0 = off, the default; a config object without it: off): the new 抖音百应 private messages,
+        # asked of the Mac once an interval (``sweep_buyin``); a registered creator's become a 百应 draft an operator
+        # copies and sends in 百应 by hand
+        try:
+            self._buyin_sec = max(0, int(getattr(config, "prm_buyin_sync_min", 0) or 0)) * 60
+        except (TypeError, ValueError):
+            self._buyin_sec = 0
+        self._buyin_lock = threading.RLock()       # one round queued or applied, or one decision on a 百应 draft, at a time
+        self._buyin_errors = 0                     # failed rounds in a row (BUYIN_ERRORS)
+        self._buyin_conv_errors: dict = {}         # conversation id -> rounds in a row it failed (BUYIN_CONV_TRIES)
+        self._buyin_fail_rounds = 0                # rounds in a row with a conversation that failed
+        self._buyin_held_logged: dict = {}         # held notice key -> when its drafting failure was last logged
+        # creator_directory() -> [{"wxid", "platform", "platform_no", "platform_uid"}]: the 达人名单 (src/influencer),
+        # who a 百应 creator is by her 抖音号 / 抖音 UID (Bot._wire_prm_directory); None: only the ids the deals' verified
+        # 抖店 sample orders found (``_creator_ids``)
+        self.creator_directory: Optional[Callable[[], list]] = None
+        # 加百应达人微信 (PRM_FRIEND_ADD, default off; src/prm/friend_adds.py): the records, one add_friend per
+        # confirmation (Bot.run attaches the admin handler and the auto-accept)
+        self.friend_adds = FriendAdds(self._store, config, clock=clock, register=self.register)
+        # 三方群 (src/prm/three_party.py): 「拉三方群」 in a deal makes the group in the WeChat window (Bot.run attaches it)
+        self.three_party = ThreeParty(self._store, config, clock=clock)
+        # on_buyin_contact(event) -> {"id", "state", "masked"} | None: told of each new contact card a creator sent in a
+        # 百应 conversation that is ours (our invite, or a registered creator's), with its values in full
+        # (``_buyin_contacts``), and of each contact she typed in her own words there: 加百应达人微信's offer_from_buyin
+        # (None while PRM_FRIEND_ADD is off: the card is recorded masked all the same).  None: nobody is told.
+        self.on_buyin_contact: Optional[Callable[[dict], Optional[dict]]] = self.friend_adds.offer_from_buyin
         # 批准并执行: checking that a 专属 action is not open already and starting it is one step
         self._approve_lock = threading.Lock()
         # Starting a 专属佣金 chain: looking whether it is under way and asking for its step is one step
@@ -566,6 +1074,11 @@ class PrmService:
         self._reserved = {str(w).strip() for w in [getattr(config, "admin_wxid", ""),
                                                     *(getattr(config, "claude_relay_wxids", None) or [])]
                           if str(w).strip()}
+        # PRM_AUTO_REGISTER (a config object without it, an older caller's: off): the new friends the scan found
+        # (``new_friend_found``: wxid, name, how; never her greeting), registered by the sender thread (``register_found``)
+        self._auto_register = str(getattr(config, "prm_auto_register", "off") or "off").strip().lower() == "on"
+        self._found: deque = deque()
+        self._found_lock = threading.Lock()
         self._wxids = self._store.active_wxids()
         # What the bot itself sent lately, per chat: (normalized text, when, packet id); each file
         # (kind, when, packet id, n): one own row of its kind each (win review F4 (b)).
@@ -574,6 +1087,8 @@ class PrmService:
         self._file_seq = itertools.count(1)
         # A packet sent before this run (or cut off by a stop): the kinds of its files not read back yet.
         self._file_rows: dict[int, list] = {}
+        # ... and of a reply in parts, the parts not read back yet (``_sent_part``: one line each, like the files).
+        self._text_rows: dict[int, list] = {}
         # Per chat, the own rows handled lately (``_row_key`` -> when): handed on again within
         # READ_BACK_SEC they are no new line (_match_own).
         self._read_back: dict[str, dict[str, float]] = {}
@@ -588,6 +1103,8 @@ class PrmService:
         self._last_retention = 0.0
         self._wake = threading.Event()
         self._stopping = threading.Event()
+        # pause(sec) between two messages of a reply: True when the bot is stopping (the rest of it is not sent)
+        self._pause = pause if pause is not None else self._stopping.wait
         self._thread: Optional[threading.Thread] = None
         relay.register_kind(PRM, self.on_result)
 
@@ -595,12 +1112,38 @@ class PrmService:
     def store(self) -> PrmStore:
         return self._store
 
+    @property
+    def auto_register(self) -> bool:
+        """PRM_AUTO_REGISTER is on: Bot._start_new_friends hands the scan's new friends to ``new_friend_found``."""
+        return self._auto_register
+
+    @property
+    def auto_mode(self) -> dict:
+        """自动模式 as the store keeps it now (``auto_mode_of``: read each time, so a write of the stopped bot's console
+        counts too)."""
+        return auto_mode_of(self._store)
+
+    def set_auto_mode(self, on: bool, actor: str = "console") -> dict:
+        """The console's 自动模式 switch (``POST /api/prm/auto``): ``{"ok": True, "auto_mode"}``.  It counts from the next
+        job and draft on (``_night_active``); the drafts waiting already stay waiting, as when the window starts."""
+        state = write_auto_mode(self._store, bool(on), now=self._clock(), actor=actor)
+        self._wake.set()                               # (the holding replies of this round say the right words)
+        return {"ok": True, "auto_mode": state}
+
     # ── lifecycle ─────────────────────────────────────────────────────────
 
     def start(self) -> None:
         """Settle what a stopped bot left half done (a send cut off; a deal marked 已签收 meanwhile:
         ``sweep_deliveries``), then the sender thread."""
         now = self._clock()
+        try:
+            self.friend_adds.start()               # (an add cut off by a stop: unsure)
+        except Exception:
+            logger.exception("PRM: the friend-add records could not be looked at")
+        try:
+            self.three_party.settle()              # (a group cut off by a stop: unsure)
+        except Exception:
+            logger.exception("PRM: the deals' 三方群 could not be looked at")
         for p in self._store.packets((SENDING,), limit=500):
             # (read back after all, its line confirms it: ``_confirm``)
             self._store.move(p["id"], (SENDING,), FAILED, outcome="indeterminate", sent_at=now, error=UNSURE_ERROR)
@@ -610,6 +1153,10 @@ class PrmService:
                 logger.info("PRM: %d deal(s) signed for while the bot was stopped: their 专属佣金 step asked for", started)
         except Exception:
             logger.exception("PRM: the deals signed for while the bot was stopped could not be looked at")
+        try:
+            self._buyin_scrub_jobs()               # (a 百应 inbox answer kept as it came, by a slip before: a summary)
+        except Exception:
+            logger.exception("PRM: the 百应 inbox jobs could not be looked at")
         self._thread = threading.Thread(target=self._loop, name="prm-sender", daemon=True)
         self._thread.start()
 
@@ -676,6 +1223,113 @@ class PrmService:
                     or not text and have is not None):
                 # (about this PC, not the deal: not a sign of life for the 8.2 clean-up)
                 self._store.set_notice(deal["id"], "clock", text, now, touch=False)
+
+    # ── 下班时段 (PRM_NIGHT_AUTO_HOURS, 2026-10-29) and 自动模式 (2026-10-30) ──
+
+    def _clock_off(self, what: str = "下班时段") -> str:
+        """Why this PC's clock cannot be trusted with the night window ("" = it can): this run measured it off
+        WeChat's by CLOCK_SKEW_SEC or more (the deals' clock notice, ``_note_clock``), or, before this run measured
+        anything, a deal still has the clock notice of a run before (nothing measured it right since).  ``what``:
+        which is held (``night_clock_text``)."""
+        if abs(self._skew) >= CLOCK_SKEW_SEC:
+            return night_clock_text(self._skew, what)
+        if self._clock_text is None and self._store.deals_with_notice("clock"):
+            return night_clock_text(None, what)
+        return ""
+
+    def _in_window(self, now: float) -> bool:
+        """Is ``now`` inside the 下班时段 (the window set, by this PC's clock)?"""
+        return self._night is not None and gates.in_night(self._night, now)
+
+    def _auto_by_day(self, now: float, auto_on: Optional[bool] = None) -> bool:
+        """Is it 自动模式 that puts the night rules in force now (switched on, ``now`` outside the window or none set)?
+        Inside the window the night's own words count, 自动模式 or not.  ``auto_on``: the switch as the caller read it
+        (one judgement reads it once: review 2026-10-30); None reads it now."""
+        on = self.auto_mode["on"] if auto_on is None else auto_on
+        return not self._in_window(now) and on
+
+    def _night_active(self, now: float, auto_on: Optional[bool] = None) -> bool:
+        """Do the night rules apply now (the 下班时段: ``now`` inside the window by this PC's clock; or 自动模式 switched
+        on in the console, at any hour) with a clock to trust?  ``auto_on``: as ``_auto_by_day``'s."""
+        on = self.auto_mode["on"] if auto_on is None else auto_on
+        return (self._in_window(now) or on) and not self._clock_off()
+
+    def _reply_meta(self, meta: dict) -> dict:
+        """A WeChat reply's draft job (her message's, a 开场白's, a 专属佣金 step's) with ``meta.reply_parts`` when
+        PRM_REPLY_PARTS is above 1: the Mac may write the reply as that many messages, a blank line between two
+        (worker.parts_line); ``_deliver`` sends them so.  The same dict."""
+        if self._reply_parts > 1:
+            meta["reply_parts"] = self._reply_parts
+        return meta
+
+    def _night_meta(self, now: float) -> dict:
+        """A draft job's ``meta.night`` (``_submit``): inside the window ``{"window": "18:00-09:00", "at": "21:30"}``,
+        自动模式 by day ``{"auto": True, "at": "14:30"}`` (worker.night_line words each)."""
+        at = time.strftime("%H:%M", time.localtime(now))
+        if self._in_window(now):
+            return {"window": gates.night_window_text(self._night, "-"), "at": at}
+        return {"auto": True, "at": at}
+
+    def _night_status(self, now: float) -> dict:
+        auto = self.auto_mode["on"]
+        held = "自动模式" if auto and not self._in_window(now) else "下班时段"
+        return night_status(self._night, now, self._clock_off(held) if self._night is not None or auto else "",
+                            auto=auto)
+
+    def _night_judge(self, meta: dict, draft, *, refused: str, short: str, unknown: list, waybill: str,
+                     attachments: list, named: int, mode: str, now: float,
+                     auto_on: Optional[bool] = None) -> Optional[str]:
+        """A reply draft that reached the gates (``on_result``'s last step: no platform action, a reply, the deal in
+        copilot mode, no newer job, nothing read late or recalled, not the system lane) and waits for a person by
+        them: may it go out by itself in the night window (or 自动模式, ``_night_active``)?  None: neither is in play
+        (the window off, or now outside it, and 自动模式 off; nothing is said); "": it goes (route ``gates.NIGHT``); else
+        why it waits as by day (``meta.night_held``; 自动模式 by day says so, ``_auto_by_day``).
+        Over ``gates.night_reason`` (complaints, ``plain_reason``, the red line, a flagged draft only as one holding
+        line): this PC's clock is right, the job was made under the night rules with a clock to trust (``meta.night``:
+        the Mac was told it is night or 自动模式 and wrote by the kb's rules for it; a draft of a job from before the
+        window or the switch, or from while the clock was off, waits; 自动模式 by day, one of a job made in the window
+        waits too: the Mac wrote by the night's words, its holding line may promise 「明早」, review 2026-10-30), it is
+        a WeChat draft (another channel's, ``meta.channel``, never), its platform action was not refused or covered,
+        all its files came.  ``auto_on``: the switch as ``on_result`` read it (its packet's tag says the same)."""
+        auto_on = self.auto_mode["on"] if auto_on is None else auto_on
+        window = self._in_window(now)
+        if not window and not auto_on:
+            return None
+        auto = not window                              # 自动模式 by day: its own words
+        if self._clock_off():
+            return "这台电脑的时间和微信对不上，" + ("自动模式先不自动发" if auto else "下班时段不自动发")
+        if not isinstance(meta.get("night"), dict):
+            return ("草稿任务建的时候自动模式还没打开（或者电脑时间和微信对不上），Mac 起草时不知道是自动模式" if auto else
+                    "草稿任务建的时候没算作下班时段（还没到点，或者电脑时间和微信对不上），Mac 起草时不知道是下班时段")
+        if auto and meta["night"].get("auto") is not True:
+            return "草稿任务是下班时段建的，Mac 按夜里的说法写的（过渡的话可能说「明早」），白天的自动模式不自动发"
+        if str(meta.get("channel") or "wechat") != "wechat":
+            return "不是微信私聊的草稿"
+        if refused:
+            return "平台动作被去掉了，回复是按执行成功写的"
+        if short:
+            return short
+        return gates.night_reason(draft.message_kind, needs_attention=draft.needs_attention, mode=mode,
+                                  unknown_tokens=unknown, reason=draft.reason, text=draft.reply_draft, waybill=waybill,
+                                  attachments=attachments, files_named=named, when="自动模式下" if auto else "夜里")
+
+    def _night_sent(self, packet: dict, now: float) -> None:
+        """A draft the night window (or 自动模式 by day: the packet's ``meta.auto_mode``, its record and notice say so)
+        sent went out (``_deliver``): the deal's record says so, and one the model flagged (it went as a holding line)
+        leaves a notice that stays until an operator says 已处理 (``night_done``); the packet keeps its
+        ``needs_attention``."""
+        auto = bool((packet.get("meta") or {}).get(AUTO_MODE))
+        detail = {"packet": packet["id"], "kind": packet["kind"], "holding": bool(packet["needs_attention"])}
+        self._store.add_event(packet["deal_id"], packet["party_id"], "night_send",
+                              {**detail, **({"auto": True} if auto else {})}, actor="system", now=now)
+        if packet["needs_attention"]:
+            why = str(packet.get("reason") or "").strip() or "模型要求运营注意"
+            self._store.set_notice(packet["deal_id"], f"{NIGHT_NOTICE}{packet['id']}",
+                                   f"{'自动模式下自动' if auto else '夜间已自动'}回了过渡的话，要注意：{why}", now,
+                                   packet=packet["id"], **({"auto": True} if auto else {}))
+            # (the draft's own notes said just that: said once, by the notice that stays)
+            self._store.drop_notices(packet["deal_id"], lambda n: n["key"] == DRAFT_NOTES + LANE_REPLY
+                                     and n.get("text") == why[:NOTICE_CHARS], now)
 
     # ── from WeChat (the route step) ──────────────────────────────────────
 
@@ -849,15 +1503,16 @@ class PrmService:
         creator = self._creator_ids(deal["id"])
         if creator:
             meta["creator"] = creator                  # her 抖音号: the Mac looks up the invite ledger by it
+        group = self.three_party.job_meta(deal)
+        if group:
+            meta["three_party"] = group                # 三方群 made: the case file's 【待拉三方群】 is done
         outbound = self._outbound(deal["id"], party["id"], now, unsent=[packet for packet, _, _ in outdated])
         if outbound:
             meta["sent"] = outbound
         backlog = self._store.take_backlog(deal["id"])
         fresh = bool(backlog)
         if backlog:
-            meta["history"] = [{"who": "operator" if ev["kind"] == "operator_message" else "creator",
-                                "text": str(ev["detail"].get("text", "")),
-                                **({"missed": True} if ev["detail"].get("missed") else {})} for ev in backlog]
+            meta["history"] = history_of(backlog)
             missed = [ev for ev in backlog if ev["kind"] == "creator_message" and ev["detail"].get("missed")]
             if missed:
                 meta["missed"] = {"count": len(missed), "from": min(_event_time(ev) for ev in missed)}
@@ -883,7 +1538,7 @@ class PrmService:
                           and n.get("lane") == LANE_REPLY and (n.get("lines") or n.get("history"))
                           and (not n.get("into") or self._cancelled(n["into"]))), key=lambda n: int(n.get("job") or 0))
         earlier = sorted([*((int(n.get("job") or 0), str(n["lines"])) for n in carried if n.get("lines")),
-                          *((int(job["id"]), lines) for _, job, lines in outdated)], key=lambda pair: pair[0])
+                          *((int(job["id"]), lines) for _, job, lines in outdated if lines)], key=lambda pair: pair[0])
         if earlier:
             text = "\n".join([*(lines for _, lines in earlier), text])
         if carried:
@@ -896,8 +1551,12 @@ class PrmService:
                     meta[key] = _merged_gap(meta.get(key), info)
         if carried or outdated:
             fresh = True
+        if not any(isinstance(meta.get(k), dict) for k in ("late", "missed", "new_friend")) and self._night_active(now):
+            # 下班时段 (or 自动模式): the Mac writes by the kb's rules for it (worker.prm_prompt), its draft may go out by
+            # itself (``_night_judge``).  Not for a job that always waits for a person (read late, a new friend's).
+            meta["night"] = self._night_meta(now)
         how, job_id = self._relay.submit(chat_id, chat_id, text, kind=PRM, files=files, settle_sec=SETTLE_SEC,
-                                         meta=meta, fresh=fresh)
+                                         meta=self._reply_meta(meta), fresh=fresh)
         for n in carried:
             self._store.set_notice(deal["id"], n["key"], failed_text(n.get("head") or n["text"], job_id), now,
                                    into=job_id)
@@ -910,18 +1569,19 @@ class PrmService:
     def _outdated(self, waiting: list, now: float) -> list:
         """The Mac's reply drafts of ``waiting`` (the deal's drafts in 待审批 a moment ago) that a message of hers
         has just put out of date (``superseded`` now: nobody sent them), with their jobs and her lines in them
-        (the job's text and the follow-ups the Mac had: ``_job_lines``): ``[(packet, job, lines)]``.  Not a
-        专属佣金 step's (the system lane is no reply of hers), nor one approved or dropped meanwhile."""
+        (the job's text and the follow-ups the Mac had: ``_job_lines``): ``[(packet, job, lines)]``; a 开场白 with
+        no line of hers too (``lines`` "": the job answering her is told it was not sent).  Not a 专属佣金
+        step's (the system lane is no reply of hers), nor one approved or dropped meanwhile."""
         out = []
         for packet in waiting:
-            if packet.get("job_id") is None or (packet.get("meta") or {}).get("lane") == LANE_SYSTEM:
-                continue
+            if packet.get("job_id") is None or (packet.get("meta") or {}).get("lane") == LANE_SYSTEM or is_buyin(packet):
+                continue                               # (a 百应 draft is no WeChat reply: its lines stay out of WeChat's)
             packet = self._store.packet(packet["id"]) or packet
             if packet["status"] != SUPERSEDED or packet.get("decided_at") != now:
                 continue
             job = self._relay.store.get(int(packet["job_id"]))
             lines = self._job_lines(job) if job is not None else ""
-            if lines:
+            if lines or (job is not None and (packet.get("meta") or {}).get(OPENING)):
                 out.append((packet, job, lines))
         return out
 
@@ -1060,9 +1720,9 @@ class PrmService:
         before its send returned (WeChat shows a line at once); a failure stays one.  A packet the bot was
         stopped in the middle of sending (failed, ``indeterminate``: ``start``) went out after all (win
         review F4 (d); before, its line was taken for an operator's and the chat was taken over): it is
-        sent again (``sent_at`` when WeChat shows it) once its text, if any, and each of its files (one
-        row each, ``_file_rows``) are read back; till then it stays red, and once its text is seen it says
-        the text did go out (``UNSURE_TEXT_SEEN``)."""
+        sent again (``sent_at`` when WeChat shows it) once its text, if any (a reply in parts: each part,
+        ``_text_rows``), and each of its files (one row each, ``_file_rows``) are read back; till then it
+        stays red, and once its text is seen it says the text did go out (``UNSURE_TEXT_SEEN``)."""
         if self._store.confirm_sent(packet_id):
             packet = self._store.packet(packet_id) or {}
             logger.info("PRM: packet %d seen in WeChat %.0f s after sending (sent_confirmed)", packet_id,
@@ -1072,9 +1732,10 @@ class PrmService:
         if packet is None or (packet["status"], packet["outcome"]) != (FAILED, "indeterminate"):
             return
         final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
-        text_seen = bool(self._own_text(msg)) or packet["error"] == UNSURE_TEXT_SEEN
         with self._sent_lock:
             files_left = self._file_rows.get(packet_id, [None]) if packet["attachments"] else []
+            parts_left = self._text_rows.get(packet_id)   # (a reply in parts: its text is seen once every part is)
+        text_seen = (bool(self._own_text(msg)) and not parts_left) or packet["error"] == UNSURE_TEXT_SEEN
         if (text_seen or not str(final or "").strip()) and not files_left:
             if self._store.settle_unsure(packet_id, sent_at=written):
                 logger.info("PRM: packet %d, cut off by a stop, did go out (seen in WeChat): sent", packet_id)
@@ -1086,12 +1747,15 @@ class PrmService:
     def _answered_by_hand(self, deal_id: int, written: float, now: float) -> None:
         """An operator wrote to her by hand (at ``written``): a draft of hers that was not written, and
         her recall, are seen to by a person.  The first is shown no more (its lines still go with her next
-        draft job: the case file must hear of them); the recall's notice goes."""
+        draft job: the case file must hear of them); the recall's notice goes, and so does the one asking
+        whether she needs a 开场白 (``OPENING_UNSURE``)."""
         def edit(notices):
             out = []
             for n in notices:
                 if n["key"] == "recall" and written >= float(n.get("recalled_at") or n.get("at") or 0):
                     continue
+                if n["key"] == OPENING_UNSURE and written >= float(n.get("at") or 0):
+                    continue                           # a person greeted her: no 开场白 to think of
                 if (str(n["key"]).startswith("failed:") and n.get("lane") == LANE_REPLY
                         and written >= float(n.get("asked_at") or 0)):
                     n = {**n, "show": False}
@@ -1229,14 +1893,11 @@ class PrmService:
             return False, None
         tokens = self._store.tokens(party["id"])
         for packet in self._store.sent_since(chat_id, written - OWN_MATCH_SEC):
-            if packet["outcome"] != "sent_unconfirmed" or float(packet["sent_at"]) >= self._started:
-                continue
-            final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
-            if _norm(pii.unmask(final, tokens)) == text:
+            if float(packet["sent_at"]) < self._started and self._sent_part(
+                    packet, text, tokens, written, unconfirmed=packet["outcome"] == "sent_unconfirmed"):
                 return True, packet["id"]
         for packet in unsure:
-            final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
-            if str(final or "").strip() and _norm(pii.unmask(final, tokens)) == text:
+            if self._sent_part(packet, text, tokens, written, unconfirmed=True):
                 return True, packet["id"]
         deal = self._store.deal_of(party["id"], now)
         for ev in self._store.events(deal["id"], limit=20):
@@ -1244,6 +1905,33 @@ class PrmService:
                     and _norm(ev["detail"].get("text")) == text):
                 return True, None
         return False, None
+
+    def _sent_part(self, packet: dict, text: str, tokens: dict, written: float, *, unconfirmed: bool) -> bool:
+        """Is ``text`` (an own text line's normalized words, written at ``written``) a line ``packet`` went out as before
+        this run (``_match_sent``)?  A reply in one message: its text, while it is not confirmed (``unconfirmed``).  A
+        reply in parts (``reply_parts``): each part once (``_text_rows`` counts them down; the first one read back
+        confirmed it), and only written before its send returned (give or take PART_LATE_SEC: the same words typed
+        later are a person's); or its whole text once (it went out in one message, before PRM_REPLY_PARTS)."""
+        final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
+        if not str(final or "").strip():
+            return False
+        whole = pii.unmask(final, tokens)
+        parts = reply_parts(whole, self._reply_parts)
+        if len(parts) <= 1:
+            return unconfirmed and _norm(whole) == text
+        if written > float(packet["sent_at"] or 0) + PART_LATE_SEC:
+            return False
+        with self._sent_lock:
+            left = self._text_rows.get(packet["id"])
+            if left is None:
+                left = self._text_rows[packet["id"]] = [_norm(p) for p in parts]
+            if text in left:
+                left.remove(text)
+                return True
+            if text == _norm(whole) and len(left) == len(parts):
+                left.clear()
+                return True
+        return False
 
     def _file_row_of(self, packet: dict, msg: dict) -> bool:
         """Is this own row one of the files of ``packet``, sent before this run (``_match_sent``)?  Each
@@ -1337,6 +2025,8 @@ class PrmService:
         meta = job_meta(job)
         if meta.get("op") == SAMPLE_OP:                 # 聚水潭's answer about the sample orders: no creator, no draft
             return self._on_sample_status(job, meta)
+        if meta.get("op") == BUYIN_OP:                  # the new 百应 private messages: drafts come of them, not of it
+            return self._on_buyin_inbox(job, meta)
         try:
             party_id, deal_id = int(meta["party_id"]), int(meta["deal_id"])
         except (KeyError, TypeError, ValueError):
@@ -1347,6 +2037,8 @@ class PrmService:
             return True
         now = self._clock()
         status = job["status"]
+        if meta.get("channel") == BUYIN_CHANNEL:        # a 百应 private-message draft: its own way, never WeChat's
+            return self._on_buyin_draft(job, meta, deal, now)
         if meta.get("op") in PLATFORM_OPS:
             return self._on_platform_job(job, meta, now)
         if meta.get("op") == "purge":                       # the Mac's case file was cleaned (or not)
@@ -1432,6 +2124,8 @@ class PrmService:
         # A job that failed (the Mac went silent) and came back after her lines went into a later job: out of date.
         handed_on = lane == LANE_REPLY and self._handed_on(deal, job["id"])
         route, decided_at = gates.REVIEW, None
+        night_held = None                              # 下班时段: why a draft judged by the night window waits
+        auto_on = self.auto_mode["on"]                 # 自动模式, read once: the judgement and the packet's tag agree
         if draft.platform is not None:
             # A platform write: always a person's decision (8.1's gates do not apply).
             state = (SUPERSEDED if mode != COPILOT or handed_on or (newer is not None and newer["id"] > job["id"])
@@ -1456,9 +2150,23 @@ class PrmService:
                 self._store, draft.message_kind, deal=deal, now=now, text=draft.reply_draft,
                 needs_attention=draft.needs_attention or bool(refused), unknown_tokens=unknown, reason=draft.reason,
                 waybill=waybill, attachments=attachments, files_named=len(named))
+            if state == PENDING:
+                # 下班时段 (PRM_NIGHT_AUTO_HOURS) or 自动模式: it may still go out by itself; only here, never before this step
+                night_held = self._night_judge(meta, draft, refused=refused, short=short, unknown=unknown,
+                                               waybill=waybill, attachments=attachments, named=len(named), mode=mode,
+                                               now=now, auto_on=auto_on)
+                if night_held == "":
+                    route, state, decided_at = gates.NIGHT, APPROVED, now
         packet_meta = {"waybill": waybill} if draft.message_kind == "shipping_notice" and waybill else {}
         if lane == LANE_SYSTEM:
             packet_meta["lane"] = LANE_SYSTEM
+        if isinstance(meta.get(OPENING), dict):
+            packet_meta[OPENING] = True                # (the console's tag; no holding reply for it)
+        by_auto = night_held is not None and self._auto_by_day(now, auto_on)
+        if by_auto:
+            packet_meta[AUTO_MODE] = True              # 自动模式 by day sent or held it: the console and the record say so
+        if night_held:
+            packet_meta["night_held"] = night_held[:200]
         tool, platform = MESSAGE_TOOL, None
         if draft.platform is not None:
             action = draft.platform.get("action")
@@ -1485,9 +2193,11 @@ class PrmService:
             self._store.supersede(deal_id, now, keep=packet_id, lane=lane)
         attention = [*notes, *([draft.reason] if draft.needs_attention and draft.reason else [])]
         # (her recall: its own notice on the deal says so, the draft's reason too)
-        # The draft job of her lines that had no draft before (or this job itself, back late): seen to.
+        # The draft job of her lines that had no draft before (or this job itself, back late): seen to; and a 开场白 that
+        # was not written, by any later reply draft.
         answered = self._store.drop_notices(deal_id, lambda n: n.get("into") == job["id"]
-                                            or n["key"] == f"failed:{job['id']}", now)
+                                            or n["key"] == f"failed:{job['id']}"
+                                            or (lane == LANE_REPLY and bool(n.get(OPENING))), now)
         if any(n.get("into") == job["id"] for n in answered):
             attention.append(f"#{job['id']} 的草稿也回了 " + "、".join(f"#{n.get('job')}" for n in answered
                                                                    if n.get("into") == job["id"])
@@ -1523,6 +2233,9 @@ class PrmService:
         if state == APPROVED:
             self._wake.set()
         logger.info("PRM: job #%d -> packet %d (%s, %s, %s)", job["id"], packet_id, state, route, draft.message_kind)
+        if night_held:
+            logger.info("PRM: packet %d was drafted in %s and waits for a person: %s", packet_id,
+                        "auto mode" if by_auto else "the night window", night_held)
         return True
 
     def _draft_failed(self, job: dict, meta: dict, head: str, notes: list, now: float) -> None:
@@ -1549,12 +2262,21 @@ class PrmService:
                     [head.replace("草稿没写成", "开专属佣金这一步的草稿没写成", 1), *notes,
                      "系统不会自己再起草这一步，请运营处理"]), now, job=job_id, lane=lane)
                 return
+            lines = self._job_lines(job)
+            if isinstance(meta.get(OPENING), dict) and not lines:
+                # our first line, and she has said nothing: no line of hers to take along; a later reply draft, a new
+                # 开场白, or an operator writing to her by hand sees to it
+                self._store.set_notice(deal_id, f"failed:{job_id}", "；".join(
+                    [head.replace("草稿没写成", "开场白没写成", 1),
+                     "可以在合作单里点「写开场白」再写一次，或者直接在微信里跟她打招呼"]), now, job=job_id, lane=lane,
+                    opening=True, asked_at=float(job.get("created_at") or now))
+                return
             # this job carried the lines of earlier ones: they are in its own lines now
             self._store.drop_notices(deal_id, lambda n: n.get("into") == job_id, now)
             head = "；".join([head, *notes])
             gap = {k: meta[k] for k in ("late", "missed", "new_friend") if isinstance(meta.get(k), dict)}
             self._store.set_notice(deal_id, f"failed:{job_id}", failed_text(head), now, job=job_id, lane=lane,
-                                   head=head, lines=self._job_lines(job)[:LINES_CHARS], gap=gap,
+                                   head=head, lines=lines[:LINES_CHARS], gap=gap,
                                    history=[h for h in meta.get("history") or [] if isinstance(h, dict)],
                                    asked_at=float(job.get("created_at") or now))
 
@@ -1612,19 +2334,49 @@ class PrmService:
 
     # ── from the console ──────────────────────────────────────────────────
 
-    def register(self, wxid: str, name: str, note: str = "") -> dict:
-        """Register a creator (an operator's decision in the console; never automatic).  When she is a
-        new friend (``on_registered``), her messages since she was added become one reviewed draft
-        (take_new_friend); ``catch_up`` in the answer says so."""
+    def register(self, wxid: str, name: str, note: str = "", link: Optional[dict] = None) -> dict:
+        """Register a creator (an operator's decision in the console; with PRM_AUTO_REGISTER the bot registers
+        new friends the same way, ``auto_register_friend``).  When she is a new friend (``on_registered``), her
+        messages since she was added become one reviewed draft (take_new_friend); ``catch_up`` in the answer
+        says so.
+
+        ``link``: who she is on 抖音 (加百应达人微信's 「是她，登记并关联」, or the 抖音号 登记达人 was given; ``check_link``).
+        In this order: the party, the link (``creator_links``), the deal's ``friend_add_link`` event, and only then
+        ``on_registered``, so her catch-up job is told her 抖音号 (``_creator_ids``).  A creator registered already only
+        gets the link and its event (``linked`` in the answer): with PRM_AUTO_REGISTER the bot has registered her
+        already by the time a person says 「是她」."""
+        return self._register(wxid, name, note, link=link)
+
+    def _register(self, wxid: str, name: str, note: str, how: Optional[str] = None,
+                  link: Optional[dict] = None) -> dict:
+        """``register``; ``how`` (PRM_AUTO_REGISTER: how the new friend was added): the bot's registration, only of a
+        wxid with no party at all (``PrmStore.add_party(auto=True)``), the deal's record says so (``AUTO_EVENT``) and
+        the log line names only the wxid's first 8 characters; the bot never links (``link`` is a person's)."""
         wxid = check_wxid(wxid, self._reserved)
         name, note = str(name or "").strip(), str(note or "").strip()
         if not name or len(name) > 30:
             raise PartyError("称呼要填，最多 30 个字")
         if len(note) > 200:
             raise PartyError("备注最多 200 个字")
-        party = self._store.add_party(wxid, name, note, self._clock())
+        link = check_link(link)
+        now = self._clock()
+        if link is not None:
+            existing = self._store.party_by_wxid(wxid)
+            if existing is not None:
+                self._link_creator(existing, link, now)
+                return {**existing, "catch_up": False, "linked": True}
+        party = self._store.add_party(wxid, name, note, now, auto=how is not None)
+        if how is not None:
+            deal = self._store.deal_of(party["id"], now)
+            self._store.add_event(deal["id"], party["id"], AUTO_EVENT, {"how": how}, actor="system", now=now)
+        if link is not None:
+            self._link_creator(party, link, now)
         self._parties_changed()
-        logger.info("PRM: party %d registered", party["id"])
+        if how is not None:
+            logger.info("PRM: new friend %s… registered automatically as party %d (PRM_AUTO_REGISTER; %s)",
+                        wxid[:8], party["id"], how)
+        else:
+            logger.info("PRM: party %d registered", party["id"])
         caught = False
         if self.on_registered is not None:
             try:
@@ -1633,12 +2385,159 @@ class PrmService:
                 logger.exception("PRM: party %d's earlier messages (a new friend) could not be asked for", party["id"])
         return {**party, "catch_up": caught}
 
-    def take_new_friend(self, chat_id: str, messages: list[dict], *, verify_until: float = 0.0) -> int:
+    # ── PRM_AUTO_REGISTER: every new friend is registered by the bot ──────
+
+    def new_friend_found(self, event: dict) -> None:
+        """The new-friend scan's ``on_found`` (Bot._start_new_friends, copilot mode with PRM_AUTO_REGISTER=on): her
+        wxid, name and how she was added are queued (never her greeting) and the sender thread is woken; it registers
+        her at the start of its next round (``register_found``).  Never ``register`` here: the scan calls this inside
+        its look, holding its ``_scan_lock``, and ``register`` calls back into the scan (``on_registered`` =
+        ``NewFriendService.registered``, then the backend's ``catch_up_chat``).  The queue is kept in prm_meta too
+        (``AUTO_QUEUE``): the scan reports a new friend once, ever, and a restart before that round would lose her
+        (``resume_found``).  Never raises (a sink that raises would get the event again at every look); off, it does
+        nothing."""
+        if not self._auto_register:
+            return
+        try:
+            item = {"wxid": str(event.get("wxid") or "").strip(), "name": str(event.get("name") or ""),
+                    "how": str(event.get("how") or "")}
+        except Exception:
+            logger.warning("PRM: a new friend's event could not be read; not registered automatically", exc_info=True)
+            return
+        with self._found_lock:
+            self._found.append(item)
+            self._keep_found()
+        self._wake.set()
+
+    def register_found(self) -> int:
+        """The new friends ``new_friend_found`` queued, registered one by one (oldest first) on the sender thread
+        (``tick``), with none of the scan's locks held.  Returns how many were registered; one that is not (a rule
+        says no, an error) is logged and stays in 登记达人's candidates for a person.  Each one seen to leaves the
+        queue, the kept one too (``AUTO_QUEUE``).  Never raises."""
+        with self._found_lock:
+            found = list(self._found)
+        done = 0
+        for event in found:
+            if self.auto_register_friend(event) is not None:
+                done += 1
+            with self._found_lock:                     # seen to: off the queue
+                try:
+                    self._found.remove(event)
+                except ValueError:
+                    pass
+                self._keep_found()
+        return done
+
+    def resume_found(self) -> int:
+        """At start, once the new-friend scan is wired (Bot._start_new_friends, PRM_AUTO_REGISTER on): the new friends
+        queued before a restart and not seen to (``AUTO_QUEUE``; review 2026-10-30: the queue lived in memory only)
+        go back on the queue, ahead of any queued since, and the sender thread is woken.  Returns how many."""
+        kept = self._kept_found()
+        with self._found_lock:
+            back = [e for e in kept if e not in self._found]
+            self._found.extendleft(reversed(back))
+            if back:
+                self._keep_found()
+        if back:
+            logger.info("PRM: %d new friend(s) queued before the restart are registered in the next round", len(back))
+            self._wake.set()
+        return len(back)
+
+    def _kept_found(self) -> list:
+        """The queue as ``AUTO_QUEUE`` keeps it (``[{wxid, name, how}]``; [] none, or unreadable: logged)."""
+        try:
+            data = json.loads(self._store.meta_value(AUTO_QUEUE) or "[]")
+        except Exception:
+            logger.warning("PRM: the kept queue of new friends could not be read; not registered automatically",
+                           exc_info=True)
+            return []
+        items = [e for e in (data if isinstance(data, list) else []) if isinstance(e, dict)]
+        return [{"wxid": str(e.get("wxid") or "").strip(), "name": str(e.get("name") or ""),
+                 "how": str(e.get("how") or "")} for e in items if str(e.get("wxid") or "").strip()]
+
+    def _keep_found(self) -> None:
+        """``AUTO_QUEUE`` = the queue now (under ``_found_lock``).  An error is logged, never raised: she is still
+        registered in this run, only a restart before it would lose her."""
+        try:
+            self._store.set_meta_value(AUTO_QUEUE, json.dumps(list(self._found), ensure_ascii=False))
+        except Exception:
+            logger.warning("PRM: the queue of new friends could not be kept for a restart", exc_info=True)
+
+    def auto_register_friend(self, event: dict) -> Optional[dict]:
+        """Register one new friend (``{wxid, name, how}``) as a full creator, as an operator's 登记 does
+        (``_register``: her messages since she was added become one reviewed draft through ``on_registered``):
+        称呼 ``auto_name``, note ``auto_note``, the deal's record ``AUTO_EVENT``, one log line with the wxid's first 8
+        characters.  None when she is not registered (``_not_auto``: the admin or a cc user, not a person's private
+        chat, a party already, active or stopped) or an error came (logged; never raised)."""
+        wxid = ""
+        try:
+            wxid = str(event.get("wxid") or "").strip()
+            how = str(event.get("how") or "").strip() or "unknown"
+            why = self._not_auto(wxid)
+            if why:
+                logger.info("PRM: new friend %s… not registered automatically: %s", wxid[:8], why)
+                return None
+            return self._register(wxid, auto_name(event.get("name"), wxid), auto_note(how), how=how)
+        except PartyError:
+            # (its text may hold a creator's name: never logged) - a party made meanwhile, by a person
+            logger.info("PRM: new friend %s… not registered automatically: she has a party already (made meanwhile)",
+                        wxid[:8])
+        except Exception:
+            logger.warning("PRM: new friend %s… could not be registered automatically; she stays in 登记达人's list "
+                           "for a person", wxid[:8], exc_info=True)
+        return None
+
+    def _not_auto(self, wxid: str) -> str:
+        """Why PRM_AUTO_REGISTER leaves this wxid alone ("" = it may register her): not a person's private chat (a
+        group, an official account, 文件传输助手: the scan never reports them either), the admin or a cc user, no wxid
+        a creator can have (``check_wxid``), or a party with this wxid already, active or stopped (an operator's 停用
+        sticks; a person may register her again in the console).  (``is_person_chat`` reads the WCDB backend's list
+        of WeChat's own chats: that module is loaded wherever the scan runs, Windows wcdb; elsewhere the import fails,
+        which ``auto_register_friend`` logs, and she stays a candidate.)"""
+        if not is_person_chat(wxid):
+            return "not a person's private chat"
+        if wxid in self._reserved:
+            return "the admin or a cc user (never a creator)"
+        try:
+            check_wxid(wxid, self._reserved)
+        except PartyError:
+            return "not a wxid a creator can have"
+        party = self._store.party_by_wxid(wxid, include_inactive=True)
+        if party is not None:
+            return "she has a party already (stopped: an operator's 停用 stays)" if not party["active"] else \
+                "she is registered already"
+        return ""
+
+    def _link_creator(self, party: dict, link: dict, now: float) -> None:
+        """Who a registered creator is on 抖音 (``check_link``'s ``link``): ``creator_links`` (the first link of an
+        account stays) and a ``friend_add_link`` event on her deal (her 抖音号, the record, when the invite card went
+        out; never a number); the deal says so when her sample order knows another 抖音号 (``_creator_ids_notice``)."""
+        made = link_creator(self._store, party, link, now=now)
+        logger.info("PRM: party %d linked to a 抖音号 (%s%s)", party["id"], link["source"], "" if made else ", known already")
+        if link["source"] == "register":           # registered by hand with the 抖音号 a 加微信 record waits for
+            try:
+                self.friend_adds.linked_by_register(party, link["account"], party["wxid"])
+            except Exception:
+                logger.exception("PRM: the 加微信 records of party %d's 抖音号 could not be closed", party["id"])
+
+    def unlink_creator(self, party_id: int, account: str) -> dict:
+        """取消关联 from the console (``unlink_creator``)."""
+        out = unlink_creator(self._store, party_id, account, now=self._clock())
+        if out.get("ok"):
+            logger.info("PRM: party %d unlinked from a 抖音号", int(party_id))
+        return out
+
+    def take_new_friend(self, chat_id: str, messages: list[dict], *, verify_until: float = 0.0, how: str = "",
+                        whole: bool = False) -> int:
         """A new friend registered as a creator: her messages since she was added (the WeChat backend
         read them back on her chat's next poll: hers only, oldest first, at most PRM_CATCHUP_HOURS
         old) become one draft job that waits for a person (``meta.new_friend``), so her first words
         are not lost; the ones up to ``verify_until`` (the time she was added) are her friend-request
-        greeting and say so.  WeChat's friend notices are left out.  Returns how many were taken."""
+        greeting and say so.  WeChat's friend notices are left out.  Nothing of hers (she accepted our
+        friend request and has not written): one 开场白 draft job instead (``_ask_opening``; ``how``: how she
+        was added, the new-friend scan's), only when the read-back reached back to when she was added (``whole``,
+        ``NewFriendService.registered``; registered later than PRM_CATCHUP_HOURS, she may have written before the
+        window: review 2026-10-30).  Returns how many of her messages were taken."""
         chat_id = str(chat_id)
         party = self._store.party_by_wxid(chat_id)
         if party is None:
@@ -1646,7 +2545,20 @@ class PrmService:
         picked = [m for m in messages or [] if not m.get("is_group", False) and not is_friend_notice(m)
                   and system_line(m) is None]
         if not picked:
-            logger.info("PRM: party %d is a new friend with no messages from before the registration", party["id"])
+            if not whole:
+                now = self._clock()
+                with self._handle_lock:
+                    deal = self._store.deal_of(party["id"], now)
+                    if not deal.get("last_message_at"):
+                        self._store.set_notice(deal["id"], OPENING_UNSURE, OPENING_UNSURE_TEXT, now, opening=True)
+                logger.info("PRM: party %d is a new friend with no messages in the catch-up window, which does not reach "
+                            "back to when she was added; no 开场白 (she may have written before it), a notice asks a "
+                            "person to look", party["id"])
+                return 0
+            with self._handle_lock:
+                job_id, why = self._ask_opening(party, how=how)
+            logger.info("PRM: party %d is a new friend with no messages from before the registration; %s", party["id"],
+                        f"job #{job_id} drafts our first line (开场白)" if job_id else f"no 开场白: {why}")
             return 0
         now = self._clock()
         times = [float(m.get("timestamp") or 0) or now for m in picked]
@@ -1674,6 +2586,70 @@ class PrmService:
                     "draft job", party["id"], taken)
         return taken
 
+    def ask_opening(self, deal_id) -> dict:
+        """「写开场白」 in the console: one 开场白 draft job for a creator who has not written to us yet
+        (``_ask_opening``, by console).  ``{"ok": True, "job"}``, or ``{"ok": False, "error"}`` saying why not."""
+        try:
+            deal = self._store.deal(int(deal_id))
+        except (TypeError, ValueError):
+            deal = None
+        party = self._store.party(deal["party_id"]) if deal else None
+        if deal is None or party is None:
+            return {"ok": False, "error": "没有找到这个合作单"}
+        with self._handle_lock:
+            job_id, why = self._ask_opening(party, by="console")
+        return {"ok": True, "job": job_id} if job_id else {"ok": False, "error": why}
+
+    def _ask_opening(self, party: dict, *, how: str = "", by: str = "new_friend") -> tuple:
+        """One draft job of our first line to a creator who has not written to us (``meta.opening``: how she came,
+        who asked; told what we sent her, ``meta.sent``, and what an operator wrote to her by hand, ``meta.history``),
+        under ``_handle_lock``: ``(job id, "")``, or ``(None, why not)`` (``_no_opening``).  It always waits for a person (``gap_notes``), never by night, never gets a holding
+        reply; a message of hers joins it, or outdates its draft (``_outdated``), like any reply draft's."""
+        now = self._clock()
+        deal = self._store.deal_of(party["id"], now)
+        why = self._no_opening(party, deal, now)
+        if why:
+            return None, why
+        how = str(how or "")
+        meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"], OPENING: {"how": how, "by": by}}
+        creator = self._creator_ids(deal["id"])
+        if creator:
+            meta["creator"] = creator
+        outbound = self._outbound(deal["id"], party["id"], now)
+        if outbound:
+            meta["sent"] = outbound
+        # What an operator wrote to her by hand while a person had the chat (she has written nothing: no line of hers
+        # is recorded): told, not taken, so her next draft job still hears of it should this one give no draft.
+        told = history_of(self._store.backlog(deal["id"]))
+        if told:
+            meta["history"] = told
+        _, job_id = self._relay.submit(party["wxid"], party["wxid"], "", kind=PRM, meta=self._reply_meta(meta),
+                                       fresh=True)
+        self._store.add_event(deal["id"], party["id"], OPENING, {"job": job_id, "how": how, "by": by},
+                              actor="console" if by == "console" else "system", now=now)
+        # one not written before: this one is on its way
+        self._store.drop_notices(deal["id"], lambda n: bool(n.get(OPENING)), now)
+        logger.info("PRM: party %d has not written to us; job #%d drafts our first line (开场白, %s)",
+                    party["id"], job_id, by)
+        return job_id, ""
+
+    def _no_opening(self, party: dict, deal: dict, now: float) -> str:
+        """Why no 开场白 is drafted for her now ("" = it is): off the list, a person has the chat, she wrote to us
+        already on WeChat (her messages are drafted), or a WeChat reply draft of hers is being written or waits in
+        待审批 (a 百应 one is another channel: it neither counts as her WeChat line nor stands in the way)."""
+        if not party.get("active"):
+            return "这位达人已经停用（不在达人名单里），不写开场白"
+        if self._mode(deal, now) != COPILOT:
+            return "现在不在副驾驶模式（人工接管或暂停），不写开场白"
+        if deal.get("last_message_at"):
+            return "她已经发过消息了：她的消息会自己起草，不用开场白"
+        if self._relay.store.latest_open(party["wxid"], drafts_only=True, system=False) is not None:
+            return "她的草稿正在写，写好会出现在「待审批」里"
+        if any((p.get("meta") or {}).get("lane") not in (LANE_SYSTEM, LANE_BUYIN)
+               for p in self._store.deal_packets(deal["id"], statuses=(PENDING, APPROVED, SENDING))):
+            return "「待审批」里已经有她的草稿"
+        return ""
+
     def set_active(self, party_id: int, active: bool) -> Optional[dict]:
         party = self._store.update_party(int(party_id), active=active, now=self._clock())
         self._parties_changed()
@@ -1694,8 +2670,20 @@ class PrmService:
         """Stage / adopt / mode / shipment / shipment_status from the console (deals.py).  The 聚水潭 sync
         (``_sample_answer``) takes the same way with ``actor`` system, ``review`` (its shipping notice always waits
         for a person), ``notice`` (none for an order signed for already) and ``note`` (which order, in the events).
-        An operator's change of the deal's stage or shipment sees to a deleted order's notice."""
+        An operator's change of the deal's stage or shipment sees to a deleted order's notice.  ``night_done``
+        (「已处理」 on a holding line the night window sent) only drops that notice; ``opening`` (「写开场白」) asks
+        for one 开场白 draft (``ask_opening``); ``group`` / ``group_try`` / ``group_made`` / ``group_none`` are 三方群's
+        (``three_party``: 「拉三方群」, 「先试一下」, 「建好了」, 「没建成」)."""
+        if action == OPENING:
+            return self.ask_opening(data.get("deal_id"))
+        if action in GROUP_ACTIONS:
+            deal_id = data.get("deal_id")
+            if action in ("group", "group_try"):
+                return self.three_party.start(deal_id, dry_run=action == "group_try", actor=actor)
+            return self.three_party.mark(deal_id, made=action == "group_made", actor=actor)
         now = self._clock()
+        if action == NIGHT_DONE:
+            return apply_deal_action(self._store, action, data, now=now, takeover_sec=self._takeover_sec, actor=actor)
         try:
             before = self._store.deal(int(data.get("deal_id")))
         except (TypeError, ValueError):
@@ -1975,17 +2963,26 @@ class PrmService:
 
     def decide(self, packet_id: int, action: str, text: Optional[str] = None) -> dict:
         """An operator's choice: send | edit (send ``text``) | drop a pending draft, or
-        wrong (a sent one should not have gone out: its kind is reviewed again, from zero)."""
+        wrong (a sent one should not have gone out: its kind is reviewed again, from zero; one the night
+        window or 自动模式 sent the same, its record says so).  A 抖音百应 draft (``BUYIN_TOOL``) has its own: copy |
+        manual_sent | drop (``_decide_buyin``); copy / manual_sent are refused for any other draft."""
         packet = self._store.packet(int(packet_id))
         if packet is None:
             return {"ok": False, "error": f"没有找到草稿 {packet_id}"}
         now = self._clock()
+        if is_buyin(packet):
+            return self._decide_buyin(packet, action, text, now)
+        if action in ("copy", "manual_sent"):
+            return {"ok": False, "error": "只有百应私信的草稿能复制、标为已在百应发了"}
         if action == "wrong":
             if not self._store.mark_wrong(packet["id"]):
                 return {"ok": False, "error": "只有已发出的消息能标为发错了（或已经标过）"}
             self._store.set_gate(packet["kind"], gates.REVIEW, now, reset=True)
+            night = packet["route"] == gates.NIGHT
             self._store.add_event(packet["deal_id"], packet["party_id"], "wrong",
-                                  {"packet": packet["id"], "kind": packet["kind"]}, actor="console", now=now)
+                                  {"packet": packet["id"], "kind": packet["kind"], **({"night": True} if night else {}),
+                                   **({"auto": True} if night and (packet.get("meta") or {}).get(AUTO_MODE) else {})},
+                                  actor="console", now=now)
             logger.info("PRM: packet %d marked wrong; %s drafts are reviewed again", packet["id"], packet["kind"])
             return {"ok": True, "status": "wrong"}
         if action == "drop":
@@ -2029,7 +3026,10 @@ class PrmService:
         return {"ok": True, "status": APPROVED}
 
     def _person_decided(self, packet: dict, now: float) -> None:
-        """An operator decided on a draft answering her: her recall (the draft said so) is seen to."""
+        """An operator decided on a draft answering her: her recall (the draft said so) is seen to.  Not by a 百应
+        draft's decision (her recall was in WeChat; ``_decide_buyin`` never comes here)."""
+        if is_buyin(packet):
+            return
         if (packet.get("meta") or {}).get("lane") != LANE_SYSTEM and packet.get("job_id") is not None:
             self._store.drop_notices(packet["deal_id"], lambda n: n["key"] == "recall", now)
 
@@ -2331,6 +3331,8 @@ class PrmService:
                                 action.get("action"))
                     self._wake.set()
                     self._after_platform(packet["id"], record, now)
+                    if action.get("action") == "jst.sample_order":    # her 抖音号 as the order found it
+                        self._creator_ids_notice(packet["deal_id"], now)
                 return
         why = "；".join(record.get("problems") or [])
         if outcome == platforms.VERIFIED and missing:
@@ -2411,8 +3413,8 @@ class PrmService:
         if outbound:
             meta["sent"] = outbound
         # input_closed: the creator's next message is a reply job of its own, not part of this step
-        _, job_id = self._relay.submit(party["wxid"], party["wxid"], "", kind=PRM, meta=meta, fresh=True,
-                                       input_closed=True)
+        _, job_id = self._relay.submit(party["wxid"], party["wxid"], "", kind=PRM, meta=self._reply_meta(meta),
+                                       fresh=True, input_closed=True)
         # what was asked for, when (``_chain``: each product once per round)
         self._store.add_event(deal["id"], party["id"], "next_step", {"job": job_id, "after": packet_id,
                                                                      "delivered": bool(delivered),
@@ -2804,25 +3806,706 @@ class PrmService:
         if dead:
             self._store.drop_notices(deal_id, lambda n: n["key"] in dead, now)
 
-    def _creator_ids(self, deal_id: int) -> dict:
-        """The creator's 抖音号 (and 抖音 UID) as the deal's verified 抖店 sample orders found them: ``{"douyin_ids",
-        "uid"}`` ({} when none), told to the Mac with her draft jobs (``meta.creator``) so its preview of a 专属佣金 can
-        look her up in the invite ledger (``platforms.invite_cover``).  An order the worker recorded before
-        ``created.creator_account`` gives it from the CLI's own answer (its ``daren.platformNo``)."""
-        douyin, uid = [], ""
-        for packet in self._store.deal_packets(deal_id, tools=("jst.sample_order",),
-                                               statuses=(APPROVED, SENDING, SENT, FAILED)):
-            data = packet["platform"] or {}
-            action, execution = data.get("action") or {}, data.get("execution") or {}
-            if execution.get("outcome") != platforms.VERIFIED or action.get("creator_platform") != "dy":
+    # ── 抖音百应私信（PRM_BUYIN_SYNC_MIN） ─────────────────────────────────
+
+    def sweep_buyin(self) -> Optional[int]:
+        """PRM_BUYIN_SYNC_MIN (0 = off, the default): once an interval, one job asks the Mac for the new 抖音百应 private
+        messages (``meta.op = BUYIN_OP``, the cursor of the last answer): the worker runs `dy buyin im-inbox` without
+        the model (read-only) and the answer comes back to ``on_result`` (``_on_buyin_inbox``).  One job at a time (the
+        last one still queued or running: none, so a Mac that is away gets no pile of them); when the last round was is
+        kept in the database (a restart does not ask again at once); after a risk wall the next round waits longer.
+        Returns the job id when one was queued.  Errors are logged (the sender thread goes on)."""
+        if self._buyin_sec <= 0:
+            return None
+        now = self._clock()
+        try:
+            with self._buyin_lock:
+                if now < self._buyin_due(now) or self._relay.store.latest_open(BUYIN_SYNC_CHAT) is not None:
+                    return None
+                self._store.set_meta_value("buyin_sync_at", now)
+                cursor = platforms.im_cursor(_json_value(self._store.meta_value("buyin_cursor")))
+                _, job_id = self._relay.submit(BUYIN_SYNC_CHAT, BUYIN_SYNC_CHAT, "读抖音百应私信（精选联盟）", kind=PRM,
+                                               meta={"op": BUYIN_OP, "cursor": cursor, "limit": platforms.IM_LIMIT},
+                                               fresh=True, input_closed=True)
+        except Exception:
+            logger.exception("PRM: the 百应 private messages could not be asked for")
+            return None
+        logger.info("PRM: job #%d asks for the new 百应 private messages", job_id)
+        return job_id
+
+    def _buyin_due(self, now: float) -> float:
+        """When the next 百应 round is due: an interval after the last one (kept in the database), not before a risk
+        wall's pause ends; a bot that never asked: BUYIN_FIRST_SEC after its start."""
+        last = _float(self._store.meta_value("buyin_sync_at"))
+        if last is None:
+            return self._started + BUYIN_FIRST_SEC
+        pause = _float(self._store.meta_value("buyin_pause_until")) or 0.0
+        return max(min(last, now) + self._buyin_sec, pause)
+
+    def _on_buyin_inbox(self, job: dict, meta: dict) -> bool:
+        """The Mac's answer to a 百应 inbox job (``platforms.check_im_result``): each conversation
+        (``_buyin_conversation``), the cursor for the next round (only when the round went through), how the round
+        went (``_buyin_round_end``); the conversations of nobody on the list quiet for BUYIN_UNMATCHED_DAYS are
+        forgotten.  A job lost or cancelled waits for the next round (the cursor stays: it reads the same again); one
+        that failed is a failed round.  Whatever the status, the job then keeps only a summary of its answer (the
+        creators' words as they wrote them were in it, nobody's on the list too; a job cancelled while the Mac was
+        finishing it has its full answer: review 2026-10-29).  A conversation that could not be taken in (its draft
+        job could not be queued, say) is not marked seen and the cursor stays, so the next round has it again."""
+        status = job["status"]
+        if status not in ("done", "failed"):
+            self._relay.store.replace_result(job["id"], json.dumps(
+                {"op": BUYIN_OP, "summary": None, "status": status}, ensure_ascii=False))
+            return True
+        now = self._clock()
+        result, stopped = None, None
+        if status == "done":
+            try:
+                result = platforms.check_im_result(json.loads(job.get("result_text") or ""))
+            except (ValueError, platforms.ActionError):
+                stopped = {"verdict": "error", "exit_code": None, "message": "Mac 交回的百应私信读不出来"}
+        else:
+            why = _job_error(job)
+            stopped = {"verdict": "old_worker" if "达人编号" in why else "error", "exit_code": None, "message": why}
+        summary = {"conversations": 0, "messages": 0, "drafts": 0, "recorded": 0, "unmatched": 0, "failed": 0,
+                   "skipped": 0, "invited": 0, "contacts": 0, "others_contacts": 0, "typed_contacts": 0}
+        why = ""
+        with self._buyin_lock:
+            if result is not None:
+                index = self._buyin_index()
+                for conv in result["conversations"]:
+                    cid = conv["conversation_id"]
+                    try:
+                        self._buyin_conversation(conv, index, now, summary)
+                        self._buyin_conv_errors.pop(cid, None)
+                    except Exception as e:             # one conversation's trouble does not stop the others
+                        tries = self._buyin_conv_errors.get(cid, 0) + 1
+                        why = why or f"{type(e).__name__}: {e}"[:160]
+                        if tries >= BUYIN_CONV_TRIES and self._buyin_give_up(conv, index, now, summary, why):
+                            self._buyin_conv_errors.pop(cid, None)
+                            logger.exception("PRM: a 百应 conversation failed %d rounds in a row; skipped (its messages "
+                                             "count as seen, the deal says so)", tries)
+                            continue
+                        self._buyin_conv_errors[cid] = tries
+                        summary["failed"] += 1
+                        logger.exception("PRM: a 百应 conversation could not be taken in (%d round(s) in a row); read "
+                                         "again next round", tries)
+                stopped = result["stopped"]
+                if stopped is None and not summary["failed"] and result["cursor"] is not None:
+                    self._store.set_meta_value("buyin_cursor", json.dumps(result["cursor"], ensure_ascii=False))
+            self._buyin_round_end(stopped, now, failed=summary["failed"], why=why)
+            self._store.drop_buyin_threads(unmatched_before=now - BUYIN_UNMATCHED_DAYS * 86400)
+        self._relay.store.replace_result(job["id"], json.dumps(
+            {"op": BUYIN_OP, "summary": summary, "stopped": stopped}, ensure_ascii=False))
+        if result is not None:
+            logger.info("PRM: 百应 inbox #%d: %d conversation(s), %d new message(s), %d draft job(s), %d recorded only, "
+                        "%d of nobody on the list, %d our invite(s); %d contact card(s) in ours, %d in others'; "
+                        "%d line(s) of hers with a contact typed in, in ours",
+                        job["id"], summary["conversations"], summary["messages"], summary["drafts"],
+                        summary["recorded"], summary["unmatched"], summary["invited"], summary["contacts"],
+                        summary["others_contacts"], summary["typed_contacts"])
+        return True
+
+    def _buyin_index(self) -> dict:
+        """Who a 百应 creator is: her 抖音 UID and her 抖音号 (any case) -> the wxids of the registered creators (active)
+        known by them: the 达人名单's 平台 UID and 抖音号 (``creator_directory``; not a 小红书 one) and the ids the deals'
+        verified 抖店 sample orders found (``_creator_ids``).  Her nickname is never used."""
+        parties = {p["wxid"]: p for p in self._store.parties()}
+        index: dict = {"uid": {}, "aweme": {}, "parties": parties}
+
+        def add(table: str, key, wxid: str) -> None:
+            key = str(key or "").strip()
+            if key:
+                index[table].setdefault(key.lower() if table == "aweme" else key, set()).add(wxid)
+
+        rows: list = []
+        if self.creator_directory is not None:
+            try:
+                rows = list(self.creator_directory() or [])
+            except Exception:
+                logger.exception("PRM: the creator list could not be read for the 百应 conversations")
+        for row in rows:
+            wxid = str((row or {}).get("wxid") or "")
+            if wxid not in parties or str(row.get("platform") or "").strip().upper() == "XHS":
                 continue
-            created = execution.get("created") or {}
-            for value in (created.get("creator_account"), action.get("creator_account"), _platform_no(execution)):
-                value = str(value or "").strip()
-                if value and platforms.creator_account_ok(value) and value not in douyin:
-                    douyin.append(value)
-            uid = uid or str(created.get("creator_uid") or action.get("creator_uid") or "")
-        return {"douyin_ids": douyin[:5], "uid": uid} if douyin or uid else {}
+            add("uid", row.get("platform_uid"), wxid)
+            add("aweme", row.get("platform_no"), wxid)
+        for wxid, party in parties.items():
+            ids = self._creator_ids(self._store.deal_of(party["id"])["id"])
+            add("uid", ids.get("uid"), wxid)
+            for douyin in ids.get("douyin_ids") or []:
+                add("aweme", douyin, wxid)
+        return index
+
+    def _buyin_party(self, creator: dict, index: dict) -> Optional[dict]:
+        """The registered creator a 百应 conversation is (``_buyin_index``), or None: nobody, or more than one (never
+        a guess)."""
+        wxids = set(index["uid"].get(creator.get("uid") or "", ())) | set(
+            index["aweme"].get(str(creator.get("aweme_id") or "").lower(), ()) if creator.get("aweme_id") else ())
+        if len(wxids) > 1:
+            logger.warning("PRM: a 百应 conversation fits %d registered creators; taken as nobody's", len(wxids))
+        return index["parties"][next(iter(wxids))] if len(wxids) == 1 else None
+
+    @staticmethod
+    def _buyin_text(msg: dict) -> str:
+        """One 百应 message as a line of the draft (a card or another kind says so)."""
+        head = BUYIN_KINDS.get(msg.get("kind"), "")
+        return " ".join(t for t in (head, str(msg.get("text") or "")) if t) or "[其他消息]"
+
+    def _buyin_conversation(self, conv: dict, index: dict, now: float, summary: dict) -> None:
+        """One conversation of a 百应 round (under ``_buyin_lock``): only the messages it has not seen (by id).  A
+        registered creator's (``_buyin_party``): every new line, hers and ours (an operator in 百应: no takeover, it
+        is no WeChat line), is recorded masked as a ``buyin_message`` event (once per message id), hers count as a
+        sign of life for the 8.2 clean-up (the deal's ``updated_at``; never its ``last_message_at``: that is her
+        latest WeChat line, the round of the WeChat holding reply, review 2026-10-29), and new lines of hers become a
+        draft job (``_buyin_draft_job``).  The messages count as seen only once that is done (a job that could not be
+        queued raises: they come again with the next round).  Nobody's on the list: no party is made (a wxid cannot
+        be made up, and the 达人名单 would get it); only her nickname, how many of her lines wait since our last one
+        and when, for the 待审批 page's line (none of her words is kept), and our invite when it is one.
+
+        Who she is: her 抖音 UID / 抖音号 as this round or an earlier one gave them (the 百应 page itself gives neither,
+        only her 百应 id: the Mac's invite ledger match gives her 抖音号 while our invite card is in what it read, and
+        the conversation keeps it, with ``invited``, after the card has scrolled out).  Her contact cards (kind
+        "contact") are recorded only masked (``buyin_contact_line``); in a conversation that is ours (our invite, or a
+        registered creator's) each new one goes to ``on_buyin_contact`` with its values (``_buyin_contacts``), in any
+        other only their number is kept (``others_contacts``).  So does each new line of hers in ours with a contact
+        typed in it (``contact.first_contacts``: a 微信号 only after a label; source "buyin_text"); her lines are
+        recorded with the 微信号 masked (``buyin_text_line``), the phone a 〈手机N〉 as on WeChat; her nickname has
+        both masked."""
+        cid = conv["conversation_id"]
+        creator = conv["creator"]
+        thread = self._store.buyin_thread(cid) or {}
+        known = set(thread.get("seen") or [])
+        new = [m for m in conv["messages"] if m["id"] not in known]
+        summary["conversations"] += 1
+        summary["messages"] += len(new)
+        stamp = [(m, float(m["at"] or now)) for m in new]
+        hers = [at for m, at in stamp if m["from"] == "creator"]
+        ours = [at for m, at in stamp if m["from"] == "shop"]
+        invited = conv.get("invited") or thread.get("invited") or None
+        # somebody else's invite card on this shop (the Mac's ``invite_match``: a colleague's), kept once seen; ours wins
+        other = invited is None and bool(conv.get("other_invite") or thread.get("other_invite"))
+        fields = {"nickname": contact.mask_contacts(pii.mask_numbers(creator.get("nickname") or ""))
+                  or thread.get("nickname") or "",
+                  "creator_uid": creator.get("uid") or thread.get("creator_uid") or "",
+                  "aweme_id": creator.get("aweme_id") or thread.get("aweme_id") or "",
+                  "buyin_id": creator.get("buyin_id") or thread.get("buyin_id") or "", "invited": invited,
+                  "other_invite": other,
+                  "seen": [*(thread.get("seen") or []), *(m["id"] for m in new)][-BUYIN_SEEN:],
+                  "last_creator_at": max([float(thread.get("last_creator_at") or 0), *hers]) or None,
+                  "last_shop_at": max([float(thread.get("last_shop_at") or 0), *ours]) or None}
+        party = self._buyin_party({"uid": fields["creator_uid"], "aweme_id": fields["aweme_id"]}, index)
+        if conv.get("invited"):
+            summary["invited"] += 1
+        cards = [(m, at) for m, at in stamp if m["kind"] == "contact"]
+        mine = party is not None or invited is not None
+        # her own words with a contact typed in (only in ours: another person's conversation is never looked into)
+        typed = [(m, at, found) for m, at in stamp if mine and m["from"] == "creator" and m["kind"] == "text"
+                 for found in (contact.first_contacts(m.get("text")),) if found]
+        added: dict = {}
+        if cards and not mine:
+            summary["others_contacts"] += len(cards)    # somebody else's conversation: not ours to handle
+            fields["contacts"] = int(thread.get("contacts") or 0) + len(cards)
+        elif cards or typed:
+            summary["contacts"] += len(cards)
+            summary["typed_contacts"] += len(typed)
+            added = self._buyin_contacts(cid, cards, fields, party, invited, typed=typed)
+        if party is None:
+            waiting = int(thread.get("unanswered") or 0) if thread.get("party_id") is None else 0
+            for m, _ in sorted(stamp, key=lambda pair: pair[1]):
+                waiting = waiting + 1 if m["from"] == "creator" else 0
+            self._store.save_buyin_thread(cid, now, party_id=None, unanswered=waiting, **fields)
+            if waiting:
+                summary["unmatched"] += 1
+            return
+        deal = self._store.deal_of(party["id"], now)
+        recorded = {d.get("id") for d in self._buyin_lines(deal["id"], cid)}
+        for m, at in sorted(stamp, key=lambda pair: pair[1]):
+            if m["id"] in recorded:
+                continue                               # (recorded by a round whose job could not be queued)
+            if m["kind"] == "contact":                 # masked here, never through the pii tokens (they keep values)
+                text = f"[{_clock_text(at)}] {buyin_contact_line(m.get('contact'), added.get(m['id']))}"
+            else:                                      # her phone a 〈手机N〉 (as on WeChat), a 微信号 masked
+                text = buyin_text_line(self._mask(party["id"], f"[{_clock_text(at)}] {self._buyin_text(m)}", now),
+                                       added.get(m["id"]))
+            self._store.add_event(deal["id"], party["id"], "buyin_message", {
+                "conversation": cid, "id": m["id"], "from": m["from"], "kind": m["kind"], "text": text, "at": at},
+                actor="creator" if m["from"] == "creator" else "operator", now=now)
+        if hers:
+            self._store.update_deal(deal["id"], now)   # a sign of life (updated_at), not her WeChat round
+        answered = max(float(fields["last_shop_at"] or 0), float(thread.get("answered_upto") or 0))
+        if hers:
+            self._buyin_draft_job(party, deal, cid, now, summary, answered=answered, nickname=fields["nickname"],
+                                  aweme=fields["aweme_id"])
+        self._store.save_buyin_thread(cid, now, party_id=party["id"], deal_id=deal["id"], unanswered=0, **fields)
+        self._buyin_notices_answered(deal["id"], cid, answered, now)
+
+    def _buyin_contacts(self, cid: str, cards: list, fields: dict, party: Optional[dict],
+                        invited: Optional[dict], typed: tuple | list = ()) -> dict:
+        """Tell ``on_buyin_contact`` (when it is set) of each new contact card ``cards`` (``[(message, at)]``) of a 百应
+        conversation that is ours, and of each new line of hers with a contact typed in (``typed``: ``[(message, at,
+        {"wechat"?, "phone"?})]``, ``contact.first_contacts``), oldest first, once per message the conversation had not
+        seen (calling it again for the same one, after a round that could not be taken in, is for the hook to bear).
+        The event::
+
+            {"source": "buyin_card" | "buyin_text", "conversation_id", "message_id", "at",
+             "creator": {"aweme_id", "uid": <her 百应 id or "">, "nickname": <numbers masked>},
+             "contact": {"wechat": <full or "">, "phone": <full or "">, "unavailable": bool, "why": <str or "">},
+             "party_id": <the registered creator's id or None>, "invited": <our invite or None>}
+
+        Its answer ``{"id": int, "state", "masked"}`` gives the id the masked line names (message id -> id); a hook
+        that raises is logged without any value and the round goes on."""
+        hook = getattr(self, "on_buyin_contact", None)
+        if not callable(hook):
+            return {}
+        told = []
+        for m, at in cards:
+            card = m.get("contact") if isinstance(m.get("contact"), dict) else {"unavailable": True, "why": "unknown"}
+            unavailable = bool(card.get("unavailable")) or not (card.get("wechat") or card.get("phone"))
+            told.append((at, m, "buyin_card", {"wechat": "" if unavailable else str(card.get("wechat") or ""),
+                                               "phone": "" if unavailable else str(card.get("phone") or ""),
+                                               "unavailable": unavailable,
+                                               "why": str(card.get("why") or "unknown") if unavailable else ""}))
+        for m, at, found in typed:
+            told.append((at, m, "buyin_text", {"wechat": str(found.get("wechat") or ""),
+                                               "phone": str(found.get("phone") or ""), "unavailable": False, "why": ""}))
+        out = {}
+        for at, m, source, values in sorted(told, key=lambda item: item[0]):
+            event = {"source": source, "conversation_id": cid, "message_id": m["id"], "at": at,
+                     "creator": {"aweme_id": fields["aweme_id"], "uid": fields["buyin_id"],
+                                 "nickname": fields["nickname"]},
+                     "contact": values, "party_id": party["id"] if party is not None else None,
+                     "invited": dict(invited) if invited else None}
+            try:
+                answer = hook(event)
+            except Exception as e:                     # never the values: the event holds them, the message may too
+                logger.warning("PRM: on_buyin_contact failed on a 百应 %s (%s); the round goes on",
+                               "contact card" if source == "buyin_card" else "line with a contact typed in",
+                               type(e).__name__)
+                continue
+            if isinstance(answer, dict) and isinstance(answer.get("id"), int) and not isinstance(answer["id"], bool):
+                out[m["id"]] = answer["id"]
+        return out
+
+    def _buyin_lines(self, deal_id: int, cid: str) -> list:
+        """The conversation's lines the deal recorded (``buyin_message`` events: masked), oldest first."""
+        rows = [dict(ev["detail"]) for ev in self._store.events(deal_id, limit=500, kinds=("buyin_message",))
+                if ev["detail"].get("conversation") == cid]
+        return sorted(rows, key=lambda d: float(d.get("at") or 0))
+
+    def _buyin_conversations_of(self, deal_id: int) -> set:
+        """The 百应 conversations a deal had (its threads, and those its recorded lines name)."""
+        named = {str(ev["detail"].get("conversation") or "")
+                 for ev in self._store.events(deal_id, limit=None, kinds=("buyin_message",))}
+        return {c for c in named | {t["conversation_id"] for t in self._store.buyin_threads(deal_id=deal_id)} if c}
+
+    def _buyin_draft_job(self, party: dict, deal: dict, cid: str, now: float, summary: dict, *, answered: float,
+                         nickname: str = "", aweme: str = "") -> Optional[int]:
+        """The draft job of a registered creator's 百应 lines not answered yet (under ``_buyin_lock``): after
+        ``answered`` (our last line in that conversation, or the lines of a 百应 draft an operator decided on).  Those
+        not older than BUYIN_MAX_AGE_SEC go as her message, the conversation before them as its history.  Its own chat
+        (``BUYIN_CHAT`` + the conversation id): no WeChat job takes them in nor they a WeChat line; a queued job of the
+        same conversation is cancelled (its lines are in this one).  Nothing is lost silently (review 2026-10-29): her
+        lines read too late have the deal's notice ``buyin_old:<conversation>``; while a person has the deal (人工接管 /
+        暂停, a WeChat takeover included) they are not drafted and ``buyin_held:<conversation>`` says so, until the deal
+        is back in copilot mode (``sweep_buyin_held`` drafts them then) or they are answered (``_buyin_notices_answered``).
+        Like a WeChat draft its meta has her 抖音号 (``creator``: ``_creator_ids`` and the conversation's ``aweme``) for
+        the Mac's invite background (worker ``invite_block``).  None when no job was made."""
+        lines = self._buyin_lines(deal["id"], cid)
+        waiting = [d for d in lines if d.get("from") == "creator" and float(d.get("at") or 0) > answered]
+        if not waiting:
+            summary["recorded"] += 1
+            return None
+        hers = [d for d in waiting if now - float(d.get("at") or 0) <= BUYIN_MAX_AGE_SEC]
+        stale = [d for d in waiting if d not in hers]
+        if stale:
+            self._store.set_notice(deal["id"], f"buyin_old:{cid}", (
+                f"她在百应私信里有 {len(stale)} 条消息读到时已经过了 {BUYIN_MAX_AGE_SEC // 3600} 小时（最早 "
+                f"{_clock_text(min(float(d['at']) for d in stale))}），没有起草：请到百应里看、在百应里回"), now,
+                conversation=cid, upto=max(float(d["at"]) for d in stale))
+        mode = self._mode(deal, now)
+        if mode != COPILOT:
+            summary["recorded"] += 1
+            self._buyin_hold(deal["id"], cid, waiting, mode, now)
+            logger.info("PRM: party %d wrote in 百应 while the deal is %s; recorded, not drafted (the deal says so)",
+                        party["id"], mode)
+            return None
+        if not hers:
+            summary["recorded"] += 1
+            return None
+        ids = {d.get("id") for d in hers}
+        upto = max(float(d.get("at") or 0) for d in hers)
+        history = [{"who": "operator" if d.get("from") == "shop" else "creator", "text": str(d.get("text") or "")}
+                   for d in lines if d.get("id") not in ids and float(d.get("at") or 0) <= upto][-BUYIN_HISTORY:]
+        creator = self._creator_ids(deal["id"])
+        aweme = str(aweme or "").strip()
+        if (aweme and platforms.creator_account_ok(aweme)
+                and aweme.lower() not in {d.lower() for d in creator.get("douyin_ids") or []}):
+            creator = {"uid": "", **creator, "douyin_ids": [*(creator.get("douyin_ids") or []), aweme][:5]}
+        meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"], "channel": BUYIN_CHANNEL,
+                "conversation": cid, "buyin_name": nickname, "upto": upto, "lines": len(hers),
+                **({"creator": creator} if creator else {}), **({"history": history} if history else {})}
+        chat = BUYIN_CHAT + cid
+        older = self._relay.store.latest_open(chat, drafts_only=True)
+        if older is not None and older["status"] == "pending":
+            self._relay.store.cancel_if_pending(older["id"], now)
+        _, job_id = self._relay.submit(chat, chat, "\n".join(str(d.get("text") or "") for d in hers), kind=PRM,
+                                       meta=meta, fresh=True, input_closed=True)
+        self._store.drop_notices(deal["id"], lambda n: n["key"] == f"buyin_held:{cid}", now)
+        summary["drafts"] += 1
+        logger.info("PRM: party %d's %d new 百应 line(s) -> job #%d", party["id"], len(hers), job_id)
+        return job_id
+
+    def _buyin_held_text(self, notice: dict, mode: str, active: bool) -> str:
+        """What a ``buyin_held`` notice says, honestly for now: while a person has the deal she will be drafted for
+        after it; with the switch off, or the creator off the list, nothing will be (re-enabling her, or the switch,
+        drafts it then)."""
+        count = int(notice.get("count") or 1)
+        earliest = _clock_text(float(notice.get("earliest") or notice.get("at") or 0))
+        said = f"她在百应私信里发了 {count} 条消息（最早 {earliest}），没有起草："
+        if self._buyin_sec <= 0:
+            return said + "百应私信的起草已经关了（PRM_BUYIN_SYNC_MIN=0），请直接到百应里回"
+        if not active:
+            return said + "这位达人已停用，不会起草（重新启用后会起草一份），请直接到百应里回"
+        if mode != COPILOT:
+            return f"{MODES.get(mode, mode)}期间{said}恢复副驾驶后会起草一份，急的话直接到百应里回"
+        return said + "马上起草一份"
+
+    def _buyin_hold(self, deal_id: int, cid: str, waiting: list, mode: str, now: float) -> None:
+        """Her 百应 lines ``waiting`` are not drafted because a person has the deal: its notice ``buyin_held:<cid>``
+        (how many, the earliest, ``upto`` the newest: ``_buyin_notices_answered``), drafted once the deal is back in
+        copilot mode (``sweep_buyin_held``)."""
+        if not waiting:
+            return
+        data = {"conversation": cid, "count": len(waiting), "earliest": min(float(d["at"]) for d in waiting),
+                "upto": max(float(d["at"]) for d in waiting)}
+        self._store.set_notice(deal_id, f"buyin_held:{cid}", self._buyin_held_text(data, mode, True), now, **data)
+
+    def _buyin_give_up(self, conv: dict, index: dict, now: float, summary: dict, why: str) -> bool:
+        """A conversation that failed BUYIN_CONV_TRIES rounds in a row (``_on_buyin_inbox``): its new messages count as
+        seen, so the cursor moves on and the others are not crowded out, and a registered creator's deal says how many
+        of her lines were skipped (``buyin_skipped:<conversation>``, until she is answered); nothing of it is drafted.
+        False when even that could not be done (the round counts it as failed then)."""
+        cid = conv["conversation_id"]
+        try:
+            thread = self._store.buyin_thread(cid) or {}
+            known = set(thread.get("seen") or [])
+            new = [m for m in conv["messages"] if m["id"] not in known]
+            self._store.save_buyin_thread(cid, now, seen=[*(thread.get("seen") or []), *(m["id"] for m in new)][-BUYIN_SEEN:])
+            summary["skipped"] += 1
+            hers = [float(m["at"] or now) for m in new if m["from"] == "creator"]
+            try:
+                party = self._buyin_party({"uid": conv["creator"].get("uid") or thread.get("creator_uid") or "",
+                                           "aweme_id": conv["creator"].get("aweme_id") or thread.get("aweme_id") or ""},
+                                          index)
+            except Exception:
+                party = None
+            if party is not None and hers:
+                deal = self._store.deal_of(party["id"], now)
+                self._store.set_notice(deal["id"], f"buyin_skipped:{cid}", (
+                    f"她在百应私信里有 {len(hers)} 条消息（最早 {_clock_text(min(hers))}），机器人连续 {BUYIN_CONV_TRIES} 轮"
+                    f"都处理不了（{why[:80]}），跳过了、没有起草：请到百应里看、在百应里回"), now, conversation=cid,
+                    upto=max(hers))
+            return True
+        except Exception:
+            logger.exception("PRM: a 百应 conversation could not even be skipped")
+            return False
+
+    def _buyin_notices_answered(self, deal_id: int, cid: str, answered: float, now: float) -> None:
+        """Her 百应 lines up to ``answered`` are answered (our line in 百应, an operator's decision on a 百应 draft): the
+        deal's notices of that conversation's lines held back, read too late or skipped that they cover go."""
+        keys = (f"buyin_held:{cid}", f"buyin_old:{cid}", f"buyin_skipped:{cid}")
+        self._store.drop_notices(deal_id, lambda n: n["key"] in keys and float(n.get("upto") or 0) <= answered, now)
+
+    def sweep_buyin_held(self) -> int:
+        """Her 百应 lines held back while a person had the deal (``buyin_held:<conversation>``): once the deal is back in
+        copilot mode (the takeover ran out, an operator switched it back), she is on the list and the switch is on, one
+        draft job of the lines still not answered (``_buyin_draft_job``); nothing left to draft (answered meanwhile, or
+        all too old: their own notice), the notice goes.  Otherwise the notice is kept and says why nothing is drafted
+        (``_buyin_held_text``: a person has the deal, she is off the list, the switch is off; ``touch=False``).  A
+        conversation whose job cannot be queued is tried again every round, its failure logged once BUYIN_LOG_EVERY_SEC.
+        Returns how many jobs were queued."""
+        now = self._clock()
+        asked = 0
+        for deal in self._store.deals_with_notice_prefix("buyin_held:"):
+            party = self._store.party(deal["party_id"])
+            active = bool(party and party.get("active"))
+            mode = self._mode(deal, now)
+            for notice in [n for n in deal["notices"] if str(n["key"]).startswith("buyin_held:")]:
+                cid = str(notice.get("conversation") or notice["key"].split(":", 1)[1])
+                if self._buyin_sec <= 0 or not active or mode != COPILOT:
+                    text = self._buyin_held_text(notice, mode, active)
+                    if text != notice.get("text"):
+                        self._store.set_notice(deal["id"], notice["key"], text, now, touch=False)
+                    continue
+                try:
+                    with self._buyin_lock:
+                        thread = self._store.buyin_thread(cid) or {}
+                        answered = max(float(thread.get("last_shop_at") or 0), float(thread.get("answered_upto") or 0))
+                        summary = {"drafts": 0, "recorded": 0}
+                        job_id = self._buyin_draft_job(party, self._store.deal(deal["id"]) or deal, cid, now, summary,
+                                                       answered=answered, nickname=thread.get("nickname") or "",
+                                                       aweme=thread.get("aweme_id") or "")
+                        if job_id is None:
+                            self._store.drop_notices(deal["id"], lambda n: n["key"] == notice["key"], now)
+                        else:
+                            asked += 1
+                        self._buyin_held_logged.pop(notice["key"], None)
+                except Exception:
+                    last = self._buyin_held_logged.get(notice["key"])
+                    if last is None or now - last >= BUYIN_LOG_EVERY_SEC:
+                        self._buyin_held_logged[notice["key"]] = now
+                        logger.exception("PRM: the 百应 lines held back in deal %d could not be drafted; tried again "
+                                         "every round (said again in %d min if it goes on)", deal["id"],
+                                         BUYIN_LOG_EVERY_SEC // 60)
+        if asked:
+            logger.info("PRM: %d 百应 conversation(s) held back while a person had the deal: drafted now", asked)
+        return asked
+
+    def _buyin_scrub_jobs(self) -> int:
+        """A 百应 inbox job handled already that still holds the Mac's answer as it came (a bot from before this
+        rule, a job cut off): only a summary stays (the clean-up after any slip; ``purge_due`` and ``start``).  A job
+        not handed to ``on_result`` yet is left alone.  Returns how many."""
+        done = 0
+        for job in self._relay.store.recent(BUYIN_SYNC_CHAT, limit=500):
+            if job["status"] in ("pending", "running") or not job.get("delivered"):
+                continue
+            try:
+                value = json.loads(job.get("result_text") or "")
+            except ValueError:
+                value = None
+            if isinstance(value, dict) and "conversations" in value:
+                self._relay.store.replace_result(job["id"], json.dumps(
+                    {"op": BUYIN_OP, "summary": None, "status": job["status"]}, ensure_ascii=False))
+                done += 1
+        if done:
+            logger.info("PRM: %d 百应 inbox job(s) still held the answer as it came; only a summary is kept now", done)
+        return done
+
+    def _buyin_round_end(self, stopped: Optional[dict], now: float, failed: int = 0, why: str = "") -> None:
+        """How the 百应 round went (``buyin_status`` in the database, what the 待审批 page says).  Through: nothing to
+        say.  Stopped by a login lapsed (77), a risk wall (76: the next round waits BUYIN_RISK_PAUSE_SEC, two intervals
+        at least), another shop (79), a CLI without the command or too old, a worker too old: said at once
+        (``BUYIN_PROBLEMS``); a hiccup (no answer, the lock busy) only after BUYIN_ERRORS rounds in a row.  The next
+        round comes after the interval as ever (a CLI that has no reader yet is asked once an interval, no more).  A round
+        that went through but had ``failed`` conversations (not taken in, read again next round): said from the second
+        such round in a row (``BUYIN_PROBLEMS["conversations"]``), until a round has none (one failing BUYIN_CONV_TRIES
+        rounds is skipped: ``_buyin_give_up``)."""
+        if stopped is None and failed:
+            self._buyin_errors = 0
+            self._buyin_fail_rounds += 1
+            if self._buyin_fail_rounds < 2:
+                logger.warning("PRM: %d 百应 conversation(s) not taken in (%s); read again next round", failed, why)
+                return
+            stopped = {"verdict": "conversations", "message": why}
+        elif stopped is None:
+            self._buyin_fail_rounds = 0
+            if self._buyin_errors or self._store.meta_value("buyin_status"):
+                logger.info("PRM: the 百应 private messages came through again")
+            self._buyin_errors = 0
+            self._store.set_meta_value("buyin_status", "")
+            return
+        verdict, message = stopped.get("verdict") or "error", str(stopped.get("message") or "")
+        pause = 0
+        if verdict == "wall":
+            pause = max(2 * self._buyin_sec, BUYIN_RISK_PAUSE_SEC)
+            self._store.set_meta_value("buyin_pause_until", now + pause)
+        if verdict == "conversations":
+            text = BUYIN_PROBLEMS["conversations"].format(count=failed, rounds=self._buyin_fail_rounds,
+                                                          message=message[:120], tries=BUYIN_CONV_TRIES)
+        elif verdict in BUYIN_PROBLEMS and verdict != "error":
+            text = BUYIN_PROBLEMS[verdict].format(pause=pause // 60, message=message[:160])
+        else:
+            self._buyin_errors += 1
+            if self._buyin_errors < BUYIN_ERRORS:
+                logger.warning("PRM: the 百应 private messages did not come through (%s: %s); asked again next round",
+                               verdict, message[:200])
+                return
+            text = BUYIN_PROBLEMS["error"].format(count=self._buyin_errors, message=message[:160])
+        old = _json_value(self._store.meta_value("buyin_status"))
+        if not isinstance(old, dict) or old.get("text") != text:
+            logger.warning("PRM: the 百应 private messages are not read: %s", text)
+            self._store.set_meta_value("buyin_status", json.dumps({"verdict": verdict, "text": text, "at": now},
+                                                                  ensure_ascii=False))
+
+    def _on_buyin_draft(self, job: dict, meta: dict, deal: dict, now: float) -> bool:
+        """A 百应 draft job ended (``meta.channel == BUYIN_CHANNEL``).  Its draft is a packet an operator copies and sends
+        in 百应 by hand (``BUYIN_TOOL``, chat ``BUYIN_CHAT`` + the conversation): always waiting for a person (no gate:
+        ``deals.route_for`` is never asked), no files, no platform action (one the draft names is left out, unrun),
+        a newer 百应 draft of the same conversation supersedes it and only it (never a WeChat draft, nor the other way).
+        A person has the deal (人工接管 / 暂停): superseded, like every draft then.  A job that gave no draft: the deal
+        says so (``buyin:<conversation>``) until the next 百应 draft of that conversation or a decision; nothing of it
+        goes into a WeChat draft job (the WeChat ``failed:`` notices are not used)."""
+        party_id, deal_id = int(meta["party_id"]), int(deal["id"])
+        cid = str(meta.get("conversation") or "")
+        key = f"buyin:{cid}"
+        status = job["status"]
+        if status == "cancelled":
+            return True                                # (a newer one of the same conversation has its lines)
+        if self._store.packet_for_job(job["id"]) is not None:
+            return True                                # already drafted (a repeated delivery)
+        head = ""
+        draft = None
+        if status in ("failed", "lost"):
+            head = "Mac 失联了" if status == "lost" else _job_error(job)
+        else:
+            try:
+                draft = parse_draft(job.get("result_text") or "")
+            except DraftError as e:
+                head = f"草稿格式不对（{e.code}）"
+        if draft is None:
+            self._store.add_event(deal_id, party_id, "buyin_draft_failed", {"job": job["id"], "conversation": cid,
+                                                                             "why": head[:200]}, actor="mac", now=now)
+            self._store.set_notice(deal_id, key, f"#{job['id']} 百应私信的草稿没写成（{head[:120]}）：她在百应里的消息请直接"
+                                   "到百应里回", now, conversation=cid)
+            logger.warning("PRM: 百应 draft job #%d gave no draft: %s", job["id"], head[:200])
+            return True
+        draft = self._mask_draft(party_id, draft, now)
+        notes = []
+        if draft.platform is not None or draft.platform_refused:
+            notes.append("百应私信的草稿不带平台动作：草稿里写的平台动作去掉了，平台上什么都不会做；回复要是说已经开好、建好了，发之前请核对")
+        named = draft.attachments_named if draft.attachments_named is not None else draft.attachments_to_send
+        if named or self._relay.store.outfiles(job["id"]):
+            notes.append("百应私信不带附件：草稿要附的文件没有附上" + (f"（{'、'.join(named[:3])}）" if named else "")
+                         + "，需要的话到百应里自己发")
+        mode = self._mode(deal, now)
+        newer = self._relay.store.latest_open(job["chat_id"], drafts_only=True)
+        # a newer job of the conversation came back first (its draft is pending, or decided): this one has fewer of her
+        # lines and never puts that one out of date (review 2026-10-29)
+        drafted = any(p["chat_id"] == job["chat_id"] and int(p.get("job_id") or 0) > int(job["id"])
+                      for p in self._store.deal_packets(deal_id, tools=(BUYIN_TOOL,)))
+        if not draft.reply_draft:
+            state = NO_REPLY
+        elif mode != COPILOT:
+            state = SUPERSEDED                         # a person has the deal (a WeChat takeover too): held back
+        elif (newer is not None and newer["id"] > job["id"]) or drafted:
+            state = SUPERSEDED                         # she wrote again in 百应: a newer draft is coming, or here
+        else:
+            state = PENDING
+        if state == SUPERSEDED and mode != COPILOT:
+            # a person took the deal while it was drafted (a WeChat takeover too): her lines wait for the end of it
+            # (``sweep_buyin_held`` drafts them once), the deal says so (re-review 2026-10-29: nothing was left)
+            with self._buyin_lock:
+                thread = self._store.buyin_thread(cid) or {}
+                answered = max(float(thread.get("last_shop_at") or 0), float(thread.get("answered_upto") or 0))
+                self._buyin_hold(deal_id, cid, [d for d in self._buyin_lines(deal_id, cid) if d.get("from") == "creator"
+                                                and float(d.get("at") or 0) > answered], mode, now)
+        packet_meta = {"channel": BUYIN_CHANNEL, "lane": LANE_BUYIN, "conversation": cid,
+                       "buyin_name": str(meta.get("buyin_name") or ""), "upto": _float(meta.get("upto")),
+                       "lines": int(meta.get("lines") or 0), "said": str(job.get("text") or "")[:BUYIN_SAID_CHARS]}
+        packet_id = self._store.add_packet(
+            deal_id=deal_id, party_id=party_id, job_id=job["id"], chat_id=job["chat_id"], kind=draft.message_kind,
+            text=draft.reply_draft, attachments=[], intent=draft.intent, slots=draft.slots,
+            stage_proposal=draft.stage_proposal, needs_attention=draft.needs_attention or bool(notes),
+            reason="；".join(r for r in (*notes, draft.reason) if r)[:500], status=state, route=gates.REVIEW,
+            meta=packet_meta, tool=BUYIN_TOOL, platform=None, now=now)
+        if state == PENDING:
+            self._store.supersede(deal_id, now, keep=packet_id, lane=LANE_BUYIN, chat_id=job["chat_id"])
+        elif state == NO_REPLY:
+            self._buyin_answered(self._store.packet(packet_id) or {}, now)     # nothing to say to those lines
+        self._store.update_deal(deal_id, now, merge_slots=draft.slots, stage_proposal=draft.stage_proposal)
+        self._store.drop_notices(deal_id, lambda n: n["key"] == key, now)
+        self._store.set_notice(deal_id, DRAFT_NOTES + LANE_BUYIN, "；".join(
+            [*notes, *([draft.reason] if draft.needs_attention and draft.reason else [])]), now)
+        logger.info("PRM: 百应 job #%d -> packet %d (%s, %s)", job["id"], packet_id, state, draft.message_kind)
+        return True
+
+    def _buyin_answered(self, packet: dict, now: float) -> None:
+        """An operator decided on a 百应 draft (sent it in 百应 by hand, or not): her lines it answered are answered (the
+        next draft of the conversation does not take them again)."""
+        cid = str((packet.get("meta") or {}).get("conversation") or "")
+        upto = _float((packet.get("meta") or {}).get("upto"))
+        if not cid or upto is None:
+            return
+        with self._buyin_lock:
+            thread = self._store.buyin_thread(cid)
+            if thread is not None and float(thread.get("answered_upto") or 0) < upto:
+                self._store.save_buyin_thread(cid, now, answered_upto=upto)
+            if thread is not None:
+                self._buyin_notices_answered(packet["deal_id"], cid, max(upto, float(thread.get("last_shop_at") or 0)),
+                                             now)
+
+    def _decide_buyin(self, packet: dict, action: str, text: Optional[str], now: float) -> dict:
+        """An operator's choice on a 百应 draft (``decide``): copy (the reply with the full numbers back, for 百应: each
+        copy is written down like 显示完整号码; ``text``: as edited, kept for the record) | manual_sent (the operator
+        says it went out in 百应: sent, ``sent_by_hand``, ``text`` what went out when it was edited; no takeover, no
+        gate, the bot sends nothing) | drop (不发).  The bot never sends it: send / edit / execute / wrong are refused."""
+        if action not in ("copy", "manual_sent", "drop"):
+            if action == "wrong":
+                return {"ok": False, "error": "百应私信是运营在百应里手动发的，不能标为发错了（它也不算进微信的自动发送门槛）"}
+            return {"ok": False, "error": "百应私信的草稿机器人发不了：点「复制」到百应里发给达人，发完点「已在百应发了」"}
+        cid = str((packet.get("meta") or {}).get("conversation") or "")
+        if action == "drop":
+            if not self._store.move(packet["id"], (PENDING,), DROPPED, decided_at=now):
+                return {"ok": False, "error": "这条草稿已经处理过了"}
+            self._buyin_answered(packet, now)
+            self._store.drop_notices(packet["deal_id"], lambda n: n["key"] == f"buyin:{cid}", now)
+            return {"ok": True, "status": DROPPED}
+        have = packet["final_text"] if packet.get("final_text") is not None else packet["text"]
+        final = have if text is None else str(text).strip()
+        if len(final) > MAX_DRAFT_CHARS:
+            return {"ok": False, "error": f"最多 {MAX_DRAFT_CHARS} 个字"}
+        if not final:
+            return {"ok": False, "error": "没有要发的内容"}
+        tokens = self._store.tokens(packet["party_id"])
+        unknown = pii.unknown_tokens(final, tokens)
+        if unknown:
+            return {"ok": False, "error": f"草稿里有对不上的占位符：{'、'.join(unknown)}（号码可能已按规定清除）"}
+        edited = int(final != packet["text"])
+        if action == "copy":
+            if packet["status"] != PENDING:
+                return {"ok": False, "error": "这条草稿已经处理过了"}
+            if final != have and not self._store.move(packet["id"], (PENDING,), PENDING, final_text=final,
+                                                      edited=edited):
+                return {"ok": False, "error": "这条草稿已经处理过了"}
+            used = sorted({m.group(0) for m in pii.TOKEN.finditer(final)})
+            self._store.add_event(packet["deal_id"], packet["party_id"], "buyin_copy",
+                                  {"packet": packet["id"], "edited": bool(edited), "tokens": used}, actor="console",
+                                  now=now)
+            return {"ok": True, "status": PENDING, "text": pii.unmask(final, tokens)}
+        # manual_sent: also for a draft a newer one superseded a moment ago (it was copied and sent before)
+        if not self._store.move(packet["id"], (PENDING, SUPERSEDED), SENT, decided_at=now, sent_at=now,
+                                final_text=final, edited=edited, outcome="sent_by_hand"):
+            return {"ok": False, "error": "这条草稿已经处理过了"}
+        self._buyin_answered(packet, now)
+        self._store.drop_notices(packet["deal_id"], lambda n: n["key"] == f"buyin:{cid}", now)
+        self._store.add_event(packet["deal_id"], packet["party_id"], "buyin_sent",
+                              {"packet": packet["id"], "conversation": cid, "edited": bool(edited)}, actor="console",
+                              now=now)
+        logger.info("PRM: 百应 draft %d sent in 百应 by hand (an operator says)", packet["id"])
+        return {"ok": True, "status": SENT}
+
+    def _creator_ids(self, deal_id: int) -> dict:
+        """The creator's 抖音号 (and 抖音 UID): ``{"douyin_ids", "uid"}`` ({} when none), told to the Mac with her draft
+        jobs (``meta.creator``) so its preview of a 专属佣金 can look her up in the invite ledger
+        (``platforms.invite_cover``), and read by the 百应 inbox to know her conversations (``_buyin_index``).  First
+        those her deal's verified 抖店 sample orders found (``_sample_creator_ids``), then those an operator linked
+        her to (``creator_links``: 加百应达人微信 or 登记达人's 抖音号; any case once, at most 5 in all).  ``uid`` stays
+        the sample order's (聚水潭's platformUid: what a 专属佣金 is opened for); a link's 百应 conversation id is
+        ``uid_im`` (only for the 百应 inbox, never for a 专属佣金: not known to be the same kind of id)."""
+        douyin, uid = self._sample_creator_ids(deal_id)
+        seen, uid_im = {d.lower() for d in douyin}, ""
+        deal = self._store.deal(deal_id)
+        for link in self._store.creator_links(deal["party_id"]) if deal else []:
+            if link["platform"] != "dy":
+                continue
+            account = str(link["account"] or "").strip()
+            if account and platforms.creator_account_ok(account) and account.lower() not in seen:
+                douyin.append(account)
+                seen.add(account.lower())
+            if link["uid_source"] == "buyin_im" and link["uid"]:
+                uid_im = uid_im or str(link["uid"])
+        out = {"douyin_ids": douyin[:5], "uid": uid} if douyin or uid else {}
+        if uid_im:
+            out["uid_im"] = uid_im
+        return out
+
+    def _sample_creator_ids(self, deal_id: int) -> tuple:
+        """``sample_creator_ids`` of this service's store."""
+        return sample_creator_ids(self._store, deal_id)
+
+    def _creator_ids_notice(self, deal_id: int, now: float) -> None:
+        """``creator_ids_notice`` of this service's store."""
+        creator_ids_notice(self._store, deal_id, now)
 
     def _waybill(self, packet: dict) -> str:
         """The system's record: the deal's latest waybill (a notice of an earlier one is refused)."""
@@ -2831,13 +4514,18 @@ class PrmService:
 
     def snapshot(self) -> dict:
         relay = self._relay.snapshot()
-        return snapshot(self._store, running=True, retention_days=self._retention_days, now=self._clock(), extra={
+        return snapshot(self._store, running=True, retention_days=self._retention_days, now=self._clock(),
+                        group_of=self.three_party.deal_out, extra={
             "mac_online": relay.get("mac_online", False),
             "worker_kinds": relay.get("worker_kinds", []),
             "can_send": self._send is not None, "can_send_files": self._send_file is not None,
             "takeover_min": self._takeover_sec // 60, "holding_min": self._holding_sec // 60,
             "retention_days": self._retention_days, "catchup_hours": self._catchup_sec // 3600,
             "clock_skew_sec": int(round(self._skew)), "sample_sync_min": self._sample_sync_sec // 60,
+            "night": self._night_status(self._clock()), "auto_register": self._auto_register,
+            "buyin_sync_min": self._buyin_sec // 60, "friend_add_status": self.friend_adds.status(),
+            "auto_mode": self.auto_mode, "three_party": self.three_party.status(),
+            "reply_parts": self._reply_parts,
         })
 
     # ── the sender thread: approved drafts, holding replies, clean-ups ────
@@ -2852,12 +4540,15 @@ class PrmService:
             self._wake.clear()
 
     def tick(self) -> None:
+        self.register_found()                          # PRM_AUTO_REGISTER: the new friends the scan queued
         self.sweep_executing()
         self.send_approved()
         self.send_holding_replies()
         self.sweep_owed_steps()
         self.sweep_deliveries()
         self.sweep_sample_status()
+        self.sweep_buyin()
+        self.sweep_buyin_held()
         now = self._clock()
         if now - self._last_retention >= RETENTION_CHECK_SEC:
             self._last_retention = now
@@ -2868,6 +4559,9 @@ class PrmService:
         sent = 0
         for packet in reversed(self._store.packets((APPROVED,), limit=50)):
             now = self._clock()
+            if is_buyin(packet):                       # (never approved; were one: the bot does not send it anywhere)
+                self._store.move(packet["id"], (APPROVED,), PENDING, decided_at=None)
+                continue
             if now - float(packet["decided_at"] or now) > APPROVED_EXPIRE_SEC:
                 self._store.move(packet["id"], (APPROVED,), FAILED, outcome="expired", sent_at=now,
                                  error="批准后太久没发出去（机器人停过），没有发送；需要的话重新写一条")
@@ -2878,7 +4572,14 @@ class PrmService:
         return sent
 
     def _deliver(self, packet: dict) -> int:
-        """Text first, then the files; stops at the first failure (never sent twice)."""
+        """Text first (its paragraphs as messages of their own, PRM_REPLY_PARTS), then the files; stops at the first
+        failure (never sent twice).  A 百应 draft is never sent
+        (``send_approved`` keeps it back already; this is the second guard): back to waiting, nothing sent."""
+        if is_buyin(packet):
+            self._store.move(packet["id"], (SENDING, APPROVED), PENDING, decided_at=None)
+            logger.warning("PRM: packet %d is a 百应 draft: the bot does not send it (an operator does, in 百应)",
+                           packet["id"])
+            return 0
         tokens = self._store.tokens(packet["party_id"])
         final = packet["final_text"] if packet["final_text"] is not None else packet["text"]
         text = pii.unmask(final, tokens)
@@ -2887,10 +4588,20 @@ class PrmService:
             problem = "草稿里有对不上的占位符（号码可能已按规定清除）"
         elif packet["kind"] == "shipping_notice" and not gates.waybill_ok(final, self._waybill(packet)):
             problem = "发货通知里的单号和系统记录对不上"
-        if not problem and text.strip():
-            noted = self._note_sent(packet["chat_id"], text, packet["id"])
+        # The text as PRM_REPLY_PARTS messages (``reply_parts``), each noted before it goes, a typing pause apart; a part
+        # that fails ends it (never sent twice), and says how many went out.
+        parts = reply_parts(text, self._reply_parts) if not problem else []
+        for n, part in enumerate(parts):
+            if n and self._pause(typing_delay(part)):
+                # The bot is stopping (its WeChat backend stopped first): the rest is not sent, and the draft stays
+                # sending, as one cut off by a stop: the next start settles it as 「不确定发出去没有」 and knows the parts
+                # read back by it (``_sent_part``), never an operator's (marked failed now, they would be).
+                logger.warning("PRM: packet %d: the bot stopped after %d of its %d messages; the rest not sent",
+                               packet["id"], n, len(parts))
+                return 0
+            noted = self._note_sent(packet["chat_id"], part, packet["id"])
             try:
-                result = self._send(packet["chat_id"], text)
+                result = self._send(packet["chat_id"], part)
                 if not result:
                     self._unnote_sent(noted)
                     problem = _refused(result) or "文字没发出去"
@@ -2898,6 +4609,11 @@ class PrmService:
                 self._unnote_sent(noted)
                 logger.exception("PRM: packet %d text not sent", packet["id"])
                 problem = "文字发送出错"
+            if problem:
+                if n:
+                    problem = (f"分 {len(parts)} 条发，前 {n} 条发出去了，第 {n + 1} 条没发出去（{problem}）；"
+                               "剩下的请在微信里手动补发")
+                break
         for item in packet["attachments"] if not problem else ():
             path = str(item.get("path") or "")
             if not Path(path).is_file():
@@ -2927,7 +4643,10 @@ class PrmService:
         # The backend says the keystrokes went through; seeing the line in WeChat confirms it
         # (often already, before the send returned).
         self._store.mark_sent(packet["id"], now)
-        logger.info("PRM: packet %d sent (%d chars, %d file(s))", packet["id"], len(text), len(packet["attachments"]))
+        logger.info("PRM: packet %d sent (%d chars%s, %d file(s))", packet["id"], len(text),
+                    f" in {len(parts)} messages" if len(parts) > 1 else "", len(packet["attachments"]))
+        if packet["route"] == gates.NIGHT:
+            self._night_sent(packet, now)
         self._update_gate(packet, now)
         return 1
 
@@ -2951,30 +4670,39 @@ class PrmService:
         (the Mac's replies only: a system notice, or a next step the bot asked for (the system
         lane: a 专属佣金 waiting for a person), answers nothing the creator asked).  None in a
         round she was answered already (``_answered``: an operator's own line, or something we
-        sent, after her latest message)."""
+        sent, after her latest message), nor for a 开场白 of a creator who has not written (no round).
+        In the 下班时段 (``_night_active``) it says PRM_NIGHT_HOLDING_TEXT; 自动模式 by day (``_auto_by_day``: no
+        「明早」) AUTO_HOLDING_TEXT."""
         if self._send is None or self._holding_sec <= 0:
             return 0
         now = self._clock()
         sent, done = 0, set()
+        text = None
         for packet in reversed(self._store.packets((PENDING,), limit=200)):
             if packet["job_id"] is None or packet["deal_id"] in done:
                 continue
-            if (packet.get("meta") or {}).get("lane") == LANE_SYSTEM:
-                continue
+            if (packet.get("meta") or {}).get("lane") == LANE_SYSTEM or is_buyin(packet):
+                continue                               # (a 百应 draft: she wrote in 百应, no WeChat 「稍等」 for it)
             if now - float(packet["created_at"]) < self._holding_sec:
                 continue
             deal = self._store.deal(packet["deal_id"])
             if deal is None or self._mode(deal, now) != COPILOT:
                 continue
+            if (packet.get("meta") or {}).get(OPENING) and not deal.get("last_message_at"):
+                continue                                   # our first line: she has said nothing to hold
             round_at = float(deal.get("last_message_at") or packet["created_at"])
             if deal.get("holding_round") is not None and float(deal["holding_round"]) >= round_at:
                 continue                                   # already told in this round
             if self._answered(deal, packet["chat_id"], round_at):
                 continue                                   # she heard from us after her message
             done.add(packet["deal_id"])
-            noted = self._note_sent(packet["chat_id"], self._holding_text)
+            if text is None:
+                auto_on = self.auto_mode["on"]         # read once: the words of the night and of 自动模式 agree
+                text = ((AUTO_HOLDING_TEXT if self._auto_by_day(now, auto_on) else self._night_holding_text)
+                        if self._night_active(now, auto_on) else self._holding_text)
+            noted = self._note_sent(packet["chat_id"], text)
             try:
-                ok = bool(self._send(packet["chat_id"], self._holding_text))
+                ok = bool(self._send(packet["chat_id"], text))
             except Exception:
                 logger.exception("PRM: holding reply for deal %d failed", deal["id"])
                 ok = False
@@ -2983,7 +4711,7 @@ class PrmService:
                 continue                                   # tried again next round of the thread
             self._store.update_deal(deal["id"], now, holding_round=round_at)
             self._store.add_event(deal["id"], deal["party_id"], "holding_reply",
-                                  {"text": self._holding_text, "packet": packet["id"]}, actor="system", now=now)
+                                  {"text": text, "packet": packet["id"]}, actor="system", now=now)
             sent += 1
             logger.info("PRM: draft %d waited %d min; holding reply sent", packet["id"], self._holding_sec // 60)
         return sent
@@ -3006,6 +4734,14 @@ class PrmService:
         """Clear the details of every deal done ``PRM_RETENTION_DAYS`` ago (8.2, ``retention.purge_due_at``)."""
         now = self._clock()
         done = 0
+        try:
+            self._buyin_scrub_jobs()
+        except Exception:
+            logger.exception("PRM: the 百应 inbox jobs could not be looked at; tried again later")
+        try:                                       # 加百应达人微信: the numbers' time, the ended records' (design §6.10)
+            self.friend_adds.sweep(now, retention_days=self._retention_days, force=True)
+        except Exception:
+            logger.exception("PRM: the friend-add records could not be cleaned up; tried again later")
         for deal in self._store.deals_to_purge(now, self._retention_days):
             try:
                 self.purge(deal, now)
@@ -3023,14 +4759,23 @@ class PrmService:
             return retention.scrub(retention.clear_receivers(text), addresses)
 
         counts = {"numbers": self._store.purge_tokens(deal["party_id"], pii.masked_value, now)}
+        # 加百应达人微信: her records' numbers (cleared when she was linked: once more), numbers in her 百应 nickname
+        counts["friend_adds"] = self._store.scrub_friend_adds(deal["party_id"], contact.clean_name, now)
         self._store.update_deal(deal["id"], now, replace_slots=retention.cleared_slots(deal.get("slots") or {}),
                                 purged_at=now)
+        group = deal.get("three_party") or {}
+        if group.get("name") or group.get("chat"):     # 三方群: WeChat's name for it holds hers
+            self._store.update_deal(deal["id"], now, three_party={k: group[k] for k in ("state", "at", "by") if k in group})
         counts["drafts"] = self._store.rewrite_packets(deal["id"], rewrite)
         counts["events"] = self._store.rewrite_events(deal["id"], rewrite)
         counts["notices"] = self._store.rewrite_notices(deal["id"], rewrite)
         # 聚水潭's words for a rejected or deleted order ("地址不全…"): kept with the order and in the sync's answers
         counts["samples"] = (self._store.rewrite_sample_orders(deal["id"], rewrite, now)
                              + self._relay.store.rewrite_chat(SAMPLE_SYNC_CHAT, PRM, rewrite))
+        # Her 百应 conversations' draft jobs (their texts: her 百应 lines, masked), and the inbox round's (a summary)
+        counts["buyin"] = (sum(self._relay.store.rewrite_chat(BUYIN_CHAT + cid, PRM, rewrite)
+                               for cid in self._buyin_conversations_of(deal["id"]))
+                           + self._relay.store.rewrite_chat(BUYIN_SYNC_CHAT, PRM, rewrite))
         if chat_id:
             counts["relay"] = self._relay.store.rewrite_chat(chat_id, PRM, rewrite)
             if self._scrub_messages is not None:
@@ -3434,7 +5179,8 @@ def apply_deal_action(store: PrmStore, action: str, data: dict, *, now: float, t
                       actor: str = "console", review: bool = False, notice: bool = True,
                       note: Optional[dict] = None) -> dict:
     """The console's deal actions (also when the bot is stopped: straight on the database); the 聚水潭 sync's too
-    (``actor`` system, ``review`` / ``notice`` / ``note``: ``deals.add_shipment``)."""
+    (``actor`` system, ``review`` / ``notice`` / ``note``: ``deals.add_shipment``).  ``night_done`` {deal_id, packet}:
+    「已处理」 on a holding line the night window sent (``night_done``)."""
     try:
         deal_id = data.get("deal_id")
         if action == "stage":
@@ -3449,10 +5195,35 @@ def apply_deal_action(store: PrmStore, action: str, data: dict, *, now: float, t
             return {"ok": True, "packet": packet_id}
         elif action == "shipment_status":
             deals.set_shipment_status(store, deal_id, str(data.get("status") or ""), now=now, actor=actor, note=note)
+        elif action == NIGHT_DONE:
+            return night_done(store, deal_id, data.get("packet"), now=now, actor=actor)
+        elif action == OPENING:                        # (running: PrmService.ask_opening)
+            return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能写开场白"}
+        elif action in GROUP_ACTIONS:                  # (running: PrmService.three_party)
+            return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能拉群"}
         else:
             return {"ok": False, "error": f"不认识的操作 {action}"}
     except deals.DealError as e:
         return {"ok": False, "error": str(e)}
+    return {"ok": True}
+
+
+def night_done(store: PrmStore, deal_id, packet=None, *, now: float, actor: str = "console") -> dict:
+    """「已处理」 on a deal's notice of a holding line the night window (or 自动模式: the notice's ``auto``, the record
+    keeps it) sent (``PrmService._night_sent``, ``NIGHT_NOTICE``): it goes, and the deal's record says it was seen to.
+    ``packet`` None: every such notice of the deal.  Also when the bot is stopped (straight on the database)."""
+    deal = deals._deal(store, deal_id)
+    try:
+        key = None if packet in (None, "") else f"{NIGHT_NOTICE}{int(packet)}"
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "草稿编号不对"}
+    dropped = store.drop_notices(deal["id"], lambda n: n["key"] == key if key
+                                 else str(n["key"]).startswith(NIGHT_NOTICE), now)
+    if not dropped:
+        return {"ok": False, "error": "这条提醒已经处理过了"}
+    for n in dropped:
+        store.add_event(deal["id"], deal["party_id"], NIGHT_DONE,
+                        {"packet": n.get("packet"), **({"auto": True} if n.get("auto") else {})}, actor=actor, now=now)
     return {"ok": True}
 
 

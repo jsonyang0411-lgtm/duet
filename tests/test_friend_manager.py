@@ -556,6 +556,16 @@ class AdminFriendCommandTests(unittest.TestCase):
         handler = self.handler()
         handler.handle("加好友   13800000000")
         self.friend.add_friend.assert_called_once_with("13800000000", "")
+    def test_add_friend_with_colon_and_no_spaces(self):
+        handler = self.handler()
+        handler.handle("添加好友：test_target_001")
+        self.friend.add_friend.assert_called_once_with("test_target_001", "")
+
+    def test_add_friend_with_colon_and_reason(self):
+        handler = self.handler()
+        handler.handle("加好友:test_target_001 合作沟通")
+        self.friend.add_friend.assert_called_once_with("test_target_001", "合作沟通")
+
 
     def test_add_friend_without_a_target_explains_the_usage(self):
         handler = self.handler()
@@ -866,6 +876,56 @@ class CaptureTargetTests(FriendTestCase):
         self.assertEqual(ocr.capture.call_count, 1)
 
 
+class OneClickAndFrontTests(FriendTestCase):
+    """2026-10-29 (geigp's real machine): every button got two clicks (a posted one and a physical one), and a dialog
+    behind another window of WeChat's own process stopped the action at once."""
+
+    def test_a_click_on_a_dialog_button_is_one_click(self):
+        manager = self.manager(FakeWindow(), FakeOcr([]))
+        posted = []
+        with patch.object(friend_manager, "post_click_window", side_effect=lambda *a: posted.append(a) or True), \
+             patch.object(friend_manager, "sys", SimpleNamespace(platform="win32")):
+            manager._click_at(999, 10, 20)
+            manager._click_row(999, row("添加到通讯录", 0.4, 0.5, 0.6, 0.55))
+        self.assertEqual(len(self.clicks), 2, "one physical click each")
+        self.assertEqual(posted, [], "no second, posted click on top of it")
+
+    def test_a_dialog_behind_a_wechat_window_is_brought_forward_and_the_action_goes_on(self):
+        window = FakeWindow()
+        window.foreground = False
+        activated = []
+
+        def activate(hwnd):
+            activated.append(hwnd)
+            window.foreground = True
+            return True
+        window.activate = activate
+        manager = self.manager(window, FakeOcr([]))
+        manager._is_wechat_foreground = lambda hwnd: True               # WeChat's own window is in front
+        manager._foreground(999, exact=True)                            # no _Abort
+        self.assertEqual(activated, [999])
+
+    def test_a_dialog_that_cannot_be_brought_forward_still_stops_the_action(self):
+        window = FakeWindow()
+        window.foreground = False
+        window.activate = lambda hwnd: False
+        manager = self.manager(window, FakeOcr([]))
+        manager._is_wechat_foreground = lambda hwnd: True
+        with self.assertRaises(friend_manager._Abort):
+            manager._foreground(999, exact=True)
+
+    def test_another_program_in_front_is_never_pushed_aside(self):
+        window = FakeWindow()
+        window.foreground = False
+        activated = []
+        window.activate = lambda hwnd: activated.append(hwnd)
+        manager = self.manager(window, FakeOcr([]))
+        manager._is_wechat_foreground = lambda hwnd: False              # the user's own program is in front
+        with self.assertRaises(friend_manager._Abort):
+            manager._foreground(999, exact=True)
+        self.assertEqual(activated, [], "keys never go to the user's window, and it is not taken from them")
+
+
 class FakeDesktop:
     """A few top-level windows with the win32gui / win32process calls the 4.0 dialog lookup makes."""
 
@@ -972,12 +1032,6 @@ class OpenAddFriendDialogTests(FriendTestCase):
             self.open(desktop, window)
         self.assertEqual(self.keys, [])
         self.assertEqual(desktop.clicks, 0)
-
-    def test_the_menu_is_not_clicked_when_it_never_appears(self):
-        desktop = FakeDesktop()
-        self.assertIsNone(self.open(desktop))
-        self.assertEqual(desktop.clicks, 1)                              # only the (+)
-
 
 def badge_picture(*positions):
     """A window picture with red round badges in its left rail."""
@@ -1475,6 +1529,22 @@ class ApplyDialogTests(DialogTestCase):
         result, _ = self.add_friend()
         self.assertNotIn("备注", result["message"])
 
+    def test_add_friend_answers_remark_set_only_when_a_remark_was_asked(self):
+        manager = self.make()
+        manager._is_wechat4 = lambda hwnd: True
+        given = []
+
+        def wechat4(hwnd, keyword, message, remark=""):
+            given.append(remark)
+            return {"ok": True, "target": keyword, "message": "已成功", **({"remark_set": True} if remark else {})}
+        manager._add_friend_wechat4 = wechat4
+        self.assertNotIn("remark_set", manager.add_friend("wxid_target", "你好呀"))
+        self.assertIs(manager.add_friend("wxid_target", "你好呀", remark=" 抖音-\n小鹿 ")["remark_set"], True)
+        self.assertIs(manager.add_friend("wxid_target", "你好呀", remark="抖" * 40)["remark_set"], True)
+        self.assertEqual(given, ["", "抖音- 小鹿", "抖" * friend_manager.MAX_REMARK_CHARS])
+        failed = manager.add_friend(" ", "你好呀", remark="抖音-小鹿")                    # (before the window: invalid)
+        self.assertEqual((failed["reason"], failed["remark_set"]), ("invalid", False))
+
     def test_the_greeting_goes_only_into_the_application_window(self):
         result, closed = self.add_friend()
         typed_into = {e[-1] for e in self.events if e[0] in ("key", "combo")}
@@ -1517,6 +1587,13 @@ class ApplyDialogTests(DialogTestCase):
         self.assertNotIn(CHAT_PERSON, {e[-1] for e in self.events if e[0] in ("key", "combo")})
         self.assertEqual(self.window.pasted, ["wxid_target"])         # the greeting was never pasted
 
+
+# ── The remark (备注) of a request (加百应达人微信, 2026-10-29) ───────────────────────────────
+#
+# add_friend's ``remark`` goes into the 「备注」 field of WeChat 4.0's application window.  That window has no UIA
+# controls and nobody has seen yet where its remark field is, so the field is found by OCR (a label reading 备注 /
+# 备注名 / 设置备注, its input the first row right below it) or not at all: nothing is clicked for it then, and the
+# request goes out as before.  Without a remark the window is driven exactly as it was.
 
 # ── An unexpected error inside a friend action (win review F8) ─────────────────────
 #
@@ -1853,6 +1930,341 @@ class DailyMaxConfigTests(unittest.TestCase):
         self.assertEqual(service._state_path, Path(config.db_path).parent / "auto_accept_state.json")
         service._notify("今天到上限了")
         self.assertEqual(sent, [("wxid_admin", "今天到上限了")])
+
+
+class AddFriendCheckedTests(unittest.TestCase):
+    """add_friend_checked (加百应达人微信 adds this way, src/prm/friend_adds.py): the admin's 添加好友 without its words;
+    the command itself answers word for word as before (AdminFriendCommandTests, AdminRiskAndCapTests)."""
+
+    def test_without_a_friend_manager_it_says_so_and_adds_nothing(self):
+        handler = AdminCommandHandler()
+        res = handler.add_friend_checked("13800000000", "你好")
+        self.assertEqual((res["ok"], res["reason"]), (False, "no_manager"))
+        self.assertFalse(handler.can_add_friends)
+
+    def test_an_exception_is_an_error_and_is_logged(self):
+        friend = MagicMock()
+        friend.add_friend.side_effect = RuntimeError("the window handle went away")
+        with self.assertLogs("src.admin", level="ERROR"):
+            res = AdminCommandHandler(friend_manager=friend).add_friend_checked("13800000000")
+        self.assertEqual(res["reason"], "error")
+        self.assertEqual(res["message"], "添加好友时出错，已中止（详见日志）：请在微信里看一下申请发出去没有")
+
+    def test_a_risk_prompt_pauses_the_auto_accept_and_says_so(self):
+        friend = MagicMock()
+        answer = {"ok": False, "reason": "risk", "message": "微信提示「操作过于频繁」…"}
+        friend.add_friend.return_value = answer
+        auto = AutoFriendService(CountingManager(), watch=False, daily_max=50, wall_clock=lambda: 0.0)
+        handler = AdminCommandHandler(friend_manager=friend, auto_friend_service=auto)
+        res = handler.add_friend_checked("13800000000", "你好")
+        friend.add_friend.assert_called_once_with("13800000000", "你好")
+        self.assertIn("自动同意好友也已暂停", res["paused"])
+        self.assertEqual(auto.paused_why(), "添加好友时微信提示操作太频繁")
+        self.assertNotIn("paused", answer)                          # the manager's own answer is left alone
+        self.assertTrue(handler.can_add_friends)
+
+    def test_an_answer_that_went_through_is_passed_on_as_it_is(self):
+        friend = MagicMock()
+        friend.add_friend.return_value = {"ok": True, "target": "abcdefyz", "message": "已成功向「abcdefyz」发送好友申请"}
+        res = AdminCommandHandler(friend_manager=friend).add_friend_checked("abcdefyz", "")
+        self.assertEqual(res, {"ok": True, "target": "abcdefyz", "message": "已成功向「abcdefyz」发送好友申请"})
+
+    def test_a_remark_is_passed_on_only_when_there_is_one_and_never_by_the_admins_command(self):
+        friend = MagicMock()
+        friend.add_friend.return_value = {"ok": True, "target": "abcdefyz", "message": "已成功", "remark_set": True}
+        handler = AdminCommandHandler(friend_manager=friend)
+        res = handler.add_friend_checked("abcdefyz", "你好", remark="抖音-小鹿")
+        friend.add_friend.assert_called_once_with("abcdefyz", "你好", remark="抖音-小鹿")
+        self.assertIs(res["remark_set"], True)
+        for call in (lambda: handler.add_friend_checked("abcdefyz", "你好", remark=""),
+                     lambda: handler.handle("添加好友 abcdefyz 你好"), lambda: handler.handle("加好友：abcdefyz 你好")):
+            friend.reset_mock()
+            call()
+            friend.add_friend.assert_called_once_with("abcdefyz", "你好")       # exactly the call it always was
+
+    def test_create_group_checked_has_the_same_breaker(self):
+        """三方群 (src/prm/three_party.py) makes its group this way: no manager, an exception, a risk prompt."""
+        self.assertEqual(AdminCommandHandler().create_group_checked(["老板测试"])["reason"], "no_manager")
+        friend = MagicMock()
+        friend.create_group.side_effect = RuntimeError("the window handle went away")
+        with self.assertLogs("src.admin", level="ERROR"):
+            res = AdminCommandHandler(friend_manager=friend).create_group_checked(["老板测试"])
+        self.assertEqual((res["reason"], res["message"]), ("error", "拉群时出错，已中止（详见日志）：请在微信里看一下群建了没有"))
+        friend = MagicMock()
+        friend.create_group.return_value = {"ok": False, "reason": "risk", "message": "微信提示「操作过于频繁」…"}
+        auto = AutoFriendService(CountingManager(), watch=False, daily_max=50, wall_clock=lambda: 0.0)
+        res = AdminCommandHandler(friend_manager=friend, auto_friend_service=auto).create_group_checked(
+            ["小美测试", "老板测试"], dry_run=True)
+        friend.create_group.assert_called_once_with(["小美测试", "老板测试"], dry_run=True)
+        self.assertIn("自动同意好友也已暂停", res["paused"])
+        self.assertEqual(auto.paused_why(), "拉群时微信提示操作太频繁")
+        friend = MagicMock()
+        friend.create_group.return_value = {"ok": True, "picked": ["小美测试"], "message": "群建好了"}
+        self.assertEqual(AdminCommandHandler(friend_manager=friend).create_group_checked(["小美测试"]),
+                         {"ok": True, "picked": ["小美测试"], "message": "群建好了"})
+
+    def test_paused_why_only_reads(self):
+        auto = AutoFriendService(CountingManager(), watch=False, wall_clock=lambda: 0.0)
+        self.assertEqual(auto.paused_why(), "")
+        auto.pause("微信提示「操作过于频繁」", tell=False)
+        for _ in range(2):                                           # reading it changes nothing
+            self.assertEqual(auto.paused_why(), "微信提示「操作过于频繁」")
+        self.assertIn("已暂停", auto.status_note())
+
+
+class BotFriendAddsWiringTests(unittest.TestCase):
+    """Bot.run gives 加百应达人微信 the admin handler, the auto-accept service and the admin's notifier."""
+
+    def test_the_friend_adds_get_the_handler_and_the_auto_accept(self):
+        config = BotConfig(admin_wxid="wxid_admin")
+        bot = Bot(config)
+        bot._auto_friend = object()
+        prm = SimpleNamespace(friend_adds=MagicMock(), three_party=MagicMock())
+        admin = AdminCommandHandler()
+        backend = SimpleNamespace(send_text=lambda chat, text: True)
+        bot._wire_friend_adds(config, backend, admin, prm)
+        handler, auto, notify = prm.friend_adds.attach.call_args.args
+        self.assertIs(handler, admin)
+        self.assertIs(auto, bot._auto_friend)
+        self.assertTrue(callable(notify))
+        self.assertIs(admin._friend_adds, prm.friend_adds)
+        # 三方群 (src/prm/three_party.py): the same handler and auto-accept, and the backend
+        prm.three_party.attach.assert_called_once_with(admin, bot._auto_friend, backend)
+
+    def test_without_the_prm_nothing_is_wired(self):
+        admin = AdminCommandHandler()
+        Bot(BotConfig())._wire_friend_adds(BotConfig(), SimpleNamespace(), admin, None)
+        self.assertIsNone(admin._friend_adds)
+        self.assertIn("没打开", admin.handle("待加达人"))
+
+
+
+MENU, PICKER, OTHER = 607, 608, 609
+
+
+class CreateGroupTests(DialogTestCase):
+    """三方群 (2026-10-30): WeChat 4.0's (+) → 「发起群聊」 → the picker, a window of its own.  Each member is found by the
+    one row of the list reading exactly that name and read back among the picked ones; 「完成」 only once everybody, and
+    nobody else, is picked.  Nothing is clicked that OCR did not read, nothing typed unless the picker is in front.
+    Every name is made up."""
+
+    PICKER_RECT = (300, 100, 1100, 800)                               # 800 x 700
+    MENU_ROWS = [row("发起群聊", 0.2, 0.08, 0.8, 0.25), row("添加朋友", 0.2, 0.42, 0.8, 0.58),
+                 row("新建笔记", 0.2, 0.76, 0.8, 0.92)]
+    BOX = row("搜索", 0.05, 0.05, 0.12, 0.08)
+    DONE = row("完成", 0.62, 0.92, 0.70, 0.96)
+    CANCEL = row("取消", 0.80, 0.92, 0.88, 0.96)
+    EMPTY = [BOX, row("请勾选需要添加的联系人", 0.55, 0.05, 0.90, 0.08), DONE, CANCEL]
+
+    def at(self, r, rect=PICKER_RECT):
+        left, top, right, bottom = rect
+        return left + int((r["x0"] + r["x1"]) / 2 * (right - left)), top + int((r["y0"] + r["y1"]) / 2 * (bottom - top))
+
+    @staticmethod
+    def listed(name, y=0.20):
+        return row(name, 0.10, y, 0.30, y + 0.03)
+
+    @staticmethod
+    def picked(name, y=0.15):
+        return row(name, 0.58, y, 0.75, y + 0.03)
+
+    def searched(self, name, *hits, picked=()):
+        """The picker after the name was typed: the box holds it, ``hits`` in the list, ``picked`` on the right."""
+        return [row(name, 0.05, 0.05, 0.20, 0.08), *hits, *picked, self.DONE, self.CANCEL]
+
+    def flow(self, a="老板测试", b="小美测试", *, after_a=None, after_b=None, final=None, hits_a=None, hits_b=None):
+        """The OCR screens of a run picking ``a`` then ``b``."""
+        pa, pb = self.picked(a), self.picked(b, y=0.20)
+        return [self.MENU_ROWS, self.EMPTY,
+                self.searched(a, *(hits_a if hits_a is not None else [self.listed(a)])),
+                after_a if after_a is not None else [self.BOX, pa, self.DONE, self.CANCEL],
+                self.searched(b, *(hits_b if hits_b is not None else [self.listed(b)]), picked=[pa]),
+                after_b if after_b is not None else [self.BOX, pa, pb, self.DONE, self.CANCEL],
+                final if final is not None else [self.BOX, row("已选择2个联系人", 0.55, 0.05, 0.85, 0.08), pa, pb,
+                                                 self.DONE, self.CANCEL]]
+
+    def create(self, screens, members=("老板测试", "小美测试"), *, dry_run=False, done_closes=True, item_opens=None):
+        manager = self.make(FakeOcr(*screens))
+        self.closed = []
+        manager._close_window = lambda h: self.closed.append(h) or self.desktop.windows.pop(h, None)
+        manager._is_window_visible = lambda h: h in self.desktop.windows
+
+        def open_picker():
+            self.desktop.windows.pop(MENU, None)                            # the menu closes on its item
+            (item_opens or (lambda: self.desktop.add(PICKER, title="发起群聊", rect=self.PICKER_RECT)))()
+
+        def done():
+            if done_closes:
+                self.desktop.windows.pop(PICKER, None)                     # WeChat makes the group, the picker goes
+        self.desktop.on_click = [lambda: self.desktop.add(MENU, cls=FakeDesktop.MENU_CLASS, rect=(10, 60, 210, 300)),
+                                 open_picker] + [lambda: None] * 4 + [done]
+        self.desktop.clicks = 0
+        return self.run_win32(lambda: manager.create_group(list(members), dry_run=dry_run))
+
+    def clicks_on(self):
+        return [(e[2], e[3]) for e in self.events if e[0] == "click"]
+
+    def test_both_are_found_picked_read_back_and_done_is_clicked_once(self):
+        result = self.create(self.flow())
+        self.assertEqual(result["ok"], True, result)
+        self.assertEqual(result["picked"], ["老板测试", "小美测试"])
+        menu_item = (10 + int(0.5 * 200), 60 + int((0.08 + 0.25) / 2 * 240))
+        self.assertEqual(self.clicks_on(), [(280, 56), menu_item, self.at(self.BOX), self.at(self.listed("老板测试")),
+                                            self.at(self.BOX), self.at(self.listed("小美测试")), self.at(self.DONE)])
+        self.assertEqual(self.window.pasted, ["老板测试", "小美测试"])
+        typed = [e for e in self.events if e[0] in ("key", "combo") and e[1:3] != (CTRL, 0x31)]
+        self.assertEqual(typed, [("combo", CTRL, KEY_A, "front", PICKER), ("key", VK_BACK, "front", PICKER),
+                                 ("combo", CTRL, KEY_V, "front", PICKER)] * 2)
+        self.assertEqual(self.closed, [])                                  # WeChat closed it after 完成
+        self.assertNotIn(PICKER, self.desktop.windows)
+
+    def test_a_try_stops_before_done_and_closes_the_picker(self):
+        result = self.create(self.flow(), dry_run=True)
+        self.assertEqual((result["ok"], result["dry_run"]), (True, True))
+        self.assertIn("没有建群", result["message"])
+        self.assertNotIn(self.at(self.DONE), self.clicks_on())
+        self.assertEqual(self.closed, [PICKER])
+
+    def test_a_name_that_is_only_part_of_a_row_is_never_clicked(self):
+        result = self.create(self.flow(hits_a=[self.listed("老板测试2"), self.listed("大老板测试", y=0.26)]))
+        self.assertEqual(result["reason"], "not_found")
+        self.assertEqual(self.clicks_on()[2:], [self.at(self.BOX)])        # the box, nothing in the list
+        self.assertEqual(self.closed, [PICKER])
+
+    def test_a_list_still_filtering_is_looked_at_once_more(self):
+        screens = self.flow()
+        screens.insert(2, self.searched("老板测试"))                      # typed, the list not filtered yet
+        result = self.create(screens)
+        self.assertEqual(result["ok"], True, result)
+        self.assertEqual(self.clicks_on()[3], self.at(self.listed("老板测试")))
+
+    def test_two_rows_of_the_same_name_pick_nobody(self):
+        """Spaces, case and emoji OCR cannot read do not tell two contacts apart: nobody is picked."""
+        result = self.create(self.flow(hits_a=[self.listed("老板 测试"), self.listed("老板测试🌸", y=0.26)]))
+        self.assertEqual(result["reason"], "namesake")
+        self.assertIn("2 个同名的", result["message"])
+        self.assertEqual(self.clicks_on()[2:], [self.at(self.BOX)])
+        self.assertEqual(self.closed, [PICKER])
+
+    def test_the_typed_name_in_the_search_box_is_not_a_row_of_the_list(self):
+        result = self.create(self.flow(hits_a=[]))
+        self.assertEqual(result["reason"], "not_found")
+        self.assertEqual(self.clicks_on()[2:], [self.at(self.BOX)])
+
+    def test_a_click_that_does_not_show_the_member_among_the_picked_stops(self):
+        result = self.create(self.flow(after_a=[self.BOX, self.listed("老板测试"), self.DONE, self.CANCEL]))
+        self.assertEqual(result["reason"], "not_picked")
+        self.assertNotIn(self.at(self.DONE), self.clicks_on())
+        self.assertEqual(self.closed, [PICKER])
+
+    def test_somebody_else_among_the_picked_stops_before_done(self):
+        final = [self.BOX, self.picked("老板测试"), self.picked("小美测试", y=0.20), self.picked("别人", y=0.25),
+                 self.DONE, self.CANCEL]
+        result = self.create(self.flow(final=final))
+        self.assertEqual(result["reason"], "extra")
+        self.assertNotIn(self.at(self.DONE), self.clicks_on())
+        self.assertEqual(self.closed, [PICKER])
+
+    def test_a_member_missing_from_the_read_back_stops_before_done(self):
+        result = self.create(self.flow(final=[self.BOX, self.picked("老板测试"), self.DONE, self.CANCEL]))
+        self.assertEqual(result["reason"], "not_picked")
+        self.assertIn("小美测试", result["message"])
+        self.assertNotIn(self.at(self.DONE), self.clicks_on())
+
+    def test_a_window_without_a_search_box_or_done_is_not_the_picker(self):
+        for first in ([self.BOX, self.CANCEL], [self.DONE, self.CANCEL]):
+            with self.subTest(first=first):
+                self.setUp()
+                screens = self.flow()
+                screens[1] = first
+                result = self.create(screens)
+                self.assertEqual(result["reason"], "no_picker")
+                self.assertEqual(len(self.clicks_on()), 2)                 # the (+) and the menu item only
+                self.assertEqual(self.window.pasted, [])
+                self.assertEqual(self.closed, [PICKER])
+
+    def test_a_menu_read_without_the_item_is_not_clicked(self):
+        screens = self.flow()
+        screens[0] = [row("添加朋友", 0.2, 0.1, 0.8, 0.4), row("新建笔记", 0.2, 0.6, 0.8, 0.9)]
+        result = self.create(screens)
+        self.assertEqual(result["reason"], "no_picker")
+        self.assertEqual(self.clicks_on(), [(280, 56)])
+        self.assertIn(("key", VK_ESCAPE, "front", HWND), self.events)      # the menu is closed
+
+    def test_a_menu_ocr_reads_nothing_of_is_clicked_at_its_top_item_and_only_the_pickers_own_title_counts(self):
+        screens = self.flow()
+        screens[0] = []
+        result = self.create(screens)
+        self.assertEqual(result["ok"], True, result)
+        self.assertEqual(self.clicks_on()[1], (10 + 100, 60 + int(0.17 * 240)))
+        for title in ("微信", "添加朋友"):
+            with self.subTest(title=title):
+                self.setUp()
+                result = self.create(screens, item_opens=lambda t=title: self.desktop.add(OTHER, title=t))
+                self.assertEqual(result["reason"], "no_picker")
+                self.assertEqual(len(self.clicks_on()), 2)
+                self.assertEqual(self.window.pasted, [])
+                self.assertEqual(self.closed, [OTHER] if title == "添加朋友" else [])
+
+    def test_with_the_item_read_a_new_dialog_titled_plainly_weixin_is_the_picker(self):
+        result = self.create(self.flow(), item_opens=lambda: self.desktop.add(PICKER, title="微信", rect=self.PICKER_RECT))
+        self.assertEqual(result["ok"], True, result)
+
+    def test_a_chat_open_in_a_window_of_its_own_is_never_taken_for_the_picker(self):
+        result = self.create(self.flow(), item_opens=lambda: self.desktop.add(PICKER, title="小朋友", rect=self.PICKER_RECT))
+        self.assertEqual(result["reason"], "no_picker")
+        self.assertEqual(self.window.pasted, [])
+
+    def test_nothing_is_typed_unless_the_picker_itself_is_in_front(self):
+        self.focusable = False                                             # SetForegroundWindow does not work
+        result = self.create(self.flow())
+        self.assertEqual(result["reason"], "aborted")
+        self.assertEqual(self.window.pasted, [])
+        self.assertEqual([e for e in self.events if e[0] in ("key", "combo") and e[1:3] != (CTRL, 0x31)], [])
+        self.assertEqual(self.closed, [PICKER])
+
+    def test_a_picker_still_open_after_done_says_the_group_may_not_exist(self):
+        result = self.create(self.flow(), done_closes=False)
+        self.assertEqual(result["reason"], "not_created")
+        self.assertIn("在微信里看一眼", result["message"])
+        self.assertEqual(self.clicks_on().count(self.at(self.DONE)), 1)    # ONE click on 完成, never again
+        self.assertEqual(self.closed, [PICKER])
+
+    def test_a_risk_prompt_while_searching_stops(self):
+        screens = self.flow()
+        screens[2] = [*screens[2], row("操作过于频繁，请稍后再试", 0.3, 0.5, 0.7, 0.55)]
+        result = self.create(screens)
+        self.assertEqual(result["reason"], "risk")
+        self.assertIn("操作过于频繁", result["message"])
+        self.assertEqual(self.clicks_on()[2:], [self.at(self.BOX)])
+
+    def test_the_names_are_checked_before_anything_is_touched(self):
+        manager = self.make(FakeOcr([]))
+        for members in ([], ["🌸"], ["小美", " 小美 "], ["a", "b", "c", "d", "e"], ["x" * 70]):
+            with self.subTest(members=members):
+                self.assertEqual(self.run_win32(manager.create_group, members)["reason"], "invalid")
+        self.assertEqual(self.clicks, [])
+        self.assertEqual(self.keys, [])
+
+    def test_the_single_window_ui_is_not_driven(self):
+        self.desktop.windows[HWND]["cls"] = "WeChatMainWndForPC"
+        result = self.create(self.flow())
+        self.assertEqual(result["reason"], "unsupported")
+        self.assertEqual(self.clicks, [])
+        self.assertEqual(self.keys, [])
+
+    def test_no_name_is_ever_logged(self):
+        with self.assertLogs("src.wechat.friend_manager", level="INFO") as logs:
+            self.create(self.flow(hits_a=[]))
+            self.setUp()
+            self.create(self.flow(final=[self.BOX, self.picked("老板测试"), self.picked("小美测试", y=0.2),
+                                         self.picked("别人家", y=0.25), self.DONE, self.CANCEL]))
+            self.setUp()
+            self.create(self.flow())
+        text = "\n".join(logs.output)
+        for name in ("老板测试", "小美测试", "别人家"):
+            self.assertNotIn(name, text)
+
 
 if __name__ == "__main__":
     unittest.main()

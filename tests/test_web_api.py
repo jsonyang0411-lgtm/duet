@@ -1356,6 +1356,7 @@ class ConsoleCrossOriginTests(unittest.TestCase):
 
         self.assertIn("/api/config", _POST_ONLY_PATHS)
         self.assertIn("/api/stop", _POST_ONLY_PATHS)
+        self.assertIn("/api/prm/friend-adds", _POST_ONLY_PATHS)          # 加百应达人微信: an add is a POST only
         for path in sorted(_POST_ONLY_PATHS):
             for suffix in ("", "?x=1"):
                 with self.subTest(path=path + suffix), \

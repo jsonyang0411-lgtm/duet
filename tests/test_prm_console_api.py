@@ -1,4 +1,5 @@
-"""The console's PRM API: GET /api/prm, POST /api/prm/parties, /api/prm/packets, /api/prm/deals, /api/prm/reveal."""
+"""The console's PRM API: GET /api/prm, POST /api/prm/parties, /api/prm/packets, /api/prm/deals, /api/prm/reveal,
+/api/prm/auto."""
 
 import json
 import time
@@ -183,8 +184,36 @@ def test_deals_and_numbers_work_while_the_bot_is_stopped(tmp_path, monkeypatch):
     assert call("/api/prm/packets", "POST", {"id": answer["packet"], "action": "wrong"})[1]["ok"] is False
 
 
+def test_an_opening_is_asked_for_from_the_running_console_and_refused_while_stopped(running, tmp_path, monkeypatch):
+    """POST /api/prm/deals {action: opening}: 「写开场白」 for a creator who has not written (a job with ``meta.opening``,
+    its draft tagged ``opening`` in /api/prm); 小美, who wrote, is told why not; a stopped bot cannot ask the Mac."""
+    assert call("/api/prm/parties", "POST", {"action": "add", "wxid": "wxid_quiet01", "name": "小青"})[1]["ok"] is True
+    deal_id = next(p["deal"]["id"] for p in call("/api/prm")[1]["parties"] if p["name"] == "小青")
+    answer = call("/api/prm/deals", "POST", {"action": "opening", "deal_id": deal_id})[1]
+    assert answer["ok"] is True
+    running.relay._clock.now += SETTLE_SEC + 1
+    job = running.relay.next_job(0, ("prm",))
+    assert job["id"] == answer["job"] and job["meta"]["opening"] == {"how": "", "by": "console"}
+    draft = {"intent": "开场白", "slots": {}, "stage_proposal": "", "message_kind": "greeting",
+             "reply_draft": "小青你好呀～", "attachments_to_send": [], "needs_attention": False, "reason": "场景 A1"}
+    running.relay.finish(job["id"], {"ok": True, "text": json.dumps(draft, ensure_ascii=False)})
+    running.relay.tick()
+    d = call("/api/prm")[1]
+    assert [(p["party_name"], p["opening"]) for p in d["pending"]] == [("小美", False), ("小青", True)]
+    events = next(p["deal"]["events"] for p in d["parties"] if p["name"] == "小青")
+    assert any(e["name"] == f"派写开场白的任务 #{job['id']}（运营点的）" for e in events)
+    she_wrote = call("/api/prm/deals", "POST", {"action": "opening", "deal_id": 1})[1]
+    assert she_wrote == {"ok": False, "error": "她已经发过消息了：她的消息会自己起草，不用开场白"}
+    server.register_prm(None)                                       # the bot stopped
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PRM_DB", raising=False)
+    assert call("/api/prm/parties", "POST", {"action": "add", "wxid": CREATOR, "name": "小美"})[1]["ok"] is True
+    stopped = call("/api/prm/deals", "POST", {"action": "opening", "deal_id": 1})[1]
+    assert stopped == {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能写开场白"}
+
+
 def test_changes_need_a_post_and_a_body():
-    for path in ("/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal"):
+    for path in ("/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal", "/api/prm/auto"):
         assert call(path)[0] == 405                                         # a GET must not change anything
     _, sock = _build_handler("/api/prm/parties", method="POST", body=b"not json",
                              headers={"Content-Type": "application/json"})
@@ -332,3 +361,492 @@ def test_registering_a_new_friend_drafts_what_she_said_since_she_was_added(runni
     assert [line.split("] ", 1)[1] for line in job["text"].split("\n")] == [
         "（加好友时的验证消息）我是阿花 〈手机1〉", "想要个样品"]
     assert running.prm.is_party_chat("wxid_new01")
+
+
+# ── 下班时段自动回复 (PRM_NIGHT_AUTO_HOURS) ──────────────────────────────────
+
+def test_the_night_window_and_its_notice_from_the_running_console(tmp_path):
+    """The window on and it is 21:30: /api/prm says where it stands; the holding line the bot sent for a draft the
+    model flagged is a notice (night_alerts, the deal's attention) until 「已处理」 (POST /api/prm/deals night_done)."""
+    clock = Clock()
+    clock.now = time.mktime((2026, 10, 29, 21, 30, 0, 0, 0, -1))
+    cfg = SimpleNamespace(claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1",
+                          claude_relay_port=0, claude_relay_prefix="cc", claude_relay_wxids=[],
+                          claude_relay_db=":memory:", claude_relay_max_chars=1500, admin_wxid="wxid_admin",
+                          prm_copilot="on", prm_db=":memory:", prm_night_auto_hours="18:00-09:00")
+    sent = []
+    relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=clock, files_dir=tmp_path / "relay")
+    prm = PrmService(cfg, relay, store=PrmStore(":memory:"), clock=clock,
+                     send=lambda c, t: sent.append((c, t)) or True, send_file=lambda c, p: True)
+    prm.register(CREATOR, "小美", "测试达人")
+    prm.handle({"chat_id": CREATOR, "sender_id": CREATOR, "content": "好呀，可以寄来看看", "msg_type": 1,
+                "is_group": False, "timestamp": clock.now})
+    clock.now += SETTLE_SEC + 1
+    job = relay.next_job(0, ("prm",))
+    line = "好呀～您的意向我都记下啦！明早我第一时间拉个小群，一起跟您敲定选款和寄样细节哈！"
+    draft = {"intent": "想要样品", "slots": {}, "stage_proposal": "agreed", "message_kind": "other", "reply_draft": line,
+             "attachments_to_send": [], "needs_attention": True, "reason": "已进入寄样阶段，请运营拉三方群"}
+    relay.finish(job["id"], {"ok": True, "text": json.dumps(draft, ensure_ascii=False)})
+    relay.tick()
+    assert prm.send_approved() == 1 and sent == [(CREATOR, line)]
+    server.register_prm(prm)
+    try:
+        d = call("/api/prm")[1]
+        assert d["night"] == {"on": True, "window": "18:00–09:00", "inside": True, "suspended": "", "error": "",
+                              "auto": False}
+        [alert] = d["night_alerts"]
+        assert alert["deal_id"] == 1 and alert["party_name"] == "小美" and "已进入寄样阶段" in alert["text"]
+        [packet] = d["recent"]
+        assert packet["route"] == "night" and packet["needs_attention"] is True and packet["id"] == alert["packet"]
+        assert d["parties"][0]["deal"]["attention"] == "夜间已自动回了过渡的话，要注意：已进入寄样阶段，请运营拉三方群"
+        done = {"action": "night_done", "deal_id": 1, "packet": alert["packet"]}
+        assert call("/api/prm/deals", "POST", done)[1] == {"ok": True}
+        d = call("/api/prm")[1]
+        assert d["night_alerts"] == [] and d["parties"][0]["deal"]["attention"] == ""
+        assert d["parties"][0]["deal"]["events"][0]["name"] == f"夜间自动回的过渡话 #{alert['packet']} 已处理"
+        assert call("/api/prm/deals", "POST", done)[1]["ok"] is False
+        assert call("/api/prm/deals", "POST", {**done, "packet": "x"})[1]["ok"] is False
+    finally:
+        server.register_prm(None)
+        relay.stop()
+
+
+def test_a_stopped_bot_shows_the_night_window_as_env_says_and_sees_to_its_notices(tmp_path, monkeypatch):
+    from src.prm import gates
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PRM_DB", raising=False)
+    monkeypatch.delenv("PRM_NIGHT_AUTO_HOURS", raising=False)
+    assert call("/api/prm")[1]["night"] == {"on": False, "window": "", "inside": False, "suspended": "", "error": "",
+                                            "auto": False}
+    monkeypatch.setenv("PRM_NIGHT_AUTO_HOURS", "18:00-09:00")
+    night = call("/api/prm")[1]["night"]
+    assert night["on"] is True and night["window"] == "18:00–09:00" and night["error"] == ""
+    assert night["inside"] is gates.in_night((18 * 60, 9 * 60), time.time())
+    monkeypatch.setenv("PRM_NIGHT_AUTO_HOURS", "18-9")
+    night = call("/api/prm")[1]["night"]
+    assert night["on"] is False and "PRM_NIGHT_AUTO_HOURS" in night["error"] and "18:00-09:00" in night["error"]
+    # notices the running bot left: seen to while it is stopped (straight on the database)
+    assert call("/api/prm/parties", "POST", {"action": "add", "wxid": CREATOR, "name": "小美"})[1]["ok"] is True
+    store = PrmStore(tmp_path / "data" / "prm.db")
+    for packet in (7, 9):
+        store.set_notice(1, f"night:{packet}", f"夜间已自动回了过渡的话，要注意：第 {packet} 份拿不准", time.time(),
+                         packet=packet)
+    store.close()
+    d = call("/api/prm")[1]
+    assert [a["packet"] for a in d["night_alerts"]] == [7, 9] and "第 7 份拿不准" in d["parties"][0]["deal"]["attention"]
+    assert call("/api/prm/deals", "POST", {"action": "night_done", "deal_id": 1, "packet": 7})[1] == {"ok": True}
+    assert [a["packet"] for a in call("/api/prm")[1]["night_alerts"]] == [9]
+    assert call("/api/prm/deals", "POST", {"action": "night_done", "deal_id": 1})[1] == {"ok": True}   # every one left
+    d = call("/api/prm")[1]
+    assert d["night_alerts"] == [] and d["parties"][0]["deal"]["attention"] == ""
+    assert [e["kind"] for e in d["parties"][0]["deal"]["events"]][:2] == ["night_done", "night_done"]
+    assert call("/api/prm/deals", "POST", {"action": "night_done", "deal_id": 5})[1]["ok"] is False
+
+
+def test_the_night_settings_are_in_the_allow_list_and_checked():
+    from src.prm.service import NIGHT_HOLDING_TEXT
+    from src.web import advanced_config as adv
+
+    keys = [f["key"] for f in next(g for g in adv.GROUPS if g["id"] == "prm")["fields"]]
+    assert keys.index("PRM_NIGHT_AUTO_HOURS") == keys.index("PRM_HOLDING_TEXT") + 1
+    assert keys.index("PRM_NIGHT_HOLDING_TEXT") == keys.index("PRM_NIGHT_AUTO_HOURS") + 1
+    hours = adv.FIELDS["PRM_NIGHT_AUTO_HOURS"]
+    assert hours["type"] == "text" and hours["default"] == "" and "重启机器人" in hours["help"]
+    assert "worker" in hours["help"] and "25%" in hours["help"]
+    assert adv.FIELDS["PRM_NIGHT_HOLDING_TEXT"]["default"] == NIGHT_HOLDING_TEXT
+    assert adv.normalize("PRM_NIGHT_HOLDING_TEXT", "  ") == NIGHT_HOLDING_TEXT and adv.normalize("PRM_NIGHT_AUTO_HOURS", "") == ""
+    assert adv.validate_updates({"PRM_NIGHT_AUTO_HOURS": "18:00-09:00"}, {}) == {}
+    assert adv.validate_updates({"PRM_NIGHT_AUTO_HOURS": ""}, {}) == {}
+    assert set(adv.validate_updates({"PRM_NIGHT_AUTO_HOURS": "18-9"}, {})) == {"PRM_NIGHT_AUTO_HOURS"}
+    assert set(adv.validate_updates({"PRM_NIGHT_HOLDING_TEXT": "好" * 61}, {})) == {"PRM_NIGHT_HOLDING_TEXT"}
+
+
+# ── 自动模式 (POST /api/prm/auto, 2026-10-30) ──────────────────────────────────
+
+def test_auto_mode_is_switched_from_the_running_console_at_once(running):
+    """The running bot: POST /api/prm/auto switches it at once (PrmService.set_auto_mode); /api/prm says so, and the
+    night status says it is what puts the night rules in force (the fixture sets no window)."""
+    clock = running.relay._clock
+    d = call("/api/prm")[1]
+    assert d["auto_mode"] == {"on": False, "since": None, "by": ""} and d["night"]["auto"] is False
+    status, answer = call("/api/prm/auto", "POST", {"on": True})
+    assert status == 200 and answer == {"ok": True, "auto_mode": {"on": True, "since": clock.now, "by": "console"}}
+    assert running.prm.auto_mode["on"] is True
+    d = call("/api/prm")[1]
+    assert d["auto_mode"]["on"] is True
+    assert d["night"] == {"on": False, "window": "", "inside": False, "suspended": "", "error": "", "auto": True}
+    made = clock.now
+    running.prm.handle({"chat_id": CREATOR, "sender_id": CREATOR, "content": "好的谢谢", "msg_type": 1,
+                        "is_group": False, "timestamp": made})
+    clock.now += SETTLE_SEC + 1
+    job = running.relay.next_job(0, ("prm",))
+    assert job["meta"]["night"] == {"auto": True, "at": time.strftime("%H:%M", time.localtime(made))}
+    for bad in ({}, {"on": "yes"}, {"on": 1}, {"on": None}):
+        answer = call("/api/prm/auto", "POST", bad)[1]
+        assert answer["ok"] is False and "on 填 true 或 false" in answer["error"], bad
+    assert running.prm.auto_mode["on"] is True                               # (a bad request changes nothing)
+    assert call("/api/prm/auto", "POST", {"on": False})[1]["auto_mode"]["on"] is False
+    d = call("/api/prm")[1]
+    assert d["auto_mode"]["on"] is False and d["night"]["auto"] is False
+
+
+def test_auto_mode_is_kept_for_the_next_start_while_the_bot_is_stopped(tmp_path, monkeypatch):
+    """Stopped: straight into the database, as the stopped bot's deal actions and 登记达人 (made when there is none
+    yet); /api/prm reads it back and the bot that starts on that database has it on."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PRM_DB", raising=False)
+    monkeypatch.delenv("PRM_NIGHT_AUTO_HOURS", raising=False)
+    d = call("/api/prm")[1]
+    assert d["running"] is False and d["auto_mode"] == {"on": False, "since": None, "by": ""}
+    db = tmp_path / "data" / "prm.db"
+    assert not db.exists()
+    answer = call("/api/prm/auto", "POST", {"on": True})[1]
+    assert answer["ok"] is True and answer["auto_mode"]["on"] is True and answer["auto_mode"]["by"] == "console"
+    assert db.exists()
+    d = call("/api/prm")[1]
+    assert d["auto_mode"]["on"] is True and (d["night"]["on"], d["night"]["auto"]) == (False, True)
+    monkeypatch.setenv("PRM_NIGHT_AUTO_HOURS", "18:00-09:00")
+    night = call("/api/prm")[1]["night"]
+    assert night["on"] is True and night["auto"] is (not night["inside"])    # inside the window it is the night's
+    cfg = SimpleNamespace(claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1",
+                          claude_relay_port=0, claude_relay_prefix="cc", claude_relay_wxids=[],
+                          claude_relay_db=":memory:", claude_relay_max_chars=1500, admin_wxid="wxid_admin",
+                          prm_copilot="on", prm_db=str(db))
+    relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), files_dir=tmp_path / "relay")
+    store = PrmStore(db)
+    try:
+        assert PrmService(cfg, relay, store=store).auto_mode["on"] is True   # the next start
+    finally:
+        store.close()
+        relay.stop()
+    assert call("/api/prm/auto", "POST", {"on": "off"})[1]["ok"] is False
+    assert call("/api/prm/auto", "POST", {"on": False})[1]["auto_mode"]["on"] is False
+    assert call("/api/prm")[1]["auto_mode"]["on"] is False
+
+
+# ── PRM_AUTO_REGISTER: new friends the bot registered ─────────────────────────
+
+def test_a_friend_the_bot_registered_is_tagged_no_candidate_and_can_be_stopped_for_good(running, tmp_path, monkeypatch):
+    from src.wechat.new_friends import NewFriendService
+
+    monkeypatch.chdir(tmp_path)
+    now = running.relay._clock()
+    server.register_new_friends(NewFriendService(SimpleNamespace(), _friends(tmp_path, now), clock=running.relay._clock))
+    try:
+        assert call("/api/prm")[1]["auto_register"] is False                 # the fixture's switch: off
+        party = running.prm.auto_register_friend({"wxid": "wxid_new01", "name": "阿花", "how": "auto_accept"})
+        d = call("/api/prm")[1]
+        shown = {p["wxid"]: p for p in d["parties"]}
+        assert (shown["wxid_new01"]["auto"], shown[CREATOR]["auto"]) == (True, False)
+        assert shown["wxid_new01"]["note"] == "自动登记（新好友，机器人自动通过）" and shown["wxid_new01"]["name"] == "阿花"
+        assert shown["wxid_new01"]["deal"]["events"][0]["name"] == "自动登记（新好友，机器人自动通过）"
+        assert [c["wxid"] for c in d["candidates"] if c.get("new")] == ["meimei_88"]   # registered: not offered
+        # 停用 works for her, and sticks: the bot never starts her again
+        assert call("/api/prm/parties", "POST", {"action": "disable", "id": party["id"]})[1] == {"ok": True}
+        assert not running.prm.is_party_chat("wxid_new01")
+        assert running.prm.auto_register_friend({"wxid": "wxid_new01", "name": "阿花", "how": "auto_accept"}) is None
+        d = call("/api/prm")[1]
+        stopped = next(p for p in d["parties"] if p["wxid"] == "wxid_new01")
+        assert (stopped["active"], stopped["auto"]) == (False, True)
+        again = next(c for c in d["candidates"] if c["wxid"] == "wxid_new01")
+        assert (again["new"], again["inactive"]) == (True, True)            # offered again, marked stopped
+        assert next(c for c in d["candidates"] if c["wxid"] == "meimei_88")["inactive"] is False
+        # a person registering her again: a person's creator now
+        answer = call("/api/prm/parties", "POST", {"action": "add", "wxid": "wxid_new01", "name": "阿花",
+                                                   "note": "运营确认是达人"})[1]
+        assert answer["ok"] is True
+        shown = next(p for p in call("/api/prm")[1]["parties"] if p["wxid"] == "wxid_new01")
+        assert (shown["active"], shown["auto"], shown["note"]) == (True, False, "运营确认是达人")
+    finally:
+        server.register_new_friends(None)
+
+
+def test_a_stopped_bot_says_whether_new_friends_are_registered_and_tags_them(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PRM_DB", raising=False)
+    monkeypatch.delenv("PRM_AUTO_REGISTER", raising=False)
+    assert call("/api/prm")[1]["auto_register"] is False
+    monkeypatch.setenv("PRM_AUTO_REGISTER", "on")
+    assert call("/api/prm")[1]["auto_register"] is True                       # as .env says (the next start)
+    store = PrmStore(tmp_path / "data" / "prm.db")
+    store.add_party("wxid_new01", "阿花", "自动登记（新好友，她加我们）", auto=True)
+    store.add_party(CREATOR, "小美")
+    store.close()
+    d = call("/api/prm")[1]
+    assert [(p["wxid"], p["auto"]) for p in d["parties"]] == [("wxid_new01", True), (CREATOR, False)]
+    assert call("/api/prm/parties", "POST", {"action": "disable", "id": 1})[1] == {"ok": True}
+    assert call("/api/prm")[1]["parties"][0]["active"] is False
+
+
+def test_the_auto_register_switch_is_in_the_allow_list_and_checked():
+    from src.web import advanced_config as adv
+
+    keys = [f["key"] for f in next(g for g in adv.GROUPS if g["id"] == "prm")["fields"]]
+    assert keys.index("PRM_AUTO_REGISTER") == keys.index("PRM_COPILOT") + 1
+    field = adv.FIELDS["PRM_AUTO_REGISTER"]
+    assert (field["type"], field["default"], field["platform"]) == ("onoff", "off", adv.WCDB_ONLY)
+    assert field["requires"] == [{"key": "PRM_COPILOT", "is": "on", "text": "达人副驾驶打开时才用"}]
+    for words in ("重启机器人", "停用", "管理员", "不是达人", "等人看过再发", "下班时段自动回复"):
+        assert words in field["help"]
+    assert adv.normalize("PRM_AUTO_REGISTER", "") == "off" and adv.normalize("PRM_AUTO_REGISTER", "yes") == "on"
+    assert adv.validate_updates({"PRM_AUTO_REGISTER": "on"}, {}) == {}            # (with the copilot off: no effect)
+    assert adv.validate_updates({"PRM_AUTO_REGISTER": "on", "PRM_COPILOT": "on", "CLAUDE_RELAY": "on",
+                                 "CLAUDE_RELAY_TOKEN": "x" * 20, "ADMIN_WXID": "wxid_admin"}, {}) == {}
+    assert set(adv.validate_updates({"PRM_AUTO_REGISTER": "always"}, {})) == {"PRM_AUTO_REGISTER"}
+
+
+# ── 加百应达人微信 (功能 R): GET /api/prm's friend_adds / friend_add_status, POST /api/prm/friend-adds ──────────
+# Every value is made up.
+
+class _Manager:
+    """FriendManager.add_friend as the console's add sees it (no WeChat window; a 4.0 application window whose 「备注」
+    field OCR saw)."""
+
+    def __init__(self):
+        self.calls = []
+        self.remarks = []
+
+    def add_friend(self, keyword, message="", remark=""):
+        self.calls.append((keyword, message))
+        self.remarks.append(remark)
+        return {"ok": True, "target": keyword, "message": f"已成功向「{keyword}」发送好友申请",
+                **({"remark_set": True} if remark else {})}
+
+
+@pytest.fixture
+def adds(running):
+    """The running bot with 加百应达人微信 on (PRM_FRIEND_ADD=on) and a fake friend manager behind the real admin
+    handler; the add runs at once (no thread)."""
+    from src.admin import AdminCommandHandler
+    from src.prm.friend_adds import FriendAdds
+
+    prm = running.prm
+    manager = _Manager()
+    prm.friend_adds = FriendAdds(prm.store, SimpleNamespace(prm_friend_add="on"), clock=running.relay._clock,
+                                 register=prm.register, spawn=lambda fn: fn(), clear_clipboard=lambda text: False)
+    prm.friend_adds.attach(AdminCommandHandler(friend_manager=manager), None, None)
+    yield SimpleNamespace(prm=prm, manager=manager, clock=running.relay._clock)
+
+
+def paste(body=None):
+    return call("/api/prm/friend-adds", "POST", {
+        "action": "paste", "aweme_id": "dy_demo01", "nickname": "小鹿",
+        "contact": {"wechat": "abcdefyz", "phone": "13800000000"}, **(body or {})})[1]
+
+
+def test_the_page_shows_the_records_masked_and_the_switchs_status(adds):
+    assert paste() == {"ok": True, "id": 1, "state": "offered"}
+    d = call("/api/prm")[1]
+    [r] = d["friend_adds"]
+    assert (r["state"], r["state_label"], r["nickname"], r["aweme_id"], r["source_label"]) == (
+        "offered", "待确认", "小鹿", "dy_demo01", "运营手动填的")
+    assert r["masked"] == {"wechat": "ab****yz", "phone": "138****0000"} and r["has_wechat"] and r["has_phone"]
+    assert r["greeting"] == "您好小鹿，百应上联系您的～" and r["listed"] and r["open"] and r["last_attempt"] is None
+    assert (r["remark"], r["remark_set"]) == ("抖音-小鹿", False)
+    status = d["friend_add_status"]
+    assert (status["enabled"], status["can_add"], status["today"], status["cap"], status["gap_sec"]) == (
+        True, True, 0, 10, 120)
+    text = json.dumps(d, ensure_ascii=False)
+    assert "abcdefyz" not in text and "13800000000" not in text
+
+
+def test_one_add_from_the_console_and_every_full_look_is_written_down(adds):
+    paste()
+    out = call("/api/prm/friend-adds", "POST", {"id": 1, "action": "add", "use": "wechat",
+                                                 "greeting": "您好小鹿，我们在百应上聊过～"})[1]
+    assert out["ok"] and out["state"] == "requested" and out["target"] == "ab****yz"
+    assert (out["remark"], out["remark_set"]) == ("抖音-小鹿", True)
+    assert "abcdefyz" not in json.dumps(out, ensure_ascii=False)
+    assert adds.manager.calls == [("abcdefyz", "您好小鹿，我们在百应上聊过～")] and adds.manager.remarks == ["抖音-小鹿"]
+    again = call("/api/prm/friend-adds", "POST", {"id": 1, "action": "add"})[1]
+    assert again["ok"] is False and "已经发过申请" in again["error"] and len(adds.manager.calls) == 1
+    d = call("/api/prm")[1]
+    assert d["friend_add_status"]["today"] == 1 and d["friend_add_status"]["wait_sec"] > 0
+    assert d["friend_adds"][0]["last_attempt"]["by"] == "console" and d["friend_adds"][0]["remark_set"] is True
+    shown = call("/api/prm/friend-adds", "POST", {"id": 1, "action": "reveal"})[1]
+    assert (shown["wechat"], shown["phone"]) == ("abcdefyz", "13800000000")
+    assert [x["actor"] for x in adds.prm.store.friend_add(1)["reveals"]] == ["console"]
+    assert call("/api/prm/friend-adds", "POST", {"id": 1, "action": "nonsense"})[1]["ok"] is False
+    assert call("/api/prm/friend-adds", "POST", {"id": 99, "action": "drop"})[1] == {
+        "ok": False, "error": "没有这一条加微信的记录"}
+    assert call("/api/prm/friend-adds", "POST", {"action": "paste", "aweme_id": ""})[1]["ok"] is False
+
+
+def test_linking_from_the_console_registers_her_and_her_deal_shows_the_douyin_id(adds):
+    paste()
+    call("/api/prm/friend-adds", "POST", {"id": 1, "action": "add"})
+    out = call("/api/prm/friend-adds", "POST", {"id": 1, "action": "link", "wxid": "wxid_demo"})[1]
+    assert out["ok"] and out["state"] == "linked" and out["party_id"]
+    assert out["remark_hint"] == "抖音-小鹿"                    # a chat picked by hand: set her remark on the phone
+    d = call("/api/prm")[1]
+    party = next(p for p in d["parties"] if p["wxid"] == "wxid_demo")
+    assert party["name"] == "小鹿" and party["note"] == "百应邀约 · 抖音号 dy_demo01"
+    [link] = party["deal"]["links"]
+    assert (link["account"], link["source"], link["add_id"]) == ("dy_demo01", "friend_add", 1)
+    assert [e["name"] for e in party["deal"]["events"]] == ["关联抖音号 dy_demo01（加微信 #1）"]
+    [r] = d["friend_adds"]
+    assert r["state"] == "linked" and r["cleared"] and not r["has_wechat"]
+    assert (r["listed"], r["remark_hint"], r["remark_set"]) == (True, "抖音-小鹿", False)     # the card stays for it
+    assert call("/api/prm/friend-adds", "POST", {"id": 1, "action": "remark_done"})[1]["ok"] is True
+    [r] = call("/api/prm")[1]["friend_adds"]
+    assert (r["listed"], r["remark_hint"], r["remark_set"]) == (False, "", True)
+    again = call("/api/prm/friend-adds", "POST", {"id": 1, "action": "remark_done"})[1]
+    assert again["ok"] is False and "没有要在手机上设的备注" in again["error"]
+    bad = call("/api/prm/friend-adds", "POST", {"id": 1, "action": "link", "wxid": "wxid_other"})[1]
+    assert bad["ok"] is False and "不能关联" in bad["error"]
+    paste({"aweme_id": "dy_demo02"})
+    chatroom = call("/api/prm/friend-adds", "POST", {"id": 2, "action": "link", "wxid": "room1@chatroom"})[1]
+    assert chatroom["ok"] is False and "群聊" in chatroom["error"]                # PartyError, as a clean answer
+
+
+def test_registering_with_a_douyin_id_and_unlinking_it(running):
+    out = call("/api/prm/parties", "POST", {"action": "add", "wxid": "wxid_new01", "name": "阿花",
+                                            "douyin_id": "dy_demo02"})[1]
+    party_id = out["party"]["id"]
+    links = running.prm.store.creator_links(party_id)
+    assert [(l["account"], l["source"]) for l in links] == [("dy_demo02", "register")]
+    bad = call("/api/prm/parties", "POST", {"action": "add", "wxid": "wxid_new02", "name": "阿青", "douyin_id": "有中文"})[1]
+    assert bad["ok"] is False and "抖音号" in bad["error"] and not running.prm.is_party_chat("wxid_new02")
+    assert call("/api/prm/parties", "POST", {"action": "unlink", "id": party_id, "account": "dy_demo02"})[1] == {"ok": True}
+    assert running.prm.store.creator_links(party_id) == []
+    again = call("/api/prm/parties", "POST", {"action": "unlink", "id": party_id, "account": "dy_demo02"})[1]
+    assert again["ok"] is False
+    events = [e["name"] for e in call("/api/prm")[1]["parties"][1]["deal"]["events"]]
+    assert events[:2] == ["取消关联抖音号 dy_demo02", "关联抖音号 dy_demo02"]
+
+
+def test_the_friend_add_endpoint_is_post_only_and_refuses_other_sites(adds):
+    status, answer = call("/api/prm/friend-adds")
+    assert status == 405 and answer["ok"] is False
+    raw = json.dumps({"action": "paste", "aweme_id": "dy_demo01", "contact": {"wechat": "abcdefyz"}}).encode()
+    _, sock = _build_handler("/api/prm/friend-adds", method="POST", body=raw,
+                             headers={"Content-Type": "application/json", "Origin": "https://evil.example"})
+    assert sock.get_response_text().split("\r\n", 1)[0].split()[1] == "403"
+    assert adds.prm.store.friend_adds() == []
+
+
+def test_a_stopped_bot_shows_the_records_but_adds_and_reveals_nothing(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PRM_DB", raising=False)
+    monkeypatch.setenv("PRM_FRIEND_ADD", "on")
+    d = call("/api/prm")[1]
+    assert d["friend_adds"] == [] and d["friend_add_status"]["enabled"] is True
+    assert d["friend_add_status"]["can_add"] is False and not (tmp_path / "data" / "prm.db").exists()
+    store = PrmStore(tmp_path / "data" / "prm.db")
+    record, _ = store.add_friend_add(state="offered", source="paste", aweme_id="dy_demo01", wechat="abcdefyz",
+                                     masked={"wechat": "ab****yz"}, now=time.time())
+    store.add_friend_attempt(record["id"], by="console", kind="wechat", now=time.time())
+    store.close()
+    d = call("/api/prm")[1]
+    assert [r["masked"] for r in d["friend_adds"]] == [{"wechat": "ab****yz"}]
+    assert "abcdefyz" not in json.dumps(d, ensure_ascii=False) and d["friend_add_status"]["today"] == 1
+    for body in ({"action": "paste", "aweme_id": "dy_demo02"}, {"id": 1, "action": "add"}, {"id": 1, "action": "reveal"}):
+        answer = call("/api/prm/friend-adds", "POST", body)[1]
+        assert answer["ok"] is False and "机器人没有运行" in answer["error"], body
+    out = call("/api/prm/parties", "POST", {"action": "add", "wxid": "wxid_new01", "name": "阿花", "douyin_id": "dy_demo03"})[1]
+    assert out["ok"]
+    store = PrmStore(tmp_path / "data" / "prm.db")
+    assert [l["account"] for l in store.creator_links(out["party"]["id"])] == ["dy_demo03"]
+    store.close()
+
+
+def test_a_new_friend_a_record_points_at_is_marked_in_the_candidates_and_not_her_clears_it(adds, tmp_path):
+    """功能 R step 5: 登记达人's new friends show 「可能是百应的小鹿（#1）」 (and 选这个 brings her 抖音号); 不是她 clears it."""
+    from src.wechat.new_friends import NewFriendService
+
+    paste()
+    call("/api/prm/friend-adds", "POST", {"id": 1, "action": "add"})
+    service = NewFriendService(SimpleNamespace(), _friends(tmp_path, adds.clock.now), clock=adds.clock)
+    server.register_new_friends(service)
+    try:
+        adds.prm.friend_adds.on_new_friend({"wxid": "meimei_88", "name": "小美美", "how": "requested",
+                                             "own_greeting": "您好小鹿，百应上联系您的～", "added_at": adds.clock.now})
+        d = call("/api/prm")[1]
+        [r] = d["friend_adds"]
+        assert r["candidate"]["wxid"] == "meimei_88" and r["candidate"]["level_label"] == "确定是她"
+        marked = next(c for c in d["candidates"] if c["wxid"] == "meimei_88")
+        assert marked["friend_add"] == {"id": 1, "nickname": "小鹿", "aweme_id": "dy_demo01", "level": "sure",
+                                        "level_label": "确定是她"}
+        assert "friend_add" not in next(c for c in d["candidates"] if c["wxid"] == "wxid_new01")
+        assert call("/api/prm/friend-adds", "POST", {"id": 1, "action": "not_her"})[1]["ok"] is True
+        d = call("/api/prm")[1]
+        assert d["friend_adds"][0]["candidate"] == {}
+        assert "friend_add" not in next(c for c in d["candidates"] if c["wxid"] == "meimei_88")
+    finally:
+        server.register_new_friends(None)
+
+
+def test_three_party_is_shown_and_made_from_the_running_console_and_refused_while_stopped(tmp_path, monkeypatch):
+    """三方群 (src/prm/three_party.py, 2026-10-30): GET /api/prm's ``three_party`` (who goes in besides her, the suggested
+    name with the brand filled in) and each deal's; POST /api/prm/deals group / group_try / group_made / group_none
+    while running; a stopped bot shows PRM_GROUP_WITH from .env and says it cannot make one."""
+    from test_three_party import BOSS, HER, NEW_GROUP, Admin, Auto, Backend
+
+    clock = Clock()
+    cfg = SimpleNamespace(claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1",
+                          claude_relay_port=0, claude_relay_prefix="cc", claude_relay_wxids=[],
+                          claude_relay_db=":memory:", claude_relay_max_chars=1500, admin_wxid="wxid_admin",
+                          prm_copilot="on", prm_db=":memory:", prm_group_with=BOSS, prm_friend_add_brand="品牌测试")
+    relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=clock, files_dir=tmp_path / "relay")
+    prm = PrmService(cfg, relay, store=PrmStore(":memory:"), clock=clock, send=lambda c, t: True)
+    party = prm.register(CREATOR, "小美", "测试达人")
+    backend = Backend()
+    admin = Admin(backend)
+    prm.three_party.attach(admin, Auto(), backend)
+    prm.three_party.spawn = lambda fn: fn()
+    prm.three_party._sleep = lambda s: None
+    server.register_prm(prm)
+    try:
+        def deal_group():
+            d = call("/api/prm")[1]
+            return d["three_party"], next(p["deal"]["three_party"] for p in d["parties"] if p["id"] == party["id"])
+
+        deal_id = prm.store.deal_of(party["id"])["id"]
+        assert deal_group() == ({"enabled": True, "with": [BOSS], "why": "", "busy": None,
+                                 "name_template": "品牌测试×{昵称}"}, {})
+        assert call("/api/prm/deals", "POST", {"action": "group_try", "deal_id": deal_id})[1] == {"ok": True,
+                                                                                                    "state": "trying"}
+        assert deal_group()[1]["tried"]["ok"] is True and admin.calls == [([HER, BOSS], True)]
+        assert call("/api/prm/deals", "POST", {"action": "group", "deal_id": deal_id})[1]["ok"] is True
+        shown = deal_group()[1]
+        assert (shown["state"], shown["label"], shown["made"], shown["chat_name"]) == ("created", "已建好", True,
+                                                                                       f"{BOSS}、{HER}")
+        assert prm.store.deal(deal_id)["three_party"]["chat"] == NEW_GROUP
+        assert call("/api/prm/deals", "POST", {"action": "group_none", "deal_id": deal_id})[1]["ok"] is True
+        assert deal_group()[1] == {"tried": shown["tried"]}
+        assert call("/api/prm/deals", "POST", {"action": "group_made", "deal_id": deal_id})[1]["ok"] is True
+        assert (deal_group()[1]["state"], deal_group()[1]["made"]) == ("created", False)
+    finally:
+        server.register_prm(None)
+        relay.stop()
+    monkeypatch.chdir(tmp_path)                                    # the bot stopped
+    monkeypatch.delenv("PRM_DB", raising=False)
+    monkeypatch.setenv("PRM_COPILOT", "on")
+    monkeypatch.setenv("PRM_GROUP_WITH", f"{BOSS}，王总测试")
+    monkeypatch.setenv("PRM_FRIEND_ADD_BRAND", "品牌测试")
+    assert call("/api/prm/parties", "POST", {"action": "add", "wxid": CREATOR, "name": "小美"})[1]["ok"] is True
+    d = call("/api/prm")[1]
+    assert d["three_party"] == {"enabled": True, "with": [BOSS, "王总测试"], "why": "机器人没有运行", "busy": None,
+                                "name_template": "品牌测试×{昵称}"}
+    for action in ("group", "group_try", "group_made", "group_none"):
+        assert call("/api/prm/deals", "POST", {"action": action, "deal_id": 1})[1] == {
+            "ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能拉群"}
+
+
+def test_the_running_console_says_how_many_messages_a_reply_may_be(tmp_path):
+    """PRM_REPLY_PARTS (src/prm/service.py reply_parts, 2026-10-30): GET /api/prm's ``reply_parts`` (the 待审批 page says
+    「会分 N 条发」 of a draft with blank lines); 1 for a config without it (one message, as before)."""
+    for parts, shown in ((3, 3), (None, 1)):
+        cfg = SimpleNamespace(claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1",
+                              claude_relay_port=0, claude_relay_prefix="cc", claude_relay_wxids=[],
+                              claude_relay_db=":memory:", claude_relay_max_chars=1500, admin_wxid="wxid_admin",
+                              prm_copilot="on", prm_db=":memory:", **({} if parts is None else {"prm_reply_parts": parts}))
+        relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=Clock(), files_dir=tmp_path / f"relay{shown}")
+        prm = PrmService(cfg, relay, store=PrmStore(":memory:"), clock=Clock(), send=lambda c, t: True)
+        server.register_prm(prm)
+        try:
+            assert call("/api/prm")[1]["reply_parts"] == shown
+        finally:
+            server.register_prm(None)
+            relay.stop()

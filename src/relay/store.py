@@ -133,6 +133,9 @@ class RelayStore:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # What is replaced or deleted is overwritten with zeros, not left in free pages: a 抖音百应 inbox answer holds the
+        # creators' words and contact numbers in full until the bot replaces it with its summary (replace_result).
+        self._conn.execute("PRAGMA secure_delete = ON")
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(_SCHEMA)
@@ -420,6 +423,14 @@ class RelayStore:
             self._conn.execute("UPDATE relay_jobs SET result_json = ? WHERE id = ?",
                                (json.dumps(data, ensure_ascii=False), job_id))
             self._conn.commit()
+
+    def replace_result(self, job_id: int, text: str) -> bool:
+        """Put ``text`` in place of a finished job's result (the PRM's 百应 inbox job: once its answer is handled,
+        only a summary stays, not the creators' words as they wrote them).  True when the job is there."""
+        with self._lock:
+            cur = self._conn.execute("UPDATE relay_jobs SET result_text = ? WHERE id = ?", (str(text), job_id))
+            self._conn.commit()
+            return cur.rowcount == 1
 
     def take_leftovers(self, job_id: int) -> list[dict]:
         """Follow-ups the worker never handed on (the job ended first); they count as taken."""

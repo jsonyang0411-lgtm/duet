@@ -215,6 +215,6 @@ function Control({ f, value, onChange, invalid }) {
       </div>
     )
   }
-  return <div style={{ width: 300 }}><TextInput value={value} onChange={onChange} mono placeholder={f.default || '（空）'} aria-invalid={invalid ? 'true' : undefined} /></div>
+  return <div style={{ width: 300 }}><TextInput value={value} onChange={onChange} mono placeholder={f.placeholder || f.default || '（空）'} aria-invalid={invalid ? 'true' : undefined} /></div>
 }
 

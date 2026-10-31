@@ -1002,3 +1002,22 @@ def test_a_creator_written_straight_into_the_database_is_read_at_once(bot):
     assert not bot.prm.is_party_chat("wxid_creator02")
     bot.prm.store.add_party("wxid_creator02", "小丽", "", bot.clock.now)
     assert bot.prm.is_party_chat("wxid_creator02")
+
+
+def test_the_clean_up_clears_her_friend_add_records_and_the_numbers_in_her_baiying_nickname(bot, clock):
+    """加百应达人微信 (功能 R): linking cleared her numbers already; the 8.2 clean-up clears them once more and masks
+    a number in her 百应 nickname, in the record and in her 抖音 link."""
+    record, _ = bot.prm.store.add_friend_add(
+        state="linked", source="paste", aweme_id="dy_demo01", nickname="小美 13800000000", wechat="abcdefyz",
+        phone="13800000000", masked={"wechat": "ab****yz", "phone": "138****0000"}, party_id=1, now=clock.now)
+    stranger, _ = bot.prm.store.add_friend_add(state="offered", source="paste", aweme_id="dy_demo02", wechat="other123",
+                                               now=clock.now)
+    bot.prm.store.add_creator_link(1, "dy_demo01", nickname="小美 13800000000", source="friend_add", now=clock.now)
+    counts = bot.prm.purge(bot.prm.store.deal(1), clock.now)
+    assert counts["friend_adds"] == 2
+    kept = bot.prm.store.friend_add(record["id"])
+    assert (kept["wechat"], kept["phone"], kept["nickname"]) == ("", "", "小美 138****0000")
+    assert kept["masked"] == {"wechat": "ab****yz", "phone": "138****0000"}
+    assert bot.prm.store.creator_links(1)[0]["nickname"] == "小美 138****0000"
+    assert bot.prm.store.friend_add(stranger["id"])["wechat"] == "other123"       # not hers: left alone
+    assert bot.prm.purge(bot.prm.store.deal(1), clock.now)["friend_adds"] == 0     # once more: nothing changes

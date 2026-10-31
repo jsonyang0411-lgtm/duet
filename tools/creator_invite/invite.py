@@ -47,6 +47,9 @@ STOP_EXITS = {EXIT_WALL: "验证码或限流（退出码 76）", EXIT_LOGIN: "�
 # The douyin CLI could not tell which login the tab is (exit 1; 2026-10-29 live: getUser gave shop id 0 = a 百应 tab that
 # had logged out). It checks before the command's own request, so nothing else went out — and nothing will, until a person logs in.
 IDENTITY_UNVERIFIABLE = "[IDENTITY_UNVERIFIABLE]"
+# A 抖音 search in the config may only filter and page: these the tool sets itself, or they would bypass the pacing, write a file or act.
+DY_SEARCH_FORBIDDEN = ("--execute", "--raw", "--out", "--with-values", "--expect-shop-id", "--expect-user-id", "--expect-aavid",
+                       "--transport", "--session-file", "--session-from", "--no-open", "--format", "--fields")
 LOGIN_HINT = "核对不了调试 Chrome 里登录的是哪家店，多半是百应掉登录了：在调试 Chrome 里重新登录百应、开着百应的页面，再重跑"
 
 AWEME_ID = re.compile(r"^[A-Za-z0-9_.-]{2,64}$")          # what douyin-engineering's author-invite takes
@@ -56,6 +59,7 @@ DIGITS = re.compile(r"^\d{1,20}$")
 PRODUCT_ID = re.compile(r"^\d{6,25}$")
 STYLE_CODE = re.compile(r"^[A-Za-z0-9_-]{2,40}$")
 RIGHT_WORDS = ("high-commission", "free-sample", "video-material", "video-boost")
+RIGHT_NAMES = {"high-commission": "专属高佣", "free-sample": "免费申样", "video-material": "视频素材支持", "video-boost": "优质视频投放"}
 COMMISSION_CAP = 25                                        # the user's own ceiling (2026-10-28), also enforced by the CLI
 CONTENT_MAX = 150                                          # the drawer's limit, counted as JS counts (UTF-16 units)
 NOT_INVITED, GATE_OPEN = 1, -1                              # status 1 = 邀约带货 (enabled); popwindow -1 = no confirmation
@@ -63,19 +67,24 @@ SENT_OUTCOMES = ("VERIFIED_SUCCESS", "ACCEPTED_UNVERIFIED", "INDETERMINATE", "CH
 
 CATEGORY_NAMES = {"small": "小达人", "mid": "中大博主", "big": "大主播/专场型"}
 CATEGORY_ORDER = ("small", "mid", "big")
-# 三类话术（用户 2026-10-28 定的要点；{品牌} 换成配置里的 brand；只写「包邮」，不写快递公司）
+# 三类话术（用户 2026-10-28 定的要点；{品牌} 换成配置里的 brand；只写「包邮」，不写快递公司；
+# 2026-10-29 去掉了「视频素材支持」（卡上也不再勾这项权益）和「25%专属高佣」：佣金不在卡上，到微信里谈；
+# 同天下午加上「合作细节加微信详聊」：卡就是为了让达人加卡上的微信）
 DEFAULT_TEMPLATES = {
     "small": "您好！我们是原创设计师帽饰品牌{品牌}，主打英伦复古、老钱风女帽，客单价高、转化好。很喜欢您的穿搭内容，"
-             "诚邀您带我们的帽子：25%专属高佣，免费寄样包邮，另有视频素材支持。期待合作～",
+             "诚邀您带我们的帽子，免费寄样包邮。合作细节加微信详聊，期待合作～",
     "mid": "您好！我们是设计师女帽品牌{品牌}（英伦复古/老钱风），一直关注您的内容，诚邀您合作带货：现货样品任选3顶，"
-           "免费包邮寄出；25%专属高佣，另有视频素材支持。期待您的回复～",
+           "免费包邮寄出。合作细节加微信详聊，期待您的回复～",
     "big": "您好！我们是设计师女帽品牌{品牌}，主打英伦复古、老钱风全系帽饰。诚邀您做一场品牌专场：专场样品看中多少款寄多少款，"
-           "全系现货锁库存；25%专属高佣，优质视频投流支持。期待合作！",
+           "全系现货锁库存，优质视频投流支持。合作细节加微信详聊，期待合作！",
 }
 DEFAULT_FIND = {
     "goods_category": "1000003461",     # 帽子（服装 > 服装配饰 > 帽子）
     "price_min": 150, "price_max": 500,
-    "queries": [{"fans_min": 5000, "fans_max": 200000, "pages": 2}, {"fans_min": 200000, "pages": 1}],
+    # 平台那边先筛掉一部分「可能骗样」的（等级 LV2 以上；小达人近 30 天销售额区间下限 ≥ 1 万。20 万粉以上不按销售额筛：
+    # 销售额不公开的大主播平台会整个筛掉），翻的页就不浪费在这些人身上；本地照样按 DEFAULT_RULES 再查一遍
+    "queries": [{"fans_min": 5000, "fans_max": 200000, "level_min": 2, "sales_min": 10000, "pages": 2},
+                {"fans_min": 200000, "level_min": 2, "pages": 1}],
 }
 DEFAULT_RULES = {
     "small_fans_min": 5000, "mid_fans_min": 200000,        # 小达人 5000～20 万（15～20 万也算小达人：用户 2026-10-29），中大博主 ≥ 20 万
@@ -83,6 +92,17 @@ DEFAULT_RULES = {
     "suspect_hat_share": 90.0,
     "female_min": 60.0,                                    # 女性粉丝低于它的不进清单（我们卖女帽：用户 2026-10-29）
     "low_hat_share": 1.0,                                  # 帽子占比低于它的标出来（只是标，不去掉）
+    # 专门带自己牌子的不进（用户 2026-10-29）：名字像店铺 / 品牌号，或这次找到的人里好几个号用同一个店名开头（店铺矩阵号）
+    "own_brand_words": "女装|男装|童装|服饰|服装|羽绒|皮草|鹅绒|貂|大码|工厂|厂家|源头|档口|批发|尾货|仓储|仓库|老板娘|旗舰|官方|专卖|门店|实体|店|品牌|定制|高定|上新",
+    "matrix_min": 2,
+    # 可能骗样品自己用的不进（用户 2026-10-29）：带货等级低、卖得少、销售额不公开又等级不高、粉丝多卖得少
+    "min_level": 2,                                        # 带货等级低于 LV2
+    "min_sales30d": 10000,                                 # 近 30 天销售额区间下限低于 1 万元
+    "hidden_sales_min_level": 3,                           # 销售额不公开（无数据）时，等级低于 LV3
+    "min_sales_per_fan": 0.2, "sales_per_fan_from": 50000, # 粉丝 5 万以上时，销售额下限 ÷ 粉丝数不到 0.2 元
+    # 只标出来给人看：帽子占比高（可能自己做帽子）、近 30 天几乎只卖一类别的货（可能只带一个牌子）
+    "own_hat_flag": 50.0, "single_category_flag": 90.0,
+    "drop_ids": [], "keep_ids": [],                        # 手动：一定不要的抖音号 / 不按「自己牌子」「骗样」两组规则去掉的抖音号
 }
 
 
@@ -182,10 +202,15 @@ def load_config(path: Optional[str]) -> dict:
     if not cfg["invite_wechat"] and not cfg["invite_phone"]:
         raise ToolError("配置 invite_wechat / invite_phone 至少要一个：邀约卡上给达人看的联系方式", EXIT_USAGE)
     cfg["brand"] = str(raw.get("brand") or "").strip()
-    cfg["commission_rate"] = _number(raw, "commission_rate", COMMISSION_CAP, 1, COMMISSION_CAP, integer=True)
-    rights = raw.get("rights", ["high-commission", "video-material"])
-    if not isinstance(rights, list) or not rights or any(r not in RIGHT_WORDS for r in rights) or len(set(rights)) != len(rights):
-        raise ToolError(f"配置 rights 要是 {', '.join(RIGHT_WORDS)} 里的几个", EXIT_USAGE)
+    # 卡上的专属佣金：0（默认）= 不开，卡只为让达人加微信，佣金到微信里谈（用户 2026-10-29 下午）；1–25 = 卡一发出去
+    # 平台就给卡上的商品开这个比例的长期专属佣金
+    cfg["commission_rate"] = _number(raw, "commission_rate", 0, 0, COMMISSION_CAP, integer=True)
+    rights = raw.get("rights", ["free-sample"])               # 2026-10-29 下午：只勾免费申样
+    if not isinstance(rights, list) or any(r not in RIGHT_WORDS for r in rights) or len(set(rights)) != len(rights):
+        raise ToolError(f"配置 rights 要是 {', '.join(RIGHT_WORDS)} 里的几个（也可以一个都不勾）", EXIT_USAGE)
+    if ("high-commission" in rights) != bool(cfg["commission_rate"]):
+        raise ToolError("配置 rights 里的 high-commission（专属高佣）和 commission_rate 要一起有、一起没有：勾专属高佣就写比例，"
+                        "不开专属佣金就别勾", EXIT_USAGE)
     cfg["rights"] = list(rights)
     # 0（默认）= 不看库存：能挂上卡的都配（老板 2026-10-29）；大于 0 才按款号查聚水潭的可用库存、不配缺货的
     cfg["min_stock"] = _number(raw, "min_stock", 0, 0, 100000, integer=True)
@@ -218,14 +243,40 @@ def load_config(path: Optional[str]) -> dict:
     for q in queries:
         if not isinstance(q, dict):
             raise ToolError("find.queries 的每一组要是一个对象", EXIT_USAGE)
-        for key in ("fans_min", "fans_max"):
+        for key in ("fans_min", "fans_max", "sales_min", "sales_max"):
             if key in q:
                 _number(q, key, q[key], 0, 10 ** 10, integer=True)
+        for key in ("level_min", "level_max"):
+            if key in q:
+                _number(q, key, q[key], 0, 7, integer=True)
         _number(q, "pages", q.get("pages", 1), 1, 5, integer=True)
         _number(q, "page", q.get("page", 1), 1, 500, integer=True)
+    # 抖音那边也找（用户 2026-10-29）：百应达人广场的只读搜索，参数原样写在配置里（douyin-engineering 的 buyin authors-*）
+    dy_queries = find.get("dy_queries") or []
+    if not isinstance(dy_queries, list) or len(dy_queries) > 10:
+        raise ToolError("配置 find.dy_queries 要是 0 到 10 组抖音达人广场的搜索", EXIT_USAGE)
+    for q in dy_queries:
+        args = q.get("args") if isinstance(q, dict) else None
+        if (not isinstance(args, list) or not 2 <= len(args) <= 30 or not all(isinstance(a, str) for a in args)
+                or args[0] != "buyin" or not re.match(r"^authors-[a-z-]{2,30}$", args[1])):
+            raise ToolError("find.dy_queries 的每一组要写 args：[\"buyin\", \"authors-…\", \"--参数=值\", …]（只读的找达人命令）", EXIT_USAGE)
+        for a in args[2:]:
+            name = a.split("=", 1)[0]
+            if not re.match(r"^--[a-z][a-z0-9-]{0,40}(=[^\s]{1,120})?$", a) or name in DY_SEARCH_FORBIDDEN:
+                raise ToolError(f"find.dy_queries 里的参数 {a[:60]} 不行：只写筛选和页数（{'、'.join(DY_SEARCH_FORBIDDEN)} 由工具管或不许用）", EXIT_USAGE)
+    find["dy_queries"] = dy_queries
+    find["dy_lookup_max"] = _number(find, "dy_lookup_max", find.get("dy_lookup_max", 60), 0, 500, integer=True)
     cfg["find"] = find
     rules = dict(DEFAULT_RULES)
     rules.update(raw.get("rules") or {})
+    try:
+        re.compile(str(rules["own_brand_words"] or ""))
+    except re.error as e:
+        raise ToolError(f"配置 rules.own_brand_words 不是正则表达式：{e}", EXIT_USAGE)
+    for key in ("drop_ids", "keep_ids"):
+        ids = rules.get(key)
+        if not isinstance(ids, list) or not all(isinstance(x, str) and AWEME_ID.match(x) for x in ids):
+            raise ToolError(f"配置 rules.{key} 要是抖音号的列表", EXIT_USAGE)
     cfg["rules"] = rules
     templates = dict(DEFAULT_TEMPLATES)
     templates.update(raw.get("templates") or {})
@@ -242,6 +293,13 @@ def load_config(path: Optional[str]) -> dict:
             raise ToolError(f"{CATEGORY_NAMES[key]}的话术里写了快递公司：只写「包邮」", EXIT_USAGE)
         cfg["templates"][key] = text
     cfg["weekly_cap"] = _number(raw, "weekly_cap", 800, 1, 5000, integer=True)
+    # 每天最多发几张；0（默认）= 不限（2026-10-29 先加了 20 张一天，同天用户说去掉：发不发由用户说了算，节奏靠 wait_between）
+    cfg["daily_cap"] = _number(raw, "daily_cap", 0, 0, 1000, integer=True)
+    # 发的先后：category（默认）= 清单的顺序（小达人、中大博主、专场型）；mixed = 三类轮流、每类里最合适的先发（mix_categories），
+    # 每天按 daily_cap 发一批时，每一批都是剩下的里面最合适的那些（用户 2026-10-29：合适的都留作候选，按天来发）
+    cfg["send_order"] = str(raw.get("send_order") or "category")
+    if cfg["send_order"] not in ("category", "mixed"):
+        raise ToolError("配置 send_order 要是 category 或 mixed", EXIT_USAGE)
     cfg["quota_margin"] = _number(raw, "quota_margin", 50, 0, 5000, integer=True)
     cfg["gap_seconds"] = _number(raw, "gap_seconds", 3, 3, 60)
     wait = raw.get("wait_between", [15, 30])
@@ -250,6 +308,14 @@ def load_config(path: Optional[str]) -> dict:
         raise ToolError("配置 wait_between 要是 [最少秒, 最多秒]，至少 10 秒", EXIT_USAGE)
     cfg["wait_between"] = [float(wait[0]), float(wait[1])]
     cfg["plan_max_age_days"] = _number(raw, "plan_max_age_days", 3, 0.01, 30)
+    # follow（达人回没回邀约卡，用户 2026-10-29）：北京时间几点到几点查、发卡后跟几天、一次最多查几位
+    hours = raw.get("follow_hours", [9, 23])
+    if (not isinstance(hours, list) or len(hours) != 2 or not all(isinstance(h, int) and not isinstance(h, bool) for h in hours)
+            or not 0 <= hours[0] < hours[1] <= 24):
+        raise ToolError("配置 follow_hours 要是 [开始点, 结束点]，北京时间 0 到 24 的整点，比如 [9, 23]", EXIT_USAGE)
+    cfg["follow_hours"] = list(hours)
+    cfg["follow_days"] = _number(raw, "follow_days", 14, 1, 60, integer=True)
+    cfg["follow_max"] = _number(raw, "follow_max", 40, 1, 200, integer=True)
     cfg["home"] = Path(os.path.expanduser(str(raw.get("home") or DEFAULT_HOME)))
     return cfg
 
@@ -419,7 +485,13 @@ class Ledger:
         return [a["aweme_id"] for a in self._attempts().values() if a["sent"] is None]
 
     def sent_this_week(self, moment: datetime) -> int:
-        start = week_start(moment)
+        return self.sent_since(week_start(moment))
+
+    def sent_today(self, moment: datetime) -> int:
+        return self.sent_since(moment.astimezone(BJT).replace(hour=0, minute=0, second=0, microsecond=0))
+
+    def sent_since(self, start: datetime) -> int:
+        """发出去了或不知道发出去没有的卡，从 ``start`` 起有几张（读不懂时间的也算上，宁多不少）。"""
         n = 0
         for a in self._attempts().values():
             if a["sent"] is False:
@@ -460,6 +532,61 @@ def female_share(row: dict) -> Optional[float]:
 
 def band_min(band) -> float:
     return float(band.get("min") or 0) if isinstance(band, dict) and band.get("available") else 0.0
+
+
+def sales_floor(row: dict) -> Optional[float]:
+    """近 30 天销售额区间的下限（元）；平台没给（达人不公开，「无数据」）是 None。"""
+    band = row.get("sales30d")
+    return float(band.get("min") or 0) if isinstance(band, dict) and band.get("available") else None
+
+
+def top_category(row: dict):
+    """近 30 天卖得最多的细分品类和它的占比（%）；没有就 (None, 0)。"""
+    best, share = None, 0.0
+    for g in row.get("recentGoods") or []:
+        value = percent(g.get("ratio")) if isinstance(g, dict) else None
+        if value is not None and value > share:
+            best, share = g.get("name"), value
+    return best, share
+
+
+def name_stem(nickname: str) -> str:
+    """昵称里店名的那一段：第一个括号 / 点 / 横线 / 竖线 / 空格前面的（「小鹿（日常穿搭）」→「小鹿」，「木子-琳琳」→「木子」）；
+    没有这些分隔的，整个昵称就是它自己。英文不分大小写（「Mia(…)」和「MIA-…」算同一家：2026-10-29 真遇到过只差大小写的同一家店）。"""
+    text = re.sub(r"^[\W_]+", "", nickname or "")
+    m = re.match(r"^([^（(•·\-|｜【\[\s]{2,})[（(•·\-|｜【\[\s]", text)
+    return (m.group(1) if m else text).casefold()
+
+
+def own_brand_reason(view: dict, rules: dict, stems: Dict[str, int]) -> Optional[str]:
+    """专门带自己牌子的多半不接别人的货：名字像店铺 / 品牌号，或店铺矩阵号（同一个店名开头的号这次找到 ≥ matrix_min 个）。"""
+    words = str(rules["own_brand_words"] or "")
+    hit = re.search(words, view["nickname"]) if words else None
+    if hit:
+        return f"名字像店铺 / 品牌号（「{hit.group(0)}」）：多半专门带自己的牌子"
+    stem = name_stem(view["nickname"])
+    if stem and stems.get(stem, 0) >= rules["matrix_min"]:
+        return f"店铺矩阵号（这次找到 {stems[stem]} 个「{stem}」开头的号）：多半专门带自己的牌子"
+    return None
+
+
+def sample_risk_reason(row: dict, view: dict, rules: dict) -> Optional[str]:
+    """可能骗样品自己用的：带货等级低、近 30 天卖得少、销售额不公开又等级不高、粉丝多卖得少。"""
+    level = view["level"] or 0
+    if level < rules["min_level"]:
+        return f"带货等级 LV{level}（低于 LV{rules['min_level']}）：卖得少，骗样风险高"
+    floor = sales_floor(row)
+    if floor is None:
+        if level < rules["hidden_sales_min_level"]:
+            return f"近 30 天销售额不公开、带货等级只有 LV{level}：骗样风险高"
+        return None
+    if floor < rules["min_sales30d"]:
+        return f"近 30 天销售额只有 {view['sales30d']}（低于 {rules['min_sales30d']:g} 元）：骗样风险高"
+    fans = view["fans"] or 0
+    if fans >= rules["sales_per_fan_from"] and floor / fans < rules["min_sales_per_fan"]:
+        return (f"粉丝 {fans}、近 30 天销售额只有 {view['sales30d']}（每个粉丝不到 {rules['min_sales_per_fan']:g} 元）：粉多卖少，"
+                "骗样风险高")
+    return None
 
 
 def classify(row: dict, rules: dict):
@@ -511,7 +638,8 @@ def find_creators(cfg: dict, clis: Clis) -> List[dict]:
     for q in find["queries"]:
         args = ["find", "--platform=DY", f"--goods-category={find['goods_category']}", f"--price-min={find['price_min']}",
                 f"--price-max={find['price_max']}", "--not-added"]
-        for key, flag in (("fans_min", "--fans-min"), ("fans_max", "--fans-max"), ("level_min", "--level-min"), ("level_max", "--level-max")):
+        for key, flag in (("fans_min", "--fans-min"), ("fans_max", "--fans-max"), ("level_min", "--level-min"), ("level_max", "--level-max"),
+                          ("sales_min", "--sales-min"), ("sales_max", "--sales-max")):
             if key in q:
                 args.append(f"{flag}={int(q[key])}")
         args += [f"--page={int(q.get('page', 1))}", f"--pages={int(q.get('pages', 1))}", f"--expect-uid={cfg['jst_expect_uid']}"]
@@ -525,8 +653,80 @@ def find_creators(cfg: dict, clis: Clis) -> List[dict]:
     return rows
 
 
+def find_on_douyin(cfg: dict, clis: Clis, known: set) -> dict:
+    """百应达人广场那边找到的人（find.dy_queries 每组一条只读搜索）：聚水潭那边已经有的只记一笔「两边都有」；行上的按钮已经不是
+    「邀约带货」（imStatus 不是 1：本店沟通过、禁用）的、已经在本店百应达人库里（inCrm）的不查也不进；其余的每位到聚水潭按抖音号
+    查一次（jst lookup，最多 dy_lookup_max 位），拿到和 jst find 一样的行（粉丝画像、近 30 天带货品类和销售额），这样两边的人走
+    同一套规则；聚水潭查不到的、已经在聚水潭「我的达人」里的、件单价不在 find.price_min～price_max 的不进。"""
+    out = {"rows": [], "both": set(), "excluded": [], "found": 0, "new": 0, "looked_up": 0, "not_looked_up": 0, "stopped": None}
+    queries = cfg["find"].get("dy_queries") or []
+    if not queries:
+        return out
+    order: List[str] = []
+    names: Dict[str, dict] = {}
+    for q in queries:
+        data = must_read(clis.run("dy", [*q["args"], f"--expect-shop-id={cfg['dy_expect_shop_id']}", "--no-open"], 900), "抖音达人广场找达人")
+        for r in data.get("rows") or []:
+            aweme = str(r.get("awemeId") or "") if isinstance(r, dict) else ""
+            if not aweme or aweme in names:
+                continue
+            names[aweme] = r
+            out["found"] += 1
+            if aweme in known:
+                out["both"].add(aweme)
+            elif r.get("imStatus") not in (None, NOT_INVITED):
+                out["excluded"].append({"aweme_id": aweme, "nickname": str(r.get("nickname") or ""), "fans": r.get("fansNum"),
+                                        "hat_share": None, "female_share": None, "source": "抖音",
+                                        "reason": f"百应里的按钮已经不是「邀约带货」（状态 {r.get('imStatus')}：本店沟通过或不能邀约）"})
+            elif r.get("inCrm") is True:
+                out["excluded"].append({"aweme_id": aweme, "nickname": str(r.get("nickname") or ""), "fans": r.get("fansNum"),
+                                        "hat_share": None, "female_share": None, "source": "抖音", "reason": "已经在本店百应达人库里"})
+            else:
+                order.append(aweme)
+    out["new"] = len(order)
+    for aweme in order[cfg["find"]["dy_lookup_max"]:]:
+        out["not_looked_up"] += 1
+    for index, aweme in enumerate(order[:cfg["find"]["dy_lookup_max"]]):
+        r = names[aweme]
+        stub = {"aweme_id": aweme, "nickname": str(r.get("nickname") or ""), "fans": r.get("fansNum"), "hat_share": None,
+                "female_share": None, "source": "抖音"}
+        if not AWEME_ID.match(aweme):
+            out["excluded"].append({**stub, "reason": "抖音号格式命令行不收"})
+            continue
+        found = clis.run("jst", ["lookup", "--platform=DY", f"--no={aweme}", f"--expect-uid={cfg['jst_expect_uid']}"], 300)
+        out["looked_up"] += 1
+        if found.exit_code == EXIT_WALL:
+            # 聚水潭限流：不再往下查（不绕过），已经查到的照常进清单，没查的记个数——一份清单不因为这个作废
+            left = len(order[:cfg["find"]["dy_lookup_max"]]) - index
+            out["looked_up"] -= 1
+            out["not_looked_up"] += left
+            out["stopped"] = f"聚水潭按抖音号查到第 {index + 1} 位时限流（{found.said()[:120]}）：后面 {left} 位没查，过一会儿重新出清单再查"
+            break
+        if found.exit_code in STOP_EXITS:
+            raise StopRun(f"聚水潭按抖音号查达人：{STOP_EXITS[found.exit_code]}，立刻停下。命令行说：{found.said()}", found.exit_code)
+        if found.exit_code != 0 or found.data is None:
+            out["excluded"].append({**stub, "reason": f"聚水潭查这个号出错（退出码 {found.exit_code}）：{found.said()[:120]}"})
+            continue
+        daren = found.data.get("daren") if found.data.get("found") else None
+        if not isinstance(daren, dict):
+            out["excluded"].append({**stub, "reason": "聚水潭查不到这个号：没有粉丝画像和带货数据，规则筛不了，不进"})
+            continue
+        if daren.get("added"):
+            out["excluded"].append({**stub, "reason": "已经在聚水潭「我的达人」里（有人在跟），不进"})
+            continue
+        price = daren.get("avgPrice")
+        lo, hi = cfg["find"]["price_min"], cfg["find"]["price_max"]
+        if isinstance(price, (int, float)) and not isinstance(price, bool) and not lo <= price <= hi:
+            out["excluded"].append({**creator_view({**daren, "platformNo": aweme}), "source": "抖音",
+                                    "reason": f"件单价 {price} 元不在 {lo:g}～{hi:g} 元（和聚水潭那边一样的条件）"})
+            continue
+        out["rows"].append({**daren, "platformNo": aweme, "_source": "抖音"})
+    return out
+
+
 def creator_view(row: dict) -> dict:
     return {
+        "source": row.get("_source") or "聚水潭",
         "aweme_id": str(row.get("platformNo") or ""), "nickname": str(row.get("nickName") or ""),
         "fans": row.get("fansNum"), "sales30d": (row.get("sales30d") or {}).get("label") if isinstance(row.get("sales30d"), dict) else None,
         "avg_price": row.get("avgPrice"), "level": row.get("level"), "channel": row.get("channelBySales") or row.get("mainChannel"),
@@ -534,11 +734,25 @@ def creator_view(row: dict) -> dict:
     }
 
 
+def _both_routes(pool: List[dict]) -> List[dict]:
+    """Inside one category: no flag first, then the higher hat share; a tie is taken from the two routes (聚水潭 / 抖音) in turn,
+    so that a list cut at --count holds both (2026-10-29: with the wider categories nearly every row had a hat share of 0, and
+    the 聚水潭 rows, found first, filled a 40 list on their own)."""
+    key = lambda c: (bool(c["flags"]), -(c["hat_share"] or 0.0))
+    route = lambda c: 1 if c.get("source") == "抖音" else 0
+    rank: Dict[int, int] = {}
+    seen = [0, 0]
+    for c in sorted(pool, key=key):
+        rank[id(c)] = seen[route(c)]
+        seen[route(c)] += 1
+    return sorted(pool, key=lambda c: (*key(c), rank[id(c)], route(c)))
+
+
 def mix_categories(candidates: List[dict]) -> List[dict]:
-    """The order the platform's status is asked in: inside each category the ones without a flag first, then the higher hat share;
-    then the categories taken in turn (大主播/专场型, 中大博主, 小达人, 大主播 …) so that a list cut at --count has all three."""
-    pools = {k: sorted((c for c in candidates if c["category"] == k), key=lambda c: (bool(c["flags"]), -(c["hat_share"] or 0.0)))
-             for k in ("big", "mid", "small")}
+    """The order the platform's status is asked in: inside each category the ones without a flag first, then the higher hat share,
+    the two routes in turn on a tie (_both_routes); then the categories taken in turn (大主播/专场型, 中大博主, 小达人, 大主播 …) so
+    that a list cut at --count has all three."""
+    pools = {k: _both_routes([c for c in candidates if c["category"] == k]) for k in ("big", "mid", "small")}
     out: List[dict] = []
     while any(pools.values()):
         for k in ("big", "mid", "small"):
@@ -559,9 +773,18 @@ def build_plan(cfg: dict, clis: Clis, ledger: Ledger, count: int, *, moment: Opt
     if not usable:
         raise ToolError(f"配置的商品没有一款可用库存 ≥ {cfg['min_stock']}：不出清单")
     rows = find_creators(cfg, clis)
+    douyin = find_on_douyin(cfg, clis, {str(r.get("platformNo") or "") for r in rows})
+    for r in rows:
+        if str(r.get("platformNo") or "") in douyin["both"]:
+            r["_source"] = "两边都有"
+    rows = rows + douyin["rows"]
     invited = ledger.never_again()
-    excluded: List[dict] = []
+    excluded: List[dict] = list(douyin["excluded"])
     candidates: List[dict] = []
+    stems: Dict[str, int] = {}
+    for aweme, nick in {str(r.get("platformNo") or ""): str(r.get("nickName") or "") for r in rows}.items():
+        stem = name_stem(nick)
+        stems[stem] = stems.get(stem, 0) + 1
     seen = set()
     for row in rows:
         view = creator_view(row)
@@ -575,12 +798,24 @@ def build_plan(cfg: dict, clis: Clis, ledger: Ledger, count: int, *, moment: Opt
         if aweme in invited:
             excluded.append({**view, "reason": "台账里已经邀约过（或不知道上次发出去没有）"})
             continue
+        if aweme in rules["drop_ids"]:
+            excluded.append({**view, "reason": "手动排除（配置 rules.drop_ids）"})
+            continue
         if view["hat_share"] is not None and view["hat_share"] >= rules["suspect_hat_share"]:
             excluded.append({**view, "reason": f"疑似同行自播号（帽子占比 {view['hat_share']}% ≥ {rules['suspect_hat_share']}%）", "suspect": True})
             continue
         if view["female_share"] is not None and view["female_share"] < rules["female_min"]:
             excluded.append({**view, "reason": f"女性粉丝 {view['female_share']}%（低于 {rules['female_min']}%）"})
             continue
+        if aweme not in rules["keep_ids"]:
+            why = own_brand_reason(view, rules, stems)
+            if why:
+                excluded.append({**view, "reason": why, "group": "own_brand"})
+                continue
+            why = sample_risk_reason(row, view, rules)
+            if why:
+                excluded.append({**view, "reason": why, "group": "sample_risk"})
+                continue
         category, why = classify(row, rules)
         if category is None:
             excluded.append({**view, "reason": why})
@@ -590,6 +825,11 @@ def build_plan(cfg: dict, clis: Clis, ledger: Ledger, count: int, *, moment: Opt
             flags.append(f"帽子占比只有 {view['hat_share']}%")
         if view["female_share"] is None:
             flags.append("粉丝性别不知道")
+        if view["hat_share"] is not None and view["hat_share"] >= rules["own_hat_flag"]:
+            flags.append(f"帽子占比 {view['hat_share']}%：可能自己做帽子，发之前看一眼她的橱窗")
+        cat, share = top_category(row)
+        if cat and cat != "帽子" and share >= rules["single_category_flag"]:
+            flags.append(f"近 30 天 {share:g}% 是{cat}：可能只带一个牌子，看一眼")
         candidates.append({**view, "category": category, "flags": flags})
     candidates = mix_categories(candidates)
     picked: List[dict] = []
@@ -635,16 +875,23 @@ def build_plan(cfg: dict, clis: Clis, ledger: Ledger, count: int, *, moment: Opt
         "weekly_quotas": quotas, "ledger_sent_this_week": ledger.sent_this_week(moment),
         "templates": cfg["templates"], "creators": picked, "spare": spare, "excluded": excluded,
         "not_checked": len(not_checked), "requests": clis.requests(),
+        "douyin": {k: douyin[k] for k in ("found", "new", "looked_up", "not_looked_up", "stopped")} | {"both": len(douyin["both"])},
     }
 
 
 def fans_range(q: dict) -> str:
     lo, hi = q.get("fans_min"), q.get("fans_max")
     if lo is not None and hi is not None:
-        return f"{lo}～{hi}"
-    if lo is not None:
-        return f"{lo} 以上"
-    return f"{hi} 以下" if hi is not None else "不限"
+        text = f"{lo}～{hi}"
+    elif lo is not None:
+        text = f"{lo} 以上"
+    else:
+        text = f"{hi} 以下" if hi is not None else "不限"
+    if q.get("level_min") is not None or q.get("level_max") is not None:
+        text += f"、带货等级 LV{q.get('level_min', 0)}～LV{q.get('level_max', 7)}"
+    if q.get("sales_min") is not None:
+        text += f"、近 30 天销售额 ≥ {q['sales_min']} 元"
+    return text
 
 
 def plan_markdown(plan: dict, plan_file: str) -> str:
@@ -655,13 +902,20 @@ def plan_markdown(plan: dict, plan_file: str) -> str:
     w(f"# 达人邀约清单 {plan['plan_id']}\n\n")
     w(f"只读生成于 {plan['created_at']}，**还没有发任何邀约**。确认这份清单以后，才由用户明确同意执行：\n\n")
     w(f"```\npython3 tools/creator_invite/invite.py run --config <配置> --plan {plan_file} --confirm {plan['plan_id']}\n```\n\n")
-    w(f"- 卡片：专属佣金 {s['commission_rate']}%（长期），权益 {'、'.join(s['rights'])}，联系方式 {s['contact']} {s['contact_masked']}\n")
+    card = f"专属佣金 {s['commission_rate']}%（长期）" if s["commission_rate"] else "不开专属佣金（佣金到微信里谈）"
+    w(f"- 卡片：{card}，权益 {'、'.join(RIGHT_NAMES.get(r, r) for r in s['rights']) or '一项都不勾'}，联系方式 {s['contact']} {s['contact_masked']}\n")
     quotas = "；".join(f"{q.get('levels')} 已用 {q.get('used')} / 上限 {q.get('limit')}" for q in plan["weekly_quotas"]) or "没读到"
     w(f"- 平台本周邀约次数（按达人等级分档，按钮浮层的原话读出）：{quotas}\n")
     w(f"- 我们自己的每周上限 {s['weekly_cap']}，台账里本周已发 {plan['ledger_sent_this_week']}；平台额度低于余量 {s['quota_margin']} 就停\n")
     f = s["find"]
     w(f"- 筛选：类目 {f['goods_category']}，件单价 {f['price_min']}～{f['price_max']} 元，没加进达人库；"
       + "；".join(f"粉丝 {fans_range(q)}，第 {q.get('page', 1)} 页起读 {q.get('pages', 1)} 页" for q in f["queries"]) + "\n")
+    dy = plan.get("douyin") or {}
+    if f.get("dy_queries"):
+        w(f"- 抖音达人广场也找了（{len(f['dy_queries'])} 组搜索）：找到 {dy.get('found', 0)} 位，其中 {dy.get('both', 0)} 位聚水潭那边也找到了；"
+          f"新的 {dy.get('new', 0)} 位按抖音号到聚水潭查了 {dy.get('looked_up', 0)} 位"
+          + (f"，还有 {dy['not_looked_up']} 位没查" + ("" if dy.get("stopped") else f"（超过一次最多查的 {f.get('dy_lookup_max')} 位）")
+             if dy.get("not_looked_up") else "") + (f"。**{dy['stopped']}**" if dy.get("stopped") else "") + "\n")
     req = plan.get("requests") or {}
     w(f"- 生成这份清单用了平台请求：聚水潭 {req.get('jst', 0)} 次、抖音 {req.get('dy', 0)} 次\n\n")
     w(f"## 商品（主推 1 款 + 其余{'有货的' if s['min_stock'] else '的'}都附带；"
@@ -676,10 +930,11 @@ def plan_markdown(plan: dict, plan_file: str) -> str:
         w(f"## {CATEGORY_NAMES[key]}（{len(rows)} 位）\n\n")
         if not rows:
             continue
-        w("| # | 抖音号 | 昵称 | 粉丝 | 近 30 天销售额 | 件单价 | 等级 | 主播类型 | 帽子占比 | 女粉 | 主推 / 附带 | 状态 | 提醒 |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+        w("| # | 来源 | 抖音号 | 昵称 | 粉丝 | 近 30 天销售额 | 件单价 | 等级 | 主播类型 | 帽子占比 | 女粉 | 主推 / 附带 | 状态 | 提醒 |\n"
+          "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
         for i, c in enumerate(rows, 1):
             prods = names.get(c["products"]["main"], c["products"]["main"]) + " / " + "、".join(names.get(x, x) for x in c["products"]["extras"])
-            w(f"| {i} | {c['aweme_id']} | {c['nickname']} | {c['fans']} | {c['sales30d'] or '-'} | {c['avg_price']} | LV{c['level']} | {c['channel'] or '-'} | "
+            w(f"| {i} | {c.get('source') or '聚水潭'} | {c['aweme_id']} | {c['nickname']} | {c['fans']} | {c['sales30d'] or '-'} | {c['avg_price']} | LV{c['level']} | {c['channel'] or '-'} | "
               f"{'-' if c['hat_share'] is None else str(c['hat_share']) + '%'} | {'-' if c['female_share'] is None else str(c['female_share']) + '%'} | {prods} | "
               f"{c.get('button') or c.get('status')} | {'；'.join(c['flags'])} |\n")
         w("\n")
@@ -687,9 +942,15 @@ def plan_markdown(plan: dict, plan_file: str) -> str:
     for key in CATEGORY_ORDER:
         w(f"- **{CATEGORY_NAMES[key]}**（{js_length(plan['templates'][key])} 字）：{plan['templates'][key]}\n")
     suspects = [c for c in plan["excluded"] if c.get("suspect")]
-    others = [c for c in plan["excluded"] if not c.get("suspect")]
+    own = [c for c in plan["excluded"] if c.get("group") == "own_brand"]
+    risky = [c for c in plan["excluded"] if c.get("group") == "sample_risk"]
+    others = [c for c in plan["excluded"] if not c.get("suspect") and c.get("group") not in ("own_brand", "sample_risk")]
     w(f"\n## 疑似同行自播号（帽子占比 ≥ {plan['settings']['rules']['suspect_hat_share']:g}%，默认不进清单，{len(suspects)} 位）\n\n")
     excluded_table(w, suspects)
+    w(f"\n## 专门带自己牌子的（名字像店铺 / 品牌号、店铺矩阵号，不进清单，{len(own)} 位；要留下哪位，把抖音号写进配置 rules.keep_ids）\n\n")
+    excluded_table(w, own)
+    w(f"\n## 可能骗样品的（带货等级低、卖得少、销售额不公开、粉多卖少，不进清单，{len(risky)} 位；要留下哪位，写进 rules.keep_ids）\n\n")
+    excluded_table(w, risky)
     w(f"\n## 其他没进清单的（{len(others)} 位）\n\n")
     excluded_table(w, others)
     if plan.get("spare"):
@@ -707,9 +968,9 @@ def excluded_table(w, rows: List[dict]) -> None:
     if not rows:
         w("没有。\n")
         return
-    w("| 抖音号 | 昵称 | 粉丝 | 帽子占比 | 女粉 | 原因 |\n|---|---|---|---|---|---|\n")
+    w("| 来源 | 抖音号 | 昵称 | 粉丝 | 帽子占比 | 女粉 | 原因 |\n|---|---|---|---|---|---|---|\n")
     for c in rows:
-        w(f"| {c['aweme_id']} | {c['nickname']} | {c['fans']} | {'-' if c.get('hat_share') is None else str(c['hat_share']) + '%'} | "
+        w(f"| {c.get('source') or '聚水潭'} | {c['aweme_id']} | {c['nickname']} | {c['fans']} | {'-' if c.get('hat_share') is None else str(c['hat_share']) + '%'} | "
           f"{'-' if c.get('female_share') is None else str(c['female_share']) + '%'} | {c['reason']} |\n")
 
 
@@ -717,9 +978,9 @@ def plan_csv(plan: dict) -> str:
     names = {p["id"]: p["name"] for p in plan["products"]}
     out = io.StringIO()
     writer = csv.writer(out)
-    writer.writerow(["类别", "抖音号", "昵称", "粉丝", "近30天销售额", "件单价", "等级", "主播类型", "帽子占比%", "女粉%", "主推", "附带", "状态", "提醒", "话术"])
+    writer.writerow(["类别", "来源", "抖音号", "昵称", "粉丝", "近30天销售额", "件单价", "等级", "主播类型", "帽子占比%", "女粉%", "主推", "附带", "状态", "提醒", "话术"])
     for c in plan["creators"]:
-        writer.writerow([CATEGORY_NAMES[c["category"]], c["aweme_id"], c["nickname"], c["fans"], c["sales30d"], c["avg_price"], c["level"], c["channel"],
+        writer.writerow([CATEGORY_NAMES[c["category"]], c.get("source") or "聚水潭", c["aweme_id"], c["nickname"], c["fans"], c["sales30d"], c["avg_price"], c["level"], c["channel"],
                          c["hat_share"], c["female_share"], names.get(c["products"]["main"]), "、".join(names.get(x, x) for x in c["products"]["extras"]),
                          c.get("button"), "；".join(c["flags"]), c["content"]])
     return out.getvalue()
@@ -740,7 +1001,9 @@ def write_plan(plan: dict, out_dir: Path) -> Dict[str, Path]:
 def invite_args(cfg: dict, plan: dict, creator: dict) -> List[str]:
     products = [creator["products"]["main"], *creator["products"]["extras"]]
     args = ["buyin", "author-invite", f"--aweme-id={creator['aweme_id']}", f"--product={','.join(products)}", f"--content={creator['content']}",
-            f"--rights={','.join(plan['settings']['rights'])}", f"--commission-rate={plan['settings']['commission_rate']}"]
+            f"--rights={','.join(plan['settings']['rights']) or 'none'}"]
+    if plan["settings"]["commission_rate"]:                 # 0 = 卡上不开专属佣金
+        args.append(f"--commission-rate={plan['settings']['commission_rate']}")
     if cfg["invite_wechat"]:
         args.append(f"--wechat={cfg['invite_wechat']}")
     if cfg["invite_phone"]:
@@ -759,7 +1022,8 @@ def load_plan(path: str) -> dict:
 
 
 def run_plan(cfg: dict, plan: dict, confirm: str, clis: Clis, ledger: Ledger, *, limit: Optional[int] = None,
-             sleep: Callable = time.sleep, uniform: Callable = random.uniform, clock: Callable = now_bjt) -> dict:
+             only: Optional[set] = None, sleep: Callable = time.sleep, uniform: Callable = random.uniform,
+             clock: Callable = now_bjt) -> dict:
     if confirm != plan.get("plan_id"):
         raise ToolError(f"--confirm 要写这份清单的编号 {plan.get('plan_id')}（用户同意的是哪一份，就写哪一份）", EXIT_USAGE)
     try:
@@ -775,7 +1039,13 @@ def run_plan(cfg: dict, plan: dict, confirm: str, clis: Clis, ledger: Ledger, *,
     ledger.append({"event": "run-start", "plan_id": plan["plan_id"]})
     previews_failed = 0
     first = True
-    for index, creator in enumerate(plan["creators"]):
+    creators = mix_categories(plan["creators"]) if cfg["send_order"] == "mixed" else plan["creators"]
+    if only is not None:                                     # 用户从清单里挑的这几位（--only），照发的先后
+        missing = sorted(only - {c.get("aweme_id") for c in creators})
+        if missing:
+            raise ToolError(f"--only 里有清单上没有的抖音号：{'、'.join(missing[:10])}", EXIT_USAGE)
+        creators = [c for c in creators if c.get("aweme_id") in only]
+    for index, creator in enumerate(creators):
         aweme = creator.get("aweme_id")
         if limit is not None and len(summary["sent"]) >= limit:
             summary["stopped"] = {"why": f"这次只发 {limit} 位（--limit）", "at": index}
@@ -786,9 +1056,16 @@ def run_plan(cfg: dict, plan: dict, confirm: str, clis: Clis, ledger: Ledger, *,
         if aweme in ledger.never_again():
             summary["skipped"].append({"aweme_id": aweme, "why": "台账里已经发过（或不知道发出去没有）：绝不再发"})
             continue
+        if aweme in cfg["rules"]["drop_ids"]:                # 清单出了以后用户又说不要的
+            summary["skipped"].append({"aweme_id": aweme, "why": "手动排除（配置 rules.drop_ids）"})
+            continue
         week = ledger.sent_this_week(clock())
         if week >= cfg["weekly_cap"]:
             summary["stopped"] = {"why": f"我们自己的每周上限 {cfg['weekly_cap']} 到了（本周已发 {week}）", "at": index}
+            break
+        today = ledger.sent_today(clock())
+        if cfg["daily_cap"] and today >= cfg["daily_cap"]:
+            summary["stopped"] = {"why": f"每天上限 {cfg['daily_cap']} 到了（今天已发 {today}）：明天接着发", "at": index}
             break
         if not first:
             sleep(uniform(*cfg["wait_between"]))
@@ -828,9 +1105,12 @@ def run_plan(cfg: dict, plan: dict, confirm: str, clis: Clis, ledger: Ledger, *,
                 ledger.append({"event": "stop", "plan_id": plan["plan_id"], "aweme_id": aweme, "phase": "quota", "left": left})
                 break
         attempt = secrets.token_hex(6)
+        # what the preview said of the card: each product's sample (免费申样 / 买样) and the CLI's warnings (免费申样 ticked for a 买样 product …)
+        samples = {str(p.get("productId")): p.get("sample") for p in preview.data.get("products") or [] if isinstance(p, dict) and p.get("productId")}
+        warnings = [str(x)[:300] for x in preview.data.get("warnings") or []][:5]
         ledger.append({"event": "attempt", "attempt": attempt, "plan_id": plan["plan_id"], "aweme_id": aweme,
                        "products": [creator["products"]["main"], *creator["products"]["extras"]], "commission_rate": plan["settings"]["commission_rate"],
-                       "category": creator.get("category")})
+                       "rights": plan["settings"]["rights"], "samples": samples, "warnings": warnings, "category": creator.get("category")})
         done = clis.run("dy", [*args, "--expect-status=1", "--expect-popwindow=-1", "--execute"], 900)
         outcome = (((done.data or {}).get("items") or [{}])[0] or {}).get("outcome") if done.data else None
         writes = (done.data or {}).get("platformWrites") if done.data else None
@@ -844,7 +1124,7 @@ def run_plan(cfg: dict, plan: dict, confirm: str, clis: Clis, ledger: Ledger, *,
             sent = False                                  # STATE_CONFLICT, FAILED before the send …: nothing went out
         ledger.append({"event": "result", "attempt": attempt, "plan_id": plan["plan_id"], "aweme_id": aweme, "exit": done.exit_code,
                        "outcome": outcome, "platform_writes": writes, "sent": sent, "timed_out": done.timed_out})
-        entry = {"aweme_id": aweme, "outcome": outcome, "exit": done.exit_code, "sent": sent}
+        entry = {"aweme_id": aweme, "outcome": outcome, "exit": done.exit_code, "sent": sent, **({"warnings": warnings} if warnings else {})}
         if done.exit_code in STOP_EXITS:
             (summary["sent"] if sent else summary["skipped"]).append(entry)
             summary["stopped"] = {"why": f"发送 {aweme}：{STOP_EXITS[done.exit_code]}", "at": index, "exit": done.exit_code}
@@ -866,6 +1146,24 @@ def run_plan(cfg: dict, plan: dict, confirm: str, clis: Clis, ledger: Ledger, *,
     return summary
 
 
+def only_ids(text: Optional[str]) -> Optional[set]:
+    """--only：「a,b,c」或「@文件」（每行一个抖音号，# 开头的行不算）。"""
+    if not text:
+        return None
+    if text.startswith("@"):
+        try:
+            raw = Path(text[1:]).expanduser().read_text(encoding="utf-8").splitlines()
+        except OSError as e:
+            raise ToolError(f"读不了 --only 的文件：{e}", EXIT_USAGE)
+    else:
+        raw = text.split(",")
+    ids = {x.strip() for x in raw if x.strip() and not x.strip().startswith("#")}
+    bad = sorted(x for x in ids if not AWEME_ID.match(x))
+    if not ids or bad:
+        raise ToolError(f"--only 要写抖音号{'（这些不像抖音号：' + '、'.join(bad[:5]) + '）' if bad else ''}", EXIT_USAGE)
+    return ids
+
+
 def run_markdown(summary: dict) -> str:
     out = io.StringIO()
     w = out.write
@@ -880,8 +1178,136 @@ def run_markdown(summary: dict) -> str:
         if summary[key]:
             w(f"\n## {title}\n\n")
             for x in summary[key]:
-                w(f"- {x.get('aweme_id')}：{x.get('outcome') or ''} {x.get('why') or ''}\n")
+                w(f"- {x.get('aweme_id')}：{x.get('outcome') or ''} {x.get('why') or ''}"
+                  + (f"（提醒：{'；'.join(x['warnings'])}）" if x.get("warnings") else "") + "\n")
     return out.getvalue()
+
+
+# ── follow: who answered a card ──────────────────────────────────────────────
+# 发过卡的达人，百应按钮从 2「继续沟通 · 待回复」变成 4「已建联」（她回了）或 3「已拒绝」时，在这台 Mac 上弹通知，叫运营去百应
+# 「合作消息」看（用户 2026-10-29：「达人要我们加她微信，我能及时看到吗」→ Mac 弹通知）。只读：每位一次搜索 + 每 20 位一次状态读
+# （douyin-engineering 的 buyin author-invite-status），不读也不发私信。由 LaunchAgent 每 30 分钟跑一次（README）。
+# 百应的「待回复会话数」（/connection/pc/im/conversations/all_unreply）不用：2026-10-29 发了二十多张卡时它是 0 / 0，看来只算达人
+# 主动发起的会话。
+
+FOLLOW_STATE = "follow-state.json"
+FOLLOW_LOG = "follow.jsonl"
+FINAL_STATUSES = {3, 4, 99, 100, 101}                       # 回了 / 拒绝 / 不能再沟通：不再查
+STATUS_WORDS = {1: "邀约带货", 2: "继续沟通 · 待回复", 3: "继续沟通 · 达人已拒绝", 4: "继续沟通 · 已建联", 99: "邀约带货（禁用）",
+                100: "在线沟通", 101: "在线沟通（禁用）"}
+PROBLEM_EVERY = timedelta(hours=2)                          # 查不了时最多两小时提醒一次
+
+
+def _when(text) -> Optional[datetime]:
+    try:
+        moment = datetime.fromisoformat(str(text))
+    except (TypeError, ValueError):
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=BJT)
+
+
+def follow_log(ledger: Ledger, report: dict) -> None:
+    """One line a run in the ledger folder's follow.log (0600): what was looked at, what changed, why it was skipped."""
+    fd = os.open(str(ledger.folder / "follow.log"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.write(fd, (json.dumps(report, ensure_ascii=False) + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+    os.chmod(str(ledger.folder / "follow.log"), 0o600)
+
+
+def mac_notify(title: str, text: str, runner: Callable = subprocess.run) -> None:
+    """A macOS notification (osascript; the texts go in as arguments, never into the script). A failure is only logged."""
+    script = ['-e', 'on run argv', '-e', 'display notification (item 2 of argv) with title (item 1 of argv) sound name "Glass"', '-e', 'end run']
+    try:
+        runner(["/usr/bin/osascript", *script, title[:120], text[:400]], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        sys.stderr.write(f"[follow] 弹不出通知：{e}\n")
+
+
+def follow_invites(cfg: dict, clis: Clis, ledger: Ledger, *, clock: Callable = now_bjt,
+                   notify: Optional[Callable] = None) -> dict:
+    """查一轮：台账里发出去了的卡（sent true），发卡后 follow_days 天内、还没回 / 没拒的；发卡 2 天内的隔 25 分钟以上查一次，
+    更早的隔 115 分钟以上，一次最多 follow_max 位（最久没查的先查）。状态变了就通知并记进 follow.jsonl；状态存在 follow-state.json。"""
+    now = clock()
+    hours = cfg["follow_hours"]
+    if not hours[0] <= now.astimezone(BJT).hour < hours[1]:
+        return {"skipped": f"北京时间 {hours[0]}～{hours[1]} 点之外不查"}
+    state_path = ledger.folder / FOLLOW_STATE
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        if not isinstance(state, dict):
+            raise ValueError("not an object")
+    except (OSError, ValueError):
+        state = {}
+    creators = state.setdefault("creators", {})
+    sent: Dict[str, datetime] = {}
+    for a in ledger._attempts().values():
+        at = _when(a.get("at"))
+        if a.get("sent") is True and a.get("aweme_id") and at is not None:
+            sent[a["aweme_id"]] = min(sent.get(a["aweme_id"], at), at)
+    due = []
+    for aweme, at in sent.items():
+        known = creators.get(aweme) or {}
+        if known.get("status") in FINAL_STATUSES or now - at > timedelta(days=cfg["follow_days"]):
+            continue
+        last = _when(known.get("checked_at"))
+        every = timedelta(minutes=25 if now - at < timedelta(days=2) else 115)
+        if last is not None and now - last < every:
+            continue
+        due.append((last or datetime(2000, 1, 1, tzinfo=BJT), aweme))
+    due = [aweme for _, aweme in sorted(due)][:cfg["follow_max"]]
+    summary = {"checked": len(due), "changes": [], "waiting": 0, "problem": None}
+    if due:
+        result = clis.run("dy", ["buyin", "author-invite-status", f"--aweme-id={','.join(due)}", "--names", "--pause-ms=4000",
+                                 f"--expect-shop-id={cfg['dy_expect_shop_id']}", "--no-open"], 1800)
+        if result.exit_code != 0 or result.data is None:
+            why = (LOGIN_HINT if result.unverifiable() else STOP_EXITS.get(result.exit_code)
+                   or ("命令行超时" if result.timed_out else f"命令行退出码 {result.exit_code}：{result.said()[:160]}"))
+            summary["problem"] = why
+            problem = state.get("problem") or {}
+            last = _when(problem.get("notified_at"))
+            if notify and (last is None or now - last >= PROBLEM_EVERY):
+                notify("百应：这次查不了达人回复", f"{why}。处理好以后会接着查")
+                problem["notified_at"] = now.isoformat(timespec="seconds")
+            state["problem"] = {**problem, "why": why, "at": now.isoformat(timespec="seconds")}
+        else:
+            state["problem"] = None
+            for c in result.data.get("creators") or []:
+                aweme = str(c.get("awemeId") or "") if isinstance(c, dict) else ""
+                if aweme not in due:
+                    continue
+                known = creators.get(aweme) or {}
+                status = c.get("status") if c.get("found") else None
+                entry = {**known, "status": status, "nickname": str(c.get("nickname") or known.get("nickname") or ""),
+                         "checked_at": now.isoformat(timespec="seconds")}
+                if status is not None and status != known.get("status"):
+                    entry["changed_at"] = now.isoformat(timespec="seconds")
+                    if status != 2:
+                        summary["changes"].append({"aweme_id": aweme, "nickname": entry["nickname"], "from": known.get("status"), "to": status})
+                creators[aweme] = entry
+    summary["waiting"] = sum(1 for aweme in sent if (creators.get(aweme) or {}).get("status") not in FINAL_STATUSES)
+    for change in summary["changes"]:
+        rec = {"at": now.isoformat(timespec="seconds"), **change}
+        fd = os.open(str(ledger.folder / FOLLOW_LOG), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, (json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8"))
+        finally:
+            os.close(fd)
+    if notify:
+        for change in summary["changes"][:4]:
+            who = f"{change['nickname'] or '达人'}（{change['aweme_id']}）"
+            if change["to"] == 4:
+                notify("百应：达人回复了邀约", f"{who} 回复了：去百应「合作消息」看她说什么，要加微信就加")
+            elif change["to"] == 3:
+                notify("百应：达人拒绝了邀约", f"{who} 拒绝了")
+            else:
+                notify("百应：邀约状态变了", f"{who} 现在是「{STATUS_WORDS.get(change['to'], change['to'])}」")
+        if len(summary["changes"]) > 4:
+            notify("百应：还有达人回复", f"另外还有 {len(summary['changes']) - 4} 位的状态变了：去百应「合作消息」看")
+    state["checked_at"] = now.isoformat(timespec="seconds")
+    private_write(state_path, json.dumps(state, ensure_ascii=False, indent=1) + "\n")
+    return summary
 
 
 # ── command line ─────────────────────────────────────────────────────────────
@@ -901,10 +1327,15 @@ def main(argv: Optional[List[str]] = None, *, runner: Callable = subprocess.run,
     p_run.add_argument("--plan", required=True, help="plan 写的 JSON 清单")
     p_run.add_argument("--confirm", required=True, help="清单编号（用户同意的那一份的编号）")
     p_run.add_argument("--limit", type=int, help="这次最多发几位")
+    p_run.add_argument("--only", help="这次只发清单里的这几位：抖音号用逗号分开，或 @文件（每行一个）")
     p_run.add_argument("--ledger-dir", help="台账目录（默认 <home>）")
     p_status = sub.add_parser("status", help="看台账：本周发了几位、哪些不知道发出去没有")
     p_status.add_argument("--config", required=True)
     p_status.add_argument("--ledger-dir")
+    p_follow = sub.add_parser("follow", help="只读：发过卡的达人回没回（按钮状态），变了就在这台 Mac 上弹通知")
+    p_follow.add_argument("--config", required=True)
+    p_follow.add_argument("--ledger-dir")
+    p_follow.add_argument("--no-notify", action="store_true", help="只打印，不弹通知")
     args = parser.parse_args(argv)
     try:
         cfg = load_config(args.config)
@@ -915,6 +1346,24 @@ def main(argv: Optional[List[str]] = None, *, runner: Callable = subprocess.run,
                                      "never_again": len(ledger.never_again()), "unknown": ledger.unknown()}, ensure_ascii=False, indent=1) + "\n")
             return EXIT_OK
         check_clis(cfg)
+        if args.command == "follow":
+            try:
+                ledger.lock()                                    # 正在发卡（run 拿着锁）就这次不查
+            except ToolError:
+                follow_log(ledger, {"at": clock().isoformat(timespec="seconds"), "skipped": "正在发邀约卡，这次不查"})
+                stdout.write(json.dumps({"skipped": "正在发邀约卡，这次不查"}, ensure_ascii=False) + "\n")
+                return EXIT_OK
+            try:
+                moment = clock()
+                clis = Clis(cfg, ledger.folder / "follow-work" / moment.strftime("%Y%m%d"), runner=runner, stamp=ledger.folder / "last-request")
+                summary = follow_invites(cfg, clis, ledger, clock=clock,
+                                         notify=None if args.no_notify else (lambda title, text: mac_notify(title, text, runner)))
+            finally:
+                ledger.unlock()
+            report = {"at": moment.isoformat(timespec="seconds"), **summary, "requests": clis.requests()}
+            follow_log(ledger, report)
+            stdout.write(json.dumps(report, ensure_ascii=False, indent=1) + "\n")
+            return EXIT_OK
         if args.command == "plan":
             if not 1 <= args.count <= 100:
                 raise ToolError("--count 在 1 到 100 之间", EXIT_USAGE)
@@ -935,7 +1384,8 @@ def main(argv: Optional[List[str]] = None, *, runner: Callable = subprocess.run,
         ledger.lock()
         try:
             clis = Clis(cfg, ledger.folder / f"run-{clock().strftime('%Y%m%d-%H%M%S')}", runner=runner, stamp=ledger.folder / "last-request")
-            summary = run_plan(cfg, plan, args.confirm, clis, ledger, limit=args.limit, sleep=sleep, uniform=uniform, clock=clock)
+            summary = run_plan(cfg, plan, args.confirm, clis, ledger, limit=args.limit, only=only_ids(args.only),
+                               sleep=sleep, uniform=uniform, clock=clock)
         finally:
             ledger.unlock()
         private_write(clis.workdir / "report.md", run_markdown(summary))

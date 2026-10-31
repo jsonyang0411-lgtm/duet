@@ -135,3 +135,51 @@
 | 连不上 100 开头的地址 | 某一台的代理软件开着 TUN 模式，把流量接走了 | 关掉 TUN；或者在 TUN 的排除路由里加上 `192.168.0.0/16` 和 `100.64.0.0/10`（只加直连规则不够） |
 | 同一个局域网里，走 Tailscale 每次请求也要零点几秒，`--check` 的往返比局域网地址慢得多 | 有一个方向没走直连，绕了 Tailscale 的中转。Mac 上 `tailscale status` 显示对端是 direct，只说明 Mac 发过去是直连，回程不一定。2026-10-27 实测的原因：Windows 上 Clash Verge 开着 Tun 模式 | 两台都运行 `tailscale ping <对方的 100 地址>`，都应该是 via 局域网地址、几毫秒。哪台显示 via DERP，就关掉哪台代理软件的 TUN（或者按上一行排除路由）。实测关掉 Windows 的 Tun 后，每次请求从 0.4 秒降到 0.03 秒 |
 | 控制台没显示 100 开头的地址 | Windows 上 Tailscale 没连上 | 托盘图标里看状态；这个列表每次刷新页面都会重新取 |
+
+## 九、在家用 Mac 打开 Windows 的控制台（SSH 隧道）
+
+- **用途**：人不在 Windows 旁边（比如晚上在家）时，在 Mac 的浏览器里点「待审批」的发送、批准并执行。
+- **原理**：控制台只听 Windows 本机的 `127.0.0.1:7327`，也只认本机地址的页面（Host / Origin 是 127.0.0.1、localhost，端口不管）。SSH 隧道把它接到 Mac 的 `127.0.0.1:7327`，浏览器打开的就是 127.0.0.1，控制台照常能用。7327 不对网络开放，机器人不用改。
+- **不要这样做**：
+  - 把控制台改成监听 0.0.0.0 或 Tailscale 地址：控制台没有登录，能连到的人就能用公司的微信号发消息、看完整号码；
+  - 用 Windows 远程桌面（RDP）：断开时 Windows 会锁屏，锁屏后机器人发不了微信、加不了好友；
+  - 让中转口令（`CLAUDE_RELAY_TOKEN`）去转发控制台：口令就成了整个控制台的钥匙。
+
+### Windows 上（一次，管理员 PowerShell）
+
+1. 装 OpenSSH 服务器并开机启动（命令装不上就在「设置 › 系统 › 可选功能」里添加「OpenSSH 服务器」）：
+   ```powershell
+   Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+   Start-Service sshd
+   Set-Service sshd -StartupType Automatic
+   ```
+2. 只让 Tailscale 网段连 22 端口（用的是别的虚拟局域网就换成它的网段）：
+   ```powershell
+   Set-NetFirewallRule -Name OpenSSH-Server-In-TCP -RemoteAddress 100.64.0.0/10
+   ```
+   Tailscale 后台收紧过访问规则的（第四节），给这台 Mac 再加一条 `100.x.y.z:22`。
+3. 放这台 Mac 的公钥（Mac 上 `pbcopy < ~/.ssh/id_ed25519.pub` 复制；公钥可以公开传）。Windows 账号是管理员时：
+   ```powershell
+   Set-Content C:\ProgramData\ssh\administrators_authorized_keys 'ssh-ed25519 AAAA…' -Encoding ascii
+   icacls C:\ProgramData\ssh\administrators_authorized_keys /inheritance:r /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F"
+   ```
+   不是管理员就放 `C:\Users\<用户名>\.ssh\authorized_keys`。
+4. Windows 不睡眠、不锁屏（显示器可以关）：锁屏时机器人发不了微信，在 Mac 上点了发送也发不出去。
+
+### Mac 上
+
+双击 `tools/claude_relay/open-console.command`：
+
+- 第一次问 Windows 的登录用户名（`C:\Users` 下面那个文件夹的名字），记在 `~/.claude-relay/console-tunnel-user`，要改就删掉这个文件；
+- Windows 的地址用 worker 的 `relay_url`（Tailscale 地址），不用另外填；
+- 隧道通了自动在浏览器打开 `http://127.0.0.1:7327`（这台 Mac 的 7327 被占用时用 17327）；
+- 断线 10 秒后自己重连，关掉窗口就断开；
+- 第一次连上时自动记下 Windows 的 SSH 指纹，以后指纹变了 ssh 会拒绝连接（防止连到冒充的机器）。
+
+### 没连上时
+
+| 现象 | 怎么办 |
+|---|---|
+| `Permission denied (publickey…)` | 公钥没放对：管理员账号要放 `administrators_authorized_keys`，权限按第 3 步改 |
+| `Connection timed out` / `Connection refused` | Windows 的 sshd 没启动，或防火墙规则没对上 Tailscale 网段；Mac 上 `nc -vz <Windows 的 100 地址> 22` 看通不通 |
+| 页面打开了，点按钮说「Forbidden: cross-origin request rejected」 | 浏览器地址不是 127.0.0.1 / localhost（比如直接用了 Tailscale 地址）：用脚本打开的那个地址 |

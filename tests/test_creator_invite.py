@@ -63,6 +63,15 @@ FAKE_NODE = textwrap.dedent("""\
         skus = scenario["stock"].get(style)
         out({"command": "goods-detail", "styleCode": style, "found": skus is not None,
              "skus": [{"itemCode": style + "-" + str(i), "availableStock": n} for i, n in enumerate(skus or [])]})
+    if args[:1] == ["lookup"]:
+        code = exits.get("lookup")
+        if code: sys.stderr.write("[NOT_LOGGED_IN] 登录失效\\n"); sys.exit(code)
+        daren = scenario.get("lookup", {}).get(opt["no"])
+        out({"platform": "DY", "no": opt["no"], "found": daren is not None, **({"daren": daren} if daren is not None else {})})
+    if args[:2] == ["buyin", "authors-square"]:
+        code = exits.get("square")
+        if code: sys.stderr.write("[WALL] 验证码\\n"); sys.exit(code)
+        out({"site": "buyin", "command": "authors-square", "rows": scenario.get("square", [])})
     if args[:1] == ["find"]:
         code = exits.get("find")
         if code: sys.stderr.write("[NOT_LOGGED_IN] 登录失效\\n"); sys.exit(code)
@@ -80,7 +89,7 @@ FAKE_NODE = textwrap.dedent("""\
                 creators.append({"awemeId": a, "found": False, "why": "the creator search answered 0 row(s)"})
                 continue
             s = scenario.get("status", {}).get(a, 1)
-            creators.append({"awemeId": a, "found": True, "status": s, "button": "邀约带货 (status 1)" if s == 1 else "继续沟通 · 待回复 (status 2)",
+            creators.append({"awemeId": a, "found": True, "status": s, "nickname": "达人" + a[-3:], "button": "邀约带货 (status 1)" if s == 1 else "继续沟通 · 待回复 (status 2)",
                              "invitable": s == 1, "hoverText": scenario["hover"], "weeklyQuota": scenario["quota"]})
         out({"site": "buyin", "command": "author-invite-status", "creators": creators,
              "summary": {"weeklyQuotas": [scenario["quota"]]}})
@@ -98,7 +107,9 @@ FAKE_NODE = textwrap.dedent("""\
             out({"executed": False, "platformWrites": 0, "items": [{"targetId": a, "outcome": "PREVIEW", "blocked": blocked,
                  "detail": "blocked (the square shows this creator's button disabled)" if blocked else "creator would get a card",
                  "currentValue": "邀约带货 (status %d); gate %d" % (status, gate)}],
-                 "gate": {"popwindowType": gate}, "statusBefore": {"status": status, "weeklyQuota": quota}})
+                 "gate": {"popwindowType": gate}, "statusBefore": {"status": status, "weeklyQuota": quota},
+                 "products": [{"productId": x, "sample": scenario.get("sample", {}).get(x, "买样")} for x in opt["product"].split(",")],
+                 **({"warnings": scenario["warnings"]} if scenario.get("warnings") else {})})
         outcome = scenario.get("outcome", {}).get(a, "VERIFIED_SUCCESS")
         writes = 0 if outcome in ("STATE_CONFLICT", "FAILED") else 1
         out({"executed": True, "platformWrites": writes, "items": [{"targetId": a, "outcome": outcome}]}, code or (0 if outcome == "VERIFIED_SUCCESS" else 1))
@@ -107,11 +118,14 @@ FAKE_NODE = textwrap.dedent("""\
 """)
 
 
-def row(aweme, fans, *, nick=None, level=3, hat="12.0%", sex="女性 90.00%", live_min=1000000, channel="直播", avg=300.0):
+def row(aweme, fans, *, nick=None, level=3, hat="12.0%", sex="女性 90.00%", live_min=1000000, channel="直播", avg=300.0,
+        hidden=False, goods=None):
+    sales = ({"available": False, "min": None, "max": None, "label": "无数据"} if hidden
+             else {"available": True, "min": live_min, "max": None, "label": f"{live_min}起"})
     return {"platformNo": aweme, "nickName": nick or f"测试达人{aweme[-3:]}", "fansNum": fans, "level": level,
-            "sales30d": {"available": True, "min": live_min, "max": None, "label": "测试区间"},
-            "sales30dLive": {"available": True, "min": live_min, "max": None, "label": "x"}, "channelBySales": channel, "mainChannel": channel,
-            "avgPrice": avg, "category": "服饰内衣", "recentGoods": [{"name": "大衣", "ratio": "50%"}, {"name": "帽子", "ratio": hat}],
+            "sales30d": sales, "sales30dLive": {**sales, "label": "x"}, "channelBySales": channel, "mainChannel": channel,
+            "avgPrice": avg, "category": "服饰内衣",
+            "recentGoods": [{"name": n, "ratio": r} for n, r in goods] if goods else [{"name": "大衣", "ratio": "50%"}, {"name": "帽子", "ratio": hat}],
             "fans": {"sex": sex}}
 
 
@@ -129,7 +143,7 @@ def creators():
         row("dy_mid_a", 250000, avg=230.0, live_min=200000),
         row("dy_big_a", 760000, level=5, live_min=10000000, avg=229.0),   # 专场型
         row("dy_big_b", 250000, level=4, live_min=5000000, avg=288.0),    # 专场型 by the rule, though under 300k fans
-        row("dy_video_big", 13000, level=4, live_min=0, channel="视频", hat="0.5%"),  # video seller: by fans, a small one; hardly any hats
+        row("dy_video_big", 13000, level=4, live_min=20000, channel="视频", hat="0.5%"),  # video seller: by fans, a small one; hardly any hats
         row("dy_male_fans", 70000, sex="男性 61.00%"),                    # female 39%: not on the list (we sell women's hats)
     ]
 
@@ -227,7 +241,9 @@ def test_plan_is_read_only_and_builds_the_list_by_the_users_rules(env):
     finds = [c["args"] for c in calls if c["args"][0] == "find"]
     assert finds[0][:6] == ["find", "--platform=DY", "--goods-category=1000003461", "--price-min=150", "--price-max=500", "--not-added"]
     assert "--fans-min=5000" in finds[0] and "--fans-max=200000" in finds[0] and "--pages=2" in finds[0] and "--expect-uid=900001" in finds[0]
-    assert "--fans-min=200000" in finds[1]
+    assert "--level-min=2" in finds[0] and "--sales-min=10000" in finds[0], "the platform drops the likely sample-takers first"
+    assert "--fans-min=200000" in finds[1] and "--level-min=2" in finds[1]
+    assert not any(a.startswith("--sales-min") for a in finds[1]), "a big creator who hides her sales is not dropped by the search"
     status = [c["args"] for c in calls if c["args"][:2] == ["buyin", "author-invite-status"]]
     assert len(status) == 1 and "--expect-shop-id=9100000000000001" in status[0] and "--no-open" in status[0]
     plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
@@ -263,7 +279,7 @@ def test_plan_is_read_only_and_builds_the_list_by_the_users_rules(env):
     assert plan["ledger_sent_this_week"] == 1
     md = Path(out["files"]["md"]).read_text(encoding="utf-8")
     assert f"run --config <配置> --plan {out['files']['json']} --confirm {plan['plan_id']}" in md and "还没有发任何邀约" in md
-    assert "粉丝 5000～200000，第 1 页起读 2 页；粉丝 200000 以上，第 1 页起读 1 页" in md
+    assert "粉丝 5000～200000、带货等级 LV2～LV7、近 30 天销售额 ≥ 10000 元，第 1 页起读 2 页；粉丝 200000 以上、带货等级 LV2～LV7，第 1 页起读 1 页" in md
     assert "不看库存，能挂上卡的都配" in md and "| 没查 | 配 |" in md
     assert "## 疑似同行自播号" in md and "dy_suspect" in md.split("## 疑似同行自播号")[1].split("## 其他没进清单的")[0]
     assert "LV2-LV3 已用 7 / 上限 2500" in md
@@ -303,6 +319,129 @@ def test_plan_counts_stops_and_stock(env):
     assert [c["args"][0] for c in env.calls()].count("find") == 1 and not any(c["args"][:1] == ["buyin"] for c in env.calls())
 
 
+def test_plan_drops_creators_who_sell_their_own_brand_and_likely_sample_takers(env):
+    env.scenario(scenario(missing=[], status={}, creators=[
+        row("dy_ok", 80000),
+        row("dy_shop", 60000, nick="小美女装（官方）"),                       # a shop's own account by its name
+        row("dy_mx_a", 40000, nick="小鹿（日常穿搭）"), row("dy_mx_b", 30000, nick="小鹿·通勤"),  # one shop's accounts
+        row("dy_mx_c", 40000, nick="Mia(轻奢极简)"), row("dy_mx_d", 30000, nick="MIA-精选", sex="女性 40.00%"),  # the same, any case
+        row("dy_lv1", 40000, level=1),                                    # sells little: 带货等级 LV1
+        row("dy_low", 40000, live_min=5000),                              # under 10 000 yuan in 30 days
+        row("dy_hidden2", 40000, level=2, hidden=True),                   # sales not shown and only LV2
+        row("dy_hidden3", 40000, level=3, hidden=True),                   # not shown, but LV3: kept
+        row("dy_fanmany", 300000, live_min=50000),                        # 300k fans, from 50k yuan: 0.17 a fan
+        row("dy_fanok", 300000, live_min=100000),                         # 0.33 a fan: kept
+        row("dy_kept", 50000, level=1),                                   # LV1, but a person said keep her
+        row("dy_dropped", 50000),                                         # a person said never
+        row("dy_ownhat", 50000, hat="57.0%"),                             # flagged: may make hats herself
+        row("dy_onecat", 50000, goods=[("连衣裙", "99%"), ("帽子", "1.0%")]),   # flagged: one kind of goods only
+    ]))
+    code, out = plan_now(env, config={"rules": {"keep_ids": ["dy_kept"], "drop_ids": ["dy_dropped"]}})
+    assert code == 0, out
+    plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
+    by = {c["aweme_id"]: c for c in plan["creators"]}
+    assert set(by) == {"dy_ok", "dy_hidden3", "dy_fanok", "dy_kept", "dy_ownhat", "dy_onecat"}
+    gone = {c["aweme_id"]: c for c in plan["excluded"]}
+    assert {k for k, c in gone.items() if c.get("group") == "own_brand"} == {"dy_shop", "dy_mx_a", "dy_mx_b", "dy_mx_c"}
+    assert gone["dy_mx_d"]["reason"].startswith("女性粉丝 40.0%"), "out for its fans, but still counted for the shop's name"
+    assert gone["dy_shop"]["reason"].startswith("名字像店铺 / 品牌号（「女装」）")
+    assert gone["dy_mx_a"]["reason"].startswith("店铺矩阵号（这次找到 2 个「小鹿」开头的号）")
+    assert {k for k, c in gone.items() if c.get("group") == "sample_risk"} == {"dy_lv1", "dy_low", "dy_hidden2", "dy_fanmany"}
+    assert gone["dy_lv1"]["reason"].startswith("带货等级 LV1（低于 LV2）")
+    assert gone["dy_low"]["reason"].startswith("近 30 天销售额只有 5000起（低于 10000 元）")
+    assert gone["dy_hidden2"]["reason"].startswith("近 30 天销售额不公开、带货等级只有 LV2")
+    assert "粉多卖少" in gone["dy_fanmany"]["reason"]
+    assert gone["dy_dropped"]["reason"] == "手动排除（配置 rules.drop_ids）"
+    assert by["dy_ownhat"]["flags"] == ["帽子占比 57.0%：可能自己做帽子，发之前看一眼她的橱窗"]
+    assert by["dy_onecat"]["flags"] == ["近 30 天 99% 是连衣裙：可能只带一个牌子，看一眼"]
+    assert [c["aweme_id"] for c in plan["creators"] if c["category"] == "small"][-2:] == ["dy_ownhat", "dy_onecat"], "flagged ones go last"
+    md = Path(out["files"]["md"]).read_text(encoding="utf-8")
+    own = md.split("## 专门带自己牌子的")[1].split("## 可能骗样品的")[0]
+    risky = md.split("## 可能骗样品的")[1].split("## 其他没进清单的")[0]
+    assert "dy_shop" in own and "dy_mx_b" in own and "dy_lv1" not in own
+    assert "dy_lv1" in risky and "dy_fanmany" in risky and "dy_shop" not in risky
+    texts = json.dumps(plan["templates"], ensure_ascii=False)
+    assert "视频素材" not in texts and "25%" not in texts and "专属高佣" not in texts, "no commission in the texts (2026-10-29)"
+    assert all("合作细节加微信详聊" in plan["templates"][k] for k in ("small", "mid", "big")), "the card is there to bring her to WeChat"
+    assert plan["settings"]["rights"] == ["free-sample"] and plan["settings"]["commission_rate"] == 0
+    assert "- 卡片：不开专属佣金（佣金到微信里谈），权益 免费申样，联系方式 微信" in md
+    rules = tool.DEFAULT_RULES
+    assert tool.name_stem("小鹿（时尚穿搭）") == tool.name_stem("小鹿•精选") == "小鹿" and tool.name_stem("木子-琳琳") == "木子"
+    assert tool.name_stem("🌟港风男装") == "港风男装" and tool.name_stem("Amy小米") == "amy小米"
+    assert tool.name_stem("Mia(轻奢极简每日上新)") == tool.name_stem("MIA-轻奢精选女装") == "mia"
+    assert tool.sample_risk_reason(row("x", 9000, level=2, live_min=10000), tool.creator_view(row("x", 9000, level=2, live_min=10000)), rules) is None
+
+
+SQUARE = {"args": ["buyin", "authors-square", "--main-cate=服饰内衣", "--fans-min=5000", "--pages=2"]}
+
+
+def test_plan_also_finds_creators_on_douyin_and_looks_each_new_one_up_in_jushuitan(env):
+    sq_new = {**row("dy_sq_new", 40000, avg=228.0), "added": False}
+    env.scenario(scenario(
+        square=[{"awemeId": "dy_sq_new", "nickname": "广场新人", "fansNum": 40000},
+                {"awemeId": "dy_small_a", "nickname": "两边都有", "fansNum": 30000},          # 聚水潭 found her too
+                {"awemeId": "dy_sq_missing", "nickname": "查不到", "fansNum": 9000},
+                {"awemeId": "dy_sq_added", "nickname": "有人跟", "fansNum": 20000},
+                {"awemeId": "dy_sq_male", "nickname": "男粉多", "fansNum": 50000},
+                {"awemeId": "dy_sq_new", "nickname": "广场新人", "fansNum": 40000},          # the same one twice
+                {"awemeId": "dy_sq_talked", "nickname": "沟通过", "fansNum": 30000, "imStatus": 2},
+                {"awemeId": "dy_sq_crm", "nickname": "在库里", "fansNum": 30000, "imStatus": 1, "inCrm": True},
+                {"awemeId": "dy_sq_cheap", "nickname": "便宜货", "fansNum": 30000, "imStatus": 1, "inCrm": False}],
+        lookup={"dy_sq_new": sq_new, "dy_sq_added": {**row("dy_sq_added", 20000), "added": True},
+                "dy_sq_male": {**row("dy_sq_male", 50000, sex="男性 70.00%"), "added": False},
+                "dy_sq_cheap": {**row("dy_sq_cheap", 30000, avg=59.9), "added": False}}))
+    code, out = plan_now(env, config={"find": {**tool.DEFAULT_FIND, "dy_queries": [SQUARE]}})
+    assert code == 0, out
+    calls = env.calls()
+    square = [c["args"] for c in calls if c["args"][:2] == ["buyin", "authors-square"]]
+    assert square == [[*SQUARE["args"], "--expect-shop-id=9100000000000001", "--no-open"]]
+    assert all(c["wrapper"] == "paced-dy.mjs" for c in calls if c["args"][:2] == ["buyin", "authors-square"])
+    looked = [c["args"] for c in calls if c["args"][:1] == ["lookup"]]
+    assert [a[2] for a in looked] == ["--no=dy_sq_new", "--no=dy_sq_missing", "--no=dy_sq_added", "--no=dy_sq_male", "--no=dy_sq_cheap"], \
+        "only the new ones, once each, in the order the square gave them; not those the square already says are taken"
+    assert all("--expect-uid=900001" in a for a in looked)
+    plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
+    by = {c["aweme_id"]: c for c in plan["creators"]}
+    assert by["dy_sq_new"]["source"] == "抖音" and by["dy_small_a"]["source"] == "两边都有" and by["dy_mid_a"]["source"] == "聚水潭"
+    assert by["dy_sq_new"]["female_share"] == 90.0 and by["dy_sq_new"]["products"]["main"] == P_PILLBOX, "the 聚水潭 row's data, our rules"
+    gone = {c["aweme_id"]: c for c in plan["excluded"]}
+    assert gone["dy_sq_missing"]["reason"].startswith("聚水潭查不到这个号") and gone["dy_sq_missing"]["source"] == "抖音"
+    assert gone["dy_sq_added"]["reason"].startswith("已经在聚水潭「我的达人」里")
+    assert gone["dy_sq_male"]["reason"].startswith("女性粉丝 30.0%"), "a 抖音 one goes through the same rules"
+    assert gone["dy_sq_talked"]["reason"].startswith("百应里的按钮已经不是「邀约带货」（状态 2")
+    assert gone["dy_sq_crm"]["reason"] == "已经在本店百应达人库里"
+    assert gone["dy_sq_cheap"]["reason"].startswith("件单价 59.9 元不在 150～500 元")
+    assert plan["douyin"] == {"found": 8, "new": 5, "looked_up": 5, "not_looked_up": 0, "both": 1, "stopped": None}
+    md = Path(out["files"]["md"]).read_text(encoding="utf-8")
+    assert "抖音达人广场也找了（1 组搜索）：找到 8 位，其中 1 位聚水潭那边也找到了；新的 5 位按抖音号到聚水潭查了 5 位" in md
+    assert "| 来源 | 抖音号 |" in md and "| 抖音 | dy_sq_new |" in md
+    # at most dy_lookup_max look-ups a plan; a lost 聚水潭 login stops it
+    env.log.unlink()
+    code, out = plan_now(env, config={"find": {**tool.DEFAULT_FIND, "dy_queries": [SQUARE], "dy_lookup_max": 2}})
+    plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
+    assert len([c for c in env.calls() if c["args"][:1] == ["lookup"]]) == 2 and plan["douyin"]["not_looked_up"] == 3
+    assert "还有 3 位没查（超过一次最多查的 2 位）" in Path(out["files"]["md"]).read_text(encoding="utf-8")
+    # 聚水潭 rate-limits a look-up: no more look-ups, the list is still made from what was found
+    env.scenario(scenario(square=[{"awemeId": "dy_sq_new", "nickname": "x", "fansNum": 1}, {"awemeId": "dy_sq_two", "nickname": "y", "fansNum": 1}],
+                          exits={"lookup": 76}))
+    env.log.unlink()
+    code, out = plan_now(env, config={"find": {**tool.DEFAULT_FIND, "dy_queries": [SQUARE]}})
+    assert code == 0, out
+    plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
+    assert plan["douyin"]["looked_up"] == 0 and plan["douyin"]["not_looked_up"] == 2 and "限流" in plan["douyin"]["stopped"]
+    assert len([c for c in env.calls() if c["args"][:1] == ["lookup"]]) == 1, "not one more look-up after the wall"
+    assert {c["aweme_id"] for c in plan["creators"]} >= {"dy_small_a", "dy_mid_a"}, "the 聚水潭 side is still on the list"
+    env.scenario(scenario(square=[{"awemeId": "dy_sq_new", "nickname": "x", "fansNum": 1}], exits={"lookup": 77}))
+    code, _ = plan_now(env, config={"find": {**tool.DEFAULT_FIND, "dy_queries": [SQUARE]}})
+    assert code == 77
+    # the config may only filter and page
+    for bad in (["buyin", "author-invite", "--aweme-id=x"], ["buyin", "authors-square", "--execute"],
+                ["buyin", "authors-square", "--transport=http"], ["fxg", "products"], ["buyin", "authors-square", "--x y"]):
+        cfg = env.write_config(find={**tool.DEFAULT_FIND, "dy_queries": [{"args": bad}]})
+        code, _, _ = env.main(["plan", "--config", cfg, "--out-dir", str(env.tmp / "p"), "--ledger-dir", str(env.tmp / "l")])
+        assert code == 2, bad
+
+
 def test_plan_mixes_the_three_categories_and_puts_the_better_fits_first(env):
     code, out = plan_now(env, count=3)
     assert code == 0, out
@@ -315,6 +454,12 @@ def test_plan_mixes_the_three_categories_and_puts_the_better_fits_first(env):
     order = tool.mix_categories([{"category": k, "flags": f, "hat_share": h, "id": i} for i, (k, f, h) in enumerate(
         [("small", [], 5.0), ("small", ["x"], 50.0), ("small", [], 20.0), ("mid", [], 1.0), ("big", ["y"], 3.0)])])
     assert [o["id"] for o in order] == [4, 3, 2, 0, 1]
+    # a tie (same flags, same hat share) is taken from the two routes in turn, so a list cut short still holds both
+    rows = [{"category": "small", "flags": ["帽子占比只有 0.0%"], "hat_share": 0.0, "source": s, "id": i}
+            for i, s in enumerate(["聚水潭", "聚水潭", "聚水潭", "抖音", "抖音", "两边都有"])]
+    assert [o["id"] for o in tool.mix_categories(rows)] == [0, 3, 1, 4, 2, 5]
+    assert [o["id"] for o in tool.mix_categories(rows + [{"category": "small", "flags": [], "hat_share": 5.0, "source": "抖音", "id": 9}])][0] == 9, \
+        "a better fit still goes first, whichever route found her"
 
 
 def test_plan_checks_status_twenty_at_a_time(env):
@@ -335,11 +480,14 @@ def test_plan_checks_status_twenty_at_a_time(env):
 
 
 def test_config_is_checked_before_anything_runs(env):
-    for over, why in (({"commission_rate": 26}, "commission_rate"), ({"invite_wechat": "", "invite_phone": ""}, "invite_wechat"),
+    for over, why in (({"commission_rate": 26, "rights": ["high-commission"]}, "commission_rate"), ({"invite_wechat": "", "invite_phone": ""}, "invite_wechat"),
+                      ({"rights": ["high-commission"]}, "专属高佣 needs a rate"), ({"commission_rate": 25}, "a rate needs 专属高佣"),
                       ({"dy_expect_shop_id": ""}, "dy_expect_shop_id"), ({"templates": {"small": "x" * 151}}, "150"),
                       ({"templates": {"mid": "顺丰包邮"}}, "快递公司"), ({"rights": ["free-sample", "nope"]}, "rights"),
                       ({"wait_between": [5, 8]}, "wait_between"), ({"gap_seconds": 1}, "gap_seconds"), ({"brand": ""}, "brand"),
                       ({"min_stock": 10, "products": [{"id": P_BERET, "name": "测试贝雷帽", "price": 339}]}, "styles"),
+                      ({"rules": {"own_brand_words": "女装|(["}}, "own_brand_words"), ({"rules": {"drop_ids": ["bad id!"]}}, "drop_ids"),
+                      ({"find": {**tool.DEFAULT_FIND, "queries": [{"fans_min": 5000, "level_min": 9}]}}, "level_min"),
                       ({"products": [{"id": f"30000000000000002{i:02d}", "name": f"款{i}", "price": 200} for i in range(6)]}, "5 款")):
         cfg = env.write_config(**over)
         code, _, _ = env.main(["plan", "--config", cfg, "--out-dir", str(env.tmp / "p"), "--ledger-dir", str(env.tmp / "l")])
@@ -386,7 +534,8 @@ def test_run_previews_then_executes_bound_to_the_preview_and_records_each_one(en
         assert execute[:len(preview)] == preview, "the execution is the preview's command plus the binding"
         assert execute[len(preview):] == ["--expect-status=1", "--expect-popwindow=-1", "--execute"]
     first = calls[0]
-    assert "--commission-rate=25" in first and "--rights=high-commission,video-material" in first and "--wechat=shop_test_wx" in first
+    assert "--rights=free-sample" in first and "--wechat=shop_test_wx" in first, "only 免费申样 on the card (2026-10-29 afternoon)"
+    assert not any(a.startswith("--commission-rate") for a in first), "no 专属佣金 on the card: the rate is talked over on WeChat"
     assert "--expect-shop-id=9100000000000001" in first and "--no-open" in first
     assert f"--product={P_PILLBOX},{P_BERET},{P_EQUESTRIAN}" in first, "the main product first, then all the others"
     assert len(sleeps) == 6 and all(s == 22.5 for s in sleeps), "15–30 s between two creators (the middle, with this uniform)"
@@ -403,6 +552,51 @@ def test_run_previews_then_executes_bound_to_the_preview_and_records_each_one(en
     assert all("绝不再发" in x["why"] for x in out["skipped"])
 
 
+def test_run_records_what_the_preview_said_of_each_products_sample(env):
+    warn = "免费申样 is ticked, but 2 of the 3 product(s) have no free sample and go as 买样"
+    plan_file, plan_id = make_plan(env, sample={P_PILLBOX: "免费申样"}, warnings=[warn])
+    code, out, _ = run_now(env, plan_file, plan_id, "--limit", "1")
+    assert code == 0 and out["sent"][0]["warnings"] == [warn]
+    attempt = [r for r in ledger_lines(env) if r.get("event") == "attempt"][-1]
+    assert attempt["samples"] == {P_PILLBOX: "免费申样", P_BERET: "买样", P_EQUESTRIAN: "买样"}
+    assert attempt["warnings"] == [warn] and attempt["rights"] == ["free-sample"] and attempt["commission_rate"] == 0
+    report = sorted((env.tmp / "ledger").glob("run-*/report.md"))[-1].read_text(encoding="utf-8")
+    assert "（提醒：免费申样 is ticked" in report
+    # a 专属佣金 on the card still works when the config asks for it
+    cfg = env.write_config(commission_rate=25, rights=["high-commission", "free-sample"])
+    assert tool.invite_args(tool.load_config(cfg), {"settings": {"rights": ["high-commission", "free-sample"], "commission_rate": 25}},
+                            {"aweme_id": "dy_x", "content": "x", "products": {"main": P_BERET, "extras": []}})[5:7] == \
+        ["--rights=high-commission,free-sample", "--commission-rate=25"]
+    assert "--rights=none" in tool.invite_args(tool.load_config(env.write_config(rights=[])), {"settings": {"rights": [], "commission_rate": 0}},
+                                               {"aweme_id": "dy_x", "content": "x", "products": {"main": P_BERET, "extras": []}})
+
+
+def test_a_mixed_send_order_takes_the_three_categories_in_turn_best_first(env):
+    plan_file, plan_id = make_plan(env)
+    env.log.unlink()
+    code, out, _ = env.main(["run", "--config", env.write_config(send_order="mixed"), "--plan", plan_file, "--confirm", plan_id,
+                             "--ledger-dir", str(env.tmp / "ledger"), "--limit", "4"])
+    assert code == 0
+    assert [x["aweme_id"] for x in out["sent"]] == ["dy_big_a", "dy_mid_a", "dy_small_a", "dy_big_b"], \
+        "a day's batch is the best of what is left in each category, not all the small ones first"
+    code, _, _ = env.main(["status", "--config", env.write_config(send_order="sideways")])
+    assert code == 2
+
+
+def test_run_sends_only_the_ones_the_user_picked_from_the_list(env, tmp_path):
+    plan_file, plan_id = make_plan(env)
+    env.log.unlink()
+    pick = tmp_path / "pick.txt"
+    pick.write_text("# 用户挑的\ndy_big_b\ndy_small_a\n", encoding="utf-8")
+    code, out, _ = env.main(["run", "--config", env.write_config(send_order="mixed"), "--plan", plan_file, "--confirm", plan_id,
+                             "--ledger-dir", str(env.tmp / "ledger"), "--only", f"@{pick}"])
+    assert code == 0 and [x["aweme_id"] for x in out["sent"]] == ["dy_small_a", "dy_big_b"], "only those two, in the send order"
+    assert {a.split("=", 1)[1] for c in env.calls() for a in c["args"] if a.startswith("--aweme-id=")} == {"dy_small_a", "dy_big_b"}
+    for bad in ("dy_not_on_the_list", "bad id!"):
+        code, _, _ = run_now(env, plan_file, plan_id, "--only", bad)
+        assert code == 2, bad
+
+
 def test_run_needs_the_plan_id_the_user_agreed_to_and_a_fresh_list(env):
     plan_file, plan_id = make_plan(env)
     env.log.unlink()
@@ -410,7 +604,7 @@ def test_run_needs_the_plan_id_the_user_agreed_to_and_a_fresh_list(env):
     assert code == 2 and env.calls() == []
     code, _, _ = run_now(env, plan_file, plan_id, clock=lambda: NOW + timedelta(days=4))
     assert code == 2 and env.calls() == [], "older than plan_max_age_days (3)"
-    cfg = env.write_config(commission_rate=20)
+    cfg = env.write_config(commission_rate=20, rights=["high-commission"])
     code, _, _ = env.main(["run", "--config", cfg, "--plan", plan_file, "--confirm", plan_id, "--ledger-dir", str(env.tmp / "ledger")])
     assert code == 2 and env.calls() == [], "the card would differ from the list that was agreed to"
 
@@ -493,6 +687,21 @@ def test_run_stops_when_the_platform_quota_runs_low_or_our_own_weekly_cap_is_rea
     assert led.sent_this_week(NOW) == 3 and led.sent_this_week(NOW + timedelta(days=5)) == 0
 
 
+def test_run_leaves_out_who_was_dropped_after_the_list_and_keeps_a_daily_cap(env):
+    plan_file, plan_id = make_plan(env)
+    cfg = env.write_config(rules={"drop_ids": ["dy_small_b", "dy_mid_a"]}, daily_cap=3, wait_between=[180, 300])
+    env.log.unlink()
+    code, out, sleeps = env.main(["run", "--config", cfg, "--plan", plan_file, "--confirm", plan_id, "--ledger-dir", str(env.tmp / "ledger")])
+    assert code == 0
+    skipped = {x["aweme_id"]: x["why"] for x in out["skipped"]}
+    assert skipped["dy_small_b"].startswith("手动排除") and not any(a == "--aweme-id=dy_small_b" for c in env.calls() for a in c["args"])
+    assert len(out["sent"]) == 2 and "每天上限 3 到了（今天已发 3）" in out["stopped"]["why"], "one was sent earlier today (invited_before)"
+    assert sleeps == [240.0], "3 to 5 minutes between two creators (the middle, with this uniform)"
+    led = tool.Ledger(env.tmp / "ledger")
+    assert led.sent_today(NOW) == 3 and led.sent_today(NOW + timedelta(days=3650)) == 0, "the ledger writes the real time: a day far ahead has none"
+    assert tool.load_config(env.write_config())["daily_cap"] == 0, "no daily cap unless the config sets one (the user, 2026-10-29)"
+
+
 def test_a_crash_between_the_attempt_and_its_result_never_leads_to_a_second_send(env):
     plan_file, plan_id = make_plan(env)
     led = tool.Ledger(env.tmp / "ledger")
@@ -535,6 +744,90 @@ def test_one_run_at_a_time(env):
         assert code == 2
     finally:
         held.unlock()
+
+
+# ── follow: who answered a card ─────────────────────────────────────────────
+
+def sent_cards(env, *cards, ledger="ledger"):
+    led = tool.Ledger(env.tmp / ledger)
+    for i, (aweme, at) in enumerate(cards):
+        stamp = at.isoformat(timespec="seconds")
+        led.append({"event": "attempt", "attempt": f"f{i}", "aweme_id": aweme, "plan_id": "Pf", "at": stamp})
+        led.append({"event": "result", "attempt": f"f{i}", "aweme_id": aweme, "sent": True, "outcome": "VERIFIED_SUCCESS", "at": stamp})
+    return led
+
+
+def follow_now(env, at, ledger="ledger", **config):
+    notes = []
+
+    def runner(argv, **kw):
+        if argv[0] == "/usr/bin/osascript":
+            notes.append((argv[-2], argv[-1]))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return subprocess.run(argv, **kw)
+    code, out, _ = env.main(["follow", "--config", env.write_config(**config), "--ledger-dir", str(env.tmp / ledger)], clock=lambda: at, runner=runner)
+    return code, out, notes
+
+
+def test_follow_tells_this_mac_when_a_creator_answers_a_card(env):
+    sent_cards(env, ("dy_fa", NOW - timedelta(hours=1)), ("dy_fb", NOW - timedelta(hours=1)), ("dy_fc", NOW - timedelta(days=3)),
+               ("dy_old", NOW - timedelta(days=20)))
+    env.scenario(scenario(status={"dy_fa": 4, "dy_fb": 2, "dy_fc": 3}))
+    code, out, notes = follow_now(env, NOW)
+    assert code == 0 and out["checked"] == 3 and out["waiting"] == 2, "dy_old is past follow_days (14): not asked about, still counted as waiting"
+    [ask] = [c["args"] for c in env.calls()]
+    assert ask[:3] == ["buyin", "author-invite-status", "--aweme-id=dy_fa,dy_fb,dy_fc"] and "--names" in ask and "--pause-ms=4000" in ask
+    assert "--expect-shop-id=9100000000000001" in ask and not any("--execute" in a for a in ask)
+    assert [(c["aweme_id"], c["to"]) for c in out["changes"]] == [("dy_fa", 4), ("dy_fc", 3)]
+    assert notes == [("百应：达人回复了邀约", "达人_fa（dy_fa） 回复了：去百应「合作消息」看她说什么，要加微信就加"),
+                     ("百应：达人拒绝了邀约", "达人_fc（dy_fc） 拒绝了")]
+    log = [json.loads(l) for l in (env.tmp / "ledger" / "follow.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [(r["aweme_id"], r["from"], r["to"]) for r in log] == [("dy_fa", None, 4), ("dy_fc", None, 3)]
+    for name in ("follow.jsonl", "follow-state.json"):
+        assert stat.S_IMODE(os.stat(env.tmp / "ledger" / name).st_mode) == 0o600
+    # 10 minutes later: the answered ones are done, the waiting one was just asked about
+    env.log.unlink()
+    code, out, notes = follow_now(env, NOW + timedelta(minutes=10))
+    assert out["checked"] == 0 and env.calls() == [] and notes == []
+    # 30 minutes later the new one is asked again; one sent 3 days ago waits two hours between two looks
+    env.scenario(scenario(status={"dy_fb": 4}))
+    code, out, notes = follow_now(env, NOW + timedelta(minutes=30))
+    assert out["checked"] == 1 and [c["aweme_id"] for c in out["changes"]] == ["dy_fb"] and len(notes) == 1
+    sent_cards(env, ("dy_fd", NOW - timedelta(days=3)), ledger="ledger2")
+    env.scenario(scenario(status={"dy_fd": 2}))
+    follow_now(env, NOW, ledger="ledger2")
+    env.log.unlink()
+    follow_now(env, NOW + timedelta(minutes=60), ledger="ledger2")
+    assert env.calls() == [], "sent 3 days ago: not again within 115 minutes"
+    follow_now(env, NOW + timedelta(minutes=120), ledger="ledger2")
+    assert len(env.calls()) == 1
+
+
+def test_follow_keeps_quiet_at_night_and_says_once_when_it_cannot_look(env, tmp_path):
+    sent_cards(env, ("dy_fa", NOW - timedelta(hours=1)))
+    code, out, notes = follow_now(env, NOW.replace(hour=2))
+    assert out["skipped"].startswith("北京时间 9～23 点之外不查") and env.calls() == [] and notes == []
+    env.scenario(scenario(exits={"status": 77}))
+    code, out, notes = follow_now(env, NOW)
+    assert out["problem"] == "登录失效（退出码 77）" and notes == [("百应：这次查不了达人回复", "登录失效（退出码 77）。处理好以后会接着查")]
+    code, out, notes = follow_now(env, NOW + timedelta(minutes=30))
+    assert out["problem"] and notes == [], "at most once in two hours"
+    code, out, notes = follow_now(env, NOW + timedelta(hours=2, minutes=1))
+    assert len(notes) == 1
+    # while a run sends cards, follow does not look
+    held = tool.Ledger(env.tmp / "ledger")
+    held.lock()
+    try:
+        env.log.unlink()
+        code, out, notes = follow_now(env, NOW + timedelta(hours=3))
+        assert code == 0 and out == {"skipped": "正在发邀约卡，这次不查"} and env.calls() == []
+        runs = [json.loads(l) for l in (env.tmp / "ledger" / "follow.log").read_text(encoding="utf-8").splitlines()]
+        assert [r.get("skipped") or r.get("problem") for r in runs][-2:] == ["登录失效（退出码 77）", "正在发邀约卡，这次不查"], "one line a run"
+    finally:
+        held.unlock()
+    calls = []
+    tool.mac_notify("标题", '她说"加我"', runner=lambda argv, **kw: calls.append(argv))
+    assert calls[0][0] == "/usr/bin/osascript" and calls[0][-2:] == ["标题", '她说"加我"'], "the texts are arguments, never part of the script"
 
 
 # ── the pacing wrappers, with real node ─────────────────────────────────────
