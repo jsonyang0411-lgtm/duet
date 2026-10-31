@@ -228,14 +228,22 @@ def boss_makes(world, members=(BOSS, HER, ME_SENDER), chat=GROUP, name=GROUP_NAM
         world.db.line(chat, BOSS, intro, t - 30)
 
 
+def opening_asked(world, run):
+    """The sender thread's round once the 开场白 may be asked for: the watch's catch-up ran (``watch_caught_up``), or,
+    for a backend that cannot say so, OPENING_WAIT_SEC after the takeover."""
+    world.clock.now += bg.OPENING_WAIT_SEC
+    run.tick()
+
+
 def taken_over(world, run):
-    """The first scan keeps the baseline; the boss makes the group while the bot runs; the next scan takes her over
-    and the next poll reads the group (the watch's catch-up).  Her party."""
+    """The first scan keeps the baseline; the boss makes the group while the bot runs; the next scan takes her over,
+    the next poll reads the group (the watch's catch-up) and the sender thread asks for the group 开场白.  Her party."""
     assert run.prm.boss_groups.scan() == 0
     boss_makes(world)
     run.poll()
     assert run.scan() == 1
     run.poll()
+    opening_asked(world, run)
     return world.prm_store.party_by_wxid(HER)
 
 
@@ -281,23 +289,26 @@ def test_the_scan_finds_the_bosss_new_group_through_the_backend_and_takes_her_ov
     assert row["made_at"] == found - bg.BOSS_SCAN_SEC - 1 - 40                # the group's oldest line
     assert GROUP in run.backend._watched and run.backend._watched[GROUP]["since"] <= row["made_at"]
     assert run.prm.is_party_group(GROUP) and not run.prm.is_party_group(NOTICE_GROUP)
-    [job] = world.jobs()                                                      # the group 开场白
-    meta = json.loads(job["meta"])
-    assert (job["kind"], job["chat_id"], job["text"]) == ("prm", GROUP, "")
-    assert meta["opening"] == {"how": "boss_group", "by": "boss_group"} and meta["channel"] == "group"
-    assert (meta["group"]["name"], meta["group"]["boss"]) == (GROUP_NAME, [BOSS_NAME])
-    assert meta["three_party"]["at"]
+    assert world.jobs() == []                                                 # the 开场白 waits for the catch-up
 
     # the next poll reads the group whatever WECHAT_GROUPS says: WeChat's line and the boss's introduction go through
     # the route (stored, unanswered), his words kept for her next draft
     run.poll()
     assert run.backend._chat_names[GROUP] == GROUP_NAME
     assert run.lines() == [("", INVITED), (BOSS, INTRO)]
-    assert world.stored(GROUP) == 2 and len(world.jobs()) == 1 and world.window.typed == []
+    assert world.stored(GROUP) == 2 and world.jobs() == [] and world.window.typed == []
     assert [(x["who"], x["text"]) for x in run.prm.boss_groups.job_group(GROUP)["lines"]] == [("老板", INTRO)]
+    opening_asked(world, run)
+    [job] = world.jobs()                                                      # the group 开场白
+    meta = json.loads(job["meta"])
+    assert (job["kind"], job["chat_id"], job["text"]) == ("prm", GROUP, "")
+    assert meta["opening"] == {"how": "boss_group", "by": "boss_group"} and meta["channel"] == "group"
+    assert (meta["group"]["name"], meta["group"]["boss"]) == (GROUP_NAME, ["老板"])    # (his name stays on this PC)
+    assert [(x["who"], x["text"]) for x in meta["group"]["lines"]] == [("老板", INTRO)]  # what he said, before it
+    assert meta["three_party"]["at"] and BOSS_NAME not in job["meta"]
     shown = call("/api/prm")[1]
-    assert shown["boss_groups"] == {"enabled": True, "why_not": "", "boss": [BOSS_NAME], "pending": [],
-                                    "waiting": 0, "linked": 1}
+    assert shown["boss_groups"] == {"enabled": True, "why_not": "", "boss": [BOSS_NAME], "boss_call": "老板",
+                                    "pending": [], "waiting": 0, "linked": 1}
     her = next(p for p in shown["parties"] if p["wxid"] == HER)
     assert her["source"] == her["deal"]["source"] == "boss_group"
     assert (her["deal"]["three_party"]["by"], her["deal"]["three_party"]["chat_name"]) == ("boss", GROUP_NAME)
@@ -329,27 +340,56 @@ def test_the_scan_finds_the_bosss_new_group_through_the_backend_and_takes_her_ov
 
 
 @pytest.mark.xfail(strict=True, reason=(
-    "BossGroups.take_over (src/prm/boss_groups.py:517-519) asks for the group 开场白 right after watch_group, but the "
-    "watch's catch-up only runs at the backend's next poll (WcdbBackend._watch_catch_up): meta.group of the 开场白 job "
-    "is fixed at submit, before the boss's introduction is handed on, so the Mac never sees it (and once the 开场白 "
-    "is sent, replied_at cuts it from her later jobs too)"))
+    "needs the backend part's WcdbBackend.watch_caught_up (review 2026-10-31, item 5): PRM asks for the group 开场白 "
+    "once the watch's catch-up ran; this backend cannot say so, so it waits OPENING_WAIT_SEC (90 s) after the takeover "
+    "(test_a_backend_that_cannot_say_its_catch_up_ran_gets_the_opening_90_seconds_on covers that)"))
 def test_the_opening_the_mac_takes_tells_the_bosss_introduction(world):
     """The boss introduced her in the group before the scan found it (his words come seconds after he makes it, the
-    scan up to a minute later): the Mac writes our first line knowing what he said (worker ``group_context_block``)."""
+    scan up to a minute later): the 开场白 is asked for at the sender thread's first round after the watch's catch-up
+    (``watch_caught_up``), and the Mac writes our first line knowing what he said (worker ``group_context_block``)."""
     run = world.run()
-    taken_over(world, run)
+    assert run.prm.boss_groups.scan() == 0
+    boss_makes(world)
+    run.poll()
+    assert run.scan() == 1 and world.jobs() == []
+    run.poll()                                                                # the watch's catch-up
     assert run.lines() == [("", INVITED), (BOSS, INTRO)]                      # PRM has his words by now
     world.clock.now += 1
+    run.tick()                                                                # (no 90 s wait)
+    world.clock.now += SETTLE_SEC + 1
     job = run.relay.next_job(0, ("prm",))                                     # the Mac takes the 开场白
     assert job["meta"]["opening"]["by"] == "boss_group"
     assert [(x["who"], x["text"]) for x in job["meta"]["group"]["lines"]] == [("老板", INTRO)]
+
+
+def test_a_backend_that_cannot_say_its_catch_up_ran_gets_the_opening_90_seconds_on(world):
+    """This backend has no ``watch_caught_up``: the 开场白 is asked for OPENING_WAIT_SEC after the takeover (the catch-up
+    ran by then), with the boss's introduction; once, never before.  (With the backend part's method it comes at the
+    first round after the catch-up: the test above.)"""
+    run = world.run()
+    assert run.prm.boss_groups.scan() == 0
+    boss_makes(world)
+    run.poll()
+    assert run.scan() == 1
+    run.poll()
+    run.backend.watch_caught_up = None                                        # (a backend without it)
+    world.clock.now += bg.OPENING_WAIT_SEC - 2
+    run.tick()
+    assert world.jobs() == []
+    world.clock.now += 2
+    run.tick()
+    run.tick()
+    [job] = world.jobs()
+    meta = json.loads(job["meta"])
+    assert meta["opening"]["by"] == "boss_group" and [x["text"] for x in meta["group"]["lines"]] == [INTRO]
 
 
 def test_a_group_made_while_the_bot_was_stopped_hands_on_what_was_said_before_the_takeover_once(world):
     """The boss made the group while the bot was stopped (WECHAT_GROUPS=* reads it from the start on: its lines then are
     history) and wrote again after the start (the route kept that line and said nothing).  The takeover hands the kept
     line on from the message store (``_replay``), the watch reads the group back to its oldest line (``made_at``) and
-    hands on the rest: her words are one reply job (read late: reviewed), not a 开场白, and no line reaches PRM twice."""
+    hands on the rest: her words are one reply job (read late: reviewed), no 开场白 at all (it waits for the catch-up,
+    and she spoke), and no line reaches PRM twice."""
     first = world.run()
     assert first.prm.boss_groups.scan() == 0
     first.stop()
@@ -366,17 +406,17 @@ def test_a_group_made_while_the_bot_was_stopped_hands_on_what_was_said_before_th
     assert second.lines() == [(BOSS, more)] and world.stored(GROUP) == 1 and world.jobs() == []   # not hers yet
     assert second.scan() == 1
     assert second.backend._watched[GROUP]["since"] == t + 10                  # back to its oldest line
-    [opening] = world.jobs()
-    assert [(x["who"], x["text"]) for x in json.loads(opening["meta"])["group"]["lines"]] == [("老板", more)]
+    assert world.jobs() == []                                                 # (the 开场白 waits for the catch-up)
     second.poll()
     assert second.lines() == [(BOSS, more), ("", INVITED), (BOSS, INTRO), (HER, "老板好～我是小美")]
-    assert world.relay_store.get(opening["id"])["status"] == "cancelled"     # she spoke: no 开场白
-    job = world.open_job()
+    [job] = world.jobs()
     meta = json.loads(job["meta"])
     assert text_lines(job) == ["老板好～我是小美"] and meta["late"] == {"from": t + 30} and meta["channel"] == "group"
     assert [(x["who"], x["text"]) for x in meta["group"]["lines"]] == [("老板", INTRO), ("老板", more)]
+    opening_asked(world, second)
     second.poll()
-    assert len(second.lines()) == 4 and len(world.jobs()) == 2 and world.window.typed == []
+    assert world.jobs() == [job]                                              # she spoke: no 开场白
+    assert len(second.lines()) == 4 and world.window.typed == []
     _, packet = mac_writes(second, "你好呀小美～")
     assert packet["status"] == "pending" and packet["chat_id"] == GROUP      # (read late: a person decides)
 
@@ -434,12 +474,15 @@ def test_a_group_of_only_the_boss_and_us_waits_and_she_is_taken_over_once_he_pul
     assert run.scan() == 1                                                    # (group_members: she is in it now)
     party = world.prm_store.party_by_wxid(HER)
     assert party["name"] == HER_NAME and world.prm_store.boss_group(GROUP)["state"] == "linked"
-    [opening] = world.jobs()
-    assert json.loads(opening["meta"])["opening"]["by"] == "boss_group" and opening["chat_id"] == GROUP
     run.poll()
     assert run.lines() == [("", INVITED), (BOSS, "等下拉个达人进来"), ("", joined), (BOSS, INTRO)]
     assert [x["text"] for x in run.prm.boss_groups.job_group(GROUP)["lines"]] == ["等下拉个达人进来", INTRO]
-    assert world.jobs() == [opening] and world.window.typed == []
+    opening_asked(world, run)
+    [opening] = world.jobs()
+    meta = json.loads(opening["meta"])
+    assert meta["opening"]["by"] == "boss_group" and opening["chat_id"] == GROUP
+    assert [x["text"] for x in meta["group"]["lines"]] == ["等下拉个达人进来", INTRO]
+    assert world.window.typed == []
 
 
 # ── 2. her line: drafted, sent into the group, read back; a person's line takes over ──
@@ -458,7 +501,7 @@ def test_her_line_is_drafted_sent_into_the_group_by_its_name_and_read_back_as_ou
     job = world.open_job()
     meta = json.loads(job["meta"])
     assert job["chat_id"] == GROUP and text_lines(job) == [asked] and "opening" not in meta
-    assert meta["channel"] == "group" and (meta["group"]["name"], meta["group"]["boss"]) == (GROUP_NAME, [BOSS_NAME])
+    assert meta["channel"] == "group" and (meta["group"]["name"], meta["group"]["boss"]) == (GROUP_NAME, ["老板"])
     assert [(x["who"], x["text"]) for x in meta["group"]["lines"]] == [("老板", INTRO)]
 
     reply = "你好～我们主要做帽子，之后由我跟你对接哈"
@@ -593,12 +636,9 @@ def test_what_the_bot_starts_itself_goes_to_the_group_while_she_is_no_friend_of_
     assert world.prm_store.packet(packet["id"])["outcome"] == "sent_confirmed"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "BossGroups.knows_private (src/prm/boss_groups.py:253) asks the backend's chat_target, whose _window_target logs "
-    "ERROR 'Cannot resolve chat_id=<her full wxid> to chat name' (src/wechat/wcdb_backend.py:1164) for every message "
-    "the bot starts for a creator who is no friend of ours (an expected answer, and spec rule 8: ids' first characters "
-    "only)"))
 def test_looking_for_her_private_chat_logs_no_error_and_not_her_wxid(world, caplog):
+    """Review (8): where a packet the bot starts itself goes is asked of the backend's quiet ``has_private_chat`` (this
+    one has none: not known), never of the send path's ``chat_target``, which logs an error with her wxid."""
     run = world.run()
     taken_over(world, run)
     caplog.set_level(logging.INFO)
@@ -675,7 +715,56 @@ def test_the_group_gone_stops_the_watch_and_her_lines_there_are_silent_again(wor
     assert world.prm_store.party_by_wxid(HER)["active"] == 1
 
 
+def test_the_bosss_line_while_her_group_draft_waits_has_it_drafted_again(world):
+    """Review (9): the boss says something in the group while her draft there waits in 待审批: the draft did not hear
+    it, so it is drafted again with it (her line again, the boss's lines now); once a draft is approved a later line
+    leaves it be, and it goes into the group; the lines its job was told are answered then, a later one is kept."""
+    run = world.run()
+    taken_over(world, run)
+    world.clock.now += 5
+    world.db.line(GROUP, HER, "你们家帽子多少钱", world.clock.now)
+    run.poll()
+    _, packet = mac_writes(run, "均价两三百哈")
+    assert packet["status"] == "pending"
+    world.clock.now += 5
+    world.db.line(GROUP, BOSS, "给她按团购价", world.clock.now)
+    run.poll()
+    assert world.prm_store.packet(packet["id"])["status"] == "superseded"
+    job = world.open_job()
+    assert text_lines(job) == ["你们家帽子多少钱"]
+    assert [x["text"] for x in json.loads(job["meta"])["group"]["lines"]] == [INTRO, "给她按团购价"]
+    _, again = mac_writes(run, "好的～按团购价给你")
+    assert approve(again["id"])["ok"] is True
+    world.clock.now += 1
+    world.db.line(GROUP, BOSS, "对", world.clock.now)
+    run.poll()
+    assert world.prm_store.packet(again["id"])["status"] == "approved" and world.open_job() is None
+    run.tick()
+    assert world.window.typed == [(GROUP_NAME, "好的～按团购价给你")]
+    assert [x["text"] for x in run.prm.boss_groups.job_group(GROUP)["lines"]] == ["对"]
+
+
 # ── 4. exclusions: our own 三方群; a group the console has to pick in ───────────
+
+def test_an_old_group_whose_chat_was_deleted_is_not_taken_over_when_it_comes_back(world):
+    """Review (4): the boss's group of a month ago whose chat was deleted on this PC is not in the baseline (WeChat's
+    session list did not have it); a new line brings it back like a new group.  It began for us a month ago: kept
+    ignored (「不是新拉的群」), never taken over, never read by the watch."""
+    t = world.clock.now
+    world.db.group(GROUP, GROUP_NAME, [BOSS, HER, ME_SENDER], t - 30 * 86400)
+    world.db.line(GROUP, BOSS, "上个月说的那个事", t - 29 * 86400)
+    world.db.times.pop(GROUP)                                                 # its chat deleted on this PC
+    run = world.run()
+    assert run.prm.boss_groups.scan() == 0
+    assert GROUP not in json.loads(world.prm_store.meta_value(bg.BASELINE))
+    world.db.line(GROUP, BOSS, "小美在吗", world.clock.now)                   # the chat is back
+    run.poll()
+    assert run.scan() == 0
+    row = world.prm_store.boss_group(GROUP)
+    assert (row["state"], row["why"]) == ("ignored", "不是新拉的群")
+    assert world.prm_store.parties() == [] and GROUP not in run.backend._watched and world.jobs() == []
+    assert run.scan() == 0 and world.prm_store.parties() == []
+
 
 class Admin:
     """The admin handler as 「拉三方群」 uses it (``create_group_checked``: WeChat's 「发起群聊」 window, faked): the group of
@@ -719,7 +808,7 @@ def test_the_group_our_own_three_party_click_made_is_never_taken_over(world, sca
         assert run.scan() == 0
     assert OURS in json.loads(world.prm_store.meta_value(bg.BASELINE))
     rows = world.prm_store.boss_groups()
-    assert [(r["chat"], r["state"], r["why"]) for r in rows] == ([(OURS, "ignored", bg.OURS_WHY)] if scan_while_made
+    assert [(r["chat"], r["state"], r["why"]) for r in rows] == ([(OURS, "ignored", bg.HAS_GROUP_WHY)] if scan_while_made
                                                                  else [])
     assert OURS not in run.backend._watched and not run.prm.is_party_group(OURS)
     assert world.prm_store.deal(deal_id)["three_party"] == made and len(world.prm_store.parties()) == 1
@@ -754,11 +843,12 @@ def test_a_group_with_two_people_she_may_be_waits_for_the_consoles_pick(world):
     assert out == {"ok": True, "party_id": party["id"], "deal_id": world.prm_store.deal_of(party["id"])["id"]}
     assert party["name"] == HER_NAME and world.prm_store.party_by_wxid(TESTER) is None
     assert GROUP in run.backend._watched and run.prm.is_party_group(GROUP)
-    [opening] = world.jobs()
-    assert json.loads(opening["meta"])["channel"] == "group" and opening["chat_id"] == GROUP
     assert call("/api/prm")[1]["boss_groups"]["pending"] == []
     run.poll()                                                                # the catch-up
     assert run.lines() == [("", INVITED), (BOSS, INTRO)]
+    opening_asked(world, run)
+    [opening] = world.jobs()
+    assert json.loads(opening["meta"])["channel"] == "group" and opening["chat_id"] == GROUP
     world.clock.now += 5
     world.db.line(GROUP, TESTER, "大家好呀", world.clock.now)
     run.poll()
@@ -803,7 +893,7 @@ def test_with_the_switch_off_the_same_database_gives_no_scan_no_watch_and_no_job
     else:
         assert run.lines() == [] and GROUP not in run.backend._chat_names
     assert call("/api/prm")[1]["boss_groups"] == {"enabled": False, "why_not": "", "boss": [BOSS_NAME],
-                                                   "pending": [], "waiting": 0, "linked": 0}
+                                                   "boss_call": "老板", "pending": [], "waiting": 0, "linked": 0}
     assert asked == []
 
 
@@ -824,7 +914,7 @@ def test_a_restarted_bot_watches_the_group_again_and_hands_on_only_what_came_mea
     world.db.line(GROUP, BOSS, "她粉丝挺多的", t + 70)
     world.clock.now = t + 120
     second = world.run(groups=groups)
-    assert second.backend._watched[GROUP]["since"] == last                   # PrmService.start: from its last line
+    assert second.backend._watched[GROUP]["since"] == last + 1               # PrmService.start: after its last line
     assert second.prm.is_party_group(GROUP)
     second.poll()
     assert second.lines() == [(HER, "我平时主要带美妆"), (BOSS, "她粉丝挺多的")]
@@ -840,15 +930,11 @@ def test_a_restarted_bot_watches_the_group_again_and_hands_on_only_what_came_mea
     assert world.prm_store.deal_of(party["id"])["mode"] == "copilot"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "after a restart the watch's catch-up hands this account's own group lines on to the own-message hook again: "
-    "PrmService.on_own_message never moves boss_groups.last_line_at (only routed lines do, src/prm/service.py:1435), "
-    "the restart watches from it (src/prm/boss_groups.py:547), and own lines are never stored, so "
-    "WcdbBackend._watch_catch_up (src/wechat/wcdb_backend.py:1831) picks them again; PRM's read-back no longer knows "
-    "a confirmed one-message reply (src/prm/service.py:2096) and takes the bot's own reply for an operator's: a false "
-    "takeover"))
 @GROUPS
 def test_after_a_restart_our_reply_read_back_before_is_not_handed_on_again(world, groups):
+    """Review (1): our own line in the group moves its last line handled on (``on_own_message``), and the restart
+    watches from the second after it: the reply read back before the stop is not handed on again, and there is no
+    false takeover."""
     first = world.run(groups=groups)
     party = taken_over(world, first)
     world.clock.now += 5
