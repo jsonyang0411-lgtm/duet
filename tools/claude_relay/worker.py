@@ -1341,21 +1341,34 @@ def history_block(history: list) -> str:
 
 
 OUTBOUND_KINDS = {"holding": "系统自动回的稍等", "shipping_notice": "发货通知"}
+# Where a reply went (``meta.sent[].where``, 功能 U): the bot says so for a creator with a 老板拉的群 only.
+SENT_WHERE = {"group": "群里", "private": "私聊"}
+SENT_WHERE_NOTE = "每一条前面标着发在哪儿：（群里）是发在老板拉的群里的，老板也看得到；（私聊）是发在和她的私聊里的。"
+
+
+def _sent_where(item: dict) -> str:
+    """群里 / 私聊 for an item of ``meta.sent`` that says where it went, else ""."""
+    where = item.get("where")
+    return SENT_WHERE.get(where, "") if isinstance(where, str) else ""
 
 
 def sent_block(sent: list, in_group: bool = False) -> str:
     """What the creator really got from us lately (the bot's record, oldest first): a draft as it
-    went out, the operator's edit next to the draft it replaced, drafts not sent.  ``in_group``: a draft
-    in a 老板拉的群 (功能 U), where the deal's replies are the group's and the private chat's alike."""
-    where = "在这个群里或私聊里" if in_group else "在这个私聊里"
+    went out, the operator's edit next to the draft it replaced, drafts not sent.  A creator with a
+    老板拉的群 (功能 U): the bot says where each went (``where``: group | private); the block then says
+    the replies are the group's and the private chat's and marks each 「（群里）」 or 「（私聊）」.
+    Without any ``where`` it is as before; ``in_group`` (a draft in the group) then says
+    「在这个群里或私聊里」."""
+    items = [item for item in sent if isinstance(item, dict)] if isinstance(sent, list) else []
+    marked = any(_sent_where(item) for item in items)
+    where = "在群里和私聊里" if marked else "在这个群里或私聊里" if in_group else "在这个私聊里"
     lines = [f"下面是最近我方{where}的回复，按时间排，以这里为准（你之前起草的版本，运营可能改过，也可能没发）。"
-             "案卷里记的和这里不一样的，按这里改正。"]
-    for item in sent if isinstance(sent, list) else []:
-        if not isinstance(item, dict):
-            continue
+             "案卷里记的和这里不一样的，按这里改正。" + (SENT_WHERE_NOTE if marked else "")]
+    for item in items:
         at = _untagged(str(item.get("at") or ""))[:20]
         kind = OUTBOUND_KINDS.get(str(item.get("kind") or ""), "")
-        head = f"（{at}{'，' + kind if kind else ''}）"
+        place = _sent_where(item)
+        head = f"{'（' + place + '）' if place else ''}（{at}{'，' + kind if kind else ''}）"
         what = item.get("what")
         if what == "sent":
             lines.append(f"{head}\n<our_reply>\n{_untagged(item.get('text', ''))}\n</our_reply>")
@@ -1519,12 +1532,13 @@ def opening_line(meta: dict) -> str:
     not written to us yet (a new friend whose catch-up found nothing of hers, or an operator's 「写开场白」 in the
     console, ``by`` console), so the job has no message of hers and asks for our first line.  In a 老板拉的群
     (``meta.channel == "group"``, 功能 U) it is the group's own wording, ``BOSS_GROUP_OPENING``: greet her there as the
-    one the boss introduced.  "" without it (the prompt as before)."""
+    one the boss introduced, by his call (「说是X总介绍的」, ``boss_call``; 「说是老板介绍的」 without one).  "" without it
+    (the prompt as before)."""
     opening = meta.get("opening")
     if not isinstance(opening, dict):
         return ""
     if meta.get("channel") == GROUP_CHANNEL:
-        return BOSS_GROUP_OPENING
+        return BOSS_GROUP_OPENING.format(call=boss_call(meta))
     if opening.get("by") == "console":
         who = "运营请你给这位达人写开场白：她还没跟我们说过话"
     else:
@@ -1553,17 +1567,19 @@ def three_party_line(meta: dict) -> str:
 
 # 老板拉的群 (功能 U, 2026-10-31): the boss made a small WeChat group with a creator who is his friend and this work
 # account, and the bot took it over (linked to her deal).  Her lines there are drafted like a private chat's and the
-# draft goes out in the group: the job says ``meta.channel == "group"`` and ``meta.group = {"name", "boss": [names],
-# "lines": [{"who": "老板" | "群成员", "at": "MM-DD HH:MM", "text"}]}`` (the others' lines since our last reply there).
+# draft goes out in the group: the job says ``meta.channel == "group"`` and ``meta.group = {"name", "boss": [calls],
+# "lines": [{"who": "老板" | "群成员", "at": "MM-DD HH:MM", "text"}]}`` (``boss``: how we call him, PRM_BOSS_CALL,
+# such as 「老板」 or 「X总」, never his name; ``lines``: the others' lines since our last reply there).
 GROUP_CHANNEL = "group"
 GROUP_NAME_CHARS = 40        # the group's name as the prompt repeats it
-BOSS_NAME_CHARS = 20         # each boss's name (PRM_GROUP_WITH's)
-GROUP_BOSSES = 5             # the most boss names repeated
+BOSS = "老板"                 # the boss, and how he is called when the job gives no call of its own
+BOSS_CALL_CHARS = 20         # each call of the boss (PRM_BOSS_CALL's)
+GROUP_BOSSES = 5             # the most calls repeated
 GROUP_ROWS = 10              # the most of the others' lines one draft is told: the newest
 GROUP_ROW_CHARS = 300        # each of them cut to this
 GROUP_WHO = ("老板", "群成员")  # who said a line; anything else is told as 群成员
-BOSS_GROUP_OPENING = (
-    "这是老板在群里介绍给我们的达人，先在群里跟她打个招呼：说是老板介绍的、我们是品牌的运营、之后由我们跟她对接，"
+BOSS_GROUP_OPENING = (       # {call}: ``boss_call``
+    "这是老板在群里介绍给我们的达人，先在群里跟她打个招呼：说是{call}介绍的、我们是品牌的运营、之后由我们跟她对接，"
     "问她一件事（比如平时主要带什么）。这一次没有达人的消息，要写的是我们在群里主动发的第一句（开场白），"
     "按 kb/ 里「老板拉的群」那一节写；她的作品、穿搭这些你不知道的不要编。"
     "我们已经跟她打过招呼的（看 <our_reply> 和 <operator_message>），就写一句自然的跟进，不要重复自我介绍。")
@@ -1575,20 +1591,38 @@ def _one_line(text, limit: int) -> str:
     return _untagged(" ".join(str(text or "").split())[:limit])
 
 
+def boss_calls(meta: dict) -> list:
+    """How a 老板拉的群's job calls the boss (``meta.group.boss``: PRM_BOSS_CALL, a call such as 「X总」, never a name):
+    strings only, each on one line, cut to ``BOSS_CALL_CHARS`` and untagged, each once, at most ``GROUP_BOSSES``; the
+    plain 「老板」 is left out (it is the word the prompt uses anyway).  [] without any."""
+    group = meta.get("group") if isinstance(meta.get("group"), dict) else {}
+    calls = []
+    for item in group.get("boss") if isinstance(group.get("boss"), list) else []:
+        call = _one_line(item, BOSS_CALL_CHARS) if isinstance(item, str) else ""
+        if call and call != BOSS and call not in calls:
+            calls.append(call)
+    return calls[:GROUP_BOSSES]
+
+
+def boss_call(meta: dict) -> str:
+    """The boss as her draft names him: his calls (``boss_calls``), else 「老板」."""
+    return "、".join(boss_calls(meta)) or BOSS
+
+
 def boss_group_line(meta: dict) -> str:
     """The prompt's line for a draft in a 老板拉的群 (``meta.channel == "group"``): the reply goes out in the group, where
-    the boss reads it too.  ``meta.group``'s ``name`` (the group's name in WeChat, which any member may change) and
-    ``boss`` (the names as PRM_GROUP_WITH writes them) are repeated on one line, cut short and untagged.  "" for every
-    other job (the prompt as before)."""
+    the boss reads it too.  ``meta.group``'s ``name`` (the group's name in WeChat, which any member may change) and the
+    boss's call (``boss_calls``) are repeated on one line, cut short and untagged: 「群里有X总（老板）、她和我们」, and
+    「群里有老板、她和我们」 for no call, the plain 「老板」 or a call that says 老板 itself.  "" for every other job (the
+    prompt as before)."""
     if meta.get("channel") != GROUP_CHANNEL:
         return ""
     group = meta.get("group") if isinstance(meta.get("group"), dict) else {}
     name = _one_line(group.get("name"), GROUP_NAME_CHARS)
-    boss = group.get("boss") if isinstance(group.get("boss"), list) else []
-    names = [n for n in (_one_line(b, BOSS_NAME_CHARS) for b in boss if isinstance(b, str)) if n][:GROUP_BOSSES]
+    calls = boss_calls(meta)
+    who = boss_call(meta) + (f"（{BOSS}）" if any(BOSS not in call for call in calls) else "")
     called = f"（群名：「{name}」）" if name else ""
-    bosses = f"（{'、'.join(names)}）" if names else ""
-    return (f"这是老板拉的三方微信群{called}，群里有老板{bosses}、她和我们；你写的 reply_draft 会发在群里，老板也看得到："
+    return (f"这是老板拉的三方微信群{called}，群里有{who}、她和我们；你写的 reply_draft 会发在群里，老板也看得到："
             "只回她说的，不替老板答话、不和老板说过的矛盾；像在群里说话，简短，按 kb/ 里「老板拉的群」那一节写。")
 
 

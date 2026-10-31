@@ -1402,6 +1402,9 @@ class TestPrmPages:
             assert expected in text, expected
         first = card.locator(".prm-boss-group", has_text="老板测试的小群")
         assert first.locator("button:has-text('是她')").count() == 2
+        for row in (first, card.locator(".prm-boss-group", has_text="老板测试的家人群")):   # (no ``why``: as before)
+            assert "群里不止一个人可能是她，点哪个是她" in row.inner_text() and row.locator(".note").count() == 0
+        assert "群里不止一个人可能是她时，在下面点哪个是她。" in text
         first.locator(".prm-boss-member", has_text="测试达人").locator("button:has-text('是她')").click()
         page.get_by_text("已接手「老板测试的小群」：测试达人 登记成达人").wait_for()
         assert posted == [("POST", "pick", {"chat": "test_group_01@chatroom", "wxid": "wxid_test_a"})]
@@ -1424,6 +1427,62 @@ class TestPrmPages:
         page.goto(f"{BASE_URL}/#/review", timeout=10000)
         page.locator(".prm-draft").first.wait_for()
         assert "老板拉了" not in page.inner_text("body")
+
+    def test_deals_page_says_why_the_bot_did_not_take_a_boss_group_over(self, page, prm):
+        """A pending group the bot did not take over by itself shows its own ``why`` (she was stopped, registering
+        failed, she has a 三方群 already…) and 是她 still works there; 「群里不止一个人可能是她」 only for a group with no
+        ``why`` and more than one member listed (the hint above the groups too); ``boss_call`` leaves the card's name."""
+        import time as _time
+
+        now = prm.clock.now
+        found = f"{_time.strftime('%H:%M', _time.localtime(now))} 发现"
+        stopped = "她在达人名单里停用过：要接手的话请在这里点「是她」"
+        failed = "没登记成：测试用的原因"
+        has_group = "她已经有三方群：测试用的说明"
+
+        def group(n, why, *members):
+            return {"chat": f"test_group_1{n}@chatroom", "name": f"测试群{n}", "found_at": now, "size": len(members) + 2,
+                    "why": why, "members": [{"wxid": f"wxid_test_{n}{m}", "name": f"测试成员{n}{m}"} for m in members]}
+
+        bg = {"enabled": True, "why_not": "", "boss": ["老板测试"], "boss_call": "测试总", "waiting": 0, "linked": 0,
+              "pending": [group(1, stopped, "a"), group(2, failed, "a", "b"), group(3, "", "a", "b"), group(4, "", "a"),
+                          group(5, has_group)]}
+        posted = []
+
+        def answer(route):
+            body = route.request.post_data_json
+            posted.append((route.request.url.rsplit("/", 1)[1], body))
+            bg["pending"] = [g for g in bg["pending"] if g["chat"] != body["chat"]]
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"ok": True, "party_id": 9, "deal_id": 9}))
+
+        self._serve_prm(page, lambda state: state.update(boss_groups=json.loads(json.dumps(bg))))
+        page.route("**/api/prm/boss-groups/*", answer)
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        card = page.locator(".prm-boss-groups")
+        card.wait_for()
+        assert card.locator(".card-head h2").inner_text() == "老板拉的群"            # (whatever boss_call is)
+        rows = {n: card.locator(".prm-boss-group", has_text=f"测试群{n}") for n in range(1, 6)}
+        for n, why in ((1, stopped), (2, failed), (5, has_group)):
+            assert rows[n].locator(".note").inner_text() == why, n
+            assert "不止一个人" not in rows[n].inner_text() and found in rows[n].inner_text(), n
+        assert rows[3].locator(".note").count() == 0
+        assert f"{found}：群里不止一个人可能是她，点哪个是她" in rows[3].inner_text()
+        assert rows[4].locator(".note").count() == 0 and "不止一个人" not in rows[4].inner_text()
+        assert found in rows[4].inner_text() and rows[4].locator("button:has-text('是她')").count() == 1
+        assert rows[5].locator("button:has-text('是她')").count() == 0
+        assert "群里不止一个人可能是她时，在下面点哪个是她。" in card.inner_text()
+        buttons = card.locator("button").all()
+        assert len(buttons) == 11 and not any(b.is_disabled() for b in buttons)    # 6 是她, 5 这个群不是达人
+        rows[1].locator("button:has-text('是她')").click()                         # (her own why says so)
+        page.get_by_text("已接手「测试群1」：测试成员1a 登记成达人").wait_for()
+        assert posted == [("pick", {"chat": "test_group_11@chatroom", "wxid": "wxid_test_1a"})]
+        rows[1].wait_for(state="detached")
+        rows[3].locator(".prm-boss-member", has_text="测试成员3b").locator("button:has-text('是她')").click()
+        rows[3].wait_for(state="detached")
+        assert posted[1:] == [("pick", {"chat": "test_group_13@chatroom", "wxid": "wxid_test_3b"})]
+        # no group left that more than one may be her: nothing says so, the hint neither
+        assert card.locator(".prm-boss-group").count() == 3 and "不止一个人" not in card.inner_text()
 
     def test_deals_page_says_why_boss_groups_cannot_run_and_has_nothing_of_them_when_off(self, page, prm):
         """On but unable to run, the card says why (and its buttons are off: a stopped bot lists the groups it found);
