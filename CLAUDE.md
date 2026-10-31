@@ -54,7 +54,7 @@ Mac 开发环境的 `.venv` 是用 uv 创建的，里面没有 pip，装依赖�
 | 测试类别 | 覆盖功能 |
 |---------|---------|
 | 路由红线 | 7 个路由步骤的顺序和每一步（`tests/test_routing_steps.py`）；任何群消息（@ 机器人、cc、管理员命令、进群）、陌生私聊、旧 .env 里的聊天开关都得不到回复，被删的聊天模块不能再被导入；群里唯一的例外是机器人接手的老板拉的群（`PRM_BOSS_GROUPS`，功能 U）里她自己的话：成一份静默的群草稿任务（审过、或者按门槛 / 下班时段 / 自动模式才发在群里），同一个群里老板、管理员、别人的 @、cc、命令、进群、图片、语音都不回、不建任务，她在别的群里的话照旧不回，开关关着这个群和别的群一样（`tests/test_router_business.py`）；登记达人私聊里发「cc …」「同意」「同意好友」、图片、语音（说的是 cc 也一样）只生成草稿任务（副驾驶）/ 给 Mac 的事件（边缘），不回复、不建 cc 任务，`CLAUDE_RELAY_ONLY` 开关都一样，她在群里 @ 机器人也不回（接手的老板拉的群里只有她的话成群的草稿任务：真的 WCDB 后端读所有群，老板和别人的话、别的群里她的 cc 都不回不建任务），`PRM_COPILOT` 和 `PRM_EDGE` 同开时机器人不启动（`tests/test_prm_route_redlines.py`，真的 WCDB 后端、路由、中转、PRM / 边缘接在假微信数据库上） |
-| API 端点 | Diagnose 返回结构、POST allowlist（聊天机器人的接口已删除）、配置字段默认值、`/api/relay`（任务的文字、结果里的号码打码，`tests/test_relay_console_api.py`）、`/api/prm` 和 `/api/prm/parties`、`/packets`、`/deals`、`/reveal`、`/friend-adds`、`/auto`（`tests/test_prm_console_api.py`）、`/api/wechat-gaps`（GET 只读、机器人停着时不建库，POST 才标看过了，`tests/test_web_api.py`） |
+| API 端点 | Diagnose 返回结构、POST allowlist（聊天机器人的接口已删除）、配置字段默认值、`/api/relay`（任务的文字、结果里的号码打码，`tests/test_relay_console_api.py`）、`/api/prm` 和 `/api/prm/parties`、`/packets`、`/deals`、`/reveal`、`/friend-adds`、`/auto`、`/boss-groups/pick`、`/boss-groups/ignore`（`tests/test_prm_console_api.py`）、`/api/wechat-gaps`（GET 只读、机器人停着时不建库，POST 才标看过了，`tests/test_web_api.py`） |
 | 页面加载 | 前端 SPA 正常渲染，不出现空白页或连接错误 |
 | 主题系统 | 浅色模式默认（明日方舟风，2026-10 改版）、Sun/Moon 按钮切换到深色、localStorage 持久化 |
 | 侧边栏导航 | 公司版（中转代理控制台）只有 运行状态/中转代理/待审批/合作单/微信连接/达人名单/运行日志 七页（Mac 端 `WECHAT_BACKEND=edge` 时没有「微信连接」）；旧链接回到运行状态 |
