@@ -1074,6 +1074,16 @@ def group_job(text="[10-31 11:05] 你好呀，你们家主要是什么帽子", *
                                              "group": BOSS_GROUP, **meta}}
 
 
+def test_a_group_job_with_a_draft_note_hears_the_group_before_the_note(worker):
+    """A creator of a 老板拉的群 with a 起草备注: the others' lines (<group_context>) come first, then the operators'
+    note (its rule line and <operator_note>), then her words — the order the two features were merged in."""
+    lines = worker.prm_prompt(group_job(note=SIGNATURE), 1, "小美", "deals/1.md", [], []).split("\n")
+    at = {tag: lines.index(tag) for tag in ("<group_context>", "</group_context>", NOTE_RULE, "<operator_note>",
+                                            "</operator_note>", "<creator_message>")}       # (the rule line names the tag too)
+    assert list(at.values()) == sorted(at.values())
+    assert lines.count("<group_context>") == 1 and lines.count("<operator_note>") == 1
+
+
 def test_a_draft_in_a_boss_group_says_it_goes_out_in_the_group_where_the_boss_reads_it(worker):
     """Windows puts ``meta.channel = "group"`` and ``meta.group`` into the draft job of her line in a 老板拉的群: right
     after the deal's line the prompt says the reply goes out in the group (its name, the boss's names) and how to talk
