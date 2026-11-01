@@ -187,6 +187,12 @@
 | 3b | 用户 10-26 让做的 4 件：佣金上限 25%、款号对平台商品、抖音 CLI 拉新、删旧代码 | 已完成（v60） |
 | 4 | 接真实聚水潭：抓 `saveV3` 后 `create_sample_order` 收商品清单、真实建寄样单；`check_inventory` 逐款调 `jst goods` 查（现在拿整段商品文字查） | 等运营第一次真寄样时抓请求（运营在调试版 Chrome 点保存前叫我们） |
 
+**周一（2026-11-02）改邀约卡片的条件**（用户 11-01 定的待办；佣金比例和投流预算要老板点头）
+- 卡上写明佣金比例：`jst invite` 没有比例参数，只能写进 `--text`；或改用 `tools/creator_invite`（`commission_rate` 1～25，卡一发出去平台就开这个比例的长期专属佣金）。`kb/话术.md`「抖音邀约卡片」和 `kb/合作政策.md`「佣金」现在都写着不写比例，要一起改
+- 勾上「优质视频投放」：`--rights high-commission,free-sample,video-boost`，达人发视频、我们投流，预算要老板批
+- 商品换成店里投流跑出过量的款，邀约信息写真实销量：卡上的商品现在是平台按人推荐的（10-29 到 10-31 的 225 张几乎都是 199、269、399、570 元这四款），`jst invite` 只能用 `--skip` 去掉、不能指定，要给它加选款参数，或改用 `tools/creator_invite`（`products`）
+- 第一步不要求加微信：邀约信息改成先在百应回话，聊起来再加微信（改 `kb/话术.md`；`--wechat` 是必填，卡上的微信号照留）
+
 其余待办：
 - 商品目录要定期重跑（`python3 tools/claude_relay/worker.py --sync-products`，上新、下架后）；还没放进定时任务
 - 一键邀约：预览版命令已做（`jst invite`，v66）。还差：第一次真邀约时运营在页面上点、我们录一次请求，和预览拼的逐项核对（尤其网址上的 `ewid`、`seraph_did`），核对后放开 `--execute`；卡片上填哪个微信、勾哪些优势等用户定；之后接进控制台（运营逐个确认再发）
@@ -441,3 +447,4 @@ CLI 是同事的千帆商家后台命令行工具：私有仓库 `doupi-org/xiao
 - 2026-10-28 v88：**商品目录带款式图**（用户选方案 A：改 CLI 输出图片字段）。① 两个 CLI 只读各试一行：抖店 `fxg products --raw` 行里有 `img`（主图）/`pics`，千帆 `items --raw` 行里有 `images[].link`，都在平台图片 CDN 上、不带登录态能下（1440×1440 JPEG）。② CLI 改动推在 **新分支 `product-images`**（用户同意上传）：`doupi-org/Douyin-engineering` `2422255`（`productRow` 加 `img`、`pics`，VALIDATION 第七十六节，输出基线重录一个摘要；全量 11590 条，和 main 一样 1 失败 91 取消，都是本机跑不了的信号 / 子进程测试）、`doupi-org/xiaohongshu-engineering` `b8d3a8d`（`ITEM_FIELDS` 加 `images`，F75，4106 通过）。两个仓库是 Christina 维护的，抖音那个 GitHub main 是她本地 main 的快照，所以没动 main，**要她合并**；这台 Mac 的两个 CLI 目录切在 `product-images` 上用。③ webot `156b399`：`_sync_dy` / `_sync_xhs` 取主图地址（`image_url` 只认 `.ecombdimg.com` / `.xiaohongshu.com`，http 换 https），worker `--sync-products` 在 CLI 锁外 `fetch_images` 下到 `prm_workspace/assets/products/<平台>-<商品ID>.<jpg|png|webp>`（不走系统代理、10 MB 上限、按文件头认格式、地址没变不重下、下不成沿用上一张、下架款的图删掉），`products.md` 加最后一列「款式图」；起草的 Claude 仍没有命令行，只在 attachments_to_send 写这个路径。全量 1944 通过。真实同步一次：xhs 939、dy 900 个商品，新下 1839 张、0 失败、477 MB（抽查手缝线贝雷帽图和标题一致）。④ kb（不在仓库，改前备份在 scratchpad `*.before-images`）：`商品.md` 加「款式图」一节（想看款式 / 推荐时附图、一次最多 3 张、message_kind material、只用目录给的路径、不说成实拍），`话术.md` 二.3 问款式改成有图先发图。没推 duet（merge-platforms 领先 171 个提交，等用户定）；没推同事仓库。
 - 2026-10-28 v89：用户说「合进去」：两个 CLI 的 `product-images` 快进并入 GitHub `main` 并推送（Douyin-engineering `4b70cbc`、xiaohongshu-engineering `68846f7`，各补一个提交改 CLAUDE.md 里「还在分支上」的话）；这台 Mac 上两个 CLI 目录切回 `main`。抖音那个仓库的开发仓库（Christina 的本地 main，GitHub 上是它的快照）里还没有这次改动，下次打快照前要先并入，否则会被盖掉。webot 仍没推 duet。
 - 2026-10-29 v91：**机器人加好友在虚拟机上跑通**（codex 发「添加好友 号 附言」→ 机器人搜号、点「添加到通讯录」、填附言、发出）。管理员改成 codex `wxid_ya400q2u58g912`（用户本人的号；yangye68 不是用户的号），codex 从 Mac 达人名单停用（管理员还挂在名单里时消息照样当达人消息转 Mac 起草）。一路排掉四层：① 虚拟机缺 VC++ 运行库，`win32ui` 加载失败，截图识别全挂（自动同意好友也因此一直没生效）——装 vc_redist.x64 后好；② 搜索结果滑进来、按钮先低后中：每 0.5 秒读一次，按钮连续两次同位置才点（`da6bb54`）；③ 4.0 路径只看「朋友资料/语音聊天」就判已是好友，陌生人被误判：改成要有「发消息」且无添加按钮（`50e210c`）；④ 根因：376×568 的「添加朋友」小窗按原尺寸 OCR 把「添加到通讯录」认成「添加到通讯余」：窄于 600px 的窗口放大 2 倍再识别（`f0046ee`，WorkBuddy 实测诊断）。三处修复在 worktree 分支 `fix-add-friend-wait`（基于同事 `912a928`），虚拟机现跑这个分支；本地提交，未推、待发同事合并。Mac 仍是旧版（会忽略新版 Windows 的 wechat_gap 事件），以后两边一起升。待做：命令加好友时自动填备注「昵称-抖音」（需改 4.0 申请窗）；同事说的弹窗标题是「微信」、200% 缩放点偏、焦点被抢、连发冲突等修复等他推。抖音邀约：今天共约 52 位，第 15 位起再遇风控停，剩 23 位明天发。诗依闺女装（近 30 日 250–500 万，按政策 25%）回了微信，用户手动加。小红书千帆邀约弹窗要求推荐商品（店里全未开推广），等老板定公开佣金和款式。
+- 2026-11-01 v92：第 5 节记下周一（11-02）改邀约卡片条件的待办：卡上写佣金、勾优质视频投放、换跑量款并写真实销量、第一步不要求加微信。这次只记待办，卡片和话术都没动。
