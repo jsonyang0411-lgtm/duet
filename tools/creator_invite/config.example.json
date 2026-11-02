@@ -40,5 +40,6 @@
   "quota_margin": 50,
   "gap_seconds": 3,
   "wait_between": [15, 30],
+  "recheck_after_seconds": 20,
   "plan_max_age_days": 3
 }

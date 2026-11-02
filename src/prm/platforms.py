@@ -2198,6 +2198,18 @@ def _catalog_run(cfg: dict, platform: str, words: list, progress) -> tuple:
     return run, data
 
 
+# 抖店商品的链接：抖店接口自己给的「复制链接」（商品列表答复里的 product_url_for_copy，见 douyin-engineering-evidence
+# 的 api-fxg-products.json）就是这个样子，只换商品 ID；2026-10-31 用三款主推试过都能打开。起草的 Claude 要发链接时
+# 只照抄 kb/products.md「链接」那一格，不自己拼。
+DY_PRODUCT_LINK = "https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id={id}&origin_type=604"
+
+
+def product_link(platform: str, item: dict) -> str:
+    """The product's link for the catalogue (抖店 only: ``DY_PRODUCT_LINK``); "" where none is known."""
+    pid = str((item or {}).get("id") or "")
+    return DY_PRODUCT_LINK.format(id=pid) if platform == "dy" and _DIGITS.match(pid) else ""
+
+
 def _sync_dy(cfg: dict, progress) -> dict:
     shop = [f"--expect-shop-id={cfg['dy_expect_shop_id']}"] if cfg.get("dy_expect_shop_id") else []
     _, data = _catalog_run(cfg, "dy", ["fxg", "products", "--page-size=100", *shop], progress)
@@ -2208,6 +2220,7 @@ def _sync_dy(cfg: dict, progress) -> dict:
             continue
         items.append({"id": pid, "title": _clip(row.get("name") or "", 120),
                       "price": _yuan(row.get("discountPrice") or row.get("priceLower"), fen=True), "skus": []})
+        items[-1]["link"] = product_link("dy", items[-1])
         image = image_url("dy", row.get("img"))              # 主图（douyin-engineering 2026-10-28 起输出 img）
         if image:
             items[-1]["image"] = image
@@ -2275,7 +2288,9 @@ def catalog_markdown(catalog: dict) -> str:
              f"同步时间：{when}（Mac 上运行 `python3 tools/claude_relay/worker.py --sync-products` 生成）。",
              "起草平台动作（platform_action）时，商品 ID 和 SKU ID 只能从这张表里取；价格是目录里的售价（元），"
              "专属价、佣金按 kb/ 里的合作规则定。SKU 后面的「编码」是聚水潭的商品编码（有的平台才有）。"
-             "「款式图」是这款的主图（平台上的第一张），要发给达人看就把这个路径写进 attachments_to_send。", ""]
+             "「款式图」是这款的主图（平台上的第一张），要发给达人看就把这个路径写进 attachments_to_send。"
+             "「链接」是这款的商品页链接（抖店「复制链接」给的那种），达人要链接就照抄这一格，不要自己拼、不要编；"
+             "写着「—」的没有链接，回复里说「链接我马上发您」，needs_attention 设为 true，请运营补发。", ""]
     for platform in CATALOG_PLATFORMS:
         name = PLATFORMS[platform]
         part = (catalog.get("platforms") or {}).get(platform)
@@ -2290,13 +2305,14 @@ def catalog_markdown(catalog: dict) -> str:
         if part.get("notes"):
             lines.append("")
         if items:
-            lines += ["| 商品 ID | 标题 | 售价（元） | SKU（ID：规格 售价） | 款式图 |", "|---|---|---|---|---|"]
+            lines += ["| 商品 ID | 标题 | 售价（元） | SKU（ID：规格 售价） | 款式图 | 链接 |", "|---|---|---|---|---|---|"]
             for item in items:
                 skus = "；".join((f"{s.get('id')}：{_cell(s.get('name') or '')} {s.get('price') or ''}".strip()
                                  + (f" 编码 {s['code']}" if s.get("code") else ""))
                                 for s in item.get("skus") or [])
+                # (a catalogue synced before the links were kept still gets them: the link is the product id's)
                 lines.append(f"| {item.get('id')} | {_cell(item.get('title') or '')} | {item.get('price') or ''} | {skus} |"
-                             f" {item.get('image_file') or '—'} |")
+                             f" {item.get('image_file') or '—'} | {product_link(platform, item) or '—'} |")
             lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 

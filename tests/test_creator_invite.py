@@ -112,7 +112,9 @@ FAKE_NODE = textwrap.dedent("""\
                  **({"warnings": scenario["warnings"]} if scenario.get("warnings") else {})})
         outcome = scenario.get("outcome", {}).get(a, "VERIFIED_SUCCESS")
         writes = 0 if outcome in ("STATE_CONFLICT", "FAILED") else 1
-        out({"executed": True, "platformWrites": writes, "items": [{"targetId": a, "outcome": outcome}]}, code or (0 if outcome == "VERIFIED_SUCCESS" else 1))
+        detail = scenario.get("detail", {}).get(a)
+        out({"executed": True, "platformWrites": writes, "items": [{"targetId": a, "outcome": outcome, **({"detail": detail} if detail else {})}]},
+            code or (0 if outcome == "VERIFIED_SUCCESS" else 1))
     sys.stderr.write("[FAKE] no answer for " + " ".join(args) + "\\n")
     sys.exit(99)
 """)
@@ -249,7 +251,7 @@ def test_plan_is_read_only_and_builds_the_list_by_the_users_rules(env):
     plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
     by = {c["aweme_id"]: c for c in plan["creators"]}
     assert set(by) == {"dy_small_a", "dy_small_b", "dy_gap", "dy_mid_a", "dy_big_a", "dy_big_b", "dy_video_big"}
-    assert [c["category"] for c in plan["creators"]] == ["small"] * 4 + ["mid", "big", "big"], "grouped by category; inside one, no flag first, then the higher hat share"
+    assert [c["category"] for c in plan["creators"]] == ["small"] * 4 + ["mid", "big", "big"], "grouped by category; inside one, no hat seller first, then the fewer flags"
     assert [c["aweme_id"] for c in plan["creators"]][:4] == ["dy_small_a", "dy_small_b", "dy_gap", "dy_video_big"]
     assert by["dy_big_b"]["category"] == "big" and by["dy_video_big"]["category"] == "small" and by["dy_gap"]["category"] == "small"
     assert by["dy_small_b"]["flags"] == []
@@ -447,19 +449,24 @@ def test_plan_mixes_the_three_categories_and_puts_the_better_fits_first(env):
     assert code == 0, out
     plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
     assert [c["category"] for c in plan["creators"]] == ["small", "mid", "big"], "one of each, not the first three the search gave"
-    assert plan["creators"][0]["aweme_id"] == "dy_small_a", "inside a category: no flag first, then the higher hat share (a tie: the search's order)"
+    assert plan["creators"][0]["aweme_id"] == "dy_small_a", "inside a category: no hat seller first, then the fewer flags (a tie: the search's order)"
     assert {c["aweme_id"] for c in plan["spare"]} >= {"dy_big_b"}, "checked and invitable but over the count: kept as spare, not dropped"
     md = Path(out["files"]["md"]).read_text(encoding="utf-8")
     assert "## 备选（查过状态、可以邀约" in md
     order = tool.mix_categories([{"category": k, "flags": f, "hat_share": h, "id": i} for i, (k, f, h) in enumerate(
         [("small", [], 5.0), ("small", ["x"], 50.0), ("small", [], 20.0), ("mid", [], 1.0), ("big", ["y"], 3.0)])])
-    assert [o["id"] for o in order] == [4, 3, 2, 0, 1]
+    assert [o["id"] for o in order] == [4, 3, 0, 2, 1], "a higher hat share no longer goes first (2026-11-02)"
     # a tie (same flags, same hat share) is taken from the two routes in turn, so a list cut short still holds both
     rows = [{"category": "small", "flags": ["帽子占比只有 0.0%"], "hat_share": 0.0, "source": s, "id": i}
             for i, s in enumerate(["聚水潭", "聚水潭", "聚水潭", "抖音", "抖音", "两边都有"])]
     assert [o["id"] for o in tool.mix_categories(rows)] == [0, 3, 1, 4, 2, 5]
-    assert [o["id"] for o in tool.mix_categories(rows + [{"category": "small", "flags": [], "hat_share": 5.0, "source": "抖音", "id": 9}])][0] == 9, \
+    assert [o["id"] for o in tool.mix_categories(rows + [{"category": "small", "flags": [], "hat_share": 0.0, "source": "抖音", "id": 9}])][0] == 9, \
         "a better fit still goes first, whichever route found her"
+    # the ones who already sell hats go last, whatever their flags (2026-11-02: of 19 invited none answered)
+    sellers = [{"category": "small", "flags": [], "hat_share": h, "source": "抖音", "id": i} for i, h in ((7, 0.3), (8, 40.0))]
+    assert [o["id"] for o in tool.mix_categories(sellers + rows)] == [0, 3, 1, 4, 2, 5, 7, 8]
+    assert [o["id"] for o in tool.mix_categories([{**sellers[1], "category": "mid"}, *rows])][:2] == [8, 0], \
+        "the categories still take turns: a seller is last only inside her own category"
 
 
 def test_plan_checks_status_twenty_at_a_time(env):
@@ -662,6 +669,70 @@ def test_run_skips_a_state_conflict_and_goes_on_and_a_later_plan_may_ask_again(e
     assert "dy_small_b" not in tool.Ledger(env.tmp / "ledger").never_again(), "nothing went out: a later plan may ask again"
 
 
+def test_a_card_that_never_arrived_is_written_back_as_not_sent_and_the_run_stops(env):
+    """2026-10-31 live: from the 50th card in 24 hours the platform took the request and sent no card (INDETERMINATE, her
+    button still 邀约带货), and the run went on through nine more. Now one more look at her button, a little later: still
+    1 → not sent (a rerun sends her) and the run stops, saying how many went out in the last 24 hours."""
+    said = "the platform reported an error it did not attribute to any target (errorCount=n/a, …)"
+    plan_file, plan_id = make_plan(env, outcome={"dy_small_b": "INDETERMINATE"}, detail={"dy_small_b": said})
+    env.log.unlink()
+    code, out, sleeps = run_now(env, plan_file, plan_id)
+    assert code == 0
+    assert [x["aweme_id"] for x in out["sent"]] == ["dy_small_a"]
+    assert out["skipped"] == [{"aweme_id": "dy_small_b", "outcome": "NOT_DELIVERED", "exit": 1, "sent": False, "checked_status": 1, "detail": said,
+                               "why": "命令行说 INDETERMINATE，再查她的按钮还是「邀约带货」：卡没送到，重跑会再发她"}]
+    first = [r for r in ledger_lines(env) if r.get("event") == "result" and r.get("aweme_id") == "dy_small_b"][0]
+    assert first["detail"] == said, "what the CLI said of the send is kept in the ledger (the platform's own words, when it gave any)"
+    assert not any("detail" in r for r in ledger_lines(env) if r.get("event") == "result" and r.get("aweme_id") == "dy_small_a"), \
+        "nothing kept for a card the CLI saw arrive"
+    assert out["stopped"]["at"] == 1 and "没把卡发出去" in out["stopped"]["why"]
+    assert "台账里这 24 小时发出去 2 张" in out["stopped"]["why"], "dy_invited earlier and dy_small_a now; not the one that never arrived"
+    calls = [c["args"] for c in env.calls()]
+    assert calls[-1] == ["buyin", "author-invite-status", "--aweme-id=dy_small_b", "--pause-ms=4000",
+                         "--expect-shop-id=9100000000000001", "--no-open"], "a read-only look, right after her execution"
+    assert "--execute" in calls[-2] and "--aweme-id=dy_small_b" in calls[-2]
+    assert sleeps == [22.5, 20.0], "the usual wait before her, then recheck_after_seconds before the look"
+    results = [(r["outcome"], r["sent"]) for r in ledger_lines(env) if r.get("event") == "result" and r.get("aweme_id") == "dy_small_b"]
+    assert results == [("INDETERMINATE", True), ("NOT_DELIVERED", False)], "the CLI's answer first, then what her button said"
+    led = tool.Ledger(env.tmp / "ledger")
+    assert "dy_small_b" not in led.never_again() and led.unknown() == []
+    report = sorted((env.tmp / "ledger").glob("run-*/report.md"))[-1].read_text(encoding="utf-8")
+    assert "停在清单第 2 位" in report and "卡没送到" in report
+    # hours later the platform takes cards again: the same command sends her and goes on
+    env.scenario(scenario())
+    code, out, _ = run_now(env, plan_file, plan_id)
+    assert code == 0 and out["stopped"] is None
+    assert [x["aweme_id"] for x in out["sent"]][:2] == ["dy_small_b", "dy_gap"] and len(out["sent"]) == 6
+    assert tool.load_config(env.write_config())["recheck_after_seconds"] == 20
+    code, _, _ = env.main(["status", "--config", env.write_config(recheck_after_seconds=-1)])
+    assert code == 2
+
+
+def test_a_card_the_cli_could_not_confirm_that_did_arrive_counts_and_the_run_goes_on(env):
+    plan_file, plan_id = make_plan(env)
+    env.scenario(scenario(outcome={"dy_small_b": "ACCEPTED_UNVERIFIED"}, status={"dy_talking": 2, "dy_small_b": 2}))
+    code, out, _ = run_now(env, plan_file, plan_id)
+    assert code == 0 and out["stopped"] is None and len(out["sent"]) == 7
+    b = next(x for x in out["sent"] if x["aweme_id"] == "dy_small_b")
+    assert (b["outcome"], b["sent"], b["checked_status"]) == ("ACCEPTED_UNVERIFIED", True, 2), "her button: 继续沟通 · 待回复"
+    assert [r["sent"] for r in ledger_lines(env) if r.get("event") == "result" and r.get("aweme_id") == "dy_small_b"] == [True]
+    assert "dy_small_b" in tool.Ledger(env.tmp / "ledger").never_again()
+    assert "checked_status" not in next(x for x in out["sent"] if x["aweme_id"] == "dy_small_a"), "a verified card is not looked at again"
+
+
+@pytest.mark.parametrize("why", ["the read fails", "the search does not find her"])
+def test_a_card_the_cli_could_not_confirm_whose_button_cannot_be_read_stops_the_run_and_is_never_sent_again(env, why):
+    plan_file, plan_id = make_plan(env)
+    broken = {"exits": {"status": 1}} if why == "the read fails" else {"missing": ["dy_ghost", "dy_small_b"]}
+    env.scenario(scenario(outcome={"dy_small_b": "INDETERMINATE"}, **broken))
+    env.log.unlink()
+    code, out, _ = run_now(env, plan_file, plan_id)
+    assert code == 0 and out["stopped"]["at"] == 1 and "再查她的按钮也没查到" in out["stopped"]["why"]
+    assert [(x["aweme_id"], x["sent"], x.get("checked_status", "-")) for x in out["sent"]] == [("dy_small_a", True, "-"), ("dy_small_b", True, None)]
+    assert "dy_small_b" in tool.Ledger(env.tmp / "ledger").never_again(), "it may have gone out: never sent again"
+    assert not any(a.startswith("--aweme-id=dy_gap") for c in env.calls() for a in c["args"]), "nothing after the stop"
+
+
 def test_run_skips_what_the_preview_does_not_bear_out(env):
     plan_file, plan_id = make_plan(env, preview_status={"dy_small_a": 2}, preview_gate={"dy_small_b": 4}, blocked=["dy_video_big"])
     code, out, _ = run_now(env, plan_file, plan_id)
@@ -683,8 +754,10 @@ def test_run_stops_when_the_platform_quota_runs_low_or_our_own_weekly_cap_is_rea
     code, out, _ = env.main(["run", "--config", env.write_config(weekly_cap=3), "--plan", plan_file, "--confirm", plan_id,
                              "--ledger-dir", str(env.tmp / "ledger2")])
     assert code == 0 and len(out["sent"]) == 3 and "每周上限 3" in out["stopped"]["why"]
-    # a new week starts on Monday (Beijing time)
-    assert led.sent_this_week(NOW) == 3 and led.sent_this_week(NOW + timedelta(days=5)) == 0
+    # a new week starts on Monday (Beijing time).  The cards above were written at the real time, not at NOW: the week
+    # after NOW's stopped being a later week the day the suite was run on it (2026-11-02, a Monday)
+    monday = tool.week_start(tool.now_bjt()) + timedelta(days=7)
+    assert led.sent_this_week(monday - timedelta(seconds=1)) == 3 and led.sent_this_week(monday) == 0
 
 
 def test_run_leaves_out_who_was_dropped_after_the_list_and_keeps_a_daily_cap(env):

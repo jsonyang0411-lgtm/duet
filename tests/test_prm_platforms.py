@@ -749,15 +749,18 @@ def test_the_catalogue_is_read_from_the_three_platforms(node, cfg, tmp_path):
     assert xhs["items"][0]["skus"] == [{"id": XHS_SKU, "name": "50ml", "price": "99.00", "on_sale": True,
                                         "code": "A7261010037A-M"}]
     assert xhs["items"][0]["price"] == "99.00"
-    assert dy["items"] == [{"id": DY_ITEM, "title": "测试主品", "price": "19.99",
+    link = f"https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id={DY_ITEM}&origin_type=604"
+    assert dy["items"] == [{"id": DY_ITEM, "title": "测试主品", "price": "19.99", "link": link,
                             "skus": [{"id": DY_SKU, "name": "红色/M", "price": "19.99", "code": "A7260810095A-M"}]}]
     assert tb["items"][0] == {"id": TB_ITEM, "title": "连衣裙 夏季", "price": "199.00", "skus": []}
     ws = tmp_path / "ws"
     (ws / "kb").mkdir(parents=True)
     paths = platforms.write_catalog(ws, cat)
     md = (ws / "kb/products.md").read_text(encoding="utf-8")
-    assert f"| {XHS_ITEM} | 防晒霜 | 99.00 | {XHS_SKU}：50ml 99.00 编码 A7261010037A-M |" in md
+    assert f"| {XHS_ITEM} | 防晒霜 | 99.00 | {XHS_SKU}：50ml 99.00 编码 A7261010037A-M | — | — |" in md   # 小红书：没有链接
     assert "面膜 ｜ 补水" in md and f"| {DY_ITEM} | 测试主品 |" in md and "## 淘宝（tb）— 1 个商品" in md
+    assert f"| {DY_SKU}：红色/M 19.99 编码 A7260810095A-M | — | {link} |" in md and "| 款式图 | 链接 |" in md
+    assert "照抄这一格，不要自己拼、不要编" in md
     assert platforms.load_catalog(ws)["platforms"]["dy"]["items"][0]["id"] == DY_ITEM and len(paths) == 2
     for argv in (c["argv"] for c in node.calls()):
         assert "--execute" not in argv and "--execute=true" not in argv
@@ -902,6 +905,19 @@ def test_fetch_image_refuses_a_redirect_off_the_cdn_and_a_file_too_large(monkeyp
     answers.append(Answer(DY_IMG, b"\xff" * (platforms.IMAGE_MAX_BYTES + 5)))
     with pytest.raises(RuntimeError, match="MB"):
         platforms.fetch_image(DY_IMG, "dy")
+
+
+def test_a_dy_product_link_is_the_one_douyins_copy_link_gives_and_old_catalogues_get_it_too(tmp_path):
+    """抖店「复制链接」的样子（product_url_for_copy），只换商品 ID；10-31 以前同步的目录（JSON 里没有 link）写
+    products.md 时也带上；小红书、淘宝、不像抖店商品 ID 的没有链接（2026-10-31，用户：「链接你不能读取吗」）。"""
+    assert platforms.product_link("dy", {"id": "3000000000000000101"}) == (
+        "https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=3000000000000000101&origin_type=604")
+    for platform, item in (("xhs", {"id": XHS_ITEM}), ("tb", {"id": TB_ITEM}), ("dy", {"id": "x?y=1"}), ("dy", {})):
+        assert platforms.product_link(platform, item) == ""
+    old = {"version": 1, "synced_at": 0, "platforms": {"dy": {"ok": True, "items": [
+        {"id": DY_ITEM, "title": "老目录里的主品", "price": "19.99", "skus": []}]}}}
+    assert f"| — | https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id={DY_ITEM}&origin_type=604 |" \
+        in platforms.catalog_markdown(old)
 
 
 def test_a_platform_that_fails_keeps_its_previous_list(node, cfg):

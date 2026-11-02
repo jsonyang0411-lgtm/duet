@@ -99,18 +99,26 @@ def prm(ctx: RouteContext) -> Optional[Stop]:
     """PRM_COPILOT=on: a registered creator's private message goes, silently, into a
     draft job for the Mac (src/prm); the draft waits in the console.  Nothing is
     ever said to the creator here, so the route ends without a reply.  After
-    ``claude_relay``: an admin's cc stays the relay's."""
+    ``claude_relay``: an admin's cc stays the relay's.
+
+    The one group the copilot takes: a 老板拉的群 it took over (PRM_BOSS_GROUPS,
+    src/prm/boss_groups.py).  Every line there ends here, silently: hers becomes a draft
+    job like a private one, the boss's and the other members' are kept for her next
+    draft.  Every other group passes on to silence."""
     service = getattr(ctx.router, "_prm", None)
     if service is None:
         return None
+    group = ctx.msg.get("is_group", True)
     try:
         handled = service.handle(ctx.msg)
     except Exception:
         logger.exception("PRM: could not take a creator's message; it is not answered")
-        handled = not ctx.msg.get("is_group", True) and service.is_party_chat(ctx.msg.get("chat_id", ""))
+        chat = ctx.msg.get("chat_id", "")
+        handled = service.is_party_group(chat) if group else service.is_party_chat(chat)
     if not handled:
         return None
-    ctx.trace.redact("[已登记达人的私聊，内容不记录]")      # phone numbers, addresses: not in the log
+    # phone numbers, addresses: not in the log
+    ctx.trace.redact("[老板拉的群（已接手），内容不记录]" if group else "[已登记达人的私聊，内容不记录]")
     ctx.trace.reason("prm_copilot")
     return Stop(None)
 

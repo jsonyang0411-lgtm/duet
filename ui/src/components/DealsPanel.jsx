@@ -1,21 +1,28 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   ArrowClockwise, UserPlus, Prohibit, ArrowCounterClockwise, CaretDown, CaretRight, Eye, EyeSlash, Truck, Check, HandWaving,
-  UsersThree, Copy,
+  UsersThree, Copy, PencilSimple,
 } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
-import { usePrm, partyAction, dealAction, revealNumbers, setupProblems, eventText, MODE_TAGS, ACTORS } from '../lib/prm'
-import { PageHead, Card, Note, Empty, Field, TextInput, Select, Seg, Confirm } from './ui'
+import {
+  usePrm, partyAction, dealAction, revealNumbers, setupProblems, eventText, MODE_TAGS, ACTORS, DRAFT_NOTE_MAX, draftNoteText,
+  saveDraftNote, bossIntroduced,
+} from '../lib/prm'
+import { PageHead, Card, Note, Empty, Field, TextInput, TextArea, Select, Seg, Confirm } from './ui'
 import { AdvancedFields } from './AdvancedPanel'
 import { FriendAddPasteCard } from './FriendAddCard'
+import { BossGroupsCard } from './BossGroupsCard'
 
 // 合作单: the creators whose private messages get drafted replies (PRM_COPILOT).
 // Registering one here means the creator agreed to be contacted on WeChat; their
 // messages then go, silently, to the Mac for a draft that waits in 待审批. A deal
 // opens (below the list, so it fits any width) into its stage, its mode (copilot /
-// a person has it / paused), the sample shipment, the numbers and the audit trail.
+// a person has it / paused), its 起草备注 for the Mac, the sample shipment, the numbers
+// and the audit trail.
 // 自动模式 on (switched on 待审批): one warn line at the top says so.
+// 老板拉的群 (PRM_BOSS_GROUPS): the card at the top (BossGroupsCard.jsx); a creator taken over from such a group is
+// tagged 老板介绍 in the list, and her deal's 三方群 block says 老板拉的群 (``three_party.by`` "boss").
 
 export default function DealsPanel() {
   const { data, err, reload } = usePrm(6000)
@@ -36,6 +43,7 @@ export default function DealsPanel() {
             <Note kind="warn">自动模式开着（{fmtClock(data.auto_mode.since)} 打开）：满足安全条件的草稿不经审批直接发给达人；在「待审批」页顶上关掉。</Note>
           </div>
         )}
+        <BossGroupsCard d={data} onDone={reload} />
         <RegisterCard d={data} onDone={reload} />
         <FriendAddPasteCard d={data} onDone={reload} />
         <PartiesCard d={data} open={open} setOpen={setOpen} onDone={reload} />
@@ -185,6 +193,7 @@ function PartiesCard({ d, open, setOpen, onDone }) {
                     <td>
                       <b>{p.name}</b>
                       {p.auto && <span className="tag warn" style={{ marginLeft: 6 }} title="新加的好友，机器人自动登记的（PRM_AUTO_REGISTER）；不是达人的点「停用」">自动登记</span>}
+                      {bossIntroduced(p) && <span className="tag cy" style={{ marginLeft: 6 }} title="老板拉群介绍给我们的达人（老板拉的群，PRM_BOSS_GROUPS）：她在那个群里说的话起草，审过发到群里">老板介绍</span>}
                       <div className="mono dim">{p.wxid}</div>{p.note && <div className="dim">{p.note}</div>}{!p.active && <span className="tag off">已停用</span>}
                     </td>
                     <td>
@@ -298,13 +307,22 @@ function DealDetail({ p, d, onDone }) {
         </div>
       </div>
 
-      {!deal.last_message_at && (
+      <DraftNoteBlock p={p} onDone={onDone} />
+
+      {(!deal.last_message_at || deal.unanswered) && (
         <div className="stack prm-opening" style={{ gap: 6 }}>
           <b>开场白</b>
-          <div className="f-hint">
-            她还没跟我们说过话。点「写开场白」，Mac 按 kb 里的破冰写法写一句先打招呼的话，在「待审批」里等你看过再发。
-            新加的好友通过以后一直没说话，系统会自己写一份，不用点；加好友过了很久才登记的，系统不知道她之前说没说过，不自己写，会留一条提示请你看一眼微信。
-          </div>
+          {deal.last_message_at ? (
+            <div className="f-hint">
+              她说过话（比如加好友时的「我是…」），可我们还没正式回过她：她那份草稿没发，最多只有机器人自动回的「稍等」。
+              点「写开场白」，Mac 按 kb 写我们正式的第一句（和别的开场白一样附款式图），在「待审批」里等你看过再发。
+            </div>
+          ) : (
+            <div className="f-hint">
+              她还没跟我们说过话。点「写开场白」，Mac 按 kb 里的破冰写法写一句先打招呼的话，在「待审批」里等你看过再发。
+              新加的好友通过以后一直没说话，系统会自己写一份，不用点；加好友过了很久才登记的，系统不知道她之前说没说过，不自己写，会留一条提示请你看一眼微信。
+            </div>
+          )}
           <div>
             <button type="button" className="btn" disabled={busy || !p.active || deal.mode !== 'copilot'}
               onClick={() => run({ action: 'opening' }, '已请 Mac 写开场白，写好会出现在「待审批」里')}>
@@ -391,10 +409,65 @@ function DealDetail({ p, d, onDone }) {
   )
 }
 
+/** 起草备注 (the deal action draft_note, 2026-10-31): what the operators tell the Mac about this creator, say her WeChat
+ *  signature's 「直接发链接和 brief、不接语音」. Every draft of hers follows it, the 开场白 too; unlike her 备注 (which the
+ *  bot writes for a friend it registered) only an operator writes it. Saved empty, it is cleared; an error stays here. */
+function DraftNoteBlock({ p, onDone }) {
+  const toast = useToast()
+  const saved = p.deal.draft_note || ''
+  const [editing, setEditing] = useState(false)
+  const [text, setText] = useState(saved)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { if (!editing) setText(saved) }, [saved, editing])
+  const length = draftNoteText(text).length
+  const hint = '写给 Mac 起草时看的，比如她签名里的要求：直接发链接和 brief、不接语音'
+  const cancel = () => { setEditing(false); setText(saved); setError('') }
+  const save = async () => {
+    if (length > DRAFT_NOTE_MAX) { setError(`起草备注最多 ${DRAFT_NOTE_MAX} 个字（现在 ${length} 个）`); return }
+    setBusy(true)
+    try {
+      await saveDraftNote(p.deal.id, text)
+      toast.ok(length ? '起草备注已保存：之后她的草稿都照它写' : '起草备注已清掉')
+      setEditing(false)
+      setError('')
+      onDone()
+    } catch (e) { setError(e.message) } finally { setBusy(false) }
+  }
+  return (
+    <div className="stack prm-draft-note" style={{ gap: 6 }}>
+      <b>起草备注</b>
+      {editing ? (
+        <>
+          <Field hint={`${hint}。空着保存就是清掉。`} error={error}>
+            <TextArea value={text} rows={3} aria-label={`${p.name} 的起草备注`} aria-invalid={error ? 'true' : undefined}
+              placeholder="比如：直接发链接和 brief，感兴趣的会回复；勿催视频，不接语音"
+              onChange={(value) => { setText(value); setError('') }} />
+          </Field>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <button type="button" className="btn primary" disabled={busy} onClick={save}><Check />保存</button>
+            <button type="button" className="btn" disabled={busy} onClick={cancel}>取消</button>
+            <span className={length > DRAFT_NOTE_MAX ? 'f-err' : 'dim'}>{length}/{DRAFT_NOTE_MAX} 字</span>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className={saved ? '' : 'dim'} style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{saved || '（没有）'}</div>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <button type="button" className="btn sm" onClick={() => setEditing(true)}><PencilSimple />{saved ? '改备注' : '写备注'}</button>
+            <span className="f-hint">{hint}</span>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
 
 /** 三方群 (src/prm/three_party.py, 2026-10-30): 「拉三方群」 makes the group in this PC's WeChat (her and PRM_GROUP_WITH,
  *  picked in 「发起群聊」 and read back before 「完成」; nothing is said in it and it is not renamed: the suggested name is
- *  there to copy); 「先试一下」 picks them and cancels.  A run that may or may not have made it asks 「建好了 / 没建成」. */
+ *  there to copy); 「先试一下」 picks them and cancels.  A run that may or may not have made it asks 「建好了 / 没建成」.
+ *  A group the boss made with her and us (``by`` "boss", 老板拉的群, PRM_BOSS_GROUPS) is hers already: it says so and what
+ *  the bot does there (her lines drafted, sent in the group), without the name to copy (the boss named it). */
 function ThreePartyBlock({ p, d, busy, run }) {
   const toast = useToast()
   const [asking, setAsking] = useState(false)
@@ -412,17 +485,29 @@ function ThreePartyBlock({ p, d, busy, run }) {
     } catch { toast.err(`没能放进剪贴板：群名是「${suggested}」`) }
   }
   const tried = g.tried
+  const gone = (
+    <button type="button" className="btn sm ghost" disabled={busy}
+      onClick={() => run({ action: 'group_none' }, '记下了：这位达人现在没有三方群')}>群已经不在了</button>
+  )
   return (
     <div className="stack prm-group" style={{ gap: 6 }}>
       <b>三方群</b>
-      {g.state === 'created' && (
+      {g.state === 'created' && g.by === 'boss' && (
+        <>
+          <div><UsersThree style={{ verticalAlign: -2 }} /> 老板拉的群（{fmtClock(g.at)} 发现）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span className="f-hint">老板把她和我们拉进了这个群，之后由我们跟她对接：她在群里说的话照常起草，回复发在群里，老板也看得到；老板和别人说的话不起草。</span>
+            {gone}
+          </div>
+        </>
+      )}
+      {g.state === 'created' && g.by !== 'boss' && (
         <>
           <div><UsersThree style={{ verticalAlign: -2 }} /> 三方群已建好（{fmtClock(g.at)}{g.made ? '' : '，手动标的'}）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
           <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             <span className="f-hint">建议在手机微信里把群名改成「{suggested}」（机器人不改群名，也不在群里说话）。</span>
             <button type="button" className="btn sm" onClick={copyName}><Copy />复制群名</button>
-            <button type="button" className="btn sm ghost" disabled={busy}
-              onClick={() => run({ action: 'group_none' }, '记下了：这位达人现在没有三方群')}>群已经不在了</button>
+            {gone}
           </div>
         </>
       )}

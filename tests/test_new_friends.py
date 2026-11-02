@@ -1333,10 +1333,64 @@ def test_the_console_asks_for_an_opening_only_for_a_creator_who_has_not_written(
     bot.prm.set_active(party["id"], True)
     db.say(OLD, OLD, "你好", clock.now)                              # she writes: her messages are drafted instead
     bot.poll()
+    assert bot.prm.deal_action("opening", {"deal_id": deal_id})["error"] == "她的草稿正在写，写好会出现在「待审批」里"
+    bot.mac_drafts()
+    [answer] = bot.prm.store.packets(("pending",))
+    assert bot.prm.decide(answer["id"], "send")["ok"] and bot.prm.send_approved() == 1     # she had a real line from us
     assert bot.prm.deal_action("opening", {"deal_id": deal_id})["error"] == "她已经发过消息了：她的消息会自己起草，不用开场白"
     assert bot.prm.deal_action("opening", {"deal_id": 999}) == {"ok": False, "error": "没有找到这个合作单"}
     assert bot.prm.deal_action("opening", {"deal_id": "x"}) == {"ok": False, "error": "没有找到这个合作单"}
     assert [json.loads(j["meta"]).get("opening") is not None for j in bot.jobs()] == [True, False]
+
+
+def test_a_creator_who_wrote_but_never_had_a_real_line_from_us_can_be_given_an_opening(copilot_bot, db, clock):
+    """Real machine, 2026-11-02: she added us with 「我是…」 (her only line), its draft was dropped and only the night 稍等
+    went out; 「写开场白」 was hidden and refused.  Now the console offers it (``unanswered``: not while a draft of hers
+    waits) and it is an opening job that says she wrote (``wrote``), told what she got from us; once a draft of ours
+    went out it is refused again, and so it is after an operator wrote to her by hand."""
+    bot = copilot_bot()
+    bot.friends.scan_once()
+    party = bot.prm.register(OLD, "老朋友")
+    bot.poll()
+    deal_id = bot.prm.store.deal_of(party["id"])["id"]
+    db.say(OLD, OLD, "我是阿花的助理", clock.now)                      # her one line
+    bot.poll()
+    bot.mac_drafts(kind="greeting")
+    [packet] = bot.prm.store.packets(("pending",))
+    deal = lambda: next(p for p in bot.prm.snapshot()["parties"] if p["id"] == party["id"])["deal"]
+    assert deal()["unanswered"] is False                             # her draft waits: answer that one
+    clock.now += 11 * 60
+    assert bot.prm.send_holding_replies() == 1                      # the bot's own 稍等: no answer
+    clock.now += 60
+    assert bot.prm.decide(packet["id"], "drop")["ok"]               # 不发
+    assert deal()["last_message_at"] and deal()["unanswered"] is True
+    asked = bot.prm.deal_action("opening", {"deal_id": deal_id})
+    assert asked["ok"] is True
+    job = bot.jobs()[-1]
+    meta = json.loads(job["meta"])
+    assert (job["id"], job["text"]) == (asked["job"], "")
+    assert meta["opening"] == {"how": "", "by": "console", "wrote": True}
+    assert [(s["what"], s["kind"]) for s in meta["sent"]] == [("sent", "holding"), ("dropped", "greeting")]
+    bot.mac_drafts(kind="greeting")
+    [opening] = bot.prm.store.packets(("pending",))
+    assert (opening["route"], opening["meta"].get("opening")) == ("review", True)
+    assert deal()["unanswered"] is False                             # a draft of hers waits in 待审批
+    assert bot.prm.decide(opening["id"], "send")["ok"] and bot.prm.send_approved() == 1
+    assert deal()["unanswered"] is False
+    assert bot.prm.deal_action("opening", {"deal_id": deal_id})["error"] == "她已经发过消息了：她的消息会自己起草，不用开场白"
+    # an operator's line by hand is an answer too
+    other = bot.prm.register(ASKED, "小青")
+    bot.poll()
+    other_deal = bot.prm.store.deal_of(other["id"])["id"]
+    db.say(ASKED, ASKED, "在吗", clock.now)
+    bot.poll()
+    bot.mac_drafts()
+    [waiting] = bot.prm.store.packets(("pending",))
+    assert bot.prm.decide(waiting["id"], "drop")["ok"]
+    assert bot.prm.store.has_answer(other_deal) is False
+    db.say(ASKED, ME_SENDER, "在的在的", clock.now)                   # an operator, on the phone
+    bot.poll()
+    assert bot.prm.store.has_answer(other_deal) is True
 
 
 def test_an_opening_asked_for_after_an_operator_greeted_her_by_hand_hears_of_it(copilot_bot, db, clock):

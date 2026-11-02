@@ -50,6 +50,12 @@ export const buyinSent = (id, text) => decide(id, 'manual_sent', text)
 export const ackPlatform = (id) => decide(id, 'ack')
 export const partyAction = (body) => post('/api/prm/parties', body)
 export const dealAction = (body) => post('/api/prm/deals', body)
+// 起草备注 (the deal action draft_note, 2026-10-31): what the operators tell the Mac about this creator; every draft of
+// hers (the 开场白 too) follows it. Saved empty, it is cleared; the bot collapses whitespace and keeps at most 300 characters.
+export const DRAFT_NOTE_MAX = 300
+/** The note as the bot keeps it (whitespace collapsed): its length is what the limit counts. */
+export const draftNoteText = (text) => String(text || '').split(/\s+/).filter(Boolean).join(' ')
+export const saveDraftNote = (dealId, text) => dealAction({ deal_id: dealId, action: 'draft_note', text: draftNoteText(text) })
 /** 自动模式 (POST /api/prm/auto): the 下班时段 rules at any hour, until switched off. */
 export const setAutoMode = (on) => post('/api/prm/auto', { on })
 /** The full numbers behind a creator's placeholders; every look is written down (8.2). */
@@ -94,6 +100,30 @@ export function inviteLine(inv) {
   const bits = [inv.category_label, inv.products ? `${inv.products} 款` : '',
     inv.commission_rate > 0 ? `卡上开了 ${inv.commission_rate}% 专属佣金` : (inv.commission_rate === 0 ? '卡上没开专属佣金' : '')].filter(Boolean)
   return `${at ? `${at} ` : ''}发的邀约卡${bits.length ? `（${bits.join('，')}）` : ''}${inv.plan_id ? ` · 清单 ${inv.plan_id}` : ''}`
+}
+
+// 老板拉的群（PRM_BOSS_GROUPS，src/prm/boss_groups.py）：老板（PRM_GROUP_WITH）把他微信里的达人和我们这个号拉进一个小群，之后由我们
+// 跟她对接。群里除了老板和我们只有一个人时机器人自己接手；不止一个时「合作单」顶上问哪个是她。只有她在群里说的话起草，和私聊的草稿一个
+// 规矩（先审、门槛、下班时段、自动模式）发在群里，老板也看得到。
+/** POST /api/prm/boss-groups/pick {chat, wxid}: she is this member of the pending group: the bot takes it over. */
+export const pickBossGroup = (chat, wxid) => post('/api/prm/boss-groups/pick', { chat, wxid })
+/** POST /api/prm/boss-groups/ignore {chat}: not a creator's group: never offered again, and stays silent like any group. */
+export const ignoreBossGroup = (chat) => post('/api/prm/boss-groups/ignore', { chat })
+/** A draft that goes out in a boss group (``channel`` "group" of a packet; any other value, or none, is her private chat). */
+export const inGroup = (p) => p?.channel === 'group'
+/** A creator the boss introduced in a group he made with us (``source`` "boss_group" of the party or of her deal). */
+export const bossIntroduced = (p) => p?.source === 'boss_group' || p?.deal?.source === 'boss_group'
+/** The 「老板拉的群」 card's line of counts: "已接手 2 个群；1 个群在等她进群或者等群里有消息（…）；1 个群要你选哪个是她" (one
+ *  sentence that says so when nothing was found yet). A group waits for her to come in, for its first lines, or while
+ *  her 三方群 is being made (second review 2026-10-31): the bot looks again at each scan. */
+export function bossGroupsLine(bg) {
+  const linked = bg?.linked || 0
+  const waiting = bg?.waiting || 0
+  const pending = (bg?.pending || []).length
+  if (!linked && !waiting && !pending) return '还没有发现老板新拉的群。'
+  return [`已接手 ${linked} 个群`,
+    waiting ? `${waiting} 个群在等她进群或者等群里有消息（机器人每分钟再看一次）` : '',
+    pending ? `${pending} 个群要你选哪个是她` : ''].filter(Boolean).join('；')
 }
 
 export const MODE_TAGS = { copilot: 'cy', human: 'warn', paused: 'off' }
@@ -166,6 +196,17 @@ export function buyinNotes(d) {
   if (b.others_invited > 0) out.push(['', `另有 ${b.others_invited} 位是店里同事邀约的（卡片不是我们这边发的），她们的回复不归我们管`])
   if (b.others_contacts > 0) out.push(['', `别人邀约的会话里有 ${b.others_contacts} 张联系方式卡片，不归我们处理`])
   return out
+}
+
+/** What the 待审批 page says of 老板拉的群: the groups where a person has to say which member she is ([] = none, or off). */
+export function bossGroupNotes(d) {
+  const bg = d?.boss_groups
+  const pending = (bg?.enabled && bg.pending) || []
+  if (!pending.length) return []
+  // a group held for its own reason (her 三方群, 不是新拉的群, a boss name not found …) says so on the card
+  const why = pending.some((g) => g?.why)
+  return [['warn', `老板拉了 ${pending.length} 个新群，${why ? '要你看一眼' : '群里不止一个人可能是她'}：`
+    + '到「合作单」页顶上的「老板拉的群」里选哪个是她，选了机器人才接手。']]
 }
 
 /** What is wrong with the setup, in the order a person has to fix it ([] = ready). */

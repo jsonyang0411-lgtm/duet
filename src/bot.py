@@ -608,6 +608,10 @@ class Bot:
         else:
             logger.warning("PRM_COPILOT: this WeChat backend does not report this account's own lines; "
                            "an operator's own replies will not take a chat over")
+        # 老板拉的群 (PRM_BOSS_GROUPS, src/prm/boss_groups.py): the backend finds the groups, reads the ones taken over
+        # (watch_group: before start, which reads them again) and names her private chat; the message store has a
+        # group's lines from before its takeover (WECHAT_GROUPS read it)
+        prm.boss_groups.attach(backend, stored=getattr(store, "get_messages_since", None))
         prm.start()
         router._prm = prm
         try:

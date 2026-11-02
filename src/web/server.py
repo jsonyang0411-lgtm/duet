@@ -1106,6 +1106,7 @@ def _prm_state_core() -> dict:
                "buyin_sync_min": _prm_int_env("PRM_BUYIN_SYNC_MIN", 0), **settings}
     stopped["friend_add_status"] = _friend_add_stopped_status(store)
     stopped["three_party"] = _three_party_stopped_status()
+    stopped["boss_groups"] = _boss_groups_stopped_status(store)
     if store is None:
         from src.prm.platforms import ACTIONS
         from src.prm.result import MESSAGE_KINDS
@@ -1129,6 +1130,28 @@ def _three_party_stopped_status() -> dict:
     template = os.getenv("PRM_GROUP_NAME", "").strip() or NAME_DEFAULT
     return {"enabled": bool(names), "with": names, "why": "机器人没有运行" if names else "", "busy": None,
             "name_template": suggested_name(template, os.getenv("PRM_FRIEND_ADD_BRAND", "").strip(), "{昵称}")}
+
+
+def _boss_groups_stopped_status(store) -> dict:
+    """老板拉的群 while the bot is stopped (src/prm/boss_groups.py ``boss_groups_out``): the switch and the bosses as .env
+    says, the groups from the database (``store`` None: none yet); nothing is found or taken over now."""
+    from src.prm.boss_groups import boss_call, boss_groups_out
+    from src.prm.three_party import group_with
+
+    on = _prm_env_on("PRM_BOSS_GROUPS")
+    return boss_groups_out(store, enabled=on, why_not="机器人没有运行" if on else "",
+                           boss=group_with(os.getenv("PRM_GROUP_WITH", "")), reserved=_prm_reserved(),
+                           boss_call=boss_call(os.getenv("PRM_BOSS_CALL", "")))
+
+
+def _prm_boss_groups(data: dict, action: str) -> dict:
+    """POST /api/prm/boss-groups/pick {chat, wxid} (「是她」: this member of a pending group is the creator) | ignore {chat}
+    (「这个群不是达人」): 老板拉的群 (src/prm/boss_groups.py ``pick`` / ``ignore``).  Only a running bot does them."""
+    if _prm is None:
+        return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能处理老板拉的群"}
+    if action == "pick":
+        return _prm.boss_groups.pick(data.get("chat"), data.get("wxid"))
+    return _prm.boss_groups.ignore(data.get("chat"))
 
 
 def _friend_add_stopped_status(store) -> dict:
@@ -1166,7 +1189,9 @@ def _prm_friend_adds(data: dict) -> dict:
 
 def _prm_deal(data: dict) -> dict:
     """POST /api/prm/deals {action: stage | adopt | mode | shipment | shipment_status | night_done | opening | group |
-    group_try | group_made | group_none, deal_id, ...} (``group*``: 三方群, src/prm/three_party.py; only while running)."""
+    group_try | group_made | group_none | draft_note, deal_id, ...} (``group*``: 三方群, src/prm/three_party.py;
+    ``draft_note`` {text}: the deal's 起草备注; ``opening``, ``group*`` and ``draft_note`` only while running: a stopped
+    bot refuses them, ``apply_deal_action``)."""
     from src.prm.service import apply_deal_action
 
     action = str(data.get("action") or "")
@@ -1365,6 +1390,7 @@ _POST_ONLY_PATHS = frozenset({
     "/api/relay/cancel", "/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal",
     "/api/prm/friend-adds",
     "/api/prm/auto",
+    "/api/prm/boss-groups/pick", "/api/prm/boss-groups/ignore",
 })
 
 
@@ -1478,7 +1504,8 @@ class _UIHandler(SimpleHTTPRequestHandler):
                          "/api/influencer/inbox/action",
                          "/api/relay/cancel",
                          "/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal",
-                         "/api/prm/friend-adds", "/api/prm/auto", "/api/wechat-gaps"):
+                         "/api/prm/friend-adds", "/api/prm/auto", "/api/wechat-gaps",
+                         "/api/prm/boss-groups/pick", "/api/prm/boss-groups/ignore"):
             self.do_GET()
         else:
             self._method_not_allowed()
@@ -1691,7 +1718,8 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 self.send_json({"ok": False, "error": str(e)})
             return
         if self.path in ("/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal",
-                         "/api/prm/friend-adds", "/api/prm/auto"):
+                         "/api/prm/friend-adds", "/api/prm/auto", "/api/prm/boss-groups/pick",
+                         "/api/prm/boss-groups/ignore"):
             content_len = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len) if content_len else b"{}"
             try:
@@ -1704,7 +1732,9 @@ class _UIHandler(SimpleHTTPRequestHandler):
                 return
             handler = {"/api/prm/parties": _prm_parties, "/api/prm/packets": _prm_packet,
                        "/api/prm/deals": _prm_deal, "/api/prm/reveal": _prm_reveal,
-                       "/api/prm/friend-adds": _prm_friend_adds, "/api/prm/auto": _prm_auto}[self.path]
+                       "/api/prm/friend-adds": _prm_friend_adds, "/api/prm/auto": _prm_auto,
+                       "/api/prm/boss-groups/pick": lambda d: _prm_boss_groups(d, "pick"),
+                       "/api/prm/boss-groups/ignore": lambda d: _prm_boss_groups(d, "ignore")}[self.path]
             try:
                 self.send_json(handler(data))
             except Exception as e:

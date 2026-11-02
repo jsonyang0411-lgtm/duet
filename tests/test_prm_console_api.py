@@ -186,7 +186,8 @@ def test_deals_and_numbers_work_while_the_bot_is_stopped(tmp_path, monkeypatch):
 
 def test_an_opening_is_asked_for_from_the_running_console_and_refused_while_stopped(running, tmp_path, monkeypatch):
     """POST /api/prm/deals {action: opening}: 「写开场白」 for a creator who has not written (a job with ``meta.opening``,
-    its draft tagged ``opening`` in /api/prm); 小美, who wrote, is told why not; a stopped bot cannot ask the Mac."""
+    its draft tagged ``opening`` in /api/prm); 小美, who wrote (``unanswered``: never had a real line from us) but has a
+    draft waiting, is told why not; a stopped bot cannot ask the Mac."""
     assert call("/api/prm/parties", "POST", {"action": "add", "wxid": "wxid_quiet01", "name": "小青"})[1]["ok"] is True
     deal_id = next(p["deal"]["id"] for p in call("/api/prm")[1]["parties"] if p["name"] == "小青")
     answer = call("/api/prm/deals", "POST", {"action": "opening", "deal_id": deal_id})[1]
@@ -202,14 +203,54 @@ def test_an_opening_is_asked_for_from_the_running_console_and_refused_while_stop
     assert [(p["party_name"], p["opening"]) for p in d["pending"]] == [("小美", False), ("小青", True)]
     events = next(p["deal"]["events"] for p in d["parties"] if p["name"] == "小青")
     assert any(e["name"] == f"派写开场白的任务 #{job['id']}（运营点的）" for e in events)
+    # 小美 wrote and never had a real line from us, but her draft waits in 待审批: not offered (2026-11-02)
+    deals = {p["name"]: p["deal"] for p in d["parties"]}
+    assert deals["小美"]["unanswered"] is False and deals["小青"]["unanswered"] is False
     she_wrote = call("/api/prm/deals", "POST", {"action": "opening", "deal_id": 1})[1]
-    assert she_wrote == {"ok": False, "error": "她已经发过消息了：她的消息会自己起草，不用开场白"}
+    assert she_wrote == {"ok": False, "error": "「待审批」里已经有她的草稿"}
     server.register_prm(None)                                       # the bot stopped
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("PRM_DB", raising=False)
     assert call("/api/prm/parties", "POST", {"action": "add", "wxid": CREATOR, "name": "小美"})[1]["ok"] is True
     stopped = call("/api/prm/deals", "POST", {"action": "opening", "deal_id": 1})[1]
     assert stopped == {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能写开场白"}
+
+
+def test_the_draft_note_is_kept_from_the_running_console_and_refused_while_stopped(running, tmp_path, monkeypatch):
+    """POST /api/prm/deals {action: draft_note, text} (起草备注, 2026-10-31): the operators' words for the Mac, kept on the
+    deal (whitespace collapsed) and shown in GET /api/prm's deal; her next draft job carries them (``meta.note``); too
+    long is refused, empty clears it; another site's page cannot change it; a stopped bot cannot keep one (refused like
+    写开场白)."""
+    words = "直接发链接和brief，感兴趣的会回复！\n勿催视频，不接语音"
+    kept = "直接发链接和brief，感兴趣的会回复！ 勿催视频，不接语音"
+    deal = call("/api/prm")[1]["parties"][0]["deal"]
+    assert deal["draft_note"] == ""
+    answer = call("/api/prm/deals", "POST", {"action": "draft_note", "deal_id": deal["id"], "text": words})[1]
+    assert answer == {"ok": True, "draft_note": kept}
+    deal = call("/api/prm")[1]["parties"][0]["deal"]
+    assert deal["draft_note"] == kept and deal["events"][0]["name"] == f"改起草备注（{len(kept)} 字）"
+    running.prm.handle({"chat_id": CREATOR, "sender_id": CREATOR, "content": "你们的帽子怎么合作", "msg_type": 1,
+                        "is_group": False, "timestamp": running.relay._clock()})
+    running.relay._clock.now += SETTLE_SEC + 1
+    assert running.relay.next_job(0, ("prm",))["meta"]["note"] == kept
+    too_long = call("/api/prm/deals", "POST", {"action": "draft_note", "deal_id": deal["id"], "text": "长" * 301})[1]
+    assert too_long == {"ok": False, "error": "起草备注最多 300 个字（现在 301 个）"}
+    raw = json.dumps({"action": "draft_note", "deal_id": deal["id"], "text": "别的网站写的"}).encode()
+    _, sock = _build_handler("/api/prm/deals", method="POST", body=raw,
+                             headers={"Content-Type": "application/json", "Origin": "https://evil.example"})
+    assert sock.get_response_text().split("\r\n", 1)[0].split()[1] == "403"
+    assert call("/api/prm/deals")[0] == 405                                 # a GET changes nothing
+    assert call("/api/prm")[1]["parties"][0]["deal"]["draft_note"] == kept
+    cleared = call("/api/prm/deals", "POST", {"action": "draft_note", "deal_id": deal["id"], "text": ""})[1]
+    assert cleared == {"ok": True, "draft_note": ""}
+    assert call("/api/prm")[1]["parties"][0]["deal"]["events"][0]["name"] == "清掉起草备注"
+    server.register_prm(None)                                       # the bot stopped
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PRM_DB", raising=False)
+    assert call("/api/prm/parties", "POST", {"action": "add", "wxid": CREATOR, "name": "小美"})[1]["ok"] is True
+    stopped = call("/api/prm/deals", "POST", {"action": "draft_note", "deal_id": 1, "text": "不接语音"})[1]
+    assert stopped == {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能改起草备注"}
+    assert call("/api/prm")[1]["parties"][0]["deal"]["draft_note"] == ""
 
 
 def test_changes_need_a_post_and_a_body():
@@ -850,3 +891,150 @@ def test_the_running_console_says_how_many_messages_a_reply_may_be(tmp_path):
         finally:
             server.register_prm(None)
             relay.stop()
+
+
+def test_boss_groups_from_the_running_console_and_while_stopped(tmp_path, monkeypatch):
+    """老板拉的群 (src/prm/boss_groups.py, 2026-10-31): GET /api/prm's ``boss_groups`` (a pending group lists only the members
+    she may be, never us, the boss or the admin, with its ``size``; the waiting and linked counts) and her deal's
+    ``source``; POST /api/prm/boss-groups/pick and /ignore (POST only, the local page only); 「群已经不在了」 on the deal
+    of a group the bot took over stops reading it.  A stopped bot shows .env's switch and the database's groups and says
+    it cannot do either."""
+    from test_prm_boss_groups import BOSS, BOSS_ID, GROUP, GROUP_NAME, ME, MEMBER, OTHER, Backend
+
+    clock = Clock()
+    cfg = SimpleNamespace(claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1",
+                          claude_relay_port=0, claude_relay_prefix="cc", claude_relay_wxids=[],
+                          claude_relay_db=":memory:", claude_relay_max_chars=1500, admin_wxid="wxid_admin",
+                          prm_copilot="on", prm_db=":memory:", prm_boss_groups="on", prm_group_with=BOSS)
+    relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=clock, files_dir=tmp_path / "relay")
+    prm = PrmService(cfg, relay, store=PrmStore(":memory:"), clock=clock, send=lambda c, t: True)
+    backend = Backend()
+    prm.boss_groups.attach(backend)
+    server.register_prm(prm)
+    try:
+        assert prm.boss_groups.scan() == 0
+        backend.groups[GROUP] = {"name": GROUP_NAME, "members": [ME, BOSS_ID, CREATOR, MEMBER, "wxid_admin"]}
+        backend.groups[OTHER] = {"name": "另一个群", "members": [ME, BOSS_ID, "wxid_x0001", "wxid_x0002"]}
+        clock.now += 61
+        assert prm.boss_groups.scan() == 0
+        shown = call("/api/prm")[1]["boss_groups"]
+        assert (shown["enabled"], shown["why_not"], shown["warning"], shown["boss"], shown["boss_call"],
+                shown["waiting"], shown["linked"]) == (True, "", "", [BOSS], "老板", 0, 0)
+        group = next(g for g in shown["pending"] if g["chat"] == GROUP)
+        assert group["members"] == [{"wxid": CREATOR, "name": "小美"}, {"wxid": MEMBER, "name": "测试达人"}]
+        assert (group["name"], group["size"]) == (GROUP_NAME, 5)
+        for path in ("/api/prm/boss-groups/pick", "/api/prm/boss-groups/ignore"):
+            assert call(path)[0] == 405                                  # a GET changes nothing
+            raw = json.dumps({"chat": OTHER, "wxid": "wxid_x0001"}).encode()
+            _, sock = _build_handler(path, method="POST", body=raw,
+                                     headers={"Content-Type": "application/json", "Origin": "https://evil.example"})
+            assert sock.get_response_text().split("\r\n", 1)[0].split()[1] == "403"
+        assert prm.store.boss_group(OTHER)["state"] == "pending"
+        for wxid in (BOSS_ID, ME, "wxid_admin"):
+            assert call("/api/prm/boss-groups/pick", "POST", {"chat": GROUP, "wxid": wxid})[1]["ok"] is False
+        out = call("/api/prm/boss-groups/pick", "POST", {"chat": GROUP, "wxid": CREATOR})[1]
+        party = prm.store.party_by_wxid(CREATOR)
+        assert out == {"ok": True, "party_id": party["id"], "deal_id": prm.store.deal_of(party["id"])["id"]}
+        assert call("/api/prm/boss-groups/ignore", "POST", {"chat": OTHER})[1] == {"ok": True}
+        assert call("/api/prm/boss-groups/ignore", "POST", {"chat": OTHER})[1]["ok"] is False
+        d = call("/api/prm")[1]
+        assert d["boss_groups"]["pending"] == [] and d["boss_groups"]["linked"] == 1
+        her = next(p for p in d["parties"] if p["wxid"] == CREATOR)
+        assert her["source"] == her["deal"]["source"] == "boss_group"
+        assert (her["deal"]["three_party"]["by"], her["deal"]["three_party"]["chat_name"]) == ("boss", GROUP_NAME)
+        assert call("/api/prm/deals", "POST", {"action": "group_none", "deal_id": out["deal_id"]})[1]["ok"] is True
+        assert prm.store.boss_group(GROUP)["state"] == "gone" and backend.unwatched == [GROUP]
+        assert not prm.is_party_group(GROUP) and call("/api/prm")[1]["boss_groups"]["linked"] == 0
+    finally:
+        server.register_prm(None)
+        relay.stop()
+    monkeypatch.chdir(tmp_path)                                    # the bot stopped
+    monkeypatch.delenv("PRM_DB", raising=False)
+    monkeypatch.setenv("PRM_COPILOT", "on")
+    monkeypatch.setenv("PRM_BOSS_GROUPS", "on")
+    monkeypatch.setenv("PRM_GROUP_WITH", BOSS)
+    monkeypatch.setenv("ADMIN_WXID", "wxid_admin")
+    monkeypatch.setenv("PRM_BOSS_CALL", " 大老板 ")
+    assert call("/api/prm")[1]["boss_groups"] == {"enabled": True, "why_not": "机器人没有运行", "warning": "",
+                                                   "boss": [BOSS], "boss_call": "大老板", "pending": [], "waiting": 0,
+                                                   "linked": 0}
+    store = PrmStore(tmp_path / "data" / "prm.db")
+    store.add_boss_group(GROUP, name=GROUP_NAME, found_at=time.time(), state="pending", boss=[{"wxid": BOSS_ID, "name": BOSS}],
+                         members=[{"wxid": BOSS_ID, "name": BOSS}, {"wxid": CREATOR, "name": "小美"},
+                                  {"wxid": MEMBER, "name": "测试达人"}, {"wxid": "wxid_admin", "name": "管理员"}])
+    store.close()
+    [pending] = call("/api/prm")[1]["boss_groups"]["pending"]
+    assert pending["members"] == [{"wxid": CREATOR, "name": "小美"}, {"wxid": MEMBER, "name": "测试达人"}]
+    for path, body in (("/api/prm/boss-groups/pick", {"chat": GROUP, "wxid": CREATOR}),
+                       ("/api/prm/boss-groups/ignore", {"chat": GROUP})):
+        assert call(path, "POST", body)[1] == {"ok": False,
+                                               "error": "机器人没有运行（或没打开达人副驾驶），现在不能处理老板拉的群"}
+    monkeypatch.setenv("PRM_BOSS_GROUPS", "off")
+    monkeypatch.delenv("PRM_BOSS_CALL")
+    assert call("/api/prm")[1]["boss_groups"] == {"enabled": False, "why_not": "", "warning": "", "boss": [BOSS],
+                                                   "boss_call": "老板", "pending": [], "waiting": 0, "linked": 0}
+
+
+def test_the_console_warns_of_an_unknown_boss_name_and_still_lets_a_person_pick(tmp_path):
+    """老板拉的群, second review 2026-10-31 F3: a name of PRM_GROUP_WITH no one contact has is ``boss_groups.warning`` in
+    GET /api/prm (``why_not`` stays "": the card's buttons are on), the groups found wait in ``pending``, and the POST
+    pick takes one over."""
+    from test_prm_boss_groups import BOSS, BOSS_ID, GROUP, GROUP_NAME, ME, Backend
+
+    clock = Clock()
+    cfg = SimpleNamespace(claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1",
+                          claude_relay_port=0, claude_relay_prefix="cc", claude_relay_wxids=[],
+                          claude_relay_db=":memory:", claude_relay_max_chars=1500, admin_wxid="wxid_admin",
+                          prm_copilot="on", prm_db=":memory:", prm_boss_groups="on", prm_group_with=f"{BOSS}，老板二")
+    relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=clock, files_dir=tmp_path / "relay")
+    prm = PrmService(cfg, relay, store=PrmStore(":memory:"), clock=clock, send=lambda c, t: True)
+    backend = Backend(contacts={BOSS: BOSS_ID})
+    prm.boss_groups.attach(backend)
+    server.register_prm(prm)
+    try:
+        assert prm.boss_groups.scan() == 0
+        backend.groups[GROUP] = {"name": GROUP_NAME, "members": [ME, BOSS_ID, CREATOR], "joined_at": clock.now}
+        clock.now += 61
+        assert prm.boss_groups.scan() == 0
+        shown = call("/api/prm")[1]["boss_groups"]
+        assert shown["why_not"] == "" and shown["warning"].startswith("PRM_GROUP_WITH 里的「老板二」在这个微信里找不到")
+        [pending] = shown["pending"]
+        assert pending["chat"] == GROUP and pending["members"] == [{"wxid": CREATOR, "name": "小美"}]
+        out = call("/api/prm/boss-groups/pick", "POST", {"chat": GROUP, "wxid": CREATOR})[1]
+        assert out["ok"] is True and prm.is_party_group(GROUP)
+    finally:
+        server.register_prm(None)
+        relay.stop()
+
+
+def test_the_running_console_shows_a_group_draft_where_it_goes(tmp_path):
+    """老板拉的群: a packet of her line in the group says so (``channel`` group, ``group_name``); others are ``wechat``."""
+    from test_prm_boss_groups import BOSS, BOSS_ID, GROUP, GROUP_NAME, ME, Backend
+
+    clock = Clock()
+    cfg = SimpleNamespace(claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1",
+                          claude_relay_port=0, claude_relay_prefix="cc", claude_relay_wxids=[],
+                          claude_relay_db=":memory:", claude_relay_max_chars=1500, admin_wxid="wxid_admin",
+                          prm_copilot="on", prm_db=":memory:", prm_boss_groups="on", prm_group_with=BOSS)
+    relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=clock, files_dir=tmp_path / "relay")
+    prm = PrmService(cfg, relay, store=PrmStore(":memory:"), clock=clock, send=lambda c, t: True)
+    backend = Backend()
+    prm.boss_groups.attach(backend)
+    prm.boss_groups.scan()
+    backend.groups[GROUP] = {"name": GROUP_NAME, "members": [ME, BOSS_ID, CREATOR], "joined_at": clock.now}
+    clock.now += 61
+    prm.boss_groups.scan()
+    server.register_prm(prm)
+    try:
+        clock.now += SETTLE_SEC + 1
+        job = relay.next_job(0, ("prm",))                              # the group's 开场白
+        relay.finish(job["id"], {"ok": True, "text": json.dumps({
+            "intent": "打招呼", "slots": {}, "stage_proposal": "", "message_kind": "greeting",
+            "reply_draft": "您好～", "attachments_to_send": [], "needs_attention": False, "reason": ""},
+            ensure_ascii=False)})
+        relay.tick()
+        [packet] = call("/api/prm")[1]["pending"]
+        assert (packet["channel"], packet["group_name"], packet["opening"]) == ("group", GROUP_NAME, True)
+    finally:
+        server.register_prm(None)
+        relay.stop()

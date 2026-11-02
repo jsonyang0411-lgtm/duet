@@ -1,8 +1,8 @@
 import { Fragment, useState } from 'react'
-import { ArrowClockwise, PaperPlaneRight, PencilSimple, X, Paperclip, WarningCircle, Eye, EyeSlash, Flag, Lightning, CheckCircle, Copy, ChatsCircle, Robot, HandPalm } from '@phosphor-icons/react'
+import { ArrowClockwise, PaperPlaneRight, PencilSimple, X, Paperclip, WarningCircle, Eye, EyeSlash, Flag, Lightning, CheckCircle, Copy, ChatsCircle, Robot, HandPalm, UsersThree } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
-import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, buyinNotes, buyinFriendAddLine, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, dealAction, nightStatus, copyBuyin, buyinSent, setAutoMode, replyPartCount } from '../lib/prm'
+import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, buyinNotes, buyinFriendAddLine, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, dealAction, nightStatus, copyBuyin, buyinSent, setAutoMode, replyPartCount, inGroup, bossGroupNotes } from '../lib/prm'
 import { PageHead, Card, Note, Banner, Empty, Confirm, TextArea } from './ui'
 import { FriendAddList } from './FriendAddCard'
 
@@ -20,6 +20,9 @@ import { FriendAddList } from './FriendAddCard'
 // 加微信 (PRM_FRIEND_ADD): the contacts 百应 creators left, one confirmed friend request each (FriendAddCard.jsx).
 // 自动模式: the same rules at any hour, switched at the top of the page (on: a warn line with
 // the button that switches it off); what it sent by day is tagged 自动模式发出.
+// 老板拉的群 (PRM_BOSS_GROUPS): a draft of her line in the group the boss made with her and us
+// (``channel`` "group") is tagged 「群里 · <群名>」 and its 发送 asks first: it goes in the group, where
+// the boss sees it. A group that needs a person to say which member she is gets one line at the top.
 
 export default function ReviewPanel() {
   const { data, err, reload } = usePrm(4000)
@@ -35,6 +38,7 @@ export default function ReviewPanel() {
         {err && <Note kind="need">{err}</Note>}
         {setupProblems(data).map(([kind, text]) => <Note key={text} kind={kind}>{text}</Note>)}
         {buyinNotes(data).map(([kind, text]) => <Note key={text} kind={kind} icon={ChatsCircle}>{text}</Note>)}
+        {bossGroupNotes(data).map(([kind, text]) => <Note key={text} kind={kind} icon={UsersThree}>{text}</Note>)}
         {!data && <Empty title="正在读取…" />}
         <AutoModeBar d={data} onDone={reload} />
         <PlatformAlerts alerts={data?.platform_alerts || []} onDone={reload} />
@@ -149,6 +153,16 @@ function AutoModeBar({ d, onDone }) {
   )
 }
 
+/** 老板拉的群 (PRM_BOSS_GROUPS): a draft of her line in the group the boss made with her and us goes out in that group. */
+function GroupTag({ p }) {
+  if (!inGroup(p)) return null
+  return (
+    <span className="tag warn prm-group-tag" title={`发在老板拉的群「${p.group_name || ''}」里（不是她的私聊），老板也看得到`}>
+      <UsersThree /><span className="prm-group-name">群里 · {p.group_name || '老板拉的群'}</span>
+    </span>
+  )
+}
+
 /** A draft the 下班时段 window (or 自动模式 by day: ``auto_mode``) sent by itself. */
 function NightTag({ p }) {
   if (p.route !== 'night') return null
@@ -245,7 +259,9 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
   const [busy, setBusy] = useState(false)
   const [dropping, setDropping] = useState(false)
   const [executing, setExecuting] = useState(null)   // the text to execute with (null = no dialog)
+  const [sending, setSending] = useState(null)       // 老板拉的群: the send that asks first ({action, text}; null = no dialog)
   const pf = p.platform
+  const group = inGroup(p)                           // it goes out in the boss's group, where he sees it
   const waiting = p.status !== 'pending'
   const act = async (action, body) => {
     setBusy(true)
@@ -253,13 +269,17 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
       if (action === 'execute') await executePlatform(p.id, body)
       else if (action === 'repreview') await repreview(p.id)
       else await decide(p.id, action, body)
-      toast.ok({ drop: '这条不发了', execute: '已批准，Mac 正在平台上执行', repreview: '已请 Mac 重新预览' }[action] || '已确认，正在发送')
+      toast.ok({ drop: '这条不发了', execute: '已批准，Mac 正在平台上执行', repreview: '已请 Mac 重新预览' }[action]
+        || (group ? '已确认，正在发到群里' : '已确认，正在发送'))
       setEditing(false)
       setDropping(false)
       setExecuting(null)
+      setSending(null)
       onDone()
     } catch (e) { toast.err(e.message) } finally { setBusy(false) }
   }
+  // 发送 / 确认发送: a draft for the boss's group asks first; any other draft goes at once, as it always did.
+  const send = (action, body) => (group ? setSending({ action, text: body }) : act(action, body))
   const [label, kind] = PACKET_STATES[p.status] || [p.status, 'pend']
   const slots = Object.entries(p.slots || {})
   const parts = replyPartCount(editing ? text : p.text, replyParts)   // PRM_REPLY_PARTS: a blank line starts the next message
@@ -268,7 +288,7 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
       title={`${p.party_name} · ${p.kind_label}`}
       eyebrow={`DRAFT #${p.id}`}
       sub={`${fmtClock(p.created_at)} ${p.system ? '系统生成' : '写好'}${p.stage_proposal_label ? ` · 建议阶段：${p.stage_proposal_label}` : ''}`}
-      actions={<>{p.opening && <span className="tag cy" title="她还没跟我们说过话：这是我们先打招呼的话，要人看过再发">开场白</span>}{p.route === 'auto' && <span className="tag ok" title="这类消息已经达到自动发送门槛">自动发送</span>}<NightTag p={p} /><span className={`tag ${kind}`}>{label}</span></>}
+      actions={<><GroupTag p={p} />{p.opening && <span className="tag cy" title="她还没跟我们说过话：这是我们先打招呼的话，要人看过再发">开场白</span>}{p.route === 'auto' && <span className="tag ok" title="这类消息已经达到自动发送门槛">自动发送</span>}<NightTag p={p} /><span className={`tag ${kind}`}>{label}</span></>}
       className="prm-draft"
     >
       <div className="stack" style={{ gap: 8 }}>
@@ -325,12 +345,12 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
           <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
             {editing ? (
               <>
-                <button type="button" className="btn primary" disabled={busy || !canSend} onClick={() => act('edit', text)}><PaperPlaneRight />确认发送</button>
+                <button type="button" className="btn primary" disabled={busy || !canSend} onClick={() => send('edit', text)}><PaperPlaneRight />确认发送</button>
                 <button type="button" className="btn" disabled={busy} onClick={() => { setEditing(false); setText(p.text) }}>取消修改</button>
               </>
             ) : (
               <>
-                <button type="button" className="btn primary" disabled={busy || !canSend} onClick={() => act('send')}><PaperPlaneRight />发送</button>
+                <button type="button" className="btn primary" disabled={busy || !canSend} onClick={() => send('send')}><PaperPlaneRight />发送</button>
                 <button type="button" className="btn" disabled={busy} onClick={() => setEditing(true)}><PencilSimple />改了再发</button>
                 <button type="button" className="btn ghost" disabled={busy} onClick={() => setDropping(true)}><X />不发</button>
               </>
@@ -345,6 +365,12 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
           这条草稿不会发给达人{pf ? '，平台上也不会执行' : ''}。达人再发消息时，会有新的草稿。
         </Confirm>
       )}
+      {sending && (
+        <Confirm title={`#${p.id} 发到群里？`} confirmLabel="发到群里" cancelLabel="再想想" busy={busy}
+          onConfirm={() => act(sending.action, sending.text)} onCancel={() => setSending(null)}>
+          这条回复会发在老板拉的群「{p.group_name || '（没有群名）'}」里，不是她的私聊：老板和群里的人都看得到。{parts > 1 ? `会分 ${parts} 条发。` : ''}
+        </Confirm>
+      )}
       {executing !== null && pf && (
         <Confirm title={`批准并执行 #${p.id}？`} confirmLabel="执行" cancelLabel="再想想" busy={busy}
           onConfirm={() => act('execute', executing)} onCancel={() => setExecuting(null)}>
@@ -353,6 +379,7 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
             {pf.caveat && <div className="f-err">{pf.caveat}</div>}
             {pf.params.map((x) => <div key={x.label} className="f-hint">{x.label}：<span className="mono">{x.value}</span></div>)}
             <div>只执行一次，不会自动重试；平台读回核验成功（VERIFIED_SUCCESS）才把回复发给达人，否则不发，并在这一页上方标红。</div>
+            {group && <div>回复发在老板拉的群「{p.group_name || '（没有群名）'}」里，不是她的私聊：老板和群里的人都看得到。</div>}
           </div>
         </Confirm>
       )}
@@ -482,7 +509,9 @@ function RecentCard({ d, onDone }) {
                 <tr key={p.id}>
                   <td className="num">#{p.id}</td>
                   <td>{p.party_name}</td>
-                  <td>{buyin ? `百应私信 · ${p.kind_label}` : p.kind_label}</td>
+                  <td title={inGroup(p) ? `发在老板拉的群「${p.group_name || ''}」里` : undefined}>
+                    {buyin ? `百应私信 · ${p.kind_label}` : inGroup(p) ? `群里 · ${p.kind_label}` : p.kind_label}
+                  </td>
                   <td>
                     {buyin && p.status === 'sent' ? (
                       <span className="tag ok" title="运营在百应里手动发的（机器人没有发）">已在百应手动发{p.edited ? ' · 改过' : ''}</span>

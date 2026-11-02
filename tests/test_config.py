@@ -789,5 +789,53 @@ class ReplyPartsConfigTests(unittest.TestCase):
             self.assertIn("PRM_REPLY_PARTS", str(ctx.exception))
 
 
+class BossGroupsConfigTests(unittest.TestCase):
+    """老板拉的群 (src/prm/boss_groups.py, 2026-10-31): off by default, groups of at most 6 by default, 3-20."""
+
+    def test_defaults_and_what_the_env_says(self):
+        from src.config import BotConfig, load_config
+
+        self.assertEqual((BotConfig().prm_boss_groups, BotConfig().prm_boss_group_max), ("off", 6))
+        with patch.dict(os.environ, {}, clear=True):
+            config = load_config()
+        self.assertEqual((config.prm_boss_groups, config.prm_boss_group_max), ("off", 6))
+        with patch.dict(os.environ, {"PRM_BOSS_GROUPS": "on", "PRM_BOSS_GROUP_MAX": "8"}, clear=True):
+            config = load_config()
+        self.assertEqual((config.prm_boss_groups, config.prm_boss_group_max), ("on", 8))
+
+    def test_bad_values_are_refused(self):
+        from src.config import _validate_config
+
+        for good in ({"prm_boss_groups": "on"}, {"prm_boss_groups": "off"}, {"prm_boss_group_max": 3},
+                     {"prm_boss_group_max": 20}):
+            _validate_config(good)
+        # on without PRM_COPILOT or PRM_GROUP_WITH only does nothing (the console says why): not refused
+        _validate_config({"prm_boss_groups": "on", "prm_copilot": "off", "prm_group_with": ""})
+        for key, value, name in (("prm_boss_groups", "maybe", "PRM_BOSS_GROUPS"), ("prm_boss_group_max", 2, "PRM_BOSS_GROUP_MAX"),
+                                 ("prm_boss_group_max", 21, "PRM_BOSS_GROUP_MAX")):
+            with self.assertRaises(RuntimeError) as ctx:
+                _validate_config({key: value})
+            self.assertIn(name, str(ctx.exception))
+
+    def test_what_the_mac_is_told_the_boss_is_called(self):
+        """PRM_BOSS_CALL (review 2026-10-31): the bosses' names (PRM_GROUP_WITH) never leave this PC; a group job calls
+        him this.  「老板」 by default and when empty, white space collapsed, 1 to 10 characters."""
+        from src.config import BotConfig, _validate_config, load_config
+
+        self.assertEqual(BotConfig().prm_boss_call, "老板")
+        for env, want in (({}, "老板"), ({"PRM_BOSS_CALL": ""}, "老板"), ({"PRM_BOSS_CALL": "  大  老板 "}, "大 老板"),
+                          ({"PRM_BOSS_CALL": "一二三四五六七八九十"}, "一二三四五六七八九十")):
+            with patch.dict(os.environ, env, clear=True):
+                self.assertEqual(load_config().prm_boss_call, want, env)
+        _validate_config({"prm_boss_call": "大老板"})
+        for bad in ("", "   ", "一二三四五六七八九十一"):
+            with self.assertRaises(RuntimeError) as ctx:
+                _validate_config({"prm_boss_call": bad})
+            self.assertIn("PRM_BOSS_CALL", str(ctx.exception))
+        with patch.dict(os.environ, {"PRM_BOSS_CALL": "一二三四五六七八九十一"}, clear=True):
+            with self.assertRaises(RuntimeError):
+                load_config()
+
+
 if __name__ == "__main__":
     unittest.main()
