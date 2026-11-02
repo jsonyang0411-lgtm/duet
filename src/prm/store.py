@@ -805,6 +805,19 @@ class PrmStore:
             ).fetchall()
         return [packet_view(dict(r)) for r in rows]
 
+    def has_answer(self, deal_id: int) -> bool:
+        """Has the creator had a real line from us in WeChat: a draft that went out (or is going out, or waits on
+        its platform action), or a line an operator typed by hand?  The bot's own holding replies (稍等, events
+        only) and a 百应 private-message draft (sent there by hand) are no answer (「写开场白」, 2026-11-02)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM action_packets WHERE deal_id = ? AND status IN (?, ?, ?) AND tool != ? LIMIT 1",
+                (deal_id, SENT, SENDING, EXECUTING, BUYIN_TOOL),
+            ).fetchone() or self._conn.execute(
+                "SELECT 1 FROM deal_events WHERE deal_id = ? AND kind = 'operator_message' LIMIT 1", (deal_id,),
+            ).fetchone()
+        return row is not None
+
     def platform_failures(self, limit: int = 50) -> list[dict]:
         """Packets with a platform action that ended ``failed`` (the platform write was not
         verified, or the reply did not go out), newest first: the console marks them red

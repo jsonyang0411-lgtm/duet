@@ -186,7 +186,8 @@ def test_deals_and_numbers_work_while_the_bot_is_stopped(tmp_path, monkeypatch):
 
 def test_an_opening_is_asked_for_from_the_running_console_and_refused_while_stopped(running, tmp_path, monkeypatch):
     """POST /api/prm/deals {action: opening}: 「写开场白」 for a creator who has not written (a job with ``meta.opening``,
-    its draft tagged ``opening`` in /api/prm); 小美, who wrote, is told why not; a stopped bot cannot ask the Mac."""
+    its draft tagged ``opening`` in /api/prm); 小美, who wrote (``unanswered``: never had a real line from us) but has a
+    draft waiting, is told why not; a stopped bot cannot ask the Mac."""
     assert call("/api/prm/parties", "POST", {"action": "add", "wxid": "wxid_quiet01", "name": "小青"})[1]["ok"] is True
     deal_id = next(p["deal"]["id"] for p in call("/api/prm")[1]["parties"] if p["name"] == "小青")
     answer = call("/api/prm/deals", "POST", {"action": "opening", "deal_id": deal_id})[1]
@@ -202,8 +203,11 @@ def test_an_opening_is_asked_for_from_the_running_console_and_refused_while_stop
     assert [(p["party_name"], p["opening"]) for p in d["pending"]] == [("小美", False), ("小青", True)]
     events = next(p["deal"]["events"] for p in d["parties"] if p["name"] == "小青")
     assert any(e["name"] == f"派写开场白的任务 #{job['id']}（运营点的）" for e in events)
+    # 小美 wrote and never had a real line from us, but her draft waits in 待审批: not offered (2026-11-02)
+    deals = {p["name"]: p["deal"] for p in d["parties"]}
+    assert deals["小美"]["unanswered"] is False and deals["小青"]["unanswered"] is False
     she_wrote = call("/api/prm/deals", "POST", {"action": "opening", "deal_id": 1})[1]
-    assert she_wrote == {"ok": False, "error": "她已经发过消息了：她的消息会自己起草，不用开场白"}
+    assert she_wrote == {"ok": False, "error": "「待审批」里已经有她的草稿"}
     server.register_prm(None)                                       # the bot stopped
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("PRM_DB", raising=False)

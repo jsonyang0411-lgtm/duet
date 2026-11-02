@@ -820,6 +820,13 @@ def test_an_opening_job_asks_for_our_first_line_and_makes_up_no_message_of_hers(
     assert worker.opening_line({"opening": {"how": "", "by": "console"}}).startswith(
         "运营请你给这位达人写开场白：她还没跟我们说过话。")
     assert worker.opening_line({"opening": {"how": "manual"}}).startswith("她刚加了我们的好友，还没说过话。")
+    # 2026-11-02: she wrote (the friend request's 「我是…」) but never had a real line from us, at most the bot's 稍等
+    wrote = worker.opening_line({"opening": {"how": "", "by": "console", "wrote": True}})
+    assert wrote.startswith(worker.OPENING_WROTE + "。这一次没有达人的消息，要写的是我们主动发的第一句")
+    assert "她在微信里说过话（看案卷），我们还没正式回过她，最多只有系统自动回的稍等" in wrote
+    for odd in ("yes", 1, None):                                     # only a true ``wrote`` says so
+        assert worker.opening_line({"opening": {"how": "", "by": "console", "wrote": odd}}).startswith(
+            "运营请你给这位达人写开场白：她还没跟我们说过话。")
     assert worker.opening_line({"opening": {}}).startswith("她刚加上好友，还没说过话。")
     joined = worker.prm_prompt({"id": 22, "text": "[10:21] 在吗", "meta": job["meta"]}, 1, "小青", "deals/1.md", [], [])
     assert joined.index(line) < joined.index("<creator_message>") and "在吗" in joined
@@ -862,6 +869,8 @@ def test_the_opening_line_works_on_the_macs_own_python(tmp_path):
         "job = {'id': 1, 'text': '', 'meta': {'opening': {'how': 'requested', 'by': 'new_friend'}}}\n"
         "p = w.prm_prompt(job, 1, '小青', 'deals/1.md', [], [])\n"
         "assert w.opening_line(job['meta']) in p.split('\\n') and '<creator_message>' not in p\n"
+        "wrote = w.opening_line({'opening': {'how': '', 'by': 'console', 'wrote': True}})\n"
+        f"assert wrote.startswith(w.OPENING_WROTE) and {'我们还没正式回过她'!a} in wrote\n"
         "print('ok', sys.version_info[:2])\n", encoding="utf-8")
     env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), "CLAUDE_RELAY_HOME": str(tmp_path / "home")}
     run = subprocess.run([python, "-I", str(script)], capture_output=True, text=True, timeout=60, cwd=tmp_path, env=env)

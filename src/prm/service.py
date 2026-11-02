@@ -875,6 +875,15 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
             "auto_mode": bool(p["meta"].get(AUTO_MODE)),
         }
 
+    def unanswered(deal: dict) -> bool:
+        """She wrote but never had a real line from us (a 稍等 aside, ``has_answer``) and no WeChat draft of hers waits
+        in 待审批: the console offers 「写开场白」 all the same (2026-11-02; a draft being written on the Mac is not seen
+        here: asked for then, ``_no_opening`` says so)."""
+        if not deal.get("last_message_at") or store.has_answer(deal["id"]):
+            return False
+        return not any((p.get("meta") or {}).get("lane") not in (LANE_SYSTEM, LANE_BUYIN)
+                       for p in store.deal_packets(deal["id"], statuses=(PENDING, APPROVED, SENDING)))
+
     def party_out(p: dict) -> dict:
         deal = newest.get(p["id"])
         source = "boss_group" if p["id"] in boss_parties else ""
@@ -900,6 +909,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
                 "stage_proposal": deal["stage_proposal"],
                 "stage_proposal_label": STAGES.get(deal["stage_proposal"], ""),
                 "attention": deal.get("attention", ""), "last_message_at": deal.get("last_message_at"),
+                "unanswered": unanswered(deal),
                 "delivered_at": deal.get("delivered_at"), "purged_at": deal.get("purged_at"),
                 "purge_due_at": retention.purge_due_at(deal, retention_days),
                 "shipment": {k: shipment[k] for k in ("carrier", "waybill", "status", "updated_at")}
@@ -2907,9 +2917,10 @@ class PrmService:
         return {"ok": True, "job": job_id} if job_id else {"ok": False, "error": why}
 
     def _ask_opening(self, party: dict, *, how: str = "", by: str = "new_friend") -> tuple:
-        """One draft job of our first line to a creator who has not written to us (``meta.opening``: how she came,
-        who asked; told what we sent her, ``meta.sent``, what an operator wrote to her by hand, ``meta.history``, and
-        the deal's 起草备注, ``meta.note``),
+        """One draft job of our first line to a creator who has not written to us, or wrote but never had a real line
+        from us (``meta.opening``: how she came, who asked, and ``wrote`` true for the latter: her line was the friend
+        request's 「我是…」, its draft was dropped, only a 稍等 went out, 2026-11-02; told what we sent her,
+        ``meta.sent``, what an operator wrote to her by hand, ``meta.history``, and the deal's 起草备注, ``meta.note``),
         under ``_handle_lock``: ``(job id, "")``, or ``(None, why not)`` (``_no_opening``).  It always waits for a person (``gap_notes``), never by night, never gets a holding
         reply; a message of hers joins it, or outdates its draft (``_outdated``), like any reply draft's."""
         now = self._clock()
@@ -2919,7 +2930,8 @@ class PrmService:
         if why:
             return None, why
         how = str(how or "")
-        meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"], OPENING: {"how": how, "by": by}}
+        meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"],
+                OPENING: {"how": how, "by": by, **({"wrote": True} if deal.get("last_message_at") else {})}}
         if group is not None:
             meta.update(channel=GROUP_CHANNEL, group=self.boss_groups.job_group(chat))
         creator = self._creator_ids(deal["id"])
@@ -2938,20 +2950,22 @@ class PrmService:
                               actor="console" if by == "console" else "system", now=now)
         # one not written before: this one is on its way
         self._store.drop_notices(deal["id"], lambda n: bool(n.get(OPENING)), now)
-        logger.info("PRM: party %d has not written to us; job #%d drafts our first line (开场白, %s)",
-                    party["id"], job_id, by)
+        logger.info("PRM: party %d %s; job #%d drafts our first line (开场白, %s)", party["id"],
+                    "wrote but never had a real line from us" if deal.get("last_message_at") else "has not written to us",
+                    job_id, by)
         return job_id, ""
 
     def _no_opening(self, party: dict, deal: dict, now: float, chat: Optional[str] = "") -> str:
         """Why no 开场白 is drafted for her now ("" = it is): off the list, a person has the chat, she wrote to us
-        already on WeChat (her messages are drafted), or a WeChat reply draft of hers is being written or waits in
+        already on WeChat and had a real line from us (``PrmStore.has_answer``: her messages are drafted; written to but
+        never answered, a 稍等 aside, she may have one, 2026-11-02), or a WeChat reply draft of hers is being written or waits in
         待审批 (a 百应 one is another channel: it neither counts as her WeChat line nor stands in the way).  ``chat``:
         where it would go (``_reach``; "" her private chat, None nowhere: 老板拉的群 she left, no private chat)."""
         if not party.get("active"):
             return "这位达人已经停用（不在达人名单里），不写开场白"
         if self._mode(deal, now) != COPILOT:
             return "现在不在副驾驶模式（人工接管或暂停），不写开场白"
-        if deal.get("last_message_at"):
+        if deal.get("last_message_at") and self._store.has_answer(deal["id"]):
             return "她已经发过消息了：她的消息会自己起草，不用开场白"
         if chat is None:
             return f"{UNREACHABLE_TEXT}，开场白发不出去"

@@ -1526,6 +1526,8 @@ def night_line(meta: dict) -> str:
 # How a new friend came (the bot's ``meta.opening.how``, its new-friend scan's words): who spoke last.
 OPENING_HOWS = {"requested": "她刚通过了我们的好友申请（是我们加的她）", "manual": "她刚加了我们的好友",
                 "auto_accept": "她刚加了我们的好友"}
+# 「写开场白」 for a creator who wrote (her friend request's 「我是…」, say) but never had a real line from us
+OPENING_WROTE = "运营请你给这位达人写开场白：她在微信里说过话（看案卷），我们还没正式回过她，最多只有系统自动回的稍等"
 
 
 def opening_line(meta: dict) -> str:
@@ -1533,14 +1535,17 @@ def opening_line(meta: dict) -> str:
     not written to us yet (a new friend whose catch-up found nothing of hers, or an operator's 「写开场白」 in the
     console, ``by`` console), so the job has no message of hers and asks for our first line.  In a 老板拉的群
     (``meta.channel == "group"``, 功能 U) it is the group's own wording, ``BOSS_GROUP_OPENING``: greet her there as the
-    one the boss introduced, by his call (「说是X总介绍的」, ``boss_call``; 「说是老板介绍的」 without one).  "" without it
-    (the prompt as before)."""
+    one the boss introduced, by his call (「说是X总介绍的」, ``boss_call``; 「说是老板介绍的」 without one).  ``wrote``
+    (2026-11-02): she did write (the friend request's 「我是…」, in the case file) but never had a real line from us, at
+    most the bot's 稍等: the console's line says so.  "" without it (the prompt as before)."""
     opening = meta.get("opening")
     if not isinstance(opening, dict):
         return ""
     if meta.get("channel") == GROUP_CHANNEL:
         return BOSS_GROUP_OPENING.format(call=boss_call(meta))
-    if opening.get("by") == "console":
+    if opening.get("by") == "console" and opening.get("wrote") is True:
+        who = OPENING_WROTE
+    elif opening.get("by") == "console":
         who = "运营请你给这位达人写开场白：她还没跟我们说过话"
     else:
         who = OPENING_HOWS.get(str(opening.get("how") or ""), "她刚加上好友") + "，还没说过话"

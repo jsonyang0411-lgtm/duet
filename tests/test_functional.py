@@ -742,6 +742,27 @@ class TestPrmPages:
         assert "这一条：开场白：先打招呼" in card.inner_text()
         assert page.locator(".prm-draft", has_text="在的，有什么可以帮你？").locator(".tag", has_text="开场白").count() == 0
 
+    def test_deals_page_offers_an_opening_to_a_creator_who_wrote_but_was_never_answered(self, page, prm):
+        """2026-11-02: 小美 wrote, her waiting draft is dropped and nothing of ours ever went out: her deal shows 「开场白」
+        all the same, saying why, and a click asks the Mac for an opening that knows she wrote (``wrote``)."""
+        from src.prm.service import SETTLE_SEC
+
+        [waiting] = prm.service.store.packets(("pending",))
+        assert prm.service.decide(waiting["id"], "drop")["ok"]
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.wait_for_timeout(1500)
+        page.locator("button[aria-label='展开 小美']").click()
+        page.wait_for_timeout(300)
+        block = page.locator(".prm-opening")
+        text = block.inner_text()
+        assert "她说过话" in text and "可我们还没正式回过她" in text and "她还没跟我们说过话" not in text
+        block.locator("button:has-text('写开场白')").click()
+        page.wait_for_timeout(1200)
+        assert "已请 Mac 写开场白" in page.inner_text("body")
+        prm.clock.now += SETTLE_SEC + 1
+        job = prm.relay.next_job(0, ("prm",))
+        assert job["meta"]["opening"] == {"how": "", "by": "console", "wrote": True} and job["text"] == ""
+
     def test_deals_page_edits_saves_and_shows_the_draft_note(self, page, prm):
         """起草备注 (2026-10-31): an opened deal shows its note (none yet) with the hint; 「写备注」 opens the field, 「保存」
         keeps it through the deal action (one line, as the bot keeps it) and her next draft job carries it; more than

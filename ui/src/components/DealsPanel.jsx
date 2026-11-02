@@ -309,13 +309,20 @@ function DealDetail({ p, d, onDone }) {
 
       <DraftNoteBlock p={p} onDone={onDone} />
 
-      {!deal.last_message_at && (
+      {(!deal.last_message_at || deal.unanswered) && (
         <div className="stack prm-opening" style={{ gap: 6 }}>
           <b>开场白</b>
-          <div className="f-hint">
-            她还没跟我们说过话。点「写开场白」，Mac 按 kb 里的破冰写法写一句先打招呼的话，在「待审批」里等你看过再发。
-            新加的好友通过以后一直没说话，系统会自己写一份，不用点；加好友过了很久才登记的，系统不知道她之前说没说过，不自己写，会留一条提示请你看一眼微信。
-          </div>
+          {deal.last_message_at ? (
+            <div className="f-hint">
+              她说过话（比如加好友时的「我是…」），可我们还没正式回过她：她那份草稿没发，最多只有机器人自动回的「稍等」。
+              点「写开场白」，Mac 按 kb 写我们正式的第一句（和别的开场白一样附款式图），在「待审批」里等你看过再发。
+            </div>
+          ) : (
+            <div className="f-hint">
+              她还没跟我们说过话。点「写开场白」，Mac 按 kb 里的破冰写法写一句先打招呼的话，在「待审批」里等你看过再发。
+              新加的好友通过以后一直没说话，系统会自己写一份，不用点；加好友过了很久才登记的，系统不知道她之前说没说过，不自己写，会留一条提示请你看一眼微信。
+            </div>
+          )}
           <div>
             <button type="button" className="btn" disabled={busy || !p.active || deal.mode !== 'copilot'}
               onClick={() => run({ action: 'opening' }, '已请 Mac 写开场白，写好会出现在「待审批」里')}>
