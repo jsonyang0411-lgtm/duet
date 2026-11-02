@@ -102,7 +102,7 @@ def test_one_click_makes_the_group_and_every_later_draft_job_hears_of_it(clock, 
                         "name": f"{BOSS}、{HER}", "members": 3}
     deal_group, status = shown(b)
     assert deal_group == {"state": "created", "label": "已建好", "at": clock.now, "by": "console", "why": "",
-                          "chat_name": f"{BOSS}、{HER}", "made": True}
+                          "chat_name": f"{BOSS}、{HER}", "made": True, "reading": False}   # (this backend reads no group)
     assert status == {"enabled": True, "with": [BOSS], "why": "", "busy": None, "name_template": "品牌测试×{昵称}"}
     names = [event_out(e)["name"] for e in b.prm.store.events(b.deal_id, kinds=(tp.EVENT,))]
     assert names == ["三方群建好了（运营点的）", "开始拉三方群（运营点的）"]

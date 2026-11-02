@@ -814,13 +814,14 @@ class TestPrmPages:
         shows it with 「复制群名」; 「群已经不在了」 takes it back; one the bot is unsure of asks 「建好了 / 没建成」.
         Every name is made up."""
         from types import SimpleNamespace
-        from test_three_party import Admin, Auto, Backend
+        from test_prm_three_party_chat import Watching
+        from test_three_party import Admin, Auto
         from src.prm.three_party import ThreeParty
 
         service = prm.service
         service.three_party = ThreeParty(service.store, SimpleNamespace(prm_group_with="老板测试",
                                                                          prm_friend_add_brand="品牌测试"))
-        backend = Backend()
+        backend = Watching()                                              # (a backend that reads groups: 三方群里的话)
         admin = Admin(backend)
         service.three_party.attach(admin, Auto(), backend)
         service.three_party.spawn = lambda fn: fn()
@@ -847,6 +848,7 @@ class TestPrmPages:
         assert admin.calls[-1] == (["小美测试", "老板测试"], False)
         text = block.inner_text()
         assert "三方群已建好" in text and "「品牌测试×小美」" in text and block.locator("button:has-text('复制群名')").count() == 1
+        assert "机器人在读这个群（只读，不在群里说话）：群里谁说了什么，会交给她私聊的草稿" in text
         assert block.locator("button:has-text('拉三方群')").count() == 0
         block.locator("button:has-text('群已经不在了')").click()
         page.wait_for_timeout(1200)
@@ -862,6 +864,7 @@ class TestPrmPages:
         block.locator("button:has-text('建好了')").click()
         page.wait_for_timeout(1200)
         assert "三方群已建好" in block.inner_text() and "手动标的" in block.inner_text()
+        assert "机器人不知道这是哪个群（手动标的），读不到群里的话" in block.inner_text() and "起草备注" in block.inner_text()
         assert service.store.deal(deal_id)["three_party"]["state"] == "created"
 
     def test_deals_page_runs_a_deal_stage_mode_waybill_and_numbers(self, page, prm):

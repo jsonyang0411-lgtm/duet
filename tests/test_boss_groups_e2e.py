@@ -832,10 +832,12 @@ def test_the_group_our_own_three_party_click_made_is_never_taken_over(world, sca
     rows = world.prm_store.boss_groups()
     assert [(r["chat"], r["state"], r["why"]) for r in rows] == ([(OURS, "ignored", bg.HAS_GROUP_WHY)] if scan_while_made
                                                                  else [])
-    assert OURS not in run.backend._watched and not run.prm.is_party_group(OURS)
+    # never taken over as the boss's; read only as her own 三方群 (2026-11-02: its lines go to her private drafts)
+    assert OURS in run.backend._watched and not run.prm.is_party_group(OURS)
+    assert run.prm.three_party.deal_of_chat(OURS)["id"] == deal_id
     assert world.prm_store.deal(deal_id)["three_party"] == made and len(world.prm_store.parties()) == 1
-    # the bot reads it from its next start on (WECHAT_GROUPS *: the backend's start resolves the chats, primes them):
-    # her words and the boss's there are kept and never answered
+    # (WECHAT_GROUPS *: the backend's start resolves the chats, primes them): her words and the boss's there are kept
+    # for her private drafts and never answered
     run.backend._resolve_groups()
     run.backend._prime_known_ids()
     world.clock.now += 5
@@ -843,8 +845,12 @@ def test_the_group_our_own_three_party_click_made_is_never_taken_over(world, sca
     world.db.line(OURS, BOSS, "你们聊", world.clock.now + 1)
     world.clock.now += 2
     run.poll()
-    assert run.lines(OURS) == [(TESTER, "老板好，我在群里了"), (BOSS, "你们聊")] and world.stored(OURS) == 2
+    # (the watch's catch-up hands on WeChat's line of the group being made too: never kept, never answered)
+    assert run.lines(OURS) == [("", f'"{BOSS_NAME}"邀请你加入了群聊'), (TESTER, "老板好，我在群里了"), (BOSS, "你们聊")]
+    assert world.stored(OURS) == 3                                            # (the route keeps all three)
     assert [job for job in world.jobs() if job["chat_id"] == OURS] == [] and world.window.typed == []
+    kept = [ev["detail"] for ev in world.prm_store.events(deal_id, limit=10, kinds=("group_line",))]
+    assert sorted((d["who"], d["text"]) for d in kept) == [("boss", "你们聊"), ("creator", "老板好，我在群里了")]
 
 
 def test_a_group_with_two_people_she_may_be_waits_for_the_consoles_pick(world):

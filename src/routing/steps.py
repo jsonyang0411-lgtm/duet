@@ -101,10 +101,12 @@ def prm(ctx: RouteContext) -> Optional[Stop]:
     ever said to the creator here, so the route ends without a reply.  After
     ``claude_relay``: an admin's cc stays the relay's.
 
-    The one group the copilot takes: a 老板拉的群 it took over (PRM_BOSS_GROUPS,
+    The groups the copilot takes: a 老板拉的群 it took over (PRM_BOSS_GROUPS,
     src/prm/boss_groups.py).  Every line there ends here, silently: hers becomes a draft
     job like a private one, the boss's and the other members' are kept for her next
-    draft.  Every other group passes on to silence."""
+    draft.  And her own 三方群 (the one 「拉三方群」 made, 2026-11-02): read only, every line
+    ends here, silently, kept for her private drafts; never a draft job.  Every other group
+    passes on to silence."""
     service = getattr(ctx.router, "_prm", None)
     if service is None:
         return None
@@ -118,7 +120,12 @@ def prm(ctx: RouteContext) -> Optional[Stop]:
     if not handled:
         return None
     # phone numbers, addresses: not in the log
-    ctx.trace.redact("[老板拉的群（已接手），内容不记录]" if group else "[已登记达人的私聊，内容不记录]")
+    if not group:
+        ctx.trace.redact("[已登记达人的私聊，内容不记录]")
+    elif service.is_party_group(ctx.msg.get("chat_id", "")):
+        ctx.trace.redact("[老板拉的群（已接手），内容不记录]")
+    else:                                              # her own 三方群: read only, its lines kept for her private drafts
+        ctx.trace.redact("[她的三方群（只读），内容不记录]")
     ctx.trace.reason("prm_copilot")
     return Stop(None)
 

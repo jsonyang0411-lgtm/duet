@@ -42,6 +42,7 @@ NAME_MAX_CHARS = 30                    # a WeChat group name
 FIND_LOOKS = 10                        # after 「完成」 the database is looked at this many times for the new group,
 FIND_STEP_SEC = 2.0                    # this far apart
 WHY_CHARS = 300
+WATCH_BACK_SEC = 300                   # a group just made is read from shortly before (its first lines)
 _SPLIT = re.compile(r"[,，、;；]")
 _SEPARATORS = " ×xX*·-—_|／/"
 
@@ -109,11 +110,66 @@ class ThreeParty:
         self._busy: Optional[int] = None          # the deal whose group is being made or tried
         self._dry = False                         # ... tried only (「先试一下」: nothing is made)
         self._tries: dict[int, dict] = {}         # deal id -> its last 「先试一下」 ({"at", "ok", "message"})
+        # 三方群里的话 (2026-11-02): where the watch of a deal's group starts again (PrmService._group_since)
+        self.since_of: Optional[Callable[[dict], float]] = None
 
     # ── wiring (Bot.run) ──────────────────────────────────────────────────
 
     def attach(self, admin=None, auto=None, backend=None) -> None:
         self._admin, self._auto, self._backend = admin, auto, backend
+        self.watch_all()                          # (wired after the PRM started, or before it: watched once either way)
+
+    # ── 三方群里的话 (2026-11-02): her group read only, its lines for her private drafts ──────────────
+
+    def deal_of_chat(self, chat: str) -> Optional[dict]:
+        """The deal whose 三方群 this group is (made, its ``chat`` known: the bot made it, or found it), or None.  Not a
+        老板拉的群 (``by`` boss): that one is src/prm/boss_groups.py's."""
+        chat = str(chat or "")
+        if not chat.endswith("@chatroom"):
+            return None
+        for deal in self._store.deals():
+            group = deal.get("three_party") or {}
+            if group.get("state") == CREATED and group.get("chat") == chat and group.get("by") != "boss":
+                return deal
+        return None
+
+    def reading(self) -> bool:
+        """Can this PC read a group whatever WECHAT_GROUPS says (the backend's ``watch_group``)?"""
+        return callable(getattr(self._backend, "watch_group", None))
+
+    def watch_all(self) -> int:
+        """Read every deal's 三方群 again (``watch_group``, read only: its lines go to PrmService._three_party_line),
+        each from where ``since_of`` says (a second after its last line kept).  Returns how many."""
+        if not self.reading():
+            return 0
+        watched = 0
+        for deal in self._store.deals():
+            group = deal.get("three_party") or {}
+            if group.get("state") == CREATED and str(group.get("chat") or "").endswith("@chatroom") and group.get("by") != "boss":
+                since = self.since_of(deal) if self.since_of is not None else float(group.get("at") or self._clock())
+                self._watch(str(group["chat"]), since)
+                watched += 1
+        if watched:
+            logger.info("PRM: 三方群: %d group(s) read again (read only)", watched)
+        return watched
+
+    def _watch(self, chat: str, since: float) -> None:
+        watch = getattr(self._backend, "watch_group", None)
+        if not callable(watch):
+            return
+        try:
+            watch(chat, since)
+        except Exception:
+            logger.exception("PRM: 三方群 %s… could not be watched", chat[:8])
+
+    def _unwatch(self, chat: str) -> None:
+        unwatch = getattr(self._backend, "unwatch_group", None)
+        if not chat or not callable(unwatch):
+            return
+        try:
+            unwatch(chat)
+        except Exception:
+            logger.exception("PRM: 三方群 %s… could not be unwatched", chat[:8])
 
     @property
     def enabled(self) -> bool:
@@ -139,6 +195,10 @@ class ThreeParty:
     def deal_out(self, deal: Optional[dict]) -> dict:
         """``state_out`` and the deal's last 「先试一下」 (``tried``)."""
         out = state_out(deal)
+        group = (deal or {}).get("three_party") or {}
+        if out:                                   # (read only, for her private drafts: 三方群里的话)
+            out["reading"] = bool(group.get("state") == CREATED and group.get("chat") and group.get("by") != "boss"
+                                  and self.reading())
         tried = self._tries.get(int((deal or {}).get("id") or 0))
         return {**out, "tried": dict(tried)} if tried else out
 
@@ -256,6 +316,7 @@ class ThreeParty:
                 return
             self._set(deal, {"state": CREATED, "at": now, "by": actor, "chat": found["chat"],
                              "name": str(found.get("name") or "")[:60], "members": int(found.get("members") or 0)}, now)
+            self._watch(str(found["chat"]), now - WATCH_BACK_SEC)   # read only from now on: its lines for her drafts
             logger.info("PRM: 三方群 for deal %d made (%d member(s) in it)", deal_id, int(found.get("members") or 0))
         except Exception:
             logger.exception("PRM: 三方群 for deal %d failed", deal_id)
@@ -306,8 +367,12 @@ class ThreeParty:
         if made:
             self._set(deal, {"state": CREATED, "at": now, "by": actor, **({"chat": group["chat"]} if group.get("chat") else {})},
                       now)
+            if group.get("chat") and group.get("by") != "boss":
+                self._watch(str(group["chat"]), now - WATCH_BACK_SEC)
         else:
             self._set(deal, {}, now)
+            if group.get("chat") and group.get("by") != "boss":
+                self._unwatch(str(group["chat"]))       # gone: no longer read
         return {"ok": True, "state": CREATED if made else ""}
 
     def settle(self) -> int:

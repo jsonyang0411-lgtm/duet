@@ -1869,7 +1869,9 @@ def test_a_group_found_while_her_three_party_group_is_being_made_waits_and_is_lo
         assert taken == 1 and row["state"] == "linked" and bot.prm.is_party_group(GROUP)
     else:
         assert taken == 0 and (row["state"], row["why"]) == ("ignored", bg.HAS_GROUP_WHY)
-        assert not bot.prm.is_party_group(GROUP) and bot.backend.watched == {}
+        # the boss's group is not taken; her own 三方群, made, is read only (2026-11-02: its lines go to her private drafts)
+        ours = bot.prm.store.deal(deal_id)["three_party"].get("chat")
+        assert not bot.prm.is_party_group(GROUP) and set(bot.backend.watched) == ({ours} if ours else set())
 
 
 def test_a_creator_the_boss_introduced_has_his_name_hidden_in_her_new_friend_catch_up(bot):

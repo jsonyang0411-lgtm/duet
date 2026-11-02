@@ -496,7 +496,7 @@ function ThreePartyBlock({ p, d, busy, run }) {
         <>
           <div><UsersThree style={{ verticalAlign: -2 }} /> 老板拉的群（{fmtClock(g.at)} 发现）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
           <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <span className="f-hint">老板把她和我们拉进了这个群，之后由我们跟她对接：她在群里说的话照常起草，回复发在群里，老板也看得到；老板和别人说的话不起草。</span>
+            <span className="f-hint">老板把她和我们拉进了这个群，之后由我们跟她对接：她在群里说的话照常起草，回复发在群里，老板也看得到；老板和别人说的话不起草。群里的话也会交给她私聊的草稿。</span>
             {gone}
           </div>
         </>
@@ -509,6 +509,9 @@ function ThreePartyBlock({ p, d, busy, run }) {
             <button type="button" className="btn sm" onClick={copyName}><Copy />复制群名</button>
             {gone}
           </div>
+          {g.reading
+            ? <div className="f-hint prm-group-reading">机器人在读这个群（只读，不在群里说话）：群里谁说了什么，会交给她私聊的草稿，群里谈定的以群里为准。</div>
+            : <div className="f-hint prm-group-reading">{g.made ? '这台电脑读不了群' : '机器人不知道这是哪个群（手动标的）'}，读不到群里的话：群里谈定了什么，写进这张合作单的「起草备注」，她私聊的草稿才知道。</div>}
         </>
       )}
       {g.state === 'unsure' && (

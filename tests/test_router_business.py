@@ -136,6 +136,44 @@ class TheBossGroupIsTheOneException(GatewayCase):
         assert self.relay.store.list_jobs(limit=1000) == []
 
 
+class HerThreePartyGroupIsReadOnly(GatewayCase):
+    """三方群里的话 (2026-11-02): her own 三方群 (the group 「拉三方群」 made) is read only.  Every line there, the boss's,
+    hers, the admin's (an @, a cc, his commands, a join line, a picture, a voice) ends in the copilot's step silently and
+    is kept for her private drafts; nothing is answered, no draft job is made; the log never has its words."""
+
+    OURS = "300000001@chatroom"
+    HER = "wxid_creator01"
+
+    def three_party_gateway(self):
+        router = self.gateway()
+        cfg = SimpleNamespace(admin_wxid=ADMIN, claude_relay_wxids=[], prm_copilot="on", prm_group_with="老板测试")
+        self.prm = PrmService(cfg, self.relay, store=PrmStore(":memory:"), clock=lambda: NOW,
+                              send=lambda chat, text: self.fail(f"nothing is sent ({chat})"))
+        party = self.prm.register(self.HER, "小美", "测试达人")
+        self.deal_id = self.prm.store.deal_of(party["id"])["id"]
+        self.prm.store.update_deal(self.deal_id, NOW, three_party={"state": "created", "at": NOW, "by": "console",
+                                                                    "chat": self.OURS})
+        router._prm = self.prm
+        return router
+
+    def test_every_line_of_her_three_party_group_is_kept_and_never_answered(self):
+        router = self.three_party_gateway()
+        self.assertFalse(self.prm.is_party_group(self.OURS))           # (not a 老板拉的群 the bot drafts in)
+        for i, fields in enumerate(GROUP_MESSAGES):
+            for sender in ("wxid_boss01", self.HER):
+                line = {"sender_name": "某人", **fields, "sender_id": fields.get("sender_id", sender)}
+                assert router.handle(group_msg(f"t{i}{sender}", chat_id=self.OURS, **line)) is None, line
+                assert self.trace.notes["ended_by"] == "prm", line
+                assert self.trace.redacted == "[她的三方群（只读），内容不记录]"
+        assert self.relay.store.list_jobs(limit=1000) == []
+        kept = self.prm.store.events(self.deal_id, limit=500, kinds=("group_line",))
+        assert kept and all(ev["detail"]["chat"] == self.OURS for ev in kept)
+        assert not any("新人" in ev["detail"]["text"] for ev in kept)           # (WeChat's join line is not kept)
+        # her lines in any other group stay silent, as ever
+        assert router.handle(group_msg("x1", "在吗", sender_id=self.HER)) is None
+        assert self.trace.notes["ended_by"] == "silence" and self.relay.store.list_jobs(limit=1000) == []
+
+
 class NoStrangerIsEverAnswered(GatewayCase):
     def test_a_private_chat_that_is_no_task_ends_in_silence(self):
         router = self.gateway()

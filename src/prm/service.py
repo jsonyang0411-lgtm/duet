@@ -169,6 +169,15 @@ ACK_WORDS = tuple(sorted(("好滴", "好的", "好嘞", "好哒", "好咧", "好
 _ACK_STAMP = re.compile(r"^\[\d{2}-\d{2} \d{2}:\d{2}\]\s*")
 _ACK_TAGS = re.compile(r"\[(?:表情|动画表情|微笑|OK|强|抱拳|握手|玫瑰|爱心|憨笑|呲牙|偷笑|可爱|害羞|愉快|耶|胜利|拥抱|鼓掌)\]")
 _ACK_NOISE = re.compile("[\\s～~!！。.，,、…?？呀啊啦哈嘛呢哟哇喔\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F]+")
+# 三方群里的话 (2026-11-02, the user: 「第一点要知道」: what the boss settles in her 三方群, the styles, the samples, the
+# commission, her private drafts must know): every line of her 三方群 the bot reads (the one 「拉三方群」 made: read only,
+# never answered; a 老板拉的群 it took over) is kept on her deal (``GROUP_LINE`` events: masked, the bosses' names as
+# PRM_BOSS_CALL), and each draft job of her private chat is told the latest GROUP_LINES_TOLD (``meta.three_party_chat``)
+GROUP_LINE = "group_line"
+GROUP_LINES_TOLD = 20
+GROUP_LINE_CHARS = 300
+GROUP_WHO_LABELS = {"creator": "她", "us": "我们", "member": "群里的人"}   # (the boss: PRM_BOSS_CALL)
+THREE_PARTY_WATCH_BACK_SEC = 300   # her 三方群 is read from shortly before it was made, a restart from its last line kept
 # Mac 重启以前发的、后来 Windows 才报失败的：没有发送时间时往回找这么久（edge 后端的发送记录留一天）
 RESTART_FAIL_SEC = 86400
 CATCHUP_HOURS = 12           # PRM_CATCHUP_HOURS: a message read late is drafted up to this old (0-72)
@@ -691,7 +700,7 @@ EVENT_NAMES = {
     "platform_recheck": "平台动作要先核对", "sample_status": "聚水潭寄样单状态",
     "commission_covered": "邀约卡开过专属佣金，当作开好",
     "night_send": "夜间自动发出", "night_done": "夜间自动回的过渡话已处理",
-    "opening_auto": "开场白没人处理，自动发出",
+    "opening_auto": "开场白没人处理，自动发出", GROUP_LINE: "三方群里的一句话",
     "auto_register": "自动登记（新好友）", "opening": "派写开场白的任务",
     "buyin_message": "百应私信", "buyin_copy": "复制百应私信草稿（含完整号码）", "buyin_sent": "运营已在百应手动发出",
     "buyin_draft_failed": "百应私信的草稿没写成",
@@ -787,6 +796,8 @@ def event_out(ev: dict) -> dict:
         name = ("老板拉的群不在了（运营说的），群里她的消息不再起草" if detail.get("gone") else
                 "老板拉群介绍" + (f"（{detail['name']}）" if detail.get("name") else "")
                 + ("，她原来的三方群保留" if detail.get("kept") else ""))
+    elif ev["kind"] == GROUP_LINE:
+        name = f"三方群里（{detail.get('label') or GROUP_WHO_LABELS.get(str(detail.get('who') or ''), '群里的人')}）"
     elif ev["kind"] == "buyin_message":
         name = "百应私信：我方（运营在百应里回的）" if detail.get("from") == "shop" else "百应私信：达人"
     elif ev["kind"] == GROUP_EVENT:
@@ -954,7 +965,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
                 "shipment": {k: shipment[k] for k in ("carrier", "waybill", "status", "updated_at")}
                 if shipment else None,
                 "shipment_status_label": SHIPMENT_STATES.get((shipment or {}).get("status", ""), ""),
-                "events": [event_out(e) for e in store.events(deal["id"], limit=12)],
+                "events": [event_out(e) for e in store.events(deal["id"], limit=60) if e["kind"] != GROUP_LINE][:12],
                 "three_party": group_of(deal),
                 "draft_note": str(deal.get("draft_note") or ""),      # 起草备注: as the operators wrote it
             },
@@ -1170,6 +1181,7 @@ class PrmService:
         self.friend_adds = FriendAdds(self._store, config, clock=clock, register=self.register)
         # 三方群 (src/prm/three_party.py): 「拉三方群」 in a deal makes the group in the WeChat window (Bot.run attaches it)
         self.three_party = ThreeParty(self._store, config, clock=clock)
+        self.three_party.since_of = self._group_since  # (her 三方群 read again from its last line kept)
         # on_buyin_contact(event) -> {"id", "state", "masked"} | None: told of each new contact card a creator sent in a
         # 百应 conversation that is ours (our invite, or a registered creator's), with its values in full
         # (``_buyin_contacts``), and of each contact she typed in her own words there: 加百应达人微信's offer_from_buyin
@@ -1209,6 +1221,8 @@ class PrmService:
         # READ_BACK_SEC they are no new line (_match_own).
         self._read_back: dict[str, dict[str, float]] = {}
         self._sent_lock = threading.Lock()
+        self._group_seen: dict[str, deque] = {}    # her 三方群 -> the message ids kept this run (``_first_group_line``)
+        self._group_seen_lock = threading.Lock()
         self._started = clock()               # what this run sent is in _sent_lines / _sent_files
         # This PC's clock minus WeChat's (win review F6), measured by this run's own lines read back
         # (``_note_clock``); 0 until then and within CLOCK_NOISE_SEC.  ``_local`` puts WeChat's times
@@ -1264,6 +1278,10 @@ class PrmService:
             self.boss_groups.start()               # (老板拉的群 the bot took over: read again from their last line)
         except Exception:
             logger.exception("PRM: the boss groups taken over could not be read again")
+        try:
+            self.three_party.watch_all()           # (her own 三方群: read again, read only, from its last line kept)
+        except Exception:
+            logger.exception("PRM: the deals' 三方群 could not be read again")
         if not self.boss_groups.on:
             # 老板拉的群 switched off: a draft for such a group still waiting is never sent (``send_approved`` too)
             stale = [p for p in self._store.packets((PENDING, APPROVED), limit=500) if is_group_packet(p)]
@@ -1566,6 +1584,9 @@ class PrmService:
         never drafted (a recall that names no boss is taken for hers: the drafts not sent wait for a person)."""
         chat_id = str(msg.get("chat_id", ""))
         row = self.boss_groups.linked(chat_id)
+        if row is None:
+            deal = self.three_party.deal_of_chat(chat_id)
+            return self._three_party_line(msg, deal) if deal is not None else False
         party = self._store.party(int(row["party_id"] or 0)) if row is not None else None
         if party is None or not party.get("active"):
             return False
@@ -1581,6 +1602,10 @@ class PrmService:
             else:
                 logger.info("PRM: a WeChat system line in boss group %s…; not drafted", chat_id[:8])
             return True
+        self._group_line(party, chat_id, "creator" if str(msg.get("sender_id") or "") == party["wxid"] else
+                         ("boss" if self.boss_groups.who(row, str(msg.get("sender_id") or ""),
+                                                         str(msg.get("sender_name") or "")) == BOSS_WHO else "member"),
+                         message_text(msg), self._local(written) if written else now, now)
         if str(msg.get("sender_id") or "") != party["wxid"]:
             who = self.boss_groups.who(row, str(msg.get("sender_id") or ""), str(msg.get("sender_name") or ""))
             self.boss_groups.add_context(chat_id, who, self._mask(party["id"], message_text(msg), now),
@@ -1591,6 +1616,93 @@ class PrmService:
             return True
         self._take(msg, party, chat_id, group=row)
         return True
+
+    def _three_party_line(self, msg: dict, deal: dict) -> bool:
+        """``handle`` for a line of her own 三方群 (the one 「拉三方群」 made, ``ThreeParty.deal_of_chat``; 2026-11-02): read
+        only.  Always True and silent: never a draft job, never a reply, no holding reply; the line is kept on her deal
+        for her private drafts (``_group_line``), WeChat's own lines (joins, recalls, 拍一拍) are not.  A deal whose
+        creator was removed from the list keeps nothing.  The same line handed on twice (a catch-up) is kept once."""
+        chat_id = str(msg.get("chat_id", ""))
+        party = self._store.party(int(deal.get("party_id") or 0))
+        if party is None or not party.get("active"):
+            return True
+        if not self._first_group_line(chat_id, msg.get("message_id")):
+            return True
+        if system_line(msg) is not None or msg.get("is_system_join") or is_friend_notice(msg):
+            return True
+        now = self._clock()
+        written = float(msg.get("timestamp", 0) or 0)
+        sender = str(msg.get("sender_id") or "")
+        who = ("creator" if sender == party["wxid"] else
+               "boss" if self.boss_groups.who({}, sender, str(msg.get("sender_name") or "")) == BOSS_WHO else "member")
+        self._group_line(party, chat_id, who, message_text(msg), self._local(written) if written else now, now)
+        logger.info("PRM: a line in party %d's 三方群 %s… kept for her private drafts (read only, not answered)",
+                    party["id"], chat_id[:8])
+        return True
+
+    def _own_three_party_line(self, msg: dict, deal: dict) -> None:
+        """This account's own line in her 三方群 (``on_own_message``): the bot never writes there, so it is an operator's;
+        kept as ours (``_group_line``, who ``us``) for her private drafts.  No takeover: the group is where the boss and
+        the operators talk, her private chat stays the copilot's.  WeChat's own lines there are not kept."""
+        party = self._store.party(int(deal.get("party_id") or 0))
+        if party is None or not party.get("active") or system_line(msg) is not None:
+            return
+        chat_id = str(msg.get("chat_id", ""))
+        if not self._first_group_line(chat_id, msg.get("message_id")):
+            return
+        now = self._clock()
+        written = float(msg.get("timestamp", 0) or 0)
+        self._group_line(party, chat_id, "us", message_text(msg), self._local(written) if written else now, now)
+        logger.info("PRM: our own line in party %d's 三方群 %s… kept for her private drafts (no takeover)",
+                    party["id"], chat_id[:8])
+
+    def _first_group_line(self, chat_id: str, message_id) -> bool:
+        """Is this line of her 三方群 new to this run (its message id; a line without one always is)?"""
+        if message_id in (None, ""):
+            return True
+        key = str(message_id)
+        with self._group_seen_lock:
+            seen = self._group_seen.setdefault(chat_id, deque(maxlen=500))
+            if key in seen:
+                return False
+            seen.append(key)
+            return True
+
+    def _group_line(self, party: dict, chat_id: str, who: str, text: str, at: float, now: float) -> None:
+        """One line of her 三方群 kept on her deal (``GROUP_LINE``): who wrote it (creator | us | boss | member), when
+        (this PC's clock), the words masked like hers (phone and ID numbers as her placeholders) with the bosses' names
+        as PRM_BOSS_CALL, at most GROUP_LINE_CHARS."""
+        said = self._mask(party["id"], self.boss_groups.hide(str(text or "")), now)[:GROUP_LINE_CHARS]
+        if not said.strip():
+            return
+        deal = self._store.deal_of(party["id"], now)
+        label = self.boss_groups.call if who == "boss" else GROUP_WHO_LABELS.get(who, "群里的人")
+        self._store.add_event(deal["id"], party["id"], GROUP_LINE,
+                              {"chat": chat_id, "who": who, "label": label, "text": said, "at": float(at)},
+                              actor="system", now=now)
+
+    def _group_lines(self, deal_id: int) -> list[dict]:
+        """What a draft job of her private chat is told of her 三方群 (``meta.three_party_chat``): its latest
+        GROUP_LINES_TOLD lines kept (``_group_line``), oldest first, ``{"who": label, "at": "MM-DD HH:MM", "text"}``;
+        [] for none."""
+        lines = [ev for ev in self._store.events(deal_id, limit=GROUP_LINES_TOLD, kinds=(GROUP_LINE,))]
+        out = []
+        for ev in sorted(lines, key=lambda e: (float(e["detail"].get("at") or e["at"]), e["id"])):
+            detail = ev["detail"]
+            out.append({"who": str(detail.get("label") or GROUP_WHO_LABELS.get(str(detail.get("who") or ""), "群里的人")),
+                        "at": _clock_text(float(detail.get("at") or ev["at"])), "text": str(detail.get("text") or "")})
+        return out
+
+    def _group_since(self, deal: dict) -> float:
+        """Where the watch of her 三方群 starts after a restart (``ThreeParty.watch_all``): a second after its last line
+        kept, or shortly before the group was made (THREE_PARTY_WATCH_BACK_SEC) when none is."""
+        chat = str((deal.get("three_party") or {}).get("chat") or "")
+        kept = [float(ev["detail"].get("at") or ev["at"])
+                for ev in self._store.events(deal["id"], limit=50, kinds=(GROUP_LINE,))
+                if str(ev["detail"].get("chat") or "") == chat]
+        if kept:
+            return max(kept) + 1
+        return float((deal.get("three_party") or {}).get("at") or self._clock()) - THREE_PARTY_WATCH_BACK_SEC
 
     def _redraft_group(self, party: dict, chat_id: str, row: dict, now: float) -> None:
         """The boss (or another member) said something in her 老板拉的群 while her draft for the group waits in 待审批
@@ -1774,6 +1886,10 @@ class PrmService:
         made = self.three_party.job_meta(deal)         # (not ``group``: that is the 老板拉的群 she wrote in)
         if made:
             meta["three_party"] = made                 # 三方群 made: the case file's 【待拉三方群】 is done
+        if group is None:
+            told = self._group_lines(deal["id"])
+            if told:
+                meta["three_party_chat"] = told         # what was said in her 三方群 lately (read only, ``_group_line``)
         outbound = self._outbound(deal["id"], party["id"], now, unsent=[packet for packet, _, _ in outdated])
         if outbound:
             meta["sent"] = outbound
@@ -2037,6 +2153,11 @@ class PrmService:
         """
         chat_id = str(msg.get("chat_id", ""))
         group = bool(msg.get("is_group")) and self.boss_groups.is_linked(chat_id)
+        if msg.get("is_group") and not group:
+            deal = self.three_party.deal_of_chat(chat_id)
+            if deal is not None:
+                self._own_three_party_line(msg, deal)
+            return
         if not group and (chat_id not in self._wxids or is_friend_notice(msg)):
             return                                         # (a friend notice is WeChat's, not an operator's)
         party = self._group_party(chat_id) if group else self._store.party_by_wxid(chat_id)
@@ -3064,8 +3185,12 @@ class PrmService:
                 OPENING: {"how": how, "by": by, **({"wrote": True} if deal.get("last_message_at") else {})}}
         if group is not None:
             meta.update(channel=GROUP_CHANNEL, group=self.boss_groups.job_group(chat))
-        elif self._opening_auto_sec:
-            meta["opening_auto"] = self._opening_auto_sec // 60   # the Mac hears its draft may go out by itself (worker)
+        else:
+            told = self._group_lines(deal["id"])
+            if told:
+                meta["three_party_chat"] = told         # what was said in her 三方群 lately
+            if self._opening_auto_sec:
+                meta["opening_auto"] = self._opening_auto_sec // 60   # the Mac hears its draft may go out by itself
         creator = self._creator_ids(deal["id"])
         if creator:
             meta["creator"] = creator
