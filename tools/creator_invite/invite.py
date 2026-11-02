@@ -97,6 +97,10 @@ DEFAULT_RULES = {
     "big_live_min": 5000000, "big_level_min": 4,          # 专场型：直播为主、近 30 天直播销售额区间下限 ≥ 500 万、LV4 及以上
     "suspect_hat_share": 90.0,
     "female_min": 60.0,                                    # 女性粉丝低于它的不进清单（我们卖女帽：用户 2026-10-29）
+    # 粉丝客单价（粉丝画像里她的粉丝占比最大的那一档，「客单价100-200元」）的下限低于它的不进清单，画像里没有的只标出来；
+    # 0 = 不看。2026-11-02 用户定 100：我们的帽子多在 200～330 元，粉丝平时一单花不到 100 的不太会买（发过卡的人里，
+    # 这一档 ≥ 100 元和 < 100 元的回复率一样，去掉的只是这部分）
+    "fans_price_min": 0,
     "low_hat_share": 1.0,                                  # 帽子占比低于它的标出来（只是标，不去掉）
     # 专门带自己牌子的不进（用户 2026-10-29）：名字像店铺 / 品牌号，或这次找到的人里好几个号用同一个店名开头（店铺矩阵号）
     "own_brand_words": "女装|男装|童装|服饰|服装|羽绒|皮草|鹅绒|貂|大码|工厂|厂家|源头|档口|批发|尾货|仓储|仓库|老板娘|旗舰|官方|专卖|门店|实体|店|品牌|定制|高定|上新",
@@ -275,6 +279,7 @@ def load_config(path: Optional[str]) -> dict:
     cfg["find"] = find
     rules = dict(DEFAULT_RULES)
     rules.update(raw.get("rules") or {})
+    rules["fans_price_min"] = _number(rules, "fans_price_min", 0, 0, 500)   # 档位最高「500元以上」：再高谁都进不来
     try:
         re.compile(str(rules["own_brand_words"] or ""))
     except re.error as e:
@@ -538,6 +543,31 @@ def female_share(row: dict) -> Optional[float]:
     return round(value if m.group(1) == "女性" else 100.0 - value, 2)
 
 
+FANS_PRICE = re.compile(r"^\s*客单价\s*(?:(\d+)\s*-\s*(\d+)\s*元|(\d+)\s*元以下|(\d+)\s*元以上)")
+
+
+def fans_price(row: dict):
+    """粉丝画像里占比最大的客单价档（她的粉丝平时一单花多少）和这一档的下限：「客单价100-200元 30.88%」→ ("100-200元", 100.0)，
+    「客单价25元以下」→ ("25元以下", 0.0)，「客单价500元以上」→ ("500元以上", 500.0)；画像里没有、读不懂就 (None, None)。"""
+    m = FANS_PRICE.match(str((row.get("fans") or {}).get("price") or ""))
+    if not m:
+        return None, None
+    lo, hi, under, over = m.groups()
+    if lo is not None:
+        return f"{lo}-{hi}元", float(lo)
+    if under is not None:
+        return f"{under}元以下", 0.0
+    return f"{over}元以上", float(over)
+
+
+def fans_crowd(row: dict) -> Optional[str]:
+    """粉丝画像里占比最大的人群：「精致妈妈 30.82%」→ 精致妈妈（平台写的 genz 写成 Z世代）；没有就 None。"""
+    m = re.match(r"^\s*(\S+?)(?:\s+\d+(?:\.\d+)?%)?\s*$", str((row.get("fans") or {}).get("crowd") or ""))
+    if not m:
+        return None
+    return "Z世代" if m.group(1).lower() == "genz" else m.group(1)
+
+
 def band_min(band) -> float:
     return float(band.get("min") or 0) if isinstance(band, dict) and band.get("available") else 0.0
 
@@ -733,12 +763,14 @@ def find_on_douyin(cfg: dict, clis: Clis, known: set) -> dict:
 
 
 def creator_view(row: dict) -> dict:
+    price, price_low = fans_price(row)
     return {
         "source": row.get("_source") or "聚水潭",
         "aweme_id": str(row.get("platformNo") or ""), "nickname": str(row.get("nickName") or ""),
         "fans": row.get("fansNum"), "sales30d": (row.get("sales30d") or {}).get("label") if isinstance(row.get("sales30d"), dict) else None,
         "avg_price": row.get("avgPrice"), "level": row.get("level"), "channel": row.get("channelBySales") or row.get("mainChannel"),
         "category_goods": row.get("category"), "hat_share": hat_share(row), "female_share": female_share(row),
+        "fans_price": price, "fans_price_low": price_low, "fans_crowd": fans_crowd(row),
     }
 
 
@@ -816,6 +848,9 @@ def build_plan(cfg: dict, clis: Clis, ledger: Ledger, count: int, *, moment: Opt
         if view["female_share"] is not None and view["female_share"] < rules["female_min"]:
             excluded.append({**view, "reason": f"女性粉丝 {view['female_share']}%（低于 {rules['female_min']}%）"})
             continue
+        if rules["fans_price_min"] and view["fans_price_low"] is not None and view["fans_price_low"] < rules["fans_price_min"]:
+            excluded.append({**view, "reason": f"粉丝客单价 {view['fans_price']}（低于 {rules['fans_price_min']:g} 元）：她的粉丝平时一单花得少"})
+            continue
         if aweme not in rules["keep_ids"]:
             why = own_brand_reason(view, rules, stems)
             if why:
@@ -834,6 +869,8 @@ def build_plan(cfg: dict, clis: Clis, ledger: Ledger, count: int, *, moment: Opt
             flags.append(f"帽子占比只有 {view['hat_share']}%")
         if view["female_share"] is None:
             flags.append("粉丝性别不知道")
+        if rules["fans_price_min"] and view["fans_price"] is None:
+            flags.append("粉丝客单价不知道")
         if view["hat_share"] is not None and view["hat_share"] >= rules["own_hat_flag"]:
             flags.append(f"帽子占比 {view['hat_share']}%：可能自己做帽子，发之前看一眼她的橱窗")
         cat, share = top_category(row)
@@ -917,7 +954,10 @@ def plan_markdown(plan: dict, plan_file: str) -> str:
     w(f"- 平台本周邀约次数（按达人等级分档，按钮浮层的原话读出）：{quotas}\n")
     w(f"- 我们自己的每周上限 {s['weekly_cap']}，台账里本周已发 {plan['ledger_sent_this_week']}；平台额度低于余量 {s['quota_margin']} 就停\n")
     f = s["find"]
-    w(f"- 筛选：类目 {f['goods_category']}，件单价 {f['price_min']}～{f['price_max']} 元，没加进达人库；"
+    fans_floor = s["rules"].get("fans_price_min")
+    w(f"- 筛选：类目 {f['goods_category']}，件单价 {f['price_min']}～{f['price_max']} 元，"
+      + (f"粉丝客单价 ≥ {fans_floor:g} 元（粉丝画像里占比最大的那一档，按它的下限比），" if fans_floor else "")
+      + "没加进达人库；"
       + "；".join(f"粉丝 {fans_range(q)}，第 {q.get('page', 1)} 页起读 {q.get('pages', 1)} 页" for q in f["queries"]) + "\n")
     dy = plan.get("douyin") or {}
     if f.get("dy_queries"):
@@ -939,13 +979,14 @@ def plan_markdown(plan: dict, plan_file: str) -> str:
         w(f"## {CATEGORY_NAMES[key]}（{len(rows)} 位）\n\n")
         if not rows:
             continue
-        w("| # | 来源 | 抖音号 | 昵称 | 粉丝 | 近 30 天销售额 | 件单价 | 等级 | 主播类型 | 帽子占比 | 女粉 | 主推 / 附带 | 状态 | 提醒 |\n"
-          "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+        w("| # | 来源 | 抖音号 | 昵称 | 粉丝 | 近 30 天销售额 | 件单价 | 粉丝客单价 | 等级 | 主播类型 | 帽子占比 | 女粉 | 粉丝人群 | 主推 / 附带 | 状态 | 提醒 |\n"
+          "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
         for i, c in enumerate(rows, 1):
             prods = names.get(c["products"]["main"], c["products"]["main"]) + " / " + "、".join(names.get(x, x) for x in c["products"]["extras"])
-            w(f"| {i} | {c.get('source') or '聚水潭'} | {c['aweme_id']} | {c['nickname']} | {c['fans']} | {c['sales30d'] or '-'} | {c['avg_price']} | LV{c['level']} | {c['channel'] or '-'} | "
-              f"{'-' if c['hat_share'] is None else str(c['hat_share']) + '%'} | {'-' if c['female_share'] is None else str(c['female_share']) + '%'} | {prods} | "
-              f"{c.get('button') or c.get('status')} | {'；'.join(c['flags'])} |\n")
+            w(f"| {i} | {c.get('source') or '聚水潭'} | {c['aweme_id']} | {c['nickname']} | {c['fans']} | {c['sales30d'] or '-'} | {c['avg_price']} | "
+              f"{c.get('fans_price') or '-'} | LV{c['level']} | {c['channel'] or '-'} | "
+              f"{'-' if c['hat_share'] is None else str(c['hat_share']) + '%'} | {'-' if c['female_share'] is None else str(c['female_share']) + '%'} | "
+              f"{c.get('fans_crowd') or '-'} | {prods} | {c.get('button') or c.get('status')} | {'；'.join(c['flags'])} |\n")
         w("\n")
     w("## 话术（按类别，字数按命令行的算法）\n\n")
     for key in CATEGORY_ORDER:
@@ -964,9 +1005,9 @@ def plan_markdown(plan: dict, plan_file: str) -> str:
     excluded_table(w, others)
     if plan.get("spare"):
         w(f"\n## 备选（查过状态、可以邀约，清单已够数，{len(plan['spare'])} 位）\n\n")
-        w("| 类别 | 抖音号 | 昵称 | 粉丝 | 件单价 | 帽子占比 | 提醒 |\n|---|---|---|---|---|---|---|\n")
+        w("| 类别 | 抖音号 | 昵称 | 粉丝 | 件单价 | 粉丝客单价 | 帽子占比 | 提醒 |\n|---|---|---|---|---|---|---|---|\n")
         for c in plan["spare"]:
-            w(f"| {CATEGORY_NAMES[c['category']]} | {c['aweme_id']} | {c['nickname']} | {c['fans']} | {c['avg_price']} | "
+            w(f"| {CATEGORY_NAMES[c['category']]} | {c['aweme_id']} | {c['nickname']} | {c['fans']} | {c['avg_price']} | {c.get('fans_price') or '-'} | "
               f"{'-' if c['hat_share'] is None else str(c['hat_share']) + '%'} | {'；'.join(c['flags'])} |\n")
     if plan.get("not_checked"):
         w(f"\n另有 {plan['not_checked']} 位符合条件、还没查平台状态（清单已够数）。\n")
@@ -987,10 +1028,12 @@ def plan_csv(plan: dict) -> str:
     names = {p["id"]: p["name"] for p in plan["products"]}
     out = io.StringIO()
     writer = csv.writer(out)
-    writer.writerow(["类别", "来源", "抖音号", "昵称", "粉丝", "近30天销售额", "件单价", "等级", "主播类型", "帽子占比%", "女粉%", "主推", "附带", "状态", "提醒", "话术"])
+    writer.writerow(["类别", "来源", "抖音号", "昵称", "粉丝", "近30天销售额", "件单价", "粉丝客单价", "等级", "主播类型", "帽子占比%", "女粉%", "粉丝人群",
+                     "主推", "附带", "状态", "提醒", "话术"])
     for c in plan["creators"]:
-        writer.writerow([CATEGORY_NAMES[c["category"]], c.get("source") or "聚水潭", c["aweme_id"], c["nickname"], c["fans"], c["sales30d"], c["avg_price"], c["level"], c["channel"],
-                         c["hat_share"], c["female_share"], names.get(c["products"]["main"]), "、".join(names.get(x, x) for x in c["products"]["extras"]),
+        writer.writerow([CATEGORY_NAMES[c["category"]], c.get("source") or "聚水潭", c["aweme_id"], c["nickname"], c["fans"], c["sales30d"], c["avg_price"],
+                         c.get("fans_price"), c["level"], c["channel"], c["hat_share"], c["female_share"], c.get("fans_crowd"),
+                         names.get(c["products"]["main"]), "、".join(names.get(x, x) for x in c["products"]["extras"]),
                          c.get("button"), "；".join(c["flags"]), c["content"]])
     return out.getvalue()
 
