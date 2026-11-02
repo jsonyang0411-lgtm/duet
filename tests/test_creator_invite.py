@@ -251,7 +251,7 @@ def test_plan_is_read_only_and_builds_the_list_by_the_users_rules(env):
     plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
     by = {c["aweme_id"]: c for c in plan["creators"]}
     assert set(by) == {"dy_small_a", "dy_small_b", "dy_gap", "dy_mid_a", "dy_big_a", "dy_big_b", "dy_video_big"}
-    assert [c["category"] for c in plan["creators"]] == ["small"] * 4 + ["mid", "big", "big"], "grouped by category; inside one, no flag first, then the higher hat share"
+    assert [c["category"] for c in plan["creators"]] == ["small"] * 4 + ["mid", "big", "big"], "grouped by category; inside one, no hat seller first, then the fewer flags"
     assert [c["aweme_id"] for c in plan["creators"]][:4] == ["dy_small_a", "dy_small_b", "dy_gap", "dy_video_big"]
     assert by["dy_big_b"]["category"] == "big" and by["dy_video_big"]["category"] == "small" and by["dy_gap"]["category"] == "small"
     assert by["dy_small_b"]["flags"] == []
@@ -449,19 +449,24 @@ def test_plan_mixes_the_three_categories_and_puts_the_better_fits_first(env):
     assert code == 0, out
     plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
     assert [c["category"] for c in plan["creators"]] == ["small", "mid", "big"], "one of each, not the first three the search gave"
-    assert plan["creators"][0]["aweme_id"] == "dy_small_a", "inside a category: no flag first, then the higher hat share (a tie: the search's order)"
+    assert plan["creators"][0]["aweme_id"] == "dy_small_a", "inside a category: no hat seller first, then the fewer flags (a tie: the search's order)"
     assert {c["aweme_id"] for c in plan["spare"]} >= {"dy_big_b"}, "checked and invitable but over the count: kept as spare, not dropped"
     md = Path(out["files"]["md"]).read_text(encoding="utf-8")
     assert "## 备选（查过状态、可以邀约" in md
     order = tool.mix_categories([{"category": k, "flags": f, "hat_share": h, "id": i} for i, (k, f, h) in enumerate(
         [("small", [], 5.0), ("small", ["x"], 50.0), ("small", [], 20.0), ("mid", [], 1.0), ("big", ["y"], 3.0)])])
-    assert [o["id"] for o in order] == [4, 3, 2, 0, 1]
+    assert [o["id"] for o in order] == [4, 3, 0, 2, 1], "a higher hat share no longer goes first (2026-11-02)"
     # a tie (same flags, same hat share) is taken from the two routes in turn, so a list cut short still holds both
     rows = [{"category": "small", "flags": ["帽子占比只有 0.0%"], "hat_share": 0.0, "source": s, "id": i}
             for i, s in enumerate(["聚水潭", "聚水潭", "聚水潭", "抖音", "抖音", "两边都有"])]
     assert [o["id"] for o in tool.mix_categories(rows)] == [0, 3, 1, 4, 2, 5]
-    assert [o["id"] for o in tool.mix_categories(rows + [{"category": "small", "flags": [], "hat_share": 5.0, "source": "抖音", "id": 9}])][0] == 9, \
+    assert [o["id"] for o in tool.mix_categories(rows + [{"category": "small", "flags": [], "hat_share": 0.0, "source": "抖音", "id": 9}])][0] == 9, \
         "a better fit still goes first, whichever route found her"
+    # the ones who already sell hats go last, whatever their flags (2026-11-02: of 19 invited none answered)
+    sellers = [{"category": "small", "flags": [], "hat_share": h, "source": "抖音", "id": i} for i, h in ((7, 0.3), (8, 40.0))]
+    assert [o["id"] for o in tool.mix_categories(sellers + rows)] == [0, 3, 1, 4, 2, 5, 7, 8]
+    assert [o["id"] for o in tool.mix_categories([{**sellers[1], "category": "mid"}, *rows])][:2] == [8, 0], \
+        "the categories still take turns: a seller is last only inside her own category"
 
 
 def test_plan_checks_status_twenty_at_a_time(env):
@@ -749,8 +754,10 @@ def test_run_stops_when_the_platform_quota_runs_low_or_our_own_weekly_cap_is_rea
     code, out, _ = env.main(["run", "--config", env.write_config(weekly_cap=3), "--plan", plan_file, "--confirm", plan_id,
                              "--ledger-dir", str(env.tmp / "ledger2")])
     assert code == 0 and len(out["sent"]) == 3 and "每周上限 3" in out["stopped"]["why"]
-    # a new week starts on Monday (Beijing time)
-    assert led.sent_this_week(NOW) == 3 and led.sent_this_week(NOW + timedelta(days=5)) == 0
+    # a new week starts on Monday (Beijing time).  The cards above were written at the real time, not at NOW: the week
+    # after NOW's stopped being a later week the day the suite was run on it (2026-11-02, a Monday)
+    monday = tool.week_start(tool.now_bjt()) + timedelta(days=7)
+    assert led.sent_this_week(monday - timedelta(seconds=1)) == 3 and led.sent_this_week(monday) == 0
 
 
 def test_run_leaves_out_who_was_dropped_after_the_list_and_keeps_a_daily_cap(env):

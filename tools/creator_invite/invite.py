@@ -743,10 +743,11 @@ def creator_view(row: dict) -> dict:
 
 
 def _both_routes(pool: List[dict]) -> List[dict]:
-    """Inside one category: no flag first, then the higher hat share; a tie is taken from the two routes (聚水潭 / 抖音) in turn,
+    """Inside one category: the ones who sell no hats first (2026-11-02, the user: of the 19 invited who sold some hats none
+    answered, of the 77 who sold none 8 did), then the fewer flags; a tie is taken from the two routes (聚水潭 / 抖音) in turn,
     so that a list cut at --count holds both (2026-10-29: with the wider categories nearly every row had a hat share of 0, and
     the 聚水潭 rows, found first, filled a 40 list on their own)."""
-    key = lambda c: (bool(c["flags"]), -(c["hat_share"] or 0.0))
+    key = lambda c: ((c["hat_share"] or 0.0) > 0, len(c["flags"]))
     route = lambda c: 1 if c.get("source") == "抖音" else 0
     rank: Dict[int, int] = {}
     seen = [0, 0]
@@ -757,7 +758,7 @@ def _both_routes(pool: List[dict]) -> List[dict]:
 
 
 def mix_categories(candidates: List[dict]) -> List[dict]:
-    """The order the platform's status is asked in: inside each category the ones without a flag first, then the higher hat share,
+    """The order the platform's status is asked in: inside each category the ones who sell no hats first, then the fewer flags,
     the two routes in turn on a tie (_both_routes); then the categories taken in turn (大主播/专场型, 中大博主, 小达人, 大主播 …) so
     that a list cut at --count has all three."""
     pools = {k: _both_routes([c for c in candidates if c["category"] == k]) for k in ("big", "mid", "small")}
