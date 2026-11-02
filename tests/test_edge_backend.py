@@ -456,6 +456,25 @@ def test_a_gap_that_cannot_be_stored_is_not_acknowledged(fake, tmp_path, monkeyp
     assert failures == [] and len(EdgeGaps(tmp_path / "edge_gaps.json").unseen()) == 1
 
 
+def test_a_new_friend_from_windows_is_offered_in_the_register_form(fake, tmp_path):
+    """Windows 报的 friend_added：记进机器人的数据库（验证消息打码），「登记达人」的新加的好友读得到；
+    同一个 wxid 再报一次（Windows 的事件库重建）不多一行。"""
+    from src.wechat.new_friends import recent_new_friends
+    added = fake.friend_added("wxid_new01", "阿花", verify_text="我是阿花 13800138000", how="manual")
+    with Running(fake, tmp_path) as run:
+        assert wait_for(lambda: fake.acked_upto >= added["id"])
+        assert any(e["type"] == "friend_added" for e in run.events)
+    assert run.seen == [], "不是达人的话"
+    [f] = recent_new_friends(str(tmp_path / "messages.db"))
+    assert (f["wxid"], f["name"], f["how"]) == ("wxid_new01", "阿花", "manual")
+    assert f["verify_text"] and "13800138000" not in f["verify_text"], "打码（和 Windows 本机一样用 mask_pii）"
+    fake.rebuild_db()
+    fake.friend_added("wxid_new01", "阿花", verify_text="我是阿花", how="manual")
+    with Running(fake, tmp_path):
+        assert wait_for(lambda: fake.acked_upto >= 1)
+    assert len(recent_new_friends(str(tmp_path / "messages.db"))) == 1
+
+
 def test_an_event_of_a_kind_the_mac_does_not_know_is_passed_on_and_acknowledged(fake, tmp_path):
     """协议只增不改：老版本的 Mac 遇到不认识的事件类型（比如 wechat_gap 之前的 Mac 看 wechat_gap）只是跳过、照样确认。"""
     with fake._cond:

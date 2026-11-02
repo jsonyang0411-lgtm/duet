@@ -276,6 +276,10 @@ class EdgeBackend(AbstractWeChatBackend):
         self.sends_record = EdgeSends(self.state.path.with_name("edge_sends.json"))
         # Windows 报来的电脑微信掉线记录（wechat_gap）：控制台显示到运营点「看过了」
         self.gaps = EdgeGaps(self.state.path.with_name("edge_gaps.json"))
+        # Windows 报来的新好友（friend_added）记进机器人的数据库，控制台「登记达人」的「新加的好友」从这里读
+        self.new_friends_db = (Path(getattr(config, "db_path", "data/messages.db")) if config is not None
+                               else self.state.path.with_name("messages.db"))
+        self._new_friends = None
         self.files_dir = Path(files_dir) if files_dir else data_dir / "edge_files"
         self._sleep = sleep
         self._clock = clock
@@ -497,6 +501,8 @@ class EdgeBackend(AbstractWeChatBackend):
                     self._unsure.pop(str(event.get("send_id") or ""), None)
                 if event.get("status") in FAILED_RESULTS:
                     self._send_failed(event)
+            elif kind == P.FRIEND_ADDED:
+                self._friend_added(event)       # 写不进去就抛出去，这条不确认、下一轮再来
             elif kind == P.WECHAT_GAP:
                 # 先存好（写不进去就抛出去，这条不确认、下一轮再来），控制台一直提醒到运营点「看过了」
                 gap = self.gaps.add(event, self._clock())
@@ -509,6 +515,28 @@ class EdgeBackend(AbstractWeChatBackend):
             self.edge_status = {k: event.get(k) for k in ("wechat", "db", "send", "detail", "at")}
         self.state.cursor = event_id
         self.state.save()
+
+    def _friend_added(self, event: Dict[str, Any]) -> None:
+        """Windows 认出的新好友：照 Windows 本机扫到时的样子记一行（验证消息打码，NEW_DAYS 天后清掉），
+        同一个 wxid 只记一次。Mac 读不了微信数据库，新好友只能从这里来。"""
+        from src.pii import mask_pii
+        from .new_friends import ADDED_OTHER, HOWS, NEW_DAYS, UNKNOWN, NewFriendStore
+
+        wxid = str(event.get("wxid") or "").strip()
+        if not wxid:
+            return
+        if self._new_friends is None:
+            self._new_friends = NewFriendStore(str(self.new_friends_db))
+        now = self._clock()
+        how = str(event.get("how") or "")
+        verify_text = str(event.get("verify_text") or "")
+        added = self._new_friends.add(
+            wxid=wxid, name=str(event.get("name") or ""), remark=str(event.get("remark") or ""),
+            how=how if how in HOWS else UNKNOWN, kind=ADDED_OTHER, added_at=float(event.get("at") or now),
+            verify_from=None, verify_text=mask_pii(verify_text) if verify_text else "", found_at=now)
+        self._new_friends.forget_verify(now - NEW_DAYS * 86400)
+        if added:
+            logger.info("[edge] Windows 报：新好友 %s…（%s），放进「登记达人」的新加的好友", wxid[:8], how or UNKNOWN)
 
     def _handle_creator_message(self, event: Dict[str, Any], callback: MessageCallback) -> None:
         files = self._download_files(event)
