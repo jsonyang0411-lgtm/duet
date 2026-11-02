@@ -13,7 +13,7 @@ import pytest
 
 from src.relay import commands as C
 from src.relay.service import (
-    LOST_AFTER_SEC, MAX_AGE_SEC, ONLINE_WINDOW_SEC, RETRY_SEND_SEC, ClaudeRelay, format_duration,
+    KINDS_WINDOW_SEC, LOST_AFTER_SEC, MAX_AGE_SEC, ONLINE_WINDOW_SEC, RETRY_SEND_SEC, ClaudeRelay, format_duration,
 )
 from src.relay.store import RelayStore
 from src.routing import steps as S
@@ -238,6 +238,44 @@ class TestHandle:
     def test_a_store_error_is_a_short_reply(self, relay, clock):
         with patch.object(relay._store, "add", side_effect=RuntimeError("disk")):
             assert relay.handle(pm("cc 跑", clock=clock)) == (True, "转给 Mac 失败了，详情看 bot.log。")
+
+
+# ── which job kinds the Mac does (the console's 「Mac 还没表示能写草稿」) ──────
+
+class TestWorkerKinds:
+    def test_a_cc_worker_and_a_prm_worker_asking_in_turn_both_count(self, relay, clock):
+        """2026-11-02: the console said 「Mac 还没表示能写草稿」 whenever the cc worker had asked last."""
+        relay.note_worker(None, kinds=("prm",))
+        relay.note_worker(None, kinds=("admin",))
+        assert relay.snapshot()["worker_kinds"] == ["admin", "prm"]
+        clock.now += 30
+        relay.note_worker(None, kinds=("prm",))
+        assert relay.snapshot()["worker_kinds"] == ["admin", "prm"]
+
+    def test_a_kind_no_worker_was_heard_from_for_a_while_is_not_done(self, relay, clock):
+        assert relay.worker_kinds() == []
+        relay.note_worker(None, kinds=("admin", "prm", "bogus"))
+        assert relay.worker_kinds() == ["admin", "prm"]
+        clock.now += KINDS_WINDOW_SEC - 1
+        relay.note_worker(None, kinds=("admin",))
+        assert relay.worker_kinds() == ["admin", "prm"]
+        clock.now += 2
+        assert relay.worker_kinds() == ["admin"]                         # the prm worker stopped
+
+    def test_a_long_jobs_heartbeats_and_result_keep_its_kind(self, relay, clock):
+        relay.register_kind("prm", lambda job: True)
+        _, job_id = relay.submit("wxid_creator", "wxid_creator", "你好", kind="prm", meta={"party_id": 1}, fresh=True)
+        relay.note_worker(None, kinds=("prm",))
+        assert relay.next_job(0, ("prm",))["id"] == job_id
+        for _ in range(5):                                                # it asks for nothing while the job runs
+            clock.now += 60
+            assert relay.heartbeat(job_id, {}) == {"cancel": False}
+            assert relay.worker_kinds() == ["prm"]
+        clock.now += 60
+        assert relay.finish(job_id, {"ok": True, "text": "{}"})
+        assert relay.worker_kinds() == ["prm"]
+        clock.now += KINDS_WINDOW_SEC
+        assert relay.heartbeat(999, {}) is None and relay.worker_kinds() == []   # an unknown job tells nothing
 
 
 # ── back to WeChat ────────────────────────────────────────────────────────

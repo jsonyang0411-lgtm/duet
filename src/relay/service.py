@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 
 LOST_AFTER_SEC = 120        # a running job without a heartbeat for this long is lost
 ONLINE_WINDOW_SEC = 60      # the Mac is online if it asked for work within this time
+KINDS_WINDOW_SEC = 180      # a job kind is done on the Mac while a worker doing it was heard from within this time
 MAX_AGE_SEC = 300           # older requests are history replayed at startup, not orders
 RETRY_SEND_SEC = 30         # wait before sending a result again after a failed send
 TICK_SEC = 5
@@ -170,8 +171,10 @@ class ClaudeRelay:
         # What the Mac worker said it offers (X-Relay-Projects on GET /relay/next).
         self._worker_projects: list[str] | None = None
         self._worker_default = ""
-        # The job kinds the last worker asked for (X-Relay-Kinds; an older worker: admin only).
-        self._worker_kinds: tuple[str, ...] = ()
+        # When a worker doing each job kind was last heard from: it asked for that kind (X-Relay-Kinds; an older
+        # worker: admin only), or sent a heartbeat or the result of a job of that kind.  The Mac may run a worker per
+        # kind (a cc one and a prm one), which ask in turn: the last request alone told only half of it.
+        self._kinds_seen: dict[str, float] = {}
         # Where the worker connects from: the LAN, Tailscale (cross-network.md), ...
         self._worker_link = PeerLog("CLAUDE_RELAY: the Mac worker")
         # Results of the other kinds go here instead of WeChat (register_kind).
@@ -414,9 +417,26 @@ class ClaudeRelay:
             self._worker_projects = [str(p) for p in projects if str(p).strip()]
             self._worker_default = str(default or "")
         if kinds is not None:
-            self._worker_kinds = tuple(k for k in kinds if k in JOB_KINDS)
+            self._saw_kinds(kinds)
         if address:
             self._worker_link.note(address)
+
+    def _saw_kinds(self, kinds) -> None:
+        now = self._clock()
+        for kind in kinds:
+            if kind in JOB_KINDS:
+                self._kinds_seen[kind] = now
+
+    def _saw_job(self, job_id: int) -> None:
+        """A worker sending a job's heartbeat or result does that job's kind (it asks for none while the job runs)."""
+        job = self._store.get(job_id)
+        if job is not None:
+            self._saw_kinds((job.get("kind") or ADMIN,))
+
+    def worker_kinds(self) -> list[str]:
+        """The job kinds some worker on the Mac does: heard from within KINDS_WINDOW_SEC (in JOB_KINDS order)."""
+        now = self._clock()
+        return [k for k in JOB_KINDS if k in self._kinds_seen and now - self._kinds_seen[k] < KINDS_WINDOW_SEC]
 
     def projects_text(self, chat_id: str) -> str:
         current = self._store.current_project(chat_id)
@@ -746,7 +766,7 @@ class ClaudeRelay:
             "mac_link": self._worker_link.kind,
             "prefix": self._prefix_word,
             "counts": self._store.counts(),
-            "worker_kinds": list(self._worker_kinds),
+            "worker_kinds": self.worker_kinds(),
         }
 
     def cancel_from_console(self, job_id: int) -> str:
@@ -794,10 +814,12 @@ class ClaudeRelay:
 
     def heartbeat(self, job_id: int, progress: Optional[dict] = None) -> Optional[dict]:
         self._seen()
+        self._saw_job(job_id)
         return self._store.heartbeat(job_id, self._clock(), _clean_progress(progress))
 
     def finish(self, job_id: int, payload: dict) -> Optional[bool]:
         self._seen()
+        self._saw_job(job_id)
         text = str(payload.get("text", "") or "")
         taken = self._store.finish(
             job_id, ok=bool(payload.get("ok")), text=text,
