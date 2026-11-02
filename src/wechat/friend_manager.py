@@ -157,6 +157,19 @@ def _centre(row: dict) -> tuple[float, float]:
     return (row["x0"] + row["x1"]) / 2, (row["y0"] + row["y1"]) / 2
 
 
+# WeChat 4.1's (+) menu has an icon left of each item that OCR reads as a character or few: 「0发起群聊」「&+添加朋友」
+# (real PC 2026-11-02: 「先试一下」 clicked nothing, the item was never read exactly).  A menu item is matched with the
+# one to three characters before its first Chinese one dropped (``_menu_item``).
+_MENU_ICON = re.compile(r"^[^\u4e00-\u9fff]{1,3}(?=[\u4e00-\u9fff])")
+
+
+def _menu_item(rows: list[dict], *labels: str) -> dict | None:
+    """The topmost OCR row of a menu that reads exactly one of ``labels`` once the icon before it (one to three
+    characters that are not Chinese: 「0发起群聊」) is dropped; anything more or else around it is no such item."""
+    found = [row for row in rows if _MENU_ICON.sub("", _clean_text(row.get("t", ""))) in labels]
+    return min(found, key=lambda r: r.get("y0", 0.0)) if found else None
+
+
 def _find_row(rows: list[dict], *labels: str, exact: bool = False, min_x0: float = 0.0) -> dict | None:
     """The topmost OCR row whose text is (exact) or contains one of ``labels``."""
     found = []
@@ -1511,7 +1524,7 @@ class FriendManager:
             return None
         left, top, right, bottom = win32gui.GetWindowRect(menu_hwnd)
         rows = self._capture_ocr(menu_hwnd)
-        item = _find_row(rows, *GROUP_MENU_LABELS, exact=True)
+        item = _menu_item(rows, *GROUP_MENU_LABELS)
         if item is not None:
             cx, cy = _centre(item)
             x, y = left + int(cx * max(1, right - left)), top + int(cy * max(1, bottom - top))
