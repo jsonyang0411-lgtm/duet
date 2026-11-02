@@ -1059,6 +1059,78 @@ class TestPrmPages:
         assert night.service.store.packet(2)["wrong"] is True
         assert night.service.store.events(1, limit=1)[0]["detail"]["night"] is True
 
+    @pytest.fixture
+    def opening_auto(self):
+        """A running PRM service with PRM_OPENING_AUTO_MIN=30, by day (2026-11-02): 小红's 开场白 went out by itself after
+        its 30 minutes; 小美's waits with its time; 小青's says 包邮 and waits for a person."""
+        import json as _json
+        import time as _time
+        from types import SimpleNamespace
+        from src.prm.service import OPENING_AUTO_GRACE_SEC, SETTLE_SEC, PrmService
+        from src.prm.store import PrmStore
+        from src.relay.service import ClaudeRelay
+        from src.relay.store import RelayStore
+        from src.web import server as web_server
+
+        class Clock:
+            now = _time.time() - 3 * 3600                    # (today, so the page shows the time alone)
+
+            def __call__(self):
+                return self.now
+
+        clock = Clock()
+        cfg = SimpleNamespace(
+            claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1", claude_relay_port=0,
+            claude_relay_prefix="cc", claude_relay_wxids=[], claude_relay_db=":memory:",
+            claude_relay_max_chars=1500, admin_wxid="wxid_admin", prm_copilot="on", prm_db=":memory:",
+            prm_opening_auto_min=30,
+        )
+        sent = []
+        relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=clock)
+        service = PrmService(cfg, relay, store=PrmStore(":memory:"), clock=clock,
+                             send=lambda c, t: sent.append((c, t)) or True, send_file=lambda c, p: True)
+
+        def opening(wxid, name, text):
+            party = service.register(wxid, name, "测试达人")
+            party = service.store.party_by_wxid(wxid)
+            assert service.ask_opening(service.store.deal_of(party["id"])["id"])["ok"]
+            clock.now += SETTLE_SEC + 1
+            job = relay.next_job(0, ("prm",))
+            draft = {"intent": "开场白", "slots": {}, "stage_proposal": "", "message_kind": "greeting", "reply_draft": text,
+                     "attachments_to_send": [], "needs_attention": False, "reason": "kb/合作政策.md 场景 A"}
+            relay.finish(job["id"], {"ok": True, "text": _json.dumps(draft, ensure_ascii=False)})
+            relay.tick()
+
+        opening("wxid_creator03", "小红", "你好呀～我是 ACE7CN 的运营，有兴趣了解一下我们家的帽子吗？")
+        clock.now += 30 * 60 + OPENING_AUTO_GRACE_SEC
+        assert service.send_due_openings() == 1 and service.send_approved() == 1
+        opening("wxid_creator01", "小美", "你好呀～我是 ACE7CN 的运营，先发几款当季现货给你看看～")
+        opening("wxid_creator02", "小青", "你好呀～我们家帽子都包邮哦～")
+        web_server.register_prm(service)
+        yield SimpleNamespace(service=service, sent=sent, relay=relay, clock=clock)
+        web_server.register_prm(None)
+        relay.stop()
+
+    def test_review_page_says_when_a_first_line_goes_by_itself_and_why_one_waits(self, page, opening_auto):
+        import time as _time
+
+        waiting = next(p for p in opening_auto.service.store.packets(("pending",)) if "先发几款" in p["text"])
+        when = _time.strftime("%H:%M", _time.localtime(waiting["meta"]["auto_at"]))
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.get_by_text("先发几款当季现货给你看看").wait_for()
+        card = page.locator(".prm-draft", has_text="先发几款当季现货给你看看").inner_text()
+        assert f"给新好友的第一句话：{when} 还没人处理就照原样自动发给她" in card
+        held = page.locator(".prm-draft", has_text="都包邮哦").inner_text()
+        assert "这份不会自动发，等你：说到了「包邮」" in held and "还没人处理就照原样自动发给她" not in held
+        recent = page.locator(".prm-recent", has_text="有兴趣了解一下我们家的帽子吗")
+        assert "开场白自动发出" in recent.inner_text()
+        assert [t for _, t in opening_auto.sent] == ["你好呀～我是 ACE7CN 的运营，有兴趣了解一下我们家的帽子吗？"]
+        # 自动模式's banner says first lines go too when the setting is on
+        opening_auto.service.set_auto_mode(True)
+        page.reload()
+        page.locator(".prm-auto", has_text="自动模式开着（").wait_for()
+        assert "新好友的第一份草稿、开场白满足条件也直接发；投诉、平台动作照旧等你。" in page.locator(".prm-auto").inner_text()
+
     # ── 加百应达人微信 (PRM_FRIEND_ADD, 功能 R): the 加微信 cards, the paste form, 登记达人's 抖音号 ───────────
     @staticmethod
     def _friend_adds_on(prm):

@@ -128,7 +128,9 @@ function AutoModeBar({ d, onDone }) {
       {a.on ? (
         <Banner kind="warn" title={`自动模式开着（${fmtClock(a.since)} 打开）`}
           actions={<button type="button" className="btn sm" disabled={busy} onClick={() => toggle(false)}><HandPalm />关掉自动模式</button>}>
-          满足安全条件的草稿不经你审批直接发给达人，拿不准的只回一句过渡的话；投诉、平台动作、新好友的第一份草稿、开场白照旧等你。
+          满足安全条件的草稿不经你审批直接发给达人，拿不准的只回一句过渡的话；{d.opening_auto_min > 0
+            ? '新好友的第一份草稿、开场白满足条件也直接发；投诉、平台动作照旧等你。'
+            : '投诉、平台动作、新好友的第一份草稿、开场白照旧等你。'}
           {!d.running && ' 机器人现在没在运行：启动以后照这个自动发。'}
         </Banner>
       ) : (
@@ -144,7 +146,9 @@ function AutoModeBar({ d, onDone }) {
           onConfirm={() => toggle(true)} onCancel={() => setAsking(false)}>
           <div className="stack" style={{ gap: 6 }}>
             <div>打开以后不管几点，都照下班时段的规则：满足安全条件的草稿<b>不经你审批直接发出</b>（佣金不超过 25%，不提坑位费、保底、返现这类）；拿不准的只回一句过渡的话，这一页顶上留提醒，你看过点「已处理」。</div>
-            <div>投诉、平台动作、新好友的第一份草稿、开场白（还有补读的、人工接管的）照旧等你；现在已经在「待审批」里的草稿也照旧等你。</div>
+            <div>{d.opening_auto_min > 0
+              ? '投诉、平台动作（还有补读的、人工接管的）照旧等你；新好友的第一份草稿、开场白满足条件也直接发出。现在已经在「待审批」里的草稿照旧等你（开场白到了卡片上写的时间照样自动发）。'
+              : '投诉、平台动作、新好友的第一份草稿、开场白（还有补读的、人工接管的）照旧等你；现在已经在「待审批」里的草稿也照旧等你。'}</div>
             <div>一直开着，机器人重启也不关；再按一下「关掉自动模式」就关掉。</div>
           </div>
         </Confirm>
@@ -169,6 +173,13 @@ function NightTag({ p }) {
   return p.auto_mode
     ? <span className="tag cy" title="自动模式下满足全部安全条件，没经过人审">自动模式发出</span>
     : <span className="tag cy" title="下班时段里满足全部安全条件，没经过人审">夜间自动发出</span>
+}
+
+/** 开场白没人处理就自动发 (PRM_OPENING_AUTO_MIN): our first line to a new friend that waited its time in 待审批 with
+ * nobody deciding, and went out by itself. */
+function OpeningAutoTag({ p }) {
+  if (p.route !== 'opening') return null
+  return <span className="tag cy" title="给新好友的第一句话在「待审批」里放到时间没人处理，满足安全条件，照原样自动发出（没经过人审）">开场白自动发出</span>
 }
 
 /** Holding lines the 下班时段 window (or 自动模式) sent for drafts the model flagged: each stays until 已处理. */
@@ -288,7 +299,7 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
       title={`${p.party_name} · ${p.kind_label}`}
       eyebrow={`DRAFT #${p.id}`}
       sub={`${fmtClock(p.created_at)} ${p.system ? '系统生成' : '写好'}${p.stage_proposal_label ? ` · 建议阶段：${p.stage_proposal_label}` : ''}`}
-      actions={<><GroupTag p={p} />{p.opening && <span className="tag cy" title="她还没跟我们说过话：这是我们先打招呼的话，要人看过再发">开场白</span>}{p.route === 'auto' && <span className="tag ok" title="这类消息已经达到自动发送门槛">自动发送</span>}<NightTag p={p} /><span className={`tag ${kind}`}>{label}</span></>}
+      actions={<><GroupTag p={p} />{p.opening && <span className="tag cy" title={p.auto_at ? `她还没跟我们说过话：这是我们先打招呼的话，${fmtClock(p.auto_at)} 还没人处理就自动发` : '她还没跟我们说过话：这是我们先打招呼的话，要人看过再发'}>开场白</span>}{p.route === 'auto' && <span className="tag ok" title="这类消息已经达到自动发送门槛">自动发送</span>}<NightTag p={p} /><OpeningAutoTag p={p} /><span className={`tag ${kind}`}>{label}</span></>}
       className="prm-draft"
     >
       <div className="stack" style={{ gap: 8 }}>
@@ -296,6 +307,10 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
           <Note kind="warn" icon={WarningCircle}>要特别注意{p.reason ? `：${p.reason}` : ''}</Note>
         )}
         {p.night_held && <div className="f-hint prm-night-held">{p.auto_mode ? '自动模式没有自动发' : '夜间没有自动发'}：{p.night_held}</div>}
+        {p.status === 'pending' && p.auto_at && (
+          <div className="f-hint prm-opening-auto">给新好友的第一句话：{fmtClock(p.auto_at)} 还没人处理就照原样自动发给她（设置里的「开场白没人处理多久自动发」）；要改的话在这之前发出。</div>
+        )}
+        {p.status === 'pending' && p.auto_held && <div className="f-hint prm-opening-held">这份不会自动发，等你：{p.auto_held}</div>}
         {p.intent && <div><b>{p.opening ? '这一条：' : '达人想要：'}</b>{p.intent}</div>}
         {!p.needs_attention && p.reason && <div className="dim"><b>依据：</b>{p.reason}</div>}
         {slots.length > 0 && (
@@ -489,7 +504,7 @@ function RecentCard({ d, onDone }) {
     setBusy(true)
     try {
       await decide(p.id, 'wrong')
-      toast.ok(`已标为发错了${p.route === 'night' ? (p.auto_mode ? '（自动模式发出的）' : '（夜间自动发出的）') : ''}：「${p.kind_label}」以后都先审，重新计数`)
+      toast.ok(`已标为发错了${p.route === 'night' ? (p.auto_mode ? '（自动模式发出的）' : '（夜间自动发出的）') : p.route === 'opening' ? '（没人处理、自动发出的开场白）' : ''}：「${p.kind_label}」以后都先审，重新计数`)
       setAsking(null)
       onDone()
     } catch (e) { toast.err(e.message) } finally { setBusy(false) }
@@ -522,6 +537,7 @@ function RecentCard({ d, onDone }) {
                     )}
                     {p.route === 'auto' && <span className="tag ok">自动</span>}
                     <NightTag p={p} />
+                    <OpeningAutoTag p={p} />
                     {p.route === 'night' && p.needs_attention && <span className="tag warn" title={p.reason}>要注意</span>}
                     {p.wrong && <span className="tag need">发错了</span>}
                     {p.platform && <span className={`tag ${p.platform.execution ? outcomeTag(p.platform.execution.outcome) : 'off'}`} title={p.platform.label}>
@@ -546,6 +562,7 @@ function RecentCard({ d, onDone }) {
         <Confirm title={`#${asking.id} 发错了？`} confirmLabel="标为发错了" cancelLabel="不标" danger busy={busy}
           onConfirm={() => wrong(asking)} onCancel={() => setAsking(null)}>
           {asking.route === 'night' && (asking.auto_mode ? '这条是自动模式自动发出的（没经过人审）。' : '这条是下班时段自动发出的（没经过人审）。')}
+          {asking.route === 'opening' && '这条是给新好友的第一句话，放到时间没人处理，自动发出的（没经过人审）。'}
           「{asking.kind_label}」这类消息会马上退回「先审后发」，自动发送的计数从头开始。已经发出去的消息收不回来，需要的话请在微信里补一句。
         </Confirm>
       )}
@@ -555,7 +572,7 @@ function RecentCard({ d, onDone }) {
 
 /** 下班时段自动回复 (PRM_NIGHT_AUTO_HOURS): on or off, night or day now (自动模式 too: ``n.auto``), and why it is held
  * when it is. */
-function NightLine({ n }) {
+function NightLine({ n, openingAuto }) {
   if (!n) return null
   const [kind, text] = nightStatus(n)
   return (
@@ -565,7 +582,7 @@ function NightLine({ n }) {
         {n.suspended && <div>{n.suspended}</div>}
         <div className="f-hint">
           {n.on || n.auto
-            ? `${n.auto ? '自动模式开着，不管几点' : '下班时段里'}，Mac 写好的回复满足全部安全条件才直接发给达人（不看下面的门槛）：不是投诉，佣金不超过 25%，不提坑位费、保底、返现这类，模型要求注意的只发一句不带数字的过渡话；平台动作、补读的、新好友、撤回、人工接管的照旧等运营。`
+            ? `${n.auto ? '自动模式开着，不管几点' : '下班时段里'}，Mac 写好的回复满足全部安全条件才直接发给达人（不看下面的门槛）：不是投诉，佣金不超过 25%，不提坑位费、保底、返现这类，模型要求注意的只发一句不带数字的过渡话；${openingAuto ? '新好友的第一份草稿、开场白满足条件也直接发；平台动作、补读的、撤回、人工接管的照旧等运营。' : '平台动作、补读的、新好友、撤回、人工接管的照旧等运营。'}`
             : '在「合作单」页下面的设置里填「下班时段自动回复」（例如 18:00-09:00）就打开。'}
           改了设置要重启机器人才生效（自动模式在这一页顶上开关，不用重启）。
         </div>
@@ -581,7 +598,7 @@ function GatesCard({ d }) {
   return (
     <Card title="自动发送门槛" eyebrow="GATES" className="prm-gates"
       sub="某类消息最近 N 条里运营原样发出的条数达标、而且没改过金额 / 号码 / 日期，这一类以后就直接发；钱和投诉一直先审（下班时段另有规则，见下面这一行）">
-      <NightLine n={d?.night} />
+      <NightLine n={d?.night} openingAuto={d?.opening_auto_min > 0} />
       {gates.length > 0 && <div className="scroll" style={{ overflowX: 'auto' }}>
         <table className="table">
           <thead><tr><th>类型</th><th>现在</th><th>最近审过的</th><th>原样发出</th><th>门槛</th></tr></thead>

@@ -1103,7 +1103,8 @@ def _prm_state_core() -> dict:
                "retention_days": _prm_int_env("PRM_RETENTION_DAYS", 90),
                "catchup_hours": _prm_int_env("PRM_CATCHUP_HOURS", 12), "night": _prm_night_env(auto["on"]),
                "auto_register": _prm_env_on("PRM_AUTO_REGISTER"), "auto_mode": auto,
-               "buyin_sync_min": _prm_int_env("PRM_BUYIN_SYNC_MIN", 0), **settings}
+               "buyin_sync_min": _prm_int_env("PRM_BUYIN_SYNC_MIN", 0),
+               "opening_auto_min": _prm_int_env("PRM_OPENING_AUTO_MIN", 0), **settings}
     stopped["friend_add_status"] = _friend_add_stopped_status(store)
     stopped["three_party"] = _three_party_stopped_status()
     stopped["boss_groups"] = _boss_groups_stopped_status(store)

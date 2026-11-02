@@ -474,7 +474,8 @@ def test_a_model_written_shipping_notice_must_carry_the_systems_number(bot):
 
 def test_the_shipping_notice_outlives_the_creators_messages_but_not_a_new_waybill(bot, clock):
     first = bot.prm.deal_action("shipment", {"deal_id": 1, "carrier": "顺丰", "waybill": "SF1111111111"})["packet"]
-    drafted(bot, draft(message_kind="greeting", reply_draft="好的呀", slots={}), text="好的谢谢")
+    # (a question: a round of nothing but 「好的谢谢」 gets no holding reply since 2026-11-02, ``ack_only``)
+    drafted(bot, draft(message_kind="greeting", reply_draft="一般两三天就到啦", slots={}), text="大概什么时候到呀")
     assert bot.prm.store.packet(first)["status"] == "pending"                 # still waits for a person
     clock.now += 11 * 60
     assert bot.prm.send_holding_replies() == 1                                # for the creator's message only

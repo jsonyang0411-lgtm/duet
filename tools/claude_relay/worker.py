@@ -1353,6 +1353,15 @@ def _sent_where(item: dict) -> str:
     return SENT_WHERE.get(where, "") if isinstance(where, str) else ""
 
 
+def _sent_files(item: dict) -> list:
+    """The files a reply of ours went out with (the bot's ``files``: their names, 同一张图不重复发, 2026-11-02), tag-safe;
+    [] for none or anything that is not a list of names."""
+    files = item.get("files")
+    if not isinstance(files, list):
+        return []
+    return [_untagged(str(name))[:80] for name in files[:10] if isinstance(name, str) and name.strip()]
+
+
 def sent_block(sent: list, in_group: bool = False) -> str:
     """What the creator really got from us lately (the bot's record, oldest first): a draft as it
     went out, the operator's edit next to the draft it replaced, drafts not sent.  A creator with a
@@ -1373,6 +1382,9 @@ def sent_block(sent: list, in_group: bool = False) -> str:
         what = item.get("what")
         if what == "sent":
             lines.append(f"{head}\n<our_reply>\n{_untagged(item.get('text', ''))}\n</our_reply>")
+            files = _sent_files(item)
+            if files:
+                lines.append(f"这一条还附了 {len(files)} 个文件：{'、'.join(files)}（她已经收到了，同样的图别再附）")
             if item.get("draft"):
                 lines.append(f"这一条是运营改过再发的，你的原稿是：\n<our_draft>\n{_untagged(item['draft'])}\n</our_draft>")
             if item.get("wrong"):
@@ -1552,6 +1564,19 @@ def opening_line(meta: dict) -> str:
     return (f"{who}。这一次没有达人的消息，要写的是我们主动发的第一句（开场白），按 kb/ 里开场白和破冰（场景 A）的写法；"
             "她的作品、穿搭这些你不知道的不要编。我们已经跟她打过招呼的（看 <our_reply> 和 <operator_message>），"
             "就写一句自然的跟进，不要重复自我介绍。")
+
+
+def opening_auto_line(meta: dict) -> str:
+    """The prompt's line for our first line to a new friend that may go out by itself (PRM_OPENING_AUTO_MIN on Windows,
+    2026-11-02: ``meta.opening_auto`` = its minutes; a 开场白, or the draft of a new friend's first messages): nobody may
+    read it before it goes, so the Mac flags what it is not sure of and the bot keeps it for a person.  "" without it, or
+    with a value that is not a whole number of 1 to 1440 (the prompt as before)."""
+    minutes = meta.get("opening_auto")
+    if isinstance(minutes, bool) or not isinstance(minutes, int) or not 1 <= minutes <= 1440:
+        return ""
+    return (f"这是我们给新好友的第一句话：运营 {minutes} 分钟内没处理，机器人就把你写的这份直接发给她（下班时段、自动模式下"
+            "写好就发），没人先看。照 kb/ 写，不许诺寄样；有拿不准的（她问的事 kb/ 里没有、要报价钱、要人拿主意的）就把 "
+            "needs_attention 设成 true，这份就会等运营。")
 
 
 _GROUP_AT = re.compile(r"\d{2}-\d{2} \d{2}:\d{2}")
@@ -1841,6 +1866,9 @@ def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, fa
                      "起草时想到已经隔了一阵，运营会先看过再发。")
     if opening:
         lines.append(opening)
+    auto = opening_auto_line(meta)
+    if auto:
+        lines.append(auto)
     if meta.get("system_note"):
         lines.append(f"<system_note>\n{_untagged(str(meta['system_note']))[:SYSTEM_NOTE_CHARS]}\n</system_note>")
     if got:

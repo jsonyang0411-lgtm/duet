@@ -150,6 +150,25 @@ NIGHT_DONE = "night_done"            # the deal action of 「已处理」 on suc
 # what applies (by day: no 「明早」; no setting of its own)
 AUTO_MODE = "auto_mode"
 AUTO_HOLDING_TEXT = "收到～您说的我都记下啦，稍后确认好第一时间回复您哈～"
+# 开场白没人处理就自动发 (PRM_OPENING_AUTO_MIN, 2026-11-02): the route of our first line to a new friend that went out by
+# itself after waiting (``send_due_openings``; never counts toward a kind's gate: ``PrmStore.reviewed`` takes ``review``
+# only), and the words such a line must not say to go by itself (kb 第 0.5 节: samples are the boss's, in the 三方群)
+OPENING_ROUTE = "opening"
+OPENING_AUTO_WORDS = ("免费", "包邮", "邮费", "寄样", "样品", "样衣", "寄出", "寄给", "送你", "送您", "送一", "试戴", "任选",
+                      "看中多少")
+OPENING_AUTO_GRACE_SEC = 120     # none goes the first minutes after a start: the catch-up may find she wrote meanwhile
+# 同一张图不重复发 (2026-11-02, the user: the 开场白's 3 pictures went again with her 货盘 an hour later, by 自动模式): a file
+# she got from us this recently (the same bytes) is left out of a new draft (``_repeated_files``)
+REPEAT_FILE_SEC = 7 * 86400
+# 她只回「好滴」这类 (2026-11-02, the user: after our 货盘 she said 「好滴」, its draft waited, and a 稍等 went out 10 minutes
+# later): a round of her messages that only says she got it has nothing to hold, so no holding reply (``ack_only``)
+ACK_WORDS = tuple(sorted(("好滴", "好的", "好嘞", "好哒", "好咧", "好吧", "好", "嗯嗯", "嗯", "哦哦", "哦", "噢", "收到", "谢谢",
+                          "谢了", "感谢", "ok", "okk", "okay", "可以", "行", "没问题", "知道了", "了解", "明白", "辛苦", "我看看",
+                          "我看一下", "我先看看", "我先看一下", "看看", "我考虑一下", "考虑一下", "我想想", "想想", "晚点回你",
+                          "回头看"), key=len, reverse=True))
+_ACK_STAMP = re.compile(r"^\[\d{2}-\d{2} \d{2}:\d{2}\]\s*")
+_ACK_TAGS = re.compile(r"\[(?:表情|动画表情|微笑|OK|强|抱拳|握手|玫瑰|爱心|憨笑|呲牙|偷笑|可爱|害羞|愉快|耶|胜利|拥抱|鼓掌)\]")
+_ACK_NOISE = re.compile("[\\s～~!！。.，,、…?？呀啊啦哈嘛呢哟哇喔\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F]+")
 # Mac 重启以前发的、后来 Windows 才报失败的：没有发送时间时往回找这么久（edge 后端的发送记录留一天）
 RESTART_FAIL_SEC = 86400
 CATCHUP_HOURS = 12           # PRM_CATCHUP_HOURS: a message read late is drafted up to this old (0-72)
@@ -360,6 +379,23 @@ def message_text(msg: dict) -> str:
         if line:
             return line
     return edge_text.message_text(msg)
+
+
+def ack_only(text: str) -> bool:
+    """Is a draft job's text (her lines, ``[MM-DD HH:MM] …`` each) nothing but 「好滴」「收到」「谢谢」「我看看」, a sticker or
+    an emoji (``ACK_WORDS``, ``_ACK_TAGS``): she only says she got it?  False for an empty text (a 开场白 has none) or for
+    any line with more in it (a question, a picture, 「好滴，哪款适合我」)."""
+    lines = [_ACK_STAMP.sub("", line).strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines:
+        return False
+    for line in lines:
+        rest = _ACK_NOISE.sub("", _ACK_TAGS.sub("", line)).lower()
+        while rest:
+            word = next((w for w in ACK_WORDS if rest.startswith(w)), None)
+            if word is None:
+                return False
+            rest = rest[len(word):]
+    return True
 
 
 def _norm(text: str) -> str:
@@ -655,6 +691,7 @@ EVENT_NAMES = {
     "platform_recheck": "平台动作要先核对", "sample_status": "聚水潭寄样单状态",
     "commission_covered": "邀约卡开过专属佣金，当作开好",
     "night_send": "夜间自动发出", "night_done": "夜间自动回的过渡话已处理",
+    "opening_auto": "开场白没人处理，自动发出",
     "auto_register": "自动登记（新好友）", "opening": "派写开场白的任务",
     "buyin_message": "百应私信", "buyin_copy": "复制百应私信草稿（含完整号码）", "buyin_sent": "运营已在百应手动发出",
     "buyin_draft_failed": "百应私信的草稿没写成",
@@ -873,6 +910,8 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
             "channel": BUYIN_CHANNEL if is_buyin(p) else GROUP_CHANNEL if p["meta"].get("channel") == GROUP_CHANNEL
             else "wechat", "group_name": str(p["meta"].get("group_name") or ""), "buyin": buyin_packet_out(store, p),
             "auto_mode": bool(p["meta"].get(AUTO_MODE)),
+            "auto_at": p["meta"].get("auto_at") if isinstance(p["meta"].get("auto_at"), (int, float)) else None,
+            "auto_held": str(p["meta"].get("auto_held") or ""),
         }
 
     def unanswered(deal: dict) -> bool:
@@ -1068,6 +1107,13 @@ class PrmService:
         self._handle_lock = threading.Lock()
         self._holding_sec = int(getattr(config, "prm_holding_min", 10) or 0) * 60
         self._holding_text = str(getattr(config, "prm_holding_text", "") or HOLDING_TEXT).strip() or HOLDING_TEXT
+        # PRM_OPENING_AUTO_MIN (0: off, as before; a config object without it, an older caller's: off): our first line to a
+        # new friend waits this long in 待审批 for a person, then goes out by itself if it passed the checks
+        # (``_opening_auto``, ``send_due_openings``); in the 下班时段 or 自动模式 at once.
+        try:
+            self._opening_auto_sec = min(max(int(getattr(config, "prm_opening_auto_min", 0) or 0), 0), 1440) * 60
+        except (TypeError, ValueError):
+            self._opening_auto_sec = 0
         # PRM_REPLY_PARTS: a reply's paragraphs go out as messages of their own (``_deliver``), and the Mac is told it may
         # write them (``_reply_meta``).  Never on the Mac's edge side (WECHAT_BACKEND=edge): Windows tells it of a send
         # that failed by the send's whole text (``on_send_failed``), which one part of a draft is not.
@@ -1404,6 +1450,42 @@ class PrmService:
         return gates.night_reason(draft.message_kind, needs_attention=draft.needs_attention, mode=mode,
                                   unknown_tokens=unknown, reason=draft.reason, text=draft.reply_draft, waybill=waybill,
                                   attachments=attachments, files_named=named, when="自动模式下" if auto else "夜里")
+
+    def _opening_auto(self, meta: dict, draft, *, refused: str, short: str, unknown: list, waybill: str,
+                      attachments: list, named: int, mode: str, recall: str, lane: str, now: float,
+                      auto_on: bool) -> Optional[tuple]:
+        """开场白没人处理就自动发 (PRM_OPENING_AUTO_MIN, 2026-11-02; the user: a friend who accepted after the operators had
+        gone home heard nothing all weekend): may this waiting draft, our first line to a new friend, go out by itself when
+        nobody decides on it?  None: not in play (the setting 0; not a first line: a 开场白 of ours, ``meta.opening``, or the
+        draft of a new friend's messages from before she was registered, ``meta.new_friend``, with none read late or
+        missed; a 老板拉的群's, the boss reads it there; a platform action; the system lane).  ``(due, "")``: it goes at
+        ``due`` (``send_due_openings``), PRM_OPENING_AUTO_MIN from now, at once in the 下班时段 or 自动模式
+        (``_night_active``).  ``(None, why)``: it waits for a person as before, the card says why (``meta.auto_held``):
+        her recall, files short, a platform action taken out, the model's attention, what ``gates.night_reason`` minds
+        (a complaint, placeholders, a red line), or a word of samples (``OPENING_AUTO_WORDS``: kb 第 0.5 节)."""
+        if self._opening_auto_sec <= 0 or lane != LANE_REPLY or draft.platform is not None:
+            return None
+        first = isinstance(meta.get(OPENING), dict) or isinstance(meta.get("new_friend"), dict)
+        if (not first or meta.get("channel") == GROUP_CHANNEL
+                or any(isinstance(meta.get(k), dict) for k in ("late", "missed"))):
+            return None
+        if recall:
+            return None, "她撤回了消息，要人看过"
+        if refused:
+            return None, refused
+        if short:
+            return None, short
+        if draft.needs_attention:
+            return None, "模型要求运营注意"
+        why = gates.night_reason(draft.message_kind, needs_attention=False, mode=mode, unknown_tokens=unknown,
+                                 reason=draft.reason, text=draft.reply_draft, waybill=waybill, attachments=attachments,
+                                 files_named=named)
+        if why:
+            return None, why
+        said = next((w for w in OPENING_AUTO_WORDS if w in (draft.reply_draft or "")), "")
+        if said:
+            return None, f"说到了「{said}」：寄样留到三方群由老板谈（kb 第 0.5 节），这份不自动发"
+        return (now if self._night_active(now, auto_on) else now + self._opening_auto_sec), ""
 
     def _night_sent(self, packet: dict, now: float) -> None:
         """A draft the night window (or 自动模式 by day: the packet's ``meta.auto_mode``, its record and notice say so)
@@ -1742,6 +1824,9 @@ class PrmService:
             # 下班时段 (or 自动模式): the Mac writes by the kb's rules for it (worker.prm_prompt), its draft may go out by
             # itself (``_night_judge``).  Not for a job that always waits for a person (read late, a new friend's).
             meta["night"] = self._night_meta(now)
+        if (self._opening_auto_sec and group is None and isinstance(meta.get("new_friend"), dict)
+                and not any(isinstance(meta.get(k), dict) for k in ("late", "missed"))):
+            meta["opening_auto"] = self._opening_auto_sec // 60   # the Mac hears its draft may go out by itself (worker)
         if group is not None:
             opening = self._relay.store.latest_open(chat_id, drafts_only=True, system=False)
             if opening is not None and isinstance(job_meta(opening).get(OPENING), dict):
@@ -1891,6 +1976,9 @@ class PrmService:
             item = {"at": at, "kind": p["kind"], **place(p)}
             if p["status"] == SENT:
                 item.update(what="sent", text=final)
+                files = [str(a.get("name") or "") for a in p.get("attachments") or [] if a.get("name")]
+                if files:
+                    item["files"] = files[:10]             # (同一张图不重复发: the Mac sees which pictures she got)
                 if p.get("edited") and str(p["text"]).strip() != str(final).strip():
                     item["draft"] = p["text"]
                 if p.get("wrong"):
@@ -1915,6 +2003,22 @@ class PrmService:
             item["at"] = _clock_text(item["at"]) if item["at"] else ""
             out.append(item)
         return out
+
+    def _repeated_files(self, deal_id: int, attachments: list, now: float) -> list:
+        """同一张图不重复发 (2026-11-02): the files of a new draft she got from us within REPEAT_FILE_SEC already (the same
+        bytes, ``sha256``, in a draft of her deal that was sent, in any of her chats), each with when it went:
+        ``[(attachment, sent_at)]``; [] for none."""
+        if not attachments:
+            return []
+        got: dict = {}
+        for p in self._store.outcomes(deal_id, limit=50):
+            sent_at = float(p.get("sent_at") or 0)
+            if p["status"] != SENT or now - sent_at > REPEAT_FILE_SEC:
+                continue
+            for a in p.get("attachments") or []:
+                if a.get("sha256"):
+                    got[a["sha256"]] = min(got.get(a["sha256"], sent_at), sent_at)
+        return [(a, got[a["sha256"]]) for a in attachments if a.get("sha256") in got]
 
     def on_own_message(self, msg: dict) -> None:
         """A line this WeChat account sent in a creator's chat (the backend's hook).
@@ -2387,6 +2491,21 @@ class PrmService:
         # Every file the draft named (an older worker reports only the ones it sent back): fewer came,
         # the draft waits for a person whatever its kind's gate, and the deal and the draft say which.
         named = draft.attachments_named if draft.attachments_named is not None else draft.attachments_to_send
+        # 同一张图不重复发: a file she got from us within REPEAT_FILE_SEC (the same bytes) is left out of the draft, which
+        # says so; the names it named lose those files too (not 「只收到 N 个」)
+        repeated = self._repeated_files(deal_id, attachments, now) if lane == LANE_REPLY else []
+        repeat_note = ""
+        if repeated:
+            gone = [a for a, _ in repeated]
+            attachments = [a for a in attachments if a not in gone]
+            left = list(named)
+            for a in gone:
+                match = next((n for n in left if _file_name(n) == a["name"]), None)
+                if match is not None:
+                    left.remove(match)
+            named = left
+            repeat_note = (f"{'、'.join(a['name'] for a in gone)} 她 {_clock_text(min(at for _, at in repeated))} 起已经收到过，"
+                           f"这次没再发（同一张图 {REPEAT_FILE_SEC // 86400} 天内不重复发）")
         # The Mac's action did not pass the bot's own check (a Mac with wider limits, say): the reply stays
         # a draft, without it, for a person (it was written as if the action had run).
         refused = (f"平台动作没过机器人这边的检查（{draft.platform_refused}），草稿里去掉了它，平台上什么都不会做；"
@@ -2451,7 +2570,18 @@ class PrmService:
                                                now=now, auto_on=auto_on)
                 if night_held == "":
                     route, state, decided_at = gates.NIGHT, APPROVED, now
+        # 开场白没人处理就自动发 (PRM_OPENING_AUTO_MIN): our first line to a new friend waits, and may go out by itself later
+        opening_auto = (self._opening_auto(meta, draft, refused=refused, short=short, unknown=unknown, waybill=waybill,
+                                           attachments=attachments, named=len(named), mode=mode, recall=recall,
+                                           lane=lane, now=now, auto_on=auto_on)
+                        if state == PENDING and route == gates.REVIEW else None)
         packet_meta = {"waybill": waybill} if draft.message_kind == "shipping_notice" and waybill else {}
+        if opening_auto is not None:
+            due, held = opening_auto
+            if held:
+                packet_meta["auto_held"] = held[:200]
+            else:
+                packet_meta["auto_at"] = due
         if lane == LANE_SYSTEM:
             packet_meta["lane"] = LANE_SYSTEM
         if isinstance(meta.get(OPENING), dict):
@@ -2480,7 +2610,7 @@ class PrmService:
             needs_attention=(draft.needs_attention or bool(short) or bool(refused) or bool(stepless) or bool(recall))
             and state != DROPPED,
             reason="；".join(r for r in (recall, covered_note if state == DROPPED else "", refused, stepless, short,
-                                         draft.reason) if r)[:500],
+                                         repeat_note, draft.reason) if r)[:500],
             status=state, route=route, decided_at=decided_at, meta=packet_meta,
             tool=tool, platform=platform, now=now,
         )
@@ -2934,6 +3064,8 @@ class PrmService:
                 OPENING: {"how": how, "by": by, **({"wrote": True} if deal.get("last_message_at") else {})}}
         if group is not None:
             meta.update(channel=GROUP_CHANNEL, group=self.boss_groups.job_group(chat))
+        elif self._opening_auto_sec:
+            meta["opening_auto"] = self._opening_auto_sec // 60   # the Mac hears its draft may go out by itself (worker)
         creator = self._creator_ids(deal["id"])
         if creator:
             meta["creator"] = creator
@@ -4941,6 +5073,7 @@ class PrmService:
             "buyin_sync_min": self._buyin_sec // 60, "friend_add_status": self.friend_adds.status(),
             "auto_mode": self.auto_mode, "three_party": self.three_party.status(),
             "reply_parts": self._reply_parts, "boss_groups": self.boss_groups.status(),
+            "opening_auto_min": self._opening_auto_sec // 60,
         })
 
     # ── the sender thread: approved drafts, holding replies, clean-ups ────
@@ -4958,6 +5091,7 @@ class PrmService:
         self.register_found()                          # PRM_AUTO_REGISTER: the new friends the scan queued
         self.boss_groups.sweep()                       # PRM_BOSS_GROUPS: the groups a boss made with us (when due)
         self.sweep_executing()
+        self.send_due_openings()
         self.send_approved()
         self.send_holding_replies()
         self.sweep_owed_steps()
@@ -4969,6 +5103,38 @@ class PrmService:
         if now - self._last_retention >= RETENTION_CHECK_SEC:
             self._last_retention = now
             self.purge_due()
+
+    def send_due_openings(self) -> int:
+        """开场白没人处理就自动发 (PRM_OPENING_AUTO_MIN): each first line to a new friend whose time came (``meta.auto_at``,
+        ``_opening_auto``) and that still waits with nobody deciding on it is approved as it is (route ``OPENING_ROUTE``;
+        the deal records ``opening_auto``), for ``send_approved`` to send; not while a person has the chat (or it is
+        paused), not one held for a person since (her recall: ``needs_attention``), not when a newer draft of hers is
+        coming.  The setting 0: none (those marked before wait for a person).  None the first OPENING_AUTO_GRACE_SEC after
+        a start: what she wrote while the bot was stopped is read back then and puts the waiting draft out of date.
+        Returns how many were approved."""
+        if self._opening_auto_sec <= 0 or self._clock() - self._started < OPENING_AUTO_GRACE_SEC:
+            return 0
+        went = 0
+        for packet in reversed(self._store.packets((PENDING,), limit=200)):
+            due = (packet.get("meta") or {}).get("auto_at")
+            now = self._clock()
+            if isinstance(due, bool) or not isinstance(due, (int, float)) or due > now or packet["needs_attention"]:
+                continue
+            deal = self._store.deal(packet["deal_id"])
+            if deal is None or self._mode(deal, now) != COPILOT:
+                continue                               # a person has the chat: it waits for them
+            newer = self._relay.store.latest_open(packet["chat_id"], drafts_only=True, system=False)
+            if newer is not None and packet["job_id"] is not None and newer["id"] > packet["job_id"]:
+                continue                               # she wrote again: her new draft answers her (this one goes stale)
+            if not self._store.move(packet["id"], (PENDING,), APPROVED, decided_at=now, route=OPENING_ROUTE):
+                continue                               # a person decided on it meanwhile
+            waited = int(max(0.0, now - float(packet["created_at"])) // 60)
+            self._store.add_event(packet["deal_id"], packet["party_id"], "opening_auto",
+                                  {"packet": packet["id"], "waited_min": waited}, actor="system", now=now)
+            logger.info("PRM: packet %d (our first line to party %d) waited %d min with nobody deciding; it goes out by "
+                        "itself (PRM_OPENING_AUTO_MIN)", packet["id"], packet["party_id"], waited)
+            went += 1
+        return went
 
     def send_approved(self) -> int:
         """Send every approved packet, oldest first; returns how many went out."""
@@ -5118,6 +5284,8 @@ class PrmService:
                 continue                               # (a 百应 draft: she wrote in 百应, no WeChat 「稍等」 for it)
             if (packet.get("meta") or {}).get("channel") == GROUP_CHANNEL:
                 continue                               # 老板拉的群: no 「稍等」 in a group (the boss reads it too)
+            if self._opening_auto_sec and "auto_at" in (packet.get("meta") or {}) and not packet["needs_attention"]:
+                continue                               # our first line goes out by itself soon (send_due_openings)
             if now - float(packet["created_at"]) < self._holding_sec:
                 continue
             deal = self._store.deal(packet["deal_id"])
@@ -5134,6 +5302,9 @@ class PrmService:
                 continue                                   # already told in this round
             if self._answered(deal, packet["chat_id"], round_at):
                 continue                                   # she heard from us after her message
+            job = self._relay.store.get(packet["job_id"])
+            if job is not None and ack_only(job.get("text") or ""):
+                continue                                   # she only said she got it (好滴): nothing to hold
             done.add(packet["deal_id"])
             if text is None:
                 auto_on = self.auto_mode["on"]         # read once: the words of the night and of 自动模式 agree

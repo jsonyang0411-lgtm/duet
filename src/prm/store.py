@@ -923,7 +923,7 @@ class PrmStore:
     def move(self, packet_id: int, from_states: tuple, to_state: str, **fields) -> bool:
         """Compare-and-set: the packet goes to ``to_state`` only if it is in one of ``from_states``.
         ``platform`` (a dict) replaces the packet's platform JSON in the same step."""
-        allowed = {"final_text", "edited", "outcome", "error", "decided_at", "sent_at", "platform"}
+        allowed = {"final_text", "edited", "outcome", "error", "decided_at", "sent_at", "platform", "route"}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"not a packet field: {sorted(unknown)}")
@@ -1077,7 +1077,7 @@ class PrmStore:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id, status, reason FROM action_packets WHERE deal_id = ? AND job_id IS NOT NULL"
-                " AND tool != ? AND (status = ? OR (status = ? AND route IN ('auto', 'night') AND tool = ?))",
+                " AND tool != ? AND (status = ? OR (status = ? AND route IN ('auto', 'night', 'opening') AND tool = ?))",
                 (deal_id, BUYIN_TOOL, PENDING, APPROVED, MESSAGE_TOOL),
             ).fetchall()
             held = 0

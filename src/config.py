@@ -321,6 +321,12 @@ class BotConfig:
     # messages (8.1); 0 = never.
     prm_holding_min: int = 10
     prm_holding_text: str = "收到，我确认一下马上回你"
+    # 开场白没人处理就自动发 (2026-11-02, the user: a friend who accepts after the operators went home heard nothing all
+    # weekend): our first line to a new friend (a 开场白, or the first draft of a new friend's messages from before she was
+    # registered) that passes the night checks (src/prm/service.py ``_opening_auto``) goes out by itself when it has waited
+    # this many minutes in 待审批 with nobody deciding on it; in the 下班时段 or 自动模式 at once.  0 = off: it waits for a
+    # person, as before.  Never a 老板拉的群's 开场白 (the boss reads it).
+    prm_opening_auto_min: int = 0
     # A reply goes out as up to this many WeChat messages, one per paragraph of its draft (a blank line between
     # two), a typing pause apart (src/prm/service.py reply_parts); 1 = one message, as before.
     prm_reply_parts: int = 3
@@ -556,6 +562,8 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(f"PRM_HOLDING_MIN must be between 0 and 120, got {kwargs.get('prm_holding_min')}")
     if not (1 <= len(str(kwargs.get("prm_holding_text", "收到，我确认一下马上回你")).strip()) <= 60):
         errors.append("PRM_HOLDING_TEXT must be 1-60 characters")
+    if not (0 <= int(kwargs.get("prm_opening_auto_min", 0)) <= 1440):
+        errors.append(f"PRM_OPENING_AUTO_MIN must be between 0 and 1440, got {kwargs.get('prm_opening_auto_min')}")
     if not (1 <= int(kwargs.get("prm_reply_parts", 3)) <= 5):
         errors.append(f"PRM_REPLY_PARTS must be between 1 and 5, got {kwargs.get('prm_reply_parts')}")
     if str(kwargs.get("prm_night_auto_hours", "") or "").strip():
@@ -752,6 +760,7 @@ def load_config() -> BotConfig:
         "prm_takeover_min": int(os.getenv("PRM_TAKEOVER_MIN", "120")),
         "prm_holding_min": int(os.getenv("PRM_HOLDING_MIN", "10")),
         "prm_holding_text": os.getenv("PRM_HOLDING_TEXT", "收到，我确认一下马上回你").strip() or "收到，我确认一下马上回你",
+        "prm_opening_auto_min": int(os.getenv("PRM_OPENING_AUTO_MIN", "0")),
         "prm_reply_parts": int(os.getenv("PRM_REPLY_PARTS", "3")),
         "prm_night_auto_hours": os.getenv("PRM_NIGHT_AUTO_HOURS", "").strip(),
         "prm_night_holding_text": (os.getenv("PRM_NIGHT_HOLDING_TEXT", "收到～您说的我都记下啦，明早第一时间回复您哈～").strip()
