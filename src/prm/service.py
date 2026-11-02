@@ -713,6 +713,75 @@ def auto_note(how: str) -> str:
     return f"自动登记（新好友，{AUTO_HOWS.get(str(how or ''), AUTO_HOWS['unknown'])}）"[:AUTO_NOTE_CHARS]
 
 
+# 微信边缘（Mac）：Windows 报来的新好友认出是哪个平台的才自动登记（edge_identity）
+EDGE_PLATFORMS = ("抖音", "小红书")
+_PLATFORM_REMARK = re.compile(r"^\s*(抖音|小红书)\s*[-－_—~·:：]?\s*(.*)$")
+
+
+def _nick_key(name) -> str:
+    return "".join(str(name or "").split()).casefold()
+
+
+def invite_nicknames(path) -> dict:
+    """我们发过邀约卡（平台收下的）的抖音昵称：``{比对用的昵称: (抖音号, 昵称原样)}``（jst invite 的台账，一行一张卡）；
+    同一个昵称对上不止一个抖音号的抖音号记成 ""（认不准就不关联）。没有文件、读不了：{}。"""
+    out: dict = {}
+    if not path:
+        return out
+    try:
+        with open(path, encoding="utf-8") as f:
+            rows = f.read().splitlines()
+    except OSError:
+        return out
+    for line in rows:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or row.get("outcome") != "ACCEPTED":
+            continue
+        nickname = " ".join(str(row.get("nickname") or "").split())
+        key, account = _nick_key(nickname), str(row.get("dy") or "").strip()
+        if not key or not account:
+            continue
+        known = out.get(key)
+        out[key] = (account if known is None or known[0] == account else "", nickname)
+    return out
+
+
+def edge_identity(event: dict, nicknames: dict) -> Optional[dict]:
+    """Windows 报的新好友是哪个平台的，认不出 None（她留在「登记达人」的新加的好友里，等人来点）：
+    - 备注是「抖音-昵称」「小红书-昵称」（我们发好友申请时填的）：这个平台，称呼用昵称；
+    - 不然她的微信名、或者验证消息里（「我是李大琪」）有我们发过卡的抖音昵称，恰好一位：抖音，称呼用那个昵称；
+    - 不然验证消息里说了「抖音」「小红书」：这个平台，称呼用她的微信名。
+    抖音的昵称在台账里恰好对上一位就带上她的抖音号（``account``）。"""
+    remark = " ".join(str(event.get("remark") or "").split())
+    name = " ".join(str(event.get("name") or "").split())
+    verify = str(event.get("verify_text") or "")
+    platform, nick = "", ""
+    m = _PLATFORM_REMARK.match(remark)
+    if m:
+        platform, nick = m.group(1), m.group(2).strip()
+    else:
+        said, own = _nick_key(verify), _nick_key(name)
+        hits = [k for k, (account, _) in nicknames.items() if account and len(k) >= 2 and (k == own or k in said)]
+        if len(hits) == 1:
+            platform, nick = "抖音", nicknames[hits[0]][1]
+        else:
+            platform = next((p for p in EDGE_PLATFORMS if p in verify), "")
+    if not platform:
+        return None
+    account = ""
+    if platform == "抖音" and nick:
+        account = nicknames.get(_nick_key(nick), ("", ""))[0]
+        if not account:                           # 「抖音-sandara主播」: a ledger nickname inside it, exactly one
+            inside = {a for k, (a, _) in nicknames.items() if a and len(k) >= 2 and k in _nick_key(nick)}
+            account = inside.pop() if len(inside) == 1 else ""
+    title = nick or name
+    return {"platform": platform, "name": title, "account": account,
+            "note": f"{platform}-{title}" if title else f"平台：{platform}"}
+
+
 def event_out(ev: dict) -> dict:
     """An event for the console: what happened, by whom, when (texts kept as stored: masked)."""
     detail = dict(ev.get("detail") or {})
@@ -1147,6 +1216,7 @@ class PrmService:
         # PRM_AUTO_REGISTER (a config object without it, an older caller's: off): the new friends the scan found
         # (``new_friend_found``: wxid, name, how; never her greeting), registered by the sender thread (``register_found``)
         self._auto_register = str(getattr(config, "prm_auto_register", "off") or "off").strip().lower() == "on"
+        self._invite_ledger = str(getattr(config, "prm_invite_ledger", "") or "")
         self._found: deque = deque()
         self._found_lock = threading.Lock()
         self._wxids = self._store.active_wxids()
@@ -2662,7 +2732,8 @@ class PrmService:
                   link: Optional[dict] = None) -> dict:
         """``register``; ``how`` (PRM_AUTO_REGISTER: how the new friend was added): the bot's registration, only of a
         wxid with no party at all (``PrmStore.add_party(auto=True)``), the deal's record says so (``AUTO_EVENT``) and
-        the log line names only the wxid's first 8 characters; the bot never links (``link`` is a person's)."""
+        the log line names only the wxid's first 8 characters; the bot links only a 抖音号 the invite ledger names
+        (微信边缘, ``edge_new_friend``); otherwise ``link`` is a person's."""
         wxid = check_wxid(wxid, self._reserved)
         name, note = str(name or "").strip(), str(note or "").strip()
         if not name or len(name) > 30:
@@ -2720,6 +2791,30 @@ class PrmService:
             self._keep_found()
         self._wake.set()
 
+    def edge_new_friend(self, event: dict) -> None:
+        """微信边缘（Mac）：Windows 报的新好友（``friend_added``，edge 后端的钩子）。PRM_AUTO_REGISTER=on 时认出平台的
+        （``edge_identity``）排队，发送线程下一轮登记（``register_found``），称呼、备注、抖音号照认出来的填；认不出的不动，
+        她在「登记达人」的新加的好友里等人来点。从不抛出。"""
+        if not self._auto_register:
+            return
+        try:
+            wxid = str(event.get("wxid") or "").strip()
+            who = edge_identity(event, invite_nicknames(self._invite_ledger)) if wxid else None
+        except Exception:
+            logger.warning("PRM: a new friend from Windows could not be read; not registered automatically", exc_info=True)
+            return
+        if who is None:
+            logger.info("PRM: new friend %s… from Windows: no platform recognised; she waits in 登记达人's list", wxid[:8])
+            return
+        item = {"wxid": wxid, "name": who["name"], "how": str(event.get("how") or ""), "note": who["note"],
+                "account": who["account"], "edge": True}
+        with self._found_lock:
+            self._found.append(item)
+            self._keep_found()
+        logger.info("PRM: new friend %s… from Windows is on %s%s; registered in the next round", wxid[:8],
+                    who["platform"], "（抖音号认出来了）" if who["account"] else "")
+        self._wake.set()
+
     def register_found(self) -> int:
         """The new friends ``new_friend_found`` queued, registered one by one (oldest first) on the sender thread
         (``tick``), with none of the scan's locks held.  Returns how many were registered; one that is not (a rule
@@ -2764,7 +2859,9 @@ class PrmService:
             return []
         items = [e for e in (data if isinstance(data, list) else []) if isinstance(e, dict)]
         return [{"wxid": str(e.get("wxid") or "").strip(), "name": str(e.get("name") or ""),
-                 "how": str(e.get("how") or "")} for e in items if str(e.get("wxid") or "").strip()]
+                 "how": str(e.get("how") or ""),
+                 **({k: e.get(k) for k in ("note", "account", "edge")} if e.get("edge") else {})}
+                for e in items if str(e.get("wxid") or "").strip()]
 
     def _keep_found(self) -> None:
         """``AUTO_QUEUE`` = the queue now (under ``_found_lock``).  An error is logged, never raised: she is still
@@ -2784,11 +2881,14 @@ class PrmService:
         try:
             wxid = str(event.get("wxid") or "").strip()
             how = str(event.get("how") or "").strip() or "unknown"
-            why = self._not_auto(wxid)
+            why = self._not_auto(wxid, edge=bool(event.get("edge")))
             if why:
                 logger.info("PRM: new friend %s… not registered automatically: %s", wxid[:8], why)
                 return None
-            return self._register(wxid, auto_name(event.get("name"), wxid), auto_note(how), how=how)
+            account = str(event.get("account") or "").strip() if event.get("edge") else ""
+            note = str(event.get("note") or "").strip() if event.get("edge") else ""
+            return self._register(wxid, auto_name(event.get("name"), wxid), note or auto_note(how), how=how,
+                                  link={"account": account, "source": "register"} if account else None)
         except PartyError:
             # (its text may hold a creator's name: never logged) - a party made meanwhile, by a person
             logger.info("PRM: new friend %s… not registered automatically: she has a party already (made meanwhile)",
@@ -2798,14 +2898,14 @@ class PrmService:
                            "for a person", wxid[:8], exc_info=True)
         return None
 
-    def _not_auto(self, wxid: str) -> str:
+    def _not_auto(self, wxid: str, edge: bool = False) -> str:
         """Why PRM_AUTO_REGISTER leaves this wxid alone ("" = it may register her): not a person's private chat (a
         group, an official account, 文件传输助手: the scan never reports them either), the admin or a cc user, no wxid
         a creator can have (``check_wxid``), or a party with this wxid already, active or stopped (an operator's 停用
         sticks; a person may register her again in the console).  (``is_person_chat`` reads the WCDB backend's list
         of WeChat's own chats: that module is loaded wherever the scan runs, Windows wcdb; elsewhere the import fails,
         which ``auto_register_friend`` logs, and she stays a candidate.)"""
-        if not is_person_chat(wxid):
+        if not edge and not is_person_chat(wxid):    # (Windows reports only a person's chat as a new friend)
             return "not a person's private chat"
         if wxid in self._reserved:
             return "the admin or a cc user (never a creator)"

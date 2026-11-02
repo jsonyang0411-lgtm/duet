@@ -314,6 +314,10 @@ class BotConfig:
     # Never the admin or a cc user, never a wxid that has a party already (an operator's 停用 sticks).  "off": as before,
     # registering is a person's click in the console.
     prm_auto_register: str = "off"
+    # PRM_INVITE_LEDGER (Mac, 微信边缘): 我们发百应邀约卡的台账（jst invite 的 ~/.jst/invites.jsonl）。PRM_AUTO_REGISTER=on 时，
+    # Windows 报来的新好友认出平台（备注「抖音-昵称」、验证消息里有平台或昵称）才自动登记，抖音昵称在台账里恰好对上一位就关联她的抖音号。
+    # 空 = 不读台账（只看备注和验证消息里的平台）。
+    prm_invite_ledger: str = ""
     # An operator's own WeChat reply in a creator's chat (or the console) gives the chat to
     # a person for this long: the creator's messages are only recorded meanwhile.
     prm_takeover_min: int = 120
@@ -752,6 +756,7 @@ def load_config() -> BotConfig:
         "prm_takeover_min": int(os.getenv("PRM_TAKEOVER_MIN", "120")),
         "prm_holding_min": int(os.getenv("PRM_HOLDING_MIN", "10")),
         "prm_holding_text": os.getenv("PRM_HOLDING_TEXT", "收到，我确认一下马上回你").strip() or "收到，我确认一下马上回你",
+        "prm_invite_ledger": os.path.expanduser(os.getenv("PRM_INVITE_LEDGER", "").strip()),
         "prm_reply_parts": int(os.getenv("PRM_REPLY_PARTS", "3")),
         "prm_night_auto_hours": os.getenv("PRM_NIGHT_AUTO_HOURS", "").strip(),
         "prm_night_holding_text": (os.getenv("PRM_NIGHT_HOLDING_TEXT", "收到～您说的我都记下啦，明早第一时间回复您哈～").strip()

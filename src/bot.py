@@ -686,6 +686,14 @@ class Bot:
                                    event.get("written_at") or event.get("at"), event.get("id"))
 
         backend.add_event_hook(chat_notice)
+
+        def friend_added(event: dict) -> None:
+            """Windows 报的新好友：PRM_AUTO_REGISTER=on 时认出平台的自动登记（PrmService.edge_new_friend，从不抛出）。"""
+            if event.get("type") == P.FRIEND_ADDED:
+                prm.edge_new_friend(event)
+
+        backend.add_event_hook(friend_added)
+        prm.resume_found()                  # 重启前排了队、还没登记的新好友
         if influencer_store is None:
             backend.add_parties_source(prm.store.active_wxids)
             return None
