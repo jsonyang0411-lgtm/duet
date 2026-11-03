@@ -1172,7 +1172,7 @@ class TestPrmPages:
                          "添加该达人微信", "我在手机上加了", "请她加我们", "不加"):
             assert expected in text, expected
         assert "今天控制台已加 0/10" in page.inner_text("body") and "abcdefyz" not in page.inner_text("body")
-        assert card.locator("input[aria-label='#1 的附言']").input_value() == "您好小鹿，百应上联系您的～"
+        assert card.locator("input[aria-label='#1 的附言']").input_value() == "您好，百应上联系您的～"
         remark = card.locator(".prm-remark").inner_text()                        # the remark, next to the greeting
         assert "备注：抖音-小鹿" in remark and "认出「备注」栏就填进去" in remark
         card.locator("button:has-text('显示完整')").click()                      # written down, this page only
@@ -1185,11 +1185,11 @@ class TestPrmPages:
         dialog = page.locator("[role=dialog]")
         said = dialog.inner_text()
         assert "搜索 ab****yz" in said and "不会自动重试" in said and "别动键盘鼠标" in said
-        assert "附言：您好小鹿，百应上联系您的～；备注：抖音-小鹿" in said
+        assert "附言：您好，百应上联系您的～；备注：抖音-小鹿" in said
         assert manager.calls == []                                               # nothing before 确定添加
         dialog.locator("button:has-text('确定添加')").click()
         page.wait_for_timeout(1500)
-        assert manager.calls == [("abcdefyz", "您好小鹿，百应上联系您的～")] and manager.remarks == ["抖音-小鹿"]
+        assert manager.calls == [("abcdefyz", "您好，百应上联系您的～")] and manager.remarks == ["抖音-小鹿"]
         assert adds._store.friend_add(1)["state"] == "requested"
         text = page.locator(".prm-friend-add", has_text="小鹿").inner_text()
         assert "已发申请" in text and "她已经通过了，我来选是哪个聊天" in text and "添加该达人微信" not in text
@@ -1301,7 +1301,7 @@ class TestPrmPages:
             assert adds._store.friend_add(1)["rejected"] == ["wxid_wrong01"] and card.locator(".prm-candidate").count() == 0
             assert prm.service.store.parties()[1:] == []                  # nobody registered by itself
             adds.on_new_friend({"wxid": "wxid_xiaolu", "name": "小鹿🌸", "how": "requested",
-                                "own_greeting": "您好小鹿，百应上联系您的～", "added_at": now + 5})
+                                "own_greeting": "您好，百应上联系您的～", "added_at": now + 5})
             page.goto(f"{BASE_URL}/#/deals", timeout=10000)
             page.wait_for_timeout(1500)
             row = page.locator(".prm-new-friend", has_text="wxid_xiaolu")

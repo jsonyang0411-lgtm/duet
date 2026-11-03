@@ -526,13 +526,14 @@ class Copilot:
     makes it); ``night``: PRM_NIGHT_AUTO_HOURS; ``relay_wxids``: the cc users; ``scan``: the scan's timing."""
 
     def __init__(self, tmp_path, clock, db, private_chats="*", catchup_hours=12, prm_store=None, relay_store=None,
-                 auto_register="off", night="", relay_wxids=(), friend_add=False, **scan):
+                 auto_register="off", night="", relay_wxids=(), friend_add=False, friend_add_greeting="", **scan):
         config = BotConfig(
             private_chat_enabled=True, private_chats=private_chats, admin_wxid=ADMIN, bot_display_name=BOT,
             claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1", claude_relay_port=0,
             claude_relay_db=":memory:", prm_copilot="on", prm_db=":memory:", prm_catchup_hours=catchup_hours,
             prm_auto_register=auto_register, prm_night_auto_hours=night, claude_relay_wxids=list(relay_wxids),
-            prm_friend_add="on" if friend_add else "off")
+            prm_friend_add="on" if friend_add else "off",
+            **({"prm_friend_add_greeting": friend_add_greeting} if friend_add_greeting else {}))
         self.clock, self.db = clock, db
         self.messages = MessageStore(initialize_db(str(tmp_path / "messages.db")))
         self.router = MessageRouter(store=self.messages, admin_handler=AdminCommandHandler(), config=config,
@@ -1393,7 +1394,7 @@ def test_an_opening_asked_for_after_an_operator_greeted_her_by_hand_hears_of_it(
 
 def test_our_greeting_in_the_new_chat_says_which_request_she_accepted_and_linking_drafts_her_words(copilot_bot, db,
                                                                                                    clock):
-    bot = copilot_bot(friend_add=True)
+    bot = copilot_bot(friend_add=True, friend_add_greeting="您好{昵称}，我是{品牌}，百应上联系您的～")   # (greetings differ)
     bot.friends.scan_once()                                          # the start marker
     clock.now += 120
     adds = bot.prm.friend_adds

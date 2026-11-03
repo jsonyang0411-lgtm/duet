@@ -686,7 +686,7 @@ class FriendAddConfigTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             config = load_config()
         self.assertEqual(config.prm_friend_add, "off")
-        self.assertEqual(config.prm_friend_add_greeting, "您好{昵称}，我是{品牌}，百应上联系您的～")
+        self.assertEqual(config.prm_friend_add_greeting, "您好，我是{品牌}，百应上联系您的～")
         with patch.dict(os.environ, {"PRM_FRIEND_ADD": "yes", "PRM_FRIEND_ADD_DAILY_MAX": "5",
                                      "PRM_FRIEND_ADD_GAP_SEC": "300", "PRM_FRIEND_ADD_GREETING": " 你好{昵称} ",
                                      "PRM_FRIEND_ADD_BRAND": " 测试品牌 "}, clear=True):

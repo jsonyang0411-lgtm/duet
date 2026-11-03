@@ -369,7 +369,7 @@ class BotConfig:
     prm_friend_add: str = "off"
     prm_friend_add_daily_max: int = 10
     prm_friend_add_gap_sec: int = 120
-    prm_friend_add_greeting: str = "您好{昵称}，我是{品牌}，百应上联系您的～"
+    prm_friend_add_greeting: str = "您好，我是{品牌}，百应上联系您的～"
     prm_friend_add_brand: str = ""
     # The remark (备注) she gets in our WeChat when the bot adds her: {昵称} her 百应 nickname (her 抖音号 when it has
     # none or a masked number), at most 16 characters once filled in; "" (PRM_FRIEND_ADD_REMARK= in .env) = no remark.
@@ -600,7 +600,7 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(f"PRM_FRIEND_ADD_DAILY_MAX must be between 1 and 30, got {kwargs.get('prm_friend_add_daily_max')}")
     if not (30 <= int(kwargs.get("prm_friend_add_gap_sec", 120)) <= 3600):
         errors.append(f"PRM_FRIEND_ADD_GAP_SEC must be between 30 and 3600, got {kwargs.get('prm_friend_add_gap_sec')}")
-    if not (1 <= len(str(kwargs.get("prm_friend_add_greeting", "您好{昵称}，我是{品牌}，百应上联系您的～")).strip()) <= 60):
+    if not (1 <= len(str(kwargs.get("prm_friend_add_greeting", "您好，我是{品牌}，百应上联系您的～")).strip()) <= 60):
         errors.append("PRM_FRIEND_ADD_GREETING must be 1-60 characters")
     if len(str(kwargs.get("prm_friend_add_brand", "") or "").strip()) > 20:
         errors.append("PRM_FRIEND_ADD_BRAND must be at most 20 characters")
@@ -775,7 +775,7 @@ def load_config() -> BotConfig:
         "prm_friend_add": _parse_switch(os.getenv("PRM_FRIEND_ADD", "off")),
         "prm_friend_add_daily_max": int(os.getenv("PRM_FRIEND_ADD_DAILY_MAX", "10")),
         "prm_friend_add_gap_sec": int(os.getenv("PRM_FRIEND_ADD_GAP_SEC", "120")),
-        "prm_friend_add_greeting": os.getenv("PRM_FRIEND_ADD_GREETING", "").strip() or "您好{昵称}，我是{品牌}，百应上联系您的～",
+        "prm_friend_add_greeting": os.getenv("PRM_FRIEND_ADD_GREETING", "").strip() or "您好，我是{品牌}，百应上联系您的～",
         "prm_friend_add_brand": os.getenv("PRM_FRIEND_ADD_BRAND", "").strip(),
         "prm_friend_add_remark": os.getenv("PRM_FRIEND_ADD_REMARK", "抖音-{昵称}").strip(),   # set but empty: no remark
         "prm_group_with": os.getenv("PRM_GROUP_WITH", "").strip(),

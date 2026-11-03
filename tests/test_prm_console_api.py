@@ -683,7 +683,7 @@ def test_the_page_shows_the_records_masked_and_the_switchs_status(adds):
     assert (r["state"], r["state_label"], r["nickname"], r["aweme_id"], r["source_label"]) == (
         "offered", "待确认", "小鹿", "dy_demo01", "运营手动填的")
     assert r["masked"] == {"wechat": "ab****yz", "phone": "138****0000"} and r["has_wechat"] and r["has_phone"]
-    assert r["greeting"] == "您好小鹿，百应上联系您的～" and r["listed"] and r["open"] and r["last_attempt"] is None
+    assert r["greeting"] == "您好，百应上联系您的～" and r["listed"] and r["open"] and r["last_attempt"] is None
     assert (r["remark"], r["remark_set"]) == ("抖音-小鹿", False)
     status = d["friend_add_status"]
     assert (status["enabled"], status["can_add"], status["today"], status["cap"], status["gap_sec"]) == (
@@ -802,7 +802,7 @@ def test_a_new_friend_a_record_points_at_is_marked_in_the_candidates_and_not_her
     server.register_new_friends(service)
     try:
         adds.prm.friend_adds.on_new_friend({"wxid": "meimei_88", "name": "小美美", "how": "requested",
-                                             "own_greeting": "您好小鹿，百应上联系您的～", "added_at": adds.clock.now})
+                                             "own_greeting": "您好，百应上联系您的～", "added_at": adds.clock.now})
         d = call("/api/prm")[1]
         [r] = d["friend_adds"]
         assert r["candidate"]["wxid"] == "meimei_88" and r["candidate"]["level_label"] == "确定是她"

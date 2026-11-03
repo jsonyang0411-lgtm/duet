@@ -235,7 +235,7 @@ class AdvancedPostTests(_TempEnv):
         self.assertNotIn("PRM_FRIEND_ADD", body["errors"])
         status, body = _request("/api/advanced", "POST", {"values": {"PRM_FRIEND_ADD_GREETING": ""}})
         self.assertTrue(body["ok"], body)                                       # (the greeting: empty is its default)
-        self.assertEqual(self.env_values()["PRM_FRIEND_ADD_GREETING"], "您好{昵称}，我是{品牌}，百应上联系您的～")
+        self.assertEqual(self.env_values()["PRM_FRIEND_ADD_GREETING"], "您好，我是{品牌}，百应上联系您的～")
 
     def test_masked_secret_keeps_the_stored_one(self):
         status, body = _request("/api/advanced", "POST", {"values": {"CLAUDE_RELAY_TOKEN": "stor***0000",

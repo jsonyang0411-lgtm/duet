@@ -93,6 +93,15 @@ def world(tmp_path):
     w.stop()
 
 
+@pytest.fixture
+def named(tmp_path):
+    """A greeting template with {昵称} (the default until 2026-11-03): every record's greeting differs, so ours in the
+    new chat says which request she accepted."""
+    w = World(tmp_path, prm_friend_add_greeting=FA.GREETING_UNTIL_1103)
+    yield w
+    w.stop()
+
+
 def buyin_event(**over):
     """The 百应 inbox's call (dy-im-inbox, agreed with webot-04 on 2026-10-29)."""
     event = {"source": "buyin_card", "conversation_id": "conv1", "message_id": "7000000000000000001", "at": 1.0,
@@ -128,11 +137,11 @@ def test_a_pasted_contact_waits_and_one_confirmation_is_one_request(world, caplo
     caplog.set_level(logging.DEBUG)
     add_id = world.paste()
     record = world.record(add_id)
-    assert record["state"] == "offered" and record["greeting"] == "您好小鹿，百应上联系您的～"
+    assert record["state"] == "offered" and record["greeting"] == "您好，百应上联系您的～"
     assert world.manager.calls == []                                      # nothing until somebody confirms
     out = world.adds.confirm(add_id)
     assert out["state"] == "requested" and out["target"] == "ab****yz"
-    assert world.manager.calls == [(WECHAT, "您好小鹿，百应上联系您的～")]
+    assert world.manager.calls == [(WECHAT, "您好，百应上联系您的～")]
     record = world.record(add_id)
     assert record["requested_at"] == world.clock.now and record["reason"] == "ok"
     [attempt] = world.store.friend_attempts()
@@ -148,7 +157,7 @@ def test_the_phone_number_is_used_when_asked_and_when_there_is_no_wechat_id(worl
     world.later(200)
     second = world.paste(aweme="dy_demo02", phone="13900000000")
     world.adds.confirm(second, use="phone", greeting="  您好，  百应上联系您的 ")
-    assert world.manager.calls == [(PHONE, "您好小鹿，百应上联系您的～"), ("13900000000", "您好， 百应上联系您的")]
+    assert world.manager.calls == [(PHONE, "您好，百应上联系您的～"), ("13900000000", "您好， 百应上联系您的")]
     assert [a["kind"] for a in world.store.friend_attempts()] == ["phone", "phone"]
 
 
@@ -337,8 +346,10 @@ def test_a_paste_needs_her_douyin_id_and_valid_numbers(world):
 
 # ── the greeting ──────────────────────────────────────────────────────────────
 
-def test_the_greeting_has_her_nickname_and_the_brand_from_this_pcs_env():
-    template = FA.GREETING_DEFAULT
+def test_the_greeting_says_only_您好_and_the_brand_from_this_pcs_env_and_her_nickname_when_the_template_has_it():
+    assert greeting_for(FA.GREETING_DEFAULT, "小鹿", "") == "您好，百应上联系您的～"          # (user 2026-11-03)
+    assert greeting_for(FA.GREETING_DEFAULT, "小鹿", "测试品牌") == "您好，我是测试品牌，百应上联系您的～"
+    template = FA.GREETING_UNTIL_1103                                    # a {昵称} template (the default before)
     assert greeting_for(template, "小鹿", "") == "您好小鹿，百应上联系您的～"
     assert greeting_for(template, "小鹿", "测试品牌") == "您好小鹿，我是测试品牌，百应上联系您的～"
     assert greeting_for(template, "小鹿 138****0000", "测试品牌") == "您好，我是测试品牌，百应上联系您的～"
@@ -356,6 +367,48 @@ def test_the_brand_and_the_greeting_come_from_the_settings(tmp_path):
     try:
         assert w.record(w.paste())["greeting"] == "小鹿你好，测试品牌的商务"
         assert w.adds.status()["default_greeting"] == "你好，测试品牌的商务"
+    finally:
+        w.stop()
+
+
+def test_at_start_the_greetings_the_old_default_made_and_not_sent_yet_lose_her_nickname(tmp_path, caplog):
+    """User 2026-11-03: the cards already waiting say 「您好，我是…」 too; what an operator typed and what went out stay."""
+    caplog.set_level(logging.INFO)
+    w = World(tmp_path, prm_friend_add_brand="测试品牌", prm_friend_add_greeting=FA.GREETING_UNTIL_1103)   # the bot before
+    try:
+        offered = w.paste()
+        waiting = w.adds.paste("dy_demo02", "小青", {})["id"]
+        typed = w.paste(aweme="dy_demo03", nickname="小白", greeting="您好小白，我是测试品牌的运营")
+        asked = w.paste(aweme="dy_demo04", nickname="小红", wechat="abcdefgh", phone="")
+        w.adds.confirm(asked)                                            # requested: her request said it already
+        w.later(121)
+        failed = w.paste(aweme="dy_demo05", nickname="小紫", wechat="abcdefgi", phone="")
+        w.manager.answers.append("no_search_box")
+        w.adds.confirm(failed)                                           # surely not sent: still to be added
+        before = {i: w.record(i) for i in (offered, waiting, typed, asked, failed)}
+        assert before[offered]["greeting"] == "您好小鹿，我是测试品牌，百应上联系您的～"
+        assert [before[i]["state"] for i in (waiting, asked, failed)] == ["waiting", "requested", "failed"]
+        w.later(DAY)
+        again = PrmService(config(prm_friend_add="on", prm_friend_add_brand="测试品牌"), w.relay, store=w.store,
+                           clock=w.clock)                                # the new default, the same brand
+        again.start()
+        again.stop()
+        after = {i: w.record(i) for i in before}
+        assert {after[i]["greeting"] for i in (offered, waiting, failed)} == {"您好，我是测试品牌，百应上联系您的～"}
+        assert after[typed]["greeting"] == "您好小白，我是测试品牌的运营"
+        assert after[asked]["greeting"] == "您好小红，我是测试品牌，百应上联系您的～"
+        assert all(after[i]["updated_at"] == before[i]["updated_at"] for i in before)    # the 7-day clock stays
+        assert [r.getMessage() for r in caplog.records if "greeting(s)" in r.getMessage()] == [
+            "FriendAdds: 3 greeting(s) not sent yet no longer have her nickname"]    # (no names)
+        assert again.friend_adds.renew_greetings() == 0                  # once is all
+
+        late = w.paste(aweme="dy_demo06", nickname="小橙")                  # made by a bot still on the old default
+        assert w.adds.renew_greetings() == 0                             # its own setting: nothing to change
+        other = FA.FriendAdds(w.store, config(prm_friend_add="on", prm_friend_add_brand="别的品牌"), clock=w.clock)
+        assert other.renew_greetings() == 0                              # not what the old default makes with its brand
+        assert w.record(late)["greeting"] == "您好小橙，我是测试品牌，百应上联系您的～"
+        assert again.friend_adds.renew_greetings() == 1
+        assert w.record(late)["greeting"] == "您好，我是测试品牌，百应上联系您的～"
     finally:
         w.stop()
 
@@ -405,7 +458,7 @@ def test_the_remark_goes_with_the_one_add_and_whether_it_was_typed_is_kept(world
     world.later(121)
     other = world.paste(aweme="dy_demo02", nickname="小青")
     answer = world.admin.handle(f"加达人 {other}")
-    assert answer == (f"已向 ab****yz 发好友申请（#{other}，附言：您好小青，百应上联系您的～，备注没填上（申请窗口里没认出「备注」栏））"
+    assert answer == (f"已向 ab****yz 发好友申请（#{other}，附言：您好，百应上联系您的～，备注没填上（申请窗口里没认出「备注」栏））"
                       "；今天已加 2/10")
     record = world.record(other)
     assert (record["state"], record["remark"], record["remark_set"]) == ("requested", "抖音-小青", False)
@@ -568,7 +621,7 @@ def test_the_admins_commands_list_add_and_drop_with_masked_numbers(world):
     assert f"#{first} 小鹿 {AWEME} 微信号 ab****yz、手机 138****0000 待确认" in listed
     assert "手机 139****0000" in listed and WECHAT not in listed and PHONE not in listed
     answer = world.admin.handle(f"加达人 {first}")
-    assert answer == f"已向 ab****yz 发好友申请（#{first}，附言：您好小鹿，百应上联系您的～，备注：抖音-小鹿）；今天已加 1/10"
+    assert answer == f"已向 ab****yz 发好友申请（#{first}，附言：您好，百应上联系您的～，备注：抖音-小鹿）；今天已加 1/10"
     assert world.store.friend_attempts()[0]["by"] == "admin"
     assert world.admin.handle(f"加达人 {second}").startswith("没有加：离上一次加好友")
     assert world.admin.handle(f"不加达人 #{second}") == f"#{second} 记成不加了（号码已清除）"
@@ -638,14 +691,24 @@ def sent(world, aweme, nickname, wechat=WECHAT, greeting=None):
     return add_id
 
 
-def test_our_own_greeting_word_for_word_says_which_request_she_accepted(world):
-    first = sent(world, "dy_demo01", "小鹿")
-    second = sent(world, "dy_demo02", "小青", wechat="abcdefgh")
-    candidate = world.adds.on_new_friend(friend(own_greeting="您好小青，百应上联系您的～", added_at=world.clock.now))
+def test_our_own_greeting_word_for_word_says_which_request_she_accepted(named):
+    first = sent(named, "dy_demo01", "小鹿")
+    second = sent(named, "dy_demo02", "小青", wechat="abcdefgh")
+    candidate = named.adds.on_new_friend(friend(own_greeting="您好小青，百应上联系您的～", added_at=named.clock.now))
     assert candidate["level"] == "sure" and candidate["level_label"] == "确定是她"
     assert candidate["evidence"] == ["她通过了我们的申请，新私聊里我方的打招呼和这份附言一字不差"]
-    assert world.record(second)["candidate"]["wxid"] == "wxid_demo" and world.record(first)["candidate"] == {}
-    assert (world.record(second)["state"], world.store.parties()) == ("requested", [])   # never linked by itself
+    assert named.record(second)["candidate"]["wxid"] == "wxid_demo" and named.record(first)["candidate"] == {}
+    assert (named.record(second)["state"], named.store.parties()) == ("requested", [])   # never linked by itself
+
+
+def test_with_the_default_greeting_every_request_says_the_same_and_her_remark_tells_her_apart(world):
+    first = sent(world, "dy_demo01", "小鹿")
+    second = sent(world, "dy_demo02", "小青", wechat="abcdefgh")
+    assert world.record(first)["greeting"] == world.record(second)["greeting"] == "您好，百应上联系您的～"
+    assert world.adds.on_new_friend(friend(own_greeting="您好，百应上联系您的～")) is None         # two waiting: nobody
+    candidate = world.adds.on_new_friend(friend(wxid="wxid_qing", own_greeting="您好，百应上联系您的～", name="抖音-小青"))
+    assert candidate["level"] == "sure" and candidate["evidence"] == ["她在我们这边显示的名字就是加她时写的备注"]
+    assert world.record(second)["candidate"]["wxid"] == "wxid_qing" and world.record(first)["candidate"] == {}
 
 
 def test_the_same_greeting_twice_or_two_requests_waiting_point_at_nobody(world):
@@ -724,7 +787,7 @@ def test_not_her_clears_it_and_that_friend_is_not_offered_for_the_record_again(w
 def test_a_better_candidate_replaces_a_weaker_one_never_the_other_way(world):
     add_id = sent(world, "dy_demo01", "小鹿")
     world.adds.on_new_friend(friend(wxid="wxid_maybe", own_greeting=""))                       # likely
-    world.adds.on_new_friend(friend(wxid="wxid_sure", own_greeting="您好小鹿，百应上联系您的～"))    # sure
+    world.adds.on_new_friend(friend(wxid="wxid_sure", own_greeting="您好，百应上联系您的～"))      # sure
     assert world.record(add_id)["candidate"]["wxid"] == "wxid_sure"
     assert world.adds.on_new_friend(friend(wxid="wxid_later", own_greeting="")) is None
     assert world.record(add_id)["candidate"]["wxid"] == "wxid_sure"
@@ -819,7 +882,7 @@ def test_the_records_console_view_carries_the_candidate_and_lists_an_expired_one
     assert world.record(add_id)["state"] == "expired"
     [item] = friend_adds_out(world.store, world.clock.now)
     assert not item["listed"] and item["can_link"]                       # expired, linkable for 30 days
-    world.adds.on_new_friend(friend(own_greeting="您好小鹿，百应上联系您的～"))
+    world.adds.on_new_friend(friend(own_greeting="您好，百应上联系您的～"))
     [item] = friend_adds_out(world.store, world.clock.now)
     assert item["listed"] and item["candidate"]["level"] == "sure"
     assert world.adds.link(add_id, "wxid_demo")["state"] == "linked"

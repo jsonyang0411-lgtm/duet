@@ -157,10 +157,11 @@ GROUPS: list[dict] = [
             {"key": "PRM_FRIEND_ADD_GAP_SEC", "type": "int", "min": 30, "max": 3600, "default": "120",
              "label": "两次加好友至少隔多久", "unit": "秒",
              "requires": [{"key": "PRM_FRIEND_ADD", "is": "on", "text": "加百应达人微信打开时才用"}]},
-            {"key": "PRM_FRIEND_ADD_GREETING", "type": "text", "default": "您好{昵称}，我是{品牌}，百应上联系您的～",
+            {"key": "PRM_FRIEND_ADD_GREETING", "type": "text", "default": "您好，我是{品牌}，百应上联系您的～",
              "label": "默认附言",
-             "help": "{昵称} 是她百应昵称的前 8 个字（昵称里有号码时不用），{品牌} 是下面的品牌名；填好以后最多 30 个字，加之前可以改。"
-                     "每个人的附言不一样，她通过以后才认得出是谁。",
+             "help": "{品牌} 是下面的品牌名；填好以后最多 30 个字，加之前可以改。默认不带她的昵称（只说「您好」，2026-11-03），"
+                     "每个人的附言一样，她通过以后靠下面的备注认出是谁；写上 {昵称}（她百应昵称的前 8 个字，昵称里有号码时不用）"
+                     "附言就各不相同，也能按附言认人。还没发出去的旧附言（「您好〈昵称〉，…」）重启时换成这里的。",
              "requires": [{"key": "PRM_FRIEND_ADD", "is": "on", "text": "加百应达人微信打开时才用"}]},
             {"key": "PRM_FRIEND_ADD_BRAND", "type": "text", "default": "", "label": "附言里的品牌名",
              "help": "只存在这台电脑的 .env 里，不进代码仓库；不填时附言里的「我是{品牌}，」整段不写。最多 20 个字。",
