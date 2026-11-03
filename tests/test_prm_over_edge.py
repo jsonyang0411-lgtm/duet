@@ -165,7 +165,7 @@ def test_a_holding_reply_goes_through_windows_too(mac, fake):
     mac.prm.send_holding_replies()                  # 发送线程也可能先发了：只发一次
     assert wait_for(lambda: fake.sends)
     [send] = fake.sends
-    assert send["text"] == "收到，我确认一下马上回你"
+    assert send["text"] == "收到，我确认一下马上回您"
     fake.complete(send["send_id"])
     fake.seen(send["send_id"])
     time.sleep(0.5)

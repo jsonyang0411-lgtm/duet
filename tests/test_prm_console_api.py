@@ -158,7 +158,7 @@ def test_deals_numbers_and_wrong_sends_from_the_running_console(running):
     # sent, then marked wrong: shipping notices are reviewed again from zero
     assert call("/api/prm/packets", "POST", {"id": notice["id"], "action": "send"})[1]["ok"]
     running.prm.send_approved()
-    assert running.sent[-1] == (CREATOR, "小美你好～样品已经寄出啦：顺丰 SF1234567890123。签收之后跟我说一声哦～")
+    assert running.sent[-1] == (CREATOR, "老师您好～样品已经寄出啦：顺丰 SF1234567890123。签收之后跟我说一声哦～")
     assert call("/api/prm/packets", "POST", {"id": notice["id"], "action": "wrong"})[1] == {"ok": True, "status": "wrong"}
     d = call("/api/prm")[1]
     assert [p["wrong"] for p in d["recent"] if p["id"] == notice["id"]] == [True]

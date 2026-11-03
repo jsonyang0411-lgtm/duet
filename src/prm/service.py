@@ -134,7 +134,7 @@ READ_BACK_ROWS = 500         # at most this many own rows a chat remembers
 RETENTION_CHECK_SEC = 3600
 PLATFORM_LOST_GRACE_SEC = 1800   # an execution whose Mac went silent this long is given up on (red)
 PLATFORM_OPS = ("platform_execute", "platform_preview")
-HOLDING_TEXT = "收到，我确认一下马上回你"
+HOLDING_TEXT = "收到，我确认一下马上回您"
 # PRM_REPLY_PARTS (2026-10-30, 「一下子发一大段很怪」): a reply goes out as up to this many WeChat messages, one per
 # paragraph of the draft (a blank line between two: ``reply_parts``), a typing pause apart (src/send/bubbles.py
 # ``typing_delay``); 1 = one message, blank lines and all, as before.  A config object without it (an older caller's): 1.

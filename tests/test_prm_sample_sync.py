@@ -189,7 +189,7 @@ def test_a_waybill_is_filled_like_the_console_and_its_shipping_notice_always_wai
     assert event_out(status)["name"] == f"聚水潭寄样单 {JST_ORDER}：已发货（{WAYBILL}）"
     assert bot.prm.decide(notice["id"], "send")["ok"]
     bot.prm.send_approved()
-    assert bot.texts == [(CREATOR, f"小美你好～样品已经寄出啦：顺丰速运 {WAYBILL}。签收之后跟我说一声哦～")]
+    assert bot.texts == [(CREATOR, f"老师您好～样品已经寄出啦：顺丰速运 {WAYBILL}。签收之后跟我说一声哦～")]
     round_says(bot, clock, (JST_ORDER, info("SENT", WAYBILL)))                  # the same again: nothing more
     assert len(shipping_notices(bot)) == 1
     assert len([e for e in bot.prm.store.events(deal["id"], limit=50) if e["kind"] in ("shipment", "sample_status")]) == 2

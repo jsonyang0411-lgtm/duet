@@ -320,7 +320,7 @@ class BotConfig:
     # A draft waiting this long gets one holding reply per round of the creator's
     # messages (8.1); 0 = never.
     prm_holding_min: int = 10
-    prm_holding_text: str = "收到，我确认一下马上回你"
+    prm_holding_text: str = "收到，我确认一下马上回您"
     # 开场白没人处理就自动发 (2026-11-02, the user: a friend who accepts after the operators went home heard nothing all
     # weekend): our first line to a new friend (a 开场白, or the first draft of a new friend's messages from before she was
     # registered) that passes the night checks (src/prm/service.py ``_opening_auto``) goes out by itself when it has waited
@@ -560,7 +560,7 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(f"PRM_TAKEOVER_MIN must be between 5 and 1440, got {kwargs.get('prm_takeover_min')}")
     if not (0 <= int(kwargs.get("prm_holding_min", 10)) <= 120):
         errors.append(f"PRM_HOLDING_MIN must be between 0 and 120, got {kwargs.get('prm_holding_min')}")
-    if not (1 <= len(str(kwargs.get("prm_holding_text", "收到，我确认一下马上回你")).strip()) <= 60):
+    if not (1 <= len(str(kwargs.get("prm_holding_text", "收到，我确认一下马上回您")).strip()) <= 60):
         errors.append("PRM_HOLDING_TEXT must be 1-60 characters")
     if not (0 <= int(kwargs.get("prm_opening_auto_min", 0)) <= 1440):
         errors.append(f"PRM_OPENING_AUTO_MIN must be between 0 and 1440, got {kwargs.get('prm_opening_auto_min')}")
@@ -759,7 +759,7 @@ def load_config() -> BotConfig:
         "prm_auto_register": _parse_switch(os.getenv("PRM_AUTO_REGISTER", "off")),
         "prm_takeover_min": int(os.getenv("PRM_TAKEOVER_MIN", "120")),
         "prm_holding_min": int(os.getenv("PRM_HOLDING_MIN", "10")),
-        "prm_holding_text": os.getenv("PRM_HOLDING_TEXT", "收到，我确认一下马上回你").strip() or "收到，我确认一下马上回你",
+        "prm_holding_text": os.getenv("PRM_HOLDING_TEXT", "收到，我确认一下马上回您").strip() or "收到，我确认一下马上回您",
         "prm_opening_auto_min": int(os.getenv("PRM_OPENING_AUTO_MIN", "0")),
         "prm_reply_parts": int(os.getenv("PRM_REPLY_PARTS", "3")),
         "prm_night_auto_hours": os.getenv("PRM_NIGHT_AUTO_HOURS", "").strip(),

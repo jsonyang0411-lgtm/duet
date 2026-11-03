@@ -110,7 +110,7 @@ GROUPS: list[dict] = [
             {"key": "PRM_HOLDING_MIN", "type": "int", "min": 0, "max": 120, "default": "10",
              "label": "草稿等多久先回一句", "unit": "分钟",
              "help": "草稿在「待审批」里放了这么久还没人处理，先自动回达人一句下面的话（达人每发一轮消息最多一次），草稿继续等。0 = 不回。"},
-            {"key": "PRM_HOLDING_TEXT", "type": "text", "default": "收到，我确认一下马上回你", "label": "先回的那句话",
+            {"key": "PRM_HOLDING_TEXT", "type": "text", "default": "收到，我确认一下马上回您", "label": "先回的那句话",
              "help": "1–60 个字。"},
             {"key": "PRM_NIGHT_AUTO_HOURS", "type": "text", "default": "", "label": "下班时段自动回复",
              "help": "填运营下班的时段，例如 18:00-09:00（可以跨过半夜，按这台电脑的时间）；空着 = 关，和以前一样按门槛先审。"

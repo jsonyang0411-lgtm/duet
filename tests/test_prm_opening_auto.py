@@ -388,7 +388,7 @@ def test_a_round_that_only_says_she_got_it_gets_no_holding_reply(bot, clock, wor
                             needs_attention=True, reason="不确定要不要回"))
     clock.now += 11 * 60
     assert bot.prm.send_holding_replies() == (1 if holds else 0)
-    assert bot.texts == ([(CREATOR, "收到，我确认一下马上回你")] if holds else [])
+    assert bot.texts == ([(CREATOR, "收到，我确认一下马上回您")] if holds else [])
 
 
 def test_which_lines_only_say_she_got_it():

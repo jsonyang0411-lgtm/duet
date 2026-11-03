@@ -627,7 +627,7 @@ def test_what_the_bot_starts_itself_goes_to_the_group_while_she_is_no_friend_of_
     packet = ship(world, run)
     assert packet["chat_id"] == GROUP and (packet["meta"]["channel"], packet["meta"]["group_name"]) == (
         "group", GROUP_NAME)
-    assert world.window.typed == [(GROUP_NAME, "小美你好～样品已经寄出啦：顺丰 SF1234567890。签收之后跟我说一声哦～")]
+    assert world.window.typed == [(GROUP_NAME, "老师您好～样品已经寄出啦：顺丰 SF1234567890。签收之后跟我说一声哦～")]
     run.poll()
     assert world.prm_store.packet(packet["id"])["outcome"] == "sent_confirmed"
 
