@@ -315,7 +315,7 @@ function DealDetail({ p, d, onDone }) {
           {deal.last_message_at ? (
             <div className="f-hint">
               她说过话（比如加好友时的「我是…」），可我们还没正式回过她：她那份草稿没发，最多只有机器人自动回的「稍等」。
-              点「写开场白」，Mac 按 kb 写我们正式的第一句（和别的开场白一样附款式图），在「待审批」里等你看过再发。
+              点「写开场白」，Mac 按 kb 写我们正式的第一句（和别的开场白一样直接发货盘图），在「待审批」里等你看过再发。
             </div>
           ) : (
             <div className="f-hint">

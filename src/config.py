@@ -330,6 +330,10 @@ class BotConfig:
     # A reply goes out as up to this many WeChat messages, one per paragraph of its draft (a blank line between
     # two), a typing pause apart (src/prm/service.py reply_parts); 1 = one message, as before.
     prm_reply_parts: int = 3
+    # 发得慢一点 (2026-11-04, the user: 「回消息的时候尽量别一口气发一堆过去」): a reply's messages go out at a person's pace
+    # (src/prm/service.py ``_deliver``: 2-5 s between its text messages by length, 3-6 s before its first file after
+    # the text, 2-4 s between files); off = as before (a 0.4-3.5 s typing pause between text messages, files at once).
+    prm_send_pace: str = "on"
     # 下班时段自动回复 ("18:00-09:00", may pass midnight; empty = off): inside it, by this PC's clock, a creator-reply
     # draft whose kind has not earned "auto" still goes out by itself when every night rule holds (src/prm/gates.py
     # night_reason: no complaint, nothing plain_reason minds, no commission above 25 % or 坑位 / 保底 …, a flagged
@@ -566,6 +570,8 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(f"PRM_OPENING_AUTO_MIN must be between 0 and 1440, got {kwargs.get('prm_opening_auto_min')}")
     if not (1 <= int(kwargs.get("prm_reply_parts", 3)) <= 5):
         errors.append(f"PRM_REPLY_PARTS must be between 1 and 5, got {kwargs.get('prm_reply_parts')}")
+    if kwargs.get("prm_send_pace", "on") not in ("off", "on"):
+        errors.append(f"PRM_SEND_PACE must be off or on, got {kwargs.get('prm_send_pace')}")
     if str(kwargs.get("prm_night_auto_hours", "") or "").strip():
         from src.prm.gates import night_window
 
@@ -762,6 +768,7 @@ def load_config() -> BotConfig:
         "prm_holding_text": os.getenv("PRM_HOLDING_TEXT", "收到，我确认一下马上回您").strip() or "收到，我确认一下马上回您",
         "prm_opening_auto_min": int(os.getenv("PRM_OPENING_AUTO_MIN", "0")),
         "prm_reply_parts": int(os.getenv("PRM_REPLY_PARTS", "3")),
+        "prm_send_pace": _parse_switch(os.getenv("PRM_SEND_PACE", "on")),
         "prm_night_auto_hours": os.getenv("PRM_NIGHT_AUTO_HOURS", "").strip(),
         "prm_night_holding_text": (os.getenv("PRM_NIGHT_HOLDING_TEXT", "收到～您说的我都记下啦，明早第一时间回复您哈～").strip()
                                    or "收到～您说的我都记下啦，明早第一时间回复您哈～"),

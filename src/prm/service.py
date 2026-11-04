@@ -95,6 +95,7 @@ import hashlib
 import itertools
 import json
 import logging
+import random
 import re
 import threading
 import time
@@ -143,6 +144,13 @@ HOLDING_TEXT = "收到，我确认一下马上回您"
 REPLY_PARTS = 3
 REPLY_PARTS_MAX = 5
 _PARAGRAPH = re.compile(r"\n[ \t　]*\n")
+# PRM_SEND_PACE (2026-11-04, 「回消息的时候尽量别一口气发一堆过去」): on, a reply's messages go out at a person's pace
+# (``_deliver``): its text messages ``typing_delay`` with PACE_TEXT apart (2-5 s by length), its first file PACE_FIRST_FILE
+# after its text, its files PACE_NEXT_FILE apart (seconds, at random in the range); off as before (``typing_delay``'s own
+# 0.4-3.5 s between text messages, files at once).  A config object without it (an older caller's): off.
+PACE_TEXT = {"base": 2.0, "per_char": 0.1, "cap": 5.0}
+PACE_FIRST_FILE = (3.0, 6.0)
+PACE_NEXT_FILE = (2.0, 4.0)
 # 下班时段 (PRM_NIGHT_AUTO_HOURS, 2026-10-29): the holding reply inside the window (PRM_NIGHT_HOLDING_TEXT), and the key
 # of a deal's notice of a holding line the window sent for a draft the model flagged (``night:<packet id>``, until 已处理)
 NIGHT_HOLDING_TEXT = "收到～您说的我都记下啦，明早第一时间回复您哈～"
@@ -1149,6 +1157,8 @@ class PrmService:
         except (TypeError, ValueError):
             parts = 1
         self._reply_parts = 1 if getattr(config, "wechat_backend", "") == "edge" else min(max(parts, 1), REPLY_PARTS_MAX)
+        # PRM_SEND_PACE: a reply's messages go out at a person's pace (``_deliver``; off: as before)
+        self._pace = str(getattr(config, "prm_send_pace", "off") or "off").strip().lower() == "on"
         # PRM_NIGHT_AUTO_HOURS (empty: off, everything as before; a config object without it, an older caller's: off):
         # inside the window a reply draft that waits for a person by the gates may still go out by itself when every
         # night rule holds (``_night_judge``); its job is told it is night (``meta.night``, ``_submit``) and holding
@@ -5391,10 +5401,20 @@ class PrmService:
                 sent += self._deliver(aimed)
         return sent
 
+    def _send_pause(self, part: str = "", *, after_text: bool = False, file_n: Optional[int] = None) -> float:
+        """Seconds to wait before the next message of a reply (``_deliver``): a text message (``part``) a typing pause
+        after the one before it, PRM_SEND_PACE's slower one when on (PACE_TEXT); a file (``file_n``: which, from 0) none
+        when off, else PACE_FIRST_FILE after the text (none for a draft of files only), PACE_NEXT_FILE after a file."""
+        if file_n is None:
+            return typing_delay(part, **PACE_TEXT) if self._pace else typing_delay(part)
+        if not self._pace or (file_n == 0 and not after_text):
+            return 0.0
+        return random.uniform(*(PACE_NEXT_FILE if file_n else PACE_FIRST_FILE))
+
     def _deliver(self, packet: dict) -> int:
         """Text first (its paragraphs as messages of their own, PRM_REPLY_PARTS), then the files; stops at the first
-        failure (never sent twice).  A 百应 draft is never sent
-        (``send_approved`` keeps it back already; this is the second guard): back to waiting, nothing sent."""
+        failure (never sent twice).  PRM_SEND_PACE on: a person's pace between them (``_send_pause``).  A 百应 draft is
+        never sent (``send_approved`` keeps it back already; this is the second guard): back to waiting, nothing sent."""
         if is_buyin(packet):
             self._store.move(packet["id"], (SENDING, APPROVED), PENDING, decided_at=None)
             logger.warning("PRM: packet %d is a 百应 draft: the bot does not send it (an operator does, in 百应)",
@@ -5412,7 +5432,7 @@ class PrmService:
         # that fails ends it (never sent twice), and says how many went out.
         parts = reply_parts(text, self._reply_parts) if not problem else []
         for n, part in enumerate(parts):
-            if n and self._pause(typing_delay(part)):
+            if n and self._pause(self._send_pause(part)):
                 # The bot is stopping (its WeChat backend stopped first): the rest is not sent, and the draft stays
                 # sending, as one cut off by a stop: the next start settles it as 「不确定发出去没有」 and knows the parts
                 # read back by it (``_sent_part``), never an operator's (marked failed now, they would be).
@@ -5434,11 +5454,18 @@ class PrmService:
                     problem = (f"分 {len(parts)} 条发，前 {n} 条发出去了，第 {n + 1} 条没发出去（{problem}）；"
                                "剩下的请在微信里手动补发")
                 break
-        for item in packet["attachments"] if not problem else ():
+        files = packet["attachments"] if not problem else []
+        for n, item in enumerate(files):
             path = str(item.get("path") or "")
             if not Path(path).is_file():
                 problem = f"文件「{item.get('name')}」在电脑上找不到了"
                 break
+            pause = self._send_pause(after_text=bool(parts), file_n=n)
+            if pause and self._pause(pause):
+                # (stopping: as a stop between two text messages above, the draft stays sending)
+                logger.warning("PRM: packet %d: the bot stopped after %d of its %d files; the rest not sent",
+                               packet["id"], n, len(files))
+                return 0
             noted = self._note_sent(packet["chat_id"], file=path, packet_id=packet["id"])
             try:
                 result = self._send_file(packet["chat_id"], path)
