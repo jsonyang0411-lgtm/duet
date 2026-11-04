@@ -64,6 +64,8 @@ reviewed: a new friend whose catch-up found nothing of hers (she accepted our fr
 WeChat's notice is all her chat has), or an operator's 「写开场白」 in the console (``ask_opening``).  Its
 job has no creator message and says so (``meta.opening``; the worker's ``opening_line``); her message
 outdates it like any reply draft (the next job hears it was not sent), and no holding reply goes for it.
+「补发货盘」 in the console (2026-11-04, ``ask_huopan``) is the same for a creator we did talk to: one job with no line of
+hers that sends her the kb's 货盘 again (``meta.huopan``; the worker's ``huopan_line``), always reviewed.
 
 An operator may tell the Mac how to write to a creator (起草备注, 2026-10-31: her WeChat signature said
 「直接发链接和brief，感兴趣的会回复！勿催视频，不接语音」): the deal action ``draft_note`` keeps it on the deal
@@ -614,11 +616,14 @@ def opening_note(opening: dict) -> str:
     return f"{who}：这份是我们先打招呼的开场白，要人看过再发"
 
 
+HUOPAN_NOTE = "运营点了「补发货盘」：这份是我们主动补发的货盘，要人看过再发"
+
+
 def gap_notes(meta: dict) -> list[str]:
     """What a draft job's ``meta`` says about messages read late (``late``), recorded without a
-    draft (``missed``) or written by a new friend before she was registered (``new_friend``), and
-    our first line to a creator who had not written (``opening``), as attention lines (any of them:
-    the draft waits for a person)."""
+    draft (``missed``) or written by a new friend before she was registered (``new_friend``), our
+    first line to a creator who had not written (``opening``) and the 货盘 an operator asked to send
+    her again (``huopan``), as attention lines (any of them: the draft waits for a person)."""
     notes = []
     late, missed, new_friend = meta.get("late"), meta.get("missed"), meta.get("new_friend")
     if isinstance(late, dict) and late.get("from"):
@@ -629,6 +634,8 @@ def gap_notes(meta: dict) -> list[str]:
         notes.append(new_friend_note(int(new_friend.get("count") or 1), float(new_friend["from"])))
     if isinstance(meta.get(OPENING), dict):
         notes.append(opening_note(meta[OPENING]))
+    if isinstance(meta.get(HUOPAN), dict):
+        notes.append(HUOPAN_NOTE)
     return notes
 
 
@@ -701,7 +708,7 @@ EVENT_NAMES = {
     "commission_covered": "邀约卡开过专属佣金，当作开好",
     "night_send": "夜间自动发出", "night_done": "夜间自动回的过渡话已处理",
     "opening_auto": "开场白没人处理，自动发出", GROUP_LINE: "三方群里的一句话",
-    "auto_register": "自动登记（新好友）", "opening": "派写开场白的任务",
+    "auto_register": "自动登记（新好友）", "opening": "派写开场白的任务", "huopan": "派补发货盘的任务",
     "buyin_message": "百应私信", "buyin_copy": "复制百应私信草稿（含完整号码）", "buyin_sent": "运营已在百应手动发出",
     "buyin_draft_failed": "百应私信的草稿没写成",
     "friend_add_link": "关联抖音号", "creator_unlinked": "取消关联抖音号",
@@ -735,6 +742,12 @@ OPENING = "opening"
 OPENING_UNSURE = "opening_unsure"
 OPENING_UNSURE_TEXT = ("她是加好友过了很久才登记的，超出了补读的时间（PRM_CATCHUP_HOURS）：补读的这段里她没说话，更早的不知道，"
                        "所以没自动写开场白；看一眼微信，她还没说过话就在合作单里点「写开场白」")
+# 补发货盘 (2026-11-04, the user: a creator we talked to went quiet, send her the 货盘 again and ask what she thinks): the
+# console's deal action (「补发货盘」, ``ask_huopan``), the job's ``meta.huopan`` ({"by": "console"}), the packet's
+# ``meta.huopan`` (the console's tag; no holding reply for it unless a line of hers joined the job), the deal's event
+# (``HUOPAN``: which job) and the notice of one the Mac did not write (``huopan``).  Its draft always waits for a person
+# (``gap_notes``).
+HUOPAN = "huopan"
 # 老板拉的群 (PRM_BOSS_GROUPS, src/prm/boss_groups.py): what the bot starts itself (a 专属佣金 step, a shipping notice, a
 # 开场白 from the console) goes to her private chat, or to the group when she has none (``_reach``); with neither (she
 # left the group) nothing is sent and the deal's notice (``UNREACHABLE``) says so until she writes to us again.
@@ -792,6 +805,8 @@ def event_out(ev: dict) -> dict:
         name = f"派写开场白的任务 #{detail['job']}" + ("（运营点的）" if detail.get("by") == "console" else
                                                      "（老板拉的群）" if detail.get("by") == BOSS_OPENING else
                                                      "（新好友还没说话）")
+    elif ev["kind"] == HUOPAN and detail.get("job"):
+        name = f"派补发货盘的任务 #{detail['job']}（运营点的）"
     elif ev["kind"] == BOSS_EVENT:
         name = ("老板拉的群不在了（运营说的），群里她的消息不再起草" if detail.get("gone") else
                 "老板拉群介绍" + (f"（{detail['name']}）" if detail.get("name") else "")
@@ -918,6 +933,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
             "created_at": p["created_at"], "decided_at": p["decided_at"], "sent_at": p["sent_at"],
             "tool": p.get("tool", MESSAGE_TOOL), "platform": platform_out(p),
             "night_held": str(p["meta"].get("night_held") or ""), "opening": bool(p["meta"].get(OPENING)),
+            "huopan": bool(p["meta"].get(HUOPAN)),
             "channel": BUYIN_CHANNEL if is_buyin(p) else GROUP_CHANNEL if p["meta"].get("channel") == GROUP_CHANNEL
             else "wechat", "group_name": str(p["meta"].get("group_name") or ""), "buyin": buyin_packet_out(store, p),
             "auto_mode": bool(p["meta"].get(AUTO_MODE)),
@@ -1966,8 +1982,8 @@ class PrmService:
     def _outdated(self, waiting: list, now: float) -> list:
         """The Mac's reply drafts of ``waiting`` (the deal's drafts in 待审批 a moment ago) that a message of hers
         has just put out of date (``superseded`` now: nobody sent them), with their jobs and her lines in them
-        (the job's text and the follow-ups the Mac had: ``_job_lines``): ``[(packet, job, lines)]``; a 开场白 with
-        no line of hers too (``lines`` "": the job answering her is told it was not sent).  Not a 专属佣金
+        (the job's text and the follow-ups the Mac had: ``_job_lines``): ``[(packet, job, lines)]``; a 开场白 or a
+        补发货盘 with no line of hers too (``lines`` "": the job answering her is told it was not sent).  Not a 专属佣金
         step's (the system lane is no reply of hers), nor one approved or dropped meanwhile."""
         out = []
         for packet in waiting:
@@ -1978,7 +1994,8 @@ class PrmService:
                 continue
             job = self._relay.store.get(int(packet["job_id"]))
             lines = self._job_lines(job) if job is not None else ""
-            if lines or (job is not None and (packet.get("meta") or {}).get(OPENING)):
+            started = (packet.get("meta") or {}).get(OPENING) or (packet.get("meta") or {}).get(HUOPAN)
+            if lines or (job is not None and started):
                 out.append((packet, job, lines))
         return out
 
@@ -2000,9 +2017,10 @@ class PrmService:
         return self.boss_groups.knows_private(party["wxid"])
 
     def _bot_started(self, packet: dict) -> bool:
-        """A packet the bot started itself (``_reach``): a shipping notice (no job), a 专属佣金 step, a 开场白."""
+        """A packet the bot started itself (``_reach``): a shipping notice (no job), a 专属佣金 step, a 开场白, a 补发货盘."""
         meta = packet.get("meta") or {}
-        return packet.get("job_id") is None or meta.get("lane") == LANE_SYSTEM or bool(meta.get(OPENING))
+        return (packet.get("job_id") is None or meta.get("lane") == LANE_SYSTEM or bool(meta.get(OPENING))
+                or bool(meta.get(HUOPAN)))
 
     def _aim(self, packet: Optional[dict]) -> Optional[dict]:
         """A packet the bot started itself still aimed at her private chat, for a creator with a 老板拉的群: where she can
@@ -2707,6 +2725,8 @@ class PrmService:
             packet_meta["lane"] = LANE_SYSTEM
         if isinstance(meta.get(OPENING), dict):
             packet_meta[OPENING] = True                # (the console's tag; no holding reply for it)
+        if isinstance(meta.get(HUOPAN), dict):
+            packet_meta[HUOPAN] = True                 # (the console's tag)
         if meta.get("channel") == GROUP_CHANNEL:       # 老板拉的群: it goes to the group (the console's tag)
             told = meta.get("group") if isinstance(meta.get("group"), dict) else {}
             kept = self._store.boss_group(str(job["chat_id"])) or {}
@@ -2745,12 +2765,15 @@ class PrmService:
             self._store.supersede(deal_id, now, keep=packet_id, lane=lane,
                                   chat_id=self._lane_chat(party_id, job["chat_id"]) if lane == LANE_REPLY else None)
         attention = [*notes, *([draft.reason] if draft.needs_attention and draft.reason else [])]
+        if state == NO_REPLY and isinstance(meta.get(HUOPAN), dict):
+            # 补发货盘 the Mac wrote nothing for (she had the 货盘 within 7 days, say): the deal says why, not 「要人看过再发」
+            attention = [*(n for n in notes if n != HUOPAN_NOTE), f"「补发货盘」这次没写：{(draft.reason or 'Mac 没说为什么')[:200]}"]
         # (her recall: its own notice on the deal says so, the draft's reason too)
-        # The draft job of her lines that had no draft before (or this job itself, back late): seen to; and a 开场白 that
-        # was not written, by any later reply draft.
+        # The draft job of her lines that had no draft before (or this job itself, back late): seen to; and a 开场白 or
+        # a 补发货盘 that was not written, by any later reply draft.
         answered = self._store.drop_notices(deal_id, lambda n: n.get("into") == job["id"]
                                             or n["key"] == f"failed:{job['id']}"
-                                            or (lane == LANE_REPLY and bool(n.get(OPENING))), now)
+                                            or (lane == LANE_REPLY and bool(n.get(OPENING) or n.get(HUOPAN))), now)
         if any(n.get("into") == job["id"] for n in answered):
             attention.append(f"#{job['id']} 的草稿也回了 " + "、".join(f"#{n.get('job')}" for n in answered
                                                                    if n.get("into") == job["id"])
@@ -2824,6 +2847,14 @@ class PrmService:
                      "请直接在老板拉的群里跟她打招呼" if meta.get("channel") == GROUP_CHANNEL
                      else "可以在合作单里点「写开场白」再写一次，或者直接在微信里跟她打招呼"]), now, job=job_id, lane=lane,
                     opening=True, asked_at=float(job.get("created_at") or now))
+                return
+            if isinstance(meta.get(HUOPAN), dict) and not lines:
+                # 补发货盘, and she said nothing meanwhile: no line of hers to take along; a later reply draft, another
+                # 补发货盘, or an operator writing to her by hand sees to it
+                self._store.set_notice(deal_id, f"failed:{job_id}", "；".join(
+                    [head.replace("草稿没写成", "补发货盘的草稿没写成", 1),
+                     "可以在合作单里再点一次「补发货盘」，或者直接在微信里把货盘发给她"]), now, job=job_id, lane=lane,
+                    huopan=True, asked_at=float(job.get("created_at") or now))
                 return
             # this job carried the lines of earlier ones: they are in its own lines now
             self._store.drop_notices(deal_id, lambda n: n.get("into") == job_id, now)
@@ -3233,6 +3264,78 @@ class PrmService:
             return "「待审批」里已经有她的草稿"
         return ""
 
+    def ask_huopan(self, deal_id) -> dict:
+        """「补发货盘」 in the console (2026-11-04): one draft job that sends her the 货盘 again (``_ask_huopan``).
+        ``{"ok": True, "job"}``, or ``{"ok": False, "error"}`` saying why not."""
+        try:
+            deal = self._store.deal(int(deal_id))
+        except (TypeError, ValueError):
+            deal = None
+        party = self._store.party(deal["party_id"]) if deal else None
+        if deal is None or party is None:
+            return {"ok": False, "error": "没有找到这个合作单"}
+        with self._handle_lock:
+            job_id, why = self._ask_huopan(party)
+        return {"ok": True, "job": job_id} if job_id else {"ok": False, "error": why}
+
+    def _ask_huopan(self, party: dict) -> tuple:
+        """One draft job of our line that sends her the 货盘 (kb 第 3.0 节: the picture, the Excel as it says) again,
+        with no new line of hers (``meta.huopan`` {"by": "console"}; told what we sent her, ``meta.sent``, what an
+        operator wrote to her by hand, ``meta.history``, her 三方群's, and the deal's 起草备注, ``meta.note``), under
+        ``_handle_lock``: ``(job id, "")``, or ``(None, why not)`` (``_no_huopan``).  Its draft always waits for a person
+        (``gap_notes``): never by a gate, by night, in 自动模式 or by PRM_OPENING_AUTO_MIN; no holding reply goes for it
+        unless a message of hers joined the job; her message after it outdates the draft (``_outdated``: her job hears it
+        was not sent)."""
+        now = self._clock()
+        deal = self._store.deal_of(party["id"], now)
+        chat, group = self._reach(party)               # (老板拉的群: no private chat with her, it goes to the group)
+        why = self._no_huopan(party, deal, now, chat)
+        if why:
+            return None, why
+        meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"], HUOPAN: {"by": "console"}}
+        if group is not None:
+            meta.update(channel=GROUP_CHANNEL, group=self.boss_groups.job_group(chat))
+        else:
+            told = self._group_lines(deal["id"])
+            if told:
+                meta["three_party_chat"] = told         # what was said in her 三方群 lately
+        made = self.three_party.job_meta(deal)
+        if made:
+            meta["three_party"] = made                 # 三方群 made: the samples are talked over there
+        creator = self._creator_ids(deal["id"])
+        if creator:
+            meta["creator"] = creator
+        outbound = self._outbound(deal["id"], party["id"], now)
+        if outbound:
+            meta["sent"] = outbound                    # (the Mac sees whether the 货盘 went out within 7 days)
+        told = history_of(self._store.backlog(deal["id"]))
+        if told:
+            meta["history"] = told                     # told, not taken: her next draft job still hears of it
+        _, job_id = self._relay.submit(chat, chat, "", kind=PRM, meta=self._reply_meta(self._with_note(meta, deal, now)), fresh=True)
+        self._store.add_event(deal["id"], party["id"], HUOPAN, {"job": job_id}, actor="console", now=now)
+        # one not written before: this one is on its way
+        self._store.drop_notices(deal["id"], lambda n: bool(n.get(HUOPAN)), now)
+        logger.info("PRM: party %d: job #%d sends her the 货盘 again (补发货盘, console)", party["id"], job_id)
+        return job_id, ""
+
+    def _no_huopan(self, party: dict, deal: dict, now: float, chat: Optional[str] = "") -> str:
+        """Why no 补发货盘 is drafted for her now ("" = it is): off the list, a person has the chat, she cannot be reached
+        (``_reach``: ``chat`` None), or a WeChat draft of hers is being written or waits in 待审批 (a 百应 one is another
+        channel and does not stand in the way).  Whether she had the 货盘 within 7 days is the Mac's to see (the case
+        file, ``meta.sent``); the bot leaves out a file she got within REPEAT_FILE_SEC all the same."""
+        if not party.get("active"):
+            return "这位达人已经停用（不在达人名单里），不补发货盘"
+        if self._mode(deal, now) != COPILOT:
+            return "现在不在副驾驶模式（人工接管或暂停），不补发货盘"
+        if chat is None:
+            return f"{UNREACHABLE_TEXT}，货盘发不出去"
+        if self._relay.store.latest_open(chat or party["wxid"], drafts_only=True, system=False) is not None:
+            return "她的草稿正在写，写好会出现在「待审批」里"
+        if any((p.get("meta") or {}).get("lane") not in (LANE_SYSTEM, LANE_BUYIN)
+               for p in self._store.deal_packets(deal["id"], statuses=(PENDING, APPROVED, SENDING))):
+            return "「待审批」里已经有她的草稿：先处理那一份"
+        return ""
+
     def set_draft_note(self, deal_id, text, actor: str = "console") -> dict:
         """「起草备注」 in the console (the deal action ``draft_note`` {text}): what the operators tell the Mac about this
         creator, which every draft job of the deal carries from now on (``_with_note``); "" clears it.  Whitespace is
@@ -3324,11 +3427,14 @@ class PrmService:
         for a person), ``notice`` (none for an order signed for already) and ``note`` (which order, in the events).
         An operator's change of the deal's stage or shipment sees to a deleted order's notice.  ``night_done``
         (「已处理」 on a holding line the night window sent) only drops that notice; ``opening`` (「写开场白」) asks
-        for one 开场白 draft (``ask_opening``); ``group`` / ``group_try`` / ``group_made`` / ``group_none`` are 三方群's
+        for one 开场白 draft (``ask_opening``); ``huopan`` (「补发货盘」) one draft that sends her the 货盘 again
+        (``ask_huopan``); ``group`` / ``group_try`` / ``group_made`` / ``group_none`` are 三方群's
         (``three_party``: 「拉三方群」, 「先试一下」, 「建好了」, 「没建成」); ``draft_note`` {text} keeps the deal's 起草备注
         (``set_draft_note``)."""
         if action == OPENING:
             return self.ask_opening(data.get("deal_id"))
+        if action == HUOPAN:
+            return self.ask_huopan(data.get("deal_id"))
         if action == DRAFT_NOTE:
             return self.set_draft_note(data.get("deal_id"), data.get("text"), actor=actor)
         if action in GROUP_ACTIONS:
@@ -5393,7 +5499,8 @@ class PrmService:
         (the Mac's replies only: a system notice, or a next step the bot asked for (the system
         lane: a 专属佣金 waiting for a person), answers nothing the creator asked).  None in a
         round she was answered already (``_answered``: an operator's own line, or something we
-        sent, after her latest message), nor for a 开场白 of a creator who has not written (no round).
+        sent, after her latest message), nor for a 开场白 of a creator who has not written (no round), nor for a
+        补发货盘 with no line of hers in its job (we started it: her last line may be an unanswered 「好滴」).
         In the 下班时段 (``_night_active``) it says PRM_NIGHT_HOLDING_TEXT; 自动模式 by day (``_auto_by_day``: no
         「明早」) AUTO_HOLDING_TEXT.  A creator with a 老板拉的群 (she writes there and in private): a round is the draft's
         own chat's lines (``last_by_chat``): her line in the group starts no round in her private chat."""
@@ -5428,6 +5535,8 @@ class PrmService:
             if self._answered(deal, packet["chat_id"], round_at):
                 continue                                   # she heard from us after her message
             job = self._relay.store.get(packet["job_id"])
+            if (packet.get("meta") or {}).get(HUOPAN) and (job is None or not self._job_lines(job)):
+                continue                                   # 补发货盘: we started it, she said nothing to hold
             if job is not None and ack_only(job.get("text") or ""):
                 continue                                   # she only said she got it (好滴): nothing to hold
             done.add(packet["deal_id"])
@@ -5952,6 +6061,8 @@ def apply_deal_action(store: PrmStore, action: str, data: dict, *, now: float, t
             return night_done(store, deal_id, data.get("packet"), now=now, actor=actor)
         elif action == OPENING:                        # (running: PrmService.ask_opening)
             return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能写开场白"}
+        elif action == HUOPAN:                         # (running: PrmService.ask_huopan)
+            return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能补发货盘"}
         elif action in GROUP_ACTIONS:                  # (running: PrmService.three_party)
             return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能拉群"}
         elif action == DRAFT_NOTE:                     # (running: PrmService.set_draft_note)

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   ArrowClockwise, UserPlus, Prohibit, ArrowCounterClockwise, CaretDown, CaretRight, Eye, EyeSlash, Truck, Check, HandWaving,
-  UsersThree, Copy, PencilSimple,
+  UsersThree, Copy, PencilSimple, Package,
 } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
@@ -332,6 +332,22 @@ function DealDetail({ p, d, onDone }) {
           </div>
         </div>
       )}
+
+      {/* 补发货盘 (the deal action huopan, 2026-11-04): send her the 货盘 again and ask which styles she likes */}
+      <div className="stack prm-huopan" style={{ gap: 6 }}>
+        <b>补发货盘</b>
+        <div className="f-hint">
+          聊过以后一直没下文、想再推一次款：点「补发货盘」，Mac 按 kb 写一两句，附上货盘图（对方是商务、助理时再加 Excel），问她看中哪几款，在「待审批」里等你看过再发（不会自动发）。
+          7 天内发过货盘的不再发，Mac 会说哪天发过。
+        </div>
+        <div>
+          <button type="button" className="btn" disabled={busy || !p.active || deal.mode !== 'copilot'}
+            onClick={() => run({ action: 'huopan' }, '已请 Mac 写补发货盘的草稿，写好会出现在「待审批」里')}>
+            <Package />补发货盘
+          </button>
+          {(!p.active || deal.mode !== 'copilot') && <span className="dim" style={{ marginLeft: 8 }}>{!p.active ? '已停用的达人不发' : '先恢复副驾驶'}</span>}
+        </div>
+      </div>
 
       {d?.three_party?.enabled && <ThreePartyBlock p={p} d={d} busy={busy} run={run} />}
 

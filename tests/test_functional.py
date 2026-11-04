@@ -763,6 +763,50 @@ class TestPrmPages:
         job = prm.relay.next_job(0, ("prm",))
         assert job["meta"]["opening"] == {"how": "", "by": "console", "wrote": True} and job["text"] == ""
 
+    def test_deals_page_asks_for_the_huopan_again_and_the_review_page_tags_it(self, page, prm):
+        """补发货盘 (2026-11-04): every opened deal has 「补发货盘」 with its hint; 小美's draft waits, so the click says why
+        not; once it is dropped a click asks the Mac for a draft that sends her the 货盘 again, which waits in 待审批
+        tagged 补发货盘; a person having the chat, the button is off and says why."""
+        import json as _json
+        from src.prm.service import SETTLE_SEC
+
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.wait_for_timeout(1500)
+        page.locator("button[aria-label='展开 小美']").click()
+        page.wait_for_timeout(300)
+        block = page.locator(".prm-huopan")
+        text = block.inner_text()
+        assert "附上货盘图（对方是商务、助理时再加 Excel）" in text and "不会自动发" in text and "7 天内发过货盘的不再发" in text
+        block.locator("button:has-text('补发货盘')").click()
+        page.wait_for_timeout(1200)
+        assert "「待审批」里已经有她的草稿：先处理那一份" in page.inner_text("body")
+        [waiting] = prm.service.store.packets(("pending",))
+        assert prm.service.decide(waiting["id"], "drop")["ok"]
+        block.locator("button:has-text('补发货盘')").click()
+        page.wait_for_timeout(1200)
+        assert "已请 Mac 写补发货盘的草稿" in page.inner_text("body")
+        prm.clock.now += SETTLE_SEC + 1
+        job = prm.relay.next_job(0, ("prm",))
+        assert job["meta"]["huopan"] == {"by": "console"} and job["text"] == ""
+        draft = {"intent": "补发货盘：问她看中哪几款", "slots": {}, "stage_proposal": "", "message_kind": "material",
+                 "reply_draft": "老师您好～给您补一份我们当季的货盘", "attachments_to_send": [], "needs_attention": False,
+                 "reason": "kb 第 3.0 节"}
+        prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(draft, ensure_ascii=False)})
+        prm.relay.tick()
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="给您补一份我们当季的货盘")
+        assert card.locator(".tag", has_text="补发货盘").count() == 1
+        assert card.locator(".tag", has_text="开场白").count() == 0
+        assert "这一条：补发货盘：问她看中哪几款" in card.inner_text()
+        assert prm.service.deal_action("mode", {"deal_id": 1, "mode": "human"})["ok"]
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.wait_for_timeout(1500)
+        page.locator("button[aria-label='展开 小美']").click()
+        page.wait_for_timeout(300)
+        block = page.locator(".prm-huopan")
+        assert block.locator("button:has-text('补发货盘')").is_disabled() and "先恢复副驾驶" in block.inner_text()
+
     def test_deals_page_edits_saves_and_shows_the_draft_note(self, page, prm):
         """起草备注 (2026-10-31): an opened deal shows its note (none yet) with the hint; 「写备注」 opens the field, 「保存」
         keeps it through the deal action (one line, as the bot keeps it) and her next draft job carries it; more than

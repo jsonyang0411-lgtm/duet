@@ -216,6 +216,37 @@ def test_an_opening_is_asked_for_from_the_running_console_and_refused_while_stop
     assert stopped == {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能写开场白"}
 
 
+def test_a_huopan_is_asked_for_from_the_running_console_and_refused_while_stopped(running, tmp_path, monkeypatch):
+    """POST /api/prm/deals {action: huopan} (「补发货盘」, 2026-11-04): with 小美's draft waiting she is told why not;
+    once it is dropped the click makes a job with ``meta.huopan``, its draft is tagged ``huopan`` in /api/prm and the
+    deal's record names the click; a stopped bot cannot ask the Mac."""
+    deal_id = call("/api/prm")[1]["parties"][0]["deal"]["id"]
+    assert call("/api/prm/deals", "POST", {"action": "huopan", "deal_id": deal_id})[1] == {
+        "ok": False, "error": "「待审批」里已经有她的草稿：先处理那一份"}
+    [waiting] = call("/api/prm")[1]["pending"]
+    assert waiting["huopan"] is False
+    assert call("/api/prm/packets", "POST", {"id": waiting["id"], "action": "drop"})[1]["ok"] is True
+    answer = call("/api/prm/deals", "POST", {"action": "huopan", "deal_id": deal_id})[1]
+    assert answer["ok"] is True
+    running.relay._clock.now += SETTLE_SEC + 1
+    job = running.relay.next_job(0, ("prm",))
+    assert (job["id"], job["text"], job["meta"]["huopan"]) == (answer["job"], "", {"by": "console"})
+    draft = {"intent": "补发货盘", "slots": {}, "stage_proposal": "", "message_kind": "material",
+             "reply_draft": "老师您好～给您补一份我们当季的货盘", "attachments_to_send": [], "needs_attention": False,
+             "reason": "kb 第 3.0 节"}
+    running.relay.finish(job["id"], {"ok": True, "text": json.dumps(draft, ensure_ascii=False)})
+    running.relay.tick()
+    d = call("/api/prm")[1]
+    assert [(p["party_name"], p["huopan"], p["status"]) for p in d["pending"]] == [("小美", True, "pending")]
+    assert any(e["name"] == f"派补发货盘的任务 #{job['id']}（运营点的）" for e in d["parties"][0]["deal"]["events"])
+    server.register_prm(None)                                       # the bot stopped
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PRM_DB", raising=False)
+    assert call("/api/prm/parties", "POST", {"action": "add", "wxid": CREATOR, "name": "小美"})[1]["ok"] is True
+    stopped = call("/api/prm/deals", "POST", {"action": "huopan", "deal_id": 1})[1]
+    assert stopped == {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能补发货盘"}
+
+
 def test_the_draft_note_is_kept_from_the_running_console_and_refused_while_stopped(running, tmp_path, monkeypatch):
     """POST /api/prm/deals {action: draft_note, text} (起草备注, 2026-10-31): the operators' words for the Mac, kept on the
     deal (whitespace collapsed) and shown in GET /api/prm's deal; her next draft job carries them (``meta.note``); too
