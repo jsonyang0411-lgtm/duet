@@ -32,6 +32,7 @@
     "mid_fans_min": 200000,
     "big_live_min": 5000000,
     "big_level_min": 4,
+    "categories": ["small", "mid", "big"],
     "suspect_hat_share": 90,
     "female_min": 60,
     "fans_price_min": 100,

@@ -291,6 +291,31 @@ def test_plan_is_read_only_and_builds_the_list_by_the_users_rules(env):
     for f in out["files"].values():
         assert stat.S_IMODE(os.stat(f).st_mode) == 0o600
     assert out["by_category"] == {"小达人": 4, "中大博主": 1, "大主播/专场型": 2}
+    assert "rules.categories" not in md, "all three categories by default: nothing said"
+
+
+def test_plan_leaves_out_a_category_the_config_does_not_want(env):
+    # the user, 2026-11-04: no 专场型 for now; they are named off the list and their room goes to the others
+    led = tool.Ledger(env.tmp / "ledger")
+    led.append({"event": "attempt", "attempt": "a1", "aweme_id": "dy_invited", "plan_id": "Pold"})
+    led.append({"event": "result", "attempt": "a1", "aweme_id": "dy_invited", "sent": True, "outcome": "VERIFIED_SUCCESS"})
+    code, out = plan_now(env, config={"rules": {"categories": ["mid", "small"]}})
+    assert code == 0, out
+    plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
+    assert {c["aweme_id"] for c in plan["creators"]} == {"dy_small_a", "dy_small_b", "dy_gap", "dy_mid_a", "dy_video_big"}
+    assert {c["category"] for c in plan["creators"]} == {"small", "mid"}
+    reasons = {c["aweme_id"]: c["reason"] for c in plan["excluded"]}
+    assert reasons["dy_big_a"] == reasons["dy_big_b"] == "大主播/专场型：这阵子不发（配置 rules.categories）"
+    assert plan["settings"]["rules"]["categories"] == ["small", "mid"], "kept in the tool's order"
+    assert out["by_category"] == {"小达人": 4, "中大博主": 1, "大主播/专场型": 0}
+    md = Path(out["files"]["md"]).read_text(encoding="utf-8")
+    assert "只要小达人、中大博主（rules.categories）" in md
+    assert "dy_big_a" in md.split("## 其他没进清单的")[1], "listed with the reason, for a person to see"
+    # what the categories may be: one or more of small / mid / big
+    for bad in ([], ["huge"], "small", ["small", 1]):
+        cfg = env.write_config(rules={"categories": bad})
+        code, _, _ = env.main(["plan", "--config", cfg, "--out-dir", str(env.tmp / "p"), "--ledger-dir", str(env.tmp / "l")])
+        assert code == 2, bad
 
 
 def test_plan_counts_stops_and_stock(env):

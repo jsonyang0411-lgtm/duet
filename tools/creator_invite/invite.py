@@ -95,6 +95,9 @@ DEFAULT_FIND = {
 DEFAULT_RULES = {
     "small_fans_min": 5000, "mid_fans_min": 200000,        # 小达人 5000～20 万（15～20 万也算小达人：用户 2026-10-29），中大博主 ≥ 20 万
     "big_live_min": 5000000, "big_level_min": 4,          # 专场型：直播为主、近 30 天直播销售额区间下限 ≥ 500 万、LV4 及以上
+    # 清单要哪几类（small / mid / big）：不在这里的那一类认出来就不进清单（写明理由），名额留给别的类。2026-11-04 用户：
+    # 专场型先不要（发了至少两天的卡里专场型 14 位只回了 1 位，中大博主、小达人 16～19%）
+    "categories": list(CATEGORY_ORDER),
     "suspect_hat_share": 90.0,
     "female_min": 60.0,                                    # 女性粉丝低于它的不进清单（我们卖女帽：用户 2026-10-29）
     # 粉丝客单价（粉丝画像里她的粉丝占比最大的那一档，「客单价100-200元」）的下限低于它的不进清单，画像里没有的只标出来；
@@ -288,6 +291,10 @@ def load_config(path: Optional[str]) -> dict:
         ids = rules.get(key)
         if not isinstance(ids, list) or not all(isinstance(x, str) and AWEME_ID.match(x) for x in ids):
             raise ToolError(f"配置 rules.{key} 要是抖音号的列表", EXIT_USAGE)
+    cats = rules.get("categories")
+    if not isinstance(cats, list) or not cats or not all(isinstance(c, str) and c in CATEGORY_ORDER for c in cats):
+        raise ToolError(f"配置 rules.categories 要是 {'、'.join(CATEGORY_ORDER)} 里的一类或几类", EXIT_USAGE)
+    rules["categories"] = [c for c in CATEGORY_ORDER if c in cats]
     cfg["rules"] = rules
     templates = dict(DEFAULT_TEMPLATES)
     templates.update(raw.get("templates") or {})
@@ -864,6 +871,9 @@ def build_plan(cfg: dict, clis: Clis, ledger: Ledger, count: int, *, moment: Opt
         if category is None:
             excluded.append({**view, "reason": why})
             continue
+        if category not in rules["categories"]:
+            excluded.append({**view, "reason": f"{CATEGORY_NAMES[category]}：这阵子不发（配置 rules.categories）"})
+            continue
         flags = []
         if view["hat_share"] is not None and view["hat_share"] < rules["low_hat_share"]:
             flags.append(f"帽子占比只有 {view['hat_share']}%")
@@ -955,8 +965,10 @@ def plan_markdown(plan: dict, plan_file: str) -> str:
     w(f"- 我们自己的每周上限 {s['weekly_cap']}，台账里本周已发 {plan['ledger_sent_this_week']}；平台额度低于余量 {s['quota_margin']} 就停\n")
     f = s["find"]
     fans_floor = s["rules"].get("fans_price_min")
+    cats = s["rules"].get("categories") or list(CATEGORY_ORDER)     # 有 rules.categories 以前生成的清单：三类都要
     w(f"- 筛选：类目 {f['goods_category']}，件单价 {f['price_min']}～{f['price_max']} 元，"
       + (f"粉丝客单价 ≥ {fans_floor:g} 元（粉丝画像里占比最大的那一档，按它的下限比），" if fans_floor else "")
+      + ("" if len(cats) == len(CATEGORY_ORDER) else f"只要{'、'.join(CATEGORY_NAMES[c] for c in cats)}（rules.categories），")
       + "没加进达人库；"
       + "；".join(f"粉丝 {fans_range(q)}，第 {q.get('page', 1)} 页起读 {q.get('pages', 1)} 页" for q in f["queries"]) + "\n")
     dy = plan.get("douyin") or {}
