@@ -1378,7 +1378,7 @@ class TestPrmPages:
     def test_review_page_says_who_left_a_contact_and_the_baiying_draft_names_its_record(self, page, prm):
         """加百应达人微信第 7 步：「待审批」页百应那一行说没登记的达人里有几位留了联系方式（见下面的「加微信」），我们邀约的
         达人发的联系方式卡片成了一张加微信卡；百应草稿卡上说这个会话留过的联系方式是哪一条加微信、到哪一步了；完整号码哪儿都
-        不显示。号码、抖音号、名字都是编的。"""
+        不显示；草稿排在加微信卡上面（2026-11-05）。号码、抖音号、名字都是编的。"""
         import json as _json
         from src.prm import platforms
         from src.prm.service import BUYIN_SYNC_CHAT
@@ -1422,6 +1422,8 @@ class TestPrmPages:
         draft = page.locator(".prm-buyin", has_text="样品什么时候到")
         assert (f"她在这个会话里留了联系方式（微信号 zq****83）→「加微信 #{early['id']}」：已登记并关联"
                 in draft.inner_text())
+        # the drafts first, the 加微信 cards under them (2026-11-05: the user scrolled past them to reach the drafts)
+        assert draft.bounding_box()["y"] < page.locator(".prm-friend-adds").bounding_box()["y"]
         assert "zq_test_wx_83" not in text and "13700001234" not in text
 
     # ── 老板拉的群 (PRM_BOSS_GROUPS, 功能 U): the fields the PRM side adds to /api/prm (``boss_groups``, a packet's

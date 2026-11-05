@@ -17,7 +17,8 @@ import { FriendAddList } from './FriendAddCard'
 // until 已处理; the status line sits above the gate table.
 // A 抖音百应 private-message draft (PRM_BUYIN_SYNC_MIN) is never sent by the bot: an
 // operator copies it, sends it in 百应 by hand and says so (已在百应发了).
-// 加微信 (PRM_FRIEND_ADD): the contacts 百应 creators left, one confirmed friend request each (FriendAddCard.jsx).
+// 加微信 (PRM_FRIEND_ADD): the contacts 百应 creators left, one confirmed friend request each (FriendAddCard.jsx),
+// below the drafts (2026-11-05: the user scrolled past a long list of them to reach the drafts).
 // 自动模式: the same rules at any hour, switched at the top of the page (on: a warn line with
 // the button that switches it off); what it sent by day is tagged 自动模式发出.
 // 老板拉的群 (PRM_BOSS_GROUPS): a draft of her line in the group the boss made with her and us
@@ -43,7 +44,6 @@ export default function ReviewPanel() {
         <AutoModeBar d={data} onDone={reload} />
         <PlatformAlerts alerts={data?.platform_alerts || []} onDone={reload} />
         <NightAlerts alerts={data?.night_alerts || []} onDone={reload} />
-        <FriendAddList d={data} onDone={reload} />
         {data && !pending.length && (
           <Empty title="现在没有要审批的草稿">已登记的达人发来消息后，Mac 写好的回复会出现在这里。</Empty>
         )}
@@ -52,6 +52,7 @@ export default function ReviewPanel() {
             ? <BuyinCard key={p.id} p={p} onDone={reload} />
             : <DraftCard key={p.id} p={p} canSend={!!data?.can_send} replyParts={data?.reply_parts || 1} onDone={reload} />))}
         </div>
+        <FriendAddList d={data} onDone={reload} />
         <RecentCard d={data} onDone={reload} />
         <GatesCard d={data} />
       </div>

@@ -86,12 +86,12 @@ export function remarkLine(r) {
   return `备注：${r.remark}${note}`
 }
 /** A 百应 draft's line of the 加微信 record made from its conversation: "她在这个会话里留了联系方式（微信号 ab****yz）→
- *  「加微信 #12」：已发申请，等她通过（见上面）" ('' without one). */
+ *  「加微信 #12」：已发申请，等她通过（见下面）" ('' without one; the 加微信 cards are below the drafts). */
 export function buyinFriendAddLine(fa) {
   if (!fa) return ''
   const m = fa.masked || {}
   const said = [m.wechat ? `微信号 ${m.wechat}` : '', m.phone ? `手机 ${m.phone}` : ''].filter(Boolean).join('、')
-  return `她在这个会话里留了联系方式${said ? `（${said}）` : ''}→「加微信 #${fa.id}」：${fa.label}${fa.open ? '（见上面）' : ''}`
+  return `她在这个会话里留了联系方式${said ? `（${said}）` : ''}→「加微信 #${fa.id}」：${fa.label}${fa.open ? '（见下面）' : ''}`
 }
 /** "10-29 11:00 发的邀约卡（小达人，4 款，卡上没开专属佣金）" ('' without an invite). */
 export function inviteLine(inv) {
