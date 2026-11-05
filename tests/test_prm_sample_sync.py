@@ -82,6 +82,12 @@ def sync_jobs(b):
     return [j for j in b.relay.store.list_jobs(100) if j["chat_id"] == SAMPLE_SYNC_CHAT]
 
 
+def asked_in(job):
+    """The bot's own orders a round asked about ([] when it asked only for ours made by hand, ``meta.mine``, 2026-11-05);
+    None when no round was queued."""
+    return None if job is None else json.loads(job["meta"])["orders"]
+
+
 def next_round(b, clock, advance=HOUR + 1):
     """The clock moves on, the sender thread ticks: the round's job, or None when nothing was asked."""
     before = {j["id"] for j in sync_jobs(b)}
@@ -132,10 +138,13 @@ def shipping_notices(b):
 # ── which orders, how often ──────────────────────────────────────────────
 
 def test_once_an_interval_the_verified_orders_not_signed_for_go_to_the_mac_in_one_job(bot, clock):
-    assert next_round(bot, clock, SAMPLE_SYNC_FIRST_SEC + 1) is None          # nothing verified: nothing asked
+    first = next_round(bot, clock, SAMPLE_SYNC_FIRST_SEC + 1)                 # nothing verified: only ours made by hand
+    assert json.loads(first["meta"]) == {"op": "sample_status", "orders": [], "mine": True}
+    assert "手动建的单" in first["text"] and "张" not in first["text"]
+    mac_answers(bot, first)
     order = made(bot, clock)
     job = next_round(bot, clock)
-    assert json.loads(job["meta"]) == {"op": "sample_status", "orders": [JST_ORDER]}
+    assert json.loads(job["meta"]) == {"op": "sample_status", "orders": [JST_ORDER], "mine": True}
     assert job["kind"] == "prm" and job["input_closed"] == 1 and "1 张" in job["text"] and CREATOR not in job["text"]
     assert next_round(bot, clock, 60) is None                                 # not before the interval
     assert next_round(bot, clock) is None                                     # due, but the last one is not back yet
@@ -147,23 +156,26 @@ def test_once_an_interval_the_verified_orders_not_signed_for_go_to_the_mac_in_on
 def test_the_sync_is_off_at_zero_and_an_unverified_order_is_never_asked_about(bot, clock):
     order = ordered(bot, clock)
     mac_runs(bot, approve(bot, order), record("ACCEPTED_UNVERIFIED", sample_order_no=JST_ORDER))
-    assert next_round(bot, clock, 2 * HOUR) is None
+    job = next_round(bot, clock, 2 * HOUR)
+    assert asked_in(job) == []                                                  # (only ours made by hand)
+    mac_answers(bot, job)
     made(bot, clock, ORDER2)
     bot.prm._sample_sync_sec = 0
-    assert next_round(bot, clock, 2 * HOUR) is None and sync_jobs(bot) == []
+    before = len(sync_jobs(bot))
+    assert next_round(bot, clock, 2 * HOUR) is None and len(sync_jobs(bot)) == before
 
 
 def test_an_order_given_up_on_or_of_a_cleared_deal_is_not_asked_about(bot, clock):
     order = made(bot, clock)
     clock.now += SAMPLE_GIVE_UP_DAYS * DAY + 1
-    assert next_round(bot, clock) is None
+    assert asked_in(next_round(bot, clock)) == []
     assert bot.prm.store.sample_order(JST_ORDER)["done"] == "old"
 
 
 def test_a_deal_marked_signed_by_hand_before_the_first_round_is_not_asked_about(bot, clock):
     order = made(bot, clock)
     assert bot.prm.deal_action("stage", {"deal_id": order["deal_id"], "stage": "delivered"})["ok"]
-    assert next_round(bot, clock) is None
+    assert asked_in(next_round(bot, clock)) == []
     assert bot.prm.store.sample_order(JST_ORDER)["done"] == "signed" and len(system_jobs(bot)) == 1
 
 
@@ -242,7 +254,7 @@ def test_signed_for_marks_the_deal_and_starts_the_commission_chain_once(bot, clo
     marked = [e for e in bot.prm.store.events(deal["id"], limit=50) if e["kind"] == "shipment_status"]
     assert len(marked) == 1 and marked[0]["actor"] == "system" and event_out(marked[0])["name"].endswith("（聚水潭同步）")
     assert bot.prm.store.sample_order(JST_ORDER)["done"] == "signed"
-    assert next_round(bot, clock) is None and len(system_jobs(bot)) == 1          # not asked about again
+    assert asked_in(next_round(bot, clock)) == [] and len(system_jobs(bot)) == 1  # not asked about again
 
 
 def test_signed_for_before_any_waybill_records_it_without_a_shipping_notice(bot, clock):
@@ -310,7 +322,7 @@ def test_a_deleted_order_turns_the_deal_red_with_its_reason_until_someone_sees_t
     round_says(bot, clock, (JST_ORDER, info("DELETED", reason="地址不全，重新提交")))
     said = attention(bot, order)
     assert f"聚水潭寄样单 {JST_ORDER} 被删除了（地址不全，重新提交）" in said
-    assert bot.prm.store.sample_order(JST_ORDER)["done"] == "deleted" and next_round(bot, clock) is None
+    assert bot.prm.store.sample_order(JST_ORDER)["done"] == "deleted" and asked_in(next_round(bot, clock)) == []
     clock.now += 5 * DAY
     bot.prm.tick()
     assert "被删除了" in attention(bot, order)                                     # until someone sees to it

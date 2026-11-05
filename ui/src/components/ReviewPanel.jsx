@@ -2,7 +2,7 @@ import { Fragment, useState } from 'react'
 import { ArrowClockwise, PaperPlaneRight, PencilSimple, X, Paperclip, WarningCircle, Eye, EyeSlash, Flag, Lightning, CheckCircle, Copy, ChatsCircle, Robot, HandPalm, UsersThree } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
-import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, buyinNotes, buyinFriendAddLine, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, dealAction, nightStatus, copyBuyin, buyinSent, setAutoMode, replyPartCount, inGroup, bossGroupNotes } from '../lib/prm'
+import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, buyinNotes, buyinFriendAddLine, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, dealAction, nightStatus, copyBuyin, buyinSent, setAutoMode, replyPartCount, inGroup, bossGroupNotes, handSampleSeen, handSampleLine } from '../lib/prm'
 import { PageHead, Card, Note, Banner, Empty, Confirm, TextArea } from './ui'
 import { FriendAddList } from './FriendAddCard'
 
@@ -21,6 +21,9 @@ import { FriendAddList } from './FriendAddCard'
 // below the drafts (2026-11-05: the user scrolled past a long list of them to reach the drafts).
 // 自动模式: the same rules at any hour, switched at the top of the page (on: a warn line with
 // the button that switches it off); what it sent by day is tagged 自动模式发出.
+// 手动建的寄样单 (PRM_SAMPLE_SYNC_MIN's ``mine``, 2026-11-05): one of our 聚水潭 orders made by hand shipped and its
+// waybill went into no deal (nobody registered fits, two do, the deal is past the sample, another waybill there):
+// a line at the top with the waybill, until 「知道了」; a matched one is a shipping notice among the drafts instead.
 // 老板拉的群 (PRM_BOSS_GROUPS): a draft of her line in the group the boss made with her and us
 // (``channel`` "group") is tagged 「群里 · <群名>」 and its 发送 asks first: it goes in the group, where
 // the boss sees it. A group that needs a person to say which member she is gets one line at the top.
@@ -40,6 +43,8 @@ export default function ReviewPanel() {
         {setupProblems(data).map(([kind, text]) => <Note key={text} kind={kind}>{text}</Note>)}
         {buyinNotes(data).map(([kind, text]) => <Note key={text} kind={kind} icon={ChatsCircle}>{text}</Note>)}
         {bossGroupNotes(data).map(([kind, text]) => <Note key={text} kind={kind} icon={UsersThree}>{text}</Note>)}
+        {data?.hand_samples_problem && <Note kind="warn">{data.hand_samples_problem}</Note>}
+        <HandSamples rows={data?.hand_samples || []} onDone={reload} />
         {!data && <Empty title="正在读取…" />}
         <AutoModeBar d={data} onDone={reload} />
         <PlatformAlerts alerts={data?.platform_alerts || []} onDone={reload} />
@@ -181,6 +186,36 @@ function NightTag({ p }) {
 function OpeningAutoTag({ p }) {
   if (p.route !== 'opening') return null
   return <span className="tag cy" title="给新好友的第一句话在「待审批」里放到时间没人处理，满足安全条件，照原样自动发出（没经过人审）">开场白自动发出</span>
+}
+
+/** Our hand-made 聚水潭 sample orders that shipped with their waybill in no deal: each line stays until 知道了. */
+function HandSamples({ rows, onDone }) {
+  const toast = useToast()
+  const [busy, setBusy] = useState('')
+  if (!rows.length) return null
+  const seen = async (h) => {
+    setBusy(h.order_no)
+    try {
+      await handSampleSeen(h.order_no)
+      onDone()
+    } catch (e) { toast.err(e.message) } finally { setBusy('') }
+  }
+  const copy = async (h) => {
+    try { await navigator.clipboard.writeText(`${h.carrier} ${h.waybill}`.trim()); toast.ok('已复制运单号') } catch { toast.err('没能放进剪贴板：请选中运单号自己复制') }
+  }
+  return (
+    <div className="stack prm-hand-samples" style={{ gap: 8 }}>
+      {rows.map((h) => (
+        <Banner key={h.order_no} kind="warn" title={handSampleLine(h)}
+          actions={<>
+            {h.waybill && <button type="button" className="btn sm" onClick={() => copy(h)}><Copy />复制运单号</button>}
+            <button type="button" className="btn sm" disabled={busy === h.order_no} onClick={() => seen(h)}><CheckCircle />知道了</button>
+          </>}>
+          <div className="f-hint">{h.sent_at ? `${fmtClock(h.sent_at)} 发货；` : ''}手动建的寄样单：机器人没有替她填进合作单，告诉她运单号以后点「知道了」</div>
+        </Banner>
+      ))}
+    </div>
+  )
 }
 
 /** Holding lines the 下班时段 window (or 自动模式) sent for drafts the model flagged: each stays until 已处理. */

@@ -1426,6 +1426,34 @@ class TestPrmPages:
         assert draft.bounding_box()["y"] < page.locator(".prm-friend-adds").bounding_box()["y"]
         assert "zq_test_wx_83" not in text and "13700001234" not in text
 
+    def test_review_page_says_which_hand_made_sample_orders_shipped_until_seen(self, page, prm):
+        """手动建的寄样单（2026-11-05）：发了货、运单号没填进任何合作单的，「待审批」顶上一行（单号、快递和运单号、谁、
+        为什么），「复制运单号」，「知道了」以后不再出现；查不了手动建的单时顶上说为什么。号码、名字都是编的。"""
+        from src.prm.service import HAND_PROBLEMS
+
+        store, now = prm.service.store, prm.clock.now
+        store.add_hand_sample("YP2611050000009", platform="DY", account="test_daren_09", nickname="测试达人九",
+                              applied_at=now - 86400, status="SENT", state="waiting", now=now)
+        store.update_hand_sample("YP2611050000009", now, state="listed", why="没登记的达人", carrier="顺丰速运_电商",
+                                 waybill="SF0000000009", sent_at=now - 600)
+        prm.service._sample_sync_sec = 3600
+        prm.service._hand_problem = HAND_PROBLEMS["old_worker"]
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        line = page.locator(".prm-hand-samples .banner", has_text="YP2611050000009")
+        text = line.inner_text()
+        assert "寄样单 YP2611050000009 已发货：顺丰速运_电商 SF0000000009" in text, text
+        assert "测试达人九 · 抖音：没登记的达人" in text and "手动建的寄样单" in text
+        assert "复制运单号" in text and "知道了" in text
+        assert "Mac 上的 worker 还是旧版本" in page.inner_text("body")
+        # (at the top: above the drafts)
+        draft = page.locator(".prm-draft").first
+        assert line.bounding_box()["y"] < draft.bounding_box()["y"]
+        line.locator("button:has-text('知道了')").click()
+        page.wait_for_timeout(1200)
+        assert page.locator(".prm-hand-samples").count() == 0
+        assert store.hand_sample("YP2611050000009")["dismissed_at"] is not None
+
     # ── 老板拉的群 (PRM_BOSS_GROUPS, 功能 U): the fields the PRM side adds to /api/prm (``boss_groups``, a packet's
     # ``channel`` "group" / ``group_name``, ``source`` "boss_group", ``three_party.by`` "boss") and its two POSTs are
     # served here by interception; everything else is the running in-memory service. Names and ids are made up. ──────

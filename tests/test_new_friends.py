@@ -533,6 +533,7 @@ class Copilot:
             claude_relay_db=":memory:", prm_copilot="on", prm_db=":memory:", prm_catchup_hours=catchup_hours,
             prm_auto_register=auto_register, prm_night_auto_hours=night, claude_relay_wxids=list(relay_wxids),
             prm_friend_add="on" if friend_add else "off",
+            prm_sample_sync_min=0,         # (the 聚水潭 sample sync: since 2026-11-05 a job every interval, not these tests')
             **({"prm_friend_add_greeting": friend_add_greeting} if friend_add_greeting else {}))
         self.clock, self.db = clock, db
         self.messages = MessageStore(initialize_db(str(tmp_path / "messages.db")))

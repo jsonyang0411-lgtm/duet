@@ -371,7 +371,7 @@ def test_the_sample_order_sync_runs_on_the_mac_side_too(mac, fake):
         job_id = mac.prm.sweep_sample_status()
         assert job_id is not None
         job = mac.relay.next_job(0, ("prm",))
-        assert job["id"] == job_id and job["meta"] == {"op": "sample_status", "orders": [JST_ORDER]}
+        assert job["id"] == job_id and job["meta"] == {"op": "sample_status", "orders": [JST_ORDER], "mine": True}
         result = platforms.sample_result([JST_ORDER], orders={JST_ORDER: answer})
         assert mac.relay.finish(job_id, {"ok": True, "text": json.dumps(result, ensure_ascii=False), "duration_s": 1})
         mac.relay.tick()

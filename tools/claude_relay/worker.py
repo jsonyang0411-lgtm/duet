@@ -2375,26 +2375,33 @@ def do_sample_status_job(settings: dict, job: dict, client: RelayClient, meta: d
     """``meta.op == "sample_status"`` (the bot's PRM_SAMPLE_SYNC_MIN): where a batch of 聚水潭 sample orders stands
     (``meta.orders``), without the model: `jst samples` (read-only, no receiver) under the Mac's platform CLI lock,
     a pause between two calls (``platforms.sample_statuses``).  The answer is short JSON (``platforms.sample_result``:
-    status, waybills, times, reasons; no creator, no receiver).  A login lapsed (77), a risk wall (76), another
-    sub-account (79) go back as they are, in ``stopped``: nothing is tried again here (the bot asks in its next
-    round)."""
+    status, waybills, times, reasons; no creator, no receiver).  ``meta.mine`` (2026-11-05): also the newest orders of
+    the logged-in sub-account made by hand (`jst samples --mine`, ``mine``: of those also when each was made and the
+    creator's platform, account and nickname; never a receiver), or why not (``mine_stopped``).  A login lapsed (77),
+    a risk wall (76), another sub-account (79) go back as they are, in ``stopped``: nothing is tried again here (the
+    bot asks in its next round)."""
     if platforms is None:
         return {"ok": False, "text": "", "error": "这台 Mac 的 worker 没有平台模块（src/prm/platforms.py）",
                 "duration_s": 0}
     started = time.monotonic()
     asked = [str(n) for n in meta.get("orders") or [] if isinstance(n, str)]
+    mine = meta.get("mine") is True
     cfg = platforms.config(settings)
     beat = _platform_heartbeat(client, int(job["id"]), "查聚水潭寄样单状态")
     try:
         with _cli_lock(beat):
-            result = platforms.sample_statuses(cfg, asked, heartbeat=beat)
+            result = platforms.sample_statuses(cfg, asked, heartbeat=beat, mine=mine)
     except (TimeoutError, platforms.Cancelled) as e:     # another platform command kept the lock, or a cancel
         verdict = "cancelled" if isinstance(e, platforms.Cancelled) else "busy"
-        result = platforms.sample_result(asked, stopped={"verdict": verdict, "exit_code": None, "message": str(e)},
-                                         not_asked=asked)
+        stopped = {"verdict": verdict, "exit_code": None, "message": str(e)}
+        result = platforms.sample_result(asked, stopped=stopped, not_asked=asked,
+                                         **({"mine": None, "mine_stopped": dict(stopped)} if mine else {}))
     stopped = result.get("stopped") or {}
-    log.info("#%s sample status: %d asked, %d answered, %d not found%s", job["id"], len(asked),
+    log.info("#%s sample status: %d asked, %d answered, %d not found%s%s", job["id"], len(asked),
              len(result.get("orders") or {}), len(result.get("missing") or []),
+             (f"; ours made by hand: {len(result['mine'])}" if isinstance(result.get("mine"), dict)
+              else f"; ours made by hand not read ({(result.get('mine_stopped') or {}).get('verdict')})" if mine
+              else ""),
              f"; stopped ({stopped.get('verdict')}, exit {stopped.get('exit_code')})" if stopped else "")
     return {"ok": True, "text": json.dumps(result, ensure_ascii=False), "duration_s": round(time.monotonic() - started, 1)}
 

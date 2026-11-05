@@ -145,7 +145,9 @@ class Run:
             private_chat_enabled=True, private_chats=ADMIN, admin_wxid=ADMIN, bot_display_name=BOT,
             claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1", claude_relay_port=0,
             claude_relay_db=":memory:", prm_copilot="on", prm_db=":memory:",
-            prm_boss_groups="on" if on else "off", prm_group_with=BOSS_NAME, **settings)
+            prm_boss_groups="on" if on else "off", prm_group_with=BOSS_NAME,
+            # (the 聚水潭 sample sync, not these tests': since 2026-11-05 it asks every interval, with no order too)
+            **{"prm_sample_sync_min": 0, **settings})
         self.routed: list[dict] = []
         self.own: list[dict] = []
         self.router = MessageRouter(store=world.messages, admin_handler=AdminCommandHandler(), config=config,

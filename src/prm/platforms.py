@@ -3060,6 +3060,10 @@ def _execute_jst(action: dict, cfg: dict, plan: dict, run_one, record: dict, cat
 # Without --raw the CLI prints no receiver; of what it prints only the status, the couriers and waybills,
 # when it was sent and signed for and why it was rejected or deleted are kept (not the creator's nickname,
 # not the products).
+# Our hand-made orders (2026-11-05, ``mine``): the bot also asks for the newest orders of the logged-in sub-account
+# (`jst samples --mine`, the CLI keeps the rows whose 跟进人 is this account and prints no uid and no staff names)
+# made by hand (with the CLI, or in the page), the ones it did not ask about: of those also when one was made and
+# her platform, account (抖音号 / 小红书号) and nickname, for the bot to know whose order it is.
 
 SAMPLE_STATES = {"INIT": "待审核", "WAITING_SEND": "待发货", "SENT": "已发货", "SIGNED": "已签收", "DELETED": "已删除"}
 # Why a sample-status job stopped (``stopped.verdict``): the CLI's exit (77 / 76 / 79, 2), a CLI that is not
@@ -3069,6 +3073,11 @@ SAMPLES_BATCH = 20          # order numbers one `samples` call asks about
 SAMPLES_PAGE = 50           # its --page-size: every order asked about fits on the first page
 SAMPLES_GAP_SEC = 4.0       # between two calls (the CLI's own `find --pages` waits 4 s between its pages)
 MAX_SAMPLE_ORDERS = 200     # order numbers one job asks about
+SAMPLES_MINE_STATUSES = ("WAITING_SEND", "SENT", "SIGNED")   # our hand-made orders worth watching
+SAMPLES_MINE_PAGE = 100     # the newest orders of the company a round looks among (the CLI's largest page)
+MAX_MINE_ORDERS = 100       # of ours one answer gives at most
+SAMPLE_PLATFORMS = ("DY", "XHS", "KS", "WXSPH")               # 聚水潭's platforms of a creator
+SAMPLE_NICK_CHARS = 40      # a creator's nickname as the bot keeps it
 MAX_SAMPLE_SHIPS = 5        # waybills kept of one order
 SAMPLE_REASON_CHARS = 200
 _WAYBILL = re.compile(r"^[A-Za-z0-9-]{6,30}$")              # a waybill as deals.py takes one
@@ -3155,6 +3164,74 @@ def samples_argv(cfg: dict, order_nos: list) -> list:
             f"--page-size={SAMPLES_PAGE}", *who]
 
 
+def samples_mine_argv(cfg: dict) -> list:
+    """One read of `jst samples --mine`: the newest orders of the logged-in sub-account that wait to be sent, were sent
+    or were signed for (no --raw: no receiver; no uid, no staff names), the sub-account checked (79)."""
+    who = [f"--expect-uid={cfg['jst_expect_uid']}"] if cfg.get("jst_expect_uid") else []
+    return [cfg["node"], CLI_FILES["jst"], "samples", "--mine", "--status=" + ",".join(SAMPLES_MINE_STATUSES),
+            f"--page-size={SAMPLES_MINE_PAGE}", *who]
+
+
+def _sample_daren(daren, platform="") -> dict:
+    """Whose order it is, as the bot matches her: her platform (DY / XHS / KS / WXSPH), her account as 聚水潭 gives
+    it (抖音号 / 小红书号, ``creator_account_ok``) and her nickname (control characters out, one line, clipped); an
+    empty string for one that does not fit.  ``platform``: the order's own, when her entry has none."""
+    d = daren if isinstance(daren, dict) else {}
+    where = str(d.get("platform") or platform or "").strip().upper()
+    account = d["platformNo"] if "platformNo" in d else d.get("platform_no")      # the CLI's key, or the answer's
+    account = str(account if isinstance(account, (str, int)) and not isinstance(account, bool) else "").strip()
+    nick = d["nickName"] if "nickName" in d else d.get("nickname")
+    nick = _CONTROL.sub("", str(nick if isinstance(nick, (str, int)) and not isinstance(nick, bool) else ""))
+    return {"platform": where if where in SAMPLE_PLATFORMS else "",
+            "platform_no": account if creator_account_ok(account) else "",
+            "nickname": _clip(nick, SAMPLE_NICK_CHARS)}
+
+
+def mine_sample_info(row) -> Optional[dict]:
+    """One of our orders for ``mine``: ``sample_info`` and when it was made (``applied_at``) and whose it is
+    (``daren``, ``_sample_daren``); None for a row without an order number."""
+    info = sample_info(row)
+    if info is None:
+        return None
+    info["applied_at"] = jst_time(row.get("applyTime"))
+    info["daren"] = _sample_daren(row.get("daren"), row.get("platform") or "")
+    return info
+
+
+def _samples_mine(cfg: dict, out: dict, asked: set, heartbeat=None) -> None:
+    """``mine`` of a sample-status answer: one `jst samples --mine` (``samples_mine_argv``), the orders it gives that
+    were not asked about (``mine_sample_info``, at most MAX_MINE_ORDERS), or None and why (``mine_stopped``).  A CLI
+    from before --mine answers a usage error (exit 2): ``unavailable``; the asked orders' answer stands either way."""
+    run = run_cli(samples_mine_argv(cfg), cfg["dirs"]["jst"], timeout=cfg.get("preview_timeout_sec",
+                                                                             PREVIEW_TIMEOUT_SEC),
+                  env=cli_env(cfg), heartbeat=heartbeat, interruptible=True)
+    out["calls"] += 1
+    data = parse_json(run.stdout)
+    if (run.exit_code != 0 or run.error or run.stopped or not isinstance(data, dict)
+            or not isinstance(data.get("rows"), list)):
+        if run.stopped == "cancelled":
+            verdict = "cancelled"
+        elif run.exit_code == 2:
+            verdict = "unavailable"
+        else:
+            verdict = _EXIT_VERDICT.get(run.exit_code) or "error"
+        failed = run.exit_code or run.error or run.stopped
+        message = ("这台 Mac 的聚水潭命令行太旧，没有 samples --mine（要更新 jushuitan-engineering）"
+                   if verdict == "unavailable" else _exit_problem(run) if failed else "命令没有输出寄样单列表")
+        out["mine"] = None
+        out["mine_stopped"] = {"verdict": verdict, "exit_code": run.exit_code, "message": message}
+        return
+    mine: dict = {}
+    for row in data["rows"]:
+        info = mine_sample_info(row)
+        if info is None or info["order_no"] in asked or info["order_no"] in mine:
+            continue
+        mine[info.pop("order_no")] = info
+        if len(mine) >= MAX_MINE_ORDERS:
+            break
+    out["mine"], out["mine_stopped"] = mine, None
+
+
 def sample_result(asked: list, **fields) -> dict:
     """The answer of a sample-status job as the worker hands it back (the bot reads it with check_sample_result):
     ``orders`` {order number: ``sample_info``}, ``missing`` (asked, not in 聚水潭's answer), ``not_asked`` (left
@@ -3166,12 +3243,14 @@ def sample_result(asked: list, **fields) -> dict:
 
 
 def sample_statuses(cfg: dict, order_nos, *, heartbeat=None, sleep: Optional[Callable[[float], None]] = None,
-                    gap: Optional[float] = None) -> dict:
+                    gap: Optional[float] = None, mine: bool = False) -> dict:
     """Where these sample orders stand in 聚水潭 (``sample_result``): `jst samples --order-no=…` (read-only, no
     receiver) for ``SAMPLES_BATCH`` of them at a time, ``gap`` seconds (``SAMPLES_GAP_SEC``) between two calls, each
     call interrupted when the job is cancelled (``heartbeat``).  A call that ends in 77 (login), 76 (risk), 79
     (another sub-account), 2 or any other failure stops it there, as it is: ``stopped`` says why, the orders not
-    asked yet are ``not_asked``; nothing is tried again (the bot asks again in its next round)."""
+    asked yet are ``not_asked``; nothing is tried again (the bot asks again in its next round).  ``mine``: then one
+    read more, our hand-made orders (``_samples_mine``: ``mine`` / ``mine_stopped``; not read when the asked ones
+    stopped: ``mine_stopped`` is that stop)."""
     sleep = sleep or time.sleep
     gap = SAMPLES_GAP_SEC if gap is None else gap
     asked = list(dict.fromkeys(str(n).strip() for n in order_nos or [] if _ORDER_NO.match(str(n).strip())))
@@ -3182,6 +3261,8 @@ def sample_statuses(cfg: dict, order_nos, *, heartbeat=None, sleep: Optional[Cal
                           "message": cfg.get("missing", {}).get("jst")
                           or "这台 Mac 的 config.json 里没有配置聚水潭的命令行项目（platforms.jst）"}
         out["not_asked"] = asked
+        if mine:
+            out["mine"], out["mine_stopped"] = None, dict(out["stopped"])
         return out
     batches = [asked[i:i + SAMPLES_BATCH] for i in range(0, len(asked), SAMPLES_BATCH)]
     for n, batch in enumerate(batches):
@@ -3208,6 +3289,13 @@ def sample_statuses(cfg: dict, order_nos, *, heartbeat=None, sleep: Optional[Cal
             if info is not None and info["order_no"] in batch:
                 out["orders"][info.pop("order_no")] = info
         out["missing"] += [no for no in batch if no not in out["orders"]]
+    if mine:
+        if out["stopped"] is not None:
+            out["mine"], out["mine_stopped"] = None, dict(out["stopped"])
+        else:
+            if out["calls"]:
+                sleep(gap)
+            _samples_mine(cfg, out, set(asked), heartbeat)
     out["checked_at"] = time.time()
     return out
 
@@ -3227,10 +3315,7 @@ def check_sample_result(value, asked=None) -> dict:
         ok = isinstance(v, (int, float)) and not isinstance(v, bool) and 1e9 <= v < 4.1e9
         return float(v) if ok else None
 
-    orders = {}
-    for number, info in (value.get("orders") if isinstance(value.get("orders"), dict) else {}).items():
-        if not fits(number) or not isinstance(info, dict):
-            continue
+    def entry(info: dict) -> dict:
         status = str(info.get("status") or "").strip().upper()
         ships = []
         for ship in info.get("ships") if isinstance(info.get("ships"), list) else []:
@@ -3238,23 +3323,45 @@ def check_sample_result(value, asked=None) -> dict:
             if not _WAYBILL.match(waybill) or any(s["waybill"] == waybill for s in ships):
                 continue
             ships.append({"carrier": _carrier(ship.get("carrier")), "waybill": waybill, "sent_at": when(ship.get("sent_at"))})
-        orders[number] = {"status": status if _SAMPLE_STATUS.match(status) else "", "ships": ships[:MAX_SAMPLE_SHIPS],
-                          "sent_at": when(info.get("sent_at")), "signed_at": when(info.get("signed_at")),
-                          "reason": _clip(info.get("reason") or "", SAMPLE_REASON_CHARS)}
-    stopped = value.get("stopped")
-    if isinstance(stopped, dict):
-        code = stopped.get("exit_code")
-        stopped = {"verdict": stopped.get("verdict") if stopped.get("verdict") in SAMPLE_STOPS else "error",
-                   "exit_code": code if _is_int(code) else None, "message": _clip(stopped.get("message") or "", 300)}
-    else:
-        stopped = None
+        return {"status": status if _SAMPLE_STATUS.match(status) else "", "ships": ships[:MAX_SAMPLE_SHIPS],
+                "sent_at": when(info.get("sent_at")), "signed_at": when(info.get("signed_at")),
+                "reason": _clip(info.get("reason") or "", SAMPLE_REASON_CHARS)}
+
+    def stop(value) -> Optional[dict]:
+        if not isinstance(value, dict):
+            return None
+        code = value.get("exit_code")
+        return {"verdict": value.get("verdict") if value.get("verdict") in SAMPLE_STOPS else "error",
+                "exit_code": code if _is_int(code) else None, "message": _clip(value.get("message") or "", 300)}
+
+    orders = {}
+    for number, info in (value.get("orders") if isinstance(value.get("orders"), dict) else {}).items():
+        if not fits(number) or not isinstance(info, dict):
+            continue
+        orders[number] = entry(info)
+    stopped = stop(value.get("stopped"))
+    # our hand-made orders (``mine``): None when the worker gave none (an old one, or it could not read them:
+    # ``mine_stopped`` says why); never an order the bot asked about
+    mine = None
+    if isinstance(value.get("mine"), dict):
+        mine = {}
+        for number, info in value["mine"].items():
+            if not (isinstance(number, str) and _ORDER_NO.match(number)) or not isinstance(info, dict):
+                continue
+            if (wanted is not None and number in wanted) or number in orders:
+                continue
+            mine[number] = {**entry(info), "applied_at": when(info.get("applied_at")),
+                            "daren": _sample_daren(info.get("daren"))}
+            if len(mine) >= MAX_MINE_ORDERS:
+                break
 
     def listed(key: str) -> list:
         items = value.get(key) if isinstance(value.get(key), list) else []
         return [n for n in dict.fromkeys(i for i in items if isinstance(i, str)) if fits(n) and n not in orders]
 
     return {"version": 1, "op": "sample_status", "orders": orders, "missing": listed("missing"),
-            "not_asked": listed("not_asked"), "stopped": stopped, "checked_at": when(value.get("checked_at"))}
+            "not_asked": listed("not_asked"), "stopped": stopped, "checked_at": when(value.get("checked_at")),
+            "mine": mine, "mine_stopped": None if mine is not None else stop(value.get("mine_stopped"))}
 
 
 # ── 抖音百应私信 (精选联盟 IM; `dy buyin im-inbox`, read-only; the bot's PRM_BUYIN_SYNC_MIN) ──

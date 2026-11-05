@@ -229,6 +229,25 @@ SAMPLE_PROBLEMS = {
     "old_worker": "Mac 上的 worker 还不会查聚水潭寄样单的状态：更新 Mac 上的代码并重启 worker（在这之前运单号和签收照旧手动填）",
     "error": "寄样单状态连续 {count} 次没同步成（{message}）：运单号和签收先照旧手动填",
 }
+# 手动建的寄样单（2026-11-05，用户：「我们怎么能第一时间得知发货」）：每一轮也请 Mac 看一眼我们这个子账号最新的寄样单
+# （``meta.mine``，`jst samples --mine`），机器人自己建的单照旧，别的（命令行、页面手动建的）有了运单号就处理一次：
+# 达人的平台账号（抖音号 / 小红书号）恰好对上一位登记达人、合作单还在寄样这一步，就照「填运单号」填进她的合作单
+# （发货通知一律等人审）；对不上、对上两位、合作单过了寄样、合作单上填了别的运单号，就在「待审批」顶上出一行，
+# 到「知道了」为止。手动建的单只填运单号：不标已签收、不开专属佣金（签收照旧人标）。第一次读到时已经发货的单只记下、
+# 不处理（``HAND_BASELINE``：上线前寄出的单运营早就知道了）。
+HAND_BASELINE = "hand_samples_baseline_at"  # prm_meta: when our hand-made orders were first read (shipped ones then: left)
+HAND_KEEP_DAYS = 30                         # a hand-made order first seen this long ago is forgotten (its line too)
+HAND_LINES = 20                             # 「待审批」 lines of hand-made orders shown at most (the newest)
+HAND_ERRORS = 2                             # rounds in a row the hand-made orders could not be read before the page says so
+HAND_WAYBILL_WAIT_SEC = 2 * 3600            # sent in 聚水潭 without a waybill this long (its time): the page says so
+HAND_PROBLEMS = {
+    "old_worker": "Mac 上的 worker 还是旧版本，查不了手动建的寄样单：在 Mac 上重启 worker（手动建的单发货了先不会提醒）",
+    "unavailable": "查不了手动建的寄样单（{message}）：手动建的单发货了先不会提醒",
+    "login": "聚水潭登录失效，查不了手动建的寄样单：请在 Mac 的调试 Chrome 里重新登录聚水潭",
+    "wall": "聚水潭限流或者要人机验证，这一轮没查手动建的寄样单：恢复以后自己接着查",
+    "wrong_account": "Mac 的调试 Chrome 里登录的聚水潭不是这台 Mac 配的子账号，查不了手动建的寄样单",
+    "error": "手动建的寄样单连续 {count} 次没查成（{message}）：发货了先不会提醒",
+}
 # 抖音百应私信（PRM_BUYIN_SYNC_MIN，2026-10-29，默认关）：邀约带货的达人可能在百应自己的私信（精选联盟私信）里回，不在微信里。
 # 机器人定时请 Mac 读一次新消息（``meta.op = BUYIN_OP``，worker 不跑模型，`dy buyin im-inbox` 只读，契约见
 # tools/claude_relay/README.md「百应私信」），登记达人的新话由 Mac 起草一份百应私信草稿（``meta.channel = BUYIN_CHANNEL``，
@@ -834,7 +853,7 @@ def event_out(ev: dict) -> dict:
         name = (f"关联抖音号 {detail['account']}" + (f"（加微信 #{detail['add_id']}）" if detail.get("add_id") else "")
                 + (f"，{str(detail['invited_at'])[:16].replace('T', ' ')} 发的邀约卡" if detail.get("invited_at") else ""))
     elif ev["kind"] in ("shipment", "shipment_status", "stage") and detail.get("source") == "jst":
-        name = f"{name}（聚水潭同步）"
+        name = f"{name}（聚水潭同步{' · 手动建的单' if detail.get('hand') else ''}）"
     return {"id": ev["id"], "kind": ev["kind"], "name": name,
             "actor": ev.get("actor", ""), "at": ev["at"], "detail": detail}
 
@@ -884,6 +903,28 @@ def gates_out(store: PrmStore) -> list[dict]:
         out.append({"kind": kind, "label": MESSAGE_KINDS.get(kind, kind), "route": gate["route"],
                     "locked": bool(gate["locked"]), "window": gate["window"], "min_unchanged": gate["min_unchanged"],
                     **stats})
+    return out
+
+
+HAND_PLATFORM_LABELS = {"DY": "抖音", "XHS": "小红书", "KS": "快手", "WXSPH": "视频号"}
+
+
+def hand_samples_out(store: PrmStore, limit: int = HAND_LINES) -> list:
+    """The 「待审批」 lines of our hand-made sample orders not seen to yet (``listed``, the newest first): the order,
+    whose (her nickname as 聚水潭 gives it and her platform; the registered creator's name when one fits), the courier
+    and waybill, when it was sent, why it did not go into a deal."""
+    parties = {}
+    out = []
+    for row in store.hand_samples(shown=True, limit=limit):
+        name = ""
+        if row.get("party_id"):
+            if row["party_id"] not in parties:
+                parties[row["party_id"]] = store.party(int(row["party_id"])) or {}
+            name = parties[row["party_id"]].get("name", "")
+        out.append({"order_no": row["order_no"], "platform": row["platform"],
+                    "platform_label": HAND_PLATFORM_LABELS.get(row["platform"], row["platform"] or ""),
+                    "nickname": row["nickname"], "party_name": name, "carrier": row["carrier"],
+                    "waybill": row["waybill"], "sent_at": row["sent_at"], "why": row["why"]})
     return out
 
 
@@ -1002,6 +1043,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
         "recent": [packet_out(p) for p in recent],
         "platform_alerts": [packet_out(p) for p in store.platform_failures()],
         "night_alerts": night_alerts,
+        "hand_samples": hand_samples_out(store),
         "buyin": buyin_out(store, now),
         "friend_adds": friend_adds_out(store, now),
         "platform_actions": {name: spec["label"] for name, spec in platforms.ACTIONS.items()},
@@ -1186,6 +1228,8 @@ class PrmService:
         self._sample_lock = threading.Lock()       # one round's job queued, or one answer applied, at a time
         self._sample_errors = 0                    # failed rounds in a row (SAMPLE_ERRORS)
         self._sample_said = ""                     # what the deals were last told of a round that could not be made
+        self._hand_problem = ""                    # why our hand-made orders are not read (the 「待审批」 page says it)
+        self._hand_errors = 0                      # rounds in a row they could not be read (HAND_ERRORS)
         # PRM_BUYIN_SYNC_MIN (0 = off, the default; a config object without it: off): the new 抖音百应 private messages,
         # asked of the Mac once an interval (``sweep_buyin``); a registered creator's become a 百应 draft an operator
         # copies and sends in 百应 by hand
@@ -4273,11 +4317,13 @@ class PrmService:
 
     def sweep_sample_status(self) -> Optional[int]:
         """PRM_SAMPLE_SYNC_MIN (0 = off): once an interval, the verified sample orders not signed for nor deleted
-        (``_live_sample_orders``) go to the Mac in one job (``meta.op = SAMPLE_OP``, the order numbers): the worker
-        reads 聚水潭 without the model and the answer comes back to ``on_result`` (``_on_sample_status``).  One job at
-        a time (the last one still queued or running: none); when the last round was is kept in the database, so a
-        restart does not ask again at once; after a risk wall (76) the next round waits longer.  Returns the job id
-        when one was queued.  Errors are logged (the sender thread goes on)."""
+        (``_live_sample_orders``) go to the Mac in one job (``meta.op = SAMPLE_OP``, the order numbers), with
+        ``meta.mine``: the Mac also reads our sub-account's newest orders made by hand (2026-11-05, ``_hand_answer``),
+        so a round goes even when the bot made none: the worker reads 聚水潭 without the model and the answer comes
+        back to ``on_result`` (``_on_sample_status``).  One job at a time (the last one still queued or running: none);
+        when the last round was is kept in the database, so a restart does not ask again at once; after a risk wall
+        (76) the next round waits longer.  Returns the job id when one was queued.  Errors are logged (the sender
+        thread goes on)."""
         if self._sample_sync_sec <= 0:
             return None
         now = self._clock()
@@ -4287,15 +4333,15 @@ class PrmService:
                     return None
                 self._store.set_meta_value("sample_sync_at", now)
                 orders = self._live_sample_orders(now)
-                if not orders:
-                    return None
-                _, job_id = self._relay.submit(SAMPLE_SYNC_CHAT, SAMPLE_SYNC_CHAT, f"查聚水潭寄样单的状态（{len(orders)} 张）",
-                                               kind=PRM, meta={"op": SAMPLE_OP, "orders": orders}, fresh=True,
+                text = (f"查聚水潭寄样单的状态（{len(orders)} 张，另看手动建的单）" if orders
+                        else "查聚水潭寄样单的状态（手动建的单）")
+                _, job_id = self._relay.submit(SAMPLE_SYNC_CHAT, SAMPLE_SYNC_CHAT, text, kind=PRM,
+                                               meta={"op": SAMPLE_OP, "orders": orders, "mine": True}, fresh=True,
                                                input_closed=True)
         except Exception:
             logger.exception("PRM: the sample orders' status could not be asked for")
             return None
-        logger.info("PRM: job #%d asks 聚水潭 where %d sample order(s) stand", job_id, len(orders))
+        logger.info("PRM: job #%d asks 聚水潭 where %d sample order(s) stand, and ours made by hand", job_id, len(orders))
         return job_id
 
     def _sample_due(self, now: float) -> float:
@@ -4376,7 +4422,184 @@ class PrmService:
                     self._sample_missing(number, now)
                 stopped = result["stopped"]
             self._sample_round_end(stopped, now)
+            if meta.get("mine") is True:
+                self._hand_answer(result, stopped, now)
         return True
+
+    # ── our sample orders made by hand (``mine``, 2026-11-05) ─────────────
+
+    def _hand_answer(self, result: Optional[dict], stopped: Optional[dict], now: float) -> None:
+        """Our sub-account's newest orders made by hand (``result["mine"]``, ``platforms.check_sample_result``), each
+        acted on once it has a waybill (``_hand_sample``); none read (an old worker answers without them, or the read
+        stopped: ``mine_stopped``, the job's ``stopped``): the 「待审批」 page says why (``HAND_PROBLEMS``; a hiccup only
+        after HAND_ERRORS rounds in a row).  The first answer read only records what was shipped already
+        (``HAND_BASELINE``).  Hand-made orders first seen HAND_KEEP_DAYS ago are forgotten."""
+        mine = result.get("mine") if result is not None else None
+        if mine is None:
+            why = (result or {}).get("mine_stopped") or stopped
+            if result is not None and why is None:
+                verdict, message = "old_worker", ""
+            else:
+                verdict, message = str((why or {}).get("verdict") or "error"), str((why or {}).get("message") or "")
+            if verdict in ("unavailable", "invalid"):
+                verdict = "unavailable"
+            if verdict in ("old_worker", "unavailable", "login", "wall", "wrong_account"):
+                text = HAND_PROBLEMS[verdict].format(message=message[:120])
+            else:
+                self._hand_errors += 1
+                if self._hand_errors < HAND_ERRORS:
+                    logger.warning("PRM: our hand-made sample orders were not read (%s: %s); asked again next round",
+                                   verdict, message[:200])
+                    return
+                text = HAND_PROBLEMS["error"].format(count=self._hand_errors, message=message[:120])
+            if text != self._hand_problem:
+                logger.warning("PRM: our hand-made sample orders are not read: %s", text)
+            self._hand_problem = text
+            return
+        if self._hand_problem or self._hand_errors:
+            logger.info("PRM: our hand-made sample orders are read again")
+        self._hand_problem, self._hand_errors = "", 0
+        baseline = self._store.meta_value(HAND_BASELINE) is None
+        index = self._hand_index() if mine else {}
+        for number, info in sorted(mine.items(), key=lambda kv: (kv[1].get("applied_at") or 0, kv[0])):
+            try:
+                self._hand_sample(number, info, index, baseline, now)
+            except Exception:                          # one order's trouble does not stop the others
+                logger.exception("PRM: hand-made sample order %s could not be applied", number)
+        if baseline:
+            self._store.set_meta_value(HAND_BASELINE, now)
+        gone = self._store.purge_hand_samples(now - HAND_KEEP_DAYS * 86400)
+        if gone:
+            logger.info("PRM: %d hand-made sample order(s) first seen %d days ago forgotten", gone, HAND_KEEP_DAYS)
+
+    def _hand_sample(self, number: str, info: dict, index: dict, baseline: bool, now: float) -> None:
+        """One of our hand-made orders: the bot's own orders (``sample_orders``) and orders made SAMPLE_GIVE_UP_DAYS
+        ago are left; one never seen is kept (``waiting``; ``baseline`` when the first answer read finds it shipped
+        already: never acted on); a waiting one with a waybill is acted on once (``_hand_place``): ``filled`` (its
+        waybill went into her deal, or was there already) or ``listed`` (a 「待审批」 line, ``why``).  Sent in
+        聚水潭 without a waybill (its list may give the waybill a little later): still waiting, a line after
+        HAND_WAYBILL_WAIT_SEC from its send time (the shipping notice needs one); when the waybill comes after all, it
+        is acted on then (a line seen to already comes back with the waybill)."""
+        if self._store.sample_order(number) is not None:
+            return                                     # the bot's own order: its sync has it
+        applied = info.get("applied_at")
+        if applied is not None and now - float(applied) > SAMPLE_GIVE_UP_DAYS * 86400:
+            return
+        daren = info.get("daren") or {}
+        ships = info.get("ships") or []
+        ship = ships[0] if ships else None
+        shipped = ship is not None or info.get("status") in ("SENT", "SIGNED")
+        row = self._store.hand_sample(number)
+        if row is None:
+            self._store.add_hand_sample(number, platform=daren.get("platform", ""), account=daren.get("platform_no", ""),
+                                        nickname=daren.get("nickname", ""), applied_at=applied,
+                                        status=info.get("status", ""),
+                                        state="baseline" if baseline and shipped else "waiting", now=now)
+            row = self._store.hand_sample(number)
+            if row is None or row["state"] != "waiting":
+                return
+        late_bill = row["state"] == "listed" and not row["waybill"] and ship is not None   # "没给运单号", then one came
+        if row["state"] != "waiting" and not late_bill:
+            return                                     # acted on once (or shipped before we looked)
+        if not shipped:
+            if info.get("status") and info["status"] != row["status"]:
+                self._store.update_hand_sample(number, now, status=info["status"])
+            return
+        fields = {"status": info.get("status", "")}
+        if ship is None:                               # sent, but 聚水潭 gives no waybill (yet)
+            went = row["sent_at"] or info.get("sent_at") or now
+            if now - float(went) < HAND_WAYBILL_WAIT_SEC:
+                if row["sent_at"] is None or info.get("status") != row["status"]:
+                    self._store.update_hand_sample(number, now, sent_at=went, **fields)
+                return
+            self._store.update_hand_sample(number, now, state="listed", sent_at=went,
+                                           why="聚水潭显示已发货，但没给运单号：请到聚水潭寄样管理看运单号", **fields)
+            logger.info("PRM: hand-made sample order %s sent without a waybill: the 待审批 page says so", number)
+            return
+        fields.update(carrier=ship["carrier"], waybill=ship["waybill"],
+                      sent_at=ship.get("sent_at") or info.get("sent_at") or row["sent_at"] or now)
+        if late_bill:
+            fields["dismissed_at"] = None              # the waybill is news: its line comes back if it is a line
+        state, why, party, deal = self._hand_place(number, info, daren, ship, index, applied, now)
+        self._store.update_hand_sample(number, now, state=state, why=why,
+                                       party_id=party["id"] if party else None, deal_id=deal["id"] if deal else None,
+                                       **fields)
+        logger.info("PRM: hand-made sample order %s shipped (%s): %s", number, ship["waybill"],
+                    f"waybill into deal {deal['id']}" if state == "filled" else f"listed on 待审批 ({why})")
+
+    def _hand_place(self, number: str, info: dict, daren: dict, ship: dict, index: dict, applied, now: float) -> tuple:
+        """Where a shipped hand-made order's waybill goes: ``(state, why, party, deal)``.  Her platform account
+        (``_hand_index``) fits exactly one registered creator whose deal is still before the sample is signed for
+        (``deals.BEFORE_DELIVERY``): into her deal the console's way (``deal_action`` ``shipment``, actor system,
+        ``review``: the shipping notice waits for a person; none when 聚水潭 says signed for already), or nothing when
+        the deal has this waybill since the order was made; a different one there, the deal past the sample, two
+        creators or none: a line (``listed``) saying so.  Never marks the deal 已签收, never a 专属佣金."""
+        platform, account = daren.get("platform") or "", str(daren.get("platform_no") or "")
+        wxids = set(index.get("keys", {}).get((platform, account.lower()), ())) if account else set()
+        if not wxids:
+            return "listed", "没登记的达人", None, None
+        if len(wxids) > 1:
+            return "listed", f"平台账号对得上 {len(wxids)} 位登记的达人，系统没有填", None, None
+        party = index["parties"][next(iter(wxids))]
+        deal = self._store.deal_of(party["id"], now)
+        if deal["stage"] not in deals.BEFORE_DELIVERY:
+            return "listed", f"{party['name']} 的合作单已经过了寄样这一步，系统没有填", party, deal
+        made = float(applied) if applied is not None else 0.0     # (when 聚水潭 did not say: any shipment of hers)
+        current = self._sample_shipment_of(deal["id"], made)
+        if current is not None:
+            if current["waybill"] == ship["waybill"]:
+                return "filled", "", party, deal          # typed in already: nothing more
+            return ("listed", f"{party['name']} 的合作单上填的是 {current['carrier']} {current['waybill']}，对不上，"
+                              "系统没有改", party, deal)
+        result = self.deal_action("shipment", {"deal_id": deal["id"], "carrier": ship["carrier"] or "快递",
+                                               "waybill": ship["waybill"]},
+                                  actor="system", review=True, notice=info.get("status") != "SIGNED",
+                                  note={"source": "jst", "order": number, "hand": True})
+        if not result.get("ok"):
+            why = " ".join(str(result.get("error") or "没说原因").split())[:80]
+            return "listed", f"运单号没能填进 {party['name']} 的合作单（{why}）", party, deal
+        return "filled", "", party, deal
+
+    def _hand_index(self) -> dict:
+        """Who a hand-made order is for: her platform and account (any case) -> the wxids of the registered (active)
+        creators known by them: the 达人名单's platform and 抖音号 / 小红书号 (``creator_directory``), the 抖音号 the
+        deals' verified 抖店 sample orders found and the links (``_creator_ids``), the 小红书 links.  Her nickname is
+        never used."""
+        parties = {p["wxid"]: p for p in self._store.parties()}
+        index: dict = {"keys": {}, "parties": parties}
+
+        def add(platform: str, account, wxid: str) -> None:
+            account = str(account or "").strip()
+            if platform and account:
+                index["keys"].setdefault((platform, account.lower()), set()).add(wxid)
+
+        rows: list = []
+        if self.creator_directory is not None:
+            try:
+                rows = list(self.creator_directory() or [])
+            except Exception:
+                logger.exception("PRM: the creator list could not be read for the hand-made sample orders")
+        for row in rows:
+            wxid = str((row or {}).get("wxid") or "")
+            if wxid in parties:
+                add(str(row.get("platform") or "").strip().upper(), row.get("platform_no"), wxid)
+        for wxid, party in parties.items():
+            ids = self._creator_ids(self._store.deal_of(party["id"])["id"])
+            for douyin in ids.get("douyin_ids") or []:
+                add("DY", douyin, wxid)
+            for link in self._store.creator_links(party["id"]):
+                if link["platform"] == "xhs":
+                    add("XHS", link["account"], wxid)
+        return index
+
+    def hand_sample_seen(self, order_no) -> dict:
+        """「知道了」 on a 「待审批」 line of a hand-made order: not shown again."""
+        number = str(order_no or "").strip()
+        if not number:
+            return {"ok": False, "error": "要给出寄样单号"}
+        if not self._store.dismiss_hand_sample(number, self._clock()):
+            return {"ok": False, "error": "这一行已经不在了"}
+        return {"ok": True}
 
     def _sample_answer(self, number: str, info: dict, now: float) -> None:
         """One order's answer from 聚水潭, each change acted on once (what was done is kept in the order's
@@ -5315,6 +5538,7 @@ class PrmService:
             "auto_mode": self.auto_mode, "three_party": self.three_party.status(),
             "reply_parts": self._reply_parts, "boss_groups": self.boss_groups.status(),
             "opening_auto_min": self._opening_auto_sec // 60,
+            "hand_samples_problem": self._hand_problem if self._sample_sync_sec > 0 else "",
         })
 
     # ── the sender thread: approved drafts, holding replies, clean-ups ────
