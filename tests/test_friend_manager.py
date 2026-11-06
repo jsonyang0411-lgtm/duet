@@ -2183,6 +2183,25 @@ class CreateGroupTests(DialogTestCase):
                 self.assertEqual(self.window.pasted, [])
                 self.assertEqual(self.closed, [PICKER])
 
+    def test_the_icons_ocr_reads_before_the_items_are_dropped(self):
+        """Real PC 2026-11-02 (WeChat 4.1): the (+) menu read as 「0发起群聊」「&+添加朋友」「写笔记」 (the icons as
+        characters): its 「发起群聊」 is clicked; a row with more than the item's words (or more than an icon before it)
+        is none."""
+        screens = self.flow()
+        screens[0] = [row("0发起群聊", 0.2, 0.08, 0.8, 0.25), row("&+添加朋友", 0.2, 0.42, 0.8, 0.58),
+                      row("写笔记", 0.2, 0.76, 0.8, 0.92)]
+        result = self.create(screens)
+        self.assertEqual(result["ok"], True, result)
+        self.assertEqual(self.clicks_on()[1], (10 + int(0.5 * 200), 60 + int((0.08 + 0.25) / 2 * 240)))
+        for read in ("0发起群聊吧", "我的发起群聊", "abcd发起群聊"):
+            with self.subTest(read=read):
+                self.setUp()
+                screens = self.flow()
+                screens[0] = [row(read, 0.2, 0.08, 0.8, 0.25), row("&+添加朋友", 0.2, 0.42, 0.8, 0.58)]
+                result = self.create(screens)
+                self.assertEqual(result["reason"], "no_picker")
+                self.assertEqual(self.clicks_on(), [(280, 56)])            # the (+) only: nothing in the menu
+
     def test_a_menu_read_without_the_item_is_not_clicked(self):
         screens = self.flow()
         screens[0] = [row("添加朋友", 0.2, 0.1, 0.8, 0.4), row("新建笔记", 0.2, 0.6, 0.8, 0.9)]

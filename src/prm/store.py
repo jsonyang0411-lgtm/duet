@@ -211,6 +211,28 @@ CREATE TABLE IF NOT EXISTS sample_orders (
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sample_orders_deal ON sample_orders(deal_id);
+-- our 聚水潭 sample orders made by hand (the CLI, the page), PRM_SAMPLE_SYNC_MIN's ``mine``, 2026-11-05: watched until
+-- one has a waybill, then acted on once: its waybill into the one registered creator's deal (``filled``), or a line at
+-- the top of 「待审批」 until 「知道了」 (``listed``; ``why``); ``baseline``: shipped already when first seen (never
+-- acted on); ``waiting``: no waybill yet.  ``account``: her 抖音号 / 小红书号 as 聚水潭 gives it.
+CREATE TABLE IF NOT EXISTS hand_samples (
+    order_no TEXT PRIMARY KEY,
+    platform TEXT NOT NULL DEFAULT '',
+    account TEXT NOT NULL DEFAULT '',
+    nickname TEXT NOT NULL DEFAULT '',
+    applied_at REAL,
+    status TEXT NOT NULL DEFAULT '',
+    carrier TEXT NOT NULL DEFAULT '',
+    waybill TEXT NOT NULL DEFAULT '',
+    sent_at REAL,
+    party_id INTEGER,
+    deal_id INTEGER,
+    state TEXT NOT NULL DEFAULT 'waiting',
+    why TEXT NOT NULL DEFAULT '',
+    dismissed_at REAL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS buyin_threads (
     conversation_id TEXT PRIMARY KEY,
     party_id INTEGER,
@@ -923,7 +945,7 @@ class PrmStore:
     def move(self, packet_id: int, from_states: tuple, to_state: str, **fields) -> bool:
         """Compare-and-set: the packet goes to ``to_state`` only if it is in one of ``from_states``.
         ``platform`` (a dict) replaces the packet's platform JSON in the same step."""
-        allowed = {"final_text", "edited", "outcome", "error", "decided_at", "sent_at", "platform"}
+        allowed = {"final_text", "edited", "outcome", "error", "decided_at", "sent_at", "platform", "route"}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"not a packet field: {sorted(unknown)}")
@@ -1077,7 +1099,7 @@ class PrmStore:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id, status, reason FROM action_packets WHERE deal_id = ? AND job_id IS NOT NULL"
-                " AND tool != ? AND (status = ? OR (status = ? AND route IN ('auto', 'night') AND tool = ?))",
+                " AND tool != ? AND (status = ? OR (status = ? AND route IN ('auto', 'night', 'opening') AND tool = ?))",
                 (deal_id, BUYIN_TOOL, PENDING, APPROVED, MESSAGE_TOOL),
             ).fetchall()
             held = 0
@@ -1373,6 +1395,70 @@ class PrmStore:
                     changed += 1
             self._conn.commit()
         return changed
+
+    # ── our sample orders made by hand (PRM_SAMPLE_SYNC_MIN's ``mine``, src/prm/service.py) ──────
+
+    def add_hand_sample(self, order_no: str, *, platform: str, account: str, nickname: str,
+                        applied_at: Optional[float], status: str, state: str, now: Optional[float] = None) -> bool:
+        """Start watching one of our hand-made orders (an order kept already stays as it is); True when it is new."""
+        now = time.time() if now is None else now
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO hand_samples (order_no, platform, account, nickname, applied_at, status, state,"
+                " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (order_no, platform, account, nickname, applied_at, status, state, now, now),
+            )
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def hand_sample(self, order_no: str) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM hand_samples WHERE order_no = ?", (order_no,)).fetchone()
+        return dict(row) if row else None
+
+    def update_hand_sample(self, order_no: str, now: Optional[float] = None, **fields) -> None:
+        allowed = {"status", "carrier", "waybill", "sent_at", "party_id", "deal_id", "state", "why", "nickname",
+                   "dismissed_at"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"not a hand sample field: {sorted(unknown)}")
+        fields["updated_at"] = time.time() if now is None else now
+        names = sorted(fields)
+        with self._lock:
+            self._conn.execute(f"UPDATE hand_samples SET {', '.join(f'{n} = ?' for n in names)} WHERE order_no = ?",
+                               (*[fields[n] for n in names], order_no))
+            self._conn.commit()
+
+    def hand_samples(self, *, state: Optional[str] = None, shown: bool = False, limit: int = 200) -> list[dict]:
+        """Our hand-made orders watched, the newest first: of one ``state``; ``shown``: only the 「待审批」 lines not seen
+        to yet (``listed``, not dismissed)."""
+        sql, where, args = "SELECT * FROM hand_samples", [], []
+        if state is not None:
+            where.append("state = ?")
+            args.append(state)
+        if shown:
+            where.append("state = 'listed' AND dismissed_at IS NULL")
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY updated_at DESC, order_no LIMIT ?", (*args, int(limit))).fetchall()
+        return [dict(r) for r in rows]
+
+    def dismiss_hand_sample(self, order_no: str, now: Optional[float] = None) -> bool:
+        """An operator has seen a line (「知道了」): it is not shown again; True when it was shown."""
+        now = time.time() if now is None else now
+        with self._lock:
+            cur = self._conn.execute("UPDATE hand_samples SET dismissed_at = ?, updated_at = ? WHERE order_no = ?"
+                                     " AND state = 'listed' AND dismissed_at IS NULL", (now, now, str(order_no)))
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def purge_hand_samples(self, before: float) -> int:
+        """Forget the hand-made orders first seen before ``before`` (their lines go too); returns how many."""
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM hand_samples WHERE created_at < ?", (before,))
+            self._conn.commit()
+            return cur.rowcount
 
     # ── 抖音百应 private messages (PRM_BUYIN_SYNC_MIN, src/prm/service.py) ─────
 

@@ -423,7 +423,7 @@ def test_no_holding_reply_when_she_heard_from_us_after_her_message(bot, clock):
     notice = bot.prm.deal_action("shipment", {"deal_id": 1, "carrier": "顺丰", "waybill": "SF1234567890123"})["packet"]
     clock.now += 60
     assert bot.prm.decide(notice, "send")["ok"] and bot.prm.send_approved() == 1
-    told = [(CREATOR, notice_text("小美", "顺丰", "SF1234567890123"))]
+    told = [(CREATOR, notice_text("顺丰", "SF1234567890123"))]
     clock.now += 11 * 60
     assert bot.prm.store.packets(("pending",)) and bot.prm.send_holding_replies() == 0 and bot.texts == told
     drafted(bot, draft(message_kind="other", reply_draft="收到～", slots={}), text="好的")
@@ -455,7 +455,7 @@ def test_a_waybill_drafts_the_shipping_notice_with_the_systems_number(bot, clock
                              now=clock.now, takeover_sec=7200)["ok"] is False
     result = bot.prm.deal_action("shipment", {"deal_id": 1, "carrier": "顺丰", "waybill": "SF1234567890123"})
     packet = bot.prm.store.packet(result["packet"])
-    assert packet["kind"] == "shipping_notice" and packet["text"] == notice_text("小美", "顺丰", "SF1234567890123")
+    assert packet["kind"] == "shipping_notice" and packet["text"] == notice_text("顺丰", "SF1234567890123")
     assert packet["meta"]["waybill"] == "SF1234567890123" and packet["meta"]["source"] == "system"
     assert bot.prm.store.deal(1)["stage"] == "shipped"
     wrong = bot.prm.decide(packet["id"], "edit", "已寄出：顺丰 SF0000000000000")
@@ -474,7 +474,8 @@ def test_a_model_written_shipping_notice_must_carry_the_systems_number(bot):
 
 def test_the_shipping_notice_outlives_the_creators_messages_but_not_a_new_waybill(bot, clock):
     first = bot.prm.deal_action("shipment", {"deal_id": 1, "carrier": "顺丰", "waybill": "SF1111111111"})["packet"]
-    drafted(bot, draft(message_kind="greeting", reply_draft="好的呀", slots={}), text="好的谢谢")
+    # (a question: a round of nothing but 「好的谢谢」 gets no holding reply since 2026-11-02, ``ack_only``)
+    drafted(bot, draft(message_kind="greeting", reply_draft="一般两三天就到啦", slots={}), text="大概什么时候到呀")
     assert bot.prm.store.packet(first)["status"] == "pending"                 # still waits for a person
     clock.now += 11 * 60
     assert bot.prm.send_holding_replies() == 1                                # for the creator's message only

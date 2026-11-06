@@ -763,6 +763,50 @@ class TestPrmPages:
         job = prm.relay.next_job(0, ("prm",))
         assert job["meta"]["opening"] == {"how": "", "by": "console", "wrote": True} and job["text"] == ""
 
+    def test_deals_page_asks_for_the_huopan_again_and_the_review_page_tags_it(self, page, prm):
+        """补发货盘 (2026-11-04): every opened deal has 「补发货盘」 with its hint; 小美's draft waits, so the click says why
+        not; once it is dropped a click asks the Mac for a draft that sends her the 货盘 again, which waits in 待审批
+        tagged 补发货盘; a person having the chat, the button is off and says why."""
+        import json as _json
+        from src.prm.service import SETTLE_SEC
+
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.wait_for_timeout(1500)
+        page.locator("button[aria-label='展开 小美']").click()
+        page.wait_for_timeout(300)
+        block = page.locator(".prm-huopan")
+        text = block.inner_text()
+        assert "附上货盘图（对方是商务、助理时再加 Excel）" in text and "不会自动发" in text and "7 天内发过货盘的不再发" in text
+        block.locator("button:has-text('补发货盘')").click()
+        page.wait_for_timeout(1200)
+        assert "「待审批」里已经有她的草稿：先处理那一份" in page.inner_text("body")
+        [waiting] = prm.service.store.packets(("pending",))
+        assert prm.service.decide(waiting["id"], "drop")["ok"]
+        block.locator("button:has-text('补发货盘')").click()
+        page.wait_for_timeout(1200)
+        assert "已请 Mac 写补发货盘的草稿" in page.inner_text("body")
+        prm.clock.now += SETTLE_SEC + 1
+        job = prm.relay.next_job(0, ("prm",))
+        assert job["meta"]["huopan"] == {"by": "console"} and job["text"] == ""
+        draft = {"intent": "补发货盘：问她看中哪几款", "slots": {}, "stage_proposal": "", "message_kind": "material",
+                 "reply_draft": "老师您好～给您补一份我们当季的货盘", "attachments_to_send": [], "needs_attention": False,
+                 "reason": "kb 第 3.0 节"}
+        prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(draft, ensure_ascii=False)})
+        prm.relay.tick()
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="给您补一份我们当季的货盘")
+        assert card.locator(".tag", has_text="补发货盘").count() == 1
+        assert card.locator(".tag", has_text="开场白").count() == 0
+        assert "这一条：补发货盘：问她看中哪几款" in card.inner_text()
+        assert prm.service.deal_action("mode", {"deal_id": 1, "mode": "human"})["ok"]
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.wait_for_timeout(1500)
+        page.locator("button[aria-label='展开 小美']").click()
+        page.wait_for_timeout(300)
+        block = page.locator(".prm-huopan")
+        assert block.locator("button:has-text('补发货盘')").is_disabled() and "先恢复副驾驶" in block.inner_text()
+
     def test_deals_page_edits_saves_and_shows_the_draft_note(self, page, prm):
         """起草备注 (2026-10-31): an opened deal shows its note (none yet) with the hint; 「写备注」 opens the field, 「保存」
         keeps it through the deal action (one line, as the bot keeps it) and her next draft job carries it; more than
@@ -814,13 +858,14 @@ class TestPrmPages:
         shows it with 「复制群名」; 「群已经不在了」 takes it back; one the bot is unsure of asks 「建好了 / 没建成」.
         Every name is made up."""
         from types import SimpleNamespace
-        from test_three_party import Admin, Auto, Backend
+        from test_prm_three_party_chat import Watching
+        from test_three_party import Admin, Auto
         from src.prm.three_party import ThreeParty
 
         service = prm.service
         service.three_party = ThreeParty(service.store, SimpleNamespace(prm_group_with="老板测试",
                                                                          prm_friend_add_brand="品牌测试"))
-        backend = Backend()
+        backend = Watching()                                              # (a backend that reads groups: 三方群里的话)
         admin = Admin(backend)
         service.three_party.attach(admin, Auto(), backend)
         service.three_party.spawn = lambda fn: fn()
@@ -847,6 +892,7 @@ class TestPrmPages:
         assert admin.calls[-1] == (["小美测试", "老板测试"], False)
         text = block.inner_text()
         assert "三方群已建好" in text and "「品牌测试×小美」" in text and block.locator("button:has-text('复制群名')").count() == 1
+        assert "机器人在读这个群（只读，不在群里说话）：群里谁说了什么，会交给她私聊的草稿" in text
         assert block.locator("button:has-text('拉三方群')").count() == 0
         block.locator("button:has-text('群已经不在了')").click()
         page.wait_for_timeout(1200)
@@ -862,6 +908,7 @@ class TestPrmPages:
         block.locator("button:has-text('建好了')").click()
         page.wait_for_timeout(1200)
         assert "三方群已建好" in block.inner_text() and "手动标的" in block.inner_text()
+        assert "机器人不知道这是哪个群（手动标的），读不到群里的话" in block.inner_text() and "起草备注" in block.inner_text()
         assert service.store.deal(deal_id)["three_party"]["state"] == "created"
 
     def test_deals_page_runs_a_deal_stage_mode_waybill_and_numbers(self, page, prm):
@@ -1059,6 +1106,78 @@ class TestPrmPages:
         assert night.service.store.packet(2)["wrong"] is True
         assert night.service.store.events(1, limit=1)[0]["detail"]["night"] is True
 
+    @pytest.fixture
+    def opening_auto(self):
+        """A running PRM service with PRM_OPENING_AUTO_MIN=30, by day (2026-11-02): 小红's 开场白 went out by itself after
+        its 30 minutes; 小美's waits with its time; 小青's says 包邮 and waits for a person."""
+        import json as _json
+        import time as _time
+        from types import SimpleNamespace
+        from src.prm.service import OPENING_AUTO_GRACE_SEC, SETTLE_SEC, PrmService
+        from src.prm.store import PrmStore
+        from src.relay.service import ClaudeRelay
+        from src.relay.store import RelayStore
+        from src.web import server as web_server
+
+        class Clock:
+            now = _time.time() - 3 * 3600                    # (today, so the page shows the time alone)
+
+            def __call__(self):
+                return self.now
+
+        clock = Clock()
+        cfg = SimpleNamespace(
+            claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1", claude_relay_port=0,
+            claude_relay_prefix="cc", claude_relay_wxids=[], claude_relay_db=":memory:",
+            claude_relay_max_chars=1500, admin_wxid="wxid_admin", prm_copilot="on", prm_db=":memory:",
+            prm_opening_auto_min=30,
+        )
+        sent = []
+        relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=clock)
+        service = PrmService(cfg, relay, store=PrmStore(":memory:"), clock=clock,
+                             send=lambda c, t: sent.append((c, t)) or True, send_file=lambda c, p: True)
+
+        def opening(wxid, name, text):
+            party = service.register(wxid, name, "测试达人")
+            party = service.store.party_by_wxid(wxid)
+            assert service.ask_opening(service.store.deal_of(party["id"])["id"])["ok"]
+            clock.now += SETTLE_SEC + 1
+            job = relay.next_job(0, ("prm",))
+            draft = {"intent": "开场白", "slots": {}, "stage_proposal": "", "message_kind": "greeting", "reply_draft": text,
+                     "attachments_to_send": [], "needs_attention": False, "reason": "kb/合作政策.md 场景 A"}
+            relay.finish(job["id"], {"ok": True, "text": _json.dumps(draft, ensure_ascii=False)})
+            relay.tick()
+
+        opening("wxid_creator03", "小红", "你好呀～我是 ACE7CN 的运营，有兴趣了解一下我们家的帽子吗？")
+        clock.now += 30 * 60 + OPENING_AUTO_GRACE_SEC
+        assert service.send_due_openings() == 1 and service.send_approved() == 1
+        opening("wxid_creator01", "小美", "你好呀～我是 ACE7CN 的运营，先发几款当季现货给你看看～")
+        opening("wxid_creator02", "小青", "你好呀～我们家帽子都包邮哦～")
+        web_server.register_prm(service)
+        yield SimpleNamespace(service=service, sent=sent, relay=relay, clock=clock)
+        web_server.register_prm(None)
+        relay.stop()
+
+    def test_review_page_says_when_a_first_line_goes_by_itself_and_why_one_waits(self, page, opening_auto):
+        import time as _time
+
+        waiting = next(p for p in opening_auto.service.store.packets(("pending",)) if "先发几款" in p["text"])
+        when = _time.strftime("%H:%M", _time.localtime(waiting["meta"]["auto_at"]))
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.get_by_text("先发几款当季现货给你看看").wait_for()
+        card = page.locator(".prm-draft", has_text="先发几款当季现货给你看看").inner_text()
+        assert f"给新好友的第一句话：{when} 还没人处理就照原样自动发给她" in card
+        held = page.locator(".prm-draft", has_text="都包邮哦").inner_text()
+        assert "这份不会自动发，等你：说到了「包邮」" in held and "还没人处理就照原样自动发给她" not in held
+        recent = page.locator(".prm-recent", has_text="有兴趣了解一下我们家的帽子吗")
+        assert "开场白自动发出" in recent.inner_text()
+        assert [t for _, t in opening_auto.sent] == ["你好呀～我是 ACE7CN 的运营，有兴趣了解一下我们家的帽子吗？"]
+        # 自动模式's banner says first lines go too when the setting is on
+        opening_auto.service.set_auto_mode(True)
+        page.reload()
+        page.locator(".prm-auto", has_text="自动模式开着（").wait_for()
+        assert "新好友的第一份草稿、开场白满足条件也直接发；投诉、平台动作照旧等你。" in page.locator(".prm-auto").inner_text()
+
     # ── 加百应达人微信 (PRM_FRIEND_ADD, 功能 R): the 加微信 cards, the paste form, 登记达人's 抖音号 ───────────
     @staticmethod
     def _friend_adds_on(prm):
@@ -1097,7 +1216,7 @@ class TestPrmPages:
                          "添加该达人微信", "我在手机上加了", "请她加我们", "不加"):
             assert expected in text, expected
         assert "今天控制台已加 0/10" in page.inner_text("body") and "abcdefyz" not in page.inner_text("body")
-        assert card.locator("input[aria-label='#1 的附言']").input_value() == "您好小鹿，百应上联系您的～"
+        assert card.locator("input[aria-label='#1 的附言']").input_value() == "您好，百应上联系您的～"
         remark = card.locator(".prm-remark").inner_text()                        # the remark, next to the greeting
         assert "备注：抖音-小鹿" in remark and "认出「备注」栏就填进去" in remark
         card.locator("button:has-text('显示完整')").click()                      # written down, this page only
@@ -1110,11 +1229,11 @@ class TestPrmPages:
         dialog = page.locator("[role=dialog]")
         said = dialog.inner_text()
         assert "搜索 ab****yz" in said and "不会自动重试" in said and "别动键盘鼠标" in said
-        assert "附言：您好小鹿，百应上联系您的～；备注：抖音-小鹿" in said
+        assert "附言：您好，百应上联系您的～；备注：抖音-小鹿" in said
         assert manager.calls == []                                               # nothing before 确定添加
         dialog.locator("button:has-text('确定添加')").click()
         page.wait_for_timeout(1500)
-        assert manager.calls == [("abcdefyz", "您好小鹿，百应上联系您的～")] and manager.remarks == ["抖音-小鹿"]
+        assert manager.calls == [("abcdefyz", "您好，百应上联系您的～")] and manager.remarks == ["抖音-小鹿"]
         assert adds._store.friend_add(1)["state"] == "requested"
         text = page.locator(".prm-friend-add", has_text="小鹿").inner_text()
         assert "已发申请" in text and "她已经通过了，我来选是哪个聊天" in text and "添加该达人微信" not in text
@@ -1226,7 +1345,7 @@ class TestPrmPages:
             assert adds._store.friend_add(1)["rejected"] == ["wxid_wrong01"] and card.locator(".prm-candidate").count() == 0
             assert prm.service.store.parties()[1:] == []                  # nobody registered by itself
             adds.on_new_friend({"wxid": "wxid_xiaolu", "name": "小鹿🌸", "how": "requested",
-                                "own_greeting": "您好小鹿，百应上联系您的～", "added_at": now + 5})
+                                "own_greeting": "您好，百应上联系您的～", "added_at": now + 5})
             page.goto(f"{BASE_URL}/#/deals", timeout=10000)
             page.wait_for_timeout(1500)
             row = page.locator(".prm-new-friend", has_text="wxid_xiaolu")
@@ -1259,7 +1378,7 @@ class TestPrmPages:
     def test_review_page_says_who_left_a_contact_and_the_baiying_draft_names_its_record(self, page, prm):
         """加百应达人微信第 7 步：「待审批」页百应那一行说没登记的达人里有几位留了联系方式（见下面的「加微信」），我们邀约的
         达人发的联系方式卡片成了一张加微信卡；百应草稿卡上说这个会话留过的联系方式是哪一条加微信、到哪一步了；完整号码哪儿都
-        不显示。号码、抖音号、名字都是编的。"""
+        不显示；草稿排在加微信卡上面（2026-11-05）。号码、抖音号、名字都是编的。"""
         import json as _json
         from src.prm import platforms
         from src.prm.service import BUYIN_SYNC_CHAT
@@ -1303,7 +1422,37 @@ class TestPrmPages:
         draft = page.locator(".prm-buyin", has_text="样品什么时候到")
         assert (f"她在这个会话里留了联系方式（微信号 zq****83）→「加微信 #{early['id']}」：已登记并关联"
                 in draft.inner_text())
+        # the drafts first, the 加微信 cards under them (2026-11-05: the user scrolled past them to reach the drafts)
+        assert draft.bounding_box()["y"] < page.locator(".prm-friend-adds").bounding_box()["y"]
         assert "zq_test_wx_83" not in text and "13700001234" not in text
+
+    def test_review_page_says_which_hand_made_sample_orders_shipped_until_seen(self, page, prm):
+        """手动建的寄样单（2026-11-05）：发了货、运单号没填进任何合作单的，「待审批」顶上一行（单号、快递和运单号、谁、
+        为什么），「复制运单号」，「知道了」以后不再出现；查不了手动建的单时顶上说为什么。号码、名字都是编的。"""
+        from src.prm.service import HAND_PROBLEMS
+
+        store, now = prm.service.store, prm.clock.now
+        store.add_hand_sample("YP2611050000009", platform="DY", account="test_daren_09", nickname="测试达人九",
+                              applied_at=now - 86400, status="SENT", state="waiting", now=now)
+        store.update_hand_sample("YP2611050000009", now, state="listed", why="没登记的达人", carrier="顺丰速运_电商",
+                                 waybill="SF0000000009", sent_at=now - 600)
+        prm.service._sample_sync_sec = 3600
+        prm.service._hand_problem = HAND_PROBLEMS["old_worker"]
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        line = page.locator(".prm-hand-samples .banner", has_text="YP2611050000009")
+        text = line.inner_text()
+        assert "寄样单 YP2611050000009 已发货：顺丰速运_电商 SF0000000009" in text, text
+        assert "测试达人九 · 抖音：没登记的达人" in text and "手动建的寄样单" in text
+        assert "复制运单号" in text and "知道了" in text
+        assert "Mac 上的 worker 还是旧版本" in page.inner_text("body")
+        # (at the top: above the drafts)
+        draft = page.locator(".prm-draft").first
+        assert line.bounding_box()["y"] < draft.bounding_box()["y"]
+        line.locator("button:has-text('知道了')").click()
+        page.wait_for_timeout(1200)
+        assert page.locator(".prm-hand-samples").count() == 0
+        assert store.hand_sample("YP2611050000009")["dismissed_at"] is not None
 
     # ── 老板拉的群 (PRM_BOSS_GROUPS, 功能 U): the fields the PRM side adds to /api/prm (``boss_groups``, a packet's
     # ``channel`` "group" / ``group_name``, ``source`` "boss_group", ``three_party.by`` "boss") and its two POSTs are

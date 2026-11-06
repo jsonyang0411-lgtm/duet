@@ -158,7 +158,7 @@ def test_deals_numbers_and_wrong_sends_from_the_running_console(running):
     # sent, then marked wrong: shipping notices are reviewed again from zero
     assert call("/api/prm/packets", "POST", {"id": notice["id"], "action": "send"})[1]["ok"]
     running.prm.send_approved()
-    assert running.sent[-1] == (CREATOR, "小美你好～样品已经寄出啦：顺丰 SF1234567890123。签收之后跟我说一声哦～")
+    assert running.sent[-1] == (CREATOR, "老师您好～样品已经寄出啦：顺丰 SF1234567890123。签收之后跟我说一声哦～")
     assert call("/api/prm/packets", "POST", {"id": notice["id"], "action": "wrong"})[1] == {"ok": True, "status": "wrong"}
     d = call("/api/prm")[1]
     assert [p["wrong"] for p in d["recent"] if p["id"] == notice["id"]] == [True]
@@ -214,6 +214,37 @@ def test_an_opening_is_asked_for_from_the_running_console_and_refused_while_stop
     assert call("/api/prm/parties", "POST", {"action": "add", "wxid": CREATOR, "name": "小美"})[1]["ok"] is True
     stopped = call("/api/prm/deals", "POST", {"action": "opening", "deal_id": 1})[1]
     assert stopped == {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能写开场白"}
+
+
+def test_a_huopan_is_asked_for_from_the_running_console_and_refused_while_stopped(running, tmp_path, monkeypatch):
+    """POST /api/prm/deals {action: huopan} (「补发货盘」, 2026-11-04): with 小美's draft waiting she is told why not;
+    once it is dropped the click makes a job with ``meta.huopan``, its draft is tagged ``huopan`` in /api/prm and the
+    deal's record names the click; a stopped bot cannot ask the Mac."""
+    deal_id = call("/api/prm")[1]["parties"][0]["deal"]["id"]
+    assert call("/api/prm/deals", "POST", {"action": "huopan", "deal_id": deal_id})[1] == {
+        "ok": False, "error": "「待审批」里已经有她的草稿：先处理那一份"}
+    [waiting] = call("/api/prm")[1]["pending"]
+    assert waiting["huopan"] is False
+    assert call("/api/prm/packets", "POST", {"id": waiting["id"], "action": "drop"})[1]["ok"] is True
+    answer = call("/api/prm/deals", "POST", {"action": "huopan", "deal_id": deal_id})[1]
+    assert answer["ok"] is True
+    running.relay._clock.now += SETTLE_SEC + 1
+    job = running.relay.next_job(0, ("prm",))
+    assert (job["id"], job["text"], job["meta"]["huopan"]) == (answer["job"], "", {"by": "console"})
+    draft = {"intent": "补发货盘", "slots": {}, "stage_proposal": "", "message_kind": "material",
+             "reply_draft": "老师您好～给您补一份我们当季的货盘", "attachments_to_send": [], "needs_attention": False,
+             "reason": "kb 第 3.0 节"}
+    running.relay.finish(job["id"], {"ok": True, "text": json.dumps(draft, ensure_ascii=False)})
+    running.relay.tick()
+    d = call("/api/prm")[1]
+    assert [(p["party_name"], p["huopan"], p["status"]) for p in d["pending"]] == [("小美", True, "pending")]
+    assert any(e["name"] == f"派补发货盘的任务 #{job['id']}（运营点的）" for e in d["parties"][0]["deal"]["events"])
+    server.register_prm(None)                                       # the bot stopped
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PRM_DB", raising=False)
+    assert call("/api/prm/parties", "POST", {"action": "add", "wxid": CREATOR, "name": "小美"})[1]["ok"] is True
+    stopped = call("/api/prm/deals", "POST", {"action": "huopan", "deal_id": 1})[1]
+    assert stopped == {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能补发货盘"}
 
 
 def test_the_draft_note_is_kept_from_the_running_console_and_refused_while_stopped(running, tmp_path, monkeypatch):
@@ -683,7 +714,7 @@ def test_the_page_shows_the_records_masked_and_the_switchs_status(adds):
     assert (r["state"], r["state_label"], r["nickname"], r["aweme_id"], r["source_label"]) == (
         "offered", "待确认", "小鹿", "dy_demo01", "运营手动填的")
     assert r["masked"] == {"wechat": "ab****yz", "phone": "138****0000"} and r["has_wechat"] and r["has_phone"]
-    assert r["greeting"] == "您好小鹿，百应上联系您的～" and r["listed"] and r["open"] and r["last_attempt"] is None
+    assert r["greeting"] == "您好，百应上联系您的～" and r["listed"] and r["open"] and r["last_attempt"] is None
     assert (r["remark"], r["remark_set"]) == ("抖音-小鹿", False)
     status = d["friend_add_status"]
     assert (status["enabled"], status["can_add"], status["today"], status["cap"], status["gap_sec"]) == (
@@ -802,7 +833,7 @@ def test_a_new_friend_a_record_points_at_is_marked_in_the_candidates_and_not_her
     server.register_new_friends(service)
     try:
         adds.prm.friend_adds.on_new_friend({"wxid": "meimei_88", "name": "小美美", "how": "requested",
-                                             "own_greeting": "您好小鹿，百应上联系您的～", "added_at": adds.clock.now})
+                                             "own_greeting": "您好，百应上联系您的～", "added_at": adds.clock.now})
         d = call("/api/prm")[1]
         [r] = d["friend_adds"]
         assert r["candidate"]["wxid"] == "meimei_88" and r["candidate"]["level_label"] == "确定是她"

@@ -7,7 +7,9 @@ live in tmp_path. The pacing wrappers (paced-dy.mjs / paced-jst.mjs) are run wit
 CLI folders when node is installed.
 """
 
+import csv
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -121,14 +123,14 @@ FAKE_NODE = textwrap.dedent("""\
 
 
 def row(aweme, fans, *, nick=None, level=3, hat="12.0%", sex="女性 90.00%", live_min=1000000, channel="直播", avg=300.0,
-        hidden=False, goods=None):
+        hidden=False, goods=None, price=None, crowd=None):
     sales = ({"available": False, "min": None, "max": None, "label": "无数据"} if hidden
              else {"available": True, "min": live_min, "max": None, "label": f"{live_min}起"})
     return {"platformNo": aweme, "nickName": nick or f"测试达人{aweme[-3:]}", "fansNum": fans, "level": level,
             "sales30d": sales, "sales30dLive": {**sales, "label": "x"}, "channelBySales": channel, "mainChannel": channel,
             "avgPrice": avg, "category": "服饰内衣",
             "recentGoods": [{"name": n, "ratio": r} for n, r in goods] if goods else [{"name": "大衣", "ratio": "50%"}, {"name": "帽子", "ratio": hat}],
-            "fans": {"sex": sex}}
+            "fans": {"sex": sex, **({"price": price} if price else {}), **({"crowd": crowd} if crowd else {})}}
 
 
 def creators():
@@ -289,6 +291,31 @@ def test_plan_is_read_only_and_builds_the_list_by_the_users_rules(env):
     for f in out["files"].values():
         assert stat.S_IMODE(os.stat(f).st_mode) == 0o600
     assert out["by_category"] == {"小达人": 4, "中大博主": 1, "大主播/专场型": 2}
+    assert "rules.categories" not in md, "all three categories by default: nothing said"
+
+
+def test_plan_leaves_out_a_category_the_config_does_not_want(env):
+    # the user, 2026-11-04: no 专场型 for now; they are named off the list and their room goes to the others
+    led = tool.Ledger(env.tmp / "ledger")
+    led.append({"event": "attempt", "attempt": "a1", "aweme_id": "dy_invited", "plan_id": "Pold"})
+    led.append({"event": "result", "attempt": "a1", "aweme_id": "dy_invited", "sent": True, "outcome": "VERIFIED_SUCCESS"})
+    code, out = plan_now(env, config={"rules": {"categories": ["mid", "small"]}})
+    assert code == 0, out
+    plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
+    assert {c["aweme_id"] for c in plan["creators"]} == {"dy_small_a", "dy_small_b", "dy_gap", "dy_mid_a", "dy_video_big"}
+    assert {c["category"] for c in plan["creators"]} == {"small", "mid"}
+    reasons = {c["aweme_id"]: c["reason"] for c in plan["excluded"]}
+    assert reasons["dy_big_a"] == reasons["dy_big_b"] == "大主播/专场型：这阵子不发（配置 rules.categories）"
+    assert plan["settings"]["rules"]["categories"] == ["small", "mid"], "kept in the tool's order"
+    assert out["by_category"] == {"小达人": 4, "中大博主": 1, "大主播/专场型": 0}
+    md = Path(out["files"]["md"]).read_text(encoding="utf-8")
+    assert "只要小达人、中大博主（rules.categories）" in md
+    assert "dy_big_a" in md.split("## 其他没进清单的")[1], "listed with the reason, for a person to see"
+    # what the categories may be: one or more of small / mid / big
+    for bad in ([], ["huge"], "small", ["small", 1]):
+        cfg = env.write_config(rules={"categories": bad})
+        code, _, _ = env.main(["plan", "--config", cfg, "--out-dir", str(env.tmp / "p"), "--ledger-dir", str(env.tmp / "l")])
+        assert code == 2, bad
 
 
 def test_plan_counts_stops_and_stock(env):
@@ -440,6 +467,68 @@ def test_plan_also_finds_creators_on_douyin_and_looks_each_new_one_up_in_jushuit
     for bad in (["buyin", "author-invite", "--aweme-id=x"], ["buyin", "authors-square", "--execute"],
                 ["buyin", "authors-square", "--transport=http"], ["fxg", "products"], ["buyin", "authors-square", "--x y"]):
         cfg = env.write_config(find={**tool.DEFAULT_FIND, "dy_queries": [{"args": bad}]})
+        code, _, _ = env.main(["plan", "--config", cfg, "--out-dir", str(env.tmp / "p"), "--ledger-dir", str(env.tmp / "l")])
+        assert code == 2, bad
+
+
+def test_plan_can_leave_out_creators_whose_fans_spend_little(env):
+    fans = [row("dy_fp_low", 30000, price="客单价50-100元 28.39%"),
+            row("dy_fp_tiny", 31000, price="客单价25元以下 30.00%"),
+            row("dy_fp_ok", 32000, price="客单价100-200元 30.88%", crowd="genz 34.22%"),
+            row("dy_fp_high", 33000, price="客单价500元以上 34.05%", crowd="资深中产 20.10%"),
+            row("dy_fp_none", 34000)]                                         # 聚水潭 gives no 客单价 for her fans
+    env.scenario(scenario(creators=fans))
+    # off by default: nobody is left out or flagged for it, but the list shows the fans' 客单价 and 人群
+    code, out = plan_now(env)
+    assert code == 0, out
+    plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
+    by = {c["aweme_id"]: c for c in plan["creators"]}
+    assert set(by) == {"dy_fp_low", "dy_fp_tiny", "dy_fp_ok", "dy_fp_high", "dy_fp_none"}
+    assert all(c["flags"] == [] for c in by.values())
+    assert (by["dy_fp_ok"]["fans_price"], by["dy_fp_ok"]["fans_price_low"], by["dy_fp_ok"]["fans_crowd"]) == ("100-200元", 100.0, "Z世代")
+    assert (by["dy_fp_tiny"]["fans_price"], by["dy_fp_tiny"]["fans_price_low"]) == ("25元以下", 0.0)
+    assert (by["dy_fp_high"]["fans_price"], by["dy_fp_high"]["fans_price_low"], by["dy_fp_high"]["fans_crowd"]) == ("500元以上", 500.0, "资深中产")
+    assert (by["dy_fp_none"]["fans_price"], by["dy_fp_none"]["fans_price_low"], by["dy_fp_none"]["fans_crowd"]) == (None, None, None)
+    md = Path(out["files"]["md"]).read_text(encoding="utf-8")
+    assert "| 件单价 | 粉丝客单价 | 等级 |" in md and "| 女粉 | 粉丝人群 |" in md
+    assert "| 300.0 | 100-200元 | LV3 |" in md and "| Z世代 |" in md and "粉丝客单价 ≥" not in md
+    # 100 (the user, 2026-11-02): a band under it is off the list with the reason; a creator without one is only flagged
+    code, out = plan_now(env, config={"rules": {"fans_price_min": 100}})
+    assert code == 0, out
+    plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
+    by = {c["aweme_id"]: c for c in plan["creators"]}
+    assert set(by) == {"dy_fp_ok", "dy_fp_high", "dy_fp_none"}
+    assert by["dy_fp_none"]["flags"] == ["粉丝客单价不知道"] and by["dy_fp_ok"]["flags"] == []
+    assert [c["aweme_id"] for c in plan["creators"]][-1] == "dy_fp_none", "the flagged one after the others"
+    gone = {c["aweme_id"]: c["reason"] for c in plan["excluded"]}
+    assert gone["dy_fp_low"] == "粉丝客单价 50-100元（低于 100 元）：她的粉丝平时一单花得少"
+    assert gone["dy_fp_tiny"] == "粉丝客单价 25元以下（低于 100 元）：她的粉丝平时一单花得少"
+    md = Path(out["files"]["md"]).read_text(encoding="utf-8")
+    assert "件单价 150～500 元，粉丝客单价 ≥ 100 元（粉丝画像里占比最大的那一档，按它的下限比），没加进达人库；" in md
+    table = list(csv.reader(io.StringIO(Path(out["files"]["csv"]).read_text(encoding="utf-8-sig"))))
+    assert table[0][6:9] == ["件单价", "粉丝客单价", "等级"] and table[0][12] == "粉丝人群"
+    ok = next(r for r in table if "dy_fp_ok" in r)
+    assert ok[7] == "100-200元" and ok[12] == "Z世代"
+    # bands are compared by their lower bound: 200 leaves out the 100-200 one too
+    code, out = plan_now(env, config={"rules": {"fans_price_min": 200}})
+    plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
+    assert {c["aweme_id"] for c in plan["creators"]} == {"dy_fp_high", "dy_fp_none"}
+    # one found on 抖音 goes by the same rule, with her 聚水潭 look-up's portrait
+    env.scenario(scenario(creators=fans, square=[{"awemeId": "dy_sq_cheapfans", "nickname": "x", "fansNum": 40000}],
+                          lookup={"dy_sq_cheapfans": {**row("dy_sq_cheapfans", 40000, avg=228.0, price="客单价50-100元 31.00%"), "added": False}}))
+    code, out = plan_now(env, config={"rules": {"fans_price_min": 100}, "find": {**tool.DEFAULT_FIND, "dy_queries": [SQUARE]}})
+    assert code == 0, out
+    gone = {c["aweme_id"]: c for c in json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))["excluded"]}
+    assert gone["dy_sq_cheapfans"]["reason"].startswith("粉丝客单价 50-100元（低于 100 元）") and gone["dy_sq_cheapfans"]["source"] == "抖音"
+    # the portrait's words as 聚水潭 writes them; anything else is not known
+    assert tool.fans_price({"fans": {"price": "客单价 200 - 500 元 28.67%"}}) == ("200-500元", 200.0)
+    assert tool.fans_price({"fans": {"price": "客单价0-25元"}}) == ("0-25元", 0.0)
+    assert tool.fans_price({"fans": {"price": "高消费 30%"}}) == tool.fans_price({"fans": None}) == tool.fans_price({}) == (None, None)
+    assert tool.fans_crowd({"fans": {"crowd": "精致妈妈"}}) == "精致妈妈" and tool.fans_crowd({"fans": {"crowd": "GENZ 12.5%"}}) == "Z世代"
+    assert tool.fans_crowd({"fans": {}}) is None
+    # the config: a number from 0 to 500 (the highest band starts at 500)
+    for bad in (-1, 501, "100", True):
+        cfg = env.write_config(rules={"fans_price_min": bad})
         code, _, _ = env.main(["plan", "--config", cfg, "--out-dir", str(env.tmp / "p"), "--ledger-dir", str(env.tmp / "l")])
         assert code == 2, bad
 

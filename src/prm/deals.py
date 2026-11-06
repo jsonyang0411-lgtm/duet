@@ -86,8 +86,10 @@ def effective_mode(deal: dict, now: float) -> str:
     return mode if mode in MODES else COPILOT
 
 
-def notice_text(name: str, carrier: str, waybill: str) -> str:
-    return f"{name}你好～样品已经寄出啦：{carrier} {waybill}。签收之后跟我说一声哦～"
+def notice_text(carrier: str, waybill: str) -> str:
+    """The shipping notice: 「老师」 and 「您」, never her name (kb 第 0 节, the user 2026-11-03; her WeChat name is
+    often our remark 「抖音-…」)."""
+    return f"老师您好～样品已经寄出啦：{carrier} {waybill}。签收之后跟我说一声哦～"
 
 
 def add_shipment(store: PrmStore, deal_id, carrier: str, waybill: str, *, now: float,
@@ -109,7 +111,7 @@ def add_shipment(store: PrmStore, deal_id, carrier: str, waybill: str, *, now: f
     set_stage(store, deal["id"], "shipped", now=now, actor=actor, note=note)
     if not notice:
         return shipment, None
-    text = notice_text(party.get("name", ""), carrier, waybill)
+    text = notice_text(carrier, waybill)
     if review:
         route, status, decided_at = gates.REVIEW, PENDING, None
     else:

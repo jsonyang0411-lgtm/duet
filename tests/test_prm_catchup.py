@@ -539,8 +539,8 @@ def test_a_pc_clock_hours_ahead_is_measured_by_the_bots_own_reply_and_corrected(
     # it counts at once and the notice goes
     world.clock.now -= ahead
     ahead = 0
-    run.prm._note_sent(CREATOR, "收到，我确认一下马上回你")
-    world.wechat.say(CREATOR, ME, "收到，我确认一下马上回你", wechat_now())
+    run.prm._note_sent(CREATOR, "收到，我确认一下马上回您")
+    world.wechat.say(CREATOR, ME, "收到，我确认一下马上回您", wechat_now())
     run.poll()
     assert run.prm.snapshot()["clock_skew_sec"] == 0 and "电脑的时间" not in world.prm_store.deal(1)["attention"]
 

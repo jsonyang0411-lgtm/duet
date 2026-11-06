@@ -45,8 +45,9 @@ Who she is once she accepted (design §7): the new-friend scan (src/wechat/new_f
 ``on_new_friend``; it only writes a ``candidate`` on the one record she fits best, with how sure (``sure``: the 微信号
 she gave is the new friend's wxid, or her name on our side is this record's remark, used by no other open record, or
 she accepted our request and our greeting in the new chat is this record's own
-greeting, word for word, used by no other open record; ``likely``: she accepted our request and this is the only one
-waiting for that, or a friend appeared within 2 minutes of an add that saw no application window; ``possible``: she
+greeting, word for word, used by no other open record (only a ``{昵称}`` template makes greetings differ: since
+2026-11-03 the default has no nickname, so the remark is what tells her apart); ``likely``: she accepted our
+request and this is the only one waiting for that, or a friend appeared within 2 minutes of an add that saw no application window; ``possible``: she
 added us and her greeting names her 百应 nickname, her 抖音号 or 百应 / 抖音 / 邀约, or her WeChat name is like her 百应
 nickname) and why.  Never more: linking is always an operator's 「是她，登记并关联」 (user, 2026-10-29); 「不是她」
 clears it and that friend is not offered for the record again.
@@ -80,6 +81,7 @@ STATES = {
     EXPIRED: "过期了（号码已清除）",
 }
 CAN_ADD_FROM = (OFFERED, FAILED, BLOCKED)          # unsure: an operator says 没发出去 first (-> failed)
+NOT_ASKED = (*CAN_ADD_FROM, NEEDS_VIEW, NOT_FOUND, WAITING)   # no request of ours went out: its greeting is still to use
 SOURCES = {"paste": "运营手动填的", "buyin_card": "百应私信里的联系方式卡片", "buyin_text": "她在百应私信里打的字"}
 USES = (WECHAT, PHONE)
 
@@ -116,7 +118,8 @@ REASONS = {
 # ── settings (src/config.py; the tests' config objects have none: the defaults) ─
 DAILY_MAX_DEFAULT, DAILY_MAX_RANGE = 10, (1, 30)
 GAP_SEC_DEFAULT, GAP_SEC_RANGE = 120, (30, 3600)
-GREETING_DEFAULT = "您好{昵称}，我是{品牌}，百应上联系您的～"
+GREETING_DEFAULT = "您好，我是{品牌}，百应上联系您的～"     # no nickname (user 2026-11-03); {昵称} still works
+GREETING_UNTIL_1103 = "您好{昵称}，我是{品牌}，百应上联系您的～"   # the default before: ``start`` re-makes what it made
 GREETING_MAX = 30                  # WeChat's own limit is not known yet (design §13): kept short
 NICK_CHARS = 8                     # of her 百应 nickname in the greeting
 NICKNAME_CHARS = 30
@@ -351,7 +354,7 @@ class FriendAdds:
 
     def start(self) -> int:
         """A bot stopped while it added (``adding``): not known whether the request went out (``unsure``); the
-        attempts it left open end the same way.  Returns how many records."""
+        attempts it left open end the same way.  Then ``renew_greetings``.  Returns how many records went unsure."""
         now = self._clock()
         moved = 0
         for record in self._store.friend_adds(states=(ADDING,)):
@@ -360,7 +363,24 @@ class FriendAdds:
                 logger.warning("FriendAdds: #%d was being added when the bot stopped: unsure", record["id"])
         for attempt in self._store.friend_attempts(unfinished=True):
             self._store.finish_friend_attempt(attempt["id"], "restart", now=now)
+        self.renew_greetings()
         return moved
+
+    def renew_greetings(self) -> int:
+        """A record no request of ours went out for (``NOT_ASKED``) whose greeting is the text the old default made
+        (``GREETING_UNTIL_1103``: her nickname after 您好) gets the text the setting makes now (user 2026-11-03: the cards
+        already waiting say 「您好，我是…」 too).  A greeting an operator typed stays, and so does the record's 7-day clock
+        (``updated_at``).  Returns how many."""
+        renewed = 0
+        for record in self._store.friend_adds(states=NOT_ASKED):
+            nickname = record.get("nickname") or ""
+            old, new = greeting_for(GREETING_UNTIL_1103, nickname, self._brand), self.greeting(nickname)
+            if record.get("greeting") == old != new and self._store.update_friend_add(
+                    record["id"], now=float(record["updated_at"]), states=(record["state"],), greeting=new):
+                renewed += 1
+        if renewed:
+            logger.info("FriendAdds: %d greeting(s) not sent yet no longer have her nickname", renewed)
+        return renewed
 
     # ── where a record comes from ─────────────────────────────────────────
 

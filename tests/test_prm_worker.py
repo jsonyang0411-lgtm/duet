@@ -878,6 +878,79 @@ def test_the_opening_line_works_on_the_macs_own_python(tmp_path):
     assert run.stdout.startswith("ok")
 
 
+# ── 补发货盘 (the bot's ``meta.huopan``: send her the 货盘 again, 2026-11-04) ──
+
+HUOPAN_HEAD = "运营在控制台点了「补发货盘」：这一次没有达人的新消息，是我们主动给她补发一份货盘，问问她看中哪几款。"
+HUOPAN_JOINED = "运营在控制台点了「补发货盘」，她刚好又发来了消息（在下面）：先回她的话，"
+
+
+def test_a_huopan_job_asks_for_the_huopan_and_makes_up_no_message_of_hers(worker):
+    """The bot's 补发货盘 job has no message of hers: the prompt says what to send (kb 第 3.0 节: the picture always, the
+    Excel as that section says; no 寄样) and what to do within 7 days of the last 货盘, with no <creator_message> block;
+    a message of hers that joined the job keeps its block after the line, which says to answer her first; without
+    ``meta.huopan`` the prompt is as it was."""
+    job = {"id": 31, "text": "", "meta": {"huopan": {"by": "console"}, "sent": [
+        {"at": 0, "kind": "other", "what": "sent", "text": "好的～这几款现货您先看看"}]}}
+    prompt = worker.prm_prompt(job, 1, "小美", "deals/1.md", [], [])
+    line = worker.huopan_line(job["meta"])
+    assert line.startswith(HUOPAN_HEAD) and line in prompt.split("\n") and "<creator_message>" not in prompt
+    for words in ("「货盘」那一节（第 3.0 节）", "货盘图一定附上，Excel 照那一节说的再加，都写进 attachments_to_send", "不提寄样",
+                  "7 天内已经发过货盘", "reply_draft 和 attachments_to_send 都留空", "<our_reply> 和 <operator_message>"):
+        assert words in line
+    assert prompt.index("<our_reply>\n好的～这几款现货您先看看\n</our_reply>") < prompt.index(line)
+    joined = worker.prm_prompt({"id": 32, "text": "[11-04 15:00] 老师在吗", "meta": job["meta"]}, 1, "小美", "deals/1.md",
+                               [], [])
+    head = worker.huopan_line(job["meta"], joined=True)
+    assert head.startswith(HUOPAN_JOINED) and "只回她的话、不再附货盘" in head
+    assert joined.index(head) < joined.index("<creator_message>") and "老师在吗" in joined and HUOPAN_HEAD not in joined
+    # an operator wrote to her by hand meanwhile: told as a record, and no 「下面是达人最新发来的消息」 with nothing after it
+    told = worker.prm_prompt({"id": 33, "text": "", "meta": {**job["meta"], "history": [
+        {"who": "operator", "text": "[09:10] 老师您好～"}]}}, 1, "小美", "deals/1.md", [], [])
+    assert "<operator_message>\n[09:10] 老师您好～\n</operator_message>" in told
+    assert "下面是达人最新发来的消息" not in told and "<creator_message>\n" not in told
+    plain = worker.prm_prompt({"id": 34, "text": "你好", "meta": {}}, 1, "小美", "deals/1.md", [], [])
+    assert "补发货盘" not in plain
+    for meta in ({"huopan": None}, {"huopan": "yes"}, {"huopan": True}):
+        assert worker.huopan_line(meta) == ""
+        assert worker.prm_prompt({"id": 34, "text": "你好", "meta": meta}, 1, "小美", "deals/1.md", [], []) == plain
+
+
+def test_the_consoles_huopan_runs_through_the_worker_and_waits_for_a_person(worker, bot, fake_claude, tmp_path, workspace):
+    """End to end (the real relay and worker): 「补发货盘」; Claude is told to send the 货盘 again, with no message of hers,
+    and the draft waits in 待审批 tagged so."""
+    asked = bot.prm.deal_action("huopan", {"deal_id": 1})
+    assert asked["ok"] is True
+    run_one(worker, bot, settings(bot, fake_claude, tmp_path, prm_workspace=str(workspace)))
+    [call] = fake_claude.calls()
+    assert HUOPAN_HEAD in call["prompt"] and "<creator_message>" not in call["prompt"]
+    [packet] = bot.prm.store.packets()
+    assert (packet["status"], packet["job_id"], packet["meta"].get("huopan")) == ("pending", asked["job"], True)
+    assert bot.texts == []
+
+
+def test_the_huopan_line_works_on_the_macs_own_python(tmp_path):
+    python = "/usr/bin/python3"
+    if not os.path.exists(python):
+        pytest.skip("no system python3")
+    script = tmp_path / "smoke.py"
+    script.write_text(
+        "import importlib.util, sys\n"
+        f"spec = importlib.util.spec_from_file_location('w', {str(ROOT / 'tools/claude_relay/worker.py')!r})\n"
+        "w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w)\n"
+        "job = {'id': 1, 'text': '', 'meta': {'huopan': {'by': 'console'}}}\n"
+        "p = w.prm_prompt(job, 1, 'x', 'deals/1.md', [], [])\n"
+        "assert w.huopan_line(job['meta']) in p.split('\\n') and '<creator_message>' not in p\n"
+        f"assert w.huopan_line(job['meta']).startswith({HUOPAN_HEAD[:20]!a})\n"
+        "j = w.prm_prompt({'id': 2, 'text': 'hi', 'meta': job['meta']}, 1, 'x', 'deals/1.md', [], [])\n"
+        f"assert {HUOPAN_JOINED[:20]!a} in j and '<creator_message>' in j\n"
+        "assert w.huopan_line({}) == ''\n"
+        "print('ok', sys.version_info[:2])\n", encoding="utf-8")
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), "CLAUDE_RELAY_HOME": str(tmp_path / "home")}
+    run = subprocess.run([python, "-I", str(script)], capture_output=True, text=True, timeout=60, cwd=tmp_path, env=env)
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.startswith("ok")
+
+
 # ── 三方群 (the bot's ``meta.three_party``: the deal's group is made, 2026-10-30) ──
 
 GROUP_LINE = ("这位达人的三方群已经拉好了（10-30 14:30 建的）：案卷「待确认 / 待答复」里的【待拉三方群】改成【已拉三方群】；"

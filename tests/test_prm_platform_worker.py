@@ -586,11 +586,12 @@ def test_the_sample_status_job_runs_on_the_macs_system_python(tmp_path):
     assert run.stdout.startswith("ok")
 
 
-def test_the_bots_round_goes_through_the_real_worker_and_fills_the_deal(worker, bot, jst_mac):  # noqa: F811
+def test_the_bots_round_goes_through_the_real_worker_and_fills_the_deal(worker, bot, jst_mac, monkeypatch):  # noqa: F811
     """端到端（副驾驶模式）：机器人排的一轮由真的 worker 读假的 jst samples，答复回到机器人：运单号填进合作单、
-    发货通知等人审。"""
+    发货通知等人审；同一轮再读一次我们手动建的单（``samples --mine``，问过的单不算进去）。"""
     from test_prm_sample_sync import verified_order
 
+    monkeypatch.setattr(worker.platforms, "SAMPLES_GAP_SEC", 0.01)
     jst_mac.node.rules([rule(["samples"], jst_samples(
         jst_sample_row(JST_ORDER, "SENT", waybills=[("顺丰速运", "SF1234567890", "2026-10-27 18:00:00")])))])
     order = verified_order(bot.prm)
@@ -599,7 +600,10 @@ def test_the_bots_round_goes_through_the_real_worker_and_fills_the_deal(worker, 
     job_id = bot.prm.sweep_sample_status()
     assert job_id is not None
     run_one(worker, bot, jst_mac.settings)
-    assert jst_mac.claude.calls() == [] and len(jst_mac.node.calls()) == 1
+    calls = jst_mac.node.calls()
+    assert jst_mac.claude.calls() == [] and len(calls) == 2
+    assert "--mine" not in calls[0]["argv"] and "--mine" in calls[1]["argv"]
+    assert bot.prm.store.hand_sample(JST_ORDER) is None                          # the bot's own: not one of ours by hand
     deal = bot.prm.store.deal(order["deal_id"])
     assert deal["stage"] == "shipped" and bot.prm.store.latest_shipment(deal["id"])["waybill"] == "SF1234567890"
     [notice] = [p for p in bot.prm.store.packets(("pending",)) if p["kind"] == "shipping_notice"]

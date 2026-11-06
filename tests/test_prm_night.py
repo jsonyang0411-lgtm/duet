@@ -501,7 +501,7 @@ def test_a_flagged_draft_with_files_waits(bot):
 
 
 def test_night_holding_problem():
-    for line in (SAMPLE_LINE, HOLD_LINE, NIGHT_HOLDING_TEXT, "我确认一下马上回你", "好的～晚一点回您", "收到，稍后回复您～"):
+    for line in (SAMPLE_LINE, HOLD_LINE, NIGHT_HOLDING_TEXT, "我确认一下马上回您", "好的～晚一点回您", "收到，稍后回复您～"):
         assert gates.night_holding_ok(line), line
     for line, why in (("明早给您30%", "有数字"), ("〈手机1〉记下啦", "有数字"), ("１０点前回您", "有数字"),
                       ("十一点前回您", "有数量或日期「十一点」"), ("我先拉一个小群，明早聊", "有数量或日期「一个」"),

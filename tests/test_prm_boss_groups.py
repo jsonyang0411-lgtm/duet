@@ -818,7 +818,7 @@ def test_what_the_bot_starts_itself_goes_to_the_group_when_she_has_no_private_ch
     assert bot.prm.snapshot()["pending"][-1]["channel"] == "group"
     bot.prm.decide(notice["id"], "send")
     bot.prm.send_approved()
-    assert bot.texts == [(GROUP, "小美你好～样品已经寄出啦：顺丰 SF1234567890。签收之后跟我说一声哦～")]
+    assert bot.texts == [(GROUP, "老师您好～样品已经寄出啦：顺丰 SF1234567890。签收之后跟我说一声哦～")]
     job_id = bot.prm._dispatch_step(bot.prm.store.deal(deal_id), party, "签收了：开专属佣金", None, True,
                                     bot.clock.now)                     # rule 2: a 专属佣金 step
     step = bot.relay.store.get(job_id)
@@ -1389,7 +1389,7 @@ def test_her_line_in_the_group_starts_no_round_of_holding_replies_in_her_private
     drafted(bot, chat=CREATOR)
     clock.now += 11 * 60
     assert bot.prm.send_holding_replies() == 1
-    assert [t for c, t in bot.texts] == ["收到，我确认一下马上回你"] * 2 and {c for c, _ in bot.texts} == {CREATOR}
+    assert [t for c, t in bot.texts] == ["收到，我确认一下马上回您"] * 2 and {c for c, _ in bot.texts} == {CREATOR}
 
 
 def test_her_private_chat_is_looked_up_quietly_once_a_minute(bot, caplog):
@@ -1869,7 +1869,9 @@ def test_a_group_found_while_her_three_party_group_is_being_made_waits_and_is_lo
         assert taken == 1 and row["state"] == "linked" and bot.prm.is_party_group(GROUP)
     else:
         assert taken == 0 and (row["state"], row["why"]) == ("ignored", bg.HAS_GROUP_WHY)
-        assert not bot.prm.is_party_group(GROUP) and bot.backend.watched == {}
+        # the boss's group is not taken; her own 三方群, made, is read only (2026-11-02: its lines go to her private drafts)
+        ours = bot.prm.store.deal(deal_id)["three_party"].get("chat")
+        assert not bot.prm.is_party_group(GROUP) and set(bot.backend.watched) == ({ours} if ours else set())
 
 
 def test_a_creator_the_boss_introduced_has_his_name_hidden_in_her_new_friend_catch_up(bot):

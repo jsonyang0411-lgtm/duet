@@ -165,7 +165,7 @@ def test_a_holding_reply_goes_through_windows_too(mac, fake):
     mac.prm.send_holding_replies()                  # 发送线程也可能先发了：只发一次
     assert wait_for(lambda: fake.sends)
     [send] = fake.sends
-    assert send["text"] == "收到，我确认一下马上回你"
+    assert send["text"] == "收到，我确认一下马上回您"
     fake.complete(send["send_id"])
     fake.seen(send["send_id"])
     time.sleep(0.5)
@@ -371,7 +371,7 @@ def test_the_sample_order_sync_runs_on_the_mac_side_too(mac, fake):
         job_id = mac.prm.sweep_sample_status()
         assert job_id is not None
         job = mac.relay.next_job(0, ("prm",))
-        assert job["id"] == job_id and job["meta"] == {"op": "sample_status", "orders": [JST_ORDER]}
+        assert job["id"] == job_id and job["meta"] == {"op": "sample_status", "orders": [JST_ORDER], "mine": True}
         result = platforms.sample_result([JST_ORDER], orders={JST_ORDER: answer})
         assert mac.relay.finish(job_id, {"ok": True, "text": json.dumps(result, ensure_ascii=False), "duration_s": 1})
         mac.relay.tick()

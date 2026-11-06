@@ -60,6 +60,14 @@ export const saveDraftNote = (dealId, text) => dealAction({ deal_id: dealId, act
 export const setAutoMode = (on) => post('/api/prm/auto', { on })
 /** The full numbers behind a creator's placeholders; every look is written down (8.2). */
 export const revealNumbers = (partyId) => post('/api/prm/reveal', { party_id: partyId })
+/** 「知道了」 on a line of one of our hand-made 聚水潭 sample orders (POST /api/prm/hand-samples): not shown again. */
+export const handSampleSeen = (orderNo) => post('/api/prm/hand-samples', { order_no: orderNo, action: 'seen' })
+/** A hand-made sample order's line: "寄样单 YP… 已发货：顺丰速运 SF…（小美 · 抖音：没登记的达人）". */
+export function handSampleLine(h) {
+  const who = [h.party_name || h.nickname || '', h.platform_label || ''].filter(Boolean).join(' · ')
+  const what = [h.carrier, h.waybill].filter(Boolean).join(' ')
+  return `寄样单 ${h.order_no} 已发货${what ? `：${what}` : ''}${who || h.why ? `（${[who, h.why].filter(Boolean).join('：')}）` : ''}`
+}
 
 // 加百应达人微信（PRM_FRIEND_ADD，src/prm/friend_adds.py）：一次确认 = 一次好友申请，号码只显示打码的，显示完整 / 复制都记一笔。
 /** POST /api/prm/friend-adds {action, id?, ...}: paste / add / edit / sent_by_phone / sent_already / not_sent / wait_her / drop / link / not_her / link_on_accept / reveal / remark_done. */
@@ -86,12 +94,12 @@ export function remarkLine(r) {
   return `备注：${r.remark}${note}`
 }
 /** A 百应 draft's line of the 加微信 record made from its conversation: "她在这个会话里留了联系方式（微信号 ab****yz）→
- *  「加微信 #12」：已发申请，等她通过（见上面）" ('' without one). */
+ *  「加微信 #12」：已发申请，等她通过（见下面）" ('' without one; the 加微信 cards are below the drafts). */
 export function buyinFriendAddLine(fa) {
   if (!fa) return ''
   const m = fa.masked || {}
   const said = [m.wechat ? `微信号 ${m.wechat}` : '', m.phone ? `手机 ${m.phone}` : ''].filter(Boolean).join('、')
-  return `她在这个会话里留了联系方式${said ? `（${said}）` : ''}→「加微信 #${fa.id}」：${fa.label}${fa.open ? '（见上面）' : ''}`
+  return `她在这个会话里留了联系方式${said ? `（${said}）` : ''}→「加微信 #${fa.id}」：${fa.label}${fa.open ? '（见下面）' : ''}`
 }
 /** "10-29 11:00 发的邀约卡（小达人，4 款，卡上没开专属佣金）" ('' without an invite). */
 export function inviteLine(inv) {

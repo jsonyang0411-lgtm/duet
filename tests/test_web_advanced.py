@@ -194,6 +194,18 @@ class AdvancedPostTests(_TempEnv):
             self.assertFalse(body["ok"])
             self.assertEqual(list(body["errors"]), ["PRM_REPLY_PARTS"], body)
 
+    def test_send_pace_is_shown_after_reply_parts_and_on_by_default(self):
+        """PRM_SEND_PACE (发得慢一点, 2026-11-04): an on/off switch right after PRM_REPLY_PARTS, on by default; a bad value is
+        refused on its own field."""
+        groups = _request("/api/advanced")[1]["groups"]
+        keys = [f["key"] for g in groups for f in g["fields"]]
+        fields = {f["key"]: f for g in groups for f in g["fields"]}
+        self.assertEqual(keys.index("PRM_SEND_PACE"), keys.index("PRM_REPLY_PARTS") + 1)
+        self.assertEqual((fields["PRM_SEND_PACE"]["type"], fields["PRM_SEND_PACE"]["value"]), ("onoff", "on"))
+        status, body = _request("/api/advanced", "POST", {"values": {"PRM_SEND_PACE": "maybe"}})
+        self.assertFalse(body["ok"])
+        self.assertEqual(list(body["errors"]), ["PRM_SEND_PACE"], body)
+
     def test_the_boss_group_settings_are_shown_and_their_errors_land_on_them(self):
         """老板拉的群 (src/prm/boss_groups.py, 2026-10-31): off, 「老板」 and 6 by default; PRM_BOSS_CALL (review 2026-10-31:
         what the Mac is told the boss is called) right after the switch; a bad value is refused on its own field
@@ -235,7 +247,7 @@ class AdvancedPostTests(_TempEnv):
         self.assertNotIn("PRM_FRIEND_ADD", body["errors"])
         status, body = _request("/api/advanced", "POST", {"values": {"PRM_FRIEND_ADD_GREETING": ""}})
         self.assertTrue(body["ok"], body)                                       # (the greeting: empty is its default)
-        self.assertEqual(self.env_values()["PRM_FRIEND_ADD_GREETING"], "您好{昵称}，我是{品牌}，百应上联系您的～")
+        self.assertEqual(self.env_values()["PRM_FRIEND_ADD_GREETING"], "您好，我是{品牌}，百应上联系您的～")
 
     def test_masked_secret_keeps_the_stored_one(self):
         status, body = _request("/api/advanced", "POST", {"values": {"CLAUDE_RELAY_TOKEN": "stor***0000",

@@ -1103,7 +1103,8 @@ def _prm_state_core() -> dict:
                "retention_days": _prm_int_env("PRM_RETENTION_DAYS", 90),
                "catchup_hours": _prm_int_env("PRM_CATCHUP_HOURS", 12), "night": _prm_night_env(auto["on"]),
                "auto_register": _prm_env_on("PRM_AUTO_REGISTER"), "auto_mode": auto,
-               "buyin_sync_min": _prm_int_env("PRM_BUYIN_SYNC_MIN", 0), **settings}
+               "buyin_sync_min": _prm_int_env("PRM_BUYIN_SYNC_MIN", 0),
+               "opening_auto_min": _prm_int_env("PRM_OPENING_AUTO_MIN", 0), **settings}
     stopped["friend_add_status"] = _friend_add_stopped_status(store)
     stopped["three_party"] = _three_party_stopped_status()
     stopped["boss_groups"] = _boss_groups_stopped_status(store)
@@ -1114,7 +1115,7 @@ def _prm_state_core() -> dict:
         return {"ok": True, "running": False, "parties": [], "pending": [], "recent": [], "counts": {}, "gates": [],
                 "platform_alerts": [], "platform_actions": {k: v["label"] for k, v in ACTIONS.items()},
                 "stages": STAGES, "kinds": MESSAGE_KINDS, "modes": MODES, "shipment_states": SHIPMENT_STATES,
-                "friend_adds": [], **stopped}
+                "friend_adds": [], "hand_samples": [], **stopped}
     try:
         return prm_snapshot(store, running=False, retention_days=stopped["retention_days"], extra=stopped)
     finally:
@@ -1188,10 +1189,10 @@ def _prm_friend_adds(data: dict) -> dict:
 
 
 def _prm_deal(data: dict) -> dict:
-    """POST /api/prm/deals {action: stage | adopt | mode | shipment | shipment_status | night_done | opening | group |
-    group_try | group_made | group_none | draft_note, deal_id, ...} (``group*``: 三方群, src/prm/three_party.py;
-    ``draft_note`` {text}: the deal's 起草备注; ``opening``, ``group*`` and ``draft_note`` only while running: a stopped
-    bot refuses them, ``apply_deal_action``)."""
+    """POST /api/prm/deals {action: stage | adopt | mode | shipment | shipment_status | night_done | opening | huopan |
+    group | group_try | group_made | group_none | draft_note, deal_id, ...} (``huopan``: 「补发货盘」; ``group*``: 三方群,
+    src/prm/three_party.py; ``draft_note`` {text}: the deal's 起草备注; ``opening``, ``huopan``, ``group*`` and
+    ``draft_note`` only while running: a stopped bot refuses them, ``apply_deal_action``)."""
     from src.prm.service import apply_deal_action
 
     action = str(data.get("action") or "")
@@ -1223,6 +1224,28 @@ def _prm_auto(data: dict) -> dict:
     store = PrmStore(_prm_db_path())
     try:
         return {"ok": True, "auto_mode": write_auto_mode(store, on, now=time.time())}
+    finally:
+        store.close()
+
+
+def _prm_hand_samples(data: dict) -> dict:
+    """POST /api/prm/hand-samples {"order_no", "action": "seen"}: 「知道了」 on a 「待审批」 line of one of our 聚水潭
+    sample orders made by hand (shipped, its waybill not in any deal: ``PrmService._hand_answer``): not shown again.
+    Running: ``PrmService.hand_sample_seen``; stopped: straight into the database."""
+    if str(data.get("action") or "seen") != "seen":
+        return {"ok": False, "error": "不认识的操作"}
+    number = str(data.get("order_no") or "").strip()
+    if not number:
+        return {"ok": False, "error": "要给出寄样单号"}
+    if _prm is not None:
+        return _prm.hand_sample_seen(number)
+    store = _prm_stopped_store()
+    if store is None:
+        return {"ok": False, "error": "这一行已经不在了"}
+    try:
+        if store.dismiss_hand_sample(number, time.time()):
+            return {"ok": True}
+        return {"ok": False, "error": "这一行已经不在了"}
     finally:
         store.close()
 
@@ -1391,6 +1414,7 @@ _POST_ONLY_PATHS = frozenset({
     "/api/prm/friend-adds",
     "/api/prm/auto",
     "/api/prm/boss-groups/pick", "/api/prm/boss-groups/ignore",
+    "/api/prm/hand-samples",
 })
 
 
@@ -1505,7 +1529,7 @@ class _UIHandler(SimpleHTTPRequestHandler):
                          "/api/relay/cancel",
                          "/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal",
                          "/api/prm/friend-adds", "/api/prm/auto", "/api/wechat-gaps",
-                         "/api/prm/boss-groups/pick", "/api/prm/boss-groups/ignore"):
+                         "/api/prm/boss-groups/pick", "/api/prm/boss-groups/ignore", "/api/prm/hand-samples"):
             self.do_GET()
         else:
             self._method_not_allowed()
@@ -1719,7 +1743,7 @@ class _UIHandler(SimpleHTTPRequestHandler):
             return
         if self.path in ("/api/prm/parties", "/api/prm/packets", "/api/prm/deals", "/api/prm/reveal",
                          "/api/prm/friend-adds", "/api/prm/auto", "/api/prm/boss-groups/pick",
-                         "/api/prm/boss-groups/ignore"):
+                         "/api/prm/boss-groups/ignore", "/api/prm/hand-samples"):
             content_len = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len) if content_len else b"{}"
             try:
@@ -1734,7 +1758,8 @@ class _UIHandler(SimpleHTTPRequestHandler):
                        "/api/prm/deals": _prm_deal, "/api/prm/reveal": _prm_reveal,
                        "/api/prm/friend-adds": _prm_friend_adds, "/api/prm/auto": _prm_auto,
                        "/api/prm/boss-groups/pick": lambda d: _prm_boss_groups(d, "pick"),
-                       "/api/prm/boss-groups/ignore": lambda d: _prm_boss_groups(d, "ignore")}[self.path]
+                       "/api/prm/boss-groups/ignore": lambda d: _prm_boss_groups(d, "ignore"),
+                       "/api/prm/hand-samples": _prm_hand_samples}[self.path]
             try:
                 self.send_json(handler(data))
             except Exception as e:
