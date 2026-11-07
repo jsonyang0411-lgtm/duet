@@ -107,6 +107,9 @@ DEFAULT_RULES = {
     "low_hat_share": 1.0,                                  # 帽子占比低于它的标出来（只是标，不去掉）
     # 专门带自己牌子的不进（用户 2026-10-29）：名字像店铺 / 品牌号，或这次找到的人里好几个号用同一个店名开头（店铺矩阵号）
     "own_brand_words": "女装|男装|童装|服饰|服装|羽绒|皮草|鹅绒|貂|大码|工厂|厂家|源头|档口|批发|尾货|仓储|仓库|老板娘|旗舰|官方|专卖|门店|实体|店|品牌|定制|高定|上新",
+    # 名字里有这些的不按名字算自己牌子（用户 2026-11-07：「设计师集合店」本来就卖好几个牌子，被「店」挡掉了好几天，
+    # 她自己找上门来）；店铺矩阵号照旧看
+    "own_brand_except": "集合店|买手店",
     "matrix_min": 2,
     # 可能骗样品自己用的不进（用户 2026-10-29）：带货等级低、卖得少、销售额不公开又等级不高、粉丝多卖得少
     "min_level": 2,                                        # 带货等级低于 LV2
@@ -283,10 +286,11 @@ def load_config(path: Optional[str]) -> dict:
     rules = dict(DEFAULT_RULES)
     rules.update(raw.get("rules") or {})
     rules["fans_price_min"] = _number(rules, "fans_price_min", 0, 0, 500)   # 档位最高「500元以上」：再高谁都进不来
-    try:
-        re.compile(str(rules["own_brand_words"] or ""))
-    except re.error as e:
-        raise ToolError(f"配置 rules.own_brand_words 不是正则表达式：{e}", EXIT_USAGE)
+    for key in ("own_brand_words", "own_brand_except"):
+        try:
+            re.compile(str(rules[key] or ""))
+        except re.error as e:
+            raise ToolError(f"配置 rules.{key} 不是正则表达式：{e}", EXIT_USAGE)
     for key in ("drop_ids", "keep_ids"):
         ids = rules.get(key)
         if not isinstance(ids, list) or not all(isinstance(x, str) and AWEME_ID.match(x) for x in ids):
@@ -604,10 +608,11 @@ def name_stem(nickname: str) -> str:
 
 
 def own_brand_reason(view: dict, rules: dict, stems: Dict[str, int]) -> Optional[str]:
-    """专门带自己牌子的多半不接别人的货：名字像店铺 / 品牌号，或店铺矩阵号（同一个店名开头的号这次找到 ≥ matrix_min 个）。"""
-    words = str(rules["own_brand_words"] or "")
+    """专门带自己牌子的多半不接别人的货：名字像店铺 / 品牌号（名字里有 own_brand_except 的不算，比如「集合店」），或店铺
+    矩阵号（同一个店名开头的号这次找到 ≥ matrix_min 个）。"""
+    words, unless = str(rules["own_brand_words"] or ""), str(rules["own_brand_except"] or "")
     hit = re.search(words, view["nickname"]) if words else None
-    if hit:
+    if hit and not (unless and re.search(unless, view["nickname"])):
         return f"名字像店铺 / 品牌号（「{hit.group(0)}」）：多半专门带自己的牌子"
     stem = name_stem(view["nickname"])
     if stem and stems.get(stem, 0) >= rules["matrix_min"]:

@@ -352,6 +352,8 @@ def test_plan_drops_creators_who_sell_their_own_brand_and_likely_sample_takers(e
     env.scenario(scenario(missing=[], status={}, creators=[
         row("dy_ok", 80000),
         row("dy_shop", 60000, nick="小美女装（官方）"),                       # a shop's own account by its name
+        row("dy_multi", 60000, nick="测试设计师品牌集合店"),                  # 集合店: many brands, not its own (2026-11-07)
+        row("dy_buyer", 60000, nick="测试买手店（主播）"),                   # 买手店: the same
         row("dy_mx_a", 40000, nick="小鹿（日常穿搭）"), row("dy_mx_b", 30000, nick="小鹿·通勤"),  # one shop's accounts
         row("dy_mx_c", 40000, nick="Mia(轻奢极简)"), row("dy_mx_d", 30000, nick="MIA-精选", sex="女性 40.00%"),  # the same, any case
         row("dy_lv1", 40000, level=1),                                    # sells little: 带货等级 LV1
@@ -369,7 +371,7 @@ def test_plan_drops_creators_who_sell_their_own_brand_and_likely_sample_takers(e
     assert code == 0, out
     plan = json.loads(Path(out["files"]["json"]).read_text(encoding="utf-8"))
     by = {c["aweme_id"]: c for c in plan["creators"]}
-    assert set(by) == {"dy_ok", "dy_hidden3", "dy_fanok", "dy_kept", "dy_ownhat", "dy_onecat"}
+    assert set(by) == {"dy_ok", "dy_multi", "dy_buyer", "dy_hidden3", "dy_fanok", "dy_kept", "dy_ownhat", "dy_onecat"}
     gone = {c["aweme_id"]: c for c in plan["excluded"]}
     assert {k for k, c in gone.items() if c.get("group") == "own_brand"} == {"dy_shop", "dy_mx_a", "dy_mx_b", "dy_mx_c"}
     assert gone["dy_mx_d"]["reason"].startswith("女性粉丝 40.0%"), "out for its fans, but still counted for the shop's name"
@@ -582,7 +584,8 @@ def test_config_is_checked_before_anything_runs(env):
                       ({"templates": {"mid": "顺丰包邮"}}, "快递公司"), ({"rights": ["free-sample", "nope"]}, "rights"),
                       ({"wait_between": [5, 8]}, "wait_between"), ({"gap_seconds": 1}, "gap_seconds"), ({"brand": ""}, "brand"),
                       ({"min_stock": 10, "products": [{"id": P_BERET, "name": "测试贝雷帽", "price": 339}]}, "styles"),
-                      ({"rules": {"own_brand_words": "女装|(["}}, "own_brand_words"), ({"rules": {"drop_ids": ["bad id!"]}}, "drop_ids"),
+                      ({"rules": {"own_brand_words": "女装|(["}}, "own_brand_words"), ({"rules": {"own_brand_except": "集合店|(["}}, "own_brand_except"),
+                      ({"rules": {"drop_ids": ["bad id!"]}}, "drop_ids"),
                       ({"find": {**tool.DEFAULT_FIND, "queries": [{"fans_min": 5000, "level_min": 9}]}}, "level_min"),
                       ({"products": [{"id": f"30000000000000002{i:02d}", "name": f"款{i}", "price": 200} for i in range(6)]}, "5 款")):
         cfg = env.write_config(**over)
