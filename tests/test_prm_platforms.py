@@ -1356,8 +1356,9 @@ def test_sample_statuses_reads_each_order_without_the_receiver_or_the_creator(no
     assert sent["sent_at"] == 1793095200.0 and sent["signed_at"] is None and sent["reason"] == ""
     assert out["orders"][ORDER2]["ships"][0]["sent_at"] == 1793095200.0                     # milliseconds
     assert out["orders"][ORDER2]["signed_at"] == 1793237400.0
-    assert out["orders"][ORDER3] == {"status": "DELETED", "ships": [], "sent_at": None, "signed_at": None,
-                                     "reason": "地址不全，重新提交"}
+    assert out["orders"][ORDER3] == {"status": "DELETED", "ships": [], "packages": 0, "unshipped": 0, "sent_at": None,
+                                     "signed_at": None, "reason": "地址不全，重新提交"}
+    assert (sent["packages"], sent["unshipped"]) == (1, 0)                        # one package, its waybill there
     text = json.dumps(out, ensure_ascii=False)
     for kept_out in ("测试达人", "test_daren_01", "测试抖店", "T100", "红色"):
         assert kept_out not in text
@@ -1449,8 +1450,10 @@ def test_the_bot_keeps_only_what_it_asked_about_in_the_shape_it_uses():
     assert set(out["orders"]) == {JST_ORDER, ORDER2}
     assert out["orders"][JST_ORDER] == {"status": "SENT", "ships": [
         {"carrier": "顺丰 速运", "waybill": "SF1234567890", "sent_at": 1793095200.0}],
+        "packages": None, "unshipped": None,                                      # (an answer without the counts)
         "sent_at": None, "signed_at": None, "reason": "x" * 200 + "…"}
-    assert out["orders"][ORDER2] == {"status": "", "ships": [], "sent_at": None, "signed_at": None, "reason": ""}
+    assert out["orders"][ORDER2] == {"status": "", "ships": [], "packages": None, "unshipped": None, "sent_at": None,
+                                     "signed_at": None, "reason": ""}
     assert out["missing"] == [ORDER3] and out["not_asked"] == []                   # (answered after all)
     assert out["stopped"] == {"verdict": "error", "exit_code": None, "message": "m" * 300 + "…"}
     for bad in ("not a dict", {"op": "platform_execute"}, None):

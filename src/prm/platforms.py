@@ -3079,6 +3079,7 @@ MAX_MINE_ORDERS = 100       # of ours one answer gives at most
 SAMPLE_PLATFORMS = ("DY", "XHS", "KS", "WXSPH")               # 聚水潭's platforms of a creator
 SAMPLE_NICK_CHARS = 40      # a creator's nickname as the bot keeps it
 MAX_SAMPLE_SHIPS = 5        # waybills kept of one order
+SAMPLE_PACKAGES_MAX = 50    # packages (ERP orders) of one order counted at most (an order has 50 SKUs at most)
 SAMPLE_REASON_CHARS = 200
 _WAYBILL = re.compile(r"^[A-Za-z0-9-]{6,30}$")              # a waybill as deals.py takes one
 _SAMPLE_STATUS = re.compile(r"^[A-Z][A-Z_]{0,29}$")
@@ -3131,30 +3132,56 @@ def _carrier(value) -> str:
 
 def sample_info(row) -> Optional[dict]:
     """What the bot needs of one row of `jst samples` (the CLI's projectSample): ``{"order_no", "status", "ships":
-    [{"carrier", "waybill", "sent_at"}], "sent_at", "signed_at", "reason"}``, the waybills that look like one, each
-    once, the earliest sent first; None for a row without an order number.  The creator, the products and the shop
-    of the row are left out."""
+    [{"carrier", "waybill", "sent_at"}], "packages", "unshipped", "sent_at", "signed_at", "reason"}``, the waybills
+    that look like one, each once, the earliest sent first; ``packages``: how many ERP orders (packages) the order
+    went to the warehouse as, ``unshipped``: how many of them have no waybill yet (2026-11-06: the warehouse sends
+    what is in stock first, the shipping notice waits for every package: ``sample_split``); None for a row without
+    an order number.  The creator, the products and the shop of the row are left out."""
     if not isinstance(row, dict):
         return None
     number = str(row.get("orderNo") or "").strip()
     if not _ORDER_NO.match(number):
         return None
     status = str(row.get("status") or "").strip().upper()
-    ships, seen = [], set()
+    ships, seen, packages, unshipped = [], set(), 0, 0
     for erp in row.get("erpOrders") if isinstance(row.get("erpOrders"), list) else []:
         if not isinstance(erp, dict):
             continue
+        packages += 1
         waybill = str(erp.get("logisticsNo") or "").strip()
-        if not _WAYBILL.match(waybill) or waybill in seen:
+        if not _WAYBILL.match(waybill):
+            unshipped += 1
+            continue
+        if waybill in seen:
             continue
         seen.add(waybill)
         ships.append({"carrier": _carrier(erp.get("logisticsCompany")), "waybill": waybill,
                       "sent_at": jst_time(erp.get("sendTime"))})
     ships.sort(key=lambda s: (s["sent_at"] is None, s["sent_at"] or 0))
     return {"order_no": number, "status": status if _SAMPLE_STATUS.match(status) else "",
-            "ships": ships[:MAX_SAMPLE_SHIPS], "sent_at": jst_time(row.get("sendTime")),
+            "ships": ships[:MAX_SAMPLE_SHIPS], "packages": min(packages, SAMPLE_PACKAGES_MAX),
+            "unshipped": min(unshipped, SAMPLE_PACKAGES_MAX), "sent_at": jst_time(row.get("sendTime")),
             "signed_at": jst_time(row.get("signTime")),
             "reason": _clip(row.get("rejectReason") or "", SAMPLE_REASON_CHARS)}
+
+
+def sample_split(info) -> Optional[tuple]:
+    """``(out, of)`` when only part of a sample order went out: the warehouse sent it as ``of`` packages (ERP orders)
+    and ``out`` of them have a waybill, the others none yet (``check_sample_result``'s ``packages`` /
+    ``unshipped``); None when it is whole: every package has a waybill, none has, 聚水潭 says it is signed for (or
+    deleted), or an old worker's answer says nothing of packages.  The creator's shipping notice waits for every
+    package (2026-11-06, the user: 「等发货单全了再说」)."""
+    if not isinstance(info, dict) or not info.get("ships") or info.get("status") in ("SIGNED", "DELETED"):
+        return None
+    packages, unshipped = info.get("packages"), info.get("unshipped")
+    if not (_is_count(packages) and _is_count(unshipped) and 0 < unshipped < packages):
+        return None
+    return packages - unshipped, packages
+
+
+def _is_count(value) -> bool:
+    """A number of packages as an answer may give one (``SAMPLE_PACKAGES_MAX`` at most)."""
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= SAMPLE_PACKAGES_MAX
 
 
 def samples_argv(cfg: dict, order_nos: list) -> list:
@@ -3303,7 +3330,9 @@ def sample_statuses(cfg: dict, order_nos, *, heartbeat=None, sleep: Optional[Cal
 def check_sample_result(value, asked=None) -> dict:
     """The Mac's answer to a sample-status job, checked and cut to what the bot uses (``ActionError`` when it is
     none): only order numbers it asked about (``asked``), statuses as words, waybills as deals.py takes them, each
-    once, times as numbers, reasons short; ``stopped`` with a known verdict (else ``error``)."""
+    once, times as numbers, reasons short, ``packages`` / ``unshipped`` as counts (None both, from an old worker or
+    when they make no sense: the order is taken whole, ``sample_split``); ``stopped`` with a known verdict (else
+    ``error``)."""
     if not isinstance(value, dict) or value.get("op") != "sample_status":
         raise _err("bad_result", "寄样单状态的结果格式不对")
     wanted = None if asked is None else {str(n) for n in asked}
@@ -3323,7 +3352,11 @@ def check_sample_result(value, asked=None) -> dict:
             if not _WAYBILL.match(waybill) or any(s["waybill"] == waybill for s in ships):
                 continue
             ships.append({"carrier": _carrier(ship.get("carrier")), "waybill": waybill, "sent_at": when(ship.get("sent_at"))})
+        packages, unshipped = info.get("packages"), info.get("unshipped")
+        if not (_is_count(packages) and _is_count(unshipped) and unshipped <= packages):
+            packages = unshipped = None                # an old worker (or nonsense): the order is taken whole
         return {"status": status if _SAMPLE_STATUS.match(status) else "", "ships": ships[:MAX_SAMPLE_SHIPS],
+                "packages": packages, "unshipped": unshipped,
                 "sent_at": when(info.get("sent_at")), "signed_at": when(info.get("signed_at")),
                 "reason": _clip(info.get("reason") or "", SAMPLE_REASON_CHARS)}
 

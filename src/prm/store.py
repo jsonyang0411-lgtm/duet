@@ -1431,13 +1431,13 @@ class PrmStore:
 
     def hand_samples(self, *, state: Optional[str] = None, shown: bool = False, limit: int = 200) -> list[dict]:
         """Our hand-made orders watched, the newest first: of one ``state``; ``shown``: only the 「待审批」 lines not seen
-        to yet (``listed``, not dismissed)."""
+        to yet (``listed``, or ``split``: only part of it went out, 2026-11-06; not dismissed)."""
         sql, where, args = "SELECT * FROM hand_samples", [], []
         if state is not None:
             where.append("state = ?")
             args.append(state)
         if shown:
-            where.append("state = 'listed' AND dismissed_at IS NULL")
+            where.append("state IN ('listed', 'split') AND dismissed_at IS NULL")
         if where:
             sql += " WHERE " + " AND ".join(where)
         with self._lock:
@@ -1449,7 +1449,8 @@ class PrmStore:
         now = time.time() if now is None else now
         with self._lock:
             cur = self._conn.execute("UPDATE hand_samples SET dismissed_at = ?, updated_at = ? WHERE order_no = ?"
-                                     " AND state = 'listed' AND dismissed_at IS NULL", (now, now, str(order_no)))
+                                     " AND state IN ('listed', 'split') AND dismissed_at IS NULL",
+                                     (now, now, str(order_no)))
             self._conn.commit()
             return cur.rowcount == 1
 

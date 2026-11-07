@@ -240,6 +240,11 @@ HAND_KEEP_DAYS = 30                         # a hand-made order first seen this 
 HAND_LINES = 20                             # 「待审批」 lines of hand-made orders shown at most (the newest)
 HAND_ERRORS = 2                             # rounds in a row the hand-made orders could not be read before the page says so
 HAND_WAYBILL_WAIT_SEC = 2 * 3600            # sent in 聚水潭 without a waybill this long (its time): the page says so
+# 拆成几个包裹的寄样单（2026-11-06，用户：「等发货单全了再说」）：仓库先发有货的那一包，别的等到货；每个包裹都有了运单号
+# 才填进合作单、出发货通知（通知里写全几个运单号）。只发了一部分时机器人自己建的单在合作单上留一条提醒，手动建的单什么都
+# 不出；第一包发出 PRM_SAMPLE_WAYBILL_DAYS 天了别的还没运单号，合作单的提醒（手动建的单：「待审批」顶上一行，``HAND_SPLIT``）
+# 改成请人去聚水潭看一下，要先通知达人就在合作单上「填运单号」。
+HAND_SPLIT = "split"                        # a hand-made order's line: only part of it went out (the rest acts)
 HAND_PROBLEMS = {
     "old_worker": "Mac 上的 worker 还是旧版本，查不了手动建的寄样单：在 Mac 上重启 worker（手动建的单发货了先不会提醒）",
     "unavailable": "查不了手动建的寄样单（{message}）：手动建的单发货了先不会提醒",
@@ -680,6 +685,13 @@ def _event_time(ev: dict) -> float:
         return float((ev.get("detail") or {}).get("at") or ev["at"])
     except (TypeError, ValueError):
         return float(ev["at"])
+
+
+def _more_waybills(packet: dict) -> list:
+    """The other packages' waybills a shipping notice names besides the deal's own (``deals.add_shipment``'s
+    ``more_waybills``, an order the warehouse sent in several, 2026-11-06): the notice may carry them too."""
+    more = (packet.get("meta") or {}).get("more_waybills")
+    return [str(m["waybill"]) for m in more if isinstance(m, dict) and m.get("waybill")] if isinstance(more, list) else []
 
 
 def _float(value) -> Optional[float]:
@@ -3475,10 +3487,11 @@ class PrmService:
                 logger.exception("PRM: the WeChat backend could not reload its private chats")
 
     def deal_action(self, action: str, data: dict, *, actor: str = "console", review: bool = False,
-                    notice: bool = True, note: Optional[dict] = None) -> dict:
+                    notice: bool = True, note: Optional[dict] = None, more=()) -> dict:
         """Stage / adopt / mode / shipment / shipment_status from the console (deals.py).  The 聚水潭 sync
         (``_sample_answer``) takes the same way with ``actor`` system, ``review`` (its shipping notice always waits
-        for a person), ``notice`` (none for an order signed for already) and ``note`` (which order, in the events).
+        for a person), ``notice`` (none for an order signed for already), ``note`` (which order, in the events) and
+        ``more`` (the other packages' waybills of an order sent in several: named in the notice, never from the page).
         An operator's change of the deal's stage or shipment sees to a deleted order's notice.  ``night_done``
         (「已处理」 on a holding line the night window sent) only drops that notice; ``opening`` (「写开场白」) asks
         for one 开场白 draft (``ask_opening``); ``huopan`` (「补发货盘」) one draft that sends her the 货盘 again
@@ -3511,7 +3524,7 @@ class PrmService:
         except (TypeError, ValueError):
             before = None
         result = apply_deal_action(self._store, action, data, now=now, takeover_sec=self._takeover_sec, actor=actor,
-                                   review=review, notice=notice, note=note)
+                                   review=review, notice=notice, note=note, more=more)
         if result.get("ok") and action == "shipment" and result.get("packet"):
             self._aim(self._store.packet(int(result["packet"])))   # 老板拉的群: the shipping notice goes where she is
         if result.get("ok"):
@@ -3835,7 +3848,7 @@ class PrmService:
             return {"ok": False, "error": f"草稿里有对不上的占位符：{'、'.join(unknown)}"}
         if packet["kind"] == "shipping_notice":
             waybill = self._waybill(packet)
-            if not gates.waybill_ok(final, waybill):
+            if not gates.waybill_ok(final, waybill, _more_waybills(packet)):
                 return {"ok": False, "error": f"发货通知里的单号和系统记录对不上（系统记录：{waybill or '还没有运单号'}）"}
         if self._send is None:
             return {"ok": False, "error": "机器人没有连着微信，现在不能发送"}
@@ -4479,7 +4492,9 @@ class PrmService:
         waybill went into her deal, or was there already) or ``listed`` (a 「待审批」 line, ``why``).  Sent in
         聚水潭 without a waybill (its list may give the waybill a little later): still waiting, a line after
         HAND_WAYBILL_WAIT_SEC from its send time (the shipping notice needs one); when the waybill comes after all, it
-        is acted on then (a line seen to already comes back with the waybill)."""
+        is acted on then (a line seen to already comes back with the waybill).  Only part of it went out
+        (``platforms.sample_split``): nothing yet, a line after PRM_SAMPLE_WAYBILL_DAYS (``_hand_split``); acted on
+        once the rest has waybills too (or 聚水潭 says it is signed for)."""
         if self._store.sample_order(number) is not None:
             return                                     # the bot's own order: its sync has it
         applied = info.get("applied_at")
@@ -4489,6 +4504,7 @@ class PrmService:
         ships = info.get("ships") or []
         ship = ships[0] if ships else None
         shipped = ship is not None or info.get("status") in ("SENT", "SIGNED")
+        split = platforms.sample_split(info)
         row = self._store.hand_sample(number)
         if row is None:
             self._store.add_hand_sample(number, platform=daren.get("platform", ""), account=daren.get("platform_no", ""),
@@ -4499,7 +4515,9 @@ class PrmService:
             if row is None or row["state"] != "waiting":
                 return
         late_bill = row["state"] == "listed" and not row["waybill"] and ship is not None   # "没给运单号", then one came
-        if row["state"] != "waiting" and not late_bill:
+        if row["state"] == HAND_SPLIT and split is None:
+            late_bill = True                           # its line said only part went out; the rest has now
+        if row["state"] not in ("waiting", HAND_SPLIT) and not late_bill:
             return                                     # acted on once (or shipped before we looked)
         if not shipped:
             if info.get("status") and info["status"] != row["status"]:
@@ -4516,24 +4534,54 @@ class PrmService:
                                            why="聚水潭显示已发货，但没给运单号：请到聚水潭寄样管理看运单号", **fields)
             logger.info("PRM: hand-made sample order %s sent without a waybill: the 待审批 page says so", number)
             return
+        if split is not None:
+            self._hand_split(number, row, ships, split, fields, now)
+            return
         fields.update(carrier=ship["carrier"], waybill=ship["waybill"],
                       sent_at=ship.get("sent_at") or info.get("sent_at") or row["sent_at"] or now)
         if late_bill:
             fields["dismissed_at"] = None              # the waybill is news: its line comes back if it is a line
-        state, why, party, deal = self._hand_place(number, info, daren, ship, index, applied, now)
+        state, why, party, deal = self._hand_place(number, info, daren, ships, index, applied, now)
         self._store.update_hand_sample(number, now, state=state, why=why,
                                        party_id=party["id"] if party else None, deal_id=deal["id"] if deal else None,
                                        **fields)
         logger.info("PRM: hand-made sample order %s shipped (%s): %s", number, ship["waybill"],
                     f"waybill into deal {deal['id']}" if state == "filled" else f"listed on 待审批 ({why})")
 
-    def _hand_place(self, number: str, info: dict, daren: dict, ship: dict, index: dict, applied, now: float) -> tuple:
+    def _hand_split(self, number: str, row: dict, ships: list, split: tuple, fields: dict, now: float) -> None:
+        """A hand-made order only part of which went out (``platforms.sample_split``, ``(out, of)``): nothing goes
+        into her deal and no line is shown yet; when the first package went is kept (``sent_at``: its time in
+        聚水潭, else now); PRM_SAMPLE_WAYBILL_DAYS after it a 「待审批」 line (``HAND_SPLIT``, the first waybill, ``why``
+        says how many went and to look in 聚水潭) until 「知道了」; the rest going out later still acts on it."""
+        out, of = split
+        went = row["sent_at"] or ships[0].get("sent_at") or now
+        if now - float(went) < self._waybill_days * 86400:
+            if row["sent_at"] is None or fields.get("status") != row["status"]:
+                self._store.update_hand_sample(number, now, sent_at=went, **fields)
+            return
+        bills = "、".join(f"{s['carrier'] or '快递'} {s['waybill']}" for s in ships)
+        why = (f"拆成了 {of} 个包裹，{int((now - float(went)) // 86400)} 天了只发出 {out} 个（{bills}），另外的还没有运单号："
+               "请到聚水潭寄样管理看一下；要先给达人发货通知，就在她的合作单上填运单号")
+        if row["state"] == HAND_SPLIT and row["why"] == why and fields.get("status") == row["status"]:
+            return                                     # nothing new to say (the line keeps its place)
+        first = row["state"] != HAND_SPLIT
+        self._store.update_hand_sample(number, now, state=HAND_SPLIT, why=why, carrier=ships[0]["carrier"],
+                                       waybill=ships[0]["waybill"], sent_at=went,
+                                       **({"dismissed_at": None} if first else {}), **fields)
+        if first:
+            logger.info("PRM: hand-made sample order %s: %d of %d packages out for %d days: the 待审批 page says so",
+                        number, out, of, self._waybill_days)
+
+    def _hand_place(self, number: str, info: dict, daren: dict, ships: list, index: dict, applied,
+                    now: float) -> tuple:
         """Where a shipped hand-made order's waybill goes: ``(state, why, party, deal)``.  Her platform account
         (``_hand_index``) fits exactly one registered creator whose deal is still before the sample is signed for
         (``deals.BEFORE_DELIVERY``): into her deal the console's way (``deal_action`` ``shipment``, actor system,
-        ``review``: the shipping notice waits for a person; none when 聚水潭 says signed for already), or nothing when
-        the deal has this waybill since the order was made; a different one there, the deal past the sample, two
-        creators or none: a line (``listed``) saying so.  Never marks the deal 已签收, never a 专属佣金."""
+        ``review``: the shipping notice waits for a person, naming every package's waybill; none when 聚水潭 says
+        signed for already), or nothing when the deal has this waybill since the order was made; a different one
+        there, the deal past the sample, two creators or none: a line (``listed``) saying so.  Never marks the deal
+        已签收, never a 专属佣金."""
+        ship = ships[0]
         platform, account = daren.get("platform") or "", str(daren.get("platform_no") or "")
         wxids = set(index.get("keys", {}).get((platform, account.lower()), ())) if account else set()
         if not wxids:
@@ -4554,7 +4602,8 @@ class PrmService:
         result = self.deal_action("shipment", {"deal_id": deal["id"], "carrier": ship["carrier"] or "快递",
                                                "waybill": ship["waybill"]},
                                   actor="system", review=True, notice=info.get("status") != "SIGNED",
-                                  note={"source": "jst", "order": number, "hand": True})
+                                  note={"source": "jst", "order": number, "hand": True},
+                                  more=[(s["carrier"] or "快递", s["waybill"]) for s in ships[1:]])
         if not result.get("ok"):
             why = " ".join(str(result.get("error") or "没说原因").split())[:80]
             return "listed", f"运单号没能填进 {party['name']} 的合作单（{why}）", party, deal
@@ -4634,6 +4683,7 @@ class PrmService:
         status = info["status"] if info["status"] and rank >= before else row["status"]
         ships = info["ships"]
         ship = ships[0] if ships else None
+        split = platforms.sample_split({**info, "status": status})     # only part of it went out: wait for the rest
         made = float(row["made_at"])
         fields = {"status": status, "checked_at": now, "misses": 0, "reason": info["reason"]}
         if ship:
@@ -4675,10 +4725,13 @@ class PrmService:
             elif not latest:
                 notes.append(f"聚水潭寄样单 {number} 有了运单号 {ship['carrier'] or '快递'} {ship['waybill']}，但它不是这张合作单"
                              "最新的寄样单，系统没有填进合作单")
+            elif deal["stage"] in deals.BEFORE_DELIVERY and split is not None:
+                notes.append(self._split_note(number, ships, split, applied, now))
             elif deal["stage"] in deals.BEFORE_DELIVERY:
-                filled = self._sample_shipment(deal, number, ship, signed=status == "SIGNED")
+                filled = self._sample_shipment(deal, number, ships, signed=status == "SIGNED")
                 if filled is not None:
                     applied.update(waybill=ship["waybill"], shipment=filled["id"])
+                    applied.pop("split_since", None)
                     deal = self._store.deal(deal["id"]) or deal
             if len(ships) > 1:
                 notes.append(f"聚水潭寄样单 {number} 有 {len(ships)} 个运单号（"
@@ -4725,17 +4778,37 @@ class PrmService:
             return [f"聚水潭寄样单 {number} 发货 {int((now - sent) // 86400)} 天了还没签收（{which}）：请查一下物流"], ask
         return [], ask
 
+    def _split_note(self, number: str, ships: list, split: tuple, applied: dict, now: float) -> str:
+        """What the deal says of an order only part of which went out (``platforms.sample_split``, ``(out, of)``):
+        nothing goes into the deal and no shipping notice is drafted until every package has a waybill; when the
+        first was seen so is kept in the order's ``applied`` (``split_since``, so a restart keeps the count); from
+        PRM_SAMPLE_WAYBILL_DAYS after it the note asks for a look in 聚水潭 (a waybill typed on the deal still sends a
+        notice the console's way)."""
+        out, of = split
+        since = _float(applied.get("split_since"))
+        if since is None:
+            since = applied["split_since"] = now
+        bills = "、".join(f"{s['carrier'] or '快递'} {s['waybill']}" for s in ships)
+        if now - since >= self._waybill_days * 86400:
+            return (f"聚水潭寄样单 {number} 拆成了 {of} 个包裹，{int((now - since) // 86400)} 天了只发出 {out} 个（{bills}），"
+                    "另外的还没有运单号：请到聚水潭寄样管理看一下；要先给达人发货通知，就在合作单上填运单号")
+        return f"聚水潭寄样单 {number} 拆成了 {of} 个包裹，先发了 {out} 个（{bills}）：等全部发出，系统再给达人发货通知"
+
     def _sample_shipment_of(self, deal_id: int, made: float) -> Optional[dict]:
         """The deal's newest shipment since the order was made (one of an earlier order is not this one's)."""
         return next((s for s in self._store.shipments(deal_id) if float(s["created_at"]) >= made - 1), None)
 
-    def _sample_shipment(self, deal: dict, number: str, ship: dict, *, signed: bool) -> Optional[dict]:
+    def _sample_shipment(self, deal: dict, number: str, ships: list, *, signed: bool) -> Optional[dict]:
         """The order's waybill into the deal the console's way (``deal_action`` ``shipment``, actor system): the
         deal goes to 已寄出 and a shipping notice from the template waits for a person whatever its kind's gate
-        (``review``); none when 聚水潭 says it is signed for already.  The new shipment, or None."""
+        (``review``); none when 聚水潭 says it is signed for already.  Several packages: the deal keeps the first
+        waybill, the notice names every one (``more``).  The new shipment, or None."""
+        ship = ships[0]
         result = self.deal_action("shipment", {"deal_id": deal["id"], "carrier": ship["carrier"] or "快递",
                                                "waybill": ship["waybill"]},
-                                  actor="system", review=True, notice=not signed, note={"source": "jst", "order": number})
+                                  actor="system", review=True, notice=not signed,
+                                  note={"source": "jst", "order": number},
+                                  more=[(s["carrier"] or "快递", s["waybill"]) for s in ships[1:]])
         if not result.get("ok"):
             logger.warning("PRM: sample order %s: its waybill could not go into deal %d (%s)", number, deal["id"],
                            result.get("error"))
@@ -5650,7 +5723,8 @@ class PrmService:
         problem = ""
         if pii.unknown_tokens(final, tokens):
             problem = "草稿里有对不上的占位符（号码可能已按规定清除）"
-        elif packet["kind"] == "shipping_notice" and not gates.waybill_ok(final, self._waybill(packet)):
+        elif packet["kind"] == "shipping_notice" and not gates.waybill_ok(final, self._waybill(packet),
+                                                                          _more_waybills(packet)):
             problem = "发货通知里的单号和系统记录对不上"
         # The text as PRM_REPLY_PARTS messages (``reply_parts``), each noted before it goes, a typing pause apart; a part
         # that fails ends it (never sent twice), and says how many went out.
@@ -6289,11 +6363,11 @@ def _job_error(job: dict) -> str:
 
 def apply_deal_action(store: PrmStore, action: str, data: dict, *, now: float, takeover_sec: float,
                       actor: str = "console", review: bool = False, notice: bool = True,
-                      note: Optional[dict] = None) -> dict:
+                      note: Optional[dict] = None, more=()) -> dict:
     """The console's deal actions (also when the bot is stopped: straight on the database); the 聚水潭 sync's too
-    (``actor`` system, ``review`` / ``notice`` / ``note``: ``deals.add_shipment``).  ``night_done`` {deal_id, packet}:
-    「已处理」 on a holding line the night window sent (``night_done``).  ``opening``, the 三方群 ones and ``draft_note`` are
-    the running bot's only (``PrmService.deal_action``): a stopped one says so."""
+    (``actor`` system, ``review`` / ``notice`` / ``note`` / ``more``: ``deals.add_shipment``).  ``night_done``
+    {deal_id, packet}: 「已处理」 on a holding line the night window sent (``night_done``).  ``opening``, the 三方群 ones
+    and ``draft_note`` are the running bot's only (``PrmService.deal_action``): a stopped one says so."""
     try:
         deal_id = data.get("deal_id")
         if action == "stage":
@@ -6304,7 +6378,7 @@ def apply_deal_action(store: PrmStore, action: str, data: dict, *, now: float, t
             deals.set_mode(store, deal_id, str(data.get("mode") or ""), now=now, takeover_sec=takeover_sec, actor=actor)
         elif action == "shipment":
             _, packet_id = deals.add_shipment(store, deal_id, data.get("carrier", ""), data.get("waybill", ""), now=now,
-                                              actor=actor, review=review, notice=notice, note=note)
+                                              actor=actor, review=review, notice=notice, note=note, more=more)
             return {"ok": True, "packet": packet_id}
         elif action == "shipment_status":
             deals.set_shipment_status(store, deal_id, str(data.get("status") or ""), now=now, actor=actor, note=note)
