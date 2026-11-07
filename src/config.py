@@ -363,8 +363,8 @@ class BotConfig:
     # 签收后问一句 (2026-11-07, the user: 「可以加」): an order the sync above sees signed for in 聚水潭 (the bot's own, or one
     # of ours made by hand whose waybill went into her deal) and she has not said she got it: one draft job asks her how
     # the samples suit her (kb 场景 D2, 「聚水潭显示签收」), only inside PRM_SIGNED_HELLO_HOURS by this PC's clock (a
-    # signature outside waits for them).  Its draft goes like any reply draft: 待审批 by day, the night window's and
-    # 自动模式's rules.  "off" (the default): nothing of it.
+    # signature outside waits for them).  By day its draft always waits in 待审批, whatever its kind's gate; in the
+    # night window or 自动模式 the night's rules judge it, like a reply draft's.  "off" (the default): nothing of it.
     prm_signed_hello: str = "off"
     prm_signed_hello_hours: str = "10:00-20:00"
     # The 抖音百应 private messages (精选联盟私信) of the creators invited by 邀约带货: asked of the Mac once this many

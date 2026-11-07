@@ -68,8 +68,8 @@ outdates it like any reply draft (the next job hears it was not sent), and no ho
 hers that sends her the kb's 货盘 again (``meta.huopan``; the worker's ``huopan_line``), always reviewed.
 签收后问一句 (PRM_SIGNED_HELLO, 2026-11-07, default off): a sample order the 聚水潭 sync sees signed for, she has not
 said she got it: one job with no line of hers asks her how the samples suit her (``meta.signed``; the worker's
-``signed_line``, kb 场景 D2), inside PRM_SIGNED_HELLO_HOURS only, once per order; unlike those two its draft goes like a
-reply draft (the gates, the night window, 自动模式).
+``signed_line``, kb 场景 D2), inside PRM_SIGNED_HELLO_HOURS only, once per order; by day it always waits for a person
+too (whatever its kind's gate), but in the night window or 自动模式 the night's rules may send it, like a reply draft.
 
 An operator may tell the Mac how to write to a creator (起草备注, 2026-10-31: her WeChat signature said
 「直接发链接和brief，感兴趣的会回复！勿催视频，不接语音」): the deal action ``draft_note`` keeps it on the deal
@@ -805,12 +805,15 @@ HUOPAN = "huopan"
 # once (store ``signed_hellos``: owed / asked / skipped) and asked for only inside PRM_SIGNED_HELLO_HOURS (this PC's
 # clock) while her chat allows (on the list, copilot mode, reachable, no draft of hers being written or waiting: owed
 # till then, ``sweep_signed_hellos``); none when she wrote after the signature, the deal moved on, or the signature is
-# SIGNED_HELLO_DAYS old.  Its draft is a reply draft like any (the gates by day, the night window's and 自动模式's
-# rules); the packet's ``meta.signed`` (the order), the deal's event (``SIGNED``), the notice of one not written
-# (``signed``); no holding reply for it unless a line of hers joined the job; her message after it outdates it.
+# SIGNED_HELLO_DAYS old.  Its draft never goes by its kind's gate: by day (outside the 下班时段, 自动模式 off) it always
+# waits for a person, the draft and the deal saying why (``SIGNED_DAY_NOTE``; the user was told 「白天进待审批，你点了
+# 才发」); in the 下班时段 or 自动模式 the night's rules judge it like a reply draft (``_night_judge``).  The packet's
+# ``meta.signed`` (the order), the deal's event (``SIGNED``), the notice of one not written (``signed``); no holding
+# reply for it unless a line of hers joined the job; her message after it outdates it.
 SIGNED = "signed"
 SIGNED_HELLO_DAYS = 3                       # a signature this old is not asked about (a first round, a long outage)
 SIGNED_HELLO_HOURS = "10:00-20:00"          # PRM_SIGNED_HELLO_HOURS when unset (or not HH:MM-HH:MM)
+SIGNED_DAY_NOTE = "签收后问一句：白天要人看过再发"
 # 老板拉的群 (PRM_BOSS_GROUPS, src/prm/boss_groups.py): what the bot starts itself (a 专属佣金 step, a shipping notice, a
 # 开场白 from the console) goes to her private chat, or to the group when she has none (``_reach``); with neither (she
 # left the group) nothing is sent and the deal's notice (``UNREACHABLE``) says so until she writes to us again.
@@ -2785,6 +2788,7 @@ class PrmService:
         route, decided_at = gates.REVIEW, None
         night_held = None                              # 下班时段: why a draft judged by the night window waits
         auto_on = self.auto_mode["on"]                 # 自动模式, read once: the judgement and the packet's tag agree
+        signed = isinstance(meta.get(SIGNED), dict) and lane == LANE_REPLY      # a 签收后问一句's draft
         if draft.platform is not None:
             # A platform write: always a person's decision (8.1's gates do not apply).
             state = (SUPERSEDED if mode != COPILOT or handed_on or (newer is not None and newer["id"] > job["id"])
@@ -2811,6 +2815,10 @@ class PrmService:
                 self._store, draft.message_kind, deal=deal, now=now, text=draft.reply_draft,
                 needs_attention=draft.needs_attention or bool(refused), unknown_tokens=unknown, reason=draft.reason,
                 waybill=waybill, attachments=attachments, files_named=len(named))
+            if signed and state == APPROVED:
+                # 签收后问一句 never goes by its kind's gate: by day a person sends it (the user was told 「白天进待审批，
+                # 你点了才发」, ``SIGNED_DAY_NOTE``), in the 下班时段 or 自动模式 the night's rules judge it (below)
+                route, state, decided_at = gates.REVIEW, PENDING, None
             if state == PENDING:
                 # 下班时段 (PRM_NIGHT_AUTO_HOURS) or 自动模式: it may still go out by itself; only here, never before this step
                 night_held = self._night_judge(meta, draft, refused=refused, short=short, unknown=unknown,
@@ -2818,6 +2826,8 @@ class PrmService:
                                                now=now, auto_on=auto_on)
                 if night_held == "":
                     route, state, decided_at = gates.NIGHT, APPROVED, now
+        # 签收后问一句 waiting by day (outside the 下班时段, 自动模式 off): the draft and the deal say why
+        day_held = SIGNED_DAY_NOTE if signed and state == PENDING and not self._in_window(now) and not auto_on else ""
         # 开场白没人处理就自动发 (PRM_OPENING_AUTO_MIN): our first line to a new friend waits, and may go out by itself later
         opening_auto = (self._opening_auto(meta, draft, refused=refused, short=short, unknown=unknown, waybill=waybill,
                                            attachments=attachments, named=len(named), mode=mode, recall=recall,
@@ -2862,7 +2872,7 @@ class PrmService:
             needs_attention=(draft.needs_attention or bool(short) or bool(refused) or bool(stepless) or bool(recall))
             and state != DROPPED,
             reason="；".join(r for r in (recall, covered_note if state == DROPPED else "", refused, stepless, short,
-                                         repeat_note, draft.reason) if r)[:500],
+                                         repeat_note, day_held, draft.reason) if r)[:500],
             status=state, route=route, decided_at=decided_at, meta=packet_meta,
             tool=tool, platform=platform, now=now,
         )
@@ -2875,7 +2885,8 @@ class PrmService:
         if state in (PENDING, APPROVED):
             self._store.supersede(deal_id, now, keep=packet_id, lane=lane,
                                   chat_id=self._lane_chat(party_id, job["chat_id"]) if lane == LANE_REPLY else None)
-        attention = [*notes, *([draft.reason] if draft.needs_attention and draft.reason else [])]
+        attention = [*notes, *([day_held] if day_held else []),
+                     *([draft.reason] if draft.needs_attention and draft.reason else [])]
         if state == NO_REPLY and isinstance(meta.get(HUOPAN), dict):
             # 补发货盘 the Mac wrote nothing for (she had the 货盘 within 7 days, say): the deal says why, not 「要人看过再发」
             attention = [*(n for n in notes if n != HUOPAN_NOTE), f"「补发货盘」这次没写：{(draft.reason or 'Mac 没说为什么')[:200]}"]

@@ -2,8 +2,9 @@
 或者我们手动建的、运单号进了她合作单的单）、她还没说收到，就派一份没有她的话的草稿任务，照 kb 场景 D2「聚水潭显示签收」问她
 一句拿到了没有、戴着合不合适（``meta.signed``）。每张单只记一次（``signed_hellos``）、只在 PRM_SIGNED_HELLO_HOURS 里问
 （这台电脑的钟，默认 10:00-20:00；时段外签收的等到点），她签收之后发过消息、合作单先被人标了已签收（或者往后走了）、签收超过
-3 天的不问；达人停用、人工接管或暂停、她的草稿正在写或在「待审批」时欠着，能问了再问。草稿和回她消息的草稿一样走：白天门槛
-（先审），下班时段、自动模式按夜里的规矩；Mac 没写（她已经说过收到了）什么都不发、不再问。开专属佣金那一路照旧。开关默认关：
+3 天的不问；达人停用、人工接管或暂停、她的草稿正在写或在「待审批」时欠着，能问了再问。草稿从不按这一类的门槛发：白天一律
+先审（招呼的门槛自动了也一样），下班时段、自动模式按夜里的规矩判；Mac 没写（她已经说过收到了）什么都不发、不再问。开专属佣金
+那一路照旧。开关默认关：
 关着什么都不记不问。Mac 提示里的那一句（``signed_line``，Mac 自带的 Python 3.9 也能跑）也在这里。名字、号码、单号都是编的。"""
 
 import json
@@ -289,8 +290,12 @@ def test_a_draft_not_written_leaves_a_notice_and_is_not_asked_again(bot, clock):
     assert len(hello_jobs(bot)) == 1
 
 
+@pytest.mark.parametrize("opened", [False, True])
 @pytest.mark.parametrize("text, goes", [(HELLO, True), ("收到啦～返现的事我跟负责人确认一下哈", False)])
-def test_in_auto_mode_its_draft_goes_by_the_night_rules(bot, clock, text, goes):
+def test_in_auto_mode_its_draft_goes_by_the_night_rules(bot, clock, text, goes, opened):
+    """自动模式 by day: the night's rules judge it, whether or not greetings have earned ``auto`` (``opened``)."""
+    if opened:
+        bot.prm.store.set_gate("greeting", "auto", clock.now)
     shipped(bot, clock)
     bot.prm.set_auto_mode(True)
     signed(bot, clock)
@@ -307,6 +312,60 @@ def test_in_auto_mode_its_draft_goes_by_the_night_rules(bot, clock, text, goes):
         assert (packet["status"], packet["route"]) == ("pending", "review") and packet["meta"]["night_held"]
         bot.prm.send_approved()
         assert bot.texts == []
+
+
+def test_by_day_it_waits_for_a_person_even_when_greetings_go_by_themselves(bot, clock):
+    bot.prm.store.set_gate("greeting", "auto", clock.now)
+    bot.prm.handle(bot.msg("老师好呀"))
+    job = bot.worker_takes()
+    bot.finish(job["id"], draft(message_kind="greeting", reply_draft="您好呀～", slots={}, stage_proposal="",
+                                reason="她打招呼"))
+    assert bot.prm.store.packet_for_job(job["id"])["route"] == "auto"           # her greeting goes by the open gate
+    bot.prm.send_approved()
+    shipped(bot, clock)
+    signed(bot, clock)
+    bot.prm.tick()
+    [hello] = hello_jobs(bot)
+    steps_aside(bot)
+    packet = mac_writes(bot, hello, HELLO)
+    assert (packet["status"], packet["route"]) == ("pending", "review")        # by day: a person sends it
+    assert packet["reason"].startswith("签收后问一句：白天要人看过再发")
+    assert "签收后问一句：白天要人看过再发" in bot.prm.store.deal(packet["deal_id"])["attention"]
+    bot.prm.send_approved()
+    assert bot.texts == []
+    assert bot.prm.decide(packet["id"], "send")["ok"]
+    bot.prm.send_approved()
+    assert bot.texts == [(CREATOR, HELLO)]
+
+
+@pytest.mark.parametrize("opened", [False, True])
+@pytest.mark.parametrize("text, goes", [(HELLO, True), ("收到啦～返现的事我跟负责人确认一下哈", False)])
+def test_inside_the_night_window_the_night_rules_judge_it(clock, tmp_path, text, goes, opened):
+    clock.now = at(17, 0)
+    b = make(clock, tmp_path, prm_night_auto_hours="18:00-09:00")
+    try:
+        if opened:
+            b.prm.store.set_gate("greeting", "auto", clock.now)
+        shipped(b, clock)
+        signed(b, clock)
+        assert 18 <= time.localtime(clock.now).tm_hour < 20                    # inside both windows
+        b.prm.tick()
+        [hello] = hello_jobs(b)
+        assert json.loads(hello["meta"])["night"]["window"] == "18:00-09:00"
+        steps_aside(b)
+        packet = mac_writes(b, hello, text)
+        assert "白天要人看过再发" not in packet["reason"]
+        if goes:
+            assert (packet["status"], packet["route"]) == ("approved", "night")
+            b.prm.send_approved()
+            assert b.texts == [(CREATOR, HELLO)]
+        else:
+            assert (packet["status"], packet["route"]) == ("pending", "review") and packet["meta"]["night_held"]
+            b.prm.send_approved()
+            assert b.texts == []
+    finally:
+        b.prm.stop()
+        b.relay.stop()
 
 
 def test_no_holding_reply_goes_for_it(bot, clock):
