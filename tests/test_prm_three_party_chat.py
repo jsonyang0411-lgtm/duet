@@ -124,6 +124,23 @@ def test_the_group_the_click_made_is_read_only_and_her_private_drafts_hear_it(bo
     assert all(ev["kind"] != GROUP_LINE for ev in shown)
 
 
+def test_a_record_forwarded_there_is_kept_with_its_people_unnamed(bot, clock):
+    """A 聊天记录 the boss forwards in her 三方群 (2026-11-06): kept as what it holds (src/edge/text.py ``record_line``),
+    the bosses as 老板, her as 她, anybody else 甲 …, its title (it names the boss) left out, the number masked; her
+    private draft is told it whole."""
+    record = {"title": f"小美和{BOSS}的聊天记录", "count": 3, "partial": False, "items": [
+        {"name": "小美", "text": "我要黑色，电话 13812345678", "ids": []},
+        {"name": BOSS, "text": "好的", "ids": []},
+        {"name": "路人", "text": "我也想要", "ids": []}]}
+    assert bot.prm.handle(line(bot, "[文件]", sender=BOSS_ID, name=BOSS, msg_type=49,
+                               special={"kind": "appmsg", "type": "19", "title": record["title"], "record": record}))
+    [kept_line] = kept(bot)
+    assert (kept_line["who"], kept_line["text"]) == ("boss", "[聊天记录] 她：我要黑色，电话 〈手机1〉；老板：好的；甲：我也想要")
+    clock.now += 60
+    told = private_job(bot)["meta"]["three_party_chat"]
+    assert told[-1]["text"] == kept_line["text"] and BOSS not in json.dumps(told, ensure_ascii=False)
+
+
 def test_a_line_handed_on_twice_is_kept_once_and_a_removed_creator_keeps_nothing(bot):
     msg = line(bot, "那就这么定啦")
     assert bot.prm.handle(msg) and bot.prm.handle(dict(msg))

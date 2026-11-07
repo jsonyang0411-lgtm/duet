@@ -61,6 +61,7 @@ stay in prm.db: the log has ids' first characters and counts only.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -70,6 +71,7 @@ from collections import deque
 from contextlib import nullcontext
 from typing import Callable, Optional
 
+from ..edge import text as edge_text
 from .store import PartyError
 from .three_party import CREATED, CREATING, NOTICE as GROUP_NOTICE, UNSURE, group_with
 
@@ -122,11 +124,41 @@ NO_LINES_WHY = "群里还没有消息：有了以后再看是不是新拉的群"
 QUIET_WHY = f"{BOSS_WAIT_DAYS} 天里群里一直没有消息，不再看这个群"
 MAKING_WHY = "她的三方群正在建（合作单上的「拉三方群」）：建完以后再看这个群"
 UNKNOWN_WHY = "PRM_GROUP_WITH 里的{names}在这个微信里找不到 / 有重名"
+# A forwarded 聊天记录 where the bosses' names never go to the Mac (``record_msg``): who said each line
+HER_LABEL, US_LABEL = "她", "我们"
+OTHER_LABELS = "甲乙丙丁戊己庚辛壬癸"      # anybody else, in the order they first speak; past ten of them: OTHERS_LABEL
+OTHERS_LABEL = "其他人"
+# a kept line that is a forwarded 聊天记录 (``line_chars``; room for the names ``hide`` and the masking change)
+RECORD_LINE_CHARS = edge_text.RECORD_CHARS + 100
 
 
 def boss_call(raw) -> str:
     """PRM_BOSS_CALL as the bot uses it: white space collapsed, at most CALL_MAX characters, 「老板」 when empty."""
     return " ".join(str(raw or "").split())[:CALL_MAX] or CALL_DEFAULT
+
+
+def line_chars(text) -> int:
+    """How long a kept line of the group may be: LINE_CHARS, a forwarded 聊天记录's RECORD_LINE_CHARS."""
+    return RECORD_LINE_CHARS if str(text or "").startswith(edge_text.RECORD_PREFIX) else LINE_CHARS
+
+
+def _hashes(wxid) -> set:
+    """A wxid as a forwarded 聊天记录 may name its person (``<dataitemsource>``: the wxid itself, or a hash of it), lower
+    case; empty for no wxid."""
+    wxid = str(wxid or "").strip()
+    if not wxid:
+        return set()
+    raw = wxid.encode("utf-8")
+    return {wxid.lower(), hashlib.md5(raw).hexdigest(), hashlib.sha1(raw).hexdigest(), hashlib.sha256(raw).hexdigest()}
+
+
+def _names_re(names) -> Optional[re.Pattern]:
+    """Each of ``names`` (two characters or more, spaces and case aside) in a text, the longest first; None for none."""
+    keys = sorted({"".join(str(n or "").split()) for n in names} - {""}, key=len, reverse=True)
+    keys = [k for k in keys if len(k) >= 2]
+    if not keys:
+        return None
+    return re.compile("|".join(r"\s*".join(re.escape(ch) for ch in k) for k in keys), re.IGNORECASE)
 
 
 def _key(name) -> str:
@@ -426,25 +458,102 @@ class BossGroups:
         pattern = self._hide_re
         return pattern.sub(lambda m: self._call, text) if pattern is not None else text
 
+    def record_msg(self, msg: dict, party: Optional[dict] = None, row: Optional[dict] = None) -> dict:
+        """A forwarded 聊天记录 (src/edge/text.py ``record_of``) told where the bosses' names never go to the Mac (a 老板拉的
+        群 and her lines there, her 三方群, a creator the boss introduced: ``hide``'s places): a copy of ``msg`` whose
+        record calls each person 老板 [PRM_BOSS_CALL] (a boss: his wxid, or a hash of it, among the ids WeChat wrote of
+        the line, or a name of PRM_GROUP_WITH, or his name in this account), 她 (``party``: her wxid or its hash, her
+        称呼, her name as a member of ``row``), 我们 (this account), and anybody else 甲, 乙 … in the order they first
+        speak (OTHER_LABELS; then OTHERS_LABEL).  Forwarded by one of the bosses or by her, with two people in it of
+        whom the other is known: the one left is who forwarded it.  The names of the people found are their labels in
+        the words too (two characters or more), and the record's title (it may name anybody) is left out.  Any other
+        message: ``msg`` itself."""
+        record = edge_text.record_of(msg)
+        if record is None:
+            return msg
+        party, row = party or {}, row or {}
+        her = str(party.get("wxid") or "")
+        bosses = ({str(b.get("wxid") or "") for b in row.get("boss") or []} | set(self._bosses)) - {""}
+        boss_ids = set().union(*(_hashes(w) for w in bosses)) if bosses else set()
+        own = ""
+        if callable(getattr(self._backend, "own_wxid", None)):
+            try:
+                own = str(self._backend.own_wxid() or "")
+            except Exception:
+                own = ""
+        boss_keys = ({_key(n) for n in self._with} | {_key(b.get("name")) for b in row.get("boss") or []}
+                     | {_key(n) for n in self._bosses.values()}) - {""}
+        her_keys = ({_key(party.get("name"))} | {_key(m.get("name")) for m in row.get("members") or []
+                                                 if her and m.get("wxid") == her}) - {""}
+        sender = str(msg.get("sender_id") or "")
+        if her and sender == her:
+            her_keys = (her_keys | {_key(msg.get("sender_name"))}) - {""}
+        own_keys = {_key(getattr(self._config, "bot_display_name", ""))} - {""}
+
+        def role(item: dict) -> str:
+            ids = {str(i).lower() for i in item.get("ids") or []}
+            key = _key(item.get("name"))
+            if ids & boss_ids or key in boss_keys:
+                return "boss"
+            if ids & _hashes(her) or key in her_keys:
+                return "her"
+            if ids & _hashes(own) or key in own_keys:
+                return "us"
+            return ""
+
+        items = [i for i in record.get("items") or [] if isinstance(i, dict)]
+        roles: dict[str, str] = {}                     # each person by the key of the name the record gives
+        spoken: dict[str, set] = {}                    # ... and the names it gives them
+        for item in items:
+            key = _key(item.get("name"))
+            if not key:
+                continue
+            spoken.setdefault(key, set()).add(" ".join(str(item.get("name") or "").split()))
+            roles[key] = roles.get(key) or role(item)
+        forwarded = ("boss" if sender in bosses or self.who(row, sender, str(msg.get("sender_name") or "")) == BOSS
+                     else "her" if her and sender == her else "")
+        unknown = [k for k, r in roles.items() if not r]
+        if forwarded and len(roles) == 2 and len(unknown) == 1 and forwarded not in roles.values():
+            roles[unknown[0]] = forwarded               # (her chat with him, forwarded by one of the two)
+        labels, others = {"boss": self._call, "her": HER_LABEL, "us": US_LABEL}, iter(OTHER_LABELS)
+        called = {key: labels[r] if r else next(others, OTHERS_LABEL) for key, r in roles.items()}
+        by_name = {n: called[key] for key, names in spoken.items() for n in names}
+        pattern = _names_re(by_name)
+        lookup = {"".join(n.split()).casefold(): label for n, label in by_name.items()}
+
+        def unnamed(words: str) -> str:
+            if pattern is None:
+                return words
+            return pattern.sub(lambda m: lookup.get("".join(m.group(0).split()).casefold(), m.group(0)), words)
+
+        told = [{"name": called.get(_key(i.get("name")), "") if _key(i.get("name")) else "",
+                 "text": unnamed(str(i.get("text") or "")), "ids": []} for i in items]
+        special = dict(msg.get("special") or {})
+        special["record"] = {**record, "title": "", "items": told}
+        return {**msg, "special": special}
+
     def note_line(self, chat: str, written: float) -> None:
         """A line of the group was handled, ours too (where the watch starts after a restart: ``_since``)."""
         self._store.note_boss_group_line(chat, written)
 
     def add_context(self, chat: str, who: str, text: str, at: float) -> Optional[int]:
-        """The boss's (or another member's) line, masked, for her next job (``job_group``); its number."""
-        return self._store.add_boss_group_line(chat, {"who": who, "at": float(at), "text": str(text or "")[:LINE_CHARS]},
+        """The boss's (or another member's) line, masked, for her next job (``job_group``); its number.  At most LINE_CHARS
+        (a forwarded 聊天记录: RECORD_LINE_CHARS, ``line_chars``)."""
+        text = str(text or "")
+        return self._store.add_boss_group_line(chat, {"who": who, "at": float(at), "text": text[:line_chars(text)]},
                                                LINES_KEPT)
 
     def job_group(self, chat: str) -> dict:
         """A group job's ``meta.group``: ``{"name", "boss", "lines"}``: the group's name and ``boss`` [PRM_BOSS_CALL] (the
         bosses' names never go to the Mac: ``hide``), ``lines`` the boss's and the other members' lines kept and not
         answered yet, at most LINES_TOLD (the newest), oldest first, each ``{"who": 老板 | 群成员, "at": "MM-DD HH:MM",
-        "text", "seq"}`` (masked, at most LINE_CHARS; ``seq`` its number: a reply sent drops these, ``replied``)."""
+        "text", "seq"}`` (masked, at most LINE_CHARS, a forwarded 聊天记录 RECORD_LINE_CHARS; ``seq`` its number: a reply
+        sent drops these, ``replied``)."""
         row = self._store.boss_group(chat) or {}
         lines = [x for x in row.get("lines") or [] if isinstance(x, dict)][-LINES_TOLD:]
         return {"name": self.hide(row.get("name"))[:NAME_CHARS], "boss": [self._call],
                 "lines": [{"who": str(x.get("who") or MEMBER), "at": _clock_text(x.get("at")),
-                           "text": self.hide(x.get("text"))[:LINE_CHARS], "seq": int(x.get("seq") or 0)}
+                           "text": self.hide(x.get("text"))[:line_chars(x.get("text"))], "seq": int(x.get("seq") or 0)}
                           for x in lines]}
 
     def replied(self, chat: str, seqs=None) -> int:

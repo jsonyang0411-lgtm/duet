@@ -145,6 +145,17 @@ def test_every_kind_of_message_has_a_line(message, line):
     assert T.message_text(message) == line
 
 
+def test_a_forwarded_record_reaches_the_mac_as_what_it_holds(edge, clock):
+    """Her forwarded 聊天记录 whose XML the backend read (``special.record``, 2026-11-06): the event's text is what is in
+    it (src/edge/text.py ``record_line``), not only its title."""
+    record = {"title": "群聊的聊天记录", "count": 3, "partial": False,
+              "items": [{"name": "小美", "text": "想要白色"}, {"name": "小周", "text": "好的"}]}
+    edge.handle(msg(clock, "[文件]", 49, special={"kind": "appmsg", "type": "19", "title": "群聊的聊天记录",
+                                                   "record": record}))
+    [event] = events(edge, P.CREATOR_MESSAGE)
+    assert event["text"] == "[聊天记录：群聊的聊天记录] 小美：想要白色；小周：好的（共 3 条）"
+
+
 def test_wechats_own_lines_are_notices_not_her_words(edge, clock):
     """A recall or 拍一拍 in a listed chat (type 10000; 10002 in older versions; its sender is empty, so it
     comes as hers) is a chat_notice, never her message; who recalled is in the words."""

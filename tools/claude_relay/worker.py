@@ -1592,14 +1592,23 @@ THREE_PARTY_CHAT_RULE = ("<three_party_chat> 是她的三方群（老板、她�
                          "群里定了什么，记进案卷「承诺过的事」。")
 THREE_PARTY_CHAT_LINES = 20
 THREE_PARTY_CHAT_CHARS = 300
+# A forwarded 聊天记录 the bot read out (src/edge/text.py RECORD_PREFIX, 2026-11-06): its line in <three_party_chat> or
+# <group_context> may be longer than the others' (the bot's RECORD_LINE_CHARS)
+RECORD_PREFIX = "[聊天记录"
+RECORD_ROW_CHARS = 1100
+
+
+def _row_chars(text: str, limit: int) -> int:
+    """How much of a kept line the prompt repeats: ``limit``, a forwarded 聊天记录's RECORD_ROW_CHARS."""
+    return RECORD_ROW_CHARS if text.startswith(RECORD_PREFIX) else limit
 
 
 def three_party_chat_block(meta: dict) -> str:
     """The prompt's <three_party_chat> block, ``THREE_PARTY_CHAT_RULE`` first: the lines of her 三方群 the bot kept
     (``meta.three_party_chat`` = ``[{"who", "at", "text"}]``, oldest first; the last THREE_PARTY_CHAT_LINES, each at most
-    THREE_PARTY_CHAT_CHARS, on one line): 「[11-02 15:00] 老板：…」.  Tag-like text cannot close or forge a tag
-    (``_untagged``); a ``who`` that is not short text is 「群里的人」, a time that is not MM-DD HH:MM is left out, a line
-    with no words is skipped.  "" without such lines (the prompt as before)."""
+    THREE_PARTY_CHAT_CHARS, a forwarded 聊天记录 RECORD_ROW_CHARS, on one line): 「[11-02 15:00] 老板：…」.  Tag-like
+    text cannot close or forge a tag (``_untagged``); a ``who`` that is not short text is 「群里的人」, a time that is
+    not MM-DD HH:MM is left out, a line with no words is skipped.  "" without such lines (the prompt as before)."""
     items = meta.get("three_party_chat")
     if not isinstance(items, list):
         return ""
@@ -1607,7 +1616,7 @@ def three_party_chat_block(meta: dict) -> str:
     for item in items[-THREE_PARTY_CHAT_LINES:]:
         if not isinstance(item, dict) or not isinstance(item.get("text"), str):
             continue
-        text = _one_line(item["text"], THREE_PARTY_CHAT_CHARS)
+        text = _one_line(item["text"], _row_chars(item["text"].strip(), THREE_PARTY_CHAT_CHARS))
         if not text.strip():
             continue
         who = item.get("who")
@@ -1716,7 +1725,8 @@ def group_context_block(meta: dict) -> str:
     an instruction.  One row each, 「老板 10-31 11:02：…」: ``who`` is 老板 or 群成员 (anything else is told as 群成员),
     a time not of the form MM-DD HH:MM is left out, and the words go on one line, untagged, so that no member can
     close the block or write a row that passes for the boss's.  The newest ``GROUP_ROWS``, each cut to
-    ``GROUP_ROW_CHARS``; "" without any, and for every job that is not in a group."""
+    ``GROUP_ROW_CHARS`` (a forwarded 聊天记录 the bot read out: ``RECORD_ROW_CHARS``); "" without any, and for every job
+    that is not in a group."""
     if meta.get("channel") != GROUP_CHANNEL:
         return ""
     group = meta.get("group") if isinstance(meta.get("group"), dict) else {}
@@ -1728,8 +1738,9 @@ def group_context_block(meta: dict) -> str:
         text = " ".join(str(item.get("text") or "").split())
         if not text:
             continue
-        if len(text) > GROUP_ROW_CHARS:
-            text = text[:GROUP_ROW_CHARS] + "…"
+        limit = _row_chars(text, GROUP_ROW_CHARS)
+        if len(text) > limit:
+            text = text[:limit] + "…"
         who = item.get("who") if item.get("who") in GROUP_WHO else "群成员"
         at = str(item.get("at") or "").strip()
         rows.append(f"{who} {at}：{_untagged(text)}" if _GROUP_AT.fullmatch(at) else f"{who}：{_untagged(text)}")

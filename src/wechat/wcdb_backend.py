@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..edge import text as edge_text
+from . import chat_record
 from .base import AbstractWeChatBackend, MessageCallback
 from .burst import MessageBurstBuffer
 from .wcdb_client import WcdbCallError, WcdbNativeClient
@@ -385,7 +386,8 @@ def _system_text(content: str) -> str:
 
 def _special_info(content: str, local_type: int) -> dict:
     """What a link, mini program, card, location or system line is, for the WeChat edge
-    (src/edge/text.py writes "[链接] 标题"); {} for anything else."""
+    (src/edge/text.py writes "[链接] 标题"); a forwarded 聊天记录 (appmsg type 19) also what is in it
+    (``record``: src/wechat/chat_record.py, when its XML can be read); {} for anything else."""
     if local_type == 10000:                      # a system line: plain text, or XML (a recall)
         return {"kind": "system", "title": _system_text(content)[:200]}
     decoded = _decompress_zstd_hex(content) or str(content or "")
@@ -411,6 +413,10 @@ def _special_info(content: str, local_type: int) -> dict:
         url = _text_at(appmsg, "url")
         if url:
             info["url"] = url                    # a link's address (src/edge/text.py keeps http/https only)
+        if info["type"] == chat_record.RECORD_APPMSG:
+            record = chat_record.parse(appmsg)   # a forwarded 聊天记录: what is in it (src/edge/text.py record_line)
+            if record is not None:
+                info["record"] = record
         return info
     return {}
 
