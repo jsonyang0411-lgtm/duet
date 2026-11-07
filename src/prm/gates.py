@@ -76,11 +76,13 @@ def earned(gate: dict, stats: dict) -> bool:
             and stats["unchanged"] >= gate["min_unchanged"] and not stats["key_changed"])
 
 
-def waybill_ok(text: str, waybill: str) -> bool:
-    """A shipping notice carries the system's waybill, and no other number that looks like one."""
+def waybill_ok(text: str, waybill: str, others=()) -> bool:
+    """A shipping notice carries the system's waybill, and no other number that looks like one but ``others``: the
+    other packages' waybills of an order the warehouse sent in several (the notice's ``more_waybills``, 2026-11-06)."""
     if not waybill or waybill not in str(text):
         return False
-    return all(m.group(0) == waybill for m in WAYBILL.finditer(str(text)))
+    allowed = {waybill, *others}
+    return all(m.group(0) in allowed for m in WAYBILL.finditer(str(text)))
 
 
 def plain_reason(kind: str, *, needs_attention: bool, mode: str, unknown_tokens: list, reason: str,

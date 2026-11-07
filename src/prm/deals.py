@@ -86,24 +86,54 @@ def effective_mode(deal: dict, now: float) -> str:
     return mode if mode in MODES else COPILOT
 
 
-def notice_text(carrier: str, waybill: str) -> str:
+MORE_PACKAGES = 4   # other packages' waybills one shipping notice names at most (聚水潭 sync: 5 waybills an order)
+
+
+def notice_text(carrier: str, waybill: str, more=()) -> str:
     """The shipping notice: 「老师」 and 「您」, never her name (kb 第 0 节, the user 2026-11-03; her WeChat name is
-    often our remark 「抖音-…」)."""
-    return f"老师您好～样品已经寄出啦：{carrier} {waybill}。签收之后跟我说一声哦～"
+    often our remark 「抖音-…」).  ``more``: the other packages' ``(carrier, waybill)`` of an order the warehouse sent
+    in several (2026-11-06): every waybill named, 「（分 N 个包裹）」."""
+    if not more:
+        return f"老师您好～样品已经寄出啦：{carrier} {waybill}。签收之后跟我说一声哦～"
+    bills = "、".join(f"{c} {w}" for c, w in [(carrier, waybill), *more])
+    return f"老师您好～样品已经寄出啦（分 {1 + len(more)} 个包裹）：{bills}。签收之后跟我说一声哦～"
+
+
+def _more_packages(more, waybill: str) -> list:
+    """The other packages of a shipment (``add_shipment``'s ``more``) as ``(carrier, waybill)`` pairs: only the ones
+    that fit a shipment (a courier of 1–20 characters on one line, a waybill as ``_WAYBILL``), not the first waybill
+    again, each once, MORE_PACKAGES at most."""
+    out, seen = [], {waybill}
+    for item in more or ():
+        if isinstance(item, dict):
+            c, w = item.get("carrier"), item.get("waybill")
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            c, w = item
+        else:
+            continue
+        c, w = str(c or "").strip() or "快递", str(w or "").strip()
+        if len(c) > 20 or "\n" in c or not _WAYBILL.match(w) or w in seen:
+            continue
+        seen.add(w)
+        out.append((c, w))
+    return out[:MORE_PACKAGES]
 
 
 def add_shipment(store: PrmStore, deal_id, carrier: str, waybill: str, *, now: float,
                  actor: str = "console", review: bool = False, notice: bool = True,
-                 note: Optional[dict] = None) -> tuple[dict, Optional[int]]:
+                 note: Optional[dict] = None, more=()) -> tuple[dict, Optional[int]]:
     """Record the waybill, move the deal to 已寄出, draft the shipping notice: ``(shipment, packet_id)``.
     ``review``: the notice waits for a person whatever its kind's gate; ``notice`` False: none is drafted
-    (``packet_id`` None); ``note``: added to the events (the 聚水潭 sync's order: ``{"source", "order"}``)."""
+    (``packet_id`` None); ``note``: added to the events (the 聚水潭 sync's order: ``{"source", "order"}``);
+    ``more``: the other packages of an order sent in several (the 聚水潭 sync, 2026-11-06: ``(carrier, waybill)``
+    or ``{carrier, waybill}`` each): the deal keeps the first waybill, the notice names them all (``notice_text``)."""
     deal = _deal(store, deal_id)
     carrier, waybill = str(carrier or "").strip(), str(waybill or "").strip()
     if not carrier or len(carrier) > 20 or "\n" in carrier:
         raise DealError("快递公司要填，最多 20 个字")
     if not _WAYBILL.match(waybill):
         raise DealError("运单号只能是 6–30 位字母、数字或短横线")
+    more = _more_packages(more, waybill)
     party = store.party(deal["party_id"]) or {}
     shipment = store.add_shipment(deal["id"], carrier, waybill, now)
     store.add_event(deal["id"], deal["party_id"], "shipment", {"carrier": carrier, "waybill": waybill, **(note or {})},
@@ -111,7 +141,7 @@ def add_shipment(store: PrmStore, deal_id, carrier: str, waybill: str, *, now: f
     set_stage(store, deal["id"], "shipped", now=now, actor=actor, note=note)
     if not notice:
         return shipment, None
-    text = notice_text(carrier, waybill)
+    text = notice_text(carrier, waybill, more)
     if review:
         route, status, decided_at = gates.REVIEW, PENDING, None
     else:
@@ -121,12 +151,14 @@ def add_shipment(store: PrmStore, deal_id, carrier: str, waybill: str, *, now: f
     packet_id = store.add_packet(
         deal_id=deal["id"], party_id=deal["party_id"], job_id=None, chat_id=party.get("wxid", ""),
         kind="shipping_notice", text=text, attachments=[], intent="通知达人样品已寄出",
-        slots={"快递公司": carrier, "运单号": waybill}, stage_proposal="", needs_attention=False,
+        slots={"快递公司": carrier, "运单号": waybill, **({"其余包裹": "、".join(f"{c} {w}" for c, w in more)} if more else {})},
+        stage_proposal="", needs_attention=False,
         reason=(f"聚水潭寄样单 {order} 有了运单号，系统自动填上、按模板生成，要人看过再发" if order
                 else "运营在控制台填了运单号，系统按模板生成"),
         status=status, route=route, decided_at=decided_at,
         meta={"waybill": waybill, "carrier": carrier, "source": "system", "shipment_id": shipment["id"],
-              **({"sample_order": order} if order else {})}, now=now,
+              **({"sample_order": order} if order else {}),
+              **({"more_waybills": [{"carrier": c, "waybill": w} for c, w in more]} if more else {})}, now=now,
     )
     store.supersede(deal["id"], now, keep=packet_id, system_kind="shipping_notice")   # an earlier waybill's
     return shipment, packet_id
