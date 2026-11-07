@@ -5,7 +5,8 @@ Works on the standardized messages of the Windows backend (wcdb_backend._standar
 ``msg_type``, ``msg_subtype`` (an appmsg's kind from the high 32 bits of WeChat 4's
 ``local_type``), ``content`` (voice already as ``[语音] …``), ``file_name``, the ``quoted_*``
 fields of a reply, and ``special`` (the title of a link, a mini program, a card, a location, and
-a link's ``url`` when the backend gives one; the line of a system message).  Nothing is dropped:
+a link's ``url`` when the backend gives one; the line of a system message; what a forwarded 聊天记录
+holds, ``record``: src/wechat/chat_record.py, its line ``record_line``).  Nothing is dropped:
 an unknown type is still a line.  The PRM copilot writes its draft jobs' lines with this too
 (src/prm/service.py ``message_text``), so both deployments tell the Mac the same.
 """
@@ -32,6 +33,13 @@ APPMSG_TYPE = 49
 # (6), a transfer (2000) … carry their kind in the high bits too and are someone's message.
 PAT_SUBTYPE = 62
 PAT_LINE = "[拍一拍]"                          # its line when the XML gave no title
+# A forwarded 聊天记录 (appmsg kind 19) whose XML the backend could read (``special.record``, src/wechat/chat_record.py):
+# one line of what is in it, 「[聊天记录：标题] 小美：想要白色；老板：好的」, always starting with RECORD_PREFIX (it is never
+# a command, a cc request or anyone's plain words), at most RECORD_CHARS.
+RECORD_KIND = "19"
+RECORD_PREFIX = "[聊天记录"
+RECORD_CHARS = 1000
+_RECORD_SEP = "；"
 
 
 def msg_type_of(msg: dict) -> int:
@@ -85,9 +93,49 @@ def _url(msg: dict) -> str:
     return url[:500] if url.lower().startswith(("http://", "https://")) else ""
 
 
+def record_of(msg: dict) -> Optional[dict]:
+    """The contents of a forwarded 聊天记录 (``special.record`` of an appmsg of kind RECORD_KIND), or None."""
+    if msg_type_of(msg) != APPMSG_TYPE or str(msg.get("file_name") or "").strip() or is_reply(msg):
+        return None
+    special = msg.get("special") if isinstance(msg.get("special"), dict) else {}
+    record = special.get("record")
+    if str(special.get("type") or "") != RECORD_KIND or not isinstance(record, dict):
+        return None
+    items = record.get("items")
+    return record if isinstance(items, list) and any(isinstance(i, dict) for i in items) else None
+
+
+def record_line(record: dict) -> str:
+    """A forwarded 聊天记录 as one line: 「[聊天记录：<title>] 名字：话；名字：[图片]…」 (no title: 「[聊天记录] …」; an item
+    without a name: its words alone), each run of white space one space; cut to RECORD_CHARS with 「…」 and, when not
+    every message is in it, how many it holds (「（共 N 条）」; only the preview was readable: 「（只读到前几条）」).  ""
+    for a record with nothing to tell."""
+    items = [i for i in record.get("items") or [] if isinstance(i, dict)]
+    said = []
+    for item in items:
+        name = " ".join(str(item.get("name") or "").split())
+        words = " ".join(str(item.get("text") or "").split()) or "[消息]"
+        said.append(f"{name}：{words}" if name else words)
+    if not said:
+        return ""
+    title = " ".join(str(record.get("title") or "").split())
+    head = f"{RECORD_PREFIX}：{title}]" if title else f"{RECORD_PREFIX}]"
+    try:
+        count = int(record.get("count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    tail = "（只读到前几条）" if record.get("partial") else (f"（共 {count} 条）" if count > len(said) else "")
+    line = f"{head} {_RECORD_SEP.join(said)}"
+    if len(line) + len(tail) > RECORD_CHARS:
+        if not tail and count > 1:
+            tail = f"（共 {count} 条）"
+        line = line[:RECORD_CHARS - len(tail) - 1].rstrip() + "…"
+    return line + tail
+
+
 def message_text(msg: dict) -> str:
     """The line of a creator's (or an operator's) message; WeChat's own line (``is_notice``) is
-    its notice text."""
+    its notice text.  A forwarded 聊天记录 whose XML was read: what is in it (``record_line``)."""
     msg_type = msg_type_of(msg)
     content = _QUOTE_PREFIX.sub("", str(msg.get("content", "") or "")).strip()
     if is_notice(msg):
@@ -113,6 +161,9 @@ def message_text(msg: dict) -> str:
         name = str(msg.get("file_name") or "").strip()
         if name:
             return f"[文件] {name}"
+        record = record_of(msg)
+        if record is not None and record_line(record):
+            return record_line(record)
         special = msg.get("special") if isinstance(msg.get("special"), dict) else {}
         kind = str(special.get("type") or "")
         label = APPMSG_LABELS.get(kind, "消息")

@@ -112,7 +112,8 @@ from ..send.bubbles import typing_delay
 from ..wechat.new_friends import FILLER, is_friend_notice, is_person_chat
 from . import contact, deals, gates, pii, platforms, retention
 from .boss_groups import (BOSS as BOSS_WHO, CHANNEL as GROUP_CHANNEL, EVENT as BOSS_EVENT, GONE as BOSS_GONE,
-                          LINKED as BOSS_LINKED, OPENING_HOW as BOSS_OPENING, BossGroups, told_lines)
+                          LINKED as BOSS_LINKED, OPENING_HOW as BOSS_OPENING, RECORD_LINE_CHARS, BossGroups,
+                          told_lines)
 from .friend_adds import OPEN as FRIEND_ADD_OPEN, STATES as FRIEND_ADD_STATES, FriendAdds, friend_adds_out
 from .result import MAX_DRAFT_CHARS, MESSAGE_KINDS, DraftError, parse_draft
 from .three_party import EVENT as GROUP_EVENT, ThreeParty, state_out as group_state_out
@@ -1672,13 +1673,14 @@ class PrmService:
             else:
                 logger.info("PRM: a WeChat system line in boss group %s…; not drafted", chat_id[:8])
             return True
+        said = message_text(self.boss_groups.record_msg(msg, party, row))   # (a 聊天记录: no boss's name in it)
         self._group_line(party, chat_id, "creator" if str(msg.get("sender_id") or "") == party["wxid"] else
                          ("boss" if self.boss_groups.who(row, str(msg.get("sender_id") or ""),
                                                          str(msg.get("sender_name") or "")) == BOSS_WHO else "member"),
-                         message_text(msg), self._local(written) if written else now, now)
+                         said, self._local(written) if written else now, now)
         if str(msg.get("sender_id") or "") != party["wxid"]:
             who = self.boss_groups.who(row, str(msg.get("sender_id") or ""), str(msg.get("sender_name") or ""))
-            self.boss_groups.add_context(chat_id, who, self._mask(party["id"], message_text(msg), now),
+            self.boss_groups.add_context(chat_id, who, self._mask(party["id"], said, now),
                                          self._local(written) if written else now)
             logger.info("PRM: a line of %s in boss group %s… kept for party %d's next draft (not answered)",
                         "the boss" if who == BOSS_WHO else "another member", chat_id[:8], party["id"])
@@ -1705,7 +1707,8 @@ class PrmService:
         sender = str(msg.get("sender_id") or "")
         who = ("creator" if sender == party["wxid"] else
                "boss" if self.boss_groups.who({}, sender, str(msg.get("sender_name") or "")) == BOSS_WHO else "member")
-        self._group_line(party, chat_id, who, message_text(msg), self._local(written) if written else now, now)
+        self._group_line(party, chat_id, who, message_text(self.boss_groups.record_msg(msg, party)),
+                         self._local(written) if written else now, now)
         logger.info("PRM: a line in party %d's 三方群 %s… kept for her private drafts (read only, not answered)",
                     party["id"], chat_id[:8])
         return True
@@ -1722,7 +1725,8 @@ class PrmService:
             return
         now = self._clock()
         written = float(msg.get("timestamp", 0) or 0)
-        self._group_line(party, chat_id, "us", message_text(msg), self._local(written) if written else now, now)
+        self._group_line(party, chat_id, "us", message_text(self.boss_groups.record_msg(msg, party)),
+                         self._local(written) if written else now, now)
         logger.info("PRM: our own line in party %d's 三方群 %s… kept for her private drafts (no takeover)",
                     party["id"], chat_id[:8])
 
@@ -1742,7 +1746,8 @@ class PrmService:
         """One line of her 三方群 kept on her deal (``GROUP_LINE``): who wrote it (creator | us | boss | member), when
         (this PC's clock), the words masked like hers (phone and ID numbers as her placeholders) with the bosses' names
         as PRM_BOSS_CALL, at most GROUP_LINE_CHARS."""
-        said = self._mask(party["id"], self.boss_groups.hide(str(text or "")), now)[:GROUP_LINE_CHARS]
+        cap = RECORD_LINE_CHARS if str(text or "").startswith(edge_text.RECORD_PREFIX) else GROUP_LINE_CHARS
+        said = self._mask(party["id"], self.boss_groups.hide(str(text or "")), now)[:cap]
         if not said.strip():
             return
         deal = self._store.deal_of(party["id"], now)
@@ -1878,9 +1883,11 @@ class PrmService:
                 return
             late = False                   # Windows' queue never replays history: drafted as it always was
         at = sent_at or now
-        line = message_text(msg)
         if group is not None or self.boss_groups.masks(party):
-            line = self.boss_groups.hide(line)     # 老板拉的群: the bosses' names never go to the Mac (PRM_BOSS_CALL)
+            # 老板拉的群: the bosses' names never go to the Mac (PRM_BOSS_CALL), a 聊天记录 she forwards included
+            line = self.boss_groups.hide(message_text(self.boss_groups.record_msg(msg, party, group)))
+        else:
+            line = message_text(msg)
         if late and age > self._catchup_sec:
             with self._handle_lock:
                 self._missed(party, self._store.deal_of(party["id"], now), line, at, now, chat_id=chat_id)
@@ -2261,9 +2268,11 @@ class PrmService:
                 self._confirm(packet_id, msg, self._local(sent_at) or now, now)
             return
         deal = self._store.deal_of(party["id"], now)
-        said = message_text(msg)
         if chat_id != party["wxid"] or self.boss_groups.party_has_group(party["id"]):
-            said = self.boss_groups.hide(said)             # 老板拉的群: the bosses' names never go to the Mac
+            # 老板拉的群: the bosses' names never go to the Mac (a 聊天记录 we forward included)
+            said = self.boss_groups.hide(message_text(self.boss_groups.record_msg(msg, party)))
+        else:
+            said = message_text(msg)
         text = self._mask(party["id"], f"[{_clock_text(sent_at or now)}] {said}", now)
         # ``at``: when it was written (read late, it is still an answer to what she wrote before it)
         self._store.add_event(deal["id"], party["id"], "operator_message", {"text": text, "at": sent_at or now},
@@ -3213,11 +3222,12 @@ class PrmService:
         info = {"from": min(times), "count": len(picked)}
         taken = 0
         for msg, at in zip(picked, times):
-            line = message_text(msg)
             if self.boss_groups.masks(party):
                 # 老板拉的群 (second review 2026-10-31 F9): a creator the boss introduced (her group taken over, or being
                 # taken over now) speaks of him: his name never goes to the Mac, as in her live lines (``_take``)
-                line = self.boss_groups.hide(line)
+                line = self.boss_groups.hide(message_text(self.boss_groups.record_msg(msg, party)))
+            else:
+                line = message_text(msg)
             if verify_until and at <= verify_until and str(msg.get("msg_type", 1)) == "1":
                 line = f"（加好友时的验证消息）{line}"
             files: tuple = ()
