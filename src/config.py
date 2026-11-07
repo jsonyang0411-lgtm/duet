@@ -360,6 +360,13 @@ class BotConfig:
     prm_sample_sync_min: int = 60
     prm_sample_waybill_days: int = 3
     prm_sample_sign_days: int = 10
+    # 签收后问一句 (2026-11-07, the user: 「可以加」): an order the sync above sees signed for in 聚水潭 (the bot's own, or one
+    # of ours made by hand whose waybill went into her deal) and she has not said she got it: one draft job asks her how
+    # the samples suit her (kb 场景 D2, 「聚水潭显示签收」), only inside PRM_SIGNED_HELLO_HOURS by this PC's clock (a
+    # signature outside waits for them).  Its draft goes like any reply draft: 待审批 by day, the night window's and
+    # 自动模式's rules.  "off" (the default): nothing of it.
+    prm_signed_hello: str = "off"
+    prm_signed_hello_hours: str = "10:00-20:00"
     # The 抖音百应 private messages (精选联盟私信) of the creators invited by 邀约带货: asked of the Mac once this many
     # minutes (0 = off, the default; the Mac's `dy buyin im-inbox`, read-only, is still to be written: until then the
     # console says it cannot be read).  A registered creator's new lines become a 百应 draft in 待审批 that an operator
@@ -596,6 +603,16 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(f"PRM_SAMPLE_WAYBILL_DAYS must be between 1 and 30, got {kwargs.get('prm_sample_waybill_days')}")
     if not (1 <= int(kwargs.get("prm_sample_sign_days", 10)) <= 60):
         errors.append(f"PRM_SAMPLE_SIGN_DAYS must be between 1 and 60, got {kwargs.get('prm_sample_sign_days')}")
+    if kwargs.get("prm_signed_hello", "off") not in ("off", "on"):
+        errors.append(f"PRM_SIGNED_HELLO must be off or on, got {kwargs.get('prm_signed_hello')}")
+    hello_hours = str(kwargs.get("prm_signed_hello_hours", "10:00-20:00") or "").strip()
+    if hello_hours:                                    # (empty: the default, 10:00-20:00)
+        from src.prm.gates import night_window
+
+        try:
+            night_window(hello_hours)
+        except ValueError:
+            errors.append(f"PRM_SIGNED_HELLO_HOURS must be HH:MM-HH:MM (like 10:00-20:00), got {hello_hours}")
     buyin_min = int(kwargs.get("prm_buyin_sync_min", 0))
     if not (buyin_min == 0 or 5 <= buyin_min <= 1440):
         errors.append(f"PRM_BUYIN_SYNC_MIN must be 0 (off) or between 5 and 1440, got {kwargs.get('prm_buyin_sync_min')}")
@@ -778,6 +795,8 @@ def load_config() -> BotConfig:
         "prm_sample_sync_min": int(os.getenv("PRM_SAMPLE_SYNC_MIN", "60")),
         "prm_sample_waybill_days": int(os.getenv("PRM_SAMPLE_WAYBILL_DAYS", "3")),
         "prm_sample_sign_days": int(os.getenv("PRM_SAMPLE_SIGN_DAYS", "10")),
+        "prm_signed_hello": _parse_switch(os.getenv("PRM_SIGNED_HELLO", "off")),
+        "prm_signed_hello_hours": os.getenv("PRM_SIGNED_HELLO_HOURS", "").strip() or "10:00-20:00",
         "prm_buyin_sync_min": int(os.getenv("PRM_BUYIN_SYNC_MIN", "0")),
         "prm_friend_add": _parse_switch(os.getenv("PRM_FRIEND_ADD", "off")),
         "prm_friend_add_daily_max": int(os.getenv("PRM_FRIEND_ADD_DAILY_MAX", "10")),

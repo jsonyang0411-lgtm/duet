@@ -27,6 +27,8 @@
                     waybill, sent / signed for, why rejected or deleted), what the deal got of
                     them (``applied``) and whether they are still asked about (``done`` empty):
                     PRM_SAMPLE_SYNC_MIN, src/prm/service.py
+``signed_hellos``   the signatures that sync saw while PRM_SIGNED_HELLO was on: whether the draft that asks her how
+                    the samples suit her is owed, was asked for (its job) or is not to be (why): once per order
 ``buyin_threads``   抖音百应 private-message conversations (精选联盟私信, PRM_BUYIN_SYNC_MIN): which registered
                     creator a conversation is (none: nobody on the list matched), her 百应 id and 抖音号, our
                     invite it is (``invited``, from the Mac's invite ledger match), the message ids handled, when
@@ -230,6 +232,22 @@ CREATE TABLE IF NOT EXISTS hand_samples (
     state TEXT NOT NULL DEFAULT 'waiting',
     why TEXT NOT NULL DEFAULT '',
     dismissed_at REAL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+-- 签收后问一句 (PRM_SIGNED_HELLO, 2026-11-07): one row per sample order the sync saw signed for in 聚水潭 while the
+-- switch was on (the bot's own, ``hand`` 0, or ours made by hand whose waybill went into her deal, ``hand`` 1): ``owed``
+-- (asked for when PRM_SIGNED_HELLO_HOURS and her chat allow), ``asked`` (``job_id``: its draft job), ``skipped``
+-- (``why``: she wrote after it, signed too long ago, a person marked the deal 已签收 …).  Never asked twice.
+CREATE TABLE IF NOT EXISTS signed_hellos (
+    order_no TEXT PRIMARY KEY,
+    deal_id INTEGER NOT NULL,
+    party_id INTEGER NOT NULL,
+    signed_at REAL NOT NULL,
+    hand INTEGER NOT NULL DEFAULT 0,
+    state TEXT NOT NULL DEFAULT 'owed',
+    why TEXT NOT NULL DEFAULT '',
+    job_id INTEGER,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -1458,6 +1476,54 @@ class PrmStore:
         """Forget the hand-made orders first seen before ``before`` (their lines go too); returns how many."""
         with self._lock:
             cur = self._conn.execute("DELETE FROM hand_samples WHERE created_at < ?", (before,))
+            self._conn.commit()
+            return cur.rowcount
+
+    # ── 签收后问一句 (PRM_SIGNED_HELLO, src/prm/service.py) ──────────────────
+
+    def add_signed_hello(self, order_no: str, *, deal_id: int, party_id: int, signed_at: float, hand: bool,
+                         state: str, why: str = "", now: Optional[float] = None) -> bool:
+        """Note a signature seen (an order noted already stays as it is: never asked twice); True when it is new."""
+        now = time.time() if now is None else now
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO signed_hellos (order_no, deal_id, party_id, signed_at, hand, state, why,"
+                " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (order_no, deal_id, party_id, signed_at, int(bool(hand)), state, why, now, now),
+            )
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def signed_hello(self, order_no: str) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM signed_hellos WHERE order_no = ?", (order_no,)).fetchone()
+        return dict(row) if row else None
+
+    def signed_hellos(self, *, state: Optional[str] = None) -> list[dict]:
+        """The signatures noted, oldest first; of one ``state`` (``owed``: the sweep's)."""
+        sql, args = "SELECT * FROM signed_hellos", []
+        if state is not None:
+            sql += " WHERE state = ?"
+            args.append(state)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY signed_at, order_no", args).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_signed_hello(self, order_no: str, now: Optional[float] = None, **fields) -> None:
+        unknown = set(fields) - {"state", "why", "job_id"}
+        if unknown:
+            raise ValueError(f"not a signed hello field: {sorted(unknown)}")
+        fields["updated_at"] = time.time() if now is None else now
+        names = sorted(fields)
+        with self._lock:
+            self._conn.execute(f"UPDATE signed_hellos SET {', '.join(f'{n} = ?' for n in names)} WHERE order_no = ?",
+                               (*[fields[n] for n in names], order_no))
+            self._conn.commit()
+
+    def purge_signed_hellos(self, before: float) -> int:
+        """Forget the signatures noted before ``before``; returns how many."""
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM signed_hellos WHERE created_at < ?", (before,))
             self._conn.commit()
             return cur.rowcount
 
