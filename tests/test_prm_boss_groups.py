@@ -18,7 +18,8 @@ from test_prm import ADMIN, CREATOR, Bot, Clock, draft
 
 from src.db import MessageStore, initialize_db
 from src.prm import boss_groups as bg
-from src.prm.service import GROUP_UNSENT, PART_LATE_SEC, SETTLE_SEC, UNREACHABLE, PrmService, event_out
+from src.prm.service import (GROUP_CLOSED_TEXT, GROUP_UNSENT, PART_LATE_SEC, SETTLE_SEC, UNREACHABLE, PrmService,
+                              event_out)
 from src.wechat.window_controller import SendRefused
 
 BOSS = "老板测试"
@@ -904,6 +905,46 @@ def test_the_group_gone_stops_reading_it_and_her_lines_there_are_silent_again(bo
     clock_now = bot.clock.now + bg.BOSS_SCAN_SEC + 1
     bot.clock.now = clock_now
     assert bot.prm.boss_groups.scan() == 0 and bot.prm.store.boss_group(GROUP)["state"] == "gone"
+
+
+def test_the_group_gone_fails_its_drafts_not_sent_and_cancels_its_queued_job(bot):
+    """Review 2026-11-09: before, a draft approved before 「群已经不在了」 (or written meanwhile) still went into the group.
+    A draft for a group goes out only while the bot drafts in it."""
+    boss_makes(bot)
+    deal_id = bot.prm.store.boss_group(GROUP)["deal_id"]
+    no_opening(bot)
+    bot.prm.handle(gmsg(bot, "在吗"))
+    _, packet = drafted(bot)
+    assert bot.prm.decide(packet["id"], "send")["ok"] is True         # approved, not sent yet
+    bot.clock.now += 5
+    bot.prm.handle(gmsg(bot, "价格呢"))
+    job = job_of(bot)                                                 # queued for the Mac
+    assert bot.prm.deal_action("group_none", {"deal_id": deal_id})["ok"] is True
+    p = bot.prm.store.packet(packet["id"])
+    assert (p["status"], p["error"]) == ("failed", GROUP_CLOSED_TEXT)
+    assert bot.relay.store.get(job["id"])["status"] == "cancelled"
+    assert bot.prm.send_approved() == 0 and bot.texts == []
+
+
+def test_bu_jie_le_on_a_boss_group_keeps_it_her_three_party_group_read_only(bot):
+    """Review 2026-11-09: the console's 「不接了」 (the admin's 「不接群」 too) on a 老板拉的群 that is her 三方群 stops the
+    drafting there only: it stays her 三方群 (as one 「建好了」 by the console), read only; never 「群已经不在了」."""
+    bot.prm.three_party.attach(backend=bot.backend)
+    boss_makes(bot)
+    deal_id = bot.prm.store.boss_group(GROUP)["deal_id"]
+    no_opening(bot)
+    before = bot.prm.store.deal(deal_id)["three_party"]
+    assert bot.prm.deal_action("group_unlink", {"deal_id": deal_id}) == {"ok": True, "three_party": True,
+                                                                        "reading": True, "unsent": 0}
+    assert bot.prm.store.deal(deal_id)["three_party"] == {**{k: v for k, v in before.items() if k != "why"},
+                                                          "by": "console"}
+    row = bot.prm.store.boss_group(GROUP)
+    assert (row["state"], row["why"]) == ("gone", bg.MANUAL_GONE_WHY) and not bot.prm.is_party_group(GROUP)
+    assert bot.prm.three_party.deal_of_chat(GROUP)["id"] == deal_id and GROUP in bot.backend.watched
+    assert bot.prm.handle(gmsg(bot, "还在吗")) is True and job_of(bot) is None           # read only: never drafted
+    assert "不接这个群了（运营说的），群里她的消息不再起草：它还是她的三方群，机器人只读" in names(bot, deal_id)
+    bot.clock.now += bg.BOSS_SCAN_SEC + 1
+    assert bot.prm.boss_groups.scan() == 0 and bot.prm.store.boss_group(GROUP)["state"] == "gone"   # (not taken again)
 
 
 def test_the_group_gone_of_a_deal_whose_group_is_not_a_boss_group_touches_nothing(bot):

@@ -1576,6 +1576,7 @@ class TestPrmPages:
         assert "三方群已建好" not in text and "品牌测试×小美" not in text
         assert block.locator("button:has-text('复制群名')").count() == 0 and block.locator("button:has-text('拉三方群')").count() == 0
         assert block.locator("button:has-text('群已经不在了')").count() == 1
+        assert block.locator("button:has-text('不接了')").count() == 1 and "它还是她的三方群，机器人只读" in text
         page.locator("button[aria-label='展开 小红']").click()                    # a deal with no group: as before
         assert page.locator(".prm-group button:has-text('拉三方群')").count() == 1
 
@@ -1853,8 +1854,9 @@ class TestPrmPages:
 
     def test_deals_page_says_a_group_linked_by_hand_and_stops_it(self, page, prm):
         """A deal whose 三方群 is a group the admin linked by hand (``by`` "manual") says 手动接的群 (not 老板拉的群) and what
-        the bot does there, with 「群已经不在了」; a group linked by hand that is not her 三方群 (``linked_groups``) has a
-        line of its own whose 「不接了」 posts the deal action ``group_unlink`` with its chat."""
+        the bot does there, with 「群已经不在了」 and 「不接了」 (the deal action ``group_unlink`` without a chat: it stays her
+        三方群, read only); a group linked by hand that is not her 三方群 (``linked_groups``) has a line of its own whose
+        「不接了」 posts ``group_unlink`` with its chat."""
         import time as _time
 
         prm.service.register("wxid_test_red", "小红")
@@ -1885,6 +1887,10 @@ class TestPrmPages:
         assert f"手动接的群（{since} 接手）：微信里叫「小美的对接群」" in text and "运营在微信里接手了这个群" in text
         assert "老板拉的群" not in text and "三方群已建好" not in text and block.locator("button:has-text('复制群名')").count() == 0
         assert page.locator(".prm-linked-groups").count() == 0
+        assert "「不接了」：不再起草，它还是她的三方群，机器人只读" in text
+        block.locator("button:has-text('不接了')").click()
+        page.get_by_text("记下了：这个群不接了，群里她的话不再起草；它还是她的三方群，机器人只读").wait_for()
+        assert posted[-1]["action"] == "group_unlink" and "chat" not in posted[-1] and posted[-1]["deal_id"]
         page.locator("button[aria-label='展开 小红']").click()
         line = page.locator(".prm-linked-group")
         line.wait_for()

@@ -157,6 +157,19 @@ class ThreeParty:
             logger.info("PRM: 三方群: %d group(s) read again (read only)", watched)
         return watched
 
+    def read_again(self, deal: Optional[dict]) -> bool:
+        """This deal's 三方群 read only again (``watch_group``, from where ``since_of`` says), as ``watch_all`` does at
+        start: a group linked by hand that the admin's 「不接群」 (or the console's 「不接了」) gave back (接手任何合作群,
+        review 2026-11-09: PrmService.unlink_group).  False: nothing is read (no group, one drafted in, or a backend
+        that cannot read groups)."""
+        group = (deal or {}).get("three_party") or {}
+        if (not self.reading() or group.get("state") != CREATED
+                or not str(group.get("chat") or "").endswith("@chatroom") or group.get("by") in TAKEN_BY):
+            return False
+        since = self.since_of(deal) if self.since_of is not None else float(group.get("at") or self._clock())
+        self._watch(str(group["chat"]), since)
+        return True
+
     def _watch(self, chat: str, since: float) -> None:
         watch = getattr(self._backend, "watch_group", None)
         if not callable(watch):

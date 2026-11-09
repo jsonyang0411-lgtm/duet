@@ -311,8 +311,10 @@ class BossGroups:
     ``local(at)``: a time WeChat gives on this PC's clock (PrmService._local: only the baseline's time of a backend
     without ``wechat_now`` is worked out with it, ``_wechat_clock``); ``guard()``: ThreeParty.guard (the lock 「拉三方群」
     starts a group under, yielding the deal being made now, never one only tried); ``catch_up(party, chat, since)``:
-    PrmService._link_catch_up (a group linked by hand: what was said there since ``since`` read once, ``link``).
-    ``attach`` gives it the WeChat backend and the bot's message store (Bot._start_prm, before PrmService.start)."""
+    PrmService._link_catch_up (a group linked by hand: what was said there since ``since`` read once, ``link``);
+    ``on_close(chat, now)``: PrmService._close_group (a group's link ended, ``_drop``: its drafts not sent fail, its
+    job not taken is cancelled).  ``attach`` gives it the WeChat backend and the bot's message store (Bot._start_prm,
+    before PrmService.start)."""
 
     def __init__(self, store, config=None, *, clock: Callable[[], float] = time.time, reserved=(),
                  register: Optional[Callable[..., dict]] = None,
@@ -320,7 +322,8 @@ class BossGroups:
                  handle: Optional[Callable[[dict], bool]] = None,
                  local: Optional[Callable[[float], float]] = None,
                  guard: Optional[Callable] = None,
-                 catch_up: Optional[Callable[[dict, str, float], Optional[dict]]] = None):
+                 catch_up: Optional[Callable[[dict, str, float], Optional[dict]]] = None,
+                 on_close: Optional[Callable[[str, float], int]] = None):
         self._store = store
         self._config = config
         self._clock = clock
@@ -331,6 +334,7 @@ class BossGroups:
         self._opening = opening
         self._handle = handle
         self._catch_up = catch_up
+        self._on_close = on_close
         self._on = str(getattr(config, "prm_boss_groups", "off") or "off").strip().lower() == "on"
         self._with = group_with(getattr(config, "prm_group_with", ""))
         self._call = boss_call(getattr(config, "prm_boss_call", ""))
@@ -446,8 +450,9 @@ class BossGroups:
         return set(self._linked)
 
     def by_hand(self, chat: str) -> bool:
-        """Was this group linked by hand (接手任何合作群, its row's ``manual``; linked now or gone since)?  Its drafts go
-        out whatever PRM_BOSS_GROUPS says, and they and the Mac say 群 instead of 老板拉的群."""
+        """Was this group linked by hand (接手任何合作群, its row's ``manual``; linked now or gone since)?  Only words hang on
+        it: its drafts and the Mac say 群 instead of 老板拉的群.  Whether a draft goes out is ``is_linked``'s (linked by
+        hand: whatever PRM_BOSS_GROUPS says; gone: never, PrmService._group_closed)."""
         chat = str(chat or "")
         if not chat.endswith("@chatroom"):
             return False
@@ -487,11 +492,13 @@ class BossGroups:
 
     def reach_group(self, party_id) -> Optional[dict]:
         """The newest group the bot took over for this creator that she is still in (no ``LEFT_NOTICE`` on her deal), or
-        None: where a packet the bot starts itself goes when she has no private chat with us (PrmService ``_reach``)."""
+        None: where a packet the bot starts itself goes when she has no private chat with us (PrmService ``_reach``).
+        Only a group the bot reads and drafts in now (``is_linked``: a row the scan took over while PRM_BOSS_GROUPS was
+        on is none while it is off, review 2026-11-09)."""
         if not self.party_has_group(party_id):
             return None
         for row in self._store.boss_groups((LINKED,)):
-            if int(row.get("party_id") or 0) != int(party_id):
+            if int(row.get("party_id") or 0) != int(party_id) or row["chat"] not in self._linked:
                 continue
             deal = self._store.deal(int(row.get("deal_id") or 0)) or {}
             if not any(n.get("key") == LEFT_NOTICE + row["chat"] for n in deal.get("notices") or []):
@@ -531,6 +538,27 @@ class BossGroups:
         """Does one of WeChat's own lines of the group name a boss (「"老板测试" 撤回了一条消息」: not hers)?"""
         names = {str(b.get("name") or "") for b in row.get("boss") or []} | set(self._with)
         return any(n and n in str(line or "") for n in names)
+
+    def recall_is_hers(self, row: dict, party: dict, line: str) -> bool:
+        """Is one of WeChat's lines of a linked group somebody's recall (``edge.text.recall_by`` "them": not ours) that
+        is hers (PrmService ``_system_line``: her drafts not sent wait for a person)?  Never one that names a boss
+        (``boss_said``).  In a 老板拉的群 any other one, as before (she is the one there besides us and the boss).  In a
+        group linked by hand (接手任何合作群, review 2026-11-09: her 商务's recall held her drafts) only one whose name is
+        hers (as this account sees her in the group, or her 称呼; spaces and case aside), or any when nobody but her, us
+        and a boss is in it."""
+        if edge_text.recall_by(line) != "them" or self.boss_said(row, line):
+            return False
+        if not row.get("manual"):
+            return True
+        her = str(party.get("wxid") or "")
+        said = " ".join(str(line or "").split()).split(edge_text.RECALL_MARK, 1)[0]
+        who = _key(said.strip().strip('"“”「」\'').strip())
+        names = {_key(m.get("name")) for m in row.get("members") or [] if m.get("wxid") == her}
+        names.add(_key(party.get("name")))
+        if who and who in names:
+            return True
+        bosses = self._bosses_in(row)
+        return not [m for m in row.get("members") or [] if m.get("wxid") not in bosses and m.get("wxid") != her]
 
     def hide(self, text) -> str:
         """``text`` with each boss's name (PRM_GROUP_WITH: spaces and case aside) as PRM_BOSS_CALL: what goes to the Mac
@@ -655,6 +683,11 @@ class BossGroups:
             if not bosses:
                 out["boss"] = []
         return out
+
+    def has_boss(self, row: dict) -> bool:
+        """Is a boss of PRM_GROUP_WITH among this group's members (``_bosses_in``)?  A group linked by hand without one
+        is no 三方群 (``_link``) and its lines are no 三方群 lines (PrmService ``_group_line``, review 2026-11-09)."""
+        return bool(self._bosses_in(row or {}))
 
     def _bosses_in(self, row: dict) -> set:
         """The wxids of the bosses (PRM_GROUP_WITH: by wxid, or a member named like one) among a group's members."""
@@ -1152,13 +1185,18 @@ class BossGroups:
     def _link(self, deal: dict, row: dict, now: float, manual: bool = False) -> bool:
         """The deal's 三方群 is this group (``by`` boss; ``manual``, a group linked by hand: ``by`` manual, at ``now``),
         unless it has one made, being made or unsure (True: kept).  Linked by hand, her own 三方群 (「拉三方群」 made it,
-        read only till now) is that group: it is drafted in from now on (``by`` manual; not kept); a group with no boss
-        of PRM_GROUP_WITH in it is no 三方群 (kb 第 0.5 节: the samples are the boss's there): the deal's stays as it is
-        (none: 「拉三方群」 still makes one), the console lists the group with the deal (``linked_groups``)."""
+        read only till now) is that group: it is drafted in from now on (``by`` manual, what it was kept as ``was``:
+        「不接群」 puts it back, PrmService.unlink_group; not kept).  A group with no boss of PRM_GROUP_WITH in it is no
+        三方群 (kb 第 0.5 节: the samples are the boss's there): the deal's stays as it is (none: 「拉三方群」 still makes
+        one), the console lists the group with the deal (``linked_groups``)."""
         group = deal.get("three_party") or {}
         state = str(group.get("state") or "")
         if manual and state == CREATED and group.get("chat") == row["chat"]:
-            self._store.update_deal(deal["id"], now, three_party={**group, "at": now, "by": MANUAL, "why": MANUAL_WHY})
+            # (what it was is kept, ``was``: 「不接群」 puts it back, a read only 三方群 again, PrmService.unlink_group)
+            was = {k: group[k] for k in ("by", "at", "why") if k in group}
+            kept = {k: v for k, v in group.items() if k != "was"}
+            self._store.update_deal(deal["id"], now,
+                                    three_party={**kept, "at": now, "by": MANUAL, "why": MANUAL_WHY, "was": was})
             return False
         if state in (CREATED, CREATING, UNSURE):
             return True
@@ -1322,13 +1360,17 @@ class BossGroups:
                 return False
             return self._drop(row, int(deal["id"]), int(deal["party_id"]), actor)
 
-    def _drop(self, row: dict, deal_id: int, party_id: int, actor: str) -> bool:
-        """``gone`` / ``stop`` (under ``_lock``): the group ``gone``, not read any more, the deal's record."""
+    def _drop(self, row: dict, deal_id: int, party_id: int, actor: str, read_only: bool = False,
+              stopped: bool = False) -> bool:
+        """``gone`` / ``stop`` (``stopped``; under ``_lock``): the group ``gone``, not read any more
+        (``unwatch_group``), its drafts not sent and its job not taken given up (``on_close``, review 2026-11-09: a
+        draft made before went into the group all the same), the deal's record (``read_only``: her 三方群 goes back to
+        being read only, PrmService.unlink_group)."""
         now = self._clock()
         chat = row["chat"]
         manual = bool(row.get("manual"))
         if not self._store.update_boss_group(chat, now, states=(LINKED,), state=GONE,
-                                             why=MANUAL_GONE_WHY if manual else GONE_WHY, opening_due=None):
+                                             why=MANUAL_GONE_WHY if manual or stopped else GONE_WHY, opening_due=None):
             return False
         self._linked = {k: v for k, v in self._linked.items() if k != chat}
         self._manual = self._manual - {chat}
@@ -1339,7 +1381,14 @@ class BossGroups:
                 unwatch(chat)
             except Exception:
                 logger.warning("PRM: boss group %s…: the backend could not stop reading it", chat[:8], exc_info=True)
-        self._store.add_event(deal_id, party_id, EVENT, {"gone": True, **({"manual": True} if manual else {})},
+        if self._on_close is not None:
+            try:
+                self._on_close(chat, now)
+            except Exception:
+                logger.exception("PRM: boss group %s…: its drafts could not be given up", chat[:8])
+        self._store.add_event(deal_id, party_id, EVENT, {"gone": True, **({"manual": True} if manual else {}),
+                                                         **({"stopped": True} if stopped else {}),
+                                                         **({"read_only": True} if read_only else {})},
                               actor=actor if actor in ("console", "admin") else "system", now=now)
         logger.info("PRM: %s %s… is gone (%s): party %d's lines there are not drafted any more",
                     "group linked by hand" if manual else "boss group", chat[:8], actor, party_id)
@@ -1450,7 +1499,11 @@ class BossGroups:
                 logger.exception("PRM: group %s…: what was said there before it was linked could not be read", chat[:8])
         caught = dict(caught) if isinstance(caught, dict) else {"read": False}
         since = caught.get("since")
-        self._watch(chat, float(since) if isinstance(since, (int, float)) else self._wechat_time(self._clock()))
+        since = float(since) if isinstance(since, (int, float)) else self._wechat_time(self._clock())
+        # (after a restart the watch starts here too, ``_since``: never the lines from before the link; review
+        # 2026-11-09: linked while unreadable, a restart read from BOSS_WATCH_BACK_SEC before the link)
+        self.note_line(chat, since - 1)
+        self._watch(chat, since)
         return {**out, "caught": {k: v for k, v in caught.items() if k != "since"}}
 
     def _link_by_hand(self, offer: dict, her: dict, actor: str) -> dict:
@@ -1499,14 +1552,16 @@ class BossGroups:
         """This PC's time ``now`` on WeChat's clock, as near as this run knows it (``local``: the skew it measured)."""
         return now - (self._local(now) - now)
 
-    def stop(self, chat: str, actor: str = "admin") -> bool:
-        """「不接群 <群名>」 (src/prm/group_link.py) on a linked group that is not her deal's 三方群 (that one is
-        「群已经不在了」: PrmService.deal_action ``group_none``, ``gone``): as ``gone``.  True when it was linked."""
+    def stop(self, chat: str, actor: str = "admin", read_only: bool = False) -> bool:
+        """「不接群 <群名>」 (src/prm/group_link.py) and the console's 「不接了」 (PrmService.unlink_group): the group is not
+        read nor drafted in any more, as ``gone`` (``read_only``: it is her 三方群, read only from now on, the record says
+        so).  True when it was linked."""
         with self._lock:
             row = self._store.boss_group(str(chat or ""))
             if row is None or row["state"] != LINKED or not self.is_linked(row["chat"]):
                 return False
-            return self._drop(row, int(row.get("deal_id") or 0), int(row.get("party_id") or 0), actor)
+            return self._drop(row, int(row.get("deal_id") or 0), int(row.get("party_id") or 0), actor, read_only,
+                              stopped=True)
 
     # ── clean-ups (PrmService.purge / purge_due) ─────────────────────────
 

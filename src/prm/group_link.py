@@ -17,8 +17,12 @@ hands the text over, ``admin_command``):
 - 「是 N」: BossGroups ``link`` (she is registered unless she is a creator already, the group linked to her deal, what
   was said there lately its context, one draft when she waits for an answer, the watch), answered in one line;
 - 「不接」: the question is dropped (it expires by itself OFFER_SEC after it was asked);
-- 「不接群 <群名>」: a linked group is not drafted in any more (PrmService.unlink_group: her deal's 三方群 as 「群已经不在了」,
-  any other group linked by hand BossGroups ``stop``; the console's 「不接了」 is the same).
+- 「不接群 <群名>」: a linked group is not drafted in any more (PrmService.unlink_group, BossGroups ``stop``: its drafts not
+  sent fail; her deal's 三方群 stays it, read only again; the console's 「不接了」 is the same).
+
+A group the scan found that waits for 「是她」 on the console's 「老板拉的群」 card (PRM_BOSS_GROUPS on) is not asked about
+here: the answer says to choose there (review 2026-11-09: two questions about one group).  「是 N」 counts only the members
+the question listed (MEMBERS_LISTED); more are chosen on the console's card.
 
 「是 N」 and 「不接」 are commands only while a question is open or was lately (ASKED_KEEP_SEC: then they say it expired), so
 the words stay free otherwise (with CLAUDE_RELAY_ONLY the admin's other lines go to the Mac).  A group linked by hand
@@ -34,7 +38,7 @@ import threading
 import time
 from typing import Callable, Optional
 
-from .boss_groups import LINKED, OFFER_SEC
+from .boss_groups import LINKED, OFFER_SEC, PENDING
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +165,8 @@ class GroupLinks:
         shown = name or NO_NAME
         if bg.is_linked(chat):
             return f"群「{shown}」已经接手了：她在群里说的话会起草"
+        if self._on_card(chat):
+            return f"群「{shown}」是老板拉的群，在控制台「合作单」页顶上的「老板拉的群」卡片里等你选她：到那里点「是她」"
         found = bg.candidates_of(chat)
         deal = service.three_party.deal_of_chat(chat)
         party = service.store.party(int(deal["party_id"])) if deal is not None else None
@@ -203,9 +209,11 @@ class GroupLinks:
         offer = bg.offered(asked["chat"])
         if offer is None:
             return self._not_open(asked)
-        members = offer["members"]
+        members = offer["members"][:MEMBERS_LISTED]           # (only the ones the question listed: review 2026-11-09)
         if not 1 <= number <= len(members):
-            return f"没有第 {number} 位：回「是 1」到「是 {len(members)}」，「不接」作罢"
+            more = (f"；只列了前 {MEMBERS_LISTED} 位，别的到控制台「合作单」页顶上的卡片里选"
+                    if len(offer["members"]) > MEMBERS_LISTED else "")
+            return f"没有第 {number} 位：回「是 1」到「是 {len(members)}」，「不接」作罢{more}"
         out = bg.link(asked["chat"], members[number - 1]["wxid"], actor="admin")
         if not out.get("ok"):
             return f"没接手：{out.get('error') or '出错了'}"
@@ -224,7 +232,9 @@ class GroupLinks:
         return f"好的，群「{asked['name']}」不接了"
 
     def admin_stop(self, name: str) -> str:
-        """「不接群 群名」: a linked group of that name is not drafted in any more (as 「群已经不在了」)."""
+        """「不接群 群名」: a linked group of that name is not drafted in any more (PrmService.unlink_group); the answer says
+        what became of it: her 三方群 still, read only; or a group like any other (never answered); and the drafts for it
+        not sent."""
         if not name:
             return "要写群名：「不接群 群名」"
         service = self._service
@@ -233,14 +243,21 @@ class GroupLinks:
         if not rows:
             return f"没有接手叫「{name}」的群"
         if len(rows) > 1:
-            return f"有 {len(rows)} 个接手的群叫「{name}」：到控制台她的合作单上点「群已经不在了」"
+            return f"有 {len(rows)} 个接手的群叫「{name}」：到控制台她的合作单上点「不接了」"
         row = rows[0]
         party = store.party(int(row.get("party_id") or 0)) if row.get("party_id") else None
         out = service.unlink_group(row.get("deal_id"), row["chat"], actor="admin")
         if not out.get("ok"):
             return f"没停：{out.get('error') or '出错了'}"
-        who = f"{party['name']}的" if party else ""
-        return f"不接了：群「{row['name']}」里她的话不再起草，群里的话和别的群一样不回（{who}合作单和私聊照旧）"
+        who = f"{party['name']}的" if party else "她的"
+        unsent = f"；还没发的 {out['unsent']} 份群里的草稿不发了" if out.get("unsent") else ""
+        if out.get("three_party"):
+            reading = ("机器人只读、不在群里说话，群里的话照旧交给她私聊的草稿" if out.get("reading") else
+                       "这台电脑读不了群，群里的话交不到她私聊的草稿")
+            return (f"不接了：群「{row['name']}」里她的话不再起草；它还是{who}三方群，{reading}"
+                    f"（合作单和私聊照旧）{unsent}")
+        return (f"不接了：群「{row['name']}」里她的话不再起草，群里的话和别的群一样不回（{who}合作单和私聊照旧）"
+                f"{unsent}")
 
     # ── helpers ──────────────────────────────────────────────────────────
 
@@ -249,14 +266,24 @@ class GroupLinks:
         return read if callable(read) else None
 
     def _describe(self, group: dict) -> str:
-        """One group of a list: its name, how many are in it, when it was active last; a deal's own 三方群 says whose."""
+        """One group of a list: its name, how many are in it, when it was active last; a deal's own 三方群 says whose, a
+        group waiting on the 「老板拉的群」 card says so."""
         size = group.get("size")
         bits = [str(group.get("name") or NO_NAME), f"{size} 人" if size else "人数读不出", _clock_text(group.get("last_at"))]
         deal = self._service.three_party.deal_of_chat(str(group["chat"]))
         party = self._service.store.party(int(deal["party_id"])) if deal is not None else None
         if party is not None:
             bits.append(f"{party['name']} 的三方群")
+        if self._on_card(str(group["chat"])):
+            bits.append("老板拉的群，在「老板拉的群」卡片里选")
         return " · ".join(b for b in bits if b)
+
+    def _on_card(self, chat: str) -> bool:
+        """Is this a group the scan found that waits for 「是她」 on the console's 「老板拉的群」 card (PRM_BOSS_GROUPS on)?"""
+        if not self._service.boss_groups.on:
+            return False
+        row = self._service.store.boss_group(chat)
+        return row is not None and row["state"] == PENDING
 
     def _not_open(self, asked: dict) -> str:
         """「是 N」 / 「不接」 when the question is not open any more: linked meanwhile, expired, or dropped."""

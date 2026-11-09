@@ -506,7 +506,9 @@ function LinkedGroups({ groups, busy, run }) {
  *  there to copy); 「先试一下」 picks them and cancels.  A run that may or may not have made it asks 「建好了 / 没建成」.
  *  A group the boss made with her and us (``by`` "boss", 老板拉的群, PRM_BOSS_GROUPS) is hers already: it says so and what
  *  the bot does there (her lines drafted, sent in the group), without the name to copy (the boss named it); one the admin
- *  linked by hand (``by`` "manual", 接手任何合作群) says 手动接的群 the same way. */
+ *  linked by hand (``by`` "manual", 接手任何合作群) says 手动接的群 the same way.  Both have 「不接了」 (deal action
+ *  ``group_unlink`` without a chat, 2026-11-09): no more drafting there, it stays her 三方群, read only (「群已经不在了」 is for
+ *  a group that is gone). */
 function ThreePartyBlock({ p, d, busy, run }) {
   const toast = useToast()
   const [asking, setAsking] = useState(false)
@@ -528,6 +530,10 @@ function ThreePartyBlock({ p, d, busy, run }) {
     <button type="button" className="btn sm ghost" disabled={busy}
       onClick={() => run({ action: 'group_none' }, '记下了：这位达人现在没有三方群')}>群已经不在了</button>
   )
+  const unlink = (
+    <button type="button" className="btn sm ghost" disabled={busy}
+      onClick={() => run({ action: 'group_unlink' }, '记下了：这个群不接了，群里她的话不再起草；它还是她的三方群，机器人只读')}>不接了</button>
+  )
   return (
     <div className="stack prm-group" style={{ gap: 6 }}>
       <b>三方群</b>
@@ -535,7 +541,8 @@ function ThreePartyBlock({ p, d, busy, run }) {
         <>
           <div><UsersThree style={{ verticalAlign: -2 }} /> 老板拉的群（{fmtClock(g.at)} 发现）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
           <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <span className="f-hint">老板把她和我们拉进了这个群，之后由我们跟她对接：她在群里说的话照常起草，回复发在群里，老板也看得到；老板和别人说的话不起草。群里的话也会交给她私聊的草稿。</span>
+            <span className="f-hint">老板把她和我们拉进了这个群，之后由我们跟她对接：她在群里说的话照常起草，回复发在群里，老板也看得到；老板和别人说的话不起草。群里的话也会交给她私聊的草稿。「不接了」：不再起草，它还是她的三方群，机器人只读。</span>
+            {unlink}
             {gone}
           </div>
         </>
@@ -544,7 +551,8 @@ function ThreePartyBlock({ p, d, busy, run }) {
         <>
           <div><UsersThree style={{ verticalAlign: -2 }} /> 手动接的群（{fmtClock(g.at)} 接手）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
           <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <span className="f-hint">运营在微信里接手了这个群（「接群」）：她在群里说的话照常起草，回复发在群里，群里的人都看得到；别人说的话不起草。群里的话也会交给她私聊的草稿。</span>
+            <span className="f-hint">运营在微信里接手了这个群（「接群」）：她在群里说的话照常起草，回复发在群里，群里的人都看得到；别人说的话不起草。群里的话也会交给她私聊的草稿。「不接了」：不再起草，它还是她的三方群，机器人只读。</span>
+            {unlink}
             {gone}
           </div>
         </>
