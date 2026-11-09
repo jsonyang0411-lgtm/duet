@@ -403,6 +403,34 @@ node bin/dy.mjs buyin im-inbox [--after=<cursor 的 JSON>] --limit=<n> --names [
 - 除非 <invite_background> 里写着「卡上开了 X% 长期专属佣金」，不要说「卡上已经给您开了佣金」。
 ```
 
+### 直播手卡（Windows 的 `PRM_HANDCARDS`，默认关）
+
+达人要直播手卡（「手卡」「直播手卡」「上播手卡」）时，Mac 照老板模板自己把图片版手卡做好，附在草稿里；草稿一律在「待审批」里等人看过卡片再发（门槛、下班时段、自动模式、开场白自动发都不会把它发出去）。合作单里还有「做手卡」：她最近那张寄样单的款（机器人建的、聚水潭核验成功的单，默认勾上），或者勾的 / 另填的抖店商品 ID，什么都不选就按案卷里她选的款。
+
+怎么做（`src/prm/handcards.py`）：
+
+1. 起草的 Claude（照样没有 Bash）在结构化结果里写 `handcards`：哪几款（kb/products.md 抖店那张表里的商品 ID）、她要的颜色、看一眼款式图后四宫格用哪一格（`photo_cell`）、底下的大号品牌字要不要切掉（`cut_bottom`）、短名（最多 6 个字）、品牌句、适用人群、4 条卖点（都按标题写，说明里标「推断的」）。
+2. worker 拿数据写技能的 `单子.json`：标题、日常价、SKU（`kb/products.json`），颜色和尺码（帽子图库的 `skus.json`，没有的按 SKU 名字拆），材质（标题里写的），老板模板的口径和双11 那一行（下面的 `handcards.json`）；库存一律「充足」；没依据的是 null（卡上红字「待定」）；直播价 = 日常价 × 0.9 向下取整（脚本自己算）。
+3. 用技能自己的 Python（Pillow）裁主图：去掉两边白边、四宫格取那一格、切掉底下的品牌字。
+4. 跑技能的 `make_cards_local.py <单子.json> --out-dir 手卡/ --no-pdf`（无头 Chromium，不碰你的 Chrome），每张要是 1600×1200；1x 图作为草稿的附件传回 Windows，草稿里的 `handcards_made` 是结论和给运营的说明（每个待定、推断的、沿用的口径、怎么裁的图、真实库存没查）。
+5. 全有或全无：哪一款没数据（不在抖店目录、没有主图、没写卖点）、脚本出错、少一张、传不上去，就一张都不附，草稿等人、写明原因，话也不能原样发。
+
+每次做手卡在 `~/.claude-relay/platform/handcards/<日期-时间>-job<编号>/` 留 7 天：`单子.json`、`产品图/`、`手卡/`（1x 图）、`run.log`。卡上的待定要补的话，改这份 `单子.json` 以后照技能的说明 `make_cards_local.py … --only N` 重出，再在微信里手动发。
+
+Mac 上要做的：
+
+1. 装好 live-handcard 技能和它的环境（`~/.local/share/live-handcard/venv`：playwright + pillow，`make_cards_local.py` 最后一行有重建的命令）。
+2. 照 `tools/claude_relay/handcards.example.json` 建 `~/.claude-relay/handcards.json`（没有这个文件，Mac 就不做手卡，草稿也不会被告诉可以做；每次任务都重读，不用重启）：
+   - `script` / `python`：技能的脚本和它自己的 Python（默认就是上面那两个位置；`python` 空着时用 `$LIVE_HANDCARD_PYTHON`）。
+   - `skus`：帽子图库的 `skus.json`（只读）。
+   - `source`、`globals`：老板模板的口径（佣金、包装、发货时间、售后、发货地、不发货地、快递、折扣 `discount`），说明里会写「沿用了<source>的口径」；口径变了就改这里。
+   - `caveats`：每份说明都要写的话（例子里是「运费险是推断的」）。
+   - `promo`：双11 那一行，`{"text": "双11再减15%实付约{N}", "factor": 0.85, "until": "2026-11-11"}`（N = 直播价 × factor 取整；`until` 那天还算，过了就不写；可加 `from`）。活动哪天结束 kb 里没写，**`until` 先确认再填**。
+   - `send_zip`：也把技能的压缩包（1x、2x、合集 PDF）附给达人（默认 false：以前手动做的时候只发 1x 图；放不下 9 个文件时不附）。
+3. prm worker 用 `kill -USR1` 重启一次（这一版 worker 的代码）。
+
+Windows 上：`.env` 里 `PRM_HANDCARDS=on`（控制台「合作单」页下面的设置里也有「自动做直播手卡」），重启机器人。
+
 ### 两端的版本
 
 旧版 worker 不会说自己能做 prm 任务（请求里没有 `X-Relay-Kinds`），机器人就不会把 prm 任务交给它：达人的话永远不会被当成 cc 任务执行。升级时先升级 Mac 端，再在 Windows 上打开 `PRM_COPILOT`。

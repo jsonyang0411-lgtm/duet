@@ -66,6 +66,11 @@ job has no creator message and says so (``meta.opening``; the worker's ``opening
 outdates it like any reply draft (the next job hears it was not sent), and no holding reply goes for it.
 「补发货盘」 in the console (2026-11-04, ``ask_huopan``) is the same for a creator we did talk to: one job with no line of
 hers that sends her the kb's 货盘 again (``meta.huopan``; the worker's ``huopan_line``), always reviewed.
+直播手卡 (PRM_HANDCARDS, 2026-11-09, src/prm/handcards.py): every WeChat draft job says the Mac may make cards
+(``meta.handcards_ok``); a draft that comes back with the Mac's cards (``Draft.handcards``) always waits for a person,
+all of its cards or none of them (``handcards.keep_cards``), and one whose cards were not made cannot go out as it is
+(``decide``).  「做手卡」 in the console (``ask_handcards``) is one job like 补发货盘's (``meta.handcards``: the products of
+her latest sample order, ``sample_items``, or the ticked ones).
 签收后问一句 (PRM_SIGNED_HELLO, 2026-11-07, default off): a sample order the 聚水潭 sync sees signed for, she has not
 said she got it: one job with no line of hers asks her how the samples suit her (``meta.signed``; the worker's
 ``signed_line``, kb 场景 D2), inside PRM_SIGNED_HELLO_HOURS only, once per order; by day it always waits for a person
@@ -114,7 +119,7 @@ from ..relay.service import MAX_AGE_SEC, job_meta
 from ..relay.store import PRM
 from ..send.bubbles import typing_delay
 from ..wechat.new_friends import FILLER, is_friend_notice, is_person_chat
-from . import contact, deals, gates, pii, platforms, retention
+from . import contact, deals, gates, handcards, pii, platforms, retention
 from .boss_groups import (BOSS as BOSS_WHO, CHANNEL as GROUP_CHANNEL, EVENT as BOSS_EVENT, GONE as BOSS_GONE,
                           LINKED as BOSS_LINKED, OPENING_HOW as BOSS_OPENING, RECORD_LINE_CHARS, BossGroups,
                           told_lines)
@@ -654,6 +659,7 @@ def opening_note(opening: dict) -> str:
 
 
 HUOPAN_NOTE = "运营点了「补发货盘」：这份是我们主动补发的货盘，要人看过再发"
+HANDCARDS_NOTE = "运营点了「做手卡」：这份是我们主动发的手卡，要人看过再发"
 
 
 def gap_notes(meta: dict) -> list[str]:
@@ -673,6 +679,8 @@ def gap_notes(meta: dict) -> list[str]:
         notes.append(opening_note(meta[OPENING]))
     if isinstance(meta.get(HUOPAN), dict):
         notes.append(HUOPAN_NOTE)
+    if isinstance(meta.get(HANDCARDS), dict):
+        notes.append(HANDCARDS_NOTE)
     return notes
 
 
@@ -758,6 +766,7 @@ EVENT_NAMES = {
     "night_send": "夜间自动发出", "night_done": "夜间自动回的过渡话已处理",
     "opening_auto": "开场白没人处理，自动发出", GROUP_LINE: "三方群里的一句话",
     "auto_register": "自动登记（新好友）", "opening": "派写开场白的任务", "huopan": "派补发货盘的任务",
+    "handcards": "派做手卡的任务",
     "signed": "聚水潭显示签收，派问一句的任务",
     "buyin_message": "百应私信", "buyin_copy": "复制百应私信草稿（含完整号码）", "buyin_sent": "运营已在百应手动发出",
     "buyin_draft_failed": "百应私信的草稿没写成",
@@ -798,6 +807,12 @@ OPENING_UNSURE_TEXT = ("她是加好友过了很久才登记的，超出了补�
 # (``HUOPAN``: which job) and the notice of one the Mac did not write (``huopan``).  Its draft always waits for a person
 # (``gap_notes``).
 HUOPAN = "huopan"
+# 直播手卡 (PRM_HANDCARDS, 2026-11-09): the console's deal action (「做手卡」, ``ask_handcards``), the job's
+# ``meta.handcards`` ({"by": "console", "items": [{"item_id", "sku_ids"}], "order"?}), the packet's ``meta.handcards``
+# (``handcards.packet_meta`` of the Mac's verdict, ``console`` for a 做手卡's), the deal's event (which job) and the
+# notice of one the Mac did not make (``handcards``).
+HANDCARDS = "handcards"
+SAMPLE_TOOL = "jst.sample_order"
 # 签收后问一句 (PRM_SIGNED_HELLO, 2026-11-07, the user: 「可以加」; kb 场景 D2 「聚水潭显示签收」): a sample order the 聚水潭 sync
 # sees signed for (the bot's own, or ours made by hand whose waybill went into her deal) while her deal had not been
 # marked 已签收 by a person: one draft job with no line of hers asks her how the samples suit her (``meta.signed``
@@ -873,6 +888,9 @@ def event_out(ev: dict) -> dict:
                                                      "（新好友还没说话）")
     elif ev["kind"] == HUOPAN and detail.get("job"):
         name = f"派补发货盘的任务 #{detail['job']}（运营点的）"
+    elif ev["kind"] == HANDCARDS and detail.get("job"):
+        name = (f"派做手卡的任务 #{detail['job']}（运营点的，"
+                + (f"{detail['items']} 款）" if detail.get("items") else "按案卷里她选的款）"))
     elif ev["kind"] == BOSS_EVENT:
         name = ("老板拉的群不在了（运营说的），群里她的消息不再起草" if detail.get("gone") else
                 "老板拉群介绍" + (f"（{detail['name']}）" if detail.get("name") else "")
@@ -1022,6 +1040,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
             "tool": p.get("tool", MESSAGE_TOOL), "platform": platform_out(p),
             "night_held": str(p["meta"].get("night_held") or ""), "opening": bool(p["meta"].get(OPENING)),
             "huopan": bool(p["meta"].get(HUOPAN)), "signed": bool(p["meta"].get(SIGNED)),
+            "handcards": p["meta"][HANDCARDS] if isinstance(p["meta"].get(HANDCARDS), dict) else None,
             "channel": BUYIN_CHANNEL if is_buyin(p) else GROUP_CHANNEL if p["meta"].get("channel") == GROUP_CHANNEL
             else "wechat", "group_name": str(p["meta"].get("group_name") or ""), "buyin": buyin_packet_out(store, p),
             "auto_mode": bool(p["meta"].get(AUTO_MODE)),
@@ -1072,6 +1091,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
                 "events": [event_out(e) for e in store.events(deal["id"], limit=60) if e["kind"] != GROUP_LINE][:12],
                 "three_party": group_of(deal),
                 "draft_note": str(deal.get("draft_note") or ""),      # 起草备注: as the operators wrote it
+                "card_items": card_items_out(store, deal["id"]),      # 「做手卡」: her latest sample order's products
             },
         }
 
@@ -1091,6 +1111,65 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
         "stages": STAGES, "kinds": MESSAGE_KINDS, "modes": MODES, "shipment_states": SHIPMENT_STATES,
         **(extra or {}),
     }
+
+
+def sample_items(store: PrmStore, deal_id: int) -> Optional[dict]:
+    """Her latest sample order the bot made (a ``jst.sample_order`` draft whose execution was verified in 聚水潭), for
+    「做手卡」: ``{"order", "at", "shop", "items": [{"item_id", "sku_ids"}]}``; None without one (an order made by hand
+    names no products here)."""
+    for packet in store.deal_packets(deal_id, tools=(SAMPLE_TOOL,)):
+        data = packet.get("platform") or {}
+        execution = data.get("execution") or {}
+        if execution.get("outcome") != platforms.VERIFIED:
+            continue
+        action = data.get("action") or {}
+        entries = action.get("items") or ([{"item_id": action["item_id"], "skus": action.get("skus") or []}]
+                                          if action.get("item_id") else [])
+        items = [{"item_id": str(e["item_id"]), "sku_ids": [str(k.get("sku_id")) for k in e.get("skus") or []
+                                                           if isinstance(k, dict) and k.get("sku_id")]}
+                 for e in entries if isinstance(e, dict) and e.get("item_id")]
+        return {"order": str((execution.get("created") or {}).get("sample_order_no") or ""), "at": _order_at(packet),
+                "shop": str(action.get("shop") or ""), "items": items[:handcards.MAX_CARDS]}
+    return None
+
+
+def card_items_out(store: PrmStore, deal_id: int) -> Optional[dict]:
+    """「做手卡」's products for the console: her latest sample order's (``sample_items``), each with how many SKUs she got
+    (only a 抖店 order's: the cards are of the 抖店 products); None without one."""
+    order = sample_items(store, deal_id)
+    if order is None:
+        return None
+    return {"order": order["order"], "at": order["at"], "shop": order["shop"],
+            "items": [{"item_id": i["item_id"], "skus": len(i["sku_ids"])} for i in order["items"]]}
+
+
+CARDS_FAILED_TEXT = "手卡没做成，草稿里没附手卡：不能原样发，改了再发（别说手卡做好了），或者不发"
+
+
+def cards_failed(packet: dict) -> bool:
+    """A draft whose 直播手卡 were not made (``meta.handcards.ok`` false): its words cannot go out as they are
+    (``PrmService.decide``, ``_approve_execute``)."""
+    cards = (packet.get("meta") or {}).get(HANDCARDS)
+    return isinstance(cards, dict) and not cards.get("ok")
+
+
+def card_ids(items) -> tuple:
+    """The products ticked for 「做手卡」: ``(ids, "")`` (抖店 item ids, digits, each once, at most handcards.MAX_CARDS;
+    None when none were given: her latest sample order's), or ``(None, why not)``."""
+    if items is None:
+        return None, ""
+    if not isinstance(items, list):
+        return None, "要做手卡的商品要写成商品 ID 的列表"
+    ids: list = []
+    for raw in items:
+        text = str(raw if isinstance(raw, (str, int)) and not isinstance(raw, bool) else "").strip()
+        if not re.fullmatch(r"\d{6,25}", text):
+            return None, f"「{str(raw)[:30]}」不是抖店的商品 ID（一串数字）"
+        if text not in ids:
+            ids.append(text)
+    if len(ids) > handcards.MAX_CARDS:
+        return None, f"一次最多做 {handcards.MAX_CARDS} 款（一份草稿最多 {handcards.MAX_CARDS} 个文件）"
+    return ids, ""
 
 
 def links_out(store: PrmStore, party_id: int) -> list[dict]:
@@ -1274,6 +1353,10 @@ class PrmService:
                            SIGNED_HELLO_HOURS)
             self._hello_hours = gates.night_window(SIGNED_HELLO_HOURS)
         self._hello_waits: dict = {}               # order -> why its hello waits, as last logged (a line per change)
+        # PRM_HANDCARDS (off: nothing of it; a config object without it, an older caller's: off): WeChat draft jobs say the
+        # Mac may make 直播手卡 (``_reply_meta``) and the console's 「做手卡」 asks for them (``ask_handcards``).  A draft that
+        # comes back with cards waits for a person all the same, switch or not (``on_result``).
+        self._handcards = str(getattr(config, "prm_handcards", "off") or "off").strip().lower() == "on"
         self._sample_lock = threading.Lock()       # one round's job queued, or one answer applied, at a time
         self._sample_errors = 0                    # failed rounds in a row (SAMPLE_ERRORS)
         self._sample_said = ""                     # what the deals were last told of a round that could not be made
@@ -1522,9 +1605,12 @@ class PrmService:
     def _reply_meta(self, meta: dict) -> dict:
         """A WeChat reply's draft job (her message's, a 开场白's, a 专属佣金 step's) with ``meta.reply_parts`` when
         PRM_REPLY_PARTS is above 1: the Mac may write the reply as that many messages, a blank line between two
-        (worker.parts_line); ``_deliver`` sends them so.  The same dict."""
+        (worker.parts_line); ``_deliver`` sends them so.  With PRM_HANDCARDS ``meta.handcards_ok``: the Mac may make 直播手卡
+        when she asks for them (worker.handcards_rule).  The same dict."""
         if self._reply_parts > 1:
             meta["reply_parts"] = self._reply_parts
+        if self._handcards:
+            meta[handcards.OK_KEY] = True
         return meta
 
     def _with_note(self, meta: dict, deal: dict, now: float) -> dict:
@@ -2103,7 +2189,8 @@ class PrmService:
                 continue
             job = self._relay.store.get(int(packet["job_id"]))
             lines = self._job_lines(job) if job is not None else ""
-            started = any((packet.get("meta") or {}).get(k) for k in (OPENING, HUOPAN, SIGNED))
+            started = (any((packet.get("meta") or {}).get(k) for k in (OPENING, HUOPAN, SIGNED))
+                       or bool(((packet.get("meta") or {}).get(HANDCARDS) or {}).get("console")))
             if lines or (job is not None and started):
                 out.append((packet, job, lines))
         return out
@@ -2127,10 +2214,10 @@ class PrmService:
 
     def _bot_started(self, packet: dict) -> bool:
         """A packet the bot started itself (``_reach``): a shipping notice (no job), a 专属佣金 step, a 开场白, a 补发货盘,
-        a 签收后问一句."""
+        a 签收后问一句, a 做手卡."""
         meta = packet.get("meta") or {}
         return (packet.get("job_id") is None or meta.get("lane") == LANE_SYSTEM or bool(meta.get(OPENING))
-                or bool(meta.get(HUOPAN)) or bool(meta.get(SIGNED)))
+                or bool(meta.get(HUOPAN)) or bool(meta.get(SIGNED)) or bool((meta.get(HANDCARDS) or {}).get("console")))
 
     def _aim(self, packet: Optional[dict]) -> Optional[dict]:
         """A packet the bot started itself still aimed at her private chat, for a creator with a 老板拉的群: where she can
@@ -2742,6 +2829,15 @@ class PrmService:
         # Every file the draft named (an older worker reports only the ones it sent back): fewer came,
         # the draft waits for a person whatever its kind's gate, and the deal and the draft say which.
         named = draft.attachments_named if draft.attachments_named is not None else draft.attachments_to_send
+        # 直播手卡 (src/prm/handcards.py): all of the Mac's cards or none of them; a draft with its verdict always waits
+        # for a person (below), and an operator's 「做手卡」 that came back without one is a failure too
+        cards = draft.handcards
+        if cards is None and isinstance(meta.get(HANDCARDS), dict) and (draft.reply_draft or attachments):
+            cards = handcards.check_made({"ok": False, "problems": ["草稿没要手卡（Mac 没说做哪几款）"]})
+        if cards is not None:
+            attachments, cards = handcards.keep_cards(cards, attachments)
+            if not cards["ok"]:
+                named = [n for n in named if _file_name(n) not in set(cards["cards"])]
         # 同一张图不重复发: a file she got from us within REPEAT_FILE_SEC (the same bytes) is left out of the draft, which
         # says so; the names it named lose those files too (not 「只收到 N 个」)
         repeated = self._repeated_files(deal_id, attachments, now) if lane == LANE_REPLY else []
@@ -2805,10 +2901,10 @@ class PrmService:
             state = SUPERSEDED                         # the creator wrote again: a newer draft is coming
         elif self._opening_outdated(job, meta):
             state = SUPERSEDED                         # 老板拉的群: she spoke there after it, the reply answers her
-        elif notes or recall or lane == LANE_SYSTEM:
+        elif notes or recall or lane == LANE_SYSTEM or cards is not None:
             # Read late, or she recalled something meanwhile: a person decides, whatever the gate.  The
             # bot's own next step too: a 专属佣金 step speaks of a platform write, so it never goes out
-            # by a gate (mac review F4).
+            # by a gate (mac review F4).  A draft with 直播手卡 (made or not) too: a person looks at the cards first.
             state = PENDING
         else:
             route, state, decided_at = deals.route_for(
@@ -2832,7 +2928,7 @@ class PrmService:
         opening_auto = (self._opening_auto(meta, draft, refused=refused, short=short, unknown=unknown, waybill=waybill,
                                            attachments=attachments, named=len(named), mode=mode, recall=recall,
                                            lane=lane, now=now, auto_on=auto_on)
-                        if state == PENDING and route == gates.REVIEW else None)
+                        if state == PENDING and route == gates.REVIEW and cards is None else None)
         packet_meta = {"waybill": waybill} if draft.message_kind == "shipping_notice" and waybill else {}
         if opening_auto is not None:
             due, held = opening_auto
@@ -2846,6 +2942,9 @@ class PrmService:
             packet_meta[OPENING] = True                # (the console's tag; no holding reply for it)
         if isinstance(meta.get(HUOPAN), dict):
             packet_meta[HUOPAN] = True                 # (the console's tag)
+        if cards is not None:                          # 直播手卡: the console's tag, the operator's note on the cards
+            packet_meta[HANDCARDS] = {**handcards.packet_meta(cards),
+                                      "console": isinstance(meta.get(HANDCARDS), dict)}
         if isinstance(meta.get(SIGNED), dict):
             packet_meta[SIGNED] = str(meta[SIGNED].get("order") or "")[:40] or True   # (the order it asks about)
         if meta.get("channel") == GROUP_CHANNEL:       # 老板拉的群: it goes to the group (the console's tag)
@@ -2869,10 +2968,11 @@ class PrmService:
             deal_id=deal_id, party_id=party_id, job_id=job["id"], chat_id=job["chat_id"],
             kind=draft.message_kind, text=draft.reply_draft, attachments=attachments, intent=draft.intent,
             slots=draft.slots, stage_proposal=draft.stage_proposal,
-            needs_attention=(draft.needs_attention or bool(short) or bool(refused) or bool(stepless) or bool(recall))
-            and state != DROPPED,
-            reason="；".join(r for r in (recall, covered_note if state == DROPPED else "", refused, stepless, short,
-                                         repeat_note, day_held, draft.reason) if r)[:500],
+            needs_attention=(draft.needs_attention or bool(short) or bool(refused) or bool(stepless) or bool(recall)
+                             or bool(cards is not None and not cards["ok"])) and state != DROPPED,
+            reason="；".join(r for r in (recall, covered_note if state == DROPPED else "", refused, stepless,
+                                         handcards.attention(cards) if cards is not None and not cards["ok"] else "",
+                                         short, repeat_note, day_held, draft.reason) if r)[:500],
             status=state, route=route, decided_at=decided_at, meta=packet_meta,
             tool=tool, platform=platform, now=now,
         )
@@ -2890,13 +2990,20 @@ class PrmService:
         if state == NO_REPLY and isinstance(meta.get(HUOPAN), dict):
             # 补发货盘 the Mac wrote nothing for (she had the 货盘 within 7 days, say): the deal says why, not 「要人看过再发」
             attention = [*(n for n in notes if n != HUOPAN_NOTE), f"「补发货盘」这次没写：{(draft.reason or 'Mac 没说为什么')[:200]}"]
+        if state == NO_REPLY and isinstance(meta.get(HANDCARDS), dict):
+            # 「做手卡」 the Mac made nothing of (it could not tell which products, say): the deal says why
+            why = "；".join((draft.handcards or {}).get("problems") or []) or draft.reason or "Mac 没说为什么"
+            attention = [*(n for n in notes if n != HANDCARDS_NOTE), f"「做手卡」这次没做：{why[:200]}"]
+        elif cards is not None:
+            # 直播手卡: the deal says the cards wait for a person (or why none came), once
+            attention = [*(n for n in attention if n != HANDCARDS_NOTE), handcards.attention(cards)]
         # (her recall: its own notice on the deal says so, the draft's reason too)
         # The draft job of her lines that had no draft before (or this job itself, back late): seen to; and a 开场白, a
         # 补发货盘 or a 签收后问一句 that was not written, by any later reply draft.
         answered = self._store.drop_notices(deal_id, lambda n: n.get("into") == job["id"]
                                             or n["key"] == f"failed:{job['id']}"
                                             or (lane == LANE_REPLY and bool(n.get(OPENING) or n.get(HUOPAN)
-                                                                            or n.get(SIGNED))), now)
+                                                                            or n.get(SIGNED) or n.get(HANDCARDS))), now)
         if any(n.get("into") == job["id"] for n in answered):
             attention.append(f"#{job['id']} 的草稿也回了 " + "、".join(f"#{n.get('job')}" for n in answered
                                                                    if n.get("into") == job["id"])
@@ -2978,6 +3085,14 @@ class PrmService:
                     [head.replace("草稿没写成", "补发货盘的草稿没写成", 1),
                      "可以在合作单里再点一次「补发货盘」，或者直接在微信里把货盘发给她"]), now, job=job_id, lane=lane,
                     huopan=True, asked_at=float(job.get("created_at") or now))
+                return
+            if isinstance(meta.get(HANDCARDS), dict) and not lines:
+                # 「做手卡」, and she said nothing meanwhile (the Mac cannot make cards, say): another click, a later reply
+                # draft, or an operator sending her cards by hand sees to it
+                self._store.set_notice(deal_id, f"failed:{job_id}", "；".join(
+                    [head.replace("草稿没写成", "做手卡的草稿没写成", 1),
+                     "可以在合作单里再点一次「做手卡」，或者请 Mac 上的 Claude 用 live-handcard 做好发她"]), now, job=job_id,
+                    lane=lane, handcards=True, asked_at=float(job.get("created_at") or now))
                 return
             if isinstance(meta.get(SIGNED), dict) and not lines:
                 # 签收后问一句, and she said nothing meanwhile: not asked again by itself; a later reply draft or an operator
@@ -3468,6 +3583,88 @@ class PrmService:
             return "「待审批」里已经有她的草稿：先处理那一份"
         return ""
 
+    def ask_handcards(self, deal_id, items=None) -> dict:
+        """「做手卡」 in the console (2026-11-09): one draft job that makes her 直播手卡 (``_ask_handcards``).  ``items``: the
+        ticked products (抖店 item ids; [] none: the ones she picked, as the case file has them); None: her latest
+        sample order's.  ``{"ok": True, "job"}``, or ``{"ok": False, "error"}`` saying why not."""
+        try:
+            deal = self._store.deal(int(deal_id))
+        except (TypeError, ValueError):
+            deal = None
+        party = self._store.party(deal["party_id"]) if deal else None
+        if deal is None or party is None:
+            return {"ok": False, "error": "没有找到这个合作单"}
+        ids, why = card_ids(items)
+        if why:
+            return {"ok": False, "error": why}
+        with self._handle_lock:
+            job_id, why = self._ask_handcards(party, ids)
+        return {"ok": True, "job": job_id} if job_id else {"ok": False, "error": why}
+
+    def _ask_handcards(self, party: dict, ids: Optional[list]) -> tuple:
+        """One draft job of our line that makes her 直播手卡, with no new line of hers (``meta.handcards`` {"by": "console",
+        "items": [{"item_id", "sku_ids"}], "order"?}: the ticked products, ``ids``, each with the SKUs she got when it is in
+        her latest 抖店 sample order; ``ids`` None: that order's products; none at all: the Mac finds them in the case
+        file, or makes none), told what we sent her, an operator's lines, her 三方群's and the deal's 起草备注 like
+        ``_ask_huopan``'s, under ``_handle_lock``: ``(job id, "")``, or ``(None, why not)`` (``_no_handcards``).  Its draft
+        always waits for a person; no holding reply goes for it unless a message of hers joined the job."""
+        now = self._clock()
+        deal = self._store.deal_of(party["id"], now)
+        chat, group = self._reach(party)
+        why = self._no_handcards(party, deal, now, chat)
+        if why:
+            return None, why
+        order = sample_items(self._store, deal["id"])
+        known = {i["item_id"]: i for i in (order or {}).get("items") or []} if (order or {}).get("shop") == "dy" else {}
+        picked = list(known.values()) if ids is None else [known.get(i) or {"item_id": i, "sku_ids": []} for i in ids]
+        ask = {"by": "console", "items": picked}
+        if order and order["order"] and any(i["item_id"] in known for i in picked):
+            ask["order"] = order["order"]
+        meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"], HANDCARDS: ask}
+        if group is not None:
+            meta.update(channel=GROUP_CHANNEL, group=self.boss_groups.job_group(chat))
+        else:
+            told = self._group_lines(deal["id"])
+            if told:
+                meta["three_party_chat"] = told
+        made = self.three_party.job_meta(deal)
+        if made:
+            meta["three_party"] = made
+        creator = self._creator_ids(deal["id"])
+        if creator:
+            meta["creator"] = creator
+        outbound = self._outbound(deal["id"], party["id"], now)
+        if outbound:
+            meta["sent"] = outbound
+        told = history_of(self._store.backlog(deal["id"]))
+        if told:
+            meta["history"] = told
+        _, job_id = self._relay.submit(chat, chat, "", kind=PRM, meta=self._reply_meta(self._with_note(meta, deal, now)),
+                                       fresh=True)
+        self._store.add_event(deal["id"], party["id"], HANDCARDS, {"job": job_id, "items": len(picked)}, actor="console",
+                              now=now)
+        self._store.drop_notices(deal["id"], lambda n: bool(n.get(HANDCARDS)), now)
+        logger.info("PRM: party %d: job #%d makes her 直播手卡 (%d product(s), console)", party["id"], job_id, len(picked))
+        return job_id, ""
+
+    def _no_handcards(self, party: dict, deal: dict, now: float, chat: Optional[str] = "") -> str:
+        """Why no 做手卡 is asked for now ("" = it is): PRM_HANDCARDS off, then as ``_no_huopan``: off the list, a person
+        has the chat, she cannot be reached, a WeChat draft of hers is being written or waits in 待审批."""
+        if not self._handcards:
+            return "手卡没打开（Windows 的 PRM_HANDCARDS），不能做手卡"
+        if not party.get("active"):
+            return "这位达人已经停用（不在达人名单里），不做手卡"
+        if self._mode(deal, now) != COPILOT:
+            return "现在不在副驾驶模式（人工接管或暂停），不做手卡"
+        if chat is None:
+            return f"{UNREACHABLE_TEXT}，手卡发不出去"
+        if self._relay.store.latest_open(chat or party["wxid"], drafts_only=True, system=False) is not None:
+            return "她的草稿正在写，写好会出现在「待审批」里"
+        if any((p.get("meta") or {}).get("lane") not in (LANE_SYSTEM, LANE_BUYIN)
+               for p in self._store.deal_packets(deal["id"], statuses=(PENDING, APPROVED, SENDING))):
+            return "「待审批」里已经有她的草稿：先处理那一份"
+        return ""
+
     def set_draft_note(self, deal_id, text, actor: str = "console") -> dict:
         """「起草备注」 in the console (the deal action ``draft_note`` {text}): what the operators tell the Mac about this
         creator, which every draft job of the deal carries from now on (``_with_note``); "" clears it.  Whitespace is
@@ -3561,13 +3758,16 @@ class PrmService:
         An operator's change of the deal's stage or shipment sees to a deleted order's notice.  ``night_done``
         (「已处理」 on a holding line the night window sent) only drops that notice; ``opening`` (「写开场白」) asks
         for one 开场白 draft (``ask_opening``); ``huopan`` (「补发货盘」) one draft that sends her the 货盘 again
-        (``ask_huopan``); ``group`` / ``group_try`` / ``group_made`` / ``group_none`` are 三方群's
+        (``ask_huopan``); ``handcards`` {items?} (「做手卡」) one draft with her 直播手卡 (``ask_handcards``); ``group`` /
+        ``group_try`` / ``group_made`` / ``group_none`` are 三方群's
         (``three_party``: 「拉三方群」, 「先试一下」, 「建好了」, 「没建成」); ``draft_note`` {text} keeps the deal's 起草备注
         (``set_draft_note``)."""
         if action == OPENING:
             return self.ask_opening(data.get("deal_id"))
         if action == HUOPAN:
             return self.ask_huopan(data.get("deal_id"))
+        if action == HANDCARDS:
+            return self.ask_handcards(data.get("deal_id"), data.get("items"))
         if action == DRAFT_NOTE:
             return self.set_draft_note(data.get("deal_id"), data.get("text"), actor=actor)
         if action in GROUP_ACTIONS:
@@ -3905,6 +4105,9 @@ class PrmService:
         if packet.get("tool", MESSAGE_TOOL) != MESSAGE_TOOL:
             return {"ok": False, "error": "这条草稿带平台动作：要点「批准并执行」，平台上核验成功后才会发给达人"}
         final = packet["text"] if action == "send" else str(text if text is not None else "").strip()
+        if cards_failed(packet) and final == packet["text"]:
+            # 直播手卡 not made: its words (「手卡整理好啦」) cannot go out as they are, without the cards
+            return {"ok": False, "error": CARDS_FAILED_TEXT}
         if len(final) > MAX_DRAFT_CHARS:
             return {"ok": False, "error": f"最多 {MAX_DRAFT_CHARS} 个字"}
         if not final and not packet["attachments"]:
@@ -3959,6 +4162,8 @@ class PrmService:
                 self._ask_recheck(packet, unsure, now)
             return {"ok": False, "error": opened}
         final = packet["text"] if text is None else str(text).strip()
+        if cards_failed(packet) and final == packet["text"]:
+            return {"ok": False, "error": CARDS_FAILED_TEXT}      # (直播手卡 not made: as in ``decide``)
         if len(final) > MAX_DRAFT_CHARS:
             return {"ok": False, "error": f"最多 {MAX_DRAFT_CHARS} 个字"}
         problems = platforms.reply_problems(final, action)
@@ -5833,6 +6038,7 @@ class PrmService:
             "reply_parts": self._reply_parts, "boss_groups": self.boss_groups.status(),
             "opening_auto_min": self._opening_auto_sec // 60,
             "hand_samples_problem": self._hand_problem if self._sample_sync_sec > 0 else "",
+            "handcards": self._handcards,
         })
 
     # ── the sender thread: approved drafts, holding replies, clean-ups ────
@@ -6086,6 +6292,9 @@ class PrmService:
                 continue                                   # 补发货盘: we started it, she said nothing to hold
             if (packet.get("meta") or {}).get(SIGNED) and (job is None or not self._job_lines(job)):
                 continue                                   # 签收后问一句: the same
+            if (((packet.get("meta") or {}).get(HANDCARDS) or {}).get("console")
+                    and (job is None or not self._job_lines(job))):
+                continue                                   # 做手卡: the same
             if job is not None and ack_only(job.get("text") or ""):
                 continue                                   # she only said she got it (好滴): nothing to hold
             done.add(packet["deal_id"])
@@ -6612,6 +6821,8 @@ def apply_deal_action(store: PrmStore, action: str, data: dict, *, now: float, t
             return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能写开场白"}
         elif action == HUOPAN:                         # (running: PrmService.ask_huopan)
             return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能补发货盘"}
+        elif action == HANDCARDS:                      # (running: PrmService.ask_handcards)
+            return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能做手卡"}
         elif action in GROUP_ACTIONS:                  # (running: PrmService.three_party)
             return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能拉群"}
         elif action == DRAFT_NOTE:                     # (running: PrmService.set_draft_note)

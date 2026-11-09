@@ -299,6 +299,34 @@ function PlatformBox({ pf }) {
   )
 }
 
+// 直播手卡 (PRM_HANDCARDS, src/prm/handcards.py): the cards of a draft as pictures (GET /api/prm/file), each opening
+// at full size, and the Mac's note on them (every 待定, what was inferred, the 口径 it reused); or why none were made.
+const PICTURE = /\.(png|jpe?g|webp)$/i
+const cardsFailed = (p) => !!p.handcards && !p.handcards.ok
+
+function HandcardsNote({ p }) {
+  const pictures = (p.attachments || []).map((a, n) => [a, n]).filter(([a]) => PICTURE.test(a.name || ''))
+  const c = p.handcards
+  return (
+    <div className="stack prm-handcards" style={{ gap: 6 }}>
+      {c.ok && pictures.length > 0 && (
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+          {pictures.map(([a, n]) => (
+            <a key={a.name} href={`/api/prm/file?packet=${p.id}&n=${n}`} target="_blank" rel="noreferrer" title={`${a.name}（点开看大图）`}>
+              <img src={`/api/prm/file?packet=${p.id}&n=${n}`} alt={a.name} loading="lazy"
+                style={{ height: 120, borderRadius: 6, border: '1px solid var(--line)', display: 'block' }} />
+            </a>
+          ))}
+        </div>
+      )}
+      {c.ok
+        ? <div className="f-hint">手卡 {c.count} 张：看过卡片再发；要改的话在 Mac 上照下面的单子改了重出。</div>
+        : <Note kind="warn">手卡没做成：{(c.problems || []).join('；') || 'Mac 没说为什么'}。草稿里没附手卡，话不能原样发。</Note>}
+      {c.note && <div className="f-hint prm-handcards-note" style={{ whiteSpace: 'pre-wrap' }}>{c.note}</div>}
+    </div>
+  )
+}
+
 function DraftCard({ p, canSend, replyParts = 1, onDone }) {
   const toast = useToast()
   const [editing, setEditing] = useState(false)
@@ -335,7 +363,7 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
       title={`${p.party_name} · ${p.kind_label}`}
       eyebrow={`DRAFT #${p.id}`}
       sub={`${fmtClock(p.created_at)} ${p.system ? '系统生成' : '写好'}${p.stage_proposal_label ? ` · 建议阶段：${p.stage_proposal_label}` : ''}`}
-      actions={<><GroupTag p={p} />{p.opening && <span className="tag cy" title={p.auto_at ? `她还没跟我们说过话：这是我们先打招呼的话，${fmtClock(p.auto_at)} 还没人处理就自动发` : '她还没跟我们说过话：这是我们先打招呼的话，要人看过再发'}>开场白</span>}{p.huopan && <span className="tag cy" title="运营点了「补发货盘」：我们主动补发的货盘，要人看过再发（不会自动发）">补发货盘</span>}{p.route === 'auto' && <span className="tag ok" title="这类消息已经达到自动发送门槛">自动发送</span>}<NightTag p={p} /><OpeningAutoTag p={p} /><span className={`tag ${kind}`}>{label}</span></>}
+      actions={<><GroupTag p={p} />{p.opening && <span className="tag cy" title={p.auto_at ? `她还没跟我们说过话：这是我们先打招呼的话，${fmtClock(p.auto_at)} 还没人处理就自动发` : '她还没跟我们说过话：这是我们先打招呼的话，要人看过再发'}>开场白</span>}{p.huopan && <span className="tag cy" title="运营点了「补发货盘」：我们主动补发的货盘，要人看过再发（不会自动发）">补发货盘</span>}{p.handcards && <span className={`tag ${p.handcards.ok ? 'cy' : 'need'}`} title={p.handcards.ok ? 'Mac 做好的直播手卡附在这份草稿里：看过卡片再发（不会自动发）' : '手卡没做成：草稿里没附手卡，话不能原样发'}>{p.handcards.ok ? '手卡' : '手卡没做成'}</span>}{p.route === 'auto' && <span className="tag ok" title="这类消息已经达到自动发送门槛">自动发送</span>}<NightTag p={p} /><OpeningAutoTag p={p} /><span className={`tag ${kind}`}>{label}</span></>}
       className="prm-draft"
     >
       <div className="stack" style={{ gap: 8 }}>
@@ -347,7 +375,7 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
           <div className="f-hint prm-opening-auto">给新好友的第一句话：{fmtClock(p.auto_at)} 还没人处理就照原样自动发给她（设置里的「开场白没人处理多久自动发」）；要改的话在这之前发出。</div>
         )}
         {p.status === 'pending' && p.auto_held && <div className="f-hint prm-opening-held">这份不会自动发，等你：{p.auto_held}</div>}
-        {p.intent && <div><b>{p.opening || p.huopan ? '这一条：' : '达人想要：'}</b>{p.intent}</div>}
+        {p.intent && <div><b>{p.opening || p.huopan || p.handcards?.console ? '这一条：' : '达人想要：'}</b>{p.intent}</div>}
         {!p.needs_attention && p.reason && <div className="dim"><b>依据：</b>{p.reason}</div>}
         {slots.length > 0 && (
           <div className="row" style={{ flexWrap: 'wrap', gap: 6 }}>
@@ -369,6 +397,7 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
             {p.attachments.map((a) => <span key={a.name} className="tag"><Paperclip />{a.name} {fmtSize(a.size)}</span>)}
           </div>
         )}
+        {p.handcards && <HandcardsNote p={p} />}
         {p.status === 'executing' && (
           <Note kind="warn">平台执行中（Mac 任务 #{pf?.job_id ?? '—'}）：核验成功后自动把回复发给达人；没核验成功就不发，在页面上方标红。
             {pf?.lost_at ? ` Mac 从 ${fmtClock(pf.lost_at)} 起失联，等它回来；30 分钟还没回来就算结果未知。` : ''}</Note>
@@ -401,12 +430,13 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
               </>
             ) : (
               <>
-                <button type="button" className="btn primary" disabled={busy || !canSend} onClick={() => send('send')}><PaperPlaneRight />发送</button>
+                <button type="button" className="btn primary" disabled={busy || !canSend || cardsFailed(p)} onClick={() => send('send')}><PaperPlaneRight />发送</button>
                 <button type="button" className="btn" disabled={busy} onClick={() => setEditing(true)}><PencilSimple />改了再发</button>
                 <button type="button" className="btn ghost" disabled={busy} onClick={() => setDropping(true)}><X />不发</button>
               </>
             )}
             {!canSend && <span className="dim">机器人没连着微信，现在发不出去</span>}
+            {canSend && cardsFailed(p) && <span className="dim">手卡没做成：改了再发，或者不发</span>}
           </div>
         )}
       </div>

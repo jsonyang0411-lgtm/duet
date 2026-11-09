@@ -807,6 +807,93 @@ class TestPrmPages:
         block = page.locator(".prm-huopan")
         assert block.locator("button:has-text('补发货盘')").is_disabled() and "先恢复副驾驶" in block.inner_text()
 
+    def test_deals_page_asks_for_handcards_and_the_review_page_shows_the_cards(self, page, prm, tmp_path):
+        """直播手卡 (PRM_HANDCARDS, 2026-11-09): an opened deal has 「直播手卡」 with her latest sample order's product ticked;
+        小美's draft waits, so a click says why not; once it is dropped a click with one more typed product id asks the
+        Mac for both; the draft that comes back is tagged 「手卡」 in 待审批 and shows each card as a picture with the
+        Mac's note; cards that were not made: tagged so, 「发送」 off, why.  Switched off: no block."""
+        import io
+        import json as _json
+        import re
+        from PIL import Image
+        from platform_fakes import DY_ITEM, DY_SKU
+        from test_prm_sample_sync import verified_order
+        from src.prm import handcards as hc
+        from src.prm.service import SETTLE_SEC
+
+        prm.relay._files_dir = tmp_path / "relay"                          # (this test's own folder for the cards)
+        prm.service._handcards = True                                      # (PRM_HANDCARDS=on)
+        verified_order(prm.service)
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.wait_for_timeout(1500)
+        page.locator("button[aria-label='展开 小美']").click()
+        page.wait_for_timeout(300)
+        block = page.locator(".prm-handcards")
+        text = block.inner_text()
+        assert "直播手卡" in text and "不会自动发" in text and "寄了 1 个 SKU" in text and DY_ITEM in text
+        assert block.locator(f"input[aria-label='做手卡：商品 {DY_ITEM}']").is_checked()
+        block.locator("button:has-text('做手卡')").click()
+        page.wait_for_timeout(1200)
+        assert "「待审批」里已经有她的草稿：先处理那一份" in page.inner_text("body")
+        [waiting] = prm.service.store.packets(("pending",))
+        assert prm.service.decide(waiting["id"], "drop")["ok"]
+        block.locator("input[aria-label='小美 做手卡的其他商品 ID']").fill("3000000000000000901")
+        block.locator("button:has-text('做手卡')").click()
+        page.wait_for_timeout(1200)
+        assert "已请 Mac 做 2 款手卡" in page.inner_text("body")
+        prm.clock.now += SETTLE_SEC + 1
+        job = prm.relay.next_job(0, ("prm",))
+        assert job["meta"]["handcards"]["items"] == [{"item_id": DY_ITEM, "sku_ids": [DY_SKU]},
+                                                     {"item_id": "3000000000000000901", "sku_ids": []}]
+        names = ["手卡_01_测试帽.png", "手卡_02_测试帽二.png"]
+        for name, colour in zip(names, ((200, 40, 40), (40, 60, 200))):
+            buf = io.BytesIO()
+            Image.new("RGB", (160, 120), colour).save(buf, "PNG")
+            body = buf.getvalue()
+            assert prm.relay.outfile(job["id"], name, io.BytesIO(body).read, len(body))
+        made = hc.made_block(True, cards=names, note="做了 2 张手卡（小美专属，抖音）\n待定（卡上红字）：没有")
+        draft = {"intent": "做手卡", "slots": {}, "stage_proposal": "", "message_kind": "material",
+                 "reply_draft": "老师，手卡整理好啦～", "attachments_to_send": names, "attachments_named": names,
+                 "needs_attention": False, "reason": "kb 手卡那一节", "handcards_made": made}
+        prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(draft, ensure_ascii=False)})
+        prm.relay.tick()
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="老师，手卡整理好啦～")
+        assert card.locator(".tag", has_text=re.compile(r"^手卡$")).count() == 1
+        pictures = card.locator(".prm-handcards img")
+        assert pictures.count() == 2
+        packet = prm.service.store.packet_for_job(job["id"])
+        assert pictures.nth(1).get_attribute("src") == f"/api/prm/file?packet={packet['id']}&n=1"
+        page.wait_for_timeout(500)
+        assert pictures.nth(0).evaluate("img => img.complete && img.naturalWidth") == 160
+        note = card.locator(".prm-handcards").inner_text()
+        assert "手卡 2 张：看过卡片再发" in note and "待定（卡上红字）：没有" in note
+        assert "这一条：做手卡" in card.inner_text()
+        assert card.locator("button:has-text('发送')").first.is_enabled()
+        assert prm.service.decide(packet["id"], "drop")["ok"]
+        assert prm.service.deal_action("handcards", {"deal_id": 1, "items": []})["ok"]
+        prm.clock.now += SETTLE_SEC + 1
+        job = prm.relay.next_job(0, ("prm",))
+        failed = hc.made_block(False, problems=["出图出错了（退出码 1）"])
+        draft = {**draft, "reply_draft": "老师，手卡在这儿～", "attachments_to_send": [], "attachments_named": [],
+                 "handcards_made": failed}
+        prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(draft, ensure_ascii=False)})
+        prm.relay.tick()
+        page.reload(timeout=10000)                                         # (already on 待审批: read it again)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="老师，手卡在这儿～")
+        assert card.locator(".tag", has_text=re.compile(r"^手卡没做成$")).count() == 1 and card.locator("img").count() == 0
+        assert "手卡没做成：出图出错了（退出码 1）" in card.inner_text()
+        assert card.locator("button:has-text('发送')").first.is_disabled()
+        assert "改了再发，或者不发" in card.inner_text()
+        prm.service._handcards = False
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.wait_for_timeout(1500)
+        page.locator("button[aria-label='展开 小美']").click()
+        page.wait_for_timeout(300)
+        assert page.locator(".prm-handcards").count() == 0
+
     def test_deals_page_edits_saves_and_shows_the_draft_note(self, page, prm):
         """起草备注 (2026-10-31): an opened deal shows its note (none yet) with the hint; 「写备注」 opens the field, 「保存」
         keeps it through the deal action (one line, as the bot keeps it) and her next draft job carries it; more than

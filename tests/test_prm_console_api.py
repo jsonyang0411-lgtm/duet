@@ -247,6 +247,66 @@ def test_a_huopan_is_asked_for_from_the_running_console_and_refused_while_stoppe
     assert stopped == {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能补发货盘"}
 
 
+def raw_call(path):
+    """A GET whose answer is not JSON: ``(status, content type, body bytes)``."""
+    _, sock = _build_handler(path)
+    head, body = b"".join(sock._sent_chunks).split(b"\r\n\r\n", 1)
+    lines = head.decode("latin-1").split("\r\n")
+    kind = next((ln.split(":", 1)[1].strip() for ln in lines if ln.lower().startswith("content-type:")), "")
+    return int(lines[0].split()[1]), kind, body
+
+
+def test_handcards_are_asked_for_shown_as_pictures_and_refused_while_stopped(running, tmp_path, monkeypatch):
+    """直播手卡 (PRM_HANDCARDS, 2026-11-09): POST /api/prm/deals {action: handcards, items} makes a job with
+    ``meta.handcards``; its draft comes back with two cards: /api/prm tags it (``handcards``: ok, count, note) and
+    GET /api/prm/file?packet=&n= gives each card as a picture (a file that is no picture, an index past the files, no
+    such draft: 404); the switch shows as ``handcards`` (running: the service's; stopped: .env's); a stopped bot cannot
+    ask the Mac."""
+    import io
+    from src.prm import handcards as hc
+
+    running.prm._handcards = True                                  # (PRM_HANDCARDS=on)
+    d = call("/api/prm")[1]
+    assert d["handcards"] is True and d["parties"][0]["deal"]["card_items"] is None
+    [waiting] = d["pending"]
+    assert waiting["handcards"] is None
+    assert call("/api/prm/packets", "POST", {"id": waiting["id"], "action": "drop"})[1]["ok"] is True
+    deal_id = d["parties"][0]["deal"]["id"]
+    assert call("/api/prm/deals", "POST", {"action": "handcards", "deal_id": deal_id, "items": ["x1"]})[1] == {
+        "ok": False, "error": "「x1」不是抖店的商品 ID（一串数字）"}
+    answer = call("/api/prm/deals", "POST", {"action": "handcards", "deal_id": deal_id,
+                                             "items": ["3000000000000000901"]})[1]
+    assert answer["ok"] is True
+    running.relay._clock.now += SETTLE_SEC + 1
+    job = running.relay.next_job(0, ("prm",))
+    assert job["meta"]["handcards"] == {"by": "console", "items": [{"item_id": "3000000000000000901", "sku_ids": []}]}
+    files = [("手卡_01_测试帽.png", b"\x89PNG card one"), ("手卡_02_测试帽二.png", b"\x89PNG card two"),
+             ("说明.txt", b"text")]
+    for name, body in files:
+        assert running.relay.outfile(job["id"], name, io.BytesIO(body).read, len(body))
+    made = hc.made_block(True, cards=[n for n, _ in files[:2]], note="做了 2 张手卡")
+    draft = {"intent": "做手卡", "slots": {}, "stage_proposal": "", "message_kind": "material",
+             "reply_draft": "老师，手卡整理好啦～", "attachments_to_send": [n for n, _ in files],
+             "attachments_named": [n for n, _ in files], "needs_attention": False, "reason": "kb", "handcards_made": made}
+    running.relay.finish(job["id"], {"ok": True, "text": json.dumps(draft, ensure_ascii=False)})
+    running.relay.tick()
+    [card] = call("/api/prm")[1]["pending"]
+    assert card["handcards"] == {"ok": True, "count": 2, "note": "做了 2 张手卡", "problems": [], "console": True}
+    assert [a["name"] for a in card["attachments"]] == [n for n, _ in files]
+    assert raw_call(f"/api/prm/file?packet={card['id']}&n=1") == (200, "image/png", files[1][1])
+    for path in (f"/api/prm/file?packet={card['id']}&n=2", f"/api/prm/file?packet={card['id']}&n=3",
+                 "/api/prm/file?packet=999&n=0", "/api/prm/file?packet=x&n=0", "/api/prm/file"):
+        assert raw_call(path)[0] == 404, path
+    server.register_prm(None)                                       # the bot stopped
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PRM_DB", raising=False)
+    monkeypatch.setenv("PRM_HANDCARDS", "on")
+    assert call("/api/prm/parties", "POST", {"action": "add", "wxid": CREATOR, "name": "小美"})[1]["ok"] is True
+    assert call("/api/prm")[1]["handcards"] is True
+    stopped = call("/api/prm/deals", "POST", {"action": "handcards", "deal_id": 1})[1]
+    assert stopped == {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能做手卡"}
+
+
 def test_the_draft_note_is_kept_from_the_running_console_and_refused_while_stopped(running, tmp_path, monkeypatch):
     """POST /api/prm/deals {action: draft_note, text} (起草备注, 2026-10-31): the operators' words for the Mac, kept on the
     deal (whitespace collapsed) and shown in GET /api/prm's deal; her next draft job carries them (``meta.note``); too

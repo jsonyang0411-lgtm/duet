@@ -1104,7 +1104,8 @@ def _prm_state_core() -> dict:
                "catchup_hours": _prm_int_env("PRM_CATCHUP_HOURS", 12), "night": _prm_night_env(auto["on"]),
                "auto_register": _prm_env_on("PRM_AUTO_REGISTER"), "auto_mode": auto,
                "buyin_sync_min": _prm_int_env("PRM_BUYIN_SYNC_MIN", 0),
-               "opening_auto_min": _prm_int_env("PRM_OPENING_AUTO_MIN", 0), **settings}
+               "opening_auto_min": _prm_int_env("PRM_OPENING_AUTO_MIN", 0),
+               "handcards": _prm_env_on("PRM_HANDCARDS"), **settings}
     stopped["friend_add_status"] = _friend_add_stopped_status(store)
     stopped["three_party"] = _three_party_stopped_status()
     stopped["boss_groups"] = _boss_groups_stopped_status(store)
@@ -1190,9 +1191,10 @@ def _prm_friend_adds(data: dict) -> dict:
 
 def _prm_deal(data: dict) -> dict:
     """POST /api/prm/deals {action: stage | adopt | mode | shipment | shipment_status | night_done | opening | huopan |
-    group | group_try | group_made | group_none | draft_note, deal_id, ...} (``huopan``: 「补发货盘」; ``group*``: 三方群,
-    src/prm/three_party.py; ``draft_note`` {text}: the deal's 起草备注; ``opening``, ``huopan``, ``group*`` and
-    ``draft_note`` only while running: a stopped bot refuses them, ``apply_deal_action``)."""
+    handcards | group | group_try | group_made | group_none | draft_note, deal_id, ...} (``huopan``: 「补发货盘」;
+    ``handcards`` {items?}: 「做手卡」, src/prm/handcards.py; ``group*``: 三方群, src/prm/three_party.py; ``draft_note``
+    {text}: the deal's 起草备注; ``opening``, ``huopan``, ``handcards``, ``group*`` and ``draft_note`` only while
+    running: a stopped bot refuses them, ``apply_deal_action``)."""
     from src.prm.service import apply_deal_action
 
     action = str(data.get("action") or "")
@@ -1206,6 +1208,39 @@ def _prm_deal(data: dict) -> dict:
                                  takeover_sec=_prm_int_env("PRM_TAKEOVER_MIN", 120) * 60)
     finally:
         store.close()
+
+
+# A draft's pictures the console may show (「待审批」 shows the 直播手卡 of a draft before anyone sends them).
+_PRM_PICTURES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
+
+
+def _prm_picture(query: str):
+    """GET /api/prm/file?packet=<id>&n=<index>: one picture among a draft's files, ``(bytes, content type)``; None
+    for anything else (no such draft or file, not a picture, gone from disk).  Read only, also while the bot is
+    stopped; the path is the one the bot itself kept for the file the Mac sent back."""
+    from urllib.parse import parse_qs
+
+    q = parse_qs(query)
+    try:
+        packet_id, n = int((q.get("packet") or [""])[0]), int((q.get("n") or [""])[0])
+    except ValueError:
+        return None
+    store = _prm.store if _prm is not None else _prm_stopped_store()
+    if store is None:
+        return None
+    try:
+        packet = store.packet(packet_id)
+    finally:
+        if _prm is None:
+            store.close()
+    files = (packet or {}).get("attachments") or []
+    if not 0 <= n < len(files) or not isinstance(files[n], dict):
+        return None
+    path = Path(str(files[n].get("path") or ""))
+    kind = _PRM_PICTURES.get(path.suffix.lower())
+    if kind is None or not path.is_file():
+        return None
+    return path.read_bytes(), kind
 
 
 def _prm_auto(data: dict) -> dict:
@@ -1734,6 +1769,29 @@ class _UIHandler(SimpleHTTPRequestHandler):
             return
 
         # ── API: PRM copilot — creators, drafts, decisions ─────────────
+        if self.path.split("?", 1)[0] == "/api/prm/file":
+            try:
+                picture = _prm_picture(self.path.partition("?")[2])
+            except Exception:
+                logger.exception("Reading a draft's picture failed")
+                picture = None
+            body, kind = picture if picture is not None else (
+                json.dumps({"ok": False, "error": "没有这张图"}, ensure_ascii=False).encode(), "")
+            self.send_response(200 if kind else 404)
+            if not kind:
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self._send_cors_headers()
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self._send_cors_headers()
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.split("?", 1)[0] == "/api/prm":
             try:
                 self.send_json(_prm_state())

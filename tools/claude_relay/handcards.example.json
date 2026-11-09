@@ -1,0 +1,21 @@
+{
+  "enabled": true,
+  "script": "~/.claude/skills/live-handcard/scripts/make_cards_local.py",
+  "python": "~/.local/share/live-handcard/venv/bin/python",
+  "skus": "~/.claude-relay/platform/hat-index/skus.json",
+  "source": "老板模板（2026-11-06）",
+  "globals": {
+    "commission": "25%",
+    "pack": "盒装 · 内置帽撑防压",
+    "ship_time": "付款后 7 天内发货",
+    "aftersale": "7天无理由 · 运费险",
+    "ship_from": "广东东莞 · 包邮",
+    "no_ship": "无 · 全国均发",
+    "express": "中通快递",
+    "discount": 0.9
+  },
+  "caveats": ["售后里的「运费险」是从抖音商品页保障栏推断的"],
+  "promo": {"text": "双11再减15%实付约{N}", "factor": 0.85, "until": "2026-11-11"},
+  "send_zip": false,
+  "timeout_sec": 0
+}
