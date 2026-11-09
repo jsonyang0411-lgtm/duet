@@ -308,13 +308,18 @@ class GroupLinks:
             return f"刚才那个「接群」已经过了 {OFFER_SEC // 60} 分钟，作废了：要接的话重新发「接群」"
         return f"群「{asked['name']}」这次不接了（已经作罢）：要接的话重新发「接群」"
 
-    @staticmethod
-    def _linked_text(offer: dict, out: dict) -> str:
-        """The answer to 「是 N」 in one line: whom the group went to, the catch-up, what to look at."""
+    def _linked_text(self, offer: dict, out: dict) -> str:
+        """The answer to 「是 N」 in one line: whom the group went to, the catch-up, what to look at.  How her drafts
+        there go is PRM_LINKED_GROUPS_AUTO's (final check 2026-11-10 A5): off, every one waits in 「待审批」; on, as a
+        老板拉的群's (a kind's gate, the 下班时段, 自动模式), but the draft of the lines that waited at 接群, which waits."""
         shown = offer.get("name") or NO_NAME
         head = (f"接手了：群「{shown}」→ {out['name']}"
                 + ("（新登记的达人）" if out.get("registered") else "（已登记）") + f"，合作单 #{out['deal_id']}")
-        bits = ["之后她在群里说的话会起草，在「待审批」里等你看"]
+        if getattr(self._service, "_linked_groups_auto", False):
+            bits = ["之后她在群里说的话会起草，和老板拉的群一样照门槛、下班时段、自动模式发（「手动接的群也自动发」开着）；"
+                    "接群这一刻她在等的那几句的草稿在「待审批」里等你看"]
+        else:
+            bits = ["之后她在群里说的话会起草，在「待审批」里等你看"]
         caught = out.get("caught") or {}
         if not caught.get("read"):
             bits.append("群里之前的话这次读不出来：从现在起她说的话照常起草")

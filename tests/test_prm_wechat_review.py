@@ -2527,8 +2527,8 @@ def test_the_clean_up_drops_the_closed_rows_and_cuts_a_waiting_proposed_edit(des
 
 def test_a_database_from_the_first_round_gets_the_new_columns(tmp_path):
     """Second review (info): a prm.db made by the first commits has ``wechat_reviews`` without ``told_at`` /
-    ``preview`` / ``late_told_at`` (and ``pictures_ok``, ``notice``, ``seen``, 2026-11-10): they are added (as every
-    column added to an old database), the sweep works."""
+    ``preview`` / ``late_told_at`` (and ``pictures_ok``, ``notice``, ``seen``, 2026-11-10, ``pictures_sent``, the final
+    check): they are added (as every column added to an old database), the sweep works."""
     import sqlite3 as sql
 
     path = tmp_path / "prm.db"
@@ -2544,10 +2544,11 @@ def test_a_database_from_the_first_round_gets_the_new_columns(tmp_path):
     conn.close()
     store = PrmStore(str(path))
     columns = {r["name"] for r in store._conn.execute("PRAGMA table_info(wechat_reviews)")}
-    assert {"told_at", "preview", "late_told_at", "pictures_ok", "notice", "seen"} <= columns
+    assert {"told_at", "preview", "late_told_at", "pictures_ok", "notice", "seen", "pictures_sent"} <= columns
     assert store.wechat_review(5)["preview"] == "" and store.wechat_reviews_to_tell() == []
     assert store.wechat_review(5)["pictures_ok"] == 1          # (2026-11-10: a row from before had its pictures sent)
     assert (store.wechat_review(5)["notice"], store.wechat_review(5)["seen"]) == (1, "")   # (its first notice, not known)
+    assert store.wechat_review(5)["pictures_sent"] == ""      # (not known: a fresh notice sends its pictures once more)
     store.close()
 
 
@@ -2871,13 +2872,15 @@ def test_a_sample_order_whose_confirmation_was_taken_back_is_not_run_from_wechat
 def test_a_held_hat_nobody_confirmed_is_never_offered_执行_the_switch_off_too(clock, tmp_path):
     """合并 fix1110-s (2026-11-10): a sample order whose last preview held a hat nobody confirmed is never approved, the
     switch on or off (``_approve_execute``, review A-L4), even when its preview says ready: its notification offers no
-    「执行」 then either, and says why."""
+    「执行」 then either, and says why.  The switch off, the console has no 「对过图了」 (``photo_confirm`` refuses it):
+    the line says 「重新预览」 alone, whose new preview no photo check holds (final check 2026-11-10 A4)."""
     desk = Desk(clock, tmp_path)                                        # (PRM_DRAFT_CONTEXT off)
     desk.prm.register(CREATOR, "小美", "测试达人")
     try:
         packet = checked_waiting(desk, held=(CODE,), verdict="ready")
         number = packet["id"]
-        why = f"{CODE} 还扣着（没对过图），不能执行：{draft_context.CONFIRM_HOW}，再点「重新预览」"
+        why = f"{CODE} 还扣着（没对过图），不能执行：点「重新预览」再核"
+        assert draft_context.held_reason([CODE], confirm=False) == why and "对过图了" not in why
         stop = f"{why}；微信里不能执行；不要的话回 2"
         assert notice_of(desk, number)[-1] == stop
         assert desk.prm.store.wechat_review(number)["preview"] in ("", None)
@@ -3086,8 +3089,10 @@ def test_a_picture_not_on_this_pc_or_too_big_makes_the_notification_say_so_and_n
 
 
 def test_a_draft_with_pictures_is_never_answered_before_they_went(desk):
-    """While its pictures are still on the way (written before the notification, ``pictures_ok`` 0 until every one
-    went), an answer written meanwhile does nothing: never a draft approved from WeChat its pictures never reached."""
+    """While its pictures are still on the way (``pictures_ok`` PICTURES_SENDING, written before the notification, until
+    every one went), an answer written meanwhile does nothing: never a draft approved from WeChat its pictures never
+    reached.  It hears 「图还在发，等图到了再回」 (final check 2026-11-10 A6: not 「图没发过来：…在控制台看过再批」, they
+    were coming), and once they went one line says they are there and how to answer, as a retry's 「补发过来了」."""
     folder = desk.relay.files_dir / "outfiles" / "job-1"
     folder.mkdir(parents=True)
     sheet = folder / "对图单-1.jpg"
@@ -3097,14 +3102,19 @@ def test_a_draft_with_pictures_is_never_answered_before_they_went(desk):
 
     def meanwhile(chat, path):
         number = desk.prm.store.packets(("pending",))[0]["id"]
+        assert desk.prm.store.wechat_review(number)["pictures_ok"] == wr.PICTURES_SENDING
         answers.append(desk.admin(f"执行 {number}"))
+        answers.append(desk.admin(f"执行 {number} 了吗"))
         return real(chat, path)
 
     desk.review._send_file = meanwhile
     packet = platform_waiting(desk, files=[{"name": "对图单-1.jpg", "path": str(sheet), "why": "核对颜色和款式"}])
     number = packet["id"]
-    assert answers == [f"#{number} {PICTURES_MISSING}"] and desk.executions() == []
+    assert answers == [f"#{number} {wr.PICTURES_COMING}",
+                       f"#{number}（小美）还没执行（在等你确认）：{wr.PICTURES_COMING}"] and desk.executions() == []
     assert desk.prm.store.wechat_review(number)["pictures_ok"] == 1     # (then it went: answered from here now)
+    assert desk.order[-2:] == [("file", ADMIN, str(sheet)), (
+        "text", ADMIN, f"#{number} 的图发过来了（在上面）：看过再引用那条通知回「执行」（或者回「执行 {number}」）")]
     assert desk.admin("执行", quote=head(desk, number)).startswith(f"#{number} 已批准执行")
 
 
@@ -3473,3 +3483,138 @@ def test_an_admin_wxid_that_is_a_group_or_a_creators_tells_nothing_and_the_conso
         assert desk.review.is_admin_line(msg) is False and desk.review.answer(msg) == (False, None, None)
     finally:
         desk.stop()
+
+
+# ── the final check of 2026-11-10 (merge-1109): a fresh notice's pictures, answers while they or it are on the way ──
+
+def test_an_answer_while_the_cards_are_still_going_waits_for_them_and_hears_when_they_came(clock, tmp_path):
+    """Final check 2026-11-10 A6 (probe R1): 1 quoting the notification while its first card is being sent (the answer
+    handled inside the send) hears 「图还在发，等图到了再回」 and nothing goes to her; once both cards went, one line says
+    so and how to answer (only then: a draft nobody answered meanwhile gets none), and 1 sends it."""
+    desk = cards_desk(clock, tmp_path)
+    try:
+        replies = []
+        real = desk.review._send_file
+
+        def racing(chat, path):
+            if not replies:
+                number = desk.prm.store.packets(("pending",))[0]["id"]
+                replies.append(desk.admin("1", quote=head(desk, number)))
+            return real(chat, path)
+
+        desk.review._send_file = racing
+        packet = cards_waiting(desk)
+        number = packet["id"]
+        assert replies == [f"#{number} {wr.PICTURES_COMING}"]
+        desk.prm.send_approved()
+        assert desk.to(CREATOR) == [] and desk.prm.store.packet(number)["status"] == "pending"
+        assert desk.order[-3:] == [*(("file", ADMIN, path) for path in card_paths(packet)), (
+            "text", ADMIN, f"#{number} 的图发过来了（在上面）：看过再引用那条通知回 1（或者回「发 {number}」）")]
+        assert desk.admin("1", quote=head(desk, number)) == f"#{number} 已批准，正在发给 小美"
+    finally:
+        desk.stop()
+
+
+def test_a_fresh_notice_whose_pictures_went_already_sends_none_again(clock, tmp_path):
+    """A fresh notice (her recall) of a draft whose cards went after the first one: they are above, the same ones; none
+    goes again, and it may be answered at once."""
+    desk = cards_desk(clock, tmp_path)
+    try:
+        packet = cards_waiting(desk)
+        number = packet["id"]
+        sent = list(desk.files)
+        her_recall(desk)
+        desk.review.sweep()
+        lines = latest_notice(desk, number)
+        assert lines[0] == f"#{number} 草稿（第 2 次通知） · 小美 · 私聊"
+        assert f"（要看的 2 张图在前面的 #{number} 通知后面，没有变）" in lines and desk.files == sent
+        assert desk.admin("1", quote=lines[0]) == f"#{number} 已批准，正在发给 小美"
+    finally:
+        desk.stop()
+
+
+def test_a_fresh_notice_after_a_new_preview_sends_its_new_sheet_and_waits_for_it(clock, tmp_path):
+    """Final check 2026-11-10 A1 (probe R10): the first notice of a sample order that held a hat went with its 对图单 v1
+    (no 「执行」); 「对过图了」 and 「重新预览」 in the console made a ready preview with another sheet (v2).  Her recall told
+    it again: the fresh notice offered 「执行」 for the new preview, said its pictures were 「在第一条通知后面」 (v1), and v2
+    never went.  A fresh notice whose pictures are not the ones that went (or whose preview is another) sends the
+    current ones after it, as a first notice does; until they came the draft is the console's in WeChat (an answer
+    meanwhile hears 「图还在发」), and one line says when they came."""
+    desk = photo_desk(clock, tmp_path)
+    try:
+        desk.prm.store.token_for(1, "phone", "手机", "13900001111", desk.clock.now)
+        desk.her("好的，寄吧")
+        problems = [f"{CODE}（均码咖啡）对图没把握（款有把握，颜色没把握）：先核对再建；{draft_context.CONFIRM_HOW}"]
+        held = {**jst_block(), "verdict": "blocked", "problems": problems, "run": {}}
+        desk.clock.now += SETTLE_SEC + 1
+        job = desk.relay.next_job(0, ("prm",))
+        first = f"对图单-{job['id']}.jpg"
+        v1 = desk.relay.operator_file(job["id"], first, io.BytesIO(b"\xff\xd8 v1").read, len(b"\xff\xd8 v1"))
+        body = reply_draft(text="寄样单建好啦，单号 {寄样单号}～", message_kind="money", platform=held, draft_context=GATED,
+                           photo_held=[CODE], operator_files=[{"name": first, "why": "并排对比", "sha256": v1["sha256"]}])
+        desk.relay.finish(job["id"], {"ok": True, "text": json.dumps(body, ensure_ascii=False), "duration_s": 3})
+        desk.relay.tick()
+        packet = desk.prm.store.packet_for_job(job["id"])
+        number = packet["id"]
+        desk.review.sweep()
+        assert [path.rsplit("/", 1)[-1] for chat, path in desk.files if chat == ADMIN] == [first]
+        assert desk.prm.deal_action("photo_confirm", {"deal_id": packet["deal_id"], "packet": number, "code": CODE})["ok"]
+        assert desk.prm.decide(number, "repreview")["ok"]
+        again = desk.relay.next_job(0, ("prm",))
+        second = f"对图单-{again['id']}.jpg"
+        v2 = desk.relay.operator_file(again["id"], second, io.BytesIO(b"\xff\xd8 v2!").read, len(b"\xff\xd8 v2!"))
+        ready = {**jst_block(), "draft_context": GATED, "photo_confirmed": [CODE],
+                 "operator_files": [{"name": second, "why": "并排对比 v2", "sha256": v2["sha256"]}]}
+        desk.relay.finish(again["id"], {"ok": True, "text": json.dumps(ready, ensure_ascii=False), "duration_s": 2})
+        desk.relay.tick()
+        desk.clock.now += 30
+        her_recall(desk)
+        answers = []
+        real = desk.review._send_file
+
+        def meanwhile(chat, path):
+            answers.append(desk.admin("执行", quote=latest_notice(desk, number)[0]))
+            return real(chat, path)
+
+        desk.review._send_file = meanwhile
+        desk.review.sweep()
+        lines = latest_notice(desk, number)
+        assert lines[0] == f"#{number} 草稿（第 2 次通知） · 小美 · 私聊"
+        assert f"（后面附 1 张图给你看：{second}：并排对比 v2）" in lines and not any("没有变" in line for line in lines)
+        assert [path.rsplit("/", 1)[-1] for chat, path in desk.files if chat == ADMIN] == [first, second]
+        assert answers == [f"#{number} {wr.PICTURES_COMING}"] and desk.executions() == []
+        assert desk.told()[-1] == (f"#{number} 的图发过来了（在上面）：看过再引用最新那条通知回「执行」"
+                                   f"（或者回「执行 {number}」）")
+        assert desk.prm.store.wechat_review(number)["pictures_ok"] == 1
+        assert desk.admin("执行", quote=lines[0]).startswith(f"#{number} 已批准执行")
+        assert len(desk.executions()) == 1
+    finally:
+        desk.stop()
+
+
+def test_an_unquoted_answer_while_the_fresh_notice_is_being_sent_does_nothing(desk):
+    """Final check 2026-11-10 A3 (probe R8): her recall, and the sweep sends 「#N 草稿（第 2 次通知）」; while that send is
+    under way (the row TELLING, its notice counted up, its ``seen`` the new one, ``notified_at`` still the first
+    notice's), an unquoted 「发 N」 written before it showed was taken (``_read_latest`` compared it with the first
+    notice's time).  It does nothing now; one written after the fresh notice acts."""
+    packet = waiting(desk)
+    number = packet["id"]
+    desk.clock.now += 5
+    her_recall(desk)
+    replies = []
+    real = desk.review._send
+
+    def racing(chat, text):
+        if chat == ADMIN and "第 2 次通知" in text and not replies:
+            assert desk.prm.store.wechat_review(number)["state"] == "telling"
+            replies.append(desk.admin(f"发 {number}", at=desk.clock.now - 1))
+        return real(chat, text)
+
+    desk.review._send = racing
+    desk.review._skew = lambda: 0.0                 # (this PC's clock measured against WeChat's: as in production)
+    desk.clock.now += 30                            # (the recall came a while after the first notice)
+    desk.review.sweep()
+    assert replies == [f"#{number} 这份草稿在通知以后有变化，看最新那条通知再回"]
+    desk.prm.send_approved()
+    assert desk.to(CREATOR) == [] and desk.prm.store.packet(number)["status"] == "pending"
+    assert desk.admin(f"发 {number}") == f"#{number} 已批准，正在发给 小美"

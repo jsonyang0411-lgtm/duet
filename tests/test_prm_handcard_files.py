@@ -2,7 +2,8 @@
 skill's zip the Mac sends back stay in the relay's ``outfiles/job-*/``.  A draft that closes without sending them
 (dropped, out of date, failed, past its 双11 line, the cards left out by 改了再发, a verdict whose cards did not all come)
 has them deleted, at once or at the hourly clean-up; any card file or zip older than KEEP_FILES_DAYS (30) goes, sent or
-not; nothing else of the relay's folder.  Names are made up."""
+not, but a draft's still waiting or going out (final check 2026-11-10 B); nothing else of the relay's folder.  A draft
+whose card is gone all the same is not sent (CARDS_GONE_TEXT).  Names are made up."""
 
 import io
 import os
@@ -11,6 +12,7 @@ import time
 from test_prm_handcards import (CARDS, CREATOR, LINE, asks, beijing, bot, card_draft, clock, drafted,  # noqa: F401
                                 hc, new_bot)
 
+from src.prm.service import CARDS_GONE_TEXT
 from src.relay.service import KEEP_FILES_DAYS
 
 
@@ -89,3 +91,28 @@ def test_card_files_and_zips_older_than_thirty_days_go_sent_or_not_and_nothing_e
         assert (folder / name).exists() is not gone, name
     assert (folder / "手卡_03_新的.png").exists()
     assert hc.sweep_files(bot.relay.files_dir, time.time() + (KEEP_FILES_DAYS + 1) * 86400) == 1
+
+
+def test_a_waiting_or_approved_drafts_cards_stay_however_old_and_one_gone_stops_it(bot, clock):
+    """Final check 2026-11-10 B (probe_card_sweeps_vs_waiting): a draft nobody decided for a month had its cards taken by
+    the 30 days' sweep, and 「发送」 then sent her the words alone (「手卡整理好啦」 without the cards).  A draft still
+    waiting, or approved and not sent yet, keeps them; a card gone all the same (by hand) and it is not sent."""
+    assert CARDS_GONE_TEXT == "手卡文件已清理：重新做手卡"
+    old = time.time() - (KEEP_FILES_DAYS + 1) * 86400
+    waiting = drafted(bot, asks(bot))
+    for path in card_paths(waiting):
+        os.utime(path, (old, old))
+    clock.now = time.time()
+    bot.prm.purge_due()
+    assert there(card_paths(waiting)) == [True, True] and bot.prm.store.packet(waiting["id"])["status"] == "pending"
+    os.remove(card_paths(waiting)[1])
+    assert bot.prm.decide(waiting["id"], "send") == {"ok": False, "error": CARDS_GONE_TEXT}
+    assert bot.prm.store.packet(waiting["id"])["status"] == "pending" and bot.texts == [] and bot.files == []
+    approved = drafted(bot, asks(bot, "老师手卡再发我一下"))
+    assert bot.prm.decide(approved["id"], "send")["ok"]                   # (approved: it goes out next round)
+    for path in card_paths(approved):
+        os.utime(path, (old, old))
+    bot.prm.purge_due()
+    assert there(card_paths(approved)) == [True, True]
+    assert bot.prm.send_approved() == 1
+    assert [os.path.basename(path) for _, path in bot.files] == [name for name, _ in CARDS]

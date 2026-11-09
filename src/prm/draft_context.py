@@ -201,8 +201,15 @@ def held_unconfirmed(packet: Optional[dict], confirmed) -> list:
     return [c for c in codes_of(meta, PHOTO_HELD) if c not in confirmed]
 
 
-def held_reason(codes) -> str:
-    return f"{'、'.join(codes)} 还扣着（没对过图），不能执行：{CONFIRM_HOW}，再点「重新预览」" if codes else ""
+def held_reason(codes, confirm: bool = True) -> str:
+    """Why a sample order with these held hats (``held_unconfirmed``) does not run: 「对过图了」, then 「重新预览」; with
+    ``confirm`` False (PRM_DRAFT_CONTEXT off: the console has no 「对过图了」 then, ``photo_confirm`` refuses it) only
+    「重新预览」, whose new preview no photo check holds (final check 2026-11-10 A4)."""
+    if not codes:
+        return ""
+    if not confirm:
+        return f"{'、'.join(codes)} 还扣着（没对过图），不能执行：点「重新预览」再核"
+    return f"{'、'.join(codes)} 还扣着（没对过图），不能执行：{CONFIRM_HOW}，再点「重新预览」"
 
 
 def held_out(packet: Optional[dict], confirmed: dict) -> list:
@@ -404,13 +411,39 @@ def operator_files_out(packet: dict) -> list:
     return out
 
 
+LIVE_STATUSES = ("pending", "approved", "sending", "executing")   # a draft still to be decided, or going out
+SHEET_GONE = "对图单已清理：点「重新预览」"   # a sample order whose sheet is not on this PC any more (final check B)
+
+
+def _resolved(path) -> str:
+    try:
+        return str(Path(path).resolve())
+    except (OSError, ValueError, RuntimeError):
+        return str(path)
+
+
+def sheets_gone(packet: Optional[dict]) -> bool:
+    """A draft's operator files (``files_of``: its 对图单) not all on this PC any more (cleared by the sweep, or deleted):
+    its sample order is not approved until a new preview makes them again (``PrmService._approve_execute``, the
+    console's 「批准并执行」 off: SHEET_GONE)."""
+    for entry in files_of(packet or {}):
+        try:
+            if not entry["path"] or not Path(entry["path"]).is_file():
+                return True
+        except OSError:
+            return True
+    return False
+
+
 def sweep(store, now: Optional[float] = None, days: int = KEEP_DAYS, files_dir=None, relay_store=None) -> int:
     """The operator files older than ``days`` (by the file's own time): the packets' files deleted (her picture is on a
     sheet) and their paths cleared (the console says the picture is gone), each packet's list written back only if it
     is still the one read (``merge_packet_meta``'s ``expect``: a new preview's sheet that came meanwhile stays; the next
     sweep looks again); with ``relay_store``, every file the relay's operator-only channel took (``relay_operator_files``:
     a packet's or not, its row forgotten once the file is gone), and with ``files_dir`` (the relay's), any outfile
-    named like a sheet in ``outfiles/job-*/`` that old too (an older worker's way).  Returns how many files went."""
+    named like a sheet in ``outfiles/job-*/`` that old too (an older worker's way).  Never a file of a draft still
+    waiting or going out (LIVE_STATUSES: final check 2026-11-10 B, a sample order waiting a month kept 「批准并执行」
+    with its sheet gone), however old.  Returns how many files went."""
     now = time.time() if now is None else now
     cutoff = now - days * 86400
 
@@ -421,8 +454,12 @@ def sweep(store, now: Optional[float] = None, days: int = KEEP_DAYS, files_dir=N
             return False
 
     gone = 0
+    live: set = set()
     for packet in store.operator_file_packets():
         read = ((packet.get("meta") or {}).get(OPERATOR_FILES))
+        if packet.get("status") in LIVE_STATUSES:
+            live |= {_resolved(f["path"]) for f in files_of(packet) if f["path"]}
+            continue
         kept, doomed = [], []
         for entry in read if isinstance(read, list) else []:
             entry = dict(entry) if isinstance(entry, dict) else {}
@@ -440,7 +477,7 @@ def sweep(store, now: Optional[float] = None, days: int = KEEP_DAYS, files_dir=N
             path = Path(str(row.get("path") or ""))
             if not str(row.get("path") or "") or not path.exists():
                 forget.append(row["id"])
-            elif old(path):
+            elif old(path) and _resolved(path) not in live:
                 gone += delete_files([str(path)])
                 if not path.exists():
                     forget.append(row["id"])
@@ -448,7 +485,7 @@ def sweep(store, now: Optional[float] = None, days: int = KEEP_DAYS, files_dir=N
     if files_dir is not None:
         for path in Path(files_dir).glob(f"outfiles/job-*/{SHEET_PREFIX}*"):
             try:
-                if path.is_file() and path.stat().st_mtime < cutoff:
+                if path.is_file() and path.stat().st_mtime < cutoff and _resolved(path) not in live:
                     gone += delete_files([str(path)])
             except OSError:
                 pass

@@ -305,8 +305,9 @@ def waits_for_lines(row: Optional[dict]) -> bool:
 
 
 class BossGroups:
-    """The 老板拉的群 of one PRM service (see the module's doc).  ``register(wxid, name, note, catch_up=True)``:
-    PrmService.register (a link by hand registers with ``catch_up`` False: no new-friend catch-up, no 开场白);
+    """The 老板拉的群 of one PRM service (see the module's doc).  ``register(wxid, name, note, opening=True)``:
+    PrmService.register (a link by hand registers with ``opening`` False: her new-friend catch-up without a 开场白,
+    nothing of it by itself);
     ``opening(party, chat)``: PrmService._group_opening (``(job id, "")`` or ``(None, why not)``); ``handle(msg)``:
     PrmService.handle (a line stored before the takeover, handed on once); ``reserved``: the admin and the cc users;
     ``local(at)``: a time WeChat gives on this PC's clock (PrmService._local: only the baseline's time of a backend
@@ -1555,10 +1556,11 @@ class BossGroups:
             if self._register is None:
                 return {"ok": False, "error": "机器人这边没法登记达人"}
             try:
-                # (no new-friend catch-up, no 开场白 of her private chat: the operator only linked a group, review
-                # 2026-11-10 A-F4; ``PrmService.register``'s ``catch_up``)
+                # (no 开场白 of her private chat, nothing of it by itself: the operator only linked a group, review
+                # 2026-11-10 A-F4; her earlier private lines still one draft that waits, final check A7:
+                # ``PrmService.register``'s ``opening``)
                 party = self._register(her["wxid"], her_name(her.get("name"), her["wxid"], MANUAL_FALLBACK),
-                                       manual_note(offer["name"]), catch_up=False)
+                                       manual_note(offer["name"]), opening=False)
             except PartyError as e:
                 return {"ok": False, "error": f"没登记成：{e}"}
             made = True

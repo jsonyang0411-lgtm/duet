@@ -178,6 +178,10 @@ PICTURE_MAX_BYTES = 20 * 1024 * 1024   # a picture for the admin bigger than thi
 # A draft whose pictures the admin was to look at (its 直播手卡, a 对图单) did not reach the chat: nothing but 2 / 不发 is
 # done for it from WeChat (2026-11-10), the console's alone until they went again
 PICTURES_MISSING = "图没发过来：这一份请在控制台看过再批"
+# ... and while they are still going (``wechat_reviews.pictures_ok`` PICTURES_SENDING; 0 did not reach, 1 went): an
+# answer then does nothing and hears this; once they went, one line says they are there (final check 2026-11-10 A6)
+PICTURES_SENDING = 2
+PICTURES_COMING = "图还在发，等图到了再回"
 CARDS_META = "handcards"    # a packet's meta of its 直播手卡 (``service.HANDCARDS``: the service imports this module)
 # A draft told here that got new attention after its notice (her recall, its 要注意 changed, lines of the group it did
 # not hear: ``attention_seen``; integrated review 2026-11-10 A-F3): a fresh notice on the same number, 「#12 草稿（第 2 次
@@ -412,6 +416,21 @@ def attention_seen(packet: dict) -> str:
                       sort_keys=True)
 
 
+def _pictures_fp(pictures) -> str:
+    """Which pictures a notification sent (``wechat_reviews.pictures_sent``): their paths, as a fingerprint ("" for
+    none).  A fresh notice whose pictures are not these (a new preview's 对图单) sends them again (``_tell_again``)."""
+    paths = sorted(str(p["path"]) for p in pictures or [])
+    return hashlib.sha256("\n".join(paths).encode("utf-8")).hexdigest()[:16] if paths else ""
+
+
+def _pictures_state(pictures) -> int:
+    """``wechat_reviews.pictures_ok`` of a notification with these pictures (``WechatReview._pictures``): 1 none to see;
+    PICTURES_SENDING every one can go and goes after it; 0 one cannot (not on this PC, too big)."""
+    if not pictures:
+        return 1
+    return PICTURES_SENDING if all(p["ok"] for p in pictures) else 0
+
+
 def _seen_of(text) -> dict:
     try:
         value = json.loads(text or "{}")
@@ -567,6 +586,7 @@ class WechatReview:
         self._cc = prefix_pattern(str(getattr(config, "claude_relay_prefix", "cc") or "cc"))
         self._failures: dict[tuple, int] = {}       # ("draft" | "told" | "late", packet id) -> sends WeChat did not take
         self._pictures_at: dict[int, float] = {}    # packet id -> when its pictures that did not go are tried again
+        self._waited: set[int] = set()              # drafts answered while their pictures were still going (A6)
         self._chat_failures = 0                       # sends to the admin's chat not taken in a row (RETRY_SEC)
         self._wait_until = 0.0                        # ... and when the chat is tried again
         self._since: Optional[float] = None           # drafts that started waiting before this stay the console's
@@ -682,7 +702,7 @@ class WechatReview:
             # approved from WeChat while its pictures are still on the way, or never came; ``seen``: what this
             # notification showed of its attention, a change after it is told again)
             if not self._store.add_wechat_review(packet["id"], packet["deal_id"], self._clock(), state=TELLING,
-                                                 preview=stamp, pictures_ok=not pictures,
+                                                 preview=stamp, pictures_ok=_pictures_state(pictures),
                                                  seen=attention_seen(packet)):
                 continue                                   # (told already)
             tried += 1
@@ -699,8 +719,10 @@ class WechatReview:
                                "in WeChat", packet["id"])
             sent += 1
         for row in self._store.wechat_reviews_open():
-            # the pictures of a draft told already that did not reach the chat: again, while it waits (SEND_TRIES)
-            if row.get("pictures_ok", 1) or row.get("state") == TELLING:
+            # the pictures of a draft told already that did not reach the chat: again, while it waits (SEND_TRIES);
+            # one left PICTURES_SENDING (a stop in the middle: no send runs now, this is the only thread that sends)
+            if int(row.get("pictures_ok", 1) if row.get("pictures_ok") is not None else 1) == 1 \
+                    or row.get("state") == TELLING:
                 continue
             key = ("pictures", row["packet_id"])
             if (self._send_file is None or self._failures.get(key, 0) >= SEND_TRIES
@@ -768,9 +790,20 @@ class WechatReview:
         number = row["packet_id"]
         notice = int(row.get("notice") or 1) + 1
         key = ("again", number)
+        state = row.get("pictures_ok")
+        state = 1 if state is None else int(state)
         try:
-            text, stamp, _ = self._notice(packet, again={"notice": notice, "change": self._what_changed(row, packet),
-                                                         "pictures_ok": bool(row.get("pictures_ok", 1))})
+            again = {"notice": notice, "change": self._what_changed(row, packet), "pictures_ok": state,
+                     "resend": False}
+            text, stamp, _ = self._notice(packet, again=again)
+            pictures = self._pictures(packet, log=False)
+            # (its pictures are not the ones that went (a new preview's 对图单), or it lets 「执行」 run another preview
+            # than the last notice did: the current pictures go after it, the draft is the console's in WeChat until
+            # they did; final check 2026-11-10 A1)
+            resend = bool(pictures) and (_pictures_fp(pictures) != str(row.get("pictures_sent") or "")
+                                         or (bool(stamp) and stamp != str(row.get("preview") or "")))
+            if resend:
+                text, stamp, pictures = self._notice(packet, again={**again, "resend": True})
         except Exception:
             logger.exception("PRM: the fresh notification of draft %d could not be written; not told", number)
             self._failures[key] = SEND_TRIES
@@ -779,17 +812,21 @@ class WechatReview:
         if current is None or current["status"] != PENDING:
             return None                                    # (decided meanwhile)
         before = {"state": row["state"], "notice": notice - 1, "seen": str(row.get("seen") or ""),
-                  "preview": str(row.get("preview") or ""), "proposed": str(row.get("proposed") or "")}
+                  "preview": str(row.get("preview") or ""), "proposed": str(row.get("proposed") or ""),
+                  "pictures_ok": state}
+        moved = {"pictures_ok": _pictures_state(pictures)} if resend else {}
         if not self._store.set_wechat_review(number, (row["state"],), self._clock(), state=TELLING, notice=notice,
-                                             seen=seen, preview=stamp, proposed=""):
+                                             seen=seen, preview=stamp, proposed="", **moved):
             return None                                    # (answered meanwhile: looked at again next round)
         if not self._try(key, text, f"the fresh notification of draft {number}"):
             self._store.set_wechat_review(number, (TELLING,), self._clock(), **before)
             return False
         now = self._clock()
         self._store.set_wechat_review(number, (TELLING,), now, state=NOTIFIED, notified_at=now)
-        logger.info("PRM: draft %d told to the admin's chat again (notice %d: it changed after the last one)", number,
-                    notice)
+        logger.info("PRM: draft %d told to the admin's chat again (notice %d: it changed after the last one)%s", number,
+                    notice, f"; its {len(pictures)} picture(s) go again" if resend else "")
+        if resend and all(p["ok"] for p in pictures):
+            self._pictures_went(packet, pictures, again=False)
         return True
 
     def _what_changed(self, row: dict, packet: dict) -> str:
@@ -928,15 +965,24 @@ class WechatReview:
         it is the console's (PICTURES_MISSING).  True when every one went."""
         number = packet["id"]
         if not self._send_pictures(number, pictures, ("pictures", number)):
+            self._store.set_wechat_review(number, (), self._clock(), pictures_ok=0)
+            with self._said_lock:
+                self._waited.discard(number)
             if not again:
                 self._try(("missing", number), f"#{number} {PICTURES_MISSING}", f"draft {number}'s pictures line")
             return False
         now = self._clock()
-        if self._store.set_wechat_review(number, (NOTIFIED, PROPOSED), now, pictures_ok=1):
+        if self._store.set_wechat_review(number, (NOTIFIED, PROPOSED), now, pictures_ok=1,
+                                         pictures_sent=_pictures_fp(pictures)):
             logger.info("PRM: draft %d's %d picture(s) sent to the admin's chat%s", number, len(pictures),
                         " again" if again else "")
+            with self._said_lock:
+                waited = number in self._waited
+                self._waited.discard(number)
             if again:
                 self.tell(f"#{number} 的图补发过来了（在上面）：{self._pictures_how(packet)}")
+            elif waited:                                   # (answered while they were still going: say they came)
+                self.tell(f"#{number} 的图发过来了（在上面）：{self._pictures_how(packet)}")
         return True
 
     def _pictures_how(self, packet: dict) -> str:
@@ -956,10 +1002,17 @@ class WechatReview:
         return f"看过再引用{which}回 1（或者回「发 {number}」）"
 
     def _pictures_stop(self, row: Optional[dict], packet: Optional[dict]) -> str:
-        """「#N 图没发过来：…」 for a waiting draft whose pictures did not reach the admin's chat (``pictures_ok`` 0): only 2
-        / 不发 is done for it from WeChat; "" otherwise."""
-        if not row or row.get("pictures_ok", 1) or not packet or packet.get("status") != PENDING:
+        """An answer's reply for a waiting draft whose pictures are not all in the admin's chat: 「#N 图还在发，等图到了再回」
+        while they are still going (PICTURES_SENDING: the draft is remembered, and a line says when they came,
+        ``_pictures_went``), 「#N 图没发过来：…」 when they did not reach it (0: only 2 / 不发 is done for it from WeChat);
+        "" otherwise."""
+        state = row.get("pictures_ok") if row else None
+        if not row or state is None or int(state) == 1 or not packet or packet.get("status") != PENDING:
             return ""
+        if int(state) == PICTURES_SENDING:
+            with self._said_lock:
+                self._waited.add(int(packet["id"]))
+            return f"#{packet['id']} {PICTURES_COMING}"
         return f"#{packet['id']} {PICTURES_MISSING}"
 
     def _changed_after(self, row: Optional[dict], packet: Optional[dict], *, quoted: Optional[int] = None,
@@ -970,7 +1023,9 @@ class WechatReview:
         the answer quotes (or a bare one answers) another notice than the latest (``quoted``: which one), or a 改成
         question asked before the latest one (``question``: its proposed edit went with the fresh notice); an answer
         that names the draft by its number without a quote written before the latest notice (a 2nd or later) could be
-        read (``written``, WeChat's time: ``_read_latest``).  2 / 不发 never come here: dropping it sends nothing."""
+        read (``written``, WeChat's time: ``_read_latest``), or while it is being sent (the row ``telling``: its
+        ``notified_at`` is still the one before; final check 2026-11-10 A3).  2 / 不发 never come here: dropping it sends
+        nothing."""
         if not row or not packet or packet.get("status") != PENDING:
             return ""
         number, seen, latest = packet["id"], str(row.get("seen") or ""), int(row.get("notice") or 1)
@@ -982,7 +1037,9 @@ class WechatReview:
             return f"#{number} {STALE_TEXT}"
         if question and latest > 1 and not (row.get("state") == PROPOSED and str(row.get("proposed") or "").strip()):
             return f"#{number} {STALE_TEXT}"
-        if written is not None and latest > 1 and not self._read_latest(row, written):
+        if written is not None and latest > 1 and (row.get("state") == TELLING or not self._read_latest(row, written)):
+            # (a fresh notice being sent: ``notified_at`` is still the one before it, so nothing written now is known
+            # to have seen it; final check 2026-11-10 A3)
             return f"#{number} {STALE_TEXT}"
         return ""
 
@@ -1090,8 +1147,8 @@ class WechatReview:
         to send after it (``_pictures``).  Pictures that cannot all go (not on this PC, too big): it says so
         (PICTURES_MISSING) where it would say how to answer, and none of them goes.  A platform draft whose 要注意 is
         cut (longer than NOTE_CHARS) lets nothing run (REASON_LONG).  ``again`` (``_tell_again``): a fresh notice,
-        ``{"notice", "change", "pictures_ok"}``: its number in the head, what changed first, the pictures as the row
-        has them (none sent again)."""
+        ``{"notice", "change", "pictures_ok", "resend"}``: its number in the head, what changed first, the pictures as
+        the row has them (none sent again), or (``resend``) said and sent as a first notice's."""
         number = packet["id"]
         meta = packet.get("meta") or {}
         ids, addresses = self._ids_of(packet), self._addresses_of(packet)
@@ -1146,13 +1203,14 @@ class WechatReview:
             lines.append(f"（附 {len(files)} 个文件：{'、'.join(files[:FILES_NAMED])}{'…' if len(files) > FILES_NAMED else ''}）")
         pictures = self._pictures(packet, log=log and again is None)
         named = "、".join(_cut(p["name"], 40) for p in pictures)
-        if again is not None:
-            # (a fresh notice: its pictures went with the first one, or did not and go as before: none again)
-            missing = bool(pictures) and not again.get("pictures_ok", True)
+        if again is not None and not again.get("resend"):
+            # (a fresh notice: its pictures went with an earlier one, the same ones, or did not and go as before: none
+            # again)
+            missing = bool(pictures) and int(again.get("pictures_ok", 1)) == 0
             if missing:
                 lines.append(f"（要看的图 {len(pictures)} 张还没发过来：{named}）")
             elif pictures:
-                lines.append(f"（要看的 {len(pictures)} 张图在第一条 #{number} 通知后面）")
+                lines.append(f"（要看的 {len(pictures)} 张图在前面的 #{number} 通知后面，没有变）")
             pictures = []
         elif any(not p["ok"] for p in pictures):
             missing = True
@@ -1243,7 +1301,7 @@ class WechatReview:
             # the switch off: only a hat its last preview held that nobody confirmed (``_approve_execute`` refuses it
             # all the same, review 2026-11-10 A-L4; 合并 fix1110-s)
             held = draft_context.held_unconfirmed(packet, confirmed)
-            return f"{draft_context.held_reason(held)}；微信里不能执行；不要的话回 2" if held else ""
+            return f"{draft_context.held_reason(held, confirm=False)}；微信里不能执行；不要的话回 2" if held else ""
         held = [h["code"] for h in draft_context.held_out(packet, confirmed) if h["held"]]
         waiting = [code for code in held if code not in confirmed]
         if waiting:
@@ -1883,8 +1941,9 @@ class WechatReview:
             photo = self._photo_stop(packet)
             if photo:
                 return f"#{number} 还没执行（在等你确认）：{photo}"
-            if self._pictures_stop(row, packet):
-                return f"#{number} 还没执行（在等你确认）：{PICTURES_MISSING}"
+            stop = self._pictures_stop(row, packet)
+            if stop:
+                return f"#{number} 还没执行（在等你确认）：{stop[len(f'#{number} '):]}"
             if self._changed_after(row, packet):
                 return f"#{number} 还没执行（在等你确认）：{STALE_TEXT}"
             if told and told == preview_stamp((packet.get("platform") or {}).get("preview")):

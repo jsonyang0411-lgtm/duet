@@ -207,16 +207,25 @@ FILES_KEEP_DAYS = 30             # the bot's side: a card file or zip in the rel
                                  # KEEP_FILES_DAYS)
 
 
-def sweep_files(files_dir, now: Optional[float] = None, days: int = FILES_KEEP_DAYS) -> int:
+def sweep_files(files_dir, now: Optional[float] = None, days: int = FILES_KEEP_DAYS, keep=()) -> int:
     """The bot's side (review 2026-11-10 B-L3): every card file and zip (``is_card_file``) in the relay's
     ``outfiles/job-*/`` older than ``days`` by its own time deleted, sent or not (her 称呼 is printed on a card:
-    「<称呼>专属」).  Returns how many went; one that cannot be deleted now is left for the next round."""
+    「<称呼>专属」), but those in ``keep`` (the cards of drafts still waiting or going out: final check 2026-11-10 B, a
+    draft waiting a month went out without its cards).  Returns how many went; one that cannot be deleted now is left
+    for the next round."""
     now = time.time() if now is None else now
     cutoff = now - days * 86400
+    kept = set()
+    for path in keep or ():
+        try:
+            kept.add(str(Path(path).resolve()))
+        except (OSError, ValueError, RuntimeError):
+            kept.add(str(path))
     gone = 0
     for path in Path(files_dir).glob("outfiles/job-*/*"):
         try:
-            if is_card_file(path.name) and path.is_file() and path.stat().st_mtime < cutoff:
+            if (is_card_file(path.name) and path.is_file() and path.stat().st_mtime < cutoff
+                    and str(path.resolve()) not in kept):
                 path.unlink()
                 gone += 1
         except OSError:

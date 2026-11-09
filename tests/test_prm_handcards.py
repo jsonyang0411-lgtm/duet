@@ -1186,13 +1186,14 @@ def test_the_switch_defaults_off_and_is_checked():
     assert adv.validate_updates({"PRM_HANDCARDS": "maybe"}, {}) and adv.validate_updates({"PRM_HANDCARDS": "on"}, {}) == {}
 
 
-def platform_packet(bot, cards):
+def platform_packet(bot, cards, attachments=()):
     deal = bot.prm.store.deal_of(bot.prm.store.party_by_wxid(CREATOR)["id"])
     action = {"action": "dy.designated_commission", "item_id": DY_ITEM, "creator_platform_id": "1234567890",
               "commission_rate": 20}
     return bot.prm.store.add_packet(
         deal_id=deal["id"], party_id=deal["party_id"], job_id=None, chat_id=CREATOR, kind="money",
-        text="佣金开好啦，手卡也整理好啦～", attachments=[], intent="", slots={}, stage_proposal="", needs_attention=True,
+        text="佣金开好啦，手卡也整理好啦～", attachments=list(attachments), intent="", slots={}, stage_proposal="",
+        needs_attention=True,
         reason="", status="pending", tool="dy.designated_commission",
         platform={"action": action, "preview": {"verdict": "ready", "problems": []}},
         meta={"handcards": {"console": False, **cards}}, now=bot.clock.now)
@@ -1204,6 +1205,18 @@ def test_a_platform_draft_whose_cards_failed_cannot_be_executed_as_it_is(bot):
     packet_id = platform_packet(bot, {"ok": False, "count": 0, "note": "", "problems": ["出图出错了"]})
     assert bot.prm.decide(packet_id, "execute") == {"ok": False, "error": CARDS_FAILED_TEXT}
     assert bot.prm.decide(packet_id, "execute", "佣金开好啦～") != {"ok": False, "error": CARDS_FAILED_TEXT}
+
+
+def test_a_platform_draft_whose_card_file_is_gone_cannot_be_executed(bot, tmp_path):
+    """Final check 2026-11-10 B: a card file of the draft not on this PC any more: 批准并执行 is refused as 发送 is, the
+    reply never goes without its cards (CARDS_GONE_TEXT); a card left out (``left_out``) is not asked for."""
+    from src.prm.service import CARDS_GONE_TEXT
+
+    gone = {"name": CARDS[0][0], "path": str(tmp_path / "relay" / "outfiles" / "job-9" / CARDS[0][0])}
+    packet_id = platform_packet(bot, {"ok": True, "count": 1, "note": "", "problems": []}, [gone])
+    assert bot.prm.decide(packet_id, "execute") == {"ok": False, "error": CARDS_GONE_TEXT}
+    left = platform_packet(bot, {"ok": True, "count": 1, "note": "", "problems": [], "left_out": True}, [gone])
+    assert bot.prm.decide(left, "execute") != {"ok": False, "error": CARDS_GONE_TEXT}
 
 
 def test_a_platform_draft_whose_cards_are_out_of_date_cannot_be_executed(bot, clock):

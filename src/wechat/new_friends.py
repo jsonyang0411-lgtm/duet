@@ -769,15 +769,16 @@ class NewFriendService:
         """The friends found in the last ``days`` days, newest first (登记达人's candidates)."""
         return self._store.recent(self._clock() - days * 86400)
 
-    def registered(self, wxid: str) -> bool:
+    def registered(self, wxid: str, opening: bool = True) -> bool:
         """A creator was registered (PrmService.on_registered: by a person in the console, or with
         PRM_AUTO_REGISTER by PRM's sender thread, never inside this service's look): when she is a new
         friend, her messages since she was added (her greeting too; at most PRM_CATCHUP_HOURS old, 5
         minutes with 0) go to PRM as one draft job, read back on her chat's next poll (the backend's
         ``catch_up_chat``), with how she was added (``how``) and whether the read-back reaches back to when she was
         added (``whole``: only then does "none of hers" mean she has not written, and PRM drafts our first line,
-        开场白; registered more than the window after, she may have written before it).  True when that was
-        asked for."""
+        开场白; registered more than the window after, she may have written before it).  ``opening`` False (接手任何合作群's
+        「是 N」: PrmService.register's ``opening``): PRM is told so (no 开场白, nothing of it by itself).  True when that
+        was asked for."""
         sink = self._catch_up_sink
         ask = getattr(self._backend, "catch_up_chat", None)
         record = self._store.get(str(wxid))
@@ -793,7 +794,8 @@ class NewFriendService:
         whole = since <= first                     # the read-back reaches back to her first line (her greeting)
 
         def hand_on(messages: list, wxid: str = str(wxid)) -> object:
-            return sink(wxid, messages, verify_until=added_at, how=how, whole=whole)
+            return sink(wxid, messages, verify_until=added_at, how=how, whole=whole,
+                        **({} if opening else {"opening": False}))
 
         ask(str(wxid), str(record["name"] or ""), since, hand_on)
         logger.info("New friends: %s… registered as a creator; her messages since she was added go to PRM",

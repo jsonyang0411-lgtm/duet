@@ -896,11 +896,18 @@ def test_the_sweep_never_writes_over_a_sheet_that_came_meanwhile(bot, clock):
 
 
 def test_the_sheets_go_after_thirty_days_by_their_own_time(bot, clock):
+    """... once their draft no longer waits: a draft still waiting or going out keeps its sheet however old (final check
+    2026-11-10 B: a sample order waiting a month kept 「批准并执行」 with its sheet gone), the packet's, the relay's row's
+    and the outfile pass alike."""
     job, packet = sheet_draft(bot, with_brief=False)
     path = Path(packet["meta"]["operator_files"][0]["path"])
     os.utime(path, (clock.now, clock.now))                        # (written at the test clock's time)
     assert draft_context.sweep(bot.prm.store, clock.now + 29 * 86400) == 0 and path.exists()
-    assert draft_context.sweep(bot.prm.store, clock.now + 31 * 86400) == 1 and not path.exists()
+    later = clock.now + 31 * 86400
+    assert draft_context.sweep(bot.prm.store, later, files_dir=bot.relay.files_dir, relay_store=bot.relay.store) == 0
+    assert path.exists() and bot.prm.store.packet(packet["id"])["meta"]["operator_files"][0]["path"] == str(path)
+    assert bot.prm.decide(packet["id"], "drop")["ok"]
+    assert draft_context.sweep(bot.prm.store, later) == 1 and not path.exists()
     kept = bot.prm.store.packet(packet["id"])["meta"]["operator_files"]
     assert kept[0]["path"] == "" and kept[0]["name"] == f"对图单-{job['id']}.jpg"
     assert bot.prm.store.operator_file_packets() == []                               # looked at once
@@ -931,4 +938,29 @@ def test_the_hourly_clean_up_runs_the_sweep(bot, clock):
         os.utime(p, (clock.now, clock.now))
     clock.now += 31 * 86400
     bot.prm.purge_due()
-    assert not path.exists() and not orphan.exists()
+    assert path.exists() and not orphan.exists()                  # (its draft still waits: final check 2026-11-10 B)
+    assert bot.prm.decide(packet["id"], "drop")["ok"]
+    bot.prm.purge_due()
+    assert not path.exists()
+
+
+def test_a_sample_order_whose_sheet_is_gone_is_not_approved_until_a_new_preview_makes_one(bot):
+    """Final check 2026-11-10 B: a waiting sample order's 对图单 not on this PC any more (deleted by hand, an older
+    sweep): nobody can look at it, so 「批准并执行」 is off on the console and refused (SHEET_GONE); a new preview's sheet
+    lets it run."""
+    _, packet = sheet_draft(bot, with_brief=False, verdict="ready")
+    assert shown_of(bot, packet["id"])["platform"]["can_execute"] is True
+    Path(packet["meta"]["operator_files"][0]["path"]).unlink()
+    shown = shown_of(bot, packet["id"])
+    assert shown["platform"]["can_execute"] is False and draft_context.SHEET_GONE in shown["platform"]["problems"]
+    assert draft_context.SHEET_GONE == "对图单已清理：点「重新预览」"
+    assert bot.prm.decide(packet["id"], "execute") == {"ok": False, "error": draft_context.SHEET_GONE}
+    assert bot.prm.store.packet(packet["id"])["status"] == "pending"
+    assert bot.prm.decide(packet["id"], "repreview")["ok"]
+    again = bot.relay.next_job(0, ("prm",))
+    answer = bot.relay.operator_file(again["id"], f"对图单-{again['id']}.jpg", io.BytesIO(SHEET).read, len(SHEET))
+    bot.finish(again["id"], text=json.dumps(sample_block(previewed_at=2.0, draft_context=GATED, operator_files=[
+        {"name": f"对图单-{again['id']}.jpg", "why": "新的对图单", "sha256": answer["sha256"]}]), ensure_ascii=False))
+    assert shown_of(bot, packet["id"])["platform"]["can_execute"] is True
+    out = bot.prm.decide(packet["id"], "execute")
+    assert out["ok"] and out["status"] == "executing", out

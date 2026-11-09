@@ -982,7 +982,7 @@ def test_a_sheet_that_says_look_again_or_has_no_sku_photo_waits_for_an_operators
 
 def test_a_new_preview_checks_by_photo_again_and_brings_a_new_sheet(worker, bot, mac):  # noqa: F811
     """重新预览 of a sample order: the bot sends the context again; the Mac checks it by her remembered picture, and the
-    new sheet replaces the draft's."""
+    new sheet replaces the draft's; it is the sweep's 30 days once the draft no longer waits."""
     order_rules(mac)
     mac.hats.answers(match={"图片-1.jpg": SURE})
     mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action=SAMPLE_ORDER)
@@ -1003,6 +1003,8 @@ def test_a_new_preview_checks_by_photo_again_and_brings_a_new_sheet(worker, bot,
     assert not Path(first).exists()                               # (review 2026-11-09: no orphan of her photo)
     second = Path(kept["path"])
     os.utime(second, (time.time() - 31 * 86400, time.time() - 31 * 86400))
+    assert bot_draft_context.sweep(bot.prm.store) == 0 and second.exists()     # (still waiting: final check 2026-11-10 B)
+    assert bot.prm.decide(packet["id"], "drop")["ok"]
     assert bot_draft_context.sweep(bot.prm.store) == 1 and not second.exists()
 
 

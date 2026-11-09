@@ -4,8 +4,10 @@ Everybody in a group linked by hand reads what goes there: with PRM_LINKED_GROUP
 always wait for a person, whatever its kind's gate, the 下班时段 (PRM_NIGHT_AUTO_HOURS), 自动模式, 开场白自动发
 (PRM_OPENING_AUTO_MIN) or 签收后问一句 would do, also a packet the bot started for her private chat and aimed at the group
 once she had none; on, the group goes as a 老板拉的群 the scan took over (tests/test_prm_boss_groups.py), but for the draft
-of the lines that waited at 接群, which always waits.  「是 N」 registers a creator without her new-friend catch-up (review
-A-F4: a private 开场白 went out by itself).  Every name, id and number is made up."""
+of the lines that waited at 接群, which always waits; the 接群 answer says which (final check 2026-11-10 A5).  「是 N」
+registers a creator with her new-friend catch-up but no 开场白, and nothing of it goes by itself (review A-F4: a private
+开场白 went out by itself; final check A7: her earlier private lines were dropped).  Every name, id and number is made
+up."""
 
 import json
 import time
@@ -50,32 +52,84 @@ def mac_writes(b, job_id, text, kind="greeting", reason="kb/合作政策.md"):
     return b.prm.store.packet_for_job(job_id)
 
 
-# ── 「是 N」: no new-friend catch-up ─────────────────────────────────────────
+# ── 「是 N」: her new-friend catch-up without a 开场白 ─────────────────────────
 
-def test_jie_qun_registers_a_new_friend_without_her_catch_up_or_an_opening(clock, tmp_path):
+def test_jie_qun_registers_a_new_friend_without_an_opening(clock, tmp_path):
     """Review A-F4 (probe A3): 「是 N」 registered her as the console does, whose ``on_registered``
     (NewFriendService.registered) read her private chat back as a new friend's: nothing of hers there, a private 开场白,
     which PRM_OPENING_AUTO_MIN sent by itself half an hour later, though the operator only linked a group.  A link by
-    hand registers her without it; the console's 登记达人 still asks for it."""
+    hand asks for her catch-up without a 开场白 (``opening`` False; final check 2026-11-10 A7: not asking for it at all
+    dropped her earlier private lines): nothing of hers there, nothing at all; the console's 登记达人 asks as before."""
     b = setup(clock, tmp_path, prm_opening_auto_min=30)
     try:
         b.backend.friends.add(CREATOR)                             # (her private chat is there: a new friend)
         asked = []
-        b.prm.on_registered = lambda wxid: asked.append(wxid) or True
+
+        def registered(wxid, **kw):                                 # (NewFriendService.registered: her read-back ...)
+            asked.append((wxid, kw))
+            b.prm.take_new_friend(wxid, [], whole=True, **kw)       # (... handed on: nothing of hers in her chat)
+            return True
+
+        b.prm.on_registered = registered
         b.backend.say(GROUP, CREATOR, "你好", clock.now - 3600)
         b.backend.say(GROUP, ME, "您好～", clock.now - 3400)         # (answered by hand there: no catch-up draft)
         answer = linked(b, member=1)
         assert "小美（新登记的达人）" in answer and b.prm.is_party_group(GROUP)
-        assert asked == []                                          # no read-back of her private chat asked for
+        assert asked == [(CREATOR, {"opening": False})]             # her read-back asked for, without a 开场白
         assert b.relay.store.latest_open(CREATOR, drafts_only=True, system=False) is None
         clock.now += 3600
         b.prm.send_due_openings()
         b.prm.send_approved()
         assert b.texts == []
         b.prm.register("wxid_creator02", "阿花", "测试")             # the console's 登记达人: as before
-        assert asked == ["wxid_creator02"]
+        assert asked[-1] == ("wxid_creator02", {})
+        assert json.loads(job_of(b, "wxid_creator02")["meta"])["opening"]["by"] == "new_friend"
     finally:
         stop(b)
+
+
+@pytest.mark.parametrize("auto_min", [30, 0])
+def test_jie_qun_still_drafts_her_earlier_private_lines_and_none_of_it_goes_by_itself(clock, tmp_path, auto_min):
+    """Final check 2026-11-10 A7: a new friend who wrote in private before the operator linked her group: 「是 N」 never
+    drafted those lines (no catch-up asked for).  Her catch-up without a 开场白 makes them one draft, which waits for a
+    person and never goes by itself: no 开场白自动发 (PRM_OPENING_AUTO_MIN), no holding reply; 「发送」 sends it."""
+    b = setup(clock, tmp_path, prm_opening_auto_min=auto_min)
+    try:
+        b.backend.friends.add(CREATOR)
+        b.prm.on_registered = lambda wxid, **kw: True
+        linked(b, member=1)
+        lines = [b.msg("老师您好，我是小美", ts=clock.now - 600), b.msg("想看看你们家的帽子", ts=clock.now - 590)]
+        assert b.prm.take_new_friend(CREATOR, lines, whole=True, opening=False) == 2
+        job = job_of(b, CREATOR)
+        meta = json.loads(job["meta"])
+        assert meta["new_friend"] == {"from": clock.now - 600, "count": 2, "linked": True}
+        assert "opening_auto" not in meta and "opening" not in meta and "night" not in meta
+        packet = mac_writes(b, job["id"], "您好～我是品牌的运营，帽子款式我发您看看", kind="faq")
+        assert (packet["status"], packet["route"]) == ("pending", "review") and "auto_at" not in packet["meta"]
+        clock.now += 3600
+        assert b.prm.send_holding_replies() == 0 and b.prm.send_due_openings() == 0
+        b.prm.send_approved()
+        assert b.texts == []
+        assert b.prm.decide(packet["id"], "send")["ok"] and b.prm.send_approved() == 1
+        assert b.texts == [(CREATOR, "您好～我是品牌的运营，帽子款式我发您看看")]
+    finally:
+        stop(b)
+
+
+def test_the_jie_qun_answer_says_how_her_drafts_there_go_by_the_switch(clock, tmp_path):
+    """Final check 2026-11-10 A5: the answer to 「是 N」 said every draft there waits in 「待审批」; switched on
+    (PRM_LINKED_GROUPS_AUTO), only the draft of the lines that waited at 接群 does, the rest goes as a 老板拉的群's."""
+    for on, how in ((True, "之后她在群里说的话会起草，和老板拉的群一样照门槛、下班时段、自动模式发（「手动接的群也自动发」开着）；"
+                           "接群这一刻她在等的那几句的草稿在「待审批」里等你看"),
+                    (False, "之后她在群里说的话会起草，在「待审批」里等你看")):
+        b = setup(clock, tmp_path / str(on), **({"prm_linked_groups_auto": "on"} if on else {}))
+        try:
+            answer = linked(b, member=1)
+            deal = b.prm.store.deal_of(b.prm.store.party_by_wxid(CREATOR)["id"])
+            assert answer == (f"接手了：群「{GROUP_NAME}」→ 小美（新登记的达人），合作单 #{deal['id']}；{how}；"
+                              "她最近没有在等我们回：等她在群里说话再起草"), on
+        finally:
+            stop(b)
 
 
 # ── PRM_LINKED_GROUPS_AUTO off (the default) ───────────────────────────────

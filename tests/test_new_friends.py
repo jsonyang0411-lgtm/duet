@@ -679,6 +679,42 @@ def test_the_same_draft_of_a_creator_who_is_not_new_goes_out_by_its_gate(copilot
     assert bot.prm.store.deal(1)["attention"] == ""
 
 
+def test_registered_by_jie_qun_her_earlier_lines_wait_for_a_person_and_nobody_gets_an_opening(copilot_bot, db, clock):
+    """Final check 2026-11-10 A7: 「是 N」 (a group linked by hand: BossGroups._link_by_hand) registers her with
+    ``opening`` False.  A new friend who wrote in private before still has those lines drafted, one draft that waits
+    for a person whatever its kind's gate, with no 开场白自动发 and no holding reply; one who has not written gets no
+    开场白 at all."""
+    bot = copilot_bot()
+    bot.prm._opening_auto_sec = 30 * 60                              # (PRM_OPENING_AUTO_MIN=30)
+    bot.friends.scan_once()                                          # the start marker
+    clock.now += 120
+    t = clock.now
+    accepted_on_phone(db, NEW, "阿花", t)                             # greeting at t-5, added at t
+    db.say(NEW, NEW, "在吗？想要个样品", t + 60)
+    they_accepted(db, ASKED, t)                                      # 小青 has not written
+    clock.now = t + 120
+    bot.poll()
+    assert sorted(e["wxid"] for e in bot.friends.scan_once()) == sorted([NEW, ASKED])
+    assert bot.prm.register(NEW, "阿花", opening=False)["catch_up"] is True
+    assert bot.prm.register(ASKED, "小青", opening=False)["catch_up"] is True
+    bot.poll()
+    bot.poll()
+    [job] = bot.jobs()                                               # hers only: no 开场白 for 小青
+    assert job["chat_id"] == NEW and lines(job) == ["（加好友时的验证消息）我是阿花，做美妆的，电话 〈手机1〉", "在吗？想要个样品"]
+    meta = json.loads(job["meta"])
+    assert meta["new_friend"] == {"from": t - 5, "count": 2, "linked": True} and "opening_auto" not in meta
+    bot.prm.store.set_gate("faq", gates.AUTO, clock.now)
+    bot.mac_drafts()
+    [packet] = bot.prm.store.packets(("pending", "approved"))
+    assert (packet["status"], packet["route"]) == ("pending", "review") and "auto_at" not in packet["meta"]
+    clock.now += 3600
+    assert bot.prm.send_holding_replies() == 0 and bot.prm.send_due_openings() == 0
+    bot.prm.send_approved()
+    assert bot.sent == []
+    assert bot.prm.decide(packet["id"], "send")["ok"] and bot.prm.send_approved() == 1
+    assert bot.sent == [(NEW, "你好阿花～欢迎")]
+
+
 def test_a_new_friend_whose_chat_was_not_read_is_caught_up_when_registered(copilot_bot, db, clock):
     """A custom id is not read under PRIVATE_CHATS=*, nor anything without being listed: the catch-up
     reads it once it is registered, and the first read of the chat does not hand anything twice."""

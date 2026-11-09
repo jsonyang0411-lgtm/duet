@@ -16,7 +16,7 @@ from test_prm_platform_flow import SAMPLE, approve, block, mac_runs, ordered, re
 
 from platform_fakes import JST_ORDER
 from src.prm import draft_context
-from src.prm.service import SECOND_ORDER_DAYS, SETTLE_SEC, event_out
+from src.prm.service import SECOND_ORDER_DAYS, SETTLE_SEC, event_out, platform_state
 
 
 @pytest.fixture
@@ -65,16 +65,18 @@ def test_a_sample_order_whose_preview_held_a_hat_nobody_confirmed_never_runs(bot
     """``photo_held``: the hats the Mac's check held for photos in the draft's last preview (its verdict is not ready
     then; ``photo_confirmed``, the ones it let go only by a confirmation, is ``withdrawn``'s).  A preview that says ready
     all the same with such a hat no operator confirmed since is never approved (the console's button off, why), the
-    switch on or off; once 「对过图了」 is there for it, it may run."""
+    switch on or off (off, the console has no 「对过图了」: 「重新预览」 alone, final check 2026-11-10 A4); once 「对过图了」
+    is there for it, it may run."""
     packet = held_draft(bot, verdict="ready")
     reason = f"{CODE_B} 还扣着（没对过图），不能执行：{draft_context.CONFIRM_HOW}，再点「重新预览」"
     assert bot.prm.decide(packet["id"], "execute") == {"ok": False, "error": reason}
     shown = shown_of(bot, packet["id"])
     assert shown["platform"]["can_execute"] is False and reason in shown["platform"]["problems"]
     bot.prm._draft_context = False
-    assert bot.prm.decide(packet["id"], "execute") == {"ok": False, "error": reason}
+    off = f"{CODE_B} 还扣着（没对过图），不能执行：点「重新预览」再核"
+    assert bot.prm.decide(packet["id"], "execute") == {"ok": False, "error": off}
     shown = shown_of(bot, packet["id"])                     # (合并 fix1110-s: the console says so the switch off too)
-    assert shown["platform"]["can_execute"] is False and reason in shown["platform"]["problems"]
+    assert shown["platform"]["can_execute"] is False and off in shown["platform"]["problems"]
     bot.prm._draft_context = True
     deal = deal_of(bot)
     assert bot.prm.deal_action("photo_confirm", {"deal_id": deal["id"], "packet": packet["id"], "code": CODE_B})["ok"]
@@ -165,6 +167,45 @@ def test_a_sample_order_verified_lately_asks_once_before_another_and_a_resend_st
         sent = b.prm.store.packet(first["id"])
         assert (sent["status"], sent["error"]) == ("sent", "") and alerts(b) == {}
         assert b.prm.decide(second["id"], "execute")["ok"]
+    finally:
+        b.prm.stop()
+        b.relay.stop()
+
+
+def test_a_sample_order_after_one_whose_result_is_not_known_asks_to_look_in_jushuitan_first(clock, tmp_path):
+    """Final check 2026-11-10 A2 (probe R5): the first sample order ended red with a result not known (INDETERMINATE: it
+    may be in 聚水潭); a second one of the deal ran without a question (``_second_order`` counted running, verified and
+    waiting ones only).  Within SECOND_ORDER_DAYS it is refused once: the first is red again and says to look in 聚水潭
+    first, as an uncertain 专属 action's does; its 「我已处理」 lets the second run.  Older: as before."""
+    from test_prm import Bot
+
+    b = Bot(clock, tmp_path)
+    b.prm.register(CREATOR, "小美", "测试达人")
+    try:
+        first = ordered(b, clock)
+        mac_runs(b, approve(b, first), record(outcome="INDETERMINATE"))
+        assert platform_state(b.prm.store.packet(first["id"])) == "uncertain"
+        clock.now += 86400
+        second = ordered(b, clock, reply="补寄的寄样单建好啦")
+        clock.now += SECOND_ORDER_DAYS * 86400                                     # (older than the window: as before)
+        assert b.prm._second_order(b.prm.store.packet(second["id"])) == ("", [])
+        clock.now -= SECOND_ORDER_DAYS * 86400
+        out = b.prm.decide(second["id"], "execute")
+        assert out == {"ok": False, "error": (
+            f"这位达人有寄样单 #{first['id']} 的结果不确定（聚水潭里可能已经建了：先到聚水潭寄样管理核对）：确定要再建一张，"
+            f"先在「待审批」最上面 #{first['id']} 的红色提醒上点「我已处理」，再回来批准这一份；不用再建，点这一份的「不发」")}
+        ask = (f"#{second['id']} 要给她再建一张寄样单：先到聚水潭寄样管理核对这一张建了没有。确实没有、或者要补寄，点这里的"
+               f"「我已处理」，再去批准 #{second['id']}；已经有了、不用再建，先点 #{second['id']} 的「不发」，再点这里的「我已处理」")
+        red = b.prm.store.packet(first["id"])
+        assert red["status"] == "failed" and red["error"].startswith(f"{ask}。上次的结果：")
+        assert list(alerts(b)) == [first["id"]]
+        notices = {n["key"]: n["text"] for n in b.prm.store.deal(first["deal_id"])["notices"]}
+        assert notices[f"platform:{first['id']}"] == f"#{first['id']} 的结果不确定，{ask}"
+        assert b.prm.decide(second["id"], "execute")["ok"] is False                # (not said yet)
+        assert b.prm.decide(first["id"], "ack") == {"ok": True, "released": second["id"]}
+        assert alerts(b) == {}
+        out = b.prm.decide(second["id"], "execute")
+        assert out["ok"] and out["status"] == "executing", out
     finally:
         b.prm.stop()
         b.relay.stop()
