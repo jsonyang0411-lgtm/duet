@@ -871,6 +871,13 @@ class TestPrmPages:
         assert pictures.nth(0).evaluate("img => img.complete && img.naturalWidth") == 160
         note = card.locator(".prm-handcards").inner_text()
         assert "手卡 2 张：看过卡片再发" in note and "待定（卡上红字）：没有" in note
+        assert prm.service.store.move(packet["id"], ("pending",), "approved", decided_at=prm.clock.now)
+        page.reload(timeout=10000)                                         # (approved, not sent yet: going out)
+        page.wait_for_timeout(1500)
+        assert card.locator(".prm-handcards-line").inner_text() == "手卡 2 张随这条一起发出"
+        assert prm.service.store.move(packet["id"], ("approved",), "pending", decided_at=None)
+        page.reload(timeout=10000)
+        page.wait_for_timeout(1500)
         assert "这一条：做手卡" in card.inner_text()
         assert card.locator("button:has-text('发送')").first.is_enabled()
         assert prm.service.decide(packet["id"], "drop")["ok"]
@@ -920,8 +927,12 @@ class TestPrmPages:
         page.locator("[role=dialog] button:has-text('只发这段话')").click()
         page.wait_for_timeout(800)
         packet = prm.service.store.packet_for_job(job["id"])
-        assert packet["status"] in ("approved", "sent") and packet["attachments"] == []
+        assert packet["status"] == "approved" and packet["attachments"] == []
         assert packet["final_text"] == "老师，双11 的价过了，手卡我重新做好再发您～"
+        page.reload(timeout=10000)                                         # (round 3: its line says what is true)
+        page.wait_for_timeout(1500)
+        line = card.locator(".prm-handcards-line").inner_text()
+        assert line == "过期的手卡没有附上：这条只发改过的话" and card.locator("img").count() == 0
         prm.service._handcards = False
         page.goto(f"{BASE_URL}/#/deals", timeout=10000)
         page.wait_for_timeout(1500)

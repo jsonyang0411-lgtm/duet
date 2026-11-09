@@ -12,9 +12,11 @@ up.
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 import urllib.error
 from pathlib import Path
@@ -40,7 +42,7 @@ NOT_ASKED = "第 1 款短名「复古西部巴拿马帽」超过 6 个字，卡�
 
 # One answer per turn of the conversation (the task, then what the worker asks again), the last one repeated; a null
 # answer is a turn that ends without the structured answer, "SLOW" one that takes 30 s (then the first answer again),
-# "ERROR" one that ends over the budget (exit code 1).
+# "ERROR" one that ends over the budget (exit code 1), "WAIT:<s>:<n>" one that takes s seconds, then gives answer n.
 FAKE_CLAUDE = textwrap.dedent("""\
     import json, os, sys, time
     args = sys.argv[1:]
@@ -64,6 +66,10 @@ FAKE_CLAUDE = textwrap.dedent("""\
         if draft == "SLOW":
             time.sleep(30)
             draft = answers[0]
+        if isinstance(draft, str) and draft.startswith("WAIT:"):
+            _, sec, n = draft.split(":")
+            time.sleep(float(sec))
+            draft = answers[int(n)]
         event = {"type": "result", "is_error": False, "total_cost_usd": 0.02, "permission_denials": []}
         if draft is None:
             event["result"] = "好的"
@@ -378,6 +384,91 @@ def test_a_turn_asked_again_that_ends_badly_keeps_the_answer_before_it(worker, b
     assert packet["needs_attention"] and packet["meta"]["handcards"]["problems"] == [TOO_LONG]
 
 
+def test_her_line_after_the_last_answer_fails_the_job_as_before(worker, bot, fake_claude, mac, tmp_path,  # noqa: F811
+                                                                 monkeypatch, caplog):
+    """(Round 3, medium: the verifier's probe.)  Asked again, the turn after it answers with cards that fit, but she
+    wrote meanwhile 「算了不用手卡了，先寄样吧」 and her turn runs past the job's deadline: never 「手卡整理好啦」 with a
+    card for a line it never read; the job fails as before and her lines go into her next draft job."""
+    mac.set_up()
+    monkeypatch.setattr(worker, "REASK_LEFT_SEC", 0)
+    monkeypatch.setattr(worker, "REASK_SEC", 60)
+    fits = {"handcards": {"call": "小美", "products": [product(short="西部巴拿马帽")]}}
+    fake_claude.turns({"handcards": {"call": "小美", "products": [product(short="复古西部巴拿马帽")]}}, "WAIT:3:3",
+                      "SLOW", fits)
+    creator_says(bot, "老师手卡发我一下")
+
+    def she_writes_again():                                   # (while the turn asked again runs)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and len(fake_claude.calls()) < 2:
+            time.sleep(0.05)
+        time.sleep(0.2)
+        creator_says(bot, "算了不用手卡了，先寄样吧")
+
+    meanwhile = threading.Thread(target=she_writes_again, daemon=True)
+    meanwhile.start()
+    with caplog.at_level(logging.INFO, logger="claude_relay.worker"):
+        run_one(worker, bot, settings(bot, fake_claude, tmp_path, prm_workspace=str(mac.ws), prm_timeout_min=0.15))
+    meanwhile.join(5)
+    assert len(fake_claude.calls()) == 3 and bot.prm.store.packets() == []
+    assert any("a line of hers came after the last answer: the job fails as before" in r.getMessage()
+               for r in caplog.records)
+    creator_says(bot, "在吗")
+    job = bot.relay.next_job(0, ("prm",))
+    assert "算了不用手卡了，先寄样吧" in job["text"] and "老师手卡发我一下" in job["text"]
+
+
+def test_which_answer_had_every_line_of_hers(worker):  # noqa: F811
+    good = json.dumps({"type": "result", "structured_output": {"reply_draft": "a"}})
+    bare = json.dumps({"type": "result", "result": "好的"})
+    assert worker.answered_all(good, ["creator"]) and worker.answered_all(good, ["creator", "reask"])
+    assert not worker.answered_all(good, ["creator", "reask", "creator"])     # (hers after the answer that came)
+    assert not worker.answered_all("\n".join([good, good]), ["creator", "reask", "creator"])
+    assert worker.answered_all("\n".join([good, good, good]), ["creator", "reask", "creator"])
+    assert worker.answered_all("\n".join([good, bare]), ["creator", "reask"])
+    assert not worker.answered_all("\n".join([good, bare]), ["creator", "creator"])
+    assert not worker.answered_all(bare, ["creator"]) and not worker.answered_all("", [])
+
+
+def test_the_re_ask_waits_for_her_lines_and_is_asked_once_whoever_asks(worker):  # noqa: F811
+    """(Round 3, items 8 and 9.)  Not while a line of hers is still ahead of it (the next result is then the re-ask's
+    own, the only one that ends its deadline); the reader's turn end and the wrap-up timer racing ask once."""
+    long = json.dumps({"type": "result", "structured_output": {"handcards": {"products": [{"short": "复古西部巴拿马帽"}]}}})
+    asked = worker.HANDCARDS_SHORTER.format(names="「复古西部巴拿马帽」")
+    stdin = _Input()
+    talk = worker.Conversation(SimpleNamespace(stdin=stdin), SimpleNamespace(close_input=lambda job, upto: []), 9,
+                               review=worker.handcards_review)
+    talk.start("任务")
+    talk.hand_on([{"id": 1, "text": "还有别的颜色吗"}])         # (written while the first turn runs)
+    talk.see(long)                                            # her line is still ahead: not asked, the input ends
+    assert not talk.reasked and stdin.closed and asked not in stdin.lines
+    stdin = _Input()
+    talk = worker.Conversation(SimpleNamespace(stdin=stdin), SimpleNamespace(close_input=lambda job, upto: []), 10,
+                               review=worker.handcards_review)
+    talk.start("任务")
+    talk.see(long)
+    assert talk.reasked and talk.reask_by is not None and stdin.lines[-1] == asked
+    talk.hand_on([{"id": 1, "text": "还有别的颜色吗"}])         # (during the turn asked again)
+    talk.see(long)                                            # its own result: the deadline is over
+    assert talk.reask_by is None
+    stdin = _Input()
+    gate = threading.Barrier(2)
+
+    def review(event):
+        gate.wait(5)                                          # (both callers have read the answer)
+        return asked
+
+    talk = worker.Conversation(SimpleNamespace(stdin=stdin), SimpleNamespace(close_input=lambda job, upto: []), 11,
+                               review=review)
+    talk.start("任务")
+    talk.results = 1
+    both = [threading.Thread(target=talk._ask_again, args=({"type": "result"},)) for _ in range(2)]
+    for t in both:
+        t.start()
+    for t in both:
+        t.join(5)
+    assert stdin.lines.count(asked) == 1 and talk.reasked
+
+
 def test_with_little_of_the_jobs_time_left_nothing_is_asked_again(worker, bot, fake_claude, mac, tmp_path,  # noqa: F811
                                                                  monkeypatch):
     """(Round 2, items 1 and 7.)  Not asked: the first answer stands, and the problem does not say it was asked."""
@@ -415,8 +506,9 @@ def test_the_re_ask_is_made_on_whichever_turn_first_needs_it_and_only_once(worke
     talk = worker.Conversation(SimpleNamespace(stdin=stdin), SimpleNamespace(close_input=lambda job, upto: rows.pop(0)),
                                7, review=worker.handcards_review)
     talk.ends_at = time.monotonic() + 600
+    talk.start("任务")
     talk.see(fine)                                            # fine: her follow-up goes in, nothing asked
-    assert not talk.reasked and not stdin.closed and len(stdin.lines) == 1
+    assert not talk.reasked and not stdin.closed and len(stdin.lines) == 2
     talk.see(long)                                            # the turn after it: asked
     assert talk.reasked and stdin.lines[-1] == asked and talk.reask_by is not None
     talk.see(long)                                            # still too long: not asked again, the input ends
@@ -424,12 +516,13 @@ def test_the_re_ask_is_made_on_whichever_turn_first_needs_it_and_only_once(worke
     stdin = _Input()
     talk = worker.Conversation(SimpleNamespace(stdin=stdin), SimpleNamespace(close_input=lambda job, upto: []), 8,
                                review=worker.handcards_review)
+    talk.start("任务")
     talk.see(json.dumps({"type": "system", "subtype": "background_tasks_changed", "tasks": [{"id": "b1"}]}))
     talk.see(long)                                            # a turn that ends while a command runs: input stays open
     assert not talk.reasked and not stdin.closed
     talk.background = 0
     talk._wrap_up_if_idle()                                   # (the timer's call once they are done)
-    assert talk.reasked and stdin.lines == [asked] and not stdin.closed
+    assert talk.reasked and stdin.lines == ["任务", asked] and not stdin.closed
 
 
 def test_the_catalogue_syncs_itself_at_night_when_set(worker, tmp_path, monkeypatch, caplog):  # noqa: F811
@@ -447,7 +540,7 @@ def test_the_catalogue_syncs_itself_at_night_when_set(worker, tmp_path, monkeypa
         os.utime(path, (at, at))
 
     write(night - 30 * 3600)
-    started = []
+    started, signals = [], []
 
     class Proc:
         pid, code = 4242, None
@@ -455,46 +548,158 @@ def test_the_catalogue_syncs_itself_at_night_when_set(worker, tmp_path, monkeypa
         def poll(self):
             return self.code
 
-        def kill(self):
-            self.code = -9
+        def send_signal(self, sig):
+            signals.append(("proc", sig))
 
-        def wait(self):
+        def wait(self, timeout=None):
+            self.code = -15
             return self.code
 
     def popen(argv, **kw):
         started.append((argv, kw))
         return Proc()
 
-    monkeypatch.setattr(worker.os, "killpg", lambda pid, sig: (_ for _ in ()).throw(OSError("no group")))
+    monkeypatch.setattr(worker.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
     s = {"prm_workspace": str(ws), "products_sync_hours": 24, "config_path": str(tmp_path / "config.json")}
-    tick = lambda at, kinds=("prm",), **more: worker.products_sync_tick({**s, **more}, kinds, now=at, popen=popen)  # noqa: E731
+
+    def tick(at, mono=0.0, kinds=("prm",), **more):          # (``mono``: the monotonic clock, which sleep stops)
+        return worker.products_sync_tick({**s, **more}, kinds, now=at, popen=popen, mono=mono)
+
     assert tick(noon) == "" and tick(night, products_sync_hours=0) == "" and tick(night, kinds=("admin",)) == ""
-    assert tick(night) == "started"
+    assert tick(night, mono=100) == "started"
     [(argv, kw)] = started
     assert argv[0] == sys.executable and argv[1].endswith("tools/claude_relay/worker.py")
     assert argv[2:] == ["--config", str(tmp_path / "config.json"), "--sync-products"] and kw["start_new_session"]
-    assert tick(night + 60) == "running" and len(started) == 1
+    assert tick(night + 60, mono=160) == "running" and len(started) == 1
+    # the lid closed for 8 h: the wall clock moved, the monotonic one hardly (round 3, item 2): still running
+    assert tick(night + 8 * 3600, mono=220) == "running" and signals == []
     worker._products_sync["proc"].code = 0
     with caplog.at_level(logging.INFO, logger="claude_relay.worker"):
-        assert tick(night + 300) == "ended"
-    [line] = [r.getMessage() for r in caplog.records if "products:" in r.getMessage()]
-    assert "the scheduled --sync-products done in 300 s" in line
-    assert tick(night + 600) == ""                            # (the last run is younger than 24 h)
-    write(night + 3 * 3600)
-    assert tick(night + 30 * 3600) == ""                      # (a sync by hand 2 h before: young enough)
-    assert tick(night + 50 * 3600) == "started"
-    assert tick(night + 50 * 3600 + worker.PRODUCTS_SYNC_MAX_SEC + 1) == "ended"
-    assert worker._products_sync["proc"] is None
+        assert tick(night + 8 * 3600 + 60, mono=400) == "ended"
+    [line] = [r for r in caplog.records if "products:" in r.getMessage()]
+    assert "the scheduled --sync-products done in 300 s" in line.getMessage() and line.levelname == "INFO"
+    assert tick(night + 9 * 3600) == ""                       # (the last run is younger than 24 h)
+    write(night + 26 * 3600)
+    assert tick(night + 30 * 3600) == ""                      # (a sync by hand 4 h before: young enough)
+    assert tick(night + 50 * 3600, mono=1000) == "started"
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="claude_relay.worker"):
+        assert tick(night + 50 * 3600 + 60, mono=1000 + worker.PRODUCTS_SYNC_MAX_SEC + 1) == "ended"
+    assert signals == [(4242, signal.SIGTERM)] and worker._products_sync["proc"] is None    # (it stops its CLI)
+    [line] = [r for r in caplog.records if "products:" in r.getMessage()]
+    assert "stopped after 60 min" in line.getMessage() and line.levelname == "WARNING"
+    assert tick(night + 75 * 3600, mono=5000) == "started"
+    worker._products_sync["proc"].code = 1                    # (a platform's login lost: exit code 1)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="claude_relay.worker"):
+        assert tick(night + 75 * 3600 + 60, mono=5060) == "ended"
+    [line] = [r for r in caplog.records if "products:" in r.getMessage()]
+    assert "ended with exit code 1" in line.getMessage() and line.levelname == "WARNING"
 
 
-def test_the_worker_looks_for_the_night_sync_only_when_idle(worker, monkeypatch):  # noqa: F811
+def test_a_state_file_that_cannot_be_written_never_ends_the_worker(worker, tmp_path, monkeypatch, caplog):  # noqa: F811
+    """(Round 3, item 1: the verifier's probe.)  ~/.claude-relay/platform is a file (or the disk is full): the night's
+    check fails there, says so once, and the worker goes on."""
+    import functools
+
+    ws = tmp_path / "biz"
+    for sub_dir in ("kb", "assets/products", "deals"):
+        (ws / sub_dir).mkdir(parents=True)
+    (ws / "kb" / "products.json").write_text(json.dumps(catalog(), ensure_ascii=False), encoding="utf-8")
+    night = time.mktime((2026, 11, 10, 1, 30, 0, 0, 0, -1))
+    os.utime(ws / "kb" / "products.json", (night - 30 * 3600, night - 30 * 3600))
+    (worker.HOME_DIR / "platform").parent.mkdir(parents=True, exist_ok=True)
+    (worker.HOME_DIR / "platform").write_text("not a folder", encoding="utf-8")
+    monkeypatch.setattr(worker, "products_sync_tick", functools.partial(worker.products_sync_tick, now=night,
+                                                                        popen=lambda argv, **kw: 1 / 0))
+    s = {"prm_workspace": str(ws), "products_sync_hours": 24, "config_path": str(tmp_path / "config.json")}
+    with caplog.at_level(logging.INFO, logger="claude_relay.worker"):
+        for _ in range(3):
+            worker.products_sync_idle(s, ("prm",))
+    warned = [r for r in caplog.records if "night sync could not be looked at" in r.getMessage()]
+    assert len(warned) == 1 and warned[0].levelname == "WARNING"
+
+
+def test_a_running_sync_stops_with_the_worker(worker, monkeypatch, caplog):  # noqa: F811
+    """(Round 3, item 3.)  The worker stops or restarts: a scheduled sync still running is told to stop (SIGTERM to its
+    group: it stops its platform CLI, which is in a group of its own), killed if it stays, and ends with its line."""
+    signals = []
+
+    class Stubborn:
+        pid, code = 77, None
+
+        def poll(self):
+            return self.code
+
+        def send_signal(self, sig):
+            pass
+
+        def wait(self, timeout=None):
+            if signals[-1][1] == signal.SIGTERM:
+                raise subprocess.TimeoutExpired("sync", timeout)
+            self.code = -9
+            return self.code
+
+    monkeypatch.setattr(worker.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(worker, "PRODUCTS_SYNC_STOP_SEC", 0.01)
+    assert worker.products_sync_stop() is False
+    worker._products_sync.update(proc=Stubborn(), started=time.monotonic())
+    with caplog.at_level(logging.INFO, logger="claude_relay.worker"):
+        assert worker.products_sync_stop("the worker restarts") is True
+    assert signals == [(77, signal.SIGTERM), (77, signal.SIGKILL)] and worker._products_sync["proc"] is None
+    [line] = [r for r in caplog.records if "products:" in r.getMessage()]
+    assert "stopped (the worker restarts)" in line.getMessage() and line.levelname == "WARNING"
+    stopped = []
+    monkeypatch.setattr(worker.platforms, "stop_running", lambda: stopped.append(1) or 1)
+    try:
+        worker._sync_terminated(signal.SIGTERM, None)
+    except SystemExit as e:
+        assert e.code == 128 + signal.SIGTERM and stopped == [1]
+    else:
+        raise AssertionError("the sync did not end")
+
+
+def test_the_setting_is_a_number_of_hours(worker, tmp_path):  # noqa: F811
+    """(Round 3, item 5.)  ``true`` is no hour: the worker refuses the config (and never syncs on it)."""
+    config = tmp_path / "config.json"
+    for good in (0, 24, 1.5):
+        config.write_text(json.dumps({"relay_url": "http://bot", "token": "t", "products_sync_hours": good}),
+                          encoding="utf-8")
+        assert worker.load_settings(config)["products_sync_hours"] == good
+    for bad in (True, "24", None, -1, [24]):
+        config.write_text(json.dumps({"relay_url": "http://bot", "token": "t", "products_sync_hours": bad}),
+                          encoding="utf-8")
+        try:
+            worker.load_settings(config)
+        except SystemExit as e:
+            assert "products_sync_hours" in str(e) and "must be a number of hours" in str(e)
+        else:
+            raise AssertionError(bad)
+        assert worker.products_sync_due({"products_sync_hours": bad}, tmp_path, time.mktime(
+            (2026, 11, 10, 1, 30, 0, 0, 0, -1))) is False
+    assert [worker._sync_hours(v) for v in (float("nan"), float("inf"), 0, 3)] == [None, None, 0.0, 3.0]
+
+
+def test_the_worker_looks_for_the_night_sync_only_when_idle(worker, monkeypatch, caplog):  # noqa: F811
+    """... and whatever goes wrong there (a full disk, a folder it cannot make) is one WARNING line, the same one once
+    in a row, and serving goes on (round 3, item 1: the verifier's probe)."""
     stopper = worker.Stopper()
     looked = []
-    monkeypatch.setattr(worker, "products_sync_tick", lambda settings, kinds: looked.append(kinds) or stopper.event.set())
+
+    def tick(settings, kinds):
+        looked.append(kinds)
+        if len(looked) == 4:
+            stopper.event.set()
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(worker, "products_sync_tick", tick)
     client = SimpleNamespace(next_job=lambda **kw: None, bot_kinds=lambda: ("admin", "prm"), base_url="http://bot")
     monkeypatch.setattr(worker, "flush_outbox", lambda client, stopper: None)
-    worker.serve({"relay_url": "http://bot", "prm_workspace": ""}, client, stopper, kinds=("admin",))
-    assert looked == [("admin",)]
+    with caplog.at_level(logging.INFO, logger="claude_relay.worker"):
+        worker.serve({"relay_url": "http://bot", "prm_workspace": ""}, client, stopper, kinds=("admin",))
+    assert looked == [("admin",)] * 4
+    warned = [r for r in caplog.records if "night sync could not be looked at" in r.getMessage()]
+    assert len(warned) == 1 and warned[0].levelname == "WARNING" and "No space left on device" in warned[0].getMessage()
 
 
 def test_old_card_folders_go_with_every_prm_job(worker, monkeypatch):  # noqa: F811

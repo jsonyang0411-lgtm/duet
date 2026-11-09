@@ -123,13 +123,15 @@ def beijing_today(now: Optional[float] = None) -> date:
     return datetime.fromtimestamp(time.time() if now is None else now, BEIJING).date()
 
 
-def _day(at) -> str:
-    """A time as 「10-28」 (its year too when it is not this one's), Beijing time; "" for none."""
+def _day(at, clock: bool = False) -> str:
+    """A time as 「10-28」 (``clock``: 「10-28 01:30」; its year too when it is not this one's), Beijing time; "" for
+    none."""
     try:
         when = datetime.fromtimestamp(float(at), BEIJING)
     except (TypeError, ValueError, OverflowError, OSError):
         return ""
-    return when.strftime("%m-%d" if when.year == beijing_today().year else "%Y-%m-%d")
+    day = "%m-%d" if when.year == beijing_today().year else "%Y-%m-%d"
+    return when.strftime(day + (" %H:%M" if clock else ""))
 
 
 # ── the Mac's verdict (what the bot reads) ───────────────────────────────
@@ -342,8 +344,9 @@ def load_config(path) -> tuple:
 
 def catalog_info(workspace) -> dict:
     """The workspace's kb/products.json (``--sync-products``) as cards need it: ``items`` (its 抖店 products by id),
-    ``synced_at`` (when the 抖店 part was synced; the file's own time for an older one; None when unknown) and
-    ``stale`` (its last sync failed and kept the earlier products)."""
+    ``synced_at`` (when the 抖店 part was synced; the file's own time for an older one; None when unknown),
+    ``stale`` (its last sync failed and kept the earlier products), ``failed`` (the 抖店 part of the last sync did not
+    come: ``tried_at`` when, ``error`` why)."""
     try:
         data = json.loads((Path(workspace) / "kb" / "products.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -353,16 +356,22 @@ def catalog_info(workspace) -> dict:
     dy = dy if isinstance(dy, dict) else {}
     items = dy.get("items") if isinstance(dy.get("items"), list) else []
     at = dy.get("synced_at") if isinstance(dy.get("synced_at"), (int, float)) else data.get("synced_at")
+    tried = data.get("synced_at")
     return {"items": {str(i["id"]): i for i in items if isinstance(i, dict) and str(i.get("id") or "").strip()},
             "synced_at": float(at) if isinstance(at, (int, float)) and not isinstance(at, bool) else None,
-            "stale": dy.get("stale") is True}
+            "stale": dy.get("stale") is True, "failed": dy.get("ok") is False,
+            "error": " ".join(str(dy.get("error") or "").split())[:80],
+            "tried_at": float(tried) if isinstance(tried, (int, float)) and not isinstance(tried, bool) else None}
 
 
 def catalogue_problem(info: dict, config: dict, now: Optional[float] = None) -> str:
-    """Why the catalogue (``catalog_info``) makes no card now; "" when it does: no 抖店 product, its last sync failed
-    (``stale``), it was synced longer ago than ``max_catalogue_days`` (the prices may have changed), or nobody knows
-    when.  ``make`` checks it first; the worker before it runs a 「做手卡」 at all."""
+    """Why the catalogue (``catalog_info``) makes no card now; "" when it does: its last sync of the 抖店 part failed
+    (when and why: a login lost, say), no 抖店 product, it was synced longer ago than ``max_catalogue_days`` (the
+    prices may have changed), or nobody knows when.  ``make`` checks it first; the worker before it runs a 「做手卡」."""
     now = time.time() if now is None else now
+    if info.get("failed"):
+        when = _day(info.get("tried_at"), clock=True) or "不知道哪天"
+        return f"商品目录上次同步没成功（{when}：{info.get('error') or '没说为什么'}），先同步再做手卡"
     if not info.get("items"):
         return "这台 Mac 的 kb/products.json 里没有抖店商品（先在 Mac 上 --sync-products）"
     synced = info.get("synced_at")
@@ -593,23 +602,35 @@ def cut_words(text, limit: int) -> tuple:
 
 
 _PREFIX = re.compile(r"^(?:抖音|小红书|淘宝|快手|视频号)\s*[-－_—:：·]+\s*")   # (the friend add's remark: 抖音-…)
-_TAIL = re.compile(r"-[0-9A-Za-z_.]{4}$")      # the friend add's remark made unique: 「-」 and her 抖音号's last 4
+# The friend add's remark made unique (friend_adds.remark_for): 「-」 and her 抖音号's last 4, digits and lowercase
+# hex (「Lucy-Anne」 is a name, not a tail)
+_TAIL = re.compile(r"-[0-9a-f]{4}$")
+
+
+def friend_add_tail(name: str) -> str:
+    """The tail the friend add made a deal's name unique with (「抖音-小美-ab12」: 「-ab12」): only on a name that
+    carries the friend add's prefix; "" otherwise."""
+    name = " ".join(str(name or "").split())
+    stripped = _PREFIX.sub("", name)
+    found = _TAIL.search(stripped) if stripped != name else None
+    return found.group(0) if found and found.group(0) != stripped else ""
 
 
 def channel_of(call: str, name: str) -> tuple:
     """``(channel, cut)``: the cards' 场次 「<称呼>专属」, her 称呼 as the draft gave it, else her deal's name without a
-    「抖音-」 prefix and the friend add's 「-ab12」 tail (the WeChat remark it sets; a 称呼 the draft copied from that
-    remark loses the deal name's very tail too); nothing a file name or HTML cannot carry; cut at a word boundary to
-    CALL_MAX.  Runtime data only, never in a file of the repository nor in a log."""
+    「抖音-」 prefix; the friend add's 「-ab12」 tail of a deal name with that prefix (``friend_add_tail``: the WeChat
+    remark it sets) goes on both paths, a 称呼 the draft copied from the remark too, no other tail; nothing a file
+    name or HTML cannot carry; cut at a word boundary to CALL_MAX.  Runtime data only, never in a file of the
+    repository nor in a log."""
     name = " ".join(str(name or "").split())
     call = " ".join(str(call or "").split())
-    tail = _TAIL.search(name)
-    if call and tail and call != tail.group(0) and call.endswith(tail.group(0)):
-        call = call[:-len(tail.group(0))].strip()
+    tail = friend_add_tail(name)
+    if call and tail and call != tail and call.endswith(tail):
+        call = call[:-len(tail)].strip()
     raw = call or name
     stripped = _PREFIX.sub("", raw)
-    if stripped != raw:
-        stripped = _TAIL.sub("", stripped)
+    if stripped != raw and tail and stripped != tail and stripped.endswith(tail):
+        stripped = stripped[:-len(tail)].strip()
     clean = re.sub(r'[\\/:*?"<>|#%&]', "", stripped).strip()
     clean, cut = cut_words(clean, CALL_MAX)
     return (f"{clean}专属" if clean else "达人专属"), cut

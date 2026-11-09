@@ -915,6 +915,38 @@ class CliRun:
         return " ".join(p if re.match(r"^[\w@%+=:,./-]+$", p) else json.dumps(p, ensure_ascii=False) for p in parts)
 
 
+# The CLI commands this process runs now (``run_cli``): each in a process group of its own, which a signal to this
+# process does not reach; ``stop_running`` stops them (``--sync-products`` told to stop).
+_RUNNING: set = set()
+_RUNNING_LOCK = threading.Lock()
+
+
+def stop_running(grace: float = 3.0) -> int:
+    """Stop every platform CLI this process runs now: SIGINT to each one's group, SIGKILL to whatever still runs after
+    ``grace`` seconds.  How many there were."""
+    with _RUNNING_LOCK:
+        procs = list(_RUNNING)
+    for proc in procs:
+        _signal_group(proc, signal.SIGINT)
+    deadline = time.monotonic() + grace
+    while procs and time.monotonic() < deadline and any(p.poll() is None for p in procs):
+        time.sleep(0.1)
+    for proc in procs:
+        if proc.poll() is None:
+            _signal_group(proc, signal.SIGKILL)
+    return len(procs)
+
+
+def _signal_group(proc: subprocess.Popen, sig) -> None:
+    try:
+        if hasattr(os, "killpg"):
+            os.killpg(proc.pid, sig)
+        else:
+            proc.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
 def _stop(proc: subprocess.Popen) -> None:
     """SIGINT to the command's group (it ends its request cleanly), SIGKILL if it stays."""
     for sig in (signal.SIGINT, signal.SIGKILL):
@@ -949,6 +981,18 @@ def run_cli(argv: list, cwd, *, timeout: float, env: Optional[dict] = None,
                                 start_new_session=True)
     except OSError as e:
         return CliRun(argv, None, "", "", 0.0, error=f"启动不了：{e}")
+    with _RUNNING_LOCK:
+        _RUNNING.add(proc)
+    try:
+        return _run_to_end(proc, argv, started, timeout, heartbeat, every, interruptible)
+    finally:
+        with _RUNNING_LOCK:
+            _RUNNING.discard(proc)
+
+
+def _run_to_end(proc: subprocess.Popen, argv: list, started: float, timeout: float, heartbeat, every: float,
+                interruptible: bool) -> CliRun:
+    """``run_cli``'s wait for one started command."""
     chunks = {"out": b"", "err": b""}
 
     def read(name, stream):

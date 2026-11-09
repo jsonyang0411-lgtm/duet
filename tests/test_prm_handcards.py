@@ -42,14 +42,15 @@ TODAY = date(2026, 11, 9)
 CELLS = {"左上": (200, 30, 30), "右上": (30, 160, 60), "左下": (40, 60, 200), "右下": (220, 200, 40)}
 
 
-def catalog(synced_at=None, stale=False):
+def catalog(synced_at=None, stale=False, tried_at=None):
     """kb/products.json: five 抖店 hats (a 2×2 main image; a single one with brand letters; one the hat index does not
     know and whose title names no material; one whose SKUs differ in price; one whose SKU names hold no colour) and a
-    小红书 one; synced now unless said otherwise."""
+    小红书 one; synced now unless said otherwise (``stale``: the last sync, at ``tried_at``, failed and kept these)."""
     synced_at = time.time() if synced_at is None else synced_at
-    return {"version": 1, "synced_at": synced_at, "platforms": {
+    return {"version": 1, "synced_at": tried_at or synced_at, "platforms": {
         "xhs": {"items": [{"id": "6ad0000000000000000000a1", "title": "测试小红书帽", "price": "100.00", "skus": []}]},
-        "dy": {"synced_at": synced_at, "stale": stale, "ok": not stale, "items": [
+        "dy": {"synced_at": synced_at, "stale": stale, "ok": not stale, "error": "登录过期（退出码 77）" if stale else "",
+               "items": [
             {"id": ITEM, "title": TITLE, "price": "315.00", "image_file": f"assets/products/dy-{ITEM}.jpg",
              "skus": [{"id": "3100000000000000911", "name": "M驼色", "price": "315.00", "code": "A7269901001A-M"},
                       {"id": "3100000000000000912", "name": "M棕咖色", "price": "315.00", "code": "A7269901001B-M"}]},
@@ -346,9 +347,18 @@ def test_a_sku_name_gives_its_colour_and_size(name, colour, sizes):
     # a 称呼 the draft copied from the friend add's remark loses the deal name's very tail (round 2, item 6)
     ("小美-ab12", "抖音-小美-ab12", "小美专属", False), ("抖音-小美-ab12", "抖音-小美-ab12", "小美专属", False),
     ("小美-ab12", "小美", "小美-ab12专属", False), ("小美-ab12", "抖音-小美-cd34", "小美-ab12专属", False),
+    # only the friend add's very tail (hex, of a name with its prefix), the same on both paths (round 3, item 7)
+    ("Lucy-Anne", "Lucy-Anne", "Lucy-Anne专属", False), ("", "Lucy-Anne", "Lucy-Anne专属", False),
+    ("小美-1995", "小美-1995", "小美-1995专属", False), ("", "抖音-lucy-anne", "lucy-anne专属", False),
+    ("", "抖音-小美-1995", "小美专属", False), ("-ab12", "抖音-小美-ab12", "-ab12专属", False),
 ])
 def test_the_channel_is_her_call_or_her_deals_name_without_the_friend_add_remark(call, name, channel, cut):
     assert hc.channel_of(call, name) == (channel, cut)
+
+
+def test_the_friend_add_tail_is_only_its_own():
+    assert [hc.friend_add_tail(n) for n in ("抖音-小美-ab12", "抖音 - 小美-0f3c", "小美-ab12", "抖音-Lucy-Anne",
+                                            "抖音-小美-x9_k", "抖音--ab12", "")] == ["-ab12", "-0f3c", "", "", "", "", ""]
 
 
 def test_products_not_in_the_catalogue_or_too_many_make_no_card(ws):
@@ -570,18 +580,22 @@ def test_a_request_without_data_never_runs_the_script(ws, cards):
 
 
 @pytest.mark.parametrize("days_old, stale, max_days, ok", [
-    (0, False, 7, True), (6.9, False, 7, True), (7.1, False, 7, False), (20, False, 30, True), (0, True, 7, False),
+    (0, False, 7, True), (6.9, False, 7, True), (7.1, False, 7, False), (20, False, 30, True), (1, True, 7, False),
 ])
 def test_a_stale_or_old_catalogue_makes_no_card(ws, cards, days_old, stale, max_days, ok):
-    """The prices are the catalogue's: one synced longer ago than max_catalogue_days, or whose last sync failed (kept the
-    earlier products), makes none and says when it was synced."""
+    """The prices are the catalogue's: one synced longer ago than max_catalogue_days makes none and says when it was
+    synced; one whose last sync failed (kept the earlier products) says when and why it failed, not 「太旧」 (round 3,
+    item 4: a night's sync that lost its login)."""
     synced = time.time() - days_old * 86400
-    (ws / "kb" / "products.json").write_text(json.dumps(catalog(synced, stale), ensure_ascii=False), encoding="utf-8")
+    tried = time.time() - 3600
+    (ws / "kb" / "products.json").write_text(json.dumps(catalog(synced, stale, tried_at=tried if stale else None),
+                                                        ensure_ascii=False), encoding="utf-8")
     made, files = make(ws, cards, product(), max_catalogue_days=max_days)
     assert made["ok"] is ok and bool(files) is ok
     if not ok:
-        when = hc._day(synced)
-        assert made["problems"] == [f"商品目录太旧（上次同步 {when}），先同步再做手卡"] and cards.calls() == []
+        problem = (f"商品目录上次同步没成功（{hc._day(tried, clock=True)}：登录过期（退出码 77）），先同步再做手卡" if stale
+                   else f"商品目录太旧（上次同步 {hc._day(synced)}），先同步再做手卡")
+        assert made["problems"] == [problem] and cards.calls() == []
         assert made["catalog_at"] == pytest.approx(synced)
 
 
@@ -591,8 +605,15 @@ def test_the_catalogue_check_is_one_for_the_cards_and_the_click():
     assert hc.catalogue_problem(fresh, cfg, now=1000.0 + 6 * 86400) == ""
     assert hc.catalogue_problem(fresh, cfg, now=1000.0 + 8 * 86400).startswith("商品目录太旧（上次同步 ")
     assert hc.catalogue_problem({**fresh, "stale": True}, cfg, now=1000.0) != ""
+    failed = {**fresh, "stale": True, "failed": True, "tried_at": hc_beijing(11, 9, 1, 30), "error": "要登录"}
+    assert hc.catalogue_problem(failed, cfg, now=1000.0) == "商品目录上次同步没成功（11-09 01:30：要登录），先同步再做手卡"
+    assert hc.catalogue_problem({**failed, "error": ""}, cfg, now=1000.0).endswith("：没说为什么），先同步再做手卡")
     assert hc.catalogue_problem({**fresh, "synced_at": None}, cfg) == "商品目录太旧（上次同步 不知道哪天），先同步再做手卡"
     assert hc.catalogue_problem({"items": {}}, cfg) == "这台 Mac 的 kb/products.json 里没有抖店商品（先在 Mac 上 --sync-products）"
+
+
+def hc_beijing(month, day, hour, minute=0):
+    return datetime(2026, month, day, hour, minute, tzinfo=hc.BEIJING).timestamp()
 
 
 def test_a_run_is_stopped_by_its_timeout_or_a_cancel(tmp_path):
@@ -896,6 +917,32 @@ def test_cards_whose_promo_line_is_out_of_date_go_only_as_edited_words(bot, cloc
     assert kept["attachments"] == [] and kept["meta"]["handcards"]["left_out"] is True
     bot.prm.send_approved()
     assert bot.texts == [(CREATOR, "老师，双11 的价已经过了，手卡我重新整理一下再发您～")] and bot.files == []
+
+
+def test_only_edited_words_leave_out_every_card_file_and_keep_the_rest(bot, clock):
+    """(Round 3: the verifier's probe.)  The cards, the skill's zip and a file that is no card (the 货盘): 改了再发 on
+    out-of-date cards keeps only the last; a packet moved without new attachments or meta keeps its own."""
+    from src.prm.store import APPROVED, PENDING, SENDING
+
+    clock.now = beijing(11, 14)
+    extra = (("测试直播手卡.zip", b"zip-1"), ("货盘_秋冬.png", b"other-1"))
+    names = [n for n, _ in CARDS] + [extra[0][0]]
+    made = hc.made_block(True, cards=names, promo_until="2026-11-11")
+    packet = drafted(bot, asks(bot), card_draft(made=made, attachments_to_send=names + [extra[1][0]],
+                                                attachments_named=names + [extra[1][0]]), files=CARDS + extra)
+    assert len(packet["attachments"]) == 4
+    clock.now = beijing(12, 9)
+    assert bot.prm.decide(packet["id"], "edit", "老师，双11 的价过了，手卡我重新整理再发您～")["ok"]
+    assert [a["name"] for a in bot.prm.store.packet(packet["id"])["attachments"]] == ["货盘_秋冬.png"]
+    other = drafted(bot, asks(bot, "老师再发一次"), card_draft())
+    before = bot.prm.store.packet(other["id"])
+    assert bot.prm.store.move(other["id"], (PENDING,), APPROVED, decided_at=clock.now, final_text="x", edited=1)
+    assert bot.prm.store.move(other["id"], (APPROVED,), SENDING)
+    after = bot.prm.store.packet(other["id"])
+    assert (after["attachments"], after["meta"], after["platform"]) == (before["attachments"], before["meta"],
+                                                                       before["platform"])
+    with pytest.raises(ValueError):
+        bot.prm.store.move(other["id"], (SENDING,), APPROVED, text="no")
 
 
 def test_cards_approved_before_their_end_date_are_not_sent_after_it(bot, clock):

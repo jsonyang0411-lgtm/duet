@@ -310,6 +310,13 @@ const cardsExpired = (p) => !!p.handcards?.expired
 const cardUrl = (p, n) => `/api/prm/file?packet=${p.id}&kind=attachment&n=${n}`
 const EXPIRED = '手卡上的双11价已过期，请重新做手卡'
 const TEXT_ONLY = '过期的手卡不会发出，只发这段话'
+// The cards' line as things stand: left out (改了再发 of out-of-date cards), waiting for a person, going out.
+const cardsLine = (p, c) => {
+  if (c.left_out) return '过期的手卡没有附上：这条只发改过的话'
+  if (p.status === 'executing') return `手卡 ${c.count} 张：平台上核验成功以后随回复一起发`
+  if (p.status === 'approved' || p.status === 'sending') return `手卡 ${c.count} 张随这条一起发出`
+  return `手卡 ${c.count} 张：看过卡片再发；要改的话在 Mac 上照下面的单子改了重出。`
+}
 
 function HandcardsNote({ p }) {
   const pictures = (p.attachments || []).map((a, n) => [a, n]).filter(([a]) => PICTURE.test(a.name || ''))
@@ -328,7 +335,7 @@ function HandcardsNote({ p }) {
       )}
       {c.ok && c.expired && <Note kind="warn">{EXPIRED}（卡上的双11 那一行到 {c.promo_until} 为止）：这份不能原样发。要手卡就点「不发」，再到合作单里点「做手卡」；只回她一段话就「改了再发」（{TEXT_ONLY}）。</Note>}
       {c.ok
-        ? !c.expired && <div className="f-hint">手卡 {c.count} 张：看过卡片再发；要改的话在 Mac 上照下面的单子改了重出。</div>
+        ? !c.expired && <div className="f-hint prm-handcards-line">{cardsLine(p, c)}</div>
         : <Note kind="warn">手卡没做成：{(c.problems || []).join('；') || 'Mac 没说为什么'}。草稿里没附手卡，话不能原样发。</Note>}
       {c.note && <div className="f-hint prm-handcards-note" style={{ whiteSpace: 'pre-wrap' }}>{c.note}</div>}
     </div>

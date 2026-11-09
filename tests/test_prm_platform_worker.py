@@ -5,6 +5,7 @@ VERIFIED_SUCCESS.  A fake ``claude`` drafts; a fake ``node`` answers like the pl
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import textwrap
@@ -209,6 +210,46 @@ def test_sync_products_writes_the_catalogue(worker, node, tmp_path, workspace, m
     assert worker.prm_asset(workspace, f"assets/products/dy-{DY_ITEM}.jpg") is not None   # a draft may send it
     assert worker.main(["--config", str(config), "--sync-products"]) == 0 and fetched == [image]   # kept, not fetched again
     assert worker.main(["--config", str(config), "--sync-products", "--platforms", "pdd"]) == 2
+
+
+def test_one_sync_products_at_a_time(worker, node, tmp_path, workspace, monkeypatch, capsys):  # noqa: F811
+    """(Review 2026-11-09, round 3.)  A --sync-products by hand while the night's one runs (or the other way round):
+    the second waits for the first's lock (its images and catalogue files are written outside the platform CLI lock)
+    and, when that does not come in time, runs nothing and writes nothing."""
+    import fcntl
+
+    node.rules([rule(["fxg", "products"], {"site": "fxg", "complete": True, "rows": []})])
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"relay_url": "http://127.0.0.1:9", "token": TOKEN, "prm_workspace": str(workspace),
+                                  **node.settings(xhs="", tb="")}), encoding="utf-8")
+    lock = worker.HOME_DIR / "platform" / "products-sync.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(worker, "PRODUCTS_SYNC_MAX_SEC", 0.3)
+    with open(lock, "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        assert worker.main(["--config", str(config), "--sync-products"]) == 1
+    assert "另一个 --sync-products 一直没跑完" in capsys.readouterr().out
+    assert not (workspace / "kb" / "products.md").exists() and node.calls() == []
+    assert worker.main(["--config", str(config), "--sync-products"]) == 0          # (let go: it runs)
+    assert signal.getsignal(signal.SIGTERM) is not worker._sync_terminated        # (its handler only while it runs)
+
+
+def test_a_platform_cli_in_its_own_group_is_stopped_with_the_sync(tmp_path):
+    """(Round 3, item 3.)  ``run_cli`` starts each command in a process group of its own, which a signal to the sync
+    does not reach: ``stop_running`` (the sync's SIGTERM handler) stops it."""
+    import threading
+
+    out = {}
+    run = threading.Thread(target=lambda: out.update(run=platforms.run_cli(
+        [sys.executable, "-c", "import time; time.sleep(30)"], tmp_path, timeout=60)), daemon=True)
+    started = time.monotonic()
+    run.start()
+    while not platforms._RUNNING and time.monotonic() - started < 10:
+        time.sleep(0.05)
+    assert platforms.stop_running(grace=2.0) == 1
+    run.join(10)
+    assert out["run"].exit_code not in (0, None) and time.monotonic() - started < 10 and not platforms._RUNNING
+    assert platforms.stop_running() == 0
 
 
 @pytest.mark.parametrize("where", ["inside", "itself"])

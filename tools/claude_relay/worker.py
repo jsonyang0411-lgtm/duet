@@ -103,6 +103,7 @@ import importlib.util
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -135,6 +136,7 @@ REASK_LEFT_SEC = 180
 # a run still going after PRODUCTS_SYNC_MAX_SEC is stopped
 PRODUCTS_SYNC_NIGHT = (0, 7)
 PRODUCTS_SYNC_MAX_SEC = 3600
+PRODUCTS_SYNC_STOP_SEC = 15  # a sync told to stop (SIGTERM: it stops its platform CLI first) is killed after this
 MAX_BACKOFF_SEC = 60
 ALL_KINDS = ("admin", "prm")
 # One lock per kind of job (admin keeps the old name: an older worker blocks a new admin one).
@@ -396,7 +398,18 @@ def load_settings(path: Path) -> dict:
     settings["relay_url"] = str(settings["relay_url"]).rstrip("/")
     if not settings["relay_url"] or not settings["token"]:
         raise SystemExit(f"relay_url and token are needed (in {path} or RELAY_URL / RELAY_TOKEN)")
+    if _sync_hours(settings.get("products_sync_hours")) is None:
+        raise SystemExit(f"products_sync_hours in {path} must be a number of hours (0 = off), "
+                         f"not {settings.get('products_sync_hours')!r}")
     return settings
+
+
+def _sync_hours(value) -> float | None:
+    """config.json ``products_sync_hours`` as hours (0: off), None when it is no finite number of 0 or more (true,
+    "24", null: ``load_settings`` refuses it; the night sync never runs on it)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        return None
+    return float(value)
 
 
 class SettingsFile:
@@ -826,21 +839,28 @@ class Conversation:
         self.review = review
         self.reasked = False         # it asked
         self.reask_by = None         # that turn ends before this (monotonic, REASK_SEC), or run_claude stops claude
+        self.reask_seq = 0           # the asking was the reask_seq-th message written: that many results end its turn
         self.ends_at = None          # the job's own deadline (run_claude): too little left, nothing is asked
         self.last_result = None      # the last turn's result event (``_wrap_up_if_idle`` looks at it too)
+        # What was written, in order ("creator": the task and her follow-ups; "reask"), and how many turns ended: a
+        # turn answers the messages written before it, one each (run_claude hands both to do_prm_job)
+        self.written: list = []
+        self.results = 0
         self.background = 0          # commands claude runs in the background right now
         self.turn_ended = False
         self.lock = threading.Lock()
         self.closed = False
         self.upto = 0
 
-    def _write(self, text: str) -> bool:
+    def _write(self, text: str, kind: str = "creator") -> bool:
+        """One message into claude's input (the caller holds ``lock``), noted in ``written``."""
         if self.closed:
             return False
         try:
             self.proc.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": text}},
                                              ensure_ascii=False) + "\n")
             self.proc.stdin.flush()
+            self.written.append(kind)
             return True
         except (OSError, ValueError):                    # claude is gone
             self.closed = True
@@ -886,10 +906,12 @@ class Conversation:
                 timer.daemon = True
                 timer.start()
         elif kind == "result":
-            self.turn_ended = True
-            self.last_result = event
-            if self.reasked:
-                self.reask_by = None                     # (the turn asked again has ended)
+            with self.lock:
+                self.turn_ended = True
+                self.last_result = event
+                self.results += 1
+                if self.reask_by is not None and self.results >= self.reask_seq:
+                    self.reask_by = None                 # (the turn asked again has ended: its own result)
             if self.background:
                 log.info("#%s turn ended with %d background command(s) running; input stays open",
                          self.job_id, self.background)
@@ -899,10 +921,12 @@ class Conversation:
             self.turn_ended = False
 
     def _ask_again(self, event) -> bool:
-        """``review`` found something to ask about this turn's answer (whichever turn, until it asked once): it is put
-        to claude, which answers in a new turn (the input stays open), within REASK_SEC (``reask_by``).  Not with less
-        than REASK_LEFT_SEC of the job's time left.  True when it was asked."""
-        if self.review is None or self.reasked or not isinstance(event, dict):
+        """``review`` found something to ask about this turn's answer (whichever turn, until it asked once, under the
+        lock: the reader's turn end and the wrap-up timer never both ask): it is put to claude, which answers in a new
+        turn (the input stays open), within REASK_SEC (``reask_by``).  Only when every message written has had its
+        turn (nothing of hers is still ahead of it: the next result is its own) and with REASK_LEFT_SEC of the job's
+        time left.  True when it was asked."""
+        if self.review is None or not isinstance(event, dict):
             return False
         try:
             text = self.review(event)
@@ -911,13 +935,25 @@ class Conversation:
             return False
         if not text:
             return False
-        if self.ends_at is not None and self.ends_at - time.monotonic() < REASK_LEFT_SEC:
-            log.info("#%s too little of the job's time left to ask claude again about its answer", self.job_id)
-            return False
         with self.lock:
-            asked = self._write(text)
+            if self.reasked or self.closed:
+                return False
+            if self.results < len(self.written):
+                why = "a message of hers is still ahead of it"
+            elif self.results > len(self.written):
+                why = "claude started a turn of its own (background commands): which answer is whose is unknown"
+            elif self.ends_at is not None and self.ends_at - time.monotonic() < REASK_LEFT_SEC:
+                why = "too little of the job's time left"
+            else:
+                why = ""
+                asked = self._write(text, "reask")
+                if asked:
+                    self.reasked, self.reask_by = True, time.monotonic() + REASK_SEC
+                    self.reask_seq = len(self.written)
+        if why:
+            log.info("#%s not asking claude again about its answer: %s", self.job_id, why)
+            return False
         if asked:
-            self.reasked, self.reask_by = True, time.monotonic() + REASK_SEC
             log.info("#%s asked claude once more about its answer", self.job_id)
         return asked
 
@@ -1031,6 +1067,7 @@ def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stoppe
         "stdout": "".join(lines), "stderr": "".join(errors),
         "returncode": proc.returncode, "stopped": stopped_because,
         "duration_s": round(time.monotonic() - started, 1), "reasked": conversation.reasked,
+        "written": list(conversation.written),
     }
 
 
@@ -2434,12 +2471,18 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
     answers = structured_events(run["stdout"]) if run.get("reasked") else []
     if answers and run["stopped"] not in ("cancelled", "worker_stopped") and (
             run["stopped"] or run["returncode"] != 0 or _answer(data) is None or bool((data or {}).get("is_error"))):
-        # 直播手卡: asked again about its short names, the turn after did not end well (past its own deadline or the
+        # 直播手卡: asked again about its short names, a turn after it did not end well (past its own deadline or the
         # job's, an exit code such as the budget cap's) or gave no answer: the last full answer stands (a short name
-        # that does not fit: no card, the draft waits for a person); never the job lost over it
-        log.info("#%s the turn asked again did not end well (%s); the answer before it stands", job["id"],
-                 run["stopped"] or f"exit {run['returncode']}")
-        run, data = {**run, "stopped": "", "returncode": 0}, answers[-1]
+        # that does not fit: no card, the draft waits for a person), only when it had every line of hers (a turn
+        # answers the messages written before it, one each: none of hers came after the one that answered); else
+        # the job fails as before and her lines go into her next draft job
+        how = run["stopped"] or f"exit {run['returncode']}"
+        if answered_all(run["stdout"], run.get("written") or []):
+            log.info("#%s the turn asked again did not end well (%s); the answer before it stands", job["id"], how)
+            run, data = {**run, "stopped": "", "returncode": 0}, answers[-1]
+        else:
+            log.info("#%s the turn asked again did not end well (%s) and a line of hers came after the last answer: "
+                     "the job fails as before", job["id"], how)
     result = summarize_prm(run, data, {**settings, "prm_timeout_min": timeout})
     if result["ok"]:
         draft = json.loads(result["text"])
@@ -2532,6 +2575,15 @@ def _answer(event) -> dict | None:
     except ValueError:
         return None
     return data if isinstance(data, dict) else None
+
+
+def answered_all(stdout: str, written: list) -> bool:
+    """The last result event that carries a structured answer had every message of hers (``written``: the
+    conversation's messages in order, "creator" or "reask"): the n-th result answers the first n messages written, so
+    none of hers may come after that many."""
+    results = [json.loads(line) for line in stdout.splitlines() if _is_result(line)]
+    last = max((n for n, event in enumerate(results, 1) if _answer(event) is not None), default=0)
+    return bool(last) and "creator" not in written[last:]
 
 
 def structured_events(stdout: str) -> list:
@@ -2853,14 +2905,26 @@ def sync_products(settings: dict, only: str = "") -> int:
     if unknown:
         print(f"商品目录只从 {', '.join(platforms.CATALOG_PLATFORMS)} 读，不认识：{', '.join(unknown)}")
         return 2
-    previous = platforms.load_catalog(workspace)
-    with _cli_lock():
-        catalog = platforms.sync_catalog(cfg, wanted, previous=previous, progress=lambda line: print(line, flush=True))
-    # 款式图下到 assets/products/（起草的 Claude 只能从 assets/ 挑文件发给达人）
-    images = platforms.fetch_images(workspace, catalog, previous=previous, progress=lambda line: print(line, flush=True))
-    print(f"款式图：新下 {images['fetched']} 张，沿用 {images['kept']} 张，没下成 {images['failed']} 张，"
-          f"删掉下架的 {images['removed']} 张")
-    paths = platforms.write_catalog(workspace, catalog)
+    before = signal.signal(signal.SIGTERM, _sync_terminated)   # (the worker's stop: the platform CLI stops too)
+    try:
+        # one --sync-products at a time on this Mac (the night's and one by hand): the images and the catalogue's
+        # files are written outside the platform CLI lock
+        with platforms.CliLock(HOME_DIR / "platform" / "products-sync.lock", wait=PRODUCTS_SYNC_MAX_SEC):
+            previous = platforms.load_catalog(workspace)
+            with _cli_lock():
+                catalog = platforms.sync_catalog(cfg, wanted, previous=previous,
+                                                 progress=lambda line: print(line, flush=True))
+            # 款式图下到 assets/products/（起草的 Claude 只能从 assets/ 挑文件发给达人）
+            images = platforms.fetch_images(workspace, catalog, previous=previous,
+                                            progress=lambda line: print(line, flush=True))
+            print(f"款式图：新下 {images['fetched']} 张，沿用 {images['kept']} 张，没下成 {images['failed']} 张，"
+                  f"删掉下架的 {images['removed']} 张")
+            paths = platforms.write_catalog(workspace, catalog)
+    except TimeoutError as e:
+        print(f"另一个 --sync-products 一直没跑完：{e}")
+        return 1
+    finally:
+        signal.signal(signal.SIGTERM, before)
     for platform, part in catalog["platforms"].items():
         state = "ok" if part.get("ok") else f"没读成：{part.get('error')}"
         print(f"{platform}: {len(part.get('items') or [])} 个商品（{state}）")
@@ -2868,24 +2932,30 @@ def sync_products(settings: dict, only: str = "") -> int:
     return 0 if all(part.get("ok") for name, part in catalog["platforms"].items() if name in wanted) else 1
 
 
+def _sync_terminated(signum, frame):
+    """``--sync-products`` told to stop (SIGTERM: the worker that started it stops, or its hour is up): the platform
+    CLI it runs now, in a process group of its own, stops first (``platforms.stop_running``), then this process."""
+    if platforms is not None:
+        platforms.stop_running()
+    print("--sync-products 被停下了（SIGTERM）", flush=True)
+    raise SystemExit(128 + int(signum))
+
+
 # config.json ``products_sync_hours``: ``--sync-products`` by itself (the catalogue's prices and SKUs: 直播手卡 refuses a
 # catalogue older than handcards.json's max_catalogue_days), in a process of its own so jobs go on meanwhile; a
 # platform action waits for its CLI lock as it does for a sync by hand.
-_products_sync: dict = {"proc": None, "started": 0.0}
+_products_sync: dict = {"proc": None, "started": 0.0, "warned": ""}
 PRODUCTS_SYNC_STATE = "products-sync.json"       # in HOME_DIR/platform: when the last scheduled run was started
 PRODUCTS_SYNC_LOG = "products-sync.log"          # in HOME_DIR/logs: the last scheduled run's output
 
 
 def products_sync_due(settings: dict, workspace: Path, now: float) -> bool:
-    """``products_sync_hours`` is set (more than 0), it is night on this Mac's clock (PRODUCTS_SYNC_NIGHT) and neither
-    the last scheduled run nor the catalogue file (written by any sync, one by hand too: its modification time, no
-    need to read it) is that young."""
-    try:
-        hours = float(settings.get("products_sync_hours") or 0)
-    except (TypeError, ValueError):
-        return False
+    """``products_sync_hours`` is set (a number more than 0: ``_sync_hours``), it is night on this Mac's clock
+    (PRODUCTS_SYNC_NIGHT) and neither the last scheduled run nor the catalogue file (written by any sync, one by hand
+    too: its modification time, no need to read it) is that young."""
+    hours = _sync_hours(settings.get("products_sync_hours"))
     start, end = PRODUCTS_SYNC_NIGHT
-    if hours <= 0 or not start <= time.localtime(now).tm_hour < end:
+    if not hours or not start <= time.localtime(now).tm_hour < end:
         return False
     last = 0.0
     try:
@@ -2899,29 +2969,79 @@ def products_sync_due(settings: dict, workspace: Path, now: float) -> bool:
     return now - last >= hours * 3600
 
 
-def products_sync_tick(settings: dict, kinds: tuple, now: float | None = None, popen=subprocess.Popen) -> str:
+def _stop_products_sync(proc) -> None:
+    """Stop the scheduled ``--sync-products``: SIGTERM to its process group (its handler, ``_sync_terminated``, stops
+    the platform CLI it runs, which is in a group of its own), SIGKILL after PRODUCTS_SYNC_STOP_SEC."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except OSError:
+            try:
+                proc.send_signal(sig)
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=PRODUCTS_SYNC_STOP_SEC)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _products_sync_ended(how: str, code, mono: float | None = None) -> None:
+    """The one line a scheduled run ends with (a WARNING when it failed or was stopped)."""
+    took = (time.monotonic() if mono is None else mono) - _products_sync["started"]
+    _products_sync["proc"] = None
+    (log.info if code == 0 else log.warning)("products: the scheduled --sync-products %s in %.0f s (output: %s)", how,
+                                             took, HOME_DIR / "logs" / PRODUCTS_SYNC_LOG)
+
+
+def products_sync_stop(why: str = "the worker stops") -> bool:
+    """A scheduled ``--sync-products`` still running when the worker stops or restarts is stopped the same way
+    (``_stop_products_sync``) and ends with its log line; True when there was one."""
+    proc = _products_sync["proc"]
+    if proc is None:
+        return False
+    code = proc.poll()
+    if code is None:
+        _stop_products_sync(proc)
+        _products_sync_ended(f"stopped ({why})", None)
+    else:
+        _products_sync_ended("done" if code == 0 else f"ended with exit code {code}", code)
+    return True
+
+
+def products_sync_idle(settings: dict, kinds: tuple) -> None:
+    """``serve``'s call of ``products_sync_tick``: whatever goes wrong in it (a full disk, a folder it cannot make) is
+    one WARNING line (the same one only once in a row), and serving goes on."""
+    try:
+        products_sync_tick(settings, kinds)
+        _products_sync["warned"] = ""
+    except Exception as e:
+        said = f"{type(e).__name__}: {e}"
+        if said != _products_sync.get("warned"):
+            log.warning("products: the night sync could not be looked at (%s); serving goes on", said)
+            _products_sync["warned"] = said
+
+
+def products_sync_tick(settings: dict, kinds: tuple, now: float | None = None, popen=subprocess.Popen,
+                       mono: float | None = None) -> str:
     """At an idle moment of ``serve`` (no job came): a scheduled ``--sync-products`` that ended is told in one log line
-    (one still going after PRODUCTS_SYNC_MAX_SEC is stopped); one that is due (``products_sync_due``, a worker that
+    (a WARNING when it failed; one still going after PRODUCTS_SYNC_MAX_SEC on the monotonic clock, which a sleeping
+    Mac does not move, is stopped, ``_stop_products_sync``); one that is due (``products_sync_due``, a worker that
     writes drafts) starts, its output in HOME_DIR/logs/products-sync.log.  "" (nothing), "running", "ended" or
-    "started"."""
+    "started".  (``now``: the wall clock, for the night and the state file; ``mono``: the monotonic one.)"""
     now = time.time() if now is None else now
+    mono = time.monotonic() if mono is None else mono
     proc = _products_sync["proc"]
     if proc is not None:
         code = proc.poll()
-        took = now - _products_sync["started"]
-        if code is None and took <= PRODUCTS_SYNC_MAX_SEC:
+        if code is None and mono - _products_sync["started"] <= PRODUCTS_SYNC_MAX_SEC:
             return "running"
         if code is None:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                proc.kill()
-            proc.wait()
-        _products_sync["proc"] = None
-        how = ("stopped after %d min" % (PRODUCTS_SYNC_MAX_SEC // 60) if code is None
-               else "done" if code == 0 else f"ended with exit code {code}")
-        log.info("products: the scheduled --sync-products %s in %.0f s (output: %s)", how, took,
-                 HOME_DIR / "logs" / PRODUCTS_SYNC_LOG)
+            _stop_products_sync(proc)
+            _products_sync_ended("stopped after %d min" % (PRODUCTS_SYNC_MAX_SEC // 60), None, mono)
+        else:
+            _products_sync_ended("done" if code == 0 else f"ended with exit code {code}", code, mono)
         return "ended"
     if "prm" not in kinds or platforms is None:
         return ""
@@ -2942,7 +3062,7 @@ def products_sync_tick(settings: dict, kinds: tuple, now: float | None = None, p
         except OSError as e:
             log.warning("products: the scheduled --sync-products did not start: %s", e)
             return ""
-    _products_sync["started"] = now
+    _products_sync["started"] = mono
     return "started"
 
 
@@ -3341,7 +3461,7 @@ def serve(settings: dict, client: RelayClient, stopper: Stopper, once: bool = Fa
             backoff = min(backoff * 2, MAX_BACKOFF_SEC)
             continue
         if job is None:
-            products_sync_tick(settings, kinds)          # (idle: the catalogue's night sync, when set)
+            products_sync_idle(settings, kinds)          # (idle: the catalogue's night sync, when set)
             continue
         try:
             result = do_job(settings, job, client, stopper, kinds)
@@ -3520,6 +3640,7 @@ def main(argv: list[str] | None = None) -> int:
     log.info("worker started (%s); bot %s", ",".join(kinds), settings["relay_url"])
     serve(settings, client, stopper, once=args.once, settings_file=SettingsFile(Path(args.config), settings),
           kinds=kinds)
+    products_sync_stop("the worker restarts" if stopper.exit_code() == RESTART_EXIT else "the worker stops")
     log.info("worker stopped")
     for lock in locks:
         lock.close()
