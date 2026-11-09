@@ -141,7 +141,7 @@ Windows 上的机器人只负责收发微信消息。你私聊机器人发 `cc �
    - 只做草稿的 worker：日志写在 `~/.claude-relay/worker-prm.log`，没发出去的结果放在 `~/.claude-relay/outbox-prm/`。没配好 `prm_workspace` 时直接退出（启动脚本 30 秒后重试）。它绝不会在不带任务类型的情况下去要任务，否则机器人会把它当成旧版 worker，交给它 cc 任务。
    - 机器人还是旧版（没有达人副驾驶，`/relay/health` 里没有 `kinds`）时，旧版机器人不分任务类型，谁来要就把 cc 任务给谁。所以只做草稿的 worker 这时不去要任务，日志里写一次「the bot does not hand out jobs by kind」，然后每分钟看一次；Windows 换成新版以后自动开始。`--check` 的 `bot …` 那一行会写 `job kinds: admin,prm`（新版）或 `older than job kinds`（旧版）。
    - `--check --kinds prm` 会显示这个 worker 会要哪几种任务、用哪把锁。
-   - 机器人比 Mac 旧（`/relay/health` 的 `features` 里没有 `dy.channel_goods:1`：还不认识照店里做法建的专属链接）时，草稿里的 `dy.channel_goods` 不交给它：不预览、不跑命令行，平台动作去掉；回复里有 `{链接}` 这类占位符的，回复也去掉（旧机器人会原样发出去）；草稿标「要注意」，原因开头是「Windows 上的机器人比这台 Mac 旧…」，日志写「the bot is older than this worker」。所以更新时先更新 Windows（或者两边一起），再更新 Mac；`--check` 的「bot knows 专属链接 the shop's way (dy.channel_goods:1)」那一行写着 yes / no。
+   - 机器人比 Mac 旧（`/relay/health` 的 `features` 里没有 `dy.channel_goods:1`：还不认识照店里做法建的专属链接）时，草稿里的 `dy.channel_goods` 不交给它：不预览、不跑命令行，平台动作去掉；回复里有 `{链接}` 这类占位符的，回复也去掉（旧机器人会原样发出去）；草稿标「要注意」，原因开头是「Windows 上的机器人比这台 Mac 旧…」，日志写「the bot is older than this worker」。所以更新时先更新 Windows（或者两边一起），再更新 Mac；`--check` 的「bot knows 专属链接 the shop's way (dy.channel_goods:1)」那一行写着 yes / no。`/relay/health` 一次超时不算数：连着问三次（中间停 1 秒、3 秒，每次最多 10 秒），都没回答就用一小时内上一次问到的结果（只做草稿的 worker 每轮的 `bot_kinds` 也会更新它）；还是不知道就同样不给，原因写「这台 Mac 连着几次都问不到 Windows 上的机器人…」，草稿多带 `"platform_held": "unasked"`：新机器人据此不把它当成这一步的草稿，开佣金那一路的建链接那一步过 5 分钟再派（最多三次），她要链接的那条消息留给她的下一份草稿。
 
 ### 草稿任务的限制（防止达人消息里夹带的指令起作用）
 

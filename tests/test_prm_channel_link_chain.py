@@ -16,7 +16,8 @@ from test_prm_platform_flow import (CHANNEL, DESIGNATED, THREE, TWO, approve, bl
 
 from platform_fakes import DY_ITEM, DY_ITEM2, DY_LINK, DY_SKU, DY_SKU2, DY_UID, JST_ORDER
 from src.prm import platforms
-from src.prm.service import LINK_SLOT, RESTART_HINT, link_wish, next_step_note, unfilled_placeholders
+from src.prm.service import (LINK_SLOT, LINKS_UNCLEAR_NOTICE, RESTART_HINT, STEP_RETRY_SEC, STEP_UNASKED_TRIES,
+                             event_out, link_reading, link_wish, next_step_note, unfilled_placeholders)
 
 LINK2 = {**CHANNEL, "item_id": DY_ITEM2}
 RUN2 = {"steps": ["create", "bind"], "skus": [{"id": DY_SKU2, "price": "198.00", "stock": 100, "main_price": "220.00"}]}
@@ -105,6 +106,22 @@ def test_the_slot_says_whether_the_deal_asks_for_links(value, wish):
 def test_a_plain_reply_is_held_for_the_platforms_placeholders(text, found):
     """The verifier's probe P7: only the platforms' placeholders (``platforms.PLACEHOLDER_LABELS``) hold a plain draft."""
     assert sorted(unfilled_placeholders(text)) == sorted(found)
+
+
+@pytest.mark.parametrize("value, reading", [
+    ("要", "yes"), ("要链接", "yes"), ("需要", "yes"), ("想要", "yes"), ("要的", "yes"), ("没问题，要", "yes"),
+    ("无所谓，要", "yes"), ("要（前缀不用写）", "yes"), ("不要前缀，要链接", "yes"), ("【小美专属】", "yes"),
+    ("小美专属", "yes"), ("前缀：小美专属", "yes"), ("【小美推荐】", "yes"),
+    ("", "no"), ("不要", "no"), ("不用", "no"), ("不需要了", "no"), ("不想要", "no"), ("暂时不要", "no"), ("算了", "no"),
+    ("先不弄了", "no"), ("以后再说", "no"), ("No", "no"), ("无", "no"), ("没有", "no"), ("【小美专属】不要了", "no"),
+    # neither: the deal keeps what it had (review 2026-11-09 N3)
+    ("好的", "unclear"), ("可以", "unclear"), ("是", "unclear"), ("Yes", "unclear"), ("专属链接", "unclear"),
+    ("待定", "unclear"), ("等她说前缀", "unclear"), ("主要看佣金", "unclear"),
+    ("不是很想要", "unclear"), ("要是需要再说", "unclear"), ("要不要都行", "unclear"),
+])
+def test_how_the_slot_is_read(value, reading):
+    assert link_reading(value) == reading
+    assert (link_wish({LINK_SLOT: value}) is not None) == (reading == "yes")
 
 
 # ── the chain: per product its commission, then its link ─────────────────
@@ -209,6 +226,126 @@ def test_a_link_that_is_not_made_does_not_hold_up_the_next_product(bot, clock, h
         error = bot.prm.store.packet(link["id"])["error"]
         assert error.startswith("渠道品 7200000000000001 建好了、没绑上她（FAILED") and "② 把它下架、删掉" in error
         assert "结果不确定" in chain_attention(bot) and "先到平台后台核对" in chain_attention(bot)
+
+
+def unasked_draft(reply=""):
+    """What a worker that could not ask this bot what it knows hands back (``hold_for_older_bot``): the link left out,
+    the reply too when it said {链接}, flagged, and ``platform_held``."""
+    return draft(message_kind="money", reply_draft=reply, slots={}, needs_attention=True,
+                 reason="这台 Mac 连着几次都问不到 Windows 上的机器人…", platform_held="unasked")
+
+
+def test_a_link_step_the_mac_could_not_ask_the_bot_about_is_asked_again_later(bot, clock):
+    """The verifier's probe P5 (review 2026-11-09 N1): the chain's link step; the Mac could not ask this bot what it
+    knows (GET /relay/health did not answer, asked again and again) and left the link out: no draft of it, the product
+    is not 「派过、草稿没建」, the step is owed and asked again five minutes later (the chain waits for it)."""
+    two_signed_for(bot, clock)
+    _, commission = step(bot, DESIGNATED)
+    opens(bot, commission)
+    job = bot.worker_takes()
+    assert job["meta"]["step"]["action"] == "dy.channel_goods"
+    bot.finish(job["id"], unasked_draft())
+    assert bot.prm.store.packet_for_job(job["id"]) is None
+    [owed] = [n for n in bot.prm.store.deal(1)["notices"] if n["key"] == "step"]
+    assert owed["text"] == (f"#{job['id']} 建专属链接这一步没起草成：Mac 问不到 Windows 上的机器人（网络不通？），"
+                            f"{STEP_RETRY_SEC // 60} 分钟后系统再派一次")
+    assert owed["tries"] == 1 and owed["item"] == DY_ITEM and owed["uid"] == DY_UID
+    assert "派过、草稿没建" not in chain_attention(bot) and "这一步欠着" in chain_attention(bot)
+    [ev] = bot.prm.store.events(1, kinds=("step_unasked",))
+    assert event_out(ev)["name"] == f"#{job['id']} 那一步没起草成：Mac 问不到 Windows 上的机器人（第 1 次）（商品 {DY_ITEM}）"
+    assert bot.prm.sweep_owed_steps() == 0 and bot.worker_takes() is None     # not before its time
+    clock.now += STEP_RETRY_SEC
+    assert bot.prm.sweep_owed_steps() == 1
+    again = bot.worker_takes()
+    assert again["meta"]["step"] == {**job["meta"]["step"], "tries": 1}
+    assert again["meta"]["system_note"] == job["meta"]["system_note"]
+    bot.finish(again["id"], draft(message_kind="money", reply_draft="链接：{链接}", slots={}, platform=block(CHANNEL)))
+    assert bot.prm.store.packet_for_job(again["id"])["status"] == "pending"
+
+
+def test_a_link_step_the_mac_never_could_ask_about_waits_for_a_person(bot, clock):
+    """Asked again ``STEP_UNASKED_TRIES`` times, the Mac still cannot ask the bot: the step waits for a person like one
+    that was not written (no more retries)."""
+    two_signed_for(bot, clock)
+    _, commission = step(bot, DESIGNATED)
+    opens(bot, commission)
+    for n in range(STEP_UNASKED_TRIES + 1):
+        job = bot.worker_takes()
+        assert job is not None and job["meta"]["step"].get("tries", 0) == n
+        bot.finish(job["id"], unasked_draft())
+        clock.now += STEP_RETRY_SEC
+        bot.prm.sweep_owed_steps()
+    assert bot.worker_takes() is None and all(n["key"] != "step" for n in bot.prm.store.deal(1)["notices"])
+    attention = bot.prm.store.deal(1)["attention"]
+    assert (f"建专属链接这一步的草稿没写成：Mac 连着 {STEP_UNASKED_TRIES} 次问不到 Windows 上的机器人" in attention
+            and "系统不会自己再起草这一步，请运营处理" in attention)
+
+
+def test_her_reply_whose_link_the_mac_could_not_ask_about_waits_for_her_next_draft(bot, clock):
+    """Her request for a link, drafted by a Mac that could not ask this bot: nothing of the reply was left, so it is no
+    draft: the deal says so and her lines go with her next draft job; a reply that still says something stays a
+    (flagged) draft."""
+    bot.prm.handle(bot.msg("链接发我一下"))
+    job = bot.worker_takes()
+    bot.finish(job["id"], unasked_draft())
+    assert bot.prm.store.packet_for_job(job["id"]) is None
+    assert "草稿没写成：Mac 问不到 Windows 上的机器人，专属链接没起草（她的消息等下一份草稿一起回）" in bot.prm.store.deal(1)["attention"]
+    bot.prm.handle(bot.msg("在吗"))
+    nxt = bot.worker_takes()
+    assert "链接发我一下" in nxt["text"] and "在吗" in nxt["text"]
+    bot.finish(nxt["id"], unasked_draft("好的老师，我马上给您弄～"))
+    kept = bot.prm.store.packet_for_job(nxt["id"])
+    assert kept["status"] == "pending" and kept["needs_attention"] and kept["text"] == "好的老师，我马上给您弄～"
+
+
+def test_a_slot_that_says_neither_keeps_the_deals_wish_and_says_so(bot, clock):
+    """review 2026-11-09 N3: a later draft writes 「好的」 over the deal's 「要」: the deal keeps 「要」 and says so, the
+    chain goes on with its links; a clear value puts the notice away."""
+    two_signed_for(bot, clock, links="要")
+    _, commission = step(bot, DESIGNATED)
+    wants_links(bot, "好的")
+    deal = bot.prm.store.deal(1)
+    assert deal["slots"][LINK_SLOT] == "要"
+    notice = next(n["text"] for n in deal["notices"] if n["key"] == LINKS_UNCLEAR_NOTICE)
+    assert notice == "专属链接那一栏写的「好的」看不出要不要，先按原来的办（原来写的是「要」）"
+    opens(bot, commission)
+    job = bot.worker_takes()
+    assert job["meta"]["step"]["action"] == "dy.channel_goods" and job["meta"]["step"]["item"] == DY_ITEM
+    bot.finish(job["id"], draft(message_kind="other", reply_draft="前缀写什么呢？", slots={}))
+    wants_links(bot, "要不要都行")
+    assert bot.prm.store.deal(1)["slots"][LINK_SLOT] == "要"
+    wants_links(bot, "【小美专属】")
+    deal = bot.prm.store.deal(1)
+    assert deal["slots"][LINK_SLOT] == "【小美专属】"
+    assert all(n["key"] != LINKS_UNCLEAR_NOTICE for n in deal["notices"])
+
+
+def test_without_a_chain_a_commission_verified_while_a_link_step_drafts_waits_for_it(bot, clock):
+    """review 2026-11-09 N2: no chain, her links wanted: A's link step is being drafted when B's 专属佣金 is verified.
+    B's link step is owed (asked then, it would put A's out of date), waits while A's draft is in 待审批 too, and is
+    asked once A's is dealt with."""
+    wants_links(bot)
+    first = drafted(bot, reply="专属佣金设好啦")
+    opens(bot, first)
+    a_job = bot.worker_takes()                                          # A's link step: being drafted
+    assert a_job["meta"]["step"] == {"packet": first["id"], "delivered": False, "item": DY_ITEM,
+                                     "action": "dy.channel_goods", "prefix": "【小美专属】"}
+    second = drafted(bot, block({**DESIGNATED, "item_id": DY_ITEM2}), reply="这款也设好啦")
+    opens(bot, second)
+    [owed] = [n for n in bot.prm.store.deal(1)["notices"] if n["key"] == "step"]
+    assert owed["item"] == DY_ITEM2 and owed["action"] == "dy.channel_goods"
+    assert owed["text"] == f"#{second['id']} 之后该建专属链接了：手头还有一步在起草，那一步交回来系统就派"
+    assert bot.worker_takes() is None
+    bot.finish(a_job["id"], draft(message_kind="money", reply_draft="链接：{链接}", slots={}, platform=block(CHANNEL)))
+    a_link = bot.prm.store.packet_for_job(a_job["id"])
+    assert a_link["status"] == "pending"                                # not put out of date
+    assert bot.prm.sweep_owed_steps() == 0
+    assert next(n["text"] for n in bot.prm.store.deal(1)["notices"] if n["key"] == "step").endswith(
+        "手头还有一步的草稿在待审批，处理掉系统就派")
+    opens(bot, a_link, record(link=DY_LINK, channel_id="7200000000000001"))
+    assert bot.prm.sweep_owed_steps() == 1
+    b_job = bot.worker_takes()
+    assert b_job["meta"]["step"]["item"] == DY_ITEM2 and b_job["meta"]["step"]["action"] == "dy.channel_goods"
 
 
 def test_a_long_order_with_links_keeps_the_note_and_the_notice_short(bot, clock):

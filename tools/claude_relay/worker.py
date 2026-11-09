@@ -115,6 +115,13 @@ STOP_GRACE_SEC = 30          # after SIGINT, wait this long before killing claud
 RESTART_EXIT = 75            # main() after SIGUSR1: the start-*.command loop runs the worker again at once
 BACKGROUND_GRACE_SEC = 20    # background commands done but no new turn after this long: wrap up
 MAX_BACKOFF_SEC = 60
+# What the bot knows (GET /relay/health ``features``, ``RelayClient.bot_features``): asked this many times, these pauses
+# between, each ask this long at most; the last answer stands in for one that cannot be had for this long (Mac and
+# Windows talk over Tailscale, sometimes through a slow relay: one timeout is no news of the bot; review 2026-11-09 N1).
+FEATURES_TRIES = 3
+FEATURES_PAUSES_SEC = (1.0, 3.0)
+FEATURES_TIMEOUT_SEC = 10
+FEATURES_KEEP_SEC = 3600
 ALL_KINDS = ("admin", "prm")
 # One lock per kind of job (admin keeps the old name: an older worker blocks a new admin one).
 LOCK_FILES = {"admin": "worker.lock", "prm": "worker-prm.lock"}
@@ -310,9 +317,11 @@ PRM_PLATFORM_NOTE = (
     "预览会说这个商品自己的上限；前缀买家看得到，不写微信、V 号、电话这些联系方式）。"
     "price（统一的渠道价，元）、stock_per_sku（每个颜色几件）、sku_ids（只放其中几个 SKU）、exclusive（false = 达人带货、"
     "共用主商品库存）只有达人或老板另外谈定、kb/ 允许时才填。绑定要达人已经有这个商品的专属佣金："
-    "还没开就先只填这个商品的 dy.designated_commission，开好以后再建链接。达人或老板要了专属链接（说到「链接」"
-    "「专属链接」「前缀」）时，slots 里记「专属链接前缀」= 她要的前缀（写成「【某某专属】」；要链接、还没说前缀就记「要」；"
-    "后来说不要了就记成空字符串）：系统按它在每个商品的专属佣金开好以后派一步建这个商品的链接。\n"
+    "还没开就先只填这个商品的 dy.designated_commission，开好以后再建链接。链接一般由系统派的那一步建（那一步的说明会写），"
+    "回她消息的草稿不填 dy.channel_goods，除非起草备注里运营让你直接建（比如专属佣金是在百应手动开的）。达人或老板要了专属链接"
+    "（说到「链接」「专属链接」「前缀」）时，slots 里记「专属链接前缀」= 她要的前缀（写成「【某某专属】」；要链接、还没说前缀"
+    "就记「要」；后来说不要了就记成空字符串；只写这三种，「好的」「可以」这类系统看不出要不要，会照原来的办）："
+    "系统按它在每个商品的专属佣金开好以后派一步建这个商品的链接。\n"
     "- dy.creator_invite：抖音百应达人广场「邀约带货」，给达人发一张邀约卡片（精选联盟私信，发出去收不回）。"
     "item_id = 主推商品 ID，extra_item_ids = 其他推荐商品（最多 4 个，一般不填），creator_douyin_id = 达人的抖音号"
     "（只能用达人在对话里自己发来的、或登记信息里的抖音号，不能猜），"
@@ -457,6 +466,7 @@ class RelayClient:
         self.token = token
         self.reload_token = reload_token
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        self.features_seen: tuple | None = None    # (time.monotonic(), features) of the last health answer
 
     def _call(self, method: str, path: str, body: dict | None = None, timeout: float = 15,
               headers: dict | None = None):
@@ -488,20 +498,45 @@ class RelayClient:
         status, data = self._call("GET", "/relay/health")
         return status == 200 and bool(data and data.get("ok"))
 
+    def _health_answer(self, timeout: float = 15) -> tuple:
+        """GET /relay/health: ``(status, data)``; a 200 answer's ``features`` are kept (``features_seen``)."""
+        status, data = self._call("GET", "/relay/health", timeout=timeout)
+        if status == 200 and isinstance(data, dict):
+            features = data.get("features")
+            self.features_seen = (time.monotonic(), [str(f) for f in features] if isinstance(features, list) else None)
+        return status, data
+
     def bot_kinds(self) -> list[str] | None:
         """The job kinds the bot hands out by kind; None from a bot older than job kinds (it ignores
-        X-Relay-Kinds and hands any job, a cc task too, to whoever asks)."""
-        status, data = self._call("GET", "/relay/health")
+        X-Relay-Kinds and hands any job, a cc task too, to whoever asks).  (A prm-only worker asks every round: its
+        answer keeps ``features_seen`` fresh.)"""
+        status, data = self._health_answer()
         kinds = data.get("kinds") if status == 200 and isinstance(data, dict) else None
         return [str(k) for k in kinds] if isinstance(kinds, list) else None
 
-    def bot_features(self) -> list[str] | None:
+    def bot_features(self, pause=time.sleep) -> list[str] | None:
         """What the bot announces besides its job kinds (GET /relay/health ``features``, e.g.
-        ``platforms.CHANNEL_FEATURE``); None from a bot that says nothing of them (from before 2026-11-09).  A bot
-        that cannot be asked raises, as every call does."""
-        status, data = self._call("GET", "/relay/health")
-        features = data.get("features") if status == 200 and isinstance(data, dict) else None
-        return [str(f) for f in features] if isinstance(features, list) else None
+        ``platforms.CHANNEL_FEATURE``); None from a bot that says nothing of them (from before 2026-11-09).  Asked up to
+        ``FEATURES_TRIES`` times (``FEATURES_PAUSES_SEC`` between, ``FEATURES_TIMEOUT_SEC`` each); when no ask is
+        answered, the last answer stands in if it is not older than ``FEATURES_KEEP_SEC``, else the last error is
+        raised (review 2026-11-09 N1: one timeout dropped a link step)."""
+        error = None
+        for n in range(FEATURES_TRIES):
+            if n:
+                pause(FEATURES_PAUSES_SEC[min(n - 1, len(FEATURES_PAUSES_SEC) - 1)])
+            try:
+                status, data = self._health_answer(timeout=FEATURES_TIMEOUT_SEC)
+            except Exception as e:                       # (a timeout, the link down: asked again)
+                error = e
+                log.warning("the bot's features could not be asked for (%d of %d): %s", n + 1, FEATURES_TRIES, e)
+                continue
+            features = data.get("features") if status == 200 and isinstance(data, dict) else None
+            return [str(f) for f in features] if isinstance(features, list) else None
+        seen = self.features_seen
+        if seen is not None and time.monotonic() - seen[0] <= FEATURES_KEEP_SEC:
+            log.info("the bot's features: its answer of %d s ago stands in", int(time.monotonic() - seen[0]))
+            return seen[1]
+        raise error
 
     def next_job(self, wait: int = POLL_WAIT_SEC, settings: dict | None = None,
                  kinds: tuple = ALL_KINDS) -> dict | None:
@@ -2390,9 +2425,13 @@ def preview_failed(raw_action, why: str) -> dict:
 # A 专属链接 for a bot older than the shop's way (review 2026-11-09 F5: a new Mac and an old Windows bot): such a bot
 # refuses the action's ``convention``, keeps the reply as a plain draft and has no check of its {链接}.
 OLDER_BOT_NOTE = ("Windows 上的机器人比这台 Mac 旧，还不认识照店里做法建的专属链接（dy.channel_goods）：这一份的平台动作没给它；"
-                  "回复里有 {链接} 这类占位符的（旧机器人不会换成链接），回复也去掉了。先更新 Windows 上的机器人，再让它重新起草")
-UNASKED_BOT_NOTE = ("这台 Mac 刚才问不到 Windows 上的机器人认不认识照店里做法建的专属链接（网络断了一下？）：这一份的平台动作没给它；"
-                    "回复里有 {链接} 这类占位符的，回复也去掉了。过一会儿让它重新起草")
+                  "回复里有 {链接} 这类占位符的（旧机器人不会换成链接），回复也去掉了。先更新 Windows 上的机器人；这一份请人工回她")
+# A bot that did not answer GET /relay/health, asked again and again (``RelayClient.bot_features``) and never heard from
+# before: not knowing is never a yes.  The draft says so (``platform_held``): a newer bot asks the step again a little
+# later and keeps her lines for her next draft (review 2026-11-09 N1).
+UNASKED_BOT_NOTE = ("这台 Mac 连着几次都问不到 Windows 上的机器人认不认识照店里做法建的专属链接（网络不通？）：这一份的平台动作没给它；"
+                    "回复里有 {链接} 这类占位符的，回复也去掉了")
+UNASKED = "unasked"                                      # the draft's ``platform_held`` then (src/prm/result.py)
 
 
 def older_bot(client: RelayClient, raw_action) -> str:
@@ -2411,12 +2450,15 @@ def older_bot(client: RelayClient, raw_action) -> str:
 
 def hold_for_older_bot(draft: dict, why: str) -> None:
     """The draft without its action (``older_bot``) waits for a person: its reply goes too when it says a platform
-    placeholder ({链接} …: nothing would fill it in), and the reason says why first."""
+    placeholder ({链接} …: nothing would fill it in), and the reason says why first; one for a bot that could not be
+    asked says so (``platform_held``: ``UNASKED``; an older bot reads no such field)."""
     reply = str(draft.get("reply_draft") or "")
     if platforms is None or any(key in reply for key in platforms.PLACEHOLDER_LABELS):
         draft["reply_draft"] = ""
     draft["needs_attention"] = True
     draft["reason"] = "；".join(r for r in (why, str(draft.get("reason") or "").strip()) if r)[:300]
+    if why == UNASKED_BOT_NOTE:
+        draft["platform_held"] = UNASKED
 
 
 def do_platform_job(settings: dict, job: dict, client: RelayClient, workspace: Path, meta: dict) -> dict:
