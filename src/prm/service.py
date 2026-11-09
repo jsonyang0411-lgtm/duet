@@ -990,6 +990,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
                                      "auto": bool(n.get("auto"))})
     pending = list(reversed(store.packets((PENDING, EXECUTING, APPROVED, SENDING), limit=200)))
     recent = store.packets((SENT, FAILED, DROPPED, SUPERSEDED, NO_REPLY), limit=limit)
+    told = store.wechat_notified(p["id"] for p in pending)     # 微信里审批草稿: when each was told to the admin's chat
     shown_cache: dict[int, dict] = {}
     # 老板拉的群 (src/prm/boss_groups.py): the creators a boss introduced in a group the bot took over (「老板介绍」, also
     # once the group is gone)
@@ -1028,6 +1029,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
             "auto_mode": bool(p["meta"].get(AUTO_MODE)),
             "auto_at": p["meta"].get("auto_at") if isinstance(p["meta"].get("auto_at"), (int, float)) else None,
             "auto_held": str(p["meta"].get("auto_held") or ""),
+            "wechat_at": told.get(p["id"]),
         }
 
     def unanswered(deal: dict) -> bool:
@@ -5856,6 +5858,7 @@ class PrmService:
             "reply_parts": self._reply_parts, "boss_groups": self.boss_groups.status(),
             "opening_auto_min": self._opening_auto_sec // 60,
             "hand_samples_problem": self._hand_problem if self._sample_sync_sec > 0 else "",
+            "wechat_review": self.wechat_review.status(),
         })
 
     # ── the sender thread: approved drafts, holding replies, clean-ups ────

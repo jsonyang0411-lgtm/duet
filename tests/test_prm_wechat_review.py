@@ -193,7 +193,8 @@ def test_with_the_switch_off_nothing_is_told_and_every_answer_goes_on_as_before(
     packet = desk.mac()
     desk.prm.tick()
     assert desk.told() == [] and desk.prm.store.wechat_review(packet["id"]) is None
-    assert desk.review.status() == {"on": False}
+    assert desk.review.status() == {"on": False} and desk.prm.snapshot()["wechat_review"] == {"on": False}
+    assert desk.prm.snapshot()["pending"][0]["wechat_at"] is None
     assert desk.admin(f"发 {packet['id']}") is None                      # (silence, as before)
     assert desk.admin("1", quote=f"#{packet['id']} 草稿 · 小美 · 私聊") is None
     assert desk.router._tracer.notes["ended_by"] == "silence"
@@ -208,7 +209,7 @@ def test_without_an_admin_nothing_is_told_and_the_console_says_why(clock, tmp_pa
     desk.her("收到6件哈")
     packet = desk.mac()
     assert desk.review.sweep() == 0 and desk.sent == []
-    assert desk.review.status() == {"on": True, "why": NO_ADMIN_WHY, "open": 0, "unsent": 0}
+    assert desk.prm.snapshot()["wechat_review"] == {"on": True, "why": NO_ADMIN_WHY, "open": 0, "unsent": 0}
     assert desk.prm.store.packet(packet["id"])["status"] == "pending"
     desk.stop()
 
@@ -752,7 +753,7 @@ def test_a_creators_answer_in_her_own_chat_is_only_her_words(desk):
     assert not desk.prm.store.packets(("approved", "sent")) and desk.to(CREATOR) == []
 
 
-# ── the log, the clean-up, the switch ─────────────────────────────────────
+# ── the log, the clean-up, the console, the switch ───────────────────────
 
 def test_the_log_has_ids_and_counts_only(desk, caplog):
     caplog.set_level(logging.DEBUG)
@@ -781,6 +782,32 @@ def test_the_clean_up_drops_the_closed_rows_and_cuts_a_waiting_proposed_edit(des
     desk.review.sweep()
     assert len([t for t in desk.told() if t.startswith(f"#{second['id']} 草稿")]) == 1     # (told once: never again)
     assert desk.admin("1", quote=head(desk, first["id"])) == f"#{first['id']} 已经处理过了：点了不发"   # (its row is gone)
+
+
+def test_the_console_says_where_the_drafts_go_and_which_were_told(desk):
+    packet = waiting(desk)
+    desk.her("在吗", chat=CREATOR)
+    second = desk.mac(text="在的～")
+    snap = desk.prm.snapshot()
+    assert snap["wechat_review"] == {"on": True, "why": "", "open": 0, "unsent": 0}       # (#1 is out of date)
+    assert [(p["id"], p["wechat_at"]) for p in snap["pending"]] == [(second["id"], None)]
+    desk.review.sweep()
+    snap = desk.prm.snapshot()
+    assert snap["wechat_review"]["open"] == 1 and snap["pending"][0]["wechat_at"] == desk.clock.now
+    assert packet["id"] != second["id"]
+
+
+def test_the_stopped_bot_says_why_nothing_goes_to_wechat(monkeypatch):
+    from src.web import server
+
+    monkeypatch.delenv("PRM_WECHAT_REVIEW", raising=False)
+    assert server._wechat_review_stopped_status() == {"on": False}
+    monkeypatch.setenv("PRM_WECHAT_REVIEW", "on")
+    monkeypatch.setenv("ADMIN_WXID", "")
+    assert server._wechat_review_stopped_status()["why"] == NO_ADMIN_WHY
+    monkeypatch.setenv("ADMIN_WXID", ADMIN)
+    assert server._wechat_review_stopped_status() == {"on": True, "why": "机器人没有运行：草稿发不到管理员微信里",
+                                                       "open": 0, "unsent": 0}
 
 
 def test_the_switch_is_off_by_default_and_checked_like_the_others(monkeypatch):

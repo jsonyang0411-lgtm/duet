@@ -2055,6 +2055,17 @@ class PrmStore:
                 (FAILED,)).fetchall()
         return [dict(r) for r in rows]
 
+    def wechat_notified(self, packet_ids) -> dict[int, float]:
+        """``{packet id: when it was told to the admin's chat}`` of these packets (the console's 「已发到微信」)."""
+        ids = [int(i) for i in packet_ids]
+        if not ids:
+            return {}
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT packet_id, notified_at FROM wechat_reviews WHERE packet_id IN ({', '.join('?' * len(ids))})",
+                ids).fetchall()
+        return {int(r["packet_id"]): float(r["notified_at"]) for r in rows}
+
     def purge_wechat_reviews(self, deal_id: int, rewrite: Callable[[str], str], now: Optional[float] = None) -> int:
         """8.2 clean-up of a deal (``PrmService.purge``): the rows of its drafts that no longer wait go, with what the
         admin wrote for them; a waiting one stays (told once: never told again), its proposed edit cut by ``rewrite``.

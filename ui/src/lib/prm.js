@@ -217,6 +217,17 @@ export function bossGroupNotes(d) {
     + '到「合作单」页顶上的「老板拉的群」里选哪个是她，选了机器人才接手。']]
 }
 
+/** 微信里审批草稿 (PRM_WECHAT_REVIEW, src/prm/wechat_review.py; ``wechat_review`` of GET /api/prm): [note kind, the line]
+ *  at the top of 待审批, or null while the switch is off. The drafts waiting here also go to the admin's WeChat, where
+ *  the admin answers them; why they cannot (no ADMIN_WXID, the bot stopped) when they cannot. */
+export function wechatReviewNote(d) {
+  const w = d?.wechat_review
+  if (!w?.on) return null
+  if (w.why) return ['warn', w.why]
+  const unsent = w.unsent > 0 ? `；有 ${w.unsent} 份试了几次都没发到微信，请在这里处理` : ''
+  return ['', `草稿也发到管理员微信里了：回 1 发出、2 不发、改 + 你的话${unsent}`]
+}
+
 /** What is wrong with the setup, in the order a person has to fix it ([] = ready). */
 export function setupProblems(d) {
   if (!d) return []

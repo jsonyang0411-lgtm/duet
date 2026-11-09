@@ -1,8 +1,8 @@
 import { Fragment, useState } from 'react'
-import { ArrowClockwise, PaperPlaneRight, PencilSimple, X, Paperclip, WarningCircle, Eye, EyeSlash, Flag, Lightning, CheckCircle, Copy, ChatsCircle, Robot, HandPalm, UsersThree } from '@phosphor-icons/react'
+import { ArrowClockwise, PaperPlaneRight, PencilSimple, X, Paperclip, WarningCircle, Eye, EyeSlash, Flag, Lightning, CheckCircle, Copy, ChatsCircle, Robot, HandPalm, UsersThree, DeviceMobile } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
-import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, buyinNotes, buyinFriendAddLine, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, dealAction, nightStatus, copyBuyin, buyinSent, setAutoMode, replyPartCount, inGroup, bossGroupNotes, handSampleSeen, handSampleLine } from '../lib/prm'
+import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, buyinNotes, buyinFriendAddLine, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, dealAction, nightStatus, copyBuyin, buyinSent, setAutoMode, replyPartCount, inGroup, bossGroupNotes, handSampleSeen, handSampleLine, wechatReviewNote } from '../lib/prm'
 import { PageHead, Card, Note, Banner, Empty, Confirm, TextArea } from './ui'
 import { FriendAddList } from './FriendAddCard'
 
@@ -27,6 +27,8 @@ import { FriendAddList } from './FriendAddCard'
 // 老板拉的群 (PRM_BOSS_GROUPS): a draft of her line in the group the boss made with her and us
 // (``channel`` "group") is tagged 「群里 · <群名>」 and its 发送 asks first: it goes in the group, where
 // the boss sees it. A group that needs a person to say which member she is gets one line at the top.
+// 微信里审批草稿 (PRM_WECHAT_REVIEW): one line at the top says the drafts also go to the admin's WeChat (or why they
+// cannot), and a draft told there is tagged 已发到微信; deciding it here or there is the same decision.
 
 export default function ReviewPanel() {
   const { data, err, reload } = usePrm(4000)
@@ -41,6 +43,7 @@ export default function ReviewPanel() {
         />
         {err && <Note kind="need">{err}</Note>}
         {setupProblems(data).map(([kind, text]) => <Note key={text} kind={kind}>{text}</Note>)}
+        <WechatReviewLine d={data} />
         {buyinNotes(data).map(([kind, text]) => <Note key={text} kind={kind} icon={ChatsCircle}>{text}</Note>)}
         {bossGroupNotes(data).map(([kind, text]) => <Note key={text} kind={kind} icon={UsersThree}>{text}</Note>)}
         {data?.hand_samples_problem && <Note kind="warn">{data.hand_samples_problem}</Note>}
@@ -63,6 +66,13 @@ export default function ReviewPanel() {
       </div>
     </div>
   )
+}
+
+/** 微信里审批草稿 (PRM_WECHAT_REVIEW): the drafts also go to the admin's WeChat, or why they cannot. */
+function WechatReviewLine({ d }) {
+  const note = wechatReviewNote(d)
+  if (!note) return null
+  return <div className="prm-wechat-review"><Note kind={note[0]} icon={DeviceMobile}>{note[1]}</Note></div>
 }
 
 /** "〈手机1〉 = 138****5678" and, after a click that is written down, the full numbers. */
@@ -335,7 +345,7 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
       title={`${p.party_name} · ${p.kind_label}`}
       eyebrow={`DRAFT #${p.id}`}
       sub={`${fmtClock(p.created_at)} ${p.system ? '系统生成' : '写好'}${p.stage_proposal_label ? ` · 建议阶段：${p.stage_proposal_label}` : ''}`}
-      actions={<><GroupTag p={p} />{p.opening && <span className="tag cy" title={p.auto_at ? `她还没跟我们说过话：这是我们先打招呼的话，${fmtClock(p.auto_at)} 还没人处理就自动发` : '她还没跟我们说过话：这是我们先打招呼的话，要人看过再发'}>开场白</span>}{p.huopan && <span className="tag cy" title="运营点了「补发货盘」：我们主动补发的货盘，要人看过再发（不会自动发）">补发货盘</span>}{p.route === 'auto' && <span className="tag ok" title="这类消息已经达到自动发送门槛">自动发送</span>}<NightTag p={p} /><OpeningAutoTag p={p} /><span className={`tag ${kind}`}>{label}</span></>}
+      actions={<><GroupTag p={p} />{p.wechat_at && <span className="tag cy prm-wechat-tag" title={`${fmtClock(p.wechat_at)} 发到管理员微信里了：在微信里回 1 / 2 / 改 也行，和这里点是同一个决定`}>已发到微信</span>}{p.opening && <span className="tag cy" title={p.auto_at ? `她还没跟我们说过话：这是我们先打招呼的话，${fmtClock(p.auto_at)} 还没人处理就自动发` : '她还没跟我们说过话：这是我们先打招呼的话，要人看过再发'}>开场白</span>}{p.huopan && <span className="tag cy" title="运营点了「补发货盘」：我们主动补发的货盘，要人看过再发（不会自动发）">补发货盘</span>}{p.route === 'auto' && <span className="tag ok" title="这类消息已经达到自动发送门槛">自动发送</span>}<NightTag p={p} /><OpeningAutoTag p={p} /><span className={`tag ${kind}`}>{label}</span></>}
       className="prm-draft"
     >
       <div className="stack" style={{ gap: 8 }}>

@@ -1514,6 +1514,39 @@ class TestPrmPages:
         assert "群里 · 收件信息复述" in row.inner_text()
         assert "群里" not in page.locator(".prm-recent tr", has_text="#1").inner_text()   # another one: as before
 
+    def test_review_page_says_the_drafts_go_to_wechat_and_tags_the_ones_told(self, page, prm):
+        """微信里审批草稿 (PRM_WECHAT_REVIEW, src/prm/wechat_review.py): off (the running service here), 待审批 has nothing of
+        it; on, a line at the top says the drafts also go to the admin's WeChat and how to answer there, and a draft
+        told is tagged 已发到微信; drafts that could not be told are counted; without ADMIN_WXID the line says why."""
+        from src.prm.wechat_review import NO_ADMIN_WHY
+
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        card = page.locator(".prm-draft", has_text="在的，有什么可以帮你？")
+        card.wait_for()
+        assert page.locator(".prm-wechat-review").count() == 0 and card.locator(".prm-wechat-tag").count() == 0
+        shown = {"status": {"on": True, "why": "", "open": 1, "unsent": 0}, "told": True}
+
+        def wechat(state):
+            state["wechat_review"] = shown["status"]
+            for p in state["pending"]:
+                p["wechat_at"] = p["created_at"] if shown["told"] else None
+
+        self._serve_prm(page, wechat)
+        page.reload()
+        line = page.locator(".prm-wechat-review")
+        line.wait_for()
+        assert line.inner_text().strip() == "草稿也发到管理员微信里了：回 1 发出、2 不发、改 + 你的话"
+        tag = card.locator(".prm-wechat-tag")
+        assert tag.inner_text() == "已发到微信" and "和这里点是同一个决定" in tag.get_attribute("title")
+        shown.update(status={"on": True, "why": "", "open": 0, "unsent": 2}, told=False)
+        page.reload()
+        page.get_by_text("有 2 份试了几次都没发到微信，请在这里处理").wait_for()
+        assert card.locator(".prm-wechat-tag").count() == 0
+        shown.update(status={"on": True, "why": NO_ADMIN_WHY, "open": 0, "unsent": 0})
+        page.reload()
+        page.get_by_text("没填管理员 wxid（ADMIN_WXID）").wait_for()
+        assert "回 1 发出" not in line.inner_text()
+
     @pytest.mark.parametrize("channel", [None, "private"], ids=["no-channel", "private"])
     def test_review_page_shows_and_sends_a_private_draft_exactly_as_before(self, page, prm, channel):
         """A draft without ``channel`` (a bot from before) or for her private chat looks as it did and 发送 sends it at
