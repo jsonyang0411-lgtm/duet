@@ -143,7 +143,8 @@ def test_the_drafting_note_tells_the_shops_way_to_a_link_and_its_slot(worker):  
     note = worker.PRM_PLATFORM_NOTE
     for words in ("dy.channel_goods", "专属达人带货", "9 折取整到元", "每个颜色 100 件", "一个动作一个商品", "title_prefix",
                   "「【小美专属】」", "最多 12 个字符，汉字算 2 个", "stock_per_sku", "先只填这个商品的 dy.designated_commission",
-                  "slots 里记「专属链接前缀」", "还没说前缀就记「要」", "记成空字符串"):
+                  "slots 里记「专属链接前缀」", "还没说前缀就记「要」", "记成空字符串", "预览会说这个商品自己的上限",
+                  "不写微信、V 号、电话这些联系方式"):
         assert words in note, words
     assert "stock" not in note.replace("stock_per_sku", "")                 # the old parameter is gone
 

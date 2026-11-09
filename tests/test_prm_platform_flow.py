@@ -397,6 +397,28 @@ def test_a_preview_past_the_bots_limits_keeps_the_reply_without_the_action(bot, 
     assert bot.texts == [] and bot.prm.decide(packet["id"], "edit", "好的，我确认一下再回你～")["ok"]
 
 
+@pytest.mark.parametrize("preview, reply", [
+    (block(CHANNEL, run={"steps": ["create", "bind"]}), "您的专属链接：{链接}"),          # an old worker's: the action goes
+    (False, "计划「{计划名}」建好啦"),                                                  # the model wrote one, no action
+], ids=["link-from-an-old-worker", "plan-name-without-an-action"])
+def test_a_plain_draft_that_still_says_a_platform_placeholder_is_never_sent_as_it_is(bot, clock, preview, reply):
+    """review 2026-11-09 #4: a plain draft whose reply still says {链接} / {计划名} … (only a platform action that ran
+    fills those in) waits for a person even where its kind goes out by itself, and 「发送」 / 「改了再发」 with the
+    placeholder still in are refused saying why; once it is written out it goes."""
+    bot.prm.store.set_gate("money", "auto", clock.now)                        # a kind that goes out on its own
+    packet = drafted(bot, preview, reply=reply)
+    assert packet["tool"] == "message.send" and packet["status"] == "pending" and packet["needs_attention"]
+    out = bot.prm.decide(packet["id"], "send")
+    assert not out["ok"] and "回复里还有 {" in out["error"] and "原样发出去她会看到花括号" in out["error"]
+    out = bot.prm.decide(packet["id"], "edit", "链接在这：{链接}")
+    assert not out["ok"] and "{链接}（专属推广链接）" in out["error"]
+    bot.prm.send_approved()
+    assert bot.texts == []
+    assert bot.prm.decide(packet["id"], "edit", "我在后台弄好了马上发您～")["ok"]
+    bot.prm.send_approved()
+    assert bot.texts == [(packet["chat_id"], "我在后台弄好了马上发您～")]
+
+
 def test_a_new_preview_the_bot_does_not_take_keeps_the_old_one_and_says_why(bot):
     packet = drafted(bot, block(verdict="login"))
     assert bot.prm.decide(packet["id"], "repreview")["ok"]

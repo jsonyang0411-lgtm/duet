@@ -70,11 +70,12 @@ def test_each_action_is_normalised_and_typed():
     assert platforms.check_action({**PLAN, "commission_rate": "20.0"})["commission_rate"] == "20"
     assert platforms.check_action(CHANNEL) == {"action": "dy.channel_goods", "item_id": DY_ITEM,
                                                "creator_platform_id": DY_UID, "title_prefix": "【小美专属】",
-                                               "exclusive": True}
+                                               "exclusive": True, "convention": 1}
     assert platforms.check_action({**CHANNEL, "exclusive": False, "title_prefix": "", "price": "15",
                                    "stock_per_sku": 50}) == {
         "action": "dy.channel_goods", "item_id": DY_ITEM, "creator_platform_id": DY_UID, "exclusive": False,
-        "price": "15.00", "stock_per_sku": 50}
+        "price": "15.00", "stock_per_sku": 50, "convention": 1}
+    assert platforms.check_action(platforms.check_action(CHANNEL)) == platforms.check_action(CHANNEL)   # (round trip)
     assert platforms.check_action(XCHANNEL)["sku_prices"] == [{"sku_id": XHS_SKU, "price": "79.00"}]
     assert platforms.check_action(CAMPAIGN)["crowd_ids"] == [TB_CROWD]
 
@@ -105,7 +106,10 @@ def test_each_action_is_normalised_and_typed():
     ({**XCHANNEL, "title": "防晒霜 {链接}"}, "bad_title"),
     ({k: v for k, v in CHANNEL.items() if k != "title_prefix"}, "missing_prefix"),   # 专属: 【某某专属】
     ({**CHANNEL, "title_prefix": "  "}, "missing_prefix"),
-    ({**CHANNEL, "title_prefix": "四个字的专属"}, "bad_prefix"),          # 【】 make it 14 > 12
+    ({**CHANNEL, "title_prefix": "这是一个非常非常长的名字的专属"}, "bad_prefix"),   # 32 > TITLE_PREFIX_CAP
+    ({**CHANNEL, "title_prefix": "小美V123专属"}, "bad_prefix"),          # reads like contact details
+    ({**CHANNEL, "convention": 2}, "bad_convention"),
+    ({**CHANNEL, "convention": True}, "bad_convention"),
     ({**CHANNEL, "exclusive": "yes"}, "bad_exclusive"),
     ({**CHANNEL, "stock": 100}, "extra_param"),                         # the old parameter: stock_per_sku now
     ({**CHANNEL, "stock_per_sku": 0}, "bad_stock"),
@@ -290,16 +294,22 @@ def test_no_channel_price_without_a_daily_price_worth_a_yuan(main):
 @pytest.mark.parametrize("given, prefix", [
     ("小美专属", "【小美专属】"), ("【小美专属】", "【小美专属】"), ("  【小美专属】 ", "【小美专属】"),
     ("[小美专属]", "【小美专属】"), ("「小美专属」", "【小美专属】"), ("（小美专属）", "【小美专属】"),
-    ("【 小美专属 】", "【小美专属】"), ("三个字专属", "【三个字专属】"),          # 1 + 5 × 2 + 1 = 12: the limit
-    ("Amy专属", "【Amy专属】"), ("小美🌸", "【小美🌸】"),
+    ("【 小美专属 】", "【小美专属】"), ("三个字专属", "【三个字专属】"),          # 1 + 5 × 2 + 1 = 12: the usual limit
+    ("Amy专属", "【Amy专属】"), ("小美🌸", "【小美🌸】"), ("Vivi专属", "【Vivi专属】"),
+    ("“小美专属”", "【小美专属】"), ("‘小美专属’", "【小美专属】"), ('"小美专属"', "【小美专属】"), ("'小美专属'", "【小美专属】"),
+    ("小\u200b美专属\ufeff", "【小美专属】"), ("\u2060【小美专属】\u200e", "【小美专属】"),   # zero-width, BOM, marks go
+    ("四个字的专属", "【四个字的专属】"),          # 14: the product's own limit (12 unless its config says more) is the CLI's
 ])
 def test_a_prefix_gets_the_shops_brackets_and_fits_the_page(given, prefix):
     assert platforms.title_prefix_of(given) == prefix
-    assert platforms.title_length(prefix) <= platforms.TITLE_PREFIX_MAX
+    assert platforms.title_length(prefix) <= platforms.TITLE_PREFIX_CAP
 
 
 @pytest.mark.parametrize("given, code, words", [
-    ("四个字的专属", "bad_prefix", "是 14 个字符"), ("【四个字的专属】", "bad_prefix", "是 14 个字符"),
+    ("这是一个非常非常长的名字的专属", "bad_prefix", "是 32 个字符"), ("【这是一个非常非常长的名字的专属】", "bad_prefix", "是 32 个字符"),
+    ("小美V123专属", "bad_prefix", "像联系方式"), ("微信小美专属", "bad_prefix", "像联系方式"), ("小美vx专属", "bad_prefix", "像联系方式"),
+    ("加V专属", "bad_prefix", "像联系方式"), ("13800001111", "bad_prefix", "像联系方式"), ("小美 v:abc", "bad_prefix", "像联系方式"),
+    ("\u200b\u200b", "missing_prefix", "【某某专属】"),
     ("【小美专属", "bad_prefix", "不成对"), ("小美】专属", "bad_prefix", "不成对"),
     ("小美\n专属", "bad_prefix", "换行"), ("{链接}", "bad_prefix", "花括号"), (12, "bad_prefix", "要是文字"),
     ("", "missing_prefix", "【某某专属】"), ("【】", "missing_prefix", "【某某专属】"), ("[ ]", "missing_prefix", "【某某专属】"),
@@ -405,7 +415,8 @@ def test_the_preview_reads_the_product_works_out_the_agreement_and_previews_with
     assert block["run"] == HAT_RUN
     bound, read, agreed = node.calls()
     assert bound["argv"][1:] == ["fxg", "channel-goods-list", f"--product-id={DY_ITEM2}", f"--uid={DY_UID}"]
-    assert read["argv"][1:] == ["fxg", "channel-goods-create", f"--product-id={DY_ITEM2}", "--sale-channel=kol"]
+    assert read["argv"][1:] == ["fxg", "channel-goods-create", f"--product-id={DY_ITEM2}", "--sale-channel=kol",
+                                "--title-prefix=【小美专属】"]               # (the product's own prefix rule)
     assert agreed["argv"][1:] == ["fxg", "channel-goods-create", "--agreement=" + agreed["agreement_path"]]
     assert agreed["agreement"] == HAT_AGREEMENT
     assert agreed["agreement_mode"] == "0o600" and not os.path.exists(agreed["agreement_path"])   # removed after the run
@@ -425,7 +436,8 @@ def test_the_preview_reads_the_product_works_out_the_agreement_and_previews_with
     assert block["problems"] == []
     # what the console lists of the action: the shop's way spelled out
     params = {p["label"]: p["value"] for p in platforms.describe(block["action"])}
-    assert params["标题前缀"] == "【小美专属】（10/12 个字符，汉字算 2 个）" and "9 折" in params["渠道价（元）"]
+    assert params["标题前缀"] == "【小美专属】（10 个字符，汉字算 2 个；这个商品最多几个看预览）" and "9 折" in params["渠道价（元）"]
+    assert "convention" not in json.dumps(platforms.describe(block["action"]), ensure_ascii=False)
     assert params["每个颜色的库存（件）"].startswith("100 件") and params["有效期"] == "长期有效"
     assert params["专属达人带货"].startswith("是")
     # the bot takes the block as it is (the agreement held to the shop's way there too)
@@ -444,7 +456,7 @@ def test_a_preview_names_its_skus_when_the_draft_does(node, cfg):
                          agreed=dy_agreed_preview([(DY_SKU2, "均码黑色", "315.00", "283.00", 100, 500)], item=DY_ITEM2)))
     block = platforms.preview({**HAT, "sku_ids": [DY_SKU2]}, cfg, catalog=catalog())
     assert block["verdict"] == "ready" and [s["id"] for s in block["run"]["skus"]] == [DY_SKU2]
-    assert node.calls()[1]["argv"][-1] == f"--sku-id={DY_SKU2}"
+    assert f"--sku-id={DY_SKU2}" in node.calls()[1]["argv"]
 
 
 @pytest.mark.parametrize("read, agreed, verdict, words", [
@@ -500,11 +512,149 @@ def test_a_creator_bound_to_a_channel_product_of_it_already_gets_no_second_one(n
     assert "已下架" in out["problems"][0] and "平台没有动" in out["problems"][0]
 
 
-def test_a_list_that_cannot_be_read_does_not_stop_the_link_but_says_to_look(node, cfg):
-    node.rules(hat_rules(bound={"site": "fxg", "command": "channel-goods-list", "error": "SCHEMA_MISMATCH"}))
+BOUND_UNREAD = [
+    dict(stderr="[SCHEMA_MISMATCH] 渠道品管理 page 1: rows[0].channel_id is not an id\n", exit=1),
+    dict(stderr="[USAGE] unknown option --uid\n", exit=2),
+    dict(stdout={"site": "fxg", "command": "channel-goods-list", "error": "SCHEMA_MISMATCH"}),
+    dict(stdout={**dy_bound_list(item=DY_ITEM2), "complete": False}),
+]
+BOUND_UNREAD_IDS = ["schema-mismatch", "usage", "no-rows", "not-complete"]
+
+
+@pytest.mark.parametrize("answer", BOUND_UNREAD, ids=BOUND_UNREAD_IDS)
+def test_a_binding_check_that_cannot_be_read_stops_the_preview(node, cfg, answer):
+    """Not knowing whether she is bound is never a yes (review 2026-11-09 #1): the preview is an error, the reason is
+    among the block's problems, nothing else is read, and the bot cannot approve it."""
+    node.rules([rule(["channel-goods-list"], **answer), *hat_rules()[1:]])
     block = platforms.preview(HAT, cfg, catalog=catalog())
-    assert block["verdict"] == "ready" and len(node.calls()) == 3
-    assert any("没查成她是不是已经绑在这个商品的渠道品上" in f["value"] for f in block["steps"][0]["facts"])
+    assert block["verdict"] == "error" and len(node.calls()) == 1
+    assert any("查不到她是不是已经绑在这个商品的渠道品上" in p and "平台没有动" in p for p in block["problems"])
+    assert platforms.check_block(block)["verdict"] == "error"
+
+
+@pytest.mark.parametrize("answer", BOUND_UNREAD, ids=BOUND_UNREAD_IDS)
+def test_a_binding_check_that_cannot_be_read_at_execution_writes_nothing(node, cfg, tmp_path, answer):
+    """The review's probe: the list failed at execution and the create went on; now NOT_RUN, nothing written."""
+    node.rules([rule(["channel-goods-list"], **answer), *hat_rules(
+        rule(["channel-goods-create"], dy_create_done(item=DY_ITEM2), execute=True, agreement=True),
+        rule(["channel-goods-bind"], dy_bind_preview(), execute=False),
+        rule(["channel-goods-bind"], dy_bind_done(), execute=True))[1:]])
+    out = execute(cfg, HAT, HAT_RUN, tmp_path)
+    assert out["outcome"] == "NOT_RUN" and argvs(node, "--execute") == []
+    assert [(s["name"], s["outcome"]) for s in out["steps"]] == [("bound", "NOT_RUN")]
+    assert out["problems"][0] == "没有执行：查不到她绑没绑，平台没有动"
+
+
+def test_a_price_of_the_drafts_above_a_colours_daily_price_is_refused(node, cfg):
+    """A unified price (270) above a colour's daily price (269): not a 专属 price for it (review 2026-11-09 #5)."""
+    node.rules(hat_rules())
+    block = platforms.preview({**HAT, "price": "270"}, cfg, catalog=catalog())
+    assert block["verdict"] == "blocked" and len(node.calls()) == 2
+    assert f"SKU {DY_SKU2C}（均码米白）：动作里写的渠道价 270.00 元比这个颜色的日常价 269.00 元还高" in block["problems"]
+    fixed = platforms.check_action({**HAT, "price": "270"})
+    with pytest.raises(ActionError) as e:
+        platforms.check_plan(fixed, {**HAT_RUN, "skus": [{"id": DY_SKU2C, "price": "270.00", "stock": 1, "main_price": "269.00"}]})
+    assert "比日常价 269.00 元还高" in str(e.value)
+
+
+def test_the_products_own_prefix_rule_is_its_configs(node, cfg):
+    """The read passes the prefix: the product's own limit (title_rule.name_prefix_max_length, the CLI's prefixMax)
+    decides, not a hard 12; a product whose config requires a prefix is read with one (review 2026-11-09 #8)."""
+    long = {**HAT, "title_prefix": "四个字的专属"}                                       # 14
+    node.rules(hat_rules(read=dy_read_preview([(DY_SKU2, "均码黑色", "315.00", 500)], item=DY_ITEM2, prefix="【四个字的专属】",
+                                              blockers=["the title prefix is 14 characters long (Han characters count 2): "
+                                                        "above the page's limit of 12 for a prefix"])))
+    block = platforms.preview(long, cfg, catalog=catalog())
+    assert block["verdict"] == "blocked" and len(node.calls()) == 2
+    assert "标题前缀「【四个字的专属】」是 14 个字符（汉字算 2 个），超过这个商品的上限 12 个：少写几个字（比如名字只留两三个字）" in block["problems"]
+    wide = dict(item=DY_ITEM2, prefix="【四个字的专属】", prefix_max=20)
+    node.rules(hat_rules(read=dy_read_preview([(DY_SKU2, "均码黑色", "315.00", 500)], **wide),
+                         agreed=dy_agreed_preview([(DY_SKU2, "均码黑色", "315.00", "283.00", 100, 500)], **wide)))
+    block = platforms.preview(long, cfg, catalog=catalog())
+    assert block["verdict"] == "ready", block["problems"]
+    assert {f["label"]: f["value"] for f in block["facts"]}["标题前缀"] == "【四个字的专属】（14/20 个字符，汉字算 2 个）"
+    required = ("the platform requires a custom title prefix for this product (title_rule.name_prefix_required: the page "
+                "will not save an empty 标题前缀): give one with --title-prefix")
+    node.rules(hat_rules(read=dy_read_preview([(DY_SKU2, "均码黑色", "315.00", 500)], item=DY_ITEM2, prefix=None,
+                                              blockers=[required])))
+    block = platforms.preview({**HAT, "exclusive": False, "title_prefix": ""}, cfg, catalog=catalog())
+    assert block["verdict"] == "blocked"
+    assert any(p.startswith("这个商品要求写标题前缀（title_prefix") for p in block["problems"])
+
+
+def test_a_daily_price_that_moved_inside_the_clis_own_run_stops_before_the_bind(node, cfg, tmp_path):
+    """The look just before agreed; the CLI's own read inside the create saw another daily price: the channel product
+    is made with the approved prices, but not bound and no link goes out: PARTIAL (review 2026-11-09 #9)."""
+    made = dy_create_done(item=DY_ITEM2)
+    made["channelGoods"]["skus"] = [{"skuId": DY_SKU2, "name": "均码黑色", "mainPrice": "330.00", "channelPrice": "283.00",
+                                     "channelStock": "增 100", "assignableStock": 500},
+                                    {"skuId": DY_SKU2B, "name": "均码咖啡", "mainPrice": "290.00", "channelPrice": "261.00",
+                                     "channelStock": "增 30", "assignableStock": 30}]
+    node.rules(hat_rules(rule(["channel-goods-create"], made, execute=True, agreement=True),
+                         rule(["channel-goods-bind"], dy_bind_preview(), execute=False),
+                         rule(["channel-goods-bind"], dy_bind_done(), execute=True)))
+    out = execute(cfg, HAT, HAT_RUN, tmp_path)
+    assert out["outcome"] == "PARTIAL" and argvs(node, "channel-goods-bind") == []
+    assert out["created"]["channel_id"] == DY_CHANNEL and "link" not in out["created"]
+    assert "日常价和批准时不一样了（SKU 3100000000000000202 的日常价变了：315.00 → 330.00 元" in out["problems"][0]
+    assert "没有绑定达人、没有发链接" in out["problems"][0]
+
+
+def test_many_colours_without_stock_keep_every_price_line(node, cfg):
+    """30 colours, 25 of them with nothing to spare: one warning line names them all, so every colour's price line
+    and 「批准以后」 stay within the 40 facts the bot keeps (review 2026-11-09 #10)."""
+    rows = [(str(3100000000000000300 + i), f"色{i}", "315.00", 0 if i >= 5 else 500) for i in range(30)]
+    node.rules(hat_rules(read=dy_read_preview(rows, item=DY_ITEM2),
+                         agreed=dy_agreed_preview([(s, n, m, "283.00", 0 if a == 0 else 100, a) for s, n, m, a in rows],
+                                                  item=DY_ITEM2)))
+    block = platforms.preview(HAT, cfg, catalog=catalog())
+    assert block["verdict"] == "ready", block["problems"]
+    facts = block["facts"]
+    assert len(facts) <= 40 and facts[-1]["label"] == "批准以后"
+    assert sum(1 for f in facts if f["label"].startswith("SKU 3100")) == 30
+    [warned] = [f["value"] for f in facts if f["label"] == "提醒"]
+    assert warned.startswith("主商品这 25 个颜色没有可分的库存，渠道品里这些颜色 0 件：SKU 3100000000000000305（色5）")
+    assert len(platforms.check_block(block)["facts"]) == len(facts)
+
+
+def test_a_ten_colour_links_facts_are_few_and_whole(node, cfg):
+    """A 10-colour link (the wechat-review branch lists a draft's facts in WeChat and refuses 「执行」 when they are cut):
+    18 facts with the real CLI's three page hints (here its fake gives two: 17), one more per kind of warning."""
+    rows = [(str(3100000000000000400 + i), f"色{i}", "315.00", 500) for i in range(10)]
+    node.rules(hat_rules(read=dy_read_preview(rows, item=DY_ITEM2),
+                         agreed=dy_agreed_preview([(s, n, m, "283.00", 100, a) for s, n, m, a in rows], item=DY_ITEM2)))
+    block = platforms.preview(HAT, cfg, catalog=catalog())
+    labels = [f["label"] for f in block["facts"]]
+    assert block["verdict"] == "ready" and len(labels) == 17
+    assert labels[:4] == ["渠道类型", "标题前缀", "有效期", "SKU"] and labels[-1] == "批准以后"
+    assert labels.count("页面提示") == 2 and sum(1 for x in labels if x.startswith("SKU 3100")) == 10
+
+
+def test_an_approval_of_the_shops_way_is_refused_by_a_worker_from_before_it(node, cfg, tmp_path):
+    """review 2026-11-09 #6: an old Mac (feb20a0) must not run a new approval its old way (达人带货: price following
+    the main product, shared stock).  The new action always carries ``convention``, a key the old check refuses."""
+    import importlib.util
+
+    try:
+        old = subprocess.run(["git", "show", "feb20a0:src/prm/platforms.py"], capture_output=True, text=True, cwd=ROOT,
+                             timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        pytest.skip("no git")
+    if old.returncode != 0:
+        pytest.skip("feb20a0 is not in this checkout")
+    path = tmp_path / "platforms_feb20a0.py"
+    path.write_text(old.stdout, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("platforms_feb20a0", str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    shared = platforms.check_action({**HAT, "exclusive": False, "title_prefix": ""})
+    assert "title_prefix" not in shared and shared["convention"] == 1
+    with pytest.raises(module.ActionError) as e:
+        module.check_action(shared)
+    assert e.value.code == "extra_param" and "convention" in str(e.value)
+    out = module.execute(shared, cfg, plan={"steps": ["create", "bind"]}, key=KEY, ledger=tmp_path / "ledger",
+                         catalog=catalog())
+    assert out["outcome"] == "NOT_RUN" and node.calls() == []
 
 
 def test_the_agreement_file_is_removed_whatever_the_run_did(cfg):
@@ -1330,7 +1480,8 @@ def test_the_shops_way_to_a_channel_link_runs_on_the_macs_system_python(node, tm
     node.rules(hat_rules(rule(["channel-goods-create"], dy_create_done(item=DY_ITEM2), execute=True, agreement=True),
                          rule(["channel-goods-bind"], dy_bind_preview(), execute=False),
                          rule(["channel-goods-bind"], dy_bind_done(), execute=True)))
-    cases = [["三个字专属", "【三个字专属】"], ["四个字的专属", None], ["「小美专属」", "【小美专属】"], ["小美🌸", "【小美🌸】"]]
+    cases = [["三个字专属", "【三个字专属】"], ["这是一个非常非常长的名字的专属", None], ["「小美专属」", "【小美专属】"],
+             ["小美🌸", "【小美🌸】"], ["小美V123专属", None], ["小\u200b美专属", "【小美专属】"]]
     script = tmp_path / "smoke.py"
     script.write_text(
         "import importlib.util, json, os, sys\n"

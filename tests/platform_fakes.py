@@ -193,12 +193,12 @@ def _counted(text: str) -> int:
 
 
 def _channel_goods(sale, skus, *, item=DY_ITEM, prefix=None, blockers=(), price_kind="pass", lower=False,
-                   warnings=()) -> dict:
+                   warnings=(), prefix_max=12) -> dict:
     """``channelGoods`` of a create preview: ``skus`` are ``(sku_id, name, main_price, channel_price, channel_stock,
     assignable)`` as the CLI prints them (prices "315.00", a stock "增 100" or "shared with the main product")."""
     title = {"text": "测试贝雷帽 秋冬羊毛款", "platformPrefix": "", "counted": 21, "min": 0, "max": 60}
     if prefix:
-        title.update(prefix=prefix, prefixCounted=_counted(prefix), prefixMax=12)
+        title.update(prefix=prefix, prefixCounted=_counted(prefix), prefixMax=prefix_max)
     return {
         "saleChannel": SALE_CHANNELS[sale],
         "mainProduct": {"id": item, "channelProductsNow": 0, "perProductLimit": "300",
@@ -214,9 +214,10 @@ def _channel_goods(sale, skus, *, item=DY_ITEM, prefix=None, blockers=(), price_
         "created": None, "links": {"channelLink": None, "mainProductLink": None}, "review": None, "next": None}
 
 
-def dy_read_preview(skus, *, item=DY_ITEM, blockers=()) -> dict:
-    """What ``fxg channel-goods-create --product-id … --sale-channel=kol`` prints: the first read of a 专属链接's
-    preview (达人带货, price and stock following the main product).  ``skus`` are ``(sku_id, name, main_price,
+def dy_read_preview(skus, *, item=DY_ITEM, blockers=(), prefix="【小美专属】", prefix_max=12) -> dict:
+    """What ``fxg channel-goods-create --product-id … --sale-channel=kol [--title-prefix …]`` prints: the first read of
+    a 专属链接's preview (达人带货, price and stock following the main product; the prefix counted against the product's
+    own limit, ``prefix_max``: its config's name_prefix_max_length).  ``skus`` are ``(sku_id, name, main_price,
     assignable)``."""
     row = dy_row(item, detail=(f"blocked ({'; '.join(blockers)}); nothing would be sent" if blockers else
                                f"create a 达人带货 channel product of the main product with {len(skus)} SKU(s) "
@@ -224,11 +225,11 @@ def dy_read_preview(skus, *, item=DY_ITEM, blockers=()) -> dict:
                  currentValue="(no channel product yet)", blocked=bool(blockers))
     return dy_result("channel-goods-create", [row], channelGoods=_channel_goods(
         "kol", [(s, n, m, "follows the main product", "shared with the main product", a) for s, n, m, a in skus],
-        item=item, blockers=blockers))
+        item=item, blockers=blockers, prefix=prefix, prefix_max=prefix_max))
 
 
 def dy_agreed_preview(skus, *, item=DY_ITEM, prefix="【小美专属】", sale="kol-exclusive", blockers=(),
-                      price_kind="pass", warnings=()) -> dict:
+                      price_kind="pass", warnings=(), prefix_max=12) -> dict:
     """What ``fxg channel-goods-create --agreement=<file>`` prints without --execute.  ``skus`` are ``(sku_id, name,
     main_price, channel_price, stock, assignable)`` (``stock`` None: shared); a 9 折 price checks ``pass`` with
     ``existPriceLowerThanMain`` true (2026-11-09, the real ones)."""
@@ -238,7 +239,8 @@ def dy_agreed_preview(skus, *, item=DY_ITEM, prefix="【小美专属】", sale="
                  currentValue="(no channel product yet)", blocked=bool(blockers))
     return dy_result("channel-goods-create", [row], channelGoods=_channel_goods(
         sale, [(s, n, m, p, "shared with the main product" if c is None else f"增 {c}", a) for s, n, m, p, c, a in skus],
-        item=item, prefix=prefix, blockers=blockers, price_kind=price_kind, lower=True, warnings=warnings))
+        item=item, prefix=prefix, blockers=blockers, price_kind=price_kind, lower=True, warnings=warnings,
+        prefix_max=prefix_max))
 
 
 def dy_bound_list(*channels, item=DY_ITEM, uid=DY_UID) -> dict:
