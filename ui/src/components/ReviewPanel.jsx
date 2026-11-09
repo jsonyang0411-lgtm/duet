@@ -318,7 +318,8 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
       if (action === 'execute') await executePlatform(p.id, body)
       else if (action === 'repreview') await repreview(p.id)
       else await decide(p.id, action, body)
-      toast.ok({ drop: '这条不发了', execute: '已批准，Mac 正在平台上执行', repreview: '已请 Mac 重新预览' }[action]
+      toast.ok({ drop: '这条不发了', execute: '已批准，Mac 正在平台上执行', repreview: '已请 Mac 重新预览',
+        redraft: '在重新起草：写好的新草稿会换掉这一份' }[action]
         || (group ? '已确认，正在发到群里' : '已确认，正在发送'))
       setEditing(false)
       setDropping(false)
@@ -349,6 +350,12 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
           <div className="f-hint prm-opening-auto">给新好友的第一句话：{fmtClock(p.auto_at)} 还没人处理就照原样自动发给她（设置里的「开场白没人处理多久自动发」）；要改的话在这之前发出。</div>
         )}
         {p.status === 'pending' && p.auto_held && <div className="f-hint prm-opening-held">这份不会自动发，等你：{p.auto_held}</div>}
+        {p.status === 'pending' && p.unheard > 0 && (
+          <div className="row prm-unheard" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span className="f-hint">写好以后群里别人又说了 {p.unheard} 句，这份草稿没听到（别人说话已经自动重写过几次，不再自动重写）。</span>
+            <button type="button" className="btn sm" disabled={busy} onClick={() => act('redraft')}><ArrowClockwise />重新起草</button>
+          </div>
+        )}
         {p.intent && <div><b>{p.opening || p.huopan ? '这一条：' : '达人想要：'}</b>{p.intent}</div>}
         {!p.needs_attention && p.reason && <div className="dim"><b>依据：</b>{p.reason}</div>}
         {slots.length > 0 && (

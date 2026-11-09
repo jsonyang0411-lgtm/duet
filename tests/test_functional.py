@@ -1576,7 +1576,8 @@ class TestPrmPages:
         assert "三方群已建好" not in text and "品牌测试×小美" not in text
         assert block.locator("button:has-text('复制群名')").count() == 0 and block.locator("button:has-text('拉三方群')").count() == 0
         assert block.locator("button:has-text('群已经不在了')").count() == 1
-        assert block.locator("button:has-text('不接了')").count() == 1 and "它还是她的三方群，机器人只读" in text
+        # (PRM_BOSS_GROUPS off here: the bot would refuse 「不接了」, so there is none, 2026-11-09)
+        assert block.locator("button:has-text('不接了')").count() == 0 and "不接了" not in text
         page.locator("button[aria-label='展开 小红']").click()                    # a deal with no group: as before
         assert page.locator(".prm-group button:has-text('拉三方群')").count() == 1
 
@@ -1873,9 +1874,13 @@ class TestPrmPages:
                 if p["wxid"] == "wxid_test_red" and p.get("deal"):
                     p["deal"]["linked_groups"] = [{"chat": "test_group_33@chatroom", "name": "小红和商务的群", "at": now}]
 
+        answers = [{"ok": True, "three_party": True, "reading": True},
+                   {"ok": True, "three_party": True, "reading": False}]
+
         def deal_post(route):
             posted.append(route.request.post_data_json)
-            route.fulfill(status=200, content_type="application/json", body=json.dumps({"ok": True}))
+            answer = answers.pop(0) if answers else {"ok": True}
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(answer))
 
         self._serve_prm(page, linked)
         page.route("**/api/prm/deals", deal_post)
@@ -1891,6 +1896,9 @@ class TestPrmPages:
         block.locator("button:has-text('不接了')").click()
         page.get_by_text("记下了：这个群不接了，群里她的话不再起草；它还是她的三方群，机器人只读").wait_for()
         assert posted[-1]["action"] == "group_unlink" and "chat" not in posted[-1] and posted[-1]["deal_id"]
+        # (the bot answers it reads no group on this PC: the toast says so, not 「机器人只读」, 2026-11-09)
+        block.locator("button:has-text('不接了')").click()
+        page.get_by_text("记下了：这个群不接了，群里她的话不再起草；它还是她的三方群，这台电脑读不了群，群里的话交不到她私聊的草稿").wait_for()
         page.locator("button[aria-label='展开 小红']").click()
         line = page.locator(".prm-linked-group")
         line.wait_for()
@@ -1899,6 +1907,61 @@ class TestPrmPages:
         line.locator("button:has-text('不接了')").click()
         page.get_by_text("记下了：「小红和商务的群」不接了，群里的话不再起草").wait_for()
         assert posted[-1]["action"] == "group_unlink" and posted[-1]["chat"] == "test_group_33@chatroom"
+
+    def test_deals_page_offers_bu_jie_le_on_a_boss_group_only_with_prm_boss_groups_on(self, page, prm):
+        """The 老板拉的群 block's 「不接了」 (2026-11-09) is there while PRM_BOSS_GROUPS is on (``boss_groups.enabled``) and
+        posts the deal action ``group_unlink`` without a chat."""
+        now = prm.clock.now
+        posted = []
+
+        def boss(state):
+            state["three_party"] = {"enabled": True, "with": ["老板测试"], "why": "", "busy": None,
+                                    "name_template": "品牌测试×{昵称}"}
+            state["boss_groups"] = {**(state.get("boss_groups") or {}), "enabled": True, "why_not": "", "warning": "",
+                                    "boss": ["老板测试"], "boss_call": "老板", "pending": [], "waiting": 0, "linked": 1}
+            for p in state["parties"]:
+                if p["wxid"] == "wxid_creator01":
+                    p["deal"]["three_party"] = {"state": "created", "label": "已建好", "at": now, "by": "boss",
+                                                "why": "老板拉的群", "chat_name": "小美的测试群", "made": True}
+
+        def deal_post(route):
+            posted.append(route.request.post_data_json)
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"ok": True, "three_party": True, "reading": True}))
+
+        self._serve_prm(page, boss)
+        page.route("**/api/prm/deals", deal_post)
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.locator("button[aria-label='展开 小美']").click()
+        block = page.locator(".prm-group")
+        block.locator("button:has-text('不接了')").click()
+        page.get_by_text("记下了：这个群不接了，群里她的话不再起草；它还是她的三方群，机器人只读").wait_for()
+        assert posted[-1]["action"] == "group_unlink" and "chat" not in posted[-1]
+
+    def test_review_page_offers_a_redraft_for_a_group_draft_that_did_not_hear_the_group(self, page, prm):
+        """A group draft whose automatic redrafts reached the cap (``unheard``, 2026-11-09) says how many lines of the
+        group it did not hear, and 「重新起草」 posts the packet action ``redraft``; a draft without it has neither."""
+        posted = []
+
+        def capped(state):
+            for p in state["pending"]:
+                if p["id"] == 2:
+                    p.update(channel="group", group_name="小美合作对接群", group_manual=True, unheard=4)
+
+        def packet_post(route):
+            posted.append(route.request.post_data_json)
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"ok": True, "status": "redrafted"}))
+
+        self._serve_prm(page, capped)
+        page.route("**/api/prm/packets", packet_post)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        hint = page.locator(".prm-unheard")
+        hint.wait_for()
+        assert hint.count() == 1 and "群里别人又说了 4 句，这份草稿没听到" in hint.inner_text()
+        hint.locator("button:has-text('重新起草')").click()
+        page.get_by_text("在重新起草：写好的新草稿会换掉这一份").wait_for()
+        assert posted[-1] == {"id": 2, "action": "redraft"}
 
     def test_review_page_says_a_draft_goes_into_a_group_linked_by_hand(self, page, prm):
         """A draft for a group the admin linked by hand (``group_manual``): the tag and the question before it goes say

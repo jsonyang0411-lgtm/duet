@@ -22,8 +22,8 @@ from test_prm_boss_groups import BOSS, BOSS_ID, HELPER, ME, NAMES, Backend, make
 from src.admin import NO_GROUP_LINKS, AdminCommandHandler
 from src.prm import boss_groups as bg
 from src.prm import group_link as gl
-from src.prm.service import (GROUP_CLOSED_TEXT, GROUP_UNSENT, LINK_TAIL, REDRAFT_GAP_SEC, SETTLE_SEC,
-                              UNREACHABLE_TEXT, event_out)
+from src.prm.service import (GROUP_CLOSED_HEAD, GROUP_CLOSED_TEXT, GROUP_UNSENT, LINK_TAIL, REDRAFT_GAP_SEC,
+                              REDRAFT_MAX, SETTLE_SEC, UNREACHABLE_TEXT, event_out)
 from src.wechat.window_controller import SendRefused
 
 GROUP = "400000001@chatroom"              # a group her 商务 made with her and us
@@ -690,7 +690,7 @@ def test_the_consoles_bu_jie_le_stops_a_group_linked_to_the_deal(bot):
     assert bot.prm.deal_action("group_unlink", {"deal_id": deal_id, "chat": OTHER})["ok"] is False
     assert bot.prm.deal_action("group_unlink", {"deal_id": deal_id + 1, "chat": GROUP})["ok"] is False
     assert bot.prm.deal_action("group_unlink", {"deal_id": deal_id, "chat": GROUP}) == {
-        "ok": True, "three_party": False, "reading": False, "unsent": 0}
+        "ok": True, "three_party": False, "reading": False, "unsent": 0, "sending": 0}
     assert bot.prm.store.boss_group(GROUP)["state"] == "gone" and not bot.prm.is_party_group(GROUP)
     assert "linked_groups" not in bot.prm.snapshot()["parties"][0]["deal"]
     assert bot.prm.deal_action("group_unlink", {"deal_id": deal_id, "chat": GROUP})["ok"] is False
@@ -727,8 +727,8 @@ def test_a_draft_written_while_the_link_ends_fails_when_it_comes_back(clock, tmp
     b.finish(job["id"], draft(message_kind="faq", reply_draft="在的～", slots={}, stage_proposal="",
                               reason="kb/合作政策.md"))
     packet = b.prm.store.packet_for_job(job["id"])
-    assert (packet["status"], packet["error"]) == ("failed", GROUP_CLOSED_TEXT)
-    assert f"#{packet['id']} {GROUP_CLOSED_TEXT}" in b.prm.store.deal(packet["deal_id"])["attention"]
+    # (failed, and shown as one: not 「自动发送」, review 2026-11-09)
+    assert (packet["status"], packet["error"], packet["route"]) == ("failed", GROUP_CLOSED_TEXT, "review")
     assert b.prm.send_approved() == 0 and b.texts == []
     b.prm.stop()
     b.relay.stop()
@@ -849,7 +849,7 @@ def test_bu_jie_qun_on_a_boss_group_that_became_her_three_party_group_by_the_lin
     b.say(f"接群 {GROUP_NAME}")
     assert b.say("是 1").startswith(f"接手了：群「{GROUP_NAME}」→ 小美（已登记）")
     assert b.prm.deal_action("group_unlink", {"deal_id": deal_id}) == {"ok": True, "three_party": True,
-                                                                      "reading": True, "unsent": 0}
+                                                                      "reading": True, "unsent": 0, "sending": 0}
     assert b.prm.store.deal(deal_id)["three_party"]["by"] == "console" and GROUP in b.backend.watched
     assert b.prm.deal_action("group_unlink", {"deal_id": deal_id})["ok"] is False      # (nothing linked now)
     b.prm.stop()
@@ -879,19 +879,54 @@ def test_a_group_with_a_boss_linked_by_hand_is_told_to_her_private_drafts(clock,
     b.relay.stop()
 
 
-def test_in_a_group_linked_by_hand_only_her_recall_holds_her_drafts(bot):
+def recall(b, name, **extra):
+    """WeChat's line of a recall in the group, naming ``name``."""
+    line = f'"{name}" 撤回了一条消息'
+    return gmsg(b, line, sender="", msg_type=10000, special={"kind": "system", "title": line}, **extra)
+
+
+def held(b, packet):
+    return bool(b.prm.store.packet(packet["id"])["needs_attention"])
+
+
+def test_in_a_group_linked_by_hand_the_recall_of_somebody_else_we_know_holds_nothing(bot):
     linked(bot, member=1)
     bot.prm.handle(gmsg(bot, "在吗"))
     _, packet = drafted(bot)
-    for line in ('"测试商务" 撤回了一条消息', '"小美的商务" 撤回了一条消息'):   # (her 商务, one named like her)
-        assert bot.prm.handle(gmsg(bot, line, sender="", msg_type=10000, special={"kind": "system", "title": line}))
-    deal = bot.prm.store.deal(packet["deal_id"])
-    assert not any(n["key"] == "recall" for n in deal["notices"])
-    assert bot.prm.store.packet(packet["id"])["needs_attention"] is False
-    line = '"小美" 撤回了一条消息'
-    assert bot.prm.handle(gmsg(bot, line, sender="", msg_type=10000, special={"kind": "system", "title": line}))
-    held = bot.prm.store.packet(packet["id"])
-    assert held["status"] == "pending" and held["needs_attention"] and "撤回" in held["reason"]
+    for name in ("测试商务", "品牌同事", BOSS):                        # her 商务, a colleague, the boss
+        assert bot.prm.handle(recall(bot, name)) is True
+    assert not held(bot, packet)
+    assert not any(n["key"] == "recall" for n in bot.prm.store.deal(packet["deal_id"])["notices"])
+    assert bot.prm.handle(recall(bot, "小美")) is True
+    p = bot.prm.store.packet(packet["id"])
+    assert p["status"] == "pending" and p["needs_attention"] and "撤回" in p["reason"]
+
+
+def test_in_a_group_linked_by_hand_a_recall_under_a_name_we_do_not_know_is_hers(bot):
+    """Review 2026-11-09: her recall under her group nickname was missed (the bot knows her by another name; a 百应
+    friend's remark is 「抖音-…」): a name that is nobody else we know is taken for hers, the drafts wait for a person."""
+    linked(bot, member=1)
+    bot.prm.handle(gmsg(bot, "在吗"))
+    _, packet = drafted(bot)
+    assert bot.prm.handle(recall(bot, "美美呀")) is True
+    assert held(bot, packet)
+
+
+def test_a_recall_wechat_wrote_over_a_line_is_whoever_wrote_that_line(bot):
+    """A recall in place (the backend's ``recalled_id``: the row of the line taken back) is hers only when that line
+    was hers, whatever name it shows."""
+    linked(bot, member=1)
+    theirs = gmsg(bot, "我撤回一下", sender=BD)
+    bot.prm.handle(theirs)
+    bot.prm.handle(gmsg(bot, "在吗"))
+    _, packet = drafted(bot)
+    assert bot.prm.handle(recall(bot, "美美呀", recalled_id=theirs["message_id"])) is True
+    assert not held(bot, packet)                                      # (her 商务's line, under a name we do not know)
+    hers = gmsg(bot, "我发错了")
+    bot.prm.handle(hers)
+    _, packet = drafted(bot)
+    assert bot.prm.handle(recall(bot, "测试商务", recalled_id=hers["message_id"])) is True
+    assert held(bot, packet)
 
 
 def test_in_a_group_of_her_us_and_the_boss_any_recall_but_the_bosses_is_hers(clock, tmp_path):
@@ -985,6 +1020,255 @@ def test_a_group_the_scan_found_waiting_on_the_boss_group_card_is_chosen_there(c
     assert b.prm.boss_groups.offered() is None and b.prm.store.boss_group(BIG)["state"] == "pending"
     b.prm.boss_groups._on = False                                     # (switched off: no card, it may be asked about)
     assert b.say("接群 品牌测试大群").startswith("群「品牌测试大群」（12 人）里谁是达人？")
+    b.prm.stop()
+    b.relay.stop()
+
+
+# ── the second check (2026-11-09, after 46ef006) ───────────────────────────
+
+def test_a_reply_going_out_in_parts_stops_when_the_link_ends(clock, tmp_path):
+    """「不接群」 while a reply in two messages went out: the second went into the group all the same.  The group is
+    looked at again before each message: the rest is not sent, the card says what went out (never 「请手动补发」), no
+    notice asks to send it by hand, and the answer to 「不接群」 counts it."""
+    b = setup(clock, tmp_path, prm_reply_parts=3)
+    linked(b, member=1)
+    b.prm.handle(gmsg(b, "在吗"))
+    _, packet = drafted(b, "第一段\n\n第二段")
+    said, real = [], b.prm._send
+
+    def send(chat, text):
+        result = real(chat, text)
+        if len(b.texts) == 1:
+            said.append(b.say(f"不接群 {GROUP_NAME}"))
+        return result
+
+    b.prm._send = send
+    assert b.prm.decide(packet["id"], "send")["ok"]
+    assert b.prm.send_approved() == 0 and b.texts == [(GROUP, "第一段")]
+    p = b.prm.store.packet(packet["id"])
+    assert (p["status"], p["error"]) == ("failed", f"分 2 条发，前 1 条发出去了；{GROUP_CLOSED_HEAD}，剩下的没发")
+    assert not any(n["key"] == GROUP_UNSENT for n in b.prm.store.deal(p["deal_id"])["notices"])
+    assert said == [f"不接了：群「{GROUP_NAME}」里她的话不再起草，群里的话和别的群一样不回（小美的合作单和私聊照旧）"
+                    "；正在往群里发的 1 份不再往下发（已经发出去的留在群里）"]
+    b.prm.stop()
+    b.relay.stop()
+
+
+def test_a_reply_with_a_file_stops_before_the_file_when_the_link_ends(bot, tmp_path):
+    linked(bot, member=1)
+    bot.prm.handle(gmsg(bot, "有图吗"))
+    _, packet = drafted(bot, "发您看看")
+    picture = tmp_path / "款式.png"
+    picture.write_bytes(b"png")
+    bot.prm.store._conn.execute("UPDATE action_packets SET attachments = ? WHERE id = ?", (json.dumps(
+        [{"name": "款式.png", "path": str(picture), "size": 3, "sha256": "0" * 64}]), packet["id"]))
+    bot.prm.store._conn.commit()
+    real = bot.prm._send
+    bot.prm._send = lambda chat, text: real(chat, text) and bot.say(f"不接群 {GROUP_NAME}") is not None
+    assert bot.prm.decide(packet["id"], "send")["ok"]
+    assert bot.prm.send_approved() == 0
+    assert bot.texts == [(GROUP, "发您看看")] and bot.files == []
+    assert bot.prm.store.packet(packet["id"])["error"] == f"文字发出去了，1 个文件发出去 0 个；{GROUP_CLOSED_HEAD}，剩下的没发"
+
+
+def test_a_draft_back_after_the_link_ended_answers_nothing(bot):
+    """It failed, but it saw to her notices (a 签收后问一句's), took the lines it carried and merged its slots and stage
+    into her deal, as a reply sent would: now nothing of the deal changes, the lines it carried wait again."""
+    linked(bot, member=1)
+    deal_id = bot.prm.store.boss_group(GROUP)["deal_id"]
+    store = bot.prm.store
+    store.set_notice(deal_id, "failed:999", "聚水潭显示签收后问她一句的草稿没写成", bot.clock.now, job=999, lane="reply",
+                     signed=True, asked_at=bot.clock.now)
+    bot.prm.handle(gmsg(bot, "寄样怎么弄"))
+    first = job_of(bot)
+    bot.clock.now += SETTLE_SEC + 1
+    assert bot.relay.next_job(0, ("prm",))["id"] == first["id"]
+    bot.finish(first["id"], ok=False, text="boom")                     # no draft: her line waits
+    bot.clock.now += 5
+    bot.prm.handle(gmsg(bot, "在吗"))
+    job = job_of(bot)                                                 # (it takes the first one's line along)
+    assert next(n for n in store.deal(deal_id)["notices"] if n["key"] == f"failed:{first['id']}")["into"] == job["id"]
+    bot.clock.now += SETTLE_SEC + 1
+    assert bot.relay.next_job(0, ("prm",))["id"] == job["id"]
+    bot.say(f"不接群 {GROUP_NAME}")
+    bot.finish(job["id"], draft(message_kind="faq", reply_draft="在的～", slots={"收件人": "小美"}, stage_proposal="address",
+                                reason="kb/合作政策.md"))
+    assert store.packet_for_job(job["id"])["status"] == "failed"
+    deal = store.deal(deal_id)
+    notices = {n["key"]: n for n in deal["notices"]}
+    assert "failed:999" in notices                                    # (her 签收后问一句 not seen to)
+    carried = notices[f"failed:{first['id']}"]
+    assert carried.get("into") is None and carried["text"].endswith("她这几条消息会并进她下一条消息的草稿一起回，也可以直接在微信里回她")
+    assert not deal["slots"] and not deal["stage_proposal"]          # (nothing of it merged)
+    assert not any(GROUP_CLOSED_TEXT in n["text"] for n in deal["notices"])
+
+
+def test_a_draft_of_hers_never_goes_into_the_group_once_it_is_linked_to_another_creator(clock, tmp_path):
+    b = setup(clock, tmp_path)
+    b.prm.store.set_gate("faq", "auto", clock.now)
+    linked(b, member=1)                                               # 小美
+    b.prm.handle(gmsg(b, "在吗"))
+    job = job_of(b)
+    b.clock.now += SETTLE_SEC + 1
+    assert b.relay.next_job(0, ("prm",))["id"] == job["id"]           # her draft is being written
+    b.say(f"不接群 {GROUP_NAME}")
+    b.say("接群")
+    b.say("接群 1")
+    assert b.say("是 2").startswith(f"接手了：群「{GROUP_NAME}」→ 测试商务")   # linked again: to her 商务
+    her, bd = (b.prm.store.party_by_wxid(w)["id"] for w in (CREATOR, BD))
+    assert b.prm._group_closed(GROUP, her) == GROUP_CLOSED_TEXT and b.prm._group_closed(GROUP, bd) == ""
+    b.finish(job["id"], draft(message_kind="faq", reply_draft="在的～", slots={}, stage_proposal="",
+                              reason="kb/合作政策.md"))
+    packet = b.prm.store.packet_for_job(job["id"])
+    assert (packet["status"], packet["error"]) == ("failed", GROUP_CLOSED_TEXT)
+    assert b.prm.send_approved() == 0 and b.texts == []
+    b.prm.stop()
+    b.relay.stop()
+
+
+def test_a_platform_reply_verified_after_the_link_ended_leaves_a_notice_on_the_deal(bot):
+    """The action was done (a sample order, say), its reply cannot go into the group: the card said so, the deal
+    did not; now a ``platform:<id>`` notice says it, until 「我已处理」."""
+    from src.prm.store import EXECUTING
+
+    linked(bot, member=1)
+    bot.prm.handle(gmsg(bot, "在吗"))
+    _, packet = drafted(bot)
+    store = bot.prm.store
+    store._conn.execute("UPDATE action_packets SET status = ?, tool = 'jst.sample_order', platform = ? WHERE id = ?",
+                        (EXECUTING, json.dumps({"action": {"action": "jst.sample_order"}, "key": "k1"}), packet["id"]))
+    store._conn.commit()
+    bot.say(f"不接群 {GROUP_NAME}")
+    assert store.move(packet["id"], (EXECUTING,), "approved", decided_at=bot.clock.now)   # verified on the platform
+    assert bot.prm.send_approved() == 0 and bot.texts == []
+    p = store.packet(packet["id"])
+    want = f"平台动作已经核验成功，但回复没发出去：{GROUP_CLOSED_TEXT}；请在微信里手动发给达人"
+    assert (p["status"], p["error"]) == ("failed", want)
+    notice = next(n for n in store.deal(p["deal_id"])["notices"] if n["key"] == f"platform:{p['id']}")
+    assert notice["text"] == f"#{p['id']} {want}"
+    assert bot.prm.decide(p["id"], "ack")["ok"] is True
+    assert not any(n["key"] == f"platform:{p['id']}" for n in store.deal(p["deal_id"])["notices"])
+
+
+def chatter(b, n, start=0):
+    """``n`` lines of a colleague in the group, REDRAFT_GAP_SEC apart; how many of them had her draft drafted again (the
+    Mac writes each redraft at once)."""
+    jobs = 0
+    for i in range(start, start + n):
+        b.clock.now += REDRAFT_GAP_SEC + 1
+        b.prm.handle(gmsg(b, f"群里闲聊 {i}", sender=COLLEAGUE))
+        if job_of(b) is not None:
+            jobs += 1
+            drafted(b)
+    return jobs
+
+
+def waiting(b):
+    return [p for p in b.prm.snapshot()["pending"] if p["channel"] == "group"]
+
+
+def test_others_lines_redraft_her_waiting_draft_at_most_three_times_then_her_card_counts_them(bot):
+    """A chatty group made a Mac job every two minutes while her draft waited (about 28 an hour): now at most
+    REDRAFT_MAX, then her draft's card says how many lines it did not hear; her next line starts again."""
+    linked(bot, member=1)
+    bot.prm.handle(gmsg(bot, "在吗"))
+    drafted(bot)
+    assert chatter(bot, 6) == REDRAFT_MAX == 3
+    [card] = waiting(bot)
+    assert card["unheard"] == 3                                       # (the lines after the last redraft)
+    bot.clock.now += 5
+    bot.prm.handle(gmsg(bot, "还在吗"))                               # her line: a draft of its own
+    drafted(bot)
+    assert "unheard" not in waiting(bot)[0]
+    assert chatter(bot, 1, start=6) == 1                              # (counted from 0 again)
+
+
+def test_the_consoles_redraft_drafts_her_group_draft_again_whatever_the_cap(bot):
+    linked(bot, member=1)
+    bot.prm.handle(gmsg(bot, "在吗"))
+    drafted(bot)
+    chatter(bot, 4)
+    [card] = waiting(bot)
+    assert card["unheard"] == 1
+    assert bot.prm.decide(card["id"], "redraft") == {"ok": True, "status": "redrafted"}
+    assert bot.prm.store.packet(card["id"])["status"] == "superseded" and job_of(bot) is not None
+    drafted(bot)
+    [fresh] = waiting(bot)
+    assert "unheard" not in fresh
+    assert bot.prm.decide(card["id"], "redraft")["ok"] is False        # (not waiting any more)
+    assert chatter(bot, 1, start=4) == 1                              # (the cap counts from 0 again)
+    bot.prm.handle(bot.msg("私聊问一下"))
+    _, private = drafted(bot, chat=CREATOR)
+    assert bot.prm.decide(private["id"], "redraft") == {"ok": False, "error": "只有群里还在「待审批」等着的草稿能重新起草"}
+
+
+def test_a_group_the_scan_found_is_asked_about_here_when_the_boss_group_card_cannot_take_it(clock, tmp_path):
+    """PRM_BOSS_GROUPS on but the scan cannot run (``why_not``: no boss named): the card's buttons are off, so 「接群」
+    asks about the group itself (else it could be linked nowhere)."""
+    b = setup(clock, tmp_path, on=True, prm_group_with="")
+    assert b.prm.boss_groups.why_not()
+    b.prm.store.add_boss_group(BIG, name="品牌测试大群", found_at=clock.now, state="pending",
+                               members=[{"wxid": CREATOR, "name": "小美"}, {"wxid": TESTER, "name": "测试达人二号"}],
+                               boss=[])
+    assert "老板拉的群，在「老板拉的群」卡片里选" not in b.say("接群")
+    assert b.say("接群 2").startswith("群「品牌测试大群」（12 人）里谁是达人？")
+    assert b.prm.boss_groups.offered(BIG) is not None
+    b.prm.stop()
+    b.relay.stop()
+
+
+def test_a_job_cancelled_as_the_link_ends_gives_back_what_it_took(bot):
+    """Its lines and the records it was told (what she said while a person had her deal) were lost: now they wait for
+    her next draft job, as a job's that gave no draft."""
+    linked(bot, member=1)
+    deal_id = bot.prm.store.boss_group(GROUP)["deal_id"]
+    assert bot.prm.deal_action("mode", {"deal_id": deal_id, "mode": "human"})["ok"]
+    bot.prm.handle(gmsg(bot, "我先问问老板"))                          # a person has her deal: only recorded
+    assert bot.prm.deal_action("mode", {"deal_id": deal_id, "mode": "copilot"})["ok"]
+    bot.clock.now += 5
+    bot.prm.handle(gmsg(bot, "在吗"))
+    job = job_of(bot)
+    assert any("我先问问老板" in h["text"] for h in json.loads(job["meta"])["history"])
+    bot.say(f"不接群 {GROUP_NAME}")
+    assert bot.relay.store.get(job["id"])["status"] == "cancelled"
+    notice = next(n for n in bot.prm.store.deal(deal_id)["notices"] if n["key"] == f"failed:{job['id']}")
+    assert notice["text"].startswith(f"#{job['id']} 的草稿任务取消了（{GROUP_CLOSED_HEAD}）")
+    bot.clock.now += 5
+    bot.prm.handle(bot.msg("私聊问一下"))
+    meta = json.loads(job_of(bot, CREATOR)["meta"])
+    assert any("我先问问老板" in h["text"] for h in meta["history"])  # (given back: her next job hears it)
+
+
+def test_a_commission_step_cancelled_as_the_link_ends_says_so_and_the_chain_is_looked_at_again(bot, monkeypatch):
+    linked(bot, member=1)
+    row = bot.prm.store.boss_group(GROUP)
+    refreshed = []
+    monkeypatch.setattr(bot.prm, "_chain_refresh", lambda deal_id, now: refreshed.append(deal_id))
+    _, job_id = bot.relay.submit(GROUP, GROUP, "", kind="prm", fresh=True, meta={
+        "party_id": row["party_id"], "deal_id": row["deal_id"], "name": "小美", "system_note": "开专属佣金：测试帽子",
+        "channel": "group", "group": bot.prm.boss_groups.job_group(GROUP)})
+    bot.say(f"不接群 {GROUP_NAME}")
+    assert bot.relay.store.get(job_id)["status"] == "cancelled"
+    notice = next(n for n in bot.prm.store.deal(row["deal_id"])["notices"] if n["key"] == f"failed:{job_id}")
+    assert notice["lane"] == "system" and notice["text"].endswith("系统不会自己再起草这一步，请运营处理")
+    assert refreshed == [row["deal_id"]]
+
+
+def test_a_group_with_a_boss_linked_while_her_deal_keeps_another_three_party_group_is_not_told_as_hers(clock, tmp_path):
+    """Its lines were told to her private drafts mixed with her 三方群's: only her deal's 三方群's are told."""
+    b = setup(clock, tmp_path)
+    party = b.prm.register(CREATOR, "小美", "测试")
+    deal = b.prm.store.deal_of(party["id"])
+    b.prm.store.update_deal(deal["id"], clock.now, three_party={"state": "created", "at": clock.now, "by": "console",
+                                                                "chat": OURS, "name": "品牌测试×小美", "members": 3})
+    b.prm._group_line(party, OURS, "boss", "三方群里说的", clock.now - 30, clock.now)
+    b.backend.groups[GROUP]["members"].append(BOSS_ID)
+    b.backend.say(GROUP, BOSS_ID, "另一个群里说的", clock.now - 20)
+    assert linked(b, member=1).split("；")[-1] == "她原来的三方群保留"
+    b.prm.handle(gmsg(b, "群里又说一句", sender=BOSS_ID))
+    b.prm.handle(b.msg("私聊问一下"))
+    told = json.loads(job_of(b, CREATOR)["meta"])["three_party_chat"]
+    assert [x["text"] for x in told] == ["三方群里说的"]
     b.prm.stop()
     b.relay.stop()
 

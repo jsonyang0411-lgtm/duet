@@ -1040,6 +1040,20 @@ class PrmStore:
             self._conn.commit()
             return cur.rowcount == 1
 
+    def note_packet(self, packet_id: int, meta: dict) -> bool:
+        """``meta`` merged into the meta of a draft still waiting in 待审批 (接手任何合作群: how many lines of the group
+        it did not hear, ``unheard``).  True when it was changed."""
+        with self._lock:
+            row = self._conn.execute("SELECT meta FROM action_packets WHERE id = ? AND status = ?",
+                                     (packet_id, PENDING)).fetchone()
+            if row is None:
+                return False
+            cur = self._conn.execute("UPDATE action_packets SET meta = ? WHERE id = ? AND status = ?",
+                                     (json.dumps({**_loads(row["meta"], {}), **(meta or {})}, ensure_ascii=False),
+                                      packet_id, PENDING))
+            self._conn.commit()
+            return cur.rowcount == 1
+
     def set_outcome(self, packet_id: int, outcome: str) -> None:
         with self._lock:
             self._conn.execute("UPDATE action_packets SET outcome = ? WHERE id = ?", (outcome, packet_id))

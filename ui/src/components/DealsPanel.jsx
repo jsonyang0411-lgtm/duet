@@ -258,11 +258,12 @@ function DealDetail({ p, d, onDone }) {
   // A change made elsewhere (AI suggestion adopted, a waybill, another console) shows up here.
   useEffect(() => setStage(deal.stage), [deal.stage])
   useEffect(() => setStatus(deal.shipment?.status || 'transit'), [deal.shipment?.status])
+  // ``done``: the toast, or a function of the bot's answer that gives it (「不接了」: is the group read now)
   const run = async (body, done) => {
     setBusy(true)
     try {
-      await dealAction({ deal_id: deal.id, ...body })
-      toast.ok(done)
+      const out = await dealAction({ deal_id: deal.id, ...body })
+      toast.ok(typeof done === 'function' ? done(out || {}) : done)
       onDone()
     } catch (e) { toast.err(e.message) } finally { setBusy(false) }
   }
@@ -530,10 +531,16 @@ function ThreePartyBlock({ p, d, busy, run }) {
     <button type="button" className="btn sm ghost" disabled={busy}
       onClick={() => run({ action: 'group_none' }, '记下了：这位达人现在没有三方群')}>群已经不在了</button>
   )
+  // 「不接了」 (2026-11-09): the toast says what the bot answered (``reading``: this PC reads the group now); a 老板拉的群
+  // with PRM_BOSS_GROUPS off is not drafted in anyway (the bot would refuse): no button then
+  const unlinked = (out) => (out.reading
+    ? '记下了：这个群不接了，群里她的话不再起草；它还是她的三方群，机器人只读'
+    : '记下了：这个群不接了，群里她的话不再起草；它还是她的三方群，这台电脑读不了群，群里的话交不到她私聊的草稿')
   const unlink = (
     <button type="button" className="btn sm ghost" disabled={busy}
-      onClick={() => run({ action: 'group_unlink' }, '记下了：这个群不接了，群里她的话不再起草；它还是她的三方群，机器人只读')}>不接了</button>
+      onClick={() => run({ action: 'group_unlink' }, unlinked)}>不接了</button>
   )
+  const bossOn = !!d?.boss_groups?.enabled
   return (
     <div className="stack prm-group" style={{ gap: 6 }}>
       <b>三方群</b>
@@ -541,8 +548,8 @@ function ThreePartyBlock({ p, d, busy, run }) {
         <>
           <div><UsersThree style={{ verticalAlign: -2 }} /> 老板拉的群（{fmtClock(g.at)} 发现）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
           <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <span className="f-hint">老板把她和我们拉进了这个群，之后由我们跟她对接：她在群里说的话照常起草，回复发在群里，老板也看得到；老板和别人说的话不起草。群里的话也会交给她私聊的草稿。「不接了」：不再起草，它还是她的三方群，机器人只读。</span>
-            {unlink}
+            <span className="f-hint">老板把她和我们拉进了这个群，之后由我们跟她对接：她在群里说的话照常起草，回复发在群里，老板也看得到；老板和别人说的话不起草。群里的话也会交给她私聊的草稿。{bossOn ? '「不接了」：不再起草，它还是她的三方群，机器人只读。' : ''}</span>
+            {bossOn && unlink}
             {gone}
           </div>
         </>

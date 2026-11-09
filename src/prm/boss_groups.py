@@ -80,7 +80,7 @@ import logging
 import re
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from contextlib import nullcontext
 from typing import Callable, Optional
 
@@ -367,6 +367,7 @@ class BossGroups:
         self._hide_for: Optional[tuple] = None    # the names ``_hide_re`` was made of
         self._hide_re = None
         self._seen: dict[str, deque] = {}         # linked group -> the message ids handed on lately (``first_time``)
+        self._said: dict[str, OrderedDict] = {}   # ... -> who wrote each of them (``sender_of``: a recall in place)
         self._seen_lock = threading.Lock()
         # chat -> party id of the linked groups the bot reads and drafts in: the scan's while PRM_BOSS_GROUPS is on, the
         # ones linked by hand always (the route asks for every group message: no database look); replaced, never
@@ -439,6 +440,12 @@ class BossGroups:
                                offer=self.offered())
 
     # ── what the PRM service asks (any thread; no lock of this class is taken) ──
+
+    def linked_party(self, chat: str) -> Optional[int]:
+        """The creator a group the bot reads and drafts in now is linked to (``is_linked``), or None: a draft of another
+        creator's (the group linked again to her 商务, say) is no draft of this group's any more (PrmService
+        ``_group_closed``, review 2026-11-09)."""
+        return self._linked.get(str(chat or ""))
 
     def is_linked(self, chat: str) -> bool:
         """Is this a group the bot reads and drafts in: one the scan took over (the feature on), or one an operator
@@ -539,26 +546,29 @@ class BossGroups:
         names = {str(b.get("name") or "") for b in row.get("boss") or []} | set(self._with)
         return any(n and n in str(line or "") for n in names)
 
-    def recall_is_hers(self, row: dict, party: dict, line: str) -> bool:
+    def recall_is_hers(self, row: dict, party: dict, line: str, sender: str = "") -> bool:
         """Is one of WeChat's lines of a linked group somebody's recall (``edge.text.recall_by`` "them": not ours) that
-        is hers (PrmService ``_system_line``: her drafts not sent wait for a person)?  Never one that names a boss
-        (``boss_said``).  In a 老板拉的群 any other one, as before (she is the one there besides us and the boss).  In a
-        group linked by hand (接手任何合作群, review 2026-11-09: her 商务's recall held her drafts) only one whose name is
-        hers (as this account sees her in the group, or her 称呼; spaces and case aside), or any when nobody but her, us
-        and a boss is in it."""
-        if edge_text.recall_by(line) != "them" or self.boss_said(row, line):
+        is hers (PrmService ``_system_line``: her drafts not sent wait for a person)?  ``sender``: who wrote the line
+        WeChat took back, when it rewrote that line in place (the backend's ``recalled_id``, ``sender_of``): hers only
+        when it was hers.  Else by the name in it: never one that names a boss (``boss_said``) or another member we
+        know (as this account sees them in the group; spaces and case aside, her own name first); any other one is
+        taken for hers (review 2026-11-09: a name we do not know is most likely hers: her group nickname, a 百应
+        friend's remark 「抖音-…」).  The drafts not sent wait for a person: a recall of hers missed is the worse slip."""
+        if edge_text.recall_by(line) != "them":
             return False
-        if not row.get("manual"):
-            return True
         her = str(party.get("wxid") or "")
+        if sender:
+            return sender == her
+        if self.boss_said(row, line):
+            return False
         said = " ".join(str(line or "").split()).split(edge_text.RECALL_MARK, 1)[0]
         who = _key(said.strip().strip('"“”「」\'').strip())
-        names = {_key(m.get("name")) for m in row.get("members") or [] if m.get("wxid") == her}
-        names.add(_key(party.get("name")))
-        if who and who in names:
+        if not who:
             return True
-        bosses = self._bosses_in(row)
-        return not [m for m in row.get("members") or [] if m.get("wxid") not in bosses and m.get("wxid") != her]
+        members = row.get("members") or []
+        if who in {_key(m.get("name")) for m in members if m.get("wxid") == her} | {_key(party.get("name"))}:
+            return True
+        return who not in {_key(m.get("name")) for m in members if m.get("wxid") != her} - {""}
 
     def hide(self, text) -> str:
         """``text`` with each boss's name (PRM_GROUP_WITH: spaces and case aside) as PRM_BOSS_CALL: what goes to the Mac
@@ -702,8 +712,9 @@ class BossGroups:
         was written (the watch's catch-up hands on old lines late).  Returns how many went."""
         return self._store.boss_group_replied(chat, seqs, self._clock())
 
-    def first_time(self, chat: str, message_id) -> bool:
-        """Is this line of a linked group handed on for the first time (the route and ``_replay`` may both have it)?"""
+    def first_time(self, chat: str, message_id, sender: str = "") -> bool:
+        """Is this line of a linked group handed on for the first time (the route and ``_replay`` may both have it)?
+        ``sender``: who wrote it, kept for a recall of it (``sender_of``), the last SEEN_IDS lines."""
         key = str(message_id or "")
         if not key:
             return True
@@ -712,7 +723,18 @@ class BossGroups:
             if key in seen:
                 return False
             seen.append(key)
+            if sender:
+                said = self._said.setdefault(str(chat), OrderedDict())
+                said[key] = str(sender)
+                while len(said) > SEEN_IDS:
+                    said.popitem(last=False)
             return True
+
+    def sender_of(self, chat: str, message_id) -> str:
+        """Who wrote this line of a linked group (``first_time``), "" when it is not known (not handed on lately, or
+        before a restart): a recall WeChat wrote over it in place names its row (``recalled_id``)."""
+        with self._seen_lock:
+            return str((self._said.get(str(chat)) or {}).get(str(message_id or "")) or "")
 
     # ── the scan ──────────────────────────────────────────────────────────
 

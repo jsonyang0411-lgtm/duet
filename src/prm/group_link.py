@@ -20,8 +20,9 @@ hands the text over, ``admin_command``):
 - 「不接群 <群名>」: a linked group is not drafted in any more (PrmService.unlink_group, BossGroups ``stop``: its drafts not
   sent fail; her deal's 三方群 stays it, read only again; the console's 「不接了」 is the same).
 
-A group the scan found that waits for 「是她」 on the console's 「老板拉的群」 card (PRM_BOSS_GROUPS on) is not asked about
-here: the answer says to choose there (review 2026-11-09: two questions about one group).  「是 N」 counts only the members
+A group the scan found that waits for 「是她」 on the console's 「老板拉的群」 card (PRM_BOSS_GROUPS on, the card's buttons on:
+no ``why_not``) is not asked about here: the answer says to choose there (review 2026-11-09: two questions about one
+group).  「是 N」 counts only the members
 the question listed (MEMBERS_LISTED); more are chosen on the console's card.
 
 「是 N」 and 「不接」 are commands only while a question is open or was lately (ASKED_KEEP_SEC: then they say it expired), so
@@ -251,6 +252,8 @@ class GroupLinks:
             return f"没停：{out.get('error') or '出错了'}"
         who = f"{party['name']}的" if party else "她的"
         unsent = f"；还没发的 {out['unsent']} 份群里的草稿不发了" if out.get("unsent") else ""
+        if out.get("sending"):                         # (``_deliver`` stops before its next message, review 2026-11-09)
+            unsent += f"；正在往群里发的 {out['sending']} 份不再往下发（已经发出去的留在群里）"
         if out.get("three_party"):
             reading = ("机器人只读、不在群里说话，群里的话照旧交给她私聊的草稿" if out.get("reading") else
                        "这台电脑读不了群，群里的话交不到她私聊的草稿")
@@ -279,8 +282,10 @@ class GroupLinks:
         return " · ".join(b for b in bits if b)
 
     def _on_card(self, chat: str) -> bool:
-        """Is this a group the scan found that waits for 「是她」 on the console's 「老板拉的群」 card (PRM_BOSS_GROUPS on)?"""
-        if not self._service.boss_groups.on:
+        """Is this a group the scan found that waits for 「是她」 on the console's 「老板拉的群」 card (PRM_BOSS_GROUPS on, and
+        the card's buttons work: no ``why_not``, review 2026-11-09: else it could be linked nowhere)?"""
+        bg = self._service.boss_groups
+        if not bg.on or bg.why_not():
             return False
         row = self._service.store.boss_group(chat)
         return row is not None and row["state"] == PENDING

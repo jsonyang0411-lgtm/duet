@@ -935,7 +935,7 @@ def test_bu_jie_le_on_a_boss_group_keeps_it_her_three_party_group_read_only(bot)
     no_opening(bot)
     before = bot.prm.store.deal(deal_id)["three_party"]
     assert bot.prm.deal_action("group_unlink", {"deal_id": deal_id}) == {"ok": True, "three_party": True,
-                                                                        "reading": True, "unsent": 0}
+                                                                        "reading": True, "unsent": 0, "sending": 0}
     assert bot.prm.store.deal(deal_id)["three_party"] == {**{k: v for k, v in before.items() if k != "why"},
                                                           "by": "console"}
     row = bot.prm.store.boss_group(GROUP)
