@@ -241,6 +241,65 @@ class AGroupLinkedByHandIsTheOtherException(GatewayCase):
         assert self.jobs() == 0
 
 
+class TheDraftAnswersAreTheAdminsAlone(GatewayCase):
+    """微信里审批草稿 (PRM_WECHAT_REVIEW, src/prm/wechat_review.py): with a draft told to the admin's chat, only the
+    admin's own one-to-one chat decides it.  Every group message (an @, a cc, the admin's commands, his 「发 1」 or his
+    quote of the notification there) and every stranger's or cc user's 「发 1」 / quote stays silent and decides
+    nothing, CLAUDE_RELAY_ONLY on or off; the admin's own answer is the one that counts."""
+
+    HER = "wxid_creator01"
+
+    def review_gateway(self, relay_only=False, **extra):
+        router = self.gateway(relay_only=relay_only, **extra)
+        cfg = SimpleNamespace(admin_wxid=ADMIN, claude_relay_wxids=[], prm_copilot="on", prm_wechat_review="on",
+                              claude_relay_only="on" if relay_only else "off")     # (Bot.run: one config for both)
+        self.told = []
+        self.prm = PrmService(cfg, self.relay, store=PrmStore(":memory:"), clock=lambda: NOW,
+                              send=lambda chat, text: self.told.append((chat, text)) or True)
+        party = self.prm.register(self.HER, "小美", "测试达人")
+        deal = self.prm.store.deal_of(party["id"])
+        self.number = self.prm.store.add_packet(
+            deal_id=deal["id"], party_id=party["id"], job_id=None, chat_id=self.HER, kind="other", text="在的～",
+            attachments=[], intent="", slots={}, stage_proposal="", needs_attention=False, reason="")
+        self.prm.wechat_review.sweep()
+        [(chat, text)] = self.told
+        self.head = text.split("\n")[0]
+        assert chat == ADMIN and self.head == f"#{self.number} 草稿 · 小美 · 私聊"
+        router._prm = self.prm
+        return router
+
+    def answers(self):
+        n = self.number
+        return [dict(content="1", msg_type=49, quoted_content=self.head), dict(content=f"发 {n}"),
+                dict(content=f"改 {n} 好的老师"), dict(content=f"不发 {n}"), dict(content="1"), dict(content="好"),
+                dict(content=f"执行 {n}"), dict(content="执行", msg_type=49, quoted_content=self.head)]
+
+    def test_no_group_message_and_nobody_else_decides_a_draft(self):
+        for relay_only in (False, True):
+            router = self.review_gateway(relay_only=relay_only)
+            for i, fields in enumerate(GROUP_MESSAGES + self.answers()):
+                for sender in (ADMIN, "wxid_member"):
+                    line = {"sender_name": "某人", **fields, "sender_id": fields.get("sender_id", sender)}
+                    assert router.handle(group_msg(f"g{relay_only}{i}{sender}", **line)) is None, line
+                    assert self.trace.notes["ended_by"] == "silence", line
+            for i, fields in enumerate(self.answers()):
+                for sender in ("wxid_stranger", "wxid_helper"):
+                    assert router.handle(private_msg(f"p{relay_only}{i}{sender}", sender_id=sender, **fields)) is None
+            assert self.prm.store.packet(self.number)["status"] == "pending" and self.jobs() == 0
+            assert len(self.told) == 1                                       # (nothing more was said to anyone)
+
+    def test_the_admins_own_answer_is_the_one_that_counts(self):
+        router = self.review_gateway(relay_only=True)
+        self.prm.wechat_review.note_sent(ADMIN, self.head)                  # (the notification: the last thing said)
+        assert "#1" in router.handle(admin_msg("a0", "1"))                   # relay only: a bare 1 is Claude's task
+        assert self.prm.store.packet(self.number)["status"] == "pending" and self.jobs() == 1
+        assert router.handle(admin_msg("a1", "1", msg_type=49, quoted_content=self.head)) == (
+            f"#{self.number} 已批准，正在发给 小美")
+        assert self.trace.notes["ended_by"] == "wechat_review" and self.stored(router, "a1") == 0
+        assert self.prm.store.packet(self.number)["status"] == "approved" and self.jobs() == 1
+        assert "#2" in router.handle(admin_msg("a2", "跑一下测试"))           # every other line: as before
+
+
 class NoStrangerIsEverAnswered(GatewayCase):
     def test_a_private_chat_that_is_no_task_ends_in_silence(self):
         router = self.gateway()

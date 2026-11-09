@@ -1456,6 +1456,22 @@ def test_a_handcards_job_of_a_group_that_closes_leaves_no_records_it_was_only_to
     b.relay.stop()
 
 
+def test_a_draft_of_a_group_linked_by_hand_told_in_wechat_names_no_boss(clock, tmp_path):
+    """合并 wechat-review (2026-11-09): 微信里审批草稿 tells the admin a draft for a group linked by hand goes to that
+    group, where everybody sees it: not 「老板拉的群」 (the console and the Mac's prompt do not say it either)."""
+    b = setup(clock, tmp_path, prm_wechat_review="on")
+    linked(b, member=1)
+    b.prm.handle(gmsg(b, "这款多少钱呀"))
+    drafted(b, reply="您好～这款日常价 299 哦")
+    b.prm.wechat_review.sweep()
+    [told] = [t for chat, t in b.texts if chat == ADMIN and "草稿 ·" in t]
+    first, second = told.split("\n")[:2]
+    assert first.endswith(f"群里「{GROUP_NAME}」") and second == "（发在群里，不是她的私聊：群里的人都看得到）"
+    assert "老板" not in told
+    b.prm.stop()
+    b.relay.stop()
+
+
 @pytest.mark.parametrize("step", [False, True])
 def test_a_draft_the_mac_could_not_ask_the_bot_about_back_after_the_link_ended_is_a_closed_groups(bot, monkeypatch, step):
     """合并 channel-goods-convention 小修 (2026-11-09): the Mac left a 专属链接 out, not able to ask the bot

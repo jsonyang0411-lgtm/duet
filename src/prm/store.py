@@ -56,6 +56,13 @@
                     clock: only a group added to after the baseline is taken over by itself, review 2026-10-31 F4);
                     ``manual``: an operator linked it by hand (接手任何合作群, src/prm/group_link.py: 「接群」; it is read
                     and drafted in whatever PRM_BOSS_GROUPS says, ``found_at`` is when it was linked)
+``wechat_reviews``  微信里审批草稿 (PRM_WECHAT_REVIEW, src/prm/wechat_review.py): one row per draft told to the admin's
+                    private chat (its number is the packet's id): when, where it stands (``state``: written before the
+                    send as ``telling``), the admin's own words kept as the proposed edit (``proposed``), what was decided
+                    there (``decision``: send, edit, drop, execute), when the admin was told what came of it
+                    (``told_at``: a send that failed, a platform action's result; ``late_told_at``: its late result) and
+                    which preview a platform draft's notification showed (``preview``: its fingerprint, "" when it said
+                    it cannot run from WeChat)
 
 A packet's life: ``pending`` (waits in the console) -> ``approved`` (an operator said
 send, the kind's gate is ``auto``, or the 下班时段 window sent it: route ``night``) -> ``sending`` ->
@@ -347,6 +354,30 @@ CREATE TABLE IF NOT EXISTS boss_groups (
     joined_at REAL,
     manual INTEGER NOT NULL DEFAULT 0
 );
+-- 微信里审批草稿 (PRM_WECHAT_REVIEW, src/prm/wechat_review.py, 2026-11-09): one row per draft told to the admin's private
+-- chat (ADMIN_WXID), the number the admin answers to is the packet's id.  ``state``: telling (written before the send;
+-- left so, it may or may not have gone out: never sent again) | notified (told, the answer is awaited) | proposed (the
+-- admin wrote other text quoting it: ``proposed``, not sent; a 「1」 quoting that question sends it) | answered (decided
+-- there: ``decision`` send / edit / drop / execute).  Open while its packet is pending.  ``told_at``: the admin was told
+-- what came of a decision taken there (a send that failed, a platform action's result; ``late_told_at``: the result that
+-- came late, after the bot had given up).  ``preview``: the fingerprint of the preview a platform draft's notification
+-- showed (「执行」 runs only that one; "": it said it cannot run from WeChat).  The 8.2 clean-up drops a deal's closed
+-- rows, cuts the rest.
+CREATE TABLE IF NOT EXISTS wechat_reviews (
+    packet_id INTEGER PRIMARY KEY,
+    deal_id INTEGER NOT NULL,
+    state TEXT NOT NULL DEFAULT 'notified',
+    notified_at REAL NOT NULL,
+    proposed TEXT NOT NULL DEFAULT '',
+    proposed_at REAL,
+    decision TEXT NOT NULL DEFAULT '',
+    answered_at REAL,
+    told_at REAL,
+    preview TEXT NOT NULL DEFAULT '',
+    late_told_at REAL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS wechat_reviews_deal ON wechat_reviews(deal_id);
 """
 
 # Columns added after the first version: (table, column, type).
@@ -380,6 +411,10 @@ _ADDED_COLUMNS = (
     ("boss_groups", "joined_at", "REAL"),
     # 接手任何合作群 (2026-11-09, src/prm/group_link.py): a group an operator linked by hand
     ("boss_groups", "manual", "INTEGER NOT NULL DEFAULT 0"),
+    # 微信里审批草稿 (src/prm/wechat_review.py), its second and third rounds (2026-11-09): a table made by the first
+    ("wechat_reviews", "told_at", "REAL"),
+    ("wechat_reviews", "preview", "TEXT NOT NULL DEFAULT ''"),
+    ("wechat_reviews", "late_told_at", "REAL"),
 )
 
 # What the creators wrote, or our side's own words, waiting for the next draft job.
@@ -968,10 +1003,12 @@ class PrmStore:
             ).fetchall()
         return [packet_view(dict(r)) for r in rows]
 
-    def move(self, packet_id: int, from_states: tuple, to_state: str, **fields) -> bool:
-        """Compare-and-set: the packet goes to ``to_state`` only if it is in one of ``from_states``.
-        ``platform`` (a dict), ``attachments`` (a list) and ``meta`` (a dict) replace the packet's JSON in the same step
-        (直播手卡 out of date: 改了再发 sends the words without the cards)."""
+    def move(self, packet_id: int, from_states: tuple, to_state: str, *,
+             expect: Optional[Callable[[dict], bool]] = None, **fields) -> bool:
+        """Compare-and-set: the packet goes to ``to_state`` only if it is in one of ``from_states`` (and, with
+        ``expect``, only if its platform JSON now passes it: one step under the lock).  ``platform`` (a dict),
+        ``attachments`` (a list) and ``meta`` (a dict) replace the packet's JSON in the same step (直播手卡 out of
+        date: 改了再发 sends the words without the cards)."""
         allowed = {"final_text", "edited", "outcome", "error", "decided_at", "sent_at", "platform", "route",
                    "attachments", "meta"}
         unknown = set(fields) - allowed
@@ -985,6 +1022,12 @@ class PrmStore:
             fields["meta"] = json.dumps(fields["meta"] or {}, ensure_ascii=False)
         names = sorted(fields)
         with self._lock:
+            if expect is not None:
+                row = self._conn.execute(
+                    f"SELECT platform FROM action_packets WHERE id = ? AND status IN ({', '.join('?' * len(from_states))})",
+                    (packet_id, *from_states)).fetchone()
+                if row is None or not expect(_loads(row["platform"], {})):
+                    return False
             cur = self._conn.execute(
                 f"UPDATE action_packets SET status = ?{''.join(f', {n} = ?' for n in names)}"
                 f" WHERE id = ? AND status IN ({', '.join('?' * len(from_states))})",
@@ -1987,3 +2030,174 @@ class PrmStore:
                     changed += 1
             self._conn.commit()
         return changed
+
+    # ── 微信里审批草稿 (PRM_WECHAT_REVIEW, src/prm/wechat_review.py) ───────────
+
+    def wechat_review_due(self, since: float = 0.0, limit: int = 200) -> list[dict]:
+        """The drafts waiting for a person that were not told to the admin's chat yet, oldest first: pending since
+        ``since`` or later (``created_at``: the drafts from before the switch was first on stay the console's), no
+        ``wechat_reviews`` row, not a 百应 draft (an operator copies those into 百应).  Which of them go out by themselves
+        (开场白自动发) is the caller's to see."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT p.* FROM action_packets p LEFT JOIN wechat_reviews w ON w.packet_id = p.id"
+                " WHERE p.status = ? AND p.tool != ? AND w.packet_id IS NULL AND p.created_at >= ? ORDER BY p.id LIMIT ?",
+                (PENDING, BUYIN_TOOL, float(since), int(limit))).fetchall()
+        return [packet_view(dict(r)) for r in rows]
+
+    def wechat_review_backlog(self, before: float, limit: int = 500) -> list[dict]:
+        """The drafts waiting for a person, never told, from before ``before``: the console counts them (they stay
+        its own: the first switch-on does not flood the admin's chat)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT p.* FROM action_packets p LEFT JOIN wechat_reviews w ON w.packet_id = p.id"
+                " WHERE p.status = ? AND p.tool != ? AND w.packet_id IS NULL AND p.created_at < ? ORDER BY p.id LIMIT ?",
+                (PENDING, BUYIN_TOOL, float(before), int(limit))).fetchall()
+        return [packet_view(dict(r)) for r in rows]
+
+    def add_wechat_review(self, packet_id: int, deal_id: int, now: Optional[float] = None, *,
+                          state: str = "notified", preview: str = "") -> bool:
+        """A draft is (being) told to the admin's chat: its row in ``state`` (``telling`` before the send), with the
+        fingerprint of the preview a platform draft's notification shows; True when it had no row before."""
+        now = time.time() if now is None else now
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO wechat_reviews (packet_id, deal_id, state, notified_at, preview, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)", (int(packet_id), int(deal_id), str(state), now, str(preview or ""), now))
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def drop_wechat_review(self, packet_id: int, states: tuple) -> bool:
+        """Forget a draft's row while it is in one of ``states`` (``telling``: its send did not go out, it is told again
+        later); True when it went."""
+        with self._lock:
+            cur = self._conn.execute(
+                f"DELETE FROM wechat_reviews WHERE packet_id = ? AND state IN ({', '.join('?' * len(states))})",
+                (int(packet_id), *states))
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def wechat_review(self, packet_id: int) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM wechat_reviews WHERE packet_id = ?", (int(packet_id),)).fetchone()
+        return dict(row) if row else None
+
+    def wechat_reviews_open(self) -> list[dict]:
+        """The drafts told to the admin that still wait for the answer there (their packet pending, nothing decided in
+        WeChat; a ``telling`` one may have gone out), oldest first; each row with its packet's ``party_id``,
+        ``chat_id`` and ``tool``."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT w.*, p.party_id AS party_id, p.chat_id AS chat_id, p.tool AS tool FROM wechat_reviews w"
+                " JOIN action_packets p ON p.id = w.packet_id WHERE p.status = ?"
+                " AND w.state IN ('telling', 'notified', 'proposed') ORDER BY w.packet_id", (PENDING,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def wechat_reviews_platform(self, since: float, limit: int = 20) -> list[dict]:
+        """The told drafts with a platform action (not a plain reply, not a 百应 draft) that still wait or run on the
+        Mac, or were told, answered in WeChat, decided or ended at ``since`` or later (the later of ``decided_at`` and
+        ``sent_at``: one approved long ago whose result came now counts), for a question about 执行 in WeChat: what
+        became of them.  The ones running first, then the decided or ended ones (the latest first), then the waiting
+        ones (the newest first); each row with its packet's ``party_id`` and ``tool``."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT w.*, p.party_id AS party_id, p.tool AS tool FROM wechat_reviews w"
+                " JOIN action_packets p ON p.id = w.packet_id WHERE p.tool NOT IN (?, ?)"
+                " AND (p.status IN (?, ?) OR w.notified_at >= ? OR COALESCE(w.answered_at, 0) >= ?"
+                " OR MAX(COALESCE(p.decided_at, 0), COALESCE(p.sent_at, 0)) >= ?)"
+                " ORDER BY CASE p.status WHEN ? THEN 0 WHEN ? THEN 2 ELSE 1 END,"
+                " MAX(COALESCE(p.decided_at, 0), COALESCE(p.sent_at, 0)) DESC, w.packet_id DESC LIMIT ?",
+                (MESSAGE_TOOL, BUYIN_TOOL, PENDING, EXECUTING, float(since), float(since), float(since), EXECUTING,
+                 PENDING, int(limit))).fetchall()
+        return [dict(r) for r in rows]
+
+    def wechat_reviews_unsure(self) -> list[dict]:
+        """The rows left ``telling`` whose draft still waits: their notification may or may not have gone out (a stop, a
+        database error after the send); never sent again, the console says so."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT w.* FROM wechat_reviews w JOIN action_packets p ON p.id = w.packet_id"
+                " WHERE w.state = 'telling' AND p.status = ? ORDER BY w.packet_id", (PENDING,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def wechat_reviews_closed_since(self, since: float, but: int) -> list[int]:
+        """The told drafts (but ``but``) that stopped waiting at ``since`` or later (decided in the console, out of date,
+        dropped: their ``decided_at``, else ``sent_at``), never one the admin decided in WeChat (``answered``: the admin
+        knows of that one): a bare answer then may have meant one of them."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT w.packet_id FROM wechat_reviews w JOIN action_packets p ON p.id = w.packet_id"
+                " WHERE w.packet_id != ? AND w.state != 'answered' AND p.status != ?"
+                " AND COALESCE(p.decided_at, p.sent_at, 0) >= ?",
+                (int(but), PENDING, float(since))).fetchall()
+        return [int(r["packet_id"]) for r in rows]
+
+    def set_wechat_review(self, packet_id: int, states: tuple = (), now: Optional[float] = None, **fields) -> bool:
+        """Compare-and-set: the row's ``fields`` (state, notified_at, proposed, proposed_at, decision, answered_at,
+        told_at, late_told_at) change only while it is in one of ``states`` (any state when empty); True when it
+        changed."""
+        allowed = {"state", "notified_at", "proposed", "proposed_at", "decision", "answered_at", "told_at", "late_told_at"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"not a wechat_reviews field: {sorted(unknown)}")
+        fields["updated_at"] = time.time() if now is None else now
+        names = sorted(fields)
+        where = f" AND state IN ({', '.join('?' * len(states))})" if states else ""
+        with self._lock:
+            cur = self._conn.execute(
+                f"UPDATE wechat_reviews SET {', '.join(f'{n} = ?' for n in names)} WHERE packet_id = ?{where}",
+                (*[fields[n] for n in names], int(packet_id), *states))
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def wechat_reviews_to_tell(self) -> list[dict]:
+        """The decisions taken in WeChat whose outcome the admin was not told yet, oldest first: (``told_at`` empty) a send
+        or edit whose draft failed, an execution whose draft ended (sent, failed, dropped); (``late_told_at`` empty) an
+        execution told already whose result came late (the bot had given up: ``execution.late``).  Each row with its
+        packet's ``party_id``, ``chat_id``, ``status``, ``outcome``, ``error``, ``tool`` and ``platform``."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT w.*, p.party_id AS party_id, p.chat_id AS chat_id, p.status AS status, p.outcome AS outcome,"
+                " p.error AS error, p.tool AS tool, p.platform AS platform FROM wechat_reviews w"
+                " JOIN action_packets p ON p.id = w.packet_id WHERE w.state = 'answered' AND ("
+                "(w.told_at IS NULL AND ((w.decision IN ('send', 'edit') AND p.status = ?)"
+                " OR (w.decision = 'execute' AND p.status IN (?, ?, ?))))"
+                " OR (w.told_at IS NOT NULL AND w.late_told_at IS NULL AND w.decision = 'execute' AND p.status = ?"
+                " AND p.platform LIKE '%\"late\": true%')) ORDER BY w.packet_id",
+                (FAILED, SENT, FAILED, DROPPED, FAILED)).fetchall()
+        return [dict(r) for r in rows]
+
+    def wechat_notified(self, packet_ids) -> dict[int, float]:
+        """``{packet id: when it was told to the admin's chat}`` of these packets (the console's 「已发到微信」)."""
+        ids = [int(i) for i in packet_ids]
+        if not ids:
+            return {}
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT packet_id, notified_at FROM wechat_reviews WHERE packet_id IN ({', '.join('?' * len(ids))})",
+                ids).fetchall()
+        return {int(r["packet_id"]): float(r["notified_at"]) for r in rows}
+
+    def purge_wechat_reviews(self, deal_id: int, rewrite: Callable[[str], str], now: Optional[float] = None) -> int:
+        """8.2 clean-up of a deal (``PrmService.purge``): the rows of its drafts that no longer wait go, with what the
+        admin wrote for them; a waiting one stays (told once: never told again), its proposed edit cut by ``rewrite``.
+        Returns how many rows went or changed."""
+        now = time.time() if now is None else now
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT w.packet_id, w.proposed, p.status AS status FROM wechat_reviews w"
+                " LEFT JOIN action_packets p ON p.id = w.packet_id WHERE w.deal_id = ?", (int(deal_id),)).fetchall()
+            gone = [r["packet_id"] for r in rows if r["status"] != PENDING]
+            changed = 0
+            if gone:
+                self._conn.execute(f"DELETE FROM wechat_reviews WHERE packet_id IN ({', '.join('?' * len(gone))})",
+                                   gone)
+            for row in rows:
+                if row["status"] == PENDING and row["proposed"]:
+                    cut = rewrite(row["proposed"])
+                    if cut != row["proposed"]:
+                        self._conn.execute("UPDATE wechat_reviews SET proposed = ?, updated_at = ? WHERE packet_id = ?",
+                                           (cut, now, row["packet_id"]))
+                        changed += 1
+            self._conn.commit()
+        return len(gone) + changed

@@ -3,9 +3,10 @@
 This bot is a business WeChat account's gateway, not a chat partner.  It relays the
 allowed people's ``cc`` tasks to Claude Code on the Mac (src/relay), hands the
 registered creators' private messages to the PRM copilot or to the Mac business
-service (src/prm, src/edge), and answers the admin's account commands in a private
-chat (src/admin.py).  Each step either ends the route with ``Stop(value)`` or
-returns ``None`` to pass the message on.
+service (src/prm, src/edge), takes the admin's answers to the drafts told to the admin's
+private chat (PRM_WECHAT_REVIEW, src/prm/wechat_review.py), and answers the admin's
+account commands in a private chat (src/admin.py).  Each step either ends the route
+with ``Stop(value)`` or returns ``None`` to pass the message on.
 
 Whatever no step took ends in ``silence``: every group message, every other private
 message.  There is no model to call and no path to one, whatever the settings say.
@@ -61,6 +62,40 @@ def edge(ctx: RouteContext) -> Optional[Stop]:
     ctx.trace.redact("[已登记达人的私聊，内容不记录]")
     ctx.trace.reason("prm_edge")
     return Stop(None)
+
+
+def wechat_review(ctx: RouteContext) -> Optional[Stop]:
+    """PRM_WECHAT_REVIEW=on (微信里审批草稿, src/prm/wechat_review.py): the admin's answer to a draft notification in the
+    admin's own private chat (quoting it: 1 / 2 / 改 … / 执行; 「发 12」「不发 12」「改 12 …」「执行 12」; a bare 1 / 2 to
+    the last notification) is the draft's decision, with one reply saying what came of it.  Before ``persist`` (her
+    words quoted, a draft edited: not kept in this PC's chat archive) and before ``claude_relay`` and ``admin_command``:
+    such an answer never becomes a cc task, a relay approval or an admin command; a cc or command line is never an
+    answer.  Lines of the message that are no answer (a merged burst's cc task, say) go on to the later steps as the
+    message, after the answer's reply.  Only ADMIN_WXID in a one-to-one chat; a group, anyone else, a creator's chat,
+    and every other line of the admin pass on as before."""
+    review = getattr(getattr(ctx.router, "_prm", None), "wechat_review", None)
+    if review is None or getattr(review, "on", False) is not True:      # (the switch off: not a step at all)
+        return None
+    is_command = getattr(getattr(ctx.router, "_admin", None), "is_command", None)
+    try:
+        matched, reply, rest = review.answer(ctx.msg, is_command=is_command)
+    except Exception:
+        logger.exception("PRM: the admin's answer to a draft notification could not be handled")
+        try:
+            matched = review.claims(ctx.msg, is_command=is_command)
+        except Exception:
+            matched = False
+        reply, rest = ("处理这条草稿回复时出错了（详见日志）：请在控制台处理" if matched else None), None
+    if not matched:
+        return None
+    ctx.trace.redact("[管理员在微信里审批草稿，内容不记录]")
+    if rest is not None:                               # its other lines: the message for the later steps
+        review.tell(reply)
+        ctx.msg = {**ctx.msg, "content": rest}
+        ctx.trace.step("wechat_review")
+        return None
+    ctx.trace.reason("wechat_review")
+    return Stop(reply)
 
 
 def persist(ctx: RouteContext) -> Optional[Stop]:
@@ -160,6 +195,8 @@ def silence(ctx: RouteContext) -> Optional[Stop]:
 ROUTE_STEPS: tuple[RouteStep, ...] = (
     RouteStep("self_message", self_message, "the account's own lines are never handled"),
     RouteStep("edge", edge, "a listed creator's message goes to the Mac (PRM_EDGE), not stored, not answered"),
+    RouteStep("wechat_review", wechat_review,
+              "the admin's answer to a draft notification (PRM_WECHAT_REVIEW), private chat only, not stored"),
     RouteStep("persist", persist, "store the message; duplicates stop here"),
     RouteStep("claude_relay", claude_relay, "cc ... from an allowed private chat goes to the Mac"),
     RouteStep("prm", prm, "a registered creator's message: a silent draft job, the console decides"),

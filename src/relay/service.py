@@ -783,6 +783,11 @@ class ClaudeRelay:
     def store(self) -> RelayStore:
         return self._store
 
+    @property
+    def files_dir(self) -> Path:
+        """Where the relay keeps files: the workers' result files (``outfiles/job-<id>/``), the held attachments."""
+        return self._files_dir
+
     def mac_online(self) -> bool:
         return bool(self._last_seen) and self._clock() - self._last_seen < ONLINE_WINDOW_SEC
 

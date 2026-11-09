@@ -314,6 +314,13 @@ class BotConfig:
     # Never the admin or a cc user, never a wxid that has a party already (an operator's 停用 sticks).  "off": as before,
     # registering is a person's click in the console.
     prm_auto_register: str = "off"
+    # 微信里审批草稿 (2026-11-09, the user: away from the PC, they copied every draft into WeChat by hand): "on": every
+    # draft that waits for a person in 「待审批」 is also told once, as one message, to the admin's private chat
+    # (ADMIN_WXID; src/prm/wechat_review.py), and the admin answers there (quoting it: 1 send / 2 drop / 改 + their words;
+    # 「发 12」「不发 12」「改 12 …」), the same decision as the console's.  Never for what goes out by itself, a 百应 draft or
+    # a holding reply; a platform action only in the console.  On without ADMIN_WXID it only does nothing (the console
+    # says why).  "off" (the default): nothing of it.
+    prm_wechat_review: str = "off"
     # An operator's own WeChat reply in a creator's chat (or the console) gives the chat to
     # a person for this long: the creator's messages are only recorded meanwhile.
     prm_takeover_min: int = 120
@@ -572,6 +579,9 @@ def _validate_config(kwargs: dict) -> None:
     # turning the copilot off in a hurry must not stop the bot from starting.)
     if kwargs.get("prm_auto_register", "off") not in ("off", "on"):
         errors.append(f"PRM_AUTO_REGISTER must be off or on, got {kwargs.get('prm_auto_register')}")
+    # (on without ADMIN_WXID it only does nothing: 「待审批」 says why.  Not refused, as PRM_BOSS_GROUPS is not.)
+    if kwargs.get("prm_wechat_review", "off") not in ("off", "on"):
+        errors.append(f"PRM_WECHAT_REVIEW must be off or on, got {kwargs.get('prm_wechat_review')}")
     if not (5 <= int(kwargs.get("prm_takeover_min", 120)) <= 1440):
         errors.append(f"PRM_TAKEOVER_MIN must be between 5 and 1440, got {kwargs.get('prm_takeover_min')}")
     if not (0 <= int(kwargs.get("prm_holding_min", 10)) <= 120):
@@ -787,6 +797,7 @@ def load_config() -> BotConfig:
         "prm_copilot": _parse_switch(os.getenv("PRM_COPILOT", "off")),
         "prm_db": os.getenv("PRM_DB", "data/prm.db").strip() or "data/prm.db",
         "prm_auto_register": _parse_switch(os.getenv("PRM_AUTO_REGISTER", "off")),
+        "prm_wechat_review": _parse_switch(os.getenv("PRM_WECHAT_REVIEW", "off")),
         "prm_takeover_min": int(os.getenv("PRM_TAKEOVER_MIN", "120")),
         "prm_holding_min": int(os.getenv("PRM_HOLDING_MIN", "10")),
         "prm_holding_text": os.getenv("PRM_HOLDING_TEXT", "收到，我确认一下马上回您").strip() or "收到，我确认一下马上回您",

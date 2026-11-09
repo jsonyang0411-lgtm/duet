@@ -131,6 +131,7 @@ from .friend_adds import OPEN as FRIEND_ADD_OPEN, STATES as FRIEND_ADD_STATES, F
 from .group_link import GroupLinks
 from .result import MAX_DRAFT_CHARS, MESSAGE_KINDS, PLATFORM_UNASKED, DraftError, parse_draft
 from .three_party import EVENT as GROUP_EVENT, TAKEN_BY as GROUP_TAKEN_BY, ThreeParty, state_out as group_state_out
+from .wechat_review import WechatReview, preview_stamp
 from .store import (
     APPROVED, BUYIN_TOOL, COPILOT, DRAFT_NOTES, DROPPED, EXECUTING, FAILED, HUMAN, LANE_BUYIN, LANE_REPLY, LANE_SYSTEM,
     DRAFT_NOTE_CHARS, MESSAGE_TOOL, MODES, NO_REPLY, NOTICE_CHARS, PAUSED, PENDING,
@@ -211,6 +212,15 @@ LINES_CHARS = 6000           # the creator's lines a notice of a draft not writt
 OWN_FILE_EARLY_SEC = 60      # a file the bot sent shows in WeChat up to this long before its send returns
 # A draft the bot was stopped in the middle of sending (``start``), and what it says once its text was read back
 UNSURE_ERROR = "发送时机器人停了，不确定发出去没有；请到微信里看一眼，需要就手动补发"
+# 批准并执行 refused (_approve_execute): the preview changed since it was read (or since the admin was shown it), a 重新预览
+# started meanwhile; a job the relay certainly did not queue (the draft waits again; an edited reply is kept for the
+# console's 「改了再执行」), one it is not known whether the relay queued (red as a result not known, its key kept: a late
+# result is marked late; never 「再批准一次」)
+PREVIEW_CHANGED = "预览刚刚变过（重新预览了）：请看了新的预览再批准"
+PREVIEWING = "正在重新预览，等结果出来再批准"
+QUEUE_FAILED = "没能排进 Mac 的任务队列，平台没有动：可以再批准一次"
+QUEUE_UNKNOWN = "排进 Mac 的任务队列时出了错，不知道排进去没有：平台上可能已经写了，请先到平台后台核对，别再批准一次"
+QUEUE_UNKNOWN_PROBLEM = "排进 Mac 的任务队列时出了错，不知道排进去没有"
 UNSURE_TEXT_SEEN = ("发送时机器人停了：文字已经发出去了（微信里读到了），素材文件不确定发出去没有；"
                     "请到微信里看一眼，需要就手动补发文件")
 # This PC's clock against WeChat's (win review F6): measured when the bot's own line is read back
@@ -1077,6 +1087,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
                                      "chat": str(n["key"])[len(GROUP_LEFT):], "text": n["text"], "at": n.get("at")})
     pending = list(reversed(store.packets((PENDING, EXECUTING, APPROVED, SENDING), limit=200)))
     recent = store.packets((SENT, FAILED, DROPPED, SUPERSEDED, NO_REPLY), limit=limit)
+    told = store.wechat_notified(p["id"] for p in pending)     # 微信里审批草稿: when each was told to the admin's chat
     shown_cache: dict[int, dict] = {}
     # 老板拉的群 (src/prm/boss_groups.py): the creators a boss introduced in a group the bot took over (「老板介绍」, also
     # once the group is gone); a group linked by hand (接手任何合作群) is no introduction
@@ -1127,6 +1138,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
             # ... the group's lines her waiting draft did not hear (REDRAFT_MAX automatic redrafts done)
             **({"unheard": int(p["meta"]["unheard"])} if isinstance(p["meta"].get("unheard"), int)
                and p["meta"]["unheard"] > 0 else {}),
+            "wechat_at": told.get(p["id"]),
         }
 
     def unanswered(deal: dict) -> bool:
@@ -1554,6 +1566,14 @@ class PrmService:
         # pause(sec) between two messages of a reply: True when the bot is stopping (the rest of it is not sent)
         self._pause = pause if pause is not None else self._stopping.wait
         self._thread: Optional[threading.Thread] = None
+        # 微信里审批草稿 (PRM_WECHAT_REVIEW, default off; src/prm/wechat_review.py): the drafts waiting for a person told to
+        # the admin's private chat (the sender thread, ``tick``), the admin's answers there (the route step wechat_review)
+        self.wechat_review = WechatReview(
+            self._store, config, clock=clock, send=send, send_file=send_file, decide=self.decide,
+            check=self.edit_problem, lines=self._packet_lines, parts=lambda text: len(reply_parts(text, self._reply_parts)),
+            aim=lambda packet: self._aim(packet, wait=True), relay_store=relay.store, local=self._local,
+            skew=self._clock_low, written=written_state, files_root=getattr(relay, "files_dir", None),
+            opening_auto=self._opening_auto_sec > 0)
         relay.register_kind(PRM, self.on_result)
 
     @property
@@ -1650,6 +1670,12 @@ class PrmService:
         """When WeChat says something was written, on this PC's clock (``_skew``, what this run measured;
         nothing before it measured anything)."""
         return written + self._skew if written else written
+
+    def _clock_low(self) -> Optional[float]:
+        """This PC's clock against WeChat's as this run measured it, below CLOCK_NOISE_SEC too (the smallest sample: this
+        PC's time minus WeChat's), or None while nothing was measured (微信里审批草稿's bare answers)."""
+        with self._sent_lock:
+            return min(self._clock_samples) if self._clock_samples else None
 
     @staticmethod
     def _clock_sample(msg: dict, noted: float, now: float) -> Optional[float]:
@@ -2736,10 +2762,11 @@ class PrmService:
         return (packet.get("job_id") is None or meta.get("lane") == LANE_SYSTEM or bool(meta.get(OPENING))
                 or bool(meta.get(HUOPAN)) or bool(meta.get(SIGNED)) or bool((meta.get(HANDCARDS) or {}).get("console")))
 
-    def _aim(self, packet: Optional[dict]) -> Optional[dict]:
+    def _aim(self, packet: Optional[dict], *, wait: bool = False) -> Optional[dict]:
         """A packet the bot started itself still aimed at her private chat, for a creator with a 老板拉的群: where she can
         be reached (``_reach``): the group (its chat, the console's tag), or nowhere: it fails, nothing is sent, the deal
-        says so (``UNREACHABLE``).  Returns the packet as it is now (None: failed so)."""
+        says so (``UNREACHABLE``).  Returns the packet as it is now (None: failed so).  ``wait`` (微信里审批草稿, before a
+        draft is told: it says where it goes): reached nowhere, nothing is changed and None comes back (told later)."""
         if packet is None or not self._bot_started(packet) or is_buyin(packet):
             return packet
         party = self._store.party(packet["party_id"])
@@ -2749,6 +2776,8 @@ class PrmService:
         if chat == party["wxid"]:
             return packet
         now = self._clock()
+        if chat is None and wait:
+            return None
         if chat is None:
             self._store.move(packet["id"], (PENDING, APPROVED, SENDING), FAILED, outcome="failed", sent_at=now,
                              error=f"{UNREACHABLE_TEXT}，没有发")
@@ -5018,12 +5047,13 @@ class PrmService:
     def reveal(self, party_id: int, actor: str = "console") -> dict:
         return reveal_numbers(self._store, int(party_id), now=self._clock(), actor=actor)
 
-    def decide(self, packet_id: int, action: str, text: Optional[str] = None) -> dict:
+    def decide(self, packet_id: int, action: str, text: Optional[str] = None, *, stamp: Optional[str] = None) -> dict:
         """An operator's choice: send | edit (send ``text``) | drop a pending draft, redraft (a group draft waiting:
         「重新起草」, ``_redraft_by_hand``), or
         wrong (a sent one should not have gone out: its kind is reviewed again, from zero; one the night
         window or 自动模式 sent the same, its record says so).  A 抖音百应 draft (``BUYIN_TOOL``) has its own: copy |
-        manual_sent | drop (``_decide_buyin``); copy / manual_sent are refused for any other draft."""
+        manual_sent | drop (``_decide_buyin``); copy / manual_sent are refused for any other draft.  ``stamp`` (execute,
+        微信里审批草稿): the fingerprint of the preview the admin was shown (``preview_stamp``): only that one runs."""
         packet = self._store.packet(int(packet_id))
         if packet is None:
             return {"ok": False, "error": f"没有找到草稿 {packet_id}"}
@@ -5051,7 +5081,7 @@ class PrmService:
             self._chain_decided(packet, now)          # 「不发」 a product: the next one is asked for (mac review F5)
             return {"ok": True, "status": DROPPED}
         if action == "execute":
-            return self._approve_execute(packet, text, now)
+            return self._approve_execute(packet, text, now, stamp=stamp)
         if action == "repreview":
             return self._repreview(packet, now)
         if action == "ack":
@@ -5075,20 +5105,9 @@ class PrmService:
         if cards_failed(packet) and final == packet["text"]:
             # 直播手卡 not made: its words (「手卡整理好啦」) cannot go out as they are, without the cards
             return {"ok": False, "error": CARDS_FAILED_TEXT}
-        if len(final) > MAX_DRAFT_CHARS:
-            return {"ok": False, "error": f"最多 {MAX_DRAFT_CHARS} 个字"}
-        if not final and not attachments:
-            return {"ok": False, "error": "没有要发的内容"}
-        unfilled = unfilled_placeholders(final)
-        if unfilled:
-            return {"ok": False, "error": unfilled_text(unfilled)}
-        unknown = pii.unknown_tokens(final, self._store.tokens(packet["party_id"]))
-        if unknown:
-            return {"ok": False, "error": f"草稿里有对不上的占位符：{'、'.join(unknown)}"}
-        if packet["kind"] == "shipping_notice":
-            waybill = self._waybill(packet)
-            if not gates.waybill_ok(final, waybill, _more_waybills(packet)):
-                return {"ok": False, "error": f"发货通知里的单号和系统记录对不上（系统记录：{waybill or '还没有运单号'}）"}
+        problem = self.edit_problem(packet, final, attachments=attachments)
+        if problem:
+            return {"ok": False, "error": problem}
         if self._send is None:
             return {"ok": False, "error": "机器人没有连着微信，现在不能发送"}
         if attachments and self._send_file is None:
@@ -5109,6 +5128,34 @@ class PrmService:
         if is_group_packet(packet) and packet.get("job_id") is not None and meta.get("lane") != LANE_SYSTEM:
             self._reset_redrafts(str(packet["chat_id"]))
 
+    def edit_problem(self, packet: dict, text: str, attachments: Optional[list] = None) -> str:
+        """Why ``text`` cannot go out as this draft ("" when it can): longer than MAX_DRAFT_CHARS, nothing to send, a
+        platform placeholder no action fills in ({链接} …, ``unfilled_placeholders``), a placeholder she has no number
+        for, a shipping notice whose waybill is not the system's.  ``decide``'s checks of what is sent (the console's
+        改了再发), and 微信里审批草稿's of a proposed edit (src/prm/wechat_review.py).  ``attachments``: the files that
+        would go with it (``decide``: out-of-date 直播手卡 left out), the draft's own when None."""
+        if len(text) > MAX_DRAFT_CHARS:
+            return f"最多 {MAX_DRAFT_CHARS} 个字"
+        if not text and not (packet["attachments"] if attachments is None else attachments):
+            return "没有要发的内容"
+        unfilled = unfilled_placeholders(text)
+        if unfilled:
+            return unfilled_text(unfilled)
+        unknown = pii.unknown_tokens(text, self._store.tokens(packet["party_id"]))
+        if unknown:
+            return f"草稿里有对不上的占位符：{'、'.join(unknown)}"
+        if packet["kind"] == "shipping_notice":
+            waybill = self._waybill(packet)
+            if not gates.waybill_ok(text, waybill, _more_waybills(packet)):
+                return f"发货通知里的单号和系统记录对不上（系统记录：{waybill or '还没有运单号'}）"
+        return ""
+
+    def _packet_lines(self, packet: dict) -> str:
+        """Her lines a draft answers (微信里审批草稿's notification): its job's text and follow-ups (``_job_lines``); ""
+        for a draft of no job (a shipping notice) or one whose job is gone."""
+        job = self._relay.store.get(int(packet["job_id"])) if packet.get("job_id") is not None else None
+        return self._job_lines(job) if job is not None else ""
+
     def _person_decided(self, packet: dict, now: float) -> None:
         """An operator decided on a draft answering her: her recall (the draft said so) is seen to.  Not by a 百应
         draft's decision (her recall was in WeChat; ``_decide_buyin`` never comes here)."""
@@ -5119,19 +5166,28 @@ class PrmService:
 
     # ── platform actions (platforms.py; the CLIs run on the Mac) ───────────
 
-    def _approve_execute(self, packet: dict, text: Optional[str], now: float) -> dict:
+    def _approve_execute(self, packet: dict, text: Optional[str], now: float, *, stamp: Optional[str] = None) -> dict:
         """批准并执行: the action goes to the Mac once (an approval key), the reply waits for
         its read-back.  The checks of a reply (length, placeholders, can it be sent) come
-        first: a platform write whose reply could not go out is not started."""
+        first: a platform write whose reply could not go out is not started.  The move to executing happens only
+        while the draft's platform data is what these checks read (a 重新预览 landing in between: refused, it is
+        looked at again; ``_same_json``); with ``stamp`` (微信里审批草稿) only while its preview is the one the admin was
+        shown.  ``text`` None: the draft as drafted (what the console and the notification show).  When the relay
+        raises while queueing the job, whether it is there decides (``_job_queued``): there, it runs as approved;
+        certainly not there, the draft waits again (the platform did not move: approve it again), an edited reply kept
+        in ``final_text`` for the console's 「改了再执行」 box; not known, the draft is red as a result not known, its
+        key kept (a late result is marked late), never to be approved again unchecked."""
         if packet.get("tool", MESSAGE_TOOL) == MESSAGE_TOOL:
             return {"ok": False, "error": "这条草稿没有平台动作"}
         data = packet["platform"]
         action, preview = data.get("action"), data.get("preview") or {}
+        if stamp is not None and preview_stamp(preview) != stamp:
+            return {"ok": False, "error": PREVIEW_CHANGED, "code": "preview_changed"}
         if not action or preview.get("verdict") != "ready":
             why = "；".join(preview.get("problems") or []) or platforms.VERDICTS.get(preview.get("verdict"), "")
             return {"ok": False, "error": f"预览没通过，不能执行：{why}"}
         if data.get("previewing"):
-            return {"ok": False, "error": "正在重新预览，等结果出来再批准"}
+            return {"ok": False, "error": PREVIEWING, "code": "previewing"}
         if action.get("action") == LINK_ACTION:
             # a step of the chain binds its round's sample order's UID (``meta.chain_uid``): another is not run; any
             # other link draft was flagged when it came if its UID is none of hers (``_link_doubts``: she may have two
@@ -5170,14 +5226,20 @@ class PrmService:
         approved = {**data, "key": uuid.uuid4().hex, "approved_at": now}
         with self._approve_lock:              # two drafts of one product approved at the same moment: one runs
             opened, unsure = self._opened_before(packet)
+            # (the platform data as read above: a 重新预览 landing meanwhile is not run unseen)
             moved = not opened and self._store.move(
-                packet["id"], (PENDING,), EXECUTING, decided_at=now, final_text=final,
-                edited=int(final != packet["text"]), platform=approved)
+                packet["id"], (PENDING,), EXECUTING, expect=lambda current: _same_json(current, data), decided_at=now,
+                final_text=final, edited=int(final != packet["text"]), platform=approved)
         if opened:
             if unsure:
                 self._ask_recheck(packet, unsure, now)
             return {"ok": False, "error": opened}
         if not moved:
+            fresh = self._store.packet(packet["id"]) or {}
+            if fresh.get("status") == PENDING:
+                if (fresh.get("platform") or {}).get("previewing"):
+                    return {"ok": False, "error": PREVIEWING, "code": "previewing"}
+                return {"ok": False, "error": PREVIEW_CHANGED, "code": "preview_changed"}
             return {"ok": False, "error": "这条草稿已经处理过了（或者达人又发了新消息，草稿已过时）"}
         meta = {"op": "platform_execute", "party_id": packet["party_id"], "deal_id": packet["deal_id"],
                 "packet_id": packet["id"], "key": approved["key"], "action": mac_action, "run": preview.get("run") or {}}
@@ -5191,11 +5253,21 @@ class PrmService:
         try:
             _, job_id = self._relay.submit(packet["chat_id"], packet["chat_id"], "", kind=PRM, meta=meta,
                                            fresh=True, input_closed=True)
-        except Exception as e:
-            logger.exception("PRM: packet %d could not be queued for the Mac", packet["id"])
-            self._store.move(packet["id"], (EXECUTING,), FAILED, outcome="platform_not_run", sent_at=now,
-                             error=f"没能排进 Mac 的任务队列，平台没有动：{e}"[:300])
-            return {"ok": False, "error": "没能排进 Mac 的任务队列，平台没有动"}
+        except Exception:
+            logger.exception("PRM: packet %d: its execution could not be queued for the Mac", packet["id"])
+            queued, job_id = self._job_queued(approved["key"])
+            if queued is None:                       # (not known: it may run; red, its key kept)
+                current = self._store.packet(packet["id"])
+                if current is not None and current["status"] == EXECUTING:
+                    self._platform_finished(current, platforms.record("UNKNOWN", [QUEUE_UNKNOWN_PROBLEM]), now)
+                return {"ok": False, "error": QUEUE_UNKNOWN, "code": "queue_unknown"}
+            if not queued:                           # (nothing was queued, nothing ran: it can be approved again)
+                edited = final != packet["text"]
+                self._store.move(packet["id"], (EXECUTING,), PENDING, decided_at=None,
+                                 final_text=final if edited else None, edited=int(edited), platform=data)
+                return {"ok": False, "error": QUEUE_FAILED, "code": "queue_failed"}
+            logger.warning("PRM: packet %d: its execution is queued as job #%d all the same (what failed came after)",
+                           packet["id"], job_id)
         self._store.set_platform(packet["id"], {**approved, "job_id": job_id}, (EXECUTING,))
         self._store.add_event(packet["deal_id"], packet["party_id"], "platform_execute",
                               {"packet": packet["id"], "action": action["action"], "job": job_id},
@@ -5205,6 +5277,18 @@ class PrmService:
             self._chain_refresh(packet["deal_id"], now)        # (that product is running now)
         logger.info("PRM: packet %d approved; %s goes to the Mac as job #%d", packet["id"], action["action"], job_id)
         return {"ok": True, "status": EXECUTING, "job": job_id}
+
+    def _job_queued(self, key: str) -> tuple:
+        """After the relay raised while queueing the execution of approval ``key``: is its job there all the same?
+        ``(True, job id)``: it is (what failed came after it was written: it runs); ``(False, None)``: it is not (the
+        relay store rolls a failed write back, so nothing hands it to the Mac later); ``(None, None)``: not known (the
+        jobs could not be looked up)."""
+        try:
+            job = self._relay.store.job_with_key(key)
+        except Exception:
+            logger.exception("PRM: the relay's jobs could not be looked up after a failed queueing")
+            return None, None
+        return (True, int(job["id"])) if job is not None else (False, None)
 
     def _opened_before(self, packet: dict) -> tuple:
         """``(why, unsure)``: why this draft's 专属 action (``ONCE_ACTIONS``) must not run ("" = it may), and the
@@ -7075,6 +7159,7 @@ class PrmService:
             "opening_auto_min": self._opening_auto_sec // 60,
             "hand_samples_problem": self._hand_problem if self._sample_sync_sec > 0 else "",
             "handcards": self._handcards,
+            "wechat_review": self.wechat_review.status(),
         })
 
     # ── the sender thread: approved drafts, holding replies, clean-ups ────
@@ -7095,6 +7180,10 @@ class PrmService:
         self.sweep_executing()
         self.send_due_openings()
         self.send_approved()
+        try:                                           # PRM_WECHAT_REVIEW: the drafts waiting told to the admin's chat
+            self.wechat_review.sweep()
+        except Exception:
+            logger.exception("PRM: telling the admin's chat of the drafts failed; tried again next round")
         self.send_holding_replies()
         self.sweep_owed_steps()
         self.sweep_deliveries()
@@ -7479,6 +7568,8 @@ class PrmService:
         if boss_chats:                                 # 老板拉的群: the names in its row and record, its lines kept
             counts["boss_groups"] = self.boss_groups.purge(deal)
         counts["drafts"] = self._store.rewrite_packets(deal["id"], rewrite)
+        # 微信里审批草稿: the rows of her drafts told to the admin (what the admin wrote for them), with her drafts
+        counts["wechat_reviews"] = self._store.purge_wechat_reviews(deal["id"], rewrite, now)
         counts["events"] = self._store.rewrite_events(deal["id"], rewrite)
         counts["notices"] = self._store.rewrite_notices(deal["id"], rewrite)
         # 聚水潭's words for a rejected or deleted order ("地址不全…"): kept with the order and in the sync's answers
@@ -7779,6 +7870,14 @@ def order_items(action: dict) -> list:
 
 # The results of an execution that wrote nothing on the platform, when no step of it wrote either.
 NOT_WRITTEN = ("FAILED", "STATE_CONFLICT", "NOT_RUN")
+
+
+def _same_json(a, b) -> bool:
+    """Two JSON values the same, key order aside, a NaN the same as a NaN (as ``preview_stamp`` reads them: a preview
+    with a NaN in it is never 「changed」 by being read twice)."""
+    def dump(value) -> str:
+        return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+    return dump(a) == dump(b)
 
 
 def written_state(execution: Optional[dict], packet_outcome: str = "") -> str:

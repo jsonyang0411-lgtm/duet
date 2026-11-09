@@ -229,6 +229,23 @@ class AdvancedPostTests(_TempEnv):
                                                "PRM_BOSS_CALL": "大老板"}, {}), {})
         self.assertEqual(adv.normalize("PRM_BOSS_CALL", ""), "老板")             # (empty: the default)
 
+    def test_wechat_review_is_shown_after_auto_register_off_by_default(self):
+        """PRM_WECHAT_REVIEW (微信里审批草稿, src/prm/wechat_review.py, 2026-11-09): an on/off switch right after
+        PRM_AUTO_REGISTER, off by default, used with the copilot on; a bad value is refused on its own field; on without
+        ADMIN_WXID is not refused (待审批 says why)."""
+        from src.web import advanced_config as adv
+
+        groups = _request("/api/advanced")[1]["groups"]
+        prm = next(g for g in groups if g["id"] == "prm")
+        keys = [f["key"] for f in prm["fields"]]
+        self.assertEqual(keys.index("PRM_WECHAT_REVIEW"), keys.index("PRM_AUTO_REGISTER") + 1)
+        field = next(f for f in prm["fields"] if f["key"] == "PRM_WECHAT_REVIEW")
+        self.assertEqual((field["type"], field["value"], field["requires"][0]["key"]), ("onoff", "off", "PRM_COPILOT"))
+        status, body = _request("/api/advanced", "POST", {"values": {"PRM_WECHAT_REVIEW": "maybe"}})
+        self.assertFalse(body["ok"])
+        self.assertEqual(list(body["errors"]), ["PRM_WECHAT_REVIEW"], body)
+        self.assertEqual(adv.validate_updates({"PRM_WECHAT_REVIEW": "on", "ADMIN_WXID": ""}, {}), {})
+
     def test_the_remark_can_be_saved_empty_and_stays_empty(self):
         """PRM_FRIEND_ADD_REMARK (加百应达人微信, 功能 R): unset shows the default; saved empty it stays empty (no remark),
         where any other empty text field would be its default; a bad one is refused on its own field."""

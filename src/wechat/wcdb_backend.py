@@ -571,6 +571,10 @@ class WcdbBackend(AbstractWeChatBackend):
         # and who hears this account's own lines there (an operator's hand-typed reply).
         self._private_filter = None
         self._own_message_hook = None
+        # 微信里审批草稿 (PRM_WECHAT_REVIEW): who hears each text the bot sent (``set_sent_hook``) and each line of this
+        # account's read back from a private chat with WeChat's time (``set_read_back_hook``)
+        self._sent_hook = None
+        self._read_back_hook = None
         self._db_failures = 0          # database reads failed in a row (the WeChat edge's state)
         # This poll cycle's chat reads: [made, answered with an error code] (_read_messages); every one
         # failing is a failed read of the database (_poll_cycle).  And the chats whose reads fail while
@@ -823,7 +827,9 @@ class WcdbBackend(AbstractWeChatBackend):
             return refused
 
         with self._window_lock:
-            return self._send_and_confirm(chat_name, chat_id, content)
+            sent = self._send_and_confirm(chat_name, chat_id, content)
+            self._tell_sent(chat_id, content, sent)      # (in the lock: the hook hears the sends in their order)
+        return sent
 
     def send_file(self, chat_id: str, path: str) -> bool:
         """Send a file into a chat (pasted, like a sticker): the Claude relay's long results, PRM's and
@@ -1382,6 +1388,37 @@ class WcdbBackend(AbstractWeChatBackend):
         """``hook(msg)`` hears this account's own lines in the private chats the filter wants
         (PRM_COPILOT: a registered creator's chat, where an operator may reply by hand)."""
         self._own_message_hook = hook
+
+    def set_sent_hook(self, hook) -> None:
+        """``hook(chat_id, text)`` hears each text the bot sent (``send_text``: the relay's, PRM's; a route reply's
+        bubbles), once WeChat took it, in the order sent (under the window lock): 微信里审批草稿 (PRM_WECHAT_REVIEW) keeps
+        the last thing the bot said in the admin's chat (src/prm/wechat_review.py ``note_sent``).  Files are not told."""
+        self._sent_hook = hook
+
+    def _tell_sent(self, chat_id: str, text: str, sent) -> None:
+        hook = self._sent_hook
+        if hook is None or not sent:
+            return
+        try:
+            hook(str(chat_id or ""), str(text or ""))
+        except Exception:
+            logger.exception("The sent hook failed; sending goes on")
+
+    def set_read_back_hook(self, hook) -> None:
+        """``hook(chat_id, text, written)`` hears each text line of this account's own read back from a private chat the
+        poll reads (``_poll_group``), with WeChat's time (``written``): 微信里审批草稿 learns when WeChat shows its
+        notification (src/prm/wechat_review.py ``note_read_back``: a bare 「1」 written after it, on WeChat's clock)."""
+        self._read_back_hook = hook
+
+    def _tell_read_back(self, standardized: dict) -> None:
+        hook = getattr(self, "_read_back_hook", None)
+        if hook is None or standardized.get("is_group", True) or int(standardized.get("msg_type", 1) or 1) != 1:
+            return
+        try:
+            hook(str(standardized.get("chat_id") or ""), str(standardized.get("content") or ""),
+                 float(standardized.get("timestamp") or 0))
+        except Exception:
+            logger.exception("The read-back hook failed; polling goes on")
 
     def own_wxid(self) -> str:
         """This WeChat account's wxid ("" when not known yet): ``myWxid``, the name of WeChat 4's data folder, which
@@ -2765,6 +2802,7 @@ class WcdbBackend(AbstractWeChatBackend):
             if self._line_is_own(standardized, my_wxid):
                 if my_wxid:
                     self._tell_own_message(standardized)
+                    self._tell_read_back(standardized)
                 continue
             if my_wxid:
                 # Tells the router's self_message step not to judge by the name.
@@ -2906,7 +2944,9 @@ class WcdbBackend(AbstractWeChatBackend):
         if refused is not None:
             return refused
         with self._window_lock:
-            return self._send_and_confirm(name, talker, text)
+            sent = self._send_and_confirm(name, talker, text)
+            self._tell_sent(talker, text, sent)          # (in the lock: the hook hears the sends in their order)
+        return sent
 
     def _send_file_part(self, group_name: str, talker: str, path: str) -> bool:
         """One sticker picture, under the window lock like a text bubble, and refused like one."""

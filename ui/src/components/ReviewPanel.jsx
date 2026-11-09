@@ -1,8 +1,8 @@
 import { Fragment, useState } from 'react'
-import { ArrowClockwise, PaperPlaneRight, PencilSimple, X, Paperclip, WarningCircle, Eye, EyeSlash, Flag, Lightning, CheckCircle, Copy, ChatsCircle, Robot, HandPalm, UsersThree } from '@phosphor-icons/react'
+import { ArrowClockwise, PaperPlaneRight, PencilSimple, X, Paperclip, WarningCircle, Eye, EyeSlash, Flag, Lightning, CheckCircle, Copy, ChatsCircle, Robot, HandPalm, UsersThree, DeviceMobile } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
-import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, buyinNotes, buyinFriendAddLine, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, dealAction, nightStatus, copyBuyin, buyinSent, setAutoMode, replyPartCount, inGroup, bossGroupNotes, handSampleSeen, handSampleLine } from '../lib/prm'
+import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, buyinNotes, buyinFriendAddLine, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, dealAction, nightStatus, copyBuyin, buyinSent, setAutoMode, replyPartCount, inGroup, bossGroupNotes, handSampleSeen, handSampleLine, wechatReviewNote } from '../lib/prm'
 import { PageHead, Card, Note, Banner, Empty, Confirm, TextArea } from './ui'
 import { FriendAddList } from './FriendAddCard'
 
@@ -27,6 +27,8 @@ import { FriendAddList } from './FriendAddCard'
 // 老板拉的群 (PRM_BOSS_GROUPS): a draft of her line in the group the boss made with her and us
 // (``channel`` "group") is tagged 「群里 · <群名>」 and its 发送 asks first: it goes in the group, where
 // the boss sees it. A group that needs a person to say which member she is gets one line at the top.
+// 微信里审批草稿 (PRM_WECHAT_REVIEW): one line at the top says the drafts also go to the admin's WeChat (or why they
+// cannot), and a draft told there is tagged 已发到微信; deciding it here or there is the same decision.
 
 export default function ReviewPanel() {
   const { data, err, reload } = usePrm(4000)
@@ -41,6 +43,7 @@ export default function ReviewPanel() {
         />
         {err && <Note kind="need">{err}</Note>}
         {setupProblems(data).map(([kind, text]) => <Note key={text} kind={kind}>{text}</Note>)}
+        <WechatReviewLine d={data} />
         {buyinNotes(data).map(([kind, text]) => <Note key={text} kind={kind} icon={ChatsCircle}>{text}</Note>)}
         {bossGroupNotes(data).map(([kind, text]) => <Note key={text} kind={kind} icon={UsersThree}>{text}</Note>)}
         {data?.hand_samples_problem && <Note kind="warn">{data.hand_samples_problem}</Note>}
@@ -64,6 +67,13 @@ export default function ReviewPanel() {
       </div>
     </div>
   )
+}
+
+/** 微信里审批草稿 (PRM_WECHAT_REVIEW): the drafts also go to the admin's WeChat, or why they cannot. */
+function WechatReviewLine({ d }) {
+  const note = wechatReviewNote(d)
+  if (!note) return null
+  return <div className="prm-wechat-review"><Note kind={note[0]} icon={DeviceMobile}>{note[1]}</Note></div>
 }
 
 /** "〈手机1〉 = 138****5678" and, after a click that is written down, the full numbers. */
@@ -378,8 +388,10 @@ function HandcardsNote({ p }) {
 
 function DraftCard({ p, canSend, replyParts = 1, onDone }) {
   const toast = useToast()
+  // a 「改了再执行」 that could not be queued for the Mac: the edited reply is kept for the next try (only the edit box has it)
+  const kept = p.status === 'pending' && p.platform && p.final_text != null && p.final_text !== p.text ? p.final_text : null
   const [editing, setEditing] = useState(false)
-  const [text, setText] = useState(p.text)
+  const [text, setText] = useState(kept ?? p.text)
   const [busy, setBusy] = useState(false)
   const [dropping, setDropping] = useState(false)
   const [executing, setExecuting] = useState(null)   // the text to execute with (null = no dialog)
@@ -415,7 +427,7 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
       title={`${p.party_name} · ${p.kind_label}`}
       eyebrow={`DRAFT #${p.id}`}
       sub={`${fmtClock(p.created_at)} ${p.system ? '系统生成' : '写好'}${p.stage_proposal_label ? ` · 建议阶段：${p.stage_proposal_label}` : ''}`}
-      actions={<><GroupTag p={p} />{p.opening && <span className="tag cy" title={p.auto_at ? `她还没跟我们说过话：这是我们先打招呼的话，${fmtClock(p.auto_at)} 还没人处理就自动发` : '她还没跟我们说过话：这是我们先打招呼的话，要人看过再发'}>开场白</span>}{p.huopan && <span className="tag cy" title="运营点了「补发货盘」：我们主动补发的货盘，要人看过再发（不会自动发）">补发货盘</span>}{p.handcards && <span className={`tag ${p.handcards.ok ? 'cy' : 'need'}`} title={p.handcards.ok ? 'Mac 做好的直播手卡附在这份草稿里：看过卡片再发（不会自动发）' : '手卡没做成：草稿里没附手卡，话不能原样发'}>{p.handcards.ok ? '手卡' : '手卡没做成'}</span>}{p.route === 'auto' && <span className="tag ok" title="这类消息已经达到自动发送门槛">自动发送</span>}<NightTag p={p} /><OpeningAutoTag p={p} /><span className={`tag ${kind}`}>{label}</span></>}
+      actions={<><GroupTag p={p} />{p.wechat_at && <span className="tag cy prm-wechat-tag" title={`${fmtClock(p.wechat_at)} 发到管理员微信里了：在微信里${p.platform ? '引用通知回「执行」/ 2' : '回 1 / 2 / 改'} 也行，和这里点是同一个决定`}>已发到微信</span>}{p.opening && <span className="tag cy" title={p.auto_at ? `她还没跟我们说过话：这是我们先打招呼的话，${fmtClock(p.auto_at)} 还没人处理就自动发` : '她还没跟我们说过话：这是我们先打招呼的话，要人看过再发'}>开场白</span>}{p.huopan && <span className="tag cy" title="运营点了「补发货盘」：我们主动补发的货盘，要人看过再发（不会自动发）">补发货盘</span>}{p.handcards && <span className={`tag ${p.handcards.ok ? 'cy' : 'need'}`} title={p.handcards.ok ? 'Mac 做好的直播手卡附在这份草稿里：看过卡片再发（不会自动发）' : '手卡没做成：草稿里没附手卡，话不能原样发'}>{p.handcards.ok ? '手卡' : '手卡没做成'}</span>}{p.route === 'auto' && <span className="tag ok" title="这类消息已经达到自动发送门槛">自动发送</span>}<NightTag p={p} /><OpeningAutoTag p={p} /><span className={`tag ${kind}`}>{label}</span></>}
       className="prm-draft"
     >
       <div className="stack" style={{ gap: 8 }}>
@@ -442,6 +454,7 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
         )}
         {pf && <PlatformBox pf={pf} />}
         {pf && <div className="f-hint">下面是平台上核验成功以后才发给达人的回复：</div>}
+        {kept != null && !editing && <div className="f-hint prm-kept-edit">上次「改了再执行」没排进 Mac 的任务队列，改过的回复还留着：点「改了再执行」接着用；直接点「批准并执行」发的是下面的原稿</div>}
         {editing
           ? <TextArea value={text} onChange={setText} rows={5} aria-label="修改要发的内容" />
           : <div className="prm-text" style={{ whiteSpace: 'pre-wrap' }}>{p.text || <span className="dim">（只发附件，没有文字）</span>}</div>}
@@ -465,7 +478,7 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
             {editing ? (
               <>
                 <button type="button" className="btn primary" disabled={busy || !canSend || !pf.can_execute || cardsExpired(p)} onClick={() => setExecuting(text)}><Lightning />确认并执行</button>
-                <button type="button" className="btn" disabled={busy} onClick={() => { setEditing(false); setText(p.text) }}>取消修改</button>
+                <button type="button" className="btn" disabled={busy} onClick={() => { setEditing(false); setText(kept ?? p.text) }}>取消修改</button>
               </>
             ) : (
               <>

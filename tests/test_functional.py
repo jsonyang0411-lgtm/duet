@@ -418,7 +418,9 @@ class TestPrmPages:
         page.wait_for_timeout(300)
         assert "整段一条发（空一行就是分开发，最多 3 条）" in card.inner_text()
 
-    def test_review_page_runs_a_platform_action_once_and_shows_it_red_when_unverified(self, page, prm):
+    @staticmethod
+    def _platform_draft(prm) -> dict:
+        """She agrees to 20%; the Mac drafts 「专属佣金 20% 设好啦～」 with a 专属佣金 action, previewed: the draft waits."""
         import json as _json
         from src.prm import platforms
         from src.prm.service import SETTLE_SEC
@@ -442,7 +444,12 @@ class TestPrmPages:
              "reason": "kb/合作政策.md", "platform": preview}
         prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(d, ensure_ascii=False)})
         prm.relay.tick()
-        packet = prm.service.store.packet_for_job(job["id"])
+        return prm.service.store.packet_for_job(job["id"])
+
+    def test_review_page_runs_a_platform_action_once_and_shows_it_red_when_unverified(self, page, prm):
+        import json as _json
+
+        packet = self._platform_draft(prm)
         page.goto(f"{BASE_URL}/#/review", timeout=10000)
         page.wait_for_timeout(1500)
         card = page.locator(".prm-draft", has_text="平台动作")
@@ -524,6 +531,33 @@ class TestPrmPages:
         assert "抖店 · 查她是不是已经绑在这个商品的渠道品上" in detail and "她还没绑在这个商品的渠道品上" in detail
         assert "抖店 · 读主商品的 SKU、日常价和可分库存" in detail and "--sale-channel=kol" in detail
         assert "抖店 · 按约定建渠道品" in detail and "--agreement=" in detail
+
+    def test_review_page_keeps_an_edited_reply_whose_execution_could_not_be_queued(self, page, prm):
+        """改了再执行 whose job the relay certainly did not queue (the draft waits again: 微信里审批草稿, third verification):
+        the edited words are kept for the next try in the edit box; the card still shows, and 批准并执行 still runs, the
+        draft as drafted."""
+        from unittest.mock import patch
+
+        edited = "专属佣金 20% 已经设好，明天 0 点生效～"
+        packet = self._platform_draft(prm)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        card = page.locator(".prm-draft", has_text="平台动作")
+        card.wait_for()
+        assert card.locator(".prm-kept-edit").count() == 0
+        card.locator("button:has-text('改了再执行')").click()
+        card.locator("textarea[aria-label='修改要发的内容']").fill(edited)
+        with patch.object(prm.relay, "submit", side_effect=RuntimeError("队列坏了")):
+            card.locator("button:has-text('确认并执行')").click()
+            page.locator("[role=dialog] button:has-text('执行')").click()
+            page.get_by_text("没能排进 Mac 的任务队列").first.wait_for()
+        assert prm.service.store.packet(packet["id"])["final_text"] == edited
+        page.reload()
+        card = page.locator(".prm-draft", has_text="平台动作")
+        card.locator(".prm-kept-edit").wait_for()
+        assert "专属佣金 20% 设好啦～" in card.locator(".prm-text").inner_text()
+        card.locator("button:has-text('改了再执行')").click()
+        assert card.locator("textarea[aria-label='修改要发的内容']").input_value() == edited
+        assert card.locator(".prm-kept-edit").count() == 0
 
     def test_review_page_drops_a_draft_after_asking(self, page, prm):
         page.goto(f"{BASE_URL}/#/review", timeout=10000)
@@ -1696,6 +1730,44 @@ class TestPrmPages:
         row.wait_for()
         assert "群里 · 收件信息复述" in row.inner_text()
         assert "群里" not in page.locator(".prm-recent tr", has_text="#1").inner_text()   # another one: as before
+
+    def test_review_page_says_the_drafts_go_to_wechat_and_tags_the_ones_told(self, page, prm):
+        """微信里审批草稿 (PRM_WECHAT_REVIEW, src/prm/wechat_review.py): off (the running service here), 待审批 has nothing of
+        it; on, a line at the top says the drafts also go to the admin's WeChat and how to answer there, and a draft
+        told is tagged 已发到微信; drafts that could not be told are counted; without ADMIN_WXID the line says why."""
+        from src.prm.wechat_review import NO_ADMIN_WHY
+
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        card = page.locator(".prm-draft", has_text="在的，有什么可以帮你？")
+        card.wait_for()
+        assert page.locator(".prm-wechat-review").count() == 0 and card.locator(".prm-wechat-tag").count() == 0
+        shown = {"status": {"on": True, "why": "", "open": 1, "unsent": 0, "unsure": 0, "older": 0}, "told": True}
+
+        def wechat(state):
+            state["wechat_review"] = shown["status"]
+            for p in state["pending"]:
+                p["wechat_at"] = p["created_at"] if shown["told"] else None
+
+        self._serve_prm(page, wechat)
+        page.reload()
+        line = page.locator(".prm-wechat-review")
+        line.wait_for()
+        assert line.inner_text().strip() == (
+            "草稿也发到管理员微信里了：引用通知回 1 发出、2 不发、改 + 你的话，带平台动作的回「执行」")
+        tag = card.locator(".prm-wechat-tag")
+        assert tag.inner_text() == "已发到微信" and "和这里点是同一个决定" in tag.get_attribute("title")
+        assert "回 1 / 2 / 改" in tag.get_attribute("title")
+        shown.update(status={"on": True, "why": "", "open": 0, "unsent": 2, "unsure": 1, "older": 3}, told=False)
+        page.reload()
+        page.get_by_text("有 2 份试了几次都没发到微信，请在这里处理").wait_for()
+        text = line.inner_text()
+        assert "有 1 份发到微信时机器人停了（或者出错），不确定管理员收到没有" in text
+        assert "打开开关以前就在等的 3 份没发到微信，请在这里处理" in text
+        assert card.locator(".prm-wechat-tag").count() == 0
+        shown.update(status={"on": True, "why": NO_ADMIN_WHY, "open": 0, "unsent": 0, "unsure": 0, "older": 0})
+        page.reload()
+        page.get_by_text("没填管理员 wxid（ADMIN_WXID）").wait_for()
+        assert "回 1 发出" not in line.inner_text()
 
     @pytest.mark.parametrize("channel", [None, "private"], ids=["no-channel", "private"])
     def test_review_page_shows_and_sends_a_private_draft_exactly_as_before(self, page, prm, channel):

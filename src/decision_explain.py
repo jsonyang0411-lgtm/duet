@@ -18,6 +18,7 @@ REASONS = {
     "claude_relay": "cc 开头的私聊指令，转给 Mac 上的 Claude Code",
     "prm_copilot": "已登记达人的私聊：不回复，静默交给 Mac 起草，草稿在控制台等运营审批",
     "prm_edge": "名单里达人的私聊：不回复、不存进聊天记录，转给 Mac 的业务服务处理",
+    "wechat_review": "管理员在自己的私聊里回草稿通知（微信里审批草稿）：按回复发出、不发或改了再发，回一句结果，不存进聊天记录",
     "admin_command": "管理员私聊发的账号命令（加好友、自动通过好友等），已执行",
     "silent_end": "不是中转指令、达人消息或管理员命令（群聊一律在这里），静默结束，不回复",
     "no_handler": "没有任何处理步骤认领这条消息",
@@ -28,6 +29,7 @@ REASONS = {
 STEPS = {
     "self_message": "自己的消息",
     "edge": "转给 Mac 业务服务",
+    "wechat_review": "微信里审批草稿",
     "persist": "入库",
     "claude_relay": "转给 Mac",
     "prm": "达人副驾驶",
