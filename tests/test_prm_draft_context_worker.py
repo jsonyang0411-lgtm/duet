@@ -64,11 +64,24 @@ FAKE_HAT = textwrap.dedent("""\
             for p in photos]}, ensure_ascii=False))
     else:
         pairs = [a.rpartition("=") for a in args[1:args.index("--json")]]
+        labelled = "--labels" in args
+        labels = json.loads(args[args.index("--labels") + 1]) if labelled else [None] * len(pairs)
+        for (photo, _, code), label in zip(pairs, labels):
+            # (a row whose code is not her picture's best hat's best colour with a photo of its own is a held one: the
+            # real sheet may still print 「√」 for it, so it must come with a label; a picture not answered: not known)
+            hats = answers["match"].get(os.path.basename(photo)) or []
+            best = (hats[0].get("colours") or [{}])[0] if hats else None
+            sure = best is None or (bool(best.get("own")) and best.get("de") is not None
+                                    and code in [c.upper() for c in best.get("codes") or []])
+            if not label and not sure:
+                sys.stderr.write("held row without a label: %s\\n" % code)
+                sys.exit(3)
         path = os.path.join(out, "sheet-%d.jpg" % len(os.listdir(out)))
         with open(path, "wb") as f:
             f.write(b"\\xff\\xd8\\xff fake sheet " + ",".join(code for _, _, code in pairs).encode())
         rows = [dict({"n": n, "photo": photo, "code": code, "ok": True, "note": "√ 图对得上（款第 1，颜色第 1）"},
-                     **answers.get("sheet", {}).get(code, {})) for n, (photo, _, code) in enumerate(pairs, 1)]
+                     **({"label": label} if labelled else {}), **answers.get("sheet", {}).get(code, {}))
+                for n, ((photo, _, code), label) in enumerate(zip(pairs, labels), 1)]
         print(json.dumps({"version": 1, "rows": rows, "sheet": path}, ensure_ascii=False))
 """)
 
@@ -612,8 +625,13 @@ def test_the_gate_takes_the_codes_the_console_confirmed(worker, tmp_path):  # no
     hats_dir = tmp_path / "hat-index"
     hats_dir.mkdir()
     (hats_dir / "hat_match.py").write_text(FAKE_HAT, encoding="utf-8")
-    (hats_dir / "answers.json").write_text(json.dumps({"match": {}, "sheet": {
+    (hats_dir / "answers.json").write_text(json.dumps({"match": {"图片-1.jpg": SURE}, "sheet": {
         CODE_A: {"ok": False, "note": "！要再看：颜色：图最像 深棕"}}}, ensure_ascii=False), encoding="utf-8")
+
+    def sheet_labels():
+        """Each sheet run's --labels (None: none passed), oldest first."""
+        runs = [json.loads(x)["args"] for x in (hats_dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
+        return [json.loads(a[a.index("--labels") + 1]) if "--labels" in a else None for a in runs if a[0] == "sheet"]
     opts = {**dc.options({"draft_context": {"hat_index": str(hats_dir), "hat_python": sys.executable}}), "stock": False,
             "gap_sec": 0.0}
     ws, rel = picture_in(tmp_path)
@@ -634,12 +652,14 @@ def test_the_gate_takes_the_codes_the_console_confirmed(worker, tmp_path):  # no
         f"{CODE_A} 对图要再看（！要再看：颜色：图最像 深棕）：先核对再建；{HOW}",
         f"{CODE_B}（均码咖啡）对图没把握（只在没把握的图里，或者不是图里最像的那一款、那个颜色）：先核对再建；{HOW}"]
     assert held["sheet"] and held["held_sheet"] and held["held_why"] == dc.OPERATOR_HELD_WHY
+    assert sheet_labels() == [None, ["扣着：同款别的颜色（她的图最像的是驼色）"]]   # (the sure hats' sheet as ever)
     assert [f["value"] for f in held["block"]["facts"] if f["label"] == dc.HELD_LABEL] == [
         f"{CODE_B}：扣着（同款别的颜色（她的图最像的是驼色））；扣着的那张对图单第 1 行，左边是她这次发的 图片-1.jpg，"
         f"右边是这个编码自己的图"]
     let = gated([CODE_B, CODE_A])
     assert let["block"]["verdict"] == "ready", let["block"]["problems"]
     assert let["held"] == [] and let["used"] == [CODE_A, CODE_B] and let["held_sheet"]
+    assert sheet_labels()[2:] == [None, ["已点「对过图了」"]]
     facts = [f["value"] for f in let["block"]["facts"]]
     assert f"{CODE_B}：运营在控制台点了「对过图了」（没有图对）" in facts
     assert f"{CODE_A}：对图单说要再看（！要再看：颜色：图最像 深棕），运营在控制台点了「对过图了」" in facts
@@ -669,7 +689,8 @@ def test_every_held_hat_gets_a_sheet_row_that_says_why_it_is_held(worker, tmp_pa
         log = hats_dir / "calls.jsonl"
         return [json.loads(x) for x in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
 
-    answers(sheet={CODE_B: {"colour": "深棕（整款图，没有这个颜色的单独图）"}, CODE_C: {"sku_photo": False}})
+    answers(match={"图片-1.jpg": SURE},
+            sheet={CODE_B: {"colour": "深棕（整款图，没有这个颜色的单独图）"}, CODE_C: {"sku_photo": False}})
     opts = {**dc.options({"draft_context": {"hat_index": str(hats_dir), "hat_python": sys.executable}}), "stock": False,
             "gap_sec": 0.0}
     ws, rel = picture_in(tmp_path)
@@ -698,6 +719,14 @@ def test_every_held_hat_gets_a_sheet_row_that_says_why_it_is_held(worker, tmp_pa
     [run] = calls()
     assert run["args"][0] == "sheet" and [a.rpartition("/")[2] for a in run["args"][1:3]] == [
         f"图片-1.jpg={CODE_B}", f"图片-1.jpg={CODE_C}"]
+    # every held row comes with its label (the sheet shows it in red in place of 「√」)
+    assert json.loads(run["args"][run["args"].index("--labels") + 1]) == [
+        "扣着：同款别的颜色（她的图最像的是驼色）", "扣着：她的图里都没对出这一款，左边放的是她最新发的那张"]
+    # (the fake refuses a held row without one, as the real sheet would print 「√」 on it)
+    pair = [(CODE_B, dc.candidate_of(CODE_B, [entry]))]
+    sheet_of = dict(home=tmp_path / "home", beat=None, sleep=lambda _: None, deadline=time.time() + 60, clock=time.time)
+    assert dc._make_sheet(worker.platforms, {}, opts, ws, pair, **sheet_of)[2] == "退出码 3"
+    assert dc._make_sheet(worker.platforms, {}, opts, ws, pair, labels=["扣着：x"], **sheet_of)[2] == ""
     # the reasons of the other kinds
     low = dc.trimmed([hat(STYLE_1 + "X", "别的款", 1.0, ("黑色", "A7269901009A-M", 9.0)),
                       hat(STYLE_1, "测试药盒帽", 0.98, ("驼色", CODE_A, 30.0), ("深棕", CODE_B, 31.0))])
@@ -715,7 +744,7 @@ def test_every_held_hat_gets_a_sheet_row_that_says_why_it_is_held(worker, tmp_pa
         f["value"] for f in capped["block"]["facts"]]
     monkeypatch.setattr(dc, "MAX_HELD_ROWS", 6)
     # the held sheet not made (the index fails on it, or no time left): a fact, the holds as they were
-    answers(sheet={}, fail_with=f"={CODE_B}")
+    answers(match={"图片-1.jpg": SURE}, sheet={}, fail_with=f"={CODE_B}")
     failed = gated()
     assert failed["held_sheet"] is None and failed["held"] == [CODE_B, CODE_C] and len(failed["block"]["problems"]) == 2
     assert "扣着的那几顶的对图单没做成（退出码 1），请自己找图核对" in [f["value"] for f in failed["block"]["facts"]]

@@ -40,8 +40,9 @@ creators share is not sent: the bot leaves it out), the item codes an operator c
    the SKU's own photo (none, or only the whole style's 「整款图」) blocks too, and is held, unless an operator
    confirmed that code.  The held codes (and the ones an operator let go) get a sheet of their own (``_held_sheet``,
    2026-11-10): her picture whose ranking has the code, else her newest one, next to the code's own photo (the style's
-   whole photo when it has none), each row's fact saying why it is held (``held_why``); a code with no photo at all
-   says so on its hold (NO_CODE_PHOTO).  That sheet never holds the order itself.  The problems follow the order's
+   whole photo when it has none), each row saying why it is held in red on the sheet (hat_match's ``--labels``, in place
+   of its own √, which never compared a colour without a photo of its own) and in its fact (``held_why``); a code with
+   no photo at all says so on its hold (NO_CODE_PHOTO).  That sheet never holds the order itself.  The problems follow the order's
    lines.
    The worker sends the sheets back on the relay's operator-only channel; the available stock of the styles (``jst
    goods-detail``, read-only) is a fact of the preview for the operators, never told to the model.
@@ -122,6 +123,7 @@ OPERATOR_SHEET_WHY = "寄样单里每一顶和她发的图并排对比（√ 图
 # 「对过图了」), so 「对过图了」 always has a sheet row to look at; why each is held is said in the preview's facts
 OPERATOR_HELD_WHY = "扣着的那几顶（和运营点了「对过图了」的）：她的图和这个编码自己的图并排，为什么扣着写在预览里；只给运营看，不发给达人"
 HELD_LABEL = "对图（扣着的那几顶）"
+CONFIRMED_LABEL = "已点「对过图了」"   # a row of the held hats' sheet an operator confirmed (the others: 「扣着：<why>」)
 NO_CODE_PHOTO = "没有这个编码的图，请自己找图核对"
 MAX_HELD_ROWS = 6                   # rows of the held hats' sheet (each a hat_match run's row: a few seconds)
 SURE = "有把握"
@@ -1369,15 +1371,19 @@ def _held_sheet(platforms, cfg: dict, opts: dict, workspace: Path, others: list,
                 home: Path, beat, sleep, deadline: float, clock: Callable[[], float]) -> Optional[Path]:
     """The held hats' sheet (2026-11-10): her picture (``candidate_of``) next to each held code's own photo, and next to
     each code an operator let go by 「对过图了」 (``hat_match.py sheet``: the SKU's own photo, else the style's main photo,
-    「（整款图…）」), MAX_HELD_ROWS rows at most, within the job's budget (``_make_sheet``).  Each row is a fact in
+    「（整款图…）」), MAX_HELD_ROWS rows at most, within the job's budget (``_make_sheet``).  Every row carries a label
+    the sheet shows in red in place of hat_match's own check (``--labels``): 「扣着：<why>」, or CONFIRMED_LABEL; a held
+    hat never reads 「√ 图对得上」 (hat_match judges only the colours with a photo of their own).  Each row is a fact in
     ``facts`` saying why the code is held, which picture of hers is on the left and what is on the right; a held code
     with no photo at all gets NO_CODE_PHOTO on its hold (``holds``).  It is never needed for the order (those hats are
     held anyway, or confirmed): a sheet not made is only a fact.  Its path, or None."""
     kept = others[:MAX_HELD_ROWS]
     for code, _, _ in others[MAX_HELD_ROWS:]:
         facts.append(f"{code}：扣着的那张对图单最多 {MAX_HELD_ROWS} 行，这一顶放不下了，请自己找图核对")
+    # (every row says in red why it is held, or that an operator confirmed it: a held hat never reads 「√ 图对得上」)
+    labels = [f"扣着：{why}" if code in holds else CONFIRMED_LABEL for code, _, why in kept]
     path, rows, problem = _make_sheet(platforms, cfg, opts, workspace, [(code, cand) for code, cand, _ in kept],
-                                      home=home, beat=beat, sleep=sleep, deadline=deadline, clock=clock)
+                                      home=home, beat=beat, sleep=sleep, deadline=deadline, clock=clock, labels=labels)
     if problem:
         facts.append(f"扣着的那几顶的对图单没做成（{problem}），请自己找图核对")
         return None
@@ -1394,9 +1400,11 @@ def _held_sheet(platforms, cfg: dict, opts: dict, workspace: Path, others: list,
 
 
 def _make_sheet(platforms, cfg: dict, opts: dict, workspace: Path, pairs: list, *, home: Path, beat, sleep,
-                deadline: Optional[float] = None, clock: Callable[[], float] = time.time) -> tuple:
+                deadline: Optional[float] = None, clock: Callable[[], float] = time.time,
+                labels: Optional[list] = None) -> tuple:
     """``hat_match.py sheet <her photo>=<code> … --json`` under the CLI lock (it may ask 聚水潭 for a SKU photo or a
-    colour, read-only): ``(sheet path | None, rows, problem)``; each row ``{"ok", "sku_photo", "whole", "note"}`` (a row
+    colour, read-only), ``labels`` (a text per pair, or None) shown in red in place of a row's √ / ！ check:
+    ``(sheet path | None, rows, problem)``; each row ``{"ok", "sku_photo", "whole", "note"}`` (a row
     whose SKU picture is only the whole style's, 「（整款图…」, counts as none: ``sku_photo`` False, ``whole`` True).  Not
     when the index timed out lately or the budget is spent; a run that times out trips the breaker."""
     why = (tool_problem(opts) if platforms is not None else "这台 Mac 的 worker 没有平台模块") or tripped("hat")
@@ -1411,6 +1419,8 @@ def _make_sheet(platforms, cfg: dict, opts: dict, workspace: Path, pairs: list, 
     sheets.mkdir(parents=True, exist_ok=True)
     argv = [str(opts["hat_python"]), str(opts["hat_index"] / "hat_match.py"), "sheet",
             *(f"{workspace / seen['entry']['rel']}={code}" for code, seen in pairs), "--json", "--out", str(sheets)]
+    if labels is not None:                       # (each row's text in place of its √ / ！ check: hat_match 2026-11-10)
+        argv += ["--labels", json.dumps([str(x)[:80] if x else None for x in labels], ensure_ascii=False)]
     env = platforms.cli_env(cfg) if cfg.get("node") else None
     left = _left(deadline, clock())
     try:
