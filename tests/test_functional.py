@@ -418,6 +418,51 @@ class TestPrmPages:
         page.wait_for_timeout(300)
         assert "整段一条发（空一行就是分开发，最多 3 条）" in card.inner_text()
 
+    def test_review_page_shows_a_sample_orders_photo_sheet_to_the_operators_only(self, page, prm, tmp_path):
+        """PRM_DRAFT_CONTEXT (2026-11-09): a sample order's draft with the Mac's photo sheet (``meta.operator_files``)
+        shows it as a picture in its platform block (GET /api/prm/file), says it is only for the operators, says a
+        sheet whose file is gone was cleaned up; a hat with no picture behind it leaves 「批准并执行」 off."""
+        import struct
+        import zlib
+        from src.prm import platforms
+
+        def chunk(kind, data):
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+        sheet = tmp_path / "relay" / "outfiles" / "job-77" / "对图单-77.png"
+        sheet.parent.mkdir(parents=True)
+        sheet.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+                          + chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00")) + chunk(b"IEND", b""))
+        action = platforms.check_action({"action": "jst.sample_order", "shop": "dy", "items": [
+            {"item_id": "3000000000000000102", "skus": [{"sku_id": "3100000000000000202", "qty": 1}]}],
+            "creator_platform": "dy", "creator_account": "test_daren_01"})
+        preview = {"version": 1, "action": action, "verdict": "blocked",
+                   "problems": ["A7269901002A-F（均码粉色）这顶没有照片对过，先核对再建"],
+                   "facts": [{"label": "对图", "value": "A7269901001A-F 驼色：对的是这次发的 图片-1.jpg（图库里第 1 款、第 1 个"
+                                                        "颜色）；√ 图对得上（款第 1，颜色第 1）"}],
+                   "steps": [], "run": {}, "previewed_at": prm.clock.now}
+        files = [{"name": "对图单-77.png", "path": str(sheet), "why": "寄样单里每一顶和她发的图并排对比；只给运营看，不发给达人"},
+                 {"name": "对图单-70.jpg", "path": str(sheet.parent / "gone.jpg"), "why": "上一份"}]
+        pid = prm.service.store.add_packet(
+            deal_id=1, party_id=1, job_id=None, chat_id="wxid_creator01", kind="money", text="寄样单建好啦",
+            attachments=[], intent="寄样", slots={}, stage_proposal="", needs_attention=False, reason="",
+            tool="jst.sample_order", platform={"action": action, "preview": preview}, meta={"operator_files": files},
+            now=prm.clock.now)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="寄样单建好啦")
+        box = card.locator(".prm-platform")
+        text = box.inner_text()
+        for expected in ("这顶没有照片对过，先核对再建", "√ 图对得上", "只给运营看（不发给达人）：寄样单里每一顶和她发的图并排对比",
+                         "对图单-70.jpg（图已经清理掉了）"):
+            assert expected in text, expected
+        img = box.locator("img")
+        assert img.count() == 1 and img.get_attribute("src") == f"/api/prm/file?packet={pid}&n=0"
+        page.wait_for_function("() => document.querySelector('.prm-operator-file img').naturalWidth > 0")
+        assert img.evaluate("el => el.naturalWidth") == 1                 # the page got the picture and decoded it
+        assert card.locator("button:has-text('批准并执行')").is_disabled()
+        assert "对图单" not in card.locator(".row .tag").all_inner_texts().__str__()   # no attachment tag for it
+
     def test_review_page_runs_a_platform_action_once_and_shows_it_red_when_unverified(self, page, prm):
         import json as _json
         from src.prm import platforms

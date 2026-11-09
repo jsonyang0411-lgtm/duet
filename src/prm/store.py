@@ -1035,6 +1035,36 @@ class PrmStore:
             self._conn.commit()
             return cur.rowcount == 1
 
+    def merge_packet_meta(self, packet_id: int, meta: dict, statuses: Optional[tuple] = None) -> bool:
+        """``meta`` merged into a packet's meta (of one of ``statuses``; any status for None): PRM_DRAFT_CONTEXT's
+        operator files (src/prm/draft_context.py).  True when it was changed."""
+        with self._lock:
+            sql, args = "SELECT meta FROM action_packets WHERE id = ?", [packet_id]
+            if statuses:
+                sql += f" AND status IN ({', '.join('?' * len(statuses))})"
+                args += list(statuses)
+            row = self._conn.execute(sql, args).fetchone()
+            if row is None:
+                return False
+            self._conn.execute("UPDATE action_packets SET meta = ? WHERE id = ?",
+                               (json.dumps({**_loads(row["meta"], {}), **(meta or {})}, ensure_ascii=False), packet_id))
+            self._conn.commit()
+            return True
+
+    def operator_file_packets(self, before: float) -> list[dict]:
+        """Packets made before ``before`` that still keep an operator file (``meta.operator_files`` with a path:
+        src/prm/draft_context.py ``sweep``), oldest first."""
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM action_packets WHERE created_at < ? AND meta LIKE ? ORDER BY id",
+                                      (before, '%"operator_files"%')).fetchall()
+        out = []
+        for row in rows:
+            packet = packet_view(dict(row))
+            files = packet["meta"].get("operator_files")
+            if isinstance(files, list) and any(isinstance(f, dict) and f.get("path") for f in files):
+                out.append(packet)
+        return out
+
     def set_outcome(self, packet_id: int, outcome: str) -> None:
         with self._lock:
             self._conn.execute("UPDATE action_packets SET outcome = ? WHERE id = ?", (outcome, packet_id))

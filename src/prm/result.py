@@ -12,6 +12,9 @@ counts) and adds ``attachments_named`` (every file the draft named) and
 ``attachments_missing`` (``[{"name", "why"}]``: outside assets/, missing, too big, the upload
 failed); an older worker sends neither.
 
+``operator_files`` (PRM_DRAFT_CONTEXT, src/prm/draft_context.py) are files the Mac sent back for the operators only
+(``[{"name", "why", "sha256"}]``: a sample order's side-by-side photo sheet), never attachments for the creator.
+
 ``platform_action`` is optional (platforms.py): the Mac checks it and previews it, and
 hands back ``platform``, its verdict, in its place; a draft that names an action the Mac
 did not preview carries the verdict ``unavailable`` and cannot be executed.  A preview whose
@@ -29,7 +32,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from . import platforms
+from . import draft_context, platforms
 from .store import STAGES
 
 # The kinds of message (8.1 of the assessment): they decide later what may go out unreviewed.
@@ -90,6 +93,9 @@ class Draft:
     # Why the Mac's platform action was left out ("" = it was not): the bot's own check refused it
     # (platforms.ActionRefused); the reply stays, as a plain draft for a person.
     platform_refused: str = ""
+    # The files the Mac sent back for the operators only (PRM_DRAFT_CONTEXT: a sample order's photo sheet),
+    # ``[{"name", "why", "sha256"}]`` (draft_context.operator_entries): never sent to the creator.
+    operator_files: list = field(default_factory=list)
 
 
 def _text(value, limit: int) -> str:
@@ -170,4 +176,5 @@ def parse_draft(raw: str) -> Draft:
         attachments_named=None if named is None else [str(f).strip()[:200] for f in named if str(f).strip()],
         attachments_missing=_missing_files(missing),
         platform_refused=refused,
+        operator_files=draft_context.operator_entries(data.get(draft_context.OPERATOR_FILES)),
     )

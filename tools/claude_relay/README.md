@@ -403,6 +403,32 @@ node bin/dy.mjs buyin im-inbox [--after=<cursor 的 JSON>] --limit=<n> --names [
 - 除非 <invite_background> 里写着「卡上开了 X% 长期专属佣金」，不要说「卡上已经给您开了佣金」。
 ```
 
+### 起草的上下文（`PRM_DRAFT_CONTEXT`，默认关；2026-11-09）
+
+起草的 Claude 以前看不到她的寄样单寄没寄（「寄出了不」「收到6件哈」只能含糊地答），也只能按名字挑帽子（ERP 的名字常常和款式对不上，照名字建的寄样单寄错过两次）。打开以后：
+
+- **她的寄样单**（`<sample_status>`）：每份草稿开始写之前，worker 按任务带的 `meta.draft_context`（合作单知道的寄样单号、她的抖音号 / 小红书号；Windows 给的）读聚水潭：一次 `jst samples --mine --page-size=100`（我们这个子账号最新的单，所有达人共用 10 分钟），合作单的单号不在里面的再 `jst samples --order-no=…`。只读、不带 `--raw`（命令行不给收件人），带 `--expect-uid`，在平台命令锁（`~/.claude-relay/platform/cli.lock`）里，锁里第一次读之前和两次之间停 3 秒；聚水潭调得太快时回空的（不报错），所以公司最新的单一张都没有、问的单一张都没回来时停 10 秒再问一次。只认平台号码或单号对上她的，从不按昵称。每张单写单号、状态（待审核 / 待发货 / 已发货 / 已签收 / 已取消）、商品（编码、颜色尺码、ERP 名、件数）、快递和运单号、申请 / 发出 / 签收时间。读不了（登录失效、风控、子账号不对、超时、锁一直被占）就写读不了，草稿照写。
+- **她发的图**（`<photo_matches>`）：任务里的图交给帽子图库（`~/.claude-relay/platform/hat-index`，它自己的 README；`hat_match.py match <图…> --top 8 --no-stock --json`，本机、不调平台，模型只从缓存读），一张图（按 sha256）只对一次，记住 7 天（`~/.claude-relay/platform/draft-context/photos/`，图还在 `inbox/` 的时候），以后的草稿任务也看得到。每张图列前几款、每款几个颜色的编码、色差、目录里卖这个编码的商品和 SKU，最像的分数低或者最像的两款差不多时写「没把握」。
+- **提示多四行规则**（在两块前面）：照 `<sample_status>` 答寄样的事、读不了就「我确认一下再回复您」；认帽子只认 `<photo_matches>` 和已经确认过的编码（她以前的寄样单、运营起草备注里写的），绝不按名字，没把握就问；不说没货、缺货、补货、「我查一下」，慢了说「分批发出」「仓库在安排」；寄样单的每一顶要对过图。
+- **寄样单对图**：草稿带 `jst.sample_order` 时，预览以后 worker 把每个 SKU 按商品目录换成聚水潭编码：在她的图的对图结果里的，做一张并排的对图单（`hat_match.py sheet <她的图>=<编码> … --json`，在平台命令锁里：它可能向聚水潭要 SKU 的图）；以前寄过的、起草备注里写了的不用图；都不是的，预览写「这顶没有照片对过，先核对再建」，不能执行。对图单传回 Windows（`对图单-<任务号>.jpg`，草稿 JSON 的 `operator_files`），只给运营看：「待审批」卡片的平台动作里显示，**从不发给达人**。顺便查这几款的仓库可用库存（`jst goods-detail`），只写在预览里给运营看。重新预览寄样单时再查一遍、带来新的对图单。
+
+**怎么打开**：Windows 的 `.env` 写 `PRM_DRAFT_CONTEXT=on`，重启机器人；Mac 的 worker 要是这一版（`kill -USR1` 重启），`--check` 多一行 `draft context (PRM_DRAFT_CONTEXT on Windows): photo index <路径> (<python>)`（写着「没有帽子图库」「帽子图库的 Python 不在」就是路径不对）。Windows 关着（或者是旧版）时任务里没有 `meta.draft_context`，worker 什么都不读、提示和以前一个字都不差。`config.json` 里可以不写，默认值是：
+
+```
+"draft_context": {
+  "hat_index": "~/.claude-relay/platform/hat-index",
+  "hat_python": "~/.local/share/hat-index/venv/bin/python",
+  "cache_min": 10, "gap_sec": 3, "empty_retry_sec": 10, "lock_wait_sec": 120,
+  "photo_min_score": 1.10, "photo_min_margin": 0.02, "stock": true, "stock_low": 3
+}
+```
+
+`hat_match.py` 的 `--json`（`match` 可以一次给几张图）和 `--out <目录>` 是 2026-11-09 加的；不带这两个时它打印、写出的和以前一模一样（改之前的在 `hat_match.py.bak-20261109`）。
+
+**多花的时间**：有新图的草稿多 10–30 秒（每次对图都要加载两个模型，一次几张图只加载一次，之后每张一两秒；对过的图不再对）；聚水潭 10 分钟内读过就不再读。任务的心跳照常发（控制台写「读聚水潭寄样单、对图」）。
+
+**数据**：块里没有收件人的名字、电话、地址，没有她的昵称和号码；聚水潭写的原因照 8.2 的规则剪掉地址和号码；日志只有单号、张数和退出码。对图单上有她的照片：Mac 上 7 天后删，Windows 上 30 天后删（`draft_context.sweep`）。
+
 ### 两端的版本
 
 旧版 worker 不会说自己能做 prm 任务（请求里没有 `X-Relay-Kinds`），机器人就不会把 prm 任务交给它：达人的话永远不会被当成 cc 任务执行。升级时先升级 Mac 端，再在 Windows 上打开 `PRM_COPILOT`。

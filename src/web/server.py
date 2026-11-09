@@ -1088,6 +1088,40 @@ def _prm_stopped_store():
     return store
 
 
+def _prm_operator_file(query: str):
+    """GET /api/prm/file?packet=<id>&n=<i>: a draft's operator-only picture (PRM_DRAFT_CONTEXT: a sample order's photo
+    sheet, src/prm/draft_context.py ``operator_file``) as ``(bytes, content type)``, or None.  Read-only; the running
+    bot's packets, or the database of a stopped one."""
+    from urllib.parse import parse_qs
+
+    from src.prm.draft_context import operator_file
+
+    args = parse_qs(query)
+    try:
+        packet_id = int((args.get("packet") or [""])[0])
+    except ValueError:
+        return None
+    n = (args.get("n") or ["0"])[0]
+    if _prm is not None:
+        packet = _prm.store.packet(packet_id)
+    else:
+        store = _prm_stopped_store()
+        if store is None:
+            return None
+        try:
+            packet = store.packet(packet_id)
+        finally:
+            store.close()
+    found = operator_file(packet, n) if packet else None
+    if found is None:
+        return None
+    path, kind = found
+    try:
+        return path.read_bytes(), kind
+    except OSError:
+        return None
+
+
 def _prm_state_core() -> dict:
     from src.prm.service import auto_mode_of, snapshot as prm_snapshot
 
@@ -1734,6 +1768,27 @@ class _UIHandler(SimpleHTTPRequestHandler):
             return
 
         # ── API: PRM copilot — creators, drafts, decisions ─────────────
+        if self.path.split("?", 1)[0] == "/api/prm/file":         # a draft's operator-only picture (GET)
+            try:
+                found = _prm_operator_file(self.path.partition("?")[2])
+            except Exception:
+                logger.exception("Reading a PRM operator file failed")
+                found = None
+            if found is None:
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps({"ok": False, "error": "没有这张图（可能已经清理掉了）"}, ensure_ascii=False).encode())
+                return
+            body, kind = found
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self._send_cors_headers()
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.split("?", 1)[0] == "/api/prm":
             try:
                 self.send_json(_prm_state())

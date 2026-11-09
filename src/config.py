@@ -367,6 +367,12 @@ class BotConfig:
     # night window or 自动模式 the night's rules judge it, like a reply draft's.  "off" (the default): nothing of it.
     prm_signed_hello: str = "off"
     prm_signed_hello_hours: str = "10:00-20:00"
+    # 起草的上下文 (2026-11-09, PRM_DRAFT_CONTEXT): a creator's draft jobs carry ``meta.draft_context`` (the 聚水潭 sample
+    # orders her deal knows, her 抖音号 / 小红书号): the Mac reads her sample orders in 聚水潭 by them (<sample_status>),
+    # matches the pictures she sent against its hat photo index (<photo_matches>), and checks a draft's sample order by
+    # photo (a hat with no picture behind it is not ready; the side-by-side sheet shows on the draft, for the operators
+    # only).  "off" (the default): nothing of it, the Mac's prompts as before (src/prm/draft_context.py).
+    prm_draft_context: str = "off"
     # The 抖音百应 private messages (精选联盟私信) of the creators invited by 邀约带货: asked of the Mac once this many
     # minutes (0 = off, the default; the Mac's `dy buyin im-inbox`, read-only, is still to be written: until then the
     # console says it cannot be read).  A registered creator's new lines become a 百应 draft in 待审批 that an operator
@@ -605,6 +611,8 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(f"PRM_SAMPLE_SIGN_DAYS must be between 1 and 60, got {kwargs.get('prm_sample_sign_days')}")
     if kwargs.get("prm_signed_hello", "off") not in ("off", "on"):
         errors.append(f"PRM_SIGNED_HELLO must be off or on, got {kwargs.get('prm_signed_hello')}")
+    if kwargs.get("prm_draft_context", "off") not in ("off", "on"):
+        errors.append(f"PRM_DRAFT_CONTEXT must be off or on, got {kwargs.get('prm_draft_context')}")
     hello_hours = str(kwargs.get("prm_signed_hello_hours", "10:00-20:00") or "").strip()
     if hello_hours:                                    # (empty: the default, 10:00-20:00)
         from src.prm.gates import night_window
@@ -797,6 +805,7 @@ def load_config() -> BotConfig:
         "prm_sample_sign_days": int(os.getenv("PRM_SAMPLE_SIGN_DAYS", "10")),
         "prm_signed_hello": _parse_switch(os.getenv("PRM_SIGNED_HELLO", "off")),
         "prm_signed_hello_hours": os.getenv("PRM_SIGNED_HELLO_HOURS", "").strip() or "10:00-20:00",
+        "prm_draft_context": _parse_switch(os.getenv("PRM_DRAFT_CONTEXT", "off")),
         "prm_buyin_sync_min": int(os.getenv("PRM_BUYIN_SYNC_MIN", "0")),
         "prm_friend_add": _parse_switch(os.getenv("PRM_FRIEND_ADD", "off")),
         "prm_friend_add_daily_max": int(os.getenv("PRM_FRIEND_ADD_DAILY_MAX", "10")),

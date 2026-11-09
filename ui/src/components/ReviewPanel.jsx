@@ -266,8 +266,25 @@ function StepView({ st }) {
   )
 }
 
+/** The operators' own pictures of a draft (PRM_DRAFT_CONTEXT: a sample order's photo sheet): shown here, never sent to her. */
+function OperatorFiles({ files }) {
+  if (!files?.length) return null
+  return (
+    <div className="stack prm-operator-files" style={{ gap: 6 }}>
+      {files.map((f) => (
+        <figure key={f.n} className="prm-operator-file" style={{ margin: 0 }}>
+          {f.kept
+            ? <img src={f.url} alt={f.name} loading="lazy" style={{ maxWidth: '100%', borderRadius: 4 }} />
+            : <div className="f-hint">{f.name}（图已经清理掉了）</div>}
+          <figcaption className="f-hint">只给运营看（不发给达人）：{f.why || f.name}</figcaption>
+        </figure>
+      ))}
+    </div>
+  )
+}
+
 /** A draft's platform action: what it will do, the Mac's verdict, and the detail behind it. */
-function PlatformBox({ pf }) {
+function PlatformBox({ pf, files }) {
   const [open, setOpen] = useState(false)
   const ex = pf.execution
   return (
@@ -286,6 +303,7 @@ function PlatformBox({ pf }) {
       {pf.requested && <div className="f-hint">草稿里写的：<span className="mono">{JSON.stringify(pf.requested)}</span></div>}
       {pf.problems.map((t) => <Note key={t} kind="need">{t}</Note>)}
       {pf.facts.map((f, i) => <div key={i} className="f-hint"><b>{f.label}：</b>{f.value}</div>)}
+      <OperatorFiles files={files} />
       {ex && <div className="f-hint">执行结果：<span className={`tag ${outcomeTag(ex.outcome)}`}>{ex.outcome}</span> {ex.outcome_label}</div>}
       {pf.steps.length > 0 && (
         <button type="button" className="link" onClick={() => setOpen(!open)}>{open ? '收起预览明细' : `看预览明细（${pf.steps.length} 条命令）`}</button>
@@ -354,7 +372,7 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
             {slots.map(([k, v]) => <span key={k} className="tag">{k}：{v}</span>)}
           </div>
         )}
-        {pf && <PlatformBox pf={pf} />}
+        {pf && <PlatformBox pf={pf} files={p.operator_files} />}
         {pf && <div className="f-hint">下面是平台上核验成功以后才发给达人的回复：</div>}
         {editing
           ? <TextArea value={text} onChange={setText} rows={5} aria-label="修改要发的内容" />
