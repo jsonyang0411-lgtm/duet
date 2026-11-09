@@ -926,6 +926,55 @@ def test_the_group_gone_fails_its_drafts_not_sent_and_cancels_its_queued_job(bot
     assert bot.prm.send_approved() == 0 and bot.texts == []
 
 
+def test_a_boss_groups_lines_are_told_apart_when_her_deal_keeps_its_three_party_group(clock, tmp_path):
+    """Second check 2026-11-09: 「是她」 while her deal has the 三方群 「拉三方群」 made: the 老板拉的群's lines were not told
+    to her private drafts any more (before, mixed in with the 三方群's).  Told apart now, each line saying its group;
+    with one group only, as before (no ``group``)."""
+    b = make(clock, tmp_path)
+    party = b.prm.register(CREATOR, "小美", "测试达人")
+    deal = b.prm.store.deal_of(party["id"])
+    made = {"state": "created", "at": b.clock.now, "by": "console", "chat": OTHER, "name": "品牌测试×小美", "members": 3}
+    b.prm.store.update_deal(deal["id"], b.clock.now, three_party=made)
+    b.prm._group_line(party, OTHER, "boss", "三方群里说的", b.clock.now - 30, b.clock.now)
+    assert boss_makes(b, members=(ME, BOSS_ID, CREATOR, MEMBER)) == 0
+    assert b.prm.boss_groups.pick(GROUP, CREATOR)["ok"] is True
+    no_opening(b)
+    b.prm.handle(gmsg(b, "这位是我们的达人小美", sender=BOSS_ID))
+    b.clock.now += 5
+    b.prm.handle(b.msg("私聊：在吗"))
+    told = json.loads(job_of(b, CREATOR)["meta"])["three_party_chat"]
+    assert [(t["group"], t["who"], t["text"]) for t in told] == [
+        ("三方群「品牌测试×小美」", "老板", "三方群里说的"), (f"群「{TOLD_NAME}」", "老板", "这位是我们的达人小美")]
+    assert BOSS not in json.dumps(told, ensure_ascii=False)
+    b.prm.stop()
+    b.relay.stop()
+
+
+def test_her_line_in_a_boss_group_gone_is_never_answered_in_her_private_chat(bot):
+    """「群已经不在了」 with her group job queued: its line went into her private draft (second check 2026-11-09)."""
+    boss_makes(bot)
+    no_opening(bot)
+    bot.prm.handle(gmsg(bot, "群里问：寄样怎么弄"))
+    deal_id = bot.prm.store.boss_group(GROUP)["deal_id"]
+    assert bot.prm.deal_action("group_none", {"deal_id": deal_id})["ok"] is True
+    bot.clock.now += 5
+    bot.prm.handle(bot.msg("私聊：在吗"))
+    assert "寄样" not in job_of(bot, CREATOR)["text"]
+    assert any(n["key"] == f"group_left:{GROUP}" for n in bot.prm.store.deal(deal_id)["notices"])
+
+
+def test_a_queued_group_opening_cancelled_by_the_group_gone_leaves_no_notice(bot):
+    """It said 「请直接在老板拉的群里跟她打招呼」 for a job with none of her lines (second check 2026-11-09)."""
+    boss_makes(bot)
+    job = job_of(bot)
+    assert json.loads(job["meta"])["opening"]["how"] == "boss_group"
+    deal_id = bot.prm.store.boss_group(GROUP)["deal_id"]
+    before = [n["key"] for n in bot.prm.store.deal(deal_id)["notices"]]
+    assert bot.prm.deal_action("group_none", {"deal_id": deal_id})["ok"] is True
+    assert bot.relay.store.get(job["id"])["status"] == "cancelled"
+    assert [n["key"] for n in bot.prm.store.deal(deal_id)["notices"]] == before
+
+
 def test_bu_jie_le_on_a_boss_group_keeps_it_her_three_party_group_read_only(bot):
     """Review 2026-11-09: the console's 「不接了」 (the admin's 「不接群」 too) on a 老板拉的群 that is her 三方群 stops the
     drafting there only: it stays her 三方群 (as one 「建好了」 by the console), read only; never 「群已经不在了」."""

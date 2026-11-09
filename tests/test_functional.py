@@ -1963,6 +1963,31 @@ class TestPrmPages:
         page.get_by_text("在重新起草：写好的新草稿会换掉这一份").wait_for()
         assert posted[-1] == {"id": 2, "action": "redraft"}
 
+    def test_review_page_lists_her_lines_a_closed_group_left_unanswered_until_done(self, page, prm):
+        """接手任何合作群 (2026-11-09): her lines in a group whose link ended before they were answered are never answered
+        in another chat: the 待审批 page lists them (``group_alerts``) until 「已处理」 posts ``group_left_done``."""
+        posted = []
+
+        def alerts(state):
+            state["group_alerts"] = [{"deal_id": 1, "party_id": 1, "party_name": "小美", "chat": "test_group_33@chatroom",
+                                      "text": "她在群「小美合作对接群」里还有 2 句话没回（群已经不接了），要回的话请到群里直接回",
+                                      "at": prm.clock.now}]
+
+        def deal_post(route):
+            posted.append(route.request.post_data_json)
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({"ok": True}))
+
+        self._serve_prm(page, alerts)
+        page.route("**/api/prm/deals", deal_post)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        banner = page.locator(".prm-group-alerts")
+        banner.wait_for()
+        text = banner.inner_text()
+        assert "小美 · 不接的群里还有话没回" in text and "还有 2 句话没回" in text and "不会在她的私聊里回" in text
+        banner.locator("button:has-text('已处理')").click()
+        page.get_by_text("已标为处理过了").wait_for()
+        assert posted[-1] == {"action": "group_left_done", "deal_id": 1, "chat": "test_group_33@chatroom"}
+
     def test_review_page_says_a_draft_goes_into_a_group_linked_by_hand(self, page, prm):
         """A draft for a group the admin linked by hand (``group_manual``): the tag and the question before it goes say
         群「…」 and that the group sees it, never 老板拉的群; a boss group's draft keeps its words."""

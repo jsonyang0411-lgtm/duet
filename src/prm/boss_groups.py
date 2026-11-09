@@ -546,14 +546,16 @@ class BossGroups:
         names = {str(b.get("name") or "") for b in row.get("boss") or []} | set(self._with)
         return any(n and n in str(line or "") for n in names)
 
-    def recall_is_hers(self, row: dict, party: dict, line: str, sender: str = "") -> bool:
+    def recall_is_hers(self, row: dict, party: dict, line: str, sender: str = "", recent: bool = True) -> bool:
         """Is one of WeChat's lines of a linked group somebody's recall (``edge.text.recall_by`` "them": not ours) that
-        is hers (PrmService ``_system_line``: her drafts not sent wait for a person)?  ``sender``: who wrote the line
-        WeChat took back, when it rewrote that line in place (the backend's ``recalled_id``, ``sender_of``): hers only
-        when it was hers.  Else by the name in it: never one that names a boss (``boss_said``) or another member we
-        know (as this account sees them in the group; spaces and case aside, her own name first); any other one is
-        taken for hers (review 2026-11-09: a name we do not know is most likely hers: her group nickname, a 百应
-        friend's remark 「抖音-…」).  The drafts not sent wait for a person: a recall of hers missed is the worse slip."""
+        is hers (PrmService ``_system_line``: every draft of hers not sent waits for a person)?  ``sender``: who wrote
+        the line WeChat took back, when it rewrote that line in place (the backend's ``recalled_id``, ``sender_of``):
+        hers only when it was hers.  Else by the name in it: hers when it is her name (as this account sees her in the
+        group, or her 称呼; spaces and case aside); never when it is a boss's (``boss_said``: PRM_GROUP_WITH, the bosses'
+        names kept) or another member's we know (review 2026-11-09).  Any other name: in a 老板拉的群 hers (she is the
+        one there besides us and the boss); in a group linked by hand only when she wrote there lately (``recent``:
+        within HER_RECALL_SEC, PrmService; second check 2026-11-09: a stranger's recall, the boss's under his nickname,
+        held all her drafts, her private ones too)."""
         if edge_text.recall_by(line) != "them":
             return False
         her = str(party.get("wxid") or "")
@@ -563,12 +565,14 @@ class BossGroups:
             return False
         said = " ".join(str(line or "").split()).split(edge_text.RECALL_MARK, 1)[0]
         who = _key(said.strip().strip('"“”「」\'').strip())
-        if not who:
-            return True
         members = row.get("members") or []
-        if who in {_key(m.get("name")) for m in members if m.get("wxid") == her} | {_key(party.get("name"))}:
+        if who and who in {_key(m.get("name")) for m in members if m.get("wxid") == her} | {_key(party.get("name"))}:
             return True
-        return who not in {_key(m.get("name")) for m in members if m.get("wxid") != her} - {""}
+        known = {_key(m.get("name")) for m in members if m.get("wxid") != her}
+        known |= {_key(b.get("name")) for b in row.get("boss") or []} | {_key(n) for n in self._with}
+        if who and who in known - {""}:
+            return False
+        return recent if row.get("manual") else True
 
     def hide(self, text) -> str:
         """``text`` with each boss's name (PRM_GROUP_WITH: spaces and case aside) as PRM_BOSS_CALL: what goes to the Mac
@@ -1105,7 +1109,8 @@ class BossGroups:
 
     def _look_at_linked(self, own: str, now: float, manual_only: bool = False) -> None:
         """Is she still in each group the bot took over (``manual_only``: each one linked by hand)?  Gone: her deal says
-        so (until she is back)."""
+        so (until she is back).  The row's members are the group's now (second check 2026-11-09: a recall is told apart
+        by the names this account sees, ``recall_is_hers``; the bosses kept, ``boss``, stay)."""
         if not callable(getattr(self._backend, "group_members", None)):
             return
         for row in self._store.boss_groups((LINKED,)):
@@ -1116,7 +1121,10 @@ class BossGroups:
             raw = self._backend.group_members(row["chat"]) if party is not None and deal is not None else None
             if raw is None:
                 continue
-            there = any(m["wxid"] == party["wxid"] for m in clean_members(raw, own))
+            members = clean_members(raw, own)
+            there = any(m["wxid"] == party["wxid"] for m in members)
+            if members and members != row["members"]:
+                self._store.update_boss_group(row["chat"], now, states=(LINKED,), members=members)
             key = LEFT_NOTICE + row["chat"]
             has = any(n.get("key") == key for n in deal["notices"])
             if not there and not has:

@@ -49,6 +49,7 @@ export default function ReviewPanel() {
         <AutoModeBar d={data} onDone={reload} />
         <PlatformAlerts alerts={data?.platform_alerts || []} onDone={reload} />
         <NightAlerts alerts={data?.night_alerts || []} onDone={reload} />
+        <GroupAlerts alerts={data?.group_alerts || []} onDone={reload} />
         {data && !pending.length && (
           <Empty title="现在没有要审批的草稿">已登记的达人发来消息后，Mac 写好的回复会出现在这里。</Empty>
         )}
@@ -216,6 +217,37 @@ function HandSamples({ rows, onDone }) {
           <div className="f-hint">{h.sent_at ? `${fmtClock(h.sent_at)} 发货；` : ''}手动建的寄样单：机器人没有替她填进合作单，告诉她运单号以后点「知道了」</div>
         </Banner>
       ))}
+    </div>
+  )
+}
+
+/** 接手任何合作群 (2026-11-09): her lines in a group whose link ended before they were answered. The bot never answers
+ *  them in another chat; each stays until 已处理 (or her next line there, the group linked again). */
+function GroupAlerts({ alerts, onDone }) {
+  const toast = useToast()
+  const [busy, setBusy] = useState('')
+  if (!alerts.length) return null
+  const done = async (a) => {
+    const key = `${a.deal_id}:${a.chat}`
+    setBusy(key)
+    try {
+      await dealAction({ action: 'group_left_done', deal_id: a.deal_id, chat: a.chat })
+      toast.ok('已标为处理过了')
+      onDone()
+    } catch (e) { toast.err(e.message) } finally { setBusy('') }
+  }
+  return (
+    <div className="stack prm-group-alerts" style={{ gap: 8 }}>
+      {alerts.map((a) => {
+        const key = `${a.deal_id}:${a.chat}`
+        return (
+          <Banner key={key} kind="warn" title={`${a.party_name} · 不接的群里还有话没回`}
+            actions={<button type="button" className="btn sm" disabled={busy === key} onClick={() => done(a)}><CheckCircle />已处理</button>}>
+            <div>{a.text}</div>
+            <div className="f-hint">机器人不会在她的私聊里回这些话；在群里回过以后点「已处理」</div>
+          </Banner>
+        )
+      })}
     </div>
   )
 }
