@@ -58,8 +58,9 @@
                     private chat (its number is the packet's id): when, where it stands (``state``: written before the
                     send as ``telling``), the admin's own words kept as the proposed edit (``proposed``), what was decided
                     there (``decision``: send, edit, drop, execute), when the admin was told what came of it
-                    (``told_at``: a send that failed, a platform action's result) and which preview a platform draft's
-                    notification showed (``preview``: its fingerprint, "" when it said it cannot run from WeChat)
+                    (``told_at``: a send that failed, a platform action's result; ``late_told_at``: its late result) and
+                    which preview a platform draft's notification showed (``preview``: its fingerprint, "" when it said
+                    it cannot run from WeChat)
 
 A packet's life: ``pending`` (waits in the console) -> ``approved`` (an operator said
 send, the kind's gate is ``auto``, or the 下班时段 window sent it: route ``night``) -> ``sending`` ->
@@ -355,9 +356,10 @@ CREATE TABLE IF NOT EXISTS boss_groups (
 -- left so, it may or may not have gone out: never sent again) | notified (told, the answer is awaited) | proposed (the
 -- admin wrote other text quoting it: ``proposed``, not sent; a 「1」 quoting that question sends it) | answered (decided
 -- there: ``decision`` send / edit / drop / execute).  Open while its packet is pending.  ``told_at``: the admin was told
--- what came of a decision taken there (a send that failed, a platform action's result).  ``preview``: the fingerprint of
--- the preview a platform draft's notification showed (「执行」 runs only that one; "": it said it cannot run from WeChat).
--- The 8.2 clean-up drops a deal's closed rows, cuts the rest.
+-- what came of a decision taken there (a send that failed, a platform action's result; ``late_told_at``: the result that
+-- came late, after the bot had given up).  ``preview``: the fingerprint of the preview a platform draft's notification
+-- showed (「执行」 runs only that one; "": it said it cannot run from WeChat).  The 8.2 clean-up drops a deal's closed
+-- rows, cuts the rest.
 CREATE TABLE IF NOT EXISTS wechat_reviews (
     packet_id INTEGER PRIMARY KEY,
     deal_id INTEGER NOT NULL,
@@ -369,6 +371,7 @@ CREATE TABLE IF NOT EXISTS wechat_reviews (
     answered_at REAL,
     told_at REAL,
     preview TEXT NOT NULL DEFAULT '',
+    late_told_at REAL,
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS wechat_reviews_deal ON wechat_reviews(deal_id);
@@ -403,6 +406,10 @@ _ADDED_COLUMNS = (
     ("deals", "last_by_chat", "TEXT NOT NULL DEFAULT '{}'"),
     # 老板拉的群, second review 2026-10-31 (F4): WeChat's line that we were added (the scan's confidence rule)
     ("boss_groups", "joined_at", "REAL"),
+    # 微信里审批草稿 (src/prm/wechat_review.py), its second and third rounds (2026-11-09): a table made by the first
+    ("wechat_reviews", "told_at", "REAL"),
+    ("wechat_reviews", "preview", "TEXT NOT NULL DEFAULT ''"),
+    ("wechat_reviews", "late_told_at", "REAL"),
 )
 
 # What the creators wrote, or our side's own words, waiting for the next draft job.
@@ -988,9 +995,11 @@ class PrmStore:
             ).fetchall()
         return [packet_view(dict(r)) for r in rows]
 
-    def move(self, packet_id: int, from_states: tuple, to_state: str, **fields) -> bool:
-        """Compare-and-set: the packet goes to ``to_state`` only if it is in one of ``from_states``.
-        ``platform`` (a dict) replaces the packet's platform JSON in the same step."""
+    def move(self, packet_id: int, from_states: tuple, to_state: str, *,
+             expect: Optional[Callable[[dict], bool]] = None, **fields) -> bool:
+        """Compare-and-set: the packet goes to ``to_state`` only if it is in one of ``from_states`` (and, with
+        ``expect``, only if its platform JSON now passes it: one step under the lock).  ``platform`` (a dict)
+        replaces the packet's platform JSON in the same step."""
         allowed = {"final_text", "edited", "outcome", "error", "decided_at", "sent_at", "platform", "route"}
         unknown = set(fields) - allowed
         if unknown:
@@ -999,6 +1008,12 @@ class PrmStore:
             fields["platform"] = json.dumps(fields["platform"] or {}, ensure_ascii=False)
         names = sorted(fields)
         with self._lock:
+            if expect is not None:
+                row = self._conn.execute(
+                    f"SELECT platform FROM action_packets WHERE id = ? AND status IN ({', '.join('?' * len(from_states))})",
+                    (packet_id, *from_states)).fetchone()
+                if row is None or not expect(_loads(row["platform"], {})):
+                    return False
             cur = self._conn.execute(
                 f"UPDATE action_packets SET status = ?{''.join(f', {n} = ?' for n in names)}"
                 f" WHERE id = ? AND status IN ({', '.join('?' * len(from_states))})",
@@ -2040,11 +2055,11 @@ class PrmStore:
 
     def wechat_reviews_open(self) -> list[dict]:
         """The drafts told to the admin that still wait for the answer there (their packet pending, nothing decided in
-        WeChat; a ``telling`` one may have gone out), oldest first; each row with its packet's ``party_id`` and
-        ``chat_id``."""
+        WeChat; a ``telling`` one may have gone out), oldest first; each row with its packet's ``party_id``,
+        ``chat_id`` and ``tool``."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT w.*, p.party_id AS party_id, p.chat_id AS chat_id FROM wechat_reviews w"
+                "SELECT w.*, p.party_id AS party_id, p.chat_id AS chat_id, p.tool AS tool FROM wechat_reviews w"
                 " JOIN action_packets p ON p.id = w.packet_id WHERE p.status = ?"
                 " AND w.state IN ('telling', 'notified', 'proposed') ORDER BY w.packet_id", (PENDING,)).fetchall()
         return [dict(r) for r in rows]
@@ -2059,19 +2074,22 @@ class PrmStore:
         return [dict(r) for r in rows]
 
     def wechat_reviews_closed_since(self, since: float, but: int) -> list[int]:
-        """The told drafts (but ``but``) that stopped waiting at ``since`` or later (decided, out of date, dropped: their
-        ``decided_at``, else ``sent_at``): a bare answer then may have meant one of them."""
+        """The told drafts (but ``but``) that stopped waiting at ``since`` or later (decided in the console, out of date,
+        dropped: their ``decided_at``, else ``sent_at``), never one the admin decided in WeChat (``answered``: the admin
+        knows of that one): a bare answer then may have meant one of them."""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT w.packet_id FROM wechat_reviews w JOIN action_packets p ON p.id = w.packet_id"
-                " WHERE w.packet_id != ? AND p.status != ? AND COALESCE(p.decided_at, p.sent_at, 0) >= ?",
+                " WHERE w.packet_id != ? AND w.state != 'answered' AND p.status != ?"
+                " AND COALESCE(p.decided_at, p.sent_at, 0) >= ?",
                 (int(but), PENDING, float(since))).fetchall()
         return [int(r["packet_id"]) for r in rows]
 
     def set_wechat_review(self, packet_id: int, states: tuple = (), now: Optional[float] = None, **fields) -> bool:
         """Compare-and-set: the row's ``fields`` (state, notified_at, proposed, proposed_at, decision, answered_at,
-        told_at) change only while it is in one of ``states`` (any state when empty); True when it changed."""
-        allowed = {"state", "notified_at", "proposed", "proposed_at", "decision", "answered_at", "told_at"}
+        told_at, late_told_at) change only while it is in one of ``states`` (any state when empty); True when it
+        changed."""
+        allowed = {"state", "notified_at", "proposed", "proposed_at", "decision", "answered_at", "told_at", "late_told_at"}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"not a wechat_reviews field: {sorted(unknown)}")
@@ -2086,17 +2104,20 @@ class PrmStore:
             return cur.rowcount == 1
 
     def wechat_reviews_to_tell(self) -> list[dict]:
-        """The decisions taken in WeChat whose outcome the admin was not told yet (``told_at`` empty), oldest first: a
-        send or edit whose draft failed, an execution whose draft ended (sent, failed, dropped); each row with its
+        """The decisions taken in WeChat whose outcome the admin was not told yet, oldest first: (``told_at`` empty) a send
+        or edit whose draft failed, an execution whose draft ended (sent, failed, dropped); (``late_told_at`` empty) an
+        execution told already whose result came late (the bot had given up: ``execution.late``).  Each row with its
         packet's ``party_id``, ``chat_id``, ``status``, ``outcome``, ``error``, ``tool`` and ``platform``."""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT w.*, p.party_id AS party_id, p.chat_id AS chat_id, p.status AS status, p.outcome AS outcome,"
                 " p.error AS error, p.tool AS tool, p.platform AS platform FROM wechat_reviews w"
-                " JOIN action_packets p ON p.id = w.packet_id WHERE w.state = 'answered' AND w.told_at IS NULL"
-                " AND ((w.decision IN ('send', 'edit') AND p.status = ?)"
-                " OR (w.decision = 'execute' AND p.status IN (?, ?, ?))) ORDER BY w.packet_id",
-                (FAILED, SENT, FAILED, DROPPED)).fetchall()
+                " JOIN action_packets p ON p.id = w.packet_id WHERE w.state = 'answered' AND ("
+                "(w.told_at IS NULL AND ((w.decision IN ('send', 'edit') AND p.status = ?)"
+                " OR (w.decision = 'execute' AND p.status IN (?, ?, ?))))"
+                " OR (w.told_at IS NOT NULL AND w.late_told_at IS NULL AND w.decision = 'execute' AND p.status = ?"
+                " AND p.platform LIKE '%\"late\": true%')) ORDER BY w.packet_id",
+                (FAILED, SENT, FAILED, DROPPED, FAILED)).fetchall()
         return [dict(r) for r in rows]
 
     def wechat_notified(self, packet_ids) -> dict[int, float]:

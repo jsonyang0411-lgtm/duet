@@ -138,6 +138,47 @@ def test_approve_queues_one_execution_with_its_own_key(bot):
     assert any(e["kind"] == "platform_execute" for e in bot.prm.store.events(packet["deal_id"]))
 
 
+def test_an_execution_that_cannot_be_queued_leaves_the_draft_waiting_to_be_approved_again(bot):
+    """批准并执行 whose relay job could not be queued: nothing ran, so the draft waits as it was (no key, no decision)
+    and can be approved again (it no longer goes red as 「没能排进 Mac 的任务队列」)."""
+    from unittest.mock import patch
+
+    from src.prm.service import QUEUE_FAILED
+
+    packet = drafted(bot)
+    with patch.object(bot.relay, "submit", side_effect=RuntimeError("队列坏了")):
+        assert bot.prm.decide(packet["id"], "execute") == {"ok": False, "error": QUEUE_FAILED, "code": "queue_failed"}
+    waiting = bot.prm.store.packet(packet["id"])
+    assert (waiting["status"], waiting["decided_at"], waiting["final_text"]) == ("pending", None, None)
+    assert waiting["platform"] == packet["platform"]
+    job = approve(bot, packet)
+    assert json.loads(job["meta"])["op"] == "platform_execute"
+
+
+def test_a_re_preview_landing_between_the_checks_and_the_move_is_never_run_unseen(bot):
+    """The move to executing compares the platform data the checks read: a 重新预览 started in between is refused
+    (the draft waits); a stamp that is not its preview's (微信里审批草稿) too."""
+    from unittest.mock import patch
+
+    from src.prm.service import PREVIEW_CHANGED
+
+    packet = drafted(bot)
+    assert bot.prm.decide(packet["id"], "execute", stamp="f" * 16)["code"] == "preview_changed"
+    real = bot.prm.store.move
+
+    def move(packet_id, from_states, to_state, **fields):
+        if to_state == "executing":
+            data = bot.prm.store.packet(packet_id)["platform"]
+            bot.prm.store.set_platform(packet_id, {**data, "previewing": 1.0}, ("pending",))
+        return real(packet_id, from_states, to_state, **fields)
+
+    with patch.object(bot.prm.store, "move", move):
+        assert bot.prm.decide(packet["id"], "execute") == {"ok": False, "error": PREVIEW_CHANGED,
+                                                          "code": "preview_changed"}
+    assert bot.prm.store.packet(packet["id"])["status"] == "pending"
+    assert [j for j in bot.relay.store.list_jobs(10) if '"platform_execute"' in j["meta"]] == []
+
+
 def test_verified_success_sends_the_reply_with_the_link(bot):
     packet = drafted(bot, block(CHANNEL), reply="专属链接给你啦：{链接} 审核通过后就能用～")
     job = approve(bot, packet)
