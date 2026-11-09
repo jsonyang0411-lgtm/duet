@@ -232,6 +232,16 @@ def test_a_group_with_nobody_she_may_be_and_one_whose_members_cannot_be_read(bot
     assert bot.prm.boss_groups.offered() is None
 
 
+def test_a_member_without_a_name_is_listed_by_the_last_4_of_her_wxid(bot):
+    """Review B-L7 (integrated review 2026-11-10): a member WeChat gives no name for was listed in the admin's chat by
+    her whole wxid; 「（没有名字）…<last 4>」 now (the console's card has the rest)."""
+    bot.backend.names[TESTER] = ""
+    bot.say("接群")
+    question = bot.say("接群 3")
+    assert question.split("\n")[1] == f"1. （没有名字）…{TESTER[-4:]}" and TESTER not in question
+    assert bot.say("是 1").startswith("接手了：群「（没有群名）」")
+
+
 def test_a_nameless_group_says_it_needs_a_name_before_anything_is_sent(bot):
     bot.say("接群")
     question = bot.say("接群 3")
@@ -1002,7 +1012,8 @@ def test_shi_n_counts_only_the_members_the_question_listed(bot):
     bot.backend.groups[BIG]["members"] = [ME, *guests]
     bot.say("接群")
     question = bot.say("接群 2").split("\n")
-    assert question[30] == "30. wxid_guest29" and "31. wxid_guest30" not in question    # (30 of 32 listed)
+    # (30 of 32 listed; nameless: their wxid's last 4 only, integrated review 2026-11-10 B-L7)
+    assert question[30] == "30. （没有名字）…st29" and not any("…st30" in line for line in question)
     assert "人太多，只列了前 30 位：别的到控制台「合作单」页顶上的卡片里选" in question
     assert bot.say("是 31") == ("没有第 31 位：回「是 1」到「是 30」，「不接」作罢；只列了前 30 位，"
                               "别的到控制台「合作单」页顶上的卡片里选")
@@ -1854,6 +1865,51 @@ def test_a_photo_sheet_of_a_group_job_goes_with_a_draft_the_ended_link_never_mak
                                   slots={}, stage_proposal="", platform_held="unasked", operator_files=named(job, row)))
         assert b.prm.store.packet_for_job(job["id"]) is None and not sheet.exists()
         assert b.texts == []
+    finally:
+        b.prm.stop()
+        b.relay.stop()
+
+
+def test_lines_of_the_group_her_waiting_draft_did_not_hear_are_told_to_the_admin_once(clock, tmp_path):
+    """Review A-F3 (``meta.unheard``): her draft for a group linked by hand was told to the admin's chat, then others
+    went on there past the redrafts allowed: her card counted the lines it did not hear, the admin's chat heard nothing
+    and a 「1」 quoting the notice sent it.  It is told again (once: more lines later are the same news) and says so;
+    an answer to the old notice does nothing, one to the fresh one acts."""
+    b = setup(clock, tmp_path, prm_wechat_review="on")
+    review = b.prm.wechat_review
+
+    def told():
+        return [t for chat, t in b.texts if chat == ADMIN and "草稿" in t.split("\n")[0]]
+
+    def answer(words, quote):
+        return review.answer({"message_id": f"q{next(_IDS)}", "chat_id": ADMIN, "sender_id": ADMIN, "content": words,
+                              "msg_type": 49, "quoted_content": quote, "is_group": False, "timestamp": b.clock.now})
+
+    try:
+        linked(b, member=1)
+        b.prm.handle(gmsg(b, "在吗"))
+        drafted(b)
+        assert chatter(b, 3) == REDRAFT_MAX
+        [card] = waiting(b)
+        assert "unheard" not in card
+        review.sweep()
+        [first] = [t for t in told() if t.startswith(f"#{card['id']} 草稿")]
+        chatter(b, 1, start=3)
+        assert waiting(b)[0]["unheard"] == 1
+        assert answer("1", first.split("\n")[0])[1] == (f"#{card['id']} 这份草稿在通知以后有变化，看最新那条通知再回"
+                                                       "（新的通知马上发过来）")
+        review.sweep()
+        fresh = [t for t in told() if t.startswith(f"#{card['id']} 草稿")][-1].split("\n")
+        assert fresh[0] == f"#{card['id']} 草稿（第 2 次通知） · 小美 · 群里「{GROUP_NAME}」"
+        assert fresh[1] == (f"上一条 #{card['id']} 的通知以后有变化：群里后来又有 1 句话这份草稿没听到。上一条作废了，"
+                            "请看这一条再回")
+        assert "（群里后来又有 1 句话这份草稿没听到：发之前请核对；要按群里的新话重写，到控制台点「重新起草」）" in fresh
+        chatter(b, 2, start=4)
+        assert waiting(b)[0]["unheard"] == 3
+        review.sweep()
+        assert len([t for t in told() if t.startswith(f"#{card['id']} 草稿")]) == 2     # (the same news: told once)
+        assert answer("1", first.split("\n")[0])[1] == f"#{card['id']} 这份草稿在通知以后有变化，看最新那条通知再回"
+        assert answer("1", fresh[0])[1] == f"#{card['id']} 已批准，正在发给 小美（群里「{GROUP_NAME}」）"
     finally:
         b.prm.stop()
         b.relay.stop()

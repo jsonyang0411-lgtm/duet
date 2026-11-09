@@ -318,8 +318,13 @@ class BotConfig:
     # draft that waits for a person in 「待审批」 is also told once, as one message, to the admin's private chat
     # (ADMIN_WXID; src/prm/wechat_review.py), and the admin answers there (quoting it: 1 send / 2 drop / 改 + their words;
     # 「发 12」「不发 12」「改 12 …」), the same decision as the console's.  Never for what goes out by itself, a 百应 draft or
-    # a holding reply; a platform action only in the console.  On without ADMIN_WXID it only does nothing (the console
-    # says why).  "off" (the default): nothing of it.
+    # a holding reply.  A platform action runs from WeChat only by 「执行」 quoting its notification (or 「执行 12」), only
+    # the preview that notification showed whole (one it could not list whole, whose 要注意 it cut, held for its photo
+    # check or for pictures that did not come stays the console's 批准并执行); 1 / 好 / 发 never run one, and its reply is
+    # edited in the console only.  A draft that changes after its notification (her recall, a new 要注意, group lines it
+    # did not hear) is told again (「#12 草稿（第 2 次通知）」); an answer to the older one does nothing.  On without
+    # ADMIN_WXID, or with a group's id or a registered creator's wxid in it, it does nothing (the console says why).
+    # "off" (the default): nothing of it.
     prm_wechat_review: str = "off"
     # An operator's own WeChat reply in a creator's chat (or the console) gives the chat to
     # a person for this long: the creator's messages are only recorded meanwhile.

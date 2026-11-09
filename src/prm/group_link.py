@@ -10,7 +10,8 @@ hands the text over, ``admin_command``):
   each with its name, how many are in it and when it was active last;
 - 「接群 3」 (a number of the last list) or 「接群 <群名>」 (its name in WeChat, spaces and case aside; several of that name:
   listed and numbered; none: said so): who in it may be her, numbered (BossGroups ``candidates_of``: everybody but us, the
-  admin, the cc users and the bosses of PRM_GROUP_WITH; the registered creators first, marked 已登记), 「回「是 2」；「不接」
+  admin, the cc users and the bosses of PRM_GROUP_WITH; the registered creators first, marked 已登记; one WeChat gives no
+  name for as 「（没有名字）…<her wxid's last 4>」, never her whole wxid), 「回「是 2」；「不接」
   作罢」 (BossGroups ``offer``: the open question, which the console's card shows too); a deal's own 三方群: she is known
   from the deal, so only 「是 1」 to confirm; a group bigger than PRM_BOSS_GROUP_MAX may be linked all the same (an
   operator's explicit act), the question says how many are in it;
@@ -47,6 +48,7 @@ LIST_MAX = 10                  # 「接群」 lists at most this many groups
 ASKED_KEEP_SEC = 7200          # 「是 N」 / 「不接」 after a question expired still say so, this long after it was asked
 MEMBERS_LISTED = 30            # a question lists at most this many members in WeChat (the console's card lists all)
 NO_NAME = "（没有群名）"
+MEMBER_NO_NAME = "（没有名字）"     # a member WeChat gives no name for (``_nameless``: her wxid's last 4 after it)
 NO_BACKEND = "这台电脑的微信读法列不出群（要 Windows 版微信的数据库直读），接不了群"
 NO_READ = "微信数据库现在读不了，稍后再发「接群」"
 _LINK = re.compile(r"^接群(?:\s*(.+))?$")
@@ -58,6 +60,13 @@ CANCEL = "不接"
 def _key(name) -> str:
     """A group's name as WeChat's search compares it (src/wechat/wcdb_backend.py ``_name_key``): no spaces, no case."""
     return "".join(str(name or "").split()).casefold()
+
+
+def _nameless(wxid) -> str:
+    """A member WeChat gives no name for, as the admin's chat lists it: never her whole wxid (integrated review
+    2026-11-10 B-L7), 「（没有名字）…<last 4>」 (the console's card has the rest)."""
+    wxid = str(wxid or "").strip()
+    return MEMBER_NO_NAME + (wxid if len(wxid) <= 4 else "…" + wxid[-4:])
 
 
 def _clock_text(at) -> str:
@@ -191,7 +200,7 @@ class GroupLinks:
         lines = [f"群「{shown}」（{size} 人）里谁是达人？回「是 编号」，「不接」作罢（{OFFER_SEC // 60} 分钟内有效）："]
         for n, m in enumerate(members[:MEMBERS_LISTED], 1):
             mark = "（已登记）" if m.get("registered") else "（停用过）" if m.get("stopped") else ""
-            lines.append(f"{n}. {m.get('name') or m['wxid']}{mark}")
+            lines.append(f"{n}. {m.get('name') or _nameless(m['wxid'])}{mark}")
         if len(members) > MEMBERS_LISTED:
             lines.append(f"人太多，只列了前 {MEMBERS_LISTED} 位：别的到控制台「合作单」页顶上的卡片里选")
         if isinstance(size, int) and size > bg.max_members:

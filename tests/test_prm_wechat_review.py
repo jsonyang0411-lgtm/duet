@@ -2,7 +2,8 @@
 each, to the admin's private chat, and the admin decides them there: quoting a notification (1 / 2 / 改 … / 执行), or
 「发 N」「不发 N」「改 N …」「执行 N」, a bare 1 / 2 to the last thing the bot said there.  The same decision as the
 console's; nothing of it with the switch off.  Each finding of the 2026-11-09 review (1–10) has its tests here, and so
-does 「执行」 (a platform action approved from WeChat).
+does 「执行」 (a platform action approved from WeChat), and the integrated review of 2026-11-10 (the end of this file: a
+draft that changes after its notice, a cut 要注意, her ids and addresses, ADMIN_WXID).
 
 The relay, the PRM service and the router as Bot.run wires them (``Desk``), with a fake WeChat that records every
 message the bot sends and tells the review each one, as the WCDB backend's sent hook does (src/bot.py).  Names,
@@ -232,6 +233,18 @@ def platform_waiting(desk, preview=None, *, text="寄样单建好啦，单号 {�
         desk.prm.store.aim_packet(packet["id"], GROUP if group else CREATOR, {"operator_files": files})
     desk.review.sweep()
     return desk.prm.store.packet(packet["id"])
+
+
+def her_uid_known(desk, uid=DY_UID) -> int:
+    """A verified 抖店 sample order of hers for this UID, straight into the store: a 专属链接 binding it has no doubt about
+    her UID, its 要注意 short enough for a notification to show whole (only the 专属佣金 the bot did not open): 「执行」
+    can run it from WeChat (a cut 要注意 cannot: integrated review 2026-11-10 A-L1)."""
+    action = {"action": "jst.sample_order", "creator_platform": "dy", "creator_uid": uid}
+    return desk.prm.store.add_packet(
+        deal_id=desk.prm.store.deal_of(1)["id"], party_id=1, job_id=None, chat_id=CREATOR, kind="other", text="",
+        attachments=[], intent="", slots={}, stage_proposal="", needs_attention=False, reason="", status="sent",
+        tool="jst.sample_order", platform={"action": action, "execution": {"outcome": "VERIFIED_SUCCESS",
+                                                                           "created": {"creator_uid": uid}}})
 
 
 def mac_runs(desk, rec):
@@ -2164,6 +2177,7 @@ def test_a_long_platform_action_lists_every_line_or_cannot_run_from_wechat(desk)
                 "seconds": 2.0, "verdict": "ready", "outcome": "", "problems": [], "raw": "{}", "facts": facts}
         return block({**CHANNEL, "stock_per_sku": 100, "exclusive": True}, steps=[step])
 
+    her_uid_known(desk)                                                 # (its 要注意 shown whole: her_uid_known)
     packet = platform_waiting(desk, preview(10), text="专属链接给你啦：{链接}")
     number = packet["id"]
     lines = notice_of(desk, number)
@@ -2196,6 +2210,7 @@ def test_a_notification_too_long_in_characters_cannot_run_from_wechat_either(des
              for i in range(30)]
     step = {"name": "create", "label": "抖店 · 建渠道品", "execute": False, "command": "node bin/dy.mjs", "exit_code": 0,
             "seconds": 2.0, "verdict": "ready", "outcome": "", "problems": [], "raw": "{}", "facts": facts}
+    her_uid_known(desk)                                                 # (its 要注意 shown whole: her_uid_known)
     packet = platform_waiting(desk, block({**CHANNEL, "stock_per_sku": 100, "exclusive": True}, steps=[step]),
                               text="专属链接给你啦：{链接}")
     number = packet["id"]
@@ -2268,6 +2283,7 @@ def test_the_ids_in_a_previews_problems_and_its_plan_show_only_their_last_charac
 def test_the_line_that_tells_an_executions_end_shows_her_ids_by_their_last_characters(desk):
     """Third verification item 9 (probe i9d): the line that told a PARTIAL end quoted its first problem raw, her UID in
     full; and a red draft's error quoted when it is answered again."""
+    her_uid_known(desk)                                                 # (its 要注意 shown whole: her_uid_known)
     packet = platform_waiting(desk, block({**CHANNEL, "stock_per_sku": 50, "exclusive": True}), text="专属链接给你啦：{链接}")
     number = packet["id"]
     desk.admin("执行", quote=head(desk, number))
@@ -2509,8 +2525,8 @@ def test_the_clean_up_drops_the_closed_rows_and_cuts_a_waiting_proposed_edit(des
 
 def test_a_database_from_the_first_round_gets_the_new_columns(tmp_path):
     """Second review (info): a prm.db made by the first commits has ``wechat_reviews`` without ``told_at`` /
-    ``preview`` / ``late_told_at`` (and ``pictures_ok``, 2026-11-10): they are added (as every column added to an old
-    database), the sweep works."""
+    ``preview`` / ``late_told_at`` (and ``pictures_ok``, ``notice``, ``seen``, 2026-11-10): they are added (as every
+    column added to an old database), the sweep works."""
     import sqlite3 as sql
 
     path = tmp_path / "prm.db"
@@ -2526,9 +2542,10 @@ def test_a_database_from_the_first_round_gets_the_new_columns(tmp_path):
     conn.close()
     store = PrmStore(str(path))
     columns = {r["name"] for r in store._conn.execute("PRAGMA table_info(wechat_reviews)")}
-    assert {"told_at", "preview", "late_told_at", "pictures_ok"} <= columns
+    assert {"told_at", "preview", "late_told_at", "pictures_ok", "notice", "seen"} <= columns
     assert store.wechat_review(5)["preview"] == "" and store.wechat_reviews_to_tell() == []
     assert store.wechat_review(5)["pictures_ok"] == 1          # (2026-11-10: a row from before had its pictures sent)
+    assert (store.wechat_review(5)["notice"], store.wechat_review(5)["seen"]) == (1, "")   # (its first notice, not known)
     store.close()
 
 
@@ -2556,6 +2573,29 @@ def test_the_stopped_bot_says_why_nothing_goes_to_wechat(monkeypatch):
     monkeypatch.setenv("ADMIN_WXID", ADMIN)
     assert server._wechat_review_stopped_status() == {"on": True, "why": "机器人没有运行：草稿发不到管理员微信里",
                                                        "open": 0, "unsent": 0, "unsure": 0, "older": 0}
+
+
+def test_the_stopped_bot_checks_admin_wxid_as_the_running_one_does(monkeypatch, tmp_path):
+    """合并 fix1110-w (2026-11-10): the stopped bot's console says why nothing goes to WeChat as the running bot's does
+    (``wechat_review.admin_problem``): ADMIN_WXID a group's id, or a registered creator's wxid in the stopped bot's
+    database (an inactive one too), not only an empty one."""
+    from src.web import server
+
+    db = tmp_path / "prm.db"
+    store = PrmStore(str(db))
+    party = store.add_party(CREATOR, "小美", now=1)
+    store.update_party(party["id"], active=False, now=2)            # (an inactive creator's wxid counts too)
+    store.close()
+    server.register_prm(None)
+    monkeypatch.setenv("PRM_DB", str(db))
+    monkeypatch.setenv("PRM_WECHAT_REVIEW", "on")
+    for admin, why in (("12345678@chatroom", wr.GROUP_ADMIN_WHY), (CREATOR, wr.CREATOR_ADMIN_WHY),
+                       (ADMIN, "机器人没有运行：草稿发不到管理员微信里"), ("", NO_ADMIN_WHY)):
+        monkeypatch.setenv("ADMIN_WXID", admin)
+        assert server._prm_state()["wechat_review"]["why"] == why, admin
+    monkeypatch.setenv("ADMIN_WXID", CREATOR)
+    assert server._wechat_review_stopped_status()["why"] == "机器人没有运行：草稿发不到管理员微信里"   # (no database: not looked up)
+    assert wr.admin_problem(" 12345678@chatroom ", None) == wr.GROUP_ADMIN_WHY
 
 
 def test_the_switch_is_off_by_default_and_checked_like_the_others(monkeypatch):
@@ -3044,3 +3084,369 @@ def test_a_draft_with_pictures_is_never_answered_before_they_went(desk):
     assert answers == [f"#{number} {PICTURES_MISSING}"] and desk.executions() == []
     assert desk.prm.store.wechat_review(number)["pictures_ok"] == 1     # (then it went: answered from here now)
     assert desk.admin("执行", quote=head(desk, number)).startswith(f"#{number} 已批准执行")
+
+
+# ── the integrated review of 2026-11-10 (merge-1109): a draft that changes after its notice, ids, addresses ──────
+
+def her_recall(desk, chat=CREATOR):
+    """She takes a line back (WeChat's own line in her chat, as the WCDB backend hands it on)."""
+    desk.prm.handle({"message_id": f"r{next(IDS)}", "chat_id": chat, "sender_id": chat, "sender_name": "她",
+                     "content": "[消息类型:10000]", "msg_type": 10000, "is_group": False, "timestamp": desk.clock.now,
+                     "special": {"kind": "system", "title": '"小美" 撤回了一条消息'}})
+
+
+def latest_notice(desk, number) -> list[str]:
+    """The lines of the latest notification of draft ``number`` (a fresh one after a change: 「#N 草稿（第 2 次通知）」)."""
+    return [t for t in desk.told() if t.startswith(f"#{number} 草稿")][-1].split("\n")
+
+
+def test_a_recall_after_the_notification_tells_the_admin_again_and_the_old_one_does_nothing(desk):
+    """Review A-F3 (probe A4): a draft told here, then she took a line back.  The service holds the drafts not sent
+    (``hold_for_review``: the console says 「撤回…发之前请核对」); the admin's chat never heard of it and a 「1」 quoting
+    the earlier notification sent the draft as it was.  Now the draft is told again on the same number, saying what
+    changed; an answer to the old notification does nothing (before the fresh one went too), one to the fresh one
+    acts."""
+    packet = waiting(desk, said="我家地址是测试路1号")
+    number = packet["id"]
+    first = head(desk, number)
+    her_recall(desk)
+    held = desk.prm.store.packet(number)
+    assert held["status"] == "pending" and held["needs_attention"] and "撤回" in held["reason"]
+    stale = f"#{number} 这份草稿在通知以后有变化，看最新那条通知再回"
+    assert desk.admin("1", quote=first) == f"{stale}（新的通知马上发过来）"     # (before the sweep told it again)
+    assert desk.prm.store.packet(number)["status"] == "pending"
+    assert desk.review.sweep() == 1
+    lines = latest_notice(desk, number)
+    assert lines[0] == f"#{number} 草稿（第 2 次通知） · 小美 · 私聊"
+    assert lines[1] == f"上一条 #{number} 的通知以后有变化：她撤回了一条消息（见「要注意」）。上一条作废了，请看这一条再回"
+    assert any(line.startswith("要注意：达人撤回了一条消息") for line in lines)
+    assert lines[-1] == f"（引用这条回；不引用就回「发 {number}」「不发 {number}」「改 {number} 你的话」）"
+    row = desk.prm.store.wechat_review(number)
+    assert (row["state"], row["notice"]) == ("notified", 2)
+    for answer in ("1", "发", "改 好的老师～", "好的，就这样发"):
+        assert desk.admin(answer, quote=first) == stale, answer
+    assert desk.prm.store.packet(number)["status"] == "pending"
+    assert desk.prm.store.wechat_review(number)["proposed"] == ""
+    desk.prm.send_approved()
+    assert desk.to(CREATOR) == []
+    desk.review.sweep()
+    assert len([t for t in desk.told() if t.startswith(f"#{number} 草稿")]) == 2       # (told again once)
+    assert desk.admin("1", quote=lines[0]) == f"#{number} 已批准，正在发给 小美"
+    desk.prm.send_approved()
+    assert desk.to(CREATOR) == ["收到啦～戴着还合适吗？"]
+
+
+def test_an_answer_to_the_old_notification_without_a_quote_does_nothing_until_the_fresh_one_was_read(desk):
+    """A bare 「1」 to the old notification, or an unquoted 「发 N」 written before the fresh one could be read, does
+    nothing; written after it, it acts (a bare 「1」 answers the fresh one, the last thing the bot said)."""
+    packet = waiting(desk)
+    number = packet["id"]
+    her_recall(desk)
+    stale = f"#{number} 这份草稿在通知以后有变化，看最新那条通知再回"
+    assert desk.admin("1") == f"{stale}（新的通知马上发过来）"
+    assert desk.admin(f"发 {number}") == f"{stale}（新的通知马上发过来）"
+    desk.clock.now += 5
+    desk.review.sweep()
+    told_at = desk.clock.now
+    assert desk.admin(f"发 {number}", at=told_at - 2) == stale            # (written before the fresh one showed)
+    assert desk.admin(f"执行 {number}", at=told_at - 2) == stale
+    assert desk.prm.store.packet(number)["status"] == "pending"
+    assert desk.admin(f"发 {number}") == f"#{number} 已批准，正在发给 小美"
+
+
+def test_a_bare_1_after_the_fresh_notice_answers_it(desk):
+    packet = waiting(desk)
+    number = packet["id"]
+    her_recall(desk)
+    desk.review.sweep()
+    assert desk.admin("1") == f"#{number} 已批准，正在发给 小美"            # (the fresh notice: the last thing said)
+
+
+def test_an_unquoted_answer_after_the_fresh_notice_counts_on_the_measured_clock(clock, tmp_path):
+    """Without its read-back (the backend did not read the fresh notice back, a restart): on this PC's time it went out,
+    a minute later with no clock measured."""
+    desk = NoReadBack(clock, tmp_path)
+    desk.prm.register(CREATOR, "小美", "测试达人")
+    try:
+        packet = waiting(desk)
+        number = packet["id"]
+        her_recall(desk)
+        desk.review.sweep()
+        told_at = desk.clock.now
+        stale = f"#{number} 这份草稿在通知以后有变化，看最新那条通知再回"
+        assert desk.admin(f"发 {number}", at=told_at + 30) == stale       # (nothing measured: a minute)
+        assert desk.admin(f"发 {number}", at=told_at + 61) == f"#{number} 已批准，正在发给 小美"
+    finally:
+        desk.stop()
+
+
+def test_a_proposed_edit_written_before_the_change_is_never_sent(desk):
+    """Other words quoting the old notification were kept as a proposed edit (「#N 改成：『…』」); the draft changed: the
+    fresh notice drops the proposal, a 「1」 quoting that question does nothing; one proposed after the fresh notice is
+    asked about and sent as before."""
+    packet = waiting(desk)
+    number = packet["id"]
+    question = desk.admin("好的呀，下周一就给您寄过去", quote=head(desk, number))
+    assert question.startswith(f"#{number} 改成：『好的呀，下周一就给您寄过去』")
+    her_recall(desk)
+    desk.review.sweep()
+    assert desk.prm.store.wechat_review(number)["proposed"] == ""
+    stale = f"#{number} 这份草稿在通知以后有变化，看最新那条通知再回"
+    assert desk.admin("1", quote=question.split("\n")[0]) == stale
+    fresh = latest_notice(desk, number)[0]
+    asked = desk.admin("那就下周二寄吧", quote=fresh)
+    assert asked.startswith(f"#{number} 改成：『那就下周二寄吧』")
+    assert desk.admin("1", quote=asked.split("\n")[0]) == f"#{number} 按你改的批准了，正在发给 小美"
+
+
+def test_2_quoting_the_old_notification_still_drops_the_draft(desk):
+    """Dropping sends nothing: 2 / 不发 to the old notification are done (as when its pictures did not come)."""
+    packet = waiting(desk)
+    number = packet["id"]
+    her_recall(desk)
+    desk.review.sweep()
+    assert desk.admin("2", quote=head(desk, number)) == f"#{number} 不发了（她再发消息时会有新的草稿）"
+    assert desk.prm.store.packet(number)["status"] == "dropped"
+
+
+def test_a_fresh_notice_wechat_does_not_take_keeps_the_answers_stale_and_is_tried_again(desk):
+    packet = waiting(desk)
+    number = packet["id"]
+    her_recall(desk)
+    desk.refuse.add(ADMIN)
+    assert desk.review.sweep() == 0
+    row = desk.prm.store.wechat_review(number)
+    assert (row["state"], row["notice"]) == ("notified", 1)               # (put back as it was)
+    desk.refuse.clear()
+    assert desk.admin("1", quote=head(desk, number)).startswith(f"#{number} 这份草稿在通知以后有变化")
+    desk.clock.now += RETRY_SEC[0] + 1
+    assert desk.review.sweep() == 1
+    assert latest_notice(desk, number)[0].startswith(f"#{number} 草稿（第 2 次通知）")
+    desk.review.sweep()
+    went = [t for kind, chat, t in desk.order if kind == "text" and chat == ADMIN and t.startswith(f"#{number} 草稿")]
+    assert len(went) == 2 and went[1].startswith(f"#{number} 草稿（第 2 次通知）")
+
+
+def test_a_second_change_is_told_as_the_third_notice(desk):
+    packet = waiting(desk)
+    number = packet["id"]
+    her_recall(desk)
+    desk.review.sweep()
+    second = latest_notice(desk, number)[0]
+    desk.clock.now += 60
+    her_recall(desk)
+    desk.review.sweep()
+    assert latest_notice(desk, number)[0] == f"#{number} 草稿（第 3 次通知） · 小美 · 私聊"
+    assert desk.admin("1", quote=second) == f"#{number} 这份草稿在通知以后有变化，看最新那条通知再回"
+    assert desk.admin("1", quote=latest_notice(desk, number)[0]) == f"#{number} 已批准，正在发给 小美"
+
+
+def test_what_a_notice_shows_of_attention_is_its_fingerprint(desk):
+    """Only what a notification shows counts as a change: whether it asks for attention and its reason, whether lines of
+    the group came it did not hear (more of them later: the same news); never a reason it does not show."""
+    base = {"needs_attention": False, "reason": "kb/合作政策.md", "meta": {}}
+    seen = wr.attention_seen(base)
+    assert wr.attention_seen({**base, "reason": "kb/别的.md"}) == seen
+    assert wr.attention_seen({**base, "needs_attention": True}) != seen
+    flagged = {**base, "needs_attention": True}
+    assert wr.attention_seen({**flagged, "reason": "达人撤回了一条消息；kb/合作政策.md"}) != wr.attention_seen(flagged)
+    assert wr.attention_seen({**base, "meta": {"unheard": 3}}) != seen
+    assert wr.attention_seen({**base, "meta": {"unheard": 5}}) == wr.attention_seen({**base, "meta": {"unheard": 3}})
+    from src.prm.service import recall_note                              # (a recall's note: what the notice says)
+    assert wr.RECALL_WORDS in recall_note(desk.clock.now)
+    recalled = json.loads(wr.attention_seen({**flagged, "reason": f"{recall_note(desk.clock.now)}；kb/合作政策.md"}))
+    assert recalled["k"] == 1 and json.loads(wr.attention_seen(flagged))["k"] == 0
+    assert wr._notice_no("#12 草稿（第 2 次通知） · 小美 · 私聊") == 2 and wr._notice_no("#12 草稿 · 小美 · 私聊") == 1
+    assert read({"msg_type": QUOTE, "content": "1", "quoted_content": "#12 草稿（第 3 次通知） · 小美"}).notice == 3
+
+
+def test_a_row_from_before_the_fingerprint_is_never_told_again_for_what_it_may_have_shown(desk):
+    """A row told by a bot from before ``seen`` was kept: the draft as it is now counts as seen (no fresh notice for
+    what the old notice may have said already), a later change is told."""
+    packet = waiting(desk)
+    number = packet["id"]
+    with desk.prm.store._lock:
+        desk.prm.store._conn.execute("UPDATE wechat_reviews SET seen = ''")
+    her_recall(desk)
+    assert desk.review.sweep() == 0 and desk.prm.store.wechat_review(number)["seen"]
+    assert desk.admin("1", quote=head(desk, number)) == f"#{number} 已批准，正在发给 小美"
+
+
+def test_a_platform_draft_whose_要注意_is_cut_runs_only_in_the_console(desk):
+    """Review A-L1 (probe A5): a 专属链接 whose UID the bot cannot tie to her and whose 专属佣金 it never opened: its
+    要注意 (the console shows it whole) was cut to NOTE_CHARS in WeChat, and 「执行」 still ran it.  A cut 要注意 on a
+    platform draft lets nothing run from WeChat now (no stamp), and the notice says why."""
+    packet = platform_waiting(desk, block({**CHANNEL, "stock_per_sku": 50, "exclusive": True}),
+                              text="专属链接给你啦：{链接}")
+    number = packet["id"]
+    assert packet["needs_attention"] and len(desk.review._reason(packet)) > wr.NOTE_CHARS
+    lines = notice_of(desk, number)
+    attention = next(line for line in lines if line.startswith("要注意："))
+    assert attention.endswith("…") and len(attention) == len("要注意：") + wr.NOTE_CHARS + 1
+    assert lines[-1] == "要注意的话太长，请在控制台看完再批；不要的话回 2"
+    assert not any("回「执行」" in line for line in lines)
+    assert desk.prm.store.wechat_review(number)["preview"] == ""
+    refused = f"#{number} 要注意的话太长，请在控制台看完再批；不要的话回 2"
+    assert desk.admin("执行", quote=head(desk, number)) == refused and desk.admin(f"执行 {number}") == refused
+    assert desk.prm.store.packet(number)["status"] == "pending" and desk.executions() == []
+    assert shown_pending(desk, number)["wechat_execute"] is False
+    assert desk.admin("2", quote=head(desk, number)) == f"#{number} 不发了（她再发消息时会有新的草稿）"
+
+
+def shown_pending(desk, number) -> dict:
+    return next(p for p in desk.prm.snapshot()["pending"] if p["id"] == number)
+
+
+def test_a_recall_that_makes_a_platform_drafts_要注意_too_long_takes_执行_back_to_the_console(desk):
+    """The first notice let 「执行」 run (its 要注意 short); her recall puts its note first: the fresh notice cuts it, so
+    「执行」 is the console's, quoting either notice."""
+    her_uid_known(desk)
+    packet = platform_waiting(desk, block({**CHANNEL, "stock_per_sku": 50, "exclusive": True}),
+                              text="专属链接给你啦：{链接}")
+    number = packet["id"]
+    assert desk.prm.store.wechat_review(number)["preview"]
+    her_recall(desk)
+    desk.review.sweep()
+    fresh = latest_notice(desk, number)
+    assert fresh[0].startswith(f"#{number} 草稿（第 2 次通知）") and fresh[-1] == "要注意的话太长，请在控制台看完再批；不要的话回 2"
+    assert desk.prm.store.wechat_review(number)["preview"] == ""
+    assert desk.admin("执行", quote=head(desk, number)) == f"#{number} 这份草稿在通知以后有变化，看最新那条通知再回"
+    assert desk.admin("执行", quote=fresh[0]) == f"#{number} 要注意的话太长，请在控制台看完再批；不要的话回 2"
+    assert desk.executions() == []
+
+
+# B-M1 / B-M2: her full ids in the admin's chat (made-up ids)
+DRAFT_UID = "11112222333344440001"        # the UID a 专属链接 draft binds
+ROUND_UID = "99998888777766660002"        # her UID on the round's verified sample order (``meta.chain_uid``)
+AWEME = "test_dy.4321abc"                 # her 抖音号 (the invite ledger's)
+
+
+def test_a_refused_执行_of_a_chain_step_shows_her_uids_by_their_last_characters(desk):
+    """Review B-M1 (probe_wr_uid): a 专属链接 step of the chain binding another UID than its round's sample order's: the
+    notice masked both, but 「执行」's refusal (``wrong_uid_text``) showed the round's UID in full (only the action's ids
+    were masked).  Every id of the draft now: the round's UID (``meta.chain_uid``) and her sample orders' too."""
+    her_uid_known(desk, ROUND_UID)
+    action = {"action": "dy.channel_goods", "item_id": DY_ITEM, "creator_platform_id": DRAFT_UID,
+              "title_prefix": "【小美专属】", "exclusive": True, "convention": 1}
+    preview = {"verdict": "ready", "facts": [{"label": "批准以后", "value": f"绑定达人 UID {DRAFT_UID}"}], "problems": [],
+               "run": {}}
+    from src.prm.service import wrong_uid_text
+    number = desk.prm.store.add_packet(
+        now=desk.clock.now, deal_id=1, party_id=1, job_id=None, chat_id=CREATOR, kind="other",
+        text="老师专属链接给您～ {链接}", attachments=[], intent="", slots={}, stage_proposal="", needs_attention=True,
+        reason=wrong_uid_text(DRAFT_UID, ROUND_UID), tool="dy.channel_goods", meta={"chain_uid": ROUND_UID},
+        platform={"action": action, "preview": preview})
+    desk.review.sweep()
+    text = "\n".join(notice_of(desk, number))
+    assert DRAFT_UID not in text and ROUND_UID not in text and f"…{ROUND_UID[-4:]}" in text
+    reply = desk.admin("执行", quote=head(desk, number))
+    assert reply.startswith(f"#{number} 没执行：链接要绑的 UID 不是这一轮寄样单上的")
+    assert DRAFT_UID not in reply and ROUND_UID not in reply and f"寄样单上的 UID：…{ROUND_UID[-4:]}" in reply
+    assert desk.executions() == []
+
+
+def test_the_invite_ledgers_douyin_id_shows_only_its_last_characters(desk):
+    """Review B-M2 (probe_wr_lines 1, 2): a 专属佣金's note of an invite card that may have gone out (a fact) and one that
+    did (a problem) wrote 「抖音号 <aweme_id>」 in full (``invite_cover_text``)."""
+    unsure = {"state": "unsure", "rate": 25, "at": "2026-11-08T10:00", "aweme_id": AWEME}
+    preview = block(DESIGNATED, facts=[{"label": "注意（邀约卡）", "value": platforms.invite_cover_text(unsure, DY_ITEM)}])
+    packet = platform_waiting(desk, preview, text="专属佣金设好啦～")
+    text = "\n".join(notice_of(desk, packet["id"]))
+    assert AWEME not in text and f"抖音号 …{AWEME[-4:]}）" in text
+    assert desk.prm.decide(packet["id"], "drop")["ok"]
+    sent = {"state": "sent", "rate": 25, "at": "2026-11-08T10:00", "aweme_id": AWEME}
+    step = {"name": "invite_ledger", "label": "邀约卡台账（这台 Mac，只读）", "execute": False, "command": "",
+            "exit_code": None, "seconds": 0, "verdict": "blocked", "outcome": "", "facts": [], "raw": "",
+            "problems": [platforms.invite_cover_text(sent, DY_ITEM)]}
+    packet = platform_waiting(desk, block(DESIGNATED, verdict="blocked", steps=[step]), text="专属佣金设好啦～")
+    text = "\n".join(notice_of(desk, packet["id"]))
+    assert AWEME not in text and f"抖音号 …{AWEME[-4:]}）" in text
+
+
+def test_her_linked_douyin_id_and_a_friend_add_name_show_only_their_last_characters(clock, tmp_path):
+    """Her 抖音号 an operator linked (``creator_links``) in her words and in the 要注意, a 称呼 that is the friend add's
+    「抖音-<抖音号>」, and a 直播手卡's 场次 cut to it (「称呼截成「…专属」」): by their last characters."""
+    desk = Desk(clock, tmp_path)
+    try:
+        desk.prm.register(CREATOR, f"抖音-{AWEME}", "测试达人")
+        desk.prm.store.add_creator_link(1, "test_dy_linked01", source="register", now=clock.now)
+        desk.her("我另一个号是 test_dy_linked01，也可以发")
+        packet = desk.mac(needs_attention=True,
+                          reason=f"手卡 2 张附在草稿里，要人看过再发（截短了：称呼截成「{AWEME[:12]}专属」）；她提到 test_dy_linked01")
+        desk.review.sweep()
+        text = desk.told()[0]
+        for private in (AWEME, AWEME[:12], "test_dy_linked01"):
+            assert private not in text, private
+        assert text.startswith(f"#{packet['id']} 草稿 · 抖音-…{AWEME[-4:]} · 私聊")
+        assert f"她：我另一个号是 …ed01，也可以发" in text
+        assert f"称呼截成「…{AWEME[8:12]}专属」" in text and "她提到 …ed01" in text
+    finally:
+        desk.stop()
+
+
+@pytest.mark.parametrize("text, shown", [
+    ("UID：99998888777766660002；草稿", "UID：…0002；草稿"),
+    ("达人 uid 1234567890 绑定被拒", "达人 uid …7890 绑定被拒"),
+    ("抖音号test_dy.4321abc，粉丝", "抖音号…1abc，粉丝"),
+    ("aweme_id=test_dy.4321abc", "aweme_id=…1abc"),
+    ("小红书号是 xhs_test_88 的买手", "小红书号是 …t_88 的买手"),
+    ("uid_source 不对", "uid_source 不对"),                 # (one word: no id after a label)
+    ("UID …0002 是她的", "UID …0002 是她的"),               # (masked already)
+    ("抖音号 abc12 太短", "抖音号 abc12 太短"),               # (shorter than 6: never an id)
+])
+def test_an_id_after_its_label_is_masked_whatever_list_it_is_in(desk, text, shown):
+    """Review B-M1 / B-M2 (the fallback beside the draft's ids): any run of 6 or more letters, digits, 「_」「.」 after
+    「UID」「抖音号」「uid」「aweme」… keeps its last 4 only, in an error or a problem told (``_hide``) as in a line."""
+    assert desk.review._hide({"platform": {}}, text) == shown
+    assert wr.WechatReview._masked("问题", text, [])[1] == shown
+
+
+def test_an_address_in_要注意_or_a_jushuitan_line_is_cut_to_province_and_city(desk):
+    """Review B-L1 (probe_wr_lines 3): the 要注意 line and a sample order's 聚水潭 facts and problems only had their
+    numbers masked: an address they quote is cut to province and city now (``retention.scrub`` with the deal's
+    addresses and the receiver's), as her own lines are."""
+    street = "某某路100号3栋1201室"
+    desk.prm.store.update_deal(1, merge_slots={"地址": f"浙江省杭州市西湖区{street}"})
+    preview = jst_block(verdict="blocked")
+    preview["action"]["receiver"]["address"] = street
+    preview["steps"][0]["problems"] = [f"地址不全：浙江省杭州市西湖区{street}，缺小区名"]
+    preview["steps"][0]["facts"] = [*JST_FACTS, {"label": "核对", "value": f"收件地址 西湖区{street}（草稿）"}]
+    desk.prm.store.token_for(1, "phone", "手机", "13900001111", desk.clock.now)
+    desk.her("好的，寄吧")
+    packet = desk.mac(text="寄样单建好啦，单号 {寄样单号}～", message_kind="money", platform=preview, needs_attention=True,
+                      reason=f"她给的地址是 浙江省杭州市西湖区{street}，请核对")
+    desk.review.sweep()
+    text = "\n".join(notice_of(desk, packet["id"]))
+    for private in (street, "某某路", "1201"):
+        assert private not in text, private
+    assert any(line.startswith("要注意：她给的地址是 浙江省杭州市（详细地址已清除）") for line in text.split("\n"))
+    assert "· 问题：地址不全：浙江省杭州市（详细地址已清除）" in text
+
+
+def test_an_admin_wxid_that_is_a_group_or_a_creators_tells_nothing_and_the_console_says_why(clock, tmp_path):
+    """Review B-L8: ADMIN_WXID was never checked: a group's id, or the wxid of a registered creator (her own chat!), got
+    every draft.  Nothing is told now, nothing there is an answer, and the console says why."""
+    desk = Desk(clock, tmp_path, admin="200000001@chatroom")
+    desk.prm.register(CREATOR, "小美", "测试达人")
+    try:
+        waiting(desk)
+        assert desk.told() == [] and desk.review.ready is False
+        assert desk.review.status() == {"on": True, "why": wr.GROUP_ADMIN_WHY, "open": 0, "unsent": 0, "unsure": 0,
+                                        "older": 0}
+    finally:
+        desk.stop()
+    store = PrmStore(":memory:")
+    first = Desk(clock, tmp_path / "a", store=store)                   # (she was registered with another ADMIN_WXID)
+    first.prm.register(OTHER, "小雨", "测试达人")
+    first.stop()
+    desk = Desk(clock, tmp_path / "b", admin=OTHER, store=store)
+    try:
+        desk.prm.register(CREATOR, "小美", "测试达人")
+        waiting(desk)
+        assert [t for c, t in desk.sent if c == OTHER] == [] and desk.review.ready is False
+        assert desk.review.status()["why"] == wr.CREATOR_ADMIN_WHY
+        msg = {"message_id": "x1", "chat_id": OTHER, "sender_id": OTHER, "content": "1", "msg_type": 1,
+               "is_group": False, "timestamp": clock.now}
+        assert desk.review.is_admin_line(msg) is False and desk.review.answer(msg) == (False, None, None)
+    finally:
+        desk.stop()

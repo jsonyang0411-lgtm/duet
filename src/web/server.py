@@ -1110,7 +1110,7 @@ def _prm_state_core() -> dict:
     stopped["friend_add_status"] = _friend_add_stopped_status(store)
     stopped["three_party"] = _three_party_stopped_status()
     stopped["boss_groups"] = _boss_groups_stopped_status(store)
-    stopped["wechat_review"] = _wechat_review_stopped_status()
+    stopped["wechat_review"] = _wechat_review_stopped_status(store)
     if store is None:
         from src.prm.platforms import ACTIONS
         from src.prm.result import MESSAGE_KINDS
@@ -1125,14 +1125,16 @@ def _prm_state_core() -> dict:
         store.close()
 
 
-def _wechat_review_stopped_status() -> dict:
+def _wechat_review_stopped_status(store=None) -> dict:
     """微信里审批草稿 while the bot is stopped (src/prm/wechat_review.py ``WechatReview.status``, from .env): the switch, and
-    why nothing goes to the admin's chat now."""
-    from src.prm.wechat_review import NO_ADMIN_WHY
+    why nothing goes to the admin's chat now: ADMIN_WXID empty, a group's id, a registered creator's wxid (in ``store``,
+    the stopped bot's database; ``wechat_review.admin_problem``, as the running bot says it), else that the bot does not
+    run."""
+    from src.prm.wechat_review import admin_problem
 
     if not _prm_env_on("PRM_WECHAT_REVIEW"):
         return {"on": False}
-    why = NO_ADMIN_WHY if not os.getenv("ADMIN_WXID", "").strip() else "机器人没有运行：草稿发不到管理员微信里"
+    why = admin_problem(os.getenv("ADMIN_WXID", ""), store) or "机器人没有运行：草稿发不到管理员微信里"
     return {"on": True, "why": why, "open": 0, "unsent": 0, "unsure": 0, "older": 0}
 
 
