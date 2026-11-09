@@ -16,7 +16,7 @@ from test_prm_platform_flow import (CHANNEL, DESIGNATED, THREE, TWO, approve, bl
 
 from platform_fakes import DY_ITEM, DY_ITEM2, DY_LINK, DY_SKU, DY_SKU2, DY_UID, JST_ORDER
 from src.prm import platforms
-from src.prm.service import LINK_SLOT, RESTART_HINT, link_wish, next_step_note
+from src.prm.service import LINK_SLOT, RESTART_HINT, link_wish, next_step_note, unfilled_placeholders
 
 LINK2 = {**CHANNEL, "item_id": DY_ITEM2}
 RUN2 = {"steps": ["create", "bind"], "skus": [{"id": DY_SKU2, "price": "198.00", "stock": 100, "main_price": "220.00"}]}
@@ -74,15 +74,37 @@ def opens(b, packet, rec=None):
     ("小美专属", {"prefix": "【小美专属】", "said": "小美专属"}),
     ("要", {"prefix": "", "said": "要"}),                                  # she wants links, no prefix said yet
     ("【小美推荐】", {"prefix": "", "said": "【小美推荐】"}),                  # not the shop's 【某某专属】: the case file's call
-    ("四个字的专属", {"prefix": "【四个字的专属】", "said": "四个字的专属"}),   # 14: the product's own limit is the CLI's
+    ("四个字的专属", {"prefix": "", "said": "四个字的专属", "long": "【四个字的专属】"}),   # 14: never dictated (F1)
     ("这是一个非常非常长的名字的专属", {"prefix": "", "said": "这是一个非常非常长的名字的专属"}),   # too long: the case file's call
     ("【不二专属】", {"prefix": "【不二专属】", "said": "【不二专属】"}),          # a bracketed name that starts with 不
     ("", None), ("  ", None), ("不要", None), ("不用", None), (None, None),
     ("不需要了", None), ("不用了", None), ("暂时不要", None), ("不要专属链接", None), ("别弄了", None), ("没有", None),
     ("无", None), ("取消吧", None), ("先不用", None), ("\u200b不要", None),        # review 2026-11-09 #7
+    # an explicit 要 says yes whatever comes before it, a prefix too; anything else says no (review 2026-11-09 F6)
+    ("没问题，要", {"prefix": "", "said": "没问题，要"}), ("不错，要链接", {"prefix": "", "said": "不错，要链接"}),
+    ("无所谓，要", {"prefix": "", "said": "无所谓，要"}), ("要，不用前缀", {"prefix": "", "said": "要，不用前缀"}),
+    ("要（前缀不用写）", {"prefix": "", "said": "要（前缀不用写）"}), ("没说前缀，要链接", {"prefix": "", "said": "没说前缀，要链接"}),
+    ("别人推荐的，要", {"prefix": "", "said": "别人推荐的，要"}), ("需要", {"prefix": "", "said": "需要"}),
+    ("【不要停专属】", {"prefix": "【不要停专属】", "said": "【不要停专属】"}),        # a bracketed prefix says yes
+    ("要，前缀写小美专属", {"prefix": "【小美专属】", "said": "要，前缀写小美专属"}),
+    ("前缀：小美专属", {"prefix": "【小美专属】", "said": "前缀：小美专属"}),
+    ("“小美专属”", {"prefix": "【小美专属】", "said": "“小美专属”"}),
+    ("算了", None), ("先不弄了", None), ("以后再说", None), ("No", None), ("no", None), ("好的", None),
+    ("不想要", None), ("主要看佣金", None), ("【小美专属】不要了", None), ("专属", None),
 ])
 def test_the_slot_says_whether_the_deal_asks_for_links(value, wish):
     assert link_wish({LINK_SLOT: value} if value is not None else {}) == wish
+
+
+@pytest.mark.parametrize("text, found", [
+    ("老师您好～样品已经寄出啦：中通 78912345678901。签收之后跟我说一声哦～", []),
+    ("已经在千帆给您开好了专属定向计划「{计划名}」～", ["{计划名}"]),
+    ("您的专属推广链接：{链接}，审核通过后就能用～", ["{链接}"]),
+    ("渠道品 {渠道品ID} 建好了，链接：{链接}", ["{链接}", "{渠道品ID}"]),
+])
+def test_a_plain_reply_is_held_for_the_platforms_placeholders(text, found):
+    """The verifier's probe P7: only the platforms' placeholders (``platforms.PLACEHOLDER_LABELS``) hold a plain draft."""
+    assert sorted(unfilled_placeholders(text)) == sorted(found)
 
 
 # ── the chain: per product its commission, then its link ─────────────────
@@ -106,8 +128,8 @@ def test_each_product_gets_its_link_right_after_its_commission(bot, clock):
     assert "日常价 9 折取整、每个颜色 100 件" in note and "{链接}" in note and "这一轮这之后还有 2 步" in note
     assert "专属链接 · 还没建：" in note and job["meta"]["step"] == {"packet": commission["id"], "delivered": True,
                                                                   "item": DY_ITEM, "action": "dy.channel_goods",
-                                                                  "prefix": "【小美专属】"}
-    assert link["status"] == "pending" and link["meta"]["lane"] == "system"
+                                                                  "prefix": "【小美专属】", "uid": DY_UID}
+    assert link["status"] == "pending" and link["meta"]["lane"] == "system" and link["meta"]["chain_uid"] == DY_UID
     assert f"专属链接：建好 0/2 个；在待审批 {DY_ITEM}（#{link['id']}）" in chain_attention(bot)
     opens(bot, link, record(link=DY_LINK, channel_id="7200000000000001"))
     assert bot.texts[-1] == (order["chat_id"], f"您的专属链接：{DY_LINK}")
@@ -183,8 +205,9 @@ def test_a_link_that_is_not_made_does_not_hold_up_the_next_product(bot, clock, h
     label = {"dropped": "这一轮不建（运营点了「不发」）", "uncertain": "结果不确定（运营会先到平台后台核对）",
              "asked": "派过、草稿没建它"}[how]
     assert f"专属链接 · {label}：{DY_ITEM}" in note
-    if how == "uncertain":
-        assert "平台上可能已经开了" in bot.prm.store.packet(link["id"])["error"]
+    if how == "uncertain":                     # the channel product, and the two ways back (review 2026-11-09 F3)
+        error = bot.prm.store.packet(link["id"])["error"]
+        assert error.startswith("渠道品 7200000000000001 建好了、没绑上她（FAILED") and "② 把它下架、删掉" in error
         assert "结果不确定" in chain_attention(bot) and "先到平台后台核对" in chain_attention(bot)
 
 
@@ -267,23 +290,60 @@ def test_a_link_drafted_for_a_product_without_its_commission_says_so(bot, clock)
     assert other["needs_attention"] and "还没给 UID 5100000000000999 开过专属佣金" in other["reason"]   # (the probe)
 
 
-def test_a_link_for_another_uid_than_hers_is_flagged_and_not_approved(bot, clock):
-    """Her UID is known (her verified 抖店 sample order: 聚水潭's platformUid): a link that would bind another one is
-    flagged when it comes and refused at 批准并执行 (review 2026-11-09 #2); hers goes."""
+def test_a_sample_order_without_her_uid_is_said_so(bot, clock):
+    """review 2026-11-09 F7: she has a verified 抖店 sample order, but it recorded no UID: the flag says that, not that
+    she has no such order."""
+    by_account = {**{k: v for k, v in TWO.items() if k != "creator_uid"}, "creator_account": "test_daren_01"}
+    order = drafted(bot, preview=block(by_account, run={"steps": ["create"]}), reply="寄样单建好啦")
+    bot.prm.store.token_for(order["party_id"], "phone", "手机", "13900001111", clock.now)
+    mac_runs(bot, approve(bot, order), record(sample_order_no=JST_ORDER))         # (no creator_uid anywhere)
+    bot.prm.send_approved()
+    link = drafted(bot, block(CHANNEL), reply="链接：{链接}")
+    assert f"她核验成功的抖店寄样单上没记下抖音 UID：批准前核对链接要绑的 UID {DY_UID} 是她的" in link["reason"]
+    assert "她没有核验成功的抖店寄样单" not in link["reason"]
+
+
+def test_a_link_for_a_uid_none_of_her_orders_has_is_flagged_not_refused(bot, clock):
+    """Her UIDs are known (her verified 抖店 sample orders: 聚水潭's platformUid).  A link draft outside the chain that
+    would bind another one is flagged when it comes, and goes if a person approves it: she may have two 抖音 accounts
+    (review 2026-11-09 F4: refusing it was wrong); hers is not flagged."""
     two_signed_for(bot, clock, links=None)
     for item in (DY_ITEM, DY_ITEM2):
         _, commission = step(bot, {**DESIGNATED, "item_id": item})
         opens(bot, commission)
     step(bot)                                                             # the round is done
     other = drafted(bot, block({**CHANNEL, "creator_platform_id": "5100000000000999"}), reply="链接：{链接}")
-    wrong = f"链接要绑的 UID 不是这位达人的（她的 UID：{DY_UID}；草稿写的是 5100000000000999）"
-    assert other["needs_attention"] and wrong in other["reason"]
-    jobs = len(bot.relay.store.list_jobs(100))
-    out = bot.prm.decide(other["id"], "execute")
-    assert not out["ok"] and out["error"].startswith(wrong) and len(bot.relay.store.list_jobs(100)) == jobs
+    doubt = f"链接要绑的 UID 5100000000000999 不在她核验成功的抖店寄样单上（寄样单上的 UID：{DY_UID}）：批准前核对是不是她的"
+    assert other["needs_attention"] and doubt in other["reason"] and "chain_uid" not in other["meta"]
+    mac_runs(bot, approve(bot, other), record(link=DY_LINK, channel_id="7200000000000005"))   # a person's call: it goes
     hers = drafted(bot, block(CHANNEL), reply="链接：{链接}")
     assert not hers["needs_attention"] and hers["reason"] == "收件信息齐了"           # (draft()'s own reason)
     assert bot.prm.decide(hers["id"], "execute")["ok"]
+
+
+def test_a_step_of_the_chain_binds_its_orders_uid_whatever_her_newest_order_says(bot, clock):
+    """A link step of the chain carries its round's order's UID (``meta.step.uid`` → the draft's ``meta.chain_uid``):
+    its draft is held to that one, not to her newest order's (a second order for her other account came in between:
+    the verifier's probe P2, refused before); a step draft that binds another UID is flagged and refused."""
+    two_signed_for(bot, clock)
+    _, commission = step(bot, DESIGNATED)
+    opens(bot, commission)
+    job, link = step(bot, CHANNEL, reply="链接：{链接}")
+    assert job["meta"]["step"]["uid"] == DY_UID and link["meta"]["chain_uid"] == DY_UID and not link["needs_attention"]
+    other = "5100000000000999"
+    order2 = drafted(bot, preview=block({**TWO, "creator_uid": other}, run={"steps": ["create"]}), reply="另一个号的寄样单建好啦")
+    mac_runs(bot, approve(bot, order2), record(sample_order_no="YP20261109999", creator_uid=other))
+    bot.prm.send_approved()
+    opens(bot, link, record(link=DY_LINK, channel_id="7200000000000001"))   # the chain's own UID: it goes
+    _, commission2 = step(bot, {**DESIGNATED, "item_id": DY_ITEM2})
+    opens(bot, commission2)
+    job, wrong = step(bot, {**LINK2, "creator_platform_id": other}, reply="链接：{链接}", run=RUN2)
+    assert job["meta"]["step"]["item"] == DY_ITEM2 and job["meta"]["step"]["uid"] == DY_UID
+    refused = f"链接要绑的 UID 不是这一轮寄样单上的（寄样单上的 UID：{DY_UID}；草稿写的是 {other}）"
+    assert wrong["needs_attention"] and refused in wrong["reason"]
+    jobs = len(bot.relay.store.list_jobs(100))
+    out = bot.prm.decide(wrong["id"], "execute")
+    assert not out["ok"] and out["error"].startswith(refused) and len(bot.relay.store.list_jobs(100)) == jobs
 
 
 def answer_steps(b, rounds=8):
@@ -353,6 +413,52 @@ def test_a_prefix_said_after_the_link_steps_asked_her_one_makes_the_links(bot, c
     assert bot.worker_takes() is None
 
 
+def test_a_prefix_too_long_is_never_dictated_and_a_link_dropped_at_it_is_asked_again(bot, clock):
+    """The verifier's probe P3 (review 2026-11-09 F1): she asks for 「【小美美呀专属】」 (14 characters; the usual limit
+    is 12): the link step's note does not dictate it, it says why and how the shop cuts it short (「【小美美专属】」), or
+    to ask her.  The Mac wrote it anyway, the preview stopped at it, the operator dropped it; B goes on; once she says
+    a shorter one, A's link is asked for again with it, then B's, and the note says why it comes now."""
+    two_signed_for(bot, clock, links="【小美美呀专属】")
+    _, commission = step(bot, DESIGNATED)
+    opens(bot, commission)
+    long = {**CHANNEL, "title_prefix": "【小美美呀专属】"}
+    job, link = step(bot, long, verdict="blocked", reply="链接：{链接}")
+    note = job["meta"]["system_note"]
+    assert "title_prefix 填「【小美美呀专属】」" not in note and job["meta"]["step"]["prefix"] == ""
+    assert "她要的前缀「【小美美呀专属】」是 14 个字符，超过一般商品的上限 12 个" in note
+    assert "（比如「【小美美专属】」）；拿不准就不填平台动作，在回复里问她前缀怎么写" in note
+    assert bot.prm.decide(link["id"], "drop")["ok"]
+    _, commission2 = step(bot, {**DESIGNATED, "item_id": DY_ITEM2})
+    says_prefix(bot, "【小美专属】")                                     # (B's 专属佣金 waits: nothing asked yet)
+    assert bot.worker_takes() is None
+    opens(bot, commission2)
+    job = bot.worker_takes()
+    assert job["meta"]["step"] == {"packet": commission2["id"], "delivered": True, "item": DY_ITEM,
+                                   "action": "dy.channel_goods", "prefix": "【小美专属】", "uid": DY_UID}
+    assert "title_prefix 填「【小美专属】」" in job["meta"]["system_note"]
+    bot.finish(job["id"], draft(message_kind="money", reply_draft="链接：{链接}", slots={},
+                                platform=block(CHANNEL)))
+    opens(bot, bot.prm.store.packet_for_job(job["id"]), record(link=DY_LINK, channel_id="7200000000000001"))
+    rest = answer_steps(bot)
+    assert [(st.get("item") or None, st.get("action")) for st in rest][:1] == [(DY_ITEM2, "dy.channel_goods")]
+
+
+def test_a_prefix_said_when_the_round_is_idle_says_so_first(bot, clock):
+    """review 2026-11-09 F7: a link step asked because her prefix came starts with that, not with the signature."""
+    two_signed_for(bot, clock, links="要")
+    _, commission = step(bot, DESIGNATED)
+    opens(bot, commission)
+    _, asked = step(bot, reply="前缀写什么呢？")
+    assert bot.prm.decide(asked["id"], "send")["ok"]
+    bot.prm.send_approved()
+    answer_steps(bot)                                                     # B's 专属佣金, its link step, the end
+    says_prefix(bot)
+    job = bot.worker_takes()
+    note = job["meta"]["system_note"]
+    assert note.startswith("合作单刚记下她要的专属链接前缀「【小美专属】」。接着开寄样单")
+    assert "达人已经签收了寄样单" not in note and job["meta"]["step"]["prefix"] == "【小美专属】"
+
+
 def test_a_link_step_asked_with_a_prefix_is_not_asked_again(bot, clock):
     two_signed_for(bot, clock)
     _, commission = step(bot, DESIGNATED)
@@ -362,6 +468,21 @@ def test_a_link_step_asked_with_a_prefix_is_not_asked_again(bot, clock):
     job, _ = step(bot, {**DESIGNATED, "item_id": DY_ITEM2})               # the chain went on to B
     says_prefix(bot, "【美美专属】")                                      # another prefix: the chain goes on, A stays asked
     assert all(st.get("item") != DY_ITEM for st in answer_steps(bot))
+
+
+def test_a_prefix_that_came_while_the_steps_draft_waited_is_taken_when_it_is_sent(bot, clock):
+    """The verifier's probe P1b: the chain's link step asked her the prefix; she says it before that draft went out:
+    sent, the link is asked for again with it."""
+    two_signed_for(bot, clock, links="要")
+    _, commission = step(bot, DESIGNATED)
+    opens(bot, commission)
+    _, asked = step(bot, reply="想问一下专属链接的前缀写什么呢？")
+    says_prefix(bot)
+    assert bot.worker_takes() is None
+    assert bot.prm.decide(asked["id"], "send")["ok"]
+    bot.prm.send_approved()
+    job = bot.worker_takes()
+    assert job["meta"]["step"]["item"] == DY_ITEM and job["meta"]["step"]["prefix"] == "【小美专属】"
 
 
 # ── without a chain (no verified sample order) ────────────────────────────
@@ -400,6 +521,85 @@ def test_without_a_chain_a_prefix_said_later_asks_for_the_link_again(bot, clock)
     assert bot.prm.decide(link["id"], "drop")["ok"]                     # 「不发」: a person's decision
     says_prefix(bot, "【美美专属】")
     assert bot.worker_takes() is None
+
+
+def test_without_a_chain_a_prefix_that_came_while_the_steps_draft_waited_is_not_lost(bot, clock):
+    """The verifier's probe P1 (review 2026-11-09 F2): the link step asked her the prefix (its draft waits in 待审批);
+    she says it meanwhile: nothing can be asked yet, the deal says the link waits; the step's draft sent, the link is
+    asked for with the prefix, and the notice goes."""
+    wants_links(bot, "要")
+    commission = drafted(bot, reply="专属佣金设好啦")
+    opens(bot, commission)
+    job, asked = step(bot, reply="前缀写什么呢？")
+    assert asked["status"] == "pending" and job["meta"]["step"]["prefix"] == ""
+    says_prefix(bot)
+    assert bot.worker_takes() is None
+    waits = next(n["text"] for n in bot.prm.store.deal(1)["notices"] if n["key"] == "links")
+    assert waits == f"专属链接（她要：【小美专属】）：商品 {DY_ITEM} 的还没建，手头这一步办完系统就接着派，一次一个商品"
+    assert bot.prm.decide(asked["id"], "send")["ok"]
+    bot.prm.send_approved()
+    job, link = step(bot, CHANNEL, reply="链接：{链接}")
+    assert job["meta"]["step"]["prefix"] == "【小美专属】" and job["meta"]["step"]["item"] == DY_ITEM
+    assert job["meta"]["system_note"].startswith(f"商品 {DY_ITEM} 的专属佣金（20%）已经在平台上开好了")
+    assert all(n["key"] != "links" for n in bot.prm.store.deal(1)["notices"])
+
+
+def test_without_a_chain_a_link_wished_before_its_prefix_says_it_waits_for_one(bot, clock):
+    """Links wanted after her 专属佣金 opened, no prefix said yet (or one too long): nothing to ask the Mac, the deal says
+    which product waits and for what (review 2026-11-09 F2)."""
+    commission = drafted(bot, reply="专属佣金设好啦")
+    opens(bot, commission)
+    step(bot)                                                             # the step after it: nothing more
+    wants_links(bot, "要")
+    assert bot.worker_takes() is None
+    text = next(n["text"] for n in bot.prm.store.deal(1)["notices"] if n["key"] == "links")
+    assert text == f"专属链接（她要：要）：商品 {DY_ITEM} 的还没建，还不知道前缀：问到她要的前缀、记进合作单以后系统就派"
+    wants_links(bot, "【小美美呀专属】")
+    text = next(n["text"] for n in bot.prm.store.deal(1)["notices"] if n["key"] == "links")
+    assert "她要的前缀「【小美美呀专属】」超过 12 个字符，要她给个短一点的" in text
+    wants_links(bot, "不要")
+    assert all(n["key"] != "links" for n in bot.prm.store.deal(1)["notices"])
+
+
+def test_an_owed_link_step_is_asked_afresh_when_her_prefix_came_meanwhile(bot, clock):
+    """review 2026-11-09 F7: a link step owed (a person had the deal) with a note that asks her the prefix; the deal
+    learned it meanwhile (a 百应 draft, say): the step goes out with a new note that gives it."""
+    wants_links(bot, "要")
+    commission = drafted(bot, reply="专属佣金设好啦")
+    execution = approve(bot, commission)
+    assert bot.prm.deal_action("mode", {"deal_id": 1, "mode": "human"})["ok"]
+    mac_runs(bot, execution, record())
+    assert bot.worker_takes() is None
+    [owed] = [n for n in bot.prm.store.deal(1)["notices"] if n["key"] == "step"]
+    assert owed["action"] == "dy.channel_goods" and owed["prefix"] == "" and "问她前缀写什么" in owed["note"]
+    bot.prm.store.update_deal(1, clock.now, merge_slots={LINK_SLOT: "【小美专属】"})
+    assert bot.prm.deal_action("mode", {"deal_id": 1, "mode": "copilot"})["ok"]
+    bot.prm.sweep_owed_steps()
+    job = bot.worker_takes()
+    note = job["meta"]["system_note"]
+    assert note.startswith("这一步欠着的时候，合作单记下了她要的专属链接前缀「【小美专属】」。")
+    assert "title_prefix 填「【小美专属】」" in note and "问她前缀写什么" not in note
+    assert job["meta"]["step"]["prefix"] == "【小美专属】" and job["meta"]["step"]["item"] == DY_ITEM
+    assert bot.worker_takes() is None and all(n["key"] != "step" for n in bot.prm.store.deal(1)["notices"])
+
+
+def test_without_a_chain_a_link_dropped_at_a_prefix_too_long_is_asked_again_with_a_shorter_one(bot, clock):
+    """review 2026-11-09 F1 without a sample order: the link step does not dictate her 14-character prefix; the Mac
+    wrote it anyway, the preview stopped at it, the operator dropped it; she gives a shorter one: asked again, once."""
+    wants_links(bot, "【小美美呀专属】")
+    commission = drafted(bot, reply="专属佣金设好啦")
+    opens(bot, commission)
+    job, link = step(bot, {**CHANNEL, "title_prefix": "【小美美呀专属】"}, verdict="blocked", reply="链接：{链接}")
+    assert job["meta"]["step"]["prefix"] == "" and "不能照写" in job["meta"]["system_note"]
+    assert bot.prm.decide(link["id"], "drop")["ok"]
+    assert bot.worker_takes() is None
+    says_prefix(bot, "【小美专属】")
+    job = bot.worker_takes()
+    assert job["meta"]["step"]["item"] == DY_ITEM and job["meta"]["step"]["prefix"] == "【小美专属】"
+    assert job["meta"]["system_note"].startswith("合作单刚记下她要的专属链接前缀「【小美专属】」。")
+    bot.finish(job["id"], draft(message_kind="other", reply_draft="", slots={}))     # (drafted nothing this time)
+    says_prefix(bot, "【小美专属】")
+    assert bot.worker_takes() is None                                    # asked with it once: not again
 
 
 def test_without_links_a_verified_link_asks_for_nothing_more(bot, clock):

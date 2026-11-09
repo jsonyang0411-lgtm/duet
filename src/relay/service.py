@@ -168,6 +168,9 @@ class ClaudeRelay:
         self._reserved = reserved
         self._admin_wxid = str(getattr(config, "admin_wxid", "") or "").strip()
         self._extra_help = extra_help
+        # What this bot announces to the workers besides its job kinds (GET /relay/health ``features``): the PRM
+        # service adds platforms.CHANNEL_FEATURE (a worker puts no 专属链接 into a draft for a bot without it).
+        self.features: list[str] = []
         # What the Mac worker said it offers (X-Relay-Projects on GET /relay/next).
         self._worker_projects: list[str] | None = None
         self._worker_default = ""

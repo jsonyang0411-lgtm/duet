@@ -299,6 +299,10 @@ def test_no_channel_price_without_a_daily_price_worth_a_yuan(main):
     ("“小美专属”", "【小美专属】"), ("‘小美专属’", "【小美专属】"), ('"小美专属"', "【小美专属】"), ("'小美专属'", "【小美专属】"),
     ("小\u200b美专属\ufeff", "【小美专属】"), ("\u2060【小美专属】\u200e", "【小美专属】"),   # zero-width, BOM, marks go
     ("四个字的专属", "【四个字的专属】"),          # 14: the product's own limit (12 unless its config says more) is the CLI's
+    # a quote or bracket alone at an end goes (review 2026-11-09 F7); spaces inside stay, the CLI takes them
+    ('"小美专属', "【小美专属】"), ("小美专属”", "【小美专属】"), ("「小美专属", "【小美专属】"), ("【“小美专属】", "【小美专属】"),
+    ("〈小美专属〉", "【小美专属】"), ("小美 专属", "【小美 专属】"), ("小美QQ专属", "【小美QQ专属】"),
+    ("抖音小美专属", "【抖音小美专属】"), ("小美美呀专属", "【小美美呀专属】"), ("2026专属", "【2026专属】"),
 ])
 def test_a_prefix_gets_the_shops_brackets_and_fits_the_page(given, prefix):
     assert platforms.title_prefix_of(given) == prefix
@@ -313,6 +317,15 @@ def test_a_prefix_gets_the_shops_brackets_and_fits_the_page(given, prefix):
     ("【小美专属", "bad_prefix", "不成对"), ("小美】专属", "bad_prefix", "不成对"),
     ("小美\n专属", "bad_prefix", "换行"), ("{链接}", "bad_prefix", "花括号"), (12, "bad_prefix", "要是文字"),
     ("", "missing_prefix", "【某某专属】"), ("【】", "missing_prefix", "【某某专属】"), ("[ ]", "missing_prefix", "【某某专属】"),
+    # C1 controls and the Unicode line separators, the bot's own check too; 「微 信」 with a space, full-width letters,
+    # digits apart (review 2026-11-09 F7); a lone quote is not a prefix
+    ("小美\x85专属", "bad_prefix", "控制字符"), ("小美\x9f专属", "bad_prefix", "控制字符"),
+    ("小美\u2028专属", "bad_prefix", "换行"), ("小美\u2029专属", "bad_prefix", "换行"),
+    ("小美微 信专属", "bad_prefix", "像联系方式"), ("小美薇\u3000信专属", "bad_prefix", "像联系方式"),
+    ("小美ｖｘ专属", "bad_prefix", "像联系方式"), ("小美Ｖ１２３专属", "bad_prefix", "像联系方式"),
+    ("小美 1 2 3 4 5", "bad_prefix", "像联系方式"), ("小美138-0000专属", "bad_prefix", "像联系方式"),
+    ("V587专属", "bad_prefix", "像联系方式"), ("小美加V专属", "bad_prefix", "像联系方式"), ("小美w x专属", "bad_prefix", "像联系方式"),
+    ('"', "missing_prefix", "【某某专属】"), ("「」", "missing_prefix", "【某某专属】"),
 ])
 def test_a_prefix_the_page_would_not_take_is_refused_saying_why(given, code, words):
     with pytest.raises(ActionError) as e:
@@ -369,8 +382,10 @@ def test_no_agreement_without_stock_in_any_colour_or_without_a_daily_price():
     unpriced = [{"skuId": DY_SKU2, "name": "均码黑色", "mainPrice": None, "assignableStock": 9}]
     assert "没读到日常价" in platforms.channel_skus(unpriced, action)[2][0]
     assert platforms.channel_skus([], action)[2] == ["读主商品的结果里没有能放进渠道品的 SKU"]
-    priced = platforms.check_action({**HAT, "price": "250"}, catalog=catalog())    # a price of its own needs none
-    assert platforms.channel_skus(unpriced, priced)[2] == []
+    # a price of its own is held to the daily price: one not read cannot be checked (review 2026-11-09, item 5's gap)
+    priced = platforms.check_action({**HAT, "price": "250"}, catalog=catalog())
+    [problem] = platforms.channel_skus(unpriced, priced)[2]
+    assert "没读到日常价，动作里写的渠道价 250.00 元没法核对（渠道价不能比日常价高）" in problem
 
 
 def test_the_bot_holds_the_approved_agreement_to_the_shops_way():
@@ -393,8 +408,12 @@ def test_the_bot_holds_the_approved_agreement_to_the_shops_way():
         assert e.value.code == "bad_plan" and words in str(e.value), (plan, str(e.value))
     fixed = platforms.check_action({**HAT, "price": "250", "stock_per_sku": 50, "sku_ids": [DY_SKU2, DY_SKU2B]})
     run = {"steps": ["create", "bind"], "skus": [{"id": DY_SKU2, "price": "250.00", "stock": 50, "main_price": "315.00"},
-                                                 {"id": DY_SKU2B, "price": "250.00", "stock": 30, "main_price": ""}]}
-    assert platforms.check_plan(fixed, run)["skus"][1] == {"id": DY_SKU2B, "price": "250.00", "stock": 30, "main_price": ""}
+                                                 {"id": DY_SKU2B, "price": "250.00", "stock": 30, "main_price": "290.00"}]}
+    assert platforms.check_plan(fixed, run)["skus"][1] == {"id": DY_SKU2B, "price": "250.00", "stock": 30,
+                                                           "main_price": "290.00"}
+    with pytest.raises(ActionError) as e:            # its daily price not known: the fixed price cannot be checked
+        platforms.check_plan(fixed, {**run, "skus": [run["skus"][0], {**run["skus"][1], "main_price": ""}]})
+    assert "SKU 3100000000000000203 没有日常价：动作里写的渠道价没法核对" in str(e.value)
     for skus, words in [([{**run["skus"][0], "price": "283.00"}], "不是动作里写的 250.00 元"),
                         ([{**run["skus"][0], "stock": 51}], "0–50 件"),
                         ([{**HAT_SKUS[2], "price": "250.00", "stock": 1}], "不是动作里写的（sku_ids）")]:
@@ -566,7 +585,10 @@ def test_the_products_own_prefix_rule_is_its_configs(node, cfg):
                                                         "above the page's limit of 12 for a prefix"])))
     block = platforms.preview(long, cfg, catalog=catalog())
     assert block["verdict"] == "blocked" and len(node.calls()) == 2
-    assert "标题前缀「【四个字的专属】」是 14 个字符（汉字算 2 个），超过这个商品的上限 12 个：少写几个字（比如名字只留两三个字）" in block["problems"]
+    # one line, in Chinese, with a shorter one the shop's way (the CLI's English lines of it go: review 2026-11-09 F7)
+    assert block["problems"] == ["标题前缀太长：「【四个字的专属】」是 14 个字符（汉字算 2 个），这个商品最多 12 个：少写几个字，"
+                                 "比如「【四个字专属】」（名字留前几个字加「专属」）"]
+    assert platforms.prefix_stopped(platforms.check_block(block))
     wide = dict(item=DY_ITEM2, prefix="【四个字的专属】", prefix_max=20)
     node.rules(hat_rules(read=dy_read_preview([(DY_SKU2, "均码黑色", "315.00", 500)], **wide),
                          agreed=dy_agreed_preview([(DY_SKU2, "均码黑色", "315.00", "283.00", 100, 500)], **wide)))
@@ -595,9 +617,51 @@ def test_a_daily_price_that_moved_inside_the_clis_own_run_stops_before_the_bind(
                          rule(["channel-goods-bind"], dy_bind_done(), execute=True)))
     out = execute(cfg, HAT, HAT_RUN, tmp_path)
     assert out["outcome"] == "PARTIAL" and argvs(node, "channel-goods-bind") == []
-    assert out["created"]["channel_id"] == DY_CHANNEL and "link" not in out["created"]
+    assert out["created"]["channel_id"] == DY_CHANNEL and out["created"]["link"].endswith(f"channel_id={DY_CHANNEL}&channel_type=4")
     assert "日常价和批准时不一样了（SKU 3100000000000000202 的日常价变了：315.00 → 330.00 元" in out["problems"][0]
     assert "没有绑定达人、没有发链接" in out["problems"][0]
+
+
+LEFT = "7200000000000077"
+LEFTOVER_DONE = (rule(["channel-goods-create"], dy_create_done(item=DY_ITEM2), execute=True, agreement=True),
+                 rule(["channel-goods-bind"], dy_bind_preview(), execute=False),
+                 rule(["channel-goods-bind"], dy_bind_done(), execute=True))
+
+
+@pytest.mark.parametrize("listed, outcome, words", [
+    (dy_bound_list((LEFT, 4), item=DY_ITEM2), "NOT_RUN", f"上次建好、没绑上的渠道品 {LEFT} 还在：先在抖店绑上她或删掉"),
+    ({**dy_bound_list(item=DY_ITEM2), "complete": False}, "NOT_RUN",
+     f"查不到上次建好、没绑上的渠道品 {LEFT} 还在不在（列表没读全）"),
+    ({"site": "fxg", "command": "channel-goods-list", "error": "SCHEMA_MISMATCH"}, "NOT_RUN", "（命令没有给出列表）"),
+    (dy_bound_list(("7200000000000001", 2), item=DY_ITEM2), "VERIFIED_SUCCESS", ""),        # only another one: gone
+], ids=["still-there", "not-complete", "no-rows", "gone"])
+def test_a_channel_product_left_unbound_stops_another_until_it_is_gone(node, cfg, tmp_path, listed, outcome, words):
+    """review 2026-11-09 F3: the approval names what earlier ones made and did not bind (the bot's record:
+    ``context.leftover``).  Before a create the product's channel products are listed without the UID filter (read
+    only: the bound check before it, filtered on her UID, cannot see an unbound one); one of those still listed stops
+    it, nothing written; a list that does not say stops it too; gone, the create goes on."""
+    node.rules([rule(["channel-goods-list", f"--uid={DY_UID}"], dy_bound_list(item=DY_ITEM2)),
+                rule(["channel-goods-list"], listed), *hat_rules()[1:], *LEFTOVER_DONE])
+    out = platforms.execute(HAT, cfg, plan=HAT_RUN, key=KEY, ledger=tmp_path / "ledger", catalog=catalog(),
+                            context={"packet_id": 3, "leftover": [LEFT, "x1", 7]})
+    assert out["outcome"] == outcome, out
+    [unfiltered] = [a for a in argvs(node, "channel-goods-list") if not any(x.startswith("--uid=") for x in a)]
+    assert f"--product-id={DY_ITEM2}" in unfiltered and "--execute" not in unfiltered
+    if outcome == "NOT_RUN":
+        assert out["problems"] == [f"没有执行：{words}，平台没有动"] if words.startswith("上次") else words in out["problems"][0]
+        assert argvs(node, "channel-goods-create", "--execute") == []
+        assert [s["name"] for s in out["steps"]][-1] == "leftover"
+    else:
+        assert out["created"]["link"] and argvs(node, "channel-goods-bind", "--execute")
+
+
+def test_without_a_leftover_the_product_is_not_listed_again(node, cfg, tmp_path):
+    """Nothing named (the bot knows of no channel product left unbound): only the bound check lists, with her UID."""
+    node.rules(hat_rules(*LEFTOVER_DONE))
+    out = platforms.execute(HAT, cfg, plan=HAT_RUN, key=KEY, ledger=tmp_path / "ledger", catalog=catalog(),
+                            context={"packet_id": 3, "leftover": "7200000000000077"})       # (not a list: ignored)
+    assert out["outcome"] == "VERIFIED_SUCCESS"
+    assert all(f"--uid={DY_UID}" in a for a in argvs(node, "channel-goods-list"))
 
 
 def test_many_colours_without_stock_keep_every_price_line(node, cfg):
@@ -1481,7 +1545,8 @@ def test_the_shops_way_to_a_channel_link_runs_on_the_macs_system_python(node, tm
                          rule(["channel-goods-bind"], dy_bind_preview(), execute=False),
                          rule(["channel-goods-bind"], dy_bind_done(), execute=True)))
     cases = [["三个字专属", "【三个字专属】"], ["这是一个非常非常长的名字的专属", None], ["「小美专属」", "【小美专属】"],
-             ["小美🌸", "【小美🌸】"], ["小美V123专属", None], ["小\u200b美专属", "【小美专属】"]]
+             ["小美🌸", "【小美🌸】"], ["小美V123专属", None], ["小\u200b美专属", "【小美专属】"], ['"小美专属', "【小美专属】"],
+             ["小美\x85专属", None], ["小美\u2028专属", None], ["小美微 信专属", None], ["小美ｖｘ专属", None]]
     script = tmp_path / "smoke.py"
     script.write_text(
         "import importlib.util, json, os, sys\n"

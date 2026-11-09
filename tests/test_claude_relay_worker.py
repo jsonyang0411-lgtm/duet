@@ -263,6 +263,8 @@ def test_check_and_a_wrong_token(worker, bot, fake_claude, tmp_path, capsys, mon
     out = capsys.readouterr().out
     assert "bot " + bot.url + ": ok" in out
     assert "network: 127.0.0.1 是本机地址，往返 " in out                       # which network, how fast
+    # (a relay without the PRM service announces nothing: a Mac would hand it no 专属链接, review 2026-11-09 F5)
+    assert "bot knows 专属链接 the shop's way (dy.channel_goods:1): no: drafts get no dy.channel_goods" in out
     monkeypatch.setenv("RELAY_TOKEN", "wrong" * 8)
     assert worker.main(["--config", str(cfg), "--check"]) == 1
     assert "token wrong" in capsys.readouterr().out

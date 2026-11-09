@@ -1437,8 +1437,10 @@ def unknown_after_the_ledger():
 
 MAYBE_OPENED = [(DESIGNATED, lambda: record("ACCEPTED_UNVERIFIED")), (DESIGNATED, lambda: record("INDETERMINATE")),
                 (DESIGNATED, lambda: record("UNKNOWN")), (DESIGNATED, unknown_after_the_ledger),
-                (CHANNEL, lambda: record("PARTIAL", channel_id="7000000001")), (CHANNEL, made_then_refused)]
-MAYBE_IDS = ["accepted-unverified", "indeterminate", "unknown", "unknown-after-the-ledger", "partial", "made-then-refused"]
+                (CHANNEL, lambda: record("UNKNOWN"))]
+MAYBE_IDS = ["accepted-unverified", "indeterminate", "unknown", "unknown-after-the-ledger", "link-unknown"]
+# 专属链接 that made its channel product and did not bind her: said apart (``test_a_channel_product_left_unbound_…``)
+LEFT_UNBOUND = [lambda: record("PARTIAL", channel_id="7000000001", link=DY_LINK), made_then_refused]
 
 
 def maybe_opened(b, clock, raw, rec):
@@ -1476,6 +1478,39 @@ def test_a_result_that_may_have_opened_it_stops_a_second_one_until_it_is_checked
     assert json.loads(job["meta"])["op"] == "platform_execute"
     names = [event_out(e)["name"] for e in bot.prm.store.events(1, kinds=("platform_recheck",))]
     assert names == [f"#{first['id']} 的结果不确定，#{second['id']} 要再开同一个商品：先核对平台"] * 2
+
+
+@pytest.mark.parametrize("rec", LEFT_UNBOUND, ids=["partial-after-the-create", "made-then-refused"])
+def test_a_channel_product_left_unbound_is_named_with_the_ways_back(bot, clock, rec):
+    """review 2026-11-09 F3 (the verifier's probe P4): a 专属链接 that made its channel product and did not bind her says
+    which one, its link and the two ways back; a second draft of the same product and creator is held until an operator
+    says on the red one that it is dealt with, and its approval hands the Mac the channel product's id: the Mac makes
+    no other while that one is there unbound (platforms ``_dy_leftover``)."""
+    first, reply = maybe_opened(bot, clock, CHANNEL, rec())
+    error = first["error"]
+    assert first["status"] == "failed" and error.startswith("渠道品 7000000001 建好了、没绑上她（")
+    assert "① 在抖店「渠道商品管理」把她绑到渠道品 7000000001 上，链接自己发给她；② 把它下架、删掉" in error
+    assert "处理好了点「我已处理」（它还在、又没绑上她时，系统不会再给她建这个商品的链接）" in error
+    assert (f"链接：{DY_LINK}" in error) == bool(first["platform"]["execution"]["created"].get("link"))
+    assert f"#{first['id']} 渠道品 7000000001 建好了、没绑上她" in bot.prm.store.deal(1)["attention"]
+    assert bot.prm.decide(first["id"], "ack")["ok"]
+    second = drafted(bot, block(CHANNEL), reply=reply)
+    out = bot.prm.decide(second["id"], "execute")
+    assert not out["ok"] and "建好了渠道品 7000000001、没绑上她" in out["error"] and "不能再建一个" in out["error"]
+    assert "点这一份的「不发」" in out["error"] and f"#{first['id']}" in out["error"]
+    [alert] = snap(bot)["platform_alerts"]
+    assert alert["error"].startswith(f"#{second['id']} 要再建同一个商品的专属链接：渠道品 7000000001 删掉了，"
+                                     "点这里的「我已处理」")
+    assert bot.prm.decide(first["id"], "ack") == {"ok": True, "released": second["id"]}
+    job = approve(bot, second)
+    assert json.loads(job["meta"])["leftover"] == ["7000000001"]     # the Mac looks for it before it makes another
+
+
+def test_an_approval_names_no_leftover_when_none_was_made(bot, clock):
+    """Nothing made before (or what was made is bound: verified): the approval carries no ``leftover``."""
+    first = drafted(bot, block(CHANNEL), reply="链接：{链接}")
+    job = approve(bot, first)
+    assert "leftover" not in json.loads(job["meta"])
 
 
 def test_a_check_lets_only_the_draft_it_was_asked_for_run(bot, clock):

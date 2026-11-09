@@ -2,9 +2,11 @@
 
 Every request carries ``Authorization: Bearer <CLAUDE_RELAY_TOKEN>``.
 
-    GET  /relay/health                 {"ok": true, "kinds": ["admin", "prm"]}  (the worker's start-up
-                                       check; "kinds": jobs go out by kind. A bot older than job kinds
-                                       answers without it and hands any job, a cc task too, to any worker)
+    GET  /relay/health                 {"ok": true, "kinds": ["admin", "prm"], "features": [...]}  (the
+                                       worker's start-up check; "kinds": jobs go out by kind. A bot older than
+                                       job kinds answers without it and hands any job, a cc task too, to any
+                                       worker; "features": what else it knows, ``ClaudeRelay.features``, e.g.
+                                       "dy.channel_goods:1" — an older bot answers without it)
     GET  /relay/next?wait=25           a job, or 204 after ``wait`` seconds without one
                                        (headers X-Relay-Projects: JSON list of aliases, X-Relay-Default;
                                        X-Relay-Kinds: "admin,prm" = the job kinds this worker does,
@@ -123,7 +125,8 @@ class _RelayHandler(BaseHTTPRequestHandler):
             return
         url = urlsplit(self.path)
         if url.path == "/relay/health":
-            self._json(200, {"ok": True, "kinds": list(KINDS)})
+            self._json(200, {"ok": True, "kinds": list(KINDS),
+                             "features": [str(f) for f in getattr(self.relay, "features", None) or []]})
         elif _MESSAGES_PATH.match(url.path):
             query = parse_qs(url.query)
             try:

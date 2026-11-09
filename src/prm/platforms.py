@@ -326,8 +326,24 @@ _HAN = re.compile("[\u2e80-\u2e99\u2e9b-\u2ef3\u2f00-\u2fd5\u3005\u3007\u3021-\u
 # Brackets and quotes a draft may write a prefix in: the pair becomes 【】 (the shop's).
 _PREFIX_PAIRS = {"[": "]", "［": "］", "「": "」", "『": "』", "(": ")", "（": "）", "〔": "〕", "〖": "〗",
                  "<": ">", "《": "》", "〈": "〉", "“": "”", "‘": "’", '"': '"', "'": "'", "＂": "＂", "＇": "＇"}
-# A prefix that reads like contact details (buyers see it): 微信, wx / vx / V 号, a run of digits.
-_CONTACT_LIKE = re.compile(r"微信|薇信|威信|(?<![a-z])(?:vx|wx|v信|v\s*[:：]|v\s*\d)|加\s*v|[+＋]\s*v|\d{5,}", re.I)
+PREFIX_PAIRS = _PREFIX_PAIRS                   # (the bot reads a deal's slot with them: service.link_wish)
+# Its closing bracket or quote -> the opening ones (a quote or bracket alone at an end goes: ``_unwrapped``).
+_PREFIX_OPENERS = {close: [o for o, c in _PREFIX_PAIRS.items() if c == close] for close in set(_PREFIX_PAIRS.values())}
+# A prefix that reads like contact details (buyers see it), looked for in its NFKC form (full-width letters and digits
+# as ASCII): 微信 (with a space in it too, 「微 信」), wx / vx / V 号, a run of five digits or more (spaces or dashes
+# between them too).
+_CONTACT_LIKE = re.compile(r"[微薇威]\s*信|(?<![a-z])(?:[vw]\s*x|v\s*信|v\s*[:：]|v\s*\d)|加\s*v|[+＋]\s*v|\d(?:[\s-]*\d){4,}",
+                           re.I)
+# What a prefix never has: the C0 and C1 controls and the two Unicode line separators (the CLI refuses \p{Cc}; U+2028 and
+# U+2029 break the line wherever the prefix is shown: review 2026-11-09 F7).
+_PREFIX_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+# The start of a preview's problem with a prefix above its product's own limit (``_dy_read``): the bot sees that a
+# preview stopped at its prefix (``prefix_stopped``).
+PREFIX_LONG = "标题前缀太长"
+# What the bot announces to the Mac workers (GET /relay/health ``features``): it knows dy.channel_goods the shop's way
+# (``CHANNEL_CONVENTION``).  A worker puts no dy.channel_goods into a draft for a bot that does not say so (an older
+# one would keep the reply with {链接} and let it be sent as it is: review 2026-11-09 F5).
+CHANNEL_FEATURE = f"dy.channel_goods:{CHANNEL_CONVENTION}"
 
 
 def _err(code: str, message: str) -> ActionError:
@@ -723,23 +739,24 @@ def title_length(text) -> int:
 def title_prefix_of(value) -> str:
     """A channel product's title prefix the shop's way, 「【小美专属】」: zero-width and other format characters and
     the spaces at its ends go; one written in another pair of brackets or quotes ([] 「」 （） “” …) gets 【】
-    instead, one without brackets gets them.  Refused (``bad_prefix``, the message says why): not text, a control
-    character or a brace, a 【 or 】 inside, one that reads like contact details (``_CONTACT_LIKE``: buyers see it),
-    and one above ``TITLE_PREFIX_CAP`` counted by ``title_length`` (the brackets too; the count is said: a product's
-    own limit, 12 unless its config says otherwise, is the CLI's to check at the preview).  Empty: ``missing_prefix``."""
+    instead, one without brackets gets them, a quote or bracket alone at an end goes (``_unwrapped``).  Refused
+    (``bad_prefix``, the message says why): not text, a control character (C0, C1, U+2028 / U+2029:
+    ``_PREFIX_CONTROL``) or a brace, a 【 or 】 inside, one that reads like contact details (``_CONTACT_LIKE``:
+    buyers see it), and one above ``TITLE_PREFIX_CAP`` counted by ``title_length`` (the brackets too; the count is
+    said: a product's own limit, 12 unless its config says otherwise, is the CLI's to check at the preview).  Empty:
+    ``missing_prefix``."""
     if not isinstance(value, str):
         raise _err("bad_prefix", "标题前缀（title_prefix）要是文字，比如「【小美专属】」")
     text = "".join(ch for ch in value if unicodedata.category(ch) != "Cf").strip()     # zero-width, BOM, bidi marks
     if not text:
         raise _err("missing_prefix", _NO_PREFIX)
-    if _CONTROL.search(text) or "{" in text or "}" in text:
+    if _PREFIX_CONTROL.search(text) or "{" in text or "}" in text:
         raise _err("bad_prefix", "标题前缀里不能有换行、控制字符、花括号")
-    if _CONTACT_LIKE.search(text):
+    if _CONTACT_LIKE.search(unicodedata.normalize("NFKC", text)):
         raise _err("bad_prefix", f"标题前缀「{_clip(text, 30)}」像联系方式（微信、V 号、一串数字）：前缀买家看得到，只写「【某某专属】」")
-    if len(text) >= 2 and ((text[0] == "【" and text[-1] == "】") or _PREFIX_PAIRS.get(text[0]) == text[-1]):
-        text = text[1:-1].strip()
-        if not text:
-            raise _err("missing_prefix", _NO_PREFIX)
+    text = _unwrapped(text)
+    if not text:
+        raise _err("missing_prefix", _NO_PREFIX)
     if "【" in text or "】" in text:
         raise _err("bad_prefix", f"标题前缀「{_clip(value, 30)}」里的【】不成对：写成「【某某专属】」")
     prefix = f"【{text}】"
@@ -748,6 +765,50 @@ def title_prefix_of(value) -> str:
         raise _err("bad_prefix", f"标题前缀「{_clip(prefix, 30)}」是 {counted} 个字符（汉字算 2 个，【】各算 1 个），"
                                  f"太长了（一般的商品最多 {TITLE_PREFIX_MAX} 个）：少写几个字（比如名字只留两三个字）")
     return prefix
+
+
+def _unwrapped(text: str) -> str:
+    """A prefix without what is around it: 【】 or a pair of ``_PREFIX_PAIRS`` (a few deep), and a quote or bracket of
+    them alone at an end (「"小美专属」: review 2026-11-09 F7).  A 【 or 】 alone stays (``title_prefix_of`` refuses it)."""
+    for _ in range(4):
+        before = text
+        if text[:1] in _PREFIX_PAIRS and _PREFIX_PAIRS[text[0]] not in text[1:]:
+            text = text[1:].strip()
+        if text[-1:] in _PREFIX_OPENERS and not any(o in text[:-1] for o in _PREFIX_OPENERS[text[-1]]):
+            text = text[:-1].strip()
+        if len(text) >= 2 and ((text[0] == "【" and text[-1] == "】") or _PREFIX_PAIRS.get(text[0]) == text[-1]):
+            text = text[1:-1].strip()
+        if text == before:
+            break
+    return text
+
+
+def short_prefix(prefix: str, limit: int = TITLE_PREFIX_MAX) -> str:
+    """A prefix cut to ``limit`` (``title_length``) the shop's way: the name's first characters and 专属
+    (「【小美美呀专属】」 → 「【小美美专属】」); "" when not even one character of the name fits."""
+    inner = prefix[1:-1] if len(prefix) >= 2 and prefix[0] == "【" and prefix[-1] == "】" else prefix
+    name = inner.replace("专属", "").strip()
+    for end in range(len(name), 0, -1):
+        cut = f"【{name[:end].strip()}专属】"
+        if title_length(cut) <= limit:
+            return cut
+    return ""
+
+
+def prefix_stopped(block) -> bool:
+    """Did this dy.channel_goods preview stop at its title prefix: above the usual ``TITLE_PREFIX_MAX``, or above its
+    product's own limit (a problem that starts with ``PREFIX_LONG``)?  The bot asks again for a product whose link
+    draft was dropped so, once the deal has a prefix that fits (review 2026-11-09 F1)."""
+    if not isinstance(block, dict) or block.get("verdict") == "ready":
+        return False
+    action = block.get("action") if isinstance(block.get("action"), dict) else {}
+    if action.get("action") != "dy.channel_goods":
+        return False
+    if title_length(action.get("title_prefix") or "") > TITLE_PREFIX_MAX:
+        return True
+    texts = [*(block.get("problems") or []),
+             *(p for s in block.get("steps") or [] if isinstance(s, dict) for p in s.get("problems") or [])]
+    return any(str(t).startswith(PREFIX_LONG) for t in texts)
 
 
 def _amount(value) -> Optional[Decimal]:
@@ -1333,6 +1394,7 @@ DY_STEPS = {
     "designated": ("百应 · 建指定达人佣金策略", ("buyin", "promotion-strategy-create-designated")),
     "promotion": ("百应 · 给商品建推广（还没推广时）", ("buyin", "promotion-create")),
     "bound": ("抖店 · 查她是不是已经绑在这个商品的渠道品上", ("fxg", "channel-goods-list")),
+    "leftover": ("抖店 · 查上次建好、没绑上她的渠道品还在不在", ("fxg", "channel-goods-list")),
     "read": ("抖店 · 读主商品的 SKU、日常价和可分库存", ("fxg", "channel-goods-create")),
     "create": ("抖店 · 按约定建渠道品", ("fxg", "channel-goods-create")),
     "bind": ("抖店 · 渠道品绑定达人", ("fxg", "channel-goods-bind")),
@@ -1374,6 +1436,12 @@ def _dy_argv(cfg: dict, step: str, action: dict, *, execute: bool, channel_id: s
         if execute:
             raise _err("bad_step", "查渠道品这一步只读")
         opts = [f"--product-id={a['item_id']}", f"--uid={a['creator_platform_id']}"]
+    elif step == "leftover":
+        # every channel product of this main product, without the UID filter (that one shows only the ones she is
+        # bound to): read only
+        if execute:
+            raise _err("bad_step", "查渠道品这一步只读")
+        opts = [f"--product-id={a['item_id']}"]
     elif step == "read":
         # the main product as the create form reads it (its SKUs, daily prices, assignable stock), never executed: as
         # 达人带货 sharing the main product's stock, so that no stock stops the read (专属达人带货 without a stock is
@@ -1628,7 +1696,12 @@ def channel_skus(rows, action: dict) -> tuple:
         if price is None:
             problems.append(f"{what}：没读到日常价（或者日常价太低），算不出 9 折的渠道价；要用别的价就在动作里写 price")
             continue
-        if fixed is not None and main is not None and fixed > main:
+        if fixed is not None and main is None:
+            # a daily price not known: the price of the draft cannot be held to it (review 2026-11-09, item 5's gap)
+            problems.append(f"{what}：没读到日常价，动作里写的渠道价 {_plain_price(fixed)} 元没法核对（渠道价不能比日常价高）；"
+                            "过一会儿点「重新预览」")
+            continue
+        if fixed is not None and fixed > main:
             problems.append(f"{what}：动作里写的渠道价 {_plain_price(fixed)} 元比这个颜色的日常价 {_plain_price(main)} 元还高")
             continue
         assignable = row.get("assignableStock") if _is_int(row.get("assignableStock")) else None
@@ -1740,6 +1813,38 @@ def _dy_bound(cfg: dict, action: dict, run_one) -> tuple:
     return rec, rows
 
 
+def leftover_text(channels: list) -> str:
+    """A create refused because channel products an earlier approval made for her and did not bind are still there."""
+    return f"上次建好、没绑上的渠道品 {'、'.join(channels)} 还在：先在抖店绑上她或删掉"
+
+
+def _dy_leftover(cfg: dict, action: dict, run_one, channels: list) -> tuple:
+    """Are the channel products an earlier approval of this product made for her and did not bind (``channels``, the
+    bot's record: ``context.leftover``) still there (review 2026-11-09 F3)?  ``fxg channel-goods-list --product-id``
+    without the UID filter, read only: the filter shows only the ones she is bound to, and ``_dy_bound`` found none.
+    ``(step record, still)``: ``still`` the ones listed now (``[]``: gone); None when the list did not say (not read,
+    not whole): not knowing is never a yes, nothing is written."""
+    run = run_one(_dy_argv(cfg, "leftover", action, execute=False), "dy", False)
+    data = parse_json(run.stdout)
+    rec = _step("leftover", DY_STEPS["leftover"][0], run, False)
+    rows = data.get("rows") if isinstance(data, dict) and isinstance(data.get("rows"), list) else None
+    listed = {str(r.get("channelId")) for r in rows or [] if isinstance(r, dict)}
+    still = [c for c in channels if c in listed]
+    if still:
+        rec["verdict"] = "blocked"
+        rec["problems"].append(leftover_text(still))
+        return rec, still
+    if run.error or run.stopped or run.exit_code != 0 or rows is None or data.get("complete") is not True:
+        rec["verdict"] = _EXIT_VERDICT.get(run.exit_code, "error")
+        why = (_exit_problem(run) if run.error or run.stopped or run.exit_code
+               else "命令没有给出列表" if rows is None else "列表没读全")
+        rec["problems"].append(f"查不到上次建好、没绑上的渠道品 {'、'.join(channels)} 还在不在（{why}）")
+        return rec, None
+    rec["verdict"] = "ready"
+    rec["facts"].append(_fact("查过", f"上次建好、没绑上的渠道品 {'、'.join(channels)} 已经不在了"))
+    return rec, []
+
+
 def _dy_read(cfg: dict, action: dict, run_one) -> tuple:
     """The first read of a channel product's preview (``read``): the create command for the main product without an
     agreement (its price, stock and prefix are not ours), for its SKUs and what stops the product at all.
@@ -1751,14 +1856,22 @@ def _dy_read(cfg: dict, action: dict, run_one) -> tuple:
     rec["facts"] = [f for f in rec["facts"] if f["label"] != "将写入"]        # (what a read would write is not ours)
     goods = data.get("channelGoods") if isinstance(data, dict) and isinstance(data.get("channelGoods"), dict) else {}
     title = goods.get("title") if isinstance(goods.get("title"), dict) else {}
+    over = False
     if _is_int(title.get("prefixCounted")) and _is_int(title.get("prefixMax")):
         rec["facts"].append(_fact("标题前缀", f"{_clip(title.get('prefix'), 40)}（{title['prefixCounted']}/{title['prefixMax']} 个字符，"
                                              "这个商品的上限）"))
         if title["prefixCounted"] > title["prefixMax"]:
-            rec["problems"].append(f"标题前缀「{_clip(title.get('prefix'), 40)}」是 {title['prefixCounted']} 个字符（汉字算 2 个），"
-                                   f"超过这个商品的上限 {title['prefixMax']} 个：少写几个字（比如名字只留两三个字）")
+            # one line, in Chinese: the CLI's own lines of it go (review 2026-11-09 F7)
+            over = True
+            rec["problems"] = [p for p in rec["problems"] if "the title prefix is " not in p]
+            short = short_prefix(str(title.get("prefix") or action.get("title_prefix") or ""), title["prefixMax"])
+            rec["problems"].append(f"{PREFIX_LONG}：「{_clip(title.get('prefix'), 40)}」是 {title['prefixCounted']} 个字符"
+                                   f"（汉字算 2 个），这个商品最多 {title['prefixMax']} 个：少写几个字"
+                                   + (f"，比如「{short}」（名字留前几个字加「专属」）" if short else "（比如名字只留两三个字）"))
     for text in goods.get("blockers") or []:
         line = _clip(text, 300)
+        if over and line.startswith("the title prefix is "):
+            continue
         if "name_prefix_required" in line and not action.get("title_prefix"):
             line = "这个商品要求写标题前缀（title_prefix，写成「【某某专属】」）：" + line
         if line not in rec["problems"]:
@@ -1831,7 +1944,10 @@ def _channel_plan(action: dict, plan: dict) -> dict:
             if price != fixed:
                 raise _err("bad_plan", f"渠道品约定里 SKU {sku} 的渠道价 {_plain_price(price)} 元不是动作里写的 "
                                        f"{_plain_price(fixed)} 元")
-            if main is not None and price > main:
+            if main is None:
+                raise _err("bad_plan", f"渠道品约定里 SKU {sku} 没有日常价：动作里写的渠道价没法核对（不能比日常价高），"
+                                       "点「重新预览」")
+            if price > main:
                 raise _err("bad_plan", f"渠道品约定里 SKU {sku} 的渠道价 {_plain_price(price)} 元比日常价 "
                                        f"{_plain_price(main)} 元还高")
         elif main is None or price != live_price(main):
@@ -2015,6 +2131,16 @@ def _execute_dy(action: dict, cfg: dict, plan: dict, run_one, record: dict, cont
         record["problems"].append("没有执行：" + ("查不到她绑没绑" if bound["verdict"] == "error" else "；".join(bound["problems"][:2]))
                                   + "，平台没有动")
         return
+    # what an earlier approval made and did not bind (the bot's record of it): still there, no second one
+    leftover = (context or {}).get("leftover")
+    leftover = [str(c) for c in leftover if _DIGITS.match(str(c))][:5] if isinstance(leftover, list) else []
+    if leftover:
+        rec, still = _dy_leftover(cfg, action, run_one, leftover)
+        record["steps"].append(rec)
+        if still is None or still:
+            rec["outcome"] = "NOT_RUN"
+            record["problems"].append(f"没有执行：{rec['problems'][-1]}，平台没有动")
+            return
     agreement = channel_agreement(action, plan["skus"])
     again, data = look("create", agreement=agreement)
     changed = _channel_mismatch(plan["skus"], data) if again["verdict"] == "ready" else []
@@ -2028,25 +2154,30 @@ def _execute_dy(action: dict, cfg: dict, plan: dict, run_one, record: dict, cont
     outcome, data = write("create", agreement=agreement)
     if outcome not in _DONE:
         return
+    # the channel product and its link stay in the record whatever comes next: the bot names them in the way back
+    # (bind her by hand and send the link, or take it down), and hands the id to the next approval (review F3)
+    link = _dy_link(data, action["item_id"])
+    if link:
+        record["created"]["link"] = link
+    channel_id = record["created"].get("channel_id", "")
     # the CLI read the product once more inside its own run: a daily price that moved between the preview just made
     # and that read went into the result, and the approved 9 折 is not the 9 折 any more (review 2026-11-09 #9)
     moved = _channel_mismatch(plan["skus"], data, prices=False)
     if moved:
-        record["problems"].append("渠道品建好了，可是建的时候主商品的日常价和批准时不一样了（" + "；".join(moved[:3])
-                                  + "）：渠道价还是批准时的，没有绑定达人、没有发链接；请到抖店「渠道商品管理」核对渠道价")
+        record["problems"].append(f"渠道品{' ' + channel_id if channel_id else ''}建好了，可是建的时候主商品的日常价和批准时"
+                                  "不一样了（" + "；".join(moved[:3]) + "）：渠道价还是批准时的，没有绑定达人、没有发链接；"
+                                  "请到抖店「渠道商品管理」核对渠道价")
         record["incomplete"] = True
         return
-    link = _dy_link(data, action["item_id"])
-    channel_id = record["created"].get("channel_id", "")
     if not channel_id:
         record["problems"].append("渠道品建好了，但结果里没有渠道品 ID，没法绑定达人")
         record["incomplete"] = True
         return
     if not link:
-        record["problems"].append("渠道品建好了，但结果里没有能发的推广链接（channelGoods.links.channelLink）")
+        record["problems"].append(f"渠道品 {channel_id} 建好了，但结果里没有能发的推广链接（channelGoods.links.channelLink），"
+                                  "没有绑定达人")
         record["incomplete"] = True
         return
-    record["created"]["link"] = link
     bind, data = look("bind", channel_id)
     rows = _rows(data)
     if rows and all(r.get("outcome") == "NO_CHANGE_NEEDED" for r in rows):

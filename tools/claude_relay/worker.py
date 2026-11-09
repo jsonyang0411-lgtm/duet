@@ -495,6 +495,14 @@ class RelayClient:
         kinds = data.get("kinds") if status == 200 and isinstance(data, dict) else None
         return [str(k) for k in kinds] if isinstance(kinds, list) else None
 
+    def bot_features(self) -> list[str] | None:
+        """What the bot announces besides its job kinds (GET /relay/health ``features``, e.g.
+        ``platforms.CHANNEL_FEATURE``); None from a bot that says nothing of them (from before 2026-11-09).  A bot
+        that cannot be asked raises, as every call does."""
+        status, data = self._call("GET", "/relay/health")
+        features = data.get("features") if status == 200 and isinstance(data, dict) else None
+        return [str(f) for f in features] if isinstance(features, list) else None
+
     def next_job(self, wait: int = POLL_WAIT_SEC, settings: dict | None = None,
                  kinds: tuple = ALL_KINDS) -> dict | None:
         """The next job; with ``settings`` the bot also learns which projects this Mac offers
@@ -2298,12 +2306,18 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
             pass                                         # no preview: the bot drops a 百应 draft's action unrun
         elif draft.get("platform_action") is not None:
             raw = draft.pop("platform_action")
-            try:
-                draft["platform"] = platform_preview(settings, workspace, raw, client, int(job["id"]), party_id,
-                                                     creator=meta.get("creator"))
-            except Exception as e:                       # never lose the draft over its preview
-                log.exception("#%s platform preview failed", job["id"])
-                draft["platform"] = preview_failed(raw, f"Mac 上预览出错：{e}")
+            older = older_bot(client, raw)
+            if older:
+                log.warning("#%s the bot is older than this worker: the draft's %s is left out", job["id"],
+                            raw.get("action"))
+                hold_for_older_bot(draft, older)
+            else:
+                try:
+                    draft["platform"] = platform_preview(settings, workspace, raw, client, int(job["id"]), party_id,
+                                                         creator=meta.get("creator"))
+                except Exception as e:                   # never lose the draft over its preview
+                    log.exception("#%s platform preview failed", job["id"])
+                    draft["platform"] = preview_failed(raw, f"Mac 上预览出错：{e}")
         result["text"] = json.dumps(draft, ensure_ascii=False)
     result["log_path"] = str(save_prm_log(job, run, result))
     log.info("#%s prm finished ok=%s in %ss", job["id"], result["ok"], result["duration_s"])
@@ -2373,6 +2387,38 @@ def preview_failed(raw_action, why: str) -> dict:
                 "facts": [], "steps": [], "run": {}, "previewed_at": time.time()}
 
 
+# A 专属链接 for a bot older than the shop's way (review 2026-11-09 F5: a new Mac and an old Windows bot): such a bot
+# refuses the action's ``convention``, keeps the reply as a plain draft and has no check of its {链接}.
+OLDER_BOT_NOTE = ("Windows 上的机器人比这台 Mac 旧，还不认识照店里做法建的专属链接（dy.channel_goods）：这一份的平台动作没给它；"
+                  "回复里有 {链接} 这类占位符的（旧机器人不会换成链接），回复也去掉了。先更新 Windows 上的机器人，再让它重新起草")
+UNASKED_BOT_NOTE = ("这台 Mac 刚才问不到 Windows 上的机器人认不认识照店里做法建的专属链接（网络断了一下？）：这一份的平台动作没给它；"
+                    "回复里有 {链接} 这类占位符的，回复也去掉了。过一会儿让它重新起草")
+
+
+def older_bot(client: RelayClient, raw_action) -> str:
+    """Why a draft's action may not go to this bot ("" = it may): a dy.channel_goods for a bot that does not announce
+    ``platforms.CHANNEL_FEATURE`` (GET /relay/health ``features``: one from before 2026-11-09), or that cannot be
+    asked now (``UNASKED_BOT_NOTE``: not knowing is never a yes)."""
+    if not isinstance(raw_action, dict) or raw_action.get("action") != "dy.channel_goods" or platforms is None:
+        return ""
+    try:
+        features = client.bot_features()
+    except Exception as e:                               # (once per draft that needs it: never fatal)
+        log.warning("the bot's features could not be asked for: %s", e)
+        return UNASKED_BOT_NOTE
+    return "" if features is not None and platforms.CHANNEL_FEATURE in features else OLDER_BOT_NOTE
+
+
+def hold_for_older_bot(draft: dict, why: str) -> None:
+    """The draft without its action (``older_bot``) waits for a person: its reply goes too when it says a platform
+    placeholder ({链接} …: nothing would fill it in), and the reason says why first."""
+    reply = str(draft.get("reply_draft") or "")
+    if platforms is None or any(key in reply for key in platforms.PLACEHOLDER_LABELS):
+        draft["reply_draft"] = ""
+    draft["needs_attention"] = True
+    draft["reason"] = "；".join(r for r in (why, str(draft.get("reason") or "").strip()) if r)[:300]
+
+
 def do_platform_job(settings: dict, job: dict, client: RelayClient, workspace: Path, meta: dict) -> dict:
     """A ``platform_preview`` (again, for a waiting draft) or ``platform_execute`` job: no model."""
     if platforms is None:
@@ -2389,6 +2435,9 @@ def do_platform_job(settings: dict, job: dict, client: RelayClient, workspace: P
     log.info("#%s platform execute: %s (packet %s)", job["id"], action.get("action"), meta.get("packet_id"))
     context = {"job_id": int(job["id"]), "packet_id": meta.get("packet_id"), "party_id": meta.get("party_id"),
                **invite_context(settings, meta.get("creator"))}
+    if isinstance(meta.get("leftover"), list):
+        # 专属链接: channel products an earlier approval made and did not bind (the bot's record): checked before a create
+        context["leftover"] = meta["leftover"]
     key = str(meta.get("key") or "")
     beat = _platform_heartbeat(client, int(job["id"]), "平台执行")
     record, locked = None, False
@@ -3110,6 +3159,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"bot {settings['relay_url']}: {'ok' if healthy else 'unexpected answer'}"
                   + (f" (job kinds: {','.join(offered)})" if offered is not None else
                      " (older than job kinds: it hands any job to any worker; a prm-only worker waits)"))
+            if platforms is not None:
+                features = client.bot_features()
+                knows = features is not None and platforms.CHANNEL_FEATURE in features
+                print(f"bot knows 专属链接 the shop's way ({platforms.CHANNEL_FEATURE}): "
+                      + ("yes" if knows else "no: drafts get no dy.channel_goods (update the bot on Windows first)"))
         except urllib.error.HTTPError as e:
             print(f"bot {settings['relay_url']}: HTTP {e.code}" + (" (token wrong)" if e.code == 401 else ""))
             return 1

@@ -196,6 +196,39 @@ def test_a_channel_link_is_made_the_shops_way_end_to_end(worker, bot, mac):  # n
     assert [c for c in mac.node.calls() if "--execute" in c["argv"]][-1]["argv"][1:3] == ["fxg", "channel-goods-bind"]
 
 
+@pytest.mark.parametrize("features", [None, [], ["dy.channel_goods:0"]], ids=["older-bot", "none", "another-convention"])
+def test_a_newer_mac_puts_no_channel_link_into_a_draft_for_an_older_bot(worker, bot, mac, monkeypatch, features):  # noqa: F811
+    """review 2026-11-09 F5 (a new Mac, an old Windows bot): the bot announces platforms.CHANNEL_FEATURE on GET
+    /relay/health; to a bot without it the worker hands no dy.channel_goods (such a bot would keep the reply with
+    {链接} and let it be sent as it is): no CLI runs, the reply goes too when it says {链接}, and the draft says why."""
+    client = worker.RelayClient(bot.url, TOKEN)
+    assert client.bot_features() == [platforms.CHANNEL_FEATURE]
+    action = {"action": "dy.channel_goods", "item_id": DY_ITEM2, "creator_platform_id": DY_UID, "title_prefix": "小美专属"}
+    mac.claude.answers(platform_action=action, reply_draft="您的专属链接：{链接}", intent="要专属链接", reason="kb/合作政策.md")
+    monkeypatch.setattr(worker.RelayClient, "bot_features", lambda self: features)
+    creator_says(bot, "要链接，前缀：小美专属")
+    run_one(worker, bot, mac.settings)
+    [packet] = bot.prm.store.packets()
+    assert packet["tool"] == "message.send" and not packet["platform"] and packet["text"] == ""
+    assert packet["reason"].startswith(worker.OLDER_BOT_NOTE) and packet["reason"].endswith("kb/合作政策.md")
+    assert mac.node.calls() == []                                    # nothing previewed
+    assert worker.OLDER_BOT_NOTE in bot.prm.store.deal(packet["deal_id"])["attention"]
+
+
+def test_a_reply_without_a_placeholder_stays_when_the_link_is_left_out(worker):  # noqa: F811
+    draft = {"reply_draft": "好的老师，链接马上给您弄", "needs_attention": False, "reason": ""}
+    worker.hold_for_older_bot(draft, worker.OLDER_BOT_NOTE)
+    assert draft == {"reply_draft": "好的老师，链接马上给您弄", "needs_attention": True, "reason": worker.OLDER_BOT_NOTE}
+    assert worker.older_bot(SimpleNamespace(bot_features=lambda: [platforms.CHANNEL_FEATURE]),
+                            {"action": "dy.channel_goods"}) == ""
+    assert worker.older_bot(SimpleNamespace(bot_features=lambda: None), DESIGNATED) == ""   # (only a link asks the bot)
+
+    def down():
+        raise OSError("connection refused")
+    # a bot that cannot be asked right now is not taken for a new one, and the draft says so in its own words
+    assert worker.older_bot(SimpleNamespace(bot_features=down), {"action": "dy.channel_goods"}) == worker.UNASKED_BOT_NOTE
+
+
 def test_a_verdict_claude_writes_itself_is_dropped(worker, bot, mac):  # noqa: F811
     forged = {"version": 1, "action": platforms.check_action(DESIGNATED), "verdict": "ready", "problems": [],
               "facts": [], "steps": [], "run": {"steps": ["designated"]}, "previewed_at": 1.0}
