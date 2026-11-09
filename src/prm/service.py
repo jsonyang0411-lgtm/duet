@@ -124,7 +124,7 @@ from .three_party import EVENT as GROUP_EVENT, ThreeParty, state_out as group_st
 from .store import (
     APPROVED, BUYIN_TOOL, COPILOT, DRAFT_NOTES, DROPPED, EXECUTING, FAILED, HUMAN, LANE_BUYIN, LANE_REPLY, LANE_SYSTEM,
     DRAFT_NOTE_CHARS, MESSAGE_TOOL, MODES, NO_REPLY, NOTICE_CHARS, PAUSED, PENDING,
-    SENDING, SENT, SHIPMENT_STATES, STAGES, SUPERSEDED, PartyError, PrmStore,
+    SENDING, SENT, SHIPMENT_STATES, STAGES, SUPERSEDED, PartyError, PrmStore, draft_note_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -1005,7 +1005,8 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
         final = p["final_text"] if p.get("final_text") is not None else p["text"]
         platform = platform_out(p)
         if photo_check and platform and platform["can_execute"] and draft_context.unchecked(p):
-            platform = {**platform, "can_execute": False, "problems": [*platform["problems"], draft_context.NOT_GATED]}
+            platform = {**platform, "can_execute": False,
+                        "problems": [*platform["problems"], draft_context.unchecked_reason(p)]}
         return {
             "id": p["id"], "deal_id": p["deal_id"], "party_id": p["party_id"],
             "party_name": party.get("name", "?"), "job_id": p["job_id"], "status": p["status"],
@@ -3524,8 +3525,9 @@ class PrmService:
 
     def set_draft_note(self, deal_id, text, actor: str = "console") -> dict:
         """「起草备注」 in the console (the deal action ``draft_note`` {text}): what the operators tell the Mac about this
-        creator, which every draft job of the deal carries from now on (``_with_note``); "" clears it.  Whitespace is
-        collapsed (``store.draft_note_text``); longer than DRAFT_NOTE_CHARS is refused, not cut.  A change is one event
+        creator, which every draft job of the deal carries from now on (``_with_note``); "" clears it.  Each line's
+        whitespace is collapsed, empty lines dropped, the lines kept (``store.draft_note_text``: a 「确认 <编码>」 is a line
+        of its own); longer than DRAFT_NOTE_CHARS is refused, not cut.  A change is one event
         (``chars``: how long the note is now; its words are in no event and no log line).  ``{"ok": True, "draft_note"}``,
         or ``{"ok": False, "error"}`` saying why not."""
         try:
@@ -3536,7 +3538,7 @@ class PrmService:
             return {"ok": False, "error": "没有找到这张合作单"}
         if not isinstance(text, str):
             return {"ok": False, "error": "要给出起草备注的文字（空着就是清掉）"}
-        note = " ".join(text.split())
+        note = draft_note_text(text, limit=None)
         if len(note) > DRAFT_NOTE_CHARS:
             return {"ok": False, "error": f"起草备注最多 {DRAFT_NOTE_CHARS} 个字（现在 {len(note)} 个）"}
         if note == str(deal.get("draft_note") or ""):
@@ -4006,8 +4008,11 @@ class PrmService:
         if data.get("previewing"):
             return {"ok": False, "error": "正在重新预览，等结果出来再批准"}
         if self._draft_context and draft_context.unchecked(packet):
-            # PRM_DRAFT_CONTEXT: its last preview was not checked by photo (a draft from before the switch was on too)
-            return {"ok": False, "error": f"{draft_context.NOT_GATED}：点「重新预览」，Mac 对过图再批准"}
+            # PRM_DRAFT_CONTEXT: its last preview was not checked by photo (a draft from before the switch was on too), or
+            # by an older rule (a v1 mark: 「这份是旧规则核的…」)
+            reason = draft_context.unchecked_reason(packet)
+            return {"ok": False, "error": reason if reason == draft_context.OLD_RULE
+                    else f"{draft_context.NOT_GATED}：点「重新预览」，Mac 对过图再批准"}
         opened, unsure = self._opened_before(packet)
         if opened:
             logger.warning("PRM: packet %d not approved: its %s ran before for this product and creator%s",

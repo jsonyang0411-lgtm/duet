@@ -249,11 +249,11 @@ def test_a_huopan_is_asked_for_from_the_running_console_and_refused_while_stoppe
 
 def test_the_draft_note_is_kept_from_the_running_console_and_refused_while_stopped(running, tmp_path, monkeypatch):
     """POST /api/prm/deals {action: draft_note, text} (起草备注, 2026-10-31): the operators' words for the Mac, kept on the
-    deal (whitespace collapsed) and shown in GET /api/prm's deal; her next draft job carries them (``meta.note``); too
+    deal (each line's blanks collapsed, the lines kept) and shown in GET /api/prm's deal; her next draft job carries them (``meta.note``); too
     long is refused, empty clears it; another site's page cannot change it; a stopped bot cannot keep one (refused like
     写开场白)."""
     words = "直接发链接和brief，感兴趣的会回复！\n勿催视频，不接语音"
-    kept = "直接发链接和brief，感兴趣的会回复！ 勿催视频，不接语音"
+    kept = "直接发链接和brief，感兴趣的会回复！\n勿催视频，不接语音"
     deal = call("/api/prm")[1]["parties"][0]["deal"]
     assert deal["draft_note"] == ""
     answer = call("/api/prm/deals", "POST", {"action": "draft_note", "deal_id": deal["id"], "text": words})[1]

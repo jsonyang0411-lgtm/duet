@@ -92,7 +92,7 @@ def test_an_old_database_gets_the_column_and_its_deals_have_no_note(tmp_path):
         deal = store.deal(1)
         assert (deal["stage"], deal["draft_note"]) == ("agreed", "")
         store.update_deal(1, 2.0, draft_note=f"  {SIGNATURE}\n\n 勿催　视频 ")
-        assert store.deal(1)["draft_note"] == f"{SIGNATURE} 勿催 视频"            # one line (the full-width blank too)
+        assert store.deal(1)["draft_note"] == f"{SIGNATURE}\n勿催 视频"           # its lines (the full-width blank too)
     finally:
         store.close()
     conn = sqlite3.connect(str(path))
@@ -103,9 +103,13 @@ def test_an_old_database_gets_the_column_and_its_deals_have_no_note(tmp_path):
     assert columns.count("draft_note") == 1
 
 
-def test_the_store_keeps_a_note_on_one_line_and_at_most_300_characters():
+def test_the_store_keeps_a_notes_lines_tidied_and_at_most_300_characters():
+    """Each line's blanks collapsed, empty lines dropped, the line breaks kept (2026-11-09: PRM_DRAFT_CONTEXT's
+    「确认 <编码>」 counts only as a line of its own)."""
     assert DRAFT_NOTE_CHARS == 300
-    assert draft_note_text("直接发链接\n\n\t和brief ") == "直接发链接 和brief" and draft_note_text(None) == ""
+    assert draft_note_text("直接发链接\n\n\t和brief ") == "直接发链接\n和brief" and draft_note_text(None) == ""
+    assert draft_note_text(" 她要深棕 \r\n确认   A7269901001B-F\r勿催\n") == "她要深棕\n确认 A7269901001B-F\n勿催"
+    assert draft_note_text("长" * 150 + "\n" + "长" * 200, limit=None) == "长" * 150 + "\n" + "长" * 200
     assert draft_note_text("长" * 400) == "长" * 300
     store = PrmStore(":memory:")
     party = store.add_party(CREATOR, "小美", now=1)
@@ -145,8 +149,8 @@ def test_a_note_too_long_or_not_text_is_refused_and_nothing_changes(bot):
     assert note(bot, "不接语音", deal_id=99) == {"ok": False, "error": "没有找到这张合作单"}
     assert note(bot, "不接语音", deal_id="x")["ok"] is False
     assert bot.prm.store.deal(1)["draft_note"] == "" and note_events(bot) == []
-    kept = note(bot, "长" * 150 + " \n\n " + "长" * 149)                           # 300 once the blanks are one
-    assert kept == {"ok": True, "draft_note": "长" * 150 + " " + "长" * 149}
+    kept = note(bot, "长" * 150 + " \n\n " + "长" * 149)                           # 300 once the blank lines go
+    assert kept == {"ok": True, "draft_note": "长" * 150 + "\n" + "长" * 149}
 
 
 def test_the_console_shows_the_note_as_written(bot):

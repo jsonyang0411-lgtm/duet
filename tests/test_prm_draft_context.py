@@ -382,6 +382,28 @@ def test_a_mark_older_than_v2_is_held_like_none(clock, tmp_path):
         b.relay.stop()
 
 
+def test_a_kept_draft_an_older_rule_checked_says_to_check_it_again(bot):
+    """Verification 2026-11-09: a draft kept from before the colour rule (its packet's mark v1, its preview ready, as
+    that bot stored it): the console and approving say 「这份是旧规则核的，点「重新预览」按新规则再核」 (not that the
+    worker is old); a new preview the Mac checks by the new rule (v2) lets it go."""
+    _, packet = sheet_draft(bot, with_brief=False, verdict="ready")
+    assert bot.prm.store.merge_packet_meta(packet["id"], {draft_context.KEY: {"v": 1, "gated": True}})
+    data = bot.prm.store.packet(packet["id"])["platform"]
+    assert bot.prm.store.set_platform(packet["id"], {**data, "preview": sample_block(previewed_at=1.5)}, ("pending",))
+    kept = bot.prm.store.packet(packet["id"])
+    assert draft_context.unchecked_reason(kept) == draft_context.OLD_RULE == "这份是旧规则核的，点「重新预览」按新规则再核"
+    [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
+    assert shown["platform"]["can_execute"] is False and shown["platform"]["problems"] == [draft_context.OLD_RULE]
+    assert bot.prm.decide(packet["id"], "execute") == {"ok": False, "error": draft_context.OLD_RULE}
+    assert bot.prm.decide(packet["id"], "repreview")["ok"]
+    again = bot.relay.next_job(0, ("prm",))
+    bot.finish(again["id"], text=json.dumps(sample_block(previewed_at=2.0, draft_context=GATED), ensure_ascii=False))
+    [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
+    assert shown["platform"]["can_execute"] is True and draft_context.unchecked_reason(bot.prm.store.packet(packet["id"])) == ""
+    assert draft_context.unchecked_reason({"platform": {"action": {"action": "jst.sample_order"}}, "meta": {}}) == \
+        draft_context.NOT_GATED
+
+
 def test_the_console_shows_the_sheet_and_serves_it_while_the_bot_runs_and_after(bot, tmp_path, monkeypatch):
     job, packet = sheet_draft(bot, with_brief=False)
     url = f"/api/prm/file?packet={packet['id']}&kind=operator&n=0"

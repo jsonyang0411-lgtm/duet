@@ -50,6 +50,7 @@ OPERATOR_FILES = "operator_files"   # the draft's (the Mac's answer) and the pac
 SHEET_PREFIX = "对图单-"            # the Mac's sheet (worker.sample_order_gate): never an attachment, named or not
 SHEET_WHY = "寄样单里每一顶和她发的图并排对比；只给运营看，不发给达人"
 NOT_GATED = "Mac 没有对图：worker 旧了或没重启"
+OLD_RULE = "这份是旧规则核的，点「重新预览」按新规则再核"   # a kept draft whose mark is older than MARK_VERSION
 MAX_ORDERS = 20
 MAX_ACCOUNTS = 10
 MAX_OPERATOR_FILES = 4
@@ -132,6 +133,31 @@ def gated_of(value) -> bool:
 def mark(gated: bool) -> dict:
     """The packet's ``meta.draft_context``: whether its last preview was checked by photo."""
     return {"v": MARK_VERSION, "gated": bool(gated)}
+
+
+def mark_version(value) -> Optional[int]:
+    """The ``v`` of a mark that says checked (``draft_context: {"v": …, "gated": true}``; ``value`` as ``gated_of``'s),
+    or None (no such mark)."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    mark = value.get(KEY) if isinstance(value, dict) else None
+    if not isinstance(mark, dict) or mark.get("gated") is not True:
+        return None
+    version = mark.get("v")
+    return version if isinstance(version, int) and not isinstance(version, bool) else 1
+
+
+def unchecked_reason(packet: Optional[dict]) -> str:
+    """Why a draft's jst.sample_order cannot be approved as it is (``unchecked``), in the console's words: its mark is an
+    older rule's (``OLD_RULE``: a new preview checks it by the new one), or there is none (``NOT_GATED``); "" when it is
+    checked (or no sample order)."""
+    if not unchecked(packet):
+        return ""
+    version = mark_version((packet or {}).get("meta"))
+    return OLD_RULE if version is not None and version < MARK_VERSION else NOT_GATED
 
 
 def unchecked(packet: Optional[dict]) -> bool:

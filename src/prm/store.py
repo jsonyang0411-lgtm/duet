@@ -77,6 +77,7 @@ link filled in, goes out) | ``failed`` (anything less: nothing is sent to the cr
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -391,8 +392,10 @@ NOTICE_CHARS = 300          # one notice's text
 ATTENTION_CHARS = 600       # all of them, as the console shows them
 # A deal's 起草备注 (``draft_note``, 2026-10-31): what the operators tell the Mac about this creator for every draft of
 # hers (her WeChat signature said 「直接发链接和brief，感兴趣的会回复！勿催视频，不接语音」, say).  Only an operator writes
-# it (her party ``note`` is the bot's for a creator it registered, and may name her groups).
+# it (her party ``note`` is the bot's for a creator it registered, and may name her groups).  Its lines stay lines
+# (2026-11-09: PRM_DRAFT_CONTEXT's 「确认 <编码>」 counts only as a line of its own).
 DRAFT_NOTE_CHARS = 300
+_LINE_BREAK = re.compile(r"\r\n|\r|\n")
 
 
 class PartyError(ValueError):
@@ -430,9 +433,13 @@ def deal_view(row: dict) -> dict:
     return out
 
 
-def draft_note_text(text) -> str:
-    """A deal's 起草备注 as it is kept: whitespace collapsed (one line), at most DRAFT_NOTE_CHARS characters."""
-    return " ".join(str(text or "").split())[:DRAFT_NOTE_CHARS]
+def draft_note_text(text, limit: Optional[int] = DRAFT_NOTE_CHARS) -> str:
+    """A deal's 起草备注 as it is kept: each line's whitespace collapsed to single blanks, empty lines dropped, the line
+    breaks kept (``\n``), at most ``limit`` characters (None: all of it; the console's ``draftNoteText`` does the
+    same)."""
+    lines = (" ".join(line.split()) for line in _LINE_BREAK.split(str(text or "")))
+    kept = "\n".join(line for line in lines if line)
+    return kept if limit is None else kept[:limit]
 
 
 def notices_of(row: dict) -> list:

@@ -51,10 +51,14 @@ export const ackPlatform = (id) => decide(id, 'ack')
 export const partyAction = (body) => post('/api/prm/parties', body)
 export const dealAction = (body) => post('/api/prm/deals', body)
 // 起草备注 (the deal action draft_note, 2026-10-31): what the operators tell the Mac about this creator; every draft of
-// hers (the 开场白 too) follows it. Saved empty, it is cleared; the bot collapses whitespace and keeps at most 300 characters.
+// hers (the 开场白 too) follows it. Saved empty, it is cleared; the bot collapses each line's blanks, drops empty lines,
+// keeps the line breaks (a 「确认 编码」 counts only as a line of its own, 2026-11-09) and at most 300 characters.
 export const DRAFT_NOTE_MAX = 300
-/** The note as the bot keeps it (whitespace collapsed): its length is what the limit counts. */
-export const draftNoteText = (text) => String(text || '').split(/\s+/).filter(Boolean).join(' ')
+/** The note as the bot keeps it (store.draft_note_text): its length is what the limit counts. */
+export const draftNoteText = (text) => String(text || '').split(/\r\n|\r|\n/)
+  .map((line) => line.split(/\s+/).filter(Boolean).join(' ')).filter(Boolean).join('\n')
+/** How the operators let a sample order's hat go that the Mac could not check by photo (PRM_DRAFT_CONTEXT). */
+export const CONFIRM_HINT = '寄样单里没对过图的那顶：对过图后，在起草备注里另起一行写：确认 编码'
 export const saveDraftNote = (dealId, text) => dealAction({ deal_id: dealId, action: 'draft_note', text: draftNoteText(text) })
 /** 自动模式 (POST /api/prm/auto): the 下班时段 rules at any hour, until switched off. */
 export const setAutoMode = (on) => post('/api/prm/auto', { on })

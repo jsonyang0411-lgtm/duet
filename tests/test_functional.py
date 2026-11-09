@@ -855,7 +855,7 @@ class TestPrmPages:
 
     def test_deals_page_edits_saves_and_shows_the_draft_note(self, page, prm):
         """起草备注 (2026-10-31): an opened deal shows its note (none yet) with the hint; 「写备注」 opens the field, 「保存」
-        keeps it through the deal action (one line, as the bot keeps it) and her next draft job carries it; more than
+        keeps it through the deal action (its lines, as the bot keeps them) and her next draft job carries it; more than
         300 characters, or the bot refusing, says why right there and keeps nothing; saved empty, it is cleared."""
         from src.prm.service import SETTLE_SEC
 
@@ -868,6 +868,7 @@ class TestPrmPages:
         text = block.inner_text()
         assert "起草备注" in text and "（没有）" in text
         assert "写给 Mac 起草时看的，比如她签名里的要求：直接发链接和 brief、不接语音" in text
+        assert "寄样单里没对过图的那顶：对过图后，在起草备注里另起一行写：确认 编码" in text      # (PRM_DRAFT_CONTEXT)
         block.locator("button:has-text('写备注')").click()
         field = block.locator("textarea[aria-label='小美 的起草备注']")
         field.fill("长" * 301)
@@ -878,7 +879,7 @@ class TestPrmPages:
         field.fill("直接发链接和brief，感兴趣的会回复！\n勿催视频，不接语音")
         block.locator("button:has-text('保存')").click()
         page.wait_for_timeout(1500)
-        kept = "直接发链接和brief，感兴趣的会回复！ 勿催视频，不接语音"
+        kept = "直接发链接和brief，感兴趣的会回复！\n勿催视频，不接语音"
         assert store.deal(1)["draft_note"] == kept
         assert kept in block.inner_text() and block.locator("textarea").count() == 0
         assert "改起草备注" in page.locator(".prm-deal").inner_text()            # the deal's record
