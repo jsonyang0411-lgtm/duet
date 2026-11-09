@@ -140,6 +140,13 @@ GROUPS: list[dict] = [
                      "再发图，图和图之间停 2～4 秒（一份两条字两张图的回复大概二十秒发完）。关掉就和以前一样：字之间停一两秒，"
                      "图紧跟着一张接一张。改完要重启机器人。",
              "requires": [{"key": "PRM_COPILOT", "is": "on", "text": "达人副驾驶打开时才用"}]},
+            {"key": "PRM_HANDCARDS", "type": "onoff", "default": "off", "label": "自动做直播手卡",
+             "help": "达人要手卡（直播手卡、上播手卡）时，Mac 照老板模板把她要的款做成图片版手卡（一款一张：价格按商品目录、"
+                     "直播价 9 折、库存写「充足」、发货口径照 Mac 上的 handcards.json），附在草稿里；合作单里也多一个「做手卡」。"
+                     "带手卡的草稿一律等你看过再发（门槛、下班时段、自动模式都不自动发）；没做成的一张都不附，话也不能原样发。"
+                     "Mac 上要装好 live-handcard 技能、建好 ~/.claude-relay/handcards.json"
+                     "（照 tools/claude_relay/handcards.example.json）。改完要重启机器人。",
+             "requires": [{"key": "PRM_COPILOT", "is": "on", "text": "达人副驾驶打开时才用"}]},
             {"key": "PRM_CATCHUP_HOURS", "type": "int", "min": 0, "max": 72, "default": "12",
              "label": "没在读时收到的消息补多久", "unit": "小时",
              "help": "机器人停着（更新 EXE、重启）或数据库重新打开的那段时间里达人发来的消息，重新读到时照样交给副驾驶："

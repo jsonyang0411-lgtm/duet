@@ -1387,6 +1387,45 @@ def test_the_records_a_group_job_took_go_to_her_next_draft_when_the_link_ends(cl
     b.relay.stop()
 
 
+@pytest.mark.parametrize("written", [False, True])
+def test_a_handcards_job_of_a_group_that_closes_leaves_no_records_it_was_only_told(clock, tmp_path, written):
+    """合并 handcard-auto (2026-11-09): a 「做手卡」 job (``meta.handcards``, PRM_HANDCARDS) is told the takeover's
+    records, it does not take them (``_ask_handcards``, like a 补发货盘's).  Cancelled as the link ends, or written and
+    back after it: it leaves no notice of records (``_group_job_closed``), so her next draft hears them once, from the
+    backlog, not twice."""
+    b = setup(clock, tmp_path, prm_handcards="on")
+    linked(b, member=1)
+    deal_id = b.prm.store.boss_group(GROUP)["deal_id"]
+    b.prm.on_own_message(own(b, "我是运营，我看一下哈"))
+    b.clock.now += 5
+    b.prm.handle(gmsg(b, "好的我等你"))                                # a person has her deal: only recorded
+    assert b.prm.store.deal(deal_id)["mode"] == "human"
+    b.prm.store.update_deal(deal_id, b.clock.now, mode="copilot", mode_until=None)
+    b.clock.now += 60
+    asked = b.prm.deal_action("handcards", {"deal_id": deal_id})
+    assert asked["ok"], asked
+    job = b.relay.store.get(asked["job"])
+    meta = json.loads(job["meta"])
+    assert job["chat_id"] == GROUP and isinstance(meta["handcards"], dict)       # (no private chat: the group)
+    assert any("好的我等你" in h["text"] for h in meta["history"])
+    if written:
+        b.clock.now += SETTLE_SEC + 1
+        assert b.relay.next_job(0, ("prm",))["id"] == job["id"]
+    b.say(f"不接群 {GROUP_NAME}")
+    if written:
+        b.finish(job["id"], draft(message_kind="faq", reply_draft="老师手卡在这里～", slots={}, stage_proposal="",
+                                  reason="kb/合作政策.md"))
+    else:
+        assert b.relay.store.get(job["id"])["status"] == "cancelled"
+    assert not any(n["key"] == f"failed:{job['id']}" for n in b.prm.store.deal(deal_id)["notices"])
+    b.clock.now += 5
+    b.prm.handle(b.msg("私聊问一下"))
+    texts = [h["text"] for h in json.loads(job_of(b, CREATOR)["meta"])["history"]]
+    assert sum("好的我等你" in t for t in texts) == 1
+    b.prm.stop()
+    b.relay.stop()
+
+
 def test_a_line_missed_by_a_group_job_back_after_the_link_ended_is_told_to_her_next_draft(bot):
     """Her line read too late (``missed``) went with a group job that came back closed: it reached no draft, its notice
     stayed for ever.  Now her next draft is told it, and its notice goes once that draft is written."""

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   ArrowClockwise, UserPlus, Prohibit, ArrowCounterClockwise, CaretDown, CaretRight, Eye, EyeSlash, Truck, Check, HandWaving,
-  UsersThree, Copy, PencilSimple, Package,
+  UsersThree, Copy, PencilSimple, Package, IdentificationCard,
 } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
@@ -353,6 +353,9 @@ function DealDetail({ p, d, onDone }) {
         </div>
       </div>
 
+      {/* 直播手卡 (the deal action handcards, PRM_HANDCARDS, 2026-11-09): the Mac makes her cards, a person looks first */}
+      {d?.handcards && <HandcardsBlock p={p} busy={busy} run={run} />}
+
       {d?.three_party?.enabled && <ThreePartyBlock p={p} d={d} busy={busy} run={run} />}
       {(deal.linked_groups || []).length > 0 && <LinkedGroups groups={deal.linked_groups} busy={busy} run={run} />}
 
@@ -498,6 +501,53 @@ function LinkedGroups({ groups, busy, run }) {
             onClick={() => run({ action: 'group_unlink', chat: g.chat }, `记下了：「${g.name || '这个群'}」不接了，群里的话不再起草`)}>不接了</button>
         </div>
       ))}
+    </div>
+  )
+}
+
+// 做手卡 (PRM_HANDCARDS): the products of her latest 抖店 sample order the bot made are ticked; other 抖店 product ids may be
+// typed; none at all: the Mac takes the ones she picked from her case file (or makes none and says why).
+function HandcardsBlock({ p, busy, run }) {
+  const deal = p.deal
+  const order = deal.card_items
+  const fromOrder = order?.shop === 'dy' ? order.items : []
+  const [ticked, setTicked] = useState(() => fromOrder.map((i) => i.item_id))
+  const [extra, setExtra] = useState('')
+  const items = [...new Set([...ticked, ...extra.split(/[\s,，、;；]+/).filter(Boolean)])]
+  const off = !p.active || deal.mode !== 'copilot'
+  const tick = (id, on) => setTicked((t) => (on ? [...t, id] : t.filter((x) => x !== id)))
+  return (
+    <div className="stack prm-handcards" style={{ gap: 6 }}>
+      <b>直播手卡</b>
+      <div className="f-hint">
+        她要上播、要手卡：点「做手卡」，Mac 照老板模板把勾上的款做成图片版手卡（一款一张，价格、尺码、颜色按商品目录，库存写「充足」），
+        附在草稿里，在「待审批」里等你看过再发（不会自动发）。什么都不勾、不填，Mac 按案卷里她选的款做。
+      </div>
+      {order && order.shop !== 'dy' && <div className="dim">她最近的寄样单是小红书店的：手卡只做抖店的款，在下面填抖店的商品 ID。</div>}
+      {fromOrder.length > 0 && (
+        <div className="stack" style={{ gap: 4 }}>
+          <span className="dim">她最近的寄样单{order.order ? ` ${order.order}` : ''}（{fmtClock(order.at)}）里的款：</span>
+          {fromOrder.map((i) => (
+            <label key={i.item_id} className="row" style={{ gap: 6, alignItems: 'center' }}>
+              <input type="checkbox" checked={ticked.includes(i.item_id)} aria-label={`做手卡：商品 ${i.item_id}`}
+                onChange={(e) => tick(i.item_id, e.target.checked)} />
+              <span className="mono">{i.item_id}</span>{i.skus > 0 && <span className="dim">（寄了 {i.skus} 个 SKU）</span>}
+            </label>
+          ))}
+        </div>
+      )}
+      <Field label="其他商品 ID（抖店，空格隔开）">
+        <TextInput mono value={extra} onChange={setExtra} placeholder="3000000000000000001" aria-label={`${p.name} 做手卡的其他商品 ID`} />
+      </Field>
+      <div>
+        <button type="button" className="btn" disabled={busy || off}
+          onClick={() => run({ action: 'handcards', items }, items.length
+            ? `已请 Mac 做 ${items.length} 款手卡，做好会出现在「待审批」里`
+            : '已请 Mac 按案卷里她选的款做手卡，做好会出现在「待审批」里')}>
+          <IdentificationCard />做手卡
+        </button>
+        {off && <span className="dim" style={{ marginLeft: 8 }}>{!p.active ? '已停用的达人不做' : '先恢复副驾驶'}</span>}
+      </div>
     </div>
   )
 }

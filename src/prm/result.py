@@ -12,6 +12,10 @@ counts) and adds ``attachments_named`` (every file the draft named) and
 ``attachments_missing`` (``[{"name", "why"}]``: outside assets/, missing, too big, the upload
 failed); an older worker sends neither.
 
+``handcards`` (handcards.py, 直播手卡: the products to make cards of) is in a job's schema only when its prompt
+offers cards (the worker's ``prm_schema``; this SCHEMA is the one without it); the Mac makes them and hands
+back ``handcards_made``, its verdict (the cards are among the files that came back).
+
 ``platform_action`` is optional (platforms.py): the Mac checks it and previews it, and
 hands back ``platform``, its verdict, in its place; a draft that names an action the Mac
 did not preview carries the verdict ``unavailable`` and cannot be executed.  A preview whose
@@ -29,7 +33,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from . import platforms
+from . import handcards, platforms
 from .store import STAGES
 
 # The kinds of message (8.1 of the assessment): they decide later what may go out unreviewed.
@@ -90,6 +94,8 @@ class Draft:
     # Why the Mac's platform action was left out ("" = it was not): the bot's own check refused it
     # (platforms.ActionRefused); the reply stays, as a plain draft for a person.
     platform_refused: str = ""
+    # The Mac's 直播手卡 for this draft (handcards.check_made: the cards among its files, or why none), or None.
+    handcards: Optional[dict] = None
 
 
 def _text(value, limit: int) -> str:
@@ -157,6 +163,12 @@ def parse_draft(raw: str) -> Draft:
     elif data.get("platform_action") is not None:
         # An action the Mac did not preview (an older worker, or one without platforms).
         platform = platforms.unpreviewed_block(data["platform_action"])
+    cards = None
+    if data.get(handcards.MADE) is not None:
+        try:
+            cards = handcards.check_made(data[handcards.MADE])
+        except ValueError as e:
+            raise DraftError("bad_handcards", str(e)[:80]) from None
     return Draft(
         intent=_text(data.get("intent"), 200),
         slots=clean_slots,
@@ -170,4 +182,5 @@ def parse_draft(raw: str) -> Draft:
         attachments_named=None if named is None else [str(f).strip()[:200] for f in named if str(f).strip()],
         attachments_missing=_missing_files(missing),
         platform_refused=refused,
+        handcards=cards,
     )

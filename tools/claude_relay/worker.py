@@ -51,7 +51,9 @@ draft goes back; the verdict goes with it.  After an operator's 批准并执行 
 queues a ``platform_execute`` job: the same CLI with --execute, once per approval key
 (a ledger in ~/.claude-relay/platform/ledger; a key seen before is never run again),
 and the outcome goes back.  ``--sync-products`` writes the catalogue (read-only CLI
-commands) to prm_workspace/kb/products.md and products.json.  Now and then the bot also asks
+commands) to prm_workspace/kb/products.md and products.json; with config.json's ``products_sync_hours`` (0, the
+default: never) a worker that writes drafts runs it by itself at night when it has no job (``products_sync_tick``).
+Now and then the bot also asks
 where its 聚水潭 sample orders stand (a ``sample_status`` job, PRM_SAMPLE_SYNC_MIN): no model,
 `jst samples` (read-only, no receiver) under the same CLI lock, paced; the short answer
 (status, waybill, sent / signed, why rejected) goes back, a login lapsed or a risk wall as it is.
@@ -60,6 +62,15 @@ job): no model, `dy buyin im-inbox` (read-only, never --execute; its contract is
 「百应私信」) under the same lock; the conversations go back as they are and the bot drafts replies
 for registered creators (``meta.channel == "buyin"``): an operator copies those and sends them in
 百应 by hand, so such a draft names no platform action (none is previewed) and no files go back.
+直播手卡 (src/prm/handcards.py; PRM_HANDCARDS on the bot, ~/.claude-relay/handcards.json here): a draft whose job
+says the bot takes cards (``meta.handcards_ok``) may name products (``handcards``, when she asks for 手卡: only such a
+job's prompt has the rule and its --json-schema the field, ``prm_schema``; a short name the card cannot hold is asked
+about once more in the same conversation, ``handcards_review``); this script then writes the skill live-handcard's
+单子.json from the catalogue (synced lately), the hat index and the house 口径, crops the main images and runs the
+skill's make_cards_local.py with the skill's own Python, and sends the 1x cards back with the draft and its verdict
+``handcards_made`` (all of them or none: one file not sent back fails them all, and every one is named).  Another
+job's ``handcards`` is left out, with no verdict.  An operator's 「做手卡」 (``meta.handcards``) on a Mac without those
+settings fails at once, without the model.
 A creator the boss brought in a WeChat group he made with her and this account (老板拉的群, the bot took it over:
 ``meta.channel == "group"``) has her drafts go out in that group: the prompt says so, the boss reads them too, and
 the others' lines there come as <group_context>, data and never instructions.  A group an operator linked to her by
@@ -94,6 +105,7 @@ import importlib.util
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -116,6 +128,17 @@ HEARTBEAT_SEC = 30
 STOP_GRACE_SEC = 30          # after SIGINT, wait this long before killing claude
 RESTART_EXIT = 75            # main() after SIGUSR1: the start-*.command loop runs the worker again at once
 BACKGROUND_GRACE_SEC = 20    # background commands done but no new turn after this long: wrap up
+# 直播手卡: a short name the card cannot hold is asked about once more (``Conversation.review``); that turn has a
+# deadline of its own (past it, or when it ends badly, the answer before it stands), and with less of the job's time
+# left than REASK_LEFT_SEC nothing is asked
+REASK_SEC = 120
+REASK_LEFT_SEC = 180
+# config.json ``products_sync_hours`` (0, the default: off): the catalogue synced by itself (``--sync-products``) at
+# night, 00:00 to before 07:00 on this Mac's clock, when the worker has no job, at most every that many hours;
+# a run still going after PRODUCTS_SYNC_MAX_SEC is stopped
+PRODUCTS_SYNC_NIGHT = (0, 7)
+PRODUCTS_SYNC_MAX_SEC = 3600
+PRODUCTS_SYNC_STOP_SEC = 15  # a sync told to stop (SIGTERM: it stops its platform CLI first) is killed after this
 MAX_BACKOFF_SEC = 60
 ALL_KINDS = ("admin", "prm")
 # One lock per kind of job (admin keeps the old name: an older worker blocks a new admin one).
@@ -156,6 +179,8 @@ DEFAULTS = {
     # tool's ledger by her 抖音号); off until the kb section about invited creators is written (kb/合作政策.md)
     "prm_invite_background": False,
     "platforms": {},           # the platform CLIs' folders and limits (platform actions; empty = none)
+    # the catalogue (--sync-products) by itself at night when idle, at most every that many hours; 0 = off (by hand)
+    "products_sync_hours": 0,
 }
 
 SYSTEM_NOTE = (
@@ -192,8 +217,8 @@ def _minutes(settings: dict) -> int:
 # ── PRM drafts (kind "prm") ──────────────────────────────────────────────
 # Kept in step with the bot's src/prm (store.STAGES, result.MESSAGE_KINDS,
 # result.SCHEMA): this script runs alone on the Mac and imports nothing of the
-# bot but src/prm/platforms.py (standard library only, loaded by its path); a test
-# checks they are the same.
+# bot but src/prm/platforms.py and src/prm/handcards.py (standard library only,
+# loaded by their paths); a test checks they are the same.
 
 PLATFORMS_FILE = Path(__file__).resolve().parents[2] / "src" / "prm" / "platforms.py"
 
@@ -212,6 +237,25 @@ def _load_platforms():
 
 
 platforms = _load_platforms()
+
+# 直播手卡 (src/prm/handcards.py, PRM_HANDCARDS on Windows): the drafting Claude may name products for cards
+# (``handcards``); this script makes them with the skill live-handcard (settings: HOME_DIR / handcards.json).
+HANDCARDS_FILE = Path(__file__).resolve().parents[2] / "src" / "prm" / "handcards.py"
+
+
+def _load_handcards():
+    """src/prm/handcards.py of this checkout, or None (then this Mac makes no cards)."""
+    try:
+        spec = importlib.util.spec_from_file_location("webot_prm_handcards", str(HANDCARDS_FILE))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception as e:                               # a copy of this file without the repository
+        logging.getLogger("claude_relay.worker").warning("handcards off: %s not loaded (%s)", HANDCARDS_FILE, e)
+        return None
+
+
+handcards = _load_handcards()
 
 PRM_TOOLS = "Read,Edit,Write,Glob,Grep"
 PRM_DENIED_TOOLS = "Bash,WebFetch,WebSearch,Task,NotebookEdit"
@@ -356,7 +400,18 @@ def load_settings(path: Path) -> dict:
     settings["relay_url"] = str(settings["relay_url"]).rstrip("/")
     if not settings["relay_url"] or not settings["token"]:
         raise SystemExit(f"relay_url and token are needed (in {path} or RELAY_URL / RELAY_TOKEN)")
+    if _sync_hours(settings.get("products_sync_hours")) is None:
+        raise SystemExit(f"products_sync_hours in {path} must be a number of hours (0 = off), "
+                         f"not {settings.get('products_sync_hours')!r}")
     return settings
+
+
+def _sync_hours(value) -> float | None:
+    """config.json ``products_sync_hours`` as hours (0: off), None when it is no finite number of 0 or more (true,
+    "24", null: ``load_settings`` refuses it; the night sync never runs on it)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        return None
+    return float(value)
 
 
 class SettingsFile:
@@ -451,6 +506,11 @@ class RelayClient:
         self.token = token
         self.reload_token = reload_token
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        self.uploads: dict = {}      # job id -> files sent back for it (the bot takes at most 9 per job)
+
+    def uploaded(self, job_id: int) -> int:
+        """How many files this worker has sent back for the job (``upload``), whoever in it sent them."""
+        return int(self.uploads.get(int(job_id), 0))
 
     def _call(self, method: str, path: str, body: dict | None = None, timeout: float = 15,
               headers: dict | None = None):
@@ -574,13 +634,15 @@ class RelayClient:
                 with self.opener.open(req, timeout=120) as resp:
                     return json.loads(resp.read().decode("utf-8") or "{}")
         try:
-            return post()
+            answer = post()
         except urllib.error.HTTPError as e:
             token = self.reload_token() if e.code == 401 and self.reload_token else None
             if not token or token == self.token:
                 raise
             self.token = token
-            return post()
+            answer = post()
+        self.uploads[int(job_id)] = self.uploaded(job_id) + 1
+        return answer
 
     def send_result(self, job_id: int, result: dict) -> bool:
         """True when the bot has it (or does not know the job: then there is nobody to tell)."""
@@ -770,23 +832,37 @@ class Conversation:
     not the end: claude starts another turn when they finish (``see``).
     """
 
-    def __init__(self, proc: subprocess.Popen, client: RelayClient, job_id: int, wrap=None):
+    def __init__(self, proc: subprocess.Popen, client: RelayClient, job_id: int, wrap=None, review=None):
         self.proc, self.client, self.job_id = proc, client, job_id
         # How a follow-up is put to claude (a prm job wraps the creator's words as data).
         self.wrap = wrap or (lambda text: f"（微信里补充）{text}")
+        # review(result event) -> "" or what to ask claude once more before the input closes (a prm job's 直播手卡: a
+        # short name the card cannot hold): looked at whenever a turn ends, until it asks (once per job)
+        self.review = review
+        self.reasked = False         # it asked
+        self.reask_by = None         # that turn ends before this (monotonic, REASK_SEC), or run_claude stops claude
+        self.reask_seq = 0           # the asking was the reask_seq-th message written: that many results end its turn
+        self.ends_at = None          # the job's own deadline (run_claude): too little left, nothing is asked
+        self.last_result = None      # the last turn's result event (``_wrap_up_if_idle`` looks at it too)
+        # What was written, in order ("creator": the task and her follow-ups; "reask"), and how many turns ended: a
+        # turn answers the messages written before it, one each (run_claude hands both to do_prm_job)
+        self.written: list = []
+        self.results = 0
         self.background = 0          # commands claude runs in the background right now
         self.turn_ended = False
         self.lock = threading.Lock()
         self.closed = False
         self.upto = 0
 
-    def _write(self, text: str) -> bool:
+    def _write(self, text: str, kind: str = "creator") -> bool:
+        """One message into claude's input (the caller holds ``lock``), noted in ``written``."""
         if self.closed:
             return False
         try:
             self.proc.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": text}},
                                              ensure_ascii=False) + "\n")
             self.proc.stdin.flush()
+            self.written.append(kind)
             return True
         except (OSError, ValueError):                    # claude is gone
             self.closed = True
@@ -832,19 +908,62 @@ class Conversation:
                 timer.daemon = True
                 timer.start()
         elif kind == "result":
-            self.turn_ended = True
+            with self.lock:
+                self.turn_ended = True
+                self.last_result = event
+                self.results += 1
+                if self.reask_by is not None and self.results >= self.reask_seq:
+                    self.reask_by = None                 # (the turn asked again has ended: its own result)
             if self.background:
                 log.info("#%s turn ended with %d background command(s) running; input stays open",
                          self.job_id, self.background)
-            else:
+            elif not self._ask_again(event):
                 self.on_result()
         elif kind in ("assistant", "user") or (kind == "system" and event.get("subtype") == "init"):
             self.turn_ended = False
 
+    def _ask_again(self, event) -> bool:
+        """``review`` found something to ask about this turn's answer (whichever turn, until it asked once, under the
+        lock: the reader's turn end and the wrap-up timer never both ask): it is put to claude, which answers in a new
+        turn (the input stays open), within REASK_SEC (``reask_by``).  Only when every message written has had its
+        turn (nothing of hers is still ahead of it: the next result is its own) and with REASK_LEFT_SEC of the job's
+        time left.  True when it was asked."""
+        if self.review is None or not isinstance(event, dict):
+            return False
+        try:
+            text = self.review(event)
+        except Exception as e:                           # never in the way of the answer
+            log.warning("#%s the answer could not be looked at again (%s)", self.job_id, e)
+            return False
+        if not text:
+            return False
+        with self.lock:
+            if self.reasked or self.closed:
+                return False
+            if self.results < len(self.written):
+                why = "a message of hers is still ahead of it"
+            elif self.results > len(self.written):
+                why = "claude started a turn of its own (background commands): which answer is whose is unknown"
+            elif self.ends_at is not None and self.ends_at - time.monotonic() < REASK_LEFT_SEC:
+                why = "too little of the job's time left"
+            else:
+                why = ""
+                asked = self._write(text, "reask")
+                if asked:
+                    self.reasked, self.reask_by = True, time.monotonic() + REASK_SEC
+                    self.reask_seq = len(self.written)
+        if why:
+            log.info("#%s not asking claude again about its answer: %s", self.job_id, why)
+            return False
+        if asked:
+            log.info("#%s asked claude once more about its answer", self.job_id)
+        return asked
+
     def _wrap_up_if_idle(self) -> None:
         if self.turn_ended and not self.background and not self.closed:
             log.info("#%s background commands done and no new turn; wrapping up", self.job_id)
-            self.on_result()
+            if not self._ask_again(self.last_result):
+                self.on_result()
 
     def on_result(self) -> None:
         """A turn ended: hand on what came meanwhile, or end the input (claude then exits)."""
@@ -876,10 +995,12 @@ class Conversation:
 
 def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stopper: Stopper,
                session_id: str | None, add_dirs: tuple = (), *, cmd: list | None = None,
-               wrap=None, env_extra: dict | None = None) -> dict:
+               wrap=None, env_extra: dict | None = None, review=None) -> dict:
     """Run claude once; heartbeat meanwhile.  Returns stdout/stderr/returncode and why it stopped.
 
-    ``cmd`` replaces the cc command line (a prm job's); ``wrap`` shapes follow-ups."""
+    ``cmd`` replaces the cc command line (a prm job's); ``wrap`` shapes follow-ups; ``review`` may ask
+    claude once more about a turn's answer (``Conversation._ask_again``: ``reasked`` in the result; that turn past its
+    own deadline stops claude, ``stopped`` "reask_timeout")."""
     cmd = cmd or claude_command(settings, session_id, add_dirs)
     # The task goes in on stdin: a task starting with "-" must not be read as an option.
     # The permission hook (a child of claude) needs to know the job and the settings file.
@@ -891,7 +1012,10 @@ def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stoppe
         text=True, encoding="utf-8", errors="replace", start_new_session=True, env=env,
     )
     progress = Progress()
-    conversation = Conversation(proc, client, int(job["id"]), wrap=wrap)
+    conversation = Conversation(proc, client, int(job["id"]), wrap=wrap, review=review)
+    started = time.monotonic()
+    deadline = started + float(settings.get("timeout_min") or 60) * 60
+    conversation.ends_at = deadline
     lines: list[str] = []
     errors: list[str] = []
 
@@ -911,8 +1035,6 @@ def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stoppe
         t.start()
     threading.Thread(target=conversation.poll, args=(stopper,), daemon=True).start()
     reader = threads[0]
-    started = time.monotonic()
-    deadline = started + float(settings.get("timeout_min") or 60) * 60
     stopped_because, signalled_at = "", None
     while reader.is_alive():
         reader.join(HEARTBEAT_SEC)
@@ -928,6 +1050,8 @@ def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stoppe
             reason = "cancelled"
         elif time.monotonic() > deadline:
             reason = "timeout"
+        elif conversation.reask_by is not None and time.monotonic() > conversation.reask_by:
+            reason = "reask_timeout"                     # (the turn asked again: the answer before it stands)
         elif stopper.event.is_set():
             reason = "worker_stopped"
         if reason and signalled_at is None:
@@ -944,7 +1068,8 @@ def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stoppe
     return {
         "stdout": "".join(lines), "stderr": "".join(errors),
         "returncode": proc.returncode, "stopped": stopped_because,
-        "duration_s": round(time.monotonic() - started, 1),
+        "duration_s": round(time.monotonic() - started, 1), "reasked": conversation.reasked,
+        "written": list(conversation.written),
     }
 
 
@@ -1291,10 +1416,18 @@ def prm_system_note(settings: dict) -> str:
     return PRM_SYSTEM_NOTE + (PRM_PLATFORM_NOTE if prm_platforms(settings) is not None else "")
 
 
-def prm_claude_command(settings: dict) -> list[str]:
+def prm_schema(cards: bool = False) -> dict:
+    """The answer's JSON schema for a prm job: PRM_SCHEMA, with 直播手卡's ``handcards`` only for a job whose prompt has
+    the 【直播手卡】 rule (``cards``): any other job's answer is exactly as before PRM_HANDCARDS."""
+    if not cards or handcards is None:
+        return PRM_SCHEMA
+    return {**PRM_SCHEMA, "properties": {**PRM_SCHEMA["properties"], "handcards": handcards.REQUEST_SCHEMA}}
+
+
+def prm_claude_command(settings: dict, cards: bool = False) -> list[str]:
     """claude for a prm job: the restricted tool set, no settings/MCP/commands from this Mac,
-    nothing saved, the guard hook, and the answer as JSON.  ``extra_args`` are NOT added
-    (they could give tools back)."""
+    nothing saved, the guard hook, and the answer as JSON (``prm_schema``: ``cards`` adds 直播手卡's
+    request).  ``extra_args`` are NOT added (they could give tools back)."""
     cmd = [
         find_claude(settings.get("claude_bin", "")), "-p", "--output-format", "stream-json", "--verbose",
         "--input-format", "stream-json",
@@ -1304,7 +1437,7 @@ def prm_claude_command(settings: dict) -> list[str]:
         "--permission-mode", "acceptEdits", "--permission-prompts", "none",
         "--settings", prm_hook_settings(),
         "--append-system-prompt", prm_system_note(settings),
-        "--json-schema", json.dumps(PRM_SCHEMA, ensure_ascii=False),
+        "--json-schema", json.dumps(prm_schema(cards), ensure_ascii=False),
     ]
     budget = float(settings.get("prm_max_budget_usd") or 0) or float(settings.get("max_budget_usd") or 0)
     if budget > 0:
@@ -1619,6 +1752,55 @@ def signed_line(meta: dict, joined: bool = False) -> str:
         return (head + "她刚好又发来了消息（在下面）：先回她的话；她说的就是收到了，照 D2 第一段回她，不用再提「显示签收」。")
     return (head + "这一次没有达人的新消息，是我们主动问一句。她签收之后已经说过收到了，或者我们已经问过（看案卷、<our_reply> 和 "
             "<operator_message>），就不再问：reply_draft 留空，reason 写明。")
+
+
+# 直播手卡 (PRM_HANDCARDS on Windows: the job's ``meta.handcards_ok``; this Mac's handcards.json, src/prm/handcards.py,
+# 2026-11-09): how the drafting Claude asks for cards (``handcards`` in its answer); the cards are made here after it
+# answered and go with its reply, which a person always looks at first.
+HANDCARDS_RULE = (
+    "【直播手卡】这台 Mac 能自己做直播手卡（图片版，一款一张，照老板模板；价格、尺码、颜色、库存、发货这些系统按数据填）。"
+    "kb/ 里说手卡由运营在 Mac 上做、你只回「整理好发您」的，现在改成这样：她要手卡（「手卡」「直播手卡」「上播手卡」），"
+    "而且看得出是哪几款（她说要带的、选好的、寄样里留下的）时，在结构化结果里填 handcards，系统做好以后附在你的回复后面，"
+    "运营看过才发；回复照 kb/ 手卡那一节写（比如「老师，手卡整理好啦～」，她要链接就照 kb/products.md「链接」那一列附上），"
+    "不用为手卡设 needs_attention。看不出是哪几款就问她，不填 handcards。"
+    "handcards.products 一款一项：item_id 只用 kb/products.md 抖店（dy）那张表里的商品 ID；colors 写她指定的颜色"
+    "（照目录里 SKU 的颜色名，没指定就留空，卡上写这款的全部颜色）；先用 Read 看一眼这款的款式图"
+    "（assets/products/dy-<商品ID>.jpg）：四宫格拼图就在 photo_cell 写要用哪一格（左上 / 右上 / 左下 / 右下，挑她要的颜色、"
+    "正面模特的那一格），单张图留空；图底下压着大号品牌字母就把 cut_bottom 设为 true；"
+    "short 是卡上的短名，最多 6 个字（字母算半个；放不下的会再问你一次），抓款式特征（如「西部巴拿马帽」「翻边小礼帽」）；"
+    "brand_line 一句「款式 · 材质 · 版型」，用标题里的词（如「西部巴拿马帽 · 100%羊毛 · 英伦复古皮带扣平顶帽」）；"
+    "material 只在标题里明写了材质时照抄（如「拉菲草」），没写就留空；audience 写「女性 · 场景 · 风格」"
+    "（如「女性 · 秋冬出游 / 通勤 · 英伦复古风」）；sells 写 4 条卖点，每条 {head: 粗体短语, rest: 以「，」开头的后半句}，"
+    "只写标题里有依据的，不编功能和数字。call 是卡上怎么称呼她（卡上写「<call>专属」，一般是她的昵称，不加「老师」），"
+    "不填就用合作单的名字。一次最多 9 款（连同别的附件）。"
+)
+
+
+def handcards_rule(meta: dict, ready: bool) -> str:
+    """The prompt's rule for asking for cards (``HANDCARDS_RULE``): when this Mac can make them (``ready``: its
+    handcards.json) and the bot takes them (``meta.handcards_ok``, PRM_HANDCARDS), or an operator clicked 「做手卡」
+    (``meta.handcards``).  "" otherwise (the prompt as before)."""
+    asked = meta.get("handcards_ok") is True or isinstance(meta.get("handcards"), dict)
+    return HANDCARDS_RULE if ready and asked else ""
+
+
+def handcards_line(meta: dict, products: list, joined: bool = False) -> str:
+    """The prompt's line for 「做手卡」 (the bot's ``meta.handcards`` = ``{"by": "console", "items"}``): an operator asked
+    for cards of these products (``products``: ``handcards.describe_asked``; none: the ones she picked, as the case
+    file has them).  ``joined``: a message of hers came meanwhile and joined the job: answer her first.  "" without
+    it (the prompt as before)."""
+    if not isinstance(meta.get("handcards"), dict):
+        return ""
+    head = "运营在控制台点了「做手卡」"
+    if products:
+        what = "给她做这几款的直播手卡（handcards 照上面【直播手卡】的规矩填，一款一项，就这几款）：" + "；".join(products) + "。"
+    else:
+        what = ("运营没有指定款：按案卷里她选的款做（她说要带的、寄样单里的）；看不出是哪几款就不做：handcards 不填，"
+                "reply_draft 留空，reason 写明缺什么。")
+    if joined:
+        return f"{head}，她刚好又发来了消息（在下面）：先回她的话，再把手卡一起发她。{what}"
+    return (f"{head}：这一次没有达人的新消息，是我们主动把手卡发给她。{what}"
+            "回复写一两句，照 kb/ 手卡那一节（比如「老师，手卡整理好啦～」），不提别的事。")
 
 
 # 三方群里的话 (the bot's ``meta.three_party_chat``, 2026-11-02): the latest lines of her 三方群 (the boss, her and us),
@@ -1976,9 +2158,11 @@ def operator_note_block(meta: dict) -> str:
     return f"{OPERATOR_NOTE_RULE}\n<operator_note>\n{_untagged(note.strip())[:OPERATOR_NOTE_CHARS]}\n</operator_note>"
 
 
-def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, failed: list, invite: str = "") -> str:
+def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, failed: list, invite: str = "",
+               card_rule: str = "", card_ask: str = "") -> str:
     """The task of a creator's WeChat draft (a 百应 one: ``buyin_prompt``); ``invite``: ``invite_block``'s
-    <invite_background> ("" for none).  A draft in a 老板拉的群 (``meta.channel == "group"``, 功能 U) also says so
+    <invite_background> ("" for none); ``card_rule`` / ``card_ask``: 直播手卡's rule and an operator's 「做手卡」
+    (``handcards_rule``, ``handcards_line``; "" for none: the prompt as before).  A draft in a 老板拉的群 (``meta.channel == "group"``, 功能 U) also says so
     (``boss_group_line``, right after the deal's line), hears the others' lines (``group_context_block``, after our
     replies and the invite background, before the rest) and has the group's own opening wording; it has no 三方群
     line (that group is her 三方群, and the line would send her to the group she is in).  Without ``meta.channel``
@@ -2005,6 +2189,8 @@ def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, fa
     parts = parts_line(meta)
     if parts:
         lines.append(parts)
+    if card_rule:
+        lines.append(card_rule)
     if meta.get("sent"):
         lines.append(sent_block(meta["sent"], in_group=in_group))
     if invite:
@@ -2022,7 +2208,8 @@ def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, fa
     if history:
         lines.append(history_block(history))
         missed = any(isinstance(item, dict) and item.get("missed") for item in history)
-        if text.strip() or not (opening or huopan or signed):   # (a 开场白, a 补发货盘, a 签收后问一句: no message of hers)
+        if text.strip() or not (opening or huopan or signed or card_ask):   # (a 开场白, a 补发货盘, a 签收后问一句, a
+            # 做手卡: no message of hers)
             lines.append("下面是达人最新发来的消息。" if missed else "人工接管结束了，下面是达人最新发来的消息。")
     late = meta.get("late") if isinstance(meta.get("late"), dict) else {}
     try:
@@ -2038,6 +2225,8 @@ def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, fa
         lines.append(huopan)
     if signed:
         lines.append(signed)
+    if card_ask:
+        lines.append(card_ask)
     auto = opening_auto_line(meta)
     if auto:
         lines.append(auto)
@@ -2047,7 +2236,7 @@ def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, fa
         lines.append("达人这次还发来了附件（用 Read 打开，图片可以直接看）：" + "、".join(got))
     if failed:
         lines.append("还有附件没能从 Windows 取到：" + "、".join(failed))
-    if text.strip() or not (meta.get("system_note") or opening or huopan or signed):
+    if text.strip() or not (meta.get("system_note") or opening or huopan or signed or card_ask):
         lines.append(creator_block(text))
     lines.append("先读案卷和 kb/ 里相关的内容，更新案卷，然后给出结构化结果。")
     return "\n".join(lines)
@@ -2278,6 +2467,8 @@ def summarize_prm(run: dict, data: dict | None, settings: dict) -> dict:
         return {**result, "ok": False, "text": "", "error": "已取消"}
     if run["stopped"] == "timeout":
         return {**result, "ok": False, "text": "", "error": f"超过 {settings.get('prm_timeout_min')} 分钟没写完草稿"}
+    if run["stopped"] == "reask_timeout":
+        return {**result, "ok": False, "text": "", "error": "再问短名的那一轮超时了"}
     if run["stopped"] == "worker_stopped":
         return {**result, "ok": False, "text": "", "error": "Mac 上的 worker 被关掉了"}
     if data is None:
@@ -2300,6 +2491,7 @@ def summarize_prm(run: dict, data: dict | None, settings: dict) -> dict:
 
 def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper) -> dict:
     meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
+    prune_handcards()                            # (every prm job, the hourly sample-status rounds too)
     if meta.get("op") == "sample_status":        # 聚水潭: no creator, no model, no workspace needed
         return do_sample_status_job(settings, job, client, meta)
     if meta.get("op") == "buyin_inbox":          # 百应私信: no creator, no model, no workspace needed
@@ -2317,11 +2509,27 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
         return purge_case_file(workspace, party_id)
     if meta.get("op") in ("platform_execute", "platform_preview"):
         return do_platform_job(settings, job, client, workspace, meta)
+    buyin = meta.get("channel") == "buyin"
+    cards_cfg, cards_why = handcards_settings() if not buyin else (None, "百应私信不能附图")
+    if isinstance(meta.get("handcards"), dict) and cards_cfg is None:
+        # 「做手卡」 on a Mac that cannot make cards: said at once (the bot's notice says how to go on), no model run
+        log.warning("#%s 做手卡 not run: %s", job["id"], cards_why)
+        return {"ok": False, "text": "", "error": f"这台 Mac 做不了手卡：{cards_why}", "duration_s": 0}
+    if isinstance(meta.get("handcards"), dict) and handcards is not None:
+        stale = handcards.catalogue_problem(handcards.catalog_info(workspace), cards_cfg)
+        if stale:                                        # (a catalogue too old: no model run either)
+            log.warning("#%s 做手卡 not run: %s", job["id"], stale)
+            return {"ok": False, "text": "", "error": stale, "duration_s": 0}
     log.info("#%s prm start: party %s (%d chars)", job["id"], party_id, len(str(job.get("text") or "")))
     case_rel = ensure_case_file(workspace, party_id, str(meta.get("name") or ""))
     got, failed = fetch_prm_files(client, job, workspace)
     invite = invite_block(settings, meta.get("creator"))      # (a 百应 draft too: the bot gives her 抖音号 with it)
-    task = {**job, "text": prm_prompt(job, party_id, str(meta.get("name") or ""), case_rel, got, failed, invite=invite)}
+    asked = handcards.asked_items(meta) if handcards is not None else None
+    card_ask = handcards_line(meta, handcards.describe_asked(asked, handcards.load_catalog(workspace)) if asked else [],
+                              joined=bool(str(job.get("text") or "").strip())) if asked is not None else ""
+    card_rule = handcards_rule(meta, cards_cfg is not None)
+    task = {**job, "text": prm_prompt(job, party_id, str(meta.get("name") or ""), case_rel, got, failed, invite=invite,
+                                      card_rule=card_rule, card_ask=card_ask)}
     timeout = float(settings.get("prm_timeout_min") or 10)
     proxy = proxy_env()
     if proxy:
@@ -2329,13 +2537,43 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
     # The guard hook (a child of claude) lets this job reach only its own creator's case file and
     # its own attachments: it learns which from the environment.
     run = run_claude({**settings, "timeout_min": timeout}, task, workspace, client, stopper, None,
-                     cmd=prm_claude_command(settings), wrap=prm_followup,
+                     cmd=prm_claude_command(settings, cards=bool(card_rule)), wrap=prm_followup,
                      env_extra={"PRM_WORKSPACE": str(workspace), "PRM_PARTY_ID": str(party_id),
-                                "PRM_JOB_ID": str(int(job["id"])), **proxy})
-    result = summarize_prm(run, parse_output(run["stdout"]), {**settings, "prm_timeout_min": timeout})
-    buyin = meta.get("channel") == "buyin"
+                                "PRM_JOB_ID": str(int(job["id"])), **proxy},
+                     review=handcards_review if card_rule else None)
+    data = parse_output(run["stdout"])
+    answers = structured_events(run["stdout"]) if run.get("reasked") else []
+    if answers and run["stopped"] not in ("cancelled", "worker_stopped") and (
+            run["stopped"] or run["returncode"] != 0 or _answer(data) is None or bool((data or {}).get("is_error"))):
+        # 直播手卡: asked again about its short names, a turn after it did not end well (past its own deadline or the
+        # job's, an exit code such as the budget cap's) or gave no answer: the last full answer stands (a short name
+        # that does not fit: no card, the draft waits for a person), only when it had every line of hers (a turn
+        # answers the messages written before it, one each: none of hers came after the one that answered); else
+        # the job fails as before and her lines go into her next draft job
+        how = run["stopped"] or f"exit {run['returncode']}"
+        if answered_all(run["stdout"], run.get("written") or []):
+            log.info("#%s the turn asked again did not end well (%s); the answer before it stands", job["id"], how)
+            run, data = {**run, "stopped": "", "returncode": 0}, answers[-1]
+        else:
+            log.info("#%s the turn asked again did not end well (%s) and a line of hers came after the last answer: "
+                     "the job fails as before", job["id"], how)
+    result = summarize_prm(run, data, {**settings, "prm_timeout_min": timeout})
     if result["ok"]:
         draft = json.loads(result["text"])
+        request = draft.pop("handcards", None)           # 直播手卡: made below, after the draft's own files
+        draft.pop("handcards_made", None)                # (only this script writes the verdict)
+        if request is None and answers:
+            # asked again about its short names, it answered without the request: the first request stands (its
+            # names do not fit: no card, and words that say the cards are ready cannot go as they are)
+            request = (_answer(answers[0]) or {}).get("handcards")
+        if request is not None and not card_rule:
+            # a job that offered no cards (PRM_HANDCARDS off, no settings on this Mac): its answer as before
+            log.info("#%s the draft named products for 手卡 the job did not offer: left out", job["id"])
+            request = None
+        elif request is not None and handcards is not None and not handcards.has_products(request):
+            # (one that names no product is none: a plain reply goes its usual way)
+            log.info("#%s the draft's 手卡 request names no product: left out", job["id"])
+            request = None
         named = [str(rel).strip() for rel in draft.get("attachments_to_send") or [] if str(rel).strip()]
         sent, missing = [], []
         # A 百应 private message carries no files (an operator copies its words into 百应): nothing goes back,
@@ -2352,6 +2590,13 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
             except Exception as e:
                 log.warning("#%s file %s not sent back: %s", job["id"], path.name, e)
                 missing.append({"name": rel, "why": f"没传上去：{e}"[:120]})
+        if request is not None:
+            # (every file the job sent back so far counts: one draft carries at most 9, the bot's MAX_OUTFILES)
+            made, cards = make_handcards(settings, job, meta, request, workspace, client, cards_cfg, cards_why,
+                                         others=client.uploaded(int(job["id"])), reasked=bool(run.get("reasked")))
+            draft["handcards_made"] = made
+            sent += cards                                # (all of them, or none: ``make_handcards``)
+            named += cards
         # What came back (all an older bot counts), every file the draft named and why some did
         # not come: the bot keeps a draft short of files for a person and says which.
         draft["attachments_to_send"] = sent
@@ -2374,6 +2619,121 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
     result["log_path"] = str(save_prm_log(job, run, result))
     log.info("#%s prm finished ok=%s in %ss", job["id"], result["ok"], result["duration_s"])
     return result
+
+
+# ── 直播手卡 (src/prm/handcards.py) ─────────────────────────────────────────
+
+HANDCARDS_SHORTER = ("（系统，不是达人的话）你给的 handcards 里有短名太长，卡上放不下（最多 6 个字，字母算半个）：{names}。"
+                     "请再给一次完整的结构化结果：别的都照原样，只把这几款的 short 改成 6 个字以内的说法（抓款式特征，"
+                     "比如「西部巴拿马帽」）；不用再读文件，也不用再改案卷。")
+
+
+def handcards_review(event: dict) -> str:
+    """For ``Conversation._ask_again``: the request in this turn's answer holds short names the card cannot hold
+    (``handcards.shorts_too_long``): what to ask claude (``HANDCARDS_SHORTER``); "" otherwise."""
+    draft = _answer(event)
+    long = handcards.shorts_too_long(draft.get("handcards")) if handcards is not None and draft else []
+    if not long:
+        return ""
+    return HANDCARDS_SHORTER.format(names="、".join(f"「{name}」" for name in long[:9]))
+
+
+def _answer(event) -> dict | None:
+    """The structured answer a result event carries (``structured_output``, else its result text as JSON); None."""
+    if not isinstance(event, dict):
+        return None
+    if isinstance(event.get("structured_output"), dict):
+        return event["structured_output"]
+    try:
+        data = json.loads(str(event.get("result") or ""))
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def answered_all(stdout: str, written: list) -> bool:
+    """The last result event that carries a structured answer had every message of hers (``written``: the
+    conversation's messages in order, "creator" or "reask"): the n-th result answers the first n messages written, so
+    none of hers may come after that many."""
+    results = [json.loads(line) for line in stdout.splitlines() if _is_result(line)]
+    last = max((n for n, event in enumerate(results, 1) if _answer(event) is not None), default=0)
+    return bool(last) and "creator" not in written[last:]
+
+
+def structured_events(stdout: str) -> list:
+    """The stream's result events that carry the structured answer, in order (a turn asked again may end without)."""
+    return [event for event in (json.loads(line) for line in stdout.splitlines() if _is_result(line))
+            if _answer(event) is not None]
+
+
+def prune_handcards() -> None:
+    """The cards' folders on this Mac (HOME_DIR/platform/handcards) older than handcards.KEEP_DAYS go."""
+    if handcards is None:
+        return
+    try:
+        handcards.prune_sessions(HOME_DIR / "platform" / "handcards")
+    except Exception as e:                               # never in the way of the job
+        log.warning("handcards folders not pruned: %s", e)
+
+
+def handcards_settings() -> tuple:
+    """``(settings, "")`` of this Mac's handcards.json (in HOME_DIR: the skill's script and Python, the house 口径, the
+    双11 line), or ``(None, why not)``: then no draft is told it may ask for cards."""
+    if handcards is None:
+        return None, f"这台 Mac 的 worker 没有手卡模块（{HANDCARDS_FILE}）"
+    return handcards.load_config(HOME_DIR / handcards.CONFIG_FILE)
+
+
+def make_handcards(settings: dict, job: dict, meta: dict, request, workspace: Path, client: RelayClient,
+                   cards_cfg, cards_why: str, others: int = 0, reasked: bool = False) -> tuple:
+    """The cards of a draft's ``handcards`` request: ``(verdict, names of the files sent back)``.  Made only when this
+    Mac can (``cards_cfg``) and the bot asked for them (``meta.handcards_ok`` or an operator's 「做手卡」), in a folder of
+    their own under HOME_DIR/platform/handcards (``handcards.make``, the job's heartbeat meanwhile: the rendering may
+    take a minute); sent back here.  ``others``: the files the job sent back already (all count against the bot's 9 per
+    job: cards that would not fit are not made); ``reasked``: the model was asked once more about its short names.
+    All or nothing: one file that does not upload makes the verdict a
+    failure that names every planned file (one whose answer was lost may have arrived: the bot leaves them all out).
+    Never loses the draft: anything that goes wrong is the verdict's ``problems``."""
+    if handcards is None:
+        return {"version": 1, "ok": False, "cards": [], "items": [], "note": "",
+                "problems": ["这台 Mac 的 worker 没有手卡模块"]}, []
+    if cards_cfg is None:
+        return handcards.made_block(False, problems=[f"这台 Mac 做不了手卡：{cards_why}"]), []
+    asked = handcards.asked_items(meta)
+    if meta.get("handcards_ok") is not True and asked is None:
+        return handcards.made_block(False, problems=["机器人没打开手卡（Windows 的 PRM_HANDCARDS），这份草稿不该做手卡"]), []
+    job_id = int(job["id"])
+    try:
+        made, files = handcards.make(request, workspace=workspace, config=cards_cfg, name=str(meta.get("name") or ""),
+                                     job_id=job_id, home=HOME_DIR / "platform" / "handcards", asked=asked or None,
+                                     others=others, heartbeat=_platform_heartbeat(client, job_id, "做手卡"),
+                                     reasked=reasked)
+    except Exception as e:                               # never lose the draft over its cards
+        log.exception("#%s handcards failed", job_id)
+        return handcards.made_block(False, problems=[f"Mac 上做手卡出错：{e}"]), []
+    if not made["ok"]:
+        log.warning("#%s handcards not made: %s", job_id, "；".join(made["problems"]))
+        return made, []
+    sent = []
+    for n, path in enumerate(files, 1):
+        try:
+            client.upload(job_id, path, path.name)
+            sent.append(path.name)
+        except Exception as e:
+            log.warning("#%s handcards: file %d of %d not sent back: %s", job_id, n, len(files), e)
+            # every file planned is named: one whose answer was lost may be there all the same, the bot leaves
+            # them all out of the draft
+            if client.uploaded(job_id) >= handcards.MAX_CARDS:
+                why = f"这个任务的文件满了（一份草稿最多 {handcards.MAX_CARDS} 个文件）"
+            elif getattr(e, "code", None) == 404:       # the relay's answer: too many files, or the job is over
+                why = (f"中继不收第 {n} 个文件（这个任务的文件满了：一份草稿最多 {handcards.MAX_CARDS} 个文件；"
+                       "或者任务已经结束）")
+            else:
+                why = f"第 {n} 个文件没传上去：{e}"
+            return handcards.made_block(False, cards=[f.name for f in files], items=made["items"],
+                                        problems=[why[:200]], catalog_at=made.get("catalog_at")), []
+    log.info("#%s handcards: %d file(s) sent back", job_id, len(sent))
+    return made, sent
 
 
 # ── platform actions (src/prm/platforms.py) ──────────────────────────────
@@ -2619,19 +2979,165 @@ def sync_products(settings: dict, only: str = "") -> int:
     if unknown:
         print(f"商品目录只从 {', '.join(platforms.CATALOG_PLATFORMS)} 读，不认识：{', '.join(unknown)}")
         return 2
-    previous = platforms.load_catalog(workspace)
-    with _cli_lock():
-        catalog = platforms.sync_catalog(cfg, wanted, previous=previous, progress=lambda line: print(line, flush=True))
-    # 款式图下到 assets/products/（起草的 Claude 只能从 assets/ 挑文件发给达人）
-    images = platforms.fetch_images(workspace, catalog, previous=previous, progress=lambda line: print(line, flush=True))
-    print(f"款式图：新下 {images['fetched']} 张，沿用 {images['kept']} 张，没下成 {images['failed']} 张，"
-          f"删掉下架的 {images['removed']} 张")
-    paths = platforms.write_catalog(workspace, catalog)
+    before = signal.signal(signal.SIGTERM, _sync_terminated)   # (the worker's stop: the platform CLI stops too)
+    try:
+        # one --sync-products at a time on this Mac (the night's and one by hand): the images and the catalogue's
+        # files are written outside the platform CLI lock
+        with platforms.CliLock(HOME_DIR / "platform" / "products-sync.lock", wait=PRODUCTS_SYNC_MAX_SEC):
+            previous = platforms.load_catalog(workspace)
+            with _cli_lock():
+                catalog = platforms.sync_catalog(cfg, wanted, previous=previous,
+                                                 progress=lambda line: print(line, flush=True))
+            # 款式图下到 assets/products/（起草的 Claude 只能从 assets/ 挑文件发给达人）
+            images = platforms.fetch_images(workspace, catalog, previous=previous,
+                                            progress=lambda line: print(line, flush=True))
+            print(f"款式图：新下 {images['fetched']} 张，沿用 {images['kept']} 张，没下成 {images['failed']} 张，"
+                  f"删掉下架的 {images['removed']} 张")
+            paths = platforms.write_catalog(workspace, catalog)
+    except TimeoutError as e:
+        print(f"另一个 --sync-products 一直没跑完：{e}")
+        return 1
+    finally:
+        signal.signal(signal.SIGTERM, before)
     for platform, part in catalog["platforms"].items():
         state = "ok" if part.get("ok") else f"没读成：{part.get('error')}"
         print(f"{platform}: {len(part.get('items') or [])} 个商品（{state}）")
     print("写好了：" + "、".join(str(p) for p in paths))
     return 0 if all(part.get("ok") for name, part in catalog["platforms"].items() if name in wanted) else 1
+
+
+def _sync_terminated(signum, frame):
+    """``--sync-products`` told to stop (SIGTERM: the worker that started it stops, or its hour is up): the platform
+    CLI it runs now, in a process group of its own, stops first (``platforms.stop_running``), then this process."""
+    if platforms is not None:
+        platforms.stop_running()
+    print("--sync-products 被停下了（SIGTERM）", flush=True)
+    raise SystemExit(128 + int(signum))
+
+
+# config.json ``products_sync_hours``: ``--sync-products`` by itself (the catalogue's prices and SKUs: 直播手卡 refuses a
+# catalogue older than handcards.json's max_catalogue_days), in a process of its own so jobs go on meanwhile; a
+# platform action waits for its CLI lock as it does for a sync by hand.
+_products_sync: dict = {"proc": None, "started": 0.0, "warned": ""}
+PRODUCTS_SYNC_STATE = "products-sync.json"       # in HOME_DIR/platform: when the last scheduled run was started
+PRODUCTS_SYNC_LOG = "products-sync.log"          # in HOME_DIR/logs: the last scheduled run's output
+
+
+def products_sync_due(settings: dict, workspace: Path, now: float) -> bool:
+    """``products_sync_hours`` is set (a number more than 0: ``_sync_hours``), it is night on this Mac's clock
+    (PRODUCTS_SYNC_NIGHT) and neither the last scheduled run nor the catalogue file (written by any sync, one by hand
+    too: its modification time, no need to read it) is that young."""
+    hours = _sync_hours(settings.get("products_sync_hours"))
+    start, end = PRODUCTS_SYNC_NIGHT
+    if not hours or not start <= time.localtime(now).tm_hour < end:
+        return False
+    last = 0.0
+    try:
+        last = float(json.loads((HOME_DIR / "platform" / PRODUCTS_SYNC_STATE).read_text(encoding="utf-8"))["started_at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    try:
+        last = max(last, (Path(workspace) / platforms.CATALOG_JSON).stat().st_mtime)
+    except (OSError, AttributeError):
+        pass
+    return now - last >= hours * 3600
+
+
+def _stop_products_sync(proc) -> None:
+    """Stop the scheduled ``--sync-products``: SIGTERM to its process group (its handler, ``_sync_terminated``, stops
+    the platform CLI it runs, which is in a group of its own), SIGKILL after PRODUCTS_SYNC_STOP_SEC."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except OSError:
+            try:
+                proc.send_signal(sig)
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=PRODUCTS_SYNC_STOP_SEC)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _products_sync_ended(how: str, code, mono: float | None = None) -> None:
+    """The one line a scheduled run ends with (a WARNING when it failed or was stopped)."""
+    took = (time.monotonic() if mono is None else mono) - _products_sync["started"]
+    _products_sync["proc"] = None
+    (log.info if code == 0 else log.warning)("products: the scheduled --sync-products %s in %.0f s (output: %s)", how,
+                                             took, HOME_DIR / "logs" / PRODUCTS_SYNC_LOG)
+
+
+def products_sync_stop(why: str = "the worker stops") -> bool:
+    """A scheduled ``--sync-products`` still running when the worker stops or restarts is stopped the same way
+    (``_stop_products_sync``) and ends with its log line; True when there was one."""
+    proc = _products_sync["proc"]
+    if proc is None:
+        return False
+    code = proc.poll()
+    if code is None:
+        _stop_products_sync(proc)
+        _products_sync_ended(f"stopped ({why})", None)
+    else:
+        _products_sync_ended("done" if code == 0 else f"ended with exit code {code}", code)
+    return True
+
+
+def products_sync_idle(settings: dict, kinds: tuple) -> None:
+    """``serve``'s call of ``products_sync_tick``: whatever goes wrong in it (a full disk, a folder it cannot make) is
+    one WARNING line (the same one only once in a row), and serving goes on."""
+    try:
+        products_sync_tick(settings, kinds)
+        _products_sync["warned"] = ""
+    except Exception as e:
+        said = f"{type(e).__name__}: {e}"
+        if said != _products_sync.get("warned"):
+            log.warning("products: the night sync could not be looked at (%s); serving goes on", said)
+            _products_sync["warned"] = said
+
+
+def products_sync_tick(settings: dict, kinds: tuple, now: float | None = None, popen=subprocess.Popen,
+                       mono: float | None = None) -> str:
+    """At an idle moment of ``serve`` (no job came): a scheduled ``--sync-products`` that ended is told in one log line
+    (a WARNING when it failed; one still going after PRODUCTS_SYNC_MAX_SEC on the monotonic clock, which a sleeping
+    Mac does not move, is stopped, ``_stop_products_sync``); one that is due (``products_sync_due``, a worker that
+    writes drafts) starts, its output in HOME_DIR/logs/products-sync.log.  "" (nothing), "running", "ended" or
+    "started".  (``now``: the wall clock, for the night and the state file; ``mono``: the monotonic one.)"""
+    now = time.time() if now is None else now
+    mono = time.monotonic() if mono is None else mono
+    proc = _products_sync["proc"]
+    if proc is not None:
+        code = proc.poll()
+        if code is None and mono - _products_sync["started"] <= PRODUCTS_SYNC_MAX_SEC:
+            return "running"
+        if code is None:
+            _stop_products_sync(proc)
+            _products_sync_ended("stopped after %d min" % (PRODUCTS_SYNC_MAX_SEC // 60), None, mono)
+        else:
+            _products_sync_ended("done" if code == 0 else f"ended with exit code {code}", code, mono)
+        return "ended"
+    if "prm" not in kinds or platforms is None:
+        return ""
+    workspace = prm_workspace_dir(settings)[0]
+    if workspace is None or not products_sync_due(settings, workspace, now):
+        return ""
+    state = HOME_DIR / "platform" / PRODUCTS_SYNC_STATE
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(json.dumps({"started_at": now}), encoding="utf-8")   # (another worker here sees it: no second run)
+    out_path = HOME_DIR / "logs" / PRODUCTS_SYNC_LOG
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    argv = [sys.executable, str(Path(__file__).resolve()), "--config",
+            str(settings.get("config_path") or HOME_DIR / "config.json"), "--sync-products"]
+    with open(out_path, "w", encoding="utf-8") as out:
+        try:
+            _products_sync["proc"] = popen(argv, cwd=str(HOME_DIR), stdin=subprocess.DEVNULL, stdout=out,
+                                           stderr=subprocess.STDOUT, start_new_session=True)
+        except OSError as e:
+            log.warning("products: the scheduled --sync-products did not start: %s", e)
+            return ""
+    _products_sync["started"] = mono
+    return "started"
 
 
 def save_prm_log(job: dict, run: dict, result: dict) -> Path:
@@ -3029,6 +3535,7 @@ def serve(settings: dict, client: RelayClient, stopper: Stopper, once: bool = Fa
             backoff = min(backoff * 2, MAX_BACKOFF_SEC)
             continue
         if job is None:
+            products_sync_idle(settings, kinds)          # (idle: the catalogue's night sync, when set)
             continue
         try:
             result = do_job(settings, job, client, stopper, kinds)
@@ -3207,6 +3714,7 @@ def main(argv: list[str] | None = None) -> int:
     log.info("worker started (%s); bot %s", ",".join(kinds), settings["relay_url"])
     serve(settings, client, stopper, once=args.once, settings_file=SettingsFile(Path(args.config), settings),
           kinds=kinds)
+    products_sync_stop("the worker restarts" if stopper.exit_code() == RESTART_EXIT else "the worker stops")
     log.info("worker stopped")
     for lock in locks:
         lock.close()
