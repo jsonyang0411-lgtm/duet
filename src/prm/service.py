@@ -3626,7 +3626,8 @@ class PrmService:
             # A person took the chat while the step was drafted: it is owed, asked for again when that ends.
             self._owe_step(deal, f"#{job['id']} {step_word(meta)}这一步的草稿没进待审批", str(meta["system_note"]),
                            step.get("packet"), bool(step.get("delivered")), now, item=step.get("item") or "",
-                           action=step.get("action") or "", prefix=step.get("prefix") or "", uid=step.get("uid") or "")
+                           action=step.get("action") or "", prefix=step.get("prefix") or "", uid=step.get("uid") or "",
+                           tries=int(step.get("tries") or 0))
         elif lane == LANE_SYSTEM and state == SUPERSEDED:
             attention.append(f"#{job['id']} {step_word(meta)}这一步的草稿没进待审批（又有了新的一步），请运营核对")
         if short:
@@ -4785,7 +4786,8 @@ class PrmService:
             return True                                # (the same answer delivered twice)
         tries = int(step.get("tries") or 0) + 1
         self._store.add_event(deal["id"], int(meta["party_id"]), "step_unasked",
-                              {"job": job["id"], "item": str(step.get("item") or ""), "tries": tries}, actor="mac", now=now)
+                              {"job": job["id"], "item": str(step.get("item") or ""), "tries": tries,
+                               **({"gave_up": True} if tries > STEP_UNASKED_TRIES else {})}, actor="mac", now=now)
         if tries > STEP_UNASKED_TRIES:
             self._draft_failed(job, meta, f"#{job['id']} 草稿没写成：Mac 连着 {STEP_UNASKED_TRIES} 次问不到 Windows 上的机器人",
                                notes, now)
@@ -4876,9 +4878,12 @@ class PrmService:
 
     def _step_asks(self, deal_id: int, since: Optional[float] = None) -> list:
         """The deal's ``next_step`` events (since ``since``) but those whose job's draft the Mac could not make, not
-        able to ask this bot what it knows (``step_unasked``: the step is owed and asked again; review 2026-11-09 N1)."""
+        able to ask this bot what it knows (``step_unasked``: the step is owed and asked again; review 2026-11-09 N1).
+        The one it gave up on (``gave_up``: after ``STEP_UNASKED_TRIES``) counts: the product stays asked until an
+        operator acts (a new round), never dispatched afresh by the chain's next move (M1)."""
         unasked = {int(ev["detail"].get("job") or 0)
-                   for ev in self._store.events(deal_id, limit=None, kinds=("step_unasked",), since=since)}
+                   for ev in self._store.events(deal_id, limit=None, kinds=("step_unasked",), since=since)
+                   if not ev["detail"].get("gave_up")}
         return [ev for ev in self._store.events(deal_id, limit=None, kinds=("next_step",), since=since)
                 if int(ev["detail"].get("job") or 0) not in unasked]
 
@@ -4955,6 +4960,8 @@ class PrmService:
                     kw = dict(item=item if link else "", action=LINK_ACTION if link else "",
                               prefix=links.get("prefix", "") if link else "")
                     if any(n["key"] == "step" for n in deal.get("notices") or []):
+                        # (that one tells the Mac this is done too: it does not draft it again, review M3)
+                        self._owed_also(deal, action, now)
                         logger.info("PRM: deal %d: the step after packet %d is not asked for (another is owed)",
                                     deal["id"], packet["id"])
                     elif under_way and note:
@@ -4968,6 +4975,30 @@ class PrmService:
                     self._links_without_chain(deal, now)   # (what is left, and the deal's notice of it)
         except Exception:
             logger.exception("PRM: the step after packet %d could not be asked for", packet_id)
+
+    def _owed_also(self, deal: dict, action: dict, now: float) -> None:
+        """A step after a verified 专属佣金 (or 专属链接) not asked for because another is owed (``_after_platform``): the
+        owed one's note says this one is done too, so the Mac does not draft it again (review 2026-11-09 M3)."""
+        owed = next((n for n in deal.get("notices") or [] if n["key"] == "step"), None)
+        if owed is None or not owed.get("note"):
+            return
+        item = str(action.get("item_id") or "")
+        if action.get("action") == LINK_ACTION:
+            also = f"另外，商品 {item} 的专属链接也已经建好、绑好达人了，不要再建。"
+        else:
+            also = (f"另外，商品 {item} 的专属佣金（{action.get('commission_rate')}%）也已经在平台上开好了"
+                    f"（达人 {action.get('creator_platform_id')}），开过的不要再开。")
+        if also not in str(owed["note"]):
+            self._store.set_notice(deal["id"], "step", owed["text"], now, note=str(owed["note"]) + also)
+
+    def _plain_next_step(self, owed: dict) -> str:
+        """The note of the step an owed 专属链接 step's packet asks for without links (``next_step_note``): after a
+        verified 专属佣金, the next product's; "" when nothing follows (after a link, say)."""
+        packet = self._store.packet(int(owed.get("packet") or 0)) if str(owed.get("packet") or "").isdigit() else None
+        if packet is None:
+            return ""
+        data = packet.get("platform") or {}
+        return next_step_note(data.get("action") or {}, data.get("execution") or {})
 
     def _link_made(self, deal_id: int, item: str) -> bool:
         """Is this product's 专属链接 made for the deal's creator (a dy.channel_goods draft of it verified, or running)?"""
@@ -5672,8 +5703,17 @@ class PrmService:
                 if self._store.drop_notices(deal["id"], lambda n: n["key"] == "step", now):
                     if stale:
                         # a link step whose note asks for a prefix she has given since (or another one), or links
-                        # she no longer wants: asked afresh, with what the deal says now (review 2026-11-09 F7)
-                        self._chain_go(deal, now, why=stale)
+                        # she no longer wants: asked afresh, with what the deal says now (review 2026-11-09 F7);
+                        # without a chain and links no longer wanted, the step its packet asks for without them (the
+                        # next 专属佣金: the Mac is still told what is left, review M2)
+                        plain = (self._plain_next_step(owed) if self._chain(deal) is None
+                                 and link_wish(deal.get("slots")) is None else "")
+                        if plain:
+                            self._dispatch_step(deal, party, stale + plain, owed.get("packet"),
+                                                bool(owed.get("delivered")), now)
+                            asked += 1
+                        else:
+                            self._chain_go(deal, now, why=stale)
                     else:
                         self._dispatch_step(deal, party, str(owed.get("note") or ""), owed.get("packet"),
                                             bool(owed.get("delivered")), now, item=str(owed.get("item") or ""),
