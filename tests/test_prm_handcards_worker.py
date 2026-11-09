@@ -42,7 +42,8 @@ NOT_ASKED = "第 1 款短名「复古西部巴拿马帽」超过 6 个字，卡�
 
 # One answer per turn of the conversation (the task, then what the worker asks again), the last one repeated; a null
 # answer is a turn that ends without the structured answer, "SLOW" one that takes 30 s (then the first answer again),
-# "ERROR" one that ends over the budget (exit code 1), "WAIT:<s>:<n>" one that takes s seconds, then gives answer n.
+# "ERROR" one that ends over the budget (exit code 1), "WAIT:<s>:<n>" one that takes s seconds, then gives answer n,
+# "TWICE:<s>:<n>" the same with two results.
 FAKE_CLAUDE = textwrap.dedent("""\
     import json, os, sys, time
     args = sys.argv[1:]
@@ -70,6 +71,13 @@ FAKE_CLAUDE = textwrap.dedent("""\
             _, sec, n = draft.split(":")
             time.sleep(float(sec))
             draft = answers[int(n)]
+        if isinstance(draft, str) and draft.startswith("TWICE:"):
+            _, sec, n = draft.split(":")
+            time.sleep(float(sec))
+            draft = answers[int(n)]
+            print(json.dumps({"type": "result", "is_error": False, "total_cost_usd": 0.02, "permission_denials": [],
+                              "result": json.dumps(draft, ensure_ascii=False), "structured_output": draft},
+                             ensure_ascii=False), flush=True)
         event = {"type": "result", "is_error": False, "total_cost_usd": 0.02, "permission_denials": []}
         if draft is None:
             event["result"] = "好的"
@@ -193,6 +201,24 @@ def test_her_request_for_cards_comes_back_with_the_cards_and_waits_for_a_person(
     logged = [r.getMessage() for r in caplog.records if r.name == "claude_relay.worker"]
     assert logged and not any("小美" in line for line in logged)
     assert not any("小美" in p.name for p in (mac.home / "platform" / "handcards").rglob("*"))
+
+
+@pytest.mark.parametrize("linked, channel", [(True, "小美专属"), (False, "小美-i.99专属")])
+def test_the_cards_name_her_without_the_friend_adds_tail_of_her_douyin_id(worker, bot, fake_claude, mac, tmp_path,  # noqa: F811
+                                                                         linked, channel):
+    """(Round 4.)  Her deal is named as the friend add's remark made unique (「抖音-小美-i.99」: the last 4 of her 抖音号):
+    with her 抖音号 known to the job (``meta.creator``) the 场次 is 「小美专属」; unknown, nothing goes."""
+    mac.set_up()
+    party = bot.prm.store.party_by_wxid(CREATOR)
+    bot.prm.store.update_party(party["id"], name="抖音-小美-i.99")
+    if linked:
+        assert bot.prm.store.add_creator_link(party["id"], "dy_test1.i.99", source="register")
+    assert worker._douyin_ids({"creator": {"douyin_ids": ["dy_test1.i.99", 5, " "]}}) == ["dy_test1.i.99"]
+    assert worker._douyin_ids({}) == [] and worker._douyin_ids({"creator": "x"}) == []
+    fake_claude.answers(handcards={"products": [product()]})
+    her_job(worker, bot, fake_claude, mac, tmp_path)
+    [made] = mac.cards()
+    assert made["sheet"]["channel"] == channel
 
 
 def test_without_the_macs_settings_no_draft_is_told_and_a_click_fails_at_once(worker, bot, fake_claude, mac,  # noqa: F811
@@ -417,16 +443,47 @@ def test_her_line_after_the_last_answer_fails_the_job_as_before(worker, bot, fak
     assert "算了不用手卡了，先寄样吧" in job["text"] and "老师手卡发我一下" in job["text"]
 
 
+def test_one_turn_with_two_results_never_answers_her_later_line(worker, bot, fake_claude, mac, tmp_path,  # noqa: F811
+                                                                 monkeypatch):
+    """(Round 4: the verifier's E6.)  The turn asked again prints two results while she writes again, then her turn
+    runs past the job's deadline: her line was never answered, the job fails as before."""
+    mac.set_up()
+    monkeypatch.setattr(worker, "REASK_LEFT_SEC", 0)
+    monkeypatch.setattr(worker, "REASK_SEC", 60)
+    fits = {"handcards": {"call": "小美", "products": [product(short="西部巴拿马帽")]}}
+    fake_claude.turns({"handcards": {"call": "小美", "products": [product(short="复古西部巴拿马帽")]}}, "TWICE:3:3",
+                      "SLOW", fits)
+    creator_says(bot, "老师手卡发我一下")
+
+    def she_writes_again():
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and len(fake_claude.calls()) < 2:
+            time.sleep(0.05)
+        time.sleep(0.3)
+        creator_says(bot, "算了不用手卡了，先寄样吧")
+
+    meanwhile = threading.Thread(target=she_writes_again, daemon=True)
+    meanwhile.start()
+    run_one(worker, bot, settings(bot, fake_claude, tmp_path, prm_workspace=str(mac.ws), prm_timeout_min=0.15))
+    meanwhile.join(5)
+    assert len(fake_claude.calls()) == 3 and bot.prm.store.packets() == []
+
+
 def test_which_answer_had_every_line_of_hers(worker):  # noqa: F811
     good = json.dumps({"type": "result", "structured_output": {"reply_draft": "a"}})
     bare = json.dumps({"type": "result", "result": "好的"})
     assert worker.answered_all(good, ["creator"]) and worker.answered_all(good, ["creator", "reask"])
     assert not worker.answered_all(good, ["creator", "reask", "creator"])     # (hers after the answer that came)
     assert not worker.answered_all("\n".join([good, good]), ["creator", "reask", "creator"])
-    assert worker.answered_all("\n".join([good, good, good]), ["creator", "reask", "creator"])
+    assert not worker.answered_all("\n".join([good, good, good]), ["creator", "reask", "creator"])  # (one answer)
     assert worker.answered_all("\n".join([good, bare]), ["creator", "reask"])
     assert not worker.answered_all("\n".join([good, bare]), ["creator", "creator"])
     assert not worker.answered_all(bare, ["creator"]) and not worker.answered_all("", [])
+    # (round 4) more results than messages, and one turn's two results (the same answer twice), never answer more
+    assert not worker.answered_all("\n".join([good, good]), ["creator"])
+    other = json.dumps({"type": "result", "structured_output": {"reply_draft": "b"}})
+    assert not worker.answered_all("\n".join([other, good, good]), ["creator", "reask", "creator"])
+    assert worker.answered_all("\n".join([other, good, other]), ["creator", "reask", "creator"])
 
 
 def test_the_re_ask_waits_for_her_lines_and_is_asked_once_whoever_asks(worker):  # noqa: F811
@@ -657,6 +714,41 @@ def test_a_running_sync_stops_with_the_worker(worker, monkeypatch, caplog):  # n
         assert e.code == 128 + signal.SIGTERM and stopped == [1]
     else:
         raise AssertionError("the sync did not end")
+
+
+def test_a_config_it_refuses_is_said_in_the_log_and_to_the_permission_hook(worker, tmp_path, caplog):  # noqa: F811
+    """(Round 4.)  A USR1 restart that does not come back: worker-prm.log says why; a permission request then gets a
+    refusal that says why, never an exit with no verdict."""
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"relay_url": "http://bot", "token": "t", "products_sync_hours": True}),
+                      encoding="utf-8")
+    with caplog.at_level(logging.INFO, logger="claude_relay.worker"):
+        try:
+            worker.main(["--config", str(config), "--kinds", "prm"])
+        except SystemExit as e:
+            said = str(e)
+        else:
+            raise AssertionError("the worker started on it")
+    [line] = [r for r in caplog.records if "config.json cannot be used" in r.getMessage()]
+    assert line.levelname == "ERROR" and said in line.getMessage() and "products_sync_hours" in said
+    answer = worker.permission_hook({"tool_name": "Bash", "tool_input": {"command": "ls"}}, "5", config)
+    decision = answer["hookSpecificOutput"]["decision"]
+    assert decision["behavior"] == "deny" and "products_sync_hours" in decision["message"]
+
+
+def test_stopping_the_cli_runs_inside_its_own_bookkeeping(worker):  # noqa: F811
+    """(Round 4.)  ``stop_running`` runs in a signal handler: one that lands while run_cli holds the lock of its
+    bookkeeping (the same thread) must not hang."""
+    done = []
+
+    def handler_inside_run_cli():
+        with worker.platforms._RUNNING_LOCK:                 # (run_cli adding or removing its command)
+            done.append(worker.platforms.stop_running(grace=0.1))
+
+    t = threading.Thread(target=handler_inside_run_cli, daemon=True)
+    t.start()
+    t.join(5)
+    assert done == [0]
 
 
 def test_the_setting_is_a_number_of_hours(worker, tmp_path):  # noqa: F811

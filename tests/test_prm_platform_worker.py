@@ -228,10 +228,21 @@ def test_one_sync_products_at_a_time(worker, node, tmp_path, workspace, monkeypa
     with open(lock, "w") as held:
         fcntl.flock(held, fcntl.LOCK_EX)
         assert worker.main(["--config", str(config), "--sync-products"]) == 1
-    assert "另一个 --sync-products 一直没跑完" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert out.count("在等另一个同步跑完（最多 0.3 秒）…") == 1                   # (round 4: one line as the wait begins)
+    assert f"另一个 --sync-products 一直没跑完（等了 0.3 秒，{lock}）" in out
     assert not (workspace / "kb" / "products.md").exists() and node.calls() == []
     assert worker.main(["--config", str(config), "--sync-products"]) == 0          # (let go: it runs)
     assert signal.getsignal(signal.SIGTERM) is not worker._sync_terminated        # (its handler only while it runs)
+    assert "在等另一个同步跑完" not in capsys.readouterr().out
+    # the platform CLI lock is another one: its wait says so, not 「另一个 --sync-products」 (round 4)
+    cli = worker.HOME_DIR / "platform" / "cli.lock"
+    monkeypatch.setattr(worker, "_cli_lock", lambda heartbeat=None: platforms.CliLock(cli, wait=0.3))
+    with open(cli, "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        assert worker.main(["--config", str(config), "--sync-products"]) == 1
+    out = capsys.readouterr().out
+    assert "平台命令行的锁一直没等到：" in out and "cli.lock" in out and "另一个 --sync-products" not in out
 
 
 def test_a_platform_cli_in_its_own_group_is_stopped_with_the_sync(tmp_path):
