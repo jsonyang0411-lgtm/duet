@@ -7,6 +7,7 @@ The jst CLI is FakeNode (tests/platform_fakes.py), the hat index a fake hat_matc
 """
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -32,6 +33,7 @@ ACCOUNT = "test_daren_01"                 # her 抖音号 (platform_fakes' made-
 OTHER = "test_daren_99"
 CODE_A, CODE_B, CODE_C = "A7269901001A-F", "A7269901001B-F", "A7269901002A-F"
 STYLE_1 = "ACE7CN202699010001"            # CODE_A's and CODE_B's style (draft_context._style_guess)
+HOW = "对过图后，在控制台这份草稿上点这顶旁边的「对过图了」"   # how a held hat is let go (2026-11-09: the console's button)
 ORDER_MADE = "YP2611010000777"            # an order the bot made for her (sample_orders)
 RECEIVER = {"name": "张三", "phone": "〈手机1〉", "province": "广东省", "city": "佛山市", "district": "南海区",
             "address": "某某路100号1栋101"}
@@ -204,9 +206,12 @@ def test_a_buyin_draft_gets_none_of_it_and_only_the_bots_accounts_count(worker):
     asked = worker.draft_context.wanted({"draft_context": {
         "orders": [JST_ORDER, "not-an-order", JST_ORDER], "verified": [JST_ORDER, ORDER_MADE, 7], "accounts": [
             {"platform": "dy", "no": ACCOUNT}, {"platform": "KS", "no": "x1"}, {"platform": "XHS", "no": "bad no!"},
-            {"platform": "XHS", "no": "xhs_test_01"}]}, "creator": {"douyin_ids": [ACCOUNT.upper(), 7, "test_daren_02"]}})
-    assert asked == {"orders": [JST_ORDER], "verified": [JST_ORDER], "accounts": [("DY", ACCOUNT), ("XHS", "xhs_test_01")]}
+            {"platform": "XHS", "no": "xhs_test_01"}], "confirmed": [CODE_B.lower(), "确认 X", 7, CODE_B, CODE_C]},
+        "creator": {"douyin_ids": [ACCOUNT.upper(), 7, "test_daren_02"]}})
+    assert asked == {"orders": [JST_ORDER], "verified": [JST_ORDER], "accounts": [("DY", ACCOUNT), ("XHS", "xhs_test_01")],
+                     "confirmed": [CODE_B, CODE_C]}
     assert worker.draft_context.wanted({"draft_context": {"orders": [], "accounts": []}})["verified"] == []
+    assert worker.draft_context.wanted({"draft_context": {"orders": [], "accounts": []}})["confirmed"] == []
 
 
 def test_an_account_two_registered_creators_share_finds_neither_ones_orders(worker, bot, mac):  # noqa: F811
@@ -226,7 +231,7 @@ def test_an_account_two_registered_creators_share_finds_neither_ones_orders(work
     [packet] = bot.prm.store.packets()
     preview = packet["platform"]["preview"]
     assert preview["verdict"] == "blocked" and preview["problems"] == [
-        f"{CODE_A}（均码黑色）这顶没有照片对过，先核对再建；对过图后，在起草备注里另起一行写：确认 {CODE_A}"]
+        f"{CODE_A}（均码黑色）这顶没有照片对过，先核对再建；{HOW}"]
     [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
     assert shown["platform"]["can_execute"] is False
 
@@ -487,7 +492,7 @@ def test_a_hat_with_no_picture_behind_it_cannot_be_executed(worker, bot, mac):  
     [packet] = bot.prm.store.packets()
     preview = packet["platform"]["preview"]
     assert preview["verdict"] == "blocked"
-    assert f"{CODE_C}（均码粉色）这顶没有照片对过，先核对再建；对过图后，在起草备注里另起一行写：确认 {CODE_C}" in preview["problems"]
+    assert f"{CODE_C}（均码粉色）这顶没有照片对过，先核对再建；{HOW}" in preview["problems"]
     assert "operator_files" not in packet["meta"] and [c["args"][0] for c in mac.hats.calls()] == ["match"]
     out = bot.prm.decide(packet["id"], "execute")
     assert out["ok"] is False
@@ -535,109 +540,140 @@ def test_only_an_earlier_order_that_went_out_or_that_the_bot_made_confirms_its_c
     assert drafted(her_row(ORDER_MADE, "DELETED", items=PINK))["verdict"] == "blocked"
 
 
-def test_only_a_confirmation_on_a_line_of_its_own_in_the_note_confirms_a_code(worker, bot, mac):  # noqa: F811
-    """The operators' 起草备注 confirms a code only as a line of its own, 「确认 <编码>」 (or 已确认 / 确认了 / 确认过了 /
-    对过图 / 对过图了, an optional ：, the codes, one 。.！! at most): a code merely written there (「她要的是 …」), on a
-    longer line (「…。确认 …」「待确认 …」), does not; through the console, 「深棕那顶⏎确认 B」 lets the order go."""
+ORDER_B = {**SAMPLE_ORDER, "items": [{"item_id": DY_ITEM2, "skus": [{"sku_id": DY_SKU2B, "qty": 1}]}]}    # (CODE_B)
+
+
+def confirm(bot, mac, packet_id, code):  # noqa: F811
+    """「对过图了，用 <编码>」 on the draft (the console's deal action)."""
+    return bot.prm.deal_action("photo_confirm", {"deal_id": mac.deal["id"], "packet": packet_id, "code": code})
+
+
+def unconfirm(bot, mac, code):  # noqa: F811
+    """Its 「撤销」."""
+    return bot.prm.deal_action("photo_unconfirm", {"deal_id": mac.deal["id"], "code": code})
+
+
+def repreviewed(worker, bot, mac, packet_id):  # noqa: F811
+    """重新预览 and the Mac's answer: (verdict, 批准并执行 on, the packet)."""
+    assert bot.prm.decide(packet_id, "repreview")["ok"]
+    run_one(worker, bot, mac.settings)
+    packet = bot.prm.store.packet(packet_id)
+    [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet_id]
+    return packet["platform"]["preview"]["verdict"], shown["platform"]["can_execute"], packet
+
+
+# Verification of 80581b7 (2026-11-09): reading 「确认 <编码>」 out of the 起草备注 could not be made safe (a word after the
+# code, a line that takes it back, an innocent 「呢子」 that reads as a question): the note confirms nothing now
+NOTES = ("确认 {c}", "已确认 {c}、A7269901001A-F", "对过图了 {c_lower}", "她要深棕\n确认 {c}", "确认 {c} pls",
+         "对过图 {c} not sure", "确认 {c}\n颜色要再看看", "她要呢子那款\n确认 {c}")
+
+
+def test_words_in_the_note_never_let_a_held_hat_go(worker, bot, mac):  # noqa: F811
+    """The operators' 起草备注 is for the drafting Claude only: no form of 「确认 <编码>」 in it (a line of its own, as the
+    last rule asked, included) lets a held hat go; the hold says to click 「对过图了」 in the console, and the note still
+    goes to the Mac as written.  The module has no note reading left."""
     dc = worker.draft_context
-    note = f"别寄 {CODE_A}\n确认 {CODE_B}、{CODE_C}\n还不确认 A7269901009A-M\n对过图：A72599018B-M"
-    assert dc.noted_codes(note) == {CODE_B, CODE_C, "A72599018B-M"}
-    assert dc.noted_codes(f"已确认：{CODE_A.lower()}\n  对过图 {CODE_B} {CODE_C}") == {CODE_A, CODE_B, CODE_C}
-    for note in (f"她要的是 {CODE_A}", f"待确认 {CODE_A}", f"请确认 {CODE_A}", f"不用确认 {CODE_A}", f"没确认 {CODE_A}",
-                 f"确认不寄 {CODE_A}", f"需要 确认 {CODE_A}", f"不 确认 {CODE_A}", f"请 确认 {CODE_A}",
-                 f"还没 对过图 {CODE_A}", f"她说「确认 {CODE_A}」", f"别寄 {CODE_B}，确认 {CODE_A}", "", None):
-        assert dc.noted_codes(note) == set(), note
+    for gone in ("read_note", "noted_codes", "confirm_how", "NOTE_MARKERS"):
+        assert not hasattr(dc, gone), gone
     order_rules(mac)
-    mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action={
-        **SAMPLE_ORDER, "items": [{"item_id": DY_ITEM2, "skus": [{"sku_id": DY_SKU2B, "qty": 1}]}]})      # (CODE_B)
-    for note, verdict in ((f"她要的是 {CODE_B}，运营看过图了", "blocked"), (f"待确认 {CODE_B}", "blocked"),
-                          (f"深棕那顶。确认 {CODE_B}", "blocked"), (f"深棕那顶\n确认 {CODE_B}", "ready")):
-        text_job(bot, mac, text="[11:09] 深棕那顶", note=note)
+    mac.hats.answers(match={"图片-1.jpg": SURE})              # (a sure 驼色 picture: CODE_A; she is sent CODE_B)
+    mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action=ORDER_B)
+    picture_job(bot, mac)
+    run_one(worker, bot, mac.settings)
+    for n, form in enumerate(NOTES):
+        note = form.format(c=CODE_B, c_lower=CODE_B.lower())
+        assert bot.prm.deal_action("draft_note", {"deal_id": mac.deal["id"], "text": note})["ok"]
+        creator_says(bot, f"深棕那顶 {n}")                    # (her draft job as the bot makes it: with the note)
         run_one(worker, bot, mac.settings)
-        assert newest_preview(bot)["verdict"] == verdict, (note, newest_preview(bot)["problems"])
-    assert f"{CODE_B}：运营在起草备注里确认了（没有图对）" in [f["value"] for f in newest_preview(bot)["facts"]]
+        preview = newest_preview(bot)
+        assert preview["verdict"] == "blocked" and preview["problems"] == [
+            f"{CODE_B}（均码咖啡）对图没把握（只在没把握的图里，或者不是图里最像的那一款、那个颜色）：先核对再建；{HOW}"], note
+        assert bot.prm.store.packets()[0]["meta"]["photo_held"] == [CODE_B]
+        kept = bot.prm.store.deal(mac.deal["id"])["draft_note"]
+        assert f"<operator_note>\n{kept}\n</operator_note>" in prompt_of(mac)
+        assert "运营在控制台点了「对过图了」的编码" not in prompt_of(mac)
+    assert "起草备注里写的「确认」都不算" in dc.PHOTO_RULE and HOW in dc.ORDER_RULE and dc.CONFIRM_HOW == HOW
 
 
-# Verification of 6b59040 (2026-11-09, HIGH): a question or request in the 起草备注 counted as confirming the code
-NOT_CONFIRMING = ("确认 {c} 吗？", "确认 {c}？", "确认{c}吗", "确认：{c} 还没对", "确认 {c} 不了", "确认 {c} 还没对",
-                  "确认 {c} 的颜色", "确认 {c} 有没有货", "确认 {c} 是不是她要的", "确认 {c} 对不对", "确认 {c} 再建单",
-                  "确认 {c} 还是 A7269901001A-F", "确认 {c}（还没看图）", "确认一下 {c} 的颜色", "确认下 {c}", "确认吗？{c}",
-                  "确认：还没对 {c}", "待确认 {c}", "未确认 {c}", "没确认 {c}", "确认不了 {c}", "确认 {c}，她要的",
-                  "确认 {c}.5 吗", "确认 {c}、")
-CONFIRMING = ("确认 {c}", "确认 {c}。", "已确认 {c}、A7269901001A-F", "确认过了 {c}", "对过图 {c}", "确认了：{c}",
-              "确认 {c}！", "  确认 {c}  ", "确认 {c}.", "确认 {c} ", "确认 {c_lower}", "对过图了 {c}",
-              "确认：{c} A7269901001A-F", "确认 {c}，A7269901001A-F", "确认{c}")
-# Verification of b0dd4cd (2026-11-09): a confirmation and then a question still let a hat go
-QUESTION_AFTER = ("确认 {c}。对吗？", "确认 {c}. 对吗?", "确认 {c}；是吗？", "确认 {c}; 对吗？", "确认 {c}! 吗", "确认 {c}！？",
-                  "确认 {c}!?", "确认 {c}。吗？", "确认 {c}。还是 A7269901001A-F？", "确认 {c}。不对，是 A7269901001A-F")
-# … and on the same line as other words (the rule now: a line of its own only)
-SAME_LINE = ("她要深棕。确认 {c}", "好的，确认 {c}", "先确认 {c}。", "麻烦确认 {c}。", "确认 {c} 均码", "确认 {c} M码", "确认 {c}🙏",
-             "确认 {c} 👍", "确认 {c}; 寄 2 顶", "确认 {c} 和 A7269901001A-F。", "确认 {c}. 寄 1 顶", "待确认 {c}")
-
-
-def test_a_question_or_request_in_the_note_never_confirms_a_code(worker):  # noqa: F811
-    """Verification 2026-11-09 (HIGH, twice): a confirmation counts only as a line of its own, trimmed: 「确认」
-    「已确认」「确认了」「确认过了」「对过图」「对过图了」, an optional ：, the codes (blanks, 、 or a comma between them), one
-    。.！! at most; and a note with a question anywhere (？ ? 吗 呢 么 还是 对不对 是不是 对吗 不对) confirms nothing.  Every
-    form, at the start of the note, after a line and before one: the plain ones count, the questions, requests and
-    same-line ones never; a code the note names on a line with 确认 that does not count is ``tried`` (its reason)."""
+def test_the_gate_takes_the_codes_the_console_confirmed(worker, tmp_path):  # noqa: F811
+    """``gate`` with the job's ``confirmed`` codes (the deal's 「对过图了」): a code with no sure picture behind it, or a
+    sheet row to look again at, goes when it is confirmed (and is named in ``used``), is held otherwise (named in
+    ``held``, the hold saying how to let it go); the prompt names the confirmed codes."""
     dc = worker.draft_context
-    for forms, counts in ((NOT_CONFIRMING, False), (QUESTION_AFTER, False), (SAME_LINE, False), (CONFIRMING, True)):
-        for form in forms:
-            text = form.format(c=CODE_B, c_lower=CODE_B.lower())
-            for note in (text, f"她要深棕\n{text}", f"{text}\n她要深棕"):
-                assert (CODE_B in dc.noted_codes(note)) is counts, note
-    for form in SAME_LINE:
-        said = dc.read_note(form.format(c=CODE_B))
-        assert CODE_B in said["tried"] and not said["doubt"], form
-        assert dc.confirm_how(CODE_B, said) == f"起草备注里提到了 {CODE_B}，但要另起一行只写「确认 {CODE_B}」才算"
-    for note in (f"确认 {CODE_B}\n她要几顶？", f"她要几顶呢\n确认 {CODE_B}", f"确认 {CODE_B}\n颜色对不对", *(
-            form.format(c=CODE_B) for form in QUESTION_AFTER)):
-        said = dc.read_note(note)
-        assert said["codes"] == set() and said["doubt"] and CODE_B in said["tried"], note
-        assert dc.confirm_how(CODE_B, said) == (f"起草备注里有问句，「确认」先不算：要确认请删掉问句，另起一行只写「确认 {CODE_B}」")
-    assert dc.confirm_how(CODE_B, dc.read_note("")) == f"对过图后，在起草备注里另起一行写：确认 {CODE_B}"
+    hats_dir = tmp_path / "hat-index"
+    hats_dir.mkdir()
+    (hats_dir / "hat_match.py").write_text(FAKE_HAT, encoding="utf-8")
+    (hats_dir / "answers.json").write_text(json.dumps({"match": {}, "sheet": {
+        CODE_A: {"ok": False, "note": "！要再看：颜色：图最像 深棕"}}}, ensure_ascii=False), encoding="utf-8")
+    opts = {**dc.options({"draft_context": {"hat_index": str(hats_dir), "hat_python": sys.executable}}), "stock": False,
+            "gap_sec": 0.0}
+    ws, rel = picture_in(tmp_path)
+    entry = {"sha256": "0" * 64, "rel": rel, "name": "图片-1.jpg", "job": 5, "at": time.time(), "now": True,
+             "hats": dc.trimmed(SURE), "verdict": dc.SURE, "error": ""}
+    action = {"action": "jst.sample_order", "shop": "dy", "items": [
+        {"item_id": DY_ITEM2, "skus": [{"sku_id": DY_SKU2, "qty": 1}, {"sku_id": DY_SKU2B, "qty": 1}]}]}
+
+    def gated(confirmed):
+        context = dc.Context("", {"ok": True, "orders": []}, {"photos": [entry]}, {}, confirmed)
+        return dc.gate({"verdict": "ready", "action": action, "facts": [], "problems": []}, context,
+                       platforms=worker.platforms, cfg={"dirs": {}}, opts=opts, catalog=coded_catalog(), workspace=ws,
+                       home=tmp_path / "home")
+
+    held = gated([])
+    assert held["block"]["verdict"] == "blocked" and held["held"] == [CODE_B, CODE_A] and held["used"] == []
+    assert held["block"]["problems"] == [
+        f"{CODE_B}（均码咖啡）对图没把握（只在没把握的图里，或者不是图里最像的那一款、那个颜色）：先核对再建；{HOW}",
+        f"{CODE_A} 对图要再看（！要再看：颜色：图最像 深棕）：先核对再建；{HOW}"]
+    let = gated([CODE_B, CODE_A])
+    assert let["block"]["verdict"] == "ready", let["block"]["problems"]
+    assert let["held"] == [] and let["used"] == [CODE_B, CODE_A]
+    facts = [f["value"] for f in let["block"]["facts"]]
+    assert f"{CODE_B}：运营在控制台点了「对过图了」（没有图对）" in facts
+    assert f"{CODE_A}：对图单说要再看（！要再看：颜色：图最像 深棕），运营在控制台点了「对过图了」" in facts
+    text = dc.context_text({"ok": True, "orders": []}, {"ok": True, "photos": []}, {}, confirmed=[CODE_B])
+    assert f"（运营对过图、在控制台点了「对过图了」的编码，可以用来建寄样单：{CODE_B}）" in text
+    assert "在控制台点了" not in dc.context_text({"ok": True, "orders": []}, {"ok": True, "photos": []}, {}).replace(
+        dc.PHOTO_RULE, "")
 
 
-def test_a_question_in_the_note_leaves_a_colour_never_compared_or_another_colour_held(worker, bot, mac):  # noqa: F811
-    """Verification 2026-11-09 (F1, F1b): the colour of her picture was never compared (CODE_A held), or she is sent the
-    hat's other colour (CODE_B held): an operator's note that asks about it (「确认 … 的颜色」「确认 … 吗？」
-    「…。确认 … 有没有货再答应她」「确认：… 还没对」), and a 重新预览, leave it held; 「确认 <编码>」 lets it go."""
+def test_a_held_hat_is_let_go_by_the_console_and_taken_back_by_its_undo(worker, bot, mac):  # noqa: F811
+    """Verification 2026-11-09 (F1, F1b), with the button: the colour of her picture was never compared (CODE_A held),
+    or she is sent the hat's other colour (CODE_B held).  「对过图了」 for a code the preview did not hold is refused; for
+    the held one it is kept, the card says 「已确认 …，点「重新预览」按确认再核」, and the new preview (its job carrying
+    the code) is ready; 「撤销」 turns 批准并执行 off again, and the next preview holds the hat again."""
     order_rules(mac, rows=[her_row(items=PINK)])            # (her earlier order: another hat)
     mac.hats.answers(match={"图片-1.jpg": no_own_colours()})
     mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action=SAMPLE_ORDER)    # (CODE_A)
     picture_job(bot, mac)
     run_one(worker, bot, mac.settings)
     [packet] = bot.prm.store.packets()
-    assert packet["platform"]["preview"]["verdict"] == "blocked"
-
-    def noted(text, packet_id):
-        assert bot.prm.deal_action("draft_note", {"deal_id": mac.deal["id"], "text": text})["ok"]
-        assert bot.prm.decide(packet_id, "repreview")["ok"]
-        run_one(worker, bot, mac.settings)
-        [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet_id]
-        return bot.prm.store.packet(packet_id)["platform"]["preview"]["verdict"], shown["platform"]["can_execute"]
-
-    for note, why in ((f"确认 {CODE_A} 的颜色", "提到了"), (f"确认 {CODE_A} 吗？", "问句"),
-                      (f"她要驼色。确认 {CODE_A} 有没有货再答应她", "提到了"), (f"确认：{CODE_A} 还没对", "提到了"),
-                      (f"她要驼色。确认 {CODE_A}", "提到了"), (f"她要驼色\n确认 {CODE_A}\n对吗？", "问句")):
-        assert noted(note, packet["id"]) == ("blocked", False), note
-        problems = bot.prm.store.packet(packet["id"])["platform"]["preview"]["problems"]
-        expected = (f"起草备注里提到了 {CODE_A}，但要另起一行只写「确认 {CODE_A}」才算" if why == "提到了"
-                    else f"起草备注里有问句，「确认」先不算：要确认请删掉问句，另起一行只写「确认 {CODE_A}」")
-        assert any(p.endswith(expected) for p in problems), (note, problems)
-    assert noted(f"她要驼色\n确认 {CODE_A}", packet["id"]) == ("ready", True)
+    assert packet["platform"]["preview"]["verdict"] == "blocked" and packet["meta"]["photo_held"] == [CODE_A]
+    refused = confirm(bot, mac, packet["id"], CODE_B)
+    assert refused["ok"] is False and "只能确认预览里扣着的那顶" in refused["error"]
+    assert confirm(bot, mac, packet["id"], CODE_A)["ok"]
+    [view] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]][0]["photo_held"]
+    assert view["code"] == CODE_A and view["held"] and view["confirmed"]
+    verdict, on, now = repreviewed(worker, bot, mac, packet["id"])
+    assert (verdict, on) == ("ready", True), now["platform"]["preview"]["problems"]
+    assert now["meta"]["photo_held"] == [] and now["meta"]["photo_confirmed"] == [CODE_A]
+    assert json.loads(bot.relay.store.get(bot.relay.store.list_jobs(1)[0]["id"])["meta"])["draft_context"][
+        "confirmed"] == [CODE_A]
+    assert unconfirm(bot, mac, CODE_A)["ok"]
+    [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
+    assert shown["platform"]["can_execute"] is False
+    assert bot.prm.decide(packet["id"], "execute") == {"ok": False,
+                                                        "error": f"撤销了 {CODE_A} 的「对过图了」：点「重新预览」再核"}
+    verdict, on, now = repreviewed(worker, bot, mac, packet["id"])
+    assert (verdict, on) == ("blocked", False) and now["meta"]["photo_held"] == [CODE_A]
     # a sure picture of the 驼色 hat, she is sent the 深棕 one
-    assert bot.prm.deal_action("draft_note", {"deal_id": mac.deal["id"], "text": ""})["ok"]
     mac.hats.answers(match={"图片-2.jpg": SURE})
-    mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action={
-        **SAMPLE_ORDER, "items": [{"item_id": DY_ITEM2, "skus": [{"sku_id": DY_SKU2B, "qty": 1}]}]})   # (CODE_B)
+    mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action=ORDER_B)
     picture_job(bot, mac, name="图片-2.jpg", body=b"\xff\xd8\xff picture two")
     run_one(worker, bot, mac.settings)
     other = bot.prm.store.packets()[0]
-    assert other["platform"]["preview"]["verdict"] == "blocked"
-    assert noted(f"确认 {CODE_B} 吗？", other["id"]) == ("blocked", False)
-    assert noted(f"确认 {CODE_B}", other["id"]) == ("ready", True)
+    assert other["platform"]["preview"]["verdict"] == "blocked" and other["meta"]["photo_held"] == [CODE_B]
+    assert confirm(bot, mac, other["id"], CODE_B)["ok"]
+    assert repreviewed(worker, bot, mac, other["id"])[:2] == ("ready", True)
 
 
 def test_a_code_only_in_an_unsure_picture_or_not_its_best_hat_is_not_taken(worker, bot, mac):  # noqa: F811
@@ -658,7 +694,7 @@ def test_a_code_only_in_an_unsure_picture_or_not_its_best_hat_is_not_taken(worke
     preview = packet["platform"]["preview"]
     assert preview["verdict"] == "blocked" and preview["problems"] == [
         f"{CODE_B}（均码咖啡）对图没把握（只在没把握的图里，或者不是图里最像的那一款、那个颜色）：先核对再建；"
-        f"对过图后，在起草备注里另起一行写：确认 {CODE_B}"]
+        f"{HOW}"]
     assert [c["args"][0] for c in mac.hats.calls()] == ["match"] and "operator_files" not in packet["meta"]
     [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
     assert shown["platform"]["can_execute"] is False
@@ -674,9 +710,10 @@ def test_a_code_only_in_an_unsure_picture_or_not_its_best_hat_is_not_taken(worke
     assert held["verdict"] == "blocked" and held["problems"][0].startswith(f"{CODE_C}（均码粉色）对图没把握")
 
 
-def test_a_sheet_that_says_look_again_or_has_no_sku_photo_waits_for_the_notes_confirmation(worker, bot, mac):  # noqa: F811
+def test_a_sheet_that_says_look_again_or_has_no_sku_photo_waits_for_an_operators_confirmation(worker, bot, mac):  # noqa: F811
     """A row of the sheet 「！要再看」 (another colour, another style) or without the SKU's own photo: not ready, the sheet
-    kept for the operators to look at; 「确认 <编码>」 in the 起草备注 and 重新预览: ready.  A sheet not made: not ready."""
+    kept for the operators to look at, the code held; 「对过图了」 in the console and 重新预览: ready (taken back, 「撤销」,
+    the next one holds it again).  A sheet not made: not ready, nothing to confirm."""
     order_rules(mac)
     look = "！要再看：颜色：图最像 驼色（A7269901001A-F）"
     mac.hats.answers(match={"图片-1.jpg": SURE}, sheet={CODE_A: {"ok": False, "note": look}})
@@ -686,21 +723,22 @@ def test_a_sheet_that_says_look_again_or_has_no_sku_photo_waits_for_the_notes_co
     [packet] = bot.prm.store.packets()
     preview = packet["platform"]["preview"]
     assert preview["verdict"] == "blocked" and preview["problems"] == [
-        f"{CODE_A} 对图要再看（{look}）：先核对再建；对过图后，在起草备注里另起一行写：确认 {CODE_A}"]
+        f"{CODE_A} 对图要再看（{look}）：先核对再建；{HOW}"]
     assert packet["meta"]["operator_files"]                        # (the sheet, for the operators to look at)
-    assert bot.prm.deal_action("draft_note", {"deal_id": mac.deal["id"], "text": f"确认 {CODE_A}"})["ok"]
-    assert bot.prm.decide(packet["id"], "repreview")["ok"]
-    run_one(worker, bot, mac.settings)
-    again = bot.prm.store.packet(packet["id"])["platform"]["preview"]
-    assert again["verdict"] == "ready", again["problems"]
-    assert f"{CODE_A}：对图单说要再看（{look}），运营在起草备注里确认了" in [f["value"] for f in again["facts"]]
-    # the index has no photo of that SKU: the same
-    assert bot.prm.deal_action("draft_note", {"deal_id": mac.deal["id"], "text": ""})["ok"]
+    assert packet["meta"]["photo_held"] == [CODE_A]
+    assert confirm(bot, mac, packet["id"], CODE_A)["ok"]
+    verdict, on, now = repreviewed(worker, bot, mac, packet["id"])
+    again = now["platform"]["preview"]
+    assert (verdict, on) == ("ready", True), again["problems"]
+    assert f"{CODE_A}：对图单说要再看（{look}），运营在控制台点了「对过图了」" in [f["value"] for f in again["facts"]]
+    assert now["meta"]["photo_confirmed"] == [CODE_A] and now["meta"]["operator_files"]
+    # the index has no photo of that SKU: the same (once the confirmation is taken back)
+    assert unconfirm(bot, mac, CODE_A)["ok"]
     mac.hats.answers(match={"图片-1.jpg": SURE}, sheet={CODE_A: {"sku_photo": False}})
     picture_job(bot, mac, text="[11:06] 就这顶")
     run_one(worker, bot, mac.settings)
     assert newest_preview(bot)["problems"] == [
-        f"{CODE_A} 对图要再看（图库里没有这个编码的图）：先核对再建；对过图后，在起草备注里另起一行写：确认 {CODE_A}"]
+        f"{CODE_A} 对图要再看（图库里没有这个编码的图）：先核对再建；{HOW}"]
     # the sheet cannot be made (the index fails): not ready
     mac.hats.answers(match={"图片-2.jpg": SURE}, exit=0)
     (mac.hats.dir / "hat_match.py").write_text(FAKE_HAT.replace('if args[0] == "match":', 'if args[0] == "sheet": sys.exit(3)\n'
@@ -994,9 +1032,9 @@ def no_own_colours():
 
 def test_a_colour_never_compared_by_photo_is_never_taken_for_sure(worker, bot, mac):  # noqa: F811
     """Verification 2026-11-09 (W2): the best hat's colours have no photo of their own, so the colour was never compared:
-    「颜色没把握」, none of its codes usable, an order of either colour waits for the 起草备注.  A sure picture gives
-    only its best colour's codes, never the hat's other colours; a sheet row whose SKU picture is only the whole style's
-    (「（整款图…」) is no SKU photo: it waits too, until the 起草备注 confirms the code."""
+    「颜色没把握」, none of its codes usable, an order of either colour waits for an operator's 「对过图了」.  A sure
+    picture gives only its best colour's codes, never the hat's other colours; a sheet row whose SKU picture is only the
+    whole style's (「（整款图…」) is no SKU photo: it waits too, until 「对过图了」 for the code."""
     dc = worker.draft_context
     assert dc.verdict(dc.trimmed(no_own_colours()), dc.options({})) == dc.NO_OWN_COLOUR
     assert dc.verdict(dc.trimmed([hat(STYLE_1, "测试药盒帽", 1.25)]), dc.options({})) == dc.NO_OWN_COLOUR  # (no colours)
@@ -1027,13 +1065,11 @@ def test_a_colour_never_compared_by_photo_is_never_taken_for_sure(worker, bot, m
     run_one(worker, bot, mac.settings)
     assert newest_preview(bot)["problems"] == [
         f"{CODE_A} 对图要再看（对图单右边只有整款图，没有这个颜色的单独图）：先核对再建；"
-        f"对过图后，在起草备注里另起一行写：确认 {CODE_A}"]
+        f"{HOW}"]
     packet = bot.prm.store.packets()[0]
-    assert packet["meta"]["operator_files"]                            # (the sheet is there to look at)
-    assert bot.prm.deal_action("draft_note", {"deal_id": mac.deal["id"], "text": f"确认 {CODE_A}"})["ok"]
-    assert bot.prm.decide(packet["id"], "repreview")["ok"]
-    run_one(worker, bot, mac.settings)
-    assert bot.prm.store.packet(packet["id"])["platform"]["preview"]["verdict"] == "ready"
+    assert packet["meta"]["operator_files"] and packet["meta"]["photo_held"] == [CODE_A]   # (the sheet to look at)
+    assert confirm(bot, mac, packet["id"], CODE_A)["ok"]
+    assert repreviewed(worker, bot, mac, packet["id"])[:2] == ("ready", True)
 
 
 def memory_of(worker, mac) -> dict:  # noqa: F811
@@ -1041,6 +1077,11 @@ def memory_of(worker, mac) -> dict:  # noqa: F811
     data = json.loads((worker.draft_context.folder(mac.home) / "photos" / f"party-{mac.party['id']}.json")
                       .read_text(encoding="utf-8"))
     return {e["name"]: (e.get("tries", 0), bool(e.get("final")), e.get("error") or "") for e in data["photos"]}
+
+
+def warned(caplog, words) -> list:
+    """The warnings logged that say ``words`` (the INFO lines the full suite may capture too are not counted)."""
+    return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING and words in r.getMessage()]
 
 
 def match_runs(mac, name=None) -> int:
@@ -1065,10 +1106,12 @@ def test_a_picture_the_index_cannot_read_is_matched_once(worker, bot, mac):  # n
 
 
 def test_an_index_that_fails_as_a_whole_is_left_alone_a_while_and_her_picture_waits_for_it(worker, bot, mac, caplog):  # noqa: F811
-    """Verification 2026-11-09 (F2a): the index fails as a whole (exit 1: not the picture's fault) for her jobs: no try
-    is charged to her picture; after MAX_RUN_FAILURES runs in a row the index is left alone for ``breaker_min`` (the
-    block and the log say so); once it works again her picture is matched (sent again too) and nothing was given up."""
+    """Verification 2026-11-09 (F2a): the index fails as a whole (exit 1: not the picture's fault; its own picture, the
+    canary, fails too) for her jobs: no try is charged to her picture; after MAX_RUN_FAILURES runs in a row the index is
+    left alone for ``breaker_min`` (the block and the log say so); once it works again her picture is matched (sent
+    again too) and nothing was given up."""
     dc = worker.draft_context
+    canary_index(mac.hats)
     mac.node.rules([mine_rows(her_row())])
     mac.hats.answers(match={"图片-1.jpg": SURE}, exit=1, stdout="boom")
     picture_job(bot, mac)
@@ -1076,7 +1119,7 @@ def test_an_index_that_fails_as_a_whole_is_left_alone_a_while_and_her_picture_wa
     for n in range(3):
         text_job(bot, mac, text=f"[11:0{n}] 在吗")
         run_one(worker, bot, mac.settings)
-    assert match_runs(mac) == dc.MAX_RUN_FAILURES                        # (then left alone)
+    assert match_runs(mac, "图片-1.jpg") == match_runs(mac, "0000-own.jpg") == dc.MAX_RUN_FAILURES   # (then left alone)
     photos = block(prompt_of(mac), "photo_matches")
     assert "对不了图（帽子图库连着出错 3 次，" in photos and "以前先不用）" in photos
     assert "hat failed 3 runs in a row; not run again for 10 min" in caplog.text
@@ -1092,24 +1135,30 @@ def test_an_index_that_fails_as_a_whole_is_left_alone_a_while_and_her_picture_wa
 def test_only_a_pictures_own_failure_is_its_try(worker, bot, mac):  # noqa: F811
     """Verification 2026-11-09 (F2b): a picture that makes the index fail is never batched with a good one again (her
     earlier failed pictures are matched each on its own): the good one is matched and never charged; the bad one is
-    charged only when its run, alone, fails right after one that went, and is left after MAX_MATCH_TRIES of those."""
+    charged when its run, alone, fails and the index's own picture (the canary) is read, and is left after
+    MAX_MATCH_TRIES of those."""
     dc = worker.draft_context
+    canary_index(mac.hats)
     mac.node.rules([mine_rows(her_row())])
-    mac.hats.answers(match={"图片-good.jpg": SURE, "图片-c.jpg": SURE, "图片-d.jpg": SURE}, fail_with="图片-bad")
+    mac.hats.answers(match={"图片-good.jpg": SURE, "图片-c.jpg": SURE, "图片-d.jpg": SURE, "0000-own.jpg": SURE},
+                     fail_with="图片-bad")
     picture_job(bot, mac, name="图片-bad.jpg", body=b"\xff\xd8\xff bad")
     run_one(worker, bot, mac.settings)
-    assert memory_of(worker, mac)["图片-bad.jpg"][:2] == (0, False)     # (the worker's first run: maybe the index)
+    assert memory_of(worker, mac)["图片-bad.jpg"][:2] == (1, False)     # (alone, and the canary was read)
     for n, name in enumerate(("图片-good.jpg", "图片-c.jpg", "图片-d.jpg"), 1):
         picture_job(bot, mac, name=name, body=f"\xff\xd8\xff {name}".encode(), text=f"[11:0{n}] 这顶")
         run_one(worker, bot, mac.settings)
         memory = memory_of(worker, mac)
         assert memory[name] == (0, False, ""), memory                  # (matched on its own, never charged)
-        assert memory["图片-bad.jpg"][0] == n, memory                   # (alone, right after a run that went)
-    assert match_runs(mac, "图片-bad.jpg") == 4 and dc.MAX_MATCH_TRIES == 3
+        assert memory["图片-bad.jpg"][0] == min(n + 1, dc.MAX_MATCH_TRIES), memory
+    assert match_runs(mac, "图片-bad.jpg") == dc.MAX_MATCH_TRIES == 3
+    for call in mac.hats.calls():                                     # (never in one run with another picture)
+        pictures = [a for a in call["args"] if a.endswith(".jpg")]
+        assert len(pictures) == 1 or not any("图片-bad" in a for a in pictures), pictures
     assert "对不了图（对图出错（退出码 1）；试了 3 次，不再对了）" in block(prompt_of(mac), "photo_matches")
     text_job(bot, mac, text="[11:09] 在吗")
     run_one(worker, bot, mac.settings)
-    assert match_runs(mac, "图片-bad.jpg") == 4                       # (left)
+    assert match_runs(mac, "图片-bad.jpg") == 3                       # (left)
 
 
 def test_stale_colour_data_of_the_index_is_said_as_such(worker, bot, mac, caplog):  # noqa: F811
@@ -1221,35 +1270,30 @@ def test_an_order_her_earlier_sent_order_confirms_is_approved_and_made(worker, b
     assert final["status"] == "sent" and final["platform"]["execution"]["outcome"] == "VERIFIED_SUCCESS"
 
 
-# ── verification of b0dd4cd (2026-11-09): the note through the console, a picture that always fails, the reruns ──
+# ── verification of b0dd4cd (2026-11-09): the note's lines, a picture that always fails, the reruns ──────────
 
-def test_a_confirmation_on_its_own_line_through_the_console_lets_the_order_go(worker, bot, mac):  # noqa: F811
-    """Verification 2026-11-09 (E1): the console used to keep the 起草备注 on one line, so 「她要深棕⏎确认 B」 never
-    counted.  The lines are kept now: with a sure picture of the 驼色 hat and the 深棕 one (CODE_B) ordered, the
-    same-line forms and a note with a question leave it held (and say why), 「她要深棕⏎确认 B」 lets it go."""
+def test_the_note_keeps_its_lines_and_the_button_lets_the_order_go(worker, bot, mac):  # noqa: F811
+    """Verification 2026-11-09 (E1), with the button: the console keeps the 起草备注's lines (each tidied), and whatever
+    the note says the 深棕 hat (CODE_B, with a sure picture of the 驼色 one) stays held through every 重新预览; 「对过图了」
+    on the draft lets it go, and her next draft job still gets the note as the console keeps it."""
     order_rules(mac)
     mac.hats.answers(match={"图片-1.jpg": SURE})            # (a sure 驼色 picture: CODE_A; she is sent CODE_B)
-    mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action={
-        **SAMPLE_ORDER, "items": [{"item_id": DY_ITEM2, "skus": [{"sku_id": DY_SKU2B, "qty": 1}]}]})
+    mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action=ORDER_B)
     picture_job(bot, mac)
     run_one(worker, bot, mac.settings)
     [packet] = bot.prm.store.packets()
     assert packet["platform"]["preview"]["verdict"] == "blocked"
-    for note, kept, verdict in ((f"她要深棕。确认 {CODE_B}", f"她要深棕。确认 {CODE_B}", "blocked"),
-                                (f"确认 {CODE_B}。还是 {CODE_A}？", f"确认 {CODE_B}。还是 {CODE_A}？", "blocked"),
-                                (f"确认 {CODE_B}\n吗？", f"确认 {CODE_B}\n吗？", "blocked"),
-                                (f"  她要深棕  \n\n 确认   {CODE_B} \n", f"她要深棕\n确认 {CODE_B}", "ready")):
+    for note, kept in ((f"她要深棕。确认 {CODE_B}", f"她要深棕。确认 {CODE_B}"),
+                       (f"  她要深棕  \n\n 确认   {CODE_B} \n", f"她要深棕\n确认 {CODE_B}")):
         assert bot.prm.deal_action("draft_note", {"deal_id": mac.deal["id"], "text": note})["ok"]
         assert bot.prm.store.deal(mac.deal["id"])["draft_note"] == kept           # (the lines kept, each tidied)
-        assert bot.prm.decide(packet["id"], "repreview")["ok"]
-        run_one(worker, bot, mac.settings)
-        preview = bot.prm.store.packet(packet["id"])["platform"]["preview"]
-        assert preview["verdict"] == verdict, (note, preview["problems"])
-    [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
-    assert shown["platform"]["can_execute"] is True
+        assert repreviewed(worker, bot, mac, packet["id"])[:2] == ("blocked", False), note
+    assert confirm(bot, mac, packet["id"], CODE_B)["ok"]
+    assert repreviewed(worker, bot, mac, packet["id"])[:2] == ("ready", True)
     creator_says(bot, "你好")                             # (her next draft job: the note as the console keeps it)
     run_one(worker, bot, mac.settings)
     assert f"<operator_note>\n她要深棕\n确认 {CODE_B}\n</operator_note>" in prompt_of(mac)
+    assert f"（运营对过图、在控制台点了「对过图了」的编码，可以用来建寄样单：{CODE_B}）" in prompt_of(mac)
 
 
 def canary_index(hats):
@@ -1296,6 +1340,71 @@ def test_a_pause_of_the_index_that_is_over_starts_its_failures_from_none(worker)
     assert dc.tripped("hat", now=time.time() + 601) == "" and dc._RUNS["fails"] == dc.MAX_RUN_FAILURES   # (a look ahead)
     dc._BREAKER["hat"] = (time.time() - 1, "连着出错 3 次")                  # (its 10 minutes are over)
     assert dc.tripped("hat") == "" and dc._RUNS["fails"] == 0 and "hat" not in dc._BREAKER
+
+
+# ── verification of 80581b7 (2026-11-09): a canary that cannot run charges nobody ─────────────────────────────
+
+def test_without_a_canary_a_pictures_own_failure_charges_nobody(worker, bot, mac, caplog):  # noqa: F811
+    """Verification of 80581b7 (C1): no canary (the index has no images/, none configured): a run went, then the index
+    breaks (exit 1) and her picture's runs alone fail job after job.  Whose fault is not known, so her good picture is
+    never charged and the index is not paused for everybody; the log says once that there is no canary.  Once the
+    index works again the picture is matched.  A canary with too little of the job's budget left: not known either."""
+    dc = worker.draft_context
+    mac.node.rules([mine_rows(her_row())])
+    mac.hats.answers(match={"图片-1.jpg": SURE, "图片-2.jpg": SURE})
+    picture_job(bot, mac, name="图片-1.jpg", body=b"\xff\xd8\xff one")
+    run_one(worker, bot, mac.settings)                            # (a run that went)
+    mac.hats.answers(match={"图片-1.jpg": SURE, "图片-2.jpg": SURE}, exit=1, stdout="index broken")
+    picture_job(bot, mac, name="图片-2.jpg", body=b"\xff\xd8\xff two", text="[11:02] 这顶")
+    run_one(worker, bot, mac.settings)
+    for n in range(4):
+        text_job(bot, mac, text=f"[11:0{n + 3}] 在吗")
+        run_one(worker, bot, mac.settings)
+    assert memory_of(worker, mac)["图片-2.jpg"][:2] == (0, False)
+    assert dc._RUNS["fails"] == 0 and dc.tripped("hat") == "" and match_runs(mac, "图片-2.jpg") == 5
+    assert len(warned(caplog, "没有对图的参照图")) == 1
+    mac.hats.answers(match={"图片-1.jpg": SURE, "图片-2.jpg": SURE})
+    text_job(bot, mac, text="[11:09] 在吗")
+    run_one(worker, bot, mac.settings)
+    assert memory_of(worker, mac)["图片-2.jpg"] == (0, False, "")
+    canary_index(mac.hats)
+    opts = dc.options(mac.settings)
+    assert dc.index_works(worker.platforms, opts, home=mac.home, deadline=time.time() + dc.MIN_LEFT_SEC - 1) is None
+    assert dc.index_works(worker.platforms, opts, home=mac.home) is None       # (one it cannot read: not known)
+    mac.hats.answers(match={"0000-own.jpg": SURE})
+    assert dc.index_works(worker.platforms, opts, home=mac.home) is True
+    mac.hats.answers(exit=1, stdout="boom")
+    assert dc.index_works(worker.platforms, opts, home=mac.home) is False      # (the index's own picture fails too)
+
+
+def test_a_canary_the_index_cannot_read_is_logged_once_and_charges_nobody(worker, bot, mac, tmp_path, caplog):  # noqa: F811
+    """Verification of 80581b7 (C2): the configured canary is a picture the index answers it cannot read: a picture
+    whose own run always fails is never charged, the index is not paused for everybody, and the log says once
+    「对图的参照图读不出来：…」; a good picture is matched as ever.  A configured canary that is not there is logged once
+    too (「对图的参照图不在」)."""
+    dc = worker.draft_context
+    canary = tmp_path / "canary.jpg"
+    canary.write_bytes(b"\xff\xd8\xff canary")
+    with_canary = {**mac.settings, "draft_context": {**mac.settings["draft_context"], "canary": str(canary)}}
+    mac.node.rules([mine_rows(her_row())])
+    mac.hats.answers(match={"图片-good.jpg": SURE}, fail_with="图片-bad")      # (canary.jpg: no answer, cannot read)
+    picture_job(bot, mac, name="图片-bad.jpg", body=b"\xff\xd8\xff bad")
+    run_one(worker, bot, with_canary)
+    for n in range(4):
+        text_job(bot, mac, text=f"[11:0{n}] 在吗")
+        run_one(worker, bot, with_canary)
+    assert memory_of(worker, mac)["图片-bad.jpg"][:2] == (0, False)
+    assert dc._RUNS["fails"] == 0 and dc.tripped("hat") == "" and match_runs(mac, "canary.jpg") == 5
+    [said] = warned(caplog, "对图的参照图读不出来")
+    assert str(canary) in said
+    picture_job(bot, mac, name="图片-good.jpg", body=b"\xff\xd8\xff good", text="[11:09] 这顶")
+    run_one(worker, bot, with_canary)
+    assert memory_of(worker, mac)["图片-good.jpg"] == (0, False, "")
+    gone = {**with_canary, "draft_context": {**with_canary["draft_context"], "canary": str(tmp_path / "no-such.jpg")}}
+    assert dc.canary_picture(dc.options(gone)) is None and dc.canary_picture(dc.options(gone)) is None
+    [said] = warned(caplog, "对图的参照图不在")
+    assert "no-such.jpg" in said
+    assert dc.index_works(worker.platforms, dc.options(gone), home=mac.home) is None
 
 
 def test_one_job_reruns_at_most_three_earlier_failed_pictures_oldest_first(worker, bot, mac):  # noqa: F811
@@ -1385,13 +1494,28 @@ def test_the_module_runs_on_the_macs_system_python(tmp_path):
 
 
 def test_check_says_where_the_photo_index_is(worker, bot, fake_claude, hats, tmp_path, capsys, monkeypatch):  # noqa: F811
+    """``worker --check``: where the photo index is, and its canary run once (read, not there, unreadable, failing)."""
     monkeypatch.delenv("RELAY_URL", raising=False)
     monkeypatch.delenv("RELAY_TOKEN", raising=False)
     cfg = tmp_path / "config.json"
-    for index, expected in ((hats.dir, f"photo index {hats.dir} ({sys.executable})"),
-                            (hats.dir / "none", "photo index 这台 Mac 没有帽子图库")):
-        s = settings(bot, fake_claude, tmp_path, draft_context={"hat_index": str(index), "hat_python": sys.executable})
+
+    def checked(**dc):
+        s = settings(bot, fake_claude, tmp_path, draft_context={"hat_python": sys.executable, **dc})
         cfg.write_text(json.dumps(s), encoding="utf-8")
         assert worker.main(["--config", str(cfg), "--check"]) == 0
-        line = [x for x in capsys.readouterr().out.splitlines() if x.startswith("draft context")]
-        assert line and line[0].startswith("draft context (PRM_DRAFT_CONTEXT on Windows): ") and expected in line[0]
+        return [x for x in capsys.readouterr().out.splitlines() if x.startswith("draft context")]
+
+    lines = checked(hat_index=str(hats.dir / "none"))
+    assert len(lines) == 1 and lines[0].startswith("draft context (PRM_DRAFT_CONTEXT on Windows): photo index 这台 Mac 没有帽子图库")
+    index_line, canary_line = checked(hat_index=str(hats.dir))
+    assert index_line == f"draft context (PRM_DRAFT_CONTEXT on Windows): photo index {hats.dir} ({sys.executable})"
+    assert canary_line.startswith("draft context canary: none: 没有对图的参照图") and "never charged" in canary_line
+    canary_index(hats)
+    hats.answers(match={"0000-own.jpg": SURE})
+    assert checked(hat_index=str(hats.dir))[1] == f"draft context canary: {hats.dir / 'images' / '0000-own.jpg'}: read"
+    hats.answers(match={})                                           # (an answer it cannot read the picture)
+    assert "对图的参照图读不出来（OSError）" in checked(hat_index=str(hats.dir))[1]
+    hats.answers(exit=1, stdout="boom")
+    assert "对图出错（退出码 1） (the index fails on its own picture" in checked(hat_index=str(hats.dir))[1]
+    line = checked(hat_index=str(hats.dir), canary=str(tmp_path / "no-such.jpg"))[1]
+    assert line.startswith("draft context canary: none: 没有对图的参照图") and "never charged" in line

@@ -2,7 +2,7 @@ import { Fragment, useState } from 'react'
 import { ArrowClockwise, PaperPlaneRight, PencilSimple, X, Paperclip, WarningCircle, Eye, EyeSlash, Flag, Lightning, CheckCircle, Copy, ChatsCircle, Robot, HandPalm, UsersThree } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
-import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, buyinNotes, buyinFriendAddLine, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, dealAction, nightStatus, copyBuyin, buyinSent, setAutoMode, replyPartCount, inGroup, bossGroupNotes, handSampleSeen, handSampleLine } from '../lib/prm'
+import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, buyinNotes, buyinFriendAddLine, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, dealAction, nightStatus, copyBuyin, buyinSent, setAutoMode, replyPartCount, inGroup, bossGroupNotes, handSampleSeen, handSampleLine, photoConfirm, photoUnconfirm } from '../lib/prm'
 import { PageHead, Card, Note, Banner, Empty, Confirm, TextArea } from './ui'
 import { FriendAddList } from './FriendAddCard'
 
@@ -317,6 +317,47 @@ function PlatformBox({ pf, files }) {
   )
 }
 
+/** 「对过图了」 (PRM_DRAFT_CONTEXT, 2026-11-09): the hats the Mac held for photos on a waiting sample order. An operator who
+ * compared the pictures (the sheet above) confirms one for her deal; the next 「重新预览」 takes it; 「撤销」 takes it back
+ * (a draft whose preview went by it then waits for a new preview). Words in the 起草备注 confirm nothing. */
+function PhotoHeld({ p, onDone }) {
+  const toast = useToast()
+  const [busy, setBusy] = useState('')
+  const rows = p.photo_held || []
+  if (!rows.length || p.status !== 'pending') return null
+  const previewing = Boolean(p.platform?.previewing)
+  const act = async (h, undo) => {
+    setBusy(h.code)
+    try {
+      if (undo) await photoUnconfirm(p.deal_id, h.code)
+      else await photoConfirm(p.deal_id, p.id, h.code)
+      toast.ok(undo ? `已撤销 ${h.code} 的「对过图了」` : `已确认 ${h.code}，点「重新预览」按确认再核`)
+      onDone()
+    } catch (e) { toast.err(e.message) } finally { setBusy('') }
+  }
+  return (
+    <div className="stack prm-photo-held" style={{ gap: 6 }}>
+      <div className="f-hint">Mac 对图扣着的帽子：看过上面的对图单、对过图再点（这张合作单的这个编码都算，撤销以前一直算）</div>
+      {rows.map((h) => (
+        <div key={h.code} className="row prm-photo-row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          {h.confirmed ? (
+            <>
+              <span className="tag ok mono">{h.code}</span>
+              <span className="f-hint">{h.held ? `已确认 ${h.code}，点「重新预览」按确认再核` : `已确认 ${h.code}：这份预览按确认核过`}{h.at ? `（${fmtClock(h.at)}）` : ''}</span>
+              <button type="button" className="btn ghost" disabled={Boolean(busy) || previewing} onClick={() => act(h, true)}>撤销</button>
+            </>
+          ) : (
+            <>
+              <button type="button" className="btn" disabled={Boolean(busy) || previewing} onClick={() => act(h, false)}>对过图了，用 {h.code}</button>
+              {!h.held && <span className="f-hint">撤销了 {h.code} 的「对过图了」：点「重新预览」再核</span>}
+            </>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function DraftCard({ p, canSend, replyParts = 1, onDone }) {
   const toast = useToast()
   const [editing, setEditing] = useState(false)
@@ -373,6 +414,7 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
           </div>
         )}
         {pf && <PlatformBox pf={pf} files={p.operator_files} />}
+        {pf && <PhotoHeld p={p} onDone={onDone} />}
         {pf && <div className="f-hint">下面是平台上核验成功以后才发给达人的回复：</div>}
         {editing
           ? <TextArea value={text} onChange={setText} rows={5} aria-label="修改要发的内容" />

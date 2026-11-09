@@ -464,6 +464,56 @@ class TestPrmPages:
         assert card.locator("button:has-text('批准并执行')").is_disabled()
         assert "对图单" not in card.locator(".row .tag").all_inner_texts().__str__()   # no attachment tag for it
 
+    def test_review_page_confirms_a_held_hat_and_takes_it_back(self, page, prm):
+        """PRM_DRAFT_CONTEXT 「对过图了」 (2026-11-09): a sample order the Mac held for a hat's photo shows
+        「对过图了，用 <编码>」 under its platform block; a click keeps the confirmation for her deal and the card says
+        「已确认 <编码>，点「重新预览」按确认再核」 with 「撤销」, which takes it back.  A draft whose preview went by the
+        confirmation says so, and once it is taken back 批准并执行 goes off and the card says to preview it again."""
+        from src.prm import platforms
+
+        code = "A7269901001B-F"
+        prm.service._draft_context = True                                   # (PRM_DRAFT_CONTEXT=on)
+        store = prm.service.store
+        action = platforms.check_action({"action": "jst.sample_order", "shop": "dy", "items": [
+            {"item_id": "3000000000000000102", "skus": [{"sku_id": "3100000000000000203", "qty": 1}]}],
+            "creator_platform": "dy", "creator_account": "test_daren_01"})
+        held = {"version": 1, "action": action, "verdict": "blocked", "steps": [], "run": {}, "facts": [],
+                "problems": [f"{code}（均码咖啡）对图没把握（款有把握，颜色没把握）：先核对再建；"
+                             "对过图后，在控制台这份草稿上点这顶旁边的「对过图了」"], "previewed_at": prm.clock.now}
+        pid = store.add_packet(
+            deal_id=1, party_id=1, job_id=None, chat_id="wxid_creator01", kind="money", text="寄样单建好啦",
+            attachments=[], intent="寄样", slots={}, stage_proposal="", needs_attention=False, reason="",
+            tool="jst.sample_order", platform={"action": action, "preview": held},
+            meta={"draft_context": {"v": 2, "gated": True}, "photo_held": [code]}, now=prm.clock.now)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="寄样单建好啦")
+        box = card.locator(".prm-photo-held")
+        assert "Mac 对图扣着的帽子" in box.inner_text()
+        box.locator(f"button:has-text('对过图了，用 {code}')").click()
+        page.wait_for_timeout(1000)
+        assert [r["code"] for r in store.photo_confirmations(1)] == [code]
+        assert f"已确认 {code}，点「重新预览」按确认再核" in box.inner_text()
+        box.locator("button:has-text('撤销')").click()
+        page.wait_for_timeout(1000)
+        assert store.photo_confirmations(1) == []
+        assert box.locator(f"button:has-text('对过图了，用 {code}')").count() == 1
+        # its preview went by the confirmation (ready): taken back, 批准并执行 goes off
+        assert store.confirm_photo(1, code, pid, prm.clock.now)
+        ready = {**held, "verdict": "ready", "problems": [], "run": {"steps": ["create"]}}
+        assert store.set_platform(pid, {"action": action, "preview": ready}, ("pending",))
+        assert store.merge_packet_meta(pid, {"photo_held": [], "photo_confirmed": [code]})
+        page.reload()
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="寄样单建好啦")
+        assert f"已确认 {code}：这份预览按确认核过" in card.locator(".prm-photo-held").inner_text()
+        assert not card.locator("button:has-text('批准并执行')").is_disabled()
+        card.locator(".prm-photo-held button:has-text('撤销')").click()
+        page.wait_for_timeout(1000)
+        text = card.inner_text()
+        assert f"撤销了 {code} 的「对过图了」：点「重新预览」再核" in text
+        assert card.locator("button:has-text('批准并执行')").is_disabled()
+
     def test_review_page_runs_a_platform_action_once_and_shows_it_red_when_unverified(self, page, prm):
         import json as _json
         from src.prm import platforms
@@ -868,7 +918,7 @@ class TestPrmPages:
         text = block.inner_text()
         assert "起草备注" in text and "（没有）" in text
         assert "写给 Mac 起草时看的，比如她签名里的要求：直接发链接和 brief、不接语音" in text
-        assert "寄样单里没对过图的那顶：对过图后，在起草备注里另起一行写：确认 编码" in text      # (PRM_DRAFT_CONTEXT)
+        assert "寄样单里没对过图的那顶不在备注里确认：对过图后，在控制台这份草稿上点这顶旁边的「对过图了」" in text   # (PRM_DRAFT_CONTEXT)
         block.locator("button:has-text('写备注')").click()
         field = block.locator("textarea[aria-label='小美 的起草备注']")
         field.fill("长" * 301)

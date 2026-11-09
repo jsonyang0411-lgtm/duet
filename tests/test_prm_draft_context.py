@@ -110,7 +110,7 @@ def test_her_draft_jobs_carry_her_deals_orders_and_her_accounts(bot):
     assert job["meta"]["draft_context"] == {
         "orders": [CREATOR_ORDER, HAND_ORDER], "verified": [CREATOR_ORDER],       # (the bot's own: verified)
         "accounts": [{"platform": "DY", "no": ACCOUNT}, {"platform": "XHS", "no": "xhs_test_02"},
-                     {"platform": "XHS", "no": "xhs_test_01"}]}
+                     {"platform": "XHS", "no": "xhs_test_01"}], "confirmed": []}
 
 
 def test_an_account_two_registered_creators_share_is_neither_ones(bot):
@@ -136,21 +136,24 @@ def test_every_kind_of_wechat_draft_job_carries_it_and_a_broken_list_still_does(
 
     bot.prm.creator_directory = broken
     job = her_job(bot)
-    assert job["meta"]["draft_context"] == {"orders": [], "verified": [], "accounts": []}
+    assert job["meta"]["draft_context"] == {"orders": [], "verified": [], "accounts": [], "confirmed": []}
     bot.prm.deal_action("huopan", {"deal_id": deal_of(bot, OTHER)["id"]})
     bot.prm.deal_action("opening", {"deal_id": deal_of(bot, OTHER)["id"]})
     metas = [json.loads(j["meta"]) for j in bot.relay.store.list_jobs(10)]
     assert all("draft_context" in m for m in metas) and len(metas) >= 2
     with patch.object(draft_context, "job_context", side_effect=RuntimeError("bad")):
-        assert bot.prm._draft_context_meta(deal_of(bot)["id"]) == {"orders": [], "verified": [], "accounts": []}
-    assert bot.prm._draft_context_meta(None) == {"orders": [], "verified": [], "accounts": []}
+        assert bot.prm._draft_context_meta(deal_of(bot)["id"]) == {"orders": [], "verified": [], "accounts": [],
+                                                                   "confirmed": []}
+    assert bot.prm._draft_context_meta(None) == {"orders": [], "verified": [], "accounts": [], "confirmed": []}
 
 
 def test_a_new_preview_of_a_sample_order_carries_it_and_the_draft_note(bot):
-    """重新预览: a sample order's job carries the context and the deal's 起草备注 (the codes it confirms, 「确认 <编码>」);
-    another action's does not."""
+    """重新预览: a sample order's job carries the context, with the codes an operator confirmed for her deal in the
+    console (「对过图了」), and the deal's 起草备注 (the operators' words for the Mac: they confirm no hat); another
+    action's does not."""
     deal = deal_of(bot)
     assert bot.prm.deal_action("draft_note", {"deal_id": deal["id"], "text": "确认 A7269901001B-F（她要深棕）"})["ok"]
+    assert bot.prm.store.confirm_photo(deal["id"], "A7269901001A-F", None, 1.0)
     job = her_job(bot)
     action = {"action": "jst.sample_order", "shop": "dy", "items": [{"item_id": "3000000000000000102",
               "skus": [{"sku_id": "3100000000000000202", "qty": 1}]}], "creator_platform": "dy",
@@ -162,8 +165,9 @@ def test_a_new_preview_of_a_sample_order_carries_it_and_the_draft_note(bot):
     out = bot.prm.decide(packet["id"], "repreview")
     assert out["ok"], out
     meta = json.loads(bot.relay.store.get(out["job"])["meta"])
-    assert meta["op"] == "platform_preview" and meta["draft_context"] == {"orders": [], "verified": [], "accounts": []}
-    assert meta["note"] == "确认 A7269901001B-F（她要深棕）"
+    assert meta["op"] == "platform_preview" and meta["draft_context"] == {
+        "orders": [], "verified": [], "accounts": [], "confirmed": ["A7269901001A-F"]}
+    assert meta["note"] == "确认 A7269901001B-F（她要深棕）"            # (her note as written: it confirms nothing)
 
 
 def test_a_new_preview_of_another_action_does_not(bot):
@@ -402,6 +406,153 @@ def test_a_kept_draft_an_older_rule_checked_says_to_check_it_again(bot):
     assert shown["platform"]["can_execute"] is True and draft_context.unchecked_reason(bot.prm.store.packet(packet["id"])) == ""
     assert draft_context.unchecked_reason({"platform": {"action": {"action": "jst.sample_order"}}, "meta": {}}) == \
         draft_context.NOT_GATED
+
+
+# ── 「对过图了」 (2026-11-09): a button on the draft, no longer words in the 起草备注 ──────────────────────────────────
+
+CODE_A, CODE_B = "A7269901001A-F", "A7269901001B-F"
+
+
+def held_draft(b, held=(CODE_B,), used=(), verdict="blocked", text="要深棕那顶"):
+    """Her sample order the Mac checked by photo: holding ``held`` for photos (its answer's ``photo_held``), letting
+    ``used`` go only by an operator's 「对过图了」 (``photo_confirmed``)."""
+    job = her_job(b, text)
+    block = sample_block(verdict)
+    if verdict == "blocked":
+        block = {**block, "problems": [f"{c}（均码咖啡）对图没把握（款有把握，颜色没把握）：先核对再建；{draft_context.CONFIRM_HOW}"
+                                       for c in held]}
+    b.finish(job["id"], draft(message_kind="money", reply_draft="寄样单建好啦", reason="kb", platform=block,
+                              draft_context=GATED, **({"photo_held": list(held)} if held else {}),
+                              **({"photo_confirmed": list(used)} if used else {})))
+    return [p for p in b.prm.store.packets() if p["job_id"] == job["id"]][0]
+
+
+def shown_of(b, packet_id):
+    [shown] = [p for p in b.prm.snapshot()["pending"] if p["id"] == packet_id]
+    return shown
+
+
+def test_the_held_codes_come_with_the_macs_check_only(bot):
+    """The Mac's answer names the codes its check held (``photo_held``) and let go only by a confirmation
+    (``photo_confirmed``): kept on the packet when the answer carries the mark (upper case, of their shape, each once);
+    an answer without the mark (or anybody's words in the draft) keeps none."""
+    packet = held_draft(bot, held=(CODE_B, CODE_B.lower(), "bad code!", 7), used=(CODE_A,))
+    assert packet["meta"]["photo_held"] == [CODE_B] and packet["meta"]["photo_confirmed"] == [CODE_A]
+    assert draft_context.confirmable(packet) == [CODE_B, CODE_A]
+    job = her_job(bot, "还有这顶")
+    bot.finish(job["id"], draft(message_kind="money", reply_draft="寄样单建好啦", reason="kb",
+                                platform=sample_block("ready"), photo_held=[CODE_B], photo_confirmed=[CODE_A]))
+    [plain] = [p for p in bot.prm.store.packets() if p["job_id"] == job["id"]]
+    assert "photo_held" not in plain["meta"] and "photo_confirmed" not in plain["meta"]
+    assert draft_context.codes_of('{"photo_held": "A7269901001B-F"}', "photo_held") == []
+    assert draft_context.codes_of("{]", "photo_held") == [] and draft_context.code_of(" a7269901001b-f ") == CODE_B
+    assert draft_context.code_of("确认 X") == "" and draft_context.code_of(None) == ""
+
+
+def test_photo_confirm_takes_only_a_code_the_drafts_last_preview_held(bot):
+    """「对过图了，用 <编码>」 (the deal action ``photo_confirm`` {packet, code}): only a code the draft's last preview held
+    for photos, on a sample order of that deal still waiting and not being previewed again; the switch on, the bot
+    running.  It is kept for the deal (code, draft, time), one event without names; a second click records nothing."""
+    packet = held_draft(bot)
+    deal = deal_of(bot)
+
+    def confirm(code, packet_id=packet["id"], deal_id=deal["id"]):
+        return bot.prm.deal_action("photo_confirm", {"deal_id": deal_id, "packet": packet_id, "code": code})
+
+    for code in (CODE_A, "", "确认 X", None, 7):
+        out = confirm(code)
+        assert out["ok"] is False and out["error"].endswith("只能确认预览里扣着的那顶"), (code, out)
+    assert confirm(CODE_B, packet_id=packet["id"] + 99) == {"ok": False, "error": "没有找到这份草稿"}
+    assert confirm(CODE_B, deal_id=deal_of(bot, OTHER)["id"]) == {"ok": False, "error": "没有找到这份草稿"}
+    assert confirm(CODE_B, deal_id="x") == {"ok": False, "error": "没有找到这张合作单"}
+    assert confirm(CODE_B.lower()) == {"ok": True, "code": CODE_B, "confirmed": True}
+    assert confirm(CODE_B) == {"ok": True, "code": CODE_B, "confirmed": True}       # (again: nothing new)
+    [row] = bot.prm.store.photo_confirmations(deal["id"])
+    assert row["code"] == CODE_B and row["packet_id"] == packet["id"] and row["at"] > 0
+    assert bot.prm.store.photo_confirmations(deal_of(bot, OTHER)["id"]) == []
+    events = bot.prm.store.events(deal["id"], kinds=("photo_confirm",))
+    assert [e["detail"] for e in events] == [{"code": CODE_B, "packet": packet["id"]}]
+    from src.prm.service import event_out
+    assert event_out(events[0])["name"] == f"对过图了，用 {CODE_B}（#{packet['id']} 的寄样单）"
+    # a draft that is no sample order, not waiting, or being previewed again
+    plain = bot.prm.store.add_packet(deal_id=deal["id"], party_id=deal["party_id"], job_id=None, chat_id=CREATOR,
+                                     kind="faq", text="好的", attachments=[], intent="", slots={}, stage_proposal="",
+                                     needs_attention=False, reason="", meta={"photo_held": [CODE_B]})
+    assert confirm(CODE_B, packet_id=plain) == {"ok": False, "error": "这份草稿不是寄样单"}
+    assert bot.prm.decide(packet["id"], "repreview")["ok"]
+    assert confirm(CODE_B) == {"ok": False, "error": "正在重新预览：等新预览出来再点"}
+    bot.prm._draft_context = False
+    assert confirm(CODE_B)["error"] == "对图没有打开（PRM_DRAFT_CONTEXT），不用点「对过图了」"
+    bot.prm._draft_context = True
+    assert bot.prm.decide(packet["id"], "drop")["ok"]
+    assert confirm(CODE_B) == {"ok": False, "error": "这份草稿已经处理过了"}
+    from src.prm.service import apply_deal_action
+    for action in ("photo_confirm", "photo_unconfirm"):           # (the bot stopped: straight on the database, refused)
+        out = apply_deal_action(bot.prm.store, action, {"deal_id": deal["id"], "packet": packet["id"], "code": CODE_B},
+                                now=1.0, takeover_sec=60)
+        assert out == {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能确认对图"}
+
+
+def test_the_next_preview_takes_a_confirmation_and_its_undo_holds_the_draft_again(bot):
+    """After 「对过图了」 the card says 「已确认 <编码>，点「重新预览」按确认再核」; the new preview's job carries the code
+    (``meta.draft_context.confirmed``) and the Mac's answer (ready, the code let go by it) makes the draft approvable.
+    「撤销」 (``photo_unconfirm``): the code is not confirmed any more, the draft cannot be approved (the console and
+    approving say so) until a new preview; the code may be confirmed again.  Each step one event, without names."""
+    packet = held_draft(bot)
+    deal = deal_of(bot)
+    assert shown_of(bot, packet["id"])["photo_held"] == [
+        {"code": CODE_B, "held": True, "used": False, "confirmed": False, "at": None}]
+    assert bot.prm.deal_action("photo_confirm", {"deal_id": deal["id"], "packet": packet["id"], "code": CODE_B})["ok"]
+    [view] = shown_of(bot, packet["id"])["photo_held"]
+    assert view["held"] and view["confirmed"] and view["at"]
+    assert bot.prm.decide(packet["id"], "execute")["ok"] is False             # (its preview still holds it)
+    out = bot.prm.decide(packet["id"], "repreview")
+    assert out["ok"], out
+    meta = json.loads(bot.relay.store.get(out["job"])["meta"])
+    assert meta["draft_context"]["confirmed"] == [CODE_B]
+    job = bot.relay.next_job(0, ("prm",))
+    bot.finish(job["id"], text=json.dumps({**sample_block(previewed_at=2.0), "draft_context": GATED,
+                                           "photo_confirmed": [CODE_B]}, ensure_ascii=False))
+    now = bot.prm.store.packet(packet["id"])
+    assert now["meta"]["photo_held"] == [] and now["meta"]["photo_confirmed"] == [CODE_B]
+    shown = shown_of(bot, packet["id"])
+    assert shown["platform"]["can_execute"] is True and shown["photo_held"] == [
+        {"code": CODE_B, "held": False, "used": True, "confirmed": True, "at": view["at"]}]
+    assert bot.prm.deal_action("photo_unconfirm", {"deal_id": deal["id"], "code": CODE_B.lower()}) == {
+        "ok": True, "code": CODE_B, "confirmed": False}
+    assert bot.prm.store.photo_confirmations(deal["id"]) == []
+    shown = shown_of(bot, packet["id"])
+    reason = f"撤销了 {CODE_B} 的「对过图了」：点「重新预览」再核"
+    assert shown["platform"]["can_execute"] is False and reason in shown["platform"]["problems"]
+    assert shown["photo_held"] == [{"code": CODE_B, "held": False, "used": True, "confirmed": False, "at": None}]
+    assert bot.prm.decide(packet["id"], "execute") == {"ok": False, "error": reason}
+    assert bot.prm.deal_action("photo_unconfirm", {"deal_id": deal["id"], "code": CODE_B})["ok"]   # (again: nothing)
+    kinds = [e["kind"] for e in reversed(bot.prm.store.events(deal["id"], kinds=("photo_confirm", "photo_unconfirm")))]
+    assert kinds == ["photo_confirm", "photo_unconfirm"]
+    from src.prm.service import event_out
+    assert event_out(bot.prm.store.events(deal["id"], kinds=("photo_unconfirm",))[0])["name"] == \
+        f"撤销了 {CODE_B} 的「对过图了」"
+    assert bot.prm.deal_action("photo_unconfirm", {"deal_id": deal["id"], "code": "x"}) == {"ok": False,
+                                                                                         "error": "编码不对"}
+    # confirmed again (its preview let it go only by one): approvable again, the same preview
+    assert bot.prm.deal_action("photo_confirm", {"deal_id": deal["id"], "packet": packet["id"], "code": CODE_B})["ok"]
+    assert shown_of(bot, packet["id"])["platform"]["can_execute"] is True
+    # a confirmation for her deal goes with every later draft job of hers, and never with another creator's
+    assert her_job(bot, "那这顶呢")["meta"]["draft_context"]["confirmed"] == [CODE_B]
+    assert bot.prm._draft_context_meta(deal_of(bot, OTHER)["id"])["confirmed"] == []
+
+
+def test_the_note_confirms_no_hat_any_more(bot):
+    """Verification of 80581b7 (2026-11-09): words in the 起草备注 never let a held hat go, 「确认 <编码>」 on a line of
+    its own included: the note goes to the Mac as the operators wrote it, and only the console's 「对过图了」 is sent as
+    a confirmation."""
+    deal = deal_of(bot)
+    for n, note in enumerate((f"确认 {CODE_B}", f"她要深棕\n确认 {CODE_B}", f"对过图了 {CODE_B}", f"已确认：{CODE_B}")):
+        assert bot.prm.deal_action("draft_note", {"deal_id": deal["id"], "text": note})["ok"]
+        job = her_job(bot, f"这顶呢 {n}")
+        assert job["meta"]["draft_context"]["confirmed"] == [] and job["meta"]["note"] == note
+        bot.finish(job["id"], draft(message_kind="faq", reply_draft="好的", reason="kb"))
+    assert bot.prm.store.photo_confirmations(deal["id"]) == []
 
 
 def test_the_console_shows_the_sheet_and_serves_it_while_the_bot_runs_and_after(bot, tmp_path, monkeypatch):

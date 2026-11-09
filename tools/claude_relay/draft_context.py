@@ -4,9 +4,10 @@ the Mac's half.  tools/claude_relay/worker.py loads this file by its path; stand
 
 Only a job whose ``meta.draft_context`` is a dict gets any of this (the bot's PRM_DRAFT_CONTEXT=on puts it on a creator's
 WeChat draft jobs and on a new preview of a draft's sample order): ``{"orders": ["YP…"], "verified": ["YP…"],
-"accounts": [{"platform": "DY" | "XHS", "no": "<抖音号 / 小红书号>"}]}``: the 聚水潭 sample orders her deal knows, the
-ones of them the bot itself made (verified), her platform accounts (an account two registered creators share is not
-sent: the bot leaves it out).  Without it the worker's prompt and preview are what they were, byte for byte.
+"accounts": [{"platform": "DY" | "XHS", "no": "<抖音号 / 小红书号>"}], "confirmed": ["<item code>"]}``: the 聚水潭 sample
+orders her deal knows, the ones of them the bot itself made (verified), her platform accounts (an account two registered
+creators share is not sent: the bot leaves it out), the item codes an operator confirmed for her deal in the console
+(「对过图了」, 2026-11-09).  Without it the worker's prompt and preview are what they were, byte for byte.
 
 1. <sample_status> (``SampleReader``): her sample orders in 聚水潭, read with the jst CLI of the worker's platform settings
    (read-only, no ``--raw``: the CLI prints no receiver at all) under the Mac's platform CLI lock (cli.lock), ``gap_sec``
@@ -22,20 +23,22 @@ sent: the bot leaves it out).  Without it the worker's prompt and preview are wh
    venv ``hat_python``: ``hat_match.py match <photos…> --top 8 --no-stock --json``; local, no platform call), each
    picture once (by its sha256), remembered per creator for KEEP_DAYS (``photos/party-<id>.json``, while the picture is
    still in inbox/): an order drafted days after her picture still has it; one whose matching failed is tried again by
-   the next job, on its own (MAX_RERUNS a job; a picture's own failures MAX_MATCH_TRIES times at most, the index's own
-   picture telling them from the index's, never again when the index cannot read it; the index failing as a whole is
-   the index's, left alone after MAX_RUN_FAILURES in a row).  Per picture the
+   the next job, on its own (MAX_RERUNS a job; a picture's own failures MAX_MATCH_TRIES times at most, a canary picture
+   telling them from the index's: without one that runs, or one the index cannot read, nobody's; never again when the
+   index cannot read the picture; the index failing as a whole is the index's, left alone after MAX_RUN_FAILURES in a
+   row).  Per picture the
    top hats with their colours and item codes, the matcher's scores and a verdict: 「没把握」 when the best score is low
    or the best two are close, 「颜色没把握」 when the best colour has no photo of its own or the index no colour data
    for it (so it was never compared), or the colours are close.
 3. ``gate``: a draft's jst.sample_order.  Every SKU's 聚水潭 item code (kb/products.json's ``code``) must come from a
    picture of hers that is 「有把握」 (its best hat, its best colour), or have been confirmed: an item of an earlier order
-   of hers that went out (SENT / SIGNED, never rejected) or that the bot made, or 「确认 <编码>」 / 「对过图 <编码>」 on a
-   line of its own in the operators' 起草备注 (``read_note``; a note with a question confirms nothing).  Otherwise the
-   preview is not ready, and says how to let the hat go (``confirm_how``).  The codes with a picture behind them get the side-by-side sheet (``hat_match.py sheet <her
-   photo>=<code> … --json``, under the CLI lock: it may ask 聚水潭 for a SKU photo, read-only); a row it marks 「！要
-   再看」 or without the SKU's own photo (none, or only the whole style's 「整款图」) blocks too, unless the 起草备注
-   confirms that code.
+   of hers that went out (SENT / SIGNED, never rejected) or that the bot made, or an operator's 「对过图了」 for the deal
+   in the console (the job's ``confirmed``; words in the 起草备注 confirm nothing).  Otherwise the preview is not ready,
+   says how to let the hat go (``CONFIRM_HOW``) and names the code among ``held`` (the console's 「对过图了」 buttons).
+   The codes with a picture behind them get the side-by-side sheet (``hat_match.py sheet <her photo>=<code> …
+   --json``, under the CLI lock: it may ask 聚水潭 for a SKU photo, read-only); a row it marks 「！要再看」 or without
+   the SKU's own photo (none, or only the whole style's 「整款图」) blocks too, and is held, unless an operator
+   confirmed that code.
    The worker sends the sheet back on the relay's operator-only channel; the available stock of the styles (``jst
    goods-detail``, read-only) is a fact of the preview for the operators, never told to the model.
 
@@ -92,6 +95,7 @@ MIN_LEFT_SEC = 8                    # less of the job's budget than this left: t
 ACCOUNT_PLATFORMS = ("DY", "XHS")
 MAX_ORDERS_ASKED = 20               # order numbers of a deal looked up (one `samples --order-no` call)
 MAX_ACCOUNTS = 10
+MAX_CONFIRMED = 100                 # codes the operators confirmed for the deal (「对过图了」), taken from a job
 MAX_ORDERS_SHOWN = 10
 MAX_ITEMS_SHOWN = 12
 MAX_PHOTOS_KEPT = 20                # remembered pictures of one creator
@@ -119,19 +123,9 @@ _ORDER_NO = re.compile(r"^YP[0-9A-Za-z]{6,30}$")
 _ACCOUNT = re.compile(r"^[0-9A-Za-z_.][0-9A-Za-z_.-]{0,39}$")   # an 抖音号 / 小红书号 (platforms._CREATOR_NO)
 _CODE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z_-]{2,63}$")          # a 聚水潭 item code (platforms._ERP_CODE)
 _CODE_TEXT = r"[0-9A-Za-z][0-9A-Za-z_-]{2,63}"
-# The 起草备注's confirmation of codes (2026-11-09: a strict command instead of reading sentences): a line of its own,
-# trimmed, that is only 「确认」「已确认」「确认了」「确认过了」「对过图」「对过图了」, an optional ：/:, the codes (between them
-# blanks, 、 or a comma) and at most one 。.！! at its end.  A note with a question anywhere in it confirms nothing.
-NOTE_MARKERS = ("确认过了", "确认了", "已确认", "确认", "对过图了", "对过图")
-_MARKER_TEXT = "|".join(NOTE_MARKERS)
-_OWN_LINE = re.compile(rf"(?:{_MARKER_TEXT})[ \t\u3000]*[:：]?[ \t\u3000]*"
-                       rf"({_CODE_TEXT}(?:(?:[ \t\u3000]*[、,，][ \t\u3000]*|[ \t\u3000]+){_CODE_TEXT})*)"
-                       rf"[ \t\u3000]*[。.！!]?")
-_OWN_SPLIT = re.compile(r"[ \t\u3000、,，]+")
-_DOUBT = re.compile(r"[？?]|吗|呢|么|还是|对不对|是不是|对吗|不对")
-_CODE_ANY = re.compile(_CODE_TEXT)
-_LINE_BREAK = re.compile(r"\r\n|\r|\n")
-CONFIRM_HOW = "对过图后，在起草备注里另起一行写：确认 "        # + the code: how the operators let a held hat go
+# How the operators let a hat go that the check held (2026-11-09: a button, no longer words in the 起草备注): the bot sends
+# the deal's confirmed codes (meta.draft_context.confirmed)
+CONFIRM_HOW = "对过图后，在控制台这份草稿上点这顶旁边的「对过图了」"
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _STYLE_OF = re.compile(r"^A7(\d{2})(\d{4})(\d{3})[A-Z]?$")         # an item code's style (the index's hatlib.style_of)
@@ -143,7 +137,7 @@ SAMPLE_RULE = ("<sample_status> 是这台 Mac 起草前从聚水潭读到的她�
                "设成 true）；写着读不了、或者「这次没读上，下面是之前读的」的时候，寄没寄出、到没到都不要下结论，只回一句不下结论的话"
                "（比如「好的老师，有消息第一时间跟您说～」），并把 needs_attention 设成 true。商品名是聚水潭（ERP）里的名字，常常和款式对不上，只当参考，认款看商品编码。")
 PHOTO_RULE = ("认帽子只认 <photo_matches> 里对图的结果（她发的图在帽子图库里对出来的），或者已经确认过的商品编码（她以前寄出去过的"
-              "寄样单里的、运营在起草备注里另起一行只写了「确认 编码」的；同一行还有别的字、备注里有问句的都不算）；绝不按名字认：ERP、店铺、淘宝的名字常常和款式"
+              "寄样单里的、运营在控制台点了「对过图了」的；起草备注里写的「确认」都不算）；绝不按名字认：ERP、店铺、淘宝的名字常常和款式"
               "对不上（叫「贝雷帽」的可能是药盒帽）。没有 <photo_matches> 就是她没发过能对的图。写着「没把握」「颜色没把握」的图、"
               "她说的和对图结果对不上的、她要的那顶不在里面的，问她（再发一张清楚的图，或者说是货盘里的第几款），或者在 reason 里"
               "请运营确认（needs_attention 设成 true），不要猜。")
@@ -151,8 +145,8 @@ STOCK_RULE = "不要跟达人说没货、缺货、补货，也不说「我查一
 ORDER_RULE = ("起草 jst.sample_order 时，每一顶都要是 <photo_matches> 里写着「可以用来建寄样单的编码」的（「有把握」那张图最像的那款、"
               "那个颜色），或者已经确认过的编码，再按编码在 kb/products.md 里找它的商品 ID 和 SKU ID（SKU 后面写着「编码 …」）；"
               "不是的不要放进寄样单，先问清楚；她明说要同一款的别的颜色时可以写进去，但 needs_attention 设成 true、reason 里请运营"
-              "核对颜色（对过图后，在起草备注里另起一行写：确认 编码）。系统会把她的图和要寄的每一顶并排做成对图单给运营看，"
-              "没对过图、对图要再看的那顶都建不了。")
+              "核对颜色（写：对过图后，在控制台这份草稿上点这顶旁边的「对过图了」）。系统会把她的图和要寄的每一顶并排做成对图单"
+              "给运营看，没对过图、对图要再看的那顶都建不了。")
 
 
 def options(settings: dict) -> dict:
@@ -175,7 +169,8 @@ def options(settings: dict) -> dict:
 
 
 def wanted(meta) -> Optional[dict]:
-    """What the job asks this module to read: ``{"orders": [...], "verified": [...], "accounts": [(platform, no)]}``, or
+    """What the job asks this module to read: ``{"orders": [...], "verified": [...], "accounts": [(platform, no)],
+    "confirmed": [item codes the operators confirmed for the deal in the console, 「对过图了」]}``, or
     None for a job without ``meta.draft_context`` (the switch off, an older bot) and for a 百应 draft.  Only order numbers
     and accounts of their shapes, and only the accounts the bot sent (it leaves out one two creators share; the job's
     ``meta.creator`` is not looked at)."""
@@ -198,8 +193,10 @@ def wanted(meta) -> Optional[dict]:
             seen.add((platform, number.lower()))
             accounts.append((platform, number))
     orders = numbers("orders")
+    confirmed = [c for c in dict.fromkeys(str(x).strip().upper() for x in ctx.get("confirmed") or [] if isinstance(x, str))
+                 if _CODE.match(c)][:MAX_CONFIRMED]
     return {"orders": orders, "verified": [o for o in numbers("verified") if o in orders],
-            "accounts": accounts[:MAX_ACCOUNTS]}
+            "accounts": accounts[:MAX_ACCOUNTS], "confirmed": confirmed}
 
 
 def folder(home: Path) -> Path:
@@ -568,48 +565,6 @@ def confirmed_codes(samples: dict, verified=()) -> dict:
     return out
 
 
-def read_note(note) -> dict:
-    """The operators' 起草备注 as confirmations: ``{"codes": the item codes it confirms, "tried": the codes it names on a
-    line with 确认 / 对过图 that do not count, "doubt": it has a question}`` (upper case).  A confirmation counts only as a
-    line of its own (``_OWN_LINE``: the whole line, trimmed, is 「确认 <编码>」 and nothing more), and only in a note with no
-    question in it (``_DOUBT``: ？ / ?, 吗 呢 么 还是 对不对 是不是 对吗 不对; then its codes are ``tried`` instead).  A code
-    merely written there (「她要的是 A…」), or on a longer line (「她要深棕。确认 A…」「待确认 A…」「确认 A… 的颜色」), is not
-    confirmed."""
-    text = str(note or "")
-    doubt = bool(_DOUBT.search(text))
-    codes: set = set()
-    tried: set = set()
-    for line in _LINE_BREAK.split(text):
-        line = line.strip()
-        if not line:
-            continue
-        m = _OWN_LINE.fullmatch(line)
-        if m:
-            codes.update(code.upper() for code in _OWN_SPLIT.split(m.group(1)) if _CODE.match(code))
-        elif "确认" in line or "对过图" in line:
-            tried.update(code.upper() for code in _CODE_ANY.findall(line) if _CODE.match(code))
-    if doubt:
-        tried |= codes
-        codes = set()
-    return {"codes": codes, "tried": tried, "doubt": doubt}
-
-
-def noted_codes(note) -> set:
-    """The item codes the operators' 起草备注 confirms (``read_note``)."""
-    return read_note(note)["codes"]
-
-
-def confirm_how(code: str, note: Optional[dict] = None) -> str:
-    """What the operators do to let a held hat go, said for what their note did (``read_note``): it names the code on a
-    line that does not count, or has a question; else how to confirm it."""
-    note = note or {}
-    if code in note.get("tried", ()) and note.get("doubt"):
-        return f"起草备注里有问句，「确认」先不算：要确认请删掉问句，另起一行只写「确认 {code}」"
-    if code in note.get("tried", ()):
-        return f"起草备注里提到了 {code}，但要另起一行只写「确认 {code}」才算"
-    return CONFIRM_HOW + code
-
-
 def sample_block(result: dict) -> str:
     """<sample_status> (``SAMPLE_RULE`` goes before it): her orders as ``SampleReader.read`` found them, one line each
     and its items and waybills below it; or why none / why 聚水潭 could not be read; due to be read again and not read,
@@ -754,7 +709,7 @@ def sure_codes(entry: dict, opts: dict) -> list:
     """The item codes one picture of hers can stand for in a sample order: none unless it is 「有把握」 (its verdict now,
     by ``opts``: then no other hat is within ``photo_min_margin`` of the best one, and the best hat's best colour has a
     photo of its own and is clearly the closest), then that colour's codes only (its sizes).  Another colour of the
-    same hat is not one: it waits for a person (「确认 <编码>」 in the 起草备注)."""
+    same hat is not one: it waits for a person (the console's 「对过图了」)."""
     hats = entry.get("hats") or []
     if entry.get("error") or not hats or verdict(hats, opts) != SURE:
         return []
@@ -882,8 +837,8 @@ def match_photos(platforms, opts: dict, workspace: Path, party_id: int, job_id: 
 
 MAX_RUN_FAILURES = 3                # hat_match.py runs failed as a whole in a row: then it is left alone for breaker_min
 MAX_RERUNS = 3                      # her pictures whose matching failed before, rerun (each alone) in one job at most
-CANARY_RECENT_SEC = 3600            # no canary picture to run: a run that went this recently says the index works
-_RUNS = {"fails": 0, "last_ok_at": None}   # this worker's hat_match.py runs: failed as a whole in a row, the last that went
+_RUNS = {"fails": 0}                # this worker's hat_match.py runs failed as a whole in a row
+_SAID: set = set()                  # what about the canary was logged already (once a worker start)
 
 
 def index_warnings(stderr) -> list:
@@ -892,60 +847,101 @@ def index_warnings(stderr) -> list:
     return [_clean(line, 200) for line in str(stderr or "").splitlines() if "colours.npy" in line or "build.py" in line][:3]
 
 
+def _say_once(key: str, message: str, *args) -> None:
+    if key not in _SAID:
+        _SAID.add(key)
+        log.warning(message, *args)
+
+
 def canary_picture(opts: dict) -> Optional[Path]:
     """A picture the index surely reads: the configured ``canary``, else the first of the index's own photos
-    (``<hat_index>/images/``); None without one."""
+    (``<hat_index>/images/``); None without one (a configured one that is not there, or none at all, is logged once a
+    worker start)."""
     configured = str(opts.get("canary") or "")
     if configured:
         path = Path(os.path.expanduser(configured))
-        return path if path.is_file() else None
+        if path.is_file():
+            return path
+        _say_once("missing", "draft context: 对图的参照图不在：%s（draft_context.canary）；一张图自己那一跑出错时分不清是"
+                             "图的错还是图库的错，谁都不算", path)
+        return None
     try:
         pictures = sorted(p for p in (Path(opts["hat_index"]) / "images").iterdir()
                           if p.suffix.lower() in IMAGE_SUFFIXES and p.is_file())
     except OSError:
+        pictures = []
+    if not pictures:
+        _say_once("none", "draft context: 没有对图的参照图（图库里没有 images/，也没配 draft_context.canary）；一张图自己"
+                          "那一跑出错时分不清是图的错还是图库的错，谁都不算")
         return None
-    return pictures[0] if pictures else None
+    return pictures[0]
+
+
+CANARY_READ, CANARY_FAILED, CANARY_UNREADABLE, CANARY_NONE = "read", "failed", "unreadable", "none"
+
+
+def run_canary(platforms, opts: dict, *, home: Path, beat=None, env: Optional[dict] = None,
+               timeout: Optional[float] = None) -> tuple:
+    """One run of the canary picture (``canary_picture``): ``(picture | None, state, why)``, ``state`` CANARY_READ (the
+    index works), CANARY_FAILED (the run failed as a whole, or timed out: the index's fault; a timeout trips the
+    breaker), CANARY_UNREADABLE (the index answered it cannot read it: logged once a worker start) or CANARY_NONE (no
+    canary); ``why`` says what went wrong ("" when it was read)."""
+    picture = canary_picture(opts)
+    if picture is None:
+        return None, CANARY_NONE, "没有对图的参照图（图库里没有 images/，也没配 draft_context.canary，或者配的那张不在）"
+    sheets = folder(home) / "sheets"
+    sheets.mkdir(parents=True, exist_ok=True)
+    argv = [str(opts["hat_python"]), str(opts["hat_index"] / "hat_match.py"), "match", str(picture), "--top", "1",
+            "--no-stock", "--json", "--out", str(sheets)]
+    run = platforms.run_cli(argv, opts["hat_index"], timeout=max(1.0, timeout or opts["match_timeout_sec"]),
+                            env=_tool_env(env), heartbeat=beat, every=30, interruptible=True)
+    data = platforms.parse_json(run.stdout)
+    photos = data.get("photos") if isinstance(data, dict) and isinstance(data.get("photos"), list) else None
+    if run.stopped == "timeout":
+        trip("hat", opts)
+        return picture, CANARY_FAILED, "对图超时"
+    if run.exit_code != 0 or photos is None or len(photos) != 1 or not isinstance(photos[0], dict):
+        return picture, CANARY_FAILED, f"对图出错（退出码 {run.exit_code}）"
+    if photos[0].get("error"):
+        why = _clean(photos[0].get("error"), 120)
+        _say_once("unreadable", "draft context: 对图的参照图读不出来：%s（%s）；一张图自己那一跑出错时谁都不算", picture, why)
+        return picture, CANARY_UNREADABLE, f"对图的参照图读不出来（{why}）"
+    return picture, CANARY_READ, ""
 
 
 def index_works(platforms, opts: dict, *, home: Path, beat=None, env: Optional[dict] = None,
-                clock: Callable[[], float] = time.time, deadline: Optional[float] = None) -> bool:
+                clock: Callable[[], float] = time.time, deadline: Optional[float] = None) -> Optional[bool]:
     """Does the index work (asked when a picture's run alone failed as a whole): a run of the canary picture
-    (``canary_picture``) goes, while the job's budget lasts; without one, a run went within CANARY_RECENT_SEC."""
-    picture = canary_picture(opts)
-    if picture is not None and _left(deadline, clock()) >= MIN_LEFT_SEC:
-        sheets = folder(home) / "sheets"
-        sheets.mkdir(parents=True, exist_ok=True)
-        argv = [str(opts["hat_python"]), str(opts["hat_index"] / "hat_match.py"), "match", str(picture), "--top", "1",
-                "--no-stock", "--json", "--out", str(sheets)]
-        run = platforms.run_cli(argv, opts["hat_index"],
-                                timeout=max(1.0, min(opts["match_timeout_sec"], _left(deadline, clock()))),
-                                env=_tool_env(env), heartbeat=beat, every=30, interruptible=True)
-        data = platforms.parse_json(run.stdout)
-        photos = data.get("photos") if isinstance(data, dict) and isinstance(data.get("photos"), list) else None
-        works = (run.exit_code == 0 and photos is not None and len(photos) == 1 and isinstance(photos[0], dict)
-                 and not photos[0].get("error"))
-        if run.stopped == "timeout":
-            trip("hat", opts)
-        log.info("draft context: the hat index's canary picture %s", "was read: the index works" if works
-                 else "failed too")
-        if works:
-            _RUNS.update(fails=0, last_ok_at=time.time())
-        return works
-    at = _RUNS.get("last_ok_at")
-    return at is not None and time.time() - at < CANARY_RECENT_SEC
+    (``run_canary``), within the job's budget.  True: it was read (the picture is the cause); False: it failed too (the
+    index's); None: not known (no canary that can run: none, a configured one not there, too little of the job's budget
+    left, one the index cannot read), so nobody is charged."""
+    if canary_picture(opts) is None or _left(deadline, clock()) < MIN_LEFT_SEC:
+        return None
+    _, state, why = run_canary(platforms, opts, home=home, beat=beat, env=env,
+                               timeout=min(opts["match_timeout_sec"], _left(deadline, clock())))
+    log.info("draft context: the hat index's canary picture %s", "was read: the index works" if state == CANARY_READ
+             else f"was not read ({why})")
+    if state == CANARY_READ:
+        _RUNS["fails"] = 0
+        return True
+    return False if state == CANARY_FAILED else None
 
 
 def _settle(platforms, opts: dict, group: list, outcome: str, **canary) -> None:
-    """After a run that failed as a whole (``outcome`` "failed" or "timeout"): a try of the picture when it ran alone,
-    did not time out, and the index works (``index_works``: then the picture is the cause; the index's failures in a
-    row stay as they were); else the index's failure, towards MAX_RUN_FAILURES in a row (then it is left alone for
-    ``breaker_min``: the block and the log say so)."""
-    if outcome == "failed" and len(group) == 1 and index_works(platforms, opts, **canary):
-        entry = group[0]
-        entry["tries"] = _tries(entry) + 1
-        if _given_up(entry):
-            entry["error"] = f"{entry['error']}；试了 {_tries(entry)} 次，不再对了"
-        return
+    """After a run that failed as a whole (``outcome`` "failed" or "timeout"): a picture that ran alone and did not time
+    out is the cause when the index works (``index_works``: then it is its try; the index's failures in a row stay as
+    they were), nobody's when that is not known (no canary that can run); else the index's failure, towards
+    MAX_RUN_FAILURES in a row (then it is left alone for ``breaker_min``: the block and the log say so)."""
+    if outcome == "failed" and len(group) == 1:
+        works = index_works(platforms, opts, **canary)
+        if works is None:
+            return                                    # (whose fault is not known: no try, and the index not paused)
+        if works:
+            entry = group[0]
+            entry["tries"] = _tries(entry) + 1
+            if _given_up(entry):
+                entry["error"] = f"{entry['error']}；试了 {_tries(entry)} 次，不再对了"
+            return
     _RUNS["fails"] += 1
     if outcome == "failed" and _RUNS["fails"] >= MAX_RUN_FAILURES:
         trip("hat", opts, why=f"连着出错 {_RUNS['fails']} 次")
@@ -982,7 +978,7 @@ def _run_match(platforms, opts: dict, workspace: Path, entries: list, *, home: P
         for entry in entries:
             entry["error"] = "对图超时" if timed_out else f"对图出错（退出码 {run.exit_code}）"
         return "timeout" if timed_out else "failed"
-    _RUNS.update(fails=0, last_ok_at=time.time())
+    _RUNS["fails"] = 0
     for entry, answer in zip(entries, photos):
         if not isinstance(answer, dict) or answer.get("error"):
             entry.update(error="这张图读不出来，不再对了", final=True, tries=_tries(entry) + 1)   # (never tried again)
@@ -1067,24 +1063,29 @@ def photo_block(result: dict, codes: dict, opts: Optional[dict] = None) -> str:
     return "<photo_matches>\n" + "\n".join(_untagged(line) for line in lines) + "\n</photo_matches>"
 
 
-def context_text(samples: Optional[dict], photos: Optional[dict], codes: dict, opts: Optional[dict] = None) -> str:
-    """What the prompt gets: the rule lines, then <photo_matches> (when she sent pictures) and <sample_status>."""
+def context_text(samples: Optional[dict], photos: Optional[dict], codes: dict, opts: Optional[dict] = None,
+                 confirmed=()) -> str:
+    """What the prompt gets: the rule lines, then <photo_matches> (when she sent pictures), the codes the operators
+    confirmed in the console (when any) and <sample_status>."""
     parts = [SAMPLE_RULE, PHOTO_RULE, STOCK_RULE, ORDER_RULE]
     block = photo_block(photos or {}, codes, opts)
     if block:
         parts.append(block)
     elif photos and not photos.get("ok") and photos.get("why"):
         parts.append(f"（她这次发的图没能对图：{_untagged(photos['why'])}）")
+    if confirmed:
+        parts.append("（运营对过图、在控制台点了「对过图了」的编码，可以用来建寄样单：" + "、".join(confirmed) + "）")
     parts.append(sample_block(samples or {"ok": False, "why": "没读"}))
     return "\n".join(parts)
 
 
 class Context:
-    """What one draft job learned: ``text`` for the prompt, ``samples`` / ``photos`` / ``codes`` / ``note`` /
-    ``verified`` for the gate."""
+    """What one draft job learned: ``text`` for the prompt, ``samples`` / ``photos`` / ``codes`` / ``confirmed`` (the
+    codes the operators confirmed in the console) / ``verified`` for the gate."""
 
-    def __init__(self, text: str, samples: dict, photos: dict, codes: dict, note: str = "", verified=()):
-        self.text, self.samples, self.photos, self.codes, self.note = text, samples, photos, codes, note
+    def __init__(self, text: str, samples: dict, photos: dict, codes: dict, confirmed=(), verified=()):
+        self.text, self.samples, self.photos, self.codes = text, samples, photos, codes
+        self.confirmed = [str(c).upper() for c in confirmed or ()]
         self.verified = list(verified or ())
 
 
@@ -1113,8 +1114,8 @@ def build(platforms, cfg: Optional[dict], opts: dict, *, workspace: Path, job: d
         log.exception("draft context: her pictures were not matched")
         photos = {"ok": False, "why": f"Mac 出错：{type(e).__name__}", "photos": []}
     codes = catalog_codes(catalog)
-    note = str(meta.get("note") or "") if isinstance(meta.get("note"), str) else ""
-    return Context(context_text(samples, photos, codes, opts), samples, photos, codes, note, asked["verified"])
+    return Context(context_text(samples, photos, codes, opts, confirmed=asked["confirmed"]), samples, photos, codes,
+                   asked["confirmed"], asked["verified"])
 
 
 # ── 3. the photo check of a sample order ──────────────────────────────────────────────────────────────────────
@@ -1178,12 +1179,14 @@ def gate(block: dict, context: Context, *, platforms, cfg: Optional[dict], opts:
     """The photo check of a previewed jst.sample_order (any other action: as it is, ``gated`` False).  ``{"block",
     "sheet", "why", "gated"}``: the preview with the check's facts and problems (not ready when a SKU has no 聚水潭
     code, a code has neither a sure picture of hers nor a confirmation, the sheet could not be made, or a row of it says
-    to look again or has no SKU photo and the 起草备注 does not confirm that code), the sheet's path when one was made (the
+    to look again or has no SKU photo and no operator confirmed that code), the sheet's path when one was made (the
     worker sends it back on the operator-only channel) and its ``why``; ``gated`` True: the check ran (the worker marks
-    the draft so; the bot holds a sample order the Mac did not check).  Within ``gate_budget_sec``.  Never raises."""
+    the draft so; the bot holds a sample order the Mac did not check); ``held``: the codes it held for photo reasons (no
+    sure picture, a sheet row to look again at), which the console offers 「对过图了」 for; ``used``: the codes it let go
+    only by such a confirmation (taken back, the bot holds the draft).  Within ``gate_budget_sec``.  Never raises."""
     action = block.get("action") if isinstance(block, dict) else None
     if not isinstance(action, dict) or action.get("action") != "jst.sample_order":
-        return {"block": block, "sheet": None, "why": "", "gated": False}
+        return {"block": block, "sheet": None, "why": "", "gated": False, "held": [], "used": []}
     out = copy.deepcopy(block)
     out.setdefault("facts", [])
     out.setdefault("problems", [])
@@ -1194,7 +1197,7 @@ def gate(block: dict, context: Context, *, platforms, cfg: Optional[dict], opts:
     except Exception as e:
         log.exception("draft context: the sample order's photo check failed")
         _block(out, f"Mac 对图时出错（{type(e).__name__}）：先核对再建")
-        result = {"block": out, "sheet": None, "why": ""}
+        result = {"block": out, "sheet": None, "why": "", "held": [], "used": []}
     return {**result, "gated": True}
 
 
@@ -1213,10 +1216,9 @@ def _gate(block: dict, action: dict, context: Context, *, platforms, cfg: dict, 
           home: Path, beat, sleep, deadline: float, clock: Callable[[], float]) -> dict:
     lines = order_lines(action, catalog)
     earlier = confirmed_codes(context.samples, context.verified)
-    said = read_note(context.note)                   # (the 起草备注's confirmations, and what it tried)
-    noted = said["codes"]
+    noted = set(context.confirmed)                   # (the operators' 「对过图了」 in the console)
     photos = (context.photos or {}).get("photos") or []
-    pairs, facts, styles = [], [], {}
+    pairs, facts, styles, held, used = [], [], {}, [], []
     for line in lines:
         label = f"{SHOP_NAMES.get(action.get('shop'), action.get('shop'))}商品 {line['item']} 的 SKU {line['sku']}" + (
             f"（{line['name']}）" if line["name"] else "")
@@ -1230,18 +1232,20 @@ def _gate(block: dict, action: dict, context: Context, *, platforms, cfg: dict, 
             styles.setdefault(seen.get("style") or _style_guess(code), []).append(code)
             continue
         if code in noted:
-            facts.append(f"{code}：运营在起草备注里确认了（没有图对）")
+            facts.append(f"{code}：运营在控制台点了「对过图了」（没有图对）")
+            used.append(code)
         elif code in earlier:
             if earlier[code]["status"] in SENT_STATES:
                 facts.append(f"{code}：她以前的寄样单 {earlier[code]['order']} 里寄过（没有图对）")
             else:
                 facts.append(f"{code}：机器人以前给她建的寄样单 {earlier[code]['order']} 里有（还没发出；没有图对）")
         elif unsure:
-            _block(block, f"{code}（{line['name'] or line['sku']}）对图没把握（{unsure}）：先核对再建；"
-                          f"{confirm_how(code, said)}")
+            _block(block, f"{code}（{line['name'] or line['sku']}）对图没把握（{unsure}）：先核对再建；{CONFIRM_HOW}")
+            held.append(code)
             continue
         else:
-            _block(block, f"{code}（{line['name'] or line['sku']}）这顶没有照片对过，先核对再建；{confirm_how(code, said)}")
+            _block(block, f"{code}（{line['name'] or line['sku']}）这顶没有照片对过，先核对再建；{CONFIRM_HOW}")
+            held.append(code)
             continue
         styles.setdefault(_style_guess(code), []).append(code)
     sheet, why = None, ""
@@ -1263,9 +1267,11 @@ def _gate(block: dict, action: dict, context: Context, *, platforms, cfg: dict, 
                 why_row = (note if row.get("ok") is False else "对图单右边只有整款图，没有这个颜色的单独图"
                            if row.get("whole") else "图库里没有这个编码的图")
                 if code in noted:
-                    facts.append(f"{code}：对图单说要再看（{why_row}），运营在起草备注里确认了")
+                    facts.append(f"{code}：对图单说要再看（{why_row}），运营在控制台点了「对过图了」")
+                    used.append(code)
                 else:
-                    _block(block, f"{code} 对图要再看（{why_row}）：先核对再建；{confirm_how(code, said)}")
+                    _block(block, f"{code} 对图要再看（{why_row}）：先核对再建；{CONFIRM_HOW}")
+                    held.append(code)
         why = OPERATOR_SHEET_WHY if sheet else ""
     for text in facts:
         _fact(block, "对图", text)
@@ -1274,7 +1280,8 @@ def _gate(block: dict, action: dict, context: Context, *, platforms, cfg: dict, 
                             clock=clock)
         if stock:
             _fact(block, "仓库可用库存（只给运营看，不跟达人说）", stock)
-    return {"block": block, "sheet": sheet, "why": why}
+    return {"block": block, "sheet": sheet, "why": why, "held": list(dict.fromkeys(held)),
+            "used": list(dict.fromkeys(used))}
 
 
 def _make_sheet(platforms, cfg: dict, opts: dict, workspace: Path, pairs: list, *, home: Path, beat, sleep,

@@ -104,8 +104,8 @@ def test_an_old_database_gets_the_column_and_its_deals_have_no_note(tmp_path):
 
 
 def test_the_store_keeps_a_notes_lines_tidied_and_at_most_300_characters():
-    """Each line's blanks collapsed, empty lines dropped, the line breaks kept (2026-11-09: PRM_DRAFT_CONTEXT's
-    「确认 <编码>」 counts only as a line of its own)."""
+    """Each line's blanks collapsed, empty lines dropped, the line breaks kept (2026-11-09: the operators' lines stay
+    lines for the drafting Claude)."""
     assert DRAFT_NOTE_CHARS == 300
     assert draft_note_text("直接发链接\n\n\t和brief ") == "直接发链接\n和brief" and draft_note_text(None) == ""
     assert draft_note_text(" 她要深棕 \r\n确认   A7269901001B-F\r勿催\n") == "她要深棕\n确认 A7269901001B-F\n勿催"

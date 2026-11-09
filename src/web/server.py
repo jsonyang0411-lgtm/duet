@@ -1223,9 +1223,11 @@ def _prm_friend_adds(data: dict) -> dict:
 
 def _prm_deal(data: dict) -> dict:
     """POST /api/prm/deals {action: stage | adopt | mode | shipment | shipment_status | night_done | opening | huopan |
-    group | group_try | group_made | group_none | draft_note, deal_id, ...} (``huopan``: 「补发货盘」; ``group*``: 三方群,
-    src/prm/three_party.py; ``draft_note`` {text}: the deal's 起草备注; ``opening``, ``huopan``, ``group*`` and
-    ``draft_note`` only while running: a stopped bot refuses them, ``apply_deal_action``)."""
+    group | group_try | group_made | group_none | draft_note | photo_confirm | photo_unconfirm, deal_id, ...}
+    (``huopan``: 「补发货盘」; ``group*``: 三方群, src/prm/three_party.py; ``draft_note`` {text}: the deal's 起草备注;
+    ``photo_confirm`` {packet, code} / ``photo_unconfirm`` {code}: PRM_DRAFT_CONTEXT's 「对过图了」 and its 「撤销」;
+    ``opening``, ``huopan``, ``group*``, ``draft_note`` and ``photo_*`` only while running: a stopped bot refuses them,
+    ``apply_deal_action``)."""
     from src.prm.service import apply_deal_action
 
     action = str(data.get("action") or "")

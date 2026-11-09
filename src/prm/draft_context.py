@@ -18,6 +18,11 @@ picture behind it leaves the preview not ready, and the sheet comes back with th
   held: not ready,
   「Mac 没有对图：worker 旧了或没重启」.  The packet keeps the mark of its last preview (``meta.draft_context``); one
   without it (``unchecked``: a draft from before the switch was on, too) cannot be approved until a new preview.
+- ``confirmable`` / ``held_out`` / ``withdrawn``: 「对过图了」 (2026-11-09; words in the 起草备注 confirm nothing): the Mac
+  names the codes its check held for photo reasons (``photo_held``) and those it let go only by an operator's
+  confirmation (``photo_confirmed``), kept in the packet's meta.  The console shows 「对过图了，用 <编码>」 for each held one;
+  the deal action ``photo_confirm`` keeps it for the deal (``PrmStore.photo_confirmations``, until 「撤销」:
+  ``photo_unconfirm``), the next preview takes it, and a draft that went by one taken back waits for a new preview.
 - ``take_operator_files`` / ``preview_operator_files``: the Mac sends the sheet on the relay's operator-only channel
   (``relay_operator_files``, POST /relay/jobs/<id>/operator-files, which an older relay does not have): never one of the
   draft's attachments, kept as the packet's ``meta.operator_files`` = ``[{"name", "path", "why"}]`` (``path`` as an
@@ -51,6 +56,16 @@ SHEET_PREFIX = "对图单-"            # the Mac's sheet (worker.sample_order_ga
 SHEET_WHY = "寄样单里每一顶和她发的图并排对比；只给运营看，不发给达人"
 NOT_GATED = "Mac 没有对图：worker 旧了或没重启"
 OLD_RULE = "这份是旧规则核的，点「重新预览」按新规则再核"   # a kept draft whose mark is older than MARK_VERSION
+# 「对过图了」 (2026-11-09): the Mac's answer, and the packet's meta, name the item codes its check held for photo reasons
+# (``photo_held``: the console offers 「对过图了，用 <编码>」 for each) and those it let go only by an operator's
+# confirmation (``photo_confirmed``: taken back, 「撤销」, the draft waits for a new preview); the deal's confirmations
+# go with every draft and new-preview job (``job_context``'s ``confirmed``)
+PHOTO_HELD = "photo_held"
+PHOTO_CONFIRMED = "photo_confirmed"
+CONFIRM_HOW = "对过图后，在控制台这份草稿上点这顶旁边的「对过图了」"
+MAX_HELD = 50                       # codes of one preview (held, or let go by a confirmation)
+MAX_CONFIRMED = 100                 # codes confirmed for one deal that go with a job (the Mac's MAX_CONFIRMED)
+_CODE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z_-]{2,63}$")      # a 聚水潭 item code (platforms._ERP_CODE)
 MAX_ORDERS = 20
 MAX_ACCOUNTS = 10
 MAX_OPERATOR_FILES = 4
@@ -98,8 +113,9 @@ def unambiguous(accounts, owners: dict, wxid: str) -> list:
 
 def job_context(store, deal_id: int, accounts) -> dict:
     """``meta.draft_context`` of a draft job of the deal: ``{"orders": ["YP…"], "verified": ["YP…"], "accounts":
-    [{"platform", "no"}]}``, the newest orders first (the bot's own, which are also ``verified``, then ours made by hand
-    that went into her deal), each once, of their shapes."""
+    [{"platform", "no"}], "confirmed": [item codes]}``, the newest orders first (the bot's own, which are also
+    ``verified``, then ours made by hand that went into her deal), each once, of their shapes; ``confirmed``: the codes
+    an operator confirmed for the deal in the console (「对过图了」, ``PrmStore.photo_confirmations``)."""
     made = [str(row.get("order_no") or "").strip() for row in reversed(store.sample_orders(deal_id=deal_id))]
     orders = list(made)
     for row in store.hand_samples(limit=500):
@@ -112,7 +128,9 @@ def job_context(store, deal_id: int, accounts) -> dict:
         if platform in ACCOUNT_PLATFORMS and _ACCOUNT.match(number) and (platform, number.lower()) not in seen:
             seen.add((platform, number.lower()))
             out.append({"platform": platform, "no": number})
-    return {"orders": orders, "verified": [o for o in orders if o in made], "accounts": out[:MAX_ACCOUNTS]}
+    confirmed = [str(r["code"]) for r in store.photo_confirmations(deal_id)][-MAX_CONFIRMED:]
+    return {"orders": orders, "verified": [o for o in orders if o in made], "accounts": out[:MAX_ACCOUNTS],
+            "confirmed": confirmed}
 
 
 def gated_of(value) -> bool:
@@ -133,6 +151,55 @@ def gated_of(value) -> bool:
 def mark(gated: bool) -> dict:
     """The packet's ``meta.draft_context``: whether its last preview was checked by photo."""
     return {"v": MARK_VERSION, "gated": bool(gated)}
+
+
+def codes_of(value, key: str) -> list:
+    """The item codes under ``key`` (``PHOTO_HELD`` / ``PHOTO_CONFIRMED``) of the Mac's answer or a packet's meta
+    (``value``: a dict, or its JSON text): upper case, of their shape, each once, at most MAX_HELD."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return []
+    codes = value.get(key) if isinstance(value, dict) else None
+    out = [str(c).strip().upper() for c in codes if isinstance(c, str)] if isinstance(codes, list) else []
+    return [c for c in dict.fromkeys(out) if _CODE.match(c)][:MAX_HELD]
+
+
+def code_of(value) -> str:
+    """An item code the console sent (upper case), or "" when it is not one."""
+    code = str(value or "").strip().upper() if isinstance(value, str) else ""
+    return code if _CODE.match(code) else ""
+
+
+def confirmable(packet: Optional[dict]) -> list:
+    """The codes 「对过图了」 may confirm on this draft: the ones its last preview held for photo reasons, or let go only
+    by a confirmation (taken back, it may be given again)."""
+    meta = (packet or {}).get("meta") or {}
+    return list(dict.fromkeys(codes_of(meta, PHOTO_HELD) + codes_of(meta, PHOTO_CONFIRMED)))
+
+
+def withdrawn(packet: Optional[dict], confirmed) -> list:
+    """The codes the draft's last preview let go only by an operator's 「对过图了」 that is not there any more
+    (``confirmed``: the deal's confirmed codes now): then it waits for a new preview."""
+    meta = (packet or {}).get("meta") or {}
+    return [c for c in codes_of(meta, PHOTO_CONFIRMED) if c not in confirmed]
+
+
+def withdrawn_reason(codes) -> str:
+    return f"撤销了 {'、'.join(codes)} 的「对过图了」：点「重新预览」再核" if codes else ""
+
+
+def held_out(packet: Optional[dict], confirmed: dict) -> list:
+    """The console's view of a waiting sample order's hats the Mac held for photos (PRM_DRAFT_CONTEXT): ``[{"code",
+    "held", "used", "confirmed", "at"}]`` for each code its last preview held (``held``: then 「对过图了，用 <编码>」, or
+    once confirmed 「已确认 <编码>，点「重新预览」按确认再核」) or let go only by a confirmation (``used``); ``confirmed`` /
+    ``at``: an operator's 「对过图了」 for the deal is there, and when (``confirmed``: code -> time; 「撤销」 takes it
+    back)."""
+    meta = (packet or {}).get("meta") or {}
+    held = set(codes_of(meta, PHOTO_HELD))
+    return [{"code": c, "held": c in held, "used": c not in held, "confirmed": c in confirmed, "at": confirmed.get(c)}
+            for c in confirmable(packet)]
 
 
 def mark_version(value) -> Optional[int]:

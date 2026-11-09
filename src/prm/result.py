@@ -15,7 +15,9 @@ failed); an older worker sends neither.
 ``operator_files`` (PRM_DRAFT_CONTEXT, src/prm/draft_context.py) are files the Mac sent back for the operators only
 (``[{"name", "why", "sha256"}]``: a sample order's side-by-side photo sheet), never attachments for the creator;
 ``draft_context: {"v": 2, "gated": true}`` says the Mac checked the draft's sample order by photo (``Draft.gated``;
-an older mark is not one).
+an older mark is not one); ``photo_held`` names the item codes that check held for photo reasons (the console's
+「对过图了」) and ``photo_confirmed`` those it let go only by an operator's 「对过图了」 (``Draft.photo_held`` /
+``Draft.photo_confirmed``).
 
 ``platform_action`` is optional (platforms.py): the Mac checks it and previews it, and
 hands back ``platform``, its verdict, in its place; a draft that names an action the Mac
@@ -101,6 +103,10 @@ class Draft:
     # The Mac checked the draft's sample order by photo (its ``draft_context: {"v": 2, "gated": true}``;
     # draft_context.ungated).
     gated: bool = False
+    # The item codes that check held for photo reasons (its ``photo_held``: the console offers 「对过图了」 for each)
+    # and those it let go only by an operator's 「对过图了」 (``photo_confirmed``); draft_context.codes_of.
+    photo_held: list = field(default_factory=list)
+    photo_confirmed: list = field(default_factory=list)
 
 
 def _text(value, limit: int) -> str:
@@ -183,4 +189,7 @@ def parse_draft(raw: str) -> Draft:
         platform_refused=refused,
         operator_files=draft_context.operator_entries(data.get(draft_context.OPERATOR_FILES)),
         gated=draft_context.gated_of(data),
+        photo_held=draft_context.codes_of(data, draft_context.PHOTO_HELD) if draft_context.gated_of(data) else [],
+        photo_confirmed=(draft_context.codes_of(data, draft_context.PHOTO_CONFIRMED) if draft_context.gated_of(data)
+                         else []),
     )

@@ -52,14 +52,18 @@ export const partyAction = (body) => post('/api/prm/parties', body)
 export const dealAction = (body) => post('/api/prm/deals', body)
 // 起草备注 (the deal action draft_note, 2026-10-31): what the operators tell the Mac about this creator; every draft of
 // hers (the 开场白 too) follows it. Saved empty, it is cleared; the bot collapses each line's blanks, drops empty lines,
-// keeps the line breaks (a 「确认 编码」 counts only as a line of its own, 2026-11-09) and at most 300 characters.
+// keeps the line breaks (2026-11-09) and at most 300 characters. It confirms no hat for a sample order (「对过图了」 does).
 export const DRAFT_NOTE_MAX = 300
 /** The note as the bot keeps it (store.draft_note_text): its length is what the limit counts. */
 export const draftNoteText = (text) => String(text || '').split(/\r\n|\r|\n/)
   .map((line) => line.split(/\s+/).filter(Boolean).join(' ')).filter(Boolean).join('\n')
-/** How the operators let a sample order's hat go that the Mac could not check by photo (PRM_DRAFT_CONTEXT). */
-export const CONFIRM_HINT = '寄样单里没对过图的那顶：对过图后，在起草备注里另起一行写：确认 编码'
+/** How the operators let a sample order's hat go that the Mac could not check by photo (PRM_DRAFT_CONTEXT): not here. */
+export const CONFIRM_HINT = '寄样单里没对过图的那顶不在备注里确认：对过图后，在控制台这份草稿上点这顶旁边的「对过图了」'
 export const saveDraftNote = (dealId, text) => dealAction({ deal_id: dealId, action: 'draft_note', text: draftNoteText(text) })
+// 「对过图了」 (PRM_DRAFT_CONTEXT, 2026-11-09): a hat the Mac held for photos on a waiting sample order, confirmed for the
+// deal after comparing the pictures (the next 「重新预览」 takes it), and its 「撤销」.
+export const photoConfirm = (dealId, packetId, code) => dealAction({ deal_id: dealId, action: 'photo_confirm', packet: packetId, code })
+export const photoUnconfirm = (dealId, code) => dealAction({ deal_id: dealId, action: 'photo_unconfirm', code })
 /** 自动模式 (POST /api/prm/auto): the 下班时段 rules at any hour, until switched off. */
 export const setAutoMode = (on) => post('/api/prm/auto', { on })
 /** The full numbers behind a creator's placeholders; every look is written down (8.2). */

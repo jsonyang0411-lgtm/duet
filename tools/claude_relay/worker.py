@@ -2364,6 +2364,8 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
         draft.pop("platform", None)                      # only this script writes the verdict
         draft.pop("operator_files", None)                # (and names the operators' files, marks the check)
         draft.pop("draft_context", None)
+        draft.pop("photo_held", None)
+        draft.pop("photo_confirmed", None)
         if buyin:
             pass                                         # no preview: the bot drops a 百应 draft's action unrun
         elif draft.get("platform_action") is not None:
@@ -2375,12 +2377,11 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
                 log.exception("#%s platform preview failed", job["id"])
                 draft["platform"] = preview_failed(raw, f"Mac 上预览出错：{e}")
             if context is not None:                      # PRM_DRAFT_CONTEXT: a sample order is checked by photo
-                draft["platform"], files, gated = sample_order_gate(settings, workspace, draft["platform"], context,
+                draft["platform"], files, marks = sample_order_gate(settings, workspace, draft["platform"], context,
                                                                     client, int(job["id"]))
                 if files:
                     draft["operator_files"] = files
-                if gated:
-                    draft["draft_context"] = dict(GATED)
+                draft.update(marks)                      # (GATED; the codes it held for photo reasons)
         result["text"] = json.dumps(draft, ensure_ascii=False)
     result["log_path"] = str(save_prm_log(job, run, result))
     log.info("#%s prm finished ok=%s in %ss", job["id"], result["ok"], result["duration_s"])
@@ -2497,25 +2498,30 @@ def _timed_out(e: BaseException) -> bool:
 
 def sample_order_gate(settings: dict, workspace: Path, block, context, client: RelayClient, job_id: int) -> tuple:
     """A previewed jst.sample_order checked by photo (``draft_context.gate``; any other action as it is): ``(block,
-    operator_files, gated)``.  The side-by-side sheet goes back on the operator-only channel (POST .../operator-files:
+    operator_files, marks)``, ``marks`` what goes next to the block once the check ran (else {}): ``draft_context``
+    (``GATED``: the bot holds any sample order without it), ``photo_held`` (the codes it held for photo reasons, which
+    the console offers 「对过图了」 for) and ``photo_confirmed`` (the codes it let go only by an operator's 「对过图了」:
+    taken back, the bot holds the draft).  The side-by-side sheet goes back on the operator-only channel (POST .../operator-files:
     the bot keeps it on the draft, never sends it to the creator) as ``[{"name", "why", "sha256"}]``, once the bot's
     /relay/health says it has that channel (``operator_files_ok``); a sheet that does not get there leaves the preview
     not ready: ``OLD_BOT`` when the bot says it has no such channel or answers 404, 「连接断了」 / 「超时了」 with 「重新
     预览再传」 when the connection failed on the way (a health check that went says the bot is new: a dropped upload is
-    the network, Tailscale say), else the error.  ``gated``: the check ran (the draft carries ``GATED``; the bot holds any
-    sample order without it)."""
+    the network, Tailscale say), else the error."""
     if draft_context is None or context is None or not isinstance(block, dict):
-        return block, [], False
+        return block, [], {}
     beat = _platform_heartbeat(client, job_id, "对图（寄样单）")
     checked = draft_context.gate(block, context, platforms=platforms,
                                  cfg=platforms.config(settings) if platforms is not None else None,
                                  opts=draft_context.options(settings),
                                  catalog=platforms.load_catalog(workspace) if platforms is not None else None,
                                  workspace=workspace, home=HOME_DIR, beat=beat)
-    gated = bool(checked.get("gated"))
+    marks = {}
+    if checked.get("gated"):
+        marks = {"draft_context": dict(GATED), **({"photo_held": list(checked["held"])} if checked.get("held") else {}),
+                 **({"photo_confirmed": list(checked["used"])} if checked.get("used") else {})}
     sheet = checked.get("sheet")
     if not sheet:
-        return checked["block"], [], gated
+        return checked["block"], [], marks
     name = f"对图单-{job_id}.jpg"
     try:
         able = client.operator_files_ok()
@@ -2524,20 +2530,20 @@ def sample_order_gate(settings: dict, workspace: Path, block, context, client: R
         able = None
     if able is False:
         log.warning("#%s the photo sheet of a sample order not sent: the bot has no operator-only channel", job_id)
-        return draft_context.sheet_lost(checked["block"], OLD_BOT), [], gated
+        return draft_context.sheet_lost(checked["block"], OLD_BOT), [], marks
     try:
         answer = client.upload_operator(job_id, Path(sheet), name)
     except Exception as e:
         log.warning("#%s the photo sheet of a sample order did not go back: %s", job_id, e)
         if isinstance(e, urllib.error.HTTPError) and e.code == 404:
-            return draft_context.sheet_lost(checked["block"], OLD_BOT), [], gated
+            return draft_context.sheet_lost(checked["block"], OLD_BOT), [], marks
         if _dropped(e) or _timed_out(e):
             return (draft_context.sheet_lost(checked["block"], "连接断了" if _dropped(e) else "超时了", retry=True), [],
-                    gated)
-        return draft_context.sheet_lost(checked["block"], _short(e, 120)), [], gated
+                    marks)
+        return draft_context.sheet_lost(checked["block"], _short(e, 120)), [], marks
     log.info("#%s sample order checked by photo: verdict %s, sheet sent back", job_id, checked["block"].get("verdict"))
     files = [{"name": name, "why": checked["why"], "sha256": str((answer or {}).get("sha256") or "")}]
-    return checked["block"], files, gated
+    return checked["block"], files, marks
 
 
 def do_platform_job(settings: dict, job: dict, client: RelayClient, workspace: Path, meta: dict) -> dict:
@@ -2554,10 +2560,10 @@ def do_platform_job(settings: dict, job: dict, client: RelayClient, workspace: P
         # new sheet for the operators (``operator_files`` next to the block: the bot keeps it on the draft)
         context = (prm_context(settings, job, meta, workspace, [], client, pictures=False)
                    if action.get("action") == "jst.sample_order" else None)
-        files, gated = [], False
+        files, marks = [], {}
         if context is not None:
-            block, files, gated = sample_order_gate(settings, workspace, block, context, client, int(job["id"]))
-        extra = {**({"operator_files": files} if files else {}), **({"draft_context": dict(GATED)} if gated else {})}
+            block, files, marks = sample_order_gate(settings, workspace, block, context, client, int(job["id"]))
+        extra = {**({"operator_files": files} if files else {}), **marks}
         return {"ok": True, "text": json.dumps({**block, **extra}, ensure_ascii=False),
                 "duration_s": round(time.monotonic() - started, 1)}
     cfg = platforms.config(settings)
@@ -3277,8 +3283,18 @@ def main(argv: list[str] | None = None) -> int:
             print(f"draft context (PRM_DRAFT_CONTEXT): off ({DRAFT_CONTEXT_FILE} not loaded)")
         else:
             opts = draft_context.options(settings)
+            problem = draft_context.tool_problem(opts)
             print("draft context (PRM_DRAFT_CONTEXT on Windows): photo index "
-                  + (draft_context.tool_problem(opts) or f"{opts['hat_index']} ({opts['hat_python']})"))
+                  + (problem or f"{opts['hat_index']} ({opts['hat_python']})"))
+            if not problem and platforms is not None:
+                # the canary, run once: a picture whose own run fails is charged only when this one is read, the
+                # index only when this one fails too; without one that runs, nobody (draft_context.index_works)
+                picture, state, why = draft_context.run_canary(platforms, opts, home=HOME_DIR)
+                print("draft context canary: " + (
+                    f"{picture}: read" if state == draft_context.CANARY_READ
+                    else f"{picture}: {why} (the index fails on its own picture: look at the hat index)"
+                    if state == draft_context.CANARY_FAILED
+                    else f"{picture or 'none'}: {why} (then a picture whose own run fails is never charged)"))
         proxy = proxy_env()
         if proxy:
             print(f"prm jobs' proxy (from {claude_settings_path()}): "

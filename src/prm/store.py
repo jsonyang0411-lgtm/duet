@@ -345,6 +345,15 @@ CREATE TABLE IF NOT EXISTS boss_groups (
     opening_due REAL,
     joined_at REAL
 );
+-- PRM_DRAFT_CONTEXT (2026-11-09): the item codes an operator confirmed for a deal after looking at the pictures
+-- (「对过图了」 on a sample order the Mac held): the Mac takes them like her earlier shipped orders; until undone
+CREATE TABLE IF NOT EXISTS photo_confirmations (
+    deal_id INTEGER NOT NULL,
+    code TEXT NOT NULL,
+    packet_id INTEGER,
+    at REAL NOT NULL,
+    PRIMARY KEY (deal_id, code)
+);
 """
 
 # Columns added after the first version: (table, column, type).
@@ -393,7 +402,7 @@ ATTENTION_CHARS = 600       # all of them, as the console shows them
 # A deal's 起草备注 (``draft_note``, 2026-10-31): what the operators tell the Mac about this creator for every draft of
 # hers (her WeChat signature said 「直接发链接和brief，感兴趣的会回复！勿催视频，不接语音」, say).  Only an operator writes
 # it (her party ``note`` is the bot's for a creator it registered, and may name her groups).  Its lines stay lines
-# (2026-11-09: PRM_DRAFT_CONTEXT's 「确认 <编码>」 counts only as a line of its own).
+# (2026-11-09).  It confirms no hat for PRM_DRAFT_CONTEXT: that is the console's 「对过图了」 (``photo_confirmations``).
 DRAFT_NOTE_CHARS = 300
 _LINE_BREAK = re.compile(r"\r\n|\r|\n")
 
@@ -1819,6 +1828,30 @@ class PrmStore:
                  str(source), add_id, now))
             self._conn.commit()
             return cur.rowcount == 1
+
+    def confirm_photo(self, deal_id: int, code: str, packet_id: Optional[int], now: float) -> bool:
+        """An operator's 「对过图了」 for ``code`` on the deal (PRM_DRAFT_CONTEXT); True when it was not confirmed yet."""
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO photo_confirmations (deal_id, code, packet_id, at) VALUES (?, ?, ?, ?)",
+                (int(deal_id), str(code), packet_id, float(now)))
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def unconfirm_photo(self, deal_id: int, code: str) -> bool:
+        """「撤销」 of a 「对过图了」; True when there was one."""
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM photo_confirmations WHERE deal_id = ? AND code = ?",
+                                     (int(deal_id), str(code)))
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def photo_confirmations(self, deal_id: int) -> list[dict]:
+        """The codes confirmed for the deal, oldest first: ``[{"code", "packet_id", "at"}]``."""
+        with self._lock:
+            rows = self._conn.execute("SELECT code, packet_id, at FROM photo_confirmations WHERE deal_id = ? "
+                                      "ORDER BY at, code", (int(deal_id),)).fetchall()
+        return [dict(r) for r in rows]
 
     def creator_links(self, party_id: Optional[int] = None, *, account: Optional[str] = None) -> list[dict]:
         """The 抖音 links, oldest first: of one creator, or of one 抖音号 (any case)."""
