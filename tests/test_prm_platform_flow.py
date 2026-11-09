@@ -21,7 +21,9 @@ from src.relay.service import LOST_AFTER_SEC
 
 DESIGNATED = {"action": "dy.designated_commission", "item_id": DY_ITEM, "creator_platform_id": DY_UID,
               "commission_rate": 20}
-CHANNEL = {"action": "dy.channel_goods", "item_id": DY_ITEM, "creator_platform_id": DY_UID, "price": "15"}
+CHANNEL = {"action": "dy.channel_goods", "item_id": DY_ITEM, "creator_platform_id": DY_UID, "title_prefix": "【小美专属】"}
+# What a preview of CHANNEL agrees (the shop's way: 19.99 → 17 yuan, 40 of the 40 the product can spare)
+CHANNEL_RUN = {"steps": ["create", "bind"], "skus": [{"id": DY_SKU, "price": "17.00", "stock": 40, "main_price": "19.99"}]}
 SAMPLE = {"action": "jst.sample_order", "shop": "dy", "item_id": DY_ITEM, "skus": [{"sku_id": DY_SKU, "qty": 1}],
           "creator_platform": "dy", "creator_uid": DY_UID,
           "receiver": {"name": "小美", "phone": "〈手机1〉", "province": "上海市", "city": "上海市", "district": "浦东新区",
@@ -36,8 +38,8 @@ def block(raw=DESIGNATED, verdict="ready", run=None, **extra):
            "steps": [{"name": "designated", "label": "百应 · 建指定达人佣金策略", "execute": False,
                       "command": "node bin/dy.mjs buyin promotion-strategy-create-designated", "exit_code": 0,
                       "seconds": 2.5, "verdict": verdict, "outcome": "", "problems": [], "facts": [], "raw": "{}"}],
-           "run": run if run is not None else {"steps": ["create", "bind"] if raw["action"] == "dy.channel_goods"
-                                               else ["designated"]},
+           "run": run if run is not None else CHANNEL_RUN if raw["action"] == "dy.channel_goods"
+           else {"steps": ["designated"]},
            "catalog": {"synced_at": 1.0, "title": "测试主品"}, "previewed_at": 2.0}
     out.update(extra)
     return out
@@ -1505,8 +1507,7 @@ def test_a_result_that_wrote_nothing_does_not_stop_a_second_one(bot, clock, rec)
 
 
 @pytest.mark.parametrize("raw, again", [
-    ({"action": "dy.channel_goods", "item_id": DY_ITEM, "creator_platform_id": DY_UID, "price": "15"},
-     {"action": "dy.channel_goods", "item_id": DY_ITEM, "creator_platform_id": DY_UID, "price": "14"}),
+    (CHANNEL, {**CHANNEL, "title_prefix": "【美美专属】"}),             # another prefix: still the same product
     ({"action": "xhs.direct_plan", "item_id": XHS_ITEM, "creator_platform_id": "小美的号", "commission_rate": 15},
      {"action": "xhs.direct_plan", "item_id": XHS_ITEM, "creator_platform_id": XHS_BUYER, "commission_rate": 12}),
 ], ids=["channel-goods", "xhs-plan-by-name-then-by-id"])

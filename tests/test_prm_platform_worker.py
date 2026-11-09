@@ -17,8 +17,9 @@ import pytest
 from test_prm_worker import CREATOR, TOKEN, bot, creator_says, run_one, settings, worker, workspace  # noqa: F401
 
 from platform_fakes import (
-    DY_ITEM, DY_UID, JST_ORDER, JST_SHOP_DY, JST_UID, FakeNode, catalog, dy_designated_done, dy_designated_preview,
-    jst_sample_row, jst_samples, rule,
+    DY_CHANNEL, DY_ITEM, DY_ITEM2, DY_LINK, DY_SKU2, DY_SKU2B, DY_UID, JST_ORDER, JST_SHOP_DY, JST_UID, FakeNode, catalog,
+    dy_agreed_preview, dy_bind_done, dy_bind_preview, dy_create_done, dy_designated_done, dy_designated_preview,
+    dy_read_preview, jst_sample_row, jst_samples, rule,
 )
 from src.prm import platforms
 from src.prm.result import SCHEMA
@@ -133,6 +134,52 @@ def test_approval_runs_the_cli_once_and_only_a_verified_write_lets_the_reply_out
     run_one(worker, bot, mac.settings)
     assert len(executions(mac.node)) == 1
     assert json.loads(bot.relay.store.list_jobs(1)[0]["result_text"])["outcome"] == "ALREADY_RUN"
+
+
+def test_a_channel_link_is_made_the_shops_way_end_to_end(worker, bot, mac):  # noqa: F811
+    """专属链接 (2026-11-09) through the real worker and bot: the draft names the product, her UID and 「前缀：小美专属」;
+    the Mac reads the product, works out the agreement (9 折 floored, 100 a colour, all a colour can spare when that is
+    fewer) and previews with it; the bot takes it, holding the agreement to the shop's way; approved, the Mac previews
+    the same agreement once more, creates, binds, and the reply goes out with the link; every agreement file 0600 and
+    gone after its run."""
+    action = {"action": "dy.channel_goods", "item_id": DY_ITEM2, "creator_platform_id": DY_UID, "title_prefix": "小美专属"}
+    mac.claude.answers(platform_action=action, reply_draft="您的专属链接：{链接}", intent="要专属链接")
+    agreed = dy_agreed_preview([(DY_SKU2, "均码黑色", "315.00", "283.00", 100, 500),
+                                (DY_SKU2B, "均码咖啡", "290.00", "261.00", 30, 30)], item=DY_ITEM2)
+    mac.node.rules([
+        rule(["channel-goods-create"], dy_read_preview([(DY_SKU2, "均码黑色", "315.00", 500),
+                                                        (DY_SKU2B, "均码咖啡", "290.00", 30)], item=DY_ITEM2),
+             execute=False, agreement=False),
+        rule(["channel-goods-create"], agreed, execute=False, agreement=True),
+        rule(["channel-goods-create"], dy_create_done(item=DY_ITEM2), execute=True, agreement=True),
+        rule(["channel-goods-bind"], dy_bind_preview(), execute=False),
+        rule(["channel-goods-bind"], dy_bind_done(), execute=True)])
+    creator_says(bot, "要链接，前缀：小美专属")
+    run_one(worker, bot, mac.settings)
+    [packet] = bot.prm.store.packets()
+    assert packet["tool"] == "dy.channel_goods" and packet["status"] == "pending"
+    block = packet["platform"]["preview"]
+    assert block["verdict"] == "ready" and block["action"]["title_prefix"] == "【小美专属】"
+    assert block["run"]["skus"] == [{"id": DY_SKU2, "price": "283.00", "stock": 100, "main_price": "315.00"},
+                                    {"id": DY_SKU2B, "price": "261.00", "stock": 30, "main_price": "290.00"}]
+    shown = {f["label"]: f["value"] for f in bot.prm.snapshot()["pending"][0]["platform"]["facts"]}
+    assert shown[f"SKU {DY_SKU2} 均码黑色"] == "日常价 315.00 元 → 渠道价 283.00 元；库存 100 件（主商品可分 500 件）"
+    assert shown["标题前缀"].startswith("【小美专属】（10/12")
+    assert bot.prm.decide(packet["id"], "execute")["ok"]
+    run_one(worker, bot, mac.settings)
+    done = bot.prm.store.packet(packet["id"])
+    assert done["status"] == "approved", done["error"]
+    assert done["platform"]["execution"]["created"]["channel_id"] == DY_CHANNEL
+    sent = []
+    bot.prm._send = lambda chat, text: sent.append((chat, text)) or True
+    bot.prm.send_approved()
+    assert sent == [(CREATOR, f"您的专属链接：{DY_LINK}")]
+    files = [c for c in mac.node.calls() if "agreement" in c]
+    assert len(files) == 3 and len({c["agreement_path"] for c in files}) == 3          # preview, look, create
+    assert all(c["agreement_mode"] == "0o600" and not os.path.exists(c["agreement_path"]) for c in files)
+    assert files[-1]["agreement"]["skus"] == [{"id": DY_SKU2, "price": "283.00", "stock": 100},
+                                              {"id": DY_SKU2B, "price": "261.00", "stock": 30}]
+    assert [c for c in mac.node.calls() if "--execute" in c["argv"]][-1]["argv"][1:3] == ["fxg", "channel-goods-bind"]
 
 
 def test_a_verdict_claude_writes_itself_is_dropped(worker, bot, mac):  # noqa: F811

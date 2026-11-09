@@ -476,6 +476,53 @@ class TestPrmPages:
         assert page.locator(".prm-alerts").count() == 0
         assert prm.sent == []
 
+    def test_review_page_shows_a_channel_links_agreement_sku_by_sku(self, page, prm, tmp_path, monkeypatch):
+        """专属链接 the shop's way (2026-11-09): the card shows what the Mac worked out: the prefix with its count, each
+        SKU's daily price → channel price, its stock and what the main product can spare, a colour without stock, the
+        CLI's own warnings, and in the detail both commands (the read and the preview with the agreement)."""
+        import json as _json
+        from platform_fakes import (DY_ITEM2, DY_SKU2, DY_SKU2B, FakeNode, catalog, dy_agreed_preview, dy_read_preview,
+                                    rule)
+        from src.prm import platforms
+        from src.prm.service import SETTLE_SEC
+
+        node = FakeNode(tmp_path / "mac", monkeypatch)
+        node.rules([
+            rule(["channel-goods-create"], dy_read_preview([(DY_SKU2, "均码黑色", "315.00", 500),
+                                                            (DY_SKU2B, "均码咖啡", "290.00", 0)], item=DY_ITEM2),
+                 execute=False, agreement=False),
+            rule(["channel-goods-create"], dy_agreed_preview([(DY_SKU2, "均码黑色", "315.00", "283.00", 100, 500),
+                                                              (DY_SKU2B, "均码咖啡", "290.00", "261.00", 0, 0)],
+                                                             item=DY_ITEM2), execute=False, agreement=True)])
+        preview = platforms.preview({"action": "dy.channel_goods", "item_id": DY_ITEM2,
+                                     "creator_platform_id": "5100000000000002", "title_prefix": "小美专属"},
+                                    platforms.config(node.settings()), catalog=catalog())
+        assert preview["verdict"] == "ready", preview
+        prm.service.handle({"chat_id": "wxid_creator01", "sender_id": "wxid_creator01", "content": "要链接，前缀：小美专属",
+                            "msg_type": 1, "is_group": False, "timestamp": prm.clock.now})
+        prm.clock.now += SETTLE_SEC + 1
+        job = prm.relay.next_job(0, ("prm",))
+        d = {"intent": "要专属链接", "slots": {}, "stage_proposal": "", "message_kind": "money",
+             "reply_draft": "您的专属链接：{链接}", "attachments_to_send": [], "needs_attention": False,
+             "reason": "kb/合作政策.md", "platform": preview}
+        prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(d, ensure_ascii=False)})
+        prm.relay.tick()
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="平台动作")
+        text = card.inner_text()
+        for expected in ("平台动作：抖店 · 达人专属链接（渠道品）并绑定达人", "预览通过，可以批准执行",
+                         "标题前缀：【小美专属】（10/12 个字符，汉字算 2 个）", "渠道类型：专属达人带货：只绑这一位达人，库存不共享",
+                         f"SKU {DY_SKU2} 均码黑色：日常价 315.00 元 → 渠道价 283.00 元；库存 100 件（主商品可分 500 件）",
+                         f"SKU {DY_SKU2B} 均码咖啡：日常价 290.00 元 → 渠道价 261.00 元；库存 0 件（主商品可分 0 件）",
+                         "提醒：", "主商品这个颜色没有可分的库存", "有效期：长期有效", "仅支持预览查看",
+                         "每个颜色的库存（件）", "每个 SKU 日常价的 9 折，取整到元"):
+            assert expected in text, expected
+        card.locator("button:has-text('看预览明细')").click()
+        detail = card.inner_text()
+        assert "抖店 · 读主商品的 SKU、日常价和可分库存" in detail and "--sale-channel=kol" in detail
+        assert "抖店 · 按约定建渠道品" in detail and "--agreement=" in detail
+
     def test_review_page_drops_a_draft_after_asking(self, page, prm):
         page.goto(f"{BASE_URL}/#/review", timeout=10000)
         page.wait_for_timeout(1500)

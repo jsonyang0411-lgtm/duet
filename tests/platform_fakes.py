@@ -3,9 +3,11 @@
 ``FakeNode`` is a ``node`` executable (a Python script) that answers the way
 xiaohongshu-engineering, douyin-engineering, campaign-engineering and jushuitan-engineering
 do: the rules a test gives say what a command prints (stdout, stderr, exit code); every
-call is logged (argv, cwd, and the order file a ``--spec=`` names, read before the caller
-removes it).  The answers below are built from the CLIs' code and tests (their key names
-are exact; the values are invented, like the CLIs' own fixtures).
+call is logged (argv, cwd, and the order file a ``--spec=`` or the agreement an
+``--agreement=`` names, with its mode, read before the caller removes it).  A rule may say
+``agreement``: it answers only a run with (true) or without (false) an ``--agreement=``.
+The answers below are built from the CLIs' code and tests (their key names are exact; the
+values are invented, like the CLIs' own fixtures).
 """
 
 import json
@@ -40,12 +42,19 @@ FAKE_NODE = textwrap.dedent("""\
         if a.startswith("--spec="):
             entry["spec"] = json.load(open(a[len("--spec="):], encoding="utf-8"))
             entry["spec_mode"] = oct(os.stat(a[len("--spec="):]).st_mode & 0o777)
+        if a.startswith("--agreement="):
+            path = a[len("--agreement="):]
+            entry["agreement"] = json.load(open(path, encoding="utf-8"))
+            entry["agreement_mode"] = oct(os.stat(path).st_mode & 0o777)
+            entry["agreement_path"] = path
     with open(os.environ["FAKE_NODE_LOG"], "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\\n")
     rules = json.load(open(os.environ["FAKE_NODE_RULES"], encoding="utf-8"))
     executing = any(a in ("--execute", "--execute=true") for a in argv)
+    agreed = any(a.startswith("--agreement=") for a in argv)
     for rule in rules:
-        if all(token in argv for token in rule["match"]) and rule.get("execute", executing) == executing:
+        if (all(token in argv for token in rule["match"]) and rule.get("execute", executing) == executing
+                and rule.get("agreement", agreed) == agreed):
             time.sleep(rule.get("sleep", 0))
             out = rule.get("stdout")
             if out is not None:
@@ -95,10 +104,12 @@ class FakeNode:
         return {"platforms": values}
 
 
-def rule(match, stdout=None, *, execute=None, stderr="", exit=0, sleep=0) -> dict:
+def rule(match, stdout=None, *, execute=None, stderr="", exit=0, sleep=0, agreement=None) -> dict:
     out = {"match": list(match), "stdout": stdout, "stderr": stderr, "exit": exit, "sleep": sleep}
     if execute is not None:
         out["execute"] = execute
+    if agreement is not None:
+        out["agreement"] = agreement
     return out
 
 
@@ -168,28 +179,77 @@ def dy_promotion(outcome="PREVIEW") -> dict:
     return dy_result("promotion-create", [row], executed=outcome != "PREVIEW")
 
 
-def dy_create_preview(*, blockers=(), price_kind="pass") -> dict:
-    row = dy_row(DY_ITEM, detail="create a 达人带货 channel product of the main product with 1 SKU(s) "
-                                 "(price 15.00; stock shared with the main product; 长期有效)",
-                 currentValue="(no channel product yet)", blocked=bool(blockers))
-    return dy_result("channel-goods-create", [row], channelGoods={
-        "saleChannel": {"option": "kol", "card": 2, "label": "达人带货", "channelType": 4, "isKolExclusive": False},
-        "skus": [{"skuId": DY_SKU, "name": "红色/M", "mainPrice": "19.99", "channelPrice": "15.00",
-                  "channelStock": "shared with the main product", "assignableStock": 40}],
+# The page's own texts the create command repeats in every answer (douyin-engineering PAGE_WARNINGS, cut short).
+DY_PAGE_WARNINGS = ["创建渠道商品后，主商品仍有可能在商城部分位置展示并售卖，请及时修改主商品相关优惠避免破价造成资损。",
+                    "渠道品链接（直接打开链接无达人信息，仅支持预览查看，下单可能被拦截，请到达人橱窗或直播间下单验证）"]
+SALE_CHANNELS = {"kol": {"option": "kol", "card": 2, "label": "达人带货", "channelType": 4, "isKolExclusive": False},
+                 "kol-exclusive": {"option": "kol-exclusive", "card": 3, "label": "专属达人带货", "channelType": 4,
+                                   "isKolExclusive": True}}
+
+
+def _counted(text: str) -> int:
+    """The page's count (a Han character 2), for the fixtures' own prefixes."""
+    return sum(2 if "\u4e00" <= ch <= "\u9fff" else 1 for ch in text)
+
+
+def _channel_goods(sale, skus, *, item=DY_ITEM, prefix=None, blockers=(), price_kind="pass", lower=False,
+                   warnings=()) -> dict:
+    """``channelGoods`` of a create preview: ``skus`` are ``(sku_id, name, main_price, channel_price, channel_stock,
+    assignable)`` as the CLI prints them (prices "315.00", a stock "增 100" or "shared with the main product")."""
+    title = {"text": "测试贝雷帽 秋冬羊毛款", "platformPrefix": "", "counted": 21, "min": 0, "max": 60}
+    if prefix:
+        title.update(prefix=prefix, prefixCounted=_counted(prefix), prefixMax=12)
+    return {
+        "saleChannel": SALE_CHANNELS[sale],
+        "mainProduct": {"id": item, "channelProductsNow": 0, "perProductLimit": "300",
+                        "saleChannelOperation": {"status": "enable", "reason": ""}},
+        "shopFlag": {"enable_sale_channel_shop": True}, "title": title,
+        "skus": [{"skuId": s, "name": n, "mainPrice": m, "channelPrice": p, "channelStock": c, "assignableStock": a}
+                 for s, n, m, p, c, a in skus],
         "period": "长期有效", "stockDefaultedToZero": False,
-        "priceCheck": {"verdict": price_kind, "kind": price_kind, "reasons": [] if price_kind == "pass" else ["渠道价低于近30天最低价"]},
-        "blockers": list(blockers), "warnings": ["渠道品链接（…）仅支持预览查看，下单可能被拦截"],
-        "created": None, "links": {"channelLink": None, "mainProductLink": None}, "next": None})
+        "priceCheck": {"verdict": price_kind, "kind": price_kind, "existPriceLowerThanMain": lower,
+                       "reasons": [] if price_kind == "pass" else ["渠道价低于近30天最低价"], "warningAccepted": False},
+        "blockers": list(blockers), "warnings": [*warnings, *DY_PAGE_WARNINGS], "redirect": None, "note": None,
+        "requestBody": None if blockers else {"main_product_id": item, "channel_type": 4},
+        "created": None, "links": {"channelLink": None, "mainProductLink": None}, "review": None, "next": None}
 
 
-def dy_create_done(outcome="VERIFIED_SUCCESS", link=DY_LINK) -> dict:
-    row = dy_row(DY_ITEM, outcome, "the platform acknowledged this target with no reported error, and a re-read "
-                                   "shows the requested value", observedValue="created")
+def dy_read_preview(skus, *, item=DY_ITEM, blockers=()) -> dict:
+    """What ``fxg channel-goods-create --product-id … --sale-channel=kol`` prints: the first read of a 专属链接's
+    preview (达人带货, price and stock following the main product).  ``skus`` are ``(sku_id, name, main_price,
+    assignable)``."""
+    row = dy_row(item, detail=(f"blocked ({'; '.join(blockers)}); nothing would be sent" if blockers else
+                               f"create a 达人带货 channel product of the main product with {len(skus)} SKU(s) "
+                               "(price follows the main product; stock shared with the main product; 长期有效)"),
+                 currentValue="(no channel product yet)", blocked=bool(blockers))
+    return dy_result("channel-goods-create", [row], channelGoods=_channel_goods(
+        "kol", [(s, n, m, "follows the main product", "shared with the main product", a) for s, n, m, a in skus],
+        item=item, blockers=blockers))
+
+
+def dy_agreed_preview(skus, *, item=DY_ITEM, prefix="【小美专属】", sale="kol-exclusive", blockers=(),
+                      price_kind="pass", warnings=()) -> dict:
+    """What ``fxg channel-goods-create --agreement=<file>`` prints without --execute.  ``skus`` are ``(sku_id, name,
+    main_price, channel_price, stock, assignable)`` (``stock`` None: shared); a 9 折 price checks ``pass`` with
+    ``existPriceLowerThanMain`` true (2026-11-09, the real ones)."""
+    row = dy_row(item, detail=(f"blocked ({'; '.join(blockers)}); nothing would be sent" if blockers else
+                               f"create a {SALE_CHANNELS[sale]['label']} channel product of the main product with "
+                               f"{len(skus)} SKU(s) (channel price set; 增 stock set; 长期有效; title prefix {prefix})"),
+                 currentValue="(no channel product yet)", blocked=bool(blockers))
+    return dy_result("channel-goods-create", [row], channelGoods=_channel_goods(
+        sale, [(s, n, m, p, "shared with the main product" if c is None else f"增 {c}", a) for s, n, m, p, c, a in skus],
+        item=item, prefix=prefix, blockers=blockers, price_kind=price_kind, lower=True, warnings=warnings))
+
+
+def dy_create_done(outcome="VERIFIED_SUCCESS", link=DY_LINK, item=DY_ITEM) -> dict:
+    row = dy_row(item, outcome, "the platform acknowledged this target with no reported error, and a re-read "
+                                "shows the requested value", observedValue="created")
     return dy_result("channel-goods-create", [row], executed=True, channelGoods={
-        "created": {"channelId": DY_CHANNEL, "productId": DY_ITEM},
+        "created": {"channelId": DY_CHANNEL, "productId": item},
         "links": {"channelLink": link, "mainProductLink": link.split("&channel_id")[0] if link else None},
         "review": "渠道品已新建成功，审核通过后生效",
-        "next": f"dy fxg channel-goods-bind --product-id {DY_ITEM} --channel-id {DY_CHANNEL} --uid <达人 UID,…> --execute"})
+        "readBack": {"reads": 1, "listRowFound": True, "status": 2, "statusName": "售卖中", "checkStatus": 3},
+        "next": f"dy fxg channel-goods-bind --product-id {item} --channel-id {DY_CHANNEL} --uid <the 达人 UID (exactly one)> --execute"})
 
 
 def dy_bind_preview(*, blocked=False, already=False) -> dict:
