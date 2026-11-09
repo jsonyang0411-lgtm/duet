@@ -365,8 +365,10 @@ CREATE TABLE IF NOT EXISTS boss_groups (
 -- came late, after the bot had given up).  ``preview``: the fingerprint of the preview a platform draft's notification
 -- showed (「执行」 runs only that one; "": it said it cannot run from WeChat).  ``pictures_ok`` (2026-11-10): 0 while a
 -- picture the admin was to see with it (its 直播手卡, a 对图单) did not reach the chat (not on this PC, too big, not
--- taken): nothing but 2 / 不发 is done from WeChat until they went again.  The 8.2 clean-up drops a deal's closed rows,
--- cuts the rest.
+-- taken): nothing but 2 / 不发 is done from WeChat until they went again.  ``notice`` / ``seen`` (2026-11-10): which
+-- notice of the draft is the latest (1 the first; a fresh one when the draft got new attention after it, a recall say,
+-- counts up) and what it showed of the draft's attention (``wechat_review.attention_seen``): an answer to an older one,
+-- or while they differ, does nothing.  The 8.2 clean-up drops a deal's closed rows, cuts the rest.
 CREATE TABLE IF NOT EXISTS wechat_reviews (
     packet_id INTEGER PRIMARY KEY,
     deal_id INTEGER NOT NULL,
@@ -380,6 +382,8 @@ CREATE TABLE IF NOT EXISTS wechat_reviews (
     preview TEXT NOT NULL DEFAULT '',
     late_told_at REAL,
     pictures_ok INTEGER NOT NULL DEFAULT 1,
+    notice INTEGER NOT NULL DEFAULT 1,
+    seen TEXT NOT NULL DEFAULT '',
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS wechat_reviews_deal ON wechat_reviews(deal_id);
@@ -431,6 +435,10 @@ _ADDED_COLUMNS = (
     ("wechat_reviews", "late_told_at", "REAL"),
     # ... and its pictures (合并以后 2026-11-10): the 直播手卡 and 对图单 the admin was to see reached the chat
     ("wechat_reviews", "pictures_ok", "INTEGER NOT NULL DEFAULT 1"),
+    # ... and a fresh notice after the draft changed (integrated review 2026-11-10 A-F3): the latest's number and
+    # what it saw
+    ("wechat_reviews", "notice", "INTEGER NOT NULL DEFAULT 1"),
+    ("wechat_reviews", "seen", "TEXT NOT NULL DEFAULT ''"),
 )
 
 # What the creators wrote, or our side's own words, waiting for the next draft job.
@@ -2135,16 +2143,18 @@ class PrmStore:
         return [packet_view(dict(r)) for r in rows]
 
     def add_wechat_review(self, packet_id: int, deal_id: int, now: Optional[float] = None, *,
-                          state: str = "notified", preview: str = "", pictures_ok: bool = True) -> bool:
+                          state: str = "notified", preview: str = "", pictures_ok: bool = True, seen: str = "") -> bool:
         """A draft is (being) told to the admin's chat: its row in ``state`` (``telling`` before the send), with the
-        fingerprint of the preview a platform draft's notification shows, and whether every picture it is to be looked
-        at with can reach the chat (``pictures_ok``); True when it had no row before."""
+        fingerprint of the preview a platform draft's notification shows, whether every picture it is to be looked
+        at with can reach the chat (``pictures_ok``) and what the notification saw of its attention (``seen``); True
+        when it had no row before."""
         now = time.time() if now is None else now
         with self._lock:
             cur = self._conn.execute(
                 "INSERT OR IGNORE INTO wechat_reviews (packet_id, deal_id, state, notified_at, preview, pictures_ok,"
-                " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (int(packet_id), int(deal_id), str(state), now, str(preview or ""), int(bool(pictures_ok)), now))
+                " seen, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (int(packet_id), int(deal_id), str(state), now, str(preview or ""), int(bool(pictures_ok)),
+                 str(seen or ""), now))
             self._conn.commit()
             return cur.rowcount == 1
 
@@ -2215,10 +2225,10 @@ class PrmStore:
 
     def set_wechat_review(self, packet_id: int, states: tuple = (), now: Optional[float] = None, **fields) -> bool:
         """Compare-and-set: the row's ``fields`` (state, notified_at, proposed, proposed_at, decision, answered_at,
-        told_at, late_told_at, pictures_ok) change only while it is in one of ``states`` (any state when empty); True
-        when it changed."""
+        told_at, late_told_at, pictures_ok; and a fresh notice's notice, seen, preview) change only while it is in one
+        of ``states`` (any state when empty); True when it changed."""
         allowed = {"state", "notified_at", "proposed", "proposed_at", "decision", "answered_at", "told_at", "late_told_at",
-                   "pictures_ok"}
+                   "pictures_ok", "notice", "seen", "preview"}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"not a wechat_reviews field: {sorted(unknown)}")

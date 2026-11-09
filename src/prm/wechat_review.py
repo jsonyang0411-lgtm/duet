@@ -9,12 +9,18 @@ private chat, or a 老板拉的群 the bot took over) goes to the admin as one m
 first (the packet id, the console's 「DRAFT #12」), the creator and where it goes (私聊 / 群里「群名」, with the console's
 group warning; a draft the bot started itself is aimed first, as ``send_approved`` aims it, and waits untold while she
 can be reached nowhere), her last line(s) it answers (short; numbers as their placeholders, addresses cut to province
-and city, a labelled 微信号 masked), the draft in full with its placeholders (their masked numbers after it, as the
-console's legend), a shipping notice's waybill, its files, and how to answer.  A draft with a platform action lists the
-action with every line its preview has (``_platform_lines``: what will be made, for whom, with which values; a sample
-order's receiver only by province and city; the creator's platform ids, and the ids of the preview's plan, by their last
-characters, in the problems too; the preview's verdict and problems), or says how many lines are left out (more than
-LINES_MAX, or more than fit in NOTICE_CHARS, the relay's send limit: then it cannot run from WeChat); the pictures the
+and city, a labelled 微信号 masked), its 要注意 (the same, at most NOTE_CHARS) and the group lines it did not hear
+(``meta.unheard``), the draft in full with its placeholders (their masked numbers after it, as the console's legend), a
+shipping notice's waybill, its files, and how to answer.  A draft with a platform action lists the action with every
+line its preview has (``_platform_lines``: what will be made, for whom, with which values; a sample order's receiver
+only by province and city, an address a fact or a problem quotes as well; the preview's verdict and problems), or says
+how many lines are left out (more than LINES_MAX, or more than fit in NOTICE_CHARS, the relay's send limit: then it
+cannot run from WeChat; nor when its 要注意 had to be cut: REASON_LONG).  Her platform ids, in every text this chat
+gets (the head's 称呼, her lines, the 要注意, the platform lines, every reply; never the draft itself, the words she
+gets and the admin approves), by their last characters (integrated
+review 2026-11-10 B-M1 / B-M2: ``_ids_of``, every id of hers the draft and her deal know, the action's and its plan's,
+her sample orders' UIDs and 抖音号, a 专属链接 step's round UID, her linked 抖音号, the invite ledger's 抖音号, a 称呼
+that is 「抖音-<抖音号>」; and any id right after 「UID」「抖音号」「uid」「aweme」…: ``_mask_ids``); the pictures the
 admin is to look at follow it (``_pictures``: its 直播手卡, 「附了 N 张手卡（图在下面）：看过再回 1」, never the skill's zip
 nor cards out of date; ``meta.operator_files``, the 对图单: the relay's own files).  Until every one of them went, the
 draft is the console's in WeChat (``pictures_ok``, 2026-11-10): one not on this PC or too big (PICTURE_MAX_BYTES), the
@@ -23,13 +29,23 @@ right after says it, and they are sent again (when they all went: one more line 
 执行 / 改 / other words for it answer PICTURES_MISSING and do nothing, 2 / 不发 drop it.  None for what goes out by itself
 (a kind's gate ``auto``, 下班时段 and 自动模式 approve it at once: never pending; 开场白自动发: ``meta.auto_at`` while
 ``send_due_openings`` still takes it), a 百应 draft (``BUYIN_TOOL``: copied into 百应 by hand), a holding reply (no
-packet), anything while ADMIN_WXID is empty (``status`` says why), nor a draft that was waiting already before the
+packet), anything while ADMIN_WXID is empty, a group's id or a registered creator's wxid (``_admin_problem``: ``status``
+says why, and nothing read there is an answer), nor a draft that was waiting already before the
 switch was first on (``ON_AT`` in prm_meta, less BACKLOG_SEC: the console counts those; a run with the switch off
 forgets ON_AT, the next switch-on starts afresh).  Each draft's row is written before its send (``telling``) and marked
 told after it: a send cut off between the two is never sent again, the console says it may have gone out.  PER_ROUND
 sends a round at most; a send WeChat does not take ends the round and the admin's chat is tried again 10 s later,
 doubling, at most 2 minutes apart, each message 6 times in all (as the relay's approval requests, src/relay/service.py
 ``_send_asks``); no draft ever waits for its notification.
+
+A draft told here that changes while it waits (``attention_seen``, the row's ``seen``: her recall puts its note first
+in the 要注意, the 要注意 changes, lines of the group come that it did not hear; integrated review 2026-11-10 A-F3) is
+told again on the same number (``_tell_again``, before any new draft of the round): 「#12 草稿（第 2 次通知）」, what
+changed first, then the draft as a notice shows it now (its pictures not sent again; a proposed edit written before
+the change dropped, the preview it lets 「执行」 run as it is now).  Until it went, and for an answer to an older
+notice (or to a 改成 question asked before it, or an unquoted 「发 12」 written before it could be read), nothing but
+2 / 不发 is done: the bot says STALE_TEXT (``_changed_after``).  WeChat not taking it: the row stays as it was, tried
+again as any notification.
 
 Answers (``answer``, the route step ``wechat_review``, before the relay or an admin command can take them): typed text
 in the admin's own private chat, never a voice message (heard wrong, a 「不发」 could send: the bot says to type).  A
@@ -76,7 +92,8 @@ finished) it does nothing (a bare 「1…」 the bot would have taken gets BARE_
 - A platform action runs only by 「执行」 quoting its notification, or 「执行 12」 (the console's 批准并执行,
   ``PrmService.decide`` "execute", every check of it), and only the preview its notification showed (``preview_stamp``,
   checked again by ``decide`` in the step that moves the draft: one it said cannot run, or one previewed again since, is
-  the console's); 1 / 好 / 发 never run one, 「改」 of its reply stays the console's.  A sample order the photo check
+  the console's; so is one whose 要注意 it cut, REASON_LONG, integrated review 2026-11-10 A-L1); 1 / 好 / 发 never run
+  one, 「改」 of its reply stays the console's.  A sample order the photo check
   holds (PRM_DRAFT_CONTEXT on: hats its preview held for photos, a preview the Mac did not check by photo, one that let
   a hat go by a 「对过图了」 taken back since) says so instead of 「执行」, and the console's 「对过图了」 / 「重新预览」 are
   how on (``_photo_stop``; 合并 draft-context 2026-11-10).  When the execution ends (the reply
@@ -162,8 +179,31 @@ PICTURE_MAX_BYTES = 20 * 1024 * 1024   # a picture for the admin bigger than thi
 # done for it from WeChat (2026-11-10), the console's alone until they went again
 PICTURES_MISSING = "图没发过来：这一份请在控制台看过再批"
 CARDS_META = "handcards"    # a packet's meta of its 直播手卡 (``service.HANDCARDS``: the service imports this module)
+# A draft told here that got new attention after its notice (her recall, its 要注意 changed, lines of the group it did
+# not hear: ``attention_seen``; integrated review 2026-11-10 A-F3): a fresh notice on the same number, 「#12 草稿（第 2 次
+# 通知）」; an answer to an older one, or while the fresh one is not out, does nothing but this (2 / 不发 still drop it)
+STALE_TEXT = "这份草稿在通知以后有变化，看最新那条通知再回"
+NOTICED_KEPT = 50           # fresh notices remembered with their time (an unquoted 「发 12」 written before one: stale)
+# A platform draft whose 要注意 is longer than NOTE_CHARS: the notification cannot show it whole, so 「执行」 is the
+# console's (integrated review 2026-11-10 A-L1)
+REASON_LONG = "要注意的话太长，请在控制台看完再批"
+RECALL_WORDS = "撤回了一条消息"   # ... a recall's note in a draft's 要注意 (``service.recall_note``): 「她撤回了一条消息」
 
 _HEAD = re.compile(r"^\s*[#＃](\d{1,9})\s*(草稿|改成)")
+_AGAIN = re.compile(r"^\s*[#＃]\d{1,9}\s*草稿（第\s*(\d{1,4})\s*次通知）")    # a fresh notice's head (STALE_TEXT)
+# A creator's platform id right after the word that says what it is, wherever a text for the admin names it (integrated
+# review 2026-11-10 B-M1 / B-M2, beside the ids the draft's data has: ``_ids_of``): 「UID 1234567890」「抖音号：xm_test01」
+# 「aweme_id=…」, by its last characters (an English label glued to a word that is no id, 「uid_source」, stays)
+_ID_AFTER = re.compile(r"(?:(?<![A-Za-z0-9_])(?P<latin>UID|uid|Uid|userId|userid|aweme(?:_?[Ii][Dd])?)"
+                       r"|(?P<han>抖音号|小红书号))"
+                       r"(?P<sep>\s*[:：=＝]\s*|\s*(?:是|为)\s*|\s*[（(「『“\"']\s*|\s+)?"
+                       r"(?P<id>[A-Za-z0-9_][A-Za-z0-9_.\-]{4,}[A-Za-z0-9_])")
+# ... the name a 直播手卡's 场次 was cut to (handcards ``channel_of``: 「称呼截成「…专属」」 in its 要注意), when it is her
+# 抖音号 (a deal named 「抖音-<抖音号>」 by the friend add) or looks like one
+_CALL_CUT = re.compile(r"(称呼截成「)([^「」\n]+?)(专属」)")
+_ID_LIKE = re.compile(r"[A-Za-z0-9_.\-]{6,}")
+# ... and a creator whose 称呼 is the friend add's 「抖音-<抖音号>」 (no nickname known): that 抖音号 is one of her ids
+_PLATFORM_NAME = re.compile(r"^\s*(?:抖音|小红书|淘宝|快手|视频号)\s*[-－_—:：·]+\s*([A-Za-z0-9_.\-]{5,})\s*$")
 _STAMP = re.compile(r"^\[\d{2}-\d{2} \d{2}:\d{2}\]\s*")
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
 _VOICE = re.compile(r"^\[语音\]\s*(.*)$", re.S)
@@ -193,6 +233,12 @@ _QUESTION_AFTER = ("没有", "吗", "么", "呢", "没", "了")   # ... after �
 
 NO_ADMIN_WHY = ("微信里审批草稿打开了，但没填管理员 wxid（ADMIN_WXID）：草稿发不到微信里。到「中转代理」页的设置里填好"
                 "「管理员 wxid」，再重启机器人")
+# ADMIN_WXID that is no admin's own one-to-one chat (integrated review 2026-11-10 B-L8): nothing is told there, nothing
+# read there is an answer
+GROUP_ADMIN_WHY = ("管理员 wxid（ADMIN_WXID）填的是一个群的 id（…@chatroom）：草稿只发到管理员自己的私聊，现在一份都不发。"
+                   "到「中转代理」页的设置里改成管理员自己的 wxid，再重启机器人")
+CREATOR_ADMIN_WHY = ("管理员 wxid（ADMIN_WXID）是一位登记过的达人的 wxid：草稿不能发到达人的私聊里，现在一份都不发。"
+                     "到「中转代理」页的设置里改成管理员自己的 wxid，再重启机器人")
 NO_SEND_WHY = "机器人没有连着微信：草稿发不到管理员微信里"
 EDGE_WHY = "Mac 端（WECHAT_BACKEND=edge）不能在微信里审批草稿：管理员的私聊在 Windows 上读"
 VOICE_TEXT = "回草稿要打字：引用那条通知回 1 发出、2 不发，或者回「发 12」这样带编号；语音不算（免得听错）"
@@ -328,6 +374,58 @@ def _tail(value) -> str:
     return value if len(value) <= TAIL_CHARS else "…" + value[-TAIL_CHARS:]
 
 
+def _after_label(m: re.Match) -> str:
+    if m.group("latin") and not m.group("sep") and not m.group("id")[0].isdigit():
+        return m.group(0)                             # (「uid_source」: one word, no id after a label)
+    return m.group(0)[:m.start("id") - m.start()] + _tail(m.group("id"))
+
+
+def _mask_ids(text, ids) -> str:
+    """``text`` as the admin's chat shows it: every id of ``ids`` (a draft's: ``WechatReview._ids_of``, longest first)
+    by its last characters, any other id right after 「UID」「抖音号」「uid」「aweme」… too (``_ID_AFTER``), a 直播手卡's
+    场次 cut to her 抖音号 (``_CALL_CUT``), a labelled 微信号 / a phone number masked."""
+    text = str(text if text is not None else "")
+    for creator_id in ids:
+        text = text.replace(creator_id, _tail(creator_id))
+    text = _ID_AFTER.sub(_after_label, text)
+
+    def call(m: re.Match) -> str:
+        name = m.group(2).strip()
+        mine = any(len(name) >= TAIL_CHARS + 1 and str(i).lower().startswith(name.lower()) for i in ids)
+        return m.group(1) + _tail(name) + m.group(3) if mine or _ID_LIKE.fullmatch(name) else m.group(0)
+
+    return contact.mask_contacts(_CALL_CUT.sub(call, text))
+
+
+def attention_seen(packet: dict) -> str:
+    """What a notification shows of a draft's attention, as a fingerprint (``wechat_reviews.seen``; never her words):
+    whether it asks for attention and its reason (``r``, a hash; ``k``: how many recalls it tells of, a recall puts its
+    note first: ``PrmStore.hold_for_review``, ``service.recall_note``), and whether lines of the group came that it did
+    not hear (``u``, ``meta.unheard``: more of them later are the same news, never a notice each)."""
+    meta = packet.get("meta") if isinstance(packet.get("meta"), dict) else {}
+    unheard = meta.get("unheard")
+    attention = bool(packet.get("needs_attention"))
+    reason = str(packet.get("reason") or "") if attention else ""
+    said = hashlib.sha256(reason.encode("utf-8")).hexdigest()[:16] if reason else ""
+    return json.dumps({"a": int(attention), "r": said, "k": reason.count(RECALL_WORDS),
+                       "u": int(isinstance(unheard, int) and not isinstance(unheard, bool) and unheard > 0)},
+                      sort_keys=True)
+
+
+def _seen_of(text) -> dict:
+    try:
+        value = json.loads(text or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _notice_no(text) -> int:
+    """Which notice of its draft a notification is (its head: 「#12 草稿（第 2 次通知）」; the first has no number)."""
+    m = _AGAIN.match(str(text or ""))
+    return int(m.group(1)) if m else 1
+
+
 def preview_stamp(preview) -> str:
     """The fingerprint of a platform draft's preview: 「执行」 runs only the one its notification showed
     (``PrmService.decide`` "execute" ``stamp``: checked again in the step that moves the draft)."""
@@ -345,12 +443,13 @@ class Said:
     head: str = ""                  # quote: 草稿 (a notification) or 改成 (the bot's question about a proposed edit)
     asked: Optional[str] = None     # quote of a question: the proposal it showed (None: not held whole)
     quoted: bool = False            # text quoting another message (a relay result, say): never a bare 1 / 2
+    notice: int = 1                 # quote of a notification: which notice of its draft (``_notice_no``)
 
 
 def read(msg: dict) -> Optional[Said]:
     """What the admin's message says (pure): typed text (``msg_type`` 1), a quote (49 with ``quoted_content``), or a
     voice message's words; None for anything else.  A quote of another message than a notification or a question is
-    ``text`` (only its numbered answers count)."""
+    ``text`` (only its numbered answers count); a quote of a notification says which notice of its draft it is."""
     try:
         msg_type = int(msg.get("msg_type", 1) or 1)
     except (TypeError, ValueError):
@@ -366,7 +465,8 @@ def read(msg: dict) -> Optional[Said]:
     head = _HEAD.match(quoted) if quoted else None
     if head is None:
         return Said("text", content, quoted=bool(quoted))
-    return Said("quote", content, int(head.group(1)), head.group(2), _asked(quoted) if head.group(2) == "改成" else None)
+    return Said("quote", content, int(head.group(1)), head.group(2), _asked(quoted) if head.group(2) == "改成" else None,
+                notice=_notice_no(quoted))
 
 
 @dataclass
@@ -390,6 +490,7 @@ class _Last:
     asked: Optional[str] = None
     text: str = ""
     wechat_at: Optional[float] = None
+    notice: int = 1                 # a notification: which notice of its draft (``_notice_no``)
 
 
 def relay_busy(relay_store, chat_id: str, now: float) -> bool:
@@ -453,6 +554,7 @@ class WechatReview:
         self._started = clock()
         self._last: Optional[_Last] = None            # the last thing the bot said in the admin's chat
         self._last_review: Optional[_Last] = None     # ... the last of it that was a notification or a 改成 question
+        self._noticed: dict[int, _Last] = {}          # ... each draft's latest fresh notice (2nd, 3rd …), NOTICED_KEPT
         self._said_lock = threading.RLock()           # ... set by the sender thread, read back by the poll thread
         self._read_backs: deque = deque(maxlen=READ_BACKS)   # (text, WeChat's time, this PC's) read back before noted
         self._seen: deque = deque(maxlen=SEEN_IDS)
@@ -478,11 +580,11 @@ class WechatReview:
         the switch was first on (``older``: the console's only)."""
         if not self._switch:
             return {"on": False}
-        why = EDGE_WHY if self._edge else NO_ADMIN_WHY if not self.admin else NO_SEND_WHY if self._send is None else ""
+        why = (EDGE_WHY if self._edge else self._admin_problem() or (NO_SEND_WHY if self._send is None else ""))
         if why:
             return {"on": True, "why": why, "open": 0, "unsent": 0, "unsure": 0, "older": 0}
         unsent = sum(1 for (what, _), failures in list(self._failures.items())
-                     if what == "draft" and failures >= SEND_TRIES)
+                     if what in ("draft", "again") and failures >= SEND_TRIES)
         older = [p for p in self._store.wechat_review_backlog(self._cutoff()) if not self._goes_by_itself(p)]
         return {"on": True, "why": "", "open": len(self._store.wechat_reviews_open()), "unsent": unsent,
                 "unsure": len(self._store.wechat_reviews_unsure()), "older": len(older)}
@@ -503,19 +605,51 @@ class WechatReview:
 
     @property
     def ready(self) -> bool:
-        return self.on and bool(self.admin) and self._send is not None
+        return self.on and self._send is not None and not self._admin_problem()
+
+    def _admin_problem(self) -> str:
+        """Why ADMIN_WXID is no chat to tell the drafts in ("" when it is one): empty, a group's id (…@chatroom), or the
+        wxid of a registered creator (her own chat: integrated review 2026-11-10 B-L8).  Nothing is told then, nothing
+        read there is an answer, and the console says why (``status``)."""
+        if not self.admin:
+            return NO_ADMIN_WHY
+        if self.admin.endswith("@chatroom"):
+            return GROUP_ADMIN_WHY
+        try:
+            if self._store.party_by_wxid(self.admin, include_inactive=True) is not None:
+                return CREATOR_ADMIN_WHY
+        except Exception:
+            logger.exception("PRM: whether ADMIN_WXID is a creator's could not be read")
+        return ""
 
     def sweep(self) -> int:
-        """One round of the sender thread: the drafts waiting for a person not told yet (oldest first; their pictures
-        right after each notification, ``_pictures_went``), the pictures of told drafts that did not reach the chat
-        (again, each draft 10 s doubling, at most 2 minutes apart, SEND_TRIES times; not while one of them is not on
-        this PC or too big), then what came of the decisions taken here (a send that failed, a platform action's end,
-        its late result); PER_ROUND sends at most.  A send WeChat does not take ends the round, and the admin's chat waits before the next one (RETRY_SEC:
-        10 s, doubling, at most 2 minutes apart); a message not taken SEND_TRIES times is not tried again this run
-        (logged; the console still has the draft).  Returns how many messages went to the admin."""
+        """One round of the sender thread: first the drafts told here that got new attention since their latest notice
+        (``attention_seen``: her recall, a 要注意 changed, lines of the group the draft did not hear; a fresh notice on
+        the same number that says what changed, ``_tell_again``), then the drafts waiting for a person not told yet
+        (oldest first; their pictures right after each notification, ``_pictures_went``), the pictures of told drafts
+        that did not reach the chat (again, each draft 10 s doubling, at most 2 minutes apart, SEND_TRIES times; not
+        while one of them is not on this PC or too big), then what came of the decisions taken here (a send that
+        failed, a platform action's end, its late result); PER_ROUND sends at most.  A send WeChat does not take ends
+        the round, and the admin's chat waits before the next one (RETRY_SEC: 10 s, doubling, at most 2 minutes apart);
+        a message not taken SEND_TRIES times is not tried again this run (logged; the console still has the draft).
+        Returns how many messages went to the admin."""
         if not self.ready or self._clock() < self._wait_until:
             return 0
         sent = tried = 0
+        for row in self._store.wechat_reviews_open():
+            change = self._changed(row)
+            if change is None:
+                continue
+            if tried >= PER_ROUND:
+                return sent
+            tried += 1
+            told = self._tell_again(row, *change)
+            if told is False:
+                return sent                                # (the chat did not take it: the round ends)
+            if told is None:
+                tried -= 1                                 # (nothing went: no send of the round)
+                continue
+            sent += 1
         for packet in self._store.wechat_review_due(self._cutoff()):
             key = ("draft", packet["id"])
             if self._goes_by_itself(packet) or self._failures.get(key, 0) >= SEND_TRIES:
@@ -536,9 +670,11 @@ class WechatReview:
             if current is None or current["status"] != PENDING:
                 continue                                   # decided (or out of date) meanwhile
             # (a draft with pictures to look at is the console's in WeChat until every one of them went: never one
-            # approved from WeChat while its pictures are still on the way, or never came)
+            # approved from WeChat while its pictures are still on the way, or never came; ``seen``: what this
+            # notification showed of its attention, a change after it is told again)
             if not self._store.add_wechat_review(packet["id"], packet["deal_id"], self._clock(), state=TELLING,
-                                                 preview=stamp, pictures_ok=not pictures):
+                                                 preview=stamp, pictures_ok=not pictures,
+                                                 seen=attention_seen(packet)):
                 continue                                   # (told already)
             tried += 1
             if not self._try(key, text, f"the notification of draft {packet['id']}"):
@@ -592,6 +728,77 @@ class WechatReview:
                 self._store.set_wechat_review(row["packet_id"], (ANSWERED,), now, told_at=now)
             sent += 1
         return sent
+
+    def _changed(self, row: dict) -> Optional[tuple]:
+        """A draft told here that is still waiting and got new attention after its latest notice: ``(packet, seen)``,
+        the draft and what a fresh notice shows of it (``attention_seen``); None otherwise (a row from before the
+        fingerprint was kept: what it showed is not known, the draft as it is now counts as seen; a fresh notice not
+        taken SEND_TRIES times this run: the console's, every answer to the old one stale)."""
+        number = row["packet_id"]
+        if self._failures.get(("again", number), 0) >= SEND_TRIES:
+            return None
+        packet = self._store.packet(number)
+        if packet is None or packet["status"] != PENDING:
+            return None
+        seen, old = attention_seen(packet), str(row.get("seen") or "")
+        if seen == old:
+            return None
+        if not old:
+            self._store.set_wechat_review(number, (row["state"],), self._clock(), seen=seen)
+            return None
+        return packet, seen
+
+    def _tell_again(self, row: dict, packet: dict, seen: str) -> Optional[bool]:
+        """The fresh notice of a draft that changed after its latest one (``_changed``): the same number, 「#12 草稿（第 N
+        次通知）」, what changed first (``_what_changed``), then the draft as a notice shows it now (its pictures are
+        not sent again: they went with the first, or still go as before, ``pictures_ok``).  The row moves first
+        (``telling``, its notice counted up, what it shows seen, the preview it lets 「执行」 run, a proposed edit
+        dropped: it was written before the change), the notice after it; WeChat not taking it puts the row back as it
+        was (every answer stays stale meanwhile: ``_changed_after``).  True: told; False: the chat did not take it;
+        None: nothing sent (the draft was decided, the row moved, the notice could not be written)."""
+        number = row["packet_id"]
+        notice = int(row.get("notice") or 1) + 1
+        key = ("again", number)
+        try:
+            text, stamp, _ = self._notice(packet, again={"notice": notice, "change": self._what_changed(row, packet),
+                                                         "pictures_ok": bool(row.get("pictures_ok", 1))})
+        except Exception:
+            logger.exception("PRM: the fresh notification of draft %d could not be written; not told", number)
+            self._failures[key] = SEND_TRIES
+            return None
+        current = self._store.packet(number)
+        if current is None or current["status"] != PENDING:
+            return None                                    # (decided meanwhile)
+        before = {"state": row["state"], "notice": notice - 1, "seen": str(row.get("seen") or ""),
+                  "preview": str(row.get("preview") or ""), "proposed": str(row.get("proposed") or "")}
+        if not self._store.set_wechat_review(number, (row["state"],), self._clock(), state=TELLING, notice=notice,
+                                             seen=seen, preview=stamp, proposed=""):
+            return None                                    # (answered meanwhile: looked at again next round)
+        if not self._try(key, text, f"the fresh notification of draft {number}"):
+            self._store.set_wechat_review(number, (TELLING,), self._clock(), **before)
+            return False
+        now = self._clock()
+        self._store.set_wechat_review(number, (TELLING,), now, state=NOTIFIED, notified_at=now)
+        logger.info("PRM: draft %d told to the admin's chat again (notice %d: it changed after the last one)", number,
+                    notice)
+        return True
+
+    def _what_changed(self, row: dict, packet: dict) -> str:
+        """The fresh notice's first words: what is new since the latest notice of the draft (``seen`` against now)."""
+        old, new = _seen_of(row.get("seen")), _seen_of(attention_seen(packet))
+        bits = []
+        if new.get("a") and (old.get("r") != new.get("r") or not old.get("a")):
+            recalled = int(new.get("k") or 0) > int(old.get("k") or 0)     # (her recall's note, put first in it)
+            bits.append("她撤回了一条消息（见「要注意」）" if recalled else "要注意有新的（见下面）")
+        elif old.get("a") and not new.get("a"):
+            bits.append("不用再特别注意了")
+        if new.get("u") and not old.get("u"):
+            unheard = (packet.get("meta") or {}).get("unheard")
+            bits.append(f"群里后来又有 {unheard} 句话这份草稿没听到" if isinstance(unheard, int) else
+                        "群里后来又有话这份草稿没听到")
+        elif old.get("u") and not new.get("u"):
+            bits.append("群里的话都听到了")
+        return "；".join(bits) or "要注意有变化"
 
     def _goes_by_itself(self, packet: dict) -> bool:
         """开场白没人处理就自动发 (PRM_OPENING_AUTO_MIN): ``send_due_openings`` sends it by itself when its time comes."""
@@ -724,18 +931,20 @@ class WechatReview:
         return True
 
     def _pictures_how(self, packet: dict) -> str:
-        """How a draft whose pictures came later is answered now (the notification's own words: quoting it)."""
+        """How a draft whose pictures came later is answered now (the notification's own words: quoting it; the
+        latest one when it was told again, ``_tell_again``)."""
         number = packet["id"]
+        row = self._store.wechat_review(number) or {}
+        which = "最新那条通知" if int(row.get("notice") or 1) > 1 else "那条通知"
         if self._platform(packet):
-            row = self._store.wechat_review(number) or {}
             told = str(row.get("preview") or "")
             if (told and told == preview_stamp((packet.get("platform") or {}).get("preview"))
                     and not self._photo_stop(packet)):
-                return f"看过再引用那条通知回「执行」（或者回「执行 {number}」）"
+                return f"看过再引用{which}回「执行」（或者回「执行 {number}」）"
             return f"这一份微信里还是不能执行，请到控制台处理；不要的话回「不发 {number}」"
         if self._group(packet):
-            return f"看过再引用那条通知回 1；不发就回「不发 {number}」"
-        return f"看过再引用那条通知回 1（或者回「发 {number}」）"
+            return f"看过再引用{which}回 1；不发就回「不发 {number}」"
+        return f"看过再引用{which}回 1（或者回「发 {number}」）"
 
     def _pictures_stop(self, row: Optional[dict], packet: Optional[dict]) -> str:
         """「#N 图没发过来：…」 for a waiting draft whose pictures did not reach the admin's chat (``pictures_ok`` 0): only 2
@@ -743,6 +952,40 @@ class WechatReview:
         if not row or row.get("pictures_ok", 1) or not packet or packet.get("status") != PENDING:
             return ""
         return f"#{packet['id']} {PICTURES_MISSING}"
+
+    def _changed_after(self, row: Optional[dict], packet: Optional[dict], *, quoted: Optional[int] = None,
+                       question: bool = False, written: Optional[float] = None) -> str:
+        """「#12 这份草稿在通知以后有变化，看最新那条通知再回」 when an answer to a waiting draft told here must not act on
+        it (integrated review 2026-11-10 A-F3), "" when it may: the draft got new attention after its latest notice
+        (``attention_seen`` against the row's ``seen``: the fresh notice is not out yet, or WeChat did not take it);
+        the answer quotes (or a bare one answers) another notice than the latest (``quoted``: which one), or a 改成
+        question asked before the latest one (``question``: its proposed edit went with the fresh notice); an answer
+        that names the draft by its number without a quote written before the latest notice (a 2nd or later) could be
+        read (``written``, WeChat's time: ``_read_latest``).  2 / 不发 never come here: dropping it sends nothing."""
+        if not row or not packet or packet.get("status") != PENDING:
+            return ""
+        number, seen, latest = packet["id"], str(row.get("seen") or ""), int(row.get("notice") or 1)
+        if seen and seen != attention_seen(packet):
+            gone = self._failures.get(("again", number), 0) >= SEND_TRIES
+            return f"#{number} {STALE_TEXT}" + ("（新的通知发不过来：这一份请在控制台处理）" if gone else
+                                                "（新的通知马上发过来）")
+        if quoted is not None and quoted != latest:
+            return f"#{number} {STALE_TEXT}"
+        if question and latest > 1 and not (row.get("state") == PROPOSED and str(row.get("proposed") or "").strip()):
+            return f"#{number} {STALE_TEXT}"
+        if written is not None and latest > 1 and not self._read_latest(row, written):
+            return f"#{number} {STALE_TEXT}"
+        return ""
+
+    def _read_latest(self, row: dict, written: float) -> bool:
+        """Was an answer written (WeChat's time) after the draft's latest notice was shown (``_seen_after``: its
+        read-back, else this PC's time it went out, ``notified_at`` after a restart, on the measured clock)?"""
+        latest = int(row.get("notice") or 1)
+        with self._said_lock:
+            said = self._noticed.get(int(row["packet_id"]))
+        if said is None or said.notice != latest:
+            said = _Last(float(row.get("notified_at") or 0), int(row["packet_id"]), "草稿", notice=latest)
+        return self._seen_after(said, written)
 
     @staticmethod
     def _json(text) -> dict:
@@ -801,15 +1044,15 @@ class WechatReview:
         state = self._state(execution, outcome)
         if state == "verified":                          # (the console's words without their own head and tail)
             why = error.removeprefix(VERIFIED_SEND_HEAD).removesuffix(VERIFIED_SEND_TAIL) or "发送出错"
-            why = self._hide(row.get("platform"), why)
+            why = self._hide(row, why)
             return (f"#{number} 已执行：{self._done(row, execution)}，但回复没有发出去（{_cut(why, NOTE_CHARS)}）；"
                     f"需要的话请在微信里手动发给 {name}")
         if status == DROPPED:                            # (an invite card had opened it already: nothing to run)
-            error = self._hide(row.get("platform"), error.removesuffix("，没有执行") or "不用执行")
+            error = self._hide(row, error.removesuffix("，没有执行") or "不用执行")
             return f"#{number} 没有执行：{_cut(error, NOTE_CHARS)}；回复没有发"
         result = str(execution.get("outcome") or ("NOT_RUN" if outcome == "platform_not_run" else "UNKNOWN"))
         problems = [p for p in execution.get("problems") or [] if isinstance(p, str) and p.strip()]
-        what = f"{platforms.outcome_text(result)}（{result}）" + (f"：{self._hide(row.get('platform'), problems[0])}"
+        what = f"{platforms.outcome_text(result)}（{result}）" + (f"：{self._hide(row, problems[0])}"
                                                                 if problems else "")
         if state == "uncertain":
             return f"#{number} {UNCERTAIN}（{_cut(what, NOTE_CHARS)}）；回复没有发"
@@ -832,22 +1075,30 @@ class WechatReview:
         """The message that tells the admin of a draft (see the module's docstring)."""
         return self._notice(packet)[0]
 
-    def _notice(self, packet: dict, log: bool = True) -> tuple[str, str, list]:
+    def _notice(self, packet: dict, log: bool = True, again: Optional[dict] = None) -> tuple[str, str, list]:
         """``(text, stamp, pictures)``: a draft's notification; the fingerprint of the preview it shows when it lets
         「执行」 run (``preview_stamp``; "" otherwise; kept when only its pictures hold it: ``pictures_ok``); the pictures
         to send after it (``_pictures``).  Pictures that cannot all go (not on this PC, too big): it says so
-        (PICTURES_MISSING) where it would say how to answer, and none of them goes."""
+        (PICTURES_MISSING) where it would say how to answer, and none of them goes.  A platform draft whose 要注意 is
+        cut (longer than NOTE_CHARS) lets nothing run (REASON_LONG).  ``again`` (``_tell_again``): a fresh notice,
+        ``{"notice", "change", "pictures_ok"}``: its number in the head, what changed first, the pictures as the row
+        has them (none sent again)."""
         number = packet["id"]
         meta = packet.get("meta") or {}
-        name = self._name_of(packet, "?")
+        ids, addresses = self._ids_of(packet), self._addresses_of(packet)
+        name = self._name_of(packet, "?", ids)
         group = meta.get("channel") == GROUP_CHANNEL
         platform = self._platform(packet)
-        lines = [f"#{number} 草稿 · {name} · " + (f"群里「{meta.get('group_name') or '老板拉的群'}」" if group else "私聊")]
+        which = f"（第 {again['notice']} 次通知）" if again else ""
+        lines = [f"#{number} 草稿{which} · {name} · "
+                 + (f"群里「{meta.get('group_name') or '老板拉的群'}」" if group else "私聊")]
+        if again:
+            lines.append(f"上一条 #{number} 的通知以后有变化：{again['change']}。上一条作废了，请看这一条再回")
         if group:
             # (a group an operator linked by hand, 接手任何合作群: no boss need be there, the console says 「群「…」」 too)
             lines.append("（发在群里，不是她的私聊：群里的人都看得到）" if meta.get("group_manual")
                          else "（发在老板拉的群里，不是她的私聊：老板和群里的人都看得到）")
-        said = self.her_words(packet)
+        said = self.her_words(packet, ids)
         if said:
             lines.append(f"她：{said}")
         elif meta.get("opening"):
@@ -862,8 +1113,16 @@ class WechatReview:
                       if isinstance(b, dict)]
             shown = "、".join(" ".join(x for x in bill if x) for bill in bills if bill[1])
             lines.append(f"运单：{shown}（发出的内容里必须是这个单号）" if shown else "运单：还没有运单号")
+        reason_cut = False
         if packet.get("needs_attention") and packet.get("reason"):
-            lines.append(f"要注意：{_cut(self._reason(packet), NOTE_CHARS)}")
+            reason = " ".join(self._reason(packet, ids, addresses).split())
+            reason_cut = len(reason) > NOTE_CHARS
+            lines.append(f"要注意：{_cut(reason, NOTE_CHARS)}")
+        unheard = meta.get("unheard")
+        if isinstance(unheard, int) and not isinstance(unheard, bool) and unheard > 0:
+            # (接手任何合作群: the group's lines that came after the last redraft allowed, the console's card says so too)
+            lines.append(f"（群里后来又有 {unheard} 句话这份草稿没听到：发之前请核对；要按群里的新话重写，到控制台点"
+                         "「重新起草」）")
         text = str(packet.get("text") or "")
         lines.append(f"草稿：{text}" if text.strip() else "草稿：（只发附件，没有文字）")
         count = self._parts(text) if self._parts is not None and text.strip() else 1
@@ -876,19 +1135,29 @@ class WechatReview:
         files = [str(a.get("name") or "文件") for a in packet.get("attachments") or []]
         if files:
             lines.append(f"（附 {len(files)} 个文件：{'、'.join(files[:FILES_NAMED])}{'…' if len(files) > FILES_NAMED else ''}）")
-        pictures = self._pictures(packet, log=log)
-        missing = any(not p["ok"] for p in pictures)
-        cards = [p for p in pictures if p["card"]]
-        sheets = [p for p in pictures if not p["card"]]
-        if missing:
-            lines.append(f"（要看的图 {len(pictures)} 张：" + "、".join(_cut(p["name"], 40) for p in pictures) + "）")
+        pictures = self._pictures(packet, log=log and again is None)
+        named = "、".join(_cut(p["name"], 40) for p in pictures)
+        if again is not None:
+            # (a fresh notice: its pictures went with the first one, or did not and go as before: none again)
+            missing = bool(pictures) and not again.get("pictures_ok", True)
+            if missing:
+                lines.append(f"（要看的图 {len(pictures)} 张还没发过来：{named}）")
+            elif pictures:
+                lines.append(f"（要看的 {len(pictures)} 张图在第一条 #{number} 通知后面）")
+            pictures = []
+        elif any(not p["ok"] for p in pictures):
+            missing = True
+            lines.append(f"（要看的图 {len(pictures)} 张：{named}）")
         else:
+            missing = False
+            cards = [p for p in pictures if p["card"]]
+            sheets = [p for p in pictures if not p["card"]]
             if cards:
                 how = ("引用这条回「执行」" if platform else "引用这条回 1" if group else "回 1")
                 lines.append(f"附了 {len(cards)} 张手卡（图在下面）：看过再{how}")
             if sheets:
                 lines.append(f"（后面附 {len(sheets)} 张图给你看：" + "、".join(
-                    f"{_cut(p['name'], 40)}" + (f"：{_cut(contact.mask_contacts(p['why']), 60)}" if p["why"] else "")
+                    f"{_cut(p['name'], 40)}" + (f"：{_cut(_mask_ids(p['why'], ids), 60)}" if p["why"] else "")
                     for p in sheets) + "）")
         stamp = ""
         if platform:
@@ -901,15 +1170,17 @@ class WechatReview:
                 stop = "正在重新预览，微信里不能执行：请到控制台看了结果再「批准并执行」；不要的话回 2"
             elif photo:
                 stop = photo
+            elif runnable and reason_cut:
+                stop = f"{REASON_LONG}；不要的话回 2"
             elif runnable:
                 stop = "通知里没列全，微信里不能执行：请到控制台看了再「批准并执行」；不要的话回 2"
             else:
                 stop = "预览没通过，微信里不能执行：请到控制台处理（「重新预览」）；不要的话回 2"
             # (the platform lines get what is left of NOTICE_CHARS, the longer of the two endings kept back)
             room = NOTICE_CHARS - len("\n".join(lines)) - 1 - max(len("\n".join(go)), len(stop)) - 1
-            listed, whole = self._platform_lines(packet, room)
+            listed, whole = self._platform_lines(packet, room, ids, addresses)
             lines += listed
-            if runnable and whole and not photo:
+            if runnable and whole and not photo and not reason_cut:
                 stamp = preview_stamp((packet.get("platform") or {}).get("preview"))
             if stamp and not missing:
                 lines += go
@@ -926,11 +1197,11 @@ class WechatReview:
                          else f"（引用这条回；不引用就回「发 {number}」「不发 {number}」「改 {number} 你的话」）")
         return "\n".join(lines), stamp, pictures
 
-    def her_words(self, packet: dict) -> str:
+    def her_words(self, packet: dict, ids: Optional[list] = None) -> str:
         """Her last line(s) the draft answers, short (SAID_LINES, SAID_CHARS each): from its job's lines without their
         time; numbers stay their placeholders, an address is cut to province and city (``retention.scrub``, with the
-        deal's addresses), a labelled 微信号 is masked.  "" for a draft with no line of hers (a shipping notice, a
-        开场白)."""
+        deal's addresses), a labelled 微信号 is masked, her platform ids by their last characters (``ids``, the
+        draft's: ``_ids_of``).  "" for a draft with no line of hers (a shipping notice, a 开场白)."""
         if packet.get("job_id") is None or self._lines is None:
             return ""
         said = [_STAMP.sub("", line).strip() for line in str(self._lines(packet) or "").split("\n")]
@@ -939,8 +1210,9 @@ class WechatReview:
             return ""
         deal = self._store.deal(packet["deal_id"]) or {}
         addresses = retention.address_values(deal.get("slots") or {})
+        ids = self._ids_of(packet) if ids is None else ids
         last = said[-SAID_LINES:]
-        shown = [_cut(contact.mask_contacts(retention.scrub(line, addresses)), SAID_CHARS) for line in last]
+        shown = [_cut(_mask_ids(retention.scrub(line, addresses), ids), SAID_CHARS) for line in last]
         return ("…" if len(said) > len(last) else "") + "／".join(shown)
 
     def _photo_stop(self, packet: dict) -> str:
@@ -987,32 +1259,95 @@ class WechatReview:
                 if isinstance(value, (str, int)) and not isinstance(value, bool) and _ID_KEY.search(str(key))]
         return sorted({i for i in ids if len(i) > TAIL_CHARS}, key=len, reverse=True)
 
-    def _ids(self, platform) -> list:
-        """The ids ``_creator_ids`` finds in a draft's platform data (a dict, or its JSON as a row has it)."""
-        data = self._json(platform)
+    def _ids_of(self, draft: dict) -> list:
+        """Every platform id of the creator a text about this draft may name (``draft``: a packet, or a row of it), for
+        ``_mask_ids``, longest first (integrated review 2026-11-10 B-M1 / B-M2): the ids its platform action names and
+        its preview's plan has (``_creator_ids``), the 抖音号 of the invite card the ledger found (``covered``), what
+        its execution made for (``created``), the UID of its round's sample order (``meta.chain_uid``, a 专属链接 step),
+        the UIDs and 抖音号 her deal's verified 抖店 sample orders found, her linked 抖音号 and their UIDs
+        (``creator_links``), and the 抖音号 of a 称呼 that is the friend add's 「抖音-<抖音号>」."""
+        from .service import sample_creator_ids, sample_creator_uids     # (the service imports this module)
+        data = self._json(draft.get("platform"))
         action = data.get("action") if isinstance(data.get("action"), dict) else {}
         preview = data.get("preview") if isinstance(data.get("preview"), dict) else {}
-        return self._creator_ids(action, preview.get("run"))
+        execution = data.get("execution") if isinstance(data.get("execution"), dict) else {}
+        ids: list = list(self._creator_ids(action, preview.get("run")))
+        for block in (preview, execution):
+            covered = block.get("covered") if isinstance(block.get("covered"), dict) else {}
+            ids.append(covered.get("aweme_id"))
+        created = execution.get("created") if isinstance(execution.get("created"), dict) else {}
+        ids += [created.get("creator_uid"), created.get("creator_account")]
+        packet = draft
+        if "meta" not in draft:                            # (a row of it: its packet's meta, ids)
+            number = draft.get("packet_id", draft.get("id"))
+            packet = (self._store.packet(int(number)) if number is not None else None) or {}
+        meta = packet.get("meta") if isinstance(packet.get("meta"), dict) else {}
+        ids.append(meta.get("chain_uid"))
+        try:
+            deal_id = draft.get("deal_id", packet.get("deal_id"))
+            if deal_id is not None:
+                ids += list(sample_creator_uids(self._store, int(deal_id))[0])
+                douyin, uid = sample_creator_ids(self._store, int(deal_id))
+                ids += [*douyin, uid]
+            party_id = draft.get("party_id", packet.get("party_id"))
+            if party_id is not None:
+                for link in self._store.creator_links(int(party_id)):
+                    ids += [link.get("account"), link.get("uid")]
+                named = _PLATFORM_NAME.match(str((self._store.party(int(party_id)) or {}).get("name") or ""))
+                if named:
+                    ids.append(named.group(1))
+        except Exception:
+            logger.exception("PRM: the creator's ids of draft %s could not all be read", draft.get("packet_id",
+                                                                                                     draft.get("id")))
+        found = {str(i).strip() for i in ids if isinstance(i, (str, int)) and not isinstance(i, bool)}
+        return sorted((i for i in found if len(i) > TAIL_CHARS), key=len, reverse=True)
 
-    def _reason(self, packet: dict) -> str:
-        """A draft's reason as a notification shows it: her platform ids by their last characters (the action's,
-        ``_ids``, and the 抖音 UIDs of her verified 抖店 sample orders a 专属链接's doubt names, ``uid_doubt_text`` /
-        ``wrong_uid_text``: 合并 channel-goods-convention 2026-11-09), a labelled 微信号 / a phone number masked."""
-        from .service import sample_creator_uids        # (the service imports this module)
-        ids = self._ids(packet.get("platform")) + list(sample_creator_uids(self._store, int(packet["deal_id"]))[0])
-        ids = sorted({i for i in ids if len(str(i)) > TAIL_CHARS}, key=len, reverse=True)
-        return self._masked("", packet.get("reason") or "", ids)[1]
+    def _addresses_of(self, draft: dict) -> list:
+        """The addresses a text about this draft may quote (``retention.scrub``'s known ones): her deal's (its slots)
+        and the receiver its sample order would go to, whole with its province, city and district (a piece of its
+        street quoted alone is cut too: ``retention.scrub``'s pieces; never a few characters alone, 「1号」)."""
+        data = self._json(draft.get("platform"))
+        action = data.get("action") if isinstance(data.get("action"), dict) else {}
+        receiver = action.get("receiver") if isinstance(action.get("receiver"), dict) else {}
+        found = []
+        try:
+            deal_id = draft.get("deal_id")
+            if deal_id is None and draft.get("packet_id") is not None:
+                deal_id = (self._store.packet(int(draft["packet_id"])) or {}).get("deal_id")
+            if deal_id is not None:
+                found += retention.address_values((self._store.deal(int(deal_id)) or {}).get("slots") or {})
+        except Exception:
+            logger.exception("PRM: the addresses of draft %s could not be read",
+                             draft.get("packet_id", draft.get("id")))
+        street = str(receiver.get("address") or "").strip()
+        if street:
+            region = "".join(str(receiver.get(k) or "").strip() for k in ("province", "city", "district"))
+            found.append(street if retention.coarse_address(street) else region + street)
+        return sorted({a for a in found if len(a) >= retention.PIECE_MIN and retention.CLEARED not in a}, key=len,
+                      reverse=True)
 
-    def _hide(self, platform, text) -> str:
-        """``text`` (a problem, an error) as the admin's chat shows it: the ids of the draft's platform action
-        (``_ids``) by their last characters, a labelled 微信号 / a phone number masked."""
-        return self._masked("", text, self._ids(platform))[1]
+    def _reason(self, packet: dict, ids: Optional[list] = None, addresses: Optional[list] = None) -> str:
+        """A draft's reason as a notification shows it: her platform ids by their last characters (``_ids_of``: the
+        action's, the UIDs a 专属链接's doubt names, ``uid_doubt_text`` / ``wrong_uid_text`` …), an address cut to
+        province and city (``retention.scrub`` with the deal's addresses, a receiver cut as the clean-up cuts it:
+        integrated review 2026-11-10 B-L1), a labelled 微信号 / a phone number masked."""
+        ids = self._ids_of(packet) if ids is None else ids
+        addresses = self._addresses_of(packet) if addresses is None else addresses
+        return self._masked("", packet.get("reason") or "", ids, addresses)[1]
+
+    def _hide(self, draft: Optional[dict], text) -> str:
+        """``text`` (a problem, an error, her 称呼) as the admin's chat shows it: the creator's platform ids of the draft
+        (``draft``: a packet, or a row of it; ``_ids_of``) by their last characters, an address cut to province and
+        city, a labelled 微信号 / a phone number masked."""
+        draft = draft or {}
+        return self._masked("", text, self._ids_of(draft), self._addresses_of(draft))[1]
 
     @classmethod
-    def _masked(cls, label: str, value, ids: list) -> tuple[str, str]:
+    def _masked(cls, label: str, value, ids: list, addresses: Optional[list] = None) -> tuple[str, str]:
         """A line of a platform action as a notification shows it: the creator's platform ids (as a parameter, in a
-        label or a value, a sample order's 达人 fact) by their last characters, the invite card's words by their length,
-        a labelled 微信号 / a phone number masked."""
+        label or a value, a sample order's 达人 fact, after 「UID」「抖音号」…: ``_mask_ids``) by their last characters, the
+        invite card's words by their length, an address cut to province and city (``addresses``: the draft's, for
+        ``retention.scrub``; None: not looked at), a labelled 微信号 / a phone number masked."""
         label, value = str(label or ""), str(value if value is not None else "")
         if label in (platforms.PARAM_LABELS["creator_platform_id"], platforms.PARAM_LABELS["creator_douyin_id"],
                      platforms.PARAM_LABELS["creator_uid"], platforms.PARAM_LABELS["creator_account"]):
@@ -1021,20 +1356,24 @@ class WechatReview:
             return label, f"（{len(value)} 字，见控制台）"
         if label == "达人":
             value = _CREATOR_FACT.sub(lambda m: f"（{m.group(1)} {_tail(m.group(2))}，粉丝", value)
+        if addresses is not None:
+            value = retention.scrub(retention.clear_receivers(value), addresses)
         for creator_id in ids:
-            label, value = label.replace(creator_id, _tail(creator_id)), value.replace(creator_id, _tail(creator_id))
-        return label, contact.mask_contacts(value)
+            label = label.replace(creator_id, _tail(creator_id))
+        return _ID_AFTER.sub(_after_label, label), _mask_ids(value, ids)
 
-    def _platform_lines(self, packet: dict, room: Optional[int] = None) -> tuple[list, bool]:
+    def _platform_lines(self, packet: dict, room: Optional[int] = None, ids: Optional[list] = None,
+                        addresses: Optional[list] = None) -> tuple[list, bool]:
         """``(lines, whole)``: a draft's platform action with every line its preview has (the console's preview block):
         what it is and the preview's verdict; a sample order's every product (name, and each SKU's code, colour and
         quantity), its courier and the receiver by province and city only (never a name, phone or street), the
         preview's other lines but the receiver's; any other action's parameters (``platforms.describe``, the receiver
         and the note left out) and every line of its preview (渠道类型, each SKU's price and stock, 价格检查, 有效期 …);
-        the preview's problems.  The creator's platform ids by their last characters (``_masked``: in the problems too).
-        At most LINES_MAX lines, each at most FACT_CHARS, all of them at most ``room`` characters (what the notification
-        has left of NOTICE_CHARS).  ``whole``: every line listed in full (else 「还有 N 项，见控制台」, and 「执行」 is the
-        console's)."""
+        the preview's problems.  The creator's platform ids by their last characters (``_masked`` with ``ids``, the
+        draft's: ``_ids_of``; in the problems too), an address a fact or a problem quotes cut to province and city
+        (``addresses``: ``_addresses_of``).  At most LINES_MAX lines, each at most FACT_CHARS, all of them at most
+        ``room`` characters (what the notification has left of NOTICE_CHARS).  ``whole``: every line listed in full
+        (else 「还有 N 项，见控制台」, and 「执行」 is the console's)."""
         data = packet.get("platform") or {}
         preview = data.get("preview") or {}
         action = data.get("action") or {}
@@ -1070,9 +1409,10 @@ class WechatReview:
         problems = [p for p in preview.get("problems") or [] if isinstance(p, str)]
         problems += [p for step in preview.get("steps") or [] if isinstance(step, dict)
                      for p in step.get("problems") or [] if isinstance(p, str) and p not in problems]
-        ids = self._creator_ids(action, preview.get("run"))
-        rows = [self._masked(label, value, ids) for label, value in shown]
-        rows += [self._masked("问题", p, ids) for p in problems]
+        ids = self._ids_of(packet) if ids is None else ids
+        addresses = self._addresses_of(packet) if addresses is None else addresses
+        rows = [self._masked(label, value, ids, addresses) for label, value in shown]
+        rows += [self._masked("问题", p, ids, addresses) for p in problems]
         lines = [" ".join(f"{label}：{value}".split()) for label, value in rows]
         cut = not all(len(line) <= FACT_CHARS for line in lines)
         listed = [f"· {_cut(line, FACT_CHARS)}" for line in lines]
@@ -1101,10 +1441,17 @@ class WechatReview:
         now = self._clock()
         with self._said_lock:
             said = _Last(now, int(head.group(1)) if head else None, head.group(2) if head else "",
-                         _asked(text) if head and head.group(2) == "改成" else None, text, self._read_first(text, now))
+                         _asked(text) if head and head.group(2) == "改成" else None, text, self._read_first(text, now),
+                         notice=_notice_no(text))
             self._last = said
             if said.number is not None:
                 self._last_review = said
+            if said.number is not None and said.head == "草稿" and said.notice > 1:
+                # (a fresh notice: an unquoted 「发 12」 written before it showed does nothing, ``_read_latest``)
+                self._noticed.pop(said.number, None)
+                self._noticed[said.number] = said
+                while len(self._noticed) > NOTICED_KEPT:
+                    self._noticed.pop(next(iter(self._noticed)))
 
     def _read_first(self, text: str, now: float) -> Optional[float]:
         """WeChat's time of ``text`` when it was read back before its send was noted (READ_BACK_EARLY_SEC at most
@@ -1133,6 +1480,10 @@ class WechatReview:
                     if getattr(self, name) is said:
                         setattr(self, name, new)
                         matched = True
+            for number, said in list(self._noticed.items()):
+                if said.wechat_at is None and _same(said.text, text):
+                    self._noticed[number] = replace(said, wechat_at=float(written))
+                    matched = True
             if not matched:
                 self._read_backs.append((text, float(written), self._clock()))
 
@@ -1150,9 +1501,11 @@ class WechatReview:
     # ── the admin's answers (the route step ``wechat_review``) ───────────
 
     def is_admin_line(self, msg: dict) -> bool:
-        """The admin's own message in the admin's one-to-one chat (never a group, nobody else)."""
+        """The admin's own message in the admin's one-to-one chat (never a group, nobody else; nothing while ADMIN_WXID
+        is no admin's own chat: ``_admin_problem``, a registered creator's words are hers)."""
         return (self.on and bool(self.admin) and not msg.get("is_group", True)
-                and str(msg.get("sender_id") or "") == self.admin and str(msg.get("chat_id") or "") == self.admin)
+                and str(msg.get("sender_id") or "") == self.admin and str(msg.get("chat_id") or "") == self.admin
+                and not self._admin_problem())
 
     def claims(self, msg: dict, *, is_command=None) -> bool:
         """Would ``answer`` take this message?  The route step's fallback when ``answer`` fails: such a message still
@@ -1312,7 +1665,7 @@ class WechatReview:
                 if m:
                     n = int(m.group(1))
                     return Plan([(action, n, True) if n == number else ("mismatch", number, n, verb)], rest)
-            return Plan([("quote", number, said.head, content, said.asked)], rest)
+            return Plan([("quote", number, said.head, content, said.asked, said.notice)], rest)
         if len(rows) == 1 and not said.quoted:
             word = _command_word(rows[0])
             if word in ("1", "2"):
@@ -1405,15 +1758,17 @@ class WechatReview:
             if not self._bare_claims(last):
                 return True, self._after_other(), None
             return True, self._bare(which, written, last), None
-        replies = [self._run(item, burst) for item in plan.items]
+        replies = [self._run(item, burst, said, written) for item in plan.items]
         replies = [r for r in replies if r]
         replies.sort(key=lambda r: bool(_HEAD.match(r)))     # (a 改成 question last: it is what a bare 1 answers)
         for reply in replies[:-1]:
             self.tell(reply)
         return True, replies[-1] if replies else None, "\n".join(plan.rest) if plan.rest else None
 
-    def _run(self, item: tuple, burst: bool) -> str:
-        """One answer of a message: its reply."""
+    def _run(self, item: tuple, burst: bool, said: Optional[Said] = None, written: float = 0.0) -> str:
+        """One answer of a message: its reply.  ``said``, ``written``: the message (which notice of the draft it quotes,
+        if any) and WeChat's time it was written (an unquoted answer written before the draft's latest notice could be
+        read does nothing: ``_changed_after``)."""
         action = item[0]
         if action == "quote":
             return self._on_quote(*item[1:])
@@ -1446,6 +1801,14 @@ class WechatReview:
             return f"#{item[1]} 已经处理过了"
         if action == "drop":
             return self._decided(row, packet, "drop", None)
+        quoting = bool(item[3] if action == "edit" else item[2])     # (the message quotes this draft's own notice)
+        quote = said if quoting and said is not None and said.kind == "quote" else None
+        stale = self._changed_after(row, packet,
+                                    quoted=quote.notice if quote is not None and quote.head == "草稿" else None,
+                                    question=quote is not None and quote.head == "改成",
+                                    written=None if quoting else written)
+        if stale:
+            return stale                               # (the draft changed after the notice this answers)
         stop = self._pictures_stop(row, packet)
         if stop:
             return stop                                # (its pictures did not come: only 2 / 不发 from here)
@@ -1508,6 +1871,8 @@ class WechatReview:
                 return f"#{number} 还没执行（在等你确认）：{photo}"
             if self._pictures_stop(row, packet):
                 return f"#{number} 还没执行（在等你确认）：{PICTURES_MISSING}"
+            if self._changed_after(row, packet):
+                return f"#{number} 还没执行（在等你确认）：{STALE_TEXT}"
             if told and told == preview_stamp((packet.get("platform") or {}).get("preview")):
                 how = "引用那条通知回「执行」" + ("" if self._group(packet) else f"（或者回「执行 {number}」）")
                 return f"#{number} 还没执行（在等你确认）：要执行请{how}"
@@ -1534,12 +1899,12 @@ class WechatReview:
             return line
         return f"#{packet['id']}（{self._name_of(packet)}）{line[len(head):]}"
 
-    def _name_of(self, draft: dict, default: str = "她") -> str:
-        """Her 称呼 as the admin's chat shows it: the ids of the draft's platform action (a packet or a row of it) by
-        their last characters (``_hide``), every phone / ID number and labelled 微信号 masked, one line, at most 20
-        characters (``contact.clean_name``)."""
+    def _name_of(self, draft: dict, default: str = "她", ids: Optional[list] = None) -> str:
+        """Her 称呼 as the admin's chat shows it: her platform ids (``_ids_of`` the draft, a packet or a row of it: a
+        称呼 that is the friend add's 「抖音-<抖音号>」 too) by their last characters (``_mask_ids``), every phone / ID
+        number and labelled 微信号 masked, one line, at most 20 characters (``contact.clean_name``)."""
         name = (self._store.party(draft["party_id"]) or {}).get("name") or ""
-        return contact.clean_name(self._hide(draft.get("platform"), name), 20) or default
+        return contact.clean_name(_mask_ids(name, self._ids_of(draft) if ids is None else ids), 20) or default
 
     def _execution_of(self, packet: dict) -> dict:
         return self._json(packet.get("platform")).get("execution") or {}
@@ -1557,9 +1922,10 @@ class WechatReview:
             return f"没有找到草稿 #{number}"
         return self._closed(packet, None) or f"#{number} 没有发到微信里审批（只有发到这里的草稿能在微信里回）：请在控制台处理"
 
-    def _on_quote(self, number: int, head: str, text: str, asked: Optional[str]) -> str:
-        """An answer quoting the notification of ``number`` (``head`` 草稿), or the bot's question about its proposed edit
-        (改成, ``asked``: the proposal that question showed)."""
+    def _on_quote(self, number: int, head: str, text: str, asked: Optional[str], notice: int = 1) -> str:
+        """An answer quoting the notification of ``number`` (``head`` 草稿; ``notice``: which notice of the draft it
+        is), or the bot's question about its proposed edit (改成, ``asked``: the proposal that question showed).  The
+        draft changed after the notice quoted (``_changed_after``): nothing but 2 / 不发."""
         row, packet = self._row(number)
         if row is None:
             return self._not_told(number, packet)
@@ -1575,6 +1941,9 @@ class WechatReview:
         command, word = _command_word(text), _word(text)
         if command in DROP_WORDS:
             return self._decided(row, packet, "drop", None)
+        stale = self._changed_after(row, packet, quoted=notice if head == "草稿" else None, question=head == "改成")
+        if stale:
+            return stale                               # (the draft changed after what is quoted: the latest notice)
         stop = self._pictures_stop(row, packet)
         if stop:
             return stop                                # (its pictures did not come: only 2 / 不发 from here)
@@ -1654,6 +2023,10 @@ class WechatReview:
             return closed
         if which == 2:
             return self._decided(row, packet, "drop", None)
+        stale = self._changed_after(row, packet, quoted=last.notice if last.head == "草稿" else None,
+                                    question=last.head == "改成")
+        if stale:
+            return stale                               # (the draft changed after what the bot said last)
         stop = self._pictures_stop(row, packet)
         if stop:
             return stop
@@ -1731,9 +2104,21 @@ class WechatReview:
             return self._decided(row, packet, "execute", None, stamp=told)
         if told:
             return f"#{number} 通知发出以后重新预览过：请到控制台看了新的预览再「批准并执行」；不要的话回 2"
+        if self._runnable(packet) and self._reason_cut(packet):
+            return f"#{number} {REASON_LONG}；不要的话回 2"      # (its 要注意 was not shown whole)
         if self._runnable(packet) and not self._listed_whole(packet):
             return f"#{number} 的平台动作通知里没列全，微信里不能执行：请到控制台看了再「批准并执行」；不要的话回 2"
         return f"#{number} 通知里的预览没通过（或者正在重新预览），微信里不能执行：请到控制台处理"
+
+    def _reason_cut(self, packet: dict) -> bool:
+        """Is the draft's 要注意 longer than a notification shows it (NOTE_CHARS: then 「执行」 is the console's)?"""
+        if not (packet.get("needs_attention") and packet.get("reason")):
+            return False
+        try:
+            return len(" ".join(self._reason(packet).split())) > NOTE_CHARS
+        except Exception:
+            logger.exception("PRM: the reason of draft %d could not be written", packet["id"])
+            return True
 
     def _listed_whole(self, packet: dict) -> bool:
         """Does the notification of this draft list its platform action whole (then it lets 「执行」 run: a stamp)?"""
@@ -1762,15 +2147,19 @@ class WechatReview:
         return f"#{packet['id']} 改成：『{text}』\n{note}回 1 发出／2 不发"
 
     def _propose(self, row: dict, packet: dict, text: str) -> str:
-        """Other words for a draft: not sent; kept as its proposed edit, after the console's checks."""
+        """Other words for a draft: not sent; kept as its proposed edit, after the console's checks (not for a draft
+        that changed after its latest notice: ``_changed_after``)."""
         number = packet["id"]
         if self._platform(packet):
             return self._platform_edit_refused(packet)
         if _not_words(text) or not _letters(text):        # (emoji and punctuation only: no words for her)
             return self._help(packet)
+        stale = self._changed_after(self._store.wechat_review(number) or row, packet)
+        if stale:
+            return stale
         problem = self._check(packet, text) if self._check is not None else ""
         if problem:
-            return f"#{number} 不能这样改：{problem}"
+            return f"#{number} 不能这样改：{_mask_ids(problem, self._ids_of(packet))}"
         now = self._clock()
         if not self._store.set_wechat_review(number, (TELLING, NOTIFIED, PROPOSED), now, state=PROPOSED, proposed=text,
                                              proposed_at=now):
@@ -1785,9 +2174,11 @@ class WechatReview:
         if self._decide is None:
             return f"#{number} 现在不能在微信里处理：请在控制台处理"
         if action != "drop":
-            stop = self._pictures_stop(self._store.wechat_review(number) or row, packet)
+            current = self._store.wechat_review(number) or row
+            stop = (self._pictures_stop(current, packet)
+                    or self._changed_after(current, self._store.packet(number) or packet))
             if stop:
-                return stop                            # (its pictures did not come: the console's)
+                return stop                            # (its pictures did not come, it changed after: not from here)
         try:
             result = self._decide(number, action, text, **({"stamp": stamp} if stamp else {}))
         except Exception:
@@ -1812,7 +2203,7 @@ class WechatReview:
             if closed:
                 return closed
             what = {"drop": "没改成不发", "execute": "没执行"}.get(action, "没发")
-            return f"#{number} {what}：{self._hide(fresh.get('platform'), result.get('error') or '出错了')}"
+            return f"#{number} {what}：{self._hide(fresh, result.get('error') or '出错了')}"
         now = self._clock()
         self._store.set_wechat_review(number, (), now, state=ANSWERED, decision=action, answered_at=now,
                                       **({"proposed": ""} if action == "send" else {}))
@@ -1838,7 +2229,7 @@ class WechatReview:
         what = {SENT: "已经发出去了", APPROVED: "已经批准，正在发", SENDING: "已经批准，正在发", DROPPED: "点了不发",
                 FAILED: "没发出去", EXECUTING: "已经批准，正在平台上执行", NO_REPLY: "不用回复"}.get(status, status)
         if status == FAILED and packet.get("error"):
-            what += f"（{_cut(self._hide(packet.get('platform'), packet['error']), 60)}）"
+            what += f"（{_cut(self._hide(packet, packet['error']), 60)}）"
         by = "你在微信里回过了，" if (row or {}).get("state") == ANSWERED else ""
         return f"#{number} 已经处理过了：{by}{what}"
 
