@@ -418,6 +418,173 @@ class TestPrmPages:
         page.wait_for_timeout(300)
         assert "整段一条发（空一行就是分开发，最多 3 条）" in card.inner_text()
 
+    def test_review_page_shows_a_sample_orders_photo_sheet_to_the_operators_only(self, page, prm, tmp_path):
+        """PRM_DRAFT_CONTEXT (2026-11-09): a sample order's draft with the Mac's photo sheet (``meta.operator_files``)
+        shows it as a picture in its platform block (GET /api/prm/file?…&kind=operator), says it is only for the
+        operators, says a sheet whose file is gone was cleaned up; a hat with no picture behind it leaves 「批准并执行」
+        off."""
+        import struct
+        import zlib
+        from src.prm import platforms
+
+        def chunk(kind, data):
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+        sheet = tmp_path / "relay" / "outfiles" / "job-77" / "对图单-77.png"
+        sheet.parent.mkdir(parents=True)
+        sheet.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+                          + chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00")) + chunk(b"IEND", b""))
+        action = platforms.check_action({"action": "jst.sample_order", "shop": "dy", "items": [
+            {"item_id": "3000000000000000102", "skus": [{"sku_id": "3100000000000000202", "qty": 1}]}],
+            "creator_platform": "dy", "creator_account": "test_daren_01"})
+        preview = {"version": 1, "action": action, "verdict": "blocked",
+                   "problems": ["A7269901002A-F（均码粉色）这顶没有照片对过，先核对再建"],
+                   "facts": [{"label": "对图", "value": "A7269901001A-F 驼色：对的是这次发的 图片-1.jpg（图库里第 1 款、第 1 个"
+                                                        "颜色）；√ 图对得上（款第 1，颜色第 1）"}],
+                   "steps": [], "run": {}, "previewed_at": prm.clock.now}
+        files = [{"name": "对图单-77.png", "path": str(sheet), "why": "寄样单里每一顶和她发的图并排对比；只给运营看，不发给达人"},
+                 {"name": "对图单-70.jpg", "path": str(sheet.parent / "gone.jpg"), "why": "上一份"}]
+        pid = prm.service.store.add_packet(
+            deal_id=1, party_id=1, job_id=None, chat_id="wxid_creator01", kind="money", text="寄样单建好啦",
+            attachments=[], intent="寄样", slots={}, stage_proposal="", needs_attention=False, reason="",
+            tool="jst.sample_order", platform={"action": action, "preview": preview}, meta={"operator_files": files},
+            now=prm.clock.now)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="寄样单建好啦")
+        box = card.locator(".prm-platform")
+        text = box.inner_text()
+        for expected in ("这顶没有照片对过，先核对再建", "√ 图对得上", "只给运营看（不发给达人）：寄样单里每一顶和她发的图并排对比",
+                         "对图单-70.jpg（图已经清理掉了）"):
+            assert expected in text, expected
+        img = box.locator("img")
+        assert img.count() == 1 and img.get_attribute("src") == f"/api/prm/file?packet={pid}&kind=operator&n=0"
+        page.wait_for_function("() => document.querySelector('.prm-operator-file img').naturalWidth > 0")
+        assert img.evaluate("el => el.naturalWidth") == 1                 # the page got the picture and decoded it
+        assert card.locator("button:has-text('批准并执行')").is_disabled()
+        assert "对图单" not in card.locator(".row .tag").all_inner_texts().__str__()   # no attachment tag for it
+
+    def test_review_page_confirms_a_held_hat_and_takes_it_back(self, page, prm):
+        """PRM_DRAFT_CONTEXT 「对过图了」 (2026-11-09): a sample order the Mac held for a hat's photo shows
+        「对过图了，用 <编码>」 under its platform block; a click keeps the confirmation for her deal and the card says
+        「已确认 <编码>，点「重新预览」按确认再核」 with 「撤销」, which takes it back.  A draft whose preview went by the
+        confirmation says so, and once it is taken back 批准并执行 goes off and the card says to preview it again."""
+        from src.prm import platforms
+
+        code = "A7269901001B-F"
+        prm.service._draft_context = True                                   # (PRM_DRAFT_CONTEXT=on)
+        store = prm.service.store
+        action = platforms.check_action({"action": "jst.sample_order", "shop": "dy", "items": [
+            {"item_id": "3000000000000000102", "skus": [{"sku_id": "3100000000000000203", "qty": 1}]}],
+            "creator_platform": "dy", "creator_account": "test_daren_01"})
+        held = {"version": 1, "action": action, "verdict": "blocked", "steps": [], "run": {}, "facts": [],
+                "problems": [f"{code}（均码咖啡）对图没把握（款有把握，颜色没把握）：先核对再建；"
+                             "对过图后，在控制台这份草稿上点这顶旁边的「对过图了」"], "previewed_at": prm.clock.now}
+        pid = store.add_packet(
+            deal_id=1, party_id=1, job_id=None, chat_id="wxid_creator01", kind="money", text="寄样单建好啦",
+            attachments=[], intent="寄样", slots={}, stage_proposal="", needs_attention=False, reason="",
+            tool="jst.sample_order", platform={"action": action, "preview": held},
+            meta={"draft_context": {"v": 3, "gated": True}, "photo_held": [code]}, now=prm.clock.now)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="寄样单建好啦")
+        box = card.locator(".prm-photo-held")
+        assert "Mac 对图扣着的帽子" in box.inner_text()
+        box.locator(f"button:has-text('对过图了，用 {code}')").click()
+        page.wait_for_timeout(1000)
+        assert [r["code"] for r in store.photo_confirmations(1)] == [code]
+        assert f"已确认 {code}，点「重新预览」按确认再核" in box.inner_text()
+        box.locator("button:has-text('撤销')").click()
+        page.wait_for_timeout(1000)
+        assert store.photo_confirmations(1) == []
+        assert box.locator(f"button:has-text('对过图了，用 {code}')").count() == 1
+        # its preview went by the confirmation (ready): taken back, 批准并执行 goes off
+        assert store.confirm_photo(1, code, pid, prm.clock.now)
+        ready = {**held, "verdict": "ready", "problems": [], "run": {"steps": ["create"]}}
+        assert store.set_platform(pid, {"action": action, "preview": ready}, ("pending",))
+        assert store.merge_packet_meta(pid, {"photo_held": [], "photo_confirmed": [code]})
+        page.reload()
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="寄样单建好啦")
+        assert f"已确认 {code}：这份预览按确认核过" in card.locator(".prm-photo-held").inner_text()
+        assert not card.locator("button:has-text('批准并执行')").is_disabled()
+        card.locator(".prm-photo-held button:has-text('撤销')").click()
+        page.wait_for_timeout(1000)
+        text = card.inner_text()
+        assert f"撤销了 {code} 的「对过图了」：点「重新预览」再核" in text
+        assert card.locator("button:has-text('批准并执行')").is_disabled()
+
+    def test_review_page_shows_everything_the_merged_branches_put_on_one_draft(self, page, prm, tmp_path):
+        """合并 draft-context (2026-11-10): one waiting draft with every part the merged branches give a card: a group
+        linked by hand whose redrafts reached the cap (「重新起草」), told to the admin's WeChat (已发到微信), with 直播手卡
+        (「手卡」, each card a picture) and a sample order the Mac held a hat of for its photo (the sheet in the platform
+        block, 「对过图了，用 <编码>」): every part shows on the card, the button keeps the confirmation, 批准并执行 stays off."""
+        import re
+        import struct
+        import zlib
+        from src.prm import platforms
+
+        def png(path):
+            def chunk(kind, data):
+                return (struct.pack(">I", len(data)) + kind + data
+                        + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+                             + chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00")) + chunk(b"IEND", b""))
+            return path
+
+        code = "A7269901001B-F"
+        prm.service._draft_context = True                                   # (PRM_DRAFT_CONTEXT=on)
+        store = prm.service.store
+        sheet = png(tmp_path / "relay" / "outfiles" / "job-78" / "对图单-78-扣着的.png")
+        cards = [png(tmp_path / "cards" / name) for name in ("手卡_01_测试帽.png", "手卡_02_测试帽二.png")]
+        action = platforms.check_action({"action": "jst.sample_order", "shop": "dy", "items": [
+            {"item_id": "3000000000000000102", "skus": [{"sku_id": "3100000000000000203", "qty": 1}]}],
+            "creator_platform": "dy", "creator_account": "test_daren_01"})
+        held = {"version": 1, "action": action, "verdict": "blocked", "steps": [], "run": {}, "facts": [],
+                "problems": [f"{code}（均码咖啡）对图没把握（款有把握，颜色没把握）：先核对再建；"
+                             "对过图后，在控制台这份草稿上点这顶旁边的「对过图了」"], "previewed_at": prm.clock.now}
+        pid = store.add_packet(
+            deal_id=1, party_id=1, job_id=None, chat_id="test_group_33@chatroom", kind="money",
+            text="寄样单和手卡都在这儿啦", intent="寄样", slots={}, stage_proposal="", needs_attention=False, reason="",
+            attachments=[{"name": c.name, "path": str(c), "size": c.stat().st_size, "sha256": ""} for c in cards],
+            tool="jst.sample_order", platform={"action": action, "preview": held},
+            meta={"channel": "group", "group_name": "小美合作对接群", "group_manual": True, "unheard": 2,
+                  "handcards": {"ok": True, "count": 2, "note": "做了 2 张手卡", "problems": [], "cuts": [],
+                                "promo_until": "", "catalog_at": None, "console": False},
+                  "draft_context": {"v": 3, "gated": True}, "photo_held": [code],
+                  "operator_files": [{"name": sheet.name, "path": str(sheet), "why": "扣着的那几顶：只给运营看"}]},
+            now=prm.clock.now)
+
+        def told(state):
+            for p in state["pending"]:
+                if p["id"] == pid:
+                    p["wechat_at"] = prm.clock.now
+
+        self._serve_prm(page, told)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        card = page.locator(".prm-draft", has_text="寄样单和手卡都在这儿啦")
+        card.wait_for()
+        assert card.locator(".prm-wechat-tag").inner_text() == "已发到微信"
+        assert card.locator(".prm-group-tag").inner_text().strip() == "群里 · 小美合作对接群"
+        assert card.locator(".tag", has_text=re.compile(r"^手卡$")).count() == 1
+        assert "群里别人又说了 2 句，这份草稿没听到" in card.locator(".prm-unheard").inner_text()
+        assert card.locator(".prm-unheard button:has-text('重新起草')").count() == 1
+        box = card.locator(".prm-platform")
+        assert box.locator("img").get_attribute("src") == f"/api/prm/file?packet={pid}&kind=operator&n=0"
+        assert "只给运营看（不发给达人）：扣着的那几顶" in box.inner_text()
+        pictures = card.locator(".prm-handcards img")
+        assert pictures.count() == 2
+        assert pictures.nth(1).get_attribute("src") == f"/api/prm/file?packet={pid}&kind=attachment&n=1"
+        page.wait_for_function("() => [...document.querySelectorAll('.prm-draft img')].length >= 3 && "
+                               "[...document.querySelectorAll('.prm-draft img')].every((i) => i.complete && i.naturalWidth > 0)")
+        assert card.locator("button:has-text('批准并执行')").is_disabled()
+        card.locator(f".prm-photo-held button:has-text('对过图了，用 {code}')").click()
+        page.wait_for_timeout(1000)
+        assert [r["code"] for r in store.photo_confirmations(1)] == [code]
+        assert f"已确认 {code}，点「重新预览」按确认再核" in card.locator(".prm-photo-held").inner_text()
+        assert card.locator("button:has-text('批准并执行')").is_disabled()
+
     @staticmethod
     def _platform_draft(prm) -> dict:
         """She agrees to 20%; the Mac drafts 「专属佣金 20% 设好啦～」 with a 专属佣金 action, previewed: the draft waits."""
@@ -1025,7 +1192,7 @@ class TestPrmPages:
 
     def test_deals_page_edits_saves_and_shows_the_draft_note(self, page, prm):
         """起草备注 (2026-10-31): an opened deal shows its note (none yet) with the hint; 「写备注」 opens the field, 「保存」
-        keeps it through the deal action (one line, as the bot keeps it) and her next draft job carries it; more than
+        keeps it through the deal action (its lines, as the bot keeps them) and her next draft job carries it; more than
         300 characters, or the bot refusing, says why right there and keeps nothing; saved empty, it is cleared."""
         from src.prm.service import SETTLE_SEC
 
@@ -1038,6 +1205,7 @@ class TestPrmPages:
         text = block.inner_text()
         assert "起草备注" in text and "（没有）" in text
         assert "写给 Mac 起草时看的，比如她签名里的要求：直接发链接和 brief、不接语音" in text
+        assert "寄样单里没对过图的那顶不在备注里确认：对过图后，在控制台这份草稿上点这顶旁边的「对过图了」" in text   # (PRM_DRAFT_CONTEXT)
         block.locator("button:has-text('写备注')").click()
         field = block.locator("textarea[aria-label='小美 的起草备注']")
         field.fill("长" * 301)
@@ -1048,7 +1216,7 @@ class TestPrmPages:
         field.fill("直接发链接和brief，感兴趣的会回复！\n勿催视频，不接语音")
         block.locator("button:has-text('保存')").click()
         page.wait_for_timeout(1500)
-        kept = "直接发链接和brief，感兴趣的会回复！ 勿催视频，不接语音"
+        kept = "直接发链接和brief，感兴趣的会回复！\n勿催视频，不接语音"
         assert store.deal(1)["draft_note"] == kept
         assert kept in block.inner_text() and block.locator("textarea").count() == 0
         assert "改起草备注" in page.locator(".prm-deal").inner_text()            # the deal's record

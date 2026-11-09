@@ -7,6 +7,7 @@ import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
 import {
   usePrm, partyAction, dealAction, revealNumbers, setupProblems, eventText, MODE_TAGS, ACTORS, DRAFT_NOTE_MAX, draftNoteText,
+  CONFIRM_HINT,
   saveDraftNote, bossIntroduced,
 } from '../lib/prm'
 import { PageHead, Card, Note, Empty, Field, TextInput, TextArea, Select, Seg, Confirm } from './ui'
@@ -461,6 +462,7 @@ function DraftNoteBlock({ p, onDone }) {
   return (
     <div className="stack prm-draft-note" style={{ gap: 6 }}>
       <b>起草备注</b>
+      <span className="f-hint prm-confirm-hint">{CONFIRM_HINT}</span>
       {editing ? (
         <>
           <Field hint={`${hint}。空着保存就是清掉。`} error={error}>

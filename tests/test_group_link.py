@@ -1806,3 +1806,54 @@ def test_the_logs_have_no_names_and_no_lines(bot, caplog):
     assert "group 40000000…" in text
     for secret in ("小美", GROUP_NAME, GROUP, CREATOR, BD, "测试商务", "13812345678", "测试路"):
         assert secret not in text, secret
+
+
+# ── 合并 draft-context (2026-11-10): a photo sheet never outlives the link of the group its job was for ──
+
+def test_a_photo_sheet_of_a_group_job_goes_with_a_draft_the_ended_link_never_makes(clock, tmp_path):
+    """PRM_DRAFT_CONTEXT: the Mac sends a sample order's photo sheet (her picture is on it) for the operators while it
+    writes a group draft; the group's link ends meanwhile (「不接群」).  Whatever comes back makes no draft that waits:
+    the job failed, its answer cannot be read, the Mac held a 专属链接 back for a bot it could not ask and nothing is
+    left, or the draft came back and failed at once: the sheet is deleted then, as for any job that leaves no draft
+    waiting (it never stays on the failed draft)."""
+    import io
+    from pathlib import Path
+    from test_prm_draft_context import GATED, SHEET, sample_block
+
+    b = setup(clock, tmp_path, prm_draft_context="on")
+    try:
+        def written_while_the_link_ends(text):
+            linked(b, member=1)
+            b.prm.handle(gmsg(b, text))
+            job = job_of(b)
+            b.clock.now += SETTLE_SEC + 1
+            assert b.relay.next_job(0, ("prm",))["id"] == job["id"]          # the Mac is writing it
+            row = b.relay.operator_file(job["id"], f"对图单-{job['id']}.jpg", io.BytesIO(SHEET).read, len(SHEET))
+            [kept] = b.relay.store.operator_files(job["id"])
+            assert b.say(f"不接群 {GROUP_NAME}").startswith("不接了")
+            b.clock.now += 5
+            return job, row, Path(kept["path"])
+
+        named = lambda job, row: [{"name": f"对图单-{job['id']}.jpg", "why": "并排对比", "sha256": row["sha256"]}]
+        job, row, sheet = written_while_the_link_ends("就要这顶，寄吧")
+        assert sheet.exists()
+        b.finish(job["id"], draft(message_kind="money", reply_draft="寄样单建好啦", reason="kb", slots={},
+                                  stage_proposal="", platform=sample_block("ready"), draft_context=GATED,
+                                  operator_files=named(job, row)))
+        packet = b.prm.store.packet_for_job(job["id"])
+        assert packet["status"] == "failed" and packet["error"] == f"{GROUP_CLOSED_TEXT}，平台没有动"
+        assert "operator_files" not in packet["meta"] and not sheet.exists()
+        job, _, sheet = written_while_the_link_ends("在吗")
+        b.finish(job["id"], ok=False, text="boom")
+        assert not sheet.exists()
+        job, _, sheet = written_while_the_link_ends("价格呢")
+        b.finish(job["id"], text="这不是一份草稿")
+        assert b.prm.store.packet_for_job(job["id"]) is None and not sheet.exists()
+        job, row, sheet = written_while_the_link_ends("链接呢")
+        b.finish(job["id"], draft(message_kind="faq", reply_draft="", reason="这台 Mac 连着几次都问不到 Windows 上的机器人",
+                                  slots={}, stage_proposal="", platform_held="unasked", operator_files=named(job, row)))
+        assert b.prm.store.packet_for_job(job["id"]) is None and not sheet.exists()
+        assert b.texts == []
+    finally:
+        b.prm.stop()
+        b.relay.stop()

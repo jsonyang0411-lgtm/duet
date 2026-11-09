@@ -16,6 +16,13 @@ failed); an older worker sends neither.
 offers cards (the worker's ``prm_schema``; this SCHEMA is the one without it); the Mac makes them and hands
 back ``handcards_made``, its verdict (the cards are among the files that came back).
 
+``operator_files`` (PRM_DRAFT_CONTEXT, src/prm/draft_context.py) are files the Mac sent back for the operators only
+(``[{"name", "why", "sha256"}]``: a sample order's side-by-side photo sheet), never attachments for the creator;
+``draft_context: {"v": 3, "gated": true}`` says the Mac checked the draft's sample order by photo (``Draft.gated``;
+an older mark is not one); ``photo_held`` names the item codes that check held for photo reasons (the console's
+「对过图了」) and ``photo_confirmed`` those it let go only by an operator's 「对过图了」 (``Draft.photo_held`` /
+``Draft.photo_confirmed``).
+
 ``platform_action`` is optional (platforms.py): the Mac checks it and previews it, and
 hands back ``platform``, its verdict, in its place; a draft that names an action the Mac
 did not preview carries the verdict ``unavailable`` and cannot be executed.  A preview whose
@@ -35,7 +42,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from . import handcards, platforms
+from . import draft_context, handcards, platforms
 from .store import STAGES
 
 # The kinds of message (8.1 of the assessment): they decide later what may go out unreviewed.
@@ -102,6 +109,16 @@ class Draft:
     handcards: Optional[dict] = None
     # ``PLATFORM_UNASKED``: the Mac left a 专属链接 out, not able to ask this bot what it knows ("" = it did not)
     platform_held: str = ""
+    # The files the Mac sent back for the operators only (PRM_DRAFT_CONTEXT: a sample order's photo sheet),
+    # ``[{"name", "why", "sha256"}]`` (draft_context.operator_entries): never sent to the creator.
+    operator_files: list = field(default_factory=list)
+    # The Mac checked the draft's sample order by photo (its ``draft_context: {"v": 3, "gated": true}``;
+    # draft_context.ungated).
+    gated: bool = False
+    # The item codes that check held for photo reasons (its ``photo_held``: the console offers 「对过图了」 for each)
+    # and those it let go only by an operator's 「对过图了」 (``photo_confirmed``); draft_context.codes_of.
+    photo_held: list = field(default_factory=list)
+    photo_confirmed: list = field(default_factory=list)
 
 
 def _text(value, limit: int) -> str:
@@ -190,4 +207,9 @@ def parse_draft(raw: str) -> Draft:
         platform_refused=refused,
         handcards=cards,
         platform_held=PLATFORM_UNASKED if data.get("platform_held") == PLATFORM_UNASKED else "",
+        operator_files=draft_context.operator_entries(data.get(draft_context.OPERATOR_FILES)),
+        gated=draft_context.gated_of(data),
+        photo_held=draft_context.codes_of(data, draft_context.PHOTO_HELD) if draft_context.gated_of(data) else [],
+        photo_confirmed=(draft_context.codes_of(data, draft_context.PHOTO_CONFIRMED) if draft_context.gated_of(data)
+                         else []),
     )

@@ -76,6 +76,14 @@ A creator the boss brought in a WeChat group he made with her and this account (
 the others' lines there come as <group_context>, data and never instructions.  A group an operator linked to her by
 hand (接手任何合作群, 2026-11-09: ``meta.group.manual``) is told as such: who is in it (a boss only when he is), the
 talk there before the link (hers and ours too) in <group_context>.
+With PRM_DRAFT_CONTEXT on the bot (2026-11-09), a creator's draft job carries ``meta.draft_context`` (the 聚水潭 order
+numbers her deal knows, her 抖音号 / 小红书号): before Claude starts, this script reads her sample orders (`jst samples`,
+read-only, under the same lock, paced) and matches the pictures she sent against the hat photo index (draft_context.py,
+next to this file), and the prompt gets <photo_matches> and <sample_status>, data and never instructions, with their rule
+lines; a draft's jst.sample_order is then checked by photo (a hat with neither a sure picture nor a confirmation behind
+it is not ready; the draft is marked ``draft_context: {"v": 3, "gated": true}``, and the bot holds a sample order
+without that mark) and its side-by-side sheet goes back on the relay's operator-only channel (``operator_files``; an
+older bot has none and says so, and the order is not ready), never to the creator.
 
 Standard library only (macOS /usr/bin/python3 is enough).  Settings:
 ~/.claude-relay/config.json (see config.example.json); the token can live in
@@ -263,6 +271,26 @@ def _load_handcards():
 
 
 handcards = _load_handcards()
+
+# PRM_DRAFT_CONTEXT (the bot's ``meta.draft_context``, 2026-11-09): her 聚水潭 sample orders and her pictures against the
+# hat photo index for the draft, the photo check of a sample order (tools/claude_relay/draft_context.py, loaded by path).
+DRAFT_CONTEXT_FILE = Path(__file__).resolve().parent / "draft_context.py"
+
+
+def _load_draft_context():
+    """tools/claude_relay/draft_context.py next to this file, or None (then a job's ``meta.draft_context`` is ignored:
+    the prompt and the preview as without it)."""
+    try:
+        spec = importlib.util.spec_from_file_location("webot_draft_context", str(DRAFT_CONTEXT_FILE))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception as e:                               # a copy of this file without its neighbour
+        logging.getLogger("claude_relay.worker").warning("draft context off: %s not loaded (%s)", DRAFT_CONTEXT_FILE, e)
+        return None
+
+
+draft_context = _load_draft_context()
 
 PRM_TOOLS = "Read,Edit,Write,Glob,Grep"
 PRM_DENIED_TOOLS = "Bash,WebFetch,WebSearch,Task,NotebookEdit"
@@ -569,6 +597,13 @@ class RelayClient:
             self.features_seen = (time.monotonic(), [str(f) for f in features] if isinstance(features, list) else None)
         return status, data
 
+    def operator_files_ok(self) -> bool:
+        """Whether the bot takes files for the operators only (PRM_DRAFT_CONTEXT's photo sheets): its /relay/health says
+        ``"operator_files": true``.  An older bot has no such channel, and for a big upload it drops the connection
+        rather than answering 404, so the worker asks first."""
+        status, data = self._call("GET", "/relay/health")
+        return status == 200 and isinstance(data, dict) and data.get("operator_files") is True
+
     def bot_kinds(self) -> list[str] | None:
         """The job kinds the bot hands out by kind; None from a bot older than job kinds (it ignores
         X-Relay-Kinds and hands any job, a cc task too, to whoever asks).  (A prm-only worker asks every round: its
@@ -697,6 +732,29 @@ class RelayClient:
             answer = post()
         self.uploads[int(job_id)] = self.uploaded(job_id) + 1
         return answer
+
+    def upload_operator(self, job_id: int, path: Path, name: str) -> dict:
+        """Send a file back with a prm job for the operators only (PRM_DRAFT_CONTEXT's photo sheet): POST
+        .../operator-files, which an older bot does not have (404): it then never gets a file it would send on to the
+        creator as an attachment.  Read as it goes, like ``upload``."""
+        def post():
+            query = urllib.parse.urlencode({"name": name})
+            with open(path, "rb") as f:
+                req = urllib.request.Request(f"{self.base_url}/relay/jobs/{job_id}/operator-files?{query}",
+                                             data=f, method="POST")
+                req.add_header("Authorization", f"Bearer {self.token}")
+                req.add_header("Content-Type", "application/octet-stream")
+                req.add_header("Content-Length", str(os.fstat(f.fileno()).st_size))
+                with self.opener.open(req, timeout=120) as resp:
+                    return json.loads(resp.read().decode("utf-8") or "{}")
+        try:
+            return post()
+        except urllib.error.HTTPError as e:
+            token = self.reload_token() if e.code == 401 and self.reload_token else None
+            if not token or token == self.token:
+                raise
+            self.token = token
+            return post()
 
     def send_result(self, job_id: int, result: dict) -> bool:
         """True when the bot has it (or does not know the job: then there is nobody to tell)."""
@@ -1649,6 +1707,11 @@ def prune_prm_files(workspace: Path) -> None:
         coarse_platform_logs(cutoff)
     except Exception as e:                               # never in the way of the job
         log.warning("platform logs not cut down: %s", e)
+    if draft_context is not None:                        # PRM_DRAFT_CONTEXT's sheets and photo memory: on or off
+        try:
+            draft_context.prune(HOME_DIR)
+        except Exception as e:
+            log.warning("draft context files not cut down: %s", e)
 
 
 PLATFORM_LOGS_UPTO = ".coarse-upto"     # in logs/platform/: the line coarse_platform_logs got to last time
@@ -2213,10 +2276,12 @@ def operator_note_block(meta: dict) -> str:
 
 
 def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, failed: list, invite: str = "",
-               card_rule: str = "", card_ask: str = "") -> str:
+               card_rule: str = "", card_ask: str = "", mac_context: str = "") -> str:
     """The task of a creator's WeChat draft (a 百应 one: ``buyin_prompt``); ``invite``: ``invite_block``'s
     <invite_background> ("" for none); ``card_rule`` / ``card_ask``: 直播手卡's rule and an operator's 「做手卡」
-    (``handcards_rule``, ``handcards_line``; "" for none: the prompt as before).  A draft in a 老板拉的群 (``meta.channel == "group"``, 功能 U) also says so
+    (``handcards_rule``, ``handcards_line``; "" for none: the prompt as before); ``mac_context``: PRM_DRAFT_CONTEXT's
+    rule lines, <photo_matches> and <sample_status> (``prm_context``; "" for none), after the attachments, right before
+    her message.  A draft in a 老板拉的群 (``meta.channel == "group"``, 功能 U) also says so
     (``boss_group_line``, right after the deal's line), hears the others' lines (``group_context_block``, after our
     replies and the invite background, before the rest) and has the group's own opening wording; it has no 三方群
     line (that group is her 三方群, and the line would send her to the group she is in).  Without ``meta.channel``
@@ -2290,6 +2355,8 @@ def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, fa
         lines.append("达人这次还发来了附件（用 Read 打开，图片可以直接看）：" + "、".join(got))
     if failed:
         lines.append("还有附件没能从 Windows 取到：" + "、".join(failed))
+    if mac_context:
+        lines.append(mac_context)
     if text.strip() or not (meta.get("system_note") or opening or huopan or signed or card_ask):
         lines.append(creator_block(text))
     lines.append("先读案卷和 kb/ 里相关的内容，更新案卷，然后给出结构化结果。")
@@ -2467,7 +2534,13 @@ def scrub_case(text: str) -> str:
 
 def purge_case_file(workspace: Path, party_id: int) -> dict:
     """The bot's 8.2 clean-up of one case file: done here, without the model.  The note goes
-    under the file's「## 清理记录」(made the first time)."""
+    under the file's「## 清理记录」(made the first time).  Her photo memory (PRM_DRAFT_CONTEXT) goes too."""
+    if draft_context is not None:
+        try:
+            if draft_context.forget(HOME_DIR, party_id):
+                log.info("photo memory of party %s deleted (8.2 clean-up)", party_id)
+        except OSError as e:
+            log.warning("photo memory of party %s not deleted: %s", party_id, e)
     path = workspace / "deals" / f"{int(party_id)}.md"
     if not path.is_file():
         return {"ok": True, "text": "没有案卷，不用清理", "duration_s": 0}
@@ -2582,8 +2655,10 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
     card_ask = handcards_line(meta, handcards.describe_asked(asked, handcards.load_catalog(workspace)) if asked else [],
                               joined=bool(str(job.get("text") or "").strip())) if asked is not None else ""
     card_rule = handcards_rule(meta, cards_cfg is not None)
+    context = prm_context(settings, job, meta, workspace, got, client)       # PRM_DRAFT_CONTEXT; None without it
     task = {**job, "text": prm_prompt(job, party_id, str(meta.get("name") or ""), case_rel, got, failed, invite=invite,
-                                      card_rule=card_rule, card_ask=card_ask)}
+                                      card_rule=card_rule, card_ask=card_ask,
+                                      mac_context=context.text if context is not None else "")}
     timeout = float(settings.get("prm_timeout_min") or 10)
     proxy = proxy_env()
     if proxy:
@@ -2659,6 +2734,10 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
         if missing:
             draft["attachments_missing"] = missing
         draft.pop("platform", None)                      # only this script writes the verdict
+        draft.pop("operator_files", None)                # (and names the operators' files, marks the check)
+        draft.pop("draft_context", None)
+        draft.pop("photo_held", None)
+        draft.pop("photo_confirmed", None)
         if buyin:
             pass                                         # no preview: the bot drops a 百应 draft's action unrun
         elif draft.get("platform_action") is not None:
@@ -2675,6 +2754,12 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
                 except Exception as e:                   # never lose the draft over its preview
                     log.exception("#%s platform preview failed", job["id"])
                     draft["platform"] = preview_failed(raw, f"Mac 上预览出错：{e}")
+                if context is not None:                  # PRM_DRAFT_CONTEXT: a sample order is checked by photo
+                    draft["platform"], files, marks = sample_order_gate(settings, workspace, draft["platform"],
+                                                                        context, client, int(job["id"]))
+                    if files:
+                        draft["operator_files"] = files
+                    draft.update(marks)                  # (GATED; the codes it held for photo reasons)
         result["text"] = json.dumps(draft, ensure_ascii=False)
     result["log_path"] = str(save_prm_log(job, run, result))
     log.info("#%s prm finished ok=%s in %ss", job["id"], result["ok"], result["duration_s"])
@@ -2916,6 +3001,115 @@ def hold_for_older_bot(draft: dict, why: str) -> None:
         draft["platform_held"] = UNASKED
 
 
+def prm_context(settings: dict, job: dict, meta: dict, workspace: Path, got: list, client: RelayClient,
+                pictures: bool = True):
+    """PRM_DRAFT_CONTEXT (the bot's ``meta.draft_context``): what the draft is told of her 聚水潭 sample orders and of her
+    pictures against the hat photo index (``draft_context.build``: the rule lines, <photo_matches>, <sample_status>), or
+    None for a job without it (the prompt as before), a 百应 draft, or a worker without the module.  The job's
+    heartbeat goes on meanwhile (聚水潭 under the CLI lock, the photo index's models).  ``pictures`` False (a new
+    preview): only her remembered pictures."""
+    if draft_context is None or draft_context.wanted(meta) is None:
+        return None
+    beat = _platform_heartbeat(client, int(job["id"]), "读聚水潭寄样单、对图")
+    try:
+        beat()                                           # (the console shows what the job is doing)
+    except Exception:
+        pass
+    cfg = platforms.config(settings) if platforms is not None else None
+    return draft_context.build(platforms, cfg, draft_context.options(settings), workspace=workspace, job=job, meta=meta,
+                               got=got, home=HOME_DIR, beat=beat, scrub=scrub_case,
+                               catalog=platforms.load_catalog(workspace) if platforms is not None else None,
+                               pictures=pictures)
+
+
+# The mark of a draft (or a new preview) whose sample order this script checked.  v2 (2026-11-09): a colour never
+# compared by photo is not sure; v3 (2026-11-10): only the console's 「对过图了」 lets a held hat go (the job's
+# ``confirmed``), never words in the 起草备注.  The bot takes no older mark (a worker before a rule is held like one that
+# checks nothing).
+GATED = {"v": 3, "gated": True}
+
+
+OLD_BOT = "Windows 的机器人还是旧版"   # (no operator-only channel: the sheet never goes as an attachment instead)
+
+
+def _reason(e: BaseException) -> BaseException:
+    """What went wrong under urllib's wrapping (it wraps a broken pipe or a timeout while sending in URLError)."""
+    reason = e.reason if isinstance(e, urllib.error.URLError) and not isinstance(e, urllib.error.HTTPError) else e
+    return reason if isinstance(reason, BaseException) else e
+
+
+def _dropped(e: BaseException) -> bool:
+    """The connection was closed on an upload (broken pipe, reset)."""
+    return isinstance(_reason(e), (BrokenPipeError, ConnectionResetError))
+
+
+def _timed_out(e: BaseException) -> bool:
+    return isinstance(_reason(e), (TimeoutError, socket.timeout))
+
+
+def sample_order_gate(settings: dict, workspace: Path, block, context, client: RelayClient, job_id: int) -> tuple:
+    """A previewed jst.sample_order checked by photo (``draft_context.gate``; any other action as it is): ``(block,
+    operator_files, marks)``, ``marks`` what goes next to the block once the check ran (else {}): ``draft_context``
+    (``GATED``: the bot holds any sample order without it), ``photo_held`` (the codes it held for photo reasons, which
+    the console offers 「对过图了」 for) and ``photo_confirmed`` (the codes it let go only by an operator's 「对过图了」:
+    taken back, the bot holds the draft).  The side-by-side sheet (``对图单-<job>.jpg``) and the held hats' sheet
+    (``对图单-<job>-扣着的.jpg``, 2026-11-10) go back on the operator-only channel (POST .../operator-files: the bot keeps
+    them on the draft, never sends them to the creator) as ``[{"name", "why", "sha256"}]``, once the bot's /relay/health
+    says it has that channel (``operator_files_ok``).  A side-by-side sheet that does not get there leaves the preview not
+    ready: ``OLD_BOT`` when the bot says it has no such channel or answers 404, 「连接断了」 / 「超时了」 with 「重新预览再
+    传」 when the connection failed on the way (a health check that went says the bot is new: a dropped upload is the
+    network, Tailscale say), else the error; a held hats' sheet that does not is only a fact (``held_sheet_lost``)."""
+    if draft_context is None or context is None or not isinstance(block, dict):
+        return block, [], {}
+    beat = _platform_heartbeat(client, job_id, "对图（寄样单）")
+    checked = draft_context.gate(block, context, platforms=platforms,
+                                 cfg=platforms.config(settings) if platforms is not None else None,
+                                 opts=draft_context.options(settings),
+                                 catalog=platforms.load_catalog(workspace) if platforms is not None else None,
+                                 workspace=workspace, home=HOME_DIR, beat=beat)
+    marks = {}
+    if checked.get("gated"):
+        marks = {"draft_context": dict(GATED), **({"photo_held": list(checked["held"])} if checked.get("held") else {}),
+                 **({"photo_confirmed": list(checked["used"])} if checked.get("used") else {})}
+    block = checked["block"]
+    sheets = [(path, why, name, needed) for path, why, name, needed in (
+        (checked.get("sheet"), checked.get("why") or "", f"对图单-{job_id}.jpg", True),
+        (checked.get("held_sheet"), checked.get("held_why") or "", f"对图单-{job_id}-扣着的.jpg", False)) if path]
+    if not sheets:
+        return block, [], marks
+    try:
+        able = client.operator_files_ok()
+    except Exception as e:                               # (not known: the upload itself says)
+        log.info("#%s the bot's health not read before the photo sheet: %s", job_id, e)
+        able = None
+    files = []
+    for path, why, name, needed in sheets:
+        lost, answer = None, None
+        if able is False:
+            log.warning("#%s the photo sheet %s of a sample order not sent: the bot has no operator-only channel",
+                        job_id, name)
+            lost = (OLD_BOT, False)
+        else:
+            try:
+                answer = client.upload_operator(job_id, Path(path), name)
+            except Exception as e:
+                log.warning("#%s the photo sheet %s of a sample order did not go back: %s", job_id, name, e)
+                if isinstance(e, urllib.error.HTTPError) and e.code == 404:
+                    lost = (OLD_BOT, False)
+                elif _dropped(e) or _timed_out(e):
+                    lost = ("连接断了" if _dropped(e) else "超时了", True)
+                else:
+                    lost = (_short(e, 120), False)
+        if lost is not None:
+            block = (draft_context.sheet_lost(block, lost[0], retry=lost[1]) if needed
+                     else draft_context.held_sheet_lost(block, lost[0]))
+            continue
+        files.append({"name": name, "why": why, "sha256": str((answer or {}).get("sha256") or "")})
+    log.info("#%s sample order checked by photo: verdict %s, %d sheet(s) sent back", job_id, block.get("verdict"),
+             len(files))
+    return block, files, marks
+
+
 def do_platform_job(settings: dict, job: dict, client: RelayClient, workspace: Path, meta: dict) -> dict:
     """A ``platform_preview`` (again, for a waiting draft) or ``platform_execute`` job: no model."""
     if platforms is None:
@@ -2925,7 +3119,16 @@ def do_platform_job(settings: dict, job: dict, client: RelayClient, workspace: P
     if meta.get("op") == "platform_preview":
         block = platform_preview(settings, workspace, meta.get("action"), client, int(job["id"]),
                                  int(meta.get("party_id") or 0), creator=meta.get("creator"))
-        return {"ok": True, "text": json.dumps(block, ensure_ascii=False),
+        action = meta.get("action") if isinstance(meta.get("action"), dict) else {}
+        # PRM_DRAFT_CONTEXT: a sample order's new preview is checked by photo again (her remembered pictures), with a
+        # new sheet for the operators (``operator_files`` next to the block: the bot keeps it on the draft)
+        context = (prm_context(settings, job, meta, workspace, [], client, pictures=False)
+                   if action.get("action") == "jst.sample_order" else None)
+        files, marks = [], {}
+        if context is not None:
+            block, files, marks = sample_order_gate(settings, workspace, block, context, client, int(job["id"]))
+        extra = {**({"operator_files": files} if files else {}), **marks}
+        return {"ok": True, "text": json.dumps({**block, **extra}, ensure_ascii=False),
                 "duration_s": round(time.monotonic() - started, 1)}
     cfg = platforms.config(settings)
     action = meta.get("action") if isinstance(meta.get("action"), dict) else {}
@@ -3809,6 +4012,22 @@ def main(argv: list[str] | None = None) -> int:
                 print("product catalogue: " + (time.strftime("%Y-%m-%d %H:%M", time.localtime(catalog["synced_at"]))
                                                if catalog and catalog.get("synced_at") else
                                                "none yet (python3 tools/claude_relay/worker.py --sync-products)"))
+        if draft_context is None:
+            print(f"draft context (PRM_DRAFT_CONTEXT): off ({DRAFT_CONTEXT_FILE} not loaded)")
+        else:
+            opts = draft_context.options(settings)
+            problem = draft_context.tool_problem(opts)
+            print("draft context (PRM_DRAFT_CONTEXT on Windows): photo index "
+                  + (problem or f"{opts['hat_index']} ({opts['hat_python']})"))
+            if not problem and platforms is not None:
+                # the canary, run once: a picture whose own run fails is charged only when this one is read, the
+                # index only when this one fails too; without one that runs, nobody (draft_context.index_works)
+                picture, state, why = draft_context.run_canary(platforms, opts, home=HOME_DIR)
+                print("draft context canary: " + (
+                    f"{picture}: read" if state == draft_context.CANARY_READ
+                    else f"{picture}: {why} (the index fails on its own picture: look at the hat index)"
+                    if state == draft_context.CANARY_FAILED
+                    else f"{picture or 'none'}: {why} (then a picture whose own run fails is never charged)"))
         proxy = proxy_env()
         if proxy:
             print(f"prm jobs' proxy (from {claude_settings_path()}): "

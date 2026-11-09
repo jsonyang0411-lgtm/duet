@@ -86,6 +86,7 @@ link filled in, goes out) | ``failed`` (anything less: nothing is sent to the cr
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -378,6 +379,15 @@ CREATE TABLE IF NOT EXISTS wechat_reviews (
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS wechat_reviews_deal ON wechat_reviews(deal_id);
+-- PRM_DRAFT_CONTEXT (2026-11-09): the item codes an operator confirmed for a deal after looking at the pictures
+-- (「对过图了」 on a sample order the Mac held): the Mac takes them like her earlier shipped orders; until undone
+CREATE TABLE IF NOT EXISTS photo_confirmations (
+    deal_id INTEGER NOT NULL,
+    code TEXT NOT NULL,
+    packet_id INTEGER,
+    at REAL NOT NULL,
+    PRIMARY KEY (deal_id, code)
+);
 """
 
 # Columns added after the first version: (table, column, type).
@@ -431,8 +441,10 @@ NOTICE_CHARS = 300          # one notice's text
 ATTENTION_CHARS = 600       # all of them, as the console shows them
 # A deal's 起草备注 (``draft_note``, 2026-10-31): what the operators tell the Mac about this creator for every draft of
 # hers (her WeChat signature said 「直接发链接和brief，感兴趣的会回复！勿催视频，不接语音」, say).  Only an operator writes
-# it (her party ``note`` is the bot's for a creator it registered, and may name her groups).
+# it (her party ``note`` is the bot's for a creator it registered, and may name her groups).  Its lines stay lines
+# (2026-11-09).  It confirms no hat for PRM_DRAFT_CONTEXT: that is the console's 「对过图了」 (``photo_confirmations``).
 DRAFT_NOTE_CHARS = 300
+_LINE_BREAK = re.compile(r"\r\n|\r|\n")
 
 
 class PartyError(ValueError):
@@ -470,9 +482,13 @@ def deal_view(row: dict) -> dict:
     return out
 
 
-def draft_note_text(text) -> str:
-    """A deal's 起草备注 as it is kept: whitespace collapsed (one line), at most DRAFT_NOTE_CHARS characters."""
-    return " ".join(str(text or "").split())[:DRAFT_NOTE_CHARS]
+def draft_note_text(text, limit: Optional[int] = DRAFT_NOTE_CHARS) -> str:
+    """A deal's 起草备注 as it is kept: each line's whitespace collapsed to single blanks, empty lines dropped, the line
+    breaks kept (``\n``), at most ``limit`` characters (None: all of it; the console's ``draftNoteText`` does the
+    same)."""
+    lines = (" ".join(line.split()) for line in _LINE_BREAK.split(str(text or "")))
+    kept = "\n".join(line for line in lines if line)
+    return kept if limit is None else kept[:limit]
 
 
 def notices_of(row: dict) -> list:
@@ -1105,6 +1121,39 @@ class PrmStore:
                                       packet_id, PENDING))
             self._conn.commit()
             return cur.rowcount == 1
+
+    def merge_packet_meta(self, packet_id: int, meta: dict, statuses: Optional[tuple] = None, *,
+                          expect: Optional[Callable[[dict], bool]] = None) -> bool:
+        """``meta`` merged into a packet's meta (of one of ``statuses``; any status for None; with ``expect``, only if
+        its meta now passes it: compare and set, one step under the lock): PRM_DRAFT_CONTEXT's operator files and mark
+        (src/prm/draft_context.py).  True when it was changed."""
+        with self._lock:
+            sql, args = "SELECT meta FROM action_packets WHERE id = ?", [packet_id]
+            if statuses:
+                sql += f" AND status IN ({', '.join('?' * len(statuses))})"
+                args += list(statuses)
+            row = self._conn.execute(sql, args).fetchone()
+            current = _loads(row["meta"], {}) if row is not None else None
+            if current is None or (expect is not None and not expect(current)):
+                return False
+            self._conn.execute("UPDATE action_packets SET meta = ? WHERE id = ?",
+                               (json.dumps({**current, **(meta or {})}, ensure_ascii=False), packet_id))
+            self._conn.commit()
+            return True
+
+    def operator_file_packets(self) -> list[dict]:
+        """Packets that still keep an operator file (``meta.operator_files`` with a path: src/prm/draft_context.py
+        ``sweep`` looks at each file's own time), oldest first."""
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM action_packets WHERE meta LIKE ? ORDER BY id",
+                                      ('%"operator_files"%',)).fetchall()
+        out = []
+        for row in rows:
+            packet = packet_view(dict(row))
+            files = packet["meta"].get("operator_files")
+            if isinstance(files, list) and any(isinstance(f, dict) and f.get("path") for f in files):
+                out.append(packet)
+        return out
 
     def set_outcome(self, packet_id: int, outcome: str) -> None:
         with self._lock:
@@ -1850,6 +1899,30 @@ class PrmStore:
                  str(source), add_id, now))
             self._conn.commit()
             return cur.rowcount == 1
+
+    def confirm_photo(self, deal_id: int, code: str, packet_id: Optional[int], now: float) -> bool:
+        """An operator's 「对过图了」 for ``code`` on the deal (PRM_DRAFT_CONTEXT); True when it was not confirmed yet."""
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO photo_confirmations (deal_id, code, packet_id, at) VALUES (?, ?, ?, ?)",
+                (int(deal_id), str(code), packet_id, float(now)))
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def unconfirm_photo(self, deal_id: int, code: str) -> bool:
+        """「撤销」 of a 「对过图了」; True when there was one."""
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM photo_confirmations WHERE deal_id = ? AND code = ?",
+                                     (int(deal_id), str(code)))
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def photo_confirmations(self, deal_id: int) -> list[dict]:
+        """The codes confirmed for the deal, oldest first: ``[{"code", "packet_id", "at"}]``."""
+        with self._lock:
+            rows = self._conn.execute("SELECT code, packet_id, at FROM photo_confirmations WHERE deal_id = ? "
+                                      "ORDER BY at, code", (int(deal_id),)).fetchall()
+        return [dict(r) for r in rows]
 
     def creator_links(self, party_id: Optional[int] = None, *, account: Optional[str] = None) -> list[dict]:
         """The 抖音 links, oldest first: of one creator, or of one 抖音号 (any case)."""

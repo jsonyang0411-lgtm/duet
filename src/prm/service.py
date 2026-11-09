@@ -122,7 +122,7 @@ from ..relay.service import MAX_AGE_SEC, job_meta
 from ..relay.store import PRM
 from ..send.bubbles import typing_delay
 from ..wechat.new_friends import FILLER, is_friend_notice, is_person_chat
-from . import contact, deals, gates, handcards, pii, platforms, retention
+from . import contact, deals, draft_context, gates, handcards, pii, platforms, retention
 from .boss_groups import (BOSS as BOSS_WHO, CHANNEL as GROUP_CHANNEL, EVENT as BOSS_EVENT, GONE as BOSS_GONE,
                           GONE_WHY as BOSS_GONE_WHY,
                           HER as GROUP_HER, LINES_KEPT as GROUP_LINES_KEPT, LINKED as BOSS_LINKED, MEMBER as GROUP_MEMBER,
@@ -135,7 +135,7 @@ from .wechat_review import WechatReview, preview_stamp
 from .store import (
     APPROVED, BUYIN_TOOL, COPILOT, DRAFT_NOTES, DROPPED, EXECUTING, FAILED, HUMAN, LANE_BUYIN, LANE_REPLY, LANE_SYSTEM,
     DRAFT_NOTE_CHARS, MESSAGE_TOOL, MODES, NO_REPLY, NOTICE_CHARS, PAUSED, PENDING,
-    SENDING, SENT, SHIPMENT_STATES, STAGES, SUPERSEDED, PartyError, PrmStore,
+    SENDING, SENT, SHIPMENT_STATES, STAGES, SUPERSEDED, PartyError, PrmStore, draft_note_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -810,6 +810,7 @@ EVENT_NAMES = {
     "buyin_draft_failed": "百应私信的草稿没写成",
     "friend_add_link": "关联抖音号", "creator_unlinked": "取消关联抖音号",
     GROUP_EVENT: "三方群", BOSS_EVENT: "老板拉群介绍", "draft_note": "改起草备注",
+    "photo_confirm": "对过图了", "photo_unconfirm": "撤销「对过图了」",
 }
 # 三方群 (src/prm/three_party.py): the console's deal actions (「拉三方群」, 「先试一下」, 「建好了」, 「没建成」) and how the
 # deal's record names each step
@@ -821,6 +822,11 @@ GROUP_EVENT_NAMES = {"creating": "开始拉三方群", "created": "三方群建�
                      "failed": "三方群没建成", "": "三方群的记录清掉了（没建成）"}
 # 起草备注 (2026-10-31): the console's deal action, and its event (how long the note is now: never its words)
 DRAFT_NOTE = "draft_note"
+# PRM_DRAFT_CONTEXT (2026-11-09): 「对过图了，用 <编码>」 on a sample order the Mac held for photos, and its 「撤销」: the
+# console's deal actions and their events ({code, packet}: no names).  The deal's confirmed codes go with every draft and
+# new-preview job (draft_context.job_context's ``confirmed``); words in the 起草备注 confirm nothing.
+PHOTO_CONFIRM = "photo_confirm"
+PHOTO_UNCONFIRM = "photo_unconfirm"
 # A creator's message recorded without a draft because it was read too late (PRM_CATCHUP_HOURS).
 MISSED_EVENT_NAME = "机器人没在读时达人的消息（没有起草）"
 # PRM_AUTO_REGISTER (2026-10-29): the deal's event of a new friend the bot registered, and how she was added (the
@@ -966,6 +972,10 @@ def event_out(ev: dict) -> dict:
         name = ("手动接的群不接了（运营说的），群里她的消息不再起草" if detail.get("gone") else
                 "手动接的群" + (f"（{detail['name']}）" if detail.get("name") else "")
                 + ("，她原来的三方群保留" if detail.get("kept") else ""))
+    elif ev["kind"] == PHOTO_CONFIRM and detail.get("code"):
+        name = f"对过图了，用 {detail['code']}" + (f"（#{detail['packet']} 的寄样单）" if detail.get("packet") else "")
+    elif ev["kind"] == PHOTO_UNCONFIRM and detail.get("code"):
+        name = f"撤销了 {detail['code']} 的「对过图了」"
     elif ev["kind"] == BOSS_EVENT:
         name = ("老板拉的群不在了（运营说的），群里她的消息不再起草" if detail.get("gone") else
                 "老板拉群介绍" + (f"（{detail['name']}）" if detail.get("name") else "")
@@ -1062,13 +1072,16 @@ def hand_samples_out(store: PrmStore, limit: int = HAND_LINES) -> list:
 
 def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, limit: int = 40,
              retention_days: int = retention.RETENTION_DAYS, now: Optional[float] = None,
-             group_of: Callable[[dict], dict] = group_state_out) -> dict:
+             group_of: Callable[[dict], dict] = group_state_out, photo_check: bool = False) -> dict:
     """What the console shows (GET /api/prm); also built from the database when the bot is stopped.
     Numbers appear only masked (``legend``); the full ones need ``reveal``.  ``night_alerts``: the deals' notices
     of holding lines the night window (``auto``: 自动模式 by day) sent (``NIGHT_NOTICE``), each until 「已处理」
     (``night_done``); ``group_alerts``: her lines in a group that closed before they were answered (``GROUP_LEFT``),
     each until 「已处理」 (``group_left_done``).  ``group_of(deal)``: a deal's 三方群 (``three_party.state_out``; the
-    running bot's adds its last 「先试一下」)."""
+    running bot's adds its last 「先试一下」).  ``photo_check`` (PRM_DRAFT_CONTEXT on): a pending sample order the Mac did
+    not check by photo (``draft_context.unchecked``), or whose last preview went by a 「对过图了」 taken back since
+    (``withdrawn``), shows 「批准并执行」 off and why; its ``photo_held`` lists the hats the Mac held for photos
+    (``held_out``: the console's 「对过图了」 and 「撤销」)."""
     now = time.time() if now is None else now
     parties = {p["id"]: p for p in store.parties(include_inactive=True)}
     newest = {}
@@ -1089,6 +1102,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
     recent = store.packets((SENT, FAILED, DROPPED, SUPERSEDED, NO_REPLY), limit=limit)
     told = store.wechat_notified(p["id"] for p in pending)     # 微信里审批草稿: when each was told to the admin's chat
     shown_cache: dict[int, dict] = {}
+    confirmed_cache: dict[int, dict] = {}            # PRM_DRAFT_CONTEXT: each deal's 「对过图了」 codes
     # 老板拉的群 (src/prm/boss_groups.py): the creators a boss introduced in a group the bot took over (「老板介绍」, also
     # once the group is gone); a group linked by hand (接手任何合作群) is no introduction
     boss_parties = {int(r["party_id"]) for r in store.boss_groups((BOSS_LINKED, BOSS_GONE))
@@ -1104,9 +1118,27 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
             shown_cache[party_id] = pii.display(store.token_rows(party_id))
         return shown_cache[party_id]
 
+    def confirmed_of(deal_id: int) -> dict:
+        if deal_id not in confirmed_cache:
+            confirmed_cache[deal_id] = {str(r["code"]): r["at"] for r in store.photo_confirmations(deal_id)}
+        return confirmed_cache[deal_id]
+
     def packet_out(p: dict) -> dict:
         party = parties.get(p["party_id"]) or {}
         final = p["final_text"] if p.get("final_text") is not None else p["text"]
+        platform = platform_out(p)
+        held: list = []
+        if photo_check and p.get("tool") == "jst.sample_order" and p["status"] == PENDING:
+            # PRM_DRAFT_CONTEXT: the hats its last preview held for photos (「对过图了，用 <编码>」) or let go only by a
+            # confirmation (「撤销」); one taken back holds the draft until a new preview
+            held = draft_context.held_out(p, confirmed_of(p["deal_id"]))
+            gone = draft_context.withdrawn(p, confirmed_of(p["deal_id"]))
+            if platform and platform["can_execute"] and gone:
+                platform = {**platform, "can_execute": False,
+                            "problems": [*platform["problems"], draft_context.withdrawn_reason(gone)]}
+        if photo_check and platform and platform["can_execute"] and draft_context.unchecked(p):
+            platform = {**platform, "can_execute": False,
+                        "problems": [*platform["problems"], draft_context.unchecked_reason(p)]}
         return {
             "id": p["id"], "deal_id": p["deal_id"], "party_id": p["party_id"],
             "party_name": party.get("name", "?"), "job_id": p["job_id"], "status": p["status"],
@@ -1124,7 +1156,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
             "waybill": p["meta"].get("waybill", ""), "system": p["meta"].get("source") == "system",
             "outcome": p["outcome"], "error": p["error"],
             "created_at": p["created_at"], "decided_at": p["decided_at"], "sent_at": p["sent_at"],
-            "tool": p.get("tool", MESSAGE_TOOL), "platform": platform_out(p),
+            "tool": p.get("tool", MESSAGE_TOOL), "platform": platform,
             "night_held": str(p["meta"].get("night_held") or ""), "opening": bool(p["meta"].get(OPENING)),
             "huopan": bool(p["meta"].get(HUOPAN)), "signed": bool(p["meta"].get(SIGNED)),
             "handcards": ({**p["meta"][HANDCARDS], "expired": cards_expired(p, now)}
@@ -1139,6 +1171,8 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
             **({"unheard": int(p["meta"]["unheard"])} if isinstance(p["meta"].get("unheard"), int)
                and p["meta"]["unheard"] > 0 else {}),
             "wechat_at": told.get(p["id"]),
+            "operator_files": draft_context.operator_files_out(p),    # PRM_DRAFT_CONTEXT: the operators' only
+            "photo_held": held,
         }
 
     def unanswered(deal: dict) -> bool:
@@ -1473,6 +1507,10 @@ class PrmService:
         # Mac may make 直播手卡 (``_reply_meta``) and the console's 「做手卡」 asks for them (``ask_handcards``).  A draft that
         # comes back with cards waits for a person all the same, switch or not (``on_result``).
         self._handcards = str(getattr(config, "prm_handcards", "off") or "off").strip().lower() == "on"
+        # PRM_DRAFT_CONTEXT (off: nothing of it; a config object without it: off): a creator's draft jobs carry
+        # ``meta.draft_context`` (``_reply_meta``): the Mac reads her 聚水潭 sample orders by it and matches her pictures
+        # against its hat photo index, and checks a sample order by photo (src/prm/draft_context.py)
+        self._draft_context = str(getattr(config, "prm_draft_context", "off") or "off").strip().lower() == "on"
         self._sample_lock = threading.Lock()       # one round's job queued, or one answer applied, at a time
         self._sample_errors = 0                    # failed rounds in a row (SAMPLE_ERRORS)
         self._sample_said = ""                     # what the deals were last told of a round that could not be made
@@ -1751,12 +1789,47 @@ class PrmService:
         """A WeChat reply's draft job (her message's, a 开场白's, a 专属佣金 step's) with ``meta.reply_parts`` when
         PRM_REPLY_PARTS is above 1: the Mac may write the reply as that many messages, a blank line between two
         (worker.parts_line); ``_deliver`` sends them so.  With PRM_HANDCARDS ``meta.handcards_ok``: the Mac may make 直播手卡
-        when she asks for them (worker.handcards_rule).  The same dict."""
+        when she asks for them (worker.handcards_rule).  With PRM_DRAFT_CONTEXT on, ``meta.draft_context`` too
+        (``_draft_context_meta``).  The same dict."""
         if self._reply_parts > 1:
             meta["reply_parts"] = self._reply_parts
         if self._handcards:
             meta[handcards.OK_KEY] = True
+        if self._draft_context:
+            meta[draft_context.KEY] = self._draft_context_meta(meta.get("deal_id"))
         return meta
+
+    def _draft_context_meta(self, deal_id) -> dict:
+        """PRM_DRAFT_CONTEXT: ``meta.draft_context`` of a draft job of the deal (``draft_context.job_context``: the
+        sample orders her deal knows, the ones the bot made, her platform accounts but one another active creator has
+        too: ``_hand_index``, as the hand-made orders go; the codes an operator confirmed for the deal, 「对过图了」).
+        Whatever goes wrong, the key is there (empty lists): the Mac still says what it could not find, and still checks
+        a sample order by photo (then holding what only a confirmation let go)."""
+        try:
+            deal = self._store.deal(int(deal_id))
+            party = self._store.party(deal["party_id"]) if deal else None
+            if party:
+                accounts = draft_context.accounts_of(self._store, party, self._creator_ids(deal["id"]),
+                                                     self.creator_directory)
+                accounts = draft_context.unambiguous(accounts, self._hand_index()["keys"], party["wxid"])
+                return draft_context.job_context(self._store, deal["id"], accounts)
+        except Exception:
+            logger.exception("PRM: the draft context of deal %s could not be put together", deal_id)
+        return {"orders": [], "verified": [], "accounts": [], "confirmed": []}
+
+    def _confirmed_codes(self, deal_id) -> dict:
+        """PRM_DRAFT_CONTEXT: the codes an operator confirmed for the deal (「对过图了」), code -> when."""
+        try:
+            return {str(r["code"]): r["at"] for r in self._store.photo_confirmations(int(deal_id))}
+        except (TypeError, ValueError):
+            return {}
+
+    def _drop_job_sheets(self, job_id: int) -> None:
+        """PRM_DRAFT_CONTEXT: a job's operator-only files that no draft keeps (its answer failed or cannot be read)
+        deleted, and its outfiles named like a sheet: her photo is on them."""
+        draft_context.delete_files([f["path"] for f in self._relay.store.operator_files(job_id)]
+                                   + [f["path"] for f in self._relay.store.outfiles(job_id)
+                                      if str(f.get("name") or "").startswith(draft_context.SHEET_PREFIX)])
 
     def _with_note(self, meta: dict, deal: dict, now: float) -> dict:
         """A draft job of the deal (her message's, a 开场白's, a 专属佣金 step's, a 百应 draft's) with ``meta.note`` when the
@@ -3340,11 +3413,14 @@ class PrmService:
         # 2026-11-09: a failed one's notice kept her lines for a draft of the group that never comes)
         closed = self._group_closed(str(job.get("chat_id") or ""), party_id) == GROUP_CLOSED_TEXT
         if closed and status in ("cancelled", "failed", "lost"):
+            if status != "lost":
+                self._drop_job_sheets(job["id"])       # (PRM_DRAFT_CONTEXT: her photo is on a sheet; 合并 draft-context)
             what = f"{step_word(meta)}这一步的草稿" if meta.get("system_note") else "的草稿"
             self._group_job_closed(job, meta, f"#{job['id']} {what}没写成（{GROUP_CLOSED_HEAD}）", now)
             return True
         if status == "cancelled":
             # (an operator cancelled it in the console): her lines it took along wait for the next one again
+            self._drop_job_sheets(job["id"])           # (PRM_DRAFT_CONTEXT: a sheet it sent first: her photo is on it)
             self._store.edit_notices(deal_id, lambda notices: [
                 {**n, "into": None, "text": failed_text(n.get("head") or n["text"], lines=bool(n.get("lines")))}
                 if n.get("into") == job["id"] else n for n in notices], now)
@@ -3358,6 +3434,8 @@ class PrmService:
                 extra = {}
             extra = extra if isinstance(extra, dict) else {}
             why = "Mac 失联了" if status == "lost" else str(extra.get("error") or job.get("result_text") or "没有返回内容")
+            if status == "failed":
+                self._drop_job_sheets(job["id"])       # (lost: the answer may still come, with them)
             self._draft_failed(job, meta, f"#{job['id']} 草稿没写成：{why[:120]}", notes, now)
             if meta.get("system_note"):
                 self._chain_refresh(deal_id, now)      # (not written: the chain waits for a person)
@@ -3368,6 +3446,7 @@ class PrmService:
         try:
             draft = parse_draft(job.get("result_text") or "")
         except DraftError as e:
+            self._drop_job_sheets(job["id"])
             if closed:
                 self._group_job_closed(job, meta, f"#{job['id']} 的草稿格式不对（{e.code}），{GROUP_CLOSED_HEAD}", now)
                 return True
@@ -3381,10 +3460,15 @@ class PrmService:
             # (its group closed meanwhile: as any draft back after its link ended, ``_closed_result``; her lines stay
             # that group's, a step is not owed again: 合并 channel-goods-convention 2026-11-09)
             what = f"{step_word(meta)}这一步的草稿" if meta.get("system_note") else "的草稿"
+            self._drop_job_sheets(job["id"])           # (no draft keeps its sheets: 合并 draft-context)
             self._group_job_closed(job, meta, f"#{job['id']} {what}写好时{GROUP_CLOSED_HEAD}，没发", now)
             return True
         if draft.platform_held == PLATFORM_UNASKED and self._unasked(job, meta, deal, draft, notes, now):
+            self._drop_job_sheets(job["id"])           # (no draft keeps its sheets: 合并 draft-context)
             return True
+        if self._draft_context and draft.platform is not None:
+            # PRM_DRAFT_CONTEXT: a sample order the Mac did not check by photo (an older worker, one not restarted) is held
+            draft = dataclasses.replace(draft, platform=draft_context.ungated(draft.platform, draft.gated))
         # A 专属佣金 the invite card (邀约卡 with a 专属佣金) opened already, as the Mac's preview found it in the invite
         # ledger (``covered``): a step of the chain is dropped and counts as open (the chain goes on); a reply keeps its
         # words for a person, without the action.
@@ -3397,7 +3481,12 @@ class PrmService:
             if lane == LANE_REPLY:
                 draft = dataclasses.replace(draft, platform=None)
                 cover = None
-        files = self._relay.store.outfiles(job["id"])
+        # PRM_DRAFT_CONTEXT: the files the Mac sent back for the operators only (a sample order's photo sheet, on the
+        # relay's operator-only channel; an outfile named like one) are kept on the packet (``meta.operator_files``),
+        # never attachments for her; past MAX_OPERATOR_FILES they are deleted
+        files, operator_files, extra_sheets = draft_context.take_operator_files(
+            self._relay.store.operator_files(job["id"]), draft.operator_files, self._relay.store.outfiles(job["id"]))
+        draft_context.delete_files(extra_sheets)
         attachments = [{"name": f["name"], "path": f["path"], "size": f["size"], "sha256": f["sha256"]} for f in files]
         # Every file the draft named (an older worker reports only the ones it sent back): fewer came,
         # the draft waits for a person whatever its kind's gate, and the deal and the draft say which.
@@ -3559,6 +3648,19 @@ class PrmService:
             packet_meta[AUTO_MODE] = True              # 自动模式 by day sent or held it: the console and the record say so
         if night_held:
             packet_meta["night_held"] = night_held[:200]
+        if operator_files and state == PENDING and not closed:
+            packet_meta[draft_context.OPERATOR_FILES] = operator_files      # (the console shows them, never sent to her)
+        elif operator_files:
+            # (nobody will look at this draft: not waiting, or its group's link ended meanwhile and it fails at once,
+            # ``_closed_result``: 合并 draft-context)
+            draft_context.delete_files([f["path"] for f in operator_files])
+        if draft.gated:
+            packet_meta[draft_context.KEY] = draft_context.mark(True)     # (the Mac checked its sample order by photo)
+            # (the codes it held for photos: the console's 「对过图了」; those it let go only by one: 「撤销」 holds it)
+            for key, codes in ((draft_context.PHOTO_HELD, draft.photo_held),
+                               (draft_context.PHOTO_CONFIRMED, draft.photo_confirmed)):
+                if codes and draft.platform is not None:
+                    packet_meta[key] = list(codes)
         tool, platform = MESSAGE_TOOL, None
         if draft.platform is not None:
             action = draft.platform.get("action")
@@ -4292,8 +4394,10 @@ class PrmService:
 
     def set_draft_note(self, deal_id, text, actor: str = "console") -> dict:
         """「起草备注」 in the console (the deal action ``draft_note`` {text}): what the operators tell the Mac about this
-        creator, which every draft job of the deal carries from now on (``_with_note``); "" clears it.  Whitespace is
-        collapsed (``store.draft_note_text``); longer than DRAFT_NOTE_CHARS is refused, not cut.  A change is one event
+        creator, which every draft job of the deal carries from now on (``_with_note``); "" clears it.  Each line's
+        whitespace is collapsed, empty lines dropped, the lines kept (``store.draft_note_text``); longer than
+        DRAFT_NOTE_CHARS is refused, not cut.  (It confirms no hat for a sample order: that is 「对过图了」,
+        ``photo_confirm``.)  A change is one event
         (``chars``: how long the note is now; its words are in no event and no log line).  ``{"ok": True, "draft_note"}``,
         or ``{"ok": False, "error"}`` saying why not."""
         try:
@@ -4304,7 +4408,7 @@ class PrmService:
             return {"ok": False, "error": "没有找到这张合作单"}
         if not isinstance(text, str):
             return {"ok": False, "error": "要给出起草备注的文字（空着就是清掉）"}
-        note = " ".join(text.split())
+        note = draft_note_text(text, limit=None)
         if len(note) > DRAFT_NOTE_CHARS:
             return {"ok": False, "error": f"起草备注最多 {DRAFT_NOTE_CHARS} 个字（现在 {len(note)} 个）"}
         if note == str(deal.get("draft_note") or ""):
@@ -4315,6 +4419,62 @@ class PrmService:
         logger.info("PRM: deal %d's draft note %s (%d characters)", deal["id"], "written" if note else "cleared",
                     len(note))
         return {"ok": True, "draft_note": note}
+
+    def photo_confirm(self, deal_id, packet_id, code, actor: str = "console") -> dict:
+        """「对过图了，用 <编码>」 in the console (the deal action ``photo_confirm`` {packet, code}; PRM_DRAFT_CONTEXT): an
+        operator compared the pictures and lets a hat the Mac held go, for the whole deal, until 「撤销」
+        (``photo_unconfirm``); the next preview of a sample order of the deal takes it (「重新预览」), like an earlier
+        order of hers that went out.  Only a code the draft's last preview held for photo reasons (or let go by a
+        confirmation taken back since: ``draft_context.confirmable``), on a sample order still waiting that is not being
+        previewed again; anything else is refused.  One event ({code, packet}: no names); a second click records
+        nothing.  ``{"ok": True, "code", "confirmed": True}`` or ``{"ok": False, "error"}``."""
+        if not self._draft_context:
+            return {"ok": False, "error": "对图没有打开（PRM_DRAFT_CONTEXT），不用点「对过图了」"}
+        try:
+            deal = self._store.deal(int(deal_id))
+            packet = self._store.packet(int(packet_id))
+        except (TypeError, ValueError):
+            deal, packet = None, None
+        if deal is None:
+            return {"ok": False, "error": "没有找到这张合作单"}
+        if packet is None or packet["deal_id"] != deal["id"]:
+            return {"ok": False, "error": "没有找到这份草稿"}
+        if packet.get("tool") != "jst.sample_order":
+            return {"ok": False, "error": "这份草稿不是寄样单"}
+        if packet["status"] != PENDING:
+            return {"ok": False, "error": "这份草稿已经处理过了"}
+        if (packet.get("platform") or {}).get("previewing"):
+            return {"ok": False, "error": "正在重新预览：等新预览出来再点"}
+        wanted = draft_context.code_of(code)
+        if not wanted or wanted not in draft_context.confirmable(packet):
+            return {"ok": False, "error": f"这份草稿现在的预览没有扣着 {wanted or '这个编码'}：只能确认预览里扣着的那顶"}
+        now = self._clock()
+        if self._store.confirm_photo(deal["id"], wanted, packet["id"], now):
+            self._store.add_event(deal["id"], deal["party_id"], PHOTO_CONFIRM, {"code": wanted, "packet": packet["id"]},
+                                  actor=actor, now=now)
+            logger.info("PRM: deal %d: %s confirmed by photo in the console (packet %d)", deal["id"], wanted,
+                        packet["id"])
+        return {"ok": True, "code": wanted, "confirmed": True}
+
+    def photo_unconfirm(self, deal_id, code, actor: str = "console") -> dict:
+        """「撤销」 of a 「对过图了」 (the deal action ``photo_unconfirm`` {code}): the code is not confirmed for the deal any
+        more; a waiting draft whose last preview went by it cannot be approved until a new preview
+        (``draft_context.withdrawn``).  One event ({code}); a second click records nothing.  ``{"ok": True, "code",
+        "confirmed": False}`` or ``{"ok": False, "error"}``."""
+        try:
+            deal = self._store.deal(int(deal_id))
+        except (TypeError, ValueError):
+            deal = None
+        if deal is None:
+            return {"ok": False, "error": "没有找到这张合作单"}
+        wanted = draft_context.code_of(code)
+        if not wanted:
+            return {"ok": False, "error": "编码不对"}
+        now = self._clock()
+        if self._store.unconfirm_photo(deal["id"], wanted):
+            self._store.add_event(deal["id"], deal["party_id"], PHOTO_UNCONFIRM, {"code": wanted}, actor=actor, now=now)
+            logger.info("PRM: deal %d: the photo confirmation of %s taken back in the console", deal["id"], wanted)
+        return {"ok": True, "code": wanted, "confirmed": False}
 
     def _group_opening(self, party: dict, chat: str) -> tuple:
         """The 开场白 of a 老板拉的群 the bot just took over (src/prm/boss_groups.py ``take_over``): one draft job of our
@@ -4433,7 +4593,8 @@ class PrmService:
         (``ask_huopan``); ``handcards`` {items?} (「做手卡」) one draft with her 直播手卡 (``ask_handcards``); ``group`` /
         ``group_try`` / ``group_made`` / ``group_none`` are 三方群's
         (``three_party``: 「拉三方群」, 「先试一下」, 「建好了」, 「没建成」); ``draft_note`` {text} keeps the deal's 起草备注
-        (``set_draft_note``)."""
+        (``set_draft_note``); ``photo_confirm`` {packet, code} / ``photo_unconfirm`` {code} are 「对过图了」 and its
+        「撤销」 (PRM_DRAFT_CONTEXT: ``photo_confirm``)."""
         if action == OPENING:
             return self.ask_opening(data.get("deal_id"))
         if action == HUOPAN:
@@ -4444,6 +4605,10 @@ class PrmService:
             return self.set_draft_note(data.get("deal_id"), data.get("text"), actor=actor)
         if action == GROUP_UNLINK:
             return self.unlink_group(data.get("deal_id"), data.get("chat"), actor=actor)
+        if action == PHOTO_CONFIRM:
+            return self.photo_confirm(data.get("deal_id"), data.get("packet"), data.get("code"), actor=actor)
+        if action == PHOTO_UNCONFIRM:
+            return self.photo_unconfirm(data.get("deal_id"), data.get("code"), actor=actor)
         if action in GROUP_ACTIONS:
             deal_id = data.get("deal_id")
             if action in ("group", "group_try"):
@@ -5219,6 +5384,14 @@ class PrmService:
             return {"ok": False, "error": f"预览没通过，不能执行：{why}"}
         if data.get("previewing"):
             return {"ok": False, "error": PREVIEWING, "code": "previewing"}
+        if self._draft_context and draft_context.unchecked(packet):
+            # PRM_DRAFT_CONTEXT: its last preview was not checked by photo (a draft from before the switch was on too), or
+            # by an older rule (a v1 / v2 mark: 「这份是旧版 Mac 按旧规则核的…」)
+            return {"ok": False, "error": draft_context.unchecked_reason(packet)}   # (each says to 重新预览)
+        gone = draft_context.withdrawn(packet, self._confirmed_codes(packet["deal_id"])) if self._draft_context else []
+        if gone:
+            # PRM_DRAFT_CONTEXT: its last preview let a hat go only by a 「对过图了」 that was taken back (「撤销」) since
+            return {"ok": False, "error": draft_context.withdrawn_reason(gone)}
         if action.get("action") == LINK_ACTION:
             # a step of the chain binds its round's sample order's UID (``meta.chain_uid``): another is not run; any
             # other link draft was flagged when it came if its UID is none of hers (``_link_doubts``: she may have two
@@ -5405,14 +5578,24 @@ class PrmService:
         action = data.get("action")
         if not action:
             return {"ok": False, "error": "这个平台动作的参数不对，预览不了；等达人再发消息时的新草稿"}
-        if not self._store.set_platform(packet["id"], {**data, "previewing": now}, (PENDING,),
+        # ``preview_key``: only the answer of this, the latest new preview, counts (an earlier one lost on the way may
+        # answer late: it never overwrites a newer preview, its sheet, its mark; _on_platform_job)
+        key = uuid.uuid4().hex
+        if not self._store.set_platform(packet["id"], {**data, "previewing": now, "preview_key": key}, (PENDING,),
                                         expect=lambda current: not current.get("previewing")):
             return {"ok": False, "error": "这条草稿已经处理过了，或者已经在重新预览"}
         meta = {"op": "platform_preview", "party_id": packet["party_id"], "deal_id": packet["deal_id"],
-                "packet_id": packet["id"], "action": action}
+                "packet_id": packet["id"], "action": action, "preview_key": key}
         creator = self._creator_ids(packet["deal_id"])
         if creator:
             meta["creator"] = creator
+        if self._draft_context and action.get("action") == "jst.sample_order":
+            # PRM_DRAFT_CONTEXT: the Mac checks the sample order by photo again (with the codes an operator confirmed for
+            # the deal, 「对过图了」; and her deal's 起草备注, as a draft job carries it)
+            meta[draft_context.KEY] = self._draft_context_meta(packet["deal_id"])
+            deal = self._store.deal(packet["deal_id"])
+            if deal is not None:
+                self._with_note(meta, deal, now)
         try:
             _, job_id = self._relay.submit(packet["chat_id"], packet["chat_id"], "", kind=PRM, meta=meta,
                                            fresh=True, input_closed=True)
@@ -5457,6 +5640,11 @@ class PrmService:
             if status in ("pending", "running"):
                 return True
             data = packet["platform"]
+            if str(meta.get("preview_key") or "") != str(data.get("preview_key") or ""):
+                # an earlier new preview's answer (lost on the way, then late): a newer one was asked for since
+                self._drop_job_sheets(job["id"])
+                logger.info("PRM: job #%d answers an earlier new preview of packet %d; ignored", job["id"], packet["id"])
+                return True
             block, refused = None, ""
             if status == "done":
                 try:
@@ -5465,6 +5653,10 @@ class PrmService:
                     refused = f"新预览的动作没过机器人这边的检查（{e}）"
                 except (ValueError, platforms.ActionError):
                     block = None
+            answered = block is not None                 # (the Mac's new preview itself, not the old one marked)
+            gated = draft_context.gated_of(job.get("result_text"))
+            if answered and self._draft_context:
+                block = draft_context.ungated(block, gated)
             if block is None:
                 why = refused or {"lost": "Mac 失联了", "cancelled": "任务被取消了"}.get(status) or _job_error(job)
                 preview = {**(data.get("preview") or {}), "problems": [f"重新预览没做成：{why}"[:200]]}
@@ -5476,6 +5668,33 @@ class PrmService:
                 block = {**block, "action": masked_action(block.get("action"), self._masker(packet["party_id"], now))}
             new = {**data, "previewing": None, **({"preview": block} if block else {})}
             self._store.set_platform(packet["id"], new, (PENDING,))
+            if answered and (block.get("action") or {}).get("action") == "jst.sample_order" and (
+                    self._draft_context or draft_context.KEY in (packet.get("meta") or {})):
+                # PRM_DRAFT_CONTEXT: the packet keeps whether its last preview was checked by photo (approving asks); once
+                # it has a mark, with the switch off too (a preview nothing checked never keeps an older one's mark); and
+                # which codes it held for photos (「对过图了」) and let go only by a confirmation (「撤销」 holds it)
+                self._store.merge_packet_meta(packet["id"], {
+                    draft_context.KEY: draft_context.mark(gated),
+                    draft_context.PHOTO_HELD: draft_context.codes_of(job.get("result_text"), draft_context.PHOTO_HELD)
+                    if gated else [],
+                    draft_context.PHOTO_CONFIRMED: draft_context.codes_of(job.get("result_text"),
+                                                                          draft_context.PHOTO_CONFIRMED)
+                    if gated else []}, (PENDING,))
+            # PRM_DRAFT_CONTEXT: the new preview's sheet replaces the draft's, and a new preview without one clears it (the
+            # old sheet was not made for it); the old files are deleted.  A sheet that came with an answer that cannot be
+            # read, for a draft no longer waiting, or past MAX_OPERATOR_FILES is deleted
+            files, extra_sheets = draft_context.preview_operator_files(
+                job.get("result_text"), self._relay.store.operator_files(job["id"]), self._relay.store.outfiles(job["id"]))
+            draft_context.delete_files(extra_sheets)
+            if answered:
+                old = [f["path"] for f in draft_context.files_of(packet) if f["path"] not in {g["path"] for g in files}]
+                if files or old:
+                    if self._store.merge_packet_meta(packet["id"], {draft_context.OPERATOR_FILES: files}, (PENDING,)):
+                        draft_context.delete_files(old)
+                    else:
+                        draft_context.delete_files([f["path"] for f in files])
+            elif files and status != "lost":         # (lost: its answer may still come, with them; else the sweep)
+                draft_context.delete_files([f["path"] for f in files])
             if packet.get("tool") in CHAIN_TOOLS:
                 self._chain_refresh(packet["deal_id"], now)    # (its preview may pass now)
             return True
@@ -7185,7 +7404,7 @@ class PrmService:
     def snapshot(self) -> dict:
         relay = self._relay.snapshot()
         return snapshot(self._store, running=True, retention_days=self._retention_days, now=self._clock(),
-                        group_of=self.three_party.deal_out, extra={
+                        group_of=self.three_party.deal_out, photo_check=self._draft_context, extra={
             "mac_online": relay.get("mac_online", False),
             "worker_kinds": relay.get("worker_kinds", []),
             "can_send": self._send is not None, "can_send_files": self._send_file is not None,
@@ -7574,6 +7793,10 @@ class PrmService:
             self.boss_groups.sweep_old(now)
         except Exception:
             logger.exception("PRM: the ignored boss groups could not be cleaned up; tried again later")
+        try:                                       # PRM_DRAFT_CONTEXT: the photo sheets (her picture) after 30 days
+            draft_context.sweep(self._store, now, files_dir=self._relay.files_dir, relay_store=self._relay.store)
+        except Exception:
+            logger.exception("PRM: the operator files could not be cleaned up; tried again later")
         for deal in self._store.deals_to_purge(now, self._retention_days):
             try:
                 self.purge(deal, now)
@@ -8346,8 +8569,9 @@ def apply_deal_action(store: PrmStore, action: str, data: dict, *, now: float, t
     """The console's deal actions (also when the bot is stopped: straight on the database); the 聚水潭 sync's too
     (``actor`` system, ``review`` / ``notice`` / ``note`` / ``more``: ``deals.add_shipment``).  ``night_done``
     {deal_id, packet}: 「已处理」 on a holding line the night window sent (``night_done``); ``group_left_done`` {deal_id,
-    chat}: 「已处理」 on her lines a closed group left unanswered (``group_left_done``).  ``opening``, the 三方群 ones
-    and ``draft_note`` are the running bot's only (``PrmService.deal_action``): a stopped one says so."""
+    chat}: 「已处理」 on her lines a closed group left unanswered (``group_left_done``).  ``opening``, the 三方群 ones,
+    ``draft_note`` and ``photo_confirm`` / ``photo_unconfirm`` are the running bot's only (``PrmService.deal_action``): a
+    stopped one says so."""
     try:
         deal_id = data.get("deal_id")
         if action == "stage":
@@ -8378,6 +8602,8 @@ def apply_deal_action(store: PrmStore, action: str, data: dict, *, now: float, t
             return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能停掉接手的群"}
         elif action == DRAFT_NOTE:                     # (running: PrmService.set_draft_note)
             return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能改起草备注"}
+        elif action in (PHOTO_CONFIRM, PHOTO_UNCONFIRM):   # (running: PrmService.photo_confirm / photo_unconfirm)
+            return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能确认对图"}
         else:
             return {"ok": False, "error": f"不认识的操作 {action}"}
     except deals.DealError as e:

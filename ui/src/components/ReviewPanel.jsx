@@ -2,7 +2,7 @@ import { Fragment, useState } from 'react'
 import { ArrowClockwise, PaperPlaneRight, PencilSimple, X, Paperclip, WarningCircle, Eye, EyeSlash, Flag, Lightning, CheckCircle, Copy, ChatsCircle, Robot, HandPalm, UsersThree, DeviceMobile } from '@phosphor-icons/react'
 import { useToast } from '../store/toast'
 import { fmtClock } from '../lib/relay'
-import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, buyinNotes, buyinFriendAddLine, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, dealAction, nightStatus, copyBuyin, buyinSent, setAutoMode, replyPartCount, inGroup, bossGroupNotes, handSampleSeen, handSampleLine, wechatReviewNote } from '../lib/prm'
+import { usePrm, PACKET_STATES, decide, revealNumbers, setupProblems, buyinNotes, buyinFriendAddLine, fmtSize, VERDICT_TAGS, outcomeTag, executePlatform, repreview, ackPlatform, dealAction, nightStatus, copyBuyin, buyinSent, setAutoMode, replyPartCount, inGroup, bossGroupNotes, handSampleSeen, handSampleLine, wechatReviewNote, photoConfirm, photoUnconfirm } from '../lib/prm'
 import { PageHead, Card, Note, Banner, Empty, Confirm, TextArea } from './ui'
 import { FriendAddList } from './FriendAddCard'
 
@@ -310,8 +310,25 @@ function StepView({ st }) {
   )
 }
 
+/** The operators' own pictures of a draft (PRM_DRAFT_CONTEXT: a sample order's photo sheet): shown here, never sent to her. */
+function OperatorFiles({ files }) {
+  if (!files?.length) return null
+  return (
+    <div className="stack prm-operator-files" style={{ gap: 6 }}>
+      {files.map((f) => (
+        <figure key={f.n} className="prm-operator-file" style={{ margin: 0 }}>
+          {f.kept
+            ? <img src={f.url} alt={f.name} loading="lazy" style={{ maxWidth: '100%', borderRadius: 4 }} />
+            : <div className="f-hint">{f.name}（图已经清理掉了）</div>}
+          <figcaption className="f-hint">只给运营看（不发给达人）：{f.why || f.name}</figcaption>
+        </figure>
+      ))}
+    </div>
+  )
+}
+
 /** A draft's platform action: what it will do, the Mac's verdict, and the detail behind it. */
-function PlatformBox({ pf }) {
+function PlatformBox({ pf, files }) {
   const [open, setOpen] = useState(false)
   const ex = pf.execution
   return (
@@ -330,6 +347,7 @@ function PlatformBox({ pf }) {
       {pf.requested && <div className="f-hint">草稿里写的：<span className="mono">{JSON.stringify(pf.requested)}</span></div>}
       {pf.problems.map((t) => <Note key={t} kind="need">{t}</Note>)}
       {pf.facts.map((f, i) => <div key={i} className="f-hint"><b>{f.label}：</b>{f.value}</div>)}
+      <OperatorFiles files={files} />
       {ex && <div className="f-hint">执行结果：<span className={`tag ${outcomeTag(ex.outcome)}`}>{ex.outcome}</span> {ex.outcome_label}</div>}
       {pf.steps.length > 0 && (
         <button type="button" className="link" onClick={() => setOpen(!open)}>{open ? '收起预览明细' : `看预览明细（${pf.steps.length} 条命令）`}</button>
@@ -382,6 +400,47 @@ function HandcardsNote({ p }) {
         ? !c.expired && <div className="f-hint prm-handcards-line">{cardsLine(p, c)}</div>
         : <Note kind="warn">手卡没做成：{(c.problems || []).join('；') || 'Mac 没说为什么'}。草稿里没附手卡，话不能原样发。</Note>}
       {c.note && <div className="f-hint prm-handcards-note" style={{ whiteSpace: 'pre-wrap' }}>{c.note}</div>}
+    </div>
+  )
+}
+
+/** 「对过图了」 (PRM_DRAFT_CONTEXT, 2026-11-09): the hats the Mac held for photos on a waiting sample order. An operator who
+ * compared the pictures (the sheet above) confirms one for her deal; the next 「重新预览」 takes it; 「撤销」 takes it back
+ * (a draft whose preview went by it then waits for a new preview). Words in the 起草备注 confirm nothing. */
+function PhotoHeld({ p, onDone }) {
+  const toast = useToast()
+  const [busy, setBusy] = useState('')
+  const rows = p.photo_held || []
+  if (!rows.length || p.status !== 'pending') return null
+  const previewing = Boolean(p.platform?.previewing)
+  const act = async (h, undo) => {
+    setBusy(h.code)
+    try {
+      if (undo) await photoUnconfirm(p.deal_id, h.code)
+      else await photoConfirm(p.deal_id, p.id, h.code)
+      toast.ok(undo ? `已撤销 ${h.code} 的「对过图了」` : `已确认 ${h.code}，点「重新预览」按确认再核`)
+      onDone()
+    } catch (e) { toast.err(e.message) } finally { setBusy('') }
+  }
+  return (
+    <div className="stack prm-photo-held" style={{ gap: 6 }}>
+      <div className="f-hint">Mac 对图扣着的帽子：看过上面的对图单、对过图再点（这张合作单的这个编码都算，撤销以前一直算）</div>
+      {rows.map((h) => (
+        <div key={h.code} className="row prm-photo-row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          {h.confirmed ? (
+            <>
+              <span className="tag ok mono">{h.code}</span>
+              <span className="f-hint">{h.held ? `已确认 ${h.code}，点「重新预览」按确认再核` : `已确认 ${h.code}：这份预览按确认核过`}{h.at ? `（${fmtClock(h.at)}）` : ''}</span>
+              <button type="button" className="btn ghost" disabled={Boolean(busy) || previewing} onClick={() => act(h, true)}>撤销</button>
+            </>
+          ) : (
+            <>
+              <button type="button" className="btn" disabled={Boolean(busy) || previewing} onClick={() => act(h, false)}>对过图了，用 {h.code}</button>
+              {!h.held && <span className="f-hint">撤销了 {h.code} 的「对过图了」：点「重新预览」再核</span>}
+            </>
+          )}
+        </div>
+      ))}
     </div>
   )
 }
@@ -452,7 +511,8 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
             {slots.map(([k, v]) => <span key={k} className="tag">{k}：{v}</span>)}
           </div>
         )}
-        {pf && <PlatformBox pf={pf} />}
+        {pf && <PlatformBox pf={pf} files={p.operator_files} />}
+        {pf && <PhotoHeld p={p} onDone={onDone} />}
         {pf && <div className="f-hint">下面是平台上核验成功以后才发给达人的回复：</div>}
         {kept != null && !editing && <div className="f-hint prm-kept-edit">上次「改了再执行」没排进 Mac 的任务队列，改过的回复还留着：点「改了再执行」接着用；直接点「批准并执行」发的是下面的原稿</div>}
         {editing

@@ -28,7 +28,7 @@ from test_prm_platform_flow import CHANNEL, DESIGNATED, block, record
 
 from src.admin import RELAY_HELP, AdminCommandHandler
 from src.db import MessageStore, initialize_db
-from src.prm import deals, gates, platforms
+from src.prm import deals, draft_context, gates, platforms
 from src.prm import wechat_review as wr
 from src.prm.service import SETTLE_SEC, UNSURE_ERROR, PrmService, platform_state
 from src.prm.store import BUYIN_TOOL, PrmStore
@@ -2726,3 +2726,104 @@ def test_a_line_read_back_before_its_send_was_noted_still_gives_it_wechats_time(
     desk.clock.now += READ_BACK_EARLY_SEC + 1
     review.note_sent(ADMIN, "收到")                                       # (too long ago to be this one)
     assert review._last.wechat_at is None
+
+
+# ── 合并 draft-context (2026-11-10): a sample order the photo check holds is the console's ───────────────────────────
+
+CODE = "A7269901001B-F"             # a made-up 聚水潭 item code
+GATED = {"v": 3, "gated": True}     # the Mac's mark next to a sample order it checked by photo (PRM_DRAFT_CONTEXT)
+
+
+def photo_desk(clock, tmp_path) -> Desk:
+    d = Desk(clock, tmp_path, prm_draft_context="on")
+    d.prm.register(CREATOR, "小美", "测试达人")
+    return d
+
+
+def checked_waiting(desk, *, held=(CODE,), used=(), verdict="blocked", mark=True) -> dict:
+    """She agrees; the Mac drafts a sample order and checks it by photo (``mark``: the answer says so), holding ``held``
+    for photos (its preview not ready) and letting ``used`` go only by an operator's 「对过图了」; the draft is told."""
+    desk.prm.store.token_for(1, "phone", "手机", "13900001111", desk.clock.now)     # 〈手机1〉: the receiver's number
+    desk.her("好的，寄吧")
+    problems = [f"{c}（均码咖啡）对图没把握（款有把握，颜色没把握）：先核对再建；{draft_context.CONFIRM_HOW}" for c in held]
+    preview = {**jst_block(), "verdict": verdict, "problems": problems,
+               "run": {"steps": ["create"]} if verdict == "ready" else {}}
+    packet = desk.mac(text="寄样单建好啦，单号 {寄样单号}～", message_kind="money", platform=preview,
+                      **({"draft_context": GATED} if mark else {}), **({"photo_held": list(held)} if held else {}),
+                      **({"photo_confirmed": list(used)} if used else {}))
+    assert packet["status"] == "pending" and packet["tool"] == "jst.sample_order"
+    desk.review.sweep()
+    return desk.prm.store.packet(packet["id"])
+
+
+def test_a_sample_order_with_hats_held_for_photos_says_so_and_执行_stays_the_consoles(clock, tmp_path):
+    """The notification of a sample order the Mac held hats of (PRM_DRAFT_CONTEXT: no sure picture behind them) says
+    how many and which, and that 「对过图了」 and 「重新预览」 are the console's; 「执行」 quoting it, 「执行 N」 and 「执行 N
+    了吗」 say the same and run nothing; once confirmed in the console it says to preview again.  The switch off (the
+    console has no 「对过图了」 then): the usual line."""
+    desk = photo_desk(clock, tmp_path)
+    try:
+        packet = checked_waiting(desk)
+        number = packet["id"]
+        stop = (f"有 1 顶帽子扣着（没对上图：{CODE}），微信里不能执行：请到控制台对过图，在这顶旁边点「对过图了」，"
+                "再点「重新预览」；不要的话回 2")
+        lines = notice_of(desk, number)
+        assert lines[-1] == stop and not any("回「执行」" in line for line in lines)
+        assert any(f"{CODE}（均码咖啡）对图没把握" in line for line in lines)        # (the problem itself is listed too)
+        assert desk.prm.store.wechat_review(number)["preview"] in ("", None)        # (no stamp: never run from here)
+        quote = head(desk, number)
+        assert desk.admin("执行", quote=quote) == f"#{number} {stop}"
+        assert desk.admin(f"执行 {number}") == f"#{number} {stop}"
+        assert desk.admin(f"执行 {number} 了吗") == f"#{number}（小美）还没执行（在等你确认）：{stop}"
+        assert desk.executions() == [] and desk.prm.store.packet(number)["status"] == "pending"
+        deal_id = packet["deal_id"]
+        assert desk.prm.deal_action("photo_confirm", {"deal_id": deal_id, "packet": number, "code": CODE})["ok"]
+        assert desk.admin("执行", quote=quote) == (f"#{number} 扣着的帽子都点过「对过图了」，微信里不能执行：请到控制台点"
+                                                   "「重新预览」按确认再核；不要的话回 2")
+        assert desk.executions() == []
+        desk.review._draft_context = False
+        assert desk.review.notification_text(desk.prm.store.packet(number)).split("\n")[-1] == (
+            "预览没通过，微信里不能执行：请到控制台处理（「重新预览」）；不要的话回 2")
+    finally:
+        desk.stop()
+
+
+def test_a_sample_order_whose_confirmation_was_taken_back_is_not_run_from_wechat(clock, tmp_path):
+    """A sample order its preview let a hat go only by a 「对过图了」 is told with 「执行」 (ready, checked); taken back in
+    the console (「撤销」), 「执行」 quoting that notification says why and runs nothing, and ``decide`` with the
+    notification's stamp refuses it too (the console's ``_approve_execute``); confirmed again, it runs."""
+    desk = photo_desk(clock, tmp_path)
+    try:
+        assert desk.prm.store.confirm_photo(1, CODE, 0, clock.now)                  # (an earlier draft's 「对过图了」)
+        packet = checked_waiting(desk, held=(), used=(CODE,), verdict="ready")
+        number, deal_id = packet["id"], packet["deal_id"]
+        lines = notice_of(desk, number)
+        assert lines[-2].startswith("引用这条回「执行」") and lines[-1] == f"（不引用就回「执行 {number}」「不发 {number}」）"
+        stamp = desk.prm.store.wechat_review(number)["preview"]
+        assert stamp
+        assert desk.prm.deal_action("photo_unconfirm", {"deal_id": deal_id, "code": CODE})["ok"]
+        why = f"撤销了 {CODE} 的「对过图了」：点「重新预览」再核"
+        quote = head(desk, number)
+        assert desk.admin("执行", quote=quote) == f"#{number} {why}；微信里不能执行，请到控制台处理；不要的话回 2"
+        assert desk.prm.decide(number, "execute", None, stamp=stamp) == {"ok": False, "error": why}
+        assert desk.executions() == [] and desk.prm.store.packet(number)["status"] == "pending"
+        assert desk.prm.deal_action("photo_confirm", {"deal_id": deal_id, "packet": number, "code": CODE})["ok"]
+        assert desk.admin("执行", quote=quote).startswith(f"#{number} 已批准执行")
+        assert len(desk.executions()) == 1
+    finally:
+        desk.stop()
+
+
+def test_a_sample_order_the_mac_did_not_check_by_photo_is_never_offered_执行(clock, tmp_path):
+    """An older Mac worker's sample order (no mark: the bot holds it, ``ungated``): its notification says what the
+    console says and offers no 「执行」."""
+    desk = photo_desk(clock, tmp_path)
+    try:
+        packet = checked_waiting(desk, held=(), verdict="ready", mark=False)
+        number = packet["id"]
+        stop = f"{draft_context.NOT_GATED}；微信里不能执行，请到控制台处理；不要的话回 2"
+        assert notice_of(desk, number)[-1] == stop
+        assert desk.admin("执行", quote=head(desk, number)) == f"#{number} {stop}"
+        assert desk.executions() == []
+    finally:
+        desk.stop()

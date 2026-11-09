@@ -118,6 +118,18 @@ CREATE TABLE IF NOT EXISTS relay_outfiles (
     sha256 TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS relay_outfiles_job ON relay_outfiles(job_id, id);
+-- what a prm job's worker sends back for the operators only (PRM_DRAFT_CONTEXT's photo sheet, 2026-11-09): stored next
+-- to its outfiles, recorded apart (never one of a draft's attachments, not counted with them); an older relay has no
+-- endpoint for them (404), so an older bot never gets one to send on
+CREATE TABLE IF NOT EXISTS relay_operator_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    path TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    sha256 TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS relay_operator_files_job ON relay_operator_files(job_id, id);
 """
 
 
@@ -372,6 +384,47 @@ class RelayStore:
                 "SELECT * FROM relay_outfiles WHERE job_id = ? ORDER BY id", (job_id,)
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def add_operator_file(self, job_id: int, name: str, path: str, size: int, sha256: str,
+                          limit: int) -> Optional[int]:
+        """Record a file the worker sent for the operators only (a running ``prm`` job's; None: not such a job, or it
+        has ``limit`` of them already).  Not one of the job's outfiles: never a draft's attachment."""
+        with self._tx():
+            row = self._conn.execute("SELECT kind, status FROM relay_jobs WHERE id = ?", (job_id,)).fetchone()
+            if row is None or row["kind"] != PRM or row["status"] not in ("running", "lost"):
+                return None
+            count = self._conn.execute("SELECT COUNT(*) FROM relay_operator_files WHERE job_id = ?",
+                                       (job_id,)).fetchone()[0]
+            if count >= limit:
+                return None
+            cur = self._conn.execute(
+                "INSERT INTO relay_operator_files (job_id, name, path, size, sha256) VALUES (?, ?, ?, ?, ?)",
+                (job_id, name, path, int(size), sha256),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def operator_files(self, job_id: Optional[int] = None) -> list[dict]:
+        """The files a job's worker sent for the operators only, oldest first; every job's with ``job_id`` None (the
+        30-day sweep of src/prm/draft_context.py goes by them)."""
+        with self._tx():
+            if job_id is None:
+                rows = self._conn.execute("SELECT * FROM relay_operator_files ORDER BY id").fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM relay_operator_files WHERE job_id = ? ORDER BY id", (job_id,)
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def forget_operator_files(self, ids) -> int:
+        """The rows of operator-only files that are gone (the sweep deleted them): no longer listed."""
+        ids = [int(i) for i in ids or []]
+        if not ids:
+            return 0
+        with self._tx():
+            cur = self._conn.execute(f"DELETE FROM relay_operator_files WHERE id IN ({', '.join('?' * len(ids))})", ids)
+            self._conn.commit()
+            return cur.rowcount
 
     def rewrite_chat(self, chat_id: str, kind: str, rewrite) -> int:
         """Rewrite what the jobs of ``kind`` in this chat hold (their text, results, meta, follow-ups):

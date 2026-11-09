@@ -1204,10 +1204,11 @@ def _prm_friend_adds(data: dict) -> dict:
 
 def _prm_deal(data: dict) -> dict:
     """POST /api/prm/deals {action: stage | adopt | mode | shipment | shipment_status | night_done | opening | huopan |
-    handcards | group | group_try | group_made | group_none | draft_note, deal_id, ...} (``huopan``: 「补发货盘」;
-    ``handcards`` {items?}: 「做手卡」, src/prm/handcards.py; ``group*``: 三方群, src/prm/three_party.py; ``draft_note``
-    {text}: the deal's 起草备注; ``opening``, ``huopan``, ``handcards``, ``group*`` and ``draft_note`` only while
-    running: a stopped bot refuses them, ``apply_deal_action``)."""
+    handcards | group | group_try | group_made | group_none | draft_note | photo_confirm | photo_unconfirm, deal_id,
+    ...} (``huopan``: 「补发货盘」; ``handcards`` {items?}: 「做手卡」, src/prm/handcards.py; ``group*``: 三方群,
+    src/prm/three_party.py; ``draft_note`` {text}: the deal's 起草备注; ``photo_confirm`` {packet, code} /
+    ``photo_unconfirm`` {code}: PRM_DRAFT_CONTEXT's 「对过图了」 and its 「撤销」; ``opening``, ``huopan``, ``handcards``,
+    ``group*``, ``draft_note`` and ``photo_*`` only while running: a stopped bot refuses them, ``apply_deal_action``)."""
     from src.prm.service import apply_deal_action
 
     action = str(data.get("action") or "")
@@ -1223,47 +1224,40 @@ def _prm_deal(data: dict) -> dict:
         store.close()
 
 
-# A draft's pictures the console may show (「待审批」 shows the 直播手卡 of a draft before anyone sends them).
-_PRM_PICTURES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
-
-
-# GET /api/prm/file's ``kind``: which of a draft's file lists (``attachment``: what goes to her, the 直播手卡; the
-# operator-only pictures, ``operator``, are another branch's: until it is merged that kind finds nothing here).
-_PRM_FILE_KINDS = ("attachment",)
+# GET /api/prm/file's ``kind``: which of a draft's file lists (「待审批」 shows a draft's pictures before anyone sends
+# them): ``attachment``, what goes to her (``packet.attachments``: the 直播手卡); ``operator``, the operators' only
+# (``meta.operator_files``: PRM_DRAFT_CONTEXT's photo sheet, only a file the relay keeps for a job)
+_PRM_FILE_KINDS = ("attachment", "operator")
 _ASCII_NUMBER = re.compile(r"[0-9]{1,12}")
 
 
 def _prm_file(query: str):
-    """GET /api/prm/file?packet=<id>&kind=attachment&n=<index>: one picture among a draft's files (``kind`` attachment:
-    ``attachments``, what goes to her: the 直播手卡) as ``(path, content type)``; None for anything else (``packet``,
-    ``kind`` or ``n`` missing or not a whole number / a known kind, no such draft or file, not a picture, gone from
-    disk).  Read only, also while the bot is stopped (that store is closed again); the path is the one the bot itself
-    kept for the file the Mac sent back."""
+    """GET /api/prm/file?packet=<id>&kind=attachment|operator&n=<index>: one picture of a draft as ``(path, content
+    type)``: ``kind`` attachment, ``attachments[n]`` (what goes to her: the 直播手卡); operator, ``meta.operator_files[n]``
+    (PRM_DRAFT_CONTEXT's photo sheet, only from the relay's ``outfiles/job-*``); which file and whether it is a picture
+    still there: src/prm/draft_context.py ``picture``.  None for anything else (``packet``, ``kind`` or ``n`` missing or
+    not a whole number of ASCII digits / a known kind, no such draft or file, not a picture, gone from disk).  Read only,
+    also while the bot is stopped (that store is closed again); the path is the one the bot itself kept for the file the
+    Mac sent back."""
     from urllib.parse import parse_qs
+
+    from src.prm.draft_context import picture
 
     q = parse_qs(query)
     kind = (q.get("kind") or [""])[0]
     raw_packet, raw_n = (q.get("packet") or [""])[0], (q.get("n") or [""])[0]
     if kind not in _PRM_FILE_KINDS or not _ASCII_NUMBER.fullmatch(raw_packet) or not _ASCII_NUMBER.fullmatch(raw_n):
         return None                                       # (str.isdigit would take 「²」 and 「١」)
-    packet_id, n = int(raw_packet), int(raw_n)
     running = _prm                                        # read once: the bot may start or stop meanwhile
     store = running.store if running is not None else _prm_stopped_store()
     if store is None:
         return None
     try:
-        packet = store.packet(packet_id)
+        packet = store.packet(int(raw_packet))
     finally:
         if running is None:
             store.close()
-    files = (packet or {}).get("attachments") or []
-    if not 0 <= n < len(files) or not isinstance(files[n], dict):
-        return None
-    path = Path(str(files[n].get("path") or ""))
-    content = _PRM_PICTURES.get(path.suffix.lower())
-    if content is None or not path.is_file():
-        return None
-    return path, content
+    return picture(packet, kind, int(raw_n))
 
 
 def _prm_auto(data: dict) -> dict:
@@ -1792,7 +1786,7 @@ class _UIHandler(SimpleHTTPRequestHandler):
             return
 
         # ── API: PRM copilot — creators, drafts, decisions ─────────────
-        if self.path.split("?", 1)[0] == "/api/prm/file":
+        if self.path.split("?", 1)[0] == "/api/prm/file":         # one picture of a draft (GET only)
             self._send_prm_file()
             return
         if self.path.split("?", 1)[0] == "/api/prm":

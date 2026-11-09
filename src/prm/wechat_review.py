@@ -71,7 +71,10 @@ finished) it does nothing (a bare 「1…」 the bot would have taken gets BARE_
 - A platform action runs only by 「执行」 quoting its notification, or 「执行 12」 (the console's 批准并执行,
   ``PrmService.decide`` "execute", every check of it), and only the preview its notification showed (``preview_stamp``,
   checked again by ``decide`` in the step that moves the draft: one it said cannot run, or one previewed again since, is
-  the console's); 1 / 好 / 发 never run one, 「改」 of its reply stays the console's.  When the execution ends (the reply
+  the console's); 1 / 好 / 发 never run one, 「改」 of its reply stays the console's.  A sample order the photo check
+  holds (PRM_DRAFT_CONTEXT on: hats its preview held for photos, a preview the Mac did not check by photo, one that let
+  a hat go by a 「对过图了」 taken back since) says so instead of 「执行」, and the console's 「对过图了」 / 「重新预览」 are
+  how on (``_photo_stop``; 合并 draft-context 2026-11-10).  When the execution ends (the reply
   sent after VERIFIED_SUCCESS, uncertain, or not done; a result that comes late too) the admin is told in one line.  A
   job the relay raised on: run when it is there all the same, 「可以再回一次」 only when it certainly is not, else red as
   not known (``PrmService._approve_execute``: QUEUE_UNSURE, its result told when it comes late).
@@ -107,7 +110,7 @@ from typing import Callable, Optional
 from ..admin import HELP_COMMANDS
 from ..relay.commands import ALLOW_WORDS, DENY_WORDS, prefix_pattern
 from ..relay.service import MAX_AGE_SEC
-from . import contact, deals, pii, platforms, retention
+from . import contact, deals, draft_context, pii, platforms, retention
 from .boss_groups import CHANNEL as GROUP_CHANNEL
 from .store import (APPROVED, BUYIN_TOOL, COPILOT, DROPPED, EXECUTING, FAILED, MESSAGE_TOOL, NO_REPLY, PENDING, SENDING,
                     SENT, SUPERSEDED, PrmStore)
@@ -143,6 +146,7 @@ READ_BACKS = 8              # the bot's own lines read back before their send wa
 READ_BACK_EARLY_SEC = 30    # ... for this long
 TAIL_CHARS = 4              # a creator's platform id (UID, 抖音号) as a notification shows it: its last characters
 FILES_NAMED = 5             # file names a notification lists at most
+HELD_NAMED = 5              # codes of a sample order's held hats (PRM_DRAFT_CONTEXT) a notification names at most
 LISTED = 8                  # drafts a 「现在有 N 份在等你回」 names at most
 STATUS_SEC = 6 * 3600       # a question about 执行 (「执行了吗」): the platform drafts told, answered or decided this recently
 STATUS_LISTED = 3           # ... (or still waiting, still running) it answers about, at most this many
@@ -428,6 +432,8 @@ class WechatReview:
         self._switch = str(getattr(config, "prm_wechat_review", "off") or "off").strip().lower() == "on"
         self.on = self._switch and not self._edge     # (the route step and the sweep do nothing otherwise)
         self._relay_only = str(getattr(config, "claude_relay_only", "off") or "off").strip().lower() == "on"
+        # PRM_DRAFT_CONTEXT (as the service reads it): a sample order its photo check holds is the console's
+        self._draft_context = str(getattr(config, "prm_draft_context", "off") or "off").strip().lower() == "on"
         self._cc = prefix_pattern(str(getattr(config, "claude_relay_prefix", "cc") or "cc"))
         self._failures: dict[tuple, int] = {}       # ("draft" | "told" | "late", packet id) -> sends WeChat did not take
         self._chat_failures = 0                       # sends to the admin's chat not taken in a row (RETRY_SEC)
@@ -758,11 +764,14 @@ class WechatReview:
         stamp = ""
         if platform:
             runnable = self._runnable(packet)
+            photo = self._photo_stop(packet)
             go = ["引用这条回「执行」在平台上执行（核验成功才把上面的回复发给她）｜2 不发",
                   f"（发在群里：一定要引用这条回「执行」；不发也可以回「不发 {number}」）" if group
                   else f"（不引用就回「执行 {number}」「不发 {number}」）"]
             if (packet.get("platform") or {}).get("previewing"):
                 stop = "正在重新预览，微信里不能执行：请到控制台看了结果再「批准并执行」；不要的话回 2"
+            elif photo:
+                stop = photo
             elif runnable:
                 stop = "通知里没列全，微信里不能执行：请到控制台看了再「批准并执行」；不要的话回 2"
             else:
@@ -771,7 +780,7 @@ class WechatReview:
             room = NOTICE_CHARS - len("\n".join(lines)) - 1 - max(len("\n".join(go)), len(stop)) - 1
             listed, whole = self._platform_lines(packet, room)
             lines += listed
-            if runnable and whole:
+            if runnable and whole and not photo:
                 stamp = preview_stamp((packet.get("platform") or {}).get("preview"))
                 lines += go
             else:
@@ -798,6 +807,33 @@ class WechatReview:
         last = said[-SAID_LINES:]
         shown = [_cut(contact.mask_contacts(retention.scrub(line, addresses)), SAID_CHARS) for line in last]
         return ("…" if len(said) > len(last) else "") + "／".join(shown)
+
+    def _photo_stop(self, packet: dict) -> str:
+        """PRM_DRAFT_CONTEXT on (合并 draft-context 2026-11-10): why a waiting sample order cannot run from WeChat for its
+        photo check, which only the console takes on (「对过图了」, 「重新预览」): the notification's last line and
+        「执行」's answer; "" when nothing of it holds the draft.  Hats its last preview held for photo reasons
+        (``photo_held``, named: its verdict is not ready anyway; once all are confirmed, a new preview is what is left),
+        a preview the Mac did not check by photo (``unchecked``: an older worker's, one made while the switch was off)
+        or one that let a hat go by a 「对过图了」 taken back since (``withdrawn``; ``PrmService._approve_execute``
+        refuses these two whatever the notification said)."""
+        if not self._draft_context or packet.get("tool") != "jst.sample_order" or packet.get("status") != PENDING:
+            return ""
+        try:
+            confirmed = {str(r["code"]): r["at"] for r in self._store.photo_confirmations(int(packet["deal_id"]))}
+        except Exception:
+            logger.exception("PRM: the photo confirmations of draft %d could not be read", packet["id"])
+            confirmed = {}
+        held = [h["code"] for h in draft_context.held_out(packet, confirmed) if h["held"]]
+        waiting = [code for code in held if code not in confirmed]
+        if waiting:
+            codes = "、".join(waiting[:HELD_NAMED]) + ("…" if len(waiting) > HELD_NAMED else "")
+            return (f"有 {len(waiting)} 顶帽子扣着（没对上图：{codes}），微信里不能执行：请到控制台对过图，在这顶旁边点"
+                    "「对过图了」，再点「重新预览」；不要的话回 2")
+        if held:
+            return "扣着的帽子都点过「对过图了」，微信里不能执行：请到控制台点「重新预览」按确认再核；不要的话回 2"
+        why = draft_context.unchecked_reason(packet) or draft_context.withdrawn_reason(
+            draft_context.withdrawn(packet, confirmed))
+        return f"{why}；微信里不能执行，请到控制台处理；不要的话回 2" if why else ""
 
     @staticmethod
     def _runnable(packet: dict) -> bool:
@@ -1329,6 +1365,9 @@ class WechatReview:
             return self._closed(packet, row) or f"#{number} 没有平台动作：要发就引用那条通知回 1（或者回「发 {number}」）"
         if status == PENDING:
             told = str((row or {}).get("preview") or "")
+            photo = self._photo_stop(packet)
+            if photo:
+                return f"#{number} 还没执行（在等你确认）：{photo}"
             if told and told == preview_stamp((packet.get("platform") or {}).get("preview")):
                 how = "引用那条通知回「执行」" + ("" if self._group(packet) else f"（或者回「执行 {number}」）")
                 return f"#{number} 还没执行（在等你确认）：要执行请{how}"
@@ -1535,6 +1574,9 @@ class WechatReview:
         if self._group(packet) and not quoted:
             return self._group_hint(packet, execute=True)
         told = str(row.get("preview") or "")
+        photo = self._photo_stop(packet)
+        if photo:
+            return f"#{number} {photo}"                # (the photo check: the console's 「对过图了」 / 「重新预览」)
         if told and told == preview_stamp((packet.get("platform") or {}).get("preview")):
             return self._decided(row, packet, "execute", None, stamp=told)
         if told:
