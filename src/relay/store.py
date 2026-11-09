@@ -677,7 +677,7 @@ class RelayStore:
                         "UPDATE relay_jobs SET progress = ? WHERE id = ?",
                         (json.dumps(progress, ensure_ascii=False), job_id),
                     )
-                self._conn.commit()
+            self._conn.commit()                        # (both: a lost job back to running is kept too)
             return {"cancel": bool(row["cancel_requested"]) or row["status"] == "cancelled"}
 
     def finish(self, job_id: int, *, ok: bool, text: str, session_id: str = "",

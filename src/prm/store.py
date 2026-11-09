@@ -2064,6 +2064,20 @@ class PrmStore:
                 " AND w.state IN ('telling', 'notified', 'proposed') ORDER BY w.packet_id", (PENDING,)).fetchall()
         return [dict(r) for r in rows]
 
+    def wechat_reviews_platform(self, since: float, limit: int = 20) -> list[dict]:
+        """The told drafts with a platform action (not a plain reply, not a 百应 draft) that still wait or run on the
+        Mac, or were told, answered in WeChat or decided at ``since`` or later, newest first (a question about 执行 in
+        WeChat: what became of them); each row with its packet's ``party_id`` and ``tool``."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT w.*, p.party_id AS party_id, p.tool AS tool FROM wechat_reviews w"
+                " JOIN action_packets p ON p.id = w.packet_id WHERE p.tool NOT IN (?, ?)"
+                " AND (p.status IN (?, ?) OR w.notified_at >= ? OR COALESCE(w.answered_at, 0) >= ?"
+                " OR COALESCE(p.decided_at, p.sent_at, 0) >= ?) ORDER BY w.packet_id DESC LIMIT ?",
+                (MESSAGE_TOOL, BUYIN_TOOL, PENDING, EXECUTING, float(since), float(since), float(since),
+                 int(limit))).fetchall()
+        return [dict(r) for r in rows]
+
     def wechat_reviews_unsure(self) -> list[dict]:
         """The rows left ``telling`` whose draft still waits: their notification may or may not have gone out (a stop, a
         database error after the send); never sent again, the console says so."""
