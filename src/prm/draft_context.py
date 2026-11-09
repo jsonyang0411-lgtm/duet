@@ -32,7 +32,7 @@ picture behind it leaves the preview not ready, and the sheet comes back with th
   came too late or cannot be read, and the ones a new preview replaces are deleted (``delete_files``): her photo is on a
   sheet.  (A job lost on the way keeps its files: its answer may still come; else the sweep takes them.)
 - ``picture`` / ``operator_files_out``: the console shows them (GET /api/prm/file?packet=&kind=operator&n=); the same
-  endpoint serves a draft's own attachments (``kind=attachment``).
+  endpoint serves a draft's own attachments (``kind=attachment``), either kind only from inside the relay's files.
 - ``sweep``: by the files' own time, the sheets go after KEEP_DAYS, as the pictures she sends do (the relay's
   KEEP_FILES_DAYS), referenced by a packet or not.
 """
@@ -192,6 +192,19 @@ def withdrawn_reason(codes) -> str:
     return f"撤销了 {'、'.join(codes)} 的「对过图了」：点「重新预览」再核" if codes else ""
 
 
+def held_unconfirmed(packet: Optional[dict], confirmed) -> list:
+    """The codes the draft's last preview held for photo reasons (``photo_held``: its verdict is not ready then) that no
+    operator confirmed since (``confirmed``: the deal's confirmed codes now): such a sample order never runs, whatever its
+    verdict says (``PrmService._approve_execute``, review 2026-11-10 A-L4: a second line; a hat let go only by a
+    confirmation is ``photo_confirmed``, ``withdrawn``)."""
+    meta = (packet or {}).get("meta") or {}
+    return [c for c in codes_of(meta, PHOTO_HELD) if c not in confirmed]
+
+
+def held_reason(codes) -> str:
+    return f"{'、'.join(codes)} 还扣着（没对过图），不能执行：{CONFIRM_HOW}，再点「重新预览」" if codes else ""
+
+
 def held_out(packet: Optional[dict], confirmed: dict) -> list:
     """The console's view of a waiting sample order's hats the Mac held for photos (PRM_DRAFT_CONTEXT): ``[{"code",
     "held", "used", "confirmed", "at"}]`` for each code its last preview held (``held``: then 「对过图了，用 <编码>」, or
@@ -346,30 +359,36 @@ def files_of(packet: dict) -> list:
     return out[:MAX_OPERATOR_FILES]
 
 
-def picture(packet: Optional[dict], kind: str, n: int) -> Optional[tuple]:
+def picture(packet: Optional[dict], kind: str, n: int, root=None) -> Optional[tuple]:
     """``(path, content type)`` of a draft's picture for GET /api/prm/file, or None: ``kind`` ``attachment`` (its own
     files, ``packet.attachments[n]``: the 直播手卡) or ``operator`` (``meta.operator_files[n]``: the photo sheet, and only
     a file the relay keeps for a job, ``…/outfiles/job-<id>/<name>``); only a picture (``IMAGE_TYPES``) that is still
-    there."""
-    if not packet or kind not in PICTURE_KINDS or not isinstance(n, int) or n < 0:
+    there, and of either kind only one inside ``root`` (the relay's files, ``ClaudeRelay.files_dir``) once its links
+    are followed (review 2026-11-10: as ``WechatReview._relay_picture``; never any other file of this PC).  ``root``
+    None: none.  The path given back is the one checked (links followed)."""
+    if not packet or kind not in PICTURE_KINDS or not isinstance(n, int) or n < 0 or root is None:
         return None
     files = files_of(packet) if kind == "operator" else list(packet.get("attachments") or [])   # (n as the console counts)
     entry = files[n] if n < len(files) else None
     if not isinstance(entry, dict) or not isinstance(entry.get("path"), str) or not entry["path"]:
         return None
-    path = Path(entry["path"])
+    try:
+        path = Path(entry["path"]).resolve()
+        inside = path.is_relative_to(Path(root).resolve())
+    except (OSError, ValueError, RuntimeError):
+        return None
     content_type = IMAGE_TYPES.get(path.suffix.lower())
-    if content_type is None:
+    if content_type is None or not inside:
         return None
     if kind == "operator" and (path.parent.parent.name != "outfiles" or not path.parent.name.startswith("job-")):
         return None
     return (path, content_type) if path.is_file() else None
 
 
-def operator_file(packet: dict, n) -> Optional[tuple]:
-    """``picture(packet, "operator", n)`` (``n`` as given; not a whole number: None)."""
+def operator_file(packet: dict, n, root=None) -> Optional[tuple]:
+    """``picture(packet, "operator", n, root)`` (``n`` as given; not a whole number: None)."""
     try:
-        return picture(packet, "operator", int(n))
+        return picture(packet, "operator", int(n), root)
     except (TypeError, ValueError):
         return None
 

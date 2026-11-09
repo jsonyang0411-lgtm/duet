@@ -421,6 +421,11 @@ class BotConfig:
     # What the Mac is told the boss is called (1-10 characters): the boss's names (PRM_GROUP_WITH) never leave this PC;
     # a group job says this instead (its ``meta.group.boss``, and in the group's name and the lines it is told).
     prm_boss_call: str = "老板"
+    # 接手任何合作群 (「接群」, decision 2026-11-10): "off" (the default): a draft for a group an operator linked by hand
+    # always waits for a person (no kind gate, 下班时段, 自动模式, 开场白自动发 or 签收后问一句 sends one: everybody in the
+    # group reads it).  "on": such a group's drafts go by them as a 老板拉的群's do, but for the first one of the lines
+    # that waited at 接群 (it always waits).
+    prm_linked_groups_auto: str = "off"
     # === WeChat edge (src/edge, edge-protocol.md) for the Mac business service ===
     # "on": Windows only receives and sends WeChat messages for the creators the Mac lists;
     # the Mac pulls /edge/* on the relay's port with PRM_EDGE_TOKEN.  Not with PRM_COPILOT.
@@ -673,6 +678,8 @@ def _validate_config(kwargs: dict) -> None:
     boss_call = " ".join(str(kwargs.get("prm_boss_call", "老板") or "").split())
     if not 1 <= len(boss_call) <= 10:
         errors.append(f"PRM_BOSS_CALL must be 1 to 10 characters, got {len(boss_call)}")
+    if kwargs.get("prm_linked_groups_auto", "off") not in ("off", "on"):
+        errors.append(f"PRM_LINKED_GROUPS_AUTO must be off or on, got {kwargs.get('prm_linked_groups_auto')}")
     prm_edge = kwargs.get("prm_edge", "off")
     if prm_edge not in ("off", "on"):
         errors.append(f"PRM_EDGE must be off or on, got {prm_edge}")
@@ -837,6 +844,7 @@ def load_config() -> BotConfig:
         "prm_boss_groups": _parse_switch(os.getenv("PRM_BOSS_GROUPS", "off")),
         "prm_boss_group_max": int(os.getenv("PRM_BOSS_GROUP_MAX", "6")),
         "prm_boss_call": " ".join(os.getenv("PRM_BOSS_CALL", "").split()) or "老板",
+        "prm_linked_groups_auto": _parse_switch(os.getenv("PRM_LINKED_GROUPS_AUTO", "off")),
         "prm_edge": _parse_switch(os.getenv("PRM_EDGE", "off")),
         "prm_edge_token": os.getenv("PRM_EDGE_TOKEN", "").strip(),
         "edge_url": os.getenv("EDGE_URL", "").strip(),

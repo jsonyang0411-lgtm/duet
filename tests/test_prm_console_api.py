@@ -325,19 +325,26 @@ def test_handcards_are_asked_for_shown_as_pictures_and_refused_while_stopped(run
     assert call("/api/prm")[1]["handcards"] is True
     stopped = call("/api/prm/deals", "POST", {"action": "handcards", "deal_id": 1})[1]
     assert stopped == {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能做手卡"}
-    picture = tmp_path / "手卡_01_测试帽.png"
+    # (only from inside the relay's folder a stopped bot finds next to CLAUDE_RELAY_DB: review 2026-11-10)
+    monkeypatch.delenv("CLAUDE_RELAY_DB", raising=False)
+    picture = tmp_path / "data" / "claude_relay_files" / "outfiles" / "job-1" / "手卡_01_测试帽.png"
+    picture.parent.mkdir(parents=True)
     picture.write_bytes(b"\x89PNG kept")
+    outside = tmp_path / "手卡_02_测试帽.png"
+    outside.write_bytes(b"\x89PNG outside")
     store = PrmStore(server._prm_db_path())
     party = store.party_by_wxid(CREATOR)
     kept = store.add_packet(deal_id=store.deal_of(party["id"])["id"], party_id=party["id"], job_id=None,
                             chat_id=CREATOR, kind="material", text="老师，手卡整理好啦～", intent="", slots={},
-                            attachments=[{"name": picture.name, "path": str(picture), "size": 11, "sha256": ""}],
+                            attachments=[{"name": picture.name, "path": str(picture), "size": 11, "sha256": ""},
+                                         {"name": outside.name, "path": str(outside), "size": 14, "sha256": ""}],
                             stage_proposal="", needs_attention=False, reason="", now=time.time())
     store.close()
     opened, real = [], server._prm_stopped_store
     monkeypatch.setattr(server, "_prm_stopped_store", lambda: opened.append(real()) or opened[-1])
     assert raw_call(f"/api/prm/file?packet={kept}&kind=attachment&n=0")[::2] == (200, b"\x89PNG kept")
-    assert raw_call(f"/api/prm/file?packet={kept}&kind=attachment&n=1")[0] == 404 and len(opened) == 2
+    assert raw_call(f"/api/prm/file?packet={kept}&kind=attachment&n=1")[0] == 404      # (outside the relay's folder)
+    assert raw_call(f"/api/prm/file?packet={kept}&kind=attachment&n=2")[0] == 404 and len(opened) == 3
     for used in opened:                                             # (closed again after each request)
         with pytest.raises(sqlite3.ProgrammingError):
             used._conn.execute("SELECT 1")

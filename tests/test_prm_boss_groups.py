@@ -370,7 +370,7 @@ def test_a_registered_creator_only_gets_the_group_linked(bot):
     deal = bot.prm.store.deal_of(party["id"])
     assert deal["three_party"]["by"] == "boss" and deal["three_party"]["chat"] == GROUP
     [ev] = bot.prm.store.events(deal["id"], kinds=(bg.EVENT,))
-    assert ev["detail"] == {"name": GROUP_NAME, "new": False}
+    assert ev["detail"] == {"name": GROUP_NAME, "chat": GROUP, "new": False}
 
 
 @pytest.mark.parametrize("made", [

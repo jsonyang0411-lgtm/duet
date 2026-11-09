@@ -222,6 +222,13 @@ GROUPS: list[dict] = [
              "label": "老板拉的群最多几个人", "unit": "人",
              "help": "人数超过这个的群当成老板平时的群，不接手。",
              "requires": [{"key": "PRM_BOSS_GROUPS", "is": "on", "text": "接手老板拉的群打开时才用"}]},
+            # 接手任何合作群 (「接群」, src/prm/group_link.py; decision 2026-11-10)
+            {"key": "PRM_LINKED_GROUPS_AUTO", "type": "onoff", "default": "off", "label": "手动接的群也自动发",
+             "platform": WCDB_ONLY,
+             "help": "管理员在微信里发「接群」接手的群（不管有没有老板），群里的人都看得到我们发的话。关着（默认）时这些群里的草稿"
+                     "一律等你看过再发：自动发送门槛、下班时段、自动模式、开场白自动发、签收后问一句都不会自动发。打开以后和老板拉的群"
+                     "一样（接群时她在等的那几句的草稿照旧等你看）。老板拉的群不受影响。改完要重启机器人。",
+             "requires": [{"key": "PRM_COPILOT", "is": "on", "text": "达人副驾驶打开时才用"}]},
         ],
     },
     {

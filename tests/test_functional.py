@@ -332,7 +332,7 @@ class TestPrmPages:
     """待审批 and 合作单 against a running PRM service (in memory: nothing is written to data/)."""
 
     @pytest.fixture
-    def prm(self):
+    def prm(self, tmp_path):
         import json as _json
         import time as _time
         from types import SimpleNamespace
@@ -355,7 +355,8 @@ class TestPrmPages:
             claude_relay_max_chars=1500, admin_wxid="wxid_admin", prm_copilot="on", prm_db=":memory:",
         )
         sent = []
-        relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=clock)
+        # (its files in the test's own folder: GET /api/prm/file serves only what is inside it, review 2026-11-10)
+        relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=clock, files_dir=tmp_path / "relay")
         service = PrmService(cfg, relay, store=PrmStore(":memory:"), clock=clock,
                              send=lambda c, t: sent.append((c, t)) or True, send_file=lambda c, p: True)
         service.register("wxid_creator01", "小美", "618 防晒")
@@ -537,7 +538,7 @@ class TestPrmPages:
         prm.service._draft_context = True                                   # (PRM_DRAFT_CONTEXT=on)
         store = prm.service.store
         sheet = png(tmp_path / "relay" / "outfiles" / "job-78" / "对图单-78-扣着的.png")
-        cards = [png(tmp_path / "cards" / name) for name in ("手卡_01_测试帽.png", "手卡_02_测试帽二.png")]
+        cards = [png(tmp_path / "relay" / "outfiles" / "job-78" / name) for name in ("手卡_01_测试帽.png", "手卡_02_测试帽二.png")]
         action = platforms.check_action({"action": "jst.sample_order", "shop": "dy", "items": [
             {"item_id": "3000000000000000102", "skus": [{"sku_id": "3100000000000000203", "qty": 1}]}],
             "creator_platform": "dy", "creator_account": "test_daren_01"})
@@ -1205,7 +1206,16 @@ class TestPrmPages:
         text = block.inner_text()
         assert "起草备注" in text and "（没有）" in text
         assert "写给 Mac 起草时看的，比如她签名里的要求：直接发链接和 brief、不接语音" in text
-        assert "寄样单里没对过图的那顶不在备注里确认：对过图后，在控制台这份草稿上点这顶旁边的「对过图了」" in text   # (PRM_DRAFT_CONTEXT)
+        hint = "寄样单里没对过图的那顶不在备注里确认：对过图后，在控制台这份草稿上点这顶旁边的「对过图了」"
+        assert hint not in text and block.locator(".prm-confirm-hint").count() == 0   # (PRM_DRAFT_CONTEXT off: review C-8)
+        prm.service._draft_context = True
+        page.reload(timeout=10000)
+        page.wait_for_timeout(1500)
+        page.locator("button[aria-label='展开 小美']").click()
+        page.wait_for_timeout(300)
+        block = page.locator(".prm-draft-note")
+        assert hint in block.inner_text()                                    # (on: the hint)
+        prm.service._draft_context = False
         block.locator("button:has-text('写备注')").click()
         field = block.locator("textarea[aria-label='小美 的起草备注']")
         field.fill("长" * 301)

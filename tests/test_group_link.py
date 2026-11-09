@@ -272,7 +272,7 @@ def test_a_registered_creator_only_gets_the_group_linked(bot):
     again = bot.prm.store.party_by_wxid(CREATOR)
     assert (again["id"], again["name"], again["note"]) == (party["id"], "小美美", "达人名单里的")
     [ev] = bot.prm.store.events(bot.prm.store.deal_of(party["id"])["id"], kinds=(bg.EVENT,))
-    assert ev["detail"] == {"name": GROUP_NAME, "new": False, "manual": True} and ev["actor"] == "admin"
+    assert ev["detail"] == {"name": GROUP_NAME, "chat": GROUP, "new": False, "manual": True} and ev["actor"] == "admin"
 
 
 def test_a_creator_an_operator_stopped_is_registered_again_by_hand(bot):
@@ -393,10 +393,12 @@ def test_only_her_newest_waiting_lines_are_the_draft_the_older_ones_context(bot)
 
 
 def test_a_draft_of_hers_waiting_ages_by_the_catch_up_when_she_just_wrote(bot):
-    """A line she wrote a moment before the link is no late line: its draft follows the gates as any."""
+    """A line she wrote a moment before the link is no late line; its draft waits for a person all the same (it answers
+    what waited at 接群, ``meta.link_first``: 2026-11-10, tests/test_prm_linked_groups.py)."""
     bot.backend.say(GROUP, CREATOR, "在吗", bot.clock.now - 20)
     linked(bot, member=1)
-    assert "late" not in json.loads(job_of(bot)["meta"])
+    meta = json.loads(job_of(bot)["meta"])
+    assert "late" not in meta and meta["link_first"] is True
 
 
 def test_a_group_whose_lines_cannot_be_read_is_linked_and_read_from_now_on(bot):
@@ -452,7 +454,9 @@ def test_an_operators_own_line_in_the_group_takes_her_deal_over(bot):
 
 
 def test_no_holding_reply_goes_to_the_group_and_the_gates_apply(clock, tmp_path):
-    b = setup(clock, tmp_path, prm_holding_min=10)
+    # (PRM_LINKED_GROUPS_AUTO on: the gates as a 老板拉的群's; off, the default, its drafts always wait: 2026-11-10,
+    # tests/test_prm_linked_groups.py)
+    b = setup(clock, tmp_path, prm_holding_min=10, prm_linked_groups_auto="on")
     b.prm.store.set_gate("faq", "auto", clock.now)
     linked(b, member=1)
     b.prm.handle(gmsg(b, "在吗"))
@@ -1538,7 +1542,8 @@ def test_a_draft_the_bot_approved_itself_that_never_went_out_is_no_persons_decis
     unchanged decision for the gate.  「不算进门槛统计」."""
     from src.prm import gates
 
-    b = setup(clock, tmp_path, **({"prm_night_auto_hours": "14:00-15:00"} if how == "night" else {}))
+    b = setup(clock, tmp_path, prm_linked_groups_auto="on",            # (off: nothing approves it by itself)
+              **({"prm_night_auto_hours": "14:00-15:00"} if how == "night" else {}))
     if how == "auto_mode":
         b.prm.set_auto_mode(True)
     linked(b, member=1)
@@ -1697,7 +1702,8 @@ def test_the_recall_window_reads_both_times_on_wechats_clock(clock, tmp_path, sk
 def test_the_mac_hears_a_draft_the_bot_approved_did_not_go_out_as_its_group_closed(clock, tmp_path, how):
     """Its ``decided_at`` cleared (no person decided it: not in the gate's count), the Mac was not told any more that
     it did not go out (``outcomes``)."""
-    b = setup(clock, tmp_path, **({"prm_night_auto_hours": "14:00-15:00"} if how == "night" else {}))
+    b = setup(clock, tmp_path, prm_linked_groups_auto="on",            # (off: nothing approves it by itself)
+              **({"prm_night_auto_hours": "14:00-15:00"} if how == "night" else {}))
     if how == "gate":
         b.prm.store.set_gate("faq", "auto", clock.now)
     linked(b, member=1)
