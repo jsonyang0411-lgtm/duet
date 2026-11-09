@@ -136,6 +136,18 @@ def test_approval_runs_the_cli_once_and_only_a_verified_write_lets_the_reply_out
     assert json.loads(bot.relay.store.list_jobs(1)[0]["result_text"])["outcome"] == "ALREADY_RUN"
 
 
+def test_the_drafting_note_tells_the_shops_way_to_a_link_and_its_slot(worker):  # noqa: F811
+    """The Mac's system note for drafts (PRM_PLATFORM_NOTE): dy.channel_goods the shop's way (what the system works
+    out, what the draft fills: one product, the prefix 【某某专属】 within 12, the overrides only when agreed, the
+    专属佣金 first) and the slot that says the deal asks for links (2026-11-09)."""
+    note = worker.PRM_PLATFORM_NOTE
+    for words in ("dy.channel_goods", "专属达人带货", "9 折取整到元", "每个颜色 100 件", "一个动作一个商品", "title_prefix",
+                  "「【小美专属】」", "最多 12 个字符，汉字算 2 个", "stock_per_sku", "先只填这个商品的 dy.designated_commission",
+                  "slots 里记「专属链接前缀」", "还没说前缀就记「要」", "记成空字符串"):
+        assert words in note, words
+    assert "stock" not in note.replace("stock_per_sku", "")                 # the old parameter is gone
+
+
 def test_a_channel_link_is_made_the_shops_way_end_to_end(worker, bot, mac):  # noqa: F811
     """专属链接 (2026-11-09) through the real worker and bot: the draft names the product, her UID and 「前缀：小美专属」;
     the Mac reads the product, works out the agreement (9 折 floored, 100 a colour, all a colour can spare when that is
