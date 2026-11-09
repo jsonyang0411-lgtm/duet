@@ -53,7 +53,9 @@
                     order by ``line_seq``: a reply sent drops every line numbered up to the highest its job was told),
                     when we last answered there (``replied_at``), while its 开场白 waits for the watch's catch-up, when it
                     was taken over (``opening_due``), and WeChat's line that we were added (``joined_at``, WeChat's
-                    clock: only a group added to after the baseline is taken over by itself, review 2026-10-31 F4)
+                    clock: only a group added to after the baseline is taken over by itself, review 2026-10-31 F4);
+                    ``manual``: an operator linked it by hand (接手任何合作群, src/prm/group_link.py: 「接群」; it is read
+                    and drafted in whatever PRM_BOSS_GROUPS says, ``found_at`` is when it was linked)
 
 A packet's life: ``pending`` (waits in the console) -> ``approved`` (an operator said
 send, the kind's gate is ``auto``, or the 下班时段 window sent it: route ``night``) -> ``sending`` ->
@@ -342,7 +344,8 @@ CREATE TABLE IF NOT EXISTS boss_groups (
     updated_at REAL NOT NULL,
     line_seq INTEGER NOT NULL DEFAULT 0,
     opening_due REAL,
-    joined_at REAL
+    joined_at REAL,
+    manual INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -375,6 +378,8 @@ _ADDED_COLUMNS = (
     ("deals", "last_by_chat", "TEXT NOT NULL DEFAULT '{}'"),
     # 老板拉的群, second review 2026-10-31 (F4): WeChat's line that we were added (the scan's confidence rule)
     ("boss_groups", "joined_at", "REAL"),
+    # 接手任何合作群 (2026-11-09, src/prm/group_link.py): a group an operator linked by hand
+    ("boss_groups", "manual", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 # What the creators wrote, or our side's own words, waiting for the next draft job.
@@ -495,7 +500,7 @@ def friend_add_view(row: dict) -> dict:
 # 老板拉的群 (src/prm/boss_groups.py): the JSON columns of a group's row, and what may be set besides its state.
 BOSS_GROUP_JSON = {"members": [], "boss": [], "lines": []}
 BOSS_GROUP_FIELDS = {"name", "found_at", "made_at", "state", "party_id", "deal_id", "members", "boss", "why",
-                     "last_line_at", "lines", "replied_at", "opening_due", "joined_at"}
+                     "last_line_at", "lines", "replied_at", "opening_due", "joined_at", "manual"}
 
 
 def _seq(line: dict) -> int:
@@ -1807,17 +1812,18 @@ class PrmStore:
 
     def add_boss_group(self, chat: str, *, name: str, found_at: float, state: str, members: list, boss: list,
                        why: str = "", made_at: Optional[float] = None, joined_at: Optional[float] = None,
-                       now: Optional[float] = None) -> bool:
+                       now: Optional[float] = None, manual: bool = False) -> bool:
         """A group the scan found (``made_at``: its oldest line, when the backend knows it; ``joined_at``: WeChat's line
-        that we were added, WeChat's clock); a group kept already stays as it is.  True when it is new."""
+        that we were added, WeChat's clock), or one an operator linked by hand (``manual``, 接手任何合作群); a group kept
+        already stays as it is.  True when it is new."""
         now = time.time() if now is None else now
         with self._lock:
             cur = self._conn.execute(
                 "INSERT OR IGNORE INTO boss_groups (chat, name, found_at, made_at, joined_at, state, members, boss, why,"
-                " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " updated_at, manual) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (str(chat), str(name or ""), float(found_at), made_at, joined_at, str(state),
                  json.dumps(members or [], ensure_ascii=False), json.dumps(boss or [], ensure_ascii=False),
-                 str(why or ""), now))
+                 str(why or ""), now, int(bool(manual))))
             self._conn.commit()
             return cur.rowcount == 1
 

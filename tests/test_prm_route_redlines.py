@@ -176,6 +176,52 @@ def test_in_a_boss_group_taken_over_only_her_lines_become_draft_jobs(world, on):
     assert meta["channel"] == "group" and [x["who"] for x in meta["group"]["lines"]] == ["老板", "群成员"]
 
 
+@pytest.mark.parametrize("on", [False, True], ids=["PRM_BOSS_GROUPS off", "PRM_BOSS_GROUPS on"])
+def test_in_a_group_linked_by_hand_only_her_lines_become_draft_jobs(world, on):
+    """接手任何合作群 (src/prm/group_link.py, 2026-11-09): the real WCDB backend reads every group (WECHAT_GROUPS *); the
+    link's own backend calls are the fake of tests/test_group_link.py.  The admin's 「接群」, 「接群 1」, 「是 1」, 「不接群 …」
+    typed in a group are no commands (no answer, nothing linked); in his own chat they link the group to her, whatever
+    PRM_BOSS_GROUPS says.  Then her line there is a draft job of the group and nothing more; another member's lines
+    there (an @, a cc, the admin's commands) and her lines in another group get no answer and no job."""
+    from test_group_link import LinkBackend
+
+    other = "room2@chatroom"
+    world.wechat.sessions[other] = "别的群"
+    run = world.run(prm_boss_groups="on" if on else "off", prm_group_with="老板测试")
+    fake = LinkBackend(own=ME)
+    fake.groups[GROUP] = {"name": "测试群", "members": [ME, CREATOR, "wxid_guest07"]}
+    fake.active[GROUP] = world.clock.now
+    run.prm.boss_groups.attach(fake)
+    run.router._admin.set_group_links(run.prm.group_links)
+    t = world.clock.now
+    for n, text in enumerate(("接群", "接群 1", "是 1", "不接群 测试群")):
+        world.wechat.say(GROUP, ADMIN, text, t + n)
+    world.clock.now = t + 10
+    run.poll()
+    assert world.sent == [] and not run.prm.is_party_group(GROUP) and run.prm.boss_groups.offered() is None
+    for text in ("接群", "接群 1", "是 1"):                            # in the admin's own chat
+        world.clock.now += 10
+        world.wechat.say(ADMIN, ADMIN, text, world.clock.now)
+        run.poll()
+    assert [chat for chat, _ in world.sent] == [ADMIN] * 3 and world.sent[-1][1].startswith("接手了：群「测试群」→ 小美")
+    assert run.prm.is_party_group(GROUP) and world.jobs() == []
+    world.clock.now += 10
+    world.wechat.say(GROUP, "wxid_guest07", f"@{BOT} 你好", world.clock.now)
+    world.wechat.say(GROUP, "wxid_guest07", "cc 帮我查一下订单", world.clock.now + 1)
+    world.wechat.say(GROUP, ADMIN, "同意好友", world.clock.now + 2)
+    world.wechat.say(other, CREATOR, "cc 帮我查一下订单", world.clock.now + 3)
+    world.clock.now += 5
+    run.poll()
+    assert [job for job in world.jobs() if job["text"]] == [] and len(world.sent) == 3
+    world.clock.now += 10
+    world.wechat.say(GROUP, CREATOR, "好的", world.clock.now)
+    run.poll()
+    [job] = [job for job in world.jobs() if job["text"]]
+    assert job["kind"] == "prm" and job["chat_id"] == GROUP and text_lines(job) == ["好的"]
+    meta = json.loads(job["meta"])
+    assert meta["channel"] == "group" and meta["group"]["manual"] is True and len(world.sent) == 3
+
+
 # ── PRM_EDGE (Windows is only the WeChat edge; the Mac drafts) ─────────────────
 
 class Edge:

@@ -503,11 +503,16 @@ class Bot:
         """加百应达人微信 (src/prm/friend_adds.py): the admin handler (``add_friend_checked``; no friend manager, as on the
         Mac: nothing is added there, the number can be copied), the auto-accept service (its pause stops every add)
         and the admin's notifier; the admin's commands.  三方群 (src/prm/three_party.py): the admin handler
-        (``create_group_checked``), the auto-accept service and the backend.  Without the PRM nothing is wired."""
+        (``create_group_checked``), the auto-accept service and the backend.  接手任何合作群 (src/prm/group_link.py): the
+        admin's 「接群」 commands.  Without the PRM nothing is wired."""
         if prm is None:
             return
         prm.friend_adds.attach(admin_handler, self._auto_friend, self._admin_notifier(config, backend))
         admin_handler.set_friend_adds(prm.friend_adds)
+        # 接手任何合作群 (src/prm/group_link.py): the admin's 接群 / 是 N / 不接 / 不接群
+        links = getattr(prm, "group_links", None)
+        if links is not None:
+            admin_handler.set_group_links(links)
         # 三方群 (src/prm/three_party.py): the same friend manager and breaker, the backend for her chat's name and
         # for the new group in the database
         prm.three_party.attach(admin_handler, self._auto_friend, backend)

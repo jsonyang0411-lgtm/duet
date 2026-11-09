@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from router_support import ADMIN, BOT, NOW, RouterCase, admin_msg, group_msg, private_msg
 
-from src.admin import RELAY_HELP
+from src.admin import NO_GROUP_LINKS, RELAY_HELP
 from src.prm.service import PrmService
 from src.prm.store import PrmStore
 from src.relay.service import ClaudeRelay
@@ -54,6 +54,10 @@ GROUP_MESSAGES = [
     dict(content="同意好友", sender_id=ADMIN, sender_name="管理员"),
     dict(content="加达人 1", sender_id=ADMIN, sender_name="管理员"),           # 加百应达人微信's commands (功能 R)
     dict(content="待加达人", sender_id=ADMIN, sender_name="管理员"),
+    dict(content="接群", sender_id=ADMIN, sender_name="管理员"),               # 接手任何合作群's commands (2026-11-09)
+    dict(content="接群 1", sender_id=ADMIN, sender_name="管理员"),
+    dict(content="是 1", sender_id=ADMIN, sender_name="管理员"),
+    dict(content="不接群 测试群", sender_id=ADMIN, sender_name="管理员"),
     dict(content=f"@{BOT} 帮助", sender_id=ADMIN, sender_name="管理员", is_at_mentioned=True),
     dict(content="\"新人\"加入了群聊", is_system_join=True, new_member_id="wxid_new"),
     dict(content="[图片]", msg_type=3),
@@ -174,10 +178,74 @@ class HerThreePartyGroupIsReadOnly(GatewayCase):
         assert self.trace.notes["ended_by"] == "silence" and self.relay.store.list_jobs(limit=1000) == []
 
 
+class AGroupLinkedByHandIsTheOtherException(GatewayCase):
+    """接手任何合作群 (src/prm/group_link.py, 2026-11-09): a group the admin linked to a creator by hand in his own chat
+    (「接群」, 「接群 1」, 「是 1」), whatever PRM_BOSS_GROUPS says (off here), is the route's other exception: HER lines there
+    become a silent draft job (never a reply).  Every other member's lines there (an @, a cc, the admin's commands, a
+    join line, a picture, a voice) stay unanswered and make no job; her lines in a group nobody linked stay silent."""
+
+    LINKED = "400000001@chatroom"
+    HER = "wxid_creator01"
+
+    def linked_gateway(self):
+        from test_group_link import LinkBackend
+        from test_prm_boss_groups import ME
+
+        router = self.gateway()
+        cfg = SimpleNamespace(admin_wxid=ADMIN, claude_relay_wxids=[], prm_copilot="on", prm_boss_groups="off",
+                              prm_group_with="老板测试")
+        self.prm = PrmService(cfg, self.relay, store=PrmStore(":memory:"), clock=lambda: NOW,
+                              send=lambda chat, text: self.fail(f"nothing is sent ({chat})"))
+        backend = LinkBackend()
+        backend.groups[self.LINKED] = {"name": "小美合作对接群", "members": [ME, self.HER, "wxid_member"]}
+        self.prm.boss_groups.attach(backend)
+        router._admin.set_group_links(self.prm.group_links)
+        router._prm = self.prm
+        assert router.handle(admin_msg("l1", "接群")).startswith("最近有动静、还没接手的群")
+        assert router.handle(admin_msg("l2", "接群 1")).startswith("群「小美合作对接群」（3 人）里谁是达人？")
+        assert router.handle(admin_msg("l3", "是 1")).startswith("接手了：群「小美合作对接群」→ 小美")
+        return router
+
+    def drafts(self):
+        return [j for j in self.relay.store.list_jobs(limit=1000) if j["kind"] == "prm" and j["text"]]
+
+    def test_only_her_lines_in_the_group_linked_by_hand_become_draft_jobs(self):
+        router = self.linked_gateway()
+        self.assertTrue(self.prm.is_party_group(self.LINKED))
+        self.assertFalse(self.prm.boss_groups.on)
+        for i, fields in enumerate(GROUP_MESSAGES):                     # her 商务, the admin, anyone but her
+            fields = {"sender_id": "wxid_member", "sender_name": "群友", **fields}
+            assert router.handle(group_msg(f"m{i}", chat_id=self.LINKED, **fields)) is None, fields
+        for i, fields in enumerate(GROUP_MESSAGES):                     # her lines in a group nobody linked
+            fields = {**fields, "sender_id": self.HER, "sender_name": "小美"}
+            assert router.handle(group_msg(f"o{i}", **fields)) is None, fields
+            assert self.trace.notes["ended_by"] == "silence", fields
+        assert self.drafts() == [] and self.prm.store.boss_group(self.LINKED)["lines"]       # (others: context)
+        assert router.handle(group_msg("h1", "这款多少钱呀", chat_id=self.LINKED, sender_id=self.HER,
+                                       sender_name="小美")) is None
+        assert self.trace.notes["ended_by"] == "prm"
+        [job] = self.drafts()
+        assert job["chat_id"] == self.LINKED and job["text"].endswith("这款多少钱呀")
+
+    def test_the_admins_link_commands_from_a_group_or_a_stranger_link_nothing(self):
+        router = self.gateway()
+        cfg = SimpleNamespace(admin_wxid=ADMIN, claude_relay_wxids=[], prm_copilot="on")
+        self.prm = PrmService(cfg, self.relay, store=PrmStore(":memory:"), clock=lambda: NOW,
+                              send=lambda chat, text: self.fail(f"nothing is sent ({chat})"))
+        router._admin.set_group_links(self.prm.group_links)
+        router._prm = self.prm
+        for i, text in enumerate(("接群", "接群 1", "是 1", "不接", "不接群 测试群")):
+            assert router.handle(group_msg(f"g{i}", text, sender_id=ADMIN, sender_name="管理员")) is None, text
+            assert router.handle(private_msg(f"p{i}", text)) is None, text
+        assert self.prm.boss_groups.offered() is None and self.prm.store.boss_groups() == []
+        assert self.jobs() == 0
+
+
 class NoStrangerIsEverAnswered(GatewayCase):
     def test_a_private_chat_that_is_no_task_ends_in_silence(self):
         router = self.gateway()
-        for i, text in enumerate(("你好", "在吗？", "cc 跑一下测试", "帮助", "同意好友", "总结一下", "加达人 1", "待加达人")):
+        for i, text in enumerate(("你好", "在吗？", "cc 跑一下测试", "帮助", "同意好友", "总结一下", "加达人 1", "待加达人",
+                                  "接群", "接群 1", "是 1", "不接", "不接群 测试群")):
             assert router.handle(private_msg(f"p{i}", text)) is None, text
         assert self.jobs() == 0
 
@@ -207,6 +275,10 @@ class WhatIsAnswered(GatewayCase):
         assert "加达人 编号" in help_text
         assert "没打开" in router.handle(admin_msg("a6", "加达人 1"))          # a command, never a task for the Mac
         assert self.jobs() == 2
+        assert "接群 / 接群 编号或群名 / 不接群 群名" in help_text
+        assert router.handle(admin_msg("a7", "接群")) == NO_GROUP_LINKS      # (no copilot here): a command all the same
+        assert self.jobs() == 2
+        assert "#3" in router.handle(admin_msg("a8", "是 1"))                # no question open: her words go to the Mac
 
 
 class OldChatSettingsDoNothing(GatewayCase):
