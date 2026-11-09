@@ -812,8 +812,8 @@ class TestPrmPages:
         小美's draft waits, so a click says why not; once it is dropped a click with one more typed product id asks the
         Mac for both; the draft that comes back is tagged 「手卡」 in 待审批 and shows each card as a picture (GET
         /api/prm/file, kind attachment) with the Mac's note; cards that were not made: tagged so, 「发送」 off, why; cards
-        whose 双11 line is past its end date: shown, but neither sent nor edited (review 2026-11-09).  Switched off: no
-        block."""
+        whose 双11 line is past its end date: shown, 「发送」 off, 「改了再发」 sends only the edited words after a confirm
+        (review 2026-11-09, round 2).  Switched off: no block."""
         import io
         import json as _json
         import re
@@ -904,11 +904,24 @@ class TestPrmPages:
         prm.relay.tick()
         page.reload(timeout=10000)
         page.wait_for_timeout(1500)
-        card = page.locator(".prm-draft", has_text="老师，手卡又整理好啦～")
-        assert card.locator(".prm-handcards img").count() == 2
+        expired = prm.service.store.packet_for_job(job["id"])["id"]
+        card = page.locator(".prm-draft", has_text=re.compile(rf"DRAFT #{expired}(?!\d)"))   # (its words change below)
+        assert "老师，手卡又整理好啦～" in card.inner_text() and card.locator(".prm-handcards img").count() == 2
         assert "手卡上的双11价已过期，请重新做手卡（卡上的双11 那一行到 2026-01-01 为止）" in card.inner_text()
         assert card.locator("button:has-text('发送')").first.is_disabled()
-        assert card.locator("button:has-text('改了再发')").first.is_disabled()
+        card.locator("button:has-text('改了再发')").click()               # (round 2: only the edited words go)
+        card.locator("textarea[aria-label='修改要发的内容']").fill("老师，双11 的价过了，手卡我重新做好再发您～")
+        card.locator("button:has-text('确认发送')").click()
+        dialog = page.locator("[role=dialog]")
+        assert "过期的手卡不会发出，只发这段话" in dialog.inner_text()
+        dialog.locator("button:has-text('再想想')").click()
+        assert prm.service.store.packet_for_job(job["id"])["status"] == "pending"
+        card.locator("button:has-text('确认发送')").click()
+        page.locator("[role=dialog] button:has-text('只发这段话')").click()
+        page.wait_for_timeout(800)
+        packet = prm.service.store.packet_for_job(job["id"])
+        assert packet["status"] in ("approved", "sent") and packet["attachments"] == []
+        assert packet["final_text"] == "老师，双11 的价过了，手卡我重新做好再发您～"
         prm.service._handcards = False
         page.goto(f"{BASE_URL}/#/deals", timeout=10000)
         page.wait_for_timeout(1500)

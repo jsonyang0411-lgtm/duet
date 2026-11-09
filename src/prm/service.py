@@ -1158,9 +1158,11 @@ def cards_failed(packet: dict) -> bool:
 
 def cards_expired(packet: dict, now: float) -> bool:
     """A draft whose 直播手卡 carry a 双11 line past its end date by Beijing time (``handcards.promo_expired``): it cannot
-    go out at all (edited words still carry the cards); the cards are made again."""
+    go out as it is, nor be sent once approved (``send_approved``); 改了再发 sends only the edited words, the cards left
+    out (``left_out``, ``decide``); for cards, they are made again."""
     cards = (packet.get("meta") or {}).get(HANDCARDS)
-    return isinstance(cards, dict) and bool(cards.get("ok")) and handcards.promo_expired(cards, handcards.beijing_today(now))
+    return (isinstance(cards, dict) and bool(cards.get("ok")) and not cards.get("left_out")
+            and handcards.promo_expired(cards, handcards.beijing_today(now)))
 
 
 def card_ids(items) -> tuple:
@@ -2842,6 +2844,11 @@ class PrmService:
         # 直播手卡 (src/prm/handcards.py): all of the Mac's cards or none of them; a draft with its verdict always waits
         # for a person (below), and an operator's 「做手卡」 that came back without one is a failure too
         cards = draft.handcards
+        if cards is not None and meta.get(handcards.OK_KEY) is not True and not isinstance(meta.get(HANDCARDS), dict):
+            # a verdict on a job that offered no cards (an older Mac worker's, PRM_HANDCARDS off): as if none came,
+            # the draft goes its usual way, like a newer worker's that leaves such a request out
+            logger.info("PRM: job #%d came back with a 手卡 verdict it was not offered: ignored", job["id"])
+            cards = None
         if cards is None and isinstance(meta.get(HANDCARDS), dict) and (draft.reply_draft or attachments):
             cards = handcards.check_made({"ok": False, "problems": ["草稿没要手卡（Mac 没说做哪几款）"]})
         if cards is not None:
@@ -4117,14 +4124,21 @@ class PrmService:
         if packet.get("tool", MESSAGE_TOOL) != MESSAGE_TOOL:
             return {"ok": False, "error": "这条草稿带平台动作：要点「批准并执行」，平台上核验成功后才会发给达人"}
         final = packet["text"] if action == "send" else str(text if text is not None else "").strip()
+        attachments, changed = packet["attachments"], {}
         if cards_expired(packet, now):
-            return {"ok": False, "error": handcards.EXPIRED_TEXT}     # (the cards themselves are out of date)
+            if action == "send" or final == packet["text"]:
+                return {"ok": False, "error": handcards.EXPIRED_TEXT}     # (the cards themselves are out of date)
+            # 改了再发 (the console asked 「过期的手卡不会发出，只发这段话」 first): the edited words go, the out-of-date
+            # cards are left out of the draft
+            attachments = [a for a in attachments if not handcards.is_card_file(a.get("name"))]
+            changed = {"attachments": attachments,
+                       "meta": {**packet["meta"], HANDCARDS: {**packet["meta"][HANDCARDS], "left_out": True}}}
         if cards_failed(packet) and final == packet["text"]:
             # 直播手卡 not made: its words (「手卡整理好啦」) cannot go out as they are, without the cards
             return {"ok": False, "error": CARDS_FAILED_TEXT}
         if len(final) > MAX_DRAFT_CHARS:
             return {"ok": False, "error": f"最多 {MAX_DRAFT_CHARS} 个字"}
-        if not final and not packet["attachments"]:
+        if not final and not attachments:
             return {"ok": False, "error": "没有要发的内容"}
         unknown = pii.unknown_tokens(final, self._store.tokens(packet["party_id"]))
         if unknown:
@@ -4135,10 +4149,10 @@ class PrmService:
                 return {"ok": False, "error": f"发货通知里的单号和系统记录对不上（系统记录：{waybill or '还没有运单号'}）"}
         if self._send is None:
             return {"ok": False, "error": "机器人没有连着微信，现在不能发送"}
-        if packet["attachments"] and self._send_file is None:
+        if attachments and self._send_file is None:
             return {"ok": False, "error": "这个微信后端不能发文件（只有 Windows 数据库直读能发）"}
         if not self._store.move(packet["id"], (PENDING,), APPROVED, decided_at=now, final_text=final,
-                                edited=int(final != packet["text"])):
+                                edited=int(final != packet["text"]), **changed):
             return {"ok": False, "error": "这条草稿已经处理过了（或者达人又发了新消息，草稿已过时）"}
         self._person_decided(packet, now)
         self._chain_decided(packet, now)
@@ -6129,6 +6143,15 @@ class PrmService:
             if now - float(packet["decided_at"] or now) > APPROVED_EXPIRE_SEC:
                 self._store.move(packet["id"], (APPROVED,), FAILED, outcome="expired", sent_at=now,
                                  error="批准后太久没发出去（机器人停过），没有发送；需要的话重新写一条")
+                continue
+            if cards_expired(packet, now):
+                # 直播手卡 approved before their 双11 line's end date, sent after it (Beijing time): not sent at all (a
+                # platform action's reply: the action itself was verified, the reply is for a person to send)
+                error = handcards.EXPIRED_TEXT
+                if packet.get("tool", MESSAGE_TOOL) != MESSAGE_TOOL:
+                    error = f"平台动作已经核验成功，但回复没发出去：{error}；请在微信里手动发给达人"
+                self._store.move(packet["id"], (APPROVED,), FAILED, outcome="failed", sent_at=now, error=error)
+                logger.warning("PRM: packet %d: its 手卡 went out of date before it was sent; not sent", packet["id"])
                 continue
             if not self._store.move(packet["id"], (APPROVED,), SENDING):
                 continue                               # another round took it

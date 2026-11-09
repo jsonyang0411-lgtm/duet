@@ -262,7 +262,8 @@ def test_handcards_are_asked_for_shown_as_pictures_and_refused_while_stopped(run
     cuts, the 双11 line's end date, ``expired``) and GET /api/prm/file?packet=&kind=attachment&n= streams each card as
     a picture (``no-store``; review 2026-11-09 item 11, the contract shared with the operator-only files, ``kind=
     operator``); a file that is no picture, an index past the files, no such draft, a kind it does not serve or none,
-    a number that is no whole number: 404 (JSON with its length and the CORS echo); another site's page (an <img>
+    a number that is no whole number of ASCII digits (「١」 is one to int()): 404 (JSON with its length and the CORS
+    echo); another site's page (an <img>
     pointed here): 403; a POST: 405.  The switch shows as ``handcards`` (running: the service's; stopped: .env's); a
     stopped bot still shows a draft's cards (its database closed again after) but cannot ask the Mac."""
     import io
@@ -305,6 +306,7 @@ def test_handcards_are_asked_for_shown_as_pictures_and_refused_while_stopped(run
     assert head["cache-control"] == "no-store" and head["content-length"] == str(len(body))
     assert head["access-control-allow-origin"] == "http://localhost:5173"
     for path in (url + "2", url + "3", url + "-1", url + "1.0", url, f"/api/prm/file?packet={card['id']}&n=1",
+                 url + "%D9%A1", url + "%C2%B2", url + "1" * 13,         # (١ and ² are no ASCII digits; 13 is too many)
                  f"/api/prm/file?packet={card['id']}&kind=operator&n=0", f"/api/prm/file?packet={card['id']}&kind=&n=0",
                  "/api/prm/file?packet=999&kind=attachment&n=0", "/api/prm/file?packet=x&kind=attachment&n=0",
                  "/api/prm/file?packet=&kind=attachment&n=0", "/api/prm/file"):

@@ -302,12 +302,14 @@ function PlatformBox({ pf }) {
 // 直播手卡 (PRM_HANDCARDS, src/prm/handcards.py): the cards of a draft as pictures (GET /api/prm/file, kind
 // attachment: the draft's own files), each opening at full size, and the Mac's note on them (the catalogue's date,
 // every 待定, what was inferred, the 口径 it reused, the words cut); or why none were made; cards whose 双11 line is
-// past its end date cannot go at all (the bot refuses them too).
+// past its end date cannot go (the bot refuses them too): only 改了再发 sends the edited words, without the cards, after
+// a confirm (``TEXT_ONLY``).
 const PICTURE = /\.(png|jpe?g|webp)$/i
 const cardsFailed = (p) => !!p.handcards && !p.handcards.ok
 const cardsExpired = (p) => !!p.handcards?.expired
 const cardUrl = (p, n) => `/api/prm/file?packet=${p.id}&kind=attachment&n=${n}`
 const EXPIRED = '手卡上的双11价已过期，请重新做手卡'
+const TEXT_ONLY = '过期的手卡不会发出，只发这段话'
 
 function HandcardsNote({ p }) {
   const pictures = (p.attachments || []).map((a, n) => [a, n]).filter(([a]) => PICTURE.test(a.name || ''))
@@ -324,7 +326,7 @@ function HandcardsNote({ p }) {
           ))}
         </div>
       )}
-      {c.ok && c.expired && <Note kind="warn">{EXPIRED}（卡上的双11 那一行到 {c.promo_until} 为止）：这份不能发，点「不发」，再到合作单里点「做手卡」。</Note>}
+      {c.ok && c.expired && <Note kind="warn">{EXPIRED}（卡上的双11 那一行到 {c.promo_until} 为止）：这份不能原样发。要手卡就点「不发」，再到合作单里点「做手卡」；只回她一段话就「改了再发」（{TEXT_ONLY}）。</Note>}
       {c.ok
         ? !c.expired && <div className="f-hint">手卡 {c.count} 张：看过卡片再发；要改的话在 Mac 上照下面的单子改了重出。</div>
         : <Note kind="warn">手卡没做成：{(c.problems || []).join('；') || 'Mac 没说为什么'}。草稿里没附手卡，话不能原样发。</Note>}
@@ -341,6 +343,7 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
   const [dropping, setDropping] = useState(false)
   const [executing, setExecuting] = useState(null)   // the text to execute with (null = no dialog)
   const [sending, setSending] = useState(null)       // 老板拉的群: the send that asks first ({action, text}; null = no dialog)
+  const [textOnly, setTextOnly] = useState(null)     // 直播手卡 out of date: the edited words that go without the cards
   const pf = p.platform
   const group = inGroup(p)                           // it goes out in the boss's group, where he sees it
   const waiting = p.status !== 'pending'
@@ -356,6 +359,7 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
       setDropping(false)
       setExecuting(null)
       setSending(null)
+      setTextOnly(null)
       onDone()
     } catch (e) { toast.err(e.message) } finally { setBusy(false) }
   }
@@ -432,19 +436,19 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
           <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
             {editing ? (
               <>
-                <button type="button" className="btn primary" disabled={busy || !canSend || cardsExpired(p)} onClick={() => send('edit', text)}><PaperPlaneRight />确认发送</button>
+                <button type="button" className="btn primary" disabled={busy || !canSend} onClick={() => (cardsExpired(p) ? setTextOnly(text) : send('edit', text))}><PaperPlaneRight />确认发送</button>
                 <button type="button" className="btn" disabled={busy} onClick={() => { setEditing(false); setText(p.text) }}>取消修改</button>
               </>
             ) : (
               <>
                 <button type="button" className="btn primary" disabled={busy || !canSend || cardsFailed(p) || cardsExpired(p)} onClick={() => send('send')}><PaperPlaneRight />发送</button>
-                <button type="button" className="btn" disabled={busy || cardsExpired(p)} onClick={() => setEditing(true)}><PencilSimple />改了再发</button>
+                <button type="button" className="btn" disabled={busy} onClick={() => setEditing(true)}><PencilSimple />改了再发</button>
                 <button type="button" className="btn ghost" disabled={busy} onClick={() => setDropping(true)}><X />不发</button>
               </>
             )}
             {!canSend && <span className="dim">机器人没连着微信，现在发不出去</span>}
             {canSend && cardsFailed(p) && <span className="dim">手卡没做成：改了再发，或者不发</span>}
-            {canSend && cardsExpired(p) && <span className="dim">{EXPIRED}</span>}
+            {canSend && cardsExpired(p) && <span className="dim">{EXPIRED}：只能改了再发（不附手卡），或者不发</span>}
           </div>
         )}
       </div>
@@ -458,6 +462,12 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
         <Confirm title={`#${p.id} 发到群里？`} confirmLabel="发到群里" cancelLabel="再想想" busy={busy}
           onConfirm={() => act(sending.action, sending.text)} onCancel={() => setSending(null)}>
           这条回复会发在老板拉的群「{p.group_name || '（没有群名）'}」里，不是她的私聊：老板和群里的人都看得到。{parts > 1 ? `会分 ${parts} 条发。` : ''}
+        </Confirm>
+      )}
+      {textOnly !== null && (
+        <Confirm title={TEXT_ONLY} confirmLabel="只发这段话" cancelLabel="再想想" busy={busy}
+          onConfirm={() => { const body = textOnly; setTextOnly(null); send('edit', body) }} onCancel={() => setTextOnly(null)}>
+          卡上的双11 那一行到 {p.handcards?.promo_until} 为止，已经过期：这次不附手卡，只发你改好的这段话（别再说手卡在这儿了）。要新的手卡就在合作单里再点「做手卡」。
         </Confirm>
       )}
       {executing !== null && pf && (

@@ -19,5 +19,6 @@
   "prm_model": "",
   "prm_timeout_min": 10,
   "prm_max_budget_usd": 0,
-  "platforms": {}
+  "platforms": {},
+  "products_sync_hours": 0
 }

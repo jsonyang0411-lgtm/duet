@@ -962,13 +962,19 @@ class PrmStore:
 
     def move(self, packet_id: int, from_states: tuple, to_state: str, **fields) -> bool:
         """Compare-and-set: the packet goes to ``to_state`` only if it is in one of ``from_states``.
-        ``platform`` (a dict) replaces the packet's platform JSON in the same step."""
-        allowed = {"final_text", "edited", "outcome", "error", "decided_at", "sent_at", "platform", "route"}
+        ``platform`` (a dict), ``attachments`` (a list) and ``meta`` (a dict) replace the packet's JSON in the same step
+        (直播手卡 out of date: 改了再发 sends the words without the cards)."""
+        allowed = {"final_text", "edited", "outcome", "error", "decided_at", "sent_at", "platform", "route",
+                   "attachments", "meta"}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"not a packet field: {sorted(unknown)}")
         if "platform" in fields:
             fields["platform"] = json.dumps(fields["platform"] or {}, ensure_ascii=False)
+        if "attachments" in fields:
+            fields["attachments"] = json.dumps(fields["attachments"] or [], ensure_ascii=False)
+        if "meta" in fields:
+            fields["meta"] = json.dumps(fields["meta"] or {}, ensure_ascii=False)
         names = sorted(fields)
         with self._lock:
             cur = self._conn.execute(

@@ -51,7 +51,9 @@ draft goes back; the verdict goes with it.  After an operator's 批准并执行 
 queues a ``platform_execute`` job: the same CLI with --execute, once per approval key
 (a ledger in ~/.claude-relay/platform/ledger; a key seen before is never run again),
 and the outcome goes back.  ``--sync-products`` writes the catalogue (read-only CLI
-commands) to prm_workspace/kb/products.md and products.json.  Now and then the bot also asks
+commands) to prm_workspace/kb/products.md and products.json; with config.json's ``products_sync_hours`` (0, the
+default: never) a worker that writes drafts runs it by itself at night when it has no job (``products_sync_tick``).
+Now and then the bot also asks
 where its 聚水潭 sample orders stand (a ``sample_status`` job, PRM_SAMPLE_SYNC_MIN): no model,
 `jst samples` (read-only, no receiver) under the same CLI lock, paced; the short answer
 (status, waybill, sent / signed, why rejected) goes back, a login lapsed or a risk wall as it is.
@@ -123,6 +125,16 @@ HEARTBEAT_SEC = 30
 STOP_GRACE_SEC = 30          # after SIGINT, wait this long before killing claude
 RESTART_EXIT = 75            # main() after SIGUSR1: the start-*.command loop runs the worker again at once
 BACKGROUND_GRACE_SEC = 20    # background commands done but no new turn after this long: wrap up
+# 直播手卡: a short name the card cannot hold is asked about once more (``Conversation.review``); that turn has a
+# deadline of its own (past it, or when it ends badly, the answer before it stands), and with less of the job's time
+# left than REASK_LEFT_SEC nothing is asked
+REASK_SEC = 120
+REASK_LEFT_SEC = 180
+# config.json ``products_sync_hours`` (0, the default: off): the catalogue synced by itself (``--sync-products``) at
+# night, 00:00 to before 07:00 on this Mac's clock, when the worker has no job, at most every that many hours;
+# a run still going after PRODUCTS_SYNC_MAX_SEC is stopped
+PRODUCTS_SYNC_NIGHT = (0, 7)
+PRODUCTS_SYNC_MAX_SEC = 3600
 MAX_BACKOFF_SEC = 60
 ALL_KINDS = ("admin", "prm")
 # One lock per kind of job (admin keeps the old name: an older worker blocks a new admin one).
@@ -163,6 +175,8 @@ DEFAULTS = {
     # tool's ledger by her 抖音号); off until the kb section about invited creators is written (kb/合作政策.md)
     "prm_invite_background": False,
     "platforms": {},           # the platform CLIs' folders and limits (platform actions; empty = none)
+    # the catalogue (--sync-products) by itself at night when idle, at most every that many hours; 0 = off (by hand)
+    "products_sync_hours": 0,
 }
 
 SYSTEM_NOTE = (
@@ -808,9 +822,12 @@ class Conversation:
         # How a follow-up is put to claude (a prm job wraps the creator's words as data).
         self.wrap = wrap or (lambda text: f"（微信里补充）{text}")
         # review(result event) -> "" or what to ask claude once more before the input closes (a prm job's 直播手卡: a
-        # short name the card cannot hold); asked at most once
+        # short name the card cannot hold): looked at whenever a turn ends, until it asks (once per job)
         self.review = review
-        self.reviewed = False
+        self.reasked = False         # it asked
+        self.reask_by = None         # that turn ends before this (monotonic, REASK_SEC), or run_claude stops claude
+        self.ends_at = None          # the job's own deadline (run_claude): too little left, nothing is asked
+        self.last_result = None      # the last turn's result event (``_wrap_up_if_idle`` looks at it too)
         self.background = 0          # commands claude runs in the background right now
         self.turn_ended = False
         self.lock = threading.Lock()
@@ -870,6 +887,9 @@ class Conversation:
                 timer.start()
         elif kind == "result":
             self.turn_ended = True
+            self.last_result = event
+            if self.reasked:
+                self.reask_by = None                     # (the turn asked again has ended)
             if self.background:
                 log.info("#%s turn ended with %d background command(s) running; input stays open",
                          self.job_id, self.background)
@@ -878,12 +898,12 @@ class Conversation:
         elif kind in ("assistant", "user") or (kind == "system" and event.get("subtype") == "init"):
             self.turn_ended = False
 
-    def _ask_again(self, event: dict) -> bool:
-        """``review`` (once) found something to ask about this turn's answer: it is put to claude, which answers in a
-        new turn (the input stays open).  True when it was asked."""
-        if self.review is None or self.reviewed:
+    def _ask_again(self, event) -> bool:
+        """``review`` found something to ask about this turn's answer (whichever turn, until it asked once): it is put
+        to claude, which answers in a new turn (the input stays open), within REASK_SEC (``reask_by``).  Not with less
+        than REASK_LEFT_SEC of the job's time left.  True when it was asked."""
+        if self.review is None or self.reasked or not isinstance(event, dict):
             return False
-        self.reviewed = True
         try:
             text = self.review(event)
         except Exception as e:                           # never in the way of the answer
@@ -891,16 +911,21 @@ class Conversation:
             return False
         if not text:
             return False
+        if self.ends_at is not None and self.ends_at - time.monotonic() < REASK_LEFT_SEC:
+            log.info("#%s too little of the job's time left to ask claude again about its answer", self.job_id)
+            return False
         with self.lock:
             asked = self._write(text)
         if asked:
+            self.reasked, self.reask_by = True, time.monotonic() + REASK_SEC
             log.info("#%s asked claude once more about its answer", self.job_id)
         return asked
 
     def _wrap_up_if_idle(self) -> None:
         if self.turn_ended and not self.background and not self.closed:
             log.info("#%s background commands done and no new turn; wrapping up", self.job_id)
-            self.on_result()
+            if not self._ask_again(self.last_result):
+                self.on_result()
 
     def on_result(self) -> None:
         """A turn ended: hand on what came meanwhile, or end the input (claude then exits)."""
@@ -936,7 +961,8 @@ def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stoppe
     """Run claude once; heartbeat meanwhile.  Returns stdout/stderr/returncode and why it stopped.
 
     ``cmd`` replaces the cc command line (a prm job's); ``wrap`` shapes follow-ups; ``review`` may ask
-    claude once more about a turn's answer (``Conversation._ask_again``)."""
+    claude once more about a turn's answer (``Conversation._ask_again``: ``reasked`` in the result; that turn past its
+    own deadline stops claude, ``stopped`` "reask_timeout")."""
     cmd = cmd or claude_command(settings, session_id, add_dirs)
     # The task goes in on stdin: a task starting with "-" must not be read as an option.
     # The permission hook (a child of claude) needs to know the job and the settings file.
@@ -949,6 +975,9 @@ def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stoppe
     )
     progress = Progress()
     conversation = Conversation(proc, client, int(job["id"]), wrap=wrap, review=review)
+    started = time.monotonic()
+    deadline = started + float(settings.get("timeout_min") or 60) * 60
+    conversation.ends_at = deadline
     lines: list[str] = []
     errors: list[str] = []
 
@@ -968,8 +997,6 @@ def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stoppe
         t.start()
     threading.Thread(target=conversation.poll, args=(stopper,), daemon=True).start()
     reader = threads[0]
-    started = time.monotonic()
-    deadline = started + float(settings.get("timeout_min") or 60) * 60
     stopped_because, signalled_at = "", None
     while reader.is_alive():
         reader.join(HEARTBEAT_SEC)
@@ -985,6 +1012,8 @@ def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stoppe
             reason = "cancelled"
         elif time.monotonic() > deadline:
             reason = "timeout"
+        elif conversation.reask_by is not None and time.monotonic() > conversation.reask_by:
+            reason = "reask_timeout"                     # (the turn asked again: the answer before it stands)
         elif stopper.event.is_set():
             reason = "worker_stopped"
         if reason and signalled_at is None:
@@ -1001,7 +1030,7 @@ def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stoppe
     return {
         "stdout": "".join(lines), "stderr": "".join(errors),
         "returncode": proc.returncode, "stopped": stopped_because,
-        "duration_s": round(time.monotonic() - started, 1),
+        "duration_s": round(time.monotonic() - started, 1), "reasked": conversation.reasked,
     }
 
 
@@ -2327,6 +2356,8 @@ def summarize_prm(run: dict, data: dict | None, settings: dict) -> dict:
         return {**result, "ok": False, "text": "", "error": "已取消"}
     if run["stopped"] == "timeout":
         return {**result, "ok": False, "text": "", "error": f"超过 {settings.get('prm_timeout_min')} 分钟没写完草稿"}
+    if run["stopped"] == "reask_timeout":
+        return {**result, "ok": False, "text": "", "error": "再问短名的那一轮超时了"}
     if run["stopped"] == "worker_stopped":
         return {**result, "ok": False, "text": "", "error": "Mac 上的 worker 被关掉了"}
     if data is None:
@@ -2373,6 +2404,11 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
         # 「做手卡」 on a Mac that cannot make cards: said at once (the bot's notice says how to go on), no model run
         log.warning("#%s 做手卡 not run: %s", job["id"], cards_why)
         return {"ok": False, "text": "", "error": f"这台 Mac 做不了手卡：{cards_why}", "duration_s": 0}
+    if isinstance(meta.get("handcards"), dict) and handcards is not None:
+        stale = handcards.catalogue_problem(handcards.catalog_info(workspace), cards_cfg)
+        if stale:                                        # (a catalogue too old: no model run either)
+            log.warning("#%s 做手卡 not run: %s", job["id"], stale)
+            return {"ok": False, "text": "", "error": stale, "duration_s": 0}
     log.info("#%s prm start: party %s (%d chars)", job["id"], party_id, len(str(job.get("text") or "")))
     case_rel = ensure_case_file(workspace, party_id, str(meta.get("name") or ""))
     got, failed = fetch_prm_files(client, job, workspace)
@@ -2389,16 +2425,21 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
         log.info("#%s prm: the proxy of %s goes to claude (%s)", job["id"], claude_settings_path(), ", ".join(proxy))
     # The guard hook (a child of claude) lets this job reach only its own creator's case file and
     # its own attachments: it learns which from the environment.
-    asked_again = []                                     # 直播手卡: a short name too long was asked about once
     run = run_claude({**settings, "timeout_min": timeout}, task, workspace, client, stopper, None,
                      cmd=prm_claude_command(settings, cards=bool(card_rule)), wrap=prm_followup,
                      env_extra={"PRM_WORKSPACE": str(workspace), "PRM_PARTY_ID": str(party_id),
                                 "PRM_JOB_ID": str(int(job["id"])), **proxy},
-                     review=(lambda event: handcards_review(event, asked_again)) if card_rule else None)
+                     review=handcards_review if card_rule else None)
     data = parse_output(run["stdout"])
-    answers = structured_events(run["stdout"]) if asked_again else []
-    if answers and _answer(data) is None:
-        data = answers[-1]                               # the turn asked again gave no answer: the first one stands
+    answers = structured_events(run["stdout"]) if run.get("reasked") else []
+    if answers and run["stopped"] not in ("cancelled", "worker_stopped") and (
+            run["stopped"] or run["returncode"] != 0 or _answer(data) is None or bool((data or {}).get("is_error"))):
+        # 直播手卡: asked again about its short names, the turn after did not end well (past its own deadline or the
+        # job's, an exit code such as the budget cap's) or gave no answer: the last full answer stands (a short name
+        # that does not fit: no card, the draft waits for a person); never the job lost over it
+        log.info("#%s the turn asked again did not end well (%s); the answer before it stands", job["id"],
+                 run["stopped"] or f"exit {run['returncode']}")
+        run, data = {**run, "stopped": "", "returncode": 0}, answers[-1]
     result = summarize_prm(run, data, {**settings, "prm_timeout_min": timeout})
     if result["ok"]:
         draft = json.loads(result["text"])
@@ -2411,6 +2452,10 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
         if request is not None and not card_rule:
             # a job that offered no cards (PRM_HANDCARDS off, no settings on this Mac): its answer as before
             log.info("#%s the draft named products for 手卡 the job did not offer: left out", job["id"])
+            request = None
+        elif request is not None and handcards is not None and not handcards.has_products(request):
+            # (one that names no product is none: a plain reply goes its usual way)
+            log.info("#%s the draft's 手卡 request names no product: left out", job["id"])
             request = None
         named = [str(rel).strip() for rel in draft.get("attachments_to_send") or [] if str(rel).strip()]
         sent, missing = [], []
@@ -2431,7 +2476,7 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
         if request is not None:
             # (every file the job sent back so far counts: one draft carries at most 9, the bot's MAX_OUTFILES)
             made, cards = make_handcards(settings, job, meta, request, workspace, client, cards_cfg, cards_why,
-                                         others=client.uploaded(int(job["id"])))
+                                         others=client.uploaded(int(job["id"])), reasked=bool(run.get("reasked")))
             draft["handcards_made"] = made
             sent += cards                                # (all of them, or none: ``make_handcards``)
             named += cards
@@ -2466,14 +2511,13 @@ HANDCARDS_SHORTER = ("（系统，不是达人的话）你给的 handcards 里�
                      "比如「西部巴拿马帽」）；不用再读文件，也不用再改案卷。")
 
 
-def handcards_review(event: dict, asked: list) -> str:
+def handcards_review(event: dict) -> str:
     """For ``Conversation._ask_again``: the request in this turn's answer holds short names the card cannot hold
-    (``handcards.shorts_too_long``): what to ask claude (``HANDCARDS_SHORTER``), noted in ``asked``; "" otherwise."""
+    (``handcards.shorts_too_long``): what to ask claude (``HANDCARDS_SHORTER``); "" otherwise."""
     draft = _answer(event)
     long = handcards.shorts_too_long(draft.get("handcards")) if handcards is not None and draft else []
     if not long:
         return ""
-    asked.append(len(long))
     return HANDCARDS_SHORTER.format(names="、".join(f"「{name}」" for name in long[:9]))
 
 
@@ -2515,12 +2559,13 @@ def handcards_settings() -> tuple:
 
 
 def make_handcards(settings: dict, job: dict, meta: dict, request, workspace: Path, client: RelayClient,
-                   cards_cfg, cards_why: str, others: int = 0) -> tuple:
+                   cards_cfg, cards_why: str, others: int = 0, reasked: bool = False) -> tuple:
     """The cards of a draft's ``handcards`` request: ``(verdict, names of the files sent back)``.  Made only when this
     Mac can (``cards_cfg``) and the bot asked for them (``meta.handcards_ok`` or an operator's 「做手卡」), in a folder of
     their own under HOME_DIR/platform/handcards (``handcards.make``, the job's heartbeat meanwhile: the rendering may
     take a minute); sent back here.  ``others``: the files the job sent back already (all count against the bot's 9 per
-    job: cards that would not fit are not made).  All or nothing: one file that does not upload makes the verdict a
+    job: cards that would not fit are not made); ``reasked``: the model was asked once more about its short names.
+    All or nothing: one file that does not upload makes the verdict a
     failure that names every planned file (one whose answer was lost may have arrived: the bot leaves them all out).
     Never loses the draft: anything that goes wrong is the verdict's ``problems``."""
     if handcards is None:
@@ -2535,7 +2580,8 @@ def make_handcards(settings: dict, job: dict, meta: dict, request, workspace: Pa
     try:
         made, files = handcards.make(request, workspace=workspace, config=cards_cfg, name=str(meta.get("name") or ""),
                                      job_id=job_id, home=HOME_DIR / "platform" / "handcards", asked=asked or None,
-                                     others=others, heartbeat=_platform_heartbeat(client, job_id, "做手卡"))
+                                     others=others, heartbeat=_platform_heartbeat(client, job_id, "做手卡"),
+                                     reasked=reasked)
     except Exception as e:                               # never lose the draft over its cards
         log.exception("#%s handcards failed", job_id)
         return handcards.made_block(False, problems=[f"Mac 上做手卡出错：{e}"]), []
@@ -2820,6 +2866,84 @@ def sync_products(settings: dict, only: str = "") -> int:
         print(f"{platform}: {len(part.get('items') or [])} 个商品（{state}）")
     print("写好了：" + "、".join(str(p) for p in paths))
     return 0 if all(part.get("ok") for name, part in catalog["platforms"].items() if name in wanted) else 1
+
+
+# config.json ``products_sync_hours``: ``--sync-products`` by itself (the catalogue's prices and SKUs: 直播手卡 refuses a
+# catalogue older than handcards.json's max_catalogue_days), in a process of its own so jobs go on meanwhile; a
+# platform action waits for its CLI lock as it does for a sync by hand.
+_products_sync: dict = {"proc": None, "started": 0.0}
+PRODUCTS_SYNC_STATE = "products-sync.json"       # in HOME_DIR/platform: when the last scheduled run was started
+PRODUCTS_SYNC_LOG = "products-sync.log"          # in HOME_DIR/logs: the last scheduled run's output
+
+
+def products_sync_due(settings: dict, workspace: Path, now: float) -> bool:
+    """``products_sync_hours`` is set (more than 0), it is night on this Mac's clock (PRODUCTS_SYNC_NIGHT) and neither
+    the last scheduled run nor the catalogue file (written by any sync, one by hand too: its modification time, no
+    need to read it) is that young."""
+    try:
+        hours = float(settings.get("products_sync_hours") or 0)
+    except (TypeError, ValueError):
+        return False
+    start, end = PRODUCTS_SYNC_NIGHT
+    if hours <= 0 or not start <= time.localtime(now).tm_hour < end:
+        return False
+    last = 0.0
+    try:
+        last = float(json.loads((HOME_DIR / "platform" / PRODUCTS_SYNC_STATE).read_text(encoding="utf-8"))["started_at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    try:
+        last = max(last, (Path(workspace) / platforms.CATALOG_JSON).stat().st_mtime)
+    except (OSError, AttributeError):
+        pass
+    return now - last >= hours * 3600
+
+
+def products_sync_tick(settings: dict, kinds: tuple, now: float | None = None, popen=subprocess.Popen) -> str:
+    """At an idle moment of ``serve`` (no job came): a scheduled ``--sync-products`` that ended is told in one log line
+    (one still going after PRODUCTS_SYNC_MAX_SEC is stopped); one that is due (``products_sync_due``, a worker that
+    writes drafts) starts, its output in HOME_DIR/logs/products-sync.log.  "" (nothing), "running", "ended" or
+    "started"."""
+    now = time.time() if now is None else now
+    proc = _products_sync["proc"]
+    if proc is not None:
+        code = proc.poll()
+        took = now - _products_sync["started"]
+        if code is None and took <= PRODUCTS_SYNC_MAX_SEC:
+            return "running"
+        if code is None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                proc.kill()
+            proc.wait()
+        _products_sync["proc"] = None
+        how = ("stopped after %d min" % (PRODUCTS_SYNC_MAX_SEC // 60) if code is None
+               else "done" if code == 0 else f"ended with exit code {code}")
+        log.info("products: the scheduled --sync-products %s in %.0f s (output: %s)", how, took,
+                 HOME_DIR / "logs" / PRODUCTS_SYNC_LOG)
+        return "ended"
+    if "prm" not in kinds or platforms is None:
+        return ""
+    workspace = prm_workspace_dir(settings)[0]
+    if workspace is None or not products_sync_due(settings, workspace, now):
+        return ""
+    state = HOME_DIR / "platform" / PRODUCTS_SYNC_STATE
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(json.dumps({"started_at": now}), encoding="utf-8")   # (another worker here sees it: no second run)
+    out_path = HOME_DIR / "logs" / PRODUCTS_SYNC_LOG
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    argv = [sys.executable, str(Path(__file__).resolve()), "--config",
+            str(settings.get("config_path") or HOME_DIR / "config.json"), "--sync-products"]
+    with open(out_path, "w", encoding="utf-8") as out:
+        try:
+            _products_sync["proc"] = popen(argv, cwd=str(HOME_DIR), stdin=subprocess.DEVNULL, stdout=out,
+                                           stderr=subprocess.STDOUT, start_new_session=True)
+        except OSError as e:
+            log.warning("products: the scheduled --sync-products did not start: %s", e)
+            return ""
+    _products_sync["started"] = now
+    return "started"
 
 
 def save_prm_log(job: dict, run: dict, result: dict) -> Path:
@@ -3217,6 +3341,7 @@ def serve(settings: dict, client: RelayClient, stopper: Stopper, once: bool = Fa
             backoff = min(backoff * 2, MAX_BACKOFF_SEC)
             continue
         if job is None:
+            products_sync_tick(settings, kinds)          # (idle: the catalogue's night sync, when set)
             continue
         try:
             result = do_job(settings, job, client, stopper, kinds)

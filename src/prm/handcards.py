@@ -88,12 +88,13 @@ _CARD_FILE = re.compile(r"^手卡_\d{2}_.*\.png$")
 _ZIP_FILE = re.compile(r"直播手卡(?:\(\d+\))?\.zip$")
 
 # The drafting Claude's ``handcards`` (the worker adds it to a job's --json-schema only with the 【直播手卡】 rule; basic
-# keywords only, as the rest of the schema: lengths and counts are this module's to check).
+# keywords only, as the rest of the schema: lengths and counts are this module's to check; ``minItems`` 1: a request
+# names a product, and one that names none is no request, ``has_products``).
 REQUEST_SCHEMA = {
     "type": "object",
     "properties": {
         "call": {"type": "string"},
-        "products": {"type": "array", "items": {
+        "products": {"type": "array", "minItems": 1, "items": {
             "type": "object",
             "properties": {
                 "item_id": {"type": "string"},
@@ -134,24 +135,26 @@ def _day(at) -> str:
 # ── the Mac's verdict (what the bot reads) ───────────────────────────────
 
 def made_block(ok: bool, *, cards=(), items=(), note: str = "", problems=(), cuts=(), promo_until: str = "",
-               catalog_at: Optional[float] = None) -> dict:
+               catalog_at: Optional[float] = None, house_todo=()) -> dict:
     """The Mac's verdict on a draft's request (``handcards_made``; the bot reads it with ``check_made``): ``ok`` with
     the cards' file names (the draft's files of those names), else ``problems`` (why no card was made) and every file
     that was planned (the bot leaves out any of them that came).  ``cuts``: the words cut to fit the card;
-    ``promo_until``: the end date (YYYY-MM-DD) of the 双11 line on the cards; ``catalog_at``: the catalogue's sync time."""
+    ``promo_until``: the end date (YYYY-MM-DD) of the 双11 line on the cards; ``catalog_at``: the catalogue's sync time;
+    ``house_todo``: the house 口径 handcards.json lacks (a red 待定 on every card: 「快递」)."""
     problems = [" ".join(str(p).split())[:300] for p in problems if str(p).strip()][:PROBLEMS]
     return {"version": 1, "ok": bool(ok) and bool(cards) and not problems, "cards": [str(c) for c in cards],
             "items": [dict(i) for i in items][:MAX_CARDS], "note": str(note or "")[:NOTE_CHARS], "problems": problems,
             "cuts": [" ".join(str(c).split())[:160] for c in cuts if str(c).strip()][:CUTS_MAX],
             "promo_until": str(promo_until or ""),
-            "catalog_at": float(catalog_at) if isinstance(catalog_at, (int, float)) else None}
+            "catalog_at": float(catalog_at) if isinstance(catalog_at, (int, float)) else None,
+            "house_todo": [str(t)[:20] for t in house_todo if str(t).strip()][:len(GLOBAL_KEYS)]}
 
 
 def check_made(raw) -> dict:
     """The Mac's verdict as the bot keeps it, ``{"ok", "cards", "items", "note", "problems", "cuts", "promo_until",
-    "catalog_at"}`` (``ok`` only with cards and no problem); a ValueError for one it cannot use (``result.parse_draft``
-    refuses the draft then, as it does a malformed platform verdict).  An older worker's verdict has no cuts, end date
-    or catalogue time."""
+    "catalog_at", "house_todo"}`` (``ok`` only with cards and no problem); a ValueError for one it cannot use
+    (``result.parse_draft`` refuses the draft then, as it does a malformed platform verdict).  An older worker's verdict
+    has no cuts, end date, catalogue time or house 待定."""
     if not isinstance(raw, dict):
         raise ValueError("handcards_made is not an object")
     cards = raw.get("cards") if raw.get("cards") is not None else []
@@ -165,8 +168,9 @@ def check_made(raw) -> dict:
     problems = raw.get("problems") if raw.get("problems") is not None else []
     items = raw.get("items") if raw.get("items") is not None else []
     cuts = raw.get("cuts") if raw.get("cuts") is not None else []
-    if not isinstance(problems, list) or not isinstance(items, list) or not isinstance(cuts, list):
-        raise ValueError("handcards_made.problems / items / cuts are not lists")
+    house = raw.get("house_todo") if raw.get("house_todo") is not None else []
+    if not all(isinstance(v, list) for v in (problems, items, cuts, house)):
+        raise ValueError("handcards_made.problems / items / cuts / house_todo are not lists")
     problems = [" ".join(str(p).split())[:300] for p in problems if str(p).strip()][:PROBLEMS]
     kept = []
     for item in items[:MAX_CARDS]:
@@ -181,7 +185,14 @@ def check_made(raw) -> dict:
     return {"ok": raw.get("ok") is True and bool(names) and not problems, "cards": names, "items": kept,
             "note": str(raw.get("note") or "")[:NOTE_CHARS], "problems": problems,
             "cuts": [" ".join(str(c).split())[:160] for c in cuts if str(c).strip()][:CUTS_MAX], "promo_until": until,
-            "catalog_at": float(at) if isinstance(at, (int, float)) and not isinstance(at, bool) else None}
+            "catalog_at": float(at) if isinstance(at, (int, float)) and not isinstance(at, bool) else None,
+            "house_todo": [str(t)[:20] for t in house if str(t).strip()][:len(GLOBAL_KEYS)]}
+
+
+def has_products(request) -> bool:
+    """A draft's ``handcards`` that names at least one product: anything else is no request (the worker leaves it
+    out, as a request a job did not offer)."""
+    return isinstance(request, dict) and isinstance(request.get("products"), list) and bool(request["products"])
 
 
 def is_card_file(name) -> bool:
@@ -204,7 +215,9 @@ def keep_cards(made: dict, attachments: list) -> tuple:
 
 
 def _todo_lines(made: dict) -> list:
-    return [f"第 {n} 款 {'、'.join(i['todo'])}" for n, i in enumerate(made.get("items") or [], 1) if i.get("todo")]
+    lines = [f"第 {n} 款 {'、'.join(i['todo'])}" for n, i in enumerate(made.get("items") or [], 1) if i.get("todo")]
+    house = list(made.get("house_todo") or [])
+    return lines + ([f"每张 {'、'.join(house)}"] if house else [])
 
 
 def attention(made: dict) -> str:
@@ -222,7 +235,8 @@ def attention(made: dict) -> str:
 
 
 def flagged(made: dict) -> bool:
-    """Does a draft with these cards need a person's special care (``needs_attention``): none made, words cut, 待定."""
+    """Does a draft with these cards need a person's special care (``needs_attention``): none made, words cut, 待定 (a
+    card's, or the house 口径's on every card)."""
     return not made.get("ok") or bool(made.get("cuts")) or bool(_todo_lines(made))
 
 
@@ -342,6 +356,20 @@ def catalog_info(workspace) -> dict:
     return {"items": {str(i["id"]): i for i in items if isinstance(i, dict) and str(i.get("id") or "").strip()},
             "synced_at": float(at) if isinstance(at, (int, float)) and not isinstance(at, bool) else None,
             "stale": dy.get("stale") is True}
+
+
+def catalogue_problem(info: dict, config: dict, now: Optional[float] = None) -> str:
+    """Why the catalogue (``catalog_info``) makes no card now; "" when it does: no 抖店 product, its last sync failed
+    (``stale``), it was synced longer ago than ``max_catalogue_days`` (the prices may have changed), or nobody knows
+    when.  ``make`` checks it first; the worker before it runs a 「做手卡」 at all."""
+    now = time.time() if now is None else now
+    if not info.get("items"):
+        return "这台 Mac 的 kb/products.json 里没有抖店商品（先在 Mac 上 --sync-products）"
+    synced = info.get("synced_at")
+    days = int(config.get("max_catalogue_days") or CATALOGUE_DAYS)
+    if info.get("stale") or synced is None or now - synced > days * 86400:
+        return f"商品目录太旧（上次同步 {_day(synced) or '不知道哪天'}），先同步再做手卡"
+    return ""
 
 
 def load_catalog(workspace) -> dict:
@@ -570,9 +598,15 @@ _TAIL = re.compile(r"-[0-9A-Za-z_.]{4}$")      # the friend add's remark made un
 
 def channel_of(call: str, name: str) -> tuple:
     """``(channel, cut)``: the cards' 场次 「<称呼>专属」, her 称呼 as the draft gave it, else her deal's name without a
-    「抖音-」 prefix and the friend add's 「-ab12」 tail (the WeChat remark it sets); nothing a file name or HTML cannot
-    carry; cut at a word boundary to CALL_MAX.  Runtime data only, never in a file of the repository nor in a log."""
-    raw = " ".join(str(call or "").split()) or " ".join(str(name or "").split())
+    「抖音-」 prefix and the friend add's 「-ab12」 tail (the WeChat remark it sets; a 称呼 the draft copied from that
+    remark loses the deal name's very tail too); nothing a file name or HTML cannot carry; cut at a word boundary to
+    CALL_MAX.  Runtime data only, never in a file of the repository nor in a log."""
+    name = " ".join(str(name or "").split())
+    call = " ".join(str(call or "").split())
+    tail = _TAIL.search(name)
+    if call and tail and call != tail.group(0) and call.endswith(tail.group(0)):
+        call = call[:-len(tail.group(0))].strip()
+    raw = call or name
     stripped = _PREFIX.sub("", raw)
     if stripped != raw:
         stripped = _TAIL.sub("", stripped)
@@ -616,14 +650,15 @@ def _sells(raw, no: int) -> tuple:
 
 
 def build_sheet(request, *, catalog: dict, skus: dict, config: dict, name: str, today: date, workspace,
-                asked: Optional[list] = None, others: int = 0) -> tuple:
+                asked: Optional[list] = None, others: int = 0, reasked: bool = False) -> tuple:
     """The skill's 单子.json for a draft's request: ``(sheet, photos, report)``; its 场次 「<称呼>专属」 (``channel_of``:
     the request's ``call``, else ``name``, her deal's).  ``photos``: per card the main image
     and its crop (``crop_photos``'s plan).  ``report``: ``problems`` (any: no card at all), ``todo`` per card (its null
     fields, a red 待定), ``notes`` (what the operator should know: a colour that does not fit, a price left 待定),
     ``cuts`` (words cut to fit the card) and ``items``.  ``asked``: the products an operator's 「做手卡」 named
     (``[{"item_id", "sku_ids"}]``; None or [] when none): those, in that order (one the draft left out is a problem, one
-    it added is left out); ``others``: the files the draft sends besides (one draft carries at most MAX_CARDS)."""
+    it added is left out); ``others``: the files the draft sends besides (one draft carries at most MAX_CARDS);
+    ``reasked``: the model was asked once more about its short names (a short name still too long says so)."""
     report: dict = {"problems": [], "notes": [], "todo": {}, "items": [], "crops": [], "cuts": []}
     products = request.get("products") if isinstance(request, dict) else None
     if not isinstance(products, list) or not products:
@@ -666,8 +701,8 @@ def build_sheet(request, *, catalog: dict, skus: dict, config: dict, name: str, 
         if not short:
             report["problems"].append(f"第 {no} 款（商品 {item_id}）：草稿没写短名")
         elif not fits:
-            report["problems"].append(f"第 {no} 款短名「{short}」超过 {SHORT_MAX} 个字，卡上放不下（问过 Mac 也没改短）："
-                                      "再点一次「做手卡」")
+            report["problems"].append(f"第 {no} 款短名「{short}」超过 {SHORT_MAX} 个字，卡上放不下"
+                                      + ("（再问过一次也没改短）" if reasked else "") + "：再点一次「做手卡」")
         image = str(item.get("image_file") or "")
         real = os.path.realpath(Path(workspace) / image) if image else ""
         if not image or not real.startswith(assets + os.sep) or not os.path.isfile(real):
@@ -995,23 +1030,22 @@ def session_folder(home, job_id: int, now: Optional[float] = None) -> Path:
 
 def make(request, *, workspace, config: dict, name: str, job_id: int, home, asked: Optional[list] = None,
          others: int = 0, today: Optional[date] = None, heartbeat: Optional[Callable[[], bool]] = None,
-         popen=subprocess.Popen, now: Optional[float] = None) -> tuple:
+         popen=subprocess.Popen, now: Optional[float] = None, reasked: bool = False) -> tuple:
     """The cards of one draft's request, ``(verdict, files)``: ``made_block`` and the 1x PNGs to send (the skill's zip
     after them when ``send_zip`` and it fits), or a verdict saying why there are none (and no file).  A catalogue
-    synced longer than ``max_catalogue_days`` ago, or whose last sync failed, makes none.  In a folder of its own
-    under ``home`` (kept KEEP_DAYS: 单子.json and the photos for a person who fixes a 待定 by hand)."""
+    synced longer than ``max_catalogue_days`` ago, or whose last sync failed, makes none (``catalogue_problem``).
+    ``reasked``: the worker asked the model once more about its short names (a problem says so).  In a folder of its
+    own under ``home`` (kept KEEP_DAYS: 单子.json and the photos for a person who fixes a 待定 by hand)."""
     now = time.time() if now is None else now
     today = today or beijing_today(now)
     info = catalog_info(workspace)
     synced = info["synced_at"]
-    if not info["items"]:
-        return made_block(False, problems=["这台 Mac 的 kb/products.json 里没有抖店商品（先在 Mac 上 --sync-products）"]), []
-    days = int(config.get("max_catalogue_days") or CATALOGUE_DAYS)
-    if info["stale"] or synced is None or now - synced > days * 86400:
-        when = _day(synced) or "不知道哪天"
-        return made_block(False, problems=[f"商品目录太旧（上次同步 {when}），先同步再做手卡"], catalog_at=synced), []
+    stale = catalogue_problem(info, config, now)
+    if stale:
+        return made_block(False, problems=[stale], catalog_at=synced), []
     sheet, photos, report = build_sheet(request, catalog=info["items"], skus=sku_index(config["skus"]), config=config,
-                                        name=name, today=today, workspace=workspace, asked=asked, others=others)
+                                        name=name, today=today, workspace=workspace, asked=asked, others=others,
+                                        reasked=reasked)
     if report["problems"]:
         return made_block(False, problems=report["problems"], items=report["items"], catalog_at=synced), []
     hide = (sheet["channel"], sheet["channel"][:-2])        # her 称呼: kept out of what goes back (a script's output)
@@ -1058,8 +1092,9 @@ def make(request, *, workspace, config: dict, name: str, job_id: int, home, aske
     until = promo["until"].isoformat() if promo and any(p.get("promo") for p in sheet["products"]) else ""
     note = note_text(sheet, report, config, today, folder=str(folder).replace(str(Path.home()), "~", 1),
                      catalog_at=synced)
+    house = [GLOBAL_LABELS[k] for k in GLOBAL_KEYS if sheet["globals"].get(k) is None]
     return made_block(True, cards=[f.name for f in files], items=report["items"], note=note, cuts=report["cuts"],
-                      promo_until=until, catalog_at=synced), files
+                      promo_until=until, catalog_at=synced, house_todo=house), files
 
 
 def _failed(step: str, code, tail: str, stopped: str, timeout: float, hide=()) -> str:

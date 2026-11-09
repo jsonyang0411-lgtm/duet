@@ -144,10 +144,10 @@ def hc_index():
     return index
 
 
-def build(ws, *products, asked=None, others=0, today=TODAY, cfg=None, name="小美", call=""):
+def build(ws, *products, asked=None, others=0, today=TODAY, cfg=None, name="小美", call="", reasked=False):
     request = {"products": list(products), **({"call": call} if call else {})}
     return hc.build_sheet(request, catalog=hc.load_catalog(ws), skus=hc_index(), config=cfg or config(), name=name,
-                          today=today, workspace=ws, asked=asked, others=others)
+                          today=today, workspace=ws, asked=asked, others=others, reasked=reasked)
 
 
 # ── the 单子.json: prices, the 双11 line, stock, 待定 ──────────────────────
@@ -242,9 +242,11 @@ def test_a_short_name_fits_the_card_a_file_name_and_its_url(text, short, fits):
 
 def test_a_short_name_too_long_makes_no_card_and_is_named_for_the_model(ws):
     """A short name that does not fit is never cut mid-word: no card, and the worker asks the model again for the names
-    ``shorts_too_long`` gives."""
+    ``shorts_too_long`` gives; the problem says it asked only when it did (review 2026-11-09, round 2, item 7)."""
     _, _, report = build(ws, product(short="复古西部巴拿马帽"))
-    assert report["problems"] == ["第 1 款短名「复古西部巴拿马帽」超过 6 个字，卡上放不下（问过 Mac 也没改短）：再点一次「做手卡」"]
+    assert report["problems"] == ["第 1 款短名「复古西部巴拿马帽」超过 6 个字，卡上放不下：再点一次「做手卡」"]
+    _, _, report = build(ws, product(short="复古西部巴拿马帽"), reasked=True)
+    assert report["problems"] == ["第 1 款短名「复古西部巴拿马帽」超过 6 个字，卡上放不下（再问过一次也没改短）：再点一次「做手卡」"]
     assert hc.shorts_too_long({"products": [product(short="复古西部巴拿马帽"), product(ITEM2, short="小礼帽")]}) == [
         "复古西部巴拿马帽"]
     assert hc.shorts_too_long(None) == [] and hc.shorts_too_long({"products": "x"}) == []
@@ -341,6 +343,9 @@ def test_a_sku_name_gives_its_colour_and_size(name, colour, sizes):
     ("", "小美-ab12", "小美-ab12专属", False),                                           # (no prefix: her own name)
     ("", "dy_小美", "dy_小美专属", False), ("", "", "达人专属", False), ("小/美&#", "", "小美专属", False),
     ("一" * 20, "", "一" * 16 + "专属", True),
+    # a 称呼 the draft copied from the friend add's remark loses the deal name's very tail (round 2, item 6)
+    ("小美-ab12", "抖音-小美-ab12", "小美专属", False), ("抖音-小美-ab12", "抖音-小美-ab12", "小美专属", False),
+    ("小美-ab12", "小美", "小美-ab12专属", False), ("小美-ab12", "抖音-小美-cd34", "小美-ab12专属", False),
 ])
 def test_the_channel_is_her_call_or_her_deals_name_without_the_friend_add_remark(call, name, channel, cut):
     assert hc.channel_of(call, name) == (channel, cut)
@@ -525,6 +530,15 @@ def test_the_cards_are_made_in_a_folder_of_their_own_and_only_the_1x_pngs_go(ws,
         assert words in note, words
 
 
+def test_a_house_value_missing_flags_every_card(ws, cards):
+    """handcards.json without 快递: a red 待定 on every card, and the draft is flagged (round 2, item 10)."""
+    made, files = make(ws, cards, product(), globals={**GLOBALS, "express": None})
+    assert made["ok"] and made["house_todo"] == ["快递"] and len(files) == 1
+    assert hc.flagged(hc.check_made(made)) and "卡上待定：每张 快递" in hc.attention(hc.check_made(made))
+    made, _ = make(ws, cards, product())
+    assert made["house_todo"] == [] and not hc.flagged(hc.check_made(made))
+
+
 def test_a_zip_goes_too_only_when_asked_and_when_it_fits(ws, cards):
     made, files = make(ws, cards, product(), send_zip=True)
     assert [f.name for f in files] == ["手卡_01_测试巴拿马帽.png", "ACE7CN直播手卡.zip"] and made["ok"]
@@ -569,6 +583,16 @@ def test_a_stale_or_old_catalogue_makes_no_card(ws, cards, days_old, stale, max_
         when = hc._day(synced)
         assert made["problems"] == [f"商品目录太旧（上次同步 {when}），先同步再做手卡"] and cards.calls() == []
         assert made["catalog_at"] == pytest.approx(synced)
+
+
+def test_the_catalogue_check_is_one_for_the_cards_and_the_click():
+    fresh = {"items": {ITEM: {}}, "synced_at": 1000.0, "stale": False}
+    cfg = {"max_catalogue_days": 7}
+    assert hc.catalogue_problem(fresh, cfg, now=1000.0 + 6 * 86400) == ""
+    assert hc.catalogue_problem(fresh, cfg, now=1000.0 + 8 * 86400).startswith("商品目录太旧（上次同步 ")
+    assert hc.catalogue_problem({**fresh, "stale": True}, cfg, now=1000.0) != ""
+    assert hc.catalogue_problem({**fresh, "synced_at": None}, cfg) == "商品目录太旧（上次同步 不知道哪天），先同步再做手卡"
+    assert hc.catalogue_problem({"items": {}}, cfg) == "这台 Mac 的 kb/products.json 里没有抖店商品（先在 Mac 上 --sync-products）"
 
 
 def test_a_run_is_stopped_by_its_timeout_or_a_cancel(tmp_path):
@@ -636,7 +660,7 @@ def test_the_verdict_is_checked_and_its_cards_come_all_or_none():
                                        promo_until="2026-11-11", catalog_at=1.5e9))
     assert made == {"ok": True, "cards": ["手卡_01_a.png", "手卡_02_b.png"], "note": "n", "problems": [], "cuts": [],
                     "items": [{"item_id": ITEM, "short": "a", "todo": ["材质"]}], "promo_until": "2026-11-11",
-                    "catalog_at": 1.5e9}
+                    "catalog_at": 1.5e9, "house_todo": []}
     files = [{"name": "手卡_01_a.png"}, {"name": "x.jpg"}, {"name": "手卡_02_b.png"}]
     assert hc.keep_cards(made, files) == (files, made)
     kept, short = hc.keep_cards(made, files[:2])
@@ -646,7 +670,7 @@ def test_the_verdict_is_checked_and_its_cards_come_all_or_none():
     odd = [*files, {"name": "手卡_03_c(2).png"}, {"name": "ACE7CN直播手卡.zip"}, {"name": "货盘.jpg"}]
     assert hc.keep_cards(failed, odd)[0] == [{"name": "x.jpg"}, {"name": "货盘.jpg"}]
     for bad in ([], {"cards": "a.png"}, {"cards": ["../a.png"]}, {"cards": ["a"] * 10}, {"problems": "x"},
-                {"cuts": "x"}, {"promo_until": "11-11"}):
+                {"cuts": "x"}, {"promo_until": "11-11"}, {"house_todo": "快递"}):
         with pytest.raises(ValueError):
             hc.check_made(bad)
     assert hc.check_made({"cards": [], "catalog_at": True})["catalog_at"] is None
@@ -654,6 +678,11 @@ def test_the_verdict_is_checked_and_its_cards_come_all_or_none():
     assert hc.attention(made) == f"手卡 2 张附在草稿里，要人看过再发（价格按 {when} 同步的商品目录；卡上待定：第 1 款 材质）"
     assert hc.attention(failed) == "手卡没做成：没传上去；草稿里没附手卡"
     assert hc.flagged(made) and hc.flagged(failed) and not hc.flagged(hc.check_made(hc.made_block(True, cards=["a"])))
+    house = hc.check_made(hc.made_block(True, cards=["a"], house_todo=["快递"]))         # (round 2, item 10)
+    assert hc.flagged(house) and hc.attention(house) == "手卡 1 张附在草稿里，要人看过再发（卡上待定：每张 快递）"
+    assert [hc.has_products(r) for r in ({"products": [{}]}, {"products": []}, {}, None, {"products": "x"})] == [
+        True, False, False, False, False]
+    assert hc.REQUEST_SCHEMA["properties"]["products"]["minItems"] == 1
     assert [hc.is_card_file(n) for n in ("手卡_01_a.png", "手卡_1_a.png", "a.png", "X直播手卡(3).zip")] == [
         True, False, False, True]
 
@@ -848,9 +877,10 @@ def test_cards_made_again_the_same_are_never_split_by_the_same_picture_filter(bo
     assert len(bot.files) == 4
 
 
-def test_cards_whose_promo_line_is_out_of_date_cannot_go_at_all(bot, clock):
-    """(Review 2026-11-09, item 2.)  Cards made on 11-11 say 「双11再减15%…」; on 11-12 (Beijing) the draft cannot be
-    sent, edited or executed: the cards themselves are wrong; the console says so."""
+def test_cards_whose_promo_line_is_out_of_date_go_only_as_edited_words(bot, clock):
+    """(Review 2026-11-09, item 2; round 2, item 5.)  Cards made on 11-11 say 「双11再减15%…」; on 11-12 (Beijing) the
+    draft cannot go as it is nor with its words unchanged; 改了再发 sends the edited words only, the cards left out
+    (the console asks 「过期的手卡不会发出，只发这段话」 first)."""
     clock.now = beijing(11, 14)
     made = hc.made_block(True, cards=[n for n, _ in CARDS], promo_until="2026-11-11")
     packet = drafted(bot, asks(bot), card_draft(made=made))
@@ -859,9 +889,47 @@ def test_cards_whose_promo_line_is_out_of_date_cannot_go_at_all(bot, clock):
     clock.now = beijing(12, 0, 5)
     [card] = [p for p in snapshot(bot.prm.store, running=True, now=clock.now)["pending"] if p["id"] == packet["id"]]
     assert card["handcards"]["expired"] is True
-    for action, text in (("send", None), ("edit", "老师，手卡在这儿～")):
+    for action, text in (("send", None), ("edit", LINE)):
         assert bot.prm.decide(packet["id"], action, text) == {"ok": False, "error": hc.EXPIRED_TEXT}
-    assert bot.prm.decide(packet["id"], "drop")["ok"]
+    assert bot.prm.decide(packet["id"], "edit", "老师，双11 的价已经过了，手卡我重新整理一下再发您～")["ok"]
+    kept = bot.prm.store.packet(packet["id"])
+    assert kept["attachments"] == [] and kept["meta"]["handcards"]["left_out"] is True
+    bot.prm.send_approved()
+    assert bot.texts == [(CREATOR, "老师，双11 的价已经过了，手卡我重新整理一下再发您～")] and bot.files == []
+
+
+def test_cards_approved_before_their_end_date_are_not_sent_after_it(bot, clock):
+    """(Round 2, item 4: the verifier's probe.)  Approved 23:50 on 11-11, the send thread's round at 00:05 on 11-12
+    (Beijing): nothing goes, the draft fails saying why."""
+    clock.now = beijing(11, 23, 50)
+    made = hc.made_block(True, cards=[n for n, _ in CARDS], promo_until="2026-11-11")
+    packet = drafted(bot, asks(bot), card_draft(made=made))
+    assert bot.prm.decide(packet["id"], "send")["ok"]
+    clock.now = beijing(12, 0, 5)
+    assert bot.prm.send_approved() == 0
+    failed = bot.prm.store.packet(packet["id"])
+    assert (failed["status"], failed["error"]) == ("failed", hc.EXPIRED_TEXT) and bot.texts == [] and bot.files == []
+
+
+@pytest.mark.parametrize("verdict", [False, True])
+def test_a_verdict_on_a_job_that_offered_no_cards_is_ignored(clock, tmp_path, verdict):
+    """(Review 2026-11-09: the reviewer's switch-off scenario; round 2, item 10.)  PRM_HANDCARDS off, its kind's gate
+    at auto: the same reply goes out by itself with or without the verdict an older Mac worker wrote for a request
+    the job did not offer."""
+    b = new_bot(clock, tmp_path, prm_handcards="off")
+    try:
+        b.prm.store.set_gate("faq", "auto", clock.now)
+        job = asks(b)
+        assert hc.OK_KEY not in job["meta"]
+        more = {"handcards_made": hc.made_block(False, problems=["机器人没打开手卡（Windows 的 PRM_HANDCARDS），这份草稿不该做手卡"])} \
+            if verdict else {}
+        b.finish(job["id"], draft(message_kind="faq", reply_draft="好的老师，手卡我这边整理好发您～", slots={},
+                                  stage_proposal="", intent="要手卡", reason="kb/合作政策.md 手卡", **more))
+        packet = b.prm.store.packet_for_job(job["id"])
+        assert packet["status"] == "approved" and "handcards" not in packet["meta"] and not packet["needs_attention"]
+    finally:
+        b.prm.stop()
+        b.relay.stop()
 
 
 def test_a_plain_draft_is_as_before(bot):
@@ -1051,3 +1119,15 @@ def test_a_platform_draft_whose_cards_are_out_of_date_cannot_be_executed(bot, cl
     for text in (None, "佣金开好啦～"):
         assert bot.prm.decide(packet_id, "execute", text) == {"ok": False, "error": hc.EXPIRED_TEXT}
     assert hc.beijing_today(clock.now) - date(2026, 11, 11) == timedelta(days=1)
+
+
+def test_a_verified_platform_reply_whose_cards_went_out_of_date_is_left_to_a_person(bot, clock):
+    """(Round 2, item 4.)  The platform's read-back came after the 双11 end date: the action stands, the reply with its
+    out-of-date cards is not sent, a person sends one."""
+    clock.now = beijing(12, 10)
+    packet_id = platform_packet(bot, {"ok": True, "count": 1, "note": "", "problems": [], "promo_until": "2026-11-11"})
+    assert bot.prm.store.move(packet_id, ("pending",), "approved", decided_at=clock.now)
+    assert bot.prm.send_approved() == 0 and bot.texts == []
+    failed = bot.prm.store.packet(packet_id)
+    assert (failed["status"], failed["error"]) == (
+        "failed", f"平台动作已经核验成功，但回复没发出去：{hc.EXPIRED_TEXT}；请在微信里手动发给达人")

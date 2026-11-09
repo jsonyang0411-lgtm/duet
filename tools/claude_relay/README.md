@@ -273,7 +273,9 @@ Mac：同一个 CLI 带 --execute，只发一次（执行台账：同一个批�
    python3 tools/claude_relay/worker.py --sync-products          # 全部配置了的平台
    python3 tools/claude_relay/worker.py --sync-products --platforms dy
    ```
-   写出 `prm_workspace/kb/products.md`（给 Claude 看：商品 ID、标题、SKU、价格）和 `kb/products.json`（给代码核对）。**平台动作的商品必须在目录里**，SKU 和专属价也按目录核对；没有目录就不预览。聚水潭不单独出目录：寄样单寄的是抖店 / 小红书店的商品，用这两家的目录（聚水潭只能按标题搜店铺商品，标题也取自目录）。小红书读 `items --tab shelf --all` + `item`，抖音读 `fxg products` + `fxg sku-prices --raw`（要原始数据里 SKU 的商家编码），淘宝读万相台选品列表 `alimama items`（没有 SKU）。某个平台这次没读成，保留上一次的列表并在 md 里注明。商品有变化就再跑一次（可以放进每天的定时任务）。
+   写出 `prm_workspace/kb/products.md`（给 Claude 看：商品 ID、标题、SKU、价格）和 `kb/products.json`（给代码核对）。
+
+   也可以让写草稿的 worker 自己同步：config.json 里 `"products_sync_hours": 24`（默认 0 = 不自己同步，只能手动跑；例子文件里是 0）。设了以后，worker 在夜里 00:00–07:00（这台 Mac 的钟）、手上没有任务时，如果商品目录（手动同步的也算）和上一次自己同步都已经超过这么多小时，就在另一个进程里跑一次 `worker.py --sync-products`（和手动跑的完全一样：平台命令行照旧一次一条，平台动作的任务等它的锁），worker 照常接任务；跑完在 worker 的日志里写一行「products: the scheduled --sync-products done in N s」（没成功写退出码，超过一小时还没完就停掉它），这次的输出在 `~/.claude-relay/logs/products-sync.log`，上一次开始的时间记在 `~/.claude-relay/platform/products-sync.json`（重启以后不会马上又跑）。打开前先手动跑一次，确认调试 Chrome 里几个平台都登录着。直播手卡只用 `max_catalogue_days`（默认 7 天）以内同步过的目录。**平台动作的商品必须在目录里**，SKU 和专属价也按目录核对；没有目录就不预览。聚水潭不单独出目录：寄样单寄的是抖店 / 小红书店的商品，用这两家的目录（聚水潭只能按标题搜店铺商品，标题也取自目录）。小红书读 `items --tab shelf --all` + `item`，抖音读 `fxg products` + `fxg sku-prices --raw`（要原始数据里 SKU 的商家编码），淘宝读万相台选品列表 `alimama items`（没有 SKU）。某个平台这次没读成，保留上一次的列表并在 md 里注明。商品有变化就再跑一次（可以放进每天的定时任务）。
    同一次还把每款的主图下到 `prm_workspace/assets/products/<平台>-<商品 ID>.jpg`（抖店行的 `img`、千帆行的 `images`，要 douyin-engineering / xiaohongshu-engineering 的 `product-images` 分支或之后的版本；旧版本没有图片字段，目录照常、只是没有图），`products.md` 最后一列「款式图」写着路径，Claude 要发图就把它写进 `attachments_to_send`。只下平台自己图片 CDN 上的地址、不走系统代理；地址没变的不重下，下架了的款它的图删掉。第一次全部下完约 1800 张、500 MB。
 4. `python3 tools/claude_relay/worker.py --check` 多两行：`platform actions: dy=…; node …` 和商品目录的同步时间。
 
@@ -415,7 +417,9 @@ node bin/dy.mjs buyin im-inbox [--after=<cursor 的 JSON>] --limit=<n> --names [
 4. 用技能自己的 Python（Pillow）裁主图：左右白边各量各的、四宫格那一格的边放在两张图的接缝上（只在中间附近找，找不到用中间）、切掉底下的品牌字。
 5. 跑技能的 `make_cards_local.py <单子.json> --out-dir 手卡/ --no-pdf`（无头 Chromium，不碰你的 Chrome），每张要是 1600×1200；1x 图作为草稿的附件传回 Windows，草稿里的 `handcards_made` 是结论和给运营的说明（商品目录哪天同步的、每个待定、推断的、沿用的口径、怎么裁的图、截短了什么、真实库存没查）。
 6. 全有或全无：哪一款没数据（不在抖店目录、没有主图、没写卖点）、脚本出错、少一张、有一个传不上去，就一张都不附（结论列出要传的每一个，机器人连看着像手卡的文件也不附），草稿等人、写明原因，话也不能原样发。一个任务最多传回 9 个文件（草稿自己的附件也算）：放不下就整套不做，说明里写为什么。
-7. 双11 那一行过了 `until`（北京时间）以后，那天以前做的手卡草稿在 Windows 上发不出去（「手卡上的双11价已过期，请重新做手卡」），在合作单里再点一次「做手卡」。
+7. 双11 那一行过了 `until`（北京时间）以后，那天以前做的手卡草稿在 Windows 上不能原样发（「手卡上的双11价已过期，请重新做手卡」）：要手卡就「不发」、在合作单里再点一次「做手卡」；只回她一段话就「改了再发」，确认框写着「过期的手卡不会发出，只发这段话」，发出去的只有改过的话。批准时还没过、发送线程轮到它时已经过了的（23:50 批准、00:05 才发）也不发，草稿标成没发出去、写着同一句话。
+8. 「做手卡」时商品目录已经太旧（见上）：Mac 不跑 claude，合作单马上提醒「做手卡的草稿没写成：商品目录太旧（上次同步 <日期>），先同步再做手卡」。目录要常新，可以打开上面「同步商品目录」那一节说的 `products_sync_hours`。
+9. 短名太长时那一轮「再问一次」有自己的时限（2 分钟），整个任务剩下不到 3 分钟就不再问；那一轮超时、出错（比如超出预算）或者没给结果，用前一个完整的回答：这份草稿照样回来，只是不附手卡、写明短名放不下。模型给的 `handcards` 一款都没有（`products` 空）当作没要手卡。
 
 每次做手卡在 `~/.claude-relay/platform/handcards/<日期-时间>-job<编号>/` 留 7 天（worker 每个 prm 任务都清一次旧的）：`单子.json`、`产品图/`、`手卡/`（1x 图）、`run.log`；文件名和 worker 日志里没有她的称呼（压缩包叫「ACE7CN直播手卡.zip」）。卡上的待定要补的话，改这份 `单子.json` 以后照技能的说明 `make_cards_local.py … --only N` 重出，再在微信里手动发。
 

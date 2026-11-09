@@ -1218,6 +1218,7 @@ _PRM_PICTURES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg
 # GET /api/prm/file's ``kind``: which of a draft's file lists (``attachment``: what goes to her, the 直播手卡; the
 # operator-only pictures, ``operator``, are another branch's: until it is merged that kind finds nothing here).
 _PRM_FILE_KINDS = ("attachment",)
+_ASCII_NUMBER = re.compile(r"[0-9]{1,12}")
 
 
 def _prm_file(query: str):
@@ -1231,16 +1232,17 @@ def _prm_file(query: str):
     q = parse_qs(query)
     kind = (q.get("kind") or [""])[0]
     raw_packet, raw_n = (q.get("packet") or [""])[0], (q.get("n") or [""])[0]
-    if kind not in _PRM_FILE_KINDS or not raw_packet.isdigit() or not raw_n.isdigit():
-        return None
+    if kind not in _PRM_FILE_KINDS or not _ASCII_NUMBER.fullmatch(raw_packet) or not _ASCII_NUMBER.fullmatch(raw_n):
+        return None                                       # (str.isdigit would take 「²」 and 「١」)
     packet_id, n = int(raw_packet), int(raw_n)
-    store = _prm.store if _prm is not None else _prm_stopped_store()
+    running = _prm                                        # read once: the bot may start or stop meanwhile
+    store = running.store if running is not None else _prm_stopped_store()
     if store is None:
         return None
     try:
         packet = store.packet(packet_id)
     finally:
-        if _prm is None:
+        if running is None:
             store.close()
     files = (packet or {}).get("attachments") or []
     if not 0 <= n < len(files) or not isinstance(files[n], dict):

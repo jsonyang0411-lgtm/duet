@@ -35,12 +35,14 @@ from src.relay.store import RelayStore
 ROOT = Path(__file__).resolve().parents[1]
 CREATOR = "wxid_creator01"
 LINE = "老师，手卡整理好啦～"
-TOO_LONG = "第 1 款短名「复古西部巴拿马帽」超过 6 个字，卡上放不下（问过 Mac 也没改短）：再点一次「做手卡」"
+TOO_LONG = "第 1 款短名「复古西部巴拿马帽」超过 6 个字，卡上放不下（再问过一次也没改短）：再点一次「做手卡」"
+NOT_ASKED = "第 1 款短名「复古西部巴拿马帽」超过 6 个字，卡上放不下：再点一次「做手卡」"
 
 # One answer per turn of the conversation (the task, then what the worker asks again), the last one repeated; a null
-# answer is a turn that ends without the structured answer.
+# answer is a turn that ends without the structured answer, "SLOW" one that takes 30 s (then the first answer again),
+# "ERROR" one that ends over the budget (exit code 1).
 FAKE_CLAUDE = textwrap.dedent("""\
-    import json, os, sys
+    import json, os, sys, time
     args = sys.argv[1:]
     answers = json.load(open(os.environ["FAKE_CLAUDE_DRAFT"], encoding="utf-8"))
     turn = 0
@@ -55,6 +57,13 @@ FAKE_CLAUDE = textwrap.dedent("""\
             f.write(json.dumps({"args": args, "prompt": prompt, "turn": turn}, ensure_ascii=False) + "\\n")
         draft = answers[min(turn, len(answers) - 1)]
         turn += 1
+        if draft == "ERROR":
+            print(json.dumps({"type": "result", "subtype": "error_max_budget_usd", "is_error": True,
+                              "total_cost_usd": 0.5, "permission_denials": []}), flush=True)
+            sys.exit(1)
+        if draft == "SLOW":
+            time.sleep(30)
+            draft = answers[0]
         event = {"type": "result", "is_error": False, "total_cost_usd": 0.02, "permission_denials": []}
         if draft is None:
             event["result"] = "好的"
@@ -77,9 +86,9 @@ def fake_claude(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_DRAFT", str(answer))
 
     def turns(*changes):
-        """The answer of each turn: the base draft with these changes (None: no structured answer)."""
-        answer.write_text(json.dumps([None if c is None else {**BASE, **c} for c in changes], ensure_ascii=False),
-                          encoding="utf-8")
+        """The answer of each turn: the base draft with these changes (None: no structured answer; "SLOW", "ERROR")."""
+        answer.write_text(json.dumps([c if c is None or isinstance(c, str) else {**BASE, **c} for c in changes],
+                                     ensure_ascii=False), encoding="utf-8")
 
     turns({"handcards": {"call": "小美", "products": [product(photo_cell="左下"),
                                                       product(ITEM2, short="无檐小礼帽", cut_bottom=True)]}})
@@ -318,6 +327,176 @@ def test_a_job_full_of_files_says_so(worker, tmp_path, monkeypatch):  # noqa: F8
     assert verdict["ok"] is False and verdict["problems"] == ["这个任务的文件满了（一份草稿最多 9 个文件）"]
 
 
+def test_a_click_on_a_catalogue_too_old_fails_at_once(worker, bot, fake_claude, mac, tmp_path):  # noqa: F811
+    """(Round 2, item 2.)  「做手卡」 when the catalogue was synced 10 days ago: no model run, the deal says why."""
+    mac.set_up()
+    (mac.ws / "kb" / "products.json").write_text(json.dumps(catalog(time.time() - 10 * 86400), ensure_ascii=False),
+                                                 encoding="utf-8")
+    deal = bot.prm.store.deal_of(bot.prm.store.party_by_wxid(CREATOR)["id"])
+    assert bot.prm.deal_action("handcards", {"deal_id": deal["id"], "items": [ITEM]})["ok"]
+    run_one(worker, bot, settings(bot, fake_claude, tmp_path, prm_workspace=str(mac.ws)))
+    assert fake_claude.calls() == [] and mac.cards() == []
+    attention = bot.prm.store.deal(deal["id"])["attention"]
+    assert "做手卡的草稿没写成：商品目录太旧（上次同步 " in attention and "先同步再做手卡" in attention
+
+
+def test_a_request_that_names_no_product_is_no_request(worker, bot, fake_claude, mac, tmp_path, caplog):  # noqa: F811
+    """(Round 2, item 3: the verifier's probe.)  PRM_HANDCARDS on and the Mac set up (every WeChat draft job has the
+    field): a plain answer to 「你好」 whose model filled it with no product goes its usual way (here its kind's gate)."""
+    mac.set_up()
+    bot.prm.store.set_gate("greeting", "auto", time.time())
+    fake_claude.answers(message_kind="greeting", reply_draft="在的老师～", handcards={"products": []})
+    with caplog.at_level(logging.INFO, logger="claude_relay.worker"):
+        her_job(worker, bot, fake_claude, mac, tmp_path, text="你好")
+    [packet] = bot.prm.store.packets()
+    assert packet["status"] == "approved" and "handcards" not in packet["meta"] and mac.cards() == []
+    assert sum("names no product: left out" in r.getMessage() for r in caplog.records) == 1
+
+
+@pytest.mark.parametrize("second, why, logged", [
+    ("SLOW", "its own deadline", "(reask_timeout)"),        # the turn asked again past REASK_SEC
+    ("SLOW", "the job's deadline", "(timeout)"),            # ... past the job's prm_timeout_min
+    ("ERROR", "an exit code", "(exit 1)"),                  # ... over the budget: exit code 1
+])
+def test_a_turn_asked_again_that_ends_badly_keeps_the_answer_before_it(worker, bot, fake_claude, mac, tmp_path,  # noqa: F811
+                                                                       monkeypatch, caplog, second, why, logged):
+    """(Round 2, item 1: the verifier's probes.)  The first answer was a whole draft (its short name too long): the
+    job never fails over the turn asked again; the draft comes back without cards, saying why, and waits."""
+    mac.set_up()
+    monkeypatch.setattr(worker, "REASK_LEFT_SEC", 0)
+    monkeypatch.setattr(worker, "REASK_SEC", 60 if why == "the job's deadline" else 1.0)
+    fake_claude.turns({"handcards": {"call": "小美", "products": [product(short="复古西部巴拿马帽")]}}, second)
+    started = time.monotonic()
+    creator_says(bot, "老师手卡发我一下")
+    with caplog.at_level(logging.INFO, logger="claude_relay.worker"):
+        run_one(worker, bot, settings(bot, fake_claude, tmp_path, prm_workspace=str(mac.ws),
+                                      prm_timeout_min=0.05 if why == "the job's deadline" else 5))
+    assert time.monotonic() - started < 25 and len(fake_claude.calls()) == 2 and mac.cards() == []
+    assert any(f"the turn asked again did not end well {logged}" in r.getMessage() for r in caplog.records)
+    [packet] = bot.prm.store.packets()
+    assert (packet["status"], packet["text"], packet["attachments"]) == ("pending", LINE, [])
+    assert packet["needs_attention"] and packet["meta"]["handcards"]["problems"] == [TOO_LONG]
+
+
+def test_with_little_of_the_jobs_time_left_nothing_is_asked_again(worker, bot, fake_claude, mac, tmp_path,  # noqa: F811
+                                                                 monkeypatch):
+    """(Round 2, items 1 and 7.)  Not asked: the first answer stands, and the problem does not say it was asked."""
+    mac.set_up()
+    monkeypatch.setattr(worker, "REASK_LEFT_SEC", 10 ** 6)
+    fake_claude.turns({"handcards": {"call": "小美", "products": [product(short="复古西部巴拿马帽")]}})
+    her_job(worker, bot, fake_claude, mac, tmp_path)
+    assert len(fake_claude.calls()) == 1
+    [packet] = bot.prm.store.packets()
+    assert packet["meta"]["handcards"]["problems"] == [NOT_ASKED] and packet["attachments"] == []
+
+
+class _Input:
+    def __init__(self):
+        self.lines, self.closed = [], False
+
+    def write(self, text):
+        self.lines.append(json.loads(text)["message"]["content"])
+
+    def flush(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+def test_the_re_ask_is_made_on_whichever_turn_first_needs_it_and_only_once(worker):  # noqa: F811
+    """(Round 2, item 7.)  A later turn's answer (after her follow-up), the end of background commands: each looked
+    at until the model was asked once; never again after."""
+    fine = json.dumps({"type": "result", "structured_output": {"handcards": {"products": [{"short": "小礼帽"}]}}})
+    long = json.dumps({"type": "result", "structured_output": {"handcards": {"products": [{"short": "复古西部巴拿马帽"}]}}})
+    asked = worker.HANDCARDS_SHORTER.format(names="「复古西部巴拿马帽」")
+    rows = [[{"id": 1, "text": "老师还有别的颜色吗"}], [], []]
+    stdin = _Input()
+    talk = worker.Conversation(SimpleNamespace(stdin=stdin), SimpleNamespace(close_input=lambda job, upto: rows.pop(0)),
+                               7, review=worker.handcards_review)
+    talk.ends_at = time.monotonic() + 600
+    talk.see(fine)                                            # fine: her follow-up goes in, nothing asked
+    assert not talk.reasked and not stdin.closed and len(stdin.lines) == 1
+    talk.see(long)                                            # the turn after it: asked
+    assert talk.reasked and stdin.lines[-1] == asked and talk.reask_by is not None
+    talk.see(long)                                            # still too long: not asked again, the input ends
+    assert stdin.closed and stdin.lines.count(asked) == 1 and talk.reask_by is None
+    stdin = _Input()
+    talk = worker.Conversation(SimpleNamespace(stdin=stdin), SimpleNamespace(close_input=lambda job, upto: []), 8,
+                               review=worker.handcards_review)
+    talk.see(json.dumps({"type": "system", "subtype": "background_tasks_changed", "tasks": [{"id": "b1"}]}))
+    talk.see(long)                                            # a turn that ends while a command runs: input stays open
+    assert not talk.reasked and not stdin.closed
+    talk.background = 0
+    talk._wrap_up_if_idle()                                   # (the timer's call once they are done)
+    assert talk.reasked and stdin.lines == [asked] and not stdin.closed
+
+
+def test_the_catalogue_syncs_itself_at_night_when_set(worker, tmp_path, monkeypatch, caplog):  # noqa: F811
+    """(Round 2, item 2.)  config.json ``products_sync_hours`` (0, the default: never): ``--sync-products`` by itself,
+    in a process of its own, from 00:00 to 07:00 on this Mac's clock, when the catalogue file (written by a sync by
+    hand too) and the last scheduled run are that old; one log line when it ends; one that hangs is stopped."""
+    ws = tmp_path / "biz"
+    for sub_dir in ("kb", "assets/products", "deals"):
+        (ws / sub_dir).mkdir(parents=True)
+    night, noon = (time.mktime((2026, 11, 10, h, 30, 0, 0, 0, -1)) for h in (1, 12))
+
+    def write(at):                                            # (a sync's catalogue, written at ``at``)
+        path = ws / "kb" / "products.json"
+        path.write_text(json.dumps(catalog(at), ensure_ascii=False), encoding="utf-8")
+        os.utime(path, (at, at))
+
+    write(night - 30 * 3600)
+    started = []
+
+    class Proc:
+        pid, code = 4242, None
+
+        def poll(self):
+            return self.code
+
+        def kill(self):
+            self.code = -9
+
+        def wait(self):
+            return self.code
+
+    def popen(argv, **kw):
+        started.append((argv, kw))
+        return Proc()
+
+    monkeypatch.setattr(worker.os, "killpg", lambda pid, sig: (_ for _ in ()).throw(OSError("no group")))
+    s = {"prm_workspace": str(ws), "products_sync_hours": 24, "config_path": str(tmp_path / "config.json")}
+    tick = lambda at, kinds=("prm",), **more: worker.products_sync_tick({**s, **more}, kinds, now=at, popen=popen)  # noqa: E731
+    assert tick(noon) == "" and tick(night, products_sync_hours=0) == "" and tick(night, kinds=("admin",)) == ""
+    assert tick(night) == "started"
+    [(argv, kw)] = started
+    assert argv[0] == sys.executable and argv[1].endswith("tools/claude_relay/worker.py")
+    assert argv[2:] == ["--config", str(tmp_path / "config.json"), "--sync-products"] and kw["start_new_session"]
+    assert tick(night + 60) == "running" and len(started) == 1
+    worker._products_sync["proc"].code = 0
+    with caplog.at_level(logging.INFO, logger="claude_relay.worker"):
+        assert tick(night + 300) == "ended"
+    [line] = [r.getMessage() for r in caplog.records if "products:" in r.getMessage()]
+    assert "the scheduled --sync-products done in 300 s" in line
+    assert tick(night + 600) == ""                            # (the last run is younger than 24 h)
+    write(night + 3 * 3600)
+    assert tick(night + 30 * 3600) == ""                      # (a sync by hand 2 h before: young enough)
+    assert tick(night + 50 * 3600) == "started"
+    assert tick(night + 50 * 3600 + worker.PRODUCTS_SYNC_MAX_SEC + 1) == "ended"
+    assert worker._products_sync["proc"] is None
+
+
+def test_the_worker_looks_for_the_night_sync_only_when_idle(worker, monkeypatch):  # noqa: F811
+    stopper = worker.Stopper()
+    looked = []
+    monkeypatch.setattr(worker, "products_sync_tick", lambda settings, kinds: looked.append(kinds) or stopper.event.set())
+    client = SimpleNamespace(next_job=lambda **kw: None, bot_kinds=lambda: ("admin", "prm"), base_url="http://bot")
+    monkeypatch.setattr(worker, "flush_outbox", lambda client, stopper: None)
+    worker.serve({"relay_url": "http://bot", "prm_workspace": ""}, client, stopper, kinds=("admin",))
+    assert looked == [("admin",)]
+
+
 def test_old_card_folders_go_with_every_prm_job(worker, monkeypatch):  # noqa: F811
     """(Review 2026-11-09, item 12.)  On the worker's own schedule: every prm job, the hourly sample-status rounds
     too, before anything else."""
@@ -374,15 +553,13 @@ def test_the_lines_and_a_prompt_without_them(worker):  # noqa: F811
 
 
 def test_what_is_asked_again_and_which_answer_stands(worker):  # noqa: F811
-    asked = []
     long = {"structured_output": {"handcards": {"products": [{"short": "复古西部巴拿马帽"}, {"short": "小礼帽"}]}}}
-    assert worker.handcards_review(long, asked) == worker.HANDCARDS_SHORTER.format(names="「复古西部巴拿马帽」")
-    assert asked == [1]
+    assert worker.handcards_review(long) == worker.HANDCARDS_SHORTER.format(names="「复古西部巴拿马帽」")
     as_text = {"result": json.dumps({"handcards": {"products": [{"short": "pillbox小礼帽"}]}}, ensure_ascii=False)}
-    assert "「pillbox小礼帽」" in worker.handcards_review(as_text, asked)
+    assert "「pillbox小礼帽」" in worker.handcards_review(as_text)
     for fine in ({"structured_output": {"handcards": {"products": [{"short": "小礼帽"}]}}}, {"result": "好的"},
                  {"structured_output": {}}, None, {"result": "[1]"}):
-        assert worker.handcards_review(fine, []) == ""
+        assert worker.handcards_review(fine) == ""
     first = {"type": "result", "structured_output": {"reply_draft": "a"}}
     lines = [json.dumps(first), "x", json.dumps({"type": "assistant"}), json.dumps({"type": "result", "result": "好的"})]
     assert worker.structured_events("\n".join(lines)) == [first]
@@ -414,9 +591,10 @@ def test_the_handcards_lines_work_on_the_macs_own_python(tmp_path):
         "line = w.handcards_line(job['meta'], h.describe_asked([{'item_id': '1', 'sku_ids': []}], {}))\n"
         "p = w.prm_prompt(job, 1, 'x', 'deals/1.md', [], [], card_rule=rule, card_ask=line)\n"
         "assert rule in p and line in p and '<creator_message>' not in p\n"
-        "asked = []\n"
-        "assert w.handcards_review({'structured_output': {'handcards': {'products': [{'short': 'x' * 13}]}}}, asked)\n"
-        "assert asked == [1] and len(w.structured_events(json.dumps({'type': 'result', 'result': '{}'}))) == 1\n"
+        "assert w.handcards_review({'structured_output': {'handcards': {'products': [{'short': 'x' * 13}]}}})\n"
+        "assert len(w.structured_events(json.dumps({'type': 'result', 'result': '{}'}))) == 1\n"
+        "assert not h.has_products({'products': []}) and w.DEFAULTS['products_sync_hours'] == 0\n"
+        "assert w.products_sync_tick({'products_sync_hours': 0}, ('prm',)) == ''\n"
         f"ws = {str(ws)!r}\n"
         "req = {'products': [{'item_id': " + repr(ITEM) + ", 'short': 'abc', 'brand_line': 'b', 'audience': 'a',"
         " 'sells': [{'head': 'h', 'rest': 'r'}], 'photo_cell': '\\u5de6\\u4e0b'}]}\n"
