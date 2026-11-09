@@ -590,15 +590,25 @@ def test_the_console_shows_the_sheet_and_serves_it_while_the_bot_runs_and_after(
         status, head, body = fetch(url)
         assert (status, head["content-type"], body) == (200, "image/jpeg", SHEET)
         assert head["content-length"] == str(len(SHEET)) and head["cache-control"] == "no-store"
+        assert head["x-content-type-options"] == "nosniff"          # (review 2026-11-10: never sniffed as anything else)
     finally:
         server.register_prm(None)
-    # the bot stopped: read from its database, closed again after the request
+    # the bot stopped: read from its database, closed again after the request; only from inside the relay's folder as a
+    # stopped bot finds it (next to CLAUDE_RELAY_DB: review 2026-11-10), the running relay's folder being another
+    stopped_root = tmp_path / "stopped"
+    monkeypatch.setenv("CLAUDE_RELAY_DB", str(stopped_root / "claude_relay.db"))
+    kept = stopped_root / "claude_relay_files" / "outfiles" / f"job-{job['id']}" / f"对图单-{job['id']}.jpg"
+    kept.parent.mkdir(parents=True)
+    kept.write_bytes(SHEET)
     db = tmp_path / "prm.db"
     stored = PrmStore(db)
     stored.add_party(CREATOR, "小美", now=1)
     pid = stored.add_packet(deal_id=1, party_id=1, job_id=job["id"], chat_id=CREATOR, kind="faq", text="好的",
                             attachments=[], intent="", slots={}, stage_proposal="", needs_attention=False, reason="",
-                            meta={"operator_files": packet["meta"]["operator_files"]}, now=1)
+                            meta={"operator_files": [{**packet["meta"]["operator_files"][0], "path": str(kept)}]}, now=1)
+    elsewhere = stored.add_packet(deal_id=1, party_id=1, job_id=job["id"], chat_id=CREATOR, kind="faq", text="好的",
+                                  attachments=[], intent="", slots={}, stage_proposal="", needs_attention=False,
+                                  reason="", meta={"operator_files": packet["meta"]["operator_files"]}, now=1)
     stored.close()
     monkeypatch.setenv("PRM_DB", str(db))
     opened, closed = server._prm_stopped_store, []
@@ -612,6 +622,8 @@ def test_the_console_shows_the_sheet_and_serves_it_while_the_bot_runs_and_after(
     monkeypatch.setattr(server, "_prm_stopped_store", stopped)
     status, head, body = fetch(f"/api/prm/file?packet={pid}&kind=operator&n=0")
     assert (status, head["content-type"], body) == (200, "image/jpeg", SHEET) and closed == [True]
+    assert head["x-content-type-options"] == "nosniff"
+    assert fetch(f"/api/prm/file?packet={elsewhere}&kind=operator&n=0")[0] == 404     # (not in the folder it reads)
 
 
 def test_the_file_endpoint_keeps_to_its_contract(bot):
@@ -668,25 +680,38 @@ def fetch(path, method="GET", origin=None, headers=None):
 
 
 def test_only_a_picture_the_relay_keeps_for_a_job_is_served(tmp_path):
-    folder = tmp_path / "relay" / "outfiles" / "job-4"
+    """Of either kind only a picture inside the relay's folder (``root``, links followed: review 2026-11-10, as the WeChat
+    notification's pictures); no folder given, none; an operator file only from ``outfiles/job-<id>/``."""
+    root = tmp_path / "relay"
+    folder = root / "outfiles" / "job-4"
     folder.mkdir(parents=True)
     for name in ("a.jpg", "a.txt"):
         (folder / name).write_bytes(b"x")
-    (tmp_path / "b.jpg").write_bytes(b"x")
+    (tmp_path / "b.jpg").write_bytes(b"x")                          # (outside the relay's folder)
+    (root / "c.jpg").write_bytes(b"x")                              # (the relay's, but no job's)
+    (folder / "link.jpg").symlink_to(tmp_path / "b.jpg")            # (inside, pointing out)
 
     def packet(path):
         return {"id": 1, "meta": {"operator_files": [{"name": "f", "path": str(path), "why": ""}]}}
 
-    assert draft_context.operator_file(packet(folder / "a.jpg"), 0) == (folder / "a.jpg", "image/jpeg")
-    for path in (folder / "a.txt", tmp_path / "b.jpg", folder / "gone.jpg", ""):
-        assert draft_context.operator_file(packet(path), 0) is None, path
-    assert draft_context.operator_file({"id": 1, "meta": {"operator_files": "junk"}}, 0) is None
+    assert draft_context.operator_file(packet(folder / "a.jpg"), 0, root) == ((folder / "a.jpg").resolve(), "image/jpeg")
+    assert draft_context.operator_file(packet(folder / "a.jpg"), 0) is None                    # (no folder: nothing)
+    for path in (folder / "a.txt", tmp_path / "b.jpg", folder / "gone.jpg", "", folder / "link.jpg", root / "c.jpg",
+                 folder / ".." / ".." / ".." / "b.jpg"):
+        assert draft_context.operator_file(packet(path), 0, root) is None, path
+    assert draft_context.operator_file({"id": 1, "meta": {"operator_files": "junk"}}, 0, root) is None
     assert draft_context.operator_files_out(packet(folder / "gone.jpg"))[0]["kept"] is False
-    assert draft_context.picture(packet(folder / "a.jpg"), "attachment", 0) is None       # (not one of its attachments)
-    assert draft_context.picture(packet(folder / "a.jpg"), "operator", -1) is None
-    card = {"id": 2, "attachments": ["junk", {"name": "b.jpg", "path": str(tmp_path / "b.jpg")}]}
-    assert draft_context.picture(card, "attachment", 1) == (tmp_path / "b.jpg", "image/jpeg")   # (n as the console counts)
-    assert draft_context.picture(card, "attachment", 0) is None and draft_context.picture(card, "operator", 1) is None
+    assert draft_context.picture(packet(folder / "a.jpg"), "attachment", 0, root) is None   # (not one of its attachments)
+    assert draft_context.picture(packet(folder / "a.jpg"), "operator", -1, root) is None
+    card = {"id": 2, "attachments": ["junk", {"name": "a.jpg", "path": str(folder / "a.jpg")},
+                                     {"name": "b.jpg", "path": str(tmp_path / "b.jpg")},
+                                     {"name": "link.jpg", "path": str(folder / "link.jpg")}]}
+    assert draft_context.picture(card, "attachment", 1, root) == ((folder / "a.jpg").resolve(), "image/jpeg")
+    assert draft_context.picture(card, "attachment", 1) is None                                # (no folder: nothing)
+    for n in (2, 3):                                                 # outside the relay's folder, or a link out of it
+        assert draft_context.picture(card, "attachment", n, root) is None, n
+    assert draft_context.picture(card, "attachment", 0, root) is None
+    assert draft_context.picture(card, "operator", 1, root) is None
 
 
 def test_a_new_previews_sheet_replaces_the_drafts_and_the_old_one_is_deleted(bot):

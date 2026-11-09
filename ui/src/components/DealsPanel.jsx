@@ -312,7 +312,7 @@ function DealDetail({ p, d, onDone }) {
         </div>
       </div>
 
-      <DraftNoteBlock p={p} onDone={onDone} />
+      <DraftNoteBlock p={p} onDone={onDone} photoCheck={!!d?.draft_context} />
 
       {(!deal.last_message_at || deal.unanswered) && (
         <div className="stack prm-opening" style={{ gap: 6 }}>
@@ -436,8 +436,10 @@ function DealDetail({ p, d, onDone }) {
 
 /** 起草备注 (the deal action draft_note, 2026-10-31): what the operators tell the Mac about this creator, say her WeChat
  *  signature's 「直接发链接和 brief、不接语音」. Every draft of hers follows it, the 开场白 too; unlike her 备注 (which the
- *  bot writes for a friend it registered) only an operator writes it. Saved empty, it is cleared; an error stays here. */
-function DraftNoteBlock({ p, onDone }) {
+ *  bot writes for a friend it registered) only an operator writes it. Saved empty, it is cleared; an error stays here.
+ *  ``photoCheck`` (PRM_DRAFT_CONTEXT on, ``draft_context`` of GET /api/prm): the hint that a held hat is confirmed with
+ *  「对过图了」 on its draft, never in the note. */
+function DraftNoteBlock({ p, onDone, photoCheck }) {
   const toast = useToast()
   const saved = p.deal.draft_note || ''
   const [editing, setEditing] = useState(false)
@@ -462,7 +464,8 @@ function DraftNoteBlock({ p, onDone }) {
   return (
     <div className="stack prm-draft-note" style={{ gap: 6 }}>
       <b>起草备注</b>
-      <span className="f-hint prm-confirm-hint">{CONFIRM_HINT}</span>
+      {/* PRM_DRAFT_CONTEXT only (review C-8): with the switch off no sample order holds a hat for photos */}
+      {photoCheck && <span className="f-hint prm-confirm-hint">{CONFIRM_HINT}</span>}
       {editing ? (
         <>
           <Field hint={`${hint}。空着保存就是清掉。`} error={error}>

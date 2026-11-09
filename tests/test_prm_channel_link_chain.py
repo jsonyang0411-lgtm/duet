@@ -12,7 +12,7 @@ import json
 import pytest
 
 from test_prm import draft
-from test_prm_platform_flow import (CHANNEL, DESIGNATED, THREE, TWO, approve, block, bot, clock,  # noqa: F401
+from test_prm_platform_flow import (CHANNEL, DESIGNATED, THREE, TWO, approve, approve_again, block, bot, clock,  # noqa: F401
                                     drafted, mac_runs, record, system_jobs)
 
 from platform_fakes import DY_ITEM, DY_ITEM2, DY_ITEM3, DY_LINK, DY_SKU, DY_SKU2, DY_UID, JST_ORDER
@@ -513,7 +513,8 @@ def test_a_step_of_the_chain_binds_its_orders_uid_whatever_her_newest_order_says
     assert job["meta"]["step"]["uid"] == DY_UID and link["meta"]["chain_uid"] == DY_UID and not link["needs_attention"]
     other = "5100000000000999"
     order2 = drafted(bot, preview=block({**TWO, "creator_uid": other}, run={"steps": ["create"]}), reply="另一个号的寄样单建好啦")
-    mac_runs(bot, approve(bot, order2), record(sample_order_no="YP20261109999", creator_uid=other))
+    # (a second order of the deal: asked about once, a person says so)
+    mac_runs(bot, approve_again(bot, order2), record(sample_order_no="YP20261109999", creator_uid=other))
     bot.prm.send_approved()
     opens(bot, link, record(link=DY_LINK, channel_id="7200000000000001"))   # the chain's own UID: it goes
     _, commission2 = step(bot, {**DESIGNATED, "item_id": DY_ITEM2})

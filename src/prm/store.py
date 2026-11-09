@@ -934,13 +934,24 @@ class PrmStore:
     def platform_failures(self, limit: int = 50) -> list[dict]:
         """Packets with a platform action that ended ``failed`` (the platform write was not
         verified, or the reply did not go out), newest first: the console marks them red
-        until an operator says they are dealt with (``platform.acked_at``).  A 百应 draft is no platform action."""
+        until an operator says they are dealt with (``platform.acked_at``).  A 百应 draft is no platform action.  Also a
+        sample order that is not red but was asked about for a second one of the deal (``platform.recheck`` with no
+        ``acked_at`` of its own: PrmService._second_order), until its 「我已处理」."""
+        live = (PENDING, EXECUTING, APPROVED, SENDING, SENT)
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM action_packets WHERE tool NOT IN (?, ?) AND status = ? ORDER BY id DESC LIMIT ?",
-                (MESSAGE_TOOL, BUYIN_TOOL, FAILED, int(limit)),
+                "SELECT * FROM action_packets WHERE tool NOT IN (?, ?) AND (status = ? OR"
+                f" (status IN ({', '.join('?' * len(live))}) AND platform LIKE ?)) ORDER BY id DESC LIMIT ?",
+                (MESSAGE_TOOL, BUYIN_TOOL, FAILED, *live, '%"recheck"%', int(limit)),
             ).fetchall()
-        return [p for p in (packet_view(dict(r)) for r in rows) if not p["platform"].get("acked_at")]
+        out = []
+        for packet in (packet_view(dict(r)) for r in rows):
+            recheck = packet["platform"].get("recheck") or {}
+            if packet["status"] == FAILED and not packet["platform"].get("acked_at"):
+                out.append(packet)
+            elif packet["status"] != FAILED and recheck and not recheck.get("acked_at"):
+                out.append(packet)
+        return out
 
     def deal_packets(self, deal_id: int, tools: tuple = (), statuses: tuple = (),
                      since: Optional[float] = None) -> list[dict]:
@@ -1067,18 +1078,25 @@ class PrmStore:
             return cur.rowcount == 1
 
     def set_platform(self, packet_id: int, platform: dict, statuses: tuple, *,
-                     expect: Optional[Callable[[dict], bool]] = None) -> bool:
+                     expect: Optional[Callable[[dict], bool]] = None, meta: Optional[dict] = None) -> bool:
         """Replace the platform JSON of a packet that is in one of ``statuses`` (and, with
-        ``expect``, whose platform JSON now passes it): one step under the lock."""
+        ``expect``, whose platform JSON now passes it): one step under the lock.  ``meta``: merged into its meta in
+        the same step (a new preview of a sample order and its photo marks: never the one without the other, review
+        2026-11-10 A-L3)."""
         with self._lock:
             row = self._conn.execute(
-                f"SELECT platform FROM action_packets WHERE id = ? AND status IN ({', '.join('?' * len(statuses))})",
+                f"SELECT platform, meta FROM action_packets WHERE id = ? AND status IN ({', '.join('?' * len(statuses))})",
                 (packet_id, *statuses),
             ).fetchone()
             if row is None or (expect is not None and not expect(_loads(row["platform"], {}))):
                 return False
-            self._conn.execute("UPDATE action_packets SET platform = ? WHERE id = ?",
-                               (json.dumps(platform or {}, ensure_ascii=False), packet_id))
+            if meta is None:
+                self._conn.execute("UPDATE action_packets SET platform = ? WHERE id = ?",
+                                   (json.dumps(platform or {}, ensure_ascii=False), packet_id))
+            else:
+                self._conn.execute("UPDATE action_packets SET platform = ?, meta = ? WHERE id = ?",
+                                   (json.dumps(platform or {}, ensure_ascii=False),
+                                    json.dumps({**_loads(row["meta"], {}), **meta}, ensure_ascii=False), packet_id))
             self._conn.commit()
             return True
 
@@ -1154,6 +1172,16 @@ class PrmStore:
                                (json.dumps({**current, **(meta or {})}, ensure_ascii=False), packet_id))
             self._conn.commit()
             return True
+
+    def card_packets(self, statuses: tuple) -> list[dict]:
+        """Packets in one of ``statuses`` whose attachments name a 直播手卡 file (「手卡_01_….png」, the skill's
+        「…直播手卡.zip」: ``attachments`` holds 手卡; the caller checks each name), oldest first
+        (PrmService.sweep_cards)."""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM action_packets WHERE status IN ({', '.join('?' * len(statuses))}) AND attachments LIKE ?"
+                " ORDER BY id", (*statuses, "%手卡%")).fetchall()
+        return [packet_view(dict(r)) for r in rows]
 
     def operator_file_packets(self) -> list[dict]:
         """Packets that still keep an operator file (``meta.operator_files`` with a path: src/prm/draft_context.py
@@ -2097,6 +2125,23 @@ class PrmStore:
                 if row["name"] or new != (row["members"], row["lines"]):
                     self._conn.execute("UPDATE boss_groups SET name = '', members = ?, lines = ?, updated_at = ?"
                                        " WHERE chat = ?", (*new, now, row["chat"]))
+                    changed += 1
+            self._conn.commit()
+        return changed
+
+    def edit_event_details(self, deal_id: int, kind: str, edit: Callable[[dict], dict]) -> int:
+        """Change the details of a deal's events of ``kind`` (8.2: the 专属链接 steps' prefix and UID, ``next_step``):
+        ``edit(detail)`` gives the new ones (equal ones: unchanged).  Returns how many changed."""
+        changed = 0
+        with self._lock:
+            rows = self._conn.execute("SELECT id, detail FROM deal_events WHERE deal_id = ? AND kind = ?",
+                                      (int(deal_id), str(kind))).fetchall()
+            for row in rows:
+                detail = _loads(row["detail"], {})
+                new = edit(dict(detail))
+                if new != detail:
+                    self._conn.execute("UPDATE deal_events SET detail = ? WHERE id = ?",
+                                       (json.dumps(new, ensure_ascii=False), row["id"]))
                     changed += 1
             self._conn.commit()
         return changed

@@ -817,6 +817,21 @@ class BossGroupsConfigTests(unittest.TestCase):
                 _validate_config({key: value})
             self.assertIn(name, str(ctx.exception))
 
+    def test_linked_groups_auto_is_off_by_default_and_only_off_or_on(self):
+        """PRM_LINKED_GROUPS_AUTO (接手任何合作群, decision 2026-11-10): off by default (a group linked by hand: its drafts
+        always wait for a person), the usual yes / no spellings, anything else refused."""
+        from src.config import BotConfig, _validate_config, load_config
+
+        self.assertEqual(BotConfig().prm_linked_groups_auto, "off")
+        for env, want in (({}, "off"), ({"PRM_LINKED_GROUPS_AUTO": "on"}, "on"), ({"PRM_LINKED_GROUPS_AUTO": "yes"}, "on"),
+                          ({"PRM_LINKED_GROUPS_AUTO": "0"}, "off")):
+            with patch.dict(os.environ, env, clear=True):
+                self.assertEqual(load_config().prm_linked_groups_auto, want, env)
+        _validate_config({"prm_linked_groups_auto": "on"})
+        with self.assertRaises(RuntimeError) as ctx:
+            _validate_config({"prm_linked_groups_auto": "maybe"})
+        self.assertIn("PRM_LINKED_GROUPS_AUTO must be off or on", str(ctx.exception))
+
     def test_what_the_mac_is_told_the_boss_is_called(self):
         """PRM_BOSS_CALL (review 2026-10-31): the bosses' names (PRM_GROUP_WITH) never leave this PC; a group job calls
         him this.  「老板」 by default and when empty, white space collapsed, 1 to 10 characters."""

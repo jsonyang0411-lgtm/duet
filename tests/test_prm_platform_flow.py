@@ -83,6 +83,18 @@ def approve(b, packet, text=None):
     return b.relay.store.get(out["job"])
 
 
+def approve_again(b, packet):
+    """批准并执行 a second sample order of the deal: refused once (review 2026-11-10 A-L5: another ran or was verified
+    lately), approved once 「我已处理」 is said on the ones the refusal named (a 补寄, as a person would)."""
+    out = b.prm.decide(packet["id"], "execute")
+    if not out["ok"] and out["error"].startswith("这位达人"):
+        for alert in b.prm.snapshot()["platform_alerts"]:
+            assert b.prm.decide(alert["id"], "ack")["ok"]
+        out = b.prm.decide(packet["id"], "execute")
+    assert out["ok"], out
+    return b.relay.store.get(out["job"])
+
+
 def mac_runs(b, job_row, rec=None, ok=True, error=""):
     """The worker takes the execution job and answers."""
     job = b.relay.next_job(0, ("prm",))

@@ -1232,13 +1232,18 @@ class WechatReview:
         a preview the Mac did not check by photo (``unchecked``: an older worker's, one made while the switch was off)
         or one that let a hat go by a 「对过图了」 taken back since (``withdrawn``; ``PrmService._approve_execute``
         refuses these two whatever the notification said)."""
-        if not self._draft_context or packet.get("tool") != "jst.sample_order" or packet.get("status") != PENDING:
+        if packet.get("tool") != "jst.sample_order" or packet.get("status") != PENDING:
             return ""
         try:
             confirmed = {str(r["code"]): r["at"] for r in self._store.photo_confirmations(int(packet["deal_id"]))}
         except Exception:
             logger.exception("PRM: the photo confirmations of draft %d could not be read", packet["id"])
             confirmed = {}
+        if not self._draft_context:
+            # the switch off: only a hat its last preview held that nobody confirmed (``_approve_execute`` refuses it
+            # all the same, review 2026-11-10 A-L4; 合并 fix1110-s)
+            held = draft_context.held_unconfirmed(packet, confirmed)
+            return f"{draft_context.held_reason(held)}；微信里不能执行；不要的话回 2" if held else ""
         held = [h["code"] for h in draft_context.held_out(packet, confirmed) if h["held"]]
         waiting = [code for code in held if code not in confirmed]
         if waiting:

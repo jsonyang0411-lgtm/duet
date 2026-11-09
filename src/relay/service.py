@@ -132,6 +132,15 @@ def job_meta(job: dict) -> dict:
     return meta if isinstance(meta, dict) else {}
 
 
+def default_files_dir(db: str) -> Path:
+    """Where a relay of this CLAUDE_RELAY_DB keeps its files when it is given no folder (``ClaudeRelay.files_dir``): next
+    to the database (``claude_relay_files``), or a temp folder for an in-memory one.  The console reads a draft's
+    pictures from inside it while the bot is stopped too (src/web/server.py ``_relay_files_root``)."""
+    db = str(db or ":memory:")
+    return (Path(tempfile.gettempdir()) / "webot-relay-files" if db == ":memory:"
+            else (Path(db).parent / "claude_relay_files").resolve())
+
+
 class ClaudeRelay:
     def __init__(self, config, *, store: Optional[RelayStore] = None,
                  send: Optional[Callable[[str, str], bool]] = None,
@@ -146,9 +155,7 @@ class ClaudeRelay:
         # Long results as a file: needs a backend that can send files (Windows).
         self._send_file = send_file if getattr(config, "claude_relay_long_file", "on") == "on" else None
         db = str(getattr(config, "claude_relay_db", ":memory:"))
-        self._files_dir = Path(files_dir) if files_dir is not None else (
-            Path(tempfile.gettempdir()) / "webot-relay-files" if db == ":memory:"
-            else (Path(db).parent / "claude_relay_files").resolve())
+        self._files_dir = Path(files_dir) if files_dir is not None else default_files_dir(db)
         self._file_sent: set[int] = set()       # jobs whose result file is in the chat already
         self._held: dict[str, list[Held]] = {}  # pictures and files waiting for the next task
         self._held_lock = threading.Lock()

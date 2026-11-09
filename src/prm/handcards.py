@@ -203,6 +203,27 @@ def is_card_file(name) -> bool:
     return bool(_CARD_FILE.match(name) or _ZIP_FILE.search(name))
 
 
+FILES_KEEP_DAYS = 30             # the bot's side: a card file or zip in the relay's outfiles goes after this (the relay's
+                                 # KEEP_FILES_DAYS)
+
+
+def sweep_files(files_dir, now: Optional[float] = None, days: int = FILES_KEEP_DAYS) -> int:
+    """The bot's side (review 2026-11-10 B-L3): every card file and zip (``is_card_file``) in the relay's
+    ``outfiles/job-*/`` older than ``days`` by its own time deleted, sent or not (her 称呼 is printed on a card:
+    「<称呼>专属」).  Returns how many went; one that cannot be deleted now is left for the next round."""
+    now = time.time() if now is None else now
+    cutoff = now - days * 86400
+    gone = 0
+    for path in Path(files_dir).glob("outfiles/job-*/*"):
+        try:
+            if is_card_file(path.name) and path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink()
+                gone += 1
+        except OSError:
+            pass
+    return gone
+
+
 def keep_cards(made: dict, attachments: list) -> tuple:
     """All or nothing (the bot's side): ``(attachments, made)``.  A good verdict whose every card arrived keeps them;
     otherwise none of the cards goes, nor any file that looks like one (``is_card_file``: a card whose upload the Mac

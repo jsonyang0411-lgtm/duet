@@ -2284,7 +2284,9 @@ def test_the_line_that_tells_an_executions_end_shows_her_ids_by_their_last_chara
     """Third verification item 9 (probe i9d): the line that told a PARTIAL end quoted its first problem raw, her UID in
     full; and a red draft's error quoted when it is answered again."""
     her_uid_known(desk)                                                 # (its 要注意 shown whole: her_uid_known)
-    packet = platform_waiting(desk, block({**CHANNEL, "stock_per_sku": 50, "exclusive": True}), text="专属链接给你啦：{链接}")
+    # (the shop's way, 100 a colour: 合并 fix1110-s, a 专属链接 off it asks for attention, convention_text)
+    packet = platform_waiting(desk, block({**CHANNEL, "stock_per_sku": platforms.CHANNEL_STOCK_PER_SKU, "exclusive": True}),
+                              text="专属链接给你啦：{链接}")
     number = packet["id"]
     desk.admin("执行", quote=head(desk, number))
     rec = platforms.record("PARTIAL", [f"渠道品 7200000000000001 建好了，但绑定达人的预览没通过，没有绑定：达人 {DY_UID} 绑定被拒：测试"])
@@ -2866,6 +2868,26 @@ def test_a_sample_order_whose_confirmation_was_taken_back_is_not_run_from_wechat
         desk.stop()
 
 
+def test_a_held_hat_nobody_confirmed_is_never_offered_执行_the_switch_off_too(clock, tmp_path):
+    """合并 fix1110-s (2026-11-10): a sample order whose last preview held a hat nobody confirmed is never approved, the
+    switch on or off (``_approve_execute``, review A-L4), even when its preview says ready: its notification offers no
+    「执行」 then either, and says why."""
+    desk = Desk(clock, tmp_path)                                        # (PRM_DRAFT_CONTEXT off)
+    desk.prm.register(CREATOR, "小美", "测试达人")
+    try:
+        packet = checked_waiting(desk, held=(CODE,), verdict="ready")
+        number = packet["id"]
+        why = f"{CODE} 还扣着（没对过图），不能执行：{draft_context.CONFIRM_HOW}，再点「重新预览」"
+        stop = f"{why}；微信里不能执行；不要的话回 2"
+        assert notice_of(desk, number)[-1] == stop
+        assert desk.prm.store.wechat_review(number)["preview"] in ("", None)
+        assert desk.admin("执行", quote=head(desk, number)) == f"#{number} {stop}"
+        assert desk.executions() == []
+        assert shown(desk, number)["wechat_execute"] is False
+    finally:
+        desk.stop()
+
+
 def test_a_sample_order_the_mac_did_not_check_by_photo_is_never_offered_执行(clock, tmp_path):
     """An older Mac worker's sample order (no mark: the bot holds it, ``ungated``): its notification says what the
     console says and offers no 「执行」."""
@@ -3301,7 +3323,8 @@ def test_a_recall_that_makes_a_platform_drafts_要注意_too_long_takes_执行_b
     """The first notice let 「执行」 run (its 要注意 short); her recall puts its note first: the fresh notice cuts it, so
     「执行」 is the console's, quoting either notice."""
     her_uid_known(desk)
-    packet = platform_waiting(desk, block({**CHANNEL, "stock_per_sku": 50, "exclusive": True}),
+    # (the shop's way, 100 a colour: 合并 fix1110-s, a 专属链接 off it asks for attention, convention_text)
+    packet = platform_waiting(desk, block({**CHANNEL, "stock_per_sku": platforms.CHANNEL_STOCK_PER_SKU, "exclusive": True}),
                               text="专属链接给你啦：{链接}")
     number = packet["id"]
     assert desk.prm.store.wechat_review(number)["preview"]

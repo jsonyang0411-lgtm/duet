@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from test_prm import CREATOR, Bot, Clock, config
-from test_prm_platform_flow import approve, mac_runs, ordered, record, system_jobs
+from test_prm_platform_flow import approve, approve_again, mac_runs, ordered, record, system_jobs
 
 from platform_fakes import DY_ITEM, JST_ORDER
 from src.config import BotConfig, _validate_config
@@ -49,9 +49,10 @@ def bot(clock, tmp_path):
 
 
 def made(b, clock, number=JST_ORDER):
-    """A sample order drafted, approved and verified in 聚水潭, its reply sent: the deal waits for the sample."""
+    """A sample order drafted, approved and verified in 聚水潭, its reply sent: the deal waits for the sample.  (A second
+    one of the deal is approved after 「我已处理」 on the earlier one: ``approve_again``.)"""
     order = ordered(b, clock)
-    mac_runs(b, approve(b, order), record(sample_order_no=number))
+    mac_runs(b, approve_again(b, order), record(sample_order_no=number))
     b.prm.send_approved()
     b.texts.clear()
     return b.prm.store.packet(order["id"])

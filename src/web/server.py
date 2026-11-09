@@ -1106,7 +1106,7 @@ def _prm_state_core() -> dict:
                "auto_register": _prm_env_on("PRM_AUTO_REGISTER"), "auto_mode": auto,
                "buyin_sync_min": _prm_int_env("PRM_BUYIN_SYNC_MIN", 0),
                "opening_auto_min": _prm_int_env("PRM_OPENING_AUTO_MIN", 0),
-               "handcards": _prm_env_on("PRM_HANDCARDS"), **settings}
+               "handcards": _prm_env_on("PRM_HANDCARDS"), "draft_context": _prm_env_on("PRM_DRAFT_CONTEXT"), **settings}
     stopped["friend_add_status"] = _friend_add_stopped_status(store)
     stopped["three_party"] = _three_party_stopped_status()
     stopped["boss_groups"] = _boss_groups_stopped_status(store)
@@ -1237,8 +1237,9 @@ def _prm_file(query: str):
     """GET /api/prm/file?packet=<id>&kind=attachment|operator&n=<index>: one picture of a draft as ``(path, content
     type)``: ``kind`` attachment, ``attachments[n]`` (what goes to her: the 直播手卡); operator, ``meta.operator_files[n]``
     (PRM_DRAFT_CONTEXT's photo sheet, only from the relay's ``outfiles/job-*``); which file and whether it is a picture
-    still there: src/prm/draft_context.py ``picture``.  None for anything else (``packet``, ``kind`` or ``n`` missing or
-    not a whole number of ASCII digits / a known kind, no such draft or file, not a picture, gone from disk).  Read only,
+    still there, inside the relay's folder (``files_root`` / ``_relay_files_root``): src/prm/draft_context.py
+    ``picture``.  None for anything else (``packet``, ``kind`` or ``n`` missing or not a whole number of ASCII digits / a
+    known kind, no such draft or file, not a picture, gone from disk, outside the relay's folder).  Read only,
     also while the bot is stopped (that store is closed again); the path is the one the bot itself kept for the file the
     Mac sent back."""
     from urllib.parse import parse_qs
@@ -1259,7 +1260,20 @@ def _prm_file(query: str):
     finally:
         if running is None:
             store.close()
-    return picture(packet, kind, int(raw_n))
+    # only a file inside the relay's folder, of either kind (review 2026-11-10: as the WeChat notification's pictures)
+    root = getattr(running, "files_root", None) if running is not None else _relay_files_root()
+    return picture(packet, kind, int(raw_n), root)
+
+
+def _relay_files_root():
+    """The relay's folder of files while the bot is stopped (``ClaudeRelay.files_dir``: the running one's when there is
+    one, else its default next to CLAUDE_RELAY_DB, ``default_files_dir``)."""
+    from src.relay.service import default_files_dir
+
+    relay = _relay
+    if relay is not None:
+        return relay.files_dir
+    return default_files_dir(os.getenv("CLAUDE_RELAY_DB", "data/claude_relay.db").strip() or "data/claude_relay.db")
 
 
 def _prm_auto(data: dict) -> dict:
@@ -2569,9 +2583,9 @@ class _UIHandler(SimpleHTTPRequestHandler):
 
     def _send_prm_file(self):
         """GET /api/prm/file (``_prm_file``; GET only: not in the POST list, a POST is 405): a draft's picture, streamed,
-        ``Cache-Control: no-store``; another site's page (``Sec-Fetch-Site: cross-site``, an <img> pointed here) gets
-        403, anything not found 404 (JSON, its length, the CORS echo).  The origin and host checks of every request
-        come first (``do_GET``)."""
+        ``Cache-Control: no-store``, ``X-Content-Type-Options: nosniff``; another site's page (``Sec-Fetch-Site:
+        cross-site``, an <img> pointed here) gets 403, anything not found 404 (JSON, its length, the CORS echo).  The
+        origin and host checks of every request come first (``do_GET``)."""
         if (self.headers.get("Sec-Fetch-Site") or "").strip().lower() == "cross-site":
             self._send_plain_json(403, {"ok": False, "error": "只给本机的控制台看"})
             return
@@ -2595,6 +2609,7 @@ class _UIHandler(SimpleHTTPRequestHandler):
             self.send_header("Content-Type", kind)
             self.send_header("Content-Length", str(size))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")    # (only ever the picture its type says: review B)
             self._send_cors_headers()
             self.end_headers()
             shutil.copyfileobj(source, self.wfile, 256 * 1024)

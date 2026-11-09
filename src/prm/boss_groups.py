@@ -305,7 +305,8 @@ def waits_for_lines(row: Optional[dict]) -> bool:
 
 
 class BossGroups:
-    """The 老板拉的群 of one PRM service (see the module's doc).  ``register(wxid, name, note)``: PrmService.register;
+    """The 老板拉的群 of one PRM service (see the module's doc).  ``register(wxid, name, note, catch_up=True)``:
+    PrmService.register (a link by hand registers with ``catch_up`` False: no new-friend catch-up, no 开场白);
     ``opening(party, chat)``: PrmService._group_opening (``(job id, "")`` or ``(None, why not)``); ``handle(msg)``:
     PrmService.handle (a line stored before the takeover, handed on once); ``reserved``: the admin and the cc users;
     ``local(at)``: a time WeChat gives on this PC's clock (PrmService._local: only the baseline's time of a backend
@@ -1194,7 +1195,7 @@ class BossGroups:
                                           party_id=int(party["id"]), deal_id=int(deal["id"]), why="", opening_due=now)
             self._linked = {**self._linked, row["chat"]: int(party["id"])}
         self._store.add_event(deal["id"], party["id"], EVENT,
-                              {"name": row["name"], "new": made, **({"kept": True} if kept else {})},
+                              {"name": row["name"], "chat": row["chat"], "new": made, **({"kept": True} if kept else {})},
                               actor="console" if actor == "console" else "system", now=now)
         since = self._since(row)
         self._watch(row["chat"], since)
@@ -1395,12 +1396,19 @@ class BossGroups:
         """``gone`` / ``stop`` (``stopped``; under ``_lock``): the group ``gone``, not read any more
         (``unwatch_group``), its drafts not sent and its job not taken given up (``on_close``, review 2026-11-09: a
         draft made before went into the group all the same), the deal's record (``read_only``: her 三方群 goes back to
-        being read only, PrmService.unlink_group)."""
+        being read only, PrmService.unlink_group).  The row keeps of its members only her and the bosses (``boss``, the
+        bosses' wxids as last read) and none of its lines (review 2026-11-10 B-L5: a big group linked by hand kept every
+        member's wxid and name)."""
         now = self._clock()
         chat = row["chat"]
         manual = bool(row.get("manual"))
+        party = self._store.party(int(party_id)) if party_id else None
+        keep = {str((party or {}).get("wxid") or "")} | {str(b.get("wxid") or "") for b in row.get("boss") or []}
+        keep = (keep | set(self._bosses)) - {""}
+        members = [m for m in row.get("members") or [] if str(m.get("wxid") or "") in keep]
         if not self._store.update_boss_group(chat, now, states=(LINKED,), state=GONE,
-                                             why=MANUAL_GONE_WHY if stopped else GONE_WHY, opening_due=None):
+                                             why=MANUAL_GONE_WHY if stopped else GONE_WHY, opening_due=None,
+                                             members=members, lines=[]):
             return False
         self._linked = {k: v for k, v in self._linked.items() if k != chat}
         self._manual = self._manual - {chat}
@@ -1416,7 +1424,7 @@ class BossGroups:
                 self._on_close(chat, now)
             except Exception:
                 logger.exception("PRM: boss group %s…: its drafts could not be given up", chat[:8])
-        self._store.add_event(deal_id, party_id, EVENT, {"gone": True, **({"manual": True} if manual else {}),
+        self._store.add_event(deal_id, party_id, EVENT, {"gone": True, "chat": chat, **({"manual": True} if manual else {}),
                                                          **({"stopped": True} if stopped else {}),
                                                          **({"read_only": True} if read_only else {})},
                               actor=actor if actor in ("console", "admin") else "system", now=now)
@@ -1489,7 +1497,8 @@ class BossGroups:
         """「是 N」 (the admin, src/prm/group_link.py) or the console's 「是她」 on the open question (``offered``): this
         member is the creator of this group, linked by hand whatever PRM_BOSS_GROUPS says.  She is registered unless
         she is an active creator already (her 称呼 her name, her note 「手动接的群（<群名>）」; one an operator stopped is
-        registered again); the group is linked to her deal (``_link``: her own 三方群 is drafted in from now on; a deal
+        registered again; never her new-friend catch-up nor a 开场白 of her private chat: review 2026-11-10 A-F4); the
+        group is linked to her deal (``_link``: her own 三方群 is drafted in from now on; a deal
         with another group made, being made or unsure keeps it, the record says so), its row ``linked`` and ``manual``
         (``found_at`` now; the lines kept before go), the deal's record says so (``EVENT`` with ``manual``).  Then, out
         of the lock, what was said there lately is read once (``catch_up``: context for her next job, one draft job when
@@ -1546,8 +1555,10 @@ class BossGroups:
             if self._register is None:
                 return {"ok": False, "error": "机器人这边没法登记达人"}
             try:
+                # (no new-friend catch-up, no 开场白 of her private chat: the operator only linked a group, review
+                # 2026-11-10 A-F4; ``PrmService.register``'s ``catch_up``)
                 party = self._register(her["wxid"], her_name(her.get("name"), her["wxid"], MANUAL_FALLBACK),
-                                       manual_note(offer["name"]))
+                                       manual_note(offer["name"]), catch_up=False)
             except PartyError as e:
                 return {"ok": False, "error": f"没登记成：{e}"}
             made = True
@@ -1564,7 +1575,8 @@ class BossGroups:
             self._manual = self._manual | {chat}
             self._due = {k: v for k, v in self._due.items() if k != chat}
         self._store.add_event(deal["id"], party["id"], EVENT,
-                              {"name": offer["name"], "new": made, "manual": True, **({"kept": True} if kept else {})},
+                              {"name": offer["name"], "chat": chat, "new": made, "manual": True,
+                               **({"kept": True} if kept else {})},
                               actor=actor if actor in ("console", "admin") else "system", now=now)
         logger.info("PRM: group %s… linked by hand (%s): party %d %s%s", chat[:8], actor, party["id"],
                     "registered" if made else "linked", ", her deal keeps its 三方群" if kept else "")
@@ -1594,6 +1606,17 @@ class BossGroups:
                               stopped=True)
 
     # ── clean-ups (PrmService.purge / purge_due) ─────────────────────────
+
+    def chats_of(self, deal_id) -> list:
+        """Every group ever linked to this deal (8.2's clean-up, PrmService.purge; review 2026-11-10 B-L5): the rows that
+        are its own now, and the ones its record names (``EVENT`` with ``chat``): a group linked again to another creator
+        since is still scrubbed of this one's lines."""
+        chats = [r["chat"] for r in self._store.boss_groups(deal_id=int(deal_id))]
+        for ev in self._store.events(int(deal_id), limit=None, kinds=(EVENT,)):
+            chat = str((ev.get("detail") or {}).get("chat") or "")
+            if chat.endswith("@chatroom") and chat not in chats:
+                chats.append(chat)
+        return chats
 
     def purge(self, deal: dict) -> int:
         """8.2 clean-up of a deal: its groups' member names, group names and kept lines, the group's name in its record."""
