@@ -1,7 +1,8 @@
 """微信里审批草稿 (PRM_WECHAT_REVIEW, 2026-11-09, src/prm/wechat_review.py): the drafts waiting in 待审批 are told, once
-each, to the admin's private chat, and the admin decides them there: quoting a notification (1 / 2 / 改 …), or
-「发 N」「不发 N」「改 N …」, a bare 1 / 2 to the last thing the bot said there.  The same decision as the console's;
-nothing of it with the switch off.  Each finding of the 2026-11-09 review (1–10) has its tests here.
+each, to the admin's private chat, and the admin decides them there: quoting a notification (1 / 2 / 改 … / 执行), or
+「发 N」「不发 N」「改 N …」「执行 N」, a bare 1 / 2 to the last thing the bot said there.  The same decision as the
+console's; nothing of it with the switch off.  Each finding of the 2026-11-09 review (1–10) has its tests here, and so
+does 「执行」 (a platform action approved from WeChat).
 
 The relay, the PRM service and the router as Bot.run wires them (``Desk``), with a fake WeChat that records every
 message the bot sends and tells the review each one, as the WCDB backend's sent hook does (src/bot.py).  Names,
@@ -18,8 +19,10 @@ from unittest.mock import patch
 
 import pytest
 
+from platform_fakes import DY_ITEM, DY_ITEM2, DY_SKU, DY_SKU2, DY_SKU2B, DY_UID, JST_ORDER
 from router_support import BOT, TraceSpy
 from test_prm import ADMIN, CREATOR, Clock, config
+from test_prm_platform_flow import CHANNEL, DESIGNATED, block, record
 
 from src.admin import RELAY_HELP, AdminCommandHandler
 from src.db import MessageStore, initialize_db
@@ -124,6 +127,9 @@ class Desk:
     def jobs(self, kind="admin") -> list[dict]:
         return [j for j in self.relay.store.list_jobs(limit=100) if j.get("kind", "admin") == kind]
 
+    def executions(self) -> list[dict]:
+        return [j for j in self.relay.store.list_jobs(limit=100) if '"platform_execute"' in str(j.get("meta") or "")]
+
 
 @pytest.fixture
 def clock():
@@ -163,6 +169,58 @@ def group_packet(desk, text="在的～群里也可以直接问我") -> int:
         now=desk.clock.now, deal_id=1, party_id=1, job_id=None, chat_id=GROUP, kind="other", text=text,
         attachments=[], intent="", slots={}, stage_proposal="", needs_attention=False, reason="",
         meta={"channel": "group", "group_name": "小美合作群"})
+
+
+# 聚水潭寄样单 as the Mac previews it (platforms._jst_facts): two products of one shop, a receiver whose number is a
+# placeholder (the notification shows only the province and the city)
+SAMPLE = {"action": "jst.sample_order", "shop": "dy", "creator_platform": "dy", "creator_uid": DY_UID,
+          "items": [{"item_id": DY_ITEM, "skus": [{"sku_id": DY_SKU, "qty": 1}]},
+                    {"item_id": DY_ITEM2, "skus": [{"sku_id": DY_SKU2, "qty": 1}, {"sku_id": DY_SKU2B, "qty": 2}]}],
+          "receiver": {"name": "小美", "phone": "〈手机1〉", "province": "浙江省", "city": "杭州市", "district": "西湖区",
+                       "address": "测试路100号3栋1201"},
+          "logistics": "SF"}
+JST_FACTS = [
+    {"label": "达人", "value": "小美（dy xm_test01，粉丝 12000）；归这个子账号跟进"},
+    {"label": "收货", "value": "小* 139****1111 浙江省杭州市西湖区 测试路***（达人名下的地址）"},
+    {"label": "快递", "value": "顺丰速运（SF）"},
+    {"label": "商品", "value": "测试款贝雷帽（测试抖店）：HAT-RED-01 红色 × 1（售价 59，平台库存 30）"},
+    {"label": "商品", "value": "测试款渔夫帽（测试抖店）：FSH-GRY-02 灰色 × 1（售价 79，平台库存 5）；"
+                               "FSH-BLK-02 黑色 × 2（售价 79，平台库存 8）"},
+    {"label": "查重", "value": "这位达人没寄过这个商品"},
+]
+
+
+def jst_block(verdict="ready", **extra):
+    step = {"name": "preview", "label": "聚水潭 · 预览寄样单", "execute": False, "command": "node bin/jst.mjs sample-create",
+            "exit_code": 0, "seconds": 3.0, "verdict": verdict, "outcome": "",
+            "problems": [] if verdict == "ready" else ["平台没登录"], "facts": JST_FACTS, "raw": "{}"}
+    return block(SAMPLE, verdict=verdict, run={"steps": ["create"]},
+                 **{"steps": [step], "facts": [], "catalog": {"synced_at": 1.0, "title": "测试款贝雷帽"}, **extra})
+
+
+def platform_waiting(desk, preview=None, *, text="寄样单建好啦，单号 {寄样单号}～", group=False, files=None) -> dict:
+    """She agrees, the Mac drafts a reply with a platform action and previews it (a sample order unless ``preview``);
+    the draft waits for a person and is told (the sender thread's round).  ``group``: it goes into her 老板拉的群;
+    ``files``: the pictures for the operator (``meta.operator_files``)."""
+    desk.prm.store.token_for(1, "phone", "手机", "13900001111", desk.clock.now)     # 〈手机1〉: the receiver's number
+    desk.her("好的，寄吧")
+    packet = desk.mac(text=text, message_kind="money", platform=preview or jst_block())
+    assert packet["status"] == "pending" and packet["tool"] != "message.send"
+    if group:
+        desk.prm.store.aim_packet(packet["id"], GROUP, {"channel": "group", "group_name": "小美合作群"})
+    if files is not None:
+        desk.prm.store.aim_packet(packet["id"], GROUP if group else CREATOR, {"operator_files": files})
+    desk.review.sweep()
+    return desk.prm.store.packet(packet["id"])
+
+
+def mac_runs(desk, rec):
+    """The Mac takes the execution and answers with ``rec`` (``record``), under the approval's key."""
+    job = desk.relay.next_job(0, ("prm",))
+    assert job is not None and job["meta"]["op"] == "platform_execute"
+    assert desk.relay.finish(job["id"], {"ok": True, "text": json.dumps({**rec, "key": job["meta"]["key"]}),
+                                         "duration_s": 9})
+    desk.relay.tick()
 
 
 # ── the notification ─────────────────────────────────────────────────────
@@ -227,7 +285,8 @@ def test_with_the_switch_off_nothing_is_told_and_every_answer_goes_on_as_before(
     assert desk.told() == [] and desk.prm.store.wechat_review(packet["id"]) is None
     assert desk.review.status() == {"on": False} and desk.prm.snapshot()["wechat_review"] == {"on": False}
     assert desk.prm.snapshot()["pending"][0]["wechat_at"] is None
-    for content, quote in ((f"发 {packet['id']}", None), ("1", f"#{packet['id']} 草稿 · 小美 · 私聊")):
+    for content, quote in ((f"发 {packet['id']}", None), (f"执行 {packet['id']}", None),
+                           ("1", f"#{packet['id']} 草稿 · 小美 · 私聊"), ("执行", f"#{packet['id']} 草稿 · 小美 · 私聊")):
         assert desk.admin(content, quote=quote) is None                 # (silence, as before)
         assert desk.router._tracer.notes["ended_by"] == "silence"
     desk.review.note_sent(ADMIN, f"#{packet['id']} 草稿 · 小美 · 私聊")    # (the hook is never set with the switch off)
@@ -743,7 +802,7 @@ def test_unquoted_numbers_count_only_for_drafts_told_here(desk):
     """「发 99」 with no notification #99: not this feature's (it goes on, as before); 「改 N …」 only for a draft that
     still waits."""
     packet = waiting(desk)
-    for words in ("发 99", "不发 99", "改 99 好的", "改 3 处错别字"):
+    for words in ("发 99", "不发 99", "执行 99", "改 99 好的", "改 3 处错别字"):
         assert desk.admin(words) is None and desk.router._tracer.notes["ended_by"] == "silence", words
     assert desk.prm.decide(packet["id"], "drop")["ok"]
     assert desk.admin(f"改 {packet['id']} 好的老师") is None              # (no longer waiting: goes on)
@@ -1051,7 +1110,7 @@ def test_an_answer_read_late_is_history_and_gets_no_reply(desk):
 
 def test_a_voice_answer_never_counts(desk):
     packet = waiting(desk)
-    for said in (f"[语音] 发 {packet['id']}。", "[语音] 1"):
+    for said in (f"[语音] 发 {packet['id']}。", f"[语音] 执行 {packet['id']}", "[语音] 1"):
         assert desk.admin(said, msg_type=34) == VOICE_TEXT
         desk.review.note_sent(ADMIN, head(desk, packet["id"]))          # (a notification the last thing said again)
     assert desk.prm.store.packet(packet["id"])["status"] == "pending"
@@ -1113,37 +1172,227 @@ def test_read_takes_typed_text_quotes_and_voice_only():
     assert read({"msg_type": 34, "content": "[语音]"}) is None
 
 
-# ── a platform action is the console's ───────────────────────────────
+# ── 执行: a platform action approved from WeChat ─────────────────────────
 
-def platform_packet(desk, verdict="ready") -> int:
-    return desk.prm.store.add_packet(
-        now=desk.clock.now, deal_id=1, party_id=1, job_id=None, chat_id=CREATOR, kind="other", text="寄样单建好啦～",
-        attachments=[], intent="", slots={}, stage_proposal="", needs_attention=False, reason="",
-        tool="jst.sample_order",
-        platform={"action": {"action": "jst.sample_order"}, "preview": {"verdict": verdict,
-                                                                         "catalog": {"title": "测试款贝雷帽"}}})
+def test_a_sample_orders_notification_lists_every_product_the_courier_and_only_province_and_city(desk):
+    packet = platform_waiting(desk)
+    number = packet["id"]
+    lines = notice_of(desk, number)
+    assert lines[0] == f"#{number} 草稿 · 小美 · 私聊" and "草稿：寄样单建好啦，单号 {寄样单号}～" in lines
+    assert lines[lines.index("草稿：寄样单建好啦，单号 {寄样单号}～") + 1:] == [
+        "平台动作：聚水潭 · 达人寄样单（预览通过，可以批准执行）",
+        "· 寄样商品：测试款贝雷帽（测试抖店）：HAT-RED-01 红色 × 1",
+        "· 寄样商品：测试款渔夫帽（测试抖店）：FSH-GRY-02 灰色 × 1；FSH-BLK-02 黑色 × 2",
+        "· 快递：顺丰速运（SF）",
+        "· 收货：浙江省杭州市（只写到市）",
+        "回「执行」在平台上执行（核验成功才把上面的回复发给她）｜2 不发",
+        f"（引用这条回；不引用就回「执行 {number}」「不发 {number}」）",
+    ]
+    text = "\n".join(lines)
+    for private in ("13900001111", "139****1111", "〈手机1〉", "测试路", "西湖区", "xm_test01", "售价", "平台库存"):
+        assert private not in text, private
 
 
-def test_a_platform_draft_is_told_but_only_the_console_runs_it(desk):
-    number = platform_packet(desk)
+def test_a_preview_without_its_products_lists_the_products_ids_and_a_receiver_kept_in_jushuitan(desk):
+    bare = jst_block(steps=[], catalog={"synced_at": 1.0, "title": "测试款贝雷帽"})
+    bare["action"] = {k: v for k, v in bare["action"].items() if k not in ("receiver", "logistics")}
+    packet = platform_waiting(desk, bare)
+    lines = notice_of(desk, packet["id"])
+    assert "· 商品：测试款贝雷帽（等 2 款）" in lines
+    assert f"· 寄样商品：SKU × 数量：{DY_ITEM}：{DY_SKU} × 1；{DY_ITEM2}：{DY_SKU2} × 1、{DY_SKU2B} × 2" in lines
+    assert "· 快递：按这台 Mac 配的" in lines and "· 收货：聚水潭里她名下的地址" in lines
+
+
+def test_a_commission_and_channel_goods_list_their_products_rate_price_and_stock(desk):
+    packet = platform_waiting(desk, block(DESIGNATED), text="专属佣金 20% 设好啦，明天 0 点生效～")
+    lines = notice_of(desk, packet["id"])
+    assert "平台动作：抖音百应 · 指定达人专属佣金（预览通过，可以批准执行）" in lines
+    assert {"· 商品：测试主品", f"· 商品 ID：{DY_ITEM}", f"· 达人平台账号：{DY_UID}", "· 佣金率（%）：20%"} <= set(lines)
+    assert desk.prm.decide(packet["id"], "drop")["ok"]
+    sku = {"name": "create", "label": "抖店 · 建渠道品", "execute": False, "command": "node bin/dy.mjs", "exit_code": 0,
+           "seconds": 2.0, "verdict": "ready", "outcome": "", "problems": [], "raw": "{}",
+           "facts": [{"label": f"SKU {DY_SKU} 红色", "value": "主品价 39 元 → 渠道价 15；库存 50（可划 80）"}]}
+    packet = platform_waiting(desk, block({**CHANNEL, "stock": 50}, steps=[sku]),
+                              text="专属链接给你啦：{链接} 审核通过后就能用～")
+    lines = notice_of(desk, packet["id"])
+    assert "平台动作：抖店 · 达人渠道品（专属链接）并绑定达人（预览通过，可以批准执行）" in lines
+    assert {"· 渠道价（元）：15.00", "· 渠道库存：50", f"· SKU {DY_SKU} 红色：主品价 39 元 → 渠道价 15；库存 50（可划 80）"} <= set(lines)
+
+
+def test_a_platform_draft_whose_preview_failed_says_it_cannot_run_from_wechat(desk):
+    packet = platform_waiting(desk, jst_block(verdict="login"))
+    number = packet["id"]
+    lines = notice_of(desk, number)
+    assert "平台动作：聚水潭 · 达人寄样单（平台没登录或登录失效（退出码 77））" in lines
+    assert "· 问题：没登录" in lines and "· 问题：平台没登录" in lines
+    assert lines[-1] == "预览没通过，微信里不能执行：请到控制台处理（「重新预览」）；不要的话回 2"
+    assert desk.admin("执行", quote=head(desk, number)) == (
+        f"#{number} 通知里的预览没通过（或者正在重新预览），微信里不能执行：请到控制台处理")
+    assert desk.prm.store.packet(number)["status"] == "pending" and desk.executions() == []
+    assert desk.admin("2", quote=head(desk, number)) == f"#{number} 不发了（她再发消息时会有新的草稿）"
+
+
+def test_the_pictures_for_the_operator_follow_its_notification(desk, tmp_path, caplog):
+    sheet, photo = tmp_path / "对比图.png", tmp_path / "帽子.jpg"
+    sheet.write_bytes(b"\x89PNG not really")
+    photo.write_bytes(b"not really")
+    (tmp_path / "说明.txt").write_text("不是图片")
+    files = [str(sheet), {"name": "帽子.jpg", "path": str(photo)}, str(tmp_path / "不在这台电脑上.png"),
+             str(tmp_path / "说明.txt")]
+    packet = platform_waiting(desk, files=files)
+    assert desk.files == [(ADMIN, str(sheet)), (ADMIN, str(photo))]
+    assert desk.sent[-1][1].startswith(f"#{packet['id']} 草稿")                # (right after its notification)
+    assert caplog.text.count(f"a picture for the operator of draft {packet['id']} is not on this PC") == 2
     desk.review.sweep()
-    text = desk.told()[0]
-    assert "平台动作：聚水潭 · 达人寄样单（测试款贝雷帽）" in text
-    assert text.endswith("这份带平台动作，请在控制台「批准并执行」；微信里只能回 2 不发")
-    hint = f"#{number} 带平台动作：微信里不能执行，请在控制台点「批准并执行」；不要的话回 2"
+    assert len(desk.files) == 2                                          # (once, with the notification)
+
+
+def test_执行_quoting_the_notification_runs_it_and_its_end_is_told(desk):
+    packet = platform_waiting(desk)
+    number = packet["id"]
+    assert desk.admin("执行", quote=head(desk, number)) == (
+        f"#{number} 已批准执行：Mac 正在平台上执行，做完了告诉你结果（核验成功才把回复发给她）")
+    assert desk.prm.store.packet(number)["status"] == "executing"
+    assert desk.prm.store.wechat_review(number)["decision"] == "execute"
+    [job] = desk.executions()
+    assert json.loads(job["meta"])["action"]["receiver"]["phone"] == "13900001111"   # (for the Mac, as from the console)
+    before = len(desk.told())
+    desk.prm.tick()
+    assert len(desk.told()) == before                                   # (nothing to tell while it runs)
+    mac_runs(desk, record(sample_order_no=JST_ORDER))
+    desk.prm.tick()                                                     # the reply goes to her, then the admin hears
+    assert desk.to(CREATOR) == [f"寄样单建好啦，单号 {JST_ORDER}～"]
+    assert desk.told()[-1] == f"#{number} 已执行：聚水潭 · 达人寄样单（平台核验成功；寄样单号 {JST_ORDER}），回复已发出"
+    desk.prm.tick()
+    assert len([t for t in desk.told() if t.startswith(f"#{number} 已执行")]) == 1
+
+
+def test_执行_n_runs_it_too_and_a_red_end_is_told_in_the_consoles_words(desk):
+    packet = platform_waiting(desk)
+    number = packet["id"]
+    assert desk.admin(f"执行 {number}").startswith(f"#{number} 已批准执行")
+    mac_runs(desk, record("FAILED"))
+    desk.prm.tick()
+    assert desk.to(CREATOR) == []
+    assert desk.told()[-1] == f"#{number} 执行没成功：平台拒绝了，或者没有发出（FAILED）：读回没证实，回复没有发；请到控制台看"
+
+
+def test_a_verified_action_whose_reply_did_not_go_is_told_so(desk):
+    packet = platform_waiting(desk)
+    number = packet["id"]
+    desk.admin("执行", quote=head(desk, number))
+    desk.refuse.add(CREATOR)
+    mac_runs(desk, record(sample_order_no=JST_ORDER))
+    desk.prm.tick()
+    assert desk.told()[-1] == (f"#{number} 已执行：聚水潭 · 达人寄样单（平台核验成功；寄样单号 {JST_ORDER}），"
+                               "但回复没有发出去（文字没发出去）；需要的话请在微信里手动发给 小美")
+
+
+@pytest.mark.parametrize("row, told", [
+    (dict(status="dropped", outcome="covered", error="邀约卡已经开了这个商品的专属佣金（20%），没有执行",
+          platform={"execution": {"outcome": "NOT_RUN"}}),
+     "#7 没有执行：邀约卡已经开了这个商品的专属佣金（20%）；回复没有发"),
+    (dict(status="failed", outcome="indeterminate", error=UNSURE_ERROR,
+          platform={"execution": {"outcome": "VERIFIED_SUCCESS", "created": {}}}),
+     "#7 已执行：抖音百应 · 指定达人专属佣金（平台核验成功），但回复不确定发出去没有（发的时候机器人停了），"
+     "请看一眼微信再决定要不要手动发给 小美"),
+    (dict(status="failed", outcome="platform_not_run", error="没能排进 Mac 的任务队列，平台没有动", platform={}),
+     "#7 执行没成功：没能排进 Mac 的任务队列，平台没有动，回复没有发；请到控制台看"),
+])
+def test_what_came_of_an_execution_is_told_in_the_consoles_words(desk, row, told):
+    desk.clock.now += UNSURE_GRACE_SEC                                   # (an unsure one: told only after the grace)
+    row = {"packet_id": 7, "party_id": 1, "decision": "execute", "tool": "dy.designated_commission",
+           **{**row, "platform": json.dumps(row["platform"])}}
+    assert desk.review._outcome_text(row) == told
+
+
+def test_the_consoles_checks_hold_for_执行(desk):
+    preview = jst_block()
+    preview["action"]["receiver"]["phone"] = "〈手机9〉"                    # (a placeholder with no number)
+    packet = platform_waiting(desk, preview)
+    number = packet["id"]
+    reply = desk.admin("执行", quote=head(desk, number))
+    assert reply.startswith(f"#{number} 没执行：") and "〈手机9〉" in reply
+    assert desk.prm.store.packet(number)["status"] == "pending" and desk.executions() == []
+
+
+@pytest.mark.parametrize("answer", ["1", "好", "发", "ok", "[强]", "同意"])
+def test_a_yes_never_runs_a_platform_action(desk, answer):
+    packet = platform_waiting(desk)
+    number = packet["id"]
+    hint = f"#{number} 带平台动作：引用那条通知回「执行」（或者回「执行 {number}」）才在平台上执行；不要的话回 2"
     assert desk.admin("1") == hint                                     # (the bare 1 to its notification)
-    for answer in ("1", "好", "改 好的", "就这样吧", "[微笑]"):
-        assert desk.admin(answer, quote=head(desk, number)) == hint
-    assert desk.admin(f"发 {number}") == hint and desk.admin(f"改 {number} 好的") == hint
-    assert desk.prm.store.packet(number)["status"] == "pending" and desk.jobs("prm") == []
+    assert desk.admin(answer, quote=head(desk, number)) == hint
+    assert desk.admin(f"发 {number}") == hint
+    assert desk.prm.store.packet(number)["status"] == "pending" and desk.executions() == []
+
+
+def test_the_reply_of_a_platform_draft_is_edited_in_the_console_only(desk):
+    packet = platform_waiting(desk)
+    number = packet["id"]
+    refused = f"#{number} 带平台动作：回复要改的话请在控制台「改了再执行」；不要的话回 2"
+    assert desk.admin("改 寄样单马上建～", quote=head(desk, number)) == refused
+    assert desk.admin(f"改 {number} 寄样单马上建～") == refused
+    assert desk.admin("这样回她可以吗", quote=head(desk, number)) == refused
+    assert desk.admin("就这样吧", quote=head(desk, number)) == refused
+    row = desk.prm.store.wechat_review(number)
+    assert (row["state"], row["proposed"]) == ("notified", "")
+    assert desk.prm.store.packet(number)["status"] == "pending" and desk.executions() == []
     assert desk.admin("2", quote=head(desk, number)) == f"#{number} 不发了（她再发消息时会有新的草稿）"
     assert desk.prm.store.packet(number)["status"] == "dropped"
 
 
-def test_a_platform_draft_whose_preview_failed_says_so(desk):
-    platform_packet(desk, verdict="login")
-    desk.review.sweep()
-    assert "；预览没通过（" in desk.told()[0]
+def test_执行_runs_only_the_preview_its_notification_showed(desk):
+    packet = platform_waiting(desk)
+    number = packet["id"]
+    assert desk.prm.decide(number, "repreview")["ok"]                   # the console: 重新预览
+    assert desk.admin("执行", quote=head(desk, number)) == f"#{number} 没执行：正在重新预览，等结果出来再批准"
+    job = desk.relay.next_job(0, ("prm",))                              # the Mac previews again
+    assert desk.relay.finish(job["id"], {"ok": True, "text": json.dumps(jst_block(previewed_at=3.0)), "duration_s": 3})
+    desk.relay.tick()
+    assert desk.prm.store.packet(number)["platform"]["preview"]["previewed_at"] == 3.0
+    assert desk.admin(f"执行 {number}") == (
+        f"#{number} 通知发出以后重新预览过：请到控制台看了新的预览再「批准并执行」；不要的话回 2")
+    assert desk.prm.store.packet(number)["status"] == "pending" and desk.executions() == []
+    assert desk.prm.decide(number, "execute")["ok"]                     # the console runs it, as ever
+
+
+def test_执行_of_a_draft_without_a_platform_action_sends_nothing(desk):
+    packet = waiting(desk)
+    number = packet["id"]
+    assert desk.admin("执行", quote=head(desk, number)) == f"#{number} 没有平台动作：回「发 {number}」就行"
+    assert desk.admin(f"执行 {number}") == f"#{number} 没有平台动作：回「发 {number}」就行"
+    assert desk.prm.store.packet(number)["status"] == "pending"
+
+
+def test_a_group_platform_draft_runs_only_by_a_quote(desk):
+    packet = platform_waiting(desk, group=True)
+    number = packet["id"]
+    lines = notice_of(desk, number)
+    assert lines[0] == f"#{number} 草稿 · 小美 · 群里「小美合作群」"
+    assert lines[-1] == f"（发在群里：要引用这条回「执行」；不发也可以回「不发 {number}」）"
+    assert desk.admin(f"执行 {number}") == f"#{number} 是发在群「小美合作群」里的，请引用那条通知回「执行」确认"
+    assert desk.executions() == []
+    assert desk.admin("执行", quote=head(desk, number)).startswith(f"#{number} 已批准执行")
+    assert len(desk.executions()) == 1
+
+
+def test_执行_never_comes_from_her_chat_a_group_or_anybody_else(desk):
+    packet = platform_waiting(desk)
+    number = packet["id"]
+    notice = head(desk, number)
+    for where in (dict(group=True, chat="room1@chatroom"), dict(sender="wxid_helper", chat="wxid_helper"),
+                  dict(sender="wxid_helper", chat=ADMIN)):
+        assert desk.admin(f"执行 {number}", **where) is None
+        assert desk.admin("执行", quote=notice, **where) is None
+    assert desk.executions() == [] and desk.prm.store.packet(number)["status"] == "pending"
+    for content, quote in ((f"执行 {number}", None), ("执行", notice)):  # her own chat: her words for the next draft
+        msg = {"message_id": f"h{next(IDS)}", "chat_id": CREATOR, "group_name": "小美", "sender_id": CREATOR,
+               "sender_name": "小美", "content": content, "msg_type": QUOTE if quote else 1,
+               "timestamp": desk.clock.now, "is_group": False, "quoted_content": quote or ""}
+        assert desk.router.handle(msg) is None and desk.router._tracer.notes["ended_by"] == "prm"
+    assert desk.executions() == [] and desk.prm.store.packet(number)["status"] == "superseded"
+    assert desk.to(CREATOR) == []
 
 
 # ── red lines: only the admin's own private chat, and never the relay's ───────
@@ -1164,7 +1413,7 @@ def test_a_draft_answer_never_becomes_a_cc_task_a_relay_approval_or_an_admin_com
     assert desk.relay.store.get_ask(ask["ask_id"])["status"] == "pending"     # the relay's question still waits
     second = waiting(desk, "那我等你", text="好的～")
     for content, quote in ((f"改 {second['id']} 好的老师", None), ("好的", head(desk, second["id"])),
-                           (f"不发 {second['id']}", None)):
+                           (f"不发 {second['id']}", None), (f"执行 {second['id']}", None)):
         desk.admin(content, quote=quote)
     assert desk.prm.store.packet(second["id"])["final_text"] == "好的老师"
     assert len(desk.jobs()) == 1                                         # only the cc task: nothing else went to the Mac

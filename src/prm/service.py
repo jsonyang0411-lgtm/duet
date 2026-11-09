@@ -1361,7 +1361,7 @@ class PrmService:
         # 微信里审批草稿 (PRM_WECHAT_REVIEW, default off; src/prm/wechat_review.py): the drafts waiting for a person told to
         # the admin's private chat (the sender thread, ``tick``), the admin's answers there (the route step wechat_review)
         self.wechat_review = WechatReview(
-            self._store, config, clock=clock, send=send, decide=self.decide,
+            self._store, config, clock=clock, send=send, send_file=send_file, decide=self.decide,
             check=self.edit_problem, lines=self._packet_lines, parts=lambda text: len(reply_parts(text, self._reply_parts)),
             aim=lambda packet: self._aim(packet, wait=True), relay_store=relay.store, local=self._local,
             opening_auto=self._opening_auto_sec > 0)

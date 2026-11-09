@@ -10,9 +10,10 @@ first (the packet id, the console's 「DRAFT #12」), the creator and where it g
 group warning; a draft the bot started itself is aimed first, as ``send_approved`` aims it, and waits untold while she
 can be reached nowhere), her last line(s) it answers (short; numbers as their placeholders, addresses cut to province
 and city, a labelled 微信号 masked), the draft in full with its placeholders (their masked numbers after it, as the
-console's legend), a shipping notice's waybill, its files, and how to answer.  A draft with a platform action is
-told too, with its action, but never run from WeChat: the notification sends the admin to the console's 「批准并执行」,
-and WeChat can only drop it.  None for what goes out by itself (a kind's gate ``auto``, 下班时段 and
+console's legend), a shipping notice's waybill, its files, and how to answer.  A draft with a platform action lists the
+action as the console's preview shows it (``_platform_lines``: what will be made, for whom, with which values; a sample
+order's receiver only by province and city; the preview's verdict and problems), and the pictures the operator is meant
+to see (``meta.operator_files``) follow it.  None for what goes out by itself (a kind's gate ``auto``, 下班时段 and
 自动模式 approve it at once: never pending; 开场白自动发: ``meta.auto_at`` while ``send_due_openings`` still takes it), a
 百应 draft (``BUYIN_TOOL``: copied into 百应 by hand), a holding reply (no packet), anything while ADMIN_WXID is empty
 (``status`` says why), nor a draft that was waiting already before the switch was first on (``ON_AT`` in prm_meta, less
@@ -40,8 +41,10 @@ in the admin's own private chat, never a voice message (heard wrong, a 「不发
   RELAY_QUIET_SEC, never right after another told draft was closed (CLOSED_RACE_SEC).
 - A draft for a 老板拉的群 is sent from WeChat only by an answer quoting its notification or question (the console's
   group confirm dialog); 「不发」 needs no quote.
-- A draft with a platform action is never sent nor edited from WeChat: 1 / 好 / 发 / 改 say to use the console's
-  「批准并执行」; 「2」 drops it.
+- A platform action runs only by 「执行」 quoting its notification, or 「执行 12」 (the console's 批准并执行,
+  ``PrmService.decide`` "execute", every check of it), and only the preview its notification showed (``_stamp``: one it
+  said cannot run, or one previewed again since, is the console's); 1 / 好 / 发 never run one, 「改」 of its reply stays
+  the console's.  When the execution ends (the reply sent after VERIFIED_SUCCESS, or red), the admin is told in one line.
 - Several lines at once (WeChat merges bubbles sent within 2.2 s, src/wechat/burst.py): each answer line is done, an edit
   in a merged burst only as a proposal; the lines that are no answer (a cc task, an admin command, anything else) go on to
   the later route steps as one message (``rest``); two or more cc / command lines among them: the whole message is
@@ -59,6 +62,8 @@ only: never a creator's name or words, never a draft.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 import threading
@@ -66,6 +71,7 @@ import time
 import unicodedata
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Optional
 
 from ..admin import HELP_COMMANDS
@@ -81,6 +87,7 @@ logger = logging.getLogger(__name__)
 TELLING, NOTIFIED, PROPOSED, ANSWERED = "telling", "notified", "proposed", "answered"   # ``wechat_reviews.state``
 SEND_WORDS = ("1", "发", "发送", "好", "好的", "可以", "行", "ok", "同意", "嗯", "[强]", "👍")   # quoting: send it
 DROP_WORDS = ("2", "不发", "不要", "算了")                          # ... drop it
+EXECUTE_WORDS = ("执行",)                                         # ... run its platform action (and send its reply)
 RETRY_SEC = (10, 120)       # a send the admin's chat did not take: the chat again after 10 s, doubling, at most 2 min apart
 SEND_TRIES = 6              # ... and a message not again (this run) after this many failed sends (about 4.5 minutes)
 PER_ROUND = 3               # sends one round of the sender thread makes at most (a pile waits its turn)
@@ -92,8 +99,12 @@ UNSURE_GRACE_SEC = 180      # a send cut off by a stop is told as unsure this lo
 SAID_LINES = 2              # her last lines a notification quotes
 SAID_CHARS = 60             # ... each cut to this many characters
 NOTE_CHARS = 120            # the draft's reason (when it asks for attention), an error told
+FACT_CHARS = 120            # a platform action's value as the notification lists it
+FACTS_LISTED = 8            # ... and how many of them at most (a sample order lists every product)
+GOODS_CHARS = 400           # a sample order's product as listed: its name, and each SKU's code, colour and quantity
 FILES_NAMED = 5             # file names a notification lists at most
 SEEN_IDS = 500              # the admin's answers remembered by message id (one handed on twice counts once)
+PICTURE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
 
 _HEAD = re.compile(r"^\s*[#＃](\d{1,9})\s*(草稿|改成)")
 _STAMP = re.compile(r"^\[\d{2}-\d{2} \d{2}:\d{2}\]\s*")
@@ -102,12 +113,14 @@ _VOICE = re.compile(r"^\[语音\]\s*(.*)$", re.S)
 _NUM = r"[#＃]?\s*(\d{1,9})"
 _SEND_N = re.compile(rf"^(?:发送|发)\s*{_NUM}$")
 _DROP_N = re.compile(rf"^不发\s*{_NUM}$")
+_EXECUTE_N = re.compile(rf"^执行\s*{_NUM}$")
 _EDIT_N = re.compile(rf"^改\s*{_NUM}(?:\s*[:：]\s*|\s+)(\S.*)$", re.S)
 _EDIT_N_ONLY = re.compile(rf"^改\s*{_NUM}\s*[:：]?$")
 _EDIT = re.compile(r"^改成?(?:\s*[:：]\s*|\s+)(\S.*)$", re.S)
 _TRAILING = re.compile(r"[\s。.!~～]+$")
 _EMOJI_TAG = re.compile(r"\[[^\[\]\s]{1,8}\]")
 _EMOJI = re.compile("[\\s\U0001F000-\U0001FAFF☀-➿️‍]+")
+_SALE = re.compile(r"（售价[^（）]*）")
 
 NO_ADMIN_WHY = ("微信里审批草稿打开了，但没填管理员 wxid（ADMIN_WXID）：草稿发不到微信里。到「中转代理」页的设置里填好"
                 "「管理员 wxid」，再重启机器人")
@@ -115,6 +128,7 @@ NO_SEND_WHY = "机器人没有连着微信：草稿发不到管理员微信里"
 EDGE_WHY = "Mac 端（WECHAT_BACKEND=edge）不能在微信里审批草稿：管理员的私聊在 Windows 上读"
 VOICE_TEXT = "回草稿要打字：引用那条通知回 1 发出、2 不发，或者回「发 12」这样带编号；语音不算（免得听错）"
 REFUSE_TEXT = "这几句是一起到的，里面有好几条要交给 Mac 或者是管理命令：都没处理，请一句一句分开发"
+VERIFIED_SEND_HEAD, VERIFIED_SEND_TAIL = "平台动作已经核验成功，但回复没发出去：", "；请在微信里手动发给达人"  # (service.py)
 
 
 def _cut(text, limit: int) -> str:
@@ -224,6 +238,7 @@ class WechatReview:
 
     def __init__(self, store: PrmStore, config, *, clock: Callable[[], float] = time.time,
                  send: Optional[Callable[[str, str], bool]] = None,
+                 send_file: Optional[Callable[[str, str], bool]] = None,
                  decide: Optional[Callable[..., dict]] = None, check: Optional[Callable[[dict, str], str]] = None,
                  lines: Optional[Callable[[dict], str]] = None, parts: Optional[Callable[[str], int]] = None,
                  aim: Optional[Callable[[dict], Optional[dict]]] = None, relay_store=None,
@@ -231,6 +246,7 @@ class WechatReview:
         self._store = store
         self._clock = clock
         self._send = send
+        self._send_file = send_file
         self._decide = decide
         self._check = check
         self._lines = lines
@@ -329,7 +345,9 @@ class WechatReview:
             current = self._store.packet(packet["id"])
             if current is None or current["status"] != PENDING:
                 continue                                   # decided (or out of date) meanwhile
-            if not self._store.add_wechat_review(packet["id"], packet["deal_id"], self._clock(), state=TELLING):
+            stamp = self._stamp(packet) if self._platform(packet) and self._runnable(packet) else ""
+            if not self._store.add_wechat_review(packet["id"], packet["deal_id"], self._clock(), state=TELLING,
+                                                 preview=stamp):
                 continue                                   # (told already)
             tried += 1
             if not self._try(key, text, f"the notification of draft {packet['id']}"):
@@ -338,6 +356,7 @@ class WechatReview:
             now = self._clock()
             self._store.set_wechat_review(packet["id"], (TELLING,), now, state=NOTIFIED, notified_at=now)
             logger.info("PRM: draft %d told to the admin's chat (微信里审批)", packet["id"])
+            self._send_pictures(packet)
             sent += 1
         for row in self._store.wechat_reviews_to_tell():
             key = ("told", row["packet_id"])
@@ -385,20 +404,75 @@ class WechatReview:
             logger.warning("PRM: %s not sent to the admin's chat (try %d); the next try in %d s", what, failures, delay)
         return False
 
+    def _send_pictures(self, packet: dict) -> None:
+        """The pictures the operator is meant to see with a draft (``meta.operator_files``: paths, or ``{path}``; a photo
+        comparison sheet, say), right after its notification; one that cannot be sent is logged, never tried again."""
+        files = (packet.get("meta") or {}).get("operator_files")
+        if not files or self._send_file is None:
+            return
+        for item in files if isinstance(files, list) else []:
+            path = item.get("path") if isinstance(item, dict) else item
+            if not isinstance(path, str) or Path(path).suffix.lower() not in PICTURE_SUFFIXES or not Path(path).is_file():
+                logger.warning("PRM: a picture for the operator of draft %d is not on this PC; not sent", packet["id"])
+                continue
+            try:
+                ok = bool(self._send_file(self.admin, path))
+            except Exception:
+                logger.exception("PRM: a picture for the operator of draft %d could not be sent", packet["id"])
+                ok = False
+            if not ok:
+                logger.warning("PRM: a picture for the operator of draft %d was not sent to the admin's chat",
+                               packet["id"])
+
     def _outcome_text(self, row: dict) -> Optional[str]:
-        """What came of a decision taken here, in one line (None: not to be told yet): a send that failed.  A send the bot
-        was stopped in the middle of (``indeterminate``) waits for its read-back, or UNSURE_GRACE_SEC after the start."""
+        """What came of a decision taken here, in one line (None: not to be told yet): a send that failed; a platform
+        action's end (the console's outcome words).  A send the bot was stopped in the middle of (``indeterminate``)
+        waits for its read-back, or UNSURE_GRACE_SEC after the start."""
         number = row["packet_id"]
         name = (self._store.party(row["party_id"]) or {}).get("name") or "她"
         status, outcome, error = row.get("status"), str(row.get("outcome") or ""), str(row.get("error") or "")
+        execute = row.get("decision") == "execute"
+        execution = (self._json(row.get("platform")).get("execution") or {}) if execute else {}
+        verified = execution.get("outcome") == platforms.VERIFIED
+        done = ""
+        if execute:
+            created = execution.get("created") or {}
+            got = "；".join(f"{what} {created[key]}" for key, what in (
+                ("link", "链接"), ("sample_order_no", "寄样单号"), ("channel_id", "渠道品 ID"), ("plan_name", "计划名"))
+                if created.get(key))
+            done = f"{platforms.label(row.get('tool'))}（平台核验成功{'；' + got if got else ''}）"
         if status == FAILED and outcome == "indeterminate":
             if self._clock() - self._started < UNSURE_GRACE_SEC:
                 return None
+            head = f"#{number} 已执行：{done}，但回复" if verified else f"#{number} "
             if "文字已经发出去了" in error:
-                return (f"#{number} 文字发出去了，文件不确定发出去没有（发的时候机器人停了），请看一眼微信再决定要不要手动"
+                return (f"{head}文字发出去了，文件不确定发出去没有（发的时候机器人停了），请看一眼微信再决定要不要手动"
                         f"补发给 {name}")
-            return f"#{number} 不确定发出去没有（发的时候机器人停了），请看一眼微信再决定要不要手动发给 {name}"
-        return f"#{number} 没发出去：{_cut(error or '发送出错', NOTE_CHARS)}；需要的话请在微信里手动发给 {name}"
+            return f"{head}不确定发出去没有（发的时候机器人停了），请看一眼微信再决定要不要手动发给 {name}"
+        if not execute:
+            return f"#{number} 没发出去：{_cut(error or '发送出错', NOTE_CHARS)}；需要的话请在微信里手动发给 {name}"
+        if status == SENT:
+            return f"#{number} 已执行：{done}，回复已发出"
+        if verified:                                     # (the console's words without their own head and tail)
+            why = error.removeprefix(VERIFIED_SEND_HEAD).removesuffix(VERIFIED_SEND_TAIL) or "发送出错"
+            return f"#{number} 已执行：{done}，但回复没有发出去（{_cut(why, NOTE_CHARS)}）；需要的话请在微信里手动发给 {name}"
+        if status == DROPPED:                            # (an invite card had opened it already: nothing to run)
+            return f"#{number} 没有执行：{_cut(error.removesuffix('，没有执行') or '不用执行', NOTE_CHARS)}；回复没有发"
+        result = str(execution.get("outcome") or "")
+        problems = [p for p in execution.get("problems") or [] if isinstance(p, str) and p.strip()]
+        why = (f"{platforms.outcome_text(result)}（{result}）" + (f"：{problems[0]}" if problems else "")
+               if result else error or "出错了")
+        return f"#{number} 执行没成功：{_cut(why, NOTE_CHARS)}，回复没有发；请到控制台看"
+
+    @staticmethod
+    def _json(text) -> dict:
+        if isinstance(text, dict):
+            return text
+        try:
+            value = json.loads(text or "{}")
+        except (TypeError, ValueError):
+            return {}
+        return value if isinstance(value, dict) else {}
 
     def notification_text(self, packet: dict) -> str:
         """The message that tells the admin of a draft (see the module's docstring)."""
@@ -419,8 +493,6 @@ class WechatReview:
             lines.append("（运营点了「补发货盘」：我们主动补发的货盘）")
         elif meta.get("signed"):
             lines.append("（聚水潭显示样品签收了：问她一句拿到没有、合不合适）")
-        if platform:
-            lines.append(self._platform_line(packet))
         if packet.get("kind") == "shipping_notice":
             bills = [(meta.get("carrier") or "", meta.get("waybill") or "")]
             bills += [(b.get("carrier") or "", b.get("waybill") or "") for b in meta.get("more_waybills") or []
@@ -442,7 +514,15 @@ class WechatReview:
         if files:
             lines.append(f"（附 {len(files)} 个文件：{'、'.join(files[:FILES_NAMED])}{'…' if len(files) > FILES_NAMED else ''}）")
         if platform:
-            lines.append("这份带平台动作，请在控制台「批准并执行」；微信里只能回 2 不发")
+            lines += self._platform_lines(packet)
+            if self._runnable(packet):
+                lines.append("回「执行」在平台上执行（核验成功才把上面的回复发给她）｜2 不发")
+                lines.append(f"（发在群里：要引用这条回「执行」；不发也可以回「不发 {number}」）" if group
+                             else f"（引用这条回；不引用就回「执行 {number}」「不发 {number}」）")
+            elif (packet.get("platform") or {}).get("previewing"):
+                lines.append("正在重新预览，微信里不能执行：请到控制台看了结果再「批准并执行」；不要的话回 2")
+            else:
+                lines.append("预览没通过，微信里不能执行：请到控制台处理（「重新预览」）；不要的话回 2")
         else:
             lines.append(f"回 1 {'发到群里' if group else '发出'}｜2 不发｜改 + 你的话（直接发你改的）")
             lines.append(f"（发在群里：要引用这条回；不发也可以回「不发 {number}」）" if group
@@ -467,18 +547,62 @@ class WechatReview:
         return ("…" if len(said) > len(last) else "") + "／".join(shown)
 
     @staticmethod
-    def _platform_line(packet: dict) -> str:
+    def _runnable(packet: dict) -> bool:
+        """Can 「执行」 be asked for (the console's 批准并执行 button: a ready preview, not being previewed again)?"""
+        data = packet.get("platform") or {}
+        return ((data.get("preview") or {}).get("verdict") == "ready" and bool(data.get("action"))
+                and not data.get("previewing"))
+
+    @staticmethod
+    def _stamp(packet: dict) -> str:
+        """The fingerprint of a platform draft's preview: 「执行」 runs only the one its notification showed (a 重新预览 in
+        the console since: to the console)."""
+        preview = (packet.get("platform") or {}).get("preview") or {}
+        blob = json.dumps(preview, sort_keys=True, ensure_ascii=False, default=str)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+    @staticmethod
+    def _platform_lines(packet: dict) -> list:
+        """A draft's platform action as the console's preview block shows it: what it is and the preview's verdict, then
+        what will be made with which values (``platforms.describe``; a sample order: every product line of the preview
+        (name, and each SKU's code, colour and quantity), the courier, the receiver by province and city only, never a
+        name, phone or street), and the preview's problems."""
         data = packet.get("platform") or {}
         preview = data.get("preview") or {}
-        name = (data.get("action") or {}).get("action") or packet.get("tool")
-        line = f"平台动作：{platforms.label(name)}"
-        title = (preview.get("catalog") or {}).get("title")
-        if title:
-            line += f"（{_cut(title, 30)}）"
+        action = data.get("action") or {}
+        name = action.get("action") or packet.get("tool")
         verdict = preview.get("verdict") or "unavailable"
-        if verdict != "ready":
-            line += f"；预览没通过（{platforms.VERDICTS.get(verdict, verdict)}）"
-        return line
+        lines = [f"平台动作：{platforms.label(name)}（{platforms.VERDICTS.get(verdict, verdict)}）"]
+        if data.get("previewing"):
+            lines.append("· 正在重新预览，结果出来以前不能执行")
+        facts = [f for f in preview.get("facts") or [] if isinstance(f, dict)]
+        facts += [f for step in preview.get("steps") or [] if isinstance(step, dict)
+                  for f in step.get("facts") or [] if isinstance(f, dict)]
+        if name == "jst.sample_order":
+            goods = [_SALE.sub("", str(f.get("value") or "")).strip() for f in facts if f.get("label") == "商品"]
+            if goods:
+                lines += [f"· 寄样商品：{_cut(value, GOODS_CHARS)}" for value in goods]
+            else:                                          # (no preview of the products: their ids, as the console)
+                lines += [f"· {p['label']}：{_cut(p['value'], GOODS_CHARS)}"
+                          for p in platforms.describe(action, preview.get("catalog"))
+                          if p["label"] in ("商品", platforms.PARAM_LABELS["items"], platforms.PARAM_LABELS["skus"])]
+            courier = next((str(f.get("value") or "") for f in facts if f.get("label") == "快递"), "")
+            lines.append(f"· 快递：{_cut(courier or action.get('logistics') or '按这台 Mac 配的', FACT_CHARS)}")
+            receiver = action.get("receiver") if isinstance(action.get("receiver"), dict) else {}
+            province, city = str(receiver.get("province") or ""), str(receiver.get("city") or "")
+            region = province + (city if city != province else "")
+            lines.append(f"· 收货：{_cut(region, FACT_CHARS)}（只写到市）" if region else "· 收货：聚水潭里她名下的地址")
+        else:
+            skip = (platforms.PARAM_LABELS["receiver"], platforms.PARAM_LABELS["note"])
+            shown = [(p["label"], p["value"]) for p in platforms.describe(action, preview.get("catalog"))
+                     if p["label"] not in skip]
+            shown += [(f["label"], f.get("value")) for f in facts if str(f.get("label") or "").startswith("SKU ")]
+            lines += [f"· {label}：{_cut(value, FACT_CHARS)}" for label, value in shown[:FACTS_LISTED]]
+        problems = [p for p in preview.get("problems") or [] if isinstance(p, str)]
+        problems += [p for step in preview.get("steps") or [] if isinstance(step, dict)
+                     for p in step.get("problems") or [] if isinstance(p, str) and p not in problems]
+        lines += [f"· 问题：{_cut(p, FACT_CHARS)}" for p in problems[:3]]
+        return lines
 
     # ── what the bot says in the admin's chat (the backend's ``set_sent_hook``) ──
 
@@ -561,9 +685,9 @@ class WechatReview:
         return packet is not None and packet["status"] == PENDING and self._told(number)
 
     def _line(self, line: str, said: Said) -> Optional[tuple]:
-        """One line's answer: 「发 N」「不发 N」 for a draft told here, 「改 N …」「改 N」 for one still waiting
+        """One line's answer: 「发 N」「不发 N」「执行 N」 for a draft told here, 「改 N …」「改 N」 for one still waiting
         (``via_quote``: the message quotes that draft's notification or question); None otherwise."""
-        for pattern, action in ((_SEND_N, "send"), (_DROP_N, "drop")):
+        for pattern, action in ((_SEND_N, "send"), (_DROP_N, "drop"), (_EXECUTE_N, "execute")):
             m = pattern.match(line)
             if m:
                 number = int(m.group(1))
@@ -601,7 +725,7 @@ class WechatReview:
             if m:
                 n = int(m.group(1))
                 return Plan([("ask", number) if n == number else ("mismatch", number, n)], rest)
-            for pattern, action in ((_SEND_N, "send"), (_DROP_N, "drop")):
+            for pattern, action in ((_SEND_N, "send"), (_DROP_N, "drop"), (_EXECUTE_N, "execute")):
                 m = pattern.match(content)
                 if m:
                     n = int(m.group(1))
@@ -698,6 +822,8 @@ class WechatReview:
             return self._decided(row, packet, "drop", None)
         if action == "send":
             return self._send_original(row, packet, quoted=item[2])
+        if action == "execute":
+            return self._execute(row, packet, quoted=item[2])
         return self._edit(row, packet, item[2], quoted=item[3], propose=burst)
 
     def _row(self, number) -> tuple[Optional[dict], Optional[dict]]:
@@ -723,6 +849,8 @@ class WechatReview:
         if closed:
             return closed
         word = _word(text)
+        if word in EXECUTE_WORDS:
+            return self._execute(row, packet, quoted=True)
         if word in SEND_WORDS:
             if head == "改成" and not self._platform(packet):
                 return self._send_asked(row, packet, asked)
@@ -776,27 +904,27 @@ class WechatReview:
         return (packet.get("meta") or {}).get("channel") == GROUP_CHANNEL
 
     @staticmethod
-    def _group_hint(packet: dict) -> str:
+    def _group_hint(packet: dict, execute: bool = False) -> str:
         name = (packet.get("meta") or {}).get("group_name") or "老板拉的群"
-        return f"#{packet['id']} 是发在群「{name}」里的，请引用那条通知回 1 确认"
+        return f"#{packet['id']} 是发在群「{name}」里的，请引用那条通知回{'「执行」' if execute else ' 1 '}确认"
 
     @staticmethod
     def _platform_hint(packet: dict) -> str:
-        return f"#{packet['id']} 带平台动作：微信里不能执行，请在控制台点「批准并执行」；不要的话回 2"
+        return f"#{packet['id']} 带平台动作：引用那条通知回「执行」（或者回「执行 {packet['id']}」）才在平台上执行；不要的话回 2"
 
     @staticmethod
     def _platform_edit_refused(packet: dict) -> str:
-        return f"#{packet['id']} 带平台动作：微信里不能执行，请在控制台点「批准并执行」；不要的话回 2"
+        return f"#{packet['id']} 带平台动作：回复要改的话请在控制台「改了再执行」；不要的话回 2"
 
     def _help(self, packet: dict) -> str:
         number = packet["id"]
         if self._platform(packet):
-            return self._platform_hint(packet)
+            return f"#{number}：这句没当成回复。引用通知回「执行」在平台上执行、回 2 不发"
         return f"#{number}：这句没当成回复，也没记成改稿。回 1 发出原稿、2 不发、「改 你的话」改了再发"
 
     def _send_original(self, row: dict, packet: dict, *, quoted: bool) -> str:
-        """The draft as it was drafted (a proposed edit dropped): not for a platform action (the console's), and for a
-        group only by an answer quoting it."""
+        """The draft as it was drafted (a proposed edit dropped): not for a platform action (「执行」), and for a group only
+        by an answer quoting it."""
         if self._platform(packet):
             return self._platform_hint(packet)
         if self._group(packet) and not quoted:
@@ -813,6 +941,22 @@ class WechatReview:
             return self._decided(row, packet, "edit", current)
         note = "（引用里看不全那一份改稿，没发）" if asked is None else "（改稿换过了：你引用的不是现在这一份，没发）"
         return self._question(packet, current, note)
+
+    def _execute(self, row: dict, packet: dict, *, quoted: bool) -> str:
+        """「执行」: the console's 批准并执行 (``decide`` "execute", every check of it): a platform action only, the preview
+        its notification showed (``_stamp``: not one the notification said cannot run, nor one previewed again since),
+        a group's only by an answer quoting it."""
+        number = packet["id"]
+        if not self._platform(packet):
+            return f"#{number} 没有平台动作：回「发 {number}」就行"
+        if self._group(packet) and not quoted:
+            return self._group_hint(packet, execute=True)
+        told = str(row.get("preview") or "")
+        if not told:
+            return f"#{number} 通知里的预览没通过（或者正在重新预览），微信里不能执行：请到控制台处理"
+        if told != self._stamp(packet):
+            return f"#{number} 通知发出以后重新预览过：请到控制台看了新的预览再「批准并执行」；不要的话回 2"
+        return self._decided(row, packet, "execute", None)
 
     def _edit(self, row: dict, packet: dict, text: str, *, quoted: bool, propose: bool = False) -> str:
         """「改 …」: sent instead of the draft (``propose``: a merged burst's, only proposed: never straight out)."""
@@ -865,7 +1009,7 @@ class WechatReview:
             closed = self._closed(fresh, row)
             if closed:
                 return closed
-            what = "没改成不发" if action == "drop" else "没发"
+            what = {"drop": "没改成不发", "execute": "没执行"}.get(action, "没发")
             return f"#{number} {what}：{result.get('error') or '出错了'}"
         now = self._clock()
         self._store.set_wechat_review(number, (), now, state=ANSWERED, decision=action, answered_at=now,
@@ -873,6 +1017,8 @@ class WechatReview:
         logger.info("PRM: draft %d decided by the admin in WeChat (%s)", number, action)
         if action == "drop":
             return f"#{number} 不发了（她再发消息时会有新的草稿）"
+        if action == "execute":
+            return f"#{number} 已批准执行：Mac 正在平台上执行，做完了告诉你结果（核验成功才把回复发给她）"
         meta = packet.get("meta") or {}
         name = (self._store.party(packet["party_id"]) or {}).get("name") or "她"
         where = f"（群里「{meta.get('group_name') or '老板拉的群'}」）" if self._group(packet) else ""

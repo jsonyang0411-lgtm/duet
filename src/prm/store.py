@@ -57,8 +57,9 @@
 ``wechat_reviews``  微信里审批草稿 (PRM_WECHAT_REVIEW, src/prm/wechat_review.py): one row per draft told to the admin's
                     private chat (its number is the packet's id): when, where it stands (``state``: written before the
                     send as ``telling``), the admin's own words kept as the proposed edit (``proposed``), what was decided
-                    there (``decision``: send, edit, drop) and when the admin was told what came of it (``told_at``:
-                    a send that failed, or that may not have gone out)
+                    there (``decision``: send, edit, drop, execute), when the admin was told what came of it
+                    (``told_at``: a send that failed, a platform action's result) and which preview a platform draft's
+                    notification showed (``preview``: its fingerprint, "" when it said it cannot run from WeChat)
 
 A packet's life: ``pending`` (waits in the console) -> ``approved`` (an operator said
 send, the kind's gate is ``auto``, or the 下班时段 window sent it: route ``night``) -> ``sending`` ->
@@ -353,9 +354,10 @@ CREATE TABLE IF NOT EXISTS boss_groups (
 -- chat (ADMIN_WXID), the number the admin answers to is the packet's id.  ``state``: telling (written before the send;
 -- left so, it may or may not have gone out: never sent again) | notified (told, the answer is awaited) | proposed (the
 -- admin wrote other text quoting it: ``proposed``, not sent; a 「1」 quoting that question sends it) | answered (decided
--- there: ``decision`` send / edit / drop).  Open while its packet is pending.  ``told_at``: the admin was told what came
--- of a decision taken there (a send that failed, or that may not have gone out).  The 8.2 clean-up drops a deal's closed
--- rows, cuts the rest.
+-- there: ``decision`` send / edit / drop / execute).  Open while its packet is pending.  ``told_at``: the admin was told
+-- what came of a decision taken there (a send that failed, a platform action's result).  ``preview``: the fingerprint of
+-- the preview a platform draft's notification showed (「执行」 runs only that one; "": it said it cannot run from WeChat).
+-- The 8.2 clean-up drops a deal's closed rows, cuts the rest.
 CREATE TABLE IF NOT EXISTS wechat_reviews (
     packet_id INTEGER PRIMARY KEY,
     deal_id INTEGER NOT NULL,
@@ -366,6 +368,7 @@ CREATE TABLE IF NOT EXISTS wechat_reviews (
     decision TEXT NOT NULL DEFAULT '',
     answered_at REAL,
     told_at REAL,
+    preview TEXT NOT NULL DEFAULT '',
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS wechat_reviews_deal ON wechat_reviews(deal_id);
@@ -2009,14 +2012,14 @@ class PrmStore:
         return [packet_view(dict(r)) for r in rows]
 
     def add_wechat_review(self, packet_id: int, deal_id: int, now: Optional[float] = None, *,
-                          state: str = "notified") -> bool:
-        """A draft is (being) told to the admin's chat: its row in ``state`` (``telling`` before the send); True when it
-        had no row before."""
+                          state: str = "notified", preview: str = "") -> bool:
+        """A draft is (being) told to the admin's chat: its row in ``state`` (``telling`` before the send), with the
+        fingerprint of the preview a platform draft's notification shows; True when it had no row before."""
         now = time.time() if now is None else now
         with self._lock:
             cur = self._conn.execute(
-                "INSERT OR IGNORE INTO wechat_reviews (packet_id, deal_id, state, notified_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?)", (int(packet_id), int(deal_id), str(state), now, now))
+                "INSERT OR IGNORE INTO wechat_reviews (packet_id, deal_id, state, notified_at, preview, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)", (int(packet_id), int(deal_id), str(state), now, str(preview or ""), now))
             self._conn.commit()
             return cur.rowcount == 1
 
@@ -2084,14 +2087,16 @@ class PrmStore:
 
     def wechat_reviews_to_tell(self) -> list[dict]:
         """The decisions taken in WeChat whose outcome the admin was not told yet (``told_at`` empty), oldest first: a
-        send or edit whose draft failed; each row with its packet's ``party_id``, ``chat_id``, ``status``, ``outcome``,
-        ``error``, ``tool`` and ``platform``."""
+        send or edit whose draft failed, an execution whose draft ended (sent, failed, dropped); each row with its
+        packet's ``party_id``, ``chat_id``, ``status``, ``outcome``, ``error``, ``tool`` and ``platform``."""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT w.*, p.party_id AS party_id, p.chat_id AS chat_id, p.status AS status, p.outcome AS outcome,"
                 " p.error AS error, p.tool AS tool, p.platform AS platform FROM wechat_reviews w"
                 " JOIN action_packets p ON p.id = w.packet_id WHERE w.state = 'answered' AND w.told_at IS NULL"
-                " AND w.decision IN ('send', 'edit') AND p.status = ? ORDER BY w.packet_id", (FAILED,)).fetchall()
+                " AND ((w.decision IN ('send', 'edit') AND p.status = ?)"
+                " OR (w.decision = 'execute' AND p.status IN (?, ?, ?))) ORDER BY w.packet_id",
+                (FAILED, SENT, FAILED, DROPPED)).fetchall()
         return [dict(r) for r in rows]
 
     def wechat_notified(self, packet_ids) -> dict[int, float]:

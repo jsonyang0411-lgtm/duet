@@ -345,7 +345,7 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
       title={`${p.party_name} · ${p.kind_label}`}
       eyebrow={`DRAFT #${p.id}`}
       sub={`${fmtClock(p.created_at)} ${p.system ? '系统生成' : '写好'}${p.stage_proposal_label ? ` · 建议阶段：${p.stage_proposal_label}` : ''}`}
-      actions={<><GroupTag p={p} />{p.wechat_at && <span className="tag cy prm-wechat-tag" title={`${fmtClock(p.wechat_at)} 发到管理员微信里了：在微信里回 1 / 2 / 改 也行，和这里点是同一个决定`}>已发到微信</span>}{p.opening && <span className="tag cy" title={p.auto_at ? `她还没跟我们说过话：这是我们先打招呼的话，${fmtClock(p.auto_at)} 还没人处理就自动发` : '她还没跟我们说过话：这是我们先打招呼的话，要人看过再发'}>开场白</span>}{p.huopan && <span className="tag cy" title="运营点了「补发货盘」：我们主动补发的货盘，要人看过再发（不会自动发）">补发货盘</span>}{p.route === 'auto' && <span className="tag ok" title="这类消息已经达到自动发送门槛">自动发送</span>}<NightTag p={p} /><OpeningAutoTag p={p} /><span className={`tag ${kind}`}>{label}</span></>}
+      actions={<><GroupTag p={p} />{p.wechat_at && <span className="tag cy prm-wechat-tag" title={`${fmtClock(p.wechat_at)} 发到管理员微信里了：在微信里${p.platform ? '引用通知回「执行」/ 2' : '回 1 / 2 / 改'} 也行，和这里点是同一个决定`}>已发到微信</span>}{p.opening && <span className="tag cy" title={p.auto_at ? `她还没跟我们说过话：这是我们先打招呼的话，${fmtClock(p.auto_at)} 还没人处理就自动发` : '她还没跟我们说过话：这是我们先打招呼的话，要人看过再发'}>开场白</span>}{p.huopan && <span className="tag cy" title="运营点了「补发货盘」：我们主动补发的货盘，要人看过再发（不会自动发）">补发货盘</span>}{p.route === 'auto' && <span className="tag ok" title="这类消息已经达到自动发送门槛">自动发送</span>}<NightTag p={p} /><OpeningAutoTag p={p} /><span className={`tag ${kind}`}>{label}</span></>}
       className="prm-draft"
     >
       <div className="stack" style={{ gap: 8 }}>

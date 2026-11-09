@@ -219,7 +219,8 @@ export function bossGroupNotes(d) {
 
 /** 微信里审批草稿 (PRM_WECHAT_REVIEW, src/prm/wechat_review.py; ``wechat_review`` of GET /api/prm): [note kind, the line]
  *  at the top of 待审批, or null while the switch is off. The drafts waiting here also go to the admin's WeChat, where
- *  the admin answers them; why they cannot (no ADMIN_WXID, the bot stopped) when they cannot; the drafts that may or may not have reached it (``unsure``), could not be told (``unsent``) or were waiting
+ *  the admin answers them (a platform action: 「执行」); why they cannot (no ADMIN_WXID, the bot stopped) when they
+ *  cannot; the drafts that may or may not have reached it (``unsure``), could not be told (``unsent``) or were waiting
  *  before the switch was first on (``older``): this page's. */
 export function wechatReviewNote(d) {
   const w = d?.wechat_review
@@ -229,7 +230,7 @@ export function wechatReviewNote(d) {
   if (w.unsure > 0) more.push(`有 ${w.unsure} 份发到微信时机器人停了（或者出错），不确定管理员收到没有：微信里没看到的请在这里处理`)
   if (w.unsent > 0) more.push(`有 ${w.unsent} 份试了几次都没发到微信，请在这里处理`)
   if (w.older > 0) more.push(`打开开关以前就在等的 ${w.older} 份没发到微信，请在这里处理`)
-  return ['', `草稿也发到管理员微信里了：引用通知回 1 发出、2 不发、改 + 你的话${more.map((m) => `；${m}`).join('')}`]
+  return ['', `草稿也发到管理员微信里了：引用通知回 1 发出、2 不发、改 + 你的话，带平台动作的回「执行」${more.map((m) => `；${m}`).join('')}`]
 }
 
 /** What is wrong with the setup, in the order a person has to fix it ([] = ready). */

@@ -204,7 +204,8 @@ class TheDraftAnswersAreTheAdminsAlone(GatewayCase):
     def answers(self):
         n = self.number
         return [dict(content="1", msg_type=49, quoted_content=self.head), dict(content=f"发 {n}"),
-                dict(content=f"改 {n} 好的老师"), dict(content=f"不发 {n}"), dict(content="1"), dict(content="好")]
+                dict(content=f"改 {n} 好的老师"), dict(content=f"不发 {n}"), dict(content="1"), dict(content="好"),
+                dict(content=f"执行 {n}"), dict(content="执行", msg_type=49, quoted_content=self.head)]
 
     def test_no_group_message_and_nobody_else_decides_a_draft(self):
         for relay_only in (False, True):

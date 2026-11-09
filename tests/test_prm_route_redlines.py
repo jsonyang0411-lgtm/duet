@@ -204,8 +204,8 @@ def told_draft(world, run):
 @pytest.mark.parametrize("relay_only", ["off", "on"])
 def test_the_admins_quote_of_a_draft_notification_decides_it_and_nothing_else_does(world, relay_only):
     """The real WCDB backend reads the admin's 引用 of a notification (its <refermsg>): the route's ``wechat_review``
-    step sends the draft and the admin hears so once; neither that nor 「发 1」 / 「不发 1」 (a draft told here) becomes a
-    cc task, with CLAUDE_RELAY_ONLY on or off; 「改 1 …」 once #1 no longer waits goes on as before (review
+    step sends the draft and the admin hears so once; neither that nor 「发 1」 / 「不发 1」 / 「执行 1」 (a draft told here)
+    becomes a cc task, with CLAUDE_RELAY_ONLY on or off; 「改 1 …」 once #1 no longer waits goes on as before (review
     finding 3: relay only, it is Claude's task).  Her own 「1」 and her quote of the same words in her chat stay her lines
     for the next draft (no decision, no reply to her); the admin's quote in a group gets nothing; a cc task still is
     one."""
@@ -224,7 +224,7 @@ def test_the_admins_quote_of_a_draft_notification_decides_it_and_nothing_else_do
     assert world.sent[-1] == (ADMIN, "#1 已批准，正在发给 小美")
     assert run.prm.send_approved() == 1 and world.sent[-1] == (CREATOR, "收到啦～戴着还合适吗？")
     world.clock.now += 10
-    for n, text in enumerate(("发 1", "不发 1")):
+    for n, text in enumerate(("发 1", "不发 1", "执行 1")):
         world.wechat.say(ADMIN, ADMIN, text, world.clock.now + n * 5)
         world.clock.now += 5
         run.poll()

@@ -66,8 +66,8 @@ def edge(ctx: RouteContext) -> Optional[Stop]:
 
 def wechat_review(ctx: RouteContext) -> Optional[Stop]:
     """PRM_WECHAT_REVIEW=on (微信里审批草稿, src/prm/wechat_review.py): the admin's answer to a draft notification in the
-    admin's own private chat (quoting it: 1 / 2 / 改 …; 「发 12」「不发 12」「改 12 …」; a bare 1 / 2 to the last
-    notification) is the draft's decision, with one reply saying what came of it.  Before ``persist`` (her
+    admin's own private chat (quoting it: 1 / 2 / 改 … / 执行; 「发 12」「不发 12」「改 12 …」「执行 12」; a bare 1 / 2 to
+    the last notification) is the draft's decision, with one reply saying what came of it.  Before ``persist`` (her
     words quoted, a draft edited: not kept in this PC's chat archive) and before ``claude_relay`` and ``admin_command``:
     such an answer never becomes a cc task, a relay approval or an admin command; a cc or command line is never an
     answer.  Lines of the message that are no answer (a merged burst's cc task, say) go on to the later steps as the

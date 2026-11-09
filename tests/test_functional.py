@@ -1535,7 +1535,8 @@ class TestPrmPages:
         page.reload()
         line = page.locator(".prm-wechat-review")
         line.wait_for()
-        assert line.inner_text().strip() == "草稿也发到管理员微信里了：引用通知回 1 发出、2 不发、改 + 你的话"
+        assert line.inner_text().strip() == (
+            "草稿也发到管理员微信里了：引用通知回 1 发出、2 不发、改 + 你的话，带平台动作的回「执行」")
         tag = card.locator(".prm-wechat-tag")
         assert tag.inner_text() == "已发到微信" and "和这里点是同一个决定" in tag.get_attribute("title")
         assert "回 1 / 2 / 改" in tag.get_attribute("title")
