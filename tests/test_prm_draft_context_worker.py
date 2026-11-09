@@ -251,7 +251,8 @@ def test_her_sample_orders_are_told_matched_by_her_account_never_her_nickname(wo
     assert f"--expect-uid={JST_UID}" in call["argv"] and "--raw" not in call["argv"]
     prompt = prompt_of(mac)
     status = block(prompt, "sample_status")
-    assert JST_ORDER in status and "已发货" in status and "中通快递 ZT0000000001（11-06 15:20 发出）" in status
+    sent = worker.draft_context._when(worker.platforms.jst_time("2026-11-06 15:20:00"))   # (this Mac's clock, any TZ)
+    assert JST_ORDER in status and "已发货" in status and f"中通快递 ZT0000000001（{sent} 发出）" in status
     assert f"{CODE_A}（驼色;F，ERP 名「测试复古贝雷帽」）× 1" in status
     assert "YP2611010000002" not in status
     for gone in ("13900001111", "某某路", "张三", "测试达人", ACCOUNT):
@@ -483,22 +484,30 @@ def test_a_sample_order_of_a_matched_hat_gets_the_sheet_for_the_operators_only(w
 
 
 def test_a_hat_with_no_picture_behind_it_cannot_be_executed(worker, bot, mac):  # noqa: F811
+    """The order names a hat none of her pictures shows (CODE_C): not ready, 批准并执行 off, the deal reminded; the held
+    hats' sheet (2026-11-10) puts her newest picture next to that code's own photo, for the operators only."""
     order_rules(mac)
     mac.hats.answers(match={"图片-1.jpg": SURE})
     mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action={
         **SAMPLE_ORDER, "items": [{"item_id": DY_ITEM3, "skus": [{"sku_id": DY_SKU3, "qty": 1}]}]})
-    picture_job(bot, mac)
+    job_id = picture_job(bot, mac)
     run_one(worker, bot, mac.settings)
     [packet] = bot.prm.store.packets()
     preview = packet["platform"]["preview"]
     assert preview["verdict"] == "blocked"
-    assert f"{CODE_C}（均码粉色）这顶没有照片对过，先核对再建；{HOW}" in preview["problems"]
-    assert "operator_files" not in packet["meta"] and [c["args"][0] for c in mac.hats.calls()] == ["match"]
+    assert preview["problems"] == [f"{CODE_C}（均码粉色）这顶没有照片对过，先核对再建；{HOW}"]
+    match, sheet = mac.hats.calls()
+    assert match["args"][0] == "match" and sheet["args"][0] == "sheet" and sheet["args"][1].endswith(f"/图片-1.jpg={CODE_C}")
+    [kept] = packet["meta"]["operator_files"]
+    assert kept["name"] == f"对图单-{job_id}-扣着的.jpg" and kept["why"] == worker.draft_context.OPERATOR_HELD_WHY
+    held = [f["value"] for f in preview["facts"] if f["label"] == "对图（扣着的那几顶）"]
+    assert held == [f"{CODE_C}：扣着（她的图里都没对出这一款，左边放的是她最新发的那张）；扣着的那张对图单第 1 行，左边是她"
+                    f"这次发的 图片-1.jpg，右边是这个编码自己的图"]
     out = bot.prm.decide(packet["id"], "execute")
     assert out["ok"] is False
     snap = bot.prm.snapshot()
     [shown] = [p for p in snap["pending"] if p["id"] == packet["id"]]
-    assert shown["platform"]["can_execute"] is False and shown["operator_files"] == []
+    assert shown["platform"]["can_execute"] is False and [f["name"] for f in shown["operator_files"]] == [kept["name"]]
     assert "这顶没有照片对过" in (bot.prm.store.deal(mac.deal["id"])["attention"] or "")
 
 
@@ -620,20 +629,137 @@ def test_the_gate_takes_the_codes_the_console_confirmed(worker, tmp_path):  # no
                        home=tmp_path / "home")
 
     held = gated([])
-    assert held["block"]["verdict"] == "blocked" and held["held"] == [CODE_B, CODE_A] and held["used"] == []
-    assert held["block"]["problems"] == [
-        f"{CODE_B}（均码咖啡）对图没把握（只在没把握的图里，或者不是图里最像的那一款、那个颜色）：先核对再建；{HOW}",
-        f"{CODE_A} 对图要再看（！要再看：颜色：图最像 深棕）：先核对再建；{HOW}"]
+    assert held["block"]["verdict"] == "blocked" and held["held"] == [CODE_A, CODE_B] and held["used"] == []
+    assert held["block"]["problems"] == [                                 # (in the order's line order)
+        f"{CODE_A} 对图要再看（！要再看：颜色：图最像 深棕）：先核对再建；{HOW}",
+        f"{CODE_B}（均码咖啡）对图没把握（只在没把握的图里，或者不是图里最像的那一款、那个颜色）：先核对再建；{HOW}"]
+    assert held["sheet"] and held["held_sheet"] and held["held_why"] == dc.OPERATOR_HELD_WHY
+    assert [f["value"] for f in held["block"]["facts"] if f["label"] == dc.HELD_LABEL] == [
+        f"{CODE_B}：扣着（同款别的颜色（她的图最像的是驼色））；扣着的那张对图单第 1 行，左边是她这次发的 图片-1.jpg，"
+        f"右边是这个编码自己的图"]
     let = gated([CODE_B, CODE_A])
     assert let["block"]["verdict"] == "ready", let["block"]["problems"]
-    assert let["held"] == [] and let["used"] == [CODE_B, CODE_A]
+    assert let["held"] == [] and let["used"] == [CODE_A, CODE_B] and let["held_sheet"]
     facts = [f["value"] for f in let["block"]["facts"]]
     assert f"{CODE_B}：运营在控制台点了「对过图了」（没有图对）" in facts
     assert f"{CODE_A}：对图单说要再看（！要再看：颜色：图最像 深棕），运营在控制台点了「对过图了」" in facts
+    assert (f"{CODE_B}：运营在控制台点了「对过图了」；扣着的那张对图单第 1 行，左边是她这次发的 图片-1.jpg，右边是"
+            f"这个编码自己的图") in facts
     text = dc.context_text({"ok": True, "orders": []}, {"ok": True, "photos": []}, {}, confirmed=[CODE_B])
     assert f"（运营对过图、在控制台点了「对过图了」的编码，可以用来建寄样单：{CODE_B}）" in text
     assert "在控制台点了" not in dc.context_text({"ok": True, "orders": []}, {"ok": True, "photos": []}, {}).replace(
         dc.PHOTO_RULE, "")
+
+
+def test_every_held_hat_gets_a_sheet_row_that_says_why_it_is_held(worker, tmp_path, monkeypatch):  # noqa: F811
+    """Verification of 2a4afd2 (2026-11-10): a held hat had no sheet row to look at before 「对过图了」.  Now the held hats
+    get their own sheet (``hat_match.py sheet``): her picture whose ranking has the code (else her newest one) next to
+    that code's own photo, the style's whole photo (「整款图」) when it has no colour of its own; each row's fact says why
+    it is held; a code with no photo at all says so on its hold (「没有这个编码的图，请自己找图核对」) and keeps its button.
+    At most MAX_HELD_ROWS rows, within the job's budget; a held sheet not made is only a fact (no more problems)."""
+    dc = worker.draft_context
+    hats_dir = tmp_path / "hat-index"
+    hats_dir.mkdir()
+    (hats_dir / "hat_match.py").write_text(FAKE_HAT, encoding="utf-8")
+
+    def answers(**values):
+        (hats_dir / "answers.json").write_text(json.dumps({"match": {}, **values}, ensure_ascii=False), encoding="utf-8")
+
+    def calls():
+        log = hats_dir / "calls.jsonl"
+        return [json.loads(x) for x in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
+
+    answers(sheet={CODE_B: {"colour": "深棕（整款图，没有这个颜色的单独图）"}, CODE_C: {"sku_photo": False}})
+    opts = {**dc.options({"draft_context": {"hat_index": str(hats_dir), "hat_python": sys.executable}}), "stock": False,
+            "gap_sec": 0.0}
+    ws, rel = picture_in(tmp_path)
+    entry = {"sha256": "0" * 64, "rel": rel, "name": "图片-1.jpg", "job": 5, "at": time.time(), "now": True,
+             "hats": dc.trimmed(SURE), "verdict": dc.SURE, "error": ""}            # (a sure 驼色 picture: CODE_A)
+    action = {"action": "jst.sample_order", "shop": "dy", "items": [
+        {"item_id": DY_ITEM2, "skus": [{"sku_id": DY_SKU2B, "qty": 1}]},           # CODE_B: the hat's other colour
+        {"item_id": DY_ITEM3, "skus": [{"sku_id": DY_SKU3, "qty": 1}]}]}           # CODE_C: in none of her pictures
+    context = dc.Context("", {"ok": True, "orders": []}, {"photos": [entry]}, {})
+
+    def gated():
+        return dc.gate({"verdict": "ready", "action": action, "facts": [], "problems": []}, context,
+                       platforms=worker.platforms, cfg={"dirs": {}}, opts=opts, catalog=coded_catalog(), workspace=ws,
+                       home=tmp_path / "home")
+
+    out = gated()
+    assert out["held"] == [CODE_B, CODE_C] and out["sheet"] is None and Path(out["held_sheet"]).is_file()
+    assert out["block"]["problems"] == [
+        f"{CODE_B}（均码咖啡）对图没把握（只在没把握的图里，或者不是图里最像的那一款、那个颜色）：先核对再建；{HOW}",
+        f"{CODE_C}（均码粉色）这顶没有照片对过，先核对再建；没有这个编码的图，请自己找图核对；{HOW}"]
+    assert [f["value"] for f in out["block"]["facts"] if f["label"] == dc.HELD_LABEL] == [
+        f"{CODE_B}：扣着（同款别的颜色（她的图最像的是驼色））；扣着的那张对图单第 1 行，左边是她这次发的 图片-1.jpg，"
+        f"右边是这一款的整款图（没有这个颜色的单独图）",
+        f"{CODE_C}：扣着（她的图里都没对出这一款，左边放的是她最新发的那张）；扣着的那张对图单第 2 行，左边是她这次发的 "
+        f"图片-1.jpg，右边是没有这个编码的图"]
+    [run] = calls()
+    assert run["args"][0] == "sheet" and [a.rpartition("/")[2] for a in run["args"][1:3]] == [
+        f"图片-1.jpg={CODE_B}", f"图片-1.jpg={CODE_C}"]
+    # the reasons of the other kinds
+    low = dc.trimmed([hat(STYLE_1 + "X", "别的款", 1.0, ("黑色", "A7269901009A-M", 9.0)),
+                      hat(STYLE_1, "测试药盒帽", 0.98, ("驼色", CODE_A, 30.0), ("深棕", CODE_B, 31.0))])
+    assert dc.held_why(dc.candidate_of(CODE_B, [{**entry, "hats": low}]), opts) == "不是她的图最像的那一款（这一款排第 2）"
+    assert dc.held_why(dc.candidate_of(CODE_A, [{**entry, "hats": dc.trimmed(no_own_colours())}]), opts) == \
+        "颜色没比过（图库里没有这个颜色的单独图）"
+    assert dc.held_why(dc.candidate_of(CODE_A, [{**entry, "hats": dc.trimmed(CLOSE)}]), opts) == \
+        "她的图没把握（最像的两款分数差不多）"
+    assert dc.held_why(None, opts) == "她没发过能对的图" and dc.candidate_of(CODE_A, [{**entry, "error": "x"}]) is None
+    # at most MAX_HELD_ROWS rows; the rest say so, and nothing is said about their photo
+    monkeypatch.setattr(dc, "MAX_HELD_ROWS", 1)
+    capped = gated()
+    assert capped["block"]["problems"][1] == f"{CODE_C}（均码粉色）这顶没有照片对过，先核对再建；{HOW}"
+    assert f"{CODE_C}：扣着的那张对图单最多 1 行，这一顶放不下了，请自己找图核对" in [
+        f["value"] for f in capped["block"]["facts"]]
+    monkeypatch.setattr(dc, "MAX_HELD_ROWS", 6)
+    # the held sheet not made (the index fails on it, or no time left): a fact, the holds as they were
+    answers(sheet={}, fail_with=f"={CODE_B}")
+    failed = gated()
+    assert failed["held_sheet"] is None and failed["held"] == [CODE_B, CODE_C] and len(failed["block"]["problems"]) == 2
+    assert "扣着的那几顶的对图单没做成（退出码 1），请自己找图核对" in [f["value"] for f in failed["block"]["facts"]]
+    facts: list = []
+    assert dc._held_sheet(worker.platforms, {}, opts, ws, [(CODE_B, dc.candidate_of(CODE_B, [entry]), "x")], {}, facts,
+                          home=tmp_path / "home", beat=None, sleep=lambda _: None, deadline=time.time() + 1,
+                          clock=time.time) is None
+    assert facts == ["扣着的那几顶的对图单没做成（这次没时间做了），请自己找图核对"]
+
+
+def test_the_held_hats_sheet_goes_back_too_and_never_holds_the_order_itself(worker, bot, mac, monkeypatch):  # noqa: F811
+    """A sample order with a sure hat (CODE_A) and a held one (CODE_B, the other colour): both sheets go back on the
+    operator-only channel, the held hats' one as 「对图单-<任务>-扣着的.jpg」; when that one does not get there (404, an
+    older bot) the preview only says so in its facts, while the side-by-side sheet still goes."""
+    order_rules(mac)
+    mac.hats.answers(match={"图片-1.jpg": SURE})
+    mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action={
+        **SAMPLE_ORDER, "items": [{"item_id": DY_ITEM2, "skus": [{"sku_id": DY_SKU2, "qty": 1},
+                                                                 {"sku_id": DY_SKU2B, "qty": 1}]}]})
+    job_id = picture_job(bot, mac)
+    run_one(worker, bot, mac.settings)
+    [packet] = bot.prm.store.packets()
+    assert [f["name"] for f in packet["meta"]["operator_files"]] == [f"对图单-{job_id}.jpg", f"对图单-{job_id}-扣着的.jpg"]
+    assert [c["args"][0] for c in mac.hats.calls()] == ["match", "sheet", "sheet"]
+    assert packet["meta"]["photo_held"] == [CODE_B]
+    [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
+    assert len(shown["operator_files"]) == 2 and shown["operator_files"][1]["why"] == worker.draft_context.OPERATOR_HELD_WHY
+    real = worker.RelayClient.upload_operator
+
+    def upload(self, job, path, name):
+        if name.endswith("-扣着的.jpg"):
+            raise urllib.error.HTTPError("http://x", 404, "Not Found", {}, None)
+        return real(self, job, path, name)
+
+    monkeypatch.setattr(worker.RelayClient, "upload_operator", upload)
+    job_id = picture_job(bot, mac, text="[11:06] 就这两顶")
+    run_one(worker, bot, mac.settings)
+    newest = bot.prm.store.packets()[0]
+    preview = newest["platform"]["preview"]
+    assert preview["problems"] == [
+        f"{CODE_B}（均码咖啡）对图没把握（只在没把握的图里，或者不是图里最像的那一款、那个颜色）：先核对再建；{HOW}"]
+    assert "扣着的那张对图单没传到 Windows（Windows 的机器人还是旧版），请自己找图核对" in [
+        f["value"] for f in preview["facts"]]
+    assert [f["name"] for f in newest["meta"]["operator_files"]] == [f"对图单-{job_id}.jpg"]
 
 
 def test_a_held_hat_is_let_go_by_the_console_and_taken_back_by_its_undo(worker, bot, mac):  # noqa: F811
@@ -695,7 +821,10 @@ def test_a_code_only_in_an_unsure_picture_or_not_its_best_hat_is_not_taken(worke
     assert preview["verdict"] == "blocked" and preview["problems"] == [
         f"{CODE_B}（均码咖啡）对图没把握（只在没把握的图里，或者不是图里最像的那一款、那个颜色）：先核对再建；"
         f"{HOW}"]
-    assert [c["args"][0] for c in mac.hats.calls()] == ["match"] and "operator_files" not in packet["meta"]
+    assert [c["args"][0] for c in mac.hats.calls()] == ["match", "sheet"]          # (the held hats' sheet only)
+    assert [f["name"] for f in packet["meta"]["operator_files"]] == [f"对图单-{packet['job_id']}-扣着的.jpg"]
+    assert f"{CODE_B}：扣着（不是她的图最像的那一款（这一款排第 2））；扣着的那张对图单第 1 行" in " ".join(
+        f["value"] for f in preview["facts"])
     [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
     assert shown["platform"]["can_execute"] is False
     # a sure picture whose second hat has the code: the same
@@ -738,7 +867,7 @@ def test_a_sheet_that_says_look_again_or_has_no_sku_photo_waits_for_an_operators
     picture_job(bot, mac, text="[11:06] 就这顶")
     run_one(worker, bot, mac.settings)
     assert newest_preview(bot)["problems"] == [
-        f"{CODE_A} 对图要再看（图库里没有这个编码的图）：先核对再建；{HOW}"]
+        f"{CODE_A} 对图要再看（没有这个编码的图，请自己找图核对）：先核对再建；{HOW}"]
     # the sheet cannot be made (the index fails): not ready
     mac.hats.answers(match={"图片-2.jpg": SURE}, exit=0)
     (mac.hats.dir / "hat_match.py").write_text(FAKE_HAT.replace('if args[0] == "match":', 'if args[0] == "sheet": sys.exit(3)\n'
@@ -793,7 +922,7 @@ def test_the_photo_memory_and_the_sheets_go_after_a_week(worker, tmp_path):  # n
 def test_a_worker_that_does_not_check_by_photo_leaves_the_sample_order_held(worker, bot, mac, monkeypatch):  # noqa: F811
     """Review 2026-11-09: the bot's switch on and a worker whose draft_context.py did not load (an older worker, one not
     restarted, the same): its preview of a sample order with no picture behind it says ready, but nothing checked it;
-    the bot holds it (「Mac 没有对图：worker 旧了或没重启」), 批准并执行 off, and so after its 重新预览."""
+    the bot holds it (「Mac 没有对图：worker 旧了或没重启，更新、重启以后点「重新预览」」), 批准并执行 off, and so after its 重新预览."""
     monkeypatch.setattr(worker, "draft_context", None)
     order_rules(mac)
     mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action=SAMPLE_ORDER)
@@ -802,13 +931,13 @@ def test_a_worker_that_does_not_check_by_photo_leaves_the_sample_order_held(work
     run_one(worker, bot, mac.settings)
     [packet] = bot.prm.store.packets()
     preview = packet["platform"]["preview"]
-    assert preview["verdict"] == "blocked" and preview["problems"] == ["Mac 没有对图：worker 旧了或没重启"]
+    assert preview["verdict"] == "blocked" and preview["problems"] == ["Mac 没有对图：worker 旧了或没重启，更新、重启以后点「重新预览」"]
     assert "draft_context" not in packet["meta"]
     [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
     assert shown["platform"]["can_execute"] is False and bot.prm.decide(packet["id"], "execute")["ok"] is False
     assert bot.prm.decide(packet["id"], "repreview")["ok"]
     run_one(worker, bot, mac.settings)
-    assert bot.prm.store.packet(packet["id"])["platform"]["preview"]["problems"] == ["Mac 没有对图：worker 旧了或没重启"]
+    assert bot.prm.store.packet(packet["id"])["platform"]["preview"]["problems"] == ["Mac 没有对图：worker 旧了或没重启，更新、重启以后点「重新预览」"]
 
 
 def test_an_older_bot_never_gets_the_sheet_and_the_order_waits(worker, bot, mac, monkeypatch):  # noqa: F811
@@ -1040,7 +1169,8 @@ def test_a_colour_never_compared_by_photo_is_never_taken_for_sure(worker, bot, m
     assert dc.verdict(dc.trimmed([hat(STYLE_1, "测试药盒帽", 1.25)]), dc.options({})) == dc.NO_OWN_COLOUR  # (no colours)
     order_rules(mac, rows=[her_row(items=PINK)])
     mac.hats.answers(match={"图片-1.jpg": no_own_colours()}, sheet={CODE_B: {"colour": "深棕"}})
-    for code, sku, name in ((CODE_B, DY_SKU2B, "均码咖啡"), (CODE_A, DY_SKU2, "均码黑色")):
+    for code, sku, name, why in ((CODE_B, DY_SKU2B, "均码咖啡", "同款别的颜色（她的图最像的是驼色）"),
+                                 (CODE_A, DY_SKU2, "均码黑色", "颜色没比过（图库里没有这个颜色的单独图）")):
         mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action={
             **SAMPLE_ORDER, "items": [{"item_id": DY_ITEM2, "skus": [{"sku_id": sku, "qty": 1}]}]})
         picture_job(bot, mac, text="[11:05] 要这顶")
@@ -1049,7 +1179,9 @@ def test_a_colour_never_compared_by_photo_is_never_taken_for_sure(worker, bot, m
         assert f"：{dc.NO_OWN_COLOUR}" in photos and "这张图不能用来建寄样单" in photos
         held = newest_preview(bot)
         assert held["verdict"] == "blocked" and held["problems"][0].startswith(f"{code}（{name}）对图没把握"), held
-    assert [c["args"][0] for c in mac.hats.calls()] == ["match"]       # (matched once; no sheet for either)
+        [row] = [f["value"] for f in held["facts"] if f["label"] == dc.HELD_LABEL]
+        assert row.startswith(f"{code}：扣着（{why}）；扣着的那张对图单第 1 行，左边是她") and "图片-1.jpg" in row, row
+    assert [c["args"][0] for c in mac.hats.calls()] == ["match", "sheet", "sheet"]  # (matched once; a held sheet each)
     # a sure picture: its best colour (CODE_A) only; the hat's other colour (CODE_B) waits
     mac.hats.answers(match={"图片-2.jpg": SURE})
     mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action={

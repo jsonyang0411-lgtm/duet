@@ -4112,10 +4112,8 @@ class PrmService:
             return {"ok": False, "error": "正在重新预览，等结果出来再批准"}
         if self._draft_context and draft_context.unchecked(packet):
             # PRM_DRAFT_CONTEXT: its last preview was not checked by photo (a draft from before the switch was on too), or
-            # by an older rule (a v1 mark: 「这份是旧规则核的…」)
-            reason = draft_context.unchecked_reason(packet)
-            return {"ok": False, "error": reason if reason == draft_context.OLD_RULE
-                    else f"{draft_context.NOT_GATED}：点「重新预览」，Mac 对过图再批准"}
+            # by an older rule (a v1 / v2 mark: 「这份是旧版 Mac 按旧规则核的…」)
+            return {"ok": False, "error": draft_context.unchecked_reason(packet)}   # (each says to 重新预览)
         gone = draft_context.withdrawn(packet, self._confirmed_codes(packet["deal_id"])) if self._draft_context else []
         if gone:
             # PRM_DRAFT_CONTEXT: its last preview let a hat go only by a 「对过图了」 that was taken back (「撤销」) since

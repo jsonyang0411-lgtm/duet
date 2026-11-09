@@ -14,9 +14,9 @@ picture behind it leaves the preview not ready, and the sheet comes back with th
   ``unambiguous``).  The Mac finds her orders by these, never by her nickname.  Without the key the Mac does none of it
   (the switch off, an older bot): the prompt as before, byte for byte.
 - ``ungated``: with the switch on, a jst.sample_order preview the Mac did not check by photo (no ``draft_context:
-  {"v": 2, "gated": true}`` next to it: an older worker, a v1 one, one not restarted, one whose module did not load) is
-  held: not ready,
-  「Mac 没有对图：worker 旧了或没重启」.  The packet keeps the mark of its last preview (``meta.draft_context``); one
+  {"v": 3, "gated": true}`` next to it: an older worker, a v1 or v2 one, one not restarted, one whose module did not
+  load) is held: not ready,
+  「Mac 没有对图：worker 旧了或没重启，更新、重启以后点「重新预览」」.  The packet keeps the mark of its last preview (``meta.draft_context``); one
   without it (``unchecked``: a draft from before the switch was on, too) cannot be approved until a new preview.
 - ``confirmable`` / ``held_out`` / ``withdrawn``: 「对过图了」 (2026-11-09; words in the 起草备注 confirm nothing): the Mac
   names the codes its check held for photo reasons (``photo_held``) and those it let go only by an operator's
@@ -49,13 +49,15 @@ from typing import Callable, Optional
 logger = logging.getLogger(__name__)
 
 KEY = "draft_context"               # the job's meta, and the Mac's mark next to a checked sample order
-MARK_VERSION = 2                    # the mark's ``v`` the bot takes: 2 since a colour never compared is not sure (an older
-                                    # worker's v1 mark is held like no mark)
+MARK_VERSION = 3                    # the mark's ``v`` the bot takes; an older one is held like no mark: a v1 worker took a
+                                    # colour never compared for sure, a v2 one let a hat go on 「确认 X」 in the 起草备注,
+                                    # its false positives too (3 since 2026-11-10: the console's 「对过图了」 only)
 OPERATOR_FILES = "operator_files"   # the draft's (the Mac's answer) and the packet's meta
 SHEET_PREFIX = "对图单-"            # the Mac's sheet (worker.sample_order_gate): never an attachment, named or not
 SHEET_WHY = "寄样单里每一顶和她发的图并排对比；只给运营看，不发给达人"
-NOT_GATED = "Mac 没有对图：worker 旧了或没重启"
-OLD_RULE = "这份是旧规则核的，点「重新预览」按新规则再核"   # a kept draft whose mark is older than MARK_VERSION
+NOT_GATED = "Mac 没有对图：worker 旧了或没重启，更新、重启以后点「重新预览」"
+OLD_RULE = "这份是旧版 Mac 按旧规则核的：更新、重启 Mac 的 worker 以后，点「重新预览」按新规则再核"   # a kept draft
+                                    # whose mark is older than MARK_VERSION
 # 「对过图了」 (2026-11-09): the Mac's answer, and the packet's meta, name the item codes its check held for photo reasons
 # (``photo_held``: the console offers 「对过图了，用 <编码>」 for each) and those it let go only by an operator's
 # confirmation (``photo_confirmed``: taken back, 「撤销」, the draft waits for a new preview); the deal's confirmations
@@ -134,9 +136,9 @@ def job_context(store, deal_id: int, accounts) -> dict:
 
 
 def gated_of(value) -> bool:
-    """Did the Mac check this answer's sample order by photo: its ``draft_context`` is ``{"v": 2, "gated": true}``
+    """Did the Mac check this answer's sample order by photo: its ``draft_context`` is ``{"v": 3, "gated": true}``
     (``value``: the answer as a dict, or its JSON text; a packet's meta too).  A mark older than MARK_VERSION is not
-    one: that worker took a colour it never compared for sure."""
+    one: that worker took a colour it never compared for sure (v1), or a 「确认 X」 in the 起草备注 (v2)."""
     if isinstance(value, str):
         try:
             value = json.loads(value)

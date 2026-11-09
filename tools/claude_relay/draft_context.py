@@ -38,8 +38,12 @@ creators share is not sent: the bot leaves it out), the item codes an operator c
    The codes with a picture behind them get the side-by-side sheet (``hat_match.py sheet <her photo>=<code> …
    --json``, under the CLI lock: it may ask 聚水潭 for a SKU photo, read-only); a row it marks 「！要再看」 or without
    the SKU's own photo (none, or only the whole style's 「整款图」) blocks too, and is held, unless an operator
-   confirmed that code.
-   The worker sends the sheet back on the relay's operator-only channel; the available stock of the styles (``jst
+   confirmed that code.  The held codes (and the ones an operator let go) get a sheet of their own (``_held_sheet``,
+   2026-11-10): her picture whose ranking has the code, else her newest one, next to the code's own photo (the style's
+   whole photo when it has none), each row's fact saying why it is held (``held_why``); a code with no photo at all
+   says so on its hold (NO_CODE_PHOTO).  That sheet never holds the order itself.  The problems follow the order's
+   lines.
+   The worker sends the sheets back on the relay's operator-only channel; the available stock of the styles (``jst
    goods-detail``, read-only) is a fact of the preview for the operators, never told to the model.
 
 A job has a time budget (``budget_sec`` before Claude starts, ``gate_budget_sec`` for the check); a tool that timed out
@@ -114,6 +118,12 @@ EXIT_WORDS = {77: "聚水潭登录失效了", 76: "聚水潭要验证或限流�
               2: "聚水潭命令行不认这些参数（jushuitan-engineering 太旧？）"}
 TOOL_NAMES = {"jst": "聚水潭命令", "hat": "帽子图库"}
 OPERATOR_SHEET_WHY = "寄样单里每一顶和她发的图并排对比（√ 图对得上 / ！要再看）；只给运营看，不发给达人"
+# The held hats' sheet (2026-11-10): her picture next to each held code's own photo (and each one an operator let go by
+# 「对过图了」), so 「对过图了」 always has a sheet row to look at; why each is held is said in the preview's facts
+OPERATOR_HELD_WHY = "扣着的那几顶（和运营点了「对过图了」的）：她的图和这个编码自己的图并排，为什么扣着写在预览里；只给运营看，不发给达人"
+HELD_LABEL = "对图（扣着的那几顶）"
+NO_CODE_PHOTO = "没有这个编码的图，请自己找图核对"
+MAX_HELD_ROWS = 6                   # rows of the held hats' sheet (each a hat_match run's row: a few seconds)
 SURE = "有把握"
 WHOLE_STYLE = "整款图"              # hat_match.py sheet: a SKU picture that is only the style's main photo
 MAX_MATCH_TRIES = 3                 # a picture whose matching failed this often is not tried again
@@ -1173,20 +1183,69 @@ def _style_guess(code: str) -> str:
     return f"ACE7CN20{m.group(1)}{m.group(2)}0{m.group(3)}" if m else base
 
 
+def candidate_of(code: str, photos: list) -> Optional[dict]:
+    """The picture of hers to put next to a code no sure picture stands for (a held one, or one an operator let go) in
+    the held hats' sheet: the one whose ranking has the code best (its hat, then its colour; the newer first),
+    ``{"entry", "hat", "colour", "ranked": True}``; else her newest picture the index read (``ranked`` False: the code is
+    in none of her pictures' rankings); None when there is none."""
+    best = None
+    for entry in photos or []:
+        if entry.get("error"):
+            continue
+        for i, hat in enumerate(entry.get("hats") or []):
+            for j, c in enumerate(hat.get("colours") or []):
+                if code in [str(k).upper() for k in c.get("codes") or []]:
+                    rank = (i, j, -float(entry.get("at") or 0))
+                    if best is None or rank < best[0]:
+                        best = (rank, {"entry": entry, "hat": i + 1, "colour": j + 1, "ranked": True})
+    if best is not None:
+        return best[1]
+    read = [e for e in photos or [] if not e.get("error") and e.get("hats")]
+    if not read:
+        return None
+    newest = max(read, key=lambda e: (bool(e.get("now")), float(e.get("at") or 0)))
+    return {"entry": newest, "hat": None, "colour": None, "ranked": False}
+
+
+def held_why(candidate: Optional[dict], opts: dict) -> str:
+    """Why a held code's picture (``candidate_of``) does not stand for it, as its row of the held hats' sheet says:
+    同款别的颜色, 颜色没比过, 颜色没把握, not her picture's best hat, her picture unsure, none of her pictures has it."""
+    if candidate is None:
+        return "她没发过能对的图"
+    if not candidate["ranked"]:
+        return "她的图里都没对出这一款，左边放的是她最新发的那张"
+    hats = candidate["entry"].get("hats") or []
+    said = verdict(hats, opts) if hats else ""
+    if candidate["hat"] > 1:
+        return f"不是她的图最像的那一款（这一款排第 {candidate['hat']}）"
+    if candidate["colour"] > 1:
+        best = str((hats[0].get("colours") or [{}])[0].get("colour") or "").strip() or "另一个颜色"
+        return f"同款别的颜色（她的图最像的是{best}）"
+    if said in (NO_OWN_COLOUR, NO_COLOUR_DATA):
+        return "颜色没比过（" + ("图库的颜色数据要重建" if said == NO_COLOUR_DATA else "图库里没有这个颜色的单独图") + "）"
+    if said.startswith("款有把握，颜色没把握"):
+        return "颜色没把握"
+    return f"她的图{said}" if said.startswith("没把握") else "对图没把握"
+
+
 def gate(block: dict, context: Context, *, platforms, cfg: Optional[dict], opts: dict, catalog, workspace: Path,
          home: Path, beat=None, sleep: Callable[[float], None] = time.sleep,
          clock: Callable[[], float] = time.time) -> dict:
     """The photo check of a previewed jst.sample_order (any other action: as it is, ``gated`` False).  ``{"block",
-    "sheet", "why", "gated"}``: the preview with the check's facts and problems (not ready when a SKU has no 聚水潭
-    code, a code has neither a sure picture of hers nor a confirmation, the sheet could not be made, or a row of it says
-    to look again or has no SKU photo and no operator confirmed that code), the sheet's path when one was made (the
-    worker sends it back on the operator-only channel) and its ``why``; ``gated`` True: the check ran (the worker marks
-    the draft so; the bot holds a sample order the Mac did not check); ``held``: the codes it held for photo reasons (no
-    sure picture, a sheet row to look again at), which the console offers 「对过图了」 for; ``used``: the codes it let go
-    only by such a confirmation (taken back, the bot holds the draft).  Within ``gate_budget_sec``.  Never raises."""
+    "sheet", "why", "held_sheet", "held_why", "gated", "held", "used"}``: the preview with the check's facts and
+    problems in the order's line order (not ready when a SKU has no 聚水潭 code, a code has neither a sure picture of
+    hers nor a confirmation, the sheet could not be made, or a row of it says to look again or has no SKU photo and no
+    operator confirmed that code), the sheet's path when one was made (the worker sends it back on the operator-only
+    channel) and its ``why``; ``held_sheet`` / ``held_why``: the held hats' sheet (``_held_sheet``: her picture next to
+    each held, or operator-confirmed, code's own photo; never needed for the order); ``gated`` True: the check ran (the
+    worker marks the draft so; the bot holds a sample order the Mac did not check); ``held``: the codes it held for photo
+    reasons (no sure picture, a sheet row to look again at), which the console offers 「对过图了」 for; ``used``: the codes
+    it let go only by such a confirmation (taken back, the bot holds the draft).  Within ``gate_budget_sec``.  Never
+    raises."""
     action = block.get("action") if isinstance(block, dict) else None
     if not isinstance(action, dict) or action.get("action") != "jst.sample_order":
-        return {"block": block, "sheet": None, "why": "", "gated": False, "held": [], "used": []}
+        return {"block": block, "sheet": None, "why": "", "held_sheet": None, "held_why": "", "gated": False,
+                "held": [], "used": []}
     out = copy.deepcopy(block)
     out.setdefault("facts", [])
     out.setdefault("problems", [])
@@ -1197,7 +1256,7 @@ def gate(block: dict, context: Context, *, platforms, cfg: Optional[dict], opts:
     except Exception as e:
         log.exception("draft context: the sample order's photo check failed")
         _block(out, f"Mac 对图时出错（{type(e).__name__}）：先核对再建")
-        result = {"block": out, "sheet": None, "why": "", "held": [], "used": []}
+        result = {"block": out, "sheet": None, "why": "", "held_sheet": None, "held_why": "", "held": [], "used": []}
     return {**result, "gated": True}
 
 
@@ -1218,70 +1277,120 @@ def _gate(block: dict, action: dict, context: Context, *, platforms, cfg: dict, 
     earlier = confirmed_codes(context.samples, context.verified)
     noted = set(context.confirmed)                   # (the operators' 「对过图了」 in the console)
     photos = (context.photos or {}).get("photos") or []
-    pairs, facts, styles, held, used = [], [], {}, [], []
-    for line in lines:
+    pairs, facts, styles, problems, holds, others = [], [], {}, [], {}, []
+    held_at, used_at = [], []                        # (line, code): the console's buttons, what 「撤销」 holds
+    for n, line in enumerate(lines):
         label = f"{SHOP_NAMES.get(action.get('shop'), action.get('shop'))}商品 {line['item']} 的 SKU {line['sku']}" + (
             f"（{line['name']}）" if line["name"] else "")
         code = line["code"]
         if not code:
-            _block(block, f"{label} 在商品目录里没有聚水潭编码，对不了图：先核对再建")
+            problems.append((n, f"{label} 在商品目录里没有聚水潭编码，对不了图：先核对再建"))
             continue
         seen, unsure = photo_of(code, photos, opts)
         if seen is not None:
-            pairs.append((code, seen))
+            pairs.append((n, code, seen))
             styles.setdefault(seen.get("style") or _style_guess(code), []).append(code)
             continue
         if code in noted:
             facts.append(f"{code}：运营在控制台点了「对过图了」（没有图对）")
-            used.append(code)
+            used_at.append((n, code))
+            candidate = candidate_of(code, photos)
+            if candidate is not None:                # (its row in the held hats' sheet, for whoever approves it)
+                others.append((code, candidate, ""))
         elif code in earlier:
             if earlier[code]["status"] in SENT_STATES:
                 facts.append(f"{code}：她以前的寄样单 {earlier[code]['order']} 里寄过（没有图对）")
             else:
                 facts.append(f"{code}：机器人以前给她建的寄样单 {earlier[code]['order']} 里有（还没发出；没有图对）")
-        elif unsure:
-            _block(block, f"{code}（{line['name'] or line['sku']}）对图没把握（{unsure}）：先核对再建；{CONFIRM_HOW}")
-            held.append(code)
-            continue
         else:
-            _block(block, f"{code}（{line['name'] or line['sku']}）这顶没有照片对过，先核对再建；{CONFIRM_HOW}")
-            held.append(code)
+            name = line["name"] or line["sku"]
+            holds[code] = {"n": n, "what": f"{code}（{name}）对图没把握（{unsure}）：先核对再建" if unsure
+                           else f"{code}（{name}）这顶没有照片对过，先核对再建", "no_photo": False}
+            held_at.append((n, code))
+            candidate = candidate_of(code, photos)
+            if candidate is not None:
+                others.append((code, candidate, held_why(candidate, opts)))
             continue
         styles.setdefault(_style_guess(code), []).append(code)
-    sheet, why = None, ""
+    sheet, why, sheet_problem = None, "", ""
     if pairs:
-        sheet, rows, problem = _make_sheet(platforms, cfg, opts, workspace, pairs, home=home, beat=beat, sleep=sleep,
-                                           deadline=deadline, clock=clock)
+        sheet, rows, problem = _make_sheet(platforms, cfg, opts, workspace, [(code, seen) for _, code, seen in pairs],
+                                           home=home, beat=beat, sleep=sleep, deadline=deadline, clock=clock)
         if problem:
-            _block(block, f"对图单没做成（{problem}）：先核对再建")
-        for (code, seen), row in zip(pairs, rows or [None] * len(pairs)):
+            sheet_problem = f"对图单没做成（{problem}）：先核对再建"
+        for (n, code, seen), row in zip(pairs, rows or [None] * len(pairs)):
             picture = seen["entry"]
-            whose = (f"这次发的 {picture.get('name')}" if picture.get("now")
-                     else f"她 {_when(picture.get('at'))} 发的 {picture.get('name')}")
             rank = f"图库里第 {seen['hat']} 款、第 {seen['colour']} 个颜色"
             note = row.get("note") if isinstance(row, dict) else ""
-            facts.append(f"{code} {seen.get('colour_name') or ''}：对的是{whose}（{rank}）" + (f"；{note}" if note else ""))
+            facts.append(f"{code} {seen.get('colour_name') or ''}：对的是{_whose(picture)}（{rank}）"
+                         + (f"；{note}" if note else ""))
             if not isinstance(row, dict):
                 continue
             if row.get("ok") is False or row.get("sku_photo") is False:
                 why_row = (note if row.get("ok") is False else "对图单右边只有整款图，没有这个颜色的单独图"
-                           if row.get("whole") else "图库里没有这个编码的图")
+                           if row.get("whole") else NO_CODE_PHOTO)
                 if code in noted:
                     facts.append(f"{code}：对图单说要再看（{why_row}），运营在控制台点了「对过图了」")
-                    used.append(code)
+                    used_at.append((n, code))
                 else:
-                    _block(block, f"{code} 对图要再看（{why_row}）：先核对再建；{CONFIRM_HOW}")
-                    held.append(code)
+                    problems.append((n, f"{code} 对图要再看（{why_row}）：先核对再建；{CONFIRM_HOW}"))
+                    held_at.append((n, code))
         why = OPERATOR_SHEET_WHY if sheet else ""
+    held_facts: list = []
+    held_sheet = (_held_sheet(platforms, cfg, opts, workspace, others, holds, held_facts, home=home, beat=beat,
+                              sleep=sleep, deadline=deadline, clock=clock) if others else None)
+    for code, hold in holds.items():
+        problems.append((hold["n"], f"{hold['what']}；" + (f"{NO_CODE_PHOTO}；" if hold["no_photo"] else "") + CONFIRM_HOW))
+    for _, text in sorted(problems, key=lambda p: p[0]):      # (in the order's line order)
+        _block(block, text)
+    if sheet_problem:
+        _block(block, sheet_problem)
     for text in facts:
         _fact(block, "对图", text)
+    for text in held_facts:
+        _fact(block, HELD_LABEL, text)
     if opts.get("stock") and styles and cfg.get("dirs", {}).get("jst"):
         stock = _read_stock(platforms, cfg, opts, styles, home=home, beat=beat, sleep=sleep, deadline=deadline,
                             clock=clock)
         if stock:
             _fact(block, "仓库可用库存（只给运营看，不跟达人说）", stock)
-    return {"block": block, "sheet": sheet, "why": why, "held": list(dict.fromkeys(held)),
-            "used": list(dict.fromkeys(used))}
+    return {"block": block, "sheet": sheet, "why": why, "held_sheet": held_sheet,
+            "held_why": OPERATOR_HELD_WHY if held_sheet else "",
+            "held": list(dict.fromkeys(code for _, code in sorted(held_at, key=lambda h: h[0]))),
+            "used": list(dict.fromkeys(code for _, code in sorted(used_at, key=lambda h: h[0])))}
+
+
+def _whose(picture: dict) -> str:
+    return (f"这次发的 {picture.get('name')}" if picture.get("now")
+            else f"她 {_when(picture.get('at'))} 发的 {picture.get('name')}")
+
+
+def _held_sheet(platforms, cfg: dict, opts: dict, workspace: Path, others: list, holds: dict, facts: list, *,
+                home: Path, beat, sleep, deadline: float, clock: Callable[[], float]) -> Optional[Path]:
+    """The held hats' sheet (2026-11-10): her picture (``candidate_of``) next to each held code's own photo, and next to
+    each code an operator let go by 「对过图了」 (``hat_match.py sheet``: the SKU's own photo, else the style's main photo,
+    「（整款图…）」), MAX_HELD_ROWS rows at most, within the job's budget (``_make_sheet``).  Each row is a fact in
+    ``facts`` saying why the code is held, which picture of hers is on the left and what is on the right; a held code
+    with no photo at all gets NO_CODE_PHOTO on its hold (``holds``).  It is never needed for the order (those hats are
+    held anyway, or confirmed): a sheet not made is only a fact.  Its path, or None."""
+    kept = others[:MAX_HELD_ROWS]
+    for code, _, _ in others[MAX_HELD_ROWS:]:
+        facts.append(f"{code}：扣着的那张对图单最多 {MAX_HELD_ROWS} 行，这一顶放不下了，请自己找图核对")
+    path, rows, problem = _make_sheet(platforms, cfg, opts, workspace, [(code, cand) for code, cand, _ in kept],
+                                      home=home, beat=beat, sleep=sleep, deadline=deadline, clock=clock)
+    if problem:
+        facts.append(f"扣着的那几顶的对图单没做成（{problem}），请自己找图核对")
+        return None
+    for i, ((code, candidate, why), row) in enumerate(zip(kept, rows), 1):
+        missing = not row["sku_photo"] and not row["whole"]
+        right = "没有这个编码的图" if missing else "这一款的整款图（没有这个颜色的单独图）" if row["whole"] else "这个编码自己的图"
+        head = f"{code}：扣着（{why}）" if code in holds else f"{code}：运营在控制台点了「对过图了」"
+        note = str(row.get("note") or "")
+        facts.append(f"{head}；扣着的那张对图单第 {i} 行，左边是她{_whose(candidate['entry'])}，右边是{right}"
+                     + (f"；图库说：{note}" if note.startswith("！") else ""))
+        if missing and code in holds:
+            holds[code]["no_photo"] = True
+    return path
 
 
 def _make_sheet(platforms, cfg: dict, opts: dict, workspace: Path, pairs: list, *, home: Path, beat, sleep,
@@ -1387,4 +1496,13 @@ def sheet_lost(block: dict, why: str, retry: bool = False) -> dict:
     out = copy.deepcopy(block)
     out.setdefault("problems", [])
     _block(out, f"对图单没传到 Windows（{why}），重新预览再传" if retry else f"对图单没传到 Windows（{why}）：先核对再建")
+    return out
+
+
+def held_sheet_lost(block: dict, why: str) -> dict:
+    """The preview once the held hats' sheet could not go to the bot: only a fact (those hats are held anyway, or an
+    operator confirmed them)."""
+    out = copy.deepcopy(block)
+    out.setdefault("facts", [])
+    _fact(out, HELD_LABEL, f"扣着的那张对图单没传到 Windows（{why}），请自己找图核对")
     return out

@@ -204,7 +204,7 @@ def test_the_operator_files_named_by_the_mac_are_never_attachments():
 SAMPLE_ACTION = {"action": "jst.sample_order", "shop": "dy", "items": [{"item_id": "3000000000000000102",
                  "skus": [{"sku_id": "3100000000000000202", "qty": 1}]}], "creator_platform": "dy",
                  "creator_account": ACCOUNT}
-GATED = {"v": 2, "gated": True}             # the Mac's mark next to a sample order it checked by photo
+GATED = {"v": 3, "gated": True}             # the Mac's mark next to a sample order it checked by photo
 
 
 def sample_block(verdict="ready", **extra):
@@ -324,12 +324,12 @@ def test_a_sample_order_the_mac_did_not_check_by_photo_is_held(clock, tmp_path):
         now = bots[-1].prm.store.packet(checked["id"])
         assert now["platform"]["preview"]["verdict"] == "blocked"
         assert now["platform"]["preview"]["problems"] == [draft_context.NOT_GATED]
-        assert now["meta"]["draft_context"] == {"v": 2, "gated": False} and draft_context.unchecked(now)
+        assert now["meta"]["draft_context"] == {"v": 3, "gated": False} and draft_context.unchecked(now)
 
         bots.append(make(clock, tmp_path / "held"))
         _, held = sheet_draft(bots[-1], with_brief=False, verdict="ready", gated=False)
         preview = held["platform"]["preview"]
-        assert preview["verdict"] == "blocked" and preview["problems"] == ["Mac 没有对图：worker 旧了或没重启"]
+        assert preview["verdict"] == "blocked" and preview["problems"] == ["Mac 没有对图：worker 旧了或没重启，更新、重启以后点「重新预览」"]
         [shown] = [p for p in bots[-1].prm.snapshot()["pending"] if p["id"] == held["id"]]
         assert shown["platform"]["can_execute"] is False
         assert bots[-1].prm.decide(held["id"], "execute")["ok"] is False
@@ -365,40 +365,49 @@ def test_a_sample_order_the_mac_did_not_check_by_photo_is_held(clock, tmp_path):
     assert draft_context.gated_of({"draft_context": {"gated": "yes"}}) is False and draft_context.gated_of("{]") is False
 
 
-def test_a_mark_older_than_v2_is_held_like_none(clock, tmp_path):
-    """Verification 2026-11-09: a worker from before the colour rule marks its sample orders ``{"v": 1, "gated": true}``
-    although it took a colour never compared by photo for sure: the bot holds such a draft like one with no mark, and
-    approving it is refused until a new preview the Mac checked (v2)."""
+def test_a_mark_older_than_v3_is_held_like_none(clock, tmp_path):
+    """Verification 2026-11-09 and 2026-11-10: a worker from before the colour rule marks its sample orders ``{"v": 1,
+    "gated": true}`` although it took a colour never compared by photo for sure, one from before 「对过图了」 ``{"v": 2,
+    "gated": true}`` although it let a hat go on 「确认 X」 in the 起草备注 (its false positives too): the bot holds either
+    draft like one with no mark (「Mac 没有对图：worker 旧了或没重启，更新、重启以后点「重新预览」」), and approving it is
+    refused until a new preview the updated Mac checked (v3)."""
+    assert draft_context.MARK_VERSION == 3
     b = make(clock, tmp_path)
     try:
-        for mark in ({"v": 1, "gated": True}, {"gated": True}, {"v": "2", "gated": True}, {"v": 2, "gated": "yes"}):
+        for mark in ({"v": 1, "gated": True}, {"v": 2, "gated": True}, {"gated": True}, {"v": "3", "gated": True},
+                     {"v": 3, "gated": "yes"}):
             assert draft_context.gated_of({"draft_context": mark}) is False, mark
-        assert draft_context.gated_of({"draft_context": GATED}) and draft_context.mark(False) == {"v": 2, "gated": False}
-        job = her_job(b, "还有这顶")
-        b.finish(job["id"], draft(message_kind="money", reply_draft="寄样单建好啦", reason="kb",
-                                  platform=sample_block("ready"), draft_context={"v": 1, "gated": True}))
-        [held] = [p for p in b.prm.store.packets() if p["job_id"] == job["id"]]
-        assert held["platform"]["preview"]["verdict"] == "blocked"
-        assert held["platform"]["preview"]["problems"] == [draft_context.NOT_GATED]
-        assert "draft_context" not in held["meta"] and b.prm.decide(held["id"], "execute")["ok"] is False
+        assert draft_context.gated_of({"draft_context": GATED}) and draft_context.mark(False) == {"v": 3, "gated": False}
+        for n, old in enumerate(({"v": 1, "gated": True}, {"v": 2, "gated": True})):
+            job = her_job(b, f"还有这顶 {n}")
+            b.finish(job["id"], draft(message_kind="money", reply_draft="寄样单建好啦", reason="kb",
+                                      platform=sample_block("ready"), draft_context=old, photo_confirmed=["A7269901001B-F"]))
+            [held] = [p for p in b.prm.store.packets() if p["job_id"] == job["id"]]
+            assert held["platform"]["preview"]["verdict"] == "blocked", old
+            assert held["platform"]["preview"]["problems"] == [draft_context.NOT_GATED]
+            assert "draft_context" not in held["meta"] and "photo_confirmed" not in held["meta"]
+            refused = b.prm.decide(held["id"], "execute")
+            assert refused["ok"] is False and draft_context.NOT_GATED in refused["error"] and "重新预览" in refused["error"]
     finally:
         b.prm.stop()
         b.relay.stop()
 
 
 def test_a_kept_draft_an_older_rule_checked_says_to_check_it_again(bot):
-    """Verification 2026-11-09: a draft kept from before the colour rule (its packet's mark v1, its preview ready, as
-    that bot stored it): the console and approving say 「这份是旧规则核的，点「重新预览」按新规则再核」 (not that the
-    worker is old); a new preview the Mac checks by the new rule (v2) lets it go."""
+    """Verification 2026-11-09 and 2026-11-10: a draft kept from before a rule (its packet's mark v1 or v2, its preview
+    ready, as that bot stored it): the console and approving say 「这份是旧版 Mac 按旧规则核的：更新、重启 Mac 的 worker
+    以后，点「重新预览」按新规则再核」; a new preview the updated Mac checks (v3) lets it go."""
     _, packet = sheet_draft(bot, with_brief=False, verdict="ready")
-    assert bot.prm.store.merge_packet_meta(packet["id"], {draft_context.KEY: {"v": 1, "gated": True}})
     data = bot.prm.store.packet(packet["id"])["platform"]
     assert bot.prm.store.set_platform(packet["id"], {**data, "preview": sample_block(previewed_at=1.5)}, ("pending",))
-    kept = bot.prm.store.packet(packet["id"])
-    assert draft_context.unchecked_reason(kept) == draft_context.OLD_RULE == "这份是旧规则核的，点「重新预览」按新规则再核"
-    [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
-    assert shown["platform"]["can_execute"] is False and shown["platform"]["problems"] == [draft_context.OLD_RULE]
-    assert bot.prm.decide(packet["id"], "execute") == {"ok": False, "error": draft_context.OLD_RULE}
+    assert draft_context.OLD_RULE == "这份是旧版 Mac 按旧规则核的：更新、重启 Mac 的 worker 以后，点「重新预览」按新规则再核"
+    for old in ({"v": 1, "gated": True}, {"v": 2, "gated": True}):
+        assert bot.prm.store.merge_packet_meta(packet["id"], {draft_context.KEY: old})
+        kept = bot.prm.store.packet(packet["id"])
+        assert draft_context.unchecked(kept) and draft_context.unchecked_reason(kept) == draft_context.OLD_RULE, old
+        [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
+        assert shown["platform"]["can_execute"] is False and shown["platform"]["problems"] == [draft_context.OLD_RULE]
+        assert bot.prm.decide(packet["id"], "execute") == {"ok": False, "error": draft_context.OLD_RULE}
     assert bot.prm.decide(packet["id"], "repreview")["ok"]
     again = bot.relay.next_job(0, ("prm",))
     bot.finish(again["id"], text=json.dumps(sample_block(previewed_at=2.0, draft_context=GATED), ensure_ascii=False))
@@ -786,7 +795,7 @@ def test_a_new_preview_nothing_checked_never_keeps_an_older_mark(bot):
     assert "draft_context" not in json.loads(bot.relay.store.get(again["id"])["meta"])
     bot.finish(again["id"], text=json.dumps(sample_block(previewed_at=2.0), ensure_ascii=False))      # (no mark)
     now = bot.prm.store.packet(packet["id"])
-    assert now["meta"]["draft_context"] == {"v": 2, "gated": False} and now["platform"]["preview"]["verdict"] == "ready"
+    assert now["meta"]["draft_context"] == {"v": 3, "gated": False} and now["platform"]["preview"]["verdict"] == "ready"
     bot.prm._draft_context = True
     [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
     assert shown["platform"]["can_execute"] is False and bot.prm.decide(packet["id"], "execute")["ok"] is False

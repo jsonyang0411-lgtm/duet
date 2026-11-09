@@ -484,7 +484,7 @@ class TestPrmPages:
             deal_id=1, party_id=1, job_id=None, chat_id="wxid_creator01", kind="money", text="寄样单建好啦",
             attachments=[], intent="寄样", slots={}, stage_proposal="", needs_attention=False, reason="",
             tool="jst.sample_order", platform={"action": action, "preview": held},
-            meta={"draft_context": {"v": 2, "gated": True}, "photo_held": [code]}, now=prm.clock.now)
+            meta={"draft_context": {"v": 3, "gated": True}, "photo_held": [code]}, now=prm.clock.now)
         page.goto(f"{BASE_URL}/#/review", timeout=10000)
         page.wait_for_timeout(1500)
         card = page.locator(".prm-draft", has_text="寄样单建好啦")
