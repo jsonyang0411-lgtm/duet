@@ -1302,7 +1302,8 @@ class TestPrmPages:
         from src.web import server as web_server
 
         class Clock:
-            now = _time.time() - 3 * 3600                    # (today, so the page shows the time alone)
+            # today at 12:00 (the page shows the time alone for today; real time minus 3 hours was yesterday before 03:00)
+            now = _time.mktime(_time.localtime()[:3] + (12, 0, 0, 0, 0, -1))
 
             def __call__(self):
                 return self.now
