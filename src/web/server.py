@@ -11,6 +11,7 @@ import logging
 import os
 _os = os
 import re
+import shutil
 import threading
 import time
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
@@ -1088,38 +1089,36 @@ def _prm_stopped_store():
     return store
 
 
-def _prm_operator_file(query: str):
-    """GET /api/prm/file?packet=<id>&n=<i>: a draft's operator-only picture (PRM_DRAFT_CONTEXT: a sample order's photo
-    sheet, src/prm/draft_context.py ``operator_file``) as ``(bytes, content type)``, or None.  Read-only; the running
-    bot's packets, or the database of a stopped one."""
+_PRM_FILE_NUMBER = re.compile(r"[0-9]{1,12}")
+
+
+def _prm_picture(query: str):
+    """GET /api/prm/file?packet=<id>&kind=attachment|operator&n=<i>: one picture of a draft, ``(path, content type)``,
+    or None.  ``kind`` ``attachment``: the draft's own files (``packet.attachments[n]``, the 直播手卡); ``operator``: its
+    operator-only files (``meta.operator_files[n]``, PRM_DRAFT_CONTEXT's photo sheet, only from the relay's
+    ``outfiles/job-*``).  ``packet``, ``kind`` and ``n`` are all needed, the numbers as plain digits; only a picture
+    (src/prm/draft_context.py ``picture``) that is still there.  Read only; the running bot's packets, or the database of
+    a stopped one (closed again)."""
     from urllib.parse import parse_qs
 
-    from src.prm.draft_context import operator_file
+    from src.prm.draft_context import picture
 
-    args = parse_qs(query)
-    try:
-        packet_id = int((args.get("packet") or [""])[0])
-    except ValueError:
+    args = parse_qs(query, keep_blank_values=True)
+    packet_s, kind, n_s = ((args.get(k) or [""])[0] for k in ("packet", "kind", "n"))
+    if not (_PRM_FILE_NUMBER.fullmatch(packet_s) and _PRM_FILE_NUMBER.fullmatch(n_s)) or kind not in (
+            "attachment", "operator"):
         return None
-    n = (args.get("n") or ["0"])[0]
     if _prm is not None:
-        packet = _prm.store.packet(packet_id)
+        packet = _prm.store.packet(int(packet_s))
     else:
         store = _prm_stopped_store()
         if store is None:
             return None
         try:
-            packet = store.packet(packet_id)
+            packet = store.packet(int(packet_s))
         finally:
             store.close()
-    found = operator_file(packet, n) if packet else None
-    if found is None:
-        return None
-    path, kind = found
-    try:
-        return path.read_bytes(), kind
-    except OSError:
-        return None
+    return picture(packet, kind, int(n_s))
 
 
 def _prm_state_core() -> dict:
@@ -1768,26 +1767,8 @@ class _UIHandler(SimpleHTTPRequestHandler):
             return
 
         # ── API: PRM copilot — creators, drafts, decisions ─────────────
-        if self.path.split("?", 1)[0] == "/api/prm/file":         # a draft's operator-only picture (GET)
-            try:
-                found = _prm_operator_file(self.path.partition("?")[2])
-            except Exception:
-                logger.exception("Reading a PRM operator file failed")
-                found = None
-            if found is None:
-                self.send_response(404)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(json.dumps({"ok": False, "error": "没有这张图（可能已经清理掉了）"}, ensure_ascii=False).encode())
-                return
-            body, kind = found
-            self.send_response(200)
-            self.send_header("Content-Type", kind)
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self._send_cors_headers()
-            self.end_headers()
-            self.wfile.write(body)
+        if self.path.split("?", 1)[0] == "/api/prm/file":         # one picture of a draft (GET only)
+            self._send_prm_picture()
             return
         if self.path.split("?", 1)[0] == "/api/prm":
             try:
@@ -2564,6 +2545,43 @@ class _UIHandler(SimpleHTTPRequestHandler):
             for code in ["error", "exception", "400", "401", "403", "404", "405", "500"]
         ):
             logger.warning("HTTP %s", format % args)
+
+    def _send_prm_picture(self) -> None:
+        """GET /api/prm/file (``_prm_picture``): the picture streamed with its type and length, ``Cache-Control:
+        no-store``; 403 for a cross-site fetch (``Sec-Fetch-Site: cross-site``; the origin and host checks are
+        do_GET's); 404 JSON (with its length and the CORS echo) for anything else."""
+        if str(self.headers.get("Sec-Fetch-Site") or "").strip().lower() == "cross-site":
+            self._forbid_cross_origin()
+            return
+        try:
+            found = _prm_picture(self.path.partition("?")[2])
+        except Exception:
+            logger.exception("Reading a draft's picture failed")
+            found = None
+        handle = None
+        if found is not None:
+            try:
+                handle = open(found[0], "rb")
+                size = os.fstat(handle.fileno()).st_size
+            except OSError:
+                handle = None
+        if handle is None:
+            body = json.dumps({"ok": False, "error": "没有这张图（可能已经清理掉了）"}, ensure_ascii=False).encode()
+            self.send_response(404)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self._send_cors_headers()
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        with handle:
+            self.send_response(200)
+            self.send_header("Content-Type", found[1])
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "no-store")
+            self._send_cors_headers()
+            self.end_headers()
+            shutil.copyfileobj(handle, self.wfile, 256 * 1024)
 
     def send_json(self, data):
         self.send_response(200)

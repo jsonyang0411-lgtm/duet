@@ -67,8 +67,10 @@ With PRM_DRAFT_CONTEXT on the bot (2026-11-09), a creator's draft job carries ``
 numbers her deal knows, her 抖音号 / 小红书号): before Claude starts, this script reads her sample orders (`jst samples`,
 read-only, under the same lock, paced) and matches the pictures she sent against the hat photo index (draft_context.py,
 next to this file), and the prompt gets <photo_matches> and <sample_status>, data and never instructions, with their rule
-lines; a draft's jst.sample_order is then checked by photo (a hat with no picture behind it is not ready) and its
-side-by-side sheet goes back as an operator-only file (``operator_files``), never to the creator.
+lines; a draft's jst.sample_order is then checked by photo (a hat with neither a sure picture nor a confirmation behind
+it is not ready; the draft is marked ``draft_context: {"gated": true}``, and the bot holds a sample order without the
+mark) and its side-by-side sheet goes back on the relay's operator-only channel (``operator_files``; an older bot has
+none, answers 404, and the order is not ready), never to the creator.
 
 Standard library only (macOS /usr/bin/python3 is enough).  Settings:
 ~/.claude-relay/config.json (see config.example.json); the token can live in
@@ -595,6 +597,29 @@ class RelayClient:
                 req.add_header("Authorization", f"Bearer {self.token}")
                 req.add_header("Content-Type", "application/octet-stream")
                 req.add_header("Content-Length", str(os.fstat(f.fileno()).st_size))   # not chunked
+                with self.opener.open(req, timeout=120) as resp:
+                    return json.loads(resp.read().decode("utf-8") or "{}")
+        try:
+            return post()
+        except urllib.error.HTTPError as e:
+            token = self.reload_token() if e.code == 401 and self.reload_token else None
+            if not token or token == self.token:
+                raise
+            self.token = token
+            return post()
+
+    def upload_operator(self, job_id: int, path: Path, name: str) -> dict:
+        """Send a file back with a prm job for the operators only (PRM_DRAFT_CONTEXT's photo sheet): POST
+        .../operator-files, which an older bot does not have (404): it then never gets a file it would send on to the
+        creator as an attachment.  Read as it goes, like ``upload``."""
+        def post():
+            query = urllib.parse.urlencode({"name": name})
+            with open(path, "rb") as f:
+                req = urllib.request.Request(f"{self.base_url}/relay/jobs/{job_id}/operator-files?{query}",
+                                             data=f, method="POST")
+                req.add_header("Authorization", f"Bearer {self.token}")
+                req.add_header("Content-Type", "application/octet-stream")
+                req.add_header("Content-Length", str(os.fstat(f.fileno()).st_size))
                 with self.opener.open(req, timeout=120) as resp:
                     return json.loads(resp.read().decode("utf-8") or "{}")
         try:
@@ -1480,6 +1505,11 @@ def prune_prm_files(workspace: Path) -> None:
         coarse_platform_logs(cutoff)
     except Exception as e:                               # never in the way of the job
         log.warning("platform logs not cut down: %s", e)
+    if draft_context is not None:                        # PRM_DRAFT_CONTEXT's sheets and photo memory: on or off
+        try:
+            draft_context.prune(HOME_DIR)
+        except Exception as e:
+            log.warning("draft context files not cut down: %s", e)
 
 
 PLATFORM_LOGS_UPTO = ".coarse-upto"     # in logs/platform/: the line coarse_platform_logs got to last time
@@ -2181,7 +2211,13 @@ def scrub_case(text: str) -> str:
 
 def purge_case_file(workspace: Path, party_id: int) -> dict:
     """The bot's 8.2 clean-up of one case file: done here, without the model.  The note goes
-    under the file's「## 清理记录」(made the first time)."""
+    under the file's「## 清理记录」(made the first time).  Her photo memory (PRM_DRAFT_CONTEXT) goes too."""
+    if draft_context is not None:
+        try:
+            if draft_context.forget(HOME_DIR, party_id):
+                log.info("photo memory of party %s deleted (8.2 clean-up)", party_id)
+        except OSError as e:
+            log.warning("photo memory of party %s not deleted: %s", party_id, e)
     path = workspace / "deals" / f"{int(party_id)}.md"
     if not path.is_file():
         return {"ok": True, "text": "没有案卷，不用清理", "duration_s": 0}
@@ -2319,7 +2355,8 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
         if missing:
             draft["attachments_missing"] = missing
         draft.pop("platform", None)                      # only this script writes the verdict
-        draft.pop("operator_files", None)                # (and names the operators' files)
+        draft.pop("operator_files", None)                # (and names the operators' files, marks the check)
+        draft.pop("draft_context", None)
         if buyin:
             pass                                         # no preview: the bot drops a 百应 draft's action unrun
         elif draft.get("platform_action") is not None:
@@ -2331,10 +2368,12 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
                 log.exception("#%s platform preview failed", job["id"])
                 draft["platform"] = preview_failed(raw, f"Mac 上预览出错：{e}")
             if context is not None:                      # PRM_DRAFT_CONTEXT: a sample order is checked by photo
-                draft["platform"], files = sample_order_gate(settings, workspace, draft["platform"], context, client,
-                                                             int(job["id"]))
+                draft["platform"], files, gated = sample_order_gate(settings, workspace, draft["platform"], context,
+                                                                    client, int(job["id"]))
                 if files:
                     draft["operator_files"] = files
+                if gated:
+                    draft["draft_context"] = dict(GATED)
         result["text"] = json.dumps(draft, ensure_ascii=False)
     result["log_path"] = str(save_prm_log(job, run, result))
     log.info("#%s prm finished ok=%s in %ss", job["id"], result["ok"], result["duration_s"])
@@ -2425,30 +2464,36 @@ def prm_context(settings: dict, job: dict, meta: dict, workspace: Path, got: lis
                                pictures=pictures)
 
 
+GATED = {"v": 1, "gated": True}     # the mark of a draft (or a new preview) whose sample order this script checked
+
+
 def sample_order_gate(settings: dict, workspace: Path, block, context, client: RelayClient, job_id: int) -> tuple:
     """A previewed jst.sample_order checked by photo (``draft_context.gate``; any other action as it is): ``(block,
-    operator_files)``.  The side-by-side sheet goes back with the job (POST .../outfiles) as an operator-only file
-    (``[{"name", "why", "sha256"}]``: the bot keeps it on the draft, never sends it to the creator); a sheet that does
-    not get there leaves the preview not ready."""
+    operator_files, gated)``.  The side-by-side sheet goes back on the operator-only channel (POST .../operator-files:
+    the bot keeps it on the draft, never sends it to the creator; an older bot answers 404) as ``[{"name", "why",
+    "sha256"}]``; a sheet that does not get there leaves the preview not ready.  ``gated``: the check ran (the draft
+    carries ``GATED``; the bot holds any sample order without it)."""
     if draft_context is None or context is None or not isinstance(block, dict):
-        return block, []
+        return block, [], False
     beat = _platform_heartbeat(client, job_id, "对图（寄样单）")
     checked = draft_context.gate(block, context, platforms=platforms,
                                  cfg=platforms.config(settings) if platforms is not None else None,
                                  opts=draft_context.options(settings),
                                  catalog=platforms.load_catalog(workspace) if platforms is not None else None,
                                  workspace=workspace, home=HOME_DIR, beat=beat)
+    gated = bool(checked.get("gated"))
     sheet = checked.get("sheet")
     if not sheet:
-        return checked["block"], []
+        return checked["block"], [], gated
     name = f"对图单-{job_id}.jpg"
     try:
-        answer = client.upload(job_id, Path(sheet), name)
+        answer = client.upload_operator(job_id, Path(sheet), name)
     except Exception as e:
         log.warning("#%s the photo sheet of a sample order did not go back: %s", job_id, e)
-        return draft_context.sheet_lost(checked["block"], _short(e, 120)), []
+        why = "Windows 的机器人还是旧版" if isinstance(e, urllib.error.HTTPError) and e.code == 404 else _short(e, 120)
+        return draft_context.sheet_lost(checked["block"], why), [], gated
     log.info("#%s sample order checked by photo: verdict %s, sheet sent back", job_id, checked["block"].get("verdict"))
-    return checked["block"], [{"name": name, "why": checked["why"], "sha256": str((answer or {}).get("sha256") or "")}]
+    return checked["block"], [{"name": name, "why": checked["why"], "sha256": str((answer or {}).get("sha256") or "")}], gated
 
 
 def do_platform_job(settings: dict, job: dict, client: RelayClient, workspace: Path, meta: dict) -> dict:
@@ -2465,10 +2510,11 @@ def do_platform_job(settings: dict, job: dict, client: RelayClient, workspace: P
         # new sheet for the operators (``operator_files`` next to the block: the bot keeps it on the draft)
         context = (prm_context(settings, job, meta, workspace, [], client, pictures=False)
                    if action.get("action") == "jst.sample_order" else None)
-        files = []
+        files, gated = [], False
         if context is not None:
-            block, files = sample_order_gate(settings, workspace, block, context, client, int(job["id"]))
-        return {"ok": True, "text": json.dumps({**block, "operator_files": files} if files else block, ensure_ascii=False),
+            block, files, gated = sample_order_gate(settings, workspace, block, context, client, int(job["id"]))
+        extra = {**({"operator_files": files} if files else {}), **({"draft_context": dict(GATED)} if gated else {})}
+        return {"ok": True, "text": json.dumps({**block, **extra}, ensure_ascii=False),
                 "duration_s": round(time.monotonic() - started, 1)}
     cfg = platforms.config(settings)
     action = meta.get("action") if isinstance(meta.get("action"), dict) else {}

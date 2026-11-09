@@ -62,6 +62,7 @@ ASK_RETRY_SEC = (10, 120)   # an approval request whose send failed: again after
 ASK_SEND_TRIES = 6          # ... and not tried again after this many failed sends (about 4.5 minutes)
 MAX_OUTFILE_BYTES = 100 * 1024 * 1024   # one file a prm job's worker sends back
 MAX_OUTFILES = 9                        # files per prm job
+MAX_OPERATOR_FILES = 4                  # files per prm job for the operators only (not counted with MAX_OUTFILES)
 
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
 _UNSAFE_NAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
@@ -407,6 +408,50 @@ class ClaudeRelay:
             return None
         logger.info("CLAUDE_RELAY: #%d sent back a file (%d bytes)", job_id, length)
         return {"id": file_id, "size": length, "sha256": digest.hexdigest()}
+
+    def operator_file(self, job_id: int, name: str, read: Callable[[int], bytes], length: int) -> Optional[dict]:
+        """A file a ``prm`` job's worker sends back for the operators only (PRM_DRAFT_CONTEXT: a sample order's photo
+        sheet, src/prm/draft_context.py): stored next to the job's outfiles (``outfiles/job-<id>/``), recorded apart
+        (``relay_operator_files``: never one of the draft's attachments, not counted with MAX_OUTFILES), at most
+        MAX_OPERATOR_FILES a job.  ``{"id", "size", "sha256"}``, or None as ``outfile``."""
+        self._seen()
+        job = self._store.get(job_id)
+        if job is None or job.get("kind") == ADMIN or job["status"] not in ("running", "lost"):
+            return None
+        if not 0 < length <= MAX_OUTFILE_BYTES:
+            return None
+        name = _UNSAFE_NAME.sub("_", str(name)).strip(" .")[:120] or "file"
+        folder = self._files_dir / "outfiles" / f"job-{job_id}"
+        folder.mkdir(parents=True, exist_ok=True)
+        path, n = folder / name, 2
+        while path.exists():                          # (an outfile of the same name)
+            path, n = folder / f"{Path(name).stem}({n}){Path(name).suffix}", n + 1
+        digest, left = hashlib.sha256(), length
+        part = path.with_name(path.name + ".part")
+        try:
+            with open(part, "wb") as out:
+                while left > 0:
+                    chunk = read(min(left, 1024 * 1024))
+                    if not chunk:
+                        raise OSError(f"the upload ended early ({length - left}/{length} bytes)")
+                    digest.update(chunk)
+                    out.write(chunk)
+                    left -= len(chunk)
+            part.replace(path)
+        finally:
+            part.unlink(missing_ok=True)
+        file_id = self._store.add_operator_file(job_id, path.name, str(path), length, digest.hexdigest(),
+                                                MAX_OPERATOR_FILES)
+        if file_id is None:
+            path.unlink(missing_ok=True)
+            return None
+        logger.info("CLAUDE_RELAY: #%d sent back a file for the operators only (%d bytes)", job_id, length)
+        return {"id": file_id, "size": length, "sha256": digest.hexdigest()}
+
+    @property
+    def files_dir(self) -> Path:
+        """Where the relay keeps the jobs' files (``outfiles/job-<id>/`` …)."""
+        return self._files_dir
 
     # ── projects ──────────────────────────────────────────────────────────
 

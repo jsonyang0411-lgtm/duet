@@ -12,6 +12,9 @@ Every request carries ``Authorization: Bearer <CLAUDE_RELAY_TOKEN>``.
     POST /relay/jobs/<id>/outfiles?name=<file name>   the bytes of a file a running prm job sends
                                        back (Content-Length, at most 100 MB, 9 per job)
                                        -> {"id", "size", "sha256"}  (404: not a running prm job)
+    POST /relay/jobs/<id>/operator-files?name=<file name>   the same for a file the operators only see (a sample
+                                       order's photo sheet, PRM_DRAFT_CONTEXT; at most 4 per job, not counted with
+                                       the outfiles, never a draft's attachment; an older relay: 404)
     GET  /relay/jobs/<id>/files/<n>    a picture or file sent with the job (bytes; 404: not one of its files)
     POST /relay/jobs/<id>/heartbeat    {"steps", "doing", "plan"} (what Claude is doing, optional)
                                        -> {"cancel": bool}    (404: unknown job)
@@ -52,6 +55,7 @@ _MESSAGES_PATH = re.compile(r"^/relay/jobs/(\d+)/messages$")
 _ASK_PATH = re.compile(r"^/relay/asks/(\d+)$")
 _FILE_PATH = re.compile(r"^/relay/jobs/(\d+)/files/(\d+)$")
 _OUTFILE_PATH = re.compile(r"^/relay/jobs/(\d+)/outfiles$")
+_OPERATOR_FILE_PATH = re.compile(r"^/relay/jobs/(\d+)/operator-files$")
 
 
 def worker_kinds(header: str | None) -> tuple[str, ...]:
@@ -182,8 +186,9 @@ class _RelayHandler(BaseHTTPRequestHandler):
         else:
             self._json(404, {"error": "not found"})
 
-    def _outfile(self, job_id: int, query: str) -> None:
-        """POST /relay/jobs/<id>/outfiles?name=…: the raw bytes of one file (not JSON)."""
+    def _outfile(self, job_id: int, query: str, operator: bool = False) -> None:
+        """POST /relay/jobs/<id>/outfiles?name=…: the raw bytes of one file (not JSON); ``operator``: POST
+        /relay/jobs/<id>/operator-files?name=…, a file for the operators only (``relay.operator_file``)."""
         name = parse_qs(query).get("name", [""])[0]
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -193,7 +198,8 @@ class _RelayHandler(BaseHTTPRequestHandler):
             self._json(400, {"error": "name and Content-Length are needed"})
             return
         try:
-            answer = self.relay.outfile(job_id, name, self.rfile.read, length)
+            answer = (self.relay.operator_file if operator else self.relay.outfile)(job_id, name, self.rfile.read,
+                                                                                   length)
         except OSError as e:
             logger.warning("CLAUDE_RELAY: a file for #%d did not arrive whole: %s", job_id, e)
             self.close_connection = True
@@ -214,6 +220,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
         m = _OUTFILE_PATH.match(url.path)
         if m:
             self._outfile(int(m.group(1)), url.query)
+            return
+        m = _OPERATOR_FILE_PATH.match(url.path)
+        if m:
+            self._outfile(int(m.group(1)), url.query, operator=True)
             return
         m = _JOB_PATH.match(url.path)
         if not m:

@@ -23,6 +23,8 @@ from test_prm_platform_worker import fake_claude, node  # noqa: F401
 from platform_fakes import (DY_ITEM2, DY_ITEM3, DY_SKU2, DY_SKU2B, DY_SKU3, JST_ORDER, JST_SHOP_DY, JST_UID, catalog,
                             jst_done, jst_preview, jst_sample_row, jst_samples, rule)
 
+from src.prm import draft_context as bot_draft_context
+
 ROOT = Path(__file__).resolve().parents[1]
 ACCOUNT = "test_daren_01"                 # her 抖音号 (platform_fakes' made-up one)
 OTHER = "test_daren_99"
@@ -189,14 +191,38 @@ def test_the_prompt_function_is_unchanged_without_the_context(worker):  # noqa: 
     assert lines.index("<X>") == lines.index("<creator_message>") - 2          # right before her message (and its note)
 
 
-def test_a_buyin_draft_gets_none_of_it(worker):  # noqa: F811
+def test_a_buyin_draft_gets_none_of_it_and_only_the_bots_accounts_count(worker):  # noqa: F811
+    """No context for a 百应 draft or a job without it.  The accounts are the bot's only (it leaves out one two creators
+    share): the job's ``meta.creator`` 抖音号 (the invite block's) are never added; ``verified`` only among ``orders``."""
     assert worker.draft_context.wanted({"channel": "buyin", "draft_context": {"orders": [], "accounts": []}}) is None
     assert worker.draft_context.wanted({"party_id": 1}) is None
     asked = worker.draft_context.wanted({"draft_context": {
-        "orders": [JST_ORDER, "not-an-order", JST_ORDER], "accounts": [
+        "orders": [JST_ORDER, "not-an-order", JST_ORDER], "verified": [JST_ORDER, ORDER_MADE, 7], "accounts": [
             {"platform": "dy", "no": ACCOUNT}, {"platform": "KS", "no": "x1"}, {"platform": "XHS", "no": "bad no!"},
             {"platform": "XHS", "no": "xhs_test_01"}]}, "creator": {"douyin_ids": [ACCOUNT.upper(), 7, "test_daren_02"]}})
-    assert asked == {"orders": [JST_ORDER], "accounts": [("DY", ACCOUNT), ("XHS", "xhs_test_01"), ("DY", "test_daren_02")]}
+    assert asked == {"orders": [JST_ORDER], "verified": [JST_ORDER], "accounts": [("DY", ACCOUNT), ("XHS", "xhs_test_01")]}
+    assert worker.draft_context.wanted({"draft_context": {"orders": [], "accounts": []}})["verified"] == []
+
+
+def test_an_account_two_registered_creators_share_finds_neither_ones_orders(worker, bot, mac):  # noqa: F811
+    """Her 抖音号 is another registered creator's too (review 2026-11-09): the bot sends it with neither one's job, so
+    the order under that account is in neither prompt (nor its waybill), and its hats confirm nobody's sample order."""
+    bot.prm.register("wxid_creator02", "小红")
+    bot.prm.store.add_creator_link(bot.prm.store.party_by_wxid("wxid_creator02")["id"], ACCOUNT, platform="dy",
+                                   source="register")
+    order_rules(mac, rows=[her_row()])                    # her_row: CODE_A, waybill ZT0000000001, under ACCOUNT
+    mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action=SAMPLE_ORDER)  # (CODE_A)
+    job_id = text_job(bot, mac, text="[11:08] 寄出了不")
+    assert json.loads(bot.relay.store.get(job_id)["meta"])["draft_context"]["accounts"] == []
+    run_one(worker, bot, mac.settings)
+    status = block(prompt_of(mac), "sample_status")
+    assert JST_ORDER not in status and "ZT0000000001" not in status and "还不知道她的抖音号" in status
+    assert not any("samples" in c["argv"] for c in mac.node.calls())
+    [packet] = bot.prm.store.packets()
+    preview = packet["platform"]["preview"]
+    assert preview["verdict"] == "blocked" and f"{CODE_A}（均码黑色）这顶没有照片对过，先核对再建" in preview["problems"]
+    [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
+    assert shown["platform"]["can_execute"] is False
 
 
 # ── 1. <sample_status> ────────────────────────────────────────────────────────────────────────────────────────
@@ -465,40 +491,126 @@ def test_a_hat_with_no_picture_behind_it_cannot_be_executed(worker, bot, mac):  
     assert "这顶没有照片对过" in (bot.prm.store.deal(mac.deal["id"])["attention"] or "")
 
 
-def test_a_code_from_her_earlier_order_or_the_operators_note_needs_no_picture(worker, bot, mac):  # noqa: F811
-    earlier = her_row(items=[{"itemCode": CODE_C, "styleCode": "ACE7CN202699010002", "name": "测试药盒帽", "sku": "粉色;F",
-                              "count": 1, "sent": 1, "signed": 1, "status": "SIGNED"}])
-    order_rules(mac, rows=[earlier])
-    mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action={
-        **SAMPLE_ORDER, "items": [{"item_id": DY_ITEM3, "skus": [{"sku_id": DY_SKU3, "qty": 1}]}]})
-    text_job(bot, mac, text="[11:08] 还要上次那个")
-    run_one(worker, bot, mac.settings)
-    [packet] = bot.prm.store.packets()
-    preview = packet["platform"]["preview"]
-    assert preview["verdict"] == "ready", preview["problems"]
-    assert {f["label"]: f["value"] for f in preview["facts"]}["对图"] == f"{CODE_C}：她以前的寄样单 {JST_ORDER} 里寄过（没有图对）"
-    # the operators' 起草备注 names a code: confirmed too
+PINK = [{"itemCode": CODE_C, "styleCode": "ACE7CN202699010002", "name": "测试药盒帽", "sku": "粉色;F", "count": 1,
+         "sent": 1, "signed": 1, "status": "SIGNED"}]
+PINK_ORDER = {**SAMPLE_ORDER, "items": [{"item_id": DY_ITEM3, "skus": [{"sku_id": DY_SKU3, "qty": 1}]}]}   # (CODE_C)
+
+
+def newest_preview(bot):  # noqa: F811
+    return bot.prm.store.packets()[0]["platform"]["preview"]
+
+
+def test_only_an_earlier_order_that_went_out_or_that_the_bot_made_confirms_its_codes(worker, bot, mac):  # noqa: F811
+    """CODE_C with no picture of hers behind it: confirmed by an earlier order of hers that went out (SENT / SIGNED) and
+    by one the bot made itself (verified: even before it is sent); never by one 聚水潭 rejected, one only audited
+    (WAITING_SEND: our own sub-account audits each order right after making it), or a cancelled one."""
+    mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action=PINK_ORDER)
+
+    def drafted(row):
+        worker.draft_context.READER.mine = {}             # (the listing read again: this case's rows)
+        order_rules(mac, rows=[row])
+        text_job(bot, mac, text="[11:08] 还要上次那个")
+        run_one(worker, bot, mac.settings)
+        return newest_preview(bot)
+
+    sent = drafted(her_row(status="SIGNED", items=PINK, sign_time="2026-11-08 10:00:00"))
+    assert sent["verdict"] == "ready", sent["problems"]
+    assert {f["label"]: f["value"] for f in sent["facts"]}["对图"] == f"{CODE_C}：她以前的寄样单 {JST_ORDER} 里寄过（没有图对）"
+    for row in (her_row(status="INIT", reject="款不对，驳回", items=PINK),           # (聚水潭 rejected it)
+                her_row(status="WAITING_SEND", items=PINK),
+                her_row(status="SIGNED", reject="少寄了一顶", items=PINK)):
+        held = drafted(row)
+        assert held["verdict"] == "blocked" and f"{CODE_C}（均码粉色）这顶没有照片对过，先核对再建" in held["problems"], row
+    bot.prm.store.add_sample_order(ORDER_MADE, packet_id=1, deal_id=mac.deal["id"], party_id=mac.party["id"],
+                                   made_at=time.time() - 3600)
+    made = drafted(her_row(ORDER_MADE, "INIT", items=PINK))
+    assert made["verdict"] == "ready", made["problems"]
+    assert f"{CODE_C}：机器人以前给她建的寄样单 {ORDER_MADE} 里有（还没发出；没有图对）" in [f["value"] for f in made["facts"]]
+    assert drafted(her_row(ORDER_MADE, "DELETED", items=PINK))["verdict"] == "blocked"
+
+
+def test_only_confirm_or_checked_by_photo_in_the_note_confirms_a_code(worker, bot, mac):  # noqa: F811
+    """The operators' 起草备注 confirms a code only in so many words, 「确认 <编码>」 or 「对过图 <编码>」 beginning it, a
+    line or a clause: a code merely written there (「她要的是 …」), or after 「待确认」「请确认」「不确认」, does not."""
+    dc = worker.draft_context
+    assert dc.noted_codes(f"别寄 {CODE_A}，确认 {CODE_B}、{CODE_C}；还不确认 A7269901009A-M；对过图：A72599018B-M") == {
+        CODE_B, CODE_C, "A72599018B-M"}
+    assert dc.noted_codes(f"已确认过：{CODE_A.lower()}\n对过图 {CODE_B} 和 {CODE_C}") == {CODE_A, CODE_B, CODE_C}
+    for note in (f"她要的是 {CODE_A}", f"待确认 {CODE_A}", f"请确认 {CODE_A}", f"不用确认 {CODE_A}", f"没确认 {CODE_A}",
+                 f"确认不寄 {CODE_A}", "", None):
+        assert dc.noted_codes(note) == set(), note
     order_rules(mac)
+    mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action={
+        **SAMPLE_ORDER, "items": [{"item_id": DY_ITEM2, "skus": [{"sku_id": DY_SKU2B, "qty": 1}]}]})      # (CODE_B)
+    for note, verdict in ((f"她要的是 {CODE_B}，运营看过图了", "blocked"), (f"待确认 {CODE_B}", "blocked"),
+                          (f"深棕那顶。确认 {CODE_B}", "ready")):
+        text_job(bot, mac, text="[11:09] 深棕那顶", note=note)
+        run_one(worker, bot, mac.settings)
+        assert newest_preview(bot)["verdict"] == verdict, (note, newest_preview(bot)["problems"])
+    assert f"{CODE_B}：运营在起草备注里确认了（没有图对）" in [f["value"] for f in newest_preview(bot)["facts"]]
+
+
+def test_a_code_only_in_an_unsure_picture_or_not_its_best_hat_is_not_taken(worker, bot, mac):  # noqa: F811
+    """Review 2026-11-09: a code is taken from a picture only when it is 「有把握」 and the code is its best hat's.  A
+    picture 「没把握」 (its best score low) whose second hat has the code, or a sure picture whose second hat has it: not
+    ready, no sheet made, 批准并执行 off."""
+    low = [hat(STYLE_1 + "X", "别的款", 1.0, ("黑色", "A7269901009A-M", 9.0)),
+           hat(STYLE_1, "测试药盒帽", 0.98, ("驼色", CODE_A, 30.0), ("深棕", CODE_B, 31.0))]
+    order_rules(mac)
+    mac.hats.answers(match={"图片-1.jpg": low}, sheet={CODE_B: {"ok": False, "note": "！要再看：图最像 别的款，这款排第 2"}})
     mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action={
         **SAMPLE_ORDER, "items": [{"item_id": DY_ITEM2, "skus": [{"sku_id": DY_SKU2B, "qty": 1}]}]})
-    text_job(bot, mac, text="[11:09] 深棕那顶", note=f"她要的是 {CODE_B}，运营看过图了")
-    worker.draft_context.READER.mine = {}                        # (the listing read again: the test's new rows)
+    picture_job(bot, mac)
     run_one(worker, bot, mac.settings)
-    newest = bot.prm.store.packets()[0]
-    assert newest["platform"]["preview"]["verdict"] == "ready", newest["platform"]["preview"]["problems"]
-    assert f"{CODE_B}：运营的起草备注里写了（没有图对）" in [f["value"] for f in newest["platform"]["preview"]["facts"]]
+    photos = block(prompt_of(mac), "photo_matches")
+    assert "没把握" in photos and "这张图不能用来建寄样单：先问她，或者请运营确认" in photos
+    [packet] = bot.prm.store.packets()
+    preview = packet["platform"]["preview"]
+    assert preview["verdict"] == "blocked" and preview["problems"] == [
+        f"{CODE_B}（均码咖啡）对图没把握（只在没把握的图、或者不是图里最像的那款里出现）：先核对再建；"
+        f"核对过就在起草备注里写「确认 {CODE_B}」再重新预览"]
+    assert [c["args"][0] for c in mac.hats.calls()] == ["match"] and "operator_files" not in packet["meta"]
+    [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
+    assert shown["platform"]["can_execute"] is False
+    # a sure picture whose second hat has the code: the same
+    second = [hat(STYLE_1, "测试药盒帽", 1.25, ("驼色", CODE_A, 2.0)),
+              hat("ACE7CN202699010002", "测试药盒帽二", 1.05, ("粉色", CODE_C, 9.0))]
+    mac.hats.answers(match={"图片-2.jpg": second})
+    mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action=PINK_ORDER)
+    picture_job(bot, mac, name="图片-2.jpg", body=b"\xff\xd8\xff picture two")
+    run_one(worker, bot, mac.settings)
+    assert f"可以用来建寄样单的编码：{CODE_A}" in block(prompt_of(mac), "photo_matches")
+    held = newest_preview(bot)
+    assert held["verdict"] == "blocked" and held["problems"][0].startswith(f"{CODE_C}（均码粉色）对图没把握")
 
 
-def test_a_sheet_that_says_look_again_is_shown_and_one_not_made_blocks(worker, bot, mac):  # noqa: F811
+def test_a_sheet_that_says_look_again_or_has_no_sku_photo_waits_for_the_notes_confirmation(worker, bot, mac):  # noqa: F811
+    """A row of the sheet 「！要再看」 (another colour, another style) or without the SKU's own photo: not ready, the sheet
+    kept for the operators to look at; 「确认 <编码>」 in the 起草备注 and 重新预览: ready.  A sheet not made: not ready."""
     order_rules(mac)
-    mac.hats.answers(match={"图片-1.jpg": SURE}, sheet={CODE_A: {"ok": False, "note": "！要再看：图最像 别的款"}})
+    look = "！要再看：颜色：图最像 驼色（A7269901001A-F）"
+    mac.hats.answers(match={"图片-1.jpg": SURE}, sheet={CODE_A: {"ok": False, "note": look}})
     mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action=SAMPLE_ORDER)
     picture_job(bot, mac)
     run_one(worker, bot, mac.settings)
     [packet] = bot.prm.store.packets()
     preview = packet["platform"]["preview"]
-    assert preview["verdict"] == "ready" and f"{CODE_A} 对图要再看：！要再看：图最像 别的款" in preview["problems"]
-    assert packet["meta"]["operator_files"]
+    assert preview["verdict"] == "blocked" and preview["problems"] == [
+        f"{CODE_A} 对图要再看（{look}）：先核对再建；核对过就在起草备注里写「确认 {CODE_A}」再重新预览"]
+    assert packet["meta"]["operator_files"]                        # (the sheet, for the operators to look at)
+    assert bot.prm.deal_action("draft_note", {"deal_id": mac.deal["id"], "text": f"确认 {CODE_A}"})["ok"]
+    assert bot.prm.decide(packet["id"], "repreview")["ok"]
+    run_one(worker, bot, mac.settings)
+    again = bot.prm.store.packet(packet["id"])["platform"]["preview"]
+    assert again["verdict"] == "ready", again["problems"]
+    assert f"{CODE_A}：对图单说要再看（{look}），运营在起草备注里确认了" in [f["value"] for f in again["facts"]]
+    # the index has no photo of that SKU: the same
+    assert bot.prm.deal_action("draft_note", {"deal_id": mac.deal["id"], "text": ""})["ok"]
+    mac.hats.answers(match={"图片-1.jpg": SURE}, sheet={CODE_A: {"sku_photo": False}})
+    picture_job(bot, mac, text="[11:06] 就这顶")
+    run_one(worker, bot, mac.settings)
+    assert newest_preview(bot)["problems"] == [
+        f"{CODE_A} 对图要再看（图库里没有这个编码的图）：先核对再建；核对过就在起草备注里写「确认 {CODE_A}」再重新预览"]
     # the sheet cannot be made (the index fails): not ready
     mac.hats.answers(match={"图片-2.jpg": SURE}, exit=0)
     (mac.hats.dir / "hat_match.py").write_text(FAKE_HAT.replace('if args[0] == "match":', 'if args[0] == "sheet": sys.exit(3)\n'
@@ -531,6 +643,10 @@ def test_a_new_preview_checks_by_photo_again_and_brings_a_new_sheet(worker, bot,
     assert [c["args"][0] for c in mac.hats.calls()] == ["match", "sheet", "sheet"]       # (no new match: remembered)
     [kept] = again["meta"]["operator_files"]
     assert kept["path"] != first and f"job-{out['job']}" in kept["path"] and job_id != out["job"]
+    assert not Path(first).exists()                               # (review 2026-11-09: no orphan of her photo)
+    second = Path(kept["path"])
+    os.utime(second, (time.time() - 31 * 86400, time.time() - 31 * 86400))
+    assert bot_draft_context.sweep(bot.prm.store) == 1 and not second.exists()
 
 
 def test_the_photo_memory_and_the_sheets_go_after_a_week(worker, tmp_path):  # noqa: F811
@@ -544,6 +660,233 @@ def test_the_photo_memory_and_the_sheets_go_after_a_week(worker, tmp_path):  # n
     os.utime(dc.folder(home) / "photos" / "party-1.json", (old, old))
     dc.prune(home)
     assert sorted(p.name for p in dc.folder(home).rglob("*") if p.is_file()) == ["sheet-2.jpg"]
+
+
+def test_a_worker_that_does_not_check_by_photo_leaves_the_sample_order_held(worker, bot, mac, monkeypatch):  # noqa: F811
+    """Review 2026-11-09: the bot's switch on and a worker whose draft_context.py did not load (an older worker, one not
+    restarted, the same): its preview of a sample order with no picture behind it says ready, but nothing checked it;
+    the bot holds it (「Mac 没有对图：worker 旧了或没重启」), 批准并执行 off, and so after its 重新预览."""
+    monkeypatch.setattr(worker, "draft_context", None)
+    order_rules(mac)
+    mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action=SAMPLE_ORDER)
+    job_id = text_job(bot, mac, text="[11:08] 要这顶")
+    assert "draft_context" in bot.relay.store.get(job_id)["meta"]
+    run_one(worker, bot, mac.settings)
+    [packet] = bot.prm.store.packets()
+    preview = packet["platform"]["preview"]
+    assert preview["verdict"] == "blocked" and preview["problems"] == ["Mac 没有对图：worker 旧了或没重启"]
+    assert "draft_context" not in packet["meta"]
+    [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
+    assert shown["platform"]["can_execute"] is False and bot.prm.decide(packet["id"], "execute")["ok"] is False
+    assert bot.prm.decide(packet["id"], "repreview")["ok"]
+    run_one(worker, bot, mac.settings)
+    assert bot.prm.store.packet(packet["id"])["platform"]["preview"]["problems"] == ["Mac 没有对图：worker 旧了或没重启"]
+
+
+def test_an_older_bot_never_gets_the_sheet_and_the_order_waits(worker, bot, mac, monkeypatch):  # noqa: F811
+    """A bot without the operator-only channel answers 404 (here the relay refuses the file the same way): the worker
+    does not send the sheet any other way (an older bot would send an outfile on to her as an attachment), and the
+    sample order is not ready: 「对图单没传到 Windows（…）」."""
+    monkeypatch.setattr(bot.relay, "operator_file", lambda *args, **kwargs: None)
+    order_rules(mac)
+    mac.hats.answers(match={"图片-1.jpg": SURE})
+    mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action=SAMPLE_ORDER)
+    picture_job(bot, mac)
+    run_one(worker, bot, mac.settings)
+    [packet] = bot.prm.store.packets()
+    preview = packet["platform"]["preview"]
+    assert preview["verdict"] == "blocked"
+    assert "对图单没传到 Windows（Windows 的机器人还是旧版）：先核对再建" in preview["problems"]
+    assert packet["attachments"] == [] and "operator_files" not in packet["meta"]
+    assert bot.relay.store.outfiles(packet["job_id"]) == []        # (nothing on the attachments' way)
+
+
+def test_a_picture_whose_matching_failed_is_matched_by_a_new_preview_and_remembered(worker, bot, mac):  # noqa: F811
+    """Review 2026-11-09: her picture's matching failed (the index broken for a while): the picture is not forgotten; a
+    重新预览 of the sample order (no pictures of its own) matches it now, and a later job has it as matched."""
+    order_rules(mac, rows=[her_row(items=PINK)])                  # (her earlier order: not the hat this one names)
+    mac.hats.answers(exit=1, stdout="not json")
+    mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action=SAMPLE_ORDER)
+    picture_job(bot, mac)
+    run_one(worker, bot, mac.settings)
+    assert "对不了图（对图出错（退出码 1））" in block(prompt_of(mac), "photo_matches")
+    [packet] = bot.prm.store.packets()
+    assert packet["platform"]["preview"]["verdict"] == "blocked"
+    mac.hats.answers(match={"图片-1.jpg": SURE})                   # the index works again
+    assert bot.prm.decide(packet["id"], "repreview")["ok"]
+    run_one(worker, bot, mac.settings)
+    again = bot.prm.store.packet(packet["id"])
+    assert again["platform"]["preview"]["verdict"] == "ready", again["platform"]["preview"]["problems"]
+    assert [c["args"][0] for c in mac.hats.calls()] == ["match", "match", "sheet"] and again["meta"]["operator_files"]
+    text_job(bot, mac, text="[11:09] 好的")
+    run_one(worker, bot, mac.settings)
+    later = block(prompt_of(mac), "photo_matches")
+    assert "这次看不到原图）：有把握" in later
+    assert [c["args"][0] for c in mac.hats.calls()].count("match") == 2      # (remembered: not matched again)
+
+
+def test_a_listing_not_read_again_is_told_as_of_when_it_was_read(worker, node, tmp_path):  # noqa: F811
+    """Review 2026-11-09: the --mine listing due to be read again and 聚水潭 not read (the CLI lock kept busy, a login
+    lapsed): the orders read before are told as they were, saying so and when they were read (no conclusion on sent or
+    signed from them); read again later, they are fresh."""
+    dc, clock, reader, cfg, opts = reader_setup(worker, node, tmp_path, lock_wait_sec=0.3)
+    home = tmp_path / "home"
+    asked = {"orders": [], "verified": [], "accounts": [("DY", ACCOUNT)]}
+    node.rules([mine_rows(her_row(status="INIT"))])
+    first = reader.read(worker.platforms, cfg, asked, opts, home=home)
+    assert first["ok"] and first["orders"][0]["status"] == "INIT" and first["stale"] == ""
+    read_at = dc._when(clock.now)
+    clock.now += 3 * 3600                                         # three hours later: due to be read again
+    node.rules([mine_rows(her_row(status="SENT"))])               # (聚水潭 says SENT now)
+    with worker.platforms.CliLock(home / "platform" / "cli.lock", wait=5):
+        out = reader.read(worker.platforms, cfg, asked, opts, home=home)
+    text = dc.sample_block(out)
+    assert out["ok"] and out["orders"][0]["status"] == "INIT" and "另一个平台命令一直占着" in out["stale"]
+    assert f"聚水潭这次没读上（另一个平台命令一直占着（等了 0 秒）），下面是 {read_at} 读的，之后可能变了：寄没寄出、到没到不要下结论。" in text
+    assert "「这次没读上，下面是之前读的」" in dc.SAMPLE_RULE
+    clock.now += dc.FAIL_CACHE_SEC + 1
+    node.rules([rule(["samples"], stderr="[NOT_LOGGED_IN] 登录失效\n", exit=77)])
+    out = reader.read(worker.platforms, cfg, asked, opts, home=home)
+    assert out["ok"] and out["stale"] == "聚水潭登录失效了" and "（聚水潭登录失效了），下面是" in dc.sample_block(out)
+    clock.now += dc.FAIL_CACHE_SEC + 1
+    node.rules([mine_rows(her_row(status="SENT"))])
+    out = reader.read(worker.platforms, cfg, asked, opts, home=home)
+    assert out["orders"][0]["status"] == "SENT" and out["stale"] == "" and "没读上" not in dc.sample_block(out)
+
+
+def test_the_block_says_which_orders_it_looks_among_and_that_a_missing_one_proves_nothing(worker, bot, mac):  # noqa: F811
+    """Review 2026-11-09: `samples --mine` sees only our sub-account's among the company's newest 100: the block says
+    so, and the rule says an order not there is not 「没寄」 (ask the operators)."""
+    dc = worker.draft_context
+    mac.node.rules([mine_rows(her_row())])
+    text_job(bot, mac)
+    run_one(worker, bot, mac.settings)
+    prompt = prompt_of(mac)
+    assert f"新的在前（{dc.WINDOW}）：" in block(prompt, "sample_status")
+    assert dc.WINDOW == "只看得到聚水潭公司最新 100 张寄样单里我们这个子账号的，加上合作单里记的单号"
+    assert "这里没有的单不等于没寄" in prompt and "请运营核对（needs_attention 设成 true）" in prompt
+    none = dc.sample_block({"ok": True, "orders": [], "at": time.time(), "listed": True})
+    assert f"里没找到她的寄样单（{dc.WINDOW}）" in none
+    assert "（只看了合作单里记的单号）" in dc.sample_block({"ok": True, "orders": [], "at": time.time(), "listed": False})
+
+
+class Platforms:
+    """``worker.platforms`` with its ``run_cli`` answered by ``answer(argv, cwd, timeout, kwargs)``; every argv kept."""
+
+    def __init__(self, real, answer):
+        self._real, self._answer, self.calls = real, answer, []
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def run_cli(self, argv, cwd, *, timeout, **kwargs):
+        argv = [str(a) for a in argv]
+        self.calls.append(argv)
+        return self._answer(argv, cwd, timeout, kwargs)
+
+
+def picture_in(tmp_path, job=5):
+    ws = tmp_path / "ws"
+    (ws / "inbox" / f"job-{job}").mkdir(parents=True, exist_ok=True)
+    (ws / "inbox" / f"job-{job}" / "图片-1.jpg").write_bytes(b"\xff\xd8\xff picture one")
+    return ws, f"inbox/job-{job}/图片-1.jpg"
+
+
+def test_a_tool_that_timed_out_is_left_alone_for_a_while(worker, node, hats, tmp_path):  # noqa: F811
+    """Review 2026-11-09: 聚水潭's CLI timed out once: for ``breaker_min`` minutes no draft calls it (each says why), then
+    it may.  The photo index the same: her picture waits (a later job tries it again) and a sample order's sheet is not
+    made (the order waits for a person)."""
+    dc, clock, reader, cfg, opts = reader_setup(worker, node, tmp_path)
+    home = tmp_path / "home"
+    hung = Platforms(worker.platforms, lambda argv, cwd, timeout, kw: worker.platforms.CliRun(
+        argv, None, "", "", timeout, stopped="timeout"))
+    asked = {"orders": [], "verified": [], "accounts": [("DY", ACCOUNT)]}
+    out = reader.read(hung, cfg, asked, opts, home=home)
+    assert not out["ok"] and out["why"] == "聚水潭命令超时（60 秒）" and len(hung.calls) == 1
+    clock.now += dc.FAIL_CACHE_SEC + 1                            # (a failed read may be tried again now...)
+    out = reader.read(hung, cfg, {**asked, "accounts": [("DY", OTHER)]}, opts, home=home)
+    assert len(hung.calls) == 1 and out["why"].startswith("聚水潭命令上次超时，") and out["why"].endswith("以前先不用")
+    assert dc.tripped("jst", now=time.time() + opts["breaker_min"] * 60 + 1) == ""
+    # the photo index
+    hopts = {**dc.options({"draft_context": {"hat_index": str(hats.dir), "hat_python": sys.executable}}), "gap_sec": 0.0}
+    ws, rel = picture_in(tmp_path)
+    hung.calls.clear()
+    got = dc.match_photos(hung, hopts, ws, 1, 5, [rel], home=home, clock=clock)
+    assert not got["ok"] and got["photos"][0]["error"] == "对图超时" and len(hung.calls) == 1
+    later = dc.match_photos(hung, hopts, ws, 1, 6, [], home=home, clock=clock)
+    assert len(hung.calls) == 1 and later["photos"][0]["error"].startswith("帽子图库上次超时，")
+    entry = {**later["photos"][0], "error": "", "hats": dc.trimmed(SURE), "verdict": dc.SURE}
+    context = dc.Context("", {"ok": True, "orders": []}, {"photos": [entry]}, {})
+    action = {"action": "jst.sample_order", "shop": "dy", "items": [{"item_id": DY_ITEM2, "skus": [{"sku_id": DY_SKU2,
+                                                                                                  "qty": 1}]}]}
+    checked = dc.gate({"verdict": "ready", "action": action, "facts": [], "problems": []}, context, platforms=hung,
+                      cfg=cfg, opts=hopts, catalog=coded_catalog(), workspace=ws, home=home, sleep=clock.sleep,
+                      clock=clock)
+    assert checked["gated"] and checked["block"]["verdict"] == "blocked" and checked["sheet"] is None
+    assert checked["block"]["problems"][0].startswith("对图单没做成（帽子图库上次超时，") and len(hung.calls) == 1
+
+
+def test_a_jobs_time_budget_leaves_the_next_tool_for_later(worker, node, hats, tmp_path):  # noqa: F811
+    """Review 2026-11-09: a slow 聚水潭 read takes most of the job's budget (``budget_sec``): her picture is not matched
+    this time (the block says so), and the next job, its budget whole, matches it."""
+    dc, clock, reader, cfg, opts = reader_setup(worker, node, tmp_path)
+    hats.answers(match={"图片-1.jpg": SURE})
+    opts = {**opts, "budget_sec": 60, "gap_sec": 0.0,
+            **{k: v for k, v in dc.options({"draft_context": {"hat_index": str(hats.dir),
+                                                              "hat_python": sys.executable}}).items()
+               if k in ("hat_index", "hat_python")}}
+
+    def answer(argv, cwd, timeout, kwargs):
+        if argv[1].endswith("hat_match.py"):
+            return worker.platforms.run_cli(argv, cwd, timeout=timeout, env=kwargs.get("env"))
+        clock.now += 55                                           # (聚水潭 took 55 of the 60 seconds)
+        return worker.platforms.CliRun(argv, 0, json.dumps(jst_samples(her_row()), ensure_ascii=False), "", 55)
+
+    slow = Platforms(worker.platforms, answer)
+    ws, rel = picture_in(tmp_path)
+    meta = {"party_id": 1, "draft_context": {"orders": [], "verified": [], "accounts": [{"platform": "DY",
+                                                                                        "no": ACCOUNT}]}}
+    first = dc.build(slow, cfg, opts, workspace=ws, job={"id": 5}, meta=meta, got=[rel], home=tmp_path / "home",
+                     reader=reader, catalog=coded_catalog())
+    assert JST_ORDER in first.text and f"图片-1.jpg（这次发的，{rel}）：对不了图（这次没时间对图了）" in first.text
+    assert hats.calls() == []
+    later = dc.build(slow, cfg, opts, workspace=ws, job={"id": 6}, meta=meta, got=[], home=tmp_path / "home",
+                     reader=reader, catalog=coded_catalog())
+    assert "这次看不到原图）：有把握" in later.text and len(hats.calls()) == 1
+    assert sum(1 for c in slow.calls if "samples" in c) == 1      # (the listing kept: 聚水潭 not asked again)
+
+
+def test_the_macs_files_are_pruned_by_every_prm_job_the_switch_on_or_off(worker, bot, mac):  # noqa: F811
+    """Review 2026-11-09: the sheets and the photo memory on the Mac go after a week whether the bot's switch is on or
+    not: every prm job prunes them, one without the context too."""
+    dc = worker.draft_context
+    sheets, photos = dc.folder(mac.home) / "sheets", dc.folder(mac.home) / "photos"
+    for folder in (sheets, photos):
+        folder.mkdir(parents=True, exist_ok=True)
+    old_sheet, old_memory, fresh = sheets / "sheet-old.jpg", photos / "party-9.json", sheets / "sheet-new.jpg"
+    for path in (old_sheet, old_memory, fresh):
+        path.write_bytes(b"x")
+    for path in (old_sheet, old_memory):
+        os.utime(path, (time.time() - 8 * 86400, time.time() - 8 * 86400))
+    bot.prm._draft_context = False
+    mac.node.rules([mine_rows(her_row())])
+    job_id = text_job(bot, mac)
+    assert "draft_context" not in bot.relay.store.get(job_id)["meta"]
+    run_one(worker, bot, mac.settings)
+    assert not old_sheet.exists() and not old_memory.exists() and fresh.exists()
+
+
+def test_the_clean_up_of_her_deal_deletes_her_photo_memory(worker, bot, mac):  # noqa: F811
+    """8.2: the clean-up of her case file (done on the Mac without the model) takes her photo memory too."""
+    dc = worker.draft_context
+    mac.node.rules([mine_rows(her_row())])
+    mac.hats.answers(match={"图片-1.jpg": SURE})
+    picture_job(bot, mac)
+    run_one(worker, bot, mac.settings)
+    memory = dc.folder(mac.home) / "photos" / f"party-{mac.party['id']}.json"
+    assert memory.is_file() and "图片-1.jpg" in memory.read_text(encoding="utf-8")
+    assert worker.purge_case_file(mac.workspace, mac.party["id"])["ok"]
+    assert not memory.exists() and dc.forget(mac.home, mac.party["id"]) is False
 
 
 def test_the_module_runs_on_the_macs_system_python(tmp_path):

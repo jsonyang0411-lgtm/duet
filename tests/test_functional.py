@@ -420,8 +420,9 @@ class TestPrmPages:
 
     def test_review_page_shows_a_sample_orders_photo_sheet_to_the_operators_only(self, page, prm, tmp_path):
         """PRM_DRAFT_CONTEXT (2026-11-09): a sample order's draft with the Mac's photo sheet (``meta.operator_files``)
-        shows it as a picture in its platform block (GET /api/prm/file), says it is only for the operators, says a
-        sheet whose file is gone was cleaned up; a hat with no picture behind it leaves 「批准并执行」 off."""
+        shows it as a picture in its platform block (GET /api/prm/file?…&kind=operator), says it is only for the
+        operators, says a sheet whose file is gone was cleaned up; a hat with no picture behind it leaves 「批准并执行」
+        off."""
         import struct
         import zlib
         from src.prm import platforms
@@ -457,7 +458,7 @@ class TestPrmPages:
                          "对图单-70.jpg（图已经清理掉了）"):
             assert expected in text, expected
         img = box.locator("img")
-        assert img.count() == 1 and img.get_attribute("src") == f"/api/prm/file?packet={pid}&n=0"
+        assert img.count() == 1 and img.get_attribute("src") == f"/api/prm/file?packet={pid}&kind=operator&n=0"
         page.wait_for_function("() => document.querySelector('.prm-operator-file img').naturalWidth > 0")
         assert img.evaluate("el => el.naturalWidth") == 1                 # the page got the picture and decoded it
         assert card.locator("button:has-text('批准并执行')").is_disabled()

@@ -969,12 +969,13 @@ def hand_samples_out(store: PrmStore, limit: int = HAND_LINES) -> list:
 
 def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, limit: int = 40,
              retention_days: int = retention.RETENTION_DAYS, now: Optional[float] = None,
-             group_of: Callable[[dict], dict] = group_state_out) -> dict:
+             group_of: Callable[[dict], dict] = group_state_out, photo_check: bool = False) -> dict:
     """What the console shows (GET /api/prm); also built from the database when the bot is stopped.
     Numbers appear only masked (``legend``); the full ones need ``reveal``.  ``night_alerts``: the deals' notices
     of holding lines the night window (``auto``: 自动模式 by day) sent (``NIGHT_NOTICE``), each until 「已处理」
     (``night_done``).  ``group_of(deal)``: a deal's 三方群 (``three_party.state_out``; the running bot's adds its last
-    「先试一下」)."""
+    「先试一下」).  ``photo_check`` (PRM_DRAFT_CONTEXT on): a pending sample order the Mac did not check by photo
+    (``draft_context.unchecked``) shows 「批准并执行」 off and why."""
     now = time.time() if now is None else now
     parties = {p["id"]: p for p in store.parties(include_inactive=True)}
     newest = {}
@@ -1002,6 +1003,9 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
     def packet_out(p: dict) -> dict:
         party = parties.get(p["party_id"]) or {}
         final = p["final_text"] if p.get("final_text") is not None else p["text"]
+        platform = platform_out(p)
+        if photo_check and platform and platform["can_execute"] and draft_context.unchecked(p):
+            platform = {**platform, "can_execute": False, "problems": [*platform["problems"], draft_context.NOT_GATED]}
         return {
             "id": p["id"], "deal_id": p["deal_id"], "party_id": p["party_id"],
             "party_name": party.get("name", "?"), "job_id": p["job_id"], "status": p["status"],
@@ -1019,7 +1023,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
             "waybill": p["meta"].get("waybill", ""), "system": p["meta"].get("source") == "system",
             "outcome": p["outcome"], "error": p["error"],
             "created_at": p["created_at"], "decided_at": p["decided_at"], "sent_at": p["sent_at"],
-            "tool": p.get("tool", MESSAGE_TOOL), "platform": platform_out(p),
+            "tool": p.get("tool", MESSAGE_TOOL), "platform": platform,
             "night_held": str(p["meta"].get("night_held") or ""), "opening": bool(p["meta"].get(OPENING)),
             "huopan": bool(p["meta"].get(HUOPAN)), "signed": bool(p["meta"].get(SIGNED)),
             "channel": BUYIN_CHANNEL if is_buyin(p) else GROUP_CHANNEL if p["meta"].get("channel") == GROUP_CHANNEL
@@ -1537,18 +1541,27 @@ class PrmService:
 
     def _draft_context_meta(self, deal_id) -> dict:
         """PRM_DRAFT_CONTEXT: ``meta.draft_context`` of a draft job of the deal (``draft_context.job_context``: the
-        sample orders her deal knows, her platform accounts).  Whatever goes wrong, the key is there (empty lists): the
-        Mac still says what it could not find, and still checks a sample order by photo."""
+        sample orders her deal knows, the ones the bot made, her platform accounts but one another active creator has
+        too: ``_hand_index``, as the hand-made orders go).  Whatever goes wrong, the key is there (empty lists): the Mac
+        still says what it could not find, and still checks a sample order by photo."""
         try:
             deal = self._store.deal(int(deal_id))
             party = self._store.party(deal["party_id"]) if deal else None
             if party:
                 accounts = draft_context.accounts_of(self._store, party, self._creator_ids(deal["id"]),
                                                      self.creator_directory)
+                accounts = draft_context.unambiguous(accounts, self._hand_index()["keys"], party["wxid"])
                 return draft_context.job_context(self._store, deal["id"], accounts)
         except Exception:
             logger.exception("PRM: the draft context of deal %s could not be put together", deal_id)
-        return {"orders": [], "accounts": []}
+        return {"orders": [], "verified": [], "accounts": []}
+
+    def _drop_job_sheets(self, job_id: int) -> None:
+        """PRM_DRAFT_CONTEXT: a job's operator-only files that no draft keeps (its answer failed or cannot be read)
+        deleted, and its outfiles named like a sheet: her photo is on them."""
+        draft_context.delete_files([f["path"] for f in self._relay.store.operator_files(job_id)]
+                                   + [f["path"] for f in self._relay.store.outfiles(job_id)
+                                      if str(f.get("name") or "").startswith(draft_context.SHEET_PREFIX)])
 
     def _with_note(self, meta: dict, deal: dict, now: float) -> dict:
         """A draft job of the deal (her message's, a 开场白's, a 专属佣金 step's, a 百应 draft's) with ``meta.note`` when the
@@ -2719,6 +2732,7 @@ class PrmService:
             return True
         if status == "cancelled":
             # (an operator cancelled it in the console): her lines it took along wait for the next one again
+            self._drop_job_sheets(job["id"])           # (PRM_DRAFT_CONTEXT: a sheet it sent first: her photo is on it)
             self._store.edit_notices(deal_id, lambda notices: [
                 {**n, "into": None, "text": failed_text(n.get("head") or n["text"])} if n.get("into") == job["id"]
                 else n for n in notices], now)
@@ -2732,6 +2746,8 @@ class PrmService:
                 extra = {}
             extra = extra if isinstance(extra, dict) else {}
             why = "Mac 失联了" if status == "lost" else str(extra.get("error") or job.get("result_text") or "没有返回内容")
+            if status == "failed":
+                self._drop_job_sheets(job["id"])       # (lost: the answer may still come, with them)
             self._draft_failed(job, meta, f"#{job['id']} 草稿没写成：{why[:120]}", notes, now)
             if meta.get("system_note"):
                 self._chain_refresh(deal_id, now)      # (not written: the chain waits for a person)
@@ -2742,12 +2758,16 @@ class PrmService:
         try:
             draft = parse_draft(job.get("result_text") or "")
         except DraftError as e:
+            self._drop_job_sheets(job["id"])
             self._draft_failed(job, meta, f"#{job['id']} 的草稿格式不对（{e.code}），没有生成待审批", notes, now)
             if meta.get("system_note"):
                 self._chain_refresh(deal_id, now)
             logger.warning("PRM: job #%d answer unusable: %s", job["id"], e)
             return True
         draft = self._mask_draft(party_id, draft, now)
+        if self._draft_context and draft.platform is not None:
+            # PRM_DRAFT_CONTEXT: a sample order the Mac did not check by photo (an older worker, one not restarted) is held
+            draft = dataclasses.replace(draft, platform=draft_context.ungated(draft.platform, draft.gated))
         # A 专属佣金 the invite card (邀约卡 with a 专属佣金) opened already, as the Mac's preview found it in the invite
         # ledger (``covered``): a step of the chain is dropped and counts as open (the chain goes on); a reply keeps its
         # words for a person, without the action.
@@ -2760,10 +2780,12 @@ class PrmService:
             if lane == LANE_REPLY:
                 draft = dataclasses.replace(draft, platform=None)
                 cover = None
-        files = self._relay.store.outfiles(job["id"])
-        # PRM_DRAFT_CONTEXT: the files the Mac sent back for the operators only (a sample order's photo sheet) are kept
-        # on the packet (``meta.operator_files``), never attachments for her
-        files, operator_files = draft_context.split_operator_files(files, draft.operator_files)
+        # PRM_DRAFT_CONTEXT: the files the Mac sent back for the operators only (a sample order's photo sheet, on the
+        # relay's operator-only channel; an outfile named like one) are kept on the packet (``meta.operator_files``),
+        # never attachments for her; past MAX_OPERATOR_FILES they are deleted
+        files, operator_files, extra_sheets = draft_context.take_operator_files(
+            self._relay.store.operator_files(job["id"]), draft.operator_files, self._relay.store.outfiles(job["id"]))
+        draft_context.delete_files(extra_sheets)
         attachments = [{"name": f["name"], "path": f["path"], "size": f["size"], "sha256": f["sha256"]} for f in files]
         # Every file the draft named (an older worker reports only the ones it sent back): fewer came,
         # the draft waits for a person whatever its kind's gate, and the deal and the draft say which.
@@ -2886,8 +2908,12 @@ class PrmService:
             packet_meta[AUTO_MODE] = True              # 自动模式 by day sent or held it: the console and the record say so
         if night_held:
             packet_meta["night_held"] = night_held[:200]
-        if operator_files:
+        if operator_files and state == PENDING:
             packet_meta[draft_context.OPERATOR_FILES] = operator_files      # (the console shows them, never sent to her)
+        elif operator_files:
+            draft_context.delete_files([f["path"] for f in operator_files])   # (nobody will look at this draft)
+        if draft.gated:
+            packet_meta[draft_context.KEY] = {"v": 1, "gated": True}     # (the Mac checked its sample order by photo)
         tool, platform = MESSAGE_TOOL, None
         if draft.platform is not None:
             action = draft.platform.get("action")
@@ -3979,6 +4005,9 @@ class PrmService:
             return {"ok": False, "error": f"预览没通过，不能执行：{why}"}
         if data.get("previewing"):
             return {"ok": False, "error": "正在重新预览，等结果出来再批准"}
+        if self._draft_context and draft_context.unchecked(packet):
+            # PRM_DRAFT_CONTEXT: its last preview was not checked by photo (a draft from before the switch was on too)
+            return {"ok": False, "error": f"{draft_context.NOT_GATED}：点「重新预览」，Mac 对过图再批准"}
         opened, unsure = self._opened_before(packet)
         if opened:
             logger.warning("PRM: packet %d not approved: its %s ran before for this product and creator%s",
@@ -4179,6 +4208,9 @@ class PrmService:
                 except (ValueError, platforms.ActionError):
                     block = None
             answered = block is not None                 # (the Mac's new preview itself, not the old one marked)
+            gated = draft_context.gated_of(job.get("result_text"))
+            if answered and self._draft_context:
+                block = draft_context.ungated(block, gated)
             if block is None:
                 why = refused or {"lost": "Mac 失联了", "cancelled": "任务被取消了"}.get(status) or _job_error(job)
                 preview = {**(data.get("preview") or {}), "problems": [f"重新预览没做成：{why}"[:200]]}
@@ -4190,10 +4222,22 @@ class PrmService:
                 block = {**block, "action": masked_action(block.get("action"), self._masker(packet["party_id"], now))}
             new = {**data, "previewing": None, **({"preview": block} if block else {})}
             self._store.set_platform(packet["id"], new, (PENDING,))
-            files = (draft_context.preview_operator_files(job.get("result_text"), self._relay.store.outfiles(job["id"]))
-                     if answered else [])
-            if files:                                # PRM_DRAFT_CONTEXT: the new preview's sheet replaces the draft's
-                self._store.merge_packet_meta(packet["id"], {draft_context.OPERATOR_FILES: files}, (PENDING,))
+            if answered and self._draft_context and (block.get("action") or {}).get("action") == "jst.sample_order":
+                # PRM_DRAFT_CONTEXT: the packet keeps whether its last preview was checked by photo (approving asks)
+                self._store.merge_packet_meta(packet["id"], {draft_context.KEY: {"v": 1, "gated": gated}}, (PENDING,))
+            # PRM_DRAFT_CONTEXT: the new preview's sheet replaces the draft's (the old file deleted); one that came with an
+            # answer that cannot be read, for a draft no longer waiting, or past MAX_OPERATOR_FILES is deleted
+            files, extra_sheets = draft_context.preview_operator_files(
+                job.get("result_text"), self._relay.store.operator_files(job["id"]), self._relay.store.outfiles(job["id"]))
+            draft_context.delete_files(extra_sheets)
+            if files and answered:
+                old = [f["path"] for f in draft_context.files_of(packet) if f["path"] not in {g["path"] for g in files}]
+                if self._store.merge_packet_meta(packet["id"], {draft_context.OPERATOR_FILES: files}, (PENDING,)):
+                    draft_context.delete_files(old)
+                else:
+                    draft_context.delete_files([f["path"] for f in files])
+            elif files and status != "lost":         # (lost: its answer may still come, with them; else the sweep)
+                draft_context.delete_files([f["path"] for f in files])
             if packet.get("tool") in COMMISSION_ACTIONS.values():
                 self._chain_refresh(packet["deal_id"], now)    # (its preview may pass now)
             return True
@@ -5859,7 +5903,7 @@ class PrmService:
     def snapshot(self) -> dict:
         relay = self._relay.snapshot()
         return snapshot(self._store, running=True, retention_days=self._retention_days, now=self._clock(),
-                        group_of=self.three_party.deal_out, extra={
+                        group_of=self.three_party.deal_out, photo_check=self._draft_context, extra={
             "mac_online": relay.get("mac_online", False),
             "worker_kinds": relay.get("worker_kinds", []),
             "can_send": self._send is not None, "can_send_files": self._send_file is not None,
@@ -6179,7 +6223,7 @@ class PrmService:
         except Exception:
             logger.exception("PRM: the ignored boss groups could not be cleaned up; tried again later")
         try:                                       # PRM_DRAFT_CONTEXT: the photo sheets (her picture) after 30 days
-            draft_context.sweep(self._store, now)
+            draft_context.sweep(self._store, now, files_dir=self._relay.files_dir)
         except Exception:
             logger.exception("PRM: the operator files could not be cleaned up; tried again later")
         for deal in self._store.deals_to_purge(now, self._retention_days):

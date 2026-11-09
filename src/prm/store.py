@@ -1051,12 +1051,12 @@ class PrmStore:
             self._conn.commit()
             return True
 
-    def operator_file_packets(self, before: float) -> list[dict]:
-        """Packets made before ``before`` that still keep an operator file (``meta.operator_files`` with a path:
-        src/prm/draft_context.py ``sweep``), oldest first."""
+    def operator_file_packets(self) -> list[dict]:
+        """Packets that still keep an operator file (``meta.operator_files`` with a path: src/prm/draft_context.py
+        ``sweep`` looks at each file's own time), oldest first."""
         with self._lock:
-            rows = self._conn.execute("SELECT * FROM action_packets WHERE created_at < ? AND meta LIKE ? ORDER BY id",
-                                      (before, '%"operator_files"%')).fetchall()
+            rows = self._conn.execute("SELECT * FROM action_packets WHERE meta LIKE ? ORDER BY id",
+                                      ('%"operator_files"%',)).fetchall()
         out = []
         for row in rows:
             packet = packet_view(dict(row))
