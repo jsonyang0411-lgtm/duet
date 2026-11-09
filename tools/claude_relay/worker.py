@@ -317,8 +317,9 @@ PRM_PLATFORM_NOTE = (
     "预览会说这个商品自己的上限；前缀买家看得到，不写微信、V 号、电话这些联系方式）。"
     "price（统一的渠道价，元）、stock_per_sku（每个颜色几件）、sku_ids（只放其中几个 SKU）、exclusive（false = 达人带货、"
     "共用主商品库存）只有达人或老板另外谈定、kb/ 允许时才填。绑定要达人已经有这个商品的专属佣金："
-    "还没开就先只填这个商品的 dy.designated_commission，开好以后再建链接。链接一般由系统派的那一步建（那一步的说明会写），"
-    "回她消息的草稿不填 dy.channel_goods，除非起草备注里运营让你直接建（比如专属佣金是在百应手动开的）。达人或老板要了专属链接"
+    "还没开就不填平台动作，专属佣金由系统派的那一步开（kb/合作政策.md 2.1），开好以后系统再派一步建这个商品的链接"
+    "（那一步的说明会写）；回她消息的草稿不填 dy.channel_goods，除非起草备注里运营让你直接建（比如专属佣金是在百应手动开的）。"
+    "达人或老板要了专属链接"
     "（说到「链接」「专属链接」「前缀」）时，slots 里记「专属链接前缀」= 她要的前缀（写成「【某某专属】」；要链接、还没说前缀"
     "就记「要」；后来说不要了就记成空字符串；只写这三种，「好的」「可以」这类系统看不出要不要，会照原来的办）："
     "系统按它在每个商品的专属佣金开好以后派一步建这个商品的链接。\n"
@@ -514,12 +515,13 @@ class RelayClient:
         kinds = data.get("kinds") if status == 200 and isinstance(data, dict) else None
         return [str(k) for k in kinds] if isinstance(kinds, list) else None
 
-    def bot_features(self, pause=time.sleep) -> list[str] | None:
+    def bot_features(self, pause=time.sleep, require: str = "") -> list[str] | None:
         """What the bot announces besides its job kinds (GET /relay/health ``features``, e.g.
         ``platforms.CHANNEL_FEATURE``); None from a bot that says nothing of them (from before 2026-11-09).  Asked up to
         ``FEATURES_TRIES`` times (``FEATURES_PAUSES_SEC`` between, ``FEATURES_TIMEOUT_SEC`` each); when no ask is
-        answered, the last answer stands in if it is not older than ``FEATURES_KEEP_SEC``, else the last error is
-        raised (review 2026-11-09 N1: one timeout dropped a link step)."""
+        answered, the last answer stands in if it is not older than ``FEATURES_KEEP_SEC`` and has ``require`` (when
+        given: an old answer kept from before the bot went away is no news, the bot may be on its way up as the new
+        one: review M4), else the last error is raised (review 2026-11-09 N1: one timeout dropped a link step)."""
         error = None
         for n in range(FEATURES_TRIES):
             if n:
@@ -533,7 +535,8 @@ class RelayClient:
             features = data.get("features") if status == 200 and isinstance(data, dict) else None
             return [str(f) for f in features] if isinstance(features, list) else None
         seen = self.features_seen
-        if seen is not None and time.monotonic() - seen[0] <= FEATURES_KEEP_SEC:
+        if (seen is not None and time.monotonic() - seen[0] <= FEATURES_KEEP_SEC
+                and (not require or require in (seen[1] or []))):
             log.info("the bot's features: its answer of %d s ago stands in", int(time.monotonic() - seen[0]))
             return seen[1]
         raise error
@@ -2437,11 +2440,12 @@ UNASKED = "unasked"                                      # the draft's ``platfor
 def older_bot(client: RelayClient, raw_action) -> str:
     """Why a draft's action may not go to this bot ("" = it may): a dy.channel_goods for a bot that does not announce
     ``platforms.CHANNEL_FEATURE`` (GET /relay/health ``features``: one from before 2026-11-09), or that cannot be
-    asked now (``UNASKED_BOT_NOTE``: not knowing is never a yes)."""
+    asked now (``UNASKED_BOT_NOTE``: not knowing is never a yes; an old answer kept from before is not knowing either,
+    ``bot_features(require=…)``: on upgrade day the bot restarts while a draft is in flight, review M4)."""
     if not isinstance(raw_action, dict) or raw_action.get("action") != "dy.channel_goods" or platforms is None:
         return ""
     try:
-        features = client.bot_features()
+        features = client.bot_features(require=platforms.CHANNEL_FEATURE)
     except Exception as e:                               # (once per draft that needs it: never fatal)
         log.warning("the bot's features could not be asked for: %s", e)
         return UNASKED_BOT_NOTE

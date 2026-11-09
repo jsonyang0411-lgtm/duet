@@ -14,7 +14,7 @@ from test_prm import draft
 from test_prm_platform_flow import (CHANNEL, DESIGNATED, THREE, TWO, approve, block, bot, clock,  # noqa: F401
                                     drafted, mac_runs, record, system_jobs)
 
-from platform_fakes import DY_ITEM, DY_ITEM2, DY_LINK, DY_SKU, DY_SKU2, DY_UID, JST_ORDER
+from platform_fakes import DY_ITEM, DY_ITEM2, DY_ITEM3, DY_LINK, DY_SKU, DY_SKU2, DY_UID, JST_ORDER
 from src.prm import platforms
 from src.prm.service import (LINK_SLOT, LINKS_UNCLEAR_NOTICE, RESTART_HINT, STEP_RETRY_SEC, STEP_UNASKED_TRIES,
                              event_out, link_reading, link_wish, next_step_note, unfilled_placeholders)
@@ -279,6 +279,49 @@ def test_a_link_step_the_mac_never_could_ask_about_waits_for_a_person(bot, clock
     attention = bot.prm.store.deal(1)["attention"]
     assert (f"建专属链接这一步的草稿没写成：Mac 连着 {STEP_UNASKED_TRIES} 次问不到 Windows 上的机器人" in attention
             and "系统不会自己再起草这一步，请运营处理" in attention)
+    # the verifier's probe Q3 (review M1): A's link counts as asked till an operator acts; the chain's next move (a
+    # decision, a draft that comes back …) does not dispatch it afresh: it goes on with B's 专属佣金
+    bot.prm._chain_go(bot.prm.store.deal(1), clock.now)
+    nxt = bot.worker_takes()
+    assert nxt["meta"]["step"]["item"] == DY_ITEM2 and "action" not in nxt["meta"]["step"]
+    assert f"专属链接 · 派过、草稿没建它：{DY_ITEM}" in nxt["meta"]["system_note"]
+
+
+def test_without_a_chain_the_cap_holds_too(bot, clock):
+    """No sample order: her link step, the Mac never could ask the bot; given up, the product is not asked afresh when
+    the deal goes on (``_links_left``, review M1)."""
+    wants_links(bot)
+    commission = drafted(bot, reply="专属佣金设好啦")
+    opens(bot, commission)
+    for n in range(STEP_UNASKED_TRIES + 1):
+        job = bot.worker_takes()
+        assert job is not None and job["meta"]["step"].get("tries", 0) == n and job["meta"]["step"]["item"] == DY_ITEM
+        bot.finish(job["id"], unasked_draft())
+        clock.now += STEP_RETRY_SEC
+        bot.prm.sweep_owed_steps()
+    assert bot.worker_takes() is None
+    assert not bot.prm._links_without_chain(bot.prm.store.deal(1), clock.now) and bot.worker_takes() is None
+
+
+def test_a_step_owed_again_by_a_takeover_keeps_its_tries(bot, clock):
+    """A retried link step (``tries`` 1) comes back while a person has the deal: owed again with its tries (review M1:
+    a takeover in between started the count over)."""
+    two_signed_for(bot, clock)
+    _, commission = step(bot, DESIGNATED)
+    opens(bot, commission)
+    job = bot.worker_takes()
+    bot.finish(job["id"], unasked_draft())
+    clock.now += STEP_RETRY_SEC
+    assert bot.prm.sweep_owed_steps() == 1
+    again = bot.worker_takes()
+    assert again["meta"]["step"]["tries"] == 1
+    assert bot.prm.deal_action("mode", {"deal_id": 1, "mode": "human"})["ok"]
+    bot.finish(again["id"], draft(message_kind="money", reply_draft="链接：{链接}", slots={}, platform=block(CHANNEL)))
+    [owed] = [n for n in bot.prm.store.deal(1)["notices"] if n["key"] == "step"]
+    assert owed["tries"] == 1 and owed["action"] == "dy.channel_goods"
+    assert bot.prm.deal_action("mode", {"deal_id": 1, "mode": "copilot"})["ok"]
+    assert bot.prm.sweep_owed_steps() == 1
+    assert bot.worker_takes()["meta"]["step"]["tries"] == 1
 
 
 def test_her_reply_whose_link_the_mac_could_not_ask_about_waits_for_her_next_draft(bot, clock):
@@ -737,6 +780,57 @@ def test_without_a_chain_a_link_dropped_at_a_prefix_too_long_is_asked_again_with
     bot.finish(job["id"], draft(message_kind="other", reply_draft="", slots={}))     # (drafted nothing this time)
     says_prefix(bot, "【小美专属】")
     assert bot.worker_takes() is None                                    # asked with it once: not again
+
+
+def verified_in_a_row(b, items):
+    """专属佣金 drafts of ``items`` approved one after the other, the Mac takes each execution, then answers them in a
+    row (no chain): their results come back in quick succession (the verifier's probes Q1, Q2)."""
+    taken = []
+    for item in items:
+        packet = drafted(b, block({**DESIGNATED, "item_id": item}), reply="")
+        row = approve(b, packet)
+        job = b.relay.next_job(0, ("prm",))
+        assert job["id"] == row["id"]
+        taken.append((packet, job))
+    for packet, job in taken:
+        rec = {**record(), "key": job["meta"]["key"]}
+        assert b.relay.finish(job["id"], {"ok": True, "text": json.dumps(rec, ensure_ascii=False), "duration_s": 9})
+        b.relay.tick()
+        b.prm.send_approved()
+    return [packet for packet, _ in taken]
+
+
+def test_without_a_chain_a_dropped_next_step_tells_the_owed_one(bot, clock):
+    """The verifier's probe Q1 (review M3): three 专属佣金 verified in a row, no links: A's next step is asked, B's is
+    owed (A's is under way), C's is not asked (one is owed already): the owed one's note says C is open too, so the Mac
+    does not draft C's 专属佣金 again."""
+    first, second, third = verified_in_a_row(bot, (DY_ITEM, DY_ITEM2, DY_ITEM3))
+    [owed] = [n for n in bot.prm.store.deal(1)["notices"] if n["key"] == "step"]
+    assert owed["text"] == f"#{second['id']} 之后该开专属佣金了：手头还有一步在起草，那一步交回来系统就派"
+    assert owed["note"].endswith(f"另外，商品 {DY_ITEM3} 的专属佣金（20%）也已经在平台上开好了（达人 {DY_UID}），开过的不要再开。")
+    job = bot.worker_takes()
+    assert job["meta"]["step"]["packet"] == first["id"]
+    bot.finish(job["id"], draft(message_kind="other", reply_draft="", slots={}))
+    assert bot.prm.sweep_owed_steps() == 1
+    assert f"另外，商品 {DY_ITEM3} 的专属佣金" in bot.worker_takes()["meta"]["system_note"]
+
+
+def test_without_a_chain_an_owed_link_step_after_no_links_asks_the_plain_next_step(bot, clock):
+    """The verifier's probe Q2 (review M2): links wanted, X and Y verified in a row (X's link step drafting, Y's
+    owed); she then says no links: Y's owed step is no link step any more, it is the step Y's 专属佣金 asks for without
+    links (the next product's), so the Mac still hears what is left."""
+    wants_links(bot)
+    _, second = verified_in_a_row(bot, (DY_ITEM, DY_ITEM2))
+    job = bot.worker_takes()
+    assert job["meta"]["step"]["item"] == DY_ITEM and job["meta"]["step"]["action"] == "dy.channel_goods"
+    bot.finish(job["id"], draft(message_kind="other", reply_draft="", slots={}))
+    wants_links(bot, "")
+    assert bot.prm.sweep_owed_steps() == 1
+    plain = bot.worker_takes()
+    assert plain["meta"]["step"] == {"packet": second["id"], "delivered": False, "item": ""}
+    note = plain["meta"]["system_note"]
+    assert note.startswith("这一步欠着的时候，合作单改成了不要专属链接。" f"商品 {DY_ITEM2} 的专属佣金（20%）已经在平台上开好了")
+    assert "就给这位达人填下一个" in note and "dy.channel_goods" not in note
 
 
 def test_without_links_a_verified_link_asks_for_nothing_more(bot, clock):
