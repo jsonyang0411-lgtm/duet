@@ -680,6 +680,38 @@ def test_the_settings_say_what_is_missing(tmp_path, cards):
     assert "不是一个 JSON 对象" in hc.load_config(path)[1]
 
 
+def test_the_settings_report_says_how_they_stand(tmp_path, cards, monkeypatch):
+    """Review 2026-11-10 (C5): ``config_report`` (``worker.py --check``, the worker's log): ok, missing, off or broken
+    and why (``load_config``'s own words), with the skill's script and Python the file names (the defaults when it
+    names none or cannot be read) and whether each is there."""
+    monkeypatch.delenv("LIVE_HANDCARD_PYTHON", raising=False)
+    path = tmp_path / "handcards.json"
+    defaults = (os.path.expanduser(hc.SKILL_SCRIPT), os.path.expanduser(hc.SKILL_PYTHON))
+    report = hc.config_report(path)
+    assert (report["state"], report["config"], (report["script"], report["python"])) == ("missing", None, defaults)
+    assert report["why"] == hc.load_config(path)[1] and report["path"] == str(path)
+    good = {"script": cards.script, "python": sys.executable, "globals": GLOBALS, "promo": PROMO}
+    path.write_text(json.dumps(good, ensure_ascii=False), encoding="utf-8")
+    report = hc.config_report(path)
+    assert report["state"] == "ok" and report["why"] == "" and report["config"] == hc.load_config(path)[0]
+    assert (report["script"], report["script_found"], report["python"], report["python_found"]) == (
+        cards.script, True, sys.executable, True)
+    for raw, state in ((dict(good, enabled=False), "off"), (dict(good, enabled="yes"), "off"),
+                       (dict(good, python=str(tmp_path / "none")), "broken"), (dict(good, max_catalogue_days=0), "broken"),
+                       ([1], "broken")):
+        path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+        report = hc.config_report(path)
+        assert (report["state"], report["why"], report["config"]) == (state, hc.load_config(path)[1], None), raw
+    assert report["script"] == defaults[0]                         # (a file that is no object names none)
+    path.write_text(json.dumps(dict(good, python=str(tmp_path / "none"))), encoding="utf-8")
+    assert hc.config_report(path)["python_found"] is False and hc.config_report(path)["script_found"] is True
+    path.write_text("{", encoding="utf-8")
+    report = hc.config_report(path)
+    assert report["state"] == "broken" and report["why"].startswith("handcards.json 读不了：") and \
+        (report["script"], report["python"]) == defaults
+    assert hc.CONFIG_STATES == ("ok", "missing", "off", "broken")
+
+
 def test_the_example_settings_are_the_house_template(tmp_path):
     example = json.loads((Path(__file__).resolve().parents[1] / "tools" / "claude_relay" / "handcards.example.json")
                          .read_text(encoding="utf-8"))

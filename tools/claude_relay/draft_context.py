@@ -5,9 +5,10 @@ the Mac's half.  tools/claude_relay/worker.py loads this file by its path; stand
 Only a job whose ``meta.draft_context`` is a dict gets any of this (the bot's PRM_DRAFT_CONTEXT=on puts it on a creator's
 WeChat draft jobs and on a new preview of a draft's sample order): ``{"orders": ["YP…"], "verified": ["YP…"],
 "accounts": [{"platform": "DY" | "XHS", "no": "<抖音号 / 小红书号>"}], "confirmed": ["<item code>"]}``: the 聚水潭 sample
-orders her deal knows, the ones of them the bot itself made (verified), her platform accounts (an account two registered
-creators share is not sent: the bot leaves it out), the item codes an operator confirmed for her deal in the console
-(「对过图了」, 2026-11-09).  Without it the worker's prompt and preview are what they were, byte for byte.
+orders her deal knows, the ones of them the bot itself made (``verified``: not read any more, since an order the bot made
+confirms no hat until it is shipped, review 2026-11-10 D3), her platform accounts (an account two registered creators
+share is not sent: the bot leaves it out), the item codes an operator confirmed for her deal in the console (「对过图了」,
+2026-11-09).  Without it the worker's prompt and preview are what they were, byte for byte.
 
 1. <sample_status> (``SampleReader``): her sample orders in 聚水潭, read with the jst CLI of the worker's platform settings
    (read-only, no ``--raw``: the CLI prints no receiver at all) under the Mac's platform CLI lock (cli.lock), ``gap_sec``
@@ -15,7 +16,8 @@ creators share is not sent: the bot leaves it out), the item codes an operator c
    asked once more after a longer pause).  One ``samples --mine`` (the logged-in sub-account's orders among the company's
    newest MINE_PAGE, shared by every creator for ``cache_min`` minutes) and ``samples --order-no=…`` for the orders her
    deal knows that it did not list (each kept as long).  Hers are the orders whose creator's platform account is one of
-   hers or whose number her deal knows; never by nickname.  Each order: its number, status in words, items (item code,
+   hers (on the same platform: a row that names no platform is hers only by its number) or whose number her deal knows;
+   never by nickname.  Each order: its number, status in words, items (item code,
    colour / size, the ERP's name, count), packages and waybills, when it was applied for, sent, signed for.  Could not
    be read (no jst CLI, a login lapsed, a risk wall, another sub-account, the lock kept busy, a timeout): the block says
    so; due to be read again but not read: the block says which time its orders are of.  The draft goes on either way.
@@ -32,8 +34,9 @@ creators share is not sent: the bot leaves it out), the item codes an operator c
    for it (so it was never compared), or the colours are close.
 3. ``gate``: a draft's jst.sample_order.  Every SKU's 聚水潭 item code (kb/products.json's ``code``) must come from a
    picture of hers that is 「有把握」 (its best hat, its best colour), or have been confirmed: an item of an earlier order
-   of hers that went out (SENT / SIGNED, never rejected) or that the bot made, or an operator's 「对过图了」 for the deal
-   in the console (the job's ``confirmed``; words in the 起草备注 confirm nothing).  Otherwise the preview is not ready,
+   of hers that was shipped to her (聚水潭 says SENT / SIGNED, or it has a waybill; never one rejected or cancelled, nor
+   one only made or audited, the bot's own too: review 2026-11-10 D3), or an operator's 「对过图了」 for the deal in the
+   console (the job's ``confirmed``; words in the 起草备注 confirm nothing).  Otherwise the preview is not ready,
    says how to let the hat go (``CONFIRM_HOW``) and names the code among ``held`` (the console's 「对过图了」 buttons).
    The codes with a picture behind them get the side-by-side sheet (``hat_match.py sheet <her photo>=<code> …
    --json``, under the CLI lock: it may ask 聚水潭 for a SKU photo, read-only); a row it marks 「！要再看」 or without
@@ -49,8 +52,11 @@ creators share is not sent: the bot leaves it out), the item codes an operator c
 
 A job has a time budget (``budget_sec`` before Claude starts, ``gate_budget_sec`` for the check); a tool that timed out
 is not run again for ``breaker_min`` minutes (the blocks say so).  Nothing here writes to a platform.  The files under
-~/.claude-relay/platform/draft-context/ (the photo memory, the sheets) go after KEEP_DAYS, like the pictures in inbox/
-(``prune``, every prm job), and her photo memory with the 8.2 clean-up of her deal (``forget``).
+~/.claude-relay/platform/draft-context/ (the photo memory, the sheets) go after KEEP_DAYS, like the pictures in inbox/,
+and so does each picture a memory file still remembers from before then (``prune``: every prm job, the sample-status
+and 百应 rounds too, and once when the worker starts), and her photo memory with the 8.2 clean-up of her deal
+(``forget``).  A config.json value of ``draft_context`` that is not taken leaves its default and is logged once a worker
+start (``options``).
 """
 
 from __future__ import annotations
@@ -110,7 +116,8 @@ COLOURS_KEPT = 6
 TOP_SHOWN, TOP_SHOWN_EARLIER, COLOURS_SHOWN = 5, 3, 3
 MAX_STOCK_STYLES = 5
 MINE_PAGE = 100                     # `samples --mine`: the newest orders of the company it looks among (the CLI's most)
-SENT_STATES = ("SENT", "SIGNED")    # an earlier order of these (never rejected) confirms its codes
+SENT_STATES = ("SENT", "SIGNED")    # an earlier order of these, or with a waybill (never rejected, never cancelled),
+                                    # was shipped to her: it confirms its codes (``confirmed_codes``)
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 SHOP_NAMES = {"dy": "抖店", "xhs": "小红书"}
 STATUS_WORDS = {"INIT": "待审核（单建好了，还没审）", "WAITING_SEND": "待发货（审过了，等仓库发）", "SENT": "已发货",
@@ -161,39 +168,77 @@ ORDER_RULE = ("起草 jst.sample_order 时，每一顶都要是 <photo_matches> 
               "给运营看，没对过图、对图要再看的那顶都建不了。")
 
 
+_SAID: set = set()                  # what was logged already, once a worker start (the canary, a setting not taken)
+
+
+def _say_once(key: str, message: str, *args) -> None:
+    if key not in _SAID:
+        _SAID.add(key)
+        log.warning(message, *args)
+
+
+def _shown(value) -> str:
+    """A config value as config.json writes it (``"24"``, ``true``, ``null``), cut short: for a log line."""
+    try:
+        text = json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = repr(value)
+    return text if len(text) <= 80 else text[:77] + "..."
+
+
+def _not_taken(key: str, value, wanted: str, default) -> None:
+    """A ``draft_context`` setting that is not taken: the default stands, and the log says so once a worker start for
+    each key and value (review 2026-11-10 C7: before, it was dropped without a word)."""
+    shown = _shown(value)
+    _say_once(f"setting {key}={shown}", "draft context: config.json 的 %s 是 %s，不能用（要%s），用默认值 %s",
+              key, shown, wanted, default)
+
+
 def options(settings: dict) -> dict:
-    """config.json's ``draft_context`` over ``DEFAULTS``: paths expanded, numbers in ``RANGES`` (others ignored)."""
-    raw = settings.get("draft_context") if isinstance(settings.get("draft_context"), dict) else {}
+    """config.json's ``draft_context`` over ``DEFAULTS``: paths expanded, numbers in ``RANGES``.  What is not taken (a
+    number out of its range or no number, a path that is no text or has control characters, a ``stock`` that is not
+    true / false, a key that is no setting, a ``draft_context`` that is no object) leaves the default, and is logged
+    once a worker start, by its key and value (``_not_taken``); an empty path is the default without a word."""
+    section = settings.get("draft_context")
+    raw = section if isinstance(section, dict) else {}
+    if section is not None and not isinstance(section, dict):
+        _not_taken("draft_context", section, "一个对象（{…}）", "（全部）")
     out = dict(DEFAULTS)
     for key in ("hat_index", "hat_python", "canary"):
         value = raw.get(key)
         if isinstance(value, str) and value.strip() and not _CONTROL.search(value):
             out[key] = value.strip()
+        elif value is not None and not (isinstance(value, str) and not value.strip()):
+            _not_taken(f"draft_context.{key}", value, "一个路径（一行字）", _shown(DEFAULTS[key]))
     for key, (low, high) in RANGES.items():
         value = raw.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool) and low <= value <= high:
             out[key] = float(value) if isinstance(DEFAULTS[key], float) else int(value)
+        elif value is not None:
+            _not_taken(f"draft_context.{key}", value, f" {low:g} 到 {high:g} 之间的数", _shown(DEFAULTS[key]))
     if isinstance(raw.get("stock"), bool):
         out["stock"] = raw["stock"]
+    elif raw.get("stock") is not None:
+        _not_taken("draft_context.stock", raw["stock"], " true 或 false", _shown(DEFAULTS["stock"]))
+    for key in raw:
+        if key not in DEFAULTS:
+            _say_once(f"setting {key}", "draft context: config.json 的 draft_context.%s 不是一项设置（拼错了？），没有用",
+                      _shown(key)[1:-1] if isinstance(key, str) else key)
     out["hat_index"] = Path(os.path.expanduser(str(out["hat_index"])))
     out["hat_python"] = Path(os.path.expanduser(str(out["hat_python"])))
     return out
 
 
 def wanted(meta) -> Optional[dict]:
-    """What the job asks this module to read: ``{"orders": [...], "verified": [...], "accounts": [(platform, no)],
-    "confirmed": [item codes the operators confirmed for the deal in the console, 「对过图了」]}``, or
-    None for a job without ``meta.draft_context`` (the switch off, an older bot) and for a 百应 draft.  Only order numbers
-    and accounts of their shapes, and only the accounts the bot sent (it leaves out one two creators share; the job's
-    ``meta.creator`` is not looked at)."""
+    """What the job asks this module to read: ``{"orders": [...], "accounts": [(platform, no)], "confirmed": [item codes
+    the operators confirmed for the deal in the console, 「对过图了」]}``, or None for a job without
+    ``meta.draft_context`` (the switch off, an older bot) and for a 百应 draft.  Only order numbers and accounts of their
+    shapes, and only the accounts the bot sent (it leaves out one two creators share; the job's ``meta.creator`` is not
+    looked at).  The bot's ``verified`` (the orders it made itself) is not taken: such an order confirms no hat until it
+    is shipped to her, like any other (``confirmed_codes``, review 2026-11-10 D3)."""
     if not isinstance(meta, dict) or not isinstance(meta.get("draft_context"), dict) or meta.get("channel") == "buyin":
         return None
     ctx = meta["draft_context"]
-
-    def numbers(key: str) -> list:
-        return [o for o in dict.fromkeys(str(x).strip() for x in ctx.get(key) or [] if isinstance(x, str))
-                if _ORDER_NO.match(o)][:MAX_ORDERS_ASKED]
-
     accounts: list = []
     seen: set = set()
     for entry in ctx.get("accounts") if isinstance(ctx.get("accounts"), list) else []:
@@ -204,27 +249,68 @@ def wanted(meta) -> Optional[dict]:
         if platform in ACCOUNT_PLATFORMS and _ACCOUNT.match(number) and (platform, number.lower()) not in seen:
             seen.add((platform, number.lower()))
             accounts.append((platform, number))
-    orders = numbers("orders")
+    orders = [o for o in dict.fromkeys(str(x).strip() for x in ctx.get("orders") or [] if isinstance(x, str))
+              if _ORDER_NO.match(o)][:MAX_ORDERS_ASKED]
     confirmed = [c for c in dict.fromkeys(str(x).strip().upper() for x in ctx.get("confirmed") or [] if isinstance(x, str))
                  if _CODE.match(c)][:MAX_CONFIRMED]
-    return {"orders": orders, "verified": [o for o in numbers("verified") if o in orders],
-            "accounts": accounts[:MAX_ACCOUNTS], "confirmed": confirmed}
+    return {"orders": orders, "accounts": accounts[:MAX_ACCOUNTS], "confirmed": confirmed}
 
 
 def folder(home: Path) -> Path:
     return Path(home) / "platform" / FOLDER
 
 
-def prune(home: Path, now: Optional[float] = None) -> None:
-    """The sheets and the photo memory older than KEEP_DAYS go (the worker calls this at every prm job)."""
+def prune(home: Path, now: Optional[float] = None) -> int:
+    """What is older than KEEP_DAYS goes: the sheets and the photo memory files by their own time, and in a memory file
+    still written to, each picture remembered from before then (review 2026-11-10 L6: not only when her next draft job
+    loads the file; one left with none goes too).  The worker calls this at every prm job (the sample-status and 百应
+    rounds too, a job that finds no workspace too) and once when it starts.  Returns how many files and pictures went."""
     cutoff = (time.time() if now is None else now) - KEEP_DAYS * 86400
+    gone = 0
     for sub in ("sheets", "photos"):
         for path in (folder(home) / sub).glob("*"):
             try:
                 if path.is_file() and path.stat().st_mtime < cutoff:
                     path.unlink()
+                    gone += 1
             except OSError:
                 pass
+    for path in (folder(home) / "photos").glob("party-*.json"):
+        gone += _prune_memory(path, cutoff)
+    return gone
+
+
+def _prune_memory(path: Path, cutoff: float) -> int:
+    """One memory file without the pictures remembered from before ``cutoff`` (and the entries that say no time):
+    written again when one went, deleted when none is left; how many went.  A file that cannot be read is left alone
+    (it goes by its own time, and ``load_memory`` takes nothing of it)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    photos = data.get("photos") if isinstance(data, dict) else None
+    if not isinstance(photos, list):
+        return 0
+
+    def young(entry) -> bool:
+        try:
+            return isinstance(entry, dict) and float(entry.get("at")) >= cutoff
+        except (TypeError, ValueError):
+            return False
+
+    kept = [entry for entry in photos if young(entry)]
+    if len(kept) == len(photos):
+        return 0
+    try:
+        if kept:
+            part = path.with_name(path.name + ".part")
+            part.write_text(json.dumps({**data, "photos": kept}, ensure_ascii=False), encoding="utf-8")
+            os.replace(str(part), str(path))
+        else:
+            path.unlink()
+    except OSError:
+        return 0
+    return len(photos) - len(kept)
 
 
 def forget(home: Path, party_id: int) -> bool:
@@ -527,13 +613,15 @@ def _empty(data: dict) -> bool:
 
 def _hers(row: dict, asked: dict) -> str:
     """How an order is hers: "order" (her deal knows its number), "account" (its creator's platform account is one of
-    hers, any case), or ""."""
+    hers on the same platform, the number in any case: her entry's platform, else the order's own), or "".  A row that
+    names no platform is never hers by an account (review 2026-11-10 L4: the same 抖音号 and 小红书号 can be two
+    people's), only by its number."""
     if str(row.get("orderNo") or "") in asked["orders"]:
         return "order"
     daren = row.get("daren") if isinstance(row.get("daren"), dict) else {}
     platform = str(daren.get("platform") or row.get("platform") or "").strip().upper()
     number = str(daren.get("platformNo") or "").strip().lower()
-    if number and any(number == no.lower() and (not platform or platform == p) for p, no in asked["accounts"]):
+    if platform and number and any(platform == p and number == no.lower() for p, no in asked["accounts"]):
         return "account"
     return ""
 
@@ -560,16 +648,17 @@ def order_entry(platforms, row: dict, scrub: Callable[[str], str] = lambda text:
     return info
 
 
-def confirmed_codes(samples: dict, verified=()) -> dict:
+def confirmed_codes(samples: dict) -> dict:
     """Item codes her earlier sample orders confirm: code -> ``{"order", "status"}`` of the newest such order.  Only an
-    order that went out (SENT / SIGNED) or one the bot itself made (``verified``: its own verified jst.sample_order, any
-    status but cancelled), never one 聚水潭 shows a reject reason for.  (Not WAITING_SEND by itself: our own sub-account
-    audits an order right after making it, so it says nothing of the hats.)"""
+    order that was shipped to her (review 2026-11-10 D3): 聚水潭 says it went out (SENT / SIGNED) or it has a waybill;
+    never one 聚水潭 shows a reject reason for, nor a cancelled one (DELETED), nor one only made or audited (INIT,
+    WAITING_SEND without a waybill: our own sub-account audits an order right after making it), the bot's own too (it
+    may have been made before the photo rule, and nothing of it reached her yet)."""
     out: dict = {}
-    made = set(verified or ())
     for entry in (samples or {}).get("orders") or []:
         status, number = entry.get("status"), entry.get("order_no")
-        if entry.get("reason") or not (status in SENT_STATES or (number in made and status != "DELETED")):
+        shipped = status in SENT_STATES or any(isinstance(s, dict) and s.get("waybill") for s in entry.get("ships") or [])
+        if entry.get("reason") or status == "DELETED" or not shipped:
             continue
         for item in entry.get("items") or []:
             if item.get("code"):
@@ -850,19 +939,12 @@ def match_photos(platforms, opts: dict, workspace: Path, party_id: int, job_id: 
 MAX_RUN_FAILURES = 3                # hat_match.py runs failed as a whole in a row: then it is left alone for breaker_min
 MAX_RERUNS = 3                      # her pictures whose matching failed before, rerun (each alone) in one job at most
 _RUNS = {"fails": 0}                # this worker's hat_match.py runs failed as a whole in a row
-_SAID: set = set()                  # what about the canary was logged already (once a worker start)
 
 
 def index_warnings(stderr) -> list:
     """hat_match.py's own warnings among what it printed to stderr (its colour data does not fit its photos: run
     build.py), for the worker's log."""
     return [_clean(line, 200) for line in str(stderr or "").splitlines() if "colours.npy" in line or "build.py" in line][:3]
-
-
-def _say_once(key: str, message: str, *args) -> None:
-    if key not in _SAID:
-        _SAID.add(key)
-        log.warning(message, *args)
 
 
 def canary_picture(opts: dict) -> Optional[Path]:
@@ -1093,12 +1175,11 @@ def context_text(samples: Optional[dict], photos: Optional[dict], codes: dict, o
 
 class Context:
     """What one draft job learned: ``text`` for the prompt, ``samples`` / ``photos`` / ``codes`` / ``confirmed`` (the
-    codes the operators confirmed in the console) / ``verified`` for the gate."""
+    codes the operators confirmed in the console) for the gate."""
 
-    def __init__(self, text: str, samples: dict, photos: dict, codes: dict, confirmed=(), verified=()):
+    def __init__(self, text: str, samples: dict, photos: dict, codes: dict, confirmed=()):
         self.text, self.samples, self.photos, self.codes = text, samples, photos, codes
         self.confirmed = [str(c).upper() for c in confirmed or ()]
-        self.verified = list(verified or ())
 
 
 def build(platforms, cfg: Optional[dict], opts: dict, *, workspace: Path, job: dict, meta: dict, got: list, home: Path,
@@ -1127,7 +1208,7 @@ def build(platforms, cfg: Optional[dict], opts: dict, *, workspace: Path, job: d
         photos = {"ok": False, "why": f"Mac 出错：{type(e).__name__}", "photos": []}
     codes = catalog_codes(catalog)
     return Context(context_text(samples, photos, codes, opts, confirmed=asked["confirmed"]), samples, photos, codes,
-                   asked["confirmed"], asked["verified"])
+                   asked["confirmed"])
 
 
 # ── 3. the photo check of a sample order ──────────────────────────────────────────────────────────────────────
@@ -1276,7 +1357,7 @@ def _fact(block: dict, label: str, value: str) -> None:
 def _gate(block: dict, action: dict, context: Context, *, platforms, cfg: dict, opts: dict, catalog, workspace: Path,
           home: Path, beat, sleep, deadline: float, clock: Callable[[], float]) -> dict:
     lines = order_lines(action, catalog)
-    earlier = confirmed_codes(context.samples, context.verified)
+    earlier = confirmed_codes(context.samples)       # (her earlier orders shipped to her)
     noted = set(context.confirmed)                   # (the operators' 「对过图了」 in the console)
     photos = (context.photos or {}).get("photos") or []
     pairs, facts, styles, problems, holds, others = [], [], {}, [], {}, []
@@ -1300,10 +1381,8 @@ def _gate(block: dict, action: dict, context: Context, *, platforms, cfg: dict, 
             if candidate is not None:                # (its row in the held hats' sheet, for whoever approves it)
                 others.append((code, candidate, ""))
         elif code in earlier:
-            if earlier[code]["status"] in SENT_STATES:
-                facts.append(f"{code}：她以前的寄样单 {earlier[code]['order']} 里寄过（没有图对）")
-            else:
-                facts.append(f"{code}：机器人以前给她建的寄样单 {earlier[code]['order']} 里有（还没发出；没有图对）")
+            facts.append(f"{code}：她以前的寄样单 {earlier[code]['order']} 里寄过（"
+                         + ("" if earlier[code]["status"] in SENT_STATES else "有运单号；") + "没有图对）")
         else:
             name = line["name"] or line["sku"]
             holds[code] = {"n": n, "what": f"{code}（{name}）对图没把握（{unsure}）：先核对再建" if unsure

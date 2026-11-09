@@ -1,7 +1,8 @@
 """专属链接 after 专属佣金 (2026-11-09): a 抖店 sample order's products get their 专属链接 (dy.channel_goods) as the step
 after each one's 专属佣金, only when the deal asks for links.  Whether it does is the drafting Claude's call: the creator
-or the boss asked for 「链接」「专属链接」「前缀」, and the draft says so in the slot 「专属链接前缀」 (the prefix, or 「要」
-while she has not said one; empty or 「不要」: not wanted).  The bot keeps the chain's record (src/prm/service.py
+or the boss spoke of 「专属链接」 or 「前缀」, or asked plainly for a link of her own (a bare 「发个链接」「链接发我」「有链接吗」
+is the product's ordinary link: never the slot, the worker's rule since 2026-11-10), and the draft says so in the slot
+「专属链接前缀」 (the prefix, or 「要」 while she has not said one; empty or 「不要」: not wanted).  The bot keeps the chain's record (src/prm/service.py
 ``_chain``): per product its commission, then its link; a link only after its commission is open; each once a round;
 one that cannot be made does not hold up the rest.  Without a chain (no verified sample order) the step after a
 verified 专属佣金 asks for that product's link.  Names, ids and numbers are invented."""

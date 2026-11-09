@@ -7915,8 +7915,10 @@ def action_for_mac(action: dict, tokens: dict) -> tuple:
 COMMISSION_ACTIONS = {"dy": "dy.designated_commission", "xhs": "xhs.direct_plan"}
 # 专属链接 (2026-11-09): a 抖店 product's link (platforms.py: the shop's way) is the step after its 专属佣金 (binding her
 # needs her in its strategy), when the deal asks for links.  Whether it does is the drafting Claude's call (the creator
-# or the boss asked for 「链接」「专属链接」「前缀」): its draft says so in the deal's slot LINK_SLOT, the prefix (or 「要」
-# while she has not said one), or an empty string when she does not want them (``link_reading``, ``link_wish``).
+# or the boss spoke of 「专属链接」 or 「前缀」, or asked plainly for a link of her own; a bare 「发个链接」「链接发我」
+# 「有链接吗」 is the product's ordinary link, kb/products.md: never this slot, worker's rule, review 2026-11-10 C1): its
+# draft says so in the deal's slot LINK_SLOT, the prefix (or 「要」 while she has not said one), or an empty string when
+# she does not want them (``link_reading``, ``link_wish``).
 LINK_ACTION = "dy.channel_goods"
 LINK_SLOT = "专属链接前缀"
 # How a slot is read (``link_reading``; review 2026-11-09 F6, N3).  Not understood (``unclear``) first: one of

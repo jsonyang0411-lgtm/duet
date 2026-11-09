@@ -716,12 +716,14 @@ def test_a_running_sync_stops_with_the_worker(worker, monkeypatch, caplog):  # n
         raise AssertionError("the sync did not end")
 
 
-def test_a_config_it_refuses_is_said_in_the_log_and_to_the_permission_hook(worker, tmp_path, caplog):  # noqa: F811
-    """(Round 4.)  A USR1 restart that does not come back: worker-prm.log says why; a permission request then gets a
-    refusal that says why, never an exit with no verdict."""
+def test_a_config_it_refuses_is_said_in_the_log_and_to_the_permission_hook(worker, tmp_path, caplog,  # noqa: F811
+                                                                          monkeypatch):
+    """(Round 4.)  A USR1 restart that does not come back (a config.json it refuses: here one without a token): the
+    log says why; a permission request then gets a refusal that says why, never an exit with no verdict."""
+    monkeypatch.delenv("RELAY_URL", raising=False)
+    monkeypatch.delenv("RELAY_TOKEN", raising=False)
     config = tmp_path / "config.json"
-    config.write_text(json.dumps({"relay_url": "http://bot", "token": "t", "products_sync_hours": True}),
-                      encoding="utf-8")
+    config.write_text(json.dumps({"relay_url": "http://bot", "token": "", "products_sync_hours": 0}), encoding="utf-8")
     with caplog.at_level(logging.INFO, logger="claude_relay.worker"):
         try:
             worker.main(["--config", str(config), "--kinds", "prm"])
@@ -730,10 +732,10 @@ def test_a_config_it_refuses_is_said_in_the_log_and_to_the_permission_hook(worke
         else:
             raise AssertionError("the worker started on it")
     [line] = [r for r in caplog.records if "config.json cannot be used" in r.getMessage()]
-    assert line.levelname == "ERROR" and said in line.getMessage() and "products_sync_hours" in said
+    assert line.levelname == "ERROR" and said in line.getMessage() and "relay_url and token are needed" in said
     answer = worker.permission_hook({"tool_name": "Bash", "tool_input": {"command": "ls"}}, "5", config)
     decision = answer["hookSpecificOutput"]["decision"]
-    assert decision["behavior"] == "deny" and "products_sync_hours" in decision["message"]
+    assert decision["behavior"] == "deny" and "relay_url and token are needed" in decision["message"]
 
 
 def test_stopping_the_cli_runs_inside_its_own_bookkeeping(worker):  # noqa: F811
@@ -751,25 +753,169 @@ def test_stopping_the_cli_runs_inside_its_own_bookkeeping(worker):  # noqa: F811
     assert done == [0]
 
 
-def test_the_setting_is_a_number_of_hours(worker, tmp_path):  # noqa: F811
-    """(Round 3, item 5.)  ``true`` is no hour: the worker refuses the config (and never syncs on it)."""
+def test_the_setting_is_a_number_of_hours_and_another_value_is_taken_as_off(worker, tmp_path, caplog):  # noqa: F811
+    """(Round 3, item 5; review 2026-11-10 C4.)  ``true`` is no hour.  It made the worker refuse config.json, and the
+    admin and the prm worker share that file: one wrong value stopped them both.  Now it is taken as 0 (off), the rest
+    of the file is used, one WARNING a worker start names the key and the value (config.json read again: not again),
+    and the night sync never runs on it; the permission hook and a token read again say nothing."""
     config = tmp_path / "config.json"
+    night = time.mktime((2026, 11, 10, 1, 30, 0, 0, 0, -1))
+    for bad, shown in ((True, "true"), ("24", '"24"'), (None, "null"), (-1, "-1"), ([24], "[24]")):
+        config.write_text(json.dumps({"relay_url": "http://bot", "token": "t", "products_sync_hours": bad,
+                                      "prm_timeout_min": 7}), encoding="utf-8")
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="claude_relay.worker"):
+            loaded = worker.load_settings(config)
+            assert worker.load_settings(config)["products_sync_hours"] == 0         # (read again: said once)
+            assert worker.read_token(config) == "t"
+            worker.load_settings(config, warn=False)
+        assert loaded["products_sync_hours"] == 0 and loaded["prm_timeout_min"] == 7
+        [line] = [r for r in caplog.records if "products_sync_hours" in r.getMessage()]
+        assert line.levelname == "WARNING" and line.getMessage() == (
+            f"products_sync_hours in {config} is {shown}, not a number of hours (0 = off): taken as 0, so the "
+            "catalogue does not sync itself at night")
+        assert loaded[worker.SETTINGS_WARNINGS] == [line.getMessage()]
+        assert worker.products_sync_due(loaded, tmp_path, night) is False
+        assert worker.products_sync_due({"products_sync_hours": bad}, tmp_path, night) is False
     for good in (0, 24, 1.5):
         config.write_text(json.dumps({"relay_url": "http://bot", "token": "t", "products_sync_hours": good}),
                           encoding="utf-8")
-        assert worker.load_settings(config)["products_sync_hours"] == good
-    for bad in (True, "24", None, -1, [24]):
-        config.write_text(json.dumps({"relay_url": "http://bot", "token": "t", "products_sync_hours": bad}),
-                          encoding="utf-8")
-        try:
-            worker.load_settings(config)
-        except SystemExit as e:
-            assert "products_sync_hours" in str(e) and "must be a number of hours" in str(e)
-        else:
-            raise AssertionError(bad)
-        assert worker.products_sync_due({"products_sync_hours": bad}, tmp_path, time.mktime(
-            (2026, 11, 10, 1, 30, 0, 0, 0, -1))) is False
+        loaded = worker.load_settings(config)
+        assert loaded["products_sync_hours"] == good and loaded[worker.SETTINGS_WARNINGS] == []
     assert [worker._sync_hours(v) for v in (float("nan"), float("inf"), 0, 3)] == [None, None, 0.0, 3.0]
+    # the permission hook (a process of its own, logging to worker.log at every request) and a token read again
+    worker._WARNED.clear()
+    config.write_text(json.dumps({"relay_url": "http://127.0.0.1:9", "token": "t", "products_sync_hours": "24"}),
+                      encoding="utf-8")
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="claude_relay.worker"):
+        answer = worker.permission_hook({"tool_name": "Bash", "tool_input": {"command": "ls"}}, "5", config)
+        assert worker.read_token(config) == "t"
+    assert answer["hookSpecificOutput"]["decision"]["behavior"] == "deny"           # (no bot on that port)
+    assert not [r for r in caplog.records if "products_sync_hours" in r.getMessage()]
+
+
+def _version_claude(tmp_path) -> str:
+    """A claude that only says its version (``--check`` asks it)."""
+    script = tmp_path / "claude-version"
+    script.write_text(f"#!{sys.executable}\nprint('2.0.0 (Claude Code)')\n", encoding="utf-8")
+    script.chmod(0o755)
+    return str(script)
+
+
+def checked(worker, bot, tmp_path, capsys, monkeypatch, **values):  # noqa: F811
+    """``worker.py --check`` on a config.json of ``values``: its lines (the photo index left out: none here)."""
+    monkeypatch.delenv("RELAY_URL", raising=False)
+    monkeypatch.delenv("RELAY_TOKEN", raising=False)
+    monkeypatch.setattr(worker, "setup_logging", lambda name="": None)
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"relay_url": bot.url, "token": TOKEN, "claude_bin": _version_claude(tmp_path),
+                               "draft_context": {"hat_index": str(tmp_path / "no-hat-index")}, **values}),
+                   encoding="utf-8")
+    capsys.readouterr()
+    assert worker.main(["--config", str(cfg), "--check"]) == 0
+    return capsys.readouterr().out.splitlines()
+
+
+def test_check_says_the_sync_setting_it_took_and_why(worker, bot, tmp_path, capsys, monkeypatch, caplog):  # noqa: F811
+    """Review 2026-11-10 (C4): ``--check`` says the night sync's setting as the worker takes it, and a value it could not
+    take, with the warning; the worker logs that warning once."""
+    def sync_lines(**values):
+        lines = checked(worker, bot, tmp_path, capsys, monkeypatch, **values)
+        at = next(n for n, line in enumerate(lines) if line.startswith("products sync"))
+        return [line for line in lines[at:at + 2] if line.startswith(("products sync", "  WARNING"))]
+
+    assert sync_lines() == ["products sync (products_sync_hours): 0 = off (the catalogue is synced by hand: "
+                            "--sync-products)"]
+    assert sync_lines(products_sync_hours=24) == [
+        "products sync (products_sync_hours): 24 = every 24 h, at night (00:00-07:00 on this Mac's clock) when idle"]
+    with caplog.at_level(logging.INFO, logger="claude_relay.worker"):
+        lines = sync_lines(products_sync_hours="24")
+    config = tmp_path / "config.json"
+    said = (f'products_sync_hours in {config} is "24", not a number of hours (0 = off): taken as 0, so the catalogue '
+            "does not sync itself at night")
+    assert lines == ["products sync (products_sync_hours): 0 = off (the catalogue is synced by hand: --sync-products)",
+                     f"  WARNING: {said}"]
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING and "products_sync_hours" in
+            r.getMessage()] == [said]
+
+
+def test_a_worker_starts_on_a_sync_setting_it_cannot_take(worker, bot, tmp_path, monkeypatch, caplog):  # noqa: F811
+    """Review 2026-11-10 (C4): ``"products_sync_hours": "24"`` no longer keeps a worker from starting: it serves (sync
+    off) and the log has the one warning."""
+    monkeypatch.delenv("RELAY_URL", raising=False)
+    monkeypatch.delenv("RELAY_TOKEN", raising=False)
+    for name in ("setup_logging", "stay_awake"):
+        monkeypatch.setattr(worker, name, lambda *a, **kw: None)
+    monkeypatch.setattr(worker.signal, "signal", lambda *a: None)
+    served = []
+    monkeypatch.setattr(worker, "serve", lambda settings, client, stopper, **kw: served.append(settings))
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"relay_url": bot.url, "token": TOKEN, "products_sync_hours": "24"}),
+                      encoding="utf-8")
+    with caplog.at_level(logging.INFO, logger="claude_relay.worker"):
+        assert worker.main(["--config", str(config), "--kinds", "admin"]) == 0
+    [settings_used] = served
+    assert settings_used["products_sync_hours"] == 0
+    assert len([r for r in caplog.records if "products_sync_hours" in r.getMessage()]) == 1
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_check_and_the_start_say_how_handcards_json_stands(worker, bot, mac, tmp_path, capsys, monkeypatch,  # noqa: F811
+                                                          caplog):
+    """Review 2026-11-10 (C5): a missing or broken handcards.json gave no sign: no draft was told it may ask for cards,
+    and nothing said why.  ``--check`` has a line for it (where it is; ok, missing, off or broken and why; the skill's
+    script and its venv's Python, found or not), and the log says it once when a prm worker starts (broken: a
+    WARNING), then again only when it changes while the worker runs."""
+    path = mac.home / "handcards.json"
+    script, python = tmp_path / "make_cards_local.py", sys.executable
+
+    def line():
+        return worker.handcards_state_line(worker.handcards.config_report(path))
+
+    def check_line():
+        [shown] = [x for x in checked(worker, bot, tmp_path, capsys, monkeypatch) if x.startswith("handcards")]
+        return shown
+
+    missing = check_line()
+    assert missing.startswith(f"handcards (直播手卡): {path}: missing (这台 Mac 没有 ") and line() == missing
+    default_script = os.path.expanduser(hc.SKILL_SCRIPT)
+    assert f"; skill script {default_script} (" in missing                      # (the defaults: none named)
+    mac.set_up()
+    assert line() == check_line() == (f"handcards (直播手卡): {path}: ok; skill script {script} (found); skill python "
+                                      f"{python} (found)")
+    mac.set_up(script=str(tmp_path / "gone.py"))
+    assert line() == (f"handcards (直播手卡): {path}: broken (找不到手卡脚本：{tmp_path / 'gone.py'}); skill script "
+                      f"{tmp_path / 'gone.py'} (not found); skill python {python} (found)")
+    mac.set_up(enabled=False)
+    assert line().startswith(f"handcards (直播手卡): {path}: off (handcards.json 里 enabled 不是 true); skill script {script}")
+    path.write_text("{", encoding="utf-8")
+    assert line().startswith(f"handcards (直播手卡): {path}: broken (handcards.json 读不了：") and check_line() == line()
+    module = worker.handcards
+    monkeypatch.setattr(worker, "handcards", None)
+    assert check_line() == f"handcards (直播手卡): off ({worker.HANDCARDS_FILE} not loaded)"
+    monkeypatch.setattr(worker, "handcards", module)              # (never monkeypatch.undo(): HOME_DIR is patched too)
+    # the log: once when a prm worker starts, again only when it changes
+    s = {"prm_workspace": str(mac.ws)}
+    with caplog.at_level(logging.INFO, logger="claude_relay.worker"):
+        worker.on_start(s, ("prm",))
+        worker.handcards_settings()                               # (a job: the same, not said again)
+    said = [r for r in caplog.records if r.getMessage().startswith("handcards (直播手卡)")]
+    assert [(r.levelname, r.getMessage()) for r in said] == [("WARNING", line())]
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="claude_relay.worker"):
+        mac.set_up()                                              # (fixed while it runs)
+        assert worker.handcards_settings()[0] is not None
+        worker.handcards_settings()
+        path.unlink()                                             # (taken away)
+        assert worker.handcards_settings() == (None, worker.handcards.load_config(path)[1])
+    said = [(r.levelname, r.getMessage().split(": ")[2].split(" ")[0])
+            for r in caplog.records if r.getMessage().startswith("handcards (直播手卡)")]
+    assert said == [("INFO", "ok;"), ("INFO", "missing")]
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="claude_relay.worker"):
+        worker.on_start(s, ("admin",))                            # (an admin-only worker makes no cards)
+    assert not caplog.records
 
 
 def test_the_worker_looks_for_the_night_sync_only_when_idle(worker, monkeypatch, caplog):  # noqa: F811
@@ -906,6 +1052,16 @@ def test_the_handcards_lines_work_on_the_macs_own_python(tmp_path):
         "assert h.catalog_info(ws)['synced_at'] and h.beijing_today(0) == date(1970, 1, 1)\n"
         "assert h.check_made(h.made_block(True, cards=['a.png'], promo_until='2099-01-01'))['promo_until']\n"
         "assert '\\u5f85\\u5b9a' in h.note_text(sheet, report, cfg, date(2026, 11, 9))\n"
+        "import os\n"
+        "from pathlib import Path\n"
+        f"conf = Path({str(tmp_path / 'config.json')!r})\n"
+        "conf.write_text(json.dumps({'relay_url': 'http://bot', 'token': 't', 'products_sync_hours': '24'}))\n"
+        "s = w.load_settings(conf)\n"
+        "assert s['products_sync_hours'] == 0 and len(s[w.SETTINGS_WARNINGS]) == 1, s\n"
+        f"r = h.config_report({str(tmp_path / 'home' / 'handcards.json')!r})\n"
+        "assert r['state'] == 'missing' and r['config'] is None and not r['script_found'], r\n"
+        "assert w.handcards_state_line(r).startswith('handcards (') and w.handcards_state_line(None).endswith('loaded)')\n"
+        "w.on_start({'prm_workspace': ws}, ('prm',))\n"
         "print('ok', sys.version_info[:2])\n", encoding="utf-8")
     env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), "CLAUDE_RELAY_HOME": str(tmp_path / "home")}
     run = subprocess.run([python, "-I", str(script)], capture_output=True, text=True, timeout=60, cwd=tmp_path, env=env)
