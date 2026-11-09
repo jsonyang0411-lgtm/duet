@@ -247,22 +247,26 @@ def test_a_huopan_is_asked_for_from_the_running_console_and_refused_while_stoppe
     assert stopped == {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能补发货盘"}
 
 
-def raw_call(path):
-    """A GET whose answer is not JSON: ``(status, content type, body bytes)``."""
-    _, sock = _build_handler(path)
+def raw_call(path, method="GET", headers=None):
+    """A request whose answer need not be JSON: ``(status, its headers by lower-case name, body bytes)``."""
+    _, sock = _build_handler(path, method=method, headers=headers)
     head, body = b"".join(sock._sent_chunks).split(b"\r\n\r\n", 1)
     lines = head.decode("latin-1").split("\r\n")
-    kind = next((ln.split(":", 1)[1].strip() for ln in lines if ln.lower().startswith("content-type:")), "")
-    return int(lines[0].split()[1]), kind, body
+    named = {ln.split(":", 1)[0].strip().lower(): ln.split(":", 1)[1].strip() for ln in lines[1:] if ":" in ln}
+    return int(lines[0].split()[1]), named, body
 
 
 def test_handcards_are_asked_for_shown_as_pictures_and_refused_while_stopped(running, tmp_path, monkeypatch):
     """直播手卡 (PRM_HANDCARDS, 2026-11-09): POST /api/prm/deals {action: handcards, items} makes a job with
-    ``meta.handcards``; its draft comes back with two cards: /api/prm tags it (``handcards``: ok, count, note) and
-    GET /api/prm/file?packet=&n= gives each card as a picture (a file that is no picture, an index past the files, no
-    such draft: 404); the switch shows as ``handcards`` (running: the service's; stopped: .env's); a stopped bot cannot
-    ask the Mac."""
+    ``meta.handcards``; its draft comes back with two cards: /api/prm tags it (``handcards``: ok, count, note, the
+    cuts, the 双11 line's end date, ``expired``) and GET /api/prm/file?packet=&kind=attachment&n= streams each card as
+    a picture (``no-store``; review 2026-11-09 item 11, the contract shared with the operator-only files, ``kind=
+    operator``); a file that is no picture, an index past the files, no such draft, a kind it does not serve or none,
+    a number that is no whole number: 404 (JSON with its length and the CORS echo); another site's page (an <img>
+    pointed here): 403; a POST: 405.  The switch shows as ``handcards`` (running: the service's; stopped: .env's); a
+    stopped bot still shows a draft's cards (its database closed again after) but cannot ask the Mac."""
     import io
+    import sqlite3
     from src.prm import handcards as hc
 
     running.prm._handcards = True                                  # (PRM_HANDCARDS=on)
@@ -291,12 +295,26 @@ def test_handcards_are_asked_for_shown_as_pictures_and_refused_while_stopped(run
     running.relay.finish(job["id"], {"ok": True, "text": json.dumps(draft, ensure_ascii=False)})
     running.relay.tick()
     [card] = call("/api/prm")[1]["pending"]
-    assert card["handcards"] == {"ok": True, "count": 2, "note": "做了 2 张手卡", "problems": [], "console": True}
+    assert card["handcards"] == {"ok": True, "count": 2, "note": "做了 2 张手卡", "problems": [], "cuts": [],
+                                 "promo_until": "", "catalog_at": None, "console": True, "expired": False}
     assert [a["name"] for a in card["attachments"]] == [n for n, _ in files]
-    assert raw_call(f"/api/prm/file?packet={card['id']}&n=1") == (200, "image/png", files[1][1])
-    for path in (f"/api/prm/file?packet={card['id']}&n=2", f"/api/prm/file?packet={card['id']}&n=3",
-                 "/api/prm/file?packet=999&n=0", "/api/prm/file?packet=x&n=0", "/api/prm/file"):
-        assert raw_call(path)[0] == 404, path
+    url = f"/api/prm/file?packet={card['id']}&kind=attachment&n="
+    page = {"Origin": "http://localhost:5173", "Sec-Fetch-Site": "same-site"}
+    status, head, body = raw_call(url + "1", headers=page)
+    assert (status, head["content-type"], body) == (200, "image/png", files[1][1])
+    assert head["cache-control"] == "no-store" and head["content-length"] == str(len(body))
+    assert head["access-control-allow-origin"] == "http://localhost:5173"
+    for path in (url + "2", url + "3", url + "-1", url + "1.0", url, f"/api/prm/file?packet={card['id']}&n=1",
+                 f"/api/prm/file?packet={card['id']}&kind=operator&n=0", f"/api/prm/file?packet={card['id']}&kind=&n=0",
+                 "/api/prm/file?packet=999&kind=attachment&n=0", "/api/prm/file?packet=x&kind=attachment&n=0",
+                 "/api/prm/file?packet=&kind=attachment&n=0", "/api/prm/file"):
+        status, head, body = raw_call(path, headers=page)
+        assert (status, json.loads(body)) == (404, {"ok": False, "error": "没有这张图"}), path
+        assert head["content-length"] == str(len(body)) and head["access-control-allow-origin"] == page["Origin"]
+    status, head, body = raw_call(url + "1", headers={"Sec-Fetch-Site": "cross-site"})
+    assert status == 403 and json.loads(body)["ok"] is False and head["content-length"] == str(len(body))
+    assert raw_call(url + "1", headers={"Origin": "https://evil.example"})[0] == 403      # (every request's check)
+    assert raw_call(url + "1", method="POST")[0] == 405
     server.register_prm(None)                                       # the bot stopped
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("PRM_DB", raising=False)
@@ -305,6 +323,22 @@ def test_handcards_are_asked_for_shown_as_pictures_and_refused_while_stopped(run
     assert call("/api/prm")[1]["handcards"] is True
     stopped = call("/api/prm/deals", "POST", {"action": "handcards", "deal_id": 1})[1]
     assert stopped == {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能做手卡"}
+    picture = tmp_path / "手卡_01_测试帽.png"
+    picture.write_bytes(b"\x89PNG kept")
+    store = PrmStore(server._prm_db_path())
+    party = store.party_by_wxid(CREATOR)
+    kept = store.add_packet(deal_id=store.deal_of(party["id"])["id"], party_id=party["id"], job_id=None,
+                            chat_id=CREATOR, kind="material", text="老师，手卡整理好啦～", intent="", slots={},
+                            attachments=[{"name": picture.name, "path": str(picture), "size": 11, "sha256": ""}],
+                            stage_proposal="", needs_attention=False, reason="", now=time.time())
+    store.close()
+    opened, real = [], server._prm_stopped_store
+    monkeypatch.setattr(server, "_prm_stopped_store", lambda: opened.append(real()) or opened[-1])
+    assert raw_call(f"/api/prm/file?packet={kept}&kind=attachment&n=0")[::2] == (200, b"\x89PNG kept")
+    assert raw_call(f"/api/prm/file?packet={kept}&kind=attachment&n=1")[0] == 404 and len(opened) == 2
+    for used in opened:                                             # (closed again after each request)
+        with pytest.raises(sqlite3.ProgrammingError):
+            used._conn.execute("SELECT 1")
 
 
 def test_the_draft_note_is_kept_from_the_running_console_and_refused_while_stopped(running, tmp_path, monkeypatch):

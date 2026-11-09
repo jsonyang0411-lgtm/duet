@@ -68,9 +68,11 @@ outdates it like any reply draft (the next job hears it was not sent), and no ho
 hers that sends her the kb's 货盘 again (``meta.huopan``; the worker's ``huopan_line``), always reviewed.
 直播手卡 (PRM_HANDCARDS, 2026-11-09, src/prm/handcards.py): every WeChat draft job says the Mac may make cards
 (``meta.handcards_ok``); a draft that comes back with the Mac's cards (``Draft.handcards``) always waits for a person,
-all of its cards or none of them (``handcards.keep_cards``), and one whose cards were not made cannot go out as it is
-(``decide``).  「做手卡」 in the console (``ask_handcards``) is one job like 补发货盘's (``meta.handcards``: the products of
-her latest sample order, ``sample_items``, or the ticked ones).
+all of its cards or none of them (``handcards.keep_cards``: nor any card-like file of a failed set; the same-picture
+filter leaves the cards alone), one whose cards were not made cannot go out as it is, and cards whose 双11 line is past
+its end date by Beijing time cannot go at all (``decide``, ``cards_expired``).  「做手卡」 in the console
+(``ask_handcards``) is one job like 补发货盘's (``meta.handcards``: the products of her latest sample order,
+``sample_items``, or the ticked ones).
 签收后问一句 (PRM_SIGNED_HELLO, 2026-11-07, default off): a sample order the 聚水潭 sync sees signed for, she has not
 said she got it: one job with no line of hers asks her how the samples suit her (``meta.signed``; the worker's
 ``signed_line``, kb 场景 D2), inside PRM_SIGNED_HELLO_HOURS only, once per order; by day it always waits for a person
@@ -1040,7 +1042,8 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
             "tool": p.get("tool", MESSAGE_TOOL), "platform": platform_out(p),
             "night_held": str(p["meta"].get("night_held") or ""), "opening": bool(p["meta"].get(OPENING)),
             "huopan": bool(p["meta"].get(HUOPAN)), "signed": bool(p["meta"].get(SIGNED)),
-            "handcards": p["meta"][HANDCARDS] if isinstance(p["meta"].get(HANDCARDS), dict) else None,
+            "handcards": ({**p["meta"][HANDCARDS], "expired": cards_expired(p, now)}
+                          if isinstance(p["meta"].get(HANDCARDS), dict) else None),
             "channel": BUYIN_CHANNEL if is_buyin(p) else GROUP_CHANNEL if p["meta"].get("channel") == GROUP_CHANNEL
             else "wechat", "group_name": str(p["meta"].get("group_name") or ""), "buyin": buyin_packet_out(store, p),
             "auto_mode": bool(p["meta"].get(AUTO_MODE)),
@@ -1151,6 +1154,13 @@ def cards_failed(packet: dict) -> bool:
     (``PrmService.decide``, ``_approve_execute``)."""
     cards = (packet.get("meta") or {}).get(HANDCARDS)
     return isinstance(cards, dict) and not cards.get("ok")
+
+
+def cards_expired(packet: dict, now: float) -> bool:
+    """A draft whose 直播手卡 carry a 双11 line past its end date by Beijing time (``handcards.promo_expired``): it cannot
+    go out at all (edited words still carry the cards); the cards are made again."""
+    cards = (packet.get("meta") or {}).get(HANDCARDS)
+    return isinstance(cards, dict) and bool(cards.get("ok")) and handcards.promo_expired(cards, handcards.beijing_today(now))
 
 
 def card_ids(items) -> tuple:
@@ -2839,8 +2849,10 @@ class PrmService:
             if not cards["ok"]:
                 named = [n for n in named if _file_name(n) not in set(cards["cards"])]
         # 同一张图不重复发: a file she got from us within REPEAT_FILE_SEC (the same bytes) is left out of the draft, which
-        # says so; the names it named lose those files too (not 「只收到 N 个」)
-        repeated = self._repeated_files(deal_id, attachments, now) if lane == LANE_REPLY else []
+        # says so; the names it named lose those files too (not 「只收到 N 个」).  Not the 直播手卡 of a good verdict: all
+        # of them go, or none (a card made again the same way is the same bytes)
+        repeated = (self._repeated_files(deal_id, [a for a in attachments if not (
+            cards is not None and cards["ok"] and a["name"] in cards["cards"])], now) if lane == LANE_REPLY else [])
         repeat_note = ""
         if repeated:
             gone = [a for a, _ in repeated]
@@ -2969,10 +2981,10 @@ class PrmService:
             kind=draft.message_kind, text=draft.reply_draft, attachments=attachments, intent=draft.intent,
             slots=draft.slots, stage_proposal=draft.stage_proposal,
             needs_attention=(draft.needs_attention or bool(short) or bool(refused) or bool(stepless) or bool(recall)
-                             or bool(cards is not None and not cards["ok"])) and state != DROPPED,
+                             or bool(cards is not None and handcards.flagged(cards))) and state != DROPPED,
             reason="；".join(r for r in (recall, covered_note if state == DROPPED else "", refused, stepless,
-                                         handcards.attention(cards) if cards is not None and not cards["ok"] else "",
-                                         short, repeat_note, day_held, draft.reason) if r)[:500],
+                                         handcards.attention(cards) if cards is not None and handcards.flagged(cards)
+                                         else "", short, repeat_note, day_held, draft.reason) if r)[:500],
             status=state, route=route, decided_at=decided_at, meta=packet_meta,
             tool=tool, platform=platform, now=now,
         )
@@ -4105,6 +4117,8 @@ class PrmService:
         if packet.get("tool", MESSAGE_TOOL) != MESSAGE_TOOL:
             return {"ok": False, "error": "这条草稿带平台动作：要点「批准并执行」，平台上核验成功后才会发给达人"}
         final = packet["text"] if action == "send" else str(text if text is not None else "").strip()
+        if cards_expired(packet, now):
+            return {"ok": False, "error": handcards.EXPIRED_TEXT}     # (the cards themselves are out of date)
         if cards_failed(packet) and final == packet["text"]:
             # 直播手卡 not made: its words (「手卡整理好啦」) cannot go out as they are, without the cards
             return {"ok": False, "error": CARDS_FAILED_TEXT}
@@ -4162,6 +4176,8 @@ class PrmService:
                 self._ask_recheck(packet, unsure, now)
             return {"ok": False, "error": opened}
         final = packet["text"] if text is None else str(text).strip()
+        if cards_expired(packet, now):
+            return {"ok": False, "error": handcards.EXPIRED_TEXT}
         if cards_failed(packet) and final == packet["text"]:
             return {"ok": False, "error": CARDS_FAILED_TEXT}      # (直播手卡 not made: as in ``decide``)
         if len(final) > MAX_DRAFT_CHARS:

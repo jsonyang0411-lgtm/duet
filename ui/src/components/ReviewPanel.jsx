@@ -299,10 +299,15 @@ function PlatformBox({ pf }) {
   )
 }
 
-// 直播手卡 (PRM_HANDCARDS, src/prm/handcards.py): the cards of a draft as pictures (GET /api/prm/file), each opening
-// at full size, and the Mac's note on them (every 待定, what was inferred, the 口径 it reused); or why none were made.
+// 直播手卡 (PRM_HANDCARDS, src/prm/handcards.py): the cards of a draft as pictures (GET /api/prm/file, kind
+// attachment: the draft's own files), each opening at full size, and the Mac's note on them (the catalogue's date,
+// every 待定, what was inferred, the 口径 it reused, the words cut); or why none were made; cards whose 双11 line is
+// past its end date cannot go at all (the bot refuses them too).
 const PICTURE = /\.(png|jpe?g|webp)$/i
 const cardsFailed = (p) => !!p.handcards && !p.handcards.ok
+const cardsExpired = (p) => !!p.handcards?.expired
+const cardUrl = (p, n) => `/api/prm/file?packet=${p.id}&kind=attachment&n=${n}`
+const EXPIRED = '手卡上的双11价已过期，请重新做手卡'
 
 function HandcardsNote({ p }) {
   const pictures = (p.attachments || []).map((a, n) => [a, n]).filter(([a]) => PICTURE.test(a.name || ''))
@@ -312,15 +317,16 @@ function HandcardsNote({ p }) {
       {c.ok && pictures.length > 0 && (
         <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
           {pictures.map(([a, n]) => (
-            <a key={a.name} href={`/api/prm/file?packet=${p.id}&n=${n}`} target="_blank" rel="noreferrer" title={`${a.name}（点开看大图）`}>
-              <img src={`/api/prm/file?packet=${p.id}&n=${n}`} alt={a.name} loading="lazy"
+            <a key={a.name} href={cardUrl(p, n)} target="_blank" rel="noreferrer" title={`${a.name}（点开看大图）`}>
+              <img src={cardUrl(p, n)} alt={a.name} loading="lazy"
                 style={{ height: 120, borderRadius: 6, border: '1px solid var(--line)', display: 'block' }} />
             </a>
           ))}
         </div>
       )}
+      {c.ok && c.expired && <Note kind="warn">{EXPIRED}（卡上的双11 那一行到 {c.promo_until} 为止）：这份不能发，点「不发」，再到合作单里点「做手卡」。</Note>}
       {c.ok
-        ? <div className="f-hint">手卡 {c.count} 张：看过卡片再发；要改的话在 Mac 上照下面的单子改了重出。</div>
+        ? !c.expired && <div className="f-hint">手卡 {c.count} 张：看过卡片再发；要改的话在 Mac 上照下面的单子改了重出。</div>
         : <Note kind="warn">手卡没做成：{(c.problems || []).join('；') || 'Mac 没说为什么'}。草稿里没附手卡，话不能原样发。</Note>}
       {c.note && <div className="f-hint prm-handcards-note" style={{ whiteSpace: 'pre-wrap' }}>{c.note}</div>}
     </div>
@@ -406,37 +412,39 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
           <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
             {editing ? (
               <>
-                <button type="button" className="btn primary" disabled={busy || !canSend || !pf.can_execute} onClick={() => setExecuting(text)}><Lightning />确认并执行</button>
+                <button type="button" className="btn primary" disabled={busy || !canSend || !pf.can_execute || cardsExpired(p)} onClick={() => setExecuting(text)}><Lightning />确认并执行</button>
                 <button type="button" className="btn" disabled={busy} onClick={() => { setEditing(false); setText(p.text) }}>取消修改</button>
               </>
             ) : (
               <>
-                <button type="button" className="btn primary" disabled={busy || !canSend || !pf.can_execute} onClick={() => setExecuting(undefined)}><Lightning />批准并执行</button>
-                <button type="button" className="btn" disabled={busy || !pf.can_execute} onClick={() => setEditing(true)}><PencilSimple />改了再执行</button>
+                <button type="button" className="btn primary" disabled={busy || !canSend || !pf.can_execute || cardsExpired(p)} onClick={() => setExecuting(undefined)}><Lightning />批准并执行</button>
+                <button type="button" className="btn" disabled={busy || !pf.can_execute || cardsExpired(p)} onClick={() => setEditing(true)}><PencilSimple />改了再执行</button>
                 <button type="button" className="btn" disabled={busy || pf.previewing || !pf.params.length} onClick={() => act('repreview')}><ArrowClockwise />重新预览</button>
                 <button type="button" className="btn ghost" disabled={busy} onClick={() => setDropping(true)}><X />不发</button>
               </>
             )}
             {!canSend && <span className="dim">机器人没连着微信，现在不能批准执行</span>}
             {canSend && !pf.can_execute && !pf.previewing && <span className="dim">预览没通过，不能执行；处理好以后点「重新预览」</span>}
+            {canSend && cardsExpired(p) && <span className="dim">{EXPIRED}</span>}
           </div>
         )}
         {!waiting && !pf && (
           <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
             {editing ? (
               <>
-                <button type="button" className="btn primary" disabled={busy || !canSend} onClick={() => send('edit', text)}><PaperPlaneRight />确认发送</button>
+                <button type="button" className="btn primary" disabled={busy || !canSend || cardsExpired(p)} onClick={() => send('edit', text)}><PaperPlaneRight />确认发送</button>
                 <button type="button" className="btn" disabled={busy} onClick={() => { setEditing(false); setText(p.text) }}>取消修改</button>
               </>
             ) : (
               <>
-                <button type="button" className="btn primary" disabled={busy || !canSend || cardsFailed(p)} onClick={() => send('send')}><PaperPlaneRight />发送</button>
-                <button type="button" className="btn" disabled={busy} onClick={() => setEditing(true)}><PencilSimple />改了再发</button>
+                <button type="button" className="btn primary" disabled={busy || !canSend || cardsFailed(p) || cardsExpired(p)} onClick={() => send('send')}><PaperPlaneRight />发送</button>
+                <button type="button" className="btn" disabled={busy || cardsExpired(p)} onClick={() => setEditing(true)}><PencilSimple />改了再发</button>
                 <button type="button" className="btn ghost" disabled={busy} onClick={() => setDropping(true)}><X />不发</button>
               </>
             )}
             {!canSend && <span className="dim">机器人没连着微信，现在发不出去</span>}
             {canSend && cardsFailed(p) && <span className="dim">手卡没做成：改了再发，或者不发</span>}
+            {canSend && cardsExpired(p) && <span className="dim">{EXPIRED}</span>}
           </div>
         )}
       </div>

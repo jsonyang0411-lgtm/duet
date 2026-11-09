@@ -16,6 +16,7 @@
   },
   "caveats": ["售后里的「运费险」是从抖音商品页保障栏推断的"],
   "promo": {"text": "双11再减15%实付约{N}", "factor": 0.85, "until": "2026-11-11"},
+  "max_catalogue_days": 7,
   "send_zip": false,
   "timeout_sec": 0
 }

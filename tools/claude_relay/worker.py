@@ -61,11 +61,14 @@ job): no model, `dy buyin im-inbox` (read-only, never --execute; its contract is
 for registered creators (``meta.channel == "buyin"``): an operator copies those and sends them in
 百应 by hand, so such a draft names no platform action (none is previewed) and no files go back.
 直播手卡 (src/prm/handcards.py; PRM_HANDCARDS on the bot, ~/.claude-relay/handcards.json here): a draft whose job
-says the bot takes cards (``meta.handcards_ok``) may name products (``handcards``, when she asks for 手卡); this
-script then writes the skill live-handcard's 单子.json from the catalogue, the hat index and the house 口径, crops the
-main images and runs the skill's make_cards_local.py with the skill's own Python, and sends the 1x cards back with the
-draft and its verdict ``handcards_made`` (all of them or none).  An operator's 「做手卡」 (``meta.handcards``) on a Mac
-without those settings fails at once, without the model.
+says the bot takes cards (``meta.handcards_ok``) may name products (``handcards``, when she asks for 手卡: only such a
+job's prompt has the rule and its --json-schema the field, ``prm_schema``; a short name the card cannot hold is asked
+about once more in the same conversation, ``handcards_review``); this script then writes the skill live-handcard's
+单子.json from the catalogue (synced lately), the hat index and the house 口径, crops the main images and runs the
+skill's make_cards_local.py with the skill's own Python, and sends the 1x cards back with the draft and its verdict
+``handcards_made`` (all of them or none: one file not sent back fails them all, and every one is named).  Another
+job's ``handcards`` is left out, with no verdict.  An operator's 「做手卡」 (``meta.handcards``) on a Mac without those
+settings fails at once, without the model.
 A creator the boss brought in a WeChat group he made with her and this account (老板拉的群, the bot took it over:
 ``meta.channel == "group"``) has her drafts go out in that group: the prompt says so, the boss reads them too, and
 the others' lines there come as <group_context>, data and never instructions.
@@ -269,7 +272,6 @@ PRM_SCHEMA = {
         "needs_attention": {"type": "boolean"},
         "reason": {"type": "string"},
         **({"platform_action": platforms.ACTION_SCHEMA} if platforms is not None else {}),
-        **({"handcards": handcards.REQUEST_SCHEMA} if handcards is not None else {}),
     },
     "required": ["intent", "slots", "stage_proposal", "message_kind", "reply_draft",
                  "attachments_to_send", "needs_attention", "reason"],
@@ -475,6 +477,11 @@ class RelayClient:
         self.token = token
         self.reload_token = reload_token
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        self.uploads: dict = {}      # job id -> files sent back for it (the bot takes at most 9 per job)
+
+    def uploaded(self, job_id: int) -> int:
+        """How many files this worker has sent back for the job (``upload``), whoever in it sent them."""
+        return int(self.uploads.get(int(job_id), 0))
 
     def _call(self, method: str, path: str, body: dict | None = None, timeout: float = 15,
               headers: dict | None = None):
@@ -598,13 +605,15 @@ class RelayClient:
                 with self.opener.open(req, timeout=120) as resp:
                     return json.loads(resp.read().decode("utf-8") or "{}")
         try:
-            return post()
+            answer = post()
         except urllib.error.HTTPError as e:
             token = self.reload_token() if e.code == 401 and self.reload_token else None
             if not token or token == self.token:
                 raise
             self.token = token
-            return post()
+            answer = post()
+        self.uploads[int(job_id)] = self.uploaded(job_id) + 1
+        return answer
 
     def send_result(self, job_id: int, result: dict) -> bool:
         """True when the bot has it (or does not know the job: then there is nobody to tell)."""
@@ -794,10 +803,14 @@ class Conversation:
     not the end: claude starts another turn when they finish (``see``).
     """
 
-    def __init__(self, proc: subprocess.Popen, client: RelayClient, job_id: int, wrap=None):
+    def __init__(self, proc: subprocess.Popen, client: RelayClient, job_id: int, wrap=None, review=None):
         self.proc, self.client, self.job_id = proc, client, job_id
         # How a follow-up is put to claude (a prm job wraps the creator's words as data).
         self.wrap = wrap or (lambda text: f"（微信里补充）{text}")
+        # review(result event) -> "" or what to ask claude once more before the input closes (a prm job's 直播手卡: a
+        # short name the card cannot hold); asked at most once
+        self.review = review
+        self.reviewed = False
         self.background = 0          # commands claude runs in the background right now
         self.turn_ended = False
         self.lock = threading.Lock()
@@ -860,10 +873,29 @@ class Conversation:
             if self.background:
                 log.info("#%s turn ended with %d background command(s) running; input stays open",
                          self.job_id, self.background)
-            else:
+            elif not self._ask_again(event):
                 self.on_result()
         elif kind in ("assistant", "user") or (kind == "system" and event.get("subtype") == "init"):
             self.turn_ended = False
+
+    def _ask_again(self, event: dict) -> bool:
+        """``review`` (once) found something to ask about this turn's answer: it is put to claude, which answers in a
+        new turn (the input stays open).  True when it was asked."""
+        if self.review is None or self.reviewed:
+            return False
+        self.reviewed = True
+        try:
+            text = self.review(event)
+        except Exception as e:                           # never in the way of the answer
+            log.warning("#%s the answer could not be looked at again (%s)", self.job_id, e)
+            return False
+        if not text:
+            return False
+        with self.lock:
+            asked = self._write(text)
+        if asked:
+            log.info("#%s asked claude once more about its answer", self.job_id)
+        return asked
 
     def _wrap_up_if_idle(self) -> None:
         if self.turn_ended and not self.background and not self.closed:
@@ -900,10 +932,11 @@ class Conversation:
 
 def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stopper: Stopper,
                session_id: str | None, add_dirs: tuple = (), *, cmd: list | None = None,
-               wrap=None, env_extra: dict | None = None) -> dict:
+               wrap=None, env_extra: dict | None = None, review=None) -> dict:
     """Run claude once; heartbeat meanwhile.  Returns stdout/stderr/returncode and why it stopped.
 
-    ``cmd`` replaces the cc command line (a prm job's); ``wrap`` shapes follow-ups."""
+    ``cmd`` replaces the cc command line (a prm job's); ``wrap`` shapes follow-ups; ``review`` may ask
+    claude once more about a turn's answer (``Conversation._ask_again``)."""
     cmd = cmd or claude_command(settings, session_id, add_dirs)
     # The task goes in on stdin: a task starting with "-" must not be read as an option.
     # The permission hook (a child of claude) needs to know the job and the settings file.
@@ -915,7 +948,7 @@ def run_claude(settings: dict, job: dict, cwd: Path, client: RelayClient, stoppe
         text=True, encoding="utf-8", errors="replace", start_new_session=True, env=env,
     )
     progress = Progress()
-    conversation = Conversation(proc, client, int(job["id"]), wrap=wrap)
+    conversation = Conversation(proc, client, int(job["id"]), wrap=wrap, review=review)
     lines: list[str] = []
     errors: list[str] = []
 
@@ -1315,10 +1348,18 @@ def prm_system_note(settings: dict) -> str:
     return PRM_SYSTEM_NOTE + (PRM_PLATFORM_NOTE if prm_platforms(settings) is not None else "")
 
 
-def prm_claude_command(settings: dict) -> list[str]:
+def prm_schema(cards: bool = False) -> dict:
+    """The answer's JSON schema for a prm job: PRM_SCHEMA, with 直播手卡's ``handcards`` only for a job whose prompt has
+    the 【直播手卡】 rule (``cards``): any other job's answer is exactly as before PRM_HANDCARDS."""
+    if not cards or handcards is None:
+        return PRM_SCHEMA
+    return {**PRM_SCHEMA, "properties": {**PRM_SCHEMA["properties"], "handcards": handcards.REQUEST_SCHEMA}}
+
+
+def prm_claude_command(settings: dict, cards: bool = False) -> list[str]:
     """claude for a prm job: the restricted tool set, no settings/MCP/commands from this Mac,
-    nothing saved, the guard hook, and the answer as JSON.  ``extra_args`` are NOT added
-    (they could give tools back)."""
+    nothing saved, the guard hook, and the answer as JSON (``prm_schema``: ``cards`` adds 直播手卡's
+    request).  ``extra_args`` are NOT added (they could give tools back)."""
     cmd = [
         find_claude(settings.get("claude_bin", "")), "-p", "--output-format", "stream-json", "--verbose",
         "--input-format", "stream-json",
@@ -1328,7 +1369,7 @@ def prm_claude_command(settings: dict) -> list[str]:
         "--permission-mode", "acceptEdits", "--permission-prompts", "none",
         "--settings", prm_hook_settings(),
         "--append-system-prompt", prm_system_note(settings),
-        "--json-schema", json.dumps(PRM_SCHEMA, ensure_ascii=False),
+        "--json-schema", json.dumps(prm_schema(cards), ensure_ascii=False),
     ]
     budget = float(settings.get("prm_max_budget_usd") or 0) or float(settings.get("max_budget_usd") or 0)
     if budget > 0:
@@ -1649,7 +1690,7 @@ HANDCARDS_RULE = (
     "（照目录里 SKU 的颜色名，没指定就留空，卡上写这款的全部颜色）；先用 Read 看一眼这款的款式图"
     "（assets/products/dy-<商品ID>.jpg）：四宫格拼图就在 photo_cell 写要用哪一格（左上 / 右上 / 左下 / 右下，挑她要的颜色、"
     "正面模特的那一格），单张图留空；图底下压着大号品牌字母就把 cut_bottom 设为 true；"
-    "short 是卡上的短名，最多 6 个字，抓款式特征（如「西部巴拿马帽」「翻边小礼帽」）；"
+    "short 是卡上的短名，最多 6 个字（字母算半个；放不下的会再问你一次），抓款式特征（如「西部巴拿马帽」「翻边小礼帽」）；"
     "brand_line 一句「款式 · 材质 · 版型」，用标题里的词（如「西部巴拿马帽 · 100%羊毛 · 英伦复古皮带扣平顶帽」）；"
     "material 只在标题里明写了材质时照抄（如「拉菲草」），没写就留空；audience 写「女性 · 场景 · 风格」"
     "（如「女性 · 秋冬出游 / 通勤 · 英伦复古风」）；sells 写 4 条卖点，每条 {head: 粗体短语, rest: 以「，」开头的后半句}，"
@@ -2308,6 +2349,7 @@ def summarize_prm(run: dict, data: dict | None, settings: dict) -> dict:
 
 def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper) -> dict:
     meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
+    prune_handcards()                            # (every prm job, the hourly sample-status rounds too)
     if meta.get("op") == "sample_status":        # 聚水潭: no creator, no model, no workspace needed
         return do_sample_status_job(settings, job, client, meta)
     if meta.get("op") == "buyin_inbox":          # 百应私信: no creator, no model, no workspace needed
@@ -2338,23 +2380,38 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
     asked = handcards.asked_items(meta) if handcards is not None else None
     card_ask = handcards_line(meta, handcards.describe_asked(asked, handcards.load_catalog(workspace)) if asked else [],
                               joined=bool(str(job.get("text") or "").strip())) if asked is not None else ""
+    card_rule = handcards_rule(meta, cards_cfg is not None)
     task = {**job, "text": prm_prompt(job, party_id, str(meta.get("name") or ""), case_rel, got, failed, invite=invite,
-                                      card_rule=handcards_rule(meta, cards_cfg is not None), card_ask=card_ask)}
+                                      card_rule=card_rule, card_ask=card_ask)}
     timeout = float(settings.get("prm_timeout_min") or 10)
     proxy = proxy_env()
     if proxy:
         log.info("#%s prm: the proxy of %s goes to claude (%s)", job["id"], claude_settings_path(), ", ".join(proxy))
     # The guard hook (a child of claude) lets this job reach only its own creator's case file and
     # its own attachments: it learns which from the environment.
+    asked_again = []                                     # 直播手卡: a short name too long was asked about once
     run = run_claude({**settings, "timeout_min": timeout}, task, workspace, client, stopper, None,
-                     cmd=prm_claude_command(settings), wrap=prm_followup,
+                     cmd=prm_claude_command(settings, cards=bool(card_rule)), wrap=prm_followup,
                      env_extra={"PRM_WORKSPACE": str(workspace), "PRM_PARTY_ID": str(party_id),
-                                "PRM_JOB_ID": str(int(job["id"])), **proxy})
-    result = summarize_prm(run, parse_output(run["stdout"]), {**settings, "prm_timeout_min": timeout})
+                                "PRM_JOB_ID": str(int(job["id"])), **proxy},
+                     review=(lambda event: handcards_review(event, asked_again)) if card_rule else None)
+    data = parse_output(run["stdout"])
+    answers = structured_events(run["stdout"]) if asked_again else []
+    if answers and _answer(data) is None:
+        data = answers[-1]                               # the turn asked again gave no answer: the first one stands
+    result = summarize_prm(run, data, {**settings, "prm_timeout_min": timeout})
     if result["ok"]:
         draft = json.loads(result["text"])
         request = draft.pop("handcards", None)           # 直播手卡: made below, after the draft's own files
         draft.pop("handcards_made", None)                # (only this script writes the verdict)
+        if request is None and answers:
+            # asked again about its short names, it answered without the request: the first request stands (its
+            # names do not fit: no card, and words that say the cards are ready cannot go as they are)
+            request = (_answer(answers[0]) or {}).get("handcards")
+        if request is not None and not card_rule:
+            # a job that offered no cards (PRM_HANDCARDS off, no settings on this Mac): its answer as before
+            log.info("#%s the draft named products for 手卡 the job did not offer: left out", job["id"])
+            request = None
         named = [str(rel).strip() for rel in draft.get("attachments_to_send") or [] if str(rel).strip()]
         sent, missing = [], []
         # A 百应 private message carries no files (an operator copies its words into 百应): nothing goes back,
@@ -2372,8 +2429,9 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
                 log.warning("#%s file %s not sent back: %s", job["id"], path.name, e)
                 missing.append({"name": rel, "why": f"没传上去：{e}"[:120]})
         if request is not None:
+            # (every file the job sent back so far counts: one draft carries at most 9, the bot's MAX_OUTFILES)
             made, cards = make_handcards(settings, job, meta, request, workspace, client, cards_cfg, cards_why,
-                                         others=len(sent))
+                                         others=client.uploaded(int(job["id"])))
             draft["handcards_made"] = made
             sent += cards                                # (all of them, or none: ``make_handcards``)
             named += cards
@@ -2403,6 +2461,51 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
 
 # ── 直播手卡 (src/prm/handcards.py) ─────────────────────────────────────────
 
+HANDCARDS_SHORTER = ("（系统，不是达人的话）你给的 handcards 里有短名太长，卡上放不下（最多 6 个字，字母算半个）：{names}。"
+                     "请再给一次完整的结构化结果：别的都照原样，只把这几款的 short 改成 6 个字以内的说法（抓款式特征，"
+                     "比如「西部巴拿马帽」）；不用再读文件，也不用再改案卷。")
+
+
+def handcards_review(event: dict, asked: list) -> str:
+    """For ``Conversation._ask_again``: the request in this turn's answer holds short names the card cannot hold
+    (``handcards.shorts_too_long``): what to ask claude (``HANDCARDS_SHORTER``), noted in ``asked``; "" otherwise."""
+    draft = _answer(event)
+    long = handcards.shorts_too_long(draft.get("handcards")) if handcards is not None and draft else []
+    if not long:
+        return ""
+    asked.append(len(long))
+    return HANDCARDS_SHORTER.format(names="、".join(f"「{name}」" for name in long[:9]))
+
+
+def _answer(event) -> dict | None:
+    """The structured answer a result event carries (``structured_output``, else its result text as JSON); None."""
+    if not isinstance(event, dict):
+        return None
+    if isinstance(event.get("structured_output"), dict):
+        return event["structured_output"]
+    try:
+        data = json.loads(str(event.get("result") or ""))
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def structured_events(stdout: str) -> list:
+    """The stream's result events that carry the structured answer, in order (a turn asked again may end without)."""
+    return [event for event in (json.loads(line) for line in stdout.splitlines() if _is_result(line))
+            if _answer(event) is not None]
+
+
+def prune_handcards() -> None:
+    """The cards' folders on this Mac (HOME_DIR/platform/handcards) older than handcards.KEEP_DAYS go."""
+    if handcards is None:
+        return
+    try:
+        handcards.prune_sessions(HOME_DIR / "platform" / "handcards")
+    except Exception as e:                               # never in the way of the job
+        log.warning("handcards folders not pruned: %s", e)
+
+
 def handcards_settings() -> tuple:
     """``(settings, "")`` of this Mac's handcards.json (in HOME_DIR: the skill's script and Python, the house 口径, the
     双11 line), or ``(None, why not)``: then no draft is told it may ask for cards."""
@@ -2416,9 +2519,10 @@ def make_handcards(settings: dict, job: dict, meta: dict, request, workspace: Pa
     """The cards of a draft's ``handcards`` request: ``(verdict, names of the files sent back)``.  Made only when this
     Mac can (``cards_cfg``) and the bot asked for them (``meta.handcards_ok`` or an operator's 「做手卡」), in a folder of
     their own under HOME_DIR/platform/handcards (``handcards.make``, the job's heartbeat meanwhile: the rendering may
-    take a minute); sent back here.  All or nothing: one card that does not upload makes the verdict a failure that
-    still names the ones sent (the bot leaves those out of the draft).  Never loses the draft: anything that goes
-    wrong is the verdict's ``problems``."""
+    take a minute); sent back here.  ``others``: the files the job sent back already (all count against the bot's 9 per
+    job: cards that would not fit are not made).  All or nothing: one file that does not upload makes the verdict a
+    failure that names every planned file (one whose answer was lost may have arrived: the bot leaves them all out).
+    Never loses the draft: anything that goes wrong is the verdict's ``problems``."""
     if handcards is None:
         return {"version": 1, "ok": False, "cards": [], "items": [], "note": "",
                 "problems": ["这台 Mac 的 worker 没有手卡模块"]}, []
@@ -2439,15 +2543,23 @@ def make_handcards(settings: dict, job: dict, meta: dict, request, workspace: Pa
         log.warning("#%s handcards not made: %s", job_id, "；".join(made["problems"]))
         return made, []
     sent = []
-    for path in files:
+    for n, path in enumerate(files, 1):
         try:
             client.upload(job_id, path, path.name)
             sent.append(path.name)
         except Exception as e:
-            log.warning("#%s card %s not sent back: %s", job_id, path.name, e)
-            # (the ones already sent are named: the bot leaves them out of the draft)
-            return handcards.made_block(False, cards=sent, items=made["items"],
-                                        problems=[f"{path.name} 没传上去：{e}"[:200]]), []
+            log.warning("#%s handcards: file %d of %d not sent back: %s", job_id, n, len(files), e)
+            # every file planned is named: one whose answer was lost may be there all the same, the bot leaves
+            # them all out of the draft
+            if client.uploaded(job_id) >= handcards.MAX_CARDS:
+                why = f"这个任务的文件满了（一份草稿最多 {handcards.MAX_CARDS} 个文件）"
+            elif getattr(e, "code", None) == 404:       # the relay's answer: too many files, or the job is over
+                why = (f"中继不收第 {n} 个文件（这个任务的文件满了：一份草稿最多 {handcards.MAX_CARDS} 个文件；"
+                       "或者任务已经结束）")
+            else:
+                why = f"第 {n} 个文件没传上去：{e}"
+            return handcards.made_block(False, cards=[f.name for f in files], items=made["items"],
+                                        problems=[why[:200]], catalog_at=made.get("catalog_at")), []
     log.info("#%s handcards: %d file(s) sent back", job_id, len(sent))
     return made, sent
 

@@ -11,6 +11,7 @@ import logging
 import os
 _os = os
 import re
+import shutil
 import threading
 import time
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
@@ -1214,17 +1215,25 @@ def _prm_deal(data: dict) -> dict:
 _PRM_PICTURES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
 
 
-def _prm_picture(query: str):
-    """GET /api/prm/file?packet=<id>&n=<index>: one picture among a draft's files, ``(bytes, content type)``; None
-    for anything else (no such draft or file, not a picture, gone from disk).  Read only, also while the bot is
-    stopped; the path is the one the bot itself kept for the file the Mac sent back."""
+# GET /api/prm/file's ``kind``: which of a draft's file lists (``attachment``: what goes to her, the 直播手卡; the
+# operator-only pictures, ``operator``, are another branch's: until it is merged that kind finds nothing here).
+_PRM_FILE_KINDS = ("attachment",)
+
+
+def _prm_file(query: str):
+    """GET /api/prm/file?packet=<id>&kind=attachment&n=<index>: one picture among a draft's files (``kind`` attachment:
+    ``attachments``, what goes to her: the 直播手卡) as ``(path, content type)``; None for anything else (``packet``,
+    ``kind`` or ``n`` missing or not a whole number / a known kind, no such draft or file, not a picture, gone from
+    disk).  Read only, also while the bot is stopped (that store is closed again); the path is the one the bot itself
+    kept for the file the Mac sent back."""
     from urllib.parse import parse_qs
 
     q = parse_qs(query)
-    try:
-        packet_id, n = int((q.get("packet") or [""])[0]), int((q.get("n") or [""])[0])
-    except ValueError:
+    kind = (q.get("kind") or [""])[0]
+    raw_packet, raw_n = (q.get("packet") or [""])[0], (q.get("n") or [""])[0]
+    if kind not in _PRM_FILE_KINDS or not raw_packet.isdigit() or not raw_n.isdigit():
         return None
+    packet_id, n = int(raw_packet), int(raw_n)
     store = _prm.store if _prm is not None else _prm_stopped_store()
     if store is None:
         return None
@@ -1237,10 +1246,10 @@ def _prm_picture(query: str):
     if not 0 <= n < len(files) or not isinstance(files[n], dict):
         return None
     path = Path(str(files[n].get("path") or ""))
-    kind = _PRM_PICTURES.get(path.suffix.lower())
-    if kind is None or not path.is_file():
+    content = _PRM_PICTURES.get(path.suffix.lower())
+    if content is None or not path.is_file():
         return None
-    return path.read_bytes(), kind
+    return path, content
 
 
 def _prm_auto(data: dict) -> dict:
@@ -1770,27 +1779,7 @@ class _UIHandler(SimpleHTTPRequestHandler):
 
         # ── API: PRM copilot — creators, drafts, decisions ─────────────
         if self.path.split("?", 1)[0] == "/api/prm/file":
-            try:
-                picture = _prm_picture(self.path.partition("?")[2])
-            except Exception:
-                logger.exception("Reading a draft's picture failed")
-                picture = None
-            body, kind = picture if picture is not None else (
-                json.dumps({"ok": False, "error": "没有这张图"}, ensure_ascii=False).encode(), "")
-            self.send_response(200 if kind else 404)
-            if not kind:
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self._send_cors_headers()
-                self.end_headers()
-                self.wfile.write(body)
-                return
-            self.send_header("Content-Type", kind)
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self._send_cors_headers()
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_prm_file()
             return
         if self.path.split("?", 1)[0] == "/api/prm":
             try:
@@ -2567,6 +2556,47 @@ class _UIHandler(SimpleHTTPRequestHandler):
             for code in ["error", "exception", "400", "401", "403", "404", "405", "500"]
         ):
             logger.warning("HTTP %s", format % args)
+
+    def _send_prm_file(self):
+        """GET /api/prm/file (``_prm_file``; GET only: not in the POST list, a POST is 405): a draft's picture, streamed,
+        ``Cache-Control: no-store``; another site's page (``Sec-Fetch-Site: cross-site``, an <img> pointed here) gets
+        403, anything not found 404 (JSON, its length, the CORS echo).  The origin and host checks of every request
+        come first (``do_GET``)."""
+        if (self.headers.get("Sec-Fetch-Site") or "").strip().lower() == "cross-site":
+            self._send_plain_json(403, {"ok": False, "error": "只给本机的控制台看"})
+            return
+        try:
+            found = _prm_file(self.path.partition("?")[2])
+        except Exception:
+            logger.exception("Reading a draft's picture failed")
+            found = None
+        if found is None:
+            self._send_plain_json(404, {"ok": False, "error": "没有这张图"})
+            return
+        path, kind = found
+        try:
+            source = open(path, "rb")
+            size = os.fstat(source.fileno()).st_size
+        except OSError:
+            self._send_plain_json(404, {"ok": False, "error": "没有这张图"})
+            return
+        with source:
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "no-store")
+            self._send_cors_headers()
+            self.end_headers()
+            shutil.copyfileobj(source, self.wfile, 256 * 1024)
+
+    def _send_plain_json(self, status: int, data: dict):
+        body = json.dumps(data, ensure_ascii=False).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self._send_cors_headers()
+        self.end_headers()
+        self.wfile.write(body)
 
     def send_json(self, data):
         self.send_response(200)

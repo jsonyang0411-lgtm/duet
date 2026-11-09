@@ -519,7 +519,7 @@ function HandcardsBlock({ p, busy, run }) {
         </div>
       )}
       <Field label="其他商品 ID（抖店，空格隔开）">
-        <TextInput mono value={extra} onChange={setExtra} placeholder="3843021700182704552" aria-label={`${p.name} 做手卡的其他商品 ID`} />
+        <TextInput mono value={extra} onChange={setExtra} placeholder="3000000000000000001" aria-label={`${p.name} 做手卡的其他商品 ID`} />
       </Field>
       <div>
         <button type="button" className="btn" disabled={busy || off}

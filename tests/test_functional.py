@@ -810,8 +810,10 @@ class TestPrmPages:
     def test_deals_page_asks_for_handcards_and_the_review_page_shows_the_cards(self, page, prm, tmp_path):
         """直播手卡 (PRM_HANDCARDS, 2026-11-09): an opened deal has 「直播手卡」 with her latest sample order's product ticked;
         小美's draft waits, so a click says why not; once it is dropped a click with one more typed product id asks the
-        Mac for both; the draft that comes back is tagged 「手卡」 in 待审批 and shows each card as a picture with the
-        Mac's note; cards that were not made: tagged so, 「发送」 off, why.  Switched off: no block."""
+        Mac for both; the draft that comes back is tagged 「手卡」 in 待审批 and shows each card as a picture (GET
+        /api/prm/file, kind attachment) with the Mac's note; cards that were not made: tagged so, 「发送」 off, why; cards
+        whose 双11 line is past its end date: shown, but neither sent nor edited (review 2026-11-09).  Switched off: no
+        block."""
         import io
         import json as _json
         import re
@@ -864,7 +866,7 @@ class TestPrmPages:
         pictures = card.locator(".prm-handcards img")
         assert pictures.count() == 2
         packet = prm.service.store.packet_for_job(job["id"])
-        assert pictures.nth(1).get_attribute("src") == f"/api/prm/file?packet={packet['id']}&n=1"
+        assert pictures.nth(1).get_attribute("src") == f"/api/prm/file?packet={packet['id']}&kind=attachment&n=1"
         page.wait_for_timeout(500)
         assert pictures.nth(0).evaluate("img => img.complete && img.naturalWidth") == 160
         note = card.locator(".prm-handcards").inner_text()
@@ -887,6 +889,26 @@ class TestPrmPages:
         assert "手卡没做成：出图出错了（退出码 1）" in card.inner_text()
         assert card.locator("button:has-text('发送')").first.is_disabled()
         assert "改了再发，或者不发" in card.inner_text()
+        assert prm.service.decide(prm.service.store.packet_for_job(job["id"])["id"], "drop")["ok"]
+        assert prm.service.deal_action("handcards", {"deal_id": 1, "items": []})["ok"]
+        prm.clock.now += SETTLE_SEC + 1
+        job = prm.relay.next_job(0, ("prm",))
+        for name in names:
+            buf = io.BytesIO()
+            Image.new("RGB", (160, 120), (90, 90, 90)).save(buf, "PNG")
+            assert prm.relay.outfile(job["id"], name, io.BytesIO(buf.getvalue()).read, len(buf.getvalue()))
+        old = hc.made_block(True, cards=names, note="做了 2 张手卡", promo_until="2026-01-01")
+        draft = {**draft, "reply_draft": "老师，手卡又整理好啦～", "attachments_to_send": names, "attachments_named": names,
+                 "handcards_made": old}
+        prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(draft, ensure_ascii=False)})
+        prm.relay.tick()
+        page.reload(timeout=10000)
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="老师，手卡又整理好啦～")
+        assert card.locator(".prm-handcards img").count() == 2
+        assert "手卡上的双11价已过期，请重新做手卡（卡上的双11 那一行到 2026-01-01 为止）" in card.inner_text()
+        assert card.locator("button:has-text('发送')").first.is_disabled()
+        assert card.locator("button:has-text('改了再发')").first.is_disabled()
         prm.service._handcards = False
         page.goto(f"{BASE_URL}/#/deals", timeout=10000)
         page.wait_for_timeout(1500)

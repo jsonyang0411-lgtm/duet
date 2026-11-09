@@ -12,8 +12,9 @@ counts) and adds ``attachments_named`` (every file the draft named) and
 ``attachments_missing`` (``[{"name", "why"}]``: outside assets/, missing, too big, the upload
 failed); an older worker sends neither.
 
-``handcards`` is optional too (handcards.py, 直播手卡): the products to make cards of; the Mac makes
-them and hands back ``handcards_made``, its verdict (the cards are among the files that came back).
+``handcards`` (handcards.py, 直播手卡: the products to make cards of) is in a job's schema only when its prompt
+offers cards (the worker's ``prm_schema``; this SCHEMA is the one without it); the Mac makes them and hands
+back ``handcards_made``, its verdict (the cards are among the files that came back).
 
 ``platform_action`` is optional (platforms.py): the Mac checks it and previews it, and
 hands back ``platform``, its verdict, in its place; a draft that names an action the Mac
@@ -59,7 +60,6 @@ SCHEMA = {
         "needs_attention": {"type": "boolean"},
         "reason": {"type": "string"},
         "platform_action": platforms.ACTION_SCHEMA,
-        "handcards": handcards.REQUEST_SCHEMA,
     },
     "required": ["intent", "slots", "stage_proposal", "message_kind", "reply_draft",
                  "attachments_to_send", "needs_attention", "reason"],

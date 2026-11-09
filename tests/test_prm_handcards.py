@@ -1,21 +1,23 @@
 """直播手卡 (PRM_HANDCARDS, 2026-11-09; src/prm/handcards.py): the bot makes the cards itself, a person still looks first.
 
 The drafting Claude names the products (``handcards``) when she asks for 手卡 or an operator clicks 「做手卡」; the Mac
-turns them into the skill live-handcard's 单子.json from data only (``build_sheet``: the 9 折 price floored, the 双11 line
-until its end date, 「充足」, a null 待定 where no source says it, the main image's crop, a short name the card can hold),
-crops the photos and runs the skill's script (here a fake that writes PNG headers), and the draft comes back with the
-1x PNGs and a verdict.  The bot keeps such a draft for a person whatever would send it by itself, all of its cards or
-none, and words whose cards were not made cannot go out as they are.  Products, ids, names and photos are made up.
+turns them into the skill live-handcard's 单子.json from data only (``build_sheet``: the 9 折 price floored, the 双11
+line until its end date with its N floored once from the daily price, 「充足」, a null 待定 where no source says it, the
+colours of the 抖店 SKU names, the main image's crop at the seam between its photos, a short name the card can hold, words
+cut at a word boundary and listed), crops the photos and runs the skill's script (here a fake that writes PNG headers),
+and the draft comes back with the 1x PNGs and a verdict.  A catalogue older than a week makes none.  The bot keeps such
+a draft for a person whatever would send it by itself, all of its cards or none (any card-like file of a failed set
+left out), the same-picture filter never splits a set, and neither words whose cards were not made nor cards whose 双11
+line is out of date can go out as they are.  Products, ids, names and photos are made up.
 """
 
 import io
 import json
-import struct
+import os
 import sys
 import textwrap
 import time
-import zlib
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -27,9 +29,10 @@ from test_prm_sample_sync import verified_order
 from platform_fakes import DY_ITEM, DY_SKU, JST_ORDER
 from src.prm import handcards as hc
 from src.prm.result import DraftError, parse_draft
-from src.prm.service import HANDCARDS_NOTE, apply_deal_action, card_ids, snapshot
+from src.prm.service import CARDS_FAILED_TEXT, HANDCARDS_NOTE, apply_deal_action, card_ids, snapshot
 
-ITEM, ITEM2, ITEM3, ITEM4 = "3000000000000000901", "3000000000000000902", "3000000000000000903", "3000000000000000904"
+ITEM, ITEM2, ITEM3, ITEM4, ITEM5 = ("3000000000000000901", "3000000000000000902", "3000000000000000903",
+                                    "3000000000000000904", "3000000000000000905")
 TITLE = "ACE7CN 测试巴拿马帽 100%羊毛英伦复古皮带扣平顶帽出游造型帽子"
 GLOBALS = {"commission": "25%", "pack": "盒装 · 内置帽撑防压", "ship_time": "付款后 7 天内发货",
            "aftersale": "7天无理由 · 运费险", "ship_from": "广东东莞 · 包邮", "no_ship": "无 · 全国均发",
@@ -39,12 +42,14 @@ TODAY = date(2026, 11, 9)
 CELLS = {"左上": (200, 30, 30), "右上": (30, 160, 60), "左下": (40, 60, 200), "右下": (220, 200, 40)}
 
 
-def catalog():
-    """kb/products.json: four 抖店 hats (a 2×2 main image; a single one with brand letters; one the hat index does not
-    know and whose title names no material; one whose SKUs differ in price) and a 小红书 one."""
-    return {"version": 1, "platforms": {
+def catalog(synced_at=None, stale=False):
+    """kb/products.json: five 抖店 hats (a 2×2 main image; a single one with brand letters; one the hat index does not
+    know and whose title names no material; one whose SKUs differ in price; one whose SKU names hold no colour) and a
+    小红书 one; synced now unless said otherwise."""
+    synced_at = time.time() if synced_at is None else synced_at
+    return {"version": 1, "synced_at": synced_at, "platforms": {
         "xhs": {"items": [{"id": "6ad0000000000000000000a1", "title": "测试小红书帽", "price": "100.00", "skus": []}]},
-        "dy": {"items": [
+        "dy": {"synced_at": synced_at, "stale": stale, "ok": not stale, "items": [
             {"id": ITEM, "title": TITLE, "price": "315.00", "image_file": f"assets/products/dy-{ITEM}.jpg",
              "skus": [{"id": "3100000000000000911", "name": "M驼色", "price": "315.00", "code": "A7269901001A-M"},
                       {"id": "3100000000000000912", "name": "M棕咖色", "price": "315.00", "code": "A7269901001B-M"}]},
@@ -52,7 +57,8 @@ def catalog():
              "image_file": f"assets/products/dy-{ITEM2}.jpg",
              "skus": [{"id": "3100000000000000921", "name": "白色/M（56-58cm）", "price": "269.00", "code": "A72599010B-M"},
                       {"id": "3100000000000000922", "name": "白色/L（58-60cm）", "price": "269.00", "code": "A72599010B-L"},
-                      {"id": "3100000000000000923", "name": "黑色/M（56-58cm）", "price": "269.00", "code": "A72599010A-M"}]},
+                      {"id": "3100000000000000923", "name": "无规格M（56-58cm）黑色", "price": "269.00",
+                       "code": "A72599010A-M"}]},
             {"id": ITEM3, "title": "ACE7CN 测试度假遮阳帽 出游百搭帽子女", "price": "199.00",
              "image_file": f"assets/products/dy-{ITEM3}.jpg",
              "skus": [{"id": "3100000000000000931", "name": "均码米色", "price": "199.00", "code": "local_x1"}]},
@@ -60,25 +66,35 @@ def catalog():
              "image_file": f"assets/products/dy-{ITEM4}.jpg",
              "skus": [{"id": "3100000000000000941", "name": "M黑色", "price": "290.00", "code": "A7269904001A-M"},
                       {"id": "3100000000000000942", "name": "L黑色", "price": "320.00", "code": "A7269904001A-L"}]},
+            {"id": ITEM5, "title": "ACE7CN 测试针织帽 羊毛针织冷帽", "price": "199.00",
+             "image_file": f"assets/products/dy-{ITEM5}.jpg",
+             "skus": [{"id": "3100000000000000951", "name": "均码1", "price": "199.00", "code": "A7269905001A-F"},
+                      {"id": "3100000000000000952", "name": "均码2", "price": "199.00", "code": "A7269905001B-F"}]},
         ]}}}
 
 
 def hat_skus():
-    """The hat index's skus.json (per style: code, colour, spec)."""
-    return {"ACE7CN202699010001": [{"code": "A7269901001A-M", "colour": "驼色", "spec": "尺码:M(56-58cm)"},
+    """The hat index's skus.json (per style: code, colour, spec); its colours disagree with the 抖店 names (they are not
+    used), its specs are the sizes."""
+    return {"ACE7CN202699010001": [{"code": "A7269901001A-M", "colour": "驼色不退换", "spec": "尺码:M(56-58cm)"},
                                    {"code": "A7269901001B-M", "colour": "颜色:棕咖色", "spec": "尺码:M(56-58cm)"}],
             "A72599010B": [{"code": "A72599010B-M", "colour": "白色", "spec": "尺码:M(56-58cm)"},
                            {"code": "A72599010B-L", "colour": "白色", "spec": "尺码:L(58-60cm)"}],
-            "A72599010A": [{"code": "A72599010A-M", "colour": "黑色", "spec": "尺码:M(56-58cm)"}],
+            "A72599010A": [{"code": "A72599010A-M", "colour": "黑色 尺码:M(56-58cm)", "spec": "尺码:M(56-58cm)"}],
             "ACE7CN202699040001": [{"code": "A7269904001A-M", "colour": "黑色", "spec": "尺码:M(56-58cm)"},
-                                   {"code": "A7269904001A-L", "colour": "黑色", "spec": "尺码:L(58-60cm)"}]}
+                                   {"code": "A7269904001A-L", "colour": "黑色", "spec": "尺码:L(58-60cm)"}],
+            "ACE7CN202699050001": [{"code": "A7269905001A-F", "colour": "1", "spec": "尺码:F(52-60cm)"},
+                                   {"code": "A7269905001B-F", "colour": "2", "spec": "尺码:F(52-60cm)"}]}
 
 
-def grid_image(path):
-    """A shop main image: a 2×2 collage of 540×720 photos on a white 1440×1440 square (180 px white on each side)."""
+def grid_image(path, left=180, right=180):
+    """A shop main image: a 2×2 collage of photos on a white 1440×1440 square, ``left`` / ``right`` px white on each side
+    (not always the same: one collage in twelve), the columns meeting in the middle of what is left."""
     image = Image.new("RGB", (1440, 1440), (255, 255, 255))
+    seam = left + (1440 - left - right) // 2
     for (col, row), colour in zip(((0, 0), (1, 0), (0, 1), (1, 1)), CELLS.values()):
-        image.paste(colour, (180 + col * 540, row * 720, 180 + (col + 1) * 540, (row + 1) * 720))
+        x0, x1 = (left, seam) if col == 0 else (seam, 1440 - right)
+        image.paste(colour, (x0, row * 720, x1, (row + 1) * 720))
     image.save(path, "JPEG", quality=95)
 
 
@@ -92,13 +108,13 @@ def single_image(path, colour=(90, 90, 90)):
 
 @pytest.fixture
 def ws(tmp_path):
-    """The Mac's workspace: kb/products.json and the main images."""
+    """The Mac's workspace: kb/products.json (synced now) and the main images."""
     root = tmp_path / "biz"
     (root / "kb").mkdir(parents=True)
     (root / "assets" / "products").mkdir(parents=True)
     (root / "kb" / "products.json").write_text(json.dumps(catalog(), ensure_ascii=False), encoding="utf-8")
     grid_image(root / "assets" / "products" / f"dy-{ITEM}.jpg")
-    for item in (ITEM2, ITEM3, ITEM4):
+    for item in (ITEM2, ITEM3, ITEM4, ITEM5):
         single_image(root / "assets" / "products" / f"dy-{item}.jpg")
     return root
 
@@ -108,7 +124,7 @@ def config(**more):
     promo = more.pop("promo", PROMO)
     return {"script": more.pop("script", ""), "python": sys.executable, "skus": more.pop("skus", ""),
             "source": "老板模板（测试）", "caveats": ["运费险是推断的"], "send_zip": False, "timeout_sec": 0,
-            "globals": dict(GLOBALS), "promo": None if promo is None else {
+            "max_catalogue_days": 7, "globals": dict(GLOBALS), "promo": None if promo is None else {
                 **promo, "until": date.fromisoformat(promo["until"]),
                 "from": date.fromisoformat(promo["from"]) if promo.get("from") else None}, **more}
 
@@ -120,12 +136,6 @@ def product(item=ITEM, **more):
             "sells": [{"head": "平顶宽檐", "rest": "，英伦复古"}, {"head": "100%羊毛", "rest": "秋冬保暖"}], **more}
 
 
-def build(ws, *products, asked=None, others=0, today=TODAY, cfg=None, name="小美", call=""):
-    request = {"products": list(products), **({"call": call} if call else {})}
-    return hc.build_sheet(request, catalog=hc.load_catalog(ws), skus=hc_index(), config=cfg or config(), name=name,
-                          today=today, workspace=ws, asked=asked, others=others)
-
-
 def hc_index():
     index = {}
     for rows in hat_skus().values():
@@ -134,24 +144,38 @@ def hc_index():
     return index
 
 
-# ── the 单子.json: prices, the 双11 line, stock, 待定, names ────────────────
+def build(ws, *products, asked=None, others=0, today=TODAY, cfg=None, name="小美", call=""):
+    request = {"products": list(products), **({"call": call} if call else {})}
+    return hc.build_sheet(request, catalog=hc.load_catalog(ws), skus=hc_index(), config=cfg or config(), name=name,
+                          today=today, workspace=ws, asked=asked, others=others)
+
+
+# ── the 单子.json: prices, the 双11 line, stock, 待定 ──────────────────────
 
 @pytest.mark.parametrize("daily, live", [(315, 283), (299, 269), (279, 251), (570, 513), (300, 270), (188, 169)])
 def test_the_live_price_is_nine_tenths_floored_to_the_yuan(daily, live):
     assert hc.floor_price(daily, 0.9) == live
 
 
+@pytest.mark.parametrize("daily, n", [(315, 240), (399, 305), (101, 77), (269, 205), (290, 221)])
+def test_the_promo_price_is_floored_once_from_the_daily_price(daily, n):
+    """kb 第 6 节: 售价 × 0.9 × 0.85, floored once (101: 77; flooring the 直播价 first gave 76)."""
+    assert hc.promo_price(daily, 0.9, 0.85) == n
+    assert hc.promo_price(101, 0.9, 0.85) != hc.floor_price(hc.floor_price(101, 0.9), 0.85)
+
+
 def test_a_sheet_takes_its_facts_from_data_and_its_words_from_the_draft(ws):
     sheet, photos, report = build(ws, product(), call="小美")
-    assert report["problems"] == []
+    assert report["problems"] == [] and report["cuts"] == []
     assert sheet["channel"] == "小美专属" and sheet["platform"] == "douyin"
+    assert (sheet["zip_name"], sheet["pdf_name"]) == ("ACE7CN直播手卡", "ACE7CN直播手卡_合集.pdf")   # (no 称呼)
     assert sheet["globals"] == GLOBALS
     [p] = sheet["products"]
     assert (p["daily"], p["stock"], p["material"], p["size"], p["id"]) == (315, "充足", "100%羊毛", "M 56-58cm", ITEM)
     assert p["colors"] == "驼色 / 棕咖色" and p["name"] == TITLE and p["img"] == "产品图/01.jpg"
     assert p["sells"] == [["平顶宽檐", "，英伦复古"], ["100%羊毛", "，秋冬保暖"]]        # (a rest gets its 「，」)
     assert p["note"] == "M 码头围 56-58cm；羊毛帽勿水洗、勿重压，可用软毛刷清灰；拍摄光线略有色差属正常"
-    assert p["promo"] == "双11再减15%实付约240"                                      # 315 → 283 → 283 × 0.85 = 240
+    assert p["promo"] == "双11再减15%实付约240"                                      # 315 × 0.9 × 0.85 = 240.975
     assert "live" not in p                                                            # (the script works it out)
     assert photos == [{"src": str((ws / "assets" / "products" / f"dy-{ITEM}.jpg").resolve()), "dst": "产品图/01.jpg",
                        "cell": None, "cut_bottom": False}]
@@ -191,7 +215,7 @@ def test_a_field_without_a_source_is_null_and_the_note_lists_it(ws):
     note = hc.note_text(sheet, report, cfg, TODAY)
     assert "待定（卡上红字）：第 1 款 材质；第 2 款 日常价；每张的 快递" in note
     assert "第 2 款日常价待定：SKU 价格不一样（290、320）" in note
-    assert "第 1 款有 1 个 SKU 帽子图库里没有，颜色尺码按 SKU 名字拆的" in note
+    assert "第 1 款有 1 个 SKU 帽子图库里没有，尺码按 SKU 名字拆的" in note
 
 
 def test_a_material_the_draft_names_counts_only_when_the_title_has_those_words(ws):
@@ -201,32 +225,73 @@ def test_a_material_the_draft_names_counts_only_when_the_title_has_those_words(w
     assert sheet["products"][0]["material"] is None
 
 
-@pytest.mark.parametrize("text, short, cut", [
-    ("西部巴拿马帽", "西部巴拿马帽", False),
-    ("一体成型马术帽", "一体成型马术", True),
-    ("pillbox礼帽", "pillbox礼帽", False),            # letters count half: 3.5 + 2
-    ("pillbox小礼帽", "pillbox小礼", True),           # 3.5 + 3: one too many
-    ("翻边/小礼帽", "翻边小礼帽", False),               # nothing a file name cannot carry
-    ("  贝雷 帽 ", "贝雷帽", False),
+# ── names and words the card can hold ────────────────────────────────────
+
+@pytest.mark.parametrize("text, short, fits", [
+    ("西部巴拿马帽", "西部巴拿马帽", True),
+    ("复古西部巴拿马帽", "复古西部巴拿马帽", False),     # never cut to 「复古西部巴拿」: too long is too long
+    ("pillbox礼帽", "pillbox礼帽", True),            # letters count half: 3.5 + 2
+    ("pillbox小礼帽", "pillbox小礼帽", False),
+    ("翻边/小礼帽", "翻边小礼帽", True),               # nothing a file name cannot carry
+    ("  贝雷 帽 ", "贝雷帽", True),
+    ("贝雷#帽%&", "贝雷帽", True),                    # nor the skill's file:// URL (# % &)
 ])
-def test_a_short_name_fits_the_card_and_a_file_name(text, short, cut):
-    assert hc.short_name(text) == (short, cut)
+def test_a_short_name_fits_the_card_a_file_name_and_its_url(text, short, fits):
+    assert hc.short_name(text) == (short, fits)
 
 
-def test_a_short_name_cut_says_so_and_a_missing_one_makes_no_card(ws):
-    sheet, _, report = build(ws, product(short="一体成型马术帽"))
-    assert sheet["products"][0]["short"] == "一体成型马术"
-    assert "第 1 款短名「一体成型马术帽」超过 6 个字，卡上用了「一体成型马术」" in report["notes"]
-    _, _, report = build(ws, product(short=" "))
+def test_a_short_name_too_long_makes_no_card_and_is_named_for_the_model(ws):
+    """A short name that does not fit is never cut mid-word: no card, and the worker asks the model again for the names
+    ``shorts_too_long`` gives."""
+    _, _, report = build(ws, product(short="复古西部巴拿马帽"))
+    assert report["problems"] == ["第 1 款短名「复古西部巴拿马帽」超过 6 个字，卡上放不下（问过 Mac 也没改短）：再点一次「做手卡」"]
+    assert hc.shorts_too_long({"products": [product(short="复古西部巴拿马帽"), product(ITEM2, short="小礼帽")]}) == [
+        "复古西部巴拿马帽"]
+    assert hc.shorts_too_long(None) == [] and hc.shorts_too_long({"products": "x"}) == []
+    _, _, report = build(ws, product(short=" #% "))
     assert report["problems"] == [f"第 1 款（商品 {ITEM}）：草稿没写短名"]
 
 
-def test_words_the_card_cannot_hold_are_cut_and_missing_words_make_no_card(ws):
-    sheet, _, report = build(ws, product(brand_line="长" * 40, sells=[{"head": "a", "rest": "b"}] * 6))
-    assert len(sheet["products"][0]["brand_line"]) == 30 and len(sheet["products"][0]["sells"]) == 4
-    assert any("字太长，卡上截短了" in n for n in report["notes"])
+@pytest.mark.parametrize("text, limit, out, cut", [
+    ("西部巴拿马帽 · 100%羊毛 · 英伦复古皮带扣平顶帽出游造型帽", 30, "西部巴拿马帽 · 100%羊毛", True),
+    ("女性 · 秋冬出游 / 通勤 / 约会 · 英伦复古风", 24, "女性 · 秋冬出游 / 通勤 / 约会", True),
+    ("一二三四五六七八九十一二三四五六七八九十", 10, "一二三四五六七八九十", True),   # no boundary: cut at the limit
+    ("平顶宽檐，英伦复古", 26, "平顶宽檐，英伦复古", False),
+    ("  多  余   空白 ", 26, "多 余 空白", False),
+])
+def test_words_are_cut_at_a_word_boundary(text, limit, out, cut):
+    assert hc.cut_words(text, limit) == (out, cut)
+
+
+def test_every_cut_is_listed_and_flags_the_draft(ws):
+    sheet, _, report = build(ws, product(brand_line="西部巴拿马帽 · 100%羊毛 · 英伦复古皮带扣平顶帽出游造型帽",
+                                         audience="女性 · 秋冬出游 / 通勤 / 约会 · 英伦复古风",
+                                         sells=[{"head": "a", "rest": "b"}] * 6),
+                                 call="一二三四五六七八九十一二三四五六七八")
+    assert sheet["products"][0]["brand_line"] == "西部巴拿马帽 · 100%羊毛" and len(sheet["products"][0]["sells"]) == 4
+    assert report["cuts"] == ["第 1 款品牌句截成「西部巴拿马帽 · 100%羊毛」", "第 1 款适用人群截成「女性 · 秋冬出游 / 通勤 / 约会」",
+                              "第 1 款卖点只用了前 4 条", "称呼截成「一二三四五六七八九十一二三四五六专属」"]
+    made = hc.check_made(hc.made_block(True, cards=["手卡_01_x.png"], cuts=report["cuts"]))
+    assert hc.flagged(made) and "截短了：第 1 款品牌句截成「西部巴拿马帽 · 100%羊毛」" in hc.attention(made)
     _, _, report = build(ws, product(audience="", sells=[]))
     assert report["problems"] == ["第 1 款（测试巴拿马帽）：草稿没写适用人群、卖点"]
+
+
+# ── colours, sizes, the 称呼 ──────────────────────────────────────────────
+
+def test_colours_come_from_the_douyin_sku_names_not_the_hat_index(ws):
+    """The hat index says 「驼色不退换」 and 「黑色 尺码:M(56-58cm)」; the 抖店 SKU names say 驼色, 黑色 (「无规格」 off)."""
+    sheet, _, report = build(ws, product(), product(ITEM2, short="小礼帽"))
+    assert [p["colors"] for p in sheet["products"]] == ["驼色 / 棕咖色", "白色 / 黑色"]
+    assert sheet["products"][1]["size"] == "M56-58/L58-60cm"            # (the sizes are still the index's)
+    assert report["todo"] == {1: [], 2: []}
+
+
+def test_a_colour_name_that_is_no_colour_is_a_red_tbd(ws):
+    sheet, _, report = build(ws, product(ITEM5, short="针织帽"))
+    assert sheet["products"][0]["colors"] == hc.TODO_HTML and report["todo"] == {1: ["颜色"]}
+    assert "第 1 款抖店 SKU 的颜色名（1、2）不像颜色，卡上颜色写待定" in report["notes"]
+    assert [hc.bad_colour(c) for c in ("1", "", "红色 尺码:F(52-60cm)", "米杏白")] == [True, True, True, False]
 
 
 def test_colours_follow_what_she_picked_and_the_card_says_when_one_does_not_fit(ws):
@@ -237,7 +302,7 @@ def test_colours_follow_what_she_picked_and_the_card_says_when_one_does_not_fit(
     assert report["notes"] == ["第 1 款要的颜色「棕色」这款没有（有 驼色 / 棕咖色），卡上写了全部颜色"]
     many = [f"颜{n}色" for n in range(1, 11)]
     assert hc.colours_text(many) == " / ".join(f"颜{n}" for n in range(1, 11)) + " 共 10 色"
-    assert hc.colours_text(["驼色", "黑色"]) == "驼色 / 黑色"
+    assert hc.colours_text(["驼色", "黑<白>色"]) == "驼色 / 黑&lt;白&gt;色"          # (the skill writes it as HTML)
 
 
 @pytest.mark.parametrize("spec, sizes, text", [
@@ -261,25 +326,24 @@ def test_sizes_are_read_from_the_hat_index_spec(spec, sizes, text):
     ("均码黑色", "黑色", [("均码", "")]),
     ("白色/M（56-58cm）", "白色", [("M", "56-58")]),
     ("M（56-58cm）黑色", "黑色", [("M", "56-58")]),
+    ("无规格M（56-58cm）黑色", "黑色", [("M", "56-58")]),
+    ("F（52-60cm）新年红", "新年红", [("F", "52-60")]),
+    ("均码1", "1", [("均码", "")]),
     ("黑色", "黑色", []),
 ])
-def test_a_sku_name_is_read_when_the_hat_index_has_no_such_code(name, colour, sizes):
+def test_a_sku_name_gives_its_colour_and_size(name, colour, sizes):
     assert hc.parse_sku_name(name) == (colour, sizes)
 
 
-def test_two_sizes_make_the_compact_spec_and_note(ws):
-    sheet, _, _ = build(ws, product(ITEM2, short="无檐小礼帽"))
-    p = sheet["products"][0]
-    assert p["size"] == "M56-58/L58-60cm" and p["colors"] == "白色 / 黑色"
-    assert p["note"].startswith("M 码头围 56-58cm、L 码头围 58-60cm；")
-
-
-@pytest.mark.parametrize("call, name, channel", [
-    ("小美", "抖音-另一个名字", "小美专属"), ("", "抖音-小美", "小美专属"), ("", "小红书－小美 ", "小美专属"),
-    ("", "dy_小美", "dy_小美专属"), ("", "", "达人专属"), ("小/美", "", "小美专属"), ("一" * 20, "", "一" * 16 + "专属"),
+@pytest.mark.parametrize("call, name, channel, cut", [
+    ("小美", "抖音-另一个名字", "小美专属", False), ("", "抖音-小美", "小美专属", False),
+    ("", "小红书－小美 ", "小美专属", False), ("", "抖音-小美-ab12", "小美专属", False),     # (the friend add's tail)
+    ("", "小美-ab12", "小美-ab12专属", False),                                           # (no prefix: her own name)
+    ("", "dy_小美", "dy_小美专属", False), ("", "", "达人专属", False), ("小/美&#", "", "小美专属", False),
+    ("一" * 20, "", "一" * 16 + "专属", True),
 ])
-def test_the_channel_is_her_call_or_her_deals_name_without_the_douyin_prefix(call, name, channel):
-    assert hc.channel_of(call, name) == channel
+def test_the_channel_is_her_call_or_her_deals_name_without_the_friend_add_remark(call, name, channel, cut):
+    assert hc.channel_of(call, name) == (channel, cut)
 
 
 def test_products_not_in_the_catalogue_or_too_many_make_no_card(ws):
@@ -304,15 +368,33 @@ def test_an_operators_products_are_the_ones_made(ws):
 
 # ── the photos ───────────────────────────────────────────────────────────
 
-def test_the_crop_box_takes_the_side_margins_the_cell_and_the_brand_letters_off():
+def test_the_crop_box_takes_each_margin_the_cell_at_its_seam_and_the_brand_letters_off():
     assert hc.crop_box(1440, 1440) == (0, 0, 1440, 1440)
-    assert hc.crop_box(1440, 1440, 180) == (180, 0, 1260, 1440)
-    assert hc.crop_box(1440, 1440, 180, cut_bottom=True) == (180, 0, 1260, 1181)
-    assert hc.crop_box(1440, 1440, 180, cell=(0, 1)) == (185, 727, 715, 1433)             # 左下, 1% inside
-    assert hc.crop_box(1440, 1440, 10) == (0, 0, 1440, 1440)           # under 1.5%: the picture, not a margin
-    assert hc.crop_box(1440, 1440, 500) == (0, 0, 1440, 1440)          # 30% or more on a side: no canvas
-    assert hc.side_margin([True] * 3 + [False] * 4 + [True] * 5) == 3  # the smaller side (the canvas is even)
-    assert hc.side_margin([True] * 4) == 4 and hc.side_margin([False, True]) == 0
+    assert hc.crop_box(1440, 1440, 180, 180) == (180, 0, 1260, 1440)
+    assert hc.crop_box(1440, 1440, 180, 180, cut_bottom=True) == (180, 0, 1260, 1181)
+    assert hc.crop_box(1440, 1440, 180, 180, cell=(0, 1)) == (185, 727, 715, 1433)       # 左下, 1% inside
+    # margins of their own: the cell between the left edge and the seam, not around the picture's middle
+    assert hc.crop_box(1440, 1440, 216, 132, cell=(1, 0), seam_x=762) == (767, 7, 1303, 713)
+    assert hc.crop_box(1440, 1440, 216, 132, cell=(1, 0)) == (767, 7, 1303, 713)          # (the content's middle)
+    assert hc.crop_box(1440, 1440, 216, 132, cell=(0, 0), seam_x=5000) == (221, 7, 757, 713)   # (a seam outside)
+    assert hc.crop_box(1440, 1440, 10, 10) == (0, 0, 1440, 1440)       # under 1.5%: the picture, not a margin
+    assert hc.crop_box(1440, 1440, 500, 500) == (0, 0, 1440, 1440)     # 30% or more on a side: no canvas
+    assert hc.side_margins([True] * 3 + [False] * 4 + [True] * 5) == (3, 5)
+    assert hc.side_margins([True] * 4) == (4, 4) and hc.side_margins([False, True]) == (0, 1)
+
+
+def test_a_seam_is_taken_only_near_the_middle_and_only_when_it_stands_out():
+    flat = [2.0] * 100
+    assert hc.seam_near(flat, 50, 3) is None                           # nothing stands out: the middle
+    edge = flat[:]
+    edge[51] = 40.0
+    assert hc.seam_near(edge, 50, 3) == 52                             # the column after the step
+    far = flat[:]
+    far[70] = 80.0
+    assert hc.seam_near(far, 50, 3) is None                            # a hat brim far off is no seam
+    weak = flat[:]
+    weak[50] = 5.0
+    assert hc.seam_near(weak, 50, 3) is None and hc.seam_near([], 0, 3) is None
 
 
 def test_the_sheet_asks_for_the_cell_and_the_cut_the_draft_chose(ws):
@@ -321,21 +403,39 @@ def test_the_sheet_asks_for_the_cell_and_the_cut_the_draft_chose(ws):
     assert report["crops"] == ["第 1 款主图左下那一格", "第 2 款去掉了底下的品牌字"]
 
 
-@pytest.mark.parametrize("cell", list(CELLS))
-def test_the_photos_are_cropped_to_the_cell_asked_for(ws, tmp_path, cell):
-    """Pillow under the skill's Python (here this one): the 2×2 image's cell is the colour of that cell, its white side
-    margins gone; a single photo loses its brand letters."""
+def crop_cells(tmp_path, src, cells=CELLS):
+    """Each cell of ``src`` cropped by ``crop_photos`` (Pillow, under this Python): {cell: image}."""
     plan = tmp_path / "crop.json"
     plan.write_text(json.dumps({"base": str(tmp_path), "photos": [
-        {"src": str(ws / "assets" / "products" / f"dy-{ITEM}.jpg"), "dst": "产品图/01.jpg", "cell": list(hc.CELLS[cell]),
-         "cut_bottom": False},
+        {"src": str(src), "dst": f"产品图/{n:02d}.jpg", "cell": list(hc.CELLS[cell]), "cut_bottom": False}
+        for n, cell in enumerate(cells, 1)]}), encoding="utf-8")
+    assert hc.crop_photos(plan) == 0
+    return {cell: Image.open(tmp_path / "产品图" / f"{n:02d}.jpg").convert("RGB") for n, cell in enumerate(cells, 1)}
+
+
+def near(a, b, tolerance=24):
+    return all(abs(x - y) < tolerance for x, y in zip(a, b))
+
+
+@pytest.mark.parametrize("left, right", [(180, 180), (216, 132), (120, 210)])
+def test_each_cell_is_cropped_without_a_strip_of_its_neighbour(tmp_path, left, right):
+    """The shop's collages do not always have even margins (one in twelve: 216 / 132 px on real ones); each cell crop is
+    its own colour to its very edges, no strip of the photo next to it."""
+    src = tmp_path / "grid.jpg"
+    grid_image(src, left, right)
+    for cell, image in crop_cells(tmp_path, src).items():
+        colour = CELLS[cell]
+        for x in (1, image.width // 2, image.width - 2):
+            for y in (1, image.height // 2, image.height - 2):
+                assert near(image.getpixel((x, y)), colour), (cell, x, y, image.getpixel((x, y)))
+
+
+def test_a_single_photo_loses_its_side_margins_and_brand_letters(ws, tmp_path):
+    plan = tmp_path / "crop.json"
+    plan.write_text(json.dumps({"base": str(tmp_path), "photos": [
         {"src": str(ws / "assets" / "products" / f"dy-{ITEM2}.jpg"), "dst": "产品图/02.jpg", "cell": None,
          "cut_bottom": True}]}), encoding="utf-8")
     assert hc.crop_photos(plan) == 0
-    with Image.open(tmp_path / "产品图" / "01.jpg") as one:
-        assert abs(one.width - 530) <= 6 and abs(one.height - 706) <= 6
-        assert all(abs(a - b) < 20 for a, b in zip(one.getpixel((one.width // 2, one.height // 2)), CELLS[cell]))
-        assert all(abs(a - b) < 20 for a, b in zip(one.getpixel((2, 2)), CELLS[cell]))        # no white margin left
     with Image.open(tmp_path / "产品图" / "02.jpg") as two:
         assert abs(two.width - 1080) <= 6 and abs(two.height - 1181) <= 2
         assert max(two.getpixel((540, two.height - 5))) < 120                             # the letters' band is gone
@@ -351,8 +451,9 @@ FAKE_CARDS = textwrap.dedent("""\
     with open(os.environ["FAKE_CARDS_LOG"], "a", encoding="utf-8") as f:
         f.write(json.dumps({"argv": args, "sheet": sheet}, ensure_ascii=False) + "\\n")
     mode = os.environ.get("FAKE_CARDS_MODE", "")
+    print(sheet["channel"] + "：" + str(len(sheet["products"])) + " 款")
     if mode == "fail":
-        print("Traceback: boom")
+        print("Traceback: boom " + sheet["channel"])
         sys.exit(1)
     if mode == "slow":
         time.sleep(60)
@@ -372,7 +473,8 @@ FAKE_CARDS = textwrap.dedent("""\
             open(base + suffix, "wb").write(png)
         open(base + ".html", "w").write("<html></html>")
     if "--zip" in args:
-        with zipfile.ZipFile(os.path.join(os.path.dirname(out), sheet["channel"] + "直播手卡.zip"), "w") as z:
+        name = sheet.get("zip_name") or sheet["channel"] + "直播手卡"
+        with zipfile.ZipFile(os.path.join(os.path.dirname(out), name + ".zip"), "w") as z:
             z.writestr("x.txt", "x")
 """)
 
@@ -391,16 +493,17 @@ def cards(tmp_path, monkeypatch):
                                                     if log.exists() else [])})
 
 
-def make(ws, cards, *products, asked=None, others=0, beat=None, **cfg):
+def make(ws, cards, *products, asked=None, others=0, beat=None, now=None, **cfg):
     return hc.make({"products": list(products), "call": "小美"}, workspace=ws,
                    config=config(script=cards.script, skus=cards.skus, **cfg), name="抖音-小美", job_id=41,
-                   home=cards.home, asked=asked, others=others, today=TODAY, heartbeat=beat)
+                   home=cards.home, asked=asked, others=others, today=TODAY, heartbeat=beat, now=now)
 
 
 def test_the_cards_are_made_in_a_folder_of_their_own_and_only_the_1x_pngs_go(ws, cards):
     made, files = make(ws, cards, product(photo_cell="左下"), product(ITEM2, short="无檐小礼帽", cut_bottom=True))
-    assert made["ok"] is True and made["problems"] == []
+    assert made["ok"] is True and made["problems"] == [] and made["cuts"] == []
     assert made["cards"] == ["手卡_01_测试巴拿马帽.png", "手卡_02_无檐小礼帽.png"] == [f.name for f in files]
+    assert made["promo_until"] == "2026-11-11" and abs(made["catalog_at"] - time.time()) < 60
     assert all(hc.png_size(f) == (1600, 1200) for f in files)
     [call] = cards.calls()
     assert "--no-pdf" in call["argv"] and "--zip" not in call["argv"]
@@ -410,33 +513,37 @@ def test_the_cards_are_made_in_a_folder_of_their_own_and_only_the_1x_pngs_go(ws,
     assert (folder / "单子.json").is_file() and (folder / "产品图" / "01.jpg").is_file()
     assert not list(folder.glob("手卡/*@2x.png")) and not list(folder.glob("手卡/*.html"))     # (tidied)
     with Image.open(folder / "产品图" / "01.jpg") as photo:
-        assert all(abs(a - b) < 20 for a, b in zip(photo.getpixel((photo.width // 2, photo.height // 2)), CELLS["左下"]))
+        assert near(photo.getpixel((photo.width // 2, photo.height // 2)), CELLS["左下"])
     note = made["note"]
+    today = hc.beijing_today().strftime("%m-%d")
     for words in ("做了 2 张手卡（小美专属，抖音）：第 1 款 测试巴拿马帽 315 → 直播 283；第 2 款 无檐小礼帽 269 → 直播 242",
+                  f"价格按 {today} 同步的商品目录（kb/products.md）",
                   "待定（卡上红字）：没有", "推断的：短名、品牌句、适用人群、卖点是按商品标题写的",
                   "沿用了老板模板（测试）的口径：佣金 25%，包装 盒装 · 内置帽撑防压",
-                  "直播价 = 日常价 × 0.9 取整；双11再减15%实付约N（N = 直播价 × 0.85 取整，到 11-11）；运费险是推断的",
-                  "产品图：第 1 款主图左下那一格；第 2 款去掉了底下的品牌字", "（留 7 天）"):
+                  "直播价 = 日常价 × 0.9 取整；双11再减15%实付约N（N = 日常价 × 0.9 × 0.85 取整，到 11-11，过了这天草稿就不能发）",
+                  "；运费险是推断的", "产品图：第 1 款主图左下那一格；第 2 款去掉了底下的品牌字", "（留 7 天）"):
         assert words in note, words
 
 
 def test_a_zip_goes_too_only_when_asked_and_when_it_fits(ws, cards):
     made, files = make(ws, cards, product(), send_zip=True)
-    assert [f.name for f in files] == ["手卡_01_测试巴拿马帽.png", "小美专属直播手卡.zip"] and made["ok"]
+    assert [f.name for f in files] == ["手卡_01_测试巴拿马帽.png", "ACE7CN直播手卡.zip"] and made["ok"]
     assert "--zip" in cards.calls()[-1]["argv"]
     made, files = make(ws, cards, product(), send_zip=True, others=8)
     assert [f.name for f in files] == ["手卡_01_测试巴拿马帽.png"] and "压缩包放不下" in made["note"]
 
 
 @pytest.mark.parametrize("mode, problem", [
-    ("fail", "出图出错了（退出码 1）：Traceback: boom"),
+    ("fail", "出图出错了（退出码 1）：Traceback: boom （称呼）"),
     ("skip", "第 2 张（无檐小礼帽）没出来"),
     ("small", "第 1 张（测试巴拿马帽）尺寸不对（800×600）"),
 ])
 def test_a_card_not_made_makes_no_card_at_all(ws, cards, monkeypatch, mode, problem):
+    """Her 称呼 never comes back in a problem (the script prints the 场次)."""
     monkeypatch.setenv("FAKE_CARDS_MODE", mode)
     made, files = make(ws, cards, product(), product(ITEM2, short="无檐小礼帽"))
     assert (made["ok"], files, made["cards"]) == (False, [], []) and problem in made["problems"]
+    assert "小美" not in json.dumps(made, ensure_ascii=False)
 
 
 def test_a_request_without_data_never_runs_the_script(ws, cards):
@@ -446,6 +553,22 @@ def test_a_request_without_data_never_runs_the_script(ws, cards):
     (ws / "kb" / "products.json").unlink()
     made, _ = make(ws, cards, product())
     assert made["problems"] == ["这台 Mac 的 kb/products.json 里没有抖店商品（先在 Mac 上 --sync-products）"]
+
+
+@pytest.mark.parametrize("days_old, stale, max_days, ok", [
+    (0, False, 7, True), (6.9, False, 7, True), (7.1, False, 7, False), (20, False, 30, True), (0, True, 7, False),
+])
+def test_a_stale_or_old_catalogue_makes_no_card(ws, cards, days_old, stale, max_days, ok):
+    """The prices are the catalogue's: one synced longer ago than max_catalogue_days, or whose last sync failed (kept the
+    earlier products), makes none and says when it was synced."""
+    synced = time.time() - days_old * 86400
+    (ws / "kb" / "products.json").write_text(json.dumps(catalog(synced, stale), ensure_ascii=False), encoding="utf-8")
+    made, files = make(ws, cards, product(), max_catalogue_days=max_days)
+    assert made["ok"] is ok and bool(files) is ok
+    if not ok:
+        when = hc._day(synced)
+        assert made["problems"] == [f"商品目录太旧（上次同步 {when}），先同步再做手卡"] and cards.calls() == []
+        assert made["catalog_at"] == pytest.approx(synced)
 
 
 def test_a_run_is_stopped_by_its_timeout_or_a_cancel(tmp_path):
@@ -460,14 +583,17 @@ def test_a_run_is_stopped_by_its_timeout_or_a_cancel(tmp_path):
     assert (code, tail, stopped) == (0, "done", "")
 
 
-def test_old_session_folders_go(tmp_path):
+def test_old_session_folders_go_on_their_own_schedule_too(tmp_path):
     home = tmp_path / "home"
-    old = home / "20261001-090000-job1"
-    old.mkdir(parents=True)
-    import os
+    old, new = home / "20261001-090000-job1", home / "20261108-090000-job2"
+    for folder in (old, new):
+        folder.mkdir(parents=True)
     os.utime(old, (time.time() - 8 * 86400, time.time() - 8 * 86400))
-    folder = hc.session_folder(home, 2)
-    assert folder.is_dir() and not old.exists()
+    assert hc.prune_sessions(home) == 1 and not old.exists() and new.exists()
+    assert hc.prune_sessions(tmp_path / "none") == 0
+    os.utime(new, (time.time() - 8 * 86400, time.time() - 8 * 86400))
+    folder = hc.session_folder(home, 3)
+    assert folder.is_dir() and not new.exists()
 
 
 # ── the Mac's settings ───────────────────────────────────────────────────
@@ -479,11 +605,13 @@ def test_the_settings_say_what_is_missing(tmp_path, cards):
     path.write_text(json.dumps(good, ensure_ascii=False), encoding="utf-8")
     cfg, why = hc.load_config(path)
     assert why == "" and cfg["promo"]["until"] == date(2026, 11, 11) and cfg["globals"]["discount"] == 0.9
-    assert cfg["globals"]["commission"] == "25%" and cfg["send_zip"] is False
+    assert cfg["globals"]["commission"] == "25%" and cfg["send_zip"] is False and cfg["max_catalogue_days"] == 7
     for bad, words in ((dict(good, enabled=False), "enabled 不是 true"),
                        (dict(good, promo={"text": "双11", "factor": 0.85, "until": "2026-11-11"}), "promo 要写成"),
                        (dict(good, promo={**PROMO, "until": "11-11"}), "promo 要写成"),
                        (dict(good, globals={**GLOBALS, "discount": 9}), "discount 要在 0.5 到 1 之间"),
+                       (dict(good, max_catalogue_days=0), "max_catalogue_days 要是 1 到 60 天"),
+                       (dict(good, max_catalogue_days="x"), "max_catalogue_days 要是 1 到 60 天"),
                        (dict(good, script=str(tmp_path / "none.py")), "找不到手卡脚本"),
                        (dict(good, python=str(tmp_path / "none")), "找不到手卡用的 Python")):
         path.write_text(json.dumps(bad, ensure_ascii=False), encoding="utf-8")
@@ -497,26 +625,52 @@ def test_the_example_settings_are_the_house_template(tmp_path):
     example = json.loads((Path(__file__).resolve().parents[1] / "tools" / "claude_relay" / "handcards.example.json")
                          .read_text(encoding="utf-8"))
     assert example["globals"] == GLOBALS and example["promo"] == PROMO and example["send_zip"] is False
+    assert example["max_catalogue_days"] == 7
 
 
 # ── the verdict, as the bot reads it ─────────────────────────────────────
 
 def test_the_verdict_is_checked_and_its_cards_come_all_or_none():
     made = hc.check_made(hc.made_block(True, cards=["手卡_01_a.png", "手卡_02_b.png"], note="n",
-                                       items=[{"item_id": ITEM, "short": "a", "todo": ["材质"]}]))
-    assert made == {"ok": True, "cards": ["手卡_01_a.png", "手卡_02_b.png"], "note": "n", "problems": [],
-                    "items": [{"item_id": ITEM, "short": "a", "todo": ["材质"]}]}
+                                       items=[{"item_id": ITEM, "short": "a", "todo": ["材质"]}],
+                                       promo_until="2026-11-11", catalog_at=1.5e9))
+    assert made == {"ok": True, "cards": ["手卡_01_a.png", "手卡_02_b.png"], "note": "n", "problems": [], "cuts": [],
+                    "items": [{"item_id": ITEM, "short": "a", "todo": ["材质"]}], "promo_until": "2026-11-11",
+                    "catalog_at": 1.5e9}
     files = [{"name": "手卡_01_a.png"}, {"name": "x.jpg"}, {"name": "手卡_02_b.png"}]
     assert hc.keep_cards(made, files) == (files, made)
     kept, short = hc.keep_cards(made, files[:2])
     assert kept == [{"name": "x.jpg"}] and short["ok"] is False and short["problems"] == ["手卡只传上来 1 / 2 张"]
+    # a failed verdict: none of its cards, nor any card-like file (the relay renames a second one 「(2)」), nor its zip
     failed = hc.check_made(hc.made_block(False, cards=["手卡_01_a.png"], problems=["没传上去"]))
-    assert failed["ok"] is False and hc.keep_cards(failed, files)[0] == [{"name": "x.jpg"}, {"name": "手卡_02_b.png"}]
-    for bad in ([], {"cards": "a.png"}, {"cards": ["../a.png"]}, {"cards": ["a"] * 10}, {"problems": "x"}):
+    odd = [*files, {"name": "手卡_03_c(2).png"}, {"name": "ACE7CN直播手卡.zip"}, {"name": "货盘.jpg"}]
+    assert hc.keep_cards(failed, odd)[0] == [{"name": "x.jpg"}, {"name": "货盘.jpg"}]
+    for bad in ([], {"cards": "a.png"}, {"cards": ["../a.png"]}, {"cards": ["a"] * 10}, {"problems": "x"},
+                {"cuts": "x"}, {"promo_until": "11-11"}):
         with pytest.raises(ValueError):
             hc.check_made(bad)
-    assert hc.attention(made) == "手卡 2 张附在草稿里，要人看过再发（卡上待定：第 1 款 材质）"
+    assert hc.check_made({"cards": [], "catalog_at": True})["catalog_at"] is None
+    when = hc._day(1.5e9)
+    assert hc.attention(made) == f"手卡 2 张附在草稿里，要人看过再发（价格按 {when} 同步的商品目录；卡上待定：第 1 款 材质）"
     assert hc.attention(failed) == "手卡没做成：没传上去；草稿里没附手卡"
+    assert hc.flagged(made) and hc.flagged(failed) and not hc.flagged(hc.check_made(hc.made_block(True, cards=["a"])))
+    assert [hc.is_card_file(n) for n in ("手卡_01_a.png", "手卡_1_a.png", "a.png", "X直播手卡(3).zip")] == [
+        True, False, False, True]
+
+
+def beijing(day, hour, minute=0):
+    """A moment by Beijing's clock (an end date is a Beijing day, whatever this machine's zone)."""
+    return datetime(2026, 11, day, hour, minute, tzinfo=hc.BEIJING).timestamp()
+
+
+def test_the_end_date_is_read_by_beijing_time():
+    until = {"ok": True, "promo_until": "2026-11-11"}
+    assert hc.beijing_today(datetime.fromisoformat("2026-11-11T15:59:00+00:00").timestamp()) == date(2026, 11, 11)
+    assert hc.beijing_today(datetime.fromisoformat("2026-11-11T16:00:00+00:00").timestamp()) == date(2026, 11, 12)
+    assert hc.beijing_today(beijing(11, 23, 59)) == date(2026, 11, 11)
+    assert not hc.promo_expired(until, date(2026, 11, 11)) and hc.promo_expired(until, date(2026, 11, 12))
+    assert not hc.promo_expired({"ok": True, "promo_until": ""}, date(2030, 1, 1))
+    assert not hc.promo_expired(None, date(2030, 1, 1)) and not hc.promo_expired({"promo_until": "x"}, date(2030, 1, 1))
 
 
 def test_a_draft_with_a_malformed_verdict_is_refused():
@@ -596,15 +750,24 @@ def test_her_draft_jobs_say_the_mac_may_make_cards_only_with_the_switch(bot, clo
 def test_a_draft_with_cards_waits_for_a_person_with_the_cards_and_the_note(bot):
     packet = drafted(bot, asks(bot))
     assert (packet["status"], packet["route"]) == ("pending", "review")
-    assert [a["name"] for a in packet["attachments"]] == [n for n, _ in CARDS]
-    assert packet["meta"]["handcards"] == {"ok": True, "count": 2, "note": "做了 2 张手卡", "problems": [],
-                                           "console": False}
+    assert [a["name"] for a in packet["attachments"]] == [n for n, _ in CARDS] and not packet["needs_attention"]
+    assert packet["meta"]["handcards"] == {"ok": True, "count": 2, "note": "做了 2 张手卡", "problems": [], "cuts": [],
+                                           "promo_until": "", "catalog_at": None, "console": False}
     assert bot.prm.store.deal(deal_id(bot))["attention"] == "手卡 2 张附在草稿里，要人看过再发"
     [card] = [p for p in snapshot(bot.prm.store, running=True)["pending"] if p["id"] == packet["id"]]
-    assert card["handcards"]["ok"] is True and card["handcards"]["count"] == 2
+    assert card["handcards"]["ok"] is True and card["handcards"]["count"] == 2 and card["handcards"]["expired"] is False
     assert bot.prm.decide(packet["id"], "send")["ok"]
     bot.prm.send_approved()
     assert bot.texts == [(CREATOR, LINE)] and len(bot.files) == 2
+
+
+def test_cards_with_cuts_or_tbd_are_flagged_with_the_list(bot):
+    made = hc.made_block(True, cards=[n for n, _ in CARDS], cuts=["第 1 款品牌句截成「测试 · 羊毛」"], catalog_at=1.5e9,
+                         items=[{"item_id": ITEM, "short": "测试巴拿马帽", "todo": ["材质"]}])
+    packet = drafted(bot, asks(bot), card_draft(made=made))
+    assert packet["needs_attention"] and packet["status"] == "pending" and len(packet["attachments"]) == 2
+    assert "截短了：第 1 款品牌句截成「测试 · 羊毛」" in packet["reason"] and "卡上待定：第 1 款 材质" in packet["reason"]
+    assert f"价格按 {hc._day(1.5e9)} 同步的商品目录" in bot.prm.store.deal(deal_id(bot))["attention"]
 
 
 @pytest.mark.parametrize("how", ["gate", "night", "auto_mode", "opening_auto"])
@@ -639,18 +802,28 @@ def test_a_draft_with_cards_never_goes_out_by_itself(clock, tmp_path, how):
 
 def test_cards_not_made_are_never_attached_and_the_words_cannot_go_as_they_are(bot):
     """The Mac failed after one card went up: the draft carries none of them, says why, and only an edited text goes."""
-    made = hc.made_block(False, cards=[CARDS[0][0]], problems=["手卡_02 没传上去：网络断了"])
+    made = hc.made_block(False, cards=[n for n, _ in CARDS], problems=["第 2 个文件没传上去：网络断了"])
     packet = drafted(bot, asks(bot), card_draft(made=made, attachments_to_send=[], attachments_named=[]),
                      files=CARDS[:1])
     assert packet["attachments"] == [] and packet["needs_attention"] and packet["status"] == "pending"
-    assert packet["reason"].startswith("手卡没做成：手卡_02 没传上去：网络断了；草稿里没附手卡")
+    assert packet["reason"].startswith("手卡没做成：第 2 个文件没传上去：网络断了；草稿里没附手卡")
     assert packet["meta"]["handcards"]["ok"] is False
-    assert bot.prm.decide(packet["id"], "send") == {
-        "ok": False, "error": "手卡没做成，草稿里没附手卡：不能原样发，改了再发（别说手卡做好了），或者不发"}
+    assert bot.prm.decide(packet["id"], "send") == {"ok": False, "error": CARDS_FAILED_TEXT}
     assert bot.prm.decide(packet["id"], "edit", LINE)["ok"] is False                 # the same words: refused too
     assert bot.prm.decide(packet["id"], "edit", "老师，手卡我晚点整理好发您～")["ok"]
     bot.prm.send_approved()
     assert bot.texts == [(CREATOR, "老师，手卡我晚点整理好发您～")] and bot.files == []
+
+
+def test_a_card_whose_upload_answer_was_lost_is_never_attached(bot):
+    """(Review 2026-11-09, item 1.)  The relay stored the 2nd card before its answer was lost; an older verdict names
+    only the 1st: the bot leaves out every card-like file of a failed set, so an edited text sends no card at all."""
+    made = hc.made_block(False, cards=[CARDS[0][0]], problems=["手卡_02 没传上去：timed out"])
+    packet = drafted(bot, asks(bot), card_draft(made=made, attachments_to_send=[], attachments_named=[]), files=CARDS)
+    assert packet["attachments"] == []
+    assert bot.prm.decide(packet["id"], "edit", "老师，手卡我晚点整理好发您～")["ok"]
+    bot.prm.send_approved()
+    assert bot.files == []
 
 
 def test_a_good_verdict_whose_cards_did_not_all_arrive_carries_none(bot):
@@ -658,6 +831,37 @@ def test_a_good_verdict_whose_cards_did_not_all_arrive_carries_none(bot):
     assert packet["attachments"] == [] and packet["needs_attention"]
     assert packet["meta"]["handcards"]["problems"] == ["手卡只传上来 1 / 2 张"]
     assert "手卡没做成：手卡只传上来 1 / 2 张" in bot.prm.store.deal(deal_id(bot))["attention"]
+
+
+def test_cards_made_again_the_same_are_never_split_by_the_same_picture_filter(bot, clock):
+    """(Review 2026-11-09, item 7.)  The same cards within 7 days are the same bytes: the 「同一张图不重复发」 filter
+    leaves card files alone, so the second set still carries both cards."""
+    first = drafted(bot, asks(bot))
+    assert bot.prm.decide(first["id"], "send")["ok"]
+    bot.prm.send_approved()
+    clock.now += 3600
+    second = drafted(bot, asks(bot, "老师手卡再发一次"))
+    assert [a["name"] for a in second["attachments"]] == [n for n, _ in CARDS]
+    assert second["meta"]["handcards"]["ok"] is True and "不重复发" not in second["reason"]
+    assert bot.prm.decide(second["id"], "send")["ok"]
+    bot.prm.send_approved()
+    assert len(bot.files) == 4
+
+
+def test_cards_whose_promo_line_is_out_of_date_cannot_go_at_all(bot, clock):
+    """(Review 2026-11-09, item 2.)  Cards made on 11-11 say 「双11再减15%…」; on 11-12 (Beijing) the draft cannot be
+    sent, edited or executed: the cards themselves are wrong; the console says so."""
+    clock.now = beijing(11, 14)
+    made = hc.made_block(True, cards=[n for n, _ in CARDS], promo_until="2026-11-11")
+    packet = drafted(bot, asks(bot), card_draft(made=made))
+    [card] = [p for p in snapshot(bot.prm.store, running=True, now=clock.now)["pending"] if p["id"] == packet["id"]]
+    assert card["handcards"]["expired"] is False and card["handcards"]["promo_until"] == "2026-11-11"
+    clock.now = beijing(12, 0, 5)
+    [card] = [p for p in snapshot(bot.prm.store, running=True, now=clock.now)["pending"] if p["id"] == packet["id"]]
+    assert card["handcards"]["expired"] is True
+    for action, text in (("send", None), ("edit", "老师，手卡在这儿～")):
+        assert bot.prm.decide(packet["id"], action, text) == {"ok": False, "error": hc.EXPIRED_TEXT}
+    assert bot.prm.decide(packet["id"], "drop")["ok"]
 
 
 def test_a_plain_draft_is_as_before(bot):
@@ -790,7 +994,6 @@ def test_the_note_constant_goes_once(bot):
 # ── the setting ──────────────────────────────────────────────────────────
 
 def test_the_switch_defaults_off_and_is_checked():
-    import os
     from types import SimpleNamespace
     from unittest.mock import patch
 
@@ -822,20 +1025,29 @@ def test_the_switch_defaults_off_and_is_checked():
     assert adv.validate_updates({"PRM_HANDCARDS": "maybe"}, {}) and adv.validate_updates({"PRM_HANDCARDS": "on"}, {}) == {}
 
 
-def test_a_platform_draft_whose_cards_failed_cannot_be_executed_as_it_is(bot):
-    """批准并执行 has the same guard as 发送: the reply goes out after the platform's read-back, never claiming cards it
-    does not carry."""
-    from src.prm.service import CARDS_FAILED_TEXT
-
+def platform_packet(bot, cards):
     deal = bot.prm.store.deal_of(bot.prm.store.party_by_wxid(CREATOR)["id"])
     action = {"action": "dy.designated_commission", "item_id": DY_ITEM, "creator_platform_id": "1234567890",
               "commission_rate": 20}
-    packet_id = bot.prm.store.add_packet(
+    return bot.prm.store.add_packet(
         deal_id=deal["id"], party_id=deal["party_id"], job_id=None, chat_id=CREATOR, kind="money",
         text="佣金开好啦，手卡也整理好啦～", attachments=[], intent="", slots={}, stage_proposal="", needs_attention=True,
         reason="", status="pending", tool="dy.designated_commission",
         platform={"action": action, "preview": {"verdict": "ready", "problems": []}},
-        meta={"handcards": {"ok": False, "count": 0, "note": "", "problems": ["出图出错了"], "console": False}},
-        now=bot.clock.now)
+        meta={"handcards": {"console": False, **cards}}, now=bot.clock.now)
+
+
+def test_a_platform_draft_whose_cards_failed_cannot_be_executed_as_it_is(bot):
+    """批准并执行 has the same guard as 发送: the reply goes out after the platform's read-back, never claiming cards it
+    does not carry."""
+    packet_id = platform_packet(bot, {"ok": False, "count": 0, "note": "", "problems": ["出图出错了"]})
     assert bot.prm.decide(packet_id, "execute") == {"ok": False, "error": CARDS_FAILED_TEXT}
     assert bot.prm.decide(packet_id, "execute", "佣金开好啦～") != {"ok": False, "error": CARDS_FAILED_TEXT}
+
+
+def test_a_platform_draft_whose_cards_are_out_of_date_cannot_be_executed(bot, clock):
+    clock.now = beijing(12, 10)
+    packet_id = platform_packet(bot, {"ok": True, "count": 1, "note": "", "problems": [], "promo_until": "2026-11-11"})
+    for text in (None, "佣金开好啦～"):
+        assert bot.prm.decide(packet_id, "execute", text) == {"ok": False, "error": hc.EXPIRED_TEXT}
+    assert hc.beijing_today(clock.now) - date(2026, 11, 11) == timedelta(days=1)
