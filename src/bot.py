@@ -575,6 +575,9 @@ class Bot:
         prm = PrmService(config, relay, send=backend.send_text, send_file=getattr(backend, "send_file", None),
                          on_parties_changed=getattr(backend, "refresh_private_chats_soon", None),
                          scrub_messages=getattr(store, "rewrite_chat", None))
+        set_sent = getattr(backend, "set_sent_hook", None)
+        if prm.wechat_review.on and callable(set_sent):
+            set_sent(prm.wechat_review.note_sent)  # 微信里审批草稿: the last thing the bot said in the admin's chat
         set_filter = getattr(backend, "set_private_filter", None)
         if callable(set_filter):
             set_filter(prm.is_party_chat)

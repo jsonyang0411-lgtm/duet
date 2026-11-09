@@ -147,7 +147,8 @@ class TheServiceSteps(StepCase):
         """微信里审批草稿 (PRM_WECHAT_REVIEW): the review's answer is the reply, the message is not stored, the trace keeps
         no words; a message it does not take goes on to be stored as before; the switch off: the step passes."""
         review = MagicMock(on=True)
-        review.answer.side_effect = lambda msg: (True, "#12 已批准") if msg["content"] == "1" else (False, None)
+        review.answer.side_effect = lambda msg, is_command=None: (
+            (True, "#12 已批准", None) if msg["content"] == "1" else (False, None, None))
         router = self.router()
         router._prm = SimpleNamespace(wechat_review=review, handle=lambda msg: False)
         assert router.handle(admin_msg("w1", "1")) == "#12 已批准"
@@ -158,6 +159,20 @@ class TheServiceSteps(StepCase):
         review.on = False
         assert router.handle(admin_msg("w3", "1")) is None and self.stored(router, "w3") == 1
         assert review.answer.call_count == 2
+        assert review.answer.call_args.kwargs["is_command"] == router._admin.is_command   # (a command is never an answer)
+
+    def test_the_lines_of_an_answer_that_are_no_answer_go_on_as_the_message(self):
+        """A merged burst of 「发 12」 and a cc task: the review's reply is said first, the cc line goes on to the later
+        steps as the message (no words of it in the trace)."""
+        review = MagicMock(on=True)
+        review.answer.return_value = (True, "#12 已批准", "cc 跑一下测试")
+        router = self.router()
+        router._prm = SimpleNamespace(wechat_review=review, handle=lambda msg: False)
+        ctx = self.ctx(router, admin_msg("w1", "发 12\ncc 跑一下测试", _burst_count=2))
+        assert S.wechat_review(ctx) is None
+        review.tell.assert_called_once_with("#12 已批准")
+        assert ctx.msg["content"] == "cc 跑一下测试" and ctx.msg["message_id"] == "w1"
+        assert self.trace.redacted == "[管理员在微信里审批草稿，内容不记录]"
 
     def test_a_breaking_review_still_keeps_an_answer_from_the_relay(self):
         review = MagicMock(on=True, answer=MagicMock(side_effect=RuntimeError("db locked")))
@@ -166,6 +181,7 @@ class TheServiceSteps(StepCase):
         review.claims.return_value = True
         assert S.wechat_review(self.ctx(router, admin_msg("w1", "发 12"))) == Stop(
             "处理这条草稿回复时出错了（详见日志）：请在控制台处理")
+        assert review.claims.call_args.kwargs == {"is_command": router._admin.is_command}
         review.claims.return_value = False
         assert S.wechat_review(self.ctx(router, admin_msg("w2", "cc 跑测试"))) is None
         review.claims.side_effect = RuntimeError("still locked")

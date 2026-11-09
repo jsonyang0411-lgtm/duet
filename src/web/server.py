@@ -1131,7 +1131,7 @@ def _wechat_review_stopped_status() -> dict:
     if not _prm_env_on("PRM_WECHAT_REVIEW"):
         return {"on": False}
     why = NO_ADMIN_WHY if not os.getenv("ADMIN_WXID", "").strip() else "机器人没有运行：草稿发不到管理员微信里"
-    return {"on": True, "why": why, "open": 0, "unsent": 0}
+    return {"on": True, "why": why, "open": 0, "unsent": 0, "unsure": 0, "older": 0}
 
 
 def _three_party_stopped_status() -> dict:

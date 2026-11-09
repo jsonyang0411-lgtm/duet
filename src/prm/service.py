@@ -1361,10 +1361,10 @@ class PrmService:
         # 微信里审批草稿 (PRM_WECHAT_REVIEW, default off; src/prm/wechat_review.py): the drafts waiting for a person told to
         # the admin's private chat (the sender thread, ``tick``), the admin's answers there (the route step wechat_review)
         self.wechat_review = WechatReview(
-            self._store, config, clock=clock, send=send, decide=self.decide, check=self.edit_problem,
-            lines=self._packet_lines, parts=lambda text: len(reply_parts(text, self._reply_parts)),
-            drafting=lambda chat: relay.store.latest_open(chat, drafts_only=True, system=False) is not None,
-            local=self._local, opening_auto=self._opening_auto_sec > 0)
+            self._store, config, clock=clock, send=send, decide=self.decide,
+            check=self.edit_problem, lines=self._packet_lines, parts=lambda text: len(reply_parts(text, self._reply_parts)),
+            aim=lambda packet: self._aim(packet, wait=True), relay_store=relay.store, local=self._local,
+            opening_auto=self._opening_auto_sec > 0)
         relay.register_kind(PRM, self.on_result)
 
     @property
@@ -2142,10 +2142,11 @@ class PrmService:
         return (packet.get("job_id") is None or meta.get("lane") == LANE_SYSTEM or bool(meta.get(OPENING))
                 or bool(meta.get(HUOPAN)) or bool(meta.get(SIGNED)))
 
-    def _aim(self, packet: Optional[dict]) -> Optional[dict]:
+    def _aim(self, packet: Optional[dict], *, wait: bool = False) -> Optional[dict]:
         """A packet the bot started itself still aimed at her private chat, for a creator with a 老板拉的群: where she can
         be reached (``_reach``): the group (its chat, the console's tag), or nowhere: it fails, nothing is sent, the deal
-        says so (``UNREACHABLE``).  Returns the packet as it is now (None: failed so)."""
+        says so (``UNREACHABLE``).  Returns the packet as it is now (None: failed so).  ``wait`` (微信里审批草稿, before a
+        draft is told: it says where it goes): reached nowhere, nothing is changed and None comes back (told later)."""
         if packet is None or not self._bot_started(packet) or is_buyin(packet):
             return packet
         party = self._store.party(packet["party_id"])
@@ -2155,6 +2156,8 @@ class PrmService:
         if chat == party["wxid"]:
             return packet
         now = self._clock()
+        if chat is None and wait:
+            return None
         if chat is None:
             self._store.move(packet["id"], (PENDING, APPROVED, SENDING), FAILED, outcome="failed", sent_at=now,
                              error=f"{UNREACHABLE_TEXT}，没有发")
@@ -5878,7 +5881,10 @@ class PrmService:
         self.sweep_executing()
         self.send_due_openings()
         self.send_approved()
-        self.wechat_review.sweep()                     # PRM_WECHAT_REVIEW: the drafts waiting told to the admin's chat
+        try:                                           # PRM_WECHAT_REVIEW: the drafts waiting told to the admin's chat
+            self.wechat_review.sweep()
+        except Exception:
+            logger.exception("PRM: telling the admin's chat of the drafts failed; tried again next round")
         self.send_holding_replies()
         self.sweep_owed_steps()
         self.sweep_deliveries()

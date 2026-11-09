@@ -184,7 +184,8 @@ class TheDraftAnswersAreTheAdminsAlone(GatewayCase):
 
     def review_gateway(self, relay_only=False, **extra):
         router = self.gateway(relay_only=relay_only, **extra)
-        cfg = SimpleNamespace(admin_wxid=ADMIN, claude_relay_wxids=[], prm_copilot="on", prm_wechat_review="on")
+        cfg = SimpleNamespace(admin_wxid=ADMIN, claude_relay_wxids=[], prm_copilot="on", prm_wechat_review="on",
+                              claude_relay_only="on" if relay_only else "off")     # (Bot.run: one config for both)
         self.told = []
         self.prm = PrmService(cfg, self.relay, store=PrmStore(":memory:"), clock=lambda: NOW,
                               send=lambda chat, text: self.told.append((chat, text)) or True)
@@ -221,11 +222,14 @@ class TheDraftAnswersAreTheAdminsAlone(GatewayCase):
 
     def test_the_admins_own_answer_is_the_one_that_counts(self):
         router = self.review_gateway(relay_only=True)
+        self.prm.wechat_review.note_sent(ADMIN, self.head)                  # (the notification: the last thing said)
+        assert "#1" in router.handle(admin_msg("a0", "1"))                   # relay only: a bare 1 is Claude's task
+        assert self.prm.store.packet(self.number)["status"] == "pending" and self.jobs() == 1
         assert router.handle(admin_msg("a1", "1", msg_type=49, quoted_content=self.head)) == (
             f"#{self.number} 已批准，正在发给 小美")
         assert self.trace.notes["ended_by"] == "wechat_review" and self.stored(router, "a1") == 0
-        assert self.prm.store.packet(self.number)["status"] == "approved" and self.jobs() == 0
-        assert "#1" in router.handle(admin_msg("a2", "跑一下测试"))           # every other line: as before
+        assert self.prm.store.packet(self.number)["status"] == "approved" and self.jobs() == 1
+        assert "#2" in router.handle(admin_msg("a2", "跑一下测试"))           # every other line: as before
 
 
 class NoStrangerIsEverAnswered(GatewayCase):

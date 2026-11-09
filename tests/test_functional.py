@@ -1524,7 +1524,7 @@ class TestPrmPages:
         card = page.locator(".prm-draft", has_text="在的，有什么可以帮你？")
         card.wait_for()
         assert page.locator(".prm-wechat-review").count() == 0 and card.locator(".prm-wechat-tag").count() == 0
-        shown = {"status": {"on": True, "why": "", "open": 1, "unsent": 0}, "told": True}
+        shown = {"status": {"on": True, "why": "", "open": 1, "unsent": 0, "unsure": 0, "older": 0}, "told": True}
 
         def wechat(state):
             state["wechat_review"] = shown["status"]
@@ -1535,14 +1535,18 @@ class TestPrmPages:
         page.reload()
         line = page.locator(".prm-wechat-review")
         line.wait_for()
-        assert line.inner_text().strip() == "草稿也发到管理员微信里了：回 1 发出、2 不发、改 + 你的话"
+        assert line.inner_text().strip() == "草稿也发到管理员微信里了：引用通知回 1 发出、2 不发、改 + 你的话"
         tag = card.locator(".prm-wechat-tag")
         assert tag.inner_text() == "已发到微信" and "和这里点是同一个决定" in tag.get_attribute("title")
-        shown.update(status={"on": True, "why": "", "open": 0, "unsent": 2}, told=False)
+        assert "回 1 / 2 / 改" in tag.get_attribute("title")
+        shown.update(status={"on": True, "why": "", "open": 0, "unsent": 2, "unsure": 1, "older": 3}, told=False)
         page.reload()
         page.get_by_text("有 2 份试了几次都没发到微信，请在这里处理").wait_for()
+        text = line.inner_text()
+        assert "有 1 份发到微信时机器人停了（或者出错），不确定管理员收到没有" in text
+        assert "打开开关以前就在等的 3 份没发到微信，请在这里处理" in text
         assert card.locator(".prm-wechat-tag").count() == 0
-        shown.update(status={"on": True, "why": NO_ADMIN_WHY, "open": 0, "unsent": 0})
+        shown.update(status={"on": True, "why": NO_ADMIN_WHY, "open": 0, "unsent": 0, "unsure": 0, "older": 0})
         page.reload()
         page.get_by_text("没填管理员 wxid（ADMIN_WXID）").wait_for()
         assert "回 1 发出" not in line.inner_text()
