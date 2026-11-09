@@ -145,7 +145,8 @@ def test_the_drafting_note_tells_the_shops_way_to_a_link_and_its_slot(worker):  
     for words in ("dy.channel_goods", "专属达人带货", "9 折取整到元", "每个颜色 100 件", "一个动作一个商品", "title_prefix",
                   "「【小美专属】」", "最多 12 个字符，汉字算 2 个", "stock_per_sku", "先只填这个商品的 dy.designated_commission",
                   "slots 里记「专属链接前缀」", "还没说前缀就记「要」", "记成空字符串", "预览会说这个商品自己的上限",
-                  "不写微信、V 号、电话这些联系方式"):
+                  "不写微信、V 号、电话这些联系方式", "回她消息的草稿不填 dy.channel_goods，除非起草备注里运营让你直接建",
+                  "只写这三种"):
         assert words in note, words
     assert "stock" not in note.replace("stock_per_sku", "")                 # the old parameter is gone
 
@@ -228,6 +229,55 @@ def test_a_reply_without_a_placeholder_stays_when_the_link_is_left_out(worker): 
         raise OSError("connection refused")
     # a bot that cannot be asked right now is not taken for a new one, and the draft says so in its own words
     assert worker.older_bot(SimpleNamespace(bot_features=down), {"action": "dy.channel_goods"}) == worker.UNASKED_BOT_NOTE
+
+
+def test_the_bots_features_are_asked_again_and_the_last_answer_stands_in(worker, bot, monkeypatch):  # noqa: F811
+    """review 2026-11-09 N1: one timeout is no news of the bot.  GET /relay/health is asked ``FEATURES_TRIES`` times,
+    ``FEATURES_PAUSES_SEC`` between, ``FEATURES_TIMEOUT_SEC`` each; when none answers, the last answer stands in for
+    ``FEATURES_KEEP_SEC`` (a prm-only worker's ``bot_kinds`` every round keeps it fresh); older, the error goes up and
+    ``older_bot`` says the bot could not be asked."""
+    client = worker.RelayClient(bot.url, TOKEN)
+    real = client._health_answer
+    calls, pauses = [], []
+
+    def flaky(timeout=15):
+        calls.append(timeout)
+        if len(calls) < worker.FEATURES_TRIES:
+            raise TimeoutError("timed out")
+        return real(timeout=timeout)
+    monkeypatch.setattr(client, "_health_answer", flaky)
+    assert client.bot_features(pause=pauses.append) == [platforms.CHANNEL_FEATURE]
+    assert calls == [worker.FEATURES_TIMEOUT_SEC] * worker.FEATURES_TRIES and pauses == list(worker.FEATURES_PAUSES_SEC)
+
+    def down(timeout=15):
+        raise TimeoutError("timed out")
+    monkeypatch.setattr(client, "_health_answer", down)
+    assert client.bot_features(pause=lambda s: None) == [platforms.CHANNEL_FEATURE]       # the last answer stands in
+    client.features_seen = (time.monotonic() - worker.FEATURES_KEEP_SEC - 1, [platforms.CHANNEL_FEATURE])
+    with pytest.raises(TimeoutError):
+        client.bot_features(pause=lambda s: None)
+    monkeypatch.setattr(worker, "FEATURES_PAUSES_SEC", (0.0, 0.0))
+    assert worker.older_bot(client, {"action": "dy.channel_goods"}) == worker.UNASKED_BOT_NOTE
+    monkeypatch.setattr(client, "_health_answer", real)
+    client.features_seen = None
+    assert client.bot_kinds() == ["admin", "prm"] and client.features_seen[1] == [platforms.CHANNEL_FEATURE]
+
+
+def test_a_reply_whose_link_the_mac_could_not_ask_about_is_no_draft(worker, bot, mac, monkeypatch):  # noqa: F811
+    """End to end: the bot cannot be asked (its health never answers): no CLI runs, the draft goes back saying so
+    (``platform_held``), and the bot keeps her lines for her next draft instead of a draft that says nothing."""
+    action = {"action": "dy.channel_goods", "item_id": DY_ITEM2, "creator_platform_id": DY_UID, "title_prefix": "小美专属"}
+    mac.claude.answers(platform_action=action, reply_draft="您的专属链接：{链接}", intent="要专属链接", reason="kb/合作政策.md")
+
+    def down(self, pause=None):
+        raise OSError("connection refused")
+    monkeypatch.setattr(worker.RelayClient, "bot_features", down)
+    creator_says(bot, "要链接，前缀：小美专属")
+    run_one(worker, bot, mac.settings)
+    assert bot.prm.store.packets() == [] and mac.node.calls() == []
+    [party] = [p for p in bot.prm.store.parties() if p["wxid"] == CREATOR]
+    attention = bot.prm.store.deal_of(party["id"])["attention"]
+    assert "草稿没写成：Mac 问不到 Windows 上的机器人，专属链接没起草（她的消息等下一份草稿一起回）" in attention
 
 
 def test_a_verdict_claude_writes_itself_is_dropped(worker, bot, mac):  # noqa: F811

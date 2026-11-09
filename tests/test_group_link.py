@@ -1456,6 +1456,42 @@ def test_a_handcards_job_of_a_group_that_closes_leaves_no_records_it_was_only_to
     b.relay.stop()
 
 
+@pytest.mark.parametrize("step", [False, True])
+def test_a_draft_the_mac_could_not_ask_the_bot_about_back_after_the_link_ended_is_a_closed_groups(bot, monkeypatch, step):
+    """合并 channel-goods-convention 小修 (2026-11-09): the Mac left a 专属链接 out, not able to ask the bot
+    (``platform_held`` unasked, ``_unasked``), and the job's group closed meanwhile: as any draft back after its link
+    ended (``_group_job_closed``).  Her reply with nothing left: her group line is the group's (``group_left``), never a
+    notice waiting for a draft of that group that will not come; a 专属链接 step: not owed again for later."""
+    linked(bot, member=1)
+    row = bot.prm.store.boss_group(GROUP)
+    deal_id = row["deal_id"]
+    monkeypatch.setattr(bot.prm, "_chain_refresh", lambda deal_id, now: None)
+    if step:
+        _, job_id = bot.relay.submit(GROUP, GROUP, "", kind="prm", fresh=True, meta={
+            "party_id": row["party_id"], "deal_id": deal_id, "name": "小美", "system_note": "建专属链接：测试帽子",
+            "step": {"packet": None, "delivered": False, "item": "3000000000000000001", "action": "dy.channel_goods"},
+            "channel": "group", "group": bot.prm.boss_groups.job_group(GROUP)})
+    else:
+        bot.prm.handle(gmsg(bot, "专属链接能弄吗"))
+        job_id = job_of(bot)["id"]
+    bot.clock.now += SETTLE_SEC + 1
+    assert bot.relay.next_job(0, ("prm",))["id"] == job_id
+    bot.say(f"不接群 {GROUP_NAME}")
+    bot.finish(job_id, draft(message_kind="faq", reply_draft="", slots={}, stage_proposal="", platform_held="unasked",
+                             reason="这台 Mac 连着几次都问不到 Windows 上的机器人…"))
+    notices = {n["key"]: n for n in bot.prm.store.deal(deal_id)["notices"]}
+    owed = [n for n in notices.values() if n.get("step")]
+    assert not owed and not any(n.get("retry_at") for n in notices.values())          # (not asked again later)
+    assert bot.prm.store.packet_for_job(job_id) is None
+    if step:
+        assert notices[f"failed:{job_id}"]["text"].startswith(f"#{job_id} 建专属链接这一步的草稿写好时{GROUP_CLOSED_HEAD}")
+    else:
+        assert f"failed:{job_id}" not in notices and notices[f"group_left:{GROUP}"]["count"] == 1
+        bot.clock.now += 5
+        bot.prm.handle(bot.msg("私聊：在吗"))
+        assert "专属链接能弄吗" not in job_of(bot, CREATOR)["text"]
+
+
 def test_a_line_missed_by_a_group_job_back_after_the_link_ended_is_told_to_her_next_draft(bot):
     """Her line read too late (``missed``) went with a group job that came back closed: it reached no draft, its notice
     stayed for ever.  Now her next draft is told it, and its notice goes once that draft is written."""

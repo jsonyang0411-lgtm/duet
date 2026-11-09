@@ -2000,3 +2000,46 @@ def test_a_creator_without_a_boss_group_has_her_catch_up_as_before(bot):
     assert not bot.prm.boss_groups.masks(party)
     bot.prm.take_new_friend(MEMBER, [bot.msg("我是老板测试介绍的", chat=MEMBER, ts=bot.clock.now - 60)])
     assert job_of(bot, MEMBER)["text"].endswith("我是老板测试介绍的")
+
+
+# ── 专属链接 for a creator who is only in the boss's group (review 2026-11-09 N2) ──────────
+
+def test_a_link_step_in_the_group_counts_as_under_way(bot, clock):
+    """The verifier's probe G1: her steps go to the group (no private chat), so the busy check looks there too: while
+    the first link step drafts, no second one is asked (before, it looked only at her wxid, and the second put the first
+    out of date); the deal says the second waits."""
+    from test_prm_platform_flow import CHANNEL, block
+    from platform_fakes import DY_ITEM, DY_ITEM2, DY_UID
+    from src.prm import platforms
+    from src.prm.service import LINK_SLOT, LINKS_NOTICE
+    assert boss_makes(bot) == 1
+    no_opening(bot)
+    [party] = bot.prm.store.parties()
+    deal = bot.prm.store.deal_of(party["id"])
+    for item in (DY_ITEM, DY_ITEM2):                   # her two 专属佣金, verified (no sample order of ours)
+        action = platforms.check_action({"action": "dy.designated_commission", "item_id": item,
+                                         "creator_platform_id": DY_UID, "commission_rate": 25})
+        bot.prm.store.add_packet(
+            deal_id=deal["id"], party_id=party["id"], job_id=None, chat_id=GROUP, kind="money", text="", attachments=[],
+            intent="", slots={}, stage_proposal="", needs_attention=False, reason="", status="sent", route="review",
+            decided_at=clock.now, meta={}, tool="dy.designated_commission",
+            platform={"action": action, "preview": {"verdict": "ready"},
+                      "execution": {"outcome": "VERIFIED_SUCCESS", "created": {}, "steps": []}}, now=clock.now)
+        clock.now += 1
+    bot.prm.store.update_deal(deal["id"], clock.now, merge_slots={LINK_SLOT: "【小美专属】"})
+    assert bot.prm._links_without_chain(bot.prm.store.deal(deal["id"]), clock.now)
+    first = bot.relay.store.latest_open(GROUP, drafts_only=True, system=True)
+    assert first is not None and json.loads(first["meta"])["step"]["item"] == DY_ITEM
+    assert bot.prm._links_busy(bot.prm.store.deal(deal["id"])) == "drafting"
+    assert not bot.prm._links_without_chain(bot.prm.store.deal(deal["id"]), clock.now)
+    steps = [j for j in bot.relay.store.list_jobs(50) if j["status"] in ("pending", "running")
+             and json.loads(j["meta"] or "{}").get("system_note")]
+    assert [j["id"] for j in steps] == [first["id"]]
+    waits = next(n["text"] for n in bot.prm.store.deal(deal["id"])["notices"] if n["key"] == LINKS_NOTICE)
+    assert waits == f"专属链接（她要：【小美专属】）：商品 {DY_ITEM2} 的还没建，手头这一步办完系统就接着派，一次一个商品"
+    clock.now += SETTLE_SEC + 1
+    taken = bot.relay.next_job(0, ("prm",))
+    assert taken["id"] == first["id"]
+    bot.finish(taken["id"], draft(message_kind="money", reply_draft="链接：{链接}", slots={},
+                                  platform=block({**CHANNEL, "item_id": DY_ITEM})))
+    assert bot.prm.store.packet_for_job(first["id"])["status"] == "pending"      # not put out of date

@@ -129,7 +129,7 @@ from .boss_groups import (BOSS as BOSS_WHO, CHANNEL as GROUP_CHANNEL, EVENT as B
                           OPENING_HOW as BOSS_OPENING, RECORD_LINE_CHARS, US as GROUP_US, BossGroups, told_lines)
 from .friend_adds import OPEN as FRIEND_ADD_OPEN, STATES as FRIEND_ADD_STATES, FriendAdds, friend_adds_out
 from .group_link import GroupLinks
-from .result import MAX_DRAFT_CHARS, MESSAGE_KINDS, DraftError, parse_draft
+from .result import MAX_DRAFT_CHARS, MESSAGE_KINDS, PLATFORM_UNASKED, DraftError, parse_draft
 from .three_party import EVENT as GROUP_EVENT, TAKEN_BY as GROUP_TAKEN_BY, ThreeParty, state_out as group_state_out
 from .store import (
     APPROVED, BUYIN_TOOL, COPILOT, DRAFT_NOTES, DROPPED, EXECUTING, FAILED, HUMAN, LANE_BUYIN, LANE_REPLY, LANE_SYSTEM,
@@ -787,6 +787,7 @@ EVENT_NAMES = {
     "platform_execute": "批准执行平台动作", "platform_result": "平台动作结果",
     "platform_preview": "重新预览平台动作", "platform_ack": "平台动作已处理",
     "recall": "撤回了一条消息", "draft_failed": "草稿没写成", "next_step": "派开专属佣金的任务",
+    "step_unasked": "Mac 问不到机器人，那一步过一会儿再派",
     "platform_recheck": "平台动作要先核对", "sample_status": "聚水潭寄样单状态",
     "commission_covered": "邀约卡开过专属佣金，当作开好",
     "night_send": "夜间自动发出", "night_done": "夜间自动回的过渡话已处理",
@@ -916,6 +917,9 @@ def event_out(ev: dict) -> dict:
         name = f"#{detail['job']} 草稿没写成"
     elif ev["kind"] == "next_step" and detail.get("job"):
         name = (f"派{'建专属链接' if detail.get('action') == LINK_ACTION else '开专属佣金'}的任务 #{detail['job']}"
+                + (f"（商品 {detail['item']}）" if detail.get("item") else ""))
+    elif ev["kind"] == "step_unasked" and detail.get("job"):
+        name = (f"#{detail['job']} 那一步没起草成：Mac 问不到 Windows 上的机器人（第 {detail.get('tries') or 1} 次）"
                 + (f"（商品 {detail['item']}）" if detail.get("item") else ""))
     elif ev["kind"] == "platform_recheck" and detail.get("packet"):
         name = f"#{detail['packet']} 的结果不确定，#{detail.get('for')} 要再开同一个商品：先核对平台"
@@ -3344,6 +3348,14 @@ class PrmService:
             logger.warning("PRM: job #%d answer unusable: %s", job["id"], e)
             return True
         draft = self._mask_draft(party_id, draft, now)
+        if draft.platform_held == PLATFORM_UNASKED and closed and (meta.get("system_note") or not draft.reply_draft):
+            # (its group closed meanwhile: as any draft back after its link ended, ``_closed_result``; her lines stay
+            # that group's, a step is not owed again: 合并 channel-goods-convention 2026-11-09)
+            what = f"{step_word(meta)}这一步的草稿" if meta.get("system_note") else "的草稿"
+            self._group_job_closed(job, meta, f"#{job['id']} {what}写好时{GROUP_CLOSED_HEAD}，没发", now)
+            return True
+        if draft.platform_held == PLATFORM_UNASKED and self._unasked(job, meta, deal, draft, notes, now):
+            return True
         # A 专属佣金 the invite card (邀约卡 with a 专属佣金) opened already, as the Mac's preview found it in the invite
         # ledger (``covered``): a step of the chain is dropped and counts as open (the chain goes on); a reply keeps its
         # words for a person, without the action.
@@ -3603,8 +3615,9 @@ class PrmService:
             attention.append(f"平台动作预览没通过：{why}"[:200])
         # 专属链接: this draft says the deal asks for links now (the creator or the boss asked for them): a chain that is
         # done, or between two steps, goes on with the links (``_chain``); one under way picks them up as it goes on
-        wish_before, wish = link_wish(deal.get("slots")), link_wish({**(deal.get("slots") or {}), **draft.slots})
-        self._store.update_deal(deal_id, now, merge_slots=draft.slots, stage_proposal=draft.stage_proposal)
+        slots = self._link_slots(deal, draft.slots, now)
+        wish_before, wish = link_wish(deal.get("slots")), link_wish({**(deal.get("slots") or {}), **slots})
+        self._store.update_deal(deal_id, now, merge_slots=slots, stage_proposal=draft.stage_proposal)
         self._store.set_notice(deal_id, DRAFT_NOTES + lane, "；".join(attention), now)   # its own notes: replaced
         if lane == LANE_SYSTEM and state == NO_REPLY:
             self._chain_go(deal, now)                  # the step drafted nothing: the chain goes on
@@ -4543,7 +4556,9 @@ class PrmService:
             return None
         since = float(chain["since"])
         packets = self._store.deal_packets(deal["id"], tools=(name,))
-        asks = self._store.events(deal["id"], limit=None, kinds=("next_step",), since=since)
+        # (a step whose draft the Mac could not make, not able to ask this bot what it knows, was not asked: it is owed
+        # and asked again, ``_unasked``; review 2026-11-09 N1)
+        asks = self._step_asks(deal["id"], since)
         asked = {str(ev["detail"].get("item")) for ev in asks if ev["detail"].get("item")
                  and ev["detail"].get("action", name) in ("", name)}
         # 专属链接 (a 抖店 order, the deal asking for links): each product's link, after its 专属佣金
@@ -4573,7 +4588,7 @@ class PrmService:
                 entry.update(link=link, link_packet=link_packet)
             items.append(entry)
         party = self._store.party(deal["party_id"]) or {}
-        job = self._relay.store.latest_open(party["wxid"], drafts_only=True, system=True) if party.get("wxid") else None
+        job = self._step_job(party)
         drafting = None
         if job is not None:
             ask = next((ev["detail"] for ev in asks if ev["detail"].get("job") == job["id"]), {})
@@ -4704,6 +4719,58 @@ class PrmService:
                f"合作单刚记下她要专属链接（{links.get('said', '')}）。")
         self._chain_go(deal, now, why=why)
 
+    def _link_slots(self, deal: dict, slots: dict, now: float) -> dict:
+        """A draft's slots as they go into the deal: a 「专属链接前缀」 (``LINK_SLOT``) that says neither yes nor no
+        (``link_reading``: 「好的」「可以」「是」「要不要都行」…) is left out, the deal keeps what it had and says so
+        (``LINKS_UNCLEAR_NOTICE``: review 2026-11-09 N3, before such a value quietly stopped the links); a clear one
+        puts that notice away."""
+        if LINK_SLOT not in (slots or {}):
+            return slots
+        said = " ".join(str(slots.get(LINK_SLOT) or "").split())
+        if link_reading(said) != "unclear":
+            self._store.set_notice(deal["id"], LINKS_UNCLEAR_NOTICE, "", now)
+            return slots
+        before = " ".join(str((deal.get("slots") or {}).get(LINK_SLOT) or "").split())
+        self._store.set_notice(deal["id"], LINKS_UNCLEAR_NOTICE,
+                               f"专属链接那一栏写的「{said[:40]}」看不出要不要，先按原来的办"
+                               + (f"（原来写的是「{before[:40]}」）" if before else "（原来没说要链接）"), now)
+        logger.info("PRM: deal %d: a draft's 专属链接 slot said neither yes nor no; the deal keeps its own", deal["id"])
+        return {k: v for k, v in slots.items() if k != LINK_SLOT}
+
+    def _unasked(self, job: dict, meta: dict, deal: dict, draft, notes: list, now: float) -> bool:
+        """The Mac left a 专属链接 out of this draft, not able to ask this bot what it knows (``PLATFORM_UNASKED``:
+        GET /relay/health did not answer, asked again and again; review 2026-11-09 N1).  A step (the system lane) is not
+        counted as drafted: it is owed again and asked a little later (``STEP_RETRY_SEC``), ``STEP_UNASKED_TRIES``
+        times at most, then it waits for a person like a step that was not written (``_draft_failed``).  Her reply with
+        nothing left of it: her lines wait for her next draft, as when a draft was not written.  True when it was dealt
+        with here (no packet is made); False: a reply that still says something goes on as a draft (flagged)."""
+        step = meta.get("step") if isinstance(meta.get("step"), dict) else {}
+        if not meta.get("system_note"):
+            if draft.reply_draft:
+                return False
+            self._draft_failed(job, meta, f"#{job['id']} 草稿没写成：Mac 问不到 Windows 上的机器人，专属链接没起草"
+                                          "（她的消息等下一份草稿一起回）", notes, now)
+            return True
+        if any(int(ev["detail"].get("job") or 0) == int(job["id"])
+               for ev in self._store.events(deal["id"], limit=50, kinds=("step_unasked",))):
+            return True                                # (the same answer delivered twice)
+        tries = int(step.get("tries") or 0) + 1
+        self._store.add_event(deal["id"], int(meta["party_id"]), "step_unasked",
+                              {"job": job["id"], "item": str(step.get("item") or ""), "tries": tries}, actor="mac", now=now)
+        if tries > STEP_UNASKED_TRIES:
+            self._draft_failed(job, meta, f"#{job['id']} 草稿没写成：Mac 连着 {STEP_UNASKED_TRIES} 次问不到 Windows 上的机器人",
+                               notes, now)
+        else:
+            self._owe_step(deal, f"#{job['id']} {step_word(meta)}这一步没起草成", str(meta["system_note"]),
+                           step.get("packet"), bool(step.get("delivered")), now, item=str(step.get("item") or ""),
+                           action=str(step.get("action") or ""), prefix=str(step.get("prefix") or ""),
+                           uid=str(step.get("uid") or ""), retry_at=now + STEP_RETRY_SEC, tries=tries,
+                           why=f"Mac 问不到 Windows 上的机器人（网络不通？），{STEP_RETRY_SEC // 60} 分钟后系统再派一次")
+        logger.warning("PRM: job #%d: the Mac could not ask the bot what it knows; the step is %s", job["id"],
+                       "given up on" if tries > STEP_UNASKED_TRIES else "asked again later")
+        self._chain_refresh(deal["id"], now)
+        return True
+
     def _links_after_slots(self, deal: dict, before: Optional[dict], wish: Optional[dict], now: float) -> None:
         """A draft's slots were merged into the deal (a WeChat draft, or a 百应 one: review 2026-11-09 F2): links asked for
         for the first time, or with another prefix, go on (``_links_wished``); no longer asked for, the deal's
@@ -4757,8 +4824,7 @@ class PrmService:
         prefix = links.get("prefix", "")
         made = [(*action_target((p["platform"] or {}).get("action") or {}, p["platform"]), p)
                 for p in self._store.deal_packets(deal["id"], tools=(LINK_ACTION,)) if p["status"] != SUPERSEDED]
-        asks = [ev["detail"] for ev in self._store.events(deal["id"], limit=None, kinds=("next_step",))
-                if ev["detail"].get("action") == LINK_ACTION]
+        asks = [ev["detail"] for ev in self._step_asks(deal["id"]) if ev["detail"].get("action") == LINK_ACTION]
         left, seen = [], set()
         for commission in reversed(self._store.deal_packets(deal["id"], tools=(COMMISSION_ACTIONS["dy"],))):
             if not (_verified(commission) or _covered(commission) is not None):
@@ -4779,18 +4845,48 @@ class PrmService:
             left.append((commission, item, action))
         return left
 
+    def _step_asks(self, deal_id: int, since: Optional[float] = None) -> list:
+        """The deal's ``next_step`` events (since ``since``) but those whose job's draft the Mac could not make, not
+        able to ask this bot what it knows (``step_unasked``: the step is owed and asked again; review 2026-11-09 N1)."""
+        unasked = {int(ev["detail"].get("job") or 0)
+                   for ev in self._store.events(deal_id, limit=None, kinds=("step_unasked",), since=since)}
+        return [ev for ev in self._store.events(deal_id, limit=None, kinds=("next_step",), since=since)
+                if int(ev["detail"].get("job") or 0) not in unasked]
+
     def _links_busy(self, deal: dict) -> str:
         """Why no step of a deal without a chain can be asked for now ("" = it can): its system job is queued or
         running (``drafting``), a step is owed (``owed``), a step's draft waits in 待审批 (``draft``)."""
         party = self._store.party(deal["party_id"]) or {}
-        if party.get("wxid") and self._relay.store.latest_open(party["wxid"], drafts_only=True, system=True):
-            return "drafting"
         if any(n["key"] == "step" for n in deal.get("notices") or []):
-            return "owed"
+            return "owed" if not self._step_job(party) else "drafting"
+        return self._step_under_way(deal, party)
+
+    def _step_under_way(self, deal: dict, party: dict) -> str:
+        """A step of the deal under way: its system job queued or running (``drafting``), or its draft waiting in 待审批
+        (``draft``); "" when neither.  Another step asked now would put that one out of date (the system lane keeps one
+        draft): it waits (``sweep_owed_steps``, ``_after_platform``; review 2026-11-09 N2)."""
+        if self._step_job(party):
+            return "drafting"
         if any((p.get("meta") or {}).get("lane") == LANE_SYSTEM
                for p in self._store.deal_packets(deal["id"], statuses=(PENDING,))):
             return "draft"
         return ""
+
+    def _step_job(self, party: dict) -> Optional[dict]:
+        """Her open system-lane job (a step being drafted): in her private chat, or in the group her steps go to
+        (``_reach``: a creator who is only in a 老板拉的群; review 2026-11-09 N2: only her wxid was looked at)."""
+        if not party:
+            return None
+        chats = [party.get("wxid")]
+        try:
+            chats.append(self._reach(party)[0])
+        except Exception:                              # (looking for a job never stops the chain)
+            logger.exception("PRM: where party %s's steps go could not be told", party.get("id"))
+        for chat in dict.fromkeys(c for c in chats if c):
+            job = self._relay.store.latest_open(chat, drafts_only=True, system=True)
+            if job is not None:
+                return job
+        return None
 
     def _after_platform(self, packet_id: int, record: dict, now: float, late: bool = False) -> None:
         """What a platform action's result means for the 专属佣金 chain: a sample order verified with
@@ -4817,13 +4913,28 @@ class PrmService:
                     return
                 if not late and packet["status"] == APPROVED:
                     # no chain (no verified sample order): the next step as before, the Mac picks it from the case
-                    # file; a 专属佣金 of a deal asking for links is followed by that product's link
+                    # file; a 专属佣金 of a deal asking for links is followed by that product's link.  Another step of
+                    # hers under way (drafted, in 待审批) is not put out of date: this one is owed until it is done; one
+                    # owed already keeps its place (her links left are asked for later: ``_links_without_chain``;
+                    # review 2026-11-09 N2)
                     item = str(action.get("item_id") or "")
                     linked = bool(links) and name != LINK_ACTION and self._link_made(deal["id"], item)
                     link = bool(links) and name != LINK_ACTION and not linked
-                    self._ask_next_step(packet, next_step_note(action, record, links=links, linked=linked), now,
-                                        item=item if link else "", action=LINK_ACTION if link else "",
-                                        prefix=links.get("prefix", "") if link else "")
+                    note = next_step_note(action, record, links=links, linked=linked)
+                    party = self._store.party(deal["party_id"]) or {}
+                    under_way = self._step_under_way(deal, party)
+                    kw = dict(item=item if link else "", action=LINK_ACTION if link else "",
+                              prefix=links.get("prefix", "") if link else "")
+                    if any(n["key"] == "step" for n in deal.get("notices") or []):
+                        logger.info("PRM: deal %d: the step after packet %d is not asked for (another is owed)",
+                                    deal["id"], packet["id"])
+                    elif under_way and note:
+                        self._owe_step(deal, f"#{packet['id']} 之后该{'建专属链接' if link else '开专属佣金'}了", note,
+                                       packet["id"], False, now,
+                                       why={"drafting": "手头还有一步在起草，那一步交回来系统就派",
+                                            "draft": "手头还有一步的草稿在待审批，处理掉系统就派"}[under_way], **kw)
+                    else:
+                        self._ask_next_step(packet, note, now, **kw)
                 if links:
                     self._links_without_chain(deal, now)   # (what is left, and the deal's notice of it)
         except Exception:
@@ -5400,24 +5511,28 @@ class PrmService:
         return ""
 
     def _owe_step(self, deal: dict, head: str, note: str, packet_id, delivered: bool, now: float,
-                  item: str = "", action: str = "", prefix: str = "", uid: str = "") -> None:
-        """The deal's ``step`` notice: «``head``：why it waits», and what ``sweep_owed_steps`` needs to ask
-        for it (the ``system_note``, the packet it follows, whether it waits for the signature, the product, and
-        whether it is a 专属链接 step: ``action``)."""
+                  item: str = "", action: str = "", prefix: str = "", uid: str = "", why: str = "",
+                  retry_at: float = 0.0, tries: int = 0) -> None:
+        """The deal's ``step`` notice: «``head``：why it waits» (``why``, else ``_step_blocked``'s), and what
+        ``sweep_owed_steps`` needs to ask for it (the ``system_note``, the packet it follows, whether it waits for the
+        signature, the product, whether it is a 专属链接 step: ``action``; not before ``retry_at``, and how many times
+        the Mac could not draft it already: ``tries``, review 2026-11-09 N1)."""
         party = self._store.party(deal["party_id"]) or {}
-        why = self._step_blocked(deal, party, now) or "系统一会儿就起草"
+        why = why or self._step_blocked(deal, party, now) or "系统一会儿就起草"
         self._store.set_notice(deal["id"], "step", f"{head}：{why}", now, head=head, note=note, packet=packet_id,
                                delivered=bool(delivered), item=str(item or ""), action=str(action or ""),
-                               prefix=str(prefix or ""), uid=str(uid or ""))
+                               prefix=str(prefix or ""), uid=str(uid or ""), retry_at=float(retry_at or 0),
+                               tries=int(tries or 0))
 
     def _dispatch_step(self, deal: dict, party: dict, note: str, packet_id, delivered: bool, now: float,
-                       item: str = "", action: str = "", prefix: str = "", uid: str = "") -> int:
+                       item: str = "", action: str = "", prefix: str = "", uid: str = "", tries: int = 0) -> int:
         """The draft job of a 专属佣金 (or 专属链接: ``action``) step (``meta.system_note``; ``meta.step`` says which
         packet it follows, whether it waited for the signature, the product it asks for and, for a link, its action,
         should it be owed again); returns its id."""
         link = {"action": action, "prefix": str(prefix or ""), **({"uid": str(uid)} if uid else {})} if action else {}
         meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"], "system_note": note,
-                "step": {"packet": packet_id, "delivered": bool(delivered), "item": str(item or ""), **link}}
+                "step": {"packet": packet_id, "delivered": bool(delivered), "item": str(item or ""), **link,
+                         **({"tries": int(tries)} if tries else {})}}
         creator = self._creator_ids(deal["id"])
         if creator:
             meta["creator"] = creator
@@ -5456,7 +5571,14 @@ class PrmService:
             if party is None or (owed.get("delivered") and not deal.get("delivered_at")):
                 self._store.drop_notices(deal["id"], lambda n: n["key"] == "step", now)
                 continue
+            if float(owed.get("retry_at") or 0) > now:
+                continue                               # (asked again a little later: the Mac could not draft it)
             why = self._step_blocked(deal, party, now)
+            if not why:
+                # another step of hers under way (being drafted, its draft in 待审批): asked now it would put that one
+                # out of date (review 2026-11-09 N2)
+                why = {"drafting": "手头还有一步在起草，那一步交回来系统就派",
+                       "draft": "手头还有一步的草稿在待审批，处理掉系统就派"}.get(self._step_under_way(deal, party), "")
             if why:
                 if owed.get("head") and owed["text"] != f"{owed['head']}：{why}":
                     self._store.set_notice(deal["id"], "step", f"{owed['head']}：{why}", now)
@@ -5472,7 +5594,7 @@ class PrmService:
                         self._dispatch_step(deal, party, str(owed.get("note") or ""), owed.get("packet"),
                                             bool(owed.get("delivered")), now, item=str(owed.get("item") or ""),
                                             action=str(owed.get("action") or ""), prefix=str(owed.get("prefix") or ""),
-                                            uid=str(owed.get("uid") or ""))
+                                            uid=str(owed.get("uid") or ""), tries=int(owed.get("tries") or 0))
                         asked += 1
             self._chain_refresh(deal["id"], now)
         return asked
@@ -6823,8 +6945,9 @@ class PrmService:
         elif state == NO_REPLY:
             self._buyin_answered(self._store.packet(packet_id) or {}, now)     # nothing to say to those lines
         # (she may ask for 专属链接 in 百应 too: the deal goes on with them as after a WeChat draft, review 2026-11-09 F2)
-        wish_before, wish = link_wish(deal.get("slots")), link_wish({**(deal.get("slots") or {}), **draft.slots})
-        self._store.update_deal(deal_id, now, merge_slots=draft.slots, stage_proposal=draft.stage_proposal)
+        slots = self._link_slots(deal, draft.slots, now)
+        wish_before, wish = link_wish(deal.get("slots")), link_wish({**(deal.get("slots") or {}), **slots})
+        self._store.update_deal(deal_id, now, merge_slots=slots, stage_proposal=draft.stage_proposal)
         self._links_after_slots(deal, wish_before, wish, now)
         self._store.drop_notices(deal_id, lambda n: n["key"] == key, now)
         self._store.set_notice(deal_id, DRAFT_NOTES + LANE_BUYIN, "；".join(
@@ -7431,19 +7554,30 @@ COMMISSION_ACTIONS = {"dy": "dy.designated_commission", "xhs": "xhs.direct_plan"
 # 专属链接 (2026-11-09): a 抖店 product's link (platforms.py: the shop's way) is the step after its 专属佣金 (binding her
 # needs her in its strategy), when the deal asks for links.  Whether it does is the drafting Claude's call (the creator
 # or the boss asked for 「链接」「专属链接」「前缀」): its draft says so in the deal's slot LINK_SLOT, the prefix (or 「要」
-# while she has not said one); anything else is not wanted (``link_wish``).
+# while she has not said one), or an empty string when she does not want them (``link_reading``, ``link_wish``).
 LINK_ACTION = "dy.channel_goods"
 LINK_SLOT = "专属链接前缀"
-# A slot says yes with a 要 that is not denied (review 2026-11-09 F6: 「没问题，要」「无所谓，要」「要（前缀不用写）」 were
-# read as no, 「算了」「以后再说」「No」 as yes): none of 不 别 没 无 甭 勿 莫 right before it or one before that (「不要」
-# 「不需要」「不想要」 deny, 「需要」 does not), and not 「主要」「重要」「只要」「要求」「要是」; or with a prefix (``_slot_prefix``)
-# whose words around it do not say one of LINK_NO_WORDS (「【小美专属】不要了」).  Nothing else says yes.
+# How a slot is read (``link_reading``; review 2026-11-09 F6, N3).  Not understood (``unclear``) first: one of
+# LINK_DOUBT_WORDS (「要不要都行」「要是需要再说」「不是很想要」).  Yes: a 要 that is not denied (``LINK_YES``: none of
+# 不 别 没 无 甭 勿 莫 right before it or one before that: 「不要」「不需要」「不想要」 deny, 「需要」 does not; not 「主要」
+# 「重要」「只要」「要求」「要是」: 「没问题，要」「无所谓，要」「要（前缀不用写）」 say yes), or a prefix (``_slot_prefix``)
+# whose words around it say none of LINK_NO_WORDS (「【小美专属】不要了」 does).  No: empty, one of LINK_NO_ALONE, or
+# one of LINK_NO_WORDS without a yes (「算了」「先不弄了」「以后再说」「No」).  Anything else (「好的」「可以」「是」
+# 「专属链接」) is not understood: the deal keeps what it had (``PrmService._link_slots``).
 LINK_YES = re.compile(r"(?<![不别没无甭勿莫主重只])(?<![不别没无甭勿莫].)要(?![求是])")
-LINK_NO_WORDS = ("不要", "不用", "不需要", "算了", "先不", "以后", "再说", "取消", "暂不", "别")
+LINK_NO_WORDS = ("不要", "不用", "不需要", "不想", "算了", "先不", "以后", "再说", "取消", "暂不", "别")
+LINK_NO_ALONE = ("无", "没有", "否", "不", "不了", "no", "nope")
+LINK_DOUBT_WORDS = ("要不要", "要是", "不是很", "不太", "不一定", "看情况", "再看看", "考虑", "可能", "也许", "待定")
 # Where a slot's prefix may be, when it is in no bracket: its last part (split here) that ends in 专属.
 _SLOT_PARTS = re.compile(r"[\s，,。.;；:：、!！?？]+|前缀(?:是|写成|写|为)?")
 # A deal without a chain whose 专属链接 wait (``PrmService._links_without_chain``): its notice says which and why.
 LINKS_NOTICE = "links"
+# A draft wrote the 「专属链接前缀」 slot in words that say neither yes nor no: the deal kept its own (``_link_slots``).
+LINKS_UNCLEAR_NOTICE = "links_unclear"
+# A step whose 专属链接 the Mac left out, not able to ask this bot what it knows (``PrmService._unasked``): asked again
+# this long after, this many times at most.
+STEP_RETRY_SEC = 300
+STEP_UNASKED_TRIES = 3
 # The platform actions of the chain: what an operator decides on them moves it on (``_chain_decided``).
 CHAIN_TOOLS = (*COMMISSION_ACTIONS.values(), LINK_ACTION)
 # A product's link in the chain (``PrmService._chain``), as the Mac and the deal hear it; ``waits``: its 专属佣金 is not
@@ -7472,20 +7606,18 @@ def _slot_prefix(value: str) -> tuple:
     return "", value
 
 
-def link_wish(slots) -> Optional[dict]:
-    """Does the deal ask for 专属链接 (its slot ``LINK_SLOT``, the drafting Claude's word; format characters and runs of
-    spaces aside)?  None: not (no slot, empty, no yes: ``LINK_YES``).  Else ``{"prefix", "said"}`` (and ``long``):
-    ``prefix`` the shop's 「【某某专属】」 when the slot names one (``_slot_prefix``, 专属 in it,
-    ``platforms.title_prefix_of``) that fits the usual limit (``platforms.TITLE_PREFIX_MAX``), else "" (she asked for
-    links: her prefix is the case file's, or still to be asked); ``long``: hers when it is above that limit (review
-    2026-11-09 F1: never dictated, the step is told to cut it short or ask her); ``said``: the slot, cut short."""
-    value = " ".join("".join(ch for ch in str((slots or {}).get(LINK_SLOT) or "")
-                             if unicodedata.category(ch) != "Cf").split())
+def _link_read(value) -> tuple:
+    """``(reading, wish)`` of a 「专属链接前缀」 value (format characters and runs of spaces aside): ``reading`` is
+    "yes", "no" or "unclear" (see ``LINK_YES``), ``wish`` the ``link_wish`` of a yes (else None)."""
+    value = " ".join("".join(ch for ch in str(value or "") if unicodedata.category(ch) != "Cf").split())
     if not value:
-        return None
+        return "no", None
     part, rest = _slot_prefix(value)
+    if any(word in rest for word in LINK_DOUBT_WORDS):
+        return "unclear", None
     if not (LINK_YES.search(rest) or (part and not any(word in rest for word in LINK_NO_WORDS))):
-        return None
+        said_no = rest.strip().lower() in LINK_NO_ALONE or any(word in rest for word in LINK_NO_WORDS)
+        return ("no" if said_no else "unclear"), None
     out = {"prefix": "", "said": value[:40]}
     if "专属" in part:
         try:
@@ -7496,7 +7628,23 @@ def link_wish(slots) -> Optional[dict]:
             out["long"] = prefix
         else:
             out["prefix"] = prefix
-    return out
+    return "yes", out
+
+
+def link_reading(value) -> str:
+    """"yes", "no" or "unclear": what a 「专属链接前缀」 value says (``_link_read``)."""
+    return _link_read(value)[0]
+
+
+def link_wish(slots) -> Optional[dict]:
+    """Does the deal ask for 专属链接 (its slot ``LINK_SLOT``, the drafting Claude's word)?  None: not (no slot, a no,
+    or words that say neither: ``link_reading``; a deal never keeps those, ``PrmService._link_slots``).  Else
+    ``{"prefix", "said"}`` (and ``long``): ``prefix`` the shop's 「【某某专属】」 when the slot names one
+    (``_slot_prefix``, 专属 in it, ``platforms.title_prefix_of``) that fits the usual limit
+    (``platforms.TITLE_PREFIX_MAX``), else "" (she asked for links: her prefix is the case file's, or still to be
+    asked); ``long``: hers when it is above that limit (review 2026-11-09 F1: never dictated, the step is told to cut it
+    short or ask her); ``said``: the slot, cut short."""
+    return _link_read((slots or {}).get(LINK_SLOT))[1]
 
 
 def link_prefix_hint(links: dict) -> str:
@@ -7556,7 +7704,8 @@ def link_again(packet: dict, prefix: str) -> bool:
 def wrong_uid_text(uid: str, known: str) -> str:
     """A 专属链接 step of the chain that would bind another UID than its round's sample order's (``known``): refused at
     approval (review 2026-11-09 F4)."""
-    return f"链接要绑的 UID 不是这一轮寄样单上的（寄样单上的 UID：{known}；草稿写的是 {uid}）：改对了再起草"
+    return (f"链接要绑的 UID 不是这一轮寄样单上的（寄样单上的 UID：{known}；草稿写的是 {uid}）：这一份点「不发」；"
+            "要给另一个号建，等她在对话里要，或者在抖店手建")
 
 
 def uid_doubt_text(uid: str, known: list, orders: int) -> str:

@@ -20,7 +20,9 @@ back ``handcards_made``, its verdict (the cards are among the files that came ba
 hands back ``platform``, its verdict, in its place; a draft that names an action the Mac
 did not preview carries the verdict ``unavailable`` and cannot be executed.  A preview whose
 action the bot's own check refuses (``platforms.ActionRefused``: a Mac whose limits are wider
-than ``FORM_LIMITS``, say) loses the action, not the draft: ``platform_refused`` says why.
+than ``FORM_LIMITS``, say) loses the action, not the draft: ``platform_refused`` says why.  A worker that could not
+ask this bot what it knows (GET /relay/health, review 2026-11-09 N1) leaves a 专属链接 out and says so:
+``platform_held`` is ``PLATFORM_UNASKED`` (anything else there is ignored).
 
 This side is where it is trusted or not: ``parse_draft`` validates instead of
 repairing; anything it cannot use raises ``DraftError`` and nothing is drafted.
@@ -45,6 +47,8 @@ MESSAGE_KINDS = {
 MAX_DRAFT_CHARS = 1500
 MAX_SLOTS = 30
 MAX_ATTACHMENTS = 9
+# The worker could not ask the bot whether it knows 专属链接 the shop's way: the action was left out (``platform_held``).
+PLATFORM_UNASKED = "unasked"
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
 
 # The schema the worker hands to ``claude --json-schema`` (the same rules as below).
@@ -96,6 +100,8 @@ class Draft:
     platform_refused: str = ""
     # The Mac's 直播手卡 for this draft (handcards.check_made: the cards among its files, or why none), or None.
     handcards: Optional[dict] = None
+    # ``PLATFORM_UNASKED``: the Mac left a 专属链接 out, not able to ask this bot what it knows ("" = it did not)
+    platform_held: str = ""
 
 
 def _text(value, limit: int) -> str:
@@ -183,4 +189,5 @@ def parse_draft(raw: str) -> Draft:
         attachments_missing=_missing_files(missing),
         platform_refused=refused,
         handcards=cards,
+        platform_held=PLATFORM_UNASKED if data.get("platform_held") == PLATFORM_UNASKED else "",
     )
