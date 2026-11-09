@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -17,8 +18,9 @@ from src.prm.platforms import ActionError
 
 from platform_fakes import (
     DRY_STDERR, DY_CHANNEL, DY_ITEM, DY_ITEM2, DY_ITEM3, DY_LINK, DY_SKU, DY_SKU2, DY_SKU2B, DY_SKU3, DY_UID, JST_ORDER, JST_SHOP_DY, JST_SHOP_XHS, JST_UID,
-    TB_CAMPAIGN, TB_CROWD, TB_ITEM, TB_PRECHECK, XHS_BUYER, XHS_ITEM, XHS_SKU, FakeNode, catalog, dy_bind_done,
-    dy_bind_preview, dy_create_done, dy_create_preview, dy_designated_done, dy_designated_preview, dy_promotion,
+    TB_CAMPAIGN, TB_CROWD, TB_ITEM, TB_PRECHECK, XHS_BUYER, XHS_ITEM, XHS_SKU, FakeNode, catalog, dy_agreed_preview,
+    dy_bind_done, dy_bind_preview, dy_bound_list, dy_create_done, dy_designated_done, dy_designated_preview, dy_promotion,
+    dy_read_preview,
     jst_blocked, jst_done, jst_preview, jst_sample_row, jst_samples, rule, tb_done, tb_row, xhs_buyers,
     xhs_channel_done, xhs_channel_preview, xhs_plan,
 )
@@ -28,7 +30,11 @@ KEY = "a" * 32
 
 DESIGNATED = {"action": "dy.designated_commission", "item_id": DY_ITEM, "creator_platform_id": DY_UID,
               "commission_rate": 20, "note": "kb/合作政策.md：腰部达人 20%"}
-CHANNEL = {"action": "dy.channel_goods", "item_id": DY_ITEM, "creator_platform_id": DY_UID, "price": "15"}
+CHANNEL = {"action": "dy.channel_goods", "item_id": DY_ITEM, "creator_platform_id": DY_UID, "title_prefix": "小美专属"}
+# What the preview of CHANNEL reads and agrees (19.99 → 17: 9 折 floored to the yuan; 40 can be spared, so 40)
+CHANNEL_READ = dy_read_preview([(DY_SKU, "红色/M", "19.99", 40)])
+CHANNEL_AGREED = dy_agreed_preview([(DY_SKU, "红色/M", "19.99", "17.00", 40, 40)])
+CHANNEL_RUN = {"steps": ["create", "bind"], "skus": [{"id": DY_SKU, "price": "17.00", "stock": 40, "main_price": "19.99"}]}
 PLAN = {"action": "xhs.direct_plan", "item_id": XHS_ITEM, "creator_platform_id": "小美的小红书号", "commission_rate": 20}
 XCHANNEL = {"action": "xhs.channel_item", "item_id": XHS_ITEM, "sku_prices": [{"sku_id": XHS_SKU, "price": "79"}]}
 CAMPAIGN = {"action": "tb.campaign", "item_id": TB_ITEM, "crowd_ids": [TB_CROWD], "bid_target": "display_pay",
@@ -63,7 +69,13 @@ def test_each_action_is_normalised_and_typed():
     assert platforms.check_action({**PLAN, "commission_rate": 12.5})["commission_rate"] == "12.5"
     assert platforms.check_action({**PLAN, "commission_rate": "20.0"})["commission_rate"] == "20"
     assert platforms.check_action(CHANNEL) == {"action": "dy.channel_goods", "item_id": DY_ITEM,
-                                               "creator_platform_id": DY_UID, "exclusive": False, "price": "15.00"}
+                                               "creator_platform_id": DY_UID, "title_prefix": "【小美专属】",
+                                               "exclusive": True, "convention": 1}
+    assert platforms.check_action({**CHANNEL, "exclusive": False, "title_prefix": "", "price": "15",
+                                   "stock_per_sku": 50}) == {
+        "action": "dy.channel_goods", "item_id": DY_ITEM, "creator_platform_id": DY_UID, "exclusive": False,
+        "price": "15.00", "stock_per_sku": 50, "convention": 1}
+    assert platforms.check_action(platforms.check_action(CHANNEL)) == platforms.check_action(CHANNEL)   # (round trip)
     assert platforms.check_action(XCHANNEL)["sku_prices"] == [{"sku_id": XHS_SKU, "price": "79.00"}]
     assert platforms.check_action(CAMPAIGN)["crowd_ids"] == [TB_CROWD]
 
@@ -92,8 +104,17 @@ def test_each_action_is_normalised_and_typed():
     ({**XCHANNEL, "sku_prices": [{"sku_id": XHS_SKU, "price": "9"}, {"sku_id": XHS_SKU, "price": "8"}]}, "bad_prices"),
     ({**XCHANNEL, "title": "-x 防晒霜"}, "bad_title"),
     ({**XCHANNEL, "title": "防晒霜 {链接}"}, "bad_title"),
-    ({**CHANNEL, "exclusive": True}, "bad_stock"),                       # 专属达人带货 cannot share the stock
-    ({**CHANNEL, "stock": -1}, "bad_stock"),
+    ({k: v for k, v in CHANNEL.items() if k != "title_prefix"}, "missing_prefix"),   # 专属: 【某某专属】
+    ({**CHANNEL, "title_prefix": "  "}, "missing_prefix"),
+    ({**CHANNEL, "title_prefix": "这是一个非常非常长的名字的专属"}, "bad_prefix"),   # 32 > TITLE_PREFIX_CAP
+    ({**CHANNEL, "title_prefix": "小美V123专属"}, "bad_prefix"),          # reads like contact details
+    ({**CHANNEL, "convention": 2}, "bad_convention"),
+    ({**CHANNEL, "convention": True}, "bad_convention"),
+    ({**CHANNEL, "exclusive": "yes"}, "bad_exclusive"),
+    ({**CHANNEL, "stock": 100}, "extra_param"),                         # the old parameter: stock_per_sku now
+    ({**CHANNEL, "stock_per_sku": 0}, "bad_stock"),
+    ({**CHANNEL, "stock_per_sku": -1}, "bad_stock"),
+    ({**CHANNEL, "stock_per_sku": True}, "bad_stock"),
     ({**CHANNEL, "sku_ids": [DY_SKU, DY_SKU]}, "bad_sku"),
     ({**CAMPAIGN, "day_budget": 301}, "over_limit"),
     ({**CAMPAIGN, "day_budget": "50"}, "bad_budget"),
@@ -227,19 +248,491 @@ def test_what_stops_a_preview_is_its_verdict(node, cfg, answer, verdict):
     assert block["problems"]
 
 
-def test_channel_goods_preview_shows_prices_and_stops_on_the_price_check(node, cfg):
-    node.rules([rule(["channel-goods-create"], dy_create_preview(), execute=False)])
-    block = platforms.preview(CHANNEL, cfg, catalog=catalog())
-    assert block["verdict"] == "ready" and block["run"] == {"steps": ["create", "bind"]}
-    (argv,) = argvs(node, "channel-goods-create")
-    assert argv[2:] == ["channel-goods-create", f"--product-id={DY_ITEM}", "--sale-channel=kol", "--price=15.00"]
-    facts = " ".join(f["value"] for f in block["steps"][0]["facts"])
-    assert "主品价 19.99 元 → 渠道价 15.00" in facts and "达人带货" in facts
-    node.rules([rule(["channel-goods-create"], dy_create_preview(price_kind="warn"), execute=False)])
-    assert platforms.preview(CHANNEL, cfg, catalog=catalog())["verdict"] == "blocked"
-    node.rules([rule(["channel-goods-create"], dy_create_preview(blockers=["主商品不在售"]), execute=False)])
-    blocked = platforms.preview(CHANNEL, cfg, catalog=catalog())
-    assert blocked["verdict"] == "blocked" and "主商品不在售" in blocked["problems"]
+# ── 专属链接 the shop's way (dy.channel_goods, 2026-11-09) ─────────────────
+# 专属达人带货, 【某某专属】, 9 折 of each SKU's daily price floored to the yuan, 100 a colour capped at what the main
+# product can spare, 长期有效; the preview reads the product, works the agreement out and previews with it.
+
+DY_SKU2C = "3100000000000000206"          # a colour the catalogue does not list yet (added after the last sync)
+HAT = {"action": "dy.channel_goods", "item_id": DY_ITEM2, "creator_platform_id": DY_UID, "title_prefix": "【小美专属】"}
+HAT_READ = dy_read_preview([(DY_SKU2, "均码黑色", "315.00", 500), (DY_SKU2B, "均码咖啡", "290.00", 30),
+                            (DY_SKU2C, "均码米白", "269.00", 0)], item=DY_ITEM2)
+HAT_SKUS = [{"id": DY_SKU2, "price": "283.00", "stock": 100, "main_price": "315.00"},
+            {"id": DY_SKU2B, "price": "261.00", "stock": 30, "main_price": "290.00"},
+            {"id": DY_SKU2C, "price": "242.00", "stock": 0, "main_price": "269.00"}]
+HAT_RUN = {"steps": ["create", "bind"], "skus": HAT_SKUS}
+HAT_AGREEMENT = {"productId": DY_ITEM2, "saleChannel": "kol-exclusive", "titlePrefix": "【小美专属】",
+                 "skus": [{"id": s["id"], "price": s["price"], "stock": s["stock"]} for s in HAT_SKUS]}
+
+
+def hat_agreed(main=("315.00", "290.00", "269.00"), **kw):
+    """The CLI's preview with HAT's agreement (``main``: the daily prices it reads now)."""
+    return dy_agreed_preview([(DY_SKU2, "均码黑色", main[0], "283.00", 100, 500),
+                              (DY_SKU2B, "均码咖啡", main[1], "261.00", 30, 30),
+                              (DY_SKU2C, "均码米白", main[2], "242.00", 0, 0)], item=DY_ITEM2, **kw)
+
+
+def hat_rules(*more, read=HAT_READ, agreed=None, bound=None):
+    """She is bound to no channel product of it yet, the read (no agreement), the preview with the agreement, then
+    ``more``."""
+    return [rule(["channel-goods-list"], dy_bound_list(item=DY_ITEM2) if bound is None else bound),
+            rule(["channel-goods-create"], read, execute=False, agreement=False),
+            rule(["channel-goods-create"], hat_agreed() if agreed is None else agreed, execute=False, agreement=True),
+            *more]
+
+
+@pytest.mark.parametrize("main, live", [("315", "283"), ("290", "261"), ("399", "359"), ("188", "169"), ("269", "242"),
+                                        ("315.00", "283"), ("199.90", "179"), ("100", "90"), ("1.12", "1"), (220, "198")])
+def test_the_channel_price_is_9_zhe_of_the_daily_price_floored_to_the_yuan(main, live):
+    assert platforms.live_price(main) == Decimal(live)
+
+
+@pytest.mark.parametrize("main", ["1.00", "0", "-5", "", None, "x", True, "NaN", "Infinity"])
+def test_no_channel_price_without_a_daily_price_worth_a_yuan(main):
+    assert platforms.live_price(main) is None
+
+
+@pytest.mark.parametrize("given, prefix", [
+    ("小美专属", "【小美专属】"), ("【小美专属】", "【小美专属】"), ("  【小美专属】 ", "【小美专属】"),
+    ("[小美专属]", "【小美专属】"), ("「小美专属」", "【小美专属】"), ("（小美专属）", "【小美专属】"),
+    ("【 小美专属 】", "【小美专属】"), ("三个字专属", "【三个字专属】"),          # 1 + 5 × 2 + 1 = 12: the usual limit
+    ("Amy专属", "【Amy专属】"), ("小美🌸", "【小美🌸】"), ("Vivi专属", "【Vivi专属】"),
+    ("“小美专属”", "【小美专属】"), ("‘小美专属’", "【小美专属】"), ('"小美专属"', "【小美专属】"), ("'小美专属'", "【小美专属】"),
+    ("小\u200b美专属\ufeff", "【小美专属】"), ("\u2060【小美专属】\u200e", "【小美专属】"),   # zero-width, BOM, marks go
+    ("四个字的专属", "【四个字的专属】"),          # 14: the product's own limit (12 unless its config says more) is the CLI's
+    # a quote or bracket alone at an end goes (review 2026-11-09 F7); spaces inside stay, the CLI takes them
+    ('"小美专属', "【小美专属】"), ("小美专属”", "【小美专属】"), ("「小美专属", "【小美专属】"), ("【“小美专属】", "【小美专属】"),
+    ("〈小美专属〉", "【小美专属】"), ("小美 专属", "【小美 专属】"), ("小美QQ专属", "【小美QQ专属】"),
+    ("抖音小美专属", "【抖音小美专属】"), ("小美美呀专属", "【小美美呀专属】"), ("2026专属", "【2026专属】"),
+])
+def test_a_prefix_gets_the_shops_brackets_and_fits_the_page(given, prefix):
+    assert platforms.title_prefix_of(given) == prefix
+    assert platforms.title_length(prefix) <= platforms.TITLE_PREFIX_CAP
+
+
+@pytest.mark.parametrize("given, code, words", [
+    ("这是一个非常非常长的名字的专属", "bad_prefix", "是 32 个字符"), ("【这是一个非常非常长的名字的专属】", "bad_prefix", "是 32 个字符"),
+    ("小美V123专属", "bad_prefix", "像联系方式"), ("微信小美专属", "bad_prefix", "像联系方式"), ("小美vx专属", "bad_prefix", "像联系方式"),
+    ("加V专属", "bad_prefix", "像联系方式"), ("13800001111", "bad_prefix", "像联系方式"), ("小美 v:abc", "bad_prefix", "像联系方式"),
+    ("\u200b\u200b", "missing_prefix", "【某某专属】"),
+    ("【小美专属", "bad_prefix", "不成对"), ("小美】专属", "bad_prefix", "不成对"),
+    ("小美\n专属", "bad_prefix", "换行"), ("{链接}", "bad_prefix", "花括号"), (12, "bad_prefix", "要是文字"),
+    ("", "missing_prefix", "【某某专属】"), ("【】", "missing_prefix", "【某某专属】"), ("[ ]", "missing_prefix", "【某某专属】"),
+    # C1 controls and the Unicode line separators, the bot's own check too; 「微 信」 with a space, full-width letters,
+    # digits apart (review 2026-11-09 F7); a lone quote is not a prefix
+    ("小美\x85专属", "bad_prefix", "控制字符"), ("小美\x9f专属", "bad_prefix", "控制字符"),
+    ("小美\u2028专属", "bad_prefix", "换行"), ("小美\u2029专属", "bad_prefix", "换行"),
+    ("小美微 信专属", "bad_prefix", "像联系方式"), ("小美薇\u3000信专属", "bad_prefix", "像联系方式"),
+    ("小美ｖｘ专属", "bad_prefix", "像联系方式"), ("小美Ｖ１２３专属", "bad_prefix", "像联系方式"),
+    ("小美 1 2 3 4 5", "bad_prefix", "像联系方式"), ("小美138-0000专属", "bad_prefix", "像联系方式"),
+    ("V587专属", "bad_prefix", "像联系方式"), ("小美加V专属", "bad_prefix", "像联系方式"), ("小美w x专属", "bad_prefix", "像联系方式"),
+    ('"', "missing_prefix", "【某某专属】"), ("「」", "missing_prefix", "【某某专属】"),
+])
+def test_a_prefix_the_page_would_not_take_is_refused_saying_why(given, code, words):
+    with pytest.raises(ActionError) as e:
+        platforms.title_prefix_of(given)
+    assert e.value.code == code and words in str(e.value), str(e.value)
+
+
+def test_the_page_counts_a_han_character_two_and_anything_else_its_utf16_length():
+    assert platforms.title_length("【三个字专属】") == 12 and platforms.title_length("【小美专属】") == 10
+    assert platforms.title_length("Amy 专属") == 8
+    assert platforms.title_length("🌸") == 2                     # an emoji: two UTF-16 units
+    assert platforms.title_length("〇々") == 4                   # Han by script, outside the common block
+    assert platforms.title_length("\U00020000") == 2            # an extension-B ideograph
+    assert platforms.title_length("") == 0 and platforms.title_length(None) == 0
+
+
+def test_the_agreement_is_9_zhe_and_100_a_colour_capped_at_what_the_product_can_spare():
+    rows = HAT_READ["channelGoods"]["skus"] + [
+        {"skuId": "3100000000000000207", "name": "均码灰", "mainPrice": "188.00", "assignableStock": None},
+        {"skuId": "3100000000000000208", "name": "均码红", "mainPrice": "399.00", "assignableStock": -3}]
+    skus, warnings, problems = platforms.channel_skus(rows, platforms.check_action(HAT, catalog=catalog()))
+    assert problems == []
+    assert [(s["id"], s["main_price"], s["price"], s["stock"], s["assignable"]) for s in skus] == [
+        (DY_SKU2, "315.00", "283.00", 100, 500), (DY_SKU2B, "290.00", "261.00", 30, 30),
+        (DY_SKU2C, "269.00", "242.00", 0, 0), ("3100000000000000207", "188.00", "169.00", 0, None)]
+    assert warnings == [
+        f"SKU {DY_SKU2C}（均码米白）：主商品这个颜色没有可分的库存，渠道品里这个颜色 0 件",
+        "SKU 3100000000000000207（均码灰）：平台没说主商品这个颜色还能分多少库存，渠道品里这个颜色先放 0 件",
+        "SKU 3100000000000000208（均码红）：主商品这个颜色可分的库存是 -3（已经分超了），渠道品里不放这个颜色"]
+    action = platforms.check_action({**HAT, "note": "kb：专属链接"}, catalog=catalog())
+    assert platforms.channel_agreement(action, skus) == {
+        "productId": DY_ITEM2, "saleChannel": "kol-exclusive", "titlePrefix": "【小美专属】", "note": "kb：专属链接",
+        "skus": [{"id": DY_SKU2, "price": "283.00", "stock": 100}, {"id": DY_SKU2B, "price": "261.00", "stock": 30},
+                 {"id": DY_SKU2C, "price": "242.00", "stock": 0}, {"id": "3100000000000000207", "price": "169.00", "stock": 0}]}
+
+
+def test_a_draft_may_name_another_price_or_stock_and_the_cap_still_holds():
+    rows = HAT_READ["channelGoods"]["skus"]
+    action = platforms.check_action({**HAT, "price": "250", "stock_per_sku": 50}, catalog=catalog())
+    skus, _, problems = platforms.channel_skus(rows, action)
+    assert problems == [] and [(s["price"], s["stock"]) for s in skus] == [("250.00", 50), ("250.00", 30), ("250.00", 0)]
+    shared = platforms.check_action({**HAT, "exclusive": False}, catalog=catalog())       # 达人带货: shares the stock
+    skus, warnings, problems = platforms.channel_skus(rows, shared)
+    assert problems == [] and warnings == [] and [s["stock"] for s in skus] == [None, None, None]
+    agreement = platforms.channel_agreement(shared, skus)
+    assert agreement["saleChannel"] == "kol" and all(set(s) == {"id", "price"} for s in agreement["skus"])
+    assert [s["price"] for s in agreement["skus"]] == ["283.00", "261.00", "242.00"]       # its price: 9 折 too
+
+
+def test_no_agreement_without_stock_in_any_colour_or_without_a_daily_price():
+    action = platforms.check_action(HAT, catalog=catalog())
+    none_left = [{"skuId": DY_SKU2, "name": "均码黑色", "mainPrice": "315.00", "assignableStock": 0}]
+    assert "每个颜色都没有可分的库存" in platforms.channel_skus(none_left, action)[2][0]
+    unpriced = [{"skuId": DY_SKU2, "name": "均码黑色", "mainPrice": None, "assignableStock": 9}]
+    assert "没读到日常价" in platforms.channel_skus(unpriced, action)[2][0]
+    assert platforms.channel_skus([], action)[2] == ["读主商品的结果里没有能放进渠道品的 SKU"]
+    # a price of its own is held to the daily price: one not read cannot be checked (review 2026-11-09, item 5's gap)
+    priced = platforms.check_action({**HAT, "price": "250"}, catalog=catalog())
+    [problem] = platforms.channel_skus(unpriced, priced)[2]
+    assert "没读到日常价，动作里写的渠道价 250.00 元没法核对（渠道价不能比日常价高）" in problem
+
+
+def test_the_bot_holds_the_approved_agreement_to_the_shops_way():
+    action = platforms.check_action(HAT)
+    assert platforms.check_plan(action, HAT_RUN) == {"steps": ["create", "bind"], "skus": HAT_SKUS}
+
+    def changed(**change):
+        return {**HAT_RUN, "skus": [{**HAT_SKUS[0], **change}, *HAT_SKUS[1:]]}
+
+    for plan, words in [
+        ({"steps": ["create", "bind"]}, "点「重新预览」"),                          # an approval from before the agreement
+        (changed(price="250.00"), "不是日常价 315.00 元的 9 折取整"), (changed(main_price=""), "（没写）的 9 折取整"),
+        (changed(stock=101), "0–100 件"), (changed(stock=-1), "0–100 件"), (changed(stock="100"), "0–100 件"),
+        (changed(id="x1"), "SKU ID"), (changed(colour="黑"), "{id, price, stock, main_price}"),
+        ({**HAT_RUN, "skus": [HAT_SKUS[0], HAT_SKUS[0]]}, "写了两次"),
+        ({**HAT_RUN, "skus": [{**s, "stock": 0} for s in HAT_SKUS]}, "每个颜色都是 0 件"),
+    ]:
+        with pytest.raises(ActionError) as e:
+            platforms.check_plan(action, plan)
+        assert e.value.code == "bad_plan" and words in str(e.value), (plan, str(e.value))
+    fixed = platforms.check_action({**HAT, "price": "250", "stock_per_sku": 50, "sku_ids": [DY_SKU2, DY_SKU2B]})
+    run = {"steps": ["create", "bind"], "skus": [{"id": DY_SKU2, "price": "250.00", "stock": 50, "main_price": "315.00"},
+                                                 {"id": DY_SKU2B, "price": "250.00", "stock": 30, "main_price": "290.00"}]}
+    assert platforms.check_plan(fixed, run)["skus"][1] == {"id": DY_SKU2B, "price": "250.00", "stock": 30,
+                                                           "main_price": "290.00"}
+    with pytest.raises(ActionError) as e:            # its daily price not known: the fixed price cannot be checked
+        platforms.check_plan(fixed, {**run, "skus": [run["skus"][0], {**run["skus"][1], "main_price": ""}]})
+    assert "SKU 3100000000000000203 没有日常价：动作里写的渠道价没法核对" in str(e.value)
+    for skus, words in [([{**run["skus"][0], "price": "283.00"}], "不是动作里写的 250.00 元"),
+                        ([{**run["skus"][0], "stock": 51}], "0–50 件"),
+                        ([{**HAT_SKUS[2], "price": "250.00", "stock": 1}], "不是动作里写的（sku_ids）")]:
+        with pytest.raises(ActionError) as e:
+            platforms.check_plan(fixed, {**run, "skus": skus})
+        assert words in str(e.value), str(e.value)
+    shared = platforms.check_action({**HAT, "exclusive": False})
+    assert platforms.check_plan(shared, {**HAT_RUN, "skus": [{**s, "stock": None} for s in HAT_SKUS]})
+    with pytest.raises(ActionError) as e:
+        platforms.check_plan(shared, HAT_RUN)
+    assert "共用主商品库存" in str(e.value)
+
+
+def test_the_preview_reads_the_product_works_out_the_agreement_and_previews_with_it(node, cfg):
+    node.rules(hat_rules())
+    block = platforms.preview(HAT, cfg, catalog=catalog())
+    assert block["verdict"] == "ready", block
+    assert block["run"] == HAT_RUN
+    bound, read, agreed = node.calls()
+    assert bound["argv"][1:] == ["fxg", "channel-goods-list", f"--product-id={DY_ITEM2}", f"--uid={DY_UID}"]
+    assert read["argv"][1:] == ["fxg", "channel-goods-create", f"--product-id={DY_ITEM2}", "--sale-channel=kol",
+                                "--title-prefix=【小美专属】"]               # (the product's own prefix rule)
+    assert agreed["argv"][1:] == ["fxg", "channel-goods-create", "--agreement=" + agreed["agreement_path"]]
+    assert agreed["agreement"] == HAT_AGREEMENT
+    assert agreed["agreement_mode"] == "0o600" and not os.path.exists(agreed["agreement_path"])   # removed after the run
+    assert [(s["name"], s["verdict"]) for s in block["steps"]] == [("bound", "ready"), ("read", "ready"),
+                                                                   ("create", "ready")]
+    facts = {f["label"]: f["value"] for f in block["facts"]}
+    assert facts["渠道类型"] == "专属达人带货：只绑这一位达人，库存不共享" and facts["有效期"] == "长期有效"
+    assert facts["标题前缀"] == "【小美专属】（10/12 个字符，汉字算 2 个）"
+    assert facts["SKU"].startswith("3 个；渠道价按日常价 9 折取整到元；库存一共 130 件")
+    assert facts[f"SKU {DY_SKU2} 均码黑色"] == "日常价 315.00 元 → 渠道价 283.00 元；库存 100 件（主商品可分 500 件）"
+    assert facts[f"SKU {DY_SKU2B} 均码咖啡"] == "日常价 290.00 元 → 渠道价 261.00 元；库存 30 件（主商品可分 30 件）"
+    assert facts[f"SKU {DY_SKU2C} 均码米白"] == "日常价 269.00 元 → 渠道价 242.00 元；库存 0 件（主商品可分 0 件）"
+    assert [f["value"] for f in block["facts"] if f["label"] == "提醒"] == [
+        f"SKU {DY_SKU2C}（均码米白）：主商品这个颜色没有可分的库存，渠道品里这个颜色 0 件"]
+    assert any("仅支持预览查看" in f["value"] for f in block["facts"] if f["label"] == "页面提示")
+    assert block["facts"][-1]["label"] == "批准以后" and DY_UID in block["facts"][-1]["value"]
+    assert block["problems"] == []
+    # what the console lists of the action: the shop's way spelled out
+    params = {p["label"]: p["value"] for p in platforms.describe(block["action"])}
+    assert params["标题前缀"] == "【小美专属】（10 个字符，汉字算 2 个；这个商品最多几个看预览）" and "9 折" in params["渠道价（元）"]
+    assert "convention" not in json.dumps(platforms.describe(block["action"]), ensure_ascii=False)
+    assert params["每个颜色的库存（件）"].startswith("100 件") and params["有效期"] == "长期有效"
+    assert params["专属达人带货"].startswith("是")
+    # the bot takes the block as it is (the agreement held to the shop's way there too)
+    assert platforms.check_block(block)["run"] == HAT_RUN
+
+
+def test_the_shop_check_goes_with_every_read_of_a_channel_product(node):
+    cfg = platforms.config(node.settings(dy_expect_shop_id="1234567"))
+    node.rules(hat_rules())
+    assert platforms.preview(HAT, cfg, catalog=catalog())["verdict"] == "ready"
+    assert all("--expect-shop-id=1234567" in c["argv"] for c in node.calls()) and len(node.calls()) == 3
+
+
+def test_a_preview_names_its_skus_when_the_draft_does(node, cfg):
+    node.rules(hat_rules(read=dy_read_preview([(DY_SKU2, "均码黑色", "315.00", 500)], item=DY_ITEM2),
+                         agreed=dy_agreed_preview([(DY_SKU2, "均码黑色", "315.00", "283.00", 100, 500)], item=DY_ITEM2)))
+    block = platforms.preview({**HAT, "sku_ids": [DY_SKU2]}, cfg, catalog=catalog())
+    assert block["verdict"] == "ready" and [s["id"] for s in block["run"]["skus"]] == [DY_SKU2]
+    assert f"--sku-id={DY_SKU2}" in node.calls()[1]["argv"]
+
+
+@pytest.mark.parametrize("read, agreed, verdict, words", [
+    (dy_read_preview([], item=DY_ITEM2, blockers=["the main product is not on sale (status 1, check_status 3)"]), None,
+     "blocked", "the main product is not on sale"),
+    (dy_read_preview([(DY_SKU2, "均码黑色", "315.00", 0), (DY_SKU2B, "均码咖啡", "290.00", 0)], item=DY_ITEM2), None,
+     "blocked", "主商品的每个颜色都没有可分的库存"),
+    (dy_read_preview([(DY_SKU2, "均码黑色", None, 9)], item=DY_ITEM2), None, "blocked", "没读到日常价"),
+    (HAT_READ, hat_agreed(price_kind="block"), "blocked", "平台的价格检查没通过（block）"),
+    (HAT_READ, hat_agreed(price_kind="warn"), "blocked", "平台的价格检查没通过（warn）"),
+    (HAT_READ, hat_agreed(blockers=["the title prefix is 14 characters long (Han characters count 2)"]), "blocked",
+     "the title prefix is 14 characters long"),
+    (HAT_READ, hat_agreed(main=("320.00", "290.00", "269.00")), "error", "日常价变了：315.00 → 320.00 元"),
+], ids=["not-on-sale", "no-stock-anywhere", "no-daily-price", "price-check-block", "price-check-warn", "cli-blocker",
+        "price-moved-between-the-reads"])
+def test_what_stops_a_channel_preview_is_said(node, cfg, read, agreed, verdict, words):
+    node.rules(hat_rules(read=read, agreed=agreed if agreed is not None else hat_agreed()))
+    block = platforms.preview(HAT, cfg, catalog=catalog())
+    assert block["verdict"] == verdict
+    assert any(words in p for p in block["problems"]), block["problems"]
+    assert len(node.calls()) == (2 if agreed is None else 3)                 # no agreement: no preview with one
+    assert platforms.check_block(block)["verdict"] == verdict                # the bot shows it, not approvable
+
+
+@pytest.mark.parametrize("answer, verdict", [
+    (dict(stderr="[NOT_LOGGED_IN] the 抖店 tab is on a login page; nothing was requested\n", exit=77), "login"),
+    (dict(stderr="[RISK_CONTROL] verification wall\n", exit=76), "wall"),
+    (dict(stderr="[IDENTITY_MISMATCH] this login is not the one expected\n", exit=79), "wrong_account"),
+    (dict(stdout="not json"), "error"),
+])
+def test_a_read_that_does_not_come_back_stops_the_channel_preview(node, cfg, answer, verdict):
+    node.rules([rule(["channel-goods-list"], dy_bound_list(item=DY_ITEM2)),
+                rule(["channel-goods-create"], execute=False, agreement=False, **answer)])
+    block = platforms.preview(HAT, cfg, catalog=catalog())
+    assert block["verdict"] == verdict and len(node.calls()) == 2 and block["problems"]
+
+
+def test_a_creator_bound_to_a_channel_product_of_it_already_gets_no_second_one(node, cfg, tmp_path):
+    """She is on a channel product of this product already (made by hand, 2026-11-09, the bot does not know it):
+    the preview stops there (blocked: the channel product, its state, its link to copy), nothing else is read; an
+    execution that finds one stops before anything is written."""
+    node.rules(hat_rules(bound=dy_bound_list(("7200000000000009", 2), item=DY_ITEM2)))
+    block = platforms.preview(HAT, cfg, catalog=catalog())
+    assert block["verdict"] == "blocked" and len(node.calls()) == 1
+    assert "她已经绑在这个商品的渠道品 7200000000000009 上了（专属达人带货，售卖中）：不再建第二个" in block["problems"][0]
+    links = [f["value"] for f in block["steps"][0]["facts"] if f["label"] == "渠道品 7200000000000009 的链接"]
+    assert links and links[0].startswith("https://haohuo.jinritemai.com/") and "channel_id=7200000000000009" in links[0]
+    node.rules(hat_rules(rule(["channel-goods-create"], dy_create_done(item=DY_ITEM2), execute=True, agreement=True),
+                         bound=dy_bound_list(("7200000000000009", 0), item=DY_ITEM2)))
+    out = execute(cfg, HAT, HAT_RUN, tmp_path)
+    assert out["outcome"] == "NOT_RUN" and argvs(node, "--execute") == []
+    assert [(s["name"], s["outcome"]) for s in out["steps"]] == [("bound", "NOT_RUN")]
+    assert "已下架" in out["problems"][0] and "平台没有动" in out["problems"][0]
+
+
+BOUND_UNREAD = [
+    dict(stderr="[SCHEMA_MISMATCH] 渠道品管理 page 1: rows[0].channel_id is not an id\n", exit=1),
+    dict(stderr="[USAGE] unknown option --uid\n", exit=2),
+    dict(stdout={"site": "fxg", "command": "channel-goods-list", "error": "SCHEMA_MISMATCH"}),
+    dict(stdout={**dy_bound_list(item=DY_ITEM2), "complete": False}),
+]
+BOUND_UNREAD_IDS = ["schema-mismatch", "usage", "no-rows", "not-complete"]
+
+
+@pytest.mark.parametrize("answer", BOUND_UNREAD, ids=BOUND_UNREAD_IDS)
+def test_a_binding_check_that_cannot_be_read_stops_the_preview(node, cfg, answer):
+    """Not knowing whether she is bound is never a yes (review 2026-11-09 #1): the preview is an error, the reason is
+    among the block's problems, nothing else is read, and the bot cannot approve it."""
+    node.rules([rule(["channel-goods-list"], **answer), *hat_rules()[1:]])
+    block = platforms.preview(HAT, cfg, catalog=catalog())
+    assert block["verdict"] == "error" and len(node.calls()) == 1
+    assert any("查不到她是不是已经绑在这个商品的渠道品上" in p and "平台没有动" in p for p in block["problems"])
+    assert platforms.check_block(block)["verdict"] == "error"
+
+
+@pytest.mark.parametrize("answer", BOUND_UNREAD, ids=BOUND_UNREAD_IDS)
+def test_a_binding_check_that_cannot_be_read_at_execution_writes_nothing(node, cfg, tmp_path, answer):
+    """The review's probe: the list failed at execution and the create went on; now NOT_RUN, nothing written."""
+    node.rules([rule(["channel-goods-list"], **answer), *hat_rules(
+        rule(["channel-goods-create"], dy_create_done(item=DY_ITEM2), execute=True, agreement=True),
+        rule(["channel-goods-bind"], dy_bind_preview(), execute=False),
+        rule(["channel-goods-bind"], dy_bind_done(), execute=True))[1:]])
+    out = execute(cfg, HAT, HAT_RUN, tmp_path)
+    assert out["outcome"] == "NOT_RUN" and argvs(node, "--execute") == []
+    assert [(s["name"], s["outcome"]) for s in out["steps"]] == [("bound", "NOT_RUN")]
+    assert out["problems"][0] == "没有执行：查不到她绑没绑，平台没有动"
+
+
+def test_a_price_of_the_drafts_above_a_colours_daily_price_is_refused(node, cfg):
+    """A unified price (270) above a colour's daily price (269): not a 专属 price for it (review 2026-11-09 #5)."""
+    node.rules(hat_rules())
+    block = platforms.preview({**HAT, "price": "270"}, cfg, catalog=catalog())
+    assert block["verdict"] == "blocked" and len(node.calls()) == 2
+    assert f"SKU {DY_SKU2C}（均码米白）：动作里写的渠道价 270.00 元比这个颜色的日常价 269.00 元还高" in block["problems"]
+    fixed = platforms.check_action({**HAT, "price": "270"})
+    with pytest.raises(ActionError) as e:
+        platforms.check_plan(fixed, {**HAT_RUN, "skus": [{"id": DY_SKU2C, "price": "270.00", "stock": 1, "main_price": "269.00"}]})
+    assert "比日常价 269.00 元还高" in str(e.value)
+
+
+def test_the_products_own_prefix_rule_is_its_configs(node, cfg):
+    """The read passes the prefix: the product's own limit (title_rule.name_prefix_max_length, the CLI's prefixMax)
+    decides, not a hard 12; a product whose config requires a prefix is read with one (review 2026-11-09 #8)."""
+    long = {**HAT, "title_prefix": "四个字的专属"}                                       # 14
+    node.rules(hat_rules(read=dy_read_preview([(DY_SKU2, "均码黑色", "315.00", 500)], item=DY_ITEM2, prefix="【四个字的专属】",
+                                              blockers=["the title prefix is 14 characters long (Han characters count 2): "
+                                                        "above the page's limit of 12 for a prefix"])))
+    block = platforms.preview(long, cfg, catalog=catalog())
+    assert block["verdict"] == "blocked" and len(node.calls()) == 2
+    # one line, in Chinese, with a shorter one the shop's way (the CLI's English lines of it go: review 2026-11-09 F7)
+    assert block["problems"] == ["标题前缀太长：「【四个字的专属】」是 14 个字符（汉字算 2 个），这个商品最多 12 个：少写几个字，"
+                                 "比如「【四个字专属】」（名字留前几个字加「专属」）"]
+    assert platforms.prefix_stopped(platforms.check_block(block))
+    wide = dict(item=DY_ITEM2, prefix="【四个字的专属】", prefix_max=20)
+    node.rules(hat_rules(read=dy_read_preview([(DY_SKU2, "均码黑色", "315.00", 500)], **wide),
+                         agreed=dy_agreed_preview([(DY_SKU2, "均码黑色", "315.00", "283.00", 100, 500)], **wide)))
+    block = platforms.preview(long, cfg, catalog=catalog())
+    assert block["verdict"] == "ready", block["problems"]
+    assert {f["label"]: f["value"] for f in block["facts"]}["标题前缀"] == "【四个字的专属】（14/20 个字符，汉字算 2 个）"
+    required = ("the platform requires a custom title prefix for this product (title_rule.name_prefix_required: the page "
+                "will not save an empty 标题前缀): give one with --title-prefix")
+    node.rules(hat_rules(read=dy_read_preview([(DY_SKU2, "均码黑色", "315.00", 500)], item=DY_ITEM2, prefix=None,
+                                              blockers=[required])))
+    block = platforms.preview({**HAT, "exclusive": False, "title_prefix": ""}, cfg, catalog=catalog())
+    assert block["verdict"] == "blocked"
+    assert any(p.startswith("这个商品要求写标题前缀（title_prefix") for p in block["problems"])
+
+
+def test_a_daily_price_that_moved_inside_the_clis_own_run_stops_before_the_bind(node, cfg, tmp_path):
+    """The look just before agreed; the CLI's own read inside the create saw another daily price: the channel product
+    is made with the approved prices, but not bound and no link goes out: PARTIAL (review 2026-11-09 #9)."""
+    made = dy_create_done(item=DY_ITEM2)
+    made["channelGoods"]["skus"] = [{"skuId": DY_SKU2, "name": "均码黑色", "mainPrice": "330.00", "channelPrice": "283.00",
+                                     "channelStock": "增 100", "assignableStock": 500},
+                                    {"skuId": DY_SKU2B, "name": "均码咖啡", "mainPrice": "290.00", "channelPrice": "261.00",
+                                     "channelStock": "增 30", "assignableStock": 30}]
+    node.rules(hat_rules(rule(["channel-goods-create"], made, execute=True, agreement=True),
+                         rule(["channel-goods-bind"], dy_bind_preview(), execute=False),
+                         rule(["channel-goods-bind"], dy_bind_done(), execute=True)))
+    out = execute(cfg, HAT, HAT_RUN, tmp_path)
+    assert out["outcome"] == "PARTIAL" and argvs(node, "channel-goods-bind") == []
+    assert out["created"]["channel_id"] == DY_CHANNEL and out["created"]["link"].endswith(f"channel_id={DY_CHANNEL}&channel_type=4")
+    assert "日常价和批准时不一样了（SKU 3100000000000000202 的日常价变了：315.00 → 330.00 元" in out["problems"][0]
+    assert "没有绑定达人、没有发链接" in out["problems"][0]
+
+
+LEFT = "7200000000000077"
+LEFTOVER_DONE = (rule(["channel-goods-create"], dy_create_done(item=DY_ITEM2), execute=True, agreement=True),
+                 rule(["channel-goods-bind"], dy_bind_preview(), execute=False),
+                 rule(["channel-goods-bind"], dy_bind_done(), execute=True))
+
+
+@pytest.mark.parametrize("listed, outcome, words", [
+    (dy_bound_list((LEFT, 4), item=DY_ITEM2), "NOT_RUN", f"上次建好、没绑上的渠道品 {LEFT} 还在：先在抖店绑上她或删掉"),
+    ({**dy_bound_list(item=DY_ITEM2), "complete": False}, "NOT_RUN",
+     f"查不到上次建好、没绑上的渠道品 {LEFT} 还在不在（列表没读全）"),
+    ({"site": "fxg", "command": "channel-goods-list", "error": "SCHEMA_MISMATCH"}, "NOT_RUN", "（命令没有给出列表）"),
+    (dy_bound_list(("7200000000000001", 2), item=DY_ITEM2), "VERIFIED_SUCCESS", ""),        # only another one: gone
+], ids=["still-there", "not-complete", "no-rows", "gone"])
+def test_a_channel_product_left_unbound_stops_another_until_it_is_gone(node, cfg, tmp_path, listed, outcome, words):
+    """review 2026-11-09 F3: the approval names what earlier ones made and did not bind (the bot's record:
+    ``context.leftover``).  Before a create the product's channel products are listed without the UID filter (read
+    only: the bound check before it, filtered on her UID, cannot see an unbound one); one of those still listed stops
+    it, nothing written; a list that does not say stops it too; gone, the create goes on."""
+    node.rules([rule(["channel-goods-list", f"--uid={DY_UID}"], dy_bound_list(item=DY_ITEM2)),
+                rule(["channel-goods-list"], listed), *hat_rules()[1:], *LEFTOVER_DONE])
+    out = platforms.execute(HAT, cfg, plan=HAT_RUN, key=KEY, ledger=tmp_path / "ledger", catalog=catalog(),
+                            context={"packet_id": 3, "leftover": [LEFT, "x1", 7]})
+    assert out["outcome"] == outcome, out
+    [unfiltered] = [a for a in argvs(node, "channel-goods-list") if not any(x.startswith("--uid=") for x in a)]
+    assert f"--product-id={DY_ITEM2}" in unfiltered and "--execute" not in unfiltered
+    if outcome == "NOT_RUN":
+        assert out["problems"] == [f"没有执行：{words}，平台没有动"] if words.startswith("上次") else words in out["problems"][0]
+        assert argvs(node, "channel-goods-create", "--execute") == []
+        assert [s["name"] for s in out["steps"]][-1] == "leftover"
+    else:
+        assert out["created"]["link"] and argvs(node, "channel-goods-bind", "--execute")
+
+
+def test_without_a_leftover_the_product_is_not_listed_again(node, cfg, tmp_path):
+    """Nothing named (the bot knows of no channel product left unbound): only the bound check lists, with her UID."""
+    node.rules(hat_rules(*LEFTOVER_DONE))
+    out = platforms.execute(HAT, cfg, plan=HAT_RUN, key=KEY, ledger=tmp_path / "ledger", catalog=catalog(),
+                            context={"packet_id": 3, "leftover": "7200000000000077"})       # (not a list: ignored)
+    assert out["outcome"] == "VERIFIED_SUCCESS"
+    assert all(f"--uid={DY_UID}" in a for a in argvs(node, "channel-goods-list"))
+
+
+def test_many_colours_without_stock_keep_every_price_line(node, cfg):
+    """30 colours, 25 of them with nothing to spare: one warning line names them all, so every colour's price line
+    and 「批准以后」 stay within the 40 facts the bot keeps (review 2026-11-09 #10)."""
+    rows = [(str(3100000000000000300 + i), f"色{i}", "315.00", 0 if i >= 5 else 500) for i in range(30)]
+    node.rules(hat_rules(read=dy_read_preview(rows, item=DY_ITEM2),
+                         agreed=dy_agreed_preview([(s, n, m, "283.00", 0 if a == 0 else 100, a) for s, n, m, a in rows],
+                                                  item=DY_ITEM2)))
+    block = platforms.preview(HAT, cfg, catalog=catalog())
+    assert block["verdict"] == "ready", block["problems"]
+    facts = block["facts"]
+    assert len(facts) <= 40 and facts[-1]["label"] == "批准以后"
+    assert sum(1 for f in facts if f["label"].startswith("SKU 3100")) == 30
+    [warned] = [f["value"] for f in facts if f["label"] == "提醒"]
+    assert warned.startswith("主商品这 25 个颜色没有可分的库存，渠道品里这些颜色 0 件：SKU 3100000000000000305（色5）")
+    assert len(platforms.check_block(block)["facts"]) == len(facts)
+
+
+def test_a_ten_colour_links_facts_are_few_and_whole(node, cfg):
+    """A 10-colour link (the wechat-review branch lists a draft's facts in WeChat and refuses 「执行」 when they are cut):
+    18 facts with the real CLI's three page hints (here its fake gives two: 17), one more per kind of warning."""
+    rows = [(str(3100000000000000400 + i), f"色{i}", "315.00", 500) for i in range(10)]
+    node.rules(hat_rules(read=dy_read_preview(rows, item=DY_ITEM2),
+                         agreed=dy_agreed_preview([(s, n, m, "283.00", 100, a) for s, n, m, a in rows], item=DY_ITEM2)))
+    block = platforms.preview(HAT, cfg, catalog=catalog())
+    labels = [f["label"] for f in block["facts"]]
+    assert block["verdict"] == "ready" and len(labels) == 17
+    assert labels[:4] == ["渠道类型", "标题前缀", "有效期", "SKU"] and labels[-1] == "批准以后"
+    assert labels.count("页面提示") == 2 and sum(1 for x in labels if x.startswith("SKU 3100")) == 10
+
+
+def test_an_approval_of_the_shops_way_is_refused_by_a_worker_from_before_it(node, cfg, tmp_path):
+    """review 2026-11-09 #6: an old Mac (feb20a0) must not run a new approval its old way (达人带货: price following
+    the main product, shared stock).  The new action always carries ``convention``, a key the old check refuses."""
+    import importlib.util
+
+    try:
+        old = subprocess.run(["git", "show", "feb20a0:src/prm/platforms.py"], capture_output=True, text=True, cwd=ROOT,
+                             timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        pytest.skip("no git")
+    if old.returncode != 0:
+        pytest.skip("feb20a0 is not in this checkout")
+    path = tmp_path / "platforms_feb20a0.py"
+    path.write_text(old.stdout, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("platforms_feb20a0", str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    shared = platforms.check_action({**HAT, "exclusive": False, "title_prefix": ""})
+    assert "title_prefix" not in shared and shared["convention"] == 1
+    with pytest.raises(module.ActionError) as e:
+        module.check_action(shared)
+    assert e.value.code == "extra_param" and "convention" in str(e.value)
+    out = module.execute(shared, cfg, plan={"steps": ["create", "bind"]}, key=KEY, ledger=tmp_path / "ledger",
+                         catalog=catalog())
+    assert out["outcome"] == "NOT_RUN" and node.calls() == []
+
+
+def test_the_agreement_file_is_removed_whatever_the_run_did(cfg):
+    seen = []
+
+    def broken(argv, platform, execute):
+        path = next(a for a in argv if a.startswith("--agreement=")).split("=", 1)[1]
+        seen.append((path, oct(os.stat(path).st_mode & 0o777), json.loads(Path(path).read_text(encoding="utf-8"))))
+        raise RuntimeError("the CLI could not start")
+
+    with pytest.raises(RuntimeError):
+        platforms._dy_agreement_run(cfg, HAT_AGREEMENT, broken, execute=True)
+    [(path, mode, written)] = seen
+    assert mode == "0o600" and written == HAT_AGREEMENT and not os.path.exists(path)
 
 
 def test_the_shop_check_goes_with_every_dy_command(node):
@@ -351,19 +844,55 @@ def execute(cfg, raw, plan, tmp_path, key=KEY, cat=None):
 
 
 def test_channel_goods_runs_create_then_bind_and_hands_back_the_link(node, cfg, tmp_path):
-    node.rules([rule(["channel-goods-create"], dy_create_done(), execute=True),
-                rule(["channel-goods-bind"], dy_bind_preview(), execute=False),
-                rule(["channel-goods-bind"], dy_bind_done(), execute=True)])
-    out = execute(cfg, CHANNEL, {"steps": ["create", "bind"]}, tmp_path)
+    """Approved: the agreement previewed once more (the same file contents), the channel product created with it
+    once, then the bind previewed and written; the link comes back, each temp file gone."""
+    node.rules(hat_rules(rule(["channel-goods-create"], dy_create_done(item=DY_ITEM2), execute=True, agreement=True),
+                         rule(["channel-goods-bind"], dy_bind_preview(), execute=False),
+                         rule(["channel-goods-bind"], dy_bind_done(), execute=True)))
+    out = execute(cfg, HAT, HAT_RUN, tmp_path)
     assert out["outcome"] == "VERIFIED_SUCCESS", out
     assert out["created"]["link"] == DY_LINK and out["created"]["channel_id"] == DY_CHANNEL
     names = [(s["name"], s["execute"]) for s in out["steps"]]
-    assert names == [("create", True), ("bind", False), ("bind", True)]
+    assert names == [("bound", False), ("create", False), ("create", True), ("bind", False), ("bind", True)]
+    looked, made = [c for c in node.calls() if c["argv"][2] == "channel-goods-create"]   # no read of the product again
+    assert looked["agreement"] == made["agreement"] == HAT_AGREEMENT
+    assert "--execute" not in looked["argv"] and made["argv"][1:] == [
+        "fxg", "channel-goods-create", "--agreement=" + made["agreement_path"], "--execute"]
+    assert made["agreement_mode"] == "0o600" and not os.path.exists(made["agreement_path"])
+    assert not os.path.exists(looked["agreement_path"])
     bind = argvs(node, "channel-goods-bind", "--execute")[0]
-    assert f"--channel-id={DY_CHANNEL}" in bind and f"--uid={DY_UID}" in bind
+    assert bind[1:] == ["fxg", "channel-goods-bind", f"--product-id={DY_ITEM2}", f"--channel-id={DY_CHANNEL}",
+                        f"--uid={DY_UID}", "--execute"]
     ledger = json.loads((tmp_path / "ledger" / f"{KEY}.json").read_text(encoding="utf-8"))
     assert ledger["status"] == "done" and ledger["record"]["outcome"] == "VERIFIED_SUCCESS" and ledger["packet_id"] == 3
+    assert ledger["run"] == HAT_RUN                                       # what was approved, kept with it
     assert oct((tmp_path / "ledger" / f"{KEY}.json").stat().st_mode & 0o777) == "0o600"
+
+
+@pytest.mark.parametrize("look, words", [
+    (dict(stdout=hat_agreed(main=("299.00", "290.00", "269.00"))), "日常价变了：315.00 → 299.00 元"),
+    (dict(stdout=dy_agreed_preview([(DY_SKU2, "均码黑色", "315.00", "283.00", 100, 500)], item=DY_ITEM2)), "没有 SKU"),
+    (dict(stdout=hat_agreed(blockers=["SKU 3100000000000000201: 增 100 is above its assignable stock 80"])), "没通过"),
+    (dict(stderr="[NOT_LOGGED_IN] the 抖店 tab is on a login page; nothing was requested\n", exit=77), "没通过"),
+], ids=["daily-price-moved", "a-colour-gone", "stock-no-longer-covers-it", "login"])
+def test_what_changed_since_the_preview_stops_the_execution_before_anything_is_written(node, cfg, tmp_path, look, words):
+    node.rules([rule(["channel-goods-list"], dy_bound_list(item=DY_ITEM2)),
+                rule(["channel-goods-create"], execute=False, agreement=True, **look),
+                rule(["channel-goods-create"], dy_create_done(item=DY_ITEM2), execute=True, agreement=True),
+                rule(["channel-goods-bind"], dy_bind_done(), execute=True)])
+    out = execute(cfg, HAT, HAT_RUN, tmp_path)
+    assert out["outcome"] == "NOT_RUN", out
+    assert argvs(node, "--execute") == [] and [(s["name"], s["execute"], s["outcome"]) for s in out["steps"]] == [
+        ("bound", False, ""), ("create", False, "NOT_RUN")]
+    assert out["problems"][0].startswith("没有执行：建渠道品之前按批准的约定再预览了一次") and words in out["problems"][0]
+    assert "平台没有动" in out["problems"][0]
+
+
+def test_an_approval_from_before_the_agreement_is_not_run(node, cfg, tmp_path):
+    """An approval whose preview carried no agreement (a worker from before 2026-11-09): nothing runs."""
+    out = execute(cfg, HAT, {"steps": ["create", "bind"]}, tmp_path)
+    assert out["outcome"] == "NOT_RUN" and node.calls() == [] and "点「重新预览」" in out["problems"][0]
+    assert not (tmp_path / "ledger" / f"{KEY}.json").exists()               # the key is not taken
 
 
 def test_an_approval_key_is_run_once(node, cfg, tmp_path):
@@ -392,17 +921,37 @@ def test_a_key_taken_by_a_run_that_died_is_not_run_again(node, cfg, tmp_path):
 ])
 def test_channel_goods_stops_at_the_first_step_that_is_not_verified(node, cfg, tmp_path, create, bind_preview,
                                                                     outcome, bind_calls):
-    rules = [rule(["channel-goods-create"], create, execute=True)]
+    rules = hat_rules(rule(["channel-goods-create"], create, execute=True, agreement=True))
     rules.append(rule(["channel-goods-bind"], bind_preview if bind_preview is not None else dy_bind_preview(),
                       execute=False))
     rules.append(rule(["channel-goods-bind"], dy_bind_done(), execute=True))
     node.rules(rules)
-    out = execute(cfg, CHANNEL, {"steps": ["create", "bind"]}, tmp_path)
+    out = execute(cfg, HAT, HAT_RUN, tmp_path)
     assert out["outcome"] == outcome, out
     assert len(argvs(node, "channel-goods-bind")) == bind_calls
     assert len(argvs(node, "channel-goods-bind", "--execute")) == 0
     if outcome != "VERIFIED_SUCCESS":
         assert out["problems"] or any(s["problems"] for s in out["steps"])
+
+
+def test_a_channel_product_made_whose_creator_the_platform_refuses_ends_failed_with_the_channel_named(node, cfg,
+                                                                                                    tmp_path):
+    """Create ok, bind refused (the platform's 「无法创建提示」: no active commission plan for her): the channel product
+    is there, unbound; the record says FAILED with the channel id, so the operator can find it (the bot marks it
+    red as a result that may have written: test_prm_platform_flow)."""
+    refused = dy_bind_done("FAILED")
+    refused["items"][0]["detail"] = "the platform refused this UID (data.failed): 达人无生效中的佣金计划"
+    refused["channelGoods"]["failedTalents"] = [{"uid": DY_UID, "reason": "达人无生效中的佣金计划"}]
+    node.rules(hat_rules(rule(["channel-goods-create"], dy_create_done(item=DY_ITEM2), execute=True, agreement=True),
+                         rule(["channel-goods-bind"], dy_bind_preview(), execute=False),
+                         rule(["channel-goods-bind"], refused, execute=True)))
+    out = execute(cfg, HAT, HAT_RUN, tmp_path)
+    assert out["outcome"] == "FAILED", out
+    assert [(s["name"], s["execute"], s["outcome"]) for s in out["steps"]] == [
+        ("bound", False, ""), ("create", False, ""), ("create", True, "VERIFIED_SUCCESS"), ("bind", False, ""),
+        ("bind", True, "FAILED")]
+    assert out["created"]["channel_id"] == DY_CHANNEL and out["created"]["link"] == DY_LINK
+    assert any("达人无生效中的佣金计划" in p for p in out["steps"][-1]["problems"])
 
 
 def test_promotion_first_then_a_fresh_preview_then_the_commission(node, cfg, tmp_path):
@@ -440,15 +989,15 @@ def test_a_promotion_whose_fresh_commission_preview_fails_is_partial(node, cfg, 
 
 
 def test_a_channel_product_whose_answer_has_no_id_is_partial_and_binds_nobody(node, cfg, tmp_path):
-    made = dy_create_done()
-    made["channelGoods"]["created"] = {"productId": DY_ITEM}                 # verified, but no channelId
-    node.rules([rule(["channel-goods-create"], made, execute=True),
-                rule(["channel-goods-bind"], dy_bind_preview(), execute=False),
-                rule(["channel-goods-bind"], dy_bind_done(), execute=True)])
-    out = execute(cfg, CHANNEL, {"steps": ["create", "bind"]}, tmp_path)
+    made = dy_create_done(item=DY_ITEM2)
+    made["channelGoods"]["created"] = {"productId": DY_ITEM2}                # verified, but no channelId
+    node.rules(hat_rules(rule(["channel-goods-create"], made, execute=True, agreement=True),
+                         rule(["channel-goods-bind"], dy_bind_preview(), execute=False),
+                         rule(["channel-goods-bind"], dy_bind_done(), execute=True)))
+    out = execute(cfg, HAT, HAT_RUN, tmp_path)
     assert out["outcome"] == "PARTIAL" and "没有渠道品 ID" in out["problems"][0]
     assert argvs(node, "channel-goods-bind") == [] and "channel_id" not in out["created"]
-    assert [s["name"] for s in out["steps"]] == ["create"]
+    assert [s["name"] for s in out["steps"]] == ["bound", "create", "create"]
 
 
 def test_a_failure_inside_the_execution_is_indeterminate_and_the_ledger_is_settled(node, cfg, tmp_path, monkeypatch):
@@ -983,6 +1532,56 @@ def test_the_module_runs_on_the_macs_system_python(tmp_path):
     run = subprocess.run([python, "-I", str(script)], capture_output=True, text=True, timeout=60, cwd=tmp_path)
     assert run.returncode == 0, run.stderr
     assert run.stdout.startswith("20 0 1")
+
+
+def test_the_shops_way_to_a_channel_link_runs_on_the_macs_system_python(node, tmp_path):
+    """专属链接 on macOS's /usr/bin/python3 (3.9): the prefix and its count, the 9 折, the preview that reads the product
+    and previews with the agreement, the bot's check of it, the execution (look, create, bind) against the fake CLI.
+    The long values go into the script ASCII-escaped (``!a``): 3.9 refuses a source line of 1500+ UTF-8 bytes."""
+    python = "/usr/bin/python3"
+    if not os.path.exists(python):
+        pytest.skip("no system python3")
+    node.rules(hat_rules(rule(["channel-goods-create"], dy_create_done(item=DY_ITEM2), execute=True, agreement=True),
+                         rule(["channel-goods-bind"], dy_bind_preview(), execute=False),
+                         rule(["channel-goods-bind"], dy_bind_done(), execute=True)))
+    cases = [["三个字专属", "【三个字专属】"], ["这是一个非常非常长的名字的专属", None], ["「小美专属」", "【小美专属】"],
+             ["小美🌸", "【小美🌸】"], ["小美V123专属", None], ["小\u200b美专属", "【小美专属】"], ['"小美专属', "【小美专属】"],
+             ["小美\x85专属", None], ["小美\u2028专属", None], ["小美微 信专属", None], ["小美ｖｘ专属", None]]
+    script = tmp_path / "smoke.py"
+    script.write_text(
+        "import importlib.util, json, os, sys\n"
+        f"spec = importlib.util.spec_from_file_location('p', {str(ROOT / 'src/prm/platforms.py')!r})\n"
+        "p = importlib.util.module_from_spec(spec); spec.loader.exec_module(p)\n"
+        f"settings = json.loads({json.dumps(node.settings())!a})\n"
+        f"catalog = json.loads({json.dumps(catalog(), ensure_ascii=False)!a})\n"
+        f"hat = json.loads({json.dumps(HAT, ensure_ascii=False)!a})\n"
+        f"cases = json.loads({json.dumps(cases, ensure_ascii=False)!a})\n"
+        "for given, want in cases:\n"
+        "    try:\n"
+        "        got = p.title_prefix_of(given)\n"
+        "    except p.ActionError:\n"
+        "        got = None\n"
+        "    assert got == want, (given, got)\n"
+        "assert p.title_length('\\U00020000') == 2 and p.title_length(cases[0][1]) == 12\n"
+        "assert [str(p.live_price(m)) for m in ('315', '290', '399', '188', '269')] == ['283', '261', '359', '169', '242']\n"
+        "cfg = p.config(settings)\n"
+        "block = p.preview(hat, cfg, catalog=catalog)\n"
+        "assert block['verdict'] == 'ready', block\n"
+        "assert p.check_block(json.loads(json.dumps(block)))['run'] == block['run']\n"
+        f"ledger = {str(tmp_path / 'ledger')!r}\n"
+        "out = p.execute(block['action'], cfg, plan=block['run'], key='b' * 32, ledger=ledger, catalog=catalog)\n"
+        "print(json.dumps({'run': block['run'], 'outcome': out['outcome'], 'link': out['created'].get('link'),\n"
+        "                  'steps': [[s['name'], s['execute']] for s in out['steps']], 'version': list(sys.version_info[:2])}))\n",
+        encoding="utf-8")
+    run = subprocess.run([python, "-I", str(script)], capture_output=True, text=True, timeout=120, cwd=tmp_path)
+    assert run.returncode == 0, run.stderr
+    got = json.loads(run.stdout)
+    assert got["version"][0] == 3 and got["run"] == HAT_RUN
+    assert got["outcome"] == "VERIFIED_SUCCESS" and got["link"] == DY_LINK
+    assert got["steps"] == [["bound", False], ["create", False], ["create", True], ["bind", False], ["bind", True]]
+    agreed = [c for c in node.calls() if "agreement" in c]
+    assert len(agreed) == 3 and all(c["agreement"] == HAT_AGREEMENT and c["agreement_mode"] == "0o600" for c in agreed)
+    assert not any(os.path.exists(c["agreement_path"]) for c in agreed)
 
 
 # ── 聚水潭: sample orders ─────────────────────────────────────────────────

@@ -18,8 +18,9 @@ import pytest
 from test_prm_worker import CREATOR, TOKEN, bot, creator_says, run_one, settings, worker, workspace  # noqa: F401
 
 from platform_fakes import (
-    DY_ITEM, DY_UID, JST_ORDER, JST_SHOP_DY, JST_UID, FakeNode, catalog, dy_designated_done, dy_designated_preview,
-    jst_sample_row, jst_samples, rule,
+    DY_CHANNEL, DY_ITEM, DY_ITEM2, DY_LINK, DY_SKU2, DY_SKU2B, DY_UID, JST_ORDER, JST_SHOP_DY, JST_UID, FakeNode, catalog,
+    dy_agreed_preview, dy_bind_done, dy_bind_preview, dy_bound_list, dy_create_done, dy_designated_done,
+    dy_designated_preview, dy_read_preview, jst_sample_row, jst_samples, rule,
 )
 from src.prm import platforms
 from src.prm.result import SCHEMA
@@ -134,6 +135,99 @@ def test_approval_runs_the_cli_once_and_only_a_verified_write_lets_the_reply_out
     run_one(worker, bot, mac.settings)
     assert len(executions(mac.node)) == 1
     assert json.loads(bot.relay.store.list_jobs(1)[0]["result_text"])["outcome"] == "ALREADY_RUN"
+
+
+def test_the_drafting_note_tells_the_shops_way_to_a_link_and_its_slot(worker):  # noqa: F811
+    """The Mac's system note for drafts (PRM_PLATFORM_NOTE): dy.channel_goods the shop's way (what the system works
+    out, what the draft fills: one product, the prefix 【某某专属】 within 12, the overrides only when agreed, the
+    专属佣金 first) and the slot that says the deal asks for links (2026-11-09)."""
+    note = worker.PRM_PLATFORM_NOTE
+    for words in ("dy.channel_goods", "专属达人带货", "9 折取整到元", "每个颜色 100 件", "一个动作一个商品", "title_prefix",
+                  "「【小美专属】」", "最多 12 个字符，汉字算 2 个", "stock_per_sku", "先只填这个商品的 dy.designated_commission",
+                  "slots 里记「专属链接前缀」", "还没说前缀就记「要」", "记成空字符串", "预览会说这个商品自己的上限",
+                  "不写微信、V 号、电话这些联系方式"):
+        assert words in note, words
+    assert "stock" not in note.replace("stock_per_sku", "")                 # the old parameter is gone
+
+
+def test_a_channel_link_is_made_the_shops_way_end_to_end(worker, bot, mac):  # noqa: F811
+    """专属链接 (2026-11-09) through the real worker and bot: the draft names the product, her UID and 「前缀：小美专属」;
+    the Mac reads the product, works out the agreement (9 折 floored, 100 a colour, all a colour can spare when that is
+    fewer) and previews with it; the bot takes it, holding the agreement to the shop's way; approved, the Mac previews
+    the same agreement once more, creates, binds, and the reply goes out with the link; every agreement file 0600 and
+    gone after its run."""
+    action = {"action": "dy.channel_goods", "item_id": DY_ITEM2, "creator_platform_id": DY_UID, "title_prefix": "小美专属"}
+    mac.claude.answers(platform_action=action, reply_draft="您的专属链接：{链接}", intent="要专属链接")
+    agreed = dy_agreed_preview([(DY_SKU2, "均码黑色", "315.00", "283.00", 100, 500),
+                                (DY_SKU2B, "均码咖啡", "290.00", "261.00", 30, 30)], item=DY_ITEM2)
+    mac.node.rules([
+        rule(["channel-goods-list"], dy_bound_list(item=DY_ITEM2)),
+        rule(["channel-goods-create"], dy_read_preview([(DY_SKU2, "均码黑色", "315.00", 500),
+                                                        (DY_SKU2B, "均码咖啡", "290.00", 30)], item=DY_ITEM2),
+             execute=False, agreement=False),
+        rule(["channel-goods-create"], agreed, execute=False, agreement=True),
+        rule(["channel-goods-create"], dy_create_done(item=DY_ITEM2), execute=True, agreement=True),
+        rule(["channel-goods-bind"], dy_bind_preview(), execute=False),
+        rule(["channel-goods-bind"], dy_bind_done(), execute=True)])
+    creator_says(bot, "要链接，前缀：小美专属")
+    run_one(worker, bot, mac.settings)
+    [packet] = bot.prm.store.packets()
+    assert packet["tool"] == "dy.channel_goods" and packet["status"] == "pending"
+    block = packet["platform"]["preview"]
+    assert block["verdict"] == "ready" and block["action"]["title_prefix"] == "【小美专属】"
+    assert block["run"]["skus"] == [{"id": DY_SKU2, "price": "283.00", "stock": 100, "main_price": "315.00"},
+                                    {"id": DY_SKU2B, "price": "261.00", "stock": 30, "main_price": "290.00"}]
+    shown = {f["label"]: f["value"] for f in bot.prm.snapshot()["pending"][0]["platform"]["facts"]}
+    assert shown[f"SKU {DY_SKU2} 均码黑色"] == "日常价 315.00 元 → 渠道价 283.00 元；库存 100 件（主商品可分 500 件）"
+    assert shown["标题前缀"].startswith("【小美专属】（10/12")
+    assert bot.prm.decide(packet["id"], "execute")["ok"]
+    run_one(worker, bot, mac.settings)
+    done = bot.prm.store.packet(packet["id"])
+    assert done["status"] == "approved", done["error"]
+    assert done["platform"]["execution"]["created"]["channel_id"] == DY_CHANNEL
+    sent = []
+    bot.prm._send = lambda chat, text: sent.append((chat, text)) or True
+    bot.prm.send_approved()
+    assert sent == [(CREATOR, f"您的专属链接：{DY_LINK}")]
+    files = [c for c in mac.node.calls() if "agreement" in c]
+    assert len(files) == 3 and len({c["agreement_path"] for c in files}) == 3          # preview, look, create
+    assert all(c["agreement_mode"] == "0o600" and not os.path.exists(c["agreement_path"]) for c in files)
+    assert files[-1]["agreement"]["skus"] == [{"id": DY_SKU2, "price": "283.00", "stock": 100},
+                                              {"id": DY_SKU2B, "price": "261.00", "stock": 30}]
+    assert [c for c in mac.node.calls() if "--execute" in c["argv"]][-1]["argv"][1:3] == ["fxg", "channel-goods-bind"]
+
+
+@pytest.mark.parametrize("features", [None, [], ["dy.channel_goods:0"]], ids=["older-bot", "none", "another-convention"])
+def test_a_newer_mac_puts_no_channel_link_into_a_draft_for_an_older_bot(worker, bot, mac, monkeypatch, features):  # noqa: F811
+    """review 2026-11-09 F5 (a new Mac, an old Windows bot): the bot announces platforms.CHANNEL_FEATURE on GET
+    /relay/health; to a bot without it the worker hands no dy.channel_goods (such a bot would keep the reply with
+    {链接} and let it be sent as it is): no CLI runs, the reply goes too when it says {链接}, and the draft says why."""
+    client = worker.RelayClient(bot.url, TOKEN)
+    assert client.bot_features() == [platforms.CHANNEL_FEATURE]
+    action = {"action": "dy.channel_goods", "item_id": DY_ITEM2, "creator_platform_id": DY_UID, "title_prefix": "小美专属"}
+    mac.claude.answers(platform_action=action, reply_draft="您的专属链接：{链接}", intent="要专属链接", reason="kb/合作政策.md")
+    monkeypatch.setattr(worker.RelayClient, "bot_features", lambda self: features)
+    creator_says(bot, "要链接，前缀：小美专属")
+    run_one(worker, bot, mac.settings)
+    [packet] = bot.prm.store.packets()
+    assert packet["tool"] == "message.send" and not packet["platform"] and packet["text"] == ""
+    assert packet["reason"].startswith(worker.OLDER_BOT_NOTE) and packet["reason"].endswith("kb/合作政策.md")
+    assert mac.node.calls() == []                                    # nothing previewed
+    assert worker.OLDER_BOT_NOTE in bot.prm.store.deal(packet["deal_id"])["attention"]
+
+
+def test_a_reply_without_a_placeholder_stays_when_the_link_is_left_out(worker):  # noqa: F811
+    draft = {"reply_draft": "好的老师，链接马上给您弄", "needs_attention": False, "reason": ""}
+    worker.hold_for_older_bot(draft, worker.OLDER_BOT_NOTE)
+    assert draft == {"reply_draft": "好的老师，链接马上给您弄", "needs_attention": True, "reason": worker.OLDER_BOT_NOTE}
+    assert worker.older_bot(SimpleNamespace(bot_features=lambda: [platforms.CHANNEL_FEATURE]),
+                            {"action": "dy.channel_goods"}) == ""
+    assert worker.older_bot(SimpleNamespace(bot_features=lambda: None), DESIGNATED) == ""   # (only a link asks the bot)
+
+    def down():
+        raise OSError("connection refused")
+    # a bot that cannot be asked right now is not taken for a new one, and the draft says so in its own words
+    assert worker.older_bot(SimpleNamespace(bot_features=down), {"action": "dy.channel_goods"}) == worker.UNASKED_BOT_NOTE
 
 
 def test_a_verdict_claude_writes_itself_is_dropped(worker, bot, mac):  # noqa: F811

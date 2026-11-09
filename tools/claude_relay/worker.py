@@ -348,9 +348,17 @@ PRM_PLATFORM_NOTE = (
     "（[{sku_id, price}]，元）；title、short_title 一般不填。\n"
     "- dy.designated_commission：抖音百应指定达人专属佣金。item_id = 商品 ID，creator_platform_id = 达人的抖音 UID"
     "（一串数字），commission_rate = 整数百分比。\n"
-    "- dy.channel_goods：抖店达人渠道品（专属推广链接），并把达人绑上去。item_id = 主商品 ID，creator_platform_id = 达人 UID；"
-    "price = 渠道价（元，不填就跟主商品一样）；sku_ids 一般不填（默认全部在售 SKU）；exclusive 一般不填"
-    "（false = 达人带货、共用主商品库存；true = 专属达人带货，这时必须给 stock）。\n"
+    "- dy.channel_goods：抖店达人专属链接（渠道品），建好后把达人绑上去。系统照店里的做法建：专属达人带货（只绑这一位达人、"
+    "库存不共享）、渠道价 = 每个 SKU 日常价的 9 折取整到元、每个颜色 100 件（主商品可分的不够就全分）、长期有效，"
+    "这些预览时按商品算好，不用填。item_id = 主商品 ID（一个动作一个商品，几款就一款一份，和专属佣金一样），"
+    "creator_platform_id = 达人 UID，title_prefix = 标题前缀，按 kb/ 的规则从达人或老板的话里取，写成「【某某专属】」"
+    "（她说「前缀：小美专属」就写「【小美专属】」；一般的商品最多 12 个字符，汉字算 2 个、【】各算 1 个，超了就少写几个字，"
+    "预览会说这个商品自己的上限；前缀买家看得到，不写微信、V 号、电话这些联系方式）。"
+    "price（统一的渠道价，元）、stock_per_sku（每个颜色几件）、sku_ids（只放其中几个 SKU）、exclusive（false = 达人带货、"
+    "共用主商品库存）只有达人或老板另外谈定、kb/ 允许时才填。绑定要达人已经有这个商品的专属佣金："
+    "还没开就先只填这个商品的 dy.designated_commission，开好以后再建链接。达人或老板要了专属链接（说到「链接」"
+    "「专属链接」「前缀」）时，slots 里记「专属链接前缀」= 她要的前缀（写成「【某某专属】」；要链接、还没说前缀就记「要」；"
+    "后来说不要了就记成空字符串）：系统按它在每个商品的专属佣金开好以后派一步建这个商品的链接。\n"
     "- dy.creator_invite：抖音百应达人广场「邀约带货」，给达人发一张邀约卡片（精选联盟私信，发出去收不回）。"
     "item_id = 主推商品 ID，extra_item_ids = 其他推荐商品（最多 4 个，一般不填），creator_douyin_id = 达人的抖音号"
     "（只能用达人在对话里自己发来的、或登记信息里的抖音号，不能猜），"
@@ -548,6 +556,14 @@ class RelayClient:
         status, data = self._call("GET", "/relay/health")
         kinds = data.get("kinds") if status == 200 and isinstance(data, dict) else None
         return [str(k) for k in kinds] if isinstance(kinds, list) else None
+
+    def bot_features(self) -> list[str] | None:
+        """What the bot announces besides its job kinds (GET /relay/health ``features``, e.g.
+        ``platforms.CHANNEL_FEATURE``); None from a bot that says nothing of them (from before 2026-11-09).  A bot
+        that cannot be asked raises, as every call does."""
+        status, data = self._call("GET", "/relay/health")
+        features = data.get("features") if status == 200 and isinstance(data, dict) else None
+        return [str(f) for f in features] if isinstance(features, list) else None
 
     def next_job(self, wait: int = POLL_WAIT_SEC, settings: dict | None = None,
                  kinds: tuple = ALL_KINDS) -> dict | None:
@@ -2609,12 +2625,18 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
             pass                                         # no preview: the bot drops a 百应 draft's action unrun
         elif draft.get("platform_action") is not None:
             raw = draft.pop("platform_action")
-            try:
-                draft["platform"] = platform_preview(settings, workspace, raw, client, int(job["id"]), party_id,
-                                                     creator=meta.get("creator"))
-            except Exception as e:                       # never lose the draft over its preview
-                log.exception("#%s platform preview failed", job["id"])
-                draft["platform"] = preview_failed(raw, f"Mac 上预览出错：{e}")
+            older = older_bot(client, raw)
+            if older:
+                log.warning("#%s the bot is older than this worker: the draft's %s is left out", job["id"],
+                            raw.get("action"))
+                hold_for_older_bot(draft, older)
+            else:
+                try:
+                    draft["platform"] = platform_preview(settings, workspace, raw, client, int(job["id"]), party_id,
+                                                         creator=meta.get("creator"))
+                except Exception as e:                   # never lose the draft over its preview
+                    log.exception("#%s platform preview failed", job["id"])
+                    draft["platform"] = preview_failed(raw, f"Mac 上预览出错：{e}")
         result["text"] = json.dumps(draft, ensure_ascii=False)
     result["log_path"] = str(save_prm_log(job, run, result))
     log.info("#%s prm finished ok=%s in %ss", job["id"], result["ok"], result["duration_s"])
@@ -2816,6 +2838,38 @@ def preview_failed(raw_action, why: str) -> dict:
                 "facts": [], "steps": [], "run": {}, "previewed_at": time.time()}
 
 
+# A 专属链接 for a bot older than the shop's way (review 2026-11-09 F5: a new Mac and an old Windows bot): such a bot
+# refuses the action's ``convention``, keeps the reply as a plain draft and has no check of its {链接}.
+OLDER_BOT_NOTE = ("Windows 上的机器人比这台 Mac 旧，还不认识照店里做法建的专属链接（dy.channel_goods）：这一份的平台动作没给它；"
+                  "回复里有 {链接} 这类占位符的（旧机器人不会换成链接），回复也去掉了。先更新 Windows 上的机器人，再让它重新起草")
+UNASKED_BOT_NOTE = ("这台 Mac 刚才问不到 Windows 上的机器人认不认识照店里做法建的专属链接（网络断了一下？）：这一份的平台动作没给它；"
+                    "回复里有 {链接} 这类占位符的，回复也去掉了。过一会儿让它重新起草")
+
+
+def older_bot(client: RelayClient, raw_action) -> str:
+    """Why a draft's action may not go to this bot ("" = it may): a dy.channel_goods for a bot that does not announce
+    ``platforms.CHANNEL_FEATURE`` (GET /relay/health ``features``: one from before 2026-11-09), or that cannot be
+    asked now (``UNASKED_BOT_NOTE``: not knowing is never a yes)."""
+    if not isinstance(raw_action, dict) or raw_action.get("action") != "dy.channel_goods" or platforms is None:
+        return ""
+    try:
+        features = client.bot_features()
+    except Exception as e:                               # (once per draft that needs it: never fatal)
+        log.warning("the bot's features could not be asked for: %s", e)
+        return UNASKED_BOT_NOTE
+    return "" if features is not None and platforms.CHANNEL_FEATURE in features else OLDER_BOT_NOTE
+
+
+def hold_for_older_bot(draft: dict, why: str) -> None:
+    """The draft without its action (``older_bot``) waits for a person: its reply goes too when it says a platform
+    placeholder ({链接} …: nothing would fill it in), and the reason says why first."""
+    reply = str(draft.get("reply_draft") or "")
+    if platforms is None or any(key in reply for key in platforms.PLACEHOLDER_LABELS):
+        draft["reply_draft"] = ""
+    draft["needs_attention"] = True
+    draft["reason"] = "；".join(r for r in (why, str(draft.get("reason") or "").strip()) if r)[:300]
+
+
 def do_platform_job(settings: dict, job: dict, client: RelayClient, workspace: Path, meta: dict) -> dict:
     """A ``platform_preview`` (again, for a waiting draft) or ``platform_execute`` job: no model."""
     if platforms is None:
@@ -2832,6 +2886,9 @@ def do_platform_job(settings: dict, job: dict, client: RelayClient, workspace: P
     log.info("#%s platform execute: %s (packet %s)", job["id"], action.get("action"), meta.get("packet_id"))
     context = {"job_id": int(job["id"]), "packet_id": meta.get("packet_id"), "party_id": meta.get("party_id"),
                **invite_context(settings, meta.get("creator"))}
+    if isinstance(meta.get("leftover"), list):
+        # 专属链接: channel products an earlier approval made and did not bind (the bot's record): checked before a create
+        context["leftover"] = meta["leftover"]
     key = str(meta.get("key") or "")
     beat = _platform_heartbeat(client, int(job["id"]), "平台执行")
     record, locked = None, False
@@ -3719,6 +3776,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"bot {settings['relay_url']}: {'ok' if healthy else 'unexpected answer'}"
                   + (f" (job kinds: {','.join(offered)})" if offered is not None else
                      " (older than job kinds: it hands any job to any worker; a prm-only worker waits)"))
+            if platforms is not None:
+                features = client.bot_features()
+                knows = features is not None and platforms.CHANNEL_FEATURE in features
+                print(f"bot knows 专属链接 the shop's way ({platforms.CHANNEL_FEATURE}): "
+                      + ("yes" if knows else "no: drafts get no dy.channel_goods (update the bot on Windows first)"))
         except urllib.error.HTTPError as e:
             print(f"bot {settings['relay_url']}: HTTP {e.code}" + (" (token wrong)" if e.code == 401 else ""))
             return 1

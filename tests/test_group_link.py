@@ -1256,6 +1256,36 @@ def test_a_commission_step_cancelled_as_the_link_ends_says_so_and_the_chain_is_l
     assert refreshed == [row["deal_id"]]
 
 
+@pytest.mark.parametrize("how", ["cancelled", "failed", "private"])
+@pytest.mark.parametrize("action, word", [("", "开专属佣金"), ("dy.channel_goods", "建专属链接")])
+def test_a_chain_step_of_a_group_that_closes_says_which_step_it_was(bot, monkeypatch, action, word, how):
+    """合并 channel-goods-convention (2026-11-09): a step of the chain is a 专属佣金's or a 专属链接's
+    (``meta.step.action``); the notice of one cancelled as the link ends, or failed after it (it was being written),
+    names it once (``step_word``; the failed one's said 「开专属佣金这一步的开专属佣金这一步的草稿没写成」 before); one
+    that failed in her private chat names its step too (a 专属链接's said 「开专属佣金这一步」)."""
+    linked(bot, member=1)
+    row = bot.prm.store.boss_group(GROUP)
+    monkeypatch.setattr(bot.prm, "_chain_refresh", lambda deal_id, now: None)
+    step = {"packet": None, "delivered": False, "item": "3000000000000000001", **({"action": action} if action else {})}
+    chat = CREATOR if how == "private" else GROUP
+    _, job_id = bot.relay.submit(chat, chat, "", kind="prm", fresh=True, meta={
+        "party_id": row["party_id"], "deal_id": row["deal_id"], "name": "小美", "system_note": f"{word}：测试帽子",
+        "step": step, **({} if how == "private" else {"channel": "group", "group": bot.prm.boss_groups.job_group(GROUP)})})
+    if how != "cancelled":
+        bot.clock.now += SETTLE_SEC + 1
+        assert bot.relay.next_job(0, ("prm",))["id"] == job_id
+    if how != "private":
+        bot.say(f"不接群 {GROUP_NAME}")
+    if how != "cancelled":
+        bot.finish(job_id, ok=False, text="出错了")
+    assert bot.relay.store.get(job_id)["status"] == ("cancelled" if how == "cancelled" else "failed")
+    notice = next(n for n in bot.prm.store.deal(row["deal_id"])["notices"] if n["key"] == f"failed:{job_id}")
+    said = {"cancelled": f"草稿任务取消了（{GROUP_CLOSED_HEAD}）", "failed": f"草稿没写成（{GROUP_CLOSED_HEAD}）",
+            "private": "草稿没写成："}[how]
+    assert notice["text"].startswith(f"#{job_id} {word}这一步的{said}")
+    assert notice["text"].count("这一步的") == 1
+
+
 def test_a_group_with_a_boss_linked_while_her_deal_keeps_another_three_party_group_is_told_apart(clock, tmp_path):
     """Its lines were told to her private drafts mixed with her 三方群's, then not at all: each group's lines say their
     group now (``group``), the Mac's prompt tells them apart."""

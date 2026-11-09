@@ -21,7 +21,9 @@ from src.relay.service import LOST_AFTER_SEC
 
 DESIGNATED = {"action": "dy.designated_commission", "item_id": DY_ITEM, "creator_platform_id": DY_UID,
               "commission_rate": 20}
-CHANNEL = {"action": "dy.channel_goods", "item_id": DY_ITEM, "creator_platform_id": DY_UID, "price": "15"}
+CHANNEL = {"action": "dy.channel_goods", "item_id": DY_ITEM, "creator_platform_id": DY_UID, "title_prefix": "【小美专属】"}
+# What a preview of CHANNEL agrees (the shop's way: 19.99 → 17 yuan, 40 of the 40 the product can spare)
+CHANNEL_RUN = {"steps": ["create", "bind"], "skus": [{"id": DY_SKU, "price": "17.00", "stock": 40, "main_price": "19.99"}]}
 SAMPLE = {"action": "jst.sample_order", "shop": "dy", "item_id": DY_ITEM, "skus": [{"sku_id": DY_SKU, "qty": 1}],
           "creator_platform": "dy", "creator_uid": DY_UID,
           "receiver": {"name": "小美", "phone": "〈手机1〉", "province": "上海市", "city": "上海市", "district": "浦东新区",
@@ -36,8 +38,8 @@ def block(raw=DESIGNATED, verdict="ready", run=None, **extra):
            "steps": [{"name": "designated", "label": "百应 · 建指定达人佣金策略", "execute": False,
                       "command": "node bin/dy.mjs buyin promotion-strategy-create-designated", "exit_code": 0,
                       "seconds": 2.5, "verdict": verdict, "outcome": "", "problems": [], "facts": [], "raw": "{}"}],
-           "run": run if run is not None else {"steps": ["create", "bind"] if raw["action"] == "dy.channel_goods"
-                                               else ["designated"]},
+           "run": run if run is not None else CHANNEL_RUN if raw["action"] == "dy.channel_goods"
+           else {"steps": ["designated"]},
            "catalog": {"synced_at": 1.0, "title": "测试主品"}, "previewed_at": 2.0}
     out.update(extra)
     return out
@@ -376,10 +378,13 @@ TWENTY_FIVE_PRICES = {"action": "xhs.channel_item", "item_id": XHS_ITEM,
 @pytest.mark.parametrize("raw, mac_limits, run, word", [
     (TWELVE_CROWDS, {"max_crowds": 20}, {"steps": ["create"], "name": "达人合作1_10271000"}, "人群包"),
     (TWENTY_FIVE_PRICES, {"max_sku_prices": 30}, {"steps": ["create"]}, "SKU 专属价"),
-], ids=["12-crowds", "25-sku-prices"])
+    ({"action": "dy.channel_goods", "item_id": DY_ITEM, "creator_platform_id": DY_UID, "exclusive": False, "price": "15"},
+     {}, {"steps": ["create", "bind"]}, "Mac 的 worker 比机器人旧"),
+], ids=["12-crowds", "25-sku-prices", "channel-link-from-a-worker-before-the-agreement"])
 def test_a_preview_past_the_bots_limits_keeps_the_reply_without_the_action(bot, clock, raw, mac_limits, run, word):
-    """A Mac whose config.json raised max_crowds / max_sku_prices past FORM_LIMITS: the bot does not take
-    its action, but the reply is no longer lost with it (「草稿格式不对」): a plain draft for a person."""
+    """A Mac whose config.json raised max_crowds / max_sku_prices past FORM_LIMITS, or a worker from before the
+    专属链接 agreement (2026-11-09: its ready preview has no ``run.skus``): the bot does not take its action, but the
+    reply is no longer lost with it (「草稿格式不对」): a plain draft for a person."""
     bot.prm.store.set_gate("other", "auto", clock.now)                      # even a kind that goes out on its own
     action = platforms.check_action(raw, limits=mac_limits)                 # what that Mac previewed, ready
     packet = drafted(bot, {**block(), "action": action, "run": run}, reply="计划建好啦～", kind="other")
@@ -390,6 +395,28 @@ def test_a_preview_past_the_bots_limits_keeps_the_reply_without_the_action(bot, 
     assert not bot.prm.decide(packet["id"], "execute")["ok"]                  # nothing can run
     assert [j for j in bot.relay.store.list_jobs(10) if '"platform_execute"' in j["meta"]] == []
     assert bot.texts == [] and bot.prm.decide(packet["id"], "edit", "好的，我确认一下再回你～")["ok"]
+
+
+@pytest.mark.parametrize("preview, reply", [
+    (block(CHANNEL, run={"steps": ["create", "bind"]}), "您的专属链接：{链接}"),          # an old worker's: the action goes
+    (False, "计划「{计划名}」建好啦"),                                                  # the model wrote one, no action
+], ids=["link-from-an-old-worker", "plan-name-without-an-action"])
+def test_a_plain_draft_that_still_says_a_platform_placeholder_is_never_sent_as_it_is(bot, clock, preview, reply):
+    """review 2026-11-09 #4: a plain draft whose reply still says {链接} / {计划名} … (only a platform action that ran
+    fills those in) waits for a person even where its kind goes out by itself, and 「发送」 / 「改了再发」 with the
+    placeholder still in are refused saying why; once it is written out it goes."""
+    bot.prm.store.set_gate("money", "auto", clock.now)                        # a kind that goes out on its own
+    packet = drafted(bot, preview, reply=reply)
+    assert packet["tool"] == "message.send" and packet["status"] == "pending" and packet["needs_attention"]
+    out = bot.prm.decide(packet["id"], "send")
+    assert not out["ok"] and "回复里还有 {" in out["error"] and "原样发出去她会看到花括号" in out["error"]
+    out = bot.prm.decide(packet["id"], "edit", "链接在这：{链接}")
+    assert not out["ok"] and "{链接}（专属推广链接）" in out["error"]
+    bot.prm.send_approved()
+    assert bot.texts == []
+    assert bot.prm.decide(packet["id"], "edit", "我在后台弄好了马上发您～")["ok"]
+    bot.prm.send_approved()
+    assert bot.texts == [(packet["chat_id"], "我在后台弄好了马上发您～")]
 
 
 def test_a_new_preview_the_bot_does_not_take_keeps_the_old_one_and_says_why(bot):
@@ -1410,8 +1437,10 @@ def unknown_after_the_ledger():
 
 MAYBE_OPENED = [(DESIGNATED, lambda: record("ACCEPTED_UNVERIFIED")), (DESIGNATED, lambda: record("INDETERMINATE")),
                 (DESIGNATED, lambda: record("UNKNOWN")), (DESIGNATED, unknown_after_the_ledger),
-                (CHANNEL, lambda: record("PARTIAL", channel_id="7000000001")), (CHANNEL, made_then_refused)]
-MAYBE_IDS = ["accepted-unverified", "indeterminate", "unknown", "unknown-after-the-ledger", "partial", "made-then-refused"]
+                (CHANNEL, lambda: record("UNKNOWN"))]
+MAYBE_IDS = ["accepted-unverified", "indeterminate", "unknown", "unknown-after-the-ledger", "link-unknown"]
+# 专属链接 that made its channel product and did not bind her: said apart (``test_a_channel_product_left_unbound_…``)
+LEFT_UNBOUND = [lambda: record("PARTIAL", channel_id="7000000001", link=DY_LINK), made_then_refused]
 
 
 def maybe_opened(b, clock, raw, rec):
@@ -1449,6 +1478,39 @@ def test_a_result_that_may_have_opened_it_stops_a_second_one_until_it_is_checked
     assert json.loads(job["meta"])["op"] == "platform_execute"
     names = [event_out(e)["name"] for e in bot.prm.store.events(1, kinds=("platform_recheck",))]
     assert names == [f"#{first['id']} 的结果不确定，#{second['id']} 要再开同一个商品：先核对平台"] * 2
+
+
+@pytest.mark.parametrize("rec", LEFT_UNBOUND, ids=["partial-after-the-create", "made-then-refused"])
+def test_a_channel_product_left_unbound_is_named_with_the_ways_back(bot, clock, rec):
+    """review 2026-11-09 F3 (the verifier's probe P4): a 专属链接 that made its channel product and did not bind her says
+    which one, its link and the two ways back; a second draft of the same product and creator is held until an operator
+    says on the red one that it is dealt with, and its approval hands the Mac the channel product's id: the Mac makes
+    no other while that one is there unbound (platforms ``_dy_leftover``)."""
+    first, reply = maybe_opened(bot, clock, CHANNEL, rec())
+    error = first["error"]
+    assert first["status"] == "failed" and error.startswith("渠道品 7000000001 建好了、没绑上她（")
+    assert "① 在抖店「渠道商品管理」把她绑到渠道品 7000000001 上，链接自己发给她；② 把它下架、删掉" in error
+    assert "处理好了点「我已处理」（它还在、又没绑上她时，系统不会再给她建这个商品的链接）" in error
+    assert (f"链接：{DY_LINK}" in error) == bool(first["platform"]["execution"]["created"].get("link"))
+    assert f"#{first['id']} 渠道品 7000000001 建好了、没绑上她" in bot.prm.store.deal(1)["attention"]
+    assert bot.prm.decide(first["id"], "ack")["ok"]
+    second = drafted(bot, block(CHANNEL), reply=reply)
+    out = bot.prm.decide(second["id"], "execute")
+    assert not out["ok"] and "建好了渠道品 7000000001、没绑上她" in out["error"] and "不能再建一个" in out["error"]
+    assert "点这一份的「不发」" in out["error"] and f"#{first['id']}" in out["error"]
+    [alert] = snap(bot)["platform_alerts"]
+    assert alert["error"].startswith(f"#{second['id']} 要再建同一个商品的专属链接：渠道品 7000000001 删掉了，"
+                                     "点这里的「我已处理」")
+    assert bot.prm.decide(first["id"], "ack") == {"ok": True, "released": second["id"]}
+    job = approve(bot, second)
+    assert json.loads(job["meta"])["leftover"] == ["7000000001"]     # the Mac looks for it before it makes another
+
+
+def test_an_approval_names_no_leftover_when_none_was_made(bot, clock):
+    """Nothing made before (or what was made is bound: verified): the approval carries no ``leftover``."""
+    first = drafted(bot, block(CHANNEL), reply="链接：{链接}")
+    job = approve(bot, first)
+    assert "leftover" not in json.loads(job["meta"])
 
 
 def test_a_check_lets_only_the_draft_it_was_asked_for_run(bot, clock):
@@ -1505,8 +1567,7 @@ def test_a_result_that_wrote_nothing_does_not_stop_a_second_one(bot, clock, rec)
 
 
 @pytest.mark.parametrize("raw, again", [
-    ({"action": "dy.channel_goods", "item_id": DY_ITEM, "creator_platform_id": DY_UID, "price": "15"},
-     {"action": "dy.channel_goods", "item_id": DY_ITEM, "creator_platform_id": DY_UID, "price": "14"}),
+    (CHANNEL, {**CHANNEL, "title_prefix": "【美美专属】"}),             # another prefix: still the same product
     ({"action": "xhs.direct_plan", "item_id": XHS_ITEM, "creator_platform_id": "小美的号", "commission_rate": 15},
      {"action": "xhs.direct_plan", "item_id": XHS_ITEM, "creator_platform_id": XHS_BUYER, "commission_rate": 12}),
 ], ids=["channel-goods", "xhs-plan-by-name-then-by-id"])

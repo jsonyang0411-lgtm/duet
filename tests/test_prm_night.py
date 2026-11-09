@@ -423,6 +423,13 @@ def test_a_draft_short_of_its_files_or_without_its_platform_action_waits(bot):
     assert refused["meta"]["night_held"] == "平台动作被去掉了，回复是按执行成功写的"
 
 
+def test_a_draft_that_never_had_an_action_waits_for_its_own_reason(bot):
+    """review 2026-11-09 F7: a plain draft whose reply still says {链接} waits saying so, not 「平台动作被去掉了」 (it
+    never had one)."""
+    plain = drafted(bot, reply("money", "专属链接给您：{链接}", reason="kb/合作政策.md"))
+    assert state(plain) == WAITS and plain["meta"]["night_held"].startswith("回复里还有 {链接}（专属推广链接）")
+
+
 @pytest.mark.parametrize("words, goes", [
     ("我们达人合作的佣金是 20%，走抖音百应 / 小红书千帆的专属佣金，订单平台自动结算～", True),
     ("数据好的老师可以给到 25%～", True),

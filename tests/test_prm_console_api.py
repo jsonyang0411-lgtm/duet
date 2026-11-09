@@ -403,11 +403,12 @@ def _platform_draft(running):
     from src.prm import platforms
 
     action = platforms.check_action({"action": "dy.channel_goods", "item_id": "3000000000000000101",
-                                     "creator_platform_id": "5100000000000002", "price": "15"})
+                                     "creator_platform_id": "5100000000000002", "title_prefix": "【小美专属】"})
     preview = {"version": 1, "action": action, "verdict": "ready", "problems": [], "steps": [],
-               "facts": [{"label": "将写入", "value": "create a 达人带货 channel product"}],
-               "run": {"steps": ["create", "bind"]}, "catalog": {"synced_at": 1.0, "title": "测试主品"},
-               "previewed_at": 2.0}
+               "facts": [{"label": "将写入", "value": "create a 专属达人带货 channel product"}],
+               "run": {"steps": ["create", "bind"], "skus": [{"id": "3100000000000000201", "price": "17.00", "stock": 40,
+                                                              "main_price": "19.99"}]},
+               "catalog": {"synced_at": 1.0, "title": "测试主品"}, "previewed_at": 2.0}
     running.prm.handle({"chat_id": CREATOR, "sender_id": CREATOR, "content": "好的，就要专属链接", "msg_type": 1,
                         "is_group": False, "timestamp": running.relay._clock()})
     running.relay._clock.now += SETTLE_SEC + 1
