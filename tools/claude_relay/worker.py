@@ -2580,9 +2580,18 @@ def _answer(event) -> dict | None:
 def answered_all(stdout: str, written: list) -> bool:
     """The last result event that carries a structured answer had every message of hers (``written``: the
     conversation's messages in order, "creator" or "reask"): the n-th result answers the first n messages written, so
-    none of hers may come after that many."""
+    none of hers may come after that many.  Never with more results than messages (a turn that gave two: which answers
+    what is unknown); the same answer twice in a row counts once (one turn's two results look so)."""
     results = [json.loads(line) for line in stdout.splitlines() if _is_result(line)]
-    last = max((n for n, event in enumerate(results, 1) if _answer(event) is not None), default=0)
+    if len(results) > len(written):
+        return False
+    turns: list = []
+    for event in results:
+        answer = _answer(event)
+        if answer is not None and turns and turns[-1] == answer:
+            continue
+        turns.append(answer)
+    last = max((n for n, answer in enumerate(turns, 1) if answer is not None), default=0)
     return bool(last) and "creator" not in written[last:]
 
 
@@ -2600,6 +2609,14 @@ def prune_handcards() -> None:
         handcards.prune_sessions(HOME_DIR / "platform" / "handcards")
     except Exception as e:                               # never in the way of the job
         log.warning("handcards folders not pruned: %s", e)
+
+
+def _douyin_ids(meta: dict) -> list:
+    """Her known 抖音号 as the job tells them (``meta.creator.douyin_ids``: her verified sample orders', the friend add's
+    linked one): the cards' 场次 loses the friend add's tail of her name only by them."""
+    creator = meta.get("creator") if isinstance(meta, dict) else None
+    ids = creator.get("douyin_ids") if isinstance(creator, dict) else None
+    return [str(i) for i in ids if isinstance(i, str) and i.strip()][:5] if isinstance(ids, list) else []
 
 
 def handcards_settings() -> tuple:
@@ -2633,7 +2650,7 @@ def make_handcards(settings: dict, job: dict, meta: dict, request, workspace: Pa
         made, files = handcards.make(request, workspace=workspace, config=cards_cfg, name=str(meta.get("name") or ""),
                                      job_id=job_id, home=HOME_DIR / "platform" / "handcards", asked=asked or None,
                                      others=others, heartbeat=_platform_heartbeat(client, job_id, "做手卡"),
-                                     reasked=reasked)
+                                     reasked=reasked, douyin_ids=_douyin_ids(meta))
     except Exception as e:                               # never lose the draft over its cards
         log.exception("#%s handcards failed", job_id)
         return handcards.made_block(False, problems=[f"Mac 上做手卡出错：{e}"]), []
@@ -2906,22 +2923,28 @@ def sync_products(settings: dict, only: str = "") -> int:
         print(f"商品目录只从 {', '.join(platforms.CATALOG_PLATFORMS)} 读，不认识：{', '.join(unknown)}")
         return 2
     before = signal.signal(signal.SIGTERM, _sync_terminated)   # (the worker's stop: the platform CLI stops too)
+    lock = HOME_DIR / "platform" / "products-sync.lock"
     try:
         # one --sync-products at a time on this Mac (the night's and one by hand): the images and the catalogue's
         # files are written outside the platform CLI lock
-        with platforms.CliLock(HOME_DIR / "platform" / "products-sync.lock", wait=PRODUCTS_SYNC_MAX_SEC):
+        with platforms.CliLock(lock, wait=PRODUCTS_SYNC_MAX_SEC, on_wait=lambda: print(
+                f"在等另一个同步跑完（最多 {_span(PRODUCTS_SYNC_MAX_SEC)}）…", flush=True)):
             previous = platforms.load_catalog(workspace)
-            with _cli_lock():
-                catalog = platforms.sync_catalog(cfg, wanted, previous=previous,
-                                                 progress=lambda line: print(line, flush=True))
+            try:
+                with _cli_lock():
+                    catalog = platforms.sync_catalog(cfg, wanted, previous=previous,
+                                                     progress=lambda line: print(line, flush=True))
+            except TimeoutError as e:            # (the platform CLI lock: a platform action runs long)
+                print(f"平台命令行的锁一直没等到：{e}")
+                return 1
             # 款式图下到 assets/products/（起草的 Claude 只能从 assets/ 挑文件发给达人）
             images = platforms.fetch_images(workspace, catalog, previous=previous,
                                             progress=lambda line: print(line, flush=True))
             print(f"款式图：新下 {images['fetched']} 张，沿用 {images['kept']} 张，没下成 {images['failed']} 张，"
                   f"删掉下架的 {images['removed']} 张")
             paths = platforms.write_catalog(workspace, catalog)
-    except TimeoutError as e:
-        print(f"另一个 --sync-products 一直没跑完：{e}")
+    except TimeoutError:
+        print(f"另一个 --sync-products 一直没跑完（等了 {_span(PRODUCTS_SYNC_MAX_SEC)}，{lock}）")
         return 1
     finally:
         signal.signal(signal.SIGTERM, before)
@@ -2930,6 +2953,15 @@ def sync_products(settings: dict, only: str = "") -> int:
         print(f"{platform}: {len(part.get('items') or [])} 个商品（{state}）")
     print("写好了：" + "、".join(str(p) for p in paths))
     return 0 if all(part.get("ok") for name, part in catalog["platforms"].items() if name in wanted) else 1
+
+
+def _span(sec: float) -> str:
+    """A wait as people say it: 「1 小时」, 「10 分钟」, 「30 秒」."""
+    if sec >= 3600 and sec % 3600 == 0:
+        return f"{int(sec // 3600)} 小时"
+    if sec >= 60:
+        return f"{int(sec // 60)} 分钟"
+    return f"{sec:g} 秒"
 
 
 def _sync_terminated(signum, frame):
@@ -3288,7 +3320,7 @@ def permission_hook(request: dict, job_id: str, config_path: Path, poll_wait: in
             "tool": tool, "detail": describe_request(tool, request.get("tool_input")), "timeout_s": timeout,
         })
         ask_id = int(created["ask_id"])
-    except Exception as e:
+    except (Exception, SystemExit) as e:                 # (a config.json load_settings refuses: its reason too)
         return decide("deny", f"没能把批准请求发到微信（{e}），按拒绝处理。")
     deadline = time.monotonic() + timeout + 60
     while time.monotonic() < deadline:
@@ -3566,7 +3598,11 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging("worker-prm.log" if prm_only else "worker.log")
     if args.permission_hook:
         return run_permission_hook()
-    settings = load_settings(Path(args.config))
+    try:
+        settings = load_settings(Path(args.config))
+    except SystemExit as e:                      # (a USR1 restart that does not come back: the log says why)
+        log.error("config.json cannot be used, the worker does not start: %s", e)
+        raise
     if args.sync_products:
         return sync_products(settings, args.platforms)
     client = RelayClient(settings["relay_url"], settings["token"],

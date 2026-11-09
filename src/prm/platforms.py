@@ -918,7 +918,8 @@ class CliRun:
 # The CLI commands this process runs now (``run_cli``): each in a process group of its own, which a signal to this
 # process does not reach; ``stop_running`` stops them (``--sync-products`` told to stop).
 _RUNNING: set = set()
-_RUNNING_LOCK = threading.Lock()
+_RUNNING_LOCK = threading.RLock()     # (re-entrant: ``stop_running`` runs in a signal handler, maybe inside run_cli's
+                                      # own add or remove on the same thread)
 
 
 def stop_running(grace: float = 3.0) -> int:
@@ -1041,9 +1042,10 @@ class CliLock:
     (mac review C#1: the cancel used to be ignored and the write went ahead)."""
 
     def __init__(self, path, wait: float = 600.0, heartbeat: Optional[Callable[[], bool]] = None,
-                 every: float = 30.0):
+                 every: float = 30.0, on_wait: Optional[Callable[[], None]] = None):
         self.path, self.wait, self.handle, self.heartbeat = Path(path), wait, None, heartbeat
         self.every = every
+        self.on_wait = on_wait           # called once when the lock is taken and the wait begins
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -1052,11 +1054,15 @@ class CliLock:
             return self
         deadline = time.monotonic() + self.wait
         beat = time.monotonic()
+        waiting = False
         while True:
             try:
                 fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 return self
             except OSError:
+                if not waiting and self.on_wait is not None:
+                    self.on_wait()
+                waiting = True
                 if time.monotonic() >= deadline:
                     self.handle.close()
                     raise TimeoutError(f"等了 {int(self.wait)} 秒，另一个平台命令还在跑（{self.path}）")

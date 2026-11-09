@@ -145,10 +145,12 @@ def hc_index():
     return index
 
 
-def build(ws, *products, asked=None, others=0, today=TODAY, cfg=None, name="小美", call="", reasked=False):
+def build(ws, *products, asked=None, others=0, today=TODAY, cfg=None, name="小美", call="", reasked=False,
+          douyin_ids=()):
     request = {"products": list(products), **({"call": call} if call else {})}
     return hc.build_sheet(request, catalog=hc.load_catalog(ws), skus=hc_index(), config=cfg or config(), name=name,
-                          today=today, workspace=ws, asked=asked, others=others, reasked=reasked)
+                          today=today, workspace=ws, asked=asked, others=others, reasked=reasked,
+                          douyin_ids=douyin_ids)
 
 
 # ── the 单子.json: prices, the 双11 line, stock, 待定 ──────────────────────
@@ -338,27 +340,39 @@ def test_a_sku_name_gives_its_colour_and_size(name, colour, sizes):
     assert hc.parse_sku_name(name) == (colour, sizes)
 
 
-@pytest.mark.parametrize("call, name, channel, cut", [
-    ("小美", "抖音-另一个名字", "小美专属", False), ("", "抖音-小美", "小美专属", False),
-    ("", "小红书－小美 ", "小美专属", False), ("", "抖音-小美-ab12", "小美专属", False),     # (the friend add's tail)
-    ("", "小美-ab12", "小美-ab12专属", False),                                           # (no prefix: her own name)
-    ("", "dy_小美", "dy_小美专属", False), ("", "", "达人专属", False), ("小/美&#", "", "小美专属", False),
-    ("一" * 20, "", "一" * 16 + "专属", True),
-    # a 称呼 the draft copied from the friend add's remark loses the deal name's very tail (round 2, item 6)
-    ("小美-ab12", "抖音-小美-ab12", "小美专属", False), ("抖音-小美-ab12", "抖音-小美-ab12", "小美专属", False),
-    ("小美-ab12", "小美", "小美-ab12专属", False), ("小美-ab12", "抖音-小美-cd34", "小美-ab12专属", False),
-    # only the friend add's very tail (hex, of a name with its prefix), the same on both paths (round 3, item 7)
-    ("Lucy-Anne", "Lucy-Anne", "Lucy-Anne专属", False), ("", "Lucy-Anne", "Lucy-Anne专属", False),
-    ("小美-1995", "小美-1995", "小美-1995专属", False), ("", "抖音-lucy-anne", "lucy-anne专属", False),
-    ("", "抖音-小美-1995", "小美专属", False), ("-ab12", "抖音-小美-ab12", "-ab12专属", False),
+DY = ["dy_test1.i.99"]                       # (made up: her 抖音号 as the job tells it, ``meta.creator.douyin_ids``)
+
+
+@pytest.mark.parametrize("call, name, ids, channel, cut", [
+    ("小美", "抖音-另一个名字", [], "小美专属", False), ("", "抖音-小美", [], "小美专属", False),
+    ("", "小红书－小美 ", [], "小美专属", False), ("", "小美-ab12", [], "小美-ab12专属", False),
+    ("", "dy_小美", [], "dy_小美专属", False), ("", "", [], "达人专属", False), ("小/美&#", "", [], "小美专属", False),
+    ("一" * 20, "", [], "一" * 16 + "专属", True),
+    # the friend add's tail is the last 4 of her 抖音号 (friend_adds.remark_for), any characters, both paths (round 4)
+    ("", "抖音-小美-i.99", DY, "小美专属", False), ("小美-i.99", "抖音-小美-i.99", DY, "小美专属", False),
+    ("抖音-小美-i.99", "抖音-小美-i.99", DY, "小美专属", False), ("", "抖音-小美-I.99", DY, "小美专属", False),
+    ("", "抖音-小美-i.99", [], "小美-i.99专属", False),                          # (her 抖音号 unknown: nothing goes)
+    ("", "抖音-小美-ab12", ["dy_other.cd34"], "小美-ab12专属", False),           # (not hers)
+    ("", "抖音-Lucy-Anne", DY, "Lucy-Anne专属", False), ("Lucy-Anne", "Lucy-Anne", ["xx_anne"], "Lucy-Anne专属", False),
+    ("", "小美-i.99", DY, "小美-i.99专属", False),                               # (no prefix: no friend add's name)
+    ("小美-i.99", "抖音-小美-cd34", ["yy.cd34"], "小美-i.99专属", False), ("-i.99", "抖音-小美-i.99", DY, "-i.99专属", False),
 ])
-def test_the_channel_is_her_call_or_her_deals_name_without_the_friend_add_remark(call, name, channel, cut):
-    assert hc.channel_of(call, name) == (channel, cut)
+def test_the_channel_is_her_call_or_her_deals_name_without_the_friend_add_remark(call, name, ids, channel, cut):
+    assert hc.channel_of(call, name, ids) == (channel, cut)
 
 
 def test_the_friend_add_tail_is_only_its_own():
-    assert [hc.friend_add_tail(n) for n in ("抖音-小美-ab12", "抖音 - 小美-0f3c", "小美-ab12", "抖音-Lucy-Anne",
-                                            "抖音-小美-x9_k", "抖音--ab12", "")] == ["-ab12", "-0f3c", "", "", "", "", ""]
+    assert [hc.friend_add_tail(n, DY) for n in ("抖音-小美-i.99", "抖音 - 小美-i.99", "小美-i.99", "抖音-Lucy-Anne",
+                                                "抖音--i.99", "")] == ["-i.99", "-i.99", "", "", "", ""]
+    assert hc.friend_add_tail("抖音-小美-i.99") == "" and hc.friend_add_tail("抖音-小美-i.99", "dy_test1.i.99") == ""
+    assert hc.friend_add_tail("抖音-小美-ab", ["ab"]) == "-ab"                   # (a 抖音号 shorter than 4: all of it)
+
+
+def test_the_sheet_takes_her_douyin_id_for_the_tail(ws):
+    sheet, _, _ = build(ws, product(), name="抖音-小美-i.99", douyin_ids=DY)
+    assert sheet["channel"] == "小美专属"
+    sheet, _, _ = build(ws, product(), name="抖音-小美-i.99")
+    assert sheet["channel"] == "小美-i.99专属"
 
 
 def test_products_not_in_the_catalogue_or_too_many_make_no_card(ws):

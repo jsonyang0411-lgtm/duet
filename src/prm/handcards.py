@@ -602,34 +602,41 @@ def cut_words(text, limit: int) -> tuple:
 
 
 _PREFIX = re.compile(r"^(?:抖音|小红书|淘宝|快手|视频号)\s*[-－_—:：·]+\s*")   # (the friend add's remark: 抖音-…)
-# The friend add's remark made unique (friend_adds.remark_for): 「-」 and her 抖音号's last 4, digits and lowercase
-# hex (「Lucy-Anne」 is a name, not a tail)
-_TAIL = re.compile(r"-[0-9a-f]{4}$")
+REMARK_TAIL = 4                  # friend_adds.REMARK_TAIL: a remark made unique gets 「-」 and her 抖音号's last 4
 
 
-def friend_add_tail(name: str) -> str:
-    """The tail the friend add made a deal's name unique with (「抖音-小美-ab12」: 「-ab12」): only on a name that
-    carries the friend add's prefix; "" otherwise."""
+def friend_add_tail(name: str, douyin_ids=()) -> str:
+    """The tail the friend add made a deal's name unique with (friend_adds.remark_for: 「-」 and the last 4 characters
+    of her 抖音号, any of them: 「抖音-小美-i.99」 of …i.99 gives 「-i.99」): only on a name that carries the friend add's
+    prefix and only when it is the last 4 of one of her known 抖音号 (``douyin_ids``, the job's ``meta.creator``; any
+    case); "" otherwise (her 抖音号 unknown: nothing goes, the card is reviewed anyway; 「抖音-Lucy-Anne」 keeps its
+    name)."""
     name = " ".join(str(name or "").split())
     stripped = _PREFIX.sub("", name)
-    found = _TAIL.search(stripped) if stripped != name else None
-    return found.group(0) if found and found.group(0) != stripped else ""
+    if stripped == name:
+        return ""
+    for aweme in douyin_ids if isinstance(douyin_ids, (list, tuple)) else ():
+        aweme = str(aweme or "").strip()
+        tail = f"-{aweme[-REMARK_TAIL:]}" if aweme else ""
+        if tail and len(stripped) > len(tail) and stripped.lower().endswith(tail.lower()):
+            return stripped[-len(tail):]
+    return ""
 
 
-def channel_of(call: str, name: str) -> tuple:
+def channel_of(call: str, name: str, douyin_ids=()) -> tuple:
     """``(channel, cut)``: the cards' 场次 「<称呼>专属」, her 称呼 as the draft gave it, else her deal's name without a
-    「抖音-」 prefix; the friend add's 「-ab12」 tail of a deal name with that prefix (``friend_add_tail``: the WeChat
-    remark it sets) goes on both paths, a 称呼 the draft copied from the remark too, no other tail; nothing a file
-    name or HTML cannot carry; cut at a word boundary to CALL_MAX.  Runtime data only, never in a file of the
-    repository nor in a log."""
+    「抖音-」 prefix; the friend add's tail of a deal name with that prefix (``friend_add_tail``: the WeChat remark it
+    sets, the last 4 of her known 抖音号 ``douyin_ids``) goes on both paths, a 称呼 the draft copied from the remark
+    too, no other tail; nothing a file name or HTML cannot carry; cut at a word boundary to CALL_MAX.  Runtime data
+    only, never in a file of the repository nor in a log."""
     name = " ".join(str(name or "").split())
     call = " ".join(str(call or "").split())
-    tail = friend_add_tail(name)
-    if call and tail and call != tail and call.endswith(tail):
+    tail = friend_add_tail(name, douyin_ids)
+    if call and tail and len(call) > len(tail) and call.lower().endswith(tail.lower()):
         call = call[:-len(tail)].strip()
     raw = call or name
     stripped = _PREFIX.sub("", raw)
-    if stripped != raw and tail and stripped != tail and stripped.endswith(tail):
+    if stripped != raw and tail and len(stripped) > len(tail) and stripped.lower().endswith(tail.lower()):
         stripped = stripped[:-len(tail)].strip()
     clean = re.sub(r'[\\/:*?"<>|#%&]', "", stripped).strip()
     clean, cut = cut_words(clean, CALL_MAX)
@@ -671,9 +678,9 @@ def _sells(raw, no: int) -> tuple:
 
 
 def build_sheet(request, *, catalog: dict, skus: dict, config: dict, name: str, today: date, workspace,
-                asked: Optional[list] = None, others: int = 0, reasked: bool = False) -> tuple:
+                asked: Optional[list] = None, others: int = 0, reasked: bool = False, douyin_ids=()) -> tuple:
     """The skill's 单子.json for a draft's request: ``(sheet, photos, report)``; its 场次 「<称呼>专属」 (``channel_of``:
-    the request's ``call``, else ``name``, her deal's).  ``photos``: per card the main image
+    the request's ``call``, else ``name``, her deal's; ``douyin_ids``: her known 抖音号, for the friend add's tail).  ``photos``: per card the main image
     and its crop (``crop_photos``'s plan).  ``report``: ``problems`` (any: no card at all), ``todo`` per card (its null
     fields, a red 待定), ``notes`` (what the operator should know: a colour that does not fit, a price left 待定),
     ``cuts`` (words cut to fit the card) and ``items``.  ``asked``: the products an operator's 「做手卡」 named
@@ -794,7 +801,7 @@ def build_sheet(request, *, catalog: dict, skus: dict, config: dict, name: str, 
         report["todo"][no] = todo
         report["items"].append({"item_id": item_id, "short": short, "daily": daily, "live": live, "todo": todo,
                                 "material_from": how})
-    channel, cut_call = channel_of(request.get("call") or "", name)
+    channel, cut_call = channel_of(request.get("call") or "", name, douyin_ids)
     if cut_call:
         report["cuts"].append(f"称呼截成「{channel}」")
     sheet = {"channel": channel, "platform": "douyin", "pdf_name": f"{ZIP_NAME}_合集.pdf", "zip_name": ZIP_NAME,
@@ -1051,11 +1058,12 @@ def session_folder(home, job_id: int, now: Optional[float] = None) -> Path:
 
 def make(request, *, workspace, config: dict, name: str, job_id: int, home, asked: Optional[list] = None,
          others: int = 0, today: Optional[date] = None, heartbeat: Optional[Callable[[], bool]] = None,
-         popen=subprocess.Popen, now: Optional[float] = None, reasked: bool = False) -> tuple:
+         popen=subprocess.Popen, now: Optional[float] = None, reasked: bool = False, douyin_ids=()) -> tuple:
     """The cards of one draft's request, ``(verdict, files)``: ``made_block`` and the 1x PNGs to send (the skill's zip
     after them when ``send_zip`` and it fits), or a verdict saying why there are none (and no file).  A catalogue
     synced longer than ``max_catalogue_days`` ago, or whose last sync failed, makes none (``catalogue_problem``).
-    ``reasked``: the worker asked the model once more about its short names (a problem says so).  In a folder of its
+    ``reasked``: the worker asked the model once more about its short names (a problem says so); ``douyin_ids``: her
+    known 抖音号 (the job's ``meta.creator``: the 场次 loses the friend add's tail of her name).  In a folder of its
     own under ``home`` (kept KEEP_DAYS: 单子.json and the photos for a person who fixes a 待定 by hand)."""
     now = time.time() if now is None else now
     today = today or beijing_today(now)
@@ -1066,7 +1074,7 @@ def make(request, *, workspace, config: dict, name: str, job_id: int, home, aske
         return made_block(False, problems=[stale], catalog_at=synced), []
     sheet, photos, report = build_sheet(request, catalog=info["items"], skus=sku_index(config["skus"]), config=config,
                                         name=name, today=today, workspace=workspace, asked=asked, others=others,
-                                        reasked=reasked)
+                                        reasked=reasked, douyin_ids=douyin_ids)
     if report["problems"]:
         return made_block(False, problems=report["problems"], items=report["items"], catalog_at=synced), []
     hide = (sheet["channel"], sheet["channel"][:-2])        # her 称呼: kept out of what goes back (a script's output)
