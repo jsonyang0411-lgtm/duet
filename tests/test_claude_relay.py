@@ -2,6 +2,7 @@
 
 import json
 import os
+import sqlite3
 import threading
 import time
 import urllib.error
@@ -181,6 +182,50 @@ class TestStore:
         store.reset_session("chat")
         store.add("chat", ME, "y")
         assert store.claim_next()["session_id"] is None
+
+    def test_a_write_whose_commit_fails_is_rolled_back_before_its_error_goes_on(self):
+        """A commit refused after the INSERT (SQLite busy, the disk full) left the transaction open: the next claim or
+        the next write's commit made the job real, its caller told it was not queued (微信里审批草稿, third verification
+        item 1: a platform write approved twice).  Every write rolls back before its error goes on."""
+        store = RelayStore(":memory:")
+        real = store._conn
+
+        class CommitFailsOnce:
+            def __init__(self):
+                self.armed = True
+
+            def commit(self):
+                if self.armed:
+                    self.armed = False
+                    raise sqlite3.OperationalError("database is locked")
+                return real.commit()
+
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+        store._conn = CommitFailsOnce()
+        with pytest.raises(sqlite3.OperationalError):
+            store.add("chat", ME, "一", now=1)
+        store._conn = real
+        assert not real.in_transaction and store.claim_next(now=2) is None
+        job = store.add("chat", ME, "二", now=3)
+        assert [j["id"] for j in store.list_jobs()] == [job]
+        store._conn = CommitFailsOnce()
+        with pytest.raises(sqlite3.OperationalError):
+            store.append_pending("chat", "admin", "三", ready_at=9)
+        store._conn = real
+        assert not real.in_transaction and store.get(job)["text"] == "二" and store.get(job)["ready_at"] is None
+
+    def test_a_job_is_found_by_its_approval_key(self):
+        """``job_with_key``: the job of an approved platform execution (``meta.key``), never one that only has the key's
+        letters somewhere else."""
+        store = RelayStore(":memory:")
+        key, other = "a" * 32, "b" * 32
+        store.add("chat", ME, "", kind="prm", meta={"op": "platform_preview", "packet_id": 1})
+        job = store.add("chat", ME, "", kind="prm", meta={"op": "platform_execute", "packet_id": 1, "key": key})
+        store.add("chat", ME, f"文字里有 {other}", kind="prm", meta={"op": "platform_preview", "note": other + "c"})
+        assert store.job_with_key(key)["id"] == job
+        assert store.job_with_key(other) is None and store.job_with_key("") is None
 
 
 # ── WeChat side ───────────────────────────────────────────────────────────

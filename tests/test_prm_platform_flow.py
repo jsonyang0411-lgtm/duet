@@ -4,6 +4,7 @@ VERIFIED_SUCCESS sends the reply (the link filled in); everything else, a Mac th
 the job or goes silent, ends red without a word to the creator."""
 
 import json
+import sqlite3
 import time
 
 import pytest
@@ -140,7 +141,8 @@ def test_approve_queues_one_execution_with_its_own_key(bot):
 
 def test_an_execution_that_cannot_be_queued_leaves_the_draft_waiting_to_be_approved_again(bot):
     """批准并执行 whose relay job could not be queued: nothing ran, so the draft waits as it was (no key, no decision)
-    and can be approved again (it no longer goes red as 「没能排进 Mac 的任务队列」)."""
+    and can be approved again (it no longer goes red as 「没能排进 Mac 的任务队列」).  Only when the job is certainly not
+    there (third verification: looked up by its approval key); a 改了再执行's words are kept for the console's edit box."""
     from unittest.mock import patch
 
     from src.prm.service import QUEUE_FAILED
@@ -151,32 +153,168 @@ def test_an_execution_that_cannot_be_queued_leaves_the_draft_waiting_to_be_appro
     waiting = bot.prm.store.packet(packet["id"])
     assert (waiting["status"], waiting["decided_at"], waiting["final_text"]) == ("pending", None, None)
     assert waiting["platform"] == packet["platform"]
-    job = approve(bot, packet)
+    edited = "专属佣金 20% 已经设好，明天 0 点生效～"
+    with patch.object(bot.relay, "submit", side_effect=RuntimeError("队列坏了")):
+        assert bot.prm.decide(packet["id"], "execute", edited)["code"] == "queue_failed"
+    waiting = bot.prm.store.packet(packet["id"])
+    assert (waiting["status"], waiting["final_text"], waiting["edited"]) == ("pending", edited, True)
+    [shown] = [p for p in snap(bot)["pending"] if p["id"] == packet["id"]]
+    assert shown["final_text"] == edited and shown["text"] == packet["text"]
+    job = approve(bot, packet, edited)
     assert json.loads(job["meta"])["op"] == "platform_execute"
+    assert bot.prm.store.packet(packet["id"])["final_text"] == edited
 
 
 def test_a_re_preview_landing_between_the_checks_and_the_move_is_never_run_unseen(bot):
-    """The move to executing compares the platform data the checks read: a 重新预览 started in between is refused
-    (the draft waits); a stamp that is not its preview's (微信里审批草稿) too."""
+    """The move to executing compares the platform data the checks read: a 重新预览 landing in between is refused
+    (the draft waits), one started in between says so (third verification, probe i7d: 「正在重新预览」, not 「预览刚刚
+    变过」); a stamp that is not its preview's (微信里审批草稿) is refused too."""
     from unittest.mock import patch
 
-    from src.prm.service import PREVIEW_CHANGED
+    from src.prm.service import PREVIEW_CHANGED, PREVIEWING
 
     packet = drafted(bot)
     assert bot.prm.decide(packet["id"], "execute", stamp="f" * 16)["code"] == "preview_changed"
     real = bot.prm.store.move
+    landing = {"previewing": 1.0}
 
     def move(packet_id, from_states, to_state, **fields):
         if to_state == "executing":
             data = bot.prm.store.packet(packet_id)["platform"]
-            bot.prm.store.set_platform(packet_id, {**data, "previewing": 1.0}, ("pending",))
+            bot.prm.store.set_platform(packet_id, {**data, **landing}, ("pending",))
         return real(packet_id, from_states, to_state, **fields)
 
     with patch.object(bot.prm.store, "move", move):
+        assert bot.prm.decide(packet["id"], "execute") == {"ok": False, "error": PREVIEWING, "code": "previewing"}
+        data = bot.prm.store.packet(packet["id"])["platform"]
+        bot.prm.store.set_platform(packet["id"], {**data, "previewing": None}, ("pending",))
+        landing = {"preview": {**data["preview"], "previewed_at": 9.0}}
         assert bot.prm.decide(packet["id"], "execute") == {"ok": False, "error": PREVIEW_CHANGED,
                                                           "code": "preview_changed"}
     assert bot.prm.store.packet(packet["id"])["status"] == "pending"
     assert [j for j in bot.relay.store.list_jobs(10) if '"platform_execute"' in j["meta"]] == []
+
+
+def test_a_nan_in_the_platform_data_never_refuses_an_approval(bot):
+    """Probe i7h: a NaN in the platform JSON (a step's seconds, say) made the move's compare false (NaN is not NaN), and
+    every 批准并执行 was refused as 「预览刚刚变过」.  The data is compared as JSON."""
+    packet = drafted(bot)
+    data = bot.prm.store.packet(packet["id"])["platform"]
+    steps = [{**data["preview"]["steps"][0], "seconds": float("nan")}]
+    nan = {**data, "preview": {**data["preview"], "steps": steps}}
+    assert bot.prm.store.set_platform(packet["id"], nan, ("pending",))
+    out = bot.prm.decide(packet["id"], "execute")
+    assert out["ok"] and out["status"] == "executing"
+
+
+def test_an_execution_queued_before_the_relay_raised_runs_as_approved(bot):
+    """Third verification item 1 (probe i10a): the relay raised after the job was written; the draft went back to
+    waiting without its key, so the Mac's answer was ignored and a second approval wrote the platform again.  The job
+    is looked up by its approval key: there, it runs as approved."""
+    from unittest.mock import patch
+
+    packet = drafted(bot)
+    real = bot.relay.submit
+
+    def queued_then_raises(*args, **kwargs):
+        real(*args, **kwargs)
+        raise sqlite3.OperationalError("database is locked")
+
+    with patch.object(bot.relay, "submit", side_effect=queued_then_raises):
+        out = bot.prm.decide(packet["id"], "execute")
+    assert out["ok"] and out["status"] == "executing"
+    job = bot.relay.store.get(out["job"])
+    executing = bot.prm.store.packet(packet["id"])
+    assert executing["platform"]["key"] == json.loads(job["meta"])["key"]
+    assert executing["platform"]["job_id"] == job["id"]
+    assert not bot.prm.decide(packet["id"], "execute")["ok"]
+    mac_runs(bot, job, record())
+    assert bot.prm.store.packet(packet["id"])["status"] == "approved"
+    assert [j["id"] for j in bot.relay.store.list_jobs(10) if '"platform_execute"' in j["meta"]] == [job["id"]]
+
+
+class CommitFailsOnce:
+    """A relay store's connection whose next commit fails, as SQLite's busy timeout does (probes i10b / i10c)."""
+
+    def __init__(self, conn):
+        self._conn, self.armed = conn, True
+
+    def commit(self):
+        if self.armed:
+            self.armed = False
+            raise sqlite3.OperationalError("database is locked")
+        return self._conn.commit()
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def test_an_execution_whose_commit_failed_is_rolled_back_and_never_handed_to_the_mac(bot):
+    """Third verification item 1 (probes i10b, i10c): the relay store's commit failed after its INSERT, nothing rolled
+    it back, and the Mac's next request (or the next write's commit) got the job while the draft waited again."""
+    from src.prm.service import QUEUE_FAILED
+
+    packet = drafted(bot)
+    store = bot.relay.store
+    real = store._conn
+    store._conn = CommitFailsOnce(real)
+    try:
+        assert bot.prm.decide(packet["id"], "execute") == {"ok": False, "error": QUEUE_FAILED, "code": "queue_failed"}
+    finally:
+        store._conn = real
+    assert not real.in_transaction and bot.relay.next_job(0, ("prm",)) is None
+    store.add(CREATOR, CREATOR, "随便一个任务")
+    assert [j for j in store.list_jobs(10) if '"platform_execute"' in j["meta"]] == []
+    assert bot.prm.store.packet(packet["id"])["status"] == "pending"
+    job = approve(bot, packet)
+    assert [j["id"] for j in store.list_jobs(10) if '"platform_execute"' in j["meta"]] == [job["id"]]
+
+
+def test_an_execution_not_known_to_be_queued_is_red_until_checked_and_a_late_result_is_kept(bot, clock):
+    """Third verification item 1: the job could not be looked up either: it may run.  Red as a result not known, its key
+    kept: a second draft of the same 专属 action waits for an operator's check, and a result that comes after all is
+    marked late (nothing sent)."""
+    from unittest.mock import patch
+
+    from src.prm.service import QUEUE_UNKNOWN, QUEUE_UNKNOWN_PROBLEM, platform_state
+
+    packet = drafted(bot)
+    real = bot.relay.submit
+
+    def queued_then_raises(*args, **kwargs):
+        real(*args, **kwargs)
+        raise sqlite3.OperationalError("disk I/O error")
+
+    with patch.object(bot.relay, "submit", side_effect=queued_then_raises), \
+            patch.object(bot.relay.store, "job_with_key", side_effect=sqlite3.OperationalError("disk I/O error")):
+        assert bot.prm.decide(packet["id"], "execute") == {"ok": False, "error": QUEUE_UNKNOWN, "code": "queue_unknown"}
+    red = bot.prm.store.packet(packet["id"])
+    assert (red["status"], red["outcome"]) == ("failed", "platform_unknown") and platform_state(red) == "uncertain"
+    assert red["platform"]["key"] and QUEUE_UNKNOWN_PROBLEM in red["error"] and "平台上可能已经开了" in red["error"]
+    assert "再批准一次" not in red["error"]
+    [alert] = snap(bot)["platform_alerts"]
+    assert alert["id"] == packet["id"]
+    [job] = [j for j in bot.relay.store.list_jobs(10) if '"platform_execute"' in j["meta"]]
+    mac_runs(bot, job, record())                                    # it was queued after all
+    late = bot.prm.store.packet(packet["id"])
+    assert late["status"] == "failed" and late["platform"]["execution"]["late"] is True
+    assert "结果晚到了" in bot.prm.store.deal(packet["deal_id"])["attention"] and bot.texts == []
+
+
+def test_an_execution_not_known_to_be_queued_stops_a_second_draft_until_it_is_checked(bot, clock):
+    """The same, nothing on the Mac: another draft of the same product and creator is refused until 「我已处理」."""
+    from unittest.mock import patch
+
+    packet = drafted(bot)
+    with patch.object(bot.relay, "submit", side_effect=RuntimeError("队列坏了")), \
+            patch.object(bot.relay.store, "job_with_key", side_effect=RuntimeError("队列坏了")):
+        assert bot.prm.decide(packet["id"], "execute")["code"] == "queue_unknown"
+    no_next_step(bot, clock)
+    second = drafted(bot)
+    out = bot.prm.decide(second["id"], "execute")
+    assert not out["ok"] and "结果不确定" in out["error"] and f"#{packet['id']}" in out["error"]
+    assert bot.prm.decide(packet["id"], "ack") == {"ok": True, "released": second["id"]}
+    assert approve(bot, second)
 
 
 def test_verified_success_sends_the_reply_with_the_link(bot):

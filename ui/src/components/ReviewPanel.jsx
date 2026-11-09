@@ -311,8 +311,10 @@ function PlatformBox({ pf }) {
 
 function DraftCard({ p, canSend, replyParts = 1, onDone }) {
   const toast = useToast()
+  // a 「改了再执行」 that could not be queued for the Mac: the edited reply is kept for the next try (only the edit box has it)
+  const kept = p.status === 'pending' && p.platform && p.final_text != null && p.final_text !== p.text ? p.final_text : null
   const [editing, setEditing] = useState(false)
-  const [text, setText] = useState(p.text)
+  const [text, setText] = useState(kept ?? p.text)
   const [busy, setBusy] = useState(false)
   const [dropping, setDropping] = useState(false)
   const [executing, setExecuting] = useState(null)   // the text to execute with (null = no dialog)
@@ -366,6 +368,7 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
         )}
         {pf && <PlatformBox pf={pf} />}
         {pf && <div className="f-hint">下面是平台上核验成功以后才发给达人的回复：</div>}
+        {kept != null && !editing && <div className="f-hint prm-kept-edit">上次「改了再执行」没排进 Mac 的任务队列，改过的回复还留着：点「改了再执行」接着用；直接点「批准并执行」发的是下面的原稿</div>}
         {editing
           ? <TextArea value={text} onChange={setText} rows={5} aria-label="修改要发的内容" />
           : <div className="prm-text" style={{ whiteSpace: 'pre-wrap' }}>{p.text || <span className="dim">（只发附件，没有文字）</span>}</div>}
@@ -388,7 +391,7 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
             {editing ? (
               <>
                 <button type="button" className="btn primary" disabled={busy || !canSend || !pf.can_execute} onClick={() => setExecuting(text)}><Lightning />确认并执行</button>
-                <button type="button" className="btn" disabled={busy} onClick={() => { setEditing(false); setText(p.text) }}>取消修改</button>
+                <button type="button" className="btn" disabled={busy} onClick={() => { setEditing(false); setText(kept ?? p.text) }}>取消修改</button>
               </>
             ) : (
               <>

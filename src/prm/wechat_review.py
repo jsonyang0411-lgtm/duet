@@ -12,10 +12,11 @@ can be reached nowhere), her last line(s) it answers (short; numbers as their pl
 and city, a labelled 微信号 masked), the draft in full with its placeholders (their masked numbers after it, as the
 console's legend), a shipping notice's waybill, its files, and how to answer.  A draft with a platform action lists the
 action with every line its preview has (``_platform_lines``: what will be made, for whom, with which values; a sample
-order's receiver only by province and city; the creator's platform ids by their last characters; the preview's verdict
-and problems), or says how many lines are left out (then it cannot run from WeChat); the pictures the operator is meant
-to see (``meta.operator_files``: the relay's own files) follow it.  None for what goes out by itself (a kind's gate
-``auto``, 下班时段 and 自动模式 approve it at once: never pending; 开场白自动发: ``meta.auto_at`` while
+order's receiver only by province and city; the creator's platform ids, and the ids of the preview's plan, by their last
+characters, in the problems too; the preview's verdict and problems), or says how many lines are left out (more than
+LINES_MAX, or more than fit in NOTICE_CHARS, the relay's send limit: then it cannot run from WeChat); the pictures the
+operator is meant to see (``meta.operator_files``: the relay's own files) follow it.  None for what goes out by itself
+(a kind's gate ``auto``, 下班时段 and 自动模式 approve it at once: never pending; 开场白自动发: ``meta.auto_at`` while
 ``send_due_openings`` still takes it), a 百应 draft (``BUYIN_TOOL``: copied into 百应 by hand), a holding reply (no
 packet), anything while ADMIN_WXID is empty (``status`` says why), nor a draft that was waiting already before the
 switch was first on (``ON_AT`` in prm_meta, less BACKLOG_SEC: the console counts those; a run with the switch off
@@ -31,8 +32,10 @@ in the admin's own private chat, never a voice message (heard wrong, a 「不发
   「ok」「同意」「嗯」「[强]」「👍」 send the draft as it was drafted (a proposed edit is dropped), 「2」「不发」「不要」「算了」 drop
   it, 「改 <你的话>」 sends those words instead (the console's 改了再发 checks: ``PrmService.edit_problem``); other words
   are kept as the proposed edit and the bot asks 「#12 改成：『…』 回 1 发出／2 不发」.  Never a proposal: a line for the
-  relay (``cc …``) or an admin command (it goes on to its step, untouched), another approval word, emoji only, a lone
-  number, a short text built around a yes (``_yes_like``: 「好的呀」「发吧」「没问题」…): the bot says how to answer.
+  relay (``cc …``; an admin command with other words refuses the whole message, as without a quote), another approval
+  word, emoji only, a lone number, a text built around a yes (``_yes_like``: a short one, 「好的呀」「发吧」「没问题」…, or
+  one made only of yes words, 「好好好好好好好好好」), any text of at most SHORT_CHARS letters (``_short``: 「妥」「冲」「安排」
+  「go」「就按这个」…): the bot says how to answer; a short one starting with 改 (「改一下」) asks what to.
 - Quoting that question: a yes word sends the proposal, only when the 『…』 quoted is the current one (else the bot shows
   the current one, as a question of its own).  A number in the words that is not the quoted draft's (「改 15 …」「发 15」
   「执行 15」 quoting #12) does nothing: the bot asks which.
@@ -42,15 +45,20 @@ in the admin's own private chat, never a voice message (heard wrong, a 「不发
   notification or a 改成 question shown before the answer was written (on WeChat's clock: ``note_read_back``), its draft
   the only one told here that still waits (else the bot lists them), never in CLAUDE_RELAY_ONLY (it may be Claude's),
   never while a relay job of this chat runs or ended within RELAY_QUIET_SEC, never right after another told draft was
-  closed in the console (CLOSED_RACE_SEC).  A bare one after the bot said something else meanwhile gets a hint; a lone
-  「执行」 is never run nor passed on while a platform draft told here waits: the bot asks which.
+  closed in the console (CLOSED_RACE_SEC).  A bare one after the bot said something else meanwhile gets a hint.  A
+  「执行」 alone or with words around it (``_execute_core``: 「执行吧」「执行？」「执行一下」「可以执行」…) is never run nor
+  passed on while a platform draft told here waits or was the last thing said: the bot asks which (in either mode).  An
+  unnumbered 「改 …」 while a notification is the last thing said: the bot asks which, except in CLAUDE_RELAY_ONLY or
+  while a relay job of this chat runs or just ended (it is Claude's: it goes on).
 - A draft for a 老板拉的群 is sent from WeChat only by an answer quoting its notification or question (the console's
   group confirm dialog); 「不发」 needs no quote.
 - A platform action runs only by 「执行」 quoting its notification, or 「执行 12」 (the console's 批准并执行,
   ``PrmService.decide`` "execute", every check of it), and only the preview its notification showed (``preview_stamp``,
   checked again by ``decide`` in the step that moves the draft: one it said cannot run, or one previewed again since, is
   the console's); 1 / 好 / 发 never run one, 「改」 of its reply stays the console's.  When the execution ends (the reply
-  sent after VERIFIED_SUCCESS, uncertain, or not done; a result that comes late too) the admin is told in one line.
+  sent after VERIFIED_SUCCESS, uncertain, or not done; a result that comes late too) the admin is told in one line.  A
+  job the relay raised on: run when it is there all the same, 「可以再回一次」 only when it certainly is not, else red as
+  not known (``PrmService._approve_execute``: QUEUE_UNSURE, its result told when it comes late).
 - Several lines at once (WeChat merges bubbles sent within 2.2 s, src/wechat/burst.py): each answer line is done, an edit
   in a merged burst only as a proposal; the lines that are no answer go on to the later route steps as one message
   (``rest``), a cc line first (the relay reads the message's start); an admin command among other lines, or two or more
@@ -96,6 +104,7 @@ DROP_WORDS = ("2", "不发", "不要", "算了")                          # ... 
 EXECUTE_WORDS = ("执行",)                                         # ... run its platform action (and send its reply)
 YES_STEMS = ("发", "好", "行", "可", "同意", "确认", "对", "是", "嗯", "ok", "照", "没问题", "中")   # a yes, not words for her
 YES_CHARS = 8               # ... in a text this short (punctuation and emoji left out): never a proposed edit
+SHORT_CHARS = 4             # quoting a notification: a text this short (「妥」「冲」「安排」「go」「就按这个」) is never a proposed edit
 RETRY_SEC = (10, 120)       # a send the admin's chat did not take: the chat again after 10 s, doubling, at most 2 min apart
 SEND_TRIES = 6              # ... and a message not again (this run) after this many failed sends (about 4.5 minutes)
 PER_ROUND = 3               # sends one round of the sender thread makes at most (a pile waits its turn)
@@ -112,6 +121,10 @@ SAID_CHARS = 60             # ... each cut to this many characters
 NOTE_CHARS = 120            # the draft's reason (when it asks for attention), an error told
 FACT_CHARS = 400            # a platform action's line as the notification lists it (cut: the list is not whole)
 LINES_MAX = 40              # ... and how many lines at most (more: 「还有 N 项，见控制台」, not run from WeChat)
+NOTICE_CHARS = 1500         # ... and the notification at most this long (the relay's send limit, the default of
+                            # CLAUDE_RELAY_MAX_CHARS): the platform lines that do not fit are left out the same way
+READ_BACKS = 8              # the bot's own lines read back before their send was noted, remembered (``note_sent``)
+READ_BACK_EARLY_SEC = 30    # ... for this long
 TAIL_CHARS = 4              # a creator's platform id (UID, 抖音号) as a notification shows it: its last characters
 FILES_NAMED = 5             # file names a notification lists at most
 LISTED = 8                  # drafts a 「现在有 N 份在等你回」 names at most
@@ -136,6 +149,11 @@ _EMOJI = re.compile("[\\s\U0001F000-\U0001FAFF☀-➿️‍]+")
 _NOT_LETTERS = re.compile(r"[\W_]+")
 _SALE = re.compile(r"（售价[^（）]*）")
 _CREATOR_FACT = re.compile(r"（(\S+) ([^，）\s]+)，粉丝")      # a sample order's 达人 fact: （平台 平台号，粉丝 …
+_ID_KEY = re.compile(r"(?:^|_)(?:id|uid|account)$", re.I)   # an id among a preview's plan (``run``): buyer_id …
+_YES_ONLY = re.compile(r"(?:没问题|同意|确认|可以|ok|[发好行可对是嗯照中的啊呀吧啦哈了滴哒嘞哦噢呢喔])+")   # 「好好好好好好好好好」
+_EXECUTE_BEFORE = ("那就", "那", "就", "可以", "请", "麻烦", "帮我", "帮忙", "去", "马上", "现在", "直接", "赶紧", "快", "好",
+                   "行", "开始")
+_EXECUTE_AFTER = ("一下", "下", "吧", "啊", "了", "呀", "哈", "呗", "哦", "喔", "嘛", "啦", "咯", "吗", "呢")
 
 NO_ADMIN_WHY = ("微信里审批草稿打开了，但没填管理员 wxid（ADMIN_WXID）：草稿发不到微信里。到「中转代理」页的设置里填好"
                 "「管理员 wxid」，再重启机器人")
@@ -146,6 +164,7 @@ REFUSE_TEXT = "这几句是一起到的，里面有好几条要交给 Mac 或者
 HELP_YES = "要发原稿：引用通知回 1；要改：写「改 + 新的话」"
 WHICH_EXECUTE = "执行哪一份？请引用那条通知回「执行」，或者回「执行 N」"
 QUEUE_RETRY = "没能排进 Mac 的任务队列，平台没有动，可以再回一次「执行」"
+QUEUE_UNSURE = "排进 Mac 的任务队列时出了错，不知道排进去没有：平台上可能已经写了，先到平台后台核对，别重做；回复没有发"
 UNCERTAIN = "结果不确定，平台上可能已经写了：先到平台后台核对，别重做"
 VERIFIED_SEND_HEAD, VERIFIED_SEND_TAIL = "平台动作已经核验成功，但回复没发出去：", "；请在微信里手动发给达人"  # (service.py)
 
@@ -172,11 +191,57 @@ def _not_words(text: str) -> bool:
     return word in ALLOW_WORDS or word in DENY_WORDS or _emoji_only(text) or word.isdigit()
 
 
+def _letters(text) -> str:
+    """A text's letters only: full-width as plain, emoji (and WeChat's 「[强]」 tags), punctuation and spaces left out,
+    lower case."""
+    return _NOT_LETTERS.sub("", _EMOJI_TAG.sub("", unicodedata.normalize("NFKC", str(text or "")))).lower()
+
+
 def _yes_like(text: str) -> bool:
-    """A short text built around a yes (「好的呀」「发吧」「可以的」「没问题」「OK的」「好的👌」…: YES_STEMS, at most YES_CHARS
-    letters once punctuation and emoji are left out): the admin approving, never words for her."""
-    bare = _NOT_LETTERS.sub("", _EMOJI_TAG.sub("", unicodedata.normalize("NFKC", str(text or "")))).lower()
-    return 0 < len(bare) <= YES_CHARS and any(stem in bare for stem in YES_STEMS)
+    """A text built around a yes: the admin approving, never words for her.  A short one (YES_STEMS, at most YES_CHARS
+    letters once punctuation and emoji are left out: 「好的呀」「发吧」「可以的」「没问题」「OK的」「好的👌」…), or one of any
+    length made only of yes words and their particles (「好好好好好好好好好」「嗯嗯嗯嗯嗯嗯嗯嗯嗯」「对对对对对对对对对」).  A yes
+    word is there in both."""
+    bare = _letters(text)
+    if not bare or not any(stem in bare for stem in YES_STEMS):
+        return False
+    return len(bare) <= YES_CHARS or bool(_YES_ONLY.fullmatch(bare))
+
+
+def _short(text: str) -> bool:
+    """Quoting a notification: a text of at most SHORT_CHARS letters (punctuation and emoji left out) that does not
+    start with 改 (「妥」「冲」「安排」「go」「没毛病」「就按这个」…): the admin reacting, never words for her (an edit says
+    「改 …」)."""
+    bare = _letters(text)
+    return 0 < len(bare) <= SHORT_CHARS and not bare.startswith("改")
+
+
+def _definite(content: str) -> bool:
+    """An answer quoting a notification that is no words of the admin's own (with a command beside it, the command goes
+    on alone): 1 / 2 / 执行 and their words, 「改 …」 and 「改」, a numbered answer."""
+    word = _word(content)
+    return (word in SEND_WORDS or word in DROP_WORDS or word in EXECUTE_WORDS or word in ("改", "改成")
+            or any(pattern.match(content) for pattern in (_EDIT, _EDIT_N, _EDIT_N_ONLY))
+            or any(pattern.match(content) for pattern, _, _ in _NUMBERED))
+
+
+def _execute_core(text: str) -> bool:
+    """A short text whose core is 「执行」 (「执行吧」「执行？」「执行一下」「可以执行」「去执行」「执行啊」「执行了」「那就执行吧」…:
+    punctuation, emoji and the words around it left out, at most YES_CHARS letters): a 「执行」 that does not say which.
+    Not one that says no (「不执行」「别执行」 stay what they are)."""
+    core = _letters(text)
+    if not core or len(core) > YES_CHARS or "执行" not in core:
+        return False
+    changed = True
+    while changed and core != "执行":
+        changed = False
+        for word in _EXECUTE_BEFORE:
+            if core.startswith(word) and core != "执行":
+                core, changed = core[len(word):], True
+        for word in _EXECUTE_AFTER:
+            if core.endswith(word) and core != "执行":
+                core, changed = core[:-len(word)], True
+    return core == "执行"
 
 
 def _asked(quoted: str) -> Optional[str]:
@@ -317,6 +382,8 @@ class WechatReview:
         self._started = clock()
         self._last: Optional[_Last] = None            # the last thing the bot said in the admin's chat
         self._last_review: Optional[_Last] = None     # ... the last of it that was a notification or a 改成 question
+        self._said_lock = threading.RLock()           # ... set by the sender thread, read back by the poll thread
+        self._read_backs: deque = deque(maxlen=READ_BACKS)   # (text, WeChat's time, this PC's) read back before noted
         self._seen: deque = deque(maxlen=SEEN_IDS)
         self._lock = threading.Lock()                 # one answer at a time
         if not self._switch:
@@ -557,13 +624,16 @@ class WechatReview:
         state = self._state(execution, outcome)
         if state == "verified":                          # (the console's words without their own head and tail)
             why = error.removeprefix(VERIFIED_SEND_HEAD).removesuffix(VERIFIED_SEND_TAIL) or "发送出错"
+            why = self._hide(row.get("platform"), why)
             return (f"#{number} 已执行：{self._done(row, execution)}，但回复没有发出去（{_cut(why, NOTE_CHARS)}）；"
                     f"需要的话请在微信里手动发给 {name}")
         if status == DROPPED:                            # (an invite card had opened it already: nothing to run)
-            return f"#{number} 没有执行：{_cut(error.removesuffix('，没有执行') or '不用执行', NOTE_CHARS)}；回复没有发"
+            error = self._hide(row.get("platform"), error.removesuffix("，没有执行") or "不用执行")
+            return f"#{number} 没有执行：{_cut(error, NOTE_CHARS)}；回复没有发"
         result = str(execution.get("outcome") or ("NOT_RUN" if outcome == "platform_not_run" else "UNKNOWN"))
         problems = [p for p in execution.get("problems") or [] if isinstance(p, str) and p.strip()]
-        what = f"{platforms.outcome_text(result)}（{result}）" + (f"：{problems[0]}" if problems else "")
+        what = f"{platforms.outcome_text(result)}（{result}）" + (f"：{self._hide(row.get('platform'), problems[0])}"
+                                                                if problems else "")
         if state == "uncertain":
             return f"#{number} {UNCERTAIN}（{_cut(what, NOTE_CHARS)}）；回复没有发"
         return f"#{number} 执行没成功：{_cut(what, NOTE_CHARS)}，平台没有动，回复没有发；请到控制台看"
@@ -631,19 +701,25 @@ class WechatReview:
                 f"{_cut(n, 40)}" + (f"：{_cut(contact.mask_contacts(w), 60)}" if w else "") for n, w, _ in pictures) + "）")
         stamp = ""
         if platform:
-            listed, whole = self._platform_lines(packet)
-            lines += listed
-            if self._runnable(packet) and whole:
-                stamp = preview_stamp((packet.get("platform") or {}).get("preview"))
-                lines.append("引用这条回「执行」在平台上执行（核验成功才把上面的回复发给她）｜2 不发")
-                lines.append(f"（发在群里：一定要引用这条回「执行」；不发也可以回「不发 {number}」）" if group
-                             else f"（不引用就回「执行 {number}」「不发 {number}」）")
-            elif (packet.get("platform") or {}).get("previewing"):
-                lines.append("正在重新预览，微信里不能执行：请到控制台看了结果再「批准并执行」；不要的话回 2")
-            elif self._runnable(packet):
-                lines.append("通知里没列全，微信里不能执行：请到控制台看了再「批准并执行」；不要的话回 2")
+            runnable = self._runnable(packet)
+            go = ["引用这条回「执行」在平台上执行（核验成功才把上面的回复发给她）｜2 不发",
+                  f"（发在群里：一定要引用这条回「执行」；不发也可以回「不发 {number}」）" if group
+                  else f"（不引用就回「执行 {number}」「不发 {number}」）"]
+            if (packet.get("platform") or {}).get("previewing"):
+                stop = "正在重新预览，微信里不能执行：请到控制台看了结果再「批准并执行」；不要的话回 2"
+            elif runnable:
+                stop = "通知里没列全，微信里不能执行：请到控制台看了再「批准并执行」；不要的话回 2"
             else:
-                lines.append("预览没通过，微信里不能执行：请到控制台处理（「重新预览」）；不要的话回 2")
+                stop = "预览没通过，微信里不能执行：请到控制台处理（「重新预览」）；不要的话回 2"
+            # (the platform lines get what is left of NOTICE_CHARS, the longer of the two endings kept back)
+            room = NOTICE_CHARS - len("\n".join(lines)) - 1 - max(len("\n".join(go)), len(stop)) - 1
+            listed, whole = self._platform_lines(packet, room)
+            lines += listed
+            if runnable and whole:
+                stamp = preview_stamp((packet.get("platform") or {}).get("preview"))
+                lines += go
+            else:
+                lines.append(stop)
         else:
             lines.append(f"回 1 {'发到群里' if group else '发出'}｜2 不发｜改 + 你的话（直接发你改的）")
             lines.append(f"（发在群里：要引用这条回；不发也可以回「不发 {number}」）" if group
@@ -675,11 +751,26 @@ class WechatReview:
                 and not data.get("previewing"))
 
     @staticmethod
-    def _creator_ids(action: dict) -> list:
-        """The creator's platform ids an action names (UID, 抖音号, 小红书号): shown by their last characters only."""
+    def _creator_ids(action: dict, run=None) -> list:
+        """The creator's platform ids an action names (UID, 抖音号, 小红书号) and the ids its preview's plan has (``run``:
+        the 小红书 买手's userId, any ``…_id``): shown by their last characters only."""
         ids = [str(action.get(k) or "").strip() for k in ("creator_platform_id", "creator_douyin_id", "creator_uid",
                                                          "creator_account")]
+        ids += [str(value).strip() for key, value in (run if isinstance(run, dict) else {}).items()
+                if isinstance(value, (str, int)) and not isinstance(value, bool) and _ID_KEY.search(str(key))]
         return sorted({i for i in ids if len(i) > TAIL_CHARS}, key=len, reverse=True)
+
+    def _ids(self, platform) -> list:
+        """The ids ``_creator_ids`` finds in a draft's platform data (a dict, or its JSON as a row has it)."""
+        data = self._json(platform)
+        action = data.get("action") if isinstance(data.get("action"), dict) else {}
+        preview = data.get("preview") if isinstance(data.get("preview"), dict) else {}
+        return self._creator_ids(action, preview.get("run"))
+
+    def _hide(self, platform, text) -> str:
+        """``text`` (a problem, an error) as the admin's chat shows it: the ids of the draft's platform action
+        (``_ids``) by their last characters, a labelled 微信号 / a phone number masked."""
+        return self._masked("", text, self._ids(platform))[1]
 
     @classmethod
     def _masked(cls, label: str, value, ids: list) -> tuple[str, str]:
@@ -698,14 +789,16 @@ class WechatReview:
             label, value = label.replace(creator_id, _tail(creator_id)), value.replace(creator_id, _tail(creator_id))
         return label, contact.mask_contacts(value)
 
-    def _platform_lines(self, packet: dict) -> tuple[list, bool]:
+    def _platform_lines(self, packet: dict, room: Optional[int] = None) -> tuple[list, bool]:
         """``(lines, whole)``: a draft's platform action with every line its preview has (the console's preview block):
         what it is and the preview's verdict; a sample order's every product (name, and each SKU's code, colour and
         quantity), its courier and the receiver by province and city only (never a name, phone or street), the
         preview's other lines but the receiver's; any other action's parameters (``platforms.describe``, the receiver
         and the note left out) and every line of its preview (渠道类型, each SKU's price and stock, 价格检查, 有效期 …);
-        the preview's problems.  The creator's platform ids by their last characters (``_masked``).  ``whole``: every
-        line listed in full (else 「还有 N 项，见控制台」, and 「执行」 is the console's)."""
+        the preview's problems.  The creator's platform ids by their last characters (``_masked``: in the problems too).
+        At most LINES_MAX lines, each at most FACT_CHARS, all of them at most ``room`` characters (what the notification
+        has left of NOTICE_CHARS).  ``whole``: every line listed in full (else 「还有 N 项，见控制台」, and 「执行」 is the
+        console's)."""
         data = packet.get("platform") or {}
         preview = data.get("preview") or {}
         action = data.get("action") or {}
@@ -741,18 +834,23 @@ class WechatReview:
         problems = [p for p in preview.get("problems") or [] if isinstance(p, str)]
         problems += [p for step in preview.get("steps") or [] if isinstance(step, dict)
                      for p in step.get("problems") or [] if isinstance(p, str) and p not in problems]
-        ids = self._creator_ids(action)
+        ids = self._creator_ids(action, preview.get("run"))
         rows = [self._masked(label, value, ids) for label, value in shown]
-        rows += [("问题", contact.mask_contacts(p)) for p in problems]
+        rows += [self._masked("问题", p, ids) for p in problems]
         lines = [" ".join(f"{label}：{value}".split()) for label, value in rows]
-        whole = len(lines) <= LINES_MAX and all(len(line) <= FACT_CHARS for line in lines)
-        keep = lines if len(lines) <= LINES_MAX else lines[:LINES_MAX - 1]
-        listed = [f"· {_cut(line, FACT_CHARS)}" for line in keep]
-        if len(keep) < len(lines):
-            listed.append(f"· 还有 {len(lines) - len(keep)} 项，见控制台")
-        elif not whole:
-            listed.append("· 有几项太长没写全，见控制台")
-        return head + listed, whole
+        cut = not all(len(line) <= FACT_CHARS for line in lines)
+        listed = [f"· {_cut(line, FACT_CHARS)}" for line in lines]
+        room = NOTICE_CHARS if room is None else room
+
+        def tail(kept: list) -> list:
+            if len(kept) < len(listed):
+                return [f"· 还有 {len(listed) - len(kept)} 项，见控制台"]
+            return ["· 有几项太长没写全，见控制台"] if cut else []
+
+        keep = listed if len(listed) <= LINES_MAX else listed[:LINES_MAX - 1]
+        while keep and len("\n".join(head + keep + tail(keep))) > room:
+            keep = keep[:-1]
+        return head + keep + tail(keep), len(keep) == len(listed) and not cut
 
     # ── what the bot says in the admin's chat (the backend's ``set_sent_hook`` / ``set_read_back_hook``) ──
 
@@ -764,21 +862,43 @@ class WechatReview:
             return
         text = str(text or "")
         head = _HEAD.match(text)
-        said = _Last(self._clock(), int(head.group(1)) if head else None, head.group(2) if head else "",
-                     _asked(text) if head and head.group(2) == "改成" else None, text)
-        self._last = said
-        if said.number is not None:
-            self._last_review = said
+        now = self._clock()
+        with self._said_lock:
+            said = _Last(now, int(head.group(1)) if head else None, head.group(2) if head else "",
+                         _asked(text) if head and head.group(2) == "改成" else None, text, self._read_first(text, now))
+            self._last = said
+            if said.number is not None:
+                self._last_review = said
+
+    def _read_first(self, text: str, now: float) -> Optional[float]:
+        """WeChat's time of ``text`` when it was read back before its send was noted (READ_BACK_EARLY_SEC at most
+        before; taken once), else None."""
+        for entry in reversed(self._read_backs):
+            seen_text, written, seen_at = entry
+            if now - seen_at <= READ_BACK_EARLY_SEC and _same(seen_text, text):
+                self._read_backs.remove(entry)
+                return written
+        return None
 
     def note_read_back(self, chat_id: str, text: str, written: float) -> None:
         """A line of this account's read back from a private chat with WeChat's time (the backend's read-back hook):
-        the last thing said in the admin's chat, as WeChat shows it (a bare answer is compared on one clock)."""
+        the last thing said in the admin's chat, as WeChat shows it (a bare answer is compared on one clock).  Under the
+        lock ``note_sent`` takes, and only onto the very thing it read (a send noted meanwhile is never undone); a line
+        read back before its send was noted is remembered for ``note_sent`` (READ_BACKS, READ_BACK_EARLY_SEC)."""
         if not self.admin or str(chat_id or "") != self.admin or not written:
             return
-        for name in ("_last", "_last_review"):
-            said = getattr(self, name)
-            if said is not None and said.wechat_at is None and _same(said.text, text):
-                setattr(self, name, replace(said, wechat_at=float(written)))
+        text = str(text or "")
+        with self._said_lock:
+            matched = False
+            for name in ("_last", "_last_review"):
+                said = getattr(self, name)
+                if said is not None and said.wechat_at is None and _same(said.text, text):
+                    new = replace(said, wechat_at=float(written))
+                    if getattr(self, name) is said:
+                        setattr(self, name, new)
+                        matched = True
+            if not matched:
+                self._read_backs.append((text, float(written), self._clock()))
 
     def tell(self, text: str) -> None:
         """Say ``text`` in the admin's chat now (an answer's reply when the rest of its message goes on to the later
@@ -854,8 +974,10 @@ class WechatReview:
     def _line(self, line: str, said: Said, last: Optional[_Last]) -> Optional[tuple]:
         """One line's answer: 「发 N」「不发 N」「执行 N」 for a draft told here, 「改 N …」「改 N」 for one still waiting
         (``via_quote``: the message quotes that draft's notification or question; one told here and no longer waiting:
-        what became of it), an unnumbered 「改 …」 while a notification is the last thing said (which one?); None
-        otherwise."""
+        what became of it), a line whose core is 「执行」 (``_execute_core``) not quoting anything while a platform draft
+        told here waits or was the last thing said (which one?), an unnumbered 「改 …」 while a notification is the last
+        thing said, unless the line may be Claude's (CLAUDE_RELAY_ONLY, a relay job of this chat under way or just
+        ended: it goes on) (which one?); None otherwise."""
         for pattern, action, _ in _NUMBERED:
             m = pattern.match(line)
             if m:
@@ -868,9 +990,16 @@ class WechatReview:
                 if self._open(number):
                     return ("edit", number, m.group(2).strip(), said.number == number) if edit else ("ask", number)
                 return ("closed", number) if self._told(number) else None
-        if _EDIT.match(line) and last is not None and last.number is not None:
-            return ("which_edit", last.number)
+        if not said.quoted and _execute_core(line) and self._execute_claims(last):
+            return ("bare_execute",)                   # (「执行吧」…: never run, never Claude's while a draft waits)
+        if (_EDIT.match(line) and last is not None and last.number is not None and not self._relay_only
+                and not self._relay_busy()):
+            return ("which_edit", last.number)         # (in CLAUDE_RELAY_ONLY, or while Claude has a task: Claude's)
         return None
+
+    def _relay_busy(self) -> bool:
+        """Has a relay job of the admin's chat not ended, or ended within RELAY_QUIET_SEC (``relay_busy``)?"""
+        return self._relay_store is not None and relay_busy(self._relay_store, self.admin, self._clock())
 
     def _rest(self, rest: list, is_command) -> tuple[list, bool]:
         """The lines of a message that are no answer as they go on (``(lines, refused)``): a cc line first (the relay
@@ -900,6 +1029,8 @@ class WechatReview:
                 return Plan(refuse=REFUSE_TEXT)
             rest = [raw[n].strip() for n in passing]
             content = "\n".join(line for n, line in enumerate(raw) if n not in passing).strip()
+            if rest and not self._cc.match(rest[0]) and content and not _definite(content):
+                return Plan(refuse=REFUSE_TEXT)        # (a command with other words, as without a quote)
             number = said.number
             m = _EDIT_N.match(content)
             if m:
@@ -920,8 +1051,6 @@ class WechatReview:
             word = _word(rows[0])
             if word in ("1", "2"):
                 return Plan([("bare", int(word))])
-            if word in EXECUTE_WORDS:                  # (a lone 执行: never run, never Claude's while a draft waits)
-                return Plan([("bare_execute",)]) if self._execute_claims(last) else None
         if len(rows) == 1 and said.quoted and _word(rows[0]) in ("1", "2"):
             return None                                # (quoting another message: not ours)
         items, rest, i = [], [], 0
@@ -1078,11 +1207,12 @@ class WechatReview:
         edit = _EDIT.match(text.strip())
         if edit:
             return self._edit(row, packet, edit.group(1).strip(), quoted=True)
-        if word in ("改", "改成"):
+        letters = _letters(text)
+        if word in ("改", "改成") or (letters.startswith("改") and len(letters) <= SHORT_CHARS):
             return f"#{number} 要改成什么？引用通知回「改 你的话」，或者回「改 {number} 你的话」"
         if self._platform(packet):
             return self._platform_hint(packet)
-        if _not_words(text) or _yes_like(text):
+        if _not_words(text) or _yes_like(text) or _short(text):
             return self._help(packet, head)
         return self._propose(row, packet, text.strip())
 
@@ -1124,7 +1254,7 @@ class WechatReview:
         number = last.number
         if not self._seen_after(last, written):
             return f"#{number} 是刚发来的，你回的时候还没看到它：请引用它回，或者回「发 {number}」「不发 {number}」"
-        if self._relay_store is not None and relay_busy(self._relay_store, self.admin, self._clock()):
+        if self._relay_busy():
             return (f"Claude 那边有任务在做或者刚做完，单独一个 1 / 2 不算：#{number} 请引用那条通知回，或者回「发 {number}」"
                     f"「不发 {number}」")
         rows = self._store.wechat_reviews_open()
@@ -1211,9 +1341,17 @@ class WechatReview:
             return self._decided(row, packet, "execute", None, stamp=told)
         if told:
             return f"#{number} 通知发出以后重新预览过：请到控制台看了新的预览再「批准并执行」；不要的话回 2"
-        if self._runnable(packet) and not self._platform_lines(packet)[1]:
+        if self._runnable(packet) and not self._listed_whole(packet):
             return f"#{number} 的平台动作通知里没列全，微信里不能执行：请到控制台看了再「批准并执行」；不要的话回 2"
         return f"#{number} 通知里的预览没通过（或者正在重新预览），微信里不能执行：请到控制台处理"
+
+    def _listed_whole(self, packet: dict) -> bool:
+        """Does the notification of this draft list its platform action whole (then it lets 「执行」 run: a stamp)?"""
+        try:
+            return bool(self._notice(packet)[1])
+        except Exception:
+            logger.exception("PRM: the notification of draft %d could not be written", packet["id"])
+            return False
 
     def _edit(self, row: dict, packet: dict, text: str, *, quoted: bool, propose: bool = False) -> str:
         """「改 …」: sent instead of the draft (``propose``: a merged burst's, only proposed: never straight out)."""
@@ -1262,16 +1400,25 @@ class WechatReview:
             logger.exception("PRM: the admin's answer to draft %d could not be carried out", number)
             result = {"ok": False, "error": "出错了（详见日志）"}
         if not result.get("ok"):
-            if result.get("code") == "queue_failed":
+            code = result.get("code")
+            if code == "queue_failed":                 # (certainly not queued: the draft waits again)
                 return f"#{number} {QUEUE_RETRY}"
-            if result.get("code") == "preview_changed":
+            if code == "queue_unknown":                # (it may run: red, its result told here when it comes late)
+                now = self._clock()
+                self._store.set_wechat_review(number, (), now, state=ANSWERED, decision=action, answered_at=now,
+                                              told_at=now)
+                logger.warning("PRM: draft %d: the admin's 执行 in WeChat may or may not have been queued", number)
+                return f"#{number} {QUEUE_UNSURE}"
+            if code == "preview_changed":
                 return f"#{number} 通知发出以后重新预览过：请到控制台看了新的预览再「批准并执行」；不要的话回 2"
+            if code == "previewing":
+                return f"#{number} 正在重新预览，微信里不能执行：请到控制台看了结果再「批准并执行」；不要的话回 2"
             fresh = self._store.packet(number) or packet
             closed = self._closed(fresh, row)
             if closed:
                 return closed
             what = {"drop": "没改成不发", "execute": "没执行"}.get(action, "没发")
-            return f"#{number} {what}：{result.get('error') or '出错了'}"
+            return f"#{number} {what}：{self._hide(fresh.get('platform'), result.get('error') or '出错了')}"
         now = self._clock()
         self._store.set_wechat_review(number, (), now, state=ANSWERED, decision=action, answered_at=now,
                                       **({"proposed": ""} if action == "send" else {}))
@@ -1297,7 +1444,7 @@ class WechatReview:
         what = {SENT: "已经发出去了", APPROVED: "已经批准，正在发", SENDING: "已经批准，正在发", DROPPED: "点了不发",
                 FAILED: "没发出去", EXECUTING: "已经批准，正在平台上执行", NO_REPLY: "不用回复"}.get(status, status)
         if status == FAILED and packet.get("error"):
-            what += f"（{_cut(packet['error'], 60)}）"
+            what += f"（{_cut(self._hide(packet.get('platform'), packet['error']), 60)}）"
         by = "你在微信里回过了，" if (row or {}).get("state") == ANSWERED else ""
         return f"#{number} 已经处理过了：{by}{what}"
 

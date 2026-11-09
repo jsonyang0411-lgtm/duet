@@ -201,10 +201,15 @@ LINES_CHARS = 6000           # the creator's lines a notice of a draft not writt
 OWN_FILE_EARLY_SEC = 60      # a file the bot sent shows in WeChat up to this long before its send returns
 # A draft the bot was stopped in the middle of sending (``start``), and what it says once its text was read back
 UNSURE_ERROR = "发送时机器人停了，不确定发出去没有；请到微信里看一眼，需要就手动补发"
-# 批准并执行 refused (_approve_execute): the preview changed since it was read (or since the admin was shown it), and a job
-# the relay could not queue (the draft waits again)
+# 批准并执行 refused (_approve_execute): the preview changed since it was read (or since the admin was shown it), a 重新预览
+# started meanwhile; a job the relay certainly did not queue (the draft waits again; an edited reply is kept for the
+# console's 「改了再执行」), one it is not known whether the relay queued (red as a result not known, its key kept: a late
+# result is marked late; never 「再批准一次」)
 PREVIEW_CHANGED = "预览刚刚变过（重新预览了）：请看了新的预览再批准"
+PREVIEWING = "正在重新预览，等结果出来再批准"
 QUEUE_FAILED = "没能排进 Mac 的任务队列，平台没有动：可以再批准一次"
+QUEUE_UNKNOWN = "排进 Mac 的任务队列时出了错，不知道排进去没有：平台上可能已经写了，请先到平台后台核对，别再批准一次"
+QUEUE_UNKNOWN_PROBLEM = "排进 Mac 的任务队列时出了错，不知道排进去没有"
 UNSURE_TEXT_SEEN = ("发送时机器人停了：文字已经发出去了（微信里读到了），素材文件不确定发出去没有；"
                     "请到微信里看一眼，需要就手动补发文件")
 # This PC's clock against WeChat's (win review F6): measured when the bot's own line is read back
@@ -3983,8 +3988,12 @@ class PrmService:
         its read-back.  The checks of a reply (length, placeholders, can it be sent) come
         first: a platform write whose reply could not go out is not started.  The move to executing happens only
         while the draft's platform data is what these checks read (a 重新预览 landing in between: refused, it is
-        looked at again); with ``stamp`` (微信里审批草稿) only while its preview is the one the admin was shown.  A job
-        the relay could not queue leaves the draft waiting, as it was (the platform did not move: approve it again)."""
+        looked at again; ``_same_json``); with ``stamp`` (微信里审批草稿) only while its preview is the one the admin was
+        shown.  ``text`` None: the draft as drafted (what the console and the notification show).  When the relay
+        raises while queueing the job, whether it is there decides (``_job_queued``): there, it runs as approved;
+        certainly not there, the draft waits again (the platform did not move: approve it again), an edited reply kept
+        in ``final_text`` for the console's 「改了再执行」 box; not known, the draft is red as a result not known, its
+        key kept (a late result is marked late), never to be approved again unchecked."""
         if packet.get("tool", MESSAGE_TOOL) == MESSAGE_TOOL:
             return {"ok": False, "error": "这条草稿没有平台动作"}
         data = packet["platform"]
@@ -3995,7 +4004,7 @@ class PrmService:
             why = "；".join(preview.get("problems") or []) or platforms.VERDICTS.get(preview.get("verdict"), "")
             return {"ok": False, "error": f"预览没通过，不能执行：{why}"}
         if data.get("previewing"):
-            return {"ok": False, "error": "正在重新预览，等结果出来再批准"}
+            return {"ok": False, "error": PREVIEWING, "code": "previewing"}
         opened, unsure = self._opened_before(packet)
         if opened:
             logger.warning("PRM: packet %d not approved: its %s ran before for this product and creator%s",
@@ -4025,7 +4034,7 @@ class PrmService:
             opened, unsure = self._opened_before(packet)
             # (the platform data as read above: a 重新预览 landing meanwhile is not run unseen)
             moved = not opened and self._store.move(
-                packet["id"], (PENDING,), EXECUTING, expect=lambda current: current == data, decided_at=now,
+                packet["id"], (PENDING,), EXECUTING, expect=lambda current: _same_json(current, data), decided_at=now,
                 final_text=final, edited=int(final != packet["text"]), platform=approved)
         if opened:
             if unsure:
@@ -4034,6 +4043,8 @@ class PrmService:
         if not moved:
             fresh = self._store.packet(packet["id"]) or {}
             if fresh.get("status") == PENDING:
+                if (fresh.get("platform") or {}).get("previewing"):
+                    return {"ok": False, "error": PREVIEWING, "code": "previewing"}
                 return {"ok": False, "error": PREVIEW_CHANGED, "code": "preview_changed"}
             return {"ok": False, "error": "这条草稿已经处理过了（或者达人又发了新消息，草稿已过时）"}
         meta = {"op": "platform_execute", "party_id": packet["party_id"], "deal_id": packet["deal_id"],
@@ -4045,10 +4056,20 @@ class PrmService:
             _, job_id = self._relay.submit(packet["chat_id"], packet["chat_id"], "", kind=PRM, meta=meta,
                                            fresh=True, input_closed=True)
         except Exception:
-            logger.exception("PRM: packet %d could not be queued for the Mac; it waits again", packet["id"])
-            self._store.move(packet["id"], (EXECUTING,), PENDING, decided_at=None, final_text=None, edited=0,
-                             platform=data)          # (nothing was queued, nothing ran: it can be approved again)
-            return {"ok": False, "error": QUEUE_FAILED, "code": "queue_failed"}
+            logger.exception("PRM: packet %d: its execution could not be queued for the Mac", packet["id"])
+            queued, job_id = self._job_queued(approved["key"])
+            if queued is None:                       # (not known: it may run; red, its key kept)
+                current = self._store.packet(packet["id"])
+                if current is not None and current["status"] == EXECUTING:
+                    self._platform_finished(current, platforms.record("UNKNOWN", [QUEUE_UNKNOWN_PROBLEM]), now)
+                return {"ok": False, "error": QUEUE_UNKNOWN, "code": "queue_unknown"}
+            if not queued:                           # (nothing was queued, nothing ran: it can be approved again)
+                edited = final != packet["text"]
+                self._store.move(packet["id"], (EXECUTING,), PENDING, decided_at=None,
+                                 final_text=final if edited else None, edited=int(edited), platform=data)
+                return {"ok": False, "error": QUEUE_FAILED, "code": "queue_failed"}
+            logger.warning("PRM: packet %d: its execution is queued as job #%d all the same (what failed came after)",
+                           packet["id"], job_id)
         self._store.set_platform(packet["id"], {**approved, "job_id": job_id}, (EXECUTING,))
         self._store.add_event(packet["deal_id"], packet["party_id"], "platform_execute",
                               {"packet": packet["id"], "action": action["action"], "job": job_id},
@@ -4058,6 +4079,18 @@ class PrmService:
             self._chain_refresh(packet["deal_id"], now)        # (that product is running now)
         logger.info("PRM: packet %d approved; %s goes to the Mac as job #%d", packet["id"], action["action"], job_id)
         return {"ok": True, "status": EXECUTING, "job": job_id}
+
+    def _job_queued(self, key: str) -> tuple:
+        """After the relay raised while queueing the execution of approval ``key``: is its job there all the same?
+        ``(True, job id)``: it is (what failed came after it was written: it runs); ``(False, None)``: it is not (the
+        relay store rolls a failed write back, so nothing hands it to the Mac later); ``(None, None)``: not known (the
+        jobs could not be looked up)."""
+        try:
+            job = self._relay.store.job_with_key(key)
+        except Exception:
+            logger.exception("PRM: the relay's jobs could not be looked up after a failed queueing")
+            return None, None
+        return (True, int(job["id"])) if job is not None else (False, None)
 
     def _opened_before(self, packet: dict) -> tuple:
         """``(why, unsure)``: why this draft's 专属 action (``ONCE_ACTIONS``) must not run ("" = it may), and the
@@ -6344,6 +6377,14 @@ def order_items(action: dict) -> list:
 
 # The results of an execution that wrote nothing on the platform, when no step of it wrote either.
 NOT_WRITTEN = ("FAILED", "STATE_CONFLICT", "NOT_RUN")
+
+
+def _same_json(a, b) -> bool:
+    """Two JSON values the same, key order aside, a NaN the same as a NaN (as ``preview_stamp`` reads them: a preview
+    with a NaN in it is never 「changed」 by being read twice)."""
+    def dump(value) -> str:
+        return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+    return dump(a) == dump(b)
 
 
 def written_state(execution: Optional[dict], packet_outcome: str = "") -> str:

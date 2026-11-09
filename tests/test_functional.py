@@ -418,7 +418,9 @@ class TestPrmPages:
         page.wait_for_timeout(300)
         assert "整段一条发（空一行就是分开发，最多 3 条）" in card.inner_text()
 
-    def test_review_page_runs_a_platform_action_once_and_shows_it_red_when_unverified(self, page, prm):
+    @staticmethod
+    def _platform_draft(prm) -> dict:
+        """She agrees to 20%; the Mac drafts 「专属佣金 20% 设好啦～」 with a 专属佣金 action, previewed: the draft waits."""
         import json as _json
         from src.prm import platforms
         from src.prm.service import SETTLE_SEC
@@ -442,7 +444,12 @@ class TestPrmPages:
              "reason": "kb/合作政策.md", "platform": preview}
         prm.relay.finish(job["id"], {"ok": True, "text": _json.dumps(d, ensure_ascii=False)})
         prm.relay.tick()
-        packet = prm.service.store.packet_for_job(job["id"])
+        return prm.service.store.packet_for_job(job["id"])
+
+    def test_review_page_runs_a_platform_action_once_and_shows_it_red_when_unverified(self, page, prm):
+        import json as _json
+
+        packet = self._platform_draft(prm)
         page.goto(f"{BASE_URL}/#/review", timeout=10000)
         page.wait_for_timeout(1500)
         card = page.locator(".prm-draft", has_text="平台动作")
@@ -475,6 +482,33 @@ class TestPrmPages:
         page.wait_for_timeout(1500)
         assert page.locator(".prm-alerts").count() == 0
         assert prm.sent == []
+
+    def test_review_page_keeps_an_edited_reply_whose_execution_could_not_be_queued(self, page, prm):
+        """改了再执行 whose job the relay certainly did not queue (the draft waits again: 微信里审批草稿, third verification):
+        the edited words are kept for the next try in the edit box; the card still shows, and 批准并执行 still runs, the
+        draft as drafted."""
+        from unittest.mock import patch
+
+        edited = "专属佣金 20% 已经设好，明天 0 点生效～"
+        packet = self._platform_draft(prm)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        card = page.locator(".prm-draft", has_text="平台动作")
+        card.wait_for()
+        assert card.locator(".prm-kept-edit").count() == 0
+        card.locator("button:has-text('改了再执行')").click()
+        card.locator("textarea[aria-label='修改要发的内容']").fill(edited)
+        with patch.object(prm.relay, "submit", side_effect=RuntimeError("队列坏了")):
+            card.locator("button:has-text('确认并执行')").click()
+            page.locator("[role=dialog] button:has-text('执行')").click()
+            page.get_by_text("没能排进 Mac 的任务队列").first.wait_for()
+        assert prm.service.store.packet(packet["id"])["final_text"] == edited
+        page.reload()
+        card = page.locator(".prm-draft", has_text="平台动作")
+        card.locator(".prm-kept-edit").wait_for()
+        assert "专属佣金 20% 设好啦～" in card.locator(".prm-text").inner_text()
+        card.locator("button:has-text('改了再执行')").click()
+        assert card.locator("textarea[aria-label='修改要发的内容']").input_value() == edited
+        assert card.locator(".prm-kept-edit").count() == 0
 
     def test_review_page_drops_a_draft_after_asking(self, page, prm):
         page.goto(f"{BASE_URL}/#/review", timeout=10000)
