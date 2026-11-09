@@ -44,8 +44,9 @@ finished) it does nothing (a bare 「1…」 the bot would have taken gets BARE_
   the current one, as a question of its own).  A number in the words that is not the quoted draft's (「改 15 …」「发 15」
   「执行 15」 quoting #12) does nothing: the bot asks which.  A question about 执行 quoting it (「执行了吗」「执行了没」「要执行
   吗」「执行？」…: ``_execute_parts``) says what became of that draft (``_execute_status``), never runs it.
-- Without a quote: 「发 12」 (the original draft), 「不发 12」 and 「执行 12」 for a draft told here, 「改 12 <你的话>」 for one
-  still waiting (one told here and closed: what became of it); anything else passes on.  A bare 「1」 / 「2」 answers only
+- Without a quote (nor quoting another message: see below): 「发 12」 (the original draft), 「不发 12」 and 「执行 12」 for a
+  draft told here, 「改 12 <你的话>」 for one still waiting (one told here and closed: what became of it); anything else
+  passes on.  A bare 「1」 / 「2」 answers only
   the last thing the bot said in this chat (``note_sent``: the backend tells it every text it sent) when that was a
   notification or a 改成 question shown before the answer was written (on WeChat's clock: ``note_read_back``), its draft
   the only one told here that still waits (else the bot lists them), never in CLAUDE_RELAY_ONLY (it may be Claude's),
@@ -60,8 +61,11 @@ finished) it does nothing (a bare 「1…」 the bot would have taken gets BARE_
   is the last thing said: the bot asks which (with a relay job of this chat under way or just ended: 「要交给 Claude 请在
   前面加 cc」), except in CLAUDE_RELAY_ONLY (it is Claude's: it goes on).  In CLAUDE_RELAY_ONLY those hints and answers
   say how to give the words to Claude instead (CC_HINT); a 「执行」-like answer quoting another message (Claude's, say:
-  the relay takes no quote there) gets one line saying so, 「cc <the words>」 (QUOTED_ELSEWHERE), and a numbered 「执行 N」
-  quoting it never runs draft #N (Claude's 「方案 N」 is likelier: QUOTED_EXECUTE).
+  the relay takes no quote there) gets one line saying so, 「cc <the words>」 (QUOTED_ELSEWHERE).
+- A message quoting anything that is not one of our notifications or questions (Claude's words, a picture) never acts
+  on a numbered answer, in either mode: when any line of it is 「发 N」「发送 N」「不发 N」「执行 N」「改 N …」 or a numbered
+  question about a draft told here (``_numbered``; Claude's 「方案 N」 is the likelier meaning), nothing of it is done nor
+  passed on (the relay never has half of it) and one line says how (QUOTED_NUMBERED).
 - A draft for a 老板拉的群 is sent from WeChat only by an answer quoting its notification or question (the console's
   group confirm dialog); 「不发」 needs no quote.
 - A platform action runs only by 「执行」 quoting its notification, or 「执行 12」 (the console's 批准并执行,
@@ -182,7 +186,7 @@ REFUSE_TEXT = "这几句是一起到的，里面有好几条要交给 Mac 或者
 HELP_YES = "要发原稿：引用通知回 1；要改：写「改 + 新的话」"
 WHICH_EXECUTE = "执行哪一份？请引用那条通知回「执行」，或者回「执行 N」"
 QUOTED_ELSEWHERE = "引用的消息交不到 Claude：要交给 Claude 请发「cc {words}」；要执行草稿请引用那条通知回「执行」"
-QUOTED_EXECUTE = "你引用的是 Claude 的消息：要执行草稿 #{number} 请不引用回「执行 {number}」，或者引用那条通知回「执行」"
+QUOTED_NUMBERED = "你引用的不是草稿通知：要处理草稿 #{number} 请不引用直接回「{direct}」，或者引用那条通知回「{quoted}」"
 CC_HINT = "（要交给 Claude 请在前面加 cc）"
 BARE_UNSURE = "1 / 2 后面别带「.」「…」：要发就回「1」，或者引用那条通知回 1"
 QUEUE_RETRY = "没能排进 Mac 的任务队列，平台没有动，可以再回一次「执行」"
@@ -652,7 +656,7 @@ class WechatReview:
         UNCERTAIN, never 「执行没成功」).  A send the bot was stopped in the middle of (``indeterminate``) waits for its
         read-back, or UNSURE_GRACE_SEC after the start."""
         number = row["packet_id"]
-        name = (self._store.party(row["party_id"]) or {}).get("name") or "她"
+        name = self._name_of(row)
         status, outcome, error = row.get("status"), str(row.get("outcome") or ""), str(row.get("error") or "")
         execute = row.get("decision") == "execute"
         execution = self._execution(row)
@@ -692,7 +696,7 @@ class WechatReview:
         """A platform action's result that came after the bot had given up on it (``execution.late``): its reply was
         never sent by itself."""
         number = row["packet_id"]
-        name = (self._store.party(row["party_id"]) or {}).get("name") or "她"
+        name = self._name_of(row)
         execution = self._execution(row)
         result = str(execution.get("outcome") or "UNKNOWN")
         if result == platforms.VERIFIED:
@@ -710,7 +714,7 @@ class WechatReview:
         「执行」 run (``preview_stamp``; "" otherwise); the pictures to send after it (``_pictures``)."""
         number = packet["id"]
         meta = packet.get("meta") or {}
-        name = (self._store.party(packet["party_id"]) or {}).get("name") or "?"
+        name = self._name_of(packet, "?")
         group = meta.get("channel") == GROUP_CHANNEL
         platform = self._platform(packet)
         lines = [f"#{number} 草稿 · {name} · " + (f"群里「{meta.get('group_name') or '老板拉的群'}」" if group else "私聊")]
@@ -1056,6 +1060,27 @@ class WechatReview:
             return ("which_edit", last.number)         # (in CLAUDE_RELAY_ONLY: Claude's)
         return None
 
+    def _numbered(self, line: str) -> Optional[tuple]:
+        """A line that acts on, or asks about, a draft told here by its number (「发 2」「发送 2」「不发 2」「执行 1」「改 2 …」
+        「改 2」「执行 1 了吗」「执行 1 吧」): ``(number, direct, quoted)``, the words to answer it with, without a quote
+        and quoting its notification; None otherwise."""
+        for pattern, _, verb in _NUMBERED:
+            m = pattern.match(line)
+            if m:
+                verb = "发送" if verb == "发" and line.startswith("发送") else verb
+                number = int(m.group(1))
+                return (number, f"{verb} {number}", verb) if self._told(number) else None
+        for pattern in (_EDIT_N, _EDIT_N_ONLY):
+            m = pattern.match(line)
+            if m:
+                number = int(m.group(1))
+                return (number, f"改 {number} 你的话", "改 你的话") if self._told(number) else None
+        parts = _execute_parts(line)
+        if parts is not None and parts[0] is not None and self._told(parts[0]):
+            number = parts[0]
+            return (number, f"执行 {number} 了吗", "执行了吗") if parts[1] else (number, f"执行 {number}", "执行")
+        return None
+
     def _relay_busy(self) -> bool:
         """Has a relay job of the admin's chat not ended, or ended within RELAY_QUIET_SEC (``relay_busy``)?"""
         return self._relay_store is not None and relay_busy(self._relay_store, self.admin, self._clock())
@@ -1112,12 +1137,14 @@ class WechatReview:
                 return Plan([("bare", int(word))])
             if word is None and _word(rows[0]) in ("1", "2") and (self._bare_claims(last) or self._hint_due(last)):
                 return Plan([("bare_unsure",)])        # (「1…」「1.」: no answer, but not silence either)
+        if said.quoted:                                # (quoting another message: never a number's, any line of it)
+            for row in rows:
+                numbered = self._numbered(row)
+                if numbered is not None:               # (the whole message refused: nothing half-done, nothing on)
+                    return Plan([("quoted_numbered", *numbered)])
         if len(rows) == 1 and said.quoted and _word(rows[0]) in ("1", "2"):
             return None                                # (quoting another message: not ours)
         if len(rows) == 1 and said.quoted and self._relay_only and _execute_parts(rows[0]) is not None:
-            numbered = _EXECUTE_N.match(rows[0])       # (quoting Claude's words: never run, its 「方案 1」 is likelier)
-            if numbered and self._told(int(numbered.group(1))):
-                return Plan([("quoted_execute", int(numbered.group(1)))])
             return Plan([("quoted_elsewhere", rows[0])])   # (the relay takes no quote in CLAUDE_RELAY_ONLY: say so)
         items, rest, i = [], [], 0
         while i < len(raw):
@@ -1219,8 +1246,8 @@ class WechatReview:
             return self._for_claude(self._status_reply(item[1]))
         if action == "quoted_elsewhere":
             return QUOTED_ELSEWHERE.format(words=_cut(item[1], 20))
-        if action == "quoted_execute":
-            return QUOTED_EXECUTE.format(number=item[1])
+        if action == "quoted_numbered":
+            return self._for_claude(QUOTED_NUMBERED.format(number=item[1], direct=item[2], quoted=item[3]))
         if action == "bare_unsure":
             return BARE_UNSURE
         if action == "bare_execute":
@@ -1310,13 +1337,19 @@ class WechatReview:
         return told or f"#{number} 已经执行完了，回复发出去没有还在核对（发的时候机器人停了）"
 
     def _named(self, packet: dict, line: str) -> str:
-        """``line`` (「#12 …」) with her 称呼 right after the number, 「#12（小美）…」 (a labelled 微信号, a phone number
-        masked; in brackets: never the head of a notification or a question, which a bare 1 could answer)."""
+        """``line`` (「#12 …」) with her 称呼 right after the number, 「#12（小美）…」 (``_name_of``; in brackets: never the
+        head of a notification or a question, which a bare 1 could answer)."""
         head = f"#{packet['id']} "
         if not line.startswith(head):
             return line
-        name = _cut(contact.mask_contacts((self._store.party(packet["party_id"]) or {}).get("name") or "她"), 20)
-        return f"#{packet['id']}（{name}）{line[len(head):]}"
+        return f"#{packet['id']}（{self._name_of(packet)}）{line[len(head):]}"
+
+    def _name_of(self, draft: dict, default: str = "她") -> str:
+        """Her 称呼 as the admin's chat shows it: the ids of the draft's platform action (a packet or a row of it) by
+        their last characters (``_hide``), every phone / ID number and labelled 微信号 masked, one line, at most 20
+        characters (``contact.clean_name``)."""
+        name = (self._store.party(draft["party_id"]) or {}).get("name") or ""
+        return contact.clean_name(self._hide(draft.get("platform"), name), 20) or default
 
     def _execution_of(self, packet: dict) -> dict:
         return self._json(packet.get("platform")).get("execution") or {}
@@ -1384,7 +1417,7 @@ class WechatReview:
         return written + skew > last.at + BARE_MARGIN_SEC
 
     def _open_list(self, rows: list) -> str:
-        names = "、".join(f"#{r['packet_id']} {(self._store.party(r['party_id']) or {}).get('name') or '?'}"
+        names = "、".join(f"#{r['packet_id']} {self._name_of(self._store.packet(r['packet_id']) or r, '?')}"
                          for r in rows[:LISTED]) + ("…" if len(rows) > LISTED else "")
         return (f"现在有 {len(rows)} 份在等你回：{names}；单独一个 1 / 2 不算：请引用那条通知回，或者回「发 {rows[0]['packet_id']}」"
                 "这样带编号")
@@ -1582,7 +1615,7 @@ class WechatReview:
         if action == "execute":
             return f"#{number} 已批准执行：Mac 正在平台上执行，做完了告诉你结果（核验成功才把回复发给她）"
         meta = packet.get("meta") or {}
-        name = (self._store.party(packet["party_id"]) or {}).get("name") or "她"
+        name = self._name_of(packet)
         where = f"（群里「{meta.get('group_name') or '老板拉的群'}」）" if self._group(packet) else ""
         return f"#{number} {'按你改的批准了' if action == 'edit' else '已批准'}，正在发给 {name}{where}"
 

@@ -33,7 +33,7 @@ from src.prm import wechat_review as wr
 from src.prm.service import SETTLE_SEC, UNSURE_ERROR, PrmService, platform_state
 from src.prm.store import BUYIN_TOOL, PrmStore
 from src.prm.wechat_review import (BACKLOG_SEC, BARE_UNSURE, CC_HINT, CLOSED_RACE_SEC, HELP_YES, HINT_SEC, NO_ADMIN_WHY,
-                                   NOTICE_CHARS, ON_AT, QUEUE_RETRY, QUEUE_UNSURE, QUOTED_ELSEWHERE, QUOTED_EXECUTE,
+                                   NOTICE_CHARS, ON_AT, QUEUE_RETRY, QUEUE_UNSURE, QUOTED_ELSEWHERE, QUOTED_NUMBERED,
                                    READ_BACK_EARLY_SEC, REFUSE_TEXT, RELAY_QUIET_SEC, UNCERTAIN, WHICH_EXECUTE,
                                    RETRY_SEC, SEND_TRIES, UNSURE_GRACE_SEC, VOICE_TEXT, read)
 from src.relay.service import MAX_AGE_SEC, ClaudeRelay
@@ -1356,13 +1356,19 @@ def test_a_message_with_rest_lines_handed_on_twice_runs_once(desk):
 
 
 def test_a_quote_of_another_message_is_no_draft_answer_but_a_number_still_says_which(desk):
+    """A quote of another message is no draft answer (a bare 1 / 2, a yes).  A numbered answer under it used to act;
+    the final check of 7eaa0dc: it never does now, in either mode (``test_a_numbered_answer_quoting_another_message_
+    never_acts``): one line says how."""
     packet = waiting(desk)
+    number = packet["id"]
     assert desk.admin("1", quote="#1 完成（3分钟）\n结果在这里") is None      # (a relay result: its job number)
-    desk.review.note_sent(ADMIN, head(desk, packet["id"]))
+    desk.review.note_sent(ADMIN, head(desk, number))
     assert desk.admin("2", quote="这是新款的色卡") is None                  # (quoting something else: never a bare 2)
     assert desk.admin("好", quote="这是新款的色卡") is None
-    assert desk.prm.store.packet(packet["id"])["status"] == "pending"
-    assert desk.admin(f"发 {packet['id']}", quote="这是新款的色卡") == f"#{packet['id']} 已批准，正在发给 小美"
+    assert desk.admin(f"发 {number}", quote="这是新款的色卡") == QUOTED_NUMBERED.format(
+        number=number, direct=f"发 {number}", quoted="发")
+    assert desk.prm.store.packet(number)["status"] == "pending"
+    assert desk.admin(f"发 {number}") == f"#{number} 已批准，正在发给 小美"   # (without the quote: as always)
 
 
 def test_a_number_never_told_says_so_only_when_a_notification_is_quoted(desk):
@@ -1757,8 +1763,9 @@ def test_relay_only_words_that_only_mention_执行_stay_claudes(clock, tmp_path)
 
 def test_relay_only_a_numbered_执行_quoting_claude_never_runs(clock, tmp_path):
     """Final check item 2: in CLAUDE_RELAY_ONLY, 「执行 1」 quoting Claude's message ran draft #1 (a platform write), while
-    the admin most likely meant Claude's 「方案 1」.  Never run: one line says how to run the draft; a number that is no
-    draft told here is Claude's words (QUOTED_ELSEWHERE).  Quoting the notification it runs, as always."""
+    the admin most likely meant Claude's 「方案 1」.  Never run: one line says how to run the draft (QUOTED_NUMBERED, and
+    how to give it to Claude); a number that is no draft told here is Claude's words (QUOTED_ELSEWHERE).  Quoting the
+    notification it runs, as always."""
     desk = Desk(clock, tmp_path, relay_only="on")
     desk.prm.register(CREATOR, "小美", "")
     desk.admin("帮我列两个清理方案")
@@ -1769,11 +1776,71 @@ def test_relay_only_a_numbered_执行_quoting_claude_never_runs(clock, tmp_path)
     packet = platform_waiting(desk)
     number = packet["id"]
     clock.now += 30
-    assert desk.admin(f"执行 {number}", quote=claude_said) == QUOTED_EXECUTE.format(number=number)
+    assert desk.admin(f"执行 {number}", quote=claude_said) == (
+        QUOTED_NUMBERED.format(number=number, direct=f"执行 {number}", quoted="执行") + CC_HINT)
     assert desk.admin("执行 9", quote=claude_said) == QUOTED_ELSEWHERE.format(words="执行 9")
     assert desk.prm.store.packet(number)["status"] == "pending" and desk.executions() == []
     assert desk.admin("执行", quote=head(desk, number)).startswith(f"#{number} 已批准执行")
     assert len(desk.executions()) == 1
+    desk.stop()
+
+
+# numbered answers under a quote of another message (final check of 7eaa0dc, probe a)
+QUOTED_FORMS = [("执行 {P}", "执行 {P}", "执行"), ("执行{P}", "执行 {P}", "执行"), ("执行 #{P}", "执行 {P}", "执行"),
+                ("执行 {P}！", "执行 {P}", "执行"), ("执行 ＃{P}", "执行 {P}", "执行"), ("执行 {P}。", "执行 {P}", "执行"),
+                ("执行 {P} 吧", "执行 {P}", "执行"), ("执行{P}吗", "执行 {P} 了吗", "执行了吗"),
+                ("发 {M}", "发 {M}", "发"), ("发送 {M}", "发送 {M}", "发送"), ("发 {M}！", "发 {M}", "发"),
+                ("发#{M}", "发 {M}", "发"), ("不发 {M}", "不发 {M}", "不发"), ("不发 {P}", "不发 {P}", "不发"),
+                ("改 {M} 好的老师明天发", "改 {M} 你的话", "改 你的话"), ("改{M} 好的", "改 {M} 你的话", "改 你的话"),
+                ("改 {M}", "改 {M} 你的话", "改 你的话"),
+                ("执行 {P}\n谢谢", "执行 {P}", "执行"), ("好的\n执行 {P}", "执行 {P}", "执行"),
+                ("执行 {P}\n发 {M}", "执行 {P}", "执行"), ("发 {M}\n谢谢", "发 {M}", "发"),
+                ("改 {M}\n好的老师", "改 {M} 你的话", "改 你的话")]
+
+
+@pytest.mark.parametrize("relay_only", ["on", "off"])
+@pytest.mark.parametrize("form, direct, quoted", QUOTED_FORMS)
+def test_a_numbered_answer_quoting_another_message_never_acts(clock, tmp_path, form, direct, quoted, relay_only):
+    """Final check of 7eaa0dc, items 1 + 2 (probe a): quoting a message that is not one of our notifications (Claude's
+    「方案 1 … 方案 2 …」), a numbered answer acted: 「执行 1\\n谢谢」 ran #1, 「好的\\n执行 1」 ran it and gave 「好的」 to the
+    relay, 「发 2」「不发 2」「改 2 …」 sent, dropped, sent the admin's words to her, in either mode.  Any numbered line of
+    such a message: nothing of it is done nor passed on, one line says how to answer the draft."""
+    desk = Desk(clock, tmp_path, relay_only=relay_only)
+    desk.prm.register(CREATOR, "小美", "")
+    desk.prm.register(OTHER, "小雨", "")
+    desk.admin("帮我把旧分支清理方案列出来" if relay_only == "on" else "cc 帮我把旧分支清理方案列出来")
+    job = desk.relay.next_job(0, ("admin",))
+    p = platform_waiting(desk)["id"]
+    m = waiting(desk, "多少佣金呀", chat=OTHER, text="25% 哦～")["id"]
+    clock.now += 30
+    claude_said = "#1 进行中：方案 1 先删旧分支，方案 2 先备份。回「执行 1」或「执行 2」"
+    reply = desk.admin(form.format(P=p, M=m), quote=claude_said)
+    number = int(direct.format(P=p, M=m).split()[1])
+    expected = QUOTED_NUMBERED.format(number=number, direct=direct.format(P=p, M=m), quoted=quoted)
+    assert reply == expected + (CC_HINT if relay_only == "on" else "")
+    assert [desk.prm.store.packet(n)["status"] for n in (p, m)] == ["pending", "pending"] and desk.executions() == []
+    assert desk.relay.store.followups(job["id"], 0) == [] and len(desk.jobs()) == 1
+    assert desk.prm.store.wechat_review(m)["proposed"] == ""
+    desk.stop()
+
+
+def test_a_quote_of_another_message_without_a_draft_number_is_as_before(clock, tmp_path):
+    """What stays: unnumbered answers to Claude under its quote (its approval words, a cc line), and numbers that are no
+    draft told here (Claude's 「方案 9」), in CLAUDE_RELAY_ONLY."""
+    desk = Desk(clock, tmp_path, relay_only="on")
+    desk.prm.register(CREATOR, "小美", "")
+    desk.admin("帮我把旧分支清理方案列出来")
+    job = desk.relay.next_job(0, ("admin",))
+    ask = desk.relay.ask(job["id"], {"tool": "Bash", "detail": "git branch -D old", "timeout_s": 600})
+    desk.relay.tick()                                                   # (the approval request goes to the admin)
+    claude_said = desk.told()[-1]
+    packet = platform_waiting(desk)
+    clock.now += 30
+    assert desk.admin("同意", quote=claude_said).startswith("好，已批准")
+    assert desk.relay.store.get_ask(ask["ask_id"])["status"] == "allow"
+    assert "已转给正在做的" in desk.admin("cc 用方案 9", quote=claude_said)
+    assert [f["text"] for f in desk.relay.store.followups(job["id"], 0)] == ["用方案 9"]
+    assert desk.prm.store.packet(packet["id"])["status"] == "pending" and desk.executions() == []
     desk.stop()
 
 
@@ -2139,6 +2206,21 @@ def test_the_creators_platform_ids_show_only_their_last_characters(desk):
     assert f"· 邀约信息：（{len(invite['invite_text'])} 字，见控制台）" in text
     for private in ("xm_test01", "shop_test01", "想邀请您"):
         assert private not in text, private
+
+
+@pytest.mark.parametrize("name, shown", [(f"小美 {DY_UID}", f"小美 …{DY_UID[-4:]}"), ("小美13900001111", "小美139****1111"),
+                                         ("小美 微信 abc123456", "小美 微信 ab****56")])
+def test_her_name_is_masked_in_the_notification_head_and_the_status_line(clock, tmp_path, name, shown):
+    """Final check of 7eaa0dc, item 3 (probe b): her 称呼 showed a platform id (her UID) in full in the status line, and
+    the notification head did not mask it at all: both as everything else now (``_name_of``)."""
+    desk = Desk(clock, tmp_path)
+    desk.prm.register(CREATOR, name, "")
+    packet = platform_waiting(desk)
+    number = packet["id"]
+    assert head(desk, number) == f"#{number} 草稿 · {shown} · 私聊"
+    reply = desk.admin("执行了吗")
+    assert reply.startswith(f"#{number}（{shown}）还没执行") and name not in reply
+    desk.stop()
 
 
 def test_the_ids_in_a_previews_problems_and_its_plan_show_only_their_last_characters(desk):
