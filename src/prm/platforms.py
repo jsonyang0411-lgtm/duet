@@ -2488,7 +2488,8 @@ def _steps(value) -> list:
 def check_block(block) -> dict:
     """The Mac's preview of an action (a draft's ``platform``), checked and cut to size.
     ``ActionError`` when it is not one; ``ActionRefused`` (its ``code`` the check's) when its
-    action does not pass ``check_action`` (the form, ``FORM_LIMITS``)."""
+    action does not pass ``check_action`` (the form, ``FORM_LIMITS``), or a ready 专属链接 carries no agreement
+    (``old_worker``: a Mac worker from before 2026-11-09 previews without one; the reply stays, the action goes)."""
     if not isinstance(block, dict) or block.get("verdict") not in VERDICTS:
         raise _err("bad_block", "平台预览的格式不对")
     action = None
@@ -2502,7 +2503,11 @@ def check_block(block) -> dict:
         raise _err("bad_block", "预览说可以执行，却没有动作")
     plan = {}
     if verdict == "ready":
-        plan = check_plan(action, block.get("run"))
+        run = block.get("run")
+        if action["action"] == "dy.channel_goods" and not (isinstance(run, dict) and run.get("skus")):
+            raise ActionRefused("old_worker", "Mac 的 worker 比机器人旧：专属链接的预览里没有约定（每个 SKU 的渠道价和库存），"
+                                              "更新 Mac 以后再起草")
+        plan = check_plan(action, run)
     catalog = block.get("catalog") if isinstance(block.get("catalog"), dict) else {}
     synced = catalog.get("synced_at")
     covered = covered_of(block.get("covered"), action) if verdict == "blocked" and action else None

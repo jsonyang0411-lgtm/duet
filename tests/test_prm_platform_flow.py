@@ -378,10 +378,13 @@ TWENTY_FIVE_PRICES = {"action": "xhs.channel_item", "item_id": XHS_ITEM,
 @pytest.mark.parametrize("raw, mac_limits, run, word", [
     (TWELVE_CROWDS, {"max_crowds": 20}, {"steps": ["create"], "name": "达人合作1_10271000"}, "人群包"),
     (TWENTY_FIVE_PRICES, {"max_sku_prices": 30}, {"steps": ["create"]}, "SKU 专属价"),
-], ids=["12-crowds", "25-sku-prices"])
+    ({"action": "dy.channel_goods", "item_id": DY_ITEM, "creator_platform_id": DY_UID, "exclusive": False, "price": "15"},
+     {}, {"steps": ["create", "bind"]}, "Mac 的 worker 比机器人旧"),
+], ids=["12-crowds", "25-sku-prices", "channel-link-from-a-worker-before-the-agreement"])
 def test_a_preview_past_the_bots_limits_keeps_the_reply_without_the_action(bot, clock, raw, mac_limits, run, word):
-    """A Mac whose config.json raised max_crowds / max_sku_prices past FORM_LIMITS: the bot does not take
-    its action, but the reply is no longer lost with it (「草稿格式不对」): a plain draft for a person."""
+    """A Mac whose config.json raised max_crowds / max_sku_prices past FORM_LIMITS, or a worker from before the
+    专属链接 agreement (2026-11-09: its ready preview has no ``run.skus``): the bot does not take its action, but the
+    reply is no longer lost with it (「草稿格式不对」): a plain draft for a person."""
     bot.prm.store.set_gate("other", "auto", clock.now)                      # even a kind that goes out on its own
     action = platforms.check_action(raw, limits=mac_limits)                 # what that Mac previewed, ready
     packet = drafted(bot, {**block(), "action": action, "run": run}, reply="计划建好啦～", kind="other")
