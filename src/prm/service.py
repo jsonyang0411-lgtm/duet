@@ -121,6 +121,7 @@ from .boss_groups import (BOSS as BOSS_WHO, CHANNEL as GROUP_CHANNEL, EVENT as B
 from .friend_adds import OPEN as FRIEND_ADD_OPEN, STATES as FRIEND_ADD_STATES, FriendAdds, friend_adds_out
 from .result import MAX_DRAFT_CHARS, MESSAGE_KINDS, DraftError, parse_draft
 from .three_party import EVENT as GROUP_EVENT, ThreeParty, state_out as group_state_out
+from .wechat_review import WechatReview
 from .store import (
     APPROVED, BUYIN_TOOL, COPILOT, DRAFT_NOTES, DROPPED, EXECUTING, FAILED, HUMAN, LANE_BUYIN, LANE_REPLY, LANE_SYSTEM,
     DRAFT_NOTE_CHARS, MESSAGE_TOOL, MODES, NO_REPLY, NOTICE_CHARS, PAUSED, PENDING,
@@ -1355,6 +1356,11 @@ class PrmService:
         # pause(sec) between two messages of a reply: True when the bot is stopping (the rest of it is not sent)
         self._pause = pause if pause is not None else self._stopping.wait
         self._thread: Optional[threading.Thread] = None
+        # 微信里审批草稿 (PRM_WECHAT_REVIEW, default off; src/prm/wechat_review.py): the drafts waiting for a person told to
+        # the admin's private chat (the sender thread, ``tick``)
+        self.wechat_review = WechatReview(
+            self._store, config, clock=clock, send=send, lines=self._packet_lines,
+            parts=lambda text: len(reply_parts(text, self._reply_parts)), opening_auto=self._opening_auto_sec > 0)
         relay.register_kind(PRM, self.on_result)
 
     @property
@@ -3928,6 +3934,12 @@ class PrmService:
         self._wake.set()
         return {"ok": True, "status": APPROVED}
 
+    def _packet_lines(self, packet: dict) -> str:
+        """Her lines a draft answers (微信里审批草稿's notification): its job's text and follow-ups (``_job_lines``); ""
+        for a draft of no job (a shipping notice) or one whose job is gone."""
+        job = self._relay.store.get(int(packet["job_id"])) if packet.get("job_id") is not None else None
+        return self._job_lines(job) if job is not None else ""
+
     def _person_decided(self, packet: dict, now: float) -> None:
         """An operator decided on a draft answering her: her recall (the draft said so) is seen to.  Not by a 百应
         draft's decision (her recall was in WeChat; ``_decide_buyin`` never comes here)."""
@@ -5852,6 +5864,7 @@ class PrmService:
         self.sweep_executing()
         self.send_due_openings()
         self.send_approved()
+        self.wechat_review.sweep()                     # PRM_WECHAT_REVIEW: the drafts waiting told to the admin's chat
         self.send_holding_replies()
         self.sweep_owed_steps()
         self.sweep_deliveries()
@@ -6173,6 +6186,8 @@ class PrmService:
         if boss_chats:                                 # 老板拉的群: the names in its row and record, its lines kept
             counts["boss_groups"] = self.boss_groups.purge(deal)
         counts["drafts"] = self._store.rewrite_packets(deal["id"], rewrite)
+        # 微信里审批草稿: the rows of her drafts told to the admin, with her drafts
+        counts["wechat_reviews"] = self._store.purge_wechat_reviews(deal["id"], rewrite, now)
         counts["events"] = self._store.rewrite_events(deal["id"], rewrite)
         counts["notices"] = self._store.rewrite_notices(deal["id"], rewrite)
         # 聚水潭's words for a rejected or deleted order ("地址不全…"): kept with the order and in the sync's answers

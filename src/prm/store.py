@@ -54,6 +54,10 @@
                     when we last answered there (``replied_at``), while its 开场白 waits for the watch's catch-up, when it
                     was taken over (``opening_due``), and WeChat's line that we were added (``joined_at``, WeChat's
                     clock: only a group added to after the baseline is taken over by itself, review 2026-10-31 F4)
+``wechat_reviews``  微信里审批草稿 (PRM_WECHAT_REVIEW, src/prm/wechat_review.py): one row per draft told to the admin's
+                    private chat (its number is the packet's id): when, where the admin's answer stands (``state``), the
+                    admin's own words kept as the proposed edit (``proposed``), what was decided there (``decision``) and
+                    when a send that failed after it was told (``told_failed_at``)
 
 A packet's life: ``pending`` (waits in the console) -> ``approved`` (an operator said
 send, the kind's gate is ``auto``, or the 下班时段 window sent it: route ``night``) -> ``sending`` ->
@@ -344,6 +348,24 @@ CREATE TABLE IF NOT EXISTS boss_groups (
     opening_due REAL,
     joined_at REAL
 );
+-- 微信里审批草稿 (PRM_WECHAT_REVIEW, src/prm/wechat_review.py, 2026-11-09): one row per draft told to the admin's private
+-- chat (ADMIN_WXID), the number the admin answers to is the packet's id.  ``state``: notified (told, the answer is
+-- awaited) | proposed (the admin wrote other text quoting it: ``proposed``, not sent; a 「1」 sends it) | answered
+-- (decided there: ``decision`` send / edit / drop).  Open while its packet is pending.  ``told_failed_at``: a draft
+-- approved there whose send failed, and the admin was told.  The 8.2 clean-up drops a deal's closed rows, cuts the rest.
+CREATE TABLE IF NOT EXISTS wechat_reviews (
+    packet_id INTEGER PRIMARY KEY,
+    deal_id INTEGER NOT NULL,
+    state TEXT NOT NULL DEFAULT 'notified',
+    notified_at REAL NOT NULL,
+    proposed TEXT NOT NULL DEFAULT '',
+    proposed_at REAL,
+    decision TEXT NOT NULL DEFAULT '',
+    answered_at REAL,
+    told_failed_at REAL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS wechat_reviews_deal ON wechat_reviews(deal_id);
 """
 
 # Columns added after the first version: (table, column, type).
@@ -1958,3 +1980,65 @@ class PrmStore:
                     changed += 1
             self._conn.commit()
         return changed
+
+    # ── 微信里审批草稿 (PRM_WECHAT_REVIEW, src/prm/wechat_review.py) ───────────
+
+    def wechat_review_due(self, limit: int = 200) -> list[dict]:
+        """The drafts waiting for a person that were not told to the admin's chat yet, oldest first: pending, no
+        ``wechat_reviews`` row, not a 百应 draft (an operator copies those into 百应).  Which of them go out by themselves
+        (开场白自动发) is the caller's to see."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT p.* FROM action_packets p LEFT JOIN wechat_reviews w ON w.packet_id = p.id"
+                " WHERE p.status = ? AND p.tool != ? AND w.packet_id IS NULL ORDER BY p.id LIMIT ?",
+                (PENDING, BUYIN_TOOL, int(limit))).fetchall()
+        return [packet_view(dict(r)) for r in rows]
+
+    def add_wechat_review(self, packet_id: int, deal_id: int, now: Optional[float] = None) -> bool:
+        """A draft was told to the admin's chat (``notified``); True when it had not been told before."""
+        now = time.time() if now is None else now
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO wechat_reviews (packet_id, deal_id, state, notified_at, updated_at)"
+                " VALUES (?, ?, 'notified', ?, ?)", (int(packet_id), int(deal_id), now, now))
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def wechat_review(self, packet_id: int) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM wechat_reviews WHERE packet_id = ?", (int(packet_id),)).fetchone()
+        return dict(row) if row else None
+
+    def wechat_reviews_open(self) -> list[dict]:
+        """The drafts told to the admin that still wait for the answer there (their packet pending, nothing decided in
+        WeChat), oldest first; each row with its packet's ``party_id`` and ``chat_id``."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT w.*, p.party_id AS party_id, p.chat_id AS chat_id FROM wechat_reviews w"
+                " JOIN action_packets p ON p.id = w.packet_id WHERE p.status = ? AND w.state IN ('notified', 'proposed')"
+                " ORDER BY w.packet_id", (PENDING,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def purge_wechat_reviews(self, deal_id: int, rewrite: Callable[[str], str], now: Optional[float] = None) -> int:
+        """8.2 clean-up of a deal (``PrmService.purge``): the rows of its drafts that no longer wait go, with what the
+        admin wrote for them; a waiting one stays (told once: never told again), its proposed edit cut by ``rewrite``.
+        Returns how many rows went or changed."""
+        now = time.time() if now is None else now
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT w.packet_id, w.proposed, p.status AS status FROM wechat_reviews w"
+                " LEFT JOIN action_packets p ON p.id = w.packet_id WHERE w.deal_id = ?", (int(deal_id),)).fetchall()
+            gone = [r["packet_id"] for r in rows if r["status"] != PENDING]
+            changed = 0
+            if gone:
+                self._conn.execute(f"DELETE FROM wechat_reviews WHERE packet_id IN ({', '.join('?' * len(gone))})",
+                                   gone)
+            for row in rows:
+                if row["status"] == PENDING and row["proposed"]:
+                    cut = rewrite(row["proposed"])
+                    if cut != row["proposed"]:
+                        self._conn.execute("UPDATE wechat_reviews SET proposed = ?, updated_at = ? WHERE packet_id = ?",
+                                           (cut, now, row["packet_id"]))
+                        changed += 1
+            self._conn.commit()
+        return len(gone) + changed
