@@ -271,6 +271,12 @@ def _date(value) -> Optional[date]:
         return None
 
 
+def _skill_paths(raw: dict) -> tuple:
+    """The skill's script and its Python as handcards.json names them (``raw``; {}: the defaults)."""
+    return (os.path.expanduser(str(raw.get("script") or SKILL_SCRIPT)),
+            os.path.expanduser(str(raw.get("python") or os.environ.get("LIVE_HANDCARD_PYTHON") or SKILL_PYTHON)))
+
+
 def load_config(path) -> tuple:
     """``(settings, "")`` of the Mac's handcards.json, or ``(None, why not)``: ``script`` (the skill's
     make_cards_local.py), ``python`` (the skill's Python: Pillow for the photos, Playwright for the cards; empty:
@@ -292,9 +298,8 @@ def load_config(path) -> tuple:
         return None, f"{path.name} 不是一个 JSON 对象"
     if raw.get("enabled", True) is not True:
         return None, f"{path.name} 里 enabled 不是 true"
-    cfg = {"script": os.path.expanduser(str(raw.get("script") or SKILL_SCRIPT)),
-           "python": os.path.expanduser(str(raw.get("python") or os.environ.get("LIVE_HANDCARD_PYTHON")
-                                             or SKILL_PYTHON)),
+    script, python = _skill_paths(raw)
+    cfg = {"script": script, "python": python,
            "skus": os.path.expanduser(str(raw.get("skus") or HAT_SKUS)),
            "source": " ".join(str(raw.get("source") or "").split())[:60],
            "caveats": [" ".join(str(c).split())[:120] for c in raw.get("caveats") or [] if str(c).strip()][:5],
@@ -338,6 +343,36 @@ def load_config(path) -> tuple:
         if not os.path.isfile(cfg[key]):
             return None, f"找不到{what}：{cfg[key]}"
     return cfg, ""
+
+
+CONFIG_STATES = ("ok", "missing", "off", "broken")
+
+
+def config_report(path) -> dict:
+    """How the Mac's handcards.json stands, for ``worker.py --check`` and the worker's log (review 2026-11-10 C5: a
+    missing or broken one gave no sign): ``{"path", "state", "why", "config", "script", "script_found", "python",
+    "python_found"}``.  ``state``: "ok" (``load_config`` takes it: ``config``), "missing" (no such file: this Mac
+    makes no cards), "off" (its ``enabled`` is not true) or "broken" (``why`` says what: the JSON, a setting, the
+    skill's script or its Python not there).  ``script`` / ``python``: the skill's as the file names them (the defaults
+    when it names none, or cannot be read), and whether they are there."""
+    path = Path(os.path.expanduser(str(path)))
+    config, why = load_config(path)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raw = None
+    raw = raw if isinstance(raw, dict) else {}
+    script, python = _skill_paths(raw)
+    if config is not None:
+        state = "ok"
+    elif not path.exists():
+        state = "missing"
+    elif raw and raw.get("enabled", True) is not True:
+        state = "off"
+    else:
+        state = "broken"
+    return {"path": str(path), "state": state, "why": why, "config": config, "script": script,
+            "script_found": os.path.isfile(script), "python": python, "python_found": os.path.isfile(python)}
 
 
 # ── the Mac: products, SKUs ──────────────────────────────────────────────
@@ -1026,7 +1061,8 @@ def run(argv: list, *, cwd, timeout: float, heartbeat: Optional[Callable[[], boo
 
 def prune_sessions(home, now: Optional[float] = None, keep_days: int = KEEP_DAYS) -> int:
     """The folders of earlier cards under ``home`` (the worker's platform/handcards) older than ``keep_days`` go (the
-    worker calls this with every prm job, the hourly sample-status rounds too); how many went."""
+    worker calls this with every prm job, the hourly sample-status and 百应 rounds too, and when it starts); how many
+    went."""
     home = Path(home)
     now = time.time() if now is None else now
     gone = 0

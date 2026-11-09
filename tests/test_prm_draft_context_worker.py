@@ -213,7 +213,8 @@ def test_the_prompt_function_is_unchanged_without_the_context(worker):  # noqa: 
 
 def test_a_buyin_draft_gets_none_of_it_and_only_the_bots_accounts_count(worker):  # noqa: F811
     """No context for a 百应 draft or a job without it.  The accounts are the bot's only (it leaves out one two creators
-    share): the job's ``meta.creator`` 抖音号 (the invite block's) are never added; ``verified`` only among ``orders``."""
+    share): the job's ``meta.creator`` 抖音号 (the invite block's) are never added.  The bot's ``verified`` is not taken
+    (review 2026-11-10 D3: an order the bot made confirms no hat until it is shipped)."""
     assert worker.draft_context.wanted({"channel": "buyin", "draft_context": {"orders": [], "accounts": []}}) is None
     assert worker.draft_context.wanted({"party_id": 1}) is None
     asked = worker.draft_context.wanted({"draft_context": {
@@ -221,9 +222,8 @@ def test_a_buyin_draft_gets_none_of_it_and_only_the_bots_accounts_count(worker):
             {"platform": "dy", "no": ACCOUNT}, {"platform": "KS", "no": "x1"}, {"platform": "XHS", "no": "bad no!"},
             {"platform": "XHS", "no": "xhs_test_01"}], "confirmed": [CODE_B.lower(), "确认 X", 7, CODE_B, CODE_C]},
         "creator": {"douyin_ids": [ACCOUNT.upper(), 7, "test_daren_02"]}})
-    assert asked == {"orders": [JST_ORDER], "verified": [JST_ORDER], "accounts": [("DY", ACCOUNT), ("XHS", "xhs_test_01")],
+    assert asked == {"orders": [JST_ORDER], "accounts": [("DY", ACCOUNT), ("XHS", "xhs_test_01")],
                      "confirmed": [CODE_B, CODE_C]}
-    assert worker.draft_context.wanted({"draft_context": {"orders": [], "accounts": []}})["verified"] == []
     assert worker.draft_context.wanted({"draft_context": {"orders": [], "accounts": []}})["confirmed"] == []
 
 
@@ -291,6 +291,33 @@ def test_the_orders_her_deal_knows_are_looked_up_by_number(worker, bot, mac):  #
     assert "--mine" in first["argv"] and f"--order-no={ORDER_MADE}" in second["argv"] and "--raw" not in second["argv"]
     status = block(prompt_of(mac), "sample_status")
     assert f"{JST_ORDER}：已发货" in status and f"{ORDER_MADE}：已签收" in status and "她的寄样单 2 张" in status
+
+
+def test_a_row_that_names_no_platform_is_hers_only_by_its_number(worker, node, tmp_path):  # noqa: F811
+    """Review 2026-11-10 (L4, the reviewer's probe): a 聚水潭 row whose creator names no platform (and the order none
+    either) was hers when its bare number matched any of her accounts, on any platform, so another creator's order
+    could be told as hers.  Now such a row is hers only by its order number, and a row of another platform never is;
+    the order's own platform stands in for her entry's, the number in any case."""
+    dc = worker.draft_context
+    asked = {"orders": [], "accounts": [("XHS", "abc123")]}
+    rows = ({"orderNo": "YP00000001", "daren": {"platform": "DY", "platformNo": "abc123"}},       # another platform
+            {"orderNo": "YP00000002", "daren": {"platform": "", "platformNo": "ABC123"}},         # no platform
+            {"orderNo": "YP00000003", "daren": {"platformNo": "abc123"}},                         # no platform key
+            {"orderNo": "YP00000004", "daren": {"platform": "SELF", "platformNo": "abc123"}})     # not hers either
+    assert [dc._hers(row, asked) for row in rows] == ["", "", "", ""]
+    assert dc._hers({**rows[2], "platform": "xhs"}, asked) == "account"                          # (the order's own)
+    assert dc._hers({"orderNo": "YP00000005", "daren": {"platform": "Xhs", "platformNo": "Abc123"}}, asked) == "account"
+    assert dc._hers(rows[1], {**asked, "orders": ["YP00000002"]}) == "order"                      # (her deal knows it)
+    # through the reader: her 抖音号 on a row that names no platform is not hers; one her deal knows still is
+    _, _, reader, cfg, opts = reader_setup(worker, node, tmp_path)
+    nowhere, known = her_row("YP2611010000003"), her_row(ORDER_MADE)
+    for row in (nowhere, known):
+        row["platform"], row["daren"]["platform"] = None, ""
+    node.rules([mine_rows(her_row(), nowhere, known)])
+    out = reader.read(worker.platforms, cfg, {"orders": [ORDER_MADE], "accounts": [("DY", ACCOUNT)]}, opts,
+                      home=tmp_path / "home")
+    assert out["ok"] and {e["order_no"] for e in out["orders"]} == {JST_ORDER, ORDER_MADE} and len(node.calls()) == 1
+    assert "YP2611010000003" not in dc.sample_block(out)
 
 
 def test_jushuitan_not_read_is_said_and_the_draft_goes_on(worker, bot, mac):  # noqa: F811
@@ -533,33 +560,77 @@ def newest_preview(bot):  # noqa: F811
     return bot.prm.store.packets()[0]["platform"]["preview"]
 
 
-def test_only_an_earlier_order_that_went_out_or_that_the_bot_made_confirms_its_codes(worker, bot, mac):  # noqa: F811
-    """CODE_C with no picture of hers behind it: confirmed by an earlier order of hers that went out (SENT / SIGNED) and
-    by one the bot made itself (verified: even before it is sent); never by one 聚水潭 rejected, one only audited
-    (WAITING_SEND: our own sub-account audits each order right after making it), or a cancelled one."""
+def with_waybill(row, waybill="ZT0000000002"):
+    """``row`` with one package that has a waybill (聚水潭 may still say WAITING_SEND: the package went out)."""
+    row["erpOrders"] = [{"erpOrderNo": "E1", "logisticsCompany": "中通快递", "logisticsNo": waybill,
+                         "sendTime": "2026-11-06 15:20:00"}]
+    return row
+
+
+def drafts_of(worker, bot, mac):  # noqa: F811
+    """``drafted(row)``: her draft job of a sample order of CODE_C (no picture of hers behind it) with 聚水潭 listing
+    ``row`` as her earlier order, and its preview; ``jobs``: the jobs it queued."""
     mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action=PINK_ORDER)
+    jobs = []
 
     def drafted(row):
         worker.draft_context.READER.mine = {}             # (the listing read again: this case's rows)
+        worker.draft_context.READER.orders = {}
         order_rules(mac, rows=[row])
-        text_job(bot, mac, text="[11:08] 还要上次那个")
+        jobs.append(text_job(bot, mac, text="[11:08] 还要上次那个"))
         run_one(worker, bot, mac.settings)
         return newest_preview(bot)
 
+    return drafted, jobs
+
+
+def held(preview) -> bool:
+    """The preview holds CODE_C: no picture of hers and no confirmation behind it."""
+    return preview["verdict"] == "blocked" and preview["problems"][0].startswith(
+        f"{CODE_C}（均码粉色）这顶没有照片对过，先核对再建")
+
+
+def test_an_order_the_bot_made_confirms_no_hat_until_it_is_shipped(worker, bot, mac):  # noqa: F811
+    """Review 2026-11-10 (D3): the bot's own sample order (the job's ``verified``) confirmed its hats with no photo and
+    no sheet, even one not sent yet, or made before the photo rule.  Now it is like any other: made or audited and not
+    shipped (INIT, WAITING_SEND), or cancelled, it confirms nothing and the hat is held; shipped, it confirms."""
+    drafted, jobs = drafts_of(worker, bot, mac)
+    bot.prm.store.add_sample_order(ORDER_MADE, packet_id=1, deal_id=mac.deal["id"], party_id=mac.party["id"],
+                                   made_at=time.time() - 3600)
+    for status in ("INIT", "WAITING_SEND", "DELETED"):
+        made = drafted(her_row(ORDER_MADE, status, items=PINK))
+        assert ORDER_MADE in json.loads(bot.relay.store.get(jobs[-1])["meta"])["draft_context"]["verified"]
+        assert held(made), (status, made)
+        assert not any(ORDER_MADE in f["value"] for f in made["facts"] if f["label"] == "对图"), made["facts"]
+    shipped = drafted(her_row(ORDER_MADE, "SENT", items=PINK))
+    assert shipped["verdict"] == "ready", shipped["problems"]
+    assert f"{CODE_C}：她以前的寄样单 {ORDER_MADE} 里寄过（没有图对）" in [f["value"] for f in shipped["facts"]]
+    assert worker.draft_context.confirmed_codes({"orders": [
+        {"order_no": ORDER_MADE, "status": "INIT", "reason": "", "ships": [], "items": [{"code": CODE_C}]}]}) == {}
+
+
+def test_only_an_earlier_order_shipped_to_her_confirms_its_codes(worker, bot, mac):  # noqa: F811
+    """Review 2026-11-10 (D3): CODE_C with no picture of hers behind it is confirmed only by an earlier order of hers
+    that was shipped to her: 聚水潭 says SENT / SIGNED, or it has a waybill (a package went out while 聚水潭 still says
+    WAITING_SEND); never by one 聚水潭 rejected, one only made or audited (INIT, WAITING_SEND: our own sub-account
+    audits each order right after making it), or a cancelled one (even with a waybill)."""
+    drafted, _ = drafts_of(worker, bot, mac)
+    on_its_way = drafted(with_waybill(her_row(status="WAITING_SEND", items=PINK)))
+    assert on_its_way["verdict"] == "ready", on_its_way["problems"]
+    assert f"{CODE_C}：她以前的寄样单 {JST_ORDER} 里寄过（有运单号；没有图对）" in [f["value"] for f in on_its_way["facts"]]
     sent = drafted(her_row(status="SIGNED", items=PINK, sign_time="2026-11-08 10:00:00"))
     assert sent["verdict"] == "ready", sent["problems"]
     assert {f["label"]: f["value"] for f in sent["facts"]}["对图"] == f"{CODE_C}：她以前的寄样单 {JST_ORDER} 里寄过（没有图对）"
+    assert drafted(her_row(status="SENT", items=PINK))["verdict"] == "ready"
     for row in (her_row(status="INIT", reject="款不对，驳回", items=PINK),           # (聚水潭 rejected it)
+                her_row(status="INIT", items=PINK),
                 her_row(status="WAITING_SEND", items=PINK),
-                her_row(status="SIGNED", reject="少寄了一顶", items=PINK)):
-        held = drafted(row)
-        assert held["verdict"] == "blocked" and held["problems"][0].startswith(f"{CODE_C}（均码粉色）这顶没有照片对过，先核对再建"), row
-    bot.prm.store.add_sample_order(ORDER_MADE, packet_id=1, deal_id=mac.deal["id"], party_id=mac.party["id"],
-                                   made_at=time.time() - 3600)
-    made = drafted(her_row(ORDER_MADE, "INIT", items=PINK))
-    assert made["verdict"] == "ready", made["problems"]
-    assert f"{CODE_C}：机器人以前给她建的寄样单 {ORDER_MADE} 里有（还没发出；没有图对）" in [f["value"] for f in made["facts"]]
-    assert drafted(her_row(ORDER_MADE, "DELETED", items=PINK))["verdict"] == "blocked"
+                her_row(status="SIGNED", reject="少寄了一顶", items=PINK),
+                with_waybill(her_row(status="DELETED", items=PINK))):             # (cancelled: a waybill or not)
+        assert held(drafted(row)), row
+    assert worker.draft_context.confirmed_codes({"orders": [
+        {"order_no": JST_ORDER, "status": "WAITING_SEND", "reason": "", "ships": [{"waybill": "ZT0000000002"}],
+         "items": [{"code": CODE_A}]}]}) == {CODE_A: {"order": JST_ORDER, "status": "WAITING_SEND"}}
 
 
 ORDER_B = {**SAMPLE_ORDER, "items": [{"item_id": DY_ITEM2, "skus": [{"sku_id": DY_SKU2B, "qty": 1}]}]}    # (CODE_B)
@@ -948,6 +1019,34 @@ def test_the_photo_memory_and_the_sheets_go_after_a_week(worker, tmp_path):  # n
     assert sorted(p.name for p in dc.folder(home).rglob("*") if p.is_file()) == ["sheet-2.jpg"]
 
 
+def test_a_picture_past_its_week_goes_from_a_memory_file_still_written_to(worker, tmp_path):  # noqa: F811
+    """Review 2026-11-10 (L6): her memory file, written yesterday, still held a picture remembered eight days ago (a
+    file goes only by its own time, and only her next draft job's load let go of the picture).  Prune drops such a
+    picture now (one that says no time too); a file left with none goes; one that cannot be read waits for its own
+    time; the young ones stay as they were."""
+    dc = worker.draft_context
+    home, now = tmp_path / "home", time.time()
+    photos = dc.folder(home) / "photos"
+    photos.mkdir(parents=True)
+    old = {"sha256": "1" * 64, "rel": "inbox/job-1/图片-1.jpg", "name": "图片-1.jpg", "job": 1, "at": now - 8 * 86400,
+           "verdict": dc.SURE, "hats": dc.trimmed(SURE), "error": ""}
+    young = {**old, "sha256": "2" * 64, "rel": "inbox/job-2/图片-2.jpg", "name": "图片-2.jpg", "job": 2, "at": now - 86400}
+    (photos / "party-1.json").write_text(json.dumps({"version": 1, "photos": [young, old]}, ensure_ascii=False),
+                                         encoding="utf-8")
+    (photos / "party-2.json").write_text(json.dumps({"version": 1, "photos": [old, {**old, "at": None}]}),
+                                         encoding="utf-8")
+    (photos / "party-3.json").write_text("not json", encoding="utf-8")
+    assert dc.prune(home, now=now) == 3                           # (one of party 1's, both of party 2's)
+    assert json.loads((photos / "party-1.json").read_text(encoding="utf-8")) == {"version": 1, "photos": [young]}
+    assert not (photos / "party-2.json").exists() and (photos / "party-3.json").read_text(encoding="utf-8") == "not json"
+    assert sorted(p.name for p in photos.iterdir()) == ["party-1.json", "party-3.json"]          # (no .part left)
+    assert dc.prune(home, now=now) == 0
+    ws = tmp_path / "ws"
+    (ws / "inbox" / "job-2").mkdir(parents=True)
+    (ws / "inbox" / "job-2" / "图片-2.jpg").write_bytes(b"\xff\xd8\xff two")
+    assert [e["name"] for e in dc.load_memory(home, 1, ws, now)] == ["图片-2.jpg"]      # (her memory reads as before)
+
+
 def test_a_worker_that_does_not_check_by_photo_leaves_the_sample_order_held(worker, bot, mac, monkeypatch):  # noqa: F811
     """Review 2026-11-09: the bot's switch on and a worker whose draft_context.py did not load (an older worker, one not
     restarted, the same): its preview of a sample order with no picture behind it says ready, but nothing checked it;
@@ -1160,6 +1259,51 @@ def test_the_macs_files_are_pruned_by_every_prm_job_the_switch_on_or_off(worker,
     assert "draft_context" not in bot.relay.store.get(job_id)["meta"]
     run_one(worker, bot, mac.settings)
     assert not old_sheet.exists() and not old_memory.exists() and fresh.exists()
+
+
+def test_the_hourly_rounds_a_job_without_a_workspace_and_the_start_prune_too(worker, mac, monkeypatch):  # noqa: F811
+    """Review 2026-11-10 (L6): only a creator's draft job pruned the Mac's week-old files; the hourly sample-status and
+    百应 rounds, a job that found no usable workspace and the worker's start did not, so a Mac that got only those kept
+    her photos on the sheets, her pictures and her words.  Now every prm job prunes before anything else (inbox/ only
+    with a usable workspace), and so does a worker that writes drafts when it starts; an admin-only one leaves them."""
+    dc = worker.draft_context
+    week_ago = time.time() - 8 * 86400
+
+    def plant():
+        sheets, photos = dc.folder(mac.home) / "sheets", dc.folder(mac.home) / "photos"
+        pictures, logs = mac.workspace / "inbox" / "job-1", mac.home / "logs" / "prm"
+        for folder in (sheets, photos, pictures, logs):
+            folder.mkdir(parents=True, exist_ok=True)
+        planted = [sheets / "对图单-1.jpg", photos / "party-9.json", pictures / "图片-1.jpg", logs / "old-job1.md"]
+        for path in planted:
+            path.write_bytes(b"x")
+        cards = mac.home / "platform" / "handcards" / "20261001-090000-job1"
+        cards.mkdir(parents=True, exist_ok=True)
+        for path in (*planted, pictures, cards):
+            os.utime(path, (week_ago, week_ago))
+        return [*planted[:2], pictures, planted[3], cards]
+
+    def gone(planted):
+        return [p.exists() for p in planted] == [False] * len(planted)
+
+    monkeypatch.setattr(worker, "do_sample_status_job", lambda *a: {"ok": True})
+    monkeypatch.setattr(worker, "do_buyin_inbox_job", lambda *a: {"ok": True})
+    for meta in ({"op": "sample_status"}, {"op": "buyin_inbox"}):
+        planted = plant()
+        assert worker.do_prm_job(mac.settings, {"id": 9, "meta": meta}, None, None) == {"ok": True}
+        assert gone(planted), meta
+    planted = plant()                                             # (no usable workspace: her pictures wait)
+    nowhere = {**mac.settings, "prm_workspace": str(mac.workspace / "no-such-folder")}
+    assert worker.do_prm_job(nowhere, {"id": 9, "meta": {"party_id": 1}}, None, None)["ok"] is False
+    assert [p.exists() for p in planted] == [False, False, True, False, False]
+    planted = plant()
+    worker.on_start(mac.settings, ("admin",))                     # (an admin-only worker: the prm worker's files)
+    assert all(p.exists() for p in planted)
+    worker.on_start(mac.settings, ("prm",))
+    assert gone(planted)
+    planted = plant()
+    worker.on_start(mac.settings, ("admin", "prm"))
+    assert gone(planted)
 
 
 def test_the_clean_up_of_her_deal_deletes_her_photo_memory(worker, bot, mac):  # noqa: F811
@@ -1599,6 +1743,47 @@ def test_one_job_reruns_at_most_three_earlier_failed_pictures_oldest_first(worke
     assert [match_runs(mac, f"图片-{i}.jpg") for i in range(5)] == [1, 1, 1, 1, 1]
 
 
+def test_a_setting_it_cannot_take_is_logged_once_by_its_key(worker, caplog):  # noqa: F811
+    """Review 2026-11-10 (C7): a config.json value of ``draft_context`` that is not taken (no number, out of its range,
+    a path that is no text, a ``stock`` that is not true / false, a key that is no setting, a section that is no
+    object) left its default without a word.  Now each is one WARNING a worker start naming the key and the value; the
+    good ones, the ones not given and an empty path say nothing; another wrong value of the same key is said too."""
+    dc = worker.draft_context
+    bad = {"draft_context": {"budget_sec": "120", "gap_sec": 99, "stock": "yes", "hat_index": 7, "canary": "",
+                             "hat_python": "/x\nrm -rf", "photo_min_score": float("nan"), "budget_secs": 60,
+                             "cache_min": 5, "colour_max_de": None}}
+    with caplog.at_level(logging.INFO, logger="claude_relay.worker"):
+        for _ in range(3):
+            opts = dc.options(bad)
+    assert (opts["budget_sec"], opts["gap_sec"], opts["stock"], opts["cache_min"], opts["photo_min_score"]) == (
+        120, 3.0, True, 5, 1.10)
+    assert str(opts["hat_index"]).endswith("hat-index") and opts["canary"] == ""
+    said = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert said == [
+        "draft context: config.json 的 draft_context.hat_index 是 7，不能用（要一个路径（一行字）），用默认值 "
+        '"~/.claude-relay/platform/hat-index"',
+        'draft context: config.json 的 draft_context.hat_python 是 "/x\\nrm -rf"，不能用（要一个路径（一行字）），用默认值 '
+        '"~/.local/share/hat-index/venv/bin/python"',
+        "draft context: config.json 的 draft_context.gap_sec 是 99，不能用（要 0 到 30 之间的数），用默认值 3.0",
+        'draft context: config.json 的 draft_context.budget_sec 是 "120"，不能用（要 10 到 1800 之间的数），用默认值 120',
+        "draft context: config.json 的 draft_context.photo_min_score 是 NaN，不能用（要 0 到 3 之间的数），用默认值 1.1",
+        'draft context: config.json 的 draft_context.stock 是 "yes"，不能用（要 true 或 false），用默认值 true',
+        "draft context: config.json 的 draft_context.budget_secs 不是一项设置（拼错了？），没有用"]
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="claude_relay.worker"):
+        dc.options({"draft_context": {"budget_sec": 5}})          # (another wrong value of a key said before)
+        dc.options({"draft_context": [1]})
+        for fine in ({}, {"draft_context": None}, {"draft_context": {"budget_sec": 60, "stock": False, "hat_index": " "}}):
+            dc.options(fine)
+    assert [r.getMessage() for r in caplog.records] == [
+        "draft context: config.json 的 draft_context.budget_sec 是 5，不能用（要 10 到 1800 之间的数），用默认值 120",
+        "draft context: config.json 的 draft_context 是 [1]，不能用（要一个对象（{…}）），用默认值 （全部）"]
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="claude_relay.worker"):
+        worker._load_draft_context().options(bad)                 # (the worker started again: said again)
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 7
+
+
 def test_the_module_runs_on_the_macs_system_python(tmp_path):
     """tools/claude_relay/draft_context.py with macOS's /usr/bin/python3 (3.9): a creator's orders read, her picture
     matched and a sample order checked, against a fake CLI and a fake index."""
@@ -1646,6 +1831,18 @@ def test_the_module_runs_on_the_macs_system_python(tmp_path):
                       cfg=cfg, opts=opts, catalog=json.loads(catalog), workspace=Path({str(ws)!r}),
                       home=Path({str(tmp_path / 'home')!r}))
         assert out["block"]["verdict"] == "ready" and out["sheet"] and Path(str(out["sheet"])).is_file(), out
+        # the 2026-11-10 fixes: no platform, no account; only a shipped order confirms; a picture past its week goes
+        assert dc._hers({{"orderNo": "YP00000003", "daren": {{"platformNo": {ACCOUNT!r}}}}},
+                        {{"orders": [], "accounts": [("DY", {ACCOUNT!r})]}}) == ""
+        made = {{"order_no": "YP00000004", "status": "INIT", "reason": "", "ships": [], "items": [{{"code": "A1B2C3"}}]}}
+        assert dc.confirmed_codes({{"orders": [made, {{**made, "status": "WAITING_SEND", "ships": [{{"waybill": "ZT01"}}]}}]}}) \\
+            == {{"A1B2C3": {{"order": "YP00000004", "status": "WAITING_SEND"}}}}
+        memory = Path({str(tmp_path / 'home')!r}) / "platform" / "draft-context" / "photos" / "party-1.json"
+        data = json.loads(memory.read_text(encoding="utf-8"))
+        data["photos"].append({{**data["photos"][0], "at": 1}})
+        memory.write_text(json.dumps(data), encoding="utf-8")
+        assert dc.prune(Path({str(tmp_path / 'home')!r})) == 1 and len(json.loads(memory.read_text())["photos"]) == 1
+        assert dc.options({{"draft_context": {{"budget_sec": "x"}}}})["budget_sec"] == 120
         print("ok", sys.version_info[:2])
     """), encoding="utf-8")
     env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path)}

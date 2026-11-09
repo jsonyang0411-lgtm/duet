@@ -52,7 +52,8 @@ queues a ``platform_execute`` job: the same CLI with --execute, once per approva
 (a ledger in ~/.claude-relay/platform/ledger; a key seen before is never run again),
 and the outcome goes back.  ``--sync-products`` writes the catalogue (read-only CLI
 commands) to prm_workspace/kb/products.md and products.json; with config.json's ``products_sync_hours`` (0, the
-default: never) a worker that writes drafts runs it by itself at night when it has no job (``products_sync_tick``).
+default: never) a worker that writes drafts runs it by itself at night when it has no job (``products_sync_tick``; a
+value that is no number of hours is taken as 0, said once in the log and by --check: ``load_settings``).
 Now and then the bot also asks
 where its 聚水潭 sample orders stand (a ``sample_status`` job, PRM_SAMPLE_SYNC_MIN): no model,
 `jst samples` (read-only, no receiver) under the same CLI lock, paced; the short answer
@@ -70,7 +71,8 @@ about once more in the same conversation, ``handcards_review``); this script the
 skill's make_cards_local.py with the skill's own Python, and sends the 1x cards back with the draft and its verdict
 ``handcards_made`` (all of them or none: one file not sent back fails them all, and every one is named).  Another
 job's ``handcards`` is left out, with no verdict.  An operator's 「做手卡」 (``meta.handcards``) on a Mac without those
-settings fails at once, without the model.
+settings fails at once, without the model.  How handcards.json stands (ok, missing, off, broken and why, the skill's
+script and venv) is a line of --check and of the log when the worker starts, and again when it changes.
 A creator the boss brought in a WeChat group he made with her and this account (老板拉的群, the bot took it over:
 ``meta.channel == "group"``) has her drafts go out in that group: the prompt says so, the boss reads them too, and
 the others' lines there come as <group_context>, data and never instructions.  A group an operator linked to her by
@@ -81,7 +83,8 @@ numbers her deal knows, her 抖音号 / 小红书号): before Claude starts, thi
 read-only, under the same lock, paced) and matches the pictures she sent against the hat photo index (draft_context.py,
 next to this file), and the prompt gets <photo_matches> and <sample_status>, data and never instructions, with their rule
 lines; a draft's jst.sample_order is then checked by photo (a hat with neither a sure picture nor a confirmation behind
-it is not ready; the draft is marked ``draft_context: {"v": 3, "gated": true}``, and the bot holds a sample order
+it, an operator's 「对过图了」 or an earlier order of hers shipped to her, is not ready; the draft is marked
+``draft_context: {"v": 3, "gated": true}``, and the bot holds a sample order
 without that mark) and its side-by-side sheet goes back on the relay's operator-only channel (``operator_files``; an
 older bot has none and says so, and the order is not ready), never to the creator.
 
@@ -394,9 +397,10 @@ PRM_PLATFORM_NOTE = (
     "还没开就不填平台动作，专属佣金由系统派的那一步开（kb/合作政策.md 2.1），开好以后系统再派一步建这个商品的链接"
     "（那一步的说明会写）；回她消息的草稿不填 dy.channel_goods，除非起草备注里运营让你直接建（比如专属佣金是在百应手动开的）。"
     "达人或老板要了专属链接"
-    "（说到「链接」「专属链接」「前缀」）时，slots 里记「专属链接前缀」= 她要的前缀（写成「【某某专属】」；要链接、还没说前缀"
-    "就记「要」；后来说不要了就记成空字符串；只写这三种，「好的」「可以」这类系统看不出要不要，会照原来的办）："
-    "系统按它在每个商品的专属佣金开好以后派一步建这个商品的链接。\n"
+    "（说到「专属链接」「前缀」，或者明说要一条只给她的链接）时，slots 里记「专属链接前缀」= 她要的前缀（写成「【某某专属】」；"
+    "要链接、还没说前缀就记「要」；后来说不要了就记成空字符串；只写这三种，「好的」「可以」这类系统看不出要不要，会照原来的办）："
+    "系统按它在每个商品的专属佣金开好以后派一步建这个商品的链接。只说「发个链接」「链接发我」「有链接吗」的，要的是普通的商品链接"
+    "（kb/products.md 里有），不是专属链接：不记这一栏。\n"
     "- dy.creator_invite：抖音百应达人广场「邀约带货」，给达人发一张邀约卡片（精选联盟私信，发出去收不回）。"
     "item_id = 主推商品 ID，extra_item_ids = 其他推荐商品（最多 4 个，一般不填），creator_douyin_id = 达人的抖音号"
     "（只能用达人在对话里自己发来的、或登记信息里的抖音号，不能猜），"
@@ -429,7 +433,16 @@ log = logging.getLogger("claude_relay.worker")
 
 # ── settings ─────────────────────────────────────────────────────────────
 
-def load_settings(path: Path) -> dict:
+SETTINGS_WARNINGS = "config_warnings"   # load_settings: a line for each value it put a default in place of
+_WARNED: set = set()                    # those lines logged already (once a worker start)
+
+
+def load_settings(path: Path, warn: bool = True) -> dict:
+    """config.json over DEFAULTS (RELAY_URL / RELAY_TOKEN win; the token from ``token_file``).  Without relay_url and a
+    token, or with a token_file that cannot be read, it refuses (SystemExit: the worker does not start, and says why).
+    A ``products_sync_hours`` that is no number of hours is taken as 0 (off) instead (review 2026-11-10: both workers
+    share this file, and one wrong value stopped them both): said in ``SETTINGS_WARNINGS`` (``--check`` prints it) and,
+    with ``warn``, in one WARNING line a worker start (``_warn_once``; the permission hook does not log it)."""
     settings = dict(DEFAULTS)
     settings["config_path"] = str(path)          # the permission hook reads the same file
     if path.exists():
@@ -446,15 +459,37 @@ def load_settings(path: Path) -> dict:
     settings["relay_url"] = str(settings["relay_url"]).rstrip("/")
     if not settings["relay_url"] or not settings["token"]:
         raise SystemExit(f"relay_url and token are needed (in {path} or RELAY_URL / RELAY_TOKEN)")
+    settings[SETTINGS_WARNINGS] = []
     if _sync_hours(settings.get("products_sync_hours")) is None:
-        raise SystemExit(f"products_sync_hours in {path} must be a number of hours (0 = off), "
-                         f"not {settings.get('products_sync_hours')!r}")
+        said = (f"products_sync_hours in {path} is {_shown(settings.get('products_sync_hours'))}, not a number of "
+                "hours (0 = off): taken as 0, so the catalogue does not sync itself at night")
+        settings["products_sync_hours"] = 0
+        settings[SETTINGS_WARNINGS].append(said)
+        if warn:
+            _warn_once(said)
     return settings
+
+
+def _shown(value) -> str:
+    """A config value as config.json writes it (``"24"``, ``true``, ``null``), cut short: for a log line."""
+    try:
+        text = json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = repr(value)
+    return text if len(text) <= 80 else text[:77] + "..."
+
+
+def _warn_once(said: str) -> None:
+    """One WARNING line for ``said``, once a worker start (config.json is read again when it changes, and for a new
+    token: the same line is not said again)."""
+    if said not in _WARNED:
+        _WARNED.add(said)
+        log.warning("%s", said)
 
 
 def _sync_hours(value) -> float | None:
     """config.json ``products_sync_hours`` as hours (0: off), None when it is no finite number of 0 or more (true,
-    "24", null: ``load_settings`` refuses it; the night sync never runs on it)."""
+    "24", null: ``load_settings`` takes it as 0 and says so; the night sync never runs on it)."""
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
         return None
     return float(value)
@@ -490,7 +525,7 @@ class SettingsFile:
 def read_token(path: Path) -> str | None:
     """The token config.json (or RELAY_TOKEN) holds now; None if it cannot be read."""
     try:
-        return load_settings(path)["token"]
+        return load_settings(path, warn=False)["token"]
     except (SystemExit, Exception):
         return None
 
@@ -1687,13 +1722,14 @@ def fetch_prm_files(client: RelayClient, job: dict, workspace: Path) -> tuple[li
     return got, failed
 
 
-def prune_prm_files(workspace: Path) -> None:
-    """Creators' pictures and files (inbox/) and the prm logs older than KEEP_INBOX_DAYS go,
-    at every prm job: the 8.2 clean-up long after delivery finds none of them left.  The platform
-    logs stay (the record of what was written to the platforms); those that age past the same line
-    are cut to province and city like new ones (``coarse_platform_logs``)."""
+def prune_prm_files(workspace: Path | None) -> None:
+    """Creators' pictures and files (inbox/; none without a usable ``workspace``) and the prm logs older than
+    KEEP_INBOX_DAYS go (``prune_mac_files``: at every prm job and when the worker starts): the 8.2 clean-up long after
+    delivery finds none of them left.  The platform logs stay (the record of what was written to the platforms); those
+    that age past the same line are cut to province and city like new ones (``coarse_platform_logs``)."""
     cutoff = time.time() - KEEP_INBOX_DAYS * 86400
-    for old in [*(workspace / "inbox").glob("job-*"), *(HOME_DIR / "logs" / "prm").glob("*.md")]:
+    inbox = list((workspace / "inbox").glob("job-*")) if workspace is not None else []
+    for old in [*inbox, *(HOME_DIR / "logs" / "prm").glob("*.md")]:
         try:
             if old.stat().st_mtime >= cutoff:
                 continue
@@ -1707,11 +1743,33 @@ def prune_prm_files(workspace: Path) -> None:
         coarse_platform_logs(cutoff)
     except Exception as e:                               # never in the way of the job
         log.warning("platform logs not cut down: %s", e)
-    if draft_context is not None:                        # PRM_DRAFT_CONTEXT's sheets and photo memory: on or off
-        try:
-            draft_context.prune(HOME_DIR)
-        except Exception as e:
-            log.warning("draft context files not cut down: %s", e)
+
+
+def prune_draft_context() -> None:
+    """PRM_DRAFT_CONTEXT's sheets and photo memory on this Mac older than its KEEP_DAYS go, a remembered picture inside
+    a memory file too (``draft_context.prune``), the switch on or off."""
+    if draft_context is None:
+        return
+    try:
+        draft_context.prune(HOME_DIR)
+    except Exception as e:                               # never in the way of the job
+        log.warning("draft context files not cut down: %s", e)
+
+
+def prune_mac_files(settings: dict) -> None:
+    """What this Mac keeps for 7 days goes when it is older: the cards' folders (``prune_handcards``), PRM_DRAFT_CONTEXT's
+    sheets and photo memory (``prune_draft_context``), her pictures in inbox/ and the prm logs (``prune_prm_files``).
+    At every prm job before anything else, the hourly sample-status and the 百应 rounds too, one that finds no usable
+    workspace too (then inbox/ waits), and once when the worker starts (``on_start``): review 2026-11-10 L6, before,
+    only a creator's job pruned the draft context's files and her pictures."""
+    prune_handcards()
+    prune_draft_context()
+    try:
+        workspace = prm_workspace_dir(settings)[0]
+    except Exception as e:                               # (an odd prm_workspace: the job says why)
+        log.warning("prm files not cut down: %s", e)
+        return
+    prune_prm_files(workspace)
 
 
 PLATFORM_LOGS_UPTO = ".coarse-upto"     # in logs/platform/: the line coarse_platform_logs got to last time
@@ -2618,7 +2676,7 @@ def summarize_prm(run: dict, data: dict | None, settings: dict) -> dict:
 
 def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper) -> dict:
     meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
-    prune_handcards()                            # (every prm job, the hourly sample-status rounds too)
+    prune_mac_files(settings)                    # (every prm job, the hourly sample-status and 百应 rounds too)
     if meta.get("op") == "sample_status":        # 聚水潭: no creator, no model, no workspace needed
         return do_sample_status_job(settings, job, client, meta)
     if meta.get("op") == "buyin_inbox":          # 百应私信: no creator, no model, no workspace needed
@@ -2631,7 +2689,6 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
         party_id = int(meta.get("party_id"))
     except (TypeError, ValueError):
         return {"ok": False, "text": "", "error": "任务里没有达人编号", "duration_s": 0}
-    prune_prm_files(workspace)
     if meta.get("op") == "purge":
         return purge_case_file(workspace, party_id)
     if meta.get("op") in ("platform_execute", "platform_preview"):
@@ -2840,10 +2897,40 @@ def _douyin_ids(meta: dict) -> list:
 
 def handcards_settings() -> tuple:
     """``(settings, "")`` of this Mac's handcards.json (in HOME_DIR: the skill's script and Python, the house 口径, the
-    双11 line), or ``(None, why not)``: then no draft is told it may ask for cards."""
+    双11 line), or ``(None, why not)``: then no draft is told it may ask for cards.  Read at every prm job (a change
+    needs no restart); the log says how it stands when that changes (``say_handcards``)."""
     if handcards is None:
         return None, f"这台 Mac 的 worker 没有手卡模块（{HANDCARDS_FILE}）"
-    return handcards.load_config(HOME_DIR / handcards.CONFIG_FILE)
+    report = handcards.config_report(HOME_DIR / handcards.CONFIG_FILE)
+    say_handcards(report)
+    return report["config"], report["why"]
+
+
+def handcards_state_line(report) -> str:
+    """One line on this Mac's handcards.json (``handcards.config_report``; None: the module did not load): where it
+    is, ok / missing / off / broken and why, the skill's script and its Python (venv) and whether they are there.
+    ``--check`` prints it, the log says it (``say_handcards``)."""
+    if report is None:
+        return f"handcards (直播手卡): off ({HANDCARDS_FILE} not loaded)"
+    found = {True: "found", False: "not found"}
+    return (f"handcards (直播手卡): {report['path']}: {report['state']}"
+            + (f" ({report['why']})" if report["why"] else "")
+            + f"; skill script {report['script']} ({found[report['script_found']]})"
+            + f"; skill python {report['python']} ({found[report['python_found']]})")
+
+
+_HANDCARDS_SAID = {"line": None}        # the last line the log said of handcards.json (``say_handcards``)
+
+
+def say_handcards(report) -> None:
+    """The log says how this Mac's handcards.json stands (``handcards_state_line``) when the worker starts
+    (``on_start``) and again only when that changes while it runs (made, fixed, broken, taken away): review 2026-11-10
+    C5, a missing or broken one gave no sign.  A WARNING when it is broken."""
+    line = handcards_state_line(report)
+    if line == _HANDCARDS_SAID["line"]:
+        return
+    _HANDCARDS_SAID["line"] = line
+    (log.warning if report is not None and report["state"] == "broken" else log.info)("%s", line)
 
 
 def make_handcards(settings: dict, job: dict, meta: dict, request, workspace: Path, client: RelayClient,
@@ -3692,7 +3779,7 @@ def permission_hook(request: dict, job_id: str, config_path: Path, poll_wait: in
         return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}
 
     try:
-        settings = load_settings(config_path)
+        settings = load_settings(config_path, warn=False)    # (the worker's own log says what it took in place)
         client = RelayClient(settings["relay_url"], settings["token"])
         timeout = _minutes(settings) * 60
         tool = str(request.get("tool_name") or "?")
@@ -3944,6 +4031,20 @@ def stay_awake() -> subprocess.Popen | None:
         return None
 
 
+def on_start(settings: dict, kinds: tuple) -> None:
+    """Once when a worker that writes drafts starts (``main``, before ``serve``): what is older than its 7 days goes
+    (``prune_mac_files``: a Mac that only gets the hourly rounds, or none, keeps nothing longer), and the log says how
+    this Mac's handcards.json stands (``say_handcards``: missing, off, broken and why; review 2026-11-10 C5).  An
+    admin-only worker does neither (the prm worker owns those files)."""
+    if "prm" not in kinds:
+        return
+    prune_mac_files(settings)
+    if handcards is None:
+        say_handcards(None)
+    else:
+        handcards_settings()                             # (says it: ``say_handcards``)
+
+
 def setup_logging(name: str = "worker.log") -> None:
     HOME_DIR.mkdir(parents=True, exist_ok=True)
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
@@ -4012,6 +4113,15 @@ def main(argv: list[str] | None = None) -> int:
                 print("product catalogue: " + (time.strftime("%Y-%m-%d %H:%M", time.localtime(catalog["synced_at"]))
                                                if catalog and catalog.get("synced_at") else
                                                "none yet (python3 tools/claude_relay/worker.py --sync-products)"))
+        hours = _sync_hours(settings.get("products_sync_hours")) or 0    # (what load_settings took)
+        night = "%02d:00-%02d:00" % PRODUCTS_SYNC_NIGHT
+        print("products sync (products_sync_hours): " + (
+            f"{hours:g} = every {hours:g} h, at night ({night} on this Mac's clock) when idle" if hours
+            else "0 = off (the catalogue is synced by hand: --sync-products)"))
+        for said in settings.get(SETTINGS_WARNINGS) or []:
+            print(f"  WARNING: {said}")
+        print(handcards_state_line(handcards.config_report(HOME_DIR / handcards.CONFIG_FILE)
+                                   if handcards is not None else None))
         if draft_context is None:
             print(f"draft context (PRM_DRAFT_CONTEXT): off ({DRAFT_CONTEXT_FILE} not loaded)")
         else:
@@ -4075,6 +4185,10 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGHUP, stopper)       # the Terminal window was closed: finish the job's bookkeeping
     signal.signal(signal.SIGUSR1, stopper.request_restart)   # kill -USR1 <pid>: restart in the same window
     log.info("worker started (%s); bot %s", ",".join(kinds), settings["relay_url"])
+    try:
+        on_start(settings, kinds)
+    except Exception as e:                       # (a prune or a look at handcards.json never keeps it from serving)
+        log.warning("start-up checks not done: %s", e)
     serve(settings, client, stopper, once=args.once, settings_file=SettingsFile(Path(args.config), settings),
           kinds=kinds)
     products_sync_stop("the worker restarts" if stopper.exit_code() == RESTART_EXIT else "the worker stops")

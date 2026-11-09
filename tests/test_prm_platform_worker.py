@@ -152,6 +152,20 @@ def test_the_drafting_note_tells_the_shops_way_to_a_link_and_its_slot(worker):  
     assert "先只填这个商品的 dy.designated_commission" not in note          # (a reply never opens a 专属佣金: kb 2.1 #5)
 
 
+def test_a_plain_link_she_asks_for_is_no_wish_for_a_channel_link(worker):  # noqa: F811
+    """Review 2026-11-10 (C1): the slot 「专属链接前缀」 was to be written when she or the boss spoke of 「链接」 at all,
+    and a creator's 「发个链接」 for a product would have started link steps.  Only 「专属链接」, 「前缀」 or a plain
+    ask for a link made just for her count; 「发个链接」「链接发我」 is the product's ordinary link (kb/products.md) and
+    writes nothing in the slot."""
+    note = worker.PRM_PLATFORM_NOTE
+    start = note.index("达人或老板要了专属链接")
+    rule = note[start:note.index("\n", start)]
+    assert "说到「链接」" not in rule and "「链接」「专属链接」" not in note
+    for words in ("说到「专属链接」「前缀」，或者明说要一条只给她的链接", "slots 里记「专属链接前缀」",
+                  "只说「发个链接」「链接发我」「有链接吗」的，要的是普通的商品链接（kb/products.md 里有），不是专属链接：不记这一栏"):
+        assert words in rule, words
+
+
 def test_a_channel_link_is_made_the_shops_way_end_to_end(worker, bot, mac):  # noqa: F811
     """专属链接 (2026-11-09) through the real worker and bot: the draft names the product, her UID and 「前缀：小美专属」;
     the Mac reads the product, works out the agreement (9 折 floored, 100 a colour, all a colour can spare when that is
