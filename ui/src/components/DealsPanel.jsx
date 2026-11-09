@@ -23,6 +23,9 @@ import { BossGroupsCard } from './BossGroupsCard'
 // 自动模式 on (switched on 待审批): one warn line at the top says so.
 // 老板拉的群 (PRM_BOSS_GROUPS): the card at the top (BossGroupsCard.jsx); a creator taken over from such a group is
 // tagged 老板介绍 in the list, and her deal's 三方群 block says 老板拉的群 (``three_party.by`` "boss").
+// 接手任何合作群 (2026-11-09): a group the admin linked by hand (「接群」 in WeChat) says 手动接的群 instead: in her 三方群
+// block when it is her 三方群 (``by`` "manual": the boss is in it), else in a line of its own (``deal.linked_groups``) with
+// 「不接了」 (deal action ``group_unlink``).
 
 export default function DealsPanel() {
   const { data, err, reload } = usePrm(6000)
@@ -255,11 +258,12 @@ function DealDetail({ p, d, onDone }) {
   // A change made elsewhere (AI suggestion adopted, a waybill, another console) shows up here.
   useEffect(() => setStage(deal.stage), [deal.stage])
   useEffect(() => setStatus(deal.shipment?.status || 'transit'), [deal.shipment?.status])
+  // ``done``: the toast, or a function of the bot's answer that gives it (「不接了」: is the group read now)
   const run = async (body, done) => {
     setBusy(true)
     try {
-      await dealAction({ deal_id: deal.id, ...body })
-      toast.ok(done)
+      const out = await dealAction({ deal_id: deal.id, ...body })
+      toast.ok(typeof done === 'function' ? done(out || {}) : done)
       onDone()
     } catch (e) { toast.err(e.message) } finally { setBusy(false) }
   }
@@ -350,6 +354,7 @@ function DealDetail({ p, d, onDone }) {
       </div>
 
       {d?.three_party?.enabled && <ThreePartyBlock p={p} d={d} busy={busy} run={run} />}
+      {(deal.linked_groups || []).length > 0 && <LinkedGroups groups={deal.linked_groups} busy={busy} run={run} />}
 
       <div className="stack" style={{ gap: 6 }}>
         <b>寄样</b>
@@ -479,11 +484,32 @@ function DraftNoteBlock({ p, onDone }) {
   )
 }
 
+/** 接手任何合作群 (2026-11-09): the groups the admin linked to her by hand that are not her 三方群 (no boss in them, or
+ *  her deal has a 三方群 of its own): each says it is drafted in, and 「不接了」 stops it (deal action ``group_unlink``). */
+function LinkedGroups({ groups, busy, run }) {
+  return (
+    <div className="stack prm-linked-groups" style={{ gap: 6 }}>
+      <b>手动接的群</b>
+      {groups.map((g) => (
+        <div key={g.chat} className="row prm-linked-group" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span><UsersThree style={{ verticalAlign: -2 }} /> 「{g.name || '（没有群名）'}」（{fmtClock(g.at)} 接手）</span>
+          <span className="f-hint">她在群里说的话照常起草，回复发在群里，群里的人都看得到；别人说的话不起草。</span>
+          <button type="button" className="btn sm ghost" disabled={busy}
+            onClick={() => run({ action: 'group_unlink', chat: g.chat }, `记下了：「${g.name || '这个群'}」不接了，群里的话不再起草`)}>不接了</button>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 /** 三方群 (src/prm/three_party.py, 2026-10-30): 「拉三方群」 makes the group in this PC's WeChat (her and PRM_GROUP_WITH,
  *  picked in 「发起群聊」 and read back before 「完成」; nothing is said in it and it is not renamed: the suggested name is
  *  there to copy); 「先试一下」 picks them and cancels.  A run that may or may not have made it asks 「建好了 / 没建成」.
  *  A group the boss made with her and us (``by`` "boss", 老板拉的群, PRM_BOSS_GROUPS) is hers already: it says so and what
- *  the bot does there (her lines drafted, sent in the group), without the name to copy (the boss named it). */
+ *  the bot does there (her lines drafted, sent in the group), without the name to copy (the boss named it); one the admin
+ *  linked by hand (``by`` "manual", 接手任何合作群) says 手动接的群 the same way.  Both have 「不接了」 (deal action
+ *  ``group_unlink`` without a chat, 2026-11-09): no more drafting there, it stays her 三方群, read only (「群已经不在了」 is for
+ *  a group that is gone). */
 function ThreePartyBlock({ p, d, busy, run }) {
   const toast = useToast()
   const [asking, setAsking] = useState(false)
@@ -505,6 +531,16 @@ function ThreePartyBlock({ p, d, busy, run }) {
     <button type="button" className="btn sm ghost" disabled={busy}
       onClick={() => run({ action: 'group_none' }, '记下了：这位达人现在没有三方群')}>群已经不在了</button>
   )
+  // 「不接了」 (2026-11-09): the toast says what the bot answered (``reading``: this PC reads the group now); a 老板拉的群
+  // with PRM_BOSS_GROUPS off is not drafted in anyway (the bot would refuse): no button then
+  const unlinked = (out) => (out.reading
+    ? '记下了：这个群不接了，群里她的话不再起草；它还是她的三方群，机器人只读'
+    : '记下了：这个群不接了，群里她的话不再起草；它还是她的三方群，这台电脑读不了群，群里的话交不到她私聊的草稿')
+  const unlink = (
+    <button type="button" className="btn sm ghost" disabled={busy}
+      onClick={() => run({ action: 'group_unlink' }, unlinked)}>不接了</button>
+  )
+  const bossOn = !!d?.boss_groups?.enabled
   return (
     <div className="stack prm-group" style={{ gap: 6 }}>
       <b>三方群</b>
@@ -512,12 +548,23 @@ function ThreePartyBlock({ p, d, busy, run }) {
         <>
           <div><UsersThree style={{ verticalAlign: -2 }} /> 老板拉的群（{fmtClock(g.at)} 发现）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
           <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <span className="f-hint">老板把她和我们拉进了这个群，之后由我们跟她对接：她在群里说的话照常起草，回复发在群里，老板也看得到；老板和别人说的话不起草。群里的话也会交给她私聊的草稿。</span>
+            <span className="f-hint">老板把她和我们拉进了这个群，之后由我们跟她对接：她在群里说的话照常起草，回复发在群里，老板也看得到；老板和别人说的话不起草。群里的话也会交给她私聊的草稿。{bossOn ? '「不接了」：不再起草，它还是她的三方群，机器人只读。' : ''}</span>
+            {bossOn && unlink}
             {gone}
           </div>
         </>
       )}
-      {g.state === 'created' && g.by !== 'boss' && (
+      {g.state === 'created' && g.by === 'manual' && (
+        <>
+          <div><UsersThree style={{ verticalAlign: -2 }} /> 手动接的群（{fmtClock(g.at)} 接手）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span className="f-hint">运营在微信里接手了这个群（「接群」）：她在群里说的话照常起草，回复发在群里，群里的人都看得到；别人说的话不起草。群里的话也会交给她私聊的草稿。「不接了」：不再起草，它还是她的三方群，机器人只读。</span>
+            {unlink}
+            {gone}
+          </div>
+        </>
+      )}
+      {g.state === 'created' && g.by !== 'boss' && g.by !== 'manual' && (
         <>
           <div><UsersThree style={{ verticalAlign: -2 }} /> 三方群已建好（{fmtClock(g.at)}{g.made ? '' : '，手动标的'}）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
           <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>

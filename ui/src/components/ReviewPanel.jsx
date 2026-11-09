@@ -49,6 +49,7 @@ export default function ReviewPanel() {
         <AutoModeBar d={data} onDone={reload} />
         <PlatformAlerts alerts={data?.platform_alerts || []} onDone={reload} />
         <NightAlerts alerts={data?.night_alerts || []} onDone={reload} />
+        <GroupAlerts alerts={data?.group_alerts || []} onDone={reload} />
         {data && !pending.length && (
           <Empty title="现在没有要审批的草稿">已登记的达人发来消息后，Mac 写好的回复会出现在这里。</Empty>
         )}
@@ -163,12 +164,14 @@ function AutoModeBar({ d, onDone }) {
   )
 }
 
-/** 老板拉的群 (PRM_BOSS_GROUPS): a draft of her line in the group the boss made with her and us goes out in that group. */
+/** 老板拉的群 (PRM_BOSS_GROUPS): a draft of her line in the group the boss made with her and us goes out in that group; one
+ *  the admin linked by hand (``group_manual``, 接手任何合作群) need have no boss in it. */
 function GroupTag({ p }) {
   if (!inGroup(p)) return null
   return (
-    <span className="tag warn prm-group-tag" title={`发在老板拉的群「${p.group_name || ''}」里（不是她的私聊），老板也看得到`}>
-      <UsersThree /><span className="prm-group-name">群里 · {p.group_name || '老板拉的群'}</span>
+    <span className="tag warn prm-group-tag" title={p.group_manual ? `发在群「${p.group_name || ''}」里（不是她的私聊），群里的人都看得到`
+      : `发在老板拉的群「${p.group_name || ''}」里（不是她的私聊），老板也看得到`}>
+      <UsersThree /><span className="prm-group-name">群里 · {p.group_name || (p.group_manual ? '手动接的群' : '老板拉的群')}</span>
     </span>
   )
 }
@@ -214,6 +217,37 @@ function HandSamples({ rows, onDone }) {
           <div className="f-hint">{h.sent_at ? `${fmtClock(h.sent_at)} 发货；` : ''}手动建的寄样单：机器人没有替她填进合作单，告诉她运单号以后点「知道了」</div>
         </Banner>
       ))}
+    </div>
+  )
+}
+
+/** 接手任何合作群 (2026-11-09): her lines in a group whose link ended before they were answered. The bot never answers
+ *  them in another chat; each stays until 已处理 (or her next line there, the group linked again). */
+function GroupAlerts({ alerts, onDone }) {
+  const toast = useToast()
+  const [busy, setBusy] = useState('')
+  if (!alerts.length) return null
+  const done = async (a) => {
+    const key = `${a.deal_id}:${a.chat}`
+    setBusy(key)
+    try {
+      await dealAction({ action: 'group_left_done', deal_id: a.deal_id, chat: a.chat })
+      toast.ok('已标为处理过了')
+      onDone()
+    } catch (e) { toast.err(e.message) } finally { setBusy('') }
+  }
+  return (
+    <div className="stack prm-group-alerts" style={{ gap: 8 }}>
+      {alerts.map((a) => {
+        const key = `${a.deal_id}:${a.chat}`
+        return (
+          <Banner key={key} kind="warn" title={`${a.party_name} · 不接的群里还有话没回`}
+            actions={<button type="button" className="btn sm" disabled={busy === key} onClick={() => done(a)}><CheckCircle />已处理</button>}>
+            <div>{a.text}</div>
+            <div className="f-hint">机器人不会在她的私聊里回这些话；在群里回过以后点「已处理」</div>
+          </Banner>
+        )
+      })}
     </div>
   )
 }
@@ -316,7 +350,8 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
       if (action === 'execute') await executePlatform(p.id, body)
       else if (action === 'repreview') await repreview(p.id)
       else await decide(p.id, action, body)
-      toast.ok({ drop: '这条不发了', execute: '已批准，Mac 正在平台上执行', repreview: '已请 Mac 重新预览' }[action]
+      toast.ok({ drop: '这条不发了', execute: '已批准，Mac 正在平台上执行', repreview: '已请 Mac 重新预览',
+        redraft: '在重新起草：写好的新草稿会换掉这一份' }[action]
         || (group ? '已确认，正在发到群里' : '已确认，正在发送'))
       setEditing(false)
       setDropping(false)
@@ -347,6 +382,12 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
           <div className="f-hint prm-opening-auto">给新好友的第一句话：{fmtClock(p.auto_at)} 还没人处理就照原样自动发给她（设置里的「开场白没人处理多久自动发」）；要改的话在这之前发出。</div>
         )}
         {p.status === 'pending' && p.auto_held && <div className="f-hint prm-opening-held">这份不会自动发，等你：{p.auto_held}</div>}
+        {p.status === 'pending' && p.unheard > 0 && (
+          <div className="row prm-unheard" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span className="f-hint">写好以后群里别人又说了 {p.unheard} 句，这份草稿没听到（别人说话已经自动重写过几次，不再自动重写）。</span>
+            <button type="button" className="btn sm" disabled={busy} onClick={() => act('redraft')}><ArrowClockwise />重新起草</button>
+          </div>
+        )}
         {p.intent && <div><b>{p.opening || p.huopan ? '这一条：' : '达人想要：'}</b>{p.intent}</div>}
         {!p.needs_attention && p.reason && <div className="dim"><b>依据：</b>{p.reason}</div>}
         {slots.length > 0 && (
@@ -419,7 +460,8 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
       {sending && (
         <Confirm title={`#${p.id} 发到群里？`} confirmLabel="发到群里" cancelLabel="再想想" busy={busy}
           onConfirm={() => act(sending.action, sending.text)} onCancel={() => setSending(null)}>
-          这条回复会发在老板拉的群「{p.group_name || '（没有群名）'}」里，不是她的私聊：老板和群里的人都看得到。{parts > 1 ? `会分 ${parts} 条发。` : ''}
+          {p.group_manual ? `这条回复会发在群「${p.group_name || '（没有群名）'}」里，不是她的私聊：群里的人都看得到。`
+            : `这条回复会发在老板拉的群「${p.group_name || '（没有群名）'}」里，不是她的私聊：老板和群里的人都看得到。`}{parts > 1 ? `会分 ${parts} 条发。` : ''}
         </Confirm>
       )}
       {executing !== null && pf && (
@@ -430,7 +472,8 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
             {pf.caveat && <div className="f-err">{pf.caveat}</div>}
             {pf.params.map((x) => <div key={x.label} className="f-hint">{x.label}：<span className="mono">{x.value}</span></div>)}
             <div>只执行一次，不会自动重试；平台读回核验成功（VERIFIED_SUCCESS）才把回复发给达人，否则不发，并在这一页上方标红。</div>
-            {group && <div>回复发在老板拉的群「{p.group_name || '（没有群名）'}」里，不是她的私聊：老板和群里的人都看得到。</div>}
+            {group && <div>{p.group_manual ? `回复发在群「${p.group_name || '（没有群名）'}」里，不是她的私聊：群里的人都看得到。`
+              : `回复发在老板拉的群「${p.group_name || '（没有群名）'}」里，不是她的私聊：老板和群里的人都看得到。`}</div>}
           </div>
         </Confirm>
       )}
@@ -560,7 +603,7 @@ function RecentCard({ d, onDone }) {
                 <tr key={p.id}>
                   <td className="num">#{p.id}</td>
                   <td>{p.party_name}</td>
-                  <td title={inGroup(p) ? `发在老板拉的群「${p.group_name || ''}」里` : undefined}>
+                  <td title={inGroup(p) ? `发在${p.group_manual ? '群' : '老板拉的群'}「${p.group_name || ''}」里` : undefined}>
                     {buyin ? `百应私信 · ${p.kind_label}` : inGroup(p) ? `群里 · ${p.kind_label}` : p.kind_label}
                   </td>
                   <td>

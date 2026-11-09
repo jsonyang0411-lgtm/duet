@@ -472,6 +472,16 @@ def _session_username(session: dict) -> str:
     ).strip()
 
 
+def _session_last_at(session: dict) -> Optional[float]:
+    """When a session's last line was written (seconds, new_friends ``session_time``): its ``last_timestamp`` before
+    WeChat's order key (``sort_timestamp``: a draft may move it); None without a time (接手任何合作群:
+    ``recent_groups``, the one active last first)."""
+    from .new_friends import session_time
+
+    at = session_time({key: session[key] for key in ("last_timestamp", "lastTimestamp") if key in session})
+    return at if at is not None else session_time(session)
+
+
 def _is_private_talker(username: str) -> bool:
     lowered = str(username or "").strip().lower()
     if not lowered or lowered.endswith("@chatroom"):
@@ -1663,6 +1673,109 @@ class WcdbBackend(AbstractWeChatBackend):
                 self._unwatched.add(chat)
         if was is not None:
             logger.info("老板拉的群: group %s… is not watched any more", chat[:8])
+
+    # ── 接手任何合作群 (src/prm/group_link.py) ─────────────────────────────
+    # An operator links any group to a creator from WeChat (「接群」): the groups to choose from, then what was said in
+    # the one chosen, read once before the watch (``watch_group``) starts after it.  Beside the poll loop, one database
+    # call per ``with_client``.
+
+    def recent_groups(self, limit: int = 10, skip=(), name: str = "") -> Optional[list]:
+        """The group chats of WeChat's session list now that are not in ``skip`` (the groups PRM drafts in already), the
+        one active last first (``_session_last_at``)::
+
+            [{"chat": id, "name": its name in WeChat ("" when nobody named it), "size": members, this account too
+              (None when they could not be read), "last_at": its session time (WeChat's clock) or None}]
+
+        At most ``limit`` (0: all).  ``name``: only the groups of that name, whenever they were active (``_name_key``:
+        no spaces, no case).  None while the database cannot be read.  Quiet: a debug line of counts only."""
+        skip = {str(chat) for chat in skip or ()}
+        key = _name_key(name)
+        try:
+            limit = max(0, int(limit or 0))
+        except (TypeError, ValueError):
+            limit = 0
+        out: list[dict] = []
+        try:
+            sessions = self.with_client(lambda client: client.get_sessions())
+            if sessions is None:
+                return None
+            groups: dict[str, Optional[float]] = {}
+            for session in sessions or []:
+                chat = _session_username(session) if isinstance(session, dict) else ""
+                if chat.endswith("@chatroom") and chat not in skip and chat not in groups:
+                    groups[chat] = _session_last_at(session)
+            order = sorted(groups, key=lambda chat: -(groups[chat] or 0))
+            names = self._display_names(order) if order else {}
+            if names is None:
+                return None
+            for chat in order:
+                group_name = names.get(chat, "")
+                if key and _name_key(group_name) != key:
+                    continue
+                try:
+                    rows = self.with_client(lambda client, chat=chat: client.get_group_members(chat))
+                except WcdbCallError:            # (an error code for this group: its size is not known)
+                    rows = None
+                members = _member_rows(rows) if rows is not None else []
+                out.append({"chat": chat, "name": group_name, "size": len(members) or None, "last_at": groups[chat]})
+                if limit and len(out) >= limit:
+                    break
+        except Exception:
+            logger.warning("接手的群: the groups could not be listed", exc_info=True)
+            return None
+        logger.debug("接手的群: %d group(s) of the session list, %d given", len(groups), len(out))
+        return out
+
+    def group_lines(self, chat: str, since: float, voices=()) -> Optional[list]:
+        """A group's lines written at ``since`` or later (``timestamp >= since``), oldest first, from its latest
+        CATCHUP_READ rows, standardized as a watched group's are (``_standardize(watched=True)``: no line left out by
+        the keyword filter, the sender's prefix taken off): this account's own lines too (``is_own`` True, by the wxid
+        alone: new_friends ``is_me``), WeChat's own lines (no sender) as they are, every other line marked
+        ``_not_self_by_id``.  A voice message of a sender in ``voices`` is recognized (``_try_voice``), any other's is
+        「[语音]」.  Nothing is marked seen or handed on: PRM reads a group an operator links by hand once
+        (src/prm/group_link.py) and then watches it from the second after the newest line it read.  None when the
+        lines cannot be read now (not a group, an error code, the database closed, this account's wxid not known yet:
+        its lines could not be told).  Logs the group id's first characters and a count only."""
+        from .new_friends import is_me
+
+        chat = str(chat or "").strip()
+        my_wxid = self.own_wxid()
+        if not chat.endswith("@chatroom") or not my_wxid:
+            return None
+        try:
+            since = float(since or 0)
+        except (TypeError, ValueError):
+            since = 0.0
+        voices = {str(v).strip() for v in voices or () if str(v or "").strip()}
+        out: list[dict] = []
+        try:
+            rows = self.with_client(lambda client: client.get_messages(talker=chat, limit=CATCHUP_READ))
+            if rows is None:
+                return None
+            names = self.with_client(lambda client: client.get_display_names([chat]))
+            group_name = " ".join(str((names or {}).get(chat) or "").split()) if isinstance(names, dict) else ""
+            group_name = group_name if group_name and group_name != chat else chat
+            for msg in reversed(list(rows or [])):
+                if not isinstance(msg, dict):
+                    continue
+                standardized = self._standardize(msg, group_name, chat, resolve_voice=False, is_group=True,
+                                                 watched=True)
+                if standardized is None or int(standardized.get("timestamp") or 0) < since:
+                    continue
+                sender = str(standardized.get("sender_id") or "")
+                if standardized.get("msg_type") == 34 and sender in voices:
+                    standardized = self._standardize(msg, group_name, chat, is_group=True, watched=True) or standardized
+                if sender and is_me(sender, my_wxid):
+                    standardized["is_own"] = True
+                else:
+                    standardized["_not_self_by_id"] = True
+                out.append(standardized)
+        except Exception:
+            logger.warning("接手的群: the lines of %s… could not be read", chat[:8], exc_info=True)
+            return None
+        logger.info("接手的群 %s…: %d line(s) since %s read", chat[:8], len(out),
+                    time.strftime("%m-%d %H:%M", time.localtime(since)))
+        return out
 
     def _people(self) -> Optional[dict]:
         """wxid -> name of everyone the database shows with a name (``contact_ids``): the private chats of the session
@@ -2969,16 +3082,17 @@ class WcdbBackend(AbstractWeChatBackend):
 
     def _standardize(self, msg: dict, group_name: str,
                      talker: str, resolve_voice: bool = True,
-                     is_group: bool | None = None) -> Optional[dict]:
+                     is_group: bool | None = None, *, watched: Optional[bool] = None) -> Optional[dict]:
         """Convert WCDB raw message to standard format.
 
         A watched group (``watch_group``): no line is left out by the keyword filter below (it was made for
         WeChat's notices as text, and drops a member's own words too: 「谢谢老板邀请」), and the sender's
-        ``<id>:`` prefix is taken off whatever the id looks like."""
+        ``<id>:`` prefix is taken off whatever the id looks like.  ``watched`` True reads a group so before it is
+        watched (``group_lines``); None: as the watch says now."""
         # WCDB message fields: sender_username, message_content, local_type, create_time
         if is_group is None:
             is_group = str(talker).endswith("@chatroom")
-        watched_group = bool(is_group) and self._is_watched(talker)
+        watched_group = bool(is_group) and (self._is_watched(talker) if watched is None else bool(watched))
         sender = str(msg.get("sender_username", msg.get("senderUsername", msg.get("sender", ""))))
         if not sender and not is_group:
             sender = talker
