@@ -9,6 +9,7 @@ message the bot sends and tells the review each one, as the WCDB backend's sent 
 numbers, ids and addresses are made up.
 """
 
+import io
 import itertools
 import json
 import logging
@@ -29,11 +30,12 @@ from test_prm_platform_flow import CHANNEL, DESIGNATED, block, record
 from src.admin import RELAY_HELP, AdminCommandHandler
 from src.db import MessageStore, initialize_db
 from src.prm import deals, draft_context, gates, platforms
+from src.prm import handcards as hc
 from src.prm import wechat_review as wr
 from src.prm.service import SETTLE_SEC, UNSURE_ERROR, PrmService, platform_state
 from src.prm.store import BUYIN_TOOL, PrmStore
 from src.prm.wechat_review import (BACKLOG_SEC, BARE_UNSURE, CC_HINT, CLOSED_RACE_SEC, HELP_YES, HINT_SEC, NO_ADMIN_WHY,
-                                   NOTICE_CHARS, ON_AT, QUEUE_RETRY, QUEUE_UNSURE, QUOTED_ELSEWHERE, QUOTED_NUMBERED,
+                                   NOTICE_CHARS, ON_AT, PICTURES_MISSING, QUEUE_RETRY, QUEUE_UNSURE, QUOTED_ELSEWHERE, QUOTED_NUMBERED,
                                    READ_BACK_EARLY_SEC, REFUSE_TEXT, RELAY_QUIET_SEC, UNCERTAIN, WHICH_EXECUTE,
                                    RETRY_SEC, SEND_TRIES, UNSURE_GRACE_SEC, VOICE_TEXT, read)
 from src.relay.service import MAX_AGE_SEC, ClaudeRelay
@@ -60,14 +62,17 @@ class Desk:
     order (the PRM's and the relay's sends; the route's replies are what ``admin`` gives back), ``files`` every file.
     Each text that goes out is told to the review as the WCDB backend tells it (src/bot.py): sent (``set_sent_hook``)
     and read back with WeChat's time, the test's clock (``set_read_back_hook``).  The admin's lines are written
-    ANSWER_DELAY after the clock (a person reads first).  A send to a chat in ``refuse`` fails."""
+    ANSWER_DELAY after the clock (a person reads first).  A send to a chat in ``refuse`` fails, and every file while
+    ``files_fail``; ``order`` is what went out, texts and files, in order."""
 
     def __init__(self, clock, tmp_path, *, review="on", relay_only="off", admin=ADMIN, store=None, relay_store=None,
                  **prm):
         self.clock = clock
         self.sent: list = []
         self.files: list = []
+        self.order: list = []
         self.refuse: set = set()
+        self.files_fail = False
         cfg = config(claude_relay_wxids=[], claude_relay_only=relay_only, admin_wxid=admin, prm_wechat_review=review,
                      **prm)
         self.router = MessageRouter(store=MessageStore(initialize_db(":memory:")), admin_handler=AdminCommandHandler(),
@@ -85,6 +90,7 @@ class Desk:
         self.sent.append((chat, text))
         if chat in self.refuse:
             return False
+        self.order.append(("text", chat, text))
         self._said(chat, text)
         return True
 
@@ -94,7 +100,10 @@ class Desk:
 
     def _send_file(self, chat, path):
         self.files.append((chat, path))
-        return chat not in self.refuse
+        if chat in self.refuse or self.files_fail:
+            return False
+        self.order.append(("file", chat, path))
+        return True
 
     def stop(self):
         self.prm.stop()
@@ -1475,7 +1484,8 @@ def test_a_platform_draft_whose_preview_failed_says_it_cannot_run_from_wechat(de
 
 def test_the_pictures_for_the_operator_follow_its_notification(desk, tmp_path, caplog):
     """``meta.operator_files`` as the draft-context writes it ({name, path, why}, the path one of the relay's files):
-    sent right after the notification, named in it; a path outside the relay's files, or not a picture, never."""
+    sent right after the notification, named in it; a path outside the relay's files, or not a picture, never (a
+    picture of the relay's that is not on this PC: the draft is the console's, the tests of 2026-11-10 below)."""
     folder = desk.relay.files_dir / "outfiles" / "job-1"
     folder.mkdir(parents=True)
     sheet, photo = folder / "对图单-1.jpg", folder / "帽子.png"
@@ -1485,15 +1495,15 @@ def test_the_pictures_for_the_operator_follow_its_notification(desk, tmp_path, c
     elsewhere = tmp_path / "别处.png"
     elsewhere.write_bytes(b"\x89PNG not really")
     files = [{"name": "对图单-1.jpg", "path": str(sheet), "why": "核对颜色和款式"}, str(photo),
-             {"name": "别处.png", "path": str(elsewhere), "why": ""}, str(folder / "说明.txt"),
-             str(folder / "不在了.png"), {"name": "空的"}]
+             {"name": "别处.png", "path": str(elsewhere), "why": ""}, str(folder / "说明.txt"), {"name": "空的"}]
     packet = platform_waiting(desk, files=files)
     number = packet["id"]
     assert desk.files == [(ADMIN, str(sheet)), (ADMIN, str(photo))]
     assert desk.sent[-1][1].startswith(f"#{number} 草稿")                # (right after its notification)
     assert "（后面附 2 张图给你看：对图单-1.jpg：核对颜色和款式、帽子.png）" in notice_of(desk, number)
-    assert caplog.text.count(f"a picture for the operator of draft {number} is not one of the relay's pictures") == 4
+    assert caplog.text.count(f"a picture for the operator of draft {number} is not one of the relay's pictures") == 3
     assert str(elsewhere) not in caplog.text
+    assert desk.prm.store.wechat_review(number)["pictures_ok"] == 1     # (every one went: answered from here)
     desk.review.sweep()
     assert len(desk.files) == 2                                          # (once, with the notification)
 
@@ -2499,7 +2509,8 @@ def test_the_clean_up_drops_the_closed_rows_and_cuts_a_waiting_proposed_edit(des
 
 def test_a_database_from_the_first_round_gets_the_new_columns(tmp_path):
     """Second review (info): a prm.db made by the first commits has ``wechat_reviews`` without ``told_at`` /
-    ``preview`` / ``late_told_at``: they are added (as every column added to an old database), the sweep works."""
+    ``preview`` / ``late_told_at`` (and ``pictures_ok``, 2026-11-10): they are added (as every column added to an old
+    database), the sweep works."""
     import sqlite3 as sql
 
     path = tmp_path / "prm.db"
@@ -2515,8 +2526,9 @@ def test_a_database_from_the_first_round_gets_the_new_columns(tmp_path):
     conn.close()
     store = PrmStore(str(path))
     columns = {r["name"] for r in store._conn.execute("PRAGMA table_info(wechat_reviews)")}
-    assert {"told_at", "preview", "late_told_at"} <= columns
+    assert {"told_at", "preview", "late_told_at", "pictures_ok"} <= columns
     assert store.wechat_review(5)["preview"] == "" and store.wechat_reviews_to_tell() == []
+    assert store.wechat_review(5)["pictures_ok"] == 1          # (2026-11-10: a row from before had its pictures sent)
     store.close()
 
 
@@ -2827,3 +2839,208 @@ def test_a_sample_order_the_mac_did_not_check_by_photo_is_never_offered_执行(c
         assert desk.executions() == []
     finally:
         desk.stop()
+
+
+
+# ── 2026-11-10: the pictures a draft is to be looked at with go after its notification; until they all came, it is the
+# console's in WeChat ───────────────────────────────────────────────────────────────────────────────────────────────
+
+CARD_NAMES = ("手卡_01_测试帽.png", "手卡_02_测试帽二.png")
+CARD_ZIP = "ACE7CN直播手卡.zip"
+
+
+def cards_desk(clock, tmp_path) -> Desk:
+    d = Desk(clock, tmp_path, prm_handcards="on")
+    d.prm.register(CREATOR, "小美", "测试达人")
+    return d
+
+
+def cards_waiting(desk, *, promo_until="", text="老师，手卡整理好啦～", chat=CREATOR) -> dict:
+    """She asks for 直播手卡; the Mac makes two cards (and the skill's zip, and a brief) and hands them back with the
+    draft (PRM_HANDCARDS on); it waits and is told (the sender thread's round)."""
+    desk.her("老师手卡发一下", chat=chat)
+    desk.clock.now += SETTLE_SEC + 1
+    job = desk.relay.next_job(0, ("prm",))
+    names = [*CARD_NAMES, CARD_ZIP]
+    for name, body in ((CARD_NAMES[0], b"\x89PNG card one"), (CARD_NAMES[1], b"\x89PNG card two"),
+                       (CARD_ZIP, b"PK the cards"), ("brief.txt", b"brief")):
+        assert desk.relay.outfile(job["id"], name, io.BytesIO(body).read, len(body))
+    made = hc.made_block(True, cards=names, note="做了 2 张手卡", promo_until=promo_until)
+    draft = reply_draft(text, message_kind="material", attachments_to_send=[*names, "brief.txt"],
+                        attachments_named=[*names, "brief.txt"], handcards_made=made)
+    desk.relay.finish(job["id"], {"ok": True, "text": json.dumps(draft, ensure_ascii=False), "duration_s": 3})
+    desk.relay.tick()
+    packet = desk.prm.store.packet_for_job(job["id"])
+    assert packet["status"] == "pending" and packet["meta"]["handcards"]["ok"] is True
+    desk.review.sweep()
+    return desk.prm.store.packet(packet["id"])
+
+
+def card_paths(packet) -> list:
+    return [a["path"] for a in packet["attachments"] if a["name"] in CARD_NAMES]
+
+
+def shown(desk, number) -> dict:
+    return next(p for p in desk.prm.snapshot()["pending"] if p["id"] == number)
+
+
+def test_handcards_go_right_after_their_notification_and_only_then_is_it_answered(clock, tmp_path):
+    """A draft with 直播手卡 is told with 「附了 2 张手卡（图在下面）：看过再回 1」 and its two card PNGs go right after the
+    notification (never the skill's zip, nor the brief); then it may be answered from WeChat."""
+    from src.prm.service import HANDCARDS
+    from src.prm.wechat_review import CARDS_META
+
+    assert CARDS_META == HANDCARDS                                      # (the review reads the service's key)
+    desk = cards_desk(clock, tmp_path)
+    try:
+        packet = cards_waiting(desk)
+        number = packet["id"]
+        assert "附了 2 张手卡（图在下面）：看过再回 1" in notice_of(desk, number)
+        notice = next(i for i, event in enumerate(desk.order) if event[0] == "text"
+                      and event[2].startswith(f"#{number} 草稿"))
+        assert desk.order[notice + 1:] == [("file", ADMIN, path) for path in card_paths(packet)]
+        assert desk.prm.store.wechat_review(number)["pictures_ok"] == 1
+        assert shown(desk, number)["wechat_console"] is False
+        assert desk.admin("1", quote=head(desk, number)) == f"#{number} 已批准，正在发给 小美"
+    finally:
+        desk.stop()
+
+
+def test_handcards_out_of_date_never_go_to_the_admin_either(clock, tmp_path):
+    """Cards whose 双11 line is past its end date (Beijing time) never go: not to her (``decide`` refuses them as they
+    are), nor to the admin's chat; the notification has no cards' line.  Another creator's cards still on time go."""
+    desk = cards_desk(clock, tmp_path)
+    desk.prm.register(OTHER, "小雨", "测试达人二")
+    try:
+        packet = cards_waiting(desk, promo_until="2026-11-11")                # (the clock: 2027-01-15)
+        number = packet["id"]
+        assert desk.files == []
+        assert not any("张手卡（图在下面）" in line for line in notice_of(desk, number))
+        assert desk.admin("1", quote=head(desk, number)) == f"#{number} 没发：{hc.EXPIRED_TEXT}"
+        on_time = cards_waiting(desk, promo_until="2027-12-31", chat=OTHER)
+        assert desk.files == [(ADMIN, path) for path in card_paths(on_time)]
+        assert "附了 2 张手卡（图在下面）：看过再回 1" in notice_of(desk, on_time["id"])
+    finally:
+        desk.stop()
+
+
+def test_cards_that_did_not_reach_the_admin_make_the_draft_the_consoles_until_they_go_again(clock, tmp_path):
+    """The first card WeChat does not take: one line says so (PICTURES_MISSING), and 1 / 发 N / 改 / other words / a
+    bare 1 for it do nothing (2 still drops it); the console is unaffected.  Sent again later (the draft's own wait):
+    one line says they came, and it may be answered from WeChat again."""
+    desk = cards_desk(clock, tmp_path)
+    try:
+        desk.files_fail = True
+        packet = cards_waiting(desk)
+        number = packet["id"]
+        stop = f"#{number} {PICTURES_MISSING}"
+        assert desk.told()[-1] == stop                                    # (right after the card that did not go)
+        assert desk.prm.store.wechat_review(number)["pictures_ok"] == 0
+        quote = head(desk, number)
+        for answer in ({"content": "1", "quote": quote}, {"content": f"发 {number}"}, {"content": "改 你好呀", "quote": quote},
+                       {"content": f"改 {number} 你好呀"}, {"content": "这顶我看行，就这么发吧", "quote": quote},
+                       {"content": "执行", "quote": quote}):
+            assert desk.admin(**answer) == stop, answer
+        assert desk.admin("1") == f"{stop}（不要的话回「不发 {number}」）"   # (the bot said that line last)
+        assert desk.prm.store.packet(number)["status"] == "pending"
+        assert desk.prm.store.wechat_review(number)["state"] == "notified"   # (no proposal kept either)
+        assert not any("手卡整理好啦" in text for text in desk.to(CREATOR))
+        view = shown(desk, number)
+        assert view["wechat_console"] is True and view["status"] == "pending"
+        tried = len(desk.files)
+        desk.review.sweep()                                               # (too soon: the draft waits its turn)
+        assert len(desk.files) == tried
+        desk.files_fail = False
+        desk.clock.now += RETRY_SEC[1] + 1
+        desk.review.sweep()
+        assert desk.order[-3:-1] == [("file", ADMIN, path) for path in card_paths(packet)]
+        assert desk.told()[-1] == f"#{number} 的图补发过来了（在上面）：看过再引用那条通知回 1（或者回「发 {number}」）"
+        assert desk.prm.store.wechat_review(number)["pictures_ok"] == 1 and shown(desk, number)["wechat_console"] is False
+        assert desk.admin("1", quote=quote) == f"#{number} 已批准，正在发给 小美"
+    finally:
+        desk.stop()
+
+
+def test_a_photo_sheet_that_did_not_reach_the_admin_keeps_执行_the_consoles_until_it_goes_again(desk):
+    """The 对图单 of a platform draft the same way: WeChat did not take it, 「执行」 (quoting, numbered) does nothing and
+    「执行 N 了吗」 says why; the console can still approve it.  Sent again: 「执行」 quoting the notification runs it."""
+    folder = desk.relay.files_dir / "outfiles" / "job-1"
+    folder.mkdir(parents=True)
+    sheet = folder / "对图单-1.jpg"
+    sheet.write_bytes(b"\xff\xd8 not really")
+    desk.files_fail = True
+    packet = platform_waiting(desk, files=[{"name": "对图单-1.jpg", "path": str(sheet), "why": "核对颜色和款式"}])
+    number = packet["id"]
+    stop = f"#{number} {PICTURES_MISSING}"
+    assert desk.told()[-1] == stop
+    quote = head(desk, number)
+    assert desk.admin("执行", quote=quote) == stop and desk.admin(f"执行 {number}") == stop
+    assert desk.admin(f"执行 {number} 了吗") == f"#{number}（小美）还没执行（在等你确认）：{PICTURES_MISSING}"
+    assert desk.executions() == []
+    view = shown(desk, number)
+    assert view["wechat_console"] is True and view["wechat_execute"] is False and view["platform"]["can_execute"] is True
+    desk.files_fail = False
+    desk.clock.now += RETRY_SEC[1] + 1
+    desk.review.sweep()
+    assert desk.order[-2] == ("file", ADMIN, str(sheet))
+    assert desk.told()[-1] == (f"#{number} 的图补发过来了（在上面）：看过再引用那条通知回「执行」（或者回「执行 {number}」）")
+    assert shown(desk, number)["wechat_execute"] is True
+    assert desk.admin("执行", quote=quote).startswith(f"#{number} 已批准执行")
+    assert len(desk.executions()) == 1
+
+
+def test_a_picture_not_on_this_pc_or_too_big_makes_the_notification_say_so_and_none_goes(clock, tmp_path, monkeypatch):
+    """Known before the notification goes: a 对图单 not on this PC (or cards too big, PICTURE_MAX_BYTES): it says so
+    where it would say how to answer, no picture goes, nothing but 2 / 不发 is done from WeChat, and it is not tried
+    again (the console's for good)."""
+    desk = Desk(clock, tmp_path)
+    desk.prm.register(CREATOR, "小美", "测试达人")
+    try:
+        gone = desk.relay.files_dir / "outfiles" / "job-1" / "对图单-1.jpg"
+        packet = platform_waiting(desk, files=[{"name": "对图单-1.jpg", "path": str(gone), "why": "核对颜色和款式"}])
+        number = packet["id"]
+        lines = notice_of(desk, number)
+        assert lines[-1] == f"{PICTURES_MISSING}；不要的话回 2" and "（要看的图 1 张：对图单-1.jpg）" in lines
+        assert not any("回「执行」" in line for line in lines) and desk.files == []
+        assert desk.admin("执行", quote=head(desk, number)) == f"#{number} {PICTURES_MISSING}"
+        desk.clock.now += 600
+        desk.review.sweep()
+        assert desk.files == [] and desk.told()[-1].startswith(f"#{number} 草稿")
+        assert desk.admin("2", quote=head(desk, number)) == f"#{number} 不发了（她再发消息时会有新的草稿）"
+    finally:
+        desk.stop()
+    monkeypatch.setattr(wr, "PICTURE_MAX_BYTES", 10)                      # (the cards: 14 bytes each)
+    desk = cards_desk(clock, tmp_path / "big")
+    try:
+        packet = cards_waiting(desk)
+        number = packet["id"]
+        lines = notice_of(desk, number)
+        assert lines[-1] == f"{PICTURES_MISSING}；不要的话回 2（或者「不发 {number}」）"
+        assert f"（要看的图 2 张：{'、'.join(CARD_NAMES)}）" in lines and desk.files == []
+        assert desk.admin("1", quote=head(desk, number)) == f"#{number} {PICTURES_MISSING}"
+        assert desk.prm.store.packet(number)["status"] == "pending"
+    finally:
+        desk.stop()
+
+
+def test_a_draft_with_pictures_is_never_answered_before_they_went(desk):
+    """While its pictures are still on the way (written before the notification, ``pictures_ok`` 0 until every one
+    went), an answer written meanwhile does nothing: never a draft approved from WeChat its pictures never reached."""
+    folder = desk.relay.files_dir / "outfiles" / "job-1"
+    folder.mkdir(parents=True)
+    sheet = folder / "对图单-1.jpg"
+    sheet.write_bytes(b"\xff\xd8 not really")
+    answers = []
+    real = desk._send_file
+
+    def meanwhile(chat, path):
+        number = desk.prm.store.packets(("pending",))[0]["id"]
+        answers.append(desk.admin(f"执行 {number}"))
+        return real(chat, path)
+
+    desk.review._send_file = meanwhile
+    packet = platform_waiting(desk, files=[{"name": "对图单-1.jpg", "path": str(sheet), "why": "核对颜色和款式"}])
+    number = packet["id"]
+    assert answers == [f"#{number} {PICTURES_MISSING}"] and desk.executions() == []
+    assert desk.prm.store.wechat_review(number)["pictures_ok"] == 1     # (then it went: answered from here now)
+    assert desk.admin("执行", quote=head(desk, number)).startswith(f"#{number} 已批准执行")

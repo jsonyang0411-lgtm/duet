@@ -1937,6 +1937,34 @@ class TestPrmPages:
         page.get_by_text("没填管理员 wxid（ADMIN_WXID）").wait_for()
         assert "回 1 发出" not in line.inner_text()
 
+    def test_review_page_says_what_wechat_can_do_for_a_draft_told_there(self, page, prm):
+        """「已发到微信」's tooltip (2026-11-10): a platform draft 「执行」 runs from WeChat only when the bot says so
+        (``wechat_execute``); one it does not is told that it cannot run from WeChat, never 「引用通知回「执行」」; a draft
+        whose pictures did not reach the chat (``wechat_console``) is the console's, only 不发 there."""
+        packet = self._platform_draft(prm)
+        shown = {"execute": False, "console": False}
+
+        def told(state):
+            for p in state["pending"]:
+                if p["id"] == packet["id"]:
+                    p.update(wechat_at=prm.clock.now, wechat_execute=shown["execute"], wechat_console=shown["console"])
+
+        self._serve_prm(page, told)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        card = page.locator(".prm-draft", has_text="专属佣金 20% 设好啦～")
+        card.wait_for()
+        title = card.locator(".prm-wechat-tag").get_attribute("title")
+        assert "这一份微信里不能执行" in title and "引用通知回「执行」" not in title
+        shown.update(execute=True)
+        page.reload()
+        card.wait_for()
+        assert "引用通知回「执行」/ 2 也行" in card.locator(".prm-wechat-tag").get_attribute("title")
+        shown.update(console=True)
+        page.reload()
+        card.wait_for()
+        title = card.locator(".prm-wechat-tag").get_attribute("title")
+        assert "要看的图没发过去" in title and "只能回 2 不发" in title and "引用通知回「执行」" not in title
+
     @pytest.mark.parametrize("channel", [None, "private"], ids=["no-channel", "private"])
     def test_review_page_shows_and_sends_a_private_draft_exactly_as_before(self, page, prm, channel):
         """A draft without ``channel`` (a bot from before) or for her private chat looks as it did and 发送 sends it at

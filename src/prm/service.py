@@ -1100,7 +1100,10 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
                                      "chat": str(n["key"])[len(GROUP_LEFT):], "text": n["text"], "at": n.get("at")})
     pending = list(reversed(store.packets((PENDING, EXECUTING, APPROVED, SENDING), limit=200)))
     recent = store.packets((SENT, FAILED, DROPPED, SUPERSEDED, NO_REPLY), limit=limit)
-    told = store.wechat_notified(p["id"] for p in pending)     # 微信里审批草稿: when each was told to the admin's chat
+    # 微信里审批草稿: when each was told to the admin's chat, and what can be done for it from there (the 「已发到微信」
+    # tag's words): ``wechat_console``, its pictures did not reach the chat (only 不发 there); ``wechat_execute``, a
+    # platform draft 「执行」 runs from WeChat (the preview it was told with, still approvable, its pictures there)
+    told = store.wechat_review_states(p["id"] for p in pending)
     shown_cache: dict[int, dict] = {}
     confirmed_cache: dict[int, dict] = {}            # PRM_DRAFT_CONTEXT: each deal's 「对过图了」 codes
     # 老板拉的群 (src/prm/boss_groups.py): the creators a boss introduced in a group the bot took over (「老板介绍」, also
@@ -1170,7 +1173,12 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
             # ... the group's lines her waiting draft did not hear (REDRAFT_MAX automatic redrafts done)
             **({"unheard": int(p["meta"]["unheard"])} if isinstance(p["meta"].get("unheard"), int)
                and p["meta"]["unheard"] > 0 else {}),
-            "wechat_at": told.get(p["id"]),
+            "wechat_at": (told.get(p["id"]) or {}).get("notified_at"),
+            **({"wechat_console": not told[p["id"]]["pictures_ok"]} if p["id"] in told else {}),
+            **({"wechat_execute": bool(told[p["id"]]["pictures_ok"] and told[p["id"]]["preview"] and platform
+                                       and platform["can_execute"] and told[p["id"]]["preview"]
+                                       == preview_stamp((p.get("platform") or {}).get("preview")))}
+               if p["id"] in told and platform is not None else {}),
             "operator_files": draft_context.operator_files_out(p),    # PRM_DRAFT_CONTEXT: the operators' only
             "photo_held": held,
         }

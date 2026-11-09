@@ -15,7 +15,12 @@ action with every line its preview has (``_platform_lines``: what will be made, 
 order's receiver only by province and city; the creator's platform ids, and the ids of the preview's plan, by their last
 characters, in the problems too; the preview's verdict and problems), or says how many lines are left out (more than
 LINES_MAX, or more than fit in NOTICE_CHARS, the relay's send limit: then it cannot run from WeChat); the pictures the
-operator is meant to see (``meta.operator_files``: the relay's own files) follow it.  None for what goes out by itself
+admin is to look at follow it (``_pictures``: its 直播手卡, 「附了 N 张手卡（图在下面）：看过再回 1」, never the skill's zip
+nor cards out of date; ``meta.operator_files``, the 对图单: the relay's own files).  Until every one of them went, the
+draft is the console's in WeChat (``pictures_ok``, 2026-11-10): one not on this PC or too big (PICTURE_MAX_BYTES), the
+notification says PICTURES_MISSING where it would say how to answer and none goes; one WeChat does not take, a line
+right after says it, and they are sent again (when they all went: one more line says it may be answered now); 1 / 发 /
+执行 / 改 / other words for it answer PICTURES_MISSING and do nothing, 2 / 不发 drop it.  None for what goes out by itself
 (a kind's gate ``auto``, 下班时段 and 自动模式 approve it at once: never pending; 开场白自动发: ``meta.auto_at`` while
 ``send_due_openings`` still takes it), a 百应 draft (``BUYIN_TOOL``: copied into 百应 by hand), a holding reply (no
 packet), anything while ADMIN_WXID is empty (``status`` says why), nor a draft that was waiting already before the
@@ -110,7 +115,7 @@ from typing import Callable, Optional
 from ..admin import HELP_COMMANDS
 from ..relay.commands import ALLOW_WORDS, DENY_WORDS, prefix_pattern
 from ..relay.service import MAX_AGE_SEC
-from . import contact, deals, draft_context, pii, platforms, retention
+from . import contact, deals, draft_context, handcards, pii, platforms, retention
 from .boss_groups import CHANNEL as GROUP_CHANNEL
 from .store import (APPROVED, BUYIN_TOOL, COPILOT, DROPPED, EXECUTING, FAILED, MESSAGE_TOOL, NO_REPLY, PENDING, SENDING,
                     SENT, SUPERSEDED, PrmStore)
@@ -152,6 +157,11 @@ STATUS_SEC = 6 * 3600       # a question about 执行 (「执行了吗」): the 
 STATUS_LISTED = 3           # ... (or still waiting, still running) it answers about, at most this many
 SEEN_IDS = 500              # the admin's answers remembered by message id (one handed on twice counts once)
 PICTURE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
+PICTURE_MAX_BYTES = 20 * 1024 * 1024   # a picture for the admin bigger than this does not go (WeChat takes it as no picture)
+# A draft whose pictures the admin was to look at (its 直播手卡, a 对图单) did not reach the chat: nothing but 2 / 不发 is
+# done for it from WeChat (2026-11-10), the console's alone until they went again
+PICTURES_MISSING = "图没发过来：这一份请在控制台看过再批"
+CARDS_META = "handcards"    # a packet's meta of its 直播手卡 (``service.HANDCARDS``: the service imports this module)
 
 _HEAD = re.compile(r"^\s*[#＃](\d{1,9})\s*(草稿|改成)")
 _STAMP = re.compile(r"^\[\d{2}-\d{2} \d{2}:\d{2}\]\s*")
@@ -436,6 +446,7 @@ class WechatReview:
         self._draft_context = str(getattr(config, "prm_draft_context", "off") or "off").strip().lower() == "on"
         self._cc = prefix_pattern(str(getattr(config, "claude_relay_prefix", "cc") or "cc"))
         self._failures: dict[tuple, int] = {}       # ("draft" | "told" | "late", packet id) -> sends WeChat did not take
+        self._pictures_at: dict[int, float] = {}    # packet id -> when its pictures that did not go are tried again
         self._chat_failures = 0                       # sends to the admin's chat not taken in a row (RETRY_SEC)
         self._wait_until = 0.0                        # ... and when the chat is tried again
         self._since: Optional[float] = None           # drafts that started waiting before this stay the console's
@@ -495,9 +506,11 @@ class WechatReview:
         return self.on and bool(self.admin) and self._send is not None
 
     def sweep(self) -> int:
-        """One round of the sender thread: the drafts waiting for a person not told yet (oldest first), then what came
-        of the decisions taken here (a send that failed, a platform action's end, its late result); PER_ROUND sends at
-        most.  A send WeChat does not take ends the round, and the admin's chat waits before the next one (RETRY_SEC:
+        """One round of the sender thread: the drafts waiting for a person not told yet (oldest first; their pictures
+        right after each notification, ``_pictures_went``), the pictures of told drafts that did not reach the chat
+        (again, each draft 10 s doubling, at most 2 minutes apart, SEND_TRIES times; not while one of them is not on
+        this PC or too big), then what came of the decisions taken here (a send that failed, a platform action's end,
+        its late result); PER_ROUND sends at most.  A send WeChat does not take ends the round, and the admin's chat waits before the next one (RETRY_SEC:
         10 s, doubling, at most 2 minutes apart); a message not taken SEND_TRIES times is not tried again this run
         (logged; the console still has the draft).  Returns how many messages went to the admin."""
         if not self.ready or self._clock() < self._wait_until:
@@ -522,8 +535,10 @@ class WechatReview:
             current = self._store.packet(packet["id"])
             if current is None or current["status"] != PENDING:
                 continue                                   # decided (or out of date) meanwhile
+            # (a draft with pictures to look at is the console's in WeChat until every one of them went: never one
+            # approved from WeChat while its pictures are still on the way, or never came)
             if not self._store.add_wechat_review(packet["id"], packet["deal_id"], self._clock(), state=TELLING,
-                                                 preview=stamp):
+                                                 preview=stamp, pictures_ok=not pictures):
                 continue                                   # (told already)
             tried += 1
             if not self._try(key, text, f"the notification of draft {packet['id']}"):
@@ -532,7 +547,29 @@ class WechatReview:
             now = self._clock()
             self._store.set_wechat_review(packet["id"], (TELLING,), now, state=NOTIFIED, notified_at=now)
             logger.info("PRM: draft %d told to the admin's chat (微信里审批)", packet["id"])
-            self._send_pictures(packet["id"], pictures)
+            if pictures and all(p["ok"] for p in pictures):
+                self._pictures_went(packet, pictures, again=False)
+            elif pictures:
+                logger.warning("PRM: draft %d has pictures for the admin that cannot go to the chat; it is the console's "
+                               "in WeChat", packet["id"])
+            sent += 1
+        for row in self._store.wechat_reviews_open():
+            # the pictures of a draft told already that did not reach the chat: again, while it waits (SEND_TRIES)
+            if row.get("pictures_ok", 1) or row.get("state") == TELLING:
+                continue
+            key = ("pictures", row["packet_id"])
+            if (self._send_file is None or self._failures.get(key, 0) >= SEND_TRIES
+                    or self._clock() < self._pictures_at.get(row["packet_id"], 0.0)):
+                continue
+            packet = self._store.packet(row["packet_id"])
+            pictures = self._pictures(packet, log=False) if packet is not None and packet["status"] == PENDING else []
+            if not pictures or not all(p["ok"] for p in pictures):
+                continue                                   # (one not on this PC, too big: the console's for good)
+            if tried >= PER_ROUND:
+                return sent
+            tried += 1
+            if not self._pictures_went(packet, pictures, again=True):
+                return sent
             sent += 1
         for row in self._store.wechat_reviews_to_tell():
             late = row.get("told_at") is not None          # (told already: its result came late)
@@ -586,46 +623,126 @@ class WechatReview:
             logger.warning("PRM: %s not sent to the admin's chat (try %d); the next try in %d s", what, failures, delay)
         return False
 
-    def _pictures(self, packet: dict) -> list:
-        """The pictures the operator is meant to see with a draft (``meta.operator_files``, read only when there: a list
-        of ``{name, path, why}`` (the draft-context's photo comparison sheet, say) or of paths): ``(name, why, path)``
-        of each that is a picture on this PC among the relay's own files (``files_root``); the others are logged."""
-        files = (packet.get("meta") or {}).get("operator_files")
+    def _pictures(self, packet: dict, log: bool = True) -> list:
+        """The pictures the admin is to look at before deciding a draft, in the order they go after its notification:
+        its 直播手卡 (the card PNGs attached to it, ``handcards.is_card_file``: never the skill's zip, nor cards out of
+        date or left out: those never go to her either), then ``meta.operator_files`` (a list of ``{name, path, why}``,
+        the draft-context's 对图单 say, or of paths).  Each ``{"name", "why", "path", "card", "ok"}``; only a picture
+        among the relay's own files counts (``files_root``: any other path, a file that is no picture, is logged and
+        left out); ``ok``: it is on this PC, at most PICTURE_MAX_BYTES, and this backend sends files."""
+        meta = packet.get("meta") or {}
         out = []
+        cards = meta.get(CARDS_META) if isinstance(meta.get(CARDS_META), dict) else None
+        if (cards is not None and cards.get("ok") and not cards.get("left_out")
+                and not handcards.promo_expired(cards, handcards.beijing_today(self._clock()))):
+            for item in packet.get("attachments") or []:
+                name = str((item or {}).get("name") or "") if isinstance(item, dict) else ""
+                if handcards.is_card_file(name) and Path(name).suffix.lower() in PICTURE_SUFFIXES:
+                    out.append(self._picture(packet, name, "", item.get("path"), card=True, log=log))
+        files = meta.get("operator_files")
         for item in files if isinstance(files, list) else []:
             path = item.get("path") if isinstance(item, dict) else item
             name = str((item.get("name") if isinstance(item, dict) else "") or Path(str(path or "")).name or "图片")
             why = str((item.get("why") if isinstance(item, dict) else "") or "")
-            if not self._relay_file(path):
+            out.append(self._picture(packet, name, why, path, card=False, log=log))
+        return [p for p in out if p is not None]
+
+    def _picture(self, packet: dict, name: str, why: str, path, *, card: bool, log: bool) -> Optional[dict]:
+        if not self._relay_picture(path):
+            if log:
                 logger.warning("PRM: a picture for the operator of draft %d is not one of the relay's pictures on this "
                                "PC; not sent", packet["id"])
-                continue
-            out.append((name, why, str(path)))
-        return out
+            return None
+        ok = self._send_file is not None and self._sendable(path)
+        if not ok and log:
+            logger.warning("PRM: a picture for the operator of draft %d cannot go to the admin's chat (%s)", packet["id"],
+                           "this backend sends no files" if self._send_file is None else "not on this PC, or too big")
+        return {"name": name, "why": why, "path": str(path), "card": card, "ok": ok}
 
-    def _relay_file(self, path) -> bool:
-        """Is ``path`` a picture file among the relay's own files (never any other file of this PC)?"""
+    def _relay_picture(self, path) -> bool:
+        """Is ``path`` a picture's among the relay's own files (never any other file of this PC; there or not)?"""
         if not isinstance(path, str) or not path or self._files_root is None:
             return False
         try:
             target = Path(path).resolve()
-            return (target.suffix.lower() in PICTURE_SUFFIXES and target.is_file()
-                    and target.is_relative_to(self._files_root.resolve()))
+            return target.suffix.lower() in PICTURE_SUFFIXES and target.is_relative_to(self._files_root.resolve())
         except (OSError, ValueError):
             return False
 
-    def _send_pictures(self, number: int, pictures: list) -> None:
-        """The pictures right after their notification; one that cannot be sent is logged, never tried again."""
+    @staticmethod
+    def _sendable(path) -> bool:
+        """The picture is on this PC and small enough to go (PICTURE_MAX_BYTES)."""
+        try:
+            target = Path(path).resolve()
+            return target.is_file() and target.stat().st_size <= PICTURE_MAX_BYTES
+        except (OSError, ValueError):
+            return False
+
+    def _send_pictures(self, number: int, pictures: list, key: tuple) -> bool:
+        """The pictures in order (after their notification, or again later); True when every one went.  The first that
+        WeChat does not take ends it (logged; the chat waits, ``RETRY_SEC``, and so does the draft's next try, 10 s
+        doubling, at most 2 minutes apart: ``key``, SEND_TRIES tries at most this run)."""
         if self._send_file is None:
-            return
-        for _, _, path in pictures:
+            return not pictures
+        for picture in pictures:
             try:
-                ok = bool(self._send_file(self.admin, path))
+                ok = bool(self._send_file(self.admin, picture["path"]))
             except Exception:
                 logger.exception("PRM: a picture for the operator of draft %d could not be sent", number)
                 ok = False
             if not ok:
                 logger.warning("PRM: a picture for the operator of draft %d was not sent to the admin's chat", number)
+                failures = self._failures.get(key, 0) + 1
+                self._failures[key] = failures
+                self._pictures_at[number] = self._clock() + min(RETRY_SEC[0] * 2 ** (failures - 1), RETRY_SEC[1])
+                self._chat_failures += 1
+                self._wait_until = self._clock() + min(RETRY_SEC[0] * 2 ** (self._chat_failures - 1), RETRY_SEC[1])
+                if failures >= SEND_TRIES:
+                    logger.error("PRM: the pictures of draft %d not sent to the admin's chat after %d tries; not tried "
+                                 "again (it stays the console's in WeChat)", number, failures)
+                return False
+        self._failures.pop(key, None)
+        self._pictures_at.pop(number, None)
+        self._chat_failures, self._wait_until = 0, 0.0
+        return True
+
+    def _pictures_went(self, packet: dict, pictures: list, *, again: bool) -> bool:
+        """Send a told draft's pictures (``again``: the ones that did not reach the chat before); every one went: the
+        draft may be answered from WeChat (``pictures_ok``), and again it says so; else (``again`` False) one line says
+        it is the console's (PICTURES_MISSING).  True when every one went."""
+        number = packet["id"]
+        if not self._send_pictures(number, pictures, ("pictures", number)):
+            if not again:
+                self._try(("missing", number), f"#{number} {PICTURES_MISSING}", f"draft {number}'s pictures line")
+            return False
+        now = self._clock()
+        if self._store.set_wechat_review(number, (NOTIFIED, PROPOSED), now, pictures_ok=1):
+            logger.info("PRM: draft %d's %d picture(s) sent to the admin's chat%s", number, len(pictures),
+                        " again" if again else "")
+            if again:
+                self.tell(f"#{number} 的图补发过来了（在上面）：{self._pictures_how(packet)}")
+        return True
+
+    def _pictures_how(self, packet: dict) -> str:
+        """How a draft whose pictures came later is answered now (the notification's own words: quoting it)."""
+        number = packet["id"]
+        if self._platform(packet):
+            row = self._store.wechat_review(number) or {}
+            told = str(row.get("preview") or "")
+            if (told and told == preview_stamp((packet.get("platform") or {}).get("preview"))
+                    and not self._photo_stop(packet)):
+                return f"看过再引用那条通知回「执行」（或者回「执行 {number}」）"
+            return f"这一份微信里还是不能执行，请到控制台处理；不要的话回「不发 {number}」"
+        if self._group(packet):
+            return f"看过再引用那条通知回 1；不发就回「不发 {number}」"
+        return f"看过再引用那条通知回 1（或者回「发 {number}」）"
+
+    def _pictures_stop(self, row: Optional[dict], packet: Optional[dict]) -> str:
+        """「#N 图没发过来：…」 for a waiting draft whose pictures did not reach the admin's chat (``pictures_ok`` 0): only 2
+        / 不发 is done for it from WeChat; "" otherwise."""
+        if not row or row.get("pictures_ok", 1) or not packet or packet.get("status") != PENDING:
+            return ""
+        return f"#{packet['id']} {PICTURES_MISSING}"
 
     @staticmethod
     def _json(text) -> dict:
@@ -715,9 +832,11 @@ class WechatReview:
         """The message that tells the admin of a draft (see the module's docstring)."""
         return self._notice(packet)[0]
 
-    def _notice(self, packet: dict) -> tuple[str, str, list]:
+    def _notice(self, packet: dict, log: bool = True) -> tuple[str, str, list]:
         """``(text, stamp, pictures)``: a draft's notification; the fingerprint of the preview it shows when it lets
-        「执行」 run (``preview_stamp``; "" otherwise); the pictures to send after it (``_pictures``)."""
+        「执行」 run (``preview_stamp``; "" otherwise; kept when only its pictures hold it: ``pictures_ok``); the pictures
+        to send after it (``_pictures``).  Pictures that cannot all go (not on this PC, too big): it says so
+        (PICTURES_MISSING) where it would say how to answer, and none of them goes."""
         number = packet["id"]
         meta = packet.get("meta") or {}
         name = self._name_of(packet, "?")
@@ -757,10 +876,20 @@ class WechatReview:
         files = [str(a.get("name") or "文件") for a in packet.get("attachments") or []]
         if files:
             lines.append(f"（附 {len(files)} 个文件：{'、'.join(files[:FILES_NAMED])}{'…' if len(files) > FILES_NAMED else ''}）")
-        pictures = self._pictures(packet)
-        if pictures:
-            lines.append(f"（后面附 {len(pictures)} 张图给你看：" + "、".join(
-                f"{_cut(n, 40)}" + (f"：{_cut(contact.mask_contacts(w), 60)}" if w else "") for n, w, _ in pictures) + "）")
+        pictures = self._pictures(packet, log=log)
+        missing = any(not p["ok"] for p in pictures)
+        cards = [p for p in pictures if p["card"]]
+        sheets = [p for p in pictures if not p["card"]]
+        if missing:
+            lines.append(f"（要看的图 {len(pictures)} 张：" + "、".join(_cut(p["name"], 40) for p in pictures) + "）")
+        else:
+            if cards:
+                how = ("引用这条回「执行」" if platform else "引用这条回 1" if group else "回 1")
+                lines.append(f"附了 {len(cards)} 张手卡（图在下面）：看过再{how}")
+            if sheets:
+                lines.append(f"（后面附 {len(sheets)} 张图给你看：" + "、".join(
+                    f"{_cut(p['name'], 40)}" + (f"：{_cut(contact.mask_contacts(p['why']), 60)}" if p["why"] else "")
+                    for p in sheets) + "）")
         stamp = ""
         if platform:
             runnable = self._runnable(packet)
@@ -782,9 +911,15 @@ class WechatReview:
             lines += listed
             if runnable and whole and not photo:
                 stamp = preview_stamp((packet.get("platform") or {}).get("preview"))
+            if stamp and not missing:
                 lines += go
+            elif stamp and missing:
+                lines.append(f"{PICTURES_MISSING}；不要的话回 2")
             else:
                 lines.append(stop)
+        elif missing:
+            lines.append(f"{PICTURES_MISSING}；不要的话回 2" + (f"（或者「不发 {number}」）" if not group else
+                                                         f"（不发也可以回「不发 {number}」）"))
         else:
             lines.append(f"回 1 {'发到群里' if group else '发出'}｜2 不发｜改 + 你的话（直接发你改的）")
             lines.append(f"（发在群里：要引用这条回；不发也可以回「不发 {number}」）" if group
@@ -1311,6 +1446,9 @@ class WechatReview:
             return f"#{item[1]} 已经处理过了"
         if action == "drop":
             return self._decided(row, packet, "drop", None)
+        stop = self._pictures_stop(row, packet)
+        if stop:
+            return stop                                # (its pictures did not come: only 2 / 不发 from here)
         if action == "send":
             return self._send_original(row, packet, quoted=item[2])
         if action == "execute":
@@ -1368,6 +1506,8 @@ class WechatReview:
             photo = self._photo_stop(packet)
             if photo:
                 return f"#{number} 还没执行（在等你确认）：{photo}"
+            if self._pictures_stop(row, packet):
+                return f"#{number} 还没执行（在等你确认）：{PICTURES_MISSING}"
             if told and told == preview_stamp((packet.get("platform") or {}).get("preview")):
                 how = "引用那条通知回「执行」" + ("" if self._group(packet) else f"（或者回「执行 {number}」）")
                 return f"#{number} 还没执行（在等你确认）：要执行请{how}"
@@ -1433,14 +1573,17 @@ class WechatReview:
         if closed:
             return closed
         command, word = _command_word(text), _word(text)
+        if command in DROP_WORDS:
+            return self._decided(row, packet, "drop", None)
+        stop = self._pictures_stop(row, packet)
+        if stop:
+            return stop                                # (its pictures did not come: only 2 / 不发 from here)
         if command in EXECUTE_WORDS:
             return self._execute(row, packet, quoted=True)
         if command in SEND_WORDS:
             if head == "改成" and not self._platform(packet):
                 return self._send_asked(row, packet, asked)
             return self._send_original(row, packet, quoted=True)
-        if command in DROP_WORDS:
-            return self._decided(row, packet, "drop", None)
         edit = _EDIT.match(text.strip())
         if edit:
             return self._edit(row, packet, edit.group(1).strip(), quoted=True)
@@ -1479,6 +1622,10 @@ class WechatReview:
         rows = self._store.wechat_reviews_open()
         if len(rows) > 1:
             return self._open_list(rows)
+        row, packet = self._row(number)
+        stop = self._pictures_stop(row, packet)
+        if stop:
+            return f"{stop}（不要的话回「不发 {number}」）"
         if review.head == "改成":
             return (f"机器人后来又说了别的，单独一个 1 / 2 不算：#{number} 的改稿还在等你确认，引用「#{number} 改成」那一问回 1，"
                     f"或者回「发 {number}」发原稿、「不发 {number}」")
@@ -1507,6 +1654,9 @@ class WechatReview:
             return closed
         if which == 2:
             return self._decided(row, packet, "drop", None)
+        stop = self._pictures_stop(row, packet)
+        if stop:
+            return stop
         if self._group(packet):
             return self._group_hint(packet)
         if self._platform(packet):
@@ -1588,7 +1738,7 @@ class WechatReview:
     def _listed_whole(self, packet: dict) -> bool:
         """Does the notification of this draft list its platform action whole (then it lets 「执行」 run: a stamp)?"""
         try:
-            return bool(self._notice(packet)[1])
+            return bool(self._notice(packet, log=False)[1])
         except Exception:
             logger.exception("PRM: the notification of draft %d could not be written", packet["id"])
             return False
@@ -1634,6 +1784,10 @@ class WechatReview:
         number = packet["id"]
         if self._decide is None:
             return f"#{number} 现在不能在微信里处理：请在控制台处理"
+        if action != "drop":
+            stop = self._pictures_stop(self._store.wechat_review(number) or row, packet)
+            if stop:
+                return stop                            # (its pictures did not come: the console's)
         try:
             result = self._decide(number, action, text, **({"stamp": stamp} if stamp else {}))
         except Exception:

@@ -62,7 +62,8 @@
                     there (``decision``: send, edit, drop, execute), when the admin was told what came of it
                     (``told_at``: a send that failed, a platform action's result; ``late_told_at``: its late result) and
                     which preview a platform draft's notification showed (``preview``: its fingerprint, "" when it said
-                    it cannot run from WeChat)
+                    it cannot run from WeChat); ``pictures_ok`` 0: a picture the admin was to look at (a 直播手卡, a
+                    对图单) did not reach the chat: the draft is the console's in WeChat until they are sent again
 
 A packet's life: ``pending`` (waits in the console) -> ``approved`` (an operator said
 send, the kind's gate is ``auto``, or the 下班时段 window sent it: route ``night``) -> ``sending`` ->
@@ -362,8 +363,10 @@ CREATE TABLE IF NOT EXISTS boss_groups (
 -- there: ``decision`` send / edit / drop / execute).  Open while its packet is pending.  ``told_at``: the admin was told
 -- what came of a decision taken there (a send that failed, a platform action's result; ``late_told_at``: the result that
 -- came late, after the bot had given up).  ``preview``: the fingerprint of the preview a platform draft's notification
--- showed (「执行」 runs only that one; "": it said it cannot run from WeChat).  The 8.2 clean-up drops a deal's closed
--- rows, cuts the rest.
+-- showed (「执行」 runs only that one; "": it said it cannot run from WeChat).  ``pictures_ok`` (2026-11-10): 0 while a
+-- picture the admin was to see with it (its 直播手卡, a 对图单) did not reach the chat (not on this PC, too big, not
+-- taken): nothing but 2 / 不发 is done from WeChat until they went again.  The 8.2 clean-up drops a deal's closed rows,
+-- cuts the rest.
 CREATE TABLE IF NOT EXISTS wechat_reviews (
     packet_id INTEGER PRIMARY KEY,
     deal_id INTEGER NOT NULL,
@@ -376,6 +379,7 @@ CREATE TABLE IF NOT EXISTS wechat_reviews (
     told_at REAL,
     preview TEXT NOT NULL DEFAULT '',
     late_told_at REAL,
+    pictures_ok INTEGER NOT NULL DEFAULT 1,
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS wechat_reviews_deal ON wechat_reviews(deal_id);
@@ -425,6 +429,8 @@ _ADDED_COLUMNS = (
     ("wechat_reviews", "told_at", "REAL"),
     ("wechat_reviews", "preview", "TEXT NOT NULL DEFAULT ''"),
     ("wechat_reviews", "late_told_at", "REAL"),
+    # ... and its pictures (合并以后 2026-11-10): the 直播手卡 and 对图单 the admin was to see reached the chat
+    ("wechat_reviews", "pictures_ok", "INTEGER NOT NULL DEFAULT 1"),
 )
 
 # What the creators wrote, or our side's own words, waiting for the next draft job.
@@ -2129,14 +2135,16 @@ class PrmStore:
         return [packet_view(dict(r)) for r in rows]
 
     def add_wechat_review(self, packet_id: int, deal_id: int, now: Optional[float] = None, *,
-                          state: str = "notified", preview: str = "") -> bool:
+                          state: str = "notified", preview: str = "", pictures_ok: bool = True) -> bool:
         """A draft is (being) told to the admin's chat: its row in ``state`` (``telling`` before the send), with the
-        fingerprint of the preview a platform draft's notification shows; True when it had no row before."""
+        fingerprint of the preview a platform draft's notification shows, and whether every picture it is to be looked
+        at with can reach the chat (``pictures_ok``); True when it had no row before."""
         now = time.time() if now is None else now
         with self._lock:
             cur = self._conn.execute(
-                "INSERT OR IGNORE INTO wechat_reviews (packet_id, deal_id, state, notified_at, preview, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?)", (int(packet_id), int(deal_id), str(state), now, str(preview or ""), now))
+                "INSERT OR IGNORE INTO wechat_reviews (packet_id, deal_id, state, notified_at, preview, pictures_ok,"
+                " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (int(packet_id), int(deal_id), str(state), now, str(preview or ""), int(bool(pictures_ok)), now))
             self._conn.commit()
             return cur.rowcount == 1
 
@@ -2207,9 +2215,10 @@ class PrmStore:
 
     def set_wechat_review(self, packet_id: int, states: tuple = (), now: Optional[float] = None, **fields) -> bool:
         """Compare-and-set: the row's ``fields`` (state, notified_at, proposed, proposed_at, decision, answered_at,
-        told_at, late_told_at) change only while it is in one of ``states`` (any state when empty); True when it
-        changed."""
-        allowed = {"state", "notified_at", "proposed", "proposed_at", "decision", "answered_at", "told_at", "late_told_at"}
+        told_at, late_told_at, pictures_ok) change only while it is in one of ``states`` (any state when empty); True
+        when it changed."""
+        allowed = {"state", "notified_at", "proposed", "proposed_at", "decision", "answered_at", "told_at", "late_told_at",
+                   "pictures_ok"}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"not a wechat_reviews field: {sorted(unknown)}")
@@ -2240,16 +2249,18 @@ class PrmStore:
                 (FAILED, SENT, FAILED, DROPPED, FAILED)).fetchall()
         return [dict(r) for r in rows]
 
-    def wechat_notified(self, packet_ids) -> dict[int, float]:
-        """``{packet id: when it was told to the admin's chat}`` of these packets (the console's 「已发到微信」)."""
+    def wechat_review_states(self, packet_ids) -> dict[int, dict]:
+        """``{packet id: {"notified_at", "preview", "pictures_ok"}}`` of these packets' rows (the console's 「已发到微信」
+        and what can be done from WeChat: ``snapshot``)."""
         ids = [int(i) for i in packet_ids]
         if not ids:
             return {}
         with self._lock:
             rows = self._conn.execute(
-                f"SELECT packet_id, notified_at FROM wechat_reviews WHERE packet_id IN ({', '.join('?' * len(ids))})",
-                ids).fetchall()
-        return {int(r["packet_id"]): float(r["notified_at"]) for r in rows}
+                "SELECT packet_id, notified_at, preview, pictures_ok FROM wechat_reviews"
+                f" WHERE packet_id IN ({', '.join('?' * len(ids))})", ids).fetchall()
+        return {int(r["packet_id"]): {"notified_at": float(r["notified_at"]), "preview": str(r["preview"] or ""),
+                                      "pictures_ok": bool(r["pictures_ok"])} for r in rows}
 
     def purge_wechat_reviews(self, deal_id: int, rewrite: Callable[[str], str], now: Optional[float] = None) -> int:
         """8.2 clean-up of a deal (``PrmService.purge``): the rows of its drafts that no longer wait go, with what the
