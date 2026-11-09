@@ -200,7 +200,7 @@ def test_the_operator_files_named_by_the_mac_are_never_attachments():
 SAMPLE_ACTION = {"action": "jst.sample_order", "shop": "dy", "items": [{"item_id": "3000000000000000102",
                  "skus": [{"sku_id": "3100000000000000202", "qty": 1}]}], "creator_platform": "dy",
                  "creator_account": ACCOUNT}
-GATED = {"v": 1, "gated": True}             # the Mac's mark next to a sample order it checked by photo
+GATED = {"v": 2, "gated": True}             # the Mac's mark next to a sample order it checked by photo
 
 
 def sample_block(verdict="ready", **extra):
@@ -320,7 +320,7 @@ def test_a_sample_order_the_mac_did_not_check_by_photo_is_held(clock, tmp_path):
         now = bots[-1].prm.store.packet(checked["id"])
         assert now["platform"]["preview"]["verdict"] == "blocked"
         assert now["platform"]["preview"]["problems"] == [draft_context.NOT_GATED]
-        assert now["meta"]["draft_context"] == {"v": 1, "gated": False} and draft_context.unchecked(now)
+        assert now["meta"]["draft_context"] == {"v": 2, "gated": False} and draft_context.unchecked(now)
 
         bots.append(make(clock, tmp_path / "held"))
         _, held = sheet_draft(bots[-1], with_brief=False, verdict="ready", gated=False)
@@ -359,6 +359,27 @@ def test_a_sample_order_the_mac_did_not_check_by_photo_is_held(clock, tmp_path):
     other = {"version": 1, "action": {"action": "dy.designated_commission"}, "verdict": "ready", "problems": []}
     assert draft_context.ungated(other, False) == other and draft_context.ungated(None, False) is None
     assert draft_context.gated_of({"draft_context": {"gated": "yes"}}) is False and draft_context.gated_of("{]") is False
+
+
+def test_a_mark_older_than_v2_is_held_like_none(clock, tmp_path):
+    """Verification 2026-11-09: a worker from before the colour rule marks its sample orders ``{"v": 1, "gated": true}``
+    although it took a colour never compared by photo for sure: the bot holds such a draft like one with no mark, and
+    approving it is refused until a new preview the Mac checked (v2)."""
+    b = make(clock, tmp_path)
+    try:
+        for mark in ({"v": 1, "gated": True}, {"gated": True}, {"v": "2", "gated": True}, {"v": 2, "gated": "yes"}):
+            assert draft_context.gated_of({"draft_context": mark}) is False, mark
+        assert draft_context.gated_of({"draft_context": GATED}) and draft_context.mark(False) == {"v": 2, "gated": False}
+        job = her_job(b, "还有这顶")
+        b.finish(job["id"], draft(message_kind="money", reply_draft="寄样单建好啦", reason="kb",
+                                  platform=sample_block("ready"), draft_context={"v": 1, "gated": True}))
+        [held] = [p for p in b.prm.store.packets() if p["job_id"] == job["id"]]
+        assert held["platform"]["preview"]["verdict"] == "blocked"
+        assert held["platform"]["preview"]["problems"] == [draft_context.NOT_GATED]
+        assert "draft_context" not in held["meta"] and b.prm.decide(held["id"], "execute")["ok"] is False
+    finally:
+        b.prm.stop()
+        b.relay.stop()
 
 
 def test_the_console_shows_the_sheet_and_serves_it_while_the_bot_runs_and_after(bot, tmp_path, monkeypatch):
@@ -592,7 +613,7 @@ def test_a_new_preview_nothing_checked_never_keeps_an_older_mark(bot):
     assert "draft_context" not in json.loads(bot.relay.store.get(again["id"])["meta"])
     bot.finish(again["id"], text=json.dumps(sample_block(previewed_at=2.0), ensure_ascii=False))      # (no mark)
     now = bot.prm.store.packet(packet["id"])
-    assert now["meta"]["draft_context"] == {"v": 1, "gated": False} and now["platform"]["preview"]["verdict"] == "ready"
+    assert now["meta"]["draft_context"] == {"v": 2, "gated": False} and now["platform"]["preview"]["verdict"] == "ready"
     bot.prm._draft_context = True
     [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
     assert shown["platform"]["can_execute"] is False and bot.prm.decide(packet["id"], "execute")["ok"] is False

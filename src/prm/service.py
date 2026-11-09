@@ -2913,7 +2913,7 @@ class PrmService:
         elif operator_files:
             draft_context.delete_files([f["path"] for f in operator_files])   # (nobody will look at this draft)
         if draft.gated:
-            packet_meta[draft_context.KEY] = {"v": 1, "gated": True}     # (the Mac checked its sample order by photo)
+            packet_meta[draft_context.KEY] = draft_context.mark(True)     # (the Mac checked its sample order by photo)
         tool, platform = MESSAGE_TOOL, None
         if draft.platform is not None:
             action = draft.platform.get("action")
@@ -4234,7 +4234,7 @@ class PrmService:
                     self._draft_context or draft_context.KEY in (packet.get("meta") or {})):
                 # PRM_DRAFT_CONTEXT: the packet keeps whether its last preview was checked by photo (approving asks); once
                 # it has a mark, with the switch off too (a preview nothing checked never keeps an older one's mark)
-                self._store.merge_packet_meta(packet["id"], {draft_context.KEY: {"v": 1, "gated": gated}}, (PENDING,))
+                self._store.merge_packet_meta(packet["id"], {draft_context.KEY: draft_context.mark(gated)}, (PENDING,))
             # PRM_DRAFT_CONTEXT: the new preview's sheet replaces the draft's, and a new preview without one clears it (the
             # old sheet was not made for it); the old files are deleted.  A sheet that came with an answer that cannot be
             # read, for a draft no longer waiting, or past MAX_OPERATOR_FILES is deleted

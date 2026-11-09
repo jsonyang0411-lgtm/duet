@@ -22,17 +22,19 @@ sent: the bot leaves it out).  Without it the worker's prompt and preview are wh
    venv ``hat_python``: ``hat_match.py match <photos…> --top 8 --no-stock --json``; local, no platform call), each
    picture once (by its sha256), remembered per creator for KEEP_DAYS (``photos/party-<id>.json``, while the picture is
    still in inbox/): an order drafted days after her picture still has it; one whose matching failed is tried again by
-   the next job, MAX_MATCH_TRIES times at most (never again when the index cannot read it).  Per picture the top hats
-   with their colours and item codes, the matcher's scores and a verdict: 「没把握」 when the best score is low or the
-   best two are close, 「颜色没把握」 when the best colour has no photo of its own (so it was never compared) or the
-   colours are close.
+   the next job, on its own (a picture's own failures MAX_MATCH_TRIES times at most, never again when the index cannot
+   read it; the index failing as a whole is the index's, left alone after MAX_RUN_FAILURES in a row).  Per picture the
+   top hats with their colours and item codes, the matcher's scores and a verdict: 「没把握」 when the best score is low
+   or the best two are close, 「颜色没把握」 when the best colour has no photo of its own or the index no colour data
+   for it (so it was never compared), or the colours are close.
 3. ``gate``: a draft's jst.sample_order.  Every SKU's 聚水潭 item code (kb/products.json's ``code``) must come from a
    picture of hers that is 「有把握」 (its best hat, its best colour), or have been confirmed: an item of an earlier order
-   of hers that went out (SENT / SIGNED, never rejected) or that the bot made, or 「确认 <编码>」 / 「对过图 <编码>」
-   beginning a line or sentence of the operators' 起草备注.  Otherwise the preview is not ready.  The codes with a
-   picture behind them get the side-by-side sheet (``hat_match.py sheet <her photo>=<code> … --json``, under the CLI
-   lock: it may ask 聚水潭 for a SKU photo, read-only); a row it marks 「！要再看」 or without the SKU's own photo (none,
-   or only the whole style's 「整款图」) blocks too, unless the 起草备注 confirms that code.
+   of hers that went out (SENT / SIGNED, never rejected) or that the bot made, or 「确认 <编码>」 / 「对过图 <编码>」 as a
+   sentence of its own in the operators' 起草备注 (never a question or a request about the code).  Otherwise the
+   preview is not ready.  The codes with a picture behind them get the side-by-side sheet (``hat_match.py sheet <her
+   photo>=<code> … --json``, under the CLI lock: it may ask 聚水潭 for a SKU photo, read-only); a row it marks 「！要
+   再看」 or without the SKU's own photo (none, or only the whole style's 「整款图」) blocks too, unless the 起草备注
+   confirms that code.
    The worker sends the sheet back on the relay's operator-only channel; the available stock of the styles (``jst
    goods-detail``, read-only) is a fact of the preview for the operators, never told to the model.
 
@@ -115,11 +117,15 @@ _ORDER_NO = re.compile(r"^YP[0-9A-Za-z]{6,30}$")
 _ACCOUNT = re.compile(r"^[0-9A-Za-z_.][0-9A-Za-z_.-]{0,39}$")   # an 抖音号 / 小红书号 (platforms._CREATOR_NO)
 _CODE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z_-]{2,63}$")          # a 聚水潭 item code (platforms._ERP_CODE)
 _CODE_TEXT = r"[0-9A-Za-z][0-9A-Za-z_-]{2,63}"
-# The 起草备注's confirmation of a code: 「确认 A…-F」, 「已确认：A…-F、B…-M」, 「确认过了 A…-F」, 「对过图 A…-F」 at the start of
-# the note, of a line or of a sentence (after 。！？； or .!?;), spaces before it allowed there only: never after another word
-# (「不确认」「待确认」「请 确认」「需要 确认」「还没 对过图」), nor inside a quote or after a comma (「她说「确认 …」」)
+# The 起草备注's confirmation of a code: 「确认 A…-F」, 「已确认：A…-F、B…-M」, 「确认过了 A…-F。」, 「对过图 A…-F」 as a whole
+# sentence: at the start of the note, of a line or of a sentence (after 。！？； or .!?;), spaces before it allowed there only,
+# and after the codes nothing but spaces, then the end of the line or 。！；.!; (an ASCII . only before a space or the end).
+# Never after another word (「不确认」「待确认」「请 确认」「需要 确认」「还没 对过图」), inside a quote or after a comma, and
+# never a question or a request about it (「确认 X 吗？」「确认 X？」「确认：X 还没对」「确认 X 的颜色」「确认 X 有没有货」
+# 「确认 X（还没看图）」「确认 X 再建单」)
 _NOTED = re.compile(rf"(?:^|(?<=[。！？；.!?;]))[ \t\u3000]*(?:已经?)?(?:确认(?:过)?了?|对过图了?)\s*[:：]?\s*"
-                    rf"({_CODE_TEXT}(?:\s*[、,，/和及]\s*{_CODE_TEXT})*)", re.M)
+                    rf"({_CODE_TEXT}(?:\s*[、,，/和及]\s*{_CODE_TEXT})*)"
+                    rf"(?=[ \t\u3000]*(?:$|[。！；;!]|\.(?=\s|$)))", re.M)
 _NOTED_SPLIT = re.compile(r"\s*[、,，/和及]\s*")
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
@@ -238,22 +244,27 @@ def _count(value) -> Optional[int]:
 
 # ── a tool that timed out is left alone for a while; a job's time budget ─────────────────────────────────────────
 
-_BREAKER: dict = {}                 # tool ("jst" | "hat") -> until when (time.time()) it is not run
+_BREAKER: dict = {}                 # tool ("jst" | "hat") -> (until when (time.time()) it is not run, why in words)
+TIMED_OUT = "上次超时"
 
 
 def tripped(tool: str, now: Optional[float] = None) -> str:
-    """Why ``tool`` is not run now ("" when it may be): it timed out lately (``trip``)."""
-    until = _BREAKER.get(tool)
+    """Why ``tool`` is not run now ("" when it may be): it timed out lately, or failed again and again (``trip``)."""
+    until, why = _BREAKER.get(tool) or (None, "")
     now = time.time() if now is None else now
     if until is None or now >= until:
         return ""
-    return f"{TOOL_NAMES.get(tool, tool)}上次超时，{_when(until)[-5:]} 以前先不用"
+    return f"{TOOL_NAMES.get(tool, tool)}{why}，{_when(until)[-5:]} 以前先不用"
 
 
-def trip(tool: str, opts: dict, now: Optional[float] = None) -> None:
-    """``tool`` timed out: not run again for ``breaker_min`` minutes."""
-    _BREAKER[tool] = (time.time() if now is None else now) + opts["breaker_min"] * 60
-    log.warning("draft context: %s timed out; not run again for %d min", tool, opts["breaker_min"])
+def trip(tool: str, opts: dict, now: Optional[float] = None, why: str = TIMED_OUT) -> None:
+    """``tool`` timed out (or, ``why``, failed again and again): not run again for ``breaker_min`` minutes."""
+    _BREAKER[tool] = ((time.time() if now is None else now) + opts["breaker_min"] * 60, why)
+    if why == TIMED_OUT:
+        log.warning("draft context: %s timed out; not run again for %d min", tool, opts["breaker_min"])
+    else:
+        log.warning("draft context: %s failed %d runs in a row; not run again for %d min (look at the index: its "
+                    "build.py, its venv)", tool, _RUNS["fails"], opts["breaker_min"])
 
 
 def _left(deadline: Optional[float], now: Optional[float] = None) -> float:
@@ -544,8 +555,9 @@ def confirmed_codes(samples: dict, verified=()) -> dict:
 
 def noted_codes(note: str) -> set:
     """The item codes the operators' 起草备注 confirms in so many words: 「确认 <编码>」, 「已确认：A、B」, 「对过图 <编码>」
-    beginning the note, a line or a sentence (upper case); a code merely written there (「别寄 A…」, 「她要的是 A…」), and
-    one after another word (「待确认」「请 确认」「不 确认」), a comma or a quote mark, is not one."""
+    as a sentence of its own (it begins the note, a line or a sentence, and ends with the codes), upper case.  A code
+    merely written there (「别寄 A…」, 「她要的是 A…」), one after another word (「待确认」「请 确认」「不 确认」), a comma or a
+    quote mark, and a question or request about it (「确认 A… 吗？」「确认 A… 的颜色」「确认：A… 还没对」) is not one."""
     out: set = set()
     for m in _NOTED.finditer(str(note or "")):
         out.update(code.upper() for code in _NOTED_SPLIT.split(m.group(1)) if _CODE.match(code))
@@ -663,13 +675,15 @@ def trimmed(hats) -> list:
 
 
 NO_OWN_COLOUR = "款有把握，颜色没把握（图库里没有这个颜色的单独图，颜色对不了）"
+NO_COLOUR_DATA = "款有把握，颜色没把握（图库的颜色数据和图对不上，要重建（build.py），颜色对不了）"
 
 
 def verdict(hats: list, opts: dict) -> str:
     """「有把握」, 「款有把握，颜色没把握（…）」, or 「没把握（why）」: the best hat's score below ``photo_min_score`` or the
     best two closer than ``photo_min_margin``; the colour: the best hat's best colour has no photo of its own in the index
-    (hat_match's ``own`` False: only the style's main photo) or no colour reading (ΔE unknown), so its colour was never
-    compared (``NO_OWN_COLOUR``), or its ΔE is at least ``colour_max_de``, or the second's less than ``colour_min_gap``
+    (hat_match's ``own`` False: only the style's main photo, ``NO_OWN_COLOUR``) or no colour reading (ΔE unknown although
+    it has its own photo: the index's colour data is missing or does not fit its photos, ``NO_COLOUR_DATA``), so its
+    colour was never compared, or its ΔE is at least ``colour_max_de``, or the second's less than ``colour_min_gap``
     above it."""
     if not hats:
         return "没把握（图库里没有像的帽子）"
@@ -680,8 +694,10 @@ def verdict(hats: list, opts: dict) -> str:
     if second is not None and top - second < opts["photo_min_margin"]:
         return "没把握（最像的两款分数差不多）"
     colours = hats[0].get("colours") or []
-    if not colours or not colours[0].get("own") or colours[0].get("de") is None:
+    if not colours or not colours[0].get("own"):
         return NO_OWN_COLOUR
+    if colours[0].get("de") is None:
+        return NO_COLOUR_DATA                    # (its own photo, but no colour reading: colours.npy missing or stale)
     own = [c for c in colours if c.get("own") and c.get("de") is not None]
     if own[0]["de"] >= opts["colour_max_de"] or (len(own) > 1 and own[1]["de"] - own[0]["de"] < opts["colour_min_gap"]):
         return "款有把握，颜色没把握"
@@ -739,8 +755,8 @@ def _tries(entry: dict) -> int:
 
 
 def _given_up(entry: dict) -> bool:
-    """A picture whose matching is not tried again: the index could not read it at all (``final``), or it failed
-    MAX_MATCH_TRIES times (a run that was skipped, or cancelled, is not a try)."""
+    """A picture whose matching is not tried again: the index could not read it at all (``final``), or its own run failed
+    MAX_MATCH_TRIES times (``_run_match``: only what is the picture's fault is a try)."""
     return bool(entry.get("final")) or _tries(entry) >= MAX_MATCH_TRIES
 
 
@@ -763,15 +779,16 @@ def match_photos(platforms, opts: dict, workspace: Path, party_id: int, job_id: 
     """Her pictures of this job (``got``: paths inside the workspace) matched against the hat index, and her earlier ones
     remembered: ``{"ok", "why", "photos": [entry …]}``, this job's first (``now`` True), each ``{"sha256", "rel",
     "name", "job", "at", "verdict", "hats", "error", "tries", "final"}``.  A picture is matched once: one seen before (her
-    memory, or this process) keeps its ranking.  The new ones, and her earlier ones whose matching failed (still in
-    inbox/), go to one ``hat_match.py match … --json`` run (the models load once), unless the index timed out lately
-    (``tripped``) or the job's budget is spent: then they say why and are tried again by a later job.  A picture is
-    tried at most MAX_MATCH_TRIES times, and never again once the index could not read it (``_given_up``)."""
+    memory, or this process) keeps its ranking.  The new ones go to one ``hat_match.py match … --json`` run (the models
+    load once); her pictures whose matching failed before (still in inbox/) each to a run of their own, so a failure
+    can be told apart.  Not while the index is left alone (``tripped``: it timed out, or failed MAX_RUN_FAILURES runs in
+    a row) or the job's budget is spent: then they say why and are tried again by a later job.  A picture is not tried
+    again once the index could not read it, or its own run failed MAX_MATCH_TRIES times (``_given_up``)."""
     now = clock()
     workspace = Path(workspace)
     memory = load_memory(home, party_id, workspace, now)
     pictures = [rel for rel in got or [] if Path(str(rel)).suffix.lower() in IMAGE_SUFFIXES]
-    current, to_run = [], []
+    current, fresh, again = [], [], []
     for rel in pictures:
         try:
             sha = _sha256(workspace / rel)
@@ -785,36 +802,52 @@ def match_photos(platforms, opts: dict, workspace: Path, party_id: int, job_id: 
             entry.update(hats=known["hats"], verdict=known.get("verdict") or verdict(known["hats"], opts))
         elif remembered is not None and _given_up(remembered):
             entry.update(error=remembered["error"], tries=_tries(remembered), final=bool(remembered.get("final")))
+        elif remembered is not None:                                  # (sent again after a failed match: its tries go on)
+            entry["tries"] = _tries(remembered)
+            again.append(entry)
         else:
-            if remembered is not None:
-                entry["tries"] = _tries(remembered)                    # (sent again: its tries go on)
-            to_run.append(entry)
+            fresh.append(entry)
         current.append(entry)
     taken = {e["sha256"] for e in current}
     earlier = [e for e in memory if e["sha256"] not in taken]
-    to_run += [e for e in earlier if e.get("error") and not _given_up(e)]   # (failed before: tried again, a few times)
+    again += [e for e in earlier if e.get("error") and not _given_up(e)]     # (failed before: tried again, alone)
     why = ""
-    if to_run:
-        why = (tool_problem(opts) if platforms is not None else "这台 Mac 的 worker 没有平台模块") or tripped("hat")
-        if not why and _left(deadline, clock()) < MIN_LEFT_SEC:
-            why = "这次没时间对图了"
-        if why:
-            for entry in to_run:
-                entry["error"] = why
-        else:
-            for entry in to_run:
-                entry["error"] = ""
-            _run_match(platforms, opts, workspace, to_run, home=home, beat=beat, env=env,
-                       timeout=min(opts["match_timeout_sec"], _left(deadline, clock())))
+    for group in ([fresh] if fresh else []) + [[e] for e in again]:
+        problem = (tool_problem(opts) if platforms is not None else "这台 Mac 的 worker 没有平台模块") or tripped("hat")
+        if not problem and _left(deadline, clock()) < MIN_LEFT_SEC:
+            problem = "这次没时间对图了"
+        if problem:
+            for entry in group:
+                entry["error"] = problem
+            why = why or problem
+            continue
+        for entry in group:
+            entry["error"] = ""
+        _run_match(platforms, opts, workspace, group, home=home, beat=beat, env=env,
+                   timeout=min(opts["match_timeout_sec"], _left(deadline, clock())))
     _save_memory(home, party_id, [*current, *earlier])
-    ok = not any(e.get("error") for e in current)
-    return {"ok": ok, "why": why if not ok else "", "photos": [*current, *earlier]}
+    failed = [e["error"] for e in current if e.get("error")]
+    return {"ok": not failed, "why": (why or failed[0]) if failed else "", "photos": [*current, *earlier]}
+
+
+MAX_RUN_FAILURES = 3                # hat_match.py runs failed as a whole in a row: then it is left alone for breaker_min
+_RUNS = {"fails": 0, "last_ok": None}   # this worker's hat_match.py runs: how many failed in a row, did the last one go
+
+
+def index_warnings(stderr) -> list:
+    """hat_match.py's own warnings among what it printed to stderr (its colour data does not fit its photos: run
+    build.py), for the worker's log."""
+    return [_clean(line, 200) for line in str(stderr or "").splitlines() if "colours.npy" in line or "build.py" in line][:3]
 
 
 def _run_match(platforms, opts: dict, workspace: Path, entries: list, *, home: Path, beat=None,
                env: Optional[dict] = None, timeout: Optional[float] = None) -> None:
     """One ``hat_match.py match <pictures…> --top 8 --no-stock --json`` run: each entry gets its ranking and verdict,
-    or ``error``.  A run that timed out trips the breaker."""
+    or ``error``.  What is a picture's try: the index could not read it (``final``: never again), or its run, alone and
+    right after one that went (the index works), failed as a whole (then it is likely the picture).  A run that failed
+    as a whole otherwise, or timed out, is the index's, never the pictures': it counts towards MAX_RUN_FAILURES (then the
+    index is left alone for ``breaker_min``, said in the log and the block); a timeout trips the breaker at once.  A
+    picture read at last loses its tries."""
     sheets = folder(home) / "sheets"
     sheets.mkdir(parents=True, exist_ok=True)
     argv = [str(opts["hat_python"]), str(opts["hat_index"] / "hat_match.py"), "match",
@@ -822,20 +855,31 @@ def _run_match(platforms, opts: dict, workspace: Path, entries: list, *, home: P
             "--out", str(sheets)]
     run = platforms.run_cli(argv, opts["hat_index"], timeout=max(1.0, timeout or opts["match_timeout_sec"]),
                             env=_tool_env(env), heartbeat=beat, every=30, interruptible=True)
+    for line in index_warnings(getattr(run, "stderr", "")):
+        log.warning("draft context: hat_match.py says: %s", line)
+    if run.stopped == "cancelled":
+        for entry in entries:
+            entry["error"] = "任务取消了"                         # (the job's, neither the index's nor the picture's)
+        return
     data = platforms.parse_json(run.stdout)
     photos = data.get("photos") if isinstance(data, dict) and isinstance(data.get("photos"), list) else None
     if run.exit_code != 0 or photos is None or len(photos) != len(entries):
-        if run.stopped == "timeout":
+        timed_out = run.stopped == "timeout"
+        alone = len(entries) == 1 and not timed_out and _RUNS["last_ok"] is True
+        _RUNS.update(fails=_RUNS["fails"] + 1, last_ok=False)
+        if timed_out:
             trip("hat", opts)
-        why = ("对图超时" if run.stopped == "timeout" else "任务取消了" if run.stopped == "cancelled"
-               else f"对图出错（退出码 {run.exit_code}）")
-        log.warning("draft context: hat_match.py match -> exit %s%s; %d picture(s) not matched", run.exit_code,
-                    f", {run.stopped}" if run.stopped else "", len(entries))
+        elif _RUNS["fails"] >= MAX_RUN_FAILURES:
+            trip("hat", opts, why=f"连着出错 {_RUNS['fails']} 次")
+        why = "对图超时" if timed_out else f"对图出错（退出码 {run.exit_code}）"
+        log.warning("draft context: hat_match.py match -> exit %s%s; %d picture(s) not matched (%d run(s) in a row)",
+                    run.exit_code, f", {run.stopped}" if run.stopped else "", len(entries), _RUNS["fails"])
         for entry in entries:
-            if run.stopped != "cancelled":                       # (the job was cancelled: not the picture's try)
+            if alone:
                 entry["tries"] = _tries(entry) + 1
             entry["error"] = why + (f"；试了 {_tries(entry)} 次，不再对了" if _given_up(entry) else "")
         return
+    _RUNS.update(fails=0, last_ok=True)
     for entry, answer in zip(entries, photos):
         if not isinstance(answer, dict) or answer.get("error"):
             entry.update(error="这张图读不出来，不再对了", final=True, tries=_tries(entry) + 1)   # (never tried again)
@@ -1155,6 +1199,8 @@ def _make_sheet(platforms, cfg: dict, opts: dict, workspace: Path, pairs: list, 
             timeout = max(1.0, min(opts["sheet_timeout_sec"], _left(deadline, clock())))
             run = platforms.run_cli(argv, opts["hat_index"], timeout=timeout, env=_tool_env(env),
                                     heartbeat=beat, every=30, interruptible=True)
+        for line in index_warnings(getattr(run, "stderr", "")):
+            log.warning("draft context: hat_match.py says: %s", line)
     except TimeoutError:
         return None, [], f"另一个平台命令一直占着（等了 {int(min(opts['lock_wait_sec'], left))} 秒）"
     except Exception as e:
@@ -1223,9 +1269,10 @@ def _read_stock(platforms, cfg: dict, opts: dict, styles: dict, *, home: Path, b
     return "；".join(parts)
 
 
-def sheet_lost(block: dict, why: str) -> dict:
-    """The preview once the sheet could not go to the bot: not ready (an operator must see it first)."""
+def sheet_lost(block: dict, why: str, retry: bool = False) -> dict:
+    """The preview once the sheet could not go to the bot: not ready (an operator must see it first); ``retry``: the
+    connection failed on the way (a new preview sends it again)."""
     out = copy.deepcopy(block)
     out.setdefault("problems", [])
-    _block(out, f"对图单没传到 Windows（{why}）：先核对再建")
+    _block(out, f"对图单没传到 Windows（{why}），重新预览再传" if retry else f"对图单没传到 Windows（{why}）：先核对再建")
     return out

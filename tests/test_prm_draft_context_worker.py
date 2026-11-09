@@ -46,6 +46,9 @@ FAKE_HAT = textwrap.dedent("""\
     with open(os.path.join(root, "calls.jsonl"), "a", encoding="utf-8") as f:
         f.write(json.dumps({"args": args, "offline": os.environ.get("HF_HUB_OFFLINE")}, ensure_ascii=False) + "\\n")
     answers = json.load(open(os.path.join(root, "answers.json"), encoding="utf-8"))
+    sys.stderr.write(answers.get("stderr", ""))
+    if answers.get("fail_with") and any(answers["fail_with"] in a for a in args):
+        sys.exit(1)
     if answers.get("exit"):
         sys.stdout.write(answers.get("stdout", ""))
         sys.exit(answers["exit"])
@@ -556,6 +559,64 @@ def test_only_confirm_or_checked_by_photo_in_the_note_confirms_a_code(worker, bo
     assert f"{CODE_B}：运营在起草备注里确认了（没有图对）" in [f["value"] for f in newest_preview(bot)["facts"]]
 
 
+# Verification of 6b59040 (2026-11-09, HIGH): a question or request in the 起草备注 counted as confirming the code
+NOT_CONFIRMING = ("确认 {c} 吗？", "确认 {c}？", "确认{c}吗", "确认：{c} 还没对", "确认 {c} 不了", "确认 {c} 还没对",
+                  "确认 {c} 的颜色", "确认 {c} 有没有货", "确认 {c} 是不是她要的", "确认 {c} 对不对", "确认 {c} 再建单",
+                  "确认 {c} 还是 A7269901001A-F", "确认 {c}（还没看图）", "确认一下 {c} 的颜色", "确认下 {c}", "确认吗？{c}",
+                  "确认：还没对 {c}", "待确认 {c}", "未确认 {c}", "没确认 {c}", "确认不了 {c}", "确认 {c}，她要的",
+                  "确认 {c}.5 吗", "确认 {c}、")
+CONFIRMING = ("确认 {c}", "确认 {c}。", "已确认 {c}、A7269901001A-F", "确认过了 {c}", "对过图 {c}", "确认了：{c}",
+              "确认 {c}！", "确认 {c}; 寄 2 顶", "确认 {c} 和 A7269901001A-F。", "确认 {c}. 寄 1 顶", "  确认 {c}  ")
+
+
+def test_a_question_or_request_in_the_note_never_confirms_a_code(worker):  # noqa: F811
+    """Verification 2026-11-09 (HIGH): 「确认 X 吗？」「确认 X 的颜色」「确认：X 还没对」… begin like a confirmation; the
+    confirmation is the whole sentence, so after its codes only spaces and the end of the line or 。！；.!; may come.  At
+    the start of the note, of a line and after 。, none of these confirms, and the real ones still do."""
+    dc = worker.draft_context
+    for forms, counts in ((NOT_CONFIRMING, False), (CONFIRMING, True)):
+        for form in forms:
+            text = form.format(c=CODE_B)
+            for note in (text, f"她要深棕\n{text}", f"她要深棕。{text}"):
+                assert (CODE_B in dc.noted_codes(note)) is counts, note
+
+
+def test_a_question_in_the_note_leaves_a_colour_never_compared_or_another_colour_held(worker, bot, mac):  # noqa: F811
+    """Verification 2026-11-09 (F1, F1b): the colour of her picture was never compared (CODE_A held), or she is sent the
+    hat's other colour (CODE_B held): an operator's note that asks about it (「确认 … 的颜色」「确认 … 吗？」
+    「…。确认 … 有没有货再答应她」「确认：… 还没对」), and a 重新预览, leave it held; 「确认 <编码>」 lets it go."""
+    order_rules(mac, rows=[her_row(items=PINK)])            # (her earlier order: another hat)
+    mac.hats.answers(match={"图片-1.jpg": no_own_colours()})
+    mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action=SAMPLE_ORDER)    # (CODE_A)
+    picture_job(bot, mac)
+    run_one(worker, bot, mac.settings)
+    [packet] = bot.prm.store.packets()
+    assert packet["platform"]["preview"]["verdict"] == "blocked"
+
+    def noted(text, packet_id):
+        assert bot.prm.deal_action("draft_note", {"deal_id": mac.deal["id"], "text": text})["ok"]
+        assert bot.prm.decide(packet_id, "repreview")["ok"]
+        run_one(worker, bot, mac.settings)
+        [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet_id]
+        return bot.prm.store.packet(packet_id)["platform"]["preview"]["verdict"], shown["platform"]["can_execute"]
+
+    for note in (f"确认 {CODE_A} 的颜色", f"确认 {CODE_A} 吗？", f"她要驼色。确认 {CODE_A} 有没有货再答应她",
+                 f"确认：{CODE_A} 还没对"):
+        assert noted(note, packet["id"]) == ("blocked", False), note
+    assert noted(f"她要驼色。确认 {CODE_A}", packet["id"]) == ("ready", True)
+    # a sure picture of the 驼色 hat, she is sent the 深棕 one
+    assert bot.prm.deal_action("draft_note", {"deal_id": mac.deal["id"], "text": ""})["ok"]
+    mac.hats.answers(match={"图片-2.jpg": SURE})
+    mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action={
+        **SAMPLE_ORDER, "items": [{"item_id": DY_ITEM2, "skus": [{"sku_id": DY_SKU2B, "qty": 1}]}]})   # (CODE_B)
+    picture_job(bot, mac, name="图片-2.jpg", body=b"\xff\xd8\xff picture two")
+    run_one(worker, bot, mac.settings)
+    other = bot.prm.store.packets()[0]
+    assert other["platform"]["preview"]["verdict"] == "blocked"
+    assert noted(f"确认 {CODE_B} 吗？", other["id"]) == ("blocked", False)
+    assert noted(f"确认 {CODE_B}", other["id"]) == ("ready", True)
+
+
 def test_a_code_only_in_an_unsure_picture_or_not_its_best_hat_is_not_taken(worker, bot, mac):  # noqa: F811
     """Review 2026-11-09: a code is taken from a picture only when it is 「有把握」 and the code is its best hat's.  A
     picture 「没把握」 (its best score low) whose second hat has the code, or a sure picture whose second hat has it: not
@@ -952,10 +1013,21 @@ def test_a_colour_never_compared_by_photo_is_never_taken_for_sure(worker, bot, m
     assert bot.prm.store.packet(packet["id"])["platform"]["preview"]["verdict"] == "ready"
 
 
-def test_a_picture_that_cannot_be_read_is_matched_once_and_a_failing_one_three_times(worker, bot, mac):  # noqa: F811
+def memory_of(worker, mac) -> dict:  # noqa: F811
+    """Her photo memory on the Mac: name -> (tries, final, error)."""
+    data = json.loads((worker.draft_context.folder(mac.home) / "photos" / f"party-{mac.party['id']}.json")
+                      .read_text(encoding="utf-8"))
+    return {e["name"]: (e.get("tries", 0), bool(e.get("final")), e.get("error") or "") for e in data["photos"]}
+
+
+def match_runs(mac, name=None) -> int:
+    return sum(1 for c in mac.hats.calls() if c["args"][0] == "match" and (name is None or any(
+        a.endswith("/" + name) for a in c["args"])))
+
+
+def test_a_picture_the_index_cannot_read_is_matched_once(worker, bot, mac):  # noqa: F811
     """Verification 2026-11-09 (W3): a picture the index answers 「cannot read」 for is never matched again (each run
-    loads the models); one whose run fails is tried with her next jobs, MAX_MATCH_TRIES times in all, then left."""
-    dc = worker.draft_context
+    loads the models)."""
     mac.node.rules([mine_rows(her_row())])
     mac.hats.answers(match={})                            # (the fake: an error for a picture it has no answer for)
     picture_job(bot, mac)
@@ -963,26 +1035,82 @@ def test_a_picture_that_cannot_be_read_is_matched_once_and_a_failing_one_three_t
     for n in range(3):
         text_job(bot, mac, text=f"[11:0{n}] 在吗")
         run_one(worker, bot, mac.settings)
-    assert [c["args"][0] for c in mac.hats.calls()].count("match") == 1
+    assert match_runs(mac) == 1
     assert "图片-1.jpg（她 " in block(prompt_of(mac), "photo_matches")
     assert "对不了图（这张图读不出来，不再对了）" in block(prompt_of(mac), "photo_matches")
-    mac.hats.answers(exit=1, stdout="not json")           # the index fails as a whole
-    picture_job(bot, mac, name="图片-2.jpg", body=b"\xff\xd8\xff picture two")
+    assert memory_of(worker, mac)["图片-1.jpg"][:2] == (1, True)
+
+
+def test_an_index_that_fails_as_a_whole_is_left_alone_a_while_and_her_picture_waits_for_it(worker, bot, mac, caplog):  # noqa: F811
+    """Verification 2026-11-09 (F2a): the index fails as a whole (exit 1: not the picture's fault) for her jobs: no try
+    is charged to her picture; after MAX_RUN_FAILURES runs in a row the index is left alone for ``breaker_min`` (the
+    block and the log say so); once it works again her picture is matched (sent again too) and nothing was given up."""
+    dc = worker.draft_context
+    mac.node.rules([mine_rows(her_row())])
+    mac.hats.answers(match={"图片-1.jpg": SURE}, exit=1, stdout="boom")
+    picture_job(bot, mac)
     run_one(worker, bot, mac.settings)
-    for n in range(4):
-        text_job(bot, mac, text=f"[11:1{n}] 在吗")
+    for n in range(3):
+        text_job(bot, mac, text=f"[11:0{n}] 在吗")
         run_one(worker, bot, mac.settings)
-    assert [c["args"][0] for c in mac.hats.calls()].count("match") == 1 + dc.MAX_MATCH_TRIES
-    assert f"对不了图（对图出错（退出码 1）；试了 {dc.MAX_MATCH_TRIES} 次，不再对了）" in block(prompt_of(mac), "photo_matches")
-    memory = json.loads((dc.folder(mac.home) / "photos" / f"party-{mac.party['id']}.json").read_text(encoding="utf-8"))
-    assert sorted((e["name"], e["tries"], e["final"]) for e in memory["photos"]) == [
-        ("图片-1.jpg", 1, True), ("图片-2.jpg", dc.MAX_MATCH_TRIES, False)]
+    assert match_runs(mac) == dc.MAX_RUN_FAILURES                        # (then left alone)
+    photos = block(prompt_of(mac), "photo_matches")
+    assert "对不了图（帽子图库连着出错 3 次，" in photos and "以前先不用）" in photos
+    assert "hat failed 3 runs in a row; not run again for 10 min" in caplog.text
+    assert memory_of(worker, mac)["图片-1.jpg"][:2] == (0, False)       # (no try of hers)
+    mac.hats.answers(match={"图片-1.jpg": SURE})          # the index works again, its 10 minutes are over
+    dc._BREAKER.clear()
+    picture_job(bot, mac, text="[11:06] 就这顶")           # (the same picture sent again)
+    run_one(worker, bot, mac.settings)
+    assert "图片-1.jpg（这次发的，inbox/" in block(prompt_of(mac), "photo_matches")
+    assert "：有把握" in block(prompt_of(mac), "photo_matches") and memory_of(worker, mac)["图片-1.jpg"] == (0, False, "")
+
+
+def test_only_a_pictures_own_failure_is_its_try(worker, bot, mac):  # noqa: F811
+    """Verification 2026-11-09 (F2b): a picture that makes the index fail is never batched with a good one again (her
+    earlier failed pictures are matched each on its own): the good one is matched and never charged; the bad one is
+    charged only when its run, alone, fails right after one that went, and is left after MAX_MATCH_TRIES of those."""
+    dc = worker.draft_context
+    mac.node.rules([mine_rows(her_row())])
+    mac.hats.answers(match={"图片-good.jpg": SURE, "图片-c.jpg": SURE, "图片-d.jpg": SURE}, fail_with="图片-bad")
+    picture_job(bot, mac, name="图片-bad.jpg", body=b"\xff\xd8\xff bad")
+    run_one(worker, bot, mac.settings)
+    assert memory_of(worker, mac)["图片-bad.jpg"][:2] == (0, False)     # (the worker's first run: maybe the index)
+    for n, name in enumerate(("图片-good.jpg", "图片-c.jpg", "图片-d.jpg"), 1):
+        picture_job(bot, mac, name=name, body=f"\xff\xd8\xff {name}".encode(), text=f"[11:0{n}] 这顶")
+        run_one(worker, bot, mac.settings)
+        memory = memory_of(worker, mac)
+        assert memory[name] == (0, False, ""), memory                  # (matched on its own, never charged)
+        assert memory["图片-bad.jpg"][0] == n, memory                   # (alone, right after a run that went)
+    assert match_runs(mac, "图片-bad.jpg") == 4 and dc.MAX_MATCH_TRIES == 3
+    assert "对不了图（对图出错（退出码 1）；试了 3 次，不再对了）" in block(prompt_of(mac), "photo_matches")
+    text_job(bot, mac, text="[11:09] 在吗")
+    run_one(worker, bot, mac.settings)
+    assert match_runs(mac, "图片-bad.jpg") == 4                       # (left)
+
+
+def test_stale_colour_data_of_the_index_is_said_as_such(worker, bot, mac, caplog):  # noqa: F811
+    """Verification 2026-11-09: the index's colours.npy does not fit its photos (hat_match says so on stderr and gives
+    no ΔE at all): the verdict says the colour data is stale (rebuild), not that the colour has no photo of its own,
+    and the index's warning goes into the worker's log."""
+    dc = worker.draft_context
+    stale = [{**h, "colours": [{**c, "de": None, "match": None} for c in h["colours"]]} for h in SURE]
+    mac.node.rules([mine_rows(her_row())])
+    mac.hats.answers(match={"图片-1.jpg": stale},
+                     stderr="colours.npy does not fit entries.json (run build.py): colours in CLIP order\n")
+    picture_job(bot, mac)
+    run_one(worker, bot, mac.settings)
+    photos = block(prompt_of(mac), "photo_matches")
+    assert f"：{dc.NO_COLOUR_DATA}" in photos and dc.NO_OWN_COLOUR not in photos
+    assert "hat_match.py says: colours.npy does not fit entries.json (run build.py)" in caplog.text
+    assert dc.verdict(dc.trimmed(no_own_colours()), dc.options({})) == dc.NO_OWN_COLOUR
 
 
 def test_the_sheet_goes_only_to_a_bot_that_says_it_takes_it(worker, bot, mac, monkeypatch):  # noqa: F811
-    """Verification 2026-11-09 (W4): an older bot drops the connection of a big upload rather than answering 404, so
-    the worker asks /relay/health first (``"operator_files": true``); without it, or when the upload's connection is
-    dropped (a broken pipe, a reset), the preview says the bot is old and the sheet goes nowhere."""
+    """Verification 2026-11-09 (W4, F3): an older bot drops the connection of a big upload rather than answering 404,
+    so the worker asks /relay/health first (``"operator_files": true``): without it, or on a 404, the preview says the
+    bot is old and the sheet goes nowhere; a connection dropped (a broken pipe, a reset) or a timeout after that is the
+    network (Tailscale, say): 「连接断了」 / 「超时了」, try again with a new preview."""
     client = worker.RelayClient(mac.settings["relay_url"], mac.settings["token"])
     assert client.operator_files_ok() is True                            # (this bot has the channel)
     for error in (BrokenPipeError(32, "Broken pipe"), ConnectionResetError(54, "Connection reset by peer"),
@@ -1002,14 +1130,29 @@ def test_the_sheet_goes_only_to_a_bot_that_says_it_takes_it(worker, bot, mac, mo
     assert "对图单没传到 Windows（Windows 的机器人还是旧版）：先核对再建" in newest_preview(bot)["problems"]
     assert uploads == [] and bot.relay.store.operator_files(job_id) == []
 
-    def dropped(self, *args):
-        raise urllib.error.URLError(BrokenPipeError(32, "Broken pipe"))
+    def failing(error):
+        def upload(self, *args):
+            raise error
+        return upload
 
-    monkeypatch.setattr(worker.RelayClient, "operator_files_ok", lambda self: True)
-    monkeypatch.setattr(worker.RelayClient, "upload_operator", dropped)
-    picture_job(bot, mac, text="[11:06] 就这顶")
-    run_one(worker, bot, mac.settings)
-    assert "对图单没传到 Windows（Windows 的机器人还是旧版）：先核对再建" in newest_preview(bot)["problems"]
+    def unknown(self):
+        raise urllib.error.URLError(ConnectionRefusedError(61, "refused"))
+
+    for health, error, problem in (
+            (lambda self: True, urllib.error.URLError(BrokenPipeError(32, "Broken pipe")),
+             "对图单没传到 Windows（连接断了），重新预览再传"),
+            (lambda self: True, ConnectionResetError(54, "reset"), "对图单没传到 Windows（连接断了），重新预览再传"),
+            (unknown, BrokenPipeError(32, "Broken pipe"), "对图单没传到 Windows（连接断了），重新预览再传"),
+            (lambda self: True, urllib.error.URLError(TimeoutError("timed out")),
+             "对图单没传到 Windows（超时了），重新预览再传"),
+            (lambda self: True, urllib.error.HTTPError("http://x", 404, "Not Found", {}, None),
+             "对图单没传到 Windows（Windows 的机器人还是旧版）：先核对再建")):
+        monkeypatch.setattr(worker.RelayClient, "operator_files_ok", health)
+        monkeypatch.setattr(worker.RelayClient, "upload_operator", failing(error))
+        picture_job(bot, mac, text="[11:06] 就这顶")
+        run_one(worker, bot, mac.settings)
+        assert problem in newest_preview(bot)["problems"], (error, newest_preview(bot)["problems"])
+        assert newest_preview(bot)["verdict"] == "blocked"
 
 
 def test_the_operators_channel_needs_the_token_and_keeps_its_files_in_the_jobs_folder(worker, bot, mac):  # noqa: F811

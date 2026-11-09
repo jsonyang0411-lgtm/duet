@@ -14,7 +14,8 @@ failed); an older worker sends neither.
 
 ``operator_files`` (PRM_DRAFT_CONTEXT, src/prm/draft_context.py) are files the Mac sent back for the operators only
 (``[{"name", "why", "sha256"}]``: a sample order's side-by-side photo sheet), never attachments for the creator;
-``draft_context: {"gated": true}`` says the Mac checked the draft's sample order by photo (``Draft.gated``).
+``draft_context: {"v": 2, "gated": true}`` says the Mac checked the draft's sample order by photo (``Draft.gated``;
+an older mark is not one).
 
 ``platform_action`` is optional (platforms.py): the Mac checks it and previews it, and
 hands back ``platform``, its verdict, in its place; a draft that names an action the Mac
@@ -97,7 +98,8 @@ class Draft:
     # The files the Mac sent back for the operators only (PRM_DRAFT_CONTEXT: a sample order's photo sheet),
     # ``[{"name", "why", "sha256"}]`` (draft_context.operator_entries): never sent to the creator.
     operator_files: list = field(default_factory=list)
-    # The Mac checked the draft's sample order by photo (its ``draft_context: {"gated": true}``; draft_context.ungated).
+    # The Mac checked the draft's sample order by photo (its ``draft_context: {"v": 2, "gated": true}``;
+    # draft_context.ungated).
     gated: bool = False
 
 

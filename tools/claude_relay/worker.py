@@ -68,9 +68,9 @@ numbers her deal knows, her 抖音号 / 小红书号): before Claude starts, thi
 read-only, under the same lock, paced) and matches the pictures she sent against the hat photo index (draft_context.py,
 next to this file), and the prompt gets <photo_matches> and <sample_status>, data and never instructions, with their rule
 lines; a draft's jst.sample_order is then checked by photo (a hat with neither a sure picture nor a confirmation behind
-it is not ready; the draft is marked ``draft_context: {"gated": true}``, and the bot holds a sample order without the
-mark) and its side-by-side sheet goes back on the relay's operator-only channel (``operator_files``; an older bot has
-none, answers 404, and the order is not ready), never to the creator.
+it is not ready; the draft is marked ``draft_context: {"v": 2, "gated": true}``, and the bot holds a sample order
+without that mark) and its side-by-side sheet goes back on the relay's operator-only channel (``operator_files``; an
+older bot has none and says so, and the order is not ready), never to the creator.
 
 Standard library only (macOS /usr/bin/python3 is enough).  Settings:
 ~/.claude-relay/config.json (see config.example.json); the token can live in
@@ -2471,16 +2471,28 @@ def prm_context(settings: dict, job: dict, meta: dict, workspace: Path, got: lis
                                pictures=pictures)
 
 
-GATED = {"v": 1, "gated": True}     # the mark of a draft (or a new preview) whose sample order this script checked
+# The mark of a draft (or a new preview) whose sample order this script checked.  v2 (2026-11-09): a colour never
+# compared by photo is not sure; the bot takes no older mark (a worker before that rule is held like one that checks
+# nothing).
+GATED = {"v": 2, "gated": True}
 
 
 OLD_BOT = "Windows 的机器人还是旧版"   # (no operator-only channel: the sheet never goes as an attachment instead)
 
 
-def _dropped(e: BaseException) -> bool:
-    """The bot closed the connection on an upload (broken pipe, reset; urllib wraps a broken pipe while sending)."""
+def _reason(e: BaseException) -> BaseException:
+    """What went wrong under urllib's wrapping (it wraps a broken pipe or a timeout while sending in URLError)."""
     reason = e.reason if isinstance(e, urllib.error.URLError) and not isinstance(e, urllib.error.HTTPError) else e
-    return isinstance(reason, (BrokenPipeError, ConnectionResetError))
+    return reason if isinstance(reason, BaseException) else e
+
+
+def _dropped(e: BaseException) -> bool:
+    """The connection was closed on an upload (broken pipe, reset)."""
+    return isinstance(_reason(e), (BrokenPipeError, ConnectionResetError))
+
+
+def _timed_out(e: BaseException) -> bool:
+    return isinstance(_reason(e), (TimeoutError, socket.timeout))
 
 
 def sample_order_gate(settings: dict, workspace: Path, block, context, client: RelayClient, job_id: int) -> tuple:
@@ -2488,8 +2500,10 @@ def sample_order_gate(settings: dict, workspace: Path, block, context, client: R
     operator_files, gated)``.  The side-by-side sheet goes back on the operator-only channel (POST .../operator-files:
     the bot keeps it on the draft, never sends it to the creator) as ``[{"name", "why", "sha256"}]``, once the bot's
     /relay/health says it has that channel (``operator_files_ok``); a sheet that does not get there leaves the preview
-    not ready (an older bot: ``OLD_BOT``, also when it answers 404 or drops the connection).  ``gated``: the check ran
-    (the draft carries ``GATED``; the bot holds any sample order without it)."""
+    not ready: ``OLD_BOT`` when the bot says it has no such channel or answers 404, 「连接断了」 / 「超时了」 with 「重新
+    预览再传」 when the connection failed on the way (a health check that went says the bot is new: a dropped upload is
+    the network, Tailscale say), else the error.  ``gated``: the check ran (the draft carries ``GATED``; the bot holds any
+    sample order without it)."""
     if draft_context is None or context is None or not isinstance(block, dict):
         return block, [], False
     beat = _platform_heartbeat(client, job_id, "对图（寄样单）")
@@ -2507,18 +2521,23 @@ def sample_order_gate(settings: dict, workspace: Path, block, context, client: R
         able = client.operator_files_ok()
     except Exception as e:                               # (not known: the upload itself says)
         log.info("#%s the bot's health not read before the photo sheet: %s", job_id, e)
-        able = True
-    if not able:
+        able = None
+    if able is False:
         log.warning("#%s the photo sheet of a sample order not sent: the bot has no operator-only channel", job_id)
         return draft_context.sheet_lost(checked["block"], OLD_BOT), [], gated
     try:
         answer = client.upload_operator(job_id, Path(sheet), name)
     except Exception as e:
         log.warning("#%s the photo sheet of a sample order did not go back: %s", job_id, e)
-        old = (isinstance(e, urllib.error.HTTPError) and e.code == 404) or _dropped(e)
-        return draft_context.sheet_lost(checked["block"], OLD_BOT if old else _short(e, 120)), [], gated
+        if isinstance(e, urllib.error.HTTPError) and e.code == 404:
+            return draft_context.sheet_lost(checked["block"], OLD_BOT), [], gated
+        if _dropped(e) or _timed_out(e):
+            return (draft_context.sheet_lost(checked["block"], "连接断了" if _dropped(e) else "超时了", retry=True), [],
+                    gated)
+        return draft_context.sheet_lost(checked["block"], _short(e, 120)), [], gated
     log.info("#%s sample order checked by photo: verdict %s, sheet sent back", job_id, checked["block"].get("verdict"))
-    return checked["block"], [{"name": name, "why": checked["why"], "sha256": str((answer or {}).get("sha256") or "")}], gated
+    files = [{"name": name, "why": checked["why"], "sha256": str((answer or {}).get("sha256") or "")}]
+    return checked["block"], files, gated
 
 
 def do_platform_job(settings: dict, job: dict, client: RelayClient, workspace: Path, meta: dict) -> dict:

@@ -14,7 +14,8 @@ picture behind it leaves the preview not ready, and the sheet comes back with th
   ``unambiguous``).  The Mac finds her orders by these, never by her nickname.  Without the key the Mac does none of it
   (the switch off, an older bot): the prompt as before, byte for byte.
 - ``ungated``: with the switch on, a jst.sample_order preview the Mac did not check by photo (no ``draft_context:
-  {"gated": true}`` next to it: an older worker, one not restarted, one whose module did not load) is held: not ready,
+  {"v": 2, "gated": true}`` next to it: an older worker, a v1 one, one not restarted, one whose module did not load) is
+  held: not ready,
   「Mac 没有对图：worker 旧了或没重启」.  The packet keeps the mark of its last preview (``meta.draft_context``); one
   without it (``unchecked``: a draft from before the switch was on, too) cannot be approved until a new preview.
 - ``take_operator_files`` / ``preview_operator_files``: the Mac sends the sheet on the relay's operator-only channel
@@ -43,6 +44,8 @@ from typing import Callable, Optional
 logger = logging.getLogger(__name__)
 
 KEY = "draft_context"               # the job's meta, and the Mac's mark next to a checked sample order
+MARK_VERSION = 2                    # the mark's ``v`` the bot takes: 2 since a colour never compared is not sure (an older
+                                    # worker's v1 mark is held like no mark)
 OPERATOR_FILES = "operator_files"   # the draft's (the Mac's answer) and the packet's meta
 SHEET_PREFIX = "对图单-"            # the Mac's sheet (worker.sample_order_gate): never an attachment, named or not
 SHEET_WHY = "寄样单里每一顶和她发的图并排对比；只给运营看，不发给达人"
@@ -112,19 +115,27 @@ def job_context(store, deal_id: int, accounts) -> dict:
 
 
 def gated_of(value) -> bool:
-    """Did the Mac check this answer's sample order by photo: its ``draft_context`` is ``{"gated": true}`` (``value``:
-    the answer as a dict, or its JSON text)."""
+    """Did the Mac check this answer's sample order by photo: its ``draft_context`` is ``{"v": 2, "gated": true}``
+    (``value``: the answer as a dict, or its JSON text; a packet's meta too).  A mark older than MARK_VERSION is not
+    one: that worker took a colour it never compared for sure."""
     if isinstance(value, str):
         try:
             value = json.loads(value)
         except ValueError:
             return False
     mark = value.get(KEY) if isinstance(value, dict) else None
-    return isinstance(mark, dict) and mark.get("gated") is True
+    version = mark.get("v") if isinstance(mark, dict) else None
+    return (mark.get("gated") is True and isinstance(version, int) and not isinstance(version, bool)
+            and version >= MARK_VERSION) if isinstance(mark, dict) else False
+
+
+def mark(gated: bool) -> dict:
+    """The packet's ``meta.draft_context``: whether its last preview was checked by photo."""
+    return {"v": MARK_VERSION, "gated": bool(gated)}
 
 
 def unchecked(packet: Optional[dict]) -> bool:
-    """A draft's jst.sample_order the Mac did not check by photo: its ``meta.draft_context`` is not ``{"gated": true}``
+    """A draft's jst.sample_order the Mac did not check by photo: its ``meta.draft_context`` is not ``mark(True)``
     (made while PRM_DRAFT_CONTEXT was off, by a worker that does not check, or its last new preview was not checked).
     With the switch on such a draft cannot be approved (``PrmService._approve_execute``) and the console says so."""
     action = ((packet or {}).get("platform") or {}).get("action") or {}
