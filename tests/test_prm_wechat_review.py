@@ -32,10 +32,10 @@ from src.prm import deals, gates, platforms
 from src.prm import wechat_review as wr
 from src.prm.service import SETTLE_SEC, UNSURE_ERROR, PrmService, platform_state
 from src.prm.store import BUYIN_TOOL, PrmStore
-from src.prm.wechat_review import (BACKLOG_SEC, CLOSED_RACE_SEC, HELP_YES, HINT_SEC, NO_ADMIN_WHY, NOTICE_CHARS, ON_AT,
-                                   QUEUE_RETRY, QUEUE_UNSURE, QUOTED_ELSEWHERE, READ_BACK_EARLY_SEC, REFUSE_TEXT,
-                                   RELAY_QUIET_SEC, UNCERTAIN, WHICH_EXECUTE, RETRY_SEC, SEND_TRIES, UNSURE_GRACE_SEC,
-                                   VOICE_TEXT, read)
+from src.prm.wechat_review import (BACKLOG_SEC, BARE_UNSURE, CC_HINT, CLOSED_RACE_SEC, HELP_YES, HINT_SEC, NO_ADMIN_WHY,
+                                   NOTICE_CHARS, ON_AT, QUEUE_RETRY, QUEUE_UNSURE, QUOTED_ELSEWHERE, QUOTED_EXECUTE,
+                                   READ_BACK_EARLY_SEC, REFUSE_TEXT, RELAY_QUIET_SEC, UNCERTAIN, WHICH_EXECUTE,
+                                   RETRY_SEC, SEND_TRIES, UNSURE_GRACE_SEC, VOICE_TEXT, read)
 from src.relay.service import MAX_AGE_SEC, ClaudeRelay
 from src.relay.store import RelayStore
 from src.router import MessageRouter
@@ -1698,7 +1698,8 @@ def test_a_lone_执行_with_no_platform_draft_told_goes_on_as_before(clock, tmp_
 def test_relay_only_a_lone_执行_is_never_claudes_go_ahead_while_a_platform_draft_waits(clock, tmp_path, ended, word):
     """Second review B1 (P2, P6): in CLAUDE_RELAY_ONLY a lone 「执行」 meant for the platform draft just told became
     Claude's follow-up (its job running) or a new task (its job ended): a go-ahead for whatever Claude had proposed.
-    Third verification item 2: 「执行吧」「执行一下」「可以执行」「去执行」「执行啊」 still did."""
+    Third verification item 2: 「执行吧」「执行一下」「可以执行」「去执行」「执行啊」 still did.  Final check item 4: the hint
+    says how it reaches Claude instead (CC_HINT)."""
     desk = Desk(clock, tmp_path, relay_only="on")
     desk.prm.register(CREATOR, "小美", "")
     desk.admin("帮我把旧分支的清理方案列出来，等我说执行再删")
@@ -1708,7 +1709,7 @@ def test_relay_only_a_lone_执行_is_never_claudes_go_ahead_while_a_platform_dra
         desk.relay.tick()
     packet = platform_waiting(desk)
     clock.now += 30
-    assert desk.admin(word) == f"{WHICH_EXECUTE}（在等的：#{packet['id']}）"
+    assert desk.admin(word) == f"{WHICH_EXECUTE}（在等的：#{packet['id']}）{CC_HINT}"
     assert desk.relay.store.followups(job["id"], 0) == [] and len(desk.jobs()) == 1
     assert desk.prm.store.packet(packet["id"])["status"] == "pending" and desk.executions() == []
     desk.stop()
@@ -1730,7 +1731,8 @@ def test_a_执行_with_words_around_it_gets_the_hint_with_a_cc_task_running_too(
 def test_relay_only_words_that_only_mention_执行_stay_claudes(clock, tmp_path):
     """What is no 「执行」 alone stays Claude's in CLAUDE_RELAY_ONLY: a 「不执行」, a sentence about something to execute.
     Fourth verification item 5 (probe r5b): a 「执行吧」 quoting Claude's own message got silence (the relay takes no
-    quote in CLAUDE_RELAY_ONLY): one line says so now; nothing runs, Claude hears nothing."""
+    quote in CLAUDE_RELAY_ONLY): one line says so now, with the words to send (final check item 4: 「cc 执行吧」, not
+    「不引用直接发」, which the review would catch); nothing runs; sent as it says, Claude has it."""
     desk = Desk(clock, tmp_path, relay_only="on")
     desk.prm.register(CREATOR, "小美", "")
     desk.admin("帮我把旧分支的清理方案列出来，等我说执行再删")
@@ -1745,9 +1747,33 @@ def test_relay_only_words_that_only_mention_执行_stay_claudes(clock, tmp_path)
     claude_said = desk.told()[-1]
     jobs = len(desk.jobs())
     for words in ("执行吧", "执行", "执行了吗"):
-        assert desk.admin(words, quote=claude_said) == QUOTED_ELSEWHERE, words
+        assert desk.admin(words, quote=claude_said) == QUOTED_ELSEWHERE.format(words=words), words
     assert len(desk.jobs()) == jobs
     assert desk.prm.store.packet(packet["id"])["status"] == "pending" and desk.executions() == []
+    assert "已交给 Mac" in desk.admin("cc 执行吧") and desk.jobs()[0]["text"] == "执行吧"   # (as the line says)
+    assert desk.prm.store.packet(packet["id"])["status"] == "pending" and desk.executions() == []
+    desk.stop()
+
+
+def test_relay_only_a_numbered_执行_quoting_claude_never_runs(clock, tmp_path):
+    """Final check item 2: in CLAUDE_RELAY_ONLY, 「执行 1」 quoting Claude's message ran draft #1 (a platform write), while
+    the admin most likely meant Claude's 「方案 1」.  Never run: one line says how to run the draft; a number that is no
+    draft told here is Claude's words (QUOTED_ELSEWHERE).  Quoting the notification it runs, as always."""
+    desk = Desk(clock, tmp_path, relay_only="on")
+    desk.prm.register(CREATOR, "小美", "")
+    desk.admin("帮我列两个清理方案")
+    job = desk.relay.next_job(0, ("admin",))
+    desk.relay.finish(job["id"], {"ok": True, "text": "方案 1：删旧分支；方案 2：归档", "duration_s": 3})
+    desk.relay.tick()
+    claude_said = desk.told()[-1]
+    packet = platform_waiting(desk)
+    number = packet["id"]
+    clock.now += 30
+    assert desk.admin(f"执行 {number}", quote=claude_said) == QUOTED_EXECUTE.format(number=number)
+    assert desk.admin("执行 9", quote=claude_said) == QUOTED_ELSEWHERE.format(words="执行 9")
+    assert desk.prm.store.packet(number)["status"] == "pending" and desk.executions() == []
+    assert desk.admin("执行", quote=head(desk, number)).startswith(f"#{number} 已批准执行")
+    assert len(desk.executions()) == 1
     desk.stop()
 
 
@@ -1756,14 +1782,14 @@ def test_relay_only_words_that_only_mention_执行_stay_claudes(clock, tmp_path)
 def test_a_question_about_执行_never_runs_and_says_what_became_of_the_draft(desk, words, how):
     """Fourth verification item 3 (probe q): 「执行了吗」「执行吗」「执行？」「执行了」… unquoted got 「执行哪一份？」 (a push to
     run it), 「执行了没」「执行了么」「要执行吗」「执行好了吗」 nothing at all.  A question about 执行, quoted, unquoted or with
-    the draft's number, never runs anything: it says what became of the draft."""
+    the draft's number, never runs anything: it says what became of the draft (her 称呼 after its number)."""
     packet = platform_waiting(desk)
     number = packet["id"]
     if how == "quoted":
         reply = desk.admin(words, quote=head(desk, number))
     else:
         reply = desk.admin(words.replace("执行", f"执行 {number}", 1) if how == "numbered" else words)
-    assert reply == f"#{number} 还没执行（在等你确认）：要执行请引用那条通知回「执行」（或者回「执行 {number}」）"
+    assert reply == f"#{number}（小美）还没执行（在等你确认）：要执行请引用那条通知回「执行」（或者回「执行 {number}」）"
     assert desk.prm.store.packet(number)["status"] == "pending" and desk.executions() == []
 
 
@@ -1773,21 +1799,24 @@ def test_a_question_about_执行_after_it_ran_says_how_far_it_got(desk):
     packet = platform_waiting(desk)
     number = packet["id"]
     desk.admin("执行", quote=head(desk, number))
-    assert desk.admin("执行了吗？") == f"#{number} 已经批准，正在平台上执行（做完了告诉你结果）"
-    assert desk.admin("执行好了没有", quote=head(desk, number)) == f"#{number} 已经批准，正在平台上执行（做完了告诉你结果）"
+    assert desk.admin("执行了吗？") == f"#{number}（小美）已经批准，正在平台上执行（做完了告诉你结果）"
+    assert desk.admin("执行好了没有", quote=head(desk, number)) == (
+        f"#{number}（小美）已经批准，正在平台上执行（做完了告诉你结果）")
     mac_runs(desk, record(sample_order_no=JST_ORDER))
-    assert desk.admin("执行了吗") == (f"#{number} 已经执行完了：聚水潭 · 达人寄样单（平台核验成功；寄样单号 {JST_ORDER}），"
+    assert desk.admin("执行了吗") == (f"#{number}（小美）已经执行完了：聚水潭 · 达人寄样单（平台核验成功；寄样单号 {JST_ORDER}），"
                                      "回复正在发")
     desk.prm.tick()
     assert desk.admin(f"执行 {number} 了没") == (
-        f"#{number} 已执行：聚水潭 · 达人寄样单（平台核验成功；寄样单号 {JST_ORDER}），回复已发出")
+        f"#{number}（小美）已执行：聚水潭 · 达人寄样单（平台核验成功；寄样单号 {JST_ORDER}），回复已发出")
     assert len(desk.executions()) == 1
 
 
 def test_a_question_about_执行_lists_a_few_drafts_and_is_not_the_reviews_without_one(clock, tmp_path):
-    """Unquoted, a question about 执行 answers for the platform drafts told here that wait or were told recently, newest
-    first, STATUS_LISTED at most; the console's red end in its words; without one it is not the review's (in
-    CLAUDE_RELAY_ONLY: Claude's)."""
+    """Unquoted, a question about 执行 answers for the platform drafts told here that wait or were told recently,
+    STATUS_LISTED at most: final check item 5, the ones running first, then the decided or ended ones (the latest first:
+    the one that ran is never hidden behind 「还有 N 份」), then the waiting ones, each with her 称呼; the console's red
+    end in its words; in CLAUDE_RELAY_ONLY with how to give it to Claude (CC_HINT); without one it is not the review's
+    (in CLAUDE_RELAY_ONLY: Claude's)."""
     desk = Desk(clock, tmp_path, relay_only="on")
     desk.prm.register(CREATOR, "小美", "")
     desk.admin("帮我把旧分支的清理方案列出来")
@@ -1806,11 +1835,27 @@ def test_a_question_about_执行_lists_a_few_drafts_and_is_not_the_reviews_witho
     desk.prm.decide(numbers[0], "execute")                              # (the oldest runs: the console's)
     mac_runs(desk, record("FAILED"))
     lines = desk.admin("执行了没？").split("\n")
-    assert lines == [f"#{n} 还没执行（在等你确认）：要执行请引用那条通知回「执行」（或者回「执行 {n}」）"
-                     for n in reversed(numbers[1:])] + ["（还有 1 份，见控制台）"]
-    assert desk.admin(f"执行 {numbers[0]} 了吗") == (
-        f"#{numbers[0]} 执行没成功：平台拒绝了，或者没有发出（FAILED）：读回没证实，平台没有动，回复没有发；请到控制台看")
+    assert lines == [
+        f"#{numbers[0]}（测试0）执行没成功：平台拒绝了，或者没有发出（FAILED）：读回没证实，平台没有动，回复没有发；请到控制台看",
+        *[f"#{n}（测试{k}）还没执行（在等你确认）：要执行请引用那条通知回「执行」（或者回「执行 {n}」）"
+          for k, n in ((3, numbers[3]), (2, numbers[2]))],
+        f"（还有 1 份，见控制台）{CC_HINT}"]
     assert len(desk.executions()) == 1
+    desk.stop()
+
+
+def test_a_result_that_came_long_after_its_approval_is_still_listed(clock, tmp_path):
+    """Final check item 5: the window took ``decided_at`` first (COALESCE), so a draft approved more than STATUS_SEC ago
+    whose result came just now was left out; the later of ``decided_at`` and ``sent_at`` counts now."""
+    desk = Desk(clock, tmp_path)
+    desk.prm.register(CREATOR, "小美", "")
+    packet = platform_waiting(desk)
+    number = packet["id"]
+    desk.prm.decide(number, "execute")                                  # (the console's)
+    clock.now += wr.STATUS_SEC + 3600
+    mac_runs(desk, record("FAILED"))                                    # (the Mac's answer, just now)
+    assert desk.admin("执行了吗") == (
+        f"#{number}（小美）执行没成功：平台拒绝了，或者没有发出（FAILED）：读回没证实，平台没有动，回复没有发；请到控制台看")
     desk.stop()
 
 
@@ -1834,30 +1879,79 @@ def test_a_command_takes_one_full_stop_or_exclamation_marks_and_tildes(desk, wor
 
 
 def test_a_1_with_an_ellipsis_never_sends(desk):
-    """Fourth verification item 1: 「1…」 sent a draft the same way, quoting its notification or bare."""
+    """Fourth verification item 1: 「1…」 sent a draft the same way, quoting its notification or bare.  Final check item
+    3: bare, it got silence; one line says to answer 1 alone now (BARE_UNSURE)."""
     packet = waiting(desk)
     number = packet["id"]
     for words in ("1…", "1...", "1。。", "发…"):
         assert desk.admin(words, quote=head(desk, number)) == f"#{number} {HELP_YES}", words
-    assert desk.admin("1…") is None and desk.admin("2...") is None   # (bare: no answer, nothing done)
+    assert desk.admin("1…") == BARE_UNSURE and desk.admin("2...") == BARE_UNSURE
     assert desk.prm.store.packet(number)["status"] == "pending"
     assert desk.admin(f"发 {number}…") is None and desk.admin(f"不发 {number}...") is None
     assert desk.prm.store.packet(number)["status"] == "pending"
     assert desk.admin("1。", quote=head(desk, number)) == f"#{number} 已批准，正在发给 小美"
 
 
+@pytest.mark.parametrize("words", ["1.", "1…", "1...", "1。。", "1．", "1｡", "2.", "２…", "１。。", "2．"])
+def test_a_bare_1_with_a_hesitating_ending_gets_a_line_and_does_nothing(desk, words):
+    """Final check item 3 (36 forms): 「1.」「1…」「1。。」「1．」「1｡」… bare got silence (2ad168e sent or refused them): one
+    line now, nothing done."""
+    packet = waiting(desk)
+    assert desk.admin(words) == BARE_UNSURE
+    assert desk.prm.store.packet(packet["id"])["status"] == "pending"
+
+
+def test_relay_only_a_bare_1_with_a_hesitating_ending_stays_claudes(clock, tmp_path):
+    """In CLAUDE_RELAY_ONLY a bare 1 / 2 is Claude's (``_bare_claims``): with a hesitating ending too, nothing of it
+    here."""
+    desk = Desk(clock, tmp_path, relay_only="on")
+    desk.prm.register(CREATOR, "小美", "")
+    packet = waiting(desk)
+    assert "已交给 Mac" in desk.admin("1…") and [job["text"] for job in desk.jobs()] == ["1…"]
+    assert desk.prm.store.packet(packet["id"])["status"] == "pending"
+    desk.stop()
+
+
+@pytest.mark.parametrize("words, status", [("1~。", "approved"), ("1。！", "approved"), ("1！。", "approved"),
+                                           ("2~。", "dropped"), ("２！。", "dropped")])
+def test_one_full_stop_with_exclamation_marks_or_tildes_is_an_ending(desk, words, status):
+    """Final check item 3: at most one 「。」 with any 「！!～~」, in either order, is an ending, not hesitating."""
+    packet = waiting(desk)
+    desk.admin(words)
+    assert desk.prm.store.packet(packet["id"])["status"] == status
+
+
+@pytest.mark.parametrize("words", ["👍…", "👍.", "[强]…", "[强]。。", "…", "。", "？", "！", "~", "……", "👍👍…"])
+def test_emoji_or_punctuation_only_quoting_a_notification_is_never_an_edit(desk, words):
+    """Final check item 1: a quoted 「👍…」「[强]。。」 (and, older, 「…」「？」「！」) became the proposed edit, and the bare 1
+    after it sent 「👍…」 to her.  A text without a letter is never words for her: the bot says how to answer."""
+    packet = waiting(desk)
+    number = packet["id"]
+    assert desk.admin(words, quote=head(desk, number)) == f"#{number} {HELP_YES}"
+    row = desk.prm.store.wechat_review(number)
+    assert (row["state"], row["proposed"]) == ("notified", "")
+    desk.admin("1")
+    assert desk.prm.store.packet(number)["status"] == "pending" and desk.to(CREATOR) == []
+    assert desk.admin("👍~。", quote=head(desk, number)) == f"#{number} 已批准，正在发给 小美"   # (an ending: 👍 is a yes)
+    assert desk.prm.store.packet(number)["final_text"] == "收到啦～戴着还合适吗？"
+
+
 def test_a_numbered_answer_takes_the_same_endings(clock, tmp_path):
     """Fourth verification item 6: 「执行 12。」「执行 12！」「发 12。」 got nothing; the endings of item 1 are taken after the
-    number, nothing else (「执行 12。。」 is still no answer)."""
+    number, nothing else.  Final check item 6: 「执行 12。。」「执行 12…」「执行 12 吧」 (no command) got no answer: what
+    became of #12, never run."""
     desk = Desk(clock, tmp_path)
     desk.prm.register(CREATOR, "小美", "")
     packet = platform_waiting(desk)
     number = packet["id"]
-    assert desk.admin(f"执行 {number}。。") is None and desk.executions() == []
+    waiting_line = f"#{number}（小美）还没执行（在等你确认）：要执行请引用那条通知回「执行」（或者回「执行 {number}」）"
+    for words in (f"执行 {number}。。", f"执行 {number}…", f"执行 {number} 吧"):
+        assert desk.admin(words) == waiting_line, words
+    assert desk.executions() == []
     assert desk.admin(f"执行 {number}！").startswith(f"#{number} 已批准执行")
     desk.stop()
     for words, told in (("发 {n}。", "已批准，正在发给 小美"), ("不发 {n}～", "不发了（她再发消息时会有新的草稿）"),
-                        ("发送 {n}!!", "已批准，正在发给 小美")):
+                        ("发送 {n}!!", "已批准，正在发给 小美"), ("发 {n}~。", "已批准，正在发给 小美")):
         desk = Desk(clock, tmp_path)
         desk.prm.register(CREATOR, "小美", "")
         number = waiting(desk)["id"]

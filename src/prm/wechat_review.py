@@ -28,9 +28,9 @@ doubling, at most 2 minutes apart, each message 6 times in all (as the relay's a
 
 Answers (``answer``, the route step ``wechat_review``, before the relay or an admin command can take them): typed text
 in the admin's own private chat, never a voice message (heard wrong, a 「不发」 could send: the bot says to type).  A
-word that does something (1 / 2 / 发 / 不发 / 执行 / 好的 …, numbered or not) ends in nothing, a single 「。」, or one or
-more of 「！!～~」 (``_command_word``, ``_END``): with 「.」「…」「...」「。。」 after it (hesitating, not finished) it does
-nothing.
+word that does something (1 / 2 / 发 / 不发 / 执行 / 好的 …, numbered or not) ends in nothing, or at most one 「。」 with
+any 「！!～~」 in either order (``_command_word``, ``_END``): with 「.」「…」「...」「。。」 after it (hesitating, not
+finished) it does nothing (a bare 「1…」 the bot would have taken gets BARE_UNSURE).
 - Quoting a notification (WeChat 引用; ``quoted_content`` starts with 「#12 草稿」): 「1」「发」「发送」「好」「好的」「可以」「行」
   「ok」「同意」「嗯」「[强]」「👍」 send the draft as it was drafted (a proposed edit is dropped), 「2」「不发」「不要」「算了」 drop
   it, 「改 <你的话>」 sends those words instead (the console's 改了再发 checks: ``PrmService.edit_problem``); other words
@@ -38,7 +38,8 @@ nothing.
   relay (``cc …``; an admin command with other words refuses the whole message, as without a quote), another approval
   word, emoji only, a lone number, a text built around a yes (``_yes_like``: a short one, 「好的呀」「发吧」「没问题」…, or
   one made only of yes words, 「好好好好好好好好好」), any text of at most SHORT_CHARS letters (``_short``: 「妥」「冲」「安排」
-  「go」「就按这个」…): the bot says how to answer; a short one starting with 改 (「改一下」) asks what to.
+  「go」「就按这个」…), a text without a letter (「👍…」「[强]。。」「…」「？」): the bot says how to answer; a short one
+  starting with 改 (「改一下」) asks what to.
 - Quoting that question: a yes word sends the proposal, only when the 『…』 quoted is the current one (else the bot shows
   the current one, as a question of its own).  A number in the words that is not the quoted draft's (「改 15 …」「发 15」
   「执行 15」 quoting #12) does nothing: the bot asks which.  A question about 执行 quoting it (「执行了吗」「执行了没」「要执行
@@ -52,12 +53,15 @@ nothing.
   closed in the console (CLOSED_RACE_SEC).  A bare one after the bot said something else meanwhile gets a hint.  A
   「执行」 alone or with words around it (``_execute_parts``: 「执行吧」「执行一下」「可以执行」…) is never run nor passed on
   while a platform draft told here waits or was the last thing said: the bot asks which (in either mode).  A question
-  about 执行 (「执行了吗」「执行了没」「执行吗」「执行？」「执行好了吗」「要执行吗」…, 「执行 12 了吗」) says what became of the
-  draft (its number) or of the platform drafts told here that wait or were told recently (``_status_rows``, at most
-  STATUS_LISTED), never runs one; with none of them it is not the review's.  An unnumbered 「改 …」 while a notification
+  about 执行 (「执行了吗」「执行了没」「执行吗」「执行？」「执行好了吗」「要执行吗」…) says what became of the platform drafts
+  told here that run, ended or were decided recently, or wait (``_status_rows``, in that order, at most STATUS_LISTED,
+  her 称呼 after each number), never runs one; with none of them it is not the review's; one with a draft number that
+  is no command (「执行 12 了吗」「执行 12 吧」「执行 12…」) answers for that draft.  An unnumbered 「改 …」 while a notification
   is the last thing said: the bot asks which (with a relay job of this chat under way or just ended: 「要交给 Claude 请在
-  前面加 cc」), except in CLAUDE_RELAY_ONLY (it is Claude's: it goes on).  In CLAUDE_RELAY_ONLY a 「执行」-like answer
-  quoting another message (Claude's, say: the relay takes no quote there) gets one line saying so (QUOTED_ELSEWHERE).
+  前面加 cc」), except in CLAUDE_RELAY_ONLY (it is Claude's: it goes on).  In CLAUDE_RELAY_ONLY those hints and answers
+  say how to give the words to Claude instead (CC_HINT); a 「执行」-like answer quoting another message (Claude's, say:
+  the relay takes no quote there) gets one line saying so, 「cc <the words>」 (QUOTED_ELSEWHERE), and a numbered 「执行 N」
+  quoting it never runs draft #N (Claude's 「方案 N」 is likelier: QUOTED_EXECUTE).
 - A draft for a 老板拉的群 is sent from WeChat only by an answer quoting its notification or question (the console's
   group confirm dialog); 「不发」 needs no quote.
 - A platform action runs only by 「执行」 quoting its notification, or 「执行 12」 (the console's 批准并执行,
@@ -146,7 +150,8 @@ _STAMP = re.compile(r"^\[\d{2}-\d{2} \d{2}:\d{2}\]\s*")
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
 _VOICE = re.compile(r"^\[语音\]\s*(.*)$", re.S)
 _NUM = r"[#＃]?\s*(\d{1,9})"
-_END = r"\s*(?:。|[！!～~]+)?"        # a command's one ending: a single 「。」, or 「！!～~」 (never 「.」「…」「...」「。。」)
+_END = r"\s*[！!～~]*。?[！!～~]*"     # a command's ending: at most one 「。」 and any 「！!～~」, in either order (never
+                                      # 「.」「…」「...」「。。」)
 _SEND_N = re.compile(rf"^(?:发送|发)\s*{_NUM}{_END}$")
 _DROP_N = re.compile(rf"^不发\s*{_NUM}{_END}$")
 _EXECUTE_N = re.compile(rf"^执行\s*{_NUM}{_END}$")
@@ -155,7 +160,7 @@ _EDIT_N = re.compile(rf"^改\s*{_NUM}(?:\s*[:：]\s*|\s+)(\S.*)$", re.S)
 _EDIT_N_ONLY = re.compile(rf"^改\s*{_NUM}\s*[:：]?$")
 _EDIT = re.compile(r"^改成?(?:\s*[:：]\s*|\s+)(\S.*)$", re.S)
 _TRAILING = re.compile(r"[。.!~～]+$")
-_COMMAND_END = re.compile(r"(?:。|[！!～~]+)$")
+_COMMAND_END = re.compile(r"[！!～~]*。?[！!～~]*$")
 _EMOJI_TAG = re.compile(r"\[[^\[\]\s]{1,8}\]")
 _EMOJI = re.compile("[\\s\U0001F000-\U0001FAFF☀-➿️‍]+")
 _NOT_LETTERS = re.compile(r"[\W_]+")
@@ -176,7 +181,10 @@ VOICE_TEXT = "回草稿要打字：引用那条通知回 1 发出、2 不发，�
 REFUSE_TEXT = "这几句是一起到的，里面有好几条要交给 Mac 或者是管理命令：都没处理，请一句一句分开发"
 HELP_YES = "要发原稿：引用通知回 1；要改：写「改 + 新的话」"
 WHICH_EXECUTE = "执行哪一份？请引用那条通知回「执行」，或者回「执行 N」"
-QUOTED_ELSEWHERE = "引用的消息交不到 Claude：要交给 Claude 请不引用直接发；要执行草稿请引用那条通知回「执行」"
+QUOTED_ELSEWHERE = "引用的消息交不到 Claude：要交给 Claude 请发「cc {words}」；要执行草稿请引用那条通知回「执行」"
+QUOTED_EXECUTE = "你引用的是 Claude 的消息：要执行草稿 #{number} 请不引用回「执行 {number}」，或者引用那条通知回「执行」"
+CC_HINT = "（要交给 Claude 请在前面加 cc）"
+BARE_UNSURE = "1 / 2 后面别带「.」「…」：要发就回「1」，或者引用那条通知回 1"
 QUEUE_RETRY = "没能排进 Mac 的任务队列，平台没有动，可以再回一次「执行」"
 QUEUE_UNSURE = "排进 Mac 的任务队列时出了错，不知道排进去没有：平台上可能已经写了，先到平台后台核对，别重做；回复没有发"
 UNCERTAIN = "结果不确定，平台上可能已经写了：先到平台后台核对，别重做"
@@ -231,10 +239,11 @@ def _short(text: str) -> bool:
 
 
 def _command_word(text) -> Optional[str]:
-    """The word of an answer that can be a command (1 / 2 / 发 / 不发 / 执行 / 好的 …), or None: spaces out, then at
-    most one ending off, a single 「。」 or one or more of 「！!～~」 (decided before full-width letters become plain
-    ones), then full-width as plain and lower case (「执 行！」 is 「执行」, 「１。」 is 「1」).  Anything else at its end
-    (「.」「…」「...」「。。」: hesitating, not finished) and it is no command (None never matches a word list)."""
+    """The word of an answer that can be a command (1 / 2 / 发 / 不发 / 执行 / 好的 …), or None: spaces out, then its
+    ending off, at most one 「。」 with any number of 「！!～~」 in either order (「。」「！」「~~」「~。」「。！」; decided
+    before full-width letters become plain ones), then full-width as plain and lower case (「执 行！」 is 「执行」, 「１。」 is
+    「1」).  Anything else at its end (「.」「…」「...」「。。」: hesitating, not finished) and it is no command (None never
+    matches a word list)."""
     bare = _COMMAND_END.sub("", "".join(str(text or "").split()), count=1)
     if not bare or bare[-1] in "。.…．｡":
         return None
@@ -1016,9 +1025,10 @@ class WechatReview:
         """One line's answer: 「发 N」「不发 N」「执行 N」 for a draft told here (a single 「。」 or 「！!～~」 after the number,
         nothing else), 「改 N …」「改 N」 for one still waiting (``via_quote``: the message quotes that draft's
         notification or question; one told here and no longer waiting: what became of it); a line built around 「执行」
-        (``_execute_parts``) not quoting anything: a question (「执行了吗」「执行 N 了没」) about a draft told here, or the
-        platform drafts told here that wait or were told recently (``_status_rows``: what became of them), else, while a
-        platform draft told here waits or was the last thing said, which one?; an unnumbered 「改 …」 while a
+        (``_execute_parts``) not quoting anything: with a draft number that is no command (「执行 N 了吗」「执行 N 吧」「执行
+        N…」), what became of that draft (told here); a question without one (「执行了吗」), what became of the
+        platform drafts told here that wait or were told recently (``_status_rows``); else, while a platform draft told
+        here waits or was the last thing said, which one?; an unnumbered 「改 …」 while a
         notification is the last thing said, unless in CLAUDE_RELAY_ONLY (it is Claude's: it goes on) (which one?);
         None otherwise."""
         for pattern, action, _ in _NUMBERED:
@@ -1036,11 +1046,11 @@ class WechatReview:
         parts = None if said.quoted else _execute_parts(line)
         if parts is not None:
             number, question = parts
-            if question and number is not None:        # (「执行 12 了吗」: what became of #12, never run)
+            if number is not None:                     # (「执行 12 了吗」「执行 12 吧」「执行 12…」: what became of #12)
                 return ("execute_status", number) if self._told(number) else None
             if question:
                 return ("execute_status", None) if self._status_rows() else None
-            if number is None and self._execute_claims(last):
+            if self._execute_claims(last):
                 return ("bare_execute",)               # (「执行吧」…: never run, never Claude's while a draft waits)
         if _EDIT.match(line) and last is not None and last.number is not None and not self._relay_only:
             return ("which_edit", last.number)         # (in CLAUDE_RELAY_ONLY: Claude's)
@@ -1100,12 +1110,15 @@ class WechatReview:
             word = _command_word(rows[0])
             if word in ("1", "2"):
                 return Plan([("bare", int(word))])
+            if word is None and _word(rows[0]) in ("1", "2") and (self._bare_claims(last) or self._hint_due(last)):
+                return Plan([("bare_unsure",)])        # (「1…」「1.」: no answer, but not silence either)
         if len(rows) == 1 and said.quoted and _word(rows[0]) in ("1", "2"):
             return None                                # (quoting another message: not ours)
-        if len(rows) == 1 and said.quoted and self._relay_only:
-            parts = _execute_parts(rows[0])
-            if parts is not None and parts[0] is None:  # (the relay takes no quote in CLAUDE_RELAY_ONLY: say so)
-                return Plan([("quoted_elsewhere",)])
+        if len(rows) == 1 and said.quoted and self._relay_only and _execute_parts(rows[0]) is not None:
+            numbered = _EXECUTE_N.match(rows[0])       # (quoting Claude's words: never run, its 「方案 1」 is likelier)
+            if numbered and self._told(int(numbered.group(1))):
+                return Plan([("quoted_execute", int(numbered.group(1)))])
+            return Plan([("quoted_elsewhere", rows[0])])   # (the relay takes no quote in CLAUDE_RELAY_ONLY: say so)
         items, rest, i = [], [], 0
         while i < len(raw):
             line = raw[i].strip()
@@ -1203,13 +1216,17 @@ class WechatReview:
             claude = "（要交给 Claude 请在前面加 cc）" if self._relay_busy() else ""
             return f"要改哪一份？引用那条通知回「改 你的话」，或者回「改 {item[1]} 你的话」{claude}"
         if action == "execute_status":
-            return self._status_reply(item[1])
+            return self._for_claude(self._status_reply(item[1]))
         if action == "quoted_elsewhere":
-            return QUOTED_ELSEWHERE
+            return QUOTED_ELSEWHERE.format(words=_cut(item[1], 20))
+        if action == "quoted_execute":
+            return QUOTED_EXECUTE.format(number=item[1])
+        if action == "bare_unsure":
+            return BARE_UNSURE
         if action == "bare_execute":
             waiting = [f"#{r['packet_id']}" for r in self._store.wechat_reviews_open()
                        if r.get("tool", MESSAGE_TOOL) not in (MESSAGE_TOOL, BUYIN_TOOL)]
-            return WHICH_EXECUTE + (f"（在等的：{'、'.join(waiting[:LISTED])}）" if waiting else "")
+            return self._for_claude(WHICH_EXECUTE + (f"（在等的：{'、'.join(waiting[:LISTED])}）" if waiting else ""))
         row, packet = self._row(item[1])
         if row is None:
             return self._not_told(item[1], packet)
@@ -1225,6 +1242,10 @@ class WechatReview:
         if action == "execute":
             return self._execute(row, packet, quoted=item[2])
         return self._edit(row, packet, item[2], quoted=item[3], propose=burst)
+
+    def _for_claude(self, text: str) -> str:
+        """A reply to a 「执行」-like answer, in CLAUDE_RELAY_ONLY with how to give it to Claude instead (CC_HINT)."""
+        return text + CC_HINT if self._relay_only and text else text
 
     @staticmethod
     def _mismatch(quoted: int, number: int, verb: str) -> str:
@@ -1257,9 +1278,14 @@ class WechatReview:
         return "\n".join(lines) or "最近没有发到这里的平台草稿"
 
     def _execute_status(self, packet: dict, row: Optional[dict]) -> str:
-        """What became of a draft, in one line, for a question about 执行: waiting (and whether 「执行」 runs it from
-        here), running on the Mac, done and its result as the line told when it ends (``_outcome_text``: verified and
-        sent, not sent, uncertain, not done, a result that came late), dropped, out of date (``_stale``)."""
+        """What became of a draft, in one line, for a question about 执行, her 称呼 after its number (``_named``):
+        waiting (and whether 「执行」 runs it from here), running on the Mac, done and its result as the line told when
+        it ends (``_outcome_text``: verified and sent, not sent, uncertain, not done, a result that came late), dropped,
+        out of date (``_stale``)."""
+        return self._named(packet, self._status_line(packet, row))
+
+    def _status_line(self, packet: dict, row: Optional[dict]) -> str:
+        """``_execute_status``'s line, 「#12 …」 (before ``_named``)."""
         number, status = packet["id"], packet["status"]
         if not self._platform(packet):
             return self._closed(packet, row) or f"#{number} 没有平台动作：要发就引用那条通知回 1（或者回「发 {number}」）"
@@ -1282,6 +1308,15 @@ class WechatReview:
                                    "tool": packet.get("tool"), "platform": packet.get("platform"),
                                    "decision": "execute"})
         return told or f"#{number} 已经执行完了，回复发出去没有还在核对（发的时候机器人停了）"
+
+    def _named(self, packet: dict, line: str) -> str:
+        """``line`` (「#12 …」) with her 称呼 right after the number, 「#12（小美）…」 (a labelled 微信号, a phone number
+        masked; in brackets: never the head of a notification or a question, which a bare 1 could answer)."""
+        head = f"#{packet['id']} "
+        if not line.startswith(head):
+            return line
+        name = _cut(contact.mask_contacts((self._store.party(packet["party_id"]) or {}).get("name") or "她"), 20)
+        return f"#{packet['id']}（{name}）{line[len(head):]}"
 
     def _execution_of(self, packet: dict) -> dict:
         return self._json(packet.get("platform")).get("execution") or {}
@@ -1310,7 +1345,7 @@ class WechatReview:
             asked_for = parts[0]
             if asked_for is not None and asked_for != number:
                 return self._mismatch(number, asked_for, "执行")
-            return self._execute_status(packet, row)
+            return self._for_claude(self._execute_status(packet, row))
         closed = self._closed(packet, row)
         if closed:
             return closed
@@ -1331,8 +1366,8 @@ class WechatReview:
             return f"#{number} 要改成什么？引用通知回「改 你的话」，或者回「改 {number} 你的话」"
         if self._platform(packet):
             return self._platform_hint(packet)
-        if _not_words(text) or _yes_like(text) or _short(text):
-            return self._help(packet, head)
+        if _not_words(text) or _yes_like(text) or _short(text) or not _letters(text):
+            return self._help(packet, head)                # (「👍…」「[强]。。」「…」「？」: no words for her)
         return self._propose(row, packet, text.strip())
 
     def _seen_after(self, last: _Last, written: float) -> bool:
@@ -1495,7 +1530,7 @@ class WechatReview:
         number = packet["id"]
         if self._platform(packet):
             return self._platform_edit_refused(packet)
-        if _not_words(text):
+        if _not_words(text) or not _letters(text):        # (emoji and punctuation only: no words for her)
             return self._help(packet)
         problem = self._check(packet, text) if self._check is not None else ""
         if problem:
