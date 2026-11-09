@@ -840,13 +840,16 @@ class PrmStore:
 
     def outcomes(self, deal_id: int, limit: int = 6) -> list[dict]:
         """A deal's latest drafts a person (or a gate) decided on, newest first: sent (as drafted
-        or edited), not sent (dropped), failed.  What the creator really got from us in WeChat: a 百应
+        or edited), not sent (dropped), failed; a failed one also when nobody decided it (2026-11-09: a draft a gate
+        approved, failed as its group closed, has no ``decided_at``: the gate's count, ``reviewed``, never takes it; the
+        Mac hears it did not go out all the same).  What the creator really got from us in WeChat: a 百应
         private-message draft (``BUYIN_TOOL``, sent there by hand) is none of it."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM action_packets WHERE deal_id = ? AND status IN (?, ?, ?) AND decided_at IS NOT NULL"
+                "SELECT * FROM action_packets WHERE deal_id = ? AND status IN (?, ?, ?)"
+                " AND (decided_at IS NOT NULL OR (status = ? AND sent_at IS NOT NULL))"
                 " AND tool != ? ORDER BY COALESCE(sent_at, decided_at) DESC, id DESC LIMIT ?",
-                (deal_id, SENT, DROPPED, FAILED, BUYIN_TOOL, int(limit)),
+                (deal_id, SENT, DROPPED, FAILED, FAILED, BUYIN_TOOL, int(limit)),
             ).fetchall()
         return [packet_view(dict(r)) for r in rows]
 

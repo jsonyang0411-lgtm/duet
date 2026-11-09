@@ -116,6 +116,7 @@ from ..send.bubbles import typing_delay
 from ..wechat.new_friends import FILLER, is_friend_notice, is_person_chat
 from . import contact, deals, gates, pii, platforms, retention
 from .boss_groups import (BOSS as BOSS_WHO, CHANNEL as GROUP_CHANNEL, EVENT as BOSS_EVENT, GONE as BOSS_GONE,
+                          GONE_WHY as BOSS_GONE_WHY,
                           HER as GROUP_HER, LINES_KEPT as GROUP_LINES_KEPT, LINKED as BOSS_LINKED, MEMBER as GROUP_MEMBER,
                           OPENING_HOW as BOSS_OPENING, RECORD_LINE_CHARS, US as GROUP_US, BossGroups, told_lines)
 from .friend_adds import OPEN as FRIEND_ADD_OPEN, STATES as FRIEND_ADD_STATES, FriendAdds, friend_adds_out
@@ -1801,8 +1802,10 @@ class PrmService:
             # place is whoever wrote that line, else none that names a boss or another member we know; in a group linked
             # by hand a name we do not know only when she wrote there within HER_RECALL_SEC)
             recalled = self.boss_groups.sender_of(chat_id, msg.get("recalled_id")) if msg.get("recalled_id") else ""
+            # (her last line there, ``last_by_chat``, is on WeChat's clock: so is the recall's, ``written``; with
+            # none, now on WeChat's clock: this PC's minus the skew measured, final check 2026-11-09)
             her_last = float((self._store.deal_of(party["id"], now).get("last_by_chat") or {}).get(chat_id) or 0)
-            recent = bool(her_last) and (self._local(written) if written else now) - her_last <= HER_RECALL_SEC
+            recent = bool(her_last) and (written or now - self._skew) - her_last <= HER_RECALL_SEC
             if line is not None and (edge_text.recall_by(line) == "us"
                                      or self.boss_groups.recall_is_hers(row, party, line, sender=recalled,
                                                                         recent=recent)):
@@ -1975,18 +1978,20 @@ class PrmService:
             self._store.set_notice(packet["deal_id"], f"platform:{packet['id']}", f"#{packet['id']} {error}", now)
         return True
 
-    def _closed_result(self, job: dict, meta: dict, packet_id: int) -> bool:
+    def _closed_result(self, job: dict, meta: dict, packet_id: int, unanswered: bool = True) -> bool:
         """``on_result``: the draft of a job whose group closed for her meanwhile (``_group_closed``) failed, and it
         answers nothing (review 2026-11-09: it saw to her notices, a 签收后问一句's, and merged its slots and stage into
         her deal): as a job that gave no draft (``_group_job_closed``: what it was told goes on, her lines stay that
-        group's), nothing else of the deal changes."""
+        group's), nothing else of the deal changes.  Also one not to be sent anyway (superseded; ``unanswered`` False:
+        no reply needed, her lines are none to count)."""
         what = "开专属佣金这一步的草稿" if meta.get("system_note") else "的草稿"
-        self._group_job_closed(job, meta, f"#{job['id']} {what}写好时{GROUP_CLOSED_HEAD}，没发", self._clock())
+        self._group_job_closed(job, meta, f"#{job['id']} {what}写好时{GROUP_CLOSED_HEAD}，没发", self._clock(),
+                               unanswered=unanswered)
         logger.info("PRM: job #%d -> packet %d for a group not drafted in for her any more; not sent", job["id"],
                     packet_id)
         return True
 
-    def _group_job_closed(self, job: dict, meta: dict, head: str, now: float) -> None:
+    def _group_job_closed(self, job: dict, meta: dict, head: str, now: float, unanswered: bool = True) -> None:
         """A draft job of a group whose link ended (cancelled in the queue: ``_close_group``; or back after it:
         ``_closed_result``), as a job that gave no draft (``_draft_failed``), but for her lines (second check
         2026-11-09: they were answered in her private chat): lines she wrote in a group are never carried into a draft
@@ -1995,17 +2000,22 @@ class PrmService:
         reply job takes them, ``take_backlog``) and how they came (``late`` / ``missed`` / ``new_friend``), on a notice
         of records only (``job`` None: her private chat's next job takes it).  The notices it carried go (their lines
         and records are its own).  A 专属佣金 step: its notice, the chain looked at again.  A job with none of her lines
-        and no records (a 开场白, a 补发货盘, a 签收后问一句) leaves nothing."""
+        and no records (a 开场白, a 补发货盘, a 签收后问一句) leaves nothing.  Said once for a job (lost first, then failed
+        or back: its lines counted once, as ``_draft_failed``; final check 2026-11-09).  ``unanswered`` False: her
+        lines are not counted (the Mac found no reply needed)."""
         deal_id, party_id, job_id = int(meta["deal_id"]), int(meta["party_id"]), int(job["id"])
         if meta.get("system_note"):
             self._draft_failed(job, meta, head, gap_notes(meta), now)
             self._chain_refresh(deal_id, now)
             return
-        lines = [line for line in self._job_lines(job).split("\n") if line.strip()]
+        lines = [line for line in self._job_lines(job).split("\n") if line.strip()] if unanswered else []
         taken = not any(isinstance(meta.get(k), dict) for k in (OPENING, HUOPAN, SIGNED))
         history = [h for h in meta.get("history") or [] if isinstance(h, dict)] if taken else []
         gap = {k: meta[k] for k in ("late", "missed", "new_friend") if isinstance(meta.get(k), dict)} if taken else {}
         with self._handle_lock:                        # (``_submit`` takes these notices along)
+            if any(int(ev["detail"].get("job") or 0) == job_id
+                   for ev in self._store.events(deal_id, limit=50, kinds=("draft_failed",))):
+                return                                 # (said once: lost first, then failed or back)
             self._store.drop_notices(deal_id, lambda n: n.get("into") == job_id, now)
             if lines:
                 self._note_group_left(deal_id, str(job["chat_id"]), len(lines), now)
@@ -2013,19 +2023,23 @@ class PrmService:
                 self._store.set_notice(deal_id, f"failed:{job_id}", failed_text(head, lines=False), now, job=None,
                                        lane=LANE_REPLY, head=head, lines="", gap=gap, history=history,
                                        asked_at=float(job.get("created_at") or now))
-        if lines or history:
-            self._store.add_event(deal_id, party_id, "draft_failed", {"job": job_id, "why": head[:200]},
-                                  actor="system", now=now)
+            if lines or history:
+                self._store.add_event(deal_id, party_id, "draft_failed", {"job": job_id, "why": head[:200]},
+                                      actor="system", now=now)
 
     def _note_group_left(self, deal_id: int, chat: str, count: int, now: float) -> None:
         """Her ``count`` lines in this group got no reply before its link ended: the deal's notice (``GROUP_LEFT``) says
-        how many wait there, all of them so far (until 「已处理」, ``group_left_done``, or her next line there)."""
+        how many wait there, all of them so far (until 「已处理」, ``group_left_done``, or her next line there); after
+        「群已经不在了」 (the row's ``why``) not 「请到群里直接回」."""
         key = f"{GROUP_LEFT}{chat}"
         have = next((n for n in (self._store.deal(deal_id) or {}).get("notices") or [] if n.get("key") == key), None)
         total = int((have or {}).get("count") or 0) + int(count)
-        name = str((self._store.boss_group(chat) or {}).get("name") or "") or "（没有群名）"
-        self._store.set_notice(deal_id, key, f"她在群「{name}」里还有 {total} 句话没回（{GROUP_CLOSED_HEAD}），"
-                                             "要回的话请到群里直接回", now, count=total, chat=chat)
+        row = self._store.boss_group(chat) or {}
+        name = str(row.get("name") or "") or "（没有群名）"
+        gone = row.get("state") == BOSS_GONE and row.get("why") == BOSS_GONE_WHY     # (「群已经不在了」: no group to answer in)
+        self._store.set_notice(deal_id, key, f"她在群「{name}」里还有 {total} 句话没回（"
+                               + ("群已经不在了），需要的话请在微信里找她" if gone else
+                                  f"{GROUP_CLOSED_HEAD}），要回的话请到群里直接回"), now, count=total, chat=chat)
 
     def _left_lines(self, deal_id: int, chat: str, party: dict, now: float) -> int:
         """``_close_group``: the notices of this group's jobs that gave no draft before (``_draft_failed``) keep her
@@ -3369,6 +3383,11 @@ class PrmService:
         if self._group_closed(job["chat_id"], party_id) == GROUP_CLOSED_TEXT and state in (PENDING, APPROVED):
             self._fail_closed(self._store.packet(packet_id), GROUP_CLOSED_TEXT, now)
             return self._closed_result(job, meta, packet_id)
+        if (self._group_closed(job["chat_id"], party_id) == GROUP_CLOSED_TEXT and lane == LANE_REPLY
+                and state in (SUPERSEDED, NO_REPLY)):
+            # (not to be sent anyway: it answers nothing all the same, final check 2026-11-09; no reply needed: her
+            # lines are none to count)
+            return self._closed_result(job, meta, packet_id, unanswered=state == SUPERSEDED)
         if state == DROPPED:
             self._store.set_outcome(packet_id, "covered")
             self._store.add_event(deal_id, party_id, "commission_covered", {

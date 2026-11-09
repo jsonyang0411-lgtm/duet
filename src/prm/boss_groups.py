@@ -1400,7 +1400,7 @@ class BossGroups:
         chat = row["chat"]
         manual = bool(row.get("manual"))
         if not self._store.update_boss_group(chat, now, states=(LINKED,), state=GONE,
-                                             why=MANUAL_GONE_WHY if manual or stopped else GONE_WHY, opening_due=None):
+                                             why=MANUAL_GONE_WHY if stopped else GONE_WHY, opening_due=None):
             return False
         self._linked = {k: v for k, v in self._linked.items() if k != chat}
         self._manual = self._manual - {chat}

@@ -1552,6 +1552,127 @@ def test_the_cap_is_one_waiting_drafts_an_operators_decision_starts_it_again(bot
     assert GROUP not in bot.prm._auto_redrafts and GROUP not in bot.prm._lines_since
 
 
+# ── the final check (2026-11-09, after 00e9cac) ────────────────────────────
+
+@pytest.mark.parametrize("skew", [3 * 3600, -3 * 3600])
+@pytest.mark.parametrize("later", [0, 600])
+def test_the_recall_window_reads_both_times_on_wechats_clock(clock, tmp_path, skew, later):
+    """Her last line there is on WeChat's clock, the recall was compared on this PC's: with the clock 3 hours off, her
+    recall right after her line was missed (or one ten minutes after it taken for hers)."""
+    b = setup(clock, tmp_path)
+    linked(b, member=1)
+    b.prm._skew = float(skew)                                         # (this PC minus WeChat, as measured)
+    wechat = lambda: b.clock.now - skew                               # noqa: E731  (WeChat's clock)
+    b.prm.handle(gmsg(b, "在吗", ts=wechat()))
+    _, packet = drafted(b)
+    b.clock.now += later
+    b.prm.handle(recall(b, "美美呀", ts=wechat()))                    # (a name we do not know: her group nickname?)
+    assert held(b, packet) is (later == 0)
+    b.prm.stop()
+    b.relay.stop()
+
+
+@pytest.mark.parametrize("how", ["gate", "night"])
+def test_the_mac_hears_a_draft_the_bot_approved_did_not_go_out_as_its_group_closed(clock, tmp_path, how):
+    """Its ``decided_at`` cleared (no person decided it: not in the gate's count), the Mac was not told any more that
+    it did not go out (``outcomes``)."""
+    b = setup(clock, tmp_path, **({"prm_night_auto_hours": "14:00-15:00"} if how == "night" else {}))
+    if how == "gate":
+        b.prm.store.set_gate("faq", "auto", clock.now)
+    linked(b, member=1)
+    b.prm.handle(gmsg(b, "寄样怎么弄"))
+    job = job_of(b)
+    b.clock.now += SETTLE_SEC + 1
+    assert b.relay.next_job(0, ("prm",))["id"] == job["id"]
+    b.say(f"不接群 {GROUP_NAME}")
+    b.finish(job["id"], draft(message_kind="faq", reply_draft="寄样的话您发一下地址～", slots={}, stage_proposal="",
+                              reason="kb/合作政策.md"))
+    packet = b.prm.store.packet_for_job(job["id"])
+    assert (packet["status"], packet["decided_at"]) == ("failed", None)
+    assert packet["id"] not in [r["id"] for r in b.prm.store.reviewed("faq", 0, 50)]
+    b.clock.now += 5
+    b.prm.handle(b.msg("私聊：在吗"))
+    sent = json.loads(job_of(b, CREATOR)["meta"])["sent"]
+    assert [(s["what"], s["text"]) for s in sent] == [("failed", "寄样的话您发一下地址～")]
+    b.prm.stop()
+    b.relay.stop()
+
+
+@pytest.mark.parametrize("order", ["lost_then_unlink", "unlink_then_lost"])
+@pytest.mark.parametrize("back", ["done", "failed"])
+def test_a_group_job_lost_and_back_across_the_unlink_counts_her_line_once(clock, tmp_path, order, back):
+    """Lost, the link ended, the Mac back (with a draft, or failed): her one line was counted twice."""
+    b = setup(clock, tmp_path)
+    linked(b, member=1)
+    deal_id = b.prm.store.boss_group(GROUP)["deal_id"]
+    b.prm.handle(gmsg(b, "寄样怎么弄"))
+    job = job_of(b)
+    b.clock.now += SETTLE_SEC + 1
+    assert b.relay.next_job(0, ("prm",))["id"] == job["id"]
+    if order == "unlink_then_lost":
+        b.say(f"不接群 {GROUP_NAME}")
+    b.clock.now += 1000
+    b.relay.tick()                                                    # (the Mac went silent: lost)
+    if order == "lost_then_unlink":
+        b.say(f"不接群 {GROUP_NAME}")
+    b.relay.heartbeat(job["id"])                                      # (it is back)
+    if back == "done":
+        b.finish(job["id"], draft(message_kind="faq", reply_draft="在的", slots={}, stage_proposal="",
+                                  reason="kb/合作政策.md"))
+    else:
+        b.finish(job["id"], ok=False, text="出错了")
+    [left] = [n for n in b.prm.store.deal(deal_id)["notices"] if n["key"] == f"group_left:{GROUP}"]
+    assert left["count"] == 1 and "还有 1 句话没回" in left["text"]
+    b.prm.stop()
+    b.relay.stop()
+
+
+def test_after_the_group_gone_the_notice_does_not_say_to_answer_in_the_group(bot):
+    """「群已经不在了」: there is no group to answer her in (not 「请到群里直接回」); 「不接群」 says it as before."""
+    party = bot.prm.register(CREATOR, "小美", "测试")
+    deal = bot.prm.store.deal_of(party["id"])
+    bot.backend.groups[OURS] = {"name": "品牌测试×小美", "members": [ME, BOSS_ID, CREATOR]}
+    bot.backend.active[OURS] = bot.clock.now - 10
+    bot.prm.store.update_deal(deal["id"], bot.clock.now, three_party={"state": "created", "at": bot.clock.now - 86400,
+                                                                      "by": "console", "chat": OURS,
+                                                                      "name": "品牌测试×小美", "members": 3})
+    bot.say("接群")
+    bot.say("接群 1")
+    bot.say("是 1")
+    bot.prm.handle(gmsg(bot, "什么时候寄呀", chat=OURS))
+    assert bot.prm.deal_action("group_none", {"deal_id": deal["id"]})["ok"] is True
+    row = bot.prm.store.boss_group(OURS)
+    assert (row["state"], row["why"]) == ("gone", bg.GONE_WHY)
+    [left] = [n for n in bot.prm.store.deal(deal["id"])["notices"] if n["key"] == f"group_left:{OURS}"]
+    assert left["text"] == "她在群「品牌测试×小美」里还有 1 句话没回（群已经不在了），需要的话请在微信里找她"
+
+
+@pytest.mark.parametrize("state", ["no_reply", "superseded"])
+def test_a_closed_groups_draft_not_to_be_sent_anyway_answers_nothing_either(bot, state):
+    """Back after the unlink with nothing to say (no reply needed), or out of date (a person has her deal): it still
+    merged its slots and stage into her deal and saw to her notices."""
+    linked(bot, member=1)
+    deal_id = bot.prm.store.boss_group(GROUP)["deal_id"]
+    store = bot.prm.store
+    store.set_notice(deal_id, "failed:999", "聚水潭显示签收后问她一句的草稿没写成", bot.clock.now, job=999, lane="reply",
+                     signed=True, asked_at=bot.clock.now)
+    bot.prm.handle(gmsg(bot, "好的收到"))
+    job = job_of(bot)
+    bot.clock.now += SETTLE_SEC + 1
+    assert bot.relay.next_job(0, ("prm",))["id"] == job["id"]
+    bot.say(f"不接群 {GROUP_NAME}")
+    if state == "superseded":
+        store.update_deal(deal_id, bot.clock.now, mode="human", mode_until=bot.clock.now + 3600)
+    bot.finish(job["id"], draft(message_kind="faq", reply_draft="" if state == "no_reply" else "好的～",
+                                slots={"收件人": "小美"}, stage_proposal="address", reason="kb/合作政策.md"))
+    assert store.packet_for_job(job["id"])["status"] == state
+    deal = store.deal(deal_id)
+    assert any(n["key"] == "failed:999" for n in deal["notices"])
+    assert not deal["slots"] and not deal["stage_proposal"]
+    left = [n for n in deal["notices"] if n["key"] == f"group_left:{GROUP}"]
+    assert [n["count"] for n in left] == ([] if state == "no_reply" else [1])   # (no reply needed: none to count)
+
+
 # ── logs ─────────────────────────────────────────────────────────────────────
 
 def test_the_logs_have_no_names_and_no_lines(bot, caplog):
