@@ -136,7 +136,8 @@ export function bossGroupsLine(bg) {
 
 export const MODE_TAGS = { copilot: 'cy', human: 'warn', paused: 'off' }
 /** Who did it (deal_events.actor). */
-export const ACTORS = { console: '控制台', system: '系统', operator: '运营（微信里）', creator: '达人', mac: 'Mac' }
+export const ACTORS = { console: '控制台', system: '系统', operator: '运营（微信里）', creator: '达人', mac: 'Mac',
+  admin: '管理员（微信里）' }
 
 /** One audit line: "改阶段 意向沟通 → 已寄出" etc. */
 export function eventText(ev, stages = {}, modes = {}, shipmentStates = {}) {

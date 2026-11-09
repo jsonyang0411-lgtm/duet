@@ -163,12 +163,14 @@ function AutoModeBar({ d, onDone }) {
   )
 }
 
-/** 老板拉的群 (PRM_BOSS_GROUPS): a draft of her line in the group the boss made with her and us goes out in that group. */
+/** 老板拉的群 (PRM_BOSS_GROUPS): a draft of her line in the group the boss made with her and us goes out in that group; one
+ *  the admin linked by hand (``group_manual``, 接手任何合作群) need have no boss in it. */
 function GroupTag({ p }) {
   if (!inGroup(p)) return null
   return (
-    <span className="tag warn prm-group-tag" title={`发在老板拉的群「${p.group_name || ''}」里（不是她的私聊），老板也看得到`}>
-      <UsersThree /><span className="prm-group-name">群里 · {p.group_name || '老板拉的群'}</span>
+    <span className="tag warn prm-group-tag" title={p.group_manual ? `发在群「${p.group_name || ''}」里（不是她的私聊），群里的人都看得到`
+      : `发在老板拉的群「${p.group_name || ''}」里（不是她的私聊），老板也看得到`}>
+      <UsersThree /><span className="prm-group-name">群里 · {p.group_name || (p.group_manual ? '手动接的群' : '老板拉的群')}</span>
     </span>
   )
 }
@@ -419,7 +421,8 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
       {sending && (
         <Confirm title={`#${p.id} 发到群里？`} confirmLabel="发到群里" cancelLabel="再想想" busy={busy}
           onConfirm={() => act(sending.action, sending.text)} onCancel={() => setSending(null)}>
-          这条回复会发在老板拉的群「{p.group_name || '（没有群名）'}」里，不是她的私聊：老板和群里的人都看得到。{parts > 1 ? `会分 ${parts} 条发。` : ''}
+          {p.group_manual ? `这条回复会发在群「${p.group_name || '（没有群名）'}」里，不是她的私聊：群里的人都看得到。`
+            : `这条回复会发在老板拉的群「${p.group_name || '（没有群名）'}」里，不是她的私聊：老板和群里的人都看得到。`}{parts > 1 ? `会分 ${parts} 条发。` : ''}
         </Confirm>
       )}
       {executing !== null && pf && (
@@ -430,7 +433,8 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
             {pf.caveat && <div className="f-err">{pf.caveat}</div>}
             {pf.params.map((x) => <div key={x.label} className="f-hint">{x.label}：<span className="mono">{x.value}</span></div>)}
             <div>只执行一次，不会自动重试；平台读回核验成功（VERIFIED_SUCCESS）才把回复发给达人，否则不发，并在这一页上方标红。</div>
-            {group && <div>回复发在老板拉的群「{p.group_name || '（没有群名）'}」里，不是她的私聊：老板和群里的人都看得到。</div>}
+            {group && <div>{p.group_manual ? `回复发在群「${p.group_name || '（没有群名）'}」里，不是她的私聊：群里的人都看得到。`
+              : `回复发在老板拉的群「${p.group_name || '（没有群名）'}」里，不是她的私聊：老板和群里的人都看得到。`}</div>}
           </div>
         </Confirm>
       )}
@@ -560,7 +564,7 @@ function RecentCard({ d, onDone }) {
                 <tr key={p.id}>
                   <td className="num">#{p.id}</td>
                   <td>{p.party_name}</td>
-                  <td title={inGroup(p) ? `发在老板拉的群「${p.group_name || ''}」里` : undefined}>
+                  <td title={inGroup(p) ? `发在${p.group_manual ? '群' : '老板拉的群'}「${p.group_name || ''}」里` : undefined}>
                     {buyin ? `百应私信 · ${p.kind_label}` : inGroup(p) ? `群里 · ${p.kind_label}` : p.kind_label}
                   </td>
                   <td>

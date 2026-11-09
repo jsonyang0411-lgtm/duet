@@ -1097,9 +1097,10 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
 
     def linked_groups(deal: dict) -> dict:
         """接手任何合作群: the groups linked by hand to this deal that are not its 三方群 (that one says so itself):
-        ``{"linked_groups": [{name, at}]}``, or nothing at all."""
+        ``{"linked_groups": [{chat, name, at}]}`` (``chat``: for the console's 「不接了」, ``group_unlink``), or nothing at
+        all."""
         mine = (deal.get("three_party") or {}).get("chat")
-        groups = [{"name": g["name"], "at": g["at"]} for g in by_hand.get(int(deal["id"]), []) if g["chat"] != mine]
+        groups = [dict(g) for g in by_hand.get(int(deal["id"]), []) if g["chat"] != mine]
         return {"linked_groups": groups} if groups else {}
 
     return {

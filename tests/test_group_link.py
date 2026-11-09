@@ -253,7 +253,8 @@ def test_shi_n_registers_her_and_links_the_group_whatever_prm_boss_groups_says(b
     # no boss in it: no 三方群 (kb 第 0.5 节); the deal lists the group (「拉三方群」 still makes her one)
     assert deal["three_party"] == {} and bot.prm.three_party.job_meta(deal) is None
     shown = bot.prm.snapshot()["parties"][0]["deal"]
-    assert shown["linked_groups"] == [{"name": GROUP_NAME, "at": bot.clock.now}] and shown["three_party"] == {}
+    assert shown["linked_groups"] == [{"chat": GROUP, "name": GROUP_NAME, "at": bot.clock.now}]
+    assert shown["three_party"] == {}
     assert bot.prm.is_party_group(GROUP) and GROUP in bot.backend.watched
     assert names(bot, deal["id"]) == [f"手动接的群（{GROUP_NAME}）"]
     assert job_of(bot) is None                                        # no 开场白: the talk is going on
@@ -648,7 +649,7 @@ def test_a_deal_with_its_own_three_party_group_keeps_it_when_another_group_is_li
     assert bot.prm.store.deal(deal["id"])["three_party"] == made
     assert f"手动接的群（{GROUP_NAME}），她原来的三方群保留" in names(bot, deal["id"])
     shown = next(p for p in bot.prm.snapshot()["parties"] if p["id"] == party["id"])["deal"]
-    assert shown["linked_groups"] == [{"name": GROUP_NAME, "at": bot.clock.now}]
+    assert shown["linked_groups"] == [{"chat": GROUP, "name": GROUP_NAME, "at": bot.clock.now}]
     other = bot.prm.register(TESTER, "测试达人二号", "")
     assert "linked_groups" not in next(p for p in bot.prm.snapshot()["parties"] if p["id"] == other["id"])["deal"]
 
