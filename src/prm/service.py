@@ -1357,10 +1357,12 @@ class PrmService:
         self._pause = pause if pause is not None else self._stopping.wait
         self._thread: Optional[threading.Thread] = None
         # 微信里审批草稿 (PRM_WECHAT_REVIEW, default off; src/prm/wechat_review.py): the drafts waiting for a person told to
-        # the admin's private chat (the sender thread, ``tick``)
+        # the admin's private chat (the sender thread, ``tick``), the admin's answers there (the route step wechat_review)
         self.wechat_review = WechatReview(
-            self._store, config, clock=clock, send=send, lines=self._packet_lines,
-            parts=lambda text: len(reply_parts(text, self._reply_parts)), opening_auto=self._opening_auto_sec > 0)
+            self._store, config, clock=clock, send=send, decide=self.decide, check=self.edit_problem,
+            lines=self._packet_lines, parts=lambda text: len(reply_parts(text, self._reply_parts)),
+            drafting=lambda chat: relay.store.latest_open(chat, drafts_only=True, system=False) is not None,
+            local=self._local, opening_auto=self._opening_auto_sec > 0)
         relay.register_kind(PRM, self.on_result)
 
     @property
@@ -3911,17 +3913,9 @@ class PrmService:
         if packet.get("tool", MESSAGE_TOOL) != MESSAGE_TOOL:
             return {"ok": False, "error": "这条草稿带平台动作：要点「批准并执行」，平台上核验成功后才会发给达人"}
         final = packet["text"] if action == "send" else str(text if text is not None else "").strip()
-        if len(final) > MAX_DRAFT_CHARS:
-            return {"ok": False, "error": f"最多 {MAX_DRAFT_CHARS} 个字"}
-        if not final and not packet["attachments"]:
-            return {"ok": False, "error": "没有要发的内容"}
-        unknown = pii.unknown_tokens(final, self._store.tokens(packet["party_id"]))
-        if unknown:
-            return {"ok": False, "error": f"草稿里有对不上的占位符：{'、'.join(unknown)}"}
-        if packet["kind"] == "shipping_notice":
-            waybill = self._waybill(packet)
-            if not gates.waybill_ok(final, waybill, _more_waybills(packet)):
-                return {"ok": False, "error": f"发货通知里的单号和系统记录对不上（系统记录：{waybill or '还没有运单号'}）"}
+        problem = self.edit_problem(packet, final)
+        if problem:
+            return {"ok": False, "error": problem}
         if self._send is None:
             return {"ok": False, "error": "机器人没有连着微信，现在不能发送"}
         if packet["attachments"] and self._send_file is None:
@@ -3933,6 +3927,23 @@ class PrmService:
         self._chain_decided(packet, now)
         self._wake.set()
         return {"ok": True, "status": APPROVED}
+
+    def edit_problem(self, packet: dict, text: str) -> str:
+        """Why ``text`` cannot go out as this draft ("" when it can): longer than MAX_DRAFT_CHARS, nothing to send, a
+        placeholder she has no number for, a shipping notice whose waybill is not the system's.  ``decide``'s checks of
+        what is sent (the console's 改了再发), and 微信里审批草稿's of a proposed edit (src/prm/wechat_review.py)."""
+        if len(text) > MAX_DRAFT_CHARS:
+            return f"最多 {MAX_DRAFT_CHARS} 个字"
+        if not text and not packet["attachments"]:
+            return "没有要发的内容"
+        unknown = pii.unknown_tokens(text, self._store.tokens(packet["party_id"]))
+        if unknown:
+            return f"草稿里有对不上的占位符：{'、'.join(unknown)}"
+        if packet["kind"] == "shipping_notice":
+            waybill = self._waybill(packet)
+            if not gates.waybill_ok(text, waybill, _more_waybills(packet)):
+                return f"发货通知里的单号和系统记录对不上（系统记录：{waybill or '还没有运单号'}）"
+        return ""
 
     def _packet_lines(self, packet: dict) -> str:
         """Her lines a draft answers (微信里审批草稿's notification): its job's text and follow-ups (``_job_lines``); ""
@@ -6186,7 +6197,7 @@ class PrmService:
         if boss_chats:                                 # 老板拉的群: the names in its row and record, its lines kept
             counts["boss_groups"] = self.boss_groups.purge(deal)
         counts["drafts"] = self._store.rewrite_packets(deal["id"], rewrite)
-        # 微信里审批草稿: the rows of her drafts told to the admin, with her drafts
+        # 微信里审批草稿: the rows of her drafts told to the admin (what the admin wrote for them), with her drafts
         counts["wechat_reviews"] = self._store.purge_wechat_reviews(deal["id"], rewrite, now)
         counts["events"] = self._store.rewrite_events(deal["id"], rewrite)
         counts["notices"] = self._store.rewrite_notices(deal["id"], rewrite)

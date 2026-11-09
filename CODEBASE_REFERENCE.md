@@ -2,7 +2,7 @@
 
 > 商务微信号的网关（Claude 中转、达人副驾驶 / 微信边缘、管理员账号命令）— 完整代码架构与 API 参考文档
 > 生成日期: 2026-06-11
-> 最后更新: 2026-11-09（微信里审批草稿（`PRM_WECHAT_REVIEW`，默认关，功能 W）：等人审的草稿也发一条到管理员（`ADMIN_WXID`）的微信私聊，编号在最前（「#12 草稿 · 名字 · 私聊 / 群里「群名」」），只发一次（新表 `wechat_reviews`），发不出去 10 秒起翻倍再试；门槛 / 下班时段 / 自动模式自动发的、开场白到点自动发的、百应私信不发；`src/prm/wechat_review.py`、`tests/test_prm_wechat_review.py`）；2026-11-07（签收后问一句（`PRM_SIGNED_HELLO`，默认关）：聚水潭同步看到寄样单签收、她还没说收到，派一份没有她的话的草稿任务（`meta.signed`，worker `signed_line`，kb 场景 D2「聚水潭显示签收」），只在 `PRM_SIGNED_HELLO_HOURS` 里问、每张单一次（新表 `signed_hellos`），草稿白天一律先审（门槛自动了也一样，`SIGNED_DAY_NOTE`），下班时段 / 自动模式按夜里的规矩判；`tests/test_prm_signed_hello.py`）；2026-11-06（转发的「聊天记录」：后端读出合并转发（appmsg type 19）里的每一句（`src/wechat/chat_record.py` `parse` → `special.record`），边缘和草稿任务的那一行写成「[聊天记录：标题] 小美：想要白色；老板测试：好的」（`edge.text.record_line`，最多 1000 字，`content` 照旧是「[文件]」、路由不变：聊天记录从不是 cc、命令、「同意好友」）；老板拉的群、她的三方群、老板介绍的达人那里，记录里的人写成 老板 / 她 / 我们 / 甲乙…、不带标题（`BossGroups.record_msg`），老板的名字不出这台电脑；群里留的、三方群记的、Mac 提示里的聊天记录那一行最多 1000 多字，别的照旧 300 字）；2026-11-04（发得慢一点：`PRM_SEND_PACE` 默认开，一份回复的字之间按字数停 2–5 秒、字发完停 3–6 秒再发图、图之间 2–4 秒，`PrmService._send_pause`）；2026-11-04（补发货盘：控制台合作单的「补发货盘」派一份补发货盘的草稿任务（`meta.huopan`，Mac 的 `huopan_line`），草稿附货盘图（商务、助理再加 Excel）、一律先审、不发稍等）；2026-11-04（达人邀约：`rules.categories` 清单要哪几类，默认三类，用户先不要专场型）；2026-11-02（「发起群聊」的菜单项：微信 4.1 的（+）菜单每项前面的图标 OCR 读成一两个字（「0发起群聊」「&+添加朋友」，真机「先试一下」什么都没点），`_menu_item` 去掉第一个汉字前面一到三个不是汉字的字再比，`_MENU_ICON`）；2026-11-02（三方群里的话：她的三方群（「拉三方群」建的）建好以后只读（`ThreeParty.watch_all` / `_watch`、`deal_of_chat`），群里每一句（她、老板、群里的人、我们）记在合作单上（`GROUP_LINE` 事件，打码、老板的名字换成 PRM_BOSS_CALL），她私聊的每份草稿任务带最近 20 句（`meta.three_party_chat`，worker `three_party_chat_block`），老板拉的群的话也一样；路由日志「[她的三方群（只读），内容不记录]」；合作单的 `three_party.reading`）；2026-11-02（开场白没人处理就自动发 `PRM_OPENING_AUTO_MIN`（默认 0 = 关：`_opening_auto`、`send_due_openings`、`route=opening`、worker `opening_auto_line`）；同一张图 7 天内不重复发（`_repeated_files`、`meta.sent` 的 `files`、worker `_sent_files`）；她只回「好滴」这类不发「稍等」（`ack_only`））；2026-11-02（邀约批量：粉丝客单价的门槛 `rules.fans_price_min`（默认 0 不看；粉丝画像里占比最大的那一档的下限低于它的不进，画像里没有的标「粉丝客单价不知道」），`fans_price` / `fans_crowd`，清单多「粉丝客单价」「粉丝人群」两列）；2026-11-02（「写开场白」也给说过话、但我们从没正式回过的达人（她只说过加好友时的「我是…」，那份草稿没发，最多机器人自动回过「稍等」）：`PrmStore.has_answer`、`_no_opening`、`meta.opening.wrote`、控制台合作单的 `unanswered`、worker `OPENING_WROTE`）；2026-11-02（邀约批量：每一类里已经在卖帽子的排到最后、再按标记少的在前，`_both_routes`；每周上限的测试改成按真实时间算下周一，不再随运行日期失效）；2026-11-02（中转：Mac 上做 cc 任务和写草稿的两个 worker 轮流来取任务，以前机器人只记最后来的那个能做什么，「待审批」页时不时误报「Mac 还没表示能写草稿」；现在每一类各记最后一次听到的时间（来取这一类、交这一类任务的心跳或结果），180 秒内听到过就算 Mac 在做，`KINDS_WINDOW_SEC`、`ClaudeRelay.worker_kinds()`）；2026-10-31（老板拉的群：老板拉了有他、达人和这个号的小群，机器人接手这位达人（群里除了我们和老板恰好一个人时自己接手，不止一个时控制台问是哪个），群里只起草她的话、审过发在群里，审批 / 门槛 / 下班时段 / 自动模式照旧，开场白一律先审，群里不回「稍等」，`PRM_BOSS_GROUPS` 默认关、`PRM_BOSS_GROUP_MAX` 默认 6，功能 U；审查 2026-10-31 的修复：只接手对我们真是新拉的群（后端每个群给 `history_complete` / `joined_at`）、她已经有三方群（建好、正在建、不确定）的不接手、`PRM_GROUP_WITH` 有认不出的名字时一律等运营点「是她」；开场白等后端补交完群里已有的话（`watch_caught_up`）再写；重启后我们自己在群里的话不再被当成运营亲手打的（自己的行也记成最后处理的一行、重启从下一秒读）；盯着的群的每一行在轮询线程里按顺序交；发群时打开的标题不带人数就不发（`NOT_A_GROUP`）；找她的私聊只问安静的 `has_private_chat`；老板的名字不出这台电脑（`PRM_BOSS_CALL`，默认「老板」）；她的群草稿在等时老板说话就重新起草；Mac 标出每条我方回复发在哪儿；关掉开关时以前留下的群草稿不再发；第二次审查 2026-10-31 的修复：机器人停在发送中、或者发了没读回的群回复，重启以后读回来不再被当成运营亲手打的（没确认的不设下限，和私聊一样）；「是不是新拉的群」按微信的钟判断（基线时间是记基线时后端的 `wechat_now()`：会话列表里最新的时间）；只有微信「邀请你加入了群聊」那一行在基线以后（或者基线前 10 分钟以内）的群才自动接手，拿不准的放在「老板拉的群」卡片上等运营点「是她」，早于基线一天以上的才不管，还没有消息的群等有了消息再看；后端读不了的群（`{"chat", "unreadable": True}`）下次扫描再问，不算「没有老板」；回复发出去去掉编号不大于它的任务被告诉的最大编号的所有留着的话；「先试一下」不算她有三方群，真的「拉三方群」正在建时老板拉的群先等着、建完再看；老板介绍的新好友补读的话也换掉老板的名字；`PRM_GROUP_WITH` 有认不出的名字时是 `/api/prm` 的 `boss_groups.warning`（卡片上提醒，按钮照常能点），`why_not` 只在扫描完全跑不了的时候；发群时只在打开的标题不带人数、读出来是认识的私聊时拒发（`NOT_A_GROUP`），人数被 OCR 截掉一半的照样算群的标题，拒发的日志只写编号前 8 位和判断；之前：起草备注：合作单里运营写给 Mac 的「起草备注」（`deals.draft_note`，最多 300 字，只有运营写），这张合作单的每个草稿任务都带上（`meta.note`，号码打码），Mac 的提示里放进 `<operator_note>`，没有备注时任务和提示一个字都不变；之前：商品目录里每款抖店商品带上链接：抖店「复制链接」的样子 `DY_PRODUCT_LINK`、`product_link`，`kb/products.md` 多一列「链接」，起草的 Claude 照抄、不编；之前：邀约批量 `tools/creator_invite`：命令行没核实成功的卡再查一次她的按钮，还是「邀约带货」就记没发出去、停下，`card_status`、`recheck_after_seconds`，功能 Q；之前：分几条发：回复按空行拆成最多 `PRM_REPLY_PARTS` 条（默认 3）一条一条发、中间停一下像在打字，Mac 写草稿时被告知可以分几条，功能 T；之前：三方群：合作单「拉三方群」在电脑微信的「发起群聊」里拉她和 `PRM_GROUP_WITH` 的人，`PRM_GROUP_WITH` 空着 = 没有，功能 S；之前：加百应达人微信加她时给她备注「抖音-<百应昵称>」`PRM_FRIEND_ADD_REMARK`，功能 R；加百应达人微信 `PRM_FRIEND_ADD`，默认关，功能 R；之前：抖音百应私信草稿 `PRM_BUYIN_SYNC_MIN`，默认关；聚水潭寄样单状态自动同步 `PRM_SAMPLE_SYNC_MIN`；清理成纯商务网关，没有聊天模型，群消息和陌生人的私聊一律不回；平台联动加聚水潭寄样单 `jst.sample_order`）
+> 最后更新: 2026-11-09（微信里审批草稿（`PRM_WECHAT_REVIEW`，默认关，功能 W）：等人审的草稿也发一条到管理员（`ADMIN_WXID`）的微信私聊，编号在最前（「#12 草稿 · 名字 · 私聊 / 群里「群名」」），管理员在手机上回：引用通知回 1 发出、2 不发、「改 你的话」直接发改的、别的话先记成改稿；不引用回「发 12」「不发 12」「改 12 …」，只有一份在等时裸 1 / 2；和控制台是同一个决定（`PrmService.decide`）；路由的新一步 `wechat_review`（在入库和中转之前，只认管理员自己的一对一私聊）；新表 `wechat_reviews`；`src/prm/wechat_review.py`、`tests/test_prm_wechat_review.py`）；2026-11-07（签收后问一句（`PRM_SIGNED_HELLO`，默认关）：聚水潭同步看到寄样单签收、她还没说收到，派一份没有她的话的草稿任务（`meta.signed`，worker `signed_line`，kb 场景 D2「聚水潭显示签收」），只在 `PRM_SIGNED_HELLO_HOURS` 里问、每张单一次（新表 `signed_hellos`），草稿白天一律先审（门槛自动了也一样，`SIGNED_DAY_NOTE`），下班时段 / 自动模式按夜里的规矩判；`tests/test_prm_signed_hello.py`）；2026-11-06（转发的「聊天记录」：后端读出合并转发（appmsg type 19）里的每一句（`src/wechat/chat_record.py` `parse` → `special.record`），边缘和草稿任务的那一行写成「[聊天记录：标题] 小美：想要白色；老板测试：好的」（`edge.text.record_line`，最多 1000 字，`content` 照旧是「[文件]」、路由不变：聊天记录从不是 cc、命令、「同意好友」）；老板拉的群、她的三方群、老板介绍的达人那里，记录里的人写成 老板 / 她 / 我们 / 甲乙…、不带标题（`BossGroups.record_msg`），老板的名字不出这台电脑；群里留的、三方群记的、Mac 提示里的聊天记录那一行最多 1000 多字，别的照旧 300 字）；2026-11-04（发得慢一点：`PRM_SEND_PACE` 默认开，一份回复的字之间按字数停 2–5 秒、字发完停 3–6 秒再发图、图之间 2–4 秒，`PrmService._send_pause`）；2026-11-04（补发货盘：控制台合作单的「补发货盘」派一份补发货盘的草稿任务（`meta.huopan`，Mac 的 `huopan_line`），草稿附货盘图（商务、助理再加 Excel）、一律先审、不发稍等）；2026-11-04（达人邀约：`rules.categories` 清单要哪几类，默认三类，用户先不要专场型）；2026-11-02（「发起群聊」的菜单项：微信 4.1 的（+）菜单每项前面的图标 OCR 读成一两个字（「0发起群聊」「&+添加朋友」，真机「先试一下」什么都没点），`_menu_item` 去掉第一个汉字前面一到三个不是汉字的字再比，`_MENU_ICON`）；2026-11-02（三方群里的话：她的三方群（「拉三方群」建的）建好以后只读（`ThreeParty.watch_all` / `_watch`、`deal_of_chat`），群里每一句（她、老板、群里的人、我们）记在合作单上（`GROUP_LINE` 事件，打码、老板的名字换成 PRM_BOSS_CALL），她私聊的每份草稿任务带最近 20 句（`meta.three_party_chat`，worker `three_party_chat_block`），老板拉的群的话也一样；路由日志「[她的三方群（只读），内容不记录]」；合作单的 `three_party.reading`）；2026-11-02（开场白没人处理就自动发 `PRM_OPENING_AUTO_MIN`（默认 0 = 关：`_opening_auto`、`send_due_openings`、`route=opening`、worker `opening_auto_line`）；同一张图 7 天内不重复发（`_repeated_files`、`meta.sent` 的 `files`、worker `_sent_files`）；她只回「好滴」这类不发「稍等」（`ack_only`））；2026-11-02（邀约批量：粉丝客单价的门槛 `rules.fans_price_min`（默认 0 不看；粉丝画像里占比最大的那一档的下限低于它的不进，画像里没有的标「粉丝客单价不知道」），`fans_price` / `fans_crowd`，清单多「粉丝客单价」「粉丝人群」两列）；2026-11-02（「写开场白」也给说过话、但我们从没正式回过的达人（她只说过加好友时的「我是…」，那份草稿没发，最多机器人自动回过「稍等」）：`PrmStore.has_answer`、`_no_opening`、`meta.opening.wrote`、控制台合作单的 `unanswered`、worker `OPENING_WROTE`）；2026-11-02（邀约批量：每一类里已经在卖帽子的排到最后、再按标记少的在前，`_both_routes`；每周上限的测试改成按真实时间算下周一，不再随运行日期失效）；2026-11-02（中转：Mac 上做 cc 任务和写草稿的两个 worker 轮流来取任务，以前机器人只记最后来的那个能做什么，「待审批」页时不时误报「Mac 还没表示能写草稿」；现在每一类各记最后一次听到的时间（来取这一类、交这一类任务的心跳或结果），180 秒内听到过就算 Mac 在做，`KINDS_WINDOW_SEC`、`ClaudeRelay.worker_kinds()`）；2026-10-31（老板拉的群：老板拉了有他、达人和这个号的小群，机器人接手这位达人（群里除了我们和老板恰好一个人时自己接手，不止一个时控制台问是哪个），群里只起草她的话、审过发在群里，审批 / 门槛 / 下班时段 / 自动模式照旧，开场白一律先审，群里不回「稍等」，`PRM_BOSS_GROUPS` 默认关、`PRM_BOSS_GROUP_MAX` 默认 6，功能 U；审查 2026-10-31 的修复：只接手对我们真是新拉的群（后端每个群给 `history_complete` / `joined_at`）、她已经有三方群（建好、正在建、不确定）的不接手、`PRM_GROUP_WITH` 有认不出的名字时一律等运营点「是她」；开场白等后端补交完群里已有的话（`watch_caught_up`）再写；重启后我们自己在群里的话不再被当成运营亲手打的（自己的行也记成最后处理的一行、重启从下一秒读）；盯着的群的每一行在轮询线程里按顺序交；发群时打开的标题不带人数就不发（`NOT_A_GROUP`）；找她的私聊只问安静的 `has_private_chat`；老板的名字不出这台电脑（`PRM_BOSS_CALL`，默认「老板」）；她的群草稿在等时老板说话就重新起草；Mac 标出每条我方回复发在哪儿；关掉开关时以前留下的群草稿不再发；第二次审查 2026-10-31 的修复：机器人停在发送中、或者发了没读回的群回复，重启以后读回来不再被当成运营亲手打的（没确认的不设下限，和私聊一样）；「是不是新拉的群」按微信的钟判断（基线时间是记基线时后端的 `wechat_now()`：会话列表里最新的时间）；只有微信「邀请你加入了群聊」那一行在基线以后（或者基线前 10 分钟以内）的群才自动接手，拿不准的放在「老板拉的群」卡片上等运营点「是她」，早于基线一天以上的才不管，还没有消息的群等有了消息再看；后端读不了的群（`{"chat", "unreadable": True}`）下次扫描再问，不算「没有老板」；回复发出去去掉编号不大于它的任务被告诉的最大编号的所有留着的话；「先试一下」不算她有三方群，真的「拉三方群」正在建时老板拉的群先等着、建完再看；老板介绍的新好友补读的话也换掉老板的名字；`PRM_GROUP_WITH` 有认不出的名字时是 `/api/prm` 的 `boss_groups.warning`（卡片上提醒，按钮照常能点），`why_not` 只在扫描完全跑不了的时候；发群时只在打开的标题不带人数、读出来是认识的私聊时拒发（`NOT_A_GROUP`），人数被 OCR 截掉一半的照样算群的标题，拒发的日志只写编号前 8 位和判断；之前：起草备注：合作单里运营写给 Mac 的「起草备注」（`deals.draft_note`，最多 300 字，只有运营写），这张合作单的每个草稿任务都带上（`meta.note`，号码打码），Mac 的提示里放进 `<operator_note>`，没有备注时任务和提示一个字都不变；之前：商品目录里每款抖店商品带上链接：抖店「复制链接」的样子 `DY_PRODUCT_LINK`、`product_link`，`kb/products.md` 多一列「链接」，起草的 Claude 照抄、不编；之前：邀约批量 `tools/creator_invite`：命令行没核实成功的卡再查一次她的按钮，还是「邀约带货」就记没发出去、停下，`card_status`、`recheck_after_seconds`，功能 Q；之前：分几条发：回复按空行拆成最多 `PRM_REPLY_PARTS` 条（默认 3）一条一条发、中间停一下像在打字，Mac 写草稿时被告知可以分几条，功能 T；之前：三方群：合作单「拉三方群」在电脑微信的「发起群聊」里拉她和 `PRM_GROUP_WITH` 的人，`PRM_GROUP_WITH` 空着 = 没有，功能 S；之前：加百应达人微信加她时给她备注「抖音-<百应昵称>」`PRM_FRIEND_ADD_REMARK`，功能 R；加百应达人微信 `PRM_FRIEND_ADD`，默认关，功能 R；之前：抖音百应私信草稿 `PRM_BUYIN_SYNC_MIN`，默认关；聚水潭寄样单状态自动同步 `PRM_SAMPLE_SYNC_MIN`；清理成纯商务网关，没有聊天模型，群消息和陌生人的私聊一律不回；平台联动加聚水潭寄样单 `jst.sample_order`）
 
 ---
 
@@ -63,7 +63,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 3. [模块间关系图](#3-模块间关系图)
 4. [功能模块展开](#4-功能模块展开)
    - [功能A: 消息获取 (WCDB直读)](#功能a-消息获取-wcdb直读)
-   - [功能B: 业务路由（7 个步骤与红线）](#功能b-业务路由7-个步骤与红线)
+   - [功能B: 业务路由（8 个步骤与红线）](#功能b-业务路由8-个步骤与红线)
    - [功能C: Web UI 和 API](#功能c-web-ui-和-api)
    - [功能D: 微信窗口操控](#功能d-微信窗口操控)
    - [功能E: 语音识别](#功能e-语音识别)
@@ -142,7 +142,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `PRM_COPILOT` | `str` | `"off"` (`off`/`on`；`on` 时必须 `CLAUDE_RELAY=on`、`PRIVATE_CHAT_ENABLED=true`) | `src/config.py` | `src/bot.py:_start_prm()` 建 `PrmService`（发送用 `backend.send_text` / `send_file`），挂到 `router._prm`，把 `is_party_chat` 交给 `WcdbBackend.set_private_filter`（登记的达人的私聊不在 `PRIVATE_CHATS` 里也读），`register_prm` 给控制台；路由步骤 `prm`（`claude_relay` 之后、`admin_command` 之前）把登记达人的私聊静默变成 `prm` 任务（不回复）；控制台「合作单」页的 `prm` 分组可改（保存时由 `_validate_config` 检查中转；`private_chat_enabled` 只在调用方给出时检查） |
 | `PRM_DB` | `str` | `"data/prm.db"` | `src/config.py` | `PrmStore`：`parties`、`deals`、`action_packets`、`pii_tokens`、`shipments`、`send_gates`、`deal_events`、`sample_orders`、`buyin_threads`、`prm_meta`、`friend_adds`、`friend_add_attempts`、`creator_links`；机器人停止时控制台的 `_prm_state` / `_prm_parties` / `_prm_deal` / `_prm_reveal` 直接读写它（`/api/prm/friend-adds` 不行：要机器人在运行）（`GET /api/prm` 在它不存在时不创建） |
 | `PRM_AUTO_REGISTER` | `str` | `"off"` (`off`/`on`；别的值启动时拒绝；开着而 `PRM_COPILOT` 没开、或者 `PRM_EDGE` 开着时只是不起作用，`Bot._start_new_friends` 记一行日志；配置对象上没有这一项时当关) | `src/config.py` | `PrmService.__init__` → `_auto_register`（`auto_register` 属性、`snapshot` 的 `auto_register`）→ `Bot._start_new_friends`：副驾驶模式、后端能在轮询之外读库（Windows `wcdb`）时把 `prm.new_friend_found` 加进新好友扫描的 `on_found`（边缘模式从不加）：扫描每报一位新好友，`new_friend_found` 只把 wxid、名字、怎么加的放进队列、叫醒发送线程；发送线程每轮开头 `register_found` → `auto_register_friend`：管理员、`CLAUDE_RELAY_WXIDS`、不是和人的私聊、已经有达人记录的（在用的、停用的都算：运营的停用一直算数）不登记，其余照控制台「登记」那样登记成正式达人（称呼 `auto_name`、备注 `auto_note`「自动登记（新好友，…）」、`parties.auto_registered=1`、合作单记一条 `auto_register`），她加好友以来的消息照旧合成一份先审的草稿（`on_registered` → `NewFriendService.registered`），以后的草稿和别的达人一样走门槛和下班时段自动回复；出错只记日志，她留在「登记达人」的候选里。机器人停着时 `/api/prm` 的 `auto_register` 读环境变量。控制台「合作单」页的 `prm` 分组可改（「新好友自动登记成达人」），开着时「登记达人」卡片顶上有提醒，名单里标「自动登记」。改了要重启机器人；Mac 上的 worker 不用动 |
-| `PRM_WECHAT_REVIEW` | `str` | `"off"` (`off`/`on`；别的值启动时拒绝；开着而没填 `ADMIN_WXID` 时只是不起作用) | `src/config.py` | `PrmService.__init__` → `WechatReview`（`src/prm/wechat_review.py`，功能 W）：发送线程把等人审的草稿发到管理员的私聊（`sweep`）。Mac 端（`WECHAT_BACKEND=edge`）不起作用。改了要重启机器人 |
+| `PRM_WECHAT_REVIEW` | `str` | `"off"` (`off`/`on`；别的值启动时拒绝；开着而没填 `ADMIN_WXID` 时只是不起作用) | `src/config.py` | `PrmService.__init__` → `WechatReview`（`src/prm/wechat_review.py`，功能 W）：发送线程把等人审的草稿发到管理员的私聊（`sweep`），路由的 `wechat_review` 一步认管理员的回复（`answer`）。Mac 端（`WECHAT_BACKEND=edge`）不起作用。改了要重启机器人 |
 | `PRM_TAKEOVER_MIN` | `int` | `120` (5–1440) | `src/config.py` | `PrmService.__init__` → `_takeover_sec`：运营用这个微信号亲手回了达人（`on_own_message`），合作单 `mode=human` 这么多分钟（`mode_until`）；控制台切到「人工接管」也用它；停止时 `_prm_deal` 读环境变量 |
 | `PRM_HOLDING_MIN` | `int` | `10` (0–120；0 = 不发) | `src/config.py` | `PrmService.send_holding_replies()`：Mac 写的回复草稿（不算开专属佣金那一路）等了这么多分钟还没人处理，先回达人一句 `PRM_HOLDING_TEXT`，每轮消息最多一次；这一轮（达人最新那条消息以后）运营亲手回过、或者已经有回复发出去了，就不发 |
 | `PRM_HOLDING_TEXT` | `str` | `"收到，我确认一下马上回您"` (1–60 字) | `src/config.py` | 同上，回的那句话 |
@@ -240,8 +240,8 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `SIGNED_DAY_NOTE` | `str` | 「签收后问一句：白天要人看过再发」 | `src/prm/service.py` | 签收后问一句的草稿白天（不在下班时段、自动模式关着）一律等人：`on_result` 把它写进草稿的 `reason` 和合作单的提醒（这一类的门槛自动了也一样，`route_for` 批准的改回 review） |
 | `OPENING_UNSURE` / `OPENING_UNSURE_TEXT` | `str` / `str` | `"opening_unsure"` / 「她是加好友过了很久才登记的，超出了补读的时间（PRM_CATCHUP_HOURS）：补读的这段里她没说话，更早的不知道，所以没自动写开场白；看一眼微信，她还没说过话就在合作单里点「写开场白」」 | `src/prm/service.py` | 审查 2026-10-30：新好友登记得比 `PRM_CATCHUP_HOURS` 晚（补读读不到她加好友的时候），补读里没有她的话不等于她没说过，不自己写开场白，合作单留这条提醒（`opening: true`）；点「写开场白」（`_ask_opening`）、她的回复草稿回来（`on_result`）、运营亲手回她（`_answered_by_hand`）时去掉 |
 | `UNREACHABLE` / `UNREACHABLE_TEXT` / `GROUP_UNSENT` / `BOSS_GROUPS_OFF_TEXT` | `str` / `str` / `str` / `str` | `"unreachable"` / 「她不是我们的微信好友，也不在老板拉的群里了：机器人发不了消息给她」/ `"boss_group_unsent"` / 「老板拉的群关了，没发」 | `src/prm/service.py` | 老板拉的群（功能 U）：机器人自己起的消息（发货通知、开专属佣金那一步、控制台的开场白）哪儿都发不到她时（没有和我们的私聊、也不在接手的群里了：`_reach` / `_aim`）合作单提醒的 key 和说法，草稿不发、标成没发出去（她再发来消息时提醒去掉）/ 发到群里的草稿没发出去（后端拒发：`GROUP_NO_NAME`、`NOT_A_GROUP`、同名…）时合作单提醒的 key（「#n 没发到老板拉的群里（原因）：请在微信里手动发」，之后群里有一条发出去就去掉）/ `PRM_BOSS_GROUPS` 关着时以前开着时写的群草稿（`is_group_packet`）不发、标成没发出去（`failed`）的 `error`（审查 2026-10-31）：启动时在等的、已批准的（`start`），之后才写好、再被批准的（`send_approved`） |
-| `RETRY_SEC` / `SEND_TRIES` / `PER_ROUND` / `SAID_LINES` / `SAID_CHARS` / `NOTE_CHARS` / `FILES_NAMED` | `tuple` / `int`… | `(10, 120)` / `6` / `3` / `2` / `60` / `120` / `5` | `src/prm/wechat_review.py` | 微信里审批草稿（`PRM_WECHAT_REVIEW`，功能 W）：发不出去时管理员私聊等 10 秒起翻倍、最多 2 分钟，每条 6 次、一轮最多 3 次发送；她的话最多 2 句、每句 60 字；依据 120 字；附件名最多 5 个 |
-| `NO_ADMIN_WHY` / `NO_SEND_WHY` / `EDGE_WHY` | `str` | 中文 | `src/prm/wechat_review.py` | 为什么发不到微信（没填 `ADMIN_WXID`、没连着微信、Mac 端）：`WechatReview.status()` 的 `why` |
+| `SEND_WORDS` / `DROP_WORDS` / `RETRY_SEC` / `SEND_TRIES` / `PER_ROUND` / `RECENT_SEC` / `BARE_MARGIN_SEC` / `SAID_LINES` / `SAID_CHARS` / `NOTE_CHARS` / `FILES_NAMED` / `LISTED` / `SEEN_IDS` | `tuple` / `tuple` / `tuple` / `int`… | 1、发、发送、好、好的、可以、行、ok / 2、不发、不要、算了 / `(10, 120)` / `6` / `3` / `3600` / `5` / `2` / `60` / `120` / `5` / `8` / `500` | `src/prm/wechat_review.py` | 微信里审批草稿（`PRM_WECHAT_REVIEW`，功能 W）：引用通知时算「发」/「不发」的字（全角、末尾的标点、大小写不管）；发不出去时管理员私聊等 10 秒起翻倍、最多 2 分钟，每条 6 次、一轮最多 3 次发送；裸 1 / 2 在没有开着的通知时只认最近 1 小时的那条、通知晚于这句话 5 秒以上的不算；她的话最多 2 句、每句 60 字；依据 / 错误 120 字；附件名最多 5 个；列出来的草稿最多 8 份；记 500 条处理过的消息编号 |
+| `NOTIFIED` / `PROPOSED` / `ANSWERED` / `NO_ADMIN_WHY` / `NO_SEND_WHY` / `EDGE_WHY` / `VOICE_TEXT` / `REST_TEXT` | `str` | `"notified"` / `"proposed"` / `"answered"` / 控制台和回复的中文 | `src/prm/wechat_review.py` | `wechat_reviews.state` 的三种；「待审批」说为什么不能用（没填 `ADMIN_WXID`、没连着微信、Mac 端）；语音的回复；连发里别的话没当成回复 |
 | `NIGHT` / `NIGHT_MAX_PERCENT` / `NIGHT_HOLDING_CHARS` / `NIGHT_RED_WORDS` / `NIGHT_CUES` / `NIGHT_MATERIALS` | `str` / `int` / `int` / `tuple[str, ...]` ×3 | `"night"` / `25` / `120` / 坑位、保底、保量、包量、对赌、返现、定金、预付、打款、转账、赔付、赔偿、退款、红包、专属价、现金、补贴 / 记下、明早、明天、确认、稍后、第一时间、回复您、回您、拉群、小群、拉个群 / 羊毛、羊绒、拉菲草、棉、真丝、桑蚕丝、麻、聚酯等 21 种 | `src/prm/gates.py` | 下班时段自动发出的草稿的 `route`（没人决定过，不算进门槛的统计）/ 夜里能自动发的百分比上限（用户定的佣金红线）/ 一句过渡话最多几个字 / 夜里自动发的草稿不能有的词 / 过渡话里至少要有的一个词 / 「100%羊毛」这类百分比说的是材质，不算佣金 |
 | `READ_BACK_SEC` / `READ_BACK_ROWS` | `int` / `int` | `1800` / `500` | `src/prm/service.py` | `_match_own`：这个号在达人私聊里的一行处理过以后，这么多秒内（每个聊天最多记这么多行）同一行（`_row_key`：同一个消息编号）又交来，不是新的一句，不再确认、不记运营的话、不接管；只认同一行，别的行里一模一样的字照样比对（对不上就是运营亲手打的，win review F4 (a)：以前 120 秒内同样的字一律当读回，运营照着机器人打的「好的」不接管） |
 | `MAX_CONSECUTIVE_ERRORS` | `int` | `5` | `src/wechat/wcdb_backend.py` | 连续错误触发重初始化阈值 |
@@ -411,9 +411,10 @@ grep "文件名" CODEBASE_REFERENCE.md
 | `context.Stop(value=None)` | 冻结的数据类：结束路由，`value` 是 `handle` 的返回值 | — |
 | `context.RouteContext(router, msg, trace)` | 步骤能看到的全部：路由器（它的 `_store`、`_admin`、`_config`、`_claude_relay`、`_prm`、`_edge` 是步骤的工具）、消息、决策追踪 | — |
 | `context.RouteStep(name, run, doc="")` | 一个有名字的步骤；`run(ctx) -> Stop \| None`，`None` = 不归我管、交给下一步；名字在它结束路由时写进追踪的 `extra.ended_by` | — |
-| `steps.ROUTE_STEPS` | `self_message` → `edge` → `persist` → `claude_relay` → `prm` → `admin_command` → `silence` | `tuple[RouteStep, ...]` |
+| `steps.ROUTE_STEPS` | `self_message` → `edge` → `wechat_review` → `persist` → `claude_relay` → `prm` → `admin_command` → `silence` | `tuple[RouteStep, ...]` |
 | `steps.self_message(ctx)` | 跳过这个号自己的消息：后端按 wxid 核实过的（`_not_self_by_id`）直接放行；否则发言人名等于或包含 `BOT_DISPLAY_NAME` → `ignore("self_message")`、`Stop(None)` | `Stop \| None` |
 | `steps.edge(ctx)` | `router._edge` 为 `None` 时跳过；`EdgeService.handle(msg)` 接了（名单里达人的私聊）→ `redact("[已登记达人的私聊，内容不记录]")`、`reason("prm_edge")`、`Stop(None)`；出错时只要是名单里的私聊（`is_party_chat`）也照样结束。在 `persist` 之前：达人的话不进 `messages.db` | `Stop \| None` |
+| `steps.wechat_review(ctx)` | `PRM_WECHAT_REVIEW`（功能 W）：`router._prm.wechat_review` 没有、或它的 `on` 不是 `True`（开关关着、Mac 端）时跳过；`WechatReview.answer(msg)` 认出是管理员对草稿通知的回复（只认 `ADMIN_WXID` 自己的一对一私聊）→ `redact("[管理员在微信里审批草稿，内容不记录]")`、`reason("wechat_review")`、`Stop(回复)`（读晚了的、交来两次的：`Stop(None)`）；`answer` 出错时用 `claims(msg)` 兜底：是回复的话说「处理这条草稿回复时出错了」，照样不交给中转。在 `persist` 之前（她的话、改过的草稿不进 `messages.db`），在 `claude_relay`、`admin_command` 之前（从不变成 cc 任务、中转的批准、管理员命令） | `Stop \| None` |
 | `steps.persist(ctx)` | `store.insert_message(msg)`；重复（含这个聊天里用 `_legacy_ids` 旧编号存过的）或出错 → `ignore("duplicate_or_store_error")`、`Stop(None)`；入库了记 `step("stored")`、`messages_processed += 1` | `Stop \| None` |
 | `steps.claude_relay(ctx)` | `router._claude_relay` 为 `None` 时跳过；`relay.handle(msg)` 返回 `(True, 回执)` → `reason("claude_relay")`、`Stop(回执)`（回执可以是 `None`，例如过旧的请求） | `Stop \| None` |
 | `steps.prm(ctx)` | `router._prm` 为 `None` 时跳过；`PrmService.handle(msg)` 接了（登记达人的私聊；或者机器人接手的老板拉的群里的任何一行，`PRM_BOSS_GROUPS`，功能 U：她的成草稿任务，老板和别人的只留作背景，她的群草稿在「待审批」里等着时让那份带上它重新起草）→ `redact(...)`（私聊「[已登记达人的私聊，内容不记录]」，群「[老板拉的群（已接手），内容不记录]」）、`reason("prm_copilot")`、`Stop(None)`；出错时登记达人的私聊（`is_party_chat`）、接手的群（`is_party_group`）照样结束；别的群落到 `silence`。在 `claude_relay` 之后：管理员的 cc 仍归中转 | `Stop \| None` |
@@ -784,7 +785,7 @@ grep "文件名" CODEBASE_REFERENCE.md
 
 | 名称 | 描述 | 参数 | 返回值 |
 |---|---|---|---|
-| `decision_explain.REASONS` / `STEPS` | 原因码 → 白话（`self_message`、`duplicate_or_store_error`、`claude_relay`、`prm_copilot`、`prm_edge`、`admin_command`、`silent_end`、`no_handler`、`reply`）/ 7 个路由步骤的中文名 | — | `dict` |
+| `decision_explain.REASONS` / `STEPS` | 原因码 → 白话（`self_message`、`duplicate_or_store_error`、`claude_relay`、`prm_copilot`、`prm_edge`、`wechat_review`、`admin_command`、`silent_end`、`no_handler`、`reply`）/ 8 个路由步骤的中文名 | — | `dict` |
 | `decision_explain.explain(record)` | 一条决策记录 → `{message_id, chat, sender, ts, outcome, reason, reason_text, ended_by, summary, trail, content}`：「结果：回复了 / 没有回复；原因：…」「由哪一步结束：…」和经过的步骤；记录是磁盘上的文件，每个字段先检查类型 | `record: dict` | `dict` |
 | `decision_explain.recent(path, *, limit=50, outcome="", chat_id="", message_id="", since=None)` | 从最新的往回读（含 `.1`–`.3` 备份，最多 `MAX_SCAN_BYTES`），坏行 / 非 UTF-8 跳过，先在原始行上粗筛；`limit` 夹在 1–500，`chat_id` 可传多个（也认群名） | 见左 | `list[dict]` |
 | `decision_explain.iter_records(path, backups=3)` / `format_text(items)` | 新的在前的决策记录 / 给命令行看的文本 | — | `Iterator[dict]` / `str` |
@@ -1116,10 +1117,12 @@ grep "文件名" CODEBASE_REFERENCE.md
 | 平台动作：`PrmService._approve_execute(packet, text, now)` / `_opened_before(packet)` / `_ask_recheck(packet, unsure, now)` / `service.platform_state(packet)` / `service.written_state(execution, packet_outcome="")` / `service._released(other, packet_id)` / `_approve_lock` / `_repreview(packet, now)` / `_ack(packet, now)` / `_on_platform_job(job, meta, now)` / `_platform_finished(packet, record, now, cancelled=False)` / `sweep_executing()` / `service.platform_out(p)` / `_job_error(job)` / `service.action_for_mac(action, tokens)` / `service.masked_action(action, mask)` / `service.PERSONAL_PARAMS` / `service.ONCE_ACTIONS` / `REOPEN_HINT` / `service.action_target(action, data=None)` / `_date_text(at)` / `PLATFORM_LOST_GRACE_SEC` / `PLATFORM_OPS` | `on_result`：草稿带平台块时一律 `pending`、`route=review`（门槛不管；不在副驾驶模式或有更新的草稿任务时 `superseded`，「更新」只算同一路的草稿任务：`latest_open(chat, drafts_only=True, system=…)`，清理和平台任务不算），预览没通过写进 `attention`；`decide("send"\|"edit")` 对平台草稿拒绝（百应私信草稿也拒绝，见 `_decide_buyin`）；`decide("execute", text)`：预览 `ready`、不在重新预览、这张合作单没有别的草稿开过同一个专属动作（`_opened_before` 返回 `(原因, 要核对的草稿)`：`ONCE_ACTIONS` = `dy.designated_commission` / `xhs.direct_plan` / `dy.channel_goods`，`PrmStore.deal_packets` 里同一个动作、同一个商品、同一位达人（`action_target`：`item_id` 和 `creator_platform_id`，千帆计划再加上预览查到的 `run.buyer_id`，所以小红书号和 userId 算同一位买手）的草稿，`executing` 的报「…正在执行（#编号，日期 批准）」，`approved` / `sending` / `sent` 或执行记录是 `VERIFIED_SUCCESS` 的 `failed`（回复没发出去、晚到的）报「…已经在 #编号（日期）开过了，平台上核验成功」，都接着 `REOPEN_HINT`「点「不发」就行（寄样单的专属佣金：系统会接着开还没开的商品）」（`platform_state`：`running` / `verified` / `uncertain` / `not_done` / 空）；结果可能已经开了的 `failed`（2026-10-28 审查 mac F6：ACCEPTED_UNVERIFIED、INDETERMINATE、UNKNOWN、PARTIAL、OBSERVED_DESIRED_STATE……，或者 FAILED 但前面有一步 `--execute` 写成了，比如渠道品建了、绑定被拒；`written_state` 给 `uncertain`）也挡住，报「…上次在 #编号（日期 批准）的结果不确定（结果：说明），平台上可能已经开了，不能直接再开。请先到平台后台核对：平台上确实没有，就在「待审批」最上面 #编号 的红色提醒上点「我已处理」，再回来批准这一份；平台上已经有了，点这一份的「不发」」，并 `_ask_recheck`：那几份重新标红（`acked_at` 清空，以前点过「我已处理」也重新出现在 `platform_alerts`），`recheck = {for: 这份, at, error: 原来的错误}`，错误改成「#这份 要再开同一个商品：先到平台后台核对。平台上确实没有，点这里的「我已处理」，再去批准 #这份；平台上已经有了，先点 #这份 的「不发」，再点这里的「我已处理」。上次的结果：…」，合作单的 `platform:<草稿>` 提醒同样写，记一条 `platform_recheck`；这之后在那几份上点「我已处理」才算核对过、平台上没有（`_released`：`recheck.for` 是这份、`acked_at` 不早于 `recheck.at`），只放行这一份：别的草稿再批准又会被要求核对一次（`recheck.for` 换成它），这份点了「不发」就什么都不会执行；结果是 FAILED / STATE_CONFLICT / NOT_RUN 且没有哪一步写成（`NOT_WRITTEN`：平台拒绝了、没有发出、没有执行；没排进 Mac 队列的 `platform_not_run` 也是）的 `failed` 不算，别的商品、别的达人、别的动作照常；台账只管同一个批准不执行两次，这一条管两份草稿（链条断了重开时上一步还在执行、回复草稿违反 kb 带了佣金）；改成 `executing` 前在 `_approve_lock` 里再查一次，同时批准两份只有一份能跑）、回复通过 `platforms.reply_problems`（空、不认识的占位符、不产生链接的动作用了 `{链接}`）和占位符检查、`action_for_mac` 没有问题、能发微信（有附件还要能发文件），才比较后改成 `executing`（`final_text` 先存着未填链接的回复、新 `key`），再 `relay.submit(kind="prm", fresh, input_closed, meta={op: "platform_execute", party_id, deal_id, packet_id, key, action, run})`（`action` 是 `action_for_mac` 给的：寄样单的收件电话换回号码，只在这个任务里；草稿的 `platform` 和控制台里仍是〈手机N〉），排不进去就 `failed`（`platform_not_run`，平台没动）；`action_for_mac` 返回 `(动作, 问题)`：没有 `receiver` 原样返回；收件电话里有这位达人没有的占位符（「收件电话的占位符对不上：…」）、`pii.unmask` 换回后过不了 `platforms.phone_of`、或者还是 `PHONE_TOKEN`、收货信息别的项（地址里写着的号码）有对不上的占位符（「收货信息里的占位符对不上：…」），都返回问题（不批准，草稿留在 `pending`，什么任务都不排）；没问题时 `receiver` 每一项都换回号码；`masked_action(action, mask)`：只对 `PERSONAL_PARAMS`（`receiver`、`note`）跑 `mask`，别的参数（商品、SKU、达人的平台 ID、标题、邀约信息）是平台的编号和我们自己的文字，原样交给平台；重新预览回来的预览块，动作也这样换过再存；`repreview`：等待中的草稿记 `previewing`，排 `platform_preview` 任务，结果回来换掉预览（没做成就保留旧的并写原因；新预览的动作过不了机器人的检查（`ActionRefused`）时原因是「新预览的动作没过机器人这边的检查（…）」，不再是一整段 JSON）；`ack`：`failed` 的平台草稿记 `acked_at`（`edit_platform` 一步做完），去掉 `platform:<草稿>` 提醒，被要求核对过的（`recheck`）回答多 `released`（放行的草稿），`platform_ack` 记录多 `recheck_for`；`_on_platform_job`：`key` 对不上的忽略，`lost` 只记 `lost_at`、继续等，结果读不出来是 `UNKNOWN`，任务失败是 `NOT_RUN`；`_platform_finished`：`VERIFIED_SUCCESS`（且没被取消）→ `platforms.fill_reply` 填占位符（有占位符平台没给值就不发、标红）、`approved`（发送线程照常发，`decided_at` 记成现在），这之后 `_after_platform`（开佣金的链条，见 `_ask_next_step` 那一行）；否则 `failed`（`outcome=platform_<结果>`，错误写明结果、没有发微信、不会重试；专属动作的结果 `written_state` 是 `uncertain` 的再加「平台上可能已经开了：同一个商品给这位达人再批准时，系统会先请你核对」；`NOT_RUN`（`written_state` 是 `not_done`：Mac 没接手、接手前被取消、等平台命令锁时被取消，什么都没执行）不叫运营去平台后台核对，写「平台动作没有执行（NOT_RUN：没有执行），平台没有动，没有发微信：…。可以重新批准：同样的动作再起草一份时照常批准就行，系统不会自己重试」），写 `platform_result` 记录（`packet`、`action`、`outcome`、`link`，动作有的话加 `item_id`、`creator_platform_id`（以后查是哪个商品、哪位达人；旧记录没有），`created` 有寄样单号时加 `sample_order_no`）和合作单的 `platform:<草稿>` 提醒（后面的草稿冲不掉，`ack` 标为已处理时去掉；晚到的结果也写这一条）；标红的也 `_after_platform`（一款开不成，链条接着派下一个）；已经不是 `executing` 的（晚到的结果）只记进 `execution`（`late`）、重新标红，不发，`_after_platform(late=True)`；`sweep_executing`（每轮 `tick`）：批准超过 `APPROVED_EXPIRE_SEC` 还没被领走的执行任务用 `cancel_if_pending` 取消（`NOT_RUN`），失联超过 `PLATFORM_LOST_GRACE_SEC`（30 分钟）的给 `UNKNOWN`，Mac 回来了（心跳晚于 `lost_at`）清掉 `lost_at`，找不到任务的给 `UNKNOWN`；`_deliver` 发不出去时错误写「平台动作已经核验成功，但回复没发出去」，遇到百应私信草稿（`send_approved` 已经挡住，这是第二道）改回 `pending`、什么都不发；`_update_gate(packet, now)` 跳过平台动作；`platform_out`：控制台用的动作名、会做什么、`caveat`、能用的占位符 `placeholders`、参数（`platforms.describe`）、预览结论 / 问题 / 事实 / 步骤、`can_execute`、执行记录、`recheck_for`（要求核对它的草稿；前端暂时不显示，错误文字里写着）；`snapshot` 的 `pending` 含 `executing` | `dict` / `(str, list)` / — / `str` / `str` / `bool` / — / `dict` / `dict` / `bool` / — / `int` / `dict \| None` / `str` / `(dict, str)` / `dict` / `tuple` / `tuple` / `str` / `(str, set)` / `str` |
 | `PrmService.snapshot()` / `service.snapshot(store, *, running, extra=None, limit=40, retention_days=30, now=None)` / `gates_out(store)` / `event_out(ev)` | 控制台的数据（见 `_prm_state`、`_prm_deal`；运行中另给 `catchup_hours`、`clock_skew_sec`（这台电脑的钟比微信快多少秒，`_note_clock`；前端还没显示，合作单的提醒里有）、`sample_sync_min`（`PRM_SAMPLE_SYNC_MIN`，0 = 关）、`night`（`_night_status`：下班时段的设置、现在在不在里面、为什么暂停、`auto`）、`auto_register`（`PRM_AUTO_REGISTER`）、`auto_mode`（`{on, since, by}`，停止时也有：`_prm_state_core` 读库））；每位达人多给 `auto`（`parties.auto_registered`：机器人自动登记的）；`night_alerts`：合作单上 `night:<草稿>` 的提醒（`{deal_id, party_id, party_name, packet, text, at, auto}`，停止时也有；`auto`：白天自动模式发的）；`hand_samples`：手动建的寄样单「待审批」上的行（`hand_samples_out`，停止时也有，还没有库时是空的）；运行中另给 `hand_samples_problem`（为什么查不了手动建的单，同步关着时空）；每份草稿多给 `night_held`（`meta.night_held`）、`opening`（`meta.opening`：开场白）、`huopan`（`meta.huopan`：补发货盘）、`auto_mode`（`meta.auto_mode`：白天自动模式判过的）；停止时也能从数据库直接拼；每份草稿的 `legend` 列出它的文字、改过的文字、`intent`、`reason`、槽位和平台动作参数里出现的占位符（2026-10-28 起不只看文字：寄样单收货信息里的〈手机N〉也有打码号码对照）；`event_out`：`missed` 的 `creator_message` 显示成 `MISSED_EVENT_NAME`（「机器人没在读时达人的消息（没有起草）」），`sample_status` 显示成「聚水潭寄样单 YP…：已发货（运单号），原因：…」（`platforms.SAMPLE_STATES`），`buyin_message` 显示成「百应私信：达人」/「百应私信：我方（运营在百应里回的）」，`snapshot` 另给 `buyin`（`buyin_out`）、每条草稿的 `channel` 和 `buyin`（`buyin_packet_out`），运行中另给 `buyin_sync_min`，聚水潭同步做的 `shipment` / `shipment_status` / `stage`（`detail.source == "jst"`）名字后面加「（聚水潭同步）」，`night_send` 显示成「夜间自动发出 #N」（过渡话后面加「（模型要求注意，发的是一句过渡的话）」；带 `auto` 的是「自动模式发出 #N」），`night_done` 显示成「夜间自动回的过渡话 #N 已处理」（带 `auto` 的是「自动模式自动回的过渡话 #N 已处理」），下班时段自动发出的被标为发错了显示成「标为发错了（夜间自动发出的）」（带 `auto` 的是「标为发错了（自动模式发出的）」），`auto_register` 显示成「自动登记（新好友，她加我们）」这样（`AUTO_HOWS`），`opening` 显示成「派写开场白的任务 #N（新好友还没说话 / 运营点的）」，`huopan` 显示成「派补发货盘的任务 #N（运营点的）」，`draft_note` 显示成「改起草备注（N 字）」/「清掉起草备注」（`detail.chars`；备注的字不进操作记录），每张合作单多给 `draft_note`，别的照 `EVENT_NAMES`；运行中另给 `reply_parts`（`PRM_REPLY_PARTS`，edge 为 1；停着时没有这一项，页面不提示分几条）；老板拉的群（功能 U）：每条草稿的 `channel` 多一个 `group`（`meta.channel`；私聊仍是 `wechat`、百应 `buyin`）、另给 `group_name`，每位达人和她的合作单给 `source`（`boss_group`：她是接手的、或者已经 `gone` 的老板拉的群里的达人；别的是 `""`），运行中另给 `boss_groups`（`BossGroups.status()`；停着时 `_boss_groups_stopped_status`） | `dict` |
 | `steps.prm(ctx)` / `Bot._start_prm(config, router, backend, relay)` | 路由步骤：`router._prm` 为 `None` 时跳过；接了就 `trace.redact(...)`（决策记录不留达人原文）、`trace.reason("prm_copilot")`，以 `Stop(None)` 结束（不回复）；`handle` 出错时，只要是登记达人的私聊（或接手的老板拉的群：`is_party_group`，功能 U）也照样结束（不会落到后面的普通聊天）；`_start_prm`：`PRM_COPILOT=on` 且中转在运行时建服务、给后端装过滤器、`boss_groups.attach(backend, stored=消息库的 get_messages_since)`、`start()`、挂到 `router._prm`、`register_prm`，`run()` 结束时 `stop()` | `Stop \| None` / `PrmService \| None` |
-| `store.PrmStore.wechat_review_due(limit=200)` / `add_wechat_review(packet_id, deal_id, now)` / `wechat_review(packet_id)` / `wechat_reviews_open()` / `purge_wechat_reviews(deal_id, rewrite, now)` | 微信里审批草稿（功能 W）的表 `wechat_reviews`（一份草稿一行，编号就是草稿的）：还没发过通知的等人审的草稿（pending、不是百应草稿、旧的在前）/ 记下发过（`INSERT OR IGNORE`，新的才 True）/ 一行 / 还开着的（`notified` / `proposed`、草稿还是 pending，带草稿的 `party_id`、`chat_id`）/ 8.2 清理：已经不在等的行删掉，还在等的留着 | 见描述 |
-| `wechat_review.WechatReview(store, config, *, clock, send=None, lines=None, parts=None, opening_auto=False)` / `on` / `admin` / `ready` / `status()` | 微信里审批草稿（功能 W）：`PrmService.__init__` 建（`lines` 是 `_packet_lines`，`parts` 按 `PRM_REPLY_PARTS` 数几条，`opening_auto` 是 `PRM_OPENING_AUTO_MIN` 开着）。`on`：开关开着、不是 Mac 端；`ready`：还要有 `ADMIN_WXID` 和发送；`status()`：`{on: false}` 或 `{on, why, open, unsent}` | `dict` |
-| `WechatReview.sweep()` / `_goes_by_itself(packet)` / `_try(key, text, what)` / `notification_text(packet)` / `her_words(packet)` / `_platform_line(packet)` | 发送线程每一轮（`PrmService.tick`，`send_approved` 之后）：没发过通知的等人审的草稿一份一条发到管理员私聊（开场白到点自动发的跳过；发之前再看一眼还是 pending；发出去 `add_wechat_review`）；一轮最多 `PER_ROUND` 次发送，一次没发出去这一轮就停、管理员私聊等 `RETRY_SEC`（10 秒起翻倍、最多 2 分钟），每条 `SEND_TRIES` 次以后这次运行不再试（记 ERROR）。通知：第一行「#编号 草稿 · 名字 · 私聊 / 群里「群名」」、群的提醒、「她：」最后一两句（去掉时间；号码留占位符、`retention.scrub` 剪地址、`contact.mask_contacts` 打码微信号）或开场白 / 补发货盘 / 签收后问一句的说明、平台动作和商品（预览没通过的原因）、发货通知的运单号、「要注意：」、草稿全文、会分几条发、号码（`pii.legend`）、附件名、怎么回（带平台动作的：去控制台「批准并执行」，只能回 2） | 发了几条 / 文字 |
-| `PrmService.wechat_review` / `_packet_lines(packet)` | 微信里审批草稿的接线（功能 W）：`tick` 在 `send_approved` 之后调 `wechat_review.sweep()`；`_packet_lines`：草稿回的那些话（任务的文字和追加的话，`_job_lines`；没有任务的 ""）；`purge` 多 `wechat_reviews` | `str` |
+| `store.PrmStore.wechat_review_due(limit=200)` / `add_wechat_review(packet_id, deal_id, now)` / `wechat_review(packet_id)` / `wechat_reviews_open()` / `latest_wechat_review()` / `set_wechat_review(packet_id, states=(), now, **fields)` / `wechat_reviews_failed()` / `purge_wechat_reviews(deal_id, rewrite, now)` | 微信里审批草稿（功能 W）的表 `wechat_reviews`（一份草稿一行，编号就是草稿的）：还没发过通知的等人审的草稿（pending、不是百应草稿、旧的在前）/ 记下发过（`INSERT OR IGNORE`，新的才 True）/ 一行 / 还开着的（`notified` / `proposed`、草稿还是 pending，带草稿的 `party_id`、`chat_id`）/ 最后发的一条 / 比较并设置（`state`、`proposed`、`proposed_at`、`decision`、`answered_at`、`told_failed_at`，别的字段 `ValueError`）/ 在微信里批准、后来没发出去、还没告诉管理员的（带草稿的 `error`）/ 8.2 清理：已经不在等的行删掉，还在等的留着、改稿按 `rewrite` 剪 | 见描述 |
+| `wechat_review.WechatReview(store, config, *, clock, send=None, decide=None, check=None, lines=None, parts=None, drafting=None, local=None, opening_auto=False)` / `on` / `admin` / `ready` / `status()` | 微信里审批草稿（功能 W）：`PrmService.__init__` 建（`decide`、`check` 是服务的 `decide` / `edit_problem`，`lines` 是 `_packet_lines`，`parts` 按 `PRM_REPLY_PARTS` 数几条，`drafting` 问中转这个聊天有没有正在写的草稿任务，`local` 是 `_local`，`opening_auto` 是 `PRM_OPENING_AUTO_MIN` 开着）。`on`：开关开着、不是 Mac 端；`ready`：还要有 `ADMIN_WXID` 和发送；`status()`：`{on: false}` 或 `{on, why, open, unsent}` | `dict` |
+| `WechatReview.sweep()` / `_goes_by_itself(packet)` / `_try(key, text, what)` / `notification_text(packet)` / `her_words(packet)` / `_platform_line(packet)` | 发送线程每一轮（`PrmService.tick`，`send_approved` 之后）：没发过通知的等人审的草稿一份一条发到管理员私聊（开场白到点自动发的跳过；发之前再看一眼还是 pending；发出去 `add_wechat_review`），再发「#N 没发出去：…」给微信里批准、后来没发出去的（`told_failed_at`）；一轮最多 `PER_ROUND` 次发送，一次没发出去这一轮就停、管理员私聊等 `RETRY_SEC`（10 秒起翻倍、最多 2 分钟），每条 `SEND_TRIES` 次以后这次运行不再试（记 ERROR）。通知：第一行「#编号 草稿 · 名字 · 私聊 / 群里「群名」」、群的提醒、「她：」最后一两句（去掉时间；号码留占位符、`retention.scrub` 剪地址、`contact.mask_contacts` 打码微信号）或开场白 / 补发货盘 / 签收后问一句的说明、平台动作和商品（预览没通过的原因）、发货通知的运单号、「要注意：」、草稿全文、会分几条发、号码（`pii.legend`）、附件名、怎么回（带平台动作的：去控制台「批准并执行」，只能回 2） | 发了几条 / 文字 |
+| `wechat_review.parse(msg)` / `Answer` / `_line(line, bare)` / `_lines(content, bare=True)` / `_word(text)` | 管理员的一条消息要干什么（纯函数，不读库）：只认打的字（类型 1，或者带 `quoted_content` 的 49）；语音 → `voice`（`heard`：它的字打出来是什么）；引用通知（`_HEAD`：「#12 草稿」或机器人问改稿的「#12 改成」）→ `quote`；「改 12 …」→ `edit`、「改 12」→ `ask`（引用着通知时带 `quoted`）；「发 12」「不发 12」、裸「1」「2」一行一个 → `lines`（`rest`：还有别的话，`bare`：只有裸 1 / 2）；引用着别的消息时只认带编号的；别的 → `None` | `Answer \| None` |
+| `WechatReview.answer(msg)` / `claims(msg)` / `is_admin_line(msg)` / `_mine(parsed)` / `_about()` / `_answer(msg, parsed)` / `_on_quote(number, text)` / `_on_line(action, number, written)` / `_bare(which, written)` / `_send_it(row, packet)` / `_drop(row, packet)` / `_edit(row, packet, text)` / `_propose(row, packet, text)` / `_decided(row, packet, action, text)` / `_closed(packet, row)` / `_stale(packet)` / `_not_told(number, packet)` / `_row(number)` | 路由的 `wechat_review` 一步：`(接了没有, 回复)`。只认 `ADMIN_WXID` 自己的一对一私聊；`_mine`：裸 1 / 2 只在有开着的通知、或最后一条在 `RECENT_SEC` 以内时算，「改 N …」只在 #N 发过通知（或引用着通知）时算，语音照它的字算；交来两次的、写下来超过 `MAX_AGE_SEC` 才读到的不回；引用通知：发的字 → `decide(send)`（有改稿就 `decide(edit, 改稿)`）、不发的字 → `decide(drop)`、「改 …」→ `decide(edit, …)`、别的话 → `check` 过了记成改稿（`proposed`）、问「#N 改成：『…』 回 1 发出／2 不发」；裸 1 / 2：只有一份开着、通知早于这句话（`BARE_MARGIN_SEC`）才是它，几份 → 列出来，没有开着的 → 最后一份怎么样了；带平台动作的只能 2；成了 → `set_wechat_review(answered, decision)`；过时的（`superseded`）说她又发了新消息、新的草稿是哪份 / 还在写 / 人工接管；处理过的说怎么处理的 | `tuple[bool, str \| None]` |
+| `PrmService.wechat_review` / `edit_problem(packet, text)` / `_packet_lines(packet)` | 微信里审批草稿的接线（功能 W）：`tick` 在 `send_approved` 之后调 `wechat_review.sweep()`；`edit_problem`：这段字能不能当这份草稿发（超过 `MAX_DRAFT_CHARS`、没有要发的、占位符对不上、发货通知的单号不是系统的；`decide` 的 send / edit 和改稿都用它，错误的字和以前一样）；`_packet_lines`：草稿回的那些话（任务的文字和追加的话，`_job_lines`；没有任务的 ""）；`purge` 多 `wechat_reviews` | `str` |
 
 ### 2.33 `src/edge/`（微信边缘，`PRM_EDGE`；协议见根目录 `edge-protocol.md`）
 
@@ -1299,7 +1302,7 @@ desktop.py / desktop_mac.py  (桌面入口)
             ├── src/db/  (数据库层)
             │     ├── schema.py  → initialize_db()
             │     └── store.py   → MessageStore
-            ├── src/router.py  (消息路由) → src/routing/steps.py (7 个步骤，见功能 B)
+            ├── src/router.py  (消息路由) → src/routing/steps.py (8 个步骤，见功能 B)
             │       ├── src/admin.py  (管理员账号命令)
             │       ├── src/relay/  (Claude 中转：ClaudeRelay、RelayStore、HTTP、附件)
             │       │     └── tools/claude_relay/worker.py  (Mac 端 worker，经中转端口取任务)
@@ -1706,21 +1709,22 @@ _reinitialize() → _resolve_groups() → _prime_known_ids() → _rearm_watched(
 
 ---
 
-### 功能B: 业务路由（7 个步骤与红线）
+### 功能B: 业务路由（8 个步骤与红线）
 
-目的：这个微信号是商务号的网关，不是聊天对象。`MessageRouter.handle` 只跑 `src/routing/steps.py` 的 7 个步骤；没有一步调用模型，代码里也没有聊天模型（不需要任何 AI 密钥）。路由里能让机器人开口的只有两种：中转的回执（`cc …`、`cc 状态` 之类）和管理员账号命令的回复。中转结果、PRM 草稿、边缘发送由各自的发送线程发出，不经过路由的返回值。
+目的：这个微信号是商务号的网关，不是聊天对象。`MessageRouter.handle` 只跑 `src/routing/steps.py` 的 8 个步骤；没有一步调用模型，代码里也没有聊天模型（不需要任何 AI 密钥）。路由里能让机器人开口的只有三种：中转的回执（`cc …`、`cc 状态` 之类）、管理员账号命令的回复，和管理员对草稿通知的回复的结果（`PRM_WECHAT_REVIEW`，功能 W，只在管理员自己的私聊里）。中转结果、PRM 草稿、边缘发送由各自的发送线程发出，不经过路由的返回值。
 
 #### 涉及文件
 
 | 文件 | 路径 | 角色 |
 |---|---|---|
 | `router.py` | `src/router.py` | `MessageRouter`：开始 / 结束决策追踪，跑 `run_route`，去掉回复里的分隔符 |
-| `steps.py` | `src/routing/steps.py` | 7 个步骤和 `ROUTE_STEPS` |
+| `steps.py` | `src/routing/steps.py` | 8 个步骤和 `ROUTE_STEPS` |
 | `context.py` | `src/routing/context.py` | `RouteContext`、`Stop`、`RouteStep` |
 | `admin.py` | `src/admin.py` | 管理员账号命令（步骤 `admin_command`） |
 | `service.py` | `src/relay/service.py` | `ClaudeRelay.handle`（步骤 `claude_relay`） |
 | `service.py` | `src/prm/service.py` | `PrmService.handle`（步骤 `prm`） |
 | `service.py` | `src/edge/service.py` | `EdgeService.handle`（步骤 `edge`） |
+| `wechat_review.py` | `src/prm/wechat_review.py` | `WechatReview.answer`（步骤 `wechat_review`，功能 W） |
 
 #### 调用链
 
@@ -1733,16 +1737,18 @@ WcdbBackend._handle_message(...)（线程池）/ Mac 后端 poll_once
         │     │                    → ignore("self_message") → Stop(None)
         │     ├── 2 edge           PRM_EDGE=on：名单里达人的私聊 → EdgeService.handle（事件给 Mac，不入库）
         │     │                    → redact + reason("prm_edge") → Stop(None)
-        │     ├── 3 persist        MessageStore.insert_message()：重复（含旧编号 _legacy_ids）/出错 → ignore("duplicate_or_store_error") → Stop(None)
+        │     ├── 3 wechat_review  PRM_WECHAT_REVIEW=on：管理员自己的一对一私聊里对草稿通知的回复 → WechatReview.answer
+        │     │                    → decide（和控制台同一个）→ redact + reason("wechat_review") → Stop(结果)（不入库）
+        │     ├── 4 persist        MessageStore.insert_message()：重复（含旧编号 _legacy_ids）/出错 → ignore("duplicate_or_store_error") → Stop(None)
         │     │                    入库 → step("stored")，messages_processed += 1（群消息也入库）
-        │     ├── 4 claude_relay   CLAUDE_RELAY=on：允许的人私聊里的 cc（只做中转时不用 cc）→ ClaudeRelay.handle
+        │     ├── 5 claude_relay   CLAUDE_RELAY=on：允许的人私聊里的 cc（只做中转时不用 cc）→ ClaudeRelay.handle
         │     │                    → reason("claude_relay") → Stop(回执)
-        │     ├── 5 prm            PRM_COPILOT=on：登记达人的私聊、接手的老板拉的群（PRM_BOSS_GROUPS，功能 U）里的每一行
+        │     ├── 6 prm            PRM_COPILOT=on：登记达人的私聊、接手的老板拉的群（PRM_BOSS_GROUPS，功能 U）里的每一行
         │     │                    → PrmService.handle（静默的草稿任务；群里只有她的话起草）
         │     │                    → redact + reason("prm_copilot") → Stop(None)
-        │     ├── 6 admin_command  私聊且 sender_id == ADMIN_WXID：AdminCommandHandler.handle(去掉 "wxid_…:" 的文字)
+        │     ├── 7 admin_command  私聊且 sender_id == ADMIN_WXID：AdminCommandHandler.handle(去掉 "wxid_…:" 的文字)
         │     │                    是命令 → reason("admin_command") → Stop(回复)；不是命令 → 下一步
-        │     └── 7 silence        其余一律 → ignore("silent_end") → Stop(None)
+        │     └── 8 silence        其余一律 → ignore("silent_end") → Stop(None)
         ├── 回复非空 → strip_separators()（去掉 U+2063 / U+2064），空了就是 None
         └── trace.finish_reply(reply)（抛异常时 finish_error 后照常抛出）
   └── 有回复 → get_sender().deliver(...) 或 SendQueue.submit(...)（见功能 H）
@@ -1760,12 +1766,14 @@ WcdbBackend._handle_message(...)（线程池）/ Mac 后端 poll_once
 | 管理员私聊发别的话（`CLAUDE_RELAY_ONLY` 关着） | `silent_end`，不回 |
 | 登记 / 名单里达人的私聊：`cc …`、`同意`、`同意好友`、图片、语音（说的是 `cc …` 也一样） | 不回复、不建 cc 任务、不执行管理员命令：`PRM_COPILOT` 只有草稿任务，`PRM_EDGE` 只有给 Mac 的 `creator_message` 事件；`CLAUDE_RELAY_ONLY` 开关都一样 |
 | 登记 / 名单里的达人在群里 @ 这个号（`cc …`、`同意好友`） | 入库，不回，不起草、不转给 Mac（接手的老板拉的群除外：她的话起草，见上一行） |
+| 管理员私聊里对草稿通知的回复（`PRM_WECHAT_REVIEW`，功能 W）：引用通知回 1 / 2 / 改 …、「发 N」「不发 N」「改 N …」、只有一份在等时的裸 1 / 2 | `wechat_review` 结束（决策记录「[管理员在微信里审批草稿，内容不记录]」），不入库，回一句结果；从不变成 cc 任务（`CLAUDE_RELAY_ONLY` 开关都一样）、中转的批准（引用通知回「好」是草稿的；裸「好」照旧回答中转的批准请求）、管理员命令 |
+| 群里（管理员也一样）、别人、登记达人的私聊里的「1」「发 1」「改 1 …」、引用通知 | 和以前一样：群里入库、`silent_end`；达人的私聊只成她的草稿任务；没决定任何草稿 |
 | `PRM_COPILOT` 和 `PRM_EDGE` 同时开 | 配置检查不过（`_validate_config`），`load_config` 抛错，机器人不启动 |
 | 旧 `.env` 里聊天功能的开关（AI 后端和密钥、触发词、主动发言…） | 不再被读取，启动也不检查它们 |
 
 要加一个新的前置检查：写一个 `step(ctx) -> Stop | None` 放进 `ROUTE_STEPS` 的合适位置，不用动别的步骤；`silence` 必须是最后一步。`ROUTE_STEPS` 可以在实例上换（`router._route_steps`），测试这样用。
 
-测试：`tests/test_routing_steps.py`（7 个步骤的顺序和每一步）、`tests/test_router_business.py`（上面的红线；被删的聊天模块不能再被导入）、`tests/test_prm_route_redlines.py`（登记达人的红线端到端：真的 WCDB 后端接在假微信数据库上、路由、中转、PRM 或微信边缘，副驾驶和边缘两种模式、`CLAUDE_RELAY_ONLY` 开和关；管理员自己的 cc 照常建任务、回执（对照）；老板拉的群：接手的群里只有她的话成草稿任务，老板和别人的话、别的群里她的 cc 都不回不建任务；`PRM_COPILOT` + `PRM_EDGE` 不启动；二轮审查 win C4）。
+测试：`tests/test_routing_steps.py`（8 个步骤的顺序和每一步）、`tests/test_router_business.py`（上面的红线；被删的聊天模块不能再被导入）、`tests/test_prm_route_redlines.py`（登记达人的红线端到端：真的 WCDB 后端接在假微信数据库上、路由、中转、PRM 或微信边缘，副驾驶和边缘两种模式、`CLAUDE_RELAY_ONLY` 开和关；管理员自己的 cc 照常建任务、回执（对照）；老板拉的群：接手的群里只有她的话成草稿任务，老板和别人的话、别的群里她的 cc 都不回不建任务；`PRM_COPILOT` + `PRM_EDGE` 不启动；二轮审查 win C4）。
 
 ---
 
@@ -2247,6 +2255,7 @@ Mac worker.py：GET /relay/next（X-Relay-Kinds: admin,prm，prm_workspace 可�
       → _update_gate（够了就 send_gates.route = auto）
   → 「标为发错了」→ decide("wrong") → set_gate(review, reset)
 管理员的微信（PRM_WECHAT_REVIEW，功能 W）：tick → wechat_review.sweep → 通知发到 ADMIN_WXID 的私聊
+  → 管理员回 → steps.wechat_review → WechatReview.answer → PrmService.decide（和控制台同一个）→ send_approved（同上）
 
 运营亲手回复（M6 + H2）：
 WcdbBackend._poll_group（myWxid 发的、登记达人的私聊）→ _tell_own_message → PrmService.on_own_message
@@ -3339,9 +3348,9 @@ CREATE TABLE IF NOT EXISTS boss_groups (
 
 ### 功能W: 微信里审批草稿（`PRM_WECHAT_REVIEW`，默认关）
 
-目的（2026-11-09，用户：「现在都是到群里后我一句句复制来和你探讨……回答都是我从这里复制然后直接到那边微信粘贴」）：运营常不在 Windows 电脑前，草稿在控制台「待审批」里等，最后都是手动复制。打开后，每份等人审的草稿也发一条到管理员（`ADMIN_WXID`）的微信私聊。只在副驾驶模式（`PRM_COPILOT`）；微信边缘（`PRM_EDGE`）不变；Mac 端（`WECHAT_BACKEND=edge`）不起作用（管理员的私聊在 Windows 上读）。
+目的（2026-11-09，用户：「现在都是到群里后我一句句复制来和你探讨……回答都是我从这里复制然后直接到那边微信粘贴」）：运营常不在 Windows 电脑前，草稿在控制台「待审批」里等，最后都是手动复制。打开后，每份等人审的草稿也发一条到管理员（`ADMIN_WXID`）的微信私聊，管理员在手机上回就是审批。只在副驾驶模式（`PRM_COPILOT`）；微信边缘（`PRM_EDGE`）不变；Mac 端（`WECHAT_BACKEND=edge`）不起作用（管理员的私聊在 Windows 上读）。
 
-涉及的代码：`src/prm/wechat_review.py`（新：通知、控制台用的状态）、`src/prm/store.py`（新表 `wechat_reviews`）、`src/prm/service.py`（接线：`wechat_review`、发送线程的 `tick`、`_packet_lines`、清理）、`src/config.py`。
+涉及的代码：`src/prm/wechat_review.py`（新：通知、管理员的回复、控制台的状态）、`src/prm/store.py`（新表 `wechat_reviews`）、`src/prm/service.py`（接线：`wechat_review`、发送线程的 `tick`、`edit_problem`、`_packet_lines`、清理）、`src/routing/steps.py`（新的一步 `wechat_review`）、`src/config.py`。
 
 #### 通知（发送线程）
 
@@ -3355,6 +3364,8 @@ PrmService.tick → send_approved → wechat_review.sweep
   │     └── _try → send(ADMIN_WXID, 文字)
   │           成了 → store.add_wechat_review(编号, 合作单, now)（state notified）
   │           不成 → 这一条的次数 +1、管理员私聊连续失败 +1 → 等 10 秒起翻倍、最多 2 分钟（_wait_until）→ 这一轮停
+  └── store.wechat_reviews_failed()（在微信里批准的、后来没发出去、还没说过的）
+        → 「#12 没发出去：<原因>；需要的话请在微信里手动发给 <名字>」→ told_failed_at
   （一轮最多 PER_ROUND 次发送）
 ```
 
@@ -3377,6 +3388,37 @@ PrmService.tick → send_approved → wechat_review.sweep
 - 不发通知的：门槛自动发的、下班时段 / 自动模式自动发的（直接 approved，从不 pending）、开场白到点自动发的（`auto_at`，`send_due_openings` 会发）、百应私信的草稿（运营到百应里手动发）、「稍等」那句（不是草稿）、没填 `ADMIN_WXID`。
 - 发不出去从不卡住草稿：控制台照常能审。
 
+#### 管理员的回复（路由的 `wechat_review` 一步）
+
+```
+WcdbBackend（管理员的私聊；引用：<refermsg> → quoted_content）→ MessageRouter.handle
+  → steps.wechat_review（在 persist、claude_relay、admin_command 之前）
+      ├── 没有 PRM / 开关关着 / Mac 端 → 下一步（和以前一样）
+      └── WechatReview.answer(msg)
+            ├── 不是 ADMIN_WXID 自己的一对一私聊（群、别人、达人的私聊）→ 不接
+            ├── parse(msg)：只认打的字（类型 1，或带 quoted_content 的 49）；语音 → voice
+            │     引用通知（「#12 草稿」或机器人问改稿的「#12 改成」）→ quote
+            │     「发 12」「不发 12」（一行一个，连发合并的几行各算各的）、裸「1」「2」→ lines
+            │     「改 12 你的话」→ edit；「改 12」→ ask
+            ├── _mine：裸 1 / 2 只在有开着的通知、或最后一条通知在 RECENT_SEC 以内时算；「改 12 …」只在 #12 发过通知
+            │     （或者引用着一条通知）时算；语音照它的字算；不算 → 不接（照旧给中转、管理员命令）
+            ├── 交来第二次 → 结束、不回；写下来超过 MAX_AGE_SEC（5 分钟）才读到 → 结束、不回（历史，不是命令）
+            ├── 语音 →「回草稿要打字…语音不算（免得听错）」
+            ├── 引用 + 1 / 发 / 发送 / 好 / 好的 / 可以 / 行 / ok → decide(send)（有改稿就 decide(edit, 改稿)）
+            │   引用 + 2 / 不发 / 不要 / 算了 → decide(drop)；引用 +「改 你的话」→ decide(edit, 你的话)
+            │   引用 + 别的话 → edit_problem 检查 → 记成改稿（proposed）→「#12 改成：『…』 回 1 发出／2 不发」
+            ├── 不引用：「发 12」「不发 12」「改 12 …」→ 同上；裸 1 / 2：只有一份开着、而且它的通知早于这句话（BARE_MARGIN_SEC）
+            │   → 就是它；几份开着 →「现在有 N 份在等你回：#12 小美、#15 小雨；回「发 12」这样带编号…」；没有开着的 → 最后一份怎么样了
+            └── 一句回复：「#12 已批准，正在发给 小美（群里「…」）」/「#12 按你改的批准了…」/「#12 不发了…」/
+                「#12 已经处理过了：…」/「#12 已过时：她又发了新消息，新的草稿是 #15」/ decide 自己的错误
+      → trace.redact("[管理员在微信里审批草稿，内容不记录]") + reason("wechat_review") → Stop(回复)（不入库）
+```
+
+- 和控制台是同一个决定：都走 `PrmService.decide`，状态用比较并设置（`store.move`），谁先谁算，后来的那边说「已经处理过了」。草稿过时（她又发了新消息、有人亲手回了她）、在控制台处理过，通知就过时，回复时照实说。
+- 在微信里批准了、后来没发出去（窗口问题、老板拉的群关了…）→ 发送线程告诉管理员一句（只一次）；控制台批准的不在微信里说。
+- 「改」的检查和控制台的「改了再发」是同一个：`PrmService.edit_problem`（最多 1500 字、不能没内容、占位符要对得上、发货通知的单号要是系统里的）。改稿记下来之前就检查。
+- 回复从不变成 cc 任务、中转的批准（「好」只有引用通知时才是草稿的；裸「好」照旧回答中转的批准请求）、管理员命令；群里、别人、达人私聊里的一律不算。
+
 #### 表（`data/prm.db`）
 
 ```sql
@@ -3396,15 +3438,15 @@ CREATE TABLE IF NOT EXISTS wechat_reviews (
 CREATE INDEX IF NOT EXISTS wechat_reviews_deal ON wechat_reviews(deal_id);
 ```
 
-重启以后发过的不再发，没发过的照样发。8.2 清理（`PrmService.purge` → `purge_wechat_reviews`）：这张合作单已经不在等的草稿的行删掉，还在等的留着（发过一次就不再发）。
+重启以后发过的不再发，没发过的照样发。8.2 清理（`PrmService.purge` → `purge_wechat_reviews`）：这张合作单已经不在等的草稿的行删掉（连同管理员写的改稿），还在等的留着（发过一次就不再发）、改稿按 8.2 剪。管理员的回复不进 `messages.db`（这一步在 `persist` 前面），决策记录只写「[管理员在微信里审批草稿，内容不记录]」。
 
 #### 日志
 
-只有编号和条数：「PRM: draft 12 told to the admin's chat (微信里审批)」「PRM: the notification of draft 12 not sent to the admin's chat (try 2); the next try in 20 s」。从不写达人的名字、她的话、草稿。
+只有编号和条数：「PRM: draft 12 told to the admin's chat (微信里审批)」「PRM: draft 12 decided by the admin in WeChat (send)」「PRM: draft 12: the admin's words in WeChat kept as its proposed edit (7 chars)」「PRM: the notification of draft 12 not sent to the admin's chat (try 2); the next try in 20 s」。从不写达人的名字、她的话、草稿。
 
-测试：`tests/test_prm_wechat_review.py`（通知的内容、不发的几种、重试、重启、打码、日志、清理、配置）。
+测试：`tests/test_prm_wechat_review.py`（通知的内容、不发的几种、重试、重启、打码、回复的每一种、同一个决定、过时、失败告诉、读晚了、语音、交来两次、日志、清理、配置）、`tests/test_routing_steps.py`（第 3 步）、`tests/test_router_business.py`、`tests/test_prm_route_redlines.py`（红线：真的 WCDB 后端读引用的 `<refermsg>`）。
 
-还没做的：Windows 真机验证（CLAUDE.md 手动验证第 13 条）：通知在管理员手机上看起来对不对。
+还没做的：Windows 真机验证（CLAUDE.md 手动验证第 13 条）：手机上引用的通知电脑上读出来的 `quoted_content` 是不是至少有开头的「#编号 草稿」、手机上回的话多久读到。
 
 ---
 
@@ -3488,7 +3530,7 @@ CLAUDE_RELAY_PROGRESS_MIN=3                    # 长任务每隔几分钟发一�
 PRM_COPILOT=off                                # on：登记过的达人的私聊静默交给 Mac 起草，控制台审批后才发
 PRM_DB=data/prm.db                             # 达人、合作单、草稿、号码占位符、运单、门槛、操作记录、聚水潭寄样单的状态
 PRM_AUTO_REGISTER=off                          # on：每个新加的好友都自动登记成达人（管理员、cc 用户、有过达人记录的除外；只在 Windows 副驾驶模式；改了要重启）
-PRM_WECHAT_REVIEW=off                          # on：等人审的草稿也发一条到管理员（ADMIN_WXID）的微信私聊（功能 W；只在 Windows 副驾驶模式；改了要重启）
+PRM_WECHAT_REVIEW=off                          # on：等人审的草稿也发一条到管理员（ADMIN_WXID）的微信私聊，管理员引用回 1 发出 / 2 不发 / 改 + 你的话，或回「发 12」「不发 12」「改 12 …」（功能 W；只在 Windows 副驾驶模式；改了要重启）
 PRM_TAKEOVER_MIN=120                           # 运营亲手回了达人，人工接管多少分钟（5–1440）
 PRM_HOLDING_MIN=10                             # 草稿等多久先回达人一句（0=不回，最多 120）
 PRM_HOLDING_TEXT=收到，我确认一下马上回您        # 那一句
@@ -3618,7 +3660,7 @@ macOS 的 `build-macos.spec` 见功能 F（datas：`ui/dist`、`.env.example`、
 | `data/group_names.json` | `src/wechat/wcdb_backend.py` | chat_id → {name, member_count} |
 | `data/group_members.json` | `src/wechat/wcdb_backend.py` | chat_id → {wxid: display_name} |
 | `data/private_chat_names.json` | `src/wechat/wcdb_backend.py`（`PRM_COPILOT` 或 `PRM_EDGE` 打开、后端有私聊过滤器时） | 微信会话列表里的私聊 wxid → 名字（控制台「合作单」页从里面选人登记；边缘的 `/edge/private_chats` 也读它） |
-| `data/prm.db` | `src/prm/store.py` | 达人副驾驶：达人、合作单、草稿、号码占位符、运单、自动发送门槛、操作记录；草稿的 `tool` / `platform`（平台动作、预览、执行记录）；`sample_orders`（聚水潭寄样单的状态和合作单拿到了什么）、`buyin_threads`（抖音百应私信的会话）、`prm_meta`（上一轮问聚水潭 / 百应的时间、百应的 cursor 和读不了的原因、自动模式的开关、自动登记排队还没处理的新好友 `AUTO_QUEUE`）、`deals.three_party`（三方群：状态、时间、群编号、微信给的群名，签收满保留期清掉群名和编号，功能 S；老板拉的群接手以后 `by: "boss"`）、`boss_groups`（老板拉的群：找到的群、状态、她的达人和合作单、成员（名字只在这里）、处理到的最后一行（我们的行也算）、留给她下一份草稿的老板 / 别人的话（每句一个编号）、开场白还没写时的接手时间；`prm_meta` 的 `boss_groups_baseline` / `boss_groups_baseline_at`；`deals.last_by_chat`（「稍等」按聊天算轮），功能 U）；连接开 `PRAGMA secure_delete = ON`（清掉、删掉的内容用 0 覆盖）；`wechat_reviews`（微信里审批草稿：发过通知的草稿，功能 W） |
+| `data/prm.db` | `src/prm/store.py` | 达人副驾驶：达人、合作单、草稿、号码占位符、运单、自动发送门槛、操作记录；草稿的 `tool` / `platform`（平台动作、预览、执行记录）；`sample_orders`（聚水潭寄样单的状态和合作单拿到了什么）、`buyin_threads`（抖音百应私信的会话）、`prm_meta`（上一轮问聚水潭 / 百应的时间、百应的 cursor 和读不了的原因、自动模式的开关、自动登记排队还没处理的新好友 `AUTO_QUEUE`）、`deals.three_party`（三方群：状态、时间、群编号、微信给的群名，签收满保留期清掉群名和编号，功能 S；老板拉的群接手以后 `by: "boss"`）、`boss_groups`（老板拉的群：找到的群、状态、她的达人和合作单、成员（名字只在这里）、处理到的最后一行（我们的行也算）、留给她下一份草稿的老板 / 别人的话（每句一个编号）、开场白还没写时的接手时间；`prm_meta` 的 `boss_groups_baseline` / `boss_groups_baseline_at`；`deals.last_by_chat`（「稍等」按聊天算轮），功能 U）；连接开 `PRAGMA secure_delete = ON`（清掉、删掉的内容用 0 覆盖）；`wechat_reviews`（微信里审批草稿：发过通知的草稿、管理员的改稿和决定，功能 W） |
 | Mac：`prm_workspace/kb/products.md`、`kb/products.json` | `src/prm/platforms.py`（`worker.py --sync-products`） | 三个目录平台（`CATALOG_PLATFORMS`：xhs / dy / tb）在售商品的目录（平台动作的商品只能从这里取；聚水潭寄样单用抖店 / 小红书店的） |
 | Mac：`~/.claude-relay/platform/ledger/<批准编号>.json`、`platform/cli.lock`、`logs/platform/*.json` | `src/prm/platforms.py`、`tools/claude_relay/worker.py` | 执行台账（同一个批准只执行一次，0600；寄样单的收货人打码存：`ledger_action`）、一次只跑一个平台命令的锁、每次执行的完整记录（不自动删除；寄样单收货人只留省市：写的时候就剪，以前写的满 `KEEP_INBOX_DAYS` 剪，`logs/platform/.coarse-upto` 记着剪到哪天） |
 | Mac：系统临时目录的 `webot-jst-*.json` | `src/prm/platforms.py:_jst_run` | 聚水潭寄样单的单子（`sample-create --spec=`，执行时含收件电话；0600，命令跑完就删） |

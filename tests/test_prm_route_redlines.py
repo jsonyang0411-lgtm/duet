@@ -15,11 +15,12 @@ Bot.run wires them (tests/test_prm_catchup.py ``World``; the edge as tests/test_
 import json
 import os
 from unittest.mock import MagicMock, patch
+from xml.sax.saxutils import escape
 
 import pytest
 
 from router_support import ADMIN, BOT, TraceSpy
-from test_prm import CREATOR
+from test_prm import CREATOR, draft
 from test_prm_catchup import GROUP, ME, FakeWeChat, World, text_lines
 
 from src.admin import RELAY_HELP, AdminCommandHandler
@@ -174,6 +175,88 @@ def test_in_a_boss_group_taken_over_only_her_lines_become_draft_jobs(world, on):
     assert job["kind"] == "prm" and job["chat_id"] == GROUP and text_lines(job) == ["好的老板"]
     meta = json.loads(job["meta"])
     assert meta["channel"] == "group" and [x["who"] for x in meta["group"]["lines"]] == ["老板", "群成员"]
+
+
+# ── PRM_WECHAT_REVIEW (微信里审批草稿): the admin answers a draft in the admin's own chat ──────────
+
+QUOTE_TYPE = (57 << 32) | 49
+
+
+def quote_xml(title, quoted, by=ME):
+    """A WeChat 引用 as WeChat 4.1 writes it (tests/test_pat_and_recall.py ``QUOTE_XML``): ``title`` typed, quoting the
+    line ``quoted`` of ``by``."""
+    return (f'<msg><appmsg appid="" sdkver="0"><title>{escape(title)}</title><type>57</type>'
+            f'<refermsg><type>1</type><svrid>777</svrid><chatusr>{by}</chatusr><displayname>我</displayname>'
+            f'<content>{escape(quoted)}</content></refermsg></appmsg></msg>')
+
+
+def told_draft(world, run):
+    """She writes, the Mac drafts, the sender thread's round tells the admin: the notification's text."""
+    world.wechat.say(CREATOR, CREATOR, "收到6件哈", world.clock.now)
+    run.poll()
+    world.mac_drafts(run, draft(reply_draft="收到啦～戴着还合适吗？", slots={}, message_kind="greeting"))
+    run.prm.wechat_review.sweep()
+    [(chat, notification)] = [(c, t) for c, t in world.sent if "草稿 ·" in t]
+    assert chat == ADMIN and notification.startswith("#1 草稿 · 小美 · 私聊")
+    return notification
+
+
+@pytest.mark.parametrize("relay_only", ["off", "on"])
+def test_the_admins_quote_of_a_draft_notification_decides_it_and_nothing_else_does(world, relay_only):
+    """The real WCDB backend reads the admin's 引用 of a notification (its <refermsg>): the route's ``wechat_review``
+    step sends the draft and the admin hears so once; neither that nor 「发 1」 / 「改 1 …」 / 「不发 1」 becomes a cc task,
+    with CLAUDE_RELAY_ONLY on or off.  Her own 「1」 and her quote of the same words in her chat stay her lines for the
+    next draft (no decision, no reply to her); the admin's quote in a group gets nothing; a cc task still is one."""
+    world.register()
+    run = world.run(prm_wechat_review="on", claude_relay_only=relay_only)
+    notification = told_draft(world, run)
+    world.clock.now += 10
+    world.wechat.say(GROUP, ADMIN, quote_xml("1", notification), world.clock.now, local_type=QUOTE_TYPE)
+    world.wechat.say(GROUP, ADMIN, "发 1", world.clock.now + 1)
+    run.poll()
+    assert world.prm_store.packet(1)["status"] == "pending"                  # a group: nothing
+    world.clock.now += 10
+    world.wechat.say(ADMIN, ADMIN, quote_xml("1", notification), world.clock.now, local_type=QUOTE_TYPE)
+    run.poll()
+    assert world.prm_store.packet(1)["status"] == "approved"
+    assert world.sent[-1] == (ADMIN, "#1 已批准，正在发给 小美")
+    assert run.prm.send_approved() == 1 and world.sent[-1] == (CREATOR, "收到啦～戴着还合适吗？")
+    world.clock.now += 10
+    for n, text in enumerate(("发 1", "改 1 好的老师", "不发 1")):
+        world.wechat.say(ADMIN, ADMIN, text, world.clock.now + n * 5)
+        world.clock.now += 5
+        run.poll()
+        assert world.sent[-1] == (ADMIN, "#1 已经处理过了：你在微信里回过了，已经发出去了")
+    assert [job["kind"] for job in world.jobs()] == ["prm"]                  # no cc task of any of it
+    # her own 「1」 and her quote of the notification's words, in her chat: her lines, nothing else
+    before = len(world.sent)
+    world.clock.now += 10
+    world.wechat.say(CREATOR, CREATOR, "1", world.clock.now)
+    world.wechat.say(CREATOR, CREATOR, quote_xml("1", notification, by=CREATOR), world.clock.now + 1,
+                     local_type=QUOTE_TYPE)
+    world.clock.now += 5
+    run.poll()
+    assert len(world.sent) == before and world.prm_store.packets(("approved",)) == []
+    assert {job["kind"] for job in world.jobs()} == {"prm"} and world.jobs()[-1]["chat_id"] == CREATOR
+    # the control: the admin's cc is a task, with its receipt
+    world.clock.now += 10
+    world.wechat.say(ADMIN, ADMIN, "cc 查一下今天的订单", world.clock.now)
+    run.poll()
+    assert [job["kind"] for job in world.jobs()][-1] == "admin" and "已交给 Mac" in world.sent[-1][1]
+
+
+def test_with_the_switch_off_the_admins_quote_of_a_draft_is_nothing(world):
+    world.register()
+    run = world.run(claude_relay_only="on")
+    world.wechat.say(CREATOR, CREATOR, "收到6件哈", world.clock.now)
+    run.poll()
+    world.mac_drafts(run, draft(reply_draft="收到啦～戴着还合适吗？", slots={}, message_kind="greeting"))
+    run.prm.tick()
+    assert world.sent == []                                                  # nothing told
+    world.clock.now += 10
+    world.wechat.say(ADMIN, ADMIN, quote_xml("1", "#1 草稿 · 小美 · 私聊"), world.clock.now, local_type=QUOTE_TYPE)
+    run.poll()
+    assert world.prm_store.packet(1)["status"] == "pending" and world.sent == []
 
 
 # ── PRM_EDGE (Windows is only the WeChat edge; the Mac drafts) ─────────────────

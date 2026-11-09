@@ -2019,6 +2019,42 @@ class PrmStore:
                 " ORDER BY w.packet_id", (PENDING,)).fetchall()
         return [dict(r) for r in rows]
 
+    def latest_wechat_review(self) -> Optional[dict]:
+        """The draft told to the admin last, whatever became of it (None: none yet)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM wechat_reviews ORDER BY notified_at DESC, packet_id DESC LIMIT 1").fetchone()
+        return dict(row) if row else None
+
+    def set_wechat_review(self, packet_id: int, states: tuple = (), now: Optional[float] = None, **fields) -> bool:
+        """Compare-and-set: the row's ``fields`` (state, proposed, proposed_at, decision, answered_at, told_failed_at)
+        change only while it is in one of ``states`` (any state when empty); True when it changed."""
+        allowed = {"state", "proposed", "proposed_at", "decision", "answered_at", "told_failed_at"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"not a wechat_reviews field: {sorted(unknown)}")
+        fields["updated_at"] = time.time() if now is None else now
+        names = sorted(fields)
+        where = f" AND state IN ({', '.join('?' * len(states))})" if states else ""
+        with self._lock:
+            cur = self._conn.execute(
+                f"UPDATE wechat_reviews SET {', '.join(f'{n} = ?' for n in names)} WHERE packet_id = ?{where}",
+                (*[fields[n] for n in names], int(packet_id), *states))
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def wechat_reviews_failed(self) -> list[dict]:
+        """The drafts the admin approved in WeChat (``decision`` send / edit) that then did not go out, the admin not
+        told yet (``told_failed_at`` empty), oldest first; each row with its packet's ``party_id``, ``chat_id`` and
+        ``error``."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT w.*, p.party_id AS party_id, p.chat_id AS chat_id, p.error AS error FROM wechat_reviews w"
+                " JOIN action_packets p ON p.id = w.packet_id WHERE w.state = 'answered'"
+                " AND w.decision IN ('send', 'edit') AND p.status = ? AND w.told_failed_at IS NULL ORDER BY w.packet_id",
+                (FAILED,)).fetchall()
+        return [dict(r) for r in rows]
+
     def purge_wechat_reviews(self, deal_id: int, rewrite: Callable[[str], str], now: Optional[float] = None) -> int:
         """8.2 clean-up of a deal (``PrmService.purge``): the rows of its drafts that no longer wait go, with what the
         admin wrote for them; a waiting one stays (told once: never told again), its proposed edit cut by ``rewrite``.

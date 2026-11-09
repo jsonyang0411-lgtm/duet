@@ -1,29 +1,37 @@
 """微信里审批草稿 (PRM_WECHAT_REVIEW, 2026-11-09, src/prm/wechat_review.py): the drafts waiting in 待审批 are told, once
-each, to the admin's private chat; nothing of it with the switch off.
+each, to the admin's private chat, and the admin decides them there (quoting a notification: 1 / 2 / 改 …, or 「发 N」
+「不发 N」「改 N …」, a bare 1 / 2 while one draft waits).  The same decision as the console's; nothing of it with the
+switch off.
 
-The relay and the PRM service as Bot.run wires them (``Desk``), with a fake WeChat that records every message the bot
-sends.  Names, numbers and addresses are made up.
+The relay, the PRM service and the router as Bot.run wires them (``Desk``), with a fake WeChat that records every
+message the bot sends.  Names, numbers and addresses are made up.
 """
 
 import itertools
 import json
 import logging
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
+from router_support import BOT, TraceSpy
 from test_prm import ADMIN, CREATOR, Clock, config
 
+from src.admin import RELAY_HELP, AdminCommandHandler
+from src.db import MessageStore, initialize_db
 from src.prm import deals, gates
 from src.prm.service import SETTLE_SEC, PrmService
 from src.prm.store import BUYIN_TOOL, PrmStore
-from src.prm.wechat_review import NO_ADMIN_WHY, RETRY_SEC, SEND_TRIES
-from src.relay.service import ClaudeRelay
+from src.prm.wechat_review import (NO_ADMIN_WHY, RETRY_SEC, SEND_TRIES, VOICE_TEXT, parse)
+from src.relay.service import MAX_AGE_SEC, ClaudeRelay
 from src.relay.store import RelayStore
+from src.router import MessageRouter
 
 OTHER = "wxid_creator02"            # a second creator (小雨)
 GROUP = "200000009@chatroom"        # a 老板拉的群 (its name is made up)
 IDS = itertools.count(1)
+QUOTE = 49                          # a WeChat 引用 (local_type 57 << 32 | 49: the backend gives 49 and the quote)
 
 
 def reply_draft(text="收到啦～戴着还合适吗？", **extra):
@@ -34,18 +42,25 @@ def reply_draft(text="收到啦～戴着还合适吗？", **extra):
 
 
 class Desk:
-    """The relay and the PRM service as Bot.run wires them; ``sent``: every message the bot sent, in order.  A send to a
-    chat in ``refuse`` fails."""
+    """The relay, the PRM service and the router as Bot.run wires them; ``sent``: every message the bot sent, in
+    order (the PRM's sends and the route's replies).  A send to a chat in ``refuse`` fails."""
 
-    def __init__(self, clock, tmp_path, *, review="on", admin=ADMIN, store=None, relay_store=None, **prm):
+    def __init__(self, clock, tmp_path, *, review="on", relay_only="off", admin=ADMIN, store=None, relay_store=None,
+                 **prm):
         self.clock = clock
         self.sent: list = []
         self.refuse: set = set()
-        cfg = config(claude_relay_wxids=[], admin_wxid=admin, prm_wechat_review=review, **prm)
+        cfg = config(claude_relay_wxids=[], claude_relay_only=relay_only, admin_wxid=admin, prm_wechat_review=review,
+                     **prm)
+        self.router = MessageRouter(store=MessageStore(initialize_db(":memory:")), admin_handler=AdminCommandHandler(),
+                                    config=SimpleNamespace(bot_display_name=BOT, admin_wxid=admin), tracer=TraceSpy())
         self.relay = ClaudeRelay(cfg, store=relay_store or RelayStore(":memory:"), clock=clock,
-                                 files_dir=tmp_path / "relay", send=self._send)
+                                 files_dir=tmp_path / "relay", send=self._send, reserved=self.router._admin.is_command,
+                                 extra_help=RELAY_HELP)
+        self.router._claude_relay = self.relay
         self.prm = PrmService(cfg, self.relay, store=store or PrmStore(":memory:"), clock=clock, send=self._send,
                               send_file=lambda chat, path: True)
+        self.router._prm = self.prm
         self.review = self.prm.wechat_review
 
     def _send(self, chat, text):
@@ -71,12 +86,23 @@ class Desk:
         self.relay.tick()
         return self.prm.store.packet_for_job(job["id"])
 
+    def admin(self, content, *, quote=None, msg_type=None, at=None, sender=ADMIN, chat=ADMIN, group=False, **extra):
+        """The admin writes in the admin's chat (``quote``: the text of the message quoted); the route's reply."""
+        msg = {"message_id": f"a{next(IDS)}", "chat_id": chat, "group_name": "管理员", "sender_id": sender,
+               "sender_name": "管理员", "content": content, "msg_type": msg_type or (QUOTE if quote else 1),
+               "timestamp": self.clock.now if at is None else at, "is_group": group, "quoted_content": quote or "",
+               **extra}
+        return self.router.handle(msg)
+
     def told(self) -> list[str]:
-        """What the PRM sent the admin (the notifications)."""
+        """What the PRM sent the admin (the notifications, a failed send told)."""
         return [text for chat, text in self.sent if chat == ADMIN]
 
     def to(self, chat=CREATOR) -> list[str]:
         return [text for c, text in self.sent if c == chat]
+
+    def jobs(self, kind="admin") -> list[dict]:
+        return [j for j in self.relay.store.list_jobs(limit=100) if j.get("kind", "admin") == kind]
 
 
 @pytest.fixture
@@ -100,6 +126,11 @@ def waiting(desk, said="收到6件哈", chat=CREATOR, **draft) -> dict:
     assert packet["status"] == "pending"
     desk.review.sweep()
     return packet
+
+
+def head(desk, number) -> str:
+    """The first line of the notification of draft ``number``: what a quote of it starts with."""
+    return next(t for t in desk.told() if t.startswith(f"#{number} 草稿")).split("\n")[0]
 
 
 # ── the notification ─────────────────────────────────────────────────────
@@ -155,15 +186,19 @@ def test_after_a_restart_a_told_draft_is_not_told_again_and_one_not_told_yet_is(
     two.stop()
 
 
-def test_with_the_switch_off_nothing_is_told(clock, tmp_path):
+def test_with_the_switch_off_nothing_is_told_and_every_answer_goes_on_as_before(clock, tmp_path):
     desk = Desk(clock, tmp_path, review="off")
     desk.prm.register(CREATOR, "小美", "")
     desk.her("收到6件哈")
     packet = desk.mac()
     desk.prm.tick()
     assert desk.told() == [] and desk.prm.store.wechat_review(packet["id"]) is None
-    assert desk.review.status() == {"on": False} and desk.prm.store.wechat_reviews_open() == []
+    assert desk.review.status() == {"on": False}
+    assert desk.admin(f"发 {packet['id']}") is None                      # (silence, as before)
+    assert desk.admin("1", quote=f"#{packet['id']} 草稿 · 小美 · 私聊") is None
+    assert desk.router._tracer.notes["ended_by"] == "silence"
     assert desk.prm.store.packet(packet["id"])["status"] == "pending"
+    assert desk.prm.store.wechat_reviews_open() == [] and desk.prm.store.latest_wechat_review() is None
     desk.stop()
 
 
@@ -309,8 +344,16 @@ def test_a_platform_draft_is_told_but_only_the_console_runs_it(desk):
     number = platform_packet(desk)
     desk.review.sweep()
     text = desk.told()[0]
-    assert text.startswith(f"#{number} 草稿 · 小美 · 私聊") and "平台动作：聚水潭 · 达人寄样单（测试款贝雷帽）" in text
+    assert "平台动作：聚水潭 · 达人寄样单（测试款贝雷帽）" in text
     assert text.endswith("这份带平台动作，请在控制台「批准并执行」；微信里只能回 2 不发")
+    for answer in ("1", "改 好的"):
+        assert desk.admin(answer, quote=head(desk, number)) == (
+            f"#{number} 带平台动作：微信里不能执行，请在控制台点「批准并执行」；不要的话回 2")
+    assert desk.admin(f"发 {number}").startswith(f"#{number} 带平台动作")
+    assert desk.admin("就这样吧", quote=head(desk, number)).startswith(f"#{number} 带平台动作")
+    assert desk.prm.store.packet(number)["status"] == "pending" and desk.jobs("prm") == []
+    assert desk.admin("2", quote=head(desk, number)) == f"#{number} 不发了（她再发消息时会有新的草稿）"
+    assert desk.prm.store.packet(number)["status"] == "dropped"
 
 
 def test_a_platform_draft_whose_preview_failed_says_so(desk):
@@ -379,6 +422,336 @@ def test_a_chat_that_takes_nothing_is_tried_once_a_round_and_the_rest_wait(desk)
     assert desk.review.sweep() == 1 and len(desk.prm.store.wechat_reviews_open()) == 4
 
 
+
+# ── the admin's answers ─────────────────────────────────────────────────
+
+@pytest.mark.parametrize("word", ["1", "发", "发送", "好", "好的", "可以", "行", "ok", "OK", "１", "好的！"])
+def test_quoting_a_notification_with_a_yes_sends_the_draft(desk, word):
+    packet = waiting(desk)
+    assert desk.admin(word, quote=head(desk, packet["id"])) == f"#{packet['id']} 已批准，正在发给 小美"
+    assert desk.prm.store.packet(packet["id"])["status"] == "approved"
+    assert desk.prm.send_approved() == 1 and desk.to(CREATOR) == ["收到啦～戴着还合适吗？"]
+    assert desk.jobs() == [] and desk.router._tracer.notes["ended_by"] == "wechat_review"
+    assert desk.prm.store.wechat_review(packet["id"])["decision"] == "send"
+
+
+@pytest.mark.parametrize("word", ["2", "不发", "不要", "算了", "２。"])
+def test_quoting_a_notification_with_a_no_drops_the_draft(desk, word):
+    packet = waiting(desk)
+    assert desk.admin(word, quote=head(desk, packet["id"])) == f"#{packet['id']} 不发了（她再发消息时会有新的草稿）"
+    assert desk.prm.store.packet(packet["id"])["status"] == "dropped"
+    desk.prm.tick()
+    assert desk.to(CREATOR) == []
+
+
+def test_quoting_with_改_sends_the_admins_words_after_the_consoles_checks(desk):
+    packet = waiting(desk)
+    number = packet["id"]
+    assert desk.admin("改 " + "长" * 1501, quote=head(desk, number)) == f"#{number} 没发：最多 1500 个字"
+    assert desk.admin("改：您的电话〈手机9〉对吗", quote=head(desk, number)) == (
+        f"#{number} 没发：草稿里有对不上的占位符：〈手机9〉")
+    assert desk.prm.store.packet(number)["status"] == "pending"
+    assert desk.admin("改 收到啦～\n明天给您开佣金哈", quote=head(desk, number)) == f"#{number} 按你改的批准了，正在发给 小美"
+    packet = desk.prm.store.packet(number)
+    assert (packet["status"], packet["final_text"], packet["edited"]) == ("approved", "收到啦～\n明天给您开佣金哈", True)
+    assert desk.prm.store.wechat_review(number)["decision"] == "edit"
+
+
+def test_改_alone_asks_for_the_words(desk):
+    packet = waiting(desk)
+    number = packet["id"]
+    assert desk.admin("改", quote=head(desk, number)) == f"#{number} 要改成什么？引用通知回「改 你的话」，或者回「改 {number} 你的话」"
+    assert desk.admin(f"改 {number}") == f"#{number} 要改成什么？回「改 {number} 你的话」"
+    assert desk.prm.store.packet(number)["status"] == "pending"
+
+
+def test_a_shipping_notice_edited_in_wechat_keeps_the_systems_waybill(desk):
+    _, number = deals.add_shipment(desk.prm.store, 1, "中通快递", "ZT1234567890", now=desk.clock.now, review=True)
+    desk.review.sweep()
+    reply = desk.admin("改 样品寄出啦：中通快递 ZT0000000000", quote=head(desk, number))
+    assert reply == f"#{number} 没发：发货通知里的单号和系统记录对不上（系统记录：ZT1234567890）"
+    assert desk.admin("改 老师，样品寄出啦：中通快递 ZT1234567890", quote=head(desk, number)).endswith("正在发给 小美")
+
+
+def test_other_words_quoting_a_notification_are_kept_as_its_proposed_edit_until_1(desk):
+    packet = waiting(desk)
+    number = packet["id"]
+    reply = desk.admin("戴着合适吗老师～", quote=head(desk, number))
+    assert reply == f"#{number} 改成：『戴着合适吗老师～』\n回 1 发出／2 不发"
+    assert desk.prm.store.packet(number)["status"] == "pending"            # not sent yet
+    row = desk.prm.store.wechat_review(number)
+    assert (row["state"], row["proposed"]) == ("proposed", "戴着合适吗老师～")
+    reply = desk.admin("还是这样吧：戴着合适吗～", quote=reply.split("\n")[0])   # quoting the question: a new proposal
+    assert reply == f"#{number} 改成：『还是这样吧：戴着合适吗～』\n回 1 发出／2 不发"
+    assert desk.admin("1", quote=reply.split("\n")[0]) == f"#{number} 按你改的批准了，正在发给 小美"
+    packet = desk.prm.store.packet(number)
+    assert (packet["status"], packet["final_text"]) == ("approved", "还是这样吧：戴着合适吗～")
+
+
+@pytest.mark.parametrize("how", ["quoting the notification", "bare"])
+def test_a_proposed_edit_is_sent_by_a_1_quoting_the_notification_or_a_bare_1(desk, how):
+    packet = waiting(desk)
+    number = packet["id"]
+    desk.admin("明天给您寄～", quote=head(desk, number))
+    reply = desk.admin("1", quote=head(desk, number) if how != "bare" else None)
+    assert reply == f"#{number} 按你改的批准了，正在发给 小美"
+    assert desk.prm.store.packet(number)["final_text"] == "明天给您寄～"
+
+
+def test_a_proposed_edit_is_checked_when_it_is_made(desk):
+    packet = waiting(desk)
+    number = packet["id"]
+    assert desk.admin("电话〈手机2〉对吗", quote=head(desk, number)) == f"#{number} 不能这样改：草稿里有对不上的占位符：〈手机2〉"
+    assert desk.prm.store.wechat_review(number)["state"] == "notified"
+
+
+def test_a_2_after_a_proposed_edit_drops_the_draft(desk):
+    packet = waiting(desk)
+    desk.admin("明天给您寄～", quote=head(desk, packet["id"]))
+    assert desk.admin("2").endswith("不发了（她再发消息时会有新的草稿）")
+    assert desk.prm.store.packet(packet["id"])["status"] == "dropped"
+
+
+def test_without_a_quote_the_number_says_which_draft(desk):
+    desk.prm.register(OTHER, "小雨", "")
+    first = waiting(desk)
+    second = waiting(desk, "多少佣金呀", chat=OTHER, text="25% 哦～")
+    third = waiting(desk, "那我等你", chat=CREATOR, text="好的～")       # (#1 out of date: her new line)
+    assert desk.admin(f"发 {second['id']}") == f"#{second['id']} 已批准，正在发给 小雨"
+    assert desk.admin(f"改 {third['id']} 好的老师～明天见") == f"#{third['id']} 按你改的批准了，正在发给 小美"
+    assert desk.prm.store.packet(third["id"])["final_text"] == "好的老师～明天见"
+    assert desk.admin(f"不发 {first['id']}") == f"#{first['id']} 已过时：她又发了新消息，新的草稿 #{third['id']} 已经处理过了"
+    assert desk.admin("发 99") == "没有找到草稿 #99"
+    assert desk.jobs() == []
+
+
+def test_a_burst_of_numbered_answers_is_each_answered(desk):
+    desk.prm.register(OTHER, "小雨", "")
+    first = waiting(desk)
+    second = waiting(desk, "多少佣金呀", chat=OTHER, text="25% 哦～")
+    reply = desk.admin(f"发 {first['id']}\n不发 {second['id']}\n谢谢")         # (three bubbles, one burst)
+    assert reply.split("\n") == [f"#{first['id']} 已批准，正在发给 小美", f"#{second['id']} 不发了（她再发消息时会有新的草稿）",
+                                 "其余的话没有当成回复：要改草稿请回「改 编号 你的话」"]
+
+
+def test_a_numbered_edit_of_a_number_never_told_goes_on_as_before(desk):
+    """「改 3 处错别字」 with no notification #3: not a draft's answer (a cc task in relay-only mode, say)."""
+    waiting(desk)
+    assert desk.admin("改 3 处错别字") is None and desk.router._tracer.notes["ended_by"] == "silence"
+
+
+def test_a_numbered_edit_quoting_a_notification_is_for_the_draft_it_quotes(desk):
+    packet = waiting(desk)
+    number = packet["id"]
+    assert desk.admin("改 3 件都收到了吗", quote=head(desk, number)) == f"#{number} 按你改的批准了，正在发给 小美"
+    assert desk.prm.store.packet(number)["final_text"] == "3 件都收到了吗"
+
+
+def test_a_bare_1_or_2_works_only_while_exactly_one_told_draft_waits(desk):
+    desk.prm.register(OTHER, "小雨", "")
+    first = waiting(desk)
+    second = waiting(desk, "多少佣金呀", chat=OTHER, text="25% 哦～")
+    assert desk.admin("1") == (f"现在有 2 份在等你回：#{first['id']} 小美、#{second['id']} 小雨；回「发 {first['id']}」"
+                               "这样带编号，或者引用那条通知回 1")
+    assert {p["status"] for p in desk.prm.store.packets(("pending", "approved"))} == {"pending"}
+    desk.admin(f"不发 {first['id']}")
+    assert desk.admin("1") == f"#{second['id']} 已批准，正在发给 小雨"
+    # nothing open: about the last one, while it is recent; long after, a bare 1 is no answer at all (as before)
+    assert desk.admin("2") == f"#{second['id']} 已经处理过了：你在微信里回过了，已经批准，正在发"
+    desk.clock.now += 3601
+    assert desk.admin("1") is None and desk.router._tracer.notes["ended_by"] == "silence"
+
+
+def test_a_bare_answer_never_takes_a_draft_told_after_it_was_written(desk):
+    packet = waiting(desk)
+    assert desk.admin("1", at=desk.clock.now - 30) == (
+        f"现在有 1 份在等你回：#{packet['id']} 小美；回「发 {packet['id']}」这样带编号，或者引用那条通知回 1")
+    assert desk.prm.store.packet(packet["id"])["status"] == "pending"
+
+
+def test_one_decision_per_draft_the_console_first(desk):
+    packet = waiting(desk)
+    number = packet["id"]
+    assert desk.prm.decide(number, "send")["ok"]                        # the console
+    assert desk.admin("2", quote=head(desk, number)) == f"#{number} 已经处理过了：已经批准，正在发"
+    desk.prm.send_approved()
+    assert desk.admin("1", quote=head(desk, number)) == f"#{number} 已经处理过了：已经发出去了"
+    assert desk.to(CREATOR) == ["收到啦～戴着还合适吗？"]
+
+
+def test_one_decision_per_draft_wechat_first(desk):
+    packet = waiting(desk)
+    number = packet["id"]
+    assert desk.admin("2", quote=head(desk, number)).endswith("不发了（她再发消息时会有新的草稿）")
+    assert desk.prm.decide(number, "send") == {"ok": False, "error": "这条草稿已经处理过了（或者达人又发了新消息，草稿已过时）"}
+    assert desk.admin("1", quote=head(desk, number)) == f"#{number} 已经处理过了：你在微信里回过了，点了不发"
+
+
+def test_an_out_of_date_notification_says_which_draft_replaced_it(desk):
+    first = waiting(desk)
+    desk.her("对了，颜色发错了")                                         # she writes again: #1 out of date
+    assert desk.admin("1", quote=head(desk, first["id"])) == (
+        f"#{first['id']} 已过时：她又发了新消息，新的草稿还在写，写好了会发到这里")
+    second = desk.mac(text="不好意思～马上给您换")
+    assert desk.admin("1", quote=head(desk, first["id"])) == f"#{first['id']} 已过时：她又发了新消息，新的草稿是 #{second['id']}"
+    assert desk.prm.store.packet(second["id"])["status"] == "pending"     # (only #2's own answer sends it)
+
+
+def test_a_draft_out_of_date_because_a_person_took_the_chat_says_so(desk):
+    packet = waiting(desk)
+    desk.prm.on_own_message({"message_id": "own1", "chat_id": CREATOR, "sender_id": "wxid_me", "content": "我来回她",
+                             "msg_type": 1, "is_group": False, "timestamp": desk.clock.now})
+    assert desk.prm.store.packet(packet["id"])["status"] == "superseded"
+    assert desk.admin("1", quote=head(desk, packet["id"])).startswith(f"#{packet['id']} 已过时：")
+
+
+def test_a_draft_approved_in_wechat_that_fails_to_send_is_told_in_one_line(desk):
+    packet = waiting(desk)
+    desk.refuse.add(CREATOR)
+    desk.admin("1", quote=head(desk, packet["id"]))
+    desk.prm.tick()                                                     # sent: refused, then told
+    assert desk.prm.store.packet(packet["id"])["status"] == "failed"
+    assert desk.told()[-1] == f"#{packet['id']} 没发出去：文字没发出去；需要的话请在微信里手动发给 小美"
+    desk.prm.tick()
+    assert len([t for t in desk.told() if "没发出去" in t]) == 1
+
+
+def test_a_draft_approved_in_the_console_that_fails_is_not_told_in_wechat(desk):
+    packet = waiting(desk)
+    desk.refuse.add(CREATOR)
+    desk.prm.decide(packet["id"], "send")
+    desk.prm.tick()
+    assert desk.prm.store.packet(packet["id"])["status"] == "failed" and len(desk.told()) == 1
+
+
+def test_a_group_draft_answered_1_is_confirmed_for_the_group(desk):
+    number = desk.prm.store.add_packet(
+        deal_id=1, party_id=1, job_id=None, chat_id=GROUP, kind="other", text="在的～",
+        attachments=[], intent="", slots={}, stage_proposal="", needs_attention=False, reason="",
+        meta={"channel": "group", "group_name": "小美合作群"})
+    desk.review.sweep()
+    assert desk.admin("1", quote=head(desk, number)) == f"#{number} 已批准，正在发给 小美（群里「小美合作群」）"
+    assert desk.prm.store.packet(number)["status"] == "approved"
+
+
+def test_an_answer_read_late_is_history_and_gets_no_reply(desk):
+    packet = waiting(desk)
+    assert desk.admin("1", quote=head(desk, packet["id"]), at=desk.clock.now - MAX_AGE_SEC - 60) is None
+    assert desk.router._tracer.notes["ended_by"] == "wechat_review"
+    assert desk.prm.store.packet(packet["id"])["status"] == "pending" and desk.jobs() == []
+
+
+def test_a_voice_answer_never_counts(desk):
+    packet = waiting(desk)
+    for said in (f"[语音] 发 {packet['id']}。", "[语音] 1"):
+        assert desk.admin(said, msg_type=34) == VOICE_TEXT
+    assert desk.prm.store.packet(packet["id"])["status"] == "pending"
+    assert desk.admin("[语音] 帮我看看今天的订单", msg_type=34) is None      # (no answer: as before)
+
+
+def test_an_answer_handed_on_twice_counts_once(desk):
+    packet = waiting(desk)
+    msg = {"message_id": "dup1", "chat_id": ADMIN, "group_name": "管理员", "sender_id": ADMIN, "sender_name": "管理员",
+           "content": "1", "msg_type": QUOTE, "timestamp": desk.clock.now, "is_group": False,
+           "quoted_content": head(desk, packet["id"])}
+    assert desk.router.handle(dict(msg)).endswith("正在发给 小美")
+    assert desk.router.handle(dict(msg)) is None
+
+
+def test_a_quote_of_another_message_is_no_draft_answer_but_a_number_still_says_which(desk):
+    packet = waiting(desk)
+    assert desk.admin("1", quote="#1 完成（3分钟）\n结果在这里") is None      # (a relay result: its job number)
+    assert desk.admin("好", quote="这是新款的色卡") is None
+    assert desk.prm.store.packet(packet["id"])["status"] == "pending"
+    assert desk.admin(f"发 {packet['id']}", quote="这是新款的色卡") == f"#{packet['id']} 已批准，正在发给 小美"
+
+
+def test_a_number_never_told_says_so(desk):
+    number = desk.prm.store.add_packet(deal_id=1, party_id=1, job_id=None, chat_id="buyin:conv1", kind="other",
+                                       text="您好～", attachments=[], intent="", slots={}, stage_proposal="",
+                                       needs_attention=False, reason="", tool=BUYIN_TOOL, meta={"channel": "buyin"})
+    assert desk.admin(f"发 {number}") == f"#{number} 没有发到微信里审批（只有发到这里的草稿能在微信里回）：请在控制台处理"
+    assert desk.prm.store.packet(number)["status"] == "pending"
+
+
+def test_a_voice_message_is_taken_only_when_its_words_typed_would_be(desk):
+    packet = waiting(desk)
+    assert desk.admin("[语音] 改 3 处错别字", msg_type=34) is None        # (no notification #3: as before)
+    assert desk.admin("[语音] 1", msg_type=34) == VOICE_TEXT             # (one open: a 1 would be its answer)
+    desk.prm.decide(packet["id"], "drop")
+    desk.clock.now += 3601
+    assert desk.admin("[语音] 1", msg_type=34) is None                  # (nothing open, nothing told lately)
+
+
+def test_the_parse_reads_only_typed_answers():
+    assert parse({"msg_type": 1, "content": "发12"}).lines == (("send", 12),)
+    assert parse({"msg_type": 1, "content": "发 12个样品"}) is None
+    assert parse({"msg_type": 1, "content": "改12个地方"}) is None
+    assert parse({"msg_type": 1, "content": "改天再说"}) is None
+    assert parse({"msg_type": 1, "content": "改 12：好的"}).text == "好的"
+    assert parse({"msg_type": 3, "content": "[图片]"}) is None
+    assert parse({"msg_type": 49, "content": "我的主页"}) is None                  # a link: no quote
+    quoted = parse({"msg_type": 49, "content": "改天再说", "quoted_content": "#12 草稿 · 小美 · 私聊\n她：…"})
+    assert (quoted.kind, quoted.number, quoted.text) == ("quote", 12, "改天再说")
+    assert parse({"msg_type": 49, "content": "1", "quoted_content": "wxid_x:\n#7 改成：『…』"}).number == 7
+
+
+# ── red lines: only the admin's own private chat, and never the relay's ───────
+
+@pytest.mark.parametrize("relay_only", ["off", "on"])
+def test_a_draft_answer_never_becomes_a_cc_task_a_relay_approval_or_an_admin_command(clock, tmp_path, relay_only):
+    desk = Desk(clock, tmp_path, relay_only=relay_only)
+    desk.prm.register(CREATOR, "小美", "")
+    desk.admin("cc 跑一下测试")                                           # a cc task that asks for an approval
+    job = desk.relay.next_job(0, ("admin",))
+    ask = desk.relay.ask(job["id"], {"tool": "Bash", "detail": "清理 build 目录", "timeout_s": 600})
+    desk.relay.tick()
+    packet = waiting(desk)
+    number = packet["id"]
+    for content, quote in (("好", head(desk, number)), (f"发 {number}", None)):
+        desk.admin(content, quote=quote)
+    assert desk.prm.store.packet(number)["status"] == "approved"
+    assert desk.relay.store.get_ask(ask["ask_id"])["status"] == "pending"     # the relay's question still waits
+    second = waiting(desk, "那我等你", text="好的～")
+    for content, quote in (("好的", head(desk, second["id"])), (f"改 {second['id']} 好的老师", None),
+                           (f"不发 {second['id']}", None), ("查状态", head(desk, second["id"]))):
+        desk.admin(content, quote=quote)
+    assert len(desk.jobs()) == 1                                         # only the cc task: nothing else went to the Mac
+    assert desk.relay.store.get_ask(ask["ask_id"])["status"] == "pending"
+    # the controls: every other line of the admin works as before
+    assert desk.admin("好").startswith(f"好，已批准 #{job['id']}")          # (the relay's question, plain 好)
+    assert desk.admin("查状态").startswith("账号状态")
+    assert "已交给 Mac" in desk.admin("cc 新任务 再跑一次")
+    if relay_only == "on":
+        assert "已交给 Mac" in desk.admin("新任务 导出今天的订单")
+    assert len(desk.jobs()) == (3 if relay_only == "on" else 2)
+    desk.stop()
+
+
+def test_only_the_admins_own_one_to_one_chat_counts(desk):
+    packet = waiting(desk)
+    number = packet["id"]
+    notice = head(desk, number)
+    assert desk.admin(f"发 {number}", group=True, chat="room1@chatroom") is None          # the admin in a group
+    assert desk.admin("1", quote=notice, group=True, chat="room1@chatroom") is None
+    assert desk.admin(f"发 {number}", sender="wxid_helper", chat="wxid_helper") is None    # somebody else
+    assert desk.admin(f"发 {number}", sender="wxid_helper", chat=ADMIN) is None            # (not the admin's line)
+    assert desk.prm.store.packet(number)["status"] == "pending" and desk.to(CREATOR) == []
+
+
+def test_a_creators_answer_in_her_own_chat_is_only_her_words(desk):
+    """Whatever she writes in her chat — 「1」, 「发 1」, a quote of a notification's words — is her message for the next
+    draft (the PRM's step), never a decision: nothing is approved, nothing is said to her."""
+    packet = waiting(desk)
+    for content, quote in (("1", None), (f"发 {packet['id']}", None), ("1", head(desk, packet["id"]))):
+        msg = {"message_id": f"h{next(IDS)}", "chat_id": CREATOR, "group_name": "小美", "sender_id": CREATOR,
+               "sender_name": "小美", "content": content, "msg_type": QUOTE if quote else 1,
+               "timestamp": desk.clock.now, "is_group": False, "quoted_content": quote or ""}
+        assert desk.router.handle(msg) is None and desk.router._tracer.notes["ended_by"] == "prm"
+    assert desk.prm.store.packet(packet["id"])["status"] == "superseded"        # (her new lines: a new draft)
+    assert not desk.prm.store.packets(("approved", "sent")) and desk.to(CREATOR) == []
+
+
 # ── the log, the clean-up, the switch ─────────────────────────────────────
 
 def test_the_log_has_ids_and_counts_only(desk, caplog):
@@ -386,22 +759,28 @@ def test_the_log_has_ids_and_counts_only(desk, caplog):
     desk.her("我的地址：广东省佛山市南海区某某路100号")
     packet = desk.mac(text="收到地址啦～明天寄出")
     desk.review.sweep()
+    desk.admin("明天一早就寄～", quote=head(desk, packet["id"]))
+    desk.admin("1")
     desk.prm.tick()
     logged = caplog.text
-    assert f"draft {packet['id']} told to the admin's chat" in logged
-    for words in ("小美", "某某路", "收到地址啦", "她："):
+    assert f"draft {packet['id']} told to the admin's chat" in logged and "proposed edit (7 chars)" in logged
+    for words in ("小美", "某某路", "收到地址啦", "明天一早就寄", "她："):
         assert words not in logged, words
 
 
-def test_the_clean_up_drops_the_closed_rows_and_keeps_a_waiting_one(desk):
+def test_the_clean_up_drops_the_closed_rows_and_cuts_a_waiting_proposed_edit(desk):
     first = waiting(desk, "我的地址：广东省佛山市南海区某某路100号", text="收到地址～")
-    desk.prm.decide(first["id"], "drop")
+    desk.admin("2", quote=head(desk, first["id"]))
     second = waiting(desk, "就寄这里", text="好的～")
+    desk.admin("就寄广东省佛山市南海区某某路100号哈", quote=head(desk, second["id"]))
     counts = desk.prm.purge(desk.prm.store.deal(1), desk.clock.now)
-    assert counts["wechat_reviews"] == 1
-    assert desk.prm.store.wechat_review(first["id"]) is None and desk.prm.store.wechat_review(second["id"]) is not None
+    assert counts["wechat_reviews"] == 2
+    assert desk.prm.store.wechat_review(first["id"]) is None
+    row = desk.prm.store.wechat_review(second["id"])
+    assert row["state"] == "proposed" and "某某路" not in row["proposed"] and "广东省佛山市" in row["proposed"]
     desk.review.sweep()
-    assert len([x for x in desk.told() if x.startswith(f"#{second['id']} 草稿")]) == 1     # (told once: never again)
+    assert len([t for t in desk.told() if t.startswith(f"#{second['id']} 草稿")]) == 1     # (told once: never again)
+    assert desk.admin("1", quote=head(desk, first["id"])) == f"#{first['id']} 已经处理过了：点了不发"   # (its row is gone)
 
 
 def test_the_switch_is_off_by_default_and_checked_like_the_others(monkeypatch):
