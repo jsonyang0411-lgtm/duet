@@ -12,12 +12,14 @@ import subprocess
 import sys
 import textwrap
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from test_prm_worker import CREATOR, bot, run_one, settings, worker, workspace  # noqa: F401
+from test_prm_worker import CREATOR, TOKEN, bot, run_one, settings, worker, workspace  # noqa: F401
 from test_prm_platform_worker import fake_claude, node  # noqa: F401
 
 from platform_fakes import (DY_ITEM2, DY_ITEM3, DY_SKU2, DY_SKU2B, DY_SKU3, JST_ORDER, JST_SHOP_DY, JST_UID, catalog,
@@ -531,13 +533,17 @@ def test_only_an_earlier_order_that_went_out_or_that_the_bot_made_confirms_its_c
 
 def test_only_confirm_or_checked_by_photo_in_the_note_confirms_a_code(worker, bot, mac):  # noqa: F811
     """The operators' 起草备注 confirms a code only in so many words, 「确认 <编码>」 or 「对过图 <编码>」 beginning it, a
-    line or a clause: a code merely written there (「她要的是 …」), or after 「待确认」「请确认」「不确认」, does not."""
+    line or a sentence (after 。！？；, spaces before it allowed only there): a code merely written there (「她要的是 …」),
+    after another word (「待确认」「请 确认」「需要 确认」), after a comma or inside a quote, does not (verification 2026-11-09:
+    a space before 确认 got past the old guard)."""
     dc = worker.draft_context
-    assert dc.noted_codes(f"别寄 {CODE_A}，确认 {CODE_B}、{CODE_C}；还不确认 A7269901009A-M；对过图：A72599018B-M") == {
+    assert dc.noted_codes(f"别寄 {CODE_A}；确认 {CODE_B}、{CODE_C}；还不确认 A7269901009A-M；对过图：A72599018B-M") == {
         CODE_B, CODE_C, "A72599018B-M"}
-    assert dc.noted_codes(f"已确认过：{CODE_A.lower()}\n对过图 {CODE_B} 和 {CODE_C}") == {CODE_A, CODE_B, CODE_C}
+    assert dc.noted_codes(f"已确认过：{CODE_A.lower()}\n  对过图 {CODE_B} 和 {CODE_C}") == {CODE_A, CODE_B, CODE_C}
+    assert dc.noted_codes(f"好的。 确认过了 {CODE_A}") == dc.noted_codes(f"ok!确认了{CODE_A}") == {CODE_A}
     for note in (f"她要的是 {CODE_A}", f"待确认 {CODE_A}", f"请确认 {CODE_A}", f"不用确认 {CODE_A}", f"没确认 {CODE_A}",
-                 f"确认不寄 {CODE_A}", "", None):
+                 f"确认不寄 {CODE_A}", f"需要 确认 {CODE_A}", f"不 确认 {CODE_A}", f"请 确认 {CODE_A}",
+                 f"还没 对过图 {CODE_A}", f"她说「确认 {CODE_A}」", f"别寄 {CODE_B}，确认 {CODE_A}", "", None):
         assert dc.noted_codes(note) == set(), note
     order_rules(mac)
     mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action={
@@ -567,7 +573,7 @@ def test_a_code_only_in_an_unsure_picture_or_not_its_best_hat_is_not_taken(worke
     [packet] = bot.prm.store.packets()
     preview = packet["platform"]["preview"]
     assert preview["verdict"] == "blocked" and preview["problems"] == [
-        f"{CODE_B}（均码咖啡）对图没把握（只在没把握的图、或者不是图里最像的那款里出现）：先核对再建；"
+        f"{CODE_B}（均码咖啡）对图没把握（只在没把握的图里，或者不是图里最像的那一款、那个颜色）：先核对再建；"
         f"核对过就在起草备注里写「确认 {CODE_B}」再重新预览"]
     assert [c["args"][0] for c in mac.hats.calls()] == ["match"] and "operator_files" not in packet["meta"]
     [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
@@ -887,6 +893,166 @@ def test_the_clean_up_of_her_deal_deletes_her_photo_memory(worker, bot, mac):  #
     assert memory.is_file() and "图片-1.jpg" in memory.read_text(encoding="utf-8")
     assert worker.purge_case_file(mac.workspace, mac.party["id"])["ok"]
     assert not memory.exists() and dc.forget(mac.home, mac.party["id"]) is False
+
+
+# ── verification of c5a54ae (2026-11-09): the colour, the tries, the old bot, the channel ───────────────────────
+
+def no_own_colours():
+    """The matcher's ranking when the best hat's colours have no photo of their own (``own`` False: only the style's
+    main photo, ΔE unknown)."""
+    return [{"rank": 1, "family": STYLE_1, "styles": [STYLE_1], "name": "测试药盒帽", "score": 1.25, "kind": "main",
+             "colours": [{"style": STYLE_1, "colour": "驼色", "own": False, "codes": [CODE_A], "score": 1.25, "de": None,
+                          "match": None, "available": None},
+                         {"style": STYLE_1, "colour": "深棕", "own": False, "codes": [CODE_B], "score": 1.25, "de": None,
+                          "match": None, "available": None}]},
+            hat("ACE7CN202699010009", "测试贝雷帽", 1.05, ("黑色", "A7269901009A-M", 9.0))]
+
+
+def test_a_colour_never_compared_by_photo_is_never_taken_for_sure(worker, bot, mac):  # noqa: F811
+    """Verification 2026-11-09 (W2): the best hat's colours have no photo of their own, so the colour was never compared:
+    「颜色没把握」, none of its codes usable, an order of either colour waits for the 起草备注.  A sure picture gives
+    only its best colour's codes, never the hat's other colours; a sheet row whose SKU picture is only the whole style's
+    (「（整款图…」) is no SKU photo: it waits too, until the 起草备注 confirms the code."""
+    dc = worker.draft_context
+    assert dc.verdict(dc.trimmed(no_own_colours()), dc.options({})) == dc.NO_OWN_COLOUR
+    assert dc.verdict(dc.trimmed([hat(STYLE_1, "测试药盒帽", 1.25)]), dc.options({})) == dc.NO_OWN_COLOUR  # (no colours)
+    order_rules(mac, rows=[her_row(items=PINK)])
+    mac.hats.answers(match={"图片-1.jpg": no_own_colours()}, sheet={CODE_B: {"colour": "深棕"}})
+    for code, sku, name in ((CODE_B, DY_SKU2B, "均码咖啡"), (CODE_A, DY_SKU2, "均码黑色")):
+        mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action={
+            **SAMPLE_ORDER, "items": [{"item_id": DY_ITEM2, "skus": [{"sku_id": sku, "qty": 1}]}]})
+        picture_job(bot, mac, text="[11:05] 要这顶")
+        run_one(worker, bot, mac.settings)
+        photos = block(prompt_of(mac), "photo_matches")
+        assert f"：{dc.NO_OWN_COLOUR}" in photos and "这张图不能用来建寄样单" in photos
+        held = newest_preview(bot)
+        assert held["verdict"] == "blocked" and held["problems"][0].startswith(f"{code}（{name}）对图没把握"), held
+    assert [c["args"][0] for c in mac.hats.calls()] == ["match"]       # (matched once; no sheet for either)
+    # a sure picture: its best colour (CODE_A) only; the hat's other colour (CODE_B) waits
+    mac.hats.answers(match={"图片-2.jpg": SURE})
+    mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action={
+        **SAMPLE_ORDER, "items": [{"item_id": DY_ITEM2, "skus": [{"sku_id": DY_SKU2B, "qty": 1}]}]})
+    picture_job(bot, mac, name="图片-2.jpg", body=b"\xff\xd8\xff picture two")
+    run_one(worker, bot, mac.settings)
+    assert f"  可以用来建寄样单的编码：{CODE_A}\n" in block(prompt_of(mac), "photo_matches")
+    assert newest_preview(bot)["problems"][0].startswith(f"{CODE_B}（均码咖啡）对图没把握")
+    # CODE_A by that picture, but the sheet's right side is only the whole style: no SKU photo of that colour
+    mac.hats.answers(match={"图片-2.jpg": SURE}, sheet={CODE_A: {"colour": "驼色（整款图，没有这个颜色的单独图）"}})
+    mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action=SAMPLE_ORDER)
+    text_job(bot, mac, text="[11:07] 驼色那顶")
+    run_one(worker, bot, mac.settings)
+    assert newest_preview(bot)["problems"] == [
+        f"{CODE_A} 对图要再看（对图单右边只有整款图，没有这个颜色的单独图）：先核对再建；"
+        f"核对过就在起草备注里写「确认 {CODE_A}」再重新预览"]
+    packet = bot.prm.store.packets()[0]
+    assert packet["meta"]["operator_files"]                            # (the sheet is there to look at)
+    assert bot.prm.deal_action("draft_note", {"deal_id": mac.deal["id"], "text": f"确认 {CODE_A}"})["ok"]
+    assert bot.prm.decide(packet["id"], "repreview")["ok"]
+    run_one(worker, bot, mac.settings)
+    assert bot.prm.store.packet(packet["id"])["platform"]["preview"]["verdict"] == "ready"
+
+
+def test_a_picture_that_cannot_be_read_is_matched_once_and_a_failing_one_three_times(worker, bot, mac):  # noqa: F811
+    """Verification 2026-11-09 (W3): a picture the index answers 「cannot read」 for is never matched again (each run
+    loads the models); one whose run fails is tried with her next jobs, MAX_MATCH_TRIES times in all, then left."""
+    dc = worker.draft_context
+    mac.node.rules([mine_rows(her_row())])
+    mac.hats.answers(match={})                            # (the fake: an error for a picture it has no answer for)
+    picture_job(bot, mac)
+    run_one(worker, bot, mac.settings)
+    for n in range(3):
+        text_job(bot, mac, text=f"[11:0{n}] 在吗")
+        run_one(worker, bot, mac.settings)
+    assert [c["args"][0] for c in mac.hats.calls()].count("match") == 1
+    assert "图片-1.jpg（她 " in block(prompt_of(mac), "photo_matches")
+    assert "对不了图（这张图读不出来，不再对了）" in block(prompt_of(mac), "photo_matches")
+    mac.hats.answers(exit=1, stdout="not json")           # the index fails as a whole
+    picture_job(bot, mac, name="图片-2.jpg", body=b"\xff\xd8\xff picture two")
+    run_one(worker, bot, mac.settings)
+    for n in range(4):
+        text_job(bot, mac, text=f"[11:1{n}] 在吗")
+        run_one(worker, bot, mac.settings)
+    assert [c["args"][0] for c in mac.hats.calls()].count("match") == 1 + dc.MAX_MATCH_TRIES
+    assert f"对不了图（对图出错（退出码 1）；试了 {dc.MAX_MATCH_TRIES} 次，不再对了）" in block(prompt_of(mac), "photo_matches")
+    memory = json.loads((dc.folder(mac.home) / "photos" / f"party-{mac.party['id']}.json").read_text(encoding="utf-8"))
+    assert sorted((e["name"], e["tries"], e["final"]) for e in memory["photos"]) == [
+        ("图片-1.jpg", 1, True), ("图片-2.jpg", dc.MAX_MATCH_TRIES, False)]
+
+
+def test_the_sheet_goes_only_to_a_bot_that_says_it_takes_it(worker, bot, mac, monkeypatch):  # noqa: F811
+    """Verification 2026-11-09 (W4): an older bot drops the connection of a big upload rather than answering 404, so
+    the worker asks /relay/health first (``"operator_files": true``); without it, or when the upload's connection is
+    dropped (a broken pipe, a reset), the preview says the bot is old and the sheet goes nowhere."""
+    client = worker.RelayClient(mac.settings["relay_url"], mac.settings["token"])
+    assert client.operator_files_ok() is True                            # (this bot has the channel)
+    for error in (BrokenPipeError(32, "Broken pipe"), ConnectionResetError(54, "Connection reset by peer"),
+                  urllib.error.URLError(BrokenPipeError(32, "Broken pipe"))):
+        assert worker._dropped(error), error
+    for error in (urllib.error.URLError("timed out"), urllib.error.HTTPError("http://x", 500, "boom", {}, None),
+                  TimeoutError("timed out")):
+        assert not worker._dropped(error), error
+    order_rules(mac)
+    mac.hats.answers(match={"图片-1.jpg": SURE})
+    mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action=SAMPLE_ORDER)
+    uploads = []
+    monkeypatch.setattr(worker.RelayClient, "operator_files_ok", lambda self: False)         # an older bot
+    monkeypatch.setattr(worker.RelayClient, "upload_operator", lambda self, *args: uploads.append(args))
+    job_id = picture_job(bot, mac)
+    run_one(worker, bot, mac.settings)
+    assert "对图单没传到 Windows（Windows 的机器人还是旧版）：先核对再建" in newest_preview(bot)["problems"]
+    assert uploads == [] and bot.relay.store.operator_files(job_id) == []
+
+    def dropped(self, *args):
+        raise urllib.error.URLError(BrokenPipeError(32, "Broken pipe"))
+
+    monkeypatch.setattr(worker.RelayClient, "operator_files_ok", lambda self: True)
+    monkeypatch.setattr(worker.RelayClient, "upload_operator", dropped)
+    picture_job(bot, mac, text="[11:06] 就这顶")
+    run_one(worker, bot, mac.settings)
+    assert "对图单没传到 Windows（Windows 的机器人还是旧版）：先核对再建" in newest_preview(bot)["problems"]
+
+
+def test_the_operators_channel_needs_the_token_and_keeps_its_files_in_the_jobs_folder(worker, bot, mac):  # noqa: F811
+    """Verification 2026-11-09 (W5): POST .../operator-files without the token is 401 and stores nothing; a name with a
+    path in it stays a name in the job's folder, made to start with 对图单-."""
+    job_id = text_job(bot, mac)
+    bot.relay.next_job(0, ("prm",))
+    url = f"{mac.settings['relay_url']}/relay/jobs/{job_id}/operator-files?name=..%2F..%2Fevil.jpg"
+    request = urllib.request.Request(url, data=b"\xff\xd8\xff abc", method="POST")
+    request.add_header("Content-Type", "application/octet-stream")
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(request, timeout=10)
+    assert e.value.code == 401 and bot.relay.store.operator_files(job_id) == []
+    request.add_header("Authorization", f"Bearer {TOKEN}")
+    with urllib.request.urlopen(request, timeout=10) as resp:
+        assert resp.status == 200
+    [row] = bot.relay.store.operator_files(job_id)
+    assert Path(row["path"]).parent == bot.relay.files_dir / "outfiles" / f"job-{job_id}"
+    assert row["name"].startswith("对图单-") and "/" not in row["name"] and Path(row["path"]).name == row["name"]
+
+
+def test_an_order_her_earlier_sent_order_confirms_is_approved_and_made(worker, bot, mac):  # noqa: F811
+    """Verification 2026-11-09 (W1): a hat confirmed only by her earlier signed order (no picture): the draft carries the
+    mark, 批准并执行 is on, a 重新预览 keeps it so, and the order is made and her reply sent."""
+    order_rules(mac, rows=[her_row(status="SIGNED", items=PINK, sign_time="2026-11-08 10:00:00")])
+    mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦：{寄样单号}", platform_action=PINK_ORDER)
+    bot.prm._mask(mac.party["id"], "收件人张三 13900001111", time.time())       # (her number's placeholder)
+    text_job(bot, mac, text="[11:08] 还要上次那个")
+    run_one(worker, bot, mac.settings)
+    [packet] = bot.prm.store.packets()
+    assert packet["platform"]["preview"]["verdict"] == "ready" and packet["meta"]["draft_context"] == worker.GATED
+    assert bot.prm.decide(packet["id"], "repreview")["ok"]
+    run_one(worker, bot, mac.settings)
+    again = bot.prm.store.packet(packet["id"])
+    assert again["platform"]["preview"]["verdict"] == "ready" and again["meta"]["draft_context"] == worker.GATED
+    [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
+    assert shown["platform"]["can_execute"] is True
+    assert bot.prm.decide(packet["id"], "execute")["ok"]
+    run_one(worker, bot, mac.settings)
+    bot.prm._send = lambda chat, text: True
+    bot.prm.send_approved()
+    final = bot.prm.store.packet(packet["id"])
+    assert final["status"] == "sent" and final["platform"]["execution"]["outcome"] == "VERIFIED_SUCCESS"
 
 
 def test_the_module_runs_on_the_macs_system_python(tmp_path):

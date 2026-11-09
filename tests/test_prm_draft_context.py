@@ -538,6 +538,121 @@ def test_a_new_preview_lost_on_the_way_keeps_its_sheet_for_the_late_answer(bot, 
     assert now["platform"]["preview"]["verdict"] == "ready"
 
 
+def test_a_late_answer_of_an_earlier_new_preview_never_overwrites_a_newer_one(bot, clock):
+    """Verification 2026-11-09: a 重新预览 lost on the way, a second one asked for and answered, then the first one's
+    answer after all: it is not this draft's preview any more (its verdict, its sheet, its mark are dropped, its sheet
+    deleted); the newer preview stays."""
+    from src.relay.service import LOST_AFTER_SEC
+
+    job, packet = sheet_draft(bot, with_brief=False, verdict="login")
+    assert bot.prm.decide(packet["id"], "repreview")["ok"]
+    first = bot.relay.next_job(0, ("prm",))
+    bot.relay.operator_file(first["id"], f"对图单-{first['id']}.jpg", io.BytesIO(SHEET + b"1").read, len(SHEET) + 1)
+    [late] = [Path(f["path"]) for f in bot.relay.store.operator_files(first["id"])]
+    clock.now += LOST_AFTER_SEC + 1
+    bot.relay.tick()                                              # (lost)
+    assert bot.prm.decide(packet["id"], "repreview")["ok"]        # asked again
+    second = bot.relay.next_job(0, ("prm",))
+    answer = bot.relay.operator_file(second["id"], f"对图单-{second['id']}.jpg", io.BytesIO(SHEET + b"2").read,
+                                     len(SHEET) + 1)
+    bot.finish(second["id"], text=json.dumps(sample_block(previewed_at=3.0, draft_context=GATED, operator_files=[
+        {"name": f"对图单-{second['id']}.jpg", "why": "第二次的", "sha256": answer["sha256"]}]), ensure_ascii=False))
+    newer = bot.prm.store.packet(packet["id"])
+    assert newer["platform"]["preview"]["verdict"] == "ready" and newer["meta"]["draft_context"] == GATED
+    bot.finish(first["id"], text=json.dumps(sample_block("login", previewed_at=2.0, operator_files=[
+        {"name": late.name, "why": "第一次的"}]), ensure_ascii=False))       # (the first one's, late, not checked)
+    after = bot.prm.store.packet(packet["id"])
+    assert after["platform"] == newer["platform"] and after["meta"] == newer["meta"] and not late.exists()
+    assert Path(after["meta"]["operator_files"][0]["path"]).read_bytes() == SHEET + b"2"
+
+
+def test_a_new_preview_without_a_sheet_clears_the_drafts(bot):
+    """Verification 2026-11-09 (B2): the new preview brings no sheet (no picture behind its hats now, the 起草备注
+    confirmed them): the old sheet was not made for it, it goes (the file too)."""
+    job, packet = sheet_draft(bot, with_brief=False, verdict="login")
+    first = Path(packet["meta"]["operator_files"][0]["path"])
+    assert bot.prm.decide(packet["id"], "repreview")["ok"]
+    again = bot.relay.next_job(0, ("prm",))
+    bot.finish(again["id"], text=json.dumps(sample_block(previewed_at=2.0, draft_context=GATED), ensure_ascii=False))
+    now = bot.prm.store.packet(packet["id"])
+    assert now["platform"]["preview"]["verdict"] == "ready" and now["meta"]["operator_files"] == []
+    assert not first.exists()
+    [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
+    assert shown["operator_files"] == [] and shown["platform"]["can_execute"] is True
+
+
+def test_a_new_preview_nothing_checked_never_keeps_an_older_mark(bot):
+    """Verification 2026-11-09 (B4): the draft was checked by photo; the switch off, a 重新预览 checks nothing: the packet
+    no longer says checked, so with the switch on again it cannot be approved until a checked preview."""
+    _, packet = sheet_draft(bot, with_brief=False, verdict="ready")
+    assert packet["meta"]["draft_context"] == GATED
+    bot.prm._draft_context = False
+    assert bot.prm.decide(packet["id"], "repreview")["ok"]
+    again = bot.relay.next_job(0, ("prm",))
+    assert "draft_context" not in json.loads(bot.relay.store.get(again["id"])["meta"])
+    bot.finish(again["id"], text=json.dumps(sample_block(previewed_at=2.0), ensure_ascii=False))      # (no mark)
+    now = bot.prm.store.packet(packet["id"])
+    assert now["meta"]["draft_context"] == {"v": 1, "gated": False} and now["platform"]["preview"]["verdict"] == "ready"
+    bot.prm._draft_context = True
+    [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
+    assert shown["platform"]["can_execute"] is False and bot.prm.decide(packet["id"], "execute")["ok"] is False
+
+
+def test_off_a_sample_order_is_approved_as_before(clock, tmp_path):
+    """Verification 2026-11-09 (B1): the switch off, a sample order no Mac checked by photo is approved and goes to the
+    Mac as it always did."""
+    b = make(clock, tmp_path, on=False)
+    try:
+        _, plain = sheet_draft(b, with_brief=False, verdict="ready", gated=False)
+        [shown] = [p for p in b.prm.snapshot()["pending"] if p["id"] == plain["id"]]
+        assert shown["platform"]["can_execute"] is True
+        out = b.prm.decide(plain["id"], "execute")
+        assert out["ok"] and out["status"] == "executing", out
+    finally:
+        b.prm.stop()
+        b.relay.stop()
+
+
+def test_the_operators_channel_takes_only_a_drafts_or_a_new_previews_files_and_names_them_as_sheets(bot, clock):
+    """Verification 2026-11-09 (B3): a file on the operator-only channel of a draft's job is stored with a name that
+    starts with 对图单- (so it is never taken for an attachment, and the sweep knows it); an execution's job, a
+    sample-status read's, a clean-up's take none; the sweep goes by the channel's rows: a file no packet keeps goes
+    after 30 days too, and its row is forgotten."""
+    job = her_job(bot)
+    assert bot.relay.operator_file(job["id"], "photo.jpg", io.BytesIO(SHEET).read, len(SHEET))
+    [row] = bot.relay.store.operator_files(job["id"])
+    path = Path(row["path"])
+    assert row["name"] == path.name == "对图单-photo.jpg"
+    for op in ("sample_status", "purge", "platform_execute", "buyin_inbox"):
+        _, other = bot.relay.submit(CREATOR, CREATOR, "", kind="prm", meta={"op": op, "party_id": 1}, fresh=True)
+        assert bot.relay.next_job(0, ("prm",))["id"] == other
+        assert bot.relay.operator_file(other, "对图单-1.jpg", io.BytesIO(SHEET).read, len(SHEET)) is None, op
+        assert bot.relay.store.operator_files(other) == []
+    assert bot.relay.finish(job["id"], {"ok": False, "text": "", "error": "x"})     # (never ticked: no draft keeps it)
+    os.utime(path, (clock.now - 31 * 86400, clock.now - 31 * 86400))
+    assert draft_context.sweep(bot.prm.store, clock.now, relay_store=bot.relay.store) == 1 and not path.exists()
+    assert bot.relay.store.operator_files(job["id"]) == []
+    assert draft_context.sweep(bot.prm.store, clock.now, relay_store=bot.relay.store) == 0
+
+
+def test_the_sweep_never_writes_over_a_sheet_that_came_meanwhile(bot, clock):
+    """Verification 2026-11-09: the sweep read a packet's sheets, a new preview put its own there meanwhile: the sweep's
+    write back is compare-and-set, so the new sheet stays (the old file is left for the next sweep)."""
+    job, packet = sheet_draft(bot, with_brief=False)
+    old = Path(packet["meta"]["operator_files"][0]["path"])
+    os.utime(old, (clock.now - 31 * 86400, clock.now - 31 * 86400))
+    read = bot.prm.store.operator_file_packets()                 # (what the sweep reads first)
+    fresh = old.with_name("对图单-9.jpg")
+    fresh.write_bytes(SHEET)
+    newer = [{"name": fresh.name, "path": str(fresh), "why": "新的"}]
+    assert bot.prm.store.merge_packet_meta(packet["id"], {"operator_files": newer})     # (a new preview's, meanwhile)
+    with patch.object(bot.prm.store, "operator_file_packets", return_value=read):
+        assert draft_context.sweep(bot.prm.store, clock.now) == 0
+    assert bot.prm.store.packet(packet["id"])["meta"]["operator_files"] == newer and fresh.exists() and old.exists()
+    assert draft_context.sweep(bot.prm.store, clock.now, files_dir=bot.relay.files_dir) == 1 and not old.exists()
+    assert fresh.exists()
+
+
 def test_the_sheets_go_after_thirty_days_by_their_own_time(bot, clock):
     job, packet = sheet_draft(bot, with_brief=False)
     path = Path(packet["meta"]["operator_files"][0]["path"])

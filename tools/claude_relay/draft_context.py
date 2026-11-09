@@ -22,14 +22,17 @@ sent: the bot leaves it out).  Without it the worker's prompt and preview are wh
    venv ``hat_python``: ``hat_match.py match <photos…> --top 8 --no-stock --json``; local, no platform call), each
    picture once (by its sha256), remembered per creator for KEEP_DAYS (``photos/party-<id>.json``, while the picture is
    still in inbox/): an order drafted days after her picture still has it; one whose matching failed is tried again by
-   the next job.  Per picture the top hats with their colours and item codes, the matcher's scores and a verdict:
-   「没把握」 when the best score is low or the best two are close, 「颜色没把握」 when its colours are.
+   the next job, MAX_MATCH_TRIES times at most (never again when the index cannot read it).  Per picture the top hats
+   with their colours and item codes, the matcher's scores and a verdict: 「没把握」 when the best score is low or the
+   best two are close, 「颜色没把握」 when the best colour has no photo of its own (so it was never compared) or the
+   colours are close.
 3. ``gate``: a draft's jst.sample_order.  Every SKU's 聚水潭 item code (kb/products.json's ``code``) must come from a
-   picture of hers that is 「有把握」 (and from its best hat), or have been confirmed: an item of an earlier order of hers
-   that went out (SENT / SIGNED, never rejected) or that the bot made, or 「确认 <编码>」 / 「对过图 <编码>」 in the
-   operators' 起草备注.  Otherwise the preview is not ready.  The codes with a picture behind them get the side-by-side
-   sheet (``hat_match.py sheet <her photo>=<code> … --json``, under the CLI lock: it may ask 聚水潭 for a SKU photo,
-   read-only); a row it marks 「！要再看」 or without the SKU's own photo blocks too, unless the 起草备注 confirms that code.
+   picture of hers that is 「有把握」 (its best hat, its best colour), or have been confirmed: an item of an earlier order
+   of hers that went out (SENT / SIGNED, never rejected) or that the bot made, or 「确认 <编码>」 / 「对过图 <编码>」
+   beginning a line or sentence of the operators' 起草备注.  Otherwise the preview is not ready.  The codes with a
+   picture behind them get the side-by-side sheet (``hat_match.py sheet <her photo>=<code> … --json``, under the CLI
+   lock: it may ask 聚水潭 for a SKU photo, read-only); a row it marks 「！要再看」 or without the SKU's own photo (none,
+   or only the whole style's 「整款图」) blocks too, unless the 起草备注 confirms that code.
    The worker sends the sheet back on the relay's operator-only channel; the available stock of the styles (``jst
    goods-detail``, read-only) is a fact of the preview for the operators, never told to the model.
 
@@ -104,15 +107,18 @@ EXIT_WORDS = {77: "聚水潭登录失效了", 76: "聚水潭要验证或限流�
 TOOL_NAMES = {"jst": "聚水潭命令", "hat": "帽子图库"}
 OPERATOR_SHEET_WHY = "寄样单里每一顶和她发的图并排对比（√ 图对得上 / ！要再看）；只给运营看，不发给达人"
 SURE = "有把握"
+WHOLE_STYLE = "整款图"              # hat_match.py sheet: a SKU picture that is only the style's main photo
+MAX_MATCH_TRIES = 3                 # a picture whose matching failed this often is not tried again
 WINDOW = f"只看得到聚水潭公司最新 {MINE_PAGE} 张寄样单里我们这个子账号的，加上合作单里记的单号"
 
 _ORDER_NO = re.compile(r"^YP[0-9A-Za-z]{6,30}$")
 _ACCOUNT = re.compile(r"^[0-9A-Za-z_.][0-9A-Za-z_.-]{0,39}$")   # an 抖音号 / 小红书号 (platforms._CREATOR_NO)
 _CODE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z_-]{2,63}$")          # a 聚水潭 item code (platforms._ERP_CODE)
 _CODE_TEXT = r"[0-9A-Za-z][0-9A-Za-z_-]{2,63}"
-# The 起草备注's confirmation of a code: 「确认 A…-F」, 「已确认：A…-F、B…-M」, 「对过图 A…-F」 at the start of the note, a
-# line or a clause (so never 「不确认」「待确认」「请确认」「不用确认」「要确认」: a word before it makes it something else)
-_NOTED = re.compile(rf"(?:^|(?<=[\s，,。.；;、：:！!？?（(「『“\"'【\[]))(?:已经?)?(?:确认过?|对过图)\s*[:：]?\s*"
+# The 起草备注's confirmation of a code: 「确认 A…-F」, 「已确认：A…-F、B…-M」, 「确认过了 A…-F」, 「对过图 A…-F」 at the start of
+# the note, of a line or of a sentence (after 。！？； or .!?;), spaces before it allowed there only: never after another word
+# (「不确认」「待确认」「请 确认」「需要 确认」「还没 对过图」), nor inside a quote or after a comma (「她说「确认 …」」)
+_NOTED = re.compile(rf"(?:^|(?<=[。！？；.!?;]))[ \t\u3000]*(?:已经?)?(?:确认(?:过)?了?|对过图了?)\s*[:：]?\s*"
                     rf"({_CODE_TEXT}(?:\s*[、,，/和及]\s*{_CODE_TEXT})*)", re.M)
 _NOTED_SPLIT = re.compile(r"\s*[、,，/和及]\s*")
 _SHA = re.compile(r"^[0-9a-f]{64}$")
@@ -131,9 +137,10 @@ PHOTO_RULE = ("认帽子只认 <photo_matches> 里对图的结果（她发的图
               "她说的和对图结果对不上的、她要的那顶不在里面的，问她（再发一张清楚的图，或者说是货盘里的第几款），或者在 reason 里"
               "请运营确认（needs_attention 设成 true），不要猜。")
 STOCK_RULE = "不要跟达人说没货、缺货、补货，也不说「我查一下」（有没有货）这类话：货一律说有；发得慢就说「分批发出」「仓库在安排」。"
-ORDER_RULE = ("起草 jst.sample_order 时，每一顶都要是 <photo_matches> 里写着「可以用来建寄样单的编码」的（「有把握」那张图最像的那款），"
-              "或者已经确认过的编码，再按编码在 kb/products.md 里找它的商品 ID 和 SKU ID（SKU 后面写着「编码 …」）；不是的不要放进"
-              "寄样单，先问清楚。系统会把她的图和要寄的每一顶并排做成对图单给运营看，没对过图、对图要再看的那顶都建不了。")
+ORDER_RULE = ("起草 jst.sample_order 时，每一顶都要是 <photo_matches> 里写着「可以用来建寄样单的编码」的（「有把握」那张图最像的那款、"
+              "那个颜色），或者已经确认过的编码，再按编码在 kb/products.md 里找它的商品 ID 和 SKU ID（SKU 后面写着「编码 …」）；"
+              "不是的不要放进寄样单，先问清楚；她明说要同一款的别的颜色时可以写进去，但 needs_attention 设成 true、reason 里请运营"
+              "核对颜色。系统会把她的图和要寄的每一顶并排做成对图单给运营看，没对过图、对图要再看的那顶都建不了。")
 
 
 def options(settings: dict) -> dict:
@@ -537,8 +544,8 @@ def confirmed_codes(samples: dict, verified=()) -> dict:
 
 def noted_codes(note: str) -> set:
     """The item codes the operators' 起草备注 confirms in so many words: 「确认 <编码>」, 「已确认：A、B」, 「对过图 <编码>」
-    beginning the note, a line or a clause (upper case); a code merely written there (「别寄 A…」, 「她要的是 A…」), and
-    one after 「待确认」「请确认」「不确认」 and the like, is not one."""
+    beginning the note, a line or a sentence (upper case); a code merely written there (「别寄 A…」, 「她要的是 A…」), and
+    one after another word (「待确认」「请 确认」「不 确认」), a comma or a quote mark, is not one."""
     out: set = set()
     for m in _NOTED.finditer(str(note or "")):
         out.update(code.upper() for code in _NOTED_SPLIT.split(m.group(1)) if _CODE.match(code))
@@ -655,10 +662,15 @@ def trimmed(hats) -> list:
     return out
 
 
+NO_OWN_COLOUR = "款有把握，颜色没把握（图库里没有这个颜色的单独图，颜色对不了）"
+
+
 def verdict(hats: list, opts: dict) -> str:
-    """「有把握」, 「款有把握，颜色没把握」, or 「没把握（why）」: the best hat's score below ``photo_min_score`` or the best
-    two closer than ``photo_min_margin``; the colour: the best one's ΔE at least ``colour_max_de``, or the second's less
-    than ``colour_min_gap`` above it."""
+    """「有把握」, 「款有把握，颜色没把握（…）」, or 「没把握（why）」: the best hat's score below ``photo_min_score`` or the
+    best two closer than ``photo_min_margin``; the colour: the best hat's best colour has no photo of its own in the index
+    (hat_match's ``own`` False: only the style's main photo) or no colour reading (ΔE unknown), so its colour was never
+    compared (``NO_OWN_COLOUR``), or its ΔE is at least ``colour_max_de``, or the second's less than ``colour_min_gap``
+    above it."""
     if not hats:
         return "没把握（图库里没有像的帽子）"
     top = hats[0].get("score")
@@ -667,24 +679,27 @@ def verdict(hats: list, opts: dict) -> str:
         return "没把握（最像的那款分数也偏低：可能不是我们的帽子，或者图里帽子看不清）"
     if second is not None and top - second < opts["photo_min_margin"]:
         return "没把握（最像的两款分数差不多）"
-    own = [c for c in hats[0].get("colours") or [] if c.get("own") and c.get("de") is not None]
-    if own and (own[0]["de"] >= opts["colour_max_de"]
-                or (len(own) > 1 and own[1]["de"] - own[0]["de"] < opts["colour_min_gap"])):
+    colours = hats[0].get("colours") or []
+    if not colours or not colours[0].get("own") or colours[0].get("de") is None:
+        return NO_OWN_COLOUR
+    own = [c for c in colours if c.get("own") and c.get("de") is not None]
+    if own[0]["de"] >= opts["colour_max_de"] or (len(own) > 1 and own[1]["de"] - own[0]["de"] < opts["colour_min_gap"]):
         return "款有把握，颜色没把握"
     return SURE
 
 
 def sure_codes(entry: dict, opts: dict) -> list:
     """The item codes one picture of hers can stand for in a sample order: none unless it is 「有把握」 (its verdict now,
-    by ``opts``: then no other hat is within ``photo_min_margin`` of the best one, and its colour is clear), then the
-    codes of its best hat, its best colour first.  (A colour of that hat other than the picture's is flagged by the
-    sheet, 「！要再看：颜色…」, and waits for a person.)"""
+    by ``opts``: then no other hat is within ``photo_min_margin`` of the best one, and the best hat's best colour has a
+    photo of its own and is clearly the closest), then that colour's codes only (its sizes).  Another colour of the
+    same hat is not one: it waits for a person (「确认 <编码>」 in the 起草备注)."""
     hats = entry.get("hats") or []
     if entry.get("error") or not hats or verdict(hats, opts) != SURE:
         return []
     out: list = []
-    for c in hats[0].get("colours") or []:
-        out += [k.upper() for k in c.get("codes") or [] if k.upper() not in out]
+    for code in (hats[0].get("colours") or [{}])[0].get("codes") or []:
+        if code.upper() not in out:
+            out.append(code.upper())
     return out
 
 
@@ -693,8 +708,8 @@ def _memory_path(home: Path, party_id: int) -> Path:
 
 
 def load_memory(home: Path, party_id: int, workspace: Path, now: float) -> list:
-    """Her remembered pictures (one whose matching failed too, ``error``): the ones still in inbox/ and younger than
-    KEEP_DAYS, newest first."""
+    """Her remembered pictures (one whose matching failed too, ``error``, with its ``tries`` and ``final``): the ones
+    still in inbox/ and younger than KEEP_DAYS, newest first."""
     try:
         data = json.loads(_memory_path(home, party_id).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -713,15 +728,27 @@ def load_memory(home: Path, party_id: int, workspace: Path, now: float) -> list:
         if now - at > KEEP_DAYS * 86400 or not (Path(workspace) / rel).is_file():
             continue
         error = _clean(entry.get("error"), 120)
-        out.append({**entry, "at": at, "hats": [] if error else trimmed(entry.get("hats")), "error": error, "now": False})
+        out.append({**entry, "at": at, "hats": [] if error else trimmed(entry.get("hats")), "error": error, "now": False,
+                    "tries": _tries(entry), "final": bool(entry.get("final"))})
     return sorted(out, key=lambda e: -e["at"])
+
+
+def _tries(entry: dict) -> int:
+    value = entry.get("tries")
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 99 else 0
+
+
+def _given_up(entry: dict) -> bool:
+    """A picture whose matching is not tried again: the index could not read it at all (``final``), or it failed
+    MAX_MATCH_TRIES times (a run that was skipped, or cancelled, is not a try)."""
+    return bool(entry.get("final")) or _tries(entry) >= MAX_MATCH_TRIES
 
 
 def _save_memory(home: Path, party_id: int, entries: list) -> None:
     path = _memory_path(home, party_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    keep = [{k: e[k] for k in ("sha256", "rel", "name", "job", "at", "verdict", "hats", "error") if k in e}
-            for e in entries[:MAX_PHOTOS_KEPT]]
+    keep = [{k: e[k] for k in ("sha256", "rel", "name", "job", "at", "verdict", "hats", "error", "tries", "final")
+             if k in e} for e in entries[:MAX_PHOTOS_KEPT]]
     part = path.with_name(path.name + ".part")
     part.write_text(json.dumps({"version": 1, "photos": keep}, ensure_ascii=False), encoding="utf-8")
     os.replace(str(part), str(path))
@@ -735,10 +762,11 @@ def match_photos(platforms, opts: dict, workspace: Path, party_id: int, job_id: 
                  deadline: Optional[float] = None) -> dict:
     """Her pictures of this job (``got``: paths inside the workspace) matched against the hat index, and her earlier ones
     remembered: ``{"ok", "why", "photos": [entry …]}``, this job's first (``now`` True), each ``{"sha256", "rel",
-    "name", "job", "at", "verdict", "hats", "error"}``.  A picture is matched once: one seen before (her memory, or this
-    process) keeps its ranking.  The new ones, and her earlier ones whose matching failed (still in inbox/), go to one
-    ``hat_match.py match … --json`` run (the models load once), unless the index timed out lately (``tripped``) or the
-    job's budget is spent: then they say why and are tried again by a later job."""
+    "name", "job", "at", "verdict", "hats", "error", "tries", "final"}``.  A picture is matched once: one seen before (her
+    memory, or this process) keeps its ranking.  The new ones, and her earlier ones whose matching failed (still in
+    inbox/), go to one ``hat_match.py match … --json`` run (the models load once), unless the index timed out lately
+    (``tripped``) or the job's budget is spent: then they say why and are tried again by a later job.  A picture is
+    tried at most MAX_MATCH_TRIES times, and never again once the index could not read it (``_given_up``)."""
     now = clock()
     workspace = Path(workspace)
     memory = load_memory(home, party_id, workspace, now)
@@ -749,17 +777,22 @@ def match_photos(platforms, opts: dict, workspace: Path, party_id: int, job_id: 
             sha = _sha256(workspace / rel)
         except OSError:
             continue
-        known = next((e for e in memory if e["sha256"] == sha and not e.get("error")), None) or _SEEN.get(sha)
+        remembered = next((e for e in memory if e["sha256"] == sha), None)
+        known = (remembered if remembered is not None and not remembered.get("error") else None) or _SEEN.get(sha)
         entry = {"sha256": sha, "rel": str(rel), "name": Path(str(rel)).name, "job": int(job_id), "at": now, "now": True,
                  "hats": [], "verdict": "", "error": ""}
         if known is not None:
             entry.update(hats=known["hats"], verdict=known.get("verdict") or verdict(known["hats"], opts))
+        elif remembered is not None and _given_up(remembered):
+            entry.update(error=remembered["error"], tries=_tries(remembered), final=bool(remembered.get("final")))
         else:
+            if remembered is not None:
+                entry["tries"] = _tries(remembered)                    # (sent again: its tries go on)
             to_run.append(entry)
         current.append(entry)
     taken = {e["sha256"] for e in current}
     earlier = [e for e in memory if e["sha256"] not in taken]
-    to_run += [e for e in earlier if e.get("error")]                     # (failed before: tried again)
+    to_run += [e for e in earlier if e.get("error") and not _given_up(e)]   # (failed before: tried again, a few times)
     why = ""
     if to_run:
         why = (tool_problem(opts) if platforms is not None else "这台 Mac 的 worker 没有平台模块") or tripped("hat")
@@ -799,12 +832,16 @@ def _run_match(platforms, opts: dict, workspace: Path, entries: list, *, home: P
         log.warning("draft context: hat_match.py match -> exit %s%s; %d picture(s) not matched", run.exit_code,
                     f", {run.stopped}" if run.stopped else "", len(entries))
         for entry in entries:
-            entry["error"] = why
+            if run.stopped != "cancelled":                       # (the job was cancelled: not the picture's try)
+                entry["tries"] = _tries(entry) + 1
+            entry["error"] = why + (f"；试了 {_tries(entry)} 次，不再对了" if _given_up(entry) else "")
         return
     for entry, answer in zip(entries, photos):
         if not isinstance(answer, dict) or answer.get("error"):
-            entry["error"] = "这张图对不了（读不出来）"
+            entry.update(error="这张图读不出来，不再对了", final=True, tries=_tries(entry) + 1)   # (never tried again)
             continue
+        entry.pop("tries", None)
+        entry.pop("final", None)
         entry["hats"] = trimmed(answer.get("hats"))
         entry["verdict"] = verdict(entry["hats"], opts)
         _SEEN[entry["sha256"]] = {"hats": entry["hats"], "verdict": entry["verdict"]}
@@ -954,10 +991,10 @@ def order_lines(action: dict, catalog) -> list:
 
 
 def photo_of(code: str, photos: list, opts: Optional[dict] = None) -> tuple:
-    """The picture of hers that stands for ``code`` (``sure_codes``: a 「有把握」 picture's best hat; its colour first,
-    then a newer picture): ``(match, "")`` with ``match`` = ``{"entry", "hat", "colour", "family", "style",
-    "colour_name"}``; else ``(None, why)``: why not (it is only in a picture that is not sure, or not in its best hat),
-    "" when no picture of hers has it at all."""
+    """The picture of hers that stands for ``code`` (``sure_codes``: a 「有把握」 picture's best hat's best colour; a
+    newer picture first): ``(match, "")`` with ``match`` = ``{"entry", "hat", "colour", "family", "style",
+    "colour_name"}``; else ``(None, why)``: why not (it is only in a picture that is not sure, or not its best hat and
+    colour), "" when no picture of hers has it at all."""
     opts = opts or DEFAULTS
     best, seen_unsure = None, False
     for entry in photos or []:
@@ -977,7 +1014,7 @@ def photo_of(code: str, photos: list, opts: Optional[dict] = None) -> tuple:
                                    "style": c.get("style"), "colour_name": c.get("colour")})
     if best is not None:
         return best[1], ""
-    return None, ("只在没把握的图、或者不是图里最像的那款里出现" if seen_unsure else "")
+    return None, ("只在没把握的图里，或者不是图里最像的那一款、那个颜色" if seen_unsure else "")
 
 
 def _style_guess(code: str) -> str:
@@ -1074,7 +1111,8 @@ def _gate(block: dict, action: dict, context: Context, *, platforms, cfg: dict, 
             if not isinstance(row, dict):
                 continue
             if row.get("ok") is False or row.get("sku_photo") is False:
-                why_row = note if row.get("ok") is False else "图库里没有这个编码的图"
+                why_row = (note if row.get("ok") is False else "对图单右边只有整款图，没有这个颜色的单独图"
+                           if row.get("whole") else "图库里没有这个编码的图")
                 if code in noted:
                     facts.append(f"{code}：对图单说要再看（{why_row}），运营在起草备注里确认了")
                 else:
@@ -1093,8 +1131,9 @@ def _gate(block: dict, action: dict, context: Context, *, platforms, cfg: dict, 
 def _make_sheet(platforms, cfg: dict, opts: dict, workspace: Path, pairs: list, *, home: Path, beat, sleep,
                 deadline: Optional[float] = None, clock: Callable[[], float] = time.time) -> tuple:
     """``hat_match.py sheet <her photo>=<code> … --json`` under the CLI lock (it may ask 聚水潭 for a SKU photo or a
-    colour, read-only): ``(sheet path | None, rows, problem)``; each row ``{"ok", "sku_photo", "note"}``.  Not when the
-    index timed out lately or the budget is spent; a run that times out trips the breaker."""
+    colour, read-only): ``(sheet path | None, rows, problem)``; each row ``{"ok", "sku_photo", "whole", "note"}`` (a row
+    whose SKU picture is only the whole style's, 「（整款图…」, counts as none: ``sku_photo`` False, ``whole`` True).  Not
+    when the index timed out lately or the budget is spent; a run that times out trips the breaker."""
     why = (tool_problem(opts) if platforms is not None else "这台 Mac 的 worker 没有平台模块") or tripped("hat")
     if not why and _left(deadline, clock()) < MIN_LEFT_SEC:
         why = "这次没时间做了"
@@ -1129,9 +1168,12 @@ def _make_sheet(platforms, cfg: dict, opts: dict, workspace: Path, pairs: list, 
         log.warning("draft context: hat_match.py sheet -> exit %s%s", run.exit_code,
                     f", {run.stopped}" if run.stopped else "")
         return None, [], ("超时" if run.stopped == "timeout" else f"退出码 {run.exit_code}")
-    clean = [{"ok": bool(r.get("ok")) if isinstance(r, dict) else False,
-              "sku_photo": bool(r.get("sku_photo", True)) if isinstance(r, dict) else False,
-              "note": _clean(r.get("note"), 120) if isinstance(r, dict) else ""} for r in rows]
+    clean = []
+    for r in rows:
+        r = r if isinstance(r, dict) else {}
+        whole = WHOLE_STYLE in str(r.get("colour") or "")   # (hat_match: 「（整款图，没有这个颜色的单独图）」)
+        clean.append({"ok": bool(r.get("ok")) if r else False, "sku_photo": bool(r.get("sku_photo", True)) and not whole
+                      if r else False, "whole": whole, "note": _clean(r.get("note"), 120)})
     return path, clean, ""
 
 

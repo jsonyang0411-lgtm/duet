@@ -362,13 +362,27 @@ class RelayStore:
             self._conn.commit()
             return int(cur.lastrowid)
 
-    def operator_files(self, job_id: int) -> list[dict]:
-        """The files a job's worker sent for the operators only, oldest first."""
+    def operator_files(self, job_id: Optional[int] = None) -> list[dict]:
+        """The files a job's worker sent for the operators only, oldest first; every job's with ``job_id`` None (the
+        30-day sweep of src/prm/draft_context.py goes by them)."""
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM relay_operator_files WHERE job_id = ? ORDER BY id", (job_id,)
-            ).fetchall()
+            if job_id is None:
+                rows = self._conn.execute("SELECT * FROM relay_operator_files ORDER BY id").fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM relay_operator_files WHERE job_id = ? ORDER BY id", (job_id,)
+                ).fetchall()
         return [dict(r) for r in rows]
+
+    def forget_operator_files(self, ids) -> int:
+        """The rows of operator-only files that are gone (the sweep deleted them): no longer listed."""
+        ids = [int(i) for i in ids or []]
+        if not ids:
+            return 0
+        with self._lock:
+            cur = self._conn.execute(f"DELETE FROM relay_operator_files WHERE id IN ({', '.join('?' * len(ids))})", ids)
+            self._conn.commit()
+            return cur.rowcount
 
     def rewrite_chat(self, chat_id: str, kind: str, rewrite) -> int:
         """Rewrite what the jobs of ``kind`` in this chat hold (their text, results, meta, follow-ups):

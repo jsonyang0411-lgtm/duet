@@ -508,6 +508,13 @@ class RelayClient:
         status, data = self._call("GET", "/relay/health")
         return status == 200 and bool(data and data.get("ok"))
 
+    def operator_files_ok(self) -> bool:
+        """Whether the bot takes files for the operators only (PRM_DRAFT_CONTEXT's photo sheets): its /relay/health says
+        ``"operator_files": true``.  An older bot has no such channel, and for a big upload it drops the connection
+        rather than answering 404, so the worker asks first."""
+        status, data = self._call("GET", "/relay/health")
+        return status == 200 and isinstance(data, dict) and data.get("operator_files") is True
+
     def bot_kinds(self) -> list[str] | None:
         """The job kinds the bot hands out by kind; None from a bot older than job kinds (it ignores
         X-Relay-Kinds and hands any job, a cc task too, to whoever asks)."""
@@ -2467,12 +2474,22 @@ def prm_context(settings: dict, job: dict, meta: dict, workspace: Path, got: lis
 GATED = {"v": 1, "gated": True}     # the mark of a draft (or a new preview) whose sample order this script checked
 
 
+OLD_BOT = "Windows 的机器人还是旧版"   # (no operator-only channel: the sheet never goes as an attachment instead)
+
+
+def _dropped(e: BaseException) -> bool:
+    """The bot closed the connection on an upload (broken pipe, reset; urllib wraps a broken pipe while sending)."""
+    reason = e.reason if isinstance(e, urllib.error.URLError) and not isinstance(e, urllib.error.HTTPError) else e
+    return isinstance(reason, (BrokenPipeError, ConnectionResetError))
+
+
 def sample_order_gate(settings: dict, workspace: Path, block, context, client: RelayClient, job_id: int) -> tuple:
     """A previewed jst.sample_order checked by photo (``draft_context.gate``; any other action as it is): ``(block,
     operator_files, gated)``.  The side-by-side sheet goes back on the operator-only channel (POST .../operator-files:
-    the bot keeps it on the draft, never sends it to the creator; an older bot answers 404) as ``[{"name", "why",
-    "sha256"}]``; a sheet that does not get there leaves the preview not ready.  ``gated``: the check ran (the draft
-    carries ``GATED``; the bot holds any sample order without it)."""
+    the bot keeps it on the draft, never sends it to the creator) as ``[{"name", "why", "sha256"}]``, once the bot's
+    /relay/health says it has that channel (``operator_files_ok``); a sheet that does not get there leaves the preview
+    not ready (an older bot: ``OLD_BOT``, also when it answers 404 or drops the connection).  ``gated``: the check ran
+    (the draft carries ``GATED``; the bot holds any sample order without it)."""
     if draft_context is None or context is None or not isinstance(block, dict):
         return block, [], False
     beat = _platform_heartbeat(client, job_id, "对图（寄样单）")
@@ -2487,11 +2504,19 @@ def sample_order_gate(settings: dict, workspace: Path, block, context, client: R
         return checked["block"], [], gated
     name = f"对图单-{job_id}.jpg"
     try:
+        able = client.operator_files_ok()
+    except Exception as e:                               # (not known: the upload itself says)
+        log.info("#%s the bot's health not read before the photo sheet: %s", job_id, e)
+        able = True
+    if not able:
+        log.warning("#%s the photo sheet of a sample order not sent: the bot has no operator-only channel", job_id)
+        return draft_context.sheet_lost(checked["block"], OLD_BOT), [], gated
+    try:
         answer = client.upload_operator(job_id, Path(sheet), name)
     except Exception as e:
         log.warning("#%s the photo sheet of a sample order did not go back: %s", job_id, e)
-        why = "Windows 的机器人还是旧版" if isinstance(e, urllib.error.HTTPError) and e.code == 404 else _short(e, 120)
-        return draft_context.sheet_lost(checked["block"], why), [], gated
+        old = (isinstance(e, urllib.error.HTTPError) and e.code == 404) or _dropped(e)
+        return draft_context.sheet_lost(checked["block"], OLD_BOT if old else _short(e, 120)), [], gated
     log.info("#%s sample order checked by photo: verdict %s, sheet sent back", job_id, checked["block"].get("verdict"))
     return checked["block"], [{"name": name, "why": checked["why"], "sha256": str((answer or {}).get("sha256") or "")}], gated
 

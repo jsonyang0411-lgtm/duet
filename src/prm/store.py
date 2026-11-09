@@ -1035,19 +1035,22 @@ class PrmStore:
             self._conn.commit()
             return cur.rowcount == 1
 
-    def merge_packet_meta(self, packet_id: int, meta: dict, statuses: Optional[tuple] = None) -> bool:
-        """``meta`` merged into a packet's meta (of one of ``statuses``; any status for None): PRM_DRAFT_CONTEXT's
-        operator files (src/prm/draft_context.py).  True when it was changed."""
+    def merge_packet_meta(self, packet_id: int, meta: dict, statuses: Optional[tuple] = None, *,
+                          expect: Optional[Callable[[dict], bool]] = None) -> bool:
+        """``meta`` merged into a packet's meta (of one of ``statuses``; any status for None; with ``expect``, only if
+        its meta now passes it: compare and set, one step under the lock): PRM_DRAFT_CONTEXT's operator files and mark
+        (src/prm/draft_context.py).  True when it was changed."""
         with self._lock:
             sql, args = "SELECT meta FROM action_packets WHERE id = ?", [packet_id]
             if statuses:
                 sql += f" AND status IN ({', '.join('?' * len(statuses))})"
                 args += list(statuses)
             row = self._conn.execute(sql, args).fetchone()
-            if row is None:
+            current = _loads(row["meta"], {}) if row is not None else None
+            if current is None or (expect is not None and not expect(current)):
                 return False
             self._conn.execute("UPDATE action_packets SET meta = ? WHERE id = ?",
-                               (json.dumps({**_loads(row["meta"], {}), **(meta or {})}, ensure_ascii=False), packet_id))
+                               (json.dumps({**current, **(meta or {})}, ensure_ascii=False), packet_id))
             self._conn.commit()
             return True
 

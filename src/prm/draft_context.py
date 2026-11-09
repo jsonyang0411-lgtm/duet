@@ -279,30 +279,47 @@ def operator_files_out(packet: dict) -> list:
     return out
 
 
-def sweep(store, now: Optional[float] = None, days: int = KEEP_DAYS, files_dir=None) -> int:
+def sweep(store, now: Optional[float] = None, days: int = KEEP_DAYS, files_dir=None, relay_store=None) -> int:
     """The operator files older than ``days`` (by the file's own time): the packets' files deleted (her picture is on a
-    sheet) and their paths cleared (the console says the picture is gone); with ``files_dir`` (the relay's), any sheet
-    in ``outfiles/job-*/`` that old too, a packet's or not (one a new preview replaced, one that came too late).
-    Returns how many files went."""
+    sheet) and their paths cleared (the console says the picture is gone), each packet's list written back only if it
+    is still the one read (``merge_packet_meta``'s ``expect``: a new preview's sheet that came meanwhile stays; the next
+    sweep looks again); with ``relay_store``, every file the relay's operator-only channel took (``relay_operator_files``:
+    a packet's or not, its row forgotten once the file is gone), and with ``files_dir`` (the relay's), any outfile
+    named like a sheet in ``outfiles/job-*/`` that old too (an older worker's way).  Returns how many files went."""
     now = time.time() if now is None else now
     cutoff = now - days * 86400
+
+    def old(path: Optional[Path]) -> bool:
+        try:
+            return path is not None and (not path.is_file() or path.stat().st_mtime < cutoff)
+        except OSError:
+            return False
+
     gone = 0
     for packet in store.operator_file_packets():
-        kept, changed = [], False
-        for entry in (packet.get("meta") or {}).get(OPERATOR_FILES) or []:
+        read = ((packet.get("meta") or {}).get(OPERATOR_FILES))
+        kept, doomed = [], []
+        for entry in read if isinstance(read, list) else []:
             entry = dict(entry) if isinstance(entry, dict) else {}
             path = Path(str(entry.get("path") or "")) if entry.get("path") else None
-            try:
-                old = path is not None and (not path.is_file() or path.stat().st_mtime < cutoff)
-            except OSError:
-                old = False
-            if old:
-                gone += delete_files([str(path)])
+            if old(path):
+                doomed.append(str(path))
                 entry["path"] = ""
-                changed = True
             kept.append(entry)
-        if changed:
-            store.merge_packet_meta(packet["id"], {OPERATOR_FILES: kept})
+        if doomed and store.merge_packet_meta(packet["id"], {OPERATOR_FILES: kept},
+                                              expect=lambda meta, read=read: meta.get(OPERATOR_FILES) == read):
+            gone += delete_files(doomed)
+    if relay_store is not None:
+        forget = []
+        for row in relay_store.operator_files():
+            path = Path(str(row.get("path") or ""))
+            if not str(row.get("path") or "") or not path.exists():
+                forget.append(row["id"])
+            elif old(path):
+                gone += delete_files([str(path)])
+                if not path.exists():
+                    forget.append(row["id"])
+        relay_store.forget_operator_files(forget)
     if files_dir is not None:
         for path in Path(files_dir).glob(f"outfiles/job-*/{SHEET_PREFIX}*"):
             try:

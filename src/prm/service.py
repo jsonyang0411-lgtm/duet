@@ -4141,11 +4141,14 @@ class PrmService:
         action = data.get("action")
         if not action:
             return {"ok": False, "error": "这个平台动作的参数不对，预览不了；等达人再发消息时的新草稿"}
-        if not self._store.set_platform(packet["id"], {**data, "previewing": now}, (PENDING,),
+        # ``preview_key``: only the answer of this, the latest new preview, counts (an earlier one lost on the way may
+        # answer late: it never overwrites a newer preview, its sheet, its mark; _on_platform_job)
+        key = uuid.uuid4().hex
+        if not self._store.set_platform(packet["id"], {**data, "previewing": now, "preview_key": key}, (PENDING,),
                                         expect=lambda current: not current.get("previewing")):
             return {"ok": False, "error": "这条草稿已经处理过了，或者已经在重新预览"}
         meta = {"op": "platform_preview", "party_id": packet["party_id"], "deal_id": packet["deal_id"],
-                "packet_id": packet["id"], "action": action}
+                "packet_id": packet["id"], "action": action, "preview_key": key}
         creator = self._creator_ids(packet["deal_id"])
         if creator:
             meta["creator"] = creator
@@ -4199,6 +4202,11 @@ class PrmService:
             if status in ("pending", "running"):
                 return True
             data = packet["platform"]
+            if str(meta.get("preview_key") or "") != str(data.get("preview_key") or ""):
+                # an earlier new preview's answer (lost on the way, then late): a newer one was asked for since
+                self._drop_job_sheets(job["id"])
+                logger.info("PRM: job #%d answers an earlier new preview of packet %d; ignored", job["id"], packet["id"])
+                return True
             block, refused = None, ""
             if status == "done":
                 try:
@@ -4222,20 +4230,24 @@ class PrmService:
                 block = {**block, "action": masked_action(block.get("action"), self._masker(packet["party_id"], now))}
             new = {**data, "previewing": None, **({"preview": block} if block else {})}
             self._store.set_platform(packet["id"], new, (PENDING,))
-            if answered and self._draft_context and (block.get("action") or {}).get("action") == "jst.sample_order":
-                # PRM_DRAFT_CONTEXT: the packet keeps whether its last preview was checked by photo (approving asks)
+            if answered and (block.get("action") or {}).get("action") == "jst.sample_order" and (
+                    self._draft_context or draft_context.KEY in (packet.get("meta") or {})):
+                # PRM_DRAFT_CONTEXT: the packet keeps whether its last preview was checked by photo (approving asks); once
+                # it has a mark, with the switch off too (a preview nothing checked never keeps an older one's mark)
                 self._store.merge_packet_meta(packet["id"], {draft_context.KEY: {"v": 1, "gated": gated}}, (PENDING,))
-            # PRM_DRAFT_CONTEXT: the new preview's sheet replaces the draft's (the old file deleted); one that came with an
-            # answer that cannot be read, for a draft no longer waiting, or past MAX_OPERATOR_FILES is deleted
+            # PRM_DRAFT_CONTEXT: the new preview's sheet replaces the draft's, and a new preview without one clears it (the
+            # old sheet was not made for it); the old files are deleted.  A sheet that came with an answer that cannot be
+            # read, for a draft no longer waiting, or past MAX_OPERATOR_FILES is deleted
             files, extra_sheets = draft_context.preview_operator_files(
                 job.get("result_text"), self._relay.store.operator_files(job["id"]), self._relay.store.outfiles(job["id"]))
             draft_context.delete_files(extra_sheets)
-            if files and answered:
+            if answered:
                 old = [f["path"] for f in draft_context.files_of(packet) if f["path"] not in {g["path"] for g in files}]
-                if self._store.merge_packet_meta(packet["id"], {draft_context.OPERATOR_FILES: files}, (PENDING,)):
-                    draft_context.delete_files(old)
-                else:
-                    draft_context.delete_files([f["path"] for f in files])
+                if files or old:
+                    if self._store.merge_packet_meta(packet["id"], {draft_context.OPERATOR_FILES: files}, (PENDING,)):
+                        draft_context.delete_files(old)
+                    else:
+                        draft_context.delete_files([f["path"] for f in files])
             elif files and status != "lost":         # (lost: its answer may still come, with them; else the sweep)
                 draft_context.delete_files([f["path"] for f in files])
             if packet.get("tool") in COMMISSION_ACTIONS.values():
@@ -6223,7 +6235,7 @@ class PrmService:
         except Exception:
             logger.exception("PRM: the ignored boss groups could not be cleaned up; tried again later")
         try:                                       # PRM_DRAFT_CONTEXT: the photo sheets (her picture) after 30 days
-            draft_context.sweep(self._store, now, files_dir=self._relay.files_dir)
+            draft_context.sweep(self._store, now, files_dir=self._relay.files_dir, relay_store=self._relay.store)
         except Exception:
             logger.exception("PRM: the operator files could not be cleaned up; tried again later")
         for deal in self._store.deals_to_purge(now, self._retention_days):

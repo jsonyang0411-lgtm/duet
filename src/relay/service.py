@@ -43,7 +43,7 @@ from typing import Callable, Optional
 from .attachments import HOLD_SEC, KINDS, Held, attachment_kind, resolve
 from .commands import RelayCommand, parse, parse_answer, prefix_pattern
 from .link import VIA as LINK_VIA, PeerLog
-from .store import ADMIN, FINAL_STATES, KINDS as JOB_KINDS, RelayStore
+from .store import ADMIN, FINAL_STATES, KINDS as JOB_KINDS, PRM, RelayStore
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +63,8 @@ ASK_SEND_TRIES = 6          # ... and not tried again after this many failed sen
 MAX_OUTFILE_BYTES = 100 * 1024 * 1024   # one file a prm job's worker sends back
 MAX_OUTFILES = 9                        # files per prm job
 MAX_OPERATOR_FILES = 4                  # files per prm job for the operators only (not counted with MAX_OUTFILES)
+OPERATOR_PREFIX = "对图单-"             # every such file's name starts so (src/prm/draft_context.py SHEET_PREFIX)
+OPERATOR_OPS = ("", "platform_preview")  # the prm jobs that may send one: a draft's, and a new preview's of its action
 
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
 _UNSAFE_NAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
@@ -413,14 +415,20 @@ class ClaudeRelay:
         """A file a ``prm`` job's worker sends back for the operators only (PRM_DRAFT_CONTEXT: a sample order's photo
         sheet, src/prm/draft_context.py): stored next to the job's outfiles (``outfiles/job-<id>/``), recorded apart
         (``relay_operator_files``: never one of the draft's attachments, not counted with MAX_OUTFILES), at most
-        MAX_OPERATOR_FILES a job.  ``{"id", "size", "sha256"}``, or None as ``outfile``."""
+        MAX_OPERATOR_FILES a job, only from a draft's job or a new preview's (``OPERATOR_OPS``: never an execution's, a
+        sample-status read's, a clean-up's), its name always starting with ``OPERATOR_PREFIX``.  ``{"id", "size",
+        "sha256"}``, or None as ``outfile``."""
         self._seen()
         job = self._store.get(job_id)
-        if job is None or job.get("kind") == ADMIN or job["status"] not in ("running", "lost"):
+        if job is None or job.get("kind") != PRM or job["status"] not in ("running", "lost"):
+            return None
+        if str(job_meta(job).get("op") or "") not in OPERATOR_OPS:
             return None
         if not 0 < length <= MAX_OUTFILE_BYTES:
             return None
         name = _UNSAFE_NAME.sub("_", str(name)).strip(" .")[:120] or "file"
+        if not name.startswith(OPERATOR_PREFIX):
+            name = (OPERATOR_PREFIX + name)[:120]
         folder = self._files_dir / "outfiles" / f"job-{job_id}"
         folder.mkdir(parents=True, exist_ok=True)
         path, n = folder / name, 2
