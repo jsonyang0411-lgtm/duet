@@ -1316,6 +1316,7 @@ def _execute_outcome(run: CliRun, data, rows: list, step: dict) -> str:
 DY_STEPS = {
     "designated": ("百应 · 建指定达人佣金策略", ("buyin", "promotion-strategy-create-designated")),
     "promotion": ("百应 · 给商品建推广（还没推广时）", ("buyin", "promotion-create")),
+    "bound": ("抖店 · 查她是不是已经绑在这个商品的渠道品上", ("fxg", "channel-goods-list")),
     "read": ("抖店 · 读主商品的 SKU、日常价和可分库存", ("fxg", "channel-goods-create")),
     "create": ("抖店 · 按约定建渠道品", ("fxg", "channel-goods-create")),
     "bind": ("抖店 · 渠道品绑定达人", ("fxg", "channel-goods-bind")),
@@ -1352,6 +1353,11 @@ def _dy_argv(cfg: dict, step: str, action: dict, *, execute: bool, channel_id: s
                 "--end=long"]
     elif step == "promotion":
         opts = [f"--id={a['item_id']}"]
+    elif step == "bound":
+        # the channel products of this main product she is bound to (the 渠道商品管理 list's kol_id filter): read only
+        if execute:
+            raise _err("bad_step", "查渠道品这一步只读")
+        opts = [f"--product-id={a['item_id']}", f"--uid={a['creator_platform_id']}"]
     elif step == "read":
         # the main product as the create form reads it (its SKUs, daily prices, assignable stock), never executed: as
         # 达人带货 sharing the main product's stock, so that no stock stops the read (专属达人带货 without a stock is
@@ -1643,6 +1649,41 @@ def _dy_agreement_run(cfg: dict, agreement: dict, run_one, *, execute: bool) -> 
             pass
 
 
+def _dy_bound(cfg: dict, action: dict, run_one) -> tuple:
+    """Is she bound to a channel product of this main product already (``bound``: ``fxg channel-goods-list
+    --product-id --uid``, read only)?  The bot knows only the links it made (2026-11-09: 8 were made by hand), and a
+    second one for the same creator and product would be created, its stock taken from the product, and then refused
+    at the bind (the platform's 「无法创建提示」).  ``(step record, rows)``: ``blocked`` with the channel products she
+    is on (their link among the facts, when it is the platform's); a login, wall or other account stops as the CLI
+    said; a list that could not be read is ``ready`` with a reminder (rows None): the operator looks."""
+    run = run_one(_dy_argv(cfg, "bound", action, execute=False), "dy", False)
+    data = parse_json(run.stdout)
+    rec = _step("bound", DY_STEPS["bound"][0], run, False)
+    rows = data.get("rows") if isinstance(data, dict) else None
+    if run.exit_code in _EXIT_VERDICT:
+        rec["verdict"] = _EXIT_VERDICT[run.exit_code]
+        rec["problems"].append(_exit_problem(run))
+        return rec, None
+    if run.error or run.stopped or not isinstance(rows, list):
+        rec["verdict"] = "ready"
+        rec["facts"].append(_fact("提醒", "没查成她是不是已经绑在这个商品的渠道品上（" + _exit_problem(run)
+                                  + "）：批准前到抖店「渠道商品管理」按这个商品和她的 UID 看一眼，有了就不要再建"))
+        return rec, None
+    rows = [r for r in rows if isinstance(r, dict)]
+    rec["verdict"] = "blocked" if rows else "ready"
+    for row in rows[:5]:
+        channel = _clip(row.get("channelId"), 40)
+        rec["problems"].append(f"她已经绑在这个商品的渠道品 {channel} 上了（{_clip(row.get('saleChannel') or '', 20)}，"
+                               f"{_clip(row.get('statusName') or row.get('status'), 20)}）：不再建第二个；链接在抖店"
+                               "「渠道商品管理」里复制，要换新的就先在那里解绑或删掉旧的")
+        link = check_link(str(row.get("link") or ""), "dy")
+        if link:
+            rec["facts"].append(_fact(f"渠道品 {channel} 的链接", link))
+    if not rows:
+        rec["facts"].append(_fact("查过", "她还没绑在这个商品的渠道品上"))
+    return rec, rows
+
+
 def _dy_read(cfg: dict, action: dict, run_one) -> tuple:
     """The first read of a channel product's preview (``read``): the create command for the main product without an
     agreement (its price, stock and prefix are not ours), for its SKUs and what stops the product at all.
@@ -1761,8 +1802,9 @@ def _channel_facts(action: dict, skus: list, warnings: list, data) -> list:
         fact = _fact("页面提示", text)
         if fact not in head:
             head.append(fact)
-    tail = [_fact("批准以后", f"先按这份约定再预览一次（日常价变了就不建），再建渠道品；建好、读回核验通过、拿到推广链接以后，"
-                            f"预览并绑定达人 UID {action['creator_platform_id']}；两步都核验通过才把推广链接发给达人")]
+    tail = [_fact("批准以后", f"先再查一次她是不是已经绑在这个商品的渠道品上、按这份约定再预览一次（绑了或者日常价变了就不建），"
+                            f"再建渠道品；建好、读回核验通过、拿到推广链接以后，预览并绑定达人 UID {action['creator_platform_id']}；"
+                            "两步都核验通过才把推广链接发给达人")]
     room = max(0, 40 - len(head) - len(tail) - 1)
     rows = []
     for s in skus[:room]:
@@ -1802,6 +1844,10 @@ def _preview_dy_designated(action: dict, cfg: dict, run_one, block: dict, contex
 def _preview_dy_channel_goods(action: dict, cfg: dict, run_one, block: dict) -> None:
     """Read the main product, work out the agreement the shop's way, preview the create with it (see above)."""
     block["run"] = {"steps": ["create", "bind"]}
+    bound, _ = _dy_bound(cfg, action, run_one)
+    block["steps"].append(bound)
+    if bound["verdict"] != "ready":
+        return
     read, data = _dy_read(cfg, action, run_one)
     block["steps"].append(read)
     if read["verdict"] != "ready":
@@ -1890,6 +1936,12 @@ def _execute_dy(action: dict, cfg: dict, plan: dict, run_one, record: dict, cont
         return
     # dy.channel_goods: the agreement the approval holds, previewed once more right before the write (anything that
     # stops it, or a daily price that moved since: NOT_RUN, nothing written); the channel product; its talent
+    bound, rows = _dy_bound(cfg, action, run_one)
+    record["steps"].append(bound)
+    if bound["verdict"] != "ready":
+        bound["outcome"] = "NOT_RUN"
+        record["problems"].append("没有执行：" + "；".join(bound["problems"][:2]) + "，平台没有动")
+        return
     agreement = channel_agreement(action, plan["skus"])
     again, data = look("create", agreement=agreement)
     changed = _channel_mismatch(plan["skus"], data) if again["verdict"] == "ready" else []

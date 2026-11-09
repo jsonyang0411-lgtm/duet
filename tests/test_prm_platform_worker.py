@@ -18,8 +18,8 @@ from test_prm_worker import CREATOR, TOKEN, bot, creator_says, run_one, settings
 
 from platform_fakes import (
     DY_CHANNEL, DY_ITEM, DY_ITEM2, DY_LINK, DY_SKU2, DY_SKU2B, DY_UID, JST_ORDER, JST_SHOP_DY, JST_UID, FakeNode, catalog,
-    dy_agreed_preview, dy_bind_done, dy_bind_preview, dy_create_done, dy_designated_done, dy_designated_preview,
-    dy_read_preview, jst_sample_row, jst_samples, rule,
+    dy_agreed_preview, dy_bind_done, dy_bind_preview, dy_bound_list, dy_create_done, dy_designated_done,
+    dy_designated_preview, dy_read_preview, jst_sample_row, jst_samples, rule,
 )
 from src.prm import platforms
 from src.prm.result import SCHEMA
@@ -159,6 +159,7 @@ def test_a_channel_link_is_made_the_shops_way_end_to_end(worker, bot, mac):  # n
     agreed = dy_agreed_preview([(DY_SKU2, "均码黑色", "315.00", "283.00", 100, 500),
                                 (DY_SKU2B, "均码咖啡", "290.00", "261.00", 30, 30)], item=DY_ITEM2)
     mac.node.rules([
+        rule(["channel-goods-list"], dy_bound_list(item=DY_ITEM2)),
         rule(["channel-goods-create"], dy_read_preview([(DY_SKU2, "均码黑色", "315.00", 500),
                                                         (DY_SKU2B, "均码咖啡", "290.00", 30)], item=DY_ITEM2),
              execute=False, agreement=False),

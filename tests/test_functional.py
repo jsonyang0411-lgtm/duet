@@ -481,13 +481,14 @@ class TestPrmPages:
         SKU's daily price → channel price, its stock and what the main product can spare, a colour without stock, the
         CLI's own warnings, and in the detail both commands (the read and the preview with the agreement)."""
         import json as _json
-        from platform_fakes import (DY_ITEM2, DY_SKU2, DY_SKU2B, FakeNode, catalog, dy_agreed_preview, dy_read_preview,
-                                    rule)
+        from platform_fakes import (DY_ITEM2, DY_SKU2, DY_SKU2B, FakeNode, catalog, dy_agreed_preview, dy_bound_list,
+                                    dy_read_preview, rule)
         from src.prm import platforms
         from src.prm.service import SETTLE_SEC
 
         node = FakeNode(tmp_path / "mac", monkeypatch)
         node.rules([
+            rule(["channel-goods-list"], dy_bound_list(item=DY_ITEM2)),
             rule(["channel-goods-create"], dy_read_preview([(DY_SKU2, "均码黑色", "315.00", 500),
                                                             (DY_SKU2B, "均码咖啡", "290.00", 0)], item=DY_ITEM2),
                  execute=False, agreement=False),
@@ -520,6 +521,7 @@ class TestPrmPages:
             assert expected in text, expected
         card.locator("button:has-text('看预览明细')").click()
         detail = card.inner_text()
+        assert "抖店 · 查她是不是已经绑在这个商品的渠道品上" in detail and "她还没绑在这个商品的渠道品上" in detail
         assert "抖店 · 读主商品的 SKU、日常价和可分库存" in detail and "--sale-channel=kol" in detail
         assert "抖店 · 按约定建渠道品" in detail and "--agreement=" in detail
 

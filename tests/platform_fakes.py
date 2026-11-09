@@ -241,6 +241,21 @@ def dy_agreed_preview(skus, *, item=DY_ITEM, prefix="【小美专属】", sale="
         item=item, prefix=prefix, blockers=blockers, price_kind=price_kind, lower=True, warnings=warnings))
 
 
+def dy_bound_list(*channels, item=DY_ITEM, uid=DY_UID) -> dict:
+    """What ``fxg channel-goods-list --product-id … --uid …`` prints (read only): the channel products of the main
+    product the talent is bound to; ``channels`` are ``(channel_id, status)`` (2 售卖中, 0 已下架 …)."""
+    names = {0: "已下架", 2: "售卖中", 3: "已封禁", 4: "审核中", 5: "审核不通过"}
+    rows = [{"mainProductId": item, "channelId": channel, "channelType": 4, "saleChannel": "专属达人带货",
+             "kolExclusive": True, "status": status, "statusName": names.get(status), "checkStatus": 3,
+             "checkStatusName": None, "startTime": None, "endTime": None, "longTerm": True, "shareMainStock": False,
+             "priceFollowMain": False, "stock": 100, "remainStock": 98, "minPrice": 28300, "maxPrice": 28300,
+             "operations": [{"key": "copy_url", "status": "enable", "reason": ""}],
+             "link": f"https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id={item}&origin_type=604"
+                     f"&channel_id={channel}&channel_type=4"} for channel, status in channels]
+    return {"site": "fxg", "command": "channel-goods-list", "filters": {"mainProductId": item, "kolId": uid},
+            "total": len(rows), "returned": len(rows), "complete": True, "pages": 1, "rows": rows}
+
+
 def dy_create_done(outcome="VERIFIED_SUCCESS", link=DY_LINK, item=DY_ITEM) -> dict:
     row = dy_row(item, outcome, "the platform acknowledged this target with no reported error, and a re-read "
                                 "shows the requested value", observedValue="created")
