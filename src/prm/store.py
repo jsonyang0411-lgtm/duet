@@ -66,7 +66,8 @@
                     对图单) did not reach the chat: the draft is the console's in WeChat until they are sent again;
                     ``shown``: what its latest notice showed of a platform draft's preview (a new preview that ended
                     since is told again), ``hats``: the held hats of a sample order as that notice numbered them
-                    (「对过图 1」 quoting it confirms the first; 2026-11-10)
+                    (「对过图 1」 quoting it confirms the first; 2026-11-10), ``waited``: the new preview the admin
+                    was told is taking long
 
 A packet's life: ``pending`` (waits in the console) -> ``approved`` (an operator said
 send, the kind's gate is ``auto``, or the 下班时段 window sent it: route ``night``) -> ``sending`` ->
@@ -375,8 +376,9 @@ CREATE TABLE IF NOT EXISTS boss_groups (
 -- them); ``pictures_sent``: which ones went (a fingerprint of their paths: a fresh notice with others sends them).
 -- ``shown``: what the latest notice showed of a platform draft's preview (``WechatReview._shown``: a new preview that
 -- came since is told in a fresh notice); ``hats``: the held hats of a sample order as it numbered them (JSON,
--- ``[{"code", "ok"}]``: 「对过图 1」 quoting it confirms the first, ``ok`` only one a sheet it sent shows).  The 8.2
--- clean-up drops a deal's closed rows, cuts the rest.
+-- ``[{"code", "ok"}]``: 「对过图 1」 quoting it confirms the first, ``ok`` only one a sheet it sent shows); ``waited``:
+-- the new preview (its key) the admin was told is taking long, once.  The 8.2 clean-up drops a deal's closed rows, cuts
+-- the rest.
 CREATE TABLE IF NOT EXISTS wechat_reviews (
     packet_id INTEGER PRIMARY KEY,
     deal_id INTEGER NOT NULL,
@@ -395,6 +397,7 @@ CREATE TABLE IF NOT EXISTS wechat_reviews (
     pictures_sent TEXT NOT NULL DEFAULT '',
     shown TEXT NOT NULL DEFAULT '',
     hats TEXT NOT NULL DEFAULT '',
+    waited TEXT NOT NULL DEFAULT '',
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS wechat_reviews_deal ON wechat_reviews(deal_id);
@@ -455,6 +458,8 @@ _ADDED_COLUMNS = (
     # ... and 微信里「对过图」 (2026-11-10): what the latest notice showed of the preview, the held hats as it numbered them
     ("wechat_reviews", "shown", "TEXT NOT NULL DEFAULT ''"),
     ("wechat_reviews", "hats", "TEXT NOT NULL DEFAULT ''"),
+    # ... and which new preview the admin was told is taking long (its ``preview_key``: told once, PREVIEW_WAIT_SEC)
+    ("wechat_reviews", "waited", "TEXT NOT NULL DEFAULT ''"),
 )
 
 # What the creators wrote, or our side's own words, waiting for the next draft job.
@@ -2288,10 +2293,10 @@ class PrmStore:
 
     def set_wechat_review(self, packet_id: int, states: tuple = (), now: Optional[float] = None, **fields) -> bool:
         """Compare-and-set: the row's ``fields`` (state, notified_at, proposed, proposed_at, decision, answered_at,
-        told_at, late_told_at, pictures_ok, pictures_sent; and a fresh notice's notice, seen, preview, shown, hats)
-        change only while it is in one of ``states`` (any state when empty); True when it changed."""
+        told_at, late_told_at, pictures_ok, pictures_sent, waited; and a fresh notice's notice, seen, preview, shown,
+        hats) change only while it is in one of ``states`` (any state when empty); True when it changed."""
         allowed = {"state", "notified_at", "proposed", "proposed_at", "decision", "answered_at", "told_at", "late_told_at",
-                   "pictures_ok", "pictures_sent", "notice", "seen", "preview", "shown", "hats"}
+                   "pictures_ok", "pictures_sent", "notice", "seen", "preview", "shown", "hats", "waited"}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"not a wechat_reviews field: {sorted(unknown)}")

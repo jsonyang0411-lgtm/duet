@@ -111,7 +111,9 @@ finished) it does nothing (a bare 「1…」 the bot would have taken gets BARE_
   「对过图了」 (``confirm``: ``PrmService.photo_confirm``, its checks, the event's actor ``wechat``); it never runs
   anything: once no held hat is left unconfirmed the service asks for the new preview itself, and the new preview is
   told in a fresh notice (``_shown``: after every new preview of a platform draft told here that ended, with its
-  stamp and its current pictures, as ``_tell_again`` tells any change), whose own quoted 「执行」 runs it.  「撤销」 stays
+  stamp and its current pictures, as ``_tell_again`` tells any change), whose own quoted 「执行」 runs it.  No worker on
+  the Mac heard from lately when it is asked for: the answer says the new preview waits for it (PREVIEW_WAITS_MAC);
+  any new preview of a draft told here with no result after PREVIEW_WAIT_SEC: one line, once (PREVIEW_WAIT_TEXT).  「撤销」 stays
   the console's.  When the execution ends (the reply
   sent after VERIFIED_SUCCESS, uncertain, or not done; a result that comes late too) the admin is told in one line.  A
   job the relay raised on: run when it is there all the same, 「可以再回一次」 only when it certainly is not, else red as
@@ -217,6 +219,10 @@ HATS_ROOM = 120             # ... and only while this much of NOTICE_CHARS is le
 PHOTO_ALL = "全部"
 PHOTO_UNDO = "要撤销请到控制台"
 PREVIEW_COMING = "正在重新预览，好了再发一条通知"
+# ... but no worker on the Mac was heard from lately (``PrmService._worker_online``): the new preview waits for it
+PREVIEW_WAITS_MAC = "Mac 现在不在线，重新预览要等它上线，好了再发一条通知"
+PREVIEW_WAIT_SEC = 600      # a new preview of a draft told here with no result this long: the admin is told once
+PREVIEW_WAIT_TEXT = "重新预览等了 10 分钟还没结果（Mac 可能不在线）：好了会再发通知；急的话到控制台看"
 # ... a platform draft being previewed again: nothing runs from the notice told before; the new preview is told in a
 # fresh one (``WechatReview._shown``)
 PREVIEWING_STOP = "正在重新预览，微信里先不能执行：好了再发一条通知，看那一条再回；不要的话回 2"
@@ -742,6 +748,7 @@ class WechatReview:
         """One round of the sender thread: first the drafts told here that got new attention since their latest notice
         (``attention_seen``: her recall, a 要注意 changed, lines of the group the draft did not hear) or a new preview
         (``_shown``: a 重新预览 that ended; a fresh notice on the same number that says what changed, ``_tell_again``),
+        a new preview with no result after PREVIEW_WAIT_SEC (one line, once for that preview: ``_preview_waits``),
         then the drafts waiting for a person not told yet
         (oldest first; their pictures right after each notification, ``_pictures_went``), the pictures of told drafts
         that did not reach the chat (again, each draft 10 s doubling, at most 2 minutes apart, SEND_TRIES times; not
@@ -766,6 +773,22 @@ class WechatReview:
             if told is None:
                 tried -= 1                                 # (nothing went: no send of the round)
                 continue
+            sent += 1
+        for row in self._store.wechat_reviews_open():
+            # a new preview of a platform draft told here that has no result after PREVIEW_WAIT_SEC (the Mac offline:
+            # its job waits in the queue): said once for that preview (the row's ``waited``: its key)
+            asked = self._preview_waits(row)
+            if not asked or self._failures.get(("waiting", row["packet_id"]), 0) >= SEND_TRIES:
+                continue
+            if tried >= PER_ROUND:
+                return sent
+            tried += 1
+            if not self._try(("waiting", row["packet_id"]), f"#{row['packet_id']} {PREVIEW_WAIT_TEXT}",
+                             f"the wait of draft {row['packet_id']}'s new preview"):
+                return sent
+            self._store.set_wechat_review(row["packet_id"], (), self._clock(), waited=asked)
+            logger.info("PRM: draft %d: its new preview has no result after %d s; the admin was told", row["packet_id"],
+                        PREVIEW_WAIT_SEC)
             sent += 1
         for packet in self._store.wechat_review_due(self._cutoff()):
             key = ("draft", packet["id"])
@@ -871,6 +894,24 @@ class WechatReview:
             return None
         return packet, seen
 
+    def _preview_waits(self, row: dict) -> str:
+        """The key of the new preview of this told draft that is taking long: a platform draft still waiting, being
+        previewed again (``platform.previewing``: when it was asked for) for PREVIEW_WAIT_SEC or longer, the admin not
+        told of this one yet (the row's ``waited``); "" otherwise."""
+        if row.get("tool", MESSAGE_TOOL) in (MESSAGE_TOOL, BUYIN_TOOL) or row.get("state") == TELLING:
+            return ""
+        packet = self._store.packet(row["packet_id"])
+        if packet is None or packet["status"] != PENDING:
+            return ""
+        data = self._json(packet.get("platform"))
+        since = data.get("previewing")
+        if not isinstance(since, (int, float)) or isinstance(since, bool) or not since:
+            return ""
+        key = str(data.get("preview_key") or since)
+        if self._clock() - float(since) < PREVIEW_WAIT_SEC or key == str(row.get("waited") or ""):
+            return ""
+        return key
+
     def _shown(self, packet: dict) -> str:
         """What a notification shows of a platform draft's preview, as a fingerprint (``wechat_reviews.shown``; "" for
         a draft with no platform action): how many new previews of it ended (``previews``, the service counts each
@@ -885,7 +926,7 @@ class WechatReview:
         blob = json.dumps({
             "n": data.get("previews") or 0, "p": preview_stamp(data.get("preview")),
             "m": [meta.get(draft_context.KEY), draft_context.codes_of(meta, draft_context.PHOTO_HELD),
-                  draft_context.codes_of(meta, draft_context.PHOTO_CONFIRMED)],
+                  draft_context.codes_of(meta, draft_context.PHOTO_CONFIRMED), draft_context.hat_marks(meta)],
             "f": [f["path"] for f in draft_context.files_of(packet)]}, sort_keys=True, ensure_ascii=False, default=str)
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
@@ -2360,7 +2401,7 @@ class WechatReview:
             able = [i for i in left if hats[i - 1]["ok"]]
             rest = [i for i in left if not hats[i - 1]["ok"] and i not in console]
             if result.get("repreview"):
-                bits.append(PREVIEW_COMING)
+                bits.append(PREVIEW_COMING if result.get("mac_online", True) else PREVIEW_WAITS_MAC)
             elif able:
                 bits.append(f"还扣着{named(able)}：对上了再引用这条通知回「对过图 {able[0]}」")
             elif not left:                             # (all confirmed, but the new preview did not start)

@@ -693,10 +693,17 @@ def test_words_in_the_note_never_let_a_held_hat_go(worker, bot, mac):  # noqa: F
     assert "起草备注里写的「确认」都不算" in dc.PHOTO_RULE and HOW in dc.ORDER_RULE and dc.CONFIRM_HOW == HOW
 
 
-def as_the_bot_reads(gated: dict) -> list:
-    """The held hats of a gate's answer as the bot reads them for 微信里「对过图」 (src/prm/draft_context.py ``held_hats``:
-    which sheet, which row, whether its code has a picture), from the preview's own facts and problems."""
-    return bot_draft_context.held_hats({"meta": {"photo_held": gated["held"]}, "platform": {"preview": gated["block"]}})
+def as_the_bot_reads(gated: dict, old_worker: bool = False) -> list:
+    """The held hats of a gate's answer as the bot has them for 微信里「对过图」 (src/prm/draft_context.py ``held_hats``:
+    which sheet, which row, whether its code has a picture): from the gate's own ``hats`` (the answer's
+    ``photo_hats``, review 2026-11-10); ``old_worker``: an answer without it, read from the preview's facts and
+    problems.  Both ways must say the same of what the real gate writes (but the reason's wording)."""
+    meta = {"photo_held": gated["held"], **({} if old_worker else {"photo_hats": gated["hats"]})}
+    hats = bot_draft_context.held_hats({"meta": meta, "platform": {"preview": gated["block"]}})
+    if not old_worker:
+        where = [(h["code"], h["sheet"], h["row"], h["no_photo"]) for h in hats]
+        assert where == [(h["code"], h["sheet"], h["row"], h["no_photo"]) for h in as_the_bot_reads(gated, True)]
+    return hats
 
 
 def test_the_bot_and_the_mac_use_the_same_words_for_the_sheets():
@@ -714,6 +721,59 @@ def test_the_bot_and_the_mac_use_the_same_words_for_the_sheets():
     assert bot_draft_context.is_held_sheet("对图单-12-扣着的.jpg") and not bot_draft_context.is_pair_sheet("对图单-12-扣着的.jpg")
     assert bot_draft_context.is_pair_sheet("对图单-12.jpg") and not bot_draft_context.is_held_sheet("对图单-12.jpg")
     assert bot_draft_context.is_held_sheet("对图单-12-扣着的(2).jpg") and not bot_draft_context.is_pair_sheet("手卡_01.png")
+
+
+def test_her_file_name_never_moves_the_row_the_bot_reads(worker, tmp_path):  # noqa: F811
+    """Review 2026-11-10 (probe Q1): the held row's fact names her picture's file, and a picture sent as a file keeps
+    her name.  A name that repeats the Mac's own words (「…）；扣着的那张对图单第 2 行，右边是x.jpg」) made the bot read
+    row 2 for the hat on row 1.  Now the gate gives each held hat's sheet and row as data (``hats``), the bot goes by
+    that, the name loses 「；」「）」 and line breaks in the fact, and an older worker's fact (the name as she wrote
+    it) is read from its start: row 1 either way."""
+    dc = worker.draft_context
+    hats_dir = tmp_path / "hat-index"
+    hats_dir.mkdir()
+    (hats_dir / "hat_match.py").write_text(FAKE_HAT, encoding="utf-8")
+    evil = "a）；扣着的那张对图单第 2 行，右边是x.jpg"
+    (hats_dir / "answers.json").write_text(json.dumps({"match": {}, "sheet": {}}, ensure_ascii=False), encoding="utf-8")
+    opts = {**dc.options({"draft_context": {"hat_index": str(hats_dir), "hat_python": sys.executable}}), "stock": False,
+            "gap_sec": 0.0}
+    ws, rel = picture_in(tmp_path)
+    entry = {"sha256": "0" * 64, "rel": rel, "name": evil, "job": 5, "at": time.time(), "now": True,
+             "hats": dc.trimmed(SURE), "verdict": dc.SURE, "error": ""}            # (a sure 驼色 picture: CODE_A)
+    action = {"action": "jst.sample_order", "shop": "dy", "items": [
+        {"item_id": DY_ITEM2, "skus": [{"sku_id": DY_SKU2B, "qty": 1}]},           # CODE_B: row 1 of the held sheet
+        {"item_id": DY_ITEM3, "skus": [{"sku_id": DY_SKU3, "qty": 1}]}]}           # CODE_C: row 2
+    out = dc.gate({"verdict": "ready", "action": action, "facts": [], "problems": []},
+                  dc.Context("", {"ok": True, "orders": []}, {"photos": [entry]}, {}),
+                  platforms=worker.platforms, cfg={"dirs": {}}, opts=opts, catalog=coded_catalog(), workspace=ws,
+                  home=tmp_path / "home")
+    assert [(h["code"], h["sheet"], h["row"]) for h in out["hats"]] == [(CODE_B, "held", 1), (CODE_C, "held", 2)]
+    facts = [f["value"] for f in out["block"]["facts"] if f["label"] == dc.HELD_LABEL]
+    assert "左边是她这次发的 a扣着的那张对图单第 2 行，右边是x.jpg，右边是这个编码自己的图" in facts[0]   # (no 「）；」 of hers)
+    assert dc._whose({"name": "a；b）c\nd\u2028e.jpg", "now": True}) == "这次发的 abcde.jpg"
+    assert [(h["code"], h["row"]) for h in as_the_bot_reads(out)] == [(CODE_B, 1), (CODE_C, 2)]
+    # an older worker: no ``photo_hats``, her name as she wrote it in the fact
+    old = {"held": out["held"], "block": {**out["block"], "facts": [
+        {"label": dc.HELD_LABEL, "value": f"{CODE_B}：扣着（颜色没把握）；扣着的那张对图单第 1 行，左边是她这次发的 {evil}，"
+                                          "右边是没有这个编码的图"},
+        {"label": dc.HELD_LABEL, "value": f"{CODE_C}：扣着（颜色没把握）；扣着的那张对图单第 2 行，左边是她这次发的 "
+                                          "b，右边是没有这个编码的图.jpg，右边是这个编码自己的图"}]}}
+    assert [(h["code"], h["sheet"], h["row"], h["no_photo"]) for h in as_the_bot_reads(old, old_worker=True)] == [
+        (CODE_B, "held", 1, True), (CODE_C, "held", 2, False)]     # (what is on the right: the fact's own last words)
+    # data the bot does not take: no row, never a wrong one
+    read = bot_draft_context.held_hats
+    marks = [{"code": CODE_B, "sheet": "held", "row": 1, "no_photo": False, "why": "x"},
+             {"code": CODE_C, "sheet": "held", "row": 1, "no_photo": False, "why": "y"}]       # (two hats, one row)
+    assert [(h["sheet"], h["row"]) for h in read({"meta": {"photo_held": [CODE_B, CODE_C], "photo_hats": marks}})] == [
+        ("", 0), ("", 0)]
+    odd = [{"code": CODE_B, "sheet": "held", "row": "1"}, {"code": CODE_C, "sheet": "wall", "row": 2}, "x",
+           {"code": CODE_A, "sheet": "held", "row": 3}]
+    assert read({"meta": {"photo_held": [CODE_B, CODE_C], "photo_hats": odd}}) == [
+        {"code": CODE_B, "why": "没对上图", "sheet": "", "row": 0, "no_photo": True},
+        {"code": CODE_C, "why": "没对上图", "sheet": "", "row": 0, "no_photo": True}]
+    assert read({"meta": {"photo_held": [CODE_B], "photo_hats": []}}) == [                     # (named by nothing)
+        {"code": CODE_B, "why": "没对上图", "sheet": "", "row": 0, "no_photo": True}]
+    assert bot_draft_context.hat_marks({"photo_hats": "x"}) is None and bot_draft_context.hat_marks("{]") is None
 
 
 def test_the_gate_takes_the_codes_the_console_confirmed(worker, tmp_path):  # noqa: F811
@@ -756,13 +816,18 @@ def test_the_gate_takes_the_codes_the_console_confirmed(worker, tmp_path):  # no
         f"{CODE_B}：扣着（同款别的颜色（她的图最像的是驼色））；扣着的那张对图单第 1 行，左边是她这次发的 图片-1.jpg，"
         f"右边是这个编码自己的图"]
     # 微信里「对过图」 (2026-11-10): the bot reads each held hat's sheet and row out of these very lines (``held_hats``)
-    assert as_the_bot_reads(held) == [
-        {"code": CODE_B, "why": "同款别的颜色（她的图最像的是驼色）", "sheet": "held", "row": 1, "no_photo": False},
-        {"code": CODE_A, "why": "对图单说要再看：要再看：颜色：图最像 深棕", "sheet": "pair", "row": 1, "no_photo": False}]
+    assert held["hats"] == [                                              # (in ``held``'s order: the order's lines)
+        {"code": CODE_A, "sheet": "pair", "row": 1, "no_photo": False, "why": "对图单说要再看：要再看：颜色：图最像 深棕"},
+        {"code": CODE_B, "sheet": "held", "row": 1, "no_photo": False, "why": "同款别的颜色（她的图最像的是驼色）"}]
+    for old_worker in (False, True):
+        assert as_the_bot_reads(held, old_worker) == [
+            {"code": CODE_B, "why": "同款别的颜色（她的图最像的是驼色）", "sheet": "held", "row": 1, "no_photo": False},
+            {"code": CODE_A, "why": "对图单说要再看：要再看：颜色：图最像 深棕", "sheet": "pair", "row": 1,
+             "no_photo": False}]
     let = gated([CODE_B, CODE_A])
     assert let["block"]["verdict"] == "ready", let["block"]["problems"]
     assert let["held"] == [] and let["used"] == [CODE_A, CODE_B] and let["held_sheet"]
-    assert as_the_bot_reads(let) == []                                   # (nothing held: nothing to confirm)
+    assert as_the_bot_reads(let) == [] and let["hats"] == []             # (nothing held: nothing to confirm)
     assert sheet_labels()[2:] == [None, ["已点「对过图了」"]]
     facts = [f["value"] for f in let["block"]["facts"]]
     assert f"{CODE_B}：运营在控制台点了「对过图了」（没有图对）" in facts
@@ -850,6 +915,9 @@ def test_every_held_hat_gets_a_sheet_row_that_says_why_it_is_held(worker, tmp_pa
     assert f"{CODE_C}：扣着的那张对图单最多 1 行，这一顶放不下了，请自己找图核对" in [
         f["value"] for f in capped["block"]["facts"]]
     assert as_the_bot_reads(capped)[1] == {"code": CODE_C, "why": "没有照片对过", "sheet": "", "row": 0, "no_photo": False}
+    assert capped["hats"] == [
+        {"code": CODE_B, "sheet": "held", "row": 1, "no_photo": False, "why": "同款别的颜色（她的图最像的是驼色）"},
+        {"code": CODE_C, "sheet": "", "row": 0, "no_photo": False, "why": "没有照片对过"}]
     monkeypatch.setattr(dc, "MAX_HELD_ROWS", 6)
     # the held sheet not made (the index fails on it, or no time left): a fact, the holds as they were
     answers(match={"图片-1.jpg": SURE}, sheet={}, fail_with=f"={CODE_B}")
@@ -882,6 +950,8 @@ def test_the_held_hats_sheet_goes_back_too_and_never_holds_the_order_itself(work
     names = [f["name"] for f in packet["meta"]["operator_files"]]       # (微信里「对过图」: which sheet is which)
     assert [bot_draft_context.is_pair_sheet(n) for n in names] == [True, False]
     assert [bot_draft_context.is_held_sheet(n) for n in names] == [False, True]
+    assert packet["meta"]["photo_hats"] == [                              # (the Mac's data, kept with ``photo_held``)
+        {"code": CODE_B, "sheet": "held", "row": 1, "no_photo": False, "why": "同款别的颜色（她的图最像的是驼色）"}]
     assert bot_draft_context.held_hats(packet) == [
         {"code": CODE_B, "why": "同款别的颜色（她的图最像的是驼色）", "sheet": "held", "row": 1, "no_photo": False}]
     [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
@@ -903,6 +973,10 @@ def test_the_held_hats_sheet_goes_back_too_and_never_holds_the_order_itself(work
     assert "扣着的那张对图单没传到 Windows（Windows 的机器人还是旧版），请自己找图核对" in [
         f["value"] for f in preview["facts"]]
     assert [f["name"] for f in newest["meta"]["operator_files"]] == [f"对图单-{job_id}.jpg"]
+    # (the held hats' sheet did not get to the bot: the hat is on no sheet there, 微信里「对过图」 leaves it to the console)
+    assert newest["meta"]["photo_hats"] == [
+        {"code": CODE_B, "sheet": "", "row": 0, "no_photo": False, "why": "同款别的颜色（她的图最像的是驼色）"}]
+    assert [(h["sheet"], h["row"]) for h in bot_draft_context.held_hats(newest)] == [("", 0)]
 
 
 def test_a_held_hat_is_let_go_by_the_console_and_taken_back_by_its_undo(worker, bot, mac):  # noqa: F811

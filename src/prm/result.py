@@ -21,7 +21,7 @@ back ``handcards_made``, its verdict (the cards are among the files that came ba
 ``draft_context: {"v": 3, "gated": true}`` says the Mac checked the draft's sample order by photo (``Draft.gated``;
 an older mark is not one); ``photo_held`` names the item codes that check held for photo reasons (the console's
 「对过图了」) and ``photo_confirmed`` those it let go only by an operator's 「对过图了」 (``Draft.photo_held`` /
-``Draft.photo_confirmed``).
+``Draft.photo_confirmed``); ``photo_hats`` where an operator sees each held one (``Draft.photo_hats``).
 
 ``platform_action`` is optional (platforms.py): the Mac checks it and previews it, and
 hands back ``platform``, its verdict, in its place; a draft that names an action the Mac
@@ -119,6 +119,9 @@ class Draft:
     # and those it let go only by an operator's 「对过图了」 (``photo_confirmed``); draft_context.codes_of.
     photo_held: list = field(default_factory=list)
     photo_confirmed: list = field(default_factory=list)
+    # Where an operator sees each held code (its ``photo_hats``, 2026-11-10: draft_context.hat_marks); None: an older
+    # worker's answer without it (the bot reads the preview's words instead).
+    photo_hats: Optional[list] = None
 
 
 def _text(value, limit: int) -> str:
@@ -212,4 +215,5 @@ def parse_draft(raw: str) -> Draft:
         photo_held=draft_context.codes_of(data, draft_context.PHOTO_HELD) if draft_context.gated_of(data) else [],
         photo_confirmed=(draft_context.codes_of(data, draft_context.PHOTO_CONFIRMED) if draft_context.gated_of(data)
                          else []),
+        photo_hats=draft_context.hat_marks(data) if draft_context.gated_of(data) else None,
     )

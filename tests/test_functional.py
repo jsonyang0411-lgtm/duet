@@ -517,6 +517,18 @@ class TestPrmPages:
         assert "正在重新预览…" in text and "点「重新预览」按确认再核" not in text
         assert card.locator("button:has-text('重新预览')").is_disabled()
         assert card.locator(".prm-photo-held button:has-text('撤销')").first.is_disabled()
+        # no worker on the Mac heard from for a while (review 2026-11-10): the card says the new preview waits for it
+        prm.clock.now += 300
+        page.reload()
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="寄样单建好啦")
+        text = card.locator(".prm-photo-held").inner_text()
+        assert f"已确认 {code}；Mac 现在不在线，重新预览要等它上线" in text and "正在重新预览（按确认再核）" not in text
+        prm.relay.note_worker(None, kinds=("prm",))                         # (it is back)
+        page.reload()
+        page.wait_for_timeout(1500)
+        card = page.locator(".prm-draft", has_text="寄样单建好啦")
+        assert f"已确认 {code}，正在重新预览（按确认再核）" in card.locator(".prm-photo-held").inner_text()
         # its preview went by the confirmation (ready): taken back, 批准并执行 goes off
         assert store.unconfirm_photo(1, other)
         ready = {**held, "verdict": "ready", "problems": [], "run": {"steps": ["create"]}}

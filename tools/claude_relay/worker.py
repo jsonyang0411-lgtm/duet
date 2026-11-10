@@ -2795,6 +2795,7 @@ def do_prm_job(settings: dict, job: dict, client: RelayClient, stopper: Stopper)
         draft.pop("draft_context", None)
         draft.pop("photo_held", None)
         draft.pop("photo_confirmed", None)
+        draft.pop("photo_hats", None)
         if buyin:
             pass                                         # no preview: the bot drops a 百应 draft's action unrun
         elif draft.get("platform_action") is not None:
@@ -3138,8 +3139,10 @@ def sample_order_gate(settings: dict, workspace: Path, block, context, client: R
     """A previewed jst.sample_order checked by photo (``draft_context.gate``; any other action as it is): ``(block,
     operator_files, marks)``, ``marks`` what goes next to the block once the check ran (else {}): ``draft_context``
     (``GATED``: the bot holds any sample order without it), ``photo_held`` (the codes it held for photo reasons, which
-    the console offers 「对过图了」 for) and ``photo_confirmed`` (the codes it let go only by an operator's 「对过图了」:
-    taken back, the bot holds the draft).  The side-by-side sheet (``对图单-<job>.jpg``) and the held hats' sheet
+    the console offers 「对过图了」 for), ``photo_confirmed`` (the codes it let go only by an operator's 「对过图了」:
+    taken back, the bot holds the draft) and ``photo_hats`` (2026-11-10, with ``photo_held``: where an operator sees
+    each held code, ``draft_context.gate``'s ``hats``, ``[{"code", "sheet", "row", "no_photo", "why"}]``; a hat whose
+    sheet did not get to the bot has no sheet and no row there: the bot numbers the held hats for 微信里「对过图」 by it).  The side-by-side sheet (``对图单-<job>.jpg``) and the held hats' sheet
     (``对图单-<job>-扣着的.jpg``, 2026-11-10) go back on the operator-only channel (POST .../operator-files: the bot keeps
     them on the draft, never sends them to the creator) as ``[{"name", "why", "sha256"}]``, once the bot's /relay/health
     says it has that channel (``operator_files_ok``).  A side-by-side sheet that does not get there leaves the preview not
@@ -3157,6 +3160,7 @@ def sample_order_gate(settings: dict, workspace: Path, block, context, client: R
     marks = {}
     if checked.get("gated"):
         marks = {"draft_context": dict(GATED), **({"photo_held": list(checked["held"])} if checked.get("held") else {}),
+                 **({"photo_hats": [dict(h) for h in checked.get("hats") or []]} if checked.get("held") else {}),
                  **({"photo_confirmed": list(checked["used"])} if checked.get("used") else {})}
     block = checked["block"]
     sheets = [(path, why, name, needed) for path, why, name, needed in (
@@ -3192,6 +3196,11 @@ def sample_order_gate(settings: dict, workspace: Path, block, context, client: R
                      else draft_context.held_sheet_lost(block, lost[0]))
             continue
         files.append({"name": name, "why": why, "sha256": str((answer or {}).get("sha256") or "")})
+    if "photo_hats" in marks:                            # (a sheet that did not get there shows the bot's side no hat)
+        there = {"pair" if needed else "held" for path, why, name, needed in sheets
+                 if any(f["name"] == name for f in files)}
+        marks["photo_hats"] = [hat if hat.get("sheet") in there else {**hat, "sheet": "", "row": 0}
+                               for hat in marks["photo_hats"]]
     log.info("#%s sample order checked by photo: verdict %s, %d sheet(s) sent back", job_id, block.get("verdict"),
              len(files))
     return block, files, marks

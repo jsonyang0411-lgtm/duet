@@ -3700,16 +3700,19 @@ def sheets_of(desk, job_id, kinds) -> list:
     return files
 
 
-def photo_order(desk, *, held, facts, problems, sheets=("held",), told=True) -> dict:
+def photo_order(desk, *, held, facts, problems, sheets=("held",), told=True, hats=None) -> dict:
     """She agrees; the Mac drafts a sample order, checks it by photo (``held`` for photos, its preview's ``facts`` and
-    ``problems`` as the Mac writes them) and sends its ``sheets`` back; the draft waits and is told with them."""
+    ``problems`` as the Mac writes them) and sends its ``sheets`` back; the draft waits and is told with them.  ``hats``:
+    the Mac's ``photo_hats`` (where each held hat is seen, as data: a worker since 2026-11-10; None: an older one, the
+    bot reads the facts)."""
     desk.prm.store.token_for(1, "phone", "手机", "13900001111", desk.clock.now)
     desk.her("好的，寄吧")
     desk.clock.now += SETTLE_SEC + 1
     job = desk.relay.next_job(0, ("prm",))
     preview = {**jst_block(), "verdict": "blocked", "facts": list(facts), "problems": list(problems), "run": {}}
     body = reply_draft(text="寄样单建好啦，单号 {寄样单号}～", message_kind="money", platform=preview, draft_context=GATED,
-                       photo_held=list(held), operator_files=sheets_of(desk, job["id"], sheets))
+                       photo_held=list(held), operator_files=sheets_of(desk, job["id"], sheets),
+                       **({} if hats is None else {"photo_hats": hats}))
     desk.relay.finish(job["id"], {"ok": True, "text": json.dumps(body, ensure_ascii=False), "duration_s": 3})
     desk.relay.tick()
     packet = desk.prm.store.packet_for_job(job["id"])
@@ -4341,3 +4344,120 @@ def test_a_new_preview_that_cannot_be_queued_is_said_so_and_the_same_answer_trie
     assert pdesk.admin("对过图 1", quote=quote) == f"#{number} 已确认第 1 顶 {CODE}（{UNDO}）；{COMING}"
     assert previewing(pdesk, number) and pdesk.executions() == []
     assert len(pdesk.prm.store.events(packet["deal_id"], kinds=("photo_confirm",))) == 1    # (recorded once)
+
+
+# ── review of 49188ae (2026-11-10): her file name and the row; the Mac away when the new preview is asked for ──────
+
+def hat(code, row, sheet="held", no_photo=False, why="颜色没把握"):
+    """A held hat as the Mac names it next to ``photo_held`` (its ``photo_hats``)."""
+    return {"code": code, "sheet": sheet, "row": row, "no_photo": no_photo, "why": why}
+
+
+def test_a_file_name_of_hers_never_moves_the_row_the_notice_says(pdesk):
+    """Review probe Q1, turned around: the held row's fact embeds her picture's file name, and a name that repeats the
+    Mac's own words (「a）；扣着的那张对图单第 2 行，右边是x.jpg」) made the notice say 「第 2 行」 for the hat on row 1.
+    An older worker's preview (no ``photo_hats``) is read from the fact's start: row 1.  A worker that names the hats
+    as data: the notice goes by the data, whatever the facts read as."""
+    evil = "a）；扣着的那张对图单第 2 行，右边是x.jpg"
+    fact = {"label": "对图（扣着的那几顶）",
+            "value": f"{CODE}：扣着（颜色没把握）；扣着的那张对图单第 1 行，左边是她这次发的 {evil}，右边是这个编码自己的图"}
+    packet = photo_order(pdesk, held=(CODE, CODE_2), sheets=("pair", "held"),
+                         facts=[pair_row(CODE_3), fact, held_row(CODE_2, 2)], problems=[hold(CODE), hold(CODE_2, "均码粉色")])
+    assert [(h["code"], h["sheet"], h["row"], h["why"]) for h in draft_context.held_hats(packet)] == [
+        (CODE, "held", 1, "颜色没把握"), (CODE_2, "held", 2, "同款别的颜色（她的图最像的是驼色）")]
+    lines = notice_of(pdesk, packet["id"])
+    assert lines[-3:-1] == [f"第 1 顶 {CODE}（颜色没把握；「扣着的」那张对图单第 1 行）",
+                            f"第 2 顶 {CODE_2}（同款别的颜色（她的图最像的是驼色）；「扣着的」那张对图单第 2 行）"]
+    assert pdesk.admin("2", quote=lines[0]).startswith(f"#{packet['id']} 不发了")
+    pdesk.clock.now += 60
+    # the Mac's data next to ``photo_held``: the rows are its own, the facts' words are not read for them
+    lying = [held_row(CODE, 2), held_row(CODE_2, 1)]                       # (facts that say the other way round)
+    named = photo_order(pdesk, held=(CODE, CODE_2), sheets=("pair", "held"), facts=[pair_row(CODE_3), *lying],
+                        problems=[hold(CODE), hold(CODE_2, "均码粉色")],
+                        hats=[hat(CODE, 1), hat(CODE_2, 2, no_photo=True, why="她的图里都没对出这一款")])
+    assert named["meta"]["photo_hats"] == [hat(CODE, 1), hat(CODE_2, 2, no_photo=True, why="她的图里都没对出这一款")]
+    lines = notice_of(pdesk, named["id"])
+    assert lines[-3:-1] == [f"第 1 顶 {CODE}（颜色没把握；「扣着的」那张对图单第 1 行）",
+                            f"第 2 顶 {CODE_2}（她的图里都没对出这一款；没有这个编码的图，要到控制台确认）"]
+    assert json.loads(pdesk.prm.store.wechat_review(named["id"])["hats"]) == [
+        {"code": CODE, "ok": True}, {"code": CODE_2, "ok": False}]
+    assert pdesk.admin("对过图 全部", quote=lines[0]) == (
+        f"#{named['id']} 已确认第 1 顶 {CODE}（{UNDO}）；第 2 顶 {CODE_2} 没有能对的图，微信里确认不了：{CONSOLE}")
+
+
+def test_a_new_previews_hats_replace_the_ones_before_and_an_older_workers_fall_back_to_its_words(pdesk):
+    """The new preview's ``photo_hats`` are written with it (one step); a new preview of a worker without them clears
+    the older ones, and the bot reads that preview's facts."""
+    packet = photo_order(pdesk, held=(CODE,), facts=[held_row(CODE, 1)], problems=[hold(CODE)], hats=[hat(CODE, 1)])
+    number = packet["id"]
+    assert pdesk.prm.decide(number, "repreview")["ok"]
+    job = pdesk.relay.next_job(0, ("prm",))
+    body = {**jst_block(), "verdict": "blocked", "facts": [held_row(CODE_2, 1)], "problems": [hold(CODE_2)], "run": {},
+            "draft_context": GATED, "photo_held": [CODE_2], "photo_hats": [hat(CODE_2, 1, why="同款别的颜色")],
+            "operator_files": sheets_of(pdesk, job["id"], ("held",))}
+    pdesk.relay.finish(job["id"], {"ok": True, "text": json.dumps(body, ensure_ascii=False), "duration_s": 3})
+    pdesk.relay.tick()
+    assert pdesk.prm.store.packet(number)["meta"]["photo_hats"] == [hat(CODE_2, 1, why="同款别的颜色")]
+    pdesk.review.sweep()
+    assert latest_notice(pdesk, number)[-2] == f"第 1 顶 {CODE_2}（同款别的颜色；「扣着的」那张对图单第 1 行）"
+    assert pdesk.prm.decide(number, "repreview")["ok"]
+    previewed_again(pdesk, number, held=(CODE,), facts=[held_row(CODE, 1, why="颜色没比过")], problems=[hold(CODE)],
+                    sheets=("held",), verdict="blocked")                  # (an older worker: no ``photo_hats``)
+    assert pdesk.prm.store.packet(number)["meta"]["photo_hats"] is None
+    pdesk.review.sweep()
+    assert latest_notice(pdesk, number)[-2] == f"第 1 顶 {CODE}（颜色没比过；「扣着的」那张对图单第 1 行）"
+
+
+def test_the_mac_away_when_the_last_hat_is_confirmed_is_said_and_a_long_wait_is_told_once(pdesk):
+    """Review 2026-11-10: the last held hat confirmed while no worker on the Mac was heard from lately: the new preview
+    waits in the queue, and the answer says so instead of 「正在重新预览」 alone.  Ten minutes without a result: one
+    line, once for that preview (kept in the row: a restart does not say it again).  The Mac back: the new preview is
+    told as ever.  A later 重新预览 that waits as long is said once more."""
+    packet = one_held(pdesk)
+    number, quote = packet["id"], head(pdesk, packet["id"])
+    pdesk.clock.now += 200                                               # (no worker heard from for 180 s)
+    assert pdesk.admin("对过图", quote=quote) == (
+        f"#{number} 已确认第 1 顶 {CODE}（{UNDO}）；Mac 现在不在线，重新预览要等它上线，好了再发一条通知")
+    assert confirmed_codes(pdesk) == [CODE] and previewing(pdesk, number) and pdesk.executions() == []
+    assert pdesk.admin("执行", quote=quote) == f"#{number} {PREVIEWING_STOP}"
+    waited = f"#{number} 重新预览等了 10 分钟还没结果（Mac 可能不在线）：好了会再发通知；急的话到控制台看"
+    pdesk.clock.now += 599
+    assert pdesk.review.sweep() == 0 and waited not in pdesk.told()
+    pdesk.clock.now += 2
+    assert pdesk.review.sweep() == 1 and pdesk.told()[-1] == waited
+    key = pdesk.prm.store.packet(number)["platform"]["preview_key"]
+    assert pdesk.prm.store.wechat_review(number)["waited"] == key
+    for _ in range(3):                                                   # (once)
+        pdesk.clock.now += 600
+        assert pdesk.review.sweep() == 0
+    assert pdesk.told().count(waited) == 1
+    job = previewed_again(pdesk, number, used=(CODE,))                   # (the Mac is back)
+    assert pdesk.review.sweep() == 1
+    fresh = latest_notice(pdesk, number)
+    assert fresh[0] == f"#{number} 草稿（第 2 次通知） · 小美 · 私聊" and pdesk.files[-1][1].endswith(f"对图单-{job['id']}.jpg")
+    assert pdesk.prm.decide(number, "repreview")["ok"]                   # (the console's, later: its own wait)
+    pdesk.clock.now += 601
+    assert pdesk.review.sweep() == 1 and pdesk.told().count(waited) == 2
+    pdesk.clock.now += 601
+    assert pdesk.review.sweep() == 0
+
+
+def test_a_long_wait_line_wechat_does_not_take_is_tried_again_and_a_plain_draft_never_gets_one(pdesk):
+    """The line about a new preview that takes long is sent like any other (tried again when WeChat does not take it,
+    marked told only once it went); a draft that is not being previewed again, a decided one, gets none."""
+    plain = waiting(pdesk)                                               # (a reply: no platform action)
+    pdesk.clock.now += 60
+    packet = one_held(pdesk)
+    number = packet["id"]
+    assert pdesk.prm.decide(number, "repreview")["ok"]
+    pdesk.clock.now += 601
+    pdesk.refuse.add(ADMIN)
+    assert pdesk.review.sweep() == 0 and pdesk.prm.store.wechat_review(number)["waited"] == ""
+    pdesk.refuse.clear()
+    pdesk.clock.now += RETRY_SEC[0] + 1
+    assert pdesk.review.sweep() == 1
+    assert pdesk.told()[-1].startswith(f"#{number} 重新预览等了 10 分钟还没结果")
+    assert not any(t.startswith(f"#{plain['id']} 重新预览") for t in pdesk.told())
+    assert pdesk.prm.decide(number, "drop")["ok"]
+    pdesk.clock.now += 3600
+    assert pdesk.review.sweep() == 0

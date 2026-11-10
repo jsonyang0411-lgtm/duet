@@ -579,7 +579,7 @@ def test_the_next_preview_takes_a_confirmation_and_its_undo_holds_the_draft_agai
     assert shown_of(bot, packet["id"])["photo_held"] == [
         {"code": CODE_B, "held": True, "used": False, "confirmed": False, "at": None}]
     done = bot.prm.deal_action("photo_confirm", {"deal_id": deal["id"], "packet": packet["id"], "code": CODE_B})
-    assert done == {"ok": True, "code": CODE_B, "confirmed": True, "repreview": True, "left": []}
+    assert done == {"ok": True, "code": CODE_B, "confirmed": True, "repreview": True, "left": [], "mac_online": True}
     shown = shown_of(bot, packet["id"])
     [view] = shown["photo_held"]
     assert view["held"] and view["confirmed"] and view["at"] and shown["platform"]["previewing"] is True
@@ -623,6 +623,27 @@ def test_the_next_preview_takes_a_confirmation_and_its_undo_holds_the_draft_agai
     # a confirmation for her deal goes with every later draft job of hers, and never with another creator's
     assert her_job(bot, "那这顶呢")["meta"]["draft_context"]["confirmed"] == [CODE_B]
     assert bot.prm._draft_context_meta(deal_of(bot, OTHER)["id"])["confirmed"] == []
+
+
+def test_a_new_preview_asked_for_while_the_mac_is_away_says_so(bot, clock):
+    """Review 2026-11-10: the last held hat confirmed while no worker on the Mac was heard from lately (the relay's
+    ``worker_kinds``, 180 s): the new preview is queued all the same and the answer says it waits (``mac_online``
+    False: the console's toast and card, the admin's answer in WeChat)."""
+    packet = held_draft(bot)
+    deal = deal_of(bot)
+    assert bot.prm._worker_online() is True
+    clock.now += 181
+    assert bot.prm._worker_online() is False and bot.prm.snapshot()["worker_kinds"] == []
+    done = bot.prm.deal_action("photo_confirm", {"deal_id": deal["id"], "packet": packet["id"], "code": CODE_B})
+    assert done == {"ok": True, "code": CODE_B, "confirmed": True, "repreview": True, "left": [], "mac_online": False}
+    assert shown_of(bot, packet["id"])["platform"]["previewing"] is True
+    bot.relay.note_worker(None, kinds=("prm",))                            # (the Mac is back, as its poll says)
+    job = bot.relay.next_job(0, ("prm",))                                  # (... and the job was waiting for it)
+    assert job["meta"]["op"] == "platform_preview" and bot.prm._worker_online() is True
+    clock.now += 181                                                       # (only the cc worker lately: not ours)
+    bot.relay.note_worker(None, kinds=("admin",))
+    assert bot.relay.next_job(0, ("admin",)) is None
+    assert bot.relay.mac_online() is True and bot.prm._worker_online() is False
 
 
 def test_the_note_confirms_no_hat_any_more(bot):

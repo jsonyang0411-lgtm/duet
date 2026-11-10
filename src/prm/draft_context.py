@@ -25,8 +25,8 @@ picture behind it leaves the preview not ready, and the sheet comes back with th
   ``photo_unconfirm``), the next preview takes it, and a draft that went by one taken back waits for a new preview.
 - ``held_hats``: where an operator sees each held hat (2026-11-10, 微信里「对过图」, src/prm/wechat_review.py): the
   sheet (the held hats' one, 「对图单-<任务>-扣着的.jpg」, or the side-by-side one) and the row there, and whether its hold
-  says there is no picture of its code, read from the Mac's own lines in the preview (its facts labelled ``HELD_LABEL``
-  / ``PAIR_LABEL``, its problems).  The admin's 「对过图 1」 quoting the draft's notice confirms only a hat with a row on
+  says there is no picture of its code: the Mac's own data next to ``photo_held`` (``photo_hats``, ``hat_marks``), and
+  for an older worker's preview read from its lines (its facts labelled ``HELD_LABEL`` / ``PAIR_LABEL``, its problems).  The admin's 「对过图 1」 quoting the draft's notice confirms only a hat with a row on
   a sheet that notice sent; ``photo_confirm`` is the same for both, and once it leaves no held hat unconfirmed the
   service asks for the new preview itself.
 - ``take_operator_files`` / ``preview_operator_files``: the Mac sends the sheet on the relay's operator-only channel
@@ -70,6 +70,7 @@ OLD_RULE = "这份是旧版 Mac 按旧规则核的：更新、重启 Mac 的 wor
 # go with every draft and new-preview job (``job_context``'s ``confirmed``)
 PHOTO_HELD = "photo_held"
 PHOTO_CONFIRMED = "photo_confirmed"
+PHOTO_HATS = "photo_hats"           # ... and where an operator sees each held code (``hat_marks``, 2026-11-10)
 CONFIRM_HOW = "对过图后，在控制台这份草稿上点这顶旁边的「对过图了」"
 MAX_HELD = 50                       # codes of one preview (held, or let go by a confirmation)
 MAX_CONFIRMED = 100                 # codes confirmed for one deal that go with a job (the Mac's MAX_CONFIRMED)
@@ -230,9 +231,10 @@ def held_out(packet: Optional[dict], confirmed: dict) -> list:
             for c in confirmable(packet)]
 
 
-# 微信里「对过图」 (2026-11-10, src/prm/wechat_review.py): which row of which sheet shows a held hat, read from the Mac's
+# 微信里「对过图」 (2026-11-10, src/prm/wechat_review.py): which row of which sheet shows a held hat.  The Mac says it as
+# data next to ``photo_held`` (``photo_hats``: ``hat_marks``); for a preview of an older worker it is read from the Mac's
 # own words in the preview (tools/claude_relay/draft_context.py ``_gate`` / ``_held_sheet``; the worker's tests run the
-# real gate through ``held_hats``, tests/test_prm_draft_context_worker.py).  A line that does not read as one of these
+# real gate through both, tests/test_prm_draft_context_worker.py).  A line that does not read as one of these
 # gives the hat no row: it is confirmed in the console only, never from WeChat
 HELD_LABEL = "对图（扣着的那几顶）"   # the facts of the held hats' sheet (the Mac's HELD_LABEL)
 PAIR_LABEL = "对图"                 # ... and of the side-by-side sheet's rows
@@ -241,8 +243,8 @@ HELD_SHEET = "held"                 # ``held_hats``'s ``sheet``: the held hats' 
 PAIR_SHEET = "pair"                 # ... the side-by-side sheet (「对图单-<任务>.jpg」)
 HELD_SHEET_END = "-扣着的"          # how the held hats' sheet's name ends (worker.sample_order_gate)
 _CODE_PART = r"[0-9A-Za-z][0-9A-Za-z_-]{2,63}"
-_HELD_ROW = re.compile(rf"^(?P<code>{_CODE_PART})：扣着（(?P<why>.+)）；扣着的那张对图单第 (?P<row>\d{{1,2}}) 行，"
-                       r"[^；]*右边是(?P<right>[^；]+)", re.S)
+# (the reason is the Mac's own, and so is the first 「；扣着的那张对图单第 N 行，」 after it: not greedy, review 2026-11-10)
+_HELD_ROW = re.compile(rf"^(?P<code>{_CODE_PART})：扣着（(?P<why>.+?)）；扣着的那张对图单第 (?P<row>\d{{1,2}}) 行，", re.S)
 PAIR_ROW_WORDS = "：对的是"         # a fact of the side-by-side sheet's row: 「<编码> <颜色>：对的是<她的哪张图>…」
 _LOOK_AGAIN = re.compile(rf"^(?P<code>{_CODE_PART}) 对图要再看（(?P<why>.+)）：先核对再建", re.S)
 
@@ -269,17 +271,71 @@ def _preview_lines(packet: Optional[dict]) -> tuple:
     return facts, problems
 
 
+def hat_marks(value) -> Optional[list]:
+    """The held hats as the Mac names them next to ``photo_held`` (2026-11-10: its answer's, or a packet meta's,
+    ``photo_hats``; ``value`` a dict or its JSON text): ``[{"code", "sheet", "row", "no_photo", "why"}]``, each code
+    once (upper case, of its shape), ``sheet`` HELD_SHEET / PAIR_SHEET with ``row`` 1–99, else "" and 0; ``no_photo``
+    True unless the Mac says False; ``why`` one short line.  None when there is no such list (an older worker: the
+    bot reads its preview's words instead, ``held_hats``)."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    listed = value.get(PHOTO_HATS) if isinstance(value, dict) else None
+    if not isinstance(listed, list):
+        return None
+    out, seen = [], set()
+    for entry in listed[:MAX_HELD]:
+        code = code_of(entry.get("code")) if isinstance(entry, dict) else ""
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        sheet, row = entry.get("sheet"), entry.get("row")
+        placed = (sheet in (HELD_SHEET, PAIR_SHEET) and isinstance(row, int) and not isinstance(row, bool)
+                  and 1 <= row <= 99)
+        out.append({"code": code, "sheet": sheet if placed else "", "row": row if placed else 0,
+                    "no_photo": entry.get("no_photo") is not False,
+                    "why": " ".join(str(entry.get("why") or "").split())[:120]})
+    return out
+
+
 def held_hats(packet: Optional[dict]) -> list:
     """The hats a sample order's last preview held for photos (``photo_held``), each with where an operator sees it:
     ``[{"code", "why", "sheet", "row", "no_photo"}]``, the rows of the held hats' sheet first (in its order), then the
     side-by-side sheet's rows that say to look again, then the hats on neither (as ``photo_held`` has them).  ``why``:
     the Mac's short reason; ``sheet`` / ``row``: HELD_SHEET or PAIR_SHEET and the row there (1 the first), "" / 0 when
     the preview names no row for it; ``no_photo``: its hold says there is no picture of this code (NO_CODE_PHOTO: the
-    right side of its row is empty).  Read from the preview's facts and problems as the Mac writes them; whatever does
-    not read so leaves the hat without a row (微信里「对过图」 takes only a hat with a row on a sheet that was sent)."""
-    held = codes_of((packet or {}).get("meta") or {}, PHOTO_HELD)
+    right side of its row is empty).  From the Mac's own data next to ``photo_held`` (``photo_hats``, ``hat_marks``:
+    review 2026-11-10, a row is never read out of words that carry her picture's file name); two hats given one row
+    have none.  Only for a preview without it (an older worker) from the preview's facts and problems as the Mac
+    writes them (``_read_hats``); whatever does not read so leaves the hat without a row (微信里「对过图」 takes only a
+    hat with a row on a sheet that was sent)."""
+    meta = (packet or {}).get("meta") or {}
+    held = codes_of(meta, PHOTO_HELD)
     if not held:
         return []
+    marks = hat_marks(meta)
+    if marks is None:
+        out = _read_hats(packet, held)
+    else:
+        named = {h["code"]: h for h in marks}
+        out = [{"code": code, "why": "", "sheet": "", "row": 0, "no_photo": True, **named.get(code, {})}
+               for code in held]
+        spots = [(h["sheet"], h["row"]) for h in out if h["sheet"]]
+        for hat in out:
+            if hat["sheet"] and spots.count((hat["sheet"], hat["row"])) > 1:
+                hat.update(sheet="", row=0)          # (two hats on one row: neither is gone by)
+            hat["why"] = hat["why"] or "没对上图"
+    order = {HELD_SHEET: 0, PAIR_SHEET: 1, "": 2}
+    return sorted(out, key=lambda h: (order[h["sheet"]], h["row"] if h["sheet"] else held.index(h["code"])))
+
+
+def _read_hats(packet: Optional[dict], held: list) -> list:
+    """``held_hats`` for a preview of a worker from before ``photo_hats``: each held code's sheet and row read from the
+    preview's facts and problems.  A held row's fact is read from its start only (its reason, then the first 「；扣着的
+    那张对图单第 N 行，」: her picture's file name comes after it and cannot move the row), what is on its right from
+    its end (after the last 「，右边是」)."""
     facts, problems = _preview_lines(packet)
     rows: dict = {}
     pair_row = 0
@@ -288,8 +344,9 @@ def held_hats(packet: Optional[dict]) -> list:
             m = _HELD_ROW.match(value)
             code = m.group("code").upper() if m else ""
             if m and code in held and code not in rows:
+                right = value.rpartition("，右边是")[2].split("；")[0]
                 rows[code] = {"why": m.group("why"), "sheet": HELD_SHEET, "row": int(m.group("row")),
-                              "no_photo": m.group("right").strip().startswith(NO_CODE_PHOTO)}
+                              "no_photo": right.strip().startswith(NO_CODE_PHOTO)}
         elif label == PAIR_LABEL and PAIR_ROW_WORDS in value:
             pair_row += 1                            # (the side-by-side sheet's rows, in the facts' order: every one
             code = value.split(" ", 1)[0].upper()    # counts, whatever its code and colour read as)
@@ -313,8 +370,7 @@ def held_hats(packet: Optional[dict]) -> list:
             hat.update(sheet="", row=0)              # (held for another reason than its row: no row to go by)
         hat["why"] = hat["why"] or "没对上图"
         out.append(hat)
-    order = {HELD_SHEET: 0, PAIR_SHEET: 1, "": 2}
-    return sorted(out, key=lambda h: (order[h["sheet"]], h["row"] if h["sheet"] else held.index(h["code"])))
+    return out
 
 
 def mark_version(value) -> Optional[int]:

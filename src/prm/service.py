@@ -3823,6 +3823,9 @@ class PrmService:
                                (draft_context.PHOTO_CONFIRMED, draft.photo_confirmed)):
                 if codes and draft.platform is not None:
                     packet_meta[key] = list(codes)
+            if draft.photo_held and draft.photo_hats is not None and draft.platform is not None:
+                # where an operator sees each held hat, as the Mac's data (微信里「对过图」 numbers them by it)
+                packet_meta[draft_context.PHOTO_HATS] = list(draft.photo_hats)
         tool, platform = MESSAGE_TOOL, None
         if draft.platform is not None:
             action = draft.platform.get("action")
@@ -4607,8 +4610,9 @@ class PrmService:
         it leaves no hat of this draft held and unconfirmed, the bot asks for the new preview itself (2026-11-10: as
         「重新预览」 does, ``_repreview``; never for a hat the preview already let go, nor after 「撤销」).  ``{"ok":
         True, "code", "confirmed": True, "left", "repreview"}`` (``left``: the codes still held and unconfirmed;
-        ``repreview``: the new preview was started, with ``repreview_error`` why not when it should have been), or
-        ``{"ok": False, "error"}``."""
+        ``repreview``: the new preview was started, with ``repreview_error`` why not when it should have been, and
+        ``mac_online``: a worker that makes it was heard from lately, ``_worker_online``; False, the job waits for the
+        Mac and the answer says so: review 2026-11-10), or ``{"ok": False, "error"}``."""
         if not self._draft_context:
             return {"ok": False, "error": "对图没有打开（PRM_DRAFT_CONTEXT），不用点「对过图了」"}
         try:
@@ -4641,11 +4645,30 @@ class PrmService:
             # the last held hat of this draft is confirmed: the new preview that takes the confirmations, by itself
             started = self._repreview(packet, now, auto=True)
             out["repreview"] = bool(started.get("ok"))
+            if started.get("ok"):
+                out["mac_online"] = self._worker_online()
+                if not out["mac_online"]:
+                    logger.warning("PRM: packet %d: previewed again by itself, but no worker on the Mac was heard from "
+                                   "lately; the job waits for it", packet["id"])
             if not started.get("ok"):
                 out["repreview_error"] = str(started.get("error") or "")
                 logger.warning("PRM: packet %d: its held hats are all confirmed, but the new preview did not start",
                                packet["id"])
         return out
+
+    def _worker_online(self) -> bool:
+        """Was a worker on the Mac that does the PRM's jobs heard from lately (the relay's ``worker_kinds``: within its
+        KINDS_WINDOW_SEC; a relay that cannot say: its ``mac_online``, else yes)?  A new preview asked for meanwhile
+        waits in the queue until it is back."""
+        try:
+            kinds = getattr(self._relay, "worker_kinds", None)
+            if callable(kinds):
+                return PRM in kinds()
+            online = getattr(self._relay, "mac_online", None)
+            return bool(online()) if callable(online) else True
+        except Exception:
+            logger.exception("PRM: whether the Mac is online could not be read")
+            return True
 
     def photo_unconfirm(self, deal_id, code, actor: str = "console") -> dict:
         """「撤销」 of a 「对过图了」 (the deal action ``photo_unconfirm`` {code}): the code is not confirmed for the deal any
@@ -5971,7 +5994,9 @@ class PrmService:
                     if gated else [],
                     draft_context.PHOTO_CONFIRMED: draft_context.codes_of(job.get("result_text"),
                                                                           draft_context.PHOTO_CONFIRMED)
-                    if gated else []}
+                    if gated else [],
+                    # (None: a worker from before it, the bot reads the preview's words: draft_context.held_hats)
+                    draft_context.PHOTO_HATS: draft_context.hat_marks(job.get("result_text")) if gated else None}
             # PRM_DRAFT_CONTEXT: the new preview's sheet replaces the draft's, and a new preview without one clears it (the
             # old sheet was not made for it); the old files are deleted.  A sheet that came with an answer that cannot be
             # read, for a draft no longer waiting, or past MAX_OPERATOR_FILES is deleted.  The sheets are written with

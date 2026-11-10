@@ -59,7 +59,7 @@ export default function ReviewPanel() {
         <div className="stack" style={{ gap: 12 }}>
           {pending.map((p) => (p.channel === 'buyin'
             ? <BuyinCard key={p.id} p={p} onDone={reload} />
-            : <DraftCard key={p.id} p={p} canSend={!!data?.can_send} replyParts={data?.reply_parts || 1} onDone={reload} />))}
+            : <DraftCard key={p.id} p={p} canSend={!!data?.can_send} replyParts={data?.reply_parts || 1} macOnline={(data?.worker_kinds || []).includes('prm')} onDone={reload} />))}
         </div>
         <FriendAddList d={data} onDone={reload} />
         <RecentCard d={data} onDone={reload} />
@@ -422,7 +422,7 @@ function HandcardsNote({ p }) {
  * that one itself once the last held hat is confirmed (2026-11-10: the answer's ``repreview``; the card then shows it
  * under way); 「撤销」 takes it back (a draft whose preview went by it then waits for a new preview, which nothing starts
  * by itself). Words in the 起草备注 confirm nothing. */
-function PhotoHeld({ p, onDone }) {
+function PhotoHeld({ p, macOnline = true, onDone }) {
   const toast = useToast()
   const [busy, setBusy] = useState('')
   const rows = p.photo_held || []
@@ -430,7 +430,9 @@ function PhotoHeld({ p, onDone }) {
   const previewing = Boolean(p.platform?.previewing)
   const left = rows.filter((h) => h.held && !h.confirmed).length   // held hats nobody confirmed yet
   // a held hat that is confirmed: previewed again by the bot itself once none is left (shown while it runs)
-  const confirmedLine = (h) => (previewing ? `已确认 ${h.code}，正在重新预览（按确认再核）`
+  // (``macOnline``: a worker on the Mac that writes drafts was heard from lately; not: the new preview waits for it)
+  const confirmedLine = (h) => (previewing
+    ? (macOnline ? `已确认 ${h.code}，正在重新预览（按确认再核）` : `已确认 ${h.code}；Mac 现在不在线，重新预览要等它上线`)
     : left > 0 ? `已确认 ${h.code}，还有 ${left} 顶扣着：都确认完自动重新预览`
       : `已确认 ${h.code}，点「重新预览」按确认再核`)
   const act = async (h, undo) => {
@@ -441,7 +443,7 @@ function PhotoHeld({ p, onDone }) {
         toast.ok(`已撤销 ${h.code} 的「对过图了」`)
       } else {
         const done = await photoConfirm(p.deal_id, p.id, h.code)
-        toast.ok(done?.repreview ? `已确认 ${h.code}，正在重新预览`
+        toast.ok(done?.repreview ? (done.mac_online === false ? `已确认 ${h.code}；Mac 现在不在线，重新预览要等它上线` : `已确认 ${h.code}，正在重新预览`)
           : done?.left?.length ? `已确认 ${h.code}，还有 ${done.left.length} 顶扣着`
             : `已确认 ${h.code}，点「重新预览」按确认再核`)
       }
@@ -471,7 +473,7 @@ function PhotoHeld({ p, onDone }) {
   )
 }
 
-function DraftCard({ p, canSend, replyParts = 1, onDone }) {
+function DraftCard({ p, canSend, replyParts = 1, macOnline = true, onDone }) {
   const toast = useToast()
   // a 「改了再执行」 that could not be queued for the Mac: the edited reply is kept for the next try (only the edit box has it)
   const kept = p.status === 'pending' && p.platform && p.final_text != null && p.final_text !== p.text ? p.final_text : null
@@ -538,7 +540,7 @@ function DraftCard({ p, canSend, replyParts = 1, onDone }) {
           </div>
         )}
         {pf && <PlatformBox pf={pf} files={p.operator_files} />}
-        {pf && <PhotoHeld p={p} onDone={onDone} />}
+        {pf && <PhotoHeld p={p} macOnline={macOnline} onDone={onDone} />}
         {pf && <div className="f-hint">下面是平台上核验成功以后才发给达人的回复：</div>}
         {kept != null && !editing && <div className="f-hint prm-kept-edit">上次「改了再执行」没排进 Mac 的任务队列，改过的回复还留着：点「改了再执行」接着用；直接点「批准并执行」发的是下面的原稿</div>}
         {editing
