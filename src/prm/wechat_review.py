@@ -39,10 +39,13 @@ doubling, at most 2 minutes apart, each message 6 times in all (as the relay's a
 ``_send_asks``); no draft ever waits for its notification.
 
 A draft told here that changes while it waits (``attention_seen``, the row's ``seen``: her recall puts its note first
-in the 要注意, the 要注意 changes, lines of the group come that it did not hear; integrated review 2026-11-10 A-F3) is
+in the 要注意, the 要注意 changes, lines of the group come that it did not hear; integrated review 2026-11-10 A-F3; or
+a new preview of its platform action ended, whatever it brought: ``_shown``, the row's ``shown``, 2026-11-10: while
+it runs the notice and 「执行」 say PREVIEWING_STOP, 「好了再发一条通知」) is
 told again on the same number (``_tell_again``, before any new draft of the round): 「#12 草稿（第 2 次通知）」, what
-changed first, then the draft as a notice shows it now (its pictures not sent again; a proposed edit written before
-the change dropped, the preview it lets 「执行」 run as it is now).  Until it went, and for an answer to an older
+changed first, then the draft as a notice shows it now (its pictures not sent again unless they are others now, a new
+preview's 对图单: then they follow it and it is answered only once they came; a proposed edit written before the
+change dropped, the preview it lets 「执行」 run as it is now).  Until it went, and for an answer to an older
 notice (or to a 改成 question asked before it, or an unquoted 「发 12」 written before it could be read), nothing but
 2 / 不发 is done: the bot says STALE_TEXT (``_changed_after``).  WeChat not taking it: the row stays as it was, tried
 again as any notification.
@@ -96,7 +99,20 @@ finished) it does nothing (a bare 「1…」 the bot would have taken gets BARE_
   one, 「改」 of its reply stays the console's.  A sample order the photo check
   holds (PRM_DRAFT_CONTEXT on: hats its preview held for photos, a preview the Mac did not check by photo, one that let
   a hat go by a 「对过图了」 taken back since) says so instead of 「执行」, and the console's 「对过图了」 / 「重新预览」 are
-  how on (``_photo_stop``; 合并 draft-context 2026-11-10).  When the execution ends (the reply
+  how on (``_photo_stop``; 合并 draft-context 2026-11-10).  The held hats a sheet sent with the notice shows are
+  numbered in it (「第 1 顶 <编码>（为什么扣着；哪张对图单第几行）」, ``_hats``, kept in the row's ``hats``), and an answer
+  quoting that notice confirms them (2026-11-10, ``_on_photo``): 「对过图 1」「对过图 1 2」「对过图了 1」「对过图 全部」, a
+  plain 「对过图」 / 「对过图了」 when it numbers one hat; only while that notice is the draft's latest, the draft waits
+  and is not being previewed again, the notice's pictures all reached the chat (``pictures_ok`` 1, the very ones:
+  ``pictures_sent``), and the answer ends as a command does (``_photo_parts``); a hat no sheet sent shows (no picture
+  of its code, no row) is the console's and not in 「全部」; a number that is none of the notice's (0, too big, twice)
+  confirms nothing; a question (「对过图了吗」) says how the hats stand; without a quote, or quoting anything else, it
+  only says to quote the notice (``PHOTO_QUOTE``), never passed on while such a draft waits.  It is the console's
+  「对过图了」 (``confirm``: ``PrmService.photo_confirm``, its checks, the event's actor ``wechat``); it never runs
+  anything: once no held hat is left unconfirmed the service asks for the new preview itself, and the new preview is
+  told in a fresh notice (``_shown``: after every new preview of a platform draft told here that ended, with its
+  stamp and its current pictures, as ``_tell_again`` tells any change), whose own quoted 「执行」 runs it.  「撤销」 stays
+  the console's.  When the execution ends (the reply
   sent after VERIFIED_SUCCESS, uncertain, or not done; a result that comes late too) the admin is told in one line.  A
   job the relay raised on: run when it is there all the same, 「可以再回一次」 only when it certainly is not, else red as
   not known (``PrmService._approve_execute``: QUEUE_UNSURE, its result told when it comes late).
@@ -192,6 +208,22 @@ NOTICED_KEPT = 50           # fresh notices remembered with their time (an unquo
 # console's (integrated review 2026-11-10 A-L1)
 REASON_LONG = "要注意的话太长，请在控制台看完再批"
 RECALL_WORDS = "撤回了一条消息"   # ... a recall's note in a draft's 要注意 (``service.recall_note``): 「她撤回了一条消息」
+# 微信里「对过图」 (2026-11-10): the held hats of a sample order a notification numbers (``WechatReview._hats``), confirmed
+# by an answer quoting it, 「对过图 1」 (``_photo_parts``, ``_on_photo``)
+SAMPLE_TOOL = "jst.sample_order"
+HATS_MAX = 8                # held hats a notification numbers at most (more: the console's 「对过图了」 only)
+HAT_WHY_CHARS = 30          # ... each one's reason cut to this many characters
+HATS_ROOM = 120             # ... and only while this much of NOTICE_CHARS is left for the platform lines
+PHOTO_ALL = "全部"
+PHOTO_UNDO = "要撤销请到控制台"
+PREVIEW_COMING = "正在重新预览，好了再发一条通知"
+# ... a platform draft being previewed again: nothing runs from the notice told before; the new preview is told in a
+# fresh one (``WechatReview._shown``)
+PREVIEWING_STOP = "正在重新预览，微信里先不能执行：好了再发一条通知，看那一条再回；不要的话回 2"
+PHOTO_QUOTE = "要确认对过图：请引用那条列着「第 1 顶 …」的草稿通知回「对过图 1」（不引用不算）"
+PHOTO_QUOTED_ELSEWHERE = "你引用的不是草稿通知：要确认对过图，请引用那条列着「第 1 顶 …」的草稿通知回「对过图 1」"
+PHOTO_HOW = "对上了就引用这条通知回「对过图 1」这样（几顶就写「对过图 1 2」），后面别带「…」「.」「？」"
+PHOTO_CONSOLE = "请到控制台在这顶旁边点「对过图了」"
 
 _HEAD = re.compile(r"^\s*[#＃](\d{1,9})\s*(草稿|改成)")
 _AGAIN = re.compile(r"^\s*[#＃]\d{1,9}\s*草稿（第\s*(\d{1,4})\s*次通知）")    # a fresh notice's head (STALE_TEXT)
@@ -234,6 +266,10 @@ _EXECUTE_BEFORE = ("那就", "那", "就", "可以", "请", "麻烦", "帮我", 
                    "行", "开始", "要")
 _EXECUTE_AFTER = ("一下", "下", "吧", "啊", "呀", "哈", "呗", "哦", "喔", "嘛", "啦", "咯", "好", "完", "成功", "过")
 _QUESTION_AFTER = ("没有", "吗", "么", "呢", "没", "了")   # ... after 执行, these make it a question (「执行了吗」「执行了没」)
+_PHOTO_HEAD = re.compile(r"^对过图了?")
+_PHOTO_ASKS = re.compile(r"(?:吗|么|呢|没有|没)[\s。.．｡…!！~～?？]*$")   # 「对过图了吗」「对过图了没」: asking, never confirming
+_PHOTO_NUMBER = re.compile(r"第?\s*(\d+)\s*顶?")
+_PHOTO_SPLIT = re.compile(r"[\s,、;；和]+")
 
 NO_ADMIN_WHY = ("微信里审批草稿打开了，但没填管理员 wxid（ADMIN_WXID）：草稿发不到微信里。到「中转代理」页的设置里填好"
                 "「管理员 wxid」，再重启机器人")
@@ -360,6 +396,54 @@ def _execute_parts(text: str) -> Optional[tuple]:
                 question = question or word in _QUESTION_AFTER
                 break
     return (number, question) if not head and not tail else None
+
+
+@dataclass(frozen=True)
+class PhotoSaid:
+    """An answer that starts with 「对过图」 / 「对过图了」 (``_photo_parts``)."""
+
+    numbers: Optional[tuple] = None     # the hats' numbers it writes, in order (None: none, or not well-formed)
+    everything: bool = False            # 「对过图 全部」
+    question: bool = False              # it asks (「对过图了吗」「对过图了没」「对过图？」): how the hats stand
+    command: bool = False               # well-formed, with a command's ending: it may confirm
+
+
+def _photo_parts(text) -> Optional[PhotoSaid]:
+    """What an answer that starts with 「对过图」 / 「对过图了」 says (None: it does not start so).  After those words:
+    nothing, hat numbers (「1」「1 2」「1、2」「第 1 顶」; full-width digits as plain ones) or 「全部」, then a command's
+    ending (``_command_word``'s: nothing, at most one 「。」 with any 「！!～~」).  ``command`` only then: 「…」「.」「。。」
+    at its end (hesitating), a 「？」 or 吗 / 么 / 呢 / 没 (asking: ``question``), or any other word, and it confirms
+    nothing."""
+    raw = str(text or "").strip()
+    head = _PHOTO_HEAD.match(raw)
+    if head is None:
+        return None
+    rest = raw[head.end():]
+    question = "?" in unicodedata.normalize("NFKC", rest) or bool(_PHOTO_ASKS.search(rest))
+    core = _COMMAND_END.sub("", rest.rstrip(), count=1).strip()      # (the ending, before full-width becomes plain)
+    hesitating = bool(core) and core[-1] in "。.…．｡"
+    body = unicodedata.normalize("NFKC", core).strip()
+    numbers, everything, formed = None, False, True
+    if body == PHOTO_ALL:
+        everything = True
+    elif body:
+        tokens = [t for t in _PHOTO_SPLIT.split(_PHOTO_NUMBER.sub(r" \1 ", body)) if t]
+        formed = bool(tokens) and all(t.isascii() and t.isdigit() and len(t) <= 3 for t in tokens)
+        numbers = tuple(int(t) for t in tokens) if formed else None
+    return PhotoSaid(numbers, everything, question, formed and not hesitating and not question)
+
+
+def hats_of(text) -> list:
+    """The held hats a notification numbered (``wechat_reviews.hats``, JSON): ``[{"code", "ok"}]``, the first its
+    「第 1 顶」; [] for a row that numbered none (one from before they were numbered too)."""
+    try:
+        value = json.loads(text or "[]")
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(value, list) or not all(isinstance(h, dict) and isinstance(h.get("code"), str) and h["code"]
+                                              for h in value):
+        return []
+    return [{"code": h["code"], "ok": h.get("ok") is True} for h in value][:HATS_MAX]
 
 
 def _asked(quoted: str) -> Optional[str]:
@@ -545,7 +629,8 @@ class WechatReview:
     """微信里审批草稿 for one PRM service (``PrmService.wechat_review``); see the module's docstring.
 
     ``decide(packet_id, action, text, stamp=…)`` and ``check(packet, text)`` are the service's ``decide`` /
-    ``edit_problem``; ``lines(packet)`` her lines a draft answers (the job's); ``parts(text)`` how many messages a text
+    ``edit_problem``; ``confirm(deal_id, packet_id, code)`` its ``photo_confirm`` (「对过图了」, as WeChat's:
+    ``_on_photo``); ``lines(packet)`` her lines a draft answers (the job's); ``parts(text)`` how many messages a text
     goes out as (PRM_REPLY_PARTS); ``aim(packet)`` where a draft the bot started itself goes (``PrmService._aim``
     without failing it: None while she can be reached nowhere); ``relay_store`` the relay's jobs (a newer draft being
     written, a cc task running); ``local`` WeChat's time on this PC's clock and ``skew`` this PC's clock against WeChat's
@@ -557,6 +642,7 @@ class WechatReview:
                  send: Optional[Callable[[str, str], bool]] = None,
                  send_file: Optional[Callable[[str, str], bool]] = None,
                  decide: Optional[Callable[..., dict]] = None, check: Optional[Callable[[dict, str], str]] = None,
+                 confirm: Optional[Callable[[int, int, str], dict]] = None,
                  lines: Optional[Callable[[dict], str]] = None, parts: Optional[Callable[[str], int]] = None,
                  aim: Optional[Callable[[dict], Optional[dict]]] = None, relay_store=None,
                  local: Optional[Callable[[float], float]] = None, skew: Optional[Callable[[], Optional[float]]] = None,
@@ -567,6 +653,7 @@ class WechatReview:
         self._send_file = send_file
         self._decide = decide
         self._check = check
+        self._confirm = confirm
         self._lines = lines
         self._parts = parts
         self._aim = aim
@@ -653,8 +740,9 @@ class WechatReview:
 
     def sweep(self) -> int:
         """One round of the sender thread: first the drafts told here that got new attention since their latest notice
-        (``attention_seen``: her recall, a 要注意 changed, lines of the group the draft did not hear; a fresh notice on
-        the same number that says what changed, ``_tell_again``), then the drafts waiting for a person not told yet
+        (``attention_seen``: her recall, a 要注意 changed, lines of the group the draft did not hear) or a new preview
+        (``_shown``: a 重新预览 that ended; a fresh notice on the same number that says what changed, ``_tell_again``),
+        then the drafts waiting for a person not told yet
         (oldest first; their pictures right after each notification, ``_pictures_went``), the pictures of told drafts
         that did not reach the chat (again, each draft 10 s doubling, at most 2 minutes apart, SEND_TRIES times; not
         while one of them is not on this PC or too big), then what came of the decisions taken here (a send that
@@ -690,7 +778,7 @@ class WechatReview:
                 if packet is None:
                     continue                               # (she can be reached nowhere yet: told once she can)
             try:
-                text, stamp, pictures = self._notice(packet)
+                text, stamp, pictures, hats = self._notice(packet)
             except Exception:
                 logger.exception("PRM: the notification of draft %d could not be written; not told", packet["id"])
                 self._failures[key] = SEND_TRIES
@@ -700,10 +788,12 @@ class WechatReview:
                 continue                                   # decided (or out of date) meanwhile
             # (a draft with pictures to look at is the console's in WeChat until every one of them went: never one
             # approved from WeChat while its pictures are still on the way, or never came; ``seen``: what this
-            # notification showed of its attention, a change after it is told again)
+            # notification showed of its attention and of its preview, a change after it is told again; ``hats``: the
+            # held hats it numbered, 「对过图 1」)
             if not self._store.add_wechat_review(packet["id"], packet["deal_id"], self._clock(), state=TELLING,
                                                  preview=stamp, pictures_ok=_pictures_state(pictures),
-                                                 seen=attention_seen(packet)):
+                                                 seen=attention_seen(packet), shown=self._shown(packet),
+                                                 hats=json.dumps(hats, ensure_ascii=False) if hats else ""):
                 continue                                   # (told already)
             tried += 1
             if not self._try(key, text, f"the notification of draft {packet['id']}"):
@@ -761,10 +851,11 @@ class WechatReview:
         return sent
 
     def _changed(self, row: dict) -> Optional[tuple]:
-        """A draft told here that is still waiting and got new attention after its latest notice: ``(packet, seen)``,
-        the draft and what a fresh notice shows of it (``attention_seen``); None otherwise (a row from before the
-        fingerprint was kept: what it showed is not known, the draft as it is now counts as seen; a fresh notice not
-        taken SEND_TRIES times this run: the console's, every answer to the old one stale)."""
+        """A draft told here that is still waiting and got new attention, or a new preview, after its latest notice:
+        ``(packet, seen)``, the draft and what a fresh notice shows of its attention (``attention_seen``; of its
+        preview: ``_shown``); None otherwise (a row from before a fingerprint was kept: what it showed is not known,
+        the draft as it is now counts as seen; a fresh notice not taken SEND_TRIES times this run: the console's,
+        every answer to the old one stale)."""
         number = row["packet_id"]
         if self._failures.get(("again", number), 0) >= SEND_TRIES:
             return None
@@ -772,12 +863,37 @@ class WechatReview:
         if packet is None or packet["status"] != PENDING:
             return None
         seen, old = attention_seen(packet), str(row.get("seen") or "")
-        if seen == old:
-            return None
-        if not old:
-            self._store.set_wechat_review(number, (row["state"],), self._clock(), seen=seen)
+        shown, was = self._shown(packet), str(row.get("shown") or "")
+        unknown = {**({} if old else {"seen": seen}), **({"shown": shown} if shown and not was else {})}
+        if unknown:                                    # (a row from before it was kept: as it is now)
+            self._store.set_wechat_review(number, (row["state"],), self._clock(), **unknown)
+        if (seen == old or not old) and (shown == was or not was):
             return None
         return packet, seen
+
+    def _shown(self, packet: dict) -> str:
+        """What a notification shows of a platform draft's preview, as a fingerprint (``wechat_reviews.shown``; "" for
+        a draft with no platform action): how many new previews of it ended (``previews``, the service counts each
+        重新预览 that ended, whatever it brought), the preview itself, its photo marks (``draft_context``: checked or
+        not, the hats held, the ones let go by a confirmation) and the operators' files with it (the 对图单).  Another
+        one than the row's: the draft is told again with the new preview, its stamp and its current pictures
+        (``_tell_again``), and until then an answer to the older notice does nothing (``_changed_after``)."""
+        if not self._platform(packet):
+            return ""
+        data = self._json(packet.get("platform"))
+        meta = packet.get("meta") if isinstance(packet.get("meta"), dict) else {}
+        blob = json.dumps({
+            "n": data.get("previews") or 0, "p": preview_stamp(data.get("preview")),
+            "m": [meta.get(draft_context.KEY), draft_context.codes_of(meta, draft_context.PHOTO_HELD),
+                  draft_context.codes_of(meta, draft_context.PHOTO_CONFIRMED)],
+            "f": [f["path"] for f in draft_context.files_of(packet)]}, sort_keys=True, ensure_ascii=False, default=str)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+    def _shown_changed(self, row: Optional[dict], packet: Optional[dict]) -> bool:
+        """Did a new preview of the draft end after its latest notice (``_shown`` against the row's; a row from before it
+        was kept: not known, no)?"""
+        was = str((row or {}).get("shown") or "")
+        return bool(was) and bool(packet) and was != self._shown(packet)
 
     def _tell_again(self, row: dict, packet: dict, seen: str) -> Optional[bool]:
         """The fresh notice of a draft that changed after its latest one (``_changed``): the same number, 「#12 草稿（第 N
@@ -795,7 +911,7 @@ class WechatReview:
         try:
             again = {"notice": notice, "change": self._what_changed(row, packet), "pictures_ok": state,
                      "resend": False}
-            text, stamp, _ = self._notice(packet, again=again)
+            text, stamp, _, hats = self._notice(packet, again=again)
             pictures = self._pictures(packet, log=False)
             # (its pictures are not the ones that went (a new preview's 对图单), or it lets 「执行」 run another preview
             # than the last notice did: the current pictures go after it, the draft is the console's in WeChat until
@@ -803,7 +919,7 @@ class WechatReview:
             resend = bool(pictures) and (_pictures_fp(pictures) != str(row.get("pictures_sent") or "")
                                          or (bool(stamp) and stamp != str(row.get("preview") or "")))
             if resend:
-                text, stamp, pictures = self._notice(packet, again={**again, "resend": True})
+                text, stamp, pictures, hats = self._notice(packet, again={**again, "resend": True})
         except Exception:
             logger.exception("PRM: the fresh notification of draft %d could not be written; not told", number)
             self._failures[key] = SEND_TRIES
@@ -813,10 +929,14 @@ class WechatReview:
             return None                                    # (decided meanwhile)
         before = {"state": row["state"], "notice": notice - 1, "seen": str(row.get("seen") or ""),
                   "preview": str(row.get("preview") or ""), "proposed": str(row.get("proposed") or ""),
-                  "pictures_ok": state}
+                  "pictures_ok": state, "shown": str(row.get("shown") or ""), "hats": str(row.get("hats") or ""),
+                  "pictures_sent": str(row.get("pictures_sent") or "")}
         moved = {"pictures_ok": _pictures_state(pictures)} if resend else {}
+        if not pictures:
+            moved = {"pictures_ok": 1, "pictures_sent": ""}      # (a new preview with no picture left to look at)
         if not self._store.set_wechat_review(number, (row["state"],), self._clock(), state=TELLING, notice=notice,
-                                             seen=seen, preview=stamp, proposed="", **moved):
+                                             seen=seen, preview=stamp, proposed="", shown=self._shown(packet),
+                                             hats=json.dumps(hats, ensure_ascii=False) if hats else "", **moved):
             return None                                    # (answered meanwhile: looked at again next round)
         if not self._try(key, text, f"the fresh notification of draft {number}"):
             self._store.set_wechat_review(number, (TELLING,), self._clock(), **before)
@@ -830,7 +950,8 @@ class WechatReview:
         return True
 
     def _what_changed(self, row: dict, packet: dict) -> str:
-        """The fresh notice's first words: what is new since the latest notice of the draft (``seen`` against now)."""
+        """The fresh notice's first words: what is new since the latest notice of the draft (``seen`` against now; a
+        new preview that ended since: ``_shown``)."""
         old, new = _seen_of(row.get("seen")), _seen_of(attention_seen(packet))
         bits = []
         if new.get("a") and (old.get("r") != new.get("r") or not old.get("a")):
@@ -844,6 +965,8 @@ class WechatReview:
                         "群里后来又有话这份草稿没听到")
         elif old.get("u") and not new.get("u"):
             bits.append("群里的话都听到了")
+        if self._shown_changed(row, packet):
+            bits.append("重新预览过了（下面是新的预览）")
         return "；".join(bits) or "要注意有变化"
 
     def _goes_by_itself(self, packet: dict) -> bool:
@@ -996,6 +1119,9 @@ class WechatReview:
             if (told and told == preview_stamp((packet.get("platform") or {}).get("preview"))
                     and not self._photo_stop(packet)):
                 return f"看过再引用{which}回「执行」（或者回「执行 {number}」）"
+            able = self._hats_open(row, packet)        # (held hats it numbered: 「对过图 1」 quoting it)
+            if able:
+                return f"对上了就引用{which}回「对过图 {able[0]}」这样确认；不要的话回「不发 {number}」"
             return f"这一份微信里还是不能执行，请到控制台处理；不要的话回「不发 {number}」"
         if self._group(packet):
             return f"看过再引用{which}回 1；不发就回「不发 {number}」"
@@ -1019,7 +1145,8 @@ class WechatReview:
                        question: bool = False, written: Optional[float] = None) -> str:
         """「#12 这份草稿在通知以后有变化，看最新那条通知再回」 when an answer to a waiting draft told here must not act on
         it (integrated review 2026-11-10 A-F3), "" when it may: the draft got new attention after its latest notice
-        (``attention_seen`` against the row's ``seen``: the fresh notice is not out yet, or WeChat did not take it);
+        (``attention_seen`` against the row's ``seen``: the fresh notice is not out yet, or WeChat did not take it), or
+        a new preview of it ended since (``_shown_changed``: the same);
         the answer quotes (or a bare one answers) another notice than the latest (``quoted``: which one), or a 改成
         question asked before the latest one (``question``: its proposed edit went with the fresh notice); an answer
         that names the draft by its number without a quote written before the latest notice (a 2nd or later) could be
@@ -1029,7 +1156,7 @@ class WechatReview:
         if not row or not packet or packet.get("status") != PENDING:
             return ""
         number, seen, latest = packet["id"], str(row.get("seen") or ""), int(row.get("notice") or 1)
-        if seen and seen != attention_seen(packet):
+        if (seen and seen != attention_seen(packet)) or self._shown_changed(row, packet):
             gone = self._failures.get(("again", number), 0) >= SEND_TRIES
             return f"#{number} {STALE_TEXT}" + ("（新的通知发不过来：这一份请在控制台处理）" if gone else
                                                 "（新的通知马上发过来）")
@@ -1141,10 +1268,12 @@ class WechatReview:
         """The message that tells the admin of a draft (see the module's docstring)."""
         return self._notice(packet)[0]
 
-    def _notice(self, packet: dict, log: bool = True, again: Optional[dict] = None) -> tuple[str, str, list]:
-        """``(text, stamp, pictures)``: a draft's notification; the fingerprint of the preview it shows when it lets
-        「执行」 run (``preview_stamp``; "" otherwise; kept when only its pictures hold it: ``pictures_ok``); the pictures
-        to send after it (``_pictures``).  Pictures that cannot all go (not on this PC, too big): it says so
+    def _notice(self, packet: dict, log: bool = True, again: Optional[dict] = None) -> tuple[str, str, list, list]:
+        """``(text, stamp, pictures, hats)``: a draft's notification; the fingerprint of the preview it shows when it
+        lets 「执行」 run (``preview_stamp``; "" otherwise; kept when only its pictures hold it: ``pictures_ok``); the
+        pictures to send after it (``_pictures``); the held hats of a sample order it numbers (``[{"code", "ok"}]``,
+        the row's ``hats``: 「对过图 1」 quoting it confirms the first; [] when it numbers none: ``_hats``).  Pictures
+        that cannot all go (not on this PC, too big): it says so
         (PICTURES_MISSING) where it would say how to answer, and none of them goes.  A platform draft whose 要注意 is
         cut (longer than NOTE_CHARS) lets nothing run (REASON_LONG).  ``again`` (``_tell_again``): a fresh notice,
         ``{"notice", "change", "pictures_ok", "resend"}``: its number in the head, what changed first, the pictures as
@@ -1202,6 +1331,7 @@ class WechatReview:
         if files:
             lines.append(f"（附 {len(files)} 个文件：{'、'.join(files[:FILES_NAMED])}{'…' if len(files) > FILES_NAMED else ''}）")
         pictures = self._pictures(packet, log=log and again is None)
+        every = list(pictures)                             # (all it is to be looked at with, sent now or before)
         named = "、".join(_cut(p["name"], 40) for p in pictures)
         if again is not None and not again.get("resend"):
             # (a fresh notice: its pictures went with an earlier one, the same ones, or did not and go as before: none
@@ -1226,15 +1356,23 @@ class WechatReview:
                 lines.append(f"（后面附 {len(sheets)} 张图给你看：" + "、".join(
                     f"{_cut(p['name'], 40)}" + (f"：{_cut(_mask_ids(p['why'], ids), 60)}" if p["why"] else "")
                     for p in sheets) + "）")
-        stamp = ""
+        stamp, hats = "", []
         if platform:
             runnable = self._runnable(packet)
             photo = self._photo_stop(packet)
             go = ["引用这条回「执行」在平台上执行（核验成功才把上面的回复发给她）｜2 不发",
                   f"（发在群里：一定要引用这条回「执行」；不发也可以回「不发 {number}」）" if group
                   else f"（不引用就回「执行 {number}」「不发 {number}」）"]
-            if (packet.get("platform") or {}).get("previewing"):
-                stop = "正在重新预览，微信里不能执行：请到控制台看了结果再「批准并执行」；不要的话回 2"
+            previewing = bool((packet.get("platform") or {}).get("previewing"))
+            # (the held hats a sheet sent with it shows, numbered: an answer quoting it confirms them, 「对过图 1」)
+            numbered = self._hats(packet, every) if photo and not previewing and not missing else []
+            told = "\n".join(self._hat_lines(numbered, ids, below=bool(pictures))) if numbered else ""
+            if numbered and NOTICE_CHARS - len("\n".join(lines)) - len(told) - 2 < HATS_ROOM:
+                numbered, told = [], ""                    # (no room left to list them: the console's)
+            if previewing:
+                stop = PREVIEWING_STOP
+            elif numbered:
+                stop, hats = told, [{"code": h["code"], "ok": bool(h["ok"])} for h in numbered]
             elif photo:
                 stop = photo
             elif runnable and reason_cut:
@@ -1245,7 +1383,7 @@ class WechatReview:
                 stop = "预览没通过，微信里不能执行：请到控制台处理（「重新预览」）；不要的话回 2"
             # (the platform lines get what is left of NOTICE_CHARS, the longer of the two endings kept back)
             room = NOTICE_CHARS - len("\n".join(lines)) - 1 - max(len("\n".join(go)), len(stop)) - 1
-            listed, whole = self._platform_lines(packet, room, ids, addresses)
+            listed, whole = self._platform_lines(packet, room, ids, addresses, wechat=bool(numbered))
             lines += listed
             if runnable and whole and not photo and not reason_cut:
                 stamp = preview_stamp((packet.get("platform") or {}).get("preview"))
@@ -1262,7 +1400,7 @@ class WechatReview:
             lines.append(f"回 1 {'发到群里' if group else '发出'}｜2 不发｜改 + 你的话（直接发你改的）")
             lines.append(f"（发在群里：要引用这条回；不发也可以回「不发 {number}」）" if group
                          else f"（引用这条回；不引用就回「发 {number}」「不发 {number}」「改 {number} 你的话」）")
-        return "\n".join(lines), stamp, pictures
+        return "\n".join(lines), stamp, pictures, hats
 
     def her_words(self, packet: dict, ids: Optional[list] = None) -> str:
         """Her last line(s) the draft answers, short (SAID_LINES, SAID_CHARS each): from its job's lines without their
@@ -1282,21 +1420,84 @@ class WechatReview:
         shown = [_cut(_mask_ids(retention.scrub(line, addresses), ids), SAID_CHARS) for line in last]
         return ("…" if len(said) > len(last) else "") + "／".join(shown)
 
-    def _photo_stop(self, packet: dict) -> str:
+    def _confirmed(self, packet: dict) -> dict:
+        """The codes an operator confirmed by photo for the draft's deal (「对过图了」; ``{code: when}``)."""
+        try:
+            return {str(r["code"]): r["at"] for r in self._store.photo_confirmations(int(packet["deal_id"]))}
+        except Exception:
+            logger.exception("PRM: the photo confirmations of draft %d could not be read", packet["id"])
+            return {}
+
+    def _hats(self, packet: dict, pictures: Optional[list] = None) -> list:
+        """The held hats of a waiting sample order as its notification numbers them (2026-11-10, PRM_DRAFT_CONTEXT on):
+        ``draft_context.held_hats`` (the held hats' sheet's rows first), each with ``confirmed`` (an operator's
+        「对过图了」 is there) and ``ok``: an answer quoting the notification may confirm it, 「对过图 1」: the preview
+        names its row on a sheet, that sheet is one of the pictures that go with the notification (``pictures``:
+        ``_pictures``, every one of them sendable; exactly one sheet of that kind), and its hold does not say there
+        is no picture of its code.  [] when it numbers none: no hat held, more than HATS_MAX, or none left that an
+        answer could confirm (then the last line is the console's, ``_photo_stop``)."""
+        if not self._draft_context or packet.get("tool") != SAMPLE_TOOL or packet.get("status") != PENDING:
+            return []
+        hats = draft_context.held_hats(packet)
+        if not hats or len(hats) > HATS_MAX:
+            return []
+        pictures = self._pictures(packet, log=False) if pictures is None else pictures
+        went = bool(pictures) and all(p["ok"] for p in pictures)
+        names = [Path(p["path"]).name for p in pictures if not p["card"]]
+        there = {draft_context.HELD_SHEET: went and sum(map(draft_context.is_held_sheet, names)) == 1,
+                 draft_context.PAIR_SHEET: went and sum(map(draft_context.is_pair_sheet, names)) == 1}
+        confirmed = self._confirmed(packet)
+        out = [{**h, "ok": bool(h["sheet"]) and h["row"] > 0 and there[h["sheet"]] and not h["no_photo"],
+                "confirmed": h["code"] in confirmed} for h in hats]
+        return out if any(h["ok"] and not h["confirmed"] for h in out) else []
+
+    @staticmethod
+    def _hat_lines(hats: list, ids: list, *, below: bool) -> list:
+        """The notification's last lines for the hats it numbers (``_hats``): how many are held, 「第 1 顶 <编码>（为什么
+        扣着；哪张对图单第几行）」 each (one no sheet shows: the console's), and how to confirm them, quoting it.
+        ``below``: its pictures go right after it (else they went with an earlier notice)."""
+        waiting = [h for h in hats if not h["confirmed"]]
+        able = [i for i, h in enumerate(hats, 1) if h["ok"] and not h["confirmed"]]
+        lines = [f"有 {len(waiting)} 顶帽子扣着（没对上图），对上了才能建这张寄样单："]
+        for i, hat in enumerate(hats, 1):
+            why = _cut(_mask_ids(hat["why"], ids), HAT_WHY_CHARS)
+            if hat["confirmed"]:
+                note = "已确认"
+            elif hat["ok"]:
+                note = why + ("；「扣着的」那张对图单第 " if hat["sheet"] == draft_context.HELD_SHEET
+                              else "；对图单第 ") + f"{hat['row']} 行"
+            else:
+                note = why + ("；没有这个编码的图" if hat["no_photo"] else "；对图单上没有这一顶") + "，要到控制台确认"
+            lines.append(f"第 {i} 顶 {hat['code']}（{note}）")
+        more = ("（几顶就写「对过图 1 2」，都对上了写「对过图 全部」）" if len(able) > 1
+                else "（只回「对过图」也行）" if len(hats) == 1 else "")
+        lines.append(f"看过{'下面' if below else '前面发过'}的对图单，对上了就引用这条回「对过图 {able[0]}」{more}；"
+                     "都确认完机器人自己重新预览、再发一条通知；不要的话回 2")
+        return lines
+
+    def _hats_open(self, row: Optional[dict], packet: Optional[dict]) -> list:
+        """The hats the draft's latest notice numbered that an answer quoting it can still confirm (``_hats_of`` the
+        row: ``ok``, still held by the preview, not confirmed yet): their numbers there."""
+        if not row or not packet or not self._draft_context or packet.get("status") != PENDING:
+            return []
+        held = draft_context.codes_of(packet.get("meta") or {}, draft_context.PHOTO_HELD)
+        confirmed = self._confirmed(packet)
+        return [i for i, h in enumerate(hats_of(row.get("hats")), 1)
+                if h["ok"] and h["code"] in held and h["code"] not in confirmed]
+
+    def _photo_stop(self, packet: dict, row: Optional[dict] = None) -> str:
         """PRM_DRAFT_CONTEXT on (合并 draft-context 2026-11-10): why a waiting sample order cannot run from WeChat for its
-        photo check, which only the console takes on (「对过图了」, 「重新预览」): the notification's last line and
-        「执行」's answer; "" when nothing of it holds the draft.  Hats its last preview held for photo reasons
+        photo check: the notification's last line (when it numbers no hat: ``_hats``) and 「执行」's answer; "" when
+        nothing of it holds the draft.  Hats its last preview held for photo reasons
         (``photo_held``, named: its verdict is not ready anyway; once all are confirmed, a new preview is what is left),
         a preview the Mac did not check by photo (``unchecked``: an older worker's, one made while the switch was off)
         or one that let a hat go by a 「对过图了」 taken back since (``withdrawn``; ``PrmService._approve_execute``
-        refuses these two whatever the notification said)."""
-        if packet.get("tool") != "jst.sample_order" or packet.get("status") != PENDING:
+        refuses these two whatever the notification said).  ``row``: the draft's notification row; when its latest
+        notice numbered hats an answer can still confirm (``_hats_open``), it says so instead of sending the admin to
+        the console."""
+        if packet.get("tool") != SAMPLE_TOOL or packet.get("status") != PENDING:
             return ""
-        try:
-            confirmed = {str(r["code"]): r["at"] for r in self._store.photo_confirmations(int(packet["deal_id"]))}
-        except Exception:
-            logger.exception("PRM: the photo confirmations of draft %d could not be read", packet["id"])
-            confirmed = {}
+        confirmed = self._confirmed(packet)
         if not self._draft_context:
             # the switch off: only a hat its last preview held that nobody confirmed (``_approve_execute`` refuses it
             # all the same, review 2026-11-10 A-L4; 合并 fix1110-s)
@@ -1306,6 +1507,11 @@ class WechatReview:
         waiting = [code for code in held if code not in confirmed]
         if waiting:
             codes = "、".join(waiting[:HELD_NAMED]) + ("…" if len(waiting) > HELD_NAMED else "")
+            able = self._hats_open(row, packet)
+            if able:
+                which = "最新那条通知" if int((row or {}).get("notice") or 1) > 1 else "那条通知"
+                return (f"有 {len(waiting)} 顶帽子扣着（没对上图：{codes}），还不能执行：看过对图单，对上了就引用{which}回"
+                        f"「对过图 {able[0]}」这样确认（或者到控制台点「对过图了」）；不要的话回 2")
             return (f"有 {len(waiting)} 顶帽子扣着（没对上图：{codes}），微信里不能执行：请到控制台对过图，在这顶旁边点"
                     "「对过图了」，再点「重新预览」；不要的话回 2")
         if held:
@@ -1435,7 +1641,7 @@ class WechatReview:
         return _ID_AFTER.sub(_after_label, label), _mask_ids(value, ids)
 
     def _platform_lines(self, packet: dict, room: Optional[int] = None, ids: Optional[list] = None,
-                        addresses: Optional[list] = None) -> tuple[list, bool]:
+                        addresses: Optional[list] = None, wechat: bool = False) -> tuple[list, bool]:
         """``(lines, whole)``: a draft's platform action with every line its preview has (the console's preview block):
         what it is and the preview's verdict; a sample order's every product (name, and each SKU's code, colour and
         quantity), its courier and the receiver by province and city only (never a name, phone or street), the
@@ -1445,7 +1651,9 @@ class WechatReview:
         draft's: ``_ids_of``; in the problems too), an address a fact or a problem quotes cut to province and city
         (``addresses``: ``_addresses_of``).  At most LINES_MAX lines, each at most FACT_CHARS, all of them at most
         ``room`` characters (what the notification has left of NOTICE_CHARS).  ``whole``: every line listed in full
-        (else 「还有 N 项，见控制台」, and 「执行」 is the console's)."""
+        (else 「还有 N 项，见控制台」, and 「执行」 is the console's).  ``wechat``: the notification numbers the held hats
+        (「对过图 1」 quoting it): a hold's problem then goes without the Mac's 「…在控制台…点「对过图了」」 at its end, the
+        notification's own last lines say how."""
         data = packet.get("platform") or {}
         preview = data.get("preview") or {}
         action = data.get("action") or {}
@@ -1481,6 +1689,8 @@ class WechatReview:
         problems = [p for p in preview.get("problems") or [] if isinstance(p, str)]
         problems += [p for step in preview.get("steps") or [] if isinstance(step, dict)
                      for p in step.get("problems") or [] if isinstance(p, str) and p not in problems]
+        if wechat:
+            problems = [p.removesuffix(f"；{draft_context.CONFIRM_HOW}") for p in problems]
         ids = self._ids_of(packet) if ids is None else ids
         addresses = self._addresses_of(packet) if addresses is None else addresses
         rows = [self._masked(label, value, ids, addresses) for label, value in shown]
@@ -1641,7 +1851,9 @@ class WechatReview:
         platform drafts told here that wait or were told recently (``_status_rows``); else, while a platform draft told
         here waits or was the last thing said, which one?; an unnumbered 「改 …」 while a
         notification is the last thing said, unless in CLAUDE_RELAY_ONLY (it is Claude's: it goes on) (which one?);
-        None otherwise."""
+        a line that starts with 「对过图」 while a sample order told here waits with held hats (``_photo_claims``): never
+        a confirmation without a quote of its notice, nor quoting anything else (how, in either mode); None
+        otherwise."""
         for pattern, action, _ in _NUMBERED:
             m = pattern.match(line)
             if m:
@@ -1654,6 +1866,8 @@ class WechatReview:
                 if self._open(number):
                     return ("edit", number, m.group(2).strip(), said.number == number) if edit else ("ask", number)
                 return ("closed", number) if self._told(number) else None
+        if _photo_parts(line) is not None and self._photo_claims():
+            return ("photo_unquoted", bool(said.quoted))   # (「对过图 1」: only quoting the notice that numbers the hats)
         parts = None if said.quoted else _execute_parts(line)
         if parts is not None:
             number, question = parts
@@ -1805,6 +2019,22 @@ class WechatReview:
         return any(row.get("tool", MESSAGE_TOOL) not in (MESSAGE_TOOL, BUYIN_TOOL)
                    for row in self._store.wechat_reviews_open())
 
+    def _photo_waiting(self) -> list:
+        """The sample orders told here that wait with hats their preview holds for photos: their numbers."""
+        out = []
+        for row in self._store.wechat_reviews_open():
+            if row.get("tool") != SAMPLE_TOOL:
+                continue
+            packet = self._store.packet(row["packet_id"])
+            if packet is not None and draft_context.codes_of(packet.get("meta") or {}, draft_context.PHOTO_HELD):
+                out.append(int(row["packet_id"]))
+        return out
+
+    def _photo_claims(self) -> bool:
+        """Is a 「对过图 …」 that quotes no notification this feature's: such a sample order waits (``_photo_waiting``).
+        It confirms nothing; the bot says to quote the notice (never passed on to the relay meanwhile)."""
+        return bool(self._photo_waiting())
+
     def _answer(self, msg: dict, said: Said, is_command, last: Optional[_Last]) -> tuple[bool, Optional[str], Optional[str]]:
         burst = self._burst(msg)
         plan = self._plan(Said("text", said.content) if said.kind == "voice" else said, is_command, burst, last)
@@ -1859,6 +2089,10 @@ class WechatReview:
             return self._for_claude(QUOTED_NUMBERED.format(number=item[1], direct=item[2], quoted=item[3]))
         if action == "bare_unsure":
             return BARE_UNSURE
+        if action == "photo_unquoted":                 # (never a confirmation: only quoting the notice)
+            waiting = [f"#{n}" for n in self._photo_waiting()]
+            return self._for_claude((PHOTO_QUOTED_ELSEWHERE if item[1] else PHOTO_QUOTE)
+                                    + (f"（扣着帽子在等的：{'、'.join(waiting[:LISTED])}）" if waiting else ""))
         if action == "bare_execute":
             waiting = [f"#{r['packet_id']}" for r in self._store.wechat_reviews_open()
                        if r.get("tool", MESSAGE_TOOL) not in (MESSAGE_TOOL, BUYIN_TOOL)]
@@ -1938,7 +2172,9 @@ class WechatReview:
             return self._closed(packet, row) or f"#{number} 没有平台动作：要发就引用那条通知回 1（或者回「发 {number}」）"
         if status == PENDING:
             told = str((row or {}).get("preview") or "")
-            photo = self._photo_stop(packet)
+            if (packet.get("platform") or {}).get("previewing"):
+                return f"#{number} 还没执行：{PREVIEW_COMING}"
+            photo = self._photo_stop(packet, row)
             if photo:
                 return f"#{number} 还没执行（在等你确认）：{photo}"
             stop = self._pictures_stop(row, packet)
@@ -2008,6 +2244,9 @@ class WechatReview:
             if asked_for is not None and asked_for != number:
                 return self._mismatch(number, asked_for, "执行")
             return self._for_claude(self._execute_status(packet, row))
+        photo = _photo_parts(text)
+        if photo is not None and packet.get("tool") == SAMPLE_TOOL:
+            return self._on_photo(row, packet, photo, head, notice)     # (「对过图 1」: the held hats it numbered)
         closed = self._closed(packet, row)
         if closed:
             return closed
@@ -2037,6 +2276,130 @@ class WechatReview:
         if _not_words(text) or _yes_like(text) or _short(text) or not _letters(text):
             return self._help(packet, head)                # (「👍…」「[强]。。」「…」「？」: no words for her)
         return self._propose(row, packet, text.strip())
+
+    def _on_photo(self, row: dict, packet: dict, said: PhotoSaid, head: str, notice: int) -> str:
+        """「对过图 …」 quoting a sample order's notification (2026-11-10): the console's 「对过图了」 for the hats that
+        notice numbered (the row's ``hats``), through ``confirm`` (``PrmService.photo_confirm``: its checks, only a code
+        the current preview holds; the event's actor says WeChat).  Only while the draft waits, the quote is of its
+        latest notice (``_changed_after``: nothing changed since, no new preview), it is not being previewed again,
+        every picture of that notice reached the chat (``pictures_ok`` 1, the very ones: ``pictures_sent``) and the
+        answer is a command (``PhotoSaid.command``); a question says how the hats stand.  The numbers are the
+        notice's: one that is none of them (0, too big, twice) confirms nothing; a hat no sheet it sent shows
+        (``ok`` False) is the console's, and no part of 「全部」; a plain 「对过图」 counts when it numbered one hat.  It
+        never runs the order: once no held hat is left the service asks for the new preview itself (its fresh notice
+        is what 「执行」 then quotes)."""
+        number = packet["id"]
+        closed = self._closed(packet, row)
+        if closed:
+            return closed
+        if head != "草稿":
+            return f"#{number} {PHOTO_QUOTE}"
+        stale = self._changed_after(row, packet, quoted=notice)
+        if stale:
+            return stale                               # (an older notice, or the draft changed since: the latest one)
+        if (packet.get("platform") or {}).get("previewing"):
+            return f"#{number} {PREVIEW_COMING}（现在不用回「对过图」）"
+        hats = hats_of(row.get("hats"))
+        held = draft_context.codes_of(packet.get("meta") or {}, draft_context.PHOTO_HELD)
+        if not self._draft_context or not hats or any(h["code"] not in held for h in hats):
+            # (the switch off; a notice that numbered no hat: none held, none a sheet it sent shows, one from before the
+            # hats were numbered; the preview holds other hats than it numbered)
+            return f"#{number} " + (self._photo_stop(packet) or "没有扣着等确认的帽子，不用回「对过图」")
+        confirmed = self._confirmed(packet)
+        if said.question:
+            return self._hats_status(row, packet, hats, confirmed)
+        stop = self._pictures_stop(row, packet)
+        if stop:
+            return stop                                # (its pictures did not all reach the chat: nothing to go by)
+        if _pictures_fp(self._pictures(packet, log=False)) != str(row.get("pictures_sent") or ""):
+            return f"#{number} 对图单和这条通知后面发的不是同一份了，微信里确认不了：{PHOTO_CONSOLE}"
+        if not said.command:
+            return f"#{number} 没看懂，什么都没确认：{PHOTO_HOW}"
+        if self._confirm is None:
+            return f"#{number} 现在不能在微信里确认：{PHOTO_CONSOLE}"
+        total, listed = len(hats), self._hats_listed(hats, confirmed)
+        if said.everything:
+            picked = [i for i, h in enumerate(hats, 1) if h["code"] not in confirmed]
+        elif said.numbers is None:
+            if total != 1:
+                return (f"#{number} 扣着 {total} 顶，要写第几顶（「对过图 1 2」这样，或者「对过图 全部」）：什么都没确认。"
+                        f"{listed}")
+            picked = [1]
+        else:
+            picked = list(said.numbers)
+            if any(n < 1 or n > total for n in picked) or len(set(picked)) != len(picked):
+                span = f"第 1–{total} 顶" if total > 1 else "第 1 顶"
+                return f"#{number} 编号不对（这条通知里只有{span}，每顶写一次）：什么都没确认。{listed}"
+        console = [i for i in picked if not hats[i - 1]["ok"]]          # (no picture to go by: the console's)
+        done, failed, result = [], "", {}
+        for i in (i for i in picked if hats[i - 1]["ok"]):
+            code = hats[i - 1]["code"]
+            try:
+                result = self._confirm(packet["deal_id"], number, code)
+            except Exception:
+                logger.exception("PRM: the admin's 对过图 for draft %d could not be carried out", number)
+                result = {"ok": False, "error": "出错了（详见日志）"}
+            if not result.get("ok"):
+                failed = f"第 {i} 顶 {code} 没确认成：{self._hide(packet, result.get('error') or '出错了')}"
+                break
+            done.append(i)
+
+        def named(numbers) -> str:
+            return "、".join(f"第 {i} 顶 {hats[i - 1]['code']}" for i in numbers)
+
+        bits = []
+        if done:
+            logger.info("PRM: draft %d: %d held hat(s) confirmed by photo by the admin in WeChat", number, len(done))
+            bits.append(f"已确认{named(done)}（{PHOTO_UNDO}）")
+        if failed:
+            bits.append(failed)
+        if console:
+            bits.append(f"{named(console)} 没有能对的图，微信里确认不了：{PHOTO_CONSOLE}")
+        if done and not failed:
+            left = [i for i, h in enumerate(hats, 1) if h["code"] in (result.get("left") or [])]
+            able = [i for i in left if hats[i - 1]["ok"]]
+            rest = [i for i in left if not hats[i - 1]["ok"] and i not in console]
+            if result.get("repreview"):
+                bits.append(PREVIEW_COMING)
+            elif able:
+                bits.append(f"还扣着{named(able)}：对上了再引用这条通知回「对过图 {able[0]}」")
+            elif not left:                             # (all confirmed, but the new preview did not start)
+                why = self._hide(packet, result.get("repreview_error") or "")
+                bits.append(f"没能自己开始重新预览{f'（{why}）' if why else ''}：请到控制台点「重新预览」")
+            if rest:
+                bits.append(f"还扣着{named(rest)}，没有能对的图：{PHOTO_CONSOLE}")
+        if not bits and all(h["code"] in confirmed for h in hats):
+            bits.append(f"都确认过了。{listed}；还没重新预览的话，请到控制台点「重新预览」")
+        elif not bits:
+            bits.append(f"没有能在微信里确认的帽子。{listed}")
+        return f"#{number} " + "；".join(bits)
+
+    @staticmethod
+    def _hats_listed(hats: list, confirmed: dict) -> str:
+        """「扣着的是：第 1 顶 <编码>（已确认）；第 2 顶 <编码>…」: the hats a notice numbered, as they stand."""
+        return "扣着的是：" + "；".join(
+            f"第 {i} 顶 {h['code']}" + ("（已确认）" if h["code"] in confirmed else "" if h["ok"] else "（要到控制台确认）")
+            for i, h in enumerate(hats, 1))
+
+    def _hats_status(self, row: dict, packet: dict, hats: list, confirmed: dict) -> str:
+        """A question quoting the notice (「对过图了吗」「对过图了没」「对过图？」): how each hat it numbered stands, and what
+        is left to do.  Confirms nothing."""
+        number = packet["id"]
+        lines = "；".join(
+            f"第 {i} 顶 {h['code']} " + ("已确认" if h["code"] in confirmed else "还没确认" if h["ok"]
+                                        else "还没确认（没有能对的图，要到控制台确认）")
+            for i, h in enumerate(hats, 1))
+        able = self._hats_open(row, packet)
+        stop = self._pictures_stop(row, packet)
+        if stop:
+            tail = stop[len(f"#{number} "):]
+        elif able:
+            tail = f"对上了就引用这条通知回「对过图 {able[0]}」"
+        elif all(h["code"] in confirmed for h in hats):
+            tail = "都确认了：请到控制台点「重新预览」按确认再核"
+        else:
+            tail = f"剩下的{PHOTO_CONSOLE}"
+        return f"#{number} 扣着 {len(hats)} 顶：{lines}。{tail}"
 
     def _seen_after(self, last: _Last, written: float) -> bool:
         """Was the bare answer written after the bot said ``last``, on one clock: WeChat's time of both when ``last`` was
@@ -2170,9 +2533,11 @@ class WechatReview:
         if self._group(packet) and not quoted:
             return self._group_hint(packet, execute=True)
         told = str(row.get("preview") or "")
-        photo = self._photo_stop(packet)
+        if (packet.get("platform") or {}).get("previewing"):
+            return f"#{number} {PREVIEWING_STOP}"      # (its new preview is told in a fresh notice: that one runs)
+        photo = self._photo_stop(packet, row)
         if photo:
-            return f"#{number} {photo}"                # (the photo check: the console's 「对过图了」 / 「重新预览」)
+            return f"#{number} {photo}"                # (the photo check: 「对过图 1」 quoting its notice, or the console)
         if told and told == preview_stamp((packet.get("platform") or {}).get("preview")):
             return self._decided(row, packet, "execute", None, stamp=told)
         if told:
@@ -2267,10 +2632,12 @@ class WechatReview:
                                               told_at=now)
                 logger.warning("PRM: draft %d: the admin's 执行 in WeChat may or may not have been queued", number)
                 return f"#{number} {QUEUE_UNSURE}"
-            if code == "preview_changed":
-                return f"#{number} 通知发出以后重新预览过：请到控制台看了新的预览再「批准并执行」；不要的话回 2"
+            if code == "preview_changed":              # (a new preview landed meanwhile: its fresh notice comes)
+                fresh = self._store.packet(number) or packet
+                return (self._changed_after(self._store.wechat_review(number) or row, fresh)
+                        or f"#{number} 通知发出以后重新预览过：请到控制台看了新的预览再「批准并执行」；不要的话回 2")
             if code == "previewing":
-                return f"#{number} 正在重新预览，微信里不能执行：请到控制台看了结果再「批准并执行」；不要的话回 2"
+                return f"#{number} {PREVIEWING_STOP}"
             fresh = self._store.packet(number) or packet
             closed = self._closed(fresh, row)
             if closed:

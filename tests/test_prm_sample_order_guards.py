@@ -66,7 +66,8 @@ def test_a_sample_order_whose_preview_held_a_hat_nobody_confirmed_never_runs(bot
     then; ``photo_confirmed``, the ones it let go only by a confirmation, is ``withdrawn``'s).  A preview that says ready
     all the same with such a hat no operator confirmed since is never approved (the console's button off, why), the
     switch on or off (off, the console has no 「对过图了」: 「重新预览」 alone, final check 2026-11-10 A4); once 「对过图了」
-    is there for it, it may run."""
+    is there for it, the bot previews it again by itself (2026-11-10), and the new preview that took the confirmation
+    may run."""
     packet = held_draft(bot, verdict="ready")
     reason = f"{CODE_B} 还扣着（没对过图），不能执行：{draft_context.CONFIRM_HOW}，再点「重新预览」"
     assert bot.prm.decide(packet["id"], "execute") == {"ok": False, "error": reason}
@@ -79,7 +80,13 @@ def test_a_sample_order_whose_preview_held_a_hat_nobody_confirmed_never_runs(bot
     assert shown["platform"]["can_execute"] is False and off in shown["platform"]["problems"]
     bot.prm._draft_context = True
     deal = deal_of(bot)
-    assert bot.prm.deal_action("photo_confirm", {"deal_id": deal["id"], "packet": packet["id"], "code": CODE_B})["ok"]
+    done = bot.prm.deal_action("photo_confirm", {"deal_id": deal["id"], "packet": packet["id"], "code": CODE_B})
+    assert done["ok"] and done["repreview"] is True
+    assert shown_of(bot, packet["id"])["platform"]["can_execute"] is False      # (being previewed again)
+    assert bot.prm.decide(packet["id"], "execute")["code"] == "previewing"
+    job = bot.relay.next_job(0, ("prm",))
+    bot.finish(job["id"], text=json.dumps({**sample_block(previewed_at=2.0), "draft_context": GATED,
+                                           "photo_confirmed": [CODE_B]}, ensure_ascii=False))
     assert shown_of(bot, packet["id"])["platform"]["can_execute"] is True
     out = bot.prm.decide(packet["id"], "execute")
     assert out["ok"] and out["status"] == "executing", out

@@ -466,26 +466,30 @@ class TestPrmPages:
         assert "对图单" not in card.locator(".row .tag").all_inner_texts().__str__()   # no attachment tag for it
 
     def test_review_page_confirms_a_held_hat_and_takes_it_back(self, page, prm):
-        """PRM_DRAFT_CONTEXT 「对过图了」 (2026-11-09): a sample order the Mac held for a hat's photo shows
-        「对过图了，用 <编码>」 under its platform block; a click keeps the confirmation for her deal and the card says
-        「已确认 <编码>，点「重新预览」按确认再核」 with 「撤销」, which takes it back.  A draft whose preview went by the
-        confirmation says so, and once it is taken back 批准并执行 goes off and the card says to preview it again."""
+        """PRM_DRAFT_CONTEXT 「对过图了」 (2026-11-09): a sample order the Mac held for two hats' photos shows
+        「对过图了，用 <编码>」 for each under its platform block; a click keeps the confirmation for her deal and the card
+        says 「已确认 <编码>，还有 1 顶扣着：都确认完自动重新预览」 with 「撤销」, which takes it back.  The last held hat
+        confirmed (2026-11-10): the bot asks the Mac for the new preview itself, the card shows it under way (「正在重新
+        预览」, the buttons off) instead of 「点「重新预览」按确认再核」.  A draft whose preview went by the confirmation
+        says so, and once it is taken back 批准并执行 goes off and the card says to preview it again (nothing previews it
+        by itself then)."""
         from src.prm import platforms
 
-        code = "A7269901001B-F"
+        code, other = "A7269901001B-F", "A7269901002A-F"
         prm.service._draft_context = True                                   # (PRM_DRAFT_CONTEXT=on)
         store = prm.service.store
         action = platforms.check_action({"action": "jst.sample_order", "shop": "dy", "items": [
             {"item_id": "3000000000000000102", "skus": [{"sku_id": "3100000000000000203", "qty": 1}]}],
             "creator_platform": "dy", "creator_account": "test_daren_01"})
         held = {"version": 1, "action": action, "verdict": "blocked", "steps": [], "run": {}, "facts": [],
-                "problems": [f"{code}（均码咖啡）对图没把握（款有把握，颜色没把握）：先核对再建；"
-                             "对过图后，在控制台这份草稿上点这顶旁边的「对过图了」"], "previewed_at": prm.clock.now}
+                "problems": [f"{c}（均码咖啡）对图没把握（款有把握，颜色没把握）：先核对再建；"
+                             "对过图后，在控制台这份草稿上点这顶旁边的「对过图了」" for c in (code, other)],
+                "previewed_at": prm.clock.now}
         pid = store.add_packet(
             deal_id=1, party_id=1, job_id=None, chat_id="wxid_creator01", kind="money", text="寄样单建好啦",
             attachments=[], intent="寄样", slots={}, stage_proposal="", needs_attention=False, reason="",
             tool="jst.sample_order", platform={"action": action, "preview": held},
-            meta={"draft_context": {"v": 3, "gated": True}, "photo_held": [code]}, now=prm.clock.now)
+            meta={"draft_context": {"v": 3, "gated": True}, "photo_held": [code, other]}, now=prm.clock.now)
         page.goto(f"{BASE_URL}/#/review", timeout=10000)
         page.wait_for_timeout(1500)
         card = page.locator(".prm-draft", has_text="寄样单建好啦")
@@ -494,13 +498,27 @@ class TestPrmPages:
         box.locator(f"button:has-text('对过图了，用 {code}')").click()
         page.wait_for_timeout(1000)
         assert [r["code"] for r in store.photo_confirmations(1)] == [code]
-        assert f"已确认 {code}，点「重新预览」按确认再核" in box.inner_text()
+        assert f"已确认 {code}，还有 1 顶扣着：都确认完自动重新预览" in box.inner_text()
+        assert not store.packet(pid)["platform"].get("previewing")           # (a hat still held: nothing previewed)
         box.locator("button:has-text('撤销')").click()
         page.wait_for_timeout(1000)
         assert store.photo_confirmations(1) == []
         assert box.locator(f"button:has-text('对过图了，用 {code}')").count() == 1
+        # both confirmed: the bot previews the order again by itself, and the card shows it
+        for c in (code, other):
+            box.locator(f"button:has-text('对过图了，用 {c}')").click()
+            page.wait_for_timeout(1000)
+        assert sorted(r["code"] for r in store.photo_confirmations(1)) == sorted([code, other])
+        assert store.packet(pid)["platform"]["previewing"]
+        job = prm.relay.next_job(0, ("prm",))
+        assert job["meta"]["op"] == "platform_preview" and job["meta"]["packet_id"] == pid
+        text = card.inner_text()
+        assert f"已确认 {code}，正在重新预览（按确认再核）" in text and f"已确认 {other}，正在重新预览（按确认再核）" in text
+        assert "正在重新预览…" in text and "点「重新预览」按确认再核" not in text
+        assert card.locator("button:has-text('重新预览')").is_disabled()
+        assert card.locator(".prm-photo-held button:has-text('撤销')").first.is_disabled()
         # its preview went by the confirmation (ready): taken back, 批准并执行 goes off
-        assert store.confirm_photo(1, code, pid, prm.clock.now)
+        assert store.unconfirm_photo(1, other)
         ready = {**held, "verdict": "ready", "problems": [], "run": {"steps": ["create"]}}
         assert store.set_platform(pid, {"action": action, "preview": ready}, ("pending",))
         assert store.merge_packet_meta(pid, {"photo_held": [], "photo_confirmed": [code]})
@@ -514,6 +532,8 @@ class TestPrmPages:
         text = card.inner_text()
         assert f"撤销了 {code} 的「对过图了」：点「重新预览」再核" in text
         assert card.locator("button:has-text('批准并执行')").is_disabled()
+        assert not store.packet(pid)["platform"].get("previewing")           # (an undo previews nothing by itself)
+        assert not card.locator("button:has-text('重新预览')").is_disabled()   # (the button, as ever)
 
     def test_review_page_shows_everything_the_merged_branches_put_on_one_draft(self, page, prm, tmp_path):
         """合并 draft-context (2026-11-10): one waiting draft with every part the merged branches give a card: a group
@@ -583,7 +603,9 @@ class TestPrmPages:
         card.locator(f".prm-photo-held button:has-text('对过图了，用 {code}')").click()
         page.wait_for_timeout(1000)
         assert [r["code"] for r in store.photo_confirmations(1)] == [code]
-        assert f"已确认 {code}，点「重新预览」按确认再核" in card.locator(".prm-photo-held").inner_text()
+        # (its one held hat: the bot previews it again by itself, 2026-11-10)
+        assert f"已确认 {code}，正在重新预览（按确认再核）" in card.locator(".prm-photo-held").inner_text()
+        assert store.packet(pid)["platform"]["previewing"]
         assert card.locator("button:has-text('批准并执行')").is_disabled()
 
     @staticmethod
@@ -1950,14 +1972,19 @@ class TestPrmPages:
     def test_review_page_says_what_wechat_can_do_for_a_draft_told_there(self, page, prm):
         """「已发到微信」's tooltip (2026-11-10): a platform draft 「执行」 runs from WeChat only when the bot says so
         (``wechat_execute``); one it does not is told that it cannot run from WeChat, never 「引用通知回「执行」」; a draft
-        whose pictures did not reach the chat (``wechat_console``) is the console's, only 不发 there."""
+        whose pictures did not reach the chat (``wechat_console``) is the console's, only 不发 there.  A sample order
+        whose held hats its notice numbered (``wechat_photo``, 2026-11-10): 「对过图 1」 quoting it confirms them; one
+        being previewed again: a fresh notice follows."""
         packet = self._platform_draft(prm)
-        shown = {"execute": False, "console": False}
+        shown = {"execute": False, "console": False, "photo": False, "previewing": False}
 
         def told(state):
             for p in state["pending"]:
                 if p["id"] == packet["id"]:
                     p.update(wechat_at=prm.clock.now, wechat_execute=shown["execute"], wechat_console=shown["console"])
+                    if shown["photo"]:
+                        p["wechat_photo"] = True
+                    p["platform"]["previewing"] = shown["previewing"]
 
         self._serve_prm(page, told)
         page.goto(f"{BASE_URL}/#/review", timeout=10000)
@@ -1974,6 +2001,17 @@ class TestPrmPages:
         card.wait_for()
         title = card.locator(".prm-wechat-tag").get_attribute("title")
         assert "要看的图没发过去" in title and "只能回 2 不发" in title and "引用通知回「执行」" not in title
+        shown.update(execute=False, console=False, photo=True)
+        page.reload()
+        card.wait_for()
+        title = card.locator(".prm-wechat-tag").get_attribute("title")
+        assert "引用那条通知回「对过图 1」这样也能确认" in title and "自己重新预览、再发一条通知" in title
+        assert "引用通知回「执行」" not in title
+        shown.update(previewing=True)
+        page.reload()
+        card.wait_for()
+        title = card.locator(".prm-wechat-tag").get_attribute("title")
+        assert "正在重新预览，新的预览出来以后会再发一条通知" in title and "对过图" not in title
 
     @pytest.mark.parametrize("channel", [None, "private"], ids=["no-channel", "private"])
     def test_review_page_shows_and_sends_a_private_draft_exactly_as_before(self, page, prm, channel):

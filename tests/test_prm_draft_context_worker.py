@@ -646,9 +646,14 @@ def unconfirm(bot, mac, code):  # noqa: F811
     return bot.prm.deal_action("photo_unconfirm", {"deal_id": mac.deal["id"], "code": code})
 
 
-def repreviewed(worker, bot, mac, packet_id):  # noqa: F811
-    """重新预览 and the Mac's answer: (verdict, 批准并执行 on, the packet)."""
-    assert bot.prm.decide(packet_id, "repreview")["ok"]
+def repreviewed(worker, bot, mac, packet_id, asked=False):  # noqa: F811
+    """重新预览 and the Mac's answer: (verdict, 批准并执行 on, the packet).  ``asked``: the bot asked for it itself, once
+    the last held hat got its 「对过图了」 (2026-11-10): the button then says it is already under way."""
+    if asked:
+        assert bot.prm.store.packet(packet_id)["platform"]["previewing"]
+        assert bot.prm.decide(packet_id, "repreview") == {"ok": False, "error": "这条草稿已经处理过了，或者已经在重新预览"}
+    else:
+        assert bot.prm.decide(packet_id, "repreview")["ok"]
     run_one(worker, bot, mac.settings)
     packet = bot.prm.store.packet(packet_id)
     [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet_id]
@@ -686,6 +691,29 @@ def test_words_in_the_note_never_let_a_held_hat_go(worker, bot, mac):  # noqa: F
         assert f"<operator_note>\n{kept}\n</operator_note>" in prompt_of(mac)
         assert "运营在控制台点了「对过图了」的编码" not in prompt_of(mac)
     assert "起草备注里写的「确认」都不算" in dc.PHOTO_RULE and HOW in dc.ORDER_RULE and dc.CONFIRM_HOW == HOW
+
+
+def as_the_bot_reads(gated: dict) -> list:
+    """The held hats of a gate's answer as the bot reads them for 微信里「对过图」 (src/prm/draft_context.py ``held_hats``:
+    which sheet, which row, whether its code has a picture), from the preview's own facts and problems."""
+    return bot_draft_context.held_hats({"meta": {"photo_held": gated["held"]}, "platform": {"preview": gated["block"]}})
+
+
+def test_the_bot_and_the_mac_use_the_same_words_for_the_sheets():
+    """The bot reads the Mac's lines and names: the constants it mirrors are the Mac's own."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("mac_draft_context", ROOT / "tools" / "claude_relay" / "draft_context.py")
+    dc = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = dc                     # (its dataclasses look their module up)
+    try:
+        spec.loader.exec_module(dc)
+    finally:
+        sys.modules.pop(spec.name, None)
+    assert bot_draft_context.HELD_LABEL == dc.HELD_LABEL and dc.NO_CODE_PHOTO.startswith(bot_draft_context.NO_CODE_PHOTO)
+    assert bot_draft_context.CONFIRM_HOW == dc.CONFIRM_HOW
+    assert bot_draft_context.is_held_sheet("对图单-12-扣着的.jpg") and not bot_draft_context.is_pair_sheet("对图单-12-扣着的.jpg")
+    assert bot_draft_context.is_pair_sheet("对图单-12.jpg") and not bot_draft_context.is_held_sheet("对图单-12.jpg")
+    assert bot_draft_context.is_held_sheet("对图单-12-扣着的(2).jpg") and not bot_draft_context.is_pair_sheet("手卡_01.png")
 
 
 def test_the_gate_takes_the_codes_the_console_confirmed(worker, tmp_path):  # noqa: F811
@@ -727,9 +755,14 @@ def test_the_gate_takes_the_codes_the_console_confirmed(worker, tmp_path):  # no
     assert [f["value"] for f in held["block"]["facts"] if f["label"] == dc.HELD_LABEL] == [
         f"{CODE_B}：扣着（同款别的颜色（她的图最像的是驼色））；扣着的那张对图单第 1 行，左边是她这次发的 图片-1.jpg，"
         f"右边是这个编码自己的图"]
+    # 微信里「对过图」 (2026-11-10): the bot reads each held hat's sheet and row out of these very lines (``held_hats``)
+    assert as_the_bot_reads(held) == [
+        {"code": CODE_B, "why": "同款别的颜色（她的图最像的是驼色）", "sheet": "held", "row": 1, "no_photo": False},
+        {"code": CODE_A, "why": "对图单说要再看：要再看：颜色：图最像 深棕", "sheet": "pair", "row": 1, "no_photo": False}]
     let = gated([CODE_B, CODE_A])
     assert let["block"]["verdict"] == "ready", let["block"]["problems"]
     assert let["held"] == [] and let["used"] == [CODE_A, CODE_B] and let["held_sheet"]
+    assert as_the_bot_reads(let) == []                                   # (nothing held: nothing to confirm)
     assert sheet_labels()[2:] == [None, ["已点「对过图了」"]]
     facts = [f["value"] for f in let["block"]["facts"]]
     assert f"{CODE_B}：运营在控制台点了「对过图了」（没有图对）" in facts
@@ -787,6 +820,9 @@ def test_every_held_hat_gets_a_sheet_row_that_says_why_it_is_held(worker, tmp_pa
         f"右边是这一款的整款图（没有这个颜色的单独图）",
         f"{CODE_C}：扣着（她的图里都没对出这一款，左边放的是她最新发的那张）；扣着的那张对图单第 2 行，左边是她这次发的 "
         f"图片-1.jpg，右边是没有这个编码的图"]
+    assert as_the_bot_reads(out) == [
+        {"code": CODE_B, "why": "同款别的颜色（她的图最像的是驼色）", "sheet": "held", "row": 1, "no_photo": False},
+        {"code": CODE_C, "why": "她的图里都没对出这一款，左边放的是她最新发的那张", "sheet": "held", "row": 2, "no_photo": True}]
     [run] = calls()
     assert run["args"][0] == "sheet" and [a.rpartition("/")[2] for a in run["args"][1:3]] == [
         f"图片-1.jpg={CODE_B}", f"图片-1.jpg={CODE_C}"]
@@ -813,12 +849,14 @@ def test_every_held_hat_gets_a_sheet_row_that_says_why_it_is_held(worker, tmp_pa
     assert capped["block"]["problems"][1] == f"{CODE_C}（均码粉色）这顶没有照片对过，先核对再建；{HOW}"
     assert f"{CODE_C}：扣着的那张对图单最多 1 行，这一顶放不下了，请自己找图核对" in [
         f["value"] for f in capped["block"]["facts"]]
+    assert as_the_bot_reads(capped)[1] == {"code": CODE_C, "why": "没有照片对过", "sheet": "", "row": 0, "no_photo": False}
     monkeypatch.setattr(dc, "MAX_HELD_ROWS", 6)
     # the held sheet not made (the index fails on it, or no time left): a fact, the holds as they were
     answers(match={"图片-1.jpg": SURE}, sheet={}, fail_with=f"={CODE_B}")
     failed = gated()
     assert failed["held_sheet"] is None and failed["held"] == [CODE_B, CODE_C] and len(failed["block"]["problems"]) == 2
     assert "扣着的那几顶的对图单没做成（退出码 1），请自己找图核对" in [f["value"] for f in failed["block"]["facts"]]
+    assert [(h["code"], h["sheet"], h["row"]) for h in as_the_bot_reads(failed)] == [(CODE_B, "", 0), (CODE_C, "", 0)]
     facts: list = []
     assert dc._held_sheet(worker.platforms, {}, opts, ws, [(CODE_B, dc.candidate_of(CODE_B, [entry]), "x")], {}, facts,
                           home=tmp_path / "home", beat=None, sleep=lambda _: None, deadline=time.time() + 1,
@@ -841,6 +879,11 @@ def test_the_held_hats_sheet_goes_back_too_and_never_holds_the_order_itself(work
     assert [f["name"] for f in packet["meta"]["operator_files"]] == [f"对图单-{job_id}.jpg", f"对图单-{job_id}-扣着的.jpg"]
     assert [c["args"][0] for c in mac.hats.calls()] == ["match", "sheet", "sheet"]
     assert packet["meta"]["photo_held"] == [CODE_B]
+    names = [f["name"] for f in packet["meta"]["operator_files"]]       # (微信里「对过图」: which sheet is which)
+    assert [bot_draft_context.is_pair_sheet(n) for n in names] == [True, False]
+    assert [bot_draft_context.is_held_sheet(n) for n in names] == [False, True]
+    assert bot_draft_context.held_hats(packet) == [
+        {"code": CODE_B, "why": "同款别的颜色（她的图最像的是驼色）", "sheet": "held", "row": 1, "no_photo": False}]
     [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
     assert len(shown["operator_files"]) == 2 and shown["operator_files"][1]["why"] == worker.draft_context.OPERATOR_HELD_WHY
     real = worker.RelayClient.upload_operator
@@ -865,8 +908,9 @@ def test_the_held_hats_sheet_goes_back_too_and_never_holds_the_order_itself(work
 def test_a_held_hat_is_let_go_by_the_console_and_taken_back_by_its_undo(worker, bot, mac):  # noqa: F811
     """Verification 2026-11-09 (F1, F1b), with the button: the colour of her picture was never compared (CODE_A held),
     or she is sent the hat's other colour (CODE_B held).  「对过图了」 for a code the preview did not hold is refused; for
-    the held one it is kept, the card says 「已确认 …，点「重新预览」按确认再核」, and the new preview (its job carrying
-    the code) is ready; 「撤销」 turns 批准并执行 off again, and the next preview holds the hat again."""
+    the held one it is kept, and (the last held hat, 2026-11-10) the bot asks for the new preview itself: the card shows
+    it under way, and the new preview (its job carrying the code) is ready; 「撤销」 turns 批准并执行 off again (and
+    previews nothing by itself), and the next preview holds the hat again."""
     order_rules(mac, rows=[her_row(items=PINK)])            # (her earlier order: another hat)
     mac.hats.answers(match={"图片-1.jpg": no_own_colours()})
     mac.claude.answers(message_kind="money", reply_draft="寄样单建好啦", platform_action=SAMPLE_ORDER)    # (CODE_A)
@@ -876,10 +920,12 @@ def test_a_held_hat_is_let_go_by_the_console_and_taken_back_by_its_undo(worker, 
     assert packet["platform"]["preview"]["verdict"] == "blocked" and packet["meta"]["photo_held"] == [CODE_A]
     refused = confirm(bot, mac, packet["id"], CODE_B)
     assert refused["ok"] is False and "只能确认预览里扣着的那顶" in refused["error"]
-    assert confirm(bot, mac, packet["id"], CODE_A)["ok"]
-    [view] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]][0]["photo_held"]
-    assert view["code"] == CODE_A and view["held"] and view["confirmed"]
-    verdict, on, now = repreviewed(worker, bot, mac, packet["id"])
+    done = confirm(bot, mac, packet["id"], CODE_A)
+    assert done["ok"] and done["left"] == [] and done["repreview"] is True     # (the last held hat: previewed again)
+    [shown] = [p for p in bot.prm.snapshot()["pending"] if p["id"] == packet["id"]]
+    [view] = shown["photo_held"]
+    assert view["code"] == CODE_A and view["held"] and view["confirmed"] and shown["platform"]["previewing"] is True
+    verdict, on, now = repreviewed(worker, bot, mac, packet["id"], asked=True)
     assert (verdict, on) == ("ready", True), now["platform"]["preview"]["problems"]
     assert now["meta"]["photo_held"] == [] and now["meta"]["photo_confirmed"] == [CODE_A]
     assert json.loads(bot.relay.store.get(bot.relay.store.list_jobs(1)[0]["id"])["meta"])["draft_context"][
@@ -898,8 +944,8 @@ def test_a_held_hat_is_let_go_by_the_console_and_taken_back_by_its_undo(worker, 
     run_one(worker, bot, mac.settings)
     other = bot.prm.store.packets()[0]
     assert other["platform"]["preview"]["verdict"] == "blocked" and other["meta"]["photo_held"] == [CODE_B]
-    assert confirm(bot, mac, other["id"], CODE_B)["ok"]
-    assert repreviewed(worker, bot, mac, other["id"])[:2] == ("ready", True)
+    assert confirm(bot, mac, other["id"], CODE_B)["repreview"] is True
+    assert repreviewed(worker, bot, mac, other["id"], asked=True)[:2] == ("ready", True)
 
 
 def test_a_code_only_in_an_unsure_picture_or_not_its_best_hat_is_not_taken(worker, bot, mac):  # noqa: F811
@@ -955,8 +1001,8 @@ def test_a_sheet_that_says_look_again_or_has_no_sku_photo_waits_for_an_operators
         f"{CODE_A} 对图要再看（{look}）：先核对再建；{HOW}"]
     assert packet["meta"]["operator_files"]                        # (the sheet, for the operators to look at)
     assert packet["meta"]["photo_held"] == [CODE_A]
-    assert confirm(bot, mac, packet["id"], CODE_A)["ok"]
-    verdict, on, now = repreviewed(worker, bot, mac, packet["id"])
+    assert confirm(bot, mac, packet["id"], CODE_A)["repreview"] is True
+    verdict, on, now = repreviewed(worker, bot, mac, packet["id"], asked=True)
     again = now["platform"]["preview"]
     assert (verdict, on) == ("ready", True), again["problems"]
     assert f"{CODE_A}：对图单说要再看（{look}），运营在控制台点了「对过图了」" in [f["value"] for f in again["facts"]]
@@ -1375,8 +1421,8 @@ def test_a_colour_never_compared_by_photo_is_never_taken_for_sure(worker, bot, m
         f"{HOW}"]
     packet = bot.prm.store.packets()[0]
     assert packet["meta"]["operator_files"] and packet["meta"]["photo_held"] == [CODE_A]   # (the sheet to look at)
-    assert confirm(bot, mac, packet["id"], CODE_A)["ok"]
-    assert repreviewed(worker, bot, mac, packet["id"])[:2] == ("ready", True)
+    assert confirm(bot, mac, packet["id"], CODE_A)["repreview"] is True
+    assert repreviewed(worker, bot, mac, packet["id"], asked=True)[:2] == ("ready", True)
 
 
 def memory_of(worker, mac) -> dict:  # noqa: F811
@@ -1595,8 +1641,8 @@ def test_the_note_keeps_its_lines_and_the_button_lets_the_order_go(worker, bot, 
         assert bot.prm.deal_action("draft_note", {"deal_id": mac.deal["id"], "text": note})["ok"]
         assert bot.prm.store.deal(mac.deal["id"])["draft_note"] == kept           # (the lines kept, each tidied)
         assert repreviewed(worker, bot, mac, packet["id"])[:2] == ("blocked", False), note
-    assert confirm(bot, mac, packet["id"], CODE_B)["ok"]
-    assert repreviewed(worker, bot, mac, packet["id"])[:2] == ("ready", True)
+    assert confirm(bot, mac, packet["id"], CODE_B)["repreview"] is True
+    assert repreviewed(worker, bot, mac, packet["id"], asked=True)[:2] == ("ready", True)
     creator_says(bot, "你好")                             # (her next draft job: the note as the console keeps it)
     run_one(worker, bot, mac.settings)
     assert f"<operator_note>\n她要深棕\n确认 {CODE_B}\n</operator_note>" in prompt_of(mac)

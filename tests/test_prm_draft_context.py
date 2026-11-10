@@ -434,6 +434,7 @@ def test_a_reply_the_mac_left_nothing_of_for_a_bot_it_could_not_ask_leaves_no_sh
 # ── 「对过图了」 (2026-11-09): a button on the draft, no longer words in the 起草备注 ──────────────────────────────────
 
 CODE_A, CODE_B = "A7269901001A-F", "A7269901001B-F"
+CODE_C = "A7269901002A-F"
 
 
 def held_draft(b, held=(CODE_B,), used=(), verdict="blocked", text="要深棕那顶"):
@@ -472,11 +473,59 @@ def test_the_held_codes_come_with_the_macs_check_only(bot):
     assert draft_context.code_of("确认 X") == "" and draft_context.code_of(None) == ""
 
 
+def test_the_held_hats_are_read_from_the_previews_own_lines_or_have_no_row():
+    """``held_hats`` (微信里「对过图」, 2026-11-10): where an operator sees each held hat, read from the Mac's facts and
+    problems (the real gate's lines: tests/test_prm_draft_context_worker.py).  Only a code the preview holds; a line that
+    does not read as the Mac writes it gives the hat no row (never confirmed from WeChat then); the held sheet's rows
+    first, then the side-by-side sheet's, then the rest."""
+    how = draft_context.CONFIRM_HOW
+
+    def packet(held, facts=(), problems=(), steps=()):
+        return {"meta": {"photo_held": list(held)}, "platform": {"preview": {
+            "facts": [{"label": label, "value": value} for label, value in facts], "problems": list(problems),
+            "steps": list(steps)}}}
+
+    held_label, pair_label = draft_context.HELD_LABEL, draft_context.PAIR_LABEL
+    row = "扣着的那张对图单第 {n} 行，左边是她这次发的 图片-1.jpg，右边是{right}"
+    hats = draft_context.held_hats(packet(
+        (CODE_C, CODE_B, CODE_A),
+        facts=[(pair_label, "A7269901008A-F 米色：浅：对的是这次发的 图片-2.jpg（图库里第 1 款、第 1 个颜色）"),   # (row 1)
+               (pair_label, "A7269901008A-F：她以前的寄样单 YP2611010000001 里寄过（没有图对）"),                 # (no row)
+               (pair_label, f"{CODE_A} 驼色：对的是这次发的 图片-1.jpg（图库里第 1 款、第 1 个颜色）；！要再看：颜色"),
+               (held_label, f"{CODE_B}：扣着（颜色没把握）；" + row.format(n=2, right="这一款的整款图（没有这个颜色的单独图）")),
+               (held_label, f"{CODE_C.lower()}：扣着（她没发过能对的图）；" + row.format(n=1, right="没有这个编码的图")),
+               (held_label, f"A7269901009Z-F：扣着（x）；" + row.format(n=3, right="这个编码自己的图"))],   # (not held)
+        problems=[f"{CODE_A} 对图要再看（！要再看：颜色）：先核对再建；{how}"]))
+    assert hats == [
+        {"code": CODE_C, "why": "她没发过能对的图", "sheet": "held", "row": 1, "no_photo": True},
+        {"code": CODE_B, "why": "颜色没把握", "sheet": "held", "row": 2, "no_photo": False},
+        {"code": CODE_A, "why": "对图单说要再看：要再看：颜色", "sheet": "pair", "row": 2, "no_photo": False}]
+    # lines that do not read as the Mac's: no row; a pair row of a hat held for another reason: no row either
+    odd = draft_context.held_hats(packet(
+        (CODE_A, CODE_B, CODE_C),
+        facts=[(held_label, f"{CODE_A}：扣着的那张对图单最多 6 行，这一顶放不下了，请自己找图核对"),
+               (held_label, f"{CODE_B} 在扣着的那张对图单第 1 行"), ("对图单", f"{CODE_C}：扣着（x）；" + row.format(n=1, right="y")),
+               (pair_label, f"{CODE_C} 粉色：对的是这次发的 图片-1.jpg（图库里第 1 款、第 1 个颜色）")],
+        problems=[f"{CODE_A}（均码驼色）这顶没有照片对过，先核对再建；没有这个编码的图，请自己找图核对；{how}",
+                  f"{CODE_B}（均码咖啡）对图没把握（只在没把握的图里）：先核对再建；{how}"]))
+    assert odd == [{"code": CODE_A, "why": "没有照片对过", "sheet": "", "row": 0, "no_photo": True},
+                   {"code": CODE_B, "why": "对图没把握", "sheet": "", "row": 0, "no_photo": False},
+                   {"code": CODE_C, "why": "没对上图", "sheet": "", "row": 0, "no_photo": False}]
+    # the steps' lines count too; no hat held, a packet with no preview: nothing
+    stepped = draft_context.held_hats(packet((CODE_B,), steps=[{"facts": [
+        {"label": held_label, "value": f"{CODE_B}：扣着（颜色没把握）；" + row.format(n=1, right="这个编码自己的图")}]}]))
+    assert stepped == [{"code": CODE_B, "why": "颜色没把握", "sheet": "held", "row": 1, "no_photo": False}]
+    assert draft_context.held_hats(packet(())) == [] and draft_context.held_hats(None) == []
+    assert draft_context.held_hats({"meta": {"photo_held": [CODE_B]}}) == [
+        {"code": CODE_B, "why": "没对上图", "sheet": "", "row": 0, "no_photo": False}]
+
+
 def test_photo_confirm_takes_only_a_code_the_drafts_last_preview_held(bot):
     """「对过图了，用 <编码>」 (the deal action ``photo_confirm`` {packet, code}): only a code the draft's last preview held
     for photos, on a sample order of that deal still waiting and not being previewed again; the switch on, the bot
-    running.  It is kept for the deal (code, draft, time), one event without names; a second click records nothing."""
-    packet = held_draft(bot)
+    running.  It is kept for the deal (code, draft, time), one event without names; a second click records nothing.
+    While another hat of the draft is still held nothing is previewed again (``left`` names it)."""
+    packet = held_draft(bot, held=(CODE_B, CODE_C))
     deal = deal_of(bot)
 
     def confirm(code, packet_id=packet["id"], deal_id=deal["id"]):
@@ -488,8 +537,10 @@ def test_photo_confirm_takes_only_a_code_the_drafts_last_preview_held(bot):
     assert confirm(CODE_B, packet_id=packet["id"] + 99) == {"ok": False, "error": "没有找到这份草稿"}
     assert confirm(CODE_B, deal_id=deal_of(bot, OTHER)["id"]) == {"ok": False, "error": "没有找到这份草稿"}
     assert confirm(CODE_B, deal_id="x") == {"ok": False, "error": "没有找到这张合作单"}
-    assert confirm(CODE_B.lower()) == {"ok": True, "code": CODE_B, "confirmed": True}
-    assert confirm(CODE_B) == {"ok": True, "code": CODE_B, "confirmed": True}       # (again: nothing new)
+    done = {"ok": True, "code": CODE_B, "confirmed": True, "repreview": False, "left": [CODE_C]}
+    assert confirm(CODE_B.lower()) == done
+    assert confirm(CODE_B) == done                                                  # (again: nothing new)
+    assert not bot.prm.store.packet(packet["id"])["platform"].get("previewing")     # (a hat still held: no new preview)
     [row] = bot.prm.store.photo_confirmations(deal["id"])
     assert row["code"] == CODE_B and row["packet_id"] == packet["id"] and row["at"] > 0
     assert bot.prm.store.photo_confirmations(deal_of(bot, OTHER)["id"]) == []
@@ -517,23 +568,30 @@ def test_photo_confirm_takes_only_a_code_the_drafts_last_preview_held(bot):
 
 
 def test_the_next_preview_takes_a_confirmation_and_its_undo_holds_the_draft_again(bot):
-    """After 「对过图了」 the card says 「已确认 <编码>，点「重新预览」按确认再核」; the new preview's job carries the code
-    (``meta.draft_context.confirmed``) and the Mac's answer (ready, the code let go by it) makes the draft approvable.
+    """After 「对过图了」 for the last held hat the bot asks for the new preview itself (2026-11-10: as 「重新预览」 does;
+    the card shows it under way, the button says so); its job carries the code (``meta.draft_context.confirmed``) and
+    the Mac's answer (ready, the code let go by it) makes the draft approvable.
     「撤销」 (``photo_unconfirm``): the code is not confirmed any more, the draft cannot be approved (the console and
-    approving say so) until a new preview; the code may be confirmed again.  Each step one event, without names."""
+    approving say so) until a new preview, which nothing starts by itself; the code may be confirmed again (its preview
+    let it go already: nothing previewed again).  Each step one event, without names."""
     packet = held_draft(bot)
     deal = deal_of(bot)
     assert shown_of(bot, packet["id"])["photo_held"] == [
         {"code": CODE_B, "held": True, "used": False, "confirmed": False, "at": None}]
-    assert bot.prm.deal_action("photo_confirm", {"deal_id": deal["id"], "packet": packet["id"], "code": CODE_B})["ok"]
-    [view] = shown_of(bot, packet["id"])["photo_held"]
-    assert view["held"] and view["confirmed"] and view["at"]
+    done = bot.prm.deal_action("photo_confirm", {"deal_id": deal["id"], "packet": packet["id"], "code": CODE_B})
+    assert done == {"ok": True, "code": CODE_B, "confirmed": True, "repreview": True, "left": []}
+    shown = shown_of(bot, packet["id"])
+    [view] = shown["photo_held"]
+    assert view["held"] and view["confirmed"] and view["at"] and shown["platform"]["previewing"] is True
     assert bot.prm.decide(packet["id"], "execute")["ok"] is False             # (its preview still holds it)
-    out = bot.prm.decide(packet["id"], "repreview")
-    assert out["ok"], out
-    meta = json.loads(bot.relay.store.get(out["job"])["meta"])
-    assert meta["draft_context"]["confirmed"] == [CODE_B]
+    assert bot.prm.decide(packet["id"], "repreview") == {"ok": False, "error": "这条草稿已经处理过了，或者已经在重新预览"}
     job = bot.relay.next_job(0, ("prm",))
+    meta = job["meta"] if isinstance(job["meta"], dict) else json.loads(job["meta"])
+    assert meta["op"] == "platform_preview" and meta["draft_context"]["confirmed"] == [CODE_B]
+    [asked] = bot.prm.store.events(deal["id"], kinds=("platform_preview",))
+    from src.prm.service import event_out
+    assert asked["actor"] == "system" and asked["detail"] == {"packet": packet["id"], "job": job["id"], "auto": True}
+    assert event_out(asked)["name"] == "扣着的帽子都对过图了：自动重新预览"
     bot.finish(job["id"], text=json.dumps({**sample_block(previewed_at=2.0), "draft_context": GATED,
                                            "photo_confirmed": [CODE_B]}, ensure_ascii=False))
     now = bot.prm.store.packet(packet["id"])
@@ -544,6 +602,7 @@ def test_the_next_preview_takes_a_confirmation_and_its_undo_holds_the_draft_agai
     assert bot.prm.deal_action("photo_unconfirm", {"deal_id": deal["id"], "code": CODE_B.lower()}) == {
         "ok": True, "code": CODE_B, "confirmed": False}
     assert bot.prm.store.photo_confirmations(deal["id"]) == []
+    assert bot.relay.next_job(0, ("prm",)) is None                           # (an undo previews nothing by itself)
     shown = shown_of(bot, packet["id"])
     reason = f"撤销了 {CODE_B} 的「对过图了」：点「重新预览」再核"
     assert shown["platform"]["can_execute"] is False and reason in shown["platform"]["problems"]
@@ -558,7 +617,8 @@ def test_the_next_preview_takes_a_confirmation_and_its_undo_holds_the_draft_agai
     assert bot.prm.deal_action("photo_unconfirm", {"deal_id": deal["id"], "code": "x"}) == {"ok": False,
                                                                                          "error": "编码不对"}
     # confirmed again (its preview let it go only by one): approvable again, the same preview
-    assert bot.prm.deal_action("photo_confirm", {"deal_id": deal["id"], "packet": packet["id"], "code": CODE_B})["ok"]
+    again = bot.prm.deal_action("photo_confirm", {"deal_id": deal["id"], "packet": packet["id"], "code": CODE_B})
+    assert again["ok"] and again["repreview"] is False and bot.relay.next_job(0, ("prm",)) is None
     assert shown_of(bot, packet["id"])["platform"]["can_execute"] is True
     # a confirmation for her deal goes with every later draft job of hers, and never with another creator's
     assert her_job(bot, "那这顶呢")["meta"]["draft_context"]["confirmed"] == [CODE_B]

@@ -188,10 +188,13 @@ function GroupTag({ p }) {
 
 /** 「已发到微信」's tooltip (微信里审批草稿): what can be done for the draft from the admin's WeChat, the same decision as
  * here. Its pictures did not reach the chat (``wechat_console``): only 不发 there. A platform draft runs from WeChat only
- * when the bot says so (``wechat_execute``: the preview it was told with, still approvable). */
+ * when the bot says so (``wechat_execute``: the preview it was told with, still approvable). A sample order whose held
+ * hats its notice numbered (``wechat_photo``, 2026-11-10): an answer quoting it confirms them, 「对过图 1」. */
 function wechatTitle(p) {
   const at = `${fmtClock(p.wechat_at)} 发到管理员微信里了`
   if (p.wechat_console) return `${at}，但要看的图没发过去：这一份在微信里只能回 2 不发，要在这里看过再批`
+  if (p.platform?.previewing) return `${at}：正在重新预览，新的预览出来以后会再发一条通知`
+  if (p.wechat_photo) return `${at}：扣着的帽子在微信里引用那条通知回「对过图 1」这样也能确认（和这里点是同一个确认）；都确认完机器人自己重新预览、再发一条通知`
   if (p.platform && !p.wechat_execute) return `${at}：这一份微信里不能执行（在微信里只能回 2 不发），要在这里「批准并执行」`
   return `${at}：在微信里${p.platform ? '引用通知回「执行」/ 2' : '回 1 / 2 / 改'} 也行，和这里点是同一个决定`
 }
@@ -415,20 +418,33 @@ function HandcardsNote({ p }) {
 }
 
 /** 「对过图了」 (PRM_DRAFT_CONTEXT, 2026-11-09): the hats the Mac held for photos on a waiting sample order. An operator who
- * compared the pictures (the sheet above) confirms one for her deal; the next 「重新预览」 takes it; 「撤销」 takes it back
- * (a draft whose preview went by it then waits for a new preview). Words in the 起草备注 confirm nothing. */
+ * compared the pictures (the sheet above) confirms one for her deal; the next 「重新预览」 takes it, and the bot asks for
+ * that one itself once the last held hat is confirmed (2026-11-10: the answer's ``repreview``; the card then shows it
+ * under way); 「撤销」 takes it back (a draft whose preview went by it then waits for a new preview, which nothing starts
+ * by itself). Words in the 起草备注 confirm nothing. */
 function PhotoHeld({ p, onDone }) {
   const toast = useToast()
   const [busy, setBusy] = useState('')
   const rows = p.photo_held || []
   if (!rows.length || p.status !== 'pending') return null
   const previewing = Boolean(p.platform?.previewing)
+  const left = rows.filter((h) => h.held && !h.confirmed).length   // held hats nobody confirmed yet
+  // a held hat that is confirmed: previewed again by the bot itself once none is left (shown while it runs)
+  const confirmedLine = (h) => (previewing ? `已确认 ${h.code}，正在重新预览（按确认再核）`
+    : left > 0 ? `已确认 ${h.code}，还有 ${left} 顶扣着：都确认完自动重新预览`
+      : `已确认 ${h.code}，点「重新预览」按确认再核`)
   const act = async (h, undo) => {
     setBusy(h.code)
     try {
-      if (undo) await photoUnconfirm(p.deal_id, h.code)
-      else await photoConfirm(p.deal_id, p.id, h.code)
-      toast.ok(undo ? `已撤销 ${h.code} 的「对过图了」` : `已确认 ${h.code}，点「重新预览」按确认再核`)
+      if (undo) {
+        await photoUnconfirm(p.deal_id, h.code)
+        toast.ok(`已撤销 ${h.code} 的「对过图了」`)
+      } else {
+        const done = await photoConfirm(p.deal_id, p.id, h.code)
+        toast.ok(done?.repreview ? `已确认 ${h.code}，正在重新预览`
+          : done?.left?.length ? `已确认 ${h.code}，还有 ${done.left.length} 顶扣着`
+            : `已确认 ${h.code}，点「重新预览」按确认再核`)
+      }
       onDone()
     } catch (e) { toast.err(e.message) } finally { setBusy('') }
   }
@@ -440,7 +456,7 @@ function PhotoHeld({ p, onDone }) {
           {h.confirmed ? (
             <>
               <span className="tag ok mono">{h.code}</span>
-              <span className="f-hint">{h.held ? `已确认 ${h.code}，点「重新预览」按确认再核` : `已确认 ${h.code}：这份预览按确认核过`}{h.at ? `（${fmtClock(h.at)}）` : ''}</span>
+              <span className="f-hint">{h.held ? confirmedLine(h) : `已确认 ${h.code}：这份预览按确认核过`}{h.at ? `（${fmtClock(h.at)}）` : ''}</span>
               <button type="button" className="btn ghost" disabled={Boolean(busy) || previewing} onClick={() => act(h, true)}>撤销</button>
             </>
           ) : (

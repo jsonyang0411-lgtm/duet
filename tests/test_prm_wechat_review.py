@@ -1623,25 +1623,44 @@ def test_the_reply_of_a_platform_draft_is_edited_in_the_console_only(desk):
     assert desk.prm.store.packet(number)["status"] == "dropped"
 
 
+PREVIEWING_STOP = "正在重新预览，微信里先不能执行：好了再发一条通知，看那一条再回；不要的话回 2"
+STALE = "这份草稿在通知以后有变化，看最新那条通知再回"
+
+
 def test_执行_runs_only_the_preview_its_notification_showed(desk):
+    """「执行」 runs the preview the quoted notice showed, never another.  While a 重新预览 runs it says so; once the new
+    preview is in, the notice told before is out of date (2026-11-10: it used to send the admin to the console) and
+    the draft is told again on the same number with the new preview (「第 2 次通知」): 「执行」 quoting that one runs it."""
     packet = platform_waiting(desk)
     number = packet["id"]
+    first = head(desk, number)
     assert desk.prm.decide(number, "repreview")["ok"]                   # the console: 重新预览
-    assert desk.admin("执行", quote=head(desk, number)) == (
-        f"#{number} 正在重新预览，微信里不能执行：请到控制台看了结果再「批准并执行」；不要的话回 2")
+    assert desk.admin("执行", quote=first) == f"#{number} {PREVIEWING_STOP}"
+    assert desk.review.sweep() == 0                                     # (nothing told while it runs)
     job = desk.relay.next_job(0, ("prm",))                              # the Mac previews again
     assert desk.relay.finish(job["id"], {"ok": True, "text": json.dumps(jst_block(previewed_at=3.0)), "duration_s": 3})
     desk.relay.tick()
     assert desk.prm.store.packet(number)["platform"]["preview"]["previewed_at"] == 3.0
-    assert desk.admin(f"执行 {number}") == (
-        f"#{number} 通知发出以后重新预览过：请到控制台看了新的预览再「批准并执行」；不要的话回 2")
+    for answer, quote in ((f"执行 {number}", None), ("执行", first)):
+        assert desk.admin(answer, quote=quote) == f"#{number} {STALE}（新的通知马上发过来）"
     assert desk.prm.store.packet(number)["status"] == "pending" and desk.executions() == []
-    assert desk.prm.decide(number, "execute")["ok"]                     # the console runs it, as ever
+    desk.clock.now += 5
+    assert desk.review.sweep() == 1
+    lines = latest_notice(desk, number)
+    assert lines[0] == f"#{number} 草稿（第 2 次通知） · 小美 · 私聊"
+    assert lines[1] == f"上一条 #{number} 的通知以后有变化：重新预览过了（下面是新的预览）。上一条作废了，请看这一条再回"
+    assert lines[-2].startswith("引用这条回「执行」")
+    assert desk.review.sweep() == 0                                     # (told once)
+    assert desk.admin("执行", quote=first) == f"#{number} {STALE}"       # (the notice of the old preview: never)
+    assert desk.executions() == []
+    assert desk.admin("执行", quote=lines[0]).startswith(f"#{number} 已批准执行")
+    assert len(desk.executions()) == 1
 
 
-def test_执行_after_an_identical_re_preview_runs_and_the_console_after_any_finished_one(desk):
-    """Probe i7g: a 重新预览 that finished leaves 「previewing: null」 in the platform data: WeChat's 执行 runs while the
-    preview is the very one the notification showed."""
+def test_执行_after_an_identical_re_preview_runs_from_its_fresh_notice(desk):
+    """Probe i7g: a 重新预览 that finished leaves 「previewing: null」 in the platform data, and 执行 still runs.  Since
+    2026-11-10 every new preview that ended is told again, the same preview too (the admin was told 「好了再发一条
+    通知」): the fresh notice is the one 「执行」 quotes."""
     packet = platform_waiting(desk)
     number = packet["id"]
     assert desk.prm.decide(number, "repreview")["ok"]
@@ -1650,8 +1669,12 @@ def test_执行_after_an_identical_re_preview_runs_and_the_console_after_any_fin
     desk.relay.finish(job["id"], {"ok": True, "text": json.dumps(jst_block(), ensure_ascii=False), "duration_s": 3})
     desk.relay.tick()
     data = desk.prm.store.packet(number)["platform"]
-    assert "previewing" in data and data["previewing"] is None
-    assert desk.admin("执行", quote=head(desk, number)).startswith(f"#{number} 已批准执行")
+    assert "previewing" in data and data["previewing"] is None and data["previews"] == 1
+    assert desk.review.sweep() == 1
+    fresh = latest_notice(desk, number)
+    assert fresh[0] == f"#{number} 草稿（第 2 次通知） · 小美 · 私聊"
+    assert desk.prm.store.wechat_review(number)["preview"] == wr.preview_stamp(data["preview"])
+    assert desk.admin("执行", quote=fresh[0]).startswith(f"#{number} 已批准执行")
     assert desk.prm.store.packet(number)["status"] == "executing" and len(desk.executions()) == 1
 
 
@@ -1668,15 +1691,15 @@ def test_the_console_approves_after_a_re_preview_that_finished(desk):
 
 def test_执行_while_a_re_preview_runs_says_so(desk):
     """A 重新预览 started after the notification, the preview itself still the one told: 「正在重新预览」, not 「预览变过」
-    (third verification, the console's words too)."""
+    (third verification, the console's words too); its result is told in a fresh notice (2026-11-10)."""
     from src.prm.service import PREVIEWING
 
     packet = platform_waiting(desk)
     number = packet["id"]
     data = desk.prm.store.packet(number)["platform"]
     desk.prm.store.set_platform(number, {**data, "previewing": desk.clock.now}, ("pending",))
-    assert desk.admin(f"执行 {number}") == (
-        f"#{number} 正在重新预览，微信里不能执行：请到控制台看了结果再「批准并执行」；不要的话回 2")
+    assert desk.admin(f"执行 {number}") == f"#{number} {PREVIEWING_STOP}"
+    assert desk.admin(f"执行 {number} 了吗") == f"#{number}（小美）还没执行：正在重新预览，好了再发一条通知"
     assert desk.prm.decide(number, "execute") == {"ok": False, "error": PREVIEWING, "code": "previewing"}
     assert desk.prm.store.packet(number)["status"] == "pending" and desk.executions() == []
 
@@ -2127,9 +2150,13 @@ def test_a_preview_changed_between_the_check_and_the_move_never_runs_unseen(desk
         return real(n, action, text, **kw)
 
     desk.review._decide = racing
-    assert desk.admin("执行", quote=head(desk, number)) == (
-        f"#{number} 通知发出以后重新预览过：请到控制台看了新的预览再「批准并执行」；不要的话回 2")
+    assert desk.admin("执行", quote=head(desk, number)) == f"#{number} {STALE}（新的通知马上发过来）"
     assert desk.prm.store.packet(number)["status"] == "pending" and desk.executions() == []
+    desk.review._decide = real
+    assert desk.review.sweep() == 1                                     # (the new preview, told again: 2026-11-10)
+    fresh = latest_notice(desk, number)
+    assert fresh[0].startswith(f"#{number} 草稿（第 2 次通知）") and any("OTHER-01 黑色 × 9" in line for line in fresh)
+    assert desk.admin("执行", quote=fresh[0]).startswith(f"#{number} 已批准执行")
 
 
 def test_the_move_to_executing_checks_the_platform_data_it_read(desk):
@@ -2812,10 +2839,12 @@ def checked_waiting(desk, *, held=(CODE,), used=(), verdict="blocked", mark=True
 
 
 def test_a_sample_order_with_hats_held_for_photos_says_so_and_执行_stays_the_consoles(clock, tmp_path):
-    """The notification of a sample order the Mac held hats of (PRM_DRAFT_CONTEXT: no sure picture behind them) says
-    how many and which, and that 「对过图了」 and 「重新预览」 are the console's; 「执行」 quoting it, 「执行 N」 and 「执行 N
-    了吗」 say the same and run nothing; once confirmed in the console it says to preview again.  The switch off (the
-    console has no 「对过图了」 then): the usual line."""
+    """The notification of a sample order the Mac held hats of (PRM_DRAFT_CONTEXT: no sure picture behind them) with no
+    sheet that shows them says how many and which, and that 「对过图了」 and 「重新预览」 are the console's (a hat a sheet
+    it sent shows is numbered and confirmed by an answer quoting it: the tests of 2026-11-10 below); 「执行」 quoting
+    it, 「执行 N」 and 「执行 N 了吗」 say the same and run nothing, and 「对过图 1」 quoting it confirms nothing; confirmed
+    for the deal but not previewed again, it says to preview again; confirmed in the console, the bot previews it
+    again by itself and says so.  The switch off (the console has no 「对过图了」 then): the usual line."""
     desk = photo_desk(clock, tmp_path)
     try:
         packet = checked_waiting(desk)
@@ -2831,14 +2860,22 @@ def test_a_sample_order_with_hats_held_for_photos_says_so_and_执行_stays_the_c
         assert desk.admin(f"执行 {number}") == f"#{number} {stop}"
         assert desk.admin(f"执行 {number} 了吗") == f"#{number}（小美）还没执行（在等你确认）：{stop}"
         assert desk.executions() == [] and desk.prm.store.packet(number)["status"] == "pending"
+        assert desk.prm.store.wechat_review(number)["hats"] == ""                   # (no sheet shows it: not numbered)
+        for answer in ("对过图 1", "对过图", "对过图 全部"):
+            assert desk.admin(answer, quote=quote) == f"#{number} {stop}", answer
         deal_id = packet["deal_id"]
-        assert desk.prm.deal_action("photo_confirm", {"deal_id": deal_id, "packet": number, "code": CODE})["ok"]
+        assert desk.prm.store.photo_confirmations(deal_id) == []
+        assert desk.prm.store.confirm_photo(deal_id, CODE, 0, clock.now)            # (for the deal, by another draft)
         assert desk.admin("执行", quote=quote) == (f"#{number} 扣着的帽子都点过「对过图了」，微信里不能执行：请到控制台点"
                                                    "「重新预览」按确认再核；不要的话回 2")
+        assert desk.prm.store.unconfirm_photo(deal_id, CODE)
+        done = desk.prm.deal_action("photo_confirm", {"deal_id": deal_id, "packet": number, "code": CODE})
+        assert done["ok"] and done["repreview"] is True                             # (the console: previewed again)
+        assert desk.admin("执行", quote=quote) == f"#{number} {PREVIEWING_STOP}"
+        assert desk.admin("对过图 1", quote=quote) == f"#{number} 正在重新预览，好了再发一条通知（现在不用回「对过图」）"
         assert desk.executions() == []
         desk.review._draft_context = False
-        assert desk.review.notification_text(desk.prm.store.packet(number)).split("\n")[-1] == (
-            "预览没通过，微信里不能执行：请到控制台处理（「重新预览」）；不要的话回 2")
+        assert desk.review.notification_text(desk.prm.store.packet(number)).split("\n")[-1] == PREVIEWING_STOP
     finally:
         desk.stop()
 
@@ -3535,11 +3572,12 @@ def test_a_fresh_notice_whose_pictures_went_already_sends_none_again(clock, tmp_
 
 def test_a_fresh_notice_after_a_new_preview_sends_its_new_sheet_and_waits_for_it(clock, tmp_path):
     """Final check 2026-11-10 A1 (probe R10): the first notice of a sample order that held a hat went with its 对图单 v1
-    (no 「执行」); 「对过图了」 and 「重新预览」 in the console made a ready preview with another sheet (v2).  Her recall told
-    it again: the fresh notice offered 「执行」 for the new preview, said its pictures were 「在第一条通知后面」 (v1), and v2
-    never went.  A fresh notice whose pictures are not the ones that went (or whose preview is another) sends the
-    current ones after it, as a first notice does; until they came the draft is the console's in WeChat (an answer
-    meanwhile hears 「图还在发」), and one line says when they came."""
+    (no 「执行」); 「对过图了」 in the console (the bot previews it again by itself now) made a ready preview with another
+    sheet (v2).  Her recall told it again: the fresh notice offered 「执行」 for the new preview, said its pictures were
+    「在第一条通知后面」 (v1), and v2 never went.  A fresh notice whose pictures are not the ones that went (or whose
+    preview is another) sends the current ones after it, as a first notice does; until they came the draft is the
+    console's in WeChat (an answer meanwhile hears 「图还在发」), and one line says when they came.  (Since 2026-11-10 the
+    new preview is told again by itself; her recall meanwhile is told in the same notice.)"""
     desk = photo_desk(clock, tmp_path)
     try:
         desk.prm.store.token_for(1, "phone", "手机", "13900001111", desk.clock.now)
@@ -3558,8 +3596,8 @@ def test_a_fresh_notice_after_a_new_preview_sends_its_new_sheet_and_waits_for_it
         number = packet["id"]
         desk.review.sweep()
         assert [path.rsplit("/", 1)[-1] for chat, path in desk.files if chat == ADMIN] == [first]
-        assert desk.prm.deal_action("photo_confirm", {"deal_id": packet["deal_id"], "packet": number, "code": CODE})["ok"]
-        assert desk.prm.decide(number, "repreview")["ok"]
+        assert desk.prm.deal_action("photo_confirm", {"deal_id": packet["deal_id"], "packet": number,
+                                                      "code": CODE})["repreview"] is True
         again = desk.relay.next_job(0, ("prm",))
         second = f"对图单-{again['id']}.jpg"
         v2 = desk.relay.operator_file(again["id"], second, io.BytesIO(b"\xff\xd8 v2!").read, len(b"\xff\xd8 v2!"))
@@ -3580,6 +3618,8 @@ def test_a_fresh_notice_after_a_new_preview_sends_its_new_sheet_and_waits_for_it
         desk.review.sweep()
         lines = latest_notice(desk, number)
         assert lines[0] == f"#{number} 草稿（第 2 次通知） · 小美 · 私聊"
+        assert lines[1] == (f"上一条 #{number} 的通知以后有变化：她撤回了一条消息（见「要注意」）；重新预览过了（下面是新的预览）。"
+                            "上一条作废了，请看这一条再回")
         assert f"（后面附 1 张图给你看：{second}：并排对比 v2）" in lines and not any("没有变" in line for line in lines)
         assert [path.rsplit("/", 1)[-1] for chat, path in desk.files if chat == ADMIN] == [first, second]
         assert answers == [f"#{number} {wr.PICTURES_COMING}"] and desk.executions() == []
@@ -3618,3 +3658,686 @@ def test_an_unquoted_answer_while_the_fresh_notice_is_being_sent_does_nothing(de
     desk.prm.send_approved()
     assert desk.to(CREATOR) == [] and desk.prm.store.packet(number)["status"] == "pending"
     assert desk.admin(f"发 {number}") == f"#{number} 已批准，正在发给 小美"
+
+
+# ── 2026-11-10: 「对过图 1」 quoting the notice confirms a held hat; the last one confirmed, the bot previews the order
+# again by itself and tells the new preview in a fresh notice, whose own 「执行」 makes the order ───────────────────────
+
+CODE_2, CODE_3 = "A7269901002A-F", "A7269901003A-F"          # more made-up 聚水潭 item codes
+HOW = draft_context.CONFIRM_HOW
+UNDO = "要撤销请到控制台"
+COMING = "正在重新预览，好了再发一条通知"
+PHOTO_HOW = "对上了就引用这条通知回「对过图 1」这样（几顶就写「对过图 1 2」），后面别带「…」「.」「？」"
+CONSOLE = "请到控制台在这顶旁边点「对过图了」"
+
+
+def held_row(code, row, why="同款别的颜色（她的图最像的是驼色）", right="这个编码自己的图"):
+    """A row of the held hats' sheet as the Mac's preview says it (tools/claude_relay/draft_context.py ``_held_sheet``)."""
+    return {"label": "对图（扣着的那几顶）",
+            "value": f"{code}：扣着（{why}）；扣着的那张对图单第 {row} 行，左边是她这次发的 图片-1.jpg，右边是{right}"}
+
+
+def hold(code, name="均码咖啡", no_photo=False):
+    """A held hat's problem as the Mac writes it (``_gate``)."""
+    return (f"{code}（{name}）对图没把握（只在没把握的图里，或者不是图里最像的那一款、那个颜色）：先核对再建；"
+            + ("没有这个编码的图，请自己找图核对；" if no_photo else "") + HOW)
+
+
+def pair_row(code, note=""):
+    """A row of the side-by-side sheet (a hat with a sure picture of hers)."""
+    return {"label": "对图", "value": f"{code} 驼色：对的是这次发的 图片-1.jpg（图库里第 1 款、第 1 个颜色）"
+                                      + (f"；{note}" if note else "")}
+
+
+def sheets_of(desk, job_id, kinds) -> list:
+    """The Mac sends its sheets back on the operator-only channel: the draft's ``operator_files``."""
+    names = {"pair": f"对图单-{job_id}.jpg", "held": f"对图单-{job_id}-扣着的.jpg"}
+    files = []
+    for kind in kinds:
+        body = f"\xff\xd8 {kind} sheet of job {job_id}".encode()
+        sent = desk.relay.operator_file(job_id, names[kind], io.BytesIO(body).read, len(body))
+        files.append({"name": names[kind], "why": "并排对比" if kind == "pair" else "扣着的那几顶", "sha256": sent["sha256"]})
+    return files
+
+
+def photo_order(desk, *, held, facts, problems, sheets=("held",), told=True) -> dict:
+    """She agrees; the Mac drafts a sample order, checks it by photo (``held`` for photos, its preview's ``facts`` and
+    ``problems`` as the Mac writes them) and sends its ``sheets`` back; the draft waits and is told with them."""
+    desk.prm.store.token_for(1, "phone", "手机", "13900001111", desk.clock.now)
+    desk.her("好的，寄吧")
+    desk.clock.now += SETTLE_SEC + 1
+    job = desk.relay.next_job(0, ("prm",))
+    preview = {**jst_block(), "verdict": "blocked", "facts": list(facts), "problems": list(problems), "run": {}}
+    body = reply_draft(text="寄样单建好啦，单号 {寄样单号}～", message_kind="money", platform=preview, draft_context=GATED,
+                       photo_held=list(held), operator_files=sheets_of(desk, job["id"], sheets))
+    desk.relay.finish(job["id"], {"ok": True, "text": json.dumps(body, ensure_ascii=False), "duration_s": 3})
+    desk.relay.tick()
+    packet = desk.prm.store.packet_for_job(job["id"])
+    assert packet["status"] == "pending" and packet["tool"] == "jst.sample_order"
+    if told:
+        desk.review.sweep()
+    return desk.prm.store.packet(packet["id"])
+
+
+def two_held(desk, **kw) -> dict:
+    """A sample order with two hats held, both on the held hats' sheet (rows 1 and 2), and a sure one on the
+    side-by-side sheet: both sheets follow its notification."""
+    return photo_order(desk, held=(CODE, CODE_2), sheets=("pair", "held"),
+                       facts=[pair_row(CODE_3), held_row(CODE, 1), held_row(CODE_2, 2, why="颜色没把握")],
+                       problems=[hold(CODE), hold(CODE_2, "均码粉色")], **kw)
+
+
+def one_held(desk, **kw) -> dict:
+    return photo_order(desk, held=(CODE,), facts=[held_row(CODE, 1)], problems=[hold(CODE)], **kw)
+
+
+def previewed_again(desk, number, *, held=(), used=(), facts=(), problems=(), sheets=("pair",), verdict="ready"):
+    """The Mac takes the new preview's job and answers: the new preview, its marks and its sheets."""
+    job = desk.relay.next_job(0, ("prm",))
+    assert job is not None and job["meta"]["op"] == "platform_preview" and job["meta"]["packet_id"] == number
+    body = {**jst_block(), "verdict": verdict, "facts": list(facts), "problems": list(problems),
+            "run": {"steps": ["create"]} if verdict == "ready" else {}, "draft_context": GATED,
+            **({"photo_held": list(held)} if held else {}), **({"photo_confirmed": list(used)} if used else {}),
+            "operator_files": sheets_of(desk, job["id"], sheets)}
+    assert desk.relay.finish(job["id"], {"ok": True, "text": json.dumps(body, ensure_ascii=False), "duration_s": 3})
+    desk.relay.tick()
+    return job
+
+
+def confirmed_codes(desk, deal_id=1) -> list:
+    return [r["code"] for r in desk.prm.store.photo_confirmations(deal_id)]
+
+
+def previewing(desk, number) -> bool:
+    return bool(desk.prm.store.packet(number)["platform"].get("previewing"))
+
+
+@pytest.fixture
+def pdesk(clock, tmp_path):
+    d = photo_desk(clock, tmp_path)
+    yield d
+    d.stop()
+
+
+def test_the_notice_numbers_the_held_hats_as_the_held_sheet_has_them_and_says_how_to_confirm(pdesk):
+    """The notice of a sample order with held hats a sheet shows: 「第 1 顶 <编码>（为什么扣着；哪张对图单第几行）」 in the
+    held sheet's row order (whatever order the preview held them in), then how to confirm, quoting it; its sheets go
+    right after it; the row keeps the hats as numbered; no stamp (never run from it)."""
+    packet = photo_order(pdesk, held=(CODE_2, CODE), sheets=("pair", "held"),
+                         facts=[pair_row(CODE_3), held_row(CODE, 1), held_row(CODE_2, 2, why="颜色没把握")],
+                         problems=[hold(CODE_2, "均码粉色"), hold(CODE)])
+    number = packet["id"]
+    lines = notice_of(pdesk, number)
+    assert lines[-4:] == [
+        "有 2 顶帽子扣着（没对上图），对上了才能建这张寄样单：",
+        f"第 1 顶 {CODE}（同款别的颜色（她的图最像的是驼色）；「扣着的」那张对图单第 1 行）",
+        f"第 2 顶 {CODE_2}（颜色没把握；「扣着的」那张对图单第 2 行）",
+        "看过下面的对图单，对上了就引用这条回「对过图 1」（几顶就写「对过图 1 2」，都对上了写「对过图 全部」）；"
+        "都确认完机器人自己重新预览、再发一条通知；不要的话回 2"]
+    assert not any("回「执行」" in line for line in lines)
+    # (each hold is listed once, without the Mac's 「…在控制台…点「对过图了」」: the last lines say how, from here)
+    assert f"· 问题：{hold(CODE).removesuffix('；' + HOW)}" in lines and not any("在控制台这份草稿上" in line for line in lines)
+    row = pdesk.prm.store.wechat_review(number)
+    assert json.loads(row["hats"]) == [{"code": CODE, "ok": True}, {"code": CODE_2, "ok": True}]
+    assert row["preview"] == "" and row["pictures_ok"] == 1 and row["shown"]
+    job = packet["job_id"]
+    assert [path.rsplit("/", 1)[-1] for kind, chat, path in pdesk.order if kind == "file"] == [
+        f"对图单-{job}.jpg", f"对图单-{job}-扣着的.jpg"]
+    assert pdesk.order[-3][0] == "text" and pdesk.order[-3][2].startswith(f"#{number} 草稿")   # (the sheets after it)
+    assert draft_context.held_hats(packet) == [
+        {"code": CODE, "why": "同款别的颜色（她的图最像的是驼色）", "sheet": "held", "row": 1, "no_photo": False},
+        {"code": CODE_2, "why": "颜色没把握", "sheet": "held", "row": 2, "no_photo": False}]
+
+
+def test_对过图_quoting_the_notice_confirms_that_hat_only_and_never_runs_anything(pdesk):
+    """「对过图 1」 quoting the notice: the console's 「对过图了」 for the first hat (the event says it came from WeChat);
+    the other stays held, nothing is previewed again, nothing runs; undo stays the console's, and the answer says so."""
+    packet = two_held(pdesk)
+    number, quote = packet["id"], head(pdesk, packet["id"])
+    assert pdesk.admin("对过图 1", quote=quote) == (
+        f"#{number} 已确认第 1 顶 {CODE}（{UNDO}）；还扣着第 2 顶 {CODE_2}：对上了再引用这条通知回「对过图 2」")
+    assert confirmed_codes(pdesk) == [CODE] and not previewing(pdesk, number)
+    [event] = pdesk.prm.store.events(packet["deal_id"], kinds=("photo_confirm",))
+    assert event["actor"] == "wechat" and event["detail"] == {"code": CODE, "packet": number}
+    from src.prm.service import event_out
+    assert event_out(event)["name"] == f"对过图了，用 {CODE}（#{number} 的寄样单）（在微信里回的）"
+    assert pdesk.executions() == [] and pdesk.prm.store.packet(number)["status"] == "pending"
+    assert pdesk.jobs("prm") == [j for j in pdesk.jobs("prm") if j["status"] == "done"]      # (no new preview asked)
+    # 「执行」 is still its own explicit answer, and the held hat still holds it
+    assert pdesk.admin("执行", quote=quote) == (
+        f"#{number} 有 1 顶帽子扣着（没对上图：{CODE_2}），还不能执行：看过对图单，对上了就引用那条通知回「对过图 2」这样确认"
+        "（或者到控制台点「对过图了」）；不要的话回 2")
+    assert pdesk.admin(f"执行 {number} 了吗").startswith(f"#{number}（小美）还没执行（在等你确认）：有 1 顶帽子扣着")
+    assert pdesk.executions() == []
+    # the console's 「撤销」 takes it back; the same answer confirms it again
+    assert pdesk.prm.deal_action("photo_unconfirm", {"deal_id": packet["deal_id"], "code": CODE})["ok"]
+    assert confirmed_codes(pdesk) == [] and not previewing(pdesk, number)
+    assert pdesk.admin("对过图了 1。", quote=quote).startswith(f"#{number} 已确认第 1 顶 {CODE}")
+
+
+@pytest.mark.parametrize("answer", ["对过图 1 2", "对过图了 1 2", "对过图 全部", "对过图了 全部", "对过图1、2", "对过图 2 1",
+                                    "对过图 第 1 顶 第 2 顶", "对过图 １ ２", "对过图 1 2。", "对过图 全部！", "对过图 1 2～",
+                                    "对过图了，1 和 2"])
+def test_the_last_held_hat_confirmed_in_wechat_starts_the_new_preview_and_执行_needs_the_fresh_notice(pdesk, answer):
+    """Every well-formed form of the answer.  Both hats confirmed: the bot asks for the new preview itself and says a
+    notice follows; the Mac's new preview (ready, the hats let go by the confirmations, a new sheet) is told on the
+    same number (「第 2 次通知」) with its sheet; until that sheet came 「执行」 does nothing; the confirmation itself ran
+    nothing, 「执行」 quoting the first notice never does, and 「执行」 quoting the fresh one makes the order."""
+    packet = two_held(pdesk)
+    number, quote = packet["id"], head(pdesk, packet["id"])
+    reply = pdesk.admin(answer, quote=quote)
+    order = (2, 1) if answer == "对过图 2 1" else (1, 2)
+    named = "、".join(f"第 {i} 顶 {(CODE, CODE_2)[i - 1]}" for i in order)
+    assert reply == f"#{number} 已确认{named}（{UNDO}）；{COMING}"
+    assert sorted(confirmed_codes(pdesk)) == sorted([CODE, CODE_2]) and previewing(pdesk, number)
+    assert pdesk.executions() == []
+    assert pdesk.admin("执行", quote=quote) == f"#{number} {PREVIEWING_STOP}"
+    assert pdesk.admin("对过图 1", quote=quote) == f"#{number} {COMING}（现在不用回「对过图」）"
+    job = previewed_again(pdesk, number, used=(CODE, CODE_2), facts=[pair_row(CODE_3)])
+    assert job["meta"]["draft_context"]["confirmed"] == confirmed_codes(pdesk)
+    assert pdesk.admin("执行", quote=quote) == f"#{number} {STALE}（新的通知马上发过来）"
+    answers, real = [], pdesk.review._send_file
+
+    def meanwhile(chat, path):
+        answers.append(pdesk.admin("执行", quote=latest_notice(pdesk, number)[0]))
+        return real(chat, path)
+
+    pdesk.review._send_file = meanwhile
+    assert pdesk.review.sweep() == 1
+    pdesk.review._send_file = real
+    lines = latest_notice(pdesk, number)
+    sheet = f"对图单-{job['id']}.jpg"
+    assert lines[0] == f"#{number} 草稿（第 2 次通知） · 小美 · 私聊"
+    assert lines[1] == f"上一条 #{number} 的通知以后有变化：重新预览过了（下面是新的预览）。上一条作废了，请看这一条再回"
+    assert f"（后面附 1 张图给你看：{sheet}：并排对比）" in lines
+    assert lines[-2].startswith("引用这条回「执行」") and not any("对过图" in line for line in lines[2:])
+    assert pdesk.files[-1][1].endswith(sheet) and answers == [f"#{number} {wr.PICTURES_COMING}"]
+    row = pdesk.prm.store.wechat_review(number)
+    assert (row["notice"], row["pictures_ok"], row["hats"]) == (2, 1, "") and row["preview"]
+    assert pdesk.executions() == []                                      # (nothing ran by itself, at any point)
+    assert pdesk.admin("执行", quote=quote) == f"#{number} {STALE}"
+    assert pdesk.admin("1", quote=lines[0]).startswith(f"#{number} 带平台动作")
+    assert pdesk.executions() == []
+    assert pdesk.admin("执行", quote=lines[0]).startswith(f"#{number} 已批准执行")
+    assert len(pdesk.executions()) == 1 and pdesk.prm.store.packet(number)["status"] == "executing"
+
+
+def test_with_one_held_hat_a_plain_对过图_counts_and_with_more_it_asks_which(pdesk):
+    """「对过图」 / 「对过图了」 alone: the one hat the notice numbers; with two hats it confirms nothing and lists them."""
+    packet = two_held(pdesk)
+    number, quote = packet["id"], head(pdesk, packet["id"])
+    listed = f"扣着的是：第 1 顶 {CODE}；第 2 顶 {CODE_2}"
+    for answer in ("对过图", "对过图了", "对过图了。"):
+        assert pdesk.admin(answer, quote=quote) == (
+            f"#{number} 扣着 2 顶，要写第几顶（「对过图 1 2」这样，或者「对过图 全部」）：什么都没确认。{listed}"), answer
+    assert confirmed_codes(pdesk) == []
+    assert pdesk.admin("2", quote=quote) == f"#{number} 不发了（她再发消息时会有新的草稿）"
+    pdesk.clock.now += 60
+    single = one_held(pdesk)
+    n = single["id"]
+    lines = notice_of(pdesk, n)
+    assert lines[-3:] == [
+        "有 1 顶帽子扣着（没对上图），对上了才能建这张寄样单：",
+        f"第 1 顶 {CODE}（同款别的颜色（她的图最像的是驼色）；「扣着的」那张对图单第 1 行）",
+        "看过下面的对图单，对上了就引用这条回「对过图 1」（只回「对过图」也行）；都确认完机器人自己重新预览、再发一条通知；"
+        "不要的话回 2"]
+    # (one hat: what is no command still confirms nothing, a question least of all)
+    for answer in ("对过图…", "对过图.", "对过图。。", "对过图了...", "对过图？", "对过图了吗", "对过图了没", "对过图呢", "对过图了吧？",
+                   "对过图 1…", "对过图了，应该对", "对过图 2", "对过图 0"):
+        reply = pdesk.admin(answer, quote=lines[0])
+        assert not reply.startswith(f"#{n} 已确认"), answer
+        assert confirmed_codes(pdesk) == [] and not previewing(pdesk, n), answer
+    assert shown(pdesk, n)["wechat_photo"] is True and shown(pdesk, n)["wechat_execute"] is False
+    assert pdesk.admin("对过图了", quote=lines[0]) == f"#{n} 已确认第 1 顶 {CODE}（{UNDO}）；{COMING}"
+    assert confirmed_codes(pdesk) == [CODE] and previewing(pdesk, n) and pdesk.executions() == []
+    assert "wechat_photo" not in shown(pdesk, n)                         # (confirmed: nothing left to confirm there)
+
+
+@pytest.mark.parametrize("answer", ["对过图了吗", "对过图了没", "对过图？", "对过图 1 吗", "对过图 1？", "对过图了么", "对过图了呢",
+                                    "对过图 全部了吗", "对过图了没有"])
+def test_a_question_about_the_photos_says_how_the_hats_stand_and_confirms_nothing(pdesk, answer):
+    packet = two_held(pdesk)
+    number, quote = packet["id"], head(pdesk, packet["id"])
+    assert pdesk.admin(answer, quote=quote) == (
+        f"#{number} 扣着 2 顶：第 1 顶 {CODE} 还没确认；第 2 顶 {CODE_2} 还没确认。对上了就引用这条通知回「对过图 1」")
+    assert confirmed_codes(pdesk) == [] and not previewing(pdesk, number)
+    assert pdesk.admin("对过图 1", quote=quote).startswith(f"#{number} 已确认第 1 顶")
+    assert pdesk.admin(answer, quote=quote) == (
+        f"#{number} 扣着 2 顶：第 1 顶 {CODE} 已确认；第 2 顶 {CODE_2} 还没确认。对上了就引用这条通知回「对过图 2」")
+    assert confirmed_codes(pdesk) == [CODE]
+
+
+@pytest.mark.parametrize("answer", ["对过图 1…", "对过图 1.", "对过图…", "对过图 1。。", "对过图 1...", "对过图 全部…", "对过图。。",
+                                    "对过图了，第一顶颜色对", "对过图 1 应该吧", "对过图了，1 没问题 2 再看看", "对过图 A7269901001B-F"])
+def test_a_hesitating_or_wordy_answer_confirms_nothing(pdesk, answer):
+    """The ending rule of every command (``_command_word``): 「…」「.」「。。」 after it and it does nothing; so do other
+    words around the numbers (never read as a confirmation)."""
+    packet = two_held(pdesk)
+    number, quote = packet["id"], head(pdesk, packet["id"])
+    assert pdesk.admin(answer, quote=quote) == f"#{number} 没看懂，什么都没确认：{PHOTO_HOW}"
+    assert confirmed_codes(pdesk) == [] and not previewing(pdesk, number) and pdesk.executions() == []
+
+
+@pytest.mark.parametrize("answer", ["对过图 0", "对过图 3", "对过图 1 1", "对过图 12 1", "对过图 1 2 3", "对过图 2 2 1", "对过图 99"])
+def test_a_number_the_notice_does_not_have_refuses_the_whole_answer(pdesk, answer):
+    packet = two_held(pdesk)
+    number, quote = packet["id"], head(pdesk, packet["id"])
+    assert pdesk.admin(answer, quote=quote) == (
+        f"#{number} 编号不对（这条通知里只有第 1–2 顶，每顶写一次）：什么都没确认。扣着的是：第 1 顶 {CODE}；第 2 顶 {CODE_2}")
+    assert confirmed_codes(pdesk) == [] and not previewing(pdesk, number)
+
+
+def test_对过图_never_counts_without_a_quote_of_the_notice(pdesk):
+    """Unquoted (a draft number in front too), quoting Claude's words, a picture, the bot's own line that the pictures
+    came, a voice message: nothing is confirmed, the bot says to quote the notice, and none of it goes on to the relay
+    or an admin command."""
+    packet = two_held(pdesk)
+    number = packet["id"]
+    waiting = f"（扣着帽子在等的：#{number}）"
+    hint = f"要确认对过图：请引用那条列着「第 1 顶 …」的草稿通知回「对过图 1」（不引用不算）{waiting}"
+    elsewhere = f"你引用的不是草稿通知：要确认对过图，请引用那条列着「第 1 顶 …」的草稿通知回「对过图 1」{waiting}"
+    for answer in ("对过图 1", f"对过图 {number} 1", "对过图 12 1", "对过图", "对过图了 全部", "对过图 1 2"):
+        assert pdesk.admin(answer) == hint, answer
+    for quoted in ("方案 1：先核对两顶的颜色", "[图片]", f"#{number} 的图发过来了（在上面）：看过再回", "对图单-1-扣着的.jpg"):
+        assert pdesk.admin("对过图 1", quote=quoted) == elsewhere, quoted
+        assert pdesk.admin("对过图 全部", quote=quoted) == elsewhere, quoted
+    assert pdesk.admin("[语音] 对过图 1", msg_type=34) == VOICE_TEXT
+    assert confirmed_codes(pdesk) == [] and not previewing(pdesk, number)
+    assert pdesk.jobs() == [] and pdesk.executions() == []
+    # (a 改成 question is no notice of the hats either; a sample order's reply is never proposed anyway)
+    assert pdesk.admin("对过图 1", quote=f"#{number} 改成：『好的』") == f"#{number} {hint[:hint.index('（扣着')]}"
+    assert confirmed_codes(pdesk) == []
+
+
+def test_对过图_with_no_held_sample_order_waiting_goes_on_as_any_other_line(clock, tmp_path):
+    """Nothing told here waits with a held hat: a line that starts with 「对过图」 is not the review's (in
+    CLAUDE_RELAY_ONLY it is Claude's task, as before)."""
+    desk = Desk(clock, tmp_path, relay_only="on", prm_draft_context="on")
+    desk.prm.register(CREATOR, "小美", "测试达人")
+    try:
+        platform_waiting(desk)                                           # (a sample order nothing holds)
+        desk.admin("对过图 1")
+        assert [j["text"] for j in desk.jobs()] == ["对过图 1"]
+    finally:
+        desk.stop()
+
+
+def test_relay_only_对过图_is_never_claudes_while_a_held_order_waits_and_the_quote_still_confirms(clock, tmp_path):
+    """CLAUDE_RELAY_ONLY: an unquoted 「对过图 1」, or one quoting Claude's message, confirms nothing and is not handed to
+    Claude while the held sample order waits (the hint says how to give it to Claude instead); quoting the notice
+    confirms, as in the other mode."""
+    desk = Desk(clock, tmp_path, relay_only="on", prm_draft_context="on")
+    desk.prm.register(CREATOR, "小美", "测试达人")
+    try:
+        packet = two_held(desk)
+        number = packet["id"]
+        waiting = f"（扣着帽子在等的：#{number}）"
+        assert desk.admin("对过图 1") == (
+            f"要确认对过图：请引用那条列着「第 1 顶 …」的草稿通知回「对过图 1」（不引用不算）{waiting}{CC_HINT}")
+        assert desk.admin("对过图 全部", quote="好的，我先核对一下第 1 顶") == (
+            f"你引用的不是草稿通知：要确认对过图，请引用那条列着「第 1 顶 …」的草稿通知回「对过图 1」{waiting}{CC_HINT}")
+        assert desk.jobs() == [] and confirmed_codes(desk) == []
+        assert desk.admin("对过图 1 2", quote=head(desk, number)) == (
+            f"#{number} 已确认第 1 顶 {CODE}、第 2 顶 {CODE_2}（{UNDO}）；{COMING}")
+        assert desk.jobs() == [] and desk.executions() == [] and previewing(desk, number)
+    finally:
+        desk.stop()
+
+
+def test_an_answer_to_an_older_notice_confirms_nothing(pdesk):
+    """The quoted notice must be the draft's latest: after her recall (before the fresh notice went, and after), 「对过图
+    1」 quoting the first one does nothing; quoting the fresh one (the hats as it numbers them, its pictures the ones
+    sent before) confirms."""
+    packet = two_held(pdesk)
+    number, first = packet["id"], head(pdesk, packet["id"])
+    sent = list(pdesk.files)
+    her_recall(pdesk)
+    assert pdesk.admin("对过图 1", quote=first) == f"#{number} {STALE}（新的通知马上发过来）"
+    assert pdesk.admin("对过图了吗", quote=first) == f"#{number} {STALE}（新的通知马上发过来）"
+    assert pdesk.review.sweep() == 1
+    lines = latest_notice(pdesk, number)
+    assert lines[0] == f"#{number} 草稿（第 2 次通知） · 小美 · 私聊" and pdesk.files == sent
+    assert f"（要看的 2 张图在前面的 #{number} 通知后面，没有变）" in lines
+    assert lines[-1].startswith("看过前面发过的对图单，对上了就引用这条回「对过图 1」")
+    for answer in ("对过图 1", "对过图 全部", "对过图 1 2"):
+        assert pdesk.admin(answer, quote=first) == f"#{number} {STALE}", answer
+    assert confirmed_codes(pdesk) == [] and not previewing(pdesk, number)
+    assert pdesk.admin("对过图 2", quote=lines[0]) == (
+        f"#{number} 已确认第 2 顶 {CODE_2}（{UNDO}）；还扣着第 1 顶 {CODE}：对上了再引用这条通知回「对过图 1」")
+    assert confirmed_codes(pdesk) == [CODE_2]
+
+
+def test_a_fresh_notice_shows_which_hats_are_confirmed_already(pdesk):
+    """One hat confirmed in the console, then her recall: the fresh notice numbers the same hats, says which is
+    confirmed, and asks for the other one by its number; 「对过图 全部」 quoting it confirms what is left."""
+    packet = two_held(pdesk)
+    number = packet["id"]
+    done = pdesk.prm.deal_action("photo_confirm", {"deal_id": packet["deal_id"], "packet": number, "code": CODE})
+    assert done["ok"] and done["repreview"] is False and done["left"] == [CODE_2]
+    assert pdesk.review.sweep() == 0                                     # (a confirmation alone is no fresh notice)
+    her_recall(pdesk)
+    pdesk.review.sweep()
+    lines = latest_notice(pdesk, number)
+    assert lines[-4:-1] == ["有 1 顶帽子扣着（没对上图），对上了才能建这张寄样单：", f"第 1 顶 {CODE}（已确认）",
+                            f"第 2 顶 {CODE_2}（颜色没把握；「扣着的」那张对图单第 2 行）"]
+    assert lines[-1].startswith("看过前面发过的对图单，对上了就引用这条回「对过图 2」；")
+    assert pdesk.admin("对过图 全部", quote=lines[0]) == f"#{number} 已确认第 2 顶 {CODE_2}（{UNDO}）；{COMING}"
+    assert previewing(pdesk, number) and pdesk.executions() == []
+
+
+def test_对过图_counts_only_once_the_sheets_reached_the_admin(pdesk):
+    """While the sheets are still going an answer waits for them (「图还在发」); a sheet WeChat did not take: nothing is
+    confirmed from WeChat (「图没发过来」) until it went again.  A question says the same."""
+    answers, real = [], pdesk._send_file
+
+    def meanwhile(chat, path):
+        if not answers:
+            number = pdesk.prm.store.packets(("pending",))[0]["id"]
+            quote = head(pdesk, number)
+            answers.append(pdesk.admin("对过图 1", quote=quote))
+            answers.append(pdesk.admin("对过图了吗", quote=quote))
+        return real(chat, path)
+
+    pdesk.review._send_file = meanwhile
+    packet = two_held(pdesk)
+    number, quote = packet["id"], head(pdesk, packet["id"])
+    assert answers == [f"#{number} {wr.PICTURES_COMING}",
+                       f"#{number} 扣着 2 顶：第 1 顶 {CODE} 还没确认；第 2 顶 {CODE_2} 还没确认。{wr.PICTURES_COMING}"]
+    assert confirmed_codes(pdesk) == []
+    assert pdesk.told()[-1] == f"#{number} 的图发过来了（在上面）：对上了就引用那条通知回「对过图 1」这样确认；不要的话回「不发 {number}」"
+    assert pdesk.admin("2", quote=quote).startswith(f"#{number} 不发了")
+    pdesk.review._send_file = real
+    pdesk.files_fail = True
+    pdesk.clock.now += 60
+    other = two_held(pdesk)
+    n, quote = other["id"], head(pdesk, other["id"])
+    assert pdesk.told()[-1] == f"#{n} {PICTURES_MISSING}"
+    for answer in ("对过图 1", "对过图 全部", "对过图 1 2"):
+        assert pdesk.admin(answer, quote=quote) == f"#{n} {PICTURES_MISSING}", answer
+    assert confirmed_codes(pdesk) == [] and not previewing(pdesk, n)
+    pdesk.files_fail = False
+    pdesk.clock.now += RETRY_SEC[1] + 1
+    pdesk.review.sweep()
+    assert pdesk.told()[-1] == f"#{n} 的图补发过来了（在上面）：对上了就引用那条通知回「对过图 1」这样确认；不要的话回「不发 {n}」"
+    assert pdesk.admin("对过图 1", quote=quote).startswith(f"#{n} 已确认第 1 顶 {CODE}")
+
+
+def test_对过图_counts_only_for_the_very_sheets_that_went_with_the_notice(pdesk):
+    """Second line: the pictures the notice went with are remembered (``pictures_sent``); should the draft's sheets be
+    others now without a fresh notice, nothing is confirmed from WeChat."""
+    packet = one_held(pdesk)
+    number, quote = packet["id"], head(pdesk, packet["id"])
+    assert pdesk.prm.store.set_wechat_review(number, (), pdesk.clock.now, pictures_sent="0" * 16)
+    assert pdesk.admin("对过图", quote=quote) == f"#{number} 对图单和这条通知后面发的不是同一份了，微信里确认不了：{CONSOLE}"
+    assert confirmed_codes(pdesk) == [] and not previewing(pdesk, number)
+
+
+def test_a_sheet_not_on_this_pc_leaves_the_hats_to_the_console(pdesk):
+    """A sheet that cannot go (deleted from this PC before the notice): the notice numbers no hat, says the pictures did
+    not come, and 「对过图 1」 quoting it confirms nothing."""
+    packet = two_held(pdesk, told=False)
+    for entry in packet["meta"]["operator_files"]:
+        if "扣着的" in entry["name"]:
+            from pathlib import Path
+            Path(entry["path"]).unlink()
+    pdesk.review.sweep()
+    number = packet["id"]
+    lines = notice_of(pdesk, number)
+    assert lines[-1].startswith("有 2 顶帽子扣着") and "请到控制台对过图" in lines[-1]
+    assert pdesk.prm.store.wechat_review(number)["hats"] == "" and pdesk.files == []
+    assert pdesk.admin("对过图 1", quote=lines[0]) == f"#{number} {lines[-1]}"
+    assert confirmed_codes(pdesk) == []
+
+
+def test_a_hat_no_sheet_shows_is_confirmed_in_the_console_only_and_is_no_part_of_全部(pdesk):
+    """Three held hats: one on the held sheet with its own photo; one whose row has no picture of its code (「没有这个
+    编码的图」); one with no row at all (the sheet was full).  Only the first is confirmed from WeChat: by its number,
+    or by 「全部」, which says the others are the console's; their own numbers confirm nothing.  The last one confirmed
+    in the console, the bot previews the order again."""
+    packet = photo_order(
+        pdesk, held=(CODE, CODE_2, CODE_3),
+        facts=[held_row(CODE, 1), held_row(CODE_2, 2, why="她的图里都没对出这一款，左边放的是她最新发的那张", right="没有这个编码的图"),
+               {"label": "对图（扣着的那几顶）", "value": f"{CODE_3}：扣着的那张对图单最多 2 行，这一顶放不下了，请自己找图核对"}],
+        problems=[hold(CODE), hold(CODE_2, "均码粉色", no_photo=True),
+                  f"{CODE_3}（均码灰色）这顶没有照片对过，先核对再建；{HOW}"])
+    number, quote = packet["id"], head(pdesk, packet["id"])
+    lines = notice_of(pdesk, number)
+    assert lines[-5:-1] == [
+        "有 3 顶帽子扣着（没对上图），对上了才能建这张寄样单：",
+        f"第 1 顶 {CODE}（同款别的颜色（她的图最像的是驼色）；「扣着的」那张对图单第 1 行）",
+        f"第 2 顶 {CODE_2}（她的图里都没对出这一款，左边放的是她最新发的那张；没有这个编码的图，要到控制台确认）",
+        f"第 3 顶 {CODE_3}（没有照片对过；对图单上没有这一顶，要到控制台确认）"]
+    assert lines[-1].startswith("看过下面的对图单，对上了就引用这条回「对过图 1」；")
+    assert json.loads(pdesk.prm.store.wechat_review(number)["hats"]) == [
+        {"code": CODE, "ok": True}, {"code": CODE_2, "ok": False}, {"code": CODE_3, "ok": False}]
+    for answer, which in (("对过图 2", f"第 2 顶 {CODE_2}"), ("对过图 3", f"第 3 顶 {CODE_3}"),
+                          ("对过图 2 3", f"第 2 顶 {CODE_2}、第 3 顶 {CODE_3}")):
+        assert pdesk.admin(answer, quote=quote) == f"#{number} {which} 没有能对的图，微信里确认不了：{CONSOLE}", answer
+    assert confirmed_codes(pdesk) == []
+    assert pdesk.admin("对过图 全部", quote=quote) == (
+        f"#{number} 已确认第 1 顶 {CODE}（{UNDO}）；第 2 顶 {CODE_2}、第 3 顶 {CODE_3} 没有能对的图，微信里确认不了：{CONSOLE}")
+    assert confirmed_codes(pdesk) == [CODE] and not previewing(pdesk, number)
+    assert pdesk.admin("对过图 全部", quote=quote) == (
+        f"#{number} 第 2 顶 {CODE_2}、第 3 顶 {CODE_3} 没有能对的图，微信里确认不了：{CONSOLE}")
+    assert pdesk.admin("对过图了吗", quote=quote) == (
+        f"#{number} 扣着 3 顶：第 1 顶 {CODE} 已确认；第 2 顶 {CODE_2} 还没确认（没有能对的图，要到控制台确认）；"
+        f"第 3 顶 {CODE_3} 还没确认（没有能对的图，要到控制台确认）。剩下的{CONSOLE}")
+    assert confirmed_codes(pdesk) == [CODE] and pdesk.executions() == []
+    for code in (CODE_2, CODE_3):                                        # (the console's button: the last one previews)
+        done = pdesk.prm.deal_action("photo_confirm", {"deal_id": packet["deal_id"], "packet": number, "code": code})
+        assert done["ok"] and done["repreview"] is (code == CODE_3)
+    assert previewing(pdesk, number)
+
+
+def test_a_hat_the_side_by_side_sheet_says_to_look_at_again_is_numbered_by_its_row_there(pdesk):
+    """A hat with a sure picture whose row of the side-by-side sheet says 「要再看」: numbered after the held sheet's
+    rows, by its row on that sheet; one whose row has no picture of the code is the console's."""
+    packet = photo_order(
+        pdesk, held=(CODE_3, CODE_2, CODE), sheets=("pair", "held"),
+        facts=[pair_row(CODE_3, "！要再看：颜色：图最像 深棕"), pair_row(CODE_2), held_row(CODE, 1)],
+        problems=[f"{CODE_3} 对图要再看（！要再看：颜色：图最像 深棕）：先核对再建；{HOW}",
+                  f"{CODE_2} 对图要再看（没有这个编码的图，请自己找图核对）：先核对再建；{HOW}", hold(CODE)])
+    number, quote = packet["id"], head(pdesk, packet["id"])
+    lines = notice_of(pdesk, number)
+    assert lines[-4:-1] == [
+        f"第 1 顶 {CODE}（同款别的颜色（她的图最像的是驼色）；「扣着的」那张对图单第 1 行）",
+        f"第 2 顶 {CODE_3}（对图单说要再看：要再看：颜色：图最像 深棕；对图单第 1 行）",
+        f"第 3 顶 {CODE_2}（对图单说要再看：没有这个编码的图，请自己找图核对；没有这个编码的图，要到控制台确认）"]
+    assert pdesk.admin("对过图 2", quote=quote).startswith(f"#{number} 已确认第 2 顶 {CODE_3}（{UNDO}）；还扣着第 1 顶 {CODE}")
+    assert pdesk.admin("对过图 全部", quote=quote) == (
+        f"#{number} 已确认第 1 顶 {CODE}（{UNDO}）；第 3 顶 {CODE_2} 没有能对的图，微信里确认不了：{CONSOLE}")
+    assert sorted(confirmed_codes(pdesk)) == sorted([CODE, CODE_3]) and not previewing(pdesk, number)
+
+
+def test_a_held_sheet_that_never_reached_windows_leaves_its_hats_to_the_console(pdesk):
+    """The preview names a row of the held hats' sheet, but only the side-by-side sheet came back (the upload was lost):
+    that hat is on no sheet the admin got, so it is not numbered and 「对过图 1」 confirms nothing."""
+    packet = photo_order(pdesk, held=(CODE,), sheets=("pair",), facts=[pair_row(CODE_3), held_row(CODE, 1)],
+                         problems=[hold(CODE)])
+    number = packet["id"]
+    lines = notice_of(pdesk, number)
+    assert lines[-1] == (f"有 1 顶帽子扣着（没对上图：{CODE}），微信里不能执行：请到控制台对过图，在这顶旁边点「对过图了」，"
+                         "再点「重新预览」；不要的话回 2")
+    assert pdesk.prm.store.wechat_review(number)["hats"] == ""
+    for answer in ("对过图 1", "对过图", "对过图 全部"):
+        assert pdesk.admin(answer, quote=lines[0]) == f"#{number} {lines[-1]}", answer
+    assert confirmed_codes(pdesk) == []
+
+
+def test_a_second_draft_of_the_deal_is_never_confirmed_previewed_or_run_by_the_firsts_answer(pdesk):
+    """Two sample orders of one deal wait (her private chat and her group): each notice numbers its own hats.  A number
+    of the other draft's list quoting this notice confirms nothing; 「对过图 1」 quoting the first confirms its hat for
+    the deal and previews the first again, never the second: that one keeps waiting for its own 「重新预览」, runs
+    nothing, and its own notice (no sheet of its own: nothing numbered) sends the admin to the console."""
+    first = one_held(pdesk)
+    held = {**jst_block(), "verdict": "blocked", "run": {}, "problems": [hold(CODE), hold(CODE_2, "均码粉色")]}
+    second = pdesk.prm.store.add_packet(
+        now=pdesk.clock.now, deal_id=first["deal_id"], party_id=1, job_id=None, chat_id=GROUP, kind="money",
+        text="寄样单建好啦，单号 {寄样单号}～", attachments=[], intent="", slots={}, stage_proposal="",
+        needs_attention=False, reason="", tool="jst.sample_order", platform={"action": SAMPLE, "preview": held},
+        meta={"channel": "group", "group_name": "小美合作群", "draft_context": GATED, "photo_held": [CODE, CODE_2]})
+    pdesk.review.sweep()
+    one, two = head(pdesk, first["id"]), head(pdesk, second)
+    assert pdesk.prm.store.wechat_review(second)["hats"] == ""
+    assert pdesk.admin("对过图 2", quote=one) == (
+        f"#{first['id']} 编号不对（这条通知里只有第 1 顶，每顶写一次）：什么都没确认。扣着的是：第 1 顶 {CODE}")
+    assert pdesk.admin("对过图 1 2", quote=one).startswith(f"#{first['id']} 编号不对")
+    console = (f"有 2 顶帽子扣着（没对上图：{CODE}、{CODE_2}），微信里不能执行：请到控制台对过图，在这顶旁边点「对过图了」，"
+               "再点「重新预览」；不要的话回 2")
+    assert pdesk.admin("对过图 1", quote=two) == f"#{second} {console}"
+    assert confirmed_codes(pdesk, first["deal_id"]) == []
+    assert pdesk.admin("对过图 1", quote=one) == f"#{first['id']} 已确认第 1 顶 {CODE}（{UNDO}）；{COMING}"
+    assert previewing(pdesk, first["id"]) and not previewing(pdesk, second)
+    assert pdesk.admin("执行", quote=two) == (
+        f"#{second} 有 1 顶帽子扣着（没对上图：{CODE_2}），微信里不能执行：请到控制台对过图，在这顶旁边点「对过图了」，"
+        "再点「重新预览」；不要的话回 2")
+    assert pdesk.prm.decide(second, "execute")["ok"] is False
+    assert pdesk.executions() == [] and pdesk.prm.store.packet(second)["status"] == "pending"
+    previews = [j for j in pdesk.jobs("prm") if '"platform_preview"' in str(j.get("meta") or "")]
+    assert len(previews) == 1 and f'"packet_id": {first["id"]}' in str(previews[0]["meta"])
+
+
+def test_对过图_never_comes_from_her_chat_a_group_or_anybody_else(pdesk):
+    """Only the admin's own one-to-one chat: the creator quoting (or typing) the notice's head in her chat, anybody in a
+    group, another sender confirm nothing."""
+    packet = two_held(pdesk)
+    number, quote = packet["id"], head(pdesk, packet["id"])
+    pdesk.admin("对过图 1", quote=quote, sender=CREATOR, chat=CREATOR)
+    pdesk.admin("对过图 全部", quote=quote, sender=ADMIN, chat=GROUP, group=True)
+    pdesk.admin("对过图 1 2", quote=quote, sender=OTHER, chat=OTHER)
+    pdesk.admin("对过图 1", quote=quote, sender=OTHER, chat=ADMIN)
+    assert confirmed_codes(pdesk) == [] and not previewing(pdesk, number) and pdesk.executions() == []
+
+
+def test_对过图_for_a_draft_no_longer_waiting_or_with_nothing_held_says_so(pdesk):
+    """A sample order nothing holds, one dropped meanwhile, a plain reply's notice: nothing to confirm."""
+    ready = checked_waiting(pdesk, held=(), verdict="ready")              # (checked by photo, nothing held)
+    assert pdesk.admin("对过图 1", quote=head(pdesk, ready["id"])) == f"#{ready['id']} 没有扣着等确认的帽子，不用回「对过图」"
+    assert pdesk.admin("对过图 1") is None                                # (unquoted, nothing held: not the review's)
+    assert pdesk.admin("2", quote=head(pdesk, ready["id"])).startswith(f"#{ready['id']} 不发了")
+    pdesk.clock.now += 60
+    packet = one_held(pdesk)
+    number, quote = packet["id"], head(pdesk, packet["id"])
+    assert pdesk.prm.decide(number, "drop")["ok"]
+    assert pdesk.admin("对过图 1", quote=quote) == f"#{number} 已经处理过了：点了不发"
+    assert confirmed_codes(pdesk) == []
+    pdesk.clock.now += 60
+    plain = waiting(pdesk)                                               # (a reply with no platform action)
+    asked = pdesk.admin("对过图了，颜色没问题的", quote=head(pdesk, plain["id"]))
+    assert asked.startswith(f"#{plain['id']} 改成：『对过图了，颜色没问题的』")       # (her reply's words, as ever)
+
+
+def test_with_the_photo_switch_off_对过图_confirms_nothing(clock, tmp_path):
+    """PRM_DRAFT_CONTEXT off (the console has no 「对过图了」 then): a held sample order's notice numbers nothing and the
+    answer only hears why it does not run."""
+    desk = Desk(clock, tmp_path)
+    desk.prm.register(CREATOR, "小美", "测试达人")
+    try:
+        packet = one_held(desk)
+        number = packet["id"]
+        lines = notice_of(desk, number)
+        assert desk.prm.store.wechat_review(number)["hats"] == "" and not any("对过图 1" in line for line in lines)
+        assert desk.admin("对过图 1", quote=lines[0]) == (
+            f"#{number} {CODE} 还扣着（没对过图），不能执行：点「重新预览」再核；微信里不能执行；不要的话回 2")
+        assert confirmed_codes(desk) == [] and not previewing(desk, number)
+    finally:
+        desk.stop()
+
+
+def test_a_new_preview_that_still_holds_a_hat_is_told_again_with_its_own_numbers(pdesk):
+    """The console's 「重新预览」 (no confirmation) of a told draft: the new preview, whatever it brought, is told in a
+    fresh notice with its own sheets and numbers (here it holds only the second hat now, as its 「第 1 顶」); the old
+    notice's numbers mean nothing any more, the fresh one's are confirmed once its sheet came."""
+    packet = two_held(pdesk)
+    number, first = packet["id"], head(pdesk, packet["id"])
+    assert pdesk.prm.decide(number, "repreview")["ok"]
+    job = previewed_again(pdesk, number, held=(CODE_2,), sheets=("pair", "held"), verdict="blocked",
+                          facts=[pair_row(CODE_3), pair_row(CODE), held_row(CODE_2, 1, why="颜色没把握")],
+                          problems=[hold(CODE_2, "均码粉色")])
+    assert pdesk.admin("对过图 2", quote=first) == f"#{number} {STALE}（新的通知马上发过来）"
+    assert pdesk.review.sweep() == 1
+    lines = latest_notice(pdesk, number)
+    assert lines[0] == f"#{number} 草稿（第 2 次通知） · 小美 · 私聊"
+    assert lines[-3:-1] == ["有 1 顶帽子扣着（没对上图），对上了才能建这张寄样单：",
+                            f"第 1 顶 {CODE_2}（颜色没把握；「扣着的」那张对图单第 1 行）"]
+    assert [path.rsplit("/", 1)[-1] for chat, path in pdesk.files[-2:]] == [
+        f"对图单-{job['id']}.jpg", f"对图单-{job['id']}-扣着的.jpg"]
+    assert pdesk.admin("对过图 2", quote=first) == f"#{number} {STALE}"
+    assert pdesk.admin("对过图 1", quote=first) == f"#{number} {STALE}"
+    assert confirmed_codes(pdesk) == []
+    assert pdesk.admin("对过图", quote=lines[0]) == f"#{number} 已确认第 1 顶 {CODE_2}（{UNDO}）；{COMING}"
+    assert confirmed_codes(pdesk) == [CODE_2] and pdesk.executions() == []
+
+
+def test_a_new_preview_that_was_not_made_is_told_too_and_runs_nothing(pdesk):
+    """The bot's own new preview after the last 「对过图」 fails on the Mac: the fresh notice says so (the preview's
+    problem) and sends the admin to the console; nothing runs from WeChat."""
+    packet = one_held(pdesk)
+    number, quote = packet["id"], head(pdesk, packet["id"])
+    assert pdesk.admin("对过图", quote=quote) == f"#{number} 已确认第 1 顶 {CODE}（{UNDO}）；{COMING}"
+    job = pdesk.relay.next_job(0, ("prm",))
+    pdesk.relay.finish(job["id"], {"ok": False, "text": "", "error": "聚水潭没登录", "duration_s": 1})
+    pdesk.relay.tick()
+    assert not previewing(pdesk, number)
+    assert pdesk.review.sweep() == 1
+    lines = latest_notice(pdesk, number)
+    assert lines[0] == f"#{number} 草稿（第 2 次通知） · 小美 · 私聊"
+    assert any("重新预览没做成" in line for line in lines)
+    assert lines[-1] == "扣着的帽子都点过「对过图了」，微信里不能执行：请到控制台点「重新预览」按确认再核；不要的话回 2"
+    assert pdesk.admin("执行", quote=lines[0]) == f"#{number} {lines[-1]}"
+    assert pdesk.executions() == [] and pdesk.prm.store.packet(number)["status"] == "pending"
+
+
+def test_the_new_texts_show_her_ids_by_their_last_characters(pdesk):
+    """A held hat's reason that names her UID (the Mac's words), and a refusal that does: only the last characters reach
+    the admin's chat, in the notice and in every answer."""
+    packet = photo_order(pdesk, held=(CODE,), facts=[held_row(CODE, 1, why=f"UID {DY_UID} 的图没把握")], problems=[hold(CODE)])
+    number, quote = packet["id"], head(pdesk, packet["id"])
+    text = "\n".join(notice_of(pdesk, number))
+    assert DY_UID not in text and f"第 1 顶 {CODE}（UID …{DY_UID[-4:]} 的图没把握；" in text
+    pdesk.review._confirm = lambda deal_id, packet_id, code: {"ok": False, "error": f"UID {DY_UID} 对不上"}
+    reply = pdesk.admin("对过图", quote=quote)
+    assert reply == f"#{number} 第 1 顶 {CODE} 没确认成：UID …{DY_UID[-4:]} 对不上" and DY_UID not in reply
+    assert all(DY_UID not in t for t in pdesk.told())
+
+
+def test_an_older_database_gets_the_two_columns_and_its_rows_number_no_hat(pdesk):
+    """A row told before the hats were numbered (``hats`` and ``shown`` empty): 「对过图 1」 quoting its notice confirms
+    nothing (the console's), and the draft as it is now counts as shown (no fresh notice for it)."""
+    packet = two_held(pdesk)
+    number, quote = packet["id"], head(pdesk, packet["id"])
+    with pdesk.prm.store._lock:
+        pdesk.prm.store._conn.execute("UPDATE wechat_reviews SET hats = '', shown = ''")
+        pdesk.prm.store._conn.commit()
+    assert pdesk.review.sweep() == 0 and pdesk.prm.store.wechat_review(number)["shown"]
+    assert pdesk.admin("对过图 1", quote=quote) == (
+        f"#{number} 有 2 顶帽子扣着（没对上图：{CODE}、{CODE_2}），微信里不能执行：请到控制台对过图，在这顶旁边点「对过图了」，"
+        "再点「重新预览」；不要的话回 2")
+    assert confirmed_codes(pdesk) == []
+
+
+def test_a_new_preview_that_cannot_be_queued_is_said_so_and_the_same_answer_tries_again(pdesk):
+    """The last hat is confirmed but the new preview cannot be queued for the Mac (the relay raises): the answer says so
+    and how on (the console's 「重新预览」); the confirmation stays.  The same answer again (the hat is confirmed already)
+    starts it once the relay takes jobs; 「全部」 with nothing left to confirm says so."""
+    packet = one_held(pdesk)
+    number, quote = packet["id"], head(pdesk, packet["id"])
+    real = pdesk.relay.submit
+
+    def broken(*args, **kw):
+        raise RuntimeError("the relay's database is busy")
+
+    pdesk.relay.submit = broken
+    assert pdesk.admin("对过图 1", quote=quote) == (
+        f"#{number} 已确认第 1 顶 {CODE}（{UNDO}）；没能自己开始重新预览（没能排进 Mac 的任务队列）：请到控制台点「重新预览」")
+    assert confirmed_codes(pdesk) == [CODE] and not previewing(pdesk, number)
+    assert pdesk.admin("对过图 全部", quote=quote) == (
+        f"#{number} 都确认过了。扣着的是：第 1 顶 {CODE}（已确认）；还没重新预览的话，请到控制台点「重新预览」")
+    assert pdesk.admin("对过图了吗", quote=quote) == (
+        f"#{number} 扣着 1 顶：第 1 顶 {CODE} 已确认。都确认了：请到控制台点「重新预览」按确认再核")
+    assert pdesk.admin("执行", quote=quote) == (
+        f"#{number} 扣着的帽子都点过「对过图了」，微信里不能执行：请到控制台点「重新预览」按确认再核；不要的话回 2")
+    pdesk.relay.submit = real
+    assert pdesk.admin("对过图 1", quote=quote) == f"#{number} 已确认第 1 顶 {CODE}（{UNDO}）；{COMING}"
+    assert previewing(pdesk, number) and pdesk.executions() == []
+    assert len(pdesk.prm.store.events(packet["deal_id"], kinds=("photo_confirm",))) == 1    # (recorded once)
