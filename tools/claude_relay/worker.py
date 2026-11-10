@@ -1895,11 +1895,11 @@ def huopan_line(meta: dict, joined: bool = False) -> str:
         return ""
     if joined:
         return ("运营在控制台点了「补发货盘」，她刚好又发来了消息（在下面）：先回她的话，再照 kb/ 里「货盘」那一节（第 3.0 节）"
-                "把货盘一起发她：货盘图一定附上，Excel 照那一节说的再加，都写进 attachments_to_send，不提寄样。案卷或 <our_reply> "
+                "把货盘一起发她：货盘图一定附上，Excel 照那一节说的再加，都写进 attachments_to_send；寄样照 kb/ 第 0.5 节，只说到可以安排。案卷或 <our_reply> "
                 "里 7 天内已经发过货盘的，只回她的话、不再附货盘，reason 写明哪天发过。")
     return ("运营在控制台点了「补发货盘」：这一次没有达人的新消息，是我们主动给她补发一份货盘，问问她看中哪几款。照 kb/ 里"
             "「货盘」那一节（第 3.0 节）：货盘图一定附上，Excel 照那一节说的再加，都写进 attachments_to_send；话只说一两句，"
-            "不再一款一款列文字，不提寄样。隔了几天重新联系可以先打个招呼；我们还没跟她说过话（看 <our_reply> 和 "
+            "不再一款一款列文字；寄样照 kb/ 第 0.5 节，只说到可以安排。隔了几天重新联系可以先打个招呼；我们还没跟她说过话（看 <our_reply> 和 "
             "<operator_message>）就按场景 A 开场白的规矩先自我介绍一句。案卷或 <our_reply> 里 7 天内已经发过货盘的，不再发："
             "reply_draft 和 attachments_to_send 都留空，reason 写明哪天发过。")
 
@@ -2045,7 +2045,7 @@ def opening_auto_line(meta: dict) -> str:
     if isinstance(minutes, bool) or not isinstance(minutes, int) or not 1 <= minutes <= 1440:
         return ""
     return (f"这是我们给新好友的第一句话：运营 {minutes} 分钟内没处理，机器人就把你写的这份直接发给她（下班时段、自动模式下"
-            "写好就发），没人先看。照 kb/ 写，不许诺寄样；有拿不准的（她问的事 kb/ 里没有、要报价钱、要人拿主意的）就把 "
+            "写好就发），没人先看。照 kb/ 写：寄样只说到「看中的款可以安排寄样」，不说送、免费、包邮，不报寄几顶；有拿不准的（她问的事 kb/ 里没有、要报价钱、要人拿主意的）就把 "
             "needs_attention 设成 true，这份就会等运营。")
 
 

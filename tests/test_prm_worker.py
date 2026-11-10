@@ -894,7 +894,7 @@ def test_a_huopan_job_asks_for_the_huopan_and_makes_up_no_message_of_hers(worker
     prompt = worker.prm_prompt(job, 1, "小美", "deals/1.md", [], [])
     line = worker.huopan_line(job["meta"])
     assert line.startswith(HUOPAN_HEAD) and line in prompt.split("\n") and "<creator_message>" not in prompt
-    for words in ("「货盘」那一节（第 3.0 节）", "货盘图一定附上，Excel 照那一节说的再加，都写进 attachments_to_send", "不提寄样",
+    for words in ("「货盘」那一节（第 3.0 节）", "货盘图一定附上，Excel 照那一节说的再加，都写进 attachments_to_send", "寄样照 kb/ 第 0.5 节，只说到可以安排",
                   "7 天内已经发过货盘", "reply_draft 和 attachments_to_send 都留空", "<our_reply> 和 <operator_message>"):
         assert words in line
     assert prompt.index("<our_reply>\n好的～这几款现货您先看看\n</our_reply>") < prompt.index(line)

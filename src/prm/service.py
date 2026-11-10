@@ -179,9 +179,10 @@ AUTO_HOLDING_TEXT = "收到～您说的我都记下啦，稍后确认好第一�
 # 开场白没人处理就自动发 (PRM_OPENING_AUTO_MIN, 2026-11-02): the route of our first line to a new friend that went out by
 # itself after waiting (``send_due_openings``; never counts toward a kind's gate: ``PrmStore.reviewed`` takes ``review``
 # only), and the words such a line must not say to go by itself (kb 第 0.5 节: samples are the boss's, in the 三方群)
+# (2026-11-10, the user: an opening may say 「看中的款可以安排寄样给您试戴」, so 寄样 / 样品 / 试戴 no longer hold it; a
+# promise still does: free, postage, a gift, how many)
 OPENING_ROUTE = "opening"
-OPENING_AUTO_WORDS = ("免费", "包邮", "邮费", "寄样", "样品", "样衣", "寄出", "寄给", "送你", "送您", "送一", "试戴", "任选",
-                      "看中多少")
+OPENING_AUTO_WORDS = ("免费", "包邮", "邮费", "样衣", "寄出", "寄给", "送你", "送您", "送一", "任选", "看中多少", "寄几", "几顶")
 OPENING_AUTO_GRACE_SEC = 120     # none goes the first minutes after a start: the catch-up may find she wrote meanwhile
 # 同一张图不重复发 (2026-11-02, the user: the 开场白's 3 pictures went again with her 货盘 an hour later, by 自动模式): a file
 # she got from us this recently (the same bytes) is left out of a new draft (``_repeated_files``)
