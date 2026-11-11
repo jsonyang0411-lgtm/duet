@@ -1152,13 +1152,21 @@ def _three_party_stopped_status() -> dict:
 def _boss_groups_stopped_status(store) -> dict:
     """老板拉的群 while the bot is stopped (src/prm/boss_groups.py ``boss_groups_out``): the switch and the bosses as .env
     says, the groups from the database (``store`` None: none yet); nothing is found or taken over now."""
-    from src.prm.boss_groups import boss_call, boss_groups_out
+    from src.prm.boss_groups import MAX_DEFAULT, MAX_HIGH, MAX_LOW, boss_call, boss_groups_out, group_ours
     from src.prm.three_party import group_with
 
     on = _prm_env_on("PRM_BOSS_GROUPS")
+    try:                                   # (PRM_BOSS_GROUP_MAX as the running bot clamps it)
+        most = min(max(int(os.getenv("PRM_BOSS_GROUP_MAX", "") or MAX_DEFAULT), MAX_LOW), MAX_HIGH)
+    except ValueError:
+        most = MAX_DEFAULT
+    # (2026-11-11: our own people's names, PRM_GROUP_OURS, and whether her side's lines are drafted, PRM_GROUP_HER_SIDE:
+    # the console's hints say whose lines are drafted while the bot is stopped too; names are not read now: no warning)
     return boss_groups_out(store, enabled=on, why_not="机器人没有运行" if on else "",
                            boss=group_with(os.getenv("PRM_GROUP_WITH", "")), reserved=_prm_reserved(),
-                           boss_call=boss_call(os.getenv("PRM_BOSS_CALL", "")))
+                           boss_call=boss_call(os.getenv("PRM_BOSS_CALL", "")),
+                           ours=group_ours(os.getenv("PRM_GROUP_OURS", "")),
+                           her_side=_prm_env_on("PRM_GROUP_HER_SIDE"), group_max=most)
 
 
 def _prm_boss_groups(data: dict, action: str) -> dict:

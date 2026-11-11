@@ -2396,6 +2396,58 @@ class TestPrmPages:
         page.get_by_text("好的，「测试双达人群」不接了").wait_for()
         assert posted[1:] == [("ignore", {"chat": "test_group_41@chatroom"})]
 
+    def test_deals_page_says_whose_lines_are_drafted_with_her_side_off_and_on(self, page, prm):
+        """她那边的人 (PRM_GROUP_HER_SIDE, 2026-11-11): the hints of the groups card (the admin's 「接群」 question, the 老板拉的群
+        card) and of her deal's linked group say 「别人说的话不起草」 with the switch off, and with it on that her side's lines
+        are drafted too (a group over PRM_BOSS_GROUP_MAX: not; the toast after 「是她」 too); our people, the boss and other
+        creators never."""
+        now = prm.clock.now
+        asked = {"chat": "test_group_61@chatroom", "name": "测试对接群", "size": 4, "asked_at": now, "until": now + 1800,
+                 "three_party": False,
+                 "members": [{"wxid": "wxid_test_61a", "name": "测试达人甲", "registered": True, "stopped": False}]}
+        big = {**asked, "chat": "test_group_62@chatroom", "name": "测试大群", "size": 12}
+        bg = {"enabled": True, "why_not": "", "warning": "", "boss": ["老板测试"], "boss_call": "老板", "pending": [],
+              "waiting": 0, "linked": 0, "manual": [asked, big]}
+
+        def state_of(state):
+            state.update(boss_groups=json.loads(json.dumps(bg)))
+            for p in state["parties"]:
+                if p["wxid"] == "wxid_creator01" and p.get("deal"):
+                    p["deal"]["linked_groups"] = [{"chat": "test_group_63@chatroom", "name": "测试手动接的群", "at": now}]
+
+        posted = []
+
+        def answer(route):
+            posted.append(route.request.post_data_json)
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({"ok": True}))
+
+        self._serve_prm(page, state_of)
+        page.route("**/api/prm/boss-groups/*", answer)
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        card = page.locator(".prm-boss-groups")
+        rows = card.locator(".prm-manual-group")
+        rows.first.wait_for()
+        assert all("；别人说的话不起草。" in rows.nth(n).inner_text() for n in range(2))
+        assert card.locator(".prm-others-line").inner_text() == "老板和别人说的话不起草。"
+        page.locator("button[aria-label='展开 小美']").click()
+        linked = page.locator(".prm-linked-group")
+        linked.wait_for()
+        assert "别人说的话不起草。" in linked.inner_text() and "她那边" not in linked.inner_text()
+        bg.update(her_side=True, max=6)
+        page.reload()
+        rows.first.wait_for()
+        side = "她那边别的人（助理、商务）说的话也起草；我们自己的人和别的登记过的达人说的话不起草。"
+        assert side in rows.nth(0).inner_text()
+        assert "；别人说的话不起草。" in rows.nth(1).inner_text() and "她那边" not in rows.nth(1).inner_text()   # (12 > 6)
+        assert card.locator(".prm-others-line").inner_text() == (
+            "她那边别的人（助理、商务）说的话也起草（群超过 6 人时只起草她本人的）；老板、我们自己的人和别的登记过的达人说的话不起草。")
+        page.locator("button[aria-label='展开 小美']").click()
+        linked.wait_for()
+        assert "她那边别的人（助理、商务）说的话也起草（群超过 6 人时只起草她本人的）" in linked.inner_text()
+        rows.nth(0).locator("button:has-text('是她')").click()
+        page.get_by_text("已接手「测试对接群」：测试达人甲，之后她和她那边的人在群里说的话会起草").wait_for()
+        assert posted == [{"chat": "test_group_61@chatroom", "wxid": "wxid_test_61a"}]
+
     def test_deals_page_warns_of_a_name_of_ours_no_contact_has_and_says_why_a_group_was_asked_about(self, page, prm):
         """我们自己的人 (PRM_GROUP_OURS, 2026-11-11): a name no one contact has is said on the groups card (``ours_warning``)
         even with PRM_BOSS_GROUPS off and nothing to choose; a group the scan asks about with only one registered creator

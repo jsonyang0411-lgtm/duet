@@ -342,7 +342,7 @@ def told_lines(group) -> list[int]:
 
 def boss_groups_out(store, *, enabled: bool, why_not: str = "", boss=(), reserved=(),
                     boss_call: str = CALL_DEFAULT, warning: str = "", offer: Optional[dict] = None, asks=(),
-                    ours=(), ours_warning: str = "") -> dict:
+                    ours=(), ours_warning: str = "", her_side: bool = False, group_max: int = MAX_DEFAULT) -> dict:
     """What the console shows (GET /api/prm ``boss_groups``; also the stopped bot's, from .env): on or off, why it cannot
     run at all now (``why_not``: the console's buttons are off then), what it warns of while it runs (``warning``, ""
     when nothing: a name of PRM_GROUP_WITH no one contact has, so no group is taken over by itself; the buttons stay
@@ -356,7 +356,9 @@ def boss_groups_out(store, *, enabled: bool, why_not: str = "", boss=(), reserve
     asks (``asks``: a group with two or more registered creators in it) are ``manual`` entries too, after the admin's;
     the groups it linked count in ``manual_linked``.  我们自己的人 (PRM_GROUP_OURS, 2026-11-11): its names (``ours``)
     and what the bot warns of them (``ours_warning``: a name no one contact has, or not read yet), each key only when
-    there is one, whatever ``enabled`` says."""
+    there is one, whatever ``enabled`` says.  她那边的人 (PRM_GROUP_HER_SIDE on): ``her_side`` True and ``max``
+    (PRM_BOSS_GROUP_MAX: a bigger group's others stay context), so that the console's hints say whose lines are drafted;
+    no key at all with it off."""
     rows = store.boss_groups() if store is not None and enabled else []
     rows = [r for r in rows if not r.get("manual")]
     pending = [{"chat": r["chat"], "name": r["name"], "found_at": r["found_at"], "why": r["why"],
@@ -380,6 +382,8 @@ def boss_groups_out(store, *, enabled: bool, why_not: str = "", boss=(), reserve
         out["ours"] = list(ours)
     if ours_warning:
         out["ours_warning"] = str(ours_warning)
+    if her_side:
+        out.update(her_side=True, max=int(group_max))
     return out
 
 
@@ -587,7 +591,7 @@ class BossGroups:
         return boss_groups_out(self._store, enabled=self._on, why_not=self.why_not() if self._on else "",
                                boss=self._with, reserved=self._reserved, boss_call=self._call, warning=self.warning(),
                                offer=self.offered(), asks=list(self._asks.values()), ours=self._ours_names,
-                               ours_warning=self.ours_warning())
+                               ours_warning=self.ours_warning(), her_side=self._her_side, group_max=self._max)
 
     # ── what the PRM service asks (any thread; no lock of this class is taken) ──
 

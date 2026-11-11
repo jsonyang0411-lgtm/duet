@@ -13,7 +13,7 @@ import {
 import { PageHead, Card, Note, Empty, Field, TextInput, TextArea, Select, Seg, Confirm } from './ui'
 import { AdvancedFields } from './AdvancedPanel'
 import { FriendAddPasteCard } from './FriendAddCard'
-import { BossGroupsCard } from './BossGroupsCard'
+import { BossGroupsCard, othersLine } from './BossGroupsCard'
 
 // 合作单: the creators whose private messages get drafted replies (PRM_COPILOT).
 // Registering one here means the creator agreed to be contacted on WeChat; their
@@ -358,7 +358,7 @@ function DealDetail({ p, d, onDone }) {
       {d?.handcards && <HandcardsBlock p={p} busy={busy} run={run} />}
 
       {d?.three_party?.enabled && <ThreePartyBlock p={p} d={d} busy={busy} run={run} />}
-      {(deal.linked_groups || []).length > 0 && <LinkedGroups groups={deal.linked_groups} busy={busy} run={run} />}
+      {(deal.linked_groups || []).length > 0 && <LinkedGroups groups={deal.linked_groups} bg={d?.boss_groups} busy={busy} run={run} />}
       {deal.reach && <ReachLine reach={deal.reach} />}
 
       <div className="stack" style={{ gap: 6 }}>
@@ -496,14 +496,14 @@ function DraftNoteBlock({ p, onDone, photoCheck }) {
 /** 接手任何合作群 (2026-11-09): the groups the admin linked to her by hand that are not her 三方群 (no boss in them, or
  *  her deal has a 三方群 of its own): each says it is drafted in, and 「不接了」 stops it (deal action ``group_unlink``).
  *  One the bot's own scan linked (群自己接上, ``auto``) says so. */
-function LinkedGroups({ groups, busy, run }) {
+function LinkedGroups({ groups, bg, busy, run }) {
   return (
     <div className="stack prm-linked-groups" style={{ gap: 6 }}>
       <b>手动接的群</b>
       {groups.map((g) => (
         <div key={g.chat} className="row prm-linked-group" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <span><UsersThree style={{ verticalAlign: -2 }} /> 「{g.name || '（没有群名）'}」（{fmtClock(g.at)} {g.auto ? '机器人自动接的' : '接手'}）</span>
-          <span className="f-hint">她在群里说的话照常起草，回复发在群里，群里的人都看得到；别人说的话不起草。</span>
+          <span className="f-hint">她在群里说的话照常起草，回复发在群里，群里的人都看得到；{othersLine(bg)}</span>
           <button type="button" className="btn sm ghost" disabled={busy}
             onClick={() => run({ action: 'group_unlink', chat: g.chat }, `记下了：「${g.name || '这个群'}」不接了，群里的话不再起草`)}>不接了</button>
         </div>
@@ -624,7 +624,7 @@ function ThreePartyBlock({ p, d, busy, run }) {
         <>
           <div><UsersThree style={{ verticalAlign: -2 }} /> 老板拉的群（{fmtClock(g.at)} 发现）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
           <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <span className="f-hint">老板把她和我们拉进了这个群，之后由我们跟她对接：她在群里说的话照常起草，回复发在群里，老板也看得到；老板和别人说的话不起草。群里的话也会交给她私聊的草稿。{bossOn ? '「不接了」：不再起草，它还是她的三方群，机器人只读。' : ''}</span>
+            <span className="f-hint">老板把她和我们拉进了这个群，之后由我们跟她对接：她在群里说的话照常起草，回复发在群里，老板也看得到；{othersLine(d?.boss_groups, { boss: true })}群里的话也会交给她私聊的草稿。{bossOn ? '「不接了」：不再起草，它还是她的三方群，机器人只读。' : ''}</span>
             {bossOn && unlink}
             {gone}
           </div>
@@ -634,7 +634,7 @@ function ThreePartyBlock({ p, d, busy, run }) {
         <>
           <div><UsersThree style={{ verticalAlign: -2 }} /> {g.why === '自动接的群' ? '自动接的群' : '手动接的群'}（{fmtClock(g.at)} 接手）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
           <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <span className="f-hint">{g.why === '自动接的群' ? '群里只有她一位登记过的达人，机器人自己接手了这个群' : '运营在微信里接手了这个群（「接群」）'}：她在群里说的话照常起草，回复发在群里，群里的人都看得到；别人说的话不起草。群里的话也会交给她私聊的草稿。「不接了」：不再起草，它还是她的三方群，机器人只读。</span>
+            <span className="f-hint">{g.why === '自动接的群' ? '群里只有她一位登记过的达人，机器人自己接手了这个群' : '运营在微信里接手了这个群（「接群」）'}：她在群里说的话照常起草，回复发在群里，群里的人都看得到；{othersLine(d?.boss_groups, { boss: true })}群里的话也会交给她私聊的草稿。「不接了」：不再起草，它还是她的三方群，机器人只读。</span>
             {unlink}
             {gone}
           </div>
