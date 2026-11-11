@@ -160,9 +160,10 @@ def test_more_lines_after_a_command_line_make_it_refused_whole():
 
 
 def test_a_note_line_reads_every_way_and_says_when_it_would_be_no_command():
-    assert parse("备注 小美 时间：周三").readings == (("小美 时间", "周三"), ("小美", "时间：周三"), ("小美 时间：周三", None))
-    assert parse("备注 Lucy Anne 只发链接").readings == (("Lucy", "Anne 只发链接"), ("Lucy Anne", "只发链接"),
-                                                         ("Lucy Anne 只发链接", None))
+    assert parse("备注 小美 时间：周三").readings == (("小美 时间", "周三", True), ("小美", "时间：周三", False),
+                                                     ("小美 时间：周三", None, False))
+    assert parse("备注 Lucy Anne 只发链接").readings == (("Lucy", "Anne 只发链接", False), ("Lucy Anne", "只发链接", False),
+                                                         ("Lucy Anne 只发链接", None, False))
     assert parse("备注 小美 不要问她要不要样品").asking is True and parse("备注 小美 只发链接").asking is False
 
 
@@ -420,6 +421,25 @@ def test_a_note_read_two_ways_takes_the_name_that_matches(desk):
     assert desk.prm.store.deal(deal(desk)["id"])["draft_note"] == "时间：周三"
 
 
+@pytest.mark.parametrize("how", ["stopped", "purged"])
+def test_a_stopped_or_cleaned_longer_name_is_never_a_shorter_live_ones_note(desk, clock, how):
+    """(Re-review 2026-11-11, N1.)  「Lucy Anne」 stopped (or her deal cleaned up), 「Lucy」 live: 「备注 Lucy Anne 只发链接」
+    writes nothing (never 「Anne 只发链接」 into Lucy's note), the answer is the stopped / cleaned one."""
+    desk.prm.register(FOURTH, "Lucy Anne", "测试达人")
+    desk.prm.register(OTHER, "Lucy", "测试达人")
+    if how == "stopped":
+        desk.prm.set_active(party(desk, FOURTH)["id"], False)
+        said = "「Lucy Anne」是停用的达人（不在达人名单里）：没做，请到控制台看"
+    else:
+        desk.prm.store.update_deal(deal(desk, FOURTH)["id"], clock.now, purged_at=clock.now)
+        said = "「Lucy Anne」的合作单收件信息已经按规定清过了：没做，请到控制台看"
+    for text in ("备注 Lucy Anne 只发链接", "备注 Lucy Anne：只发链接", "备注 Lucy Anne"):
+        assert desk.admin(text) == said, text
+    assert deal(desk, OTHER)["draft_note"] == "" and events(desk, "draft_note", OTHER) == []
+    assert desk.admin("备注 Lucy 只发链接").startswith("Lucy：起草备注换好了。")       # (her own name: hers)
+    assert deal(desk, OTHER)["draft_note"] == "只发链接"
+
+
 def test_a_name_with_spaces_goes_whole_and_none_of_it_into_the_note(desk):
     """(Review 2026-11-11, item 6a.)  The longest name that matches a live creator wins."""
     desk.prm.register(FOURTH, "Lucy Anne", "测试达人")
@@ -429,12 +449,38 @@ def test_a_name_with_spaces_goes_whole_and_none_of_it_into_the_note(desk):
     assert desk.admin("备注 Lucy Anne").startswith("Lucy Anne：起草备注（4 字）：周三再说")
 
 
-@pytest.mark.parametrize("words", ["不要问她要不要样品", "她什么款都可以", "样品还没", "只发链接...", "先别发货盘…",
-                                   "她问能不能便宜", "Only brief.", "她要的是哪个颜色？"])
-def test_a_note_for_a_name_that_matches_takes_any_words(desk, words):
-    """(Review 2026-11-11, item 6b.)  Once the name matches a live creator the rest is her note, whatever it says."""
-    assert desk.admin(f"备注 小美 {words}").startswith("抖音-小美：起草备注换好了。")
+QUESTION_LIKE = ["不要问她要不要样品", "她什么款都可以", "样品还没", "只发链接...", "先别发货盘…", "她问能不能便宜",
+                 "Only brief.", "她要的是哪个颜色？", "怎么写比较好？", "是什么意思"]
+
+
+@pytest.mark.parametrize("words", QUESTION_LIKE)
+def test_a_note_in_the_colon_form_takes_any_words(desk, words):
+    """(Review 2026-11-11, item 6b.)  「备注 名字：…」 with a name that matches a live creator: the rest is her note,
+    whatever it says."""
+    assert desk.admin(f"备注 小美：{words}").startswith("抖音-小美：起草备注换好了。")
     assert deal(desk)["draft_note"] == words
+
+
+@pytest.mark.parametrize("relay_only", ["off", "on"])
+@pytest.mark.parametrize("words", QUESTION_LIKE)
+def test_a_note_in_the_blank_form_that_reads_as_a_question_writes_nothing(clock, tmp_path, relay_only, words):
+    """(Re-review 2026-11-11, N3.)  The blank form with words that ask or hesitate: the admin may have been asking;
+    nothing written, nothing passed on, one line saying to use the colon (the cc part with CLAUDE_RELAY_ONLY)."""
+    d = make(clock, tmp_path, relay_only=relay_only)
+    try:
+        d.admin("备注 小美 只发链接")
+        before = len(jobs(d))
+        assert d.admin(f"备注 小美 {words}") == ("这句像是在问话，没改备注：要写成备注请用冒号「备注 小美：…」"
+                                               + ("；要问 Claude 请在前面加 cc" if relay_only == "on" else ""))
+        assert deal(d)["draft_note"] == "只发链接" and len(jobs(d)) == before
+        assert d.admin("备注 小美 撤销").startswith("抖音-小美：起草备注放回去了")      # (the last change is the first one)
+    finally:
+        d.stop()
+
+
+def test_a_note_in_the_blank_form_without_a_question_still_writes(desk):
+    assert desk.admin("备注 小美 只发链接，周三以后再约").startswith("抖音-小美：起草备注换好了。")
+    assert deal(desk)["draft_note"] == "只发链接，周三以后再约"
 
 
 def test_a_question_after_备注_that_names_nobody_goes_on_as_before(clock, tmp_path):

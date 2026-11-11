@@ -52,9 +52,12 @@ What is a command (``parse``): one line, 「<指令><空白><名字…>」, endi
 (wechat_review's ``_command_word``).  「做手卡怎么用」 (no blank after the word), 「签收了吗」, 「合作单 小美呢」, 「做手卡
 小美？」 (a question: ？ / 吗 / 呢 / 么 / 嘛 / 没 at its end, or 怎么 / 怎样 / 什么 / 为什么 / 如何 / 多久 / 多少 / 哪 … in it),
 「签收 小美…」 (hesitating) are none and go where they went before.  备注: once the line is 「备注」 + a blank + a name
-that matches a live creator, the rest is her note, whatever it says (a question too); its readings (``Typed.readings``:
-「备注 名字：文字」, and the name up to each blank) are tried, the longest name that matches wins (「备注 Lucy Anne
-只发链接」: her name whole, never a piece of it in the note); a 备注 line that names nobody follows the rules above.  A
+that matches a live creator, the rest is her note: in the colon form 「备注 名字：文字」 whatever it says, in the blank form
+only words that read as no question nor hesitation (a question there writes nothing, one line says to use the colon:
+the admin may have been asking); its readings (``Typed.readings``: 「备注 名字：文字」, and the name up to each blank) are
+tried, the longest name that matches wins (「备注 Lucy Anne 只发链接」: her name whole, never a piece of it in the note),
+and a stopped creator's or a cleaned deal's whole name longer than that one refuses it all (said so, nothing written);
+a 备注 line that names nobody follows the rules above.  A
 message whose first line is a command and that has more lines is refused whole (one command per message).  Only typed
 text in the admin's own one-to-one chat (never a group, a creator, anybody else; nothing while ADMIN_WXID is a group's or
 a registered creator's: wechat_review's ``admin_problem``), written lately (MAX_AGE_SEC on this PC's clock, as the
@@ -152,14 +155,17 @@ LONG_TEXT = f"名字太长了（最多 {NAME_MAX} 个字，只写她在名单里
 CC_HINT = "（要交给 Claude 请在前面加 cc）"
 ERROR_TEXT = "处理合作单指令的时候出错了（详见日志）：请到控制台看一下"
 NO_UNDO_TEXT = f"没有能撤销的起草备注（只能撤销 {UNDO_SEC // 3600} 小时内用「备注」换掉的最后一次，撤销一次）"
+# 「备注 名字 <words that ask or hesitate>」 (the blank form): nothing written; {name} the name as typed (masked)
+QUESTION_TEXT = "这句像是在问话，没改备注：要写成备注请用冒号「备注 {name}：…」"
+QUESTION_CC = "；要问 Claude 请在前面加 cc"
 
 
 @dataclass(frozen=True)
 class Typed:
     """A command line (``parse``): the word's action (``VERBS``, or ``help``), the name as typed, 备注's words (None: none
     given; 「清空」: ""), whether the message has more lines (refused whole), and for 备注 every way the line reads
-    (``readings``: ``(name, words)``, the one taken first) and whether it would be no command but for her name
-    (``asking``: a question or a hesitation)."""
+    (``readings``: ``(name, words, colon)``, the one taken first; ``colon``: 「名字：文字」) and whether it would be no
+    command but for her name (``asking``: a question or a hesitation)."""
 
     verb: str
     name: str = ""
@@ -230,20 +236,21 @@ def _note_words(words) -> Optional[str]:
 
 
 def _note_readings(rest: str) -> tuple:
-    """Every way 「备注 <rest>」 reads, ``(name, words)``: 「名字：文字」 first (a colon after the name, which may hold
-    spaces), then the name up to each blank in turn, the words after it (the whole: no words, the note shown)."""
+    """Every way 「备注 <rest>」 reads, ``(name, words, colon)``: 「名字：文字」 first (a colon after the name, which may hold
+    spaces: ``colon`` True), then the name up to each blank in turn, the words after it (the whole: no words, the note
+    shown)."""
     out: list = []
     colon = _NOTE_COLON.fullmatch(rest)
     if colon is not None and _key(colon.group(1)):
-        out.append((colon.group(1).strip(), _note_words(colon.group(2))))
+        out.append((colon.group(1).strip(), _note_words(colon.group(2)), True))
     for m in re.finditer(r"\S+", rest):
         name, words = rest[:m.end()].strip(), rest[m.end():].strip()
-        out.append((name, _note_words(words)))
+        out.append((name, _note_words(words), False))
     seen, kept = set(), []
-    for name, words in out:
+    for name, words, by_colon in out:
         if (_key(name), words) not in seen and _key(name):
             seen.add((_key(name), words))
-            kept.append((name, words))
+            kept.append((name, words, by_colon))
     return tuple(kept)
 
 
@@ -260,7 +267,7 @@ def parse(text) -> Optional[Typed]:
         readings = _note_readings(note.group(1).strip())
         if not readings:
             return None
-        name, words = readings[0]
+        name, words, _ = readings[0]
         return Typed(NOTE, name, words, more, "备注", readings, asking=bare is None)
     if bare is None:
         return None
@@ -413,7 +420,10 @@ class DealCommands:
             self._asked["closed"] = True
         found = None
         if typed.verb == NOTE:
-            typed, found = self._note_reading(typed)
+            typed, found, by_colon = self._note_reading(typed)
+            if found is not None and found.live and typed.asking and not by_colon and typed.text is not None:
+                logger.info("PRM: 合作单指令 note: the blank form reads as a question; nothing written")
+                return QUESTION_TEXT.format(name=_echo(typed.name)) + (QUESTION_CC if self._relay_only else "")
         size = len(_key(typed.name))
         if size < NAME_MIN:
             return SHORT_TEXT
@@ -440,22 +450,31 @@ class DealCommands:
 
     def _note_named(self, typed: Typed) -> bool:
         """Does a reading of this 备注 line name a live creator (``_find``)?"""
-        return any(NAME_MIN <= len(_key(name)) <= NAME_MAX and self._find(name).live for name, _ in typed.readings)
+        return any(NAME_MIN <= len(_key(name)) <= NAME_MAX and self._find(name).live for name, _, _ in typed.readings)
 
     def _note_reading(self, typed: Typed) -> tuple:
-        """备注: the reading whose name matches a live creator, the longest such name (her name with its spaces whole:
-        no piece of it in the note), and what it matched; none: the line as first read, None."""
-        best = None
-        for name, words in typed.readings:
+        """备注: ``(typed, found, colon)``: the reading whose name matches a live creator, the longest such name (her name
+        with its spaces whole: no piece of it in the note), what it matched and whether it is the colon form; a stopped
+        creator's or a cleaned deal's whole name longer than that one (or with no live one): that reading and only what
+        is not live (``_command`` refuses it so: never a shorter live name instead, review 2026-11-11 N1); none: the line
+        as first read, None."""
+        best = dead = None
+        for name, words, by_colon in typed.readings:
             size = len(_key(name))
             if not NAME_MIN <= size <= NAME_MAX:
                 continue
             found = self._find(name)
             if found.live and (best is None or size > len(_key(best[0]))):
-                best = (name, words, found)
+                best = (name, words, found, by_colon)
+            if found.dead_whole and (dead is None or size > len(_key(dead[0]))):
+                dead = (name, words, found, by_colon)
+        if dead is not None and (best is None or len(_key(dead[0])) > len(_key(best[0]))):
+            name, words, found, by_colon = dead
+            return replace(typed, name=name, text=words), Found(dead_whole=found.dead_whole, dead=found.dead), by_colon
         if best is None:
-            return typed, None
-        return replace(typed, name=best[0], text=best[1]), best[2]
+            return typed, None, typed.readings[0][2] if typed.readings else False
+        name, words, found, by_colon = best
+        return replace(typed, name=name, text=words), found, by_colon
 
     def _dead(self, typed: Typed, rows: list) -> str:
         """The name matches only a stopped creator or a cleaned deal: said so, the console's."""
