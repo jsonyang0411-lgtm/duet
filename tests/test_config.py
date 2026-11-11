@@ -766,6 +766,22 @@ class GroupConfigTests(unittest.TestCase):
             self.assertIn(name, str(ctx.exception))
 
 
+    def test_our_own_people_are_a_list_of_names_like_the_bosses(self):
+        """PRM_GROUP_OURS (2026-11-11): our colleagues' names, empty by default, white space at either end dropped, at
+        most 10 different names of 1-20 characters (split as PRM_GROUP_WITH's)."""
+        from src.config import BotConfig, _validate_config, load_config
+
+        self.assertEqual(BotConfig().prm_group_ours, "")
+        with patch.dict(os.environ, {"PRM_GROUP_OURS": " 品牌同事，测试运营 "}, clear=True):
+            self.assertEqual(load_config().prm_group_ours, "品牌同事，测试运营")
+        for good in ("", "品牌同事", ",".join(f"同事{n}" for n in range(10))):
+            _validate_config({"prm_group_ours": good})
+        for bad in (",".join(f"同事{n}" for n in range(11)), "品牌同事,品牌同事", "长" * 21, "🌸"):
+            with self.assertRaises(RuntimeError) as ctx:
+                _validate_config({"prm_group_ours": bad})
+            self.assertIn("PRM_GROUP_OURS", str(ctx.exception))
+
+
 class ReplyPartsConfigTests(unittest.TestCase):
     """PRM_REPLY_PARTS (src/prm/service.py reply_parts, 2026-10-30): a reply in up to 3 messages by default, 1-5."""
 

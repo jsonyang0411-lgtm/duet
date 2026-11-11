@@ -2396,6 +2396,37 @@ class TestPrmPages:
         page.get_by_text("好的，「测试双达人群」不接了").wait_for()
         assert posted[1:] == [("ignore", {"chat": "test_group_41@chatroom"})]
 
+    def test_deals_page_warns_of_a_name_of_ours_no_contact_has_and_says_why_a_group_was_asked_about(self, page, prm):
+        """我们自己的人 (PRM_GROUP_OURS, 2026-11-11): a name no one contact has is said on the groups card (``ours_warning``)
+        even with PRM_BOSS_GROUPS off and nothing to choose; a group the scan asks about with only one registered creator
+        says why it was not linked by itself (``why``)."""
+        now = prm.clock.now
+        warning = "PRM_GROUP_OURS 里的「测试同事」在这个微信里找不到 / 有重名：认出来以前，机器人不自己接群"
+        bg = {"enabled": False, "why_not": "", "warning": "", "boss": [], "boss_call": "老板", "pending": [],
+              "waiting": 0, "linked": 0, "ours": ["测试同事"], "ours_warning": warning}
+
+        def state_of(state):
+            state.update(boss_groups=json.loads(json.dumps(bg)))
+
+        self._serve_prm(page, state_of)
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        card = page.locator(".prm-boss-groups")
+        card.wait_for()
+        assert card.locator(".prm-ours-warning").inner_text() == warning
+        assert card.locator(".prm-manual-group").count() == 0
+        bg["manual"] = [{"chat": "test_group_51@chatroom", "name": "测试单达人群", "size": 3, "asked_at": now,
+                         "until": None, "three_party": False, "by": "scan",
+                         "why": "PRM_GROUP_OURS 里有名字还没认出来，分不清群里谁是我们自己的人",
+                         "members": [{"wxid": "wxid_test_51a", "name": "测试达人甲", "registered": True, "stopped": False},
+                                     {"wxid": "wxid_test_51b", "name": "测试同事", "registered": False,
+                                      "stopped": False}]}]
+        page.reload()
+        row = page.locator(".prm-manual-group")
+        row.wait_for()
+        assert "机器人看到的群：没自动接" in row.inner_text() and "不止一位" not in row.inner_text()
+        assert row.locator(".prm-ask-why").inner_text() == ("为什么没自动接：PRM_GROUP_OURS 里有名字还没认出来，"
+                                                            "分不清群里谁是我们自己的人")
+
     def test_deals_page_has_the_jie_qun_question_above_the_bosss_groups_and_its_buttons_on(self, page, prm):
         """PRM_BOSS_GROUPS on, the scan unable to run (``why_not``: its buttons off): the admin's open question is on the
         「老板拉的群」 card all the same, its 「是她」 on; her deal's own 三方群 says so."""

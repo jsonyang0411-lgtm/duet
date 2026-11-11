@@ -278,6 +278,25 @@ class AdvancedPostTests(_TempEnv):
             self.assertEqual(adv.validate_updates({key: "on"}, {}), {})
             self.assertEqual(adv.normalize(key, "yes"), "on")
 
+    def test_our_own_people_are_a_text_field_after_her_side_empty_by_default(self):
+        """PRM_GROUP_OURS (2026-11-11): our colleagues' names, a text field right after PRM_GROUP_HER_SIDE, empty by
+        default (empty saves as empty), used with the copilot on; too many names are refused on its own field."""
+        from src.web import advanced_config as adv
+
+        groups = _request("/api/advanced")[1]["groups"]
+        prm = next(g for g in groups if g["id"] == "prm")
+        keys = [f["key"] for f in prm["fields"]]
+        field = prm["fields"][keys.index("PRM_GROUP_HER_SIDE") + 1]
+        self.assertEqual((field["key"], field["type"], field["value"]), ("PRM_GROUP_OURS", "text", ""))
+        self.assertTrue(field["empty_ok"])
+        self.assertEqual([r["key"] for r in field["requires"]], ["PRM_COPILOT"])
+        self.assertIn("只存在这台电脑的 .env 里", field["help"])
+        status, body = _request("/api/advanced", "POST",
+                                {"values": {"PRM_GROUP_OURS": ",".join(f"同事{n}" for n in range(11))}})
+        self.assertFalse(body["ok"])
+        self.assertEqual(list(body["errors"]), ["PRM_GROUP_OURS"], body)
+        self.assertEqual(adv.validate_updates({"PRM_GROUP_OURS": "品牌同事,测试运营"}, {}), {})
+
     def test_reach_last_spoke_is_the_copilots_last_switch_off_by_default(self):
         """PRM_REACH_LAST_SPOKE (2026-11-11): what the bot starts itself goes where her side last spoke; an on/off switch
         at the end of the copilot's settings, off by default, used with the copilot on; a bad value is refused on its own

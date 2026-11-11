@@ -2236,8 +2236,9 @@ class PrmService:
         said = message_text(self.boss_groups.record_msg(msg, party, row))   # (a 聊天记录: no boss's name in it)
         if self._three_party_lines(row, chat_id, party):
             sender = str(msg.get("sender_id") or "")
-            kind = ("creator" if sender == party["wxid"] else "boss"
-                    if self.boss_groups.who(row, sender, str(msg.get("sender_name") or "")) == BOSS_WHO else "member")
+            said_by = self.boss_groups.who(row, sender, str(msg.get("sender_name") or ""))
+            kind = ("creator" if sender == party["wxid"] else "boss" if said_by == BOSS_WHO
+                    else "us" if said_by == GROUP_US else "member")     # (us: one of ours, PRM_GROUP_OURS)
             self._group_line(party, chat_id, kind, said, self._local(written) if written else now, now)
         speaker = str(msg.get("sender_id") or "")
         # 她那边的人 (PRM_GROUP_HER_SIDE): her assistant's, her 商务's line is drafted as hers
@@ -2248,12 +2249,14 @@ class PrmService:
             self.boss_groups.add_context(chat_id, who, self._mask(party["id"], said, now),
                                          self._local(written) if written else now)
             logger.info("PRM: a line of %s in boss group %s… kept for party %d's next draft (not answered)",
-                        "the boss" if who == BOSS_WHO else "another member", chat_id[:8], party["id"])
+                        "the boss" if who == BOSS_WHO else "one of ours" if who == GROUP_US else "another member",
+                        chat_id[:8], party["id"])
             if row.get("manual"):
                 # 接手任何合作群 (review 2026-11-09): a big group's members do not make a Mac job each: the boss's line
-                # has her waiting draft drafted again at once, anybody else's at most every REDRAFT_GAP_SEC (one owed
-                # till then, ``sweep_owed_redrafts``) and at most REDRAFT_MAX times (then her draft's card counts them)
-                if who != BOSS_WHO:
+                # (and one of our own people's, PRM_GROUP_OURS) has her waiting draft drafted again at once, anybody
+                # else's at most every REDRAFT_GAP_SEC (one owed till then, ``sweep_owed_redrafts``) and at most
+                # REDRAFT_MAX times (then her draft's card counts them)
+                if who not in (BOSS_WHO, GROUP_US):
                     self._lines_since[chat_id] = self._lines_since.get(chat_id, 0) + 1
                     if self._auto_redrafts.get(chat_id, 0) >= REDRAFT_MAX:
                         self._unheard(party, chat_id)
@@ -2261,7 +2264,8 @@ class PrmService:
                     if now - self._redrafted.get(chat_id, 0.0) < REDRAFT_GAP_SEC:
                         self._redraft_owed.setdefault(chat_id, now)
                         return True
-                self._group_redraft(party, chat_id, row, now, how="others" if who != BOSS_WHO else "boss")
+                self._group_redraft(party, chat_id, row, now,
+                                    how="others" if who not in (BOSS_WHO, GROUP_US) else "boss")
                 return True
             self._redraft_group(party, chat_id, row, now)
             return True
@@ -2326,6 +2330,9 @@ class PrmService:
             return f"已自动接群（{AUTO_WHY}）：{said}；{undo}"
         if kind == ASK_NOTICE:
             creators = [review.creator_name(p) for p in info.get("creators") or [] if p]
+            if info.get("why"):                # (one creator, but a doubt: BossGroups._auto_doubt)
+                return (f"{group}{size}里有一位登记过的达人（{'、'.join(creators) or '她'}），但{info['why']}，机器人没自动接："
+                        f"{pick}选她，或者到控制台「合作单」页顶上选；不是合作群就回「不接」或者不用管")
             return (f"{group}{size}里有 {len(creators)} 位登记过的达人（{'、'.join(creators)}），机器人不猜是谁的群，没自动接："
                     f"{pick}选一位，或者到控制台「合作单」页顶上选；不是合作群就回「不接」或者不用管")
         why = f"（里面的 {review.creator_name(party)} 已经有接手的群，没自动接）" if party else ""
@@ -2391,7 +2398,9 @@ class PrmService:
                 items.append((msg, written, "side"))
             else:
                 who = self.boss_groups.who(row, sender, str(msg.get("sender_name") or ""))
-                items.append((msg, written, "boss" if who == BOSS_WHO else "member"))
+                if who == GROUP_US:            # (one of our own people, PRM_GROUP_OURS: ours, it answers her too)
+                    ours_at = max(ours_at, written)
+                items.append((msg, written, "boss" if who == BOSS_WHO else "us" if who == GROUP_US else "member"))
         waiting = [msg for msg, written, who in items if who in ("creator", "side") and written > ours_at]
         tail = {id(msg) for msg in waiting[-LINK_TAIL:]}
         sided = {id(msg) for msg, _, who in items if who == "side"}
@@ -2703,8 +2712,9 @@ class PrmService:
         now = self._clock()
         written = float(msg.get("timestamp", 0) or 0)
         sender = str(msg.get("sender_id") or "")
-        who = ("creator" if sender == party["wxid"] else
-               "boss" if self.boss_groups.who({}, sender, str(msg.get("sender_name") or "")) == BOSS_WHO else "member")
+        said_by = self.boss_groups.who({}, sender, str(msg.get("sender_name") or ""))
+        who = ("creator" if sender == party["wxid"] else "boss" if said_by == BOSS_WHO
+               else "us" if said_by == GROUP_US else "member")     # (us: one of ours, PRM_GROUP_OURS)
         self._group_line(party, chat_id, who, message_text(self.boss_groups.record_msg(msg, party)),
                          self._local(written) if written else now, now)
         logger.info("PRM: a line in party %d's 三方群 %s… kept for her private drafts (read only, not answered)",

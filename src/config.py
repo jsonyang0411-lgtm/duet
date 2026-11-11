@@ -452,6 +452,12 @@ class BotConfig:
     # her latest line in private, or none: as before.  Decided when the message is made.  "off" (the default): her private
     # chat when she has one, else the group, as before.
     prm_reach_last_spoke: str = "off"
+    # 我们自己的人 (src/prm/boss_groups.py, 2026-11-11): the names of our own people (colleagues) in creators' groups, by
+    # their names in this account's contacts (their 备注), comma-separated, at most 10 (this PC's .env only, never the
+    # repo), resolved as PRM_GROUP_WITH's bosses are: never "who is she" (the scan, 接群, the boss scan), never her side
+    # (prm_group_her_side), their lines context.  A name no one contact has: the console warns and no group is linked or
+    # taken over by itself until it is put right.  "" (the default) = none.
+    prm_group_ours: str = ""
     # === WeChat edge (src/edge, edge-protocol.md) for the Mac business service ===
     # "on": Windows only receives and sends WeChat messages for the creators the Mac lists;
     # the Mac pulls /edge/* on the relay's port with PRM_EDGE_TOKEN.  Not with PRM_COPILOT.
@@ -710,6 +716,12 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(f"PRM_GROUPS_AUTO_LINK must be off or on, got {kwargs.get('prm_groups_auto_link')}")
     if kwargs.get("prm_group_her_side", "off") not in ("off", "on"):
         errors.append(f"PRM_GROUP_HER_SIDE must be off or on, got {kwargs.get('prm_group_her_side')}")
+    ours_names = [" ".join(n.split()) for n in re.split(r"[,，、;；]", str(kwargs.get("prm_group_ours", "") or ""))
+                  if n.strip()]
+    if len(ours_names) > 10 or len(set(ours_names)) != len(ours_names):
+        errors.append("PRM_GROUP_OURS must name at most 10 different people (comma-separated)")
+    elif any(len(n) > 20 or not any(ch.isalnum() for ch in n) for n in ours_names):
+        errors.append("PRM_GROUP_OURS: each name must be 1-20 characters with a letter, a digit or a Chinese character")
     if kwargs.get("prm_reach_last_spoke", "off") not in ("off", "on"):
         errors.append(f"PRM_REACH_LAST_SPOKE must be off or on, got {kwargs.get('prm_reach_last_spoke')}")
     prm_edge = kwargs.get("prm_edge", "off")
@@ -880,6 +892,7 @@ def load_config() -> BotConfig:
         "prm_groups_auto_link": _parse_switch(os.getenv("PRM_GROUPS_AUTO_LINK", "off")),
         "prm_group_her_side": _parse_switch(os.getenv("PRM_GROUP_HER_SIDE", "off")),
         "prm_reach_last_spoke": _parse_switch(os.getenv("PRM_REACH_LAST_SPOKE", "off")),
+        "prm_group_ours": os.getenv("PRM_GROUP_OURS", "").strip(),
         "prm_edge": _parse_switch(os.getenv("PRM_EDGE", "off")),
         "prm_edge_token": os.getenv("PRM_EDGE_TOKEN", "").strip(),
         "edge_url": os.getenv("EDGE_URL", "").strip(),
