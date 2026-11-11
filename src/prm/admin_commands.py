@@ -806,7 +806,13 @@ class DealCommands:
         if group is not None:
             reason = "她那边最近是在这个群里说的话" if why == REACH_LAST_SPOKE else "她没有和我们的私聊"
             return f"{what}发到群「{self._hide(party, deal, group.get('name') or '（没有群名）')}」（{reason}）"
-        if not (getattr(service, "_reach_last_spoke", False) and service.boss_groups.party_has_group(party["id"])):
+        if not service.boss_groups.party_has_group(party["id"]):
+            return f"{what}发私聊"
+        if service._private_known(party) is None:
+            # (the backend cannot say now whether she has a private chat: the deal page's reach "unknown"; the sends
+            # take her private chat meanwhile, never a group for that, and nothing approved moves unseen)
+            return f"{what}现在说不准发到哪：机器人现在读不出她有没有私聊，先按私聊算"
+        if not getattr(service, "_reach_last_spoke", False):
             return f"{what}发私聊"
         latest = service._last_spoken(party, deal)
         reason = ("她还没说过话" if not latest else "她最近说话的那个群机器人现在不在里面起草" if latest.endswith("@chatroom")

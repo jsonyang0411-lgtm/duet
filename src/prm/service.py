@@ -3330,21 +3330,38 @@ class PrmService:
         """Re-review 2026-11-11 N1: an approved packet whose target changed since a person (or its gate) approved it is
         not sent: it goes back to 待审批 (route review), aimed at where it would go now (``chat``; ``group``: that group's
         row, or None for her private chat), its card saying so (``meta.hold``, 「发送对象变了：现在会发到…，请再看一眼」);
-        a second approval sends it there.  Returns None (nothing to send now)."""
+        a second approval sends it there.  Returns None (nothing to send now).
+        Merge 2026-11-11: ``meta.retarget`` counts the times (微信里审批草稿 tells such a draft again, 「第 N 次通知」 with
+        the new target: ``WechatReview.retargeted``, ``attention_seen``; an answer to the older notice does nothing); the
+        holds it was made with stay (``meta.opening`` / ``huopan`` / ``handcards``, no ``auto_at``: nothing sends a waiting
+        draft by itself).  A platform draft (its action run and verified, its reply approved with it) never goes back to
+        be approved again (that would offer the action once more): it fails as one whose group closed does, its reply
+        for a person to send by hand (``_fail_closed``: 「平台动作已经核验成功，但回复没发出去：…」)."""
         name = str((group or {}).get("name") or "")
+        where = f"群「{name or '（没有群名）'}」" if group is not None else "她的私聊"
+        hold = f"发送对象变了：现在会发到{where}，请再看一眼"
+        if packet.get("tool", MESSAGE_TOOL) != MESSAGE_TOOL:
+            if self._fail_closed(packet, hold.replace("，请再看一眼", ""), self._clock()):
+                logger.warning("PRM: packet %d (a platform draft): where its reply goes changed since it was approved; "
+                               "not sent, for a person to send by hand", packet["id"])
+            return None
         meta = {k: v for k, v in (packet.get("meta") or {}).items()
                 if k not in ("channel", "group_name", "group_manual", "reach", "group_told", "decided_chat", "auto_at")}
         if group is not None:
             meta.update(channel=GROUP_CHANNEL, group_name=name[:60], **({"group_manual": True} if group.get("manual")
                                                                           else {}), **reach_meta(why))
-        where = f"群「{name or '（没有群名）'}」" if group is not None else "她的私聊"
-        meta["hold"] = f"发送对象变了：现在会发到{where}，请再看一眼"
+        meta["hold"] = hold
+        meta["retarget"] = int(meta.get("retarget") or 0) + 1 if isinstance(meta.get("retarget"), int) else 1
         if "auto_at" in (packet.get("meta") or {}):
             meta["auto_held"] = meta["hold"]   # (开场白自动发: its time gone, the card says why it did not go by itself)
         if self._store.aim_packet(packet["id"], chat, {}) and self._store.move(
                 packet["id"], (APPROVED, SENDING), PENDING, decided_at=None, route=gates.REVIEW, meta=meta):
             logger.warning("PRM: packet %d: where it goes changed since it was approved (now %s); back to 待审批",
                            packet["id"], "a group" if group is not None else "her private chat")
+            try:
+                self.wechat_review.retargeted(packet["id"])   # (told in WeChat: told again, the new target in it)
+            except Exception:
+                logger.exception("PRM: packet %d: its notice in WeChat could not be opened again", packet["id"])
         return None
 
     def _moved_since_decided(self, packet: dict) -> bool:

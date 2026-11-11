@@ -495,14 +495,19 @@ def attention_seen(packet: dict) -> str:
     """What a notification shows of a draft's attention, as a fingerprint (``wechat_reviews.seen``; never her words):
     whether it asks for attention and its reason (``r``, a hash; ``k``: how many recalls it tells of, a recall puts its
     note first: ``PrmStore.hold_for_review``, ``service.recall_note``), and whether lines of the group came that it did
-    not hear (``u``, ``meta.unheard``: more of them later are the same news, never a notice each)."""
+    not hear (``u``, ``meta.unheard``: more of them later are the same news, never a notice each); and how many times
+    its target changed after it was approved (``t``, ``meta.retarget``, PrmService ``_retarget``: merge 2026-11-11; only
+    on a draft that has it, so no other draft's fingerprint changes)."""
     meta = packet.get("meta") if isinstance(packet.get("meta"), dict) else {}
     unheard = meta.get("unheard")
     attention = bool(packet.get("needs_attention"))
     reason = str(packet.get("reason") or "") if attention else ""
     said = hashlib.sha256(reason.encode("utf-8")).hexdigest()[:16] if reason else ""
+    moved = meta.get("retarget")
     return json.dumps({"a": int(attention), "r": said, "k": reason.count(RECALL_WORDS),
-                       "u": int(isinstance(unheard, int) and not isinstance(unheard, bool) and unheard > 0)},
+                       "u": int(isinstance(unheard, int) and not isinstance(unheard, bool) and unheard > 0),
+                       **({"t": moved} if isinstance(moved, int) and not isinstance(moved, bool) and moved > 0
+                          else {})},
                       sort_keys=True)
 
 
@@ -995,6 +1000,11 @@ class WechatReview:
         new preview that ended since: ``_shown``)."""
         old, new = _seen_of(row.get("seen")), _seen_of(attention_seen(packet))
         bits = []
+        if new.get("t") and new.get("t") != old.get("t"):
+            # (PrmService._retarget: approved for one chat, it would go to another now; merge 2026-11-11)
+            hold = str((packet.get("meta") or {}).get("hold") or "")
+            bits.append((hold if hold.startswith("发送对象变了") else "发送对象变了，请再看一眼")
+                        + "（上一条通知和你的回复作废，没有发出去）")
         if new.get("a") and (old.get("r") != new.get("r") or not old.get("a")):
             recalled = int(new.get("k") or 0) > int(old.get("k") or 0)     # (her recall's note, put first in it)
             bits.append("她撤回了一条消息（见「要注意」）" if recalled else "要注意有新的（见下面）")
@@ -1009,6 +1019,18 @@ class WechatReview:
         if self._shown_changed(row, packet):
             bits.append("重新预览过了（下面是新的预览）")
         return "；".join(bits) or "要注意有变化"
+
+    def retargeted(self, number: int) -> bool:
+        """A draft told here went back to 待审批 because where it goes changed after it was approved (PrmService
+        ``_retarget``, merge 2026-11-11).  Approved here: its row is open again (``notified``: the answer that approved it
+        is done with), so the next round tells it again, 「第 N 次通知」 saying the new target (``_changed``:
+        ``attention_seen``'s ``t``); approved in the console: the row is open already, the same.  Until that notice is
+        out, and quoting the older one after it, an answer does nothing (``_changed_after``).  True when a row opened."""
+        opened = self._store.set_wechat_review(int(number), (ANSWERED,), self._clock(), state=NOTIFIED, decision="",
+                                               answered_at=None, told_at=None, proposed="")
+        if opened:
+            logger.info("PRM: draft %d (approved in WeChat) goes elsewhere now; it is told again", number)
+        return opened
 
     def _goes_by_itself(self, packet: dict) -> bool:
         """开场白没人处理就自动发 (PRM_OPENING_AUTO_MIN): ``send_due_openings`` sends it by itself when its time comes."""

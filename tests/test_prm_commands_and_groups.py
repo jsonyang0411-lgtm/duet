@@ -526,3 +526,157 @@ def test_the_group_answers_name_a_deal_as_the_commands_do_never_like_a_draft(clo
         assert f"合作单 {deal_id(d)} 号" in notice and "#" not in notice
     finally:
         d.stop()
+
+
+# ── merge of e907574 (re-review N1–N6): a target that changes after the approval, with 微信里审批草稿 ─────────
+
+def she_leaves(d, chat=GROUP):
+    """She leaves the group; a round of the scan says so on her deal (her side may not be reached there).  (With
+    PRM_BOSS_GROUPS on the boss scan's first round only keeps its baseline: a minute later it looks at the groups.)"""
+    d.backend.groups[chat]["members"].remove(CREATOR)
+    key = bg.LEFT_NOTICE + chat
+    for _ in range(3):
+        d.clock.now += bg.BOSS_SCAN_SEC + 1
+        d.prm.boss_groups.sweep()
+        if any(n["key"] == key for n in d.prm.store.deal(deal_id(d))["notices"]):
+            return
+    raise AssertionError("her leaving the group was not seen")
+
+
+def notices_of(d, number) -> list:
+    return [t for t in d.told() if t.startswith(f"#{number} 草稿")]
+
+
+def test_a_draft_approved_in_wechat_whose_target_changed_is_told_again_with_the_new_target(clock, tmp_path):
+    """Her side last spoke in her team's group: a 补发货盘 the admin ordered in WeChat goes there and is approved there
+    (quoting its notice); she leaves the group before it goes.  Nothing is sent; the draft is back in 待审批 aimed at her
+    private chat, and the admin is told again (「第 2 次通知」) with the new target and why; the old notice's 1 sends
+    nothing, the fresh one's sends it where it says."""
+    d = make(clock, tmp_path)
+    try:
+        link_by_hand(d)
+        spoke(d, "private")
+        spoke(d, "group")
+        assert "已派补发货盘" in d.admin("补发货盘 小美")
+        packet = drafted(d, open_job(d, GROUP)["id"], text="老师，货盘再发您一份～")
+        d.review.sweep()
+        old = head(d, packet["id"])
+        assert "已批准" in d.admin("1", quote=old)
+        assert d.prm.store.packet(packet["id"])["meta"]["decided_chat"] == GROUP    # (from WeChat too)
+        she_leaves(d)
+        assert d.prm.send_approved() == 0 and d.to(GROUP) == [] and d.to(CREATOR) == []
+        back = d.prm.store.packet(packet["id"])
+        assert (back["status"], back["route"], back["chat_id"]) == ("pending", "review", CREATOR)
+        assert back["meta"]["hold"] == "发送对象变了：现在会发到她的私聊，请再看一眼" and back["meta"]["huopan"] is True
+        assert d.prm.store.wechat_review(packet["id"])["state"] == "notified"
+        stale = d.admin("1", quote=old)                                   # (before the fresh notice is out)
+        assert "这份草稿在通知以后有变化" in stale and d.prm.store.packet(packet["id"])["status"] == "pending"
+        assert d.review.sweep() == 1
+        [first, fresh] = notices_of(d, packet["id"])
+        assert fresh.startswith(f"#{packet['id']} 草稿（第 2 次通知）")
+        assert "发送对象变了：现在会发到她的私聊" in fresh.split("\n")[1] and "私聊" in fresh.split("\n")[0]
+        assert "这份草稿在通知以后有变化" in d.admin("1", quote=old)       # (the old notice: nothing)
+        assert d.prm.store.packet(packet["id"])["status"] == "pending"
+        assert "已批准" in d.admin("1", quote=fresh.split("\n")[0])
+        d.prm.send_approved()
+        assert d.to(CREATOR) == ["老师，货盘再发您一份～"] and d.to(GROUP) == []
+    finally:
+        d.stop()
+
+
+def test_a_draft_approved_in_the_console_whose_target_changed_is_told_again_too(clock, tmp_path):
+    d = make(clock, tmp_path)
+    try:
+        link_by_hand(d)
+        spoke(d, "private")
+        spoke(d, "group")
+        assert "已派补发货盘" in d.admin("补发货盘 小美")
+        packet = drafted(d, open_job(d, GROUP)["id"])
+        d.review.sweep()
+        assert d.prm.decide(packet["id"], "send")["ok"]
+        assert d.prm.store.packet(packet["id"])["meta"]["decided_chat"] == GROUP
+        she_leaves(d)
+        assert d.prm.send_approved() == 0
+        assert d.review.sweep() == 1
+        assert notices_of(d, packet["id"])[-1].startswith(f"#{packet['id']} 草稿（第 2 次通知）")
+    finally:
+        d.stop()
+
+
+@pytest.mark.parametrize("typed", ["写开场白 小美", "做手卡 小美", "补发货盘 小美"])
+def test_what_a_command_ordered_keeps_waiting_when_it_comes_back(clock, tmp_path, typed):
+    """A 开场白 / 做手卡 / 补发货盘 ordered in WeChat, approved for her group, bounced by the target change: back in
+    待审批 it still never goes by itself (自动模式, 开场白自动发 on; hours later), and keeps what it was made with."""
+    from test_prm_admin_commands import cards_drafted
+
+    d = make(clock, tmp_path)
+    try:
+        link_by_hand(d)
+        spoke(d, "private")
+        spoke(d, "group")
+        d.prm.set_auto_mode(True)
+        assert "已派" in d.admin(typed), typed
+        job = open_job(d, GROUP)
+        if typed.startswith("做手卡"):
+            packet = cards_drafted(d, job)
+        else:
+            packet = drafted(d, job["id"], text="老师您好～", kind="greeting" if typed.startswith("写开场白") else "faq")
+        assert packet["status"] == "pending" and packet["chat_id"] == GROUP and "auto_at" not in packet["meta"]
+        d.review.sweep()
+        assert "已批准" in d.admin("1", quote=head(d, packet["id"]))
+        she_leaves(d)
+        assert d.prm.send_approved() == 0
+        back = d.prm.store.packet(packet["id"])
+        assert (back["status"], back["chat_id"]) == ("pending", CREATOR)
+        assert "auto_at" not in back["meta"] and back["meta"]["hold"].startswith("发送对象变了")
+        kind = {"写开场白": "opening", "做手卡": "handcards", "补发货盘": "huopan"}[typed.split()[0]]
+        assert back["meta"].get(kind), back["meta"]
+        assert back["attachments"] == packet["attachments"]
+        d.clock.now += 3 * 3600
+        assert d.prm.send_due_openings() == 0 and d.prm.send_approved() == 0
+        assert d.prm.store.packet(packet["id"])["status"] == "pending" and d.to(CREATOR) == [] and d.to(GROUP) == []
+    finally:
+        d.stop()
+
+
+def test_a_platform_drafts_reply_never_comes_back_to_be_approved_again(clock, tmp_path):
+    """A 专属佣金 step's reply, its action verified, approved for her group: she left the group before it went.  Back
+    in 待审批 it would offer the platform action once more: it fails instead, the reply for a person to send by hand."""
+    d = make(clock, tmp_path)
+    try:
+        link_by_hand(d)
+        spoke(d, "private")
+        spoke(d, "group")
+        deal = deal_id(d)
+        number = d.prm.store.add_packet(
+            deal_id=deal, party_id=d.her_party["id"], job_id=None, chat_id=GROUP, kind="other", text="老师专属佣金开好啦～",
+            attachments=[], intent="", slots={}, stage_proposal="", needs_attention=False, reason="",
+            status="approved", route="review", decided_at=d.clock.now, tool="dy.designated_commission",
+            platform={"execution": {"outcome": "VERIFIED_SUCCESS"}},
+            meta={"channel": "group", "group_name": GROUP_NAME, "group_manual": True, "reach": "last_spoke",
+                  "lane": "system"}, now=d.clock.now)
+        she_leaves(d)
+        assert d.prm.send_approved() == 0 and d.to(GROUP) == [] and d.to(CREATOR) == []
+        packet = d.prm.store.packet(number)
+        assert packet["status"] == "failed"
+        assert packet["error"].startswith("平台动作已经核验成功，但回复没发出去：发送对象变了：现在会发到她的私聊")
+    finally:
+        d.stop()
+
+
+def test_the_status_says_it_cannot_tell_when_the_backend_cannot_say_whether_she_has_a_private_chat(clock, tmp_path):
+    d = make(clock, tmp_path, prm_reach_last_spoke="off")
+    try:
+        link_by_hand(d)
+        spoke(d, "group")                                                 # (no line of hers in private)
+        d.backend.readable = False
+        assert d.prm.boss_groups.knows_private(CREATOR) is None
+        line = next(x for x in status(d) if x.startswith("回复："))
+        assert line.endswith("机器人主动发的（开场白、货盘、手卡、发货通知）现在说不准发到哪：机器人现在读不出她有没有私聊，先按私聊算")
+        assert d.prm._reach_out(d.prm.store.party_by_wxid(CREATOR), d.prm.store.deal(deal_id(d))) == {
+            "where": "private", "why": "unknown"}
+        d.backend.readable = True
+        line = next(x for x in status(d) if x.startswith("回复："))
+        assert f"发到群「{GROUP_NAME}」（她没有和我们的私聊）" in line, line
+    finally:
+        d.stop()
