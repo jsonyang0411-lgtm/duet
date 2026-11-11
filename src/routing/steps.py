@@ -169,7 +169,8 @@ def admin_command(ctx: RouteContext) -> Optional[Stop]:
     """The admin's account commands (friends, help) in the admin's private chat.
 
     Only ``ADMIN_WXID`` in a one-to-one chat; a group is never answered, an @ there
-    included.  Text that is not a command passes on (to silence)."""
+    included.  Text that is not a command passes on (to silence).  The handler gets the
+    message too (合作单指令, PRM_WECHAT_COMMANDS: typed text only)."""
     router, msg = ctx.router, ctx.msg
     admin = str(getattr(router._config, "admin_wxid", "") or "")
     handler = getattr(router, "_admin", None)
@@ -178,7 +179,7 @@ def admin_command(ctx: RouteContext) -> Optional[Stop]:
     content = _QUOTE_PREFIX.sub("", str(msg.get("content", "") or "")).strip()
     if not content:
         return None
-    reply = handler.handle(content)
+    reply = handler.handle(content, msg=msg)
     if not reply:
         return None
     ctx.trace.reason("admin_command")

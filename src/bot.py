@@ -516,6 +516,10 @@ class Bot:
         # 三方群 (src/prm/three_party.py): the same friend manager and breaker, the backend for her chat's name and
         # for the new group in the database
         prm.three_party.attach(admin_handler, self._auto_friend, backend)
+        # 合作单指令 (src/prm/admin_commands.py, PRM_WECHAT_COMMANDS): 做手卡 / 补发货盘 / 签收 … <达人>; off: not handed over
+        commands = getattr(prm, "deal_commands", None)
+        if commands is not None and commands.on:
+            admin_handler.set_deal_commands(commands)
 
     @staticmethod
     def _admin_notifier(config, backend):
@@ -545,8 +549,12 @@ class Bot:
         # When the bot only relays, the admin's management commands still go to the
         # admin handler (route step admin_command), not to the Mac.
         is_command = getattr(getattr(router, "_admin", None), "is_command", None)
+        # 合作单指令 (src/prm/admin_commands.py): named in the help too while PRM_WECHAT_COMMANDS and the copilot are on
+        deal_help = ""
+        if getattr(config, "prm_copilot", "off") == "on" and getattr(config, "prm_wechat_commands", "off") == "on":
+            from .prm.admin_commands import HELP_LINE as deal_help
         relay = ClaudeRelay(config, send=backend.send_text, send_file=getattr(backend, "send_file", None),
-                            reserved=is_command, extra_help=RELAY_HELP if is_command else "")
+                            reserved=is_command, extra_help=RELAY_HELP + deal_help if is_command else "")
         try:
             relay.start()
         except OSError:

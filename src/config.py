@@ -326,6 +326,13 @@ class BotConfig:
     # ADMIN_WXID, or with a group's id or a registered creator's wxid in it, it does nothing (the console says why).
     # "off" (the default): nothing of it.
     prm_wechat_review: str = "off"
+    # 合作单指令 (src/prm/admin_commands.py, 2026-11-11): "on": in the admin's one-to-one chat (ADMIN_WXID) a typed line
+    # 「做手卡 <达人>」「补发货盘 <达人>」「写开场白 <达人>」「签收 <达人>」「备注 <达人> <文字>」「接管 <达人>」「副驾驶 <达人>」
+    # 「合作单 <达人>」 runs the console's deal button for her deal (found by her 称呼, a piece of it too; several: 「选 N」),
+    # with its checks, and is answered in one line; 「指令」 lists them.  Nothing is sent to a creator by it: what a
+    # button makes (a draft job, a note, a stage, a mode) waits or goes as when clicked.  Not on the Mac's edge side.
+    # "off" (the default): nothing of it, every line goes where it went before.
+    prm_wechat_commands: str = "off"
     # An operator's own WeChat reply in a creator's chat (or the console) gives the chat to
     # a person for this long: the creator's messages are only recorded meanwhile.
     prm_takeover_min: int = 120
@@ -598,6 +605,8 @@ def _validate_config(kwargs: dict) -> None:
     # (on without ADMIN_WXID it only does nothing: 「待审批」 says why.  Not refused, as PRM_BOSS_GROUPS is not.)
     if kwargs.get("prm_wechat_review", "off") not in ("off", "on"):
         errors.append(f"PRM_WECHAT_REVIEW must be off or on, got {kwargs.get('prm_wechat_review')}")
+    if kwargs.get("prm_wechat_commands", "off") not in ("off", "on"):
+        errors.append(f"PRM_WECHAT_COMMANDS must be off or on, got {kwargs.get('prm_wechat_commands')}")
     if not (5 <= int(kwargs.get("prm_takeover_min", 120)) <= 1440):
         errors.append(f"PRM_TAKEOVER_MIN must be between 5 and 1440, got {kwargs.get('prm_takeover_min')}")
     if not (0 <= int(kwargs.get("prm_holding_min", 10)) <= 120):
@@ -818,6 +827,7 @@ def load_config() -> BotConfig:
         "prm_db": os.getenv("PRM_DB", "data/prm.db").strip() or "data/prm.db",
         "prm_auto_register": _parse_switch(os.getenv("PRM_AUTO_REGISTER", "off")),
         "prm_wechat_review": _parse_switch(os.getenv("PRM_WECHAT_REVIEW", "off")),
+        "prm_wechat_commands": _parse_switch(os.getenv("PRM_WECHAT_COMMANDS", "off")),
         "prm_takeover_min": int(os.getenv("PRM_TAKEOVER_MIN", "120")),
         "prm_holding_min": int(os.getenv("PRM_HOLDING_MIN", "10")),
         "prm_holding_text": os.getenv("PRM_HOLDING_TEXT", "收到，我确认一下马上回您").strip() or "收到，我确认一下马上回您",
