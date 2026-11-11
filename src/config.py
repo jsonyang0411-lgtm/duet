@@ -328,9 +328,10 @@ class BotConfig:
     prm_wechat_review: str = "off"
     # 合作单指令 (src/prm/admin_commands.py, 2026-11-11): "on": in the admin's one-to-one chat (ADMIN_WXID) a typed line
     # 「做手卡 <达人>」「补发货盘 <达人>」「写开场白 <达人>」「签收 <达人>」「备注 <达人> <文字>」「接管 <达人>」「副驾驶 <达人>」
-    # 「合作单 <达人>」 runs the console's deal button for her deal (found by her 称呼, a piece of it too; several: 「选 N」),
-    # with its checks, and is answered in one line; 「指令」 lists them.  Nothing is sent to a creator by it: what a
-    # button makes (a draft job, a note, a stage, a mode) waits or goes as when clicked.  Not on the Mac's edge side.
+    # 「合作单 <达人>」 runs the console's deal button for her deal (found by her whole 称呼; a piece of it, or namesakes:
+    # listed first, 「选 N」), with its checks, and is answered in one line; 「指令」 lists them.  Nothing is sent to a
+    # creator by it: what a button makes (a draft job, a note, a stage, a mode) waits as when clicked (a 开场白 ordered
+    # here always waits for a person).  Not on the Mac's edge side.
     # "off" (the default): nothing of it, every line goes where it went before.
     prm_wechat_commands: str = "off"
     # An operator's own WeChat reply in a creator's chat (or the console) gives the chat to

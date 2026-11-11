@@ -850,6 +850,9 @@ AUTO_NOTE_CHARS = 200        # her note
 # packet's ``meta.opening``, the deal's event (``OPENING``: which job, how, by) and the console's deal action
 # (「写开场白」, ``ask_opening``).
 OPENING = "opening"
+# ... a 开场白 the admin ordered in WeChat (合作单指令's 「写开场白 <达人>」, src/prm/admin_commands.py; decision 2026-11-11):
+# its job's ``meta.opening.held``; it never goes out by itself (no PRM_OPENING_AUTO_MIN, 下班时段 or 自动模式: ``_opening_auto``)
+OPENING_HELD = "held"
 # A new friend registered more than PRM_CATCHUP_HOURS after she was added, with nothing of hers in the read-back: what
 # she wrote before it is not known, so no 开场白 by itself; this notice (``opening`` too) asks a person to look (review
 # 2026-10-30).  A 开场白 asked for, a reply draft of hers, or an operator writing to her by hand sees to it.
@@ -2021,13 +2024,16 @@ class PrmService:
         gone home heard nothing all weekend): may this waiting draft, our first line to a new friend, go out by itself when
         nobody decides on it?  None: not in play (the setting 0; not a first line: a 开场白 of ours, ``meta.opening``, or the
         draft of a new friend's messages from before she was registered, ``meta.new_friend``, with none read late or
-        missed; a 老板拉的群's, the boss reads it there; a platform action; the system lane).  ``(due, "")``: it goes at
+        missed; a 老板拉的群's, the boss reads it there; a platform action; the system lane; a 开场白 the admin ordered in
+        WeChat, ``meta.opening.held``: 合作单指令, it always waits for a person).  ``(due, "")``: it goes at
         ``due`` (``send_due_openings``), PRM_OPENING_AUTO_MIN from now, at once in the 下班时段 or 自动模式
         (``_night_active``).  ``(None, why)``: it waits for a person as before, the card says why (``meta.auto_held``):
         her recall, files short, a platform action taken out, the model's attention, what ``gates.night_reason`` minds
         (a complaint, placeholders, a red line), or a word of samples (``OPENING_AUTO_WORDS``: kb 第 0.5 节)."""
         if self._opening_auto_sec <= 0 or lane != LANE_REPLY or draft.platform is not None:
             return None
+        if isinstance(meta.get(OPENING), dict) and meta[OPENING].get(OPENING_HELD):
+            return None                                # (合作单指令's 「写开场白」: a person always decides)
         first = isinstance(meta.get(OPENING), dict) or (isinstance(meta.get("new_friend"), dict)
                                                         and not meta["new_friend"].get("linked"))
         if (not first or meta.get("channel") == GROUP_CHANNEL
@@ -4374,15 +4380,17 @@ class PrmService:
         if why:
             return None, why
         how = str(how or "")
+        held = by == "console" and actor == ADMIN_ACTOR    # (合作单指令: it always waits for a person)
         meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"],
-                OPENING: {"how": how, "by": by, **({"wrote": True} if deal.get("last_message_at") else {})}}
+                OPENING: {"how": how, "by": by, **({"wrote": True} if deal.get("last_message_at") else {}),
+                          **({OPENING_HELD: True} if held else {})}}
         if group is not None:
             meta.update(channel=GROUP_CHANNEL, group=self.boss_groups.job_group(chat))
         else:
             told = self._group_lines(deal["id"])
             if told:
                 meta["three_party_chat"] = told         # what was said in her 三方群 lately
-            if self._opening_auto_sec:
+            if self._opening_auto_sec and not held:
                 meta["opening_auto"] = self._opening_auto_sec // 60   # the Mac hears its draft may go out by itself
         creator = self._creator_ids(deal["id"])
         if creator:

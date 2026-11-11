@@ -10,14 +10,18 @@ answered in one short line, 「<她>：<what happened>」 or the refusal the act
   「做手卡」 when nothing is ticked): one draft job; its draft always waits for a person in 「待审批」 (``_ask_handcards``:
   no gate, 下班时段 or 自动模式 sends cards);
 - 「补发货盘 <达人>」: ``huopan``, one draft job; its draft always waits for a person;
-- 「写开场白 <达人>」: ``opening``, one draft job; its draft waits in 「待审批」 and goes as a 开场白 the console asked for
-  goes (PRM_OPENING_AUTO_MIN: by itself when nobody decides on it, the answer says so);
+- 「写开场白 <达人>」: ``opening``, one draft job; ordered from WeChat it always waits for a person too (decision
+  2026-11-11: ``meta.opening.held``, never by PRM_OPENING_AUTO_MIN, the 下班时段 or 自动模式; told in WeChat like any
+  waiting draft while PRM_WECHAT_REVIEW is on); a click in the console goes as before;
 - 「签收 <达人>」: what the console's 「更新物流 → 已签收」 sends (``shipment_status`` delivered, her one waybill), or
-  without a waybill its 「改阶段 → 已签收」 (``stage`` delivered); what a signature starts (the 专属佣金 chain) starts as
-  from the console, its drafts waiting for 批准并执行.  Two waybills or more, a deal past 已签收 (the stage would go
-  back), or one that is 已签收 already: nothing is done, the answer points to the console;
+  without a waybill its 「改阶段 → 已签收」 (``stage`` delivered), the latter only for a deal at a sample stage
+  (SAMPLE_STAGES) or with a sample order of its own; what a signature starts (the 专属佣金 chain) starts as from the
+  console, its drafts waiting for 批准并执行.  Two waybills or more, a deal past 已签收 (the stage would go back), one
+  that is 已签收 already, or one with neither a waybill nor samples: nothing is done, the answer points to the console;
 - 「备注 <达人> <文字>」 / 「备注 <达人>：<文字>」: ``draft_note``, the whole 起草备注 replaced as the console's save does
-  (longer than DRAFT_NOTE_CHARS: the console's refusal); 「备注 <达人> 清空」 clears it; 「备注 <达人>」 shows it;
+  (longer than DRAFT_NOTE_CHARS: the console's refusal); the answer shows the note it replaced and the new one;
+  「备注 <达人> 清空」 clears it; 「备注 <达人> 撤销」 puts back the note this command replaced last (in memory,
+  UNDO_SEC, once); 「备注 <达人>」 shows it;
 - 「接管 <达人>」 / 「副驾驶 <达人>」 (or 「恢复副驾驶 <达人>」): ``mode`` human (PRM_TAKEOVER_MIN, the console's 人工接管) /
   copilot (its 恢复副驾驶; already copilot: nothing done);
 - 「合作单 <达人>」: read only: the stage and the mode, the waybill and her latest sample order, where her drafts go, what
@@ -26,30 +30,42 @@ answered in one short line, 「<她>：<what happened>」 or the refusal the act
 
 Nothing here sends anything to a creator by itself: each command only makes what the console's button makes (a draft
 job, a note, a stage or a mode change), and a draft it brings waits or goes by the same rules as one clicked in the
-console.  The deal's record names the admin as who did it (``ACTOR``: 「管理员（微信里）」 in the console, as 「接群」's).
+console (a 开场白 ordered here: always waits).  The deal's record names the admin as who did it (``ACTOR``:
+「管理员（微信里）」 in the console, as 「接群」's).  No reply carries a relay job's number as 「#N」 (in this chat 「发 N」
+「不发 N」 act on draft numbers); a deal's number is written 「合作单 N 号」, a draft's 「#N」 as the review's notices do.
 
 Finding her (``_find``): her 称呼 as the console lists her (often the friend add's remark 「抖音-<昵称>」), with or without
-the platform's prefix, spaces, separators (「-」「_」「·」「:」), full-width letters and case aside, whole or a piece of
-it (a whole one first); only a creator on the list whose deal was not cleaned up (8.2).  One: done.  Several: numbered
-(LISTED at most: her 称呼, the stage, the deal's number) and 「选 N」 runs the command once for the N-th, CHOICE_SEC long;
-「选 N」 is a command only while such a question is open or was lately (ASKED_KEEP_SEC: then it says the question
-expired, or was answered), so the words stay free otherwise (as group_link's 「是 N」).  None: one line, with the
-CLOSE_LISTED closest names; the line is not handed on to the Mac's Claude (with CLAUDE_RELAY_ONLY the answer says to put
-cc in front for Claude).
+the platform's prefix, spaces, separators (「-」「_」「·」「:」), full-width letters and case aside; a name of NAME_MIN to
+NAME_MAX characters (else one line saying so); only a creator on the list whose deal was not cleaned up (8.2).
+- Her whole name: done (two or more with that name: numbered, 「选 N」).  A stopped creator's or a cleaned deal's whole
+  name: never a piece of another's instead; the answer says she is stopped / her deal was cleaned and points to the
+  console.
+- A piece of names only: a command that changes something always lists them numbered (one too) and 「选 N」 runs it once
+  for the N-th, CHOICE_SEC long; 「合作单」 and showing a 备注 act on one at once.  The list holds LISTED at most (her
+  称呼, the stage, the deal's number).  「选 N」 is a command only while such a list is open or was lately
+  (ASKED_KEEP_SEC: then it says the list expired, was answered, or was closed by a later command), so the words stay free
+  otherwise (as group_link's 「是 N」).
+- None: one line, with the CLOSE_LISTED closest names; the line is not handed on to the Mac's Claude (with
+  CLAUDE_RELAY_ONLY the answer says to put cc in front for Claude).
 
-What is a command (``parse``): one line, 「<指令><空白><名字…>」 (a name of at most NAME_MAX characters), ending in
-nothing or at most one 「。」 with any 「！!～~」 (wechat_review's ``_command_word``).  「做手卡怎么用」 (no blank after the
-word), 「签收了吗」, 「合作单 小美呢」, 「做手卡 小美？」 (a question: ？ / 吗 / 呢 / 么 / 嘛 / 没 at its end, or 怎么 / 什么 /
-为什么 / 如何 / 是不是 / 能不能 / 要不要 / 可不可以 in it), 「签收 小美…」 (hesitating) are none and go where they went
-before.  A message whose first line is a command and that has more lines is refused whole (one command per message).
-Only typed text in the admin's own one-to-one chat (never a group, a creator, anybody else; nothing while ADMIN_WXID is a
-group's or a registered creator's: wechat_review's ``admin_problem``): a voice message or a quote with a command's words
-gets one line saying to type it, and nothing is done.  The switch off: nothing of it (src/bot.py does not hand it to the
-admin handler; every line goes where it went before).
+What is a command (``parse``): one line, 「<指令><空白><名字…>」, ending in nothing or at most one 「。」 with any 「！!～~」
+(wechat_review's ``_command_word``).  「做手卡怎么用」 (no blank after the word), 「签收了吗」, 「合作单 小美呢」, 「做手卡
+小美？」 (a question: ？ / 吗 / 呢 / 么 / 嘛 / 没 at its end, or 怎么 / 怎样 / 什么 / 为什么 / 如何 / 多久 / 多少 / 哪 … in it),
+「签收 小美…」 (hesitating) are none and go where they went before.  备注: once the line is 「备注」 + a blank + a name
+that matches a live creator, the rest is her note, whatever it says (a question too); its readings (``Typed.readings``:
+「备注 名字：文字」, and the name up to each blank) are tried, the longest name that matches wins (「备注 Lucy Anne
+只发链接」: her name whole, never a piece of it in the note); a 备注 line that names nobody follows the rules above.  A
+message whose first line is a command and that has more lines is refused whole (one command per message).  Only typed
+text in the admin's own one-to-one chat (never a group, a creator, anybody else; nothing while ADMIN_WXID is a group's or
+a registered creator's: wechat_review's ``admin_problem``), written lately (MAX_AGE_SEC on this PC's clock, as the
+review's answers: an older line WeChat read late gets one line saying it was not done): a voice message or a quote with a
+command's words gets one line saying to type it, and nothing is done.  The switch off: nothing of it (src/bot.py does not
+hand it to the admin handler; every line goes where it went before).
 
 Replies name her as 微信里审批草稿 does (her platform ids by their last characters, ``WechatReview._name_of``); waybills
-and order numbers by their last 4.  The answers go to the admin's own chat only (the route step's reply); the log has
-deal ids and counts only: never a name, never the words typed.
+and order numbers by their last 4; what the admin typed is echoed with its numbers masked.  The answers go to the admin's
+own chat only (the route step's reply); the decision trace keeps ``TRACE_TEXT`` instead of the line (src/routing/steps.py
+``admin_command``); the log has deal ids and counts only: never a name, never the words typed.
 """
 
 from __future__ import annotations
@@ -60,9 +76,10 @@ import re
 import threading
 import time
 import unicodedata
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Callable, Optional
 
+from ..relay.service import MAX_AGE_SEC
 from . import contact, deals, platforms
 from .result import MESSAGE_KINDS
 from .store import COPILOT, HUMAN, MODES, PENDING, SHIPMENT_STATES, STAGES
@@ -74,11 +91,14 @@ SWITCH = "prm_wechat_commands"       # the config's field (PRM_WECHAT_COMMANDS)
 ACTOR = "admin"                      # the deal events' actor: the admin's typed command (as 「接群」's, group_link.py)
 CHOICE_SEC = 300                     # 「选 N」 picks from a list of namesakes this long
 ASKED_KEEP_SEC = 7200                # ... and after that still says the list expired, this long after it was given
+UNDO_SEC = 7200                      # 「备注 名字 撤销」 puts back the note replaced this recently (once)
 LISTED = 10                          # namesakes a list numbers at most
 CLOSE_LISTED = 3                     # close names a 「没有对得上的」 answer offers at most
 CLOSE_CUTOFF = 0.5                   # ... how close (difflib's ratio)
-NAME_MAX = 20                        # a name typed after the word: at most this many characters (spaces aside)
+NAME_MIN = 2                         # a name typed after the word: at least this many characters (spaces aside) ...
+NAME_MAX = 20                        # ... and at most this many
 TAIL = 4                             # a waybill, an order number: its last characters
+ECHO_CHARS = 30                      # what the admin typed, as an answer repeats it: at most this many characters
 
 # The words and the deal action each one is (``_do``).  「恢复副驾驶」 is the console's button; 「副驾驶」 the short form.
 HANDCARDS, HUOPAN, OPENING, SIGN, NOTE, TAKEOVER, BACK, STATUS = (
@@ -87,53 +107,84 @@ VERBS = {"做手卡": HANDCARDS, "补发货盘": HUOPAN, "写开场白": OPENING
          "副驾驶": BACK, "恢复副驾驶": BACK, "合作单": STATUS}
 HELP_WORDS = ("指令",)
 CLEAR_WORDS = ("清空",)
+UNDO_WORDS = ("撤销",)
 # A deal past 已签收: 「签收」 would set its stage back (the console's 「更新物流」 would too): the console's to decide
 AFTER_DELIVERY = ("brief", "draft", "revise", "published", "closed")
+# 「签收」 without a waybill: only a deal at one of these stages (store.STAGES: 收集收件信息 待寄出 已寄出 运输中 物流异常)
+# or one with a sample order of its own; any other stage is the console's (it never had samples sent)
+SAMPLE_STAGES = ("address", "to_ship", "shipped", "transit", "ship_error")
+TRACE_TEXT = "[合作单指令，内容不记录]"   # what the decision trace keeps of such a line (src/routing/steps.py)
 
 _VERB = re.compile(r"^(" + "|".join(sorted(map(re.escape, VERBS), key=len, reverse=True)) + r")[ \t]+(\S.*)$")
+_NOTE_HEAD = re.compile(r"^备注[ \t]+(\S.*)$")
+_NOTE_COLON = re.compile(r"^([^:：\n]+?)\s*[:：]\s*(.*)$")   # 「备注 小美：只发链接」 (the part after 备注)
 _CHOICE = re.compile(r"^选\s*(\d{1,3})$")
 _ENDING = re.compile(r"[！!～~]*。?[！!～~]*$")        # a command's ending (wechat_review ``_COMMAND_END``)
 _HESITATING = "。.…．｡"
 _ASKING_END = ("吗", "呢", "么", "嘛", "没", "没有")
-_ASKING_IN = ("怎么", "什么", "为什么", "如何", "是不是", "能不能", "要不要", "可不可以")
-_NOTE_COLON = re.compile(r"^备注[ \t]+([^:：\n]+?)\s*[:：]\s*(.*)$")   # 「备注 小美：只发链接」
+_ASKING_IN = ("怎么", "怎样", "什么", "为什么", "为啥", "啥", "如何", "多久", "多少", "哪些", "哪个", "哪里", "是不是",
+              "能不能", "要不要", "可不可以")
 _SEPARATORS = re.compile(r"[\s\-－_—–·・:：]+")
 _PREFIX = re.compile(r"^\s*(?:抖音|小红书|淘宝|快手|视频号)\s*[-－_—:：·]+\s*")   # the friend add's remark (抖音-…)
 _VOICE = re.compile(r"^\[语音\]\s*(.*)$", re.S)
 _QUOTE_PREFIX = re.compile(r"^\s*wxid_[a-zA-Z0-9]+:\s*")
 
 HELP_TEXT = (
-    "合作单指令（只在管理员私聊里打字发；名字写她在名单里的名字，写一部分也行）：\n"
+    "合作单指令（只在管理员私聊里打字发；名字写她在名单里的名字，写全了直接做，只写一部分时先列出来让你回「选 编号」）：\n"
     "做手卡 名字 — 按她最近一张寄样单的款做手卡，做好进「待审批」等你看\n"
     "补发货盘 名字 — 写一份补发货盘的草稿，进「待审批」等你看\n"
-    "写开场白 名字 — 写一份开场白，进「待审批」\n"
+    "写开场白 名字 — 写一份开场白，进「待审批」等你看\n"
     "签收 名字 — 合作单标「已签收」（和控制台「更新物流 → 已签收」一样）\n"
-    "备注 名字 文字 — 换掉她的起草备注（「备注 名字 清空」清掉，「备注 名字」看现在的）\n"
+    "备注 名字 文字 — 换掉她的起草备注（「备注 名字 清空」清掉，「备注 名字 撤销」放回刚才换掉的，「备注 名字」看现在的）\n"
     "接管 名字 / 副驾驶 名字 — 人工接管 / 恢复副驾驶\n"
     "合作单 名字 — 看她的合作单现在怎样\n"
-    "好几位对得上时回「选 编号」；要交给 Claude 的话前面加 cc"
+    "要交给 Claude 的话前面加 cc"
 )
 # One line for the admin's 「帮助」 (src/admin.py) and the relay's help (src/bot.py) while the switch is on
 HELP_LINE = "\n  做手卡 / 补发货盘 / 写开场白 / 签收 / 备注 / 接管 / 副驾驶 / 合作单 + 名字   合作单指令（发「指令」看用法）"
 VOICE_TEXT = "合作单指令要打字发（语音不算，免得听错）：比如「{example}」"
 QUOTE_TEXT = "引用的消息不算合作单指令：不引用，直接打字发「{example}」"
 OTHER_TEXT = "只认打字发的合作单指令：比如「{example}」"
+TOO_OLD_TEXT = "这条合作单指令是 {minutes} 分钟前写的（微信这会儿才读到），太久了，没做：要做的话请再发一次"
 MORE_TEXT = "一条消息只放一个合作单指令、一行写完（备注的文字也写在同一行）：都没处理，请分开发"
+SHORT_TEXT = "名字至少写两个字（她在名单里的名字，写一部分也行）：没做"
+LONG_TEXT = f"名字太长了（最多 {NAME_MAX} 个字，只写她在名单里的名字）：没做"
 CC_HINT = "（要交给 Claude 请在前面加 cc）"
 ERROR_TEXT = "处理合作单指令的时候出错了（详见日志）：请到控制台看一下"
+NO_UNDO_TEXT = f"没有能撤销的起草备注（只能撤销 {UNDO_SEC // 3600} 小时内用「备注」换掉的最后一次，撤销一次）"
 
 
 @dataclass(frozen=True)
 class Typed:
     """A command line (``parse``): the word's action (``VERBS``, or ``help``), the name as typed, 备注's words (None: none
-    given; 「清空」: ""), and whether the message has more lines (refused whole)."""
+    given; 「清空」: ""), whether the message has more lines (refused whole), and for 备注 every way the line reads
+    (``readings``: ``(name, words)``, the one taken first) and whether it would be no command but for her name
+    (``asking``: a question or a hesitation)."""
 
     verb: str
     name: str = ""
     text: Optional[str] = None
     more: bool = False
     word: str = ""                   # the word as typed (「恢复副驾驶」, 「副驾驶」 …): what the answers repeat
-    alt: Optional[tuple] = None      # 备注 read the other way: (name, words) (``parse``)
+    readings: tuple = ()
+    asking: bool = False
+
+
+@dataclass
+class Found:
+    """Who a name typed matches (``DealCommands._find``): ``(party, deal)`` pairs of live deals whose 称呼 is it
+    (``whole``) or holds it (``piece``); of deals not live (a stopped creator, a deal cleaned up): whole and any; the live
+    names by their key (for the close ones)."""
+
+    whole: list = field(default_factory=list)
+    piece: list = field(default_factory=list)
+    dead_whole: list = field(default_factory=list)
+    dead: list = field(default_factory=list)
+    keys: dict = field(default_factory=dict)
+
+    @property
+    def live(self) -> bool:
+        return bool(self.whole or self.piece)
 
 
 def switch_on(config) -> bool:
@@ -152,6 +203,12 @@ def _tail(value) -> str:
     return value if len(value) <= TAIL else "…" + value[-TAIL:]
 
 
+def _echo(text) -> str:
+    """What the admin typed, as an answer repeats it: one line, phone / ID numbers and labelled 微信号 masked, ECHO_CHARS
+    at most."""
+    return contact.clean_name(text, ECHO_CHARS)
+
+
 def _ended(line: str) -> Optional[str]:
     """``line`` without a command's ending (at most one 「。」 with any 「！!～~」, decided before full-width letters
     become plain ones); None when it hesitates (「…」「.」「。。」 at its end) or asks (a 「？」, 吗 / 呢 / 么 / 嘛 / 没 at its
@@ -165,46 +222,54 @@ def _ended(line: str) -> Optional[str]:
 
 
 def _note_words(words) -> Optional[str]:
-    """备注's words as kept: None for none, "" for 「清空」 (its ending aside), else as typed."""
+    """备注's words as kept: None for none, "" for 「清空」 (its ending aside), else as typed (撤销 too: ``_note``)."""
     words = str(words or "").strip()
     if not words:
         return None
     return "" if _ended(words) in CLEAR_WORDS else words
 
 
+def _note_readings(rest: str) -> tuple:
+    """Every way 「备注 <rest>」 reads, ``(name, words)``: 「名字：文字」 first (a colon after the name, which may hold
+    spaces), then the name up to each blank in turn, the words after it (the whole: no words, the note shown)."""
+    out: list = []
+    colon = _NOTE_COLON.fullmatch(rest)
+    if colon is not None and _key(colon.group(1)):
+        out.append((colon.group(1).strip(), _note_words(colon.group(2))))
+    for m in re.finditer(r"\S+", rest):
+        name, words = rest[:m.end()].strip(), rest[m.end():].strip()
+        out.append((name, _note_words(words)))
+    seen, kept = set(), []
+    for name, words in out:
+        if (_key(name), words) not in seen and _key(name):
+            seen.add((_key(name), words))
+            kept.append((name, words))
+    return tuple(kept)
+
+
 def parse(text) -> Optional[Typed]:
     """The command ``text`` is (pure; see the module's doc): ``Typed`` or None.  Only its first line is read; more
-    lines make it ``more`` (refused whole by ``DealCommands``).  备注: 「备注 <名字>：<文字>」 (a colon after the name, the
-    name may hold spaces) takes any words, a question too (it is plainly a note); 「备注 <名字> <文字>」 (the name up to
-    the first blank) only when the whole line reads as a command; a line that reads both ways (「备注 小美 时间：周三」)
-    keeps the other as ``alt`` (``DealCommands`` takes the one whose name matches); the words keep their own ending."""
-    lines = str(text or "").replace("\u3000", " ").strip().split("\n")
+    lines make it ``more`` (refused whole by ``DealCommands``).  A 备注 line is one whatever it says, its ``readings``
+    for ``DealCommands`` to try and ``asking`` when it would not read as a command (then it is one only if a reading's
+    name matches a live creator); the words keep their own ending."""
+    lines = str(text or "").replace("　", " ").strip().split("\n")
     first, more = lines[0].strip(), any(line.strip() for line in lines[1:])
-    colon = _NOTE_COLON.fullmatch(first)
-    if colon is not None and not 1 <= len(_key(colon.group(1))) <= NAME_MAX:
-        colon = None
-    space = None
     bare = _ended(first)
-    if bare is not None:
-        if bare in HELP_WORDS:
-            return Typed("help", more=more, word=bare)
-        m = _VERB.fullmatch(bare)
-        if m is not None:
-            word, rest = m.group(1), m.group(2).strip()
-            if VERBS[word] == NOTE:
-                parts = rest.split(None, 1)
-                typed_words = first[len(word):].strip().split(None, 1)       # (from the line as typed: its ending)
-                space = Typed(NOTE, parts[0], _note_words(typed_words[1]) if len(parts) > 1 else None, more, word)
-            else:
-                space = Typed(VERBS[word], rest, None, more, word)
-            if not 1 <= len(_key(space.name)) <= NAME_MAX:
-                space = None
-    if colon is not None:
-        typed = Typed(NOTE, colon.group(1).strip(), _note_words(colon.group(2)), more, "备注")
-        if space is not None and _key(space.name) != _key(typed.name):
-            return replace(typed, alt=(space.name, space.text))
-        return typed
-    return space
+    note = _NOTE_HEAD.fullmatch(first)
+    if note is not None:
+        readings = _note_readings(note.group(1).strip())
+        if not readings:
+            return None
+        name, words = readings[0]
+        return Typed(NOTE, name, words, more, "备注", readings, asking=bare is None)
+    if bare is None:
+        return None
+    if bare in HELP_WORDS:
+        return Typed("help", more=more, word=bare)
+    m = _VERB.fullmatch(bare)
+    if m is None or VERBS[m.group(1)] == NOTE:
+        return None
+    return Typed(VERBS[m.group(1)], m.group(2).strip(), None, more, m.group(1))
 
 
 def _clock_text(at, now: float) -> str:
@@ -219,9 +284,11 @@ def _clock_text(at, now: float) -> str:
 
 class DealCommands:
     """The admin's 合作单指令 of one PRM service (see the module's doc).  ``service``: the PrmService (its store,
-    ``deal_action``, ``wechat_review`` for her 称呼 as the admin's chat shows it).  ``on``: PRM_WECHAT_COMMANDS."""
+    ``deal_action``, ``wechat_review`` for her 称呼 as the admin's chat shows it, ``_local`` for WeChat's times).
+    ``on``: PRM_WECHAT_COMMANDS."""
 
     help_line = HELP_LINE                          # the admin's 「帮助」 names the commands in it (src/admin.py)
+    trace_text = TRACE_TEXT                        # the decision trace keeps this of such a line (src/routing/steps.py)
 
     def __init__(self, service, config=None, *, clock: Callable[[], float] = time.time):
         self._service = service
@@ -231,17 +298,20 @@ class DealCommands:
         self._admin = str(getattr(config, "admin_wxid", "") or "").strip()
         self._relay_only = str(getattr(config, "claude_relay_only", "off") or "off").strip().lower() == "on"
         self._lock = threading.Lock()              # one command at a time
-        # the last list of namesakes: {"at", "typed", "deals": [deal id], "done"} (「选 N」 picks from it)
+        # the last list of namesakes: {"at", "typed", "deals": [deal id], "done", "closed"} (「选 N」 picks from it)
         self._asked: Optional[dict] = None
+        # 「备注 名字 撤销」: per deal, the note a 备注 replaced and what it wrote, when (UNDO_SEC, once)
+        self._undo: dict[int, dict] = {}
 
     # ── the admin's text (src/admin.py ``_command``) ─────────────────────
 
     def admin_command(self, text, msg: Optional[dict] = None) -> Optional[Callable[[], str]]:
         """The command ``text`` is (``run()`` answers it), or None (it goes on as it is).  ``msg``: the admin's message
-        (src/routing/steps.py ``admin_command``): only typed text in the admin's own one-to-one chat runs one; a voice
-        message or a quote with a command's words is answered that it must be typed; anybody else's, nothing.  Without
-        ``msg`` (the relay asking whether a line is a command: ``AdminCommandHandler.is_command``) only the words count.
-        「选 N」 only while a list is open or was lately (ASKED_KEEP_SEC)."""
+        (src/routing/steps.py ``admin_command``): only typed text in the admin's own one-to-one chat, written lately,
+        runs one; a voice message or a quote with a command's words is answered that it must be typed, an old line that
+        it was too old; anybody else's, nothing.  Without ``msg`` (the relay asking whether a line is a command:
+        ``AdminCommandHandler.is_command``) only the words count.  「选 N」 only while a list is open or was lately
+        (ASKED_KEEP_SEC)."""
         if not self.on:
             return None
         content = str(text or "")
@@ -252,18 +322,25 @@ class DealCommands:
             heard = _VOICE.match(content.strip())
             content = heard.group(1).strip().rstrip("。.！!，,、 ") if heard else content
         typed = parse(content)
+        if typed is not None and typed.verb == NOTE and typed.asking and not self._note_named(typed):
+            typed = None                               # (a question naming nobody: no command, it goes on)
         if typed is None:
             match = _CHOICE.fullmatch(_ended(content.strip()) or "") if "\n" not in content.strip() else None
             asked = self._asked
             if match is None or asked is None or self._clock() - float(asked["at"]) > ASKED_KEEP_SEC:
                 return None
-            if how:
-                return lambda: self._refusal(how, f"选 {match.group(1)}")
+            example = f"选 {match.group(1)}"
             number = int(match.group(1))
-            return lambda: self._run(self._choose, number)
+            run = lambda: self._run(self._choose, number)      # noqa: E731
+        else:
+            example = self._example(typed)
+            run = lambda: self._run(self._command, typed)      # noqa: E731
+        age = self._age(msg)
+        if age is not None:
+            return lambda: self._too_old(age)
         if how:
-            return lambda: self._refusal(how, self._example(typed))
-        return lambda: self._run(self._command, typed)
+            return lambda: self._refusal(how, example)
+        return run
 
     def _how(self, msg: Optional[dict]) -> Optional[str]:
         """What kind of message of the admin's ``msg`` is: "" typed text (or no message: words only), ``voice``,
@@ -283,11 +360,30 @@ class DealCommands:
             return "quote"
         return "" if msg_type == 1 else "other"
 
+    def _age(self, msg: Optional[dict]) -> Optional[float]:
+        """How long ago the message was written when that is more than MAX_AGE_SEC (WeChat's time on this PC's clock,
+        ``PrmService._local``, as the review's answers: a line WeChat read late, after a re-login, is history); else
+        None."""
+        try:
+            written = float((msg or {}).get("timestamp") or 0)
+        except (TypeError, ValueError):
+            return None
+        if not written:
+            return None
+        local = getattr(self._service, "_local", None)
+        age = self._clock() - (local(written) if callable(local) else written)
+        return age if age > MAX_AGE_SEC else None
+
+    def _too_old(self, age: float) -> str:
+        logger.info("PRM: 合作单指令: a command line read %.0f s after it was written; not run", age)
+        return TOO_OLD_TEXT.format(minutes=max(1, int(round(age / 60))))
+
     @staticmethod
     def _example(typed: Typed) -> str:
+        """The command as an answer repeats it: the word and the name (masked), never a note's words."""
         if typed.verb == "help":
             return typed.word
-        return f"{typed.word} {contact.mask_contacts(typed.name)}" + (f" {typed.text}" if typed.text else "")
+        return f"{typed.word} {_echo(typed.name)}" + (" …" if typed.verb == NOTE and typed.text is not None else "")
 
     @staticmethod
     def _refusal(how: str, example: str) -> str:
@@ -305,50 +401,110 @@ class DealCommands:
     # ── the commands ─────────────────────────────────────────────────────
 
     def _command(self, typed: Typed) -> str:
-        """A command line: refused whole with more lines; 「指令」: the list; else her deal by name (``_find``), the
-        command done for one, a list for several, the closest names for none."""
+        """A command line: refused whole with more lines; 「指令」: the list; else her deal by name (``_find``): a whole
+        name done at once (namesakes listed), a stopped creator's or a cleaned deal's whole name said so, a piece of
+        names listed (for 「合作单」 and showing a 备注, one done at once), none: the closest names.  Any earlier list is
+        closed (its 「选 N」 runs nothing now)."""
         if typed.more:
             return MORE_TEXT
         if typed.verb == "help":
             return HELP_TEXT
-        found, close, dead = self._find(typed.name)
-        if not found and typed.alt is not None:          # (备注 read the other way: its name matches)
-            other = self._find(typed.alt[0])
-            if other[0]:
-                typed = replace(typed, name=typed.alt[0], text=typed.alt[1], alt=None)
-                found, close, dead = other
-        if len(found) == 1:                            # (a list open meanwhile stays open: 「选 N」 is for that one)
-            party, deal = found[0]
-            return self._do(typed, party, deal)
-        if found:
-            return self._list(typed, found)
-        logger.info("PRM: 合作单指令 %s: no deal matches (%d close, %d not live)", typed.verb, len(close), len(dead))
-        asked = contact.mask_contacts(typed.name)
-        if dead:
-            head = f"对得上「{asked}」的只有停用的达人，或者收件信息清过的合作单：请到控制台看"
-        else:
-            head = f"没有达人对得上「{asked}」（只找名单里在用的达人）"
-            if close:
-                head += "；是不是：" + "、".join(self._shown(p, d) for p, d in close) + "？"
+        if self._asked is not None and not self._asked["done"]:
+            self._asked["closed"] = True
+        found = None
+        if typed.verb == NOTE:
+            typed, found = self._note_reading(typed)
+        size = len(_key(typed.name))
+        if size < NAME_MIN:
+            return SHORT_TEXT
+        if size > NAME_MAX:
+            return LONG_TEXT + (CC_HINT if self._relay_only else "")
+        found = found or self._find(typed.name)
+        changes = typed.verb != STATUS and not (typed.verb == NOTE and typed.text is None)
+        if len(found.whole) == 1:
+            return self._do(typed, *found.whole[0])
+        if found.whole:
+            return self._list(typed, found.whole, whole=True)
+        if found.dead_whole or (not found.piece and found.dead):
+            return self._dead(typed, found.dead_whole or found.dead)
+        if len(found.piece) == 1 and not changes:
+            return self._do(typed, *found.piece[0])
+        if found.piece:
+            return self._list(typed, found.piece, whole=False)
+        close = self._close(typed.name, found)
+        logger.info("PRM: 合作单指令 %s: no deal matches (%d close)", typed.verb, len(close))
+        head = f"没有达人对得上「{_echo(typed.name)}」（只找名单里在用的达人）"
+        if close:
+            head += "；是不是：" + "、".join(self._shown(p, d) for p, d in close) + "？"
         return head + (CC_HINT if self._relay_only else "")
 
-    def _list(self, typed: Typed, found: list) -> str:
-        """Several deals match: numbered (LISTED at most), 「选 N」 picks one (CHOICE_SEC)."""
-        listed = found[:LISTED]
-        self._asked = {"at": self._clock(), "typed": typed, "deals": [int(d["id"]) for _, d in listed], "done": False}
-        logger.info("PRM: 合作单指令 %s: %d deals match, %d listed", typed.verb, len(found), len(listed))
-        asked = contact.mask_contacts(typed.name)
-        head = (f"有 {len(found)} 位达人对得上「{asked}」：回「选 编号」{self._doing(typed)}（{CHOICE_SEC // 60} 分钟内有效）"
-                if len(found) <= LISTED else
-                f"有 {len(found)} 位达人对得上「{asked}」，只列了前 {LISTED} 位：回「选 编号」{self._doing(typed)}"
-                f"（{CHOICE_SEC // 60} 分钟内有效），不在里面的话名字写全一点再发")
+    def _note_named(self, typed: Typed) -> bool:
+        """Does a reading of this 备注 line name a live creator (``_find``)?"""
+        return any(NAME_MIN <= len(_key(name)) <= NAME_MAX and self._find(name).live for name, _ in typed.readings)
+
+    def _note_reading(self, typed: Typed) -> tuple:
+        """备注: the reading whose name matches a live creator, the longest such name (her name with its spaces whole:
+        no piece of it in the note), and what it matched; none: the line as first read, None."""
+        best = None
+        for name, words in typed.readings:
+            size = len(_key(name))
+            if not NAME_MIN <= size <= NAME_MAX:
+                continue
+            found = self._find(name)
+            if found.live and (best is None or size > len(_key(best[0]))):
+                best = (name, words, found)
+        if best is None:
+            return typed, None
+        return replace(typed, name=best[0], text=best[1]), best[2]
+
+    def _dead(self, typed: Typed, rows: list) -> str:
+        """The name matches only a stopped creator or a cleaned deal: said so, the console's."""
+        asked = _echo(typed.name)
+        logger.info("PRM: 合作单指令 %s: the name matches %d deal(s) not live", typed.verb, len(rows))
+        if len(rows) == 1:
+            party, deal = rows[0]
+            if not party.get("active"):
+                return f"「{asked}」是停用的达人（不在达人名单里）：没做，请到控制台看"
+            return f"「{asked}」的合作单收件信息已经按规定清过了：没做，请到控制台看"
+        return f"对得上「{asked}」的只有停用的达人，或者收件信息清过的合作单：没做，请到控制台看"
+
+    def _close(self, name: str, found: Found) -> list:
+        """The CLOSE_LISTED live deals whose names are closest to ``name`` (difflib, CLOSE_CUTOFF)."""
+        close, seen = [], set()
+        for k in difflib.get_close_matches(_key(name), list(found.keys), n=CLOSE_LISTED * 2, cutoff=CLOSE_CUTOFF):
+            party, deal = found.keys[k]
+            if party["id"] not in seen:
+                seen.add(party["id"])
+                close.append((party, deal))
+        return close[:CLOSE_LISTED]
+
+    def _list(self, typed: Typed, rows: list, *, whole: bool) -> str:
+        """Namesakes, or names holding the piece typed: numbered (LISTED at most), 「选 N」 runs the command once for the
+        N-th (CHOICE_SEC)."""
+        listed = rows[:LISTED]
+        self._asked = {"at": self._clock(), "typed": typed, "deals": [int(d["id"]) for _, d in listed], "done": False,
+                       "closed": False}
+        logger.info("PRM: 合作单指令 %s: %d deals match (%s), %d listed", typed.verb, len(rows),
+                    "whole name" if whole else "a piece", len(listed))
+        asked, doing, valid = _echo(typed.name), self._doing(typed), f"（{CHOICE_SEC // 60} 分钟内有效）"
+        if whole:
+            head = f"有 {len(rows)} 位达人都叫「{asked}」：回「选 编号」{doing}{valid}"
+        elif len(rows) == 1:
+            head = f"「{asked}」只是名字的一部分，对得上 1 位：是她就回「选 1」{doing}{valid}"
+        else:
+            head = f"有 {len(rows)} 位达人的名字里有「{asked}」：回「选 编号」{doing}{valid}"
+        if len(rows) > LISTED:
+            head += f"；只列了前 {LISTED} 位，不在里面的话名字写全一点再发"
         lines = [head]
         for n, (party, deal) in enumerate(listed, 1):
-            lines.append(f"{n}. {self._shown(party, deal)} · {STAGES.get(deal['stage'], deal['stage'])} · 合作单 #{deal['id']}")
+            lines.append(f"{n}. {self._shown(party, deal)} · {STAGES.get(deal['stage'], deal['stage'])} · "
+                         f"合作单 {deal['id']} 号")
         return "\n".join(lines)
 
     @staticmethod
     def _doing(typed: Typed) -> str:
+        if typed.verb == NOTE and typed.text is None:
+            return "看备注"
         return {HANDCARDS: "做手卡", HUOPAN: "补发货盘", OPENING: "写开场白", SIGN: "标签收", NOTE: "改备注",
                 TAKEOVER: "人工接管", BACK: "恢复副驾驶", STATUS: "看合作单"}.get(typed.verb, "")
 
@@ -361,6 +517,8 @@ class DealCommands:
         again = f"重新发「{self._example(typed)}」"
         if asked["done"]:
             return f"刚才那个「选」已经回过了：要再来一次请{again}"
+        if asked.get("closed"):
+            return f"刚才那个列表作废了（后来又发了别的合作单指令）：要的话{again}"
         if self._clock() - float(asked["at"]) > CHOICE_SEC:
             return f"刚才那个列表已经过了 {CHOICE_SEC // 60} 分钟，作废了：要的话{again}"
         ids = asked["deals"]
@@ -373,45 +531,36 @@ class DealCommands:
         asked["done"] = True
         return self._do(typed, party, deal)
 
-    def _find(self, name: str) -> tuple[list, list, list]:
-        """``(found, close, dead)`` for a name typed: the live deals (``(party, deal)``: a creator on the list, her
-        newest deal, not cleaned up) whose 称呼 is it (with or without the platform's prefix: ``_key``), else those
-        whose 称呼 holds it; the CLOSE_LISTED closest of the others when none does; and the deals not live that would
-        match."""
+    def _find(self, name: str) -> Found:
+        """Who ``name`` matches (``Found``): each creator's newest deal, live (on the list, not cleaned up: 8.2) or not,
+        by her 称呼 with and without the platform's prefix (``_key``), whole or holding it."""
         store = self._service.store
         newest: dict = {}
         for deal in store.deals():
             newest[deal["party_id"]] = deal
         want = _key(name)
-        whole, piece, dead, keys = [], [], [], {}
+        found = Found()
         for party in store.parties(include_inactive=True):
             deal = newest.get(party["id"])
             if deal is None:
                 continue
             names = {_key(party["name"]), _key(_PREFIX.sub("", str(party["name"] or "")))} - {""}
             live = bool(party.get("active")) and not deal.get("purged_at")
-            hit = "whole" if want in names else "piece" if any(want in k for k in names) else ""
+            whole = want in names
+            piece = not whole and any(want in k for k in names)
             if not live:
-                if hit:
-                    dead.append((party, deal))
+                if whole:
+                    found.dead_whole.append((party, deal))
+                if whole or piece:
+                    found.dead.append((party, deal))
                 continue
-            if hit == "whole":
-                whole.append((party, deal))
-            elif hit == "piece":
-                piece.append((party, deal))
+            if whole:
+                found.whole.append((party, deal))
+            elif piece:
+                found.piece.append((party, deal))
             for k in names:
-                keys.setdefault(k, (party, deal))
-        found = whole or piece
-        close: list = []
-        if not found:
-            seen = set()
-            for k in difflib.get_close_matches(want, list(keys), n=CLOSE_LISTED * 2, cutoff=CLOSE_CUTOFF):
-                party, deal = keys[k]
-                if party["id"] not in seen:
-                    seen.add(party["id"])
-                    close.append((party, deal))
-            close = close[:CLOSE_LISTED]
-        return found, close, dead
+                found.keys.setdefault(k, (party, deal))
+        return found
 
     def _shown(self, party: dict, deal: dict) -> str:
         """Her 称呼 as the admin's chat shows it (``WechatReview._name_of``: her platform ids by their last characters,
@@ -457,29 +606,33 @@ class DealCommands:
         items = len(order["items"]) if order and order.get("shop") == "dy" else 0
         which = (f"按她最近一张寄样单{' ' + _tail(order['order']) + ' ' if order.get('order') else ''}的 {items} 款"
                  if items else "她没有机器人建的抖店寄样单：Mac 按案卷里她选的款做")
-        return f"已派做手卡的任务 #{out.get('job')}（{which}），做好会进「待审批」，要你看过才发"
+        return f"已派做手卡的任务（{which}），做好会进「待审批」，要你看过才发"
 
     def _huopan(self, typed: Typed, party: dict, deal: dict) -> str:
         """「补发货盘」: the console's; its draft always waits for a person (``PrmService._ask_huopan``)."""
         out = self._action("huopan", {"deal_id": deal["id"]})
         if not out.get("ok"):
             return self._refused(party, deal, out, "派补发货盘")
-        return f"已派补发货盘的任务 #{out.get('job')}，写好会进「待审批」，要你看过才发"
+        return "已派补发货盘的任务，写好会进「待审批」，要你看过才发"
 
     def _opening(self, typed: Typed, party: dict, deal: dict) -> str:
-        """「写开场白」: the console's; its draft goes as the console's 开场白 goes (PRM_OPENING_AUTO_MIN)."""
+        """「写开场白」: the console's, but its draft never goes by itself (``meta.opening.held``: no PRM_OPENING_AUTO_MIN,
+        下班时段 or 自动模式; ``PrmService._ask_opening``, ``_opening_auto``)."""
         out = self._action("opening", {"deal_id": deal["id"]})
         if not out.get("ok"):
             return self._refused(party, deal, out, "派写开场白")
-        minutes = int(getattr(self._service, "_opening_auto_sec", 0) or 0) // 60
-        how = (f"和控制台点的一样：{minutes} 分钟没人处理会照原样自动发（下班时段、自动模式写好就发），不想发就回「不发」或在控制台点"
-               if minutes else "要你看过才发")
-        return f"已派写开场白的任务 #{out.get('job')}，写好会进「待审批」，{how}"
+        return "已派写开场白的任务，写好会进「待审批」，要你看过才发"
+
+    def _has_samples(self, deal: dict) -> bool:
+        """A sample order of her deal: one the 聚水潭 sync keeps, or a verified one the bot made (``sample_items``)."""
+        from .service import sample_items                 # (the service imports this module)
+        store = self._service.store
+        return bool(store.sample_orders(deal_id=deal["id"])) or sample_items(store, deal["id"]) is not None
 
     def _sign(self, typed: Typed, party: dict, deal: dict) -> str:
         """「签收」: the console's 「更新物流 → 已签收」 on her one waybill (``shipment_status`` delivered), or without one
-        its 「改阶段 → 已签收」 (``stage`` delivered).  Two waybills or more, a deal past 已签收, or one 已签收 already:
-        the console's."""
+        its 「改阶段 → 已签收」 (``stage`` delivered) for a deal at a sample stage or with a sample order.  Two waybills or
+        more, a deal past 已签收, one 已签收 already, or one with neither a waybill nor samples: the console's."""
         store = self._service.store
         ships = store.shipments(deal["id"])
         stage = STAGES.get(deal["stage"], deal["stage"])
@@ -491,6 +644,8 @@ class DealCommands:
         ship = ships[0] if ships else None
         if deal["stage"] == "delivered" and (ship is None or ship["status"] == "delivered"):
             return "合作单本来就是「已签收」，没再标：要重新标请到控制台"
+        if ship is None and deal["stage"] not in SAMPLE_STAGES and not self._has_samples(deal):
+            return f"没标：合作单是「{stage}」，没有运单号也没有寄样单：要标签收请到控制台"
         if ship is not None:
             out = self._action("shipment_status", {"deal_id": deal["id"], "status": "delivered"})
             done = f"标成「已签收」了（{ship['carrier']} {_tail(ship['waybill'])}）"
@@ -501,23 +656,52 @@ class DealCommands:
             return self._refused(party, deal, out, "标签收")
         return done + "；签收以后该做的（比如专属佣金）和控制台点「已签收」一样起草，在「待审批」里等你批"
 
+    def _note_shown(self, party: dict, deal: dict, text: str) -> str:
+        """A 起草备注 as the admin's chat shows it: one line (「 / 」 between its lines), her ids, addresses and numbers
+        masked (``_hide``), 「（没有）」 when there is none."""
+        if not text:
+            return "（没有）"
+        return contact.mask_contacts(self._hide(party, deal, " / ".join(text.split("\n"))))
+
     def _note(self, typed: Typed, party: dict, deal: dict) -> str:
-        """「备注」: the console's 起草备注 replaced (「清空」: cleared); no words: the note as it is."""
+        """「备注」: the console's 起草备注 replaced (「清空」: cleared; the answer shows what it replaced); 「撤销」: the
+        note this command replaced last put back (``_undo``); no words: the note as it is."""
         before = str(deal.get("draft_note") or "")
         if typed.text is None:
             if not before:
                 return "还没有起草备注（「备注 名字 文字」写一条）"
-            shown = contact.mask_contacts(self._hide(party, deal, " / ".join(before.split("\n"))))
-            return f"起草备注（{len(before)} 字）：{shown}"
+            return f"起草备注（{len(before)} 字）：{self._note_shown(party, deal, before)}"
+        if _ended(typed.text) in UNDO_WORDS:
+            return self._undo_note(party, deal, before)
         out = self._action("draft_note", {"deal_id": deal["id"], "text": typed.text})
         if not out.get("ok"):
             return self._refused(party, deal, out, "改起草备注")
         note = str(out.get("draft_note") or "")
         if note == before:
             return "起草备注本来就是这样，没改"
+        now = self._clock()
+        self._undo = {k: v for k, v in self._undo.items() if now - v["at"] <= UNDO_SEC}
+        self._undo[int(deal["id"])] = {"before": before, "after": note, "at": now}
+        undo = "（「备注 名字 撤销」能放回原来的）" if before else ""
         if not note:
-            return "起草备注清掉了"
-        return f"起草备注换好了（{len(note)} 字）：之后她的草稿都按它写"
+            return f"起草备注清掉了。原来：{self._note_shown(party, deal, before)}{undo}"
+        return (f"起草备注换好了。原来：{self._note_shown(party, deal, before)} 现在：{self._note_shown(party, deal, note)}"
+                f"{undo}")
+
+    def _undo_note(self, party: dict, deal: dict, now_note: str) -> str:
+        """「备注 名字 撤销」: the note the last 备注 of this deal replaced, put back once, within UNDO_SEC, unless the
+        note changed since (in the console, say)."""
+        entry = self._undo.get(int(deal["id"]))
+        if entry is None or self._clock() - entry["at"] > UNDO_SEC:
+            self._undo.pop(int(deal["id"]), None)
+            return NO_UNDO_TEXT
+        if now_note != entry["after"]:
+            return "起草备注在那以后又改过了（不是这条指令改的），没撤销：请到控制台看"
+        out = self._action("draft_note", {"deal_id": deal["id"], "text": entry["before"]})
+        if not out.get("ok"):
+            return self._refused(party, deal, out, "撤销起草备注")
+        self._undo.pop(int(deal["id"]), None)
+        return f"起草备注放回去了：{self._note_shown(party, deal, str(out.get('draft_note') or ''))}"
 
     def _takeover(self, typed: Typed, party: dict, deal: dict) -> str:
         """「接管」: the console's 人工接管 (PRM_TAKEOVER_MIN)."""
@@ -539,13 +723,14 @@ class DealCommands:
         return "恢复副驾驶了：她的消息照常起草，接管期间双方说的话会带进下一份草稿"
 
     def _status(self, typed: Typed, party: dict, deal: dict) -> str:
-        """「合作单」: read only (nothing changes, nothing recorded)."""
+        """「合作单」: read only (nothing changes, nothing recorded).  Drafts by their numbers as the review's notices
+        show them (「#12」); the deal's in words (「合作单 7 号」)."""
         store, now = self._service.store, self._clock()
         mode = deals.effective_mode(deal, now)
         mode_text = MODES.get(mode, mode)
         if mode == HUMAN and deal.get("mode_until"):
             mode_text += f"（到 {_clock_text(deal['mode_until'], now)}）"
-        lines = [f"{self._shown(party, deal)}（合作单 #{deal['id']}）：阶段「{STAGES.get(deal['stage'], deal['stage'])}」"
+        lines = [f"{self._shown(party, deal)}（合作单 {deal['id']} 号）：阶段「{STAGES.get(deal['stage'], deal['stage'])}」"
                  f" · {mode_text}"]
         ships = store.shipments(deal["id"])
         sample = []

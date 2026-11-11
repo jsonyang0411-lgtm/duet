@@ -132,6 +132,19 @@ class AdminCommandHandler:
         command = self._command(content, msg)
         return command() if command is not None else None
 
+    def redaction(self, content: str, msg: Optional[dict] = None) -> Optional[str]:
+        """What the decision trace keeps instead of this line (the route step ``admin_command``): 合作单指令's
+        ``DealCommands.trace_text`` for a line of theirs (names, a note's words: never in data/decision_trace.jsonl,
+        as the review's step redacts its answers); None for every other line (kept as before)."""
+        commands = self._deal_commands
+        if commands is None:
+            return None
+        try:
+            return commands.trace_text if commands.admin_command(content.strip(), msg) is not None else None
+        except Exception:
+            logger.exception("ADMIN: could not tell whether a line is a 合作单指令")
+            return None
+
     def is_command(self, content: str) -> bool:
         """A management command (not the help), recognised without running it.
 

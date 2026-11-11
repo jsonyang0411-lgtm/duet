@@ -170,7 +170,8 @@ def admin_command(ctx: RouteContext) -> Optional[Stop]:
 
     Only ``ADMIN_WXID`` in a one-to-one chat; a group is never answered, an @ there
     included.  Text that is not a command passes on (to silence).  The handler gets the
-    message too (合作单指令, PRM_WECHAT_COMMANDS: typed text only)."""
+    message too (合作单指令, PRM_WECHAT_COMMANDS: typed text only), and a line of 合作单指令 is
+    kept in the decision trace as the handler's ``redaction`` says (its names, a note's words)."""
     router, msg = ctx.router, ctx.msg
     admin = str(getattr(router._config, "admin_wxid", "") or "")
     handler = getattr(router, "_admin", None)
@@ -179,6 +180,10 @@ def admin_command(ctx: RouteContext) -> Optional[Stop]:
     content = _QUOTE_PREFIX.sub("", str(msg.get("content", "") or "")).strip()
     if not content:
         return None
+    hidden = getattr(handler, "redaction", None)              # (合作单指令: its names and words not in the trace)
+    hidden = hidden(content, msg) if callable(hidden) else None
+    if isinstance(hidden, str) and hidden:
+        ctx.trace.redact(hidden)
     reply = handler.handle(content, msg=msg)
     if not reply:
         return None
