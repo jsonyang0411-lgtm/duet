@@ -123,15 +123,18 @@ from ..relay.store import PRM
 from ..send.bubbles import typing_delay
 from ..wechat.new_friends import FILLER, is_friend_notice, is_person_chat
 from . import contact, deals, draft_context, gates, handcards, pii, platforms, retention
-from .boss_groups import (BOSS as BOSS_WHO, CHANNEL as GROUP_CHANNEL, EVENT as BOSS_EVENT, GONE as BOSS_GONE,
+from .boss_groups import (ASK_NOTICE, AUTO as GROUP_AUTO, AUTO_WHY, BOSS as BOSS_WHO, mask_name,
+                          CHANNEL as GROUP_CHANNEL, EVENT as BOSS_EVENT, GONE as BOSS_GONE,
                           GONE_WHY as BOSS_GONE_WHY,
-                          HER as GROUP_HER, LINES_KEPT as GROUP_LINES_KEPT, LINKED as BOSS_LINKED, MEMBER as GROUP_MEMBER,
-                          OPENING_HOW as BOSS_OPENING, RECORD_LINE_CHARS, US as GROUP_US, BossGroups, told_lines)
+                          HER as GROUP_HER, HER_SIDE as GROUP_HER_SIDE, HER_SIDE_MARK, LINES_KEPT as GROUP_LINES_KEPT,
+                          LINKED as BOSS_LINKED, LINKED_NOTICE, MEMBER as GROUP_MEMBER, NEW_NOTICE,
+                          OPENING_HOW as BOSS_OPENING, REACH_LAST_SPOKE, RECORD_LINE_CHARS, US as GROUP_US, BossGroups,
+                          told_lines)
 from .friend_adds import OPEN as FRIEND_ADD_OPEN, STATES as FRIEND_ADD_STATES, FriendAdds, friend_adds_out
 from .group_link import GroupLinks
 from .result import MAX_DRAFT_CHARS, MESSAGE_KINDS, PLATFORM_UNASKED, DraftError, parse_draft
 from .three_party import EVENT as GROUP_EVENT, TAKEN_BY as GROUP_TAKEN_BY, ThreeParty, state_out as group_state_out
-from .wechat_review import WechatReview, hats_of, preview_stamp
+from .wechat_review import WechatReview, admin_problem, hats_of, preview_stamp
 from .store import (
     APPROVED, BUYIN_TOOL, COPILOT, DRAFT_NOTES, DROPPED, EXECUTING, FAILED, HUMAN, LANE_BUYIN, LANE_REPLY, LANE_SYSTEM,
     DRAFT_NOTE_CHARS, MESSAGE_TOOL, MODES, NO_REPLY, NOTICE_CHARS, PAUSED, PENDING,
@@ -783,13 +786,21 @@ def _later(deal: dict, at: float) -> float:
     return max(float(deal.get("last_message_at") or 0), at)
 
 
-def _wrote(deal: dict, chat_id: str, at: float) -> dict:
+def _wrote(deal: dict, chat_id: str, at: float, side: bool = False) -> dict:
     """``update_deal``'s fields after a message of hers written at ``at`` in ``chat_id``: ``last_message_at`` (any chat)
     and that chat's own time in ``last_by_chat`` (老板拉的群: a creator who writes in a group and in private has a 稍等
-    round of each chat, ``send_holding_replies``).  Neither goes back."""
+    round of each chat, ``send_holding_replies``).  Neither goes back.  ``side`` (她那边的人, PRM_GROUP_HER_SIDE): a line
+    of her side's other people in that group: its time is kept under SIDE_SPOKE + the chat (``_spoke``, ``_her_last``)."""
     by_chat = dict(deal.get("last_by_chat") or {})
-    by_chat[str(chat_id)] = max(float(by_chat.get(str(chat_id)) or 0), at)
+    key = (SIDE_SPOKE if side else "") + str(chat_id)
+    by_chat[key] = max(float(by_chat.get(key) or 0), at)
     return {"last_message_at": _later(deal, at), "last_by_chat": by_chat}
+
+
+def reach_meta(why: str) -> dict:
+    """A group job's (and its packet's) ``meta.reach`` when PRM_REACH_LAST_SPOKE sent it there (``_reaching``'s why
+    REACH_LAST_SPOKE): ``{"reach": "last_spoke"}``; else nothing (a group job as before)."""
+    return {"reach": REACH_LAST_SPOKE} if why == REACH_LAST_SPOKE else {}
 
 
 EVENT_NAMES = {
@@ -889,6 +900,19 @@ SIGNED_DAY_NOTE = "签收后问一句：白天要人看过再发"
 # left the group) nothing is sent and the deal's notice (``UNREACHABLE``) says so until she writes to us again.
 UNREACHABLE = "unreachable"
 UNREACHABLE_TEXT = "她不是我们的微信好友，也不在老板拉的群里了：机器人发不了消息给她"
+# ... PRM_REACH_LAST_SPOKE (off, the default; 2026-11-11, a real case: a creator's team talks only in their group, the
+# deal also has an old private chat, 「做手卡」's cards went to the private chat where nobody looks): "on": what the bot
+# starts itself goes to a linked group she is still in (one it drafts in: never a deal's read-only 三方群) when the
+# latest line of her side on the deal (hers; with PRM_GROUP_HER_SIDE on her side's too: ``last_by_chat``) was in that
+# group; her latest line in her private chat, or none at all: as before.  Decided when the message is made
+# (``_reaching`` ``made``): a job is drafted for the chat it goes to, a shipping notice (no job) once, the first time it
+# is aimed (``_aim``: its ``meta.reach``); it never moves after that but by the rule above (she has no private chat).
+# A job and its packet sent to the group by this rule say so (``meta.reach`` REACH_LAST_SPOKE: the console's why); one
+# that stays in her private chat by it, a shipping notice, ``meta.reach`` REACH_PRIVATE (decided: not again).
+REACH_PRIVATE = "private"                 # (REACH_LAST_SPOKE: src/prm/boss_groups.py, wechat_review reads it too)
+# ... her side's other people's lines (PRM_GROUP_HER_SIDE) are kept apart in ``last_by_chat`` (this + the group's id):
+# they count for where her side last spoke only while that switch is on (``_spoke``), her own lines are the chat's key
+SIDE_SPOKE = "side:"
 # ... and a draft that did not go out to such a group (a refusal: the window does not know the group's name, a namesake):
 # the deal says so until a later one goes out there
 GROUP_UNSENT = "boss_group_unsent"
@@ -923,6 +947,20 @@ HER_RECALL_SEC = 180
 LINK_FIRST = "link_first"
 HAND_GROUP_HELD = "运营手动接的群：草稿一律等你看过再发（群里的人都看得到；PRM_LINKED_GROUPS_AUTO 关着）"
 LINK_FIRST_HELD = "接群时她在等我们回的那几句：这份草稿等你看过再发"
+# ... a group the scan linked by itself (群自己接上, PRM_GROUPS_AUTO_LINK): the same rule, said in its own words
+AUTO_GROUP_HELD = "机器人自动接的群：草稿一律等你看过再发（群里的人都看得到；PRM_LINKED_GROUPS_AUTO 关着）"
+# ... (review 2026-11-11 #2) and until a person confirmed it (a draft there sent by a person, 「确认接群」, the console's
+# 「是她的群」: ``BossGroups.confirm``), whatever PRM_LINKED_GROUPS_AUTO says
+AUTO_UNCONFIRMED_HELD = ("机器人自动接的群，还没人确认是她的群：草稿一律等你看过再发（你发出去一份、回「确认接群 群名」或者在合作单上点"
+                         "「是她的群」以后，照「手动接的群也自动发」）")
+# 她那边的人 (PRM_GROUP_HER_SIDE, review 2026-11-11 #1): her side is anybody there not known to be ours, so a draft whose
+# job holds a line of theirs (HER_SIDE_MARK) always waits for a person: no gate, 下班时段, 自动模式, PRM_LINKED_GROUPS_AUTO
+HER_SIDE_HELD = "她那边的人（不是登记的那个号）说的话：机器人不能确定这个人是谁，这份草稿一律等你看过再发"
+# ... the hold reasons a draft's card shows by day too (``meta.hold``; the others are said as before)
+SHOWN_HOLDS = (AUTO_UNCONFIRMED_HELD, HER_SIDE_HELD)
+GROUP_CONFIRM = "group_confirm"            # the deal action of the console's 「是她的群」 ({chat})
+# ... and in the lines it sends the admin's chat (``_auto_link_notice``), a group nobody named
+NO_GROUP_NAME = "一个没有群名的群"
 
 
 def auto_name(name, wxid: str) -> str:
@@ -985,6 +1023,13 @@ def event_out(ev: dict) -> dict:
         name = "不接这个群了（运营说的），群里她的消息不再起草：它还是她的三方群，机器人只读"
     elif ev["kind"] == BOSS_EVENT and detail.get("gone") and detail.get("stopped") and not detail.get("manual"):
         name = "老板拉的群不接了（运营说的），群里她的消息不再起草"
+    elif ev["kind"] == BOSS_EVENT and detail.get("auto") and detail.get("confirmed"):   # 群自己接上: a person says so
+        name = ("确认了自动接的群" + (f"（{detail['name']}）" if detail.get("name") else "")
+                + ("：运营发出去了一份草稿" if detail.get("how") == "sent" else "") + "，之后的草稿照「手动接的群也自动发」")
+    elif ev["kind"] == BOSS_EVENT and detail.get("manual") and detail.get("auto"):   # 群自己接上: the scan's own link
+        name = ("自动接的群不接了（运营说的），群里她的消息不再起草" if detail.get("gone") else
+                "自动接的群" + (f"（{detail['name']}）" if detail.get("name") else "")
+                + f"：{detail.get('why') or AUTO_WHY}" + ("，她原来的三方群保留" if detail.get("kept") else ""))
     elif ev["kind"] == BOSS_EVENT and detail.get("manual"):      # 接手任何合作群: a group an operator linked by hand
         name = ("手动接的群不接了（运营说的），群里她的消息不再起草" if detail.get("gone") else
                 "手动接的群" + (f"（{detail['name']}）" if detail.get("name") else "")
@@ -1092,7 +1137,8 @@ def hand_samples_out(store: PrmStore, limit: int = HAND_LINES) -> list:
 
 def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, limit: int = 40,
              retention_days: int = retention.RETENTION_DAYS, now: Optional[float] = None,
-             group_of: Callable[[dict], dict] = group_state_out, photo_check: bool = False) -> dict:
+             group_of: Callable[[dict], dict] = group_state_out, photo_check: bool = False,
+             reach_of: Optional[Callable[[dict, dict], Optional[dict]]] = None) -> dict:
     """What the console shows (GET /api/prm); also built from the database when the bot is stopped.
     Numbers appear only masked (``legend``); the full ones need ``reveal``.  ``night_alerts``: the deals' notices
     of holding lines the night window (``auto``: 自动模式 by day) sent (``NIGHT_NOTICE``), each until 「已处理」
@@ -1101,7 +1147,9 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
     running bot's adds its last 「先试一下」).  ``photo_check`` (PRM_DRAFT_CONTEXT on): a pending sample order the Mac did
     not check by photo (``draft_context.unchecked``), or whose last preview went by a 「对过图了」 taken back since
     (``withdrawn``), shows 「批准并执行」 off and why; its ``photo_held`` lists the hats the Mac held for photos
-    (``held_out``: the console's 「对过图了」 and 「撤销」)."""
+    (``held_out``: the console's 「对过图了」 and 「撤销」).  ``reach_of(party, deal)`` (the running bot's, with
+    PRM_REACH_LAST_SPOKE on: PrmService ``_reach_out``): where what the bot starts itself for her would go now and why,
+    a deal's ``reach`` (only for a creator with a linked group; never from the stopped console)."""
     now = time.time() if now is None else now
     parties = {p["id"]: p for p in store.parties(include_inactive=True)}
     newest = {}
@@ -1135,7 +1183,9 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
     by_hand: dict[int, list] = {}
     for r in store.boss_groups((BOSS_LINKED,)):
         if r.get("manual") and r.get("deal_id"):
-            by_hand.setdefault(int(r["deal_id"]), []).append({"chat": r["chat"], "name": r["name"], "at": r["found_at"]})
+            by_hand.setdefault(int(r["deal_id"]), []).append(
+                {"chat": r["chat"], "name": r["name"], "at": r["found_at"],
+                 **({"auto": True} if r.get("manual") == GROUP_AUTO else {})})   # (群自己接上: the scan linked it)
 
     def shown(party_id: int) -> dict:
         if party_id not in shown_cache:
@@ -1202,6 +1252,10 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
             "auto_at": p["meta"].get("auto_at") if isinstance(p["meta"].get("auto_at"), (int, float)) else None,
             "auto_held": str(p["meta"].get("auto_held") or ""),
             **({"group_manual": True} if p["meta"].get("group_manual") else {}),   # 接手任何合作群: no 老板 need be there
+            **({"hold": str(p["meta"]["hold"])} if p["meta"].get("hold") else {}),   # (review 2026-11-11 #1, #2)
+            # ... PRM_REACH_LAST_SPOKE: one the bot started goes to the group because her side last spoke there
+            **({"reach": REACH_LAST_SPOKE} if p["meta"].get("channel") == GROUP_CHANNEL
+               and p["meta"].get("reach") == REACH_LAST_SPOKE else {}),
             # ... the group's lines her waiting draft did not hear (REDRAFT_MAX automatic redrafts done)
             **({"unheard": int(p["meta"]["unheard"])} if isinstance(p["meta"].get("unheard"), int)
                and p["meta"]["unheard"] > 0 else {}),
@@ -1263,13 +1317,32 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
                 "draft_note": str(deal.get("draft_note") or ""),      # 起草备注: as the operators wrote it
                 "card_items": card_items_out(store, deal["id"]),      # 「做手卡」: her latest sample order's products
                 **linked_groups(deal),
+                **reached(p, deal),
+                # 群自己接上 (review 2026-11-11 #2): its groups the scan linked that nobody confirmed (「是她的群」)
+                **({"unconfirmed_groups": unconfirmed[int(deal["id"])]} if int(deal["id"]) in unconfirmed else {}),
             },
         }
 
+    unconfirmed: dict[int, list] = {}
+    for r in store.boss_groups((BOSS_LINKED,)):
+        if r.get("manual") == GROUP_AUTO and r.get("confirmed_at") is None and r.get("deal_id"):
+            unconfirmed.setdefault(int(r["deal_id"]), []).append({"chat": r["chat"], "name": r["name"]})
+
+    def reached(party: dict, deal: dict) -> dict:
+        """PRM_REACH_LAST_SPOKE: ``{"reach": {"where", "name"?, "why"}}`` (``reach_of``), or nothing at all."""
+        if reach_of is None:
+            return {}
+        try:
+            out = reach_of(party, deal)
+        except Exception:                              # (the console's page never fails over it)
+            logger.exception("PRM: where party %s's messages go could not be told", party.get("id"))
+            out = None
+        return {"reach": out} if out else {}
+
     def linked_groups(deal: dict) -> dict:
         """接手任何合作群: the groups linked by hand to this deal that are not its 三方群 (that one says so itself):
-        ``{"linked_groups": [{chat, name, at}]}`` (``chat``: for the console's 「不接了」, ``group_unlink``), or nothing at
-        all."""
+        ``{"linked_groups": [{chat, name, at}]}`` (``chat``: for the console's 「不接了」, ``group_unlink``; ``auto``
+        True on one the scan linked by itself, 群自己接上), or nothing at all."""
         mine = (deal.get("three_party") or {}).get("chat")
         groups = [dict(g) for g in by_hand.get(int(deal["id"]), []) if g["chat"] != mine]
         return {"linked_groups": groups} if groups else {}
@@ -1623,7 +1696,8 @@ class PrmService:
         self.boss_groups = BossGroups(self._store, config, clock=clock, reserved=self._reserved, register=self.register,
                                       opening=self._group_opening, handle=self.handle, local=self._local,
                                       guard=self.three_party.guard, catch_up=self._link_catch_up,
-                                      on_close=self._close_group)
+                                      on_close=self._close_group, notice=self._auto_link_notice,
+                                      tell=self._tell_admin)
         # 接手任何合作群 (src/prm/group_link.py, 2026-11-09): the admin's 「接群」 commands (Bot._wire_friend_adds hands
         # them over from src/admin.py); a group linked by hand works whatever PRM_BOSS_GROUPS says
         self.group_links = GroupLinks(self, clock=clock)
@@ -1631,6 +1705,9 @@ class PrmService:
         # person (``_hand_hold``); on: they go by the gates, the 下班时段 and 自动模式 as a 老板拉的群's
         self._linked_groups_auto = (str(getattr(config, "prm_linked_groups_auto", "off") or "off").strip().lower()
                                     == "on")
+        # ... PRM_REACH_LAST_SPOKE (off, the default; a config object without it: off): what the bot starts itself goes
+        # where her side last spoke (``_reaching``, REACH_LAST_SPOKE)
+        self._reach_last_spoke = (str(getattr(config, "prm_reach_last_spoke", "off") or "off").strip().lower() == "on")
         # ... a group linked by hand: when her waiting group draft was last drafted again, and the groups where one is
         # owed (``_group_message``, ``sweep_owed_redrafts``: REDRAFT_GAP_SEC)
         self._redrafted: dict[str, float] = {}
@@ -2048,13 +2125,25 @@ class PrmService:
         """Why a draft for this chat waits for a person whatever its kind's gate, the 下班时段, 自动模式, 开场白自动发 or
         签收后问一句 would do ("" = nothing of it holds it): the chat is a group linked by hand (接手任何合作群,
         ``BossGroups.by_hand``) and PRM_LINKED_GROUPS_AUTO is off (``HAND_GROUP_HELD``: everybody in it reads what goes
-        there, decision 2026-11-10), or the draft answers the lines that waited at 接群 (its job's ``meta.link_first``,
-        ``LINK_FIRST_HELD``), whatever the switch says.  A 老板拉的群 the scan took over keeps its way."""
+        there, decision 2026-11-10; one the scan linked by itself, 群自己接上: ``AUTO_GROUP_HELD``), or the draft answers
+        the lines that waited at 接群 (its job's ``meta.link_first``, ``LINK_FIRST_HELD``), whatever the switch says.  A
+        老板拉的群 the scan took over keeps its way."""
         if not self.boss_groups.by_hand(str(chat_id or "")):
             return ""
         if isinstance(meta, dict) and meta.get(LINK_FIRST):
             return LINK_FIRST_HELD
-        return "" if self._linked_groups_auto else HAND_GROUP_HELD
+        if self.boss_groups.unconfirmed(str(chat_id or "")):
+            return AUTO_UNCONFIRMED_HELD           # (review 2026-11-11 #2: nobody confirmed the scan's link yet)
+        if self._linked_groups_auto:
+            return ""
+        return AUTO_GROUP_HELD if self.boss_groups.by_scan(str(chat_id or "")) else HAND_GROUP_HELD
+
+    def _side_line_in(self, job: Optional[dict]) -> bool:
+        """她那边的人 (review 2026-11-11 #1): does this draft job hold a line of her side's other people (HER_SIDE_MARK
+        before it: ``_take``; joined or carried along, its text and follow-ups: ``_job_lines``)?"""
+        if not job or not self.boss_groups.her_side_on:
+            return False
+        return HER_SIDE_MARK in str(job.get("text") or "") or HER_SIDE_MARK in self._job_lines(job)
 
     def _night_sent(self, packet: dict, now: float) -> None:
         """A draft the night window (or 自动模式 by day: the packet's ``meta.auto_mode``, its record and notice say so)
@@ -2134,7 +2223,11 @@ class PrmService:
         while her group draft waits in 待审批 has it drafted again with it (``_redraft_group``; in a group linked by
         hand the boss's at once, anybody else's at most every REDRAFT_GAP_SEC); WeChat's own lines are never drafted (a
         recall that is hers, ``BossGroups.recall_is_hers``: the drafts not sent wait for a person).  The lines are kept
-        on her deal for her private drafts only when the group is her deal's 三方群 (``_three_party_lines``)."""
+        on her deal for her private drafts only when the group is her deal's 三方群 (``_three_party_lines``).
+        她那边的人 (PRM_GROUP_HER_SIDE on, 2026-11-11): a line of a member who is not ours nor a registered creator
+        (``BossGroups.her_side``: her assistant, her 商务) is drafted as her own is (``_take`` with ``side``: the same
+        job, gates, 下班时段, 自动模式, redrafts and what counts as answered; marked HER_SIDE_MARK in the job's text), and
+        a recall of such a member's is hers; with the switch off it is context only, as before."""
         chat_id = str(msg.get("chat_id", ""))
         row = self.boss_groups.linked(chat_id)
         if row is None:
@@ -2156,11 +2249,16 @@ class PrmService:
             recalled = self.boss_groups.sender_of(chat_id, msg.get("recalled_id")) if msg.get("recalled_id") else ""
             # (her last line there, ``last_by_chat``, is on WeChat's clock: so is the recall's, ``written``; with
             # none, now on WeChat's clock: this PC's minus the skew measured, final check 2026-11-09)
-            her_last = float((self._store.deal_of(party["id"], now).get("last_by_chat") or {}).get(chat_id) or 0)
+            her_last = self._her_last(self._store.deal_of(party["id"], now), chat_id)
             recent = bool(her_last) and (written or now - self._skew) - her_last <= HER_RECALL_SEC
+            # (她那边的人: a recall of her side's other people is hers too; the one who wrote the recalled line may have
+            # come in since the members were last read)
+            hers = self.boss_groups.side_ids(row, party)
+            if recalled and self.boss_groups.her_side(row, party, recalled):
+                hers = hers | {recalled}
             if line is not None and (edge_text.recall_by(line) == "us"
                                      or self.boss_groups.recall_is_hers(row, party, line, sender=recalled,
-                                                                        recent=recent)):
+                                                                        recent=recent, side=hers)):
                 self._system_line(msg, party, line)
             else:
                 logger.info("PRM: a WeChat system line in boss group %s…; not drafted", chat_id[:8])
@@ -2168,20 +2266,27 @@ class PrmService:
         said = message_text(self.boss_groups.record_msg(msg, party, row))   # (a 聊天记录: no boss's name in it)
         if self._three_party_lines(row, chat_id, party):
             sender = str(msg.get("sender_id") or "")
-            kind = ("creator" if sender == party["wxid"] else "boss"
-                    if self.boss_groups.who(row, sender, str(msg.get("sender_name") or "")) == BOSS_WHO else "member")
+            said_by = self.boss_groups.who(row, sender, str(msg.get("sender_name") or ""))
+            kind = ("creator" if sender == party["wxid"] else "boss" if said_by == BOSS_WHO
+                    else "us" if said_by == GROUP_US else "member")     # (us: one of ours, PRM_GROUP_OURS)
             self._group_line(party, chat_id, kind, said, self._local(written) if written else now, now)
-        if str(msg.get("sender_id") or "") != party["wxid"]:
+        speaker = str(msg.get("sender_id") or "")
+        # 她那边的人 (PRM_GROUP_HER_SIDE): her assistant's, her 商务's line is drafted as hers
+        side = (speaker != party["wxid"] and not msg.get("is_own")
+                and self.boss_groups.her_side(row, party, speaker, str(msg.get("sender_name") or "")))
+        if speaker != party["wxid"] and not side:
             who = self.boss_groups.who(row, str(msg.get("sender_id") or ""), str(msg.get("sender_name") or ""))
             self.boss_groups.add_context(chat_id, who, self._mask(party["id"], said, now),
                                          self._local(written) if written else now)
             logger.info("PRM: a line of %s in boss group %s… kept for party %d's next draft (not answered)",
-                        "the boss" if who == BOSS_WHO else "another member", chat_id[:8], party["id"])
+                        "the boss" if who == BOSS_WHO else "one of ours" if who == GROUP_US else "another member",
+                        chat_id[:8], party["id"])
             if row.get("manual"):
                 # 接手任何合作群 (review 2026-11-09): a big group's members do not make a Mac job each: the boss's line
-                # has her waiting draft drafted again at once, anybody else's at most every REDRAFT_GAP_SEC (one owed
-                # till then, ``sweep_owed_redrafts``) and at most REDRAFT_MAX times (then her draft's card counts them)
-                if who != BOSS_WHO:
+                # (and one of our own people's, PRM_GROUP_OURS) has her waiting draft drafted again at once, anybody
+                # else's at most every REDRAFT_GAP_SEC (one owed till then, ``sweep_owed_redrafts``) and at most
+                # REDRAFT_MAX times (then her draft's card counts them)
+                if who not in (BOSS_WHO, GROUP_US):
                     self._lines_since[chat_id] = self._lines_since.get(chat_id, 0) + 1
                     if self._auto_redrafts.get(chat_id, 0) >= REDRAFT_MAX:
                         self._unheard(party, chat_id)
@@ -2189,24 +2294,94 @@ class PrmService:
                     if now - self._redrafted.get(chat_id, 0.0) < REDRAFT_GAP_SEC:
                         self._redraft_owed.setdefault(chat_id, now)
                         return True
-                self._group_redraft(party, chat_id, row, now, how="others" if who != BOSS_WHO else "boss")
+                self._group_redraft(party, chat_id, row, now,
+                                    how="others" if who not in (BOSS_WHO, GROUP_US) else "boss")
                 return True
             self._redraft_group(party, chat_id, row, now)
             return True
-        # (her own line: its draft job hears the group's lines; others' lines may have her drafts drafted again; her
-        # lines a closed link of this group left unanswered: she writes there again)
+        # (her own line, or one of her side's: its draft job hears the group's lines; others' lines may have her drafts
+        # drafted again; her lines a closed link of this group left unanswered: she writes there again)
         self._reset_redrafts(chat_id)
         deal = self._store.deal_of(party["id"], now)
         if any(n.get("key") == GROUP_LEFT + chat_id for n in deal["notices"]):
             self._store.drop_notices(deal["id"], lambda n: n["key"] == GROUP_LEFT + chat_id, now)
-        self._take(msg, party, chat_id, group=row)
+        if side:
+            logger.info("PRM: a line of her side (not the registered account, %s…) in group %s… is drafted as party "
+                        "%d's", speaker[:6], chat_id[:8], party["id"])
+        self._take(msg, party, chat_id, group=row, side=side)
         return True
+
+    def _her_last(self, deal: dict, chat_id: str) -> float:
+        """When her side last wrote in this chat (``last_by_chat``, WeChat's clock; 0.0 never): her own lines, and with
+        PRM_GROUP_HER_SIDE on her side's other people's too (SIDE_SPOKE)."""
+        by_chat = deal.get("last_by_chat") or {}
+        times = [by_chat.get(str(chat_id))]
+        if self.boss_groups.her_side_on:
+            times.append(by_chat.get(SIDE_SPOKE + str(chat_id)))
+        return max([float(t or 0) for t in times])
+
+    def _tell_admin(self, text: str) -> Optional[bool]:
+        """One line said in the admin's own chat by the bot itself (群自己接上, BossGroups ``tell``): True when it went,
+        False when WeChat did not take it now, None when there is no admin's chat to tell (no sender, the Mac's edge
+        backend, ADMIN_WXID empty, a group's id or a registered creator's wxid: ``wechat_review.admin_problem``).
+        Whatever PRM_WECHAT_REVIEW says: the answer to such a line is the admin's 「接群」 / 「不接群」 command."""
+        admin = self.wechat_review.admin
+        edge = str(getattr(self._config, "wechat_backend", "") or "") == "edge"
+        if self._send is None or edge or admin_problem(admin, self._store):
+            return None
+        try:
+            return bool(self._send(admin, str(text)))
+        except Exception:
+            logger.exception("PRM: a line about a group could not be sent to the admin's chat")
+            return False
+
+    def _auto_link_notice(self, kind: str, info: dict) -> str:
+        """群自己接上 (BossGroups ``notice``): the one line the admin's chat gets about a group the scan looked at
+        (``info``: the group's ``chat`` / ``name`` / ``size``, and by ``kind``: LINKED_NOTICE, her ``party`` and the
+        link's answer ``out``; ASK_NOTICE, the registered ``creators`` in it; NEW_NOTICE / ACTIVE_NOTICE, the creator
+        who has a linked group already as ``party``, or None).  The group's name and her 称呼 as that chat may show them
+        (``WechatReview.shown`` / ``creator_name``: her platform ids by their last characters, numbers masked).  The
+        answer it suggests names the group only when the name is one the 「接群」 commands would find (not empty, not
+        changed by the masking); else it points at the list or the console."""
+        review = self.wechat_review
+        party = info.get("party")
+        raw = " ".join(str(info.get("name") or "").split())
+        name = review.shown(raw, party)
+        # (a name cut short, review 2026-11-11 #10: the 「接群」 commands would not find it: the list or the console)
+        exact = bool(name) and name == raw and not info.get("long")
+        group = f"群「{name}」" if name else NO_GROUP_NAME
+        size = f"（{info['size']} 人）" if info.get("size") else ""
+        pick = f"回「接群 {name}」" if exact else "发「接群」从单子里选它"
+        if kind == LINKED_NOTICE:
+            out = info["out"]
+            her = review.creator_name(party, out.get("deal_id"))
+            said = self.group_links.linked_text({**info, "name": name}, {**out, "name": her})
+            said = said[len("接手了："):] if said.startswith("接手了：") else said
+            undo = f"不对就回「不接群 {name}」" if exact else "不对就到控制台她的合作单上点这个群的「不接了」"
+            sure = (f"对的话回「确认接群 {name}」" if exact else "对的话到控制台她的合作单上点「是她的群」")
+            return (f"已自动接群（{AUTO_WHY}）：{said}；{sure}（确认以前、或者你发出去一份以前，这个群的草稿都等你看）；{undo}")
+        refuse = (f"不是合作群就回「不接群 {name}」（以后不再问）" if exact
+                  else "不是合作群就到控制台「合作单」页顶上点「不接」")
+        if kind == ASK_NOTICE:
+            creators = [review.creator_name(p) for p in info.get("creators") or [] if p]
+            if info.get("why"):                # (one creator, but a doubt: BossGroups._auto_doubt)
+                return (f"{group}{size}里有一位登记过的达人（{'、'.join(creators) or '她'}），但{info['why']}，机器人没自动接："
+                        f"{pick}选她，或者到控制台「合作单」页顶上选；{refuse}")
+            return (f"{group}{size}里有 {len(creators)} 位登记过的达人（{'、'.join(creators)}），机器人不猜是谁的群，没自动接："
+                    f"{pick}选一位，或者到控制台「合作单」页顶上选；{refuse}")
+        why = f"（里面的 {review.creator_name(party)} 已经有接手的群，没自动接）" if party else ""
+        if kind == NEW_NOTICE:
+            head = f"新{group}{size}" if name else f"{NO_GROUP_NAME}{size}是新的，"
+        else:
+            head = f"{group}{size}有新消息，"
+        return f"{head}还没接{why}：{pick}" + (f"；不是合作群就回「不接群 {name}」，以后不再提醒" if exact else "")
 
     def _link_catch_up(self, party: dict, chat: str, since: float) -> Optional[dict]:
         """接手任何合作群 (src/prm/group_link.py; BossGroups.link, ``catch_up``): what was said in a group an operator just
         linked to her by hand, read once (the backend's ``group_lines``: since ``since``, BossGroups.catch_up_since), is
         context for her next job (``add_context``: the boss's, the other members', ours and her own lines, 老板 /
-        群成员 / 我们 / 她, the newest GROUP_LINES_KEPT; ``meta.group.lines``) and is kept on her deal for her private
+        群成员 / 我们 / 她, with PRM_GROUP_HER_SIDE on her side's other people's as 她那边 (they wait for an answer as
+        hers do), the newest GROUP_LINES_KEPT; ``meta.group.lines``) and is kept on her deal for her private
         drafts (``_group_line``: the lines it has not kept yet, her own 三方群 having been read before; only a group
         that is her deal's 三方群, ``_three_party_lines``).  No 开场白: the talk is going on.  Her lines after our last
         one there (none of ours: all of hers) are lines waiting for an
@@ -2219,16 +2394,19 @@ class PrmService:
         ``{"read": False}`` when the backend cannot read it now."""
         read = getattr(self.boss_groups.backend, "group_lines", None)
         lines = None
+        row = self._store.boss_group(chat) or {}
+        # (她那边的人, PRM_GROUP_HER_SIDE: her side's other people count as her: their voice messages are heard, their
+        # lines after our last one wait for an answer too)
+        side_ids = self.boss_groups.side_ids(row, party)
         if callable(read):
             try:
-                lines = read(chat, since, voices=(party["wxid"],))
+                lines = read(chat, since, voices=(party["wxid"], *sorted(side_ids)))
             except Exception:
                 logger.warning("PRM: group %s…: what was said there could not be read", chat[:8], exc_info=True)
         if lines is None:
             logger.info("PRM: group %s… linked by hand: its lines so far could not be read; from now on", chat[:8])
             return {"read": False}
         now = self._clock()
-        row = self._store.boss_group(chat) or {}
         deal = self._store.deal_of(party["id"], now)
         three_party = self._three_party_lines(row, chat, party)    # (her private drafts hear them, or not)
         kept_until = max([float(ev["detail"].get("at") or ev["at"])
@@ -2250,19 +2428,24 @@ class PrmService:
                 items.append((msg, written, "us"))
             elif sender == party["wxid"]:
                 items.append((msg, written, "creator"))
+            elif sender in side_ids or self.boss_groups.her_side(row, party, sender, str(msg.get("sender_name") or "")):
+                items.append((msg, written, "side"))
             else:
                 who = self.boss_groups.who(row, sender, str(msg.get("sender_name") or ""))
-                items.append((msg, written, "boss" if who == BOSS_WHO else "member"))
-        waiting = [msg for msg, written, who in items if who == "creator" and written > ours_at]
+                if who == GROUP_US:            # (one of our own people, PRM_GROUP_OURS: ours, it answers her too)
+                    ours_at = max(ours_at, written)
+                items.append((msg, written, "boss" if who == BOSS_WHO else "us" if who == GROUP_US else "member"))
+        waiting = [msg for msg, written, who in items if who in ("creator", "side") and written > ours_at]
         tail = {id(msg) for msg in waiting[-LINK_TAIL:]}
+        sided = {id(msg) for msg, _, who in items if who == "side"}
         kept = [item for item in items if id(item[0]) not in tail][-GROUP_LINES_KEPT:]
-        labels = {"us": GROUP_US, "creator": GROUP_HER, "boss": BOSS_WHO, "member": GROUP_MEMBER}
+        labels = {"us": GROUP_US, "creator": GROUP_HER, "side": GROUP_HER_SIDE, "boss": BOSS_WHO, "member": GROUP_MEMBER}
         told = 0
         for msg, written, who in sorted(kept + [item for item in items if id(item[0]) in tail], key=lambda i: i[1]):
             at = self._local(written) if written else now
             said = message_text(self.boss_groups.record_msg(msg, party, row))
             if three_party and at > kept_until:        # (her private drafts hear the group's lines: ``_group_lines``)
-                self._group_line(party, chat, who, said, at, now)
+                self._group_line(party, chat, "member" if who == "side" else who, said, at, now)
             if id(msg) not in tail:
                 self.boss_groups.add_context(chat, labels[who], self._mask(party["id"], said, now), at)
                 told += 1
@@ -2271,7 +2454,8 @@ class PrmService:
         group = self._store.boss_group(chat)
         held = bool(tail) and self._mode(self._store.deal_of(party["id"], now), now) != COPILOT
         for msg in [msg for msg in waiting if id(msg) in tail]:
-            self._take(msg, party, chat, group=group, at_link=True)   # (its draft always waits: ``_hand_hold``)
+            # (its draft always waits: ``_hand_hold``)
+            self._take(msg, party, chat, group=group, at_link=True, side=id(msg) in sided)
         job = self._relay.store.latest_open(chat, drafts_only=True, system=False) if tail else None
         logger.info("PRM: group %s… linked by hand: %d line(s) read, %d kept as context, %d of hers wait%s", chat[:8],
                     len(items), told, len(tail), f" -> job #{job['id']}" if job else "")
@@ -2562,8 +2746,9 @@ class PrmService:
         now = self._clock()
         written = float(msg.get("timestamp", 0) or 0)
         sender = str(msg.get("sender_id") or "")
-        who = ("creator" if sender == party["wxid"] else
-               "boss" if self.boss_groups.who({}, sender, str(msg.get("sender_name") or "")) == BOSS_WHO else "member")
+        said_by = self.boss_groups.who({}, sender, str(msg.get("sender_name") or ""))
+        who = ("creator" if sender == party["wxid"] else "boss" if said_by == BOSS_WHO
+               else "us" if said_by == GROUP_US else "member")     # (us: one of ours, PRM_GROUP_OURS)
         self._group_line(party, chat_id, who, message_text(self.boss_groups.record_msg(msg, party)),
                          self._local(written) if written else now, now)
         logger.info("PRM: a line in party %d's 三方群 %s… kept for her private drafts (read only, not answered)",
@@ -2623,10 +2808,12 @@ class PrmService:
         deal = self._store.deal(deal_id) or {}
         group = deal.get("three_party") or {}
         main = str(group.get("chat") or "") if group.get("state") == "created" else ""
-        labels = {main: f"三方群「{self.boss_groups.hide(group.get('name') or '') or '（没有群名）'}」"} if main else {}
+        # (review 2026-11-11 #7: the groups' names masked for the Mac, ``mask_name``)
+        labels = ({main: f"三方群「{mask_name(self.boss_groups.hide(group.get('name') or '')) or '（没有群名）'}」"}
+                  if main else {})
         for row in self._store.boss_groups((BOSS_LINKED,), deal_id=deal_id):
             if row["chat"] not in labels and self.boss_groups.has_boss(row):
-                labels[row["chat"]] = f"群「{self.boss_groups.hide(row.get('name') or '') or '（没有群名）'}」"
+                labels[row["chat"]] = f"群「{mask_name(self.boss_groups.hide(row.get('name') or '')) or '（没有群名）'}」"
         events = self._store.events(deal_id, limit=GROUP_LINES_SCAN if labels else GROUP_LINES_TOLD,
                                     kinds=(GROUP_LINE,))
         lines = [ev for ev in events if not labels or str(ev["detail"].get("chat") or "") in labels][:GROUP_LINES_TOLD]
@@ -2743,12 +2930,15 @@ class PrmService:
         notice = next((n for n in deal.get("notices") or [] if n.get("key") == "recall"), None)
         return float(notice.get("recalled_at") or notice["at"]) if notice else None
 
-    def _take(self, msg: dict, party: dict, chat_id: str, group: Optional[dict] = None, at_link: bool = False) -> None:
+    def _take(self, msg: dict, party: dict, chat_id: str, group: Optional[dict] = None, at_link: bool = False,
+              side: bool = False) -> None:
         """``handle`` for a registered creator's message.  What is recorded and the job it joins
         are decided under ``_handle_lock``; a picture or file is fetched outside it (that may wait
         for the WeChat window, and the backend's own lines wait for the lock).  ``group``: the row of the
         老板拉的群 she wrote in (``_group_message``; ``chat_id`` is the group's).  ``at_link``: one of her lines that
-        waited when the group was linked by hand (``_link_catch_up``: ``_submit``'s ``at_link``)."""
+        waited when the group was linked by hand (``_link_catch_up``: ``_submit``'s ``at_link``).  ``side`` (她那边的人,
+        PRM_GROUP_HER_SIDE): the line is not the registered account's but one of her side's other people's in that
+        group: it is taken as hers, HER_SIDE_MARK before its words wherever they go (the job, the deal's record)."""
         now = self._clock()
         sent_at = float(msg.get("timestamp", 0) or 0)
         age = now - self._local(sent_at) if sent_at else 0.0     # (on this PC's clock: win review F6)
@@ -2764,12 +2954,14 @@ class PrmService:
             line = self.boss_groups.hide(message_text(self.boss_groups.record_msg(msg, party, group)))
         else:
             line = message_text(msg)
+        if side and group is not None:
+            line = HER_SIDE_MARK + line
         if late and age > self._catchup_sec:
             with self._handle_lock:
-                self._missed(party, self._store.deal_of(party["id"], now), line, at, now, chat_id=chat_id)
+                self._missed(party, self._store.deal_of(party["id"], now), line, at, now, chat_id=chat_id, side=side)
             return
         with self._handle_lock:
-            if self._recorded_for_a_person(party, line, at, now, chat_id=chat_id):
+            if self._recorded_for_a_person(party, line, at, now, chat_id=chat_id, side=side):
                 return
         files: tuple = ()
         kind = attachment_kind(msg)
@@ -2781,13 +2973,15 @@ class PrmService:
             elif not files:
                 line += f"（{ATTACHMENT_KINDS[kind]}没取到）"
         with self._handle_lock:
-            if not self._recorded_for_a_person(party, line, at, now, chat_id=chat_id):   # (a person may have it now)
-                self._submit(party, chat_id, line, files, at, age, late, now, group=group, at_link=at_link)
+            if not self._recorded_for_a_person(party, line, at, now, chat_id=chat_id, side=side):   # (a person may have
+                # it now)
+                self._submit(party, chat_id, line, files, at, age, late, now, group=group, at_link=at_link, side=side)
 
-    def _recorded_for_a_person(self, party: dict, line: str, at: float, now: float, chat_id: str = "") -> bool:
+    def _recorded_for_a_person(self, party: dict, line: str, at: float, now: float, chat_id: str = "",
+                               side: bool = False) -> bool:
         """A person has the chat (taken over, paused): the message is recorded for the next draft,
         nothing queued; True then (under ``_handle_lock``).  ``chat_id``: where she wrote (her private chat when
-        empty)."""
+        empty); ``side``: a line of her side's other people (``_wrote``)."""
         deal = self._store.deal_of(party["id"], now)
         mode = self._mode(deal, now)
         if mode == COPILOT:
@@ -2795,14 +2989,14 @@ class PrmService:
         text = self._mask(party["id"], f"[{_clock_text(at)}] {line}", now)
         self._store.add_event(deal["id"], party["id"], "creator_message", {"text": text},
                               actor="creator", forwarded=False, now=now)
-        self._store.update_deal(deal["id"], now, **_wrote(deal, chat_id or party["wxid"], at))
+        self._store.update_deal(deal["id"], now, **_wrote(deal, chat_id or party["wxid"], at, side=side))
         self._store.supersede(deal["id"], now, lane=LANE_REPLY)
         logger.info("PRM: party %d writes while the deal is %s; recorded, not drafted", party["id"], mode)
         return True
 
     def _submit(self, party: dict, chat_id: str, line: Optional[str], files: tuple, at: float, age: float,
                 late: bool, now: float, new_friend: Optional[dict] = None, group: Optional[dict] = None,
-                at_link: bool = False) -> None:
+                at_link: bool = False, side: bool = False) -> None:
         """The draft job of a creator's message (under ``_handle_lock``): the waiting drafts are
         out of date, the deal hears of the message, the job is made or joined.  ``new_friend``
         (``{"from", "count"}``, take_new_friend): a new friend's messages from before she was
@@ -2817,7 +3011,8 @@ class PrmService:
         writes in two chats: a message puts out of date only the drafts of the chat it came in (``_lane_chat``), each
         reply goes where she wrote.  ``line`` None (``_redraft_group``): no new line of hers, the boss or another member
         said something there while her group draft waited: that draft is out of date and her lines in it are drafted
-        again, with the group's lines now.
+        again, with the group's lines now.  ``side`` (她那边的人): the line is one of her side's other people's (the deal
+        keeps its time apart, ``_wrote``).
 
         Her lines of the reply drafts this message puts out of date (they waited in 待审批, nobody sent
         them: ``_outdated``) and of draft jobs that gave no draft (``failed:`` notices, mac review F1) go
@@ -2834,7 +3029,7 @@ class PrmService:
             self._store.drop_notices(deal["id"], lambda n: n["key"] == UNREACHABLE, now)    # she wrote: reachable
         outdated = self._outdated(waiting, now) if stale else []
         if line is not None:
-            self._store.update_deal(deal["id"], now, **_wrote(deal, chat_id, at))
+            self._store.update_deal(deal["id"], now, **_wrote(deal, chat_id, at, side=side))
         meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"]}
         if group is not None:
             meta["channel"] = GROUP_CHANNEL            # 老板拉的群: the Mac writes for the group, its packet goes there
@@ -2906,7 +3101,7 @@ class PrmService:
         if carried or outdated:
             fresh = True
         if (not any(isinstance(meta.get(k), dict) for k in ("late", "missed", "new_friend")) and self._night_active(now)
-                and not (group is not None and self._hand_hold(chat_id, meta))):
+                and not (group is not None and (side or self._hand_hold(chat_id, meta)))):
             # 下班时段 (or 自动模式): the Mac writes by the kb's rules for it (worker.prm_prompt), its draft may go out by
             # itself (``_night_judge``).  Not for a job that always waits for a person (read late, a new friend's, a
             # group linked by hand's: ``_hand_hold``).
@@ -2957,15 +3152,81 @@ class PrmService:
                 out.append((packet, job, lines))
         return out
 
-    def _reach(self, party: dict) -> tuple:
+    def _reach(self, party: dict, made: bool = False, deal: Optional[dict] = None) -> tuple:
         """Where a packet the bot starts itself goes (no line of hers it answers: a 专属佣金 step, a shipping notice, a
-        开场白 asked for in the console): ``(chat id, the 老板拉的群's row or None)``.  Her private chat, as before; for a
-        creator with a 老板拉的群 (PRM_BOSS_GROUPS) only when she ever wrote to us there or the backend knows it (she is
-        our friend), else that group; ``(None, None)`` when neither (she left it): nothing is sent (``UNREACHABLE``)."""
-        if not self.boss_groups.party_has_group(party["id"]) or self._private_known(party):
-            return party["wxid"], None
+        开场白 asked for in the console, a 补发货盘, a 做手卡, a 签收后问一句): ``(chat id, the linked group's row or None)``,
+        as ``_reaching`` decides it."""
+        chat, group, _ = self._reaching(party, made=made, deal=deal)
+        return chat, group
+
+    def _reaching(self, party: dict, made: bool = False, deal: Optional[dict] = None) -> tuple:
+        """The one place that decides where what the bot starts itself goes: ``(chat id, the linked group's row or None,
+        why)``.  Her private chat, as before; for a creator with a linked group (a 老板拉的群, one linked by hand or by the
+        scan) only when she ever wrote to us there or the backend knows it (she is our friend), else that group (the
+        newest she is still in, ``BossGroups.reach_group``); ``(None, None, "")`` when neither (she left it): nothing is
+        sent (``UNREACHABLE``).  ``made``: the message is being made now (a job about to be asked for, a shipping notice
+        aimed the first time): with PRM_REACH_LAST_SPOKE on, a linked group she is still in where the latest line of her
+        side on the deal was written (``_spoke``) comes first (why REACH_LAST_SPOKE); her private chat by that rule is
+        why REACH_PRIVATE.  ``why`` is "" otherwise (the rule as before).  ``deal``: hers, when the caller has it."""
+        if not self.boss_groups.party_has_group(party["id"]):
+            return party["wxid"], None, REACH_PRIVATE if made and self._reach_last_spoke else ""
+        if made and self._reach_last_spoke:
+            row = self._spoke(party, deal)
+            if row is not None:
+                return row["chat"], row, REACH_LAST_SPOKE
+        if self._private_known(party):
+            return party["wxid"], None, REACH_PRIVATE if made and self._reach_last_spoke else ""
         row = self.boss_groups.reach_group(party["id"])
-        return (row["chat"], row) if row is not None else (None, None)
+        return (row["chat"], row, "") if row is not None else (None, None, "")
+
+    def _spoke(self, party: dict, deal: Optional[dict] = None) -> Optional[dict]:
+        """PRM_REACH_LAST_SPOKE: the linked group she is still in (``BossGroups.reach_groups``: one the bot drafts in,
+        never a read-only 三方群) where the latest line of her side on her deal was written (``_last_spoken``), or None:
+        her latest line was in her private chat, in a group she left or the bot does not draft in, or there is none."""
+        where = self._last_spoken(party, deal)
+        if not where.endswith("@chatroom"):
+            return None
+        return next((row for row in self.boss_groups.reach_groups(party["id"]) if row["chat"] == where), None)
+
+    def _last_spoken(self, party: dict, deal: Optional[dict] = None) -> str:
+        """The chat of the latest line of her side on her deal ("" none): ``last_by_chat`` (WeChat's clock) as it is now,
+        her own lines, and with PRM_GROUP_HER_SIDE on her side's other people's too (SIDE_SPOKE); a tie goes to her
+        private chat."""
+        deal = (self._store.deal(int(deal["id"])) if deal and deal.get("id") else None) or self._store.deal_of(
+            party["id"], self._clock())               # (as it is now: the caller's may be from before a line of hers)
+        side = self.boss_groups.her_side_on
+        best, where = 0.0, ""
+        for key, at in (deal.get("last_by_chat") or {}).items():
+            chat = str(key)
+            if chat.startswith(SIDE_SPOKE):
+                if not side:
+                    continue
+                chat = chat[len(SIDE_SPOKE):]
+            try:
+                at = float(at or 0)
+            except (TypeError, ValueError):
+                continue
+            if at > best or (at == best and where.endswith("@chatroom") and not chat.endswith("@chatroom")):
+                best, where = at, chat
+        return where
+
+    def _reach_out(self, party: dict, deal: dict) -> Optional[dict]:
+        """The deal page's ``reach`` (PRM_REACH_LAST_SPOKE on, a creator with a linked group; ``snapshot``'s
+        ``reach_of``): where what the bot starts itself for her would go now (``_reaching`` with ``made``) and why:
+        ``{"where": "group", "name", "why": "last_spoke" | "no_private"}``, ``{"where": "private", "why": "last_private"
+        (her latest line was there) | "never" (she wrote nowhere yet) | "elsewhere" (her latest line was in a group she
+        left or the bot does not draft in)}``, ``{"where": "none"}`` (nowhere: ``UNREACHABLE``).  None: no linked group."""
+        if not self.boss_groups.party_has_group(party["id"]):
+            return None
+        chat, group, why = self._reaching(party, made=True, deal=deal)
+        if chat is None:
+            return {"where": "none"}
+        if group is not None:
+            return {"where": "group", "name": str(group.get("name") or "")[:60],
+                    "why": "last_spoke" if why == REACH_LAST_SPOKE else "no_private"}
+        latest = self._last_spoken(party, deal)
+        return {"where": "private", "why": ("never" if not latest else "elsewhere" if latest.endswith("@chatroom")
+                                            else "last_private")}
 
     def _private_known(self, party: dict) -> bool:
         """Has she a private chat with us: a draft job of her lines there, or the backend lists it (``knows_private``)?"""
@@ -2982,17 +3243,24 @@ class PrmService:
                 or bool(meta.get(HUOPAN)) or bool(meta.get(SIGNED)) or bool((meta.get(HANDCARDS) or {}).get("console")))
 
     def _aim(self, packet: Optional[dict], *, wait: bool = False) -> Optional[dict]:
-        """A packet the bot started itself still aimed at her private chat, for a creator with a 老板拉的群: where she can
-        be reached (``_reach``): the group (its chat, the console's tag), or nowhere: it fails, nothing is sent, the deal
-        says so (``UNREACHABLE``).  Returns the packet as it is now (None: failed so).  ``wait`` (微信里审批草稿, before a
-        draft is told: it says where it goes): reached nowhere, nothing is changed and None comes back (told later)."""
+        """A packet the bot started itself still aimed at her private chat, for a creator with a linked group: where she
+        can be reached (``_reaching``): the group (its chat, the console's tag), or nowhere: it fails, nothing is sent, the
+        deal says so (``UNREACHABLE``).  Returns the packet as it is now (None: failed so).  ``wait`` (微信里审批草稿, before
+        a draft is told: it says where it goes): reached nowhere, nothing is changed and None comes back (told later).
+        PRM_REACH_LAST_SPOKE on: a packet with no job (a shipping notice) is decided once, the first time it is aimed
+        (``made``: where her side last spoke; ``meta.reach`` says how it went, REACH_PRIVATE when it stays); a job's packet
+        went where its job was asked for (``_reaching`` with ``made`` then): only the rule as before moves it."""
         if packet is None or not self._bot_started(packet) or is_buyin(packet):
             return packet
         party = self._store.party(packet["party_id"])
         if party is None or packet["chat_id"] != party["wxid"]:
             return packet
-        chat, group = self._reach(party)
+        fresh = self._reach_last_spoke and packet.get("job_id") is None and not (packet.get("meta") or {}).get("reach")
+        chat, group, why = self._reaching(party, made=fresh, deal=self._store.deal(int(packet["deal_id"] or 0)) if fresh
+                                          else None)
         if chat == party["wxid"]:
+            if fresh and self._store.aim_packet(packet["id"], chat, {"reach": REACH_PRIVATE}):
+                return self._store.packet(packet["id"])        # (decided: it stays in her private chat)
             return packet
         now = self._clock()
         if chat is None and wait:
@@ -3006,9 +3274,10 @@ class PrmService:
                            "not sent", packet["id"], party["id"])
             return None
         self._store.aim_packet(packet["id"], chat, {"channel": GROUP_CHANNEL, "group_name": str(group["name"])[:60],
-                                                    **({"group_manual": True} if group.get("manual") else {})})
-        logger.info("PRM: packet %d goes to boss group %s… (party %d has no private chat with us)", packet["id"],
-                    chat[:8], party["id"])
+                                                    **({"group_manual": True} if group.get("manual") else {}),
+                                                    **({"reach": why} if why else {})})
+        logger.info("PRM: packet %d goes to boss group %s… (party %d %s)", packet["id"], chat[:8], party["id"],
+                    "last wrote there: PRM_REACH_LAST_SPOKE" if why == REACH_LAST_SPOKE else "has no private chat with us")
         return self._store.packet(packet["id"])
 
     def _lane_chat(self, party_id: int, chat_id: str) -> Optional[str]:
@@ -3024,11 +3293,12 @@ class PrmService:
         job = self._relay.store.get(int(job_id or 0)) if job_id else None
         return str((job or {}).get("chat_id") or party["wxid"]) == chat
 
-    def _missed(self, party: dict, deal: dict, line: str, at: float, now: float, chat_id: str = "") -> None:
+    def _missed(self, party: dict, deal: dict, line: str, at: float, now: float, chat_id: str = "",
+                side: bool = False) -> None:
         """A creator's message older than PRM_CATCHUP_HOURS when it was read: too old to draft.
         It is recorded (the deal's history; the next draft job hears of it, ``take_backlog``),
         waiting drafts are out of date, and the deal asks a person to look (how many such
-        messages wait, the earliest one's time)."""
+        messages wait, the earliest one's time).  ``side``: a line of her side's other people (``_wrote``)."""
         text = self._mask(party["id"], f"[{_clock_text(at)}] {line}", now)
         self._store.add_event(deal["id"], party["id"], "creator_message", {"text": text, "missed": True, "at": at},
                               actor="creator", forwarded=False, now=now)
@@ -3036,7 +3306,7 @@ class PrmService:
         waiting = [ev for ev in self._store.backlog(deal["id"])
                    if ev["kind"] == "creator_message" and ev["detail"].get("missed")]
         earliest = min([_event_time(ev) for ev in waiting] or [at])
-        self._store.update_deal(deal["id"], now, **_wrote(deal, chat_id or party["wxid"], at))
+        self._store.update_deal(deal["id"], now, **_wrote(deal, chat_id or party["wxid"], at, side=side))
         # until the draft job that hears of them comes back (on_result)
         self._store.set_notice(deal["id"], "missed", missed_note(len(waiting) or 1, earliest), now)
         logger.warning("PRM: party %d's message was read %.1f h after it was written (more than "
@@ -3724,6 +3994,10 @@ class PrmService:
         # 接手任何合作群: a draft for a group linked by hand waits for a person (PRM_LINKED_GROUPS_AUTO off; the lines that
         # waited at 接群 whatever it says)
         hand_held = self._hand_hold(str(job.get("chat_id") or ""), meta)
+        # 她那边的人 (review 2026-11-11 #1): a line of her side's other people is anybody's not known to be ours: its draft
+        # always waits for a person, whatever the gate, the 下班时段, 自动模式 or PRM_LINKED_GROUPS_AUTO say
+        if self._side_line_in(job):
+            hand_held = HER_SIDE_HELD
         if draft.platform is not None:
             # A platform write: always a person's decision (8.1's gates do not apply).
             state = (SUPERSEDED if mode != COPILOT or handed_on or (newer is not None and newer["id"] > job["id"])
@@ -3800,7 +4074,8 @@ class PrmService:
             # (the group's name as WeChat gives it, for the console: the job's has the bosses' names hidden; and the
             # numbers of the group's lines the job was told: sent, they go, ``_deliver``)
             packet_meta.update(channel=GROUP_CHANNEL, group_name=str(kept.get("name") or told.get("name") or "")[:60],
-                               group_told=told_lines(told), **({"group_manual": True} if kept.get("manual") else {}))
+                               group_told=told_lines(told), **({"group_manual": True} if kept.get("manual") else {}),
+                               **reach_meta(str(meta.get("reach") or "")))   # (PRM_REACH_LAST_SPOKE: why it is there)
             chat = str(job["chat_id"])
             if (kept.get("manual") and lane == LANE_REPLY and self._auto_redrafts.get(chat, 0) >= REDRAFT_MAX
                     and self._lines_since.get(chat, 0) > 0):
@@ -3811,6 +4086,8 @@ class PrmService:
             packet_meta[AUTO_MODE] = True              # 自动模式 by day sent or held it: the console and the record say so
         if night_held:
             packet_meta["night_held"] = night_held[:200]
+        if hand_held in SHOWN_HOLDS and state == PENDING:
+            packet_meta["hold"] = hand_held[:200]       # (review 2026-11-11 #1, #2: why it waits, by day too)
         if operator_files and state == PENDING and not closed:
             packet_meta[draft_context.OPERATOR_FILES] = operator_files      # (the console shows them, never sent to her)
         elif operator_files:
@@ -4361,7 +4638,9 @@ class PrmService:
         reply; a message of hers joins it, or outdates its draft (``_outdated``), like any reply draft's."""
         now = self._clock()
         deal = self._store.deal_of(party["id"], now)
-        chat, group = self._reach(party)               # (老板拉的群: no private chat with her, it goes to the group)
+        # (老板拉的群: no private chat with her, it goes to the group; PRM_REACH_LAST_SPOKE: the console's 「写开场白」 goes
+        # where her side last spoke, a new friend's 开场白 answers her friend request: her private chat as before)
+        chat, group, reach = self._reaching(party, made=by == "console", deal=deal)
         why = self._no_opening(party, deal, now, chat)
         if why:
             return None, why
@@ -4369,7 +4648,7 @@ class PrmService:
         meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"],
                 OPENING: {"how": how, "by": by, **({"wrote": True} if deal.get("last_message_at") else {})}}
         if group is not None:
-            meta.update(channel=GROUP_CHANNEL, group=self.boss_groups.job_group(chat))
+            meta.update(channel=GROUP_CHANNEL, group=self.boss_groups.job_group(chat), **reach_meta(reach))
         else:
             told = self._group_lines(deal["id"])
             if told:
@@ -4442,13 +4721,14 @@ class PrmService:
         was not sent)."""
         now = self._clock()
         deal = self._store.deal_of(party["id"], now)
-        chat, group = self._reach(party)               # (老板拉的群: no private chat with her, it goes to the group)
+        # (老板拉的群: no private chat with her, it goes to the group; PRM_REACH_LAST_SPOKE: where her side last spoke)
+        chat, group, reach = self._reaching(party, made=True, deal=deal)
         why = self._no_huopan(party, deal, now, chat)
         if why:
             return None, why
         meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"], HUOPAN: {"by": "console"}}
         if group is not None:
-            meta.update(channel=GROUP_CHANNEL, group=self.boss_groups.job_group(chat))
+            meta.update(channel=GROUP_CHANNEL, group=self.boss_groups.job_group(chat), **reach_meta(reach))
         else:
             told = self._group_lines(deal["id"])
             if told:
@@ -4517,7 +4797,7 @@ class PrmService:
         always waits for a person; no holding reply goes for it unless a message of hers joined the job."""
         now = self._clock()
         deal = self._store.deal_of(party["id"], now)
-        chat, group = self._reach(party)
+        chat, group, reach = self._reaching(party, made=True, deal=deal)   # (PRM_REACH_LAST_SPOKE: where her side spoke)
         why = self._no_handcards(party, deal, now, chat)
         if why:
             return None, why
@@ -4529,7 +4809,7 @@ class PrmService:
             ask["order"] = order["order"]
         meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"], HANDCARDS: ask}
         if group is not None:
-            meta.update(channel=GROUP_CHANNEL, group=self.boss_groups.job_group(chat))
+            meta.update(channel=GROUP_CHANNEL, group=self.boss_groups.job_group(chat), **reach_meta(reach))
         else:
             told = self._group_lines(deal["id"])
             if told:
@@ -4744,6 +5024,21 @@ class PrmService:
             return "「待审批」里已经有群里的草稿"
         return ""
 
+    def confirm_group(self, deal_id, chat, actor: str = "console") -> dict:
+        """群自己接上 (review 2026-11-11 #2): the console's 「是她的群」 on a group of this deal the scan linked by itself
+        (``BossGroups.confirm``): from now on its drafts go as PRM_LINKED_GROUPS_AUTO says."""
+        try:
+            deal = self._store.deal(int(deal_id))
+        except (TypeError, ValueError):
+            deal = None
+        row = self._store.boss_group(str(chat or ""))
+        if deal is None or row is None or int(row.get("deal_id") or 0) != int(deal["id"]):
+            return {"ok": False, "error": "这个群没有接在这张合作单上"}
+        out = self.boss_groups.confirm(row["chat"], actor=actor)
+        if out.get("ok"):
+            self._wake.set()
+        return out
+
     def unlink_group(self, deal_id, chat="", actor: str = "console") -> dict:
         """接手任何合作群: a group linked to this deal is not drafted in any more (``deal_action`` ``group_unlink``, the
         console's 「不接了」; the admin's 「不接群 群名」, src/prm/group_link.py): ``BossGroups.stop`` (its drafts not sent
@@ -4820,6 +5115,8 @@ class PrmService:
             return self.set_draft_note(data.get("deal_id"), data.get("text"), actor=actor)
         if action == GROUP_UNLINK:
             return self.unlink_group(data.get("deal_id"), data.get("chat"), actor=actor)
+        if action == GROUP_CONFIRM:
+            return self.confirm_group(data.get("deal_id"), data.get("chat"), actor=actor)
         if action == PHOTO_CONFIRM:
             return self.photo_confirm(data.get("deal_id"), data.get("packet"), data.get("code"), actor=actor)
         if action == PHOTO_UNCONFIRM:
@@ -5287,13 +5584,14 @@ class PrmService:
         return ""
 
     def _step_job(self, party: dict) -> Optional[dict]:
-        """Her open system-lane job (a step being drafted): in her private chat, or in the group her steps go to
-        (``_reach``: a creator who is only in a 老板拉的群; review 2026-11-09 N2: only her wxid was looked at)."""
+        """Her open system-lane job (a step being drafted): in her private chat, or in a linked group she is still in,
+        where her steps go (``_reaching``: a creator who is only in a 老板拉的群; review 2026-11-09 N2: only her wxid was
+        looked at; PRM_REACH_LAST_SPOKE: the group where her side last spoke, which may not be the newest)."""
         if not party:
             return None
         chats = [party.get("wxid")]
-        try:
-            chats.append(self._reach(party)[0])
+        try:                                           # (PRM_REACH_LAST_SPOKE: any linked group she is still in)
+            chats += [row["chat"] for row in self.boss_groups.reach_groups(party["id"])]
         except Exception:                              # (looking for a job never stops the chain)
             logger.exception("PRM: where party %s's steps go could not be told", party.get("id"))
         for chat in dict.fromkeys(c for c in chats if c):
@@ -6193,11 +6491,12 @@ class PrmService:
         outbound = self._outbound(deal["id"], party["id"], now)
         if outbound:
             meta["sent"] = outbound
-        # 老板拉的群: no private chat with her, the step goes to the group (``_step_blocked`` holds one for nowhere)
-        chat, group = self._reach(party)
+        # 老板拉的群: no private chat with her, the step goes to the group (``_step_blocked`` holds one for nowhere);
+        # PRM_REACH_LAST_SPOKE: where her side last spoke
+        chat, group, reach = self._reaching(party, made=True, deal=deal)
         chat = chat or party["wxid"]
         if group is not None:
-            meta.update(channel=GROUP_CHANNEL, group=self.boss_groups.job_group(chat))
+            meta.update(channel=GROUP_CHANNEL, group=self.boss_groups.job_group(chat), **reach_meta(reach))
         # input_closed: the creator's next message is a reply job of its own, not part of this step
         _, job_id = self._relay.submit(chat, chat, "", kind=PRM, meta=self._reply_meta(self._with_note(meta, deal, now)),
                                        fresh=True, input_closed=True)
@@ -6910,7 +7209,7 @@ class PrmService:
             return "", "这位达人已经停用（不在达人名单里）"
         if self._mode(deal, now) != COPILOT:
             return "", "现在不在副驾驶模式（人工接管或暂停）"
-        chat, _ = self._reach(party)
+        chat, _ = self._reach(party, made=True, deal=deal)     # (where ``_ask_signed_hello`` would ask)
         if chat is None:
             return "", UNREACHABLE_TEXT
         if self._relay.store.latest_open(chat, drafts_only=True, system=False) is not None:
@@ -6925,11 +7224,11 @@ class PrmService:
         her, ``meta.sent``, what an operator wrote to her by hand, ``meta.history``, her 三方群's and the deal's 起草备注,
         ``meta.note``; in the night window or 自动模式 ``meta.night``: its draft goes by those rules, ``_night_judge``),
         to her private chat or the 老板拉的群 she is reached in (``_reach``); returns its id."""
-        chat, group = self._reach(party)
+        chat, group, reach = self._reaching(party, made=True, deal=deal)   # (PRM_REACH_LAST_SPOKE: where her side spoke)
         signed = {"order": row["order_no"], "at": time.strftime("%m-%d %H:%M", time.localtime(float(row["signed_at"])))}
         meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"], SIGNED: signed}
         if group is not None:
-            meta.update(channel=GROUP_CHANNEL, group=self.boss_groups.job_group(chat))
+            meta.update(channel=GROUP_CHANNEL, group=self.boss_groups.job_group(chat), **reach_meta(reach))
         else:
             told = self._group_lines(deal["id"])
             if told:
@@ -7727,7 +8026,8 @@ class PrmService:
     def snapshot(self) -> dict:
         relay = self._relay.snapshot()
         return snapshot(self._store, running=True, retention_days=self._retention_days, now=self._clock(),
-                        group_of=self.three_party.deal_out, photo_check=self._draft_context, extra={
+                        group_of=self.three_party.deal_out, photo_check=self._draft_context,
+                        reach_of=self._reach_out if self._reach_last_spoke else None, extra={
             "mac_online": relay.get("mac_online", False),
             "worker_kinds": relay.get("worker_kinds", []),
             "can_send": self._send is not None, "can_send_files": self._send_file is not None,
@@ -8018,6 +8318,9 @@ class PrmService:
             # written, review 2026-10-31)
             self.boss_groups.replied(packet["chat_id"], (packet.get("meta") or {}).get("group_told") or [])
             self._store.drop_notices(packet["deal_id"], lambda n: n["key"] == GROUP_UNSENT, now)
+            if packet["route"] == gates.REVIEW and self.boss_groups.unconfirmed(packet["chat_id"]):
+                # 群自己接上 (review #2): a person sent a draft into the group the scan linked: it is hers
+                self.boss_groups.confirm(packet["chat_id"], actor="system", how="sent")
         logger.info("PRM: packet %d sent (%d chars%s, %d file(s))", packet["id"], len(text),
                     f" in {len(parts)} messages" if len(parts) > 1 else "", len(packet["attachments"]))
         if packet["route"] == gates.NIGHT:
@@ -9009,6 +9312,8 @@ def apply_deal_action(store: PrmStore, action: str, data: dict, *, now: float, t
             return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能拉群"}
         elif action == GROUP_UNLINK:                   # (running: PrmService.unlink_group)
             return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能停掉接手的群"}
+        elif action == GROUP_CONFIRM:                  # (running: PrmService.confirm_group)
+            return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能确认接手的群"}
         elif action == DRAFT_NOTE:                     # (running: PrmService.set_draft_note)
             return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能改起草备注"}
         elif action in (PHOTO_CONFIRM, PHOTO_UNCONFIRM):   # (running: PrmService.photo_confirm / photo_unconfirm)

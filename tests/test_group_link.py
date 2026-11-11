@@ -307,7 +307,7 @@ def test_shi_n_out_of_range_and_a_registration_refused_change_nothing(bot):
 def test_bu_jie_drops_the_question_and_it_expires_by_itself(bot):
     bot.say("接群")
     bot.say("接群 1")
-    assert bot.say("不接") == f"好的，群「{GROUP_NAME}」不接了"
+    assert bot.say("不接") == f"好的，群「{GROUP_NAME}」不接了，以后也不自动接（要接再发「接群 {GROUP_NAME}」）"
     assert bot.prm.boss_groups.offered() is None and bot.prm.store.boss_group(GROUP) is None
     assert bot.say("是 1") == f"群「{GROUP_NAME}」这次不接了（已经作罢）：要接的话重新发「接群」"
     bot.say("接群 1")
@@ -672,7 +672,7 @@ def test_a_deal_with_its_own_three_party_group_keeps_it_when_another_group_is_li
 def test_bu_jie_qun_stops_a_linked_group_as_the_group_gone_does(bot):
     linked(bot, member=1)
     deal_id = bot.prm.store.boss_group(GROUP)["deal_id"]
-    assert bot.say("不接群 别的群") == "没有接手叫「别的群」的群"
+    assert bot.say("不接群 别的群") == "没有叫「别的群」的群（要和微信里的群名一样，不管空格和大小写）"
     assert bot.say(f"不接群 {GROUP_NAME}") == (f"不接了：群「{GROUP_NAME}」里她的话不再起草，群里的话和别的群一样不回"
                                              "（小美的合作单和私聊照旧）")
     row = bot.prm.store.boss_group(GROUP)

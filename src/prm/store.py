@@ -55,7 +55,9 @@
                     was taken over (``opening_due``), and WeChat's line that we were added (``joined_at``, WeChat's
                     clock: only a group added to after the baseline is taken over by itself, review 2026-10-31 F4);
                     ``manual``: an operator linked it by hand (接手任何合作群, src/prm/group_link.py: 「接群」; it is read
-                    and drafted in whatever PRM_BOSS_GROUPS says, ``found_at`` is when it was linked)
+                    and drafted in whatever PRM_BOSS_GROUPS says, ``found_at`` is when it was linked); 2: the scan
+                    linked it by itself (群自己接上, PRM_GROUPS_AUTO_LINK: ``BossGroups.auto_scan``; what that scan
+                    keeps besides is prm_meta's ``groups_auto_link``)
 ``wechat_reviews``  微信里审批草稿 (PRM_WECHAT_REVIEW, src/prm/wechat_review.py): one row per draft told to the admin's
                     private chat (its number is the packet's id): when, where it stands (``state``: written before the
                     send as ``telling``), the admin's own words kept as the proposed edit (``proposed``), what was decided
@@ -443,6 +445,9 @@ _ADDED_COLUMNS = (
     ("boss_groups", "joined_at", "REAL"),
     # 接手任何合作群 (2026-11-09, src/prm/group_link.py): a group an operator linked by hand
     ("boss_groups", "manual", "INTEGER NOT NULL DEFAULT 0"),
+    # 群自己接上 (2026-11-11, review #2): when a person confirmed a group the scan linked by itself (a draft there sent by
+    # a person, 「确认接群」, the console's 「是她的群」); None: every draft there waits for a person
+    ("boss_groups", "confirmed_at", "REAL"),
     # 微信里审批草稿 (src/prm/wechat_review.py), its second and third rounds (2026-11-09): a table made by the first
     ("wechat_reviews", "told_at", "REAL"),
     ("wechat_reviews", "preview", "TEXT NOT NULL DEFAULT ''"),
@@ -586,7 +591,7 @@ def friend_add_view(row: dict) -> dict:
 # 老板拉的群 (src/prm/boss_groups.py): the JSON columns of a group's row, and what may be set besides its state.
 BOSS_GROUP_JSON = {"members": [], "boss": [], "lines": []}
 BOSS_GROUP_FIELDS = {"name", "found_at", "made_at", "state", "party_id", "deal_id", "members", "boss", "why",
-                     "last_line_at", "lines", "replied_at", "opening_due", "joined_at", "manual"}
+                     "last_line_at", "lines", "replied_at", "opening_due", "joined_at", "manual", "confirmed_at"}
 
 
 def _seq(line: dict) -> int:

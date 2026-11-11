@@ -174,13 +174,18 @@ function AutoModeBar({ d, onDone }) {
   )
 }
 
+/** PRM_REACH_LAST_SPOKE (2026-11-11): why one the bot started goes to the group though she may have a private chat. */
+const REACH_WHY = '她那边最近是在这个群里说的话，所以机器人主动发的这一条也发在群里。'
+const reachWhy = (p) => (p.reach === 'last_spoke' ? REACH_WHY : '')
+
 /** 老板拉的群 (PRM_BOSS_GROUPS): a draft of her line in the group the boss made with her and us goes out in that group; one
- *  the admin linked by hand (``group_manual``, 接手任何合作群) need have no boss in it. */
+ *  the admin linked by hand (``group_manual``, 接手任何合作群) need have no boss in it; one the bot started that goes there
+ *  because her side last spoke there (``reach``) says so. */
 function GroupTag({ p }) {
   if (!inGroup(p)) return null
   return (
-    <span className="tag warn prm-group-tag" title={p.group_manual ? `发在群「${p.group_name || ''}」里（不是她的私聊），群里的人都看得到`
-      : `发在老板拉的群「${p.group_name || ''}」里（不是她的私聊），老板也看得到`}>
+    <span className="tag warn prm-group-tag" title={(p.group_manual ? `发在群「${p.group_name || ''}」里（不是她的私聊），群里的人都看得到`
+      : `发在老板拉的群「${p.group_name || ''}」里（不是她的私聊），老板也看得到`) + (reachWhy(p) ? `；${reachWhy(p)}` : '')}>
       <UsersThree /><span className="prm-group-name">群里 · {p.group_name || (p.group_manual ? '手动接的群' : '老板拉的群')}</span>
     </span>
   )
@@ -522,6 +527,8 @@ function DraftCard({ p, canSend, replyParts = 1, macOnline = true, onDone }) {
           <Note kind="warn" icon={WarningCircle}>要特别注意{p.reason ? `：${p.reason}` : ''}</Note>
         )}
         {p.night_held && <div className="f-hint prm-night-held">{p.auto_mode ? '自动模式没有自动发' : '夜间没有自动发'}：{p.night_held}</div>}
+        {p.hold && <div className="f-hint prm-hold">要你看过再发：{p.hold}</div>}
+        {inGroup(p) && reachWhy(p) && <div className="f-hint prm-reach-why">发在群「{p.group_name || '（没有群名）'}」里：{reachWhy(p)}</div>}
         {p.status === 'pending' && p.auto_at && (
           <div className="f-hint prm-opening-auto">给新好友的第一句话：{fmtClock(p.auto_at)} 还没人处理就照原样自动发给她（设置里的「开场白没人处理多久自动发」）；要改的话在这之前发出。</div>
         )}
@@ -611,7 +618,7 @@ function DraftCard({ p, canSend, replyParts = 1, macOnline = true, onDone }) {
         <Confirm title={`#${p.id} 发到群里？`} confirmLabel="发到群里" cancelLabel="再想想" busy={busy}
           onConfirm={() => act(sending.action, sending.text)} onCancel={() => setSending(null)}>
           {p.group_manual ? `这条回复会发在群「${p.group_name || '（没有群名）'}」里，不是她的私聊：群里的人都看得到。`
-            : `这条回复会发在老板拉的群「${p.group_name || '（没有群名）'}」里，不是她的私聊：老板和群里的人都看得到。`}{parts > 1 ? `会分 ${parts} 条发。` : ''}
+            : `这条回复会发在老板拉的群「${p.group_name || '（没有群名）'}」里，不是她的私聊：老板和群里的人都看得到。`}{reachWhy(p)}{parts > 1 ? `会分 ${parts} 条发。` : ''}
         </Confirm>
       )}
       {textOnly !== null && (
@@ -629,7 +636,7 @@ function DraftCard({ p, canSend, replyParts = 1, macOnline = true, onDone }) {
             {pf.params.map((x) => <div key={x.label} className="f-hint">{x.label}：<span className="mono">{x.value}</span></div>)}
             <div>只执行一次，不会自动重试；平台读回核验成功（VERIFIED_SUCCESS）才把回复发给达人，否则不发，并在这一页上方标红。</div>
             {group && <div>{p.group_manual ? `回复发在群「${p.group_name || '（没有群名）'}」里，不是她的私聊：群里的人都看得到。`
-              : `回复发在老板拉的群「${p.group_name || '（没有群名）'}」里，不是她的私聊：老板和群里的人都看得到。`}</div>}
+              : `回复发在老板拉的群「${p.group_name || '（没有群名）'}」里，不是她的私聊：老板和群里的人都看得到。`}{reachWhy(p)}</div>}
           </div>
         </Confirm>
       )}

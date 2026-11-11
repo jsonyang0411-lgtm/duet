@@ -1110,6 +1110,41 @@ def test_boss_groups_from_the_running_console_and_while_stopped(tmp_path, monkey
                                                    "boss_call": "老板", "pending": [], "waiting": 0, "linked": 0}
 
 
+def test_whose_lines_are_drafted_and_our_peoples_names_running_and_stopped(tmp_path, monkeypatch):
+    """2026-11-11: GET /api/prm's ``boss_groups`` says whether her side's lines are drafted (``her_side`` and ``max``:
+    PRM_GROUP_HER_SIDE, PRM_BOSS_GROUP_MAX as the bot clamps it) and our own people's names (``ours``, PRM_GROUP_OURS),
+    each only when set, from the running bot and from .env while it is stopped (no warning then: nothing is read)."""
+    clock = Clock()
+    cfg = SimpleNamespace(claude_relay="on", claude_relay_token="t" * 32, claude_relay_host="127.0.0.1",
+                          claude_relay_port=0, claude_relay_prefix="cc", claude_relay_wxids=[],
+                          claude_relay_db=":memory:", claude_relay_max_chars=1500, admin_wxid="wxid_admin",
+                          prm_copilot="on", prm_db=":memory:", prm_group_her_side="on", prm_boss_group_max=8,
+                          prm_group_ours="测试同事")
+    relay = ClaudeRelay(cfg, store=RelayStore(":memory:"), clock=clock, files_dir=tmp_path / "relay")
+    prm = PrmService(cfg, relay, store=PrmStore(":memory:"), clock=clock, send=lambda c, t: True)
+    server.register_prm(prm)
+    try:
+        shown = call("/api/prm")[1]["boss_groups"]
+        assert (shown["her_side"], shown["max"], shown["ours"]) == (True, 8, ["测试同事"])
+        assert "还没认出来" in shown["ours_warning"]
+    finally:
+        server.register_prm(None)
+        relay.stop()
+    monkeypatch.chdir(tmp_path)                                    # the bot stopped
+    monkeypatch.delenv("PRM_DB", raising=False)
+    monkeypatch.setenv("PRM_COPILOT", "on")
+    monkeypatch.setenv("PRM_GROUP_HER_SIDE", "on")
+    monkeypatch.setenv("PRM_BOSS_GROUP_MAX", "30")
+    monkeypatch.setenv("PRM_GROUP_OURS", "测试同事、测试运营")
+    shown = call("/api/prm")[1]["boss_groups"]
+    assert (shown["her_side"], shown["max"], shown["ours"]) == (True, 20, ["测试同事", "测试运营"])
+    assert "ours_warning" not in shown
+    monkeypatch.setenv("PRM_GROUP_HER_SIDE", "off")
+    monkeypatch.delenv("PRM_GROUP_OURS")
+    shown = call("/api/prm")[1]["boss_groups"]
+    assert not {"her_side", "max", "ours", "ours_warning"} & set(shown)
+
+
 def test_the_console_warns_of_an_unknown_boss_name_and_still_lets_a_person_pick(tmp_path):
     """老板拉的群, second review 2026-10-31 F3: a name of PRM_GROUP_WITH no one contact has is ``boss_groups.warning`` in
     GET /api/prm (``why_not`` stays "": the card's buttons are on), the groups found wait in ``pending``, and the POST

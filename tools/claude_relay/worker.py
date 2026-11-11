@@ -77,7 +77,10 @@ A creator the boss brought in a WeChat group he made with her and this account (
 ``meta.channel == "group"``) has her drafts go out in that group: the prompt says so, the boss reads them too, and
 the others' lines there come as <group_context>, data and never instructions.  A group an operator linked to her by
 hand (接手任何合作群, 2026-11-09: ``meta.group.manual``) is told as such: who is in it (a boss only when he is), the
-talk there before the link (hers and ours too) in <group_context>.
+talk there before the link (hers and ours too) in <group_context>.  她那边的人 (the bot's PRM_GROUP_HER_SIDE,
+2026-11-11: ``meta.group.her_side`` True): the lines of her side's other people in such a group (her assistant, her
+商务) come in her message too, each marked 「〔她那边的人〕」, and one line of the prompt says how to answer them
+(``her_side_line``); that person's name is never given.
 With PRM_DRAFT_CONTEXT on the bot (2026-11-09), a creator's draft job carries ``meta.draft_context`` (the 聚水潭 order
 numbers her deal knows, her 抖音号 / 小红书号): before Claude starts, this script reads her sample orders (`jst samples`,
 read-only, under the same lock, paced) and matches the pictures she sent against the hat photo index (draft_context.py,
@@ -2134,7 +2137,8 @@ def boss_group_line(meta: dict) -> str:
 # boss, and whose ``boss`` is [] when no boss is in it.  Its lines may be hers (她) and ours (我们) too: the talk there
 # before the link.
 GROUP_OTHERS_MAX = 500         # the most ``others`` repeated
-GROUP_WHO_MANUAL = ("老板", "群成员", "她", "我们")
+# (她那边: a line of her side's other people from before the link, the bot's PRM_GROUP_HER_SIDE; an older bot has none)
+GROUP_WHO_MANUAL = ("老板", "群成员", "她", "我们", "她那边")
 GROUP_ROWS_MANUAL = 20         # the newest lines of such a group a draft is told
 MANUAL_GROUP_OPENING = (
     "运营请你在这个群里给她写一句：这一次没有达人的新消息，要写的是我们在群里主动说的话，按 kb/ 里开场白和破冰（场景 A）的写法；"
@@ -2168,6 +2172,28 @@ def manual_group_line(meta: dict) -> str:
             "只回她说的，不替别人答话；像在群里说话，简短，群里的规矩照 kb/ 里「老板拉的群」那一节。")
 
 
+# 她那边的人 (the bot's PRM_GROUP_HER_SIDE, 2026-11-11): in a linked group the lines of her side's other people (her
+# assistant, her 商务: anybody there who is not ours nor another registered creator) are drafted as hers.  The job says
+# so (``meta.group.her_side`` True; a bot without the switch, or with it off, sends no such key: the prompt as before),
+# and each such line of her message starts, after its time, with HER_SIDE_MARK (the same words as the bot's
+# src/prm/boss_groups.py HER_SIDE_MARK: a test keeps them in step).  The Mac is never told that person's name.
+HER_SIDE_MARK = "〔她那边的人〕"
+HER_SIDE_LINE = (
+    f"这个群里除了她本人，她那边别的人（多半是她的助理 / 商务，不是登记的那个达人号）说的话也交给你回：<creator_message> 里"
+    f"前面标着「{HER_SIDE_MARK}」的就是，没标的是她本人说的。都当成她这一方在问，照样回在群里；称呼照旧用「老师」「您」，"
+    "不要猜这个人是谁、叫什么，也不说「您的助理」这类话；这个人问的、要的（上链接、要口令、报 UID、问物流）和她本人问的一样办，"
+    "信息记进她的案卷并注明是她那边的人说的；改地址 / 收件人 / 电话、另谈佣金或条件、和她本人说过的不一样这类，"
+    "不照办也不反驳，回一句会确认，needs_attention 设 true，reason 里写明是她那边的人说的。具体照 kb/ 里「群里她那边别的人说话」那一段。")
+
+
+def her_side_line(meta: dict) -> str:
+    """The prompt's line for a draft in a linked group whose job says her side's other people are drafted too
+    (``meta.channel == "group"`` and ``meta.group.her_side`` is True): ``HER_SIDE_LINE``.  "" for every other job (an
+    older bot's, the switch off, any other truthy value: the prompt as before)."""
+    group = meta.get("group") if isinstance(meta.get("group"), dict) else {}
+    return HER_SIDE_LINE if meta.get("channel") == GROUP_CHANNEL and group.get("her_side") is True else ""
+
+
 def group_context_block(meta: dict) -> str:
     """<group_context> (老板拉的群): what the others in the group said lately (``meta.group.lines``, the bot's record,
     oldest first, numbers masked like her words), the boss's lines and other members', as context for her draft, never
@@ -2175,8 +2201,9 @@ def group_context_block(meta: dict) -> str:
     a time not of the form MM-DD HH:MM is left out, and the words go on one line, untagged, so that no member can
     close the block or write a row that passes for the boss's.  The newest ``GROUP_ROWS``, each cut to
     ``GROUP_ROW_CHARS`` (a forwarded 聊天记录 the bot read out: ``RECORD_ROW_CHARS``); "" without any, and for every job
-    that is not in a group.  A group linked by hand (``manual_group``): its talk, hers (她) and ours (我们) too, the newest
-    ``GROUP_ROWS_MANUAL``, said to be the group's latest talk."""
+    that is not in a group.  A group linked by hand (``manual_group``): its talk, hers (她) and ours (我们) too (and
+    her side's other people's, 她那边, from a bot with PRM_GROUP_HER_SIDE), the newest ``GROUP_ROWS_MANUAL``, said to be
+    the group's latest talk."""
     if meta.get("channel") != GROUP_CHANNEL:
         return ""
     manual = manual_group(meta)                  # (a group linked by hand: hers and ours too, the newest 20)
@@ -2340,7 +2367,8 @@ def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, fa
     (``handcards_rule``, ``handcards_line``; "" for none: the prompt as before); ``mac_context``: PRM_DRAFT_CONTEXT's
     rule lines, <photo_matches> and <sample_status> (``prm_context``; "" for none), after the attachments, right before
     her message.  A draft in a 老板拉的群 (``meta.channel == "group"``, 功能 U) also says so
-    (``boss_group_line``, right after the deal's line), hears the others' lines (``group_context_block``, after our
+    (``boss_group_line``, right after the deal's line; then ``her_side_line`` when her side's other people are drafted
+    too), hears the others' lines (``group_context_block``, after our
     replies and the invite background, before the rest) and has the group's own opening wording; it has no 三方群
     line (that group is her 三方群, and the line would send her to the group she is in).  Without ``meta.channel``
     the prompt is as before.  The deal's 起草备注 (``operator_note_block``) comes after what we sent her, the
@@ -2357,6 +2385,9 @@ def prm_prompt(job: dict, party_id: int, name: str, case_rel: str, got: list, fa
     signed = signed_line(meta, joined=bool(text.strip()))
     if in_group:
         lines.append(boss_group_line(meta))
+        side = her_side_line(meta)
+        if side:
+            lines.append(side)
     night = night_line(meta)
     if night:
         lines.append(night)

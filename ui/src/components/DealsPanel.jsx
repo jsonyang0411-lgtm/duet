@@ -13,7 +13,7 @@ import {
 import { PageHead, Card, Note, Empty, Field, TextInput, TextArea, Select, Seg, Confirm } from './ui'
 import { AdvancedFields } from './AdvancedPanel'
 import { FriendAddPasteCard } from './FriendAddCard'
-import { BossGroupsCard } from './BossGroupsCard'
+import { BossGroupsCard, othersLine } from './BossGroupsCard'
 
 // 合作单: the creators whose private messages get drafted replies (PRM_COPILOT).
 // Registering one here means the creator agreed to be contacted on WeChat; their
@@ -358,7 +358,9 @@ function DealDetail({ p, d, onDone }) {
       {d?.handcards && <HandcardsBlock p={p} busy={busy} run={run} />}
 
       {d?.three_party?.enabled && <ThreePartyBlock p={p} d={d} busy={busy} run={run} />}
-      {(deal.linked_groups || []).length > 0 && <LinkedGroups groups={deal.linked_groups} busy={busy} run={run} />}
+      {(deal.linked_groups || []).length > 0 && <LinkedGroups groups={deal.linked_groups} bg={d?.boss_groups} busy={busy} run={run} />}
+      {(deal.unconfirmed_groups || []).length > 0 && <UnconfirmedGroups groups={deal.unconfirmed_groups} busy={busy} run={run} />}
+      {deal.reach && <ReachLine reach={deal.reach} />}
 
       <div className="stack" style={{ gap: 6 }}>
         <b>寄样</b>
@@ -493,21 +495,57 @@ function DraftNoteBlock({ p, onDone, photoCheck }) {
 }
 
 /** 接手任何合作群 (2026-11-09): the groups the admin linked to her by hand that are not her 三方群 (no boss in them, or
- *  her deal has a 三方群 of its own): each says it is drafted in, and 「不接了」 stops it (deal action ``group_unlink``). */
-function LinkedGroups({ groups, busy, run }) {
+ *  her deal has a 三方群 of its own): each says it is drafted in, and 「不接了」 stops it (deal action ``group_unlink``).
+ *  One the bot's own scan linked (群自己接上, ``auto``) says so. */
+function LinkedGroups({ groups, bg, busy, run }) {
   return (
     <div className="stack prm-linked-groups" style={{ gap: 6 }}>
       <b>手动接的群</b>
       {groups.map((g) => (
         <div key={g.chat} className="row prm-linked-group" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-          <span><UsersThree style={{ verticalAlign: -2 }} /> 「{g.name || '（没有群名）'}」（{fmtClock(g.at)} 接手）</span>
-          <span className="f-hint">她在群里说的话照常起草，回复发在群里，群里的人都看得到；别人说的话不起草。</span>
+          <span><UsersThree style={{ verticalAlign: -2 }} /> 「{g.name || '（没有群名）'}」（{fmtClock(g.at)} {g.auto ? '机器人自动接的' : '接手'}）</span>
+          <span className="f-hint">她在群里说的话照常起草，回复发在群里，群里的人都看得到；{othersLine(bg)}</span>
           <button type="button" className="btn sm ghost" disabled={busy}
             onClick={() => run({ action: 'group_unlink', chat: g.chat }, `记下了：「${g.name || '这个群'}」不接了，群里的话不再起草`)}>不接了</button>
         </div>
       ))}
     </div>
   )
+}
+
+/** PRM_REACH_LAST_SPOKE (2026-11-11; a creator with a linked group): where what the bot starts itself for her would go now
+ *  (a shipping notice, a 专属佣金 step, 写开场白 / 补发货盘 / 做手卡, 签收后问一句) and why (``deal.reach``). */
+const REACH_KINDS = '机器人主动发的消息（发货通知、专属佣金、写开场白、补发货盘、做手卡、签收后问一句）'
+function reachText(r) {
+  if (!r) return ''
+  if (r.where === 'none') return `${REACH_KINDS}现在发不出去：她不是我们的微信好友，也不在接手的群里了。`
+  if (r.where === 'group') {
+    const why = r.why === 'last_spoke' ? '她那边最近是在这个群里说的话' : '她没有和我们的私聊'
+    return `${REACH_KINDS}现在发在群「${r.name || '（没有群名）'}」里：${why}，群里的人都看得到。`
+  }
+  const why = r.why === 'never' ? '她还没说过话' : r.why === 'elsewhere' ? '她最近说话的那个群机器人现在不在里面起草（她退了群，或者群不接了）'
+    : '她最近是在私聊里说的话'
+  return `${REACH_KINDS}现在发在她的私聊里：${why}。`
+}
+
+/** 群自己接上 (review 2026-11-11 #2): a group the scan linked by itself that nobody confirmed: every draft there waits;
+ *  「是她的群」 confirms it (deal action ``group_confirm``; the admin's 「确认接群 群名」 and a draft sent by a person do too). */
+function UnconfirmedGroups({ groups, busy, run }) {
+  return (
+    <div className="stack prm-unconfirmed-groups" style={{ gap: 6 }}>
+      {groups.map((g) => (
+        <div key={g.chat} className="row prm-unconfirmed-group" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span className="f-hint">「{g.name || '（没有群名）'}」是机器人自动接的，还没人确认是她的群：确认以前这个群的草稿都等你看过再发。</span>
+          <button type="button" className="btn sm" disabled={busy}
+            onClick={() => run({ action: 'group_confirm', chat: g.chat }, `记下了：「${g.name || '这个群'}」是她的群`)}>是她的群</button>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function ReachLine({ reach }) {
+  return <div className="f-hint prm-reach">{reachText(reach)}</div>
 }
 
 // 做手卡 (PRM_HANDCARDS): the products of her latest 抖店 sample order the bot made are ticked; other 抖店 product ids may be
@@ -603,7 +641,7 @@ function ThreePartyBlock({ p, d, busy, run }) {
         <>
           <div><UsersThree style={{ verticalAlign: -2 }} /> 老板拉的群（{fmtClock(g.at)} 发现）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
           <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <span className="f-hint">老板把她和我们拉进了这个群，之后由我们跟她对接：她在群里说的话照常起草，回复发在群里，老板也看得到；老板和别人说的话不起草。群里的话也会交给她私聊的草稿。{bossOn ? '「不接了」：不再起草，它还是她的三方群，机器人只读。' : ''}</span>
+            <span className="f-hint">老板把她和我们拉进了这个群，之后由我们跟她对接：她在群里说的话照常起草，回复发在群里，老板也看得到；{othersLine(d?.boss_groups, { boss: true })}群里的话也会交给她私聊的草稿。{bossOn ? '「不接了」：不再起草，它还是她的三方群，机器人只读。' : ''}</span>
             {bossOn && unlink}
             {gone}
           </div>
@@ -611,9 +649,9 @@ function ThreePartyBlock({ p, d, busy, run }) {
       )}
       {g.state === 'created' && g.by === 'manual' && (
         <>
-          <div><UsersThree style={{ verticalAlign: -2 }} /> 手动接的群（{fmtClock(g.at)} 接手）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
+          <div><UsersThree style={{ verticalAlign: -2 }} /> {g.why === '自动接的群' ? '自动接的群' : '手动接的群'}（{fmtClock(g.at)} 接手）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
           <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <span className="f-hint">运营在微信里接手了这个群（「接群」）：她在群里说的话照常起草，回复发在群里，群里的人都看得到；别人说的话不起草。群里的话也会交给她私聊的草稿。「不接了」：不再起草，它还是她的三方群，机器人只读。</span>
+            <span className="f-hint">{g.why === '自动接的群' ? '群里只有她一位登记过的达人，机器人自己接手了这个群' : '运营在微信里接手了这个群（「接群」）'}：她在群里说的话照常起草，回复发在群里，群里的人都看得到；{othersLine(d?.boss_groups, { boss: true })}群里的话也会交给她私聊的草稿。「不接了」：不再起草，它还是她的三方群，机器人只读。</span>
             {unlink}
             {gone}
           </div>

@@ -151,7 +151,7 @@ from ..admin import HELP_COMMANDS
 from ..relay.commands import ALLOW_WORDS, DENY_WORDS, prefix_pattern
 from ..relay.service import MAX_AGE_SEC
 from . import contact, deals, draft_context, handcards, pii, platforms, retention
-from .boss_groups import CHANNEL as GROUP_CHANNEL
+from .boss_groups import CHANNEL as GROUP_CHANNEL, REACH_LAST_SPOKE
 from .store import (APPROVED, BUYIN_TOOL, COPILOT, DROPPED, EXECUTING, FAILED, MESSAGE_TOOL, NO_REPLY, PENDING, SENDING,
                     SENT, SUPERSEDED, PrmStore)
 
@@ -1334,6 +1334,9 @@ class WechatReview:
             # (a group an operator linked by hand, 接手任何合作群: no boss need be there, the console says 「群「…」」 too)
             lines.append("（发在群里，不是她的私聊：群里的人都看得到）" if meta.get("group_manual")
                          else "（发在老板拉的群里，不是她的私聊：老板和群里的人都看得到）")
+            if meta.get("reach") == REACH_LAST_SPOKE:
+                # (PRM_REACH_LAST_SPOKE: one the bot started goes there because her side last spoke there)
+                lines.append("（她那边最近是在这个群里说的话，所以机器人主动发的这一条也发在群里）")
         said = self.her_words(packet, ids)
         if said:
             lines.append(f"她：{said}")
@@ -2255,6 +2258,21 @@ class WechatReview:
         number and labelled 微信号 masked, one line, at most 20 characters (``contact.clean_name``)."""
         name = (self._store.party(draft["party_id"]) or {}).get("name") or ""
         return contact.clean_name(_mask_ids(name, self._ids_of(draft) if ids is None else ids), 20) or default
+
+    def creator_name(self, party: dict, deal_id=None, default: str = "她") -> str:
+        """Her 称呼 as the admin's chat shows it in a line that is no draft's (群自己接上, PrmService._auto_link_notice):
+        ``_name_of`` by her party and deal (her linked 抖音号, her sample orders' UIDs, a 称呼 that is 「抖音-<抖音号>」: by
+        their last characters; numbers masked).  Works whatever PRM_WECHAT_REVIEW says."""
+        draft = {"party_id": party["id"], **({"deal_id": deal_id} if deal_id is not None else {})}
+        return self._name_of(draft, default)
+
+    def shown(self, text, party: Optional[dict] = None, deal_id=None) -> str:
+        """``text`` (a group's name, a member's name) as the admin's chat shows it in such a line: the creator's
+        platform ids by their last characters when ``party`` is given (``_ids_of``), any id after a label, a phone
+        number and a labelled 微信号 masked (``_mask_ids``), on one line."""
+        ids = self._ids_of({"party_id": party["id"], **({"deal_id": deal_id} if deal_id is not None else {})}) \
+            if party is not None else []
+        return " ".join(_mask_ids(text, ids).split())
 
     def _execution_of(self, packet: dict) -> dict:
         return self._json(packet.get("platform")).get("execution") or {}

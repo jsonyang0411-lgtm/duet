@@ -17,7 +17,8 @@ hands the text over, ``admin_command``):
   operator's explicit act), the question says how many are in it;
 - 「是 N」: BossGroups ``link`` (she is registered unless she is a creator already, the group linked to her deal, what
   was said there lately its context, one draft when she waits for an answer, the watch), answered in one line;
-- 「不接」: the question is dropped (it expires by itself OFFER_SEC after it was asked);
+- 「不接」: the question is dropped (it expires by itself OFFER_SEC after it was asked); with PRM_GROUPS_AUTO_LINK on
+  the group is remembered as refused (BossGroups ``decline``: the scan never links it by itself nor tells about it);
 - 「不接群 <群名>」: a linked group is not drafted in any more (PrmService.unlink_group, BossGroups ``stop``: its drafts not
   sent fail; her deal's 三方群 stays it, read only again; the console's 「不接了」 is the same).
 
@@ -25,6 +26,11 @@ A group the scan found that waits for 「是她」 on the console's 「老板拉
 no ``why_not``) is not asked about here: the answer says to choose there (review 2026-11-09: two questions about one
 group).  「是 N」 counts only the members
 the question listed (MEMBERS_LISTED); more are chosen on the console's card.
+
+群自己接上 (PRM_GROUPS_AUTO_LINK, 2026-11-11, BossGroups ``auto_scan``): the scan links a group by itself when exactly
+one registered creator is in it and tells the admin's chat (「已自动接群：…不对就回「不接群 <群名>」」); a group it does not
+link (two or more creators, or none in a group that is new or active) is told there once with how to link it here
+(「接群 <群名>」): the commands above are the same.
 
 「是 N」 and 「不接」 are commands only while a question is open or was lately (ASKED_KEEP_SEC: then they say it expired), so
 the words stay free otherwise (with CLAUDE_RELAY_ONLY the admin's other lines go to the Mac).  A group linked by hand
@@ -53,6 +59,7 @@ NO_BACKEND = "这台电脑的微信读法列不出群（要 Windows 版微信的
 NO_READ = "微信数据库现在读不了，稍后再发「接群」"
 _LINK = re.compile(r"^接群(?:\s*(.+))?$")
 _STOP = re.compile(r"^不接群(?:\s*(.+))?$")
+_CONFIRM = re.compile(r"^确认接群(?:\s*(.+))?$")    # 群自己接上 (review 2026-11-11 #2): a group the scan linked is hers
 _YES = re.compile(r"^是\s*(\d{1,3})$")
 CANCEL = "不接"
 
@@ -93,6 +100,10 @@ class GroupLinks:
         """The command ``text`` is (``run()`` answers it), or None: 「接群」 / 「接群 N」 / 「接群 群名」 / 「不接群 群名」
         always, 「是 N」 / 「不接」 only while a question is open or was lately (``ASKED_KEEP_SEC``)."""
         content = " ".join(str(text or "").replace("　", " ").split())
+        match = _CONFIRM.fullmatch(content)
+        if match:
+            name = (match.group(1) or "").strip()
+            return lambda: self._run(self.admin_confirm, name)
         match = _STOP.fullmatch(content)
         if match:
             name = (match.group(1) or "").strip()
@@ -228,7 +239,7 @@ class GroupLinks:
         if not out.get("ok"):
             return f"没接手：{out.get('error') or '出错了'}"
         self._asked = None
-        return self._linked_text(offer, out)
+        return self.linked_text(offer, out)
 
     def admin_cancel(self) -> str:
         """「不接」: the open question is dropped."""
@@ -237,9 +248,40 @@ class GroupLinks:
             return "现在没有在等你回答的「接群」"
         if self._service.boss_groups.offered(asked["chat"]) is None:
             return self._not_open(asked)
-        self._service.boss_groups.withdraw(asked["chat"])        # (``_asked`` stays: a 「是 N」 after it says so)
+        # (``_asked`` stays: a 「是 N」 after it says so; 群自己接上: the scan leaves a group a person refused alone; review
+        # 2026-11-11 #6: only the group the admin's own question is about, never one the scan asked about)
+        self._service.boss_groups.decline(asked["chat"])
         logger.info("PRM: group %s…: the question who she is was dropped (the admin)", asked["chat"][:8])
-        return f"好的，群「{asked['name']}」不接了"
+        again = f"「接群 {asked['name']}」" if asked["name"] != NO_NAME else "「接群」"
+        return f"好的，群「{asked['name']}」不接了，以后也不自动接（要接再发{again}）"
+
+    def admin_confirm(self, name: str) -> str:
+        """「确认接群 群名」 (群自己接上, review 2026-11-11 #2): a group the scan linked by itself is hers (BossGroups
+        ``confirm``): its drafts no longer all wait for that reason.  No name: the one such group nobody confirmed."""
+        bg, store = self._service.boss_groups, self._service.store
+        rows = [r for r in store.boss_groups((LINKED,)) if bg.unconfirmed(r["chat"])]
+        if name:
+            named = [r for r in store.boss_groups((LINKED,)) if bg.is_linked(r["chat"]) and _key(r["name"]) == _key(name)
+                     and r.get("manual") == 2]
+            if not named:
+                return f"没有机器人自动接的、叫「{name}」的群"
+            if len(named) > 1:
+                return f"有 {len(named)} 个自动接的群叫「{name}」：到控制台她的合作单上点「是她的群」"
+            rows = named
+        elif len(rows) != 1:
+            return ("现在没有等你确认的自动接的群" if not rows else
+                    f"有 {len(rows)} 个自动接的群在等你确认：回「确认接群 群名」，或者到控制台她的合作单上点「是她的群」")
+        row = rows[0]
+        out = bg.confirm(row["chat"], actor="admin")
+        if not out.get("ok"):
+            return f"没确认：{out.get('error') or '出错了'}"
+        party = store.party(int(row.get("party_id") or 0)) if row.get("party_id") else None
+        who = party["name"] if party else "她"
+        if out.get("already"):
+            return f"群「{row['name']}」早就确认过是 {who} 的群了"
+        how = ("之后的草稿和老板拉的群一样照门槛、下班时段、自动模式发" if getattr(self._service, "_linked_groups_auto", False)
+               else "之后的草稿照旧在「待审批」里等你看（「手动接的群也自动发」关着）")
+        return f"好的：群「{row['name']}」确认是 {who} 的群了，{how}"
 
     def admin_stop(self, name: str) -> str:
         """「不接群 群名」: a linked group of that name is not drafted in any more (PrmService.unlink_group); the answer says
@@ -251,7 +293,7 @@ class GroupLinks:
         bg, store = service.boss_groups, service.store
         rows = [r for r in store.boss_groups((LINKED,)) if bg.is_linked(r["chat"]) and _key(r["name"]) == _key(name)]
         if not rows:
-            return f"没有接手叫「{name}」的群"
+            return self._refuse(name)
         if len(rows) > 1:
             return f"有 {len(rows)} 个接手的群叫「{name}」：到控制台她的合作单上点「不接了」"
         row = rows[0]
@@ -270,6 +312,28 @@ class GroupLinks:
                     f"（合作单和私聊照旧）{unsent}")
         return (f"不接了：群「{row['name']}」里她的话不再起草，群里的话和别的群一样不回（{who}合作单和私聊照旧）"
                 f"{unsent}")
+
+    def _refuse(self, name: str) -> str:
+        """「不接群 群名」 of a group that is not linked (review 2026-11-11 #6): the scan that links groups by itself is
+        never to link it, ask or tell about it (BossGroups ``refuse``; the admin's own 「接群」 still links it)."""
+        read = self._reader()
+        if read is None:
+            return f"没有接手叫「{name}」的群"
+        found = read(0, name=name)
+        if found is None:
+            return NO_READ
+        free = [g for g in found if not self._service.boss_groups.is_linked(g["chat"])]
+        if not free:
+            return f"没有叫「{name}」的群（要和微信里的群名一样，不管空格和大小写）"
+        if len(free) > 1:
+            return f"有 {len(free)} 个群叫「{name}」：到控制台「合作单」页顶上的卡片里点「不接」，或者先给群改个不一样的名字"
+        group = free[0]
+        self._service.boss_groups.refuse(group["chat"])
+        if self._asked is not None and self._asked.get("chat") == group["chat"]:
+            self._service.boss_groups.withdraw(group["chat"])
+        shown = group.get("name") or name
+        logger.info("PRM: group %s…: the admin says it is not to be linked by itself", str(group["chat"])[:8])
+        return f"已记下：「{shown}」以后不自动接；要接再发「接群 {shown}」"
 
     # ── helpers ──────────────────────────────────────────────────────────
 
@@ -308,18 +372,25 @@ class GroupLinks:
             return f"刚才那个「接群」已经过了 {OFFER_SEC // 60} 分钟，作废了：要接的话重新发「接群」"
         return f"群「{asked['name']}」这次不接了（已经作罢）：要接的话重新发「接群」"
 
-    def _linked_text(self, offer: dict, out: dict) -> str:
-        """The answer to 「是 N」 in one line: whom the group went to, the catch-up, what to look at.  How her drafts
+    def linked_text(self, offer: dict, out: dict) -> str:
+        """The answer to 「是 N」 in one line: whom the group went to, the catch-up, what to look at (also the body of
+        the scan's own 「已自动接群」 line, PrmService._auto_link_notice; with PRM_GROUP_HER_SIDE on, in a group it counts
+        in, it says her side's lines are drafted too).  How her drafts
         there go is PRM_LINKED_GROUPS_AUTO's (final check 2026-11-10 A5): off, every one waits in 「待审批」; on, as a
         老板拉的群's (a kind's gate, the 下班时段, 自动模式), but the draft of the lines that waited at 接群, which waits."""
         shown = offer.get("name") or NO_NAME
         head = (f"接手了：群「{shown}」→ {out['name']}"
                 + ("（新登记的达人）" if out.get("registered") else "（已登记）") + f"，合作单 #{out['deal_id']}")
+        bg = self._service.boss_groups
+        size = offer.get("size")
+        # (她那边的人, PRM_GROUP_HER_SIDE on, in a group of at most PRM_BOSS_GROUP_MAX: her side's lines are drafted too)
+        side = bool(getattr(bg, "her_side_on", False)) and not (isinstance(size, int) and size > bg.max_members)
+        who = "她和她那边的人（助理、商务）" if side else "她"
         if getattr(self._service, "_linked_groups_auto", False):
-            bits = ["之后她在群里说的话会起草，和老板拉的群一样照门槛、下班时段、自动模式发（「手动接的群也自动发」开着）；"
+            bits = [f"之后{who}在群里说的话会起草，和老板拉的群一样照门槛、下班时段、自动模式发（「手动接的群也自动发」开着）；"
                     "接群这一刻她在等的那几句的草稿在「待审批」里等你看"]
         else:
-            bits = ["之后她在群里说的话会起草，在「待审批」里等你看"]
+            bits = [f"之后{who}在群里说的话会起草，在「待审批」里等你看"]
         caught = out.get("caught") or {}
         if not caught.get("read"):
             bits.append("群里之前的话这次读不出来：从现在起她说的话照常起草")
