@@ -123,7 +123,7 @@ from ..relay.store import PRM
 from ..send.bubbles import typing_delay
 from ..wechat.new_friends import FILLER, is_friend_notice, is_person_chat
 from . import contact, deals, draft_context, gates, handcards, pii, platforms, retention
-from .boss_groups import (ASK_NOTICE, AUTO as GROUP_AUTO, AUTO_WHY, BOSS as BOSS_WHO,
+from .boss_groups import (ASK_NOTICE, AUTO as GROUP_AUTO, AUTO_WHY, BOSS as BOSS_WHO, mask_name,
                           CHANNEL as GROUP_CHANNEL, EVENT as BOSS_EVENT, GONE as BOSS_GONE,
                           GONE_WHY as BOSS_GONE_WHY,
                           HER as GROUP_HER, HER_SIDE as GROUP_HER_SIDE, HER_SIDE_MARK, LINES_KEPT as GROUP_LINES_KEPT,
@@ -2808,10 +2808,12 @@ class PrmService:
         deal = self._store.deal(deal_id) or {}
         group = deal.get("three_party") or {}
         main = str(group.get("chat") or "") if group.get("state") == "created" else ""
-        labels = {main: f"三方群「{self.boss_groups.hide(group.get('name') or '') or '（没有群名）'}」"} if main else {}
+        # (review 2026-11-11 #7: the groups' names masked for the Mac, ``mask_name``)
+        labels = ({main: f"三方群「{mask_name(self.boss_groups.hide(group.get('name') or '')) or '（没有群名）'}」"}
+                  if main else {})
         for row in self._store.boss_groups((BOSS_LINKED,), deal_id=deal_id):
             if row["chat"] not in labels and self.boss_groups.has_boss(row):
-                labels[row["chat"]] = f"群「{self.boss_groups.hide(row.get('name') or '') or '（没有群名）'}」"
+                labels[row["chat"]] = f"群「{mask_name(self.boss_groups.hide(row.get('name') or '')) or '（没有群名）'}」"
         events = self._store.events(deal_id, limit=GROUP_LINES_SCAN if labels else GROUP_LINES_TOLD,
                                     kinds=(GROUP_LINE,))
         lines = [ev for ev in events if not labels or str(ev["detail"].get("chat") or "") in labels][:GROUP_LINES_TOLD]

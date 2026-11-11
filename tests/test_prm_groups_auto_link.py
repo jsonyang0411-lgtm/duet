@@ -213,8 +213,10 @@ def test_a_group_is_read_again_only_when_something_was_said_in_it_or_after_an_ho
         b.backend.active[BIG] = b.clock.now                          # ... and in the big one (never read for that)
         scan(b)
         assert b.backend.calls.count("group_members") == reads + 1
-        scan(b, after=bg.AUTO_MEMBERS_SEC)
-        assert b.backend.calls.count("group_members") == reads + 4
+        scan(b, after=bg.AUTO_MEMBERS_SEC + bg.AUTO_JITTER_SEC)       # (an hour and each group's own bit later)
+        assert b.backend.calls.count("group_members") == reads + 3      # (the big one: not for AUTO_BIG_SEC)
+        scan(b, after=bg.AUTO_BIG_SEC)
+        assert b.backend.calls.count("group_members") == reads + 6
     finally:
         stop(b)
 
@@ -269,7 +271,8 @@ def test_a_group_over_the_size_limit_is_left_alone(clock, tmp_path):
         b.backend.active[GROUP] = b.clock.now
         assert scan(b, after=bg.AUTO_MEMBERS_SEC) == QUIET and told(b) == []
         b.backend.groups[GROUP]["members"] = [ME, CREATOR, BD]
-        assert scan(b, after=bg.AUTO_MEMBERS_SEC) == {**QUIET, "linked": 1}
+        assert scan(b, after=bg.AUTO_MEMBERS_SEC + bg.AUTO_JITTER_SEC) == QUIET     # (a big group: read seldom)
+        assert scan(b, after=bg.AUTO_BIG_SEC) == {**QUIET, "linked": 1}
     finally:
         stop(b)
 
@@ -438,7 +441,8 @@ def test_a_group_that_cannot_be_read_now_is_retried_never_taken_for_one_without_
     bot.backend.group_members = lambda chat: None if chat == GROUP else real(chat)
     assert bot.prm.boss_groups.auto_scan() == {**QUIET, "unread": 1}
     assert bot.prm.store.boss_group(GROUP) is None and told(bot) == [] and GROUP not in kept(bot)["told"]
-    assert scan(bot) == {**QUIET, "unread": 1}                       # asked for again at each scan
+    assert scan(bot) == {**QUIET, "unread": 1}                       # asked for again at the next scan
+    assert scan(bot) == QUIET                                        # (... then less and less often: review #8)
     bot.backend.group_members = real
     assert scan(bot) == {**QUIET, "linked": 1} and bot.prm.is_party_group(GROUP)
 
@@ -1119,5 +1123,129 @@ def test_a_name_too_long_to_quote_points_at_the_list(clock, tmp_path):
         scan(b)
         [line] = told(b)
         assert "发「接群」从单子里选它" in line and f"接群 {long[:60]}" not in line and "不接群" not in line
+    finally:
+        stop(b)
+
+
+# ── review 2026-11-11 #7: a group's name is masked before it goes to the Mac ──
+
+def test_a_group_named_with_a_phone_number_reaches_the_mac_masked(clock, tmp_path):
+    b = setup(clock, tmp_path)
+    try:
+        b.backend.groups[GROUP]["name"] = "对接 13800001234 UID 1234567890123"
+        assert b.prm.boss_groups.auto_scan()["linked"] == 1
+        b.clock.now += 30
+        b.prm.handle(gmsg(b, "在吗"))
+        job = job_of(b)
+        name = json.loads(job["meta"])["group"]["name"]
+        assert "13800001234" not in job["meta"] and "1234567890123" not in job["meta"]
+        assert name.startswith("对接 138****1234") and "UID" in name
+        assert bg.mask_name("小美合作对接群") == "小美合作对接群"          # (a plain name as it is)
+    finally:
+        stop(b)
+
+
+def test_her_three_party_groups_name_is_masked_in_her_private_jobs(clock, tmp_path):
+    from test_prm_boss_groups import boss_makes, gmsg as boss_gmsg, make as boss_make
+
+    b = boss_make(clock, tmp_path)
+    try:
+        assert boss_makes(b, name="老板测试、小美 13800001234") == 1
+        group = json.loads(job_of(b, "200000001@chatroom")["meta"])["group"]       # (its 开场白's job)
+        assert "13800001234" not in group["name"] and "138****1234" in group["name"]
+        b.prm.handle(boss_gmsg(b, "群里说一句"))
+        b.clock.now += 30
+        b.prm.handle(b.msg("私聊说一句"))
+        for chat in (CREATOR, "200000001@chatroom"):
+            assert "13800001234" not in job_of(b, chat)["meta"]
+    finally:
+        stop(b)
+
+
+# ── review #8: hundreds of groups ─────────────────────────────────────────────
+
+def many(b, n):
+    for i in range(n):
+        chat = f"5000000{i:02d}@chatroom"
+        b.backend.groups[chat] = {"name": f"测试群{i:02d}", "members": [ME, f"wxid_guest{i:02d}"]}
+        b.backend.active[chat] = b.clock.now - 7200 - i
+
+
+def test_one_scan_reads_at_most_so_many_groups_the_rest_at_the_next_ones(clock, tmp_path):
+    b = setup(clock, tmp_path, register=False)
+    try:
+        many(b, 40)
+        b.prm.boss_groups.auto_scan()
+        assert b.backend.calls.count("group_members") == bg.AUTO_READS_MAX
+        scan(b)
+        assert b.backend.calls.count("group_members") == 2 * bg.AUTO_READS_MAX
+        scan(b)
+        assert b.backend.calls.count("group_members") == 43             # (all 43 groups read once)
+        scan(b)
+        assert b.backend.calls.count("group_members") == 43             # (none due again yet)
+    finally:
+        stop(b)
+
+
+def test_one_scan_stops_reading_after_its_time_budget(clock, tmp_path):
+    b = setup(clock, tmp_path, register=False)
+    try:
+        many(b, 10)
+        tick = [0.0]
+        real = b.backend.group_members
+
+        def slow(chat):                                              # each read takes a second
+            tick[0] += 1.0
+            return real(chat)
+
+        b.backend.group_members = slow
+        b.prm.boss_groups._monotonic = lambda: tick[0]
+        b.prm.boss_groups.auto_scan()
+        assert b.backend.calls.count("group_members") == int(bg.AUTO_SCAN_BUDGET_SEC) + 1
+    finally:
+        stop(b)
+
+
+def test_a_group_that_cannot_be_read_is_tried_less_and_less_often(clock, tmp_path):
+    b = setup(clock, tmp_path, register=False)
+    try:
+        b.backend.groups = {GROUP: b.backend.groups[GROUP]}
+        b.backend.unreadable.add(GROUP)
+        real = b.backend.group_members
+        b.backend.group_members = lambda chat: None if chat in b.backend.unreadable else real(chat)
+        tries = []
+        for _ in range(16):                                          # 16 scans, a minute apart
+            tries.append(scan(b)["unread"])
+        assert tries == [1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1]   # (1, 2, 4, 8 minutes apart: not each)
+        b.backend.unreadable.discard(GROUP)
+        b.clock.now += bg.AUTO_BACKOFF_MAX_SEC
+        assert b.prm.boss_groups.auto_scan()["linked"] == 0           # (read again; nobody registered in it)
+    finally:
+        stop(b)
+
+
+def test_each_group_falls_due_at_its_own_time(clock, tmp_path):
+    jitters = {bg._jitter(f"5000000{i:02d}@chatroom") for i in range(20)}
+    assert len(jitters) > 10 and all(0 <= j <= bg.AUTO_JITTER_SEC for j in jitters)
+
+
+# ── review #9: old sessions coming back are no new groups ─────────────────────
+
+def test_old_sessions_a_relogin_brings_back_are_not_told_about(clock, tmp_path):
+    """A re-login or a history sync brings back sessions of old groups that were not in the baseline's list: they are
+    not new (their WeChat time is from before the switch first ran), so nothing is said of them; a group really active
+    since is told once."""
+    b = setup(clock, tmp_path, register=False)
+    try:
+        b.prm.boss_groups.auto_scan()                                # (the baseline)
+        for i in range(5):                                           # old sessions back
+            chat = f"6000000{i:02d}@chatroom"
+            b.backend.groups[chat] = {"name": f"老群{i}", "members": [ME, f"wxid_guest{i:02d}"]}
+            b.backend.active[chat] = b.clock.now - 30 * 86400
+        chat = "600000099@chatroom"
+        b.backend.groups[chat] = {"name": "没有时间的老群", "members": [ME, "wxid_guest99"]}
+        assert scan(b) == QUIET and told(b) == []
+        new_group(b, members=(ME, TESTER))
+        assert scan(b)["told"] == 1 and len(told(b)) == 1
     finally:
         stop(b)

@@ -118,7 +118,7 @@ from contextlib import nullcontext
 from typing import Callable, Optional
 
 from ..edge import text as edge_text
-from . import gates
+from . import gates, pii
 from ..wechat.new_friends import is_me
 from .store import SENT, PartyError
 from .three_party import _SPLIT as NAMES_SPLIT, CREATED, CREATING, NOTICE as GROUP_NOTICE, UNSURE, group_with
@@ -196,7 +196,17 @@ AUTO = 2                           # boss_groups.manual of a group the scan link
 # when its 「还没接」 line was queued}, "asked": {chat: when its 「不止一位达人」 line was queued}, "no": {chat: when a
 # person refused it}, "owed": [[chat, the line for the admin's chat]]}
 AUTO_STATE = "groups_auto_link"
-AUTO_MEMBERS_SEC = 3600            # a group nothing was said in is read again (its members) this seldom; a big one too
+AUTO_MEMBERS_SEC = 3600            # a group nothing was said in is read again (its members) this seldom
+# (review 2026-11-11 #8: hundreds of groups) ... each group a little later than that, by its id (they do not all fall due
+# in one scan); a group over PRM_BOSS_GROUP_MAX this seldom; one that cannot be read after 1, 2, 4… scans, at most
+# AUTO_BACKOFF_MAX_SEC; one scan reads at most AUTO_READS_MAX groups' members and for at most AUTO_SCAN_BUDGET_SEC (it
+# runs on the sender thread before the round's sends): the others at the next scans, the most active first
+AUTO_JITTER_SEC = 900
+AUTO_BIG_SEC = 6 * 3600
+AUTO_BACKOFF_MAX_SEC = 3600
+AUTO_READS_MAX = 20
+AUTO_SCAN_BUDGET_SEC = 3.0
+LATER = "later"                    # ``_auto_group``: not read this scan (the scan's reads are used up): at the next
 AUTO_TELL_MAX = 3                  # the lines for the admin's chat one scan sends at most
 AUTO_TELL_TRIES = 6                # a line WeChat does not take is tried at this many scans, then dropped
 AUTO_LINK_TRIES = 3                # a link that fails is tried at this many scans a run
@@ -227,6 +237,19 @@ OURS_MAX = 10
 OURS_UNKNOWN_WHY = "PRM_GROUP_OURS 里的{names}在这个微信里找不到 / 有重名"
 OURS_UNREAD_WHY = "PRM_GROUP_OURS 里的名字还没认出来（微信数据库还没读到）"
 OURS_HOLD = "：认出来以前，机器人不自己接群、不自己接手老板拉的群（认得出是谁的群也先问你）"
+
+
+def mask_name(text) -> str:
+    """A group's name as a job for the Mac carries it (review 2026-11-11 #7: a group named with a phone number went out
+    whole): phone and ID numbers masked (``pii.mask_numbers``), and as the admin's chat shows names (src/prm/
+    wechat_review.py ``_mask_ids``): an id after a label (UID, 抖音号…), a labelled 微信号."""
+    from .wechat_review import _mask_ids          # (that module imports this one)
+    return _mask_ids(pii.mask_numbers(str(text or "")), [])
+
+
+def _jitter(chat: str) -> int:
+    """A group's own 0..AUTO_JITTER_SEC seconds (by its id: the same each run)."""
+    return int(hashlib.sha256(str(chat).encode()).hexdigest()[:8], 16) % (AUTO_JITTER_SEC + 1)
 
 
 def group_ours(raw) -> list[str]:
@@ -507,6 +530,7 @@ class BossGroups:
         self._asks: dict[str, dict] = {}
         self._auto_kept: Optional[dict] = None
         self._auto_tries: dict[tuple, int] = {}
+        self._monotonic: Callable[[], float] = time.monotonic   # (the scan's time budget, AUTO_SCAN_BUDGET_SEC)
         self._auto_unsaid = False                # no admin's chat to tell: said once in the log
         if not self._auto:                       # (review 2026-11-11 #10: lines queued while it was on are not kept)
             try:
@@ -953,7 +977,7 @@ class BossGroups:
         row = self._store.boss_group(chat) or {}
         manual = bool(row.get("manual"))
         lines = [x for x in row.get("lines") or [] if isinstance(x, dict)][-(LINES_TOLD_MANUAL if manual else LINES_TOLD):]
-        out = {"name": self.hide(row.get("name"))[:NAME_CHARS], "boss": [self._call],
+        out = {"name": mask_name(self.hide(row.get("name")))[:NAME_CHARS], "boss": [self._call],
                "lines": [{"who": str(x.get("who") or MEMBER), "at": _clock_text(x.get("at")),
                           "text": self.hide(x.get("text"))[:line_chars(x.get("text"))], "seq": int(x.get("seq") or 0)}
                          for x in lines]}
@@ -2069,18 +2093,22 @@ class BossGroups:
         active = self._store.active_wxids()
         out = {"linked": 0, "asked": 0, "told": 0, "unread": 0}
         asks: dict[str, dict] = {}
+        budget = {"reads": 0, "until": self._monotonic() + AUTO_SCAN_BUDGET_SEC, "later": 0}
         for group in listed:
             chat = str(group["chat"])
             try:
-                what = self._auto_group(kept, group, active, chat in held, asks, now)
+                what = self._auto_group(kept, group, active, chat in held, asks, now, budget)
             except Exception:                  # (one group's trouble never stops the others': it is looked at again)
                 logger.exception("PRM: group %s…: the scan could not look at it; again at the next one", chat[:8])
                 self._auto_seen.pop(chat, None)
                 what = "unread"
-            if what == "unread" and chat in self._asks:
+            if what in ("unread", LATER) and chat in self._asks:
                 asks.setdefault(chat, self._asks[chat])
-            if what:
+            if what in out:
                 out[what] += 1
+        if budget["later"]:
+            logger.debug("PRM: groups: %d group(s) left for the next scan (%d read this one)", budget["later"],
+                         budget["reads"])
         # (a question answered while this scan ran, 「是她」 or 「不接」, is not put back)
         self._asks = {chat: ask for chat, ask in asks.items() if chat not in kept["no"] and chat not in self._linked}
         self._auto_tell(kept)
@@ -2090,17 +2118,21 @@ class BossGroups:
                         out["linked"], out["asked"], out["told"], out["unread"])
         return out
 
-    def _auto_group(self, kept: dict, group: dict, active: set, held: bool, asks: dict, now: float) -> str:
+    def _auto_group(self, kept: dict, group: dict, active: set, held: bool, asks: dict, now: float,
+                    budget: Optional[dict] = None) -> str:
         """One group of the scan's list: "linked" (it has exactly one registered creator, and she was linked), "asked"
         (two or more: the question is in ``asks``; counted when its line for the admin's chat is queued, once),
         "told" (none it can link by itself, the group new or active since the baseline: its line queued, once),
-        "unread" (not readable now), or "" (nothing to do).  ``held``: it waits on the 「老板拉的群」 card, which asks
-        who she is already: only linked, never asked or told about."""
+        "unread" (not readable now), LATER (its members are due but this scan's reads are used up: ``budget``), or ""
+        (nothing to do).  ``held``: it waits on the 「老板拉的群」 card, which asks who she is already: only linked, never
+        asked or told about."""
         chat = str(group["chat"])
         last_at = _num(group.get("last_at"))
-        found = self._auto_read(chat, last_at, now)
+        found = self._auto_read(chat, last_at, now, budget)
+        if found is LATER:
+            return LATER
         if found is None:
-            return "unread"                    # (asked for again at the next scan, never taken for "nobody in it")
+            return "unread"                    # (asked for again later, never taken for "nobody in it")
         size = len(found["all"]) + 1
         people = found["members"]
         if size > self._max or not people:
@@ -2119,7 +2151,10 @@ class BossGroups:
             if doubt:                          # (a person says whose it is: never a guess)
                 return self._auto_ask(kept, offer, creators, doubt, held, asks, now)
             return "linked" if self._auto_link(kept, offer, creators[0], party, now) else ""
-        fresh = chat not in kept["base"] or (last_at or 0.0) > kept["at"]
+        # (review 2026-11-11 #9: by WeChat's time only: active after the switch first ran, or a group not there then that
+        # was active from that moment on; one merely missing from the baseline's list, as old sessions a re-login or a
+        # history sync brings back, stays quiet)
+        fresh = last_at is not None and (last_at > kept["at"] or (chat not in kept["base"] and last_at >= kept["at"]))
         if cannot == AUTO_MAKING or held or chat in kept["told"] or not fresh:
             return ""
         self._auto_owe(kept, "told", chat, NEW_NOTICE if chat not in kept["base"] else ACTIVE_NOTICE,
@@ -2172,17 +2207,36 @@ class BossGroups:
         return any(ev.get("actor") not in ("system", "creator")
                    for ev in self._store.events(int(deal["id"]), limit=200, kinds=("stage",)))
 
-    def _auto_read(self, chat: str, last_at: Optional[float], now: float) -> Optional[dict]:
-        """Who of this group she may be (``candidates_of``), read now when it was not read this run, could not be read
-        last time, something was said in it since (a group over PRM_BOSS_GROUP_MAX: not for that), or AUTO_MEMBERS_SEC
-        went by; else as last read.  None: not readable now."""
+    def _auto_read(self, chat: str, last_at: Optional[float], now: float, budget: Optional[dict] = None):
+        """Who of this group she may be (``candidates_of``), read now when it was not read this run, something was said
+        in it since (a group over PRM_BOSS_GROUP_MAX: not for that), or AUTO_MEMBERS_SEC and its own ``_jitter`` went by
+        (a big group: AUTO_BIG_SEC); one that could not be read last time after 1, 2, 4… scans (``retry_at``, at most
+        AUTO_BACKOFF_MAX_SEC: a group we left is not asked for every minute); else as last read.  None: not readable
+        now; LATER: not read this scan (one not readable lately whose next try is not due yet, or one due while this scan
+        read AUTO_READS_MAX groups already or took AUTO_SCAN_BUDGET_SEC)."""
         seen = self._auto_seen.get(chat)
-        if (seen is None or seen["found"] is None or now - seen["at"] >= AUTO_MEMBERS_SEC
-                or (seen["last_at"] != last_at and not seen["big"])):
-            found = self.candidates_of(chat)
-            seen = {"at": now, "last_at": last_at, "found": found,
-                    "big": found is not None and len(found["all"]) + 1 > self._max}
-            self._auto_seen[chat] = seen
+        if seen is not None and seen["found"] is None:
+            due = now >= float(seen.get("retry_at") or 0)
+        elif seen is not None:
+            every = AUTO_BIG_SEC if seen["big"] else AUTO_MEMBERS_SEC + _jitter(chat)
+            due = now - seen["at"] >= every or (seen["last_at"] != last_at and not seen["big"])
+        else:
+            due = True
+        if not due:                            # (one not readable lately: not asked for now, not counted again)
+            return seen["found"] if seen["found"] is not None else LATER
+        if budget is not None:
+            if budget["reads"] >= AUTO_READS_MAX or self._monotonic() > budget["until"]:
+                budget["later"] += 1
+                return LATER
+            budget["reads"] += 1
+        found = self.candidates_of(chat)
+        if found is None:
+            fails = int((seen or {}).get("fails") or 0) + 1 if seen is not None and seen["found"] is None else 1
+            seen = {"at": now, "last_at": last_at, "found": None, "big": False, "fails": fails,
+                    "retry_at": now + min(BOSS_SCAN_SEC * 2 ** (fails - 1), AUTO_BACKOFF_MAX_SEC)}
+        else:
+            seen = {"at": now, "last_at": last_at, "found": found, "big": len(found["all"]) + 1 > self._max}
+        self._auto_seen[chat] = seen
         return seen["found"]
 
     def _auto_link(self, kept: dict, offer: dict, her: dict, party: dict, now: float) -> bool:
