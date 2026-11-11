@@ -874,6 +874,9 @@ def test_when_she_can_be_reached_nowhere_nothing_is_sent_and_the_deal_says_so(bo
 
 
 def test_a_shipping_notice_made_while_the_bot_was_stopped_still_goes_where_she_is(bot):
+    """Made on the database while the bot was stopped, it shows her private chat; she has none: approved, it is not
+    sent there nor into the group unseen (re-review 2026-11-11 N1: where it goes is what the person was shown): it
+    comes back to 待审批 aimed at the group, saying so; approved again, it goes into the group."""
     from src.prm.service import apply_deal_action
 
     boss_makes(bot)
@@ -881,6 +884,11 @@ def test_a_shipping_notice_made_while_the_bot_was_stopped_still_goes_where_she_i
     out = apply_deal_action(bot.prm.store, "shipment", {"deal_id": deal_id, "carrier": "顺丰", "waybill": "SF1234567890"},
                             now=bot.clock.now, takeover_sec=7200)     # (the stopped console: straight on the database)
     assert bot.prm.store.packet(out["packet"])["chat_id"] == CREATOR
+    bot.prm.decide(out["packet"], "send")
+    assert bot.prm.send_approved() == 0 and bot.texts == []
+    packet = bot.prm.store.packet(out["packet"])
+    assert (packet["status"], packet["chat_id"], packet["meta"]["channel"]) == ("pending", GROUP, "group")
+    assert packet["meta"]["hold"] == f"发送对象变了：现在会发到群「{GROUP_NAME}」，请再看一眼"
     bot.prm.decide(out["packet"], "send")
     bot.prm.send_approved()
     assert bot.texts[0][0] == GROUP and bot.prm.store.packet(out["packet"])["chat_id"] == GROUP

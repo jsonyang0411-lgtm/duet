@@ -772,8 +772,8 @@ def test_a_packet_aimed_at_the_group_as_the_link_ends_is_not_sent(bot, monkeypat
     out = bot.prm.deal_action("shipment", {"deal_id": deal_id, "carrier": "顺丰", "waybill": "SF1234567890"})
     aim = bot.prm._aim
 
-    def aimed_and_the_link_ends(packet):
-        packet = aim(packet)
+    def aimed_and_the_link_ends(packet, **kw):
+        packet = aim(packet, **kw)
         bot.say(f"不接群 {GROUP_NAME}")
         return packet
 

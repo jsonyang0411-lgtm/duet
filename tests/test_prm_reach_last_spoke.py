@@ -271,9 +271,14 @@ def test_a_notice_made_while_the_bot_was_stopped_is_decided_when_it_is_first_aim
                                                           "waybill": "SF1234567890"}, now=b.clock.now, takeover_sec=7200)
         assert b.prm.store.packet(out["packet"])["chat_id"] == CREATOR and "reach" not in \
             b.prm.store.packet(out["packet"])["meta"]
+        b.prm.decide(out["packet"], "send")                          # (a person approved it as it was shown: private)
+        assert b.prm.send_approved() == 0 and b.texts == []           # (re-review N1: not into the group unseen)
+        packet = b.prm.store.packet(out["packet"])
+        assert (packet["status"], packet["chat_id"], packet["meta"]["reach"]) == ("pending", GROUP, "last_spoke")
+        assert packet["meta"]["hold"].startswith("发送对象变了：现在会发到群「")
         b.prm.decide(out["packet"], "send")
         b.prm.send_approved()
-        assert b.texts[-1][0] == GROUP and b.prm.store.packet(out["packet"])["meta"]["reach"] == "last_spoke"
+        assert b.texts[-1][0] == GROUP
     finally:
         stop(b)
 
@@ -331,5 +336,85 @@ def test_switched_off_nothing_changes(clock, tmp_path):
         assert "reach" not in the_deal(b)
         assert all("reach" not in p for p in b.prm.snapshot()["pending"])
         assert b.prm._reaching(b.party, made=True) == (CREATOR, None, "")
+    finally:
+        stop(b)
+
+
+# ── re-review 2026-11-11: the size limit, she left after the decision, an answer that could not be had ──
+
+def test_the_rule_never_picks_a_group_over_the_size_limit(clock, tmp_path):
+    """N2: her latest line was in a 12-person group linked by hand (the 接群 question allows it): a shipping notice with
+    her waybill goes to her private chat, as with the switch off."""
+    from test_group_link import BIG
+
+    b = link_setup(clock, tmp_path, prm_reach_last_spoke="on")
+    try:
+        b.say("接群")
+        b.say("接群 2")
+        assert b.say("是 1").startswith("接手了：群「品牌测试大群」")
+        b.prm.handle(b.msg("私聊问一下"))
+        b.clock.now += 60
+        b.prm.handle(gmsg(b, "大群里说一句", chat=BIG))
+        b.clock.now += 5
+        for chat in (CREATOR, BIG):
+            job = job_of(b, chat)
+            if job is not None:
+                b.relay.store.cancel_if_pending(job["id"], b.clock.now)
+        deal_id = b.prm.store.boss_group(BIG)["deal_id"]
+        out = b.prm.deal_action("shipment", {"deal_id": deal_id, "carrier": "顺丰", "waybill": "SF1234567890"})
+        packet = b.prm.store.packet(out["packet"])
+        assert len(b.prm.store.boss_group(BIG)["members"]) + 1 == 12
+        assert packet["chat_id"] == CREATOR and packet["meta"]["reach"] == "private"
+    finally:
+        stop(b)
+
+
+@pytest.mark.parametrize("how", ["person", "gate"])
+def test_she_left_the_group_after_the_notice_was_approved_it_comes_back_to_a_person(clock, tmp_path, how):
+    """N3: aimed at her team's group (her side last spoke there), approved (by a person, or by its kind's gate); she
+    leaves the group before it goes: it is not sent there, nor anywhere unseen: back to 待审批, aimed at her private
+    chat, saying so; approved again it goes to her private chat."""
+    b = setup(clock, tmp_path, prm_linked_groups_auto="on")
+    try:
+        assert b.prm.deal_action("group_confirm", {"deal_id": b.deal_id, "chat": GROUP})["ok"] is False   # (by hand)
+        private_then_group(b)
+        if how == "gate":
+            b.prm.store.set_gate("shipping_notice", "auto", b.clock.now)
+        notice = ship(b)
+        assert notice["chat_id"] == GROUP and notice["meta"]["reach"] == "last_spoke"
+        if how == "person":
+            assert b.prm.decide(notice["id"], "send")["ok"]
+        b.backend.groups[GROUP]["members"].remove(CREATOR)
+        b.clock.now += bg.BOSS_SCAN_SEC + 1
+        b.prm.boss_groups.sweep()                                      # (the deal says she left)
+        assert b.prm.send_approved() == 0 and b.texts == []
+        packet = b.prm.store.packet(notice["id"])
+        assert (packet["status"], packet["route"], packet["chat_id"]) == ("pending", "review", CREATOR)
+        assert "channel" not in packet["meta"] and "reach" not in packet["meta"]
+        assert packet["meta"]["hold"] == "发送对象变了：现在会发到她的私聊，请再看一眼"
+        assert next(p for p in b.prm.snapshot()["pending"] if p["id"] == packet["id"])["channel"] == "wechat"
+        assert b.prm.decide(packet["id"], "send")["ok"]
+        b.prm.send_approved()
+        assert [chat for chat, _ in b.texts] == [CREATOR]
+    finally:
+        stop(b)
+
+
+def test_when_the_backend_cannot_say_whether_she_has_a_private_chat_no_group_is_picked_for_it(clock, tmp_path):
+    """N1: a passing read failure is no "she has no private chat": bot-started messages stay with her private chat
+    (as made), and a notice approved for it is never moved into the group at send time for that."""
+    b = setup(clock, tmp_path, on=False)
+    try:
+        b.backend.readable = False                                     # (the database cannot be read now)
+        assert b.prm.boss_groups.knows_private(CREATOR) is None
+        notice = ship(b)
+        assert notice["chat_id"] == CREATOR
+        assert b.prm._reaching(b.party) == (CREATOR, None, "")
+        assert b.prm.decide(notice["id"], "send")["ok"]
+        b.prm.send_approved()
+        assert [chat for chat, _ in b.texts] == [CREATOR]              # (where the card said)
+        b.backend.readable = True
+        assert b.prm.boss_groups.knows_private(CREATOR) is False       # (she is no friend of ours: now it can say)
+        assert ship(b, "SF1234567891")["chat_id"] == GROUP
     finally:
         stop(b)

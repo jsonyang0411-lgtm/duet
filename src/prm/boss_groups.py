@@ -612,19 +612,34 @@ class BossGroups:
 
     def ours_warning(self) -> str:
         """What the console (and the log, ``_read_bosses``) says of PRM_GROUP_OURS ("" = nothing): names not read yet,
-        or a name no one contact has (none, or two)."""
-        if not self._ours_names or not self._ours_unknown:
+        or a name no one contact has (none, or two); else (re-review 2026-11-11 N6) a name that is a registered
+        creator's too (her 称呼 on the list: only the contact it resolved to is ours, she stays a creator), and a
+        resolved contact that is a registered creator (ours wins: never "who is she")."""
+        if not self._ours_names:
             return ""
-        if not self._ours_read:
-            return OURS_UNREAD_WHY + OURS_HOLD
-        return (OURS_UNKNOWN_WHY.format(names=self._quoted(self._ours_unknown))
-                + "（要和这个微信号里他的备注或名字一样，而且只有一个人叫这个名字）" + OURS_HOLD)
+        if self._ours_unknown:
+            if not self._ours_read:
+                return OURS_UNREAD_WHY + OURS_HOLD
+            return (OURS_UNKNOWN_WHY.format(names=self._quoted(self._ours_unknown))
+                    + "（要和这个微信号里他的备注或名字一样，而且只有一个人叫这个名字）" + OURS_HOLD)
+        bits = []
+        parties = self._store.parties(include_inactive=True)
+        both = [n for w, n in self._ours_ids.items() if any(p["wxid"] == w for p in parties)]
+        if both:
+            bits.append(f"PRM_GROUP_OURS 里的{self._quoted(both)}也是登记过的达人：机器人把他当我们自己的人，群里不当达人")
+        keys = {_key(p.get("name")) for p in parties if p["wxid"] not in self._ours_ids} - {""}
+        same = [n for n in self._ours_names if _key(n) in keys]
+        if same:
+            bits.append(f"PRM_GROUP_OURS 里的{self._quoted(same)}和登记过的达人同名：只有通讯录里认出的那个人算我们自己的人，"
+                        "同名的达人照旧是达人")
+        return "；".join(bits)
 
     def _not_her(self, row: Optional[dict] = None) -> tuple:
         """Who is never her (``candidates``): the bosses' and our people's wxids as last read (and the row's bosses), and
-        the names they go by (PRM_GROUP_WITH, PRM_GROUP_OURS: a member named like one)."""
+        the names the bosses go by (PRM_GROUP_WITH: a member named like one).  Our people (PRM_GROUP_OURS) only by the
+        contact their name resolved to (re-review 2026-11-11 N6: a creator who carries the same name stays a creator)."""
         ids = set(self._bosses) | set(self._ours_ids) | {str(b.get("wxid") or "") for b in (row or {}).get("boss") or []}
-        return ids - {""}, [*self._with, *self._ours_names]
+        return ids - {""}, list(self._with)
 
     def status(self) -> dict:
         return boss_groups_out(self._store, enabled=self._on, why_not=self.why_not() if self._on else "",
@@ -794,22 +809,28 @@ class BossGroups:
                 out.append(row)
         return out
 
-    def knows_private(self, wxid: str) -> bool:
+    def knows_private(self, wxid: str) -> Optional[bool]:
         """Does the backend have her private chat (she is our friend)?  Its quiet ``has_private_chat`` (no log), its
-        answer kept KNOWS_SEC per creator (the sender thread asks every round for a step owed); False when it cannot
-        say.  Never the send path's ``chat_target`` (it logs an error with her wxid for a chat it cannot name)."""
+        answer kept KNOWS_SEC per creator (the sender thread asks every round for a step owed); False for a backend
+        without it (as before).  None (re-review 2026-11-11 N1): it could not answer now (it raised, the database is
+        not readable, this account's wxid is not known yet): not kept, asked again next time; never taken for "she has
+        no private chat".  Never the send path's ``chat_target`` (it logs an error with her wxid for a chat it cannot
+        name)."""
         wxid = str(wxid or "")
         now = self._clock()
         kept = self._knows.get(wxid)
         if kept is not None and now - kept[0] < KNOWS_SEC:
             return kept[1]
         ask = getattr(self._backend, "has_private_chat", None)
-        known = False
-        if callable(ask) and wxid:
-            try:
-                known = bool(ask(wxid))
-            except Exception:
-                logger.debug("PRM: boss groups: a private chat could not be looked up", exc_info=True)
+        if not callable(ask) or not wxid:
+            return False
+        if not self._readable() or (callable(getattr(self._backend, "own_wxid", None)) and not self._own()):
+            return None
+        try:
+            known = bool(ask(wxid))
+        except Exception:
+            logger.debug("PRM: boss groups: a private chat could not be looked up", exc_info=True)
+            return None
         self._knows[wxid] = (now, known)
         return known
 
@@ -824,8 +845,7 @@ class BossGroups:
         names = [name, *(m.get("name") for m in row.get("members") or [] if m.get("wxid") == sender)]
         if keys and any(_key(n) in keys for n in names if n):
             return BOSS
-        ours = {_key(n) for n in self._ours_names} - {""}
-        if sender in self._ours_ids or (ours and any(_key(n) in ours for n in names if n)):
+        if sender in self._ours_ids:           # (re-review 2026-11-11 N6: our people by their resolved contact only)
             return US
         return MEMBER
 
@@ -2094,6 +2114,16 @@ class BossGroups:
         out = {"linked": 0, "asked": 0, "told": 0, "unread": 0}
         asks: dict[str, dict] = {}
         budget = {"reads": 0, "until": self._monotonic() + AUTO_SCAN_BUDGET_SEC, "later": 0}
+        # (re-review 2026-11-11 N4: busy groups fall due at each line; the reads of a scan go to the groups never read
+        # first, then to the ones read longest ago, so that none waits for ever; the groups are then looked at in the
+        # session list's order, the most active first, as before)
+        seen = self._auto_seen
+        for group in sorted(listed, key=lambda g: (str(g["chat"]) in seen,
+                                                   float((seen.get(str(g["chat"])) or {}).get("at") or 0))):
+            try:
+                self._auto_read(str(group["chat"]), _num(group.get("last_at")), now, budget)
+            except Exception:                  # (its trouble is the group's own: seen to below)
+                logger.debug("PRM: group %s…: its members could not be read", str(group["chat"])[:8], exc_info=True)
         for group in listed:
             chat = str(group["chat"])
             try:
@@ -2142,6 +2172,10 @@ class BossGroups:
                  "deal_id": None, "by": SCAN, **({"long": True} if len(str(group.get("name") or "")) > NAME_CHARS else {}),
                  "members": [{**m, "registered": m["wxid"] in active} for m in people],
                  "all": list(found["all"]), "boss": list(found["boss"])}
+        # (review 2026-11-11 #9: by WeChat's time only: active after the switch first ran, or a group not there then that
+        # was active from that moment on; one merely missing from the baseline's list, as old sessions a re-login or a
+        # history sync brings back, stays quiet)
+        fresh = last_at is not None and (last_at > kept["at"] or (chat not in kept["base"] and last_at >= kept["at"]))
         if len(creators) > 1:
             return self._auto_ask(kept, offer, creators, "", held, asks, now)
         party = self._store.party_by_wxid(creators[0]["wxid"]) if creators else None
@@ -2149,27 +2183,28 @@ class BossGroups:
         if party is not None and not cannot:
             doubt = AUTO_STOPPED_DOUBT if any(m.get("stopped") for m in people) else self._auto_doubt(party, offer)
             if doubt:                          # (a person says whose it is: never a guess)
-                return self._auto_ask(kept, offer, creators, doubt, held, asks, now)
+                # (re-review N5: a WeChat line only for a group new or active since the baseline; none at all for names
+                # of PRM_GROUP_OURS not known: the console says so, and once they are, 「已自动接群」 is the one line)
+                return self._auto_ask(kept, offer, creators, doubt, held, asks, now,
+                                      tell=fresh and doubt != AUTO_OURS_DOUBT)
             return "linked" if self._auto_link(kept, offer, creators[0], party, now) else ""
-        # (review 2026-11-11 #9: by WeChat's time only: active after the switch first ran, or a group not there then that
-        # was active from that moment on; one merely missing from the baseline's list, as old sessions a re-login or a
-        # history sync brings back, stays quiet)
-        fresh = last_at is not None and (last_at > kept["at"] or (chat not in kept["base"] and last_at >= kept["at"]))
         if cannot == AUTO_MAKING or held or chat in kept["told"] or not fresh:
             return ""
         self._auto_owe(kept, "told", chat, NEW_NOTICE if chat not in kept["base"] else ACTIVE_NOTICE,
                        {**offer, "party": party if cannot == AUTO_HAS_GROUP else None}, now)
         return "told"
 
-    def _auto_ask(self, kept: dict, offer: dict, creators: list, why: str, held: bool, asks: dict, now: float) -> str:
+    def _auto_ask(self, kept: dict, offer: dict, creators: list, why: str, held: bool, asks: dict, now: float,
+                  tell: bool = True) -> str:
         """The scan does not link this group by itself: the console asks whose it is (``asks``: the offer, with ``why``
         when it is not two or more creators: ``_auto_doubt``), and one line for the admin's chat is owed, once a group
-        (``asked``).  ``held``: it waits on the 「老板拉的群」 card, which asks already: nothing."""
+        (``asked``), unless ``tell`` is False (re-review 2026-11-11 N5: the card only; the group is not marked, a line
+        may go once it is active).  ``held``: it waits on the 「老板拉的群」 card, which asks already: nothing."""
         chat = offer["chat"]
         if held:
             return ""
         asks[chat] = {**offer, "at": (self._asks.get(chat) or offer)["at"], **({"why": why} if why else {})}
-        if chat in kept["asked"]:
+        if chat in kept["asked"] or not tell:
             return ""
         self._auto_owe(kept, "asked", chat, ASK_NOTICE,
                        {**offer, "creators": [self._store.party_by_wxid(m["wxid"]) for m in creators],
@@ -2222,8 +2257,11 @@ class BossGroups:
             due = now - seen["at"] >= every or (seen["last_at"] != last_at and not seen["big"])
         else:
             due = True
-        if not due:                            # (one not readable lately: not asked for now, not counted again)
-            return seen["found"] if seen["found"] is not None else LATER
+        if not due:                            # (one not readable lately: not asked for now, not counted again; one
+            # that could not be read in this very scan, ``_auto_scan``'s reads first: not readable now)
+            if seen["found"] is None:
+                return None if seen["at"] == now else LATER
+            return seen["found"]
         if budget is not None:
             if budget["reads"] >= AUTO_READS_MAX or self._monotonic() > budget["until"]:
                 budget["later"] += 1

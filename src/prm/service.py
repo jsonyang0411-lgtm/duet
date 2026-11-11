@@ -3174,7 +3174,11 @@ class PrmService:
             row = self._spoke(party, deal)
             if row is not None:
                 return row["chat"], row, REACH_LAST_SPOKE
-        if self._private_known(party):
+        known = self._private_known(party)
+        if known is None:                      # (it cannot be told now: her private chat, never a group for that)
+            logger.debug("PRM: whether party %d has a private chat with us cannot be told now; her private chat it is",
+                        party["id"])
+        if known is not False:
             return party["wxid"], None, REACH_PRIVATE if made and self._reach_last_spoke else ""
         row = self.boss_groups.reach_group(party["id"])
         return (row["chat"], row, "") if row is not None else (None, None, "")
@@ -3186,7 +3190,14 @@ class PrmService:
         where = self._last_spoken(party, deal)
         if not where.endswith("@chatroom"):
             return None
-        return next((row for row in self.boss_groups.reach_groups(party["id"]) if row["chat"] == where), None)
+        return next((row for row in self._spoke_groups(party) if row["chat"] == where), None)
+
+    def _spoke_groups(self, party: dict) -> list:
+        """The groups PRM_REACH_LAST_SPOKE may send what the bot starts to (re-review 2026-11-11 N2, N3): the linked
+        groups she is still in that the bot drafts in (``BossGroups.reach_groups``) with at most PRM_BOSS_GROUP_MAX
+        members (a bigger one, linked by hand all the same: as with the switch off)."""
+        most = self.boss_groups.max_members
+        return [row for row in self.boss_groups.reach_groups(party["id"]) if len(row.get("members") or []) + 1 <= most]
 
     def _last_spoken(self, party: dict, deal: Optional[dict] = None) -> str:
         """The chat of the latest line of her side on her deal ("" none): ``last_by_chat`` (WeChat's clock) as it is now,
@@ -3224,12 +3235,15 @@ class PrmService:
         if group is not None:
             return {"where": "group", "name": str(group.get("name") or "")[:60],
                     "why": "last_spoke" if why == REACH_LAST_SPOKE else "no_private"}
+        if self._private_known(party) is None:
+            return {"where": "private", "why": "unknown"}
         latest = self._last_spoken(party, deal)
         return {"where": "private", "why": ("never" if not latest else "elsewhere" if latest.endswith("@chatroom")
                                             else "last_private")}
 
-    def _private_known(self, party: dict) -> bool:
-        """Has she a private chat with us: a draft job of her lines there, or the backend lists it (``knows_private``)?"""
+    def _private_known(self, party: dict) -> Optional[bool]:
+        """Has she a private chat with us: a draft job of her lines there, or the backend lists it (``knows_private``)?
+        None: the backend could not say now (re-review 2026-11-11 N1: never read as "no", ``_reaching``)."""
         if any(job.get("kind") == PRM and str(job.get("text") or "").strip() and not job_meta(job).get("op")
                for job in self._relay.store.recent(party["wxid"], limit=50)):
             return True
@@ -3242,18 +3256,30 @@ class PrmService:
         return (packet.get("job_id") is None or meta.get("lane") == LANE_SYSTEM or bool(meta.get(OPENING))
                 or bool(meta.get(HUOPAN)) or bool(meta.get(SIGNED)) or bool((meta.get(HANDCARDS) or {}).get("console")))
 
-    def _aim(self, packet: Optional[dict], *, wait: bool = False) -> Optional[dict]:
+    def _aim(self, packet: Optional[dict], *, wait: bool = False, sending: bool = False) -> Optional[dict]:
         """A packet the bot started itself still aimed at her private chat, for a creator with a linked group: where she
         can be reached (``_reaching``): the group (its chat, the console's tag), or nowhere: it fails, nothing is sent, the
         deal says so (``UNREACHABLE``).  Returns the packet as it is now (None: failed so).  ``wait`` (微信里审批草稿, before
         a draft is told: it says where it goes): reached nowhere, nothing is changed and None comes back (told later).
         PRM_REACH_LAST_SPOKE on: a packet with no job (a shipping notice) is decided once, the first time it is aimed
         (``made``: where her side last spoke; ``meta.reach`` says how it went, REACH_PRIVATE when it stays); a job's packet
-        went where its job was asked for (``_reaching`` with ``made`` then): only the rule as before moves it."""
+        went where its job was asked for (``_reaching`` with ``made`` then): only the rule as before moves it.
+        ``sending`` (``send_approved``, re-review 2026-11-11 N1, N3): it is approved and about to go: where it would go
+        now is not where it was when it was approved (her private chat now a group; a group PRM_REACH_LAST_SPOKE picked
+        that is not one it may pick any more: she left it, it is no longer read, it grew past PRM_BOSS_GROUP_MAX): it
+        is not sent, it goes back to 待审批 aimed at the new place, saying so (``_retarget``); None comes back."""
         if packet is None or not self._bot_started(packet) or is_buyin(packet):
             return packet
         party = self._store.party(packet["party_id"])
-        if party is None or packet["chat_id"] != party["wxid"]:
+        if party is None:
+            return packet
+        if packet["chat_id"] != party["wxid"]:
+            if (sending and (packet.get("meta") or {}).get("reach") == REACH_LAST_SPOKE
+                    and packet["chat_id"] not in {row["chat"] for row in self._spoke_groups(party)}):
+                chat, group, why = self._reaching(party)
+                if chat is None:
+                    return self._unreachable(packet, party)
+                return self._retarget(packet, chat, group, why)
             return packet
         fresh = self._reach_last_spoke and packet.get("job_id") is None and not (packet.get("meta") or {}).get("reach")
         chat, group, why = self._reaching(party, made=fresh, deal=self._store.deal(int(packet["deal_id"] or 0)) if fresh
@@ -3266,19 +3292,58 @@ class PrmService:
         if chat is None and wait:
             return None
         if chat is None:
-            self._store.move(packet["id"], (PENDING, APPROVED, SENDING), FAILED, outcome="failed", sent_at=now,
-                             error=f"{UNREACHABLE_TEXT}，没有发")
-            self._store.set_notice(packet["deal_id"], UNREACHABLE, f"{UNREACHABLE_TEXT}：#{packet['id']} 没有发，"
-                                                                   "请在微信里找到她手动发", now)
-            logger.warning("PRM: packet %d: party %d is in no chat with us (no private chat, gone from the boss group); "
-                           "not sent", packet["id"], party["id"])
-            return None
+            return self._unreachable(packet, party)
+        if sending:
+            return self._retarget(packet, chat, group, why)
         self._store.aim_packet(packet["id"], chat, {"channel": GROUP_CHANNEL, "group_name": str(group["name"])[:60],
                                                     **({"group_manual": True} if group.get("manual") else {}),
                                                     **({"reach": why} if why else {})})
         logger.info("PRM: packet %d goes to boss group %s… (party %d %s)", packet["id"], chat[:8], party["id"],
                     "last wrote there: PRM_REACH_LAST_SPOKE" if why == REACH_LAST_SPOKE else "has no private chat with us")
         return self._store.packet(packet["id"])
+
+    def _unreachable(self, packet: dict, party: dict) -> None:
+        """``_aim``: she can be reached nowhere: the packet fails, nothing is sent, the deal says so (``UNREACHABLE``)."""
+        now = self._clock()
+        self._store.move(packet["id"], (PENDING, APPROVED, SENDING), FAILED, outcome="failed", sent_at=now,
+                         error=f"{UNREACHABLE_TEXT}，没有发")
+        self._store.set_notice(packet["deal_id"], UNREACHABLE, f"{UNREACHABLE_TEXT}：#{packet['id']} 没有发，"
+                                                               "请在微信里找到她手动发", now)
+        logger.warning("PRM: packet %d: party %d is in no chat with us (no private chat, gone from the boss group); "
+                       "not sent", packet["id"], party["id"])
+        return None
+
+    def _retarget(self, packet: dict, chat: str, group: Optional[dict], why: str = "") -> None:
+        """Re-review 2026-11-11 N1: an approved packet whose target changed since a person (or its gate) approved it is
+        not sent: it goes back to 待审批 (route review), aimed at where it would go now (``chat``; ``group``: that group's
+        row, or None for her private chat), its card saying so (``meta.hold``, 「发送对象变了：现在会发到…，请再看一眼」);
+        a second approval sends it there.  Returns None (nothing to send now)."""
+        name = str((group or {}).get("name") or "")
+        meta = {k: v for k, v in (packet.get("meta") or {}).items()
+                if k not in ("channel", "group_name", "group_manual", "reach", "group_told", "decided_chat", "auto_at")}
+        if group is not None:
+            meta.update(channel=GROUP_CHANNEL, group_name=name[:60], **({"group_manual": True} if group.get("manual")
+                                                                          else {}), **reach_meta(why))
+        where = f"群「{name or '（没有群名）'}」" if group is not None else "她的私聊"
+        meta["hold"] = f"发送对象变了：现在会发到{where}，请再看一眼"
+        if "auto_at" in (packet.get("meta") or {}):
+            meta["auto_held"] = meta["hold"]   # (开场白自动发: its time gone, the card says why it did not go by itself)
+        if self._store.aim_packet(packet["id"], chat, {}) and self._store.move(
+                packet["id"], (APPROVED, SENDING), PENDING, decided_at=None, route=gates.REVIEW, meta=meta):
+            logger.warning("PRM: packet %d: where it goes changed since it was approved (now %s); back to 待审批",
+                           packet["id"], "a group" if group is not None else "her private chat")
+        return None
+
+    def _moved_since_decided(self, packet: dict) -> bool:
+        """``send_approved`` (re-review 2026-11-11 N1): a packet a person approved for one chat (``meta.decided_chat``,
+        ``decide``) that is aimed at another now goes back to 待审批 (``_retarget``): True then."""
+        decided = str((packet.get("meta") or {}).get("decided_chat") or "")
+        if not decided or decided == str(packet.get("chat_id") or ""):
+            return False
+        chat = str(packet["chat_id"])
+        row = self._store.boss_group(chat) if chat.endswith("@chatroom") else None
+        self._retarget(packet, chat, row, str((packet.get("meta") or {}).get("reach") or ""))
+        return True
 
     def _lane_chat(self, party_id: int, chat_id: str) -> Optional[str]:
         """Whose waiting reply drafts a new one puts out of date: for a creator with a 老板拉的群 (PRM_BOSS_GROUPS) only
@@ -5824,6 +5889,11 @@ class PrmService:
             return {"ok": False, "error": "机器人没有连着微信，现在不能发送"}
         if attachments and self._send_file is None:
             return {"ok": False, "error": "这个微信后端不能发文件（只有 Windows 数据库直读能发）"}
+        # (re-review 2026-11-11 N1: the chat the person was shown; at send time another one sends nothing, ``send_approved``)
+        if "meta" in changed:
+            changed["meta"] = {**changed["meta"], "decided_chat": packet["chat_id"]}
+        else:
+            self._store.merge_packet_meta(packet["id"], {"decided_chat": packet["chat_id"]}, (PENDING,))
         if not self._store.move(packet["id"], (PENDING,), APPROVED, decided_at=now, final_text=final,
                                 edited=int(final != packet["text"]), **changed):
             return {"ok": False, "error": "这条草稿已经处理过了（或者达人又发了新消息，草稿已过时）"}
@@ -8139,8 +8209,11 @@ class PrmService:
                 continue                               # another round took it
             if self._closed_now(self._store.packet(packet["id"]), now):
                 continue
-            aimed = self._aim(self._store.packet(packet["id"]))   # (老板拉的群: one the bot started, made while stopped)
-            if (aimed is not None and not self._closed_now(aimed, now)    # (re-aimed: only to a group drafted in now)
+            # (老板拉的群: one the bot started; re-review 2026-11-11 N1, N3: where it goes is where it was approved for,
+            # else back to 待审批)
+            aimed = self._aim(self._store.packet(packet["id"]), sending=True)
+            if (aimed is not None and not self._moved_since_decided(aimed)
+                    and not self._closed_now(aimed, now)                 # (re-aimed: only to a group drafted in now)
                     and not self._held_by_hand_group(aimed)):            # (... and by itself not into one by hand)
                 sent += self._deliver(aimed)
         return sent
@@ -8318,7 +8391,8 @@ class PrmService:
             # written, review 2026-10-31)
             self.boss_groups.replied(packet["chat_id"], (packet.get("meta") or {}).get("group_told") or [])
             self._store.drop_notices(packet["deal_id"], lambda n: n["key"] == GROUP_UNSENT, now)
-            if packet["route"] == gates.REVIEW and self.boss_groups.unconfirmed(packet["chat_id"]):
+            if (packet["route"] == gates.REVIEW and self.boss_groups.unconfirmed(packet["chat_id"])
+                    and (packet.get("meta") or {}).get("decided_chat") == packet["chat_id"]):
                 # 群自己接上 (review #2): a person sent a draft into the group the scan linked: it is hers
                 self.boss_groups.confirm(packet["chat_id"], actor="system", how="sent")
         logger.info("PRM: packet %d sent (%d chars%s, %d file(s))", packet["id"], len(text),

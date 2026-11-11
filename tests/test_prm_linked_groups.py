@@ -200,7 +200,8 @@ def test_a_shipping_notice_its_gate_approved_waits_once_it_goes_to_a_group_linke
 def test_an_opening_that_went_by_itself_waits_once_it_goes_to_a_group_linked_by_hand(clock, tmp_path):
     """开场白自动发 (PRM_OPENING_AUTO_MIN): our first line for her private chat (she was our friend then) is approved by
     itself; when it is sent she has no private chat with us any more and it would go to the group linked by hand
-    (``_aim``): it waits for a person instead, its time to go by itself gone (the card says why)."""
+    (``_aim``): it waits for a person instead, its time to go by itself gone (the card says why: re-review 2026-11-11 N1,
+    where it goes changed since it was approved)."""
     b = setup(clock, tmp_path, prm_opening_auto_min=30)
     try:
         b.backend.friends.add(CREATOR)
@@ -216,10 +217,11 @@ def test_an_opening_that_went_by_itself_waits_once_it_goes_to_a_group_linked_by_
         assert b.prm.send_approved() == 0 and b.texts == []
         held = b.prm.store.packet(packet["id"])
         assert (held["status"], held["route"], held["chat_id"]) == ("pending", "review", GROUP)
-        assert "auto_at" not in held["meta"] and held["meta"]["auto_held"] == HAND_GROUP_HELD
+        changed = f"发送对象变了：现在会发到群「{GROUP_NAME}」，请再看一眼"
+        assert "auto_at" not in held["meta"] and held["meta"]["auto_held"] == held["meta"]["hold"] == changed
         assert b.prm.send_due_openings() == 0
         [shown] = [p for p in b.prm.snapshot()["pending"] if p["id"] == packet["id"]]
-        assert shown["auto_at"] is None and shown["auto_held"] == HAND_GROUP_HELD
+        assert shown["auto_at"] is None and shown["auto_held"] == changed
     finally:
         stop(b)
 
