@@ -2198,8 +2198,8 @@ class PrmService:
             self._group_line(party, chat_id, kind, said, self._local(written) if written else now, now)
         speaker = str(msg.get("sender_id") or "")
         # 她那边的人 (PRM_GROUP_HER_SIDE): her assistant's, her 商务's line is drafted as hers
-        side = speaker != party["wxid"] and self.boss_groups.her_side(row, party, speaker,
-                                                                      str(msg.get("sender_name") or ""))
+        side = (speaker != party["wxid"] and not msg.get("is_own")
+                and self.boss_groups.her_side(row, party, speaker, str(msg.get("sender_name") or "")))
         if speaker != party["wxid"] and not side:
             who = self.boss_groups.who(row, str(msg.get("sender_id") or ""), str(msg.get("sender_name") or ""))
             self.boss_groups.add_context(chat_id, who, self._mask(party["id"], said, now),

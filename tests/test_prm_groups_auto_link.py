@@ -763,3 +763,40 @@ def test_one_groups_trouble_never_stops_the_others(bot, caplog):
     assert "of 3 looked at, 1 linked by the scan itself" in caplog.text and GROUP_NAME not in caplog.text
     bot.backend.group_members = real
     assert scan(bot) == QUIET                                        # (read now: nobody registered in it, old: quiet)
+
+
+@pytest.mark.parametrize("group", [
+    {"state": "created", "by": "console"},                           # 「建好了」 by hand: no group id kept
+    {"state": "unsure", "by": "console", "why": "不确定建没建成"},      # 「拉三方群」 ended unsure
+    {"state": "failed", "by": "console", "why": "没建成"}])
+def test_a_deal_that_has_a_three_party_group_already_keeps_it_as_a_link_by_hand_does(clock, tmp_path, group):
+    """What ``_link`` does for a link by hand holds for the scan's own: a deal with a 三方群 made or unsure (its id not
+    known: 「建好了」 by hand, a 「拉三方群」 that ended unsure) keeps it as it is, and the group is linked besides (the
+    console lists it with her deal); one whose 「拉三方群」 failed has none, so a group with a boss in it becomes it."""
+    b = setup(clock, tmp_path)
+    try:
+        b.backend.groups[GROUP]["members"] = [ME, CREATOR, BOSS_ID, BD]
+        deal = b.prm.store.deal_of(b.her["id"])
+        was = {**group, "at": b.clock.now - 3600}
+        b.prm.store.update_deal(deal["id"], b.clock.now, three_party=was)
+        assert b.prm.boss_groups.auto_scan() == {**QUIET, "linked": 1}
+        now = b.prm.store.deal_of(b.her["id"])["three_party"]
+        [ev] = b.prm.store.events(deal["id"], kinds=(bg.EVENT,))
+        if group["state"] == "failed":
+            assert (now["state"], now["by"], now["chat"], now["why"]) == ("created", "manual", GROUP, bg.AUTO_LINK_WHY)
+            assert "kept" not in ev["detail"]
+        else:
+            assert now == was and ev["detail"]["kept"] is True and "她原来的三方群保留" in told(b)[0]
+            assert b.prm.snapshot()["parties"][0]["deal"]["linked_groups"][0]["chat"] == GROUP
+        assert b.prm.store.boss_group(GROUP)["manual"] == bg.AUTO and b.prm.is_party_group(GROUP)
+    finally:
+        stop(b)
+
+
+def test_no_line_goes_to_a_chat_that_is_not_the_admins_own(bot):
+    assert bot.prm._tell_admin("测试一句") is True and told(bot) == ["测试一句"]
+    bot.prm.wechat_review.admin = CREATOR                            # ADMIN_WXID is a registered creator's: her chat
+    assert bot.prm._tell_admin("测试一句") is None
+    bot.prm.wechat_review.admin = ADMIN
+    bot.prm._config.wechat_backend = "edge"                          # the Mac's side of a WeChat edge: never from here
+    assert bot.prm._tell_admin("测试一句") is None and bot.texts == [(ADMIN, "测试一句")]

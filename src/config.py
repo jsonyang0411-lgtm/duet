@@ -440,7 +440,8 @@ class BotConfig:
     # refused is never linked by it.  "off" (the default): nothing of it.  Needs PRM_COPILOT=on.
     prm_groups_auto_link: str = "off"
     # 她那边的人 (PrmService._group_message, 2026-11-11): "on": in a linked group (a 老板拉的群, one linked by hand or by
-    # the scan) a line of a member who is not ours (us, a boss, the admin, a cc user) nor another registered creator is
+    # the scan) of at most prm_boss_group_max members, a line of a member who is not ours (us, a boss, the admin, a cc
+    # user) nor another registered creator is
     # drafted as her own line is (her assistant, her 商务: the same job, gates, 下班时段, 自动模式), marked 〔她那边的人〕
     # for the Mac (never that person's name).  "off" (the default): such a line is context only, as before.
     prm_group_her_side: str = "off"

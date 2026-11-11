@@ -101,7 +101,8 @@ linked (they are groups linked by hand in every other way: PRM_LINKED_GROUPS_AUT
 她那边的人 (PRM_GROUP_HER_SIDE, default off; 2026-11-11): in a linked group a line of a member who is not ours (us, a
 boss, the admin, a cc user) and no registered creator (``her_side``) is drafted as her own line is (PrmService
 ``_group_message``): her assistant, her 商务.  A job of such a group says so (``job_group``: ``her_side`` True) and each
-such line is marked HER_SIDE_MARK in the job's text; that person's name never goes to the Mac.
+such line is marked HER_SIDE_MARK in the job's text; that person's name never goes to the Mac.  Only in a group of at
+most PRM_BOSS_GROUP_MAX members: in a bigger one (an operator may link one by hand) the others stay context.
 """
 
 from __future__ import annotations
@@ -117,6 +118,7 @@ from contextlib import nullcontext
 from typing import Callable, Optional
 
 from ..edge import text as edge_text
+from ..wechat.new_friends import is_me
 from .store import PartyError
 from .three_party import CREATED, CREATING, NOTICE as GROUP_NOTICE, UNSURE, group_with
 
@@ -577,12 +579,16 @@ class BossGroups:
 
     def her_side(self, row: dict, party: dict, sender: str, name: str = "") -> bool:
         """她那边的人 (PRM_GROUP_HER_SIDE on): is ``sender``, who wrote a line in her linked group, somebody of her side
-        who is not the registered account (her assistant, her 商务)?  Anybody but her, us, a boss (``who``: his wxid, or a
-        member named like one), the admin, a cc user, and a registered creator (a stopped one too: another creator's
-        words are never hers).  False with the switch off, and for a line without a sender (WeChat's own)."""
+        who is not the registered account (her assistant, her 商务)?  Anybody but her, us (``is_me``: this account's
+        lines carry its wxid without the data folder's suffix), a boss (``who``: his wxid, or a member named like one),
+        the admin, a cc user, and a registered creator (a stopped one too: another creator's words are never hers).
+        Only in a group of at most PRM_BOSS_GROUP_MAX members (the row's, as last read: a big group an operator linked
+        by hand keeps everybody else's lines as context, never a Mac job per member).  False with the switch off, and
+        for a line without a sender (WeChat's own)."""
         sender = str(sender or "").strip()
         if (not self._her_side or not sender or sender.endswith("@chatroom")
-                or sender == str((party or {}).get("wxid") or "") or sender in self._reserved or sender == self._own()):
+                or sender == str((party or {}).get("wxid") or "") or sender in self._reserved
+                or is_me(sender, self._own()) or len((row or {}).get("members") or []) + 1 > self._max):
             return False
         if self.who(row or {}, sender, name) == BOSS:
             return False

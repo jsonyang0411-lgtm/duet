@@ -313,3 +313,44 @@ def test_the_hold_reason_of_a_hand_linked_group_is_unchanged(bot):
                                 reason="kb/合作政策.md"))
     packet = bot.prm.store.packet_for_job(job["id"])
     assert (packet["status"], packet["meta"]["night_held"]) == ("pending", HAND_GROUP_HELD)
+
+
+def test_in_a_big_group_linked_by_hand_the_others_stay_context(clock, tmp_path):
+    """A group over PRM_BOSS_GROUP_MAX an operator linked all the same (the 接群 question said: 只起草你选的那个人的话，
+    别人的话只当背景): nobody else there is her side, or every member's line would be a Mac job."""
+    from test_group_link import BIG
+
+    b = setup(clock, tmp_path)
+    try:
+        b.say("接群")
+        b.say("接群 2")                                               # the big group: 12 members
+        answer = b.say("是 1")
+        assert answer.startswith("接手了：群「品牌测试大群」→ 小美") and "之后她在群里说的话会起草" in answer
+        row, party = b.prm.store.boss_group(BIG), b.prm.store.party_by_wxid(CREATOR)
+        assert len(row["members"]) + 1 == 12 and b.prm.boss_groups.side_ids(row, party) == set()
+        assert b.prm.handle(gmsg(b, "大家好", sender="wxid_guest03", chat=BIG)) is True
+        assert job_of(b, BIG) is None and [x["who"] for x in b.prm.store.boss_group(BIG)["lines"]] == ["群成员"]
+        b.prm.handle(gmsg(b, "在吗", chat=BIG))
+        assert job_of(b, BIG)["text"].endswith("在吗")                # her own line there is drafted as ever
+    finally:
+        stop(b)
+
+
+def test_the_jie_qun_answer_says_her_sides_lines_are_drafted_too(bot):
+    assert "之后她和她那边的人（助理、商务）在群里说的话会起草，在「待审批」里等你看" in linked(bot, member=1)
+
+
+def test_our_own_line_is_never_her_side_whatever_suffix_our_wxid_carries(clock, tmp_path):
+    """This account's wxid as the backend gives it carries the data folder's suffix (wxid_abc_b6ce); its own lines are
+    written by wxid_abc.  A line of ours handed on as a group line (a stored one, say) is never drafted as her side's."""
+    b = setup(clock, tmp_path)
+    try:
+        linked(b, member=1)
+        b.backend.own = ME + "_b6ce"
+        row, party = b.prm.store.boss_group(GROUP), b.prm.store.party_by_wxid(CREATOR)
+        assert not b.prm.boss_groups.her_side(row, party, ME) and b.prm.boss_groups.her_side(row, party, BD)
+        b.backend.own = ME
+        assert b.prm.handle({**gmsg(b, "我们自己说的", sender="wxid_other_device"), "is_own": True}) is True
+        assert job_of(b) is None
+    finally:
+        stop(b)
