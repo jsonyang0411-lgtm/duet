@@ -3308,9 +3308,12 @@ class PrmService:
             return self._unreachable(packet, party)
         if sending:
             return self._retarget(packet, chat, group, why)
+        moved = str((packet.get("meta") or {}).get("hold") or "").startswith("发送对象变了")   # (sent back before)
         self._store.aim_packet(packet["id"], chat, {"channel": GROUP_CHANNEL, "group_name": str(group["name"])[:60],
                                                     **({"group_manual": True} if group.get("manual") else {}),
-                                                    **({"reach": why} if why else {})})
+                                                    **({"reach": why} if why else {}),
+                                                    **({"hold": f"发送对象变了：现在会发到群「{group['name'] or '（没有群名）'}」，"
+                                                                "请再看一眼"} if moved else {})})
         logger.info("PRM: packet %d goes to boss group %s… (party %d %s)", packet["id"], chat[:8], party["id"],
                     "last wrote there: PRM_REACH_LAST_SPOKE" if why == REACH_LAST_SPOKE else "has no private chat with us")
         return self._store.packet(packet["id"])
@@ -3336,7 +3339,12 @@ class PrmService:
         holds it was made with stay (``meta.opening`` / ``huopan`` / ``handcards``, no ``auto_at``: nothing sends a waiting
         draft by itself).  A platform draft (its action run and verified, its reply approved with it) never goes back to
         be approved again (that would offer the action once more): it fails as one whose group closed does, its reply
-        for a person to send by hand (``_fail_closed``: 「平台动作已经核验成功，但回复没发出去：…」)."""
+        for a person to send by hand (``_fail_closed``: 「平台动作已经核验成功，但回复没发出去：…」).
+        The words a person approved stay the draft's (final check of merge-1111, R1): an edit (「改了再发」, the admin's
+        「改 N …」) becomes its ``text`` while it waits again, so the card, the fresh notice and a 「发送」 all have it; the
+        Mac's own words are kept in ``meta.drafted`` and put back with the next decision (``decide``: ``edited`` and the
+        gates' count still compare what was sent with what the Mac wrote).  The night window's and 自动模式's words of
+        that approval (``night_held``, ``auto_mode``) go: a person decides now."""
         name = str((group or {}).get("name") or "")
         where = f"群「{name or '（没有群名）'}」" if group is not None else "她的私聊"
         hold = f"发送对象变了：现在会发到{where}，请再看一眼"
@@ -3346,11 +3354,17 @@ class PrmService:
                                "not sent, for a person to send by hand", packet["id"])
             return None
         meta = {k: v for k, v in (packet.get("meta") or {}).items()
-                if k not in ("channel", "group_name", "group_manual", "reach", "group_told", "decided_chat", "auto_at")}
+                if k not in ("channel", "group_name", "group_manual", "reach", "group_told", "decided_chat", "auto_at",
+                             "night_held", AUTO_MODE)}
         if group is not None:
             meta.update(channel=GROUP_CHANNEL, group_name=name[:60], **({"group_manual": True} if group.get("manual")
                                                                           else {}), **reach_meta(why))
         meta["hold"] = hold
+        approved = packet.get("final_text")
+        if approved is not None and str(approved) != str(packet["text"]):
+            meta.setdefault("drafted", packet["text"])       # (the Mac's words: back with the next decision)
+            # (before it waits again: nobody decides an approved one meanwhile, and a send in between sends these too)
+            self._store.reword_packet(packet["id"], (APPROVED, SENDING), str(approved), clear_final=True)
         meta["retarget"] = int(meta.get("retarget") or 0) + 1 if isinstance(meta.get("retarget"), int) else 1
         if "auto_at" in (packet.get("meta") or {}):
             meta["auto_held"] = meta["hold"]   # (开场白自动发: its time gone, the card says why it did not go by itself)
@@ -5882,9 +5896,15 @@ class PrmService:
                                   actor="console", now=now)
             logger.info("PRM: packet %d marked wrong; %s drafts are reviewed again", packet["id"], packet["kind"])
             return {"ok": True, "status": "wrong"}
+        # (a draft the target-change rule sent back: its ``text`` holds the words a person approved, ``meta.drafted``
+        # the Mac's; the decision puts the Mac's back, so a record compares what went out with what the Mac wrote)
+        drafted = (packet.get("meta") or {}).get("drafted")
+        original = drafted if isinstance(drafted, str) else packet["text"]
         if action == "drop":
             if not self._store.move(packet["id"], (PENDING,), DROPPED, decided_at=now):
                 return {"ok": False, "error": "这条草稿已经处理过了"}
+            if original != packet["text"]:
+                self._store.reword_packet(packet["id"], (DROPPED,), original)
             self._drop_cards(packet["attachments"])   # (直播手卡 not sent: her 称呼 is on them)
             self._person_decided(packet, now)
             self._group_draft_decided(packet)
@@ -5930,8 +5950,10 @@ class PrmService:
         else:
             self._store.merge_packet_meta(packet["id"], {"decided_chat": packet["chat_id"]}, (PENDING,))
         if not self._store.move(packet["id"], (PENDING,), APPROVED, decided_at=now, final_text=final,
-                                edited=int(final != packet["text"]), **changed):
+                                edited=int(final != original), **changed):
             return {"ok": False, "error": "这条草稿已经处理过了（或者达人又发了新消息，草稿已过时）"}
+        if original != packet["text"]:           # (sent back before: the Mac's words on record again, ``final_text`` sent)
+            self._store.reword_packet(packet["id"], (APPROVED, SENDING, SENT, FAILED), original)
         if changed:
             self._drop_cards([a for a in packet["attachments"] if a not in attachments])   # (the cards left out)
         self._person_decided(packet, now)

@@ -680,3 +680,113 @@ def test_the_status_says_it_cannot_tell_when_the_backend_cannot_say_whether_she_
         assert f"发到群「{GROUP_NAME}」（她没有和我们的私聊）" in line, line
     finally:
         d.stop()
+
+
+# ── final check of merge-1111, R1: the words a person approved survive a send-back ─────────────────────
+
+def sent_back(d, edit=None, wechat_edit=None):
+    """A 补发货盘 in her group (her side spoke there last), its Mac draft 「老师，原稿：价格 299」; approved (as it is, with
+    the console's 「改了再发」 ``edit``, or with the admin's 「改 N …」 ``wechat_edit`` quoting its notice); she leaves the
+    group before it goes: back in 待审批.  The packet as it is then."""
+    link_by_hand(d)
+    spoke(d, "private")
+    spoke(d, "group")
+    assert "已派补发货盘" in d.admin("补发货盘 小美")
+    packet = drafted(d, open_job(d, GROUP)["id"], text="老师，原稿：价格 299")
+    d.review.sweep()
+    if wechat_edit is not None:
+        reply = d.admin(f"改 {wechat_edit}", quote=head(d, packet["id"]))
+        assert "已批准" in reply or "正在发" in reply, reply
+    elif edit is not None:
+        assert d.prm.decide(packet["id"], "edit", edit)["ok"]
+    else:
+        assert d.prm.decide(packet["id"], "send")["ok"]
+    she_leaves(d)
+    assert d.prm.send_approved() == 0 and d.to(GROUP) == []
+    back = d.prm.store.packet(packet["id"])
+    assert (back["status"], back["chat_id"]) == ("pending", CREATOR)
+    return back
+
+
+def card_of(d, number):
+    return next(p for p in d.prm.snapshot()["pending"] if p["id"] == number)
+
+
+def test_a_console_edit_survives_the_send_back_and_is_what_goes_out(desk):
+    d = desk
+    back = sent_back(d, edit="老师，改过的：价格 269")
+    assert back["text"] == "老师，改过的：价格 269" and back["final_text"] is None
+    assert back["meta"]["drafted"] == "老师，原稿：价格 299"
+    assert card_of(d, back["id"])["text"] == "老师，改过的：价格 269"           # (the card shows what was approved)
+    assert d.prm.decide(back["id"], "send")["ok"]
+    d.prm.send_approved()
+    assert d.to(CREATOR) == ["老师，改过的：价格 269"]
+    done = d.prm.store.packet(back["id"])
+    assert (done["text"], done["final_text"], done["edited"]) == ("老师，原稿：价格 299", "老师，改过的：价格 269", True)
+
+
+def test_a_wechat_edit_survives_the_send_back_its_fresh_notice_shows_it_and_1_sends_it(desk):
+    d = desk
+    back = sent_back(d, wechat_edit="老师，微信里改的：价格 269")
+    assert back["text"] == "老师，微信里改的：价格 269"
+    assert d.review.sweep() == 1
+    fresh = notices_of(d, back["id"])[-1]
+    assert fresh.startswith(f"#{back['id']} 草稿（第 2 次通知）")
+    assert "老师，微信里改的：价格 269" in fresh and "原稿" not in fresh
+    assert "已批准" in d.admin("1", quote=fresh.split("\n")[0])
+    d.prm.send_approved()
+    assert d.to(CREATOR) == ["老师，微信里改的：价格 269"]
+    done = d.prm.store.packet(back["id"])
+    assert (done["text"], done["final_text"], done["edited"]) == ("老师，原稿：价格 299", "老师，微信里改的：价格 269", True)
+
+
+def test_an_unedited_draft_is_unchanged_by_the_send_back(desk):
+    d = desk
+    back = sent_back(d)
+    assert back["text"] == "老师，原稿：价格 299" and "drafted" not in back["meta"]
+    assert d.prm.decide(back["id"], "send")["ok"]
+    d.prm.send_approved()
+    assert d.to(CREATOR) == ["老师，原稿：价格 299"]
+    assert d.prm.store.packet(back["id"])["edited"] is False
+
+
+def test_a_second_edit_after_the_send_back_wins(desk):
+    d = desk
+    back = sent_back(d, edit="老师，改过的：价格 269")
+    assert d.prm.decide(back["id"], "edit", "老师，再改一次：价格 259")["ok"]
+    d.prm.send_approved()
+    assert d.to(CREATOR) == ["老师，再改一次：价格 259"]
+    done = d.prm.store.packet(back["id"])
+    assert (done["text"], done["final_text"], done["edited"]) == ("老师，原稿：价格 299", "老师，再改一次：价格 259", True)
+
+
+def test_a_dropped_sent_back_draft_keeps_the_macs_words_on_record(desk):
+    d = desk
+    back = sent_back(d, edit="老师，改过的：价格 269")
+    assert d.prm.decide(back["id"], "drop")["ok"]
+    assert d.prm.store.packet(back["id"])["text"] == "老师，原稿：价格 299"
+
+
+def test_a_send_back_drops_the_night_words_of_the_approval_and_a_later_re_aim_keeps_the_line_true(desk):
+    d = desk
+    link_by_hand(d)
+    spoke(d, "private")
+    spoke(d, "group")
+    assert "已派补发货盘" in d.admin("补发货盘 小美")
+    packet = drafted(d, open_job(d, GROUP)["id"])
+    d.prm.store.merge_packet_meta(packet["id"], {"night_held": "夜里没自动发：测试", "auto_mode": True}, ("pending",))
+    assert d.prm.decide(packet["id"], "send")["ok"]
+    she_leaves(d)
+    d.prm.send_approved()
+    back = d.prm.store.packet(packet["id"])
+    assert "night_held" not in back["meta"] and "auto_mode" not in back["meta"]
+    assert back["meta"]["hold"] == "发送对象变了：现在会发到她的私聊，请再看一眼"
+    # (later the bot re-aims it by itself, before anybody approved it again: the line says where it goes now)
+    d.backend.groups[GROUP]["members"].append(CREATOR)
+    for _ in range(2):
+        d.clock.now += bg.BOSS_SCAN_SEC + 1
+        d.prm.boss_groups.sweep()
+    d.prm._private_known = lambda party: False                              # (she is no friend of ours now)
+    aimed = d.prm._aim(d.prm.store.packet(packet["id"]), wait=True)
+    assert aimed["chat_id"] == GROUP
+    assert aimed["meta"]["hold"] == f"发送对象变了：现在会发到群「{GROUP_NAME}」，请再看一眼"

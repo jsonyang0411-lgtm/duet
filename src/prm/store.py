@@ -1150,6 +1150,19 @@ class PrmStore:
             self._conn.commit()
             return new
 
+    def reword_packet(self, packet_id: int, states: tuple, text: str, *, clear_final: bool = False) -> bool:
+        """The draft's words (``text``) while it is in one of ``states``; ``clear_final``: its ``final_text`` and ``edited``
+        cleared with them.  Only the target-change rule uses it (PrmService ``_retarget``: the words a person approved
+        become the draft's while it waits again; its next decision puts the Mac's back): ``move`` never changes the
+        words.  True when it changed."""
+        extra = ", final_text = NULL, edited = 0" if clear_final else ""
+        with self._lock:
+            cur = self._conn.execute(
+                f"UPDATE action_packets SET text = ?{extra} WHERE id = ? AND status IN ({', '.join('?' * len(states))})",
+                (str(text), int(packet_id), *states))
+            self._conn.commit()
+            return cur.rowcount == 1
+
     def aim_packet(self, packet_id: int, chat_id: str, meta: dict) -> bool:
         """A packet not sent yet goes to another chat (老板拉的群: a packet the bot started itself for a creator with no
         private chat with us): its ``chat_id``, and ``meta`` merged into its meta.  True when it was changed."""
