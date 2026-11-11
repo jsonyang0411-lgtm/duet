@@ -31,7 +31,7 @@ from test_prm_boss_groups import BOSS, BOSS_ID, HELPER, ME, make
 from src.admin import AdminCommandHandler
 from src.prm import boss_groups as bg
 from src.prm import group_link as gl
-from src.prm.service import AUTO_GROUP_HELD, HAND_GROUP_HELD, LINK_FIRST_HELD, PrmService
+from src.prm.service import AUTO_GROUP_HELD, AUTO_UNCONFIRMED_HELD, HAND_GROUP_HELD, LINK_FIRST_HELD, PrmService
 
 NEW = "400000009@chatroom"                # a group made after the switch went on
 NEW_NAME = "小美直播对接"
@@ -137,6 +137,7 @@ def test_a_group_with_exactly_one_registered_creator_links_itself_old_as_it_is(b
     assert told(bot) == [
         f"已自动接群（群里只有她一位登记过的达人）：群「{GROUP_NAME}」→ 小美（已登记），合作单 #{deal['id']}；"
         "之后她在群里说的话会起草，在「待审批」里等你看；群里最近 3 句记成了背景；她最后 1 句还没人回，派了一份草稿；"
+        f"对的话回「确认接群 {GROUP_NAME}」（确认以前、或者你发出去一份以前，这个群的草稿都等你看）；"
         f"不对就回「不接群 {GROUP_NAME}」"]
     # the console: listed with her deal as a group the bot linked; no question open
     shown = bot.prm.snapshot()
@@ -737,15 +738,29 @@ def test_the_line_shows_her_platform_id_by_its_last_characters_and_logs_no_name(
         stop(b)
 
 
-def test_the_scan_never_sends_anything_to_a_group_or_a_creator(bot):
-    """What the scan does by itself is reading and linking: the only messages it sends go to the admin's chat."""
-    bot.backend.say(GROUP, CREATOR, "在吗", bot.clock.now - 20)
-    new_group(bot, members=(ME, TESTER))
-    bot.prm.boss_groups.auto_scan()
-    for _ in range(3):
-        bot.clock.now += bg.BOSS_SCAN_SEC + 1
-        bot.prm.tick()
-    assert {chat for chat, _ in bot.texts} == {ADMIN} and bot.files == []
+@pytest.mark.parametrize("linked_auto", [False, True])
+def test_the_scan_never_sends_anything_to_a_group_or_a_creator(clock, tmp_path, linked_auto):
+    """What the scan does by itself is reading and linking: the only messages it sends go to the admin's chat, with
+    PRM_LINKED_GROUPS_AUTO, 自动模式 and an auto gate on too (review 2026-11-11: the catch-up draft and the first live
+    one wait for a person)."""
+    b = setup(clock, tmp_path, **({"prm_linked_groups_auto": "on"} if linked_auto else {}))
+    try:
+        if linked_auto:
+            assert b.prm.set_auto_mode(True)["ok"]
+            b.prm.store.set_gate("faq", "auto", b.clock.now)
+        b.backend.say(GROUP, CREATOR, "在吗", b.clock.now - 20)
+        new_group(b, members=(ME, TESTER))
+        b.prm.boss_groups.auto_scan()
+        drafted(b)                                                    # (the Mac drafts the catch-up's job)
+        b.clock.now += 30
+        b.prm.handle(gmsg(b, "你们家帽子多少钱呀"))
+        drafted(b)                                                    # (and her first live line's)
+        for _ in range(3):
+            b.clock.now += bg.BOSS_SCAN_SEC + 1
+            b.prm.tick()
+        assert {chat for chat, _ in b.texts} == {ADMIN} and b.files == []
+    finally:
+        stop(b)
 
 
 def test_one_groups_trouble_never_stops_the_others(bot, caplog):
@@ -800,3 +815,104 @@ def test_no_line_goes_to_a_chat_that_is_not_the_admins_own(bot):
     bot.prm.wechat_review.admin = ADMIN
     bot.prm._config.wechat_backend = "edge"                          # the Mac's side of a WeChat edge: never from here
     assert bot.prm._tell_admin("测试一句") is None and bot.texts == [(ADMIN, "测试一句")]
+
+
+# ── review 2026-11-11 #2: an auto-linked group waits for a person until one confirmed it ──
+
+@pytest.mark.parametrize("how", ["auto_mode", "night", "gate"])
+def test_nobody_confirmed_the_scans_link_its_first_live_draft_waits_whatever_the_switches(clock, tmp_path, how):
+    """PRM_LINKED_GROUPS_AUTO on, nothing waited when the scan linked it (no catch-up draft): her first live line's
+    draft waits for a person (its card says why), never by 自动模式, the 下班时段 or an auto gate."""
+    prm = {"prm_linked_groups_auto": "on", **({"prm_night_auto_hours": "00:00-23:59"} if how == "night" else {})}
+    b = setup(clock, tmp_path, **prm)
+    try:
+        if how == "auto_mode":
+            assert b.prm.set_auto_mode(True)["ok"]
+        if how == "gate":
+            b.prm.store.set_gate("faq", "auto", b.clock.now)
+        assert b.prm.boss_groups.auto_scan()["linked"] == 1 and job_of(b) is None
+        assert b.prm.boss_groups.unconfirmed(GROUP)
+        b.clock.now += 30
+        b.prm.handle(gmsg(b, "你们家帽子多少钱呀"))
+        job, packet = drafted(b)
+        assert "night" not in json.loads(job["meta"])
+        assert (packet["status"], packet["route"], packet["meta"]["hold"]) == ("pending", "review",
+                                                                               AUTO_UNCONFIRMED_HELD)
+        b.prm.send_approved()
+        assert [chat for chat, _ in b.texts] == [ADMIN]               # (only the 「已自动接群」 line)
+        assert b.prm.snapshot()["parties"][0]["deal"]["unconfirmed_groups"] == [{"chat": GROUP, "name": GROUP_NAME}]
+    finally:
+        stop(b)
+
+
+def test_a_draft_a_person_sent_there_confirms_the_group_and_a_restart_keeps_it(clock, tmp_path):
+    b = setup(clock, tmp_path, prm_linked_groups_auto="on")
+    try:
+        assert b.prm.set_auto_mode(True)["ok"]
+        assert b.prm.boss_groups.auto_scan()["linked"] == 1
+        b.clock.now += 30
+        b.prm.handle(gmsg(b, "你们家帽子多少钱呀"))
+        _, first = drafted(b)
+        assert b.prm.decide(first["id"], "send")["ok"]                 # a person sends it
+        b.prm.send_approved()
+        assert not b.prm.boss_groups.unconfirmed(GROUP) and "unconfirmed_groups" not in \
+            b.prm.snapshot()["parties"][0]["deal"]
+        deal = b.prm.store.deal_of(b.her["id"])
+        assert "确认了自动接的群（小美合作对接群）：运营发出去了一份草稿，之后的草稿照「手动接的群也自动发」" in names(b, deal["id"])
+        again = bg.BossGroups(b.prm.store, b.prm._config, clock=b.clock)   # (as a restart reads it: from prm.db)
+        assert not again.unconfirmed(GROUP) and again.by_scan(GROUP)
+        b.clock.now += 30
+        b.prm.handle(gmsg(b, "那寄样怎么弄呀"))
+        _, later = drafted(b)
+        assert (later["status"], later["route"]) == ("approved", "night") and "hold" not in later["meta"]
+    finally:
+        stop(b)
+
+
+def test_the_admin_confirms_the_group_in_wechat_as_the_notice_says(clock, tmp_path):
+    b = setup(clock, tmp_path, prm_linked_groups_auto="on")
+    try:
+        assert b.prm.boss_groups.auto_scan()["linked"] == 1
+        line = told(b)[-1]
+        assert f"对的话回「确认接群 {GROUP_NAME}」" in line and "这个群的草稿都等你看" in line
+        assert b.say("确认接群 不存在的群") == "没有机器人自动接的、叫「不存在的群」的群"
+        answer = b.say(f"确认接群 {GROUP_NAME}")
+        assert answer == (f"好的：群「{GROUP_NAME}」确认是 小美 的群了，之后的草稿和老板拉的群一样照门槛、下班时段、自动模式发")
+        assert not b.prm.boss_groups.unconfirmed(GROUP)
+        assert b.say("确认接群") == "现在没有等你确认的自动接的群"
+        assert b.say(f"确认接群 {GROUP_NAME}") == f"群「{GROUP_NAME}」早就确认过是 小美 的群了"
+    finally:
+        stop(b)
+
+
+def test_the_console_confirms_the_group_on_the_deal(clock, tmp_path):
+    b = setup(clock, tmp_path)
+    try:
+        assert b.prm.boss_groups.auto_scan()["linked"] == 1
+        deal = b.prm.store.deal_of(b.her["id"])
+        assert b.prm.deal_action("group_confirm", {"deal_id": deal["id"], "chat": BIG})["ok"] is False
+        out = b.prm.deal_action("group_confirm", {"deal_id": deal["id"], "chat": GROUP})
+        assert out["ok"] and not b.prm.boss_groups.unconfirmed(GROUP)
+        b.clock.now += 30
+        b.prm.handle(gmsg(b, "在吗"))
+        _, packet = drafted(b)
+        assert packet["status"] == "pending" and "hold" not in packet["meta"]   # (PRM_LINKED_GROUPS_AUTO off: as before)
+        assert b.prm._hand_hold(GROUP) == AUTO_GROUP_HELD
+    finally:
+        stop(b)
+
+
+def test_a_group_linked_by_hand_needs_no_confirmation(clock, tmp_path):
+    b = setup(clock, tmp_path, auto=False, prm_linked_groups_auto="on")
+    try:
+        assert b.prm.set_auto_mode(True)["ok"]
+        b.say("接群")
+        b.say("接群 1")
+        b.say("是 1")
+        assert not b.prm.boss_groups.unconfirmed(GROUP)
+        b.clock.now += 30
+        b.prm.handle(gmsg(b, "在吗"))
+        _, packet = drafted(b)
+        assert (packet["status"], packet["route"]) == ("approved", "night")
+    finally:
+        stop(b)

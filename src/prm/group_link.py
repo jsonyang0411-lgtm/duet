@@ -59,6 +59,7 @@ NO_BACKEND = "这台电脑的微信读法列不出群（要 Windows 版微信的
 NO_READ = "微信数据库现在读不了，稍后再发「接群」"
 _LINK = re.compile(r"^接群(?:\s*(.+))?$")
 _STOP = re.compile(r"^不接群(?:\s*(.+))?$")
+_CONFIRM = re.compile(r"^确认接群(?:\s*(.+))?$")    # 群自己接上 (review 2026-11-11 #2): a group the scan linked is hers
 _YES = re.compile(r"^是\s*(\d{1,3})$")
 CANCEL = "不接"
 
@@ -99,6 +100,10 @@ class GroupLinks:
         """The command ``text`` is (``run()`` answers it), or None: 「接群」 / 「接群 N」 / 「接群 群名」 / 「不接群 群名」
         always, 「是 N」 / 「不接」 only while a question is open or was lately (``ASKED_KEEP_SEC``)."""
         content = " ".join(str(text or "").replace("　", " ").split())
+        match = _CONFIRM.fullmatch(content)
+        if match:
+            name = (match.group(1) or "").strip()
+            return lambda: self._run(self.admin_confirm, name)
         match = _STOP.fullmatch(content)
         if match:
             name = (match.group(1) or "").strip()
@@ -247,6 +252,34 @@ class GroupLinks:
         self._service.boss_groups.decline(asked["chat"])
         logger.info("PRM: group %s…: the question who she is was dropped (the admin)", asked["chat"][:8])
         return f"好的，群「{asked['name']}」不接了"
+
+    def admin_confirm(self, name: str) -> str:
+        """「确认接群 群名」 (群自己接上, review 2026-11-11 #2): a group the scan linked by itself is hers (BossGroups
+        ``confirm``): its drafts no longer all wait for that reason.  No name: the one such group nobody confirmed."""
+        bg, store = self._service.boss_groups, self._service.store
+        rows = [r for r in store.boss_groups((LINKED,)) if bg.unconfirmed(r["chat"])]
+        if name:
+            named = [r for r in store.boss_groups((LINKED,)) if bg.is_linked(r["chat"]) and _key(r["name"]) == _key(name)
+                     and r.get("manual") == 2]
+            if not named:
+                return f"没有机器人自动接的、叫「{name}」的群"
+            if len(named) > 1:
+                return f"有 {len(named)} 个自动接的群叫「{name}」：到控制台她的合作单上点「是她的群」"
+            rows = named
+        elif len(rows) != 1:
+            return ("现在没有等你确认的自动接的群" if not rows else
+                    f"有 {len(rows)} 个自动接的群在等你确认：回「确认接群 群名」，或者到控制台她的合作单上点「是她的群」")
+        row = rows[0]
+        out = bg.confirm(row["chat"], actor="admin")
+        if not out.get("ok"):
+            return f"没确认：{out.get('error') or '出错了'}"
+        party = store.party(int(row.get("party_id") or 0)) if row.get("party_id") else None
+        who = party["name"] if party else "她"
+        if out.get("already"):
+            return f"群「{row['name']}」早就确认过是 {who} 的群了"
+        how = ("之后的草稿和老板拉的群一样照门槛、下班时段、自动模式发" if getattr(self._service, "_linked_groups_auto", False)
+               else "之后的草稿照旧在「待审批」里等你看（「手动接的群也自动发」关着）")
+        return f"好的：群「{row['name']}」确认是 {who} 的群了，{how}"
 
     def admin_stop(self, name: str) -> str:
         """「不接群 群名」: a linked group of that name is not drafted in any more (PrmService.unlink_group); the answer says

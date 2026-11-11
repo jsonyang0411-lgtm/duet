@@ -26,10 +26,11 @@ from test_prm_boss_groups import GROUP as BOSS_GROUP, boss_makes, gmsg as boss_g
 from test_prm_groups_auto_link import setup as auto_setup, told
 
 from src.prm import boss_groups as bg
-from src.prm.service import HAND_GROUP_HELD, SETTLE_SEC
+from src.prm.service import HAND_GROUP_HELD, HER_SIDE_HELD, SETTLE_SEC
 
 MARK = bg.HER_SIDE_MARK
 SECOND = "wxid_creator02"                 # another registered creator in the same group
+ASSISTANT = "wxid_assist02"               # her live assistant, a member of her group (another one of her side)
 ASK = "帽子到了，上一下链接"
 
 
@@ -177,11 +178,30 @@ def test_a_recall_of_her_side_holds_her_drafts_as_her_own_recall_does(bot):
     assert bot.prm.handle(recall(bot, "不认识的名字", recalled_id=theirs["message_id"])) is True
     assert held(bot, packet)                                          # by the line WeChat wrote over: her assistant's
     bot.prm.decide(packet["id"], "drop")
+    bot.backend.names[ASSISTANT] = "测试助理"
+    bot.backend.groups[GROUP]["members"].append(ASSISTANT)
+    bot.clock.now += bg.BOSS_SCAN_SEC + 1
+    bot.prm.boss_groups.sweep()                                       # (her assistant is a member now)
     bot.clock.now += 30
     bot.prm.handle(gmsg(bot, "在吗", sender=BD))
     _, packet = drafted(bot)
-    assert bot.prm.handle(recall(bot, "品牌同事")) is True              # (a colleague of the group: her side as well)
+    assert bot.prm.handle(recall(bot, "测试助理")) is True              # (another member of her side: hers as well)
     assert held(bot, packet)
+
+
+def test_a_recall_of_our_colleague_named_in_prm_group_ours_is_not_hers(clock, tmp_path):
+    """Review 2026-11-11 #1: the brand's colleague in her group is ours (PRM_GROUP_OURS), never her side: his recall holds
+    none of her drafts."""
+    b = setup(clock, tmp_path, prm_group_ours="品牌同事")
+    try:
+        b.backend.contacts["品牌同事"] = COLLEAGUE
+        linked(b, member=1)
+        b.prm.handle(gmsg(b, "在吗", sender=BD))
+        _, packet = drafted(b)
+        assert b.prm.handle(recall(b, "品牌同事")) is True
+        assert not held(b, packet)
+    finally:
+        stop(b)
 
 
 def test_switched_off_her_assistants_recall_holds_nothing(clock, tmp_path):
@@ -240,9 +260,10 @@ def test_switched_off_her_assistants_lines_at_jie_qun_are_context_as_before(cloc
 # ── a 老板拉的群 and a group the scan linked ──────────────────────────────────
 
 @pytest.mark.parametrize("on", [True, False])
-def test_in_a_boss_group_her_sides_line_goes_by_the_night_window_as_hers(clock, tmp_path, on):
-    """A 老板拉的群 the scan took over: her assistant came in later.  On: the assistant's line is drafted and, in the
-    下班时段, goes out by itself as her own would.  Off: context only."""
+def test_in_a_boss_group_her_sides_line_is_drafted_and_always_waits_for_a_person(clock, tmp_path, on):
+    """A 老板拉的群 the scan took over: her assistant came in later.  On: the assistant's line is drafted, and its draft
+    waits for a person even in the 下班时段, where her own would go out by itself (review 2026-11-11 #1: her side is
+    anybody not known to be ours); its card says why.  Off: context only."""
     b = make(clock, tmp_path, prm_night_auto_hours="00:00-23:59", **({"prm_group_her_side": "on"} if on else {}))
     try:
         assert boss_makes(b) == 1
@@ -256,11 +277,20 @@ def test_in_a_boss_group_her_sides_line_goes_by_the_night_window_as_hers(clock, 
             return
         job, packet = drafted(b, chat=BOSS_GROUP)
         meta = json.loads(job["meta"])
-        assert job["text"].endswith(f"{MARK}{ASK}") and meta["group"]["her_side"] is True and "night" in meta
+        assert job["text"].endswith(f"{MARK}{ASK}") and meta["group"]["her_side"] is True
+        assert "night" not in meta                                    # (the Mac writes as by day: a person sends it)
         assert "manual" not in meta["group"]                          # (a 老板拉的群: told as one)
-        assert (packet["status"], packet["route"]) == ("approved", "night")
+        assert (packet["status"], packet["route"]) == ("pending", "review")
+        assert packet["meta"]["hold"] == packet["meta"]["night_held"] == HER_SIDE_HELD
+        assert next(p for p in b.prm.snapshot()["pending"] if p["id"] == packet["id"])["hold"] == HER_SIDE_HELD
         b.prm.send_approved()
-        assert [chat for chat, _ in b.texts] == [BOSS_GROUP]
+        assert b.texts == []
+        # her own line there afterwards: by the night window, as before (no line of her side in its job)
+        b.prm.decide(packet["id"], "drop")
+        b.clock.now += 60
+        b.prm.handle(boss_gmsg(b, "在吗"))
+        _, own = drafted(b, chat=BOSS_GROUP)
+        assert (own["status"], own["route"]) == ("approved", "night") and "hold" not in own["meta"]
         # the boss's own line there stays context
         b.clock.now += 60
         b.prm.handle(boss_gmsg(b, "这位是她助理，对接找她", sender=BOSS_ID))
@@ -300,8 +330,9 @@ def test_the_real_case_the_group_links_itself_and_her_assistants_request_is_one_
         stop(b)
 
 
-def test_the_hold_reason_of_a_hand_linked_group_is_unchanged(bot):
-    """PRM_GROUP_HER_SIDE changes who is drafted, never what goes out by itself: a group linked by hand still waits."""
+def test_a_hand_linked_groups_draft_of_her_sides_line_waits_and_says_why(bot):
+    """PRM_GROUP_HER_SIDE never lets more go out by itself: in a group linked by hand (which waits anyway) the draft of
+    her side's line waits, by the stricter reason (review 2026-11-11 #1: who that person is is not known)."""
     assert bot.prm.set_auto_mode(True)["ok"]
     linked(bot, member=1)
     bot.clock.now += 30
@@ -314,7 +345,9 @@ def test_the_hold_reason_of_a_hand_linked_group_is_unchanged(bot):
     bot.finish(job["id"], draft(message_kind="faq", reply_draft="好的老师～", slots={}, stage_proposal="",
                                 reason="kb/合作政策.md"))
     packet = bot.prm.store.packet_for_job(job["id"])
-    assert (packet["status"], packet["meta"]["night_held"]) == ("pending", HAND_GROUP_HELD)
+    assert (packet["status"], packet["meta"]["night_held"], packet["meta"]["hold"]) == ("pending", HER_SIDE_HELD,
+                                                                                         HER_SIDE_HELD)
+    assert bot.prm._hand_hold(GROUP) == HAND_GROUP_HELD               # (the group's own reason, as before)
 
 
 def test_in_a_big_group_linked_by_hand_the_others_stay_context(clock, tmp_path):
@@ -354,5 +387,49 @@ def test_our_own_line_is_never_her_side_whatever_suffix_our_wxid_carries(clock, 
         b.backend.own = ME
         assert b.prm.handle({**gmsg(b, "我们自己说的", sender="wxid_other_device"), "is_own": True}) is True
         assert job_of(b) is None
+    finally:
+        stop(b)
+
+
+# ── review 2026-11-11 #1: a draft with a line of her side always waits ────────
+
+@pytest.mark.parametrize("how", ["gate", "night", "auto_mode"])
+def test_a_draft_of_her_sides_line_never_goes_by_itself_whatever_the_switches(clock, tmp_path, how):
+    """In a group linked by hand with PRM_LINKED_GROUPS_AUTO on (its drafts go as a 老板拉的群's) and confirmed: her own
+    line's draft goes by its kind's gate, the 下班时段 or 自动模式; a line of her side's is never sent by any of them."""
+    prm = {"prm_linked_groups_auto": "on", **({"prm_night_auto_hours": "00:00-23:59"} if how == "night" else {})}
+    b = setup(clock, tmp_path, **prm)
+    try:
+        linked(b, member=1)
+        if how == "gate":
+            b.prm.store.set_gate("faq", "auto", b.clock.now)
+        if how == "auto_mode":
+            assert b.prm.set_auto_mode(True)["ok"]
+        b.clock.now += 30
+        b.prm.handle(gmsg(b, ASK, sender=BD))
+        job, packet = drafted(b, "好的老师～链接这边马上安排")
+        assert "night" not in json.loads(job["meta"])
+        assert (packet["status"], packet["route"], packet["meta"]["hold"]) == ("pending", "review", HER_SIDE_HELD)
+        b.prm.send_approved()
+        assert b.texts == []
+        b.prm.decide(packet["id"], "drop")
+        b.clock.now += 60
+        b.prm.handle(gmsg(b, "在吗"))                                 # her own line: by the switches, as before
+        _, own = drafted(b, "在的老师～")
+        assert own["status"] == "approved" and "hold" not in own["meta"]
+    finally:
+        stop(b)
+
+
+def test_her_own_line_joined_by_one_of_her_sides_waits_too(clock, tmp_path):
+    b = setup(clock, tmp_path, prm_linked_groups_auto="on")
+    try:
+        linked(b, member=1)
+        b.prm.store.set_gate("faq", "auto", b.clock.now)
+        b.prm.handle(gmsg(b, "在吗"))
+        b.clock.now += 5
+        b.prm.handle(gmsg(b, ASK, sender=BD))                         # (joins her job)
+        _, packet = drafted(b, "在的老师～")
+        assert (packet["status"], packet["meta"]["hold"]) == ("pending", HER_SIDE_HELD)
     finally:
         stop(b)

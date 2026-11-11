@@ -2396,6 +2396,43 @@ class TestPrmPages:
         page.get_by_text("好的，「测试双达人群」不接了").wait_for()
         assert posted[1:] == [("ignore", {"chat": "test_group_41@chatroom"})]
 
+    def test_a_held_draft_says_why_and_a_group_the_scan_linked_is_confirmed_on_the_deal(self, page, prm):
+        """Review 2026-11-11 #1, #2: a draft that always waits says why on its card by day too (``hold``); a group the
+        scan linked by itself that nobody confirmed is said on her deal with 「是她的群」 (deal action ``group_confirm``)."""
+        from src.prm.service import AUTO_UNCONFIRMED_HELD
+
+        def state_of(state):
+            for p in state["pending"]:
+                if p["id"] == 2:
+                    p.update(channel="group", group_name="测试自动接的群", group_manual=True, hold=AUTO_UNCONFIRMED_HELD)
+            for p in state["parties"]:
+                if p["wxid"] == "wxid_creator01" and p.get("deal"):
+                    p["deal"]["unconfirmed_groups"] = [{"chat": "test_group_71@chatroom", "name": "测试自动接的群"}]
+
+        posted = []
+
+        def answer(route):
+            if route.request.method == "POST":
+                posted.append(route.request.post_data_json)
+                route.fulfill(status=200, content_type="application/json", body=json.dumps({"ok": True}))
+            else:
+                route.fallback()
+
+        self._serve_prm(page, state_of)
+        page.route("**/api/prm/deals", answer)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        hold = page.locator(".prm-draft .prm-hold")
+        hold.wait_for()
+        assert hold.inner_text() == f"要你看过再发：{AUTO_UNCONFIRMED_HELD}"
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.locator("button[aria-label='展开 小美']").click()
+        row = page.locator(".prm-unconfirmed-group")
+        row.wait_for()
+        assert "「测试自动接的群」是机器人自动接的，还没人确认是她的群" in row.inner_text()
+        row.locator("button:has-text('是她的群')").click()
+        page.get_by_text("记下了：「测试自动接的群」是她的群").wait_for()
+        assert posted and posted[-1]["action"] == "group_confirm" and posted[-1]["chat"] == "test_group_71@chatroom"
+
     def test_deals_page_says_whose_lines_are_drafted_with_her_side_off_and_on(self, page, prm):
         """她那边的人 (PRM_GROUP_HER_SIDE, 2026-11-11): the hints of the groups card (the admin's 「接群」 question, the 老板拉的群
         card) and of her deal's linked group say 「别人说的话不起草」 with the switch off, and with it on that her side's lines

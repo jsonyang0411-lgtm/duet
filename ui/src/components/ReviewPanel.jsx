@@ -527,6 +527,7 @@ function DraftCard({ p, canSend, replyParts = 1, macOnline = true, onDone }) {
           <Note kind="warn" icon={WarningCircle}>要特别注意{p.reason ? `：${p.reason}` : ''}</Note>
         )}
         {p.night_held && <div className="f-hint prm-night-held">{p.auto_mode ? '自动模式没有自动发' : '夜间没有自动发'}：{p.night_held}</div>}
+        {p.hold && <div className="f-hint prm-hold">要你看过再发：{p.hold}</div>}
         {inGroup(p) && reachWhy(p) && <div className="f-hint prm-reach-why">发在群「{p.group_name || '（没有群名）'}」里：{reachWhy(p)}</div>}
         {p.status === 'pending' && p.auto_at && (
           <div className="f-hint prm-opening-auto">给新好友的第一句话：{fmtClock(p.auto_at)} 还没人处理就照原样自动发给她（设置里的「开场白没人处理多久自动发」）；要改的话在这之前发出。</div>

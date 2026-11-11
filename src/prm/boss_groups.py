@@ -631,6 +631,44 @@ class BossGroups:
         row = self._store.boss_group(chat)
         return bool(row and row.get("manual") == AUTO)
 
+    def unconfirmed(self, chat: str) -> bool:
+        """群自己接上 (review 2026-11-11 #2): is this a group the scan linked by itself that the bot drafts in and nobody
+        confirmed yet (its row's ``confirmed_at``: a draft there sent by a person, 「确认接群」, the console's 「是她的群」)?
+        Every draft there waits for a person then, PRM_LINKED_GROUPS_AUTO or not (PrmService ``_hand_hold``)."""
+        chat = str(chat or "")
+        if not chat.endswith("@chatroom") or chat not in self._linked:
+            return False
+        row = self._store.boss_group(chat)
+        return bool(row and row.get("manual") == AUTO and row.get("confirmed_at") is None)
+
+    def unconfirmed_of(self, deal_id) -> list:
+        """The groups of this deal the scan linked by itself that nobody confirmed yet (``unconfirmed``):
+        ``[{"chat", "name"}]`` (the console's 「是她的群」)."""
+        return [{"chat": r["chat"], "name": r["name"]} for r in self._store.boss_groups((LINKED,), deal_id=deal_id)
+                if self.unconfirmed(r["chat"])]
+
+    def confirm(self, chat, *, actor: str = "console", how: str = "") -> dict:
+        """A person says a group the scan linked by itself is hers (``how``: "sent", a draft of it a person sent; else
+        the admin's 「确认接群」 or the console's 「是她的群」): kept in its row (``confirmed_at``, a restart keeps it), the
+        deal's record says so.  ``{"ok": True, "chat", "name", "party_id", "deal_id"}`` or ``{"ok": False, "error"}``."""
+        chat = str(chat or "")
+        row = self._store.boss_group(chat)
+        if row is None or row.get("state") != LINKED or chat not in self._linked or row.get("manual") != AUTO:
+            return {"ok": False, "error": "这个群不是机器人自动接的群（或者已经不接了）"}
+        out = {"ok": True, "chat": chat, "name": row["name"], "party_id": row.get("party_id"),
+               "deal_id": row.get("deal_id")}
+        if row.get("confirmed_at") is not None:
+            return {**out, "already": True}
+        now = self._clock()
+        self._store.update_boss_group(chat, now, states=(LINKED,), confirmed_at=now)
+        if row.get("deal_id"):
+            self._store.add_event(int(row["deal_id"]), int(row.get("party_id") or 0), EVENT,
+                                  {"name": row["name"], "chat": chat, "manual": True, "auto": True, "confirmed": True,
+                                   **({"how": how} if how else {})},
+                                  actor=actor if actor in ("console", "admin") else "system", now=now)
+        logger.info("PRM: group %s… the scan linked: confirmed (%s)", chat[:8], how or actor)
+        return out
+
     def _own(self) -> str:
         """This account's wxid as the backend says it now ("" when it cannot)."""
         ask = getattr(self._backend, "own_wxid", None)
@@ -1859,7 +1897,7 @@ class BossGroups:
             self._store.update_boss_group(chat, now, name=offer["name"], found_at=now, state=LINKED,
                                           members=offer["all"], boss=offer["boss"], party_id=int(party["id"]),
                                           deal_id=int(deal["id"]), why="", opening_due=None, lines=[],
-                                          manual=AUTO if auto else 1)
+                                          manual=AUTO if auto else 1, confirmed_at=None)
             kept = self._link(deal, self._store.boss_group(chat), now, manual=True,
                               why=AUTO_LINK_WHY if auto else MANUAL_WHY)
             self._linked = {**self._linked, chat: int(party["id"])}

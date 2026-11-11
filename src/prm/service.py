@@ -949,6 +949,16 @@ HAND_GROUP_HELD = "运营手动接的群：草稿一律等你看过再发（群�
 LINK_FIRST_HELD = "接群时她在等我们回的那几句：这份草稿等你看过再发"
 # ... a group the scan linked by itself (群自己接上, PRM_GROUPS_AUTO_LINK): the same rule, said in its own words
 AUTO_GROUP_HELD = "机器人自动接的群：草稿一律等你看过再发（群里的人都看得到；PRM_LINKED_GROUPS_AUTO 关着）"
+# ... (review 2026-11-11 #2) and until a person confirmed it (a draft there sent by a person, 「确认接群」, the console's
+# 「是她的群」: ``BossGroups.confirm``), whatever PRM_LINKED_GROUPS_AUTO says
+AUTO_UNCONFIRMED_HELD = ("机器人自动接的群，还没人确认是她的群：草稿一律等你看过再发（你发出去一份、回「确认接群 群名」或者在合作单上点"
+                         "「是她的群」以后，照「手动接的群也自动发」）")
+# 她那边的人 (PRM_GROUP_HER_SIDE, review 2026-11-11 #1): her side is anybody there not known to be ours, so a draft whose
+# job holds a line of theirs (HER_SIDE_MARK) always waits for a person: no gate, 下班时段, 自动模式, PRM_LINKED_GROUPS_AUTO
+HER_SIDE_HELD = "她那边的人（不是登记的那个号）说的话：机器人不能确定这个人是谁，这份草稿一律等你看过再发"
+# ... the hold reasons a draft's card shows by day too (``meta.hold``; the others are said as before)
+SHOWN_HOLDS = (AUTO_UNCONFIRMED_HELD, HER_SIDE_HELD)
+GROUP_CONFIRM = "group_confirm"            # the deal action of the console's 「是她的群」 ({chat})
 # ... and in the lines it sends the admin's chat (``_auto_link_notice``), a group nobody named
 NO_GROUP_NAME = "一个没有群名的群"
 
@@ -1013,6 +1023,9 @@ def event_out(ev: dict) -> dict:
         name = "不接这个群了（运营说的），群里她的消息不再起草：它还是她的三方群，机器人只读"
     elif ev["kind"] == BOSS_EVENT and detail.get("gone") and detail.get("stopped") and not detail.get("manual"):
         name = "老板拉的群不接了（运营说的），群里她的消息不再起草"
+    elif ev["kind"] == BOSS_EVENT and detail.get("auto") and detail.get("confirmed"):   # 群自己接上: a person says so
+        name = ("确认了自动接的群" + (f"（{detail['name']}）" if detail.get("name") else "")
+                + ("：运营发出去了一份草稿" if detail.get("how") == "sent" else "") + "，之后的草稿照「手动接的群也自动发」")
     elif ev["kind"] == BOSS_EVENT and detail.get("manual") and detail.get("auto"):   # 群自己接上: the scan's own link
         name = ("自动接的群不接了（运营说的），群里她的消息不再起草" if detail.get("gone") else
                 "自动接的群" + (f"（{detail['name']}）" if detail.get("name") else "")
@@ -1239,6 +1252,7 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
             "auto_at": p["meta"].get("auto_at") if isinstance(p["meta"].get("auto_at"), (int, float)) else None,
             "auto_held": str(p["meta"].get("auto_held") or ""),
             **({"group_manual": True} if p["meta"].get("group_manual") else {}),   # 接手任何合作群: no 老板 need be there
+            **({"hold": str(p["meta"]["hold"])} if p["meta"].get("hold") else {}),   # (review 2026-11-11 #1, #2)
             # ... PRM_REACH_LAST_SPOKE: one the bot started goes to the group because her side last spoke there
             **({"reach": REACH_LAST_SPOKE} if p["meta"].get("channel") == GROUP_CHANNEL
                and p["meta"].get("reach") == REACH_LAST_SPOKE else {}),
@@ -1304,8 +1318,15 @@ def snapshot(store: PrmStore, *, running: bool, extra: Optional[dict] = None, li
                 "card_items": card_items_out(store, deal["id"]),      # 「做手卡」: her latest sample order's products
                 **linked_groups(deal),
                 **reached(p, deal),
+                # 群自己接上 (review 2026-11-11 #2): its groups the scan linked that nobody confirmed (「是她的群」)
+                **({"unconfirmed_groups": unconfirmed[int(deal["id"])]} if int(deal["id"]) in unconfirmed else {}),
             },
         }
+
+    unconfirmed: dict[int, list] = {}
+    for r in store.boss_groups((BOSS_LINKED,)):
+        if r.get("manual") == GROUP_AUTO and r.get("confirmed_at") is None and r.get("deal_id"):
+            unconfirmed.setdefault(int(r["deal_id"]), []).append({"chat": r["chat"], "name": r["name"]})
 
     def reached(party: dict, deal: dict) -> dict:
         """PRM_REACH_LAST_SPOKE: ``{"reach": {"where", "name"?, "why"}}`` (``reach_of``), or nothing at all."""
@@ -2111,9 +2132,18 @@ class PrmService:
             return ""
         if isinstance(meta, dict) and meta.get(LINK_FIRST):
             return LINK_FIRST_HELD
+        if self.boss_groups.unconfirmed(str(chat_id or "")):
+            return AUTO_UNCONFIRMED_HELD           # (review 2026-11-11 #2: nobody confirmed the scan's link yet)
         if self._linked_groups_auto:
             return ""
         return AUTO_GROUP_HELD if self.boss_groups.by_scan(str(chat_id or "")) else HAND_GROUP_HELD
+
+    def _side_line_in(self, job: Optional[dict]) -> bool:
+        """她那边的人 (review 2026-11-11 #1): does this draft job hold a line of her side's other people (HER_SIDE_MARK
+        before it: ``_take``; joined or carried along, its text and follow-ups: ``_job_lines``)?"""
+        if not job or not self.boss_groups.her_side_on:
+            return False
+        return HER_SIDE_MARK in str(job.get("text") or "") or HER_SIDE_MARK in self._job_lines(job)
 
     def _night_sent(self, packet: dict, now: float) -> None:
         """A draft the night window (or 自动模式 by day: the packet's ``meta.auto_mode``, its record and notice say so)
@@ -2327,7 +2357,8 @@ class PrmService:
             said = self.group_links.linked_text({**info, "name": name}, {**out, "name": her})
             said = said[len("接手了："):] if said.startswith("接手了：") else said
             undo = f"不对就回「不接群 {name}」" if exact else "不对就到控制台她的合作单上点这个群的「不接了」"
-            return f"已自动接群（{AUTO_WHY}）：{said}；{undo}"
+            sure = (f"对的话回「确认接群 {name}」" if exact else "对的话到控制台她的合作单上点「是她的群」")
+            return (f"已自动接群（{AUTO_WHY}）：{said}；{sure}（确认以前、或者你发出去一份以前，这个群的草稿都等你看）；{undo}")
         if kind == ASK_NOTICE:
             creators = [review.creator_name(p) for p in info.get("creators") or [] if p]
             if info.get("why"):                # (one creator, but a doubt: BossGroups._auto_doubt)
@@ -3065,7 +3096,7 @@ class PrmService:
         if carried or outdated:
             fresh = True
         if (not any(isinstance(meta.get(k), dict) for k in ("late", "missed", "new_friend")) and self._night_active(now)
-                and not (group is not None and self._hand_hold(chat_id, meta))):
+                and not (group is not None and (side or self._hand_hold(chat_id, meta)))):
             # 下班时段 (or 自动模式): the Mac writes by the kb's rules for it (worker.prm_prompt), its draft may go out by
             # itself (``_night_judge``).  Not for a job that always waits for a person (read late, a new friend's, a
             # group linked by hand's: ``_hand_hold``).
@@ -3958,6 +3989,10 @@ class PrmService:
         # 接手任何合作群: a draft for a group linked by hand waits for a person (PRM_LINKED_GROUPS_AUTO off; the lines that
         # waited at 接群 whatever it says)
         hand_held = self._hand_hold(str(job.get("chat_id") or ""), meta)
+        # 她那边的人 (review 2026-11-11 #1): a line of her side's other people is anybody's not known to be ours: its draft
+        # always waits for a person, whatever the gate, the 下班时段, 自动模式 or PRM_LINKED_GROUPS_AUTO say
+        if self._side_line_in(job):
+            hand_held = HER_SIDE_HELD
         if draft.platform is not None:
             # A platform write: always a person's decision (8.1's gates do not apply).
             state = (SUPERSEDED if mode != COPILOT or handed_on or (newer is not None and newer["id"] > job["id"])
@@ -4046,6 +4081,8 @@ class PrmService:
             packet_meta[AUTO_MODE] = True              # 自动模式 by day sent or held it: the console and the record say so
         if night_held:
             packet_meta["night_held"] = night_held[:200]
+        if hand_held in SHOWN_HOLDS and state == PENDING:
+            packet_meta["hold"] = hand_held[:200]       # (review 2026-11-11 #1, #2: why it waits, by day too)
         if operator_files and state == PENDING and not closed:
             packet_meta[draft_context.OPERATOR_FILES] = operator_files      # (the console shows them, never sent to her)
         elif operator_files:
@@ -4982,6 +5019,21 @@ class PrmService:
             return "「待审批」里已经有群里的草稿"
         return ""
 
+    def confirm_group(self, deal_id, chat, actor: str = "console") -> dict:
+        """群自己接上 (review 2026-11-11 #2): the console's 「是她的群」 on a group of this deal the scan linked by itself
+        (``BossGroups.confirm``): from now on its drafts go as PRM_LINKED_GROUPS_AUTO says."""
+        try:
+            deal = self._store.deal(int(deal_id))
+        except (TypeError, ValueError):
+            deal = None
+        row = self._store.boss_group(str(chat or ""))
+        if deal is None or row is None or int(row.get("deal_id") or 0) != int(deal["id"]):
+            return {"ok": False, "error": "这个群没有接在这张合作单上"}
+        out = self.boss_groups.confirm(row["chat"], actor=actor)
+        if out.get("ok"):
+            self._wake.set()
+        return out
+
     def unlink_group(self, deal_id, chat="", actor: str = "console") -> dict:
         """接手任何合作群: a group linked to this deal is not drafted in any more (``deal_action`` ``group_unlink``, the
         console's 「不接了」; the admin's 「不接群 群名」, src/prm/group_link.py): ``BossGroups.stop`` (its drafts not sent
@@ -5058,6 +5110,8 @@ class PrmService:
             return self.set_draft_note(data.get("deal_id"), data.get("text"), actor=actor)
         if action == GROUP_UNLINK:
             return self.unlink_group(data.get("deal_id"), data.get("chat"), actor=actor)
+        if action == GROUP_CONFIRM:
+            return self.confirm_group(data.get("deal_id"), data.get("chat"), actor=actor)
         if action == PHOTO_CONFIRM:
             return self.photo_confirm(data.get("deal_id"), data.get("packet"), data.get("code"), actor=actor)
         if action == PHOTO_UNCONFIRM:
@@ -8259,6 +8313,9 @@ class PrmService:
             # written, review 2026-10-31)
             self.boss_groups.replied(packet["chat_id"], (packet.get("meta") or {}).get("group_told") or [])
             self._store.drop_notices(packet["deal_id"], lambda n: n["key"] == GROUP_UNSENT, now)
+            if packet["route"] == gates.REVIEW and self.boss_groups.unconfirmed(packet["chat_id"]):
+                # 群自己接上 (review #2): a person sent a draft into the group the scan linked: it is hers
+                self.boss_groups.confirm(packet["chat_id"], actor="system", how="sent")
         logger.info("PRM: packet %d sent (%d chars%s, %d file(s))", packet["id"], len(text),
                     f" in {len(parts)} messages" if len(parts) > 1 else "", len(packet["attachments"]))
         if packet["route"] == gates.NIGHT:
@@ -9250,6 +9307,8 @@ def apply_deal_action(store: PrmStore, action: str, data: dict, *, now: float, t
             return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能拉群"}
         elif action == GROUP_UNLINK:                   # (running: PrmService.unlink_group)
             return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能停掉接手的群"}
+        elif action == GROUP_CONFIRM:                  # (running: PrmService.confirm_group)
+            return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能确认接手的群"}
         elif action == DRAFT_NOTE:                     # (running: PrmService.set_draft_note)
             return {"ok": False, "error": "机器人没有运行（或没打开达人副驾驶），现在不能改起草备注"}
         elif action in (PHOTO_CONFIRM, PHOTO_UNCONFIRM):   # (running: PrmService.photo_confirm / photo_unconfirm)

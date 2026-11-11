@@ -359,6 +359,7 @@ function DealDetail({ p, d, onDone }) {
 
       {d?.three_party?.enabled && <ThreePartyBlock p={p} d={d} busy={busy} run={run} />}
       {(deal.linked_groups || []).length > 0 && <LinkedGroups groups={deal.linked_groups} bg={d?.boss_groups} busy={busy} run={run} />}
+      {(deal.unconfirmed_groups || []).length > 0 && <UnconfirmedGroups groups={deal.unconfirmed_groups} busy={busy} run={run} />}
       {deal.reach && <ReachLine reach={deal.reach} />}
 
       <div className="stack" style={{ gap: 6 }}>
@@ -525,6 +526,22 @@ function reachText(r) {
   const why = r.why === 'never' ? '她还没说过话' : r.why === 'elsewhere' ? '她最近说话的那个群机器人现在不在里面起草（她退了群，或者群不接了）'
     : '她最近是在私聊里说的话'
   return `${REACH_KINDS}现在发在她的私聊里：${why}。`
+}
+
+/** 群自己接上 (review 2026-11-11 #2): a group the scan linked by itself that nobody confirmed: every draft there waits;
+ *  「是她的群」 confirms it (deal action ``group_confirm``; the admin's 「确认接群 群名」 and a draft sent by a person do too). */
+function UnconfirmedGroups({ groups, busy, run }) {
+  return (
+    <div className="stack prm-unconfirmed-groups" style={{ gap: 6 }}>
+      {groups.map((g) => (
+        <div key={g.chat} className="row prm-unconfirmed-group" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span className="f-hint">「{g.name || '（没有群名）'}」是机器人自动接的，还没人确认是她的群：确认以前这个群的草稿都等你看过再发。</span>
+          <button type="button" className="btn sm" disabled={busy}
+            onClick={() => run({ action: 'group_confirm', chat: g.chat }, `记下了：「${g.name || '这个群'}」是她的群`)}>是她的群</button>
+        </div>
+      ))}
+    </div>
+  )
 }
 
 function ReachLine({ reach }) {
