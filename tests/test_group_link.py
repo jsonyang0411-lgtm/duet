@@ -256,7 +256,7 @@ def test_shi_n_registers_her_and_links_the_group_whatever_prm_boss_groups_says(b
     answer = linked(bot, member=1)                                    # 1: 小美
     party = bot.prm.store.party_by_wxid(CREATOR)
     deal = bot.prm.store.deal_of(party["id"])
-    assert answer == (f"接手了：群「{GROUP_NAME}」→ 小美（新登记的达人），合作单 #{deal['id']}；之后她在群里说的话会起草，"
+    assert answer == (f"接手了：群「{GROUP_NAME}」→ 小美（新登记的达人），合作单 {deal['id']} 号；之后她在群里说的话会起草，"
                       "在「待审批」里等你看；她最近没有在等我们回：等她在群里说话再起草")
     assert (party["name"], party["note"]) == ("小美", f"手动接的群（{GROUP_NAME}）")
     row = bot.prm.store.boss_group(GROUP)
@@ -278,7 +278,7 @@ def test_a_registered_creator_only_gets_the_group_linked(bot):
     bot.say("接群")
     assert bot.say("接群 1").split("\n")[1] == "1. 小美（已登记）"            # (as this account sees her)
     answer = bot.say("是 1")
-    assert answer.startswith(f"接手了：群「{GROUP_NAME}」→ 小美美（已登记），合作单 #")
+    assert answer.startswith(f"接手了：群「{GROUP_NAME}」→ 小美美（已登记），合作单 ")
     again = bot.prm.store.party_by_wxid(CREATOR)
     assert (again["id"], again["name"], again["note"]) == (party["id"], "小美美", "达人名单里的")
     [ev] = bot.prm.store.events(bot.prm.store.deal_of(party["id"])["id"], kinds=(bg.EVENT,))
@@ -636,10 +636,10 @@ def test_jie_qun_on_her_own_three_party_group_only_asks_to_confirm(bot):
     bot.backend.say(OURS, BOSS_ID, "寄 3 顶给她", bot.clock.now - 50)
     bot.backend.say(OURS, CREATOR, "收到啦，什么时候寄", bot.clock.now - 20)
     assert "1. 品牌测试×小美 · 3 人" in bot.say("接群") and "小美 的三方群" in bot.say("接群")
-    assert bot.say("接群 1") == (f"群「品牌测试×小美」是 小美 的三方群（合作单 #{deal['id']}，「拉三方群」建的，现在只读）："
+    assert bot.say("接群 1") == (f"群「品牌测试×小美」是 小美 的三方群（合作单 {deal['id']} 号，「拉三方群」建的，现在只读）："
                                 "接手以后她在群里说的话会起草，回复发在群里，群里的人都看得到。回「是 1」接手，「不接」作罢（30 分钟内有效）")
     answer = bot.say("是 1")
-    assert answer.startswith(f"接手了：群「品牌测试×小美」→ 小美（已登记），合作单 #{deal['id']}")
+    assert answer.startswith(f"接手了：群「品牌测试×小美」→ 小美（已登记），合作单 {deal['id']} 号")
     assert "她原来的三方群保留" not in answer and "派了一份草稿" in answer
     group = bot.prm.store.deal(deal["id"])["three_party"]
     assert (group["by"], group["chat"], group["why"], group["at"]) == ("manual", OURS, "手动接的群", bot.clock.now)

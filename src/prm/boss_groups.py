@@ -143,6 +143,9 @@ LINES_KEPT = 30                    # the boss's / other members' lines a group k
 LINES_TOLD = 10                    # ... and tells one job
 LINE_CHARS = 300
 NAME_CHARS = 60                    # a group's name as kept
+# Who of a deal's events is a person (``_treated``; the console's click, the admin's command typed in WeChat: 合作单指令's
+# and 「接群」's actor, src/prm/admin_commands.py ``ACTOR``); system / creator / mac / operator are not such a decision
+PERSON_ACTORS = ("console", "admin")
 NAME_MAX = 30                      # her 称呼 (PrmService.register)
 CALL_DEFAULT, CALL_MAX = "老板", 10  # PRM_BOSS_CALL: what the Mac is told the boss is called
 BASELINE = "boss_groups_baseline"  # prm_meta: the group ids there were when the feature first ran (JSON list)
@@ -2196,15 +2199,17 @@ class BossGroups:
     def _treated(self, deal: dict) -> bool:
         """Has a person treated this deal's creator as one (review 2026-11-11 #5: an auto-registered new friend counts as a
         certain creator only then)?  A draft of hers a person decided and that went out (route review, sent), a stage a
-        person set (a ``stage`` event by the console, the admin or WeChat), an 起草备注, or a sample order tied to the deal
-        (聚水潭's, the bot's own or one typed in by hand)."""
+        person set (a ``stage`` event by the console or the admin), an 起草备注, or a sample order tied to the deal
+        (聚水潭's, the bot's own or one typed in by hand).  A person's stage is one by the people's actors only
+        (``PERSON_ACTORS``: the console's click, the admin's typed 「签收 <达人>」 or 「接群」), never one of anything
+        automatic (the 聚水潭 sync's system, the Mac's: merge 2026-11-11)."""
         if str(deal.get("draft_note") or "").strip():
             return True
         if self._store.sample_orders(deal_id=int(deal["id"])):
             return True
         if any(p.get("route") == gates.REVIEW for p in self._store.deal_packets(int(deal["id"]), statuses=(SENT,))):
             return True
-        return any(ev.get("actor") not in ("system", "creator")
+        return any(ev.get("actor") in PERSON_ACTORS
                    for ev in self._store.events(int(deal["id"]), limit=200, kinds=("stage",)))
 
     def _auto_read(self, chat: str, last_at: Optional[float], now: float, budget: Optional[dict] = None):

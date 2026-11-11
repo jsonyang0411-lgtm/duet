@@ -23,10 +23,10 @@ from test_prm_sample_sync import verified_order
 from test_prm_wechat_review import Desk, reply_draft
 
 from platform_fakes import JST_ORDER
-from src.admin import HELP_TEXT, RELAY_HELP, AdminCommandHandler
+from src.admin import HELP_TEXT, RELAY_HELP, AdminCommandHandler, help_text
 from src.prm import admin_commands as ac
-from src.prm.admin_commands import (ACTOR, ASKED_KEEP_SEC, CHOICE_SEC, HELP_LINE, NAME_MAX, SAMPLE_STAGES, TRACE_TEXT,
-                                    UNDO_SEC, parse)
+from src.prm.admin_commands import (ACTOR, ASKED_KEEP_SEC, CHOICE_SEC, HELP_LINE, NAME_MAX, RELAY_LINE, SAMPLE_STAGES,
+                                    TRACE_TEXT, UNDO_SEC, parse)
 from src.prm.service import OPENING_HELD, SETTLE_SEC, apply_deal_action, event_out
 from src.prm.store import DRAFT_NOTE_CHARS, STAGES
 from src.relay.service import MAX_AGE_SEC
@@ -547,7 +547,7 @@ def test_no_answer_carries_a_job_number_one_could_answer_with(clock, tmp_path):
 
 def test_the_list_of_commands_and_the_admins_help(desk):
     assert desk.admin("指令") == ac.HELP_TEXT
-    assert desk.admin("帮助") == HELP_TEXT + HELP_LINE
+    assert desk.admin("帮助") == help_text(HELP_LINE)
 
 
 # ── finding her ───────────────────────────────────────────────────────────
@@ -875,7 +875,7 @@ def test_the_bot_hands_the_commands_over_only_with_the_switch(desk):
         prm = SimpleNamespace(friend_adds=MagicMock(), three_party=MagicMock(), group_links=None, deal_commands=commands)
         Bot(BotConfig(admin_wxid=ADMIN))._wire_friend_adds(BotConfig(admin_wxid=ADMIN), SimpleNamespace(), handler, prm)
         assert (handler._deal_commands is commands) is on
-        assert handler.handle("帮助") == HELP_TEXT + (HELP_LINE if on else "")
+        assert handler.handle("帮助") == help_text(HELP_LINE if on else "")
 
 
 @pytest.mark.parametrize("copilot, commands, named", [("on", "on", True), ("on", "off", False), ("off", "on", False)])
@@ -899,7 +899,7 @@ def test_the_relays_help_names_them_only_with_the_switch_and_the_copilot(monkeyp
     router = SimpleNamespace(_admin=AdminCommandHandler())
     config = BotConfig(claude_relay="on", prm_copilot=copilot, prm_wechat_commands=commands, admin_wxid=ADMIN)
     Bot._start_claude_relay(config, router, SimpleNamespace(send_text=lambda chat, text: True))
-    assert seen["extra_help"] == RELAY_HELP + (HELP_LINE if named else "")
+    assert seen["extra_help"] == RELAY_HELP + (RELAY_LINE if named else "")
 
 
 def test_a_stopped_bot_still_refuses_what_it_refused(desk, clock):

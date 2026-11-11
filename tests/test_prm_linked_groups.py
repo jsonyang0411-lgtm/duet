@@ -126,7 +126,7 @@ def test_the_jie_qun_answer_says_how_her_drafts_there_go_by_the_switch(clock, tm
         try:
             answer = linked(b, member=1)
             deal = b.prm.store.deal_of(b.prm.store.party_by_wxid(CREATOR)["id"])
-            assert answer == (f"接手了：群「{GROUP_NAME}」→ 小美（新登记的达人），合作单 #{deal['id']}；{how}；"
+            assert answer == (f"接手了：群「{GROUP_NAME}」→ 小美（新登记的达人），合作单 {deal['id']} 号；{how}；"
                               "她最近没有在等我们回：等她在群里说话再起草"), on
         finally:
             stop(b)

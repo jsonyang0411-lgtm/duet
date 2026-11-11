@@ -26,8 +26,8 @@ AUTO_ACCEPT_COMMANDS = {                 # whitespace-normalised text -> switch 
 FRIEND_ADDS_COMMANDS = ("待加达人", "待加的达人")
 FRIEND_ADD_COMMAND = re.compile(r"^(不加达人|加达人)\s*#?\s*(\d{1,9})$")
 NO_FRIEND_ADDS = "加百应达人微信没打开（要达人副驾驶和 PRM_FRIEND_ADD）"
-# 接手任何合作群 (src/prm/group_link.py): 「接群」, 「接群 N / 群名」, 「是 N」, 「不接」, 「不接群 群名」
-GROUP_LINK_COMMAND = re.compile(r"^不?接群")
+# 接手任何合作群 (src/prm/group_link.py): 「接群」, 「接群 N / 群名」, 「是 N」, 「不接」, 「不接群 群名」, 「确认接群 群名」
+GROUP_LINK_COMMAND = re.compile(r"^(?:不|确认)?接群")
 NO_GROUP_LINKS = "接群要先打开达人副驾驶（PRM_COPILOT）"
 
 
@@ -36,7 +36,7 @@ NO_GROUP_LINKS = "接群要先打开达人副驾驶（PRM_COPILOT）"
 RELAY_HELP = (
     "管理命令（只有管理员能用，不会交给 Mac）：\n"
     "查状态 / 添加好友 号码 [附言] / 同意好友 / 自动同意好友 开|关 / 待加达人 / 加达人 编号 / 不加达人 编号\n"
-    "接群 / 接群 编号或群名 / 不接群 群名（接手一个合作群：她在群里说的话起草）"
+    "接群 / 接群 编号或群名 / 不接群 群名 / 确认接群 群名（接手一个合作群：她在群里说的话起草；确认机器人自动接的群是她的）"
 )
 
 HELP_TEXT = (
@@ -48,9 +48,20 @@ HELP_TEXT = (
     "  待加达人                    百应达人留的、还没加的微信（号码打码）\n"
     "  加达人 <编号> / 不加达人 <编号>  发一次好友申请 / 记成不加\n"
     "  接群 / 接群 <编号或群名>    接手一个合作群：选谁是达人，她在群里说的话起草（不接群 <群名> 停掉）\n"
+    "  确认接群 <群名>             机器人自动接的群确认是她的（确认以前那里的草稿都等你看）\n"
     "  帮助 / help                 显示本帮助\n"
     "开了中转时，cc 开头的私聊转给 Mac 上的 Claude Code（cc 帮助 看中转命令）"
 )
+_HELP_SELF = "\n  帮助 / help"
+
+
+def help_text(extra: str = "") -> str:
+    """The admin's 「帮助」: HELP_TEXT, with ``extra`` (合作单指令's ``HELP_LINE`` while PRM_WECHAT_COMMANDS is on) among
+    the commands, right before 帮助's own line (merge 2026-11-11: each feature's commands listed once, in one list)."""
+    if not extra:
+        return HELP_TEXT
+    head, sep, tail = HELP_TEXT.partition(_HELP_SELF)
+    return head + extra + sep + tail
 
 
 class AdminCommandHandler:
@@ -62,8 +73,8 @@ class AdminCommandHandler:
       同意好友 / 通过好友        → 立即检查并同意所有待处理的好友申请
       自动同意好友 开 / 关      → 切换后台自动同意开关
       待加达人 / 加达人 N / 不加达人 N → 加百应达人微信（src/prm/friend_adds.py）的记录、发一次申请、不加
-      接群 / 接群 N|群名 / 是 N / 不接 / 不接群 群名 → 接手任何合作群（src/prm/group_link.py；「是 N」「不接」只在
-                                 问着的时候算命令）
+      接群 / 接群 N|群名 / 是 N / 不接 / 不接群 群名 / 确认接群 群名 → 接手任何合作群（src/prm/group_link.py；「是 N」
+                                 「不接」只在问着的时候算命令；确认接群：群自己接上 PRM_GROUPS_AUTO_LINK）
       做手卡 / 补发货盘 / 写开场白 / 签收 / 备注 / 接管 / 副驾驶 / 合作单 <达人>、指令、选 N → 合作单指令
                                  （src/prm/admin_commands.py，PRM_WECHAT_COMMANDS 开着时；「选 N」只在问着的时候算命令）
       帮助 / help / 命令        → show help text
@@ -128,7 +139,7 @@ class AdminCommandHandler:
         """
         content = content.strip()
         if content in HELP_COMMANDS:
-            return HELP_TEXT + (self._deal_commands.help_line if self._deal_commands is not None else "")
+            return help_text(self._deal_commands.help_line if self._deal_commands is not None else "")
         command = self._command(content, msg)
         return command() if command is not None else None
 

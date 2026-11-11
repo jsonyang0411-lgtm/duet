@@ -76,7 +76,7 @@ def test_the_admin_links_a_group_by_hand_and_her_waiting_line_is_one_draft(world
     answer = admin_says(world, run, "是 1")
     party = world.prm_store.party_by_wxid(HER)
     deal = world.prm_store.deal_of(party["id"])
-    assert answer == (f"接手了：群「{LINKED_NAME}」→ {HER_NAME}（新登记的达人），合作单 #{deal['id']}；之后她在群里说的话会起草，"
+    assert answer == (f"接手了：群「{LINKED_NAME}」→ {HER_NAME}（新登记的达人），合作单 {deal['id']} 号；之后她在群里说的话会起草，"
                       "在「待审批」里等你看；群里最近 3 句记成了背景；她最后 1 句还没人回，派了一份草稿")
     assert party["note"] == f"手动接的群（{LINKED_NAME}）" and deal["mode"] == "copilot"
     [job] = world.jobs()

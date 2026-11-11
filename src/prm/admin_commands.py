@@ -24,8 +24,10 @@ answered in one short line, 「<她>：<what happened>」 or the refusal the act
   UNDO_SEC, once); 「备注 <达人>」 shows it;
 - 「接管 <达人>」 / 「副驾驶 <达人>」 (or 「恢复副驾驶 <达人>」): ``mode`` human (PRM_TAKEOVER_MIN, the console's 人工接管) /
   copilot (its 恢复副驾驶; already copilot: nothing done);
-- 「合作单 <达人>」: read only: the stage and the mode, the waybill and her latest sample order, where her drafts go, what
-  of hers waits in 「待审批」 or is being written, whether a 起草备注 is set;
+- 「合作单 <达人>」: read only: the stage and the mode, the waybill and her latest sample order, where her drafts go and
+  where what the bot starts itself goes and why (the sends' own decision, ``PrmService._reaching``: PRM_REACH_LAST_SPOKE
+  may send it to the group where her side last spoke), a group of hers the scan linked that nobody confirmed (how to:
+  「确认接群 <群名>」), what of hers waits in 「待审批」 or is being written, whether a 起草备注 is set;
 - 「指令」: these commands (the admin's 「帮助」 names them in one line, ``HELP_LINE``).
 
 Nothing here sends anything to a creator by itself: each command only makes what the console's button makes (a draft
@@ -140,11 +142,14 @@ HELP_TEXT = (
     "签收 名字 — 合作单标「已签收」（和控制台「更新物流 → 已签收」一样）\n"
     "备注 名字 文字 — 换掉她的起草备注（「备注 名字 清空」清掉，「备注 名字 撤销」放回刚才换掉的，「备注 名字」看现在的）\n"
     "接管 名字 / 副驾驶 名字 — 人工接管 / 恢复副驾驶\n"
-    "合作单 名字 — 看她的合作单现在怎样\n"
+    "合作单 名字 — 看她的合作单现在怎样（机器人主动发的发到哪、为什么）\n"
+    "接群、确认接群、不接群这些群的指令和别的管理命令：发「帮助」看\n"
     "要交给 Claude 的话前面加 cc"
 )
-# One line for the admin's 「帮助」 (src/admin.py) and the relay's help (src/bot.py) while the switch is on
+# One line for the admin's 「帮助」 (src/admin.py ``help_text``: among its commands) while the switch is on, and the
+# relay's help (src/bot.py; CLAUDE_RELAY_ONLY), whose lines are written without the indent (merge 2026-11-11)
 HELP_LINE = "\n  做手卡 / 补发货盘 / 写开场白 / 签收 / 备注 / 接管 / 副驾驶 / 合作单 + 名字   合作单指令（发「指令」看用法）"
+RELAY_LINE = "\n做手卡 / 补发货盘 / 写开场白 / 签收 / 备注 / 接管 / 副驾驶 / 合作单 名字（合作单指令：发「指令」看用法）"
 VOICE_TEXT = "合作单指令要打字发（语音不算，免得听错）：比如「{example}」"
 QUOTE_TEXT = "引用的消息不算合作单指令：不引用，直接打字发「{example}」"
 OTHER_TEXT = "只认打字发的合作单指令：比如「{example}」"
@@ -766,6 +771,7 @@ class DealCommands:
         if sample:
             lines.append("寄样：" + "；".join(sample))
         lines.append("回复：" + self._where(party, deal))
+        lines.extend(self._unconfirmed(party, deal))
         lines.append(self._waiting(party, deal))
         note = str(deal.get("draft_note") or "")
         if note:
@@ -774,23 +780,55 @@ class DealCommands:
 
     def _where(self, party: dict, deal: dict) -> str:
         """Where her drafts go: her private chat, the groups linked to her deal (her lines there are answered there),
-        her 三方群 (read only), and where what the bot starts itself goes (``PrmService._reach``)."""
+        her 三方群 (read only), and where what the bot starts itself goes, and why (``_started``)."""
         from .boss_groups import LINKED                   # (the service imports this module)
         service, store = self._service, self._service.store
         groups = [self._hide(party, deal, r.get("name") or "（没有群名）")
                   for r in store.boss_groups((LINKED,), deal_id=int(deal["id"])) if service.boss_groups.is_linked(r["chat"])]
-        chat, group = service._reach(party)
-        if chat is None:
-            started = "机器人主动发的（开场白、货盘、手卡、发货通知）发不出去：她不是好友，也不在接手的群里了"
-        elif group is not None:
-            started = f"机器人主动发的（开场白、货盘、手卡、发货通知）发到群「{self._hide(party, deal, group.get('name') or '')}」"
-        else:
-            started = "机器人主动发的（开场白、货盘、手卡、发货通知）发私聊"
-        parts = [("她在私聊和群「" + "」「".join(groups) + "」里说的话，在哪说就回哪") if groups else "私聊", started]
+        parts = [("她在私聊和群「" + "」「".join(groups) + "」里说的话，在哪说就回哪") if groups else "私聊",
+                 self._started(party, deal)]
         three = deal.get("three_party") or {}
         if three.get("state") == "created" and three.get("chat") and not service.boss_groups.is_linked(three["chat"]):
             parts.append(f"三方群「{self._hide(party, deal, three.get('name') or '')}」机器人只读")
         return "；".join(parts)
+
+    def _started(self, party: dict, deal: dict) -> str:
+        """Where what the bot starts itself for her goes now, and why: the very decision its sends take
+        (``PrmService._reaching`` with ``made``, as the console's 写开场白 / 补发货盘 / 做手卡, a 专属佣金 step, a shipping
+        notice aimed the first time, 签收后问一句; merge 2026-11-11: PRM_REACH_LAST_SPOKE may send them to the group where
+        her side last spoke although she has a private chat).  The reasons are the console's (``_reach_out``)."""
+        from .boss_groups import REACH_LAST_SPOKE        # (the service imports this module)
+        service = self._service
+        what = "机器人主动发的（开场白、货盘、手卡、发货通知）"
+        chat, group, why = service._reaching(party, made=True, deal=deal)
+        if chat is None:
+            return f"{what}发不出去：她不是好友，也不在接手的群里了"
+        if group is not None:
+            reason = "她那边最近是在这个群里说的话" if why == REACH_LAST_SPOKE else "她没有和我们的私聊"
+            return f"{what}发到群「{self._hide(party, deal, group.get('name') or '（没有群名）')}」（{reason}）"
+        if not (getattr(service, "_reach_last_spoke", False) and service.boss_groups.party_has_group(party["id"])):
+            return f"{what}发私聊"
+        latest = service._last_spoken(party, deal)
+        reason = ("她还没说过话" if not latest else "她最近说话的那个群机器人现在不在里面起草" if latest.endswith("@chatroom")
+                  else "她最近是在私聊里说的话")
+        return f"{what}发私聊（{reason}）"
+
+    def _unconfirmed(self, party: dict, deal: dict) -> list:
+        """群自己接上 (PRM_GROUPS_AUTO_LINK; merge 2026-11-11): one line per group of her deal the scan linked by itself that
+        nobody confirmed yet (``BossGroups.unconfirmed_of``): every draft there waits for that, and how to confirm it.
+        The group's name as the scan's own notice shows it (``WechatReview.shown`` with her party, PrmService
+        ``_auto_link_notice``); 「确认接群 <群名>」 only when that name is one the command finds (not masked, not cut
+        short), else the console's 「是她的群」."""
+        from .boss_groups import NAME_CHARS               # (the service imports this module)
+        review, out = self._service.wechat_review, []
+        for row in self._service.boss_groups.unconfirmed_of(int(deal["id"])):
+            raw = " ".join(str(row.get("name") or "").split())
+            name = review.shown(raw, party)
+            exact = bool(name) and name == raw and len(raw) < NAME_CHARS     # (a kept name of NAME_CHARS: maybe cut)
+            group = f"群「{name}」" if name else "一个没有群名的群"
+            how = f"回「确认接群 {name}」" if exact else "到控制台她的合作单上点「是她的群」"
+            out.append(f"{group}是机器人自动接的，还没人确认是她的群：那里的草稿都等你看；对的话{how}")
+        return out
 
     def _waiting(self, party: dict, deal: dict) -> str:
         """What of hers waits in 「待审批」 (numbers and kinds), and whether the Mac is writing a draft of hers."""

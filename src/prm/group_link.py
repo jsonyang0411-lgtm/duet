@@ -198,7 +198,7 @@ class GroupLinks:
             size = group.get("size") or len(found["all"]) + 1
             bg.offer(chat, name, size, found, deal_id=int(deal["id"]))
             self._asked = {"at": self._clock(), "chat": chat, "name": shown}
-            return (f"群「{shown}」是 {party['name']} 的三方群（合作单 #{deal['id']}，「拉三方群」建的，现在只读）：接手以后她在群里"
+            return (f"群「{shown}」是 {party['name']} 的三方群（合作单 {deal['id']} 号，「拉三方群」建的，现在只读）：接手以后她在群里"
                     f"说的话会起草，回复发在群里，群里的人都看得到。回「是 1」接手，「不接」作罢（{OFFER_SEC // 60} 分钟内有效）")
         if found is None:
             return f"群「{shown}」的成员现在读不出来：稍后再试"
@@ -380,7 +380,7 @@ class GroupLinks:
         老板拉的群's (a kind's gate, the 下班时段, 自动模式), but the draft of the lines that waited at 接群, which waits."""
         shown = offer.get("name") or NO_NAME
         head = (f"接手了：群「{shown}」→ {out['name']}"
-                + ("（新登记的达人）" if out.get("registered") else "（已登记）") + f"，合作单 #{out['deal_id']}")
+                + ("（新登记的达人）" if out.get("registered") else "（已登记）") + f"，合作单 {out['deal_id']} 号")
         bg = self._service.boss_groups
         size = offer.get("size")
         # (她那边的人, PRM_GROUP_HER_SIDE on, in a group of at most PRM_BOSS_GROUP_MAX: her side's lines are drafted too)

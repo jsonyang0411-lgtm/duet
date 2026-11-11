@@ -552,7 +552,7 @@ class Bot:
         # 合作单指令 (src/prm/admin_commands.py): named in the help too while PRM_WECHAT_COMMANDS and the copilot are on
         deal_help = ""
         if getattr(config, "prm_copilot", "off") == "on" and getattr(config, "prm_wechat_commands", "off") == "on":
-            from .prm.admin_commands import HELP_LINE as deal_help
+            from .prm.admin_commands import RELAY_LINE as deal_help
         relay = ClaudeRelay(config, send=backend.send_text, send_file=getattr(backend, "send_file", None),
                             reserved=is_command, extra_help=RELAY_HELP + deal_help if is_command else "")
         try:

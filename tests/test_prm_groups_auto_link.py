@@ -135,7 +135,7 @@ def test_a_group_with_exactly_one_registered_creator_links_itself_old_as_it_is(b
     assert [(x["who"], x["text"]) for x in meta["group"]["lines"]] == [
         ("她", "你们家这款还有货吗"), ("我们", "有的，我发您看看"), ("群成员", "她这周想先看样")]
     assert told(bot) == [
-        f"已自动接群（群里只有她一位登记过的达人）：群「{GROUP_NAME}」→ 小美（已登记），合作单 #{deal['id']}；"
+        f"已自动接群（群里只有她一位登记过的达人）：群「{GROUP_NAME}」→ 小美（已登记），合作单 {deal['id']} 号；"
         "之后她在群里说的话会起草，在「待审批」里等你看；群里最近 3 句记成了背景；她最后 1 句还没人回，派了一份草稿；"
         f"对的话回「确认接群 {GROUP_NAME}」（确认以前、或者你发出去一份以前，这个群的草稿都等你看）；"
         f"不对就回「不接群 {GROUP_NAME}」"]
