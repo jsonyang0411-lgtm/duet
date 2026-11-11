@@ -523,7 +523,7 @@ function reachText(r) {
     const why = r.why === 'last_spoke' ? '她那边最近是在这个群里说的话' : '她没有和我们的私聊'
     return `${REACH_KINDS}现在发在群「${r.name || '（没有群名）'}」里：${why}，群里的人都看得到。`
   }
-  const why = r.why === 'never' ? '她还没说过话' : r.why === 'elsewhere' ? '她最近说话的那个群机器人现在不在里面起草（她退了群，或者群不接了）'
+  const why = r.why === 'unknown' ? '机器人现在读不出她有没有私聊，先按私聊算' : r.why === 'never' ? '她还没说过话' : r.why === 'elsewhere' ? '她最近说话的那个群机器人现在不在里面起草（她退了群，或者群不接了）'
     : '她最近是在私聊里说的话'
   return `${REACH_KINDS}现在发在她的私聊里：${why}。`
 }

@@ -183,18 +183,19 @@ def test_a_name_no_contact_has_is_said_and_stops_the_scan_linking_by_itself(cloc
         warning = b.prm.snapshot()["boss_groups"]["ours_warning"]
         assert "「不存在的同事」" in warning and "不自己接" in warning
         assert b.prm.snapshot()["boss_groups"]["ours"] == ["不存在的同事"]
+        b.backend.active[GROUP] = b.clock.now                         # (active: still no WeChat line for this cause)
         out = b.prm.boss_groups.auto_scan()
-        assert out["linked"] == 0 and out["asked"] == 1 and b.prm.store.boss_group(GROUP) is None
-        ask = b.prm.boss_groups.asked_by_scan(GROUP)
+        assert out == QUIET and b.prm.store.boss_group(GROUP) is None
+        ask = b.prm.boss_groups.asked_by_scan(GROUP)                  # (the console's card asks)
         assert [m["wxid"] for m in ask["members"] if m["registered"]] == [CREATOR]
-        b.prm.send_approved()
-        line = told(b)[-1]
-        assert "PRM_GROUP_OURS" in line and "没自动接" in line and f"接群 {GROUP_NAME}" in line
-        # put right: read again, the next scan links it
+        assert ask["why"] == bg.AUTO_OURS_DOUBT
+        assert told(b) == []                                          # (re-review N5: the console says the name)
+        # put right: read again, the next scan links it; 「已自动接群」 is the one line the admin gets
         known(b, "不存在的同事")
         read(b)
         assert "ours_warning" not in b.prm.snapshot()["boss_groups"]
         assert b.prm.boss_groups.auto_scan()["linked"] == 1
+        assert len(told(b)) == 1 and told(b)[0].startswith("已自动接群")
     finally:
         stop(b)
 
@@ -213,7 +214,7 @@ def test_names_that_could_not_be_read_are_not_known_the_scan_asks(clock, tmp_pat
         b.backend.contact_ids = broken
         read(b)
         assert "还没认出来" in b.prm.snapshot()["boss_groups"]["ours_warning"]
-        assert b.prm.boss_groups.auto_scan() == {**QUIET, "asked": 1}
+        assert b.prm.boss_groups.auto_scan() == QUIET and b.prm.boss_groups.asked_by_scan(GROUP) is not None
         b.backend.contact_ids = works
         read(b)
         assert "ours_warning" not in b.prm.snapshot()["boss_groups"]
@@ -233,5 +234,52 @@ def test_the_boss_scan_waits_for_a_person_while_a_name_of_ours_is_unknown(clock,
         assert boss_makes(b) == 0
         row = b.prm.store.boss_group(BOSS_GROUP)
         assert row["state"] == "pending" and "PRM_GROUP_OURS" in row["why"]
+    finally:
+        stop(b)
+
+
+# ── re-review 2026-11-11 N6: ours by the resolved contact only ────────────────
+
+def test_a_creator_named_like_one_of_ours_stays_a_creator(clock, tmp_path):
+    """PRM_GROUP_OURS names 小美, and so is the registered creator; that name resolves to our colleague's contact.  She
+    is still listed by 「接群」, linked by the scan, and her line in the catch-up is hers (not ours: her earlier lines
+    are not taken as answered); the console says the name is ambiguous."""
+    b = auto_setup(clock, tmp_path, prm_group_ours="小美", register=False)
+    try:
+        b.backend.contacts["小美"] = COLLEAGUE                          # (the contact the name resolves to)
+        b.her = b.prm.register(CREATOR, "小美", "测试达人")
+        t = b.clock.now
+        b.backend.say(GROUP, CREATOR, "寄样怎么弄呀", t - 900)
+        read(b)
+        warning = b.prm.boss_groups.ours_warning()
+        assert "和登记过的达人同名" in warning and "「小美」" in warning
+        assert b.prm.boss_groups.auto_scan()["linked"] == 1
+        assert b.prm.store.boss_group(GROUP)["party_id"] == b.her["id"]
+        job = job_of(b)
+        assert job["text"].endswith("寄样怎么弄呀") and json.loads(job["meta"])["link_first"] is True
+        assert b.prm.boss_groups.who(b.prm.store.boss_group(GROUP), CREATOR, "小美") == bg.MEMBER
+        assert b.prm.boss_groups.who(b.prm.store.boss_group(GROUP), COLLEAGUE) == bg.US
+    finally:
+        stop(b)
+
+
+def test_a_name_not_resolved_never_hides_a_creator_of_that_name(clock, tmp_path):
+    b = link_setup(clock, tmp_path, prm_group_ours="小美")             # (no contact is 小美: not resolved)
+    try:
+        b.say("接群")
+        assert "1. 小美" in b.say("接群 1")                              # (listed: never ours by a name)
+    finally:
+        stop(b)
+
+
+def test_one_of_ours_who_is_a_registered_creator_is_ours_and_the_console_says_so(clock, tmp_path):
+    b = auto_setup(clock, tmp_path, prm_group_ours=COLLEAGUE_NAME)
+    try:
+        known(b)
+        b.prm.register(COLLEAGUE, COLLEAGUE_NAME, "测试")
+        read(b)
+        assert "也是登记过的达人" in b.prm.boss_groups.ours_warning()
+        assert b.prm.boss_groups.auto_scan()["linked"] == 1          # (she is the one creator: he is ours)
+        assert b.prm.store.boss_group(GROUP)["party_id"] == b.her["id"]
     finally:
         stop(b)
