@@ -135,6 +135,7 @@ from .group_link import GroupLinks
 from .result import MAX_DRAFT_CHARS, MESSAGE_KINDS, PLATFORM_UNASKED, DraftError, parse_draft
 from .three_party import EVENT as GROUP_EVENT, TAKEN_BY as GROUP_TAKEN_BY, ThreeParty, state_out as group_state_out
 from .wechat_review import WechatReview, admin_problem, hats_of, preview_stamp
+from .admin_commands import ACTOR as ADMIN_ACTOR, DealCommands
 from .store import (
     APPROVED, BUYIN_TOOL, COPILOT, DRAFT_NOTES, DROPPED, EXECUTING, FAILED, HUMAN, LANE_BUYIN, LANE_REPLY, LANE_SYSTEM,
     DRAFT_NOTE_CHARS, MESSAGE_TOOL, MODES, NO_REPLY, NOTICE_CHARS, PAUSED, PENDING,
@@ -842,6 +843,9 @@ DRAFT_NOTE = "draft_note"
 PHOTO_CONFIRM = "photo_confirm"
 PHOTO_UNCONFIRM = "photo_unconfirm"
 WECHAT_ACTOR = "wechat"             # an event's actor: the admin's quoted 「对过图 1」 in WeChat (wechat_review.py)
+# 合作单指令 (PRM_WECHAT_COMMANDS, src/prm/admin_commands.py, 2026-11-11): an operator's change from the console or typed in
+# the admin's chat (``ADMIN_ACTOR``, 「接群」's too): ``deal_action`` sees to a deleted order's notice for either
+OPERATOR_ACTORS = ("console", ADMIN_ACTOR)
 # A creator's message recorded without a draft because it was read too late (PRM_CATCHUP_HOURS).
 MISSED_EVENT_NAME = "机器人没在读时达人的消息（没有起草）"
 # PRM_AUTO_REGISTER (2026-10-29): the deal's event of a new friend the bot registered, and how she was added (the
@@ -857,6 +861,9 @@ AUTO_NOTE_CHARS = 200        # her note
 # packet's ``meta.opening``, the deal's event (``OPENING``: which job, how, by) and the console's deal action
 # (「写开场白」, ``ask_opening``).
 OPENING = "opening"
+# ... a 开场白 the admin ordered in WeChat (合作单指令's 「写开场白 <达人>」, src/prm/admin_commands.py; decision 2026-11-11):
+# its job's ``meta.opening.held``; it never goes out by itself (no PRM_OPENING_AUTO_MIN, 下班时段 or 自动模式: ``_opening_auto``)
+OPENING_HELD = "held"
 # A new friend registered more than PRM_CATCHUP_HOURS after she was added, with nothing of hers in the read-back: what
 # she wrote before it is not known, so no 开场白 by itself; this notice (``opening`` too) asks a person to look (review
 # 2026-10-30).  A 开场白 asked for, a reply draft of hers, or an operator writing to her by hand sees to it.
@@ -1759,6 +1766,9 @@ class PrmService:
             aim=lambda packet: self._aim(packet, wait=True), relay_store=relay.store, local=self._local,
             skew=self._clock_low, written=written_state, files_root=getattr(relay, "files_dir", None),
             opening_auto=self._opening_auto_sec > 0)
+        # 合作单指令 (PRM_WECHAT_COMMANDS, default off; src/prm/admin_commands.py): the console's deal buttons typed in the
+        # admin's chat, 「做手卡 <达人>」 … (Bot._wire_friend_adds hands them over from src/admin.py while it is on)
+        self.deal_commands = DealCommands(self, config, clock=clock)
         relay.register_kind(PRM, self.on_result)
 
     @property
@@ -2091,13 +2101,16 @@ class PrmService:
         gone home heard nothing all weekend): may this waiting draft, our first line to a new friend, go out by itself when
         nobody decides on it?  None: not in play (the setting 0; not a first line: a 开场白 of ours, ``meta.opening``, or the
         draft of a new friend's messages from before she was registered, ``meta.new_friend``, with none read late or
-        missed; a 老板拉的群's, the boss reads it there; a platform action; the system lane).  ``(due, "")``: it goes at
+        missed; a 老板拉的群's, the boss reads it there; a platform action; the system lane; a 开场白 the admin ordered in
+        WeChat, ``meta.opening.held``: 合作单指令, it always waits for a person).  ``(due, "")``: it goes at
         ``due`` (``send_due_openings``), PRM_OPENING_AUTO_MIN from now, at once in the 下班时段 or 自动模式
         (``_night_active``).  ``(None, why)``: it waits for a person as before, the card says why (``meta.auto_held``):
         her recall, files short, a platform action taken out, the model's attention, what ``gates.night_reason`` minds
         (a complaint, placeholders, a red line), or a word of samples (``OPENING_AUTO_WORDS``: kb 第 0.5 节)."""
         if self._opening_auto_sec <= 0 or lane != LANE_REPLY or draft.platform is not None:
             return None
+        if isinstance(meta.get(OPENING), dict) and meta[OPENING].get(OPENING_HELD):
+            return None                                # (合作单指令's 「写开场白」: a person always decides)
         first = isinstance(meta.get(OPENING), dict) or (isinstance(meta.get("new_friend"), dict)
                                                         and not meta["new_friend"].get("linked"))
         if (not first or meta.get("channel") == GROUP_CHANNEL
@@ -4615,9 +4628,10 @@ class PrmService:
                     "draft job", party["id"], taken)
         return taken
 
-    def ask_opening(self, deal_id) -> dict:
+    def ask_opening(self, deal_id, actor: str = "console") -> dict:
         """「写开场白」 in the console: one 开场白 draft job for a creator who has not written to us yet
-        (``_ask_opening``, by console).  ``{"ok": True, "job"}``, or ``{"ok": False, "error"}`` saying why not."""
+        (``_ask_opening``, by console; ``actor``: who asked, the event's, ``ADMIN_ACTOR`` for 合作单指令's 「写开场白 <达人>」).
+        ``{"ok": True, "job"}``, or ``{"ok": False, "error"}`` saying why not."""
         try:
             deal = self._store.deal(int(deal_id))
         except (TypeError, ValueError):
@@ -4626,10 +4640,10 @@ class PrmService:
         if deal is None or party is None:
             return {"ok": False, "error": "没有找到这个合作单"}
         with self._handle_lock:
-            job_id, why = self._ask_opening(party, by="console")
+            job_id, why = self._ask_opening(party, by="console", actor=actor)
         return {"ok": True, "job": job_id} if job_id else {"ok": False, "error": why}
 
-    def _ask_opening(self, party: dict, *, how: str = "", by: str = "new_friend") -> tuple:
+    def _ask_opening(self, party: dict, *, how: str = "", by: str = "new_friend", actor: str = "console") -> tuple:
         """One draft job of our first line to a creator who has not written to us, or wrote but never had a real line
         from us (``meta.opening``: how she came, who asked, and ``wrote`` true for the latter: her line was the friend
         request's 「我是…」, its draft was dropped, only a 稍等 went out, 2026-11-02; told what we sent her,
@@ -4645,15 +4659,17 @@ class PrmService:
         if why:
             return None, why
         how = str(how or "")
+        held = by == "console" and actor == ADMIN_ACTOR    # (合作单指令: it always waits for a person)
         meta = {"party_id": party["id"], "deal_id": deal["id"], "name": party["name"],
-                OPENING: {"how": how, "by": by, **({"wrote": True} if deal.get("last_message_at") else {})}}
+                OPENING: {"how": how, "by": by, **({"wrote": True} if deal.get("last_message_at") else {}),
+                          **({OPENING_HELD: True} if held else {})}}
         if group is not None:
             meta.update(channel=GROUP_CHANNEL, group=self.boss_groups.job_group(chat), **reach_meta(reach))
         else:
             told = self._group_lines(deal["id"])
             if told:
                 meta["three_party_chat"] = told         # what was said in her 三方群 lately
-            if self._opening_auto_sec:
+            if self._opening_auto_sec and not held:
                 meta["opening_auto"] = self._opening_auto_sec // 60   # the Mac hears its draft may go out by itself
         creator = self._creator_ids(deal["id"])
         if creator:
@@ -4668,7 +4684,7 @@ class PrmService:
             meta["history"] = told
         _, job_id = self._relay.submit(chat, chat, "", kind=PRM, meta=self._reply_meta(self._with_note(meta, deal, now)), fresh=True)
         self._store.add_event(deal["id"], party["id"], OPENING, {"job": job_id, "how": how, "by": by},
-                              actor="console" if by == "console" else "system", now=now)
+                              actor=actor if by == "console" else "system", now=now)
         # one not written before: this one is on its way
         self._store.drop_notices(deal["id"], lambda n: bool(n.get(OPENING)), now)
         logger.info("PRM: party %d %s; job #%d drafts our first line (开场白, %s)", party["id"],
@@ -4697,9 +4713,9 @@ class PrmService:
             return "「待审批」里已经有她的草稿"
         return ""
 
-    def ask_huopan(self, deal_id) -> dict:
-        """「补发货盘」 in the console (2026-11-04): one draft job that sends her the 货盘 again (``_ask_huopan``).
-        ``{"ok": True, "job"}``, or ``{"ok": False, "error"}`` saying why not."""
+    def ask_huopan(self, deal_id, actor: str = "console") -> dict:
+        """「补发货盘」 in the console (2026-11-04): one draft job that sends her the 货盘 again (``_ask_huopan``; ``actor``:
+        who asked, the event's).  ``{"ok": True, "job"}``, or ``{"ok": False, "error"}`` saying why not."""
         try:
             deal = self._store.deal(int(deal_id))
         except (TypeError, ValueError):
@@ -4708,10 +4724,10 @@ class PrmService:
         if deal is None or party is None:
             return {"ok": False, "error": "没有找到这个合作单"}
         with self._handle_lock:
-            job_id, why = self._ask_huopan(party)
+            job_id, why = self._ask_huopan(party, actor=actor)
         return {"ok": True, "job": job_id} if job_id else {"ok": False, "error": why}
 
-    def _ask_huopan(self, party: dict) -> tuple:
+    def _ask_huopan(self, party: dict, actor: str = "console") -> tuple:
         """One draft job of our line that sends her the 货盘 (kb 第 3.0 节: the picture, the Excel as it says) again,
         with no new line of hers (``meta.huopan`` {"by": "console"}; told what we sent her, ``meta.sent``, what an
         operator wrote to her by hand, ``meta.history``, her 三方群's, and the deal's 起草备注, ``meta.note``), under
@@ -4746,7 +4762,7 @@ class PrmService:
         if told:
             meta["history"] = told                     # told, not taken: her next draft job still hears of it
         _, job_id = self._relay.submit(chat, chat, "", kind=PRM, meta=self._reply_meta(self._with_note(meta, deal, now)), fresh=True)
-        self._store.add_event(deal["id"], party["id"], HUOPAN, {"job": job_id}, actor="console", now=now)
+        self._store.add_event(deal["id"], party["id"], HUOPAN, {"job": job_id}, actor=actor, now=now)
         # one not written before: this one is on its way
         self._store.drop_notices(deal["id"], lambda n: bool(n.get(HUOPAN)), now)
         logger.info("PRM: party %d: job #%d sends her the 货盘 again (补发货盘, console)", party["id"], job_id)
@@ -4770,10 +4786,11 @@ class PrmService:
             return "「待审批」里已经有她的草稿：先处理那一份"
         return ""
 
-    def ask_handcards(self, deal_id, items=None) -> dict:
+    def ask_handcards(self, deal_id, items=None, actor: str = "console") -> dict:
         """「做手卡」 in the console (2026-11-09): one draft job that makes her 直播手卡 (``_ask_handcards``).  ``items``: the
         ticked products (抖店 item ids; [] none: the ones she picked, as the case file has them); None: her latest
-        sample order's.  ``{"ok": True, "job"}``, or ``{"ok": False, "error"}`` saying why not."""
+        sample order's.  ``actor``: who asked, the event's.  ``{"ok": True, "job"}``, or ``{"ok": False, "error"}`` saying
+        why not."""
         try:
             deal = self._store.deal(int(deal_id))
         except (TypeError, ValueError):
@@ -4785,10 +4802,10 @@ class PrmService:
         if why:
             return {"ok": False, "error": why}
         with self._handle_lock:
-            job_id, why = self._ask_handcards(party, ids)
+            job_id, why = self._ask_handcards(party, ids, actor=actor)
         return {"ok": True, "job": job_id} if job_id else {"ok": False, "error": why}
 
-    def _ask_handcards(self, party: dict, ids: Optional[list]) -> tuple:
+    def _ask_handcards(self, party: dict, ids: Optional[list], actor: str = "console") -> tuple:
         """One draft job of our line that makes her 直播手卡, with no new line of hers (``meta.handcards`` {"by": "console",
         "items": [{"item_id", "sku_ids"}], "order"?}: the ticked products, ``ids``, each with the SKUs she got when it is in
         her latest 抖店 sample order; ``ids`` None: that order's products; none at all: the Mac finds them in the case
@@ -4828,7 +4845,7 @@ class PrmService:
             meta["history"] = told
         _, job_id = self._relay.submit(chat, chat, "", kind=PRM, meta=self._reply_meta(self._with_note(meta, deal, now)),
                                        fresh=True)
-        self._store.add_event(deal["id"], party["id"], HANDCARDS, {"job": job_id, "items": len(picked)}, actor="console",
+        self._store.add_event(deal["id"], party["id"], HANDCARDS, {"job": job_id, "items": len(picked)}, actor=actor,
                               now=now)
         self._store.drop_notices(deal["id"], lambda n: bool(n.get(HANDCARDS)), now)
         logger.info("PRM: party %d: job #%d makes her 直播手卡 (%d product(s), console)", party["id"], job_id, len(picked))
@@ -5104,13 +5121,14 @@ class PrmService:
         ``group_try`` / ``group_made`` / ``group_none`` are 三方群's
         (``three_party``: 「拉三方群」, 「先试一下」, 「建好了」, 「没建成」); ``draft_note`` {text} keeps the deal's 起草备注
         (``set_draft_note``); ``photo_confirm`` {packet, code} / ``photo_unconfirm`` {code} are 「对过图了」 and its
-        「撤销」 (PRM_DRAFT_CONTEXT: ``photo_confirm``)."""
+        「撤销」 (PRM_DRAFT_CONTEXT: ``photo_confirm``).  ``actor`` ``ADMIN_ACTOR``: 合作单指令's (src/prm/admin_commands.py,
+        the admin's typed 「做手卡 <达人>」 …): the same as the console's, the events say who."""
         if action == OPENING:
-            return self.ask_opening(data.get("deal_id"))
+            return self.ask_opening(data.get("deal_id"), actor=actor)
         if action == HUOPAN:
-            return self.ask_huopan(data.get("deal_id"))
+            return self.ask_huopan(data.get("deal_id"), actor=actor)
         if action == HANDCARDS:
-            return self.ask_handcards(data.get("deal_id"), data.get("items"))
+            return self.ask_handcards(data.get("deal_id"), data.get("items"), actor=actor)
         if action == DRAFT_NOTE:
             return self.set_draft_note(data.get("deal_id"), data.get("text"), actor=actor)
         if action == GROUP_UNLINK:
@@ -5146,9 +5164,9 @@ class PrmService:
             self._aim(self._store.packet(int(result["packet"])))   # 老板拉的群: the shipping notice goes where she is
         if result.get("ok"):
             self._wake.set()
-            if actor == "console" and action != "mode" and before:
+            if actor in OPERATOR_ACTORS and action != "mode" and before:
                 self._drop_dead_samples(before["id"], now)
-            if actor == "console" and action == "shipment" and before:      # the waybill 聚水潭 did not give: typed
+            if actor in OPERATOR_ACTORS and action == "shipment" and before:      # the waybill 聚水潭 did not give: typed
                 self._store.drop_notices(before["id"], lambda n: n["key"].startswith(SAMPLE_ASK), now)
             after = self._store.deal(before["id"]) if before else None
             if after and after.get("delivered_at"):

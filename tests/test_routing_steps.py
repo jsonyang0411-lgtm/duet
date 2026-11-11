@@ -214,8 +214,12 @@ class AdminCommands(StepCase):
         router = self.router(admin_wxid="")
         assert router.handle(private_msg("o1", "帮助", sender_id="")) is None
 
-    def test_the_handler_is_called_with_the_text_only(self):
+    def test_the_handler_is_called_with_the_text_and_the_message(self):
+        """The text stripped; the message itself beside it (合作单指令, PRM_WECHAT_COMMANDS: typed text only)."""
         admin = MagicMock(handle=MagicMock(return_value="好"))
         router = self.router(admin=admin)
-        assert router.handle(admin_msg("a1", "  查状态  ")) == "好"
-        admin.handle.assert_called_once_with("查状态")
+        msg = admin_msg("a1", "  查状态  ")
+        assert router.handle(msg) == "好"
+        admin.handle.assert_called_once()
+        assert admin.handle.call_args.args == ("查状态",)
+        assert admin.handle.call_args.kwargs["msg"]["message_id"] == "a1"

@@ -64,6 +64,8 @@ class AdminCommandHandler:
       待加达人 / 加达人 N / 不加达人 N → 加百应达人微信（src/prm/friend_adds.py）的记录、发一次申请、不加
       接群 / 接群 N|群名 / 是 N / 不接 / 不接群 群名 → 接手任何合作群（src/prm/group_link.py；「是 N」「不接」只在
                                  问着的时候算命令）
+      做手卡 / 补发货盘 / 写开场白 / 签收 / 备注 / 接管 / 副驾驶 / 合作单 <达人>、指令、选 N → 合作单指令
+                                 （src/prm/admin_commands.py，PRM_WECHAT_COMMANDS 开着时；「选 N」只在问着的时候算命令）
       帮助 / help / 命令        → show help text
 
     Usage:
@@ -84,6 +86,7 @@ class AdminCommandHandler:
         self._status = status
         self._friend_adds = None
         self._group_links = None
+        self._deal_commands = None
 
     def set_friend_manager(self, friend_manager, auto_friend_service=None) -> None:
         """Attach or update the FriendManager and AutoFriendService instances."""
@@ -103,25 +106,44 @@ class AdminCommandHandler:
         """接手任何合作群 (src/prm/group_link.py ``GroupLinks``) for 接群 / 是 N / 不接 / 不接群."""
         self._group_links = group_links
 
+    def set_deal_commands(self, deal_commands) -> None:
+        """合作单指令 (src/prm/admin_commands.py ``DealCommands``, PRM_WECHAT_COMMANDS on) for 做手卡 <达人> … / 指令 / 选 N."""
+        self._deal_commands = deal_commands
+
     @property
     def can_add_friends(self) -> bool:
         """There is a friend manager to drive the WeChat window (加百应达人微信 shows its button only then)."""
         return self._friend is not None
 
-    def handle(self, content: str) -> str | None:
+    def handle(self, content: str, msg: Optional[dict] = None) -> str | None:
         """Parse and execute an admin command. Returns reply text or None.
 
         Args:
             content: The message text (the backend's ``wxid_…:`` quote prefix removed).
+            msg: The message itself (the route step ``admin_command``): 合作单指令 runs only typed text in the
+                admin's own chat (a voice message or a quote is told to type it); the other commands do not look.
 
         Returns:
             Reply text if the content was a recognized command, else None.
         """
         content = content.strip()
         if content in HELP_COMMANDS:
-            return HELP_TEXT
-        command = self._command(content)
+            return HELP_TEXT + (self._deal_commands.help_line if self._deal_commands is not None else "")
+        command = self._command(content, msg)
         return command() if command is not None else None
+
+    def redaction(self, content: str, msg: Optional[dict] = None) -> Optional[str]:
+        """What the decision trace keeps instead of this line (the route step ``admin_command``): 合作单指令's
+        ``DealCommands.trace_text`` for a line of theirs (names, a note's words: never in data/decision_trace.jsonl,
+        as the review's step redacts its answers); None for every other line (kept as before)."""
+        commands = self._deal_commands
+        if commands is None:
+            return None
+        try:
+            return commands.trace_text if commands.admin_command(content.strip(), msg) is not None else None
+        except Exception:
+            logger.exception("ADMIN: could not tell whether a line is a 合作单指令")
+            return None
 
     def is_command(self, content: str) -> bool:
         """A management command (not the help), recognised without running it.
@@ -131,8 +153,8 @@ class AdminCommandHandler:
         """
         return self._command(content.strip()) is not None
 
-    def _command(self, content: str):
-        """The management command ``content`` is, as ``run()``; else None."""
+    def _command(self, content: str, msg: Optional[dict] = None):
+        """The management command ``content`` is, as ``run()``; else None (``msg``: the message, for 合作单指令)."""
         if content in STATUS_COMMANDS:
             return self._cmd_status
         # ── Friend commands (they drive the WeChat window and take seconds) ──
@@ -149,6 +171,10 @@ class AdminCommandHandler:
         if match:
             add, add_id = match.group(1) == "加达人", int(match.group(2))
             return lambda: self._cmd_friend_add(add, add_id)
+        if self._deal_commands is not None:        # (「选 N」 only while its list is open)
+            command = self._deal_commands.admin_command(content, msg)
+            if command is not None:
+                return command
         if self._group_links is not None:          # (「是 N」 and 「不接」 only while its question is open)
             return self._group_links.admin_command(content)
         if GROUP_LINK_COMMAND.match(content):
