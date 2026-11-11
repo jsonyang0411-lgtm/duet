@@ -431,6 +431,19 @@ class BotConfig:
     # group reads it).  "on": such a group's drafts go by them as a 老板拉的群's do, but for the first one of the lines
     # that waited at 接群 (it always waits).
     prm_linked_groups_auto: str = "off"
+    # 群自己接上 (src/prm/boss_groups.py ``auto_scan``, 2026-11-11): "on": every group chat of this account with at most
+    # prm_boss_group_max members, old ones too, is looked at by the scan: exactly one member is an active registered
+    # creator (no other linked group of hers) -> the group is linked to her deal as a link by hand is (no 开场白, the
+    # talk there its context, one draft when her side waits, and that one always waits for a person), the admin is told
+    # once in WeChat; two or more registered creators -> the console asks, the admin is told once; none -> nothing, and
+    # one WeChat line for a group that appeared or was active after the switch first ran.  A group a person stopped or
+    # refused is never linked by it.  "off" (the default): nothing of it.  Needs PRM_COPILOT=on.
+    prm_groups_auto_link: str = "off"
+    # 她那边的人 (PrmService._group_message, 2026-11-11): "on": in a linked group (a 老板拉的群, one linked by hand or by
+    # the scan) a line of a member who is not ours (us, a boss, the admin, a cc user) nor another registered creator is
+    # drafted as her own line is (her assistant, her 商务: the same job, gates, 下班时段, 自动模式), marked 〔她那边的人〕
+    # for the Mac (never that person's name).  "off" (the default): such a line is context only, as before.
+    prm_group_her_side: str = "off"
     # === WeChat edge (src/edge, edge-protocol.md) for the Mac business service ===
     # "on": Windows only receives and sends WeChat messages for the creators the Mac lists;
     # the Mac pulls /edge/* on the relay's port with PRM_EDGE_TOKEN.  Not with PRM_COPILOT.
@@ -685,6 +698,10 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(f"PRM_BOSS_CALL must be 1 to 10 characters, got {len(boss_call)}")
     if kwargs.get("prm_linked_groups_auto", "off") not in ("off", "on"):
         errors.append(f"PRM_LINKED_GROUPS_AUTO must be off or on, got {kwargs.get('prm_linked_groups_auto')}")
+    if kwargs.get("prm_groups_auto_link", "off") not in ("off", "on"):
+        errors.append(f"PRM_GROUPS_AUTO_LINK must be off or on, got {kwargs.get('prm_groups_auto_link')}")
+    if kwargs.get("prm_group_her_side", "off") not in ("off", "on"):
+        errors.append(f"PRM_GROUP_HER_SIDE must be off or on, got {kwargs.get('prm_group_her_side')}")
     prm_edge = kwargs.get("prm_edge", "off")
     if prm_edge not in ("off", "on"):
         errors.append(f"PRM_EDGE must be off or on, got {prm_edge}")
@@ -850,6 +867,8 @@ def load_config() -> BotConfig:
         "prm_boss_group_max": int(os.getenv("PRM_BOSS_GROUP_MAX", "6")),
         "prm_boss_call": " ".join(os.getenv("PRM_BOSS_CALL", "").split()) or "老板",
         "prm_linked_groups_auto": _parse_switch(os.getenv("PRM_LINKED_GROUPS_AUTO", "off")),
+        "prm_groups_auto_link": _parse_switch(os.getenv("PRM_GROUPS_AUTO_LINK", "off")),
+        "prm_group_her_side": _parse_switch(os.getenv("PRM_GROUP_HER_SIDE", "off")),
         "prm_edge": _parse_switch(os.getenv("PRM_EDGE", "off")),
         "prm_edge_token": os.getenv("PRM_EDGE_TOKEN", "").strip(),
         "edge_url": os.getenv("EDGE_URL", "").strip(),

@@ -17,7 +17,8 @@ hands the text over, ``admin_command``):
   operator's explicit act), the question says how many are in it;
 - 「是 N」: BossGroups ``link`` (she is registered unless she is a creator already, the group linked to her deal, what
   was said there lately its context, one draft when she waits for an answer, the watch), answered in one line;
-- 「不接」: the question is dropped (it expires by itself OFFER_SEC after it was asked);
+- 「不接」: the question is dropped (it expires by itself OFFER_SEC after it was asked); with PRM_GROUPS_AUTO_LINK on
+  the group is remembered as refused (BossGroups ``decline``: the scan never links it by itself nor tells about it);
 - 「不接群 <群名>」: a linked group is not drafted in any more (PrmService.unlink_group, BossGroups ``stop``: its drafts not
   sent fail; her deal's 三方群 stays it, read only again; the console's 「不接了」 is the same).
 
@@ -25,6 +26,11 @@ A group the scan found that waits for 「是她」 on the console's 「老板拉
 no ``why_not``) is not asked about here: the answer says to choose there (review 2026-11-09: two questions about one
 group).  「是 N」 counts only the members
 the question listed (MEMBERS_LISTED); more are chosen on the console's card.
+
+群自己接上 (PRM_GROUPS_AUTO_LINK, 2026-11-11, BossGroups ``auto_scan``): the scan links a group by itself when exactly
+one registered creator is in it and tells the admin's chat (「已自动接群：…不对就回「不接群 <群名>」」); a group it does not
+link (two or more creators, or none in a group that is new or active) is told there once with how to link it here
+(「接群 <群名>」): the commands above are the same.
 
 「是 N」 and 「不接」 are commands only while a question is open or was lately (ASKED_KEEP_SEC: then they say it expired), so
 the words stay free otherwise (with CLAUDE_RELAY_ONLY the admin's other lines go to the Mac).  A group linked by hand
@@ -228,7 +234,7 @@ class GroupLinks:
         if not out.get("ok"):
             return f"没接手：{out.get('error') or '出错了'}"
         self._asked = None
-        return self._linked_text(offer, out)
+        return self.linked_text(offer, out)
 
     def admin_cancel(self) -> str:
         """「不接」: the open question is dropped."""
@@ -237,7 +243,8 @@ class GroupLinks:
             return "现在没有在等你回答的「接群」"
         if self._service.boss_groups.offered(asked["chat"]) is None:
             return self._not_open(asked)
-        self._service.boss_groups.withdraw(asked["chat"])        # (``_asked`` stays: a 「是 N」 after it says so)
+        # (``_asked`` stays: a 「是 N」 after it says so; 群自己接上: the scan leaves a group a person refused alone)
+        self._service.boss_groups.decline(asked["chat"])
         logger.info("PRM: group %s…: the question who she is was dropped (the admin)", asked["chat"][:8])
         return f"好的，群「{asked['name']}」不接了"
 
@@ -308,8 +315,9 @@ class GroupLinks:
             return f"刚才那个「接群」已经过了 {OFFER_SEC // 60} 分钟，作废了：要接的话重新发「接群」"
         return f"群「{asked['name']}」这次不接了（已经作罢）：要接的话重新发「接群」"
 
-    def _linked_text(self, offer: dict, out: dict) -> str:
-        """The answer to 「是 N」 in one line: whom the group went to, the catch-up, what to look at.  How her drafts
+    def linked_text(self, offer: dict, out: dict) -> str:
+        """The answer to 「是 N」 in one line: whom the group went to, the catch-up, what to look at (also the body of
+        the scan's own 「已自动接群」 line, PrmService._auto_link_notice).  How her drafts
         there go is PRM_LINKED_GROUPS_AUTO's (final check 2026-11-10 A5): off, every one waits in 「待审批」; on, as a
         老板拉的群's (a kind's gate, the 下班时段, 自动模式), but the draft of the lines that waited at 接群, which waits."""
         shown = offer.get("name") or NO_NAME

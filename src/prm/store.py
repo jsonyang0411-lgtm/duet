@@ -55,7 +55,9 @@
                     was taken over (``opening_due``), and WeChat's line that we were added (``joined_at``, WeChat's
                     clock: only a group added to after the baseline is taken over by itself, review 2026-10-31 F4);
                     ``manual``: an operator linked it by hand (接手任何合作群, src/prm/group_link.py: 「接群」; it is read
-                    and drafted in whatever PRM_BOSS_GROUPS says, ``found_at`` is when it was linked)
+                    and drafted in whatever PRM_BOSS_GROUPS says, ``found_at`` is when it was linked); 2: the scan
+                    linked it by itself (群自己接上, PRM_GROUPS_AUTO_LINK: ``BossGroups.auto_scan``; what that scan
+                    keeps besides is prm_meta's ``groups_auto_link``)
 ``wechat_reviews``  微信里审批草稿 (PRM_WECHAT_REVIEW, src/prm/wechat_review.py): one row per draft told to the admin's
                     private chat (its number is the packet's id): when, where it stands (``state``: written before the
                     send as ``telling``), the admin's own words kept as the proposed edit (``proposed``), what was decided

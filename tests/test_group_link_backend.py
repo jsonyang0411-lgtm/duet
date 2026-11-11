@@ -103,6 +103,22 @@ def test_recent_groups_a_groups_members_not_readable_has_no_size_and_none_while_
     assert run.backend.recent_groups() is None
 
 
+def test_recent_groups_without_sizes_reads_no_groups_members(tmp_path, db, clock):
+    """``sizes`` False (PRM's own scan of every group, once a minute: BossGroups.auto_scan, 2026-11-11): the groups, their
+    names and times as ever, no member list read, every ``size`` None."""
+    db.group(GROUP, GROUP_NAME, [HER, BD, ME_SENDER], clock.now - 60)
+    run = Run(tmp_path, db)
+    asked = []
+    real = db.get_group_members
+    db.get_group_members = lambda chat: asked.append(chat) or real(chat)
+    listed = run.backend.recent_groups(0, skip={OLD_GROUP}, sizes=False)
+    assert listed == [{"chat": GROUP, "name": GROUP_NAME, "size": None, "last_at": float(int(clock.now - 60))},
+                      {"chat": NOTICE_GROUP, "name": NOTICE_NAME, "size": None,
+                       "last_at": float(int(clock.now - 20 * 86400))}]
+    assert asked == []
+    assert [g["size"] for g in run.backend.recent_groups(0, skip={OLD_GROUP})] == [3, 3] and len(asked) == 2
+
+
 def test_recent_groups_takes_a_sessions_last_line_before_its_order_key(tmp_path, db, clock):
     """The order is when each group's last line was written (``last_timestamp``), not WeChat's sort key (a draft may
     move it); milliseconds read as seconds."""

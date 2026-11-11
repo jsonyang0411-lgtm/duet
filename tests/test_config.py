@@ -832,6 +832,22 @@ class BossGroupsConfigTests(unittest.TestCase):
             _validate_config({"prm_linked_groups_auto": "maybe"})
         self.assertIn("PRM_LINKED_GROUPS_AUTO must be off or on", str(ctx.exception))
 
+    def test_groups_auto_link_and_her_side_are_off_by_default_and_only_off_or_on(self):
+        """PRM_GROUPS_AUTO_LINK (the groups link themselves when it is clear whose they are) and PRM_GROUP_HER_SIDE (her
+        team's lines in a linked group count as hers), 2026-11-11: both off by default, the usual yes / no spellings,
+        anything else refused."""
+        from src.config import BotConfig, _validate_config, load_config
+
+        for field, name in (("prm_groups_auto_link", "PRM_GROUPS_AUTO_LINK"), ("prm_group_her_side", "PRM_GROUP_HER_SIDE")):
+            self.assertEqual(getattr(BotConfig(), field), "off")
+            for env, want in (({}, "off"), ({name: "on"}, "on"), ({name: "yes"}, "on"), ({name: "0"}, "off")):
+                with patch.dict(os.environ, env, clear=True):
+                    self.assertEqual(getattr(load_config(), field), want, env)
+            _validate_config({field: "on"})
+            with self.assertRaises(RuntimeError) as ctx:
+                _validate_config({field: "maybe"})
+            self.assertIn(f"{name} must be off or on", str(ctx.exception))
+
     def test_what_the_mac_is_told_the_boss_is_called(self):
         """PRM_BOSS_CALL (review 2026-10-31): the bosses' names (PRM_GROUP_WITH) never leave this PC; a group job calls
         him this.  「老板」 by default and when empty, white space collapsed, 1 to 10 characters."""

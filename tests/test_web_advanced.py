@@ -219,7 +219,8 @@ class AdvancedPostTests(_TempEnv):
         for key in ("PRM_BOSS_GROUP_MAX", "PRM_BOSS_CALL"):
             self.assertEqual(fields[key]["requires"][0]["key"], "PRM_BOSS_GROUPS")
         prm = next(g for g in groups if g["id"] == "prm")
-        self.assertEqual([f["key"] for f in prm["fields"]][-4:-1], ["PRM_BOSS_GROUPS", "PRM_BOSS_CALL", "PRM_BOSS_GROUP_MAX"])
+        # (after them: PRM_LINKED_GROUPS_AUTO, and 2026-11-11's PRM_GROUPS_AUTO_LINK and PRM_GROUP_HER_SIDE)
+        self.assertEqual([f["key"] for f in prm["fields"]][-6:-3], ["PRM_BOSS_GROUPS", "PRM_BOSS_CALL", "PRM_BOSS_GROUP_MAX"])
         for key, value in (("PRM_BOSS_GROUP_MAX", "2"), ("PRM_BOSS_GROUP_MAX", "21"), ("PRM_BOSS_GROUPS", "maybe"),
                            ("PRM_BOSS_CALL", "一二三四五六七八九十一")):
             status, body = _request("/api/advanced", "POST", {"values": {key: value}})
@@ -229,15 +230,16 @@ class AdvancedPostTests(_TempEnv):
                                                "PRM_BOSS_CALL": "大老板"}, {}), {})
         self.assertEqual(adv.normalize("PRM_BOSS_CALL", ""), "老板")             # (empty: the default)
 
-    def test_linked_groups_auto_is_shown_last_off_by_default(self):
+    def test_linked_groups_auto_is_shown_after_the_boss_groups_off_by_default(self):
         """PRM_LINKED_GROUPS_AUTO (接手任何合作群, decision 2026-11-10): an on/off switch after the 老板拉的群 settings, off by
         default (a group linked by hand: its drafts always wait for a person), used with the copilot on, not with
-        PRM_BOSS_GROUPS (a link by hand works whatever that says); a bad value is refused on its own field."""
+        PRM_BOSS_GROUPS (a link by hand works whatever that says); a bad value is refused on its own field.  (The two
+        switches of 2026-11-11 come after it.)"""
         from src.web import advanced_config as adv
 
         groups = _request("/api/advanced")[1]["groups"]
         prm = next(g for g in groups if g["id"] == "prm")
-        field = prm["fields"][-1]
+        field = prm["fields"][-3]
         self.assertEqual((field["key"], field["type"], field["value"]), ("PRM_LINKED_GROUPS_AUTO", "onoff", "off"))
         self.assertEqual(field["requires"][0]["key"], "PRM_COPILOT")
         self.assertIn("一律等你看过再发", field["help"])
@@ -246,6 +248,29 @@ class AdvancedPostTests(_TempEnv):
         self.assertEqual(list(body["errors"]), ["PRM_LINKED_GROUPS_AUTO"], body)
         self.assertEqual(adv.validate_updates({"PRM_LINKED_GROUPS_AUTO": "on"}, {}), {})
         self.assertEqual(adv.normalize("PRM_LINKED_GROUPS_AUTO", "yes"), "on")
+
+    def test_groups_auto_link_and_her_side_are_shown_last_off_by_default(self):
+        """PRM_GROUPS_AUTO_LINK and PRM_GROUP_HER_SIDE (2026-11-11): two on/off switches at the end of the copilot's
+        settings, off by default, used with the copilot on (never tied to PRM_BOSS_GROUPS: the groups link themselves
+        by the registered creator in them, whatever that says); a bad value is refused on its own field."""
+        from src.web import advanced_config as adv
+
+        groups = _request("/api/advanced")[1]["groups"]
+        prm = next(g for g in groups if g["id"] == "prm")
+        link, side = prm["fields"][-2:]
+        self.assertEqual((link["key"], link["type"], link["value"]), ("PRM_GROUPS_AUTO_LINK", "onoff", "off"))
+        self.assertEqual((side["key"], side["type"], side["value"]), ("PRM_GROUP_HER_SIDE", "onoff", "off"))
+        for field in (link, side):
+            self.assertEqual([r["key"] for r in field["requires"]], ["PRM_COPILOT"])
+        self.assertIn("恰好只有一位登记过、在用的达人", link["help"])
+        self.assertIn("不接群 群名", link["help"])
+        self.assertIn("〔她那边的人〕", side["help"])
+        for key in ("PRM_GROUPS_AUTO_LINK", "PRM_GROUP_HER_SIDE"):
+            status, body = _request("/api/advanced", "POST", {"values": {key: "maybe"}})
+            self.assertFalse(body["ok"])
+            self.assertEqual(list(body["errors"]), [key], body)
+            self.assertEqual(adv.validate_updates({key: "on"}, {}), {})
+            self.assertEqual(adv.normalize(key, "yes"), "on")
 
     def test_wechat_review_is_shown_after_auto_register_off_by_default(self):
         """PRM_WECHAT_REVIEW (微信里审批草稿, src/prm/wechat_review.py, 2026-11-09): an on/off switch right after

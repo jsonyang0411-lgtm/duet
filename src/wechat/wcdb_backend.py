@@ -1716,7 +1716,7 @@ class WcdbBackend(AbstractWeChatBackend):
     # the one chosen, read once before the watch (``watch_group``) starts after it.  Beside the poll loop, one database
     # call per ``with_client``.
 
-    def recent_groups(self, limit: int = 10, skip=(), name: str = "") -> Optional[list]:
+    def recent_groups(self, limit: int = 10, skip=(), name: str = "", sizes: bool = True) -> Optional[list]:
         """The group chats of WeChat's session list now that are not in ``skip`` (the groups PRM drafts in already), the
         one active last first (``_session_last_at``)::
 
@@ -1724,7 +1724,9 @@ class WcdbBackend(AbstractWeChatBackend):
               (None when they could not be read), "last_at": its session time (WeChat's clock) or None}]
 
         At most ``limit`` (0: all).  ``name``: only the groups of that name, whenever they were active (``_name_key``:
-        no spaces, no case).  None while the database cannot be read.  Quiet: a debug line of counts only."""
+        no spaces, no case).  ``sizes`` False (PRM's own scan of every group, once a minute: BossGroups.auto_scan): no
+        group's members are read, every ``size`` is None (two database calls in all: the session list and the names).
+        None while the database cannot be read.  Quiet: a debug line of counts only."""
         skip = {str(chat) for chat in skip or ()}
         key = _name_key(name)
         try:
@@ -1750,7 +1752,7 @@ class WcdbBackend(AbstractWeChatBackend):
                 if key and _name_key(group_name) != key:
                     continue
                 try:
-                    rows = self.with_client(lambda client, chat=chat: client.get_group_members(chat))
+                    rows = self.with_client(lambda client, chat=chat: client.get_group_members(chat)) if sizes else None
                 except WcdbCallError:            # (an error code for this group: its size is not known)
                     rows = None
                 members = _member_rows(rows) if rows is not None else []

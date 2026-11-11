@@ -24,6 +24,9 @@ import { Card, Note, Confirm } from './ui'
 // member links it by hand (the same POST pick {chat, wxid}: no 开场白, what was said there is context), 「不接」 drops
 // the question (POST ignore {chat}, no confirmation: nothing is kept of it). With PRM_BOSS_GROUPS off only these show,
 // under the name 「合作群」.
+// 群自己接上 (PRM_GROUPS_AUTO_LINK, 2026-11-11): a group the bot's own scan found with two or more registered creators in
+// it is such a question too (``by`` "scan", no ``until``: it stays until answered): the same 「是她」 / 「不接」 (「不接」: the
+// scan leaves the group alone from then on).
 
 /** A pending group with no reason of its own and more than one member listed: more than one may be her. */
 const unsure = (g) => !g.why && (g.members || []).length > 1
@@ -56,7 +59,9 @@ export function BossGroupsCard({ d, onDone }) {
   const drop = (g) => run(g, () => ignoreBossGroup(g.chat), `好的，${named(g)}不接了`)
   if (!bg.enabled) {
     return (
-      <Card title="合作群" eyebrow="GROUPS" className="prm-boss-groups" sub="你在微信里发了「接群」：选群里哪个是达人，机器人就接手这个群">
+      <Card title="合作群" eyebrow="GROUPS" className="prm-boss-groups"
+        sub={manual.every((g) => g.by === 'scan') ? '机器人看到的群里不止一位登记过的达人：选哪个是这个群的达人，机器人就接手这个群'
+          : '你在微信里发了「接群」：选群里哪个是达人，机器人就接手这个群'}>
         <div className="stack" style={{ gap: 10 }}>
           {manual.map((g) => (
             <ManualGroupRow key={g.chat} g={g} disabled={!!busy} onPick={(m) => link(g, m)} onDrop={() => drop(g)} />
@@ -100,15 +105,17 @@ export function BossGroupsCard({ d, onDone }) {
  *  her alone (``three_party``). */
 function ManualGroupRow({ g, disabled, onPick, onDrop }) {
   const until = g.until ? `${fmtClock(g.until)} 前有效` : ''
+  const scan = g.by === 'scan'                          // (群自己接上: the bot's own scan asks, not the admin's 「接群」)
   return (
     <div className="stack prm-boss-group prm-manual-group" style={{ gap: 6 }}>
       <div>
         <b><UsersThree style={{ verticalAlign: -2 }} /> {g.name || '（没有群名）'}</b>{' '}
-        <span className="dim">{[g.size ? `${g.size} 人` : '', '你在微信里发的「接群」', until].filter(Boolean).join(' · ')}</span>
+        <span className="dim">{[g.size ? `${g.size} 人` : '', scan ? '机器人看到的群：里面不止一位登记过的达人，没自动接' : '你在微信里发的「接群」', until].filter(Boolean).join(' · ')}</span>
       </div>
       <div className="f-hint">
         {g.three_party ? '这是她的三方群（「拉三方群」建的，现在只读）：点「是她」以后她在群里说的话会起草，回复发在群里。'
-          : '点哪个是达人（也可以是她的商务）：机器人接手这个群，群里最近的话当背景，她在等回复就起草一份；别人说的话不起草。也可以在微信里回「是 编号」。'}
+          : scan ? '点这个群是哪位达人的：机器人接手这个群，群里最近的话当背景，她在等回复就起草一份。不是合作群就点「不接」，机器人以后不再自己接它。'
+            : '点哪个是达人（也可以是她的商务）：机器人接手这个群，群里最近的话当背景，她在等回复就起草一份；别人说的话不起草。也可以在微信里回「是 编号」。'}
       </div>
       {(g.members || []).map((m) => (
         <div key={m.wxid} className="row prm-boss-member" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>

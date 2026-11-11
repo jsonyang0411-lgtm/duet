@@ -493,14 +493,15 @@ function DraftNoteBlock({ p, onDone, photoCheck }) {
 }
 
 /** 接手任何合作群 (2026-11-09): the groups the admin linked to her by hand that are not her 三方群 (no boss in them, or
- *  her deal has a 三方群 of its own): each says it is drafted in, and 「不接了」 stops it (deal action ``group_unlink``). */
+ *  her deal has a 三方群 of its own): each says it is drafted in, and 「不接了」 stops it (deal action ``group_unlink``).
+ *  One the bot's own scan linked (群自己接上, ``auto``) says so. */
 function LinkedGroups({ groups, busy, run }) {
   return (
     <div className="stack prm-linked-groups" style={{ gap: 6 }}>
       <b>手动接的群</b>
       {groups.map((g) => (
         <div key={g.chat} className="row prm-linked-group" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-          <span><UsersThree style={{ verticalAlign: -2 }} /> 「{g.name || '（没有群名）'}」（{fmtClock(g.at)} 接手）</span>
+          <span><UsersThree style={{ verticalAlign: -2 }} /> 「{g.name || '（没有群名）'}」（{fmtClock(g.at)} {g.auto ? '机器人自动接的' : '接手'}）</span>
           <span className="f-hint">她在群里说的话照常起草，回复发在群里，群里的人都看得到；别人说的话不起草。</span>
           <button type="button" className="btn sm ghost" disabled={busy}
             onClick={() => run({ action: 'group_unlink', chat: g.chat }, `记下了：「${g.name || '这个群'}」不接了，群里的话不再起草`)}>不接了</button>
@@ -611,9 +612,9 @@ function ThreePartyBlock({ p, d, busy, run }) {
       )}
       {g.state === 'created' && g.by === 'manual' && (
         <>
-          <div><UsersThree style={{ verticalAlign: -2 }} /> 手动接的群（{fmtClock(g.at)} 接手）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
+          <div><UsersThree style={{ verticalAlign: -2 }} /> {g.why === '自动接的群' ? '自动接的群' : '手动接的群'}（{fmtClock(g.at)} 接手）{g.chat_name ? `：微信里叫「${g.chat_name}」` : ''}</div>
           <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <span className="f-hint">运营在微信里接手了这个群（「接群」）：她在群里说的话照常起草，回复发在群里，群里的人都看得到；别人说的话不起草。群里的话也会交给她私聊的草稿。「不接了」：不再起草，它还是她的三方群，机器人只读。</span>
+            <span className="f-hint">{g.why === '自动接的群' ? '群里只有她一位登记过的达人，机器人自己接手了这个群' : '运营在微信里接手了这个群（「接群」）'}：她在群里说的话照常起草，回复发在群里，群里的人都看得到；别人说的话不起草。群里的话也会交给她私聊的草稿。「不接了」：不再起草，它还是她的三方群，机器人只读。</span>
             {unlink}
             {gone}
           </div>
