@@ -241,7 +241,7 @@ def test_a_creator_with_a_linked_group_already_gets_no_second_one_by_itself(bot)
     new_group(bot)
     assert scan(bot) == {**QUIET, "told": 1} and bot.prm.store.boss_group(NEW) is None
     assert told(bot)[-1] == (f"新群「{NEW_NAME}」（3 人）还没接（里面的 小美 已经有接手的群，没自动接）："
-                             f"回「接群 {NEW_NAME}」")
+                             f"回「接群 {NEW_NAME}」；不是合作群就回「不接群 {NEW_NAME}」，以后不再提醒")
     assert scan(bot) == QUIET and len(told(bot)) == 2
     assert bot.say(f"不接群 {GROUP_NAME}").startswith("不接了：")
     assert scan(bot) == {**QUIET, "linked": 1}                       # she has none now: the new one is hers
@@ -282,7 +282,8 @@ def test_two_registered_creators_are_one_question_for_a_person_and_one_line(bot)
     assert bot.prm.boss_groups.auto_scan() == {**QUIET, "asked": 1}
     assert bot.prm.store.boss_group(GROUP) is None and not bot.prm.is_party_group(GROUP)
     assert told(bot) == [f"群「{GROUP_NAME}」（4 人）里有 2 位登记过的达人（小美、测试达人乙），机器人不猜是谁的群，没自动接："
-                         f"回「接群 {GROUP_NAME}」选一位，或者到控制台「合作单」页顶上选；不是合作群就回「不接」或者不用管"]
+                         f"回「接群 {GROUP_NAME}」选一位，或者到控制台「合作单」页顶上选；"
+                         f"不是合作群就回「不接群 {GROUP_NAME}」（以后不再问）"]
     asked_at = bot.clock.now
     assert scan(bot) == QUIET and scan(bot) == QUIET and len(told(bot)) == 1      # once per group
     [shown] = bot.prm.snapshot()["boss_groups"]["manual"]                        # the console's card: until answered
@@ -323,6 +324,8 @@ def test_a_persons_bu_jie_on_the_scans_question_is_remembered(bot):
     bot.prm.boss_groups.auto_scan()
     assert bot.prm.boss_groups.ignore(GROUP) == {"ok": True}
     assert bot.prm.boss_groups.asked_by_scan(GROUP) is None and GROUP in kept(bot)["no"]
+    bot.clock.now += 31 * 86400                                       # (a month and more: the clean-ups ran)
+    bot.prm.purge_due()
     bot.backend.groups[GROUP]["members"] = [ME, CREATOR, BD]          # (the other creator left: she alone now)
     bot.backend.active[GROUP] = bot.clock.now
     assert scan(bot) == QUIET and bot.prm.store.boss_group(GROUP) is None and len(told(bot)) == 1
@@ -336,7 +339,7 @@ def test_the_admins_bu_jie_in_wechat_is_remembered_too(clock, tmp_path):
     try:
         b.prm.boss_groups.auto_scan()
         assert b.say(f"接群 {GROUP_NAME}").startswith(f"群「{GROUP_NAME}」（4 人）里谁是达人？")
-        assert b.say("不接") == f"好的，群「{GROUP_NAME}」不接了"
+        assert b.say("不接") == f"好的，群「{GROUP_NAME}」不接了，以后也不自动接（要接再发「接群 {GROUP_NAME}」）"
         assert GROUP in kept(b)["no"]
         b.prm.register(CREATOR, "小美", "测试达人")                    # she alone is a creator there now
         b.backend.active[GROUP] = b.clock.now
@@ -381,7 +384,8 @@ def test_a_group_that_appears_after_the_switch_went_on_is_told_once(clock, tmp_p
         b.prm.boss_groups.auto_scan()
         new_group(b, members=(ME, TESTER, BD))
         assert scan(b) == {**QUIET, "told": 1}
-        assert told(b) == [f"新群「{NEW_NAME}」（3 人）还没接：回「接群 {NEW_NAME}」"]
+        assert told(b) == [f"新群「{NEW_NAME}」（3 人）还没接：回「接群 {NEW_NAME}」；"
+                           f"不是合作群就回「不接群 {NEW_NAME}」，以后不再提醒"]
         b.backend.active[NEW] = b.clock.now + 30                     # more is said there: never told twice
         assert scan(b) == QUIET and scan(b) == QUIET and len(told(b)) == 1
         assert b.prm.store.boss_group(NEW) is None                   # nothing was done by itself
@@ -397,7 +401,8 @@ def test_a_group_from_before_that_becomes_active_is_told_once(clock, tmp_path):
         b.clock.now += 600
         b.backend.active[GROUP] = b.clock.now                        # somebody writes in her team's old group
         assert scan(b) == {**QUIET, "told": 1}
-        assert told(b) == [f"群「{GROUP_NAME}」（4 人）有新消息，还没接：回「接群 {GROUP_NAME}」"]
+        assert told(b) == [f"群「{GROUP_NAME}」（4 人）有新消息，还没接：回「接群 {GROUP_NAME}」；"
+                           f"不是合作群就回「不接群 {GROUP_NAME}」，以后不再提醒"]
         b.backend.active[GROUP] = b.clock.now + 60
         assert scan(b) == QUIET and len(told(b)) == 1
     finally:
@@ -473,6 +478,8 @@ def test_a_group_a_person_stopped_is_never_linked_again_by_the_scan(clock, tmp_p
         assert b.prm.store.boss_group(GROUP)["state"] == "gone" and not b.prm.is_party_group(GROUP)
         if how != "group_none":
             assert names(b, deal["id"])[-1] == "自动接的群不接了（运营说的），群里她的消息不再起草"
+        b.clock.now += 31 * 86400                                    # (a month and more: the clean-ups ran)
+        b.prm.purge_due()
         b.backend.active[GROUP] = b.clock.now + 30                   # she writes there again
         for _ in range(3):
             assert scan(b) == QUIET
@@ -503,9 +510,11 @@ def test_with_the_switch_off_nothing_changes_at_all(clock, tmp_path):
             "enabled": False, "why_not": "", "warning": "", "boss": [BOSS], "boss_call": "老板", "pending": [],
             "waiting": 0, "linked": 0}
         assert b.prm.handle(gmsg(b, "有人吗")) is False               # her line in the group: silent, as before
-        # a person's 「不接」 keeps nothing either, and 接群 by hand works as ever
+        # a person's 「不接」 is the one thing kept (review 2026-11-11 #6: a person's word, for when the switch goes on;
+        # nothing else of the scan's), and 接群 by hand works as ever
         b.say(f"接群 {GROUP_NAME}")
-        assert b.say("不接") == f"好的，群「{GROUP_NAME}」不接了" and b.prm.store.meta_value(bg.AUTO_STATE) is None
+        assert b.say("不接").startswith(f"好的，群「{GROUP_NAME}」不接了，以后也不自动接")
+        assert list(kept(b)["no"]) == [GROUP] and kept(b)["at"] is None and kept(b)["owed"] == []
         b.say(f"接群 {GROUP_NAME}")
         assert b.say("是 1").startswith(f"接手了：群「{GROUP_NAME}」→ 小美（已登记）")
         assert b.prm.store.boss_group(GROUP)["manual"] == 1
@@ -786,11 +795,13 @@ def test_one_groups_trouble_never_stops_the_others(bot, caplog):
     {"state": "failed", "by": "console", "why": "没建成"}])
 def test_a_deal_that_has_a_three_party_group_already_keeps_it_as_a_link_by_hand_does(clock, tmp_path, group):
     """What ``_link`` does for a link by hand holds for the scan's own: a deal with a 三方群 made or unsure (its id not
-    known: 「建好了」 by hand, a 「拉三方群」 that ended unsure) keeps it as it is, and the group is linked besides (the
-    console lists it with her deal); one whose 「拉三方群」 failed has none, so a group with a boss in it becomes it."""
+    known: 「建好了」 by hand, a 「拉三方群」 that ended unsure) keeps it as it is, and a group with no boss in it is linked
+    besides (the console lists it with her deal); one whose 「拉三方群」 failed has none, so a group with a boss in it
+    becomes it.  (A group with a boss in it while hers is unsure or marked by hand: asked, never linked by itself.)"""
     b = setup(clock, tmp_path)
     try:
-        b.backend.groups[GROUP]["members"] = [ME, CREATOR, BOSS_ID, BD]
+        b.backend.groups[GROUP]["members"] = ([ME, CREATOR, BOSS_ID, BD] if group["state"] == "failed"
+                                              else [ME, CREATOR, BD])
         deal = b.prm.store.deal_of(b.her["id"])
         was = {**group, "at": b.clock.now - 3600}
         b.prm.store.update_deal(deal["id"], b.clock.now, three_party=was)
@@ -914,5 +925,199 @@ def test_a_group_linked_by_hand_needs_no_confirmation(clock, tmp_path):
         b.prm.handle(gmsg(b, "在吗"))
         _, packet = drafted(b)
         assert (packet["status"], packet["route"]) == ("approved", "night")
+    finally:
+        stop(b)
+
+
+# ── review 2026-11-11 #3: a person's 「这个群不是达人」 outlives its row ─────────
+
+def test_this_group_is_no_creators_on_the_boss_card_is_kept_after_the_row_is_dropped(clock, tmp_path):
+    """The 「老板拉的群」 card's 「这个群不是达人」: its row is dropped IGNORED_KEEP_DAYS later; the scan that links groups by
+    itself still never links the group, though a creator registered in it since."""
+    b = setup(clock, tmp_path, on=True, register=False)
+    try:
+        b.prm.boss_groups.sweep()
+        t = b.clock.now
+        b.backend.groups[OTHER] = {"name": "测试群X", "members": [ME, BOSS_ID, TESTER, BD], "joined_at": t,
+                                   "history_complete": True, "created_at": t}
+        b.backend.active[OTHER] = t
+        b.clock.now += bg.BOSS_SCAN_SEC + 1
+        b.prm.boss_groups.sweep()
+        assert b.prm.store.boss_group(OTHER)["state"] == "pending"
+        assert b.prm.boss_groups.ignore(OTHER) == {"ok": True}
+        b.clock.now += (bg.IGNORED_KEEP_DAYS + 1) * 86400
+        b.prm.purge_due()
+        assert b.prm.store.boss_group(OTHER) is None and OTHER in kept(b)["no"]
+        b.prm.register(TESTER, "测试达人二号", "测试")
+        b.backend.active[OTHER] = b.clock.now
+        b.clock.now += bg.BOSS_SCAN_SEC + 1
+        b.prm.boss_groups.sweep()
+        assert b.prm.store.boss_group(OTHER) is None and not b.prm.is_party_group(OTHER)
+    finally:
+        stop(b)
+
+
+# ── review #4: her 三方群 unsure or marked by hand, a boss in the group: a person decides ──
+
+@pytest.mark.parametrize("state", ["unsure", "created"])
+def test_the_group_that_may_be_her_unsure_three_party_group_is_asked_about(clock, tmp_path, state):
+    """「拉三方群」 makes exactly this group: us, her and the boss.  It ended unsure (or a person marked 「建好了」 with no
+    group id): this may be that very group.  The scan, as strict as the boss scan, does not link it: the console asks and
+    the admin is told once; her deal keeps its 三方群 as it was."""
+    b = setup(clock, tmp_path)
+    try:
+        b.backend.groups[GROUP]["members"] = [ME, CREATOR, BOSS_ID]
+        deal = b.prm.store.deal_of(b.her["id"])
+        was = {"state": state, "by": "console", "at": b.clock.now - 60}
+        b.prm.store.update_deal(deal["id"], b.clock.now, three_party=was)
+        assert b.prm.boss_groups.auto_scan() == {**QUIET, "asked": 1}
+        assert b.prm.store.boss_group(GROUP) is None and b.prm.store.deal(deal["id"])["three_party"] == was
+        ask = b.prm.boss_groups.asked_by_scan(GROUP)
+        assert ask["why"] == bg.AUTO_THREE_DOUBT
+        [line] = told(b)
+        assert "她的三方群还没认出是哪个群" in line and "没自动接" in line
+        assert scan(b) == QUIET and len(told(b)) == 1
+    finally:
+        stop(b)
+
+
+# ── review #5: an auto-registered new friend is a certain creator only once a person treated her as one ──
+
+FRIEND = "wxid_newfriend09"               # a new friend the bot registered by itself (PRM_AUTO_REGISTER)
+
+
+def auto_registered(b, wxid=FRIEND, name="新好友测试"):
+    party = b.prm.store.add_party(wxid, name, "自动登记（新好友）", auto=True)
+    assert party["auto_registered"]
+    return party
+
+
+@pytest.mark.parametrize("treated", ["", "note", "sample", "sent", "stage"])
+def test_an_auto_registered_new_friend_is_the_one_creator_only_once_a_person_treated_her_as_one(clock, tmp_path,
+                                                                                                treated):
+    """The real setup: most creators are friends the bot registered by itself; so is a colleague or a supplier who added
+    the account.  A group whose one registered member is such a friend nobody treated as a creator is asked about, never
+    linked by itself.  Any of these says a person did: a draft note, a sample order on her deal, a draft of hers a person
+    sent, a stage a person set."""
+    b = setup(clock, tmp_path, register=False)
+    try:
+        party = auto_registered(b)
+        deal = b.prm.store.deal_of(party["id"])
+        if treated == "note":
+            assert b.prm.set_draft_note(deal["id"], "她做直播，主推帽子")["ok"]
+        elif treated == "sample":
+            b.prm.store.add_sample_order("YP0000000009", packet_id=0, deal_id=deal["id"], party_id=party["id"],
+                                         made_at=b.clock.now, now=b.clock.now)
+        elif treated == "sent":
+            packet_id = b.prm.store.add_packet(
+                deal_id=deal["id"], party_id=party["id"], job_id=None, chat_id=TESTER, kind="faq", text="您好～",
+                attachments=[], intent="", slots={}, stage_proposal="", needs_attention=False, reason="",
+                status="sending", route="review", decided_at=b.clock.now, meta={}, now=b.clock.now)
+            assert b.prm.store.mark_sent(packet_id, b.clock.now)
+        elif treated == "stage":
+            assert b.prm.deal_action("stage", {"deal_id": deal["id"], "stage": "agreed"})["ok"]
+        new_group(b, members=(ME, FRIEND, "wxid_guest01"), name="内部运营群")
+        out = b.prm.boss_groups.auto_scan()
+        if treated:
+            assert out["linked"] == 1 and b.prm.store.boss_group(NEW)["party_id"] == party["id"]
+        else:
+            assert out["linked"] == 0 and out["asked"] == 1 and b.prm.store.boss_group(NEW) is None
+            assert b.prm.boss_groups.asked_by_scan(NEW)["why"] == bg.AUTO_NEW_FRIEND_DOUBT
+            assert "她是新好友自动登记的" in told(b)[-1]
+    finally:
+        stop(b)
+
+
+def test_a_creator_an_operator_registered_needs_nothing_more(bot):
+    assert not bot.her.get("auto_registered") and bot.prm.boss_groups.auto_scan()["linked"] == 1
+
+
+# ── review #6: 「不接群 <群名>」 refuses a group not linked; a bare 「不接」 only its own question's ──
+
+def test_the_two_creator_notices_refusal_works_as_it_says(bot):
+    bot.prm.register(SECOND, "测试达人乙", "测试")
+    bot.backend.groups[GROUP]["members"] = [ME, CREATOR, SECOND, BD]
+    assert bot.prm.boss_groups.auto_scan()["asked"] == 1
+    assert f"不是合作群就回「不接群 {GROUP_NAME}」" in told(bot)[-1]
+    assert bot.say(f"不接群 {GROUP_NAME}") == f"已记下：「{GROUP_NAME}」以后不自动接；要接再发「接群 {GROUP_NAME}」"
+    assert GROUP in kept(bot)["no"] and bot.prm.boss_groups.asked_by_scan(GROUP) is None
+    assert "manual" not in bot.prm.snapshot()["boss_groups"]
+    bot.backend.groups[GROUP]["members"] = [ME, CREATOR, BD]          # (one creator now: still never by itself)
+    bot.backend.active[GROUP] = bot.clock.now
+    assert scan(bot) == QUIET and not bot.prm.is_party_group(GROUP)
+    assert bot.say("不接群 没有这个群") == "没有叫「没有这个群」的群（要和微信里的群名一样，不管空格和大小写）"
+
+
+def test_a_bare_bu_jie_never_refuses_the_group_the_scan_asked_about(clock, tmp_path):
+    """The admin asked about another group by hand a moment ago; the scan asks about her team's group: 「不接」 drops the
+    admin's own question (and says the refusal lasts), never the scan's; with no question of the admin's own it is no
+    command at all."""
+    b = setup(clock, tmp_path)
+    try:
+        b.prm.register(SECOND, "测试达人乙", "测试")
+        new_group(b, members=(ME, TESTER, BD))
+        assert b.say(f"接群 {NEW_NAME}").startswith(f"群「{NEW_NAME}」")
+        b.backend.groups[GROUP]["members"] = [ME, CREATOR, SECOND, BD]
+        assert b.prm.boss_groups.auto_scan()["asked"] == 1
+        assert b.say("不接") == f"好的，群「{NEW_NAME}」不接了，以后也不自动接（要接再发「接群 {NEW_NAME}」）"
+        assert set(kept(b)["no"]) == {NEW} and b.prm.boss_groups.asked_by_scan(GROUP) is not None
+    finally:
+        stop(b)
+    b = setup(clock, tmp_path)
+    try:
+        b.prm.register(SECOND, "测试达人乙", "测试")
+        b.backend.groups[GROUP]["members"] = [ME, CREATOR, SECOND, BD]
+        assert b.prm.boss_groups.auto_scan()["asked"] == 1
+        assert b.say("不接") is None and kept(b)["no"] == {}           # (free words: no question of the admin's)
+    finally:
+        stop(b)
+
+
+def test_a_refusal_is_kept_with_the_switch_off_too(clock, tmp_path):
+    b = setup(clock, tmp_path, auto=False)
+    try:
+        b.say(f"接群 {GROUP_NAME}")
+        assert b.say("不接").startswith(f"好的，群「{GROUP_NAME}」不接了，以后也不自动接")
+        assert GROUP in kept(b)["no"]
+    finally:
+        stop(b)
+
+
+# ── review #10 ────────────────────────────────────────────────────────────────
+
+def test_one_active_and_one_stopped_creator_is_asked_about(clock, tmp_path):
+    b = setup(clock, tmp_path)
+    try:
+        other = b.prm.register(SECOND, "测试达人乙", "测试")
+        b.prm.set_active(other["id"], False)
+        b.backend.groups[GROUP]["members"] = [ME, CREATOR, SECOND]
+        assert b.prm.boss_groups.auto_scan() == {**QUIET, "asked": 1}
+        assert b.prm.boss_groups.asked_by_scan(GROUP)["why"] == bg.AUTO_STOPPED_DOUBT
+        assert b.prm.store.boss_group(GROUP) is None
+    finally:
+        stop(b)
+
+
+def test_lines_queued_while_it_was_on_are_dropped_once_it_is_off(clock, tmp_path):
+    b = setup(clock, tmp_path)
+    try:
+        b.prm.store.set_meta_value(bg.AUTO_STATE, json.dumps({"at": 1.0, "base": [], "told": {}, "asked": {}, "no": {},
+                                                              "owed": [[GROUP, "群「测试」还没接：回「接群 测试」"]]}))
+        b.prm._config.prm_groups_auto_link = "off"
+        bg.BossGroups(b.prm.store, b.prm._config, clock=b.clock)
+        assert kept(b)["owed"] == [] and kept(b)["at"] == 1.0
+    finally:
+        stop(b)
+
+
+def test_a_name_too_long_to_quote_points_at_the_list(clock, tmp_path):
+    long = "测试" * 40                                                # (80 characters: kept as its first 60)
+    b = setup(clock, tmp_path, register=False)
+    try:
+        b.prm.boss_groups.auto_scan()
+        new_group(b, members=(ME, TESTER), name=long)
+        scan(b)
+        [line] = told(b)
+        assert "发「接群」从单子里选它" in line and f"接群 {long[:60]}" not in line and "不接群" not in line
     finally:
         stop(b)

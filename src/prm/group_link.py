@@ -248,10 +248,12 @@ class GroupLinks:
             return "现在没有在等你回答的「接群」"
         if self._service.boss_groups.offered(asked["chat"]) is None:
             return self._not_open(asked)
-        # (``_asked`` stays: a 「是 N」 after it says so; 群自己接上: the scan leaves a group a person refused alone)
+        # (``_asked`` stays: a 「是 N」 after it says so; 群自己接上: the scan leaves a group a person refused alone; review
+        # 2026-11-11 #6: only the group the admin's own question is about, never one the scan asked about)
         self._service.boss_groups.decline(asked["chat"])
         logger.info("PRM: group %s…: the question who she is was dropped (the admin)", asked["chat"][:8])
-        return f"好的，群「{asked['name']}」不接了"
+        again = f"「接群 {asked['name']}」" if asked["name"] != NO_NAME else "「接群」"
+        return f"好的，群「{asked['name']}」不接了，以后也不自动接（要接再发{again}）"
 
     def admin_confirm(self, name: str) -> str:
         """「确认接群 群名」 (群自己接上, review 2026-11-11 #2): a group the scan linked by itself is hers (BossGroups
@@ -291,7 +293,7 @@ class GroupLinks:
         bg, store = service.boss_groups, service.store
         rows = [r for r in store.boss_groups((LINKED,)) if bg.is_linked(r["chat"]) and _key(r["name"]) == _key(name)]
         if not rows:
-            return f"没有接手叫「{name}」的群"
+            return self._refuse(name)
         if len(rows) > 1:
             return f"有 {len(rows)} 个接手的群叫「{name}」：到控制台她的合作单上点「不接了」"
         row = rows[0]
@@ -310,6 +312,28 @@ class GroupLinks:
                     f"（合作单和私聊照旧）{unsent}")
         return (f"不接了：群「{row['name']}」里她的话不再起草，群里的话和别的群一样不回（{who}合作单和私聊照旧）"
                 f"{unsent}")
+
+    def _refuse(self, name: str) -> str:
+        """「不接群 群名」 of a group that is not linked (review 2026-11-11 #6): the scan that links groups by itself is
+        never to link it, ask or tell about it (BossGroups ``refuse``; the admin's own 「接群」 still links it)."""
+        read = self._reader()
+        if read is None:
+            return f"没有接手叫「{name}」的群"
+        found = read(0, name=name)
+        if found is None:
+            return NO_READ
+        free = [g for g in found if not self._service.boss_groups.is_linked(g["chat"])]
+        if not free:
+            return f"没有叫「{name}」的群（要和微信里的群名一样，不管空格和大小写）"
+        if len(free) > 1:
+            return f"有 {len(free)} 个群叫「{name}」：到控制台「合作单」页顶上的卡片里点「不接」，或者先给群改个不一样的名字"
+        group = free[0]
+        self._service.boss_groups.refuse(group["chat"])
+        if self._asked is not None and self._asked.get("chat") == group["chat"]:
+            self._service.boss_groups.withdraw(group["chat"])
+        shown = group.get("name") or name
+        logger.info("PRM: group %s…: the admin says it is not to be linked by itself", str(group["chat"])[:8])
+        return f"已记下：「{shown}」以后不自动接；要接再发「接群 {shown}」"
 
     # ── helpers ──────────────────────────────────────────────────────────
 

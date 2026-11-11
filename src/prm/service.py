@@ -2347,7 +2347,8 @@ class PrmService:
         party = info.get("party")
         raw = " ".join(str(info.get("name") or "").split())
         name = review.shown(raw, party)
-        exact = bool(name) and name == raw
+        # (a name cut short, review 2026-11-11 #10: the 「接群」 commands would not find it: the list or the console)
+        exact = bool(name) and name == raw and not info.get("long")
         group = f"群「{name}」" if name else NO_GROUP_NAME
         size = f"（{info['size']} 人）" if info.get("size") else ""
         pick = f"回「接群 {name}」" if exact else "发「接群」从单子里选它"
@@ -2359,19 +2360,21 @@ class PrmService:
             undo = f"不对就回「不接群 {name}」" if exact else "不对就到控制台她的合作单上点这个群的「不接了」"
             sure = (f"对的话回「确认接群 {name}」" if exact else "对的话到控制台她的合作单上点「是她的群」")
             return (f"已自动接群（{AUTO_WHY}）：{said}；{sure}（确认以前、或者你发出去一份以前，这个群的草稿都等你看）；{undo}")
+        refuse = (f"不是合作群就回「不接群 {name}」（以后不再问）" if exact
+                  else "不是合作群就到控制台「合作单」页顶上点「不接」")
         if kind == ASK_NOTICE:
             creators = [review.creator_name(p) for p in info.get("creators") or [] if p]
             if info.get("why"):                # (one creator, but a doubt: BossGroups._auto_doubt)
                 return (f"{group}{size}里有一位登记过的达人（{'、'.join(creators) or '她'}），但{info['why']}，机器人没自动接："
-                        f"{pick}选她，或者到控制台「合作单」页顶上选；不是合作群就回「不接」或者不用管")
+                        f"{pick}选她，或者到控制台「合作单」页顶上选；{refuse}")
             return (f"{group}{size}里有 {len(creators)} 位登记过的达人（{'、'.join(creators)}），机器人不猜是谁的群，没自动接："
-                    f"{pick}选一位，或者到控制台「合作单」页顶上选；不是合作群就回「不接」或者不用管")
+                    f"{pick}选一位，或者到控制台「合作单」页顶上选；{refuse}")
         why = f"（里面的 {review.creator_name(party)} 已经有接手的群，没自动接）" if party else ""
         if kind == NEW_NOTICE:
             head = f"新{group}{size}" if name else f"{NO_GROUP_NAME}{size}是新的，"
         else:
             head = f"{group}{size}有新消息，"
-        return f"{head}还没接{why}：{pick}"
+        return f"{head}还没接{why}：{pick}" + (f"；不是合作群就回「不接群 {name}」，以后不再提醒" if exact else "")
 
     def _link_catch_up(self, party: dict, chat: str, since: float) -> Optional[dict]:
         """接手任何合作群 (src/prm/group_link.py; BossGroups.link, ``catch_up``): what was said in a group an operator just

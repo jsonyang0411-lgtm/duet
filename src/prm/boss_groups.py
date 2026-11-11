@@ -118,8 +118,9 @@ from contextlib import nullcontext
 from typing import Callable, Optional
 
 from ..edge import text as edge_text
+from . import gates
 from ..wechat.new_friends import is_me
-from .store import PartyError
+from .store import SENT, PartyError
 from .three_party import _SPLIT as NAMES_SPLIT, CREATED, CREATING, NOTICE as GROUP_NOTICE, UNSURE, group_with
 
 logger = logging.getLogger(__name__)
@@ -205,6 +206,13 @@ AUTO_GONE_WHY = "她不是在用的达人了"
 AUTO_HAS_GROUP, AUTO_PURGED, AUTO_MAKING = "group", "purged", "making"   # why the one creator is not linked by itself
 # ... and why the one creator is asked about instead (the console's question, one WeChat line: ``_auto_doubt``)
 AUTO_OURS_DOUBT = "PRM_GROUP_OURS 里有名字还没认出来，分不清群里谁是我们自己的人"
+# (review 2026-11-11 #4) her deal's 三方群 is unsure, or marked 「建好了」 by hand with no group id, and a boss is in this
+# group: it may be that very group (the boss scan is as strict: ``_has_group``)
+AUTO_THREE_DOUBT = "她的三方群还没认出是哪个群（「拉三方群」拿不准建没建成、或者是手动标的「建好了」），这个群里有老板，可能就是它"
+# (review #5) she was registered by the bot as a new friend (PRM_AUTO_REGISTER) and nobody treated her as a creator yet
+AUTO_NEW_FRIEND_DOUBT = "她是新好友自动登记的，还没人确认过她是达人（没人发过她的草稿、改过阶段、写过起草备注，也没有寄样单）"
+# (review #10) a creator an operator stopped (停用) is in it too
+AUTO_STOPPED_DOUBT = "群里还有一位停用过的达人"
 SCAN = "scan"                      # an open question's ``by``: the scan asks (``asked_by_scan``), not the admin
 LINKED_NOTICE, ASK_NOTICE, NEW_NOTICE, ACTIVE_NOTICE = "linked", "ask", "new", "active"   # ``notice``'s kinds
 # 她那边的人 (PRM_GROUP_HER_SIDE, 2026-11-11): before a line of her side's other people in a job's text; who said a line
@@ -500,6 +508,13 @@ class BossGroups:
         self._auto_kept: Optional[dict] = None
         self._auto_tries: dict[tuple, int] = {}
         self._auto_unsaid = False                # no admin's chat to tell: said once in the log
+        if not self._auto:                       # (review 2026-11-11 #10: lines queued while it was on are not kept)
+            try:
+                raw = json.loads(store.meta_value(AUTO_STATE) or "{}")
+            except ValueError:
+                raw = {}
+            if isinstance(raw, dict) and raw.get("owed"):
+                store.set_meta_value(AUTO_STATE, json.dumps({**raw, "owed": []}, ensure_ascii=False, sort_keys=True))
         rows = store.boss_groups((LINKED,))
         live = [r for r in rows if r.get("party_id") and (self._on or r.get("manual"))]
         self._linked = {r["chat"]: int(r["party_id"]) for r in live}
@@ -1795,12 +1810,28 @@ class BossGroups:
         「接群」 still links it.  True when there was a question."""
         target = str(chat or "") if chat is not None else str((self._offer or {}).get("chat") or "")
         had = self.withdraw(chat)
-        if had and self._auto and target:
-            with self._lock:
-                kept = self._auto_state()
-                kept["no"][target] = self._clock()
-                self._auto_save(kept)
+        if had and target:
+            self.refuse(target)                # (review 2026-11-11 #6: whatever the switch says, a person's 「不接」 lasts)
         return had
+
+    def refuse(self, *chats: str) -> None:
+        """A person said these groups are not to be linked by the scan (「不接」, 「不接群 <群名>」 of a group not linked,
+        「这个群不是达人」 whose row is dropped after IGNORED_KEEP_DAYS: ``sweep_old``): kept in ``AUTO_STATE`` ``no`` (a
+        restart keeps it, the switch off too: it is a person's word), its question dropped; an operator's own 「接群」
+        still links it."""
+        chats = [str(c) for c in chats if str(c or "").endswith("@chatroom")]
+        if not chats:
+            return
+        with self._lock:
+            kept = self._auto_state()
+            for chat in chats:
+                kept["no"][chat] = self._clock()
+            self._auto_save(kept)
+        self._asks = {k: v for k, v in self._asks.items() if k not in chats}
+
+    def refused(self, chat: str) -> bool:
+        """Did a person say the scan is not to link this group (``refuse``)?"""
+        return str(chat or "") in self._auto_state()["no"]
 
     def link(self, chat, wxid, *, actor: str = "admin") -> dict:
         """「是 N」 (the admin, src/prm/group_link.py) or the console's 「是她」 on the open question (``offered``): this
@@ -2076,7 +2107,7 @@ class BossGroups:
             return ""
         creators = [m for m in people if m["wxid"] in active]
         offer = {"chat": chat, "name": str(group.get("name") or "")[:NAME_CHARS], "size": size, "at": now,
-                 "deal_id": None, "by": SCAN,
+                 "deal_id": None, "by": SCAN, **({"long": True} if len(str(group.get("name") or "")) > NAME_CHARS else {}),
                  "members": [{**m, "registered": m["wxid"] in active} for m in people],
                  "all": list(found["all"]), "boss": list(found["boss"])}
         if len(creators) > 1:
@@ -2084,7 +2115,7 @@ class BossGroups:
         party = self._store.party_by_wxid(creators[0]["wxid"]) if creators else None
         cannot = self._auto_cannot(party) if party is not None else ""
         if party is not None and not cannot:
-            doubt = self._auto_doubt(party, offer)
+            doubt = AUTO_STOPPED_DOUBT if any(m.get("stopped") for m in people) else self._auto_doubt(party, offer)
             if doubt:                          # (a person says whose it is: never a guess)
                 return self._auto_ask(kept, offer, creators, doubt, held, asks, now)
             return "linked" if self._auto_link(kept, offer, creators[0], party, now) else ""
@@ -2113,10 +2144,33 @@ class BossGroups:
     def _auto_doubt(self, party: dict, offer: dict) -> str:
         """Why the one registered creator of a group is asked about instead of linked by itself ("" = she is linked):
         a name of PRM_GROUP_OURS no one contact has, or not read yet (AUTO_OURS_DOUBT: one of ours may be taken for
-        her side or her)."""
+        her side or her); her deal's 三方群 unsure or marked made with no group id while a boss is in this group
+        (AUTO_THREE_DOUBT, review 2026-11-11 #4: it may be that very group); she was registered by the bot as a new
+        friend and nobody treated her as a creator yet (AUTO_NEW_FRIEND_DOUBT, review #5: ``_treated``)."""
         if self._ours_unknown:
             return AUTO_OURS_DOUBT
+        deal = self._store.deal_of(int(party["id"]), self._clock())
+        group = deal.get("three_party") or {}
+        state = str(group.get("state") or "")
+        if offer.get("boss") and (state == UNSURE or (state == CREATED and not group.get("chat"))):
+            return AUTO_THREE_DOUBT
+        if party.get("auto_registered") and not self._treated(deal):
+            return AUTO_NEW_FRIEND_DOUBT
         return ""
+
+    def _treated(self, deal: dict) -> bool:
+        """Has a person treated this deal's creator as one (review 2026-11-11 #5: an auto-registered new friend counts as a
+        certain creator only then)?  A draft of hers a person decided and that went out (route review, sent), a stage a
+        person set (a ``stage`` event by the console, the admin or WeChat), an 起草备注, or a sample order tied to the deal
+        (聚水潭's, the bot's own or one typed in by hand)."""
+        if str(deal.get("draft_note") or "").strip():
+            return True
+        if self._store.sample_orders(deal_id=int(deal["id"])):
+            return True
+        if any(p.get("route") == gates.REVIEW for p in self._store.deal_packets(int(deal["id"]), statuses=(SENT,))):
+            return True
+        return any(ev.get("actor") not in ("system", "creator")
+                   for ev in self._store.events(int(deal["id"]), limit=200, kinds=("stage",)))
 
     def _auto_read(self, chat: str, last_at: Optional[float], now: float) -> Optional[dict]:
         """Who of this group she may be (``candidates_of``), read now when it was not read this run, could not be read
@@ -2218,7 +2272,11 @@ class BossGroups:
         baseline = self._baseline()
         if baseline is None:
             return 0
+        refused = {r["chat"] for r in self._store.boss_groups((IGNORED,)) if r.get("why") == IGNORE_WHY}
         gone = self._store.delete_boss_groups(state=IGNORED, before=now - IGNORED_KEEP_DAYS * 86400)
+        if set(gone) & refused:
+            # (review 2026-11-11 #3: a person said 「这个群不是达人」: the scan that links groups by itself keeps knowing it)
+            self.refuse(*sorted(set(gone) & refused))
         if gone:
             self._store.set_meta_value(BASELINE, json.dumps(sorted(baseline | set(gone))))
             logger.info("PRM: boss groups: %d ignored group(s) dropped after %d days", len(gone), IGNORED_KEEP_DAYS)
