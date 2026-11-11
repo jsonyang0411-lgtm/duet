@@ -359,6 +359,7 @@ function DealDetail({ p, d, onDone }) {
 
       {d?.three_party?.enabled && <ThreePartyBlock p={p} d={d} busy={busy} run={run} />}
       {(deal.linked_groups || []).length > 0 && <LinkedGroups groups={deal.linked_groups} busy={busy} run={run} />}
+      {deal.reach && <ReachLine reach={deal.reach} />}
 
       <div className="stack" style={{ gap: 6 }}>
         <b>寄样</b>
@@ -509,6 +510,25 @@ function LinkedGroups({ groups, busy, run }) {
       ))}
     </div>
   )
+}
+
+/** PRM_REACH_LAST_SPOKE (2026-11-11; a creator with a linked group): where what the bot starts itself for her would go now
+ *  (a shipping notice, a 专属佣金 step, 写开场白 / 补发货盘 / 做手卡, 签收后问一句) and why (``deal.reach``). */
+const REACH_KINDS = '机器人主动发的消息（发货通知、专属佣金、写开场白、补发货盘、做手卡、签收后问一句）'
+function reachText(r) {
+  if (!r) return ''
+  if (r.where === 'none') return `${REACH_KINDS}现在发不出去：她不是我们的微信好友，也不在接手的群里了。`
+  if (r.where === 'group') {
+    const why = r.why === 'last_spoke' ? '她那边最近是在这个群里说的话' : '她没有和我们的私聊'
+    return `${REACH_KINDS}现在发在群「${r.name || '（没有群名）'}」里：${why}，群里的人都看得到。`
+  }
+  const why = r.why === 'never' ? '她还没说过话' : r.why === 'elsewhere' ? '她最近说话的那个群机器人现在不在里面起草（她退了群，或者群不接了）'
+    : '她最近是在私聊里说的话'
+  return `${REACH_KINDS}现在发在她的私聊里：${why}。`
+}
+
+function ReachLine({ reach }) {
+  return <div className="f-hint prm-reach">{reachText(reach)}</div>
 }
 
 // 做手卡 (PRM_HANDCARDS): the products of her latest 抖店 sample order the bot made are ticked; other 抖店 product ids may be

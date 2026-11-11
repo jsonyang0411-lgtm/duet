@@ -2572,6 +2572,42 @@ class TestPrmPages:
         dialog.wait_for(state="detached")
         assert prm.service.store.packet(2)["status"] == "pending"
 
+    def test_review_and_deals_pages_say_why_what_the_bot_started_goes_to_the_group(self, page, prm):
+        """PRM_REACH_LAST_SPOKE (2026-11-11): a draft the bot started that goes to the group because her side last spoke
+        there (``reach`` "last_spoke") says so on its card, in its tag and in the question before it goes; her deal says
+        where what the bot starts goes now and why (``deal.reach``); a group draft without ``reach`` says nothing of it."""
+        reach = {"where": "group", "name": "小美合作对接群", "why": "last_spoke"}
+
+        def state_of(state):
+            for p in state["pending"] + state["recent"]:
+                if p["id"] == 2:
+                    p.update(channel="group", group_name="小美合作对接群", group_manual=True, reach="last_spoke")
+            for p in state["parties"]:
+                if p["wxid"] == "wxid_creator01" and p.get("deal"):
+                    p["deal"]["reach"] = dict(reach)
+
+        self._serve_prm(page, state_of)
+        page.goto(f"{BASE_URL}/#/review", timeout=10000)
+        card = page.locator(".prm-draft", has=page.locator(".prm-group-tag"))
+        card.wait_for()
+        why = "她那边最近是在这个群里说的话，所以机器人主动发的这一条也发在群里。"
+        assert why in card.locator(".prm-reach-why").inner_text()
+        assert why in card.locator(".prm-group-tag").get_attribute("title")
+        card.locator("button:has-text('发送')").click()
+        dialog = page.locator("[role=dialog]")
+        assert why in dialog.inner_text()
+        dialog.locator("button:has-text('再想想')").click()
+        dialog.wait_for(state="detached")
+        page.goto(f"{BASE_URL}/#/deals", timeout=10000)
+        page.locator("button[aria-label='展开 小美']").click()
+        line = page.locator(".prm-reach")
+        line.wait_for()
+        assert "现在发在群「小美合作对接群」里：她那边最近是在这个群里说的话" in line.inner_text()
+        reach.update(where="private", why="last_private")
+        page.reload()
+        page.locator("button[aria-label='展开 小美']").click()
+        page.locator(".prm-reach", has_text="现在发在她的私聊里：她最近是在私聊里说的话").wait_for()
+
     def test_deals_page_shows_the_boss_group_settings(self, page, prm):
         """老板拉的群's two settings (src/web/advanced_config.py, the PRM side of 功能 U) show in 合作单's settings: the
         switch, and the group size with its range. Runs once that side is merged (src/prm/boss_groups.py exists)."""

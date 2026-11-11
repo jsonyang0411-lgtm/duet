@@ -445,6 +445,13 @@ class BotConfig:
     # drafted as her own line is (her assistant, her 商务: the same job, gates, 下班时段, 自动模式), marked 〔她那边的人〕
     # for the Mac (never that person's name).  "off" (the default): such a line is context only, as before.
     prm_group_her_side: str = "off"
+    # 发在她那边最近说话的地方 (PrmService._reaching, 2026-11-11): "on": what the bot starts itself (a shipping notice, a
+    # 专属佣金 / 专属链接 step, the console's 开场白, 补发货盘 and 做手卡, 签收后问一句) goes to a linked group she is still in
+    # (one the bot drafts in, never a read-only 三方群) when the latest line of her side on the deal (hers; with
+    # prm_group_her_side on her side's other people's too) was in that group, even when she has a private chat with us;
+    # her latest line in private, or none: as before.  Decided when the message is made.  "off" (the default): her private
+    # chat when she has one, else the group, as before.
+    prm_reach_last_spoke: str = "off"
     # === WeChat edge (src/edge, edge-protocol.md) for the Mac business service ===
     # "on": Windows only receives and sends WeChat messages for the creators the Mac lists;
     # the Mac pulls /edge/* on the relay's port with PRM_EDGE_TOKEN.  Not with PRM_COPILOT.
@@ -703,6 +710,8 @@ def _validate_config(kwargs: dict) -> None:
         errors.append(f"PRM_GROUPS_AUTO_LINK must be off or on, got {kwargs.get('prm_groups_auto_link')}")
     if kwargs.get("prm_group_her_side", "off") not in ("off", "on"):
         errors.append(f"PRM_GROUP_HER_SIDE must be off or on, got {kwargs.get('prm_group_her_side')}")
+    if kwargs.get("prm_reach_last_spoke", "off") not in ("off", "on"):
+        errors.append(f"PRM_REACH_LAST_SPOKE must be off or on, got {kwargs.get('prm_reach_last_spoke')}")
     prm_edge = kwargs.get("prm_edge", "off")
     if prm_edge not in ("off", "on"):
         errors.append(f"PRM_EDGE must be off or on, got {prm_edge}")
@@ -870,6 +879,7 @@ def load_config() -> BotConfig:
         "prm_linked_groups_auto": _parse_switch(os.getenv("PRM_LINKED_GROUPS_AUTO", "off")),
         "prm_groups_auto_link": _parse_switch(os.getenv("PRM_GROUPS_AUTO_LINK", "off")),
         "prm_group_her_side": _parse_switch(os.getenv("PRM_GROUP_HER_SIDE", "off")),
+        "prm_reach_last_spoke": _parse_switch(os.getenv("PRM_REACH_LAST_SPOKE", "off")),
         "prm_edge": _parse_switch(os.getenv("PRM_EDGE", "off")),
         "prm_edge_token": os.getenv("PRM_EDGE_TOKEN", "").strip(),
         "edge_url": os.getenv("EDGE_URL", "").strip(),

@@ -833,12 +833,13 @@ class BossGroupsConfigTests(unittest.TestCase):
         self.assertIn("PRM_LINKED_GROUPS_AUTO must be off or on", str(ctx.exception))
 
     def test_groups_auto_link_and_her_side_are_off_by_default_and_only_off_or_on(self):
-        """PRM_GROUPS_AUTO_LINK (the groups link themselves when it is clear whose they are) and PRM_GROUP_HER_SIDE (her
-        team's lines in a linked group count as hers), 2026-11-11: both off by default, the usual yes / no spellings,
-        anything else refused."""
+        """PRM_GROUPS_AUTO_LINK (the groups link themselves when it is clear whose they are), PRM_GROUP_HER_SIDE (her
+        team's lines in a linked group count as hers) and PRM_REACH_LAST_SPOKE (what the bot starts goes where her side
+        last spoke), 2026-11-11: all off by default, the usual yes / no spellings, anything else refused."""
         from src.config import BotConfig, _validate_config, load_config
 
-        for field, name in (("prm_groups_auto_link", "PRM_GROUPS_AUTO_LINK"), ("prm_group_her_side", "PRM_GROUP_HER_SIDE")):
+        for field, name in (("prm_groups_auto_link", "PRM_GROUPS_AUTO_LINK"), ("prm_group_her_side", "PRM_GROUP_HER_SIDE"),
+                            ("prm_reach_last_spoke", "PRM_REACH_LAST_SPOKE")):
             self.assertEqual(getattr(BotConfig(), field), "off")
             for env, want in (({}, "off"), ({name: "on"}, "on"), ({name: "yes"}, "on"), ({name: "0"}, "off")):
                 with patch.dict(os.environ, env, clear=True):

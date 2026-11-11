@@ -151,6 +151,9 @@ BASELINE_AT = "boss_groups_baseline_at"
 PENDING, WAITING, LINKED, IGNORED, GONE = "pending", "waiting", "linked", "ignored", "gone"
 STATES = (PENDING, WAITING, LINKED, IGNORED, GONE)
 CHANNEL = "group"                  # a group job's and packet's ``meta.channel``
+# ... and its ``meta.reach`` when PRM_REACH_LAST_SPOKE sent what the bot started itself there (PrmService ``_reaching``:
+# the latest line of her side on the deal was in that group, though she may have a private chat with us)
+REACH_LAST_SPOKE = "last_spoke"
 OPENING_HOW = "boss_group"         # the group 开场白's ``meta.opening`` ({"how", "by"} both this)
 EVENT = "boss_group"               # the deal's record 「老板拉群介绍（群名）」
 LEFT_NOTICE = "boss_group_left:"   # + the group id: the deal's notice while she is not in the group
@@ -631,19 +634,27 @@ class BossGroups:
         return self.party_has_group(party.get("id")) or str(party.get("wxid") or "") in self._taking
 
     def reach_group(self, party_id) -> Optional[dict]:
-        """The newest group the bot took over for this creator that she is still in (no ``LEFT_NOTICE`` on her deal), or
-        None: where a packet the bot starts itself goes when she has no private chat with us (PrmService ``_reach``).
-        Only a group the bot reads and drafts in now (``is_linked``: a row the scan took over while PRM_BOSS_GROUPS was
-        on is none while it is off, review 2026-11-09)."""
+        """The newest group the bot took over for this creator that she is still in (``reach_groups``' first), or None:
+        where a packet the bot starts itself goes when she has no private chat with us (PrmService ``_reaching``)."""
+        groups = self.reach_groups(party_id)
+        return groups[0] if groups else None
+
+    def reach_groups(self, party_id) -> list:
+        """The groups the bot took over for this creator that she is still in (no ``LEFT_NOTICE`` on her deal), the
+        newest first: the ones a packet the bot starts itself may go to (PrmService ``_reaching``; PRM_REACH_LAST_SPOKE:
+        the one where her side last spoke).  Only a group the bot reads and drafts in now (``is_linked``: a row the scan
+        took over while PRM_BOSS_GROUPS was on is none while it is off, review 2026-11-09; a deal's read-only 三方群 has no
+        such row)."""
         if not self.party_has_group(party_id):
-            return None
+            return []
+        out = []
         for row in self._store.boss_groups((LINKED,)):
             if int(row.get("party_id") or 0) != int(party_id) or row["chat"] not in self._linked:
                 continue
             deal = self._store.deal(int(row.get("deal_id") or 0)) or {}
             if not any(n.get("key") == LEFT_NOTICE + row["chat"] for n in deal.get("notices") or []):
-                return row
-        return None
+                out.append(row)
+        return out
 
     def knows_private(self, wxid: str) -> bool:
         """Does the backend have her private chat (she is our friend)?  Its quiet ``has_private_chat`` (no log), its

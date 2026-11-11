@@ -95,9 +95,11 @@ def test_her_assistants_line_is_drafted_as_hers_and_the_mac_is_told_whose_it_is(
     # that person's name and wxid never go to the Mac; the log has an id's first characters only
     assert "测试商务" not in json.dumps([job["text"], meta], ensure_ascii=False) and BD not in job["meta"]
     assert "测试商务" not in caplog.text and BD not in caplog.text and "a line of her side" in caplog.text
-    # her deal hears it as a line of hers there (what counts as answered, the recall window)
+    # her deal hears it as a line of her side there (the recall window; kept apart from her own lines, under 「side:」:
+    # where her side last spoke counts it only while the switch is on, PRM_REACH_LAST_SPOKE)
     deal = bot.prm.store.deal_of(party["id"])
-    assert deal["last_by_chat"][GROUP] == bot.clock.now
+    assert deal["last_by_chat"] == {"side:" + GROUP: bot.clock.now} and deal["last_message_at"] == bot.clock.now
+    assert bot.prm._her_last(deal, GROUP) == bot.clock.now
     # the draft goes to the group, by the rules of a group linked by hand (it waits; a person sends it)
     _, packet = drafted(bot, "好的老师～链接这边马上安排")
     assert (packet["chat_id"], packet["status"], packet["route"]) == (GROUP, "pending", "review")

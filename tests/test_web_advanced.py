@@ -219,8 +219,11 @@ class AdvancedPostTests(_TempEnv):
         for key in ("PRM_BOSS_GROUP_MAX", "PRM_BOSS_CALL"):
             self.assertEqual(fields[key]["requires"][0]["key"], "PRM_BOSS_GROUPS")
         prm = next(g for g in groups if g["id"] == "prm")
-        # (after them: PRM_LINKED_GROUPS_AUTO, and 2026-11-11's PRM_GROUPS_AUTO_LINK and PRM_GROUP_HER_SIDE)
-        self.assertEqual([f["key"] for f in prm["fields"]][-6:-3], ["PRM_BOSS_GROUPS", "PRM_BOSS_CALL", "PRM_BOSS_GROUP_MAX"])
+        # (after them: PRM_LINKED_GROUPS_AUTO, and 2026-11-11's group switches)
+        keys = [f["key"] for f in prm["fields"]]
+        at = keys.index("PRM_BOSS_GROUPS")
+        self.assertEqual(keys[at:at + 4], ["PRM_BOSS_GROUPS", "PRM_BOSS_CALL", "PRM_BOSS_GROUP_MAX",
+                                           "PRM_LINKED_GROUPS_AUTO"])
         for key, value in (("PRM_BOSS_GROUP_MAX", "2"), ("PRM_BOSS_GROUP_MAX", "21"), ("PRM_BOSS_GROUPS", "maybe"),
                            ("PRM_BOSS_CALL", "一二三四五六七八九十一")):
             status, body = _request("/api/advanced", "POST", {"values": {key: value}})
@@ -239,7 +242,8 @@ class AdvancedPostTests(_TempEnv):
 
         groups = _request("/api/advanced")[1]["groups"]
         prm = next(g for g in groups if g["id"] == "prm")
-        field = prm["fields"][-3]
+        keys = [f["key"] for f in prm["fields"]]
+        field = prm["fields"][keys.index("PRM_BOSS_GROUP_MAX") + 1]
         self.assertEqual((field["key"], field["type"], field["value"]), ("PRM_LINKED_GROUPS_AUTO", "onoff", "off"))
         self.assertEqual(field["requires"][0]["key"], "PRM_COPILOT")
         self.assertIn("一律等你看过再发", field["help"])
@@ -257,7 +261,9 @@ class AdvancedPostTests(_TempEnv):
 
         groups = _request("/api/advanced")[1]["groups"]
         prm = next(g for g in groups if g["id"] == "prm")
-        link, side = prm["fields"][-2:]
+        keys = [f["key"] for f in prm["fields"]]
+        at = keys.index("PRM_LINKED_GROUPS_AUTO") + 1
+        link, side = prm["fields"][at:at + 2]
         self.assertEqual((link["key"], link["type"], link["value"]), ("PRM_GROUPS_AUTO_LINK", "onoff", "off"))
         self.assertEqual((side["key"], side["type"], side["value"]), ("PRM_GROUP_HER_SIDE", "onoff", "off"))
         for field in (link, side):
@@ -271,6 +277,23 @@ class AdvancedPostTests(_TempEnv):
             self.assertEqual(list(body["errors"]), [key], body)
             self.assertEqual(adv.validate_updates({key: "on"}, {}), {})
             self.assertEqual(adv.normalize(key, "yes"), "on")
+
+    def test_reach_last_spoke_is_the_copilots_last_switch_off_by_default(self):
+        """PRM_REACH_LAST_SPOKE (2026-11-11): what the bot starts itself goes where her side last spoke; an on/off switch
+        at the end of the copilot's settings, off by default, used with the copilot on; a bad value is refused on its own
+        field."""
+        from src.web import advanced_config as adv
+
+        groups = _request("/api/advanced")[1]["groups"]
+        prm = next(g for g in groups if g["id"] == "prm")
+        field = prm["fields"][-1]
+        self.assertEqual((field["key"], field["type"], field["value"]), ("PRM_REACH_LAST_SPOKE", "onoff", "off"))
+        self.assertEqual([r["key"] for r in field["requires"]], ["PRM_COPILOT"])
+        self.assertIn("最近一句话", field["help"])
+        status, body = _request("/api/advanced", "POST", {"values": {"PRM_REACH_LAST_SPOKE": "maybe"}})
+        self.assertFalse(body["ok"])
+        self.assertEqual(list(body["errors"]), ["PRM_REACH_LAST_SPOKE"], body)
+        self.assertEqual(adv.validate_updates({"PRM_REACH_LAST_SPOKE": "on"}, {}), {})
 
     def test_wechat_review_is_shown_after_auto_register_off_by_default(self):
         """PRM_WECHAT_REVIEW (微信里审批草稿, src/prm/wechat_review.py, 2026-11-09): an on/off switch right after

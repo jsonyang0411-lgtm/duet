@@ -151,7 +151,7 @@ from ..admin import HELP_COMMANDS
 from ..relay.commands import ALLOW_WORDS, DENY_WORDS, prefix_pattern
 from ..relay.service import MAX_AGE_SEC
 from . import contact, deals, draft_context, handcards, pii, platforms, retention
-from .boss_groups import CHANNEL as GROUP_CHANNEL
+from .boss_groups import CHANNEL as GROUP_CHANNEL, REACH_LAST_SPOKE
 from .store import (APPROVED, BUYIN_TOOL, COPILOT, DROPPED, EXECUTING, FAILED, MESSAGE_TOOL, NO_REPLY, PENDING, SENDING,
                     SENT, SUPERSEDED, PrmStore)
 
@@ -1334,6 +1334,9 @@ class WechatReview:
             # (a group an operator linked by hand, 接手任何合作群: no boss need be there, the console says 「群「…」」 too)
             lines.append("（发在群里，不是她的私聊：群里的人都看得到）" if meta.get("group_manual")
                          else "（发在老板拉的群里，不是她的私聊：老板和群里的人都看得到）")
+            if meta.get("reach") == REACH_LAST_SPOKE:
+                # (PRM_REACH_LAST_SPOKE: one the bot started goes there because her side last spoke there)
+                lines.append("（她那边最近是在这个群里说的话，所以机器人主动发的这一条也发在群里）")
         said = self.her_words(packet, ids)
         if said:
             lines.append(f"她：{said}")
